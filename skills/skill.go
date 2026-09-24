@@ -43,6 +43,24 @@ type Descriptor struct {
 	Enabled     bool
 }
 
+// InstructionsBlock 渲染技能的完整指令块（激活阶段的上下文产物）：
+// 标题 + SKILL.md 正文 + 资源清单（可按需读取）。
+//
+// 两个激活入口共用同一渲染 —— 模型 load_skill 的工具结果，与用户命令
+//（/技能名、技能面板「加载」，见 agents/commands.go）追加进对话历史的注入消息，
+// 必须逐字节同构：模型面对的是同一段指令，只有决策来源不同（模型 vs 用户）。
+func InstructionsBlock(s *Skill) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Skill: %s\n\n%s\n", s.Name, s.Instructions)
+	if len(s.Resources) > 0 {
+		b.WriteString("\nSkill resources (read as needed):\n")
+		for _, r := range s.Resources {
+			fmt.Fprintf(&b, "- %s\n", r)
+		}
+	}
+	return b.String()
+}
+
 // parseSkill 解析一个技能目录：SKILL.md 必须以 frontmatter 开头，
 // 且必须含 name 与 description，否则视为损坏技能。
 func parseSkill(skillDir string) (*Skill, error) {

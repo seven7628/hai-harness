@@ -842,6 +842,8 @@ func truncateToolResult(s string) string {
 // messageText 消息文本渲染（content 文本拼接 + 工具调用；reasoning 不参与总结）。
 // task_result 块（后台任务完成消息）参与渲染：异步任务结果在压缩后不得消失
 // （此前白名单不含 task_result，结果消息随压缩输入"渲染为空"——S1-D）。
+// skill 块（用户命令加载的技能指令，core.NewSkillMessage）同样参与渲染：
+// 压缩输入里看得见才会被摘要保留，否则压缩后模型"忘记"当前任务必须遵循的技能。
 // C6：tool 角色回执与 task_result 文本按 toolResultMaxChars 截断后渲染。
 // 图片块渲染为占位标记（imageMarker，不把 base64 倒进压缩输入，但摘要器必须知道
 // 「这里有一张图」——否则视觉任务压缩后摘要失真：模型以为读过的截图不存在，
@@ -858,7 +860,7 @@ func messageText(m core.Message) string {
 				b.WriteString(imageMarker)
 			}
 			sawImage = true
-		case "text", summaryContentType, core.ContentTypeTaskResult:
+		case "text", summaryContentType, core.ContentTypeTaskResult, core.ContentTypeSkill:
 			if c.Type == core.ContentTypeTaskResult || (c.Type == "text" && m.Role == core.Tool) {
 				b.WriteString(truncateToolResult(c.Content))
 			} else {

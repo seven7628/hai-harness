@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/tools"
-	"strings"
 )
 
 // LoadSkillTool 是渐进披露的激活入口（框架内置工具）：
@@ -82,15 +81,9 @@ func (t *LoadSkillTool) Call(_ context.Context, _, arguments string) (string, er
 	if t.OnLoad != nil {
 		t.OnLoad(s.Name)
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Skill: %s\n\n%s\n", s.Name, s.Instructions)
-	if len(s.Resources) > 0 {
-		b.WriteString("\nSkill resources (read as needed):\n")
-		for _, r := range s.Resources {
-			fmt.Fprintf(&b, "- %s\n", r)
-		}
-	}
-	return b.String(), nil
+	// 渲染与命令路径（agents/commands.go 的 skills load）共用：同一段指令字节，
+	// 只有「谁决定加载」不同（模型调用工具 vs 用户下命令）。
+	return InstructionsBlock(s), nil
 }
 
 func (t *LoadSkillTool) AfterCall(_ context.Context, _ core.ToolCall) {}

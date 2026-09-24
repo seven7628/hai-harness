@@ -27,6 +27,11 @@ const (
 	// user 角色 + 非 text 块 —— provider 按文本翻译送 LLM（模型看到 Markdown 结果续跑），
 	// collectUserTexts 只认 text 块所以不被当作「用户输入」上报。
 	ContentTypeTaskResult = "task_result"
+	// ContentTypeSkill 用户主动加载的技能指令块（命令框架：/技能名 与技能面板「加载」，
+	// 见 agents/commands.go）：user 角色 + 非 text 块 —— provider 按文本翻译送 LLM
+	//（模型据此遵循该技能，与模型 load_skill 的工具结果同构），但 collectUserContents /
+	// 标题 fallback / 历史恢复渲染只认 text 块 → 不算用户输入、不污染会话标题与对话正文。
+	ContentTypeSkill = "skill"
 	// ContentTypeMeshFrom 跨会话/远程投递消息的来源提示块（session_send / mesh 入站注入）：
 	// user 角色 + 非 text 块 —— provider 按文本翻译送 LLM（模型看到「来自哪个会话」可回信），
 	// 但 collectUserTexts / 标题 fallback / UI 只认 text 块 → 来源提示不进对话正文、
@@ -121,6 +126,21 @@ func NewToolMessageWithImages(toolCallId, text string, images []Content) Message
 	return Message{Role: Tool, ToolCallId: toolCallId, Content: blocks}
 }
 
+// NewSkillMessage 构造「用户主动加载技能」的指令消息（命令框架：skills load）。
+//
+// 与模型 load_skill 的唯一区别是决策来源（用户 vs 模型）：指令正文同构，且同样
+// **追加进对话历史**而非拼进系统提示词。为什么必须走历史（2026-09-24）：
+// 系统提示词是 provider 缓存前缀的首段（缓存顺序：tools → system → messages），
+// 会话中途给它加层 = 已有整段上下文不再是本次请求的前缀 → 按全价重写一次缓存
+//（1h 档写入价 2× 基础输入价，上下文越长代价越大）；历史尾部追加只增量写入
+// 新增的消息，前缀逐字不变。
+func NewSkillMessage(text string) Message {
+	return Message{
+		Role:    User,
+		Content: []Content{{Type: ContentTypeSkill, Content: text}},
+	}
+}
+
 // NewCommandMessage 构造内部指令消息（命令框架）：system 角色 + command 内容块，
 // 经 inbox 注入，消费点在 agents 注入段（剥出执行、不送 LLM、不持久化）。
 func NewCommandMessage(name, args string) Message {
@@ -203,8 +223,9 @@ func (m *Message) Validate() error {
 	for i, c := range m.Content {
 		// summary：LLM 压缩器生成的摘要消息类型（provider 翻译时按文本发送）；
 		// command：内部指令消息（命令框架，仅 Session.Command 注入，不持久化）；
-		// task_result：后台任务完成消息（仅 Session.PushTaskResult 注入，非用户输入）
-		if c.Type != "" && c.Type != ContentTypeText && c.Type != ContentTypeImage && c.Type != ContentTypeSummary && c.Type != ContentTypeCommand && c.Type != ContentTypeTaskResult && c.Type != ContentTypeMeshFrom {
+		// task_result：后台任务完成消息（仅 Session.PushTaskResult 注入，非用户输入）；
+		// skill：用户主动加载的技能指令（命令框架，仅 agents 注入，非用户输入）
+		if c.Type != "" && c.Type != ContentTypeText && c.Type != ContentTypeImage && c.Type != ContentTypeSummary && c.Type != ContentTypeCommand && c.Type != ContentTypeTaskResult && c.Type != ContentTypeMeshFrom && c.Type != ContentTypeSkill {
 			return fmt.Errorf("content[%d] has invalid type %q", i, c.Type)
 		}
 	}

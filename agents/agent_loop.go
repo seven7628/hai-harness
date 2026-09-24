@@ -415,10 +415,6 @@ type AgentContext struct {
 	// 仅保留 system，然后 Stop 结束本轮——上下文已空无需再跑 LLM，下轮从零开始）
 	forceClear bool
 
-	// loadedSkill 产品强制加载的技能（命令框架：skills load 命令置位；
-	// 每轮循环顶部经 composeSystemPrompt 层4 重注入 system，见 appendLoadedSkill）
-	loadedSkill string
-
 	// stopped 策略性终止标志（E：PostToolBatch 返回 true 经 Stop() 置位；
 	// 本轮工具批收尾后循环自然终止，AgentEnd finishReason=stop 非失败）。
 	// 与 aborted 的区别：不取消 ctx、不中断任何执行；跨 goroutine 终止用 Abort。
@@ -801,6 +797,9 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 	// 命令消费（B）：剥出内部指令消息执行 —— 必须在 system 注入之前
 	//（指令消息是 system 角色且 messageText 为空——command 块不在 text/summary
 	// 白名单——若不先剥出会被下方的「内容比较替换」当旧 system 覆盖，命令丢失）。
+	// 命令的上下文产物（skills load 的技能指令）随本步原位落进消息列表：**不进
+	// system 提示词**（那是缓存前缀首段，中途改它 = 整段上下文重写缓存，见
+	// core.NewSkillMessage）。
 	input = a.injectCommands(ac, opts, input)
 
 	// 系统提示词注入：分层组装（行为契约 base + 产品层 + 工作记忆 Agent.md + 技能清单）
@@ -905,21 +904,9 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 			continue // 下轮顶部 IsStopped → break
 		}
 
-		// 已加载技能 system 重注入（B）：loadedSkill 变更后每轮顶部「内容比较替换」，
-		// 复用入口注入逻辑（稳定字节不重写，零历史噪音；重拼亚毫秒级，低频可接受）
-		if ac.loadedSkill != "" {
-			sp := a.appendLoadedSkill(a.composeSystemPrompt(), ac)
-			if sp != "" {
-				switch {
-				case len(ac.Messages) == 0 || ac.Messages[0].Role != core.System:
-					ac.Messages = append([]core.Message{core.NewSystemMessage(sp)}, ac.Messages...)
-					ac.RunHistory = append(ac.RunHistory, ac.Messages[0])
-				case messageText(ac.Messages[0]) != sp:
-					ac.Messages[0] = core.NewSystemMessage(sp)
-					ac.RunHistory = append(ac.RunHistory, ac.Messages[0])
-				}
-			}
-		}
+		// 已加载技能的历史注入（B）：见 injectCommands —— 命令产出的技能指令
+		// 原位替换指令消息落在对话尾部（不进 system：system 是缓存前缀首段，
+		// 中途加层会让整段上下文重写缓存，见 core.NewSkillMessage）。
 
 		// 结算段（C）：占位替换在压缩前执行（减少压缩输入体积）；去重替换
 		// 在回写循环内即时完成（见 recordRead）

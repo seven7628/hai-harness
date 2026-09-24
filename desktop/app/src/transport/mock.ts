@@ -1410,7 +1410,7 @@ class MockTransport implements Transport {
         this.respond(cmd, {})
         if (!sk) this.emit({ event_type: 'command_result', session_id: sid, name: 'skills', error: `skill ${name} not found`, timestamp: ts() })
         else if (!sk.enabled) this.emit({ event_type: 'command_result', session_id: sid, name: 'skills', error: `skill ${name} is disabled`, timestamp: ts() })
-        else this.emit({ event_type: 'command_result', session_id: sid, name: 'skills', result: `skill "${name}" loaded into system prompt`, timestamp: ts() })
+        else this.emit({ event_type: 'command_result', session_id: sid, name: 'skills', result: `skill "${name}" loaded into context`, timestamp: ts() })
         break
       }
       case 'mcp_list': {
@@ -1520,7 +1520,7 @@ class MockTransport implements Transport {
           this.emit({ event_type: 'command_result', session_id: sid, name: 'skills', error: `skill ${raw} is disabled`, timestamp: ts() })
         } else {
           this.respond(cmd, {})
-          this.emit({ event_type: 'command_result', session_id: sid, name: 'skills', result: `skill "${raw}" loaded into system prompt`, timestamp: ts() })
+          this.emit({ event_type: 'command_result', session_id: sid, name: 'skills', result: `skill "${raw}" loaded into context`, timestamp: ts() })
         }
         break
       }
