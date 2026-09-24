@@ -171,6 +171,11 @@ const (
 	// abort 状态，故本常量由调用方在取消时按 abort 标志覆盖，ClassifyError 不返回它。
 	ErrorKindAborted = "aborted"
 
+	// ErrorKindOutputTruncated 单次输出被上限截断、零可见内容（OutputTruncatedError）。
+	// 引擎已知的终止形态：模型把输出预算烧在 reasoning 上，一个字没留给答案。终止时
+	// **不重试**（重试装不下同一份答案，只会再烧一轮预算），只如实报错让人去调 max_tokens。
+	ErrorKindOutputTruncated = "output_truncated"
+
 	// ErrorKindUpstreamUnavailable 上游模型服务瞬时不可用（5xx 网关错误、连接被重置等）。
 	// 语义：可重试、且**不是**调用方的问题——终止时必须让用户知道这是供应商侧抖动。
 	ErrorKindUpstreamUnavailable = "upstream_unavailable"
@@ -189,6 +194,10 @@ func ClassifyError(err error) string {
 		return ErrorKindContextExceeded
 	case errors.Is(err, context.Canceled):
 		return ErrorKindCanceled
+	// 输出被上限截断（零交付）：与 context_exceeded 同为引擎已知的语义化终止形态，
+	// 前端/指标据此与普通网络/解析错误区分开（2026-09-24）。
+	case isOutputTruncated(err):
+		return ErrorKindOutputTruncated
 	case IsPermanent(err):
 		return ErrorKindPermanent
 	case isUpstreamUnavailable(err):
@@ -201,6 +210,44 @@ func ClassifyError(err error) string {
 		}
 		return ErrorKindGeneric
 	}
+}
+
+// OutputTruncatedError 单次输出被上限截断、且**零可见内容**（finish_reason=length +
+// content 为空）。与 ContextExceededError 同类：引擎**已知**的终止形态，语义可识别，
+// 上层据此输出"为什么结束/怎么办"，而不是让宿主自己去猜。
+//
+// 为什么必须报错（实测 2026-09-24，三个子 agent 同一形态）：模型的输出预算被 reasoning
+// 烧光（如 opencode2/deepseek-v4.1-flash 配 max_tokens=12800，单轮 reasoning 3.6 万字符），
+// 一个字都没留给答案。此前这种收尾与「模型自己说完就停」完全同形 → 循环按自然 stop 结束
+// → **零交付却报成功**：子 agent 状态 completed、结果为空串，主 agent 当成"已完成"继续，
+// 用户看到任务莫名结束且全程没有任何报错。
+//
+// 为什么不续跑/不重试：截断是**配置与任务的匹配问题**（输出预算 < 该任务需要的答案量），
+// 引擎替模型重试既不能保证装得下，又会偷偷多烧一轮 token。如实报错让人看见并去调预算，
+// 比在收尾处打补丁更容易定位。
+type OutputTruncatedError struct {
+	Limit          int64 // 本次单次输出上限（tokens；0 = 未知，请求未带 max_tokens）
+	ReasoningChars int   // 被截断那轮的 reasoning 字符数（证明预算花在思考上；诊断用）
+	// HadAssistantText 本次 Run 此前是否产出过可见文本：true = 中途说过话、最后一轮被截断
+	// （相对更可惜，但同样没有最终答复）；false = 全程一句话没说。
+	HadAssistantText bool
+}
+
+func (e *OutputTruncatedError) Error() string {
+	var b strings.Builder
+	b.WriteString("LLM 输出被上限截断，未产出任何可见内容（零交付）")
+	if e.Limit > 0 {
+		fmt.Fprintf(&b, "：本次单次输出上限 %d tokens 已用尽", e.Limit)
+	} else {
+		b.WriteString("：本次单次输出上限已用尽")
+	}
+	if e.ReasoningChars > 0 {
+		fmt.Fprintf(&b, "，且全部花在 reasoning 上（该轮 reasoning 约 %d 字符），没有留给正文", e.ReasoningChars)
+	}
+	b.WriteString("。")
+	b.WriteString("原因：模型的思考链吃光了输出预算。建议：① 调大该模型的「单次输出上限」（max_tokens）；")
+	b.WriteString("② 或降低推理档位；③ 或把任务拆小、要求分次交付。")
+	return b.String()
 }
 
 // ContextExceededError LLM 上下文超限错误（模型窗口被请求撑爆）。
@@ -419,6 +466,14 @@ func isUpstreamUnavailable(err error) bool {
 		return true
 	}
 	return IsUpstreamUnavailableText(err.Error())
+}
+
+// isOutputTruncated ClassifyError 用：识别「单次输出被上限截断、零交付」。
+// 只看类型（不作文本兜底）：本错误由 agents 层**在已知 finish_reason=length 时**构造，
+// 不存在"上游只给文本"的情形，加文本匹配只会误伤正常回答里提到截断的场合。
+func isOutputTruncated(err error) bool {
+	var ot *OutputTruncatedError
+	return errors.As(err, &ot)
 }
 
 // PartialUsageError 把「本次尝试**已经产生**的用量」随错误一起上抛。

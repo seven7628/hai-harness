@@ -1055,6 +1055,34 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 					continue
 				}
 			}
+			// 输出被上限截断、零可见内容 → **等价于「什么都没有」的收尾**，如实报错终止
+			// （2026-09-24，用户裁定「不该让引擎提醒/续跑，截断就该如实报错」）。
+			//
+			// 形态（实测，三个子 agent 同一病）：finish_reason=length、content 为空、输出
+			// 预算全花在 reasoning 上（opencode2/deepseek-v4.1-flash 配 max_tokens=12800，
+			// 单轮 reasoning 3.6 万字符）。此前与「模型自己说完就停」完全同形，循环按自然
+			// stop 收尾 → **零交付却报成功**：子 agent 状态 completed、结果为空串，主 agent
+			// 当成"已完成"继续往下走，用户看到任务莫名结束且全程无任何报错。
+			//
+			// 为什么判定放在这里（stop 检查点，且先于 Stop hooks 与静默结束事件）：
+			//   - 收尾轮无文本 + 无工具调用 ⇒ 本次 Run 没有任何可交付物，唯一诚实的终态是失败；
+			//   - 先于静默结束事件：截断是更强的判据（引擎已知上游为何切断），报错即可，
+			//     不必再叠加一条"静默结束"读数；
+			//   - 先于 Stop hooks：hooks 是"再跑一轮"的加码机制，而截断轮**没有可续跑的
+			//     依据**（模型没交出任何东西，多跑一轮只是再赌一次预算够不够），且引擎
+			//     不能替模型续跑（用户裁定）。
+			//
+			// 不重试：截断是**配置与任务的匹配问题**（输出预算 < 该任务需要的答案量），
+			// 重试装不下同一份答案，只会再烧一轮 token。不判永久错误：调大 max_tokens /
+			// 拆小任务后同一请求完全可能成功，它不该被 MarkPermanent 的语义污染。
+			if round.finishReason == core.FinishReasonLength && strings.TrimSpace(round.content) == "" {
+				ac.Err = &provider.OutputTruncatedError{
+					Limit:            a.currentMaxTokens(),
+					ReasoningChars:   len(round.reasoning),
+					HadAssistantText: ac.sawAssistantText,
+				}
+				break
+			}
 			// A1(b)/C9 静默结束的可见事件（**只加可观测性，不改模型行为**）：走到 stop
 			// 检查点意味着模型这一轮既没产出文本、也没发起工具调用 —— 即**没有交付最终
 			// 答复** —— 用户与宿主看不到任何最终回复，此前这种「静默结束」在事件流里没有
