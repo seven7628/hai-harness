@@ -89,9 +89,12 @@ desktop/app/build/*
 !desktop/app/build/HAI.icns
 !desktop/app/build/icon-1024.png
 !desktop/app/build/icon-source.svg
-!desktop/app/build/make-icns.js
+!desktop/app/build/make-icons.mjs
+!desktop/app/build/make-dmg-background.mjs
+!desktop/app/build/dmg-background.png
+!desktop/app/build/dmg-background@2x.png
 desktop/app/build/icon.iconset/
-desktop/app/build/icon-source.svg.png
+desktop/app/build/icon-preview.png
 desktop/app/build/mhybrid.iso
 desktop/app/dist/hai-bridge
 desktop/app/dist/hai-bridge-*

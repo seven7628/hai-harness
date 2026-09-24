@@ -11,6 +11,9 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "build:bridge": "cd ../.. && CGO_ENABLED=0 go build -o desktop/app/dist/hai-bridge ./desktop/bridge",
     "dist:mac": "vite build && npm run build:electron && npm run build:bridge:mac && electron-builder --mac --arm64",
+    "icons": "node build/make-icons.mjs --preview",
+    "dmg:background": "node build/make-dmg-background.mjs",
+    "assets": "npm run icons && npm run dmg:background",
     "e2e:browser": "node e2e/desktop_browser_e2e.mjs",
     "e2e:image": "node e2e/verify_image_attach.mjs",
     "test:e2e-safety": "node --test e2e/safe_cleanup.test.mjs",
@@ -125,6 +128,27 @@
         }
       ],
       "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "background": "dmg-background.png",
+      "iconSize": 128,
+      "window": {
+        "width": 700,
+        "height": 460
+      },
+      "contents": [
+        {
+          "x": 200,
+          "y": 236,
+          "type": "file"
+        },
+        {
+          "x": 500,
+          "y": 236,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
     }
   },
   "dependencies": {
