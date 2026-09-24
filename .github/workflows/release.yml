@@ -1,0 +1,127 @@
+name: release
+
+# 只在「显式推 tag」时触发（v0.1.0 / v0.2.0-rc.1 …）——不做每次 push 的构建。
+# 手动跑一次：gh workflow run release -f ...（如需，可另加 workflow_dispatch）
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 建 Release / 传附件需要写权限（默认 token 是只读）
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-arm64:
+    name: macOS arm64 (.dmg / .zip) → Release
+    # Apple Silicon runner，与 electron-builder --mac --arm64 对齐（macOS 13 及更早是 Intel）
+    runs-on: macos-14
+    env:
+      # 未配 Developer ID：显式关掉签名身份自动发现，避免 electron-builder 去找证书
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 校验 tag 与 package.json 版本一致
+        id: version
+        run: |
+          v="$(node -p "require('./desktop/app/package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$v" != "$tag" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 desktop/app/package.json 的版本 $v 不一致"
+            exit 1
+          fi
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+          echo "打包版本：$v"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Go 静态检查
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "::error::gofmt 未格式化：$out"
+            exit 1
+          fi
+          go vet ./...
+
+      - name: 编译 bridge（arm64 静态二进制，随 app 分发）
+        run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o desktop/app/dist/hai-bridge ./desktop/bridge
+
+      - name: 编译 computer-helper（Swift 薄适配器）
+        working-directory: desktop/computer-helper
+        run: swiftc -O -o computer-helper computer_helper.swift
+
+      - name: 准备三方资产目录（不随仓库分发；客户端对缺失目录优雅降级）
+        # electron-builder 的 extraResources 指向这两个目录，源目录不存在会打包失败
+        run: mkdir -p desktop/vendor/chrome-devtools-mcp desktop/vendor/ego-browser-skill
+
+      - name: 安装前端依赖
+        working-directory: desktop/app
+        # lockfile 不在仓库里（其 resolved 指向私有 npm 镜像，已按 .gitignore 排除），
+        # 故用 install 而非 ci —— 代价是依赖解析不可复现，见 README「从源码构建」。
+        run: npm install --no-audit --no-fund
+
+      - name: 渲染层类型检查
+        working-directory: desktop/app
+        run: npx tsc --noEmit
+
+      - name: 打包（vite build + tsc + bridge + electron-builder）
+        working-directory: desktop/app
+        run: npm run dist:mac
+
+      - name: 生成校验和
+        working-directory: desktop/app/release
+        run: |
+          shasum -a 256 HAI-*.dmg HAI-*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 留存产物（Actions 页可直接下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: HAI-${{ steps.version.outputs.v }}-macos-arm64
+          path: |
+            desktop/app/release/*.dmg
+            desktop/app/release/*.zip
+            desktop/app/release/*.blockmap
+            desktop/app/release/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: 建 Release 并上传产物
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/app/release/*.dmg
+            desktop/app/release/*.zip
+            desktop/app/release/*.blockmap
+            desktop/app/release/SHA256SUMS.txt
+          generate_release_notes: true
+          # v0.2.0-rc.1 这类带后缀的 tag 自动标为 pre-release（不占 latest）
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ### 安装 / Install
+
+            - **macOS (Apple Silicon)**：下载 `HAI-${{ steps.version.outputs.v }}-arm64.dmg`，双击后把 **HAI** 拖进「应用程序」。
+              Download the `.dmg` and drag **HAI** into *Applications*.
+            - 校验和见 `SHA256SUMS.txt`（`shasum -a 256 -c SHA256SUMS.txt`）/ Checksums in `SHA256SUMS.txt`.
+
+            ### 首次打开 / First launch
+
+            本构建**未签名、未公证**（no Developer ID / notarization），双击会被 Gatekeeper 拦下：
+            请**右键 →「打开」**，或执行 / right-click → *Open*, or run:
+
+            ```sh
+            xattr -dr com.apple.quarantine /Applications/HAI.app
+            ```
