@@ -132,7 +132,7 @@ func NewToolMessageWithImages(toolCallId, text string, images []Content) Message
 // **追加进对话历史**而非拼进系统提示词。为什么必须走历史（2026-09-24）：
 // 系统提示词是 provider 缓存前缀的首段（缓存顺序：tools → system → messages），
 // 会话中途给它加层 = 已有整段上下文不再是本次请求的前缀 → 按全价重写一次缓存
-//（1h 档写入价 2× 基础输入价，上下文越长代价越大）；历史尾部追加只增量写入
+// （1h 档写入价 2× 基础输入价，上下文越长代价越大）；历史尾部追加只增量写入
 // 新增的消息，前缀逐字不变。
 func NewSkillMessage(text string) Message {
 	return Message{

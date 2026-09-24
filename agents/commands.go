@@ -12,9 +12,9 @@ import (
 
 // injectCommands 消费内部指令消息（命令框架）：遍历 msgs 剥出 command 消息执行，
 // 返回剔除后的消息（指令消息本身不送 LLM、不落盘）；命令产出的上下文内容
-//（如 skills load 的技能指令）**原位**替换该指令消息 —— 位置即命令发生的时刻
-//（正文跟在命令之后时顺序天然正确：技能指令在前、用户任务在后），并同步进本轮
-//历史（RunHistory，与工具结果回写同一语义：append-only 日志记下模型看到了什么）。
+// （如 skills load 的技能指令）**原位**替换该指令消息 —— 位置即命令发生的时刻
+// （正文跟在命令之后时顺序天然正确：技能指令在前、用户任务在后），并同步进本轮
+// 历史（RunHistory，与工具结果回写同一语义：append-only 日志记下模型看到了什么）。
 //
 // 调用点（必须保证的顺序）：
 //  1. RunStream 入口、system 注入之前 —— 指令消息是 system 角色且 messageText
@@ -40,7 +40,7 @@ func (a *AgentLoop) injectCommands(ac *AgentContext, opts *RunOptions, msgs []co
 // executeCommand 执行单条指令消息，返回该命令的上下文产物（injected=true 时调用方
 // 需把它放进消息列表，位置 = 被消费的指令消息处）。
 // 命令失败不 kill Run（带外操作）：结果经 CommandResult 事件回传调用者
-//（compact 例外：结果经 CompressStart/End 事件感知，不重复发 CommandResult）。
+// （compact 例外：结果经 CompressStart/End 事件感知，不重复发 CommandResult）。
 func (a *AgentLoop) executeCommand(ac *AgentContext, opts *RunOptions, m core.Message) (core.Message, bool) {
 	name, args := parseCommand(m)
 	emit := func(result, errMsg string) {

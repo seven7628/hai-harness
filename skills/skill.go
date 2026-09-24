@@ -47,7 +47,7 @@ type Descriptor struct {
 // 标题 + SKILL.md 正文 + 资源清单（可按需读取）。
 //
 // 两个激活入口共用同一渲染 —— 模型 load_skill 的工具结果，与用户命令
-//（/技能名、技能面板「加载」，见 agents/commands.go）追加进对话历史的注入消息，
+// （/技能名、技能面板「加载」，见 agents/commands.go）追加进对话历史的注入消息，
 // 必须逐字节同构：模型面对的是同一段指令，只有决策来源不同（模型 vs 用户）。
 func InstructionsBlock(s *Skill) string {
 	var b strings.Builder
