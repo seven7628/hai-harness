@@ -4503,13 +4503,24 @@ export function dispatchEvent(raw: AnyEvent): void {
       const runId = raw.run_id ? String(raw.run_id) : undefined
       const isContextExceeded = errorKind === 'context_exceeded'
       const failedLabel = maxAttempts > 0 && attempt > 0 ? `第 ${attempt}/${maxAttempts} 次尝试失败` : `第 ${attempt} 次尝试失败`
+      // 取消类（2026-09-24）：必须先于 willRetry 判定，且**绝不能**落到「重试已耗尽」——
+      // 取消发生在第 1 次尝试上（实测日志：48 条 llm_error 里 6 条取消全是 attempt=1），
+      // 一次都没重试却说「重试已耗尽」，用户读到的是「重试机制没了」。两者都不重试但归因不同：
+      //   - aborted（用户点停止 / agent_interrupt）→ 用户自己的动作，说「已中断」；
+      //   - canceled（会话关闭 / 后台任务终止/超时）→ 用户没按停止，只陈述取消事实。
+      // 文案与 Go 侧 view_reducer.llmRetryText 逐字一致（同一份规则两处实现：本处负责实时流，
+      // Go 侧负责 checkpoint/恢复视图，措辞漂移会让历史刷新后变样）。
       const text = isContextExceeded
         ? `（LLM 上下文超限终止）${msg}`
-        : willRetry
-          ? `（LLM 请求失败：${failedLabel} → 重试第 ${attempt + 1}${maxAttempts > 0 ? `/${maxAttempts}` : ''} 次）${msg}`
-          : errorKind === 'upstream_unavailable'
-            ? `（上游模型服务连续不可用，${failedLabel}、重试已耗尽后终止；这是供应商侧瞬时故障，不是你的请求造成的，稍后重试即可）${msg}`
-            : `（LLM 请求失败：${failedLabel}、重试已耗尽）${msg}`
+        : errorKind === 'aborted'
+          ? `（LLM 请求已中断：${failedLabel} 时用户中断，未重试）${msg}`
+          : errorKind === 'canceled'
+            ? `（LLM 请求已取消：${failedLabel} 时被取消，未重试）${msg}`
+            : willRetry
+              ? `（LLM 请求失败：${failedLabel} → 重试第 ${attempt + 1}${maxAttempts > 0 ? `/${maxAttempts}` : ''} 次）${msg}`
+              : errorKind === 'upstream_unavailable'
+                ? `（上游模型服务连续不可用，${failedLabel}、重试已耗尽后终止；这是供应商侧瞬时故障，不是你的请求造成的，稍后重试即可）${msg}`
+                : `（LLM 请求失败：${failedLabel}、重试已耗尽）${msg}`
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         // 子 agent 的 LLM 错误：挂到其卡片活动记录（卡片终态一并收敛；上下文超限 = failed）

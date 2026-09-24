@@ -48,9 +48,12 @@ func (l *LLMEnd) Type() EventType {
 // 的 Attempt（故文案统一改为「第 N/M 次失败 → 重试第 N+1/M 次」，配合 MaxAttempts
 // 让用户看见进度总量，而不是像卡在「重试 1」）。
 // RetryDelayMs 是本次失败后到下次尝试的退避等待时长（毫秒）；最后一次失败（不重试）为 0。
-// ErrorKind 是错误分类标签（provider.ClassifyError）：rate_limit / permanent / canceled /
-// generic / context_exceeded / upstream_unavailable —— 前端据此区分"上下文超限（需缩小
-// 范围/压缩）"、"上游侧瞬时故障（重试耗尽后归因供应商）"等专门提示。
+// ErrorKind 是错误分类标签（provider.ClassifyError，取消类由 agents 层按 abort 标志细分）：
+// rate_limit / permanent / canceled / aborted / generic / context_exceeded / upstream_unavailable
+// —— 前端据此区分"上下文超限（需缩小范围/压缩）"、"上游侧瞬时故障（重试耗尽后归因供应商）"、
+// "用户主动中断（aborted，非失败）"、"系统取消（canceled）"等专门提示。
+// canceled 与 aborted 都是 context.Canceled 且都不重试，区别只在**谁取消的**（见
+// provider.ErrorKindAborted 注释）：文案必须不同，否则一次都没重试却显示「重试已耗尽」。
 type LLMError struct {
 	RunId        string `json:"run_id"`          // 所属运行（事件自包含）
 	Model        string `json:"model,omitempty"` // 失败的那次调用用的模型（metrics 归因/展示用）

@@ -158,9 +158,18 @@ func (e *StreamStallError) SetCause(err error) {
 const (
 	ErrorKindRateLimit       = "rate_limit"       // 限流（429）重试耗尽
 	ErrorKindPermanent       = "permanent"        // 永久错误（4xx 除可重试集合）
-	ErrorKindCanceled        = "canceled"         // 上下文取消
+	ErrorKindCanceled        = "canceled"         // 上下文取消（自动：会话关闭/后台任务终止等）
 	ErrorKindGeneric         = "generic"          // 其他（超时/网络/内部，重试耗尽）
 	ErrorKindContextExceeded = "context_exceeded" // LLM 上下文超限（不可重试，需缩小范围/压缩）
+
+	// ErrorKindAborted 用户主动中断（点停止 / agent_interrupt）。与 ErrorKindCanceled 的
+	// 关键区别（2026-09-24 拆分，此前两者共用 canceled）：两者的 err 都是 context.Canceled、
+	// 都不重试，但**归因完全不同** —— canceled 是系统侧取消，aborted 是用户自己按的停止。
+	// 共用 canceled 时 UI 只能输出「重试已耗尽」（第 1 次就因取消而终止，一次都没重试），
+	// 用户读到的却是「重试机制没了」。
+	// 判定权在 agents 层（ac.IsAborted()，见 streamWithRetry.llmErrorKind）：provider 层不持有
+	// abort 状态，故本常量由调用方在取消时按 abort 标志覆盖，ClassifyError 不返回它。
+	ErrorKindAborted = "aborted"
 
 	// ErrorKindUpstreamUnavailable 上游模型服务瞬时不可用（5xx 网关错误、连接被重置等）。
 	// 语义：可重试、且**不是**调用方的问题——终止时必须让用户知道这是供应商侧抖动。

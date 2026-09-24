@@ -1354,6 +1354,17 @@ func llmRetryText(e *events.LLMError) string {
 	if e.MaxAttempts > 0 {
 		failed = "第 " + itoa(e.Attempt) + "/" + itoa(e.MaxAttempts) + " 次尝试失败"
 	}
+	// 取消类（2026-09-24）：必须先于 !WillRetry 判定，且**绝不能**落到「重试已耗尽」——
+	// 取消发生在第 1 次尝试上（实测日志：48 条 llm_error 里 6 条取消全是 attempt=1），
+	// 一次都没重试却说「重试已耗尽」，用户读到的是「重试机制没了」。两者都不重试，但归因不同：
+	//   - aborted（用户点停止 / agent_interrupt）→ 是用户自己的动作，说「已中断」；
+	//   - canceled（会话关闭 / 后台任务终止/超时）→ 用户没按停止，只陈述取消事实，不归因给用户。
+	if e.ErrorKind == "aborted" {
+		return "（LLM 请求已中断：" + failed + " 时用户中断，未重试）" + e.Message
+	}
+	if e.ErrorKind == "canceled" {
+		return "（LLM 请求已取消：" + failed + " 时被取消，未重试）" + e.Message
+	}
 	if !e.WillRetry {
 		// 上游模型服务瞬时不可用 + 重试耗尽：必须给出归因——否则用户会以为自己的请求
 		// 或本地环境有问题。

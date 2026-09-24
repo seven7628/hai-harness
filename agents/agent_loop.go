@@ -1162,7 +1162,7 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 	case ac.Err != nil:
 		endReason = core.FinishReasonError
 		errMsg = ac.Err.Error()
-		errKind = provider.ClassifyError(ac.Err) // 类型标签：rate_limit/permanent/canceled/generic
+		errKind = llmErrorKind(ac, ac.Err) // 类型标签：rate_limit/permanent/canceled|aborted/generic
 	case ac.IsStopped():
 		endReason = core.FinishReasonStop // 策略性终止（PostToolBatch 等）：正常 stop
 	case hitMaxIter:
@@ -1589,7 +1589,7 @@ func (a *AgentLoop) streamWithRetry(ac *AgentContext, r *roundResult) error {
 			MaxAttempts:  maxAttempts, // 总次数上限：前端显示「第 N/M 次失败 → 重试第 N+1/M 次」
 			WillRetry:    willRetry,
 			RetryDelayMs: delay.Milliseconds(),
-			ErrorKind:    provider.ClassifyError(err), // context_exceeded 等：前端据此输出专门提示
+			ErrorKind:    llmErrorKind(ac, err), // 取消来源等：前端据此输出专门提示
 			Usage:        partial,
 			Timestamp:    time.Now(),
 			EventType:    events.LLMErrorType,
@@ -1609,6 +1609,24 @@ func (a *AgentLoop) streamWithRetry(ac *AgentContext, r *roundResult) error {
 // retryable 判断错误是否值得重试：用户取消与永久错误不重试。
 func retryable(err error) bool {
 	return !errors.Is(err, context.Canceled) && !provider.IsPermanent(err)
+}
+
+// llmErrorKind 分类本轮失败的错误标签；与 provider.ClassifyError 的唯一差别是
+// **取消的来源**（2026-09-24）：
+//
+//   - provider.ErrorKindAborted —— 用户主动中断（点停止 / agent_interrupt 取消任务）。
+//     Abort() 同时置 aborted 标志与 cancel()，而会话关闭（Session.Close → sessionCancel）
+//     与后台任务超时只 cancel ctx、不置标志 —— 标志是两者的唯一区分点。
+//   - provider.ErrorKindCanceled —— 系统侧取消：会话关闭、后台任务终止/超时等。用户没按停止，
+//     也没有重试机会可言（ctx 已死，重试只会立刻再失败）。
+//
+// 两者的 err 都是 context.Canceled 且都不重试，但对用户的归因截然不同：共用 canceled 时
+// UI 只能输出「重试已耗尽」（其实第 1 次就终止，一次都没重试），用户读到的却是「重试机制没了」。
+func llmErrorKind(ac *AgentContext, err error) string {
+	if errors.Is(err, context.Canceled) && ac.IsAborted() {
+		return provider.ErrorKindAborted
+	}
+	return provider.ClassifyError(err)
 }
 
 // streamOnce 发起一轮模型调用，把 LLM 事件翻译为 Agent 事件，并聚合进 r。

@@ -52,8 +52,9 @@ type AgentEnd struct {
 	FinishReason core.FinishReason `json:"finish_reason"`   // 结束原因：stop / tool_call / error
 	Usage        *core.Usage       `json:"usage"`           // 本轮总用量（含 Cost）
 	Error        string            `json:"error,omitempty"` // 失败原因（FinishReason=error 时）
-	// ErrorKind 错误类型标签（provider.ClassifyError：rate_limit / permanent / canceled / generic），
-	// 供上层区分「瞬时错误重试耗尽（可稍后重试）」vs「永久错误（配置/参数问题）」
+	// ErrorKind 错误类型标签（provider.ClassifyError，取消类由 agents 层按 abort 标志细分：
+	// rate_limit / permanent / canceled / aborted / generic），供上层区分「瞬时错误重试耗尽
+	// （可稍后重试）」vs「永久错误（配置/参数问题）」vs「用户中断（aborted，非失败）」。
 	ErrorKind string `json:"error_kind,omitempty"`
 
 	RunId     string    `json:"run_id"` // 与 AgentStart 一致，关联整条事件流
