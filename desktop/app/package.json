@@ -1,0 +1,169 @@
+{
+  "name": "hai-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron \"npm:dev:vite\" \"npm:dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "npm run build:electron && wait-on tcp:${VITE_PORT:-5173} && cross-env VITE_DEV_SERVER_URL=http://localhost:${VITE_PORT:-5173} electron .",
+    "build": "vite build && npm run build:electron && npm run build:bridge",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:bridge": "cd ../.. && CGO_ENABLED=0 go build -o desktop/app/dist/hai-bridge ./desktop/bridge",
+    "dist:mac": "vite build && npm run build:electron && npm run build:bridge:mac && electron-builder --mac --arm64",
+    "e2e:browser": "node e2e/desktop_browser_e2e.mjs",
+    "e2e:image": "node e2e/verify_image_attach.mjs",
+    "test:e2e-safety": "node --test e2e/safe_cleanup.test.mjs",
+    "test:store": "node scripts/test-store-queue.mjs",
+    "test:effort": "node scripts/test-effort-inherit.mjs",
+    "test:store:scoping": "node scripts/test-store-scoping.mjs",
+    "test:right-tabs": "node scripts/test-right-panel-tabs.mjs",
+    "test:embed-v2": "esbuild electron/embed_v2.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/embed_v2.test.cjs && node --test /tmp/embed_v2.test.cjs",
+    "test:chrome-import": "esbuild electron/chrome-import.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/chrome-import.test.cjs && node --test /tmp/chrome-import.test.cjs",
+    "test:chrome-cookies-read": "esbuild electron/chrome-cookies-read.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/chrome-cookies-read.test.cjs && node --test /tmp/chrome-cookies-read.test.cjs",
+    "test:node-path": "esbuild electron/node-path.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/node-path.test.cjs && node --test /tmp/node-path.test.cjs",
+    "link-check:embed-v2": "node ../../scripts/embed_v2_link_check.mjs",
+    "test:ws-git": "node scripts/test-ws-git.mjs",
+    "test:question-options": "node scripts/test-question-options.mjs",
+    "test:fixes": "node scripts/test-restore-fixes.mjs",
+    "test:recent": "node scripts/test-recent-bar.mjs",
+    "test:left-files": "npm run build && node e2e/verify_left_files.mjs",
+    "test:agents": "node scripts/test-agent-isolation.mjs",
+    "test:checkpoint": "node scripts/test-checkpoint-hydrate.mjs",
+    "test:task-usage": "node scripts/test-task-usage.mjs",
+    "test:restore-retry": "node scripts/test-restore-retry.mjs",
+    "preview": "vite preview",
+    "test": "npm run test:e2e-safety && npm run test:store && npm run test:effort && npm run test:embed-v2 && npm run test:chrome-import && npm run test:chrome-cookies-read && npm run test:node-path && npm run test:permission-policy && npm run test:read-image && npm run e2e:clipboard && npm run test:ws-git && npm run test:fixes && npm run test:recent && npm run test:left-files && npm run test:tok-speed && npm run test:agents && npm run test:checkpoint && npm run test:task-usage && npm run test:restore-retry && npm run test:csv && npm run test:question-options && npm run link-check:embed-v2 && npm run test:trace && npm run test:trace-parity && npm run test:usage-stats && npm run test:usage-incl && npm run test:price-refresh && npm run test:thinking-text && npm run e2e:usage-stats && npm run e2e:ctx-panel && npm run e2e:mcp-hooks && npm run test:retry-progress && npm run e2e:subagent-style",
+    "check": "npm run build:electron && npx tsc --noEmit && npm run lint && npm run test",
+    "build:bridge:mac": "cd ../.. && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o desktop/app/dist/hai-bridge ./desktop/bridge",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test:tok-speed": "node scripts/test-token-speed.mjs",
+    "test:usage-stats": "node scripts/test-usage-stats.mjs",
+    "test:usage-incl": "node scripts/test-usage-incl.mjs",
+    "test:price-refresh": "node scripts/test-price-refresh.mjs",
+    "test:thinking-text": "node scripts/test-thinking-text.mjs",
+    "e2e:usage-stats": "node e2e/verify_usage_stats.mjs",
+    "test:trace": "node scripts/test-trace.mjs",
+    "e2e:trace": "node e2e/verify_trace_tab.mjs",
+    "e2e:wide-table": "node e2e/verify_wide_table.mjs",
+    "e2e:markdown": "node e2e/verify_markdown_render.mjs",
+    "e2e:markdown-html": "node e2e/verify_markdown_html.mjs",
+    "e2e:md-file-modes": "node e2e/verify_md_file_modes.mjs",
+    "e2e:html-preview": "node e2e/verify_html_preview_chrome.mjs",
+    "test:trace-parity": "node scripts/test-trace-parity.mjs",
+    "test:csv": "node scripts/test-csv.mjs",
+    "e2e:codeblock": "node e2e/verify_codeblock_shell.mjs",
+    "e2e:artifacts": "node e2e/verify_artifacts_card.mjs",
+    "e2e:ctx-panel": "node e2e/verify_ctx_panel.mjs",
+    "e2e:subagent-style": "node e2e/verify_subagent_transcript_style.mjs",
+    "e2e:mcp-hooks": "node e2e/verify_mcp_hooks_panel.mjs",
+    "e2e:xlsx": "node e2e/verify_xlsx_preview.mjs",
+    "e2e:pdf": "node e2e/verify_pdf_preview.mjs",
+    "e2e:office": "node e2e/verify_docx_pptx_preview.mjs",
+    "e2e:csv": "node e2e/verify_csv_preview.mjs",
+    "test:permission-policy": "esbuild electron/permission-policy.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/permission-policy.test.cjs && node --test /tmp/permission-policy.test.cjs",
+    "test:read-image": "esbuild electron/read-image.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/read-image.test.cjs && node --test /tmp/read-image.test.cjs",
+    "e2e:clipboard": "node e2e/verify_clipboard_copy.mjs",
+    "e2e:scoping": "node e2e/verify_preview_scoping.mjs",
+    "e2e:container": "node e2e/verify_preview_container.mjs",
+    "e2e:auto": "node e2e/verify_auto_open_visual.mjs",
+    "e2e:session-tabs": "node e2e/verify_session_tabs_persist.mjs",
+    "test:retry-progress": "node e2e/verify_retry_progress.mjs"
+  },
+  "build": {
+    "appId": "ai.hai.desktop",
+    "productName": "HAI",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json",
+      "!node_modules"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "extraResources": [
+      {
+        "from": "dist/hai-bridge",
+        "to": "hai-bridge"
+      },
+      {
+        "from": "../vendor/chrome-devtools-mcp",
+        "to": "chrome-devtools-mcp"
+      },
+      {
+        "from": "../computer-helper",
+        "to": "computer-helper"
+      },
+      {
+        "from": "../vendor/ego-browser-skill",
+        "to": "ego-browser-skill"
+      },
+      {
+        "from": "../vendor/office-skills",
+        "to": "office-skills"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/HAI.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
+  },
+  "dependencies": {
+    "github-slugger": "^2.0.0",
+    "hast-util-from-html": "^2.0.3",
+    "hast-util-sanitize": "^5.0.2",
+    "katex": "^0.18.5",
+    "mermaid": "^11.17.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^4.12.2",
+    "rehype-katex": "^7.0.1",
+    "remark-frontmatter": "^5.0.0",
+    "remark-gemoji": "^8.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "shiki": "^4.4.3",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.9.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.5",
+    "playwright": "^1.62.1",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.68.0",
+    "vite": "^6.0.3",
+    "wait-on": "^8.0.1"
+  }
+}

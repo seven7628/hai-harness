@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="ink">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HAI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- 中文字体由 renderer JS 动态注入（main.tsx）：head 静态 link（即使 media=print）
+         仍会被浏览器下载并计入 CSSOM → 阻塞 module script 执行 → 黑屏（实测 loadFile 2.4s）。
+         JS 注入在首帧后异步加载，零阻塞。IBM Plex Sans/Mono 已本地托管（index.css @font-face）。 -->
+    <noscript>
+      <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet" />
+      <link href="https://fonts.googleapis.com/css2?family=Nanum+Brush+Script&family=Zhi+Mang+Xing&display=swap" rel="stylesheet" />
+    </noscript>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,644 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 会话页皮肤层（V3）：只覆盖视觉 —— 同一份 DOM、不改类名、不改组件。
+ * 由 <html data-skin="current|v3"> 驱动：本文件每条选择器都以 html[data-skin='v3']
+ * 开头，所以默认皮肤 current 零命中、零影响（切换开关在设置里，不属于本层）。
+ * 设计依据：docs/design-research/07-component-spec.md（V3 视觉语言）。
+ * 内容来源：docs/agent-ui-lab/src/restyle-app-only.css —— 逐条照搬，只换文件头。
+ * 例外（lab 里不存在、按同一套语言补写的本仓独有类）：`.plan-card` 卡壳（lab 的计划没有这层壳，
+ * 见 §9.3「不是卡」）、`.ic` 行首图标（第二期补的 DOM）。补写项一律在规则上方注明来源。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+
+/* ── 消息头：谁 · 模型 · 时间（收紧，去掉多余留白） ───────────────────────── */
+html[data-skin='v3'] .msg {
+  margin-bottom: 14px;
+}
+
+html[data-skin='v3'] .msg .who {
+  gap: 6px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+html[data-skin='v3'] .msg .who b {
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+html[data-skin='v3'] .msg-ts {
+  font-size: 10.5px;
+  color: var(--text-3);
+  opacity: 0.85;
+}
+
+html[data-skin='v3'] .msg .body {
+  /* 主仓 body 是 13.5px，正文继承它；.md-text 的 line-height 是 1.7 —— 照抄，不放大 */
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+/* ── 思考：一行标题 + 展开体（无框、左竖线、灰字） ───────────────────────── */
+html[data-skin='v3'] .thinking {
+  margin: 6px 0 12px;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+html[data-skin='v3'] .thinking-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 20px;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .thinking-hd:hover {
+  color: var(--text-2);
+}
+
+html[data-skin='v3'] .thinking-toggle,
+html[data-skin='v3'] .thinking-more {
+  color: inherit;
+  font-size: inherit;
+}
+
+html[data-skin='v3'] .thinking .body,
+html[data-skin='v3'] .thinking-body,
+html[data-skin='v3'] .thinking .md-text,
+html[data-skin='v3'] .thinking pre {
+  margin: 2px 0 4px 8px;
+  padding: 0 0 0 12px;
+  border-left: 1px solid var(--border);
+  background: none;
+  border-top: 0;
+  font-size: 13.5px;
+  line-height: 22px;
+  color: var(--text-3);
+}
+
+/* 段间距：默认皮肤保留「一行空行」的间距（≈ 1 倍行高，见 index.css 的 .tk-p），
+   V3 收到与正文段落同节奏（.msg .body p 的 4px）。选择器特异性要同时压过
+   .msg .body p（0,2,1）与 .thinking .thinking-body .tk-p（0,3,0）→ 这里 0,3,1。 */
+html[data-skin='v3'] .thinking .thinking-body .tk-p {
+  margin: 0 0 4px;
+}
+html[data-skin='v3'] .thinking .thinking-body .tk-p:last-child {
+  margin-bottom: 0;
+}
+
+/* ── 工具组 / 工具行：从"带框卡片"变成"一行文字" ────────────────────────── */
+html[data-skin='v3'] .tool-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 12px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+
+html[data-skin='v3'] .tool-row {
+  position: relative;
+  background: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0 4px 4px 0;
+  margin-left: -2px;
+  padding-left: 8px;
+  transition: background 120ms var(--ease);
+}
+
+html[data-skin='v3'] .tool-row:hover {
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+
+/* 竖条 = 状态（全屏唯一的状态语言） */
+html[data-skin='v3'] .tool-row:has(.run),
+html[data-skin='v3'] .tool-row.open:has(.run) {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+html[data-skin='v3'] .tool-row:has(.st.err) {
+  border-left-color: color-mix(in srgb, var(--error) 55%, transparent);
+}
+
+html[data-skin='v3'] .tool-row:has(.badge.bg) {
+  border-left-color: color-mix(in srgb, var(--running) 45%, transparent);
+}
+
+html[data-skin='v3'] .tool-row-hd {
+  min-height: 28px;
+  gap: 8px;
+  padding: 0 6px 0 0;
+  font-size: 13.5px;
+  line-height: 20px;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .tool-row-hd:hover {
+  color: var(--text-2);
+}
+
+html[data-skin='v3'] .tool-row .chev {
+  color: var(--text-3);
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+html[data-skin='v3'] .tool-row .t {
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  /* 工具名保持仓里的语义色（accent）：它是"哪个工具"，参数与时长才是灰的。
+     之前写成 color: inherit 会把名字压灰 —— 名字与参数就分不出主次了。 */
+  color: var(--accent);
+  font-weight: 500;
+}
+
+html[data-skin='v3'] .tool-row .t.err {
+  color: color-mix(in srgb, var(--error) 80%, var(--text-2));
+  font-weight: 500;
+}
+
+html[data-skin='v3'] .tool-row .args {
+  font-family: var(--font-mono);
+  /* 主仓 .tool-row .args 就是 11.5px */
+  font-size: 11.5px;
+  color: var(--text-3);
+  opacity: 0.9;
+}
+
+html[data-skin='v3'] .tool-row .ms {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  opacity: 0.75;
+}
+
+html[data-skin='v3'] .tool-row .st {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .tool-row .st.ok {
+  color: var(--success);
+  opacity: 0.8;
+}
+
+html[data-skin='v3'] .tool-row .st.err {
+  color: var(--error);
+}
+
+html[data-skin='v3'] .tool-row .run {
+  color: var(--accent);
+}
+
+/* 摘后台的徽标：唯一的药丸（状态色只出现在药丸里） */
+html[data-skin='v3'] .tool-row .badge.bg {
+  margin-right: 4px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 0;
+  background: color-mix(in srgb, var(--running) 16%, transparent);
+  color: color-mix(in srgb, var(--running) 85%, var(--text));
+}
+
+html[data-skin='v3'] .tool-promote {
+  opacity: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+  transition: opacity 120ms var(--ease), color 120ms var(--ease);
+}
+
+html[data-skin='v3'] .tool-row-hd:hover .tool-promote {
+  opacity: 1;
+}
+
+html[data-skin='v3'] .tool-promote:hover {
+  color: var(--text-2);
+}
+
+/* ── 变更：标签一行 + diff 只有行底色（没有卡、没有 code-bg 容器） ──────── */
+html[data-skin='v3'] .tool-diff {
+  margin: 2px 0 4px 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+  background: none;
+}
+
+html[data-skin='v3'] .tool-diff-hd {
+  min-height: 22px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .tool-diff-hd .td-label {
+  font-size: 11px;
+}
+
+html[data-skin='v3'] .tool-diff-hd .td-stats b {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+html[data-skin='v3'] .tool-diff-hd .td-stats .add {
+  color: var(--diff-add-text);
+}
+
+html[data-skin='v3'] .tool-diff-hd .td-stats .del {
+  color: var(--diff-del-text);
+}
+
+html[data-skin='v3'] .tool-diff-hd .td-path {
+  font-size: 11.5px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .tool-diff-hd .td-more {
+  opacity: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+  transition: opacity 120ms var(--ease);
+}
+
+html[data-skin='v3'] .tool-diff:hover .td-more {
+  opacity: 1;
+}
+
+html[data-skin='v3'] .tool-diff-body {
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+
+html[data-skin='v3'] .tool-diff-body .uni {
+  font-size: 12.5px;
+  line-height: 20px;
+}
+
+html[data-skin='v3'] .tool-diff-body .uni .ln {
+  border-radius: 3px;
+}
+
+/* ── 展开体（参数/结果）：小标签 + 纯文本，没有框、没有虚线 ───────────────── */
+html[data-skin='v3'] .tool-row-body {
+  margin: 2px 0 4px 8px;
+  padding: 0 0 2px 12px;
+  border-left: 1px solid var(--border);
+  border-top: 0;
+  gap: 2px;
+}
+
+html[data-skin='v3'] .tr-sec {
+  margin: 6px 0 0;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+html[data-skin='v3'] .tr-sec-h {
+  margin: 0 0 2px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .tr-code,
+html[data-skin='v3'] .json-box {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 19px;
+  white-space: pre-wrap;
+  color: var(--text-2);
+}
+
+html[data-skin='v3'] .tool-error-info {
+  margin-left: 0;
+  padding-left: 12px;
+  border-left: 1px solid color-mix(in srgb, var(--error) 40%, transparent);
+}
+
+html[data-skin='v3'] .tool-error-info .tr-sec-h {
+  color: color-mix(in srgb, var(--error) 75%, var(--text-3));
+}
+
+html[data-skin='v3'] .tool-error-info .tr-code {
+  color: color-mix(in srgb, var(--error) 80%, var(--text-2));
+}
+
+html[data-skin='v3'] .tr-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+html[data-skin='v3'] .tr-act {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--text-3);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+html[data-skin='v3'] .tr-act:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+/* ── 子代理卡 → 一行 + 缩进（不再是卡） ─────────────────────────────────── */
+html[data-skin='v3'] .agent-card {
+  margin: 4px 0 10px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  padding-left: 12px;
+}
+
+html[data-skin='v3'] .agent-card .ac-main {
+  min-height: 26px;
+  padding: 0;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .agent-card .ag-st {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .agent-card .ag-st.busy {
+  color: var(--accent);
+}
+
+html[data-skin='v3'] .agent-card .ag-st.ok {
+  color: var(--success);
+  opacity: 0.8;
+}
+
+html[data-skin='v3'] .agent-card .ag-label {
+  font-size: 13.5px;
+}
+
+html[data-skin='v3'] .agent-card .ag-sec,
+html[data-skin='v3'] .agent-card .ag-t,
+html[data-skin='v3'] .agent-card .ag-compressing,
+html[data-skin='v3'] .agent-card .ag-retry {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+  opacity: 0.85;
+}
+
+html[data-skin='v3'] .agent-card .ac-body {
+  padding: 0 0 4px 0;
+}
+
+/* ── 计划：一行；展开是清单，不是卡 ─────────────────────────────────────── */
+/* 卡壳必须先销掉：`.plan-card` 的边框/底色是「当前样式」的语言，V3 里计划 = 一行 + 一条竖线
+   （设计依据 design-research/07 §9.3：AI Elements 的 Plan 是带边框的 Card，与「一屏只有一个
+   边框」冲突，只借它的信息结构）。漏这一条时，下面 .plan-hd 的 padding:0 会让头部
+   （列表图标 / 详情 / 耗时）直接顶在卡边框上 —— 那就是「太贴边」的来源。
+   失败态同理：V3 没有边框语言，错误由文字色承担（.plan-meta.err / .plan-err）。 */
+html[data-skin='v3'] .plan-card,
+html[data-skin='v3'] .plan-card.error {
+  margin: 4px 0 12px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  overflow: visible;
+}
+
+html[data-skin='v3'] .plan-hd {
+  min-height: 26px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-size: 13.5px;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .plan-hd .plan-title {
+  font-size: 13.5px;
+}
+
+html[data-skin='v3'] .plan-hd .plan-meta,
+html[data-skin='v3'] .plan-hd .plan-call {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+  opacity: 0.85;
+}
+
+html[data-skin='v3'] .plan-list {
+  /* 保留仓里的纵向/右侧 padding（2px 10px 8px 22px），只把左侧缩进换成"一条竖线"语言 */
+  margin-left: 8px;
+  padding: 2px 10px 8px 22px;
+  border-left: 1px solid var(--border);
+  background: none;
+  border-top: 0;
+}
+
+html[data-skin='v3'] .plan-item {
+  font-size: 13.5px;
+  line-height: 24px;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .plan-item.done {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-3) 45%, transparent);
+  opacity: 0.7;
+}
+
+/* 「详情」原始参数/结果 与 失败文本：原 padding（26px / 31px 左缩进）是挂在卡内盒子上的，
+   卡壳销掉后要改成与 .tool-row-body / .tool-error-info 同一套展开体语言（左竖线 + 12px）。 */
+html[data-skin='v3'] .plan-raw {
+  margin: 2px 0 4px 8px;
+  padding: 0 0 2px 12px;
+  border-top: 0;
+  border-left: 1px solid var(--border);
+}
+
+html[data-skin='v3'] .plan-err {
+  margin: 0 0 4px 8px;
+  padding: 0 0 2px 12px;
+  border-left: 1px solid color-mix(in srgb, var(--error) 40%, transparent);
+}
+
+/* ── 上下文压缩：弱化为一行（虚线分隔语义保留在文字里） ─────────────────── */
+html[data-skin='v3'] .compression-card,
+html[data-skin='v3'] .compression-card-hd {
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+
+html[data-skin='v3'] .compression-card-hd {
+  min-height: 26px;
+  padding: 0;
+  font-size: 13.5px;
+  color: var(--text-3);
+}
+
+html[data-skin='v3'] .compression-card-hd:hover {
+  color: var(--text-2);
+}
+
+html[data-skin='v3'] .compression-icon {
+  color: var(--text-3);
+  opacity: 0.8;
+}
+
+html[data-skin='v3'] .compression-summary {
+  font-size: 13.5px;
+}
+
+html[data-skin='v3'] .compression-meta {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+  opacity: 0.75;
+}
+
+html[data-skin='v3'] .compression-card-body,
+html[data-skin='v3'] .compression-grid {
+  margin-left: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+  background: none;
+  border-top: 0;
+}
+
+html[data-skin='v3'] .compression-summary-preview {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 13.5px;
+  line-height: 22px;
+  color: var(--text-2);
+}
+
+html[data-skin='v3'] .compression-grid {
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+/* ── 轮末元信息 / 元信息行：一行 mono，弱化 ─────────────────────────────── */
+html[data-skin='v3'] .assistant-turn-meta {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* ── 代码块 / html 块：本仓既有约定（无壳 + 悬停浮出）保持不动 ───────────── */
+html[data-skin='v3'] .codeblock {
+  border-radius: 8px;
+}
+
+html[data-skin='v3'] .htmlblock {
+  border-radius: 8px;
+}
+
+/* 计划清单（展开）：序号 + 删除线弱化，缩进挂在左竖线上 */
+html[data-skin='v3'] .plan-list .plan-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13.5px;
+  line-height: 24px;
+}
+
+/* ═══════════════ 行首图标（V3 的行标识；默认皮肤下完全不渲染） ═══════════════
+ * 渲染点全在 NarrativeBlocks.tsx（思考 / 工具行 / 压缩）与 Narrative.tsx（子代理卡），
+ * 共 4 处；子 agent 转录（AgentTranscript）复用同一批原语 —— 两处宿主都吃这套规则。
+ * 计划行用的是它既有的内联 <CheckList size={13}>（本层只重新着色，不动 DOM）。
+ * 默认皮肤：`.ic` 直接 display:none —— 结构与观感都不变（零影响）。 */
+html:not([data-skin='v3']) .ic {
+  display: none;
+}
+html[data-skin='v3'] .ic {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--text-3);
+  opacity: 0.9;
+}
+/* 只有"在跑"和"失败"两处给图标染色（与左竖条同一套状态语言） */
+html[data-skin='v3'] .tool-row:has(.run) .ic,
+html[data-skin='v3'] .agent-card.running .ic,
+html[data-skin='v3'] .thinking-hd .ic {
+  color: var(--accent);
+  opacity: 1;
+}
+html[data-skin='v3'] .tool-row:has(.st.err) .ic {
+  color: var(--error);
+  opacity: 1;
+}
+html[data-skin='v3'] .tool-row:has(.badge.bg) .ic {
+  color: color-mix(in srgb, var(--running) 85%, var(--text-3));
+}
+/* 计划行沿用既有内联图标：放大到 16px 并统一成灰（默认皮肤下它仍是原样 13px） */
+html[data-skin='v3'] .plan-hd > svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-3);
+  opacity: 0.9;
+}
+/* 思考行里"进行中"的那条：图标亮度跟着文字走 */
+html[data-skin='v3'] .thinking:hover .ic {
+  color: var(--text-2);
+}
+
+/* 计划清单：当前项提亮 + 状态字形（✓/◎/○）统一成 mono 小字（仓里 .plan-st 本来就接近，这里对齐 V3） */
+html[data-skin='v3'] .plan-item.active {
+  color: var(--text-2);
+}
+html[data-skin='v3'] .plan-st {
+  width: 12px;
+  flex: none;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* 思考行的按钮在仓里是 inline（vertical-align: baseline）→ 我插的 16px 图标与
+ * `<span class="mono">▸ 思考 · 2.6s</span>` 会差 4px 基线。V3 下把它变成 flex 中线对齐。 */
+html[data-skin='v3'] .thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+html[data-skin='v3'] .thinking-hd {
+  align-items: center;
+}

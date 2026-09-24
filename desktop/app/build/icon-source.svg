@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- HAI 应用图标（2026-08-18）：纸色底（品牌 #F7F4EE → 微渐变）+ 亮色版 HAI 共笔 logo。
+       全幅方形（macOS 由系统裁圆角）；内嵌 logo 缩放 880/560 ≈ 1.57，居中留白。 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBF9F4"/>
+      <stop offset="1" stop-color="#EAE5D8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <svg x="72" y="214" width="880" height="597" viewBox="0 0 560 380">
+    <g fill="none" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+      <path stroke="#17181D" d="M100 300 L132 120"/>
+      <path stroke="#17181D" d="M115 215 L286 215"/>
+      <path stroke="#C23A2E" d="M210 300 L251 70"/>
+      <path stroke="#6E6E75" d="M251 70 L345 300"/>
+      <path stroke="#6E6E75" d="M430 300 L462 120"/>
+    </g>
+  </svg>
+</svg>

@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HAI — 一声嗨，双向奔赴</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nanum+Brush+Script&family=Zhi+Mang+Xing&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:    #F7F4EE;
+    --ink:      #17181D;
+    --ink-soft: #6E6E75;
+    --muted:    #8B8B93;
+    --line:     rgba(23,24,29,.10);
+    --human:    #FF7A45;
+    --ai:       #4A7DFF;
+    --with:     #C23A2E;
+  }
+  body.dark{
+    --paper:    #121318;
+    --ink:      #F2F1EE;
+    --ink-soft: #A6A6B0;
+    --muted:    #6E6E77;
+    --line:     rgba(242,241,238,.12);
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;
+    -webkit-font-smoothing:antialiased;
+    transition:background .45s ease,color .45s ease;
+  }
+
+  .wrap{max-width:1000px;margin:0 auto;padding:56px 32px 96px}
+
+  /* ---------- top bar ---------- */
+  .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:56px}
+  .tag{font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+  .tag b{color:var(--ink);font-weight:600}
+  .toggle{
+    font:inherit;font-size:12px;letter-spacing:.06em;color:var(--muted);
+    background:transparent;border:1px solid var(--line);border-radius:999px;
+    padding:8px 16px;cursor:pointer;transition:color .2s,border-color .2s;
+  }
+  .toggle:hover{color:var(--ink);border-color:var(--muted)}
+
+  /* ---------- hero ---------- */
+  .hero{text-align:center}
+  .hero #heroMark{width:min(440px,82vw);margin:0 auto;display:block}
+  .wordmark{
+    margin-top:42px;font-family:'Nanum Brush Script',cursive;
+    font-size:clamp(54px,8vw,78px);line-height:1;letter-spacing:.02em;
+  }
+  .wH{color:var(--ink)}
+  .wAI{color:var(--ink-soft)}
+  .seal{
+    font-family:'Zhi Mang Xing','Kaiti SC',serif;font-size:.4em;line-height:1;
+    color:#fff;background:var(--with);border-radius:.16em;
+    padding:.24em .32em;display:inline-block;vertical-align:.42em;margin-left:.38em;
+    box-shadow:0 2px 10px color-mix(in srgb,var(--with) 38%,transparent);
+  }
+  .sub{margin-top:16px;font-size:15px;line-height:1.9;color:var(--muted);max-width:520px;margin-left:auto;margin-right:auto}
+  .sub em{color:var(--with);font-style:normal}
+  .legend{
+    margin-top:28px;display:inline-flex;gap:22px;align-items:center;
+    font-size:12px;color:var(--muted);letter-spacing:.04em;
+  }
+  .legend .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:7px;vertical-align:-1px;transition:background .3s}
+  .legend span{white-space:nowrap}
+
+  /* ---------- 定稿双版本 ---------- */
+  .final-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.final-grid{grid-template-columns:1fr}}
+  .final{border-radius:18px;padding:34px 22px 30px;text-align:center;border:1px solid var(--line)}
+  .final.light{background:#F7F4EE;color:#17181D}
+  .final.dark{background:#121318;color:#F2F1EE}
+  .final-label{font-size:11px;letter-spacing:.18em;text-transform:uppercase;opacity:.55;margin-bottom:14px}
+  .final svg{width:min(300px,64vw);margin:0 auto;display:block}
+  .fword{font-family:'Nanum Brush Script',cursive;font-size:clamp(34px,4.5vw,42px);line-height:1;margin-top:20px;letter-spacing:.02em}
+  .fseal{font-family:'Zhi Mang Xing','Kaiti SC',serif;font-size:.4em;line-height:1;color:#fff;background:#C23A2E;border-radius:.16em;padding:.24em .32em;display:inline-block;vertical-align:.42em;margin-left:.32em;box-shadow:0 2px 10px rgba(194,58,46,.35)}
+
+  .tag-done{font-style:normal;font-size:10px;font-weight:600;letter-spacing:.08em;color:#fff;background:var(--with);border-radius:999px;padding:2px 8px;margin-right:6px;vertical-align:2px}
+
+  /* ---------- section divider ---------- */
+  .divider{
+    margin:72px 0 18px;display:flex;align-items:center;gap:16px;
+    font-size:12px;letter-spacing:.2em;color:var(--muted);text-transform:uppercase;
+  }
+  .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
+
+  /* ---------- brand moment ---------- */
+  .anim{
+    border:1px solid var(--line);border-radius:18px;overflow:hidden;
+    display:grid;grid-template-columns:1fr auto;align-items:center;
+  }
+  .anim svg{width:min(430px,74vw);padding:18px 10px;display:block}
+  .anim .meta{padding:0 26px;max-width:320px}
+  .anim .meta h3{font-size:14px;font-weight:600;line-height:1.5}
+  .anim .meta p{margin-top:8px;font-size:12px;line-height:1.8;color:var(--muted)}
+  .anim .meta .k{
+    display:inline-block;margin-top:14px;font-size:11px;letter-spacing:.06em;
+    color:var(--with);border:1px solid var(--with);border-radius:999px;padding:5px 11px;
+    opacity:0;transform:translateY(4px);transition:opacity .5s ease .2s,transform .5s ease .2s;
+  }
+  .anim.done .meta .k{opacity:1;transform:none}
+  @media(max-width:760px){.anim{grid-template-columns:1fr}.anim .meta{padding:0 26px 24px}}
+
+  @keyframes withPulse{
+    0%,100%{filter:drop-shadow(0 0 0 rgba(0,0,0,0))}
+    50%{filter:drop-shadow(0 0 16px color-mix(in srgb,var(--with) 60%,transparent))}
+  }
+  .draw-with.pulse{animation:withPulse 1.3s ease-in-out .15s 2}
+
+  /* ---------- colorways ---------- */
+  .hint{margin-bottom:26px;font-size:12px;color:var(--muted)}
+  .sw-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  @media(max-width:880px){.sw-grid{grid-template-columns:repeat(2,1fr)}}
+  .sw-group{
+    grid-column:1/-1;font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--muted);margin-top:10px;
+  }
+  .sw{
+    background:var(--paper);border:1px solid var(--line);border-radius:18px;
+    padding:24px 20px 18px;cursor:pointer;
+    transition:border-color .25s,transform .25s,box-shadow .25s;
+  }
+  .sw:hover{border-color:var(--with);transform:translateY(-2px)}
+  .sw.active{border-color:var(--with);box-shadow:0 0 0 2px color-mix(in srgb,var(--with) 45%,transparent)}
+  .sw svg{width:100%;height:auto;display:block}
+  .sw h4{margin-top:16px;font-size:13px;font-weight:600}
+  .sw .note{margin-top:4px;font-size:11px;color:var(--muted);line-height:1.6}
+  .sw .dots{margin-top:12px;display:flex;gap:6px;align-items:center}
+  .sw .dots i{width:14px;height:14px;border-radius:50%;border:1px solid rgba(0,0,0,.10)}
+  .sw .dots b{font-weight:400;font-size:10px;color:var(--muted);margin-left:2px;letter-spacing:.05em}
+
+  /* ---------- footer ---------- */
+  .foot{margin-top:72px;text-align:center;font-size:12px;color:var(--muted);letter-spacing:.06em;line-height:2}
+  .foot b{color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="top">
+    <div class="tag">HAI&nbsp;&nbsp;/&nbsp;&nbsp;Human <b>with</b> AI&nbsp;&nbsp;/&nbsp;&nbsp;读作「嗨」</div>
+    <button class="toggle" id="toggle">深色 / 浅色</button>
+  </div>
+
+  <!-- ================= HERO ================= -->
+  <section class="hero">
+    <div id="heroMark"></div>
+    <div class="wordmark">
+      <span class="wH">H</span><span class="wAI">AI</span>
+      <span class="seal">嗨</span>
+    </div>
+    <p class="sub">H 斜向右肩，右竖就是 A 的左腿——两个字母共用一根<em>斜边</em>。<br>H 浓墨、AI 淡墨：人与 AI，浓淡不同，共用一笔。</p>
+    <div class="legend">
+      <span><i class="dot" id="dotHuman"></i>Human · 你</span>
+      <span><i class="dot" id="dotAI"></i>AI</span>
+      <span><i class="dot" id="dotWith"></i>with · 共用斜边</span>
+    </div>
+  </section>
+
+  <!-- ================= FINAL 双版本 ================= -->
+  <div class="divider">定稿 · 墨·浓淡 · 双版本</div>
+  <div class="final-grid">
+    <div class="final light">
+      <div class="final-label">亮色 · 宣纸</div>
+      <svg viewBox="0 0 560 380" aria-label="HAI 亮色版">
+        <g fill="none" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+          <path stroke="#17181D" d="M100 300 L132 120"/>
+          <path stroke="#17181D" d="M115 215 L286 215"/>
+          <path stroke="#C23A2E" d="M210 300 L251 70"/>
+          <path stroke="#6E6E75" d="M251 70 L345 300"/>
+          <path stroke="#6E6E75" d="M430 300 L462 120"/>
+        </g>
+      </svg>
+      <div class="fword"><span style="color:#17181D">H</span><span style="color:#6E6E75">AI</span><span class="fseal">嗨</span></div>
+    </div>
+    <div class="final dark">
+      <div class="final-label">深色 · 夜墨</div>
+      <svg viewBox="0 0 560 380" aria-label="HAI 深色版">
+        <g fill="none" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+          <path stroke="#F2F1EE" d="M100 300 L132 120"/>
+          <path stroke="#F2F1EE" d="M115 215 L286 215"/>
+          <path stroke="#C23A2E" d="M210 300 L251 70"/>
+          <path stroke="#A6A6B0" d="M251 70 L345 300"/>
+          <path stroke="#A6A6B0" d="M430 300 L462 120"/>
+        </g>
+      </svg>
+      <div class="fword"><span style="color:#F2F1EE">H</span><span style="color:#A6A6B0">AI</span><span class="fseal">嗨</span></div>
+    </div>
+  </div>
+
+  <!-- ================= BRAND MOMENT ================= -->
+  <div class="divider">品牌时刻 · 那一笔让两个字母同时成立</div>
+  <div class="anim" id="anim">
+    <svg viewBox="0 0 560 380" aria-label="HAI 共笔逐笔动画">
+      <g fill="none" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+        <path class="draw"           stroke="var(--ink)"  d="M100 300 L132 120"/>
+        <path class="draw"           stroke="var(--ink)"  d="M115 215 L286 215"/>
+        <path class="draw"           stroke="var(--ink-soft)" d="M251 70 L345 300"/>
+        <path class="draw"           stroke="var(--ink-soft)" d="M430 300 L462 120"/>
+        <path class="draw draw-with" stroke="var(--with)" d="M210 300 L251 70"/>
+      </g>
+    </svg>
+    <div class="meta">
+      <h3>H 和 A 各缺一条腿</h3>
+      <p>先画左竖、横杠、A 右腿、I——两个字母都不完整。朱砂共用斜边最后落下：<b>这一笔，让 H 和 A 同时成立</b>。点配色会重播，with 色随之改变。</p>
+      <span class="k">with&nbsp;=&nbsp;让两个字母成立的那一笔</span>
+    </div>
+  </div>
+
+  <!-- ================= COLORWAYS ================= -->
+  <div class="divider">选一套配色</div>
+  <div class="hint">点击配色，实时应用到上方主标；品牌时刻会重播。</div>
+  <div class="sw-grid" id="swGrid"></div>
+
+  <div class="foot">
+    <b>HAI</b> · 读作「嗨」· 中文谐音，英文直译<br>
+    H 右竖 = A 左腿 —— 一根共笔斜边，人与 AI 共事
+  </div>
+
+</div>
+
+<script>
+  const GEO = {
+    h:   "M100 300 L132 120",
+    bar: "M115 215 L286 215",
+    sh:  "M210 300 L251 70",
+    a:   "M251 70 L345 300",
+    i:   "M430 300 L462 120"
+  };
+
+  function markSVG(s, gradId){
+    const S = s.strokes;
+    const defs = s.gradStops
+      ? `<defs><linearGradient id="${gradId}" x1="0" y1="1" x2="1" y2="0">
+           <stop offset="0" style="stop-color:${s.gradStops[0]}"/>
+           <stop offset="1" style="stop-color:${s.gradStops[1]}"/>
+         </linearGradient></defs>` : '';
+    const sh = s.gradStops ? `url(#${gradId})` : S.sh;
+    return `<svg viewBox="0 0 560 380" aria-label="HAI logo">${defs}
+      <g fill="none" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+        <path stroke="${S.H}"   d="${GEO.h}"/>
+        <path stroke="${S.bar}" d="${GEO.bar}"/>
+        <path stroke="${sh}"    d="${GEO.sh}"/>
+        <path stroke="${S.A}"   d="${GEO.a}"/>
+        <path stroke="${S.I}"   d="${GEO.i}"/>
+      </g></svg>`;
+  }
+
+  const INK   = 'var(--ink)';
+  const SOFT  = 'var(--ink-soft)';
+  const HUMAN = 'var(--human)';
+  const AI    = 'var(--ai)';
+  const WITH  = 'var(--with)';
+  const ZHUSHA = '#C23A2E';
+
+  const SWATCHES = [
+    { group:'水墨 · 浓淡', name:'墨 · 浓淡', note:'H 浓墨、A 淡墨，朱砂斜边 —— 已定稿。',
+      strokes:{H:INK,bar:INK,sh:ZHUSHA,A:SOFT,I:SOFT}, with:ZHUSHA },
+    { group:'水墨 · 浓淡', name:'墨 · 五色', note:'共用斜边由浓到淡——with = 墨色的过渡。',
+      strokes:{H:INK,bar:INK,sh:'grad',A:SOFT,I:SOFT}, gradStops:[INK,SOFT], with:ZHUSHA },
+    { group:'水墨 · 印章', name:'墨 · 朱砂', note:'纯墨 + 朱砂斜边。最简单的一枚印章。',
+      strokes:{H:INK,bar:INK,sh:ZHUSHA,A:INK,I:INK}, with:ZHUSHA },
+    { group:'水墨 · 印章', name:'墨 · 花青', note:'文人青。青花 / 山水罩色，沉着。',
+      strokes:{H:INK,bar:INK,sh:'#3F5F94',A:INK,I:INK}, with:'#3F5F94' },
+    { group:'水墨 · 印章', name:'墨 · 金', note:'泥金笺。工笔贵气。',
+      strokes:{H:INK,bar:INK,sh:'#B08A3C',A:INK,I:INK}, with:'#B08A3C' },
+    { group:'科技 · 单色', name:'纸墨 · 紫', note:'黑字 + 紫斜边。',
+      strokes:{H:INK,bar:INK,sh:WITH,A:INK,I:INK}, human:'#FF7A45', ai:'#4A7DFF', with:'#7C5CFF' },
+    { group:'科技 · 单色', name:'纸墨 · 渐变', note:'斜边橙→蓝渐变——with = 人与 AI 的交汇带。',
+      strokes:{H:INK,bar:INK,sh:'grad',A:INK,I:INK}, gradStops:[HUMAN,AI], human:'#FF7A45', ai:'#4A7DFF', with:'#7C5CFF' },
+    { group:'科技 · 单色', name:'墨 · 青', note:'黑字 + 青色斜边。低饱和冷静。',
+      strokes:{H:INK,bar:INK,sh:WITH,A:INK,I:INK}, human:'#FF7A45', ai:'#4A7DFF', with:'#0E9C9C' },
+    { group:'科技 · 分词', name:'橙蓝紫', note:'H=橙，A=蓝，with=紫。三色分词。',
+      strokes:{H:HUMAN,bar:INK,sh:WITH,A:AI,I:AI}, human:'#FF7A45', ai:'#4A7DFF', with:'#7C5CFF' },
+    { group:'科技 · 分词', name:'金墨 · 品红', note:'金 / 墨蓝 / 品红。编辑感。',
+      strokes:{H:HUMAN,bar:INK,sh:WITH,A:AI,I:AI}, human:'#F2B84B', ai:'#33475B', with:'#E64980' }
+  ];
+
+  const heroBox = document.getElementById('heroMark');
+  const swGrid  = document.getElementById('swGrid');
+  const DEFAULT = 0;
+
+  function applySwatch(i){
+    const s = SWATCHES[i];
+    const root = document.documentElement.style;
+    root.setProperty('--human', s.human || '#FF7A45');
+    root.setProperty('--ai',    s.ai    || '#4A7DFF');
+    root.setProperty('--with',  s.with  || ZHUSHA);
+    heroBox.innerHTML = markSVG(s, 'heroGrad');
+
+    document.getElementById('dotHuman').style.background =
+      s.strokes.H === INK ? 'var(--ink)' : (s.human || 'var(--ink)');
+    document.getElementById('dotAI').style.background =
+      s.strokes.A === SOFT ? 'var(--ink-soft)' : (s.ai || 'var(--ink)');
+    document.getElementById('dotWith').style.background =
+      s.gradStops ? `linear-gradient(90deg, ${s.gradStops[0]}, ${s.gradStops[1]})`
+                  : (s.with || 'var(--with)');
+
+    document.querySelectorAll('.sw').forEach((el, k) => el.classList.toggle('active', k===i));
+    replayMoment();
+  }
+
+  // ---------- build swatches ----------
+  let lastGroup = null;
+  SWATCHES.forEach((s, i) => {
+    if (s.group !== lastGroup) {
+      const g = document.createElement('div');
+      g.className = 'sw-group';
+      g.textContent = s.group;
+      swGrid.appendChild(g);
+      lastGroup = s.group;
+    }
+    const el = document.createElement('div');
+    el.className = 'sw' + (i===DEFAULT ? ' active' : '');
+    el.style.setProperty('--human', s.human || '#FF7A45');
+    el.style.setProperty('--ai',    s.ai    || '#4A7DFF');
+    el.style.setProperty('--with',  s.with  || ZHUSHA);
+    const withDot = s.gradStops
+      ? `linear-gradient(90deg, ${s.gradStops[0]}, ${s.gradStops[1]})` : s.strokes.sh;
+    const tag = i===DEFAULT ? '<i class="tag-done">定稿</i>' : '';
+    el.innerHTML = markSVG(s, `swGrad${i}`)
+      + `<h4>${tag}${s.name}</h4><div class="note">${s.note}</div><div class="dots">`
+      + `<i style="background:${s.strokes.H}"></i><i style="background:${s.strokes.A}"></i><i style="background:${withDot}"></i>`
+      + `<b>H / A / with</b></div>`;
+    el.addEventListener('click', () => applySwatch(i));
+    swGrid.appendChild(el);
+  });
+
+  // ---------- brand moment ----------
+  const DUR = [650, 650, 750, 650, 750];
+  const DEL = [0, 650, 1300, 2050, 2700];
+
+  function draw(){
+    const svg = document.getElementById('anim');
+    const paths = svg.querySelectorAll('.draw');
+    paths.forEach((p, i) => {
+      const len = p.getTotalLength();
+      p.style.strokeDasharray  = len;
+      p.style.strokeDashoffset = len;
+      p.style.transition = `stroke-dashoffset ${DUR[i]}ms ${DEL[i]}ms cubic-bezier(.45,0,.2,1)`;
+    });
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      paths.forEach(p => p.style.strokeDashoffset = '0');
+      setTimeout(() => {
+        svg.classList.add('done');
+        const w = svg.querySelector('.draw-with');
+        if (w) w.classList.add('pulse');
+      }, 3450);
+    }));
+  }
+
+  function replayMoment(){
+    const svg = document.getElementById('anim');
+    svg.classList.remove('done');
+    const w = svg.querySelector('.draw-with');
+    if (w) w.classList.remove('pulse');
+    svg.querySelectorAll('.draw').forEach(p => {
+      p.style.transition = 'none';
+      const len = p.getTotalLength();
+      p.style.strokeDasharray  = len;
+      p.style.strokeDashoffset = len;
+    });
+    requestAnimationFrame(draw);
+  }
+
+  // ---------- dark / light ----------
+  document.getElementById('toggle').addEventListener('click', () => {
+    document.body.classList.toggle('dark');
+  });
+
+  applySwatch(DEFAULT);
+  setTimeout(() => { replayMoment(); }, 400);   // 等字体布局稳定后开播
+</script>
+</body>
+</html>

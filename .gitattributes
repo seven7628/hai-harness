@@ -1,0 +1,10 @@
+# 行尾统一（Windows / Linux / macOS 贡献者一致）
+* text=auto eol=lf
+
+# 二进制：不做行尾转换、diff 里标为二进制
+*.png binary
+*.icns binary
+*.woff2 binary
+*.pdf binary
+*.mp4 binary
+*.swift text

@@ -1,0 +1,113 @@
+# ══════════════════════════════════════════════════════════════════════════
+# 本仓库只发布「内核 + bridge + 客户端」。
+# 开发期资产（文档 / 设计稿 / 汇报材料 / 示例 / 测试与端到端 / 三方 vendored
+# 资产 / 本机状态）一律不入版本库 —— 它们仍保留在本机工作目录里。
+# ══════════════════════════════════════════════════════════════════════════
+
+# —— 密钥 / 本地环境（绝不能提交）——
+.env
+.env.*
+!.env.example
+
+# —— 本机运行态数据（用户配置、会话、日志；含明文 provider key）——
+.go-code/
+.gocache/
+
+# —— 开发期资产：不入版本库 ——
+# 文档 / 设计稿 / 汇报材料 / 示例 / 构建与发布脚本 / 本机脚本
+/docs/
+/decks/
+/examples/
+/build_tools/
+/internal/
+/oss/
+/scripts/
+/promo-video/
+/harness-audit/
+/out/
+/.design-research/
+# 开发期的压缩评测脚本（体积与依赖都只对本机有意义）
+/tools/eval_compress_v3.py
+# 本机工具与编辑器状态
+.agents/
+.claude/
+.idea/
+.vscode/
+.DS_Store
+.playwright-cli/
+.playwright-cli-config.json
+# 客户端开发期截图与调试脚本
+desktop/app/*.png
+desktop/app/clean-ms.js
+desktop/app/fast2.js
+desktop/app/measure-tag.js
+desktop/app/persist-check.js
+# 品牌设计过程稿（成品 logo 与截图保留）
+brand/boot-preview*
+
+# —— 测试与端到端：不入版本库 ——
+*_test.go
+*_test.ts
+*_test.tsx
+*_test.mjs
+*_test.js
+*.test.ts
+*.test.tsx
+*.test.mjs
+*.test.js
+/desktop/app/e2e/
+/desktop/app/scripts/
+/desktop/bridge/e2e_*.py
+testdata/
+# skills 远程安装的夹具目录（测试用内存夹具，磁盘上这几个是开发遗留）
+/skills/remote/a/
+/skills/remote/b/
+/skills/remote/code-review/
+/skills/remote/repo-skill/
+/skills/remote/shared/
+
+# —— 三方 vendored 资产：不随仓库分发（用户自备；客户端对缺失目录优雅降级）——
+/desktop/vendor/chrome-devtools-mcp/
+/desktop/vendor/ego-browser-skill/
+
+# —— 依赖 ——
+node_modules/
+
+# —— 构建产物 / 编译出的可执行文件（go build / vite / swiftc 生成）——
+/bridge
+/compact
+/flappy
+/flappy-verify
+/fps-verify
+/computer_e2e
+/dist/
+desktop/app/dist/
+desktop/app/dist-electron/
+desktop/app/release/
+# 构建目录，但应用图标是发布必需资产——显式放行这几个
+desktop/app/build/*
+!desktop/app/build/HAI.icns
+!desktop/app/build/icon-1024.png
+!desktop/app/build/icon-source.svg
+!desktop/app/build/make-icns.js
+desktop/app/build/icon.iconset/
+desktop/app/build/icon-source.svg.png
+desktop/app/build/mhybrid.iso
+desktop/app/dist/hai-bridge
+desktop/app/dist/hai-bridge-*
+# 原生载体的编译产物（Swift / Rust）
+desktop/computer-helper/computer-helper
+desktop/computer-helper/target/
+
+# —— lockfile ——
+# resolved 指向私有 npm registry 主机名，不入库；构建与 CI 用 npm install 解析依赖。
+desktop/app/package-lock.json
+
+# —— 其它本机 / 临时产物 ——
+desktop/*.pdf
+*.test
+*.out
+coverage.out
+build_out.txt
+test_out.txt
+tsc_out.txt
