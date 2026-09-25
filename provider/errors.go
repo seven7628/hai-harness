@@ -94,8 +94,12 @@ func (e *FirstChunkTimeoutError) Unwrap() error { return e.Cause }
 // SetCause 记录底层错误（诊断用）。取消/超时类一律忽略 —— 与构造器同一理由：
 // 让 errors.Is(err, context.Canceled) 永远不成立，否则重试层会把首字超时
 // 误判成「用户中断」而不重试。
+//
+// 同时拒绝会把自身重新挂回错误链的 cause。Go HTTP 在 WithCancelCause 取消时会
+// 返回 url.Error{Err: cause}；若原样写回，会形成 ft -> url.Error -> ft 环，
+// 后续 errors.As/Is 将无限遍历并持续占用 CPU。
 func (e *FirstChunkTimeoutError) SetCause(err error) {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || err == e || errors.Is(err, e) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	e.Cause = err
@@ -144,10 +148,11 @@ func (e *StreamStallError) Error() string {
 
 func (e *StreamStallError) Unwrap() error { return e.Cause }
 
-// SetCause 记录底层错误（诊断用）。取消/超时类一律忽略 —— 与构造器同一理由：
-// 让 errors.Is(err, context.Canceled) 永远不成立，否则重试层会把停滞误判成用户中断。
+// SetCause 记录底层错误（诊断用）。取消/超时类一律忽略（同 NewFirstChunkTimeoutError）：
+// errors.Is(err, context.Canceled) 永远不成立，否则重试层会把停滞误判成用户中断。
+// 同时拒绝把自身经 url.Error 等包装后重新挂回，避免形成循环错误链。
 func (e *StreamStallError) SetCause(err error) {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || err == e || errors.Is(err, e) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	e.Cause = err
