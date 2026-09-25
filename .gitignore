@@ -106,7 +106,8 @@ desktop/computer-helper/target/
 # resolved 指向私有 npm registry 主机名，不入库；构建与 CI 用 npm install 解析依赖。
 desktop/app/package-lock.json
 
-# —— Remotion 宣传片渲染产物 ——
+# —— Remotion 本地工程与渲染产物 ——
+/brand/remotion/
 /brand/HAI-v0.1.2-douyin-xhs.mp4
 
 # —— 其它本机 / 临时产物 ——
