@@ -109,6 +109,7 @@ desktop/app/package-lock.json
 # —— Remotion 本地工程与渲染产物 ——
 /brand/remotion/
 /brand/HAI-v0.1.2-douyin-xhs.mp4
+/brand/HAI-v0.1.2-latest-ui-fast.mp4
 
 # —— 其它本机 / 临时产物 ——
 desktop/*.pdf
