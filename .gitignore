@@ -59,6 +59,10 @@ brand/boot-preview*
 /desktop/app/scripts/
 /desktop/bridge/e2e_*.py
 testdata/
+# 真实会话回放基准的夹具（tools/bench/export_real_sessions.py 生成）：
+# 含本机 ~/.go-code/sessions 的真实会话内容（数十 MB、含用户对话与代码），
+# 绝不入库。测试在夹具缺失时 t.Skip，不伪造数字。
+.testdata/
 # skills 远程安装的夹具目录（测试用内存夹具，磁盘上这几个是开发遗留）
 /skills/remote/a/
 /skills/remote/b/
