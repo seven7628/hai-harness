@@ -71,9 +71,16 @@ type Config struct {
 // 与 Phase A 的进程内链一致，避免"读-改-写"在候选账本上丢更新。
 type Service struct {
 	cfg Config
-	// hooks Phase A 格式的渲染/解析钩子（结构 Replay 用；由 NewService 填好）。
+	// hooks Phase A 格式的渲染/解析钩子（结构 Replay、快照、归档用）。
 	hooks StructuralHooks
 	mu    sync.Mutex
+	// Phase C 组件的懒创建缓存（见文件尾的访问器说明）。
+	initOnce       sync.Once
+	dirsCache      evolutionDirs
+	ledgerCache    *outcomeLedger
+	lifeCache      *lifecycleStore
+	revisionsCache *revisionStore
+	evidenceCache  *evidenceStore
 }
 
 // NewService 构造控制面。
@@ -101,7 +108,11 @@ func NewService(cfg Config) (*Service, error) {
 	if cfg.Replayer == nil {
 		cfg.Replayer = DefaultReplayer(DefaultStructuralHooks())
 	}
-	return &Service{cfg: cfg, hooks: DefaultStructuralHooks()}, nil
+	return &Service{
+		cfg:       cfg,
+		hooks:     DefaultStructuralHooks(),
+		dirsCache: newEvolutionDirs(cfg.Store.Dir()),
+	}, nil
 }
 
 // DefaultStructuralHooks 用 Phase A 的公开入口填出渲染/解析钩子。
@@ -364,6 +375,15 @@ func (s *Service) Promote(c *Candidate) error {
 		return fmt.Errorf("%w: candidate %s is %q on disk", ErrNotVerified, c.ID, stored.Status)
 	}
 	topic := stored.Topic
+	// 覆盖前先给**既有内容**留快照。
+	//
+	// 这是回滚能用的唯一正确时机：快照在状态变更时刻抓，会抓到"已经坏了"的
+	// 内容（破坏可能发生在任何一次直接 WriteTopic 里，等生命周期操作发生时
+	// 往往已经晚了）。而"坏版本进入记忆"的真实入口就是晋级覆盖 —— 新候选
+	// 盖掉好主题。在覆盖前抓快照，Rollback 拿到的就是被替换掉的那个好版本。
+	if err := s.snapshotLocked(stored.Topic.Name, "pre-promote snapshot"); err != nil {
+		return err
+	}
 	if err := s.cfg.Promoter.Promote(&topic); err != nil {
 		return fmt.Errorf("evolution: promote %s: %w", c.ID, err)
 	}
@@ -425,4 +445,105 @@ func (s *Service) RejectAllPending(reason string) (int, error) {
 
 func sortCandidates(cs []*Candidate) {
 	sort.Slice(cs, func(i, j int) bool { return cs[i].ID < cs[j].ID })
+}
+
+// --- Phase C 组件的懒创建访问器 -----------------------------------------
+//
+// 全部懒创建且**进程内缓存**：evolution 目录可能根本不存在（没提交过任何候选的
+// 仓库不应该因为构造 Service 就多出四个空目录），而一旦第一次用到就必须保持
+// 同一个实例 —— 否则 ledger 与 lifecycle 各自的锁会失效（两个实例 = 两把锁，
+// 读-改-写就不再串行）。
+
+// dirs 返回 evolution 目录布局。
+func (s *Service) dirs() evolutionDirs { return s.dirsCache }
+
+// ledger 返回结果账本（懒创建）。
+func (s *Service) ledger() Ledger {
+	s.initOnce.Do(func() {
+		if s.ledgerCache == nil {
+			s.ledgerCache = newOutcomeLedger(s.dirsCache.outcomes)
+		}
+		if s.lifeCache == nil {
+			s.lifeCache = &lifecycleStore{dir: s.dirsCache.lifecycle}
+		}
+		if s.revisionsCache == nil {
+			s.revisionsCache = &revisionStore{dir: s.dirsCache.revisions}
+		}
+		if s.evidenceCache == nil {
+			s.evidenceCache = &evidenceStore{dir: s.dirsCache.evidence}
+		}
+	})
+	return s.ledgerCache
+}
+
+// life 返回生命周期状态存储（懒创建）。
+func (s *Service) life() *lifecycleStore { s.ledger(); return s.lifeCache }
+
+// revisions 返回版本快照存储（懒创建）。
+func (s *Service) revisions() *revisionStore { s.ledger(); return s.revisionsCache }
+
+// evidence 返回负证据账本（懒创建）。
+func (s *Service) evidence() *evidenceStore { s.ledger(); return s.evidenceCache }
+
+// record 访问 outcomeLedger 的具体类型（Append/Reset 需要具体方法）。
+func (s *Service) record() *outcomeLedger {
+	s.ledger()
+	return s.ledgerCache
+}
+
+// RecordOutcome 记录一次结果观测（Phase C 的核心写入口）。
+//
+// 宿主在真实任务跑完后调用它：读了记忆且确实省了事 → OutcomeHelped；
+// 读了但把 Agent 带偏 → OutcomeHarmful + 同步记一条负证据。
+//
+// 为什么"记观测"和"记负证据"是两件事：观测是**原始事实**（时间序列，可能
+// 自我修正——一次 harmful 之后可以再 helped），负证据是**结论**（带权重、
+// 参与阻止判定）。把两者混在一份结构里，修正一次观测就会连带改写结论。
+func (s *Service) RecordOutcome(topic string, o Outcome) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record().Append(topic, o); err != nil {
+		return err
+	}
+	// 有害观测同时落一条负证据，保证"负证据账本"不依赖调用点记得写两处。
+	if isNegative(o) {
+		kind := NegHarmful
+		switch o.Kind {
+		case OutcomeContradicted:
+			kind = NegContradicted
+		case OutcomeUnused:
+			kind = NegStale
+		case OutcomeReverted:
+			kind = NegHarmful
+		}
+		if err := s.evidence().Append(NegativeEvidence{
+			Target: "topic:" + topic,
+			Kind:   kind,
+			Detail: o.Note,
+			At:     o.At,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Outcomes 读某主题的全部观测（宿主查账 / 计算置信度）。
+func (s *Service) Outcomes(topic string) ([]Outcome, error) { return s.record().Load(topic) }
+
+// ConfidenceOf 算某主题当前置信度（读算，不落盘）。
+func (s *Service) ConfidenceOf(topic string) (Confidence, error) {
+	outcomes, err := s.record().Load(topic)
+	if err != nil {
+		return Confidence{}, err
+	}
+	sortOutcomes(outcomes)
+	return DefaultConfidence(outcomes), nil
+}
+
+// ResetOutcomes 清空某主题的观测（实验重置；必须显式调用）。
+func (s *Service) ResetOutcomes(topic string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.record().Reset(topic)
 }

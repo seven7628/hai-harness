@@ -72,6 +72,17 @@ func newEvolutionDirs(repoDir string) evolutionDirs {
 	}
 }
 
+// errNotExist 文件不存在的归一哨兵（os.IsNotExist 覆盖不到的包装错误）。
+var errNotExist = os.ErrNotExist
+
+// removeIfExists 删除文件；不存在不算错误。
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("evolution: remove %s: %w", path, err)
+	}
+	return nil
+}
+
 // safeSegment 校验一个可用于单级路径的名字（ID / 主题名 / 技能名）。
 //
 // 只允许小写字母数字、连字符、下划线、点，且拒绝 "." / ".." / 含分隔符：
@@ -172,6 +183,15 @@ func writeJSON(path string, v any) error {
 		return fmt.Errorf("evolution: encode %s: %w", path, err)
 	}
 	return writeFileAtomic(path, string(b)+"\n")
+}
+
+// readFileString 读整个文件为字符串；不存在时返回空串（调用点自行判定）。
+func readFileString(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 // readJSON 读 JSON；文件不存在时返回 os.ErrNotExist 包裹的错误。
