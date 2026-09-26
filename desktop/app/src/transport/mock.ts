@@ -134,12 +134,33 @@ type Emit = (line: string) => void
 //     当成「URL + 描述符」切开 → logo 的 <img src> 直接变空（表现为文档顶部一个破图图标）。
 //     所以这两张图用 ?no-inline 拿到真实 URL。
 //  ③ png 截图 400KB+，本来就不会内联，无需处理。
+//
+// ④ 必须**只替换 markdown 的图片/资源引用语法**，不能对全文 replaceAll：
+//     README.zh-CN.md 的「目录结构」表格里有一行正文写的就是 `brand/hai-logo-light.svg`
+//     （`  | \`brand/\` | 品牌 logo（深/亮两版） | \`brand/hai-logo-light.svg\` |`），
+//     全文替换会把表格里的**说明文字**也换成 `http://localhost:4199/@fs/Users/<本机>/…`
+//     —— 长图里直接暴出本机绝对路径（2026-09-26 实测）。
+//     故按 `![alt](path)` / `<source srcset>` / `<img src>` 三种真实引用形态定位后再换。
 const assetUrl = (u: string): string => new URL(u, typeof location === 'undefined' ? 'http://localhost/' : location.href).href
-const MOCK_README_ZH = currentProjectReadmeZh
-  .replaceAll('brand/hai-logo-dark.svg', assetUrl(haiLogoDarkUrl))
-  .replaceAll('brand/hai-logo-light.svg', assetUrl(haiLogoLightUrl))
-  .replaceAll('brand/screenshot-main.png', assetUrl(screenshotMainUrl))
-  .replaceAll('brand/screenshot-trace.png', assetUrl(screenshotTraceUrl))
+const ASSET_MAP: Array<[string, string]> = [
+  ['brand/hai-logo-dark.svg', haiLogoDarkUrl],
+  ['brand/hai-logo-light.svg', haiLogoLightUrl],
+  ['brand/screenshot-main.png', screenshotMainUrl],
+  ['brand/screenshot-trace.png', screenshotTraceUrl],
+]
+// markdown 图片：![alt](brand/xxx) —— 路径在紧跟 `(` 之后、对应 `)` 之前。
+const rewriteMdImage = (s: string): string =>
+  s.replace(/(!\[[^\]]*\]\()(brand\/[^)\s]+)(\))/g, (m, head: string, p: string, tail: string) => {
+    const hit = ASSET_MAP.find(([from]) => p.endsWith(from))
+    return hit ? `${head}${assetUrl(hit[1])}${tail}` : m
+  })
+// 内联 HTML 的图片引用：<img src="…"> / <source srcset="…">（README 顶部 logo 走 <picture>）。
+const rewriteHtmlSrc = (s: string): string =>
+  s.replace(/(<(?:img|source)\b[^>]*?\s(?:src|srcset)=")([^"]+)(")/g, (m, head: string, p: string, tail: string) => {
+    const hit = ASSET_MAP.find(([from]) => p.endsWith(from))
+    return hit ? `${head}${assetUrl(hit[1])}${tail}` : m
+  })
+const MOCK_README_ZH = rewriteHtmlSrc(rewriteMdImage(currentProjectReadmeZh))
   .replace(/\n$/, '') // 去掉文件末尾换行：行数与真实文件一致（wc -l = 426）
 
 // —— mock 工作区文件（read_file / file_preview / 审批 diff 共用同一内容：真 bridge 从磁盘读同一文件）——

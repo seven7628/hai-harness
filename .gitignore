@@ -113,6 +113,12 @@ desktop/app/package-lock.json
 /brand/*.mp4
 !/brand/hai-promo.mp4
 
+# —— 本地生成的长图素材 ——
+// README 预览长图由 desktop/app/e2e/capture_readme_longshot.mjs 生成（该目录不入库），
+// 单张 5MB 且可随时重跑，不进版本库。
+// 手动复现：node desktop/app/e2e/capture_readme_longshot.mjs --split
+/brand/screenshot-readme-zh-*.png
+
 # —— 其它本机 / 临时产物 ——
 desktop/*.pdf
 *.test
