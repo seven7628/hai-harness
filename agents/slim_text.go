@@ -44,7 +44,15 @@ type slimTextConfig struct {
 	GrepPerFileTail int
 	// MergePairs 工具对合并（E）：删整组重复的「工具调用 + 结果」**消息**。
 	// 与上面几项不同 —— 它动的是消息结构（配对与下标），风险等级更高，故
-	// 单独开关（默认随 D 段一起开，可显式关掉退回纯文本瘦身）。
+	// 单独开关（默认随 D 段一起开）。
+	//
+	// 为何默认开：长任务里「读 A → 改 A → 再读 A」是最高频的重复模式，旧值
+	// 在磁盘上早已作废，留着会让模型对着过时内容推理。真实会话实测收益不大
+	// （编码类会话重复率仅 0~5%），但该模式一旦出现就是成片的重复消息。
+	//
+	// 逃生舱：若某模型/端点对「历史里少了工具调用」敏感，用
+	// WithSlimText(SlimTextOptions{MergePairs: boolPtr(false)}) 只关 E 段，
+	// 保留 C/D/F（尤其 F 图片段，收益最大且与协议无关）。
 	MergePairs *bool
 }
 
@@ -93,6 +101,10 @@ func boolOrTrue(b *bool) *bool {
 	}
 	return b
 }
+
+// BoolPtr 供宿主在包外构造 SlimTextOptions 的三态开关（如只关 E 段：
+// WithSlimText(SlimTextOptions{MergePairs: agents.BoolPtr(false)})）。
+func BoolPtr(b bool) *bool { return &b }
 
 func (o SlimTextOptions) toConfig() *slimTextConfig {
 	t := &slimTextConfig{

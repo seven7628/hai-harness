@@ -4046,6 +4046,10 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		agents.WithSlimText(agents.SlimTextOptions{}),
 		agents.WithImageSlim(agents.ImageSlimConfig{Keep: 4, MaxRounds: 30}),
 	)
+	// 逃生舱（按需）：E 段动消息结构（删整组「工具调用+结果」消息），若某个
+	// 模型/端点对「历史里少了工具调用」敏感，可只关 E 段而保留 C/D/F：
+	//   agents.WithSlimText(agents.SlimTextOptions{MergePairs: agents.BoolPtr(false)})
+	// F 图片段与协议无关、收益最大（-54.9%），任何情况下都建议保留。
 	// 采样默认（宿主决策 2026-08）：DeepSeek 显式 top_p=0.95 / temperature=1.0；OpenAI 厂商默认
 	if temperature, topP := m.provCfg.samplingDefaults(); temperature != nil {
 		opts = append(opts, agents.WithTemperature(*temperature), agents.WithTopP(*topP))
