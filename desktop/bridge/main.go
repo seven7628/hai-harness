@@ -55,6 +55,7 @@ import (
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/cron"
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/evolution"
 	"github.com/seven7628/hai-harness/hooks"
 	"github.com/seven7628/hai-harness/mcp"
 	"github.com/seven7628/hai-harness/memory"
@@ -764,10 +765,16 @@ func (m *manager) pptxPreviewer(pyRT *goruntime.Runtime) *builtin.PptxPreviewer 
 
 // workspaceRuntime：单个工作区的会话集合 + 持久化目录 + 技能注册表 + 自定义 subagent 注册表 + MCP 管理器（按工作区隔离）
 type workspaceRuntime struct {
-	path       string
-	storeDir   string
-	eventsDir  string
-	memory     *memory.MemoryService
+	path      string
+	storeDir  string
+	eventsDir string
+	memory    *memory.MemoryService
+	// evolution Memory 自进化控制面（Phase B/C/D）。nil = 未接上。
+	//
+	// 保持 nil 是**正常状态**而不是错误：无 git 仓库身份、构造失败、宿主没配真实
+	// Replayer，都应该是"控制面缺席、Phase A 记忆照常工作"。因此装配点对它的
+	// 错误只记不阻断（见 openWorkspace）。
+	evolution  *evolution.Service
 	skills     *skills.Registry             // 分层技能注册表（全局 .agents/.go-code + 工作区 .agents/.go-code，工作区优先）
 	subagents  *subagent.DefinitionRegistry // 自定义 subagent 定义注册表（全局 ~/.go-code/agents + 工作区 agents，工作区优先）
 	mcp        *mcp.Manager                 // MCP 服务器管理器（每工作区共享连接；配置分层：用户 settings.json + 项目 .mcp.json/.go-code/settings.json）
@@ -1041,11 +1048,27 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	if _, err := memSvc.Open(context.Background(), path); err != nil {
 		memSvc = nil
 	}
+	// Memory 自进化控制面（Phase B/C/D）。**失败不阻断工作区启动**：控制面是增强
+	// 能力，缺席时 Phase A 的记忆读写必须照常工作。
+	//
+	// 这里刻意不注入真实 LLM Replayer：每次 Replay 都是一次真实模型调用，启动
+	// 路径上默认开着会花钱、拖慢启动、并让「验证过了」这件事依赖网络可用性。
+	// 要开启由宿主在拿到 provider 后显式替换（见 llm_replayer.go 的接线说明）。
+	var evoSvc *evolution.Service
+	if memSvc != nil {
+		if s, err := newEvolutionService(memSvc); err != nil {
+			startupLog("A5.evolutionUnavailable", time.Now())
+			fmt.Fprintf(os.Stderr, "⚠ memory 进化控制面未启用（Phase A 记忆不受影响）: %v\n", err)
+		} else {
+			evoSvc = s
+		}
+	}
 	ws := &workspaceRuntime{
 		path:       path,
 		storeDir:   wsSessionsDir(path), // APP 级：~/.go-code/sessions/<wsKey>（跨 workspace，工作区下只留 skills）
 		eventsDir:  wsEventsDir(path),   // APP 级：~/.go-code/events/<wsKey>
 		memory:     memSvc,
+		evolution:  evoSvc,
 		skills:     skillsReg,
 		subagents:  subagentsReg,
 		mcp:        mcpm,
