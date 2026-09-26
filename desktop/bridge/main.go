@@ -57,6 +57,7 @@ import (
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/hooks"
 	"github.com/seven7628/hai-harness/mcp"
+	"github.com/seven7628/hai-harness/memory"
 	"github.com/seven7628/hai-harness/plugin"
 	"github.com/seven7628/hai-harness/plugin/browser"
 	computerplugin "github.com/seven7628/hai-harness/plugin/computer"
@@ -766,6 +767,7 @@ type workspaceRuntime struct {
 	path       string
 	storeDir   string
 	eventsDir  string
+	memory     *memory.MemoryService
 	skills     *skills.Registry             // 分层技能注册表（全局 .agents/.go-code + 工作区 .agents/.go-code，工作区优先）
 	subagents  *subagent.DefinitionRegistry // 自定义 subagent 定义注册表（全局 ~/.go-code/agents + 工作区 agents，工作区优先）
 	mcp        *mcp.Manager                 // MCP 服务器管理器（每工作区共享连接；配置分层：用户 settings.json + 项目 .mcp.json/.go-code/settings.json）
@@ -1033,10 +1035,17 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 		}
 	}
 	startupLog("A5.computerEnsureSynced", cuSyncStart)
+	// Phase A：解析当前工作区所属的 canonical repository memory。失败不阻断工作区启动；
+	// 无 git 身份时保持 nil，AgentLoop 不注入任何 Memory 层。
+	memSvc := memory.NewService(memory.Config{})
+	if _, err := memSvc.Open(context.Background(), path); err != nil {
+		memSvc = nil
+	}
 	ws := &workspaceRuntime{
 		path:       path,
 		storeDir:   wsSessionsDir(path), // APP 级：~/.go-code/sessions/<wsKey>（跨 workspace，工作区下只留 skills）
 		eventsDir:  wsEventsDir(path),   // APP 级：~/.go-code/events/<wsKey>
+		memory:     memSvc,
 		skills:     skillsReg,
 		subagents:  subagentsReg,
 		mcp:        mcpm,
@@ -3951,6 +3960,9 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
 	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec())
+	// Phase A Memory 工具：主 Agent 可见；共享引擎的子 Agent 也会看到 schema，
+	// 但 memory 工具自身按 ToolContext.Depth 拒绝子运行调用。
+	registerMemoryTools(eng, m.runtime(workspace).memory)
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()
@@ -3998,6 +4010,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		agents.WithSubagents(m.runtime(workspace).subagents), // 自定义 subagent 清单注入 system（渐进披露）+ spawn_agent
 		agents.WithAgentMDDir(workspace),                     // 工作区 AGENTS.md/CLAUDE.md 递归发现（工作记忆层）
 		agents.WithWorkingDir(workspace),                     // Current Workspace 环境层：声明本会话文件操作根目录
+		agents.WithMemory(m.runtime(workspace).memory),       // Phase A：当前 canonical Repository 的 bounded MEMORY.md 索引
 		// @引用 PDF 文本抽取（2026-09）：PDF 结构层是纯 ASCII，agents 侧的二进制判定
 		// 读不出正文（压缩流 → 报「二进制不读内容」；未压缩 → 把 PDF 源码当正文注入）。
 		// 抽取要 pypdf + 受管运行时 + 沙箱，属宿主能力面 → 经钩子注入（agents 包不

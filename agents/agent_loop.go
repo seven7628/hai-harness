@@ -118,6 +118,10 @@ type Config struct {
 	// Skills 技能注册表（渐进披露的发现来源：清单注入系统提示词），nil 表示无技能
 	Skills *skills.Registry
 
+	// Memory 长期仓库记忆（Phase A：只注入 bounded MEMORY.md 索引）。
+	// nil = 无 Memory，行为与既有配置完全一致。
+	Memory MemoryProvider
+
 	// Subagents 自定义 subagent 注册表（渐进披露的发现来源：清单注入系统提示词），
 	// nil 表示无自定义 subagent。spawn_agent 工具在工具引擎侧注册（subagent 包）。
 	Subagents SubagentLister
@@ -311,6 +315,12 @@ func WithAgentMDDir(dir string) Option {
 
 func WithSkills(reg *skills.Registry) Option {
 	return func(c *Config) { c.Skills = reg }
+}
+
+// WithMemory 注入 Phase A 仓库记忆提供者。nil 或未调用本选项时，
+// system prompt 保持既有字节不变。
+func WithMemory(p MemoryProvider) Option {
+	return func(c *Config) { c.Memory = p }
 }
 
 func WithCompressor(comp Compressor) Option {
@@ -1499,6 +1509,10 @@ func (a *AgentLoop) composeSystemPrompt() string {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
+		b.WriteString(mem)
+	}
+	// 仓库自动记忆：只注入 bounded MEMORY.md 索引，Topic 正文不进入 system。
+	if mem := memoryIndexBlock(a.cfg.Memory); mem != "" {
 		b.WriteString(mem)
 	}
 	// 技能清单（buildSkillManifest 自带 \n\n 前缀）
