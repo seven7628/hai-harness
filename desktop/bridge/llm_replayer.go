@@ -133,24 +133,24 @@ func (r *llmReplayer) runJudgeLoop(ctx context.Context, req evolution.ReplayRequ
 		if len(toolCalls) == 0 {
 			return answer, nil
 		}
-		// 工具轮用尽：让模型基于已有证据收尾，下一轮不再给工具。
+		// 工具轮用尽：让模型基于已有证据收尾。下一轮撤掉工具 schema ——
+		// 留着它模型会继续探查，"收尾"就成了可选项。
 		if round+1 >= maxRounds {
 			messages = append(messages,
-				core.NewUserMessage(core.Content{
-					Type:    core.ContentTypeText,
-					Content: "Stop investigating and answer now with exactly one word: SUPPORTED, CONTRADICTED, or UNVERIFIABLE.",
-				}))
+				core.NewAssistantMessage(nil, "", toolCalls))
+			results, err := r.tools.RunBatch(ctx, toolCalls, nil, nil, nil, 0)
+			if err != nil {
+				return "", err
+			}
+			messages = append(messages, toolResultsMessage(toolCalls, results)...)
 			schemas = nil
 			continue
 		}
 		if r.tools == nil {
 			// 没给工具却要了工具调用：回一条说明，避免模型空转。
-			messages = append(messages,
-				core.NewAssistantMessage(nil, "", toolCalls),
-				core.NewUserMessage(core.Content{
-					Type:    core.ContentTypeText,
-					Content: "No tools are available. Answer now with exactly one word: SUPPORTED, CONTRADICTED, or UNVERIFIABLE.",
-				}))
+			// 用 Tool 角色回执（不是 user）——见 toolResultsMessage 的注释。
+			messages = append(messages, core.NewAssistantMessage(nil, "", toolCalls))
+			messages = append(messages, toolResultsMessage(toolCalls, nil)...)
 			continue
 		}
 
@@ -162,33 +162,36 @@ func (r *llmReplayer) runJudgeLoop(ctx context.Context, req evolution.ReplayRequ
 		if len(results) == 0 {
 			results = []core.ToolResult{{Id: toolCalls[0].Id, IsError: true, Result: "tool execution produced no result"}}
 		}
-		messages = append(messages, toolResultsMessage(toolCalls, results))
+		messages = append(messages, toolResultsMessage(toolCalls, results)...)
 	}
 }
 
-// toolResultsMessage 把工具结果按 call 顺序拼成一条 user 消息回灌。
+// toolResultsMessage 把工具结果拼成 core.Tool 消息序列。
 //
-// 单独成函数是为了让「配对完整性」这件事在一个地方可见：漏掉任何一条 call
-// 的结果，推理模型（DeepSeek 等）会直接 400，而这在真实 provider 上表现为
-// 一个看不出原因的 Replay 失败。
-func toolResultsMessage(calls []core.ToolCall, results []core.ToolResult) core.Message {
+// 消息角色必须是 Tool 而不是 User —— 这是踩过的坑：opencode 网关对
+// "assistant 带 tool_calls + 紧随一条 user 消息"的组合直接 400
+// （invalid_request_error）。AgentLoop 走的是 NewToolMessageWithImages，本函数
+// 与它同构，只是没有图片块（只读工具不产生图片）。
+//
+// 配对完整性同样重要：漏掉任何一条 call 的结果，上游会因 tool_call_id 找不到
+// 对应的 tool 消息而报错，而这在真实 provider 上表现成一个看不出原因的 Replay
+// 失败。因此这里按 calls 顺序遍历，而不是按 results 顺序。
+func toolResultsMessage(calls []core.ToolCall, results []core.ToolResult) []core.Message {
 	byID := make(map[string]core.ToolResult, len(results))
 	for _, r := range results {
 		byID[r.Id] = r
 	}
-	var parts []core.Content
+	out := make([]core.Message, 0, len(calls))
 	for _, c := range calls {
-		res, ok := byID[c.Id]
 		text := "tool produced no result"
-		if ok {
-			text = res.Result
+		if r, ok := byID[c.Id]; ok {
+			text = r.Result
 		}
-		parts = append(parts, core.Content{
-			Type:    core.ContentTypeText,
-			Content: fmt.Sprintf("[%s] %s", c.Name, text),
-		})
+		msg := core.NewToolMessage(c.Id, text)
+		msg.ToolName = c.Name
+		out = append(out, msg)
 	}
-	return core.NewUserMessage(parts...)
+	return out
 }
 
 func (r *llmReplayer) Name() string { return r.name }
