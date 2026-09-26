@@ -916,6 +916,9 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 		// 在回写循环内即时完成（见 recordRead）
 		if ac.slim != nil {
 			a.applyStale(ac)
+			// 图片瘦身（F）：在压缩前执行，让压缩输入体积也跟着降（图片是
+			// 压缩估算里的大头，estimatedImageTokens 单图 1600）。
+			a.applyImageSlim(ac)
 			// 工具对合并（E）：删整组重复的「工具调用 + 结果」消息。
 			// 必须紧跟 reset —— 删消息使所有下标失效（slim 全部按下标记账，
 			// 占位文本里的 #N 引用也已在 mergeToolPairs 内改写为新下标）。

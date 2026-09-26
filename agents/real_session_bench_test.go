@@ -312,6 +312,53 @@ func replaySlice(t *testing.T, msgs []core.Message, stage string) (int, int) {
 	return before, after
 }
 
+// TestRealSessionImageReclaim 实测 F 段（图片瘦身）在真实会话上的效果。
+// 图片占真实上下文 93%，这一项的收益量级应远大于 C/D/E 文本瘦身之和。
+func TestRealSessionImageReclaim(t *testing.T) {
+	raw, err := os.ReadFile("../.testdata/real_sessions.json")
+	if err != nil {
+		t.Skip("夹具缺失")
+	}
+	var sessions []realSession
+	if err := json.Unmarshal(raw, &sessions); err != nil {
+		t.Fatalf("夹具解析失败: %v", err)
+	}
+	for _, keep := range []int{2, 4, 8} {
+		var beforeImg, afterImg, beforeAll, afterAll int
+		for _, s := range sessions {
+			if len(s.Messages) < 50 {
+				continue
+			}
+			a := NewAgentLoop(WithToolResultSlim(), WithImageSlim(ImageSlimConfig{Keep: keep, MaxRounds: -1}))
+			ac := &AgentContext{slim: newSlimState(*a.cfg.Slim)}
+			ac.Messages = append(ac.Messages, s.Messages...)
+			beforeAll += sumMsgBytes(ac.Messages)
+			beforeImg += imgTotal(ac.Messages)
+			a.applyImageSlim(ac)
+			afterAll += sumMsgBytes(ac.Messages)
+			afterImg += imgTotal(ac.Messages)
+		}
+		if beforeAll == 0 {
+			t.Skip("夹具无有效会话")
+		}
+		t.Logf("保最近 %d 张：图片 %d → %d 字节（-%.1f%%）；全会话 %d → %d 字节（-%.1f%%）",
+			keep, beforeImg, afterImg, 100*float64(beforeImg-afterImg)/float64(beforeImg),
+			beforeAll, afterAll, 100*float64(beforeAll-afterAll)/float64(beforeAll))
+	}
+}
+
+func imgTotal(msgs []core.Message) int {
+	n := 0
+	for _, m := range msgs {
+		for _, c := range m.Content {
+			if c.Type == core.ContentTypeImage {
+				n += len(c.Content)
+			}
+		}
+	}
+	return n
+}
+
 func TestRealSessionRepeatProfile(t *testing.T) {
 	raw, err := os.ReadFile("../.testdata/real_sessions.json")
 	if err != nil {

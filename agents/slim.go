@@ -24,12 +24,13 @@ import (
 // SlimConfig 工具结果瘦身配置（WithToolResultSlim 启用；默认关——行为变化项
 // 产品验证后开）。字段 0 值 = 使用默认。
 type SlimConfig struct {
-	DedupMinBytes int             // 只读结果去重的参与下限（默认 2048：小结果不值得断层代价）
-	StaleRounds   int             // 占位替换的轮龄阈值（默认 20 轮）
-	StaleMinBytes int             // 占位替换的字节下限（默认 8192：只占位超龄大结果）
-	SpillMaxBytes int             // spill 溢出阈值（默认 65536；> 阈值写文件 + 历史留预览）
-	SpillDir      string          // spill 文件目录（空 = 不 spill；建议置于文件工具工作区内，模型可 read_file 检索）
-	Text          *slimTextConfig // D 段：语义化结果瘦身（nil = 关闭；WithSlimText 设置）
+	DedupMinBytes int              // 只读结果去重的参与下限（默认 2048：小结果不值得断层代价）
+	StaleRounds   int              // 占位替换的轮龄阈值（默认 20 轮）
+	StaleMinBytes int              // 占位替换的字节下限（默认 8192：只占位超龄大结果）
+	SpillMaxBytes int              // spill 溢出阈值（默认 65536；> 阈值写文件 + 历史留预览）
+	SpillDir      string           // spill 文件目录（空 = 不 spill；建议置于文件工具工作区内，模型可 read_file 检索）
+	Text          *slimTextConfig  // D 段：语义化结果瘦身（nil = 关闭；WithSlimText 设置）
+	Images        *ImageSlimConfig // F 段：图片瘦身（nil = 关闭；WithImageSlim 设置）
 }
 
 func (c *SlimConfig) normalize() {
@@ -90,6 +91,8 @@ type slimState struct {
 	rerunIndex map[string]rerunRef     // 工具名+参数 → 上次结果（D 段）
 	edits      map[string]fileEditStat // path → 编辑计数与增删行（D 段）
 	editGen    map[string]int          // path → 编辑代数（读取时快照，判定旧结果失效）
+	// imagesRemoved F 段累计淘汰的图片张数（可观测性：宿主可据此判断阈值是否合理）
+	imagesRemoved int
 }
 
 func newSlimState(cfg SlimConfig) *slimState {
@@ -112,6 +115,7 @@ func (s *slimState) reset() {
 	s.rerunIndex = make(map[string]rerunRef)
 	s.edits = make(map[string]fileEditStat)
 	s.editGen = make(map[string]int)
+	s.imagesRemoved = 0
 }
 
 // spillResult 溢出写文件（入历史前）：> SpillMaxBytes 且配置了目录时，完整输出

@@ -4033,6 +4033,19 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		// options.sessionId —— 同一会话多轮共享缓存前缀；空 sid 不启用）。
 		agents.WithSessionID(sid),
 	)
+	// 上下文瘦身（C/D/E/F 段，产品侧启用；实测依据见 tools/bench/export_real_sessions.py
+	// 回放的 6 个真实会话）：
+	//   - F 图片：base64 截图占真实上下文 93%（单会话累积 18~56 张）。保最近 4 张
+	//     即回收 61.7% 图片体积、54.9% 全会话体积 —— 远大于文本侧全部收益之和。
+	//   - C+D 文本：可瘦身文本 -4.9%（零 LLM 成本，无行为风险）。
+	//   - E 合并：删整组重复的「工具调用+结果」消息。长任务里同一文件被反复
+	//     读取/编辑很常见（同参数重读，文件改动后旧值已被作废），合并可去掉
+	//     这些消息的 role + tool_calls JSON + tool_call_id 结构开销。
+	opts = append(opts,
+		agents.WithToolResultSlim(),
+		agents.WithSlimText(agents.SlimTextOptions{}),
+		agents.WithImageSlim(agents.ImageSlimConfig{Keep: 4, MaxRounds: 30}),
+	)
 	// 采样默认（宿主决策 2026-08）：DeepSeek 显式 top_p=0.95 / temperature=1.0；OpenAI 厂商默认
 	if temperature, topP := m.provCfg.samplingDefaults(); temperature != nil {
 		opts = append(opts, agents.WithTemperature(*temperature), agents.WithTopP(*topP))
