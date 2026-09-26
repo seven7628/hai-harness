@@ -1,6 +1,11 @@
 import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus } from './types'
 import type { BridgeCommand } from '../store/events'
 import type { MCPProjectInfo, MCPProjectServer, HookSectionView } from '../store/useAppStore'
+import currentProjectReadmeZh from '../../../../README.zh-CN.md?raw'
+import haiLogoDarkUrl from '../../../../brand/hai-logo-dark.svg?no-inline'
+import haiLogoLightUrl from '../../../../brand/hai-logo-light.svg?no-inline'
+import screenshotMainUrl from '../../../../brand/screenshot-main.png?url'
+import screenshotTraceUrl from '../../../../brand/screenshot-trace.png?url'
 
 // mock 项目池：pickWorkspace 轮换返回，演示「项目→会话」树（浏览器无真实文件夹选择器）
 const MOCK_PROJECTS = ['/mock/proj-auth', '/mock/proj-billing', '/mock/proj-search', '/mock/proj-notify']
@@ -114,6 +119,29 @@ type Emit = (line: string) => void
 // 事件严格串行：每个 LLM 轮 = llm_start→(think/流式)→llm_end，工具调用在其后
 // —— store 的「关闭最后一条 assistant 块」依赖此顺序；每个 ask 发一个主 agent_start（runId 递增）。
 
+// mock 里的「项目 README」（演示 / 宣传片 / 预览回归共用这一份真实内容，不用另造一份假文档）。
+// 图片改写：README 里的图是**仓库相对路径**（brand/hai-logo-*.svg、brand/screenshot-*.png）。
+// 真实环境由主进程 fs:read-image 读盘（见 lib/localAsset.ts），浏览器 mock 没有这条 IPC ——
+// 原样渲染只会得到「读不到」的占位块（宣传片里 logo 与两张截图就是这么露出来的）。这里在 mock
+// 侧把相对路径换成 Vite 打出来的资源 URL：图真能显示，形状仍与真 bridge 一致。
+// logo 走 <picture>：srcset 在 <source> 上，src 在 <img> 上，两处都要改。
+//
+// 三个坑都在这几行里（都是实测踩出来的）：
+//  ① Vite 给的是**根相对**地址（dev /@fs/…，build 因 base:'./' 是 ./assets/…）。它们没有 scheme，
+//     会被 lib/localAsset.ts 的 isLocalAssetSrc 判成「本地文件路径」→ 又走回 fs:read-image →
+//     浏览器 mock 里没有这条 IPC，还是读不到。补成 http(s) 绝对地址后才落到普通 <img> 分支。
+//  ② svg 只有 451 字节，Vite 默认会**内联成 data URL**；而 data URL 里带逗号，srcset 解析会把它
+//     当成「URL + 描述符」切开 → logo 的 <img src> 直接变空（表现为文档顶部一个破图图标）。
+//     所以这两张图用 ?no-inline 拿到真实 URL。
+//  ③ png 截图 400KB+，本来就不会内联，无需处理。
+const assetUrl = (u: string): string => new URL(u, typeof location === 'undefined' ? 'http://localhost/' : location.href).href
+const MOCK_README_ZH = currentProjectReadmeZh
+  .replaceAll('brand/hai-logo-dark.svg', assetUrl(haiLogoDarkUrl))
+  .replaceAll('brand/hai-logo-light.svg', assetUrl(haiLogoLightUrl))
+  .replaceAll('brand/screenshot-main.png', assetUrl(screenshotMainUrl))
+  .replaceAll('brand/screenshot-trace.png', assetUrl(screenshotTraceUrl))
+  .replace(/\n$/, '') // 去掉文件末尾换行：行数与真实文件一致（wc -l = 418）
+
 // —— mock 工作区文件（read_file / file_preview / 审批 diff 共用同一内容：真 bridge 从磁盘读同一文件）——
 // read_file 读到几行就是几行（header 行数 = 内容实际行数）；edit_file 的 diff 只反映该工具自己的改动，
 // 每个文件工具按各自参数给出不同结果（不共享同一份 canned 内容）。
@@ -226,6 +254,10 @@ const MOCK_FILES: Record<string, string[]> = {
     'id,val',
     ...Array.from({ length: 700 }, (_, i) => `${i + 1},v${i + 1}`),
   ],
+  // 项目 README：真实内容（见上面的 MOCK_README_ZH）。不用 README.md 这个名字 ——
+  // 产出卡片回归（e2e/verify_artifacts_card.mjs）以 README.md 为样本断言 .fp-code，
+  // 复用同名会把那条用例的语义改掉。
+  'README.zh-CN.md': MOCK_README_ZH.split('\n'),
 }
 
 // —— mock 命令校验（与真 bridge 同规则：拒绝式失败，返回中文原因；null = 通过）——
@@ -282,8 +314,8 @@ const MOCK_FS_DIRS: Record<string, string[]> = {
   '/mock/proj-notify/src': [],
 }
 const MOCK_FS_FILES: Record<string, string[]> = {
-  '/mock/workspace': ['auth.go', 'auth_test.go', 'README.md'],
-  '/mock/proj-auth': ['auth.go', 'README.md'], // @ 面板首屏有文件条目可点选（verify 4a）
+  '/mock/workspace': ['auth.go', 'auth_test.go', 'README.md', 'README.zh-CN.md'],
+  '/mock/proj-auth': ['auth.go', 'README.md', 'README.zh-CN.md'], // @ 面板首屏有文件条目可点选（verify 4a）
   '/mock/workspace/src': ['main.go', 'util.go'],
   '/mock/workspace/docs': ['guide.md'],
   '/mock/proj-auth/src': ['svc.go', 'App.vue'], // .vue 单文件组件：右侧文件栏高亮验证
@@ -1952,6 +1984,7 @@ class MockTransport implements Transport {
       this.promoteScript(sid, runId) // 长工具 promote 演示
     }
     else if (/vue/.test(joined)) this.vueScript(sid, runId) // mock 钩子：读 .vue 组件（右侧文件栏高亮验证）
+    else if (/readme/i.test(joined)) this.readmeScript(sid, runId) // mock 钩子：读项目 README（右侧 Markdown 预览 + 相对路径图片）
     else if (/html|网页预览/.test(joined)) this.htmlScript(sid, runId) // mock 钩子：输出 html 代码块（iframe 实时预览验证）
     else if (/写个网页|写html|write_html/.test(joined)) this.writeHtmlScript(sid, runId) // mock 钩子：write_file 落盘 .html（「打开」右侧浏览器验证）
     else if (/mermaid|流程图|架构图/.test(joined)) this.mermaidScript(sid, runId, /错误|坏/.test(joined)) // mock 钩子：输出 mermaid 图表（markdown 渲染验证）；含「错误/坏」→ 输出语法错误的图（错误回退验证）
@@ -2032,6 +2065,29 @@ class MockTransport implements Transport {
     }, sid)
     this.after(1560, () => this.emit({ event_type: 'agent_end', session_id: sid, run_id: runId, index: 1, content: '读取 App.vue 完成', finish_reason: 'end', model: this.model, timestamp: ts() }), sid)
     this.after(1600, () => this.finishRun(sid), sid)
+  }
+
+  // ---------- README 钩子：读项目 README（右侧 Markdown 预览 + 相对路径图片验证） ----------
+  // 走的是真实内容（MOCK_README_ZH）：图是 brand/ 下的相对路径引用，mock 已把它们改写成
+  // Vite 资源 URL，所以点开工具行里的路径就能看到「文档 + 相对路径图片」完整生效 ——
+  // 演示、宣传片截图与预览回归共用这一条。
+  private readmeScript(sid: string, runId: string) {
+    this.llmTurn(0, {
+      think: ['用户要看项目 README：直接读工作区里那份真实文档，预览交给右侧文件面板。'],
+      stream: '读取项目里的 `README.zh-CN.md`（418 行）。',
+      endAt: 700,
+      end: { finish_reason: 'tool_call', usage: { Input: 320, Output: 32, CacheRead: 280, TotalTokens: 352 }, tool_calls: [{ id: 'r-1', name: 'read_file', arguments: '{"path":"README.zh-CN.md","start_line":1,"end_line":120}' }] },
+    }, sid)
+    this.toolStart('r-1', 'read_file', '{"path":"README.zh-CN.md","start_line":1,"end_line":120}', runId, 720, sid)
+    this.toolEnd('r-1', 'read_file', readResult('README.zh-CN.md', 1, 120), runId, 900, sid)
+    this.llmTurn(940, {
+      think: ['README 是 Markdown：默认走渲染预览，不是高亮源码；图是仓库相对路径，预览里应当直接出图。'],
+      stream: '已读完前 120 行。点开上面的 `README.zh-CN.md` 可看完整文档：标题、表格、徽标和 `brand/` 下的截图都是渲染后的效果，不是源码。',
+      endAt: 1900,
+      end: { finish_reason: 'stop', usage: { Input: 640, Output: 70, CacheRead: 600, TotalTokens: 710 } },
+    }, sid)
+    this.after(1960, () => this.emit({ event_type: 'agent_end', session_id: sid, run_id: runId, index: 1, content: 'README 预览已就绪', finish_reason: 'end', model: this.model, timestamp: ts() }), sid)
+    this.after(2000, () => this.finishRun(sid), sid)
   }
 
   // ---------- html 钩子：输出 ```html 代码块（iframe 沙箱实时预览验证） ----------
