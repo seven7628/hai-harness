@@ -24,11 +24,12 @@ import (
 // SlimConfig 工具结果瘦身配置（WithToolResultSlim 启用；默认关——行为变化项
 // 产品验证后开）。字段 0 值 = 使用默认。
 type SlimConfig struct {
-	DedupMinBytes int    // 只读结果去重的参与下限（默认 2048：小结果不值得断层代价）
-	StaleRounds   int    // 占位替换的轮龄阈值（默认 20 轮）
-	StaleMinBytes int    // 占位替换的字节下限（默认 8192：只占位超龄大结果）
-	SpillMaxBytes int    // spill 溢出阈值（默认 65536；> 阈值写文件 + 历史留预览）
-	SpillDir      string // spill 文件目录（空 = 不 spill；建议置于文件工具工作区内，模型可 read_file 检索）
+	DedupMinBytes int             // 只读结果去重的参与下限（默认 2048：小结果不值得断层代价）
+	StaleRounds   int             // 占位替换的轮龄阈值（默认 20 轮）
+	StaleMinBytes int             // 占位替换的字节下限（默认 8192：只占位超龄大结果）
+	SpillMaxBytes int             // spill 溢出阈值（默认 65536；> 阈值写文件 + 历史留预览）
+	SpillDir      string          // spill 文件目录（空 = 不 spill；建议置于文件工具工作区内，模型可 read_file 检索）
+	Text          *slimTextConfig // D 段：语义化结果瘦身（nil = 关闭；WithSlimText 设置）
 }
 
 func (c *SlimConfig) normalize() {
@@ -63,26 +64,54 @@ type slimRead struct {
 	hash  string // 结果文本 sha256
 }
 
+// readAnchor 一次 read_file 的折叠锚（D 段）：区间 + 读取时的文件编辑代数 +
+// 是否已被折叠。同一 path 保留全部锚（多次读不同片段是互补信息，不能只留最新）。
+type readAnchor struct {
+	index  int
+	rng    readRange
+	gen    int
+	folded bool
+}
+
+// rerunRef 一次「重复调用去重」的锚：bash/grep/glob 同参数重跑的旧结果索引。
+type rerunRef struct {
+	index int
+	hash  string
+}
+
 // slimState 每次 Run 的工具结果瘦身状态（AgentContext.slim；AgentLoop 不可变
 // 约束 → 状态必须 per-Run）。下标只增不减（替换不增删元素），压缩整体替换
 // Messages 后必须 reset（否则按失效下标改写错误消息，可能改写摘要/system）。
 type slimState struct {
 	cfg        SlimConfig
-	readIndex  map[string]slimRead // path → 最近一次 read 结果（去重匹配锚）
-	roundStart []int               // 每轮循环顶部的消息数（轮龄判定：距尾 N 块）
+	readIndex  map[string]slimRead     // path → 最近一次 read 结果（去重匹配锚）
+	roundStart []int                   // 每轮循环顶部的消息数（轮龄判定：距尾 N 块）
+	reads      map[string][]readAnchor // path → read 折叠锚（D 段）
+	rerunIndex map[string]rerunRef     // 工具名+参数 → 上次结果（D 段）
+	edits      map[string]fileEditStat // path → 编辑计数与增删行（D 段）
+	editGen    map[string]int          // path → 编辑代数（读取时快照，判定旧结果失效）
 }
 
 func newSlimState(cfg SlimConfig) *slimState {
 	return &slimState{
-		cfg:       cfg,
-		readIndex: make(map[string]slimRead),
+		cfg:        cfg,
+		readIndex:  make(map[string]slimRead),
+		reads:      make(map[string][]readAnchor),
+		rerunIndex: make(map[string]rerunRef),
+		editGen:    make(map[string]int),
 	}
 }
 
 // reset 压缩成功后调用：Messages 整体替换，全部下标失效 → 清空重建。
+// edits/editGen 同样清空：代数是「相对本 Run 消息序列」的量纲，压缩后旧
+// 读取的折叠判定失去意义（文件账本 fileLedger 不受此影响，它不携带下标）。
 func (s *slimState) reset() {
 	s.readIndex = make(map[string]slimRead)
 	s.roundStart = nil
+	s.reads = make(map[string][]readAnchor)
+	s.rerunIndex = make(map[string]rerunRef)
+	s.edits = make(map[string]fileEditStat)
+	s.editGen = make(map[string]int)
 }
 
 // spillResult 溢出写文件（入历史前）：> SpillMaxBytes 且配置了目录时，完整输出

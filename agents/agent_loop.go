@@ -1139,6 +1139,10 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 				text := r.Result
 				if ac.slim != nil {
 					text = a.spillResult(ac, tc, text)
+					// 语义化瘦身（D）：在 spill 之后、去重记账之前 —— spill 已把
+					// 超大结果压成预览，折叠/简化再作用于留下的文本（省的是二次
+					// 收益：ANSI 噪声、重复行、被覆盖的旧读取）。
+					text = a.slimToolResult(ac, tc, text, len(ac.Messages))
 				}
 				// 图片类工具结果（read_file 读图 / 截图 / MCP image）：图片块随 tool
 				// 消息入上下文（模型可见）；slim 只作用于 text —— 图片不参与 spill/去重
