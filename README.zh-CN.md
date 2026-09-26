@@ -14,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="mailto:victor06282023@gmail.com"><img alt="Email: victor06282023@gmail.com" src="https://img.shields.io/badge/邮箱-victor06282023%40gmail.com-47848F.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Go 1.25.5" src="https://img.shields.io/badge/Go-1.25.5-00ADD8.svg">
   <img alt="Platform: macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg">
@@ -21,6 +22,7 @@
   <img alt="Providers: 22 presets / 3 protocols" src="https://img.shields.io/badge/providers-22%20presets%20%2F%203%20protocols-6E6E75.svg">
   <br>
   <a href="README.md">English</a> ·
+  <a href="#联系方式">联系方式</a> ·
   <a href="#为什么是-hai-harness">设计取舍</a> ·
   <a href="#架构">架构</a> ·
   <a href="#执行链路事件与-trace">执行链路</a> ·
@@ -409,6 +411,12 @@ npm run build                 # 生产打包 + bridge 二进制
 3. **不要静默失败。** 新的失败路径必须以事件、分类错误或持久化错误字段暴露出来；客户端的全部假设建立在这条之上。
 4. **推送前跑 `gofmt`、`go vet`、`tsc --noEmit`、`eslint`。** 改动尽量收窄 —— 内核的影响面很宽。
 5. **不要提交密钥与本机路径。** provider key、会话日志、绝对家目录路径都不得出现在代码、测试与文档里。
+
+## 联系方式
+
+有问题、想报 bug，或者希望合作？发邮件到
+[**victor06282023@gmail.com**](mailto:victor06282023@gmail.com)，或直接开
+[issue](https://github.com/seven7628/hai-harness/issues)。
 
 ## 许可证
 

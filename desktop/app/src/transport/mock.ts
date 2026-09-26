@@ -140,7 +140,7 @@ const MOCK_README_ZH = currentProjectReadmeZh
   .replaceAll('brand/hai-logo-light.svg', assetUrl(haiLogoLightUrl))
   .replaceAll('brand/screenshot-main.png', assetUrl(screenshotMainUrl))
   .replaceAll('brand/screenshot-trace.png', assetUrl(screenshotTraceUrl))
-  .replace(/\n$/, '') // 去掉文件末尾换行：行数与真实文件一致（wc -l = 418）
+  .replace(/\n$/, '') // 去掉文件末尾换行：行数与真实文件一致（wc -l = 426）
 
 // —— mock 工作区文件（read_file / file_preview / 审批 diff 共用同一内容：真 bridge 从磁盘读同一文件）——
 // read_file 读到几行就是几行（header 行数 = 内容实际行数）；edit_file 的 diff 只反映该工具自己的改动，
@@ -2074,7 +2074,7 @@ class MockTransport implements Transport {
   private readmeScript(sid: string, runId: string) {
     this.llmTurn(0, {
       think: ['用户要看项目 README：直接读工作区里那份真实文档，预览交给右侧文件面板。'],
-      stream: '读取项目里的 `README.zh-CN.md`（418 行）。',
+      stream: '读取项目里的 `README.zh-CN.md`（426 行）。',
       endAt: 700,
       end: { finish_reason: 'tool_call', usage: { Input: 320, Output: 32, CacheRead: 280, TotalTokens: 352 }, tool_calls: [{ id: 'r-1', name: 'read_file', arguments: '{"path":"README.zh-CN.md","start_line":1,"end_line":120}' }] },
     }, sid)

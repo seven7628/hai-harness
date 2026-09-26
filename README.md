@@ -14,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="mailto:victor06282023@gmail.com"><img alt="Email: victor06282023@gmail.com" src="https://img.shields.io/badge/email-victor06282023%40gmail.com-47848F.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Go 1.25.5" src="https://img.shields.io/badge/Go-1.25.5-00ADD8.svg">
   <img alt="Platform: macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg">
@@ -21,6 +22,7 @@
   <img alt="Providers: 22 presets / 3 protocols" src="https://img.shields.io/badge/providers-22%20presets%20%2F%203%20protocols-6E6E75.svg">
   <br>
   <a href="README.zh-CN.md">中文文档</a> ·
+  <a href="#contact">Contact</a> ·
   <a href="#why-hai-harness">Why</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#the-execution-chain-events--trace">Execution chain</a> ·
@@ -420,6 +422,12 @@ Issues and pull requests are welcome. A few ground rules that keep this codebase
    the harness has a wide blast radius.
 5. **Do not commit secrets or machine-specific paths.** Provider keys, session logs and absolute home
    paths must not appear in code, tests or docs.
+
+## Contact
+
+Questions, bug reports, or want to collaborate? Email
+[**victor06282023@gmail.com**](mailto:victor06282023@gmail.com) — or open an
+[issue](https://github.com/seven7628/hai-harness/issues).
 
 ## License
 
