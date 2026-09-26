@@ -58,6 +58,18 @@ type Config struct {
 	Validators []Validator
 	// Replayer 单次 Replay 执行器（空 = DefaultReplayer，零 LLM 调用）。
 	Replayer Replayer
+	// SkillInstaller 技能安装器（Phase D）。
+	//
+	// nil 是**允许**的：Phase A/B/C 场景不需要它，只有调用 ActivateSkill 时才会
+	// 报 ErrNoSkillInstaller。理由是技能落成 SKILL.md 要经过 skills.Registry 的
+	// 命名空间与覆盖优先级，那是宿主装配的事；本包猜错命名空间的后果是
+	// "技能加载不到"或"覆盖了用户自己的技能"，因此宁可不装。
+	SkillInstaller SkillInstaller
+	// JointReplayer 联合 Replay 执行器（Phase D，2×2 对照）。
+	//
+	// nil 是**允许**的且是安全默认值：RunJoint 在没有它时返回"实验没跑，
+	// 什么都不能宣称"，而不是返回一个看起来像跑过的空结论。
+	JointReplayer JointReplayer
 	// RequireReplay 为真表示"没有 Replayer 就报错"（ErrNoReplayer），
 	//	而不是退化成 replay_skipped。宿主想保证每条记忆都被真实验证时打开它。
 	RequireReplay bool
