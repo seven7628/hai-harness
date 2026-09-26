@@ -77,28 +77,30 @@ func validateRepoID(id string) error {
 // 输出恒为规范形（小写连字符），这样 `WriteTopic("My Topic")` 与
 // `WriteTopic("my-topic")` 落到同一个文件。
 func validateTopicName(name string) (string, error) {
-	n := strings.ToLower(strings.TrimSpace(name))
+	raw := strings.TrimSpace(name)
+	if raw == "" {
+		return "", fmt.Errorf("topic name is empty")
+	}
+	// 路径语义必须拒绝而不是静默改名：把 `../x`、`a/b`、绝对路径等改写成
+	// 另一个合法 slug 会让调用方误以为写入/读取了自己请求的对象。
+	if strings.ContainsAny(raw, `/\\`) || raw == "." || raw == ".." || strings.Contains(raw, "..") {
+		return "", fmt.Errorf("topic name %q must be a single safe slug, not a path", name)
+	}
+	n := strings.ToLower(raw)
 	n = strings.TrimPrefix(n, "topic:")
-	n = strings.TrimPrefix(n, "topics/")
 	n = strings.TrimSuffix(n, ".md")
 	n = strings.TrimSpace(n)
 	if n == "" {
-		return "", fmt.Errorf("topic name is empty")
+		return "", fmt.Errorf("topic name %q is empty", name)
 	}
 	if len(n) > maxTopicNameLen {
 		return "", fmt.Errorf("topic name %q too long (%d > %d)", name, len(n), maxTopicNameLen)
 	}
-	// 空白/下划线/点 → 连字符（"My Topic" → "my-topic"），再剔除其余非法字符，
-	// 折叠重复连字符、去首尾连字符。
+	// 仍允许输入中的空格/下划线/点折叠为连字符，但不允许其它字符静默丢失。
+	if !topicSeparatorsRe.MatchString(n) && !topicNameRe.MatchString(n) {
+		return "", fmt.Errorf("topic name %q contains unsupported characters", name)
+	}
 	n = topicSeparatorsRe.ReplaceAllString(n, "-")
-	n = invalidTopicCharRe.ReplaceAllString(n, "") // 剩余非 [a-z0-9-] 字符直接删
-	for strings.Contains(n, "--") {
-		n = strings.ReplaceAll(n, "--", "-")
-	}
-	n = strings.Trim(n, "-")
-	if n == "" {
-		return "", fmt.Errorf("topic name %q has no usable characters", name)
-	}
 	if !topicNameRe.MatchString(n) {
 		return "", fmt.Errorf("topic name %q is not a valid slug (%q)", name, topicNameRe.String())
 	}

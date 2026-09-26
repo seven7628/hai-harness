@@ -91,6 +91,10 @@ func (s *MemoryService) BootstrapIndex() (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	chain := s.chainFor(store)
+	chain.Lock()
+	defer chain.Unlock()
+
 	idx, err := store.ReadIndex()
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -106,31 +110,11 @@ func (s *MemoryService) BootstrapIndex() (*Index, error) {
 		if err := store.WriteIndex(fresh); err != nil {
 			return nil, err
 		}
-		// 回读：让返回值的 Lines/Bytes/Path/Entries 与磁盘真实内容一致
-		//（Bootstrap 时内存对象的 Raw 为空，直接返回会误导调用方）。
+		// 回读：让返回值的 Lines/Bytes/Path/Entries 与磁盘真实内容一致。
 		return store.ReadIndex()
 	}
-	if idx.Bootstrap {
-		return idx, nil
-	}
-	changed := false
-	if idx.RepoID == "" {
-		idx.RepoID = store.RepoID()
-		changed = true
-	}
-	if idx.RemoteURL == "" && s.remoteURL() != "" {
-		idx.RemoteURL, changed = s.remoteURL(), true
-	}
-	if idx.RepoRoot == "" && s.repoRoot() != "" {
-		idx.RepoRoot, changed = s.repoRoot(), true
-	}
-	if changed {
-		// 只补缺失字段：Generated 保留文件里的值（写回不该改写"上次生成"的时间，
-		// 否则每次打开都声称自己刚生成过）。
-		if err := store.WriteIndex(idx); err != nil {
-			return nil, err
-		}
-	}
+	// 已存在的索引原样返回。索引中的仓库元数据不由 Bootstrap 补写：
+	// 读-改-写会和 WriteTopic 争用索引，且旧格式索引没有必要被自动重写。
 	return idx, nil
 }
 
@@ -212,16 +196,15 @@ func (s *MemoryService) WriteTopic(t *Topic) error {
 	return s.syncIndexEntry(store, valid)
 }
 
-// chainFor 取该存储的写互斥（单进程内串行化"写主题 + 更新索引"这个复合操作）。
+// chainFor 取该存储的写互斥。Phase A 索引更新是 read-modify-write，
+// 同一进程内所有 MemoryService 对同一 Memory 根串行化；先保证不丢条目，
+// 后续再按 repoID 细分锁粒度。
 func (s *MemoryService) chainFor(store Store) *sync.Mutex {
-	if fs, ok := store.(*FileStore); ok {
-		return fs.chains.chain(fs.repoID)
-	}
 	return globalChain
 }
 
-// 非 FileStore 实现（测试替身 / 未来别的后端）没有自己的 chain 表，
-// 用这把进程级兜底锁保证复合写仍串行。
+// 非 FileStore 实现（测试替身 / 未来别的后端）没有自己的 repo id，
+// 用进程级兜底锁保证复合写仍串行。
 var globalChain = &sync.Mutex{}
 
 // syncIndexEntry 把主题摘要并入索引（读-改-写；同名条目覆盖、按 updated 倒序）。
@@ -271,7 +254,6 @@ func (s *MemoryService) syncIndexEntry(store Store, t *Topic) error {
 	idx.Entries = sortEntries(out)
 	idx.TopicCount = len(idx.Entries)
 	idx.Generated = s.now()
-	idx.Truncated = false // 写回即视为"已按限额整理过"
 	return store.WriteIndex(idx)
 }
 

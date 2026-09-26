@@ -2,6 +2,7 @@ package agents
 
 import (
 	"reflect"
+	"strings"
 
 	"github.com/seven7628/hai-harness/memory"
 )
@@ -17,8 +18,14 @@ type MemoryProvider interface {
 	BootstrapIndex() (*memory.Index, error)
 }
 
+const memoryProtocol = `## Memory Protocol
+- Project Memory is a map of previously recorded, repository-scoped experience.
+- Read a topic with memory_view when its title or description matches the task.
+- Current repository files, tests, CI, AGENTS.md, and explicit user instructions take priority over an older memory.
+- Write only non-obvious, reusable knowledge that is not already derivable from the repository.`
+
 // memoryIndexBlock 将索引转换为稳定的 system prompt 层。
-// 索引本身已经是 Markdown；这里只加固定标题，不把 Topic 正文带入 system。
+// 索引本身已经是 Markdown；这里只加固定协议，不把 Topic 正文带入 system。
 func memoryIndexBlock(p MemoryProvider) string {
 	if p == nil {
 		return ""
@@ -33,8 +40,8 @@ func memoryIndexBlock(p MemoryProvider) string {
 		}
 	}
 	idx, err := p.BootstrapIndex()
-	if err != nil || idx == nil || idx.Raw == "" {
+	if err != nil || idx == nil || idx.Raw == "" || strings.Contains(idx.Raw, "- (no topics yet)") {
 		return ""
 	}
-	return "\n\n## Project Memory\n\n" + idx.Raw
+	return "\n\n" + memoryProtocol + "\n\n" + idx.Raw
 }

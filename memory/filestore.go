@@ -124,6 +124,9 @@ func (s *FileStore) WriteIndex(idx *Index) error {
 		return fmt.Errorf("memory: index repo id %q does not match store %q", idx.RepoID, s.repoID)
 	}
 	out, _ := renderIndex(idx)
+	if countLines(out) > IndexMaxLines || len(out) > IndexMaxBytes {
+		return fmt.Errorf("memory: index limit exceeded (%d lines / %d bytes); remove or merge topics before writing", countLines(out), len(out))
+	}
 	return writeFileAtomic(s.IndexPath(), out)
 }
 

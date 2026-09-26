@@ -26,6 +26,7 @@ func (t *ViewTool) Parameters() any {
 	return tools.Obj(map[string]any{"ref": tools.Str("Memory topic name, for example build-recovery, or index")}, "ref")
 }
 func (t *ViewTool) CanParallel() bool { return true }
+func (t *ViewTool) ReadOnly() bool    { return true }
 func (t *ViewTool) ValidParams(ctx context.Context, _, arguments string) error {
 	var a struct {
 		Ref string `json:"ref"`
@@ -116,7 +117,11 @@ func (t *WriteTool) Call(ctx context.Context, _, arguments string) (string, erro
 func (t *WriteTool) AfterCall(context.Context, core.ToolCall) {}
 
 func rejectSubagent(ctx context.Context) error {
-	if tc := events.ToolContextFrom(ctx); tc != nil && tc.Depth > 0 {
+	tc := events.ToolContextFrom(ctx)
+	if tc == nil {
+		return errors.New("memory tools require a tool execution context")
+	}
+	if tc.Depth > 0 {
 		return errors.New("memory tools are available to the main agent only; subagents must use explicit memory refs")
 	}
 	return nil

@@ -14,7 +14,7 @@ const (
 	topicFence  = "---"
 )
 
-var indexBullet = regexp.MustCompile(`^- \[([^\]]+)\]\(([^)]+)\)(?: — (.*))?$`)
+var indexBullet = regexp.MustCompile(`^- \[([^\]]+)\]\(([^)]+)\)(?: — ?(.*))?$`)
 
 func renderIndex(idx *Index) (string, int) {
 	var b strings.Builder
@@ -49,9 +49,21 @@ func renderIndexEntry(e IndexEntry) string {
 
 func parseIndex(repoID, path, raw string, truncated bool) *Index {
 	idx := &Index{RepoID: repoID, Path: path, Raw: raw, Truncated: truncated, Lines: countLines(raw), Bytes: len(raw)}
+	section := ""
+	var contextLines []string
 	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(line)
-		if line == indexHeader || strings.HasPrefix(line, "## Context") {
+		if line == indexHeader {
+			continue
+		}
+		if line == "## Context" {
+			section = "context"
+			continue
+		}
+		if section == "context" {
+			if line != "" {
+				contextLines = append(contextLines, line)
+			}
 			continue
 		}
 		m := indexBullet.FindStringSubmatch(line)
@@ -64,6 +76,7 @@ func parseIndex(repoID, path, raw string, truncated bool) *Index {
 		}
 		idx.Entries = append(idx.Entries, IndexEntry{Name: name, Title: name, Summary: m[3]})
 	}
+	idx.Context = strings.Join(contextLines, "\n")
 	idx.TopicCount = len(idx.Entries)
 	return idx
 }

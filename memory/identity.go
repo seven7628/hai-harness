@@ -199,6 +199,11 @@ func repoIDFrom(id Identity) string {
 	if id.RemoteURL != "" {
 		return repoIDFromRemote(id.RemoteURL)
 	}
+	// 无 remote 的 worktree 共享 git common dir；优先用它派生目录名，
+	// 这样同一 Repository 的多个 worktree 落到同一份 Project Memory。
+	if id.GitCommonDir != "" {
+		return repoIDFromPath(id.GitCommonDir)
+	}
 	return repoIDFromPath(id.RepoRoot)
 }
 

@@ -19,7 +19,7 @@ func TestMemoryToolsValidateAndCall(t *testing.T) {
 	}
 	view := NewViewTool(s)
 	write := NewWriteTool(s)
-	ctx := context.Background()
+	ctx := events.WithToolContextForRun(context.Background(), "main-run", "", 0, nil, nil, nil)
 	if err := view.ValidParams(ctx, "", `{"ref":"index"}`); err != nil {
 		t.Fatal(err)
 	}
