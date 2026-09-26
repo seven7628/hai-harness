@@ -42,6 +42,10 @@ type slimTextConfig struct {
 	GrepPerFileMax  int
 	GrepPerFileHead int
 	GrepPerFileTail int
+	// MergePairs 工具对合并（E）：删整组重复的「工具调用 + 结果」**消息**。
+	// 与上面几项不同 —— 它动的是消息结构（配对与下标），风险等级更高，故
+	// 单独开关（默认随 D 段一起开，可显式关掉退回纯文本瘦身）。
+	MergePairs *bool
 }
 
 func (c *slimTextConfig) normalize() {
@@ -78,6 +82,16 @@ type SlimTextOptions struct {
 	GrepPerFileMax   int
 	GrepPerFileHead  int
 	GrepPerFileTail  int
+	MergePairs       *bool
+}
+
+// boolOrTrue 三态开关归一：nil = 开启（与 D 段其余子能力一致的默认语义）。
+func boolOrTrue(b *bool) *bool {
+	if b == nil {
+		v := true
+		return &v
+	}
+	return b
 }
 
 func (o SlimTextOptions) toConfig() *slimTextConfig {
@@ -90,6 +104,7 @@ func (o SlimTextOptions) toConfig() *slimTextConfig {
 		GrepPerFileMax:   o.GrepPerFileMax,
 		GrepPerFileHead:  o.GrepPerFileHead,
 		GrepPerFileTail:  o.GrepPerFileTail,
+		MergePairs:       boolOrTrue(o.MergePairs),
 	}
 	t.normalize()
 	return t
@@ -132,11 +147,11 @@ func (a *AgentLoop) slimToolResult(ac *AgentContext, tc core.ToolCall, text stri
 			text = foldRepeatedLines(text)
 		}
 		if s.cfg.Text.BashRerunDedup {
-			text = a.dedupRerun(ac, tc, text, newIdx, "同一命令重复执行，输出与消息 #%d 逐字相同")
+			text = a.dedupRerun(ac, tc, text, newIdx, slimPlaceholderPrefix+"同一命令重复执行，输出与消息 #%d 逐字相同]")
 		}
 	case "grep", "glob":
 		if s.cfg.Text.SearchRerunDedup {
-			text = a.dedupRerun(ac, tc, text, newIdx, "同一搜索重复执行，结果与消息 #%d 逐字相同")
+			text = a.dedupRerun(ac, tc, text, newIdx, slimPlaceholderPrefix+"同一搜索重复执行，结果与消息 #%d 逐字相同]")
 		}
 		if s.cfg.Text.GrepPerFileMax > 0 {
 			text = foldPerFileMatches(text, s.cfg.Text)
@@ -278,7 +293,7 @@ func (a *AgentLoop) foldRead(ac *AgentContext, tc core.ToolCall, text string, ne
 // renderReadFold 折叠占位文本：回答「有多少变更、变更的是什么、在哪」。
 func renderReadFold(path string, r readRange, st fileEditStat, newIdx int, superseded bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[read_file %s%s 的旧结果已折叠", path, rangeSuffix(r))
+	fmt.Fprintf(&b, slimPlaceholderPrefix+"read_file %s%s 的旧结果已折叠", path, rangeSuffix(r))
 	if st.count > 0 {
 		if st.statsKnown {
 			fmt.Fprintf(&b, "：该文件此后被本会话编辑 %d 次（+%d -%d 行）", st.count, st.added, st.removed)

@@ -154,7 +154,7 @@ func (a *AgentLoop) recordRead(ac *AgentContext, tc core.ToolCall, text string, 
 		// 同 path 同内容：旧结果替换短引用（历史 ToolCallId 保留，协议配对不变）
 		ac.Messages[prev.index] = core.NewToolMessage(
 			ac.Messages[prev.index].ToolCallId,
-			fmt.Sprintf("[内容与消息 #%d 相同，已去重]", newIdx),
+			fmt.Sprintf(slimPlaceholderPrefix+"内容与消息 #%d 相同，已去重]", newIdx),
 		)
 	}
 	ac.slim.readIndex[path] = slimRead{index: newIdx, hash: h}
@@ -171,7 +171,7 @@ func (a *AgentLoop) applyStale(ac *AgentContext) {
 		return // 轮龄未达阈值
 	}
 	cutoff := s.roundStart[len(s.roundStart)-1-s.cfg.StaleRounds]
-	placeholder := fmt.Sprintf("[旧工具结果已占位（超过 %d 轮），可要求重新执行工具获取最新内容]", s.cfg.StaleRounds)
+	placeholder := fmt.Sprintf(slimPlaceholderPrefix+"旧工具结果已占位（超过 %d 轮），可要求重新执行工具获取最新内容]", s.cfg.StaleRounds)
 	for i := 0; i < cutoff; i++ {
 		m := &ac.Messages[i]
 		if m.Role != core.Tool || len(m.Content) == 0 {
