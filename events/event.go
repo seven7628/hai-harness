@@ -24,6 +24,10 @@ const (
 	// 注意：这是**可观测性**事件，不是失败（IsError / AgentEnd 语义不受影响）。
 	RunSilentEndType EventType = "run_silent_end"
 
+	// MemoryProbeType memory 命中后重复探查的读数（Phase A 收尾，纯可观测性，
+	// 不影响任何运行时行为；仅在 Run 内发生过成功 memory_view 时发出）。
+	MemoryProbeType EventType = "memory_probe"
+
 	CompressStartType EventType = "compress_start"
 	CompressEndType   EventType = "compress_end"
 
