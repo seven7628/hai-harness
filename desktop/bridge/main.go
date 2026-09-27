@@ -55,10 +55,8 @@ import (
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/cron"
 	"github.com/seven7628/hai-harness/events"
-	"github.com/seven7628/hai-harness/evolution"
 	"github.com/seven7628/hai-harness/hooks"
 	"github.com/seven7628/hai-harness/mcp"
-	"github.com/seven7628/hai-harness/memory"
 	"github.com/seven7628/hai-harness/plugin"
 	"github.com/seven7628/hai-harness/plugin/browser"
 	computerplugin "github.com/seven7628/hai-harness/plugin/computer"
@@ -765,16 +763,9 @@ func (m *manager) pptxPreviewer(pyRT *goruntime.Runtime) *builtin.PptxPreviewer 
 
 // workspaceRuntime：单个工作区的会话集合 + 持久化目录 + 技能注册表 + 自定义 subagent 注册表 + MCP 管理器（按工作区隔离）
 type workspaceRuntime struct {
-	path      string
-	storeDir  string
-	eventsDir string
-	memory    *memory.MemoryService
-	// evolution Memory 自进化控制面（Phase B/C/D）。nil = 未接上。
-	//
-	// 保持 nil 是**正常状态**而不是错误：无 git 仓库身份、构造失败、宿主没配真实
-	// Replayer，都应该是"控制面缺席、Phase A 记忆照常工作"。因此装配点对它的
-	// 错误只记不阻断（见 openWorkspace）。
-	evolution  *evolution.Service
+	path       string
+	storeDir   string
+	eventsDir  string
 	skills     *skills.Registry             // 分层技能注册表（全局 .agents/.go-code + 工作区 .agents/.go-code，工作区优先）
 	subagents  *subagent.DefinitionRegistry // 自定义 subagent 定义注册表（全局 ~/.go-code/agents + 工作区 agents，工作区优先）
 	mcp        *mcp.Manager                 // MCP 服务器管理器（每工作区共享连接；配置分层：用户 settings.json + 项目 .mcp.json/.go-code/settings.json）
@@ -1042,33 +1033,10 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 		}
 	}
 	startupLog("A5.computerEnsureSynced", cuSyncStart)
-	// Phase A：解析当前工作区所属的 canonical repository memory。失败不阻断工作区启动；
-	// 无 git 身份时保持 nil，AgentLoop 不注入任何 Memory 层。
-	memSvc := memory.NewService(memory.Config{})
-	if _, err := memSvc.Open(context.Background(), path); err != nil {
-		memSvc = nil
-	}
-	// Memory 自进化控制面（Phase B/C/D）。**失败不阻断工作区启动**：控制面是增强
-	// 能力，缺席时 Phase A 的记忆读写必须照常工作。
-	//
-	// 这里刻意不注入真实 LLM Replayer：每次 Replay 都是一次真实模型调用，启动
-	// 路径上默认开着会花钱、拖慢启动、并让「验证过了」这件事依赖网络可用性。
-	// 要开启由宿主在拿到 provider 后显式替换（见 llm_replayer.go 的接线说明）。
-	var evoSvc *evolution.Service
-	if memSvc != nil {
-		if s, err := newEvolutionService(memSvc); err != nil {
-			startupLog("A5.evolutionUnavailable", time.Now())
-			fmt.Fprintf(os.Stderr, "⚠ memory 进化控制面未启用（Phase A 记忆不受影响）: %v\n", err)
-		} else {
-			evoSvc = s
-		}
-	}
 	ws := &workspaceRuntime{
 		path:       path,
 		storeDir:   wsSessionsDir(path), // APP 级：~/.go-code/sessions/<wsKey>（跨 workspace，工作区下只留 skills）
 		eventsDir:  wsEventsDir(path),   // APP 级：~/.go-code/events/<wsKey>
-		memory:     memSvc,
-		evolution:  evoSvc,
 		skills:     skillsReg,
 		subagents:  subagentsReg,
 		mcp:        mcpm,
@@ -3983,9 +3951,6 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
 	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec())
-	// Phase A Memory 工具：主 Agent 可见；共享引擎的子 Agent 也会看到 schema，
-	// 但 memory 工具自身按 ToolContext.Depth 拒绝子运行调用。
-	registerMemoryTools(eng, m.runtime(workspace).memory)
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()
@@ -4033,7 +3998,6 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		agents.WithSubagents(m.runtime(workspace).subagents), // 自定义 subagent 清单注入 system（渐进披露）+ spawn_agent
 		agents.WithAgentMDDir(workspace),                     // 工作区 AGENTS.md/CLAUDE.md 递归发现（工作记忆层）
 		agents.WithWorkingDir(workspace),                     // Current Workspace 环境层：声明本会话文件操作根目录
-		agents.WithMemory(m.runtime(workspace).memory),       // Phase A：当前 canonical Repository 的 bounded MEMORY.md 索引
 		// @引用 PDF 文本抽取（2026-09）：PDF 结构层是纯 ASCII，agents 侧的二进制判定
 		// 读不出正文（压缩流 → 报「二进制不读内容」；未压缩 → 把 PDF 源码当正文注入）。
 		// 抽取要 pypdf + 受管运行时 + 沙箱，属宿主能力面 → 经钩子注入（agents 包不

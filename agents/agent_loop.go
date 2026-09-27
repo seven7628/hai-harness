@@ -118,10 +118,6 @@ type Config struct {
 	// Skills 技能注册表（渐进披露的发现来源：清单注入系统提示词），nil 表示无技能
 	Skills *skills.Registry
 
-	// Memory 长期仓库记忆（Phase A：只注入 bounded MEMORY.md 索引）。
-	// nil = 无 Memory，行为与既有配置完全一致。
-	Memory MemoryProvider
-
 	// Subagents 自定义 subagent 注册表（渐进披露的发现来源：清单注入系统提示词），
 	// nil 表示无自定义 subagent。spawn_agent 工具在工具引擎侧注册（subagent 包）。
 	Subagents SubagentLister
@@ -317,12 +313,6 @@ func WithSkills(reg *skills.Registry) Option {
 	return func(c *Config) { c.Skills = reg }
 }
 
-// WithMemory 注入 Phase A 仓库记忆提供者。nil 或未调用本选项时，
-// system prompt 保持既有字节不变。
-func WithMemory(p MemoryProvider) Option {
-	return func(c *Config) { c.Memory = p }
-}
-
 func WithCompressor(comp Compressor) Option {
 	return func(c *Config) { c.Compressor = comp }
 }
@@ -416,14 +406,6 @@ type AgentContext struct {
 	// 「收尾轮无文本」（见下方 stop 检查点处的裁定说明）。
 	sawAssistantText bool
 	est              *estimator
-
-	// memoryViews 本 Run 成功的 memory_view 次数；memoryHitRound 记**首次**命中
-	// 所在的工具轮序号（0 = 本 Run 从未命中）。两者只用于 memory_probe 读数
-	// （见 memory_probe.go），不参与任何行为决策。
-	memoryViews       int
-	memoryHitRound    int
-	postHitProbeCalls int
-	postHitTools      map[string]int
 
 	// forceCompact 强制压缩标志（命令框架：compact 命令置位，本轮结算段
 	// maybeCompact(forced=true) 直接压缩，跳过 ShouldCompact 预估）
@@ -1221,9 +1203,6 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 	// 产出汇总（纯内存，见 agents/artifacts.go）：在任何结束原因下都携带——
 	// 中断/失败前写入的文件是真实产出，不应因为 run 未正常结束而丢失。
 	artifacts, artifactsTruncated := collector.collect()
-	// memory 命中读数：与 AgentEnd 同处结算段，但在其之前发出——AgentEnd 之后的
-	// 消费者若按"最后一条事件"收尾，不会把读数当成收尾信号。
-	a.emitMemoryProbe(ac)
 	ac.Handler(ac.ctx, &events.AgentEnd{
 		Index:              int64(ac.Iteration),
 		Content:            lastContent,
@@ -1520,10 +1499,6 @@ func (a *AgentLoop) composeSystemPrompt() string {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
-		b.WriteString(mem)
-	}
-	// 仓库自动记忆：只注入 bounded MEMORY.md 索引，Topic 正文不进入 system。
-	if mem := memoryIndexBlock(a.cfg.Memory); mem != "" {
 		b.WriteString(mem)
 	}
 	// 技能清单（buildSkillManifest 自带 \n\n 前缀）
@@ -2362,9 +2337,6 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 	// next_action/fix 供拦截文案用），随后按状态变更清理（见 recordToolOutcomes 注释）。
 	// 位置与旧记录点一致（批末、回写前）：账本描述的是「这一轮工具执行发生了什么」。
 	recordToolOutcomes(ac, calls, results)
-	// memory 命中读数（纯记账，见 memory_probe.go）：必须在 recordToolOutcomes 之后
-	// —— 拦截/拒绝的结果在它那里已定型，在这里只认"真正执行过且成功"的调用。
-	noteMemoryTools(ac, calls, results)
 	if len(blockedResults) > 0 {
 		results = append(blockedResults, results...)
 	}
