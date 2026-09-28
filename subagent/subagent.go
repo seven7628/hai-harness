@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/seven7628/hai-harness/agents"
+	"github.com/seven7628/hai-harness/agents/prompt"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/tools"
@@ -343,6 +344,30 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 		// 非失败中断：OnRunning 捕获 ac.Abort → tk.abort（agent_interrupt 调用）
 		opts.OnRunning = func(ac *agents.AgentContext) { tk.setAbort(ac.Abort) }
 
+		// 子 loop 的在途任务门控（让「结果投回本 loop」真正成立的前提）：
+		// 模型产出最终回复、准备自然收尾时，若本 agent 名下还有在途孙任务，注入一次
+		// 清单提醒并多跑一轮 —— 否则 loop 先结束，孙结果只能回落主会话（等于没修）。
+		// 为什么不能只靠投递：子 agent 的常态是「干完自己的活就收尾」，而孙任务往往
+		// 才是重活；主 loop 有 pendingTasksNudge（desktop/bridge WithPendingTasksNudge
+		// + Session 的 RunOptions.TaskState）解决同一问题，但**子 loop 两样都没有**，
+		// 也不该为此去改宿主装配 —— 故用 RunOptions.Stop（Run 级、引擎自带
+		// maxStopHookBlocks=8 上限）在子 loop 内部自给自足。
+		// 边界：至多提醒一次（模型再次坚持收尾即放行，防空转）；孙任务仍未回 → 本轮
+		// 结束、结果按投递判据回落主会话（不丢）。叶子任务（无后代）查一次空即放行。
+		// 注意：buildOptions 不继承宿主的 Stop（见其注释），此处不会覆盖宿主 hook。
+		nudged := false
+		opts.Stop = func(context.Context, events.StopContext) events.StopResult {
+			if nudged {
+				return events.StopResult{}
+			}
+			inFlight := t.registry.InFlightDescendants(tk.ID)
+			if len(inFlight) == 0 {
+				return events.StopResult{}
+			}
+			nudged = true
+			return events.StopResult{Continue: true, Reason: fmt.Sprintf(prompt.PendingTasksReminder, renderInFlight(inFlight))}
+		}
+
 		// journal：打开失败降级 jr=nil（任务照跑）；start 记录；defer 就近收口。
 		// 全部 Append 忽略错误 —— 进度落盘是尽力而为的旁路，绝不影响子运行本身
 		//（主 Agent 防线：journal 环节零失败面传导到 spawn/子运行，docs §3.3）。
@@ -448,13 +473,27 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 	// ② 后台运行、结果自动送达；③ 可用 TaskOutput 拉取进度（勿高频轮询）；④ 勿重复委派范围。
 	hint := backgroundHint(name, task)
 	// 子→孙派发（parentTaskID 非空）换 nestedBackgroundHint：收件人是**本 loop**，
-	// 措辞必须点明"结果回到你这里、不会去主会话"，否则子 agent 会误以为结果在别处，
-	// 转而高频轮询 TaskOutput 或提前收尾。
+	// 子→孙派发换文案：收件人是本 loop，措辞需说清"结果回到你这里"（否则子 agent 会
+	// 去主会话找），但**不能承诺一定回来**（见 nestedBackgroundHint 的措辞纪律）。
 	if parentTaskID != "" {
 		hint = nestedBackgroundHint(name, task)
 	}
 	return fmt.Sprintf(`{"task_id":%q,"status":"running","type":"subagent","name":%q,"output_file":%q,"hint":%q}`,
 		taskRef.ID, t.spec.Name, taskRef.OutputFile(), hint), nil
+}
+
+// renderInFlight 渲染在途后代任务清单（Stop 门控注入 prompt.PendingTasksReminder 的 %s）。
+// 极简一行一条：任务 id + 名字 + 状态，供模型判断"还有谁没回"。
+func renderInFlight(inFlight []TaskInfo) string {
+	var b strings.Builder
+	for _, ti := range inFlight {
+		name := ti.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		fmt.Fprintf(&b, "- %s (%s) — %s\n", ti.ID, name, ti.Status)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // backgroundHint 构造后台任务提示（主 Agent 可见）。
@@ -475,15 +514,16 @@ func backgroundHint(name, task string) string {
 
 // nestedBackgroundHint 子→孙派发的行为提示（**当前 loop 就是结果收件人**）：
 // 与 backgroundHint 同一设计原则（模型零思考知道该干嘛），但投递对象是本 loop：
-// 必须点明"结果回到你这里、不会进主会话"，否则子 agent 会误以为结果在别处，
-// 转而高频轮询 TaskOutput 或提前收尾。
+// 措辞纪律：**不得承诺"一定回到你这里"**。投递判据是"本 loop 还活着且在接收"，
+// 万一本轮先收尾（孙任务更慢），结果会回落主会话——给模型一个绝对承诺，它就会
+// 停止在别处找结果。条件式表述 + 指明兜底去处，模型才知道两种结局该去哪找。
 func nestedBackgroundHint(name, task string) string {
 	goal := extractGoal(task)
 	if goal == "" {
 		goal = "background analysis task"
 	}
 	return fmt.Sprintf(
-		"Background task %q is running (Goal: %s). Continue your other work; when it finishes the result comes back to YOU as a message at your next turn boundary — it is NOT pushed to the main session. Do not wait for it, do not duplicate its scope, and check progress sparingly with TaskOutput(%s).",
+		"Background task %q is running (Goal: %s). Continue your other work; when it finishes, the result is delivered back to YOU as a message on a later turn — if you finish first, it falls back to the main session instead. Do not wait for it, do not duplicate its scope, and check progress sparingly with TaskOutput(%s).",
 		name, goal, "task_id")
 }
 

@@ -5366,9 +5366,21 @@ export function dispatchEvent(raw: AnyEvent): void {
       const usage = taskUsageFromEvent(raw.usage as RawUsage | undefined)
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
+        // task_end 自带 result/error（subagent 侧 TaskEnd 事件填充）：子 agent 派出的孙任务
+        // 结果投回**子 loop**、不发 task_result_delivered，若此处不回填，卡片会停在
+        // 「完成」但结果区空白。回填对主链路幂等（随后的 task_result_delivered 同值覆盖），
+        // 同时兜住「入队失败 → task_result_delivered 未达」的既有场景。
+        const endResult = raw.result != null ? String(raw.result) : ''
+        const endError = raw.error != null ? String(raw.error) : ''
+        const endPayload = endResult || endError
+          ? {
+              ...(endResult ? { taskResult: endResult } : {}),
+              ...(endError ? { taskError: endError } : {}),
+            }
+          : {}
         const upd = setView(s, sid, { ...v, blocks: applyTaskUsage(v.blocks.map((b) =>
           (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === taskId
-            ? { ...b, status, ...(b.kind === 'async_task' ? { endedAt: ts } : { durMs: ts - b.spawnedAt }) }
+            ? { ...b, status, ...endPayload, ...(b.kind === 'async_task' ? { endedAt: ts } : { durMs: ts - b.spawnedAt }) }
             // promoted 工具任务同样按 task_end 收敛（task_result_delivered 可能因
             // 入队失败未达 —— 事件与入队已解耦，但仍保留双通道收敛，防止卡片永久停在
             // 「执行中/中断中」，角标「N 运行中」随之归零）。durMs 缺失（tool_run_end

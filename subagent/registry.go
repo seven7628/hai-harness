@@ -99,9 +99,6 @@ type Task struct {
 // OutputFile 返回 journal 路径；构造期赋值、发布后不可变，免锁直读。
 func (t *Task) OutputFile() string { return t.outputFile }
 
-// ParentTaskID 返回发起本任务的后台任务 id（"" = 主 Agent 直派）；构造期赋值、免锁直读。
-func (t *Task) ParentTaskID() string { return t.parentTaskID }
-
 // closeDelivery 关闭本任务对孙任务结果的接收（子运行返回时调用，见 runBackground）：
 // 运行已结束 → inbox 无人消费。此后到达的孙任务结果回落到主会话（Registry 收尾按
 // 此判定），不静默留在一口没人读的信箱里。
@@ -167,6 +164,9 @@ type TaskInfo struct {
 	Status     TaskStatus `json:"status"`
 	Error      string     `json:"error,omitempty"`
 	OutputFile string     `json:"output_file,omitempty"` // journal 路径（"" = 未启用落盘）
+	// ParentTaskID 派发方任务 id（子 agent 派孙任务时 = 该子 agent 的 task id；
+	// 主 Agent 直派 / 同步子运行为空）。让 TaskList 能对账派发链（孙任务挂在谁名下）。
+	ParentTaskID string `json:"parent_task_id,omitempty"`
 }
 
 // Kind 取值：TaskList/压缩交接 [TaskStates] 里区分子 agent 与 promoted 工具任务
@@ -252,6 +252,23 @@ func (r *Registry) ToolTaskByID(id string) (ToolTaskInfo, bool) {
 		}
 	}
 	return ToolTaskInfo{}, false
+}
+
+// InFlightDescendants 返回 parentID 名下仍在途的后台任务（running / interrupting），
+// 按创建序（List 序）。派发链上的**后代**——子 agent 用它判断"我还有没等完的孙任务"。
+// 只认直接后代（parentTaskID == parentID）：兄弟任务/主会话的其他任务与本 agent 无关，
+// 混进来会让子 agent 为主会话的无关任务操心。未知 parentID = 空。
+func (r *Registry) InFlightDescendants(parentID string) []TaskInfo {
+	if parentID == "" {
+		return nil
+	}
+	var out []TaskInfo
+	for _, ti := range r.List() {
+		if ti.ParentTaskID == parentID && (ti.Status == TaskRunning || ti.Status == TaskInterrupting) {
+			out = append(out, ti)
+		}
+	}
+	return out
 }
 
 // NewRegistry 创建注册表（主/辅两个并发槽池：默认容量 DefaultConcurrency = 1000，
@@ -654,12 +671,13 @@ func (r *Registry) Done(id string) <-chan struct{} {
 // info 组装 TaskInfo（调用方需已持 t.mu；outputFile 不可变字段直读亦安全）。
 func (t *Task) info() TaskInfo {
 	return TaskInfo{
-		ID:         t.ID,
-		Kind:       TaskKindAgent,
-		Name:       t.Name,
-		ToolName:   t.ToolName,
-		Status:     t.Status,
-		OutputFile: t.outputFile,
+		ID:           t.ID,
+		Kind:         TaskKindAgent,
+		Name:         t.Name,
+		ToolName:     t.ToolName,
+		Status:       t.Status,
+		OutputFile:   t.outputFile,
+		ParentTaskID: t.parentTaskID, // 构造期不可变，免锁直读
 	}
 }
 

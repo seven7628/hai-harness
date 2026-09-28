@@ -43,7 +43,7 @@ func NewAgentTools(spawnLoop *agents.AgentLoop, bgCtx func() context.Context, re
 		// task 省略 = 文件化 subagent——从 [可用子智能体] 清单选中 name，自动加载
 		// {name}.md 定义（yaml + 正文人设）作为子 agent 人设，无需主 agent 生成 Prompt。
 		Description: "Spawn a background subagent to execute a task (returns immediately with task_id, does not block the main task); " +
-			"when done, the result is pushed back automatically to whoever delegated it — the main session if you spawned it, or your own loop if a subagent delegated to you (you see it as a message on your next turn). " +
+			"when done, the result is pushed back automatically to whoever delegated it. " +
 			"Monitor its progress sparingly with TaskOutput (latest journal entry); use agent_send to steer/message it mid-run; agent_interrupt to stop it. " +
 			"After the call returns a task_id, the final result arrives later as a message announcing background-task completion — record the task_id immediately, continue with OTHER independent work while it runs, and do not duplicate its scope yourself nor re-invoke agent_spawn for a task already spawned; never retry this call to wait for the result (it will be delivered automatically).\n\n" +
 			"TWO MODES (choose one):\n" +
@@ -78,7 +78,7 @@ func (t *agentSendTool) Name() string { return "agent_send" }
 func (t *agentSendTool) Description() string {
 	return "Send a message TO a running background subagent (one-way: main → sub). " +
 		"The subagent receives it at its next round boundary; this tool does NOT return the subagent's reply — " +
-		"the sub's final result is pushed back automatically when the task completes (to whoever delegated it). " +
+		"the sub's final result is pushed back automatically when the task completes. " +
 		"(task_id is the identifier returned by agent_spawn)"
 }
 func (t *agentSendTool) Parameters() any {
@@ -146,7 +146,7 @@ type agentInterruptTool struct{ reg *Registry }
 
 func (t *agentInterruptTool) Name() string { return "agent_interrupt" }
 func (t *agentInterruptTool) Description() string {
-	return "Request interruption of a running background task: a subagent spawned via agent_spawn, or a tool call promoted to background (tooltask-*). A successful call means the request was accepted (status interrupting); the final interrupted status is pushed back automatically to whoever delegated the task. Interruption is not a failure, but the task is not completed."
+	return "Request interruption of a running background task: a subagent spawned via agent_spawn, or a tool call promoted to background (tooltask-*). A successful call means the request was accepted (status interrupting); the final interrupted status is pushed back automatically. Interruption is not a failure, but the task is not completed."
 }
 func (t *agentInterruptTool) Parameters() any {
 	return tools.Obj(map[string]any{
