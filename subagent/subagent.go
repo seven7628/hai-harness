@@ -285,9 +285,14 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 	opts := t.buildOptions(tc, childDepth, name)
 	var handler events.EventHandler
 	parentRun := ""
+	// parentTaskID 发起方后台任务 id（ToolContext.TaskId）：非空 = 本次派发发生在**另一个
+	// 子 agent 的运行里**（主 → 子 → 孙），任务终态结果投它的 inbox；空 = 主 Agent 直派，
+	// 结果经 OnTaskDone 推主会话。
+	parentTaskID := ""
 	if tc != nil {
 		handler = tc.Handler
 		parentRun = tc.RunId
+		parentTaskID = tc.TaskId
 	}
 
 	// 闭包捕获 parentRun/handler/opts 均为外层确定值；task 经 Start 参数传入
@@ -311,11 +316,13 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 	// journal 路径由 Registry 在任务构造期经解析器产出（StartOptions.JournalPath）；
 	// 打开/写入全部在下方 run 闭包（后台 goroutine）内，spawn 同步路径零开销。
 	taskRef, err := t.registry.StartToolWithOptions(t.bgCtx(), StartOptions{
-		ToolName:    t.spec.Name,
-		Name:        name,
-		OnStarted:   onStarted,
-		Slots:       t.spec.Slots, // nil = Registry 主池；explore 类工具用独立辅池
-		JournalPath: t.spec.JournalPath,
+		ToolName:  t.spec.Name,
+		Name:      name,
+		OnStarted: onStarted,
+		Slots:     t.spec.Slots, // nil = Registry 主池；explore 类工具用独立辅池
+		// 子→孙派发：结果投回本 loop（发起方子 agent）的 inbox，不进主会话
+		ParentTaskID: parentTaskID,
+		JournalPath:  t.spec.JournalPath,
 	}, func(bg context.Context, tk *Task) (string, core.Usage, error) {
 		// 任务 id 注入运行选项：AgentStart/AgentEnd 事件携带 task_id（前端关联锚；不依赖事件顺序）
 		opts.TaskId = tk.ID
@@ -376,6 +383,10 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 		sub := t.spec.Loop.RunStream(bg, []core.Message{
 			core.NewUserMessage(core.Content{Type: "text", Content: task}),
 		}, streamHandler, opts)
+		// 子运行一返回即关闭"孙任务结果接收"：运行结束后 Poll 不会再 drain，本任务的
+		// inbox 无人消费。此后到达的孙任务结果按 Registry 收尾判定回落到主会话
+		//（而不是写进一口没人读的信箱）。放在 journal/事件之前：把窗口收到最小。
+		tk.closeDelivery()
 
 		// 终态判定（TaskEnd 事件与 journal result 共用 classifySubEnd，防漂移）：
 		// 中断请求优先于错误（abort 非失败）；被 AbandonAll 弃置的任务以 abandoned
@@ -434,6 +445,12 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 	// ① 任务目标（从任务描述提取首句，主 Agent 据此判断哪些范围会被覆盖、避免重复劳动）；
 	// ② 后台运行、结果自动送达；③ 可用 TaskOutput 拉取进度（勿高频轮询）；④ 勿重复委派范围。
 	hint := backgroundHint(name, task)
+	// 子→孙派发（parentTaskID 非空）换 nestedBackgroundHint：收件人是**本 loop**，
+	// 措辞必须点明"结果回到你这里、不会去主会话"，否则子 agent 会误以为结果在别处，
+	// 转而高频轮询 TaskOutput 或提前收尾。
+	if parentTaskID != "" {
+		hint = nestedBackgroundHint(name, task)
+	}
 	return fmt.Sprintf(`{"task_id":%q,"status":"running","type":"subagent","name":%q,"output_file":%q,"hint":%q}`,
 		taskRef.ID, t.spec.Name, taskRef.OutputFile(), hint), nil
 }
@@ -451,6 +468,20 @@ func backgroundHint(name, task string) string {
 	}
 	return fmt.Sprintf(
 		"Background task %q is running (Goal: %s). Continue your current work; its result will be pushed automatically when done — do not wait for it, poll sparingly via TaskOutput(%s) if needed, and do not duplicate its scope.",
+		name, goal, "task_id")
+}
+
+// nestedBackgroundHint 子→孙派发的行为提示（**当前 loop 就是结果收件人**）：
+// 与 backgroundHint 同一设计原则（模型零思考知道该干嘛），但投递对象是本 loop：
+// 必须点明"结果回到你这里、不会进主会话"，否则子 agent 会误以为结果在别处，
+// 转而高频轮询 TaskOutput 或提前收尾。
+func nestedBackgroundHint(name, task string) string {
+	goal := extractGoal(task)
+	if goal == "" {
+		goal = "background analysis task"
+	}
+	return fmt.Sprintf(
+		"Background task %q is running (Goal: %s). Continue your other work; when it finishes the result comes back to YOU as a message at your next turn boundary — it is NOT pushed to the main session. Do not wait for it, do not duplicate its scope, and check progress sparingly with TaskOutput(%s).",
 		name, goal, "task_id")
 }
 

@@ -66,6 +66,19 @@ type Task struct {
 	// 勿改为运行中可写：那需要重审锁语义（docs/SUBAGENT_OUTPUT_JOURNAL_TASKOUTPUT.md §3.2）。
 	outputFile string
 
+	// parentTaskID 发起方后台任务 id（"" = 主 Agent 直派 / 同步子运行 = 无后台父）。
+	// 子 agent 再派子 agent时，本任务终态投**这个父任务的 inbox**（父 loop 的 Poll drain
+	// 在下个 stop 轮消费），不进主会话——否则主 Agent 会收到一条自己没派过的任务结果。
+	// 构造期赋值、发布后不可变 → ParentTaskID() 免锁直读。
+	parentTaskID string
+
+	// acceptingDelivery 是否仍接收孙任务结果投递（deliverToParent）。构造期 true，
+	// 子运行返回即刻由 closeDelivery 置 false（mu 保护）。
+	// 语义：**只有还在跑的父 loop 才可能消费 inbox**——运行一结束，inbox 里再进来的
+	// 消息就没人 drain 了（与 agent_send 同款的固有窗口，这里把它从"整个收尾期"
+	// 收缩到"运行返回前的最后一步"）。置 false 后到达的结果自动回落到主会话。
+	acceptingDelivery bool
+
 	abort          func() // 子 Run 的 ac.Abort（OnRunning 捕获）——agent_interrupt 调用（非失败终止）
 	abortRequested bool   // interrupt 早于 OnRunning 时的待处理请求（消除捕获窗口）
 
@@ -79,6 +92,18 @@ type Task struct {
 
 // OutputFile 返回 journal 路径；构造期赋值、发布后不可变，免锁直读。
 func (t *Task) OutputFile() string { return t.outputFile }
+
+// ParentTaskID 返回发起本任务的后台任务 id（"" = 主 Agent 直派）；构造期赋值、免锁直读。
+func (t *Task) ParentTaskID() string { return t.parentTaskID }
+
+// closeDelivery 关闭本任务对孙任务结果的接收（子运行返回时调用，见 runBackground）：
+// 运行已结束 → inbox 无人消费。此后到达的孙任务结果回落到主会话（Registry 收尾按
+// 此判定），不静默留在一口没人读的信箱里。
+func (t *Task) closeDelivery() {
+	t.mu.Lock()
+	t.acceptingDelivery = false
+	t.mu.Unlock()
+}
 
 // setAbort 捕获子 Run 的中止句柄（OnRunning 回调里调用）。
 // 若 interrupt 已先行（abortRequested），立即执行——消除「中断早于子 Run
@@ -319,6 +344,11 @@ type StartOptions struct {
 	// JournalPath journal 路径解析器：start() 在 Task 构造期调用（此处才拿到生成 id），
 	// 产物随构造赋值 → 发布前就绪、无竞态窗口；返回错误/nil 解析器 = 不落盘。
 	JournalPath func(taskID string) (string, error)
+	// ParentTaskID 发起本任务的后台任务 id（子 agent 用 agent_spawn 派孙任务时 = 该子
+	// agent 自己的 task id，由 ToolContext.TaskId 透传）。非空 → 终态结果投该父任务的
+	// inbox（父 loop 消费），不触发 OnTaskDone（主会话推送）。父已结束/未知时自动回落
+	// OnTaskDone，结果不丢（见 deliverToParent）。
+	ParentTaskID string
 }
 
 // Start 启动后台任务：并发槽阻塞获取（ctx 感知——调用方传 Session 级 ctx，
@@ -374,13 +404,15 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 		}
 	}
 	t := &Task{
-		ID:         id,
-		Name:       o.Name,
-		ToolName:   o.ToolName,
-		Status:     TaskRunning,
-		outputFile: outputFile, // 构造期赋值：早于 map 登记与 goroutine 启动，发布后不可变
-		done:       make(chan struct{}),
-		inbox:      make(chan string, 16),
+		ID:                id,
+		Name:              o.Name,
+		ToolName:          o.ToolName,
+		Status:            TaskRunning,
+		outputFile:        outputFile, // 构造期赋值：早于 map 登记与 goroutine 启动，发布后不可变
+		parentTaskID:      o.ParentTaskID,
+		acceptingDelivery: true, // 子运行返回时 closeDelivery 关闭
+		done:              make(chan struct{}),
+		inbox:             make(chan string, 16),
 	}
 	r.mu.Lock()
 	r.tasks[id] = t
@@ -425,12 +457,48 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 		}
 		waiting := t.waiting // 宿主 Wait 在途：结果已由 Wait 消费，不重复推送
 		t.mu.Unlock()
-		if r.onTaskDone != nil && !abandoned && !waiting {
+		if abandoned || waiting {
+			return
+		}
+		// 子 agent 再派子 agent：结果投回**发起方子 agent 的 inbox**（其 Poll drain
+		// 在下个 stop 轮消费）——不进主会话，避免主 Agent 收到一条自己没派过的任务
+		// 结果而误判/重复委派。父已结束/未知/inbox 满 → 返回 false，回落主会话推送
+		//（宁可主会话收到一条，也不让结果彻底丢失）。
+		if t.parentTaskID != "" && r.deliverToParent(t, result, status, err) {
+			return
+		}
+		if r.onTaskDone != nil {
 			// usage 同源 t.Usage（run 返回值已在上方写入）——回调里不再读 t，避免锁外读竞态
 			r.onTaskDone(t.ID, t.Name, result, status, usage, err)
 		}
 	}()
 	return t, nil
+}
+
+// deliverToParent 把任务终态投回发起方子 agent 的 inbox（子→孙派发的结果通道）。
+// 父仍在 running 且仍接收投递（acceptingDelivery）时非阻塞写入并返回 true；父未知/
+// 已收尾/已关闭接收/inbox 满（16）返回 false，调用方回落到 OnTaskDone（主会话）——
+// 宁可主会话多收一条，也不让结果彻底丢失。
+// 判据与写入同持父任务锁：与父侧 closeDelivery 严格互斥，杜绝"写进了没人读的信箱"。
+// 正文用 core.TaskResultText —— 与投主会话的 task_result 消息同源（同一段文案、
+// 同一份状态语义）。
+func (r *Registry) deliverToParent(t *Task, result string, status TaskStatus, err error) bool {
+	parent, gerr := r.get(t.parentTaskID)
+	if gerr != nil {
+		return false
+	}
+	msg := core.TaskResultText(t.ID, t.Name, result, string(status), err)
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if parent.Status != TaskRunning || !parent.acceptingDelivery {
+		return false
+	}
+	select {
+	case parent.inbox <- msg:
+		return true
+	default:
+		return false // inbox 满（16 条未消费）：回落主会话
+	}
 }
 
 // Send 向任务投递消息（agent_send）：非阻塞写 Task.inbox（满则丢弃返回

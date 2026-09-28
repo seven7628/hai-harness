@@ -2275,14 +2275,17 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 	// 整批工具执行超时预算；注入工具上下文（子 agent 类工具据此关联父事件流/继承
 	// hooks）与会话待办/审批
 	var hooks *events.ToolHooks
+	taskID := ""
 	if opts != nil {
 		hooks = &events.ToolHooks{
 			PreToolUse:    opts.PreToolUse,
 			PostToolBatch: opts.PostToolBatch,
 			PreCompact:    opts.PreCompact,
 		}
+		taskID = opts.TaskId // 本次运行的后台任务 id（空 = 主 Agent 运行）：子 agent 派子 agent时
+		// spawn 工具据此把孙任务结果投回本 loop 的 inbox，而非主会话（见 subagent.Tool.runBackground）
 	}
-	ctx := events.WithToolContextForRun(ac.ctx, ac.RunId, ac.ParentRunId, ac.Depth, ac.Handler, ac.Approver, hooks)
+	ctx := events.WithToolContextForRunTask(ac.ctx, ac.RunId, ac.ParentRunId, taskID, ac.Depth, ac.Handler, ac.Approver, hooks)
 	ctx = todo.WithStore(ctx, ac.Todo)
 	cancel := func() {}
 	if a.cfg.ToolBatchTimeout > 0 {
