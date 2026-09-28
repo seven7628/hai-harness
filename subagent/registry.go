@@ -82,8 +82,14 @@ type Task struct {
 	abort          func() // 子 Run 的 ac.Abort（OnRunning 捕获）——agent_interrupt 调用（非失败终止）
 	abortRequested bool   // interrupt 早于 OnRunning 时的待处理请求（消除捕获窗口）
 
-	done  chan struct{}
-	inbox chan string // agent_send 投递 → 子 RunStream Poll drain
+	done chan struct{}
+	// inbox 任务消息队列（容量 16）：agent_send（用户/主 agent 的文本）与孙任务终态
+	// （task_result 内容块）都经此投给运行中的任务，由 runBackground 的 Poll drain
+	// 原样消费。**携带完整 Message 而非字符串**：终态结果因此与投主会话的
+	// task_result 消息逐字同源，同享压缩截断（llm_compressor 的 task_result 3000
+	// 字符上限）与 hasTaskTrace 任务痕迹判据——若降级为纯文本 user 消息，这两处
+	// 护栏会在子 agent 里失效（大结果进压缩输入不再截断）。
+	inbox chan core.Message
 
 	waiting bool // 宿主 Wait 在途（结果已由 Wait 消费 → 完成时不触发 OnTaskDone）
 
@@ -412,7 +418,7 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 		parentTaskID:      o.ParentTaskID,
 		acceptingDelivery: true, // 子运行返回时 closeDelivery 关闭
 		done:              make(chan struct{}),
-		inbox:             make(chan string, 16),
+		inbox:             make(chan core.Message, 16),
 	}
 	r.mu.Lock()
 	r.tasks[id] = t
@@ -480,14 +486,15 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 // 已收尾/已关闭接收/inbox 满（16）返回 false，调用方回落到 OnTaskDone（主会话）——
 // 宁可主会话多收一条，也不让结果彻底丢失。
 // 判据与写入同持父任务锁：与父侧 closeDelivery 严格互斥，杜绝"写进了没人读的信箱"。
-// 正文用 core.TaskResultText —— 与投主会话的 task_result 消息同源（同一段文案、
-// 同一份状态语义）。
+// 投递的是 core.NewTaskResultMessageWithStatus —— 与 Session.PushTaskResult 同一个
+// 构造器，主会话与子 loop 拿到的是同一种消息（内容块类型也同源，非仅文案相同）。
 func (r *Registry) deliverToParent(t *Task, result string, status TaskStatus, err error) bool {
 	parent, gerr := r.get(t.parentTaskID)
 	if gerr != nil {
 		return false
 	}
-	msg := core.TaskResultText(t.ID, t.Name, result, string(status), err)
+	// 与 Session.PushTaskResult 同一个构造器 → 与主会话 task_result 消息逐字同源
+	msg := core.NewTaskResultMessageWithStatus(t.ID, t.Name, result, string(status), err)
 	parent.mu.Lock()
 	defer parent.mu.Unlock()
 	if parent.Status != TaskRunning || !parent.acceptingDelivery {
@@ -515,7 +522,8 @@ func (r *Registry) Send(id, msg string) error {
 		return ErrTaskFinished
 	}
 	select {
-	case t.inbox <- msg:
+	// agent_send 送的是"别人对你说的话"（非任务结果）→ user 文本消息，与投递前语义一致
+	case t.inbox <- core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: msg}):
 		return nil
 	default:
 		return ErrTaskInboxFull

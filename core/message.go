@@ -167,17 +167,6 @@ func NewTaskResultMessage(taskID, name, result string, err error) Message {
 // NewTaskResultMessageWithStatus 构造后台任务终态消息：user 角色 + task_result 内容块。
 // status 是 completed/interrupted/failed/abandoned；result 原样嵌入、不截断、不解释。
 func NewTaskResultMessageWithStatus(taskID, name, result, status string, err error) Message {
-	return Message{
-		Role:    User,
-		Content: []Content{{Type: ContentTypeTaskResult, Content: TaskResultText(taskID, name, result, status, err)}},
-	}
-}
-
-// TaskResultText 后台任务终态正文（与 NewTaskResultMessageWithStatus 同源，防两处文案漂移）。
-// 供**非消息投递通道**复用同一份文案：子 agent 再派子 agent时，孙任务结果经
-// subagent.Task.inbox（string 通道）投回父 agent，由其 Poll drain 包成 user 消息消费
-// （见 subagent/registry.go deliverToParent）。
-func TaskResultText(taskID, name, result, status string, err error) string {
 	var b strings.Builder
 	label := "完成"
 	switch status {
@@ -208,7 +197,10 @@ func TaskResultText(taskID, name, result, status string, err error) string {
 	} else {
 		b.WriteString("\n\n—— 后台任务结果，据此继续当前工作。")
 	}
-	return b.String()
+	return Message{
+		Role:    User,
+		Content: []Content{{Type: ContentTypeTaskResult, Content: b.String()}},
+	}
 }
 
 // Validate 校验消息不变量：角色合法、tool 消息必须有关联 Id、

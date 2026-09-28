@@ -327,12 +327,14 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 		// 任务 id 注入运行选项：AgentStart/AgentEnd 事件携带 task_id（前端关联锚；不依赖事件顺序）
 		opts.TaskId = tk.ID
 		// 消息接收：Task.inbox → Poll drain（stop 轮消费；工具轮投递延迟到下个 stop 轮）
+		// inbox 携带完整 Message：agent_send 的 user 文本、孙任务终态的 task_result
+		// 块原样入上下文（后者与主会话同源，见 Task.inbox 注释）。
 		opts.Poll = func(context.Context) []core.Message {
 			var msgs []core.Message
 			for {
 				select {
 				case m := <-tk.inbox:
-					msgs = append(msgs, core.NewUserMessage(core.Content{Type: "text", Content: m}))
+					msgs = append(msgs, m)
 				default:
 					return msgs
 				}
