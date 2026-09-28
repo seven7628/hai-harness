@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/seven7628/hai-harness/agents"
+	"github.com/seven7628/hai-harness/agents/prompt"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/tools"
@@ -285,9 +286,14 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 	opts := t.buildOptions(tc, childDepth, name)
 	var handler events.EventHandler
 	parentRun := ""
+	// parentTaskID 发起方后台任务 id（ToolContext.TaskId）：非空 = 本次派发发生在**另一个
+	// 子 agent 的运行里**（主 → 子 → 孙），任务终态结果投它的 inbox；空 = 主 Agent 直派，
+	// 结果经 OnTaskDone 推主会话。
+	parentTaskID := ""
 	if tc != nil {
 		handler = tc.Handler
 		parentRun = tc.RunId
+		parentTaskID = tc.TaskId
 	}
 
 	// 闭包捕获 parentRun/handler/opts 均为外层确定值；task 经 Start 参数传入
@@ -311,21 +317,25 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 	// journal 路径由 Registry 在任务构造期经解析器产出（StartOptions.JournalPath）；
 	// 打开/写入全部在下方 run 闭包（后台 goroutine）内，spawn 同步路径零开销。
 	taskRef, err := t.registry.StartToolWithOptions(t.bgCtx(), StartOptions{
-		ToolName:    t.spec.Name,
-		Name:        name,
-		OnStarted:   onStarted,
-		Slots:       t.spec.Slots, // nil = Registry 主池；explore 类工具用独立辅池
-		JournalPath: t.spec.JournalPath,
+		ToolName:  t.spec.Name,
+		Name:      name,
+		OnStarted: onStarted,
+		Slots:     t.spec.Slots, // nil = Registry 主池；explore 类工具用独立辅池
+		// 子→孙派发：结果投回本 loop（发起方子 agent）的 inbox，不进主会话
+		ParentTaskID: parentTaskID,
+		JournalPath:  t.spec.JournalPath,
 	}, func(bg context.Context, tk *Task) (string, core.Usage, error) {
 		// 任务 id 注入运行选项：AgentStart/AgentEnd 事件携带 task_id（前端关联锚；不依赖事件顺序）
 		opts.TaskId = tk.ID
 		// 消息接收：Task.inbox → Poll drain（stop 轮消费；工具轮投递延迟到下个 stop 轮）
+		// inbox 携带完整 Message：agent_send 的 user 文本、孙任务终态的 task_result
+		// 块原样入上下文（后者与主会话同源，见 Task.inbox 注释）。
 		opts.Poll = func(context.Context) []core.Message {
 			var msgs []core.Message
 			for {
 				select {
 				case m := <-tk.inbox:
-					msgs = append(msgs, core.NewUserMessage(core.Content{Type: "text", Content: m}))
+					msgs = append(msgs, m)
 				default:
 					return msgs
 				}
@@ -333,6 +343,30 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 		}
 		// 非失败中断：OnRunning 捕获 ac.Abort → tk.abort（agent_interrupt 调用）
 		opts.OnRunning = func(ac *agents.AgentContext) { tk.setAbort(ac.Abort) }
+
+		// 子 loop 的在途任务门控（让「结果投回本 loop」真正成立的前提）：
+		// 模型产出最终回复、准备自然收尾时，若本 agent 名下还有在途孙任务，注入一次
+		// 清单提醒并多跑一轮 —— 否则 loop 先结束，孙结果只能回落主会话（等于没修）。
+		// 为什么不能只靠投递：子 agent 的常态是「干完自己的活就收尾」，而孙任务往往
+		// 才是重活；主 loop 有 pendingTasksNudge（desktop/bridge WithPendingTasksNudge
+		// + Session 的 RunOptions.TaskState）解决同一问题，但**子 loop 两样都没有**，
+		// 也不该为此去改宿主装配 —— 故用 RunOptions.Stop（Run 级、引擎自带
+		// maxStopHookBlocks=8 上限）在子 loop 内部自给自足。
+		// 边界：至多提醒一次（模型再次坚持收尾即放行，防空转）；孙任务仍未回 → 本轮
+		// 结束、结果按投递判据回落主会话（不丢）。叶子任务（无后代）查一次空即放行。
+		// 注意：buildOptions 不继承宿主的 Stop（见其注释），此处不会覆盖宿主 hook。
+		nudged := false
+		opts.Stop = func(context.Context, events.StopContext) events.StopResult {
+			if nudged {
+				return events.StopResult{}
+			}
+			inFlight := t.registry.InFlightDescendants(tk.ID)
+			if len(inFlight) == 0 {
+				return events.StopResult{}
+			}
+			nudged = true
+			return events.StopResult{Continue: true, Reason: fmt.Sprintf(prompt.PendingTasksReminder, renderInFlight(inFlight))}
+		}
 
 		// journal：打开失败降级 jr=nil（任务照跑）；start 记录；defer 就近收口。
 		// 全部 Append 忽略错误 —— 进度落盘是尽力而为的旁路，绝不影响子运行本身
@@ -376,6 +410,10 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 		sub := t.spec.Loop.RunStream(bg, []core.Message{
 			core.NewUserMessage(core.Content{Type: "text", Content: task}),
 		}, streamHandler, opts)
+		// 子运行一返回即关闭"孙任务结果接收"：运行结束后 Poll 不会再 drain，本任务的
+		// inbox 无人消费。此后到达的孙任务结果按 Registry 收尾判定回落到主会话
+		//（而不是写进一口没人读的信箱）。放在 journal/事件之前：把窗口收到最小。
+		tk.closeDelivery()
 
 		// 终态判定（TaskEnd 事件与 journal result 共用 classifySubEnd，防漂移）：
 		// 中断请求优先于错误（abort 非失败）；被 AbandonAll 弃置的任务以 abandoned
@@ -434,8 +472,28 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 	// ① 任务目标（从任务描述提取首句，主 Agent 据此判断哪些范围会被覆盖、避免重复劳动）；
 	// ② 后台运行、结果自动送达；③ 可用 TaskOutput 拉取进度（勿高频轮询）；④ 勿重复委派范围。
 	hint := backgroundHint(name, task)
+	// 子→孙派发（parentTaskID 非空）换 nestedBackgroundHint：收件人是**本 loop**，
+	// 子→孙派发换文案：收件人是本 loop，措辞需说清"结果回到你这里"（否则子 agent 会
+	// 去主会话找），但**不能承诺一定回来**（见 nestedBackgroundHint 的措辞纪律）。
+	if parentTaskID != "" {
+		hint = nestedBackgroundHint(name, task)
+	}
 	return fmt.Sprintf(`{"task_id":%q,"status":"running","type":"subagent","name":%q,"output_file":%q,"hint":%q}`,
 		taskRef.ID, t.spec.Name, taskRef.OutputFile(), hint), nil
+}
+
+// renderInFlight 渲染在途后代任务清单（Stop 门控注入 prompt.PendingTasksReminder 的 %s）。
+// 极简一行一条：任务 id + 名字 + 状态，供模型判断"还有谁没回"。
+func renderInFlight(inFlight []TaskInfo) string {
+	var b strings.Builder
+	for _, ti := range inFlight {
+		name := ti.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		fmt.Fprintf(&b, "- %s (%s) — %s\n", ti.ID, name, ti.Status)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // backgroundHint 构造后台任务提示（主 Agent 可见）。
@@ -451,6 +509,21 @@ func backgroundHint(name, task string) string {
 	}
 	return fmt.Sprintf(
 		"Background task %q is running (Goal: %s). Continue your current work; its result will be pushed automatically when done — do not wait for it, poll sparingly via TaskOutput(%s) if needed, and do not duplicate its scope.",
+		name, goal, "task_id")
+}
+
+// nestedBackgroundHint 子→孙派发的行为提示（**当前 loop 就是结果收件人**）：
+// 与 backgroundHint 同一设计原则（模型零思考知道该干嘛），但投递对象是本 loop：
+// 措辞纪律：**不得承诺"一定回到你这里"**。投递判据是"本 loop 还活着且在接收"，
+// 万一本轮先收尾（孙任务更慢），结果会回落主会话——给模型一个绝对承诺，它就会
+// 停止在别处找结果。条件式表述 + 指明兜底去处，模型才知道两种结局该去哪找。
+func nestedBackgroundHint(name, task string) string {
+	goal := extractGoal(task)
+	if goal == "" {
+		goal = "background analysis task"
+	}
+	return fmt.Sprintf(
+		"Background task %q is running (Goal: %s). Continue your other work; when it finishes, the result is delivered back to YOU as a message on a later turn — if you finish first, it falls back to the main session instead. Do not wait for it, do not duplicate its scope, and check progress sparingly with TaskOutput(%s).",
 		name, goal, "task_id")
 }
 

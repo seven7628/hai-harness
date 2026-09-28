@@ -43,7 +43,7 @@ func (t *taskOutputTool) Description() string {
 	return "Read a background task's output/state to sense its progress (pull-based monitoring). " +
 		"For subagent tasks (task-XXXXXXXX from agent_spawn / subagent_explore) it returns the authoritative status plus the latest journal records (per-round progress text and tool activity; the final record is the full result). " +
 		"For promoted tool tasks (tooltask-XXXXXXXX, listed by TaskList) it returns a state snapshot only: there is no journal and no pullable intermediate output, and their final result is delivered to the main session automatically — do not poll them. " +
-		"The final result of a subagent task is ALSO pushed back to the main session automatically when the task completes; this tool is for checking progress while it runs (and for verifying the delivered result). " +
+		"The final result of a subagent task is ALSO pushed back automatically when the task completes; this tool is for checking progress while it runs (and for verifying the delivered result). " +
 		"If you need to wait for a subagent task, pass wait_seconds to block instead of polling repeatedly: it returns as soon as the task finishes OR its journal gains a new record (i.e. a new round of progress), whichever comes first — the result is also pushed back automatically when the task finishes. " +
 		"(task_id is the identifier returned by agent_spawn)"
 }
