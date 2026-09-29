@@ -1159,6 +1159,10 @@ const zh: Record<string, string> = {
   'narrative.suggestCode2': '加一个 /status 接口',
   'narrative.suggestCode3': '给 parse 补测试',
   'narrative.ttft': '本轮 TTFT {ttft} · LLM 总耗时 {dur}',
+  // 分段兜底：TTFT / LLM 总耗时任一取不到时（如中断、失败、首字超时的末轮没有 llm_end）
+  // 只显示能确证的那一段，绝不因为缺一个就把整行（含 Agent 总耗时 / tokens/s）藏掉。
+  'narrative.ttftOnly': '本轮 TTFT {ttft}',
+  'narrative.llmDurOnly': 'LLM 总耗时 {dur}',
   'narrative.tokensPerSec': ' · {speed} tokens/s',
   'narrative.agentDur': 'Agent 总耗时 {dur}',
   'narrative.attachAlt': '附件图片',
@@ -2577,6 +2581,8 @@ const en: Record<string, string> = {
   'narrative.suggestCode2': 'Add a /status endpoint',
   'narrative.suggestCode3': 'Add tests for parse',
   'narrative.ttft': 'TTFT {ttft} · LLM total {dur}',
+  'narrative.ttftOnly': 'TTFT {ttft}',
+  'narrative.llmDurOnly': 'LLM total {dur}',
   'narrative.tokensPerSec': ' · {speed} tok/s',
   'narrative.agentDur': 'Agent total {dur}',
   'narrative.attachAlt': 'Attached image',

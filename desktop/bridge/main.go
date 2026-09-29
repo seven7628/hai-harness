@@ -1236,11 +1236,17 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 				"timestamp":  time.Now().UnixMilli(),
 			})
 		}
-		// TEMP-DEBUG: LoadRecord 失败诊断（区分"无 record"与"record 损坏/路径错"）
+		// 2026-09-29：原 TEMP-DEBUG 对**任何** LoadRecord 失败都打一行 stderr，结果每次
+		// 新会话（record 尚未首次提交 → ErrRecordNotFound）都刷一条
+		// "session record not found: session not found"，被当成异常排查半天。语义上
+		// 「还没有 record」是正常路径（main.go 上方装配处本就忽略该错误），只有
+		// 损坏 / 校验和不符 / 路径错才值得打印。
 		if rec, lerr := recordStore.LoadRecord(context.Background(), wsKey, id); lerr != nil {
-			fmt.Fprintf(os.Stderr, "[checkpoint-debug] LoadRecord sid=%s wsKey=%s err=%v\n", id, wsKey, lerr)
+			if !errors.Is(lerr, session.ErrRecordNotFound) {
+				fmt.Fprintf(os.Stderr, "[checkpoint] LoadRecord 失败 sid=%s wsKey=%s err=%v\n", id, wsKey, lerr)
+			}
 		} else if rec != nil {
-			fmt.Fprintf(os.Stderr, "[checkpoint-debug] record 存在 sid=%s rev=%d\n", id, rec.Revision)
+			fmt.Fprintf(os.Stderr, "[checkpoint] record 存在 sid=%s rev=%d\n", id, rec.Revision)
 		}
 	} else if recordSetupErr != nil {
 		// TEMP-DEBUG: record 装配失败诊断
