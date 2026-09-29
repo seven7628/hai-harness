@@ -3035,7 +3035,9 @@ function pushAssistant(v: SessionView, model?: string, requestId?: string, start
 }
 
 // 追加流式文本/思考到目标 assistant 块；目标缺失时兜底最后一条 assistant（无 request 的旧流）
-function appendToAssistant(v: SessionView, bid: number | undefined, field: 'text' | 'thinking', c: string, thinkStart?: number): SessionView {
+// runId：兜底新建的块必须带上（否则 agent_end 按 `b.runId === run_id` 找不到它，
+// Agent 总耗时挂不上去 —— 与 llm_start 建块的字段集保持一致）
+function appendToAssistant(v: SessionView, bid: number | undefined, field: 'text' | 'thinking', c: string, thinkStart?: number, runId?: string): SessionView {
   const blocks = [...v.blocks]
   let idx = bid != null ? blocks.findIndex((b) => b.id === bid && b.kind === 'assistant') : -1
   if (idx < 0) {
@@ -3051,7 +3053,7 @@ function appendToAssistant(v: SessionView, bid: number | undefined, field: 'text
   } else {
     const id = blockSeq++
     lastLLMBlockId = id
-    blocks.push({ kind: 'assistant', id, text: field === 'text' ? c : '', thinking: field === 'thinking' ? c : '', streaming: true, ts: Date.now(), ...(field === 'thinking' && thinkStart != null ? { thinkStart } : {}) })
+    blocks.push({ kind: 'assistant', id, text: field === 'text' ? c : '', thinking: field === 'thinking' ? c : '', streaming: true, ts: Date.now(), ...(runId ? { runId } : {}), ...(field === 'thinking' && thinkStart != null ? { thinkStart } : {}) })
   }
   return { ...v, blocks, lastLLMBlockId }
 }
@@ -4290,7 +4292,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           return setView(s, sid, { ...v, blocks: appendAgentStream(v.blocks, runId, 'thinking', c, startClient), thinkStartTs })
         }
         const bid = raw.request_id ? v.reqBlock[String(raw.request_id)] : undefined
-        const nv = appendToAssistant(v, bid, 'thinking', c, startClient)
+        const nv = appendToAssistant(v, bid, 'thinking', c, startClient, runId)
         // TTFT（问题七）：首个任意 chunk（reasoning 或 content）到达 = 本轮首字耗时。
         // 思考模型 reasoning 先行——此前只在 content_chunk 结算，TTFT 被整段思考虚高。
         nv.ttftMs = nv.ttftMs ?? (nv.llmStartTs ? ts - nv.llmStartTs : undefined)
@@ -4331,7 +4333,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           return setView(s, sid, { ...v, blocks, thinkStartTs, turnThinkMs })
         }
         const bid = raw.request_id ? v.reqBlock[String(raw.request_id)] : undefined
-        const nv = appendToAssistant(v, bid, 'text', c)
+        const nv = appendToAssistant(v, bid, 'text', c, undefined, runId)
         nv.ttftMs = nv.ttftMs ?? (nv.llmStartTs ? now - nv.llmStartTs : undefined)
         const textIdx = bid != null ? nv.blocks.findIndex((b) => b.id === bid) : -1
         if (textIdx >= 0 && nv.blocks[textIdx].kind === 'assistant') {
@@ -4448,9 +4450,14 @@ export function dispatchEvent(raw: AnyEvent): void {
         const ctxTokensEstimated = ctxHasUsage ? false : v.ctxTokensEstimated
         // 非工具调用的最终文本回复在消息底部展示本轮 TTFT 与总耗时；
         // 纯 ToolCall 回复没有可展示的文本，不附加到消息。
+        // finalBid：bid 为 undefined（request_id 有值但 reqBlock 查不到 —— llm_start 丢失/
+        // 被重放跳过/被重试丢弃）时退回 lastLLMBlockId —— 与上面 settleAssistant 的兜底
+        // 落在**同一条块**上。此前二者用不同的定位：文字补上了、指标挂在 -1 上不挂，
+        // 用户看到「有正文、没耗时」（Go 侧 applyLLMEndLocked 同口径：bid==0 回退
+        // lastAssistantBlockLocked）。
         // 注意：最终块编辑与落库必须基于 withThink（已含思考结算的数组），否则
         // 「纯思考→工具调用」轮的 thinkMs 结算会被丢弃 → 思考计时器永不停止。
-        const finalBid = bid
+        const finalBid = bid ?? v.lastLLMBlockId
         const finalIdx = finalBid != null ? withThink.findIndex((b) => b.id === finalBid) : -1
         if (finalIdx >= 0 && withThink[finalIdx].kind === 'assistant' && (withThink[finalIdx] as Extract<MsgBlock, { kind: 'assistant' }>).text) {
           const ab = withThink[finalIdx] as Extract<MsgBlock, { kind: 'assistant' }>
@@ -5192,10 +5199,28 @@ export function dispatchEvent(raw: AnyEvent): void {
         // SubAgent 的 abort/完成不得清 Session 级等待态（审批队列是 Session 统一 FIFO，
         // SubAgent 中断只收敛它自己的调用，后端按 ctx/超时自行出队）。
         const isSub = id !== '' && isSubAgentRun(v, id)
-        const finalAssistantIdx = isSub ? -1 : v.blocks.findLastIndex((b) =>
+        // AgentEnd = 本 run 最后一轮已定局。**仍在流式的块在此冻结**（2026-09-29）：
+        // 中断 / run 级失败 / 达轮数上限截断这三种收尾都没有 llm_end（durMs、usage 的
+        // 唯一来源），块就永远停在 streaming=true —— 渲染门 `!b.streaming` 过不去，
+        // 底部指标行整行不显示、光标 ▍ 一直闪。此处按「已流逝时间」兜底：
+        //   - durMs：末轮 llm_start（turnStartTs）→ agent_end，诚实的「已跑多久」；
+        //   - ttftMs：只在真收到过 chunk 时才有（由 chunk 分支结算），没有就不补 ——
+        //     首字超时那类一个事件都没来的末轮，如实留空而不是编一个 30s。
+        // 只动本 run 的块（runId 缺省的无 request 旧流按 view 级流式态一并收敛）。
+        let blocks = !isSub
+          ? v.blocks.map((b) => {
+            if (b.kind !== 'assistant' || !b.streaming) return b
+            if (id && b.runId && b.runId !== id) return b
+            const nb = { ...b, streaming: false }
+            if (nb.thinkStart != null && nb.thinkMs == null) nb.thinkMs = Math.max(0, now - nb.thinkStart)
+            if (nb.durMs == null && v.turnStartTs != null) nb.durMs = Math.max(0, now - v.turnStartTs)
+            return nb
+          })
+          : v.blocks
+        const finalAssistantIdx = isSub ? -1 : blocks.findLastIndex((b) =>
           b.kind === 'assistant' && !b.streaming && Boolean(b.text) && b.runId === id,
         )
-        let blocks = v.blocks.map((b, index) =>
+        blocks = blocks.map((b, index) =>
           b.kind === 'assistant' && index === finalAssistantIdx && typeof raw.duration_ms === 'number'
             ? { ...b, agentDurMs: raw.duration_ms }
             : b.kind === 'agent' && b.runId === id
@@ -5263,7 +5288,10 @@ export function dispatchEvent(raw: AnyEvent): void {
           ),
           blocks,
           runningAgentCount: countRunningAgents(blocks),
-          streaming: (aborted || truncated) && !isSub ? false : v.streaming,
+          // 主 run 结束（任何 finish_reason）即解除流式态：此前只对 abort/max_iterations
+          // 复位，finish_reason=error 要等 session_run_error 才复位 —— 中间那段窗口
+          // 输入框仍是禁用的。子 run 的结束不动会话级流式态。
+          streaming: !isSub ? false : v.streaming,
           aborted: aborted && !isSub ? true : v.aborted, // 主 run 中断置位：拦截后续残留 chunk
           approvals: aborted && !isSub ? [] : v.approvals,
           question: aborted && !isSub ? undefined : v.question,

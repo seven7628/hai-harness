@@ -436,6 +436,7 @@ type ViewReducer struct {
 	// 计时瞬态（仅结算使用，不持久化）
 	thinkStart       map[string]time.Time // runID → 首个 reasoning chunk 时间
 	turnThinkMs      map[string]int64     // runID → 已结算思考耗时
+	turnStart        map[string]time.Time // runID → 当前 LLM 轮 llm_start 时刻（末轮无 llm_end 时兜底算「已跑多久」）
 	toolStartTs      map[string]time.Time // toolID → 工具开始时间
 	compStart        map[string]time.Time // runID（""=主）→ 压缩开始时刻
 	agentCompressing map[string]bool      // runID → 子 agent 压缩进行中
@@ -509,6 +510,7 @@ func newReducer(seq, clearGeneration uint64) *ViewReducer {
 		toolBlockID:       map[string]uint64{},
 		thinkStart:        map[string]time.Time{},
 		turnThinkMs:       map[string]int64{},
+		turnStart:         map[string]time.Time{},
 		toolStartTs:       map[string]time.Time{},
 		compStart:         map[string]time.Time{},
 		agentCompressing:  map[string]bool{},
@@ -787,6 +789,7 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 	r.toolBlockID = map[string]uint64{}
 	r.thinkStart = map[string]time.Time{}
 	r.turnThinkMs = map[string]int64{}
+	r.turnStart = map[string]time.Time{}
 	r.toolStartTs = map[string]time.Time{}
 	r.compStart = map[string]time.Time{}
 	r.agentCompressing = map[string]bool{}
@@ -1169,7 +1172,14 @@ func (r *ViewReducer) applyLLMStartLocked(e *events.LLMStart) {
 	if key == "" {
 		key = "$" + e.RunId // 无 request 的旧流：按 run 共享一个结算态
 	}
-	r.reqState[key] = &reqState{runID: e.RunId, model: e.Model, start: e.Timestamp, blockID: bid}
+	ts := e.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	r.reqState[key] = &reqState{runID: e.RunId, model: e.Model, start: ts, blockID: bid}
+	// 当前 LLM 轮起点（runID 级）：末轮若没有 llm_end（中断/失败/截断），AgentEnd 用它
+	// 兜底出「这一轮已经跑了多久」——否则该块永远拿不到 DurMs，刷新后指标行缺一段。
+	r.turnStart[e.RunId] = ts
 }
 
 // applyLLMEndLocked 结算单次 LLM 调用：turn 指标、usage/cost、assistant 块终态。
@@ -1192,6 +1202,7 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 		delete(r.thinkStart, runKey)
 	}
 	delete(r.turnThinkMs, runKey)
+	delete(r.turnStart, runKey) // 本轮已结算：AgentEnd 不再兜底（否则会重复计一次）
 
 	// 请求态（durMs / TTFT）
 	var rs *reqState
@@ -1750,6 +1761,30 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 		}
 	}
 
+	// 末轮兜底结算（2026-09-29）：中断 / run 级失败 / 达轮数上限截断都没有 llm_end，
+	// 该轮正文块因此永远拿不到 DurMs/TtftMs —— 刷新后底部指标行缺一段（与前端实时
+	// 分段渲染的缺口一致）。用 llm_start→AgentEnd 的**已流逝时间**补 DurMs；TtftMs 不补
+	// （首字超时那类一个 chunk 都没来过，如实留空）。已结算的轮次不受影响（DurMs>0）。
+	if ts, ok := r.turnStart[e.RunId]; ok && !ts.IsZero() {
+		elapsed := msBetween(ts, now)
+		if bid := r.lastAssistantBlockForRunLocked(e.RunId); bid != 0 {
+			if idx := r.findBlockLocked(bid); idx >= 0 && r.blocks[idx].Kind == blockKindAssistant {
+				b := r.blocks[idx]
+				if b.DurMs == 0 && elapsed > 0 {
+					b.DurMs = elapsed
+				}
+				if b.ThinkMs == 0 {
+					if st, ok2 := r.thinkStart[e.RunId]; ok2 {
+						b.ThinkMs = msBetween(st, now)
+					}
+				}
+				r.blocks[idx] = b
+			}
+		}
+	}
+	delete(r.turnStart, e.RunId)
+	delete(r.thinkStart, e.RunId) // 末轮思考计时在此落地（llm_end 不会再来），清瞬态
+
 	// 主 run：中断/截断提示 + 工具块收尾
 	blocks := r.blocks
 	if aborted {
@@ -2214,6 +2249,7 @@ func (r *ViewReducer) clearLocked() {
 	r.reqState = map[string]*reqState{}
 	r.thinkStart = map[string]time.Time{}
 	r.turnThinkMs = map[string]int64{}
+	r.turnStart = map[string]time.Time{}
 	r.toolStartTs = map[string]time.Time{}
 	r.compStart = map[string]time.Time{}
 	r.agentCompressing = map[string]bool{}

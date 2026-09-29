@@ -117,6 +117,41 @@ function RetryProgress({ ts, delayMs, retrying, startedAt, costUsd }: { ts?: num
   )
 }
 
+// 助手块底部的本轮指标行：TTFT / LLM 总耗时 / Agent 总耗时 / 输出速度。
+// 2026-09-29：四个指标**各自独立**渲染。此前整行挂在 `ttftMs != null && durMs != null`
+// 一个门上 —— 中断、run 级失败、达轮数上限截断这三种收尾都没有 llm_end（durMs 的唯一
+// 来源），于是 durMs 缺失把整行藏掉，连已经挂在块上的 Agent 总耗时、已经拿到的 usage
+// 一起消失，用户读作「AgentEnd 时前端没展示耗时信息」。现在缺哪段省哪段，取不到就不显示。
+const AssistantTurnMeta = memo(function AssistantTurnMeta({ b }: { b: Extract<MsgBlock, { kind: 'assistant' }> }) {
+  const t = useT()
+  // 输出速度 = outputTokens / 生成窗口。分母口径见 store 的 genMsOf：
+  // 分子含 reasoning token，故思考未流式时必须用整轮 durMs——否则 reasoning 模型会
+  // 算出几十倍虚高（DeepSeek 把 reasoning 塞在末次 usage、流里没有 reasoning chunk 时，
+  // durMs - ttftMs 只剩正文的零点几秒）。刷新后 genMs 未持久化，用同一纯函数重算，数字一致。
+  let speed: string | null = null
+  const out = b.outputTokens
+  if (out != null && out > 0) {
+    const genMs = b.genMs ?? genMsOf(b)
+    if (genMs != null && genMs > 0) speed = t('narrative.tokensPerSec').replace('{speed}', (out / (genMs / 1000)).toFixed(2))
+  }
+  const head = b.ttftMs != null && b.durMs != null
+    ? t('narrative.ttft').replace('{ttft}', fmtDuration(b.ttftMs)).replace('{dur}', fmtDuration(b.durMs))
+    : b.ttftMs != null
+      ? t('narrative.ttftOnly').replace('{ttft}', fmtDuration(b.ttftMs))
+      : b.durMs != null
+        ? t('narrative.llmDurOnly').replace('{dur}', fmtDuration(b.durMs))
+        : null
+  // 一段都拿不到（既无耗时也无速度）→ 整行不渲染，不留空壳。
+  if (!head && !speed) return null
+  return (
+    <div className="assistant-turn-meta mono">
+      {head ?? ''}
+      {b.agentDurMs != null ? `${head || speed ? ' · ' : ''}${t('narrative.agentDur').replace('{dur}', fmtDuration(b.agentDurMs))}` : ''}
+      {speed ?? ''}
+    </div>
+  )
+})
+
 export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   const t = useT()
   // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话
@@ -353,23 +388,8 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
           {b.text || b.streaming ? (
             <div className="md-text">
               {b.text ? <Markdown text={b.text} /> : null}
-              {!b.streaming && b.ttftMs != null && b.durMs != null && (
-                <div className="assistant-turn-meta mono">
-                  {t('narrative.ttft').replace('{ttft}', fmtDuration(b.ttftMs)).replace('{dur}', fmtDuration(b.durMs))}
-                  {b.agentDurMs != null ? ` · ${t('narrative.agentDur').replace('{dur}', fmtDuration(b.agentDurMs))}` : ''}
-                  {(() => {
-                    // 输出速度 = outputTokens / 生成窗口。分母口径见 store 的 genMsOf：
-                    // 分子含 reasoning token，故思考未流式时必须用整轮 durMs——否则
-                    // reasoning 模型会算出几十倍虚高（DeepSeek 把 reasoning 塞在末次
-                    // usage、流里没有 reasoning chunk 时，durMs - ttftMs 只剩正文的
-                    // 零点几秒）。刷新后 genMs 未持久化，用同一纯函数重算，数字一致。
-                    const out = b.outputTokens
-                    if (out == null || out <= 0) return null
-                    const genMs = b.genMs ?? genMsOf(b)
-                    if (genMs == null || genMs <= 0) return null
-                    return t('narrative.tokensPerSec').replace('{speed}', (out / (genMs / 1000)).toFixed(2))
-                  })()}
-                </div>
+              {!b.streaming && (
+                <AssistantTurnMeta b={b} />
               )}
               {b.streaming && <span className="mono" style={{ color: 'var(--running)' }}>▍</span>}
             </div>
