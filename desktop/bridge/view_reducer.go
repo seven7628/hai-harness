@@ -1783,6 +1783,7 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 		}
 	}
 	delete(r.turnStart, e.RunId)
+	delete(r.thinkStart, e.RunId) // 末轮思考计时在此落地（llm_end 不会再来），清瞬态
 
 	// 主 run：中断/截断提示 + 工具块收尾
 	blocks := r.blocks
