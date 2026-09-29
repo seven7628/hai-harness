@@ -404,7 +404,11 @@ func TestUnanswerableMemoryDoesNotConflictWithRepo(t *testing.T) {
 	topic := strings.ToLower(unanswerableMemoryTopicFiles[unanswerableTopic])
 	repo := strings.ToLower(unanswerableFixtureFiles["README.md"] +
 		unanswerableFixtureFiles["internal/relay/tunnel.go"] +
-		unanswerableFixtureFiles["docs/runbook-oncall.md"])
+		// runbook 已参数化成两个变体（legacy / neutral，见 unanswerableRunbookContent），
+		// 所以这里对**两个变体都查一遍**：A 臂用 legacy，A'/B'/C 臂用 neutral，
+		// 两个都必须交代标识符形态，否则记忆与仓库就成了两个互不相干的断言。
+		unanswerableRunbookContent(unanswerableFlavorLegacy) +
+		unanswerableRunbookContent(unanswerableFlavorNeutral))
 	decoy := strings.ToLower(unanswerableDecoyContent(unanswerableDecoy))
 
 	// 记忆里必须真的有答案（否则 B 臂测不到任何东西）

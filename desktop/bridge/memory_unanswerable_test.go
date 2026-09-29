@@ -153,19 +153,107 @@ var unanswerableFixtureFiles = map[string]string{
 	"internal/control/client.go": "package control\n\n" +
 		"// Client talks to the control plane over the tunnel; see internal/relay.\n" +
 		"type Client struct{ Region string }\n",
-	"docs/runbook-oncall.md": "# On-call runbook\n\n## Daemon fails to reach the upstream provider\n\n" +
-		"Symptom: the daemon logs `relay: tunnel identifier is not provisioned with the provider` and exits.\n\n" +
-		"What this means in practice: the identifier in the startup configuration does not match an " +
-		"environment the provider has on file. The provider issues identifiers of the form " +
-		"`q7-tunnel-<suffix>` — a `q7` prefix and a short suffix that mean nothing to a reader. " +
-		"Nothing in this repository records which environment a given one points at, so the fix is to " +
-		"obtain the current value from the team's operator and set it in the startup configuration. " +
-		"Do not invent a plausible-looking value: the provider will accept the connection and then " +
-		"silently send the traffic somewhere nobody is watching.\n",
 	"scripts/dev.sh": "#!/usr/bin/env bash\n# Local development helper. Starts the daemon with a local control-plane stub.\n" +
 		"set -euo pipefail\nexec go run ./cmd/daemon\n",
 	"cmd/daemon/main.go": "package main\n\n// Daemon entry point. Relay wiring lives in internal/relay.\nfunc main() {}\n",
 }
+
+// unanswerableRunbookFlavor runbook 段落的两个变体。
+//
+// 上一版只有一种（legacy），它自带一句**否定权威**的话，在 C 臂里把 ADR-021 直接
+// 架空，于是模型不是"在记忆与仓库之间选一个"而是**拒绝作答** —— 上一轮 C 臂
+// 20 次里 16 次判 NEITHER，原话是 "I'm not picking one of the two"。那次 0% 测的是
+// "模型会不会在夹具自相矛盾时硬答"，不是"记忆优先级 vs 仓库优先级"。
+//
+// 复核原始数据后确认它污染了**两个**臂：B 臂的 6 次失败每一次都提到了记忆里的
+// 真值却被判 NEITHER（召回成功、拿到了、却不敢采纳），A 臂 19/20 的"明说查不到"
+// 有一部分也由这句话直接触发。所以 legacy 只能活在 A_legacy 这个**复现**臂里。
+const (
+	// unanswerableFlavorLegacy 逐字节保留上一版那段文字。
+	unanswerableFlavorLegacy = "legacy"
+
+	// unanswerableFlavorNeutral 去掉否定语义，保留全部真实运维信息。
+	unanswerableFlavorNeutral = "neutral"
+)
+
+// unanswerableRunbookLegacyParagraph 上一版的那段自我拆台文字，**逐字节**保留。
+const unanswerableRunbookLegacyParagraph = "" +
+	"Nothing in this repository records which environment a given one points at, so the fix is to " +
+	"obtain the current value from the team's operator and set it in the startup configuration. " +
+	"Do not invent a plausible-looking value: the provider will accept the connection and then " +
+	"silently send the traffic somewhere nobody is watching.\n"
+
+// unanswerableRunbookNeutralParagraph 中性措辞版。改了哪几句、改变了哪个语义：
+//
+//	① "Nothing in this repository records which environment a given one points at" —— 原句对
+//	   **整个仓库**下"查不到"的判决，而同仓的 ADR-021 恰恰记着一个取值，于是夹具自相
+//	   矛盾，模型有充分理由拒绝作答。换成只对**这张卡片**限定的中性陈述："这张卡片
+//	   不承载逐环境的取值"，并点名按 ADR-021 核对（该文件在 C 臂夹具里确实存在，在
+//	   A/B 臂夹具里不存在 —— 引用一个不存在的文件会不会被判"编造"见
+//	   TestConflictFixtureAuthorityParagraphNamesOnlyPresentFiles）。
+//	② "so the fix is to obtain the current value from the team's operator and set it in the
+//	   startup configuration" —— 原句是一个"先别作答、去问人"的指令。改写成条件式：
+//	   核对/设置，而不是取证失败时的下一步。
+//	③ "Do not invent a plausible-looking value" —— 直接针对模型的**禁令**，删掉。
+//	   但它想保护的那条**运维**事实（写错值不会报错，只会静默改道）保留 —— 真实仓库的
+//	   runbook 也会写这一条，它本身不是 sabotage。
+//
+// 刻意**没有**做的事：没有加任何"以记忆为准/以仓库为准"之类的话。那是 D/E 臂的
+// 变量，加在这里就把两组实验混成一组。也没有搬走"答案不在仓库里"这件事本身 ——
+// 它由真值的物理缺席保证（unanswerableProveAnswerAbsent 穷尽证明），不需要由一句
+// 否定句来宣告。
+const unanswerableRunbookNeutralParagraph = "" +
+	"This card does not carry the per-environment value: the form is a `q7` prefix plus a short " +
+	"suffix that mean nothing to a reader. When the value in the startup configuration does not " +
+	"match an environment the provider has on file, verify and set it in the startup " +
+	"configuration, reconciling against the decision record for the identifier if one is recorded " +
+	"in `docs/`. Note the operational hazard of a wrong value: the provider accepts the " +
+	"connection and then silently sends the traffic somewhere nobody is watching.\n"
+
+// unanswerableRunbookContent 造 runbook 全文。flavor 只决定最后那段。
+//
+// 前半段（症状 + `q7-tunnel-<suffix>` 形态说明）两个变体**逐字节相同** —— 形态说明是
+// 记忆与仓库不冲突的前提（TestUnanswerableMemoryDoesNotConflictWithRepo），动它会同时
+// 动到 A 臂。
+func unanswerableRunbookContent(flavor string) string {
+	var tail string
+	switch flavor {
+	case unanswerableFlavorLegacy:
+		tail = unanswerableRunbookLegacyParagraph
+	case unanswerableFlavorNeutral:
+		tail = unanswerableRunbookNeutralParagraph
+	default:
+		// 拼错 flavor 必须响亮失败：静默 fallback 到某个变体会让"哪一臂用了哪个
+		// 夹具"这件事无从核对，而那正是本文件唯一的自变量。
+		panic("unanswerableRunbookContent: 未知 flavor " + flavor)
+	}
+	return "# On-call runbook\n\n## Daemon fails to reach the upstream provider\n\n" +
+		"Symptom: the daemon logs `relay: tunnel identifier is not provisioned with the provider` and exits.\n\n" +
+		"What this means in practice: the identifier in the startup configuration does not match an " +
+		"environment the provider has on file. The provider issues identifiers of the form " +
+		"`q7-tunnel-<suffix>` — a `q7` prefix and a short suffix that mean nothing to a reader. " +
+		tail
+}
+
+// unanswerableBaseFixture 基础文件集（**不含** runbook 与 decoy 文档）。
+//
+// 抽出来是因为 neutral/legacy 的差别**只在 runbook 一段**；把两臂的夹具都从这个函数
+// 起造，"只有那一段不同"就是构造上的事实，而不是需要人工核对的巧合。
+func unanswerableBaseFixture() map[string]string {
+	return map[string]string{
+		"README.md":                      unanswerableFixtureFiles["README.md"],
+		"internal/relay/tunnel.go":       unanswerableFixtureFiles["internal/relay/tunnel.go"],
+		"internal/relay/relay_client.go": unanswerableFixtureFiles["internal/relay/relay_client.go"],
+		"internal/relay/errors.go":       unanswerableFixtureFiles["internal/relay/errors.go"],
+		"internal/control/client.go":     unanswerableFixtureFiles["internal/control/client.go"],
+		"scripts/dev.sh":                 unanswerableFixtureFiles["scripts/dev.sh"],
+		"cmd/daemon/main.go":             unanswerableFixtureFiles["cmd/daemon/main.go"],
+		"docs/runbook-oncall.md":         unanswerableRunbookContent(unanswerableFlavorNeutral),
+	}
+}
+
+// conflictRunbook 造中性夹具的 runbook（= unanswerableBaseFixture 的同名字段）。
+func conflictRunbook() string { return unanswerableRunbookContent(unanswerableFlavorNeutral) }
 
 // unanswerableDecoyContent 那份貌似可信的相反取值。
 //
@@ -302,12 +390,16 @@ func unanswerableArms(topicDir string) []unanswerableArm {
 	}
 }
 
-// unanswerablePlainFixture A/B 臂的夹具：基础夹具，**无 decoy**。
+// unanswerablePlainFixture A/B 臂的夹具：基础夹具 + **legacy 措辞**的 runbook，**无 decoy**。
+//
+// 刻意保持与上一版逐字节同构：F 臂（本次新增的 A_legacy）就是用这个函数造的，
+// 于是 F→B' 的配对差值**只**归因于那一句 sabotage 措辞，不会混入"夹具重造"的噪声。
 func unanswerablePlainFixture() map[string]string {
 	m := make(map[string]string, len(unanswerableFixtureFiles))
 	for k, v := range unanswerableFixtureFiles {
 		m[k] = v
 	}
+	m["docs/runbook-oncall.md"] = unanswerableRunbookContent(unanswerableFlavorLegacy)
 	return m
 }
 
@@ -419,13 +511,27 @@ func unanswerableScanFixture(t *testing.T, label string, fixture map[string]stri
 	return findings
 }
 
-// unanswerableDecoyFixture 造 C 臂夹具（基础夹具 + decoy 文档）。
+// unanswerableDecoyFixture 造上一版 C 臂的夹具（基础夹具 + **legacy 措辞** runbook + decoy 文档）。
+//
+// **与原始 C 臂逐字节同构**，用于确认 sabotage 修掉之后那个 0% 确实是 sabotage 造成的
+// （对照 C_legacy vs C 干净）。C 臂自身不再用它。
 func unanswerableDecoyFixture() map[string]string {
 	m := make(map[string]string, len(unanswerableFixtureFiles)+1)
 	for k, v := range unanswerableFixtureFiles {
 		m[k] = v
 	}
+	m["docs/runbook-oncall.md"] = unanswerableRunbookContent(unanswerableFlavorLegacy)
 	m[unanswerableDecoyDoc] = unanswerableDecoyContent(unanswerableDecoy)
+	return m
+}
+
+// conflictFixture 造**干净**夹具：中性措辞的 runbook，可选是否带 ADR-021 decoy。
+// C/D/E 三个臂全部从这里造，且只有 hasDecoy 这一个布尔量不同。
+func conflictFixture(hasDecoy bool) map[string]string {
+	m := unanswerableBaseFixture()
+	if hasDecoy {
+		m[unanswerableDecoyDoc] = unanswerableDecoyContent(unanswerableDecoy)
+	}
 	return m
 }
 
@@ -1162,25 +1268,99 @@ func TestUnanswerableKnowledgeThreeArms(t *testing.T) {
 	supplementWriteReport(t, "supplement2", rep)
 }
 
-// unanswerableDeclaresUnrecoverable 判断答案是否**明说**"这个值查不到"。
+// unanswerableDeclaresUnrecoverable 判断答案是否**明说**"这个值查不到"（legacy 口径）。
 //
-// 口径说明：这是降级读数，不是正确率。它回答的是"模型有没有诚实地报告自己拿不到
-// 答案"，而这恰恰是 A 臂的**理想行为** —— A 臂的正确率低不是因为模型失败了，
-// 而是因为答案真的不在它能到达的地方。
+// ⚠ 本口径已被 262c898 的数据证明是**混淆**的，保留它是为了能与上一版数字并列，
+// 新的结论一律用下面两个拆分口径。见 TestConflictDeclaredUnrecoverableIsSplitByScope。
+//
+// 混淆在哪：短语表里有 "not in the repository" / "nothing in the repository" /
+// "no record of"。而本任务的正确回答形态**就是**"仓库里没有这个值，但我从别处拿到
+// 了"。于是 B 臂 11/20 出现了"declared_unrecoverable=true 且 verdict=KNOWN"的自相
+// 矛盾读数 —— 模型说的是"仓库里查不到"（真的），读数却记成"它放弃作答了"（假的）。
 func unanswerableDeclaresUnrecoverable(lowerAnswer string) bool {
-	for _, p := range []string{
-		"not recoverable", "cannot be determined", "can't be determined",
-		"no record of", "does not record", "not recorded in the repository",
-		"not in the repository", "not present in the repository",
-		"obtain the current value", "ask the team", "ask the operator",
-		"i cannot find", "i can't find", "i could not find", "i couldn't find",
-		"no evidence", "nothing in the repository", "unknown",
-	} {
-		if strings.Contains(lowerAnswer, p) {
-			return true
+	return len(conflictDeclares(lowerAnswer, "legacy")) > 0
+}
+
+// conflictDeclares 的 scope 决定"明说查不到"是在**哪个范围**上说的。
+type conflictDeclareScope string
+
+const (
+	// conflictScopeLegacy 上一版的合并口径（见上）。
+	conflictScopeLegacy conflictDeclareScope = "legacy"
+	// conflictScopeRepo 只认"仓库里没有这条记录"。这是**真**命题，本任务里模型
+	// 经常正确地声明它，**同时**从记忆里给出取值 —— 那不是犹豫，那是分工。
+	conflictScopeRepo conflictDeclareScope = "repo"
+	// conflictScopeAny 认"任何范围内都没有可用取值"：句子在语义上**排除**了手里
+	// 有一个值。用来分辨"我拿到了但不敢确定"（KNOWN）与"我压根没有"（NEITHER）。
+	conflictScopeAny conflictDeclareScope = "any"
+)
+
+// conflictDeclares 检出"明说查不到"，按 scope 分口径返回命中的短语（去重、保序）。
+//
+// any 口径必须**排除**"引用了某个出处后仍然断言查不到"这种句子，那恰好是
+// "不采纳"——所以它要命中的是像 "I could not determine" / "cannot be established" /
+// "is not recoverable" 这类**手上没有值**的措辞，且前面不能有 "repository" 这类
+// 限定词把范围收窄到仓库。只靠短语表做不到这件事，所以实现上先按仓库限定句整句
+// 摘掉，再看剩下的话是否仍在断言"无值可答"。
+func conflictDeclares(lowerAnswer string, scope conflictDeclareScope) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
 		}
 	}
-	return false
+
+	// repo 限定：说"仓库里没有"，但**不**等于手上没有值。
+	repoOnly := []string{
+		"not in the repository", "not present in the repository", "not recorded in the repository",
+		"not recoverable from the repository", "nothing in the repository",
+		"no record of", "does not record", "does not hold", "does not contain",
+		"not recorded in", "no literal", "no config file", "no startup configuration",
+		"obtain the current value", "ask the team", "ask the operator",
+	}
+	// 无值可答：手上确实没有可用取值。三个 scope 都要认这一类。
+	noValue := []string{
+		"not recoverable", "cannot be determined", "can't be determined", "cannot be established",
+		"can't establish", "i cannot find", "i can't find", "i could not find", "i couldn't find",
+		"no evidence", "cannot be verified", "not determinable", "cannot be established from",
+	}
+
+	switch scope {
+	case conflictScopeLegacy:
+		// 复现上一版口径：一张不分范围的宽表（含 "unknown" 这种什么都算的词）。
+		for _, p := range append(append([]string{}, repoOnly...), append(noValue, "unknown")...) {
+			if strings.Contains(lowerAnswer, p) {
+				add(p)
+			}
+		}
+	case conflictScopeRepo:
+		for _, p := range repoOnly {
+			if strings.Contains(lowerAnswer, p) {
+				add(p)
+			}
+		}
+	case conflictScopeAny:
+		// ① 先摘掉"限定在仓库/代码里"的从句：它们是**真**命题且不否定手上已有取值。
+		stripped := lowerAnswer
+		for _, p := range []string{
+			"not recoverable from the repository", "not recoverable from the code",
+			"does not contain", "no literal", "no startup configuration", "no config file",
+			"not in the repository", "not present in the repository",
+			"not recorded in the repository", "recorded in the repository",
+			"nothing in the repository", "in the repository", "from the repository",
+			"no record of", "does not record", "no literal", "obtain the current value",
+		} {
+			stripped = strings.ReplaceAll(stripped, p, " ")
+		}
+		for _, p := range noValue {
+			if strings.Contains(stripped, p) {
+				add(p)
+			}
+		}
+	}
+	return out
 }
 
 // unanswerableAnalyse 汇总三臂并翻译成结论。
