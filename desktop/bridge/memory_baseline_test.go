@@ -48,6 +48,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -145,7 +146,13 @@ func baselineMemoryImporters(t *testing.T) []string {
 	t.Helper()
 	var out []string
 	// go list 比手写目录遍历可靠：它按真实构建配置给包，vendor/嵌套模块都算对。
+	// cmd.Dir 必须显式指向**模块根**（2026-09-29 修复）：`go list ./...` 的
+	// `./...` 是相对**当前工作目录**解析的，而本函数运行在测试进程里、cwd 不可控。
+	// 实测在 desktop/bridge 下只列出 2 个包，从模块根列 48 个 —— 护栏因此只扫了
+	// 2/48，"出现其他 importer 仍 Fatal"这条承诺形同虚设（往 agents/ 或 subagent/
+	// 加一个 memory import，两条测试照样全绿）。
 	cmd := exec.Command("go", "list", "-deps=false", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", "./...")
+	cmd.Dir = baselineModuleRoot()
 	blob, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("go list 失败，无法断言空状态（不要在这时候继续出数字）: %v", err)
@@ -1026,4 +1033,26 @@ func baselineWriteReport(t *testing.T, rep *baselineReport) {
 		return
 	}
 	t.Logf("report written: %s", path)
+}
+
+// baselineModuleRoot 定位 go.mod 所在目录（模块根）。
+//
+// 不用 runtime.Caller 硬数层数（改目录结构就错），而是一路上溯找 go.mod；
+// 找不到就退回本文件所在目录（此时 go list 会失败并由调用方 t.Fatalf，不会静默通过）。
+func baselineModuleRoot() string {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return "."
+	}
+	dir := filepath.Dir(thisFile)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return filepath.Dir(thisFile)
+		}
+		dir = parent
+	}
 }

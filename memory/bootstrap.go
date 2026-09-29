@@ -30,19 +30,28 @@ import (
 // 《技术方案》§5.2 要求「追加位置与 AGENTS.md 同级或其后」，那是装配层的结构知识，
 // 本包不该反过来规定它。
 //
-// # 为什么现在没有任何地方调用它（重要，不要"顺手接上"）
+// # 装配点（2026-09-29 接上，此前本包零 importer）
 //
-// 本包当前**没有任何生产文件 import 它**。这是刻意的：Step 0 的三臂行为基线
-// （desktop/bridge/memory_baseline_test.go 的 baselineEnforceEmptyMemoryState）
-// 断言的正是"仓库没有可被装配路径消费的 memory 实现"——一旦接线，那次基线测到的
-// 就不再是模型的行为而是实现的行为，正在跑的真实 provider 调用会全部作废。
-// 空状态自查：
+//	Step 3  desktop/bridge/main.go buildLoop：newMemoryHost(...).injection(...)
+//	        非空则 agents.WithMemoryInjection，composeSystemPrompt 在工作记忆之后拼接
+//	Step 4  desktop/bridge/main.go newSessionEngine：builtin.NewFileTools(ws)
+//	        .WithPostWrite(→ memoryHost.postWrite)
+//
+// 身份解析在**装配期做一次**并缓存，composeSystemPrompt 每轮循环都重跑，
+// 放那里等于每轮多一次 git 子进程 + N 次读盘。
+//
+// 装配期**不能**用 bgCtx()：buildLoop 阶段它捕获的 session 变量还是 nil，调用即崩。
+// 故用 context.WithTimeout(context.Background(), memoryResolveTimeout)（10s）——
+// 顺带防住"挂住的 git 阻塞会话创建"。
+//
+// 空状态自查（**现已不成立**，接线后 desktop/bridge 是 importer）：
 //
 //	go list -deps=false -f "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}" ./... | grep hai-harness/memory
-//	# 期望只输出 github.com/seven7628/hai-harness/memory 一行（没有任何 importer）
+//	# 期望含 github.com/seven7628/hai-harness/desktop/bridge（生产装配点）
 //
-// 评测结束后由装配方在**会话启动的 prompt 拼装点**接 Step 3、在 **write_file 钩子**
-// 接 Step 4；在那之前不要 import 本包。
+// Step 0 三臂基线装置因此在产品树上跳过（见 desktop/bridge/memory_baseline_test.go
+// 的 baselineEnforceEmptyMemoryState：仅 desktop/bridge 时跳过，出现**其他** importer
+// 仍 t.Fatal —— 护栏防的是"不知道自己在测什么"，该能力完整保留）。
 
 func Bootstrap(ctx context.Context, workdir string, cfg Config) BootstrapResult {
 	// ↓ 开关前置短路：关闭时不解析身份（不跑 git）、不读盘、不注入。

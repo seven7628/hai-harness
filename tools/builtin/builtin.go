@@ -139,13 +139,37 @@ func (f *FileTools) resolve(raw string) (string, error) {
 
 // denyHarnessConfigPath 拒绝 go-code 自身配置/密钥路径（~/.go-code）：settings.json
 // 可能含 api_key。无法定位 home 时放弃该保护（与旧行为一致，不阻塞正常路径）。
+//
+// # 必须解析软链接（2026-09-29，Project Memory 放行 memory 子树后补上）
+//
+// 放行 memory 子树让模型获得了**在记忆目录里创建任意文件**的能力：bash 的 `ln -s`
+// 不在危险命令名单里，而 memory 子树在沙箱放行子树内。于是出现一条完整攻击链：
+//
+//	模型: bash "ln -s ~/.go-code/settings.json ~/.go-code/memory/repos/<id>/steal.md"
+//	模型: read_file ~/.go-code/memory/repos/<id>/steal.md
+//	  → 词法判定落在 memory 子树 → 放行
+//	  → os.ReadFile **跟随软链接** → 读到 settings.json 里的明文 api_key
+//
+// 关键：read_file 跑在主 Agent 进程里、**不进沙箱**，本函数是它唯一的防线。
+// 所以不能只做词法比较 —— 必须把**真实目标**解析出来再判定，否则 memory 子树
+// 就成了通往受保护目录的桥。
+//
+// 解析后若真实目标仍在 ~/.go-code 内，按同一份放行名单判定；若解析到
+// ~/.go-code 之外，那与模型直接读那个绝对路径无区别，不是本函数新增的攻击面。
 func denyHarnessConfigPath(abs string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
+	real := resolveRealTarget(abs)
+	// home 也要解析：macOS 上 /tmp 是 /private/tmp 的软链接，HOME=/tmp/xxx 时
+	// 解析出的目标带 /private 前缀而 cfgDir 不带，两边基准不一致 → 判定整体失效。
+	// 判据：软链接解析后的真实路径与配置根必须在**同一基准**上比较。
+	if resolvedHome, rerr := filepath.EvalSymlinks(home); rerr == nil {
+		home = resolvedHome
+	}
 	cfgDir := filepath.Clean(filepath.Join(home, ".go-code"))
-	if abs == cfgDir || strings.HasPrefix(abs, cfgDir+string(os.PathSeparator)) {
+	if real == cfgDir || strings.HasPrefix(real, cfgDir+string(os.PathSeparator)) {
 		// 受管子树放行：plugins（Browser Use 等受管组件的安装/调试需要文件工具可达）
 		// 与 runtime（受管 Python 运行时 ~/.go-code/runtime/python：venv 解释器与
 		// 依赖库需可读、__pycache__ 需可写）—— 与沙箱 carve-out
@@ -155,15 +179,47 @@ func denyHarnessConfigPath(abs string) error {
 		// （技术方案 §1）。不放行它 = 模型既读不到注入的索引指向的 topic，也写不进
 		// 新记忆，auto memory 整个不成立。该子树下只有记忆文件（0600），不含密钥。
 		// .go-code 其余（settings.json 明文密钥 / sessions / events）仍保护。
-		for _, sub := range []string{"plugins", "runtime", "memory"} {
+		for _, sub := range allowedConfigSubtrees {
 			dir := filepath.Join(cfgDir, sub)
-			if abs == dir || strings.HasPrefix(abs, dir+string(os.PathSeparator)) {
+			if real == dir || strings.HasPrefix(real, dir+string(os.PathSeparator)) {
 				return nil
 			}
 		}
-		return fmt.Errorf("path %q is go-code's own config/secret directory and is protected", abs)
+		return fmt.Errorf("path %q resolves to %q, which is go-code's own config/secret directory and is protected", abs, real)
 	}
 	return nil
+}
+
+// allowedConfigSubtrees ~/.go-code 下对文件工具放行的受管子树。
+//
+// 与 sandbox.defaultOpenSubpaths 是**同一份语义的两次列举**（沙箱放行 shell 侧、
+// 本名单放行文件工具侧）。两处不同步就会出现"沙箱能跑而文件工具读写不了"或反向。
+// 由 TestAllowedSubtreesMatchSandboxOpenSubpaths 钉住同步。
+var allowedConfigSubtrees = []string{"plugins", "runtime", "memory"}
+
+// resolveRealTarget 解析路径的**真实目标**：对最深的已存在祖先做 EvalSymlinks，
+// 再把剩余（可能尚不存在）的部分原样接回去。
+//
+// 为什么不能直接 filepath.EvalSymlinks(abs)：write_file 写新文件时目标不存在，
+// EvalSymlinks 报 ENOENT。而那正是最需要判定的场景之一（模型新建软链接时，
+// 链接本身存在；它指向的 settings.json 通常也存在，但新记忆文件确实不存在）。
+func resolveRealTarget(abs string) string {
+	p := filepath.Clean(abs)
+	rest := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			if rest == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return abs // 理论上到不了这里（根必然存在）
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 // ---------- read_file ----------

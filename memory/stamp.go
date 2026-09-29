@@ -117,10 +117,22 @@ func stampWith(c Config, d Dir, path string, raw []byte, now time.Time) WriteSta
 // "无 frontmatter 的文件"凭空加 frontmatter（那种文件首行不会恰好是 `---`），
 // 因此不违反官方第 ② 条。
 func hasFrontmatter(raw []byte) bool {
+	_, _, ok := findFrontmatter(raw)
+	return ok
+}
+
+// findFrontmatter 定位 frontmatter 的开/闭定界行，判定与编辑**共用**这一份实现。
+//
+// 为什么要共用（2026-09-29 修复）：此前 hasFrontmatter 容忍前导空行与 BOM，而
+// setFrontmatterField 只看 lines[0]。于是同一个文件在���一个函数里"有 frontmatter"、
+// 在另一个函数里"没有"—— 结果是**静默不补戳且不报错**（宿主只看 StampModified 的
+// Err，看到 nil 就当成功）。用户手工编辑的记忆文件常常从空行开头，这条路径命中率
+// 不低。一个函数判定为 true 的输入，另一个必须能处理。
+func findFrontmatter(raw []byte) (open, close int, ok bool) {
 	s, _ := splitBOM(raw)
 	lines := strings.Split(s, "\n")
 	if len(lines) == 0 {
-		return false
+		return 0, 0, false
 	}
 	i := 0
 	for ; i < len(lines); i++ {
@@ -129,16 +141,19 @@ func hasFrontmatter(raw []byte) bool {
 			continue
 		}
 		if !isFMDelimiter(t) || t != FMOpen {
-			return false
+			return 0, 0, false
 		}
 		break
 	}
+	if i >= len(lines) {
+		return 0, 0, false
+	}
 	for j := i + 1; j < len(lines); j++ {
 		if isFMDelimiter(lines[j]) {
-			return true
+			return i, j, true
 		}
 	}
-	return false
+	return 0, 0, false // 有开无闭：不是合法 frontmatter（官方第 ② 条当作没有）
 }
 
 // setFrontmatterField 写入或更新 frontmatter 里的一个标量字段。
@@ -153,23 +168,17 @@ func hasFrontmatter(raw []byte) bool {
 func setFrontmatterField(raw []byte, key, value string) (out []byte, changed bool, err error) {
 	s, bom := splitBOM(raw)
 	lines := strings.Split(s, "\n")
-	if len(lines) == 0 || !isFMDelimiter(lines[0]) {
+	openIdx, closeIdx, ok := findFrontmatter(raw)
+	if !ok {
 		// 防御：调用方已判过 frontmatter 存在，这里不该发生。返回原内容而不是
-		// 凭空造一个 frontmatter（官方第 ② 条）。
+		// 凭空造一个 frontmatter（官方第 ② 条）。口径与 hasFrontmatter 共用
+		// findFrontmatter，所以"判定有"与"能编辑"不会再出现分歧。
 		return raw, false, nil
 	}
-	close := -1
-	for i := 1; i < len(lines); i++ {
-		if isFMDelimiter(lines[i]) {
-			close = i
-			break
-		}
-	}
-	if close < 0 {
-		// 有开无闭：不是合法 frontmatter，当作"没有 frontmatter"，不动它。
-		return raw, false, nil
-	}
-	indent := frontmatterIndent(lines[:close])
+	close := closeIdx
+	// 扫描范围必须**跳过开定界行**：它自身缩进为 0，会把最小缩进拖到 0，
+	// 于是"整块缩进两格"的 frontmatter 会被写回顶格的 modified（修复前后的行为要一致）。
+	indent := frontmatterIndent(lines[openIdx+1 : close])
 	newLine := indent + key + ": " + value
 	for i := 1; i < close; i++ {
 		if fmKey(lines[i]) != key {
@@ -187,18 +196,42 @@ func setFrontmatterField(raw []byte, key, value string) (out []byte, changed boo
 	return appendBOM(string(out), bom), true, nil
 }
 
-// frontmatterIndent 取 frontmatter 内最后一条有效记录的缩进（0 = 顶格）。
+// frontmatterIndent 取 frontmatter 内**顶层键**的缩进（0 = 顶格）。
 //
-// 官方示例是顶格 `type: user`；`modified` 与 `type` 同级。取最后一条有效记录的
-// 缩进而不是写死 0，是为了跟随用户已有的写法（有人会整体缩进两格）。
+// 官方示例是顶格 `type: user`；`modified` 与 `type` 同级。跟随用户已有的写法
+// （有人会整体缩进两格），所以不能写死 0。
+//
+// 为什么取**最小**缩进而不是「最后一条有效记录」的缩进（2026-09-29 修复）：
+// 嵌套结构下两者不等价。以下输入曾产出**非法 YAML** ——
+//
+//	---
+//	type: user
+//	tags:
+//	  - alpha
+//	  - beta
+//	  modified: 2026-09-29T...   <- 挂进了 tags 的列表里
+//	---
+//
+// 结果是整个 frontmatter 不可解析（`type` 一并丢失），而官方把 `modified` 的用途
+// 正是"让模型读回记忆时知道这条有多新"—— 时间戳读不回来，这条记忆的时效信息归零。
+// 该损坏**静默**：不报错、不打日志、测试全绿。修复前的测试恰好只覆盖了"整块缩进"
+// 这一种能工作的形态，把会坏的形态漏掉了。
+//
+// 最小缩进即顶层键的缩进：嵌套列表/嵌套对象的子行更深，取 min 必然落在顶层；
+// 整块被缩进时所有键同深，min 仍是它们的共同缩进，行为与修复前一致。
 func frontmatterIndent(lines []string) string {
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) == "" {
+	indent := ""
+	found := false
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) == "" {
 			continue
 		}
-		return lines[i][:len(lines[i])-len(strings.TrimLeft(lines[i], " \t"))]
+		cur := ln[:len(ln)-len(strings.TrimLeft(ln, " \t"))]
+		if !found || len(cur) < len(indent) {
+			indent, found = cur, true
+		}
 	}
-	return ""
+	return indent
 }
 
 // isFMDelimiter 判定 frontmatter 定界行：`---` 或 `...`（两者都是 YAML 的定界标记）。

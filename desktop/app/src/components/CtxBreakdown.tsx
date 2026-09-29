@@ -16,7 +16,7 @@ import { useT } from '../i18n'
 //
 // 分区配色（水墨主题内取色，两套主题自动跟随）：消息=黛青（同 ctx 环主色）、
 // 工具=赭石、MCP=朱砂（外部集成）、系统提示词=竹青、技能=黛青+朱砂混色、其他=灰。
-const PART_ORDER = ['system_prompt', 'skills', 'tools', 'mcp', 'messages', 'other']
+const PART_ORDER = ['system_prompt', 'skills', 'memory', 'tools', 'mcp', 'messages', 'other']
 
 export default function CtxBreakdownPanel({
   used,

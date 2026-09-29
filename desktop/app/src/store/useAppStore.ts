@@ -181,6 +181,18 @@ export interface SkillDetail {
   resources: string[]
 }
 
+// Project Memory 开关（bridge memory_settings 命令）。
+// explicit=false 表示用户从未设置过（默认开）—— UI 用来区分「默认开着」与「你手动开着」，
+// 前者不该在文案里说成用户的决定。
+export interface MemorySettings {
+  enabled: boolean
+  explicit: boolean
+  applies_to: string
+  memory_dir?: string
+  memory_dir_error?: string
+  env_override: boolean
+}
+
 // 上下文构成分区（bridge context_breakdown 命令）。
 // 分区键与 SDK 常量一一对应：system_prompt / skills / tools / mcp / messages / other。
 // 口径（2026-09-20 重定）：
@@ -2383,6 +2395,8 @@ interface AppState {
   externalSkillsError?: string
   externalSkillsImported?: number
   skillDetail?: SkillDetail // 技能详情（skill_get；SkillsPage 预览）
+  // Project Memory 开关（memory_settings；设置面板 · Agent 组）。
+  memorySettings?: MemorySettings
   marketSkills?: MarketSkill[] // 远程市场浏览结果（skill_browse；SkillsPage 市场区块）
   markets: MarketInfo[] // 已保存市场（market_list；SkillsPage 市场管理）
   mcpServers: MCPServerInfo[] // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
@@ -2487,6 +2501,10 @@ interface AppState {
   toggleSkill(name: string, enabled: boolean): void // 启用/禁用（真过滤：发现清单 + load_skill）
   getSkill(name: string): void // 技能详情预览（skill_get）
   closeSkill(): void
+  // Project Memory 开关（设置面板 · Agent 组）。生效时机 = 下一个会话；
+  // 乐观更新，bridge 落盘失败时由 memory_set_enabled 响应触发回拉。
+  fetchMemorySettings(): void
+  setMemoryEnabled(on: boolean): void
   installSkill(url: string, scope: string, name?: string): void // 远程技能下载（skill_install）；name 可选 = 市场浏览后精确安装单个
   browseMarket(url: string): void // 浏览远程市场技能（skill_browse，只读；结果落 marketSkills）
   refreshMarket(url: string): void // 刷新当前浏览的市场（重拉 + 对比本地；安装/更新后调）
@@ -3813,6 +3831,28 @@ export function dispatchEvent(raw: AnyEvent): void {
       // skill_get：技能详情（SKILL.md 指令 + 资源清单；预览）
       if (t === 'skill_get') {
         setState({ skillDetail: d as unknown as SkillDetail })
+        break
+      }
+      // memory_settings：Project Memory 开关回读。全局设置，不按工作区过滤。
+      if (t === 'memory_settings') {
+        if (r.ok) {
+          setState({
+            memorySettings: {
+              enabled: d.enabled !== false,
+              explicit: d.explicit === true,
+              applies_to: String(d.applies_to || 'next_session'),
+              memory_dir: typeof d.memory_dir === 'string' ? d.memory_dir : undefined,
+              memory_dir_error: typeof d.memory_dir_error === 'string' ? d.memory_dir_error : undefined,
+              env_override: d.env_override === true,
+            },
+          })
+        }
+        break
+      }
+      // memory_set_enabled：落盘失败要把 UI 回滚到 bridge 的权威值。
+      // 乐观更新已经改了本地状态，不回滚就会出现「显示已关闭、重启后又开着」。
+      if (t === 'memory_set_enabled') {
+        if (!r.ok) send({ type: 'memory_settings', payload: {} })
         break
       }      // context_breakdown：上下文构成分区（Composer ctx 环 hover 面板）。
       // 会话级数据：响应归属的会话 ≠ 当前活跃会话（切会话后迟到）→ 丢弃，避免面板
@@ -7135,6 +7175,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   getSkill: (name) => send({ type: 'skill_get', payload: { name } }),
   closeSkill: () => set({ skillDetail: undefined }),
+  // —— Project Memory 开关（设置面板 · Agent 组）——
+  //
+  // 生效时机 = **下一个会话**（或 switch_model / switch_persona / set_provider 重建
+  // loop 之后）。运行中的会话不变：记忆注入是系统提示词的一部分，会话中途删掉会让
+  // 同一会话前后两轮"你记得什么"不一致，而记忆的价值恰恰建立在跨轮一致上。
+  //
+  // 乐观更新 + 失败回滚：bridge 落盘 ~/.go-code/memory.json 失败必须让 UI 回到原值
+  // ——「面板显示已关闭、重启后又开着」比报错更难排查。
+  fetchMemorySettings: () => send({ type: 'memory_settings', payload: {} }),
+  setMemoryEnabled: (on: boolean) => {
+    const prev = get().memorySettings
+    const base: MemorySettings = prev ?? {
+      enabled: true, explicit: false, applies_to: 'next_session', env_override: false,
+    }
+    set({ memorySettings: { ...base, enabled: on, explicit: true } })
+    send({ type: 'memory_set_enabled', payload: { enabled: on } })
+  },
   // 远程技能下载（exec git，全局/工作区作用域）：装完回拉清单；name 可选 = 市场浏览后精确安装单个
   installSkill: (url, scope, name) => {
     const payload: Record<string, unknown> = { url, scope }

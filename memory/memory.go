@@ -27,11 +27,15 @@
 //	索引排序、冲突时的优先级、过期 / 淘汰 / 自动清理、向量检索、/memory UI、
 //	subagent 记忆继承、Skill Candidate、任何形式的自进化
 //
-// # 当前状态：本包**未被任何生产文件 import**（有意为之）
+// # 当前状态：已接入生产路径（2026-09-29，commit 93b9a87）
 //
-// Step 0 的三臂行为基线（desktop/bridge/memory_baseline_test.go 的
-// baselineEnforceEmptyMemoryState）断言"仓库没有可被装配路径消费的 memory 实现"——
-// 一旦接线，那次基线测到的就不是模型的行为而是实现的行为。详见 bootstrap.go 顶部的说明。
+// 本包此前**刻意不被任何生产文件 import**，以便 Step 0 三臂行为基线在"空状态"上
+// 测量模型行为而非实现行为。那些数字已采集完毕（Wiki 协议 §1.5），基线装置现在
+// 在产品树上**有条件跳过**（唯一 importer 是 desktop/bridge 时跳过，出现**其他**
+// importer 仍 t.Fatal —— 护栏防的是"不知道自己在测什么"，该能力完整保留）。
+//
+// 装配点：desktop/bridge/main.go 的 buildLoop（Step 3 注入）与 newSessionEngine
+// （Step 4 钩子）。详见 bootstrap.go 顶部的说明。
 //
 // 官方依据（memory#storage-location）：
 //
