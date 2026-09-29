@@ -45,7 +45,9 @@ type IndexLoad struct {
 	Dir Dir
 	// Path 索引文件绝对路径。
 	Path string
-	// Text 截断后的索引正文，**逐字节等于**注入段落去掉标题后的内容。
+	// Text 截断后的索引正文（**不含**注入段落自带的那行标题，也**不含**截断提示——
+	// 提示是宿主加的话，不是索引内容，见 truncationNotice）。
+	// 未发生截断时，本字段与注入段落去掉标题后的内容**逐字节相等**。
 	Text string
 	// TotalLines 索引总行数（截断前）。
 	TotalLines int
@@ -114,7 +116,14 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 	if strings.TrimSpace(text) == "" {
 		// 空索引（如模型建了 MEMORY.md 但还没写条目）：同样不注入。
 		// 注入一个空标题只会占 context 并给模型一个"记忆系统已就绪"的错觉。
+		// 这一分支在截断提示之前：被丢掉的若只是空行，那不是记忆，
+		// "无记忆时逐字节不变"（§5.2）比任何提示都重要。
 		return Injection{Enabled: true, Dir: &d, Reason: "empty-index"}, nil
+	}
+	// ↓ 截断提示：**只陈述本次已经发生的事实**，不新增机制（见 truncationNotice）。
+	// 未截断时 text 逐字节不变，注入文本也逐字节不变（§5.2 硬要求）。
+	if load.TruncatedBy != "" {
+		text += truncationNotice(load.TruncatedBy)
 	}
 	return Injection{
 		Text:    indexHeading + "\n\n" + text,
@@ -122,6 +131,50 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 		Dir:     &d,
 		Load:    load,
 	}, nil
+}
+
+// truncationNotice 拼出"本次加载被截断"的末尾提示（官方口径）。
+//
+// # 为什么这不是自行发明机制
+//
+// 官方（memory#how-it-works）已经规定了这件事会发生，只是没有规定怎么告知：
+//
+//	"Claude Code measures the file against the 200-line and 25KB read limits…
+//	 because everything past the limit is dropped on the next load."
+//
+// 所以"本段清单不完整"是**既有实现里已经在发生的既成事实**（boundIndex 一直在丢），
+// 提示只是把它如实呈现给被影响的一方——与"索引行如实呈现、不删不改"是同一条原则：
+// 宿主可以搬运事实，不能替模型判断。
+//
+// 而不做提示的后果不是"少显示几十行"，是一个模型自己发现不了的循环：
+// 250 行的索引里后 50 条在清单上凭空消失 → 模型据此判定"这条我没记过" → 重记一遍
+// → 索引更长 → 下一轮又消失一批。它看到的清单语法完全正常，没有任何可察觉的信号。
+//
+// # 为什么不改索引本身
+//
+// 官方限额是**加载**限额（read limits），不是"必须这么短"的校验：写侧 CheckIndex 才是
+// 校验面，而它可被 Bash（`echo >> MEMORY.md`）绕过 write_file 钩子。读侧唯一能做的、
+// 且不越权做的事，就是如实说一声"这里被截断了"，剩下的由模型自己 read MEMORY.md 解决。
+//
+// # 三条自我约束（写死在这里以免后来者"顺手优化"）
+//
+//  1. **不点名**：提示里不得出现任何被截掉的文件名或条目数——那是在泄露内容，
+//     也在暗示"确实丢了哪几条"，模型会开始猜。
+//  2. **不计数**：提示是宿主加的话，不属于 MEMORY.md，因此**不计入 200 行 / 25KB**
+//     （官方量的是文件本身）。它拼在 boundIndex 之后，天然不会被下一轮度量到。
+//  3. **不引导新行为**：只说"可以自己读完整清单"——这是官方本来就有的标准文件工具能力，
+//     不是新协议（§2：上一版 6 条自相矛盾的协议是 12%~62% 采纳率的来源）。
+//
+// 放在**末尾**而不是开头：开头是清单的第一印象，模型逐行读清单时最先看到的就是它，
+// 会把每一条都当成有保留地呈现；末尾则只在模型读完清单、准备据此行动时才生效，
+// 且不打断「标题 → 条目」这个官方规定的阅读结构。
+func truncationNotice(truncatedBy string) string {
+	// truncatedBy 的取值域只有 "line" / "byte"（boundIndex 的全部赋值点），
+	// 原样透出，好让模型知道**哪一个**限额先到：成因不同，模型该做的事也不同
+	// （行数超了要合并条目，字节超了要缩短行）。它是个计量维度名，不是记忆内容。
+	return "\n\n注意：以上索引已按 200 行 / 25KB 限额截断，本次先到的是 " + truncatedBy +
+		" 限额（超出限额的内容在本次加载中被丢弃）。未显示的部分可能还包含其他记忆条目，" +
+		"如需查看完整清单，请自行读取 MEMORY.md。"
 }
 
 // boundIndex 把索引正文截到 MaxIndexLines 行 / MaxIndexBytes 字节，取先到者。
