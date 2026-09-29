@@ -4,7 +4,7 @@ import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, SUBAGENT
 import { useT } from '../i18n'
 import { meshUUID, meshToken } from '../lib/meshRand'
 import { copyText } from '../lib/clipboard'
-import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, ImageIcon, PaletteIcon, SendIcon, SessionIcon, Sparkles, TerminalIcon } from './icons'
+import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, ImageIcon, PaletteIcon, PinIcon, SendIcon, SessionIcon, Sparkles, TerminalIcon } from './icons'
 import { BrowserSettingsEditor } from './BrowserSettingsEditor'
 import { ComputerSettingsEditor } from './ComputerSettingsEditor'
 import { IMSettingsEditor } from './IMSettingsEditor'
@@ -17,7 +17,7 @@ import { getTransport } from '../transport'
 
 // 左侧导航分组（对齐设计稿：基础项 → 模型 → Agent 能力 → 数据与统计）。
 // 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不分组，顶部基础项）。
-type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'im' | 'mesh' | 'usage'
+type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'im' | 'mesh' | 'memory' | 'usage'
 const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab; label: string; icon: ReactElement }[] }[] = [
   {
     id: 'base',
@@ -42,6 +42,7 @@ const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab;
       { key: 'plugin', label: 'settings.plugin', icon: <AccessIcon size={14} /> },
       { key: 'im', label: 'settings.im', icon: <SessionIcon size={14} /> },
       { key: 'mesh', label: 'settings.mesh', icon: <SendIcon size={14} /> },
+      { key: 'memory', label: 'settings.memory', icon: <PinIcon size={14} /> },
     ],
   },
   {
@@ -115,6 +116,7 @@ export default function SettingsModal() {
           {tab === 'plugin' && <PluginTab />}
           {tab === 'im' && <IMTab />}
           {tab === 'mesh' && <MeshTab />}
+          {tab === 'memory' && <MemoryTab />}
           {tab === 'usage' && <UsageStats />}
         </div>
       </div>
@@ -2349,6 +2351,82 @@ function MeshTab() {
             </div>
           </div>
         </>
+      )}
+    </>
+  )
+}
+
+// —— Project Memory 开关（设置面板 · Agent 组）——
+//
+// 生效时机 = **下一个会话**（或 switch_model / switch_persona / set_provider 重建
+// loop 之后）。运行中的会话不变，这不是缺陷：记忆注入是**系统提示词的一部分**，
+// 会话中途删掉会让同一会话前后两轮「你记得什么」不一致，而记忆的价值恰恰建立在
+// 跨轮一致上。所以文案必须写明这一点，否则用户会以为开关失灵。
+//
+// 另两处诚实展示，不粉饰：
+//   · env_override —— 环境变量压过面板选择时明确告知，否则用户在这里改了却没生效
+//   · explicit=false —— 「默认开着」不是「你的决定」，文案不冒认
+function MemoryTab() {
+  const t = useT()
+  const ms = useAppStore((s) => s.memorySettings)
+  const fetchMemorySettings = useAppStore((s) => s.fetchMemorySettings)
+  const setMemoryEnabled = useAppStore((s) => s.setMemoryEnabled)
+  const showToast = useAppStore((s) => s.showToast)
+
+  useEffect(() => {
+    void fetchMemorySettings()
+  }, [fetchMemorySettings])
+
+  const on = ms?.enabled ?? true
+
+  return (
+    <>
+      <div className="settings-sec-title">{t('settings.memory')}</div>
+      <p className="set-desc">{t('settings.memory.desc')}</p>
+
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.memory.enable')}</div>
+          <div className="set-desc">{t('settings.memory.enable.desc')}</div>
+        </div>
+        <div className="seg" role="radiogroup" aria-label={t('settings.memory.enable')}>
+          <button className={on ? 'cur' : ''} aria-pressed={on} onClick={() => setMemoryEnabled(true)}>{t('settings.on')}</button>
+          <button className={!on ? 'cur' : ''} aria-pressed={!on} onClick={() => setMemoryEnabled(false)}>{t('settings.off')}</button>
+        </div>
+      </div>
+
+      <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.nextSession')}</p>
+
+      {ms?.env_override && (
+        <p className="set-desc" style={{ marginTop: 8, color: 'var(--warn, #d08700)' }}>
+          {t('settings.memory.envOverride')}
+        </p>
+      )}
+      {!ms?.explicit && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.defaultOn')}</p>
+      )}
+
+      {ms?.memory_dir && (
+        <div className="mesh-conn-url" style={{ marginTop: 12 }}>
+          <code className="mesh-code">{ms.memory_dir}</code>
+          {/* 复制反馈用「已复制」就地替换文案（与 MeshTab 的连接地址同一范式），
+              而不是 toast：这段面板已经在讲路径，就地反馈更贴近被复制的对象。 */}
+          <button
+            className="btn"
+            onClick={() => {
+              void copyText(ms.memory_dir || '').then((ok) => {
+                if (ok) showToast(t('settings.memory.dirCopied'))
+              })
+            }}
+          >
+            {t('settings.memory.dirCopy')}
+          </button>
+        </div>
+      )}
+      {ms?.memory_dir_error && (
+        <p className="set-desc" style={{ marginTop: 8, color: 'var(--danger, #c0392b)' }}>
+          {ms.memory_dir_error}
+        </p>
       )}
     </>
   )

@@ -115,6 +115,18 @@ type Config struct {
 	AgentMDFiles []string
 	AgentMDDirs  []string
 
+	// MemoryInjection Project Memory 索引段（Step 3 启动注入的**成品文本**，由宿主
+	// 预先算好放在这里）；空 = 不注入该层。
+	//
+	// 为什么宿主预渲染而不是本层去调 memory.Bootstrap：
+	//  ① composeSystemPrompt 每轮循环都会重跑（见 appendLoadedSkill / 上下文压缩后
+	//     的重建），而 Bootstrap 要跑 git 解析身份 + 读索引，放这里等于每轮多一次
+	//     子进程 + N 次读盘。
+	//  ② 本层不认识"记忆目录"这个产品概念（同 AgentMDFiles / binaryHint 的分层理由）。
+	//
+	// 宿主侧的开关语义（关闭 = 完全不注入，而不是注入一段"请勿使用记忆"）在
+	// memory.Bootstrap 内闭环，本层只负责把**可能为空**的成品文本拼进去。
+	MemoryInjection string
 	// Skills 技能注册表（渐进披露的发现来源：清单注入系统提示词），nil 表示无技能
 	Skills *skills.Registry
 
@@ -311,6 +323,13 @@ func WithAgentMDDir(dir string) Option {
 
 func WithSkills(reg *skills.Registry) Option {
 	return func(c *Config) { c.Skills = reg }
+}
+
+// WithMemoryInjection 注入 Project Memory 索引段（Step 3）。参数是**成品文本**，
+// 由宿主预先调 memory.Bootstrap 算好（见 Config.MemoryInjection 的理由）。
+// 空串 / 不调本选项 = 不注入该层。
+func WithMemoryInjection(text string) Option {
+	return func(c *Config) { c.MemoryInjection = text }
 }
 
 func WithCompressor(comp Compressor) Option {
@@ -1500,6 +1519,17 @@ func (a *AgentLoop) composeSystemPrompt() string {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(mem)
+	}
+	// Project Memory 索引（Step 3）。位置在工作记忆**之后**：官方要求"与 AGENTS.md
+	// 同级或其后"，而工作记忆是模型的项目指令、索引是模型的**自己写下的**东西，
+	// 后者放在指令之后，读序上更接近"指令 → 我记的东西"。
+	// 空串 = 无记忆 / 开关关闭（关闭由宿主不填本字段表达，本层不做二次判定，
+	// 免得"注入一段叫模型别用记忆"那种仍占 context 的半开半关）。
+	if a.cfg.MemoryInjection != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(a.cfg.MemoryInjection)
 	}
 	// 技能清单（buildSkillManifest 自带 \n\n 前缀）
 	if a.cfg.Skills != nil {

@@ -72,7 +72,8 @@
     "e2e:container": "node e2e/verify_preview_container.mjs",
     "e2e:auto": "node e2e/verify_auto_open_visual.mjs",
     "e2e:session-tabs": "node e2e/verify_session_tabs_persist.mjs",
-    "test:retry-progress": "node e2e/verify_retry_progress.mjs"
+    "test:retry-progress": "node e2e/verify_retry_progress.mjs",
+    "e2e:memory": "node e2e/memory_settings_e2e.mjs"
   },
   "build": {
     "appId": "ai.hai.desktop",

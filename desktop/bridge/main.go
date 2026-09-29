@@ -57,6 +57,7 @@ import (
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/hooks"
 	"github.com/seven7628/hai-harness/mcp"
+	"github.com/seven7628/hai-harness/memory"
 	"github.com/seven7628/hai-harness/plugin"
 	"github.com/seven7628/hai-harness/plugin/browser"
 	computerplugin "github.com/seven7628/hai-harness/plugin/computer"
@@ -666,6 +667,7 @@ type manager struct {
 	mu          sync.Mutex
 	workspaces  map[string]*workspaceRuntime // key = workspace 绝对路径
 	provCfg     *providerConfig              // 全局 provider 配置（热切换；set_provider 更新）
+	memPrefs    *memoryPrefStore             // Project Memory 用户开关（设置面板；下一个会话生效）
 	out         *out
 	metrics     *FileMetricsStore // 全局指标（跨 workspace，~/.go-code/metrics.jsonl）
 	seq         int
@@ -2356,7 +2358,42 @@ func (m *manager) dispatch(c command) {
 		}
 		m.resp(c, true, "", map[string]any{"skills": m.skillList(ws)})
 
-	case "skill_toggle": // 启用/禁用技能（真过滤：发现清单 + load_skill 立即生效）
+	case CmdMemorySettings: // 读取 Project Memory 开关（设置面板打开时）
+		p := m.memPrefs.load()
+		// 目录路径一并给前端：面板要显示"记忆存在哪里"，用户才能自己找到/备份/删除。
+		dir, dirErr := memory.MemoryRoot()
+		resp := map[string]any{
+			"enabled":      p.enabled(),
+			"explicit":     p.Enabled != nil, // false = 用户从未设置过（默认开）
+			"applies_to":   "next_session",
+			"memory_dir":   dir,
+			"env_override": os.Getenv(memory.EnvAutoMemoryEnabled) != "",
+		}
+		if dirErr != nil {
+			resp["memory_dir_error"] = dirErr.Error()
+		}
+		m.resp(c, true, "", resp)
+
+	case CmdMemorySetEnabled: // 改 Project Memory 开关（下一个会话生效）
+		raw, present := c.Payload["enabled"]
+		if !present {
+			m.resp(c, false, "缺少 enabled 字段", nil)
+			return
+		}
+		on, ok := raw.(bool)
+		if !ok {
+			m.resp(c, false, "enabled 必须是布尔值", nil)
+			return
+		}
+		// 落盘失败必须回传给前端让它回滚开关：面板显示"已关闭"但重启后又开着，
+		// 比报错更难排查。
+		if err := m.memPrefs.set(memoryPrefs{Enabled: &on}); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{"enabled": on, "applies_to": "next_session"})
+
+	case CmdSkillToggle: // 启用/禁用技能（真过滤：发现清单 + load_skill 立即生效）
 		if ws == "" {
 			m.resp(c, false, "workspace 为空", nil)
 			return
@@ -3777,7 +3814,7 @@ func (r *subagentEffortRef) set(level provider.ReasoningEffortLevel) {
 // （run_python 的固定解释器来源；nil = 不注册 run_python —— 未装配运行时的 SDK 用法
 // 不注册比注册一个必然失败的工具更好，诊断留给宿主）。按 persona profile 决定工具集：
 // Work 无 bash（办公助理不跑命令）、无 agent_*/plan_submit（不派子 agent / 不规划）。
-func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string)) (*tools.Engine, *subagentEffortRef) {
+func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -3785,6 +3822,22 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	effortRef := newSubagentEffortRef(provider.ReasoningEffortLevel(effort))
 	eng := tools.NewToolEngine()
 	ft := builtin.NewFileTools(workspace)
+	// Project Memory 的 modified 钩子（Step 4）：记忆文件由模型用标准 write_file /
+	// edit_file 写入，官方规定写入时补 `modified`，没有别的入口。宿主钩子在**写成功
+	// 之后**触发，错误不吞。闸门（开关 / 路径是否记忆 / 目录解析）全在宿主侧，
+	// 工具层不认识"记忆"这个概念。未开启记忆时钩子第一次调用就返回 nil，零开销。
+	{
+		cfg := memory.Config{}
+		if len(memCfg) > 0 {
+			cfg = memCfg[0]
+		}
+		// 惰性：装配期不碰 bgCtx（此时它捕获的 session 变量仍为 nil，调用即崩）。
+		// 钩子在写文件时才取 ctx，那时会话已就绪。
+		mh := newMemoryHost(cfg)
+		ft = ft.WithPostWrite(func(absPath string) error {
+			return mh.postWrite(bgCtx(), workspace, absPath)
+		})
+	}
 	if sbx != nil {
 		// bash 沙箱后端（macOS Seatbelt + WithRelease 放行门）：注入后 bash 命令在沙箱内执行。
 		ft = ft.WithBashSandbox(sbx)
@@ -3950,7 +4003,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
-	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec())
+	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()
@@ -4044,6 +4097,19 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	if m.provCfg.isOpenCodeGateway() {
 		opts = append(opts, agents.WithRetainReasoning(true))
 	}
+	// Project Memory 启动注入（Step 3）。装配期算一次：composeSystemPrompt 每轮
+	// 循环都会重跑，而解析记忆目录要跑 git 读索引，放进去等于每轮重复一次。
+	// 空串 = 无记忆 / 无 git 身份 / 开关关闭，三者都不注入（memory_wiring.go 有解释）。
+	// 解析成功的结果不跨装配点共享：newSessionEngine 的 Step 4 钩子持有自己的
+	// memoryHost，所以这里最多多一次 git 调用，换来装配层零状态。
+	// 开关在**会话装配期**取值（下一个会话生效，运行中的会话不变，见 memory_prefs.go）。
+	// 身份解析要跑 git，给一个有界 context：不让一个挂住的 git 阻塞会话创建。
+	// 这里不能用 bgCtx()——buildLoop 阶段它捕获的 session 变量还是 nil。
+	mctx, mcancel := context.WithTimeout(context.Background(), memoryResolveTimeout)
+	if inj := newMemoryHost(m.memoryConfig()).injection(mctx, workspace); inj != "" {
+		opts = append(opts, agents.WithMemoryInjection(inj))
+	}
+	mcancel()
 	// TEMP-STARTUP A7：NewAgentLoop
 	loopStart := time.Now()
 	loop := agents.NewAgentLoop(opts...)
@@ -4765,6 +4831,7 @@ func serve() error {
 		metrics:    NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
 		imPlugin:   implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
 		hub:        session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
+		memPrefs:   newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
 	}
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()

@@ -69,6 +69,11 @@ const (
 	//「锚点 − 静态合计」残差（口径见 docs/CTX_ACCOUNTING_FIX_2026-09-20.md）。
 	CmdContextBreakdown Command = "context_breakdown"
 	CmdSkillToggle      Command = "skill_toggle"
+	// CmdMemorySettings / CmdMemorySetEnabled Project Memory 开关（设置面板）。
+	// 生效时机 = **下一个会话**（或 switch_model / switch_persona / set_provider
+	// 重建 loop 之后）；运行中的会话不改变，理由见 memory_prefs.go。
+	CmdMemorySettings   Command = "memory_settings"
+	CmdMemorySetEnabled Command = "memory_set_enabled"
 	CmdSkillGet         Command = "skill_get"
 	CmdLoadSkill        Command = "load_skill"
 	CmdCommand          Command = "command"

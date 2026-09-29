@@ -32,6 +32,28 @@ type FileTools struct {
 	// bash，等于让模型去调不存在的工具、白耗轮次；nil = 默认提示 bash（库默认，既有
 	// 用户不受影响）。
 	binaryHint func(path string) string
+
+	// postWrite 写/改成功后的宿主钩子，参数是**绝对路径**。nil = 不挂钩（库默认，
+	// 既有用户不受影响）。
+	//
+	// 用途：Project Memory 的 modified 戳（memory 包 StampModified）。官方规定
+	// topic 文件被写入时补 `modified`，而记忆文件由模型用**标准 write_file /
+	// edit_file** 写入——所以戳时间戳只能挂在这两个工具的写成功路径上，没有别的
+	// 入口。工具本身不知道"记忆"是什么概念，只负责在写成功后报一次绝对路径；
+	// 是不是记忆文件、要不要补戳、开关是否打开，全部由宿主的钩子决定。
+	//
+	// 为什么用钩子而不是直接 import memory：工具层不应依赖任何产品概念
+	// （同 binaryHint 的分层理由）。宿主不注入钩子 = 行为与今天完全一致。
+	postWrite func(absPath string) error
+}
+
+// WithPostWrite 注入"写/改成功后"钩子（nil = 保持默认不挂钩）。
+//
+// 钩子返回错误会**一并回给模型**，不吞：Step 4 补戳失败若被静默吞掉，记忆文件
+// 会带着过期或缺失的 modified 继续留在索引里，而模型毫不知情。
+func (f *FileTools) WithPostWrite(fn func(absPath string) error) *FileTools {
+	f.postWrite = fn
+	return f
 }
 
 // WithBashSandbox 注入 bash 工具的执行后端（如 macOS Seatbelt / Linux bwrap）。
@@ -128,8 +150,12 @@ func denyHarnessConfigPath(abs string) error {
 		// 与 runtime（受管 Python 运行时 ~/.go-code/runtime/python：venv 解释器与
 		// 依赖库需可读、__pycache__ 需可写）—— 与沙箱 carve-out
 		// （defaultOpenSubpaths）同语义，两处必须同步，否则沙箱能跑而文件工具读写不了。
+		// memory（Project Memory，官方 auto memory 目录）：官方形态就是"模型用**标准
+		// read_file / write_file / edit_file** 读写记忆目录"，没有记忆专用工具
+		// （技术方案 §1）。不放行它 = 模型既读不到注入的索引指向的 topic，也写不进
+		// 新记忆，auto memory 整个不成立。该子树下只有记忆文件（0600），不含密钥。
 		// .go-code 其余（settings.json 明文密钥 / sessions / events）仍保护。
-		for _, sub := range []string{"plugins", "runtime"} {
+		for _, sub := range []string{"plugins", "runtime", "memory"} {
 			dir := filepath.Join(cfgDir, sub)
 			if abs == dir || strings.HasPrefix(abs, dir+string(os.PathSeparator)) {
 				return nil
@@ -537,6 +563,9 @@ func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, er
 			}
 		}
 		t.diff.Created = created
+		if err := t.notifyPostWrite(p); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("appended (+%d)", t.diff.Added), nil
 	}
 	// 覆盖：锁内读旧内容（若存在）→ 替换 → 算 diff。旧内容须在替换前读取，
@@ -559,7 +588,21 @@ func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, er
 	// 不能用 Removed==0 推断（纯插入内容同样是 +N -0）。
 	t.diff = finalizeDiff(computeFileDiff(a.Path, old, a.Content), a.Content)
 	t.diff.Created = lock == nil
+	if err := t.notifyPostWrite(p); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("written (+%d -%d)", t.diff.Added, t.diff.Removed), nil
+}
+
+// notifyPostWrite 触发宿主"写/改成功后"钩子；未注入钩子时是零成本空操作。
+//
+// 只在**写成功之后**调用：写失败时文件没变，补戳没有意义，且会把一次已经失败
+// 的操作报成"记忆写入出错"，掩盖真正的错误。
+func (t *writeFileTool) notifyPostWrite(absPath string) error {
+	if t.FileTools == nil || t.FileTools.postWrite == nil {
+		return nil
+	}
+	return t.FileTools.postWrite(absPath)
 }
 
 // ---------- edit_file ----------
@@ -643,7 +686,19 @@ func (t *editFileTool) Call(_ context.Context, _, arguments string) (string, err
 	// 旧全文 s 与 replaced 均在手，免费产 diff（信息源头在工具）。
 	// edit_file 入口已 statPath 要求文件存在 → Created 恒 false（modified）。
 	t.diff = finalizeDiff(computeFileDiff(a.Path, s, replaced), replaced)
+	if err := t.notifyPostWrite(p); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("[edit_file: replaced 1 occurrence in %s (+%d -%d)]", a.Path, t.diff.Added, t.diff.Removed), nil
+}
+
+// notifyPostWrite 触发宿主"写/改成功后"钩子；未注入钩子时是零成本空操作。
+// 理由与 write_file 同名方法一致：只在写成功后调用，错误不吞。
+func (t *editFileTool) notifyPostWrite(absPath string) error {
+	if t.FileTools == nil || t.FileTools.postWrite == nil {
+		return nil
+	}
+	return t.FileTools.postWrite(absPath)
 }
 
 // readAllLocked 读取目标文件全文（持锁时直接复用锁定 fd，避免再次 open 竞态）。

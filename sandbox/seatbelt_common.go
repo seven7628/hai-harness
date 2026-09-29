@@ -33,6 +33,10 @@ var defaultSensitivePaths = []string{
 var defaultOpenSubpaths = []string{
 	".go-code/plugins",
 	".go-code/runtime",
+	// .go-code/memory：Project Memory 目录（官方 auto memory）。官方形态是模型用
+	// **标准文件工具**读写记忆，没有记忆专用工具（技术方案 §1）；不放行则 bash 侧
+	// 写不了记忆，与文件工具侧行为不一致。该子树下只有记忆文件（0600），无密钥。
+	".go-code/memory",
 }
 
 // deviceReadPaths / deviceWritePaths 常规 shell 运行必需设备白名单（2026-08-28 误伤修复）。

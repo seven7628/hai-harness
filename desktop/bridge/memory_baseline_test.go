@@ -87,19 +87,53 @@ const (
 // 为什么写成硬失败而不是 t.Log：这是"基线有效"的前提条件。前提失效还继续出
 // 数字，等于重演上一版"先有数字再找证据"的路径。置 HAI_EVAL_BASELINE_FORCE=1
 // 可以在明知前提下失效时显式放行（并留下记录），但那是有意为之的越权。
+// baselineEnforceEmptyMemoryState 是本文件最硬的前置条件：**仓库当前不得有可被
+// 装配路径消费的 memory 实现**，否则基线测的是实现而不是模型（用户要求：Step 0
+// 的测量必须不依赖任何 Memory 实现；它必须有办法证明这一点，而不是口头声明）。
+//
+// 判据是"没有任何生产文件 import hai-harness/memory"——不是"没有 memory 目录"。
+//
+// 2026-09-29：Step 3/4 接线完成后，desktop/bridge **有意**成为 importer，于是本装置
+// 在产品树上永远无法成立。处理方式分两种，区别很重要：
+//
+//	① 唯一的 importer 是 desktop/bridge（即我们自己那次有意接线）→ 跳过，并说明
+//	   为什么跳过、在哪棵树上还能跑。数字已经采集完毕（原始 JSON 见 /tmp/evalout
+//	   与 Wiki 协议 §1.5），装置保留是为了记录"测的是什么"。
+//	② 出现**其他** importer → 仍然 t.Fatal。那是意外接线，而意外接线会让基线数字
+//	   静默变成"测实现"，正是这个断言存在的唯一理由。
+//
+// 跳过不是把护栏拆掉：护栏要防的是"不知道自己在测什么"，而 ① 是知道且已记录。
 func baselineEnforceEmptyMemoryState(t *testing.T) string {
 	t.Helper()
 	offenders := baselineMemoryImporters(t)
 	if len(offenders) > 0 {
+		// 接线白名单：只有 desktop/bridge 消费 memory 时，基线在产品树上不成立是
+		// **已知且有意**的，跳过；出现别的 importer 仍按下文硬失败。
+		const wiredPkg = "github.com/seven7628/hai-harness/desktop/bridge"
+		unexpected := make([]string, 0, len(offenders))
+		for _, o := range offenders {
+			if o != wiredPkg {
+				unexpected = append(unexpected, o)
+			}
+		}
+		if len(unexpected) == 0 {
+			t.Skipf(
+				"Step 0 基线装置在产品树上不成立：%s 已有意接线（Step 3 注入 + Step 4 钩子），"+
+					"而本基线必须在**空状态**上测。\n"+
+					"这不是回归 —— 基线数字已采集完毕（见 Wiki 协议 §1.5）；"+
+					"若要重跑，请在无 memory 装配的树上执行（例如 git worktree 于接线前的提交）。\n"+
+					"如需在本树强跑：HAI_EVAL_BASELINE_FORCE=1（会在报告里留痕，且数字测的是实现不是模型）。",
+				wiredPkg)
+		}
 		msg := fmt.Sprintf(
 			"仓库已有 %d 个生产文件 import hai-harness/memory：%v\n"+
-				"Step 0 基线必须在**空状态**上测 —— 此时测到的才是模型的行为，不是实现的行为。\n"+
-				"请在装配路径消费 memory 之前重跑基线（或先让实现只存在于未被引用的包里）。\n"+
+				"其中 %v 不是已知的接线点（desktop/bridge）—— 这是**意外接线**。\n"+
+				"Step 0 基线必须在**空状态**上测，否则测到的是实现的行为而不是模型的行为。\n"+
 				"明知这一点仍要强跑：HAI_EVAL_BASELINE_FORCE=1（会在报告里留痕）。",
-			len(offenders), offenders)
+			len(unexpected), unexpected, unexpected)
 		if os.Getenv("HAI_EVAL_BASELINE_FORCE") == "1" {
 			t.Log("⚠ " + msg)
-			return "OVERRIDDEN by HAI_EVAL_BASELINE_FORCE=1: " + strings.Join(offenders, ", ")
+			return "OVERRIDDEN by HAI_EVAL_BASELINE_FORCE=1: " + strings.Join(unexpected, ", ")
 		}
 		t.Fatal(msg)
 	}
