@@ -127,3 +127,55 @@ func composeWorkingMemory(files []agentMDFile) string {
 	}
 	return b.String()
 }
+
+// discoverUserAgentMD 用户级指令文件（~/.agents/AGENTS.md 等）：**单文件、非递归**。
+//
+// 为什么非递归：用户级目录（~/.agents）同时是 skills / subagents 的家，其子目录里
+// 天然可能各有自己的 AGENTS.md（如某个 skill 自带的说明）；递归会把它们全捞进来当
+// 个人全局指令 —— 语义错位且体积不可控。用户级只认「本目录的那一份」。
+//
+// 为什么单文件而非复用工作区的去重规则：工作区层是「一个 root 递归出一组文件」，
+// 用户级是「一个文件」，形状本就不同；同名共存时按 agentMDNames 顺序取第一个
+// （AGENTS.md 优先于 CLAUDE.md），与工作区的同级共存规则同向。
+//
+// 路径经 displayAgentMDPath 缩成 ~/.agents/AGENTS.md：注入 system 的是**个人 home
+// 路径**，展示缩写既更短、也不外泄用户名。
+func discoverUserAgentMD(dir string) []agentMDFile {
+	if dir == "" {
+		return nil
+	}
+	for _, name := range agentMDNames {
+		path := filepath.Join(dir, name)
+		// Stat 而非 Lstat：跟随符号链接（~/.agents/AGENTS.md → dotfiles 仓库是常见形态，
+		// 与 discoverAgentMD 同口径）；目录 / 断链 / 特殊文件跳过。
+		fi, err := os.Stat(path)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		return []agentMDFile{{
+			Name:    name,
+			RelPath: displayAgentMDPath(path),
+			Content: string(content),
+		}}
+	}
+	return nil
+}
+
+// displayAgentMDPath 把用户 home 前缀缩成 ~（仅用于展示；非 home 子树原样返回）。
+// 不复用 artifacts.go 的 (*artifactCollector).displayPath：那是「工作区内绝对路径 →
+// 相对路径」的另一套语义（此处要的是 home 缩写），方法集不共享、语义也不同。
+func displayAgentMDPath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	rel, err := filepath.Rel(home, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return path // 非 home 子树（或无法判定）：原样
+	}
+	return filepath.Join("~", rel)
+}

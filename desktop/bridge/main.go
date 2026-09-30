@@ -3647,9 +3647,10 @@ func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConf
 		agents.WithLLMTimeout(0),
 		agents.WithMaxRetries(11),
 		agents.WithRetryBackoff(agents.FixedBackoff(time.Second)),
-		agents.WithAgentMDDir(workspace), // 子任务共享工作区 AGENTS.md/CLAUDE.md
-		agents.WithWorkingDir(workspace), // Current Workspace 环境层：声明子任务文件操作根目录
-		agents.WithSkills(sk),            // 技能发现清单注入 system（渐进披露；与主会话同实例，启用过滤一致）
+		agents.WithAgentMDDir(workspace),              // 子任务共享工作区 AGENTS.md/CLAUDE.md
+		agents.WithUserAgentMDDir(globalAgentMDDir()), // 用户级 ~/.agents/AGENTS.md（优先级低于工作区层）
+		agents.WithWorkingDir(workspace),              // Current Workspace 环境层：声明子任务文件操作根目录
+		agents.WithSkills(sk),                         // 技能发现清单注入 system（渐进披露；与主会话同实例，启用过滤一致）
 		// 2026-08-22：拷贝主 Agent 的上下文窗口与压缩配置（**拷贝而非共享**）——
 		// 此前子 loop 缺省（无窗口/无压缩器），长任务上下文无限增长、必然撞超限。
 		// 独立 NewLLMCompressor 实例：与主 loop 的压缩器互不影响（各自状态/调用互不干扰）。
@@ -3738,9 +3739,10 @@ func buildExploreLoop(workspace, sid string, pc *providerConfig, prov, model, ef
 		agents.WithMaxRetries(11),
 		agents.WithRetryBackoff(agents.FixedBackoff(time.Second)),
 		agents.WithSystemPrompt(prompt.DesktopExploreV2),
-		agents.WithAgentMDDir(workspace), // 共享工作区 AGENTS.md/CLAUDE.md
-		agents.WithWorkingDir(workspace), // Current Workspace 环境层
-		agents.WithSkills(sk),            // 技能发现清单注入 system（渐进披露；与主会话同实例）
+		agents.WithAgentMDDir(workspace),              // 共享工作区 AGENTS.md/CLAUDE.md
+		agents.WithUserAgentMDDir(globalAgentMDDir()), // 用户级 ~/.agents/AGENTS.md（优先级低于工作区层）
+		agents.WithWorkingDir(workspace),              // Current Workspace 环境层
+		agents.WithSkills(sk),                         // 技能发现清单注入 system（渐进披露；与主会话同实例）
 		// 2026-08-22：拷贝主 Agent 的上下文窗口与压缩配置（**拷贝而非共享**）——
 		// 此前 Explore 子 loop 缺省（无窗口/无压缩器），长分析（大 grep/多文件）上下文
 		// 无限增长、必然撞模型窗口。独立 NewLLMCompressor 实例：与主 loop 互不影响。
@@ -4049,6 +4051,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		agents.WithSkills(sk),                                // 技能发现清单注入 system（渐进披露）+ /skills 命令
 		agents.WithSubagents(m.runtime(workspace).subagents), // 自定义 subagent 清单注入 system（渐进披露）+ spawn_agent
 		agents.WithAgentMDDir(workspace),                     // 工作区 AGENTS.md/CLAUDE.md 递归发现（工作记忆层）
+		agents.WithUserAgentMDDir(globalAgentMDDir()),        // 用户级 ~/.agents/AGENTS.md（跨工作区，优先级最低）
 		agents.WithWorkingDir(workspace),                     // Current Workspace 环境层：声明本会话文件操作根目录
 		// @引用 PDF 文本抽取（2026-09）：PDF 结构层是纯 ASCII，agents 侧的二进制判定
 		// 读不出正文（压缩流 → 报「二进制不读内容」；未压缩 → 把 PDF 源码当正文注入）。

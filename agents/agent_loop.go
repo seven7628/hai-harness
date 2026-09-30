@@ -115,6 +115,15 @@ type Config struct {
 	AgentMDFiles []string
 	AgentMDDirs  []string
 
+	// UserAgentMDDir 用户级指令目录（~/.agents，跨工作区）；只取该目录**本层那一个**
+	// AGENTS.md / CLAUDE.md（非递归，见 discoverUserAgentMD）。空 = 无用户级层。
+	//
+	// 分层语义 = **顺序拼接，不做覆盖**：用户级在最前（优先级最低），其后是显式文件、
+	// 最后是工作区递归发现的各层。刻意不实现「工作区同名文件覆盖用户级」——用户级装的是
+	// 个人全局偏好（"一律用中文回答"），工作区装的是项目约定；让项目根文件把个人偏好顶掉
+	// 是静默丢用户配置。对齐 Codex / Claude Code 的 global-then-project 拼接语义。
+	UserAgentMDDir string
+
 	// Skills 技能注册表（渐进披露的发现来源：清单注入系统提示词），nil 表示无技能
 	Skills *skills.Registry
 
@@ -311,6 +320,13 @@ func WithAgentMDFiles(files ...string) Option {
 // 每次运行前重读：文件变更在下一次运行自动生效（字节稳定不变时缓存命中不受影响）。
 func WithAgentMDDir(dir string) Option {
 	return func(c *Config) { c.AgentMDDirs = append(c.AgentMDDirs, dir) }
+}
+
+// WithUserAgentMDDir 注入用户级指令目录（~/.agents）：只取该目录本层的单个
+// AGENTS.md / CLAUDE.md（非递归），拼在**工作记忆层最前**（优先级最低）。
+// 与 WithAgentMDDir 的分工：后者是工作区递归发现根，本选项是跨工作区的个人全局层。
+func WithUserAgentMDDir(dir string) Option {
+	return func(c *Config) { c.UserAgentMDDir = dir }
 }
 
 func WithSkills(reg *skills.Registry) Option {
@@ -1505,8 +1521,10 @@ func (a *AgentLoop) composeSystemPrompt() string {
 		}
 		b.WriteString("## Current Workspace\n- " + a.cfg.WorkingDir)
 	}
-	// 工作记忆：显式文件（顺序即注入序，RelPath 显示为文件路径）
+	// 工作记忆：用户级（~/.agents 单文件，优先级最低）→ 显式文件（顺序即注入序，
+	// RelPath 显示为文件路径）→ 工作区递归发现（根优先）。
 	var files []agentMDFile
+	files = append(files, discoverUserAgentMD(a.cfg.UserAgentMDDir)...)
 	for _, f := range a.cfg.AgentMDFiles {
 		if content, err := os.ReadFile(f); err == nil {
 			files = append(files, agentMDFile{Name: filepath.Base(f), RelPath: f, Content: string(content)})
