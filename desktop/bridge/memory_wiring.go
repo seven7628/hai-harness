@@ -74,38 +74,68 @@ func (h *memoryHost) resolve(ctx context.Context, workdir string) (*memory.Dir, 
 	return nil, res.Err
 }
 
-// injection 返回 Step 3 要注入系统提示词的段落。
+// injection 返回 Step 3 要注入系统提示词的段落（主会话）。
 //
 // 四种结果：
 //
 //	开关关闭        → 空（reason=disabled）
-//	无 git 身份     → 空（reason=no-identity，这是绝大多数会话）
-//	有身份但无索引   → **只有目录说明**（reason=no-index / empty-index）
+//	取不到目录       → 空（reason=no-identity / 取不到 home）
+//	有目录但无索引   → **只有目录说明**（reason=no-index / empty-index）
 //	有索引          → 标题 + 索引正文（+ 截断提示）+ 目录说明
 //
 // 前两种返回空串 = 不改动系统提示词的任何字节；后两种一定会注入一段文本。
 // 这不是"多花了点 context"，而是冷启动的唯一入口：没有 MEMORY.md 就没有第一条
 // 记忆，而第一条只可能靠这段说明写出来（2026-09-30 起，见 memory/guidance.go）。
 func (h *memoryHost) injection(ctx context.Context, workspace string) string {
-	if h.cfg.Disabled() {
-		return ""
-	}
 	// 走 resolve 而不是自己再 Bootstrap 一次：解析成功的结果在装配期已缓存，
-	// 两次装配点（Step 3 注入 / Step 4 钩子）因此只付一次 git 的代价。
+	// 装配点（Step 3 注入 / Step 4 钩子）因此只付一次 git 的代价。
 	dir, err := h.resolve(ctx, workspace)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[memory] 启动注入跳过：%v\n", err)
 		return ""
 	}
 	if dir == nil {
-		return "" // 开关关闭 / 无 git 身份（后者是绝大多数会话）
+		return "" // 开关关闭 / 取不到目录
 	}
-	inj, err := h.cfg.BuildInjection(*dir)
+	return h.injectionFor(*dir)
+}
+
+// injectionFor 对**给定**记忆目录产出注入段。与 injection 的区别只有"目录从哪来"，
+// 因为主会话与「启用 memory 的子 agent」走的是同一段文本生成逻辑——官方说的是
+// 子 agent 有自己的目录，不是另一套规则。
+func (h *memoryHost) injectionFor(dir memory.Dir) string {
+	if h.cfg.Disabled() {
+		return ""
+	}
+	inj, err := h.cfg.BuildInjection(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[memory] 读索引失败：%v\n", err)
 		return ""
 	}
 	return inj.Text
+}
+
+// subagentInjection 返回某个子 agent 自己的记忆目录的注入段。
+//
+// 官方 memory#how-it-works："The main conversation's auto memory isn't loaded into
+// subagents … A subagent's own auto memory, enabled with the subagent `memory` field,
+// is a separate directory." —— 所以这里**不给**主目录，只给子 agent 自己那份；
+// 子 agent 的记忆与主会话互不可见（这正是官方那句 "isn't loaded into subagents" 的
+// 含义，也是我们一直以来的实际行为，现在由 TestSubagentDoesNotInheritMainMemory 钉住）。
+func (h *memoryHost) subagentInjection(ctx context.Context, workspace, name string) string {
+	if h.cfg.Disabled() || name == "" {
+		return ""
+	}
+	repo, err := h.resolve(ctx, workspace)
+	if err != nil || repo == nil {
+		return ""
+	}
+	sub, ok := h.cfg.SubagentDir(*repo, name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[memory] 子 agent %q 的记忆目录派生失败（名字非法？）：不注入\n", name)
+		return ""
+	}
+	return h.injectionFor(sub)
 }
 
 // postWrite 是 Step 4 的钩子实现：记忆目录内的写入，补/更新 `modified`；
@@ -125,10 +155,17 @@ func (h *memoryHost) injection(ctx context.Context, workspace string) string {
 //	① 开关关闭      → 连 .lock 侧车文件都不建（否则变成"不读但写入"）
 //	② 路径不是记忆 → IsMemoryPath 是纯词法比较，不需要先解析仓库身份，
 //	                   工作区内的绝大多数写入在这里就被排除，零 git 开销
-//	③ 目录解析失败  → 无 git 身份就没有记忆目录，无从判断
+//	③ 目录解析失败  → 取不到记忆目录，无从判断
 //
 // 真正的错误（补戳写失败、索引超限）**不吞**，原样回给模型：静默吞掉会让记忆文件
 // 带着过期或缺失的 modified 继续留在索引里，而模型毫不知情。
+//
+// # 归属按**路径**判定，不按调用者（2026-09-30）
+//
+// 主 agent 与子 agent 共用同一个 ToolEngine 实例，钩子拿不到"谁在写"。但这不需要
+// 解决：主目录（`<root>/repos/<id>`）与子 agent 目录（`<root>/agents/<id>/<name>`）
+// **互不相交**，路径本身就唯一确定归属。这也正是把子 agent 记忆放在 `agents/` 下
+// 而不是 `repos/<id>/agents/` 的原因（见 memory/subagent.go）。
 func (h *memoryHost) postWrite(ctx context.Context, workspace, absPath string) (string, error) {
 	if h.cfg.Disabled() {
 		return "", nil
@@ -140,23 +177,56 @@ func (h *memoryHost) postWrite(ctx context.Context, workspace, absPath string) (
 	if err != nil || dir == nil {
 		return "", nil
 	}
+	// 子 agent 的独立目录优先：它与主目录不相交，两者不可能同时命中同一条路径。
+	target := *dir
+	if sub, ok := h.cfg.SubagentDirFromPath(*dir, absPath); ok {
+		target = sub
+	}
 	// 官方（memory#how-it-works）把两条规则都挂在 MEMORY.md 上：
 	//
 	//	"After Claude writes to `MEMORY.md`, Claude Code measures the file
 	//	 against the 200-line and 25KB read limits."
 	//
 	// 所以 topic 文件走 modified、索引走限额测量，两者在同一个钩子里分流。
-	if dir.IsIndex(absPath) {
-		if err := h.cfg.CheckIndex(*dir); err != nil {
+	if target.IsIndex(absPath) {
+		if err := h.cfg.CheckIndex(target); err != nil {
 			return "", err
 		}
-		return h.cfg.NearIndexNotice(*dir), nil
+		return h.cfg.NearIndexNotice(target), nil
 	}
-	if !dir.IsTopic(absPath) {
+	if !target.IsTopic(absPath) {
 		return "", nil
 	}
-	ws := h.cfg.StampModified(*dir, absPath)
+	ws := h.cfg.StampModified(target, absPath)
 	return "", ws.Err
+}
+
+// personaMemory 描述"给这个子 agent 注入哪一份记忆"。
+//
+// 它是**装配参数**而不是全局状态：memoryHost 与主会话共用（同一次 git 解析结果
+// 只付一次代价），但子 agent 各自的目录由 Name 决定。
+type personaMemory struct {
+	// Host 与主会话同一个 memoryHost（共享已解析的主目录，避免重复跑 git）。
+	Host *memoryHost
+	// Name 子 agent 定义名；空 = 不注入。
+	Name string
+	// Ctx 取会话 ctx。装配期 session 变量还是 nil，不能直接取 bgCtx()，
+	// 故由调用方（newSessionEngine，已持有 bgCtx）传进来。
+	Ctx func() context.Context
+}
+
+// bgCtxOrBackground 取会话 ctx；取不到就用 Background。
+//
+// 为什么不直接 Fatal/panic：记忆是增强项，不是会话的前提——上下文不可用时降级成
+// "这个子 agent 没有记忆"继续跑，远好过让整个 spawn 失败。
+func (p personaMemory) bgCtxOrBackground() context.Context {
+	if p.Ctx == nil {
+		return context.Background()
+	}
+	if c := p.Ctx(); c != nil {
+		return c
+	}
+	return context.Background()
 }
 
 // memoryResolveTimeout 身份解析（跑 git）的上限。
@@ -165,3 +235,14 @@ func (h *memoryHost) postWrite(ctx context.Context, workspace, absPath string) (
 // 凭据助手等待、锁等待）会把整个会话创建卡死，而用户看到的只是"应用没反应"。
 // 超时后按"没有记忆"处理 —— 官方对缺失的规定就是不注入不报错。
 const memoryResolveTimeout = 10 * time.Second
+
+// memCfgValue 从可变参数 memCfg ...memory.Config 里取值（没传 = 零值 = 跟随环境/默认开）。
+//
+// 抽成函数是因为取值出现两次（host 装配 + 子 agent 记忆），而"没传"必须与
+// `memory.Config{}` 完全同义——两处各写一遍 `if len(...)>0` 迟早会漂移。
+func memCfgValue(memCfg []memory.Config) memory.Config {
+	if len(memCfg) > 0 {
+		return memCfg[0]
+	}
+	return memory.Config{}
+}

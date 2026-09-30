@@ -27,6 +27,24 @@ type AgentDefinition struct {
 	Model        string   // yaml model（可选；v1 仅元数据）
 	Instructions string   // 正文：子 agent 的 system prompt 人设层
 	Source       string   // 来源文件路径（展示/调试）
+
+	// Memory 是否给该子 agent 启用**独立的** auto memory 目录（yaml `memory: true`）。
+	//
+	// 官方 memory#how-it-works：
+	//
+	//	"A subagent's own auto memory, enabled with the subagent `memory` field,
+	//	 is a separate directory."
+	//
+	// 默认 false 的理由不是"官方说默认关"，而是**默认开着会串味**：子 agent 与主
+	// 会话共用同一个 ToolEngine 实例，postWrite 钩子只拿到 absPath、拿不到调用者
+	// 身份，而主会话的记忆索引**按官方要求不注入子 agent**（同段："isn't loaded
+	// into subagents"）。于是默认开启的子 agent 既不知道记忆目录在哪，又完全有能力
+	// 往主目录里写，产出的是没人索引的孤儿记忆。显式声明 memory: true 之后，它拿到
+	// 的是自己那一份的注入与写入范围。
+	//
+	// 这条推翻了旧结论（「subagent 记忆继承本轮明确不做，官方未规定」）：官方规定
+	// 了，2026-09-30 补上（Wiki 摘录 §5.2）。
+	Memory bool
 }
 
 // DefinitionRegistry 自定义 subagent 定义注册表：分层扫描 {layer}/*.md + 同名高层覆盖。
@@ -155,6 +173,7 @@ func parseAgentFileIn(path string, lenient bool) (*AgentDefinition, error) {
 		Model:        strings.TrimSpace(strOf(meta["model"])),
 		Instructions: strings.TrimSpace(body),
 		Source:       path,
+		Memory:       boolOf(meta["memory"]),
 	}
 	if lenient {
 		// 外部（Claude Code）文件常无头部或头部不全：从文件自身补出可用元数据，
@@ -263,6 +282,26 @@ func strOf(v any) string {
 // strSliceOf 解析 yaml 字段（tools）→ []string；兼容数组/字符串/标量。
 // 字符串既支持空格分隔（go-code 约定），也支持逗号分隔（Claude Code 的
 // `tools: Read, Grep, Glob` 形态）。
+// boolOf 解析 yaml 布尔。接受 true/false、on/off、yes/no、1/0。
+//
+// 宽松是刻意的：外部（Claude Code）子 agent 定义文件的写法不受我们控制，
+// `memory: "true"` 这种字符串形态在真实文件里出现过——按 false 处理会让
+// 子 agent 静默失去记忆，且没有任何提示。
+func boolOf(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "true", "yes", "on", "1", "enabled":
+			return true
+		}
+	case int:
+		return t != 0
+	}
+	return false
+}
+
 func strSliceOf(v any) []string {
 	switch t := v.(type) {
 	case []any:

@@ -3615,7 +3615,17 @@ func (t codeAgentTuning) options() []agents.Option {
 // persona="" 时与旧 buildSpawnLoop 逐字节等价（不追加任何 Option）。
 // sk 为技能注册表（与主会话同一实例）：注入技能发现清单（渐进披露），
 // 子 agent 经 load_skill 激活技能；不注入 subagent 清单（防递归）。
-func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConfig, prov, model, effort, persona string, sk *skills.Registry) *agents.AgentLoop {
+//
+// mem（可选，最多一个）：给「声明了 memory: true」的子 agent 注入**它自己那份**
+// auto memory。官方 memory#how-it-works：
+//
+//	"The main conversation's auto memory isn't loaded into subagents …
+//	 A subagent's own auto memory, enabled with the subagent `memory` field,
+//	 is a separate directory."
+//
+// 用可变参数而不是加位置参数：两个既有调用点里只有一个需要它，加位置参数会让另一个
+// 也变成 `nil, ""` 的噪音。mem.Name == "" 即不注入。
+func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConfig, prov, model, effort, persona string, sk *skills.Registry, mem ...personaMemory) *agents.AgentLoop {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -3671,6 +3681,16 @@ func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConf
 	}
 	if systemLayer != "" {
 		opts = append(opts, agents.WithSystemPrompt(systemLayer))
+	}
+	// 子 agent 的独立 auto memory（官方：启用 memory 字段的那份是 separate directory）。
+	// 惰性取 ctx：装配期 session 变量还为 nil（与 Step 4 钩子同一约束）。
+	if len(mem) > 0 && mem[0].Host != nil && mem[0].Name != "" {
+		mctx, mcancel := context.WithTimeout(mem[0].bgCtxOrBackground(), memoryResolveTimeout)
+		inj := mem[0].Host.subagentInjection(mctx, workspace, mem[0].Name)
+		mcancel()
+		if inj != "" {
+			opts = append(opts, agents.WithMemoryInjection(inj))
+		}
 	}
 	// 采样默认（宿主决策 2026-08）：DeepSeek 显式 top_p=0.95 / temperature=1.0；OpenAI 厂商默认
 	if temperature, topP := pc.samplingDefaults(); temperature != nil {
@@ -3830,14 +3850,12 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	// 返回值分两路（2026-09-30）：err 是真失败（补戳失败、索引超限），notice 是
 	// "写已成功、顺带提醒"（索引接近限额）。官方对后者用词是 reminds 而非 error，
 	// 混进 err 会诱使模型重试——重试只会让索引更长。
+	// memHost 提到装配期作用域：子 agent 声明 memory: true 时注入它自己那份记忆，
+	// 用的是**同一个** host，于是主目录只解析一次（每次 spawn 各建一个 host 的话，
+	// 每个子 agent 都要重跑一次 git）。
+	memHost := newMemoryHost(memCfgValue(memCfg))
 	{
-		cfg := memory.Config{}
-		if len(memCfg) > 0 {
-			cfg = memCfg[0]
-		}
-		// 惰性：装配期不碰 bgCtx（此时它捕获的 session 变量仍为 nil，调用即崩）。
-		// 钩子在写文件时才取 ctx，那时会话已就绪。
-		mh := newMemoryHost(cfg)
+		mh := memHost
 		ft = ft.WithPostWrite(func(absPath string) (string, error) {
 			return mh.postWrite(bgCtx(), workspace, absPath)
 		})
@@ -3892,7 +3910,16 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 			func(def *subagent.AgentDefinition) *agents.AgentLoop {
 				// 文件化 subagent（agent_spawn task 省略时按 name 加载）：人设 loop
 				// 每次调用新建 → 读当前档位（switch_effort 后派生的子 agent 立即同档）。
-				return buildPersonaLoop(eng, workspace, sid, pc, prov, model, string(effortRef.current()), def.Instructions, sk)
+				//
+				// `memory: true` 的定义拿到**自己那份** auto memory（官方：主会话记忆不进
+				// 子 agent，子 agent 自己的是 separate directory）。Host 与主会话共用同一个，
+				// 于是已解析的主目录只付一次 git 代价；目录归属由 postWrite 按**路径**判定
+				// （两个目录不相交），钩子不需要知道调用者是谁。
+				var pm []personaMemory
+				if def.Memory {
+					pm = append(pm, personaMemory{Host: memHost, Name: def.Name, Ctx: bgCtx})
+				}
+				return buildPersonaLoop(eng, workspace, sid, pc, prov, model, string(effortRef.current()), def.Instructions, sk, pm...)
 			}) {
 			eng.RegisterTool(context.Background(), t) // agent_spawn（动态 + 文件化双模式）/send/interrupt/list/output
 		}
