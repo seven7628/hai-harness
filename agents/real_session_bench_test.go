@@ -34,7 +34,7 @@ func replaySession(t *testing.T, msgs []core.Message, stage string) (int, int) {
 	switch stage {
 	case "off":
 	case "cd":
-		opts = append(opts, WithSlimText(SlimTextOptions{MergePairs: boolPtr(false)}))
+		opts = append(opts, WithSlimText(SlimTextOptions{MergePairs: BoolPtr(false)}))
 	case "cde":
 		opts = append(opts, WithSlimText(SlimTextOptions{}))
 	default:
@@ -260,7 +260,7 @@ func replaySlice(t *testing.T, msgs []core.Message, stage string) (int, int) {
 	switch stage {
 	case "off":
 	case "cd":
-		opts = append(opts, WithSlimText(SlimTextOptions{MergePairs: boolPtr(false)}))
+		opts = append(opts, WithSlimText(SlimTextOptions{MergePairs: BoolPtr(false)}))
 	case "cde":
 		opts = append(opts, WithSlimText(SlimTextOptions{}))
 	}
