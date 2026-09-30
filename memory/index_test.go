@@ -89,20 +89,33 @@ func TestBuildInjection_IndexOneLinePerMemory(t *testing.T) {
 
 // —————————————————————— 官方规定的边界 ——————————————————————
 
-// 索引不存在：官方 "If a file doesn't exist, no error" —— 不注入、不报错。
-func TestBuildInjection_NoIndexIsNotAnError(t *testing.T) {
+// 索引不存在：官方 "If a file doesn't exist, no error" —— 不报错，且**必须仍然注入
+// 目录说明**（2026-09-30 起）。
+//
+// 这一条是 P0-1 的核心断言：没有 MEMORY.md 就永远没有"第一条记忆"，而"第一条"
+// 只可能靠这段说明写出来。不注入 = 冷启动死锁（guidance.go 顶部）。
+func TestBuildInjection_NoIndexStillInjectsGuidance(t *testing.T) {
 	d := memDir(t)
 	inj, err := (Config{}).BuildInjection(d)
 	if err != nil {
 		t.Fatalf("索引不存在不应报错：%v", err)
 	}
-	if !inj.Empty() || inj.Reason != "no-index" {
-		t.Fatalf("inj = %+v, want 空注入 + Reason=no-index", inj)
+	if inj.Reason != "no-index" {
+		t.Fatalf("Reason = %q, want \"no-index\"", inj.Reason)
+	}
+	if inj.Empty() {
+		t.Fatal("无索引时仍须注入目录说明——否则模型永远写不出第一条记忆")
+	}
+	if !strings.Contains(inj.Text, d.Path) {
+		t.Fatalf("说明段必须含记忆目录绝对路径 %q：\n%s", d.Path, inj.Text)
+	}
+	if !strings.Contains(inj.Text, "当前尚无记忆") {
+		t.Fatalf("无索引时须如实说明尚无记忆：\n%s", inj.Text)
 	}
 }
 
-// 索引存在但为空（只有标题、或全是空白）：同样不注入。
-// 注入一个空标题只会占 context，并给模型"记忆系统已就绪"的错觉。
+// 索引存在但为空（零字节 / 只有空白 / 只有标题）：**不注入索引正文**，但同样注入
+// 目录说明。三种退化状态与"文件不存在"在模型看来是同一件事，给同一段文本。
 func TestBuildInjection_EmptyIndex(t *testing.T) {
 	d := memDir(t)
 	for name, content := range map[string]string{
@@ -115,8 +128,11 @@ func TestBuildInjection_EmptyIndex(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !inj.Empty() {
-			t.Fatalf("%s: 期望空注入，得到 %q", name, inj.Text)
+		if inj.Empty() || !strings.Contains(inj.Text, d.Path) {
+			t.Fatalf("%s: 期望注入目录说明，得到 %q", name, inj.Text)
+		}
+		if inj.Load != nil {
+			t.Fatalf("%s: 索引无正文时 Load 应为 nil，得到 %+v", name, inj.Load)
 		}
 		if inj.Reason != "empty-index" {
 			t.Fatalf("%s: Reason = %q", name, inj.Reason)
@@ -240,11 +256,12 @@ func TestBuildInjection_IndexWithNonTopicLinesIsPreservedVerbatim(t *testing.T) 
 	if inj.Load.TruncatedBy != "" {
 		t.Fatalf("不得截断：%+v", inj.Load)
 	}
-	// 逐字节等于「宿主标题 + 原文去掉重复标题行」：官方没规定索引行格式，宿主不得
-	// 改写模型的写入（唯一例外是那段重复的标题，见 stripIndexHeading）。
+	// 逐字节等于「宿主标题 + 原文去掉重复标题行 + 目录说明」：官方没规定索引行格式，
+	// 宿主不得改写模型的写入（唯一例外是那段重复的标题，见 stripIndexHeading）。
 	want := indexHeading + "\n\n" +
 		"Notes live in topic files; keep this list short.\n" +
-		"- user_role.md\n- deleted_topic.md\nsub/nested.md\n- notes.txt\nMEMORY.md" // 结尾换行由宿主补齐
+		"- user_role.md\n- deleted_topic.md\nsub/nested.md\n- notes.txt\nMEMORY.md" + // 结尾换行由宿主补齐
+		"\n\n" + guidance(d, true)
 	if inj.Text != want {
 		t.Fatalf("注入与原文不一致：\n%q\nwant\n%q", inj.Text, want)
 	}
@@ -367,7 +384,7 @@ func TestCheckIndex(t *testing.T) {
 func TestNearIndexNotice(t *testing.T) {
 	d := memDir(t)
 	writeIndex(t, d, "- a.md\n")
-	if got := NearIndexNotice(d); got != "" {
+	if got := (Config{}).NearIndexNotice(d); got != "" {
 		t.Fatalf("离限额还远时不该有提醒：%q", got)
 	}
 	var b strings.Builder
@@ -377,7 +394,7 @@ func TestNearIndexNotice(t *testing.T) {
 		b.WriteString(".md\n")
 	}
 	writeIndex(t, d, b.String())
-	got := NearIndexNotice(d)
+	got := (Config{}).NearIndexNotice(d)
 	if got == "" {
 		t.Fatal("接近限额时应有精简提醒")
 	}
@@ -423,13 +440,14 @@ func TestBuildInjection_TruncationNoticeIsAppendedAtEnd(t *testing.T) {
 		t.Fatalf("前提失败：TruncatedBy = %q", inj.Load.TruncatedBy)
 	}
 
-	notice := truncationNotice("line")
+	notice := truncationNotice("line") + "\n\n" + guidance(d, true)
 	if !strings.Contains(inj.Text, notice) {
 		t.Fatalf("250 行索引应带截断提示，得到：\n%q", inj.Text)
 	}
-	// 提示必须在**末尾**：标题 → 条目 → 提示，官方规定的阅读结构不能被打断。
+	// 提示必须在索引正文之后、说明段之前：标题 → 条目 → 截断提示 → 目录说明。
+	// 官方规定的阅读结构（清单在前）不能被打断。
 	if !strings.HasSuffix(inj.Text, notice) {
-		t.Fatalf("提示必须在注入文本末尾：\n%q", inj.Text)
+		t.Fatalf("提示必须紧接在目录说明之前：\n%q", inj.Text)
 	}
 	// 提示本身含 "line"（哪个限额先到），且落在全文最后一段。
 	idx := strings.Index(inj.Text, truncationNoticeMarker)
@@ -440,6 +458,7 @@ func TestBuildInjection_TruncationNoticeIsAppendedAtEnd(t *testing.T) {
 	// 条目本身**一字未改**：清单部分与"没有提示时的同样 200 行"逐字节相同。
 	// 即：只追加，不删行、不加行、不改排序。
 	body := strings.TrimSuffix(inj.Text, notice)
+	body = strings.TrimSuffix(body, "\n\n"+guidance(d, true))
 	_, wantBody := boundIndex(d, []byte(buildLinesIndex(250)))
 	if body != indexHeading+"\n\n"+wantBody {
 		t.Fatalf("提示之外的内容被改动了：\n%q", body)
@@ -456,10 +475,12 @@ func TestBuildInjection_TruncationNoticeIsAppendedAtEnd(t *testing.T) {
 	}
 }
 
-// 「无记忆时 prompt 逐字节不变」（§5.2）：未截断时**不得**追加任何提示。
+// 未截断时**不得**追加任何提示（截断提示）。
 //
-// 这是本改动的头号不变量——提示只在 TruncatedBy != "" 时出现，
-// 绝大多数会话（索引几十行）走的是这条零分支，字节级必须完全一致。
+// 2026-09-30 起注入末尾固定多一段目录说明，所以"字节不变"的不变量从**整段**收窄为
+// **索引部分**——这是有意为之的收窄，不是退化：说明段是冷启动的唯一入口（见
+// TestBuildInjection_NoIndexStillInjectsGuidance）。真正要守住的是"宿主的呈现层
+// 不碰模型写的每一个字节"，而 boundIndex 的等式正是对这一点的证明。
 func TestBuildInjection_NoNoticeWhenWithinBothLimits(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -484,11 +505,11 @@ func TestBuildInjection_NoNoticeWhenWithinBothLimits(t *testing.T) {
 			if strings.Contains(inj.Text, truncationNoticeMarker) {
 				t.Fatalf("未截断时不得出现提示：\n%q", inj.Text)
 			}
-			// 逐字节等于「宿主标题 + boundIndex 产出的索引正文」——与本次改动之前完全相同。
-			// 这里刻意用 boundIndex 而不是"手写一个想当然的原文"：它是这次改动**之前**
-			// 注入文本的逐字节来源，所以这个等式就是"字节没变"的证明。
+			// 索引部分逐字节等于「宿主标题 + boundIndex 产出的索引正文」——与 2026-09-30
+			// 之前完全相同。这里刻意用 boundIndex 而不是"手写一个想当然的原文"：它是那次
+			// 改动**之前**注入文本的逐字节来源，所以这个等式就是"索引字节没变"的证明。
 			_, wantBody := boundIndex(d, []byte(tc.content))
-			want := indexHeading + "\n\n" + wantBody
+			want := indexHeading + "\n\n" + wantBody + "\n\n" + guidance(d, true)
 			if inj.Text != want {
 				t.Fatalf("注入文本被改动了：\n%q\nwant\n%q", inj.Text, want)
 			}
@@ -520,8 +541,11 @@ func TestBuildInjection_ByteLimitNoticeSaysByte(t *testing.T) {
 		t.Fatalf("TruncatedBy = %q, want \"byte\"", inj.Load.TruncatedBy)
 	}
 	notice := truncationNotice("byte")
-	if !strings.HasSuffix(inj.Text, notice) {
-		t.Fatalf("应带 \"byte\" 提示且在末尾：\n%q", inj.Text)
+	if !strings.HasSuffix(inj.Text, notice+"\n\n"+guidance(d, true)) {
+		t.Fatalf("应带 \"byte\" 提示且紧接目录说明之前：\n%q", inj.Text)
+	}
+	if !strings.Contains(inj.Text, notice) {
+		t.Fatalf("应带 \"byte\" 提示：\n%q", inj.Text)
 	}
 	// 字节限额触发的索引没被行限额再切一刀，40 行里只装下了 ~25 行。
 	if inj.Load.LoadedLines >= 40 {
@@ -599,10 +623,15 @@ func TestTruncationNoticeLeaksNoDroppedEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 泄露检查的对象是**截断提示本身**，不包含其后的目录说明——说明段里出现
+	// "25000"（官方字节限额）是规格的一部分，与"泄露丢了多少条"无关。
 	notice := truncationNotice("line")
-	// 拼进注入文本的那一段，与常量提示**逐字节相等**——即它不依赖索引内容。
-	if !strings.HasSuffix(inj.Text, notice) {
+	// 截断提示与目录说明一起构成注入的末尾（说明在最后，见 guidance.go）。
+	if !strings.HasSuffix(inj.Text, notice+"\n\n"+guidance(d, true)) {
 		t.Fatalf("注入末尾不是常量提示：\n%q", inj.Text)
+	}
+	if !strings.Contains(inj.Text, notice) {
+		t.Fatalf("注入缺少截断提示：\n%q", inj.Text)
 	}
 	// 提示正文是**常量**拼接（只随 truncatedBy 变化），不含任何索引派生的字符串。
 	// 逐条核对：所有被丢掉的条目名都不得出现在提示里。
@@ -644,12 +673,14 @@ func TestTruncationNoticeNotAddedWhenIndexIsEmpty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !inj.Empty() {
-			t.Fatalf("%s: 期望空注入，得到 %q", name, inj.Text)
+		if inj.Empty() || !strings.Contains(inj.Text, d.Path) {
+			t.Fatalf("%s: 期望注入目录说明，得到 %q", name, inj.Text)
 		}
 		if inj.Reason != "empty-index" {
 			t.Fatalf("%s: Reason = %q", name, inj.Reason)
 		}
+		// 索引无正文时**不得**出现截断提示：官方量的是文件，而"超限但全是空行"
+		// 这类退化状态里没有任何条目可丢，提示会凭空造出一个不存在的截断。
 		if strings.Contains(inj.Text, truncationNoticeMarker) {
 			t.Fatalf("%s: 无记忆时不得有提示：%q", name, inj.Text)
 		}

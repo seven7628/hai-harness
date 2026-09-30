@@ -115,7 +115,7 @@ func TestPrefOffDisablesNewSessionAssembly(t *testing.T) {
 	}
 	ws := t.TempDir()
 	ft := builtin.NewFileTools(ws).
-		WithPostWrite(func(p string) error { return h.postWrite(context.Background(), ws, p) })
+		WithPostWrite(func(p string) (string, error) { return h.postWrite(context.Background(), ws, p) })
 	if err := callWriteFile(ft, topic, "---\ntype: project\n---\n\ny\n"); err != nil {
 		t.Fatalf("write_file 应成功: %v", err)
 	}

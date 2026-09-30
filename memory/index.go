@@ -22,7 +22,13 @@ import (
 //   - 不逐条校验索引里的文件是否存在（官方无校验）；
 //   - 不为索引行补 description / 摘要（官方索引是纯文件名列表）；
 //   - 不排序索引（官方未规定；上一版的"近期优先"在 `modified` 不进索引行的前提下无法实现）；
-//   - 不注入任何"记忆协议"文本（§2：上一版 6 条协议含两条自相矛盾，是 12%~62% 采纳率的来源）。
+//   - 不注入**行为判据**（"什么时候该记 / 不该记什么"）。
+//
+// 最后一条是 2026-09-30 的修正。此前这里写的是「不注入任何记忆协议文本」，依据是
+// 「官方没有」——该判断有误，见 guidance.go 顶部。**注入存储形态说明**（目录在哪、
+// 记忆文件长什么样）是另一回事：官方必然有，否则模型连第一条记忆都写不出来
+// （Wiki §4.1 反推）。而**行为判据**确实是连续变量，要等 A/B 对照实验才能决定，
+// 现阶段一律不加——上一版就是在这里翻的车。
 const (
 	// MaxIndexLines 索引加载行数上限（官方 200 行）。
 	MaxIndexLines = 200
@@ -65,27 +71,33 @@ type IndexLoad struct {
 // 结构体而非 string 是为了让装配层不必重新解析自己的输出判断"有没有内容"
 // （Empty 字段即答案），也便于测试断言边界。
 type Injection struct {
-	// Text 注入文本。Enabled=false / 无索引 / 索引为空时**恒为 ""**——
-	// "无记忆时 prompt 逐字节不变"（§5.2）是硬要求。
+	// Text 注入文本。**开关关闭时恒为 ""**——关闭 = 完全不注入任何 Memory 相关
+	// 系统提示词（见 Config.Enabled）。
+	//
+	// 记忆目录**已解析但还没有 MEMORY.md** 时**不再是空串**：会注入 guidance.go 的
+	// 说明段。2026-09-30 之前这里是空的，理由是"无记忆时 prompt 逐字节不变"，
+	// 而该理由依赖「官方不注入说明」这个已被推翻的前提（guidance.go 顶部）。
 	Text string
 	// Enabled 解析后的开关值。false 时 Text 必为 ""。
 	Enabled bool
 	// Dir 解析出的记忆目录（Enabled=false 或解析失败时为 nil）。
 	Dir *Dir
-	// Load 索引加载度量（未读到索引时为 nil）。
+	// Load 索引加载度量（未读到索引、或索引为空时为 nil）。
 	Load *IndexLoad
-	// Reason 未注入的原因标识（无注入时非空）："disabled" / "no-identity" / "no-index" / "empty-index"。
+	// Reason 注入形态标识："disabled" / "no-identity" / "no-index" / "empty-index"，
+	// 有索引正文时为空串。仅供装配层日志与测试断言，**不参与**是否注入的判定。
 	Reason string
 }
 
-// Empty 无注入。装配层据此**不改动系统提示词的任何字节**。
+// Empty 无注入文本。装配层据此**不改动系统提示词的任何字节**。
+//
+// 注意它现在**只在开关关闭时**为真：无索引/空索引仍会返回说明段。
 func (i Injection) Empty() bool { return strings.TrimSpace(i.Text) == "" }
 
 // indexHeading 注入段落的标题行。
 //
 // 标题是必需的：段落拼进系统提示词后，模型需要知道"这一段是记忆索引"而不是文档片段。
-// 但**只有这一行**——官方不向模型追加记忆协议（§2），索引本身就是全部引导，
-// 剩下的引导由「索引行 + 模型判断」承担。
+// 它之下依次是：索引正文（若非空）→ 目录说明（guidance.go）。
 const indexHeading = "# Project Memory (MEMORY.md)"
 
 // BuildInjection 读该记忆目录的索引并组装注入段落（Dir 已知时的入口）。
@@ -107,26 +119,32 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 	raw, err := c.ReadFile(path)
 	if err != nil {
 		if isNotExist(err) {
-			// 官方：索引不存在就不注入、不报错（§5.2 明文）。
-			return Injection{Enabled: true, Dir: &d, Reason: "no-index"}, nil
+			// 官方：索引不存在不报错。但**仍然注入说明段**——这正是冷启动唯一一次
+			// 能把记忆目录告诉模型的机会（没有 MEMORY.md 就永远没有"第一条"）。
+			// 见 guidance.go 顶部的闭环分析。
+			return Injection{
+				Text:    indexHeading + "\n\n" + guidance(d, false),
+				Enabled: true, Dir: &d, Reason: "no-index",
+			}, nil
 		}
 		return Injection{Enabled: true, Dir: &d}, err
 	}
 	load, text := boundIndex(d, raw)
 	if strings.TrimSpace(text) == "" {
-		// 空索引（如模型建了 MEMORY.md 但还没写条目）：同样不注入。
-		// 注入一个空标题只会占 context 并给模型一个"记忆系统已就绪"的错觉。
-		// 这一分支在截断提示之前：被丢掉的若只是空行，那不是记忆，
-		// "无记忆时逐字节不变"（§5.2）比任何提示都重要。
-		return Injection{Enabled: true, Dir: &d, Reason: "empty-index"}, nil
+		// 空索引（模型建了 MEMORY.md 但还没写条目）：同样注入**说明段**。
+		// 「无索引」与「空索引」在模型看来是同一件事——都还没有记忆——所以给同一
+		// 段文本，不因为文件碰巧存在就说"你的索引是空的"（那会像是丢了东西）。
+		return Injection{
+			Text:    indexHeading + "\n\n" + guidance(d, false),
+			Enabled: true, Dir: &d, Reason: "empty-index",
+		}, nil
 	}
 	// ↓ 截断提示：**只陈述本次已经发生的事实**，不新增机制（见 truncationNotice）。
-	// 未截断时 text 逐字节不变，注入文本也逐字节不变（§5.2 硬要求）。
 	if load.TruncatedBy != "" {
 		text += truncationNotice(load.TruncatedBy)
 	}
 	return Injection{
-		Text:    indexHeading + "\n\n" + text,
+		Text:    indexHeading + "\n\n" + text + "\n\n" + guidance(d, true),
 		Enabled: true,
 		Dir:     &d,
 		Load:    load,
@@ -271,18 +289,24 @@ func stripIndexHeading(s string) string {
 
 // CheckIndex 测量**已落盘**的索引是否超限，供 write_file 钩子在写后调用（§4.3）。
 //
-// 官方（memory#how-it-works）只定义了超限这一种返回：
+// 官方（memory#how-it-works）把触发点写得很清楚：
+//
+//	"After Claude writes to `MEMORY.md`, Claude Code measures the file
+//	 against the 200-line and 25KB read limits."
+//
+// 超限时官方只定义了一种返回：
 //
 //	"If the file is over a limit, the write still succeeds, but Claude Code
 //	 returns an error telling Claude to rewrite the index, because everything
 //	 past the limit is dropped on the next load."
 //
 // 所以本函数**只判超限**：在限额内一律返回 nil，接近限额时的精简提醒由
-// NearIndexNotice 单独给出（那是非错误提示，宿主自行决定要不要附在工具结果后）。
+// NearIndexNotice 单独给出（那走钩子的 notice 通道，不是错误）。
 //
-// 官方那条 "near a limit → reminds Claude to shorten it" 的提醒由谁在何时发出，
-// 官方文档没有规定触发点，本轮**不接**（§4.5：不得自行发明）；NearIndexNotice 作为
-// 可调用入口留着，接线时挂到 write_file 钩子即可。
+// 2026-09-30 修正：此处的注释原写「官方文档没有规定触发点，本轮不接」——**这是错的**，
+// 触发点就在上面引用的第一句里。误读的代价是 CheckIndex 与 NearIndexNotice 都成了
+// 没有调用点的死函数，而 postWrite 恰好在 `!IsTopic` 处跳过 MEMORY.md，
+// 三处凑成"接线齐全但永不触发"。见 Wiki《HAI-Harness-Memory官方原文摘录》§5.3。
 //
 // 索引不存在返回 nil：官方对索引缺失的规定是"不注入不报错"，写后测量同理。
 func (c Config) CheckIndex(d Dir) error {
@@ -302,10 +326,23 @@ func (c Config) CheckIndex(d Dir) error {
 
 // NearIndexNotice 接近限额时给模型的精简提醒（官方 memory#how-it-works 的原话口径）。
 //
+// 官方原文（memory#how-it-works）：
+//
+//	"If the file is near a limit, Claude Code reminds Claude to shorten it:
+//	 keep one line per entry, move detail into topic files, and merge or drop
+//	 stale entries."
+//
+// 官方说的是 **reminds**（提醒）而不是报错，所以它走钩子的 notice 通道而非 error
+// 通道——见 builtin.WithPostWrite 的注释。CheckIndex 只判"已经超限"，两者合起来
+// 才是官方那一对行为。
+//
 // 阈值取「用量 ≥ 限额的四分之三」。官方没有给数字（只说 "near a limit"），
 // 这里是产品侧的一个具体取值，写出来是为了让它可测、可争论，而不是藏在代码里。
-func NearIndexNotice(d Dir) string {
-	raw, err := (Config{}).withDefaults().ReadFile(joinIndex(d))
+//
+// 2026-09-30：由包级函数改为 Config 的方法。此前它内部硬编码 Config{}，绕过了
+// 注入的 ReadFile 出口——测试无法计数、也无法指向临时目录之外的真实 I/O。
+func (c Config) NearIndexNotice(d Dir) string {
+	raw, err := c.withDefaults().ReadFile(joinIndex(d))
 	if err != nil {
 		return ""
 	}

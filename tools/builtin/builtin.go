@@ -44,14 +44,25 @@ type FileTools struct {
 	//
 	// 为什么用钩子而不是直接 import memory：工具层不应依赖任何产品概念
 	// （同 binaryHint 的分层理由）。宿主不注入钩子 = 行为与今天完全一致。
-	postWrite func(absPath string) error
+	//
+	// 返回 (notice, err) 而不是单一 error，是 2026-09-30 的修正。宿主有两类
+	// **不同性质**的话要在写成功后告诉模型，而它们不能走同一条通道：
+	//
+	//	err     真失败：写入本身没成，或官方明说要报错的情形（如 MEMORY.md 超限，
+	//	         官方 "the write still succeeds, but Claude Code returns an error
+	//	         telling Claude to rewrite the index"）。回错误是忠实的。
+	//	notice  写**已经成功**，但顺带提醒一句（如索引接近限额）。把它塞进 err
+	//	         会让模型以为写失败了——它很可能重试，而重试只会让索引更长，
+	//	         正是这条提醒要避免的结果。
+	postWrite func(absPath string) (notice string, err error)
 }
 
 // WithPostWrite 注入"写/改成功后"钩子（nil = 保持默认不挂钩）。
 //
-// 钩子返回错误会**一并回给模型**，不吞：Step 4 补戳失败若被静默吞掉，记忆文件
-// 会带着过期或缺失的 modified 继续留在索引里，而模型毫不知情。
-func (f *FileTools) WithPostWrite(fn func(absPath string) error) *FileTools {
+// notice 会拼在成功结果**后面**返回给模型（非错误）；err 会**一并回给模型**，不吞：
+// Step 4 补戳失败若被静默吞掉，记忆文件会带着过期或缺失的 modified 继续留在索引里，
+// 而模型毫不知情。
+func (f *FileTools) WithPostWrite(fn func(absPath string) (string, error)) *FileTools {
 	f.postWrite = fn
 	return f
 }
@@ -619,10 +630,11 @@ func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, er
 			}
 		}
 		t.diff.Created = created
-		if err := t.notifyPostWrite(p); err != nil {
+		notice, err := t.notifyPostWrite(p)
+		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("appended (+%d)", t.diff.Added), nil
+		return withNotice(fmt.Sprintf("appended (+%d)", t.diff.Added), notice), nil
 	}
 	// 覆盖：锁内读旧内容（若存在）→ 替换 → 算 diff。旧内容须在替换前读取，
 	// 与 edit_file 同款锁内读改写全程无竞态；替换后旧内容不可再得（信息源头在工具）。
@@ -644,19 +656,28 @@ func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, er
 	// 不能用 Removed==0 推断（纯插入内容同样是 +N -0）。
 	t.diff = finalizeDiff(computeFileDiff(a.Path, old, a.Content), a.Content)
 	t.diff.Created = lock == nil
-	if err := t.notifyPostWrite(p); err != nil {
+	notice, err := t.notifyPostWrite(p)
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("written (+%d -%d)", t.diff.Added, t.diff.Removed), nil
+	return withNotice(fmt.Sprintf("written (+%d -%d)", t.diff.Added, t.diff.Removed), notice), nil
+}
+
+// withNotice 把宿主钩子给的提醒拼在成功结果之后（空提醒 = 结果逐字节不变）。
+func withNotice(result, notice string) string {
+	if strings.TrimSpace(notice) == "" {
+		return result
+	}
+	return result + "\n\n" + strings.TrimSpace(notice)
 }
 
 // notifyPostWrite 触发宿主"写/改成功后"钩子；未注入钩子时是零成本空操作。
 //
 // 只在**写成功之后**调用：写失败时文件没变，补戳没有意义，且会把一次已经失败
 // 的操作报成"记忆写入出错"，掩盖真正的错误。
-func (t *writeFileTool) notifyPostWrite(absPath string) error {
+func (t *writeFileTool) notifyPostWrite(absPath string) (string, error) {
 	if t.FileTools == nil || t.FileTools.postWrite == nil {
-		return nil
+		return "", nil
 	}
 	return t.FileTools.postWrite(absPath)
 }
@@ -742,17 +763,18 @@ func (t *editFileTool) Call(_ context.Context, _, arguments string) (string, err
 	// 旧全文 s 与 replaced 均在手，免费产 diff（信息源头在工具）。
 	// edit_file 入口已 statPath 要求文件存在 → Created 恒 false（modified）。
 	t.diff = finalizeDiff(computeFileDiff(a.Path, s, replaced), replaced)
-	if err := t.notifyPostWrite(p); err != nil {
+	notice, err := t.notifyPostWrite(p)
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("[edit_file: replaced 1 occurrence in %s (+%d -%d)]", a.Path, t.diff.Added, t.diff.Removed), nil
+	return withNotice(fmt.Sprintf("[edit_file: replaced 1 occurrence in %s (+%d -%d)]", a.Path, t.diff.Added, t.diff.Removed), notice), nil
 }
 
 // notifyPostWrite 触发宿主"写/改成功后"钩子；未注入钩子时是零成本空操作。
-// 理由与 write_file 同名方法一致：只在写成功后调用，错误不吞。
-func (t *editFileTool) notifyPostWrite(absPath string) error {
+// 理由与 write_file 同名方法一致：只在写成功后调用，错误不吞，提醒不混进错误。
+func (t *editFileTool) notifyPostWrite(absPath string) (string, error) {
 	if t.FileTools == nil || t.FileTools.postWrite == nil {
-		return nil
+		return "", nil
 	}
 	return t.FileTools.postWrite(absPath)
 }

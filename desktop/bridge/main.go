@@ -3822,10 +3822,14 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	effortRef := newSubagentEffortRef(provider.ReasoningEffortLevel(effort))
 	eng := tools.NewToolEngine()
 	ft := builtin.NewFileTools(workspace)
-	// Project Memory 的 modified 钩子（Step 4）：记忆文件由模型用标准 write_file /
-	// edit_file 写入，官方规定写入时补 `modified`，没有别的入口。宿主钩子在**写成功
-	// 之后**触发，错误不吞。闸门（开关 / 路径是否记忆 / 目录解析）全在宿主侧，
-	// 工具层不认识"记忆"这个概念。未开启记忆时钩子第一次调用就返回 nil，零开销。
+	// Project Memory 的 Step 4 钩子：记忆文件由模型用标准 write_file / edit_file
+	// 写入，官方规定写入时补 `modified`，没有别的入口。宿主钩子在**写成功之后**触发。
+	// 闸门（开关 / 路径是否记忆 / 目录解析）全在宿主侧，工具层不认识"记忆"这个概念。
+	// 未开启记忆时钩子第一次调用就返回空，零开销。
+	//
+	// 返回值分两路（2026-09-30）：err 是真失败（补戳失败、索引超限），notice 是
+	// "写已成功、顺带提醒"（索引接近限额）。官方对后者用词是 reminds 而非 error，
+	// 混进 err 会诱使模型重试——重试只会让索引更长。
 	{
 		cfg := memory.Config{}
 		if len(memCfg) > 0 {
@@ -3834,7 +3838,7 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 		// 惰性：装配期不碰 bgCtx（此时它捕获的 session 变量仍为 nil，调用即崩）。
 		// 钩子在写文件时才取 ctx，那时会话已就绪。
 		mh := newMemoryHost(cfg)
-		ft = ft.WithPostWrite(func(absPath string) error {
+		ft = ft.WithPostWrite(func(absPath string) (string, error) {
 			return mh.postWrite(bgCtx(), workspace, absPath)
 		})
 	}

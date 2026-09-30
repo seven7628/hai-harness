@@ -16,6 +16,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/seven7628/hai-harness/agents"
@@ -113,8 +115,14 @@ func TestMemoryWiredIntoRealSessionSystemPrompt(t *testing.T) {
 		t.Fatal("基线系统提示词字节数异常")
 	}
 
-	// 写入索引后再建一个会话（偏好仍为默认开）
-	idx := "- relay_tunnel_id.md\n- release_gate.md\nMARKER_MEMORY_INDEX\n"
+	// 写入索引后再建一个会话（偏好仍为默认开）。
+	//
+	// 索引刻意做大（100 条 ≈ 1.1KB）：2026-09-30 起**无索引的会话也会注入目录说明**，
+	// 两个会话的差值因此不是"索引长度"，而是"索引长度 − 说明里那行『当前尚无记忆…』"
+	// （中文按 UTF-8 字节计，那行约 59 字节）。用 100 条的索引把这个 59 字节的记账
+	// 差淹没掉，断言才稳定——早期版本用 59 字节的索引，算出来的差值是 3，
+	// 看起来像"注入没生效"，其实是测试的算术假设过时了。
+	idx := buildBigIndex(100)
 	writeMemoryIndex(t, ws, idx)
 
 	withMem, err := m.create(ws, "mem-on", "")
@@ -125,10 +133,25 @@ func TestMemoryWiredIntoRealSessionSystemPrompt(t *testing.T) {
 	if onChars <= baseChars {
 		t.Fatalf("开着记忆时提示词侧没有变长：基线 %d → 有记忆 %d（注入未生效）", baseChars, onChars)
 	}
-	// 增量必须至少覆盖索引正文本身（加上标题与分隔只会更大）
-	if onChars-baseChars < int64(len(idx)) {
-		t.Fatalf("增量 %d 小于索引正文 %d：注入被截断或串错了内容", onChars-baseChars, len(idx))
+	// 增量必须覆盖索引正文（扣掉上面那行"尚无记忆"的记账差），留 300 字节余量。
+	delta := onChars - baseChars
+	if delta < int64(len(idx))-300 {
+		t.Fatalf("增量 %d 远小于索引正文 %d：注入被截断或串错了内容", delta, len(idx))
 	}
+	if delta > int64(len(idx)) {
+		t.Fatalf("增量 %d 大于索引正文 %d：说明段本该两会话相同，差值不该超过索引", delta, len(idx))
+	}
+}
+
+// buildBigIndex 造一份 n 条记忆的索引。
+func buildBigIndex(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString("- topic_")
+		b.WriteString(strconv.Itoa(i))
+		b.WriteString(".md\n")
+	}
+	return b.String()
 }
 
 // TestMemoryOffMeansNoInjectionInNewSession：关掉后，**新会话**的系统提示词

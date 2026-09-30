@@ -77,7 +77,11 @@ func TestBootstrap_InjectsIndex(t *testing.T) {
 	}
 }
 
-// 目录不存在（首次使用的仓库）→ 不注入、不报错。
+// 目录不存在（首次使用的仓库）→ **注入目录说明**、不报错。
+//
+// 2026-09-30：这一条从"不注入"翻转过来。首次使用正是唯一一次能把记忆目录告诉模型的
+// 时机——没有 MEMORY.md 就没有"第一条"，而"第一条"只可能靠这段说明写出来。
+// 判据是"说明里含目录路径"，不是"注入了索引"。
 func TestBootstrap_NoMemoryYet(t *testing.T) {
 	c := bootConfig(t, nil)
 	res := Bootstrap(context.Background(), t.TempDir(), c)
@@ -87,10 +91,14 @@ func TestBootstrap_NoMemoryYet(t *testing.T) {
 	if !res.Resolved || res.Dir == nil {
 		t.Fatal("目录身份仍应解析出来（Step 4 需要它）")
 	}
-	if !res.Injection.Empty() || res.Injection.Reason != "no-index" {
-		t.Fatalf("inj = %+v", res.Injection)
+	if res.Injection.Empty() || !strings.Contains(res.Injection.Text, res.Dir.Path) {
+		t.Fatalf("首次使用须注入目录说明：%+v", res.Injection)
+	}
+	if res.Injection.Reason != "no-index" {
+		t.Fatalf("Reason = %q", res.Injection.Reason)
 	}
 	// 官方**不创建**这个目录：无记忆与有记忆必须可区分。
+	// （首次写入时由 write_file 的 replaceLocked 建父目录，见 tools/builtin/lock.go。）
 	if _, err := os.Stat(res.Dir.Path); err == nil {
 		t.Fatal("Bootstrap 凭空建出了记忆目录")
 	}
