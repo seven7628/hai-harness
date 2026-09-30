@@ -262,7 +262,23 @@ func p0Inspect(t *testing.T, dir memory.Dir, run p0Run) p0Run {
 
 // TestP0GuidanceCausesModelToWriteMemory 是 P0 的端到端验收。
 //
-// 配对交错执行（A、B 各跑一次），漂移在两臂间均摊。
+// 三臂交错执行（A→B→C 一轮算一次配对），漂移在三臂间均摊：
+//
+//	A 现状注入（目录 + frontmatter 格式，无行为判据）
+//	B 完全不注入（模型压根不知道有记忆这回事）
+//	C A + 官方 §2.2 的行为判据（**P1 的候选**）
+//
+// C 臂的判据文本逐句照抄官方，不自创：
+//
+//	"Claude skips anything it can derive from the codebase, such as
+//	 architecture, file paths, or debugging fixes. It also skips anything your
+//	 CLAUDE.md files already say."
+//	"Claude doesn't save something every session. It decides what's worth
+//	 remembering based on whether the information would be useful in a future
+//	 conversation."
+//
+// 上一版自创 6 条行为规则是 12%~62% 采纳率的来源；这次的区别是**有原文可依**。
+// 但"照抄"不等于"该加"——C 是否真的更好仍要由本装置测出来，故它先是实验臂。
 func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 	prov, model, p := baselineEnvOrSkip(t)
 	baselinePing(t, p, prov, model)
@@ -303,6 +319,20 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 		runB := p0RunOnce(t, p, prov, model, wsB, hB, "", i, "B")
 		runs = append(runs, runB)
 		p0LogRun(t, runB)
+
+		// C 臂：现状注入 + 官方行为判据。与 A 臂**只差这一段**。
+		homeC := t.TempDir()
+		t.Setenv("HOME", homeC)
+		wsC := p0Fixture(t)
+		hC := newMemoryHost(memory.Config{Directory: filepath.Join(homeC, "mem")})
+		injC := hC.injection(context.Background(), wsC)
+		if injC == "" {
+			t.Fatalf("C 臂基础注入为空")
+		}
+		injC += "\n\n" + p0CriteriaOfficial
+		runC := p0RunOnce(t, p, prov, model, wsC, hC, injC, i, "C")
+		runs = append(runs, runC)
+		p0LogRun(t, runC)
 	}
 
 	// 原始读数先落盘：判定是确定性的，但原始数据比任何汇总都值钱。
@@ -313,24 +343,36 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 		}
 	}
 
-	aWrite, bWrite, aChain, bChain := 0, 0, 0, 0
-	aAttempt, bAttempt := 0, 0
+	aWrite, bWrite, cWrite := 0, 0, 0
+	aChain, bChain, cChain := 0, 0, 0
+	aAttempt, bAttempt, cAttempt := 0, 0, 0
 	for _, r := range runs {
-		if r.Arm == "A" {
+		switch r.Arm {
+		case "A":
 			aAttempt += r.WriteAttempts
-			if r.WroteTopic {
-				aWrite++
-			}
-			if r.chainTurned() {
-				aChain++
-			}
-		} else {
+		case "B":
 			bAttempt += r.WriteAttempts
-			if r.WroteTopic {
+		case "C":
+			cAttempt += r.WriteAttempts
+		}
+		if r.WroteTopic {
+			switch r.Arm {
+			case "A":
+				aWrite++
+			case "B":
 				bWrite++
+			case "C":
+				cWrite++
 			}
-			if r.chainTurned() {
+		}
+		if r.chainTurned() {
+			switch r.Arm {
+			case "A":
+				aChain++
+			case "B":
 				bChain++
+			case "C":
+				cChain++
 			}
 		}
 	}
@@ -348,20 +390,44 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 		}
 	}
 	disc, pMc, pOK := supplementMcNemarExact(b01, b10)
+	// A/C 的配对比较才是 P1 的问题（C = 加了行为判据）。单独算，不要拿 A/B 的
+	// p 值去回答"C 有没有用"。
+	c01, c10 := 0, 0
+	for i := 0; i < reps; i++ {
+		aOn := runs[i*3].chainTurned()
+		cOn := runs[i*3+2].chainTurned()
+		if aOn && !cOn {
+			c01++
+		} else if cOn && !aOn {
+			c10++
+		}
+	}
 	aLo, aHi := supplementWilsonCI(aChain, reps)
 	bLo, bHi := supplementWilsonCI(bChain, reps)
 	mde := supplementMDEUnpaired(0, reps, 1, reps)
+	_ = mde
 
-	t.Logf("写入率   A=%d/%d  B=%d/%d", aWrite, reps, bWrite, reps)
-	t.Logf("写尝试   A=%d  B=%d（分母都是 %d 次会话）", aAttempt, bAttempt, reps)
-	t.Logf("全链转通 A=%d/%d [Wilson %.0f%%–%.0f%%]  B=%d/%d [Wilson %.0f%%–%.0f%%]",
-		aChain, reps, 100*aLo, 100*aHi, bChain, reps, 100*bLo, 100*bHi)
+	t.Logf("写入率   A=%d/%d  B=%d/%d  C=%d/%d", aWrite, reps, bWrite, reps, cWrite, reps)
+	t.Logf("写尝试   A=%d  B=%d  C=%d（分母都是 %d 次会话）", aAttempt, bAttempt, cAttempt, reps)
+	cLo, cHi := supplementWilsonCI(cChain, reps)
+	t.Logf("全链转通 A=%d/%d [Wilson %.0f%%–%.0f%%]  B=%d/%d [Wilson %.0f%%–%.0f%%]  C=%d/%d [Wilson %.0f%%–%.0f%%]",
+		aChain, reps, 100*aLo, 100*aHi, bChain, reps, 100*bLo, 100*bHi,
+		cChain, reps, 100*cLo, 100*cHi)
+	t.Logf("C−A 差值 = %+.1f 个百分点（判据文本的效果；本装置 MDE ≈ %.0f pp）",
+		100*(float64(cChain)/float64(reps)-float64(aChain)/float64(reps)), mde)
 	if pOK {
 		t.Logf("配对 McNemar：不一致对 %d（仅A %d / 仅B %d），双侧精确 p=%.3f", disc, b01, b10, pMc)
 	} else {
 		t.Logf("配对 McNemar：无不一致对，p 不可报（那是分辨率不足，不是零假设被接受）")
 	}
 	t.Logf("本装置在 n=%d/臂 下能分辨的最小差值 ≈ %.0f 个百分点", reps, mde)
+	cDisc, cP, cPOK := supplementMcNemarExact(c01, c10)
+	if cPOK {
+		t.Logf("A vs C（判据文本）：不一致对 %d（仅A %d / 仅C %d），双侧精确 p=%.3f",
+			cDisc, c01, c10, cP)
+	} else {
+		t.Logf("A vs C：无不一致对，p 不可报（分辨率不足，不是零假设被接受）")
+	}
 
 	// —— 断言一（强，可证伪）：机制真的转起来了 ——
 	//
@@ -388,6 +454,11 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 	// "效应显著"。
 	if pOK && pMc >= 0.05 {
 		t.Logf("注意：本次 n=%d 不足以断言效应显著（p=%.3f）。机制已证，效应量待测。", reps, pMc)
+	}
+	if cPOK && cP < 0.05 && cChain > aChain {
+		t.Logf("C 臂（官方行为判据）在 p=%.3f 下显著优于 A 臂：判据可以进入 guidance.go。", cP)
+	} else if cPOK {
+		t.Logf("C 臂（官方行为判据）未显示可测到的改善（p=%.3f）：**不要**把它加进生产注入。", cP)
 	}
 }
 
@@ -449,3 +520,29 @@ func truncForLog(s string) string {
 	}
 	return s
 }
+
+// p0CriteriaOfficial 是官方 §2.2 的行为判据，**逐句照抄**、只做中英直译所需的
+// 最小改写（官方原文见下），没有加任何我们自己的话：
+//
+//	"Claude **skips anything it can derive from the codebase**, such as
+//	 architecture, file paths, or debugging fixes. **It also skips anything your
+//	 CLAUDE.md files already say.**"
+//	"**Claude doesn't save something every session.** It decides what's worth
+//	 remembering based on whether the information would be useful in a future
+//	 conversation."
+//
+// # 它为什么在**测试文件**里而不在 memory 包里
+//
+// 这是**待验证的候选**，不是已发布的行为。放进生产包就等于把结论提前写进代码——
+// 而本轮的全部教训恰恰是"我们判断该有的东西"与"官方有的东西"要分开。装置测出
+// 结论之后再决定放不放进 guidance.go，届时把判据和它的实测数据一起提交。
+//
+// # 与上一版那 6 条协议的区别
+//
+// 上一版是**自创**的 6 条，内部互相矛盾（既说"不要每次都写"又说"持续更新索引"），
+// 采纳率 12%~62%。这一次有原文可依，且只有三条、不含祈使句、不与形态说明冲突。
+// 但"照抄"不构成"该加"的证据——所以它是 C 臂，要数据。
+const p0CriteriaOfficial = "关于何时记录记忆：" +
+	"跳过任何能从代码库推导出来的内容，例如架构、文件路径或调试修复；" +
+	"也跳过项目指令文件（CLAUDE.md / AGENTS.md）里已经写明的内容。" +
+	"并不是每个会话都要写入记忆——由你判断某条信息在未来对话里是否还用得上。"
