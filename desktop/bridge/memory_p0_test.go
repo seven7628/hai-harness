@@ -48,9 +48,18 @@ import (
 	"github.com/seven7628/hai-harness/tools/builtin"
 )
 
-// p0RepsFloor 是重复次数地板。低于 8 就无法把"A 臂 0/8"和"A 臂 6/8"区分开，
-// 而那正是本装置要回答的问题。
-const p0RepsFloor = 8
+// p0RepsFloor 是重复次数地板。
+//
+// 2026-09-30 从 8 提到 20，原因是**地板设错了**而不是模型变了：实测单次会话写入
+// 概率约 0.17（4/24），于是 n=8 时"一次都没写"的概率是 0.83^8 ≈ **22%** ——
+// 机制断言（至少一次全链转通）每跑五次就会误报一次。实测确实撞上过：整包跑批
+// FAIL 而单独跑 PASS。
+//
+// n=20 时 0.83^20 ≈ 2.4%，可接受。代价是每轮约 11 分钟，所以跑批走 nohup 写日志文件。
+//
+// 更小的 n 也不是不能用来估写入**率**——只是不能用来断言"机制成立"，因为那个断言
+// 是"出现一次即成立"，对 n 的要求是相反方向的：要的是"几乎不可能一次都不出现"。
+const p0RepsFloor = 20
 
 func p0Reps(t *testing.T) int {
 	t.Helper()
@@ -63,7 +72,8 @@ func p0Reps(t *testing.T) int {
 		t.Fatalf("HAI_EVAL_P0_REPS=%q 解析失败（要一个正整数）", raw)
 	}
 	if n < p0RepsFloor {
-		t.Fatalf("HAI_EVAL_P0_REPS=%d < 地板 %d：n 太小分不清「没写」与「写得少」", n, p0RepsFloor)
+		t.Fatalf("HAI_EVAL_P0_REPS=%d < 地板 %d：单次写入概率约 0.17，n 太小时"+
+			"「一次都没写」是个大概率事件，机制断言会 flake", n, p0RepsFloor)
 	}
 	return n
 }
