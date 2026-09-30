@@ -48,32 +48,65 @@ func Resolve(ctx context.Context, workdir string) (Dir, error) { return New().Re
 
 // Resolve 由工作目录（通常是 session 的 workdir）解析 Project Memory 的目录。
 //
-// 官方 memory#storage-location 只规定了「<project> 由 git 仓库派生，同一仓库的所有
-// worktree 与子目录共享一份记忆」，没有规定 ID 的具体字符串形态。本包据此的派生顺序：
+// 官方 memory#storage-location：
 //
-//  1. git rev-parse --show-toplevel —— 确认在 git 工作树内，否则 ErrNoGit；
+//	"Each project gets its own memory directory at ~/.claude/projects/<project>/memory/.
+//	 The <project> path is derived from the git repository, so all worktrees and
+//	 subdirectories within the same repo share one auto memory directory.
+//	 **Outside a git repo, the project root is used instead.**"
+//
+// 派生顺序：
+//
+//  1. git rev-parse --show-toplevel —— 在 git 工作树内则确认仓库根；
 //  2. 有 remote  → 由 remote URL 规范化出 ID（可辨认、跨克隆路径稳定）；
-//  3. 无 remote  → 由 git rev-parse --git-common-dir 派生。
+//  3. 无 remote  → 由 git rev-parse --git-common-dir 派生；
+//  4. **不在 git 工作树内** → 由工作目录的绝对路径派生（官方明确回落到项目根）。
 //
 // 第 3 条是 worktree 共享的承重点：worktree 各自的 .git 是一个**文件**，指向主仓库的
 // common dir，因此同一仓库的任意 worktree 都得到同一个 common dir → 同一个 ID。
 // （用 toplevel 会让每个 worktree 各得一份记忆，直接违反官方共享语义。）
+//
+// # 第 4 条是 2026-09-30 补上的（官方有、我们没有）
+//
+// 在此之前非 git 目录直接返回 ErrNoGit、不启用记忆，理由记为《技术方案》§8 待定项 1
+// "倾向默认关闭"。回原文核对后发现**官方明确规定了回落到项目根目录**，那条待定项
+// 的担忧（"绝对路径哈希会让同一项目移动后失去记忆"）不成立——官方的
+// sessions#where-transcripts-are-stored 就是这么做的：
+//
+//	"<project> is your working directory path with non-alphanumeric characters
+//	 replaced by `-`. For a working directory whose converted name exceeds 200
+//	 characters, Claude Code truncates the name to 200 characters and appends a
+//	 hash of the full path."
+//
+// 即官方**接受**"项目移动后失去记忆"这个代价。误判形态与 P0 三条完全一致：
+// 把"我们还没实现"记成了"官方没规定"（见 Wiki §5.3）。
+//
+// 我们与官方的**已知偏离**（刻意，且记在这里以免被当成 bug）：
+//   - 官方把路径里每一个非字母数字字符都换成 `-`；我们保留 `.` 并加 `path-` 前缀。
+//     理由是防撞车：remote 派生的 ID 形如 `github.com-owner-repo`，若路径派生也
+//     允许点号，一个叫 `github.com-owner-repo` 的**目录**会与同名 remote 的仓库
+//     静默共用一份记忆。前缀让 `ls ~/.go-code/memory/repos` 一眼能分清哪些是
+//     路径作用域、哪些是仓库作用域——可辨认是我们这一层刻意的取舍（见 idFromRemote）。
+//   - 截断长度用本包的 maxIDLen(80) 而非官方的 200：我们的 ID 形态不同，官方那个
+//     上限是针对它自己的路径串长度调的，照搬没有意义。
 func (r *Resolver) Resolve(ctx context.Context, workdir string) (Dir, error) {
 	dir, err := normalizeDir(workdir)
 	if err != nil {
 		return Dir{}, err
 	}
-	top, err := r.git(ctx, dir, "rev-parse", "--show-toplevel")
+	root, err := ReposRoot()
 	if err != nil {
-		return Dir{}, fmt.Errorf("memory: %q 不在 git 工作树内（%v）：%w", dir, err, ErrNoGit)
+		return Dir{}, err
 	}
-	top = strings.TrimSpace(top)
-	if top == "" {
-		return Dir{}, fmt.Errorf("memory: --show-toplevel 输出为空：%w", ErrNoGit)
-	}
-	if !filepath.IsAbs(top) {
-		// git 正常输出绝对路径；相对输出按 workdir 解析（防御性，保留可解释性）。
-		top = filepath.Clean(filepath.Join(dir, top))
+
+	top, gitErr := r.gitToplevel(ctx, dir)
+	if gitErr != nil {
+		// 官方回落：不在 git 仓库里 → 项目根目录就是工作目录本身。
+		id := idFromPath(dir)
+		if id == "" {
+			return Dir{}, fmt.Errorf("memory: 由路径 %q 派生的身份为空：%w", dir, ErrNoIdentity)
+		}
+		return Dir{ID: id, Path: filepath.Join(root, id)}, nil
 	}
 
 	// remote 优先：跨机器、跨克隆路径一致，换机器 clone 一次即可复用同一份记忆。
@@ -94,12 +127,27 @@ func (r *Resolver) Resolve(ctx context.Context, workdir string) (Dir, error) {
 	if id == "" {
 		return Dir{}, fmt.Errorf("memory: 由 toplevel %q 派生的身份为空：%w", top, ErrNoIdentity)
 	}
-
-	root, err := ReposRoot()
-	if err != nil {
-		return Dir{}, err
-	}
 	return Dir{ID: id, Path: filepath.Join(root, id)}, nil
+}
+
+// gitToplevel 取 git 仓库根，失败时返回错误（**不**当作致命）。
+//
+// 单独成函数是为了让"不在 git 内"与"git 坏了"在调用点可分：前者走官方回��，
+// 后者目前也回落（用户看不到 git 安装与否，而记忆不该因此整体失效）。
+func (r *Resolver) gitToplevel(ctx context.Context, dir string) (string, error) {
+	top, err := r.git(ctx, dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("%q 不在 git 工作树内（%v）", dir, err)
+	}
+	top = strings.TrimSpace(top)
+	if top == "" {
+		return "", fmt.Errorf("git rev-parse --show-toplevel 输出为空")
+	}
+	if !filepath.IsAbs(top) {
+		// git 正常输出绝对路径；相对输出按 workdir 解析（防御性，保留可解释性）。
+		top = filepath.Clean(filepath.Join(dir, top))
+	}
+	return top, nil
 }
 
 // remoteURL 取规范化前的 remote URL：origin 优先，否则第一个已配置的 remote。
@@ -180,6 +228,73 @@ func idFromRemote(u string) string {
 		id = id[:maxIDLen-17] + "-" + shortHash(strings.Join(segs, "/"))
 	}
 	return id
+}
+
+// idFromPath 无 git 时由绝对路径派生 ID：`path-<路径，非字母数字折叠为 ->-<短哈希>`。
+//
+// 官方口径（sessions#where-transcripts-are-stored）：
+//
+//	"<project> is your working directory path with non-alphanumeric characters
+//	 replaced by `-` … truncates the name to 200 characters and appends a hash
+//	 of the full path."
+//
+// 与官方三处**刻意**的偏离，理由逐条写在这里以免后来者当成 bug 去"修正"：
+//
+//  1. **哈希永远拼上，不只在截断时。** 官方只在超长时补，于是 `/x/a-b` 与 `/x/a/b`
+//     都变成 `x-a-b`——两个不同的项目**静默共用**一份记忆。官方那套目录名是给它自己
+//     的会话转录用的，撞了只是会话列表混；而记忆撞车是把 A 项目的结论喂给 B 项目。
+//     本文件 idFromGitDir 早就为此在名字里带哈希，这里沿用同一原则。
+//  2. **保留点号。** 可辨认：`path-Users-me-github.com-x-repo` 一眼读得出是哪个目录。
+//     与 idFromRemote 的可辨认取舍一致。
+//  3. **加 `path-` 前缀。** 结构性地排除与 remote 派生 ID（`github.com-owner-repo`）
+//     撞车——一个恰好叫这个名字的**目录**不该和同名 remote 的仓库共用记忆。
+//     前缀还让 `ls ~/.go-code/memory/repos` 一眼分清哪些是路径作用域、哪些是仓库作用域。
+//
+// 连续 `-` 折叠为一个：`-` 与 `/` 都映射成 `-`，不折叠的话 `/x//y` 会长出一串 `---`。
+// 折叠本身会制造歧义，但第 1 条的哈希已经把歧义消掉了。
+func idFromPath(abs string) string {
+	abs = filepath.ToSlash(strings.TrimSpace(abs))
+	if abs == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("path-")
+	for _, r := range abs {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	body := collapseDashes(strings.Trim(b.String(), "-"))
+	// 折叠后可能整串都是 '-'（全非 ASCII 的路径）——那就没有可辨认部分了，只留哈希。
+	if body == "" || strings.Trim(body, "path-.") == "" {
+		return "path-" + shortHash(abs)
+	}
+	const h = 12 // shortHash 的十六进制位数
+	if len(body) > maxIDLen-h-1 {
+		body = body[:maxIDLen-h-1]
+	}
+	return body + "-" + shortHash(abs)
+}
+
+// collapseDashes 把连续的 '-' 压成一个。
+func collapseDashes(s string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		if r == '-' {
+			if prevDash {
+				continue
+			}
+			prevDash = true
+		} else {
+			prevDash = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // splitRemoteURL 把各种 remote 形态拆成 (host, 仓库路径)。

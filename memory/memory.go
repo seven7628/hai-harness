@@ -57,18 +57,26 @@ import (
 
 // 身份解析的哨兵错误（调用点用 errors.Is 判别，不解析错误字符串）。
 var (
-	// ErrNoGit 工作目录不在 git 工作树内。
-	//
-	// 官方在 git 仓库之外改用「项目根目录」（memory#storage-location），
-	// 但**具体怎么把项目根目录变成一个目录名官方没有规定**，且《技术方案》§8 待定项 1
-	// 倾向默认关闭（绝对路径哈希会让同一项目移动后失去记忆）。
-	// 故此处按「返回明确错误、不启用记忆」实现，等待该项决策。
-	ErrNoGit = errors.New("memory: 工作目录不在 git 工作树内，不启用记忆")
 	// ErrNoHome 取不到 home 目录，无法定位 ~/.go-code/memory。
 	ErrNoHome = errors.New("memory: 无法定位 home 目录")
-	// ErrNoIdentity 无法由 git 派生出仓库身份（如 ID 派生结果为空或含路径分隔符）。
-	ErrNoIdentity = errors.New("memory: 无法确定仓库身份")
+	// ErrNoIdentity 无法由工作目录派生出项目身份（ID 派生结果为空）。
+	ErrNoIdentity = errors.New("memory: 无法确定项目身份")
 )
+
+// 关于「工作目录不在 git 工作树内」——
+//
+// **它不再是错误。** 官方 memory#storage-location 明确写了回���：
+//
+//	"Outside a git repo, the project root is used instead."
+//
+// 此前本文件有 ErrNoGit = "工作目录不在 git 工作树内，不启用记忆"，依据是《技术方案》
+// §8 待定项 1「倾向默认关闭（绝对路径哈希会让同一项目移动后失去记忆）」。2026-09-30 回
+// 原文核对后删去该符号：官方不仅规定了回落，sessions#where-transcripts-are-stored 还
+// 给出了确切的目录名算法（路径非字母数字→`-`，超长截断并补全路径哈希），即官方**接受**
+// 「项目移动后失去记忆」这个代价。
+//
+// 这与 P0 三条是同一个误判形态：把「我们还没实现」记成了「官方没规定」。
+// 现在的派生顺序见 identity.go 的 Resolve。
 
 // 记忆存储的目录约定（技术方案 §3.1）：
 //

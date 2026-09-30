@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -168,18 +167,79 @@ func TestResolve_NoRemoteDistinctRepos(t *testing.T) {
 	}
 }
 
-// 无 git：返回明确错误，不启用记忆；不发明绝对路径哈希 fallback。
-func TestResolve_NoGit(t *testing.T) {
+// 非 git 目录：回落到项目根目录（官方 memory#storage-location："Outside a git repo,
+// the project root is used instead"）。
+//
+// 2026-09-30 从"返回 ErrNoGit"翻转过来。此前《技术方案》§8 待定项 1 记的是
+// "无 git 时不启用记忆，倾向默认关闭"，而回原文核对发现官方明确写了回落——
+// 与 P0 三条同一个误判形态（把"没实现"记成"官方没规定"）。
+//
+// 断言三件事：能解析、ID 是路径作用域、且**不同目录不撞车**。
+func TestResolve_OutsideGitRepoUsesProjectRoot(t *testing.T) {
 	withHome(t)
-	plain := filepath.Join(t.TempDir(), "not-a-repo")
-	if err := os.MkdirAll(plain, 0o750); err != nil {
+	base := t.TempDir()
+	a := filepath.Join(base, "not-a-repo")
+	b := filepath.Join(base, "other")
+	for _, d := range []string{a, b} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dA, err := Resolve(context.Background(), a)
+	if err != nil {
+		t.Fatalf("非 git 目录应当能解析出记忆目录（官方回落到项目根）：%v", err)
+	}
+	if !strings.HasPrefix(dA.ID, "path-") {
+		t.Fatalf("ID = %q，期望 path- 前缀（路径作用域）", dA.ID)
+	}
+	// 哈希尾巴校验的是"有"而不是"等于哪个值"：normalizeDir 会解析软链接
+	// （macOS 上 /var → /private/var），所以被哈希的是**解析后**的路径，
+	// 在测试里复算它等于把实现细节抄一遍。
+	if tail := dA.ID[len(dA.ID)-12:]; !isHex(tail) {
+		t.Fatalf("ID = %q，末 12 位应为十六进制哈希", dA.ID)
+	}
+	if want := filepath.Join(reposRootForTest(t), dA.ID); dA.Path != want {
+		t.Fatalf("Path = %q, want %q", dA.Path, want)
+	}
+
+	// 同目录重复解析必须稳定（否则每次会话一份新记忆）。
+	again, err := Resolve(context.Background(), a)
+	if err != nil || again.ID != dA.ID {
+		t.Fatalf("同一目录两次解析不一致：%q vs %q (%v)", dA.ID, again.ID, err)
+	}
+
+	// 撞车是最坏失败：两个项目静默共用一份记忆。
+	dB, err := Resolve(context.Background(), b)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Resolve(context.Background(), plain); err == nil {
-		t.Fatal("非 git 目录应当报错（待定项 1：无 git 时不启用记忆）")
-	} else if !errors.Is(err, ErrNoGit) {
-		t.Fatalf("err = %v, 期望包装 ErrNoGit", err)
+	if dA.ID == dB.ID {
+		t.Fatalf("两个不同目录得到同一 ID %q（会静默共用一份记忆）", dA.ID)
 	}
+
+	// 折叠歧义：`/x/a-b` 与 `/x/a/b` 在"非字母数字→-"下同形，哈缀必须把它们分开。
+	c := filepath.Join(base, "a-b")
+	e := filepath.Join(base, "a", "b")
+	for _, d := range []string{c, e} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dC, _ := Resolve(context.Background(), c)
+	dE, _ := Resolve(context.Background(), e)
+	if dC.ID == dE.ID {
+		t.Fatalf("a-b 与 a/b 折叠成同一 ID %q：哈希没起作用", dC.ID)
+	}
+}
+
+func reposRootForTest(t *testing.T) string {
+	t.Helper()
+	r, err := ReposRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 // 非 origin 的 remote 也能取到身份（官方未规定取哪个，本包取第一个）。
@@ -287,4 +347,14 @@ func homeDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return h
+}
+
+// isHex 判断 s 是否全为小写十六进制字符。
+func isHex(s string) bool {
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return len(s) > 0
 }

@@ -120,10 +120,13 @@ type BootstrapResult struct {
 	Injection Injection
 	// Dir 记忆目录（Enabled=true 且身份解析成功时非 nil），供 Step 4 使用。
 	Dir *Dir
-	// Resolved 身份解析是否成功。ErrNoGit / ErrNoHome 等**不算失败**：
+	// Resolved 身份解析是否成功。ErrNoHome 等**不算失败**：
 	// 绝大多数会话没有记忆，官方对缺失的规定是"不注入不报错"。
 	Resolved bool
-	// Err 真实错误（身份解析失败、读盘 IO 失败）。非 nil 时注入文本必为空。
+	// Err 真实错误（取不到 home、读盘 IO 失败）。非 nil 时注入文本必为空。
+	//
+	// 注意「工作目录不在 git 工作树内」**不在此列**：官方回落到项目根目录，
+	// 那条路径仍然解析成功（见 identity.go Resolve）。
 	Err error
 }
 

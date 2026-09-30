@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,8 +103,12 @@ func TestBootstrap_NoMemoryYet(t *testing.T) {
 	}
 }
 
-// 身份解析失败（无 git）→ 不注入；错误带回给调用方，但不阻断会话。
-func TestBootstrap_NoIdentity(t *testing.T) {
+// git 不可用（没装 git / 不是仓库且路径也派不出身份）→ 仍要给出记忆目录。
+//
+// 2026-09-30：非 git 不再是错误（官方回落到项目根）。本测试改为断言**回落确实发生**——
+// 注入的 git 执行器对任何调用都报错，解析必须仍然成功，且注入段里带着目录路径。
+// 保留一个"git 全挂"的场景，是为了让"回落不依赖 git 恰好能跑"这件事被钉住。
+func TestBootstrap_GitUnavailableFallsBackToProjectRoot(t *testing.T) {
 	clearEnv(t)
 	c := Config{Directory: t.TempDir(), Resolve: &Resolver{
 		Run: func(context.Context, string, ...string) (string, error) {
@@ -113,17 +116,17 @@ func TestBootstrap_NoIdentity(t *testing.T) {
 		},
 	}}
 	res := Bootstrap(context.Background(), t.TempDir(), c)
-	if res.Injection.Text != "" {
-		t.Fatalf("无身份时不得注入：%q", res.Injection.Text)
+	if res.Err != nil {
+		t.Fatalf("git 不可用不该阻断会话：%v", res.Err)
 	}
-	if res.Injection.Reason != "no-identity" {
-		t.Fatalf("Reason = %q", res.Injection.Reason)
+	if !res.Resolved || res.Dir == nil {
+		t.Fatal("应回落到项目根目录")
 	}
-	if res.Resolved || res.Dir != nil {
-		t.Fatal("无身份时不应有 Dir")
+	if !strings.HasPrefix(res.Dir.ID, "path-") {
+		t.Fatalf("ID = %q, want path- 前缀", res.Dir.ID)
 	}
-	if !errors.Is(res.Err, ErrNoGit) {
-		t.Fatalf("err = %v, 期望包装 ErrNoGit", res.Err)
+	if res.Injection.Text == "" || !strings.Contains(res.Injection.Text, res.Dir.Path) {
+		t.Fatalf("回落时也要注入目录说明：%+v", res.Injection)
 	}
 }
 

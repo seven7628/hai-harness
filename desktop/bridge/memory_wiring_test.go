@@ -31,18 +31,30 @@ func newTestMemHost(t *testing.T, root string, enabled bool) *memoryHost {
 	return newMemoryHost(cfg)
 }
 
-// memTopicDir 造一个"看起来像 git 仓库"的记忆目录：直接给 memoryHost 注入已解析的
-// 目录，绕开 git 身份解析（那部分由 memory/identity_test.go 负责）。
+// memTopicDir 造一个 memoryHost 与它**真实解析出来**的记忆目录。
+//
+// 2026-09-30 改写。此前这里硬塞 `h.dir = &memory.Dir{Path: root/repos/testid}` 并靠
+// 「Bootstrap 在非 git 目录会失败」来保证预设不被覆盖。非 git 回落项目根（官方规定，
+// 见 memory/identity.go）之后，那条隐含前提失效，Bootstrap 会用路径派生的 ID 覆盖
+// 预设目录，于是钩子开始往另一个目录写——6 个测试同时变红。
+//
+// 现在改成**走真实解析**：用与生产同一条路径（memory.Bootstrap）拿到目录，再建它。
+// 代价是这个辅助函数不再"跳过 git 解析"，收益是它测的就是产品行为。
 func memTopicDir(t *testing.T) (*memoryHost, *memory.Dir, string) {
 	t.Helper()
 	root := t.TempDir()
+	ws := t.TempDir()
 	h := newTestMemHost(t, root, true)
-	dir := memory.Dir{Path: filepath.Join(root, "repos", "testid")}
-	if err := os.MkdirAll(dir.Path, 0o700); err != nil {
+	res := memory.Bootstrap(context.Background(), ws, h.cfg)
+	if !res.Resolved || res.Dir == nil {
+		t.Fatalf("解析记忆目录失败：%v", res.Err)
+	}
+	if err := os.MkdirAll(res.Dir.Path, 0o700); err != nil {
 		t.Fatalf("建记忆目录: %v", err)
 	}
-	h.dir = &dir
-	return h, &dir, root
+	h.once.Do(func() {}) // 锁住 once，避免后续 resolve 再跑一次并覆盖
+	h.dir = res.Dir
+	return h, res.Dir, root
 }
 
 // TestPostWriteStampsTopicFrontmatter：模型用标准 write_file 写记忆 topic，
