@@ -115,6 +115,15 @@ type Config struct {
 	AgentMDFiles []string
 	AgentMDDirs  []string
 
+	// UserAgentMDDir 用户级指令目录（~/.agents，跨工作区）；只取该目录**本层那一个**
+	// AGENTS.md / CLAUDE.md（非递归，见 discoverUserAgentMD）。空 = 无用户级层。
+	//
+	// 分层语义 = **顺序拼接，不做覆盖**：用户级在最前（优先级最低），其后是显式文件、
+	// 最后是工作区递归发现的各层。刻意不实现「工作区同名文件覆盖用户级」——用户级装的是
+	// 个人全局偏好（"一律用中文回答"），工作区装的是项目约定；让项目根文件把个人偏好顶掉
+	// 是静默丢用户配置。对齐 Codex / Claude Code 的 global-then-project 拼接语义。
+	UserAgentMDDir string
+
 	// Skills 技能注册表（渐进披露的发现来源：清单注入系统提示词），nil 表示无技能
 	Skills *skills.Registry
 
@@ -307,6 +316,13 @@ func WithAgentMDFiles(files ...string) Option {
 // 每次运行前重读：文件变更在下一次运行自动生效（字节稳定不变时缓存命中不受影响）。
 func WithAgentMDDir(dir string) Option {
 	return func(c *Config) { c.AgentMDDirs = append(c.AgentMDDirs, dir) }
+}
+
+// WithUserAgentMDDir 注入用户级指令目录（~/.agents）：只取该目录本层的单个
+// AGENTS.md / CLAUDE.md（非递归），拼在**工作记忆层最前**（优先级最低）。
+// 与 WithAgentMDDir 的分工：后者是工作区递归发现根，本选项是跨工作区的个人全局层。
+func WithUserAgentMDDir(dir string) Option {
+	return func(c *Config) { c.UserAgentMDDir = dir }
 }
 
 func WithSkills(reg *skills.Registry) Option {
@@ -1485,16 +1501,36 @@ func (a *AgentLoop) composeSystemPrompt() string {
 		}
 		b.WriteString("## Current Workspace\n- " + a.cfg.WorkingDir)
 	}
-	// 工作记忆：显式文件（顺序即注入序，RelPath 显示为文件路径）
+	// 工作记忆（**加载顺序即优先级**：越靠后越优先，冲突时后者更受重视）：
+	//
+	//	1. 用户级（~/.agents 单文件）—— 跨工作区的个人全局偏好，优先级最低
+	//	2. 显式文件（AgentMDFiles，顺序即注入序，RelPath 显示为文件路径）
+	//	3. 工作区递归发现（AgentMDDirs，根优先：根 → 子目录，深者更具体）
+	//
+	// 用户级刻意**在前**：个人偏好是"背景设定"，项目约定才是"当前任务规则"。
+	//
+	// 顺序即优先级（后者离指令更近、冲突时更晚的更受重视），刻意不做"工作区覆盖
+	// 用户级"：用户级装个人偏好、工作区装项目约定，顶掉前者 = 静默丢用户配置。
+	//
+	// 代价（知情取舍）：前缀缓存的失效面 —— 改工作区任一 AGENTS.md 会连带作废
+	// 其后所有层。放在最前是"最易变的内容在最稳定的前缀里"，对命中率最不友好。
+	// 但反过来把用户级放最后会让"个人偏好"看起来比"项目约定"更权威，语义更糟；
+	// 且个人文件通常数月不动，实际抖动源仍是工作区文件。故维持现状。
 	var files []agentMDFile
+	files = append(files, discoverUserAgentMD(a.cfg.UserAgentMDDir)...)
 	for _, f := range a.cfg.AgentMDFiles {
 		if content, err := os.ReadFile(f); err == nil {
-			files = append(files, agentMDFile{Name: filepath.Base(f), RelPath: f, Content: string(content)})
+			abs := f
+			if a, err := filepath.Abs(f); err == nil {
+				abs = a
+			}
+			files = append(files, agentMDFile{Name: filepath.Base(f), RelPath: f, Content: string(content), Abs: abs})
 		}
 	}
 	for _, dir := range a.cfg.AgentMDDirs {
 		files = append(files, discoverAgentMD(dir)...)
 	}
+	files = dedupeAgentMDByPath(files)
 	if mem := composeWorkingMemory(files); mem != "" {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")

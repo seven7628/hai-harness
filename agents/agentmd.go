@@ -14,6 +14,10 @@ type agentMDFile struct {
 	Name    string // 文件名（AGENTS.md / CLAUDE.md）
 	RelPath string // 相对发现根的路径（文件头定位用）
 	Content string
+	// Abs 绝对路径，仅供跨层去重（dedupeAgentMDByPath）。不能靠 RelPath 反推：
+	// 工作区层的 RelPath 是**相对发现根**的，"AGENTS.md" 相对进程 CWD 解析出来的
+	// 是另一条路径，去重会失效。
+	Abs string
 }
 
 // agentMDNames 协议支持的文件名：Codex 的 AGENTS.md 规范 + Claude Code 的 CLAUDE.md。
@@ -69,7 +73,7 @@ func discoverAgentMD(dir string) []agentMDFile {
 		if err != nil {
 			rel = path
 		}
-		files = append(files, agentMDFile{Name: d.Name(), RelPath: rel, Content: string(content)})
+		files = append(files, agentMDFile{Name: d.Name(), RelPath: rel, Content: string(content), Abs: path})
 		return nil
 	})
 
@@ -126,4 +130,99 @@ func composeWorkingMemory(files []agentMDFile) string {
 		fmt.Fprintf(&b, "# %s (%s)\n\n%s", f.Name, f.RelPath, content)
 	}
 	return b.String()
+}
+
+// userAgentMDMaxBytes 用户级指令文件体量上限（64 KiB）。见 discoverUserAgentMD 内的说明。
+const userAgentMDMaxBytes = 64 << 10
+
+// discoverUserAgentMD 用户级指令文件（~/.agents/AGENTS.md 等）：**单文件、非递归**。
+//
+// 注入位置：工作记忆层的**最前**（见 composeSystemPrompt）—— 用户级先加载、工作区
+// 层后加载，故用户级优先级最低。
+//
+// 为什么非递归：用户级目录（~/.agents）同时是 skills / subagents 的家，其子目录里
+// 天然可能各有自己的 AGENTS.md（如某个 skill 自带的说明）；递归会把它们全捞进来当
+// 个人全局指令 —— 语义错位且体积不可控。用户级只认「本目录的那一份」。
+//
+// 为什么单文件而非复用工作区的去重规则：工作区层是「一个 root 递归出一组文件」，
+// 用户级是「一个文件」，形状本就不同；同名共存时按 agentMDNames 顺序取第一个
+// （AGENTS.md 优先于 CLAUDE.md），与工作区的同级共存规则同向。
+//
+// 渲染的路径是**绝对路径**，不用 "~" 缩写：注入 system 的这段文本是模型**要照着
+// 操作的路径**，而文件工具的 resolve（tools/builtin/builtin.go）不展开 "~"——
+// "~/.agents/AGENTS.md" 会被当成工作区内的相对路径，write_file 静默在
+// {ws}/~/.agents/AGENTS.md 建出一个字面量 "~" 目录还报成功（已复现）。这里不能
+// 拿"不外泄用户名"换正确性：用户名本来就经 Current Workspace / 工具回执外泄。
+func discoverUserAgentMD(dir string) []agentMDFile {
+	if dir == "" {
+		return nil
+	}
+	for _, name := range agentMDNames {
+		path := filepath.Join(dir, name)
+		// Stat 而非 Lstat：跟随符号链接（~/.agents/AGENTS.md → dotfiles 仓库是常见形态，
+		// 与 discoverAgentMD 同口径）；目录 / 断链 / 特殊文件跳过。
+		fi, err := os.Stat(path)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		content, err := os.ReadFile(path)
+		// 读失败**继续**兜底下一个名字（AGENTS.md 不可读但 CLAUDE.md 可读时用后者），
+		// 不因 Stat 成功就吞掉整个用户级层。
+		//
+		// 空/纯空白**继续**兜底，与工作区层 composeWorkingMemory 的"空内容跳过"
+		// 是同一个"算不算指令文件"的判定，两层口径必须一致 —— 否则一个只放了空
+		// 占位的 ~/.agents/AGENTS.md 会把真实偏好的 CLAUDE.md 遮掉，且无任何报错
+		//（用户在全局层配的偏好从此静默失效）。
+		if err != nil || strings.TrimSpace(string(content)) == "" {
+			continue
+		}
+		// 体量上限：用户级是**全局**文件 —— 一次手滑写出几百 KB，会在每个工作区的
+		// 每一轮请求里反复付费，且没有任何提示。工作区层是逐仓的、影响面小得多。
+		// 超限时**明确告知**而非静默截断（静默截断会让模型按"规则只到一半"行事）。
+		if len(content) > userAgentMDMaxBytes {
+			return []agentMDFile{{
+				Name:    name,
+				RelPath: path,
+				Content: fmt.Sprintf(
+					"[%s 超过 %d 字节上限（实际 %d），未注入。请精简该文件后重试。]",
+					path, userAgentMDMaxBytes, len(content)),
+				Abs: path,
+			}}
+		}
+		return []agentMDFile{{
+			Name:    name,
+			RelPath: path,
+			Content: string(content),
+			Abs:     path,
+		}}
+	}
+	return nil
+}
+
+// dedupeAgentMDByPath 同一物理文件只保留**首次**出现的那一份（用户级优先，故实际
+// 保留的是用户级渲染）。
+//
+// 为什么需要：用户把 ~/.agents 本身当工作区打开（dotfiles / skills 仓库很常见）时，
+// 同一个 AGENTS.md 会被用户级与工作区递归各注入一次，模型看到两份逐字相同、
+// 路径标注不同的块。工作区层的 RelPath 是相对路径、用户级是绝对路径，所以只能按
+// 绝对路径归一后比较，不能按 RelPath 字符串。
+func dedupeAgentMDByPath(files []agentMDFile) []agentMDFile {
+	seen := make(map[string]bool, len(files))
+	out := files[:0]
+	for _, f := range files {
+		abs := f.Abs
+		if abs == "" { // 兜底：理论上无（两条发现路径都填了），退回 RelPath
+			if p, err := filepath.Abs(f.RelPath); err == nil {
+				abs = p
+			} else {
+				abs = f.RelPath
+			}
+		}
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		out = append(out, f)
+	}
+	return out
 }

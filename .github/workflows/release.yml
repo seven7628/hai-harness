@@ -57,6 +57,11 @@ jobs:
           fi
           go vet ./...
 
+      # go vet 覆盖 _test.go（语法错会让它失败），但**不执行**测试 —— 没有这一步，
+      # 测试文件只能破坏构建、毫无收益。新增回归测试必须在这里真正跑起来。
+      - name: Go 测试
+        run: go test ./...
+
       - name: 编译 bridge（arm64 静态二进制，随 app 分发）
         run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o desktop/app/dist/hai-bridge ./desktop/bridge
 
