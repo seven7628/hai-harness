@@ -680,7 +680,13 @@ export interface SessionView {
   costUsd: number     // 会话累计成本（桥按价表打标累加）
   ttftMs?: number
   llmStartTs?: number
-  turnStartTs?: number
+  // 本 LLM 轮起始时刻，**按 run_id 分槽**（key = run_id；无 run_id 的旧流落 ''）。
+  // 为什么分槽而不是单个标量：spawn_agent 是 Background 工具（subagent/agent_tools.go），
+  // 子 agent 与主 agent 的轮次并发交错，子 run 的 llm_end 会落进主 run 某轮的
+  // llm_start..llm_end 窗口。单个标量时那次 llm_end 把主 run 的起点清成 undefined，
+  // 该轮 durMs 永久丢失（agent_end 的末轮兜底读同一字段，回天无力）。分槽后各 run
+  // 只消费自己的槽位。口径对齐 Go 侧 view_reducer 的 turnStart[run_id]。
+  turnStartTs?: Record<string, number>
   toolStartTs: Record<string, number>
   streaming: boolean
   aborted: boolean // 本次 run 已被用户中断（agent_end abort 置位；agent_start 复位）——chunk 防御
@@ -2419,7 +2425,7 @@ interface AppState {
   browserBusy: boolean // 浏览器面板拉取中（页列表/截图）
   ttftMs?: number
   llmStartTs?: number
-  turnStartTs?: number
+  turnStartTs?: Record<string, number> // 按 run_id 分槽（见 SessionView 同名字段注释）
   toolStartTs: Record<string, number>
   streaming: boolean
   pendingQueue: QueuedInput[]
@@ -4242,6 +4248,12 @@ export function dispatchEvent(raw: AnyEvent): void {
       const runId = raw.run_id ? String(raw.run_id) : undefined
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
+        // 本 LLM 轮起点**按 run_id 分槽**记（llm_end 与同 runId 的 llm_start 配对差分）。
+        // 子 run 也要记：它只消费自己的槽位，不会再抢主 run 的。
+        // 一个 runId 一个槽足够：Runtime 侧同一 run 内 LLM 调用严格串行
+        // （agent_loop.go streamWithRetry 是阻塞调用，单 goroutine 循环）。
+        const ts = evTs(raw) ?? Date.now()
+        const turnStartTs = { ...v.turnStartTs, [runId ?? '']: ts }
         if (runId && isSubAgentRun(v, runId)) {
           // A retry starts a new LLM attempt. Keep the historical count and
           // clear the transient error only when the next attempt actually starts.
@@ -4256,17 +4268,14 @@ export function dispatchEvent(raw: AnyEvent): void {
                 }
               : b,
           )
-          return setView(s, sid, { ...v, blocks })
+          return setView(s, sid, { ...v, blocks, turnStartTs })
         }
         // 新轮起始：重置主流思考标记（中断残留的 thinkStartTs/turnThinkMs 不能串到本轮）
         const thinkStartTs = { ...v.thinkStartTs }
         const turnThinkMs = { ...v.turnThinkMs }
         delete thinkStartTs['']
         delete turnThinkMs['']
-        // 记本 LLM 轮起始时刻（llm_end 差分得每轮耗时；子 agent 轮 best-effort）。
-        // 用事件 timestamp（重放可重建）；缺省兜底 Date.now()（旧日志/无时间戳事件）。
-        const ts = evTs(raw) ?? Date.now()
-        return setView(s, sid, { ...pushAssistant(v, raw.model as string | undefined, raw.request_id ? String(raw.request_id) : undefined, ts, runId), turnStartTs: ts, thinkStartTs, turnThinkMs })
+        return setView(s, sid, { ...pushAssistant(v, raw.model as string | undefined, raw.request_id ? String(raw.request_id) : undefined, ts, runId), turnStartTs, thinkStartTs, turnThinkMs })
       })
       break
     }
@@ -4372,7 +4381,11 @@ export function dispatchEvent(raw: AnyEvent): void {
           reasoning: v.usage.reasoning + (ru.Reasoning ?? 0),
         }
         // 每轮指标：llm_end 一条（含主/子 agent），差分耗时时长 + 思考耗时 + 桥打标 cost
-        const durMs = v.turnStartTs ? now - v.turnStartTs : undefined
+        // 起点取**本 run 自己的槽位**（key 同 thinkStartTs）。早先这里是 view 级单标量
+        // turnStartTs，子 run 的 llm_end 会把它清掉 —— 并发窗口内主 run 该轮 durMs 丢失、
+        // 子 run 反而记成主 run 的轮起点。分槽后各 run 只消费自己那格。
+        const turnStarted = v.turnStartTs?.[key]
+        const durMs = turnStarted != null ? now - turnStarted : undefined
         const cost = typeof raw.cost_usd === 'number' ? raw.cost_usd : 0
         const turn: TurnMetric = {
           model: String(raw.model || ''),
@@ -4390,6 +4403,9 @@ export function dispatchEvent(raw: AnyEvent): void {
         const costUsd = v.costUsd + cost
         const reqBlock = { ...v.reqBlock }
         if (raw.request_id) delete reqBlock[String(raw.request_id)]
+        // 清本 run 的轮起点（只清自己那格；子 run 结束不得动主 run 正在计时的轮）
+        const turnStartTs = { ...v.turnStartTs }
+        if (turnStarted != null) delete turnStartTs[key]
         // A sub-agent completion must never clear a main-agent error block.
         // Main-run success still clears its own retry/error presentation.
         const blocks = isSub ? [...v.blocks] : v.blocks.filter((b) => b.kind !== 'error')
@@ -4417,7 +4433,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               },
             }
           }
-          return setView(s, sid, { ...v, blocks, reqBlock, usage: g, turns, costUsd, turnStartTs: undefined, thinkStartTs, turnThinkMs })
+          return setView(s, sid, { ...v, blocks, reqBlock, usage: g, turns, costUsd, turnStartTs, thinkStartTs, turnThinkMs })
         }
         const bid = raw.request_id ? v.reqBlock[String(raw.request_id)] : v.lastLLMBlockId
         const idx = bid != null ? blocks.findIndex((b) => b.id === bid) : -1
@@ -4475,7 +4491,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           const genMs = genMsOf({ thinking: ab.thinking, durMs, ttftMs: ttft, reasoningTokens: reasoningTok, thinkingSummarized })
           withThink[finalIdx] = { ...ab, ttftMs: ttft, durMs, outputTokens: ru.Output ?? 0, reasoningTokens: reasoningTok, thinkingSummarized, genMs }
         }
-        return setView(s, sid, { ...v, blocks: withThink, reqBlock, streaming: false, llmStartTs: undefined, turnStartTs: undefined, usage: g, turns, costUsd, thinkStartTs, turnThinkMs, ctxTokens, ctxTokensEstimated })
+        return setView(s, sid, { ...v, blocks: withThink, reqBlock, streaming: false, llmStartTs: undefined, turnStartTs, usage: g, turns, costUsd, thinkStartTs, turnThinkMs, ctxTokens, ctxTokensEstimated })
       })
       // LLM End：把暂存队列整队一次性推送到服务端（下一个 LLM Start 前经插话 Poll /
       // takeBatch 成批消费并回 UserInputsConsumed 确认）。幂等：仅推未推送项。
@@ -5203,7 +5219,7 @@ export function dispatchEvent(raw: AnyEvent): void {
         // 中断 / run 级失败 / 达轮数上限截断这三种收尾都没有 llm_end（durMs、usage 的
         // 唯一来源），块就永远停在 streaming=true —— 渲染门 `!b.streaming` 过不去，
         // 底部指标行整行不显示、光标 ▍ 一直闪。此处按「已流逝时间」兜底：
-        //   - durMs：末轮 llm_start（turnStartTs）→ agent_end，诚实的「已跑多久」；
+        //   - durMs：末轮 llm_start（turnStartTs[本 run]）→ agent_end，诚实的「已跑多久」；
         //   - ttftMs：只在真收到过 chunk 时才有（由 chunk 分支结算），没有就不补 ——
         //     首字超时那类一个事件都没来的末轮，如实留空而不是编一个 30s。
         // 只动本 run 的块（runId 缺省的无 request 旧流按 view 级流式态一并收敛）。
@@ -5213,7 +5229,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             if (id && b.runId && b.runId !== id) return b
             const nb = { ...b, streaming: false }
             if (nb.thinkStart != null && nb.thinkMs == null) nb.thinkMs = Math.max(0, now - nb.thinkStart)
-            if (nb.durMs == null && v.turnStartTs != null) nb.durMs = Math.max(0, now - v.turnStartTs)
+            if (nb.durMs == null && v.turnStartTs?.[id] != null) nb.durMs = Math.max(0, now - (v.turnStartTs[id] as number))
             return nb
           })
           : v.blocks
@@ -5279,6 +5295,12 @@ export function dispatchEvent(raw: AnyEvent): void {
           // 达 MaxIterations 护栏被截断：任务未完成、无最终答复——明确提示可「继续」续跑
           blocks = [...blocks, { kind: 'assistant', id: blockSeq++, text: '（已达本轮轮数上限，任务未完成；输入「继续」可续跑）', streaming: false, thinking: '' }]
         }
+        // 本 run 的轮起点终态清理：agent_end 是 run 的提交边界，此后不会再有该 run 的
+        // llm_end。**子 run 同样要清** —— 末轮无 llm_end 的中断/失败路径下，那一格没人
+        // 消费，每个子 agent 结束都留一格，长会话无界增长。只删自己那格，不动并发中的
+        // 其它 run（父 run 正在计时的轮、子 agent 兄弟轮）。
+        const turnStartTs = { ...v.turnStartTs }
+        delete turnStartTs[id]
         const upd = setView(s, sid, {
           ...v,
           runNodes: v.runNodes.map((n) =>
@@ -5287,6 +5309,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               : n,
           ),
           blocks,
+          turnStartTs,
           runningAgentCount: countRunningAgents(blocks),
           // 主 run 结束（任何 finish_reason）即解除流式态：此前只对 abort/max_iterations
           // 复位，finish_reason=error 要等 session_run_error 才复位 —— 中间那段窗口
@@ -5343,7 +5366,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           blocks: upsertErrorBlock(v.blocks, `（运行失败）${msg}`),
           streaming: false,
           llmStartTs: undefined,
-          turnStartTs: undefined,
+          turnStartTs: {}, // run 级失败：所有 run（含在跑的子 agent）的轮起点一并作废
         })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
@@ -5638,7 +5661,7 @@ function finalizeReplayView(v: SessionView): SessionView {
     ...v,
     streaming: false,
     llmStartTs: undefined,
-    turnStartTs: undefined,
+    turnStartTs: {},
     toolStartTs: {},
     thinkStartTs: {},
     turnThinkMs: {},
@@ -6877,7 +6900,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           streaming: false,
           aborted: true, // 立即置位：过滤后续残留 chunk（含后端切断前已在途的缓冲）
           llmStartTs: undefined,
-          turnStartTs: undefined,
+          turnStartTs: {}, // 中断：主/子 run 的轮起点一并作废
           // 冻结进行中的助手块：本地立即停止追加（块级 streaming=false），并结算
           // 进行中的思考计时（thinkStart 已打点但未 llm_end 结算 → 置 thinkMs=已耗时，
           // 「思考 ·N…」实时跳动立即停住，显示中断时刻的思考时长）
