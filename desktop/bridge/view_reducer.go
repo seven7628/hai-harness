@@ -1317,6 +1317,24 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 	}
 	r.llmErrorSeen[key] = true
 
+	// 失败 attempt 的 reqState 清理：每次 attempt 的 llm_start 都按**自己的** request_id
+	// 开一条 reqState（上游 chatcmpl id 每次 attempt 都不同），但只有成功那次有 llm_end
+	// 去 delete。applyLLMEndLocked 删的是 llm_end 自带的那个 request_id，失败 attempt 的
+	// 条目没人回收 —— 每次失败重试在 map 里留一条（会话存活期内累积），且条目带着过期的
+	// blockID / start，迟到事件按 request_id 命中它会读到错误的结算锚。
+	//
+	// 为什么按 run 整扫而不是按 request_id 精确删：events.LLMError 不携带失败 attempt 的
+	// request_id，Runtime 侧 roundResult 也没有，要从 provider 流里把它拽出来是侵入式改动
+	// （要改 provider 事件 → translate → streamWithRetry 三处）。而 runID 是 reqState 自带的
+	// 字段，且同一 run 内 LLM 调用严格串行（streamWithRetry 是阻塞调用，单 goroutine 循环），
+	// llm_error 到达时该 run 名下唯一活着的条目就是这次失败 attempt 的 —— 整扫安全，
+	// 也不会误删并发中的其它 run（父 run 正在计时的轮、兄弟子 agent 各占各的 key）。
+	for k, rs := range r.reqState {
+		if rs.runID == e.RunId {
+			delete(r.reqState, k)
+		}
+	}
+
 	at := nowMillis()
 	r.lastError = &LastError{Message: e.Message, Kind: e.ErrorKind, At: at}
 
