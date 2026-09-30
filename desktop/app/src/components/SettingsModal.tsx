@@ -2372,6 +2372,7 @@ function MemoryTab() {
   const listing = useAppStore((s) => s.memoryListing)
   const browseAvailable = useAppStore((s) => s.memoryBrowseAvailable)
   const browseLoading = useAppStore((s) => s.memoryBrowseLoading)
+  const browseError = useAppStore((s) => s.memoryBrowseError)
   const fetchMemorySettings = useAppStore((s) => s.fetchMemorySettings)
   const fetchMemoryBrowsing = useAppStore((s) => s.fetchMemoryBrowsing)
   const setMemoryEnabled = useAppStore((s) => s.setMemoryEnabled)
@@ -2451,7 +2452,15 @@ function MemoryTab() {
         </button>
       </div>
 
-      {!on && <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.off')}</p>}
+      {browseError && (
+        // 命令失败 ≠ 记忆未启用：说「未启用」会把用户引去检查开关，而问题在别处。
+        <p className="set-desc" style={{ marginTop: 8, color: 'var(--danger, #c0392b)' }}>
+          {t('settings.memory.browse.failed')}: {browseError}
+        </p>
+      )}
+      {!on && !browseError && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.off')}</p>
+      )}
       {on && browseLoading && !listing && (
         <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.loading')}</p>
       )}

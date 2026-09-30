@@ -66,6 +66,7 @@ const zh: Record<string, string> = {
   'settings.memory.dirCopy': '复制',
   'settings.memory.dirCopied': '已复制路径',
   'settings.memory.savedToast': '已保存 {n} 条记忆',
+  'settings.memory.browse.failed': '读取记忆文件列表失败',
   'settings.memory.recalledToast': '已回忆 {n} 条记忆',
   // 记忆浏览（官方 §2.7 的 /memory）。
   'settings.memory.browse': '记忆文件',
@@ -1579,6 +1580,7 @@ const en: Record<string, string> = {
   'settings.memory.browse': 'Memory files',
   'settings.memory.browse.desc': "This project's memories are plain Markdown files — open, edit or delete them yourself at any time.",
   'settings.memory.savedToast': 'Saved {n} memories',
+  'settings.memory.browse.failed': 'Failed to list memory files',
   'settings.memory.recalledToast': 'Recalled {n} memories',
   'settings.memory.browse.refresh': 'Refresh',
   'settings.memory.browse.loading': 'Loading…',

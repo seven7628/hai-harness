@@ -2418,6 +2418,12 @@ interface AppState {
   memoryListing?: MemoryListing
   memoryBrowseAvailable: boolean
   memoryBrowseLoading: boolean
+  // 浏览命令**失败**的原因（如 "workspace 为空"、读盘错误）。
+  //
+  // 必须与「记忆不可用」分开：两者在旧实现里共用 memoryBrowseAvailable=false，
+  // 界面上都会显示「项目记忆未启用」—— 命令失败时说这句话是**误导**，用户会去
+  // 检查开关，而问题在别处。
+  memoryBrowseError?: string
   // 记忆活动的合并计数（memory_activity 逐文件到达，弹窗前先攒一会儿）。
   // 宿主没有"一次运行结束"的可靠观测点，聚合放在这一侧。
   memPendingSaved: number
@@ -3887,6 +3893,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           setState({
             memoryBrowseAvailable: avail,
             memoryBrowseLoading: false,
+            memoryBrowseError: undefined,
             memoryListing: avail
               ? {
                   dir: String(l.dir || ''),
@@ -3903,7 +3910,12 @@ export function dispatchEvent(raw: AnyEvent): void {
               : undefined,
           })
         } else {
-          setState({ memoryBrowseAvailable: false, memoryBrowseLoading: false, memoryListing: undefined })
+          setState({
+            memoryBrowseAvailable: false,
+            memoryBrowseLoading: false,
+            memoryListing: undefined,
+            memoryBrowseError: String(r.error || '浏览记忆文件失败'),
+          })
         }
         break
       }
@@ -6269,6 +6281,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   memoryBrowseLoading: false,
   memPendingSaved: 0,
   memPendingRecalled: 0,
+  memoryBrowseError: undefined,
   externalSkillsLoading: false,
   externalSkillsImporting: false,
   externalSkillsError: undefined,
