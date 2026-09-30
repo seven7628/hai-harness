@@ -1503,16 +1503,29 @@ func (a *AgentLoop) composeSystemPrompt() string {
 	}
 	// 工作记忆：用户级（~/.agents 单文件，优先级最低）→ 显式文件（顺序即注入序，
 	// RelPath 显示为文件路径）→ 工作区递归发现（根优先）。
+	//
+	// 顺序即优先级（后者离指令更近、冲突时更晚的更受重视），刻意不做"工作区覆盖
+	// 用户级"：用户级装个人偏好、工作区装项目约定，顶掉前者 = 静默丢用户配置。
+	//
+	// 代价（知情取舍）：前缀缓存的失效面 —— 改工作区任一 AGENTS.md 会连带作废
+	// 其后所有层。放在最前是"最易变的内容在最稳定的前缀里"，对命中率最不友好。
+	// 但反过来把用户级放最后会让"个人偏好"看起来比"项目约定"更权威，语义更糟；
+	// 且个人文件通常数月不动，实际抖动源仍是工作区文件。故维持现状。
 	var files []agentMDFile
 	files = append(files, discoverUserAgentMD(a.cfg.UserAgentMDDir)...)
 	for _, f := range a.cfg.AgentMDFiles {
 		if content, err := os.ReadFile(f); err == nil {
-			files = append(files, agentMDFile{Name: filepath.Base(f), RelPath: f, Content: string(content)})
+			abs := f
+			if a, err := filepath.Abs(f); err == nil {
+				abs = a
+			}
+			files = append(files, agentMDFile{Name: filepath.Base(f), RelPath: f, Content: string(content), Abs: abs})
 		}
 	}
 	for _, dir := range a.cfg.AgentMDDirs {
 		files = append(files, discoverAgentMD(dir)...)
 	}
+	files = dedupeAgentMDByPath(files)
 	if mem := composeWorkingMemory(files); mem != "" {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")

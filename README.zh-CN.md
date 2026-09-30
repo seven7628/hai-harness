@@ -207,8 +207,8 @@ sequenceDiagram
 - **安全纵深** —— `sandbox.Sandbox` 执行后端，macOS **Seatbelt** 已落地（敏感路径 deny、工作区外写入拦截、
   受管插件子树放行、放行门）；`http_get` 带 SSRF 防护；路径 containment；文件 `0600`/`0700`；
   工具输出里的凭据脱敏。
-- **上下文与记忆** —— `AGENTS.md` / `CLAUDE.md` 分层发现（用户级 `~/.agents/AGENTS.md` 单文件 +
-  工作区递归根，按优先级从低到高拼接）、四层系统提示（基础契约 → 产品层 →
+- **上下文与记忆** —— `AGENTS.md` / `CLAUDE.md` 分层发现（用户级 `~/.agents/AGENTS.md` 单文件、
+  非递归；工作区根递归；按优先级从低到高拼接）、四层系统提示（基础契约 → 产品层 →
   工作记忆 → 技能清单）、缓存友好的字节稳定前缀、压缩与恢复都幸存的 `todo_*`、
   **Agent Skills**（`SKILL.md` + 渐进披露 + 全局/工作区分层注册表 + 远程安装/更新/市场）。
 - **集成** —— MCP 客户端（分层配置 + stdio/http/streamable_http/sse + fsnotify 热重载 + 坏配置

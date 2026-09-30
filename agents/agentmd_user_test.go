@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// writeUserMDFile 写测试指令文件（自带 helper：agents 包的 writeTestFile 在
-// agentmd_test.go 里，而 .gitignore 的 *_test.go 规则使那个文件不在版本控制内 ——
-// 本文件必须自包含，不能依赖仓库外的测试助手）。
+// writeUserMDFile 写测试指令文件。
+//
+// 自带而不复用别处的助手：本仓 .gitignore 有 *_test.go，除本文件外 agents 包的
+// 测试文件都未纳入版本控制，复用它们的 helper 会让本文件在干净 clone 上编译不过。
 func writeUserMDFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -48,6 +49,22 @@ func TestDiscoverUserAgentMD(t *testing.T) {
 	if got := discoverUserAgentMD(dir); len(got) != 1 || got[0].Name != "AGENTS.md" {
 		t.Fatalf("用户级发现不应递归子目录：%+v", got)
 	}
+
+	// 空/纯空白 AGENTS.md **不得**遮蔽 CLAUDE.md（否则用户在全局层配的偏好静默失效）
+	for _, blank := range []string{"", "   \n\t  "} {
+		b := t.TempDir()
+		writeUserMDFile(t, filepath.Join(b, "AGENTS.md"), blank)
+		writeUserMDFile(t, filepath.Join(b, "CLAUDE.md"), "IMPORTANT PREF")
+		got := discoverUserAgentMD(b)
+		if len(got) != 1 || got[0].Name != "CLAUDE.md" || !strings.Contains(got[0].Content, "PREF") {
+			t.Fatalf("空白 AGENTS.md 遮蔽了有效 CLAUDE.md（blank=%q）：%+v", blank, got)
+		}
+		// 端到端：偏好必须真的进了 system
+		sp := NewAgentLoop(WithUserAgentMDDir(b)).composeSystemPrompt()
+		if !strings.Contains(sp, "IMPORTANT PREF") {
+			t.Fatalf("空白 AGENTS.md 导致用户偏好未注入（blank=%q）", blank)
+		}
+	}
 }
 
 // 用户级层缺文件时的降级：只有 CLAUDE.md 仍能兜底；目录/断链/特殊文件不算指令文件。
@@ -85,22 +102,28 @@ func TestDiscoverUserAgentMDFallback(t *testing.T) {
 	}
 }
 
-// 路径展示：home 前缀缩成 ~（注入 system 的是个人 home 路径，不外泄用户名）。
-func TestDisplayAgentMDPath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("无 home 目录")
+// 注入 system 的路径必须是**工具能直接用的绝对路径**。
+//
+// 这一条曾是真实缺陷：早先渲染成 "~/.agents/AGENTS.md"，而文件工具的 resolve
+// 不展开 "~"，write_file 会把它锚到工作区、静默建出一个字面量 "~" 目录并报成功
+// （见 tools/builtin 的 resolve + 本仓 write_file 复现）。故此处钉住"绝对 + 非 ~ 前缀"。
+func TestUserAgentMDRelPathIsActionableAbs(t *testing.T) {
+	dir := t.TempDir()
+	writeUserMDFile(t, filepath.Join(dir, "AGENTS.md"), "PREF")
+	files := discoverUserAgentMD(dir)
+	if len(files) != 1 {
+		t.Fatalf("应发现 1 个文件，实际 %d", len(files))
 	}
-	if got, want := displayAgentMDPath(filepath.Join(home, ".agents", "AGENTS.md")), filepath.Join("~", ".agents", "AGENTS.md"); got != want {
-		t.Fatalf("home 子树应缩成 ~：got %q, want %q", got, want)
+	rel := files[0].RelPath
+	if !filepath.IsAbs(rel) {
+		t.Fatalf("RelPath 必须是绝对路径（模型要照着它操作），实际 %q", rel)
 	}
-	outside := filepath.Join(t.TempDir(), "AGENTS.md")
-	if got := displayAgentMDPath(outside); got != outside {
-		t.Fatalf("非 home 子树应原样返回：got %q, want %q", got, outside)
+	if strings.HasPrefix(rel, "~") {
+		t.Fatalf("RelPath 不得以 ~ 开头：文件工具不展开 ~，会锚到工作区（实际 %q）", rel)
 	}
-	// home 本身（rel == "."）也缩成 "~"，不缩成 "./x"
-	if got := displayAgentMDPath(filepath.Join(home, "AGENTS.md")); got != filepath.Join("~", "AGENTS.md") {
-		t.Fatalf("home 根下的文件：got %q", got)
+	// 渲染出的路径必须能被 write_file 原样解析（工具层不锚定 workspace 的分支）
+	if got := filepath.Clean(rel); got != rel {
+		t.Fatalf("RelPath 应是 Clean 过的：%q vs %q", rel, got)
 	}
 }
 
@@ -163,5 +186,51 @@ func TestUserAgentMDAbsentIsNoop(t *testing.T) {
 	userDir := t.TempDir()
 	if got := NewAgentLoop(WithAgentMDDir(ws), WithUserAgentMDDir(userDir)).composeSystemPrompt(); got != base {
 		t.Fatalf("用户级目录无指令文件时不应改变 system：\n%s", got)
+	}
+}
+
+// 用户把 ~/.agents 本身当工作区打开（dotfiles / skills 仓库很常见）时，同一个文件
+// 不得被注入两份。
+//
+// 这条不是洁癖：用户级渲染绝对路径、工作区层渲染相对路径，两块路径标注不同但
+// 内容逐字相同，模型会看到"两份互相矛盾（其实相同）的规则"。
+func TestUserAgentMDDedupWhenWorkspaceIsUserDir(t *testing.T) {
+	userDir := t.TempDir()
+	writeUserMDFile(t, filepath.Join(userDir, "AGENTS.md"), "PREF")
+	sp := NewAgentLoop(WithUserAgentMDDir(userDir), WithAgentMDDir(userDir)).composeSystemPrompt()
+	if n := strings.Count(sp, "PREF"); n != 1 {
+		t.Fatalf("同一物理文件被注入 %d 次，应为 1 次:\n%s", n, sp)
+	}
+	// 去重不得误伤**不同**的文件：子目录那份必须仍在
+	writeUserMDFile(t, filepath.Join(userDir, "sub", "AGENTS.md"), "SUBPREF")
+	sp = NewAgentLoop(WithUserAgentMDDir(userDir), WithAgentMDDir(userDir)).composeSystemPrompt()
+	if !strings.Contains(sp, "SUBPREF") {
+		t.Fatalf("去重误伤了工作区里另一个文件:\n%s", sp)
+	}
+	if strings.Count(sp, "PREF")-strings.Count(sp, "SUBPREF") != 1 {
+		t.Fatalf("根文件应仍只一份:\n%s", sp)
+	}
+}
+
+// 超大体量的用户级文件：不得整份注入（全局文件一次手滑 = 每个工作区每轮都付费），
+// 也**不得静默截断**（模型会按"规则只到一半"行事），必须明确告知。
+func TestUserAgentMDSizeCap(t *testing.T) {
+	dir := t.TempDir()
+	writeUserMDFile(t, filepath.Join(dir, "AGENTS.md"), strings.Repeat("X", userAgentMDMaxBytes+1))
+	got := discoverUserAgentMD(dir)
+	if len(got) != 1 {
+		t.Fatalf("应产出 1 条说明，实际 %d", len(got))
+	}
+	if strings.Contains(got[0].Content, "XXX") {
+		t.Fatal("超限文件被注入了（不得静默截断或整份注入）")
+	}
+	if !strings.Contains(got[0].Content, "上限") {
+		t.Fatalf("超限应明确告知而非静默：%q", got[0].Content)
+	}
+	// 恰好在上限内 → 正常注入
+	dir2 := t.TempDir()
+	writeUserMDFile(t, filepath.Join(dir2, "AGENTS.md"), strings.Repeat("X", userAgentMDMaxBytes))
+	if got := discoverUserAgentMD(dir2); len(got) != 1 || !strings.Contains(got[0].Content, "XXX") {
+		t.Fatal("上限内应正常注入")
 	}
 }
