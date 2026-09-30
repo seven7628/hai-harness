@@ -490,14 +490,24 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 	disc, pMc, pOK := supplementMcNemarExact(b01, b10)
 	// A/C 的配对比较才是 P1 的问题（C = 加了行为判据）。单独算，不要拿 A/B 的
 	// p 值去回答"C 有没有用"。
-	c01, c10 := 0, 0
+	//
+	// **比较的是精确率，不是 chainTurned**（2026-09-30 修正）：初版这里还在算
+	// chainTurned，而两臂在那个指标上都是 20/20，算出来是"无不一致对、p 不可报"，
+	// 看起来像没差异；真正的差异（垃圾 4/20 vs 1/20）在 chainTurned 里根本看不见
+	// ——它只看"有没有写"，而两臂都写了。拿错指标去回答问题，结论就是空的。
+	c01, c10 := 0, 0 // 精确率不一致对
+	r01, r10 := 0, 0 // 召回不一致对
 	for i := 0; i < reps; i++ {
-		aOn := runs[i*3].chainTurned()
-		cOn := runs[i*3+2].chainTurned()
-		if aOn && !cOn {
+		aRun, cRun := runs[i*3], runs[i*3+2]
+		if aRun.precision() && !cRun.precision() {
 			c01++
-		} else if cOn && !aOn {
+		} else if cRun.precision() && !aRun.precision() {
 			c10++
+		}
+		if aRun.Remembered && !cRun.Remembered {
+			r01++
+		} else if cRun.Remembered && !aRun.Remembered {
+			r10++
 		}
 	}
 	mde := supplementMDEUnpaired(0, reps, 1, reps)
@@ -540,10 +550,17 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 	t.Logf("本装置在 n=%d/臂 下能分辨的最小差值 ≈ %.0f 个百分点", reps, mde)
 	cDisc, cP, cPOK := supplementMcNemarExact(c01, c10)
 	if cPOK {
-		t.Logf("A vs C（判据文本）：不一致对 %d（仅A %d / 仅C %d），双侧精确 p=%.3f",
+		t.Logf("A vs C · 精确率：不一致对 %d（仅A %d / 仅C %d），双侧精确 p=%.3f",
 			cDisc, c01, c10, cP)
 	} else {
-		t.Logf("A vs C：无不一致对，p 不可报（分辨率不足，不是零假设被接受）")
+		t.Logf("A vs C · 精确率：无不一致对，p 不可报（分辨率不足，不是零假设被接受）")
+	}
+	rDisc, rP, rPOK := supplementMcNemarExact(r01, r10)
+	if rPOK {
+		t.Logf("A vs C · 召回：  不一致对 %d（仅A %d / 仅C %d），双侧精确 p=%.3f"+
+			"（>0.05 = 判据没有伤召回）", rDisc, r01, r10, rP)
+	} else {
+		t.Logf("A vs C · 召回：  无不一致对（判据没有伤召回）")
 	}
 
 	// —— 断言一（强，可证伪）：机制真的转起来了 ——
@@ -582,9 +599,17 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 	// 读完数据之后单独决定（判据文本至今留在测试文件里）。
 	switch {
 	case c.prec > a.prec && c.recall >= a.recall-2:
-		t.Logf("判据的效果：C 精确率 %d/%d vs A %d/%d，且召回未塌（%d vs %d）——方向符合预期，"+
-			"但 p=%.3f 仍未达显著，需更多 rep 才能决定是否搬进生产。",
-			c.prec, reps, a.prec, reps, c.recall, a.recall, cP)
+		if cPOK && cP < 0.05 {
+			t.Logf("判据的效果：C 精确率 %d/%d vs A %d/%d（p=%.3f，显著）、召回未塌"+
+				"（%d vs %d）——方向与统计都支持，可以考虑搬进 guidance.go。",
+				c.prec, reps, a.prec, reps, cP, c.recall, a.recall)
+		} else {
+			t.Logf("判据的效果：C 精确率 %d/%d vs A %d/%d，召回未塌（%d vs %d）——"+
+				"**方向**符合预期，但精确率的配对 p=%s 未达 0.05：**不要**据此搬进生产，"+
+				"需要更多 rep（本装置 MDE ≈ %.0f pp）。",
+				c.prec, reps, a.prec, reps, c.recall, a.recall,
+				formatP(cP, cPOK), mde)
+		}
 	case c.recall < a.recall-2:
 		t.Logf("判据把召回压下去了（C 记对 %d/%d vs A %d/%d）：**不要**加——它滤掉了本该记的。",
 			c.recall, reps, a.recall, reps)
@@ -737,4 +762,12 @@ func TestP0CriteriaClassificationIsSound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// formatP 把 McNemar 的 p 值渲染成日志文本，区分"真的 p=0.000"与"算不出来"。
+func formatP(p float64, ok bool) string {
+	if !ok {
+		return "不可报（无不一致对）"
+	}
+	return strconv.FormatFloat(p, 'g', 3, 64)
 }
