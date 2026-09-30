@@ -2398,8 +2398,8 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
-		// 复用会话装配那套身份解析：面板看到的目录必须与注入/补戳用的是同一个，
-		// 否则用户会看到一个"存在但没人用"的目录。
+		// 复用会话装配那套身份解析（同一个 host，git 只跑一次）：面板看到的目录
+		// 必须与注入/补戳用的是同一个，否则用户会看到一个"存在但没人用"的目录。
 		mctx, mcancel := context.WithTimeout(context.Background(), memoryResolveTimeout)
 		dir, derr := newMemoryHost(m.memoryConfig()).resolve(mctx, ws)
 		mcancel()
@@ -2417,7 +2417,10 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, lerr.Error(), nil)
 			return
 		}
-		m.resp(c, true, "", map[string]any{"available": true, "listing": listing})
+		m.resp(c, true, "", map[string]any{
+			"available": true,
+			"listing":   listing,
+		})
 
 	case CmdSkillToggle: // 启用/禁用技能（真过滤：发现清单 + load_skill 立即生效）
 		if ws == "" {
