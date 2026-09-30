@@ -2393,6 +2393,32 @@ func (m *manager) dispatch(c command) {
 		}
 		m.resp(c, true, "", map[string]any{"enabled": on, "applies_to": "next_session"})
 
+	case CmdMemoryBrowse: // 浏览 Project Memory 文件（官方 §2.7 的 `/memory`）
+		if ws == "" {
+			m.resp(c, false, "workspace 为空", nil)
+			return
+		}
+		// 复用会话装配那套身份解析：面板看到的目录必须与注入/补戳用的是同一个，
+		// 否则用户会看到一个"存在但没人用"的目录。
+		mctx, mcancel := context.WithTimeout(context.Background(), memoryResolveTimeout)
+		dir, derr := newMemoryHost(m.memoryConfig()).resolve(mctx, ws)
+		mcancel()
+		if derr != nil {
+			m.resp(c, false, derr.Error(), nil)
+			return
+		}
+		if dir == nil {
+			// 开关关闭 / 取不到目录：不是错误，面板据此显示"未启用"而不是报错。
+			m.resp(c, true, "", map[string]any{"available": false})
+			return
+		}
+		listing, lerr := m.memoryConfig().List(*dir)
+		if lerr != nil {
+			m.resp(c, false, lerr.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{"available": true, "listing": listing})
+
 	case CmdSkillToggle: // 启用/禁用技能（真过滤：发现清单 + load_skill 立即生效）
 		if ws == "" {
 			m.resp(c, false, "workspace 为空", nil)
@@ -3856,9 +3882,13 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	memHost := newMemoryHost(memCfgValue(memCfg))
 	{
 		mh := memHost
-		ft = ft.WithPostWrite(func(absPath string) (string, error) {
-			return mh.postWrite(bgCtx(), workspace, absPath)
-		})
+		ft = ft.WithPostWrite(func(ctx context.Context, absPath string) (string, error) {
+			return mh.postWrite(ctx, workspace, absPath)
+		}).
+			// 读取侧的同一套判定，用来发 "Recalled N memories"（官方 §2.7）。
+			WithPostRead(func(ctx context.Context, absPath string) (string, error) {
+				return mh.postRead(ctx, workspace, absPath)
+			})
 	}
 	if sbx != nil {
 		// bash 沙箱后端（macOS Seatbelt + WithRelease 放行门）：注入后 bash 命令在沙箱内执行。

@@ -74,13 +74,19 @@ const (
 	// 重建 loop 之后）；运行中的会话不改变，理由见 memory_prefs.go。
 	CmdMemorySettings   Command = "memory_settings"
 	CmdMemorySetEnabled Command = "memory_set_enabled"
-	CmdSkillGet         Command = "skill_get"
-	CmdLoadSkill        Command = "load_skill"
-	CmdCommand          Command = "command"
-	CmdMCPList          Command = "mcp_list"
-	CmdMCPSet           Command = "mcp_set"
-	CmdMCPRefresh       Command = "mcp_refresh"
-	CmdMCPReload        Command = "mcp_reload" // 重读配置分层（用户 + 项目）→ 热应用 + 重建本工作区会话
+	// CmdMemoryBrowse 浏览 Project Memory 文件（官方 §2.7 的 `/memory`：
+	// "Run `/memory` to browse and open memory files from within a session"）。
+	//
+	// **纯读**（官方承诺"随时可编辑或删除"→ 宿主只列，不做校验也不提供写路径）。
+	// 无 payload；响应带 Listing（目录 / 索引是否存在 / 文件清单）。
+	CmdMemoryBrowse Command = "memory_browse"
+	CmdSkillGet     Command = "skill_get"
+	CmdLoadSkill    Command = "load_skill"
+	CmdCommand      Command = "command"
+	CmdMCPList      Command = "mcp_list"
+	CmdMCPSet       Command = "mcp_set"
+	CmdMCPRefresh   Command = "mcp_refresh"
+	CmdMCPReload    Command = "mcp_reload" // 重读配置分层（用户 + 项目）→ 热应用 + 重建本工作区会话
 	// CmdMCPProjects 多项目项目层汇总（MCP 页「项目」区；payload.workspaces = 前端绑定的项目）。
 	// **不创建运行态**：只为查看而读盘，有运行态的项目才附连接状态/工具数。
 	CmdMCPProjects Command = "mcp_projects"

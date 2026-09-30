@@ -193,6 +193,23 @@ export interface MemorySettings {
   env_override: boolean
 }
 
+// Project Memory 记忆文件清单（bridge memory_browse；官方 §2.7 的 `/memory`）。
+// 与 MemorySettings 分开：开关是全局偏好（不按工作区），清单是**本工作区**的记忆目录内容。
+export interface MemoryListedFile {
+  name: string
+  size: number
+  modified?: string
+  type?: string
+  indexed: boolean
+  missing?: boolean
+}
+
+export interface MemoryListing {
+  dir: string
+  index_present: boolean
+  files: MemoryListedFile[]
+}
+
 // 上下文构成分区（bridge context_breakdown 命令）。
 // 分区键与 SDK 常量一一对应：system_prompt / skills / tools / mcp / messages / other。
 // 口径（2026-09-20 重定）：
@@ -2397,6 +2414,14 @@ interface AppState {
   skillDetail?: SkillDetail // 技能详情（skill_get；SkillsPage 预览）
   // Project Memory 开关（memory_settings；设置面板 · Agent 组）。
   memorySettings?: MemorySettings
+  // Project Memory 文件清单（memory_browse；设置面板 · 记忆浏览区）。
+  memoryListing?: MemoryListing
+  memoryBrowseAvailable: boolean
+  memoryBrowseLoading: boolean
+  // 记忆活动的合并计数（memory_activity 逐文件到达，弹窗前先攒一会儿）。
+  // 宿主没有"一次运行结束"的可靠观测点，聚合放在这一侧。
+  memPendingSaved: number
+  memPendingRecalled: number
   marketSkills?: MarketSkill[] // 远程市场浏览结果（skill_browse；SkillsPage 市场区块）
   markets: MarketInfo[] // 已保存市场（market_list；SkillsPage 市场管理）
   mcpServers: MCPServerInfo[] // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
@@ -2505,6 +2530,7 @@ interface AppState {
   // 乐观更新，bridge 落盘失败时由 memory_set_enabled 响应触发回拉。
   fetchMemorySettings(): void
   setMemoryEnabled(on: boolean): void
+  fetchMemoryBrowsing(): void
   installSkill(url: string, scope: string, name?: string): void // 远程技能下载（skill_install）；name 可选 = 市场浏览后精确安装单个
   browseMarket(url: string): void // 浏览远程市场技能（skill_browse，只读；结果落 marketSkills）
   refreshMarket(url: string): void // 刷新当前浏览的市场（重拉 + 对比本地；安装/更新后调）
@@ -3053,7 +3079,9 @@ function pushAssistant(v: SessionView, model?: string, requestId?: string, start
 }
 
 // 追加流式文本/思考到目标 assistant 块；目标缺失时兜底最后一条 assistant（无 request 的旧流）
-function appendToAssistant(v: SessionView, bid: number | undefined, field: 'text' | 'thinking', c: string, thinkStart?: number): SessionView {
+// runId：兜底新建的块必须带上（否则 agent_end 按 `b.runId === run_id` 找不到它，
+// Agent 总耗时挂不上去 —— 与 llm_start 建块的字段集保持一致）
+function appendToAssistant(v: SessionView, bid: number | undefined, field: 'text' | 'thinking', c: string, thinkStart?: number, runId?: string): SessionView {
   const blocks = [...v.blocks]
   let idx = bid != null ? blocks.findIndex((b) => b.id === bid && b.kind === 'assistant') : -1
   if (idx < 0) {
@@ -3069,7 +3097,7 @@ function appendToAssistant(v: SessionView, bid: number | undefined, field: 'text
   } else {
     const id = blockSeq++
     lastLLMBlockId = id
-    blocks.push({ kind: 'assistant', id, text: field === 'text' ? c : '', thinking: field === 'thinking' ? c : '', streaming: true, ts: Date.now(), ...(field === 'thinking' && thinkStart != null ? { thinkStart } : {}) })
+    blocks.push({ kind: 'assistant', id, text: field === 'text' ? c : '', thinking: field === 'thinking' ? c : '', streaming: true, ts: Date.now(), ...(runId ? { runId } : {}), ...(field === 'thinking' && thinkStart != null ? { thinkStart } : {}) })
   }
   return { ...v, blocks, lastLLMBlockId }
 }
@@ -3849,6 +3877,36 @@ export function dispatchEvent(raw: AnyEvent): void {
         }
         break
       }
+      // memory_browse：记忆文件清单（官方 §2.7 的 `/memory`）。available=false =
+      // 记忆关着或取不到目录，不是错误——面板据此显示"未启用"而不是报错。
+      if (t === 'memory_browse') {
+        if (r.ok) {
+          const avail = d.available === true
+          const l = (d.listing || {}) as Record<string, unknown>
+          const rawFiles = Array.isArray(l.files) ? (l.files as Array<Record<string, unknown>>) : []
+          setState({
+            memoryBrowseAvailable: avail,
+            memoryBrowseLoading: false,
+            memoryListing: avail
+              ? {
+                  dir: String(l.dir || ''),
+                  index_present: l.index_present === true,
+                  files: rawFiles.map((f) => ({
+                    name: String(f.name || ''),
+                    size: Number(f.size) || 0,
+                    modified: typeof f.modified === 'string' ? f.modified : undefined,
+                    type: typeof f.type === 'string' ? f.type : undefined,
+                    indexed: f.indexed === true,
+                    missing: f.missing === true,
+                  })),
+                }
+              : undefined,
+          })
+        } else {
+          setState({ memoryBrowseAvailable: false, memoryBrowseLoading: false, memoryListing: undefined })
+        }
+        break
+      }
       // memory_set_enabled：落盘失败要把 UI 回滚到 bridge 的权威值。
       // 乐观更新已经改了本地状态，不回滚就会出现「显示已关闭、重启后又开着」。
       if (t === 'memory_set_enabled') {
@@ -4330,7 +4388,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           return setView(s, sid, { ...v, blocks: appendAgentStream(v.blocks, runId, 'thinking', c, startClient), thinkStartTs })
         }
         const bid = raw.request_id ? v.reqBlock[String(raw.request_id)] : undefined
-        const nv = appendToAssistant(v, bid, 'thinking', c, startClient)
+        const nv = appendToAssistant(v, bid, 'thinking', c, startClient, runId)
         // TTFT（问题七）：首个任意 chunk（reasoning 或 content）到达 = 本轮首字耗时。
         // 思考模型 reasoning 先行——此前只在 content_chunk 结算，TTFT 被整段思考虚高。
         nv.ttftMs = nv.ttftMs ?? (nv.llmStartTs ? ts - nv.llmStartTs : undefined)
@@ -4371,7 +4429,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           return setView(s, sid, { ...v, blocks, thinkStartTs, turnThinkMs })
         }
         const bid = raw.request_id ? v.reqBlock[String(raw.request_id)] : undefined
-        const nv = appendToAssistant(v, bid, 'text', c)
+        const nv = appendToAssistant(v, bid, 'text', c, undefined, runId)
         nv.ttftMs = nv.ttftMs ?? (nv.llmStartTs ? now - nv.llmStartTs : undefined)
         const textIdx = bid != null ? nv.blocks.findIndex((b) => b.id === bid) : -1
         if (textIdx >= 0 && nv.blocks[textIdx].kind === 'assistant') {
@@ -4488,9 +4546,14 @@ export function dispatchEvent(raw: AnyEvent): void {
         const ctxTokensEstimated = ctxHasUsage ? false : v.ctxTokensEstimated
         // 非工具调用的最终文本回复在消息底部展示本轮 TTFT 与总耗时；
         // 纯 ToolCall 回复没有可展示的文本，不附加到消息。
+        // finalBid：bid 为 undefined（request_id 有值但 reqBlock 查不到 —— llm_start 丢失/
+        // 被重放跳过/被重试丢弃）时退回 lastLLMBlockId —— 与上面 settleAssistant 的兜底
+        // 落在**同一条块**上。此前二者用不同的定位：文字补上了、指标挂在 -1 上不挂，
+        // 用户看到「有正文、没耗时」（Go 侧 applyLLMEndLocked 同口径：bid==0 回退
+        // lastAssistantBlockLocked）。
         // 注意：最终块编辑与落库必须基于 withThink（已含思考结算的数组），否则
         // 「纯思考→工具调用」轮的 thinkMs 结算会被丢弃 → 思考计时器永不停止。
-        const finalBid = bid
+        const finalBid = bid ?? v.lastLLMBlockId
         const finalIdx = finalBid != null ? withThink.findIndex((b) => b.id === finalBid) : -1
         if (finalIdx >= 0 && withThink[finalIdx].kind === 'assistant' && (withThink[finalIdx] as Extract<MsgBlock, { kind: 'assistant' }>).text) {
           const ab = withThink[finalIdx] as Extract<MsgBlock, { kind: 'assistant' }>
@@ -5212,6 +5275,32 @@ export function dispatchEvent(raw: AnyEvent): void {
       })
       break
     }
+    // memory_activity：Project Memory 的读/写活动（官方 §2.7 的
+    // "Saved N memories" / "Recalled N memories"）。
+    //
+    // 宿主**逐文件**发（它没有"一次运行结束"的可靠观测点，聚合态放在事件系统里
+    // 要跨运行维护），所以合并在这一侧：同一 action 的事件在一个短窗口内累加，
+    // 窗口结束才弹一次。这正是官方那句话的形状（"Saved 2 memories" 而不是两次
+    // "Saved 1 memory"）。
+    case 'memory_activity': {
+      const action = String(raw.action || '')
+      if (action !== 'saved' && action !== 'recalled') break
+      const key = action === 'saved' ? 'memPendingSaved' : 'memPendingRecalled'
+      const prev = (getState() as unknown as Record<string, number>)[key] || 0
+      setState({ [key]: prev + 1 } as unknown as Partial<AppState>)
+      // 每次事件都重置定时器：一串写入聚成一条，一串之后再来的另起一条。
+      setTimeout(() => {
+        const n = ((getState() as unknown as Record<string, number>)[key] || 0) as number
+        if (n <= 0) return
+        setState({ [key]: 0 } as unknown as Partial<AppState>)
+        getState().showToast(
+          action === 'saved'
+            ? i18nT('settings.memory.savedToast').replace('{n}', String(n))
+            : i18nT('settings.memory.recalledToast').replace('{n}', String(n)),
+        )
+      }, 900)
+      break
+    }
     case 'agent_end': {
       const sid = getSid(raw, getState().activeSessionId)
       const id = String(raw.run_id || '')
@@ -5232,10 +5321,28 @@ export function dispatchEvent(raw: AnyEvent): void {
         // SubAgent 的 abort/完成不得清 Session 级等待态（审批队列是 Session 统一 FIFO，
         // SubAgent 中断只收敛它自己的调用，后端按 ctx/超时自行出队）。
         const isSub = id !== '' && isSubAgentRun(v, id)
-        const finalAssistantIdx = isSub ? -1 : v.blocks.findLastIndex((b) =>
+        // AgentEnd = 本 run 最后一轮已定局。**仍在流式的块在此冻结**（2026-09-29）：
+        // 中断 / run 级失败 / 达轮数上限截断这三种收尾都没有 llm_end（durMs、usage 的
+        // 唯一来源），块就永远停在 streaming=true —— 渲染门 `!b.streaming` 过不去，
+        // 底部指标行整行不显示、光标 ▍ 一直闪。此处按「已流逝时间」兜底：
+        //   - durMs：末轮 llm_start（turnStartTs）→ agent_end，诚实的「已跑多久」；
+        //   - ttftMs：只在真收到过 chunk 时才有（由 chunk 分支结算），没有就不补 ——
+        //     首字超时那类一个事件都没来的末轮，如实留空而不是编一个 30s。
+        // 只动本 run 的块（runId 缺省的无 request 旧流按 view 级流式态一并收敛）。
+        let blocks = !isSub
+          ? v.blocks.map((b) => {
+            if (b.kind !== 'assistant' || !b.streaming) return b
+            if (id && b.runId && b.runId !== id) return b
+            const nb = { ...b, streaming: false }
+            if (nb.thinkStart != null && nb.thinkMs == null) nb.thinkMs = Math.max(0, now - nb.thinkStart)
+            if (nb.durMs == null && v.turnStartTs != null) nb.durMs = Math.max(0, now - v.turnStartTs)
+            return nb
+          })
+          : v.blocks
+        const finalAssistantIdx = isSub ? -1 : blocks.findLastIndex((b) =>
           b.kind === 'assistant' && !b.streaming && Boolean(b.text) && b.runId === id,
         )
-        let blocks = v.blocks.map((b, index) =>
+        blocks = blocks.map((b, index) =>
           b.kind === 'assistant' && index === finalAssistantIdx && typeof raw.duration_ms === 'number'
             ? { ...b, agentDurMs: raw.duration_ms }
             : b.kind === 'agent' && b.runId === id
@@ -5303,7 +5410,10 @@ export function dispatchEvent(raw: AnyEvent): void {
           ),
           blocks,
           runningAgentCount: countRunningAgents(blocks),
-          streaming: (aborted || truncated) && !isSub ? false : v.streaming,
+          // 主 run 结束（任何 finish_reason）即解除流式态：此前只对 abort/max_iterations
+          // 复位，finish_reason=error 要等 session_run_error 才复位 —— 中间那段窗口
+          // 输入框仍是禁用的。子 run 的结束不动会话级流式态。
+          streaming: !isSub ? false : v.streaming,
           aborted: aborted && !isSub ? true : v.aborted, // 主 run 中断置位：拦截后续残留 chunk
           approvals: aborted && !isSub ? [] : v.approvals,
           question: aborted && !isSub ? undefined : v.question,
@@ -5406,9 +5516,21 @@ export function dispatchEvent(raw: AnyEvent): void {
       const usage = taskUsageFromEvent(raw.usage as RawUsage | undefined)
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
+        // task_end 自带 result/error（subagent 侧 TaskEnd 事件填充）：子 agent 派出的孙任务
+        // 结果投回**子 loop**、不发 task_result_delivered，若此处不回填，卡片会停在
+        // 「完成」但结果区空白。回填对主链路幂等（随后的 task_result_delivered 同值覆盖），
+        // 同时兜住「入队失败 → task_result_delivered 未达」的既有场景。
+        const endResult = raw.result != null ? String(raw.result) : ''
+        const endError = raw.error != null ? String(raw.error) : ''
+        const endPayload = endResult || endError
+          ? {
+              ...(endResult ? { taskResult: endResult } : {}),
+              ...(endError ? { taskError: endError } : {}),
+            }
+          : {}
         const upd = setView(s, sid, { ...v, blocks: applyTaskUsage(v.blocks.map((b) =>
           (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === taskId
-            ? { ...b, status, ...(b.kind === 'async_task' ? { endedAt: ts } : { durMs: ts - b.spawnedAt }) }
+            ? { ...b, status, ...endPayload, ...(b.kind === 'async_task' ? { endedAt: ts } : { durMs: ts - b.spawnedAt }) }
             // promoted 工具任务同样按 task_end 收敛（task_result_delivered 可能因
             // 入队失败未达 —— 事件与入队已解耦，但仍保留双通道收敛，防止卡片永久停在
             // 「执行中/中断中」，角标「N 运行中」随之归零）。durMs 缺失（tool_run_end
@@ -6141,6 +6263,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   titleOverrides: initTitles,
   skills: [],
   externalSkillsStatus: undefined,
+  // 记忆浏览初始态：未加载。memoryBrowseAvailable=false 表示"还没查到"，
+  // 与"查到了但记忆关着"在 UI 上表现相同（都不列文件），故不额外区分。
+  memoryBrowseAvailable: false,
+  memoryBrowseLoading: false,
+  memPendingSaved: 0,
+  memPendingRecalled: 0,
   externalSkillsLoading: false,
   externalSkillsImporting: false,
   externalSkillsError: undefined,
@@ -7184,6 +7312,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 乐观更新 + 失败回滚：bridge 落盘 ~/.go-code/memory.json 失败必须让 UI 回到原值
   // ——「面板显示已关闭、重启后又开着」比报错更难排查。
   fetchMemorySettings: () => send({ type: 'memory_settings', payload: {} }),
+  // 浏览清单是**按工作区**的：同一份设置面板在切工作区时必须换目录，
+  // 所以先置 loading 再发请求——否则两个工作区的清单会闪一下互相覆盖。
+  fetchMemoryBrowsing: () => {
+    set({ memoryBrowseLoading: true })
+    send({ type: 'memory_browse', payload: {} })
+  },
   setMemoryEnabled: (on: boolean) => {
     const prev = get().memorySettings
     const base: MemorySettings = prev ?? {

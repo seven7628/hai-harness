@@ -11117,3 +11117,46 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 
 @import './narrative-skin.css';
+
+/* —— Project Memory 记忆浏览（官方 §2.7 的 /memory）——
+   刻意做成**只读清单**而不是可编辑表格：官方承诺的是「记忆文件随时可以自己打开、
+   编辑或删除」，即把编辑交给用户在文件上做。宿主再画一套行内编辑/删除，就得配一套
+   校验与确认，而官方没有这套机制 —— 那是自创。 */
+.mem-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.mem-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.mem-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  color: var(--text);
+}
+.mem-table code {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  user-select: all;
+}
+/* 索引里列了但磁盘上没有：官方对陈旧条目不做校验（不擅自删），如实标出。 */
+.mem-table tr.gone td {
+  color: var(--text-dim);
+}
+.mem-table tr.gone code {
+  text-decoration: line-through;
+}
+.tag-warn {
+  color: var(--warn, #d08700);
+  font-size: 11px;
+}
+.tag-dim {
+  color: var(--text-dim);
+  font-size: 11px;
+}

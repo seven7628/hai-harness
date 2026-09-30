@@ -148,8 +148,8 @@ func p0RunOnce(t *testing.T, p provider.Provider, prov, model, root string,
 	ft := builtin.NewFileTools(root)
 	if mh != nil {
 		ws := root
-		ft = ft.WithPostWrite(func(p string) (string, error) {
-			return mh.postWrite(context.Background(), ws, p)
+		ft = ft.WithPostWrite(func(ctx context.Context, p string) (string, error) {
+			return mh.postWrite(ctx, ws, p)
 		})
 	}
 	eng := tools.NewToolEngine()

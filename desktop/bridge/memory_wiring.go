@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/memory"
 )
 
@@ -197,7 +198,14 @@ func (h *memoryHost) postWrite(ctx context.Context, workspace, absPath string) (
 	if !target.IsTopic(absPath) {
 		return "", nil
 	}
+	scope := events.MemoryScopeMain
+	if target.Path != dir.Path {
+		scope = events.MemoryScopeSubagent
+	}
 	ws := h.cfg.StampModified(target, absPath)
+	if ws.Err == nil {
+		h.emitMemoryActivity(ctx, scope, events.MemoryActionSaved, filepath.Base(absPath))
+	}
 	return "", ws.Err
 }
 
@@ -245,4 +253,56 @@ func memCfgValue(memCfg []memory.Config) memory.Config {
 		return memCfg[0]
 	}
 	return memory.Config{}
+}
+
+// postRead 是 read_file 的"读成功后"钩子：读的是记忆文件时发一条
+// MemoryActivity{Action: recalled}（官方 "Recalled N memories"）。
+//
+// 与 postWrite 的判定同构（三道闸：开关 / 是否记忆路径 / 目录能否解析），但**不**
+// 需要归属到具体目录：读侧不补戳、不测限额，只需要知道"这是一条记忆、它属于谁
+// 的记忆"，以便把事件标上 Scope。
+func (h *memoryHost) postRead(ctx context.Context, workspace, absPath string) (string, error) {
+	if h.cfg.Disabled() || !filepath.IsAbs(absPath) || !h.cfg.IsMemoryPath(absPath) {
+		return "", nil
+	}
+	dir, err := h.resolve(ctx, workspace)
+	if err != nil || dir == nil {
+		return "", nil
+	}
+	scope := events.MemoryScopeMain
+	owner := *dir
+	if sub, ok := h.cfg.SubagentDirFromPath(*dir, absPath); ok {
+		scope = events.MemoryScopeSubagent
+		owner = sub
+	}
+	// MEMORY.md 是索引不是记忆条目：读索引是"读清单"，官方没把它算成一条记忆。
+	// 计入会让 "Recalled N memories" 在刚启动、只加载了索引时就说 N>0。
+	if !owner.IsTopic(absPath) {
+		return "", nil
+	}
+	h.emitMemoryActivity(ctx, scope, events.MemoryActionRecalled, filepath.Base(absPath))
+	return "", nil
+}
+
+// emitMemoryActivity 发一条记忆活动事件。
+//
+// 发不出去**不报错**：它是一条纯可观测性事件（官方那句话只是"你能看到"），
+// 而读写的成功与否不该因为它失败而改变。拿不到工具上下文（直接调工具的根 agent
+// 路径）就静默跳过——没有 RunId 就无法与 agent_start/agent_end 关联，发出去也
+// 是孤儿事件。
+func (h *memoryHost) emitMemoryActivity(ctx context.Context, scope events.MemoryScope,
+	action events.MemoryAction, file string) {
+	tc := events.ToolContextFrom(ctx)
+	if tc == nil || tc.Handler == nil {
+		return
+	}
+	tc.Handler(ctx, &events.MemoryActivity{
+		RunId:     tc.RunId,
+		Scope:     scope,
+		Action:    action,
+		File:      file,
+		Count:     1,
+		Timestamp: time.Now(),
+		EventType: events.MemoryActivityType,
+	})
 }

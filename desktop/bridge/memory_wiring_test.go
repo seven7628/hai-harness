@@ -69,7 +69,7 @@ func TestPostWriteStampsTopicFrontmatter(t *testing.T) {
 
 	ws := t.TempDir()
 	ft := builtin.NewFileTools(ws).
-		WithPostWrite(func(p string) (string, error) { return h.postWrite(context.Background(), ws, p) })
+		WithPostWrite(func(ctx context.Context, p string) (string, error) { return h.postWrite(ctx, ws, p) })
 	// 记忆目录在工作区之外 —— 必须用**绝对路径**。这正是官方形态：模型被告知索引在
 	// 工作区外某处，用标准 write_file 写绝对路径过去。若这里改用相对路径而写到工作区
 	// 内的同名文件，测试会假通过而生产仍然坏。
@@ -211,7 +211,7 @@ func TestPostWriteEditFileAlsoStamps(t *testing.T) {
 	}
 	ws := t.TempDir()
 	ft := builtin.NewFileTools(ws).
-		WithPostWrite(func(p string) (string, error) { return h.postWrite(context.Background(), ws, p) })
+		WithPostWrite(func(ctx context.Context, p string) (string, error) { return h.postWrite(ctx, ws, p) })
 	if err := callEditFile(ft, topic, "old body", "new body"); err != nil {
 		t.Fatalf("edit_file 应成功: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestPostWriteIndexLimitsAreWired(t *testing.T) {
 	h, dir, _ := memTopicDir(t)
 	ws := t.TempDir()
 	ft := builtin.NewFileTools(ws).
-		WithPostWrite(func(p string) (string, error) { return h.postWrite(context.Background(), ws, p) })
+		WithPostWrite(func(ctx context.Context, p string) (string, error) { return h.postWrite(ctx, ws, p) })
 	idx := filepath.Join(dir.Path, "MEMORY.md")
 
 	// —— 接近限额（160 行 ≥ 200×3/4）：提醒走 notice，**不报错** ——

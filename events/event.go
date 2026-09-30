@@ -24,6 +24,11 @@ const (
 	// 注意：这是**可观测性**事件，不是失败（IsError / AgentEnd 语义不受影响）。
 	RunSilentEndType EventType = "run_silent_end"
 
+	// MemoryActivityType Project Memory 的读/写活动（官方 memory#how-it-works 的
+	// "Saved N memories" / "Recalled N memories"）。逐文件发，聚合展示由前端做，
+	// 理由见 events/memory_activity.go 的注释。
+	MemoryActivityType EventType = "memory_activity"
+
 	CompressStartType EventType = "compress_start"
 	CompressEndType   EventType = "compress_end"
 

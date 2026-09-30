@@ -45,6 +45,11 @@ type FileTools struct {
 	// 为什么用钩子而不是直接 import memory：工具层不应依赖任何产品概念
 	// （同 binaryHint 的分层理由）。宿主不注入钩子 = 行为与今天完全一致。
 	//
+	// **带 ctx**（2026-09-30 追加）：Project Memory 的 "Saved/Recalled N memories"
+	// 需要把事件挂到**本次运行**上（RunId + Handler 都在工具上下文里）。不带 ctx 的
+	// 钩子只能看到路径，发不出可关联的事件——第一版就踩了这个：单测直接调宿主方法
+	// 全绿，端到端那条（真的走 read_file）却是 0 条事件。
+	//
 	// 返回 (notice, err) 而不是单一 error，是 2026-09-30 的修正。宿主有两类
 	// **不同性质**的话要在写成功后告诉模型，而它们不能走同一条通道：
 	//
@@ -54,7 +59,26 @@ type FileTools struct {
 	//	notice  写**已经成功**，但顺带提醒一句（如索引接近限额）。把它塞进 err
 	//	         会让模型以为写失败了——它很可能重试，而重试只会让索引更长，
 	//	         正是这条提醒要避免的结果。
-	postWrite func(absPath string) (notice string, err error)
+	postWrite func(ctx context.Context, absPath string) (notice string, err error)
+	// postRead 读成功后的对称钩子，签名与 postWrite 一致。默认 nil（零开销）。
+	//
+	// 为什么需要它（2026-09-30）：Project Memory 的用户可见面里有一条
+	// "Recalled N memories"（官方 memory#how-it-works）。要诚实地报这个数，就得知道
+	// 模型**读了哪些记忆文件**——而读只有这一个入口，postWrite 只能看见写。
+	//
+	// 返回值用途与 postWrite 相同，但**目前没有宿主用它**：读取失败要照常报错，
+	// 读取成功没有要附加给模型的提示（官方没规定读记忆要提醒什么）。签名先对齐，
+	// 是为了不必在两个钩子不一致时再改一次。
+	postRead func(ctx context.Context, absPath string) (notice string, err error)
+}
+
+// WithPostRead 注入"读成功后"钩子（nil = 保持默认不挂钩）。
+//
+// 与 WithPostWrite 同型：notice 拼在结果后、err 回给模型。见 WithPostWrite 的注释
+// 为什么那两条通道必须分开。
+func (f *FileTools) WithPostRead(fn func(context.Context, string) (string, error)) *FileTools {
+	f.postRead = fn
+	return f
 }
 
 // WithPostWrite 注入"写/改成功后"钩子（nil = 保持默认不挂钩）。
@@ -62,7 +86,7 @@ type FileTools struct {
 // notice 会拼在成功结果**后面**返回给模型（非错误）；err 会**一并回给模型**，不吞：
 // Step 4 补戳失败若被静默吞掉，记忆文件会带着过期或缺失的 modified 继续留在索引里，
 // 而模型毫不知情。
-func (f *FileTools) WithPostWrite(fn func(absPath string) (string, error)) *FileTools {
+func (f *FileTools) WithPostWrite(fn func(context.Context, string) (string, error)) *FileTools {
 	f.postWrite = fn
 	return f
 }
@@ -430,7 +454,21 @@ func (t *readFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	for i, l := range lines {
 		fmt.Fprintf(&b, "%d: %s\n", start+i, l)
 	}
-	return b.String(), nil
+	notice, err := t.notifyPostRead(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	return withNotice(b.String(), notice), nil
+}
+
+// notifyPostRead 触发宿主"读成功后"钩子；未注入钩子时是零成本空操作。
+// 与 notifyPostWrite 同理：只在**读成功之后**调用——读失败时什么也没发生，
+// 报"回忆了记忆"是假的。
+func (t *readFileTool) notifyPostRead(ctx context.Context, absPath string) (string, error) {
+	if t.FileTools == nil || t.FileTools.postRead == nil {
+		return "", nil
+	}
+	return t.FileTools.postRead(ctx, absPath)
 }
 
 // statPath 操作前预检查目标存在性（给 LLM 可操作提示，而非裸错误）。
@@ -616,7 +654,7 @@ func (t *writeFileTool) ValidParams(_ context.Context, _, arguments string) erro
 	return nil
 }
 
-func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, error) {
+func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, error) {
 	t.diff = nil
 	var a writeArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
@@ -655,7 +693,7 @@ func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, er
 			}
 		}
 		t.diff.Created = created
-		notice, err := t.notifyPostWrite(p)
+		notice, err := t.notifyPostWrite(ctx, p)
 		if err != nil {
 			return "", err
 		}
@@ -681,7 +719,7 @@ func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, er
 	// 不能用 Removed==0 推断（纯插入内容同样是 +N -0）。
 	t.diff = finalizeDiff(computeFileDiff(a.Path, old, a.Content), a.Content)
 	t.diff.Created = lock == nil
-	notice, err := t.notifyPostWrite(p)
+	notice, err := t.notifyPostWrite(ctx, p)
 	if err != nil {
 		return "", err
 	}
@@ -700,11 +738,11 @@ func withNotice(result, notice string) string {
 //
 // 只在**写成功之后**调用：写失败时文件没变，补戳没有意义，且会把一次已经失败
 // 的操作报成"记忆写入出错"，掩盖真正的错误。
-func (t *writeFileTool) notifyPostWrite(absPath string) (string, error) {
+func (t *writeFileTool) notifyPostWrite(ctx context.Context, absPath string) (string, error) {
 	if t.FileTools == nil || t.FileTools.postWrite == nil {
 		return "", nil
 	}
-	return t.FileTools.postWrite(absPath)
+	return t.FileTools.postWrite(ctx, absPath)
 }
 
 // ---------- edit_file ----------
@@ -751,7 +789,7 @@ func (t *editFileTool) ValidParams(_ context.Context, _, arguments string) error
 	return nil
 }
 
-func (t *editFileTool) Call(_ context.Context, _, arguments string) (string, error) {
+func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, error) {
 	t.diff = nil
 	var a editArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
@@ -788,7 +826,7 @@ func (t *editFileTool) Call(_ context.Context, _, arguments string) (string, err
 	// 旧全文 s 与 replaced 均在手，免费产 diff（信息源头在工具）。
 	// edit_file 入口已 statPath 要求文件存在 → Created 恒 false（modified）。
 	t.diff = finalizeDiff(computeFileDiff(a.Path, s, replaced), replaced)
-	notice, err := t.notifyPostWrite(p)
+	notice, err := t.notifyPostWrite(ctx, p)
 	if err != nil {
 		return "", err
 	}
@@ -797,11 +835,11 @@ func (t *editFileTool) Call(_ context.Context, _, arguments string) (string, err
 
 // notifyPostWrite 触发宿主"写/改成功后"钩子；未注入钩子时是零成本空操作。
 // 理由与 write_file 同名方法一致：只在写成功后调用，错误不吞，提醒不混进错误。
-func (t *editFileTool) notifyPostWrite(absPath string) (string, error) {
+func (t *editFileTool) notifyPostWrite(ctx context.Context, absPath string) (string, error) {
 	if t.FileTools == nil || t.FileTools.postWrite == nil {
 		return "", nil
 	}
-	return t.FileTools.postWrite(absPath)
+	return t.FileTools.postWrite(ctx, absPath)
 }
 
 // readAllLocked 读取目标文件全文（持锁时直接复用锁定 fd，避免再次 open 竞态）。

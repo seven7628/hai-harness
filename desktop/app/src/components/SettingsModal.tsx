@@ -2369,15 +2369,23 @@ function MeshTab() {
 function MemoryTab() {
   const t = useT()
   const ms = useAppStore((s) => s.memorySettings)
+  const listing = useAppStore((s) => s.memoryListing)
+  const browseAvailable = useAppStore((s) => s.memoryBrowseAvailable)
+  const browseLoading = useAppStore((s) => s.memoryBrowseLoading)
   const fetchMemorySettings = useAppStore((s) => s.fetchMemorySettings)
+  const fetchMemoryBrowsing = useAppStore((s) => s.fetchMemoryBrowsing)
   const setMemoryEnabled = useAppStore((s) => s.setMemoryEnabled)
   const showToast = useAppStore((s) => s.showToast)
 
   useEffect(() => {
     void fetchMemorySettings()
-  }, [fetchMemorySettings])
+    void fetchMemoryBrowsing()
+  }, [fetchMemorySettings, fetchMemoryBrowsing])
 
   const on = ms?.enabled ?? true
+  // 关掉记忆时不该显示"0 个文件"——那会被读成"记忆被清空了"。
+  // 实际语义是"没有记忆目录"，两者的处置完全不同。
+  const showListing = on && browseAvailable
 
   return (
     <>
@@ -2427,6 +2435,61 @@ function MemoryTab() {
         <p className="set-desc" style={{ marginTop: 8, color: 'var(--danger, #c0392b)' }}>
           {ms.memory_dir_error}
         </p>
+      )}
+
+      {/* —— 记忆浏览（官方 §2.7 的 `/memory`：browse and open memory files）——
+          纯读，且**刻意不提供删除按钮**：官方承诺的是「随时可以自己编辑或删除」，
+          也就是把这件事交给用户直接在文件上做。宿主再画一个删除入口，等于要给
+          删除配一套校验与确认，而官方没有这套机制——那是自创。 */}
+      <div className="set-row" style={{ marginTop: 16 }}>
+        <div>
+          <div className="set-label">{t('settings.memory.browse')}</div>
+          <div className="set-desc">{t('settings.memory.browse.desc')}</div>
+        </div>
+        <button className="btn" onClick={() => void fetchMemoryBrowsing()}>
+          {t('settings.memory.browse.refresh')}
+        </button>
+      </div>
+
+      {!on && <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.off')}</p>}
+      {on && browseLoading && !listing && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.loading')}</p>
+      )}
+      {showListing && !listing?.index_present && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.noIndex')}</p>
+      )}
+      {showListing && listing && listing.files.length === 0 && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.empty')}</p>
+      )}
+      {showListing && listing && listing.files.length > 0 && (
+        <table className="mem-table" style={{ marginTop: 8 }}>
+          <thead>
+            <tr>
+              <th>{t('settings.memory.browse')}</th>
+              <th>type</th>
+              <th>modified</th>
+              <th style={{ textAlign: 'right' }}>{t('settings.memory.browse.size')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {listing.files.map((f) => (
+              <tr key={f.name} className={f.missing ? 'gone' : undefined}>
+                <td>
+                  <code>{f.name}</code>
+                  {f.missing && <span className="tag-warn"> {t('settings.memory.browse.missing')}</span>}
+                  {/* 未登记是正常中间态（模型刚写 topic 还没补索引），标出来而不是
+                      藏起来：藏起来会让人以为这条记忆不存在。 */}
+                  {!f.indexed && !f.missing && (
+                    <span className="tag-dim"> {t('settings.memory.browse.notIndexed')}</span>
+                  )}
+                </td>
+                <td>{f.type || '—'}</td>
+                <td>{f.modified || '—'}</td>
+                <td style={{ textAlign: 'right' }}>{f.size}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </>
   )
