@@ -137,6 +137,9 @@ const userAgentMDMaxBytes = 64 << 10
 
 // discoverUserAgentMD 用户级指令文件（~/.agents/AGENTS.md 等）：**单文件、非递归**。
 //
+// 注入位置：工作记忆层的**最前**（见 composeSystemPrompt）—— 用户级先加载、工作区
+// 层后加载，故用户级优先级最低。
+//
 // 为什么非递归：用户级目录（~/.agents）同时是 skills / subagents 的家，其子目录里
 // 天然可能各有自己的 AGENTS.md（如某个 skill 自带的说明）；递归会把它们全捞进来当
 // 个人全局指令 —— 语义错位且体积不可控。用户级只认「本目录的那一份」。
