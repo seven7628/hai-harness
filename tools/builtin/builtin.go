@@ -122,6 +122,31 @@ func (f *FileTools) Register(e *tools.Engine) {
 	}
 }
 
+// pathParamDesc 是 read_file / write_file / edit_file 三个工具共用的 path 参数说明。
+//
+// # 为什么必须改（2026-09-30）
+//
+// 原文是 "File path (relative to workspace root)"，**与 resolve 的实际行为不符**，而
+// 这条不符在 Project Memory 上直接造成写入失败：
+//
+//	resolve 接受绝对路径（工作区外也接受），只拒绝用 `..` 逃逸的**相对**路径；
+//	而 schema 说"相对工作区根"，模型于是把宿主给它的**绝对**记忆目录路径
+//	（如 ~/.go-code/memory/repos/<id>/）转成相对路径 —— 被拒：
+//	    path "../009/mem/repos/010-f5ae/relay-backoff.md" escapes workspace root
+//
+// 即：宿主与工具**各自**都是对的，合起来把模型带进死路。真实 provider 跑批里
+// 每 7 次写入尝试就有 1 次这样失败（2026-09-30 实测）。
+//
+// 官方没有这个矛盾：Claude Code 的 Write 参数写的是
+// "Absolute path to file, or relative to the working directory" —— 两种都收。
+// 我们不改 resolve 的行为（拒绝 `..` 逃逸是刻意的，见下），只把**实际规则**说准：
+// 相对路径按工作区根解析且不得逃逸，要写工作区外的文件就用绝对路径。
+//
+// 这是工具契约的描述修正，不是新机制：行为一个字没改，schema 终于与实现一致。
+const pathParamDesc = "File path. A relative path is resolved against the workspace root " +
+	"and may not escape it (a leading ../ is rejected); use an absolute path for files " +
+	"outside the workspace."
+
 // resolve 校验并解析路径为绝对路径（问题十六：与沙箱/审批统一治理）。
 //   - 相对路径 → 锚定 workspace root（既有行为；`..` 逃逸仍拒绝——相对语义下
 //     工作区外无意义，出工作区请用绝对路径表达显式意图）；
@@ -254,7 +279,7 @@ func newReadFileTool(f *FileTools) *readFileTool {
 			Name_:        "read_file",
 			Description_: "Read a text file and return numbered lines. path is required and relative to the workspace root. start_line and end_line are optional 1-based inclusive integers. Omit both for the first 200 lines; if only start_line is given, read up to 200 lines from there. If both are given in reverse order, the tool normalizes them to the ascending range and reports the normalization. Reading an image file (png/jpeg/gif) returns the image itself for direct viewing (do not pass start_line/end_line for images). Use glob to locate files and grep to search content.",
 			Params_: tools.Obj(map[string]any{
-				"path":       tools.Str("File path (relative to workspace root)"),
+				"path":       tools.Str(pathParamDesc),
 				"start_line": tools.Map{"type": "integer", "minimum": 1, "default": 1, "description": "First line, 1-based; omit for line 1"},
 				"end_line":   tools.Map{"type": "integer", "minimum": 1, "description": "Last line, inclusive; omit to read the default 200-line window. If end_line is smaller than start_line, the tool normalizes the range to ascending order and reports it."},
 			}, "path"),
@@ -564,7 +589,7 @@ func newWriteFileTool(f *FileTools) *writeFileTool {
 				"Overwrite is atomic (temp file + rename; concurrent readers never see partial content); concurrent write conflicts return an error (retryable). " +
 				"Creates missing files and parent directories automatically; if you need to keep the old content before overwriting, back it up with read_file first.",
 			Params_: tools.Obj(map[string]any{
-				"path":    tools.Str("File path (relative to workspace root)"),
+				"path":    tools.Str(pathParamDesc),
 				"content": tools.Str("Text content to write (full new file content)"),
 				"append":  map[string]any{"type": "boolean", "default": false, "description": "Append mode (default false = overwrite)"},
 			}, "path", "content"),
@@ -699,7 +724,7 @@ func newEditFileTool(f *FileTools) *editFileTool {
 			Name_:        "edit_file",
 			Description_: "Replace exactly one occurrence in an existing text file. Read the file first and copy old_string exactly, including whitespace and line breaks. Use the shortest old_string that is still unique; uniqueness is more important than minimizing context. Keep the change minimal: new_string must contain only the necessary edits (ideally 1-3 lines) and must not rewrite unrelated content. If it matches zero or multiple times, no change is made. After an error never repeat the same arguments: read_file and refresh the edit. Use write_file only for intentional full-file replacement.",
 			Params_: tools.Obj(map[string]any{
-				"path":       tools.Str("File path (relative to workspace root)"),
+				"path":       tools.Str(pathParamDesc),
 				"old_string": tools.Str("Original text to replace (must appear exactly once; ideally 1-3 lines, just enough to be unique)"),
 				"new_string": tools.Str("Replacement text"),
 			}, "path", "old_string", "new_string"),
