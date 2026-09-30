@@ -95,11 +95,51 @@ type p0Run struct {
 	Duration float64  `json:"duration_sec"`
 
 	// 以下三项把"没写成"拆开：模型**根本没试**、试了但**写错了地方**、
-	// 试了且写对了地方但**被拒**。不拆开的话，"A 臂只有 3% 写入"这个数字
+	// 试了且写对了地方但**被拒**。不拆开的话，"写入率只有 17%"这个数字
 	// 无法区分"模型不感兴趣"与"我们的写入路径坏了"——而两者的处置完全相反。
 	WriteAttempts  int      `json:"write_attempts"`
 	WriteRejected  []string `json:"write_rejected,omitempty"`
 	WriteElsewhere int      `json:"write_elsewhere"` // 写了 .md，但不在记忆目录里
+
+	// —— P1 的两个判据（2026-09-30）——
+	//
+	// 之前只有 chainTurned（= 写了带 frontmatter 且被补戳的 topic），它只答
+	// "写没写"，而**判据是精确率工具**：它压掉的是不该写的那部分。所以必须
+	// 把"写了什么"也记下来，否则 C 臂因为正确地不写而拿 0 分（第一版就是这样）。
+	//
+	// 判定**读文件内容做关键词匹配**，不经 LLM 判定器——9-29 那次用模型判
+	// "这段是不是记忆"，自洽率只有 89%，整个读数因此作废。
+	//
+	// Remembered 写了**用户口述、代码里没有**的事实（该记的记了）
+	// RecordedDerivable 写了**代码里直接能读出**的内容（不该记的记了）
+	Remembered        bool `json:"remembered"`
+	RecordedDerivable bool `json:"recorded_derivable"`
+	RecordedAllTokens int  `json:"recorded_all_tokens"` // 命中过的 token 数（诊断用）
+
+	// Body 全部 topic 的正文拼接。仅供 classifyRun 与它的自检用，**不进 JSON**
+	//（跑批的原始数据不该被一段可能很大的正文撑爆；要复现判定看 topics 即可）。
+	Body string `json:"-"`
+}
+
+// classifyRun 按关键词把记忆正文分成"该记的"与"不该记的"。
+//
+// 判定**读文件内容做关键词匹配**，不经 LLM 判定器——9-29 那次用模型判"这段是不是
+// 记忆"，自洽率只有 89%，整个读数因此作废。
+//
+// 词表在 p0Turns 旁边（那里说明了为什么这两个集合必须与仓库内容不相交）。
+// 任一条命中即算命中：这是召回口径（"记没记下来"），不是"每条都对"。
+func classifyRun(r *p0Run, body string) {
+	for _, tok := range p0RememberTokens {
+		if strings.Contains(body, tok) {
+			r.Remembered = true
+		}
+	}
+	for _, tok := range p0DerivableTokens {
+		if strings.Contains(body, tok) {
+			r.RecordedDerivable = true
+			r.RecordedAllTokens++
+		}
+	}
 }
 
 // chainTurned 一条链是否真的转起来了：写了 topic、带 frontmatter、且 modified 被补上。
@@ -137,12 +177,51 @@ func p0Fixture(t *testing.T) string {
 	return dir
 }
 
-// p0Question 任务措辞。A/B 两臂**逐字节相同**，且不含任何与记忆有关的暗示。
-const p0Question = "阅读这个仓库，说明 relay 服务监听哪个端口、" +
-	"backlog 是多少，以及重连退避上限为什么不能调高。"
+// p0Turns 是本次跑批的两轮提问，三臂**逐字节相同**，且都不含与记忆有关的暗示。
+//
+// # 为什么是两轮（2026-09-30 改）
+//
+// 第一版只有一轮、且是纯只读的仓库问答。那一版**测不出判据的作用**，原因是它把
+// "唯一值得记的东西"设成了代码里那条注释：
+//
+//	// 重连退避上限 5s：调高会让上游 429 放大成雪崩，别动。
+//
+// 而官方判据第一条原文就是 "skips anything it can derive from the codebase"。
+// 于是加判据的模型**照判据办事、不写**，装置却奖励写入——把"答对了"记成"失败"。
+// 实测 C 臂 0/20 对 A 臂 4/20，方向正好是这么来的（见 Wiki §6.1）。
+//
+// 现在第一轮给出两条**仓库里根本不存在**的事实（发布窗口、排查顺序），
+// 它们只存在于这次对话里，正是官方说的 "working preferences" 与
+// "decisions that Claude can't derive from the code or git history"。
+// 于是"该记的"与"不该记的"同时在场，判据才有可测的作用面。
+//
+// 第二轮保持原来的只读任务：它本身不提供新的可记内容，是**干扰项**。
+var p0Turns = []string{
+	// —— 第一轮：用户交代两条仓库里没有的约定 ——
+	"补充两条这个仓库里查不到、但你之后每次都会用到的约定：\n" +
+		"1) 发布窗口：每周四 15:00 之后到下周一 10:00 之间不要合并主干。\n" +
+		"2) 排查线上问题：先看 relay-metrics 面板，再看日志，最后才考虑重启。\n" +
+		"现在请阅读这个仓库，说明 relay 服务监听哪个端口、backlog 是多少，" +
+		"以及重连退避上限为什么不能调高。",
+	// —— 第二轮：普通追问，不含新事实 ——
+	"再确认一下：刚才说的端口和 backlog，在配置文件里是哪几行写的？",
+}
+
+// p0FactTokens 把记忆内容分成两类，用于**确定性**判定（不经 LLM 判定器）。
+//
+// 该记的（只出现在用户口述里，仓库中无）：p0RememberTokens
+// 不该记的（能从代码/配置直接读出）：p0DerivableTokens
+var (
+	// p0RememberTokens 用户口述事实的判定词。挑的是**只在对话里出现过**的词形：
+	// 仓库里既没有这些中文表述，也没有这些数字组合，所以命中即说明它记的是
+	// 用户说的东西，而不是从代码里抄的。
+	p0RememberTokens = []string{"发布窗口", "relay-metrics", "排查"}
+	// p0DerivableTokens 纯代码可推导内容的判定词。官方判据要求跳过这一类。
+	p0DerivableTokens = []string{"8443", "backlog", "maxBackoff", "重连退避"}
+)
 
 func p0RunOnce(t *testing.T, p provider.Provider, prov, model, root string,
-	mh *memoryHost, inject string, pairIdx int, arm string) p0Run {
+	mh *memoryHost, inject string, pairIdx int, arm string, turns ...string) p0Run {
 
 	t.Helper()
 	ft := builtin.NewFileTools(root)
@@ -204,10 +283,14 @@ func p0RunOnce(t *testing.T, p provider.Provider, prov, model, root string,
 	})
 
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	ac := loop.Run(ctx, []core.Message{core.NewUserMessage(core.Content{
-		Type: core.ContentTypeText, Content: p0Question,
-	})}, handler)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	msgs := make([]core.Message, 0, len(turns))
+	for _, t := range turns {
+		msgs = append(msgs, core.NewUserMessage(core.Content{
+			Type: core.ContentTypeText, Content: t,
+		}))
+	}
+	ac := loop.Run(ctx, msgs, handler)
 	cancel()
 	run.Duration = time.Since(start).Seconds()
 	if ac != nil && ac.Err != nil {
@@ -257,7 +340,28 @@ func p0Inspect(t *testing.T, dir memory.Dir, run p0Run) p0Run {
 	if b, rerr := os.ReadFile(filepath.Join(dir.Path, memory.IndexFileName)); rerr == nil {
 		run.IndexUpdated = strings.Contains(string(b), topics[0])
 	}
+
+	// 分类要读**全部** topic 而不是 topics[0]：一个 session 可能写好几条，
+	// 只看第一条会把"第一条写错了"误判成"没写"。任一条命中即算命中（这是
+	// 召回口径：要问的是"记没记下来"，不是"每条都对"）。
+	var all strings.Builder
+	for _, name := range topics {
+		if body, rerr := os.ReadFile(filepath.Join(dir.Path, name)); rerr == nil {
+			all.Write(body)
+			all.WriteString("\n")
+		}
+	}
+	body := all.String()
+	classifyRun(&run, body)
+	run.Body = body
 	return run
+}
+
+// precision 该次会话"写对了吗"：写了东西且**没**写纯代码可推导的内容。
+//
+// 只有"没写"才谈得上精确——不写既不精确也不失误，那是召回问题，由 Remembered 管。
+func (r p0Run) precision() bool {
+	return r.WroteTopic && !r.RecordedDerivable
 }
 
 // TestP0GuidanceCausesModelToWriteMemory 是 P0 的端到端验收。
@@ -297,7 +401,7 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 		if injA == "" {
 			t.Fatalf("A 臂注入为空——生产路径本身坏了，实验无从谈起")
 		}
-		runA := p0RunOnce(t, p, prov, model, wsA, hA, injA, i, "A")
+		runA := p0RunOnce(t, p, prov, model, wsA, hA, injA, i, "A", p0Turns...)
 		runs = append(runs, runA)
 		p0LogRun(t, runA)
 
@@ -316,7 +420,7 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 		if _, err := hB.resolve(context.Background(), wsB); err != nil {
 			t.Fatalf("B 臂解析记忆目录失败：%v", err)
 		}
-		runB := p0RunOnce(t, p, prov, model, wsB, hB, "", i, "B")
+		runB := p0RunOnce(t, p, prov, model, wsB, hB, "", i, "B", p0Turns...)
 		runs = append(runs, runB)
 		p0LogRun(t, runB)
 
@@ -330,7 +434,7 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 			t.Fatalf("C 臂基础注入为空")
 		}
 		injC += "\n\n" + p0CriteriaOfficial
-		runC := p0RunOnce(t, p, prov, model, wsC, hC, injC, i, "C")
+		runC := p0RunOnce(t, p, prov, model, wsC, hC, injC, i, "C", p0Turns...)
 		runs = append(runs, runC)
 		p0LogRun(t, runC)
 	}
@@ -343,46 +447,40 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 		}
 	}
 
-	aWrite, bWrite, cWrite := 0, 0, 0
-	aChain, bChain, cChain := 0, 0, 0
-	aAttempt, bAttempt, cAttempt := 0, 0, 0
+	// 四组读数，每臂一份：
+	//   chain   全链转通（机制：写了 → 带 frontmatter → 宿主补 modified）
+	//   recall  记下了**用户口述、代码里没有**的事实（该记的记了）
+	//   prec    写了且**没**写纯代码可推导的内容（不该记的没记）
+	//   junk    写了纯代码可推导的内容（不该记的记了）
+	type armStat struct{ chain, recall, prec, junk, attempt, write int }
+	stat := map[string]*armStat{"A": {}, "B": {}, "C": {}}
 	for _, r := range runs {
-		switch r.Arm {
-		case "A":
-			aAttempt += r.WriteAttempts
-		case "B":
-			bAttempt += r.WriteAttempts
-		case "C":
-			cAttempt += r.WriteAttempts
-		}
+		st := stat[r.Arm]
+		st.attempt += r.WriteAttempts
 		if r.WroteTopic {
-			switch r.Arm {
-			case "A":
-				aWrite++
-			case "B":
-				bWrite++
-			case "C":
-				cWrite++
-			}
+			st.write++
 		}
 		if r.chainTurned() {
-			switch r.Arm {
-			case "A":
-				aChain++
-			case "B":
-				bChain++
-			case "C":
-				cChain++
-			}
+			st.chain++
+		}
+		if r.Remembered {
+			st.recall++
+		}
+		if r.precision() {
+			st.prec++
+		}
+		if r.RecordedDerivable {
+			st.junk++
 		}
 	}
+	a, b, c := stat["A"], stat["B"], stat["C"]
 
 	// 统计口径与 Step 0 / 补测一**同源**（复用 supplementMcNemarExact /
 	// supplementWilsonCI），避免两台仪器各报各的。
 	b01, b10 := 0, 0
 	for i := 0; i < reps; i++ {
-		aOn := runs[i*2].chainTurned()
-		bOn := runs[i*2+1].chainTurned()
+		aOn := runs[i*3].chainTurned()
+		bOn := runs[i*3+1].chainTurned()
 		if aOn && !bOn {
 			b01++
 		} else if bOn && !aOn {
@@ -402,19 +500,38 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 			c10++
 		}
 	}
-	aLo, aHi := supplementWilsonCI(aChain, reps)
-	bLo, bHi := supplementWilsonCI(bChain, reps)
 	mde := supplementMDEUnpaired(0, reps, 1, reps)
-	_ = mde
 
-	t.Logf("写入率   A=%d/%d  B=%d/%d  C=%d/%d", aWrite, reps, bWrite, reps, cWrite, reps)
-	t.Logf("写尝试   A=%d  B=%d  C=%d（分母都是 %d 次会话）", aAttempt, bAttempt, cAttempt, reps)
-	cLo, cHi := supplementWilsonCI(cChain, reps)
-	t.Logf("全链转通 A=%d/%d [Wilson %.0f%%–%.0f%%]  B=%d/%d [Wilson %.0f%%–%.0f%%]  C=%d/%d [Wilson %.0f%%–%.0f%%]",
-		aChain, reps, 100*aLo, 100*aHi, bChain, reps, 100*bLo, 100*bHi,
-		cChain, reps, 100*cLo, 100*cHi)
-	t.Logf("C−A 差值 = %+.1f 个百分点（判据文本的效果；本装置 MDE ≈ %.0f pp）",
-		100*(float64(cChain)/float64(reps)-float64(aChain)/float64(reps)), mde)
+	pc := func(st *armStat, k string) int {
+		switch k {
+		case "chain":
+			return st.chain
+		case "recall":
+			return st.recall
+		case "prec":
+			return st.prec
+		case "junk":
+			return st.junk
+		case "write":
+			return st.write
+		}
+		return st.attempt
+	}
+	for _, k := range []string{"write", "chain", "recall", "prec", "junk"} {
+		name := map[string]string{
+			"write": "写了任何东西", "chain": "全链转通",
+			"recall": "记下用户口述事实", "prec": "写对（无垃圾）", "junk": "记了代码可推导内容",
+		}[k]
+		t.Logf("%-18s A=%d/%d  B=%d/%d  C=%d/%d", name,
+			pc(a, k), reps, pc(b, k), reps, pc(c, k), reps)
+	}
+	t.Logf("写尝试（分母都是 %d 次会话） A=%d  B=%d  C=%d", reps, a.attempt, b.attempt, c.attempt)
+
+	// P1 的主问题：**精确率**（不该记的没记）在 C 臂有没有变好，代价是召回掉了多少。
+	cPrecLo, cPrecHi := supplementWilsonCI(c.prec, reps)
+	aPrecLo, aPrecHi := supplementWilsonCI(a.prec, reps)
+	t.Logf("精确率 Wilson  A=%d/%d [%.0f%%–%.0f%%]  C=%d/%d [%.0f%%–%.0f%%]（MDE ≈ %.0f pp）",
+		a.prec, reps, 100*aPrecLo, 100*aPrecHi, c.prec, reps, 100*cPrecLo, 100*cPrecHi, mde)
 	if pOK {
 		t.Logf("配对 McNemar：不一致对 %d（仅A %d / 仅B %d），双侧精确 p=%.3f", disc, b01, b10, pMc)
 	} else {
@@ -433,7 +550,7 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 	//
 	// 这条只需要**一次**成功就成立：改动之前，"模型写入 → 宿主补 modified"在结构上
 	// 不可能发生（模型不知道往哪写），所以 0 次是必然的，出现 1 次就是反证。
-	if aChain == 0 {
+	if a.chain == 0 {
 		t.Fatalf("A 臂（真实产品注入）0/%d 全链转通：模型从未写出带 frontmatter 的记忆，"+
 			"或宿主钩子从未命中——P0 的机制假设不成立", reps)
 	}
@@ -442,8 +559,8 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 	//
 	// B 臂的模型完全不知道有记忆这回事，它写出的任何文件都不可能带 frontmatter。
 	// B > 0 说明装置被污染（上一 rep 泄漏、或工具面漏了），此时 A−B 的读数不可用。
-	if bChain > 0 {
-		t.Fatalf("B 臂（完全不注入）却转通了 %d 次全链——装置有污染，B 臂不干净", bChain)
+	if b.chain > 0 {
+		t.Fatalf("B 臂（完全不注入）却转通了 %d 次全链——装置有污染，B 臂不干净", b.chain)
 	}
 
 	// —— 断言三：不下结论 ——
@@ -455,10 +572,25 @@ func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
 	if pOK && pMc >= 0.05 {
 		t.Logf("注意：本次 n=%d 不足以断言效应显著（p=%.3f）。机制已证，效应量待测。", reps, pMc)
 	}
-	if cPOK && cP < 0.05 && cChain > aChain {
-		t.Logf("C 臂（官方行为判据）在 p=%.3f 下显著优于 A 臂：判据可以进入 guidance.go。", cP)
-	} else if cPOK {
-		t.Logf("C 臂（官方行为判据）未显示可测到的改善（p=%.3f）：**不要**把它加进生产注入。", cP)
+	// P1 的判定门槛：**精确率变好，且召回没有塌**。
+	//
+	// 只看精确率是不够的——一条判据只要让模型什么都不写，精确率就是 100%。
+	// 只看召回也不够——A 臂那种"什么都记"召回很高但全是垃圾。两个都要，且
+	// 第二个必须是**硬门槛**。
+	//
+	// 仍然只打日志、不改断言：C 更好不是把判据搬进生产包的充分条件，那要在
+	// 读完数据之后单独决定（判据文本至今留在测试文件里）。
+	switch {
+	case c.prec > a.prec && c.recall >= a.recall-2:
+		t.Logf("判据的效果：C 精确率 %d/%d vs A %d/%d，且召回未塌（%d vs %d）——方向符合预期，"+
+			"但 p=%.3f 仍未达显著，需更多 rep 才能决定是否搬进生产。",
+			c.prec, reps, a.prec, reps, c.recall, a.recall, cP)
+	case c.recall < a.recall-2:
+		t.Logf("判据把召回压下去了（C 记对 %d/%d vs A %d/%d）：**不要**加——它滤掉了本该记的。",
+			c.recall, reps, a.recall, reps)
+	default:
+		t.Logf("判据未显示可测到的精确率改善（C %d/%d vs A %d/%d，p=%.3f）：**不要**加进生产注入。",
+			c.prec, reps, a.prec, reps, cP)
 	}
 }
 
@@ -487,10 +619,23 @@ func TestP0ArmsDifferOnlyByInjection(t *testing.T) {
 			t.Fatalf("注入混入行为判据 %q，P1 未做实验前不得出现：\n%s", bad, inj)
 		}
 	}
-	// 提问措辞本身也不得暗示记忆。
+	// 提问措辞本身也不得暗示记忆（否则"模型写不写"测的是被暗示的程度，不是注入）。
 	for _, bad := range []string{"记忆", "memory", "MEMORY"} {
-		if strings.Contains(strings.ToLower(p0Question), strings.ToLower(bad)) {
-			t.Fatalf("任务措辞暗示了记忆（%q），会污染变量：%q", bad, p0Question)
+		for i, turn := range p0Turns {
+			if strings.Contains(strings.ToLower(turn), strings.ToLower(bad)) {
+				t.Fatalf("第 %d 轮措辞暗示了记忆（%q），会污染变量：%q", i+1, bad, turn)
+			}
+		}
+	}
+	// 两轮必须都**不含**可记事实之外的提示：第二轮是干扰项，它只复述仓库内容。
+	if len(p0Turns) < 2 {
+		t.Fatalf("装置需要至少两轮提问（用户口述 + 干扰），实际 %d 轮", len(p0Turns))
+	}
+	// 判定词必须与仓库内容**不相交**：否则"该不该记"的分界线本身是错的。
+	repoFact := "8443 backlog 128 maxBackoff 重连退避"
+	for _, tok := range p0RememberTokens {
+		if strings.Contains(repoFact, tok) {
+			t.Fatalf("判定词 %q 同时出现在仓库可推导内容里，分类会自相矛盾", tok)
 		}
 	}
 }
@@ -503,11 +648,11 @@ func TestP0ArmsDifferOnlyByInjection(t *testing.T) {
 func p0LogRun(t *testing.T, r p0Run) {
 	t.Helper()
 	t.Logf("pair=%d arm=%s topic=%v fmtr=%v type=%v modified=%v index=%v "+
-		"| 写尝试=%d 被拒=%d 写到别处=%d 用时=%.0fs err=%q",
+		"| 记下用户事实=%v 记了代码内容=%v | 写尝试=%d 被拒=%d 用时=%.0fs err=%q",
 		r.PairIndex, r.Arm, r.WroteTopic, r.HasFrontmatter,
 		r.HasType, r.StampedModified, r.IndexUpdated,
-		r.WriteAttempts, len(r.WriteRejected), r.WriteElsewhere,
-		r.Duration, r.Err)
+		r.Remembered, r.RecordedDerivable,
+		r.WriteAttempts, len(r.WriteRejected), r.Duration, r.Err)
 	for _, rej := range r.WriteRejected {
 		t.Logf("  pair=%d arm=%s 写被拒: %s", r.PairIndex, r.Arm, truncForLog(rej))
 	}
@@ -546,3 +691,50 @@ const p0CriteriaOfficial = "关于何时记录记忆：" +
 	"跳过任何能从代码库推导出来的内容，例如架构、文件路径或调试修复；" +
 	"也跳过项目指令文件（CLAUDE.md / AGENTS.md）里已经写明的内容。" +
 	"并不是每个会话都要写入记忆——由你判断某条信息在未来对话里是否还用得上。"
+
+// TestP0CriteriaClassificationIsSound 自检那套**确定性判定**本身对不对。
+//
+// 这条比跑批更重要：分类器错了，后面所有 A/B/C 读数都只是**把错误量化**。
+// 而分类器最容易错的地方是 token 选取 —— 挑一个仓库里也有的词当"该记的"，
+// 就会把"从代码里抄的"误判成"从对话里听的"，方向整个反过来。
+func TestP0CriteriaClassificationIsSound(t *testing.T) {
+	// ① 仓库可推导内容 → 判为 junk（不该记的记了）
+	junk := p0Run{WroteTopic: true}
+	for _, tok := range []string{"backlog=128", "listen=0.0.0.0:8443", "const maxBackoff = 5"} {
+		junk.Body += tok
+	}
+	// ② 用户口述事实 → 判为 recall（该记的记了）
+	good := p0Run{WroteTopic: true, Body: "发布窗口：周四 15:00 后不要合并主干；排查先看 relay-metrics 面板"}
+	// ③ 两者混在一起 → 既是 recall 也是 junk（"什么都记"）
+	mixed := p0Run{WroteTopic: true, Body: "发布窗口：周四 15:00 后不要合并主干。backlog=128"}
+	// ④ 什么都没写 → 既不是 recall 也不是 prec（不写不是"写对"）
+	none := p0Run{}
+
+	cases := []struct {
+		name                           string
+		run                            p0Run
+		wantRecall, wantJunk, wantPrec bool
+	}{
+		{"只记了代码内容", junk, false, true, false},
+		{"只记了用户口述", good, true, false, true},
+		{"混着记", mixed, true, true, false},
+		{"什么都没写", none, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.run
+			// 复用 p0Inspect 的同一段判定逻辑：把它抽出来，两处共用，
+			// 免得"分类器"和"跑批用的分类"悄悄漂移。
+			classifyRun(&got, got.Body)
+			if got.Remembered != tc.wantRecall {
+				t.Fatalf("Remembered = %v, want %v", got.Remembered, tc.wantRecall)
+			}
+			if got.RecordedDerivable != tc.wantJunk {
+				t.Fatalf("RecordedDerivable = %v, want %v", got.RecordedDerivable, tc.wantJunk)
+			}
+			if got.precision() != tc.wantPrec {
+				t.Fatalf("precision = %v, want %v", got.precision(), tc.wantPrec)
+			}
+		})
+	}
+}
