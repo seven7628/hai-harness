@@ -1092,7 +1092,7 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 	//
 	// 只在**最外层**调用（call.Depth == 0）取出：嵌套子调用也走同一个 finish，
 	// 若它们也TakeRecord 会把累积记录提前清空。call.Depth 由 ExecuteOne 按
-	// opts.Depth 填入，天然是这��判别式。
+	// opts.Depth 填入，天然是这个判别式。
 	//
 	// 注意：此处**不把嵌套 usage 加进 r.Usage** —— 子调用各自的 Usage 已由
 	// ExecuteOne → NestedRecorder.AddUsage 独立累加（tools/nested.go），

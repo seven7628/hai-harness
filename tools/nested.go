@@ -240,16 +240,24 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 
 	start := time.Now()
 	r := e.execute(ctx, call, nil, nil, "")
-	rec.Add(core.NestedCallRecord{
-		Id:       call.Id,
-		Name:     call.Name,
-		Args:     truncNested(call.Arguments, core.NestedMaxArgsPerCall),
-		Result:   truncNested(r.Result, core.NestedMaxArgsPerCall),
-		IsError:  r.IsError,
-		Duration: time.Since(start),
-		Usage:    usageOrNil(r.Usage),
-	}, len(call.Arguments))
-	// 用量独立累加：即使 Add 因限额丢弃了记录，用量仍必须计入。
-	rec.AddUsage(r.Usage)
+
+	// 只记录**真正嵌套**的调用（Depth > 0）。Depth == 0 时本次调用就是外层编排调用
+	// 本身，它不该把自己记成自己的嵌套记录：finish() 在 execute() 内部就已
+	// TakeRecord（见 engine.go finish 的 call.Depth == 0 分支），自记录会落在
+	// 取出之后，凭空多出一条幽灵记录。
+	if opts.Depth > 0 {
+		rec.Add(core.NestedCallRecord{
+			Id:       call.Id,
+			Name:     call.Name,
+			Args:     truncNested(call.Arguments, core.NestedMaxArgsPerCall),
+			Result:   truncNested(r.Result, core.NestedMaxArgsPerCall),
+			IsError:  r.IsError,
+			Duration: time.Since(start),
+			Usage:    usageOrNil(r.Usage),
+		}, len(call.Arguments))
+		// 用量独立累加：即使 Add 因限额丢弃了记录，用量仍必须计入。
+		// Depth == 0 的外层调用其用量由 AgentLoop 的父累加路径结算，不在此重复计入。
+		rec.AddUsage(r.Usage)
+	}
 	return r
 }
