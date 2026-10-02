@@ -45,8 +45,14 @@ desktop/app/persist-check.js
 # 品牌设计过程稿（成品 logo 与截图保留）
 brand/boot-preview*
 
-# —— 测试与端到端：不入版本库 ——
-*_test.go
+# —— 测试与端到端：前端/E2E 不入版本库 ——
+# Go 测试【已恢复入库，2026-10-02】：此规则来自 918c0ee「初始发布快照」的副产物，
+# 并非评审过的决策 —— 已有 28 个 Go 测试用 git add -f 绕过它入库，项目实际行为早已
+# 否定这条规则。代价是每个新 clone / worktree 都**静默丢失全部 Go 回归网**
+# （实测：codemode worktree 上 `go build` 通过但一个测试都没有）。
+# 成本对照：全部 Go 测试共 3.3 MB / 282 文件，而 .git 已 48 MB —— 量级不对等。
+# 发布边界另有更完善的双闸：oss/scope.txt 的 [exclude] + scripts/oss-check.sh 硬拦，
+# 在 .gitignore 里再做一次过滤属职责错位。
 *_test.ts
 *_test.tsx
 *_test.mjs
