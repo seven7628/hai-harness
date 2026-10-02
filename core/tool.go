@@ -25,6 +25,24 @@ type ToolCall struct {
 
 	// RequestId 发起该调用的请求 ID（事件自包含：工具事件可关联到具体 LLM 调用）
 	RequestId string `json:"request_id,omitempty"`
+
+	// ParentCallId 发起本次调用的外层工具调用 id（编排型工具的子调用）；空 = 顶层调用。
+	//
+	// 与 events.ToolContext.RunId 语义不同，不可混用：RunId 是「运行」，
+	// ParentCallId 是「工具调用」—— 一次运行内可有多个顶层工具调用，
+	// 各自都是自己子调用的父。用于事件归组（TUI 按 parent 嵌套渲染）
+	// 与有界记录（core.NestedCallRecord）。
+	ParentCallId string `json:"parent_call_id,omitempty"`
+
+	// Depth 嵌套深度（顶层调用 = 0）。编排型工具（codemode）经 tools.ExecuteOne
+	// 递归调用工具时递增。
+	//
+	// 与 events.ToolContext.Depth 的关系：两者必须同步，但**权威来源不同** ——
+	// ToolContext.Depth 由 AgentLoop 按「运行」注入（agent_loop.go:2324），
+	// 本字段按「单次运行内的工具调用嵌套」计。subagent 的 maxSpawnDepth
+	// （subagent/agent_tools.go:27 = 2）管的是前者，是**独立的另一道闸**；
+	// core.NestedMaxDepth 管的是后者。不接线会让脚本经 agent_spawn 绕过深度限制。
+	Depth int `json:"depth,omitempty"`
 }
 
 type ToolError struct {
@@ -73,6 +91,18 @@ type ToolResult struct {
 
 	// Usage 本次执行的用量（子 agent 类工具回传子运行用量，成本传导给父结算）
 	Usage Usage
+
+	// NestedCalls 本次调用**内部**发生的嵌套调用的有界记录（仅编排型工具填充，
+	// 普通工具恒为 nil）。codemode 一次调用内跑 N 次工具调用时，这里是 N 条摘要。
+	//
+	// 不进 transcript —— 模型只看得到 codemode 脚本自身的输出，嵌套中间结果
+	// 不产生对话条目（这是 codemode 的主要收益来源，见设计文档 §1）。
+	// 消费方：UI 展开显示、TUI 按 parent 归组渲染、HTML 导出。
+	//
+	// 计费口径：嵌套调用的 usage 由 core.NestedRecorder **独立累加**并合入本
+	// 结果的 Usage；AgentLoop 的父累加路径（agent_loop.go:2370）不做改动——
+	// 嵌套调用从不经过 runBatch 的返回值，不会在那里被二次累加。
+	NestedCalls []NestedCallRecord
 }
 
 // ImageBlocks 返回结果中的图片块（无则 nil）。

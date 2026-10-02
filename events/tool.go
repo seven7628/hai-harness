@@ -76,6 +76,14 @@ type ToolStart struct {
 	//（promote 时经 task_id 定位；占位结果 {task_id,status:"running"} 回写历史同源）。
 	TaskId string `json:"task_id,omitempty"`
 
+	// ParentCallId 发起本次调用的外层工具调用 id；空 = 顶层调用。
+	// 编排型工具（codemode）的子调用经 tools.ExecuteOne 执行时填充，
+	// 供消费方按父归组渲染成嵌套结构（对齐 pi 的 parentToolCallId）。
+	ParentCallId string `json:"parent_call_id,omitempty"`
+
+	// Depth 嵌套深度（顶层 = 0）。与 core.NestedMaxDepth 配套。
+	Depth int `json:"depth,omitempty"`
+
 	EventType EventType `json:"event_type"`
 }
 
@@ -138,6 +146,20 @@ type ToolResponse struct {
 	// Exec 命令类工具（bash 等）的执行结局（退出码/超时/取消）。存在意义：把「失败/
 	// 超时/取消」从结果文本升级为结构化信号（UI 红色标记 / 指标聚合），Result 仍保留完整输出。
 	Exec *core.ExecStatus `json:"exec,omitempty"`
+
+	// ParentCallId 发起本次调用的外层工具调用 id；空 = 顶层调用。
+	// 语义同 ToolStart.ParentCallId。
+	ParentCallId string `json:"parent_call_id,omitempty"`
+
+	// Depth 嵌套深度（顶层 = 0）。
+	Depth int `json:"depth,omitempty"`
+
+	// NestedCalls 本次调用内部发生的嵌套调用的有界摘要（仅编排型工具填充）。
+	// 消费方：UI 展开、TUI 归组渲染、HTML 导出。宿主可忽略。
+	//
+	// 与 Usage 的分工：Usage 是**聚合**后的总量（供计费），
+	// NestedCalls 是**逐条**明细（供展示）。两者同源于 core.NestedRecorder。
+	NestedCalls []core.NestedCallRecord `json:"nested_calls,omitempty"`
 
 	EventType EventType `json:"event_type"`
 }

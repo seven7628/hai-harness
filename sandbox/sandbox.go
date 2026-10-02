@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -32,6 +33,19 @@ type ExecSpec struct {
 	ExitCode *int
 	TimedOut *bool
 	Canceled *bool
+
+	// Stdin 可选：喂给子进程的标准输入。nil = 不接stdin（**默认，行为与本字段
+	// 加入前逐字节一致**，既有实现与测试零改动）。
+	//
+	// 存在意义：脚本类解释器（Python / 后续的 codemode JS 运行时）需要把源码
+	// 经 stdin 传入（`python -` / `node -`），而不是把源码拼进命令行 ——
+	// 命令行要过 sh -c，两层转义（shell 引号/反引号/$ + 语言自身引号）任一组合
+	// 都能把脚本改坏。此前本仓 run_python 因此只能「写临时文件再执行」
+	//（tools/builtin/run_python.go:31-33 记录了这一限制）。
+	//
+	// 零值不变式是本字段的设计约束：所有现有调用方不设Stdin，runExec 不碰
+	// cmd.Stdin，行为完全不变。
+	Stdin io.Reader
 }
 
 // Sandbox 沙箱执行后端。
@@ -55,6 +69,9 @@ type NoSandbox struct{}
 // Run 执行 sh -c 命令（进程隔离语义：非零退出并入文本返回）。
 func (NoSandbox) Run(ctx context.Context, spec ExecSpec) (string, error) {
 	cmd := exec.Command("sh", "-c", spec.Command)
+	if spec.Stdin != nil {
+		cmd.Stdin = spec.Stdin
+	}
 	cmd.Dir = spec.Cwd
 	cmd.Env = isolatedEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // 独立进程组

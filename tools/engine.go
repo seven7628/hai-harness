@@ -9,6 +9,7 @@ import (
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +50,10 @@ type Engine struct {
 	// tooltask-1/tooltask-2 被多代任务复用，前端按 taskId 匹配历史块时发生串卡
 	//（2026-08-30 实证：历代 read_file/todo_add 块被新一代 promote 事件误翻转）。
 	taskIDSeq uint64 // 随机 id 冲突兜底序号（crypto/rand 为主，seq 混入保证进程内绝对唯一）
+
+	// onRegisterConflict 工具重名注册回调（宿主据此发事件警告）；nil = 不上报。
+	// 见 RegisterTool：同名同实例静默通过（hidden 档依赖），同名异实例上报。
+	onRegisterConflict func(RegisterConflict)
 
 	lock sync.RWMutex
 }
@@ -125,10 +130,57 @@ func NewToolEngine(opts ...Option) *Engine {
 	return e
 }
 
-func (e *Engine) RegisterTool(_ context.Context, tool Tool) {
+// RegisterTool 注册工具。
+//
+// 重名处理（Phase 0 起）：**不再静默覆盖**。
+//
+//   - 同名**同实例**（同一指针）：静默通过。这是 exposure "hidden" 档的依赖 ——
+//     工具无法注销，撤下一个工具靠「用同名重新注册」实现（对齐 pi：
+//     工具不能 unregister，只能重注册为 hidden）。若把重名改成报错，等于禁掉
+//     hidden 档。
+//   - 同名**不同实例**：保留「后注册者胜出」的历史行为（保持既有语义与测试），
+//     但通过 onRegisterConflict 钩子上报，供宿主发事件警告。诊断信息只在
+//     真撞名时出现，不污染正常路径。
+func (e *Engine) RegisterTool(ctx context.Context, tool Tool) {
 	e.lock.Lock()
-	defer e.lock.Unlock()
+	prev, existed := e.tools[tool.Name()]
 	e.tools[tool.Name()] = tool
+	cb := e.onRegisterConflict
+	e.lock.Unlock()
+
+	if existed && prev != tool && cb != nil {
+		cb(RegisterConflict{
+			Name:     tool.Name(),
+			Previous: toolIdentity(prev),
+			Incoming: toolIdentity(tool),
+		})
+	}
+}
+
+// RegisterConflict 一次工具重名注册的信息（供宿主发事件警告）。
+type RegisterConflict struct {
+	Name     string
+	Previous string // 先注册者的类型标识（取不到则为空）
+	Incoming string // 后注册者的类型标识
+}
+
+// SetRegisterConflictHook 设置重名注册回调（宿主据此发事件告警）。
+// nil = 不上报（默认），此时重名行为与本改动前完全一致。
+func (e *Engine) SetRegisterConflictHook(fn func(RegisterConflict)) {
+	e.lock.Lock()
+	e.onRegisterConflict = fn
+	e.lock.Unlock()
+}
+
+// toolIdentity 取工具的类型标识（用于撞名诊断文本）。非指针类型退化为空串。
+func toolIdentity(t Tool) string {
+	if t == nil {
+		return ""
+	}
+	if d := reflect.TypeOf(t); d != nil {
+		return d.String()
+	}
+	return ""
 }
 
 func (e *Engine) GetTool(_ context.Context, name string) (Tool, error) {
@@ -867,15 +919,17 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	if handler != nil {
 		tc := events.ToolContextFrom(ctx)
 		handler(ctx, &events.ToolStart{
-			RequestId: call.RequestId,
-			Index:     call.Index,
-			Id:        call.Id,
-			Name:      call.Name,
-			Arguments: call.Arguments, // 实际执行的参数 JSON（UI 展示「传了什么」）
-			RunId:     runOf(tc),
-			TaskId:    taskID,
-			Timestamp: time.Now(),
-			EventType: events.ToolRunStartType,
+			RequestId:    call.RequestId,
+			Index:        call.Index,
+			Id:           call.Id,
+			Name:         call.Name,
+			Arguments:    call.Arguments, // 实际执行的参数 JSON（UI 展示「传了什么」）
+			RunId:        runOf(tc),
+			TaskId:       taskID,
+			ParentCallId: call.ParentCallId,
+			Depth:        call.Depth,
+			Timestamp:    time.Now(),
+			EventType:    events.ToolRunStartType,
 		})
 	}
 
@@ -1033,7 +1087,24 @@ type finishInput struct {
 // Arguments 携带实际执行的参数（PreToolUse 改写后；历史 ToolCall 保留原参——审计用）。
 // diff 为本次执行对文件的变更（ToolDiffProvider 产出；事件层携带，不进 LLM 上下文）。
 func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call core.ToolCall, in finishInput) core.ToolResult {
-	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec}
+	// 嵌套记录汇入：编排型工具（codemode）经 ExecuteOne 发起子调用时，子调用的记录
+	// 都挂在 ctx 的 NestedRecorder 上；到这里一次性取出挂到 ToolResult + 事件。
+	//
+	// 只在**最外层**调用（call.Depth == 0）取出：嵌套子调用也走同一个 finish，
+	// 若它们也TakeRecord 会把累积记录提前清空。call.Depth 由 ExecuteOne 按
+	// opts.Depth 填入，天然是这��判别式。
+	//
+	// 注意：此处**不把嵌套 usage 加进 r.Usage** —— 子调用各自的 Usage 已由
+	// ExecuteOne → NestedRecorder.AddUsage 独立累加（tools/nested.go），
+	// 由编排型工具在返回前自行合并，避免与 AgentLoop 的父累加
+	//（agents/agent_loop.go:2370）二次计入。
+	var nested []core.NestedCallRecord
+	if call.Depth == 0 {
+		if rec := events.NestedRecorderFrom(ctx); rec != nil {
+			nested = rec.TakeRecord()
+		}
+	}
+	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec, NestedCalls: nested}
 	if in.isErr {
 		r.ToolError = parseToolError(in.result)
 	}
@@ -1056,25 +1127,28 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 			}
 		}
 		handler(ctx, &events.ToolResponse{
-			RequestId:  call.RequestId,
-			Index:      call.Index,
-			Id:         call.Id,
-			Name:       call.Name,
-			RunId:      runOf(tc),
-			Arguments:  call.Arguments,
-			Result:     r.Result,
-			IsError:    r.IsError,
-			ErrorCode:  code,
-			Changed:    errorChanged(r.ToolError),
-			Retryable:  errorRetryable(r.ToolError),
-			NextAction: errorNextAction(r.ToolError),
-			Recovery:   errorRecovery(r.ToolError),
-			Diff:       in.diff,
-			Images:     in.images,
-			Usage:      &r.Usage,
-			Exec:       in.exec,
-			Timestamp:  time.Now(),
-			EventType:  events.ToolRunEndType,
+			RequestId:    call.RequestId,
+			Index:        call.Index,
+			Id:           call.Id,
+			Name:         call.Name,
+			RunId:        runOf(tc),
+			Arguments:    call.Arguments,
+			Result:       r.Result,
+			IsError:      r.IsError,
+			ErrorCode:    code,
+			Changed:      errorChanged(r.ToolError),
+			Retryable:    errorRetryable(r.ToolError),
+			NextAction:   errorNextAction(r.ToolError),
+			Recovery:     errorRecovery(r.ToolError),
+			Diff:         in.diff,
+			Images:       in.images,
+			Usage:        &r.Usage,
+			Exec:         in.exec,
+			ParentCallId: call.ParentCallId,
+			Depth:        call.Depth,
+			NestedCalls:  nested,
+			Timestamp:    time.Now(),
+			EventType:    events.ToolRunEndType,
 		})
 	}
 	return r
