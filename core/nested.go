@@ -92,8 +92,14 @@ func (b *usageBox) get() Usage {
 // NewNestedRecorder 创建一个记录器。
 func NewNestedRecorder() *NestedRecorder { return &NestedRecorder{usageBox: &usageBox{}} }
 
-// box 惰性取（防零值 NestedRecorder{} 直接使用时 box 为 nil）。
+// box 取共享用量盒，必要时在**锁内**惰性初始化。
+//
+// 惰性初始化必须在 r.mu 内：零值 NestedRecorder{}（未经 NewNestedRecorder）的
+// usageBox 为 nil，并发首次 AddUsage 若无锁写入 r.usageBox 即为数据竞态
+// —— 由 TestZeroValueRecorderConcurrentAddUsage 以 -race 捕获。
 func (r *NestedRecorder) box() *usageBox {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.usageBox == nil {
 		r.usageBox = &usageBox{}
 	}

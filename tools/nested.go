@@ -235,11 +235,11 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 
 	rec := events.NestedRecorderFrom(ctx)
 	if rec == nil {
-		return e.execute(ctx, call, nil, nil, "")
+		return e.executeApproved(ctx, call, nil)
 	}
 
 	start := time.Now()
-	r := e.execute(ctx, call, nil, nil, "")
+	r := e.executeApproved(ctx, call, nil)
 
 	// 只记录**真正嵌套**的调用（Depth > 0）。Depth == 0 时本次调用就是外层编排调用
 	// 本身，它不该把自己记成自己的嵌套记录：finish() 在 execute() 内部就已
@@ -260,4 +260,28 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 		rec.AddUsage(r.Usage)
 	}
 	return r
+}
+
+// executeApproved 先走审批再执行 —— 嵌套调用的**权限门必须逐次生效**。
+//
+// execute() 只**消费** decisions 表，不发起审批；审批发生在 preApprove，
+// 而 preApprove 只被 Sequence / Parallel / runBatch 调用（engine.go:451/462/481）。
+// 因此嵌套调用**不能**直接调 execute(decisions=nil)，否则声明了 ApprovalRequired
+// 的工具（bash / write_file 等）会在完全没有审批的情况下执行 —— 一条真实的越权路径。
+// 由TestExecuteOneRespectsApproval捕获（曾观察到 result="SHOULD-NOT-RUN"）。
+//
+// 审批事件仍传 nil handler：嵌套调用的审批请求与事件归组留给 Phase 2
+// （届时接带 ParentCallId 的事件流），但**审批决策本身必须在 Phase 0 就生效**——
+// 安全门不能延后。
+func (e *Engine) executeApproved(ctx context.Context, call core.ToolCall, handler events.EventHandler) core.ToolResult {
+	decisions, err := e.preApprove(ctx, []core.ToolCall{call}, handler)
+	if err != nil {
+		// preApprove 出错（如 ctx 取消）→ 拒绝执行，与 execute() 的失败语义一致。
+		return core.ToolResult{
+			Id:      call.Id,
+			IsError: true,
+			Result:  "approval could not be requested: " + err.Error(),
+		}
+	}
+	return e.execute(ctx, call, handler, decisions, "")
 }
