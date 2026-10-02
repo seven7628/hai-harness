@@ -50,8 +50,7 @@ type ExecScope struct {
 
 	recorder *core.NestedRecorder
 
-	tail       chan struct{} // 串行门尾令牌；nil = 当前无持有者
-	holdsQueue bool          // 本作用域已持串行锁（向下传播：上层持锁 ⇒ 深层全部串行）
+	tail chan struct{} // 串行门尾令牌；nil = 当前无持有者
 
 	wallStart time.Time
 	wallLimit time.Duration // 0 = 不限
@@ -77,38 +76,39 @@ func (s *ExecScope) Recorder() *core.NestedRecorder {
 	return s.recorder
 }
 
-// Acquire 取串行门，返回的release **必须由调用方 defer**（漏 defer = 闸门永不
+// Acquire 取串行门，返回的 release **必须由调用方 defer**（漏 defer = 闸门永不
 // 释放，后续串行调用全部阻塞）。
 //
-// exclusive=false 或 holdsQueue=true 时返回空操作 —— 这实现了 pi 的语义
+// # exclusive 与 inherited 为何是两个参数
+//
+// exclusive：本帧自己是否需要独占（如「本次要写文件」）。
+// inherited：**祖先帧是否已持锁** —— 对齐 pi 的 holdsQueue 语义
 // 「上层拿过串行锁 ⇒ 深层全部串行」，杜绝 Promise.all 并行写文件。
-func (s *ExecScope) Acquire(exclusive bool) (release func()) {
+//
+// inherited 必须由**调用方按帧传入**，不能做成 scope 上的状态。初稿把
+// holdsQueue 存成 scope 级字段，结果并发兄弟帧（Promise.all 发起的多条嵌套
+// 调用）看到 holdsQueue=true 就**全部绕过闸门** —— 恰好是本闸门要防的情况。
+// 序列化是「跨并发帧」的维度，祖先关系是「跨嵌套层」的维度，两者不能共用一个字段。
+// 该缺陷由 TestAcquireSerializesAcrossGoroutines 捕获（曾失败）。
+func (s *ExecScope) Acquire(exclusive, inherited bool) (release func()) {
 	if s == nil {
 		return func() {}
 	}
 	s.mu.Lock()
-	if !exclusive || s.holdsQueue {
+	if !exclusive || inherited {
 		s.mu.Unlock()
 		return func() {}
 	}
 	prev := s.tail // nil 表示无前驱
 	cur := make(chan struct{})
 	s.tail = cur
-	s.holdsQueue = true
 	s.mu.Unlock()
 
 	if prev != nil { // ← 有前驱才等；nil 跳过 ⇒ 首调不死锁
 		<-prev
 	}
 	var once sync.Once
-	return func() {
-		once.Do(func() {
-			s.mu.Lock()
-			s.holdsQueue = false
-			s.mu.Unlock()
-			close(cur)
-		})
-	}
+	return func() { once.Do(func() { close(cur) }) }
 }
 
 // Enter 进入一次嵌套调用：检查墙钟预算与次数，登记调用栈。
