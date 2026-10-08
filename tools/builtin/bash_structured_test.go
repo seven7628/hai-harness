@@ -47,11 +47,14 @@ func callBashStructured(t *testing.T, tool *BashTool, command string) (string, b
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, err := tool.Call(tools.WithScriptCall(context.Background()), "bash", string(args))
+	// 结构化结果写在**本次调用**的 ctx 槽里（引擎在真实链路中注入；这里自备一个同形态的槽）。
+	sink := &tools.StructuredSink{}
+	ctx := tools.WithScriptCall(tools.WithStructuredSink(context.Background(), sink))
+	text, err := tool.Call(ctx, "bash", string(args))
 	if err != nil {
 		t.Fatalf("bash.Call(%q): %v", command, err)
 	}
-	return text, decodeBashStructured(t, tool.StructuredContent())
+	return text, decodeBashStructured(t, sink.Content())
 }
 
 // decodeBashStructured 解码结构化原文（nil / 非法 JSON 直接失败）。
@@ -191,18 +194,24 @@ func TestBashStructuredReportsRealExitCode(t *testing.T) {
 	}
 }
 
-// TestBashStructuredNilWhenCommandNotExecuted 命令未执行（高危拦截）→ 无结构化结果，
-// 且**不会残留**上一次调用的对象（引擎只在 Call 成功后读取，残留 = 张冠李戴）。
+// TestBashStructuredNilWhenCommandNotExecuted 命令未执行（高危拦截）→ 它**自己的**槽
+// 必须为空。槽每次调用独立（引擎在 Call 前注入），所以这里钉的是「失败路径不写槽」；
+// 旧形态（实例字段）还需要额外防「上一次残留」，那种残留已随槽的引入结构性消失
+// （并发下的清空/串味同理，见 tools 包的 TestStructuredSinkIsPerCallNotPerToolInstance）。
 func TestBashStructuredNilWhenCommandNotExecuted(t *testing.T) {
 	tool := NewBashTool(t.TempDir(), 0, nil, nil)
+	// 先成功跑一次（历史上这是「残留」的来源），再跑被拦截的命令。
 	if _, got := callBashStructured(t, tool, "echo first-call-ok"); got.ExitCode != 0 {
 		t.Fatalf("前置调用应成功: %+v", got)
 	}
-	if _, err := tool.Call(context.Background(), "bash", `{"command":"sudo rm -rf /"}`); err == nil {
+
+	sink := &tools.StructuredSink{}
+	ctx := tools.WithScriptCall(tools.WithStructuredSink(context.Background(), sink))
+	if _, err := tool.Call(ctx, "bash", `{"command":"sudo rm -rf /"}`); err == nil {
 		t.Fatal("高危命令必须被拒绝（未执行）")
 	}
-	if raw := tool.StructuredContent(); raw != nil {
-		t.Fatalf("未执行的命令不得有结构化结果（更不得残留上一次的）: %q", raw)
+	if raw := sink.Content(); raw != nil {
+		t.Fatalf("未执行的命令不得有结构化结果: %q", raw)
 	}
 }
 

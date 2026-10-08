@@ -51,15 +51,15 @@ type BashTool struct {
 	mu     sync.Mutex
 	curCwd string // 当前工作目录（初始 = Cwd；cd 命令成功后更新）
 
-	// 结构化结果暂存（tools.OutputSchemaProvider）：Call 内写入、引擎在 Call **成功**
-	// 返回之后读取（与 ToolUsageProvider/ToolDiffProvider 同构的先例；并行调用同一实例
-	// 的竞态顾虑与那两个先例一致）。smu 保护下面三个字段：
-	// structured（本次调用的 JSON 原文，nil = 无）/ spillDir（惰性落盘目录，见 ensureSpillDir）
-	// / spillSeq（落盘文件序号）。独立于 mu：cwd 是会话状态，这三个是单次调用产物。
-	smu        sync.Mutex
-	structured []byte
-	spillDir   string
-	spillSeq   uint64
+	// spill 落盘目录与序号（惰性建目录，见 ensureSpillDir）。
+	//
+	// 注意**没有**「结构化结果暂存」字段：结构化结果写进引擎注入的**每次调用独立**的
+	// ctx 槽（tools.StructuredSinkFrom(ctx)）。用实例字段会在「主 agent 与后台子 agent
+	// 共享同一 ToolEngine」的并发下互相清空/串味（评审实测：脚本路径 3/300 拿到 nil，
+	// 退化成 20KB 文本）。smu 保护下面两个字段。
+	smu      sync.Mutex
+	spillDir string
+	spillSeq uint64
 
 	// BeforeExec 可选钩子：每条命令真正执行前调用（参数 = 最终命令文本，cd 前缀
 	// 已剥离）。宿主注入产品级副作用（如检测 ego-browser 命令激活窗口），工具层
@@ -186,9 +186,8 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	// 先清空上一次的结构化暂存：引擎只在 Call 成功返回后读取它，早退/失败的调用
-	// 绝不能把上一次的对象留在那里（命令未执行 = 没有 exit_code 可言）。
-	t.setStructured(nil)
+	// 失败/早退的调用不写结构化槽（命令未执行 = 没有 exit_code 可言）。槽是**本次调用
+	// 独立**的（引擎注入），故这里无需、也无法"清空上一次" —— 上一次的槽已随那次调用回收。
 	// 时限交给执行层（sandbox.runExec）动态处理，不在本层自叠 WithTimeout——
 	// 若任务被 promote 为后台，引擎 liftableTimeout 已解除时限（ctx 标记 Unlimited），
 	// 本层的快照定时器反而会挡住「后台不限时」的语义。
@@ -277,12 +276,15 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	// 模型路径维持现有限额」）：模型看的是被引擎截断到 20 KB 的文本，结构化原文没有
 	// 消费者，而 >1 MiB 时它还会顺带落盘一个没人引用、永不删除的文件 —— 纯成本
 	//（磁盘 + 一份命令输出的额外副本），故按 tools.IsScriptCall 收口。
-	// 注意每次调用都要显式清空：引擎在 Call 之后无条件读 StructuredContent()，
-	// 留着上一次的暫存会被当成「本次的结构化结果」。
+	// 槽是每次调用独立的（引擎在 Call 前注入），故不需要"清空上一次"——
+	// 上一次的槽已随那次调用回收。
+	// 写进**本次调用**的结构化槽（引擎注入；直接调用本工具时可能为 nil —— 那就没人收）。
+	// 槽随调用生命周期回收，故不需要（也不能）用实例字段：主 agent 与后台子 agent 共享
+	// 同一个 ToolEngine，同一实例会被并发调用，实例字段会互相清空/串味（评审实测复现）。
 	if tools.IsScriptCall(ctx) {
-		t.setStructured(t.buildStructured(ctx, out, exitCode, wall))
-	} else {
-		t.setStructured(nil)
+		if sink := tools.StructuredSinkFrom(ctx); sink != nil {
+			sink.Set(t.buildStructured(ctx, out, exitCode, wall))
+		}
 	}
 	return out, nil
 }
@@ -297,22 +299,6 @@ func (t *BashTool) OutputSchema() any {
 		"exit_code":         tools.Int("命令真实退出码（被信号杀死 / 超时 / 取消为 -1）"),
 		"wall_time_seconds": tools.Number("命令实际墙钟耗时（秒，只计真实执行，不含 cd 解析与高危检查）"),
 	}, "output", "truncated", "exit_code", "wall_time_seconds")
-}
-
-// StructuredContent 实现 tools.OutputSchemaProvider：本次调用的结构化结果原文（JSON）。
-// nil = 无（命令未执行 / 执行层故障）→ 编排侧退回文本路径。读取时机由引擎保证
-// （Call 成功返回之后），与 ToolUsageProvider/ToolDiffProvider 同构。
-func (t *BashTool) StructuredContent() []byte {
-	t.smu.Lock()
-	defer t.smu.Unlock()
-	return t.structured
-}
-
-// setStructured 写本次调用的结构化结果（nil = 清空）。
-func (t *BashTool) setStructured(raw []byte) {
-	t.smu.Lock()
-	t.structured = raw
-	t.smu.Unlock()
 }
 
 // bashStructuredOutput bash 的结构化结果（脚本路径消费；模型路径仍看文本）。

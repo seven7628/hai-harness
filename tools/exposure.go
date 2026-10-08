@@ -15,6 +15,7 @@ package tools
 
 import (
 	"context"
+	"sync"
 
 	"github.com/seven7628/hai-harness/core"
 )
@@ -134,17 +135,68 @@ func NamespaceOf(t Tool) *ToolNamespace {
 
 // OutputSchemaProvider 可选接口：工具声明结构化返回契约。
 //
-// 声明后**编排路径**（脚本内 tools.x(...)）拿 structuredContent（JSON 原文）而非
-// 拼接文本 —— 这是脚本里能做结构化过滤/聚合的前提；模型路径仍是文本（不变）。
+// 声明后**编排路径**（脚本内 tools.x(...)）拿结构化结果（JSON 原文）而非拼接文本
+// —— 这是脚本里能做结构化过滤/聚合的前提；模型路径仍是文本（不变）。
 //
-// 取值时机与 ToolUsageProvider / ToolDiffProvider 同构：Call 内暂存、引擎在 Call
-// 成功返回**之后**调用 StructuredContent()（并行调用同一工具的竞态顾虑与那两个先例一致）。
-// 返回 nil = 退回文本路径（工具可以按本次参数决定不给结构化结果）。
+// 写入方式：工具在 Call 内把本次结果写进**引擎注入的 ctx 槽**
+// （`tools.StructuredSinkFrom(ctx).Set(raw)`，见 StructuredSink）。**不是**实例字段、
+// 也不是 getter —— 评审实测：实例字段在「同一 ToolEngine 被主 agent 与后台子 agent
+// 并发使用」时会互相清空/串味（子 agent 与主会话共享 engine，见 desktop/bridge），
+// 而 getter 形态还要求引擎与工具对「哪一次调用」达成一致，它做不到（StructuredContent()
+// 没有 ctx 入参）。ctx 槽是 ImageSink/ExecSink 的同款范式：每次调用独立、并发安全、
+// 天然随调用生命周期回收。
+//
+// 未实现本接口的工具，引擎不读槽位（写进去也不生效）；实现了但本次没写 = 退回文本路径。
 type OutputSchemaProvider interface {
 	// OutputSchema 结构化结果的 JSON Schema（描述生成用；nil = 不声明 schema）。
 	OutputSchema() any
-	// StructuredContent 本次调用的结构化结果原文；nil = 无（退回文本）。
-	StructuredContent() []byte
+}
+
+// StructuredSink 单次工具调用的结构化结果槽（**每次调用独立**，见 WithStructuredSink）。
+//
+// 与 ImageSink/ExecSink 同构：引擎在发起调用前注入，工具在 Call 内写入，引擎在 Call
+// 成功返回后读取一次。并发安全（同一槽不会被两次调用共享，锁只是防工具自身并发写）。
+type StructuredSink struct {
+	mu  sync.Mutex
+	raw []byte
+}
+
+// Set 写入本次调用的结构化结果原文（nil/空 = 清空；工具可按本次参数决定不给结构化结果）。
+func (s *StructuredSink) Set(raw []byte) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.raw = raw
+}
+
+// Content 读取结构化结果原文（nil = 本次没有）。
+func (s *StructuredSink) Content() []byte {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.raw
+}
+
+// structuredSinkKey 槽的 ctx 键（私有：只经 With/From 访问）。
+type structuredSinkKey struct{}
+
+// WithStructuredSink 注入结构化结果槽（**引擎**在 Call 前调用；工具/测试直接调用工具时
+// 也可自备一个，用于取回结果）。
+func WithStructuredSink(ctx context.Context, s *StructuredSink) context.Context {
+	return context.WithValue(ctx, structuredSinkKey{}, s)
+}
+
+// StructuredSinkFrom 取出本次调用的结构化结果槽；未注入返回 nil（工具侧必须判 nil）。
+func StructuredSinkFrom(ctx context.Context) *StructuredSink {
+	if ctx == nil {
+		return nil
+	}
+	s, _ := ctx.Value(structuredSinkKey{}).(*StructuredSink)
+	return s
 }
 
 // SkipTruncateProvider 可选接口：本次结果**不做**引擎的 defaultMaxResponseSize

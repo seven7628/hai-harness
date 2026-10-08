@@ -1021,6 +1021,11 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 
 	defer tool.AfterCall(ctx, call)
 
+	// 结构化结果槽：**每次调用一个**，工具在 Call 内写、这里读一次。
+	// 为什么必须是 ctx 槽而不是工具实例字段：主 agent 与后台子 agent 共享同一个 ToolEngine
+	//（见 desktop/bridge），同一工具实例会被并发调用 —— 实例字段会互相清空/串味
+	//（评审实测 3/300 复现「脚本路径拿到 nil，退化成 20KB 文本」）。
+	structuredSink := &StructuredSink{}
 	// 图片收集槽：每次调用独立（放 ctx）——并行批不得共享暂存，否则结果会张冠李戴
 	//（见 tools.ImageSink 注释）。工具经 ImageSinkFrom(ctx).Add(...) 报告图片。
 	sink := &ImageSink{}
@@ -1028,20 +1033,20 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	// （bash 等）在 Call 内上报退出码/超时，引擎据此把「失败/超时」升级为结构化信号，
 	// 而 **Call 仍返回 nil error**（否则下面 err != nil 分支会丢弃整个 out，非目标 1）。
 	execSink := &ExecSink{}
-	out, err := callTool(tool, WithExecSink(WithImageSink(ctx, sink), execSink), call)
+	out, err := callTool(tool, WithExecSink(WithImageSink(WithStructuredSink(ctx, structuredSink), sink), execSink), call)
 	if err != nil {
 		return e.finish(ctx, handler, call, finishInput{result: err.Error(), isErr: true})
 	}
 
+	// 槽位读数：只有声明了 OutputSchemaProvider 的工具才认（未声明者写槽也不生效，
+	// 契约与描述生成对齐）。nil = 退回文本路径。
+	var structured []byte
+	if _, ok := tool.(OutputSchemaProvider); ok {
+		structured = structuredSink.Content()
+	}
 	usage := core.Usage{}
 	if up, ok := tool.(ToolUsageProvider); ok {
 		usage = up.Usage() // 子 agent 类工具回传本次执行用量
-	}
-	// 结构化结果（编排路径用）：与 Usage/Diff 同构的「Call 内暂存 + 成功后读取」，
-	// nil = 退回文本路径（工具可按本次参数决定不给结构化结果）。
-	var structured []byte
-	if sp, ok := tool.(OutputSchemaProvider); ok {
-		structured = sp.StructuredContent()
 	}
 	var diff *core.FileDiff
 	if dp, ok := tool.(ToolDiffProvider); ok {

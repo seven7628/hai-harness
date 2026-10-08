@@ -178,8 +178,13 @@ type structuredTool struct {
 }
 
 func (s *structuredTool) OutputSchema() any { return map[string]any{"type": "object"} }
-func (s *structuredTool) StructuredContent() []byte {
-	return s.payload
+
+// Call 写引擎注入的**本次调用**槽（旧形态是实例字段 + getter，已因跨 run 串味废弃）。
+func (s *structuredTool) Call(ctx context.Context, _, _ string) (string, error) {
+	if sink := StructuredSinkFrom(ctx); sink != nil {
+		sink.Set(s.payload)
+	}
+	return s.result, nil
 }
 
 func TestStructuredContentCapturedOnResult(t *testing.T) {
@@ -201,5 +206,62 @@ func TestStructuredContentCapturedOnResult(t *testing.T) {
 	plain.RegisterTool(context.Background(), &stubTool{BaseTool: BaseTool{Name_: "p", Description_: "p", Params_: map[string]any{}}, result: "t"})
 	if got := plain.ExecuteOne(context.Background(), core.ToolCall{Id: "2", Name: "p", Arguments: "{}"}, ExecuteOpts{}).Structured; got != nil {
 		t.Fatalf("普通工具 Structured = %q, want nil", got)
+	}
+}
+
+// crosstalkTool 两个并发调用会在 Call 内相遇（barrier），各自写入**自己**的结构化结果。
+// 用于钉住「同一工具实例被并发调用」这条真实场景（主 agent 与后台子 agent 共享同一个
+// ToolEngine）：实例字段形态会互相清空/串味（评审实测 3/300 复现），ctx 槽形态不会。
+type crosstalkTool struct {
+	stubTool
+	entered chan struct{} // 每进入一次 Call 投递一次
+	release chan struct{} // 两个调用都进来后才放行
+}
+
+func (c *crosstalkTool) OutputSchema() any { return map[string]any{"type": "object"} }
+
+func (c *crosstalkTool) Call(ctx context.Context, _, args string) (string, error) {
+	c.entered <- struct{}{}
+	<-c.release
+	if sink := StructuredSinkFrom(ctx); sink != nil {
+		sink.Set([]byte(`{"payload":` + args + `}`))
+	}
+	return args, nil
+}
+
+// TestStructuredSinkIsPerCallNotPerToolInstance 并发调用同一实例：各拿各的结构化结果。
+// 旧形态（实例字段 + getter）在此必然串味或清空 —— 这是「模型路径清空脚本路径结果」
+// 那个真实回归的最小复现形态。
+func TestStructuredSinkIsPerCallNotPerToolInstance(t *testing.T) {
+	e := NewToolEngine()
+	tool := &crosstalkTool{
+		stubTool: stubTool{BaseTool: BaseTool{Name_: "x", Description_: "x", Params_: map[string]any{}}},
+		entered:  make(chan struct{}, 2),
+		release:  make(chan struct{}),
+	}
+	e.RegisterTool(context.Background(), tool)
+
+	results := make(chan core.ToolResult, 2)
+	for _, id := range []string{"1", "2"} {
+		go func(id string) {
+			results <- e.ExecuteOne(context.Background(),
+				core.ToolCall{Id: id, Name: "x", Arguments: `"` + id + `"`}, ExecuteOpts{})
+		}(id)
+	}
+	// 两个调用都已进入 Call（同一实例同时在跑）→ 放行
+	<-tool.entered
+	<-tool.entered
+	close(tool.release)
+
+	got := map[string]string{}
+	for i := 0; i < 2; i++ {
+		r := <-results
+		got[r.Id] = string(r.Structured)
+	}
+	for _, id := range []string{"1", "2"} {
+		want := `{"payload":"` + id + `"}`
+		if got[id] != want {
+			t.Fatalf("调用 %s 的 Structured = %q, want %q（并发调用同一实例串味了）", id, got[id], want)
+		}
 	}
 }
