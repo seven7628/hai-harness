@@ -442,10 +442,17 @@ func longestCommonRunes(a, b []rune) int {
 // ToolParams 返回所有已注册工具的厂商无关 schema，按工具名字典序排序。
 // 排序是缓存命中的前提：map 遍历顺序随机，顺序抖动会让同一会话多轮请求的
 // 工具 schema 前缀每次失配（provider 缓存按字节前缀匹配）。勿改为无序遍历。
-func (e *Engine) ToolParams(_ context.Context) ([]core.ToolSchema, error) {
+// ToolParams 返回**声明给模型**的工具 schema 列表（exposure ∈ {direct, model-only}）。
+//
+// 排序与过滤的两条不变量（provider 侧缓存对 schema 抖动极敏感，见 e.tools 注释）：
+//   - 名字排序固定（不随注册顺序/并发注册变化）；
+//   - codemode/deferred/hidden 档**永不出现**在返回值里 —— hidden 是撤下工具的手段，
+//     deferred 由 tool_search 现查（否则 MCP 工具会重新把描述撑爆，pi #10212）。
+//
+// 过滤之后交给 LoadoutProvider（编排型工具用它给已声明工具的描述追加「也可从脚本
+// 调用」片段，对齐 pi prepareLoadout）。provider 按名字排序依次应用，保证可复现。
+func (e *Engine) ToolParams(ctx context.Context) ([]core.ToolSchema, error) {
 	e.lock.RLock()
-	defer e.lock.RUnlock()
-
 	names := make([]string, 0, len(e.tools))
 	for name := range e.tools {
 		names = append(names, name)
@@ -453,13 +460,35 @@ func (e *Engine) ToolParams(_ context.Context) ([]core.ToolSchema, error) {
 	sort.Strings(names)
 
 	schemas := make([]core.ToolSchema, 0, len(e.tools))
+	providers := make([]string, 0, 1)
 	for _, name := range names {
 		t := e.tools[name]
+		if !DeclaredToModel(t) {
+			continue
+		}
 		schemas = append(schemas, core.ToolSchema{
 			Name:        t.Name(),
 			Description: t.Description(),
 			Parameters:  t.Parameters(),
 		})
+		if _, ok := t.(LoadoutProvider); ok {
+			providers = append(providers, name)
+		}
+	}
+	e.lock.RUnlock()
+
+	// loadout 钩子在锁外跑（实现方可能读别的工具表/查 MCP 连接状态，持锁调用极易死锁）。
+	for _, name := range providers {
+		e.lock.RLock()
+		t := e.tools[name]
+		e.lock.RUnlock()
+		lp, ok := t.(LoadoutProvider)
+		if !ok {
+			continue // 快照期间的并发重注册：跳过而不是崩
+		}
+		if out := lp.PrepareLoadout(ctx, schemas); out != nil {
+			schemas = out
+		}
 	}
 	return schemas, nil
 }
@@ -1008,6 +1037,12 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	if up, ok := tool.(ToolUsageProvider); ok {
 		usage = up.Usage() // 子 agent 类工具回传本次执行用量
 	}
+	// 结构化结果（编排路径用）：与 Usage/Diff 同构的「Call 内暂存 + 成功后读取」，
+	// nil = 退回文本路径（工具可按本次参数决定不给结构化结果）。
+	var structured []byte
+	if sp, ok := tool.(OutputSchemaProvider); ok {
+		structured = sp.StructuredContent()
+	}
 	var diff *core.FileDiff
 	if dp, ok := tool.(ToolDiffProvider); ok {
 		diff = dp.Diff() // write/edit 类工具回传本次调用对文件的变更（事件层，宿主渲染）
@@ -1036,14 +1071,23 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	// 图片按 maxImageBytes 逐张过闸（超限丢弃 + 文本说明，模型知道有图但拿不到，
 	// 比静默塞爆上下文好——对齐 provider.DowngradeImages 的「明示降级」语义）。
 	// 失败路径同样过 truncate（超时的部分输出可能超长）。
-	text, images := e.limitImages(e.truncate(out), sink)
+	//
+	// SkipTruncateProvider 是唯一的豁免：编排型工具（codemode）的输出预算由它自己
+	// 按 max_output_tokens + spill 管理，被引擎再砍一刀会让「脚本已按模型要求筛过」
+	// 的输出反而缺尾（设计文档 §4.2 阻断项 B）。豁免**只对文本**生效，图片闸门照旧。
+	text := out
+	if st, ok := tool.(SkipTruncateProvider); !ok || !st.SkipTruncate() {
+		text = e.truncate(out)
+	}
+	text, images := e.limitImages(text, sink)
 	return e.finish(ctx, handler, call, finishInput{
-		result: text,
-		isErr:  isErr,
-		usage:  usage,
-		diff:   diff,
-		images: images,
-		exec:   execStatus,
+		result:     text,
+		isErr:      isErr,
+		usage:      usage,
+		diff:       diff,
+		images:     images,
+		exec:       execStatus,
+		structured: structured,
 	})
 }
 
@@ -1108,12 +1152,13 @@ func callTool(tool Tool, ctx context.Context, call core.ToolCall) (out string, e
 
 // finishInput finish 的入参（字段多，用具名结构避免位置参数拼错）。
 type finishInput struct {
-	result string
-	isErr  bool
-	usage  core.Usage
-	diff   *core.FileDiff
-	images []core.Content   // 图片类工具产出的内容块（ToolImageProvider）
-	exec   *core.ExecStatus // 命令类工具的执行结局（ExecSink 旁路；nil = 不适用/未采集）
+	result     string
+	isErr      bool
+	usage      core.Usage
+	diff       *core.FileDiff
+	images     []core.Content   // 图片类工具产出的内容块（ToolImageProvider）
+	exec       *core.ExecStatus // 命令类工具的执行结局（ExecSink 旁路；nil = 不适用/未采集）
+	structured []byte           // 结构化结果原文（OutputSchemaProvider；nil = 无）
 }
 
 // finish 构造结果并发出 ToolResponse 事件。
@@ -1138,7 +1183,7 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 			in.usage = in.usage.Add(rec.TakeUsage())
 		}
 	}
-	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec, NestedCalls: nested}
+	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec, NestedCalls: nested, Structured: in.structured}
 	if in.isErr {
 		r.ToolError = parseToolError(in.result)
 	}

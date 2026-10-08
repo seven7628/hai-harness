@@ -103,6 +103,14 @@ type ToolResult struct {
 	// 结果的 Usage；AgentLoop 的父累加路径（agent_loop.go:2370）不做改动——
 	// 嵌套调用从不经过 runBatch 的返回值，不会在那里被二次累加。
 	NestedCalls []NestedCallRecord
+
+	// Structured 结构化结果原文（实现 tools.OutputSchemaProvider 的工具产出；
+	// nil = 无结构化结果，退回文本路径）。
+	//
+	// 消费方：编排路径（codemode 的脚本内 tools.x(...) 拿到对象而非拼接文本，
+	// 这是脚本里能做过滤/聚合的前提）。**不进模型上下文**——模型路径仍读 Result。
+	// 取值时机：引擎在 Call 成功返回后读取（工具在 Call 内暂存），与 Usage/Diff 同构。
+	Structured []byte
 }
 
 // ImageBlocks 返回结果中的图片块（无则 nil）。
