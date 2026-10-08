@@ -103,6 +103,10 @@ const optionsLinePrefix = "// @options:"
 //  3. 这段文本进的是**每次请求都带的工具 schema**，属于前缀缓存的一部分：
 //     改一个字就击穿一次全量缓存，所以只在契约变化时改，别做「顺手润色」。
 //  4. 预算上它和目录共享 DefaultInlineBudget，长度受 TestDescriptionIntroBudget 守护。
+//  5. 正文里的**默认值必须与代码一致**：`timeout_ms` 未声明 = DefaultScriptTimeoutMs（30s）。
+//     原句写 "default: unlimited"，与 D3 修好后的代码正好相反（模型会以为自己没有墙钟上限，
+//     而宿主 30s 就杀）—— Wave 2 接墙钟时改成真话，由
+//     TestDescriptionIntroTimeoutDefaultMatchesCode 钉住。
 const DESCRIPTION_INTRO = `Run JavaScript that calls other tools: chain them, loop over them, run independent
 calls concurrently, and filter large results down to what you need instead of issuing
 many separate tool calls.
@@ -126,7 +130,7 @@ Calling tools:
 Budget line (optional, must be the first line of the script):
   // @options: {"max_output_tokens": 4000, "timeout_ms": 60000}
 max_output_tokens caps the output sent back to you (0-200000, default 10000);
-timeout_ms caps wall-clock time (1-3600000, at most 1 hour; default: unlimited).
+timeout_ms caps wall-clock time (1-3600000, at most 1 hour; default: 30000 = 30 seconds).
 Only these two fields are accepted - anything else fails the call before the script runs.
 
 Helpers:
@@ -159,6 +163,9 @@ connected on demand). Call searchTools(query) inside the script to find and call
 var reservedGlobals = map[string]bool{
 	"tools": true, "ALL_TOOLS": true, "text": true, "image": true, "exit": true,
 	"store": true, "load": true, "console": true, "globalThis": true,
+	// describeNamespace 对齐 pi 保留，但本仓 scaffold **未**安装它：namespace 的长使用指引
+	// 由 describeTool(name).namespace_instructions 提供（tools/exposure.go 的同款说明）。
+	// 保留此名只是不许工具占用它；将来若真装上，不必再动这里。
 	"searchTools": true, "describeTool": true, "describeNamespace": true,
 }
 
