@@ -23,6 +23,8 @@ import { splitThinkingParagraphs } from '../lib/thinkingText'
 import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
+import { ToolNestedCalls, ToolOutputPreview } from './ToolNestedCalls'
+import { hasScriptOutput, type NestedCallView } from '../lib/codemodeNested'
 import { useT } from '../i18n'
 
 /** 工具行渲染的统一数据：主对话 MsgBlock.tool 与子 agent AgentItem.tool 的共同子集。
@@ -45,6 +47,10 @@ export interface ToolRowData {
   interrupting?: boolean
   todos?: TodoItem[]
   usage?: UsageAgg
+  /** 编排型工具（codemode）脚本内的嵌套调用清单（外层结果自带；子调用没有自己的行） */
+  nestedCalls?: NestedCallView[]
+  /** 完整输出落盘路径（结果里点名；缺失 = 不显示该行，见 lib/codemodeNested.ts） */
+  spillPath?: string
   /** 主对话块 id（React key / 定位用；AgentItem 没有） */
   id?: number
 }
@@ -358,6 +364,13 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
         <UsageChip className="mono tu" usage={b.usage} title={t('usage.tip').replace('{tok}', String((b.usage?.input ?? 0) + (b.usage?.output ?? 0))).replace('{cost}', fmtUsd(b.usage?.costUsd ?? 0))} />
         <span className={`st ${err ? 'err' : changed ? 'ok' : ''}`}>{err ? '✗' : changed ? '✓' : ''}</span>
       </div>
+      {/* —— 编排型工具（codemode）的两块附加渲染（设计文档 §17）—— */}
+      {/* 1) 脚本内的嵌套调用清单：**只挂在外面这一行**下面（子调用不占独立工具行）。
+             折叠态 = 最后 8 条 + 「…N earlier calls」，展开态 = 全部 —— 组件自带折叠交互。 */}
+      {b.nestedCalls && b.nestedCalls.length > 0 && <ToolNestedCalls calls={b.nestedCalls} />}
+      {/* 2) 脚本输出的折叠预览：按**视觉行**限 5 行（不是按 \n 数），下方点名 spill 路径。
+             展开行时不再重复预览 —— 展开体里的「结果」区已经是全文（限高内滚）。 */}
+      {!open && hasScriptOutput(b) && <ToolOutputPreview text={b.result ?? ''} spillPath={b.spillPath} />}
       {/* 行内 diff 预览（运行时变更可见性，2026-08-22）：write/edit 完成即自动展开，
           限高 + 内滚 + 可折叠（+n −m 摘要）；与「查看变更」的右侧完整视图并存。
           独立于行详情（open）的展开状态 —— 不点行也能看到改了什么。 */}

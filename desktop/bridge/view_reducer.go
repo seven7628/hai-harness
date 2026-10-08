@@ -132,7 +132,10 @@ type Block struct {
 	Promoted   bool           `json:"promoted,omitempty"`
 	TaskStatus string         `json:"task_status,omitempty"`
 	Todos      []TodoItem     `json:"todos,omitempty"` // todo_* 工具调用时刻快照
-	StartedAt  int64          `json:"started_at,omitempty"`
+	// NestedCalls 编排型工具（codemode）脚本内的嵌套调用摘要（与 AgentItem 同名字段同义）。
+	// 只出现在编排型工具那一块上；宿主折叠态只显示最后 8 条（desktop/app 的 pickNestedCalls）。
+	NestedCalls []NestedCall `json:"nested_calls,omitempty"`
+	StartedAt   int64        `json:"started_at,omitempty"`
 
 	// Settled 是内部结算标记（不序列化）：assistant 块收到 llm_end / tool 块收到
 	// tool_end 后置 true。归一化悬空态时据此区分「已结算但无正文」（纯工具调用轮）
@@ -167,6 +170,35 @@ type Block struct {
 	ArtifactsTruncated bool          `json:"artifacts_truncated,omitempty"`
 }
 
+// NestedCall 是 core.NestedCallRecord 的稳定投影（checkpoint schema，独立于 core 的演进）。
+// 字段与 core.NestedCallRecord 一一对应：args/result 已由引擎按 8 KiB 截断、error 按 500 字符
+// 截断（本层不再截断，宿主渲染时另按 200/500 字符做预览）。
+// Duration 单位纳秒（time.Duration 的原生单位）—— 宿主换算成毫秒展示。
+type NestedCall struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Args     string `json:"args,omitempty"`
+	Result   string `json:"result,omitempty"`
+	IsError  bool   `json:"is_error,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Duration int64  `json:"duration,omitempty"`
+}
+
+// nestedCalls 把 core.NestedCallRecord 投影成 checkpoint 形态（无记录 = nil，不落空数组）。
+func nestedCalls(in []core.NestedCallRecord) []NestedCall {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]NestedCall, 0, len(in))
+	for _, r := range in {
+		out = append(out, NestedCall{
+			ID: r.Id, Name: r.Name, Args: r.Args, Result: r.Result,
+			IsError: r.IsError, Error: r.Error, Duration: int64(r.Duration),
+		})
+	}
+	return out
+}
+
 // ArtifactRef 是 core.Artifact 的稳定投影（checkpoint schema，独立于 core 的演进）。
 // 字段与 core.Artifact 一一对应；只保留宿主展示所需（不含工作区外不可达信息）。
 type ArtifactRef struct {
@@ -198,6 +230,10 @@ type AgentItem struct {
 	TaskID    string         `json:"task_id,omitempty"`
 	Diff      *Diff          `json:"diff,omitempty"`
 	Images    []Content      `json:"images,omitempty"` // tool item: 结果图片（read_file 读图 / 截图）
+	// NestedCalls 编排型工具（codemode）脚本内发生的嵌套调用摘要（core.NestedCallRecord 的
+	// 稳定投影）。子调用**没有自己的工具行/工具项**，明细只挂在外层调用这一处 ——
+	// 宿主在行内联成清单渲染（设计文档 §17 第二条）。
+	NestedCalls []NestedCall `json:"nested_calls,omitempty"`
 
 	// compression item
 	Before    int    `json:"before,omitempty"`
@@ -1418,6 +1454,14 @@ func (r *ViewReducer) applyToolStartLocked(e *events.ToolStart) {
 	}
 	r.toolStartSeen[key] = true
 
+	// 嵌套子调用（parent_call_id 非空）**不生成独立工具块/链路节点**：它不是模型发起的
+	// 工具调用，明细只挂在外层编排工具（codemode）那一块的 NestedCalls 上（设计文档 §17
+	// 第一条）。宿主渲染器同一规则见 desktop/app/src/store/useAppStore.ts 的 tool_start ——
+	// 两边必须一致，否则刷新/恢复后这些行会「凭空出现」。
+	if e.ParentCallId != "" {
+		return
+	}
+
 	ts := e.Timestamp
 	if ts.IsZero() {
 		ts = time.Now()
@@ -1478,6 +1522,12 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 	}
 	r.toolEndSeen[key] = true
 
+	// 嵌套子调用（parent_call_id 非空）不结算任何工具块/工具项/链路节点 —— 与 applyToolStartLocked
+	// 同一条规则（设计文档 §17 第一条；宿主侧同规则见 desktop/app 的 useAppStore）。
+	// 但**会话级事实照常入档**：diff 是真实发生的文件变更、todos 是脚本改过的计划快照 ——
+	// 因为「不显示成一行」而丢掉它们，会让 Git 面板/待办列表在脚本跑完后是错的。
+	nested := e.ParentCallId != ""
+
 	ts := e.Timestamp
 	if ts.IsZero() {
 		ts = time.Now()
@@ -1488,6 +1538,19 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 		delete(r.toolStartTs, e.Id)
 	}
 	info := toolErrorInfo(e)
+
+	if nested {
+		// 子调用没有自己的工具块/工具项/链路节点：只留会话级事实（见上），
+		// 行内清单挂在外层编排工具（codemode）那一块上。
+		if e.Diff != nil {
+			r.diffs = append(r.diffs, *fileDiff(e.Diff))
+		}
+		if meta.Todos != nil {
+			r.todos = cloneTodos(meta.Todos)
+		}
+		delete(r.approvalSeen, "approval:"+e.Id)
+		return
+	}
 
 	if r.isSubRunLocked(e.RunId) {
 		bid := r.agentBlockID[e.RunId]
@@ -1507,6 +1570,8 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 					it.DurMs = durMs
 					it.Diff = fileDiff(e.Diff)
 					it.Images = contentBlocks(e.Images)
+					// 编排型工具（codemode）：脚本内的嵌套调用清单（子 agent 转录里的脚本行同样要能展开）
+					it.NestedCalls = nestedCalls(e.NestedCalls)
 					// 子 agent 卡片内的工具项：本次调用用量（仅子 agent 类工具非零）
 					if e.Usage != nil && !e.Usage.IsZero() {
 						u := taskUsageFromCore(*e.Usage)
@@ -1548,6 +1613,8 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 		b.Status = statusDone
 		b.Diff = fileDiff(e.Diff)
 		b.Images = contentBlocks(e.Images)
+		// 编排型工具（codemode）的嵌套调用清单：与结果同一时刻定格（重放/恢复后清单不丢）
+		b.NestedCalls = nestedCalls(e.NestedCalls)
 		// 本次调用的用量（子 agent 类工具经 ToolUsageProvider 回传，含成本；普通工具全零）——
 		// 一次调用的用量是**一次性**值（非累计），直接覆盖；卡片/工具行据此展示 tokens + 成本。
 		if e.Usage != nil && !e.Usage.IsZero() {
@@ -2688,6 +2755,8 @@ func cloneBlocks(in []Block) []Block {
 	for i, b := range in {
 		b.Contents = append([]Content{}, b.Contents...)
 		b.Todos = append([]TodoItem{}, b.Todos...)
+		// NestedCalls 同 Artifacts：切片必须显式复制（Snapshot 的深拷贝语义）
+		b.NestedCalls = append([]NestedCall{}, b.NestedCalls...)
 		b.Warnings = append([]string{}, b.Warnings...)
 		b.Items = cloneAgentItems(b.Items)
 		// Artifacts 是切片：值拷贝 out[i]=b 会共享底层数组，必须显式复制
@@ -2709,6 +2778,7 @@ func cloneBlocks(in []Block) []Block {
 func cloneAgentItems(in []AgentItem) []AgentItem {
 	out := make([]AgentItem, len(in))
 	for i, it := range in {
+		it.NestedCalls = append([]NestedCall{}, it.NestedCalls...)
 		if it.ErrorInfo != nil {
 			ei := *it.ErrorInfo
 			it.ErrorInfo = &ei
