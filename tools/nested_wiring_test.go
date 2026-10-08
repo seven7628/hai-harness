@@ -527,3 +527,43 @@ func TestExecuteOneCorrectsDepthZeroWithParent(t *testing.T) {
 	}
 	_ = r // 记录/用量已断言；脚本标记本身由 TestExecuteOneMarksScriptCalls 覆盖
 }
+
+// ---- 7. 引擎侧的暴露档守卫（第二层闸）----
+
+// TestExecuteOneRefusesHiddenAndModelOnly 编排路径不得执行 hidden / model-only 工具。
+//
+// 复核实测：引擎此前对这两档**照常执行**（`CallableFromScript=false` 也跑出 "RAN"）——
+// 「hidden = 撤下」「model-only = 禁自嵌套（codemode 自己那一档）」两个产品不变量
+// 只能靠编排方自律。编排方「只认目录表」是纪律，纪律会失守，故引擎侧补一层闸。
+func TestExecuteOneRefusesHiddenAndModelOnly(t *testing.T) {
+	e := NewToolEngine()
+	for name, exp := range map[string]ToolExposure{
+		"gone":     ExposureHidden,
+		"self":     ExposureModelOnly,
+		"callable": ExposureCodemode, // 对照组：可编排档必须照常执行
+	} {
+		e.RegisterTool(context.Background(), &tierTool{
+			BaseTool: BaseTool{Name_: name, Description_: name, Params_: map[string]any{}}, exp: exp,
+		})
+	}
+
+	for _, c := range []struct {
+		name     string
+		wantRuns bool
+	}{{"gone", false}, {"self", false}, {"callable", true}} {
+		r := e.ExecuteOne(context.Background(), core.ToolCall{Id: "n1", Name: c.name, Arguments: "{}"},
+			ExecuteOpts{ParentCallId: "outer-1", Depth: 1})
+		if c.wantRuns {
+			if r.IsError {
+				t.Fatalf("%s 属可编排档，不该被拒: %q", c.name, r.Result)
+			}
+			continue
+		}
+		if !r.IsError {
+			t.Fatalf("%s 不可编排却执行了（结果 %q）—— 撤下/禁自嵌套失效", c.name, r.Result)
+		}
+		if !strings.Contains(r.Result, "not callable from a script") {
+			t.Fatalf("%s 的拒绝原因不可读: %q", c.name, r.Result)
+		}
+	}
+}

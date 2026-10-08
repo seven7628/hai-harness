@@ -246,6 +246,25 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 		call.Depth = opts.Depth
 	}
 
+	// 暴露档守卫（引擎侧的**第二层闸**）：hidden（撤下）与 model-only（禁编排，codemode
+	// 自身用它封死递归）一律不可经编排路径执行。
+	//
+	// 为什么引擎也要拦：编排方「只认目录表、不 GetTool 兜底」是**纪律**，纪律会失守 ——
+	// 复核实测 ExecuteOne 对这两档照常执行（`CallableFromScript=false` 也跑出 "RAN"）。
+	// 两个产品不变量（hidden 撤下、model-only 禁自嵌套）不该依赖每个编排者的自觉。
+	// 未实现 ExposureProvider 的工具 = direct（既有工具零迁移，行为不变）。
+	// 未知工具不在此拦：交给 execute() 产出它一贯的「not registered」结果。
+	if tool, err := e.GetTool(ctx, call.Name); err == nil && !CallableFromScript(tool) {
+		return core.ToolResult{
+			Id:      call.Id,
+			IsError: true,
+			Result: fmt.Sprintf(
+				"tool %q is not callable from a script (exposure %q): "+
+					"hidden tools are retired and model-only tools must not be orchestrated",
+				call.Name, ToolExposureOf(tool)),
+		}
+	}
+
 	// 深度守卫：core.NestedMaxDepth 管「单次运行内的编排嵌套」，
 	// 与 subagent 的 maxSpawnDepth（subagent/agent_tools.go:27 = 2，管「运行」间
 	// 的派生）是独立的另一道闸。两道都要接线，否则脚本可经 agent_spawn 绕过。
