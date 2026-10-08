@@ -36,10 +36,23 @@ import fs from 'node:fs';
 
 const PROTO_MAJOR = 1;
 
+// 协议行的哨兵前缀（ASCII RS，0x1e）。
+//
+// 为什么必须有它：协议行与用户输出**共用一个 fd**（宿主经 sandbox 只拿得到合并文本），
+// 若不加前缀，宿主只能靠「这行能不能解成 JSON」来分帧 —— 脚本直写 fd1/fd2
+// （fs.writeSync，绕开被替换的 process.stdout.write）时，宿主会在那一行停下，
+// 把**真正的 result 帧**当成用户输出：console 输出全丢，原始协议 JSON 反而泄进
+// 模型上下文（实测复现）。加哨兵后「哪一行是协议」是显式事实，宿主可以全量扫描
+// 而不是遇错即停。
+//
+// 哨兵只出现在协议行，用户输出被截获进 result 帧的 out 字段（JSON 转义），
+// 故用户无法伪造协议行。
+const SENTINEL = '\x1e';
+
 // 真 fd1 上的协议输出：绕过一切被替换的 write。
 const send = (obj) => {
   try {
-    fs.writeSync(1, JSON.stringify(obj) + '\n');
+    fs.writeSync(1, SENTINEL + JSON.stringify(obj) + '\n');
   } catch {
     // fd1 已关（宿主先超时杀进程）：无处可报，静默。
   }

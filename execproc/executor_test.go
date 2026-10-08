@@ -171,12 +171,16 @@ while (true) { await new Promise(r => setTimeout(r, 50)); }
 	if !res.TimedOut {
 		t.Errorf("TimedOut = false, want true (text=%q raw=%q)", res.Text, res.Raw)
 	}
-	// 首行必须声明输出不完整（否则模型会把中间结果当完整结果）。
+	// 首行必须声明结局，且**不得**承诺一个拿不回来的「部分输出」：
+	// 脚本输出在沙箱进程内缓冲、只在脚本正常收尾时回传，被杀 = 一条都拿不回来。
 	if !strings.HasPrefix(res.Text, "[TIMEOUT after") {
-		t.Errorf("Text 首行未声明 TIMEOUT/PARTIAL:\n%s", res.Text)
+		t.Errorf("Text 首行未声明 TIMEOUT:\n%s", res.Text)
 	}
-	if !strings.Contains(res.Text, "PARTIAL") {
-		t.Errorf("Text 未声明输出是 PARTIAL:\n%s", res.Text)
+	if !strings.Contains(res.Text, "nothing could be recovered") {
+		t.Errorf("Text 未说明输出不可回收（模型会把空当成真结果）:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, "the output below is PARTIAL") {
+		t.Errorf("无输出时仍承诺「下面的是部分输出」:\n%s", res.Text)
 	}
 
 	// ② 无残留。**pid 读不到即判失败**（不是跳过）：脚本在进入死循环前就写了
@@ -485,5 +489,78 @@ func TestCommandCarriesMaxOldSpaceFlag(t *testing.T) {
 	e2.opt.MaxOldSpaceMB = 0
 	if cmd2 := e2.command(NodeInfo{Path: "/usr/bin/node"}); !strings.Contains(cmd2, "max-old-space-size=512") {
 		t.Fatalf("command = %q, want the default heap limit to be applied", cmd2)
+	}
+}
+
+// ---- 分帧：直写 fd1/fd2 不得吞掉 result 帧（评审发现 7）----
+
+// TestSplitFramesToleratesStrayLines 非协议行出现在**任意位置**时，结果帧都必须被收走。
+//
+// 回归背景：初版是「首行不是帧就停止扫描」，于是一行 fs.writeSync(1, ...) 就能让后面
+// 的真 result 帧落进 tail —— 用户的 console 输出全丢，原始协议 JSON 反而泄进模型上下文。
+func TestSplitFramesToleratesStrayLines(t *testing.T) {
+	text := strings.Join([]string{
+		frameSentinel + `{"notify":"hello","version":{"version_major":1,"version_minor":0}}`,
+		"stray-direct-write",
+		frameSentinel + `{"notify":"result","out":"captured-log\n","bytes":13}`,
+		"[exit: 0]",
+	}, "\n")
+
+	frames, tail := SplitFrames(text)
+	if len(frames) != 2 {
+		t.Fatalf("frames = %d, want 2（中间那行不该终止扫描）: %+v", len(frames), frames)
+	}
+	if frames[1].Out != "captured-log\n" {
+		t.Fatalf("result 帧内容 = %q, want captured-log", frames[1].Out)
+	}
+	if !strings.Contains(tail, "stray-direct-write") || !strings.Contains(tail, "[exit: 0]") {
+		t.Fatalf("tail = %q, want 直写内容与结局注记都在", tail)
+	}
+	if strings.Contains(tail, "notify") {
+		t.Fatalf("协议行混进了 tail（会泄进模型上下文）: %q", tail)
+	}
+}
+
+// TestScriptDirectFDWriteDoesNotSwallowOutput 端到端：脚本直写 fd1 后再 console.log，
+// 用户输出必须完整回到模型，且模型上下文里不得出现裸协议 JSON。
+func TestScriptDirectFDWriteDoesNotSwallowOutput(t *testing.T) {
+	requireNode(t)
+	e := newTestExecutor(t)
+
+	res, err := e.Execute(context.Background(), `
+import fs from 'node:fs';
+fs.writeSync(1, "stray-direct-write\n");
+fs.writeSync(2, "stray-direct-write-stderr\n");
+console.log("captured-log");
+`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(res.Text, "captured-log") {
+		t.Fatalf("console 输出丢了（result 帧被直写行吞掉）:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "stray-direct-write") {
+		t.Errorf("直写内容应原样透出给模型:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, `"notify"`) {
+		t.Fatalf("裸协议 JSON 泄进了模型上下文:\n%s", res.Text)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", res.ExitCode)
+	}
+}
+
+// TestVerifyHandshakeAcceptsSentinel 纯函数必须同时接受带哨兵（线上真实形状）与裸 JSON
+// （旧帧/单测形状），避免协议形状演进时把校验写成只认一种。
+func TestVerifyHandshakeAcceptsSentinel(t *testing.T) {
+	bare := `{"notify":"hello","version":{"version_major":1,"version_minor":0}}`
+	if _, err := VerifyHandshake(bare, protoMajor); err != nil {
+		t.Fatalf("裸 JSON 应通过: %v", err)
+	}
+	if _, err := VerifyHandshake(frameSentinel+bare, protoMajor); err != nil {
+		t.Fatalf("带哨兵应通过: %v", err)
+	}
+	if _, err := VerifyHandshake("just-a-log-line", protoMajor); err == nil {
+		t.Fatal("非帧行必须报握手缺失")
 	}
 }

@@ -212,19 +212,20 @@ func (e *Executor) Execute(ctx context.Context, script string) (RunResult, error
 	return res, nil
 }
 
-// mustMarshalLine 把帧重新编码成一行 JSON（喂给纯函数 VerifyHandshake）。
+// mustMarshalLine 把帧重新编码成一行**带哨兵前缀**的协议行（喂给纯函数 VerifyHandshake）。
 //
 // 绕这一圈而不是直接比字段：VerifyHandshake 需要**行**作为输入（它是 stdjson
 // 解码层的测试面），而这里手上已是解码后的结构。重新编码的成本可忽略
-// （每执行一次一次 marshal），换来握手校验只有一份实现（纯函数可单测）。
+// （每执行一次一次 marshal），换来握手校验只有一份实现（纯函数可单测）；
+// 顺带让校验走的是**线上真实帧形状**（含哨兵），而不是另一种形状。
 func mustMarshalLine(f Frame) string {
 	b, err := json.Marshal(f)
 	if err != nil {
-		// Frame 全是基础类型 + string，marshal 不可能失败；真失败就退化成空行，
+		// Frame 全是基础类型 + string，marshal 不可能失败；真失败就退化成只有哨兵的空行，
 		// 让 VerifyHandshake 报「没有握手」而不是 panic。
-		return ""
+		return frameSentinel
 	}
-	return string(b)
+	return frameSentinel + string(b)
 }
 
 // assemble 把协议帧 + sandbox 尾巴组装成给模型的文本。
@@ -262,14 +263,8 @@ func assemble(frames []Frame, tail string, res RunResult) (stdjson.Version, stri
 	}
 
 	var b strings.Builder
-	switch {
-	case res.Canceled:
-		b.WriteString("[CANCELLED — the script was interrupted before finishing; " +
-			"the output below is PARTIAL]\n")
-	case res.TimedOut:
-		limit := e_timeoutText(res)
-		b.WriteString("[TIMEOUT after " + limit + " — the script was killed and the " +
-			"output below is PARTIAL]\n")
+	if note := outcomeNote(res, out == ""); note != "" {
+		b.WriteString(note + "\n")
 	}
 	if out != "" {
 		b.WriteString(strings.TrimRight(out, "\n"))
@@ -291,6 +286,36 @@ func e_timeoutText(res RunResult) string {
 		return res.Timeout.String()
 	}
 	return "the configured limit"
+}
+
+// outcomeNote 结局首行（超时/取消）。形态与 bash 工具对齐 —— 模型在两个工具上看到
+// 同一套「首行声明 + 后续输出」的读法，不必学第二种。
+//
+// 但与 bash 有一处**硬差异**，措辞必须分开：bash 的输出由 sandbox 管道边跑边收，
+// 超时被杀也能拿到已产生的部分输出；本执行层的用户输出是在沙箱进程内缓冲的，
+// 只在脚本正常收尾时随 result 帧回传（见 prelude.js）。被 kill 的脚本因此
+// **一条也拿不回来** —— 此时说「下面的输出是部分结果」而下面是空的，模型会把空
+// 当成真结果继续推理，比不声明更坏（本仓实测 130 次的教训，见 bash 工具的同类注释）。
+//
+// noOutput 为 true 时改用「输出不可回收」措辞，并说明为什么（脚本输出只在脚本
+// 跑完时才回传），让模型知道这是**机制**限制、不是脚本没输出。
+func outcomeNote(res RunResult, noOutput bool) string {
+	switch {
+	case res.Canceled && noOutput:
+		return "[CANCELLED — the script was interrupted before it could report output; " +
+			"script output is only returned when the script finishes, so nothing could be recovered]"
+	case res.Canceled:
+		return "[CANCELLED — the script was interrupted before finishing; " +
+			"the output below is PARTIAL]"
+	case res.TimedOut && noOutput:
+		return "[TIMEOUT after " + e_timeoutText(res) + " — the script was killed before it could " +
+			"report output; script output is only returned when the script finishes, " +
+			"so nothing could be recovered]"
+	case res.TimedOut:
+		return "[TIMEOUT after " + e_timeoutText(res) + " — the script was killed and the " +
+			"output below is PARTIAL]"
+	}
+	return ""
 }
 
 // truncate 按字节截断并标注省略量（给模型看，必须说明白丢了多少）。
@@ -404,16 +429,18 @@ const (
 // # 为什么只能拿到「合并文本」而不是结构化帧
 //
 // 执行经 sandbox.Sandbox，它把 stdout+stderr 合并成一个字符串返回（runExec 的
-// 契约，bash 工具同款）—— 没有「逐帧读」这条通道。但协议帧仍是可判定的：
-// prelude 把真协议行写到 fd1、把用户输出截获进 result 帧，所以合并文本里
-// **前几行一定是协议帧**，后面才是 sandbox 自己追加的 `[exit: N]` 等注记。
-// 于是校验方式就是：逐行解，直到解出 hello 或第一行不是帧。
+// 契约，bash 工具同款）—— 没有「逐帧读」这条通道。协议行因此带哨兵前缀
+// （frameSentinel，见 prelude.js）：宿主据此把「协议行」与「用户输出/sandbox 注记」
+// 分开，而不是靠「首行不是帧就停」那种一戳就破的启发式。
+//
+// 入口收的是**第一帧那一行**（execproc 自己 marshal 回来的），哨兵可有可无 ——
+// 本函数是纯函数，测试直接喂裸 JSON 也要能判版本。
 //
 // 独立成纯函数（无 I/O、可单测）：握手失败与帧错乱这两条路径在真实执行里极难
 // 构造，而它们恰是最该被钉住的两条。
 func VerifyHandshake(line string, wantMajor int) (stdjson.Version, error) {
 	var fr Frame
-	if err := stdjson.NewReader(strings.NewReader(line + "\n")).Next(&fr); err != nil {
+	if err := stdjson.NewReader(strings.NewReader(stripFrameSentinel(line) + "\n")).Next(&fr); err != nil {
 		if stdjson.LineTooLongErr(err) {
 			return stdjson.Version{}, fmt.Errorf(
 				"sandbox runtime produced a first line larger than %d bytes before the handshake "+
@@ -436,22 +463,56 @@ func VerifyHandshake(line string, wantMajor int) (stdjson.Version, error) {
 	return fr.Version, nil
 }
 
-// SplitFrames 从合并输出里分出协议帧与其后的**人类可读尾巴**。
+// frameSentinel 协议行的哨兵前缀（ASCII RS）。**唯一事实源是 prelude.js**，
+// 两边改一处必须改另一处（协议版本号 protoMajor 就是这个耦合的兜底检查）。
 //
-// 逐行尝试解码：能解成已知 notify 的帧就收走，不能解（原样）就停止 —— 之后的
-// 全部是 sandbox 的注记（`[exit: 1]` / kill 说明 / 脚本自己写到 stderr 的噪声），
-// 作为 tail 原样保留。这让「模型看到的东西」= 用户输出 + 结局注记，而协议
-// 帧本身不进模型上下文（它们是宿主与沙箱之间的私事）。
+// 为什么不是「首行不是帧就停」：脚本直写 fd1/fd2 会插进任意位置，那种解析会
+// 把后面的真 result 帧一起当成用户文本（输出全丢 + 原始 JSON 泄进模型上下文）。
+const frameSentinel = "\x1e"
+
+// stripFrameSentinel 去掉协议行哨兵（无哨兵时原样返回 —— 便于纯函数单测与旧帧兼容）。
+func stripFrameSentinel(line string) string {
+	return strings.TrimPrefix(line, frameSentinel)
+}
+
+// SplitFrames 从合并输出里分出协议帧与**其余全部文本**（sandbox 注记 + 用户直写）。
+//
+// 逐行**全量**扫描：带哨兵且能解成已知 notify 的行收作帧，其余行按原序留在 tail。
+// 不因一个非帧行就停止（那是初版实现，见 frameSentinel 注释里的一戳就破）。
+//
+// 代价与取舍：tail 与帧的相对顺序信息会丢（输出的相对顺序可能被打散）——
+// 故给模型的文本统一按「帧里的用户输出 → 脚本错误 → tail」重组（见 assemble）。
+// 直写 fd 本就绕过了输出截获，其内容仍需让模型看见（原样留在 tail），
+// 但不能让它把 result 帧吞掉。
 func SplitFrames(text string) (frames []Frame, tail string) {
-	lines := strings.Split(text, "\n")
-	for i, ln := range lines {
-		var f Frame
-		if err := stdjson.NewReader(strings.NewReader(ln + "\n")).Next(&f); err != nil || !knownNotify(f.Notify) {
-			return frames, strings.TrimSpace(strings.Join(lines[i:], "\n"))
+	var tailLines []string
+	for _, ln := range strings.Split(text, "\n") {
+		if f, ok := parseFrameLine(ln); ok {
+			frames = append(frames, f)
+			continue
 		}
-		frames = append(frames, f)
+		tailLines = append(tailLines, ln)
 	}
-	return frames, ""
+	return frames, strings.TrimSpace(strings.Join(tailLines, "\n"))
+}
+
+// parseFrameLine 解析一行协议帧：必须带哨兵前缀，且 notify 是 prelude 会发的三种之一。
+//
+// 哨兵 + notify 白名单双重要求的结果：用户输出（哪怕是合法 JSON、哪怕自己写了
+// notify 字段）永远不可能被误判成协议帧 —— 那些内容都在 result 帧的 out 字段里
+// （JSON 转义过），或经直写留在 tail。
+func parseFrameLine(line string) (Frame, bool) {
+	if !strings.HasPrefix(line, frameSentinel) {
+		return Frame{}, false
+	}
+	var f Frame
+	if err := stdjson.NewReader(strings.NewReader(stripFrameSentinel(line) + "\n")).Next(&f); err != nil {
+		return Frame{}, false
+	}
+	if !knownNotify(f.Notify) {
+		return Frame{}, false
+	}
+	return f, true
 }
 
 // knownNotify notify 是否是 prelude 会发的三种之一。
