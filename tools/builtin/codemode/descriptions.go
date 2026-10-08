@@ -182,12 +182,94 @@ func (o ScriptOptions) OutputTokens() int {
 	return DefaultScriptOutputTokens
 }
 
-// Timeout 生效的墙钟上限；0 = 不限时（由宿主 ExecScope 兜底）。
+// DefaultScriptTimeoutMs 未声明 timeout_ms 时的墙钟上限（设计文档 §14.2 的建议值 30s）。
+//
+// 为什么不能是 0/不限时：codemode 工具自身 `ToolTimeout()=-1`（引擎兜底豁免，生命周期
+// 自管），墙钟 owner 是宿主的 ExecScope —— 若这里也返回 0，就**没有任何自动终止**，
+// 一个 `while(true){}` 只能靠用户中断；而教学正文对模型自称 "enforced quotas
+// (memory, wall clock, output size)"，只有在有默认上限时才成立（复核实测）。
+const DefaultScriptTimeoutMs = 30_000
+
+// Timeout 生效的墙钟上限；未声明 = DefaultScriptTimeoutMs（30s），显式 0 亦按默认处理。
 func (o ScriptOptions) Timeout() time.Duration {
 	if o.TimeoutMs == nil {
-		return 0
+		return DefaultScriptTimeoutMs * time.Millisecond
 	}
 	return time.Duration(*o.TimeoutMs) * time.Millisecond
+}
+
+// looksLikeOptionsLine 首行是否「看起来想声明选项」——用来把**近似写法**判成错误而不是
+// 「没声明」（见 ParseOptionsLine）。判据刻意收窄到「注释行 + 选项词打头」，避免把普通
+// 散文注释（`// note: options are …`）误判：
+//
+//	`// @options {…}` / `//@options:…` / `// @options：…` / `// options: …` → true（报错）
+//	`// @options_x: 1`（更长的标识符，是别的指令）              → false（当没声明）
+//	`// note: options are …`（散文）                          → false
+func looksLikeOptionsLine(line string) bool {
+	l := strings.ToLower(strings.TrimSpace(line))
+	if !strings.HasPrefix(l, "//") {
+		return false
+	}
+	body := strings.TrimLeft(l[2:], " \t")
+	for _, p := range []string{"@options", "@option", "options"} {
+		if !strings.HasPrefix(body, p) {
+			continue
+		}
+		rest := body[len(p):]
+		if rest == "" {
+			return true
+		}
+		r, _ := utf8.DecodeRuneInString(rest)
+		if r == '_' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return false // 更长标识符（@options_x / options-foo）：不是选项行
+		}
+		return true
+	}
+	return false
+}
+
+// quoteForError 把可能很长/含控制字符的首行截断成可读的引用（给模型看的报错）。
+func quoteForError(line string) string {
+	const max = 120
+	if len(line) > max {
+		return fmt.Sprintf("%q… (+%d bytes)", line[:max], len(line)-max)
+	}
+	return fmt.Sprintf("%q", line)
+}
+
+// rejectDuplicateKeys 拒绝重复键。JSON 的 map 语义是 last-wins，`{"timeout_ms":1000,
+// "timeout_ms":2000}` 会静默变成 2s —— 与「非法即报错」的严格性不符（复核缺陷 D9）。
+// 只扫顶层（选项对象是扁平的），值用 Decode 跳过。
+func rejectDuplicateKeys(raw string) error {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil // 非 JSON 交给下面的 Unmarshal 报错（错误文案更完整）
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		key, ok := kt.(string)
+		if !ok {
+			return nil
+		}
+		if seen[key] {
+			return fmt.Errorf("codemode: option %q is declared twice in the @options line "+
+				"(the later value would silently win)", key)
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return nil
+		}
+	}
+	return nil
 }
 
 // ParseOptionsLine 严格解析脚本首行的 `// @options: {...}`，
@@ -206,10 +288,27 @@ func (o ScriptOptions) Timeout() time.Duration {
 func ParseOptionsLine(code string) (ScriptOptions, string, error) {
 	first, rest, _ := strings.Cut(code, "\n")
 	trimmed := strings.TrimLeft(first, " \t")
+	// BOM：模型偶尔在脚本开头带 UTF-8 BOM，不剥掉的话前缀匹配失败 → 预算声明**静默**
+	// 消失（脚本照样跑，只是没有上限）。
+	trimmed = strings.TrimPrefix(trimmed, "\ufeff")
 	if !strings.HasPrefix(trimmed, optionsLinePrefix) {
+		// 近似写法（漏冒号 / 全角冒号 / `//@options` / 半角空格变体…）必须**报错**而不是
+		// 当成「没声明」：静默忽略会让模型以为自己设了预算，实际进入无墙钟上限的形态
+		//（复核缺陷 D3）。判据用「含 @option」这种宽判据 —— 宁可对一行奇怪的注释报错，
+		// 也不能把一条真的选项声明当注释吃掉。
+		if looksLikeOptionsLine(trimmed) {
+			return ScriptOptions{}, "", fmt.Errorf(
+				"codemode: the first line looks like an options line but is malformed: %s\n"+
+					`expected exactly %s {"max_output_tokens": 1000, "timeout_ms": 30000} `+
+					"(half-width colon, straight quotes)",
+				quoteForError(first), optionsLinePrefix)
+		}
 		return ScriptOptions{}, code, nil
 	}
 	raw := strings.TrimSpace(trimmed[len(optionsLinePrefix):])
+	if err := rejectDuplicateKeys(raw); err != nil {
+		return ScriptOptions{}, "", err
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
 		return ScriptOptions{}, "", fmt.Errorf("codemode: %s line is not a JSON object (%v)", optionsLinePrefix, err)
@@ -494,7 +593,10 @@ type SelectResult struct {
 //
 // budgetTokens 是整个目录段的估算 token 上限（charsPerToken = 4，向上取整）：
 //   - < 0 → 不限（全部列出，对齐 pi「未配置 → 全部列出」的兜底）
-//   - 0   → 只列组标题
+//   - 0   → 一条都不列，且**连组标题也不渲染**，改用 catalogEmptyNote
+//     （「none listed here - use searchTools(...)」）。此处与早期注释「只列组标题」
+//     不符 —— 复核实测指出该不一致，现按**实际行为**写清：预算 0 是「模型自己用
+//     searchTools 找」的极端档，渲染一堆空组标题只会白占上下文。
 //
 // overheadTokens = 目录段之外的固定开销（INTRO + 指引 + 标题），先扣掉：预算的意义
 // 就是「这段描述在上下文里占多少」，只算条目会低估整段描述的真实体积。
@@ -729,19 +831,29 @@ func BuildCatalog(opts DescribeOptions) (*Catalog, error) {
 
 	// 4) 撞名消解 + 双键表。作用域是**全部可编排名**（deferred 也要能派发）：
 	//    若只按已列举的工具去重，deferred 与 direct 撞名时桥接就分不清该投给谁。
-	collide := map[string]int{}
-	for _, t := range callable {
-		collide[normalize(t.Name)]++
-	}
+	//
+	// **后缀判定必须与「谁在场」无关**（复核实测的字节不稳定缺陷）：若按「归一后重名者
+	// 才加后缀」，那么一个 deferred 工具上线/下线就会给一个无关的**已列举**条目改名
+	//（`x_y` → `x_y_ced28c`），描述字节随 MCP 连接抖动 —— 正是设计文档 §18 / pi #10212
+	// 要根除的那类缓存击穿。故规则改为**纯函数**：名字本身需要归一（`normalize(raw) != raw`）
+	// 就加后缀，否则保持原名。已归一的合法标识符天然互不相同，于是：
+	//   - `read_file`（合法）→ 原名，不随任何人进出而变；
+	//   - `read-file` / `read.file`（需归一）→ 各自带自己的 fnv32 后缀，彼此不同。
+	// 残留冲突（第三方名字恰好长成 `read_file_ab12cd`）用计数器兜底，**不硬失败** ——
+	// 为一个名字冲突让整个 codemode 不可用，blast radius 与收益完全不成比例（复核实测）。
 	for i := range callable {
 		id := normalize(callable[i].Name)
-		if collide[id] > 1 {
+		if id != callable[i].Name {
 			id = collisionSuffix(id, callable[i].Name)
 		}
-		if prev, ok := cat.Names[id]; ok {
-			return nil, fmt.Errorf(
-				"codemode: 归一 + 后缀后仍撞名: %q 与 %q → %q（请改名，静默取舍会让模型调错实现）",
-				prev, callable[i].Name, id)
+		if _, taken := cat.Names[id]; taken {
+			base := id
+			for n := 2; ; n++ {
+				id = fmt.Sprintf("%s_%d", base, n)
+				if _, taken := cat.Names[id]; !taken {
+					break
+				}
+			}
 		}
 		callable[i].scriptName = id
 		cat.Names[id] = callable[i].Name
@@ -777,10 +889,10 @@ func BuildCatalog(opts DescribeOptions) (*Catalog, error) {
 	}
 
 	// 6) 前缀（固定开销）+ 装箱 + 渲染。
-	prefix := DESCRIPTION_INTRO + "\n\n"
-	if len(cat.Deferred) > 0 {
-		prefix += DEFERRED_TOOLS_GUIDANCE + "\n\n"
-	}
+	// 指引段**无条件**拼接：若按「有没有 deferred 工具」条件拼接，MCP 一连上就把整段
+	// 描述撑长 172 字节（复核实测 2589→2761），provider 前缀缓存当场失效。指引段本身
+	// 不提任何工具名，故无条件拼接不会泄漏 deferred 工具的存在。
+	prefix := DESCRIPTION_INTRO + "\n\n" + DEFERRED_TOOLS_GUIDANCE + "\n\n"
 	overhead := estimateTokens(prefix + catalogHeading + "\n")
 
 	sel := SelectCatalog(groups, overhead, budget)

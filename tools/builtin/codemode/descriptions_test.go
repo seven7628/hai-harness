@@ -11,6 +11,7 @@ package codemode
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seven7628/hai-harness/tools"
 )
@@ -110,13 +111,14 @@ func TestBuildCatalogCollisionHitsDifferentImplementations(t *testing.T) {
 	if dash == under {
 		t.Fatalf("撞名未消解：read-file 与 read_file 都映射到 %q", dash)
 	}
-	for _, id := range []string{dash, under} {
-		if !strings.HasPrefix(id, "read_file_") {
-			t.Errorf("脚本名 %q 应以归一结果加后缀为前缀（read_file_ + fnv32 前 6 位）", id)
-		}
-		if len(id) != len("read_file_")+6 {
-			t.Errorf("脚本名 %q 的后缀长度应为 6 位十六进制", id)
-		}
+	// 后缀判定与「谁在场」无关（纯函数）：需要归一的 `read-file` 带自己的 fnv32 后缀；
+	// 本身就是合法标识符的 `read_file` **保持原名** —— 否则一个 deferred 工具的上线/下线
+	// 会给这个无关的已列举条目改名，描述字节随 MCP 连接抖动（复核缺陷 D1）。
+	if !strings.HasPrefix(dash, "read_file_") || len(dash) != len("read_file_")+6 {
+		t.Errorf("需归一的脚本名 %q 应为 read_file_ + fnv32 前 6 位", dash)
+	}
+	if under != "read_file" {
+		t.Errorf("合法标识符必须保持原名（不随他人进出而变），got %q", under)
 	}
 	if got := cat.Names[dash]; got != "read-file" {
 		t.Errorf("Names[%q] = %q, want read-file", dash, got)
@@ -152,8 +154,10 @@ func TestBuildCatalogNameMapCoversCallableTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCatalog: %v", err)
 	}
-	if _, ok := cat.Names["mcp__dev_radius__get"]; !ok {
+	if id, ok := cat.RawNames["mcp__dev-radius__get"]; !ok {
 		t.Error("deferred 工具必须进映射表（可编排但不可列举）")
+	} else if _, ok := cat.Names[id]; !ok {
+		t.Errorf("映射表双向不一致：RawNames 给出 %q，Names 里没有", id)
 	}
 	if _, ok := cat.RawNames["secret"]; ok {
 		t.Error("hidden 工具不得进映射表（不可编排）")
@@ -246,10 +250,11 @@ func TestDeferredChurnKeepsOtherEntryBytes(t *testing.T) {
 	if one.Description != two.Description {
 		t.Errorf("deferred 集合从 1 个变 2 个改变了描述字节 —— 前缀缓存会被击穿")
 	}
-	// 0 个 → 1 个：只有 DEFERRED_TOOLS_GUIDANCE 这一段变化，条目行一字不动。
-	stripped := strings.Replace(one.Description, DEFERRED_TOOLS_GUIDANCE+"\n\n", "", 1)
-	if stripped != none.Description {
-		t.Errorf("首次出现 deferred 工具时，除指引段外还改动了别的字节：\n--- 去掉指引的 one-deferred ---\n%s\n--- no-deferred ---\n%s", stripped, none.Description)
+	// 0 个 → 1 个（用户连上第一个 MCP server）：**整段描述逐字节相同**。
+	// 指引段无条件拼接 + 后缀与集合解耦之后，MCP 连接/断开对描述字节零影响
+	//（复核缺陷 D1 的两条路径都堵在这里；此前 0→1 会多 172 字节并可能给已列举条目改名）。
+	if none.Description != one.Description {
+		t.Errorf("首次出现 deferred 工具时描述字节变了 —— 前缀缓存会被击穿：\n--- no-deferred ---\n%s\n--- one-deferred ---\n%s", none.Description, one.Description)
 	}
 	lines := func(c *Catalog) []string {
 		out := make([]string, 0, len(c.Entries))
@@ -487,7 +492,9 @@ func TestBuildCatalogBudgetTrim(t *testing.T) {
 	}
 	// 预算按**实际成本**算：固定开销（INTRO + 标题）+ core 一条 + git 一条 + lark 一条。
 	// 这样第 4 组（util）必然被裁，core 的第二条也放不下 —— 裁剪点确定，断言才有意义。
-	overhead := estimateTokens(DESCRIPTION_INTRO + "\n\n" + catalogHeading + "\n")
+	// 固定开销 = INTRO + **无条件拼接的**指引段 + 标题（与实现同口径；指引段不再按
+	// deferred 数量条件拼接，见 D1 的字节稳定性修复）。
+	overhead := estimateTokens(DESCRIPTION_INTRO + "\n\n" + DEFERRED_TOOLS_GUIDANCE + "\n\n" + catalogHeading + "\n")
 	entry := func(i int) int { return estimateTokens(renderEntry(ts[i])) }
 	header := func(ns string, n int) int { return estimateTokens(renderGroupHeader(ns, "", 0, n)) }
 	budget := overhead + header("core", 2) + entry(0) + header("git", 1) + entry(2) + header("lark", 1) + entry(3)
@@ -519,6 +526,12 @@ func TestBuildCatalogBudgetTrim(t *testing.T) {
 	// 描述整体（含被裁组标题的尾巴）允许比预算略高几个 token，但不该翻倍。
 	if cat.UsedTokens > budget+len(cat.GroupLines)*8 {
 		t.Errorf("描述 %d token 超出预算 %d 太多（被裁组标题的尾巴有上限）", cat.UsedTokens, budget)
+	}
+
+	// 指引段无条件存在（MCP 一个都没连时也在）：它不提任何工具名，故不泄漏 deferred
+	// 的存在；而「有工具没列出来时该用 searchTools」这句话必须始终对模型可见。
+	if !strings.Contains(cat.Description, DEFERRED_TOOLS_GUIDANCE) {
+		t.Error("DEFERRED_TOOLS_GUIDANCE 必须无条件出现在描述里（否则 0→1 个 deferred 会改字节）")
 	}
 
 	// 预算 0：一条都不列，但必须给出可执行的下一步。
@@ -688,6 +701,18 @@ func TestParseOptionsLine(t *testing.T) {
 		wantErr string
 	}{
 		{name: "没有声明：正文逐字节不变", code: "const a = 1;", body: "const a = 1;"},
+		// —— 近似写法必须报错，不能静默当「没声明」（复核缺陷 D3）——
+		{name: "漏冒号报错", code: "// @options {\"timeout_ms\": 5000}\nz()", wantErr: "looks like an options line"},
+		{name: "注释符后无空格报错", code: "//@options: {\"timeout_ms\": 5000}\nz()", wantErr: "looks like an options line"},
+		{name: "全角冒号报错", code: "// @options：{\"timeout_ms\": 5000}\nz()", wantErr: "looks like an options line"},
+		{name: "漏 @ 报错", code: "// options: {\"timeout_ms\": 5000}\nz()", wantErr: "looks like an options line"},
+		{name: "单数 @option 报错", code: "// @option: {\"timeout_ms\": 5000}\nz()", wantErr: "looks like an options line"},
+		{name: "更长标识符不算选项行（当注释）", code: "// @options_x: 1\nz()", body: "// @options_x: 1\nz()"},
+		{name: "散文注释不算选项行", code: "// note: options are documented below\nz()", body: "// note: options are documented below\nz()"},
+		// —— BOM：剥掉后照常解析（不剥就会静默丢预算）——
+		{name: "BOM + 声明", code: "\ufeff// @options: {\"timeout_ms\": 2500}\nz()", body: "z()", timeout: intPtr(2500)},
+		// —— 重复键必须报错（JSON last-wins 会静默吞掉前一个声明）——
+		{name: "重复键报错", code: "// @options: {\"timeout_ms\": 1000, \"timeout_ms\": 2000}\nz()", wantErr: "declared twice"},
 		{name: "空脚本", code: "", body: ""},
 		{name: "声明 + 正文", code: "// @options: {\"max_output_tokens\": 4000}\nconst a = 1;", body: "const a = 1;", out: intPtr(4000)},
 		{name: "只有声明行", code: "// @options: {\"timeout_ms\": 90000}", body: "", timeout: intPtr(90000)},
@@ -758,8 +783,12 @@ func TestScriptOptionsDefaults(t *testing.T) {
 	if got := opts.OutputTokens(); got != DefaultScriptOutputTokens {
 		t.Errorf("默认输出预算 = %d, want %d", got, DefaultScriptOutputTokens)
 	}
-	if got := opts.Timeout(); got != 0 {
-		t.Errorf("未声明 timeout_ms 应当不限时（0），实际 %v", got)
+	// 未声明 timeout_ms = 30s（设计文档 §14.2 的建议值），**不是**不限时：
+	// codemode 工具自身 ToolTimeout()=-1（引擎兜底豁免），墙钟 owner 是宿主 ExecScope ——
+	// 这里若返回 0 就完全没有自动终止，`while(true){}` 只能靠用户中断，而教学正文对模型
+	// 自称 "enforced quotas (memory, wall clock, output size)"（复核缺陷 D3）。
+	if got := opts.Timeout(); got != DefaultScriptTimeoutMs*time.Millisecond {
+		t.Errorf("未声明 timeout_ms 应为默认 %v，实际 %v", DefaultScriptTimeoutMs*time.Millisecond, got)
 	}
 	opts, _, err = ParseOptionsLine("// @options: {\"timeout_ms\": 1500, \"max_output_tokens\": 7}\nx()")
 	if err != nil {
