@@ -78,6 +78,15 @@ type ScriptCall struct {
 	Id   string          // 双向关联锚（沙箱生成，会话内唯一）
 	Name string          // 工具名（已归一化，见 descriptions 的 normalize）
 	Args json.RawMessage // 对象参数原文
+
+	// Index 派发序号：读帧协程按**帧到达顺序**单调递增地发号（见 dispatch）。
+	//
+	// 为什么要有它（Phase 2 复核 F3）：帧一到就各起一个 goroutine（脚本里 Promise.all
+	// 要真并发），于是**谁先到 OnCall 取决于调度**，而不是脚本里的先后。编排方要恢复
+	// 「脚本先发起先执行」的唯一确定信息就是这个按帧序发的号 —— 靠别的办法（按时延猜
+	// 前驱是否快到了）都是启发式。Id 是**脚本**顺序的锚，这里刻意不复用它：两者在
+	// 「帧到达顺序」这一维上可能不同，而 Index 正是那一维的权威。
+	Index int64
 }
 
 // ScriptResult 一次工具调用的回执（宿主 → 沙箱）。
@@ -537,6 +546,9 @@ type bridgeHost struct {
 	// 它就与那次写互等，收尾路径永久挂死。实测：假 Sandbox（没人读管道）必挂。
 	closed    atomic.Bool
 	closeOnce sync.Once
+
+	// dispatchSeq 派发序号（见 ScriptCall.Index）。
+	dispatchSeq atomic.Int64
 }
 
 func newBridgeHost(ctx context.Context, spool string, init json.RawMessage, onCall func(context.Context, ScriptCall) ScriptResult) *bridgeHost {
@@ -597,7 +609,9 @@ func (h *bridgeHost) onLine(line string) {
 // dispatch 分派一次 call：**每次调用一个 goroutine**（脚本内 Promise.all 要真并发）
 // 回执按 id 关联、允许乱序。串行/独占语义由上层（ExecScope）决定，本层不设门。
 func (h *bridgeHost) dispatch(f Frame) {
-	call := ScriptCall{Id: f.Id, Name: f.Name, Args: f.Args}
+	// 发号必须在**本函数**（读帧协程里、按帧序调用）完成，不能挪进下面的 goroutine：
+	// 挪进去就跟着调度乱了，而这个号的全部价值就是「不受调度影响」。
+	call := ScriptCall{Id: f.Id, Name: f.Name, Args: f.Args, Index: h.dispatchSeq.Add(1)}
 	go func() {
 		// 子进程已死（超时/取消后的在途回执）时写会失败——无人可收，静默丢弃。
 		_ = h.writeReply(call, h.invoke(call))

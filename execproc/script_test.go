@@ -1553,3 +1553,68 @@ func TestExecuteScriptFrameWithCallIsNotLeakedIntoText(t *testing.T) {
 		t.Errorf("tail = %q, want 只有用户输出", tail)
 	}
 }
+
+// TestScriptCallIndexFollowsFrameOrder dispatch 发的号必须按**帧顺序**单调，且与
+// OnCall 何时被调度、回执谁先回来都无关（Phase 2 复核 F3 的机制钉子）。
+//
+// 用例形态刻意做成「到达/完成顺序必然反」：slow（脚本里第一条）在 OnCall 里等 fast
+// 跑完才返回 ⇒ 完成顺序是 fast→slow。若 Index 是「谁先跑谁拿小号」或者干脆不单调，
+// 断言立刻红；只有「在读帧处发号」才能同时满足两条。
+func TestScriptCallIndexFollowsFrameOrder(t *testing.T) {
+	requireNode(t)
+	e := New(nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	byIndex := map[int64]string{}
+	var arrived []string
+	slowArrived := make(chan struct{})
+	fastDone := make(chan struct{})
+
+	res, err := e.ExecuteScript(ctx, ScriptOpts{
+		Timeout: 20 * time.Second,
+		// 工具表（沙箱的 tools Proxy 只放行表里的名字 —— 名字不在表里连帧都发不出来）。
+		Init: json.RawMessage(`{"tools":[{"name":"slow_call","rawName":"slow_call"},` +
+			`{"name":"fast_call","rawName":"fast_call"}]}`),
+		Script: "const a = tools.slow_call({});\n" +
+			"const b = tools.fast_call({});\n" +
+			"const [ra, rb] = await Promise.all([a, b]);\n" +
+			"return ra + '/' + rb;",
+		OnCall: func(_ context.Context, c ScriptCall) ScriptResult {
+			mu.Lock()
+			byIndex[c.Index] = c.Name
+			arrived = append(arrived, c.Name)
+			mu.Unlock()
+			switch c.Name {
+			case "slow_call":
+				close(slowArrived)
+				<-fastDone // 等第二条先返回：证明两者真并发、且顺序信息不来自调度
+				return ScriptResult{Value: json.RawMessage(`"slow"`)}
+			case "fast_call":
+				<-slowArrived // 反序保护：确保 slow 先登记
+				close(fastDone)
+				return ScriptResult{Value: json.RawMessage(`"fast"`)}
+			}
+			return ScriptResult{IsError: true, Value: json.RawMessage(`"unexpected"`)}
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteScript: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("脚本没跑完: exit=%d text=%q", res.ExitCode, res.Text)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := byIndex[1]; got != "slow_call" {
+		t.Errorf("Index=1 是 %q, want slow_call（脚本里第一条发起的）—— 号没在读帧处发？实测映射 %v", got, byIndex)
+	}
+	if got := byIndex[2]; got != "fast_call" {
+		t.Errorf("Index=2 是 %q, want fast_call；实测映射 %v", got, byIndex)
+	}
+	// 否定控制：完成顺序确实是反的（fast 先返回），否则这条用例不构成对「调度无关」的证明。
+	if len(arrived) != 2 || arrived[0] != "slow_call" {
+		t.Logf("到达顺序 = %v（本机调度恰好正序，用例仍有效但没覆盖反序路径）", arrived)
+	}
+}

@@ -45,9 +45,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -174,6 +176,7 @@ func (t *Tool) Call(ctx context.Context, _ string, args string) (string, error) 
 		pending: pending,
 		scope:   tools.NewExecScope(events.NestedRecorderFrom(ctx), 0),
 		cancels: map[int64]context.CancelFunc{},
+		turns:   newTurnGate(),
 	}
 	defer br.close()
 
@@ -221,6 +224,9 @@ type bridge struct {
 	mu      sync.Mutex
 	seq     int64
 	cancels map[int64]context.CancelFunc
+
+	// turns 写类调用的保序门（F3）：按脚本侧调用序号放行，票号缺失则退回到达序。
+	turns *turnGate
 
 	// pendingMu 串行化对 pending 的读写。
 	//
@@ -291,6 +297,12 @@ func (b *bridge) untrack(id int64) {
 
 // onCall 沙箱发起的每一次调用（传输层每个 call 一个 goroutine，回执允许乱序）。
 func (b *bridge) onCall(ctx context.Context, c execproc.ScriptCall) execproc.ScriptResult {
+	// 保序门（F3）：**所有**帧都要登记「到场 / 跑完」（含保留操作与被拒的调用）——
+	// 少登记一个，后面票号更大的写类调用就会永远等它（见 serial.go 的三处纪律）。
+	seq := scriptSeq(c)
+	b.turns.arrive(seq)
+	defer b.turns.done(seq)
+
 	// 保留名先判：它们带 `$codemode:` 前缀，而归一化会把冒号变成下划线，故与目录表里的
 	// 名字不可能撞（见 protocol.go）。
 	if op, ok := reservedOp(c.Name); ok {
@@ -300,7 +312,7 @@ func (b *bridge) onCall(ctx context.Context, c execproc.ScriptCall) execproc.Scr
 	if err != nil {
 		return scriptError(err)
 	}
-	return b.runTool(ctx, raw, c.Args)
+	return b.runTool(ctx, raw, c.Args, seq)
 }
 
 // resolve 把脚本侧名字解析成引擎内 raw 名：**只认目录表**（纪律见文件头）。
@@ -320,7 +332,9 @@ func (b *bridge) resolve(name string) (string, error) {
 }
 
 // runTool 派发一次子调用。
-func (b *bridge) runTool(ctx context.Context, raw string, args json.RawMessage) execproc.ScriptResult {
+// runTool 派发一次子调用。seq 是**写类保序**的票号（F3，见 scriptSeq）—— 0 表示拿不到
+// 票号（直接构造 ScriptCall 的调用面），此时不排队、行为退回到达序。
+func (b *bridge) runTool(ctx context.Context, raw string, args json.RawMessage, seq int64) execproc.ScriptResult {
 	// 墙钟预算：到点后不再发起**新**调用（在跑的那些由 runCtx 取消级联打断）。
 	// 文案与 tools.ExecScope.Enter 的预算拒绝保持同一口径（同一件事不该有两种说法）。
 	if b.clock.expired() {
@@ -340,11 +354,31 @@ func (b *bridge) runTool(ctx context.Context, raw string, args json.RawMessage) 
 	if tl := b.byRaw[raw]; tl != nil {
 		exclusive = !tl.CanParallel()
 	}
+
+	// 保序（对抗复核 F3）：Acquire 只保证**互斥**、不保证**脚本次序** —— 写类帧各有一个
+	// goroutine，谁先抢到锁取决于调度，实测 20 次里 13 次反序（脚本先 write_file 后
+	// edit_file 变成先改后写）。票号取脚本侧的调用序号（ScriptCall.Id = String(++seq)，
+	// 单次执行内单调），**必须排在 Acquire 之前**：先持锁再等更早的票就是死锁。
+	// 写类调用在此等「更早的票号都到场且跑完」；票号缺失（<=0）时直通（退回到达序）。
+	// 登记/注销在 onCall 里做（所有帧无差别），这里只负责**等**。
+	if exclusive {
+		b.turns.waitTurn(seq, ctx)
+	}
+
 	// inherited 恒为 false：它表达的是「**祖先帧**是否已持锁」，而脚本不可能嵌套脚本
 	// （codemode 自己是 model-only + core.NestedMaxDepth=1），故本作用域内的所有帧都是
 	// 平级兄弟 —— 兄弟之间必须过闸，那正是这里要做的串行化。
 	release := b.scope.Acquire(exclusive, false)
 	defer release()
+
+	// 等到闸/锁的这段时间里，脚本可能已经被墙钟杀掉或用户取消（对抗复核 F4）：引擎不会替
+	// 你拦（它只把 ctx 传下去，而写类工具真的会执行），于是一条**排在门后**的写类调用会在
+	// TIMEOUT 之后产生真实副作用，且它不出现在任何工具事件里（转录上完全看不见）——
+	// 比直接报错糟得多。故取到门后先复查，再进引擎。
+	if ctx.Err() != nil || b.clock.expired() {
+		return scriptError(fmt.Errorf("script is no longer running (wall-clock limit %s reached or "+
+			"the call was canceled while it waited its turn); nothing was executed", b.clock.limit()))
+	}
 
 	b.mu.Lock()
 	b.seq++
@@ -457,6 +491,27 @@ func (b *bridge) opStore(args json.RawMessage) execproc.ScriptResult {
 //
 // 为什么读文件与校验格式在宿主：沙箱只递路径；非法图片必须**在这里**就被拒掉 ——
 // 一个坏块写进对话历史会让之后每一个请求失败（设计文档 §20.3 / pi #10215）。
+// scriptSeq 取本次调用的**保序票号**（F3）。两级来源，语义不同，顺序不可换：
+//
+//  1. `ScriptCall.Index`（传输层按**帧到达顺序**发的号，读帧协程里发 —— 不受调度影响）。
+//     这才是「脚本先发起先执行」的权威：帧是脚本按顺序写出来的，读到它们的顺序就是脚本
+//     顺序。刻意在**读帧处**发号而不是在 OnCall 里发，否则发号本身就被调度打乱了。
+//  2. `ScriptCall.Id`（沙箱的 `String(++seq)`，豆脚本顺序）—— 兜底：调用面直接构造
+//     ScriptCall（单测、未来的第二个传输后端）时没有 Index，用它仍能排序。
+//
+// 都拿不到（<=0）时返回 0，turnGate 不排队，行为退回「只互斥不保序」——宁可退化，
+// 也不能因为一个缺失的票号把调用卡死。
+func scriptSeq(c execproc.ScriptCall) int64 {
+	if c.Index > 0 {
+		return c.Index
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(c.Id), 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
 func (b *bridge) opImage(ctx context.Context, args json.RawMessage) execproc.ScriptResult {
 	var req imageRequest
 	if err := json.Unmarshal(args, &req); err != nil {
@@ -466,21 +521,35 @@ func (b *bridge) opImage(ctx context.Context, args json.RawMessage) execproc.Scr
 	if path == "" {
 		return scriptError(errors.New("codemode image: path is empty"))
 	}
+	// 宿主读盘策略（对抗复核 F1/R2）：沙箱与文件工具都拒绝 ~/.go-code（settings.json
+	// 可能含 api_key），而这里是**宿主**在读 —— 不判的话脚本能让宿主把受保护目录里的
+	// 图片直接送进模型上下文。
+	if reason := denyHostRead(path); reason != "" {
+		return scriptError(fmt.Errorf("codemode image: %s", reason))
+	}
 	st, err := os.Stat(path)
 	if err != nil {
-		return scriptError(fmt.Errorf("codemode image: %s is not readable: %w", path, err))
+		// 文案刻意不带 errno 细节里的尺寸/存在性区分之外的东西，也不回显路径以外的信息。
+		return scriptError(fmt.Errorf("codemode image: %s is not readable", path))
 	}
 	if st.IsDir() {
 		return scriptError(fmt.Errorf("codemode image: %s is a directory", path))
 	}
-	if st.Size() > maxImageFileBytes {
-		return scriptError(fmt.Errorf("codemode image: %s is %d bytes, over the %d-byte limit "+
-			"for an embedded image - downscale it first and pass the smaller file",
-			path, st.Size(), maxImageFileBytes))
+	// 必须是**普通文件**（对抗复核 F2）：FIFO/字符设备的 st.Size() 恒为 0，会绕过下面的
+	// 体积闸门，而 os.ReadFile 在 FIFO 上会一直阻塞 —— 沙箱被杀之后宿主这条 goroutine
+	// 还卡在 read 里（fd + goroutine 泄漏，ExecuteScript 早已返回）。
+	if !st.Mode().IsRegular() {
+		return scriptError(fmt.Errorf("codemode image: %s is not a regular file "+
+			"(pipes and devices cannot be embedded)", path))
 	}
-	data, err := os.ReadFile(path)
+	if st.Size() > maxImageFileBytes {
+		return scriptError(fmt.Errorf("codemode image: file is over the %d-byte limit "+
+			"for an embedded image - downscale it first and pass the smaller file",
+			maxImageFileBytes))
+	}
+	data, err := readImageBounded(path)
 	if err != nil {
-		return scriptError(fmt.Errorf("codemode image: reading %s failed: %w", path, err))
+		return scriptError(fmt.Errorf("codemode image: %s", err))
 	}
 	mime, ok := sniffImageMIME(data)
 	if !ok {
@@ -502,6 +571,40 @@ func (b *bridge) opImage(ctx context.Context, args json.RawMessage) execproc.Scr
 // 检索质量如实说：这是「子串/词命中 + 名字权重」的打分，不是 BM25（pi 的 Bm25Ranker
 // 排在 P2-b）。它够用的场景是「我记得有个工具叫 xxx / 描述里有 yyy」；不够用的是同义词
 // 与语义相近的查询。放在宿主侧正是为了将来换算法不动沙箱。
+// readImageBounded 读图片文件，带上限。
+//
+// 为什么不用 os.ReadFile（对抗复核 F2 的第二半）：
+//   - 打开后再 fstat 一次（判断的是**真的那个 fd**，不是先前 stat 的路径）；
+//   - 用 LimitReader 限死内存：即便路径在 Stat 与打开之间被换成别的东西（TOCTOU），
+//     也不会把宿主内存吃爆。读满上限即判失败，不做「读一半当图片」的降级。
+//
+// 星号依旧在：这个检查挡不住「打开时才变成 FIFO」的竞态（那会卡在 open 上）——闭合它
+// 需要 O_NONBLOCK 打开，而本仓没有这个先例（各处都是 Stat + IsRegular），代价与收益
+// 不成比例（要赢微秒级竞态；且内容仍须过 magic bytes 才可能进模型上下文）。已记录 §7.18。
+func readImageBounded(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not readable", path)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("%s is not readable", path)
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file (pipes and devices cannot be embedded)", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxImageFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s failed", path)
+	}
+	if len(data) > maxImageFileBytes {
+		return nil, fmt.Errorf("file is over the %d-byte limit for an embedded image - "+
+			"downscale it first and pass the smaller file", maxImageFileBytes)
+	}
+	return data, nil
+}
+
 func (b *bridge) opSearch(args json.RawMessage) execproc.ScriptResult {
 	var req searchRequest
 	if err := json.Unmarshal(args, &req); err != nil {
@@ -770,11 +873,26 @@ func storeFailureNote(err error) string {
 // 返回（结果文本, 是否截断, spill 路径）。
 func (b *bridge) budget(ctx context.Context, text string, so ScriptOptions) (string, bool, string) {
 	budgetBytes := so.OutputTokens() * charsPerToken
-	if budgetBytes <= 0 || len(text) <= budgetBytes {
+	if len(text) <= budgetBytes {
 		return text, false, ""
 	}
+	// 结局面（第一行）**永不被截断**：§6.5 要求「结局声明必须在首行」，而模型的
+	// `max_output_tokens` 可以小到 0（正文写明的取值域 0-200000）—— 预算为 0 时它的语义是
+	// 「只回结局声明」（对抗复核 F5）。此前 `budgetBytes<=0` 被当成「**不限**」，而本工具
+	// `SkipTruncate=true`（引擎的 20 KB 兜底已被豁免）⇒ 声明 0 反而把任意大的输出直接灌进
+	// 上下文且不 spill，是**fail-open**；现在最大的一头改成「保首行 + 其余进 spill」。
+	protected := len(text)
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		protected = i + 1
+	}
 	head := budgetBytes / 2
+	if head < protected {
+		head = protected
+	}
 	tail := budgetBytes - head
+	if tail < 0 {
+		tail = 0
+	}
 	headCut := cutAtRuneBoundary(text, head, false)
 	tailStart := cutAtRuneBoundary(text, len(text)-tail, true)
 	if tailStart < headCut {
