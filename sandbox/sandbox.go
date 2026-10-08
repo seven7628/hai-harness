@@ -43,8 +43,13 @@ type ExecSpec struct {
 	// 都能把脚本改坏。此前本仓 run_python 因此只能「写临时文件再执行」
 	//（tools/builtin/run_python.go:31-33 记录了这一限制）。
 	//
-	// 零值不变式是本字段的设计约束：所有现有调用方不设Stdin，runExec 不碰
-	// cmd.Stdin，行为完全不变。
+	// 零值不变式是本字段的设计约束：所有现有调用方不设 Stdin，接线点只有
+	// runExec 里的一个 if，行为完全不变。
+	//
+	// **接线点必须在 runExec**（NoSandbox/Seatbelt 共用的骨架），不能只改某一个
+	// 后端的 Run：漏掉的那一侧会静默丢弃脚本源码 —— 子进程读到 EOF 当成「空脚本」
+	// 跑完并返回 exit 0，调用方看到的是「成功但什么都没输出」，排查成本极高。
+	// 由 TestExecSpecStdinFeedsSeatbelt 钉住（曾只接 NoSandbox）。
 	Stdin io.Reader
 }
 
@@ -69,9 +74,6 @@ type NoSandbox struct{}
 // Run 执行 sh -c 命令（进程隔离语义：非零退出并入文本返回）。
 func (NoSandbox) Run(ctx context.Context, spec ExecSpec) (string, error) {
 	cmd := exec.Command("sh", "-c", spec.Command)
-	if spec.Stdin != nil {
-		cmd.Stdin = spec.Stdin
-	}
 	cmd.Dir = spec.Cwd
 	cmd.Env = isolatedEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // 独立进程组
@@ -168,6 +170,11 @@ func runExec(ctx context.Context, cmd *exec.Cmd, spec ExecSpec) (string, error) 
 	var out lockedBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
+	// ExecSpec.Stdin 的统一接线点（两个后端共用本骨架）：nil = 不碰 cmd.Stdin
+	// （os/exec 把子进程 stdin 接到 /dev/null，即本字段加入前的行为）。
+	if spec.Stdin != nil {
+		cmd.Stdin = spec.Stdin
+	}
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}

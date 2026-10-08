@@ -121,3 +121,63 @@ func (*neverClosingReader) Read(p []byte) (int, error) {
 	time.Sleep(50 * time.Millisecond)
 	return 0, nil
 }
+
+// ---- Seatbelt 后端：同一个接线点必须同样生效（darwin 专有，其余平台 skip）----
+
+// seatbeltOrSkip 构造一个可用的 Seatbelt 后端；不可用（非 darwin / 无
+// sandbox-exec / 策略探测失败）时跳过 —— 本文件在非 macOS 也要能编译通过。
+func seatbeltOrSkip(t *testing.T) *Seatbelt {
+	t.Helper()
+	if !Available() {
+		t.Skip("sandbox-exec 不可用（非 darwin 或未安装），跳过真实沙箱用例")
+	}
+	s, err := NewSeatbelt(t.TempDir())
+	if err != nil {
+		t.Skipf("Seatbelt 构造失败（本环境不支持真实沙箱）: %v", err)
+	}
+	return s
+}
+
+// TestExecSpecStdinFeedsSeatbelt Stdin 必须经 runExec 统一接线，**两个后端都要生效**。
+//
+// 回归背景：接线点曾只写在 NoSandbox.Run 里，Seatbelt 侧静默丢弃 Stdin ——
+// `cat` 读到 EOF 立即返回空输出，`node --input-type=module -` 会当成空脚本跑完并
+// 返回 exit 0：调用方看到的是「成功但没有任何输出」。而 codemode 的脚本正是经 stdin
+// 喂进去的，且执行器被设计为注入「与 bash 同一个 sandbox 实例」
+// （desktop/bridge/main.go 在 sandbox mode = seatbelt 时就是这条路径）。
+func TestExecSpecStdinFeedsSeatbelt(t *testing.T) {
+	s := seatbeltOrSkip(t)
+	out, err := s.Run(context.Background(), ExecSpec{
+		Command: "cat",
+		Stdin:   strings.NewReader("stdin-payload-marker"),
+		Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "stdin-payload-marker") {
+		t.Fatalf("out = %q, want it to contain the stdin payload（Seatbelt 未转发 ExecSpec.Stdin）", out)
+	}
+}
+
+// TestExecSpecStdinNilIsOldBehaviorSeatbelt 零值不变式在 Seatbelt 侧同样成立：
+// Stdin==nil 不接 stdin，且不因「等输入」挂死。
+func TestExecSpecStdinNilIsOldBehaviorSeatbelt(t *testing.T) {
+	s := seatbeltOrSkip(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		out, err := s.Run(context.Background(), ExecSpec{Command: "echo nil-stdin-ok", Timeout: 10 * time.Second})
+		if err != nil {
+			t.Errorf("Run: %v", err)
+		}
+		if !strings.Contains(out, "nil-stdin-ok") {
+			t.Errorf("out = %q, want 'nil-stdin-ok'", out)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Seatbelt Run with nil Stdin hung")
+	}
+}
