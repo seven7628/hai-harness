@@ -1,14 +1,15 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
-import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings } from '../transport/types'
+import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
-import type { CheckpointView } from './checkpoint'
+import type { CheckpointView, CheckpointNestedCall } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
 import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
 import { visualKindOf, isVisualPath } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
+import { parseNestedCalls, spillPathFrom, type NestedCallView } from '../lib/codemodeNested'
 import { t as i18nT } from '../i18n'
 
 export type RightTab = 'activity' | 'git' | 'agent' | 'file' | 'web'
@@ -265,6 +266,7 @@ export interface MCPProjectServer {
   url?: string
   env?: Record<string, string>
   enabled: boolean
+  exposure?: string // 暴露档位（空 = 未声明，有效档由引擎侧解析，见 MCPServerCfg.exposure）
   file: string // 定义文件：.mcp.json（只读）| .go-code/settings.json（可编辑）
   editable: boolean
   state?: string // 连接状态（仅该项目有运行态时出现）
@@ -473,7 +475,9 @@ export interface CompressionInfo {
 export type MsgBlock =
   | { kind: 'user'; id: number; text: string; ts?: number; contents?: QueuedContent[]; refs?: RefLoadInfo[] } // contents = 附件（图片等；对话页渲染缩略图）；refs = @引用展开结果（refs_loaded 事件，对话页状态行）
   | { kind: 'assistant'; id: number; text: string; streaming: boolean; model?: string; runId?: string; thinking: string; thinkMs?: number; ttftMs?: number; durMs?: number; agentDurMs?: number; thinkStart?: number; outputTokens?: number; reasoningTokens?: number; thinkingSummarized?: boolean; genMs?: number; ts?: number }
-  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg }
+  // 工具块：nestedCalls = 编排型工具（codemode）脚本内的嵌套调用清单（外层结果自带，
+  // 子调用**不生成**自己的工具块）；spillPath = 完整输出落盘路径（缺失时渲染层不显示该行）。
+  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string }
   | { kind: 'agent'; id: number; runId: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean }
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
   | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
@@ -608,7 +612,9 @@ export interface PendingRelease {
 export type AgentItem =
   | { kind: 'text'; text: string; error?: boolean } // error=true = LLM 失败/上下文超限提示（卡片内醒目显示）
   | { kind: 'thinking'; text: string; thinkStart?: number }
-  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg }
+  // tool 项：nestedCalls / spillPath 仅编排型工具（codemode）有 —— 脚本内的嵌套调用清单与
+  // 完整输出落盘路径（来源与语义见 lib/codemodeNested.ts；嵌套调用自身没有工具行）。
+  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string }
   | { kind: 'compression'; before: number; after: number; ctxTokens?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
 
 // PriceRefreshSummary refresh_prices 结果摘要（UI toast 用；字段对齐 bridge 响应）
@@ -2585,6 +2591,7 @@ interface AppState {
   setCronDetail(open: boolean): void // 详情子页开关
   deleteCron(id: string): void // 删除任务（cron_delete；cron_changed 后自动刷新）
   updateCron(id: string, patch: { prompt?: string; cron?: string; recurring?: boolean; paused?: boolean }): void // 编辑任务（cron_update；paused=true 暂停 / false 恢复）
+  setCodemodeEnabled(on: boolean): void // codemode 开关（乐观 + 持久化 + bridge 重建：注册/移除 codemode 工具）
   setCronEnabled(on: boolean): void // 定时任务开关（乐观 + 持久化 + bridge 重建：加载/卸载 cron 工具）
   setCronAutoClean(on: boolean): void // 自动清理开关（乐观 + 持久化）
   setMeshSessionEnabled(on: boolean): void // Session Mesh C1 开关（乐观 + 持久化 + bridge 热重载：加载/卸载 session_* 工具）
@@ -4622,6 +4629,13 @@ export function dispatchEvent(raw: AnyEvent): void {
       const taskId = String(raw.task_id || '') // 工具任务 id（promote 关联锚；无 = 旧版/无批任务）
       const startTs = evTs(raw) ?? Date.now() // 工具开始时刻（事件时间戳，结算 durMs 用，重放可重建）
       const startClient = Date.now() // 客户端接收时刻（实时时钟锚点：从「接收到 Start」起走，重放不虚高）
+      // —— 嵌套子调用（parent_call_id 非空）**不生成独立工具行** ——
+      // 设计文档 §17 第一条：编排型工具（codemode）脚本内发起的调用不是模型发起的工具调用，
+      // 宿主必须吞掉带 parent 的事件（pi renderer.ts:69-94 的 `if (event.parentToolCallId) break`），
+      // 它们的可见性由外层结果的 nested_calls 清单承担（见 tool_response / ToolNestedCalls）。
+      // 今天引擎还不发嵌套工具事件（IMPLEMENTATION-SPEC §6.2.3：Phase 2 才接 `ExecuteOne` 的
+      // 事件转发），这里钉的是**契约**：引擎一开始发，宿主就必须已经是对的。
+      if (raw.parent_call_id) break
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         const isSub = runId ? isSubAgentRun(v, runId) : false
@@ -4940,19 +4954,30 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 普通工具不花模型钱，全零 → undefined（不留空白用量位）。同源展示：主对话工具行
       // 与子 agent 卡片内的工具项都据此显示 tokens + 成本。
       const callUsage = taskUsageFromEvent(raw.usage as RawUsage | undefined)
+      // 编排型工具（codemode）自带的两样展示数据（其它工具恒 undefined，零影响）：
+      //   · nestedCalls：脚本内发生的子调用逐条摘要（有界，见 core.NestedRecorder）；
+      //   · spillPath：完整输出落盘路径（结果里点名；取不到就不显示那一行）。
+      const nestedCalls = parseNestedCalls(raw.nested_calls)
+      const spillPath = spillPathFrom(toolResult, raw.structured) || undefined
+      // 嵌套子调用（parent_call_id 非空）：**不改动任何工具行**（见 tool_start 处的契约注释）——
+      // 子调用的明细已经在外层 codemode 结果的 nested_calls 里了，再建一行就是重复且来路不明。
+      // 但会话级的事实照常入档（见下方 nested 分支）：文件变更 / 待办快照是真实发生的副作用，
+      // 审批 / 提问 / 沙箱放行弹窗按 toolId 清除，否则脚本里的子调用会让弹窗永久残留。
+      const nested = Boolean(raw.parent_call_id)
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         const started = v.toolStartTs[toolId]
         const durMs = started ? (evTs(raw) ?? Date.now()) - started : undefined
         const isSub = runId ? isSubAgentRun(v, runId) : false
-        const blocks = isSub && runId
+        // 工具行/子 agent 卡片内的工具项更新（原样计算）—— 嵌套子调用在下方整段跳过。
+        const mappedBlocks = isSub && runId
           ? v.blocks.map((b) =>
               b.kind === 'agent' && b.runId === runId
                 ? {
                     ...b,
                     items: b.items.map((it) =>
                       it.kind === 'tool' && it.toolId === toolId
-                        ? { ...it, status: (raw.is_error ? 'error' : 'done') as Extract<AgentItem, { kind: 'tool' }>['status'], result: toolResult, errorInfo, durMs, diff: raw.diff ? pickDiff(raw.diff) : undefined, images: pickImages(raw.images), ...(callUsage ? { usage: callUsage } : {}) }
+                        ? { ...it, status: (raw.is_error ? 'error' : 'done') as Extract<AgentItem, { kind: 'tool' }>['status'], result: toolResult, errorInfo, durMs, diff: raw.diff ? pickDiff(raw.diff) : undefined, images: pickImages(raw.images), ...(callUsage ? { usage: callUsage } : {}), ...(nestedCalls ? { nestedCalls } : {}), ...(spillPath ? { spillPath } : {}) }
                         : it,
                     ),
                   }
@@ -4979,6 +5004,8 @@ export function dispatchEvent(raw: AnyEvent): void {
                   taskStatus: (b.interrupting ? 'interrupted' : 'completed') as AsyncTaskStatus,
                   ...(callUsage ? { usage: callUsage } : {}),
                   ...(Array.isArray(raw.todos) ? { todos: raw.todos as TodoItem[] } : {}),
+                  ...(nestedCalls ? { nestedCalls } : {}),
+                  ...(spillPath ? { spillPath } : {}),
                 }
               }
               return {
@@ -4995,8 +5022,13 @@ export function dispatchEvent(raw: AnyEvent): void {
                 // 历史计划卡据此渲染当时状态，而不是永远跟随 store 最新列表（否则每张
                 // 卡都显示最终态，多次更新看起来一模一样）。
                 ...(Array.isArray(raw.todos) ? { todos: raw.todos as TodoItem[] } : {}),
+                // 编排型工具（codemode）：脚本内嵌套调用清单 + 完整输出落盘路径。
+                // 同一次响应的重复投递用同一份值覆盖（幂等，不追加）。
+                ...(nestedCalls ? { nestedCalls } : {}),
+                ...(spillPath ? { spillPath } : {}),
               }
             })
+        const blocks = nested ? v.blocks : mappedBlocks
         const toolStartTs = { ...v.toolStartTs }
         delete toolStartTs[toolId]
         const upd = setView(s, sid, {
@@ -5004,11 +5036,13 @@ export function dispatchEvent(raw: AnyEvent): void {
           blocks,
           toolStartTs,
           diffs: raw.diff ? [...v.diffs, pickDiff(raw.diff)!] : v.diffs,
-          runNodes: v.runNodes.map((n) =>
-            n.id === `tool-${toolId}`
-              ? { ...n, status: (raw.is_error ? 'error' : 'done') as RunNode['status'], result: toolResult, isError: Boolean(raw.is_error), errorInfo, durMs }
-              : n,
-          ),
+          runNodes: nested
+            ? v.runNodes
+            : v.runNodes.map((n) =>
+                n.id === `tool-${toolId}`
+                  ? { ...n, status: (raw.is_error ? 'error' : 'done') as RunNode['status'], result: toolResult, isError: Boolean(raw.is_error), errorInfo, durMs }
+                  : n,
+              ),
           todos: Array.isArray(raw.todos) ? (raw.todos as TodoItem[]) : v.todos,
           approvals: v.approvals.filter((a) => a.id !== toolId),
           // ask_user 工具结束（回答/超时/打断）→ 清除提问（modal 关闭；避免超时后残留）
@@ -5815,10 +5849,13 @@ function cpAgentItem(it: {
   before?: number; after?: number; ctx_tokens?: number; reason?: string; model?: string; summary?: string
   usage?: { input?: number; output?: number; cache_read?: number; cacheRead?: number; cache_write?: number; cacheWrite?: number; cache_write_1h?: number; cacheWrite1h?: number; reasoning?: number; cost_usd?: number; costUsd?: number }
   error?: string; aborted?: boolean; active?: boolean; analysis?: string
+  nested_calls?: CheckpointNestedCall[]
 }): AgentItem {
   if (it.kind === 'text') return { kind: 'text', text: it.text ?? '', error: it.is_error === true }
   if (it.kind === 'thinking') return { kind: 'thinking', text: it.text ?? '', ...(it.think_start != null ? { thinkStart: it.think_start } : {}) }
   if (it.kind === 'tool') {
+    const cpNested = parseNestedCalls(it.nested_calls)
+    const cpSpill = spillPathFrom(it.result ?? '')
     return {
       kind: 'tool', toolId: it.tool_id ?? '', name: it.name ?? '', args: it.args,
       images: pickImages(it.images),
@@ -5829,6 +5866,9 @@ function cpAgentItem(it: {
       diff: it.diff ? cpDiff(it.diff) : undefined,
       // 本次调用用量（仅子 agent 类工具非零）：恢复后卡片内工具项仍显示 tokens/成本
       ...(it.usage && (it.usage.input || it.usage.output || it.usage.cost_usd) ? { usage: cpUsage(it.usage) } : {}),
+      // 编排型工具（codemode）的嵌套调用清单：子 agent 转录里的脚本行同样要能展开清单
+      ...(cpNested ? { nestedCalls: cpNested } : {}),
+      ...(cpSpill ? { spillPath: cpSpill } : {}),
     }
   }
   // compression
@@ -5877,7 +5917,9 @@ function checkpointToView(cp: CheckpointView): SessionView {
           ...(b.ts != null ? { ts: b.ts } : {}),
         })
         break
-      case 'tool':
+      case 'tool': {
+        const cpNested = parseNestedCalls(b.nested_calls)
+        const cpSpill = spillPathFrom(b.result ?? '')
         blocks.push({
           kind: 'tool', id: b.id, toolId: b.tool_id ?? '', name: b.name ?? '', args: b.args,
           result: b.result, diff: b.diff ? cpDiff(b.diff) : undefined,
@@ -5891,8 +5933,15 @@ function checkpointToView(cp: CheckpointView): SessionView {
           ...(b.todos?.length ? { todos: b.todos.map(cpTodo) } : {}),
           // 任务用量（promoted 工具任务：TaskEnd 写入 checkpoint）——恢复后卡片仍显示成本
           ...(b.usage && (b.usage.input || b.usage.output || b.usage.cost_usd) ? { usage: cpUsage(b.usage) } : {}),
+          // 编排型工具（codemode）的嵌套调用清单：恢复后行内清单不消失（Go 侧同名字段）。
+          // 旧 checkpoint（追加字段之前）没有它 → 为空即不渲染，行为与从前一致。
+          ...(cpNested ? { nestedCalls: cpNested } : {}),
+          // spill 路径是**文本里的事实**（它本身没进 checkpoint schema）：从结果原文提取，
+          // 旧会话重放同样有效；取不到就不显示那一行。
+          ...(cpSpill ? { spillPath: cpSpill } : {}),
         })
         break
+      }
       case 'agent': {
         const artItems = pickArtifacts(b.artifacts)
         blocks.push({
@@ -8050,6 +8099,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateCron: (id, patch) => {
     send({ type: 'cron_update', payload: { id, ...patch } })
     get().fetchCron()
+  },
+  // codemode（脚本编排工具，Wave 3）：乐观更新 + 落盘 + bridge 重载。
+  // 为什么必须 reload_settings：工具注册发生在 newSessionEngine（loop 重建），
+  // 且 MCP「未声明档位」的默认落点也随这个开关在重载时重算（§7.11）。
+  setCodemodeEnabled: (on) => {
+    const cur: CodemodeSettings = get().settings.codemode ?? { enabled: false, mode: 'on' }
+    const next: CodemodeSettings = { ...cur, enabled: on }
+    set((s) => ({ settings: { ...s.settings, codemode: next } }))
+    void transport.settingsSet({ codemode: next }).then((r) => {
+      if (!r.ok) return // 写盘失败：不通知 bridge（避免"未持久化却热生效"的假成功）
+      send({ type: 'reload_settings', payload: {} })
+    })
   },
   // 定时任务开关：乐观更新 + 落盘 + bridge 重载（重建 loop：加载/卸载 cron 工具）
   setCronEnabled: (on) => {

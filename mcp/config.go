@@ -39,6 +39,57 @@ type ServerConfig struct {
 	URL     string            `json:"url,omitempty"` // http/sse 端点
 	// Enabled 显式关闭（false）：工具不注册、不连接。nil = 默认启用。
 	Enabled *bool `json:"enabled,omitempty"`
+	// Exposure 该 server 全部工具的暴露档位（config 层词汇，与引擎档 tools.ToolExposure
+	// 是两套，折法见 mcp/tool.go 的 toToolExposure）：
+	//
+	//	direct   直接声明给模型（= Claude Code 的默认行为；工具多时会撑爆工具表）
+	//	codemode 可被 codemode 脚本调用，不写进 codemode 描述（由哪个工具负责激活）
+	//	deferred 同上（两者在引擎侧**同一档**）；由 tool_search 现查
+	//	hidden   撤下（不声明、不进描述、脚本内也不可达）
+	//
+	// 空 = **未声明**（不 materialize 成具体档位）：有效档位由适配器侧解析 ——
+	// Manager.DefaultExposure（宿主的装配决策）优先，未设则落到包级出厂默认 deferred
+	// （既不进模型工具表、也不进 codemode 描述 —— 否则几十个 server 的工具描述会灌进
+	// codemode 描述并随连接/断线抖动，provider 前缀缓存当场失效 = pi #10212；设计文档 §18）。
+	//
+	// 为什么不在这里就把空写成 "deferred"：那会把「用户说了 deferred」与「用户什么都没说」
+	// 混成一件事，宿主的装配决策（激活通道未上线时该用 direct，见 Manager.DefaultExposure）
+	// 就永远轮不到 —— 而 deferred 在通道上线前等价于 MCP 对模型整体不可达。
+	//
+	// browser_* 例外、行为不变：plugin/browser 的 wrappedTool 不转发 Exposure（见其 wrapper.go）。
+	//
+	// 现状（2026-10，Wave 3 装配）：desktop/bridge 按 codemode 开关**条件化**设置它 ——
+	// codemode 激活（searchTools 可用）时 = tools.ExposureDeferred，未激活时 = tools.ExposureDirect
+	//（通道不在时落 deferred 等于把 MCP 对模型整体不可达）。见 desktop/bridge/codemode.go 的
+	// mcpDefaultExposure / applyMCPDefaultExposure 与实施规范 §7.11/§7.17。
+	Exposure string `json:"exposure,omitempty"`
+}
+
+// mcpExposureValues 配置档合法值（顺序 = 错误提示里的列举顺序）。
+var mcpExposureValues = []string{"direct", "codemode", "deferred", "hidden"}
+
+// defaultMCPExposure 出厂默认档位（见 ServerConfig.Exposure 注释）。
+const defaultMCPExposure = "deferred"
+
+// normalizeExposure 归一 + 校验 exposure 字段：空 = 保持空（未声明，有效档由适配器解析），
+// 非法值**明确报错**。
+//
+// 为什么不静默降级到 deferred：档位直接决定暴露面，一个拼写错误（"defrred"）静默按
+// deferred 处理时，用户以为自己写了 hidden（撤下）却仍可被脚本调用 —— 与 Validate 对
+// type 的口径一致（V2 P1-PROTOCOL-06）：写错的配置要么生效要么报错，不猜。
+// 代价：坏配置的 server 整条被跳过（Merge/loadFile 的既有语义），这正是「明确」的信号。
+func normalizeExposure(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return "", nil // 未声明：留给适配器解析（Manager.DefaultExposure → 包级默认）
+	}
+	for _, ok := range mcpExposureValues {
+		if v == ok {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("mcp 未知 exposure %q（支持 %s；缺省 = %s）",
+		raw, strings.Join(mcpExposureValues, "/"), defaultMCPExposure)
 }
 
 // IsEnabled 解析启用状态（缺省 true）。
@@ -64,7 +115,12 @@ func (c ServerConfig) Validate() (ServerConfig, error) {
 	default:
 		return c, fmt.Errorf("mcp 未知 type %q（支持 stdio/http/streamable_http/sse）", c.Type)
 	}
+	exp, err := normalizeExposure(c.Exposure)
+	if err != nil {
+		return c, err
+	}
 	c.Type = typ
+	c.Exposure = exp
 	return c, nil
 }
 

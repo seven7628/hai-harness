@@ -146,6 +146,7 @@ function GeneralTab() {
   const setLang = useAppStore((s) => s.setLang)
   const setSandboxMode = useAppStore((s) => s.setSandboxMode)
   const setCronEnabled = useAppStore((s) => s.setCronEnabled)
+  const setCodemodeEnabled = useAppStore((s) => s.setCodemodeEnabled)
   const setStopBackgroundOnInterrupt = useAppStore((s) => s.setStopBackgroundOnInterrupt)
   const setCronAutoClean = useAppStore((s) => s.setCronAutoClean)
   const externalSkillsStatus = useAppStore((s) => s.externalSkillsStatus)
@@ -228,6 +229,19 @@ function GeneralTab() {
         <div className="seg" role="radiogroup" aria-label={t('settings.cron')}>
           <button className={(settings.cron?.enabled ?? true) ? 'cur' : ''} aria-pressed={settings.cron?.enabled ?? true} onClick={() => setCronEnabled(true)}>{t('settings.on')}</button>
           <button className={!(settings.cron?.enabled ?? true) ? 'cur' : ''} aria-pressed={!(settings.cron?.enabled ?? true)} onClick={() => setCronEnabled(false)}>{t('settings.off')}</button>
+        </div>
+      </div>
+      {/* codemode（脚本编排工具）：默认关；开启后模型多一个「写脚本串工具」的入口，
+          且 MCP 的「未声明」档位默认落点翻成 deferred（脚本里 searchTools 现查）。
+          切换后走 reload_settings 重建 loop —— 工具注册与 MCP 档位都在装配期定型。 */}
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.codemode')}</div>
+          <div className="set-desc">{t('settings.codemode.desc')}</div>
+        </div>
+        <div className="seg" role="radiogroup" aria-label={t('settings.codemode')}>
+          <button className={(settings.codemode?.enabled ?? false) ? 'cur' : ''} aria-pressed={settings.codemode?.enabled ?? false} onClick={() => setCodemodeEnabled(true)}>{t('settings.on')}</button>
+          <button className={!(settings.codemode?.enabled ?? false) ? 'cur' : ''} aria-pressed={!(settings.codemode?.enabled ?? false)} onClick={() => setCodemodeEnabled(false)}>{t('settings.off')}</button>
         </div>
       </div>
       {/* 主停止后台任务联动（S3-B，2026-08-30 默认翻转）：默认关 = 点 Composer 停止只停主会话，

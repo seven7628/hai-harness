@@ -1004,6 +1004,20 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	mcpLoader := &mcp.Loader{}
 	mcpRes := mcpLoader.Load(mcpConfigLayers(path)...)
 	mcpm := mcp.NewManagerWithSource(mcpRes.Config, mcpRes.Source)
+	// 暴露档位默认值 = **按设置条件化**（Wave 3 §7.11 收尾）：
+	//   codemode 激活（searchTools 是 deferred 的激活通道）→ deferred：MCP 工具不占
+	//     模型工具表，改成脚本里 searchTools() 按需现查（这才是不撑爆描述的原因）；
+	//   codemode 关闭 → direct：保持既有产品口径（模型直接看到 MCP 工具）。
+	// 为什么不能无条件 deferred：通道不在时 deferred = MCP 工具对模型**整体不可达**
+	//（既不在 ToolParams，也没有任何东西能把它加载回来）—— 那是把已装好的 MCP 功能
+	// 对用户悄悄关掉。
+	//
+	// 生效时机：本值在「服务器连接、工具适配器建立」时被读走（Manager.Tools →
+	// newAdapterWithDefault），故这里（启动）+ reload_settings（紧挨 rebuildAll 之前）
+	// 两处设置它。**没有**热重注册通道（本波次明确不做）：改 codemode 段需要
+	// reload_settings 或重启桥才影响 MCP 档位；单台服务器仍可用面板的「模型可见性」
+	// 即时覆盖（mcpSet → 重连该 server）。
+	applyMCPDefaultExposure(mcpm) // 读 codemode 段 → 定档 + 打印被拒配置的警告
 	startupLog("A5.mcp.NewManager", mcpStart)
 	plgStart := time.Now()
 	plg := buildPlugins(m.imPlugin) // 插件注册表（内建 Browser Use + 全局 IM 单例）
@@ -2107,8 +2121,11 @@ func (m *manager) dispatch(c command) {
 		m.refreshComputerApprovedApps() // Computer Use 已授权 App 热更新（无需重启插件）
 		m.applyMeshSettings()           // Session Mesh 开关热更新（Hub 门 + 远程网关 + rebuildAll 对齐工具）
 		m.refreshBrowserEngine()        // Browser 引擎开关热更新（browser_engine: mcp|ego）
-		m.applySubagentConcurrency()    // 子 agent 并发槽上限热更新（settings.json agent 段）
-		m.rebuildAll()                  // 现有：重建全部 loop（兜底对齐 system 工具清单）
+		// MCP 未声明档位的默认落点随 codemode 开关走（§7.11）：必须排在 rebuildAll 之前
+		// —— 适配器在 newSessionEngine → Manager.Tools 时按这个值定型。
+		m.applyMCPDefaultExposureAllWorkspaces()
+		m.applySubagentConcurrency() // 子 agent 并发槽上限热更新（settings.json agent 段）
+		m.rebuildAll()               // 现有：重建全部 loop（兜底对齐 system 工具清单）
 		m.resp(c, true, "", nil)
 
 	case CmdMeshStatus: // 查询 Session Mesh 状态（设置页「别人怎么连我」/ 排障）
@@ -3910,6 +3927,11 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 			eng.RegisterTool(context.Background(), t)
 		}
 	}
+	// codemode（脚本编排工具，Wave 3 装配）：settings.json 的 codemode.enabled=true 才注册，
+	// 默认关闭（对齐 pi defaultActive:false）。**完全不注册**而不是注册成 hidden —— 见
+	// codemode.go 文件头。沙箱/解释器/store/工具表都在 registerCodemode 里接（与 bash、
+	// run_python 同一个 sbx 实例、同一个工作区锚）。开关热更新走 reload_settings（rebuildAll）。
+	registerCodemode(eng, workspace, sid, sbx, loadCodemodeSettingsQuiet())
 	return eng, effortRef
 }
 
