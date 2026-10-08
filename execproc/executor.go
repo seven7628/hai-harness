@@ -228,36 +228,52 @@ func mustMarshalLine(f Frame) string {
 	return frameSentinel + string(b)
 }
 
+// frameParts 一帧流里「给模型看」的三样东西（hello 版本 / 用户输出 / 脚本错误）。
+type frameParts struct {
+	hello     stdjson.Version
+	out       string
+	scriptErr string
+	sawHello  bool
+}
+
+// collectFrames 从帧流里抽取给模型看的内容（唯一实现）。
+//
+// 独立成函数是为了让 assemble（Execute）与 ExecuteScript 的 OnOutput 共用同一份口径：
+// 两处各写一遍解帧逻辑，迟早会出现「同一个帧在两条路径上被解读成不同的东西」。
+func collectFrames(frames []Frame) frameParts {
+	var p frameParts
+	for _, f := range frames {
+		switch f.Notify {
+		case notifyHello:
+			p.hello, p.sawHello = f.Version, true
+		case notifyResult:
+			if f.Out != "" {
+				if p.out != "" {
+					p.out += "\n"
+				}
+				p.out += f.Out
+			}
+		case notifyError:
+			if p.scriptErr == "" {
+				p.scriptErr = strings.TrimSpace(f.Msg)
+			}
+		}
+	}
+	return p
+}
+
 // assemble 把协议帧 + sandbox 尾巴组装成给模型的文本。
 //
 // 为什么**不**在超时时保留部分输出之外还强调什么：形态逐字对齐 bash 工具，
 // 这样模型在 bash 与 codemode 两个工具上看到的是同一套「首行声明 + 后续输出」
 // 的读法，不需要学第二种。
 func assemble(frames []Frame, tail string, res RunResult) (stdjson.Version, string) {
-	var hello stdjson.Version
-	var out, scriptErr string
-	sawHello := false
-	for _, f := range frames {
-		switch f.Notify {
-		case notifyHello:
-			hello, sawHello = f.Version, true
-		case notifyResult:
-			if f.Out != "" {
-				if out != "" {
-					out += "\n"
-				}
-				out += f.Out
-			}
-		case notifyError:
-			if scriptErr == "" {
-				scriptErr = strings.TrimSpace(f.Msg)
-			}
-		}
-	}
+	p := collectFrames(frames)
+	hello, out, scriptErr := p.hello, p.out, p.scriptErr
 	// 没握手成功：prelude 都没起来（node 崩溃/被杀/旗标不被支持）。此时**不**把
 	// 整段 raw 灌给模型 —— 那可能是 Node 的 V8 崩溃栈，噪声远大于信息；
 	// 但也不能什么都不说（模型会以为脚本静默失败），故给一句可行动的判断。
-	if !sawHello {
+	if !p.sawHello {
 		return hello, "the sandbox runtime produced no handshake — the script never started.\n" +
 			"tail: " + truncate(tail, 500)
 	}
@@ -354,17 +370,24 @@ func (e *Executor) timeout() time.Duration {
 //   - `-`：从 stdin 读脚本源码。这是本包不落盘的根据（见包注释取舍 1）。
 //   - `--import`：注入 prelude（见 prelude.js 头注）。
 func (e *Executor) command(n NodeInfo) string {
+	return e.nodePrefix(n, e.maxOldSpaceMB()) +
+		" --import " + shellQuote(preludeDataURL()) +
+		" --input-type=module -"
+}
+
+// nodePrefix 命令行的公共前缀：解释器路径 + 堆上限旗标。
+//
+// 抽出来给两条执行路径共用（Execute 走 stdin 脚本；ExecuteScript 走临时文件 + 桥接）：
+// 堆上限与路径转义这两件事必须只有一份实现，否则「哪条路径少了一个 --max-old-space-size」
+// 会变成一条静默的隔离降级（对照 TestCommandCarriesMaxOldSpaceFlag 的变异说明）。
+func (e *Executor) nodePrefix(n NodeInfo, mb int) string {
 	var b strings.Builder
 	b.WriteString(shellQuote(n.Path))
-	if mb := e.maxOldSpaceMB(); mb > 0 {
+	if mb > 0 {
 		// --max-old-space-size 是 V8 的**堆**上限：脚本 OOM 时 Node 自己 abort，
 		// 宿主存活，且退出码与 stderr 文本足以让模型看懂是「分配超限」。
 		fmt.Fprintf(&b, " --max-old-space-size=%d", mb)
 	}
-	// data: URL 整段单引号包裹：base64 字母表（[A-Za-z0-9+/=]）不含单引号，
-	// 故这一层包裹**没有**注入面（prefix 里的 `:`/`/`/`;` 在单引号内均字面）。
-	b.WriteString(" --import " + shellQuote(preludeDataURL()))
-	b.WriteString(" --input-type=module -")
 	return b.String()
 }
 
@@ -417,11 +440,22 @@ func shellQuote(s string) string {
 // （而非 hello/result/error 三个类型）—— 三者的 notify 字段互斥，合成一个结构体
 // 的代价（未用字段留空）远小于三处重复的解码样板；SplitFrames 只认 notify 白名单。
 
-// notifyKind 三个合法 notify 值。出现第四个即协议漂移（prelude 发了宿主不认识的东西）。
+// notifyKind 帧的合法 notify 值。出现白名单外的即协议漂移（prelude 发了宿主不认识的
+// 东西）。call 是 Phase 2 桥接（prelude_bridge.js）新增的一类：沙箱 → 宿主的工具调用
+// 请求；它只出现在带桥接的 ExecuteScript 路径上，Execute 不会收到。
 const (
 	notifyHello  = "hello"
 	notifyResult = "result"
 	notifyError  = "error"
+	notifyCall   = "call"
+)
+
+// notify 宿主 → 沙箱的三条出站消息（executeScript 的桥接通道）。它们**不是**帧白名单
+// 的一员：方向相反、且只走 stdin 的 NDJSON，不进 SplitFrames/knownNotify。
+const (
+	notifyInit     = "init"
+	notifyReply    = "reply"
+	notifyShutdown = "shutdown"
 )
 
 // VerifyHandshake 校验一次执行产出的**第一帧**是否为兼容握手。
@@ -515,16 +549,16 @@ func parseFrameLine(line string) (Frame, bool) {
 	return f, true
 }
 
-// knownNotify notify 是否是 prelude 会发的三种之一。
+// knownNotify notify 是否是 prelude 会发的合法值之一。
 //
-// 出现第四个 notify 即协议漂移（prelude 发了宿主不认识的东西）—— 此时**不**收该帧，
-// 交给 tail 原样透出给模型看（比静默丢弃更利于排查），也不会让 assemble 误判
-// 「有握手」。
+// 出现白名单外的 notify 即协议漂移（prelude 发了宿主不认识的东西）—— 此时**不**收该帧，
+// 交给 tail 原样透出给模型看（比静默丢弃更利于排查），也不会让 assemble 误判「有握手」。
 func knownNotify(n string) bool {
-	return n == notifyHello || n == notifyResult || n == notifyError
+	return n == notifyHello || n == notifyResult || n == notifyError || n == notifyCall
 }
 
-// Frame 一帧协议消息（prelude 只会发这三种 notify）。
+// Frame 一帧协议消息（prelude 只会发这四种 notify）。用单一类型而非四个结构体：四者的
+// notify 互斥，合成一个的代价（未用字段留空）远小于四处重复的解码样板。
 type Frame struct {
 	Notify string `json:"notify"`
 	// hello
@@ -536,6 +570,11 @@ type Frame struct {
 	// error
 	Kind string `json:"kind,omitempty"`
 	Msg  string `json:"msg,omitempty"`
+	// call（Phase 2 桥接）
+	// Id 是沙箱生成的关联锚：回执必须回抄它（见 script.go 的 bridgeReply）。
+	Id   string          `json:"id,omitempty"`
+	Name string          `json:"name,omitempty"`
+	Args json.RawMessage `json:"args,omitempty"`
 }
 
 // quoteFirstLine 取第一行并截断（错误文案用，避免把整段输出灌进一条错误）。
