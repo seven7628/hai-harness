@@ -85,6 +85,52 @@ const silent = (c, encOrCb, maybeCb) => {
 process.stdout.write = silent;
 process.stderr.write = silent;
 
+// ---- Phase 2 桥接插槽 ----
+// 宿主注入的 prelude 后缀（若存在）在此被 require/import 进来并调用。
+// Phase 1 不注册该钩子（桥接属 Phase 2 的 codemode 工具），故此处是有意留空：
+// 留一个明确命名、明确注释的空位，好过 Phase 1 先发明一套 Phase 2 必然要改的
+// 桥接 API —— 设计文档评审意见 4：「无消费者的可选接口是最温床」。
+//
+// 位置在结果封送/错误归集**之前**不是排版问题：下面两个 helper 是 flush/die 的依赖，
+// 而 die 可能在模块求值期间就被 uncaughtException 调到（那时 const 还在 TDZ，
+// 报错处理自己抛 ReferenceError = 整条错误通道失效）。
+globalThis.__codemodeHost = globalThis.__codemodeHost || null;
+
+// 桥接层（prelude_bridge.js，经第二个 --import 注入）与协议端之间的**私有**契约。
+// 两个成员都不是可选的「顺手加的钩子」，各有唯一消费者（见 prelude_bridge.js）：
+//
+//	result()        → {value} | null：脚本结局值（return 值 / exit(v) 的值）；
+//	                  null = 无返回值 ⇒ result 帧不带 value 字段；
+//	rewriteStack(s) → string：报错文本的堆栈改写。AsyncFunction 求值下 V8 给动态
+//	                  函数套了一层包装头，堆栈行号整体偏移，只有桥接层知道怎么补
+//	                  （本进程内**实测**得出，不硬编码 —— 见桥接文件的「行号对齐」）。
+//
+// 缺席 = 两者都不生效：Phase 1 的 Execute 路径不注册它，行为与本行加入前逐字节一致
+// （Execute 也没有 return 承诺，见 execproc.RunResult.Value 的注释）。
+const bridgeSlot = () => globalThis.__codemodeBridge;
+
+// bridgeResult 取脚本结局值（插槽坏了不抛：丢 value 也不能丢整帧输出）。
+const bridgeResult = () => {
+  const slot = bridgeSlot();
+  if (!slot || typeof slot.result !== 'function') return null;
+  try {
+    return slot.result();
+  } catch {
+    return null;
+  }
+};
+
+// rewriteStack 让桥接层改写堆栈文本（同上：改写失败就用原文，报错不能因为改写而消失）。
+const rewriteStack = (text) => {
+  const slot = bridgeSlot();
+  if (!slot || typeof slot.rewriteStack !== 'function') return text;
+  try {
+    return String(slot.rewriteStack(text));
+  } catch {
+    return text;
+  }
+};
+
 // ---- 结果封送 ----
 const flush = () => {
   let out = '';
@@ -94,7 +140,13 @@ const flush = () => {
     out = '';
   }
   chunks.length = 0;
-  send({ notify: 'result', out, bytes: out.length });
+  const frame = { notify: 'result', out, bytes: out.length };
+  // Phase 2：桥接层若挂了插槽（上面的 `__codemodeBridge`），脚本的 return/exit
+  // 值随本帧一起回去（宿主 execproc.RunResult.Value）。取的是**函数返回值**而不是
+  // 事先存好的值：脚本可能一直在跑，值只有在 'exit' 这一刻才是最终值。
+  const v = bridgeResult();
+  if (v && Object.prototype.hasOwnProperty.call(v, 'value')) frame.value = v.value;
+  send(frame);
 };
 
 // 排在**用户自己的** exit 监听器之后（append 语义）：用户退出钩子里的 console.log
@@ -108,20 +160,13 @@ let reported = false;
 const die = (kind, msg) => {
   if (reported) return; // unhandledRejection 与 uncaughtException 常成对触发，只报一次
   reported = true;
-  send({ notify: 'error', kind, msg: String(msg) });
+  send({ notify: 'error', kind, msg: rewriteStack(String(msg)) });
   // 不立刻 exitCode=1 就跑完：让用户自己注册的后续钩子有机会跑（部分脚本靠
   // exitCode 表达失败）；但**必须**置上，否则一次抛错的脚本会伪装成成功。
   process.exitCode = 1;
 };
 process.on('uncaughtException', (e) => die('script', e && e.stack ? e.stack : e));
 process.on('unhandledRejection', (e) => die('script', e && e.stack ? e.stack : e));
-
-// ---- Phase 2 桥接插槽 ----
-// 宿主注入的 prelude 后缀（若存在）在此被 require/import 进来并调用。
-// Phase 1 不注册该钩子（桥接属 Phase 2 的 codemode 工具），故此处是有意留空：
-// 留一个明确命名、明确注释的空位，好过 Phase 1 先发明一套 Phase 2 必然要改的
-// 桥接 API —— 设计文档评审意见 4：「无消费者的可选接口是最温床」。
-globalThis.__codemodeHost = globalThis.__codemodeHost || null;
 
 // ---- 握手 ----
 // 放在模块顶层 await 之后：ESM 的 import 只取到具名导出，而顶层 await 之前的

@@ -75,6 +75,12 @@ console.log(j);
 	if res.Hello.Major != protoMajor {
 		t.Errorf("Hello.Major = %d, want %d", res.Hello.Major, protoMajor)
 	}
+	// Execute 路径**不填** Value：脚本在这里是 ESM 入口模块（没有 return 承诺，
+	// 也没有桥接层把值带回来）。这条断言钉住「Execute 行为不变」——
+	// 值通道只属于 ExecuteScript（见 RunResult.Value 的注释）。
+	if res.Value != nil {
+		t.Errorf("Execute 路径的 Value = %s, want nil（该路径没有 return 承诺）", res.Value)
+	}
 }
 
 // TestScriptSourceNotInCommandLine 钉住「脚本走 stdin」这条设计约束：

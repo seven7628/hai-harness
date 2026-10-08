@@ -145,6 +145,19 @@ type RunResult struct {
 	Timeout time.Duration
 	// Hello 子进程自报的运行时版本（握手成功时非零；失败时零值）。
 	Hello stdjson.Version
+	// Value 脚本 `return` 的值（或 `exit(v)` 的值）的 JSON 原文；nil = 脚本没有返回值
+	// （没写 return / `return undefined` / 本次执行没跑到收尾）。
+	//
+	// 只有 ExecuteScript（带桥接）会填它：脚本在那条路径上是 AsyncFunction 的**函数体**
+	// （顶层 return 合法，见 IMPLEMENTATION-SPEC §7.8/§7.9）。Execute 路径的脚本是 ESM
+	// 入口模块、没有 return 承诺，也没有桥接层把值带回来 —— 那条路径的 Value 恒为 nil，
+	// 行为与本字段加入前逐字节一致。
+	//
+	// 显式 `return null` 得到字面量 `null`（非 nil），与「没有返回值」区分得开。
+	// 非 JSON 可编码的返回值（函数/Symbol/BigInt/循环引用）由沙箱侧归一化：能编码的
+	// 给原文，不能编码的退化成一句可读文本（prelude_bridge.js 的 normalizeResult）——
+	// 绝不因为值没法编码而丢 result 帧（丢帧会让整次执行看起来「没有收尾」）。
+	Value json.RawMessage
 }
 
 // Execute 执行一段 JavaScript，返回合并输出与结构化结局。
@@ -228,17 +241,18 @@ func mustMarshalLine(f Frame) string {
 	return frameSentinel + string(b)
 }
 
-// frameParts 一帧流里「给模型看」的三样东西（hello 版本 / 用户输出 / 脚本错误）。
+// frameParts 一帧流里「给模型看」的内容（hello 版本 / 用户输出 / 脚本错误）+ 结局值。
 type frameParts struct {
 	hello     stdjson.Version
 	out       string
 	scriptErr string
 	sawHello  bool
+	value     json.RawMessage // result 帧的 value（脚本 return/exit 值；nil = 无返回值）
 }
 
 // collectFrames 从帧流里抽取给模型看的内容（唯一实现）。
 //
-// 独立成函数是为了让 assemble（Execute）与 ExecuteScript 的 OnOutput 共用同一份口径：
+// 独立成函数是为了让 assemble（Execute）与 ExecuteScript 共用同一份口径：
 // 两处各写一遍解帧逻辑，迟早会出现「同一个帧在两条路径上被解读成不同的东西」。
 func collectFrames(frames []Frame) frameParts {
 	var p frameParts
@@ -252,6 +266,12 @@ func collectFrames(frames []Frame) frameParts {
 					p.out += "\n"
 				}
 				p.out += f.Out
+			}
+			// 结局值取**最后一条** result 帧的：正常只有一条（prelude 在 'exit' 上
+			// once），多条只可能来自脚本自己伪造的帧 —— 那时取最后一条与「out 的
+			// 拼接顺序」同一口径，不另发明规则。
+			if len(f.Value) > 0 {
+				p.value = f.Value
 			}
 		case notifyError:
 			if p.scriptErr == "" {
@@ -268,7 +288,12 @@ func collectFrames(frames []Frame) frameParts {
 // 这样模型在 bash 与 codemode 两个工具上看到的是同一套「首行声明 + 后续输出」
 // 的读法，不需要学第二种。
 func assemble(frames []Frame, tail string, res RunResult) (stdjson.Version, string) {
-	p := collectFrames(frames)
+	return assembleParts(collectFrames(frames), tail, res)
+}
+
+// assembleParts assemble 的本体：收**已解好的帧内容**，让调用方顺手拿到 value
+// （ExecuteScript 要 res.Value）而不必把整段帧再扫一遍。
+func assembleParts(p frameParts, tail string, res RunResult) (stdjson.Version, string) {
 	hello, out, scriptErr := p.hello, p.out, p.scriptErr
 	// 没握手成功：prelude 都没起来（node 崩溃/被杀/旗标不被支持）。此时**不**把
 	// 整段 raw 灌给模型 —— 那可能是 Node 的 V8 崩溃栈，噪声远大于信息；
@@ -567,6 +592,10 @@ type Frame struct {
 	// result
 	Out   string `json:"out,omitempty"`
 	Bytes int    `json:"bytes,omitempty"`
+	// Value 脚本结局值（Phase 2 桥接层填；return 值或 exit(v) 的值）。缺省**不带**
+	// 该字段（= 无返回值 ⇒ RunResult.Value 为 nil）；显式 `return null` 时这里是
+	// 字面量 null（JSON 的 omitempty 对 RawMessage 的 `null` 仍会写出，二者可区分）。
+	Value json.RawMessage `json:"value,omitempty"`
 	// error
 	Kind string `json:"kind,omitempty"`
 	Msg  string `json:"msg,omitempty"`

@@ -39,12 +39,13 @@ func TestExecuteScriptUnderSeatbelt(t *testing.T) {
 	res, err := e.ExecuteScript(context.Background(), ScriptOpts{
 		Cwd:     ws,
 		Timeout: 30 * time.Second,
-		// 注意：这里**不用** 顶层 return —— 当前桥接把脚本作为 ESM 入口模块求值，
-		// `return` 是 SyntaxError（pi 的「顶层 return 即结果」语义需要 AsyncFunction
-		// 求值，见 IMPLEMENTATION-SPEC §7.8 的待办）。本用例只压 Seatbelt 通路本身。
+		// Phase 1-A2 起脚本由桥接层用 AsyncFunction 求值（函数体），故这里顺带压住
+		// 「顶层 return 即结果」这条语义在 Seatbelt 通路下同样成立（值经 result 帧的
+		// value 字段回来，见 IMPLEMENTATION-SPEC §7.8/§7.9）。
 		Script: `
 const got = await tools.echo({n: 42});
 console.log("answer=" + got.n);
+return { n: got.n };
 `,
 		Init: json.RawMessage(`{"tools":[{"name":"echo"}]}`),
 		OnCall: func(context.Context, ScriptCall) ScriptResult {
@@ -60,6 +61,10 @@ console.log("answer=" + got.n);
 	}
 	if !strings.Contains(res.Text, "answer=42") {
 		t.Fatalf("脚本输出/工具回执没回来:\nText=%q\nRaw=%q", res.Text, res.Raw)
+	}
+	if string(res.Value) != `{"n":42}` {
+		t.Fatalf("Value = %s, want {\"n\":42}（顶层 return 的值必须回到宿主）\nText=%q\nRaw=%q",
+			res.Value, res.Text, res.Raw)
 	}
 	if strings.Contains(res.Text, `"notify"`) {
 		t.Fatalf("协议帧泄进模型可见文本:\n%s", res.Text)

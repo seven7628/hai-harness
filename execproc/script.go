@@ -6,8 +6,13 @@
 //
 // # 通道划分（Phase 2 冻结，见 IMPLEMENTATION-SPEC §7.1-1 / §7.2）
 //
-//	宿主 → 沙箱：stdin，一行一条 JSON —— init（首条）/ reply（回执）/ shutdown
+//	宿主 → 沙箱：stdin，一行一条 JSON —— init（首条，**含脚本正文**）/ reply / shutdown
 //	沙箱 → 宿主：fd1，带哨兵前缀的帧 —— hello / call（新增）/ result / error
+//
+// 脚本正文在 **init 里**（init.script，Phase 1-A2 起）：临时文件那条路（Phase 1-A 把
+// 脚本写成 `script.mjs` 当 ESM 入口模块跑）已经拆掉 —— 顶层 `return` 在入口模块里是
+// SyntaxError，而模型契约承诺它；顺带把「脚本不落盘」这条 Phase 1 用 stdin 换来的性质
+// 收回来（脚本可能含密钥/路径，属凭据面）。
 //
 // # 为什么 fd1 要重定向到 spool 文件（最容易被误读的一处）
 //
@@ -33,8 +38,9 @@
 // # 错误面（与 Execute 同契约）
 //
 // 脚本抛错 / 非零退出 / 超时 / 取消**都不是** error：全部并入 RunResult.Text，模型看完
-// 自行修正。error 只留给「根本没跑起来 + 握手不兼容」（node 不可用、临时文件写不出、
-// protoMajor 不匹配）—— 那类问题重试多少次都不会变好，调用方应把 codemode 标为不可用。
+// 自行修正。error 只留给「根本没跑起来 + 握手不兼容」（node 不可用、临时目录写不出、
+// protoMajor 不匹配、Init 不是对象）—— 那类问题重试多少次都不会变好，调用方应把
+// codemode 标为不可用。
 package execproc
 
 import (
@@ -87,24 +93,65 @@ type ScriptOpts struct {
 	Timeout       time.Duration // <0 = 不限时（宿主管墙钟，见 7.1-2）
 	MaxOldSpaceMB int
 	Init          json.RawMessage // 注入沙箱的初始化载荷（工具目录/store），由 codemode 生成
-	OnCall        func(ctx context.Context, c ScriptCall) ScriptResult
-	OnOutput      func(text string) // 可选：脚本输出增量（Phase 2 允许只在结束时给）
+	// Scaffold 宿主注入的 JS 片段（可选）：在用户脚本**之前**求值，签名为 (ctx)，
+	// ctx = { init, hostCall }（init = 上面那个载荷的原文，hostCall(name, args) 走与
+	// OnCall 同一条 call/reply 路径）。Wave 2 用它装 text/image/store/load/searchTools/
+	// describeTool 这些全局；传输层自己只提供 exit()（见 prelude_bridge.js）。
+	//
+	// 契约（三条都与「怎么求值」有关，写在宿主侧是因为写 scaffold 的是宿主）：
+	//   - 本片段是**函数体**（不是函数表达式）：`(ctx) => {...}` 这种写法只会求值出
+	//     一个函数对象、不会被调用，请直接写语句（可含 await）；
+	//   - 要用 `globalThis.<name> = …` 定义全局才**对用户脚本可见**（函数体里
+	//     `const`/`var` 都是局部的）；用户脚本与它同 realm，globalThis 上的键彼此可见；
+	//   - 与脚本一样**永不落盘**（随 init 走 stdin），报错即收尾（kind=scaffold，
+	//     用户脚本不执行）—— scaffold 装不上全局时硬跑只会把宿主的 bug 伪装成
+	//     「模型写了不存在的函数」。
+	Scaffold string
+	OnCall   func(ctx context.Context, c ScriptCall) ScriptResult
+	OnOutput func(text string) // 可选：脚本输出增量（Phase 2 允许只在结束时给）
 }
 
 // Init 载荷形状 —— 宿主侧的唯一权威定义（沙箱侧 prelude_bridge.js 按宽容规则解析它）：
 //
-//	{"tools": [{"name": "read_file", "rawName": "mcp__dev-radius__read-file"}, "grep"],
-//	 "store": {...}}
+//		{"tools": [{"name": "read_file", "rawName": "mcp__dev-radius__read-file"}, "grep"],
+//		 "store": {...}}
 //
-//   - `tools` 数组的每一项可以是字符串（只有归一化名）或对象（`name` 必填；
-//     `rawName`（别名 `raw`）是**原始名**，用于沙箱里 `tools["mcp__dev-radius__x"]`
-//     那种双键调用）。写成 map（`{"read_file": {...}}`）也认，键即归一化名。
-//   - 名字归一化与撞名解决在 **codemode 侧**（datasheet §15.1），桥接只认这里给的
-//     最终名：两处各归一化一次会让撞名判定失真。归一化名撞名时沙箱内**先到先得**
-//     （对齐 pi）：后到的仍可经自己的原始名调用，但不顶掉先到的键 —— 静默覆盖会让
-//     脚本调到另一个工具，是最难查的一类错。
-//   - 其余键（store 等）本波不解释，原样挂在沙箱的 `globalThis.__codemode.init` 上，
-//     由 Wave 2 的 tools/builtin/codemode/protocol.go 决定怎么用。
+//	  - `tools` 数组的每一项可以是字符串（只有归一化名）或对象（`name` 必填；
+//	    `rawName`（别名 `raw`）是**原始名**，用于沙箱里 `tools["mcp__dev-radius__x"]`
+//	    那种双键调用）。写成 map（`{"read_file": {...}}`）也认，键即归一化名。
+//	  - 名字归一化与撞名解决在 **codemode 侧**（datasheet §15.1），桥接只认这里给的
+//	    最终名：两处各归一化一次会让撞名判定失真。归一化名撞名时沙箱内**先到先得**
+//	    （对齐 pi）：后到的仍可经自己的原始名调用，但不顶掉先到的键 —— 静默覆盖会让
+//	    脚本调到另一个工具，是最难查的一类错。
+//	  - 其余键（store 等）本波不解释，原样挂在沙箱的 `globalThis.__codemode.init` 上，
+//	    由 Wave 2 的 tools/builtin/codemode/protocol.go 决定怎么用。
+//
+// 另有一条**调用方须知**（与上面的形状分开写：一条是「载荷长什么样」，一条是
+// 「哪些键不归你」）：**`script` / `scaffold` 是传输字段，调用方别用** —— 宿主会把 ScriptOpts.Script 与 .Scaffold 塞进
+// 这条消息的这两个键（源码只能经 stdin 进沙箱，见 ExecuteScript 的生命周期注释），
+// 沙箱侧取走后立刻从暴露给脚本的那份 init 上删掉；调用方若自己用了这两个键，会被覆盖。
+func initPayload(init json.RawMessage, script, scaffold string) (json.RawMessage, error) {
+	obj := map[string]json.RawMessage{}
+	trimmed := bytes.TrimSpace(init)
+	// 空载荷与字面量 null 都按「没有额外载荷」处理（Init 是可选字段，零值即空）。
+	if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+		if err := json.Unmarshal(trimmed, &obj); err != nil {
+			return nil, fmt.Errorf("codemode: ScriptOpts.Init 必须是 JSON 对象（脚本与初始化载荷"+
+				"同一条消息送出，非对象的载荷没地方挂 script 字段）: %w", err)
+		}
+	}
+	obj["script"] = jsonString(script)
+	if scaffold != "" {
+		obj["scaffold"] = jsonString(scaffold)
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		// map[string]json.RawMessage 里塞的都是合法 JSON 与字符串字面量，编不出来只可能是
+		// 调用方给的 RawMessage 本身畸形（json.Marshal 会做一次合法性检查）。
+		return nil, fmt.Errorf("codemode: 编码 init 载荷失败（ScriptOpts.Init 里有非法 JSON？）: %w", err)
+	}
+	return b, nil
+}
 
 // ExecuteScript 跑一段带桥接的脚本。契约与 Execute 一致：脚本错误/非零退出不是 error；
 // **默认不返回 error**，error 只留给「根本没跑起来 + 握手不兼容」。
@@ -122,8 +169,10 @@ type ScriptOpts struct {
 // 回执允许乱序（按 id 关联）。本层刻意**不加串行门** —— 串行/独占语义是上层
 // （ExecScope）的职责，加在这里会让上层的闸门失效（嵌套调用会绕过它自己的判定）。
 //
-// 生命周期：脚本写在 os.MkdirTemp(0700) 的临时目录里（0600），帧 spool 同目录；
-// 正常/超时/取消/error 四类退出路径都会删掉整个目录（defer）。
+// 生命周期：临时目录 os.MkdirTemp(0700) 里**只有帧 spool**（0600）—— 脚本正文与
+// scaffold 都随 init 走 stdin，永不落盘（Phase 1 用 stdin 换来的这条性质，Phase 2
+// 把 stdin 让给桥接通道之后由 init.script 继续承担）；正常/超时/取消/error 四类退出
+// 路径都会删掉整个目录（defer）。
 func (e *Executor) ExecuteScript(ctx context.Context, opts ScriptOpts) (RunResult, error) {
 	if strings.TrimSpace(opts.Script) == "" {
 		return RunResult{}, errors.New("codemode: script is empty (nothing to execute)")
@@ -132,13 +181,18 @@ func (e *Executor) ExecuteScript(ctx context.Context, opts ScriptOpts) (RunResul
 	if err != nil {
 		return RunResult{}, err
 	}
-	files, err := writeScriptFiles(opts.Script)
+	// init 在**建临时目录之前**组装：Init 不是对象这类调用方错误不该留下临时资材。
+	init, err := initPayload(opts.Init, opts.Script, opts.Scaffold)
+	if err != nil {
+		return RunResult{}, err
+	}
+	files, err := newRunFiles()
 	if err != nil {
 		return RunResult{}, err
 	}
 	defer files.remove()
-	if onScriptFiles != nil {
-		onScriptFiles(files)
+	if onRunFiles != nil {
+		onRunFiles(files)
 	}
 
 	sbx := e.sbx
@@ -163,7 +217,7 @@ func (e *Executor) ExecuteScript(ctx context.Context, opts ScriptOpts) (RunResul
 	callCtx, cancelCalls := context.WithCancel(runCtx)
 	defer cancelCalls()
 
-	br := newBridgeHost(callCtx, files.spool, opts.Init, opts.OnCall)
+	br := newBridgeHost(callCtx, files.spool, init, opts.OnCall)
 	if err := br.start(runCtx); err != nil {
 		return RunResult{}, err
 	}
@@ -178,7 +232,7 @@ func (e *Executor) ExecuteScript(ctx context.Context, opts ScriptOpts) (RunResul
 		Command:  e.scriptCommand(node, files, opts.MaxOldSpaceMB),
 		Cwd:      cwd,
 		Timeout:  to,
-		Stdin:    br.stdin(), // stdin 整条让给宿主→沙箱通道（脚本走临时文件）
+		Stdin:    br.stdin(), // stdin 整条让给宿主→沙箱通道（脚本与 scaffold 都走 init）
 		ExitCode: &exitCode,
 		TimedOut: &timedOut,
 		Canceled: &canceled,
@@ -203,7 +257,11 @@ func (e *Executor) ExecuteScript(ctx context.Context, opts ScriptOpts) (RunResul
 	// 与 Execute **逐字同一条**组装路径：帧解析、结局首行、超时/取消措辞（§6.5 的
 	// 「拿不到输出就不得承诺 PARTIAL」）都由它负责，两条执行路径不会各自漂移。
 	frames, tail := SplitFrames(raw)
-	res.Hello, res.Text = assemble(frames, tail, res)
+	parts := collectFrames(frames)
+	res.Hello, res.Text = assembleParts(parts, tail, res)
+	// 脚本结局值（return / exit(v)）：nil = 没有返回值。Execute 路径不填它 ——
+	// 那条路径的脚本没有 return 承诺（见 RunResult.Value 的注释）。
+	res.Value = parts.value
 	if len(frames) > 0 && frames[0].Notify == notifyHello {
 		if _, err := VerifyHandshake(mustMarshalLine(frames[0]), protoMajor); err != nil {
 			return res, err
@@ -212,8 +270,8 @@ func (e *Executor) ExecuteScript(ctx context.Context, opts ScriptOpts) (RunResul
 	if opts.OnOutput != nil {
 		// Phase 2 允许只在结束时给一次（流式留给常驻 worker）：只给脚本自己产生的
 		// 输出，不含结局注记与直写 fd 的 tail —— 那些是宿主侧的诊断信息。
-		if p := collectFrames(frames); p.out != "" {
-			opts.OnOutput(p.out)
+		if parts.out != "" {
+			opts.OnOutput(parts.out)
 		}
 	}
 	return res, nil
@@ -237,17 +295,22 @@ func (e *Executor) scriptTimeout(t time.Duration) time.Duration {
 // scriptCommand 带桥接的命令行。
 //
 //	形如：node --max-old-space-size=512 --import '<prelude>' --import '<bridge>' \
-//	      '/tmp/codemode-script-x/script.mjs' > '/tmp/codemode-script-x/frames.ndjson' 2>&1
+//	      --eval '' > '/tmp/codemode-run-x/frames.ndjson' 2>&1
 //
 // 四个部分各自不可省：
-//   - 两个 --import：协议端（握手/截获/result 帧）在前、桥接端（init/call/tools）在后
-//     —— 顺序是硬语义，桥接端的顶层 await 依赖协议端已就位；
-//   - 脚本路径：**不用** `--input-type=module -`（stdin 已让给宿主→沙箱通道）；
-//     `.mjs` 后缀让 node 按 ESM 评估，顶层 await 才是合法的；
+//   - 两个 --import：协议端（握手/截获/result 帧）在前、桥接端（init/call/tools/求值）
+//     在后 —— 顺序是硬语义，桥接端依赖协议端已就位（它要发 error/result 帧）；
+//   - `--eval ”`：**入口只是一个占位的空脚本**。为什么不能省：node 在没有脚本参数
+//     且 stdin 不是 TTY 时会把 **stdin 当脚本源码读**，而 stdin 已整条让给桥接通道
+//     （init/reply/shutdown），那会把 init 那一行当脚本求值掉。用户脚本由桥接端用
+//     `new AsyncFunction` 求值（见 prelude_bridge.js 的「求值形态」），故这里不需要
+//     任何入口模块 —— 也就没有 `script.mjs`（脚本永不落盘）；
 //   - `> spool 2>&1`：fd1/fd2 重定向到宿主可 tail 的文件（见文件头）。顺序不能反
 //     （`2>&1 > file` 会把 stderr 留在原 fd 上），故两半由同一条语句生成，不给调用方
 //     拼错的余地。
-func (e *Executor) scriptCommand(n NodeInfo, f scriptFiles, mb int) string {
+//
+// 脚本正文**不在命令行里**（会经 sh -c 并在进程表里裸奔）：它走 init.script。
+func (e *Executor) scriptCommand(n NodeInfo, f runFiles, mb int) string {
 	if mb <= 0 {
 		mb = e.maxOldSpaceMB()
 	}
@@ -255,63 +318,58 @@ func (e *Executor) scriptCommand(n NodeInfo, f scriptFiles, mb int) string {
 	b.WriteString(e.nodePrefix(n, mb))
 	b.WriteString(" --import " + shellQuote(preludeDataURL()))
 	b.WriteString(" --import " + shellQuote(bridgeDataURL()))
-	b.WriteString(" " + shellQuote(f.script))
+	b.WriteString(" --eval ''")
 	b.WriteString(" > " + shellQuote(f.spool) + " 2>&1")
 	return b.String()
 }
 
-// ---- 临时资材（脚本 + 帧 spool）----
+// ---- 临时资材（只有帧 spool 一个文件）----
 
-// scriptFiles 一次执行的临时资材（三个路径都在同一个 0700 目录里）。
-type scriptFiles struct {
-	dir    string
-	script string // 脚本正文（0600）
-	spool  string // 子进程 fd1/fd2 的重定向目标（0600）
+// runFiles 一次执行的临时资材（都在同一个 0700 目录里）。
+//
+// 只有一个文件是**设计结果**，不是简化：脚本正文与 scaffold 都随 init 走 stdin
+// （Phase 1-A2，见 IMPLEMENTATION-SPEC §7.8-2），临时目录里只剩子进程 fd1/fd2 的
+// 重定向目标。0600/0700 的断言（spool 里有工具回执与用户输出）仍由本结构承载。
+type runFiles struct {
+	dir   string
+	spool string // 子进程 fd1/fd2 的重定向目标（0600）
 }
 
-// onScriptFiles 测试观察点（生产恒 nil）：把三个路径交给它。
+// onRunFiles 测试观察点（生产恒 nil）：把两个路径交给它。
 //
 // 为什么需要这条缝：0600 这条断言只能在**运行期间**成立（跑完就删了），而调用方在
 // ExecuteScript 返回后拿不到任何路径 —— 没有这个钩子就只能让沙箱里的脚本「自证」
 // 权限（被观察者自报，不是宿主观察）。同 sandbox 包 killProcGroup 的测试注入点。
-var onScriptFiles func(files scriptFiles)
+var onRunFiles func(files runFiles)
 
-// writeScriptFiles 建临时目录并落盘脚本与帧 spool。
+// newRunFiles 建临时目录并**先建**帧 spool。
 //
 // 目录选 /tmp 而**不是** os.TempDir()：Seatbelt 策略里 /tmp 是唯一「可读**且**可写」
 // 的位置（file-read* 见 systemReadPaths，file-write* 见 buildPolicy），而 macOS 的
 // $TMPDIR 是 /var/folders/... —— 只读不可写，真开着沙箱时帧 spool 会写失败
 // （sandbox.isolatedEnv 把子进程的 TMPDIR 钉成 /tmp 也是同一个理由）。/tmp 是 1777，
 // 但本目录是 0700，只有本人能进。
-func writeScriptFiles(script string) (scriptFiles, error) {
-	dir, err := os.MkdirTemp("/tmp", "codemode-script-")
+func newRunFiles() (runFiles, error) {
+	dir, err := os.MkdirTemp("/tmp", "codemode-run-")
 	if err != nil {
-		return scriptFiles{}, fmt.Errorf("codemode: 建临时目录失败（脚本与帧 spool 都要落盘）: %w", err)
+		return runFiles{}, fmt.Errorf("codemode: 建临时目录失败（帧 spool 要落盘）: %w", err)
 	}
-	f := scriptFiles{
-		dir:    dir,
-		script: filepath.Join(dir, "script.mjs"), // .mjs ⇒ ESM（顶层 await 才合法）
-		spool:  filepath.Join(dir, "frames.ndjson"),
-	}
-	fail := func(what string, err error) (scriptFiles, error) {
-		_ = os.RemoveAll(dir)
-		return scriptFiles{}, fmt.Errorf("codemode: 写 %s 失败: %w", what, err)
-	}
-	// 0600：脚本正文可能含用户数据（与 spill 同口径，见设计文档 §15.4 的补注）。
-	if err := os.WriteFile(f.script, []byte(script), 0o600); err != nil {
-		return fail("脚本文件", err)
+	f := runFiles{
+		dir:   dir,
+		spool: filepath.Join(dir, "frames.ndjson"),
 	}
 	// spool 由宿主**先建**：sh 的 `>` 只截断不设权限，先建才能钉住 0600（否则按 umask
 	// 出生，可能是 0644 —— 里面有工具回执与用户输出）。
 	if err := os.WriteFile(f.spool, nil, 0o600); err != nil {
-		return fail("帧 spool", err)
+		_ = os.RemoveAll(dir)
+		return runFiles{}, fmt.Errorf("codemode: 写帧 spool 失败: %w", err)
 	}
 	return f, nil
 }
 
 // remove 删掉整份资材（四类退出路径共用）。删失败不改结局：删不掉的文件在 /tmp 里是
 // 遗留物而非正确性问题，调用方无从补救，故这里不把它升级成 error。
-func (f scriptFiles) remove() {
+func (f runFiles) remove() {
 	if f.dir != "" {
 		_ = os.RemoveAll(f.dir)
 	}
@@ -319,12 +377,13 @@ func (f scriptFiles) remove() {
 
 // ---- 宿主 → 沙箱：三条出站消息（形状的唯一事实源 = prelude_bridge.js 的 handle）----
 
-// bridgeInit 首条消息：注入初始化载荷（opts.Init 原文）。
-// 沙箱侧在**顶层 await** 里等它 —— 没到之前不会求值用户脚本（否则脚本里的 tools.x
-// 会先于工具表就位）。
+// bridgeInit 首条消息：注入初始化载荷 + **脚本正文**（initPayload 组装：opts.Init 原文
+// 上多挂 script / scaffold 两个键）。
+// 沙箱侧**同步**读它（readSync），读完才求值 scaffold 与用户脚本 —— 没到之前不会求值
+// 任何用户代码（否则脚本里的 tools.x 会先于工具表就位）。
 type bridgeInit struct {
 	Notify string          `json:"notify"` // 恒 "init"
-	Init   json.RawMessage `json:"init"`   // opts.Init 原文（nil ⇒ JSON null，沙箱兜成空表）
+	Init   json.RawMessage `json:"init"`   // initPayload 的产物（恒为对象：至少含 script）
 }
 
 // bridgeReply 一次 call 的回执。Id 必须回抄沙箱给的 ScriptCall.Id（按 id 关联，
