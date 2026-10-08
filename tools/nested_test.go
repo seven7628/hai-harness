@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -335,40 +336,67 @@ func TestRegisterToolConflict(t *testing.T) {
 
 // TestExecuteOneDoesNotCoverPreToolUse —— 负向测试，钉住已知降级。
 //
-// PreToolUse 在 agents 层（agents/agent_loop.go:2251），引擎侧 execute() 没有它，
-// 故 ExecuteOne 路径天然跳过。这是**产品级降级**，Phase 0 明确承认。
-// 将来把 hooks 下沉进引擎时，本测试需要翻转。
+// PreToolUse 在 agents 层（agents/agent_loop.go:2251 的 runTools 内），引擎侧 execute()
+// 没有它，故 ExecuteOne 路径天然跳过。这是**产品级降级**（规范 §3.3 第 14 条要求负向
+// 钉住）：PreToolUse 是本仓唯一能做 Block 与参数改写的钩子，嵌套调用不过它。
+//
+// 断言方式是「注入间谍钩子 + 断言它一次都没被调用」：ToolHooks 挂在 ToolContext 上，
+// 任何一层真去跑 hooks 都会命中这个间谍。将来把 hooks 下沉进引擎时，本测试必须翻转
+// （改为断言钩子确实被调用、且改写/阻断生效）——
+// 0f 之前这里只断言「没报错」，空转的负向测试比没有更坏（给人验过的错觉）。
 func TestExecuteOneDoesNotCoverPreToolUse(t *testing.T) {
 	e := newNestedEngine(t)
-	rec := core.NewNestedRecorder()
-	ctx := events.WithNestedRecorder(context.Background(), rec)
+	var called atomic.Int32
+	hooks := &events.ToolHooks{
+		PreToolUse: func(context.Context, events.PreToolUseContext) events.PreToolUseResult {
+			called.Add(1)
+			return events.PreToolUseResult{Decision: events.ToolDecisionBlock, Reason: "should not run"}
+		},
+	}
+	ctx := events.WithToolContext(context.Background(), "run1", 0, nil, nil, hooks)
 
 	r := e.ExecuteOne(ctx, core.ToolCall{Id: "n1", Name: "count", Arguments: "{}"}, ExecuteOpts{Depth: 1})
-	if r.IsError {
-		t.Fatalf("unexpected error: %q", r.Result)
+
+	if called.Load() != 0 {
+		t.Fatalf("PreToolUse 被调用了 %d 次 —— 契约变了：本负向测试必须翻转，"+
+			"并同步删掉 ExecuteOne godoc 里的「已知降级」说明", called.Load())
 	}
-	// 本测试不验证 hook 是否被调用（引擎层无 hook 概念），
-	// 只保证「当前实现不因缺失 hook 而报错」，即降级是静默且安全的。
-	// 真正的行为契约由 agents 层测试覆盖。
+	if r.IsError {
+		t.Fatalf("降级必须是静默且安全的（不因缺 hooks 报错）: %q", r.Result)
+	}
 }
 
-// TestExecuteOneCarriesParentAndDepth ExecuteOne 必须把 ParentCallId/Depth
-// 写回 ToolCall —— 事件归组与深度判定都依赖它。
-func TestExecuteOneCarriesParentAndDepth(t *testing.T) {
-	e := newNestedEngine(t)
-	rec := core.NewNestedRecorder()
-	ctx := events.WithNestedRecorder(context.Background(), rec)
-
-	e.ExecuteOne(ctx, core.ToolCall{Id: "n1", Name: "count", Arguments: "{}"},
-		ExecuteOpts{ParentCallId: "outer1", Depth: 1})
-
-	got := rec.TakeRecord()
-	if len(got) != 1 {
-		t.Fatalf("records = %d, want 1", len(got))
+// TestExecuteOneAssignsDepthToAuditAnchor ExecuteOne 必须把 ParentCallId/Depth 落到
+// **可观测的两处**：审批事件（UI 归组）与工具读到的 ToolContext.Depth（深度判定）。
+//
+// 这条替换掉早先那个名不副实的用例：原 TestExecuteOneCarriesParentAndDepth 既没断言
+// parent 也没断言 depth（Tool.Call 的签名里根本拿不到 ToolCall，记录本身也不含 parent），
+// 真正有意义的出口只有上面两处 —— 分别由本用例与
+// TestNestedApprovalEventReachesHandler / TestToolEventsCarryParentCallIdAndDepth 覆盖。
+func TestExecuteOneAssignsDepthToAuditAnchor(t *testing.T) {
+	e := NewToolEngine()
+	e.RegisterTool(context.Background(), &approvalTool{
+		stubTool: stubTool{BaseTool: BaseTool{Name_: "danger-anchor", Description_: "d", Params_: map[string]any{}}, result: "RAN"},
+	})
+	var req *events.ToolApprovalRequested
+	h := func(_ context.Context, ev events.Event) {
+		if v, ok := ev.(*events.ToolApprovalRequested); ok {
+			req = v
+		}
 	}
-	// 记录本身不含 parent（parent 体现在事件上），这里验证 args/result 截断不炸。
-	if got[0].Args == "" {
-		t.Fatal("Args should be captured")
+	// 深度守卫的边界值必须逐一落到事件上（0 = 顶层，1 = 上限内最深）。
+	for _, depth := range []int{0, core.NestedMaxDepth} {
+		req = nil
+		ctx := events.WithToolContext(context.Background(), "run1", 0, h, allowApprover{}, nil)
+		e.ExecuteOne(ctx, core.ToolCall{Id: "n1", Name: "danger-anchor", Arguments: "{}"},
+			ExecuteOpts{ParentCallId: "outer-9", Depth: depth})
+		if req == nil {
+			t.Fatalf("depth=%d：没收到审批事件", depth)
+		}
+		if req.ParentCallId != "outer-9" || req.Depth != depth {
+			t.Fatalf("depth=%d：事件身份 = %q/%d, want outer-9/%d",
+				depth, req.ParentCallId, req.Depth, depth)
+		}
 	}
 }
 

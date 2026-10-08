@@ -148,13 +148,34 @@ func (e *Engine) RegisterTool(ctx context.Context, tool Tool) {
 	cb := e.onRegisterConflict
 	e.lock.Unlock()
 
-	if existed && prev != tool && cb != nil {
+	if existed && !sameToolInstance(prev, tool) && cb != nil {
 		cb(RegisterConflict{
 			Name:     tool.Name(),
 			Previous: toolIdentity(prev),
 			Incoming: toolIdentity(tool),
 		})
 	}
+}
+
+// sameToolInstance 判断两次注册是否为同一实例（同名同实例静默通过 —— hidden 档依赖）。
+//
+// 为什么不能直接写 `prev != tool`：接口值比较在「两侧动态类型相同、且该类型不可比较」
+// 时（如带切片/映射字段的值类型工具）会 **panic**。旧实现是无条件覆盖、不会 panic
+// ——引入撞名检测不能把「原本能注册的工具」变成进程崩溃。故先比类型，再按可比性退化。
+func sameToolInstance(a, b Tool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb {
+		return false // 类型不同 ⇒ 必是不同实现
+	}
+	if ta.Comparable() {
+		return a == b // 指针/可比较值：直接比较（唯一能判定「同一实例」的情形）
+	}
+	// 不可比较的值类型：拿不到稳定实例标识，按「不同实例」处理
+	//（宁多发一条警告，不可 panic）。
+	return false
 }
 
 // RegisterConflict 一次工具重名注册的信息（供宿主发事件警告）。
@@ -840,14 +861,16 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 		}
 		if handler != nil {
 			handler(ctx, &events.ToolApprovalRequested{
-				RunId:     tc.RunId,
-				RequestId: c.RequestId,
-				Id:        c.Id,
-				Index:     c.Index,
-				Name:      c.Name,
-				Arguments: c.Arguments,
-				Timestamp: time.Now(),
-				EventType: events.ToolApprovalType,
+				RunId:        tc.RunId,
+				RequestId:    c.RequestId,
+				Id:           c.Id,
+				Index:        c.Index,
+				Name:         c.Name,
+				Arguments:    c.Arguments,
+				ParentCallId: c.ParentCallId,
+				Depth:        c.Depth,
+				Timestamp:    time.Now(),
+				EventType:    events.ToolApprovalType,
 			})
 		}
 		ok, err := wait(ctx)
@@ -951,6 +974,16 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 		}
 		return e.finish(ctx, handler, call, finishInput{result: msg, isErr: true})
 	}
+
+	// 嵌套记录槽：本次调用**自己**那一个 recorder（已有则沿用外层 —— 嵌套调用经
+	// ExecuteOne 进来时不能新建，否则记录被切碎）。放在所有工具可见的 ctx 派生之前，
+	// 保证 BeforeCall/Call/AfterCall 看到的是同一个 ctx。
+	//
+	// 为什么是引擎建而不是编排工具建：Tool.Call 只返回 (string, error)，工具没有任何
+	// 通道把自己的 NestedCalls/嵌套用量写回 ToolResult；只有「引擎建、工具读」这条路
+	// 才能让 finish() 拿到同一份 recorder（对齐 ImageSink/ExecSink 的槽范式）。
+	// 非编排工具不碰它，finish 取到空记录 → NestedCalls 恒 nil，零行为变化。
+	ctx = events.EnsureNestedRecorder(ctx)
 
 	// 拦截点：BeforeCall 返回 Block 时跳过执行（如用户确认场景）
 	if resp := tool.BeforeCall(ctx, call); resp.Block {
@@ -1094,14 +1127,15 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 	// 若它们也TakeRecord 会把累积记录提前清空。call.Depth 由 ExecuteOne 按
 	// opts.Depth 填入，天然是这个判别式。
 	//
-	// 注意：此处**不把嵌套 usage 加进 r.Usage** —— 子调用各自的 Usage 已由
-	// ExecuteOne → NestedRecorder.AddUsage 独立累加（tools/nested.go），
-	// 由编排型工具在返回前自行合并，避免与 AgentLoop 的父累加
-	//（agents/agent_loop.go:2370）二次计入。
+	// 嵌套用量在**同一处**合并进本结果的 Usage：这是嵌套调用用量进入会话结算的
+	// 唯一通道（嵌套调用不经 runBatch，AgentLoop 的父累加看不到它们），故合并一次
+	// 不会与父累加重复计数。编排工具**不得**再把这份用量经 ToolUsageProvider
+	// 上报一遍（那才会双计）——契约写在 tools/nested.go 的 ExecuteOne godoc 里。
 	var nested []core.NestedCallRecord
 	if call.Depth == 0 {
 		if rec := events.NestedRecorderFrom(ctx); rec != nil {
 			nested = rec.TakeRecord()
+			in.usage = in.usage.Add(rec.TakeUsage())
 		}
 	}
 	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec, NestedCalls: nested}

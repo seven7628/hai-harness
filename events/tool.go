@@ -54,6 +54,13 @@ type ToolApprovalRequested struct {
 	Arguments string    `json:"arguments"`
 	Timestamp time.Time `json:"timestamp"`
 
+	// ParentCallId / Depth 嵌套调用的来源标注（空/0 = 顶层调用）。
+	// 存在意义：编排型工具（codemode）内部的第 N 个子调用要人确认时，UI 得能显示
+	// 「这是某个脚本里的第 N 个调用在等你确认」，而不是一条来路不明的独立调用
+	//（对齐设计文档 §16.2；归组渲染是宿主的事，引擎只负责带上来源）。
+	ParentCallId string `json:"parent_call_id,omitempty"`
+	Depth        int    `json:"depth,omitempty"`
+
 	EventType EventType `json:"event_type"`
 }
 

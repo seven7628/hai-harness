@@ -191,7 +191,7 @@ func usageOrNil(u core.Usage) *core.Usage {
 }
 
 // ExecuteOne 执行单条工具调用，走与批内**完全相同**的管线
-// （审批 → ValidParams → 超时 → BeforeCall → Call → 截断 → AfterCall → 事件）。
+// （审批 → ValidParams → 超时 → BeforeCall → Call → 截断 → AfterCall）。
 //
 // 供编排型工具（codemode）从工具内部回调引擎。
 //
@@ -203,18 +203,34 @@ func usageOrNil(u core.Usage) *core.Usage {
 // 若这里返回 error，桥接层包一次、引擎又包一次，模型看到的是 TOOL_ERROR
 // 信封被套在引擎文本里。
 //
-// # 与 execute() 的差异（仅两处）
+// # 编排方怎么用（唯一正确形态）
 //
-//  1. 填入 opts.ParentCallId / opts.Depth 供事件标注与深度判定；
-//  2. 嵌套调用自动汇入 ctx 上的 core.NestedRecorder（若有）：记录 + 用量。
+//	ctx 里已有引擎注入的 recorder（events.EnsureNestedRecorder，勿自建）
+//	rec := events.NestedRecorderFrom(ctx)
+//	e.ExecuteOne(ctx, call, tools.ExecuteOpts{ParentCallId: 本次调用 id, Depth: 1})
+//
+// 记录与嵌套用量由**引擎**在本次调用收尾时自动挂到外层 ToolResult
+// （NestedCalls + Usage）。编排方**不要**自建 recorder —— 自建那份挂不到自己的
+// ToolResult 上（Tool.Call 只返回 (string, error)，没有回写通道，见
+// events.EnsureNestedRecorder）；也**不要**把嵌套用量经 ToolUsageProvider 再上报
+// 一次 —— 引擎已从 recorder 合并过一次（engine.go finish），再报即双计。
+//
+// # 与 runBatch 单条的差异
+//
+//  1. 填 opts.ParentCallId / opts.Depth：既写进事件，也把 opts.Depth 叠加到
+//     events.ToolContext.Depth 上交给工具（否则 subagent 的 maxSpawnDepth 读到的是
+//     外层运行深度，脚本可借道 agent_spawn 隐掉一层嵌套 —— 设计文档 §20.1）；
+//  2. 子调用自动汇入 ctx 上的 core.NestedRecorder（记录 + 用量）；
+//  3. **不发射工具事件**（ToolStart/ToolResponse）：带 ParentCallId 的嵌套事件流是
+//     Phase 2 的事。但**审批事件必须透出** —— 请求不到 UI，一次 manual 模式的嵌套
+//     调用会白等满审批窗口并占住会话审批队列（设计文档 §16.2）。
 //
 // # 已知降级（Phase 0，负向测试钉住）
 //
 //   - **PreToolUse 不覆盖嵌套调用**：PreToolUse 在 agents 层
 //     （agents/agent_loop.go:2251），引擎侧 execute() 没有它，故本路径天然跳过。
 //     这是产品级降级。将来把 hooks 下沉进引擎时，tools/nested_test.go 里的
-//     TestPreToolUseDoesNotCoverNestedCalls 需要翻转。
-//   - **不发射事件**：handler 传 nil。Phase 2 接入带 ParentCallId 的事件流后移除。
+//     TestExecuteOneDoesNotCoverPreToolUse 需要翻转。
 func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts ExecuteOpts) core.ToolResult {
 	call.ParentCallId = opts.ParentCallId
 	call.Depth = opts.Depth
@@ -233,13 +249,18 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 		}
 	}
 
+	// 深度接线必须先于执行：工具（subagent 的 maxSpawnDepth、审计等）读的就是
+	// 本次执行拿到的这个 ctx。
+	ctx = withNestedCallDepth(ctx, opts.Depth)
+	handler := nestedApprovalHandler(ctx)
+
 	rec := events.NestedRecorderFrom(ctx)
 	if rec == nil {
-		return e.executeApproved(ctx, call, nil)
+		return e.executeApproved(ctx, call, handler)
 	}
 
 	start := time.Now()
-	r := e.executeApproved(ctx, call, nil)
+	r := e.executeApproved(ctx, call, handler)
 
 	// 只记录**真正嵌套**的调用（Depth > 0）。Depth == 0 时本次调用就是外层编排调用
 	// 本身，它不该把自己记成自己的嵌套记录：finish() 在 execute() 内部就已
@@ -255,11 +276,57 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 			Duration: time.Since(start),
 			Usage:    usageOrNil(r.Usage),
 		}, len(call.Arguments))
-		// 用量独立累加：即使 Add 因限额丢弃了记录，用量仍必须计入。
-		// Depth == 0 的外层调用其用量由 AgentLoop 的父累加路径结算，不在此重复计入。
+		// 用量独立累加：即使 Add 因限额丢弃了记录，用量仍必须计入 ——
+		// 由引擎在本次编排调用收尾时合并进外层 ToolResult.Usage（engine.go finish）。
 		rec.AddUsage(r.Usage)
 	}
 	return r
+}
+
+// withNestedCallDepth 把「单次运行内的调用嵌套深度」叠加到运行深度上交给工具。
+//
+// 组合而非覆盖：events.ToolContext.Depth 是**运行**深度（AgentLoop 按「运行」注入，
+// agents/agent_loop.go:2324），opts.Depth 是本次调用在**运行内**的嵌套层数。工具要的
+// 是两者之和 —— subagent 按 childDepth = tc.Depth + 1 判定 maxSpawnDepth
+// （subagent/subagent.go:180）。覆盖会丢掉运行深度（子 agent 内跑脚本时按 0 重算），
+// 不接则脚本能把嵌套整层隐掉。
+func withNestedCallDepth(ctx context.Context, depth int) context.Context {
+	if depth <= 0 {
+		return ctx
+	}
+	tc := events.ToolContextFrom(ctx)
+	if tc == nil {
+		// 无 ToolContext（framework 外调用/测试）：至少把调用嵌套深度立起来，
+		// 别让下游读到 0。无运行可关联，故 RunId 留空。
+		return events.WithToolContextForRunTask(ctx, "", "", "", depth, nil, nil, nil)
+	}
+	return events.WithToolContextForRunTask(ctx, tc.RunId, tc.ParentRunId, tc.TaskId,
+		tc.Depth+depth, tc.Handler, tc.Approver, tc.Hooks)
+}
+
+// nestedApprovalHandler 嵌套调用的事件出口：**只**透传审批请求，其余事件一律不发。
+//
+// 为什么不能整个传 nil（原实现）：preApprove 只在 handler != nil 时发
+// ToolApprovalRequested（tools/engine.go），而审批等待器是「按 id 注册后阻塞等待」
+// 的（session/approval.go，默认 30 分钟窗口）—— 请求不发事件，UI 就永远看不到有人
+// 在等确认，调用会白等满窗口再被当成「超时未决」拒绝，并在此期间占住审批队列
+// （等人类不是脚本在消耗预算，但这里连人都不会被叫到）。
+//
+// 为什么不能透传全部事件：带 ParentCallId 的 ToolStart/ToolResponse 归组渲染是
+// Phase 2 才接的（规范 §3.3），先透传会让 UI 把嵌套调用提前显示成独立工具行。
+//
+// 无 ToolContext / 无 handler 时返回 nil（与传入 nil 等价：不发事件）。
+func nestedApprovalHandler(ctx context.Context) events.EventHandler {
+	tc := events.ToolContextFrom(ctx)
+	if tc == nil || tc.Handler == nil {
+		return nil
+	}
+	h := tc.Handler
+	return func(c context.Context, ev events.Event) {
+		if _, ok := ev.(*events.ToolApprovalRequested); ok {
+			h(c, ev)
+		}
+	}
 }
 
 // executeApproved 先走审批再执行 —— 嵌套调用的**权限门必须逐次生效**。
@@ -270,9 +337,14 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 // 的工具（bash / write_file 等）会在完全没有审批的情况下执行 —— 一条真实的越权路径。
 // 由TestExecuteOneRespectsApproval捕获（曾观察到 result="SHOULD-NOT-RUN"）。
 //
-// 审批事件仍传 nil handler：嵌套调用的审批请求与事件归组留给 Phase 2
-// （届时接带 ParentCallId 的事件流），但**审批决策本身必须在 Phase 0 就生效**——
-// 安全门不能延后。
+// 时限语义与批内对齐（设计文档 §16.3）：
+//   - **审批**用调用方 ctx（批前统一审批，不吃单次工具时限 —— 否则人还在看确认弹窗，
+//     工具就先被自己的时限判死）；
+//   - **执行**用 timeoutFor 算出的单次时限（工具级 ToolTimeout/ToolTimeoutProvider
+//     声明 → PerCallTimeout 按参数覆盖），落在可摘离的 liftableTimeout 上
+//     ——与 runBatch 同一份实现，不另造闸门。
+//
+// 审批事件走调用方传入的 handler（ExecuteOne 传的是「只透传审批」的过滤器）。
 func (e *Engine) executeApproved(ctx context.Context, call core.ToolCall, handler events.EventHandler) core.ToolResult {
 	decisions, err := e.preApprove(ctx, []core.ToolCall{call}, handler)
 	if err != nil {
@@ -283,5 +355,12 @@ func (e *Engine) executeApproved(ctx context.Context, call core.ToolCall, handle
 			Result:  "approval could not be requested: " + err.Error(),
 		}
 	}
-	return e.execute(ctx, call, handler, decisions, "")
+
+	execCtx := ctx
+	if timeout := e.timeoutFor(ctx, call); timeout > 0 {
+		lb := newLiftableTimeout(ctx, timeout)
+		defer lb.stop() // 回收时限盒（停表 + 退 watcher），防 timer 泄漏
+		execCtx = lb
+	}
+	return e.execute(execCtx, call, handler, decisions, "")
 }

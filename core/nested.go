@@ -1,7 +1,6 @@
 package core
 
 import (
-	"strings"
 	"sync"
 	"time"
 )
@@ -146,6 +145,22 @@ func (r *NestedRecorder) Usage() Usage {
 	return r.box().get()
 }
 
+// TakeUsage 返回并**清空**累加的用量（引擎在最外层调用收尾时并入 ToolResult）。
+//
+// 为什么必须与 TakeRecord 分开取：记录会被限额丢弃、用量不会（见 Add），
+// 两者的取出时机也可能不同（外层的 usage 要在 finish 时才合并）。
+func (r *NestedRecorder) TakeUsage() Usage {
+	if r == nil {
+		return Usage{}
+	}
+	b := r.box()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	u := b.u
+	b.u = Usage{}
+	return u
+}
+
 // TakeRecord 返回当前记录并**清空**（挂到外层 ToolResult 上后调用一次）。
 func (r *NestedRecorder) TakeRecord() []NestedCallRecord {
 	if r == nil {
@@ -183,40 +198,4 @@ func (r *NestedRecorder) Clone() *NestedRecorder {
 	}
 	// 共享用量累加器：把 usage 指向同一个 *usageBox。
 	return &NestedRecorder{usageBox: r.box()} // 共享同一个 box
-}
-
-// truncateNested 按上限截断 s，超出时尾部标注省略字节数。
-func truncateNested(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	// 标注本身占位，保证结果长度不超过 max。
-	marker := "…[+" + itoa(len(s)-max+16) + " bytes]"
-	if max <= len(marker) {
-		return s[:max]
-	}
-	return s[:max-len(marker)] + marker
-}
-
-func itoa(n int) string {
-	if n <= 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
-}
-
-// normalizeNestedArgs 给参数 JSON 补上省略号语义（空串 = 无参）。
-func normalizeNestedArgs(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	return s
 }
