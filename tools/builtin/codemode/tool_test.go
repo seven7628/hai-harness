@@ -348,6 +348,39 @@ func TestValidParams(t *testing.T) {
 	}
 }
 
+// ---- 墙钟上限的来源优先级（Wave 3：Options.ScriptTimeout）----
+
+// TestScriptTimeoutPrecedence 三条来源的优先级：@options.timeout_ms > 宿主配置 >
+// DefaultScriptTimeoutMs（30s）。宿主配置返回 <=0（含 nil）一律退化到 30s ——
+// 装配方写错一个 0 不该把「有自动终止」变成「不限时」。
+func TestScriptTimeoutPrecedence(t *testing.T) {
+	t.Parallel()
+	declared := func(ms int) ScriptOptions { return ScriptOptions{TimeoutMs: &ms} }
+	cases := []struct {
+		name string
+		host func() time.Duration // nil = 没配 ScriptTimeout
+		so   ScriptOptions
+		want time.Duration
+	}{
+		{"未声明 + 未配宿主 → 30s", nil, ScriptOptions{}, DefaultScriptTimeoutMs * time.Millisecond},
+		{"未声明 + 宿主 90s", func() time.Duration { return 90 * time.Second }, ScriptOptions{}, 90 * time.Second},
+		{"宿主 0 → 退化 30s", func() time.Duration { return 0 }, ScriptOptions{}, DefaultScriptTimeoutMs * time.Millisecond},
+		{"宿主负数 → 退化 30s", func() time.Duration { return -5 * time.Second }, ScriptOptions{}, DefaultScriptTimeoutMs * time.Millisecond},
+		{"声明 5s 压过宿主 90s", func() time.Duration { return 90 * time.Second }, declared(5000), 5 * time.Second},
+		// 声明 0 只有直构 ScriptOptions 才到得了这里（@options 的 0 被解析层拒绝，
+		// 见 minScriptTimeoutMs）—— 仍走 Wave 2 的 so.Timeout()，本波次不动它的语义。
+		{"声明 0 原样透传（生产路径不可达）", func() time.Duration { return 90 * time.Second }, declared(0), 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tool := New(Options{ScriptTimeout: c.host})
+			if got := tool.scriptTimeout(c.so); got != c.want {
+				t.Fatalf("scriptTimeout = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // ---- 结局措辞（§6.5）----
 
 func TestRetimeoutBodyKeepsWordingDiscipline(t *testing.T) {

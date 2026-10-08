@@ -671,6 +671,56 @@ while (true) {}
 	waitNoLivePIDs(t, pids, 3*time.Second)
 }
 
+// ---- ④b 宿主默认上限（Options.ScriptTimeout）：未声明 timeout_ms 时的墙钟 ----
+
+// TestHostScriptTimeoutAppliesWithoutOptionsLine 宿主配置的默认上限必须对
+// 「未写 @options」的脚本生效（Wave 3 的 codemode.budget_seconds 走这一条）。
+func TestHostScriptTimeoutAppliesWithoutOptionsLine(t *testing.T) {
+	requireNode(t)
+	h := newHarness(t)
+	h.installCodemode(func(o *Options) { o.ScriptTimeout = func() time.Duration { return 700 * time.Millisecond } })
+
+	start := time.Now()
+	res, _ := h.run(context.Background(), "while (true) {}")
+	elapsed := time.Since(start)
+
+	if limit := 700*time.Millisecond + 6*time.Second; elapsed > limit {
+		t.Fatalf("返回耗时 %v, want <= %v（宿主上限没生效？）", elapsed, limit)
+	}
+	first := strings.SplitN(res.Result, "\n", 2)[0]
+	if !strings.HasPrefix(first, "[TIMEOUT after 700ms") {
+		t.Fatalf("首行必须声明宿主上限（700ms）: %q\n完整文本:\n%s", first, res.Result)
+	}
+	var structured codemodeResult
+	if err := json.Unmarshal(res.Structured, &structured); err != nil {
+		t.Fatalf("结构化结果解析失败: %v (%s)", err, res.Structured)
+	}
+	if !structured.TimedOut || structured.Canceled {
+		t.Fatalf("结构化结局 = %+v, want TimedOut=true Canceled=false", structured)
+	}
+}
+
+// TestOptionsLineTimeoutBeatsHostDefault 脚本自己声明的 timeout_ms 压过宿主默认：
+// 宿主 400ms 而脚本要跑 ~1.2s —— 只有「声明优先」成立时它才跑得完。
+func TestOptionsLineTimeoutBeatsHostDefault(t *testing.T) {
+	requireNode(t)
+	h := newHarness(t)
+	h.installCodemode(func(o *Options) { o.ScriptTimeout = func() time.Duration { return 400 * time.Millisecond } })
+
+	script := `// @options: {"timeout_ms": 8000}
+const { setTimeout: sleep } = await import('node:timers/promises');
+await sleep(1200);
+return "survived";
+`
+	res, _ := h.run(context.Background(), script)
+	if res.IsError {
+		t.Fatalf("脚本声明了 8s 上限却仍失败（宿主默认没被压过？）: %q", res.Result)
+	}
+	if !strings.Contains(res.Result, "survived") {
+		t.Fatalf("结果里应有返回值: %q", res.Result)
+	}
+}
+
 // ---- ⑤ 脚本抛错：已发生的调用记录在、副作用不回滚 ----
 
 func TestScriptErrorKeepsEarlierCallsAndSideEffects(t *testing.T) {

@@ -36,9 +36,10 @@ type Manager struct {
 	//
 	// ⚠️ 装配点的义务：deferred 档的**激活通道**是 codemode 的 searchTools() / tool_search
 	// （Wave 2/3）。在通道存在之前把它设成 deferred，等价于把 MCP 功能对模型整体关闭
-	// （既不在 ToolParams、也没有任何东西能把它加载回来）。故 desktop/bridge 在激活通道
-	// 落地前必须显式设成 tools.ExposureDirect，通道上线后再翻回 deferred —— 这一条是
-	// 装配决策，不放进本包（本包只管照做 + 显式配置优先）。
+	// （既不在 ToolParams、也没有任何东西能把它加载回来）。故 desktop/bridge **按 codemode 开关
+	// 条件化**设置它：codemode 激活（searchTools 可用）→ deferred，未激活 → direct ——
+	// 这一条是装配决策，不放进本包（本包只管照做 + 显式配置优先）。
+	// Wave 3 落地点：desktop/bridge/codemode.go 的 mcpDefaultExposure / applyMCPDefaultExposure。
 	DefaultExposure tools.ToolExposure
 }
 

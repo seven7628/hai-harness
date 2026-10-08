@@ -58,10 +58,10 @@ type ServerConfig struct {
 	//
 	// browser_* 例外、行为不变：plugin/browser 的 wrappedTool 不转发 Exposure（见其 wrapper.go）。
 	//
-	// 现状（2026-10）：产品装配 desktop/bridge 显式设了 Manager.DefaultExposure =
-	// tools.ExposureDirect —— 因为 deferred 的激活通道（codemode 的 searchTools / tool_search）
-	// 尚未上线，落到 deferred 等于 MCP 对模型整体不可达。故「包级默认 deferred」≠「产品
-	// 默认不进模型工具表」；翻回 deferred 的条件写在 main.go 的装配注释与实施规范 §7.11。
+	// 现状（2026-10，Wave 3 装配）：desktop/bridge 按 codemode 开关**条件化**设置它 ——
+	// codemode 激活（searchTools 可用）时 = tools.ExposureDeferred，未激活时 = tools.ExposureDirect
+	//（通道不在时落 deferred 等于把 MCP 对模型整体不可达）。见 desktop/bridge/codemode.go 的
+	// mcpDefaultExposure / applyMCPDefaultExposure 与实施规范 §7.11/§7.17。
 	Exposure string `json:"exposure,omitempty"`
 }
 

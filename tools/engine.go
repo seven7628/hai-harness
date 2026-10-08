@@ -231,6 +231,35 @@ func (e *Engine) GetTool(_ context.Context, name string) (Tool, error) {
 	return nil, fmt.Errorf("tool %q is not registered%s", name, toolSuggestion(name, names))
 }
 
+// Tools 返回**全部已注册工具**的快照（含 deferred/hidden/model-only），按名字典序排序。
+//
+// 与 ToolParams 的分工（Phase 2）：ToolParams 只回**声明给模型**的档位
+// （direct/model-only），而编排型工具（codemode）的目录要**全部**档位 —— 分层是它自己
+// 的职责（BuildCatalog 按 exposure 判定「可编排 / 可列举」，见 exposure.go）。本方法是
+// 那个「列出全部」的面，**不加任何过滤**：漏掉 deferred 会让 MCP 工具在脚本里不可达
+// （那是它的设计用途），过滤 hidden 则让编排方无从知道注册表里还有什么。
+//
+// 顺序确定（同 ToolParams 的理由）：调用方会逐项投影进描述，map 遍历顺序随机会让同一
+// 集合两次生成的字节不同 —— provider 前缀缓存按字节匹配，抖动即整段失效（pi #10212）。
+//
+// 快照语义：返回的切片与注册表解耦（后续注册不影响本次结果）；并发安全（RLock）。
+// 只读注册表本身，不改任何既有行为；调用方**不要**在持本表的情况下调用
+// RegisterTool（与 GetTool 同款：本方法已释放锁才返回）。
+func (e *Engine) Tools() []Tool {
+	e.lock.RLock()
+	names := make([]string, 0, len(e.tools))
+	for name := range e.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]Tool, 0, len(names))
+	for _, name := range names {
+		out = append(out, e.tools[name])
+	}
+	e.lock.RUnlock()
+	return out
+}
+
 // toolAliases 常见「外来命名」→ 本 harness 工具名。只收无歧义的一对一映射：
 // 歧义的（如 TodoWrite 既可能指 todo_add 也可能指 todo_update）不自动解析，
 // 改为返回带建议的错误，避免替模型猜错工具。大小写敏感（"BASH"/"READ" 走建议路径）。

@@ -150,7 +150,9 @@ func (t *Tool) Call(ctx context.Context, _ string, args string) (string, error) 
 
 	// 5) 墙钟 owner = 宿主：给沙箱传 Timeout<0（它那一侧的固定 deadline 做不到
 	//    「审批等待期间暂停墙钟」），自己用可取消的 ctx 管预算。
-	clock := newWallClock(so.Timeout())
+	//    （上限来源：@options.timeout_ms 优先，其次宿主配置 codemode.budget_seconds，
+	//    最后 DefaultScriptTimeoutMs=30s —— 见 Options.ScriptTimeout / scriptTimeout）。
+	clock := newWallClock(t.scriptTimeout(so))
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	clock.watch(runCtx, cancelRun)

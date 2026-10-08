@@ -94,6 +94,15 @@ type Options struct {
 	// 返回 <0 = 不限）。装配方读 codemode.inline_budget 配置。
 	InlineBudget func() int
 
+	// ScriptTimeout 脚本**未**在首行 `// @options` 声明 timeout_ms 时的默认墙钟上限
+	//（nil 或返回 <=0 = DefaultScriptTimeoutMs，即 30s）。`@options.timeout_ms` 一律优先
+	// —— 模型的显式声明永远压过宿主默认。装配方读 codemode.budget_seconds 配置。
+	//
+	// 为什么是函数而不是 time.Duration：这个值来自 settings.json，由宿主热读
+	//（reload_settings 后同一个工具实例要吃到新值）；拷一份进 Options 会永久冻住
+	// 装配那一刻的设置。与 Mode/InlineBudget 同款（都是「每问一次」的配置读取）。
+	ScriptTimeout func() time.Duration
+
 	// Store 会话级 store（OpenStore 的产物；nil = 进程内内存 store：跨调用可见、
 	// 不落盘）。脚本内 store()/load() 的权威侧。
 	Store *Store
@@ -340,6 +349,30 @@ func (t *Tool) budget() *int {
 	}
 	b := t.opts.InlineBudget()
 	return &b
+}
+
+// scriptTimeout 本次脚本的墙钟上限（优先级见下）。
+//
+// 三条，顺序不可换：
+//  1. `@options.timeout_ms` —— 模型的**显式声明**，永远优先。非 nil 就原样交给
+//     `ScriptOptions.Timeout()`（Wave 2 语义，一行不改）：生产路径上它恒 >0，
+//     因为解析层把 [1, 1h] 之外的值全判成错误（minScriptTimeoutMs）；
+//  2. `Options.ScriptTimeout`（宿主配置，>0 才生效）—— 让装配方能在不碰 @options 的
+//     前提下给出本机默认（Wave 3 的 codemode.budget_seconds）；
+//  3. `DefaultScriptTimeoutMs`（30s，D3 定的默认；见 ScriptOptions.Timeout）。
+//
+// 宿主配置返回 <=0 时**退化到 30s 而不是不限时**：装配方的配置错误不该把
+// 「有自动终止」变成「一个 while(true) 只能靠用户中断」（D3 的教训）。
+func (t *Tool) scriptTimeout(so ScriptOptions) time.Duration {
+	if so.TimeoutMs != nil {
+		return so.Timeout()
+	}
+	if t.opts.ScriptTimeout != nil {
+		if d := t.opts.ScriptTimeout(); d > 0 {
+			return d
+		}
+	}
+	return so.Timeout()
 }
 
 // scriptNameFor 一个 raw 名在脚本里的**主**名字（纯函数）。

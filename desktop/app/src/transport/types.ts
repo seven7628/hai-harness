@@ -78,7 +78,7 @@ export interface MCPServerCfg {
   //   codemode 可被 codemode 脚本调用、不写进 codemode 描述
   //   deferred 同上，由 tool_search 现查（引擎侧出厂默认）
   //   hidden   撤下（不声明、不进描述、脚本内也不可达）
-  // 不设 = 未声明：有效档位由宿主装配决策解析（激活通道上线前后不同）。
+  // 不设 = 未声明：有效档位由宿主装配决策解析（codemode 开 = deferred 按需可搜；关 = direct 直接可见）。
   exposure?: 'direct' | 'codemode' | 'deferred' | 'hidden'
 }
 // 命令沙箱设置（macOS Seatbelt / sandbox-exec）。sensitive_paths 追加进策略的
@@ -99,6 +99,21 @@ export interface PermissionsSettings {
 export interface CronSettings {
   enabled: boolean
   auto_clean: boolean
+}
+// settings.json codemode 段（脚本编排工具，Wave 3）。字段与默认值见 bridge 的
+// loadCodemodeSettings（desktop/bridge/codemode.go）：缺字段/整段缺失一律走默认，
+// 非法值退化到默认并在 bridge stderr 留警告。
+export interface CodemodeSettings {
+  // 是否注册 codemode 工具（默认 false = 完全不注册）。
+  enabled: boolean
+  // 模式："on"（默认，已声明工具保持声明 + 描述追加「也可从脚本调用」）| "off"（不激活）。
+  // "only"（已声明工具对模型隐藏）在 Wave 2 只做了一半，bridge 会**拒绝**它并按关闭处理。
+  mode?: 'on' | 'off'
+  // 目录描述的估算 token 上限：>0 覆盖，<0 = 不限，0/缺省 = 工具内建默认（3000）。
+  inline_budget?: number
+  // 脚本未在首行 // @options 声明 timeout_ms 时的默认墙钟上限（秒，>0，≤ 3600）。
+  // 缺省 = 30 秒（工具内建默认）；脚本自己的声明永远优先。
+  budget_seconds?: number
 }
 // settings.json agent 段：子 agent 运行时调参（提醒阈值 + 并发槽上限）。
 export interface AgentSettings {
@@ -190,6 +205,11 @@ export interface AppSettings {
   sandbox?: SandboxSettings // 命令沙箱（缺省 seatbelt；桌面端默认开启 2026-08-16 决策）
   permissions?: PermissionsSettings // open 白名单（空 = 禁用 open）
   cron?: CronSettings // 定时任务（缺省全开 2026-08-19 决策）
+  // codemode（脚本编排工具，2026-10 Wave 3）：缺省**关闭**（对齐 pi defaultActive:false）。
+  // 类型在这里声明是为了往返安全：settings.json 是自由 JSON，bridge 读它决定「是否注册
+  // codemode 工具 + MCP 未声明档位落 direct 还是 deferred」；前端不做类型化重写内容的
+  // 裁剪（readSettings 展开原始键），声明类型让面板/往返都不丢用户手写的这一节。
+  codemode?: CodemodeSettings
   mesh?: MeshSettings // Session Mesh 会话间通信（缺省全关：开启后才注册 session_* 工具）
   agent?: AgentSettings // Agent 运行时设置（提醒阈值 + 子 agent 并发槽上限）
   runtime?: RuntimeSettings // 运行期行为开关（S3-B 主停止后台任务语义）

@@ -113,7 +113,7 @@ func (a *mcpTool) Exposure() tools.ToolExposure {
 	raw := strings.TrimSpace(a.server.Config().Exposure)
 	if raw == "" {
 		if a.def != "" {
-			return a.def // 宿主的装配决策（见 Manager.DefaultExposure：激活通道未上线时 = direct）
+			return a.def // 宿主的装配决策（见 Manager.DefaultExposure：Wave 3 起按 codemode 开关在 direct/deferred 间条件化）
 		}
 		return tools.ExposureDeferred // 包级出厂默认（设计文档 §18）
 	}
