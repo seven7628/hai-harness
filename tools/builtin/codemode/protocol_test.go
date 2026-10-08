@@ -295,6 +295,78 @@ func TestHostOpStore(t *testing.T) {
 	}
 }
 
+// TestScaffoldStoreRollsBackRejectedWritesAndLoadKeepsProtoKey 两条跨语言修正的钉子
+// （对抗复核 F7）：① load() 无参不许用普通字面量累加 —— 键 __proto__ 会走原型 setter
+// 而静默消失（单查 load("__proto__") 却拿得到，症状极难查）；② 宿主拒绝的写入必须回滚
+// 本地视图 —— 否则同一段脚本里的 load() 会读到「根本没落盘的值」。
+func TestScaffoldStoreRollsBackRejectedWritesAndLoadKeepsProtoKey(t *testing.T) {
+	requireNode(t)
+	b, _ := newOpBridge(t)
+	e := execproc.New(nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := e.ExecuteScript(ctx, execproc.ScriptOpts{
+		Timeout:  20 * time.Second,
+		Scaffold: scaffoldSource,
+		Init:     json.RawMessage(`{"tools":[],"store":{}}`),
+		Script: `
+await store("__proto__", 41);
+await store("n", 1);
+const all = load();
+const longKey = "k".repeat(2048);
+let caught = "";
+try { await store(longKey, 1); } catch (e) { caught = String((e && e.message) || e); }
+text(JSON.stringify({
+  keys: Object.keys(all).sort().join(","),
+  proto: String(all["__proto__"]),
+  caught: caught.slice(0, 80),
+  keysAfter: Object.keys(load()).length,
+}));
+return "";
+`,
+		OnCall: func(cctx context.Context, c execproc.ScriptCall) execproc.ScriptResult {
+			if op, ok := reservedOp(c.Name); ok {
+				return b.hostOp(cctx, op, c.Args)
+			}
+			return execproc.ScriptResult{IsError: true, Value: jsonText("unexpected tool call: " + c.Name)}
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteScript: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("脚本没跑完: exit=%d text=%q", res.ExitCode, res.Text)
+	}
+	// 取最后一行非空输出：text() 与 console.* 汇在同一条通道里，前面可能还有别的行。
+	lines := strings.Split(strings.TrimSpace(res.Text), "\n")
+	payload := lines[len(lines)-1]
+	var got struct {
+		Keys      string `json:"keys"`
+		Proto     string `json:"proto"`
+		Caught    string `json:"caught"`
+		KeysAfter int    `json:"keysAfter"`
+	}
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatalf("脚本输出不是预期 JSON: %q (err=%v)", res.Text, err)
+	}
+	if got.Keys != "__proto__,n" {
+		t.Errorf("load() 列出的键 = %q, want \"__proto__,n\"（普通字面量会让 __proto__ 静默消失）", got.Keys)
+	}
+	if got.Proto != "41" {
+		t.Errorf("load()[\"__proto__\"] = %q, want \"41\"", got.Proto)
+	}
+	if !strings.Contains(got.Caught, "1 KiB") {
+		t.Errorf("超长键被宿主拒绝时，脚本应看到可读原因，实际 %q", got.Caught)
+	}
+	if got.KeysAfter != 2 {
+		t.Errorf("被拒的写入没有回滚本地视图：load() 里有 %d 个键，want 2（__proto__ 与 n）", got.KeysAfter)
+	}
+	// 宿主侧同样只该有两个键（长键那次压根没进 Pending）。
+	if rec := b.pending.Record(); len(rec.Set) != 2 {
+		t.Errorf("宿主 Pending 里的键 = %d, want 2: %+v", len(rec.Set), rec.Set)
+	}
+}
+
 func TestHostOpImage(t *testing.T) {
 	t.Parallel()
 	b, _ := newOpBridge(t)

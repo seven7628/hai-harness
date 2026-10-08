@@ -203,7 +203,9 @@ const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)
 
 globalThis.load = (key) => {
   if (key === undefined) {
-    const all = {};
+    // Object.create(null)：普通字面量的键 __proto__ 会走原型 setter，条目**静默消失**
+    //（而 load("__proto__") 单查却拿得到，症状极难查）—— 对抗复核 F7。
+    const all = Object.create(null);
     for (const k of Object.keys(storeValues)) all[k] = clone(storeValues[k]);
     return all;
   }
@@ -219,8 +221,15 @@ globalThis.store = async (key, value) => {
   }
   const limits = (init && init.store_limits) || {};
   if (value === undefined) {
+    const had = Object.prototype.hasOwnProperty.call(storeValues, key);
+    const prev = storeValues[key];
     delete storeValues[key];
-    return await hostCall(OP_STORE, { key: key, delete: true });
+    try {
+      return await hostCall(OP_STORE, { key: key, delete: true });
+    } catch (e) {
+      if (had) storeValues[key] = prev; // 宿主拒绝 ⇒ 回滚（否则脚本内 load() 会撒谎）
+      throw e;
+    }
   }
   let raw;
   try {
@@ -239,8 +248,19 @@ globalThis.store = async (key, value) => {
     throw new Error('store(' + JSON.stringify(key) + '): value is ' + size + ' bytes, over the ' +
       limits.value_bytes + '-byte (256 KiB) limit for one value - store a path or a summary instead');
   }
-  storeValues[key] = JSON.parse(raw); // 本地视图立刻生效：同一段脚本里的 load(key) 必须看得见
-  return await hostCall(OP_STORE, { key: key, value: JSON.parse(raw) });
+  // 本地视图立刻生效：同一段脚本里的 load(key) 必须看得见。但**宿主拒绝时回滚**：
+  // 否则「键超长 / 写入后超总量」这类只有宿主能判的拒绝会让本地视图永久偏离权威，
+  // 脚本以为自己写成功了、下一段脚本却 load 不到（对抗复核 F6/F7 同源）。
+  const hadKey = Object.prototype.hasOwnProperty.call(storeValues, key);
+  const prevVal = storeValues[key];
+  storeValues[key] = JSON.parse(raw);
+  try {
+    return await hostCall(OP_STORE, { key: key, value: JSON.parse(raw) });
+  } catch (e) {
+    if (hadKey) storeValues[key] = prevVal;
+    else delete storeValues[key];
+    throw e;
+  }
 };
 
 // searchTools / describeTool：检索与描述都在宿主侧（目录与 namespace 的 instructions

@@ -35,8 +35,14 @@ const (
 	MaxStoreValueBytes = 256 << 10 // 256 KiB
 
 	// MaxStoreTotalBytes 整个 store 的上限（对齐 pi 的 1048576）。
-	// 只统计值的字节数（键通常是几十字节，忽略不计）。
+	// 统计**键 + 值**的字节数：只算值的话，脚本可以用大量长键把 store 撑到任意大
+	//（实测 3000 个 1 KiB 的键 ⇒ 3 MB 落盘、此后每次调用都带 3 MB 的 init 载荷），
+	// 而键的字节同样是落盘与每次调用传递的真实成本（对抗复核 F6）。
 	MaxStoreTotalBytes = 1 << 20 // 1 MiB
+
+	// MaxStoreKeyBytes 单个键的上限。键是要进 init 载荷与 jsonl 的，长键既贵又是
+	// 「绕过总量限制」的载体；1 KiB 远超任何正常用法（键名是标识符，不是数据）。
+	MaxStoreKeyBytes = 1 << 10 // 1 KiB
 
 	// storeFileMode 文件权限：0600（只有本用户可读写）。store 里会出现工具结果里的
 	// 路径、内容片段，同 spill 文件的既定要求（pi 那边是裸 writeFile，是它的缺陷）。
@@ -47,6 +53,7 @@ const (
 // 直接 errors.Is 断言「是限额而不是别的错」。
 var (
 	ErrStoreValueTooLarge = errors.New("codemode store: 单值超过上限")
+	ErrStoreKeyTooLarge   = errors.New("codemode store: 键超过上限")
 	ErrStoreTotalTooLarge = errors.New("codemode store: 总量超过上限")
 	ErrStoreInvalidJSON   = errors.New("codemode store: 值不是合法 JSON")
 )
@@ -89,6 +96,10 @@ func NewPending() *Pending {
 func (p *Pending) Set(key string, value json.RawMessage) error {
 	if key == "" {
 		return fmt.Errorf("codemode store: 键不能为空")
+	}
+	if len(key) > MaxStoreKeyBytes {
+		return fmt.Errorf("%w: 键 %d 字节 > 上限 %d 字节（1 KiB）。键是标识符，别把数据塞进键里",
+			ErrStoreKeyTooLarge, len(key), MaxStoreKeyBytes)
 	}
 	compact, err := compactJSON(value)
 	if err != nil {
@@ -272,6 +283,10 @@ func (s *Store) appendRecord(rec StoreRecord) error {
 			if k == "" {
 				return fmt.Errorf("codemode store: 键不能为空")
 			}
+			if len(k) > MaxStoreKeyBytes {
+				return fmt.Errorf("%w: 键 %d 字节 > 上限 %d 字节（1 KiB）。键是标识符，别把数据塞进键里",
+					ErrStoreKeyTooLarge, len(k), MaxStoreKeyBytes)
+			}
 			compact, err := compactJSON(v)
 			if err != nil {
 				return fmt.Errorf("codemode store: 键 %q 的值不是合法 JSON: %w", k, err)
@@ -290,11 +305,15 @@ func (s *Store) appendRecord(rec StoreRecord) error {
 	norm.Delete = append([]string(nil), rec.Delete...)
 
 	total := 0
-	for _, v := range next {
-		total += len(v)
+	for k, v := range next {
+		if len(k) > MaxStoreKeyBytes {
+			return fmt.Errorf("%w: 键 %d 字节 > 上限 %d 字节（1 KiB）。键是标识符，别把数据塞进键里",
+				ErrStoreKeyTooLarge, len(k), MaxStoreKeyBytes)
+		}
+		total += len(k) + len(v)
 	}
 	if total > MaxStoreTotalBytes {
-		return fmt.Errorf("%w: 写入后总量 %d 字节 > 上限 %d 字节（1 MiB）。删掉不再需要的键（store(k, undefined)）再存",
+		return fmt.Errorf("%w: 写入后总量 %d 字节（键+值）> 上限 %d 字节（1 MiB）。删掉不再需要的键（store(k, undefined)）再存",
 			ErrStoreTotalTooLarge, total, MaxStoreTotalBytes)
 	}
 

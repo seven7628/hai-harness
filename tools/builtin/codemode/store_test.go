@@ -148,12 +148,17 @@ func TestStoreCompactsValues(t *testing.T) {
 // ---- 限额 ----
 
 func TestStoreLimits(t *testing.T) {
-	// seedFull 预置一个「总量恰好顶到 1 MiB」的 store（4 × 256 KiB）。
+	// 记账口径（对抗复核 F6 修正）：总量 = Σ(键字节 + 值字节)。所以「恰好顶到 1 MiB」
+	// 的值尺寸要扣掉键的开销 —— 4 个 1 字节的键 ⇒ 每个值 262143 字节时总量恰为 1048576。
+	const keyCount = 4
+	const exactFitValue = (MaxStoreTotalBytes - keyCount) / keyCount // 262143
+
+	// seedFull 预置一个「总量恰好顶到 1 MiB」的 store。
 	seedFull := func(t *testing.T, s *Store) {
 		t.Helper()
 		p := NewPending()
 		for _, k := range []string{"a", "b", "c", "d"} {
-			if err := p.Set(k, jsonStringOfSize(MaxStoreValueBytes)); err != nil {
+			if err := p.Set(k, jsonStringOfSize(exactFitValue)); err != nil {
 				t.Fatalf("预置: %v", err)
 			}
 		}
@@ -189,12 +194,25 @@ func TestStoreLimits(t *testing.T) {
 			wantErr: ErrStoreValueTooLarge,
 		},
 		{
-			name: "总量恰好 1 MiB（4 × 256 KiB，合法）",
+			name: "键 1 KiB + 1 字节（拒绝）",
+			seed: noop,
+			write: func(t *testing.T, s *Store) error {
+				// 暂存路径先拒（脚本内可 catch）。
+				if err := NewPending().Set(strings.Repeat("k", MaxStoreKeyBytes+1), json.RawMessage("1")); !errors.Is(err, ErrStoreKeyTooLarge) {
+					t.Errorf("Pending.Set 应当先拒超长键，实际 %v", err)
+				}
+				// 落盘前的第二道闸（白盒）。
+				return s.appendRecord(StoreRecord{Set: map[string]json.RawMessage{strings.Repeat("k", MaxStoreKeyBytes+1): json.RawMessage("1")}})
+			},
+			wantErr: ErrStoreKeyTooLarge,
+		},
+		{
+			name: "总量恰好 1 MiB（键+值，合法）",
 			seed: noop,
 			write: func(t *testing.T, s *Store) error {
 				p := NewPending()
 				for _, k := range []string{"a", "b", "c", "d"} {
-					if err := p.Set(k, jsonStringOfSize(MaxStoreValueBytes)); err != nil {
+					if err := p.Set(k, jsonStringOfSize(exactFitValue)); err != nil {
 						return err
 					}
 				}
@@ -207,11 +225,11 @@ func TestStoreLimits(t *testing.T) {
 			write: func(t *testing.T, s *Store) error {
 				p := NewPending()
 				for _, k := range []string{"a", "b", "c", "d"} {
-					if err := p.Set(k, jsonStringOfSize(MaxStoreValueBytes)); err != nil {
+					if err := p.Set(k, jsonStringOfSize(exactFitValue)); err != nil {
 						return err
 					}
 				}
-				if err := p.Set("e", json.RawMessage("1")); err != nil { // 再来 1 字节就超
+				if err := p.Set("e", json.RawMessage("1")); err != nil { // 再来 1 键 + 1 字节就超
 					return err
 				}
 				return s.Commit(p)
@@ -259,11 +277,41 @@ func TestStoreLimits(t *testing.T) {
 				t.Error("限额校验失败时内存状态被改动了")
 			}
 			// 报错必须能让模型看懂限额（它会照着这句改脚本），所以带上具体数字与建议。
-			wantText := map[error]string{ErrStoreValueTooLarge: "256 KiB", ErrStoreTotalTooLarge: "1 MiB"}[c.wantErr]
+			wantText := map[error]string{
+				ErrStoreValueTooLarge: "256 KiB",
+				ErrStoreKeyTooLarge:   "1 KiB",
+				ErrStoreTotalTooLarge: "1 MiB",
+			}[c.wantErr]
 			if !strings.Contains(err.Error(), wantText) {
 				t.Errorf("报错里缺少 %q: %v", wantText, err)
 			}
 		})
+	}
+}
+
+// TestStoreTotalCountsKeys 键的字节必须计入总量。
+//
+// 为什么单列（对抗复核 F6）：只算值时，脚本能用大量长键把 store 撑到任意大 ——
+// 实测 3000 个 1 KiB 的键 = 3 MB 落盘，且此后**每次调用**都带 3 MB 的 init 载荷。
+func TestStoreTotalCountsKeys(t *testing.T) {
+	t.Parallel()
+	s, path := openTemp(t)
+	p := NewPending()
+	prefix := strings.Repeat("k", MaxStoreKeyBytes-4) // 1 KiB 键：前缀 + 4 位序号 = 恰好 1024
+	for i := 0; i < 3000; i++ {
+		if err := p.Set(fmt.Sprintf("%s%04d", prefix, i), json.RawMessage("1")); err != nil {
+			t.Fatalf("第 %d 个键不该被拒（键恰好 1 KiB、值 1 字节）: %v", i, err)
+		}
+	}
+	err := s.Commit(p)
+	if !errors.Is(err, ErrStoreTotalTooLarge) {
+		t.Fatalf("3000 × 1 KiB 的键把总量顶到 ~3 MB，必须被总量闸拒绝，实际 err=%v", err)
+	}
+	if got := readFile(t, path); got != "" {
+		t.Errorf("被拒的批次不该写进文件，实际 %d 字节", len(got))
+	}
+	if got := len(valuesOf(t, s)); got != 0 {
+		t.Errorf("被拒的批次不该改内存状态，实际 %d 个键", got)
 	}
 }
 
