@@ -294,8 +294,8 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 func (t *BashTool) OutputSchema() any {
 	return tools.Obj(map[string]any{
 		"output":            tools.Str("命令的合并输出（stdout+stderr）。超时/取消时首行是 [TIMEOUT …]/[CANCELLED …] 声明（说明下文为部分输出）。上限 1 MiB：被截断时这里是前 1 MiB，全文见 full_output_path"),
-		"truncated":         tools.Bool("output 是否被 1 MiB 上限截断（true 时完整输出已落盘，见 full_output_path）"),
-		"full_output_path":  tools.Str("未截断全文的落盘路径（仅 truncated=true 时有值；文件权限 0600 且不在工作区内，脚本可用 read 工具或 fs 读取）"),
+		"truncated":         tools.Bool("output 是否被 1 MiB 上限截断。true 时通常能在 full_output_path 找到全文；落盘失败（磁盘满/目录不可写）时该路径为空 —— 此时 output 就是全部可得内容"),
+		"full_output_path":  tools.Str("未截断全文的落盘路径（truncated=true 且落盘成功时有值；落盘失败时为空串，不要当成有效路径）。文件权限 0600 且不在工作区内，脚本可用 read 工具或 fs 读取"),
 		"exit_code":         tools.Int("命令真实退出码（被信号杀死 / 超时 / 取消为 -1）"),
 		"wall_time_seconds": tools.Number("命令实际墙钟耗时（秒，只计真实执行，不含 cd 解析与高危检查）"),
 	}, "output", "truncated", "exit_code", "wall_time_seconds")

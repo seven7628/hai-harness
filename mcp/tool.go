@@ -161,7 +161,7 @@ func (a *mcpTool) Namespace() *tools.ToolNamespace {
 		Name:        a.tool.server,
 		Description: fmt.Sprintf("MCP server %q — tools grouped here. Server usage guidance is available on demand, not inlined.", a.tool.server),
 	}
-	if a.server.Status().State == "connected" {
+	if a.server.Connected() {
 		ns.Instructions = a.server.Instructions(context.Background())
 	}
 	return ns

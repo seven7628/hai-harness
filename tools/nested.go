@@ -235,6 +235,17 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 	call.ParentCallId = opts.ParentCallId
 	call.Depth = opts.Depth
 
+	// 误用纠正：带了 ParentCallId（= 编排方明确说「这是某次调用的子调用」）却把 Depth 留 0，
+	// 是**静默毁数据**的组合，必须纠正而不是照做：
+	//   - finish() 只在 Depth==0 时取记录/用量 ⇒ 子调用的记录与嵌套用量会被内层 finish 取走，
+	//     外层拿到空的 NestedCalls 与 Usage（会话**少计费**，§16.4 的唯一通道断掉）；
+	//   - WithScriptCall 只在 Depth>0 注入 ⇒ 脚本里 tools.bash(...) 静默退回 20KB 文本。
+	// 两者都不报错、只在行为上少东西，是 Wave 2 最容易踩的一处（复核实测复现）。
+	if call.ParentCallId != "" && opts.Depth <= 0 {
+		opts.Depth = 1
+		call.Depth = opts.Depth
+	}
+
 	// 深度守卫：core.NestedMaxDepth 管「单次运行内的编排嵌套」，
 	// 与 subagent 的 maxSpawnDepth（subagent/agent_tools.go:27 = 2，管「运行」间
 	// 的派生）是独立的另一道闸。两道都要接线，否则脚本可经 agent_spawn 绕过。

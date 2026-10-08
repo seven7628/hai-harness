@@ -57,6 +57,11 @@ type ServerConfig struct {
 	// 就永远轮不到 —— 而 deferred 在通道上线前等价于 MCP 对模型整体不可达。
 	//
 	// browser_* 例外、行为不变：plugin/browser 的 wrappedTool 不转发 Exposure（见其 wrapper.go）。
+	//
+	// 现状（2026-10）：产品装配 desktop/bridge 显式设了 Manager.DefaultExposure =
+	// tools.ExposureDirect —— 因为 deferred 的激活通道（codemode 的 searchTools / tool_search）
+	// 尚未上线，落到 deferred 等于 MCP 对模型整体不可达。故「包级默认 deferred」≠「产品
+	// 默认不进模型工具表」；翻回 deferred 的条件写在 main.go 的装配注释与实施规范 §7.11。
 	Exposure string `json:"exposure,omitempty"`
 }
 

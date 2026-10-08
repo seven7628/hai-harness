@@ -499,3 +499,31 @@ func (p *scriptMarkProbe) Call(ctx context.Context, _, _ string) (string, error)
 	return "ok", nil
 }
 func (p *scriptMarkProbe) ValidParams(context.Context, string, string) error { return nil }
+
+// TestExecuteOneCorrectsDepthZeroWithParent 编排方漏写 Depth 时不得静默毁数据。
+//
+// 复核实测的误用组合：`ExecuteOpts{ParentCallId: "outer"}` 但 Depth 留 0 ⇒
+// ① finish() 在 Depth==0 分支把子调用的记录/用量取走，外层 NestedCalls/Usage 为空
+//
+//	（会话少计费）；② 不注入脚本标记 ⇒ 脚本里 tools.bash 静默退回 20KB 文本。
+//
+// 两者都不报错，故必须有回归钉住「ParentCallId 非空 + Depth 0 → 按 Depth 1 处理」。
+func TestExecuteOneCorrectsDepthZeroWithParent(t *testing.T) {
+	orch := &orchestratorTool{}
+	e := newOrchestratorEngine(t, orch)
+
+	// 编排工具内部照旧用 Depth:1；这里直接模拟「误用 Depth 0」的编排方：
+	// 用外层调用的 ctx 起一次带 ParentCallId 的子调用。
+	rec := core.NewNestedRecorder()
+	ctx := events.WithNestedRecorder(context.Background(), rec)
+	r := e.ExecuteOne(ctx, core.ToolCall{Id: "outer-1/1", Name: "leaf", Arguments: "{}"},
+		ExecuteOpts{ParentCallId: "outer-1", Depth: 0})
+
+	if len(rec.TakeRecord()) != 1 {
+		t.Fatal("ParentCallId 非空时按 Depth 1 处理：记录必须留在 recorder 里（否则会话少计费）")
+	}
+	if got := rec.Usage().TotalTokens; got != 15 {
+		t.Fatalf("嵌套用量 = %d, want 15（Depth 0 会让用量被内层 finish 取走）", got)
+	}
+	_ = r // 记录/用量已断言；脚本标记本身由 TestExecuteOneMarksScriptCalls 覆盖
+}

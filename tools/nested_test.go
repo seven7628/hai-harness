@@ -384,8 +384,11 @@ func TestExecuteOneAssignsDepthToAuditAnchor(t *testing.T) {
 			req = v
 		}
 	}
-	// 深度守卫的边界值必须逐一落到事件上（0 = 顶层，1 = 上限内最深）。
-	for _, depth := range []int{0, core.NestedMaxDepth} {
+	// 深度守卫的边界值必须逐一落到事件上（1 = 上限内最深）。
+	// 注意 Depth=0 **不在**这一组：带 ParentCallId 却留 Depth=0 是误用（会让记录/用量被
+	// 内层 finish 取走、且不注入脚本标记），ExecuteOne 会按 Depth=1 纠正 —— 见
+	// TestExecuteOneCorrectsDepthZeroWithParent。这里覆盖合法区间。
+	for _, depth := range []int{1, core.NestedMaxDepth} {
 		req = nil
 		ctx := events.WithToolContext(context.Background(), "run1", 0, h, allowApprover{}, nil)
 		e.ExecuteOne(ctx, core.ToolCall{Id: "n1", Name: "danger-anchor", Arguments: "{}"},
@@ -397,6 +400,16 @@ func TestExecuteOneAssignsDepthToAuditAnchor(t *testing.T) {
 			t.Fatalf("depth=%d：事件身份 = %q/%d, want outer-9/%d",
 				depth, req.ParentCallId, req.Depth, depth)
 		}
+	}
+
+	// 误用组合（ParentCallId 非空 + Depth 0）被纠正成 1：事件上看到的也是纠正后的值，
+	// 与「记录/用量不被内层取走」是同一个判别式（见 ExecuteOne 的注释）。
+	req = nil
+	ctx := events.WithToolContext(context.Background(), "run1", 0, h, allowApprover{}, nil)
+	e.ExecuteOne(ctx, core.ToolCall{Id: "n1", Name: "danger-anchor", Arguments: "{}"},
+		ExecuteOpts{ParentCallId: "outer-9", Depth: 0})
+	if req == nil || req.Depth != 1 {
+		t.Fatalf("ParentCallId 非空 + Depth 0 必须按 1 处理，事件 = %+v", req)
 	}
 }
 
