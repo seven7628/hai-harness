@@ -39,6 +39,49 @@ type ServerConfig struct {
 	URL     string            `json:"url,omitempty"` // http/sse 端点
 	// Enabled 显式关闭（false）：工具不注册、不连接。nil = 默认启用。
 	Enabled *bool `json:"enabled,omitempty"`
+	// Exposure 该 server 全部工具的暴露档位（config 层词汇，与引擎档 tools.ToolExposure
+	// 是两套，折法见 mcp/tool.go 的 toToolExposure）：
+	//
+	//	direct   直接声明给模型（= Claude Code 的默认行为；工具多时会撑爆工具表）
+	//	codemode 可被 codemode 脚本调用，不写进 codemode 描述（由哪个工具负责激活）
+	//	deferred 同上（两者在引擎侧**同一档**）；由 tool_search 现查
+	//	hidden   撤下（不声明、不进描述、脚本内也不可达）
+	//
+	// 空 = **deferred**（出厂默认，安全不变量）：既不进模型工具表、也不进 codemode
+	// 描述 —— 一旦默认 codemode，几十个 server 的工具描述会灌进 codemode 描述并随
+	// MCP 连接/断线抖动，provider 前缀缓存当场失效（pi #10212；设计文档 §18）。
+	//
+	// 装配点提醒：未显式设置该字段的既有装配（desktop/bridge 的 mcpm.Tools 注册、
+	// plugin/browser 的私有 Manager）落地后即按 deferred 生效 —— 想让模型**直呼** MCP
+	// 工具的产品口径（Claude Code 默认）必须显式写 "direct"。（browser_* 例外，行为不变：
+	// plugin/browser 的 wrappedTool 不转发 Exposure，见其 wrapper.go。）
+	Exposure string `json:"exposure,omitempty"`
+}
+
+// mcpExposureValues 配置档合法值（顺序 = 错误提示里的列举顺序）。
+var mcpExposureValues = []string{"direct", "codemode", "deferred", "hidden"}
+
+// defaultMCPExposure 出厂默认档位（见 ServerConfig.Exposure 注释）。
+const defaultMCPExposure = "deferred"
+
+// normalizeExposure 归一 + 校验 exposure 字段：空 = deferred，非法值**明确报错**。
+//
+// 为什么不静默降级到 deferred：档位直接决定暴露面，一个拼写错误（"defrred"）静默按
+// deferred 处理时，用户以为自己写了 hidden（撤下）却仍可被脚本调用 —— 与 Validate 对
+// type 的口径一致（V2 P1-PROTOCOL-06）：写错的配置要么生效要么报错，不猜。
+// 代价：坏配置的 server 整条被跳过（Merge/loadFile 的既有语义），这正是「明确」的信号。
+func normalizeExposure(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return defaultMCPExposure, nil
+	}
+	for _, ok := range mcpExposureValues {
+		if v == ok {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("mcp 未知 exposure %q（支持 %s；缺省 = %s）",
+		raw, strings.Join(mcpExposureValues, "/"), defaultMCPExposure)
 }
 
 // IsEnabled 解析启用状态（缺省 true）。
@@ -64,7 +107,12 @@ func (c ServerConfig) Validate() (ServerConfig, error) {
 	default:
 		return c, fmt.Errorf("mcp 未知 type %q（支持 stdio/http/streamable_http/sse）", c.Type)
 	}
+	exp, err := normalizeExposure(c.Exposure)
+	if err != nil {
+		return c, err
+	}
 	c.Type = typ
+	c.Exposure = exp
 	return c, nil
 }
 

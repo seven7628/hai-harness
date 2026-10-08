@@ -92,6 +92,66 @@ func (a *mcpTool) RequiresApproval(_ context.Context, _ core.ToolCall) bool {
 	return !a.tool.readOnly
 }
 
+// 编译期断言：适配器必须满足暴露层接口（见 tools/exposure.go）。
+var (
+	_ tools.ExposureProvider  = (*mcpTool)(nil)
+	_ tools.NamespaceProvider = (*mcpTool)(nil)
+)
+
+// Exposure 实现 tools.ExposureProvider：MCP 工具的暴露档位（配置档 → 引擎档；
+// 出厂默认 deferred，见 ServerConfig.Exposure 与 toToolExposure）。
+// 每调用一次读 Server.Config()：配置热重载会重建 Server/适配器，缓存一份反而可能读到旧值。
+func (a *mcpTool) Exposure() tools.ToolExposure {
+	return toToolExposure(a.server.Config().Exposure)
+}
+
+// toToolExposure 配置档 → 引擎档的两层映射（照抄 pi 的 toToolExposure，
+// mcp/src/pi-src/mcp/tools.ts:39-41；设计文档 §18）。
+//
+// 关键一条：配置里的 "codemode" **折成引擎的 deferred**，不是引擎的 ExposureCodemode。
+// 两档在本仓里只差「由哪个工具负责激活」，但落到引擎后语义不同：引擎 codemode 档 =
+// 可编排 **且进 codemode 描述**，而 MCP 工具必须**永不进描述** —— 一旦写成引擎 codemode，
+// 几十个 server 的工具描述会灌进 codemode 的描述，且描述字节随 MCP 连接/断线抖动
+// （provider 前缀缓存全失效），即重新引入 pi #10212（0.99.0 引入，0.99.2 修）：
+// 这就是这里必须折成 deferred 的全部理由。
+//
+// 空/未识别值 → deferred（最保守且不丢能力：不进模型工具表、不进描述，但脚本仍可达；
+// 正常路径上 Validate 已把非法值拦成显式错误，这里只管手工构造的 ServerConfig）。
+func toToolExposure(raw string) tools.ToolExposure {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "direct":
+		return tools.ExposureDirect
+	case "codemode", "deferred":
+		return tools.ExposureDeferred
+	case "hidden":
+		return tools.ExposureHidden
+	default:
+		return tools.ExposureDeferred
+	}
+}
+
+// Namespace 实现 tools.NamespaceProvider：把 MCP server 声明成 codemode 描述里的一个分组
+// （工具名里的 mcp__<server>__ 前缀天然就是分组键）。
+//
+//   - Description 只用**配置信息**合成，与连接状态无关：描述字节必须稳定
+//     （同 exposure 的缓存不变量，见 tools/engine.go 的 ToolParams 注释）。
+//   - Instructions 只在 server **已连接**时透传（mcp.Server.Instructions 会惰性建连）：
+//     Namespace() 在描述生成路径上被调用（工具轮内），在那里做一次上限 15s 的 initialize
+//     会卡住整个 turn。已连接时读的是 initialize 缓存下来的字段，零成本；未连接时给空串
+//     —— MCP 工具的适配器本身只在连接成功后才存在，所以正常路径上 instructions 不会丢。
+//     「已连接」的判定复用 ServerStatus.State（server.go 的公开状态标签）；标签改名会让
+//     这里静默失效，故 exposure_test.go 里有「连接前空 / 连接后透传」的双向用例钉住。
+func (a *mcpTool) Namespace() *tools.ToolNamespace {
+	ns := &tools.ToolNamespace{
+		Name:        a.tool.server,
+		Description: fmt.Sprintf("MCP server %q — tools grouped here. Server usage guidance is available on demand, not inlined.", a.tool.server),
+	}
+	if a.server.Status().State == "connected" {
+		ns.Instructions = a.server.Instructions(context.Background())
+	}
+	return ns
+}
+
 func (a *mcpTool) ValidParams(_ context.Context, _, arguments string) error {
 	if strings.TrimSpace(arguments) == "" || arguments == "null" {
 		return nil // 无参数调用合法

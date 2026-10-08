@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/seven7628/hai-harness/core"
+	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/tools"
 	"os"
@@ -50,6 +51,16 @@ type BashTool struct {
 	mu     sync.Mutex
 	curCwd string // 当前工作目录（初始 = Cwd；cd 命令成功后更新）
 
+	// 结构化结果暂存（tools.OutputSchemaProvider）：Call 内写入、引擎在 Call **成功**
+	// 返回之后读取（与 ToolUsageProvider/ToolDiffProvider 同构的先例；并行调用同一实例
+	// 的竞态顾虑与那两个先例一致）。smu 保护下面三个字段：
+	// structured（本次调用的 JSON 原文，nil = 无）/ spillDir（惰性落盘目录，见 ensureSpillDir）
+	// / spillSeq（落盘文件序号）。独立于 mu：cwd 是会话状态，这三个是单次调用产物。
+	smu        sync.Mutex
+	structured []byte
+	spillDir   string
+	spillSeq   uint64
+
 	// BeforeExec 可选钩子：每条命令真正执行前调用（参数 = 最终命令文本，cd 前缀
 	// 已剥离）。宿主注入产品级副作用（如检测 ego-browser 命令激活窗口），工具层
 	// 不关心具体逻辑；nil = 无钩子。执行不应阻塞命令主路径（实现应快速返回）。
@@ -61,6 +72,20 @@ const (
 	defaultBashTimeout = 5 * time.Minute
 	maxBashTimeout     = time.Hour
 )
+
+// maxBashStructuredOutput 脚本路径（OutputSchemaProvider 的 output 字段）上限：1 MiB。
+// 两条路径的预算**刻意不同**，不要合并：
+//   - 模型路径：引擎 defaultMaxResponseSize（20 KB）头尾截断 —— 结果每轮都进上下文，
+//     放开会把上下文炸掉（tools/exposure.go 的 SkipTruncateProvider 注释同理）。
+//   - 脚本路径：结果只在脚本里活着（不进模型上下文），是「脚本内过滤/聚合」的原料 ——
+//     砍到 20 KB 的话 `await tools.bash(...)` 拿到的就是残片，过滤无从谈起
+//     （设计文档 §15.4 / pi CHANGELOG.md:106 同口径）。
+//
+// 超上限的部分不丢：全文落盘并把路径写进 full_output_path（见 spillFile）。
+const maxBashStructuredOutput = 1 << 20
+
+// bashSpillDirPrefix 落盘目录前缀（os.MkdirTemp 在系统临时目录下建，见 ensureSpillDir）。
+const bashSpillDirPrefix = "hai-harness-bash-spill-"
 
 // NewBashTool 创建 bash 工具（FileTools.Tools() 默认注册）。
 // cwd 命令初始工作目录：推荐传工作区根 —— bash 相对路径与文件工具同锚（Current
@@ -161,6 +186,9 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
+	// 先清空上一次的结构化暂存：引擎只在 Call 成功返回后读取它，早退/失败的调用
+	// 绝不能把上一次的对象留在那里（命令未执行 = 没有 exit_code 可言）。
+	t.setStructured(nil)
 	// 时限交给执行层（sandbox.runExec）动态处理，不在本层自叠 WithTimeout——
 	// 若任务被 promote 为后台，引擎 liftableTimeout 已解除时限（ctx 标记 Unlimited），
 	// 本层的快照定时器反而会挡住「后台不限时」的语义。
@@ -206,6 +234,7 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	}
 	var exitCode int
 	var timedOut, canceled bool
+	started := time.Now() // 墙钟只包住真实执行（cd 解析/高危拦截不算命令耗时）
 	out, err := sbx.Run(ctx, sandbox.ExecSpec{
 		Command:  cmd,
 		Cwd:      cwd,
@@ -214,12 +243,15 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 		TimedOut: &timedOut,
 		Canceled: &canceled,
 	})
+	wall := time.Since(started)
 	// 上报结构化结局（旁路：Call 必须返回 nil error，否则引擎会丢弃 out，见非目标 1）
 	if sink := tools.ExecSinkFrom(ctx); sink != nil {
 		sink.SetExit(cmd, exitCode, timedOut, canceled)
 	}
 	if err != nil {
-		return out, err // 真正的执行层故障（如 sh 无法启动）才走 error
+		// 真正的执行层故障（如 sh 无法启动）：不写结构化结果（无真实结局可报），
+		// 引擎在此分支也不会读它（err != nil 直接丢弃 out）。
+		return out, err
 	}
 	switch {
 	case canceled:
@@ -237,7 +269,155 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 		}
 		out = fmt.Sprintf("[TIMEOUT after %s — the command was killed and the output below is PARTIAL]\n%s", limit, out)
 	}
+	// 结构化结果（**仅脚本路径**）：与文本同源（同一份 out，含超时/取消首行声明），
+	// 只是上限放宽到 1 MiB 且带真实结局。引擎在 Call 成功后读走它 → 脚本里
+	// tools.bash(...) 拿到对象而不是被 20 KB 砍过的文本（设计文档 §15.4 的单点改造）。
+	//
+	// 模型路径**不产出**（设计文档 §15.4 原文：「仅在编排/SDK 调用路径返回完整输出，
+	// 模型路径维持现有限额」）：模型看的是被引擎截断到 20 KB 的文本，结构化原文没有
+	// 消费者，而 >1 MiB 时它还会顺带落盘一个没人引用、永不删除的文件 —— 纯成本
+	//（磁盘 + 一份命令输出的额外副本），故按 tools.IsScriptCall 收口。
+	// 注意每次调用都要显式清空：引擎在 Call 之后无条件读 StructuredContent()，
+	// 留着上一次的暫存会被当成「本次的结构化结果」。
+	if tools.IsScriptCall(ctx) {
+		t.setStructured(t.buildStructured(ctx, out, exitCode, wall))
+	} else {
+		t.setStructured(nil)
+	}
 	return out, nil
+}
+
+// OutputSchema 实现 tools.OutputSchemaProvider：bash 结构化返回契约（脚本路径）。
+// 字段与语义见 bashStructuredOutput / buildStructured。
+func (t *BashTool) OutputSchema() any {
+	return tools.Obj(map[string]any{
+		"output":            tools.Str("命令的合并输出（stdout+stderr）。超时/取消时首行是 [TIMEOUT …]/[CANCELLED …] 声明（说明下文为部分输出）。上限 1 MiB：被截断时这里是前 1 MiB，全文见 full_output_path"),
+		"truncated":         tools.Bool("output 是否被 1 MiB 上限截断（true 时完整输出已落盘，见 full_output_path）"),
+		"full_output_path":  tools.Str("未截断全文的落盘路径（仅 truncated=true 时有值；文件权限 0600 且不在工作区内，脚本可用 read 工具或 fs 读取）"),
+		"exit_code":         tools.Int("命令真实退出码（被信号杀死 / 超时 / 取消为 -1）"),
+		"wall_time_seconds": tools.Number("命令实际墙钟耗时（秒，只计真实执行，不含 cd 解析与高危检查）"),
+	}, "output", "truncated", "exit_code", "wall_time_seconds")
+}
+
+// StructuredContent 实现 tools.OutputSchemaProvider：本次调用的结构化结果原文（JSON）。
+// nil = 无（命令未执行 / 执行层故障）→ 编排侧退回文本路径。读取时机由引擎保证
+// （Call 成功返回之后），与 ToolUsageProvider/ToolDiffProvider 同构。
+func (t *BashTool) StructuredContent() []byte {
+	t.smu.Lock()
+	defer t.smu.Unlock()
+	return t.structured
+}
+
+// setStructured 写本次调用的结构化结果（nil = 清空）。
+func (t *BashTool) setStructured(raw []byte) {
+	t.smu.Lock()
+	t.structured = raw
+	t.smu.Unlock()
+}
+
+// bashStructuredOutput bash 的结构化结果（脚本路径消费；模型路径仍看文本）。
+// 字段名与 pi 一致（CHANGELOG.md:106 / 设计文档 §15.4）。
+type bashStructuredOutput struct {
+	Output         string  `json:"output"`
+	Truncated      bool    `json:"truncated"`
+	FullOutputPath string  `json:"full_output_path,omitempty"` // 空 = 未截断（无落盘）
+	ExitCode       int     `json:"exit_code"`
+	WallTimeSec    float64 `json:"wall_time_seconds"`
+}
+
+// buildStructured 组装本次调用的结构化结果。语义（三条都是硬要求）：
+//  1. output 与文本路径**同源**：文本是 output 的投影（同一份 out + 引擎的 20 KB 截断），
+//     连超时/取消的首行声明也一样 —— 脚本与模型看到的是同一件事实的两个粒度。
+//  2. 超 1 MiB 只保留前 1 MiB，且**不注入任何提示行**：结构化字段要能被脚本直接解析，
+//     「被砍了」由 truncated + full_output_path 两个字段承载（写注释进 output 会污染数据）。
+//  3. exit_code / wall_time_seconds 取真实结局（与 ExecSink 同一组变量算出，不二次判定）。
+//
+// 落盘失败（磁盘满 / 目录不可写）不改变文本路径：truncated=true 但 full_output_path 为空
+// —— spill 是优化不是正确性（同 agents/slim.go 的取舍）。
+func (t *BashTool) buildStructured(ctx context.Context, out string, exitCode int, wall time.Duration) []byte {
+	so := bashStructuredOutput{Output: out, ExitCode: exitCode, WallTimeSec: wall.Seconds()}
+	if len(out) > maxBashStructuredOutput {
+		so.Truncated = true
+		so.Output = truncateUTF8(out, maxBashStructuredOutput) // 不劈裂多字节字符
+		so.FullOutputPath = t.spillFile(ctx, out)
+	}
+	raw, err := json.Marshal(so)
+	if err != nil {
+		return nil // 不可达（字段全可序列化）；返回 nil = 退回文本路径
+	}
+	return raw
+}
+
+// spillFile 把未截断全文落盘并返回路径（失败 = ""）。
+//
+// 落盘约定（设计文档 §15.4 的硬要求：0600 且在工作区之外，pi 的裸 writeFile 是缺陷不要照抄）：
+//   - 目录：os.MkdirTemp 在系统临时目录（$TMPDIR；macOS = /var/folders/…）下建 0700 目录，
+//     同一 BashTool 实例复用（惰性、不 per-call 造目录）。TMPDIR 天然在工作区之外 ——
+//     本仓从不把 TMPDIR 指向工作区（沙箱层反而显式把沙箱内 TMPDIR 钉到 /tmp，见 sandbox.isolatedEnv）。
+//   - 文件名：沿用本仓 spill 命名约定 `spill-<runId>-<n>.txt`（agents/slim.go 先例；bash 没有
+//     callId，用实例内自增序号保证唯一 —— 同一次 run 内可直接按名字排序定位）。
+//   - 权限 0600：命令输出常含凭据/私有数据（pi 的 MCP 侧也这么注释），只有用户本人可读。
+//
+// 不删文件：路径已经交给脚本/宿主（full_output_path），删掉等于给死链；留在系统临时目录由
+// 操作系统回收（与 slim 的 spill 同性质）。
+func (t *BashTool) spillFile(ctx context.Context, full string) string {
+	dir, err := t.ensureSpillDir()
+	if err != nil {
+		return ""
+	}
+	runID := ""
+	if tc := events.ToolContextFrom(ctx); tc != nil {
+		runID = tc.RunId
+	}
+	path := filepath.Join(dir, t.nextSpillName(runID))
+	if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
+		return ""
+	}
+	return path
+}
+
+// ensureSpillDir 惰性建落盘目录（0700，见 spillFile 的约定）；同实例复用同一个目录。
+func (t *BashTool) ensureSpillDir() (string, error) {
+	t.smu.Lock()
+	defer t.smu.Unlock()
+	if t.spillDir != "" {
+		return t.spillDir, nil
+	}
+	dir, err := os.MkdirTemp("", bashSpillDirPrefix)
+	if err != nil {
+		return "", err
+	}
+	t.spillDir = dir
+	return dir, nil
+}
+
+// nextSpillName 生成落盘文件名（spill-<runId>-<n>.txt；无 runId 时省略该段）。
+// runId 经 sanitize 处理：它来自事件层（宿主/模型可影响），不能带路径分隔符。
+func (t *BashTool) nextSpillName(runID string) string {
+	t.smu.Lock()
+	defer t.smu.Unlock()
+	t.spillSeq++
+	if runID = sanitizeSpillID(runID); runID == "" {
+		return fmt.Sprintf("spill-%d.txt", t.spillSeq)
+	}
+	return fmt.Sprintf("spill-%s-%d.txt", runID, t.spillSeq)
+}
+
+// sanitizeSpillID 只保留文件名安全字符（字母/数字/.-_），其余替换为 "_"，并限长。
+func sanitizeSpillID(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+		if b.Len() >= 48 {
+			break
+		}
+	}
+	return strings.Trim(b.String(), "._-")
 }
 
 // currentCwd 返回当前工作目录（会话内跨调用；初始 = 构造 cwd）。
