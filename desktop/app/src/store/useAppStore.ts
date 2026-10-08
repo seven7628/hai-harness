@@ -266,6 +266,7 @@ export interface MCPProjectServer {
   url?: string
   env?: Record<string, string>
   enabled: boolean
+  exposure?: string // 暴露档位（空 = 未声明，有效档由引擎侧解析，见 MCPServerCfg.exposure）
   file: string // 定义文件：.mcp.json（只读）| .go-code/settings.json（可编辑）
   editable: boolean
   state?: string // 连接状态（仅该项目有运行态时出现）

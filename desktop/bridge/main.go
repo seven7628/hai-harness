@@ -1004,6 +1004,16 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	mcpLoader := &mcp.Loader{}
 	mcpRes := mcpLoader.Load(mcpConfigLayers(path)...)
 	mcpm := mcp.NewManagerWithSource(mcpRes.Config, mcpRes.Source)
+	// 暴露档位默认值 = **direct**（保持既有产品口径：模型直接看到 MCP 工具）。
+	//
+	// 为什么不用包级默认的 deferred（设计文档 §18 的安全默认）：deferred 的**激活通道**
+	// 是 codemode 的 searchTools() / tool_search，它们要等 codemode 工具本体与 Wave 3 才
+	// 上线。通道上线前落到 deferred = MCP 工具对模型**整体不可达**（既不在 ToolParams，
+	// 也没有任何东西能把它加载回来）—— 那是把已装好的 MCP 功能对用户悄悄关掉。
+	//
+	// 待办（Wave 3 收尾）：codemode 工具激活后把这一行翻成 tools.ExposureDeferred，
+	// 并同步 MCP 面板的文案（配置面板已可逐 server 显式设置 exposure，见 MCPTab）。
+	mcpm.DefaultExposure = tools.ExposureDirect
 	startupLog("A5.mcp.NewManager", mcpStart)
 	plgStart := time.Now()
 	plg := buildPlugins(m.imPlugin) // 插件注册表（内建 Browser Use + 全局 IM 单例）

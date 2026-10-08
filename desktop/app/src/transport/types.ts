@@ -73,6 +73,13 @@ export interface MCPServerCfg {
   env?: Record<string, string>
   url?: string
   enabled?: boolean
+  // exposure 暴露档位（config 层词汇，折法与默认见 mcp.Manager.DefaultExposure）：
+  //   direct   直接声明给模型（工具多时会撑爆工具表）
+  //   codemode 可被 codemode 脚本调用、不写进 codemode 描述
+  //   deferred 同上，由 tool_search 现查（引擎侧出厂默认）
+  //   hidden   撤下（不声明、不进描述、脚本内也不可达）
+  // 不设 = 未声明：有效档位由宿主装配决策解析（激活通道上线前后不同）。
+  exposure?: 'direct' | 'codemode' | 'deferred' | 'hidden'
 }
 // 命令沙箱设置（macOS Seatbelt / sandbox-exec）。sensitive_paths 追加进策略的
 // 强制 deny-read 路径（绝对路径或相对 home；默认已含 ~/.ssh/.aws/Keychains 等）。
