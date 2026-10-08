@@ -252,6 +252,12 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 	// 深度接线必须先于执行：工具（subagent 的 maxSpawnDepth、审计等）读的就是
 	// 本次执行拿到的这个 ctx。
 	ctx = withNestedCallDepth(ctx, opts.Depth)
+	if opts.Depth > 0 {
+		// 脚本内调用标记：Depth>0 即「由编排脚本发起」。工具据此决定要不要为本次调用
+		// 产出只在脚本路径有意义的产物（结构化结果、超限落盘 —— 见 WithScriptCall）。
+		// Depth==0 是编排工具自己被模型直呼，不进脚本，不标记。
+		ctx = WithScriptCall(ctx)
+	}
 	handler := nestedApprovalHandler(ctx)
 
 	rec := events.NestedRecorderFrom(ctx)
@@ -281,6 +287,32 @@ func (e *Engine) ExecuteOne(ctx context.Context, call core.ToolCall, opts Execut
 		rec.AddUsage(r.Usage)
 	}
 	return r
+}
+
+// ScriptCallKey 脚本内调用的 ctx 标记键（见 WithScriptCall / IsScriptCall）。
+type ScriptCallKey struct{}
+
+// WithScriptCall 标记「本次工具调用来自编排脚本」（引擎在 ExecuteOne 里注入，Depth>0）。
+//
+// 为什么需要这个标记：工具的结果有两条消费路径 —— 直接进模型上下文，或进脚本。
+// 有些「为脚本准备的能力」在模型路径是纯成本：
+//   - 结构化结果（tools.OutputSchemaProvider）：脚本按字段过滤/聚合，模型只看文本；
+//   - 超限落盘（bash 的 1 MiB spill）：脚本能读回全文，模型路径没人消费，
+//     却在磁盘上留下一份命令输出（永不删除，隐私面 + 磁盘泄漏）。
+//
+// 引擎用它区分，工具据此决定「要不要为本次调用多做一份更重的产物」。
+// 除引擎（tools.ExecuteOne）与测试外，任何调用方都不该手工设置它。
+func WithScriptCall(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ScriptCallKey{}, true)
+}
+
+// IsScriptCall 报告本次调用是否来自编排脚本（见 WithScriptCall）。
+func IsScriptCall(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(ScriptCallKey{}).(bool)
+	return v
 }
 
 // withNestedCallDepth 把「单次运行内的调用嵌套深度」叠加到运行深度上交给工具。

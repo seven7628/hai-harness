@@ -450,3 +450,52 @@ func TestRegisterToolConflictOnUncomparableToolDoesNotPanic(t *testing.T) {
 		t.Fatalf("不可比较值类型：预期上报 1 次（已知代价），got %d", len(conflicts3))
 	}
 }
+
+// ---- 6. 脚本内调用标记：只在 Depth>0 注入 ----
+
+// TestExecuteOneMarksScriptCalls ExecuteOne(opts.Depth>0) 必须标记 ctx 为「脚本内调用」——
+// 工具据此决定是否为本次调用产出只在脚本路径有意义的产物（bash 的结构化结果与 1 MiB
+// 落盘、设计文档 §15.4「完整输出只服务编排路径」）。Depth==0 是编排工具自己被模型直呼，
+// 不进脚本，必须**不**标记（否则模型路径也会多产一份没人消费的产物 + 落盘）。
+func TestExecuteOneMarksScriptCalls(t *testing.T) {
+	e := NewToolEngine()
+	marks := make(chan bool, 4)
+	e.RegisterTool(context.Background(), &scriptMarkProbe{
+		BaseTool: BaseTool{Name_: "mark-probe", Description_: "d", Params_: map[string]any{}},
+		marks:    marks,
+	})
+
+	e.ExecuteOne(context.Background(), core.ToolCall{Id: "n1", Name: "mark-probe"}, ExecuteOpts{Depth: 1})
+	if got := awaitMark(t, marks); !got {
+		t.Fatal("Depth=1 的嵌套调用必须带脚本标记（工具侧据此产出结构化结果/落盘）")
+	}
+	e.ExecuteOne(context.Background(), core.ToolCall{Id: "n0", Name: "mark-probe"}, ExecuteOpts{})
+	if got := awaitMark(t, marks); got {
+		t.Fatal("Depth=0 是模型直呼编排工具本身，不该带脚本标记")
+	}
+}
+
+// awaitMark 有界等待探针回执。无界 `<-ch` 是测试事故的温床：探针没被调用（工具名注册错、
+// 早退路径命中）时整套测试会挂到 Go 的 -timeout 才报错，现场只剩一个 [chan receive]
+// 栈 —— 失败信息远不如一句「探针没被调用」。参见本文件曾经的实际事故。
+func awaitMark(t *testing.T, marks <-chan bool) bool {
+	t.Helper()
+	select {
+	case v := <-marks:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal("探针未被调用（工具注册名对不上？引擎走了早退路径？）")
+		return false
+	}
+}
+
+type scriptMarkProbe struct {
+	BaseTool
+	marks chan bool
+}
+
+func (p *scriptMarkProbe) Call(ctx context.Context, _, _ string) (string, error) {
+	p.marks <- IsScriptCall(ctx)
+	return "ok", nil
+}
+func (p *scriptMarkProbe) ValidParams(context.Context, string, string) error { return nil }
