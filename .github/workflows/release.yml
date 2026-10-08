@@ -60,6 +60,10 @@ jobs:
       # go vet 覆盖 _test.go（语法错会让它失败），但**不执行**测试 —— 没有这一步，
       # 测试文件只能破坏构建、毫无收益。新增回归测试必须在这里真正跑起来。
       - name: Go 测试
+        # GO_CODE_REQUIRE_NODE=1：execproc 的端到端用例依赖 node，缺了默认会 t.Skip ——
+        # 那会让流水线「全绿但零覆盖」。CI 上把它变成硬失败（runner 已装 node 22）。
+        env:
+          GO_CODE_REQUIRE_NODE: '1'
         run: go test ./...
 
       - name: 编译 bridge（arm64 静态二进制，随 app 分发）

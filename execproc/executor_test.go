@@ -32,11 +32,25 @@ func requireNode(t *testing.T) {
 	e := New(nil, nil)
 	n, err := e.node(context.Background())
 	if err != nil {
-		t.Skipf("跳过：本机无可用 node（%v）", err)
+		requireOrSkip(t, "本机无可用 node（%v）", err)
 	}
 	if n.Path == "" {
 		t.Fatal("node 探测返回空路径")
 	}
+}
+
+// requireOrSkip 环境依赖缺失时的统一处置：默认**跳过**（开发者机器上没装 node 不该
+// 让整套测试红），但设了 GO_CODE_REQUIRE_NODE=1 就**失败**。
+//
+// 为什么必须有这个开关：CI 上一台没装 node 的机器会让 execproc 的 20+ 条端到端用例
+// 全部 skip —— 流水线一片绿，实际零覆盖（本仓历史上正是这么丢过整包回归网）。
+// release.yml 的 Go 测试步骤显式设这个变量，把「静默跳过」变成「响亮失败」。
+func requireOrSkip(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("GO_CODE_REQUIRE_NODE") == "1" {
+		t.Fatalf("环境依赖缺失且 GO_CODE_REQUIRE_NODE=1（CI 不允许静默跳过）："+format, args...)
+	}
+	t.Skipf("跳过："+format+"（本地开发允许跳过；CI 设 GO_CODE_REQUIRE_NODE=1 即失败）", args...)
 }
 
 // newTestExecutor 建一个 cwd=临时目录的执行器（工作区根语义）。

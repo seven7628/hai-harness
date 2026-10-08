@@ -26,12 +26,12 @@ import (
 
 func TestExecuteScriptUnderSeatbelt(t *testing.T) {
 	if !sandbox.Available() {
-		t.Skip("sandbox-exec 不可用（非 darwin 或未安装），跳过真实沙箱用例")
+		requireOrSkip(t, "sandbox-exec 不可用（非 darwin 或未安装）")
 	}
 	ws := t.TempDir()
 	sb, err := sandbox.NewSeatbelt(ws)
 	if err != nil {
-		t.Skipf("Seatbelt 构造失败（本环境不支持真实沙箱）: %v", err)
+		requireOrSkip(t, "Seatbelt 构造失败（本环境不支持真实沙箱）: %v", err)
 	}
 	requireNode(t)
 
