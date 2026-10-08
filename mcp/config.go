@@ -47,14 +47,16 @@ type ServerConfig struct {
 	//	deferred 同上（两者在引擎侧**同一档**）；由 tool_search 现查
 	//	hidden   撤下（不声明、不进描述、脚本内也不可达）
 	//
-	// 空 = **deferred**（出厂默认，安全不变量）：既不进模型工具表、也不进 codemode
-	// 描述 —— 一旦默认 codemode，几十个 server 的工具描述会灌进 codemode 描述并随
-	// MCP 连接/断线抖动，provider 前缀缓存当场失效（pi #10212；设计文档 §18）。
+	// 空 = **未声明**（不 materialize 成具体档位）：有效档位由适配器侧解析 ——
+	// Manager.DefaultExposure（宿主的装配决策）优先，未设则落到包级出厂默认 deferred
+	// （既不进模型工具表、也不进 codemode 描述 —— 否则几十个 server 的工具描述会灌进
+	// codemode 描述并随连接/断线抖动，provider 前缀缓存当场失效 = pi #10212；设计文档 §18）。
 	//
-	// 装配点提醒：未显式设置该字段的既有装配（desktop/bridge 的 mcpm.Tools 注册、
-	// plugin/browser 的私有 Manager）落地后即按 deferred 生效 —— 想让模型**直呼** MCP
-	// 工具的产品口径（Claude Code 默认）必须显式写 "direct"。（browser_* 例外，行为不变：
-	// plugin/browser 的 wrappedTool 不转发 Exposure，见其 wrapper.go。）
+	// 为什么不在这里就把空写成 "deferred"：那会把「用户说了 deferred」与「用户什么都没说」
+	// 混成一件事，宿主的装配决策（激活通道未上线时该用 direct，见 Manager.DefaultExposure）
+	// 就永远轮不到 —— 而 deferred 在通道上线前等价于 MCP 对模型整体不可达。
+	//
+	// browser_* 例外、行为不变：plugin/browser 的 wrappedTool 不转发 Exposure（见其 wrapper.go）。
 	Exposure string `json:"exposure,omitempty"`
 }
 
@@ -64,7 +66,8 @@ var mcpExposureValues = []string{"direct", "codemode", "deferred", "hidden"}
 // defaultMCPExposure 出厂默认档位（见 ServerConfig.Exposure 注释）。
 const defaultMCPExposure = "deferred"
 
-// normalizeExposure 归一 + 校验 exposure 字段：空 = deferred，非法值**明确报错**。
+// normalizeExposure 归一 + 校验 exposure 字段：空 = 保持空（未声明，有效档由适配器解析），
+// 非法值**明确报错**。
 //
 // 为什么不静默降级到 deferred：档位直接决定暴露面，一个拼写错误（"defrred"）静默按
 // deferred 处理时，用户以为自己写了 hidden（撤下）却仍可被脚本调用 —— 与 Validate 对
@@ -73,7 +76,7 @@ const defaultMCPExposure = "deferred"
 func normalizeExposure(raw string) (string, error) {
 	v := strings.ToLower(strings.TrimSpace(raw))
 	if v == "" {
-		return defaultMCPExposure, nil
+		return "", nil // 未声明：留给适配器解析（Manager.DefaultExposure → 包级默认）
 	}
 	for _, ok := range mcpExposureValues {
 		if v == ok {

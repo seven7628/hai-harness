@@ -62,11 +62,19 @@ func (t Tool) EngineName() string {
 type mcpTool struct {
 	server *Server
 	tool   Tool
+	// def server 未显式声明 exposure 时用的引擎档（Manager.DefaultExposure；空 = 包级默认 deferred）。
+	def tools.ToolExposure
 }
 
 // NewAdapter 为单个 MCP 工具建适配器（Manager 装配时调用）。
 func NewAdapter(s *Server, t Tool) tools.Tool {
 	return &mcpTool{server: s, tool: t}
+}
+
+// newAdapterWithDefault 带「未声明档位」默认值的适配器（Manager.Tools 走这条）。
+// 保留 NewAdapter 的公开签名不变：既有调用方零迁移。
+func newAdapterWithDefault(s *Server, t Tool, def tools.ToolExposure) tools.Tool {
+	return &mcpTool{server: s, tool: t, def: def}
 }
 
 func (a *mcpTool) Name() string { return a.tool.EngineName() }
@@ -102,7 +110,14 @@ var (
 // 出厂默认 deferred，见 ServerConfig.Exposure 与 toToolExposure）。
 // 每调用一次读 Server.Config()：配置热重载会重建 Server/适配器，缓存一份反而可能读到旧值。
 func (a *mcpTool) Exposure() tools.ToolExposure {
-	return toToolExposure(a.server.Config().Exposure)
+	raw := strings.TrimSpace(a.server.Config().Exposure)
+	if raw == "" {
+		if a.def != "" {
+			return a.def // 宿主的装配决策（见 Manager.DefaultExposure：激活通道未上线时 = direct）
+		}
+		return tools.ExposureDeferred // 包级出厂默认（设计文档 §18）
+	}
+	return toToolExposure(raw) // 显式配置永远优先
 }
 
 // toToolExposure 配置档 → 引擎档的两层映射（照抄 pi 的 toToolExposure，

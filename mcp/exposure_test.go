@@ -42,8 +42,10 @@ func TestServerConfigExposureDefaultsToDeferred(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if cfg.Exposure != "deferred" {
-		t.Fatalf("默认 exposure = %q, want deferred", cfg.Exposure)
+	// 未声明 = 保持空（不 materialize）：有效档位由适配器解析 —— 包级默认 deferred，
+	// 宿主可经 Manager.DefaultExposure 覆盖（装配决策，见该字段注释）。
+	if cfg.Exposure != "" {
+		t.Fatalf("未声明 exposure 应保持空（不 materialize）, got %q", cfg.Exposure)
 	}
 	if !cfg.IsEnabled() {
 		t.Fatal("启用语义不受 exposure 影响（缺省仍为启用）")
@@ -82,8 +84,10 @@ func TestServerConfigExposureInvalidValueErrors(t *testing.T) {
 	if _, ok := loaded["bad"]; ok {
 		t.Fatal("非法 exposure 的 server 不得被加载")
 	}
-	if got := loaded["good"].Exposure; got != "deferred" {
-		t.Fatalf("合法 server 照常加载且默认 deferred, got %q", got)
+	// 合法 server 照常加载；未声明档位保持空（有效档位由适配器解析 → 包级默认 deferred，
+	// 宿主可经 Manager.DefaultExposure 覆盖，见 config.Exposure 与 Manager.DefaultExposure）。
+	if got := loaded["good"].Exposure; got != "" {
+		t.Fatalf("合法 server 照常加载且档位未声明（留空）, got %q", got)
 	}
 }
 
@@ -397,4 +401,35 @@ func newFixtureServer(instr string) *server.MCPServer {
 		},
 	)
 	return srv
+}
+
+// TestManagerDefaultExposureOverridesPackageDefault Manager.DefaultExposure 是**装配决策**
+// 的载体：激活通道（codemode 的 searchTools / tool_search）上线前后，宿主用它决定
+// 「未声明的 server」该落到哪一档。零值 = deferred（包级出厂默认，见
+// TestMCPToolDefaultsToDeferredExposure）；装配点显式设 direct 时，未声明档位的 server
+// 必须重新对模型可见 —— 否则 deferred 在通道上线前等价于把 MCP 功能整体关掉。
+func TestManagerDefaultExposureOverridesPackageDefault(t *testing.T) {
+	ctx := context.Background()
+
+	// ① 宿主设 direct：未声明的 server 落到 direct（声明给模型 + 可编排）。
+	mDirect := fixtureManager(t, map[string]ServerConfig{"srv": {Type: "stdio", Command: "unused"}})
+	mDirect.DefaultExposure = tools.ExposureDirect
+	for _, tl := range mDirect.Tools(ctx) {
+		if got := tools.ToolExposureOf(tl); got != tools.ExposureDirect {
+			t.Fatalf("%s 的引擎档 = %q, want direct（宿主默认生效）", tl.Name(), got)
+		}
+		if !tools.DeclaredToModel(tl) {
+			t.Fatalf("%s 在 direct 默认下必须声明给模型", tl.Name())
+		}
+	}
+
+	// ② 显式配置永远优先于宿主默认：hidden 该撤下就撤下。
+	mixed := fixtureManager(t, map[string]ServerConfig{"srv": {Type: "stdio", Command: "unused"}})
+	mixed.DefaultExposure = tools.ExposureDirect
+	mixed.servers["srv"].cfg.Exposure = "hidden"
+	for _, tl := range mixed.Tools(ctx) {
+		if got := tools.ToolExposureOf(tl); got != tools.ExposureHidden {
+			t.Fatalf("%s 的引擎档 = %q, want hidden（显式配置优先于宿主默认）", tl.Name(), got)
+		}
+	}
 }
