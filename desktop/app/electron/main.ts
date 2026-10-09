@@ -345,7 +345,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   stt: { enabled: false }, // 语音输入默认关闭（配置 base_url/model/api_key 后开启）
 }
 
-function readSettings(): AppSettings {
+// SettingsRead 读盘结果：settings 永远可用（显示兜底），corrupt 标记「文件在但读不出」。
+// 区分两种失败是数据安全的前提：
+//   - 文件不存在（首次运行/用户删过）→ 默认值起步是安全的，可以写盘；
+//   - 文件存在但读不出（JSON 坏 / 权限 / 半截写入）→ 默认值只能用于显示，**绝不能写回**：
+//     每条写路径都是「读整份 → 改自己那部分 → 整文件重写」，读失败静默变默认值 = 下一次
+//     保存把用户的全部 provider / api_key / MCP 配置整份清成默认（真机事故，不可逆）。
+type SettingsRead = { settings: AppSettings; corrupt: boolean; error?: string }
+
+function readSettingsResult(): SettingsRead {
   try {
     const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'))
     const s = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AppSettings // 深拷贝兜底默认
@@ -358,21 +366,70 @@ function readSettings(): AppSettings {
     if (!Number.isFinite(agent.reminder_rounds) || agent.reminder_rounds < 0) agent.reminder_rounds = 30
     // 内置三卡：默认合并（老配置缺字段/缺协议时回退默认）
     for (const k of BUILTIN_PROVIDERS) provider[k] = { ...s.provider[k], ...(raw.provider?.[k] ?? {}) }
-    // 自定义 provider：补齐 ProviderCfg 缺省（手改 settings.json 缺 models/max_tokens/protocol 时 UI 不崩）
+    // 自定义 provider：补齐 ProviderCfg 缺省（手改 settings.json 缺 models/max_tokens/protocol 时 UI 不崩）。
+    // 原值展开在前：认不出的字段（auth_type / usage_input_includes_cache / cache_ttl_1h /
+    // deleted / 将来新增）必须原样带过 —— 按固定键集重建等于每次读盘都把它们删一遍，
+    // 随后任何一次写盘就把这个「删除结果」固化（真机事故：自定义 provider 的 auth_type 静默消失）。
     for (const [k, v] of Object.entries(provider)) {
       if (k === 'active' || BUILTIN_PROVIDERS.includes(k as (typeof BUILTIN_PROVIDERS)[number])) continue
-      const cfg = v as ProviderCfg | undefined
-      provider[k] = { base_url: cfg?.base_url ?? '', api_key: cfg?.api_key ?? '', models: cfg?.models ?? {}, max_tokens: cfg?.max_tokens ?? {}, protocol: cfg?.protocol ?? 'chat_completions', openai_compat: cfg?.openai_compat, input_types: cfg?.input_types ?? {}, prices: cfg?.prices }
+      const cfg = (v ?? {}) as ProviderCfg
+      provider[k] = {
+        ...cfg,
+        base_url: cfg.base_url ?? '',
+        api_key: cfg.api_key ?? '',
+        models: cfg.models ?? {},
+        max_tokens: cfg.max_tokens ?? {},
+        protocol: cfg.protocol ?? 'chat_completions',
+        input_types: cfg.input_types ?? {},
+      }
     }
     // permissions 字段级合并：旧 settings 缺 computer_approved_apps → 补空数组
     //（避免整段 raw 覆盖丢字段；allowed_apps 残留字段不再读入——已废弃）。
     const permissions: PermissionsSettings = {
       computer_approved_apps: raw.permissions?.computer_approved_apps ?? [],
     }
-    return { ...s, ...raw, provider, agent, permissions }
-  } catch {
-    return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AppSettings
+    return { settings: { ...s, ...raw, provider, agent, permissions }, corrupt: false }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const missing = !fs.existsSync(SETTINGS_FILE())
+    if (!missing) {
+      console.error(`[settings] 读取失败（${msg}）：${SETTINGS_FILE()} 暂时只按默认值显示；写盘侧会拒绝覆盖，不会清空配置`)
+    }
+    return {
+      settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AppSettings,
+      corrupt: !missing,
+      error: missing ? undefined : `读取失败（${msg}）`,
+    }
   }
+}
+
+function readSettings(): AppSettings {
+  return readSettingsResult().settings
+}
+
+// quarantineCorruptSettings 把读不出的 settings.json 挪到带时间戳的备份名（**rename，不删**）。
+// 为什么挪而不是就地修：用户配置（含明文 key）只有这一个副本，留着才可能人工恢复；
+// 挪走后「缺文件」语义成立，客户端可以按默认值继续工作，不必永久卡在只读。
+// 返回备份路径；失败返回空串（此时原文件仍在，写侧继续拒绝）。
+function quarantineCorruptSettings(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const backup = `${SETTINGS_FILE()}.corrupt-${stamp}`
+  try {
+    fs.renameSync(SETTINGS_FILE(), backup)
+    return backup
+  } catch {
+    return ''
+  }
+}
+
+// settingsForWrite 写路径专用读盘：坏文件 → 返回错误并**拒绝这次写**（同时备份坏文件）。
+// 本函数是「一次读失败就清空用户配置」的唯一闸门，任何新写路径都必须经它取 cur。
+function settingsForWrite(): { cur: AppSettings } | { error: string } {
+  const r = readSettingsResult()
+  if (!r.corrupt) return { cur: r.settings }
+  const backup = quarantineCorruptSettings()
+  const where = backup ? `旧文件已备份到 ${backup}（未删除），可从中恢复 Provider 配置` : `原文件保持不变，请修复后重试`
+  return { error: `settings.json 解析失败（${r.error ?? '未知错误'}），已拒绝写入以免清空配置；${where}。` }
 }
 
 function writeSettings(s: AppSettings): { ok: true } | { ok: false; error: string } {
@@ -1179,7 +1236,9 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     }
   })
   ipcMain.handle('settings:set', (_e, patch: Partial<AppSettings>) => {
-    const cur = readSettings()
+    const read = settingsForWrite()
+    if ('error' in read) return { ok: false, error: read.error }
+    const cur = read.cur
     const next: AppSettings = { ...cur, ...patch }
     if (patch.provider) {
       next.provider = { ...cur.provider }
@@ -1207,7 +1266,9 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   ipcMain.handle('provider:save', (_e, p: { provider: string; active?: string; base_url?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; prices?: Record<string, { input: number; cache_read: number; cache_write: number; output: number }>; input_types?: Record<string, string[]>; openai_compat?: OpenAICompatCapabilities; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => {
     if (!isValidProviderName(p.provider)) return { ok: false, error: '无效 provider 名称' }
     if (p.active && !isValidProviderName(p.active)) return { ok: false, error: '无效 provider 名称' }
-    const cur = readSettings()
+    const read = settingsForWrite()
+    if ('error' in read) return { ok: false, error: read.error }
+    const cur = read.cur
     if (p.active) cur.provider.active = p.active
     const pc = (cur.provider[p.provider] as ProviderCfg | undefined) ?? { base_url: '', models: {}, max_tokens: {}, protocol: 'chat_completions', input_types: {} }
     // 用户重新保存配置 = 重新启用（清除删除标记；内置 provider 删除是 deleted 标记，
@@ -1248,7 +1309,9 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!isValidProviderName(provider)) {
       return { ok: false, error: '无效 provider 名称' }
     }
-    const cur = readSettings()
+    const read = settingsForWrite()
+    if ('error' in read) return { ok: false, error: read.error }
+    const cur = read.cur
     // 内置 5 家：物理删除会因 bridge 预置复活 → 用 deleted 标记替代（保留默认值供恢复）
     if ((BUILTIN_PROVIDERS as readonly string[]).includes(provider)) {
       const pc = cur.provider[provider]
@@ -1284,7 +1347,9 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // mcp:save：持久化 MCP 服务器配置（settings.json mcpServers 段，全量替换）。
   // 不转发 bridge——热应用由 renderer 另发 mcp_set 桥命令（重建会话工具集）。
   ipcMain.handle('mcp:save', (_e, servers: Record<string, MCPServerCfg>) => {
-    const cur = readSettings()
+    const read = settingsForWrite()
+    if ('error' in read) return { ok: false, error: read.error }
+    const cur = read.cur
     if (!servers || typeof servers !== 'object') return { ok: false, error: '无效配置' }
     for (const [name, c] of Object.entries(servers)) {
       if (!name.trim()) return { ok: false, error: '服务器名不能为空' }

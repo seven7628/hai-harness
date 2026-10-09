@@ -140,20 +140,31 @@ func (m *manager) unregisterOAuthPrompt(id, provider string) {
 
 // persistAuthType 把某 provider 的 auth_type 持久化到 settings.json provider 段。
 // 桌面端用户决策：provider 配置直接写 settings.json（与 api_key 明文同通道）。
-// 原子写（tmp + rename）：崩溃不产生半写文件；写失败返回错误（调用方记日志）。
+// 写失败返回错误（调用方记日志）。
+//
+// 只改 provider.<name>.auth_type 这一个键：settings.json 是**多写者**文件（Electron 写
+// theme/lang/mcpServers 与其余 provider，bridge 写 hooks/mcpServers），按「只认识 provider
+// 段的 struct」整体序列化回去，会把别的顶层键静默抹掉（真机事故：oauth_login 之后
+// settings.json 只剩 provider 一个键）。因此这里读**整份对象**、只替换目标键，其余顶层键
+// 与兄弟 provider 的原始字节原样带过 —— 交给 patchJSONFile（0600 + 原子写；坏文件拒绝覆盖，
+// 不让一次误写把用户配置钉死成半截）。
 func persistAuthType(providerName, authType string) error {
 	path := homeCfgPath("settings.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err // 无 settings（headless）→ 仅内存生效
 	}
-	var outer struct {
-		Provider map[string]json.RawMessage `json:"provider"`
-	}
-	if err := json.Unmarshal(raw, &outer); err != nil || outer.Provider == nil {
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &outer); err != nil {
 		return fmt.Errorf("settings.json parse failed: %v", err)
 	}
-	block, ok := outer.Provider[providerName]
+	providers := map[string]json.RawMessage{}
+	if block, ok := outer["provider"]; ok {
+		if err := json.Unmarshal(block, &providers); err != nil {
+			return fmt.Errorf("settings.json provider parse failed: %v", err)
+		}
+	}
+	block, ok := providers[providerName]
 	if !ok {
 		return fmt.Errorf("provider %s not persisted yet", providerName) // 纯内存 provider → 前端保存时会带 auth_type
 	}
@@ -166,17 +177,8 @@ func persistAuthType(providerName, authType string) error {
 	if err != nil {
 		return err
 	}
-	outer.Provider[providerName] = updated
-	out, err := json.MarshalIndent(outer, "", "  ")
-	if err != nil {
-		return err
-	}
-	// 原子写：tmp + rename（与 store.writeAll 同模式；防崩溃产生半写 settings.json）
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil { // settings 含明文 key，0600
-		return err
-	}
-	return os.Rename(tmp, path)
+	providers[providerName] = updated
+	return patchJSONFile(path, map[string]any{"provider": providers})
 }
 
 // handleOAuthLogin oauth_login 命令：发起订阅登录。
