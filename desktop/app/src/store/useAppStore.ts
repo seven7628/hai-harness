@@ -1791,6 +1791,14 @@ export const MODEL_MAX_TOKENS_DEFAULT = 8192
 // 当失控护栏用，别按「保守点更安全」的直觉调小。
 export const SUBAGENT_CONCURRENCY_DEFAULT = 1000
 
+// 自动压缩触发阈值缺省（占上下文窗口比例）。与 bridge 的 codeAgentCompressThreshold
+// / agentSettings.compressThreshold() 默认值对齐：2026-08-30 实测 0.72 会让子 Agent
+// 高频压缩 + 重读循环，回退 0.8；用户未配置时三处读数都应得到同一个 0.8。
+export const COMPRESS_THRESHOLD_DEFAULT = 0.8
+// 设置面板的合法区间（与 store setCompressThreshold 的钳制一致）。
+export const COMPRESS_THRESHOLD_MIN = 0.05
+export const COMPRESS_THRESHOLD_MAX = 0.95
+
 // 已知模型默认单次输出上限（max_tokens；Provider 面板未配置时回退用）。
 // 数据源：provider 注册表（provider/models_*.go，models.dev 2026-08，与 pi 对齐）。
 export const KNOWN_MODEL_MAX_TOKENS: Record<string, Record<string, number>> = {
@@ -1864,6 +1872,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     },
   },
   mcpServers: {},
+  // compress_threshold 刻意**不写默认值**（与 electron/main.ts 的 DEFAULT_SETTINGS 同口径）：
+  // 缺字段 = bridge 走自身默认 0.8，配置里不留下痕迹。读取处统一 ?? COMPRESS_THRESHOLD_DEFAULT。
   agent: { reminder_rounds: 30, max_subagents: SUBAGENT_CONCURRENCY_DEFAULT, max_explore_subagents: SUBAGENT_CONCURRENCY_DEFAULT },
   sandbox: { mode: 'seatbelt' },
   permissions: { computer_approved_apps: [] }, // Computer Use 已授权 App（设置 → 插件 → Computer Use）；空 = 全部拒绝
@@ -2602,6 +2612,7 @@ interface AppState {
   setStopBackgroundOnInterrupt(on: boolean): void // 主停止是否连后台任务一起停（乐观 + 持久化）
   setGoalAlignmentRounds(n: number): void
   setSubagentConcurrency(patch: Partial<Pick<AgentSettings, 'max_subagents' | 'max_explore_subagents'>>): void // 子 agent 并发槽上限（乐观 + 持久化 + bridge 热更新）
+  setCompressThreshold(t: number): void // 自动压缩触发阈值（占窗口比例；乐观 + 持久化 + bridge 热更新）
   setSTTSettings(patch: Partial<STTSettings>): void // 语音输入（话筒）配置（乐观 + 持久化）
   openNewFolder(): void // 「新建文件夹…」：打开创建文件夹 modal
   closeNewFolder(): void
@@ -8211,6 +8222,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     void transport.settingsSet({ agent }).then((r) => {
       if (!r.ok) return // 写盘失败：不推送（配置未持久化，运行中改无意义）
       send({ type: 'set_max_subagents', payload: { max_subagents: agent.max_subagents, max_explore_subagents: agent.max_explore_subagents } })
+    })
+  },
+  // 自动压缩触发阈值（占上下文窗口比例）：乐观更新 + 落盘 settings.json agent 段，
+  // 再通知 bridge 热更新（只改触发线：在途会话下一次压缩判定生效，不重建会话/不丢上下文）。
+  // 下限 0.05（调太小 = 几乎每次请求都压缩）、上限 0.95（留出余量，0.95 以上压缩后
+  // 仍可能直接撞窗口）；0 与负数回退默认 0.8（0 = 永不压缩，是误配不是选项）。
+  setCompressThreshold: (t: number) => {
+    const cur = get().settings.agent ?? { reminder_rounds: 30 }
+    const n = Math.round(t * 100) / 100 // 两位小数足够（1% 粒度）
+    const value = Number.isFinite(n) && n > 0 ? Math.min(COMPRESS_THRESHOLD_MAX, Math.max(COMPRESS_THRESHOLD_MIN, n)) : COMPRESS_THRESHOLD_DEFAULT
+    const agent: AgentSettings = { ...cur, compress_threshold: value }
+    set((s) => ({ settings: { ...s.settings, agent } }))
+    void transport.settingsSet({ agent }).then((r) => {
+      if (!r.ok) return // 写盘失败：不推送阈值（配置未持久化，运行中改无意义）
+      send({ type: 'set_compress_threshold', payload: { compress_threshold: value } })
     })
   },
   // 语音输入（STT）配置：乐观更新 + 落盘（settings.json stt 段；Composer 话筒据此显隐）

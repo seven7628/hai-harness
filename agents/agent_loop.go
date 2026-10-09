@@ -271,6 +271,56 @@ func WithCompressThreshold(t float64) Option {
 	return func(c *Config) { c.CompressThreshold = t }
 }
 
+// defaultCompressThreshold 压缩阈值缺省（占上下文窗口比例）。2026-08-30 实测 0.72 会让
+// 子 Agent 高频压缩 + 重读循环，回退到 0.8；宿主（bridge）按用户设置覆盖，未配置时用本值。
+const defaultCompressThreshold = 0.8
+
+// SetCompressThreshold 会话期间切换自动压缩触发阈值（占上下文窗口比例）：下一次
+// 压缩判定生效（触发线 = ContextWindow × Threshold），不重建 loop/会话。与
+// SetContextWindow 同属「运行边界配置」，宿主经 settings 的 agent.compress_threshold
+// 热更新。
+//
+// 钳到 (0,1]：两侧都要挡，因为它们都让压缩**静默永不触发**，而那不是"配错了"该有的
+// 表现 —— 是无声的失效：
+//   - `!(t > 0)`：0 / 负数 / NaN（Go 里 NaN 的所有比较都是 false，所以这一句顺带
+//     覆盖 NaN，不用另写 IsNaN）
+//   - `t > 1`：>1 与 +Inf。int64(窗口 × 3) 远超窗口，或 int64(窗口 × +Inf) 饱和成
+//     MaxInt64 —— 触发线永远够不着，压缩再也不跑。
+//
+// 与 bridge 读设置时的 agentSettings.compressThreshold() 完全同口径（两处独立钳，
+// 防任一处漏；这是导出的 SDK 方法，保证不能依赖"某个调用方恰好会挡"）。
+func (a *AgentLoop) SetCompressThreshold(t float64) {
+	if !(t > 0) || t > 1 {
+		t = defaultCompressThreshold
+	}
+	a.cfgMu.Lock()
+	a.cfg.CompressThreshold = t
+	a.cfgMu.Unlock()
+}
+
+// CompressThreshold 当前自动压缩阈值（只读；宿主侧可访问的出口）。
+// 与私有 currentCompressThreshold 读同一份状态（后者只服务 maybeCompact 的触发线
+// 计算，包外取不到）。当前生产调用方只有测试与宿主自校验 —— 与 SetContextWindow
+// 这类 setter 配对存在：宿主改完阈值后若要确认落到哪个 loop，读这里。
+// 注意 ContextWindow 没有对应的 public getter（宿主只在装配期读 providerConfig），
+// 所以这对 getter 的覆盖面是刻意不对称的，不是漏了一个。
+func (a *AgentLoop) CompressThreshold() float64 {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.CompressThreshold
+}
+
+// currentCompressThreshold 压缩触发线计算用的当前阈值。
+// **必须**经 cfgMu 读：CompressThreshold 是运行期可写字段（SetCompressThreshold）——
+// 这是 cfg 里第一个「压缩相关」的可写字段，直接摸 a.cfg 会在 bridge 命令 goroutine
+// 热更与 maybeCompact（run goroutine）之间构成数据竞争。其余 cfg 字段仍只读，
+// 直接读 a.cfg 没问题，这个不行。
+func (a *AgentLoop) currentCompressThreshold() float64 {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.CompressThreshold
+}
+
 func WithCompressMargin(m float64) Option {
 	return func(c *Config) { c.CompressMargin = m }
 }
@@ -567,7 +617,7 @@ func NewAgentLoop(opts ...Option) *AgentLoop {
 		StreamStallTimeout: 3 * time.Minute,
 		MaxRetries:         10,
 		ContextWindow:      128000,
-		CompressThreshold:  0.8,
+		CompressThreshold:  defaultCompressThreshold,
 		CompressMargin:     0.1,
 		BaseSystemPrompt:   DefaultSystemPrompt,
 	}
@@ -1982,7 +2032,7 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 	}
 	stats := CompressStats{
 		EstimatedTokens: estimated,
-		Budget:          int64(float64(a.currentContextWindow()) * a.cfg.CompressThreshold),
+		Budget:          int64(float64(a.currentContextWindow()) * a.currentCompressThreshold()),
 	}
 	if !forced && !a.cfg.Compressor.ShouldCompact(ac.ctx, stats) {
 		return

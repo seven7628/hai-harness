@@ -8123,6 +8123,26 @@ body.is-electron .cron-head {
   color: var(--text-3);
   margin-top: 2px;
 }
+/* 同一行里「滑轨 + 数字 + 单位」的横向组合（设置 → 通用 → 上下文压缩阈值）。
+   滑轨吃剩余宽度，数字框只占自然宽度，单位文字贴右。 */
+.set-row > .set-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.set-inline > .range-input {
+  width: 120px;
+  accent-color: var(--accent);
+}
+.set-inline > .text-input {
+  width: 68px;
+}
+.set-inline > .set-unit {
+  font-size: 12px;
+  color: var(--text-3);
+  min-width: 12px;
+}
 
 /* ============ 外观设置（设置 → 外观）：代码主题预览卡 + 背景色选择 ============
  * 代码主题卡按主题色渲染同一段示例（真 shiki 管线，见 highlight.ts 的 themeOverride）：

@@ -120,7 +120,15 @@ func supportsImageOf(inputs []string) bool {
 }
 
 // boolPtr 便捷构造 *bool（模型常量表里显式声明 SupportsThinking/SupportsTemperature 用）。
-func boolPtr(b bool) *bool { return &b }
+// boolPtr 便捷构造 *bool（模型常量表里显式声明 SupportsThinking/SupportsTemperature 用）。
+// 转发到导出的 BoolPtr —— 两份等价实现相隔几行早晚会漂移，这里只保留一份本体。
+// boolPtr 便捷构造 *bool（模型常量表里显式声明 SupportsThinking/SupportsTemperature 用）。
+// 转发到导出的 BoolPtr —— 两份等价实现相隔几行早晚会漂移，只保留一份本体。
+func boolPtr(b bool) *bool { return BoolPtr(b) }
+
+// BoolPtr 便捷构造 *bool（调用方要显式表达「开/关」的布尔字段时用，如
+// RequestConfig.Thinking 的显式关闭；nil 才是「厂商默认」）。
+func BoolPtr(b bool) *bool { return &b }
 
 // Registry 模型元数据注册表（普通结构体，依赖注入 —— 不是包级单例）。
 // 由 bridge 构造（持有 settings 数据）并经 Dependencies 注入各 provider；
@@ -1073,6 +1081,42 @@ func (r *Registry) SupportsCacheControl(provider, model string) bool {
 		return true
 	}
 	return *info.SupportsCacheControl
+}
+
+// CanDisableThinking 模型是否允许**显式关闭**思考（压缩等辅助请求的省时省费开关）。
+//
+// 语义与 ResolveThinking(Thinking:false) 的请求侧发送行为严格一致 —— 本方法回答的是
+// 「现在关掉思考会不会让请求变成 400」，供压缩器这类「不需要思考、只想快速拿摘要」
+// 的辅助调用在发请求前判定：
+//   - 非推理模型（ThinkingDefaultOff / reasoning:false）：没有思考可关 → false；
+//   - 强制思考模型（ThinkingForceOn，GLM-5.3 等官方明确 disabled 会 400）：false；
+//   - **未知模型（自建 provider 手加 / 网关别名表里没有的，如 opencode Go 的
+//     step5-preview-free）→ false**：我们没有任何元数据，无从判断它是否强制思考；
+//   - 其余（有元数据的普通推理模型 / toggle-only）：true。
+//
+// 为什么未知模型必须判 false（2026-10 线上 400 实证）：opencode Go 网关的
+// step5-preview-free 不在内置表，解析全部落空。此前这里对未知模型保守返回 true，
+// 于是压缩请求带着 thinking=false 发出去，上游直接
+// 400 "Reasoning is mandatory for this endpoint and cannot be disabled"。
+// 两侧代价**不对称**：
+//   - 错判「不可关」→ 只是不发开关，回到「跟随厂商默认」的旧行为，压缩多花点时间；
+//   - 错判「可关」→ 压缩必然失败，且失败会被 AgentLoop 降级成"不压缩"，
+//     上下文继续涨直到撞窗 —— 用户看到的是"压缩没反应"，不是一句可诊断的错。
+//
+// 拿不准时就该选无损的那一侧。用户若确实知道某未知模型能关，可在 settings 里为它
+// 补一条带 thinking 声明的 override（Override + hasThinkingDecl），判定立刻转正。
+//
+// 注意与 ThinkingForceOn 的分工：后者只回答「关不掉」（且查表不中时返回 false，
+// 无法区分「查不到」与「确实不强制」），本方法才适合做"要不要发开关"的决策。
+func (r *Registry) CanDisableThinking(provider, model string) bool {
+	info, ok := r.Resolve(provider, model)
+	if !ok {
+		return false // 未知模型：无从判断 → 不当成可关（见上方代价不对称说明）
+	}
+	if info.ThinkingDefaultOff || info.ThinkingForceOn {
+		return false
+	}
+	return true
 }
 
 // ThinkingDecision 思考解析结果：是否开思考 + 归一档位（已 clamp 到模型支持范围）。
