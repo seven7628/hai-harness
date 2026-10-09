@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +75,10 @@ type Config struct {
 	Resolve *Resolver
 	// Now 时间来源（nil = time.Now）。补 `modified` 用它，保证可测。
 	Now func() time.Time
+	// ReadDir 目录列举出口（nil = os.ReadDir）。与 ReadFile 同一理由抽出来：
+	// List 要能跑在注入的根目录上，而不是去列用户真实的 ~/.go-code/memory
+	//（此前 list.go 直接 os.ReadDir，测试里 ReadFile 指向 tmp 而列举列真实 home）。
+	ReadDir func(string) ([]fs.DirEntry, error)
 	// ReadFile / WriteFile / Rename / Remove 是 Step 3/4 全部 I/O 的出口。
 	//
 	// 单独抽出不是为了抽象洁癖，而是为了让「关闭开关不产生任何读盘副作用」成为
@@ -137,6 +142,9 @@ func (c Config) withDefaults() Config {
 	}
 	if out.Now == nil {
 		out.Now = time.Now
+	}
+	if out.ReadDir == nil {
+		out.ReadDir = os.ReadDir
 	}
 	if out.ReadFile == nil {
 		out.ReadFile = os.ReadFile

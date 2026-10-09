@@ -203,7 +203,23 @@ func (h *memoryHost) postWrite(ctx context.Context, workspace, absPath string) (
 		scope = events.MemoryScopeSubagent
 	}
 	ws := h.cfg.StampModified(target, absPath)
-	if ws.Err == nil {
+	// saved 事件只对"这条写入真的被记忆系统接管了"发。
+	//
+	// Err == nil 的路径有三类（memory/stamp.go 的 Stamped 三态），只有两类算"保存了
+	// 一条记忆"：
+	//
+	//	StampedWritten    补戳写盘（模型写了带 frontmatter 的记忆）→ 发
+	//	StampedUnchanged  时间戳本就是这一刻（同一秒内重复写）→ 发
+	//	StampedSkipped    跳过了 —— 在本调用语境下只剩一个成因：**文件没有 frontmatter**
+	//
+	// 最后一种不该发。官方第 ② 条 "Claude Code never adds frontmatter to a file that
+	// has none" 意味着那种文件永远不会被补 modified，memory/list.go 的 Modified 字段
+	// 对它恒为空。此时若仍报 saved，前端弹出的 "Saved N memories" 就是**假成功提示**：
+	// 用户以为记忆已被接管，而它其实游离在时间戳机制之外。
+	//
+	// （索引与非 .md 已在上面的 IsTopic 处滤掉，开关关闭在函数入口就返回了，
+	//   所以这里的 Skipped 不可能是那几种成因。）
+	if ws.Err == nil && ws.Stamped != memory.StampedSkipped {
 		h.emitMemoryActivity(ctx, scope, events.MemoryActionSaved, filepath.Base(absPath))
 	}
 	return "", ws.Err

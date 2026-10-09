@@ -124,7 +124,7 @@ func hasFrontmatter(raw []byte) bool {
 // findFrontmatter 定位 frontmatter 的开/闭定界行，判定与编辑**共用**这一份实现。
 //
 // 为什么要共用（2026-09-29 修复）：此前 hasFrontmatter 容忍前导空行与 BOM，而
-// setFrontmatterField 只看 lines[0]。于是同一个文件在���一个函数里"有 frontmatter"、
+// setFrontmatterField 只看 lines[0]。于是同一个文件在另一个函数里"有 frontmatter"、
 // 在另一个函数里"没有"—— 结果是**静默不补戳且不报错**（宿主只看 StampModified 的
 // Err，看到 nil 就当成功）。用户手工编辑的记忆文件常常从空行开头，这条路径命中率
 // 不低。一个函数判定为 true 的输入，另一个必须能处理。
@@ -180,7 +180,19 @@ func setFrontmatterField(raw []byte, key, value string) (out []byte, changed boo
 	// 于是"整块缩进两格"的 frontmatter 会被写回顶格的 modified（修复前后的行为要一致）。
 	indent := frontmatterIndent(lines[openIdx+1 : close])
 	newLine := indent + key + ": " + value
-	for i := 1; i < close; i++ {
+	for i := openIdx + 1; i < close; i++ {
+		// 只认**顶层**键。此前按 fmKey 匹配而不看缩进，于是嵌套结构下的同名字段
+		// （如 `meta:\n  modified: 2020-01-01`）被当成顶层键命中：它的值被搬到顶层、
+		// 原行被删，`meta` 从对象变成 null。那是静默破坏用户数据，而本函数的硬约束
+		// 恰恰是"不破坏任何其它 frontmatter 字段"（见函数注释）。
+		//
+		// 空行要先排掉：lineIndent("") == ""，而顶层顶格时 indent 也是 ""。
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		if lineIndent(lines[i]) != indent {
+			continue
+		}
 		if fmKey(lines[i]) != key {
 			continue
 		}
@@ -226,12 +238,20 @@ func frontmatterIndent(lines []string) string {
 		if strings.TrimSpace(ln) == "" {
 			continue
 		}
-		cur := ln[:len(ln)-len(strings.TrimLeft(ln, " \t"))]
+		cur := lineIndent(ln)
 		if !found || len(cur) < len(indent) {
 			indent, found = cur, true
 		}
 	}
 	return indent
+}
+
+// lineIndent 取一行的前导空白（空行返回 ""，调用方需自行跳过）。
+//
+// 与 frontmatterIndent 共用这一段表达式，免得"怎么算缩进"出现两份判断——
+// 那份用于决定写在哪，这份用于决定哪一行是顶层键，两者必须同口径。
+func lineIndent(ln string) string {
+	return ln[:len(ln)-len(strings.TrimLeft(ln, " \t"))]
 }
 
 // isFMDelimiter 判定 frontmatter 定界行：`---` 或 `...`（两者都是 YAML 的定界标记）。

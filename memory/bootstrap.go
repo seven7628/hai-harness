@@ -94,7 +94,7 @@ func resolveDir(ctx context.Context, workdir string, cfg Config) (Dir, error) {
 		return Dir{}, err
 	}
 	if name := c.projectDirName(); name != "" {
-		id := sanitizeSegment(name)
+		id := safeIDSegment(name)
 		if id == "" {
 			return Dir{}, ErrNoIdentity
 		}
@@ -108,6 +108,24 @@ func resolveDir(ctx context.Context, workdir string, cfg Config) (Dir, error) {
 	// ID 不变，所以换根不会改变"哪份记忆属于哪个仓库"，只改变落在哪。
 	d.Path = filepath.Join(root, reposDirName, d.ID)
 	return d, nil
+}
+
+// safeIDSegment 把外部输入压成一个安全的单段目录名；无法构成时返回 ""。
+//
+// sanitizeSegment 保留 '.'（为了 remote 派生的 github.com-owner-repo 可辨认），
+// 且只 trim 两端的 '-'，于是 "." / ".." 会**原样通过**。它们的后果不是洁癖：
+// `filepath.Join(root, reposDirName, "..")` 把 `..` 吃掉 → 落到 repos 的父目录，
+// 也就是整个记忆根 <root>。于是 IsInMemoryDir 对 <root> 下任意文件返回 true，
+// List 与保留期清理会把整个记忆根当成一个仓库的记忆目录遍历。
+//
+// subagent.go 的 SubagentDir 早就按这条判据拒过（那里的分支形态与此完全相同），
+// 现在两份共用这一份实现，避免"修了一处漏一处"。
+func safeIDSegment(name string) string {
+	seg := sanitizeSegment(name)
+	if seg == "" || seg == "." || seg == ".." {
+		return ""
+	}
+	return seg
 }
 
 // BootstrapResult 是 Bootstrap 的返回值。

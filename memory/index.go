@@ -235,7 +235,16 @@ func boundIndex(d Dir, raw []byte) (*IndexLoad, string) {
 	}
 	if len(lines) > MaxIndexLines {
 		lines = lines[:MaxIndexLines]
-		load.TruncatedBy = "line"
+		// 只有字节限额**没先到**时才归因为"行"。
+		//
+		// 这里是"取先到者"的落点（见本函数顶部）：字节先切完 25KB 之后，剩下的
+		// 行数仍可能超 200，若此时无条件覆盖，先到的事实就被抹掉了——实测
+		// 500 行长索引会被报成 "line"，而 25KB 才是先到的那一个。
+		// 归因错会把模型引向无效动作：该缩短行的时候被告知去合并条目
+		//（truncationNotice 用这个维度名给指引，见 index.go:189-196）。
+		if load.TruncatedBy == "" {
+			load.TruncatedBy = "line"
+		}
 	}
 	// 截断完成后再做字节计数：报告的必须是**真正进了 prompt 的量**，
 	// 而不是"截断前那一坨有多少字节"——后者在行限额先触发时会偏大。
@@ -246,7 +255,12 @@ func boundIndex(d Dir, raw []byte) (*IndexLoad, string) {
 	// 索引自带的标题行与宿主加的标题重复，注入前去掉（见 stripIndexHeading）。
 	// LoadedLines/LoadedBytes 保持为"从文件里加载了多少"——官方量的是文件本身，
 	// 标题是注入这一步的呈现处理，不该改写这个数字。
-	return load, stripIndexHeading(joined)
+	body := stripIndexHeading(joined)
+	// Text 是注释承诺过的字段（"截断后的索引正文"）。此前声明了却从未赋值，
+	// 恒为空串——任何读它的调用方都会静默拿到空值，而这种空值又和"没有索引"
+	// 长得一样。这里补上，让字段名与注释对得上实现。
+	load.Text = body
+	return load, body
 }
 
 // stripIndexHeading 去掉索引正文**首个** markdown 标题行及其后的空行。

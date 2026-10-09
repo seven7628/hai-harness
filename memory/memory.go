@@ -65,7 +65,7 @@ var (
 
 // 关于「工作目录不在 git 工作树内」——
 //
-// **它不再是错误。** 官方 memory#storage-location 明确写了回���：
+// **它不再是错误。** 官方 memory#storage-location 明确写了回落：
 //
 //	"Outside a git repo, the project root is used instead."
 //

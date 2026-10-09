@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // FileTools 绑定工作区根目录的文件工具集。
@@ -178,21 +179,32 @@ const pathParamDesc = "File path. A relative path is resolved against the worksp
 //     进程；mode.Approve 审批管所有工具调用），工具层不再自行锚死 workspace；
 //   - go-code 自身配置/密钥目录（~/.go-code）显式拒绝——与 Seatbelt 的
 //     defaultSensitivePaths 同一保护对象，防止模型篡改 harness 自身配置。
+//
+// **denyHarnessConfigPath 必须对两条分支都生效**（2026-10-09 修复，此前只在绝对
+// 路径分支上调）。攻击面不是理论上的：
+//
+//	模型: bash "ln -s ~/.go-code /workspace/cfg"
+//	模型: read_file path="cfg/settings.json"
+//	  → 相对分支只做 HasPrefix(workspace) 词法判定 → 放行
+//	  → os.ReadFile 跟随软链接 → 读到明文 api_key
+//
+// 而绝对路径那条路（`/workspace/cfg/settings.json`）是被拦的——同一个文件只因写法
+// 不同而结论相反。根因是"路径从哪来"被当成了"路径到哪去"的判据，而 deny 的本职是
+// 后者：Join 之后两条分支产出的都是绝对路径，就该受同一套判定。
 func (f *FileTools) resolve(raw string) (string, error) {
 	if raw == "" {
 		return "", errors.New("path is required")
 	}
-	if filepath.IsAbs(raw) {
-		p := filepath.Clean(raw)
-		if err := denyHarnessConfigPath(p); err != nil {
-			return "", err
-		}
-		return p, nil
+	base := ""
+	if !filepath.IsAbs(raw) {
+		base = f.root
 	}
-	base := f.root
 	p := filepath.Clean(filepath.Join(base, raw))
-	if p != base && !strings.HasPrefix(p, base+string(os.PathSeparator)) {
+	if base != "" && p != base && !strings.HasPrefix(p, base+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path %q escapes workspace root %q", raw, base)
+	}
+	if err := denyHarnessConfigPath(p); err != nil {
+		return "", err
 	}
 	return p, nil
 }
@@ -216,6 +228,20 @@ func (f *FileTools) resolve(raw string) (string, error) {
 //
 // 解析后若真实目标仍在 ~/.go-code 内，按同一份放行名单判定；若解析到
 // ~/.go-code 之外，那与模型直接读那个绝对路径无区别，不是本函数新增的攻击面。
+//
+// # 硬链接是 EvalSymlinks 看不见的同型链（2026-10-09 补）
+//
+// 上面的链路全部围绕软链接，但 `ln`（不带 `-s`，建硬链接）与 `ln -s` 同样常用，
+// 而 memory 子树在沙箱放行名单里：
+//
+//	模型: bash "ln ~/.go-code/settings.json ~/.go-code/memory/repos/<id>/note.md"
+//	模型: read_file ~/.go-code/memory/repos/<id>/note.md
+//	  → EvalSymlinks 对该路径无感（硬链没有"链接"可解，它自己就是真实名字）
+//	  → 词法命中放行名单 → 放行
+//	  → os.ReadFile  → 读到明文 api_key
+//
+// 硬链与源文件共享 inode，所以唯一的判据是 inode 比对。受保护侧文件数很少且不随
+// 会话增长，反过来扫它们是廉价的；若扫放行子树（memory 可能有上千个文件）则不划算。
 func denyHarnessConfigPath(abs string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -229,7 +255,7 @@ func denyHarnessConfigPath(abs string) error {
 		home = resolvedHome
 	}
 	cfgDir := filepath.Clean(filepath.Join(home, ".go-code"))
-	if real == cfgDir || strings.HasPrefix(real, cfgDir+string(os.PathSeparator)) {
+	if real == cfgDir || strings.HasPrefix(real, cfgDir+string(filepath.Separator)) {
 		// 受管子树放行：plugins（Browser Use 等受管组件的安装/调试需要文件工具可达）
 		// 与 runtime（受管 Python 运行时 ~/.go-code/runtime/python：venv 解释器与
 		// 依赖库需可读、__pycache__ 需可写）—— 与沙箱 carve-out
@@ -241,13 +267,69 @@ func denyHarnessConfigPath(abs string) error {
 		// .go-code 其余（settings.json 明文密钥 / sessions / events）仍保护。
 		for _, sub := range allowedConfigSubtrees {
 			dir := filepath.Join(cfgDir, sub)
-			if real == dir || strings.HasPrefix(real, dir+string(os.PathSeparator)) {
+			if real == dir || strings.HasPrefix(real, dir+string(filepath.Separator)) {
+				// 硬链接桥：放行子树内的名字可以与受保护文件**共享 inode**，词法与
+				// EvalSymlinks 都看不出来。放行之前先否掉它（见本函数顶部的链路说明）。
+				if isHardlinkToProtected(abs, cfgDir) {
+					return fmt.Errorf("path %q is a hard link to a protected go-code config file", abs)
+				}
 				return nil
 			}
 		}
 		return fmt.Errorf("path %q resolves to %q, which is go-code's own config/secret directory and is protected", abs, real)
 	}
 	return nil
+}
+
+// DenyHarnessConfigPath 是 denyHarnessConfigPath 的导出门面。
+//
+// 存在的理由：desktop/bridge 另有**一份拷贝**（main_helpers.go）服务于预览通路
+// （file_preview / xlsx_preview 等）。那份拷贝是纯词法的——不解析软链接、放行名单
+// 还漏了 memory，于是同一条链路在预览通路里畅通无阻。把它改为委托本函数，让
+// "~/.go-code 保护"只有一份实现（否则每修一次都要记得同步两处，而已经漂移过一次）。
+func DenyHarnessConfigPath(abs string) error { return denyHarnessConfigPath(abs) }
+
+// protectedConfigFiles ~/.go-code 下**可能含明文密钥**的配置文件。
+//
+// 硬链接比对只扫这份名单（而不是整个 ~/.go-code）：这些是已知的密钥载体，
+// 文件数固定、不随会话增长，逐个 stat 的成本可以忽略。新增密钥文件时加进来。
+var protectedConfigFiles = []string{
+	"settings.json", // provider api_key / base_url
+	"keys.json",     // 模型密钥
+	"im-config.json",
+	"oauth.json",
+}
+
+// isHardlinkToProtected 判定 abs 是否与某个受保护配置文件**共享 inode**。
+//
+// 判据是 (Dev, Ino) 而不是只看 Ino：Ino 只在同一文件系统内唯一，而 ~/.go-code 理论上
+// 可能跨卷（用户把部分内容放到另一块盘上）。 Dev+Ino 同时相等才是同一个文件。
+//
+// 取不到 stat（文件不存在 / 不是常规文件 / 平台没有 Stat_t）时返回 false：
+// 判不了就当没有硬链，其余判定（词法 + EvalSymlinks）仍然生效。
+func isHardlinkToProtected(abs, cfgDir string) bool {
+	fi, err := os.Stat(abs)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	for _, name := range protectedConfigFiles {
+		ti, err := os.Stat(filepath.Join(cfgDir, name))
+		if err != nil || !ti.Mode().IsRegular() {
+			continue
+		}
+		ts, ok := ti.Sys().(*syscall.Stat_t)
+		if !ok {
+			continue
+		}
+		if ts.Dev == st.Dev && ts.Ino == st.Ino {
+			return true
+		}
+	}
+	return false
 }
 
 // allowedConfigSubtrees ~/.go-code 下对文件工具放行的受管子树。

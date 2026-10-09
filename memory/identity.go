@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // DefaultGitTimeout 单次 git 子进程超时。
@@ -132,7 +133,7 @@ func (r *Resolver) Resolve(ctx context.Context, workdir string) (Dir, error) {
 
 // gitToplevel 取 git 仓库根，失败时返回错误（**不**当作致命）。
 //
-// 单独成函数是为了让"不在 git 内"与"git 坏了"在调用点可分：前者走官方回��，
+// 单独成函数是为了让"不在 git 内"与"git 坏了"在调用点可分：前者走官方回落，
 // 后者目前也回落（用户看不到 git 安装与否，而记忆不该因此整体失效）。
 func (r *Resolver) gitToplevel(ctx context.Context, dir string) (string, error) {
 	top, err := r.git(ctx, dir, "rev-parse", "--show-toplevel")
@@ -225,7 +226,9 @@ func idFromRemote(u string) string {
 	}
 	id := strings.Join(segs, "-")
 	if len(id) > maxIDLen {
-		id = id[:maxIDLen-17] + "-" + shortHash(strings.Join(segs, "/"))
+		// truncateTo 而不是 id[:n]：字节切片会把中文/日文仓库名切成半个 rune，
+		// 产出的目录名让 os.MkdirAll 报 illegal byte sequence —— 该仓库整体失去记忆。
+		id = truncateTo(id, maxIDLen-17) + "-" + shortHash(strings.Join(segs, "/"))
 	}
 	return id
 }
@@ -274,7 +277,7 @@ func idFromPath(abs string) string {
 	}
 	const h = 12 // shortHash 的十六进制位数
 	if len(body) > maxIDLen-h-1 {
-		body = body[:maxIDLen-h-1]
+		body = truncateTo(body, maxIDLen-h-1)
 	}
 	return body + "-" + shortHash(abs)
 }
@@ -362,7 +365,8 @@ func idFromGitDir(top, commonDir string) string {
 	}
 	id := base + "-" + h
 	if len(id) > maxIDLen {
-		id = id[:maxIDLen]
+		// 同上：字节截断会产生非法 UTF-8 目录名（见 truncateTo）。
+		id = truncateTo(id, maxIDLen)
 	}
 	return id
 }
@@ -371,6 +375,28 @@ func idFromGitDir(top, commonDir string) string {
 func shortHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+// truncateTo 把 s 截到最多 n **字节**，且不切坏 rune（返回的串必为合法 UTF-8）。
+//
+// 为什么不能直接 s[:n]：那会把多字节 rune 切成半个，产出的目录名让 os.MkdirAll 报
+// "illegal byte sequence"——非 ASCII 仓库名（中文/日文目录在 macOS/Linux 上常见）
+// 会因此**整体失去记忆**：目录建不出来，模型写文件失败，Step 3/4 全链路沉默失效。
+// maxIDLen 是字节口径，而 ID 的可辨识部分来自目录名，两者单位不同就必须在这里对齐。
+func truncateTo(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	// 从 n 往前找最近的 rune 起点：s[:i] 必是完整 rune 序列。
+	for i := n; i > 0; i-- {
+		if utf8.RuneStart(s[i]) {
+			return s[:i]
+		}
+	}
+	return ""
 }
 
 // sanitizeSegment 把一段路径/主机名压成安全的单段目录名片段：小写，

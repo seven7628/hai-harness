@@ -76,12 +76,11 @@ func (c Config) SubagentDir(repo Dir, name string) (Dir, bool) {
 	if err != nil {
 		return Dir{}, false
 	}
-	seg := sanitizeSegment(name)
-	// sanitizeSegment 保留 '.'（为了 remote 派生的 github.com-owner-repo 可辨认），
-	// 只 trim 掉 '-'，所以 "." / ".." 会原样通过并让 filepath.Join 退到上一层。
-	// 这不是洁癖：`<根>/agents/<repo-id>/..` = `<根>/agents`，即子 agent 的记忆
-	// 直接落到整个 agents 命名空间上。
-	if seg == "" || seg == "." || seg == ".." {
+	// safeIDSegment 拒 "." / ".."：`<根>/agents/<repo-id>/..` = `<根>/agents`，
+	// 即子 agent 的记忆直接落到整个 agents 命名空间上。判据与 bootstrap.go 的
+	// ProjectDirName 共用一份（见 safeIDSegment 的说明）。
+	seg := safeIDSegment(name)
+	if seg == "" {
 		return Dir{}, false
 	}
 	path := filepath.Join(root, repo.ID, seg)

@@ -103,7 +103,7 @@ func TestMemoryActivityRecalledOnTopicRead(t *testing.T) {
 }
 
 // TestMemoryActivityScopeSeparatesSubagent：子 agent 目录的读写标 subagent scope，
-// 且主目录同��件仍是 main。
+// 且主目录同一件仍是 main。
 func TestMemoryActivityScopeSeparatesSubagent(t *testing.T) {
 	home := t.TempDir()
 	ws := t.TempDir()

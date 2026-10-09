@@ -776,26 +776,100 @@ function HtmlPreviewBlock({ code }: { code: string }) {
   )
 }
 
+// 高亮结果缓存（模块级，跨组件实例存活）。
+// 为什么必须放在模块级而不是组件里：流式中 CodeBlock 会被 react-markdown 反复重建
+// （实测 133 次挂载/67 次卸载，见下面 CodeBlock 的注释）。缓存若跟着组件实例走，
+// 每次重建都从「未高亮原文」重新等 shiki —— 那正是用户看到的抖动。
+//
+// key 带 lang 与主题命中码：shiki 产物里烘死了主题色（inline style="color:#..."），
+// 换主题必须重算，否则深浅主题串色。行号与否也进 key（≥2 行才加 gutter，
+// 同一份 code 在行数跨越阈值时产物不同）。
+const HL_CACHE_MAX = 60
+const hlCache = new Map<string, string>()
+let lastRunAt = 0
+
+function hlKey(code: string, lang: string, themeKey: string, lineNumbers: boolean): string {
+  return `${lang}\u0000${themeKey}\u0000${lineNumbers ? 'L' : '-'}\u0000${code}`
+}
+
+function cacheGet(code: string, lang: string, themeKey: string, lineNumbers: boolean): string {
+  return hlCache.get(hlKey(code, lang, themeKey, lineNumbers)) ?? ''
+}
+
+function cacheSet(code: string, lang: string, themeKey: string, lineNumbers: boolean, html: string): void {
+  // 简单 LRU：超限时先淘汰最早写入的一批（Map 保插入序，re-insert 即刷新顺序）
+  if (hlCache.size >= HL_CACHE_MAX) {
+    const drop = Math.max(1, Math.floor(HL_CACHE_MAX / 4))
+    let n = 0
+    for (const k of hlCache.keys()) {
+      hlCache.delete(k)
+      if (++n >= drop) break
+    }
+  }
+  hlCache.set(hlKey(code, lang, themeKey, lineNumbers), html)
+}
+
 // 代码块：语言标签 + 复制按钮 + shiki 高亮（异步加载，先出原文再替换为高亮）；
 // 随主题切换重渲（深/亮用不同 shiki 主题，见 highlight.ts）。
+//
+// 流式去抖（2026-10-09，用户实测「带代码块的回答流式输出时页面抖动」）：
+// 根治两个叠加的原因，缺一不可：
+//   ① **组件被反复重建**：react-markdown 每次 text 变化都重建整棵组件树，而 pre 覆盖返回
+//      `<>{children}</>`（Fragment 不构成复用边界）→ CodeBlock 实例随之重建，其 useMemo/
+//      useState 全部从零开始。实测一个 200 行代码块在一次流式里被挂载 133 次、卸载 67 次。
+//      修法：把高亮结果 **提升到模块级缓存**，按 code+lang+theme 命中。重建后首次渲染
+//      即命中缓存 → 同步拿到已高亮 HTML，不再有「plain → shiki」的形态跳变。
+//   ② **高亮风暴**：code 每 32ms 变一次（store 的 flushChunkBuf 合批节拍）→ 原实现在
+//      effect 里直接 codeToHtml，200 行块单次 18-21ms，流式全程累计约占主线程 30%
+//      （定量分析见 docs/NARRATIVE_STYLE_DESIGN_2026-09-18.md §6.2 P1）。
+//      修法：150ms 稳定期去抖 + 250ms 最小高亮间隔。等待期间**不清空已有高亮**
+//      （沿用上一个稳定态），因此不会闪回未高亮原文。
+// 回归：e2e/verify_codeblock_stream_jitter.mjs（该目录不入库，本地/CI 手工跑）——
+// 锁住「流式全程形态切换 ≤1 次」与「plain/shiki 版式高度逐像素一致」两条不变量。
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const t = useT()
-  const [html, setHtml] = useState('')
-  const { state: copyState, copy } = useCopy(code)
   const resolved = useResolvedTheme()
   const ap = useAppearance()
   const codeTheme = resolved === 'paper' ? ap.codeThemeLight : ap.codeThemeDark
+  // 行号：≥2 行的块才加 gutter（单行片段挂个「1」是噪音，参考稿是带行号的多行块）。
+  const lineNumbers = code.split('\n').length >= 2
+  // 主题命中码：解析后的主题名 + 深浅。**必须包含具体主题名** —— 外观设置里可换
+  // shiki 主题（见 highlight.ts 的 themeOverride），同名深浅但主题不同时要重算。
+  const themeKey = `${resolved}:${codeTheme}`
+  // 初值就读缓存：组件被重建时（流式中的常态）第一帧就是已高亮结果，不闪回原文
+  const [html, setHtml] = useState(() => cacheGet(code, lang, themeKey, lineNumbers))
+  const { state: copyState, copy } = useCopy(code)
 
   useEffect(() => {
     let alive = true
-    // 行号：≥2 行的块才加 gutter（单行片段挂个「1」是噪音，参考稿是带行号的多行块）。
-    codeToHtml(code, lang, resolved, code.split('\n').length >= 2)
-      .then((h) => { if (alive) setHtml(h) })
-      .catch(() => { /* shiki 不可用：保留未高亮 <pre> 原文（不白屏、不吞异常） */ })
+    // 缓存命中（重建 / 切主题又切回 / 同内容重复渲染）→ 同步用，不排高亮
+    const hit = cacheGet(code, lang, themeKey, lineNumbers)
+    if (hit) {
+      setHtml(hit)
+      return
+    }
+    const timers: number[] = []
+    // 稳定期去抖：code 持续变化就不断重置计时；只有它安静 150ms 才认为「暂时定型」
+    const run = () => {
+      lastRunAt = Date.now()
+      codeToHtml(code, lang, resolved, lineNumbers)
+        .then((h) => { if (alive) { cacheSet(code, lang, themeKey, lineNumbers, h); setHtml(h) } })
+        .catch(() => { /* shiki 不可用：保留当前内容（不白屏、不吞异常） */ })
+    }
+    timers.push(window.setTimeout(() => {
+      // 最小间隔兜底：距上次高亮不足 250ms 时顺延，避免短时间连续重排
+      const wait = Math.max(0, 250 - (Date.now() - lastRunAt))
+      if (wait > 0) {
+        timers.push(window.setTimeout(run, wait))
+        return
+      }
+      run()
+    }, 150))
     return () => {
+      timers.forEach((id) => window.clearTimeout(id))
       alive = false
     }
-  }, [code, lang, resolved, codeTheme])
+  }, [code, lang, resolved, codeTheme, themeKey, lineNumbers])
 
   return (
     <div className="codeblock">

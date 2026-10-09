@@ -10,7 +10,7 @@ package main
 //
 // # 三条设计约束，每条都来自 2026-09-29 那次实验作废的教训
 //
-//  1. **判定是确定性的，不��� LLM 判定器。** 指标全部是"某个文件是否存在、某个
+//  1. **判定是确定性的，不依赖 LLM 判定器。** 指标全部是"某个文件是否存在、某个
 //     frontmatter 字段是否被宿主补上"——读文件系统即可。9-29 那次用模型判"这段
 //     是不是记忆"，自洽率只有 89%，整个读数因此作废。这里没有判定器可失效。
 //  2. **两臂只差注入段。** A 臂用**生产代码路径**（newMemoryHost().injection）
@@ -253,7 +253,7 @@ func p0RunOnce(t *testing.T, p provider.Provider, prov, model, root string,
 		agents.WithMaxRetries(2),
 		agents.WithLLMTimeout(4 * time.Minute),
 	}
-	// 走生产装配点：会话系统提示词里的 memory 分���就是这一段。
+	// 走生产装配点：会话系统提示词里的 memory 分区就是这一段。
 	opts = append(opts, agents.WithMemoryInjection(inject))
 
 	var mu sync.Mutex

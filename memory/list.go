@@ -17,7 +17,6 @@ package memory
 //     过一遍校验"这类设计：官方没有校验，我们也不发明。
 
 import (
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -72,16 +71,28 @@ func (c Config) List(d Dir) (Listing, error) {
 		f.Indexed = true // 来自索引，即便文件已不在磁盘上（Missing 与 Indexed 可同时为真）
 		out.Files = append(out.Files, f)
 	}
-	if entries, err := os.ReadDir(d.Path); err == nil {
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || indexed[name] ||
-				!strings.EqualFold(filepath.Ext(name), ".md") ||
-				strings.EqualFold(name, IndexFileName) {
-				continue
-			}
-			out.Files = append(out.Files, c.listedFile(d, name))
+	// 走出口而不是 os.ReadDir：与 ReadFile 同一口径。此前这里直接 os.ReadDir，
+	// 于是 Config{Directory: <tmp>} 的测试里 ReadFile 指向临时目录、目录列举却列用户
+	// 真实的 ~/.go-code/memory——方向相反的两个根（与 subagent.go 的 agentsRoot
+	// 那次修正同型）。
+	//
+	// 列举失败也**不再静默吞掉**：调用点要能区分"没有记忆"与"读不了目录"。
+	// 目录不存在按"没有记忆"处理（官方：不存在不报错），其余错误回传。
+	entries, err := c.ReadDir(d.Path)
+	if err != nil {
+		if isNotExist(err) {
+			return out, nil
 		}
+		return out, err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || indexed[name] ||
+			!strings.EqualFold(filepath.Ext(name), ".md") ||
+			strings.EqualFold(name, IndexFileName) {
+			continue
+		}
+		out.Files = append(out.Files, c.listedFile(d, name))
 	}
 
 	sort.Slice(out.Files, func(i, j int) bool { return out.Files[i].Name < out.Files[j].Name })
