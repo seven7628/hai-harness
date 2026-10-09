@@ -8,6 +8,7 @@ import (
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/provider"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -46,8 +47,19 @@ type LLMCompressor struct {
 	// OpenCode Go 网关要求辅助请求同样带 x-opencode-session（按会话路由 + 缓存前缀
 	// 复用）。空 = 不下发（由 transport 兜底 id 接管）。bridge 装配时注入。
 	sessionID string
-	MaxTokens int64         // 摘要输出上限（默认 8192；建议不超过窗口 5%，防压后二次触发）
-	Timeout   time.Duration // 压缩调用可选总时限兜底；0 = 不限（2026-09 起宿主传 0：
+	// registry 思考能力判定注册表（压缩请求关思考用）。nil = 用 BuiltinModels 兜底
+	// （内置表天然可读；零值只在测试/手搓装配时出现）。兜底实例经 Registry()
+	// 惰性构造（dfltRegistryOnce），装配期注入后本字段恒非 nil。
+	registry *provider.Registry
+	// dfltRegistryOnce 保证兜底注册表只构造一次（Registry() 缓存用）。
+	dfltRegistryOnce sync.Once
+	// DisableThinking 压缩请求是否显式关闭思考。默认 true（2026-10 定策）：
+	// 摘要是「忠实压缩已有上下文」的结构化任务，思考链既不改变输入、又把首包时间
+	// 与输出 token 显著抬高（思考模型实测 idle 情况下压缩耗时数分钟）。判定是否
+	// 可关由 CanDisableThinking 按注册表决定（见 compressConfig）。
+	DisableThinking bool
+	MaxTokens       int64         // 摘要输出上限（默认 8192；建议不超过窗口 5%，防压后二次触发）
+	Timeout         time.Duration // 压缩调用可选总时限兜底；0 = 不限（2026-09 起宿主传 0：
 	// 首包超时 60s 由 HTTP 层统一覆盖，压缩流开始后不限时长，与主会话一致）
 
 	// StallTimeout 压缩调用的流内停滞预算（2026-09-22）：首个事件之后相邻两个事件之间的
@@ -132,6 +144,22 @@ func WithCompressProviderName(name string) LLMCompressorOption {
 // x-opencode-session（缺失即 400；带同一 id 才能复用会话的路由与缓存前缀）。
 func WithCompressSessionID(sid string) LLMCompressorOption {
 	return func(c *LLMCompressor) { c.sessionID = sid }
+}
+
+// WithCompressRegistry 注入思考能力判定用的注册表（压缩请求关思考的判定依据）。
+// 必须与 provider 实例同一个 Registry —— 用户的 model overrides（settings.json
+// 里为自定义模型补的思考声明）只存在于 bridge 那一个实例里，压缩器另建注册表会
+// 读不到它对 force-on / toggle-only 的标注，把关不了的模型判成「可关」。
+// 不注入 = 用内置表兜底（见 LLMCompressor.registry）。
+func WithCompressRegistry(reg *provider.Registry) LLMCompressorOption {
+	return func(c *LLMCompressor) { c.registry = reg }
+}
+
+// WithCompressThinkingOff 关闭「压缩调用显式关思考」策略（逃逸舱）。
+// 默认开启（DisableThinking=true）；仅在实测某端点对显式关思考有异常时用 ——
+// 关掉后压缩请求不再带思考开关，回到「跟随厂商默认/会话档位」的旧行为。
+func WithCompressThinkingOff() LLMCompressorOption {
+	return func(c *LLMCompressor) { c.DisableThinking = false }
 }
 
 // WithCompressMaxRetries 设置压缩 LLM 调用的最大尝试次数（含首次，默认 1 = 不重试）。
@@ -222,6 +250,7 @@ func NewLLMCompressor(p provider.Provider, model string, opts ...LLMCompressorOp
 		Timeout:             90 * time.Second,
 		StallTimeout:        3 * time.Minute, // 与 agents.StreamStallTimeout 同值（流内静默上限）
 		LatestUserMaxTokens: defaultLatestUserMaxTokens,
+		DisableThinking:     true, // 默认关思考（见 DisableThinking 注释）
 	}
 	for _, o := range opts {
 		o(c)
@@ -245,6 +274,65 @@ func (c *LLMCompressor) summaryPrompt() string {
 	return prompt.SummaryPrompt
 }
 
+// compressConfig 压缩调用的请求配置：输出上限 + 思考开关 + 摘要档位。
+//
+// 档位固定 high（2026-09 用户决策）：摘要是「忠实压缩已有上下文」的结构化任务，不随
+// 会话档位漂移 —— 此前不带 Effort，落到厂商默认（多数模型 = high，但显式声明更明确，
+// 且避免注册表默认变化时摘要跟着变）。无档位可表达的模型由 provider 侧消化
+// （toggle-only 只发开关）。
+//
+// 思考开关（2026-10 优化）：DisableThinking（默认 true）时按注册表判定当前
+// (provider, model) 是否允许关闭 —— 思考模型显式关（thinking=false / effort=none
+// 形式由 provider 翻译），非思考模型与关不掉的模型**不带开关**（不带 = 不发一个
+// 模型不认识的字段/不让 disabled 把请求打成 400）。判定方向必须与 provider 侧
+// ResolveThinking + 各 thinkingFormat 分支的实际发送行为一致，故直接复用同一份
+// CanDisableThinking，不另立一套「是不是思考模型」的字符串族表。
+//
+// 为什么关掉而不是调低档位：档位在多数厂商只影响思考预算、不改变「跑不跑思考」，
+// 而一次压缩要吞整段上下文再产出长摘要，思考链既拉长首包又烧输出 token；摘要是
+// 忠实压缩任务，思考不改变它的输入。
+func (c *LLMCompressor) compressConfig() *provider.RequestConfig {
+	cfg := &provider.RequestConfig{
+		MaxTokens: c.MaxTokens,
+		Effort:    provider.ReasoningEffortLevelHigh,
+	}
+	if c.DisableThinking && c.canDisableThinking() {
+		cfg.Thinking = provider.BoolPtr(false)
+	}
+	return cfg
+}
+
+// canDisableThinking 当前 (provider, model) 能否显式关闭思考。
+// 经 Registry() 取（未注入时惰性兜底 + 缓存，见 Registry 注释）。
+func (c *LLMCompressor) canDisableThinking() bool {
+	return c.Registry().CanDisableThinking(c.providerName, c.model)
+}
+
+// Registry 压缩器实际使用的模型元数据注册表（只读）。
+// 宿主用它做「子 loop 与主 loop 同配置」的一致性校验（同 windowForIn 的思路）：
+// 压缩关思考的判定读这份注册表，用户为自建模型补的 thinking_force_on / toggle-only
+// 标注只在 bridge 注入的那一个实例里（另建注册表 = 读不到标注 = 把关不掉的模型判成
+// 可关 → 上游 400）。
+//
+// 恒非 nil：未显式注入时返回内置表（行为可预测，调用方不必判空）。该兜底实例
+// **惰性构造一次并缓存**（NewRegistry 要 clone 整个内置表，实测 ~0.14ms/次；
+// 虽然压缩本身是秒级 LLM 调用、这点开销是噪声，但不缓存会让"忘了注入"变成隐性的
+// 重复成本）。
+func (c *LLMCompressor) Registry() *provider.Registry {
+	c.dfltRegistryOnce.Do(func() {
+		if c.registry == nil {
+			c.registry = provider.NewRegistry()
+		}
+	})
+	return c.registry
+}
+
+// CanDisableThinking 压缩器对当前 (provider, model) 的关思考判定（只读；不发起请求）。
+// 宿主/测试用它验证装配结果，不必真跑一次压缩。
+func (c *LLMCompressor) CanDisableThinking() bool {
+	return c.canDisableThinking()
+}
+
 func (c *LLMCompressor) Compact(ctx context.Context, messages []core.Message) (CompressResult, error) {
 	sp := splitMessages(messages, c.KeepRecentMessages)
 	system, latestUser, prevSummary, history := sp.system, sp.latestUser, sp.prevSummary, sp.history
@@ -264,14 +352,7 @@ func (c *LLMCompressor) Compact(ctx context.Context, messages []core.Message) (C
 		Model:     c.model,
 		Provider:  c.providerName,
 		SessionID: c.sessionID,
-		Config: &provider.RequestConfig{
-			MaxTokens: c.MaxTokens,
-			// 摘要档位固定 high（2026-09 用户决策）：摘要是「忠实压缩已有上下文」的
-			// 结构化任务，不随会话档位漂移 —— 此前不带 Effort，落到厂商默认（多数
-			// 模型 = high，但显式声明更明确，且避免注册表默认变化时摘要跟着变）。
-			// 无档位可表达的模型由 provider 侧消化（toggle-only 只发开关）。
-			Effort: provider.ReasoningEffortLevelHigh,
-		},
+		Config:    c.compressConfig(),
 		Messages: []core.Message{
 			core.NewSystemMessage(c.summaryPrompt()),
 			core.NewUserMessage(core.Content{Type: "text", Content: input}),

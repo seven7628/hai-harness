@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, SUBAGENT_CONCURRENCY_DEFAULT, inputTypesForProvider } from '../store/useAppStore'
+import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, SUBAGENT_CONCURRENCY_DEFAULT, COMPRESS_THRESHOLD_DEFAULT, COMPRESS_THRESHOLD_MIN, COMPRESS_THRESHOLD_MAX, inputTypesForProvider } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { meshUUID, meshToken } from '../lib/meshRand'
 import { copyText } from '../lib/clipboard'
@@ -149,6 +149,14 @@ function GeneralTab() {
   const setCodemodeEnabled = useAppStore((s) => s.setCodemodeEnabled)
   const setStopBackgroundOnInterrupt = useAppStore((s) => s.setStopBackgroundOnInterrupt)
   const setCronAutoClean = useAppStore((s) => s.setCronAutoClean)
+  const setCompressThreshold = useAppStore((s) => s.setCompressThreshold)
+  // 压缩阈值（占窗口比例）：与 store 的钳制口径一致地兜底（缺配置 → 默认 0.8）。
+  // 滑杆的 value 必须是整数百分比，浮点比例 ×100 后用 Math.round 归一。
+  const compressThresholdRaw = settings.agent?.compress_threshold ?? COMPRESS_THRESHOLD_DEFAULT
+  const compressThreshold =
+    Number.isFinite(compressThresholdRaw) && compressThresholdRaw > 0
+      ? Math.min(COMPRESS_THRESHOLD_MAX, Math.max(COMPRESS_THRESHOLD_MIN, compressThresholdRaw))
+      : COMPRESS_THRESHOLD_DEFAULT
   const externalSkillsStatus = useAppStore((s) => s.externalSkillsStatus)
   const externalSkillsLoading = useAppStore((s) => s.externalSkillsLoading)
   const externalSkillsImporting = useAppStore((s) => s.externalSkillsImporting)
@@ -209,6 +217,27 @@ function GeneralTab() {
       <div className="set-row">
         <div><div className="set-label">{t('settings.goalAlign')}</div><div className="set-desc">{t('settings.goalAlign.desc')}</div></div>
         <input className="text-input" type="number" min={0} max={100} value={settings.agent?.reminder_rounds ?? 30} onChange={(e) => useAppStore.getState().setGoalAlignmentRounds(Number(e.target.value))} />
+      </div>
+      {/* 上下文压缩阈值（占模型上下文窗口比例）：用小步进滑杆 + 数字输入双控件。
+           调小 = 更早压缩（单次请求更短、更便宜，但压缩更频繁）；调大 = 更晚压缩。 */}
+      <div className="set-row">
+        <div><div className="set-label">{t('settings.compressThreshold')}</div><div className="set-desc">{t('settings.compressThreshold.desc')}</div></div>
+        <div className="set-inline">
+          <input
+            className="range-input"
+            type="range" min={5} max={95} step={1}
+            aria-label={t('settings.compressThreshold')}
+            value={Math.round(compressThreshold * 100)}
+            onChange={(e) => setCompressThreshold(Number(e.target.value) / 100)}
+          />
+          <input
+            className="text-input"
+            type="number" min={5} max={95} step={5}
+            value={Math.round(compressThreshold * 100)}
+            onChange={(e) => setCompressThreshold(Number(e.target.value) / 100)}
+          />
+          <span className="set-unit">%</span>
+        </div>
       </div>
       {/* 子 agent 并发槽上限（主池 = agent_spawn，辅池 = subagent_explore）：槽满会让工具调用
           同步阻塞（主 Agent 整批挂住），所以缺省 1000 只是失控护栏 —— 这两项是「调小」用的。 */}

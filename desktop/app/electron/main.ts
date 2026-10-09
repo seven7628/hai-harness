@@ -250,8 +250,14 @@ interface SandboxSettings {
 interface PermissionsSettings {
   computer_approved_apps: string[]
 }
-interface GoalAlignmentSettings {
+// agent 段除提醒阈值外的可调项：压缩阈值（占窗口比例）+ 子 agent 并发槽上限。
+// 三者的缺省与校验口径以 bridge（desktop/bridge/providers.go 的 agentSettings）为准，
+// 这里只负责「读进来的值合法化 + 写出去时不丢字段」。
+interface AgentRuntimeSettings {
   reminder_rounds: number
+  compress_threshold?: number
+  max_subagents?: number
+  max_explore_subagents?: number
 }
 interface RuntimeSettings {
   stop_background_on_interrupt?: boolean // 主停止是否连后台任务一起停（缺省 true；S3-B）
@@ -281,7 +287,7 @@ interface AppSettings {
   mcpServers: Record<string, MCPServerCfg> // MCP 服务器配置（bridge 启动/热应用读取）
   sandbox?: SandboxSettings // 命令沙箱（缺省 seatbelt；桌面端默认开启 2026-08-16 决策）
   permissions?: PermissionsSettings // Computer Use 已授权 App（空 = 全部拒绝）
-  agent?: GoalAlignmentSettings // Agent 运行时目标一致性提醒；0 = 禁用
+  agent?: AgentRuntimeSettings // Agent 运行时设置（提醒阈值 + 压缩阈值 + 子 agent 并发槽上限）
   runtime?: RuntimeSettings // 运行期行为开关（主停止后台任务语义）
   stt?: STTSettings // 语音输入（话筒）配置；配置齐全才显示话筒
 }
@@ -338,6 +344,8 @@ const DEFAULT_SETTINGS: AppSettings = {
     },
   },
   mcpServers: {},
+  // compress_threshold 刻意**不写默认值**：缺字段 = bridge 用自身默认 0.8，
+  // 用户没动过这项时配置里不留下任何痕迹（改了才出现）。
   agent: { reminder_rounds: 30 },
   sandbox: { mode: 'seatbelt', sensitive_paths: [] }, // 命令沙箱默认开启（2026-08-16 用户决策）
   permissions: { computer_approved_apps: [] }, // Computer Use 已授权 App 空 = 全部拒绝（安全默认）
@@ -350,12 +358,24 @@ function readSettings(): AppSettings {
     const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'))
     const s = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AppSettings // 深拷贝兜底默认
     const provider: AppSettings['provider'] = { ...s.provider, ...(raw.provider ?? {}) }
-    // Agent 提醒配置：旧 settings 没有 agent 段时使用默认 30；0 明确表示禁用。
-    const agent: GoalAlignmentSettings = {
+    // Agent 运行时段（提醒阈值 / 压缩阈值 / 子 agent 并发槽）：字段级合并 + 逐项合法化，
+    // 缺字段回退默认（口径与 bridge 的 loadAgentSettings 一致）。
+    // 旧 settings 没有 agent 段时 reminder_rounds 用默认 30；0 明确表示禁用。
+    const agent: AgentRuntimeSettings = {
       ...s.agent,
       ...(raw.agent && typeof raw.agent === 'object' ? raw.agent : {}),
     }
     if (!Number.isFinite(agent.reminder_rounds) || agent.reminder_rounds < 0) agent.reminder_rounds = 30
+    if (agent.compress_threshold !== undefined) {
+      const t = Number(agent.compress_threshold)
+      // 非法值（含 NaN / <=0 / >1）删掉字段 —— 让 bridge 走自己的默认，
+      // 而不是把 0 或 3 写死进配置（0 = 永不压缩，是误配，不是选项）。
+      if (!Number.isFinite(t) || t <= 0 || t > 1) delete agent.compress_threshold
+    }
+    for (const k of ['max_subagents', 'max_explore_subagents'] as const) {
+      const v = Number(agent[k])
+      if (!Number.isFinite(v) || v < 1) delete agent[k]
+    }
     // 内置三卡：默认合并（老配置缺字段/缺协议时回退默认）
     for (const k of BUILTIN_PROVIDERS) provider[k] = { ...s.provider[k], ...(raw.provider?.[k] ?? {}) }
     // 自定义 provider：补齐 ProviderCfg 缺省（手改 settings.json 缺 models/max_tokens/protocol 时 UI 不崩）
@@ -1192,11 +1212,26 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
       }
     }
     if (patch.agent) {
+      // 字段级合并：三项各自合法化，未提供的字段沿用旧值（整体覆盖会把
+      // compress_threshold / 并发槽静默丢掉）。
+      // 注意别叫 cur：外层已有同名变量（整个 settings 的当前值）。
+      const curAgent: AgentRuntimeSettings = cur.agent ?? { reminder_rounds: 30 }
+      const agent: AgentRuntimeSettings = { ...curAgent }
       const rounds = Number(patch.agent.reminder_rounds)
-      next.agent = {
-        ...(cur.agent ?? { reminder_rounds: 30 }),
-        reminder_rounds: Number.isFinite(rounds) && rounds >= 0 ? Math.round(rounds) : (cur.agent?.reminder_rounds ?? 30),
+      agent.reminder_rounds = Number.isFinite(rounds) && rounds >= 0 ? Math.round(rounds) : curAgent.reminder_rounds ?? 30
+      if (patch.agent.compress_threshold !== undefined) {
+        const t = Number(patch.agent.compress_threshold)
+        if (Number.isFinite(t) && t > 0 && t <= 1) agent.compress_threshold = t
+        else delete agent.compress_threshold
       }
+      for (const k of ['max_subagents', 'max_explore_subagents'] as const) {
+        const v = patch.agent[k]
+        if (v === undefined) continue
+        const n = Number(v)
+        if (Number.isFinite(n) && n >= 1) agent[k] = Math.round(n)
+        else delete agent[k]
+      }
+      next.agent = agent
     }
     const res = writeSettings(next)
     if (!res.ok) return { ok: false, error: res.error }

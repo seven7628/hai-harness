@@ -16,7 +16,7 @@
 //
 //	switch_mode / switch_effort / switch_persona / switch_model / set_provider /
 //
-//	set_goal_alignment_rounds / set_max_subagents / list_models / reload_settings / file_preview / xlsx_preview / skills / skill_toggle / skill_get / load_skill /
+//	set_goal_alignment_rounds / set_max_subagents / set_compress_threshold / list_models / reload_settings / file_preview / xlsx_preview / skills / skill_toggle / skill_get / load_skill /
 //	skill_install / skill_browse / skill_update / skill_uninstall /
 //	market_add / market_remove / market_list / skill_update_market /
 //	mcp_list / mcp_set / mcp_refresh / plugin_list / plugin_install / plugin_uninstall /
@@ -2125,7 +2125,11 @@ func (m *manager) dispatch(c command) {
 		// —— 适配器在 newSessionEngine → Manager.Tools 时按这个值定型。
 		m.applyMCPDefaultExposureAllWorkspaces()
 		m.applySubagentConcurrency() // 子 agent 并发槽上限热更新（settings.json agent 段）
-		m.rebuildAll()               // 现有：重建全部 loop（兜底对齐 system 工具清单）
+		// 压缩阈值热更新（settings.json agent.compress_threshold）：rebuildAll 会按
+		// settings 值重建 loop，此处先就地 set 一遍是为了「手改配置但 rebuild 未覆盖到
+		// 的路径」也立即生效（幂等：同值重复 set 无副作用）。
+		m.applyCompressThreshold()
+		m.rebuildAll() // 现有：重建全部 loop（兜底对齐 system 工具清单）
 		m.resp(c, true, "", nil)
 
 	case CmdMeshStatus: // 查询 Session Mesh 状态（设置页「别人怎么连我」/ 排障）
@@ -2172,6 +2176,15 @@ func (m *manager) dispatch(c command) {
 		}
 		m.setSubagentConcurrency(spawn, explore)
 		m.resp(c, true, "", map[string]any{"max_subagents": spawn, "max_explore_subagents": explore})
+
+	case "set_compress_threshold": // 自动压缩触发阈值热更新（占窗口比例）：不重建 loop/会话
+		t := floatNum(c.Payload, "compress_threshold", -1)
+		if !(t > 0) || t > 1 {
+			m.resp(c, false, "compress_threshold 必须是 (0, 1] 的比例值", nil)
+			return
+		}
+		m.setCompressThreshold(t)
+		m.resp(c, true, "", map[string]any{"compress_threshold": t})
 
 	case CmdListModels: // 拉取某 provider 模型列表（Provider 设置面板「拉取模型列表」）
 		providerName := str(c.Payload, "provider")
@@ -3531,11 +3544,54 @@ const (
 	hostExploreLoop codeAgentHost = "buildExploreLoop"
 )
 
-// codeAgentCompressThreshold 自动压缩触发阈值（占上下文窗口比例）。**钉住 0.8**：
-// 2026-08-30 D1/D2 曾试 0.8→0.72 提前压缩，实测子 Agent 高频压缩 + 重读循环，已回退；
-// 用户 2026-09-18 再次明确「压缩阈值不改，就保持」。三宿主共用同一常量（此前是三处
-// 字面量 0.8）——C7 的装配断言钉住它：谁想再动，必须先让测试红起来，而不是悄悄改一处。
+// codeAgentCompressThreshold 自动压缩触发阈值（占上下文窗口比例）的**默认值**。
+// 默认 0.8：2026-08-30 D1/D2 曾试 0.8→0.72 提前压缩，实测子 Agent 高频压缩 + 重读循环，
+// 已回退；用户 2026-09-18 再次明确「压缩阈值不改，就保持」。三宿主共用同一常量
+// ——C7 的装配断言钉住它：谁想再动，必须先让测试红起来，而不是悄悄改一处。
+//
+// 2026-10 起该值可在设置面板改（settings.json agent.compress_threshold）：
+// 常量退化为「用户未配置时的默认」，三宿主的**未配置**行为逐字节不变。
 const codeAgentCompressThreshold = 0.8
+
+// codeAgentCompressThresholdFor 三宿主共用的生效阈值：读 settings 的
+// agent.compress_threshold，未配置/非法 → 默认。
+func codeAgentCompressThresholdFor() float64 {
+	return loadAgentSettings().compressThreshold()
+}
+
+// compressTorOptions 三宿主（buildLoop / buildPersonaLoop / buildExploreLoop）共用的
+// LLMCompressor 选项集 —— 压缩器配置的**单一事实源**。
+//
+// 为什么提取（2026-10）：这三处的压缩器参数原本各写一遍（窗口、档位、重试策略、
+// 输出上限、关思考判定注册表…）。"三宿主一致"靠人眼维持，而漏一项的后果不在单元
+// 测试里暴露（Explore/子 agent 的上下文会无限增长、或压缩判定读不到宿主的模型
+// 标注）。合成一个函数 + 一条装配断言（TestCompressorOptionsWiredForAllHosts）
+// 把「谁改漏了谁先让测试红」落到实处。
+//
+// 参数语义：
+//   - prov/model/sid：压缩调用同主会话的 provider 归属、模型与会话 id
+//     （网关要求辅助/子请求同样带 x-opencode-session，同 id 才能复用路由与缓存前缀）
+//   - reg：关思考判定的注册表，**必须是 bridge 那一个实例**（pc.registry）——
+//     用户为自建模型补的 thinking_force_on / toggle-only 标注只存在于它里面。
+func compressTorOptions(prov, model, sid string, pc *providerConfig) []agents.LLMCompressorOption {
+	return []agents.LLMCompressorOption{
+		// 2026-09-18：压缩与主会话同策略 —— 不限总时限（0）+ 首字预算 30s
+		//（SDK 默认，agents.FirstChunkTimeout）+ 流内停滞预算 3min（SDK 默认，
+		// agents.LLMCompressor.StallTimeout）+ 首次+10 重试固定 1s 退避
+		//（HTTP 层 ResponseHeaderTimeout=60s 仅次级兜底）。
+		agents.WithCompressTimeout(0), agents.WithCompressMaxRetries(11), agents.WithCompressBackoff(agents.FixedBackoff(time.Second)), agents.WithKeepRecentMessages(10),
+		agents.WithSummaryVersion(3), agents.WithCompressorRetryOnMissingSection(true),
+		// 摘要输出上限 = 模型真实 max_tokens（与主对话一致）：默认 8192 对
+		// 1M 窗口 / 560K 输入的手动 summary 必然 finish_reason=length 截断失败。
+		agents.WithSummaryMaxTokens(pc.maxTokensForIn(prov, model)),
+		agents.WithSummaryContextWindow(pc.windowForIn(prov, model)),
+		agents.WithCompressProviderName(prov), agents.WithCompressSessionID(sid),
+		// 关思考判定（2026-10）：读**同一个**注册表 —— 用户对自定义模型补的
+		// thinking_force_on / toggle-only 标注只在 bridge 这个实例里，另建注册表
+		// 读不到 → 把关不掉的模型判成「可关」→ 发 disabled 被上游 400。
+		agents.WithCompressRegistry(pc.registry),
+	}
+}
 
 // codeAgentTuning 三宿主 loop 装配点上「易失的可调项」值类型（C7）。纯值 + 纯函数：
 // 装配点只经 options() 生成 agents.Option，测试可直接断言字段与应用结果（无需
@@ -3563,11 +3619,11 @@ type codeAgentTuning struct {
 // codeAgentTuningFor 返回某宿主的可调项取值（单一事实源）。
 // 与提取前逐项一致：postToolNudge 三宿主全开；goalAlignmentRounds 仅主会话（值 =
 // 装配时读 settings 的 loadAgentSettings().ReminderRounds，与提取前同一时点）；
-// 压缩阈值三宿主同一常量。
+// 压缩阈值三宿主同一来源（settings 的 agent.compress_threshold，未配置 → 默认）。
 func codeAgentTuningFor(host codeAgentHost) codeAgentTuning {
 	t := codeAgentTuning{
 		postToolNudge:     true,
-		compressThreshold: codeAgentCompressThreshold,
+		compressThreshold: codeAgentCompressThresholdFor(),
 	}
 	if host == hostMainLoop {
 		rounds := loadAgentSettings().ReminderRounds
@@ -3628,18 +3684,10 @@ func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConf
 		agents.WithMaxTokens(pc.maxTokensForIn(prov, model)),
 		agents.WithContextWindow(pc.windowForIn(prov, model)),
 		// 压缩配置（V2 的 A/B 对照见 docs/summary/压缩PromptV2优化分析-2026-08-30.md
-		// 附录 C）+ SummaryPromptV3 + 缺节带反馈重试 + C5 近窗裁剪窗口注入。
+		// 附录 C）：参数集与主会话/Explore 共用 compressTorOptions（单一事实源，
+		// 装配断言见 TestCompressorOptionsWiredForAllHosts）。
 		agents.WithCompressor(agents.NewLLMCompressor(pc.newProvider(prov), model,
-			// 2026-09：压缩与主会话同策略（主会话的单次上界 = 首字预算 30s，在 agents
-			// streamOnce 里生效；压缩调用是非流式，故这里靠自身超时档位）
-			// —— 不限总时限（0）+ 首次+10 重试（11）固定 1s 退避。
-			agents.WithCompressTimeout(0), agents.WithCompressMaxRetries(11), agents.WithCompressBackoff(agents.FixedBackoff(time.Second)), agents.WithKeepRecentMessages(10),
-			agents.WithSummaryVersion(3), agents.WithCompressorRetryOnMissingSection(true),
-			agents.WithSummaryMaxTokens(pc.maxTokensForIn(prov, model)),
-			agents.WithSummaryContextWindow(pc.windowForIn(prov, model)),
-			// 子 agent 与父会话同会话 id：OpenCode Go 网关要求辅助/子请求同样带
-			// x-opencode-session（缺失 400），同 id 才能复用会话路由与缓存前缀。
-			agents.WithCompressProviderName(prov), agents.WithCompressSessionID(sid))),
+			compressTorOptions(prov, model, sid, pc)...)),
 		// 子 agent 的会话标识（与父会话同 id；Responses prompt cache key +
 		// OpenCode Go 网关 x-opencode-session 用）。
 		agents.WithSessionID(sid),
@@ -3719,14 +3767,10 @@ func buildExploreLoop(workspace, sid string, pc *providerConfig, prov, model, ef
 		// 无限增长、必然撞模型窗口。独立 NewLLMCompressor 实例：与主 loop 互不影响。
 		agents.WithMaxTokens(pc.maxTokensForIn(prov, model)),
 		agents.WithContextWindow(pc.windowForIn(prov, model)),
-		// 压缩器参数与主会话同步（阈值/V3/缺节重试/近窗窗口）+ 2026-09 超时/重试
-		// 同策略（不限总时限 / 首字预算 30s / 首次+10 重试固定 1s 退避）。
+		// 压缩器参数与主会话/子 agent 共用 compressTorOptions（单一事实源，
+		// 装配断言见 TestCompressorOptionsWiredForAllHosts）。
 		agents.WithCompressor(agents.NewLLMCompressor(pc.newProvider(prov), model,
-			agents.WithCompressTimeout(0), agents.WithCompressMaxRetries(11), agents.WithCompressBackoff(agents.FixedBackoff(time.Second)), agents.WithKeepRecentMessages(10),
-			agents.WithSummaryVersion(3), agents.WithCompressorRetryOnMissingSection(true),
-			agents.WithSummaryMaxTokens(pc.maxTokensForIn(prov, model)),
-			agents.WithSummaryContextWindow(pc.windowForIn(prov, model)),
-			agents.WithCompressProviderName(prov), agents.WithCompressSessionID(sid))),
+			compressTorOptions(prov, model, sid, pc)...)),
 		// Explore 与父会话同会话 id（OpenCode Go 网关 x-opencode-session 用）。
 		agents.WithSessionID(sid),
 	}
@@ -4041,19 +4085,17 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		// KeepRecentMessages=10（问题三）：滚动近窗原文保留最近交换，工具回执
 		// 不再只靠摘要转述；splitMessages 按完整 assistant→tool 组截断防悬空配对。
 		// 阈值与 SummaryPromptV3（2026-08-30 GPN 交接单重构）+ 缺节带反馈重试 +
-		// C5 近窗裁剪窗口注入；阈值取值见 codeAgentCompressThreshold。
+		// C5 近窗裁剪窗口注入；阈值取值见 codeAgentTuningFor（默认 codeAgentCompressThreshold）。
+		//
+		// 参数集与子 agent/Explore 共用 compressTorOptions（单一事实源，装配断言见
+		// TestCompressorOptionsWiredForAllHosts）。
+		//
+		// 关思考（默认策略，可在 agents.WithCompressThinkingOff 逃生）：摘要是忠实压缩
+		// 任务，思考链不改变它的输入却显著拉长首包 + 烧输出 token。判定由压缩器按
+		// (prov, model) 读注册表完成（forced-on / 非推理模型不发开关），宿主侧无需
+		// 按模型配白名单。
 		agents.WithCompressor(agents.NewLLMCompressor(p, model,
-			// 2026-09-18：压缩与主会话同策略 —— 不限总时限（0）+ 首字预算 30s
-			//（SDK 默认，agents.FirstChunkTimeout）+ 流内停滞预算 3min（SDK 默认，
-			// agents.LLMCompressor.StallTimeout）+ 首次+10 重试固定 1s 退避
-			//（HTTP 层 ResponseHeaderTimeout=60s 仅次级兜底）。
-			agents.WithCompressTimeout(0), agents.WithCompressMaxRetries(11), agents.WithCompressBackoff(agents.FixedBackoff(time.Second)), agents.WithKeepRecentMessages(10),
-			agents.WithSummaryVersion(3), agents.WithCompressorRetryOnMissingSection(true),
-			// 摘要输出上限 = 模型真实 max_tokens（与主对话一致）：默认 8192 对
-			// 1M 窗口 / 560K 输入的手动 summary 必然 finish_reason=length 截断失败。
-			agents.WithSummaryMaxTokens(m.provCfg.maxTokensForIn(prov, model)),
-			agents.WithSummaryContextWindow(m.provCfg.windowForIn(prov, model)),
-			agents.WithCompressProviderName(prov), agents.WithCompressSessionID(sid))),
+			compressTorOptions(prov, model, sid, m.provCfg)...)),
 	)
 	// D3（方案 B2/C3.2）：stop 检查点在途任务提醒（Work 无 agent_* 工具时快照恒空
 	// = 天然 no-op）+ 自动压缩失败退避 3min（防失控重试，实测 211k/231k 样本）。
@@ -4160,6 +4202,38 @@ func (m *manager) setSubagentConcurrency(spawn, explore int) {
 func (m *manager) applySubagentConcurrency() {
 	ag := loadAgentSettings()
 	m.setSubagentConcurrency(ag.maxSubagents(), ag.maxExploreSubagents())
+}
+
+// setCompressThreshold 把自动压缩触发阈值同步到所有已创建会话的主 loop。
+// 只调 AgentLoop setter，不重建 loop/会话：下一次压缩判定按新触发线
+// （ContextWindow × Threshold）生效，上下文、历史、后台任务均不变。
+// 改大会「更晚压缩」（上下文更长才触发），改小则「更早压缩」—— 两侧都不丢数据。
+func (m *manager) setCompressThreshold(t float64) {
+	m.mu.Lock()
+	wsList := make([]*workspaceRuntime, 0, len(m.workspaces))
+	for _, ws := range m.workspaces {
+		wsList = append(wsList, ws)
+	}
+	m.mu.Unlock()
+	for _, ws := range wsList {
+		ws.mu.Lock()
+		sessions := make([]*bridgeSession, 0, len(ws.sessions))
+		for _, bs := range ws.sessions {
+			sessions = append(sessions, bs)
+		}
+		ws.mu.Unlock()
+		for _, bs := range sessions {
+			if bs.loop != nil {
+				bs.loop.SetCompressThreshold(t)
+			}
+		}
+	}
+}
+
+// applyCompressThreshold 从 settings.json（agent 段）重读压缩阈值并热应用：
+// reload_settings 用（手改配置文件后无需重启；前端设置面板走 set_compress_threshold）。
+func (m *manager) applyCompressThreshold() {
+	m.setCompressThreshold(loadAgentSettings().compressThreshold())
 }
 
 // applyMeshSettings 热应用 Session Mesh 设置（CmdReloadSettings 调用；不重启进程）。
@@ -4939,6 +5013,22 @@ func str(m map[string]any, k string) string {
 		return v
 	}
 	return ""
+}
+
+// floatNum 从命令 payload 取浮点值（缺字段/类型不符 → fallback）。
+//
+// 只认 float64：bridge 的 stdin 主循环用标准 `json.Unmarshal` 解命令（无 UseNumber），
+// 数字恒为 float64。刻意不做 int/int64/json.Number 分支 —— 那些在生产中不可达，
+// 而 json.Number("abc").Float64() 会静默返回 0，正是"阈值 0 = 永不压缩"这类误配值
+// 最危险的入口。与 str / boolVal 一样只做单类型断言，宽度靠调用方传 fallback 兜底。
+func floatNum(m map[string]any, k string, fallback float64) float64 {
+	if m == nil {
+		return fallback
+	}
+	if v, ok := m[k].(float64); ok {
+		return v
+	}
+	return fallback
 }
 
 func boolVal(v any) bool {

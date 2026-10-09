@@ -125,6 +125,10 @@ export interface AgentSettings {
   // 所以这两个值只是「失控护栏」，别调小到接近日常并发。
   max_subagents?: number
   max_explore_subagents?: number
+  // 自动压缩触发阈值（占模型上下文窗口比例，缺省 0.8 = 80%）。调小 = 更早压缩
+  // （上下文更短、后续请求更便宜，但压缩更频繁）；调大 = 更晚压缩（单请求更长、
+  // 更容易撞窗口）。范围 (0, 1]，缺失/非法按 0.8。
+  compress_threshold?: number
 }
 export interface RuntimeSettings {
   stop_background_on_interrupt?: boolean // 主停止是否连后台任务一起停（缺省 false：只停主会话）
