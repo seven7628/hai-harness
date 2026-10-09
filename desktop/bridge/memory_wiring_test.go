@@ -374,25 +374,6 @@ func callEditFile(ft *builtin.FileTools, abs, oldS, newS string) error {
 	return os.ErrNotExist
 }
 
-func jsonQuote(s string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"':
-			b.WriteString(`\"`)
-		case '\\':
-			b.WriteString(`\\`)
-		case '\n':
-			b.WriteString(`\n`)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
-}
-
 // TestEmptyStateAssertionSkipsOnlyForWiredPackage：基线断言的跳过是**有条件的**。
 //
 // Step 3/4 接线后 desktop/bridge 成为 importer，基线在产品树上不成立是已知且有意的，

@@ -132,7 +132,10 @@ type Block struct {
 	Promoted   bool           `json:"promoted,omitempty"`
 	TaskStatus string         `json:"task_status,omitempty"`
 	Todos      []TodoItem     `json:"todos,omitempty"` // todo_* 工具调用时刻快照
-	StartedAt  int64          `json:"started_at,omitempty"`
+	// NestedCalls 编排型工具（codemode）脚本内的嵌套调用摘要（与 AgentItem 同名字段同义）。
+	// 只出现在编排型工具那一块上；宿主折叠态只显示最后 8 条（desktop/app 的 pickNestedCalls）。
+	NestedCalls []NestedCall `json:"nested_calls,omitempty"`
+	StartedAt   int64        `json:"started_at,omitempty"`
 
 	// Settled 是内部结算标记（不序列化）：assistant 块收到 llm_end / tool 块收到
 	// tool_end 后置 true。归一化悬空态时据此区分「已结算但无正文」（纯工具调用轮）
@@ -167,6 +170,35 @@ type Block struct {
 	ArtifactsTruncated bool          `json:"artifacts_truncated,omitempty"`
 }
 
+// NestedCall 是 core.NestedCallRecord 的稳定投影（checkpoint schema，独立于 core 的演进）。
+// 字段与 core.NestedCallRecord 一一对应：args/result 已由引擎按 8 KiB 截断、error 按 500 字符
+// 截断（本层不再截断，宿主渲染时另按 200/500 字符做预览）。
+// Duration 单位纳秒（time.Duration 的原生单位）—— 宿主换算成毫秒展示。
+type NestedCall struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Args     string `json:"args,omitempty"`
+	Result   string `json:"result,omitempty"`
+	IsError  bool   `json:"is_error,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Duration int64  `json:"duration,omitempty"`
+}
+
+// nestedCalls 把 core.NestedCallRecord 投影成 checkpoint 形态（无记录 = nil，不落空数组）。
+func nestedCalls(in []core.NestedCallRecord) []NestedCall {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]NestedCall, 0, len(in))
+	for _, r := range in {
+		out = append(out, NestedCall{
+			ID: r.Id, Name: r.Name, Args: r.Args, Result: r.Result,
+			IsError: r.IsError, Error: r.Error, Duration: int64(r.Duration),
+		})
+	}
+	return out
+}
+
 // ArtifactRef 是 core.Artifact 的稳定投影（checkpoint schema，独立于 core 的演进）。
 // 字段与 core.Artifact 一一对应；只保留宿主展示所需（不含工作区外不可达信息）。
 type ArtifactRef struct {
@@ -198,6 +230,10 @@ type AgentItem struct {
 	TaskID    string         `json:"task_id,omitempty"`
 	Diff      *Diff          `json:"diff,omitempty"`
 	Images    []Content      `json:"images,omitempty"` // tool item: 结果图片（read_file 读图 / 截图）
+	// NestedCalls 编排型工具（codemode）脚本内发生的嵌套调用摘要（core.NestedCallRecord 的
+	// 稳定投影）。子调用**没有自己的工具行/工具项**，明细只挂在外层调用这一处 ——
+	// 宿主在行内联成清单渲染（设计文档 §17 第二条）。
+	NestedCalls []NestedCall `json:"nested_calls,omitempty"`
 
 	// compression item
 	Before    int    `json:"before,omitempty"`
@@ -436,6 +472,7 @@ type ViewReducer struct {
 	// 计时瞬态（仅结算使用，不持久化）
 	thinkStart       map[string]time.Time // runID → 首个 reasoning chunk 时间
 	turnThinkMs      map[string]int64     // runID → 已结算思考耗时
+	turnStart        map[string]time.Time // runID → 当前 LLM 轮 llm_start 时刻（末轮无 llm_end 时兜底算「已跑多久」）
 	toolStartTs      map[string]time.Time // toolID → 工具开始时间
 	compStart        map[string]time.Time // runID（""=主）→ 压缩开始时刻
 	agentCompressing map[string]bool      // runID → 子 agent 压缩进行中
@@ -509,6 +546,7 @@ func newReducer(seq, clearGeneration uint64) *ViewReducer {
 		toolBlockID:       map[string]uint64{},
 		thinkStart:        map[string]time.Time{},
 		turnThinkMs:       map[string]int64{},
+		turnStart:         map[string]time.Time{},
 		toolStartTs:       map[string]time.Time{},
 		compStart:         map[string]time.Time{},
 		agentCompressing:  map[string]bool{},
@@ -787,6 +825,7 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 	r.toolBlockID = map[string]uint64{}
 	r.thinkStart = map[string]time.Time{}
 	r.turnThinkMs = map[string]int64{}
+	r.turnStart = map[string]time.Time{}
 	r.toolStartTs = map[string]time.Time{}
 	r.compStart = map[string]time.Time{}
 	r.agentCompressing = map[string]bool{}
@@ -1169,7 +1208,14 @@ func (r *ViewReducer) applyLLMStartLocked(e *events.LLMStart) {
 	if key == "" {
 		key = "$" + e.RunId // 无 request 的旧流：按 run 共享一个结算态
 	}
-	r.reqState[key] = &reqState{runID: e.RunId, model: e.Model, start: e.Timestamp, blockID: bid}
+	ts := e.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	r.reqState[key] = &reqState{runID: e.RunId, model: e.Model, start: ts, blockID: bid}
+	// 当前 LLM 轮起点（runID 级）：末轮若没有 llm_end（中断/失败/截断），AgentEnd 用它
+	// 兜底出「这一轮已经跑了多久」——否则该块永远拿不到 DurMs，刷新后指标行缺一段。
+	r.turnStart[e.RunId] = ts
 }
 
 // applyLLMEndLocked 结算单次 LLM 调用：turn 指标、usage/cost、assistant 块终态。
@@ -1192,6 +1238,7 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 		delete(r.thinkStart, runKey)
 	}
 	delete(r.turnThinkMs, runKey)
+	delete(r.turnStart, runKey) // 本轮已结算：AgentEnd 不再兜底（否则会重复计一次）
 
 	// 请求态（durMs / TTFT）
 	var rs *reqState
@@ -1306,6 +1353,24 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 	}
 	r.llmErrorSeen[key] = true
 
+	// 失败 attempt 的 reqState 清理：每次 attempt 的 llm_start 都按**自己的** request_id
+	// 开一条 reqState（上游 chatcmpl id 每次 attempt 都不同），但只有成功那次有 llm_end
+	// 去 delete。applyLLMEndLocked 删的是 llm_end 自带的那个 request_id，失败 attempt 的
+	// 条目没人回收 —— 每次失败重试在 map 里留一条（会话存活期内累积），且条目带着过期的
+	// blockID / start，迟到事件按 request_id 命中它会读到错误的结算锚。
+	//
+	// 为什么按 run 整扫而不是按 request_id 精确删：events.LLMError 不携带失败 attempt 的
+	// request_id，Runtime 侧 roundResult 也没有，要从 provider 流里把它拽出来是侵入式改动
+	// （要改 provider 事件 → translate → streamWithRetry 三处）。而 runID 是 reqState 自带的
+	// 字段，且同一 run 内 LLM 调用严格串行（streamWithRetry 是阻塞调用，单 goroutine 循环），
+	// llm_error 到达时该 run 名下唯一活着的条目就是这次失败 attempt 的 —— 整扫安全，
+	// 也不会误删并发中的其它 run（父 run 正在计时的轮、兄弟子 agent 各占各的 key）。
+	for k, rs := range r.reqState {
+		if rs.runID == e.RunId {
+			delete(r.reqState, k)
+		}
+	}
+
 	at := nowMillis()
 	r.lastError = &LastError{Message: e.Message, Kind: e.ErrorKind, At: at}
 
@@ -1389,6 +1454,14 @@ func (r *ViewReducer) applyToolStartLocked(e *events.ToolStart) {
 	}
 	r.toolStartSeen[key] = true
 
+	// 嵌套子调用（parent_call_id 非空）**不生成独立工具块/链路节点**：它不是模型发起的
+	// 工具调用，明细只挂在外层编排工具（codemode）那一块的 NestedCalls 上（设计文档 §17
+	// 第一条）。宿主渲染器同一规则见 desktop/app/src/store/useAppStore.ts 的 tool_start ——
+	// 两边必须一致，否则刷新/恢复后这些行会「凭空出现」。
+	if e.ParentCallId != "" {
+		return
+	}
+
 	ts := e.Timestamp
 	if ts.IsZero() {
 		ts = time.Now()
@@ -1449,6 +1522,12 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 	}
 	r.toolEndSeen[key] = true
 
+	// 嵌套子调用（parent_call_id 非空）不结算任何工具块/工具项/链路节点 —— 与 applyToolStartLocked
+	// 同一条规则（设计文档 §17 第一条；宿主侧同规则见 desktop/app 的 useAppStore）。
+	// 但**会话级事实照常入档**：diff 是真实发生的文件变更、todos 是脚本改过的计划快照 ——
+	// 因为「不显示成一行」而丢掉它们，会让 Git 面板/待办列表在脚本跑完后是错的。
+	nested := e.ParentCallId != ""
+
 	ts := e.Timestamp
 	if ts.IsZero() {
 		ts = time.Now()
@@ -1459,6 +1538,19 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 		delete(r.toolStartTs, e.Id)
 	}
 	info := toolErrorInfo(e)
+
+	if nested {
+		// 子调用没有自己的工具块/工具项/链路节点：只留会话级事实（见上），
+		// 行内清单挂在外层编排工具（codemode）那一块上。
+		if e.Diff != nil {
+			r.diffs = append(r.diffs, *fileDiff(e.Diff))
+		}
+		if meta.Todos != nil {
+			r.todos = cloneTodos(meta.Todos)
+		}
+		delete(r.approvalSeen, "approval:"+e.Id)
+		return
+	}
 
 	if r.isSubRunLocked(e.RunId) {
 		bid := r.agentBlockID[e.RunId]
@@ -1478,6 +1570,8 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 					it.DurMs = durMs
 					it.Diff = fileDiff(e.Diff)
 					it.Images = contentBlocks(e.Images)
+					// 编排型工具（codemode）：脚本内的嵌套调用清单（子 agent 转录里的脚本行同样要能展开）
+					it.NestedCalls = nestedCalls(e.NestedCalls)
 					// 子 agent 卡片内的工具项：本次调用用量（仅子 agent 类工具非零）
 					if e.Usage != nil && !e.Usage.IsZero() {
 						u := taskUsageFromCore(*e.Usage)
@@ -1519,6 +1613,8 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 		b.Status = statusDone
 		b.Diff = fileDiff(e.Diff)
 		b.Images = contentBlocks(e.Images)
+		// 编排型工具（codemode）的嵌套调用清单：与结果同一时刻定格（重放/恢复后清单不丢）
+		b.NestedCalls = nestedCalls(e.NestedCalls)
 		// 本次调用的用量（子 agent 类工具经 ToolUsageProvider 回传，含成本；普通工具全零）——
 		// 一次调用的用量是**一次性**值（非累计），直接覆盖；卡片/工具行据此展示 tokens + 成本。
 		if e.Usage != nil && !e.Usage.IsZero() {
@@ -1749,6 +1845,30 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 			}
 		}
 	}
+
+	// 末轮兜底结算（2026-09-29）：中断 / run 级失败 / 达轮数上限截断都没有 llm_end，
+	// 该轮正文块因此永远拿不到 DurMs/TtftMs —— 刷新后底部指标行缺一段（与前端实时
+	// 分段渲染的缺口一致）。用 llm_start→AgentEnd 的**已流逝时间**补 DurMs；TtftMs 不补
+	// （首字超时那类一个 chunk 都没来过，如实留空）。已结算的轮次不受影响（DurMs>0）。
+	if ts, ok := r.turnStart[e.RunId]; ok && !ts.IsZero() {
+		elapsed := msBetween(ts, now)
+		if bid := r.lastAssistantBlockForRunLocked(e.RunId); bid != 0 {
+			if idx := r.findBlockLocked(bid); idx >= 0 && r.blocks[idx].Kind == blockKindAssistant {
+				b := r.blocks[idx]
+				if b.DurMs == 0 && elapsed > 0 {
+					b.DurMs = elapsed
+				}
+				if b.ThinkMs == 0 {
+					if st, ok2 := r.thinkStart[e.RunId]; ok2 {
+						b.ThinkMs = msBetween(st, now)
+					}
+				}
+				r.blocks[idx] = b
+			}
+		}
+	}
+	delete(r.turnStart, e.RunId)
+	delete(r.thinkStart, e.RunId) // 末轮思考计时在此落地（llm_end 不会再来），清瞬态
 
 	// 主 run：中断/截断提示 + 工具块收尾
 	blocks := r.blocks
@@ -2214,6 +2334,7 @@ func (r *ViewReducer) clearLocked() {
 	r.reqState = map[string]*reqState{}
 	r.thinkStart = map[string]time.Time{}
 	r.turnThinkMs = map[string]int64{}
+	r.turnStart = map[string]time.Time{}
 	r.toolStartTs = map[string]time.Time{}
 	r.compStart = map[string]time.Time{}
 	r.agentCompressing = map[string]bool{}
@@ -2634,6 +2755,8 @@ func cloneBlocks(in []Block) []Block {
 	for i, b := range in {
 		b.Contents = append([]Content{}, b.Contents...)
 		b.Todos = append([]TodoItem{}, b.Todos...)
+		// NestedCalls 同 Artifacts：切片必须显式复制（Snapshot 的深拷贝语义）
+		b.NestedCalls = append([]NestedCall{}, b.NestedCalls...)
 		b.Warnings = append([]string{}, b.Warnings...)
 		b.Items = cloneAgentItems(b.Items)
 		// Artifacts 是切片：值拷贝 out[i]=b 会共享底层数组，必须显式复制
@@ -2655,6 +2778,7 @@ func cloneBlocks(in []Block) []Block {
 func cloneAgentItems(in []AgentItem) []AgentItem {
 	out := make([]AgentItem, len(in))
 	for i, it := range in {
+		it.NestedCalls = append([]NestedCall{}, it.NestedCalls...)
 		if it.ErrorInfo != nil {
 			ei := *it.ErrorInfo
 			it.ErrorInfo = &ei

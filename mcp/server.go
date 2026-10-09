@@ -304,6 +304,19 @@ func (s *Server) Tools(ctx context.Context) []Tool {
 }
 
 // Status 服务器状态快照（UI 展示 + P0 观测）。
+// Connected 是否**真的**连着：state==Connected **且** client 非 nil。
+//
+// 为什么不能只比状态字符串：Instructions() 内部会 EnsureConnected，而 EnsureConnected
+// 在「state 已置 Connected 但 client 为 nil」时会**同步建连**（上限 15s）。描述生成路径
+// （Namespace() 每轮都被调）若用状态字符串判定，就可能在那里卡一次 initialize —— 那是
+// 复核指出的潜在耦合（当前该状态不可达，但一旦有人让 Close 只清 client 就会踩）。
+// 判据收紧到「两个条件同时成立」，这类改动再也影响不到描述路径。
+func (s *Server) Connected() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state == StateConnected && s.client != nil
+}
+
 func (s *Server) Status() ServerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()

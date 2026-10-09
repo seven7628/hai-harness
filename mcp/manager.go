@@ -28,6 +28,19 @@ type Manager struct {
 	// transportFor 测试注入（in-process）；nil = 按 cfg 构建 stdio/http/sse。
 	// 返回的传输必须是全新实例（每次连接独立绑定）。
 	transportFor func(ServerConfig) (transport.Interface, error)
+
+	// DefaultExposure 未在 ServerConfig 显式声明 exposure 的 server，其工具落到哪个**引擎档**。
+	//
+	// 零值 = tools.ExposureDeferred（设计文档 §18 的出厂默认：不进模型工具表、也不进
+	// codemode 描述 —— 几十个 server 的工具描述不会灌进描述、也不会随连接抖动）。
+	//
+	// ⚠️ 装配点的义务：deferred 档的**激活通道**是 codemode 的 searchTools() / tool_search
+	// （Wave 2/3）。在通道存在之前把它设成 deferred，等价于把 MCP 功能对模型整体关闭
+	// （既不在 ToolParams、也没有任何东西能把它加载回来）。故 desktop/bridge **按 codemode 开关
+	// 条件化**设置它：codemode 激活（searchTools 可用）→ deferred，未激活 → direct ——
+	// 这一条是装配决策，不放进本包（本包只管照做 + 显式配置优先）。
+	// Wave 3 落地点：desktop/bridge/codemode.go 的 mcpDefaultExposure / applyMCPDefaultExposure。
+	DefaultExposure tools.ToolExposure
 }
 
 // NewManager 按配置建管理器（servers 仅持有配置，连接惰性：首次 Tools 触发——
@@ -124,7 +137,7 @@ func (m *Manager) Tools(ctx context.Context) []tools.Tool {
 	var out []tools.Tool
 	for _, s := range servers {
 		for _, t := range s.Tools(ctx) {
-			out = append(out, NewAdapter(s, t))
+			out = append(out, newAdapterWithDefault(s, t, m.DefaultExposure))
 		}
 	}
 	return out

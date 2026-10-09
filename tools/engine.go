@@ -9,6 +9,7 @@ import (
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +50,10 @@ type Engine struct {
 	// tooltask-1/tooltask-2 被多代任务复用，前端按 taskId 匹配历史块时发生串卡
 	//（2026-08-30 实证：历代 read_file/todo_add 块被新一代 promote 事件误翻转）。
 	taskIDSeq uint64 // 随机 id 冲突兜底序号（crypto/rand 为主，seq 混入保证进程内绝对唯一）
+
+	// onRegisterConflict 工具重名注册回调（宿主据此发事件警告）；nil = 不上报。
+	// 见 RegisterTool：同名同实例静默通过（hidden 档依赖），同名异实例上报。
+	onRegisterConflict func(RegisterConflict)
 
 	lock sync.RWMutex
 }
@@ -125,10 +130,78 @@ func NewToolEngine(opts ...Option) *Engine {
 	return e
 }
 
-func (e *Engine) RegisterTool(_ context.Context, tool Tool) {
+// RegisterTool 注册工具。
+//
+// 重名处理（Phase 0 起）：**不再静默覆盖**。
+//
+//   - 同名**同实例**（同一指针）：静默通过。这是 exposure "hidden" 档的依赖 ——
+//     工具无法注销，撤下一个工具靠「用同名重新注册」实现（对齐 pi：
+//     工具不能 unregister，只能重注册为 hidden）。若把重名改成报错，等于禁掉
+//     hidden 档。
+//   - 同名**不同实例**：保留「后注册者胜出」的历史行为（保持既有语义与测试），
+//     但通过 onRegisterConflict 钩子上报，供宿主发事件警告。诊断信息只在
+//     真撞名时出现，不污染正常路径。
+func (e *Engine) RegisterTool(ctx context.Context, tool Tool) {
 	e.lock.Lock()
-	defer e.lock.Unlock()
+	prev, existed := e.tools[tool.Name()]
 	e.tools[tool.Name()] = tool
+	cb := e.onRegisterConflict
+	e.lock.Unlock()
+
+	if existed && !sameToolInstance(prev, tool) && cb != nil {
+		cb(RegisterConflict{
+			Name:     tool.Name(),
+			Previous: toolIdentity(prev),
+			Incoming: toolIdentity(tool),
+		})
+	}
+}
+
+// sameToolInstance 判断两次注册是否为同一实例（同名同实例静默通过 —— hidden 档依赖）。
+//
+// 为什么不能直接写 `prev != tool`：接口值比较在「两侧动态类型相同、且该类型不可比较」
+// 时（如带切片/映射字段的值类型工具）会 **panic**。旧实现是无条件覆盖、不会 panic
+// ——引入撞名检测不能把「原本能注册的工具」变成进程崩溃。故先比类型，再按可比性退化。
+func sameToolInstance(a, b Tool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb {
+		return false // 类型不同 ⇒ 必是不同实现
+	}
+	if ta.Comparable() {
+		return a == b // 指针/可比较值：直接比较（唯一能判定「同一实例」的情形）
+	}
+	// 不可比较的值类型：拿不到稳定实例标识，按「不同实例」处理
+	//（宁多发一条警告，不可 panic）。
+	return false
+}
+
+// RegisterConflict 一次工具重名注册的信息（供宿主发事件警告）。
+type RegisterConflict struct {
+	Name     string
+	Previous string // 先注册者的类型标识（取不到则为空）
+	Incoming string // 后注册者的类型标识
+}
+
+// SetRegisterConflictHook 设置重名注册回调（宿主据此发事件告警）。
+// nil = 不上报（默认），此时重名行为与本改动前完全一致。
+func (e *Engine) SetRegisterConflictHook(fn func(RegisterConflict)) {
+	e.lock.Lock()
+	e.onRegisterConflict = fn
+	e.lock.Unlock()
+}
+
+// toolIdentity 取工具的类型标识（用于撞名诊断文本）。非指针类型退化为空串。
+func toolIdentity(t Tool) string {
+	if t == nil {
+		return ""
+	}
+	if d := reflect.TypeOf(t); d != nil {
+		return d.String()
+	}
+	return ""
 }
 
 func (e *Engine) GetTool(_ context.Context, name string) (Tool, error) {
@@ -156,6 +229,35 @@ func (e *Engine) GetTool(_ context.Context, name string) (Tool, error) {
 	}
 	sort.Strings(names) // 清单顺序确定（错误文本可断言），同 ToolParams 的理由
 	return nil, fmt.Errorf("tool %q is not registered%s", name, toolSuggestion(name, names))
+}
+
+// Tools 返回**全部已注册工具**的快照（含 deferred/hidden/model-only），按名字典序排序。
+//
+// 与 ToolParams 的分工（Phase 2）：ToolParams 只回**声明给模型**的档位
+// （direct/model-only），而编排型工具（codemode）的目录要**全部**档位 —— 分层是它自己
+// 的职责（BuildCatalog 按 exposure 判定「可编排 / 可列举」，见 exposure.go）。本方法是
+// 那个「列出全部」的面，**不加任何过滤**：漏掉 deferred 会让 MCP 工具在脚本里不可达
+// （那是它的设计用途），过滤 hidden 则让编排方无从知道注册表里还有什么。
+//
+// 顺序确定（同 ToolParams 的理由）：调用方会逐项投影进描述，map 遍历顺序随机会让同一
+// 集合两次生成的字节不同 —— provider 前缀缓存按字节匹配，抖动即整段失效（pi #10212）。
+//
+// 快照语义：返回的切片与注册表解耦（后续注册不影响本次结果）；并发安全（RLock）。
+// 只读注册表本身，不改任何既有行为；调用方**不要**在持本表的情况下调用
+// RegisterTool（与 GetTool 同款：本方法已释放锁才返回）。
+func (e *Engine) Tools() []Tool {
+	e.lock.RLock()
+	names := make([]string, 0, len(e.tools))
+	for name := range e.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]Tool, 0, len(names))
+	for _, name := range names {
+		out = append(out, e.tools[name])
+	}
+	e.lock.RUnlock()
+	return out
 }
 
 // toolAliases 常见「外来命名」→ 本 harness 工具名。只收无歧义的一对一映射：
@@ -369,10 +471,17 @@ func longestCommonRunes(a, b []rune) int {
 // ToolParams 返回所有已注册工具的厂商无关 schema，按工具名字典序排序。
 // 排序是缓存命中的前提：map 遍历顺序随机，顺序抖动会让同一会话多轮请求的
 // 工具 schema 前缀每次失配（provider 缓存按字节前缀匹配）。勿改为无序遍历。
-func (e *Engine) ToolParams(_ context.Context) ([]core.ToolSchema, error) {
+// ToolParams 返回**声明给模型**的工具 schema 列表（exposure ∈ {direct, model-only}）。
+//
+// 排序与过滤的两条不变量（provider 侧缓存对 schema 抖动极敏感，见 e.tools 注释）：
+//   - 名字排序固定（不随注册顺序/并发注册变化）；
+//   - codemode/deferred/hidden 档**永不出现**在返回值里 —— hidden 是撤下工具的手段，
+//     deferred 由 tool_search 现查（否则 MCP 工具会重新把描述撑爆，pi #10212）。
+//
+// 过滤之后交给 LoadoutProvider（编排型工具用它给已声明工具的描述追加「也可从脚本
+// 调用」片段，对齐 pi prepareLoadout）。provider 按名字排序依次应用，保证可复现。
+func (e *Engine) ToolParams(ctx context.Context) ([]core.ToolSchema, error) {
 	e.lock.RLock()
-	defer e.lock.RUnlock()
-
 	names := make([]string, 0, len(e.tools))
 	for name := range e.tools {
 		names = append(names, name)
@@ -380,13 +489,35 @@ func (e *Engine) ToolParams(_ context.Context) ([]core.ToolSchema, error) {
 	sort.Strings(names)
 
 	schemas := make([]core.ToolSchema, 0, len(e.tools))
+	providers := make([]string, 0, 1)
 	for _, name := range names {
 		t := e.tools[name]
+		if !DeclaredToModel(t) {
+			continue
+		}
 		schemas = append(schemas, core.ToolSchema{
 			Name:        t.Name(),
 			Description: t.Description(),
 			Parameters:  t.Parameters(),
 		})
+		if _, ok := t.(LoadoutProvider); ok {
+			providers = append(providers, name)
+		}
+	}
+	e.lock.RUnlock()
+
+	// loadout 钩子在锁外跑（实现方可能读别的工具表/查 MCP 连接状态，持锁调用极易死锁）。
+	for _, name := range providers {
+		e.lock.RLock()
+		t := e.tools[name]
+		e.lock.RUnlock()
+		lp, ok := t.(LoadoutProvider)
+		if !ok {
+			continue // 快照期间的并发重注册：跳过而不是崩
+		}
+		if out := lp.PrepareLoadout(ctx, schemas); out != nil {
+			schemas = out
+		}
 	}
 	return schemas, nil
 }
@@ -788,14 +919,16 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 		}
 		if handler != nil {
 			handler(ctx, &events.ToolApprovalRequested{
-				RunId:     tc.RunId,
-				RequestId: c.RequestId,
-				Id:        c.Id,
-				Index:     c.Index,
-				Name:      c.Name,
-				Arguments: c.Arguments,
-				Timestamp: time.Now(),
-				EventType: events.ToolApprovalType,
+				RunId:        tc.RunId,
+				RequestId:    c.RequestId,
+				Id:           c.Id,
+				Index:        c.Index,
+				Name:         c.Name,
+				Arguments:    c.Arguments,
+				ParentCallId: c.ParentCallId,
+				Depth:        c.Depth,
+				Timestamp:    time.Now(),
+				EventType:    events.ToolApprovalType,
 			})
 		}
 		ok, err := wait(ctx)
@@ -867,15 +1000,17 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	if handler != nil {
 		tc := events.ToolContextFrom(ctx)
 		handler(ctx, &events.ToolStart{
-			RequestId: call.RequestId,
-			Index:     call.Index,
-			Id:        call.Id,
-			Name:      call.Name,
-			Arguments: call.Arguments, // 实际执行的参数 JSON（UI 展示「传了什么」）
-			RunId:     runOf(tc),
-			TaskId:    taskID,
-			Timestamp: time.Now(),
-			EventType: events.ToolRunStartType,
+			RequestId:    call.RequestId,
+			Index:        call.Index,
+			Id:           call.Id,
+			Name:         call.Name,
+			Arguments:    call.Arguments, // 实际执行的参数 JSON（UI 展示「传了什么」）
+			RunId:        runOf(tc),
+			TaskId:       taskID,
+			ParentCallId: call.ParentCallId,
+			Depth:        call.Depth,
+			Timestamp:    time.Now(),
+			EventType:    events.ToolRunStartType,
 		})
 	}
 
@@ -898,6 +1033,16 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 		return e.finish(ctx, handler, call, finishInput{result: msg, isErr: true})
 	}
 
+	// 嵌套记录槽：本次调用**自己**那一个 recorder（已有则沿用外层 —— 嵌套调用经
+	// ExecuteOne 进来时不能新建，否则记录被切碎）。放在所有工具可见的 ctx 派生之前，
+	// 保证 BeforeCall/Call/AfterCall 看到的是同一个 ctx。
+	//
+	// 为什么是引擎建而不是编排工具建：Tool.Call 只返回 (string, error)，工具没有任何
+	// 通道把自己的 NestedCalls/嵌套用量写回 ToolResult；只有「引擎建、工具读」这条路
+	// 才能让 finish() 拿到同一份 recorder（对齐 ImageSink/ExecSink 的槽范式）。
+	// 非编排工具不碰它，finish 取到空记录 → NestedCalls 恒 nil，零行为变化。
+	ctx = events.EnsureNestedRecorder(ctx)
+
 	// 拦截点：BeforeCall 返回 Block 时跳过执行（如用户确认场景）
 	if resp := tool.BeforeCall(ctx, call); resp.Block {
 		return e.finish(ctx, handler, call, finishInput{result: "blocked: " + resp.Reasoning, isErr: true})
@@ -905,6 +1050,11 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 
 	defer tool.AfterCall(ctx, call)
 
+	// 结构化结果槽：**每次调用一个**，工具在 Call 内写、这里读一次。
+	// 为什么必须是 ctx 槽而不是工具实例字段：主 agent 与后台子 agent 共享同一个 ToolEngine
+	//（见 desktop/bridge），同一工具实例会被并发调用 —— 实例字段会互相清空/串味
+	//（评审实测 3/300 复现「脚本路径拿到 nil，退化成 20KB 文本」）。
+	structuredSink := &StructuredSink{}
 	// 图片收集槽：每次调用独立（放 ctx）——并行批不得共享暂存，否则结果会张冠李戴
 	//（见 tools.ImageSink 注释）。工具经 ImageSinkFrom(ctx).Add(...) 报告图片。
 	sink := &ImageSink{}
@@ -912,11 +1062,17 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	// （bash 等）在 Call 内上报退出码/超时，引擎据此把「失败/超时」升级为结构化信号，
 	// 而 **Call 仍返回 nil error**（否则下面 err != nil 分支会丢弃整个 out，非目标 1）。
 	execSink := &ExecSink{}
-	out, err := callTool(tool, WithExecSink(WithImageSink(ctx, sink), execSink), call)
+	out, err := callTool(tool, WithExecSink(WithImageSink(WithStructuredSink(ctx, structuredSink), sink), execSink), call)
 	if err != nil {
 		return e.finish(ctx, handler, call, finishInput{result: err.Error(), isErr: true})
 	}
 
+	// 槽位读数：只有声明了 OutputSchemaProvider 的工具才认（未声明者写槽也不生效，
+	// 契约与描述生成对齐）。nil = 退回文本路径。
+	var structured []byte
+	if _, ok := tool.(OutputSchemaProvider); ok {
+		structured = structuredSink.Content()
+	}
 	usage := core.Usage{}
 	if up, ok := tool.(ToolUsageProvider); ok {
 		usage = up.Usage() // 子 agent 类工具回传本次执行用量
@@ -949,14 +1105,23 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	// 图片按 maxImageBytes 逐张过闸（超限丢弃 + 文本说明，模型知道有图但拿不到，
 	// 比静默塞爆上下文好——对齐 provider.DowngradeImages 的「明示降级」语义）。
 	// 失败路径同样过 truncate（超时的部分输出可能超长）。
-	text, images := e.limitImages(e.truncate(out), sink)
+	//
+	// SkipTruncateProvider 是唯一的豁免：编排型工具（codemode）的输出预算由它自己
+	// 按 max_output_tokens + spill 管理，被引擎再砍一刀会让「脚本已按模型要求筛过」
+	// 的输出反而缺尾（设计文档 §4.2 阻断项 B）。豁免**只对文本**生效，图片闸门照旧。
+	text := out
+	if st, ok := tool.(SkipTruncateProvider); !ok || !st.SkipTruncate() {
+		text = e.truncate(out)
+	}
+	text, images := e.limitImages(text, sink)
 	return e.finish(ctx, handler, call, finishInput{
-		result: text,
-		isErr:  isErr,
-		usage:  usage,
-		diff:   diff,
-		images: images,
-		exec:   execStatus,
+		result:     text,
+		isErr:      isErr,
+		usage:      usage,
+		diff:       diff,
+		images:     images,
+		exec:       execStatus,
+		structured: structured,
 	})
 }
 
@@ -1021,19 +1186,38 @@ func callTool(tool Tool, ctx context.Context, call core.ToolCall) (out string, e
 
 // finishInput finish 的入参（字段多，用具名结构避免位置参数拼错）。
 type finishInput struct {
-	result string
-	isErr  bool
-	usage  core.Usage
-	diff   *core.FileDiff
-	images []core.Content   // 图片类工具产出的内容块（ToolImageProvider）
-	exec   *core.ExecStatus // 命令类工具的执行结局（ExecSink 旁路；nil = 不适用/未采集）
+	result     string
+	isErr      bool
+	usage      core.Usage
+	diff       *core.FileDiff
+	images     []core.Content   // 图片类工具产出的内容块（ToolImageProvider）
+	exec       *core.ExecStatus // 命令类工具的执行结局（ExecSink 旁路；nil = 不适用/未采集）
+	structured []byte           // 结构化结果原文（OutputSchemaProvider；nil = 无）
 }
 
 // finish 构造结果并发出 ToolResponse 事件。
 // Arguments 携带实际执行的参数（PreToolUse 改写后；历史 ToolCall 保留原参——审计用）。
 // diff 为本次执行对文件的变更（ToolDiffProvider 产出；事件层携带，不进 LLM 上下文）。
 func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call core.ToolCall, in finishInput) core.ToolResult {
-	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec}
+	// 嵌套记录汇入：编排型工具（codemode）经 ExecuteOne 发起子调用时，子调用的记录
+	// 都挂在 ctx 的 NestedRecorder 上；到这里一次性取出挂到 ToolResult + 事件。
+	//
+	// 只在**最外层**调用（call.Depth == 0）取出：嵌套子调用也走同一个 finish，
+	// 若它们也TakeRecord 会把累积记录提前清空。call.Depth 由 ExecuteOne 按
+	// opts.Depth 填入，天然是这个判别式。
+	//
+	// 嵌套用量在**同一处**合并进本结果的 Usage：这是嵌套调用用量进入会话结算的
+	// 唯一通道（嵌套调用不经 runBatch，AgentLoop 的父累加看不到它们），故合并一次
+	// 不会与父累加重复计数。编排工具**不得**再把这份用量经 ToolUsageProvider
+	// 上报一遍（那才会双计）——契约写在 tools/nested.go 的 ExecuteOne godoc 里。
+	var nested []core.NestedCallRecord
+	if call.Depth == 0 {
+		if rec := events.NestedRecorderFrom(ctx); rec != nil {
+			nested = rec.TakeRecord()
+			in.usage = in.usage.Add(rec.TakeUsage())
+		}
+	}
+	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec, NestedCalls: nested, Structured: in.structured}
 	if in.isErr {
 		r.ToolError = parseToolError(in.result)
 	}
@@ -1056,25 +1240,28 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 			}
 		}
 		handler(ctx, &events.ToolResponse{
-			RequestId:  call.RequestId,
-			Index:      call.Index,
-			Id:         call.Id,
-			Name:       call.Name,
-			RunId:      runOf(tc),
-			Arguments:  call.Arguments,
-			Result:     r.Result,
-			IsError:    r.IsError,
-			ErrorCode:  code,
-			Changed:    errorChanged(r.ToolError),
-			Retryable:  errorRetryable(r.ToolError),
-			NextAction: errorNextAction(r.ToolError),
-			Recovery:   errorRecovery(r.ToolError),
-			Diff:       in.diff,
-			Images:     in.images,
-			Usage:      &r.Usage,
-			Exec:       in.exec,
-			Timestamp:  time.Now(),
-			EventType:  events.ToolRunEndType,
+			RequestId:    call.RequestId,
+			Index:        call.Index,
+			Id:           call.Id,
+			Name:         call.Name,
+			RunId:        runOf(tc),
+			Arguments:    call.Arguments,
+			Result:       r.Result,
+			IsError:      r.IsError,
+			ErrorCode:    code,
+			Changed:      errorChanged(r.ToolError),
+			Retryable:    errorRetryable(r.ToolError),
+			NextAction:   errorNextAction(r.ToolError),
+			Recovery:     errorRecovery(r.ToolError),
+			Diff:         in.diff,
+			Images:       in.images,
+			Usage:        &r.Usage,
+			Exec:         in.exec,
+			ParentCallId: call.ParentCallId,
+			Depth:        call.Depth,
+			NestedCalls:  nested,
+			Timestamp:    time.Now(),
+			EventType:    events.ToolRunEndType,
 		})
 	}
 	return r

@@ -132,6 +132,22 @@ func buildSkillsRegistry(ws string) *skills.Registry {
 	return reg
 }
 
+// —— Agent.md 工作记忆：用户级（跨工作区）——
+// globalAgentMDDir 全局用户级指令目录（~/.agents，跨工作区）。与工作区层同用
+// .agents 命名空间（该目录已是 skills / subagents 的家），但 agents 层**只取本层
+// 那一个** AGENTS.md / CLAUDE.md —— 非递归：其子目录（skills/agents）下的 AGENTS.md
+// 属于各技能/子代理自己的说明，不是个人全局指令。
+//
+// home 解析失败返回空串（= 无用户级层），与 agentSkillsDir 的 "." 兜底刻意不同：
+// 这里兜底成 cwd 会把**工作区根**的 AGENTS.md 当用户级再注入一遍（同一文件两份）。
+func globalAgentMDDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, skills.AgentDirName)
+}
+
 // —— 自定义 Subagent（2026-08-29）：文件化定义 + spawn_agent 派发 ——
 // globalSubagentsDir 全局 go-code 自定义 subagent 目录（~/.go-code/agents，跨工作区；
 // 兼容旧路径，次优先）。

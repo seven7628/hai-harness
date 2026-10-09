@@ -54,6 +54,13 @@ type ToolApprovalRequested struct {
 	Arguments string    `json:"arguments"`
 	Timestamp time.Time `json:"timestamp"`
 
+	// ParentCallId / Depth 嵌套调用的来源标注（空/0 = 顶层调用）。
+	// 存在意义：编排型工具（codemode）内部的第 N 个子调用要人确认时，UI 得能显示
+	// 「这是某个脚本里的第 N 个调用在等你确认」，而不是一条来路不明的独立调用
+	//（对齐设计文档 §16.2；归组渲染是宿主的事，引擎只负责带上来源）。
+	ParentCallId string `json:"parent_call_id,omitempty"`
+	Depth        int    `json:"depth,omitempty"`
+
 	EventType EventType `json:"event_type"`
 }
 
@@ -75,6 +82,14 @@ type ToolStart struct {
 	// TaskId 本次调用对应的工具任务 id（tooltask-<seq>）：前端据此把工具行关联到后台任务
 	//（promote 时经 task_id 定位；占位结果 {task_id,status:"running"} 回写历史同源）。
 	TaskId string `json:"task_id,omitempty"`
+
+	// ParentCallId 发起本次调用的外层工具调用 id；空 = 顶层调用。
+	// 编排型工具（codemode）的子调用经 tools.ExecuteOne 执行时填充，
+	// 供消费方按父归组渲染成嵌套结构（对齐 pi 的 parentToolCallId）。
+	ParentCallId string `json:"parent_call_id,omitempty"`
+
+	// Depth 嵌套深度（顶层 = 0）。与 core.NestedMaxDepth 配套。
+	Depth int `json:"depth,omitempty"`
 
 	EventType EventType `json:"event_type"`
 }
@@ -138,6 +153,20 @@ type ToolResponse struct {
 	// Exec 命令类工具（bash 等）的执行结局（退出码/超时/取消）。存在意义：把「失败/
 	// 超时/取消」从结果文本升级为结构化信号（UI 红色标记 / 指标聚合），Result 仍保留完整输出。
 	Exec *core.ExecStatus `json:"exec,omitempty"`
+
+	// ParentCallId 发起本次调用的外层工具调用 id；空 = 顶层调用。
+	// 语义同 ToolStart.ParentCallId。
+	ParentCallId string `json:"parent_call_id,omitempty"`
+
+	// Depth 嵌套深度（顶层 = 0）。
+	Depth int `json:"depth,omitempty"`
+
+	// NestedCalls 本次调用内部发生的嵌套调用的有界摘要（仅编排型工具填充）。
+	// 消费方：UI 展开、TUI 归组渲染、HTML 导出。宿主可忽略。
+	//
+	// 与 Usage 的分工：Usage 是**聚合**后的总量（供计费），
+	// NestedCalls 是**逐条**明细（供展示）。两者同源于 core.NestedRecorder。
+	NestedCalls []core.NestedCallRecord `json:"nested_calls,omitempty"`
 
 	EventType EventType `json:"event_type"`
 }

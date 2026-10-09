@@ -38,18 +38,22 @@ type mcpProjectLayerInfo struct {
 // mcpProjectServerInfo 项目层合并后的一条服务器（契约 §5.1 servers）。
 // state/tool_count/error 只在「该项目有运行态且运行态确有这台」时出现（omitempty）。
 type mcpProjectServerInfo struct {
-	Name      string            `json:"name"`
-	Type      string            `json:"type"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args"`
-	URL       string            `json:"url"`
-	Env       map[string]string `json:"env"`
-	Enabled   bool              `json:"enabled"`
-	File      string            `json:"file"`
-	Editable  bool              `json:"editable"`
-	State     string            `json:"state,omitempty"`
-	ToolCount int               `json:"tool_count,omitempty"`
-	Error     string            `json:"error,omitempty"`
+	Name    string            `json:"name"`
+	Type    string            `json:"type"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	URL     string            `json:"url"`
+	Env     map[string]string `json:"env"`
+	Enabled bool              `json:"enabled"`
+	// Exposure 该 server 的暴露档位（config 层值；空 = 未声明，有效档由引擎侧解析，
+	// 见 mcp.Manager.DefaultExposure）。面板据此回显与编辑 —— 不带它的话用户在面板里
+	// 看不到也改不了这一档（保存时靠 mergeUnknownByName 侥幸不丢，但无法修改）。
+	Exposure  string `json:"exposure,omitempty"`
+	File      string `json:"file"`
+	Editable  bool   `json:"editable"`
+	State     string `json:"state,omitempty"`
+	ToolCount int    `json:"tool_count,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // mcpProjectInfo 一个项目（已绑定的工作区）的项目级 MCP 视图（契约 §5.1）。
@@ -167,6 +171,7 @@ func (m *manager) mcpProjectView(ws string) mcpProjectInfo {
 			Args:     c.Args,
 			URL:      c.URL,
 			Env:      c.Env,
+			Exposure: c.Exposure,
 			Enabled:  c.IsEnabled(),
 			File:     file,
 			Editable: file == layers[len(layers)-1].Path, // 只有 {ws}/.go-code/settings.json 可编辑

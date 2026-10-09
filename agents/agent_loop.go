@@ -127,6 +127,16 @@ type Config struct {
 	// 宿主侧的开关语义（关闭 = 完全不注入，而不是注入一段"请勿使用记忆"）在
 	// memory.Bootstrap 内闭环，本层只负责把**可能为空**的成品文本拼进去。
 	MemoryInjection string
+
+	// UserAgentMDDir 用户级指令目录（~/.agents，跨工作区）；只取该目录**本层那一个**
+	// AGENTS.md / CLAUDE.md（非递归，见 discoverUserAgentMD）。空 = 无用户级层。
+	//
+	// 分层语义 = **顺序拼接，不做覆盖**：用户级在最前（优先级最低），其后是显式文件、
+	// 最后是工作区递归发现的各层。刻意不实现「工作区同名文件覆盖用户级」——用户级装的是
+	// 个人全局偏好（"一律用中文回答"），工作区装的是项目约定；让项目根文件把个人偏好顶掉
+	// 是静默丢用户配置。对齐 Codex / Claude Code 的 global-then-project 拼接语义。
+	UserAgentMDDir string
+
 	// Skills 技能注册表（渐进披露的发现来源：清单注入系统提示词），nil 表示无技能
 	Skills *skills.Registry
 
@@ -274,6 +284,56 @@ func WithCompressThreshold(t float64) Option {
 	return func(c *Config) { c.CompressThreshold = t }
 }
 
+// defaultCompressThreshold 压缩阈值缺省（占上下文窗口比例）。2026-08-30 实测 0.72 会让
+// 子 Agent 高频压缩 + 重读循环，回退到 0.8；宿主（bridge）按用户设置覆盖，未配置时用本值。
+const defaultCompressThreshold = 0.8
+
+// SetCompressThreshold 会话期间切换自动压缩触发阈值（占上下文窗口比例）：下一次
+// 压缩判定生效（触发线 = ContextWindow × Threshold），不重建 loop/会话。与
+// SetContextWindow 同属「运行边界配置」，宿主经 settings 的 agent.compress_threshold
+// 热更新。
+//
+// 钳到 (0,1]：两侧都要挡，因为它们都让压缩**静默永不触发**，而那不是"配错了"该有的
+// 表现 —— 是无声的失效：
+//   - `!(t > 0)`：0 / 负数 / NaN（Go 里 NaN 的所有比较都是 false，所以这一句顺带
+//     覆盖 NaN，不用另写 IsNaN）
+//   - `t > 1`：>1 与 +Inf。int64(窗口 × 3) 远超窗口，或 int64(窗口 × +Inf) 饱和成
+//     MaxInt64 —— 触发线永远够不着，压缩再也不跑。
+//
+// 与 bridge 读设置时的 agentSettings.compressThreshold() 完全同口径（两处独立钳，
+// 防任一处漏；这是导出的 SDK 方法，保证不能依赖"某个调用方恰好会挡"）。
+func (a *AgentLoop) SetCompressThreshold(t float64) {
+	if !(t > 0) || t > 1 {
+		t = defaultCompressThreshold
+	}
+	a.cfgMu.Lock()
+	a.cfg.CompressThreshold = t
+	a.cfgMu.Unlock()
+}
+
+// CompressThreshold 当前自动压缩阈值（只读；宿主侧可访问的出口）。
+// 与私有 currentCompressThreshold 读同一份状态（后者只服务 maybeCompact 的触发线
+// 计算，包外取不到）。当前生产调用方只有测试与宿主自校验 —— 与 SetContextWindow
+// 这类 setter 配对存在：宿主改完阈值后若要确认落到哪个 loop，读这里。
+// 注意 ContextWindow 没有对应的 public getter（宿主只在装配期读 providerConfig），
+// 所以这对 getter 的覆盖面是刻意不对称的，不是漏了一个。
+func (a *AgentLoop) CompressThreshold() float64 {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.CompressThreshold
+}
+
+// currentCompressThreshold 压缩触发线计算用的当前阈值。
+// **必须**经 cfgMu 读：CompressThreshold 是运行期可写字段（SetCompressThreshold）——
+// 这是 cfg 里第一个「压缩相关」的可写字段，直接摸 a.cfg 会在 bridge 命令 goroutine
+// 热更与 maybeCompact（run goroutine）之间构成数据竞争。其余 cfg 字段仍只读，
+// 直接读 a.cfg 没问题，这个不行。
+func (a *AgentLoop) currentCompressThreshold() float64 {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.CompressThreshold
+}
+
 func WithCompressMargin(m float64) Option {
 	return func(c *Config) { c.CompressMargin = m }
 }
@@ -319,6 +379,13 @@ func WithAgentMDFiles(files ...string) Option {
 // 每次运行前重读：文件变更在下一次运行自动生效（字节稳定不变时缓存命中不受影响）。
 func WithAgentMDDir(dir string) Option {
 	return func(c *Config) { c.AgentMDDirs = append(c.AgentMDDirs, dir) }
+}
+
+// WithUserAgentMDDir 注入用户级指令目录（~/.agents）：只取该目录本层的单个
+// AGENTS.md / CLAUDE.md（非递归），拼在**工作记忆层最前**（优先级最低）。
+// 与 WithAgentMDDir 的分工：后者是工作区递归发现根，本选项是跨工作区的个人全局层。
+func WithUserAgentMDDir(dir string) Option {
+	return func(c *Config) { c.UserAgentMDDir = dir }
 }
 
 func WithSkills(reg *skills.Registry) Option {
@@ -570,7 +637,7 @@ func NewAgentLoop(opts ...Option) *AgentLoop {
 		StreamStallTimeout: 3 * time.Minute,
 		MaxRetries:         10,
 		ContextWindow:      128000,
-		CompressThreshold:  0.8,
+		CompressThreshold:  defaultCompressThreshold,
 		CompressMargin:     0.1,
 		BaseSystemPrompt:   DefaultSystemPrompt,
 	}
@@ -1504,16 +1571,36 @@ func (a *AgentLoop) composeSystemPrompt() string {
 		}
 		b.WriteString("## Current Workspace\n- " + a.cfg.WorkingDir)
 	}
-	// 工作记忆：显式文件（顺序即注入序，RelPath 显示为文件路径）
+	// 工作记忆（**加载顺序即优先级**：越靠后越优先，冲突时后者更受重视）：
+	//
+	//	1. 用户级（~/.agents 单文件）—— 跨工作区的个人全局偏好，优先级最低
+	//	2. 显式文件（AgentMDFiles，顺序即注入序，RelPath 显示为文件路径）
+	//	3. 工作区递归发现（AgentMDDirs，根优先：根 → 子目录，深者更具体）
+	//
+	// 用户级刻意**在前**：个人偏好是"背景设定"，项目约定才是"当前任务规则"。
+	//
+	// 顺序即优先级（后者离指令更近、冲突时更晚的更受重视），刻意不做"工作区覆盖
+	// 用户级"：用户级装个人偏好、工作区装项目约定，顶掉前者 = 静默丢用户配置。
+	//
+	// 代价（知情取舍）：前缀缓存的失效面 —— 改工作区任一 AGENTS.md 会连带作废
+	// 其后所有层。放在最前是"最易变的内容在最稳定的前缀里"，对命中率最不友好。
+	// 但反过来把用户级放最后会让"个人偏好"看起来比"项目约定"更权威，语义更糟；
+	// 且个人文件通常数月不动，实际抖动源仍是工作区文件。故维持现状。
 	var files []agentMDFile
+	files = append(files, discoverUserAgentMD(a.cfg.UserAgentMDDir)...)
 	for _, f := range a.cfg.AgentMDFiles {
 		if content, err := os.ReadFile(f); err == nil {
-			files = append(files, agentMDFile{Name: filepath.Base(f), RelPath: f, Content: string(content)})
+			abs := f
+			if a, err := filepath.Abs(f); err == nil {
+				abs = a
+			}
+			files = append(files, agentMDFile{Name: filepath.Base(f), RelPath: f, Content: string(content), Abs: abs})
 		}
 	}
 	for _, dir := range a.cfg.AgentMDDirs {
 		files = append(files, discoverAgentMD(dir)...)
 	}
+	files = dedupeAgentMDByPath(files)
 	if mem := composeWorkingMemory(files); mem != "" {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
@@ -1976,7 +2063,7 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 	}
 	stats := CompressStats{
 		EstimatedTokens: estimated,
-		Budget:          int64(float64(a.currentContextWindow()) * a.cfg.CompressThreshold),
+		Budget:          int64(float64(a.currentContextWindow()) * a.currentCompressThreshold()),
 	}
 	if !forced && !a.cfg.Compressor.ShouldCompact(ac.ctx, stats) {
 		return
@@ -2305,14 +2392,17 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 	// 整批工具执行超时预算；注入工具上下文（子 agent 类工具据此关联父事件流/继承
 	// hooks）与会话待办/审批
 	var hooks *events.ToolHooks
+	taskID := ""
 	if opts != nil {
 		hooks = &events.ToolHooks{
 			PreToolUse:    opts.PreToolUse,
 			PostToolBatch: opts.PostToolBatch,
 			PreCompact:    opts.PreCompact,
 		}
+		taskID = opts.TaskId // 本次运行的后台任务 id（空 = 主 Agent 运行）：子 agent 派子 agent时
+		// spawn 工具据此把孙任务结果投回本 loop 的 inbox，而非主会话（见 subagent.Tool.runBackground）
 	}
-	ctx := events.WithToolContextForRun(ac.ctx, ac.RunId, ac.ParentRunId, ac.Depth, ac.Handler, ac.Approver, hooks)
+	ctx := events.WithToolContextForRunTask(ac.ctx, ac.RunId, ac.ParentRunId, taskID, ac.Depth, ac.Handler, ac.Approver, hooks)
 	ctx = todo.WithStore(ctx, ac.Todo)
 	cancel := func() {}
 	if a.cfg.ToolBatchTimeout > 0 {

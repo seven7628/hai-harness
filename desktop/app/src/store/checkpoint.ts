@@ -74,6 +74,8 @@ export interface CheckpointAgentItem {
   task_id?: string
   diff?: CheckpointDiff
   images?: CheckpointContent[] // tool item: 结果图片
+  /** 编排型工具（codemode）脚本内的嵌套调用摘要（Go Block.NestedCalls，追加字段） */
+  nested_calls?: CheckpointNestedCall[]
   before?: number
   after?: number
   ctx_tokens?: number
@@ -85,6 +87,19 @@ export interface CheckpointAgentItem {
   aborted?: boolean
   active?: boolean
   analysis?: string // 压缩器 <analysis> 块留档（仅观测；compression item）
+}
+
+// CheckpointNestedCall 是 core.NestedCallRecord 的稳定投影（Go Block.NestedCalls）：
+// 编排型工具（codemode）脚本内发生的**嵌套调用**摘要 —— 宿主在工具行内联成清单渲染
+//（设计文档 §17 第二条），这些子调用本身没有工具块。duration = 纳秒。
+export interface CheckpointNestedCall {
+  id: string
+  name: string
+  args?: string
+  result?: string
+  is_error?: boolean
+  error?: string
+  duration?: number
 }
 
 // CheckpointBlock 与 Go Block 平铺对应（可选字段按 kind 解释）。
@@ -132,6 +147,8 @@ export interface CheckpointBlock {
   promoted?: boolean
   task_status?: string
   todos?: CheckpointTodo[]
+  /** 编排型工具（codemode）脚本内的嵌套调用摘要（Go Block.NestedCalls，Phase 2 追加字段） */
+  nested_calls?: CheckpointNestedCall[]
   started_at?: number
   label?: string
   spawned_at?: number

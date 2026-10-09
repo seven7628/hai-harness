@@ -47,6 +47,26 @@ type agentSettings struct {
 	// 2026-09-20 加固：原硬编码 4 太小，槽满会让工具调用同步阻塞 → 主 Agent 整批挂死。
 	MaxSubagents        int `json:"max_subagents"`
 	MaxExploreSubagents int `json:"max_explore_subagents"`
+
+	// CompressThreshold 自动压缩触发阈值（占上下文窗口比例，0.8 = 80%）。
+	// 缺失/≤0 = 用 codeAgentCompressThreshold 默认值（用户未配置时行为不变）。
+	// 用**指针**字段承载「未配置」语义：0.0 本身不是合法阈值（等于永不压缩），
+	// 与「没写这一项」必须可区分。
+	CompressThreshold *float64 `json:"compress_threshold,omitempty"`
+}
+
+// compressThreshold 生效阈值（未配置/非法 → 默认 codeAgentCompressThreshold）。
+// 合法区间 (0, 1)：0 与负数按默认（防误配成永不压缩），>1 也按默认（阈值必须在
+// 窗口比例内，写 3 只会让压缩永不触发）。
+func (s agentSettings) compressThreshold() float64 {
+	if s.CompressThreshold == nil {
+		return codeAgentCompressThreshold
+	}
+	t := *s.CompressThreshold
+	if !(t > 0) || t > 1 {
+		return codeAgentCompressThreshold
+	}
+	return t
 }
 
 // maxSubagents 主池上限（<=0 = 默认）。

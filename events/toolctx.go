@@ -13,6 +13,7 @@ type ToolContext struct {
 	// ParentRunId 仍表示发起当前运行的父运行 ID，不能混用。
 	RunId       string
 	ParentRunId string       // 发起运行的 RunId（子 agent 的父）
+	TaskId      string       // 发起运行的后台任务 id（"" = 非后台任务 = 主 Agent 直调）
 	Depth       int          // 发起运行的深度（根 = 0）
 	Handler     EventHandler // 发起运行的事件消费者
 	Approver    Approver     // 人工确认（engine 工具轮执行前调用）
@@ -28,11 +29,20 @@ func WithToolContext(ctx context.Context, parentRunId string, depth int, handler
 	return WithToolContextForRun(ctx, parentRunId, parentRunId, depth, handler, approver, hooks)
 }
 
-// WithToolContextForRun 注入精确的当前运行与父运行关联。
+// WithToolContextForRun 注入精确的当前运行与父运行关联（taskId = ""：非后台任务）。
 func WithToolContextForRun(ctx context.Context, runId, parentRunId string, depth int, handler EventHandler, approver Approver, hooks *ToolHooks) context.Context {
+	return WithToolContextForRunTask(ctx, runId, parentRunId, "", depth, handler, approver, hooks)
+}
+
+// WithToolContextForRunTask 与 WithToolContextForRun 同，另带发起运行的后台任务 id
+// （RunOptions.TaskId）。子 agent 再派子 agent时，spawn 工具据此判定「结果该投回
+// 哪个 loop」：发起方是后台子 agent（TaskId 非空）→ 投它的 inbox；主 Agent 直调
+// （TaskId 为空）→ 投主会话。
+func WithToolContextForRunTask(ctx context.Context, runId, parentRunId, taskId string, depth int, handler EventHandler, approver Approver, hooks *ToolHooks) context.Context {
 	return context.WithValue(ctx, toolCtxKey{}, &ToolContext{
 		RunId:       runId,
 		ParentRunId: parentRunId,
+		TaskId:      taskId,
 		Depth:       depth,
 		Handler:     handler,
 		Approver:    approver,

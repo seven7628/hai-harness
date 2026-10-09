@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -32,6 +33,24 @@ type ExecSpec struct {
 	ExitCode *int
 	TimedOut *bool
 	Canceled *bool
+
+	// Stdin 可选：喂给子进程的标准输入。nil = 不接stdin（**默认，行为与本字段
+	// 加入前逐字节一致**，既有实现与测试零改动）。
+	//
+	// 存在意义：脚本类解释器（Python / 后续的 codemode JS 运行时）需要把源码
+	// 经 stdin 传入（`python -` / `node -`），而不是把源码拼进命令行 ——
+	// 命令行要过 sh -c，两层转义（shell 引号/反引号/$ + 语言自身引号）任一组合
+	// 都能把脚本改坏。此前本仓 run_python 因此只能「写临时文件再执行」
+	//（tools/builtin/run_python.go:31-33 记录了这一限制）。
+	//
+	// 零值不变式是本字段的设计约束：所有现有调用方不设 Stdin，接线点只有
+	// runExec 里的一个 if，行为完全不变。
+	//
+	// **接线点必须在 runExec**（NoSandbox/Seatbelt 共用的骨架），不能只改某一个
+	// 后端的 Run：漏掉的那一侧会静默丢弃脚本源码 —— 子进程读到 EOF 当成「空脚本」
+	// 跑完并返回 exit 0，调用方看到的是「成功但什么都没输出」，排查成本极高。
+	// 由 TestExecSpecStdinFeedsSeatbelt 钉住（曾只接 NoSandbox）。
+	Stdin io.Reader
 }
 
 // Sandbox 沙箱执行后端。
@@ -151,6 +170,11 @@ func runExec(ctx context.Context, cmd *exec.Cmd, spec ExecSpec) (string, error) 
 	var out lockedBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
+	// ExecSpec.Stdin 的统一接线点（两个后端共用本骨架）：nil = 不碰 cmd.Stdin
+	// （os/exec 把子进程 stdin 接到 /dev/null，即本字段加入前的行为）。
+	if spec.Stdin != nil {
+		cmd.Stdin = spec.Stdin
+	}
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}

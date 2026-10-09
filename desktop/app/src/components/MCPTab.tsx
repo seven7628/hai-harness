@@ -248,6 +248,7 @@ function MCPProjectDetail({ proj, onBack }: { proj: MCPProjectInfo; onBack: () =
         ...(s.args?.length ? { args: s.args } : {}),
         ...(s.url ? { url: s.url } : {}),
         ...(s.env && Object.keys(s.env).length ? { env: s.env } : {}),
+        ...(s.exposure ? { exposure: s.exposure as MCPServerCfg['exposure'] } : {}),
         enabled: s.enabled,
       }
     }
@@ -409,6 +410,8 @@ type MCPServerDraft = {
   args: string
   url: string
   envRows: { key: string; value: string }[]
+  // exposure 暴露档位；'' = 未声明（有效档由宿主装配决策解析，见 MCPServerCfg.exposure）
+  exposure: '' | 'direct' | 'codemode' | 'deferred' | 'hidden'
 }
 
 // 命令预设：npx / uvx / python3 一键填 command（args 留占位提示）；custom = 手填
@@ -419,7 +422,7 @@ const CMD_PRESETS: Record<'npx' | 'uvx' | 'python3' | 'custom', { command: strin
   custom: { command: '', argsPh: '' },
 }
 
-const emptyDraft = (): MCPServerDraft => ({ name: '', type: 'stdio', cmdType: 'npx', command: 'npx', args: '', url: '', envRows: [] })
+const emptyDraft = (): MCPServerDraft => ({ name: '', type: 'stdio', cmdType: 'npx', command: 'npx', args: '', url: '', envRows: [], exposure: '' })
 
 // cmdTypeOf 按 command 反推预设（匹配预设默认 command → 该预设；否则 custom）。
 function cmdTypeOf(command: string): MCPServerDraft['cmdType'] {
@@ -452,6 +455,7 @@ function draftOf(name: string, c: MCPServerCfg): MCPServerDraft {
     args: (c.args ?? []).join(' '),
     url: c.url ?? '',
     envRows: envToRows(c.env),
+    exposure: (c.exposure ?? '') as MCPServerDraft['exposure'],
   }
 }
 
@@ -473,6 +477,7 @@ function buildCfg(draft: MCPServerDraft): { ok: true; name: string; cfg: MCPServ
         ? { command, args: draft.args.trim() ? draft.args.split(/\s+/).filter(Boolean) : undefined }
         : { url: draft.url.trim() }),
       ...(env ? { env } : {}),
+      ...(draft.exposure ? { exposure: draft.exposure } : {}),
     },
   }
 }
@@ -572,6 +577,21 @@ function ServerForm({
         <button className="btn mcp-env-add" onClick={() => setDraft((d) => ({ ...d, envRows: [...d.envRows, { key: '', value: '' }] }))}>
           + {t('mcp.env.add')}
         </button>
+      </div>
+      <div className="set-row">
+        <div className="set-label">{t('mcp.exposure')}</div>
+        <select
+          className="prov-input"
+          value={draft.exposure}
+          aria-label="mcp exposure"
+          onChange={(e) => setDraft((d) => ({ ...d, exposure: e.target.value as MCPServerDraft['exposure'] }))}
+        >
+          <option value="">{t('mcp.exposure.unset')}</option>
+          <option value="direct">{t('mcp.exposure.direct')}</option>
+          <option value="codemode">{t('mcp.exposure.codemode')}</option>
+          <option value="deferred">{t('mcp.exposure.deferred')}</option>
+          <option value="hidden">{t('mcp.exposure.hidden')}</option>
+        </select>
       </div>
       <div className="mcp-form-btns">
         <button className="btn primary" onClick={onSave}>{t('mcp.save')}</button>
