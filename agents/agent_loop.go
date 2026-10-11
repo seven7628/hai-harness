@@ -55,11 +55,18 @@ type Config struct {
 	LLMTimeout       time.Duration // 可选挂死兜底：整轮 LLM 调用（含流）总时限；
 	// 0 = 不限制（bridge 生产装配传 0 —— 首字预算在 FirstChunkTimeout，流开始后不限总时长）。
 	// 测试/旧调用方传 >0 时生效。默认 90s（NewAgentLoop 零值语义，被 bridge 覆盖）。
-	// FirstChunkTimeout 首字预算（2026-09-18 定策）：**单次尝试**从请求发出到收到模型
-	// 首个流事件的上限；首个事件一到即解除，此后流内不再计时（长 reasoning / 大文档生成
-	// 不受切 —— 与 LLMTimeout 的「整轮总时限」是两个东西，恰好互补）。超时按上游侧
-	// 瞬时故障处理：可重试、走 LLMError 事件、耗尽后归因「供应商侧故障」。
-	// 0 = 不限制。默认 30s。
+	// FirstChunkTimeout 首字预算（2026-09-18 定策，2026-10-11 调宽默认值）：**单次尝试**
+	// 从请求发出到收到模型首个流事件的上限；首个事件一到即解除，此后流内不再计时（长
+	// reasoning / 大文档生成不受切 —— 与 LLMTimeout 的「整轮总时限」是两个东西，恰好互补）。
+	// 超时按上游侧瞬时故障处理：可重试、走 LLMError 事件、耗尽后归因「供应商侧故障」。
+	//
+	// 默认 90s（原 30s，2026-10-11 用户反馈后调宽）：实测 TTFT 之外的**弱网/长首字模型**在
+	// 30s 处被频繁误切 —— 首字预算每次尝试独立计时，一个真正慢的模型（GLM/Claude 长思考、
+	// 跨境链路、企业代理）每轮都在 30s 被切，重试 10 次毫无意义（同样的模型同样的网络不会
+	// 因重试而更快），用户侧表现为「总是异常」后耗尽成 11×(30s+1s) ≈ 5.7min 的供应商故障。
+	// 取 90s = 仍明显短于用户「卡死了」的容忍阈值，又宽到能覆盖弱建连 + 网关排队 + 长首 token。
+	// 用户/OPS 可按 provider 特性覆盖（settings agent.first_chunk_timeout，秒）。
+	// 0 = 不限制（不推荐：那会让「上游完全无响应」重新变成无限等待，见 SetFirstChunkTimeout）。
 	FirstChunkTimeout time.Duration
 
 	// StreamStallTimeout 流内停滞预算（2026-09-22 定策）：**流已经开始**（首个事件已到）
@@ -627,10 +634,13 @@ func NewAgentLoop(opts ...Option) *AgentLoop {
 		MaxIterations:    1000,
 		MaxParallelTools: 8,
 		LLMTimeout:       90 * time.Second,
-		// 首字预算 30s（2026-09-18 定策）：实测一次尝试在「无首字」状态下静默挂了 187s
-		// （用户只看到「正在重试 1」），而 30s 足够覆盖正常建连+排队+首个 token 的漫长尾；
-		// 超时即视为上游无响应 → 记一次失败并重试，与「流开始后不限总时长」互补。
-		FirstChunkTimeout: 30 * time.Second,
+		// 首字预算 90s（2026-09-18 定策，2026-10-11 由 30s 调宽）：实测一次尝试在「无首字」
+		// 状态下静默挂了 187s（用户只看到「正在重试 1」）。取 90s 的两个理由：①覆盖弱网/长
+		// 首字模型（GLM/Claude 长思考、跨境链路、企业代理）—— 30s 曾把它们每轮都误切成
+		// 上游故障，重试 10 次全废（同样的网络不会因重试而更快）；②仍明显短于用户「卡死了」
+		// 的容忍阈值。命中 = 上游无响应 → 记一次失败并重试，与「流开始后不限总时长」互补。
+		// 可配：settings agent.first_chunk_timeout（秒；0 = 关），见 SetFirstChunkTimeout。
+		FirstChunkTimeout: 90 * time.Second,
 		// 流内停滞预算 3min（2026-09-22 定策）：首个事件之后两个事件之间的最大静默。
 		// 反馈样本（GLM）：流中段静默 >5min 没有任何输出（界面上表现为「卡住」）；
 		// 取 3min = 远超健康流的块间隔（秒级），又明显短于用户的容忍阈值。
@@ -740,6 +750,42 @@ func (a *AgentLoop) currentGoalAlignmentReminderRounds() int {
 	a.goalAlignmentMu.RLock()
 	defer a.goalAlignmentMu.RUnlock()
 	return a.goalAlignmentReminderRounds
+}
+
+// SetFirstChunkTimeout 会话期间切换首字预算（负数按 0 处理）：**下一次 LLM 请求**生效，
+// 不重建 loop/会话。宿主 = bridge 的 set_first_chunk_timeout 命令与 reload_settings 热更。
+//
+// 为什么默认值要宽到 90s：首字预算**每次尝试独立计时**，而重试不会让同一个慢模型变快
+// （同样的网关排队/同样的链路）。30s 时弱网/长首字模型（GLM、Claude 长思考、跨境链路、
+// 企业代理）每轮都在 30s 被切 → 重试 10 次全废 → 用户侧恒表现为「总是异常」，最终
+// 11×(30s+1s) ≈ 5.7min 后归因成供应商侧故障。详见 Config.FirstChunkTimeout。
+//
+// 为何必须经 cfgMu：FirstChunkTimeout 是运行期可写字段，而 streamOnce 在 run goroutine
+// 上读它 —— 与 SetCompressThreshold 同型（该注释模式见 currentCompressThreshold）。
+// 为 0 = 关掉看门狗（**不推荐**：那会让「上游完全无响应」重新变成无限等待，正是 2026-09-18
+// 实测 187s 静默挂死的成因）。
+func (a *AgentLoop) SetFirstChunkTimeout(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	a.cfgMu.Lock()
+	a.cfg.FirstChunkTimeout = d
+	a.cfgMu.Unlock()
+}
+
+// FirstChunkTimeout 当前首字预算（只读）。宿主改完后用它确认落到哪个 loop（与
+// SetFirstChunkTimeout 配对；装配期也可用于三宿主一致性校验）。
+func (a *AgentLoop) FirstChunkTimeout() time.Duration {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.FirstChunkTimeout
+}
+
+// currentFirstChunkTimeout streamOnce 专用的加锁读取（理由同 currentCompressThreshold）。
+func (a *AgentLoop) currentFirstChunkTimeout() time.Duration {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.FirstChunkTimeout
 }
 
 // RunOptions 运行选项（RunStream 参数）。
@@ -1777,7 +1823,7 @@ func llmErrorKind(ac *AgentContext, err error) string {
 // streamOnce 发起一轮模型调用，把 LLM 事件翻译为 Agent 事件，并聚合进 r。
 // 返回值 receivedEnd 表示本轮是否收到过 LLMEndEvent。
 // 超时策略（2026-09-18 定策，三层各管一段，勿混用）：
-//   - 首字预算 FirstChunkTimeout（默认 30s，本函数实现）：请求发出 → 首个 provider 事件；
+//   - 首字预算 FirstChunkTimeout（默认 90s，本函数实现）：请求发出 → 首个 provider 事件；
 //     首个事件到达即解除，此后不再计时。命中 = 上游无响应 → 可重试的
 //     provider.FirstChunkTimeoutError（见该类型注释：为什么必须可重试、为什么不能
 //     以 context.Canceled 上抛）。
@@ -1797,7 +1843,7 @@ func (a *AgentLoop) streamOnce(ac *AgentContext, r *roundResult) (bool, error) {
 	streamCtx, cancelCause := context.WithCancelCause(streamCtx)
 	defer cancelCause(context.Canceled) // 释放：cancel 函数必须被调用，避免 ctx 泄漏
 	var firstChunkTimer *time.Timer
-	if d := a.cfg.FirstChunkTimeout; d > 0 {
+	if d := a.currentFirstChunkTimeout(); d > 0 {
 		firstChunkTimer = time.AfterFunc(d, func() {
 			cancelCause(provider.NewFirstChunkTimeoutError(d, nil))
 		})

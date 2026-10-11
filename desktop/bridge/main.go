@@ -16,7 +16,7 @@
 //
 //	switch_mode / switch_effort / switch_persona / switch_model / set_provider /
 //
-//	set_goal_alignment_rounds / set_max_subagents / set_compress_threshold / list_models / reload_settings / file_preview / xlsx_preview / skills / skill_toggle / skill_get / load_skill /
+//	set_goal_alignment_rounds / set_max_subagents / set_compress_threshold / set_first_chunk_timeout / list_models / reload_settings / file_preview / xlsx_preview / skills / skill_toggle / skill_get / load_skill /
 //	skill_install / skill_browse / skill_update / skill_uninstall /
 //	market_add / market_remove / market_list / skill_update_market /
 //	mcp_list / mcp_set / mcp_refresh / plugin_list / plugin_install / plugin_uninstall /
@@ -2131,6 +2131,10 @@ func (m *manager) dispatch(c command) {
 		// settings 值重建 loop，此处先就地 set 一遍是为了「手改配置但 rebuild 未覆盖到
 		// 的路径」也立即生效（幂等：同值重复 set 无副作用）。
 		m.applyCompressThreshold()
+		// 首字预算热更新（settings.json agent.first_chunk_timeout，2026-10-11）：同上
+		// 就地 set 一遍兜底。与压缩阈值不同，本项**没有** rebuild 兜底也无妨 ——
+		// rebuildAll 建的也是新 loop（装配时读同一份 settings），两者同源不会漂移。
+		m.applyFirstChunkTimeout()
 		m.rebuildAll() // 现有：重建全部 loop（兜底对齐 system 工具清单）
 		m.resp(c, true, "", nil)
 
@@ -2187,6 +2191,23 @@ func (m *manager) dispatch(c command) {
 		}
 		m.setCompressThreshold(t)
 		m.resp(c, true, "", map[string]any{"compress_threshold": t})
+
+	case "set_first_chunk_timeout": // 首字预算热更新（秒）：不重建 loop/会话，下一次 attempt 生效
+		// 为何单独一条命令（2026-10-11）：首字预算与「重试机制总是异常」直接相关。
+		// 弱网/长首字模型（GLM、Claude 长思考、跨境链路、企业代理）每次尝试都在 30s
+		// 被切成「上游故障」——预算每次尝试独立计时，重试不会让同一模型变快，于是
+		// 10 次重试全废。默认值已调宽到 90s，此处让用户/OPS 按 provider 特性实时调。
+		sec := intNum(c.Payload, "first_chunk_timeout", -1)
+		// 合法区间 (0, MaxFirstChunkTimeoutSec]：0 = 「立即超时」是误配（会让每次尝试
+		// 瞬间失败），>900 等于关掉预算（重新变回无反馈的长等待，正是 187s 静默挂死的
+		// 成因）。与 agentSettings.firstChunkTimeout() 同口径钳制。
+		if sec <= 0 || sec > MaxFirstChunkTimeoutSec {
+			m.resp(c, false, fmt.Sprintf("first_chunk_timeout 必须是 1-%d 之间的秒数", MaxFirstChunkTimeoutSec), nil)
+			return
+		}
+		d := time.Duration(sec) * time.Second
+		m.setFirstChunkTimeout(d)
+		m.resp(c, true, "", map[string]any{"first_chunk_timeout": sec})
 
 	case CmdListModels: // 拉取某 provider 模型列表（Provider 设置面板「拉取模型列表」）
 		providerName := str(c.Payload, "provider")
@@ -3641,12 +3662,16 @@ func codeAgentCompressThresholdFor() float64 {
 //     用户为自建模型补的 thinking_force_on / toggle-only 标注只存在于它里面。
 func compressTorOptions(prov, model, sid string, pc *providerConfig) []agents.LLMCompressorOption {
 	return []agents.LLMCompressorOption{
-		// 2026-09-18：压缩与主会话同策略 —— 不限总时限（0）+ 首字预算 30s
-		//（SDK 默认，agents.FirstChunkTimeout）+ 流内停滞预算 3min（SDK 默认，
+		// 2026-09-18：压缩与主会话同策略 —— 不限总时限（0）+ 首字预算（SDK 默认 90s，
+		// 2026-10-11 由 30s 调宽并改为可配）+ 流内停滞预算 3min（SDK 默认，
 		// agents.LLMCompressor.StallTimeout）+ 首次+10 重试固定 1s 退避
 		//（HTTP 层 ResponseHeaderTimeout=60s 仅次级兜底）。
 		agents.WithCompressTimeout(0), agents.WithCompressMaxRetries(11), agents.WithCompressBackoff(agents.FixedBackoff(time.Second)), agents.WithKeepRecentMessages(10),
 		agents.WithSummaryVersion(3), agents.WithCompressorRetryOnMissingSection(true),
+		// 首字预算（2026-10-11）：与主对话**同一份** settings 值 —— 三宿主的压缩器都经
+		// 本函数构造，故在此注入即可全覆盖（无需逐个装配点接线，也就不会漏）。对齐
+		// codeAgentTuning.firstChunkTimeout（主对话侧同源同值）。
+		compressFirstChunkTimeout(),
 		// 摘要输出上限 = 模型真实 max_tokens（与主对话一致）：默认 8192 对
 		// 1M 窗口 / 560K 输入的手动 summary 必然 finish_reason=length 截断失败。
 		agents.WithSummaryMaxTokens(pc.maxTokensForIn(prov, model)),
@@ -3673,6 +3698,14 @@ func compressTorOptions(prov, model, sid string, pc *providerConfig) []agents.LL
 //   - goalAlignmentRounds：主会话接线到 settings 的 loadAgentSettings().ReminderRounds
 //     （值随设置变）；子宿主**刻意不接线**（保持 agents 缺省 0 = 禁用）。
 //   - compressThreshold：见 codeAgentCompressThreshold 注释。
+//   - firstChunkTimeout（2026-10-11 新增）：WithFirstChunkTimeout 曾与 postToolNudge 同病
+//     —— **零生产接线**（全仓库只有 agents 包测试调用它），桌面端三宿主全吃 agents 默认
+//     30s，用户/OPS 无法覆盖。弱网/长首字模型（GLM、Claude 长思考、跨境链路、企业代理）
+//     每次尝试都在 30s 被切成「上游故障」，重试 10 次全废（首字预算每次尝试独立计时，
+//     重试不会让同一模型变快）⇒ 用户侧恒表现为「总是异常」。走本结构 = 与另三项同路：
+//     单一事实源生成选项 + assembly_wiring_test.go 钉住三宿主接线（防再次零接线）。
+//     取值 = loadAgentSettings().firstChunkTimeout()（秒，未配置 → agents 默认 90s）。
+//     三宿主同值（含压缩器，见 compressFirstChunkTimeout：run 内第二个 LLM 调用点）。
 type codeAgentTuning struct {
 	postToolNudge bool
 	// goalAlignmentRounds 非 nil = 本宿主接线 WithGoalAlignmentReminderRounds(该值)；
@@ -3680,16 +3713,22 @@ type codeAgentTuning struct {
 	// 合法取值（显式禁用），与「本宿主不接线」必须可区分。
 	goalAlignmentRounds *int
 	compressThreshold   float64
+	// firstChunkTimeout >0 = 本宿主接线 WithFirstChunkTimeout(该值)。恒 >0
+	// （firstChunkTimeout() 对缺失/0/负/越界一律兜底 90s）—— 0 值 = 「立即超时」，
+	// 绝不是合法策略，故不需要指针区分「未配置」。
+	firstChunkTimeout time.Duration
 }
 
 // codeAgentTuningFor 返回某宿主的可调项取值（单一事实源）。
 // 与提取前逐项一致：postToolNudge 三宿主全开；goalAlignmentRounds 仅主会话（值 =
 // 装配时读 settings 的 loadAgentSettings().ReminderRounds，与提取前同一时点）；
-// 压缩阈值三宿主同一来源（settings 的 agent.compress_threshold，未配置 → 默认）。
+// 压缩阈值三宿主同一来源（settings 的 agent.compress_threshold，未配置 → 默认）；
+// firstChunkTimeout 三宿主同源同值（settings 的 agent.first_chunk_timeout，未配置 → 90s）。
 func codeAgentTuningFor(host codeAgentHost) codeAgentTuning {
 	t := codeAgentTuning{
 		postToolNudge:     true,
 		compressThreshold: codeAgentCompressThresholdFor(),
+		firstChunkTimeout: loadAgentSettings().firstChunkTimeout(),
 	}
 	if host == hostMainLoop {
 		rounds := loadAgentSettings().ReminderRounds
@@ -3698,14 +3737,16 @@ func codeAgentTuningFor(host codeAgentHost) codeAgentTuning {
 	return t
 }
 
-// options 把可调项值翻译成 agents.Option —— 装配点生成这三项选项的唯一入口。
+// options 把可调项值翻译成 agents.Option —— 装配点生成这几项选项的唯一入口。
 // 提炼安全性（重构等价性）：agents 的每个 With* 都是纯 setter（只写自己的 Config
 // 字段、不读其它字段），故选项在切片中的先后次序不影响最终 Config；与其余 With*
 // 的相对位置同样无关。逐项对应关系：postToolNudge → WithPostToolNudgeEnabled()；
 // goalAlignmentRounds → WithGoalAlignmentReminderRounds(n)（仅接线时）；
-// compressThreshold → WithCompressThreshold(t)。
+// compressThreshold → WithCompressThreshold(t)；
+// firstChunkTimeout → WithFirstChunkTimeout(d)（恒接线；压缩器侧另经
+// compressFirstChunkTimeout 注入同一值）。
 func (t codeAgentTuning) options() []agents.Option {
-	opts := make([]agents.Option, 0, 3)
+	opts := make([]agents.Option, 0, 4)
 	if t.postToolNudge {
 		opts = append(opts, agents.WithPostToolNudgeEnabled())
 	}
@@ -3713,7 +3754,19 @@ func (t codeAgentTuning) options() []agents.Option {
 		opts = append(opts, agents.WithGoalAlignmentReminderRounds(*t.goalAlignmentRounds))
 	}
 	opts = append(opts, agents.WithCompressThreshold(t.compressThreshold))
+	if t.firstChunkTimeout > 0 {
+		opts = append(opts, agents.WithFirstChunkTimeout(t.firstChunkTimeout))
+	}
 	return opts
+}
+
+// compressFirstChunkTimeout 压缩器侧的首字预算选项：与主对话**同一份值**注入
+// （LLMCompressor 是 run 内的第二个 LLM 调用点，自动压缩无首字挂死 = 整个会话静默，
+// 策略必须与主对话同源，否则会出现「主对话 90s 被切 / 压缩没人管」的漂移）。
+// 当前不按 provider 区分（首字预算是全局 agent 段设置），故不取 prov/model 形参；
+// 未来若改成 per-provider 覆盖，在此函数内接参即可，调用点不受影响。
+func compressFirstChunkTimeout() agents.LLMCompressorOption {
+	return agents.WithCompressFirstChunkTimeout(loadAgentSettings().firstChunkTimeout())
 }
 
 // buildPersonaLoop 子 agent 运行时（spawn_agent 的按定义执行器）：
@@ -4364,6 +4417,46 @@ func (m *manager) setCompressThreshold(t float64) {
 // reload_settings 用（手改配置文件后无需重启；前端设置面板走 set_compress_threshold）。
 func (m *manager) applyCompressThreshold() {
 	m.setCompressThreshold(loadAgentSettings().compressThreshold())
+}
+
+// setFirstChunkTimeout 把首字预算同步到所有已创建会话的主 loop。
+// 只调 AgentLoop setter，不重建 loop/会话：**下一次 attempt** 按新预算生效（正在跑的
+// 那次尝试仍用旧值 —— streamOnce 在 attempt 开头读一次），上下文/历史/后台任务均不变。
+//
+// 为什么必须可热更（2026-10-11 用户反馈）：弱网/长首字模型（GLM、Claude 长思考、跨境
+// 链路、企业代理）在 30s 预算下每次尝试都被切成「上游故障」，重试 10 次全废 —— 首字
+// 预算每次尝试独立计时，而重试不会让同一个慢模型变快。默认值已调宽到 90s，此处让
+// 用户改完配置立即生效（不必重启、不必重开会话）。
+//
+// 子 agent / explore 的 loop 不在此列：它们按需构造、生命周期短（构建期读同一份
+// settings），热改只影响之后新建的子 loop —— 与 setCompressThreshold 同一边界
+// （那里也只推主 loop；子 loop 的压缩阈值同样是构建期注入）。
+func (m *manager) setFirstChunkTimeout(d time.Duration) {
+	m.mu.Lock()
+	wsList := make([]*workspaceRuntime, 0, len(m.workspaces))
+	for _, ws := range m.workspaces {
+		wsList = append(wsList, ws)
+	}
+	m.mu.Unlock()
+	for _, ws := range wsList {
+		ws.mu.Lock()
+		sessions := make([]*bridgeSession, 0, len(ws.sessions))
+		for _, bs := range ws.sessions {
+			sessions = append(sessions, bs)
+		}
+		ws.mu.Unlock()
+		for _, bs := range sessions {
+			if bs.loop != nil {
+				bs.loop.SetFirstChunkTimeout(d)
+			}
+		}
+	}
+}
+
+// applyFirstChunkTimeout 从 settings.json（agent 段）重读首字预算并热应用：
+// reload_settings 用（手改配置文件后无需重启；前端设置面板走 set_first_chunk_timeout）。
+func (m *manager) applyFirstChunkTimeout() {
+	m.setFirstChunkTimeout(loadAgentSettings().firstChunkTimeout())
 }
 
 // applyMeshSettings 热应用 Session Mesh 设置（CmdReloadSettings 调用；不重启进程）。

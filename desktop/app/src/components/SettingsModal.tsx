@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, SUBAGENT_CONCURRENCY_DEFAULT, COMPRESS_THRESHOLD_DEFAULT, COMPRESS_THRESHOLD_MIN, COMPRESS_THRESHOLD_MAX, inputTypesForProvider } from '../store/useAppStore'
+import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, SUBAGENT_CONCURRENCY_DEFAULT, COMPRESS_THRESHOLD_DEFAULT, COMPRESS_THRESHOLD_MIN, COMPRESS_THRESHOLD_MAX, FIRST_CHUNK_TIMEOUT_DEFAULT, FIRST_CHUNK_TIMEOUT_MIN, FIRST_CHUNK_TIMEOUT_MAX, inputTypesForProvider } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { meshUUID, meshToken } from '../lib/meshRand'
 import { copyText } from '../lib/clipboard'
@@ -152,6 +152,13 @@ function GeneralTab() {
   const setStopBackgroundOnInterrupt = useAppStore((s) => s.setStopBackgroundOnInterrupt)
   const setCronAutoClean = useAppStore((s) => s.setCronAutoClean)
   const setCompressThreshold = useAppStore((s) => s.setCompressThreshold)
+  // 首字预算（秒）：与 store 的钳制口径一致地兜底（缺配置 → 默认 90）。
+  const setFirstChunkTimeout = useAppStore((s) => s.setFirstChunkTimeout)
+  const firstChunkTimeoutRaw = settings.agent?.first_chunk_timeout ?? FIRST_CHUNK_TIMEOUT_DEFAULT
+  const firstChunkTimeout =
+    Number.isFinite(firstChunkTimeoutRaw) && firstChunkTimeoutRaw > 0
+      ? Math.min(FIRST_CHUNK_TIMEOUT_MAX, Math.max(FIRST_CHUNK_TIMEOUT_MIN, Math.round(firstChunkTimeoutRaw)))
+      : FIRST_CHUNK_TIMEOUT_DEFAULT
   // 压缩阈值（占窗口比例）：与 store 的钳制口径一致地兜底（缺配置 → 默认 0.8）。
   // 滑杆的 value 必须是整数百分比，浮点比例 ×100 后用 Math.round 归一。
   const compressThresholdRaw = settings.agent?.compress_threshold ?? COMPRESS_THRESHOLD_DEFAULT
@@ -239,6 +246,15 @@ function GeneralTab() {
             onChange={(e) => setCompressThreshold(Number(e.target.value) / 100)}
           />
           <span className="set-unit">%</span>
+        </div>
+      </div>
+      {/* 首字预算（秒）：单次尝试「请求发出 → 首个流事件」的上限，首字一到即解除、
+           流开始后不限总时长。调大 = 更容忍弱网/长首字模型；调小 = 更快判定上游无响应。 */}
+      <div className="set-row">
+        <div><div className="set-label">{t('settings.firstChunkTimeout')}</div><div className="set-desc">{t('settings.firstChunkTimeout.desc')}</div></div>
+        <div className="set-inline">
+          <input className="text-input" type="number" min={FIRST_CHUNK_TIMEOUT_MIN} max={FIRST_CHUNK_TIMEOUT_MAX} step={10} value={firstChunkTimeout} onChange={(e) => setFirstChunkTimeout(Number(e.target.value))} />
+          <span className="set-unit">s</span>
         </div>
       </div>
       {/* 子 agent 并发槽上限（主池 = agent_spawn，辅池 = subagent_explore）：槽满会让工具调用

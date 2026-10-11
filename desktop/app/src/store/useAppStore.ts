@@ -1828,6 +1828,18 @@ export const COMPRESS_THRESHOLD_DEFAULT = 0.8
 export const COMPRESS_THRESHOLD_MIN = 0.05
 export const COMPRESS_THRESHOLD_MAX = 0.95
 
+// 首字预算缺省（秒）。三处必须同值：bridge agentSettings.firstChunkTimeout()、
+// agents.Config/LLMCompressor.FirstChunkTimeout 的默认、本处（面板未配置时的回显）。
+// 2026-10-11 由 30 调宽到 90：30s 会把弱网/长首字模型（GLM / Claude 长思考 / 跨境链路 /
+// 企业代理）的**每一次尝试**都切成「上游故障」—— 该预算每次尝试独立计时，重试不会让
+// 同一个慢模型变快，于是 10 次重试全废、用户侧恒表现为「总是异常」。
+export const FIRST_CHUNK_TIMEOUT_DEFAULT = 90
+// 设置面板的合法区间（与 bridge agentSettings.MaxFirstChunkTimeoutSec / 命令校验同口径）。
+// 上限 900 的意义：再宽就接近「关掉预算」，那会让「上游完全无响应」重新变成长时间
+// 无反馈的等待（2026-09-18 实测 187s 静默挂死的成因），故 defaults 侧同样挡一道。
+export const FIRST_CHUNK_TIMEOUT_MIN = 1
+export const FIRST_CHUNK_TIMEOUT_MAX = 900
+
 // 已知模型默认单次输出上限（max_tokens；Provider 面板未配置时回退用）。
 // 数据源：provider 注册表（provider/models_*.go，models.dev 2026-08，与 pi 对齐）。
 export const KNOWN_MODEL_MAX_TOKENS: Record<string, Record<string, number>> = {
@@ -2663,6 +2675,7 @@ interface AppState {
   setGoalAlignmentRounds(n: number): void
   setSubagentConcurrency(patch: Partial<Pick<AgentSettings, 'max_subagents' | 'max_explore_subagents'>>): void // 子 agent 并发槽上限（乐观 + 持久化 + bridge 热更新）
   setCompressThreshold(t: number): void // 自动压缩触发阈值（占窗口比例；乐观 + 持久化 + bridge 热更新）
+  setFirstChunkTimeout(sec: number): void // 首字预算秒数（乐观 + 持久化 + bridge 热更新）
   setSTTSettings(patch: Partial<STTSettings>): void // 语音输入（话筒）配置（乐观 + 持久化）
   openNewFolder(): void // 「新建文件夹…」：打开创建文件夹 modal
   closeNewFolder(): void
@@ -8401,6 +8414,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     void transport.settingsSet({ agent }).then((r) => {
       if (!r.ok) return // 写盘失败：不推送阈值（配置未持久化，运行中改无意义）
       send({ type: 'set_compress_threshold', payload: { compress_threshold: value } })
+    })
+  },
+  // 首字预算（秒）：与 setCompressThreshold 同一套路（乐观更新 + 落盘 + 推送命令热更）。
+  // 数值钳在 (0, 900]：0/负数/非有限值回退默认 90（0 会让每次尝试瞬间失败，是误配不是
+  // 「关闭」）；超上界按 900 截断而非回退 —— 用户显式想放宽时不该被悄悄改小。
+  setFirstChunkTimeout: (sec: number) => {
+    const cur = get().settings.agent ?? { reminder_rounds: 30 }
+    const n = Math.round(sec)
+    let value: number
+    if (!Number.isFinite(n) || n < FIRST_CHUNK_TIMEOUT_MIN) value = FIRST_CHUNK_TIMEOUT_DEFAULT
+    else value = Math.min(FIRST_CHUNK_TIMEOUT_MAX, n)
+    const agent: AgentSettings = { ...cur, first_chunk_timeout: value }
+    set((s) => ({ settings: { ...s.settings, agent } }))
+    void transport.settingsSet({ agent }).then((r) => {
+      if (!r.ok) return // 写盘失败：不推送（配置未持久化，热更无意义）
+      send({ type: 'set_first_chunk_timeout', payload: { first_chunk_timeout: value } })
     })
   },
   // 语音输入（STT）配置：乐观更新 + 落盘（settings.json stt 段；Composer 话筒据此显隐）
