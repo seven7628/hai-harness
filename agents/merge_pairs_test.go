@@ -371,7 +371,7 @@ func TestMergePairsToggle(t *testing.T) {
 	}
 	build := func(on bool) *AgentContext {
 		a := NewAgentLoop(WithToolResultSlim(), WithSlimText(SlimTextOptions{
-			MergePairs: boolPtr(on),
+			MergePairs: BoolPtr(on),
 		}))
 		ac := &AgentContext{Messages: buildMsgs(specs, ""), slim: newSlimState(*a.cfg.Slim)}
 		// 复现结算段的门控（agent_loop.go 的判定）；protectRounds=0 → 默认保护末尾 2 组
