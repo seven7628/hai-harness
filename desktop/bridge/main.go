@@ -3717,6 +3717,51 @@ type codeAgentTuning struct {
 	// （firstChunkTimeout() 对缺失/0/负/越界一律兜底 90s）—— 0 值 = 「立即超时」，
 	// 绝不是合法策略，故不需要指针区分「未配置」。
 	firstChunkTimeout time.Duration
+	// contextSlim 上下文瘦身（C/D/E + F 图片）——三宿主全开，见
+	// contextSlimTuning 注释与 agents 侧实测数据。
+	contextSlim contextSlimTuning
+}
+
+// contextSlimTuning 上下文瘦身开关组。取值与依据集中在此，避免散落三处。
+type contextSlimTuning struct {
+	enabled     bool // 关 = 三宿主都不传任何 slim 选项（回退到 agents 缺省：全关）
+	imageKeep   int  // F 段：保留最近 N 张图片（负数 = 只按轮龄淘汰）
+	imageRounds int  // F 段：图片轮龄上限（负数 = 不按轮龄淘汰）
+}
+
+// contextSlimTuningFor 单一事实源：三个宿主（主会话 / spawn / explore）同一取值。
+//
+// 依据（tools/bench/export_real_sessions.py 导出的 6 个真实会话回放，407~1104 条
+// 消息、211~570 条工具结果）：
+//
+//	F 图片段：base64 截图占真实上下文 **93%**（单会话累积 18~56 张）。保最近 4 张
+//	  即回收 61.7% 图片体积、**54.9% 全会话体积** —— 远大于文本侧全部收益之和。
+//	C+D 文本段：可瘦身文本 -4.9%（零 LLM 成本、无协议风险）。
+//	E 合并段：删整组重复的「工具调用+结果」消息。真实编码会话重复率仅 0~5%，
+//	  但长任务里「读 A→改 A→再读 A」一旦出现就是成片重复，默认开。
+//
+// 三宿主全开：子 agent 同样读文件、跑命令、截图，漏掉任何一个就意味着该 loop
+// 的上下文不受治理。
+//
+// 逃生舱（按需注释掉对应项即可）：
+//   - 只关 E 段（动消息结构，唯一有协议风险的一段）：
+//     agents.WithSlimText(agents.SlimTextOptions{MergePairs: agents.BoolPtr(false)})
+//   - 关图片段：imageKeep/imageRounds 置负数。
+//   - 全关：enabled = false。
+func contextSlimTuningFor() contextSlimTuning {
+	return contextSlimTuning{enabled: true, imageKeep: 4, imageRounds: 30}
+}
+
+// options 翻译成 agents.Option（nil receiver 安全：未设置时返回 nil）。
+func (c contextSlimTuning) options() []agents.Option {
+	if !c.enabled {
+		return nil
+	}
+	return []agents.Option{
+		agents.WithToolResultSlim(),
+		agents.WithSlimText(agents.SlimTextOptions{}),
+		agents.WithImageSlim(agents.ImageSlimConfig{Keep: c.imageKeep, MaxRounds: c.imageRounds}),
+	}
 }
 
 // codeAgentTuningFor 返回某宿主的可调项取值（单一事实源）。
@@ -3729,6 +3774,7 @@ func codeAgentTuningFor(host codeAgentHost) codeAgentTuning {
 		postToolNudge:     true,
 		compressThreshold: codeAgentCompressThresholdFor(),
 		firstChunkTimeout: loadAgentSettings().firstChunkTimeout(),
+		contextSlim:       contextSlimTuningFor(),
 	}
 	if host == hostMainLoop {
 		rounds := loadAgentSettings().ReminderRounds
@@ -3744,9 +3790,14 @@ func codeAgentTuningFor(host codeAgentHost) codeAgentTuning {
 // goalAlignmentRounds → WithGoalAlignmentReminderRounds(n)（仅接线时）；
 // compressThreshold → WithCompressThreshold(t)；
 // firstChunkTimeout → WithFirstChunkTimeout(d)（恒接线；压缩器侧另经
-// compressFirstChunkTimeout 注入同一值）。
+// compressFirstChunkTimeout 注入同一值）；
+// contextSlim → 上下文瘦身三段（C/D/E + F 图片，见 slimImageKeep 的实测依据）。
+//
+// 放在这里而不是各 build*Loop 里逐个 append：主会话与两个子 agent（spawn /
+// explore）走同一套装配入口，漏掉任何一个就意味着该 loop 的上下文不受治理
+// （子 agent 同样会读文件、跑命令、截图）。
 func (t codeAgentTuning) options() []agents.Option {
-	opts := make([]agents.Option, 0, 4)
+	opts := make([]agents.Option, 0, 7)
 	if t.postToolNudge {
 		opts = append(opts, agents.WithPostToolNudgeEnabled())
 	}
@@ -3757,6 +3808,7 @@ func (t codeAgentTuning) options() []agents.Option {
 	if t.firstChunkTimeout > 0 {
 		opts = append(opts, agents.WithFirstChunkTimeout(t.firstChunkTimeout))
 	}
+	opts = append(opts, t.contextSlim.options()...)
 	return opts
 }
 
@@ -4276,6 +4328,8 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		// options.sessionId —— 同一会话多轮共享缓存前缀；空 sid 不启用）。
 		agents.WithSessionID(sid),
 	)
+	// 上下文瘦身（C/D/E/F 段）不在此处 append —— 走 codeAgentTuning.contextSlim，
+	// 由 codeAgentTuningFor 单点装配，主会话与两个子 agent 一并生效。
 	// 采样默认（宿主决策 2026-08）：DeepSeek 显式 top_p=0.95 / temperature=1.0；OpenAI 厂商默认
 	if temperature, topP := m.provCfg.samplingDefaults(); temperature != nil {
 		opts = append(opts, agents.WithTemperature(*temperature), agents.WithTopP(*topP))

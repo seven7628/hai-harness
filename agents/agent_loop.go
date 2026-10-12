@@ -164,6 +164,10 @@ type Config struct {
 	// nil = 关闭（默认）——行为变化项，产品验证后 WithToolResultSlim 启用。
 	Slim *SlimConfig
 
+	// MergeProtectRounds 工具对合并（E）的末尾保护轮数：最近 N 组工具调用
+	// 不参与合并（模型正在引用它们）。0 = 默认 2。随 Slim 一起生效。
+	MergeProtectRounds int
+
 	// RefExtractor 可选的 @引用内容抽取钩子（当前用于 PDF：抽出文本注入 FileContent）。
 	// nil = 不抽取 —— PDF 保持旧行为（压缩流报「二进制，不读内容」/未压缩把源码当正文）。
 	// 由宿主（desktop/bridge）经 WithRefExtractor 注入：抽取要真解析格式，属宿主能力面，
@@ -1044,6 +1048,18 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 		// 在回写循环内即时完成（见 recordRead）
 		if ac.slim != nil {
 			a.applyStale(ac)
+			// 图片瘦身（F）：在压缩前执行，让压缩输入体积也跟着降（图片是
+			// 压缩估算里的大头，estimatedImageTokens 单图 1600）。
+			a.applyImageSlim(ac)
+			// 工具对合并（E）：删整组重复的「工具调用 + 结果」消息。
+			// 必须紧跟 reset —— 删消息使所有下标失效（slim 全部按下标记账，
+			// 占位文本里的 #N 引用也已在 mergeToolPairs 内改写为新下标）。
+			// 独立开关：动结构的这一项不能跟着 slim 一起默认生效。
+			if a.cfg.Slim != nil && a.cfg.Slim.Text != nil &&
+				a.cfg.Slim.Text.MergePairs != nil && *a.cfg.Slim.Text.MergePairs &&
+				a.mergeToolPairs(ac, a.cfg.MergeProtectRounds) {
+				ac.slim.reset()
+			}
 		}
 
 		forced := ac.forceCompact
@@ -1271,6 +1287,10 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 				text := r.Result
 				if ac.slim != nil {
 					text = a.spillResult(ac, tc, text)
+					// 语义化瘦身（D）：在 spill 之后、去重记账之前 —— spill 已把
+					// 超大结果压成预览，折叠/简化再作用于留下的文本（省的是二次
+					// 收益：ANSI 噪声、重复行、被覆盖的旧读取）。
+					text = a.slimToolResult(ac, tc, text, len(ac.Messages))
 				}
 				// 图片类工具结果（read_file 读图 / 截图 / MCP image）：图片块随 tool
 				// 消息入上下文（模型可见）；slim 只作用于 text —— 图片不参与 spill/去重
