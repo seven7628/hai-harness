@@ -625,10 +625,10 @@ class MockTransport implements Transport {
     const priceOf: Record<string, { input: number; cache_read: number; output: number }> = {
       'deepseek-flash': { input: 0.15, cache_read: 0.003, output: 0.6 },
       'deepseek-v4.1-flash': { input: 0.15, cache_read: 0.003, output: 0.6 },
-      'deepseek-v4-flash': { input: 0.14, cache_read: 0.014, output: 0.28 },
-      'deepseek-v4-flash-vision-exp': { input: 0.14, cache_read: 0.014, output: 0.28 },
-      'deepseek-v4-pro': { input: 0.435, cache_read: 0.003625, output: 0.87 },
-      'deepseek-chat': { input: 0.28, cache_read: 0.028, output: 0.56 },
+      'deepseek-v4-flash': { input: 0.15, cache_read: 0.003, output: 0.6 },
+      'deepseek-v4-flash-vision-exp': { input: 0.15, cache_read: 0.003, output: 0.6 },
+      'deepseek-v4-pro': { input: 0.66, cache_read: 0.022, output: 1.98 },
+      'deepseek-chat': { input: 0.14, cache_read: 0.0028, output: 0.28 },
       'glm-5.1': { input: 1.4, cache_read: 0.26, output: 4.4 },
       'glm-5.2': { input: 1.4, cache_read: 0.26, output: 4.4 },
       'glm-5.3': { input: 1.4, cache_read: 0.26, output: 4.4 },
@@ -1929,7 +1929,7 @@ class MockTransport implements Transport {
     this.emit({ event_type: 'llm_start', session_id: sid, model, ...(requestId ? { request_id: requestId } : {}), ...(runId ? { run_id: runId } : {}), timestamp: ts() })
   }
   private llmEnd(over: Record<string, unknown>, sid = this.sid) {
-    // cost_usd 模拟真 bridge 打标（同价表：Input$0.14 / CacheRead$0.014 / Output$0.28 每 M）
+    // cost_usd 模拟真 bridge 打标（同价表：Input$0.15 / CacheRead$0.003 / Output$0.6 每 M）
     const u = (over.usage as { Input?: number; CacheRead?: number; CacheWrite?: number; Output?: number } | undefined) ?? {}
     // 上下文占用锚点（context_breakdown 用）：与真 bridge 的 reducer 同口径 —— 最近一次
     // llm_end 的 Input 即当前上下文占用（压缩/清空后会由后续轮次覆盖）。
@@ -1937,7 +1937,7 @@ class MockTransport implements Transport {
       this.ctxTokens.set(sid, u.Input)
       this.ctxEstimated.set(sid, false) // provider 真实 usage → 真实口径
     }
-    const costUsd = ((u.Input ?? 0) * 0.14 + (u.CacheRead ?? 0) * 0.014 + (u.CacheWrite ?? 0) * 0.175 + (u.Output ?? 0) * 0.28) / 1e6
+    const costUsd = ((u.Input ?? 0) * 0.15 + (u.CacheRead ?? 0) * 0.003 + (u.CacheWrite ?? 0) * 0.175 + (u.Output ?? 0) * 0.6) / 1e6
     this.emit({ event_type: 'llm_end', session_id: sid, model: this.model, timestamp: ts(), cost_usd: Number(costUsd.toFixed(8)), ...over })
   }
   private toolStart(id: string, name: string, args: string, runId: string, at: number, sid = this.sid, bg = false) {
@@ -2803,10 +2803,10 @@ $$`
 // ByWorkspace），这样设置页与空会话图表在浏览器里能按真实布局渲染。确定性伪随机（固定种子）
 // → 每次刷新曲线一致，便于截图比对。
 const MOCK_STATS_MODELS = [
-  { key: 'deepseek/deepseek-v4.1-flash', weight: 0.62, inTok: 26000, outTok: 900, price: { in: 0.14, out: 0.28 } },
-  { key: 'deepseek/deepseek-v4-pro', weight: 0.2, inTok: 41000, outTok: 1400, price: { in: 0.435, out: 0.87 } },
+  { key: 'deepseek/deepseek-v4.1-flash', weight: 0.62, inTok: 26000, outTok: 900, price: { in: 0.15, out: 0.6 } },
+  { key: 'deepseek/deepseek-v4-pro', weight: 0.2, inTok: 41000, outTok: 1400, price: { in: 0.66, out: 1.98 } },
   { key: 'opencode/glm-5.2', weight: 0.13, inTok: 52000, outTok: 1800, price: { in: 1.4, out: 4.4 } },
-  { key: 'anthropic/claude-opus-4.8', weight: 0.05, inTok: 68000, outTok: 2600, price: { in: 15, out: 75 } },
+  { key: 'anthropic/claude-opus-4.8', weight: 0.05, inTok: 68000, outTok: 2600, price: { in: 5, out: 25 } },
 ]
 
 function mockMetricsReport(from: string): Record<string, unknown> {
