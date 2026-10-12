@@ -1794,21 +1794,21 @@ export const MODEL_WINDOW_1M = 1_000_000
 // 用此表直接传最大上下文，未知模型回退 MODEL_WINDOW(128k)。如需调整在此扩行。
 // 数据源：provider 注册表（provider/models_*.go，models.dev 2026-08，与 pi 对齐）。
 export const KNOWN_MODEL_WINDOWS: Record<string, Record<string, number>> = {
-  deepseek: { 'deepseek-v4-flash': 1000000, 'deepseek-v4-pro': 1000000, 'deepseek-v4-flash-vision-exp': 1000000, 'deepseek-chat': 64000 },
-  openai: { 'gpt-4o': 128000, 'gpt-4o-mini': 128000, 'gpt-4.1': 1047576, 'gpt-5-nano': 400000, 'gpt-5': 400000, 'gpt-5-mini': 400000, 'gpt-5.3-chat-latest': 128000, 'gpt-3.5-turbo': 16385 }, // gpt-4.1 = 1M 上下文
+  deepseek: { 'deepseek-flash': 1000000, 'deepseek-v4.1-flash': 1000000, 'deepseek-v4-flash': 1000000, 'deepseek-v4-pro': 1000000, 'deepseek-v4-flash-vision-exp': 1000000, 'deepseek-chat': 64000 },
+  openai: { 'gpt-6-astra': 1050000, 'gpt-6-sol': 1050000, 'gpt-6-luna': 1050000, 'gpt-6.1-sol': 1050000, 'gpt-4o': 128000, 'gpt-4o-mini': 128000, 'gpt-4.1': 1047576, 'gpt-5-nano': 400000, 'gpt-5': 400000, 'gpt-5-mini': 400000, 'gpt-5.3-chat-latest': 128000, 'gpt-3.5-turbo': 16385 }, // gpt-4.1 = 1M 上下文
   // OpenCode Go（chat/completions 族）：模型真实窗口（models.dev 2026-08；与注册表一致）
   opencode: {
-    'deepseek-v4-flash': 1000000, 'deepseek-v4-pro': 1000000, 'deepseek-v4-flash-vision-exp': 1000000,
+    'deepseek-flash': 1000000, 'deepseek-v4.1-flash': 1000000, 'deepseek-v4-flash': 1000000, 'deepseek-v4-pro': 1000000, 'deepseek-v4-flash-vision-exp': 1000000,
     'glm-5.1': 202752, 'glm-5.2': 1000000, 'glm-5.3': 1000000, 'glm-5.3-flash': 1000000,
     'kimi-k3': 1048576, 'kimi-k2.7-code': 262144, 'kimi-k2.6': 262144, 'kimi-k2.5': 262144,
     'mimo-v2.6-pro': 1048576, 'mimo-v2.6-flash': 1048576, 'mimo-v2.5': 1000000, 'mimo-v2.5-pro': 1048576, 'hy3': 256000, 'hy4-preview': 1024000,
     'qwen3.6-plus': 1000000, 'qwen3.7-max': 1000000, 'qwen3.7-plus': 1000000, 'qwen3.8-max': 1000000, 'qwen3.8-flash': 1000000,
-    'minimax-m2.7': 204800, 'minimax-m3': 1000000, 'gpt-5.6-luna': 1050000, 'grok-4.6': 500000,
+    'minimax-m2.7': 204800, 'minimax-m3': 1000000, 'gpt-5.6-luna': 1050000, 'gpt-6-luna': 1050000, 'claude-haiku-5-5': 1000000, 'grok-4.6': 500000,
     'muse-spark-1.2-contributor': 1048576, 'longcat-2.0': 1000000,
   },
   kimi: { 'kimi-k2.6': 262144, 'kimi-k2.7-code': 262144, 'kimi-k2.7-code-highspeed': 262144, 'kimi-k2.7': 262144, 'kimi-k2.5': 262144, 'kimi-k2-thinking': 262144, 'kimi-k3': 1048576 },
   zhipu: { 'glm-4.6': 204800, 'glm-4.7': 204800, 'glm-5-turbo': 200000, 'glm-5.1': 202752, 'glm-5.2': 1000000, 'glm-5.2-highspeed': 1000000, 'glm-5.3': 1000000, 'glm-5.3-flash': 1000000, 'glm-5.3-highspeed': 1000000, 'glm-5': 1000000, 'glm-5v-turbo': 200000, 'glm-4.5-flash': 131072, 'glm-4.5': 131072, 'glm-4.5-air': 131072 },
-  anthropic: { 'claude-sonnet-4-5': 1000000, 'claude-sonnet-4-6': 1000000, 'claude-sonnet-5': 1000000, 'claude-opus-4-5': 200000, 'claude-opus-4-6': 1000000, 'claude-opus-4-7': 1000000, 'claude-opus-4-8': 1000000, 'claude-opus-5': 1000000, 'claude-haiku-4-5': 200000, 'claude-fable-5': 1000000 },
+  anthropic: { 'claude-opus-5-5': 1000000, 'claude-sonnet-5-5': 1000000, 'claude-haiku-5-5': 1000000, 'claude-sonnet-4-5': 1000000, 'claude-sonnet-4-6': 1000000, 'claude-sonnet-5': 1000000, 'claude-opus-4-5': 200000, 'claude-opus-4-6': 1000000, 'claude-opus-4-7': 1000000, 'claude-opus-4-8': 1000000, 'claude-opus-5': 1000000, 'claude-haiku-4-5': 200000, 'claude-fable-5': 1000000 },
 }
 
 // 单次输出上限兜底（未知模型）：与 bridge defaultMaxTokens 一致。
@@ -1843,20 +1843,20 @@ export const FIRST_CHUNK_TIMEOUT_MAX = 900
 // 已知模型默认单次输出上限（max_tokens；Provider 面板未配置时回退用）。
 // 数据源：provider 注册表（provider/models_*.go，models.dev 2026-08，与 pi 对齐）。
 export const KNOWN_MODEL_MAX_TOKENS: Record<string, Record<string, number>> = {
-  deepseek: { 'deepseek-v4-flash': 384000, 'deepseek-v4-pro': 384000, 'deepseek-v4-flash-vision-exp': 384000, 'deepseek-chat': 8192 },
-  openai: { 'gpt-4o': 16384, 'gpt-4o-mini': 16384, 'gpt-4.1': 32768, 'gpt-5-nano': 128000, 'gpt-5': 128000, 'gpt-5-mini': 128000, 'gpt-5.3-chat-latest': 16384, 'gpt-3.5-turbo': 4096 },
+  deepseek: { 'deepseek-flash': 384000, 'deepseek-v4.1-flash': 384000, 'deepseek-v4-flash': 384000, 'deepseek-v4-pro': 384000, 'deepseek-v4-flash-vision-exp': 384000, 'deepseek-chat': 8192 },
+  openai: { 'gpt-6-astra': 128000, 'gpt-6-sol': 128000, 'gpt-6-luna': 128000, 'gpt-6.1-sol': 128000, 'gpt-4o': 16384, 'gpt-4o-mini': 16384, 'gpt-4.1': 32768, 'gpt-5-nano': 128000, 'gpt-5': 128000, 'gpt-5-mini': 128000, 'gpt-5.3-chat-latest': 16384, 'gpt-3.5-turbo': 4096 },
   opencode: {
-    'deepseek-v4-flash': 384000, 'deepseek-v4-pro': 384000, 'deepseek-v4-flash-vision-exp': 384000,
+    'deepseek-flash': 384000, 'deepseek-v4.1-flash': 384000, 'deepseek-v4-flash': 384000, 'deepseek-v4-pro': 384000, 'deepseek-v4-flash-vision-exp': 384000,
     'glm-5.1': 32768, 'glm-5.2': 131072, 'glm-5.3': 131072, 'glm-5.3-flash': 131072,
     'kimi-k3': 131072, 'kimi-k2.7-code': 262144, 'kimi-k2.6': 65536, 'kimi-k2.5': 262144,
     'mimo-v2.6-pro': 131072, 'mimo-v2.6-flash': 131072, 'mimo-v2.5': 128000, 'mimo-v2.5-pro': 128000, 'hy3': 64000, 'hy4-preview': 64000,
     'qwen3.6-plus': 65536, 'qwen3.7-max': 65536, 'qwen3.7-plus': 65536, 'qwen3.8-max': 131072, 'qwen3.8-flash': 131072,
-    'minimax-m2.7': 131072, 'minimax-m3': 131072, 'gpt-5.6-luna': 128000, 'grok-4.6': 500000,
+    'minimax-m2.7': 131072, 'minimax-m3': 131072, 'gpt-5.6-luna': 128000, 'gpt-6-luna': 128000, 'claude-haiku-5-5': 128000, 'grok-4.6': 500000,
     'muse-spark-1.2-contributor': 131072, 'longcat-2.0': 131072,
   },
   kimi: { 'kimi-k2.6': 262144, 'kimi-k2.7-code': 262144, 'kimi-k2.7-code-highspeed': 262144, 'kimi-k2.7': 262144, 'kimi-k2.5': 262144, 'kimi-k2-thinking': 262144, 'kimi-k3': 131072 },
   zhipu: { 'glm-4.6': 131072, 'glm-4.7': 131072, 'glm-5-turbo': 131072, 'glm-5.1': 32768, 'glm-5.2': 131072, 'glm-5.2-highspeed': 131072, 'glm-5.3': 131072, 'glm-5.3-flash': 131072, 'glm-5.3-highspeed': 131072, 'glm-5': 131072, 'glm-5v-turbo': 131072, 'glm-4.5-flash': 98304, 'glm-4.5': 98304, 'glm-4.5-air': 98304 },
-  anthropic: { 'claude-sonnet-4-5': 64000, 'claude-sonnet-4-6': 128000, 'claude-sonnet-5': 128000, 'claude-opus-4-5': 64000, 'claude-opus-4-6': 128000, 'claude-opus-4-7': 128000, 'claude-opus-4-8': 128000, 'claude-opus-5': 128000, 'claude-haiku-4-5': 64000, 'claude-fable-5': 128000 },
+  anthropic: { 'claude-opus-5-5': 128000, 'claude-sonnet-5-5': 128000, 'claude-haiku-5-5': 128000, 'claude-sonnet-4-5': 64000, 'claude-sonnet-4-6': 128000, 'claude-sonnet-5': 128000, 'claude-opus-4-5': 64000, 'claude-opus-4-6': 128000, 'claude-opus-4-7': 128000, 'claude-opus-4-8': 128000, 'claude-opus-5': 128000, 'claude-haiku-4-5': 64000, 'claude-fable-5': 128000 },
 }
 
 // DeepSeek V4 Flash supports vision input through the OpenAI-compatible
@@ -1864,12 +1864,12 @@ export const KNOWN_MODEL_MAX_TOKENS: Record<string, Record<string, number>> = {
 // 视觉模型默认表（对齐后端 provider 注册表 models.dev 2026-08）：
 // 仅列真实支持 image 输入的模型；其余默认纯文本（前端上传按钮据此显隐）。
 export const KNOWN_MODEL_INPUT_TYPES: Record<string, Record<string, string[]>> = {
-  deepseek: { 'deepseek-v4-flash-vision-exp': ['text', 'image'] },
-  openai: { 'gpt-4o': ['text', 'image'], 'gpt-4o-mini': ['text', 'image'], 'gpt-4.1': ['text', 'image'], 'gpt-5-nano': ['text', 'image'], 'gpt-5': ['text', 'image'], 'gpt-5-mini': ['text', 'image'], 'gpt-5.3-chat-latest': ['text', 'image'] },
+  deepseek: { 'deepseek-flash': ['text', 'image'], 'deepseek-v4.1-flash': ['text', 'image'], 'deepseek-v4-flash-vision-exp': ['text', 'image'] },
+  openai: { 'gpt-6-astra': ['text', 'image'], 'gpt-6-sol': ['text', 'image'], 'gpt-6-luna': ['text', 'image'], 'gpt-6.1-sol': ['text', 'image'], 'gpt-4o': ['text', 'image'], 'gpt-4o-mini': ['text', 'image'], 'gpt-4.1': ['text', 'image'], 'gpt-5-nano': ['text', 'image'], 'gpt-5': ['text', 'image'], 'gpt-5-mini': ['text', 'image'], 'gpt-5.3-chat-latest': ['text', 'image'] },
+  anthropic: { 'claude-opus-5-5': ['text', 'image'], 'claude-sonnet-5-5': ['text', 'image'], 'claude-haiku-5-5': ['text', 'image'], 'claude-sonnet-4-5': ['text', 'image'], 'claude-sonnet-4-6': ['text', 'image'], 'claude-sonnet-5': ['text', 'image'], 'claude-opus-4-5': ['text', 'image'], 'claude-opus-4-6': ['text', 'image'], 'claude-opus-4-7': ['text', 'image'], 'claude-opus-4-8': ['text', 'image'], 'claude-opus-5': ['text', 'image'], 'claude-haiku-4-5': ['text', 'image'], 'claude-fable-5': ['text', 'image'] },
   zhipu: { 'glm-5v-turbo': ['text', 'image'], 'glm-5.3-flash': ['text', 'image'] },
   kimi: { 'kimi-k2.6': ['text', 'image'], 'kimi-k2.7-code': ['text', 'image'], 'kimi-k2.7-code-highspeed': ['text', 'image'], 'kimi-k2.5': ['text', 'image'], 'kimi-k3': ['text', 'image'] },
-  anthropic: { 'claude-sonnet-4-5': ['text', 'image'], 'claude-sonnet-4-6': ['text', 'image'], 'claude-sonnet-5': ['text', 'image'], 'claude-opus-4-5': ['text', 'image'], 'claude-opus-4-6': ['text', 'image'], 'claude-opus-4-7': ['text', 'image'], 'claude-opus-4-8': ['text', 'image'], 'claude-opus-5': ['text', 'image'], 'claude-haiku-4-5': ['text', 'image'], 'claude-fable-5': ['text', 'image'] },
-  opencode: { 'deepseek-v4-flash-vision-exp': ['text', 'image'], 'kimi-k3': ['text', 'image'], 'kimi-k2.6': ['text', 'image'], 'kimi-k2.7-code': ['text', 'image'], 'kimi-k2.5': ['text', 'image'], 'mimo-v2.6-pro': ['text', 'image'], 'mimo-v2.6-flash': ['text', 'image'], 'mimo-v2.5': ['text', 'image'], 'glm-5.3-flash': ['text', 'image'], 'qwen3.6-plus': ['text', 'image'], 'qwen3.7-plus': ['text', 'image'], 'qwen3.8-max': ['text', 'image'], 'qwen3.8-flash': ['text', 'image'], 'minimax-m3': ['text', 'image'], 'gpt-5.6-luna': ['text', 'image'], 'grok-4.6': ['text', 'image'], 'muse-spark-1.2-contributor': ['text', 'image'] },
+  opencode: { 'deepseek-v4.1-flash': ['text', 'image'], 'claude-haiku-5-5': ['text', 'image'], 'deepseek-v4-flash-vision-exp': ['text', 'image'], 'kimi-k3': ['text', 'image'], 'kimi-k2.6': ['text', 'image'], 'kimi-k2.7-code': ['text', 'image'], 'kimi-k2.5': ['text', 'image'], 'mimo-v2.6-pro': ['text', 'image'], 'mimo-v2.6-flash': ['text', 'image'], 'mimo-v2.5': ['text', 'image'], 'glm-5.3-flash': ['text', 'image'], 'qwen3.6-plus': ['text', 'image'], 'qwen3.7-plus': ['text', 'image'], 'qwen3.8-max': ['text', 'image'], 'qwen3.8-flash': ['text', 'image'], 'minimax-m3': ['text', 'image'], 'gpt-5.6-luna': ['text', 'image'], 'gpt-6-luna': ['text', 'image'], 'grok-4.6': ['text', 'image'], 'muse-spark-1.2-contributor': ['text', 'image'] },
   minimax: { 'MiniMax-M3': ['text', 'image'] },
   xai: { 'grok-4.6': ['text', 'image'], 'grok-4.5': ['text', 'image'] },
 }

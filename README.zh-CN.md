@@ -350,7 +350,7 @@ func main() {
 | `anthropic`（Messages） | anthropic · minimax · fireworks · github-copilot · kimi-coding |
 
 模型元数据（上下文窗口、输出上限、价表、推理支持、思考档位、模态）以注册表形式随包分发，
-共 **735 条**，可被用户覆盖；对没有内置清单的端点，用 `list_models` 命令现场发现。
+共 **772 条**，可被用户覆盖；对没有内置清单的端点，用 `list_models` 命令现场发现。
 任何 OpenAI 兼容网关都能用 —— 把 `base_url` 指过去、选好协议即可。
 
 ## 安全与隐私
