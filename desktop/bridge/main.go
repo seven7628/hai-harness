@@ -16,7 +16,7 @@
 //
 //	switch_mode / switch_effort / switch_persona / switch_model / set_provider /
 //
-//	set_goal_alignment_rounds / set_max_subagents / set_compress_threshold / list_models / reload_settings / file_preview / xlsx_preview / skills / skill_toggle / skill_get / load_skill /
+//	set_goal_alignment_rounds / set_max_subagents / set_compress_threshold / set_first_chunk_timeout / list_models / reload_settings / file_preview / xlsx_preview / skills / skill_toggle / skill_get / load_skill /
 //	skill_install / skill_browse / skill_update / skill_uninstall /
 //	market_add / market_remove / market_list / skill_update_market /
 //	mcp_list / mcp_set / mcp_refresh / plugin_list / plugin_install / plugin_uninstall /
@@ -57,6 +57,7 @@ import (
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/hooks"
 	"github.com/seven7628/hai-harness/mcp"
+	"github.com/seven7628/hai-harness/memory"
 	"github.com/seven7628/hai-harness/plugin"
 	"github.com/seven7628/hai-harness/plugin/browser"
 	computerplugin "github.com/seven7628/hai-harness/plugin/computer"
@@ -666,6 +667,7 @@ type manager struct {
 	mu          sync.Mutex
 	workspaces  map[string]*workspaceRuntime // key = workspace 绝对路径
 	provCfg     *providerConfig              // 全局 provider 配置（热切换；set_provider 更新）
+	memPrefs    *memoryPrefStore             // Project Memory 用户开关（设置面板；下一个会话生效）
 	out         *out
 	metrics     *FileMetricsStore // 全局指标（跨 workspace，~/.go-code/metrics.jsonl）
 	seq         int
@@ -2129,6 +2131,10 @@ func (m *manager) dispatch(c command) {
 		// settings 值重建 loop，此处先就地 set 一遍是为了「手改配置但 rebuild 未覆盖到
 		// 的路径」也立即生效（幂等：同值重复 set 无副作用）。
 		m.applyCompressThreshold()
+		// 首字预算热更新（settings.json agent.first_chunk_timeout，2026-10-11）：同上
+		// 就地 set 一遍兜底。与压缩阈值不同，本项**没有** rebuild 兜底也无妨 ——
+		// rebuildAll 建的也是新 loop（装配时读同一份 settings），两者同源不会漂移。
+		m.applyFirstChunkTimeout()
 		m.rebuildAll() // 现有：重建全部 loop（兜底对齐 system 工具清单）
 		m.resp(c, true, "", nil)
 
@@ -2185,6 +2191,23 @@ func (m *manager) dispatch(c command) {
 		}
 		m.setCompressThreshold(t)
 		m.resp(c, true, "", map[string]any{"compress_threshold": t})
+
+	case "set_first_chunk_timeout": // 首字预算热更新（秒）：不重建 loop/会话，下一次 attempt 生效
+		// 为何单独一条命令（2026-10-11）：首字预算与「重试机制总是异常」直接相关。
+		// 弱网/长首字模型（GLM、Claude 长思考、跨境链路、企业代理）每次尝试都在 30s
+		// 被切成「上游故障」——预算每次尝试独立计时，重试不会让同一模型变快，于是
+		// 10 次重试全废。默认值已调宽到 90s，此处让用户/OPS 按 provider 特性实时调。
+		sec := intNum(c.Payload, "first_chunk_timeout", -1)
+		// 合法区间 (0, MaxFirstChunkTimeoutSec]：0 = 「立即超时」是误配（会让每次尝试
+		// 瞬间失败），>900 等于关掉预算（重新变回无反馈的长等待，正是 187s 静默挂死的
+		// 成因）。与 agentSettings.firstChunkTimeout() 同口径钳制。
+		if sec <= 0 || sec > MaxFirstChunkTimeoutSec {
+			m.resp(c, false, fmt.Sprintf("first_chunk_timeout 必须是 1-%d 之间的秒数", MaxFirstChunkTimeoutSec), nil)
+			return
+		}
+		d := time.Duration(sec) * time.Second
+		m.setFirstChunkTimeout(d)
+		m.resp(c, true, "", map[string]any{"first_chunk_timeout": sec})
 
 	case CmdListModels: // 拉取某 provider 模型列表（Provider 设置面板「拉取模型列表」）
 		providerName := str(c.Payload, "provider")
@@ -2392,7 +2415,71 @@ func (m *manager) dispatch(c command) {
 		}
 		m.resp(c, true, "", map[string]any{"skills": m.skillList(ws)})
 
-	case "skill_toggle": // 启用/禁用技能（真过滤：发现清单 + load_skill 立即生效）
+	case CmdMemorySettings: // 读取 Project Memory 开关（设置面板打开时）
+		p := m.memPrefs.load()
+		// 目录路径一并给前端：面板要显示"记忆存在哪里"，用户才能自己找到/备份/删除。
+		dir, dirErr := memory.MemoryRoot()
+		resp := map[string]any{
+			"enabled":      p.enabled(),
+			"explicit":     p.Enabled != nil, // false = 用户从未设置过（默认开）
+			"applies_to":   "next_session",
+			"memory_dir":   dir,
+			"env_override": os.Getenv(memory.EnvAutoMemoryEnabled) != "",
+		}
+		if dirErr != nil {
+			resp["memory_dir_error"] = dirErr.Error()
+		}
+		m.resp(c, true, "", resp)
+
+	case CmdMemorySetEnabled: // 改 Project Memory 开关（下一个会话生效）
+		raw, present := c.Payload["enabled"]
+		if !present {
+			m.resp(c, false, "缺少 enabled 字段", nil)
+			return
+		}
+		on, ok := raw.(bool)
+		if !ok {
+			m.resp(c, false, "enabled 必须是布尔值", nil)
+			return
+		}
+		// 落盘失败必须回传给前端让它回滚开关：面板显示"已关闭"但重启后又开着，
+		// 比报错更难排查。
+		if err := m.memPrefs.set(memoryPrefs{Enabled: &on}); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{"enabled": on, "applies_to": "next_session"})
+
+	case CmdMemoryBrowse: // 浏览 Project Memory 文件（官方 §2.7 的 `/memory`）
+		if ws == "" {
+			m.resp(c, false, "workspace 为空", nil)
+			return
+		}
+		// 复用会话装配那套身份解析（同一个 host，git 只跑一次）：面板看到的目录
+		// 必须与注入/补戳用的是同一个，否则用户会看到一个"存在但没人用"的目录。
+		mctx, mcancel := context.WithTimeout(context.Background(), memoryResolveTimeout)
+		dir, derr := newMemoryHost(m.memoryConfig()).resolve(mctx, ws)
+		mcancel()
+		if derr != nil {
+			m.resp(c, false, derr.Error(), nil)
+			return
+		}
+		if dir == nil {
+			// 开关关闭 / 取不到目录：不是错误，面板据此显示"未启用"而不是报错。
+			m.resp(c, true, "", map[string]any{"available": false})
+			return
+		}
+		listing, lerr := m.memoryConfig().List(*dir)
+		if lerr != nil {
+			m.resp(c, false, lerr.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{
+			"available": true,
+			"listing":   listing,
+		})
+
+	case CmdSkillToggle: // 启用/禁用技能（真过滤：发现清单 + load_skill 立即生效）
 		if ws == "" {
 			m.resp(c, false, "workspace 为空", nil)
 			return
@@ -3575,12 +3662,16 @@ func codeAgentCompressThresholdFor() float64 {
 //     用户为自建模型补的 thinking_force_on / toggle-only 标注只存在于它里面。
 func compressTorOptions(prov, model, sid string, pc *providerConfig) []agents.LLMCompressorOption {
 	return []agents.LLMCompressorOption{
-		// 2026-09-18：压缩与主会话同策略 —— 不限总时限（0）+ 首字预算 30s
-		//（SDK 默认，agents.FirstChunkTimeout）+ 流内停滞预算 3min（SDK 默认，
+		// 2026-09-18：压缩与主会话同策略 —— 不限总时限（0）+ 首字预算（SDK 默认 90s，
+		// 2026-10-11 由 30s 调宽并改为可配）+ 流内停滞预算 3min（SDK 默认，
 		// agents.LLMCompressor.StallTimeout）+ 首次+10 重试固定 1s 退避
 		//（HTTP 层 ResponseHeaderTimeout=60s 仅次级兜底）。
 		agents.WithCompressTimeout(0), agents.WithCompressMaxRetries(11), agents.WithCompressBackoff(agents.FixedBackoff(time.Second)), agents.WithKeepRecentMessages(10),
 		agents.WithSummaryVersion(3), agents.WithCompressorRetryOnMissingSection(true),
+		// 首字预算（2026-10-11）：与主对话**同一份** settings 值 —— 三宿主的压缩器都经
+		// 本函数构造，故在此注入即可全覆盖（无需逐个装配点接线，也就不会漏）。对齐
+		// codeAgentTuning.firstChunkTimeout（主对话侧同源同值）。
+		compressFirstChunkTimeout(),
 		// 摘要输出上限 = 模型真实 max_tokens（与主对话一致）：默认 8192 对
 		// 1M 窗口 / 560K 输入的手动 summary 必然 finish_reason=length 截断失败。
 		agents.WithSummaryMaxTokens(pc.maxTokensForIn(prov, model)),
@@ -3607,6 +3698,14 @@ func compressTorOptions(prov, model, sid string, pc *providerConfig) []agents.LL
 //   - goalAlignmentRounds：主会话接线到 settings 的 loadAgentSettings().ReminderRounds
 //     （值随设置变）；子宿主**刻意不接线**（保持 agents 缺省 0 = 禁用）。
 //   - compressThreshold：见 codeAgentCompressThreshold 注释。
+//   - firstChunkTimeout（2026-10-11 新增）：WithFirstChunkTimeout 曾与 postToolNudge 同病
+//     —— **零生产接线**（全仓库只有 agents 包测试调用它），桌面端三宿主全吃 agents 默认
+//     30s，用户/OPS 无法覆盖。弱网/长首字模型（GLM、Claude 长思考、跨境链路、企业代理）
+//     每次尝试都在 30s 被切成「上游故障」，重试 10 次全废（首字预算每次尝试独立计时，
+//     重试不会让同一模型变快）⇒ 用户侧恒表现为「总是异常」。走本结构 = 与另三项同路：
+//     单一事实源生成选项 + assembly_wiring_test.go 钉住三宿主接线（防再次零接线）。
+//     取值 = loadAgentSettings().firstChunkTimeout()（秒，未配置 → agents 默认 90s）。
+//     三宿主同值（含压缩器，见 compressFirstChunkTimeout：run 内第二个 LLM 调用点）。
 type codeAgentTuning struct {
 	postToolNudge bool
 	// goalAlignmentRounds 非 nil = 本宿主接线 WithGoalAlignmentReminderRounds(该值)；
@@ -3614,16 +3713,68 @@ type codeAgentTuning struct {
 	// 合法取值（显式禁用），与「本宿主不接线」必须可区分。
 	goalAlignmentRounds *int
 	compressThreshold   float64
+	// firstChunkTimeout >0 = 本宿主接线 WithFirstChunkTimeout(该值)。恒 >0
+	// （firstChunkTimeout() 对缺失/0/负/越界一律兜底 90s）—— 0 值 = 「立即超时」，
+	// 绝不是合法策略，故不需要指针区分「未配置」。
+	firstChunkTimeout time.Duration
+	// contextSlim 上下文瘦身（C/D/E + F 图片）——三宿主全开，见
+	// contextSlimTuning 注释与 agents 侧实测数据。
+	contextSlim contextSlimTuning
+}
+
+// contextSlimTuning 上下文瘦身开关组。取值与依据集中在此，避免散落三处。
+type contextSlimTuning struct {
+	enabled     bool // 关 = 三宿主都不传任何 slim 选项（回退到 agents 缺省：全关）
+	imageKeep   int  // F 段：保留最近 N 张图片（负数 = 只按轮龄淘汰）
+	imageRounds int  // F 段：图片轮龄上限（负数 = 不按轮龄淘汰）
+}
+
+// contextSlimTuningFor 单一事实源：三个宿主（主会话 / spawn / explore）同一取值。
+//
+// 依据（tools/bench/export_real_sessions.py 导出的 6 个真实会话回放，407~1104 条
+// 消息、211~570 条工具结果）：
+//
+//	F 图片段：base64 截图占真实上下文 **93%**（单会话累积 18~56 张）。保最近 4 张
+//	  即回收 61.7% 图片体积、**54.9% 全会话体积** —— 远大于文本侧全部收益之和。
+//	C+D 文本段：可瘦身文本 -4.9%（零 LLM 成本、无协议风险）。
+//	E 合并段：删整组重复的「工具调用+结果」消息。真实编码会话重复率仅 0~5%，
+//	  但长任务里「读 A→改 A→再读 A」一旦出现就是成片重复，默认开。
+//
+// 三宿主全开：子 agent 同样读文件、跑命令、截图，漏掉任何一个就意味着该 loop
+// 的上下文不受治理。
+//
+// 逃生舱（按需注释掉对应项即可）：
+//   - 只关 E 段（动消息结构，唯一有协议风险的一段）：
+//     agents.WithSlimText(agents.SlimTextOptions{MergePairs: agents.BoolPtr(false)})
+//   - 关图片段：imageKeep/imageRounds 置负数。
+//   - 全关：enabled = false。
+func contextSlimTuningFor() contextSlimTuning {
+	return contextSlimTuning{enabled: true, imageKeep: 4, imageRounds: 30}
+}
+
+// options 翻译成 agents.Option（nil receiver 安全：未设置时返回 nil）。
+func (c contextSlimTuning) options() []agents.Option {
+	if !c.enabled {
+		return nil
+	}
+	return []agents.Option{
+		agents.WithToolResultSlim(),
+		agents.WithSlimText(agents.SlimTextOptions{}),
+		agents.WithImageSlim(agents.ImageSlimConfig{Keep: c.imageKeep, MaxRounds: c.imageRounds}),
+	}
 }
 
 // codeAgentTuningFor 返回某宿主的可调项取值（单一事实源）。
 // 与提取前逐项一致：postToolNudge 三宿主全开；goalAlignmentRounds 仅主会话（值 =
 // 装配时读 settings 的 loadAgentSettings().ReminderRounds，与提取前同一时点）；
-// 压缩阈值三宿主同一来源（settings 的 agent.compress_threshold，未配置 → 默认）。
+// 压缩阈值三宿主同一来源（settings 的 agent.compress_threshold，未配置 → 默认）；
+// firstChunkTimeout 三宿主同源同值（settings 的 agent.first_chunk_timeout，未配置 → 90s）。
 func codeAgentTuningFor(host codeAgentHost) codeAgentTuning {
 	t := codeAgentTuning{
 		postToolNudge:     true,
 		compressThreshold: codeAgentCompressThresholdFor(),
+		firstChunkTimeout: loadAgentSettings().firstChunkTimeout(),
+		contextSlim:       contextSlimTuningFor(),
 	}
 	if host == hostMainLoop {
 		rounds := loadAgentSettings().ReminderRounds
@@ -3632,14 +3783,21 @@ func codeAgentTuningFor(host codeAgentHost) codeAgentTuning {
 	return t
 }
 
-// options 把可调项值翻译成 agents.Option —— 装配点生成这三项选项的唯一入口。
+// options 把可调项值翻译成 agents.Option —— 装配点生成这几项选项的唯一入口。
 // 提炼安全性（重构等价性）：agents 的每个 With* 都是纯 setter（只写自己的 Config
 // 字段、不读其它字段），故选项在切片中的先后次序不影响最终 Config；与其余 With*
 // 的相对位置同样无关。逐项对应关系：postToolNudge → WithPostToolNudgeEnabled()；
 // goalAlignmentRounds → WithGoalAlignmentReminderRounds(n)（仅接线时）；
-// compressThreshold → WithCompressThreshold(t)。
+// compressThreshold → WithCompressThreshold(t)；
+// firstChunkTimeout → WithFirstChunkTimeout(d)（恒接线；压缩器侧另经
+// compressFirstChunkTimeout 注入同一值）；
+// contextSlim → 上下文瘦身三段（C/D/E + F 图片，见 slimImageKeep 的实测依据）。
+//
+// 放在这里而不是各 build*Loop 里逐个 append：主会话与两个子 agent（spawn /
+// explore）走同一套装配入口，漏掉任何一个就意味着该 loop 的上下文不受治理
+// （子 agent 同样会读文件、跑命令、截图）。
 func (t codeAgentTuning) options() []agents.Option {
-	opts := make([]agents.Option, 0, 3)
+	opts := make([]agents.Option, 0, 7)
 	if t.postToolNudge {
 		opts = append(opts, agents.WithPostToolNudgeEnabled())
 	}
@@ -3647,7 +3805,20 @@ func (t codeAgentTuning) options() []agents.Option {
 		opts = append(opts, agents.WithGoalAlignmentReminderRounds(*t.goalAlignmentRounds))
 	}
 	opts = append(opts, agents.WithCompressThreshold(t.compressThreshold))
+	if t.firstChunkTimeout > 0 {
+		opts = append(opts, agents.WithFirstChunkTimeout(t.firstChunkTimeout))
+	}
+	opts = append(opts, t.contextSlim.options()...)
 	return opts
+}
+
+// compressFirstChunkTimeout 压缩器侧的首字预算选项：与主对话**同一份值**注入
+// （LLMCompressor 是 run 内的第二个 LLM 调用点，自动压缩无首字挂死 = 整个会话静默，
+// 策略必须与主对话同源，否则会出现「主对话 90s 被切 / 压缩没人管」的漂移）。
+// 当前不按 provider 区分（首字预算是全局 agent 段设置），故不取 prov/model 形参；
+// 未来若改成 per-provider 覆盖，在此函数内接参即可，调用点不受影响。
+func compressFirstChunkTimeout() agents.LLMCompressorOption {
+	return agents.WithCompressFirstChunkTimeout(loadAgentSettings().firstChunkTimeout())
 }
 
 // buildPersonaLoop 子 agent 运行时（spawn_agent 的按定义执行器）：
@@ -3657,7 +3828,17 @@ func (t codeAgentTuning) options() []agents.Option {
 // persona="" 时与旧 buildSpawnLoop 逐字节等价（不追加任何 Option）。
 // sk 为技能注册表（与主会话同一实例）：注入技能发现清单（渐进披露），
 // 子 agent 经 load_skill 激活技能；不注入 subagent 清单（防递归）。
-func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConfig, prov, model, effort, persona string, sk *skills.Registry) *agents.AgentLoop {
+//
+// mem（可选，最多一个）：给「声明了 memory: true」的子 agent 注入**它自己那份**
+// auto memory。官方 memory#how-it-works：
+//
+//	"The main conversation's auto memory isn't loaded into subagents …
+//	 A subagent's own auto memory, enabled with the subagent `memory` field,
+//	 is a separate directory."
+//
+// 用可变参数而不是加位置参数：两个既有调用点里只有一个需要它，加位置参数会让另一个
+// 也变成 `nil, ""` 的噪音。mem.Name == "" 即不注入。
+func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConfig, prov, model, effort, persona string, sk *skills.Registry, mem ...personaMemory) *agents.AgentLoop {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -3706,6 +3887,16 @@ func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConf
 	}
 	if systemLayer != "" {
 		opts = append(opts, agents.WithSystemPrompt(systemLayer))
+	}
+	// 子 agent 的独立 auto memory（官方：启用 memory 字段的那份是 separate directory）。
+	// 惰性取 ctx：装配期 session 变量还为 nil（与 Step 4 钩子同一约束）。
+	if len(mem) > 0 && mem[0].Host != nil && mem[0].Name != "" {
+		mctx, mcancel := context.WithTimeout(mem[0].bgCtxOrBackground(), memoryResolveTimeout)
+		inj := mem[0].Host.subagentInjection(mctx, workspace, mem[0].Name)
+		mcancel()
+		if inj != "" {
+			opts = append(opts, agents.WithMemoryInjection(inj))
+		}
 	}
 	// 采样默认（宿主决策 2026-08）：DeepSeek 显式 top_p=0.95 / temperature=1.0；OpenAI 厂商默认
 	if temperature, topP := pc.samplingDefaults(); temperature != nil {
@@ -3846,7 +4037,7 @@ func (r *subagentEffortRef) set(level provider.ReasoningEffortLevel) {
 // （run_python 的固定解释器来源；nil = 不注册 run_python —— 未装配运行时的 SDK 用法
 // 不注册比注册一个必然失败的工具更好，诊断留给宿主）。按 persona profile 决定工具集：
 // Work 无 bash（办公助理不跑命令）、无 agent_*/plan_submit（不派子 agent / 不规划）。
-func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string)) (*tools.Engine, *subagentEffortRef) {
+func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -3854,6 +4045,28 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	effortRef := newSubagentEffortRef(provider.ReasoningEffortLevel(effort))
 	eng := tools.NewToolEngine()
 	ft := builtin.NewFileTools(workspace)
+	// Project Memory 的 Step 4 钩子：记忆文件由模型用标准 write_file / edit_file
+	// 写入，官方规定写入时补 `modified`，没有别的入口。宿主钩子在**写成功之后**触发。
+	// 闸门（开关 / 路径是否记忆 / 目录解析）全在宿主侧，工具层不认识"记忆"这个概念。
+	// 未开启记忆时钩子第一次调用就返回空，零开销。
+	//
+	// 返回值分两路（2026-09-30）：err 是真失败（补戳失败、索引超限），notice 是
+	// "写已成功、顺带提醒"（索引接近限额）。官方对后者用词是 reminds 而非 error，
+	// 混进 err 会诱使模型重试——重试只会让索引更长。
+	// memHost 提到装配期作用域：子 agent 声明 memory: true 时注入它自己那份记忆，
+	// 用的是**同一个** host，于是主目录只解析一次（每次 spawn 各建一个 host 的话，
+	// 每个子 agent 都要重跑一次 git）。
+	memHost := newMemoryHost(memCfgValue(memCfg))
+	{
+		mh := memHost
+		ft = ft.WithPostWrite(func(ctx context.Context, absPath string) (string, error) {
+			return mh.postWrite(ctx, workspace, absPath)
+		}).
+			// 读取侧的同一套判定，用来发 "Recalled N memories"（官方 §2.7）。
+			WithPostRead(func(ctx context.Context, absPath string) (string, error) {
+				return mh.postRead(ctx, workspace, absPath)
+			})
+	}
 	if sbx != nil {
 		// bash 沙箱后端（macOS Seatbelt + WithRelease 放行门）：注入后 bash 命令在沙箱内执行。
 		ft = ft.WithBashSandbox(sbx)
@@ -3904,7 +4117,16 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 			func(def *subagent.AgentDefinition) *agents.AgentLoop {
 				// 文件化 subagent（agent_spawn task 省略时按 name 加载）：人设 loop
 				// 每次调用新建 → 读当前档位（switch_effort 后派生的子 agent 立即同档）。
-				return buildPersonaLoop(eng, workspace, sid, pc, prov, model, string(effortRef.current()), def.Instructions, sk)
+				//
+				// `memory: true` 的定义拿到**自己那份** auto memory（官方：主会话记忆不进
+				// 子 agent，子 agent 自己的是 separate directory）。Host 与主会话共用同一个，
+				// 于是已解析的主目录只付一次 git 代价；目录归属由 postWrite 按**路径**判定
+				// （两个目录不相交），钩子不需要知道调用者是谁。
+				var pm []personaMemory
+				if def.Memory {
+					pm = append(pm, personaMemory{Host: memHost, Name: def.Name, Ctx: bgCtx})
+				}
+				return buildPersonaLoop(eng, workspace, sid, pc, prov, model, string(effortRef.current()), def.Instructions, sk, pm...)
 			}) {
 			eng.RegisterTool(context.Background(), t) // agent_spawn（动态 + 文件化双模式）/send/interrupt/list/output
 		}
@@ -4024,7 +4246,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
-	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec())
+	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()
@@ -4106,6 +4328,8 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		// options.sessionId —— 同一会话多轮共享缓存前缀；空 sid 不启用）。
 		agents.WithSessionID(sid),
 	)
+	// 上下文瘦身（C/D/E/F 段）不在此处 append —— 走 codeAgentTuning.contextSlim，
+	// 由 codeAgentTuningFor 单点装配，主会话与两个子 agent 一并生效。
 	// 采样默认（宿主决策 2026-08）：DeepSeek 显式 top_p=0.95 / temperature=1.0；OpenAI 厂商默认
 	if temperature, topP := m.provCfg.samplingDefaults(); temperature != nil {
 		opts = append(opts, agents.WithTemperature(*temperature), agents.WithTopP(*topP))
@@ -4117,6 +4341,19 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	if m.provCfg.isOpenCodeGateway() {
 		opts = append(opts, agents.WithRetainReasoning(true))
 	}
+	// Project Memory 启动注入（Step 3）。装配期算一次：composeSystemPrompt 每轮
+	// 循环都会重跑，而解析记忆目录要跑 git 读索引，放进去等于每轮重复一次。
+	// 空串 = 无记忆 / 无 git 身份 / 开关关闭，三者都不注入（memory_wiring.go 有解释）。
+	// 解析成功的结果不跨装配点共享：newSessionEngine 的 Step 4 钩子持有自己的
+	// memoryHost，所以这里最多多一次 git 调用，换来装配层零状态。
+	// 开关在**会话装配期**取值（下一个会话生效，运行中的会话不变，见 memory_prefs.go）。
+	// 身份解析要跑 git，给一个有界 context：不让一个挂住的 git 阻塞会话创建。
+	// 这里不能用 bgCtx()——buildLoop 阶段它捕获的 session 变量还是 nil。
+	mctx, mcancel := context.WithTimeout(context.Background(), memoryResolveTimeout)
+	if inj := newMemoryHost(m.memoryConfig()).injection(mctx, workspace); inj != "" {
+		opts = append(opts, agents.WithMemoryInjection(inj))
+	}
+	mcancel()
 	// TEMP-STARTUP A7：NewAgentLoop
 	loopStart := time.Now()
 	loop := agents.NewAgentLoop(opts...)
@@ -4234,6 +4471,46 @@ func (m *manager) setCompressThreshold(t float64) {
 // reload_settings 用（手改配置文件后无需重启；前端设置面板走 set_compress_threshold）。
 func (m *manager) applyCompressThreshold() {
 	m.setCompressThreshold(loadAgentSettings().compressThreshold())
+}
+
+// setFirstChunkTimeout 把首字预算同步到所有已创建会话的主 loop。
+// 只调 AgentLoop setter，不重建 loop/会话：**下一次 attempt** 按新预算生效（正在跑的
+// 那次尝试仍用旧值 —— streamOnce 在 attempt 开头读一次），上下文/历史/后台任务均不变。
+//
+// 为什么必须可热更（2026-10-11 用户反馈）：弱网/长首字模型（GLM、Claude 长思考、跨境
+// 链路、企业代理）在 30s 预算下每次尝试都被切成「上游故障」，重试 10 次全废 —— 首字
+// 预算每次尝试独立计时，而重试不会让同一个慢模型变快。默认值已调宽到 90s，此处让
+// 用户改完配置立即生效（不必重启、不必重开会话）。
+//
+// 子 agent / explore 的 loop 不在此列：它们按需构造、生命周期短（构建期读同一份
+// settings），热改只影响之后新建的子 loop —— 与 setCompressThreshold 同一边界
+// （那里也只推主 loop；子 loop 的压缩阈值同样是构建期注入）。
+func (m *manager) setFirstChunkTimeout(d time.Duration) {
+	m.mu.Lock()
+	wsList := make([]*workspaceRuntime, 0, len(m.workspaces))
+	for _, ws := range m.workspaces {
+		wsList = append(wsList, ws)
+	}
+	m.mu.Unlock()
+	for _, ws := range wsList {
+		ws.mu.Lock()
+		sessions := make([]*bridgeSession, 0, len(ws.sessions))
+		for _, bs := range ws.sessions {
+			sessions = append(sessions, bs)
+		}
+		ws.mu.Unlock()
+		for _, bs := range sessions {
+			if bs.loop != nil {
+				bs.loop.SetFirstChunkTimeout(d)
+			}
+		}
+	}
+}
+
+// applyFirstChunkTimeout 从 settings.json（agent 段）重读首字预算并热应用：
+// reload_settings 用（手改配置文件后无需重启；前端设置面板走 set_first_chunk_timeout）。
+func (m *manager) applyFirstChunkTimeout() {
+	m.setFirstChunkTimeout(loadAgentSettings().firstChunkTimeout())
 }
 
 // applyMeshSettings 热应用 Session Mesh 设置（CmdReloadSettings 调用；不重启进程）。
@@ -4870,6 +5147,7 @@ func serve() error {
 		metrics:    NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
 		imPlugin:   implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
 		hub:        session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
+		memPrefs:   newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
 	}
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()

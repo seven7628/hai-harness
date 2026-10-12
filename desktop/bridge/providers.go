@@ -53,6 +53,39 @@ type agentSettings struct {
 	// 用**指针**字段承载「未配置」语义：0.0 本身不是合法阈值（等于永不压缩），
 	// 与「没写这一项」必须可区分。
 	CompressThreshold *float64 `json:"compress_threshold,omitempty"`
+
+	// FirstChunkTimeoutSec 首字预算秒数（2026-10-11）：单次 LLM 尝试从请求发出到收到首个
+	// provider 事件的上限；首字一到即解除，流开始后**不限总时长**（长 reasoning / 大文档
+	// 生成不受切）。缺失/≤0 = 用 agents 默认 90s（见 agentSettings.firstChunkTimeout）。
+	// 0 不是合法「配置值」而是「立即超时」——与 codemode.budget_seconds 同口径，故走
+	// 指针 + 钳制，不用 0 值哨兵。
+	//
+	// 为何要可配（用户反馈）：默认 30s 对弱网/长首字模型（GLM、Claude 长思考、跨境链路、
+	// 企业代理）过于苛刻 —— 首字预算每次尝试独立计时，重试不会让同一个慢模型变快，于是
+	// 每轮都在 30s 被切成「上游故障」，重试 10 次全废。默认值已调宽到 90s，此处留给
+	// 按 provider 特性自行调宽/关掉的用户。语义详见 agents.Config.FirstChunkTimeout。
+	FirstChunkTimeoutSec *int `json:"first_chunk_timeout,omitempty"`
+}
+
+// MaxFirstChunkTimeoutSec 首字预算的钳制上界（秒）：防误配成 3600s 这种「其实等于关掉」
+// 的值 —— 首字预算过宽会让「上游完全无响应」重新变成长时间无反馈的等待，正是 2026-09-18
+// 实测 187s 静默挂死的成因。报错/兜底优于静默接受：攒越久越难发现。
+const MaxFirstChunkTimeoutSec = 900
+
+// firstChunkTimeout 生效首字预算（秒 → Duration）。未配置/越界（≤0 或 >900）= agents
+// 默认 90s（宿主不覆盖 FirstChunkTimeout 时该值就是用户实跑预算）。
+// 合法区间 (0, 900]：0 会让看门狗「立即超时」（误配成永久失败），负值同理；>900 等于
+// 关掉预算（弱网场景仍可显式写 0 关，但 3600 这种无心之失不给过）。
+func (s agentSettings) firstChunkTimeout() time.Duration {
+	const dflt = 90 * time.Second
+	if s.FirstChunkTimeoutSec == nil {
+		return dflt
+	}
+	sec := *s.FirstChunkTimeoutSec
+	if sec <= 0 || sec > MaxFirstChunkTimeoutSec {
+		return dflt
+	}
+	return time.Duration(sec) * time.Second
 }
 
 // compressThreshold 生效阈值（未配置/非法 → 默认 codeAgentCompressThreshold）。

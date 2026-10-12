@@ -69,6 +69,15 @@ type LLMCompressor struct {
 	// 默认 3min（与 agents.StreamStallTimeout 同值）。
 	StallTimeout time.Duration
 
+	// FirstChunkTimeout 压缩调用的首字预算（2026-10-11 补齐）：**单次尝试**从请求发出到
+	// 收到首个 provider 事件的上限；首个事件一到即解除，此后流内不再计时（压缩摘要长、
+	// 且有 8192+ 输出上限，流开始后绝不设界）。与主对话 agents.Config.FirstChunkTimeout
+	// 同语义同动因：压缩是 run 内部的第二个 LLM 调用点，「无首字挂死」同样表现为**整个
+	// 会话静默**，而 HTTP 首包 60s 只到响应头、StallTimeout 只从首事件起算 —— 中间那段
+	// （响应头已回但迟迟没有首个流事件，或连接建立后完全无响应）此前无任何一层管得到。
+	// 0 = 不限制。默认 90s（与主对话同值，2026-10-11 由「无」补齐）。
+	FirstChunkTimeout time.Duration
+
 	// MaxRetries 压缩 LLM 调用的最大尝试次数（含首次，默认 1 = 不重试）。
 	// 与主 Agent streamWithRetry 的 MaxRetries 语义一致（2026-08-30：
 	// 压缩曾裸调用无重试，瞬时错误如 JSON 解析失败直接放弃整轮压缩；
@@ -131,6 +140,13 @@ func WithCompressTimeout(d time.Duration) LLMCompressorOption {
 // 语义与取值理由见 LLMCompressor.StallTimeout。
 func WithCompressStallTimeout(d time.Duration) LLMCompressorOption {
 	return func(c *LLMCompressor) { c.StallTimeout = d }
+}
+
+// WithCompressFirstChunkTimeout 设置压缩调用的首字预算（0 = 不限制）。
+// 语义与取值理由见 LLMCompressor.FirstChunkTimeout（与主对话同值；宿主按同一份
+// settings 注入，保证两个 LLM 调用点的策略不漂移）。
+func WithCompressFirstChunkTimeout(d time.Duration) LLMCompressorOption {
+	return func(c *LLMCompressor) { c.FirstChunkTimeout = d }
 }
 
 // WithCompressProviderName 绑定压缩调用的 provider 名（价表/模型元数据 Lookup 用；
@@ -244,11 +260,14 @@ func trimRecentWindow(recent []core.Message, limit int64) []core.Message {
 // NewLLMCompressor 创建基于 LLM 的结构化压缩器。
 func NewLLMCompressor(p provider.Provider, model string, opts ...LLMCompressorOption) *LLMCompressor {
 	c := &LLMCompressor{
-		provider:            p,
-		model:               model,
-		MaxTokens:           defaultSummaryMaxTokens,
-		Timeout:             90 * time.Second,
-		StallTimeout:        3 * time.Minute, // 与 agents.StreamStallTimeout 同值（流内静默上限）
+		provider:     p,
+		model:        model,
+		MaxTokens:    defaultSummaryMaxTokens,
+		Timeout:      90 * time.Second,
+		StallTimeout: 3 * time.Minute, // 与 agents.StreamStallTimeout 同值（流内静默上限）
+		// 首字预算 90s：与 agents.Config.FirstChunkTimeout 同值同语义（见该字段注释）。
+		// 压缩是 run 内第二个 LLM 调用点，「无首字」挂死 = 整个会话静默，必须同样设界。
+		FirstChunkTimeout:   90 * time.Second,
 		LatestUserMaxTokens: defaultLatestUserMaxTokens,
 		DisableThinking:     true, // 默认关思考（见 DisableThinking 注释）
 	}
@@ -472,7 +491,26 @@ func (c *LLMCompressor) compressOnce(ctx context.Context, req *provider.StreamRe
 	defer cancelCause(context.Canceled)
 	stall := newStreamStallWatch(c.StallTimeout, cancelCause)
 	defer stall.stop()
+	// 首字看门狗（2026-10-11）：与主对话同语义 —— 请求发出 → 首个 provider 事件的上限，
+	// 首个事件一到即 Stop（此后长摘要流不受切）。与 stall 两段不重叠：本表管「还没有第一个
+	// 事件」，stall 管「有了之后没有下一个」。到点以 cause 取消，provider 侧只会报
+	// 「context canceled」—— 由下方按 cause 翻译回可重试的 FirstChunkTimeoutError。
+	var firstChunkTimer *time.Timer
+	if d := c.FirstChunkTimeout; d > 0 {
+		firstChunkTimer = time.AfterFunc(d, func() {
+			cancelCause(provider.NewFirstChunkTimeoutError(d, nil))
+		})
+		defer firstChunkTimer.Stop()
+	}
+	// gotFirstEvent 与 stall touch 同一线程假设：provider 在 Stream 内同步回调 handler。
+	gotFirstEvent := false
 	err := c.provider.Stream(streamCtx, req, func(e provider.StreamEvent) error {
+		if !gotFirstEvent {
+			gotFirstEvent = true
+			if firstChunkTimer != nil {
+				firstChunkTimer.Stop()
+			}
+		}
 		stall.touch() // 事件即活动：重置停滞看门狗
 		if ev, ok := e.(provider.LLMEndEvent); ok {
 			raw = ev.Content
@@ -491,6 +529,15 @@ func (c *LLMCompressor) compressOnce(ctx context.Context, req *provider.StreamRe
 		if stallErr, ok := context.Cause(streamCtx).(*provider.StreamStallError); ok {
 			stallErr.SetCause(err)
 			return "", "", partial, "", stallErr
+		}
+		// 首字超时同理翻译（2026-10-11）：仅在「一个事件都没到」时替换 —— 已收到首字说明是
+		// 流内其它失败（或正常结束），与首字预算无关。绝不以 context.Canceled 上抛，否则
+		// 压缩重试层（同 retryable）会把它当用户中断而一次都不重试。
+		if !gotFirstEvent {
+			if ft, ok := context.Cause(streamCtx).(*provider.FirstChunkTimeoutError); ok {
+				ft.SetCause(err)
+				return "", "", partial, "", ft
+			}
 		}
 		return "", "", partial, "", err
 	}

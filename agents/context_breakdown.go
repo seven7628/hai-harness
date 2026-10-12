@@ -12,6 +12,7 @@ import (
 const (
 	ContextPartSystem   = "system_prompt" // 行为契约 + 产品层 + 工作记忆（Agent.md）+ 模式提示
 	ContextPartSkills   = "skills"        // 技能清单（系统提示词末段，单独计量）
+	ContextPartMemory   = "memory"        // Project Memory 索引（系统提示词中段，单独计量）
 	ContextPartTools    = "tools"         // 内置工具 schema
 	ContextPartMCP      = "mcp"           // MCP 工具 schema（mcp__<server>__<tool>）
 	ContextPartMessages = "messages"      // 会话消息（不含系统提示词）
@@ -20,7 +21,7 @@ const (
 
 // contextPartOrder 分区输出序（稳定：前端行序按占用排序前先有确定骨架）。
 var contextPartOrder = []string{
-	ContextPartSystem, ContextPartSkills, ContextPartTools,
+	ContextPartSystem, ContextPartSkills, ContextPartMemory, ContextPartTools,
 	ContextPartMCP, ContextPartMessages, ContextPartOther,
 }
 
@@ -98,8 +99,13 @@ func (a *AgentLoop) ContextBreakdown(ctx context.Context, messages []core.Messag
 		}
 		system += mode.SystemHint
 	}
-	// 两个清单是拼进系统提示词的连续字节，直接减去即得「纯提示词」部分。
-	systemChars := int64(len(system)) - int64(len(skillsManifest)) - int64(len(subagentManifest))
+	// 拼进系统提示词的连续字节，直接减去即得「纯提示词」部分。
+	// 记忆索引同理：它就是 Config.MemoryInjection 这段文本，composeSystemPrompt
+	// 原样拼进去。单独计量是因为用户要能看到「记忆占了多少上下文」——它和技能清单
+	// 一样是**可增长且由用户选择**的部分，混在 system_prompt 里会随记忆条数增长而
+	// 悄悄吃掉预算，而用户看不见。
+	memoryChars := int64(len(a.cfg.MemoryInjection))
+	systemChars := int64(len(system)) - int64(len(skillsManifest)) - int64(len(subagentManifest)) - memoryChars
 	if systemChars < 0 {
 		systemChars = 0
 	}
@@ -128,6 +134,7 @@ func (a *AgentLoop) ContextBreakdown(ctx context.Context, messages []core.Messag
 	chars := map[string]int64{
 		ContextPartSystem:   systemChars,
 		ContextPartSkills:   int64(len(skillsManifest)),
+		ContextPartMemory:   memoryChars,
 		ContextPartTools:    toolChars,
 		ContextPartMCP:      mcpChars,
 		ContextPartMessages: messageCharsTotal,

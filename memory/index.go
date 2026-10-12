@@ -1,0 +1,403 @@
+package memory
+
+import (
+	"errors"
+	"io/fs"
+	"strings"
+	"unicode/utf8"
+)
+
+// 启动注入（技术方案 §5.2，Step 3）。
+//
+// 官方 memory#how-it-works 对这件事的全部规定：
+//
+//	"Claude doesn't load topic files such as user_role.md at startup.
+//	 Claude reads them on demand using its standard file tools when it needs the information."
+//	"…using MEMORY.md to keep track of what's stored where."
+//
+// 因此 Step 3 **只做一件事**：把 MEMORY.md 的前 200 行 / 25KB（取先到者）作为一段
+// 系统提示词交给装配层。之后模型自己用标准 read_file 去读 topic 正文。
+//
+// 这里**不做**（官方没有，《技术方案》§4.5/§5.5）：
+//   - 不逐条校验索引里的文件是否存在（官方无校验）；
+//   - 不为索引行补 description / 摘要（官方索引是纯文件名列表）；
+//   - 不排序索引（官方未规定；上一版的"近期优先"在 `modified` 不进索引行的前提下无法实现）；
+//   - 不注入**行为判据**（"什么时候该记 / 不该记什么"）。
+//
+// 最后一条是 2026-09-30 的修正。此前这里写的是「不注入任何记忆协议文本」，依据是
+// 「官方没有」——该判断有误，见 guidance.go 顶部。**注入存储形态说明**（目录在哪、
+// 记忆文件长什么样）是另一回事：官方必然有，否则模型连第一条记忆都写不出来
+// （Wiki §4.1 反推）。而**行为判据**确实是连续变量，要等 A/B 对照实验才能决定，
+// 现阶段一律不加——上一版就是在这里翻的车。
+const (
+	// MaxIndexLines 索引加载行数上限（官方 200 行）。
+	MaxIndexLines = 200
+	// MaxIndexBytes 索引加载字节上限（官方 25KB）。
+	//
+	// 取 25000 而不是 25*1024：官方原文写 "25KB"，Claude Code 自己按 25,000 计，
+	// 取大了会在"官方会拦、我们不拦"的边界上与官方行为不一致。
+	MaxIndexBytes = 25000
+)
+
+// ErrIndexTooLarge 索引超过限额，调用点应让模型重写索引。
+//
+// 与 §4.3 的语义对齐：**超限时写入本身不失败**（文件已由标准 write_file 落盘），
+// 这里返回的是一条"请重写索引"的错误信息，用于附在工具结果里回给模型。
+var ErrIndexTooLarge = errors.New("memory: MEMORY.md 超过 200 行 / 25KB 限额，本次加载已截断；请重写索引：每条一行、细节移到 topic 文件、合并或丢弃过期条目")
+
+// IndexLoad 是「读到了索引」的度量结果（Step 3 的可观测面，便于评估与调试）。
+type IndexLoad struct {
+	// Dir 本次加载所属的记忆目录（<root>/repos/<id>）。
+	Dir Dir
+	// Path 索引文件绝对路径。
+	Path string
+	// Text 截断后的索引正文（**不含**注入段落自带的那行标题，也**不含**截断提示——
+	// 提示是宿主加的话，不是索引内容，见 truncationNotice）。
+	// 未发生截断时，本字段与注入段落去掉标题后的内容**逐字节相等**。
+	Text string
+	// TotalLines 索引总行数（截断前）。
+	TotalLines int
+	// TotalBytes 索引总字节数（截断前）。
+	TotalBytes int
+	// LoadedLines / LoadedBytes 实际进入提示词的量。
+	LoadedLines int
+	LoadedBytes int
+	// TruncatedBy "line" / "byte" / "" —— 哪个限额先到。
+	TruncatedBy string
+}
+
+// Injection 是 Step 3 的产物：一段可直接拼进系统提示词的文本。
+//
+// 结构体而非 string 是为了让装配层不必重新解析自己的输出判断"有没有内容"
+// （Empty 字段即答案），也便于测试断言边界。
+type Injection struct {
+	// Text 注入文本。**开关关闭时恒为 ""**——关闭 = 完全不注入任何 Memory 相关
+	// 系统提示词（见 Config.Enabled）。
+	//
+	// 记忆目录**已解析但还没有 MEMORY.md** 时**不再是空串**：会注入 guidance.go 的
+	// 说明段。2026-09-30 之前这里是空的，理由是"无记忆时 prompt 逐字节不变"，
+	// 而该理由依赖「官方不注入说明」这个已被推翻的前提（guidance.go 顶部）。
+	Text string
+	// Enabled 解析后的开关值。false 时 Text 必为 ""。
+	Enabled bool
+	// Dir 解析出的记忆目录（Enabled=false 或解析失败时为 nil）。
+	Dir *Dir
+	// Load 索引加载度量（未读到索引、或索引为空时为 nil）。
+	Load *IndexLoad
+	// Reason 注入形态标识："disabled" / "no-identity" / "no-index" / "empty-index"，
+	// 有索引正文时为空串。仅供装配层日志与测试断言，**不参与**是否注入的判定。
+	Reason string
+}
+
+// Empty 无注入文本。装配层据此**不改动系统提示词的任何字节**。
+//
+// 注意它现在**只在开关关闭时**为真：无索引/空索引仍会返回说明段。
+func (i Injection) Empty() bool { return strings.TrimSpace(i.Text) == "" }
+
+// indexHeading 注入段落的标题行。
+//
+// 标题是必需的：段落拼进系统提示词后，模型需要知道"这一段是记忆索引"而不是文档片段。
+// 它之下依次是：索引正文（若非空）→ 目录说明（guidance.go）。
+const indexHeading = "# Project Memory (MEMORY.md)"
+
+// BuildInjection 读该记忆目录的索引并组装注入段落（Dir 已知时的入口）。
+//
+// 返回 Injection：不存在 / 空 → Empty()==true、Reason 非空、**err 为 nil**
+// （官方 "If a file doesn't exist, no error" —— 绝大多数会话都没有记忆，不该报错）。
+// 真正的读盘错误（权限、IO）才返回 err，交给装配层决定是否记日志。
+func (c Config) BuildInjection(d Dir) (Injection, error) {
+	c = c.withDefaults()
+	if !c.enabled() {
+		// 开关前置判定发生在任何 I/O 之前：关闭时**一次读盘都不发生**。
+		return Injection{Enabled: false, Reason: "disabled"}, nil
+	}
+	return c.buildInjection(d)
+}
+
+func (c Config) buildInjection(d Dir) (Injection, error) {
+	path := joinIndex(d)
+	raw, err := c.ReadFile(path)
+	if err != nil {
+		if isNotExist(err) {
+			// 官方：索引不存在不报错。但**仍然注入说明段**——这正是冷启动唯一一次
+			// 能把记忆目录告诉模型的机会（没有 MEMORY.md 就永远没有"第一条"）。
+			// 见 guidance.go 顶部的闭环分析。
+			return Injection{
+				Text:    indexHeading + "\n\n" + guidance(d, false),
+				Enabled: true, Dir: &d, Reason: "no-index",
+			}, nil
+		}
+		return Injection{Enabled: true, Dir: &d}, err
+	}
+	load, text := boundIndex(d, raw)
+	if strings.TrimSpace(text) == "" {
+		// 空索引（模型建了 MEMORY.md 但还没写条目）：同样注入**说明段**。
+		// 「无索引」与「空索引」在模型看来是同一件事——都还没有记忆——所以给同一
+		// 段文本，不因为文件碰巧存在就说"你的索引是空的"（那会像是丢了东西）。
+		return Injection{
+			Text:    indexHeading + "\n\n" + guidance(d, false),
+			Enabled: true, Dir: &d, Reason: "empty-index",
+		}, nil
+	}
+	// ↓ 截断提示：**只陈述本次已经发生的事实**，不新增机制（见 truncationNotice）。
+	if load.TruncatedBy != "" {
+		text += truncationNotice(load.TruncatedBy)
+	}
+	return Injection{
+		Text:    indexHeading + "\n\n" + text + "\n\n" + guidance(d, true),
+		Enabled: true,
+		Dir:     &d,
+		Load:    load,
+	}, nil
+}
+
+// truncationNotice 拼出"本次加载被截断"的末尾提示（官方口径）。
+//
+// # 为什么这不是自行发明机制
+//
+// 官方（memory#how-it-works）已经规定了这件事会发生，只是没有规定怎么告知：
+//
+//	"Claude Code measures the file against the 200-line and 25KB read limits…
+//	 because everything past the limit is dropped on the next load."
+//
+// 所以"本段清单不完整"是**既有实现里已经在发生的既成事实**（boundIndex 一直在丢），
+// 提示只是把它如实呈现给被影响的一方——与"索引行如实呈现、不删不改"是同一条原则：
+// 宿主可以搬运事实，不能替模型判断。
+//
+// 而不做提示的后果不是"少显示几十行"，是一个模型自己发现不了的循环：
+// 250 行的索引里后 50 条在清单上凭空消失 → 模型据此判定"这条我没记过" → 重记一遍
+// → 索引更长 → 下一轮又消失一批。它看到的清单语法完全正常，没有任何可察觉的信号。
+//
+// # 为什么不改索引本身
+//
+// 官方限额是**加载**限额（read limits），不是"必须这么短"的校验：写侧 CheckIndex 才是
+// 校验面，而它可被 Bash（`echo >> MEMORY.md`）绕过 write_file 钩子。读侧唯一能做的、
+// 且不越权做的事，就是如实说一声"这里被截断了"，剩下的由模型自己 read MEMORY.md 解决。
+//
+// # 三条自我约束（写死在这里以免后来者"顺手优化"）
+//
+//  1. **不点名**：提示里不得出现任何被截掉的文件名或条目数——那是在泄露内容，
+//     也在暗示"确实丢了哪几条"，模型会开始猜。
+//  2. **不计数**：提示是宿主加的话，不属于 MEMORY.md，因此**不计入 200 行 / 25KB**
+//     （官方量的是文件本身）。它拼在 boundIndex 之后，天然不会被下一轮度量到。
+//  3. **不引导新行为**：只说"可以自己读完整清单"——这是官方本来就有的标准文件工具能力，
+//     不是新协议（§2：上一版 6 条自相矛盾的协议是 12%~62% 采纳率的来源）。
+//
+// 放在**末尾**而不是开头：开头是清单的第一印象，模型逐行读清单时最先看到的就是它，
+// 会把每一条都当成有保留地呈现；末尾则只在模型读完清单、准备据此行动时才生效，
+// 且不打断「标题 → 条目」这个官方规定的阅读结构。
+func truncationNotice(truncatedBy string) string {
+	// truncatedBy 的取值域只有 "line" / "byte"（boundIndex 的全部赋值点），
+	// 原样透出，好让模型知道**哪一个**限额先到：成因不同，模型该做的事也不同
+	// （行数超了要合并条目，字节超了要缩短行）。它是个计量维度名，不是记忆内容。
+	return "\n\n注意：以上索引已按 200 行 / 25KB 限额截断，本次先到的是 " + truncatedBy +
+		" 限额（超出限额的内容在本次加载中被丢弃）。未显示的部分可能还包含其他记忆条目，" +
+		"如需查看完整清单，请自行读取 MEMORY.md。"
+}
+
+// boundIndex 把索引正文截到 MaxIndexLines 行 / MaxIndexBytes 字节，取先到者。
+//
+// 官方（memory#how-it-works）：
+//
+//	"Claude Code measures the file against the 200-line and 25KB read limits.
+//	 If the file is near a limit… If the file is over a limit, the write still
+//	 succeeds, but Claude Code returns an error telling Claude to rewrite the index,
+//	 because everything past the limit is dropped on the next load."
+//
+// 即**超限部分下次加载时被直接丢弃**，所以截断必须是"按行切 + 按字节切"两遍独立进行，
+// 取先到者，而不是先按行再按字节串行（那会因行截断后变短而错过字节限额）。
+func boundIndex(d Dir, raw []byte) (*IndexLoad, string) {
+	load := &IndexLoad{
+		Dir:        d,
+		Path:       joinIndex(d),
+		TotalBytes: len(raw),
+		TotalLines: countLines(string(raw)),
+	}
+
+	// — 字节限额 —（先切字节：25KB 常比 200 行先到）
+	b := raw
+	if len(b) > MaxIndexBytes {
+		b = b[:MaxIndexBytes]
+		// 官方说"everything past the limit is dropped"，即硬切。硬切可能落在多字节
+		// rune 中间，产出的字符串会带 U+FFFD；这里退到最近的完整 rune 边界，
+		// 保证注入文本永远 UTF-8 合法（非法字节进 prompt 会让 provider 报错）。
+		b = trimPartialRune(b)
+		load.TruncatedBy = "byte"
+	}
+
+	text := string(b)
+	// — 行限额 —
+	// 按 "\n" 切、去掉末尾空段：官方示例的索引以单个换行结尾，若按 Split 的末段
+	// 算行数会把"文件结尾换行"误判成多一行，白白少载一条记忆。
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > MaxIndexLines {
+		lines = lines[:MaxIndexLines]
+		// 只有字节限额**没先到**时才归因为"行"。
+		//
+		// 这里是"取先到者"的落点（见本函数顶部）：字节先切完 25KB 之后，剩下的
+		// 行数仍可能超 200，若此时无条件覆盖，先到的事实就被抹掉了——实测
+		// 500 行长索引会被报成 "line"，而 25KB 才是先到的那一个。
+		// 归因错会把模型引向无效动作：该缩短行的时候被告知去合并条目
+		//（truncationNotice 用这个维度名给指引，见 index.go:189-196）。
+		if load.TruncatedBy == "" {
+			load.TruncatedBy = "line"
+		}
+	}
+	// 截断完成后再做字节计数：报告的必须是**真正进了 prompt 的量**，
+	// 而不是"截断前那一坨有多少字节"——后者在行限额先触发时会偏大。
+	joined := strings.Join(lines, "\n")
+	load.LoadedLines = len(lines)
+	load.LoadedBytes = len(joined)
+
+	// 索引自带的标题行与宿主加的标题重复，注入前去掉（见 stripIndexHeading）。
+	// LoadedLines/LoadedBytes 保持为"从文件里加载了多少"——官方量的是文件本身，
+	// 标题是注入这一步的呈现处理，不该改写这个数字。
+	body := stripIndexHeading(joined)
+	// Text 是注释承诺过的字段（"截断后的索引正文"）。此前声明了却从未赋值，
+	// 恒为空串——任何读它的调用方都会静默拿到空值，而这种空值又和"没有索引"
+	// 长得一样。这里补上，让字段名与注释对得上实现。
+	load.Text = body
+	return load, body
+}
+
+// stripIndexHeading 去掉索引正文**首个** markdown 标题行及其后的空行。
+//
+// 为什么做这一件事（它看起来像自创，所以把理由写全）：
+//
+//  1. 宿主要注入的段落本来就会带一行标题（模型需要知道这段是记忆清单）。官方示例
+//     的 MEMORY.md 第一行也是 `# Project Memory`——两份标题叠在一起纯属浪费 context。
+//  2. 它让"索引只有标题、没有条目"这种退化状态能被判为**空**：否则宿主会注入一段
+//     只有标题的空清单，既占 context 又让模型误以为"记忆系统已就绪"。
+//     §5.2 的硬要求是「无记忆时 prompt 逐字节不变」，这个退化状态必须算"无记忆"。
+//  3. 顺序上它发生在**限额判定之后**：官方量的是文件本身，所以 TotalLines/TotalBytes
+//     与截断都按原文件算，标题只影响最终进入 prompt 的那一份文本。
+//
+// 只剥**第一个非空行**的标题，且只认 ATX 标题（`#`…）；正文里的 `#` 标题不动
+// （模型可能把索引写成按主题分组的多级列表）。
+func stripIndexHeading(s string) string {
+	lines := strings.Split(s, "\n")
+	i := 0
+	for ; i < len(lines); i++ {
+		t := strings.TrimSpace(strings.TrimRight(lines[i], " \t\r"))
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "#") {
+			rest := t[1:]
+			if rest == "" || rest[0] == ' ' || rest[0] == '\t' {
+				i++ // 跳过标题行本身
+			}
+		}
+		break
+	}
+	for ; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			break
+		}
+	}
+	return strings.Join(lines[i:], "\n")
+}
+
+// CheckIndex 测量**已落盘**的索引是否超限，供 write_file 钩子在写后调用（§4.3）。
+//
+// 官方（memory#how-it-works）把触发点写得很清楚：
+//
+//	"After Claude writes to `MEMORY.md`, Claude Code measures the file
+//	 against the 200-line and 25KB read limits."
+//
+// 超限时官方只定义了一种返回：
+//
+//	"If the file is over a limit, the write still succeeds, but Claude Code
+//	 returns an error telling Claude to rewrite the index, because everything
+//	 past the limit is dropped on the next load."
+//
+// 所以本函数**只判超限**：在限额内一律返回 nil，接近限额时的精简提醒由
+// NearIndexNotice 单独给出（那走钩子的 notice 通道，不是错误）。
+//
+// 2026-09-30 修正：此处的注释原写「官方文档没有规定触发点，本轮不接」——**这是错的**，
+// 触发点就在上面引用的第一句里。误读的代价是 CheckIndex 与 NearIndexNotice 都成了
+// 没有调用点的死函数，而 postWrite 恰好在 `!IsTopic` 处跳过 MEMORY.md，
+// 三处凑成"接线齐全但永不触发"。见 Wiki《HAI-Harness-Memory官方原文摘录》§5.3。
+//
+// 索引不存在返回 nil：官方对索引缺失的规定是"不注入不报错"，写后测量同理。
+func (c Config) CheckIndex(d Dir) error {
+	raw, err := c.withDefaults().ReadFile(joinIndex(d))
+	if err != nil {
+		if isNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	load, _ := boundIndex(d, raw)
+	if load.TruncatedBy != "" {
+		return ErrIndexTooLarge
+	}
+	return nil
+}
+
+// NearIndexNotice 接近限额时给模型的精简提醒（官方 memory#how-it-works 的原话口径）。
+//
+// 官方原文（memory#how-it-works）：
+//
+//	"If the file is near a limit, Claude Code reminds Claude to shorten it:
+//	 keep one line per entry, move detail into topic files, and merge or drop
+//	 stale entries."
+//
+// 官方说的是 **reminds**（提醒）而不是报错，所以它走钩子的 notice 通道而非 error
+// 通道——见 builtin.WithPostWrite 的注释。CheckIndex 只判"已经超限"，两者合起来
+// 才是官方那一对行为。
+//
+// 阈值取「用量 ≥ 限额的四分之三」。官方没有给数字（只说 "near a limit"），
+// 这里是产品侧的一个具体取值，写出来是为了让它可测、可争论，而不是藏在代码里。
+//
+// 2026-09-30：由包级函数改为 Config 的方法。此前它内部硬编码 Config{}，绕过了
+// 注入的 ReadFile 出口——测试无法计数、也无法指向临时目录之外的真实 I/O。
+func (c Config) NearIndexNotice(d Dir) string {
+	raw, err := c.withDefaults().ReadFile(joinIndex(d))
+	if err != nil {
+		return ""
+	}
+	load, _ := boundIndex(d, raw)
+	nearLines := MaxIndexLines*3/4 <= load.TotalLines
+	nearBytes := MaxIndexBytes*3/4 <= load.TotalBytes
+	if !nearLines && !nearBytes {
+		return ""
+	}
+	return "MEMORY.md 接近 200 行 / 25KB 加载上限：请精简索引——每条一行、细节移到 topic 文件、合并或丢弃过期条目。"
+}
+
+// joinIndex 索引文件路径（d.Path 已是 Clean 过的绝对路径，直接用 "/" 拼即可）。
+func joinIndex(d Dir) string { return d.Path + "/" + IndexFileName }
+
+// countLines 统计行数（等价 wc -l：结尾有换行时不算多出空行；无换行结尾也计 1 行）。
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		n++
+	}
+	return n
+}
+
+// trimPartialRune 把可能被切断的多字节 rune 退掉。
+func trimPartialRune(b []byte) []byte {
+	for i := len(b) - 1; i >= 0 && i > len(b)-utf8.UTFMax-1; i-- {
+		if utf8.RuneStart(b[i]) {
+			r, size := utf8.DecodeLastRune(b[:i+1])
+			if r == utf8.RuneError && size <= 1 {
+				// i 之后是不完整的尾部字节，退到 i。
+				return b[:i]
+			}
+			return b
+		}
+	}
+	return b
+}
+
+// isNotExist 判定「文件不存在」。fs.ErrNotExist 覆盖 os / iofs 两层的 ENOENT。
+func isNotExist(err error) bool { return errors.Is(err, fs.ErrNotExist) }

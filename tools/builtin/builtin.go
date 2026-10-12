@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // FileTools 绑定工作区根目录的文件工具集。
@@ -32,6 +33,63 @@ type FileTools struct {
 	// bash，等于让模型去调不存在的工具、白耗轮次；nil = 默认提示 bash（库默认，既有
 	// 用户不受影响）。
 	binaryHint func(path string) string
+
+	// postWrite 写/改成功后的宿主钩子，参数是**绝对路径**。nil = 不挂钩（库默认，
+	// 既有用户不受影响）。
+	//
+	// 用途：Project Memory 的 modified 戳（memory 包 StampModified）。官方规定
+	// topic 文件被写入时补 `modified`，而记忆文件由模型用**标准 write_file /
+	// edit_file** 写入——所以戳时间戳只能挂在这两个工具的写成功路径上，没有别的
+	// 入口。工具本身不知道"记忆"是什么概念，只负责在写成功后报一次绝对路径；
+	// 是不是记忆文件、要不要补戳、开关是否打开，全部由宿主的钩子决定。
+	//
+	// 为什么用钩子而不是直接 import memory：工具层不应依赖任何产品概念
+	// （同 binaryHint 的分层理由）。宿主不注入钩子 = 行为与今天完全一致。
+	//
+	// **带 ctx**（2026-09-30 追加）：Project Memory 的 "Saved/Recalled N memories"
+	// 需要把事件挂到**本次运行**上（RunId + Handler 都在工具上下文里）。不带 ctx 的
+	// 钩子只能看到路径，发不出可关联的事件——第一版就踩了这个：单测直接调宿主方法
+	// 全绿，端到端那条（真的走 read_file）却是 0 条事件。
+	//
+	// 返回 (notice, err) 而不是单一 error，是 2026-09-30 的修正。宿主有两类
+	// **不同性质**的话要在写成功后告诉模型，而它们不能走同一条通道：
+	//
+	//	err     真失败：写入本身没成，或官方明说要报错的情形（如 MEMORY.md 超限，
+	//	         官方 "the write still succeeds, but Claude Code returns an error
+	//	         telling Claude to rewrite the index"）。回错误是忠实的。
+	//	notice  写**已经成功**，但顺带提醒一句（如索引接近限额）。把它塞进 err
+	//	         会让模型以为写失败了——它很可能重试，而重试只会让索引更长，
+	//	         正是这条提醒要避免的结果。
+	postWrite func(ctx context.Context, absPath string) (notice string, err error)
+	// postRead 读成功后的对称钩子，签名与 postWrite 一致。默认 nil（零开销）。
+	//
+	// 为什么需要它（2026-09-30）：Project Memory 的用户可见面里有一条
+	// "Recalled N memories"（官方 memory#how-it-works）。要诚实地报这个数，就得知道
+	// 模型**读了哪些记忆文件**——而读只有这一个入口，postWrite 只能看见写。
+	//
+	// 返回值用途与 postWrite 相同，但**目前没有宿主用它**：读取失败要照常报错，
+	// 读取成功没有要附加给模型的提示（官方没规定读记忆要提醒什么）。签名先对齐，
+	// 是为了不必在两个钩子不一致时再改一次。
+	postRead func(ctx context.Context, absPath string) (notice string, err error)
+}
+
+// WithPostRead 注入"读成功后"钩子（nil = 保持默认不挂钩）。
+//
+// 与 WithPostWrite 同型：notice 拼在结果后、err 回给模型。见 WithPostWrite 的注释
+// 为什么那两条通道必须分开。
+func (f *FileTools) WithPostRead(fn func(context.Context, string) (string, error)) *FileTools {
+	f.postRead = fn
+	return f
+}
+
+// WithPostWrite 注入"写/改成功后"钩子（nil = 保持默认不挂钩）。
+//
+// notice 会拼在成功结果**后面**返回给模型（非错误）；err 会**一并回给模型**，不吞：
+// Step 4 补戳失败若被静默吞掉，记忆文件会带着过期或缺失的 modified 继续留在索引里，
+// 而模型毫不知情。
+func (f *FileTools) WithPostWrite(fn func(context.Context, string) (string, error)) *FileTools {
+	f.postWrite = fn
+	return f
 }
 
 // WithBashSandbox 注入 bash 工具的执行后端（如 macOS Seatbelt / Linux bwrap）。
@@ -89,6 +147,31 @@ func (f *FileTools) Register(e *tools.Engine) {
 	}
 }
 
+// pathParamDesc 是 read_file / write_file / edit_file 三个工具共用的 path 参数说明。
+//
+// # 为什么必须改（2026-09-30）
+//
+// 原文是 "File path (relative to workspace root)"，**与 resolve 的实际行为不符**，而
+// 这条不符在 Project Memory 上直接造成写入失败：
+//
+//	resolve 接受绝对路径（工作区外也接受），只拒绝用 `..` 逃逸的**相对**路径；
+//	而 schema 说"相对工作区根"，模型于是把宿主给它的**绝对**记忆目录路径
+//	（如 ~/.go-code/memory/repos/<id>/）转成相对路径 —— 被拒：
+//	    path "../009/mem/repos/010-f5ae/relay-backoff.md" escapes workspace root
+//
+// 即：宿主与工具**各自**都是对的，合起来把模型带进死路。真实 provider 跑批里
+// 每 7 次写入尝试就有 1 次这样失败（2026-09-30 实测）。
+//
+// 官方没有这个矛盾：Claude Code 的 Write 参数写的是
+// "Absolute path to file, or relative to the working directory" —— 两种都收。
+// 我们不改 resolve 的行为（拒绝 `..` 逃逸是刻意的，见下），只把**实际规则**说准：
+// 相对路径按工作区根解析且不得逃逸，要写工作区外的文件就用绝对路径。
+//
+// 这是工具契约的描述修正，不是新机制：行为一个字没改，schema 终于与实现一致。
+const pathParamDesc = "File path. A relative path is resolved against the workspace root " +
+	"and may not escape it (a leading ../ is rejected); use an absolute path for files " +
+	"outside the workspace."
+
 // resolve 校验并解析路径为绝对路径（问题十六：与沙箱/审批统一治理）。
 //   - 相对路径 → 锚定 workspace root（既有行为；`..` 逃逸仍拒绝——相对语义下
 //     工作区外无意义，出工作区请用绝对路径表达显式意图）；
@@ -96,48 +179,189 @@ func (f *FileTools) Register(e *tools.Engine) {
 //     进程；mode.Approve 审批管所有工具调用），工具层不再自行锚死 workspace；
 //   - go-code 自身配置/密钥目录（~/.go-code）显式拒绝——与 Seatbelt 的
 //     defaultSensitivePaths 同一保护对象，防止模型篡改 harness 自身配置。
+//
+// **denyHarnessConfigPath 必须对两条分支都生效**（2026-10-09 修复，此前只在绝对
+// 路径分支上调）。攻击面不是理论上的：
+//
+//	模型: bash "ln -s ~/.go-code /workspace/cfg"
+//	模型: read_file path="cfg/settings.json"
+//	  → 相对分支只做 HasPrefix(workspace) 词法判定 → 放行
+//	  → os.ReadFile 跟随软链接 → 读到明文 api_key
+//
+// 而绝对路径那条路（`/workspace/cfg/settings.json`）是被拦的——同一个文件只因写法
+// 不同而结论相反。根因是"路径从哪来"被当成了"路径到哪去"的判据，而 deny 的本职是
+// 后者：Join 之后两条分支产出的都是绝对路径，就该受同一套判定。
 func (f *FileTools) resolve(raw string) (string, error) {
 	if raw == "" {
 		return "", errors.New("path is required")
 	}
-	if filepath.IsAbs(raw) {
-		p := filepath.Clean(raw)
-		if err := denyHarnessConfigPath(p); err != nil {
-			return "", err
-		}
-		return p, nil
+	base := ""
+	if !filepath.IsAbs(raw) {
+		base = f.root
 	}
-	base := f.root
 	p := filepath.Clean(filepath.Join(base, raw))
-	if p != base && !strings.HasPrefix(p, base+string(os.PathSeparator)) {
+	if base != "" && p != base && !strings.HasPrefix(p, base+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path %q escapes workspace root %q", raw, base)
+	}
+	if err := denyHarnessConfigPath(p); err != nil {
+		return "", err
 	}
 	return p, nil
 }
 
 // denyHarnessConfigPath 拒绝 go-code 自身配置/密钥路径（~/.go-code）：settings.json
 // 可能含 api_key。无法定位 home 时放弃该保护（与旧行为一致，不阻塞正常路径）。
+//
+// # 必须解析软链接（2026-09-29，Project Memory 放行 memory 子树后补上）
+//
+// 放行 memory 子树让模型获得了**在记忆目录里创建任意文件**的能力：bash 的 `ln -s`
+// 不在危险命令名单里，而 memory 子树在沙箱放行子树内。于是出现一条完整攻击链：
+//
+//	模型: bash "ln -s ~/.go-code/settings.json ~/.go-code/memory/repos/<id>/steal.md"
+//	模型: read_file ~/.go-code/memory/repos/<id>/steal.md
+//	  → 词法判定落在 memory 子树 → 放行
+//	  → os.ReadFile **跟随软链接** → 读到 settings.json 里的明文 api_key
+//
+// 关键：read_file 跑在主 Agent 进程里、**不进沙箱**，本函数是它唯一的防线。
+// 所以不能只做词法比较 —— 必须把**真实目标**解析出来再判定，否则 memory 子树
+// 就成了通往受保护目录的桥。
+//
+// 解析后若真实目标仍在 ~/.go-code 内，按同一份放行名单判定；若解析到
+// ~/.go-code 之外，那与模型直接读那个绝对路径无区别，不是本函数新增的攻击面。
+//
+// # 硬链接是 EvalSymlinks 看不见的同型链（2026-10-09 补）
+//
+// 上面的链路全部围绕软链接，但 `ln`（不带 `-s`，建硬链接）与 `ln -s` 同样常用，
+// 而 memory 子树在沙箱放行名单里：
+//
+//	模型: bash "ln ~/.go-code/settings.json ~/.go-code/memory/repos/<id>/note.md"
+//	模型: read_file ~/.go-code/memory/repos/<id>/note.md
+//	  → EvalSymlinks 对该路径无感（硬链没有"链接"可解，它自己就是真实名字）
+//	  → 词法命中放行名单 → 放行
+//	  → os.ReadFile  → 读到明文 api_key
+//
+// 硬链与源文件共享 inode，所以唯一的判据是 inode 比对。受保护侧文件数很少且不随
+// 会话增长，反过来扫它们是廉价的；若扫放行子树（memory 可能有上千个文件）则不划算。
 func denyHarnessConfigPath(abs string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
+	real := resolveRealTarget(abs)
+	// home 也要解析：macOS 上 /tmp 是 /private/tmp 的软链接，HOME=/tmp/xxx 时
+	// 解析出的目标带 /private 前缀而 cfgDir 不带，两边基准不一致 → 判定整体失效。
+	// 判据：软链接解析后的真实路径与配置根必须在**同一基准**上比较。
+	if resolvedHome, rerr := filepath.EvalSymlinks(home); rerr == nil {
+		home = resolvedHome
+	}
 	cfgDir := filepath.Clean(filepath.Join(home, ".go-code"))
-	if abs == cfgDir || strings.HasPrefix(abs, cfgDir+string(os.PathSeparator)) {
+	if real == cfgDir || strings.HasPrefix(real, cfgDir+string(filepath.Separator)) {
 		// 受管子树放行：plugins（Browser Use 等受管组件的安装/调试需要文件工具可达）
 		// 与 runtime（受管 Python 运行时 ~/.go-code/runtime/python：venv 解释器与
 		// 依赖库需可读、__pycache__ 需可写）—— 与沙箱 carve-out
 		// （defaultOpenSubpaths）同语义，两处必须同步，否则沙箱能跑而文件工具读写不了。
+		// memory（Project Memory，官方 auto memory 目录）：官方形态就是"模型用**标准
+		// read_file / write_file / edit_file** 读写记忆目录"，没有记忆专用工具
+		// （技术方案 §1）。不放行它 = 模型既读不到注入的索引指向的 topic，也写不进
+		// 新记忆，auto memory 整个不成立。该子树下只有记忆文件（0600），不含密钥。
 		// .go-code 其余（settings.json 明文密钥 / sessions / events）仍保护。
-		for _, sub := range []string{"plugins", "runtime"} {
+		for _, sub := range allowedConfigSubtrees {
 			dir := filepath.Join(cfgDir, sub)
-			if abs == dir || strings.HasPrefix(abs, dir+string(os.PathSeparator)) {
+			if real == dir || strings.HasPrefix(real, dir+string(filepath.Separator)) {
+				// 硬链接桥：放行子树内的名字可以与受保护文件**共享 inode**，词法与
+				// EvalSymlinks 都看不出来。放行之前先否掉它（见本函数顶部的链路说明）。
+				if isHardlinkToProtected(abs, cfgDir) {
+					return fmt.Errorf("path %q is a hard link to a protected go-code config file", abs)
+				}
 				return nil
 			}
 		}
-		return fmt.Errorf("path %q is go-code's own config/secret directory and is protected", abs)
+		return fmt.Errorf("path %q resolves to %q, which is go-code's own config/secret directory and is protected", abs, real)
 	}
 	return nil
+}
+
+// DenyHarnessConfigPath 是 denyHarnessConfigPath 的导出门面。
+//
+// 存在的理由：desktop/bridge 另有**一份拷贝**（main_helpers.go）服务于预览通路
+// （file_preview / xlsx_preview 等）。那份拷贝是纯词法的——不解析软链接、放行名单
+// 还漏了 memory，于是同一条链路在预览通路里畅通无阻。把它改为委托本函数，让
+// "~/.go-code 保护"只有一份实现（否则每修一次都要记得同步两处，而已经漂移过一次）。
+func DenyHarnessConfigPath(abs string) error { return denyHarnessConfigPath(abs) }
+
+// protectedConfigFiles ~/.go-code 下**可能含明文密钥**的配置文件。
+//
+// 硬链接比对只扫这份名单（而不是整个 ~/.go-code）：这些是已知的密钥载体，
+// 文件数固定、不随会话增长，逐个 stat 的成本可以忽略。新增密钥文件时加进来。
+var protectedConfigFiles = []string{
+	"settings.json", // provider api_key / base_url
+	"keys.json",     // 模型密钥
+	"im-config.json",
+	"oauth.json",
+}
+
+// isHardlinkToProtected 判定 abs 是否与某个受保护配置文件**共享 inode**。
+//
+// 判据是 (Dev, Ino) 而不是只看 Ino：Ino 只在同一文件系统内唯一，而 ~/.go-code 理论上
+// 可能跨卷（用户把部分内容放到另一块盘上）。 Dev+Ino 同时相等才是同一个文件。
+//
+// 取不到 stat（文件不存在 / 不是常规文件 / 平台没有 Stat_t）时返回 false：
+// 判不了就当没有硬链，其余判定（词法 + EvalSymlinks）仍然生效。
+func isHardlinkToProtected(abs, cfgDir string) bool {
+	fi, err := os.Stat(abs)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	for _, name := range protectedConfigFiles {
+		ti, err := os.Stat(filepath.Join(cfgDir, name))
+		if err != nil || !ti.Mode().IsRegular() {
+			continue
+		}
+		ts, ok := ti.Sys().(*syscall.Stat_t)
+		if !ok {
+			continue
+		}
+		if ts.Dev == st.Dev && ts.Ino == st.Ino {
+			return true
+		}
+	}
+	return false
+}
+
+// allowedConfigSubtrees ~/.go-code 下对文件工具放行的受管子树。
+//
+// 与 sandbox.defaultOpenSubpaths 是**同一份语义的两次列举**（沙箱放行 shell 侧、
+// 本名单放行文件工具侧）。两处不同步就会出现"沙箱能跑而文件工具读写不了"或反向。
+// 由 TestAllowedSubtreesMatchSandboxOpenSubpaths 钉住同步。
+var allowedConfigSubtrees = []string{"plugins", "runtime", "memory"}
+
+// resolveRealTarget 解析路径的**真实目标**：对最深的已存在祖先做 EvalSymlinks，
+// 再把剩余（可能尚不存在）的部分原样接回去。
+//
+// 为什么不能直接 filepath.EvalSymlinks(abs)：write_file 写新文件时目标不存在，
+// EvalSymlinks 报 ENOENT。而那正是最需要判定的场景之一（模型新建软链接时，
+// 链接本身存在；它指向的 settings.json 通常也存在，但新记忆文件确实不存在）。
+func resolveRealTarget(abs string) string {
+	p := filepath.Clean(abs)
+	rest := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			if rest == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return abs // 理论上到不了这里（根必然存在）
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 // ---------- read_file ----------
@@ -161,7 +385,7 @@ func newReadFileTool(f *FileTools) *readFileTool {
 			Name_:        "read_file",
 			Description_: "Read a text file and return numbered lines. path is required and relative to the workspace root. start_line and end_line are optional 1-based inclusive integers. Omit both for the first 200 lines; if only start_line is given, read up to 200 lines from there. If both are given in reverse order, the tool normalizes them to the ascending range and reports the normalization. Reading an image file (png/jpeg/gif) returns the image itself for direct viewing (do not pass start_line/end_line for images). Use glob to locate files and grep to search content.",
 			Params_: tools.Obj(map[string]any{
-				"path":       tools.Str("File path (relative to workspace root)"),
+				"path":       tools.Str(pathParamDesc),
 				"start_line": tools.Map{"type": "integer", "minimum": 1, "default": 1, "description": "First line, 1-based; omit for line 1"},
 				"end_line":   tools.Map{"type": "integer", "minimum": 1, "description": "Last line, inclusive; omit to read the default 200-line window. If end_line is smaller than start_line, the tool normalizes the range to ascending order and reports it."},
 			}, "path"),
@@ -312,7 +536,21 @@ func (t *readFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	for i, l := range lines {
 		fmt.Fprintf(&b, "%d: %s\n", start+i, l)
 	}
-	return b.String(), nil
+	notice, err := t.notifyPostRead(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	return withNotice(b.String(), notice), nil
+}
+
+// notifyPostRead 触发宿主"读成功后"钩子；未注入钩子时是零成本空操作。
+// 与 notifyPostWrite 同理：只在**读成功之后**调用——读失败时什么也没发生，
+// 报"回忆了记忆"是假的。
+func (t *readFileTool) notifyPostRead(ctx context.Context, absPath string) (string, error) {
+	if t.FileTools == nil || t.FileTools.postRead == nil {
+		return "", nil
+	}
+	return t.FileTools.postRead(ctx, absPath)
 }
 
 // statPath 操作前预检查目标存在性（给 LLM 可操作提示，而非裸错误）。
@@ -471,7 +709,7 @@ func newWriteFileTool(f *FileTools) *writeFileTool {
 				"Overwrite is atomic (temp file + rename; concurrent readers never see partial content); concurrent write conflicts return an error (retryable). " +
 				"Creates missing files and parent directories automatically; if you need to keep the old content before overwriting, back it up with read_file first.",
 			Params_: tools.Obj(map[string]any{
-				"path":    tools.Str("File path (relative to workspace root)"),
+				"path":    tools.Str(pathParamDesc),
 				"content": tools.Str("Text content to write (full new file content)"),
 				"append":  map[string]any{"type": "boolean", "default": false, "description": "Append mode (default false = overwrite)"},
 			}, "path", "content"),
@@ -498,7 +736,7 @@ func (t *writeFileTool) ValidParams(_ context.Context, _, arguments string) erro
 	return nil
 }
 
-func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, error) {
+func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, error) {
 	t.diff = nil
 	var a writeArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
@@ -537,7 +775,11 @@ func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, er
 			}
 		}
 		t.diff.Created = created
-		return fmt.Sprintf("appended (+%d)", t.diff.Added), nil
+		notice, err := t.notifyPostWrite(ctx, p)
+		if err != nil {
+			return "", err
+		}
+		return withNotice(fmt.Sprintf("appended (+%d)", t.diff.Added), notice), nil
 	}
 	// 覆盖：锁内读旧内容（若存在）→ 替换 → 算 diff。旧内容须在替换前读取，
 	// 与 edit_file 同款锁内读改写全程无竞态；替换后旧内容不可再得（信息源头在工具）。
@@ -559,7 +801,30 @@ func (t *writeFileTool) Call(_ context.Context, _, arguments string) (string, er
 	// 不能用 Removed==0 推断（纯插入内容同样是 +N -0）。
 	t.diff = finalizeDiff(computeFileDiff(a.Path, old, a.Content), a.Content)
 	t.diff.Created = lock == nil
-	return fmt.Sprintf("written (+%d -%d)", t.diff.Added, t.diff.Removed), nil
+	notice, err := t.notifyPostWrite(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	return withNotice(fmt.Sprintf("written (+%d -%d)", t.diff.Added, t.diff.Removed), notice), nil
+}
+
+// withNotice 把宿主钩子给的提醒拼在成功结果之后（空提醒 = 结果逐字节不变）。
+func withNotice(result, notice string) string {
+	if strings.TrimSpace(notice) == "" {
+		return result
+	}
+	return result + "\n\n" + strings.TrimSpace(notice)
+}
+
+// notifyPostWrite 触发宿主"写/改成功后"钩子；未注入钩子时是零成本空操作。
+//
+// 只在**写成功之后**调用：写失败时文件没变，补戳没有意义，且会把一次已经失败
+// 的操作报成"记忆写入出错"，掩盖真正的错误。
+func (t *writeFileTool) notifyPostWrite(ctx context.Context, absPath string) (string, error) {
+	if t.FileTools == nil || t.FileTools.postWrite == nil {
+		return "", nil
+	}
+	return t.FileTools.postWrite(ctx, absPath)
 }
 
 // ---------- edit_file ----------
@@ -579,7 +844,7 @@ func newEditFileTool(f *FileTools) *editFileTool {
 			Name_:        "edit_file",
 			Description_: "Replace exactly one occurrence in an existing text file. Read the file first and copy old_string exactly, including whitespace and line breaks. Use the shortest old_string that is still unique; uniqueness is more important than minimizing context. Keep the change minimal: new_string must contain only the necessary edits (ideally 1-3 lines) and must not rewrite unrelated content. If it matches zero or multiple times, no change is made. After an error never repeat the same arguments: read_file and refresh the edit. Use write_file only for intentional full-file replacement.",
 			Params_: tools.Obj(map[string]any{
-				"path":       tools.Str("File path (relative to workspace root)"),
+				"path":       tools.Str(pathParamDesc),
 				"old_string": tools.Str("Original text to replace (must appear exactly once; ideally 1-3 lines, just enough to be unique)"),
 				"new_string": tools.Str("Replacement text"),
 			}, "path", "old_string", "new_string"),
@@ -606,7 +871,7 @@ func (t *editFileTool) ValidParams(_ context.Context, _, arguments string) error
 	return nil
 }
 
-func (t *editFileTool) Call(_ context.Context, _, arguments string) (string, error) {
+func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, error) {
 	t.diff = nil
 	var a editArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
@@ -643,7 +908,20 @@ func (t *editFileTool) Call(_ context.Context, _, arguments string) (string, err
 	// 旧全文 s 与 replaced 均在手，免费产 diff（信息源头在工具）。
 	// edit_file 入口已 statPath 要求文件存在 → Created 恒 false（modified）。
 	t.diff = finalizeDiff(computeFileDiff(a.Path, s, replaced), replaced)
-	return fmt.Sprintf("[edit_file: replaced 1 occurrence in %s (+%d -%d)]", a.Path, t.diff.Added, t.diff.Removed), nil
+	notice, err := t.notifyPostWrite(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	return withNotice(fmt.Sprintf("[edit_file: replaced 1 occurrence in %s (+%d -%d)]", a.Path, t.diff.Added, t.diff.Removed), notice), nil
+}
+
+// notifyPostWrite 触发宿主"写/改成功后"钩子；未注入钩子时是零成本空操作。
+// 理由与 write_file 同名方法一致：只在写成功后调用，错误不吞，提醒不混进错误。
+func (t *editFileTool) notifyPostWrite(ctx context.Context, absPath string) (string, error) {
+	if t.FileTools == nil || t.FileTools.postWrite == nil {
+		return "", nil
+	}
+	return t.FileTools.postWrite(ctx, absPath)
 }
 
 // readAllLocked 读取目标文件全文（持锁时直接复用锁定 fd，避免再次 open 竞态）。

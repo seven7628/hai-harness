@@ -182,6 +182,35 @@ export interface SkillDetail {
   resources: string[]
 }
 
+// Project Memory 开关（bridge memory_settings 命令）。
+// explicit=false 表示用户从未设置过（默认开）—— UI 用来区分「默认开着」与「你手动开着」，
+// 前者不该在文案里说成用户的决定。
+export interface MemorySettings {
+  enabled: boolean
+  explicit: boolean
+  applies_to: string
+  memory_dir?: string
+  memory_dir_error?: string
+  env_override: boolean
+}
+
+// Project Memory 记忆文件清单（bridge memory_browse；官方 §2.7 的 `/memory`）。
+// 与 MemorySettings 分开：开关是全局偏好（不按工作区），清单是**本工作区**的记忆目录内容。
+export interface MemoryListedFile {
+  name: string
+  size: number
+  modified?: string
+  type?: string
+  indexed: boolean
+  missing?: boolean
+}
+
+export interface MemoryListing {
+  dir: string
+  index_present: boolean
+  files: MemoryListedFile[]
+}
+
 // 上下文构成分区（bridge context_breakdown 命令）。
 // 分区键与 SDK 常量一一对应：system_prompt / skills / tools / mcp / messages / other。
 // 口径（2026-09-20 重定）：
@@ -1799,6 +1828,18 @@ export const COMPRESS_THRESHOLD_DEFAULT = 0.8
 export const COMPRESS_THRESHOLD_MIN = 0.05
 export const COMPRESS_THRESHOLD_MAX = 0.95
 
+// 首字预算缺省（秒）。三处必须同值：bridge agentSettings.firstChunkTimeout()、
+// agents.Config/LLMCompressor.FirstChunkTimeout 的默认、本处（面板未配置时的回显）。
+// 2026-10-11 由 30 调宽到 90：30s 会把弱网/长首字模型（GLM / Claude 长思考 / 跨境链路 /
+// 企业代理）的**每一次尝试**都切成「上游故障」—— 该预算每次尝试独立计时，重试不会让
+// 同一个慢模型变快，于是 10 次重试全废、用户侧恒表现为「总是异常」。
+export const FIRST_CHUNK_TIMEOUT_DEFAULT = 90
+// 设置面板的合法区间（与 bridge agentSettings.MaxFirstChunkTimeoutSec / 命令校验同口径）。
+// 上限 900 的意义：再宽就接近「关掉预算」，那会让「上游完全无响应」重新变成长时间
+// 无反馈的等待（2026-09-18 实测 187s 静默挂死的成因），故 defaults 侧同样挡一道。
+export const FIRST_CHUNK_TIMEOUT_MIN = 1
+export const FIRST_CHUNK_TIMEOUT_MAX = 900
+
 // 已知模型默认单次输出上限（max_tokens；Provider 面板未配置时回退用）。
 // 数据源：provider 注册表（provider/models_*.go，models.dev 2026-08，与 pi 对齐）。
 export const KNOWN_MODEL_MAX_TOKENS: Record<string, Record<string, number>> = {
@@ -2405,6 +2446,22 @@ interface AppState {
   externalSkillsError?: string
   externalSkillsImported?: number
   skillDetail?: SkillDetail // 技能详情（skill_get；SkillsPage 预览）
+  // Project Memory 开关（memory_settings；设置面板 · Agent 组）。
+  memorySettings?: MemorySettings
+  // Project Memory 文件清单（memory_browse；设置面板 · 记忆浏览区）。
+  memoryListing?: MemoryListing
+  memoryBrowseAvailable: boolean
+  memoryBrowseLoading: boolean
+  // 浏览命令**失败**的原因（如 "workspace 为空"、读盘错误）。
+  //
+  // 必须与「记忆不可用」分开：两者在旧实现里共用 memoryBrowseAvailable=false，
+  // 界面上都会显示「项目记忆未启用」—— 命令失败时说这句话是**误导**，用户会去
+  // 检查开关，而问题在别处。
+  memoryBrowseError?: string
+  // 记忆活动的合并计数（memory_activity 逐文件到达，弹窗前先攒一会儿）。
+  // 宿主没有"一次运行结束"的可靠观测点，聚合放在这一侧。
+  memPendingSaved: number
+  memPendingRecalled: number
   marketSkills?: MarketSkill[] // 远程市场浏览结果（skill_browse；SkillsPage 市场区块）
   markets: MarketInfo[] // 已保存市场（market_list；SkillsPage 市场管理）
   mcpServers: MCPServerInfo[] // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
@@ -2509,6 +2566,11 @@ interface AppState {
   toggleSkill(name: string, enabled: boolean): void // 启用/禁用（真过滤：发现清单 + load_skill）
   getSkill(name: string): void // 技能详情预览（skill_get）
   closeSkill(): void
+  // Project Memory 开关（设置面板 · Agent 组）。生效时机 = 下一个会话；
+  // 乐观更新，bridge 落盘失败时由 memory_set_enabled 响应触发回拉。
+  fetchMemorySettings(): void
+  setMemoryEnabled(on: boolean): void
+  fetchMemoryBrowsing(): void
   installSkill(url: string, scope: string, name?: string): void // 远程技能下载（skill_install）；name 可选 = 市场浏览后精确安装单个
   browseMarket(url: string): void // 浏览远程市场技能（skill_browse，只读；结果落 marketSkills）
   refreshMarket(url: string): void // 刷新当前浏览的市场（重拉 + 对比本地；安装/更新后调）
@@ -2613,6 +2675,7 @@ interface AppState {
   setGoalAlignmentRounds(n: number): void
   setSubagentConcurrency(patch: Partial<Pick<AgentSettings, 'max_subagents' | 'max_explore_subagents'>>): void // 子 agent 并发槽上限（乐观 + 持久化 + bridge 热更新）
   setCompressThreshold(t: number): void // 自动压缩触发阈值（占窗口比例；乐观 + 持久化 + bridge 热更新）
+  setFirstChunkTimeout(sec: number): void // 首字预算秒数（乐观 + 持久化 + bridge 热更新）
   setSTTSettings(patch: Partial<STTSettings>): void // 语音输入（话筒）配置（乐观 + 持久化）
   openNewFolder(): void // 「新建文件夹…」：打开创建文件夹 modal
   closeNewFolder(): void
@@ -3839,6 +3902,64 @@ export function dispatchEvent(raw: AnyEvent): void {
       // skill_get：技能详情（SKILL.md 指令 + 资源清单；预览）
       if (t === 'skill_get') {
         setState({ skillDetail: d as unknown as SkillDetail })
+        break
+      }
+      // memory_settings：Project Memory 开关回读。全局设置，不按工作区过滤。
+      if (t === 'memory_settings') {
+        if (r.ok) {
+          setState({
+            memorySettings: {
+              enabled: d.enabled !== false,
+              explicit: d.explicit === true,
+              applies_to: String(d.applies_to || 'next_session'),
+              memory_dir: typeof d.memory_dir === 'string' ? d.memory_dir : undefined,
+              memory_dir_error: typeof d.memory_dir_error === 'string' ? d.memory_dir_error : undefined,
+              env_override: d.env_override === true,
+            },
+          })
+        }
+        break
+      }
+      // memory_browse：记忆文件清单（官方 §2.7 的 `/memory`）。available=false =
+      // 记忆关着或取不到目录，不是错误——面板据此显示"未启用"而不是报错。
+      if (t === 'memory_browse') {
+        if (r.ok) {
+          const avail = d.available === true
+          const l = (d.listing || {}) as Record<string, unknown>
+          const rawFiles = Array.isArray(l.files) ? (l.files as Array<Record<string, unknown>>) : []
+          setState({
+            memoryBrowseAvailable: avail,
+            memoryBrowseLoading: false,
+            memoryBrowseError: undefined,
+            memoryListing: avail
+              ? {
+                  dir: String(l.dir || ''),
+                  index_present: l.index_present === true,
+                  files: rawFiles.map((f) => ({
+                    name: String(f.name || ''),
+                    size: Number(f.size) || 0,
+                    modified: typeof f.modified === 'string' ? f.modified : undefined,
+                    type: typeof f.type === 'string' ? f.type : undefined,
+                    indexed: f.indexed === true,
+                    missing: f.missing === true,
+                  })),
+                }
+              : undefined,
+          })
+        } else {
+          setState({
+            memoryBrowseAvailable: false,
+            memoryBrowseLoading: false,
+            memoryListing: undefined,
+            memoryBrowseError: String(r.error || '浏览记忆文件失败'),
+          })
+        }
+        break
+      }
+      // memory_set_enabled：落盘失败要把 UI 回滚到 bridge 的权威值。
+      // 乐观更新已经改了本地状态，不回滚就会出现「显示已关闭、重启后又开着」。
+      if (t === 'memory_set_enabled') {
+        if (!r.ok) send({ type: 'memory_settings', payload: {} })
         break
       }      // context_breakdown：上下文构成分区（Composer ctx 环 hover 面板）。
       // 会话级数据：响应归属的会话 ≠ 当前活跃会话（切会话后迟到）→ 丢弃，避免面板
@@ -5240,6 +5361,32 @@ export function dispatchEvent(raw: AnyEvent): void {
       })
       break
     }
+    // memory_activity：Project Memory 的读/写活动（官方 §2.7 的
+    // "Saved N memories" / "Recalled N memories"）。
+    //
+    // 宿主**逐文件**发（它没有"一次运行结束"的可靠观测点，聚合态放在事件系统里
+    // 要跨运行维护），所以合并在这一侧：同一 action 的事件在一个短窗口内累加，
+    // 窗口结束才弹一次。这正是官方那句话的形状（"Saved 2 memories" 而不是两次
+    // "Saved 1 memory"）。
+    case 'memory_activity': {
+      const action = String(raw.action || '')
+      if (action !== 'saved' && action !== 'recalled') break
+      const key = action === 'saved' ? 'memPendingSaved' : 'memPendingRecalled'
+      const prev = (getState() as unknown as Record<string, number>)[key] || 0
+      setState({ [key]: prev + 1 } as unknown as Partial<AppState>)
+      // 每次事件都重置定时器：一串写入聚成一条，一串之后再来的另起一条。
+      setTimeout(() => {
+        const n = ((getState() as unknown as Record<string, number>)[key] || 0) as number
+        if (n <= 0) return
+        setState({ [key]: 0 } as unknown as Partial<AppState>)
+        getState().showToast(
+          action === 'saved'
+            ? i18nT('settings.memory.savedToast').replace('{n}', String(n))
+            : i18nT('settings.memory.recalledToast').replace('{n}', String(n)),
+        )
+      }, 900)
+      break
+    }
     case 'agent_end': {
       const sid = getSid(raw, getState().activeSessionId)
       const id = String(raw.run_id || '')
@@ -6224,6 +6371,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   titleOverrides: initTitles,
   skills: [],
   externalSkillsStatus: undefined,
+  // 记忆浏览初始态：未加载。memoryBrowseAvailable=false 表示"还没查到"，
+  // 与"查到了但记忆关着"在 UI 上表现相同（都不列文件），故不额外区分。
+  memoryBrowseAvailable: false,
+  memoryBrowseLoading: false,
+  memPendingSaved: 0,
+  memPendingRecalled: 0,
+  memoryBrowseError: undefined,
   externalSkillsLoading: false,
   externalSkillsImporting: false,
   externalSkillsError: undefined,
@@ -7258,6 +7412,29 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   getSkill: (name) => send({ type: 'skill_get', payload: { name } }),
   closeSkill: () => set({ skillDetail: undefined }),
+  // —— Project Memory 开关（设置面板 · Agent 组）——
+  //
+  // 生效时机 = **下一个会话**（或 switch_model / switch_persona / set_provider 重建
+  // loop 之后）。运行中的会话不变：记忆注入是系统提示词的一部分，会话中途删掉会让
+  // 同一会话前后两轮"你记得什么"不一致，而记忆的价值恰恰建立在跨轮一致上。
+  //
+  // 乐观更新 + 失败回滚：bridge 落盘 ~/.go-code/memory.json 失败必须让 UI 回到原值
+  // ——「面板显示已关闭、重启后又开着」比报错更难排查。
+  fetchMemorySettings: () => send({ type: 'memory_settings', payload: {} }),
+  // 浏览清单是**按工作区**的：同一份设置面板在切工作区时必须换目录，
+  // 所以先置 loading 再发请求——否则两个工作区的清单会闪一下互相覆盖。
+  fetchMemoryBrowsing: () => {
+    set({ memoryBrowseLoading: true })
+    send({ type: 'memory_browse', payload: {} })
+  },
+  setMemoryEnabled: (on: boolean) => {
+    const prev = get().memorySettings
+    const base: MemorySettings = prev ?? {
+      enabled: true, explicit: false, applies_to: 'next_session', env_override: false,
+    }
+    set({ memorySettings: { ...base, enabled: on, explicit: true } })
+    send({ type: 'memory_set_enabled', payload: { enabled: on } })
+  },
   // 远程技能下载（exec git，全局/工作区作用域）：装完回拉清单；name 可选 = 市场浏览后精确安装单个
   installSkill: (url, scope, name) => {
     const payload: Record<string, unknown> = { url, scope }
@@ -8237,6 +8414,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     void transport.settingsSet({ agent }).then((r) => {
       if (!r.ok) return // 写盘失败：不推送阈值（配置未持久化，运行中改无意义）
       send({ type: 'set_compress_threshold', payload: { compress_threshold: value } })
+    })
+  },
+  // 首字预算（秒）：与 setCompressThreshold 同一套路（乐观更新 + 落盘 + 推送命令热更）。
+  // 数值钳在 (0, 900]：0/负数/非有限值回退默认 90（0 会让每次尝试瞬间失败，是误配不是
+  // 「关闭」）；超上界按 900 截断而非回退 —— 用户显式想放宽时不该被悄悄改小。
+  setFirstChunkTimeout: (sec: number) => {
+    const cur = get().settings.agent ?? { reminder_rounds: 30 }
+    const n = Math.round(sec)
+    let value: number
+    if (!Number.isFinite(n) || n < FIRST_CHUNK_TIMEOUT_MIN) value = FIRST_CHUNK_TIMEOUT_DEFAULT
+    else value = Math.min(FIRST_CHUNK_TIMEOUT_MAX, n)
+    const agent: AgentSettings = { ...cur, first_chunk_timeout: value }
+    set((s) => ({ settings: { ...s.settings, agent } }))
+    void transport.settingsSet({ agent }).then((r) => {
+      if (!r.ok) return // 写盘失败：不推送（配置未持久化，热更无意义）
+      send({ type: 'set_first_chunk_timeout', payload: { first_chunk_timeout: value } })
     })
   },
   // 语音输入（STT）配置：乐观更新 + 落盘（settings.json stt 段；Composer 话筒据此显隐）

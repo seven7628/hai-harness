@@ -92,6 +92,8 @@
   --cat-net: #debf91; /* 外部：联网 / MCP / 打开网页 */
   --cat-agent: #de919f; /* 子 agent：task / 后台任务 */
   --cat-skill: #debe91; /* 技能：SKILL(...) */
+  /* 记忆：苔绿。单独定义而不复用 --cat-skill（与 --cat-net 只差一个通道，不可分） */
+  --ctx-moss: #91c79b;
   /* —— 分类色板（文件类型）—— */
   --ft-code: #9591de;
   --ft-doc: #91b6de;
@@ -139,6 +141,7 @@
   --cat-net: #875e22;
   --cat-agent: #872234;
   --cat-skill: #875d22;
+  --ctx-moss: #2f7a48;
   /* —— 分类色板（文件类型）—— */
   --ft-code: #272287;
   --ft-doc: #225287;
@@ -4429,16 +4432,21 @@ body.is-electron .left.collapsed .rail .rbtn {
 /* ── 上下文构成面板（ctx 环 hover）────────────────────────────────────────
    分区配色（水墨调色板内取色，两套主题自动跟随）：
    消息=黛青（与 ctx 环主色一致）/ 工具=赭石 / MCP=朱砂（外部集成）/
-   系统提示词=竹青 / 技能=黛青×朱砂混色 / 其他=灰。 */
+   系统提示词=竹青 / 技能=黛青×朱砂混色 / 记忆=苔绿 / 其他=灰。 */
 .ctx-panel {
-  /* 6 段取分类色板（2026-09-21）：原来混用 indigo/ochre/cinnabar/bamboo ——
+  /* 7 段取分类色板（2026-09-21 首发 6 段，2026-09-29 加记忆）：原来混用
+     indigo/ochre/cinnabar/bamboo ——
      亮色下 --cinnabar 已变墨黑，与"其他"撞色，6 段里有 2 段分不出来。
-     语义色一律不参与：这里的 6 段是**分类**（消息/工具/MCP/系统提示词/技能/其他）。 */
+     语义色一律不参与：这里的段是**分类**。
+     记忆段**没有**复用 --cat-skill：它(#debe91) 与 --cat-net(#debf91) 只差一个
+     通道，肉眼不可分，而这两段恰好会同时出现（MCP 开启时）。所以新取一个
+     苔绿，两套主题各自成对定义。 */
   --ctx-c-messages: var(--cat-read);
   --ctx-c-tools: var(--cat-cmd);
   --ctx-c-mcp: var(--cat-net);
   --ctx-c-system_prompt: var(--cat-write);
   --ctx-c-skills: var(--cat-agent);
+  --ctx-c-memory: var(--ctx-moss);
   --ctx-c-other: var(--text-3);
   position: absolute;
   bottom: calc(100% + 10px);
@@ -4535,6 +4543,7 @@ body.is-electron .left.collapsed .rail .rbtn {
 .ctx-c-mcp { background: var(--ctx-c-mcp); }
 .ctx-c-system_prompt { background: var(--ctx-c-system_prompt); }
 .ctx-c-skills { background: var(--ctx-c-skills); }
+.ctx-c-memory { background: var(--ctx-c-memory); }
 .ctx-c-other { background: var(--ctx-c-other); }
 .ctx-panel-ft {
   display: flex;
@@ -11299,3 +11308,46 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 
 @import './narrative-skin.css';
+
+/* —— Project Memory 记忆浏览（官方 §2.7 的 /memory）——
+   刻意做成**只读清单**而不是可编辑表格：官方承诺的是「记忆文件随时可以自己打开、
+   编辑或删除」，即把编辑交给用户在文件上做。宿主再画一套行内编辑/删除，就得配一套
+   校验与确认，而官方没有这套机制 —— 那是自创。 */
+.mem-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.mem-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.mem-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  color: var(--text);
+}
+.mem-table code {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  user-select: all;
+}
+/* 索引里列了但磁盘上没有：官方对陈旧条目不做校验（不擅自删），如实标出。 */
+.mem-table tr.gone td {
+  color: var(--text-dim);
+}
+.mem-table tr.gone code {
+  text-decoration: line-through;
+}
+.tag-warn {
+  color: var(--warn, #d08700);
+  font-size: 11px;
+}
+.tag-dim {
+  color: var(--text-dim);
+  font-size: 11px;
+}

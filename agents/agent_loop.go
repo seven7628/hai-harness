@@ -55,11 +55,18 @@ type Config struct {
 	LLMTimeout       time.Duration // 可选挂死兜底：整轮 LLM 调用（含流）总时限；
 	// 0 = 不限制（bridge 生产装配传 0 —— 首字预算在 FirstChunkTimeout，流开始后不限总时长）。
 	// 测试/旧调用方传 >0 时生效。默认 90s（NewAgentLoop 零值语义，被 bridge 覆盖）。
-	// FirstChunkTimeout 首字预算（2026-09-18 定策）：**单次尝试**从请求发出到收到模型
-	// 首个流事件的上限；首个事件一到即解除，此后流内不再计时（长 reasoning / 大文档生成
-	// 不受切 —— 与 LLMTimeout 的「整轮总时限」是两个东西，恰好互补）。超时按上游侧
-	// 瞬时故障处理：可重试、走 LLMError 事件、耗尽后归因「供应商侧故障」。
-	// 0 = 不限制。默认 30s。
+	// FirstChunkTimeout 首字预算（2026-09-18 定策，2026-10-11 调宽默认值）：**单次尝试**
+	// 从请求发出到收到模型首个流事件的上限；首个事件一到即解除，此后流内不再计时（长
+	// reasoning / 大文档生成不受切 —— 与 LLMTimeout 的「整轮总时限」是两个东西，恰好互补）。
+	// 超时按上游侧瞬时故障处理：可重试、走 LLMError 事件、耗尽后归因「供应商侧故障」。
+	//
+	// 默认 90s（原 30s，2026-10-11 用户反馈后调宽）：实测 TTFT 之外的**弱网/长首字模型**在
+	// 30s 处被频繁误切 —— 首字预算每次尝试独立计时，一个真正慢的模型（GLM/Claude 长思考、
+	// 跨境链路、企业代理）每轮都在 30s 被切，重试 10 次毫无意义（同样的模型同样的网络不会
+	// 因重试而更快），用户侧表现为「总是异常」后耗尽成 11×(30s+1s) ≈ 5.7min 的供应商故障。
+	// 取 90s = 仍明显短于用户「卡死了」的容忍阈值，又宽到能覆盖弱建连 + 网关排队 + 长首 token。
+	// 用户/OPS 可按 provider 特性覆盖（settings agent.first_chunk_timeout，秒）。
+	// 0 = 不限制（不推荐：那会让「上游完全无响应」重新变成无限等待，见 SetFirstChunkTimeout）。
 	FirstChunkTimeout time.Duration
 
 	// StreamStallTimeout 流内停滞预算（2026-09-22 定策）：**流已经开始**（首个事件已到）
@@ -115,6 +122,19 @@ type Config struct {
 	AgentMDFiles []string
 	AgentMDDirs  []string
 
+	// MemoryInjection Project Memory 索引段（Step 3 启动注入的**成品文本**，由宿主
+	// 预先算好放在这里）；空 = 不注入该层。
+	//
+	// 为什么宿主预渲染而不是本层去调 memory.Bootstrap：
+	//  ① composeSystemPrompt 每轮循环都会重跑（见 appendLoadedSkill / 上下文压缩后
+	//     的重建），而 Bootstrap 要跑 git 解析身份 + 读索引，放这里等于每轮多一次
+	//     子进程 + N 次读盘。
+	//  ② 本层不认识"记忆目录"这个产品概念（同 AgentMDFiles / binaryHint 的分层理由）。
+	//
+	// 宿主侧的开关语义（关闭 = 完全不注入，而不是注入一段"请勿使用记忆"）在
+	// memory.Bootstrap 内闭环，本层只负责把**可能为空**的成品文本拼进去。
+	MemoryInjection string
+
 	// UserAgentMDDir 用户级指令目录（~/.agents，跨工作区）；只取该目录**本层那一个**
 	// AGENTS.md / CLAUDE.md（非递归，见 discoverUserAgentMD）。空 = 无用户级层。
 	//
@@ -143,6 +163,10 @@ type Config struct {
 	// Slim 工具结果瘦身配置（C：去重替换/占位替换/spill 溢出写文件；零 LLM 成本）。
 	// nil = 关闭（默认）——行为变化项，产品验证后 WithToolResultSlim 启用。
 	Slim *SlimConfig
+
+	// MergeProtectRounds 工具对合并（E）的末尾保护轮数：最近 N 组工具调用
+	// 不参与合并（模型正在引用它们）。0 = 默认 2。随 Slim 一起生效。
+	MergeProtectRounds int
 
 	// RefExtractor 可选的 @引用内容抽取钩子（当前用于 PDF：抽出文本注入 FileContent）。
 	// nil = 不抽取 —— PDF 保持旧行为（压缩流报「二进制，不读内容」/未压缩把源码当正文）。
@@ -379,6 +403,13 @@ func WithSkills(reg *skills.Registry) Option {
 	return func(c *Config) { c.Skills = reg }
 }
 
+// WithMemoryInjection 注入 Project Memory 索引段（Step 3）。参数是**成品文本**，
+// 由宿主预先调 memory.Bootstrap 算好（见 Config.MemoryInjection 的理由）。
+// 空串 / 不调本选项 = 不注入该层。
+func WithMemoryInjection(text string) Option {
+	return func(c *Config) { c.MemoryInjection = text }
+}
+
 func WithCompressor(comp Compressor) Option {
 	return func(c *Config) { c.Compressor = comp }
 }
@@ -607,10 +638,13 @@ func NewAgentLoop(opts ...Option) *AgentLoop {
 		MaxIterations:    1000,
 		MaxParallelTools: 8,
 		LLMTimeout:       90 * time.Second,
-		// 首字预算 30s（2026-09-18 定策）：实测一次尝试在「无首字」状态下静默挂了 187s
-		// （用户只看到「正在重试 1」），而 30s 足够覆盖正常建连+排队+首个 token 的漫长尾；
-		// 超时即视为上游无响应 → 记一次失败并重试，与「流开始后不限总时长」互补。
-		FirstChunkTimeout: 30 * time.Second,
+		// 首字预算 90s（2026-09-18 定策，2026-10-11 由 30s 调宽）：实测一次尝试在「无首字」
+		// 状态下静默挂了 187s（用户只看到「正在重试 1」）。取 90s 的两个理由：①覆盖弱网/长
+		// 首字模型（GLM/Claude 长思考、跨境链路、企业代理）—— 30s 曾把它们每轮都误切成
+		// 上游故障，重试 10 次全废（同样的网络不会因重试而更快）；②仍明显短于用户「卡死了」
+		// 的容忍阈值。命中 = 上游无响应 → 记一次失败并重试，与「流开始后不限总时长」互补。
+		// 可配：settings agent.first_chunk_timeout（秒；0 = 关），见 SetFirstChunkTimeout。
+		FirstChunkTimeout: 90 * time.Second,
 		// 流内停滞预算 3min（2026-09-22 定策）：首个事件之后两个事件之间的最大静默。
 		// 反馈样本（GLM）：流中段静默 >5min 没有任何输出（界面上表现为「卡住」）；
 		// 取 3min = 远超健康流的块间隔（秒级），又明显短于用户的容忍阈值。
@@ -720,6 +754,42 @@ func (a *AgentLoop) currentGoalAlignmentReminderRounds() int {
 	a.goalAlignmentMu.RLock()
 	defer a.goalAlignmentMu.RUnlock()
 	return a.goalAlignmentReminderRounds
+}
+
+// SetFirstChunkTimeout 会话期间切换首字预算（负数按 0 处理）：**下一次 LLM 请求**生效，
+// 不重建 loop/会话。宿主 = bridge 的 set_first_chunk_timeout 命令与 reload_settings 热更。
+//
+// 为什么默认值要宽到 90s：首字预算**每次尝试独立计时**，而重试不会让同一个慢模型变快
+// （同样的网关排队/同样的链路）。30s 时弱网/长首字模型（GLM、Claude 长思考、跨境链路、
+// 企业代理）每轮都在 30s 被切 → 重试 10 次全废 → 用户侧恒表现为「总是异常」，最终
+// 11×(30s+1s) ≈ 5.7min 后归因成供应商侧故障。详见 Config.FirstChunkTimeout。
+//
+// 为何必须经 cfgMu：FirstChunkTimeout 是运行期可写字段，而 streamOnce 在 run goroutine
+// 上读它 —— 与 SetCompressThreshold 同型（该注释模式见 currentCompressThreshold）。
+// 为 0 = 关掉看门狗（**不推荐**：那会让「上游完全无响应」重新变成无限等待，正是 2026-09-18
+// 实测 187s 静默挂死的成因）。
+func (a *AgentLoop) SetFirstChunkTimeout(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	a.cfgMu.Lock()
+	a.cfg.FirstChunkTimeout = d
+	a.cfgMu.Unlock()
+}
+
+// FirstChunkTimeout 当前首字预算（只读）。宿主改完后用它确认落到哪个 loop（与
+// SetFirstChunkTimeout 配对；装配期也可用于三宿主一致性校验）。
+func (a *AgentLoop) FirstChunkTimeout() time.Duration {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.FirstChunkTimeout
+}
+
+// currentFirstChunkTimeout streamOnce 专用的加锁读取（理由同 currentCompressThreshold）。
+func (a *AgentLoop) currentFirstChunkTimeout() time.Duration {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.FirstChunkTimeout
 }
 
 // RunOptions 运行选项（RunStream 参数）。
@@ -978,6 +1048,18 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 		// 在回写循环内即时完成（见 recordRead）
 		if ac.slim != nil {
 			a.applyStale(ac)
+			// 图片瘦身（F）：在压缩前执行，让压缩输入体积也跟着降（图片是
+			// 压缩估算里的大头，estimatedImageTokens 单图 1600）。
+			a.applyImageSlim(ac)
+			// 工具对合并（E）：删整组重复的「工具调用 + 结果」消息。
+			// 必须紧跟 reset —— 删消息使所有下标失效（slim 全部按下标记账，
+			// 占位文本里的 #N 引用也已在 mergeToolPairs 内改写为新下标）。
+			// 独立开关：动结构的这一项不能跟着 slim 一起默认生效。
+			if a.cfg.Slim != nil && a.cfg.Slim.Text != nil &&
+				a.cfg.Slim.Text.MergePairs != nil && *a.cfg.Slim.Text.MergePairs &&
+				a.mergeToolPairs(ac, a.cfg.MergeProtectRounds) {
+				ac.slim.reset()
+			}
 		}
 
 		forced := ac.forceCompact
@@ -1205,6 +1287,10 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 				text := r.Result
 				if ac.slim != nil {
 					text = a.spillResult(ac, tc, text)
+					// 语义化瘦身（D）：在 spill 之后、去重记账之前 —— spill 已把
+					// 超大结果压成预览，折叠/简化再作用于留下的文本（省的是二次
+					// 收益：ANSI 噪声、重复行、被覆盖的旧读取）。
+					text = a.slimToolResult(ac, tc, text, len(ac.Messages))
 				}
 				// 图片类工具结果（read_file 读图 / 截图 / MCP image）：图片块随 tool
 				// 消息入上下文（模型可见）；slim 只作用于 text —— 图片不参与 spill/去重
@@ -1587,6 +1673,17 @@ func (a *AgentLoop) composeSystemPrompt() string {
 		}
 		b.WriteString(mem)
 	}
+	// Project Memory 索引（Step 3）。位置在工作记忆**之后**：官方要求"与 AGENTS.md
+	// 同级或其后"，而工作记忆是模型的项目指令、索引是模型的**自己写下的**东西，
+	// 后者放在指令之后，读序上更接近"指令 → 我记的东西"。
+	// 空串 = 无记忆 / 开关关闭（关闭由宿主不填本字段表达，本层不做二次判定，
+	// 免得"注入一段叫模型别用记忆"那种仍占 context 的半开半关）。
+	if a.cfg.MemoryInjection != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(a.cfg.MemoryInjection)
+	}
 	// 技能清单（buildSkillManifest 自带 \n\n 前缀）
 	if a.cfg.Skills != nil {
 		b.WriteString(buildSkillManifest(a.cfg.Skills))
@@ -1746,7 +1843,7 @@ func llmErrorKind(ac *AgentContext, err error) string {
 // streamOnce 发起一轮模型调用，把 LLM 事件翻译为 Agent 事件，并聚合进 r。
 // 返回值 receivedEnd 表示本轮是否收到过 LLMEndEvent。
 // 超时策略（2026-09-18 定策，三层各管一段，勿混用）：
-//   - 首字预算 FirstChunkTimeout（默认 30s，本函数实现）：请求发出 → 首个 provider 事件；
+//   - 首字预算 FirstChunkTimeout（默认 90s，本函数实现）：请求发出 → 首个 provider 事件；
 //     首个事件到达即解除，此后不再计时。命中 = 上游无响应 → 可重试的
 //     provider.FirstChunkTimeoutError（见该类型注释：为什么必须可重试、为什么不能
 //     以 context.Canceled 上抛）。
@@ -1766,7 +1863,7 @@ func (a *AgentLoop) streamOnce(ac *AgentContext, r *roundResult) (bool, error) {
 	streamCtx, cancelCause := context.WithCancelCause(streamCtx)
 	defer cancelCause(context.Canceled) // 释放：cancel 函数必须被调用，避免 ctx 泄漏
 	var firstChunkTimer *time.Timer
-	if d := a.cfg.FirstChunkTimeout; d > 0 {
+	if d := a.currentFirstChunkTimeout(); d > 0 {
 		firstChunkTimer = time.AfterFunc(d, func() {
 			cancelCause(provider.NewFirstChunkTimeoutError(d, nil))
 		})

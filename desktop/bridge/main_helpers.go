@@ -248,24 +248,13 @@ func truncateUTF8(s string, n int) string {
 
 // denyHarnessConfigPath 拒绝 go-code 自身配置/密钥路径（~/.go-code）——与工具层
 // builtin.denyHarnessConfigPath 同保护对象（settings.json 可能含 api_key）。
+//
+// **这是委托而不是实现**（2026-10-09 修复）。此前这里是一份词法拷贝：不解析软链接、
+// home 不解基准、放行名单还只有 {plugins, runtime} 而漏了 memory。后果是同一个
+// ~/.go-code 在两条通路上结论相反——预览通路里 `ln -s ~/.go-code/settings.json
+// /tmp/x.json` 一路放行，而 read_file 拦。拷贝必然漂移，所以现在只留门面。
 func denyHarnessConfigPath(abs string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	cfgDir := filepath.Clean(filepath.Join(home, ".go-code"))
-	if abs == cfgDir || strings.HasPrefix(abs, cfgDir+string(os.PathSeparator)) {
-		// 受管子树放行（~/.go-code/plugins + ~/.go-code/runtime）：与 builtin 同语义
-		// （受管组件与受管 Python 运行时都要文件工具可达；两处必须同步改）
-		for _, sub := range []string{"plugins", "runtime"} {
-			dir := filepath.Join(cfgDir, sub)
-			if abs == dir || strings.HasPrefix(abs, dir+string(os.PathSeparator)) {
-				return nil
-			}
-		}
-		return fmt.Errorf("path %q is go-code's own config/secret directory and is protected", abs)
-	}
-	return nil
+	return builtin.DenyHarnessConfigPath(abs)
 }
 
 // resolveWorkspacePath 解析预览类命令的文件路径（**只做路径解析，不做读取**）：

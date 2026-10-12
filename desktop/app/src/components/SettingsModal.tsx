@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, SUBAGENT_CONCURRENCY_DEFAULT, COMPRESS_THRESHOLD_DEFAULT, COMPRESS_THRESHOLD_MIN, COMPRESS_THRESHOLD_MAX, inputTypesForProvider } from '../store/useAppStore'
+import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, SUBAGENT_CONCURRENCY_DEFAULT, COMPRESS_THRESHOLD_DEFAULT, COMPRESS_THRESHOLD_MIN, COMPRESS_THRESHOLD_MAX, FIRST_CHUNK_TIMEOUT_DEFAULT, FIRST_CHUNK_TIMEOUT_MIN, FIRST_CHUNK_TIMEOUT_MAX, inputTypesForProvider } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { meshUUID, meshToken } from '../lib/meshRand'
 import { copyText } from '../lib/clipboard'
-import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, ImageIcon, PaletteIcon, SendIcon, SessionIcon, Sparkles, TerminalIcon } from './icons'
+import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, ImageIcon, PaletteIcon, PinIcon, SendIcon, SessionIcon, Sparkles, TerminalIcon } from './icons'
 import { BrowserSettingsEditor } from './BrowserSettingsEditor'
 import { ComputerSettingsEditor } from './ComputerSettingsEditor'
 import { IMSettingsEditor } from './IMSettingsEditor'
@@ -17,7 +17,7 @@ import { getTransport } from '../transport'
 
 // 左侧导航分组（对齐设计稿：基础项 → 模型 → Agent 能力 → 数据与统计）。
 // 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不分组，顶部基础项）。
-type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'im' | 'mesh' | 'usage'
+type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'im' | 'mesh' | 'memory' | 'usage'
 const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab; label: string; icon: ReactElement }[] }[] = [
   {
     id: 'base',
@@ -42,6 +42,7 @@ const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab;
       { key: 'plugin', label: 'settings.plugin', icon: <AccessIcon size={14} /> },
       { key: 'im', label: 'settings.im', icon: <SessionIcon size={14} /> },
       { key: 'mesh', label: 'settings.mesh', icon: <SendIcon size={14} /> },
+      { key: 'memory', label: 'settings.memory', icon: <PinIcon size={14} /> },
     ],
   },
   {
@@ -115,6 +116,7 @@ export default function SettingsModal() {
           {tab === 'plugin' && <PluginTab />}
           {tab === 'im' && <IMTab />}
           {tab === 'mesh' && <MeshTab />}
+          {tab === 'memory' && <MemoryTab />}
           {tab === 'usage' && <UsageStats />}
         </div>
       </div>
@@ -150,6 +152,13 @@ function GeneralTab() {
   const setStopBackgroundOnInterrupt = useAppStore((s) => s.setStopBackgroundOnInterrupt)
   const setCronAutoClean = useAppStore((s) => s.setCronAutoClean)
   const setCompressThreshold = useAppStore((s) => s.setCompressThreshold)
+  // 首字预算（秒）：与 store 的钳制口径一致地兜底（缺配置 → 默认 90）。
+  const setFirstChunkTimeout = useAppStore((s) => s.setFirstChunkTimeout)
+  const firstChunkTimeoutRaw = settings.agent?.first_chunk_timeout ?? FIRST_CHUNK_TIMEOUT_DEFAULT
+  const firstChunkTimeout =
+    Number.isFinite(firstChunkTimeoutRaw) && firstChunkTimeoutRaw > 0
+      ? Math.min(FIRST_CHUNK_TIMEOUT_MAX, Math.max(FIRST_CHUNK_TIMEOUT_MIN, Math.round(firstChunkTimeoutRaw)))
+      : FIRST_CHUNK_TIMEOUT_DEFAULT
   // 压缩阈值（占窗口比例）：与 store 的钳制口径一致地兜底（缺配置 → 默认 0.8）。
   // 滑杆的 value 必须是整数百分比，浮点比例 ×100 后用 Math.round 归一。
   const compressThresholdRaw = settings.agent?.compress_threshold ?? COMPRESS_THRESHOLD_DEFAULT
@@ -237,6 +246,15 @@ function GeneralTab() {
             onChange={(e) => setCompressThreshold(Number(e.target.value) / 100)}
           />
           <span className="set-unit">%</span>
+        </div>
+      </div>
+      {/* 首字预算（秒）：单次尝试「请求发出 → 首个流事件」的上限，首字一到即解除、
+           流开始后不限总时长。调大 = 更容忍弱网/长首字模型；调小 = 更快判定上游无响应。 */}
+      <div className="set-row">
+        <div><div className="set-label">{t('settings.firstChunkTimeout')}</div><div className="set-desc">{t('settings.firstChunkTimeout.desc')}</div></div>
+        <div className="set-inline">
+          <input className="text-input" type="number" min={FIRST_CHUNK_TIMEOUT_MIN} max={FIRST_CHUNK_TIMEOUT_MAX} step={10} value={firstChunkTimeout} onChange={(e) => setFirstChunkTimeout(Number(e.target.value))} />
+          <span className="set-unit">s</span>
         </div>
       </div>
       {/* 子 agent 并发槽上限（主池 = agent_spawn，辅池 = subagent_explore）：槽满会让工具调用
@@ -2392,6 +2410,154 @@ function MeshTab() {
             </div>
           </div>
         </>
+      )}
+    </>
+  )
+}
+
+// —— Project Memory 开关（设置面板 · Agent 组）——
+//
+// 生效时机 = **下一个会话**（或 switch_model / switch_persona / set_provider 重建
+// loop 之后）。运行中的会话不变，这不是缺陷：记忆注入是**系统提示词的一部分**，
+// 会话中途删掉会让同一会话前后两轮「你记得什么」不一致，而记忆的价值恰恰建立在
+// 跨轮一致上。所以文案必须写明这一点，否则用户会以为开关失灵。
+//
+// 另两处诚实展示，不粉饰：
+//   · env_override —— 环境变量压过面板选择时明确告知，否则用户在这里改了却没生效
+//   · explicit=false —— 「默认开着」不是「你的决定」，文案不冒认
+function MemoryTab() {
+  const t = useT()
+  const ms = useAppStore((s) => s.memorySettings)
+  const listing = useAppStore((s) => s.memoryListing)
+  const browseAvailable = useAppStore((s) => s.memoryBrowseAvailable)
+  const browseLoading = useAppStore((s) => s.memoryBrowseLoading)
+  const browseError = useAppStore((s) => s.memoryBrowseError)
+  const fetchMemorySettings = useAppStore((s) => s.fetchMemorySettings)
+  const fetchMemoryBrowsing = useAppStore((s) => s.fetchMemoryBrowsing)
+  const setMemoryEnabled = useAppStore((s) => s.setMemoryEnabled)
+  const showToast = useAppStore((s) => s.showToast)
+
+  useEffect(() => {
+    void fetchMemorySettings()
+    void fetchMemoryBrowsing()
+  }, [fetchMemorySettings, fetchMemoryBrowsing])
+
+  const on = ms?.enabled ?? true
+  // 关掉记忆时不该显示"0 个文件"——那会被读成"记忆被清空了"。
+  // 实际语义是"没有记忆目录"，两者的处置完全不同。
+  const showListing = on && browseAvailable
+
+  return (
+    <>
+      <div className="settings-sec-title">{t('settings.memory')}</div>
+      <p className="set-desc">{t('settings.memory.desc')}</p>
+
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.memory.enable')}</div>
+          <div className="set-desc">{t('settings.memory.enable.desc')}</div>
+        </div>
+        <div className="seg" role="radiogroup" aria-label={t('settings.memory.enable')}>
+          <button className={on ? 'cur' : ''} aria-pressed={on} onClick={() => setMemoryEnabled(true)}>{t('settings.on')}</button>
+          <button className={!on ? 'cur' : ''} aria-pressed={!on} onClick={() => setMemoryEnabled(false)}>{t('settings.off')}</button>
+        </div>
+      </div>
+
+      <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.nextSession')}</p>
+
+      {ms?.env_override && (
+        <p className="set-desc" style={{ marginTop: 8, color: 'var(--warn, #d08700)' }}>
+          {t('settings.memory.envOverride')}
+        </p>
+      )}
+      {!ms?.explicit && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.defaultOn')}</p>
+      )}
+
+      {ms?.memory_dir && (
+        <div className="mesh-conn-url" style={{ marginTop: 12 }}>
+          <code className="mesh-code">{ms.memory_dir}</code>
+          {/* 复制反馈用「已复制」就地替换文案（与 MeshTab 的连接地址同一范式），
+              而不是 toast：这段面板已经在讲路径，就地反馈更贴近被复制的对象。 */}
+          <button
+            className="btn"
+            onClick={() => {
+              void copyText(ms.memory_dir || '').then((ok) => {
+                if (ok) showToast(t('settings.memory.dirCopied'))
+              })
+            }}
+          >
+            {t('settings.memory.dirCopy')}
+          </button>
+        </div>
+      )}
+      {ms?.memory_dir_error && (
+        <p className="set-desc" style={{ marginTop: 8, color: 'var(--danger, #c0392b)' }}>
+          {ms.memory_dir_error}
+        </p>
+      )}
+
+      {/* —— 记忆浏览（官方 §2.7 的 `/memory`：browse and open memory files）——
+          纯读，且**刻意不提供删除按钮**：官方承诺的是「随时可以自己编辑或删除」，
+          也就是把这件事交给用户直接在文件上做。宿主再画一个删除入口，等于要给
+          删除配一套校验与确认，而官方没有这套机制——那是自创。 */}
+      <div className="set-row" style={{ marginTop: 16 }}>
+        <div>
+          <div className="set-label">{t('settings.memory.browse')}</div>
+          <div className="set-desc">{t('settings.memory.browse.desc')}</div>
+        </div>
+        <button className="btn" onClick={() => void fetchMemoryBrowsing()}>
+          {t('settings.memory.browse.refresh')}
+        </button>
+      </div>
+
+      {browseError && (
+        // 命令失败 ≠ 记忆未启用：说「未启用」会把用户引去检查开关，而问题在别处。
+        <p className="set-desc" style={{ marginTop: 8, color: 'var(--danger, #c0392b)' }}>
+          {t('settings.memory.browse.failed')}: {browseError}
+        </p>
+      )}
+      {!on && !browseError && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.off')}</p>
+      )}
+      {on && browseLoading && !listing && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.loading')}</p>
+      )}
+      {showListing && !listing?.index_present && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.noIndex')}</p>
+      )}
+      {showListing && listing && listing.files.length === 0 && (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.browse.empty')}</p>
+      )}
+      {showListing && listing && listing.files.length > 0 && (
+        <table className="mem-table" style={{ marginTop: 8 }}>
+          <thead>
+            <tr>
+              <th>{t('settings.memory.browse')}</th>
+              <th>type</th>
+              <th>modified</th>
+              <th style={{ textAlign: 'right' }}>{t('settings.memory.browse.size')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {listing.files.map((f) => (
+              <tr key={f.name} className={f.missing ? 'gone' : undefined}>
+                <td>
+                  <code>{f.name}</code>
+                  {f.missing && <span className="tag-warn"> {t('settings.memory.browse.missing')}</span>}
+                  {/* 未登记是正常中间态（模型刚写 topic 还没补索引），标出来而不是
+                      藏起来：藏起来会让人以为这条记忆不存在。 */}
+                  {!f.indexed && !f.missing && (
+                    <span className="tag-dim"> {t('settings.memory.browse.notIndexed')}</span>
+                  )}
+                </td>
+                <td>{f.type || '—'}</td>
+                <td>{f.modified || '—'}</td>
+                <td style={{ textAlign: 'right' }}>{f.size}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </>
   )

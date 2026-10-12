@@ -65,6 +65,10 @@ brand/boot-preview*
 /desktop/app/scripts/
 /desktop/bridge/e2e_*.py
 testdata/
+# 真实会话回放基准的夹具（tools/bench/export_real_sessions.py 生成）：
+# 含本机 ~/.go-code/sessions 的真实会话内容（数十 MB、含用户对话与代码），
+# 绝不入库。测试在夹具缺失时 t.Skip，不伪造数字。
+.testdata/
 # skills 远程安装的夹具目录（测试用内存夹具，磁盘上这几个是开发遗留）
 /skills/remote/a/
 /skills/remote/b/
@@ -118,6 +122,12 @@ desktop/app/package-lock.json
 /brand/remotion/
 /brand/*.mp4
 !/brand/hai-promo.mp4
+
+# —— 本地生成的长图素材 ——
+// README 预览长图由 desktop/app/e2e/capture_readme_longshot.mjs 生成（该目录不入库），
+// 单张 5MB 且可随时重跑，不进版本库。
+// 手动复现：node desktop/app/e2e/capture_readme_longshot.mjs --split
+/brand/screenshot-readme-zh-*.png
 
 # —— 其它本机 / 临时产物 ——
 desktop/*.pdf
