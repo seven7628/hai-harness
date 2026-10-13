@@ -1030,6 +1030,7 @@ type unanswerableAnalysis struct {
 
 func unanswerableEnvOrSkip(t *testing.T) (prov, model string, p provider.Provider) {
 	t.Helper()
+	isolateUserPrices(t) // 读真实 settings 前先隔离全局价表（见 memory_baseline_test.go 注释）
 	if testing.Short() {
 		t.Skip("慢测试：需真实 provider（-short 跳过）")
 	}
