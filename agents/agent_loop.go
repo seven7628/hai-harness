@@ -1445,6 +1445,7 @@ func (a *AgentLoop) resetGoalAlignmentAfterSuccessfulWrite(ac *AgentContext, cal
 //   - write_file / edit_file：产物已落盘（现状判据，未变）；
 //   - todo_add / todo_update：计划被显式推进（模型自己声明了进展）；
 //   - agent_spawn：委派已启动（本身就是行动，不是空转）；
+//   - agent_resume：把已结束的任务续起来 —— 同 agent_spawn，是行动而非空转；
 //   - TaskOutput：拿到了子任务**终态**结论（只看进度不算——见 hasTerminalTaskStatus）；
 //   - bash：验证动作（构建/测试类命令——见 isVerifyCommand）。
 //
@@ -1455,7 +1456,7 @@ func (a *AgentLoop) resetGoalAlignmentAfterSuccessfulWrite(ac *AgentContext, cal
 // 这正是护栏要保留的行为（防止「纯读空转」被判为进展）。
 func progressToolResult(tc core.ToolCall, r core.ToolResult) bool {
 	switch tc.Name {
-	case "write_file", "edit_file", "todo_add", "todo_update", "agent_spawn":
+	case "write_file", "edit_file", "todo_add", "todo_update", "agent_spawn", "agent_resume":
 		return true
 	case "TaskOutput":
 		return hasTerminalTaskStatus(r.Result)

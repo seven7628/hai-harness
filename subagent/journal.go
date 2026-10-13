@@ -35,6 +35,11 @@ func ValidTaskID(id string) bool { return taskIDPattern.MatchString(id) }
 // 全量文本留在子上下文与完成推送里。
 const turnTextCap = 4000
 
+// taskTextCap start 记录里**原始任务全文**（JournalRecord.Task）的上限（runes）：
+// agent_resume 靠它重建交接简报，必须拿回任务的原始意图 —— 200 字符的进度摘要
+// （JournalRecord.Text）不够用。上限只为防单条记录无界膨胀（任务描述正常在几 KB 内）。
+const taskTextCap = 8000
+
 // truncateRunes 按 rune 截断到 limit；返回截断后文本与是否发生截断。
 func truncateRunes(s string, limit int) (string, bool) {
 	r := []rune(s)
@@ -57,22 +62,29 @@ func toolCallNames(calls []core.ToolCall) []string {
 }
 
 // JournalRecord 子任务输出日志的一行记录（按 Type 区分）：
-//   - start：任务启动（Name/Task 摘要由 runBackground 填入 Text 等通用字段）
+//   - start：任务启动（Name/Task 摘要由 runBackground 填入 Text 等通用字段；
+//     Task 字段另存原始任务全文，供 agent_resume 重建交接简报）
 //   - turn：一轮 LLM 决策进度（Round 序号 + 截断文本 + 工具名列表；不含压缩轮，
 //     压缩器不经 handler 发 events.LLMEnd —— 见文档 §1.4-1）
 //   - result：终态（Status/Final/Error/Usage；唯一 fsync 行）
 //   - status：中间状态翻转预留位（本期不发）
 type JournalRecord struct {
-	Type        string      `json:"type"`
-	Ts          time.Time   `json:"ts"`
-	TaskId      string      `json:"task_id"`
-	Name        string      `json:"name,omitempty"`          // start：任务短标签
-	ParentRunID string      `json:"parent_run_id,omitempty"` // start：发起方运行 RunId（嵌套派生区分层级，§3.7）
-	Depth       int         `json:"depth,omitempty"`         // start：运行深度
-	Round       int         `json:"round,omitempty"`         // turn：第几轮 LLM 决策（1-based）
-	Text        string      `json:"text,omitempty"`          // turn：本轮内容（截断）；result：最终回复
-	ToolNames   []string    `json:"tool_names,omitempty"`    // turn：本轮工具名列表
-	Status      string      `json:"status,omitempty"`        // result/status：completed|failed|interrupted|abandoned
+	Type        string    `json:"type"`
+	Ts          time.Time `json:"ts"`
+	TaskId      string    `json:"task_id"`
+	Name        string    `json:"name,omitempty"`          // start：任务短标签
+	ParentRunID string    `json:"parent_run_id,omitempty"` // start：发起方运行 RunId（嵌套派生区分层级，§3.7）
+	Depth       int       `json:"depth,omitempty"`         // start：运行深度
+	// Task 原始任务全文（start 记录；agent_resume 的交接简报来源）。与 Text 的分工：
+	// Text 是给人和进度看的截断摘要（200 字符），Task 是恢复要用的完整指令。
+	Task string `json:"task,omitempty"`
+	// ResumedFrom 本任务是恢复哪个任务而来（start 记录；空 = 原生派发）。
+	// 恢复链由此可追溯，TaskList/TaskInfo 同字段透出。
+	ResumedFrom string      `json:"resumed_from,omitempty"`
+	Round       int         `json:"round,omitempty"`      // turn：第几轮 LLM 决策（1-based）
+	Text        string      `json:"text,omitempty"`       // turn：本轮内容（截断）；result：最终回复
+	ToolNames   []string    `json:"tool_names,omitempty"` // turn：本轮工具名列表
+	Status      string      `json:"status,omitempty"`     // result/status：completed|failed|interrupted|abandoned
 	Error       string      `json:"error,omitempty"`
 	Usage       *core.Usage `json:"usage,omitempty"`
 	Truncated   bool        `json:"truncated,omitempty"`
@@ -216,6 +228,35 @@ func ReadTail(path string, n int) (JournalTail, error) {
 		}
 		window *= 2
 	}
+}
+
+// ReadAll 读 journal 全部合法记录（文件序）。与 ReadTail 的分工：Tail 服务「进度感知」
+// （只需末尾几条、成本随文件大小线性），All 服务「恢复运行」（agent_resume 要用完整轮次
+// 重建交接简报，缺头部等于丢掉任务原始意图）。损坏行/半截行同样跳过（同一判据）。
+// 文件不存在返回空切片（调用方按「无 journal」处理，不是错误）。
+func ReadAll(path string) ([]JournalRecord, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("journal read all %s: %w", path, err)
+	}
+	out := make([]JournalRecord, 0, 16)
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			continue
+		}
+		var rec JournalRecord
+		if json.Unmarshal(trimmed, &rec) == nil && rec.Type != "" {
+			out = append(out, rec)
+		}
+	}
+	return out, nil
 }
 
 // parseJournalWindow 解析窗口内的完整行：返回末尾 n 条合法记录（文件序）与窗口内合法

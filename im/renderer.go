@@ -293,6 +293,7 @@ func toolEmoji(name string) string {
 		"agent_spawn":     "🧵",
 		"agent_send":      "📨",
 		"agent_interrupt": "⏹",
+		"agent_resume":    "♻️",
 		"TaskOutput":      "📤",
 		"load_skill":      "🧩",
 		"skills":          "🧩",

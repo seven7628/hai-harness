@@ -41,6 +41,7 @@ export function toolArgsSummary(name: string, args: string, t: (k: string) => st
       return String(a.task ?? a.prompt ?? '').slice(0, 24)
     case 'agent_interrupt':
     case 'agent_send':
+    case 'agent_resume':
     case 'TaskOutput':
       return String(a.task_id ?? '')
     case 'ask_user': {

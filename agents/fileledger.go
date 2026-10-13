@@ -340,8 +340,8 @@ func recordToolOutcomes(ac *AgentContext, calls []core.ToolCall, results []core.
 
 // isStateChangeTool 状态变更类工具（C5 清理判据）：成功即「局面变了」，本 Run 的
 // 失败记录随之清空。与 progressToolResult 的白名单**同源但不等同**——后者含
-// agent_spawn / TaskOutput / 验证命令（那是「进展」判据，不改变可重跑性），本判据只认
-// 真正改变工作区或计划的工具。todo_* 按前缀匹配（本仓只有 todo_add / todo_update）。
+// agent_spawn / agent_resume / TaskOutput / 验证命令（那是「进展」判据，不改变可重跑性），
+// 本判据只认真正改变工作区或计划的工具。todo_* 按前缀匹配（本仓只有 todo_add / todo_update）。
 func isStateChangeTool(name string) bool {
 	switch name {
 	case "write_file", "edit_file":

@@ -72,6 +72,10 @@ type Task struct {
 	// 构造期赋值、发布后不可变 → ParentTaskID() 免锁直读。
 	parentTaskID string
 
+	// resumedFrom 本任务由恢复哪个已结束任务而来（StartOptions.ResumedFrom；"" = 原生
+	// 派发）。构造期赋值、发布后不可变 → ResumedFrom() 免锁直读，用于恢复链展示。
+	resumedFrom string
+
 	// acceptingDelivery 是否仍接收孙任务结果投递（deliverToParent）。构造期 true，
 	// 子运行返回即刻由 closeDelivery 置 false（mu 保护）。
 	// 语义：**只有还在跑的父 loop 才可能消费 inbox**——运行一结束，inbox 里再进来的
@@ -167,6 +171,9 @@ type TaskInfo struct {
 	// ParentTaskID 派发方任务 id（子 agent 派孙任务时 = 该子 agent 的 task id；
 	// 主 Agent 直派 / 同步子运行为空）。让 TaskList 能对账派发链（孙任务挂在谁名下）。
 	ParentTaskID string `json:"parent_task_id,omitempty"`
+	// ResumedFrom 本任务由恢复哪个已结束任务而来（agent_resume；空 = 原生派发）。
+	// 恢复链可追溯：TaskList 一眼看出「这是 task-xxx 的续跑」而不是一条新任务。
+	ResumedFrom string `json:"resumed_from,omitempty"`
 }
 
 // Kind 取值：TaskList/压缩交接 [TaskStates] 里区分子 agent 与 promoted 工具任务
@@ -372,6 +379,9 @@ type StartOptions struct {
 	// inbox（父 loop 消费），不触发 OnTaskDone（主会话推送）。父已结束/未知时自动回落
 	// OnTaskDone，结果不丢（见 deliverToParent）。
 	ParentTaskID string
+	// ResumedFrom 本任务由恢复哪个已结束任务而来（agent_resume；"" = 原生派发）。
+	// 仅供展示与追溯（TaskList/TaskInfo 透出恢复链）——不参与投递判定。
+	ResumedFrom string
 }
 
 // Start 启动后台任务：并发槽阻塞获取（ctx 感知——调用方传 Session 级 ctx，
@@ -433,6 +443,7 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 		Status:            TaskRunning,
 		outputFile:        outputFile, // 构造期赋值：早于 map 登记与 goroutine 启动，发布后不可变
 		parentTaskID:      o.ParentTaskID,
+		resumedFrom:       o.ResumedFrom,
 		acceptingDelivery: true, // 子运行返回时 closeDelivery 关闭
 		done:              make(chan struct{}),
 		inbox:             make(chan core.Message, 16),
@@ -678,8 +689,12 @@ func (t *Task) info() TaskInfo {
 		Status:       t.Status,
 		OutputFile:   t.outputFile,
 		ParentTaskID: t.parentTaskID, // 构造期不可变，免锁直读
+		ResumedFrom:  t.resumedFrom,  // 构造期不可变，免锁直读
 	}
 }
+
+// ResumedFrom 返回本任务的恢复来源 id（构造期赋值、发布后不可变，免锁直读）。
+func (t *Task) ResumedFrom() string { return t.resumedFrom }
 
 // Close cancels all asynchronous tasks and waits for their goroutines to exit.
 func (r *Registry) Close(ctx context.Context) error {

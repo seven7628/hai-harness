@@ -594,9 +594,12 @@ func missingSummarySections(summary string) []string {
 }
 
 // hasTaskTrace 判断压缩输入是否携带任务痕迹（B3 动态护栏触发条件）：
-// 历史消息含 task_result 内容块 / 渲染输入含 agent_spawn 工具调用 / 注入了 [TaskStates] 段。
+// 历史消息含 task_result 内容块 / 渲染输入含 agent_spawn（或 agent_resume —— 同样是
+// 派发/续派生后台任务的痕迹）工具调用 / 注入了 [TaskStates] 段。
 func hasTaskTrace(history []core.Message, renderedInput string) bool {
-	if strings.Contains(renderedInput, "[tool_call] agent_spawn") || strings.Contains(renderedInput, "[TaskStates]") {
+	if strings.Contains(renderedInput, "[tool_call] agent_spawn") ||
+		strings.Contains(renderedInput, "[tool_call] agent_resume") ||
+		strings.Contains(renderedInput, "[TaskStates]") {
 		return true
 	}
 	for _, m := range history {

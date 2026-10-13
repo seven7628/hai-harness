@@ -280,6 +280,15 @@ func (t *Tool) runSync(ctx context.Context, tc *events.ToolContext, childDepth i
 // 子运行 ctx = Session 级（bgCtx()），父工具 Call 返回后不受影响；
 // 消息接收 = Task.inbox → Poll drain（工具轮投递的延迟到子下个 stop 轮消费）。
 func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childDepth int, task, name string) (string, error) {
+	return t.runBackgroundFrom(ctx, tc, childDepth, task, name, "")
+}
+
+// runBackgroundFrom runBackground 的共用实现；resumedFrom 非空 = 本次派发是 agent_resume
+// 的续跑（记进任务与 journal 的 start 记录，供 TaskList 追溯恢复链）。
+// 「为什么恢复要走同一条派发链路」：恢复任务与原生派发在生命周期上完全一致（同一 loop /
+// 同一槽池 / 同一 journal 解析器 / 同一结果回传与中断路由），唯一的差别是**输入文本**
+// 由 journal 重建、且多一个来源标记 —— 单开一条链路只会让两者慢慢漂移。
+func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, childDepth int, task, name, resumedFrom string) (string, error) {
 	if t.bgCtx == nil {
 		return "", fmt.Errorf("%s: background tool requires a session context provider", t.spec.Name)
 	}
@@ -324,6 +333,7 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 		// 子→孙派发：结果投回本 loop（发起方子 agent）的 inbox，不进主会话
 		ParentTaskID: parentTaskID,
 		JournalPath:  t.spec.JournalPath,
+		ResumedFrom:  resumedFrom,
 	}, func(bg context.Context, tk *Task) (string, core.Usage, error) {
 		// 任务 id 注入运行选项：AgentStart/AgentEnd 事件携带 task_id（前端关联锚；不依赖事件顺序）
 		opts.TaskId = tk.ID
@@ -377,10 +387,15 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 				jr = j
 				defer j.Close()
 				excerpt, _ := truncateRunes(task, 200)
+				full, _ := truncateRunes(task, taskTextCap)
 				_ = j.Append(JournalRecord{
 					Type: "start", Ts: time.Now(), TaskId: tk.ID,
 					Name: name, ParentRunID: parentRun, Depth: childDepth,
 					Text: excerpt,
+					// Task 存原始指令全文：agent_resume 的交接简报靠它重建任务意图
+					//（Text 的 200 字符摘要不够）。ResumedFrom 记录恢复链。
+					Task:        full,
+					ResumedFrom: tk.ResumedFrom(),
 				})
 			}
 		}
@@ -471,15 +486,28 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 	// 动作是"继续按自己的套路分析"（它没有"已委派"的概念）；hint 明确告知：
 	// ① 任务目标（从任务描述提取首句，主 Agent 据此判断哪些范围会被覆盖、避免重复劳动）；
 	// ② 后台运行、结果自动送达；③ 可用 TaskOutput 拉取进度（勿高频轮询）；④ 勿重复委派范围。
-	hint := backgroundHint(name, task)
-	// 子→孙派发（parentTaskID 非空）换 nestedBackgroundHint：收件人是**本 loop**，
-	// 子→孙派发换文案：收件人是本 loop，措辞需说清"结果回到你这里"（否则子 agent 会
-	// 去主会话找），但**不能承诺一定回来**（见 nestedBackgroundHint 的措辞纪律）。
-	if parentTaskID != "" {
-		hint = nestedBackgroundHint(name, task)
+	hint := backgroundHintFor(name, task, resumedFrom, parentTaskID)
+	payload := ""
+	if resumedFrom != "" {
+		// 恢复：带上 resumed_from，模型/宿主一眼看出这是续跑而不是新活。
+		payload = fmt.Sprintf(`,"resumed_from":%q`, resumedFrom)
 	}
-	return fmt.Sprintf(`{"task_id":%q,"status":"running","type":"subagent","name":%q,"output_file":%q,"hint":%q}`,
-		taskRef.ID, t.spec.Name, taskRef.OutputFile(), hint), nil
+	return fmt.Sprintf(`{"task_id":%q,"status":"running","type":"subagent","name":%q,"output_file":%q%s,"hint":%q}`,
+		taskRef.ID, t.spec.Name, taskRef.OutputFile(), payload, hint), nil
+}
+
+// backgroundHintFor 选本次派发的行为提示（三种形态，措辞纪律各见其注释）：
+// resume（交接简报已在跑）> 子→孙（收件人是本 loop）> 主 Agent 直派。
+func backgroundHintFor(name, task, resumedFrom, parentTaskID string) string {
+	if resumedFrom != "" {
+		return fmt.Sprintf(
+			"Resumed task %q as a NEW task (its previous run ended; the original instruction, progress and outcome were rebuilt into its prompt). Continue your other work; its result is pushed back automatically when done — do not wait for it, do not resume it again, and do not duplicate its scope.",
+			name)
+	}
+	if parentTaskID != "" {
+		return nestedBackgroundHint(name, task)
+	}
+	return backgroundHint(name, task)
 }
 
 // renderInFlight 渲染在途后代任务清单（Stop 门控注入 prompt.PendingTasksReminder 的 %s）。

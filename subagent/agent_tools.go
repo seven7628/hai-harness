@@ -65,6 +65,7 @@ func NewAgentTools(spawnLoop *agents.AgentLoop, bgCtx func() context.Context, re
 		spawnTool,
 		&agentSendTool{reg: reg}, // D2 已拍板保留：主 Agent 运行中主动通信 SubAgent 的手段
 		&agentInterruptTool{reg: reg},
+		&agentResumeTool{spawn: spawnTool, reg: reg}, // 恢复已结束的子 agent（从 journal 重建，跑成新任务）
 		&taskListTool{reg: reg},
 		&taskOutputTool{reg: reg}, // 子→主过程监控（journal 最新记录 + 权威状态）
 	}
