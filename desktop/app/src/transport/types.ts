@@ -139,9 +139,6 @@ export interface AgentSettings {
   // 「总是异常」后耗尽成供应商侧故障。默认值已调宽到 90s，此处留给按 provider 特性再调。
   first_chunk_timeout?: number
 }
-export interface RuntimeSettings {
-  stop_background_on_interrupt?: boolean // 主停止是否连后台任务一起停（缺省 false：只停主会话）
-}
 // Session Mesh 运行状态（mesh_status 命令响应；设置页「别人怎么连我」数据源）。
 export interface MeshStatusInfo {
   session_enabled: boolean
@@ -225,7 +222,6 @@ export interface AppSettings {
   codemode?: CodemodeSettings
   mesh?: MeshSettings // Session Mesh 会话间通信（缺省全关：开启后才注册 session_* 工具）
   agent?: AgentSettings // Agent 运行时设置（提醒阈值 + 子 agent 并发槽上限）
-  runtime?: RuntimeSettings // 运行期行为开关（S3-B 主停止后台任务语义）
   stt?: STTSettings // 语音输入（话筒）配置；配置齐全才显示话筒按钮
 }
 

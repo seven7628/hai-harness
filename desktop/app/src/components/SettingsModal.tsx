@@ -149,7 +149,6 @@ function GeneralTab() {
   const setSandboxMode = useAppStore((s) => s.setSandboxMode)
   const setCronEnabled = useAppStore((s) => s.setCronEnabled)
   const setCodemodeEnabled = useAppStore((s) => s.setCodemodeEnabled)
-  const setStopBackgroundOnInterrupt = useAppStore((s) => s.setStopBackgroundOnInterrupt)
   const setCronAutoClean = useAppStore((s) => s.setCronAutoClean)
   const setCompressThreshold = useAppStore((s) => s.setCompressThreshold)
   // 首字预算（秒）：与 store 的钳制口径一致地兜底（缺配置 → 默认 90）。
@@ -289,18 +288,6 @@ function GeneralTab() {
         <div className="seg" role="radiogroup" aria-label={t('settings.codemode')}>
           <button className={(settings.codemode?.enabled ?? false) ? 'cur' : ''} aria-pressed={settings.codemode?.enabled ?? false} onClick={() => setCodemodeEnabled(true)}>{t('settings.on')}</button>
           <button className={!(settings.codemode?.enabled ?? false) ? 'cur' : ''} aria-pressed={!(settings.codemode?.enabled ?? false)} onClick={() => setCodemodeEnabled(false)}>{t('settings.off')}</button>
-        </div>
-      </div>
-      {/* 主停止后台任务联动（S3-B，2026-08-30 默认翻转）：默认关 = 点 Composer 停止只停主会话，
-          后台任务继续运行（单个任务经 interrupt_task 精确停止）；显式开 = 兼容旧级联语义 */}
-      <div className="set-row">
-        <div>
-          <div className="set-label">{t('settings.stopBg')}</div>
-          <div className="set-desc">{t('settings.stopBg.desc')}</div>
-        </div>
-        <div className="seg" role="radiogroup" aria-label={t('settings.stopBgAria')}>
-          <button className={(settings.runtime?.stop_background_on_interrupt ?? false) ? 'cur' : ''} aria-pressed={settings.runtime?.stop_background_on_interrupt ?? false} onClick={() => setStopBackgroundOnInterrupt(true)}>{t('settings.on')}</button>
-          <button className={!(settings.runtime?.stop_background_on_interrupt ?? false) ? 'cur' : ''} aria-pressed={!(settings.runtime?.stop_background_on_interrupt ?? false)} onClick={() => setStopBackgroundOnInterrupt(false)}>{t('settings.off')}</button>
         </div>
       </div>
       {/* 外部 Skills：目录检测与导入由 Go bridge 完成，renderer 不直接访问用户目录 */}

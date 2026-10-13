@@ -259,9 +259,6 @@ interface AgentRuntimeSettings {
   max_subagents?: number
   max_explore_subagents?: number
 }
-interface RuntimeSettings {
-  stop_background_on_interrupt?: boolean // 主停止是否连后台任务一起停（缺省 true；S3-B）
-}
 // 语音输入（STT）配置：OpenAI 兼容 /audio/transcriptions 端点（与 types.ts STTSettings 同构）
 interface STTSettings {
   enabled?: boolean
@@ -288,7 +285,6 @@ interface AppSettings {
   sandbox?: SandboxSettings // 命令沙箱（缺省 seatbelt；桌面端默认开启 2026-08-16 决策）
   permissions?: PermissionsSettings // Computer Use 已授权 App（空 = 全部拒绝）
   agent?: AgentRuntimeSettings // Agent 运行时设置（提醒阈值 + 压缩阈值 + 子 agent 并发槽上限）
-  runtime?: RuntimeSettings // 运行期行为开关（主停止后台任务语义）
   stt?: STTSettings // 语音输入（话筒）配置；配置齐全才显示话筒
 }
 
@@ -349,7 +345,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   agent: { reminder_rounds: 30 },
   sandbox: { mode: 'seatbelt', sensitive_paths: [] }, // 命令沙箱默认开启（2026-08-16 用户决策）
   permissions: { computer_approved_apps: [] }, // Computer Use 已授权 App 空 = 全部拒绝（安全默认）
-  runtime: { stop_background_on_interrupt: true }, // 主停止连后台任务一起停（S3-B 缺省 true）
   stt: { enabled: false }, // 语音输入默认关闭（配置 base_url/model/api_key 后开启）
 }
 

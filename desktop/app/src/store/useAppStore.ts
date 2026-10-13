@@ -1920,7 +1920,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   permissions: { computer_approved_apps: [] }, // Computer Use 已授权 App（设置 → 插件 → Computer Use）；空 = 全部拒绝
   cron: { enabled: true, auto_clean: true }, // 定时任务默认全开（2026-08-19 用户决策）
   mesh: { session_enabled: false, remote_enabled: false }, // Session Mesh 默认全关（安全默认：开启后才注册工具）
-  runtime: { stop_background_on_interrupt: false }, // 主停止只停主会话（S3-B 缺省 false，2026-08-30 用户决策）
   stt: { enabled: false }, // 语音输入默认关闭（配置 base_url/model/api_key 后开启）
 }
 
@@ -2671,7 +2670,6 @@ interface AppState {
   setMeshRemoteCfg(remote: NonNullable<MeshSettings['remote']>): void // 远程网关配置（listen/peers/token；保存即热重载）
   fetchMeshStatus(): void // 查询 mesh 运行状态（node_id / connect_urls / links / peers / tls）
   pingMeshNode(nodeId: string): Promise<{ ok: boolean; rttMs?: number; error?: string }> // 主动 ping 节点（mesh_ping；连接检测）
-  setStopBackgroundOnInterrupt(on: boolean): void // 主停止是否连后台任务一起停（乐观 + 持久化）
   setGoalAlignmentRounds(n: number): void
   setSubagentConcurrency(patch: Partial<Pick<AgentSettings, 'max_subagents' | 'max_explore_subagents'>>): void // 子 agent 并发槽上限（乐观 + 持久化 + bridge 热更新）
   setCompressThreshold(t: number): void // 自动压缩触发阈值（占窗口比例；乐观 + 持久化 + bridge 热更新）
@@ -8362,13 +8360,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         else resolve({ ok: false, error: r.error || 'ping 失败' })
       })
     })
-  },
-  // 主「停止」是否连后台任务一起停（S3-B，缺省 false = 只停主会话）：乐观更新 + 落盘
-  // settings.json runtime 段；bridge interrupt 分支逐次读取生效值（无需 reload_settings）。
-  setStopBackgroundOnInterrupt: (on) => {
-    const cur = get().settings.runtime ?? { stop_background_on_interrupt: false }
-    set((s) => ({ settings: { ...s.settings, runtime: { ...cur, stop_background_on_interrupt: on } } }))
-    void transport.settingsSet({ runtime: { ...cur, stop_background_on_interrupt: on } })
   },
   setGoalAlignmentRounds: (n) => {
     const value = Math.max(0, Math.min(100, Math.round(n)))

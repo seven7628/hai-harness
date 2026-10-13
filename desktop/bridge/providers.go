@@ -118,41 +118,6 @@ func (s agentSettings) maxExploreSubagents() int {
 	return s.MaxExploreSubagents
 }
 
-// runtimeSettings settings.json 顶层 runtime 段：运行期行为开关。
-// StopBackgroundOnInterrupt: 主「停止」（Composer 停止按钮 → interrupt 命令）是否
-// 连后台子 agent 一起停（S3-B）。默认 true（保持兼容——用户显式点主停止时预期
-// 一并停下，否则子 agent 流式输出仍在、且前端 streaming 门控会卡输入）；
-// false = 主停止只停主会话，后台任务继续运行（任务按 interrupt_task 精确停止）。
-// 指针语义：缺字段 = 保持默认 true。
-type runtimeSettings struct {
-	StopBackgroundOnInterrupt *bool `json:"stop_background_on_interrupt"`
-}
-
-// loadRuntimeSettings 读 runtime 段（settings.json；缺失/坏配置 → 零值 = 全默认）。
-func loadRuntimeSettings() runtimeSettings {
-	raw, err := os.ReadFile(homeCfgPath("settings.json"))
-	if err != nil {
-		return runtimeSettings{}
-	}
-	var outer struct {
-		Runtime *runtimeSettings `json:"runtime"`
-	}
-	if json.Unmarshal(raw, &outer) != nil || outer.Runtime == nil {
-		return runtimeSettings{}
-	}
-	return *outer.Runtime
-}
-
-// stopBackgroundOnInterrupt 生效值（默认 false：主停止只停主会话，
-// 后台异步任务不受影响——需停单个任务走 interrupt_task 精确中断）。
-func stopBackgroundOnInterrupt() bool {
-	rs := loadRuntimeSettings()
-	if rs.StopBackgroundOnInterrupt == nil {
-		return false
-	}
-	return *rs.StopBackgroundOnInterrupt
-}
-
 func loadAgentSettings() agentSettings {
 	out := agentSettings{ReminderRounds: 30}
 	raw, err := os.ReadFile(homeCfgPath("settings.json"))

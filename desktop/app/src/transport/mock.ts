@@ -697,7 +697,6 @@ class MockTransport implements Transport {
       },
       mcpServers: this.mockMCPCfg,
       agent: { reminder_rounds: 30, max_subagents: 1000, max_explore_subagents: 1000 },
-      runtime: { stop_background_on_interrupt: false }, // 主停止只停主会话（S3-B mock 缺省 false）
       stt: { enabled: false }, // 语音输入默认关闭
     }
     try {

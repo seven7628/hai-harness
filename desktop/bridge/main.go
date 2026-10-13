@@ -1728,18 +1728,11 @@ func (m *manager) dispatch(c command) {
 		// 此前软停语义下模型把中断消息当普通输入继续执行工具（事件日志实证），
 		// 用户看到"点了停止还在输出"。中断后会话 idle，下一条用户输入才恢复。
 		bs.s.Interrupt()
-		// 用户「停止」= 只停主会话（主 run 的 abort）。后台异步任务（agent_spawn 派生的
-		// 子 agent、promoted 的后台工具任务）设计上脱离主 run 存活，**不受主停止影响**
-		//（2026-08-30 用户决策：停止对话不影响异步任务；单个异步任务的停止统一走
-		// interrupt_task 按 taskId 精确中断，与对话页/右栏任务卡同一入口）。
-		// S3-B 开关保留：显式配置 runtime.stop_background_on_interrupt=true 时才级联停后台。
-		if stopBackgroundOnInterrupt() {
-			for _, ti := range bs.s.Registry().List() {
-				if ti.Status == subagent.TaskRunning {
-					_ = bs.s.Registry().Interrupt(ti.ID) // 非失败终止（AgentEnd finishReason=abort）
-				}
-			}
-		}
+		// 用户「停止」= 只 abort 当前主 run。后台异步任务（agent_spawn 派生的子 agent、
+		// promoted 的后台工具任务）设计上脱离主 run 存活，**不受主停止影响**——这是
+		// 无条件规则，没有开关可翻转（2026-08-30 用户决策：停止对话不影响异步任务）；
+		// 停单个任务只走 interrupt_task / agent_interrupt 按 taskId 精确中断，与对话页/
+		// 右栏任务卡同一入口。
 		bs.wakeRun() // 保险：run loop 若正阻塞在 Run 入口的 takeBatch 之外，唤醒后自然退出
 		m.resp(c, true, "", nil)
 
