@@ -29,8 +29,8 @@ export interface ProviderCfg {
   models: Record<string, number> // model → context window（tokens；1M=1000000）
   max_tokens: Record<string, number> // model → 单次输出上限（tokens；DeepSeek v4-flash 官方 384k）
   // 每模型用户价表覆盖（USD/1M tokens；缺省/全 0 = 用内置注册表价表）。
-  // 维度 model → 单价：同模型名在不同 provider 下费率不同（deepseek-v4-flash 缓存价
-  // DeepSeek 直连 $0.014/M vs OpenCode Go $0.0028/M），故价表挂 provider 段。
+  // 维度 model → 单价：价表挂 provider 段（2026-10 起 deepseek-v4-flash 直连与
+  // OpenCode Go 同价 0.15/0.003/0.6 —— 仍按 provider 分别记账，勿跨 provider 套价）。
   prices?: Record<string, ModelPrices>
   protocol?: 'chat_completions' | 'responses' | 'anthropic' // OpenAI 兼容接入协议；responses/anthropic 暂未支持（默认 chat_completions）
   // 自定义 OpenAI-compatible 端点的请求能力；未配置保持完整 OpenAI 请求。

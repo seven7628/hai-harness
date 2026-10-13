@@ -349,7 +349,7 @@ The desktop bridge is a plain stdio NDJSON host: a command per line on stdin
 | `anthropic` (Messages) | anthropic · minimax · fireworks · github-copilot · kimi-coding |
 
 Model metadata (context window, max output, pricing, reasoning support, thinking levels, modalities)
-ships as a registry with **735 entries** and is user-overridable; a `list_models` command discovers
+ships as a registry with **772 entries** and is user-overridable; a `list_models` command discovers
 models for endpoints that have no built-in list. Any OpenAI-compatible gateway works — point
 `base_url` at it and pick the protocol.
 

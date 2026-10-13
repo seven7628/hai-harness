@@ -10,6 +10,8 @@
    ],
    "id": "deepseek",
    "models": [
+    "deepseek-flash",
+    "deepseek-v4.1-flash",
     "deepseek-v4-flash",
     "deepseek-v4-pro",
     "deepseek-v4-flash-vision-exp",
@@ -25,6 +27,10 @@
    ],
    "id": "openai",
    "models": [
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-4o",
     "gpt-4o-mini",
     "gpt-3.5-turbo",
@@ -44,6 +50,7 @@
    ],
    "id": "opencode",
    "models": [
+    "deepseek-v4.1-flash",
     "deepseek-v4-flash",
     "deepseek-v4-pro",
     "deepseek-v4-flash-vision-exp",
@@ -69,6 +76,7 @@
     "minimax-m2.7",
     "minimax-m3",
     "gpt-5.6-luna",
+    "gpt-6-luna",
     "grok-4.6",
     "muse-spark-1.2-contributor",
     "longcat-2.0"
@@ -127,6 +135,9 @@
    ],
    "id": "anthropic",
    "models": [
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
     "claude-sonnet-4-5",
     "claude-sonnet-4-6",
     "claude-sonnet-5",
@@ -355,10 +366,10 @@
      "max"
     ],
     "cost": {
-     "input": 0.14,
-     "cache_read": 0.0028,
-     "cache_write": 0,
-     "output": 0.28
+     "input": 0.15,
+     "cache_read": 0.003,
+     "cache_write": 0.0,
+     "output": 0.6
     },
     "protocol": "chat_completions"
    },
@@ -387,10 +398,10 @@
      "max"
     ],
     "cost": {
-     "input": 0.14,
-     "cache_read": 0.0028,
-     "cache_write": 0,
-     "output": 0.28
+     "input": 0.15,
+     "cache_read": 0.003,
+     "cache_write": 0.0,
+     "output": 0.6
     },
     "protocol": "chat_completions"
    },
@@ -416,10 +427,10 @@
      "max"
     ],
     "cost": {
-     "input": 0.435,
-     "cache_read": 0.003625,
-     "cache_write": 0,
-     "output": 0.87
+     "input": 0.66,
+     "cache_read": 0.022,
+     "cache_write": 0.0,
+     "output": 1.98
     },
     "protocol": "chat_completions"
    },
@@ -452,6 +463,70 @@
     },
     "protocol": "chat_completions",
     "source": "compat"
+   },
+   {
+    "id": "deepseek-flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "thinking_format": "deepseek",
+    "reasoning": true,
+    "requires_reasoning_content": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.15,
+     "cache_read": 0.003,
+     "cache_write": 0.0,
+     "output": 0.6
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "deepseek-v4.1-flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "thinking_format": "deepseek",
+    "reasoning": true,
+    "requires_reasoning_content": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.15,
+     "cache_read": 0.003,
+     "cache_write": 0.0,
+     "output": 0.6
+    },
+    "protocol": "chat_completions"
    }
   ],
   "openai": [
@@ -1463,6 +1538,138 @@
     },
     "protocol": "chat_completions",
     "source": "compat"
+   },
+   {
+    "id": "gpt-6-astra",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 10,
+     "cache_read": 1,
+     "cache_write": 12.5,
+     "output": 50
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
+   },
+   {
+    "id": "gpt-6-sol",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 2,
+     "cache_read": 0.2,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
+   },
+   {
+    "id": "gpt-6-luna",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
+   },
+   {
+    "id": "gpt-6.1-sol",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 2,
+     "cache_read": 0.1,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
    }
   ],
   "anthropic": [
@@ -1775,6 +1982,96 @@
      "output": 10
     },
     "protocol": "anthropic"
+   },
+   {
+    "id": "claude-opus-5-5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_tokens",
+    "supports_thinking": true,
+    "thinking_levels": {
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 4,
+     "cache_read": 0.2,
+     "cache_write": 5,
+     "output": 20
+    },
+    "protocol": "anthropic"
+   },
+   {
+    "id": "claude-sonnet-5-5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_tokens",
+    "supports_thinking": true,
+    "thinking_levels": {
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 2,
+     "cache_read": 0.1,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "protocol": "anthropic"
+   },
+   {
+    "id": "claude-haiku-5-5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_tokens",
+    "supports_thinking": true,
+    "thinking_levels": {
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "protocol": "anthropic"
    }
   ],
   "kimi": [
@@ -1992,10 +2289,10 @@
      "max"
     ],
     "cost": {
-     "input": 3,
+     "input": 3.0,
      "cache_read": 0.3,
-     "cache_write": 0,
-     "output": 15
+     "cache_write": 3.0,
+     "output": 15.0
     },
     "protocol": "chat_completions",
     "supports_cache_control": false
@@ -2182,10 +2479,10 @@
      "max"
     ],
     "cost": {
-     "input": 0.075,
-     "cache_read": 0.015,
-     "cache_write": 0,
-     "output": 0.25
+     "input": 0.15,
+     "cache_read": 0.03,
+     "cache_write": 0.0,
+     "output": 0.5
     },
     "protocol": "chat_completions",
     "thinking_force_on": true,
@@ -2236,10 +2533,10 @@
     "reasoning": true,
     "thinking_toggle_only": true,
     "cost": {
-     "input": 0.6,
-     "cache_read": 0.11,
+     "input": 1.0,
+     "cache_read": 0.2,
      "cache_write": 0.0,
-     "output": 2.2
+     "output": 3.2
     },
     "protocol": "chat_completions",
     "source": "compat",
@@ -2266,10 +2563,10 @@
      "high": "high"
     },
     "cost": {
-     "input": 0.6,
-     "cache_read": 0.11,
+     "input": 1.4,
+     "cache_read": 0.26,
      "cache_write": 0.0,
-     "output": 2.2
+     "output": 4.4
     },
     "protocol": "chat_completions",
     "source": "compat",
@@ -2353,10 +2650,10 @@
     "reasoning": true,
     "thinking_toggle_only": true,
     "cost": {
-     "input": 0.0,
-     "cache_read": 0.0,
+     "input": 0.6,
+     "cache_read": 0.11,
      "cache_write": 0.0,
-     "output": 0.0
+     "output": 2.2
     },
     "protocol": "chat_completions",
     "source": "compat",
@@ -2374,10 +2671,10 @@
     "reasoning": true,
     "thinking_toggle_only": true,
     "cost": {
-     "input": 0.0,
-     "cache_read": 0.0,
+     "input": 0.2,
+     "cache_read": 0.03,
      "cache_write": 0.0,
-     "output": 0.0
+     "output": 1.1
     },
     "protocol": "chat_completions",
     "source": "compat",
@@ -2445,10 +2742,10 @@
      "max"
     ],
     "cost": {
-     "input": 0.22,
-     "cache_read": 0.007,
-     "cache_write": 0,
-     "output": 0.66
+     "input": 0.15,
+     "cache_read": 0.003,
+     "cache_write": 0.0,
+     "output": 0.6
     },
     "protocol": "chat_completions"
    },
@@ -2477,10 +2774,10 @@
      "max"
     ],
     "cost": {
-     "input": 0.22,
-     "cache_read": 0.007,
-     "cache_write": 0,
-     "output": 0.66
+     "input": 0.15,
+     "cache_read": 0.003,
+     "cache_write": 0.0,
+     "output": 0.6
     },
     "protocol": "chat_completions"
    },
@@ -2607,10 +2904,10 @@
      "max"
     ],
     "cost": {
-     "input": 0.075,
-     "cache_read": 0.015,
-     "cache_write": 0,
-     "output": 0.25
+     "input": 0.15,
+     "cache_read": 0.03,
+     "cache_write": 0.0,
+     "output": 0.5
     },
     "protocol": "chat_completions"
    },
@@ -2810,7 +3107,7 @@
     "cost": {
      "input": 0.3,
      "cache_read": 0.06,
-     "cache_write": 0,
+     "cache_write": 0.375,
      "output": 1.2
     },
     "protocol": "chat_completions"
@@ -3099,6 +3396,104 @@
      "high"
     ],
     "requires_reasoning_content": true
+   },
+   {
+    "id": "deepseek-v4.1-flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "thinking_format": "deepseek",
+    "reasoning": true,
+    "requires_reasoning_content": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.15,
+     "cache_read": 0.003,
+     "cache_write": 0.0,
+     "output": 0.6
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "claude-haiku-5-5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_tokens",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "gpt-6-luna",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
    }
   ],
   "groq": [
@@ -4439,6 +4834,38 @@
      "output": 0
     },
     "protocol": "chat_completions"
+   },
+   {
+    "id": "deepseek-v4.1-flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "qwen",
+    "reasoning": true,
+    "requires_reasoning_content": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.0,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 0.0
+    },
+    "protocol": "chat_completions"
    }
   ],
   "xiaomi": [
@@ -5005,6 +5432,38 @@
      "output": 0.5
     },
     "protocol": "chat_completions"
+   },
+   {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "thinking_format": "together",
+    "reasoning": true,
+    "requires_reasoning_content": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.3,
+     "cache_read": 0.006,
+     "cache_write": 0.0,
+     "output": 1.2
+    },
+    "protocol": "chat_completions"
    }
   ],
   "fireworks": [
@@ -5071,8 +5530,8 @@
     "max_tokens_field": "max_tokens",
     "cost": {
      "input": 0.15,
-     "cache_read": 0.029,
-     "cache_write": 0,
+     "cache_read": 0.03,
+     "cache_write": 0.0,
      "output": 0.5
     },
     "protocol": "anthropic"
@@ -5195,8 +5654,8 @@
     "max_tokens_field": "max_tokens",
     "cost": {
      "input": 0.6,
-     "cache_read": 0.119,
-     "cache_write": 0,
+     "cache_read": 0.12,
+     "cache_write": 0.0,
      "output": 2.4
     },
     "protocol": "anthropic"
@@ -5376,6 +5835,36 @@
      "output": 22.5
     },
     "protocol": "chat_completions"
+   },
+   {
+    "id": "accounts/fireworks/models/deepseek-v4p1-flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.3,
+     "cache_read": 0.006,
+     "cache_write": 0.0,
+     "output": 1.2
+    },
+    "protocol": "anthropic"
    }
   ],
   "cerebras": [
@@ -6012,6 +6501,36 @@
      "output": 0.5
     },
     "protocol": "chat_completions"
+   },
+   {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.3,
+     "cache_read": 0.03,
+     "cache_write": 0.0,
+     "output": 1.2
+    },
+    "protocol": "chat_completions"
    }
   ],
   "nvidia": [
@@ -6444,6 +6963,38 @@
      "cache_read": 0,
      "cache_write": 0,
      "output": 0
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "deepseek-ai/deepseek-v4.1-flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "thinking_format": "deepseek",
+    "reasoning": true,
+    "requires_reasoning_content": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.0,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 0.0
     },
     "protocol": "chat_completions"
    }
@@ -7911,6 +8462,36 @@
      "output": 0.5
     },
     "protocol": "chat_completions"
+   },
+   {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_completion_tokens",
+    "reasoning": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "cost": {
+     "input": 0.3,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 1.2
+    },
+    "protocol": "chat_completions"
    }
   ],
   "openrouter": [
@@ -9102,10 +9683,10 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.2574,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 1.0287
+     "input": 0.32,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 0.89
     },
     "protocol": "chat_completions"
    },
@@ -9122,10 +9703,10 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.25,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 1
+     "input": 0.29,
+     "cache_read": 0.11,
+     "cache_write": 0.0,
+     "output": 1.14
     },
     "protocol": "chat_completions"
    },
@@ -9141,10 +9722,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.55,
-     "cache_read": 0.55,
-     "cache_write": 0,
-     "output": 1.65
+     "input": 0.25,
+     "cache_read": 0.13,
+     "cache_write": 0.0,
+     "output": 0.95
     },
     "protocol": "chat_completions"
    },
@@ -9217,10 +9798,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.269,
-     "cache_read": 0.1345,
-     "cache_write": 0,
-     "output": 0.4
+     "input": 0.259,
+     "cache_read": 0.14,
+     "cache_write": 0.0,
+     "output": 0.8
     },
     "protocol": "chat_completions"
    },
@@ -9264,10 +9845,10 @@
      "xhigh"
     ],
     "cost": {
-     "input": 0.08092,
-     "cache_read": 0.016184,
-     "cache_write": 0,
-     "output": 0.16184
+     "input": 0.03,
+     "cache_read": 0.03,
+     "cache_write": 0.0,
+     "output": 1.28
     },
     "protocol": "chat_completions"
    },
@@ -9292,10 +9873,10 @@
      "xhigh"
     ],
     "cost": {
-     "input": 0.065,
+     "input": 0.016,
      "cache_read": 0.016,
-     "cache_write": 0,
-     "output": 0.18
+     "cache_write": 0.0,
+     "output": 0.64
     },
     "protocol": "chat_completions"
    },
@@ -9349,10 +9930,10 @@
      "xhigh"
     ],
     "cost": {
-     "input": 0.44,
-     "cache_read": 0.014,
-     "cache_write": 0,
-     "output": 1.32
+     "input": 0.2156,
+     "cache_read": 0.00686,
+     "cache_write": 0.0,
+     "output": 0.6468
     },
     "protocol": "chat_completions"
    },
@@ -9377,10 +9958,10 @@
      "xhigh"
     ],
     "cost": {
-     "input": 1.6,
-     "cache_read": 0.135,
-     "cache_write": 0,
-     "output": 3.2
+     "input": 0.95526,
+     "cache_read": 0.079605,
+     "cache_write": 0.0,
+     "output": 1.91052
     },
     "protocol": "chat_completions"
    },
@@ -9405,10 +9986,10 @@
      "xhigh"
     ],
     "cost": {
-     "input": 1.1154,
-     "cache_read": 0.03718,
-     "cache_write": 0,
-     "output": 3.3462
+     "input": 0.66,
+     "cache_read": 0.022,
+     "cache_write": 0.0,
+     "output": 1.98
     },
     "protocol": "chat_completions"
    },
@@ -10197,10 +10778,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.07,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 0.34
+     "input": 0.09,
+     "cache_read": 0.05,
+     "cache_write": 0.0,
+     "output": 0.3
     },
     "protocol": "chat_completions"
    },
@@ -10324,10 +10905,10 @@
      "high"
     ],
     "cost": {
-     "input": 0.1,
-     "cache_read": 0.05,
-     "cache_write": 0,
-     "output": 0.15
+     "input": 0.06,
+     "cache_read": 0.015,
+     "cache_write": 0.0,
+     "output": 0.25
     },
     "protocol": "chat_completions"
    },
@@ -10529,10 +11110,10 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.71,
-     "cache_read": 0.71,
-     "cache_write": 0,
-     "output": 0.71
+     "input": 0.22,
+     "cache_read": 0.11,
+     "cache_write": 0.0,
+     "output": 0.5
     },
     "protocol": "chat_completions"
    },
@@ -10550,10 +11131,10 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.2,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 0.696
+     "input": 0.1875,
+     "cache_read": 0.05,
+     "cache_write": 0.0,
+     "output": 0.6525
     },
     "protocol": "chat_completions"
    },
@@ -10775,10 +11356,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.255,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 1.02
+     "input": 0.3,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 1.2
     },
     "protocol": "chat_completions"
    },
@@ -10832,10 +11413,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.3,
-     "cache_read": 0.06,
-     "cache_write": 0,
-     "output": 1.2
+     "input": 0.21,
+     "cache_read": 0.042,
+     "cache_write": 0.0,
+     "output": 0.84
     },
     "protocol": "chat_completions"
    },
@@ -11189,9 +11770,9 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.019,
-     "cache_read": 0,
-     "cache_write": 0,
+     "input": 0.029,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
      "output": 0.03
     },
     "protocol": "chat_completions"
@@ -11256,10 +11837,10 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.075,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 0.2
+     "input": 0.09375,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 0.25
     },
     "protocol": "chat_completions"
    },
@@ -11375,10 +11956,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.41,
-     "cache_read": 0.07,
-     "cache_write": 0,
-     "output": 2.06
+     "input": 0.5,
+     "cache_read": 0.15,
+     "cache_write": 0.0,
+     "output": 2.5
     },
     "protocol": "chat_completions"
    },
@@ -11396,10 +11977,10 @@
     "requires_reasoning_content": true,
     "supports_developer_role": false,
     "cost": {
-     "input": 0.95,
-     "cache_read": 0.16,
-     "cache_write": 0,
-     "output": 4
+     "input": 0.65,
+     "cache_read": 0.15,
+     "cache_write": 0.0,
+     "output": 3.41
     },
     "protocol": "chat_completions"
    },
@@ -11416,10 +11997,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.66,
+     "input": 0.6712,
      "cache_read": 0.18,
-     "cache_write": 0,
-     "output": 3.4
+     "cache_write": 0.0,
+     "output": 3.35
     },
     "protocol": "chat_completions"
    },
@@ -11446,10 +12027,10 @@
      "max"
     ],
     "cost": {
-     "input": 3,
-     "cache_read": 0.3,
-     "cache_write": 0,
-     "output": 15
+     "input": 0.73,
+     "cache_read": 0.55,
+     "cache_write": 0.0,
+     "output": 10.0
     },
     "protocol": "chat_completions"
    },
@@ -11535,10 +12116,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.05,
+     "input": 0.06,
      "cache_read": 0.025,
-     "cache_write": 0,
-     "output": 0.2
+     "cache_write": 0.0,
+     "output": 0.24
     },
     "protocol": "chat_completions"
    },
@@ -11582,10 +12163,10 @@
      "medium"
     ],
     "cost": {
-     "input": 0.085,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 0.4
+     "input": 0.08,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 0.45
     },
     "protocol": "chat_completions"
    },
@@ -11636,10 +12217,10 @@
      "high"
     ],
     "cost": {
-     "input": 0.5,
-     "cache_read": 0.1,
-     "cache_write": 0,
-     "output": 2.2
+     "input": 0.6,
+     "cache_read": 0.12,
+     "cache_write": 0.0,
+     "output": 2.4
     },
     "protocol": "chat_completions"
    },
@@ -11709,9 +12290,9 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.08,
+     "input": 0.07,
      "cache_read": 0.04,
-     "cache_write": 0,
+     "cache_write": 0.0,
      "output": 0.2
     },
     "protocol": "chat_completions"
@@ -13655,10 +14236,10 @@
      "high"
     ],
     "cost": {
-     "input": 0.03,
-     "cache_read": 0.03,
-     "cache_write": 0,
-     "output": 0.13
+     "input": 0.018,
+     "cache_read": 0.009,
+     "cache_write": 0.0,
+     "output": 0.09
     },
     "protocol": "chat_completions"
    },
@@ -14165,10 +14746,10 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.0875,
+     "input": 0.09,
      "cache_read": 0.0175,
-     "cache_write": 0,
-     "output": 0.35
+     "cache_write": 0.0,
+     "output": 0.55
     },
     "protocol": "chat_completions"
    },
@@ -14184,10 +14765,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.23,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 2.3
+     "input": 0.45,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 3.5
     },
     "protocol": "chat_completions"
    },
@@ -14223,10 +14804,10 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.04815,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 0.19305
+     "input": 0.1,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 0.3
     },
     "protocol": "chat_completions"
    },
@@ -14540,10 +15121,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.2,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 2.4
+     "input": 0.29,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 1.0
     },
     "protocol": "chat_completions"
    },
@@ -14582,10 +15163,10 @@
     "supports_developer_role": false,
     "thinking_default_off": true,
     "cost": {
-     "input": 0.117,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 0.455
+     "input": 0.25,
+     "cache_read": 0.12,
+     "cache_write": 0.0,
+     "output": 0.75
     },
     "protocol": "chat_completions"
    },
@@ -14622,10 +15203,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.29,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 2.4
+     "input": 0.26,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 2.08
     },
     "protocol": "chat_completions"
    },
@@ -14642,10 +15223,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.195,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 1.56
+     "input": 0.26,
+     "cache_read": 0.0,
+     "cache_write": 0.0,
+     "output": 2.6
     },
     "protocol": "chat_completions"
    },
@@ -14662,10 +15243,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.25,
-     "cache_read": 0.25,
-     "cache_write": 0,
-     "output": 1.25
+     "input": 0.08,
+     "cache_read": 0.04,
+     "cache_write": 0.0,
+     "output": 0.75
     },
     "protocol": "chat_completions"
    },
@@ -14682,10 +15263,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.39,
-     "cache_read": 0,
-     "cache_write": 0,
-     "output": 2.34
+     "input": 0.55,
+     "cache_read": 0.225,
+     "cache_write": 0.0,
+     "output": 3.5
     },
     "protocol": "chat_completions"
    },
@@ -14802,10 +15383,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.6,
+     "input": 0.32,
      "cache_read": 0.12,
-     "cache_write": 0,
-     "output": 3.6
+     "cache_write": 0.0,
+     "output": 3.2
     },
     "protocol": "chat_completions"
    },
@@ -14823,9 +15404,9 @@
     "supports_developer_role": false,
     "cost": {
      "input": 0.1,
-     "cache_read": 0.05,
-     "cache_write": 0,
-     "output": 0.9
+     "cache_read": 0.1,
+     "cache_write": 0.0,
+     "output": 0.95
     },
     "protocol": "chat_completions"
    },
@@ -15028,10 +15609,10 @@
      "xhigh"
     ],
     "cost": {
-     "input": 0.425,
-     "cache_read": 0.085,
+     "input": 0.04,
+     "cache_read": 0.0198,
      "cache_write": 0.53125,
-     "output": 2.55
+     "output": 2.3
     },
     "protocol": "chat_completions"
    },
@@ -15591,10 +16172,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.03,
-     "cache_read": 0.006,
-     "cache_write": 0,
-     "output": 0.12
+     "input": 0.09,
+     "cache_read": 0.018,
+     "cache_write": 0.0,
+     "output": 0.36
     },
     "protocol": "chat_completions"
    },
@@ -15841,10 +16422,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.43,
-     "cache_read": 0.08,
-     "cache_write": 0,
-     "output": 1.75
+     "input": 0.5,
+     "cache_read": 0.1,
+     "cache_write": 0.0,
+     "output": 2.0
     },
     "protocol": "chat_completions"
    },
@@ -15862,8 +16443,8 @@
     "supports_developer_role": false,
     "cost": {
      "input": 0.3,
-     "cache_read": 0.055,
-     "cache_write": 0,
+     "cache_read": 0.05,
+     "cache_write": 0.0,
      "output": 0.9
     },
     "protocol": "chat_completions"
@@ -15880,10 +16461,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.4,
-     "cache_read": 0.08,
-     "cache_write": 0,
-     "output": 1.75
+     "input": 0.6,
+     "cache_read": 0.11,
+     "cache_write": 0.0,
+     "output": 2.2
     },
     "protocol": "chat_completions"
    },
@@ -15899,9 +16480,9 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 0.06,
+     "input": 0.0605,
      "cache_read": 0.01,
-     "cache_write": 0,
+     "cache_write": 0.0,
      "output": 0.4
     },
     "protocol": "chat_completions"
@@ -15919,9 +16500,9 @@
     "supports_developer_role": false,
     "cost": {
      "input": 0.6,
-     "cache_read": 0.119,
-     "cache_write": 0,
-     "output": 1.9
+     "cache_read": 0.12,
+     "cache_write": 0.0,
+     "output": 1.92
     },
     "protocol": "chat_completions"
    },
@@ -15983,10 +16564,10 @@
      "xhigh"
     ],
     "cost": {
-     "input": 1.19,
-     "cache_read": 0.221,
-     "cache_write": 0,
-     "output": 3.74
+     "input": 0.06,
+     "cache_read": 0.059,
+     "cache_write": 0.0,
+     "output": 7.0
     },
     "protocol": "chat_completions"
    },
@@ -16039,10 +16620,10 @@
      "max"
     ],
     "cost": {
-     "input": 1.4,
-     "cache_read": 0.26,
-     "cache_write": 0,
-     "output": 4.4
+     "input": 0.079,
+     "cache_read": 0.059,
+     "cache_write": 0.0,
+     "output": 4.8
     },
     "protocol": "chat_completions"
    },
@@ -16069,10 +16650,10 @@
      "max"
     ],
     "cost": {
-     "input": 0.075,
-     "cache_read": 0.015,
-     "cache_write": 0,
-     "output": 0.25
+     "input": 0.0232,
+     "cache_read": 0.0232,
+     "cache_write": 0.0,
+     "output": 1.2
     },
     "protocol": "chat_completions"
    },
@@ -16153,10 +16734,10 @@
      "max"
     ],
     "cost": {
-     "input": 10,
-     "cache_read": 1,
+     "input": 10.0,
+     "cache_read": 0.25,
      "cache_write": 12.5,
-     "output": 50
+     "output": 50.0
     },
     "protocol": "chat_completions"
    },
@@ -16173,10 +16754,10 @@
     "thinking_format": "openrouter",
     "supports_developer_role": false,
     "cost": {
-     "input": 1,
-     "cache_read": 0.1,
-     "cache_write": 1.25,
-     "output": 5
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
     },
     "protocol": "chat_completions"
    },
@@ -16207,10 +16788,10 @@
      "max"
     ],
     "cost": {
-     "input": 5,
-     "cache_read": 0.5,
-     "cache_write": 6.25,
-     "output": 25
+     "input": 4.0,
+     "cache_read": 0.2,
+     "cache_write": 5.0,
+     "output": 20.0
     },
     "protocol": "chat_completions"
    },
@@ -16241,10 +16822,10 @@
      "max"
     ],
     "cost": {
-     "input": 2,
-     "cache_read": 0.2,
+     "input": 2.0,
+     "cache_read": 0.1,
      "cache_write": 2.5,
-     "output": 10
+     "output": 10.0
     },
     "protocol": "chat_completions"
    },
@@ -16269,10 +16850,10 @@
      "xhigh"
     ],
     "cost": {
-     "input": 0.05,
-     "cache_read": 0.013,
-     "cache_write": 0,
-     "output": 0.16
+     "input": 0.0128,
+     "cache_read": 0.0128,
+     "cache_write": 0.0,
+     "output": 0.768
     },
     "protocol": "chat_completions"
    },
@@ -16359,10 +16940,10 @@
      "max"
     ],
     "cost": {
-     "input": 2.55,
-     "cache_read": 0.256,
-     "cache_write": 0,
-     "output": 12.75
+     "input": 0.73,
+     "cache_read": 0.55,
+     "cache_write": 0.0,
+     "output": 10.0
     },
     "protocol": "chat_completions"
    },
@@ -16486,10 +17067,10 @@
      "max"
     ],
     "cost": {
-     "input": 1.17,
-     "cache_read": 0.234,
-     "cache_write": 0,
-     "output": 3.96
+     "input": 0.055,
+     "cache_read": 0.06,
+     "cache_write": 0.0,
+     "output": 5.0
     },
     "protocol": "chat_completions"
    },
@@ -16561,6 +17142,408 @@
     "supports_developer_role": false,
     "thinking_format": "openrouter",
     "thinking_toggle_only": true
+   },
+   {
+    "id": "deepseek/deepseek-v4.1-flash",
+    "context_window": 1048576,
+    "max_tokens": 943718,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "reasoning": true,
+    "requires_reasoning_content": true,
+    "supports_developer_role": false,
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max"
+    },
+    "cost": {
+     "input": 0.15,
+     "cache_read": 0.003,
+     "cache_write": 0.0,
+     "output": 0.6
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "openai/gpt-6-astra",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 10,
+     "cache_read": 1,
+     "cache_write": 12.5,
+     "output": 50
+    },
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "openai/gpt-6-sol",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 2,
+     "cache_read": 0.2,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "openai/gpt-6-luna",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "openai/gpt-6.1-sol",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 2,
+     "cache_read": 0.1,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "openai/gpt-6-astra-pro",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 10,
+     "cache_read": 1,
+     "cache_write": 12.5,
+     "output": 50
+    },
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "openai/gpt-6-sol-pro",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 2,
+     "cache_read": 0.2,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "openai/gpt-6-luna-pro",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "openai/gpt-6.1-sol-pro",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 2,
+     "cache_read": 0.1,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "anthropic/claude-opus-5.5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 4,
+     "cache_read": 0.2,
+     "cache_write": 5,
+     "output": 20
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "anthropic/claude-sonnet-5.5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 2,
+     "cache_read": 0.1,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "protocol": "chat_completions"
+   },
+   {
+    "id": "anthropic/claude-haiku-5.5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_completion_tokens",
+    "thinking_format": "openrouter",
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "protocol": "chat_completions"
    }
   ],
   "openai-codex": [
@@ -17596,6 +18579,225 @@
      "output": 1.2
     },
     "protocol": "responses"
+   },
+   {
+    "id": "gpt-6-astra",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 10,
+     "cache_read": 1,
+     "cache_write": 12.5,
+     "output": 50
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
+   },
+   {
+    "id": "gpt-6-sol",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 2,
+     "cache_read": 0.2,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
+   },
+   {
+    "id": "gpt-6-luna",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
+   },
+   {
+    "id": "gpt-6.1-sol",
+    "context_window": 1050000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "cost": {
+     "input": 2,
+     "cache_read": 0.1,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "max_tokens_field": "max_output_tokens",
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "thinking_levels": {
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "protocol": "responses"
+   },
+   {
+    "id": "claude-opus-5.5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_tokens",
+    "thinking_levels": {
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 4,
+     "cache_read": 0.2,
+     "cache_write": 5,
+     "output": 20
+    },
+    "protocol": "anthropic"
+   },
+   {
+    "id": "claude-sonnet-5.5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_tokens",
+    "thinking_levels": {
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 2,
+     "cache_read": 0.1,
+     "cache_write": 2.5,
+     "output": 10
+    },
+    "protocol": "anthropic"
+   },
+   {
+    "id": "claude-haiku-5.5",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "reasoning": true,
+    "max_tokens_field": "max_tokens",
+    "thinking_levels": {
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "cost": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.5
+    },
+    "protocol": "anthropic"
    }
   ],
   "kimi-coding": [

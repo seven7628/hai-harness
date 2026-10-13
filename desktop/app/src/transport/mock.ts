@@ -623,10 +623,12 @@ class MockTransport implements Transport {
   // 让 mock 模式打开设置即回显内置价）。deepseek 直连价 + opencode 网关价。
   private builtinModelsCost(presets: { id: string; models: string[] }[]): Record<string, Record<string, { input: number; cache_read: number; cache_write: number; output: number }>> {
     const priceOf: Record<string, { input: number; cache_read: number; output: number }> = {
-      'deepseek-v4-flash': { input: 0.14, cache_read: 0.014, output: 0.28 },
-      'deepseek-v4-flash-vision-exp': { input: 0.14, cache_read: 0.014, output: 0.28 },
-      'deepseek-v4-pro': { input: 0.435, cache_read: 0.003625, output: 0.87 },
-      'deepseek-chat': { input: 0.28, cache_read: 0.028, output: 0.56 },
+      'deepseek-flash': { input: 0.15, cache_read: 0.003, output: 0.6 },
+      'deepseek-v4.1-flash': { input: 0.15, cache_read: 0.003, output: 0.6 },
+      'deepseek-v4-flash': { input: 0.15, cache_read: 0.003, output: 0.6 },
+      'deepseek-v4-flash-vision-exp': { input: 0.15, cache_read: 0.003, output: 0.6 },
+      'deepseek-v4-pro': { input: 0.66, cache_read: 0.022, output: 1.98 },
+      'deepseek-chat': { input: 0.14, cache_read: 0.0028, output: 0.28 },
       'glm-5.1': { input: 1.4, cache_read: 0.26, output: 4.4 },
       'glm-5.2': { input: 1.4, cache_read: 0.26, output: 4.4 },
       'glm-5.3': { input: 1.4, cache_read: 0.26, output: 4.4 },
@@ -659,22 +661,22 @@ class MockTransport implements Transport {
         active: 'deepseek',
         deepseek: {
           base_url: 'https://api.deepseek.com/v1',
-          models: { 'deepseek-v4-flash': 1000000, 'deepseek-v4-pro': 1000000, 'deepseek-v4-flash-vision-exp': 1000000, 'deepseek-chat': 64000 },
-          max_tokens: { 'deepseek-v4-flash': 384000, 'deepseek-v4-pro': 384000, 'deepseek-v4-flash-vision-exp': 384000, 'deepseek-chat': 8192 },
+          models: { 'deepseek-flash': 1000000, 'deepseek-v4.1-flash': 1000000, 'deepseek-v4-flash': 1000000, 'deepseek-v4-pro': 1000000, 'deepseek-v4-flash-vision-exp': 1000000, 'deepseek-chat': 64000 },
+          max_tokens: { 'deepseek-flash': 384000, 'deepseek-v4.1-flash': 384000, 'deepseek-v4-flash': 384000, 'deepseek-v4-pro': 384000, 'deepseek-v4-flash-vision-exp': 384000, 'deepseek-chat': 8192 },
           protocol: 'chat_completions',
           input_types: { 'deepseek-v4-flash-vision-exp': ['text', 'image'] }, // DeepSeek 视觉模型
         },
         openai: {
           base_url: 'https://api.openai.com/v1',
-          models: { 'gpt-4o': 128000 },
-          max_tokens: { 'gpt-4o': 16384 },
+          models: { 'gpt-6-astra': 1050000, 'gpt-6.1-sol': 1050000, 'gpt-6-sol': 1050000, 'gpt-6-luna': 1050000, 'gpt-4o': 128000 },
+          max_tokens: { 'gpt-6-astra': 128000, 'gpt-6.1-sol': 128000, 'gpt-6-sol': 128000, 'gpt-6-luna': 128000, 'gpt-4o': 16384 },
           protocol: 'chat_completions',
           input_types: { 'gpt-4o': ['text', 'image'], 'gpt-4o-mini': ['text', 'image'], 'gpt-4.1': ['text', 'image'] },
         },
         opencode: {
           base_url: 'https://opencode.ai/zen/go/v1',
-          models: { 'deepseek-v4-flash': 1000000, 'deepseek-v4-pro': 1000000, 'deepseek-v4-flash-vision-exp': 1000000, 'glm-5.1': 202752, 'glm-5.2': 1000000, 'glm-5.3': 1000000, 'glm-5.3-flash': 1000000, 'kimi-k3': 1048576, 'kimi-k2.7-code': 262144, 'kimi-k2.6': 262144, 'kimi-k2.5': 262144, 'mimo-v2.6-pro': 1048576, 'mimo-v2.6-flash': 1048576, 'mimo-v2.5': 1000000, 'mimo-v2.5-pro': 1048576, 'hy3': 256000, 'hy4-preview': 1024000, 'qwen3.6-plus': 1000000, 'qwen3.7-max': 1000000, 'qwen3.7-plus': 1000000, 'qwen3.8-max': 1000000, 'minimax-m2.7': 204800, 'minimax-m3': 1000000, 'gpt-5.6-luna': 1050000, 'grok-4.6': 500000, 'muse-spark-1.2-contributor': 1048576, 'longcat-2.0': 1000000 },
-          max_tokens: { 'deepseek-v4-flash': 384000, 'deepseek-v4-pro': 384000, 'deepseek-v4-flash-vision-exp': 384000, 'glm-5.1': 32768, 'glm-5.2': 131072, 'glm-5.3': 131072, 'glm-5.3-flash': 131072, 'kimi-k3': 131072, 'kimi-k2.7-code': 262144, 'kimi-k2.6': 65536, 'kimi-k2.5': 262144, 'mimo-v2.6-pro': 131072, 'mimo-v2.6-flash': 131072, 'mimo-v2.5': 128000, 'mimo-v2.5-pro': 128000, 'hy3': 64000, 'hy4-preview': 64000, 'qwen3.6-plus': 65536, 'qwen3.7-max': 65536, 'qwen3.7-plus': 65536, 'qwen3.8-max': 131072, 'minimax-m2.7': 131072, 'minimax-m3': 131072, 'gpt-5.6-luna': 128000, 'grok-4.6': 500000, 'muse-spark-1.2-contributor': 131072, 'longcat-2.0': 131072 },
+          models: { 'deepseek-flash': 1000000, 'deepseek-v4.1-flash': 1000000, 'deepseek-v4-flash': 1000000, 'deepseek-v4-pro': 1000000, 'deepseek-v4-flash-vision-exp': 1000000, 'glm-5.1': 202752, 'glm-5.2': 1000000, 'glm-5.3': 1000000, 'glm-5.3-flash': 1000000, 'kimi-k3': 1048576, 'kimi-k2.7-code': 262144, 'kimi-k2.6': 262144, 'kimi-k2.5': 262144, 'mimo-v2.6-pro': 1048576, 'mimo-v2.6-flash': 1048576, 'mimo-v2.5': 1000000, 'mimo-v2.5-pro': 1048576, 'hy3': 256000, 'hy4-preview': 1024000, 'qwen3.6-plus': 1000000, 'qwen3.7-max': 1000000, 'qwen3.7-plus': 1000000, 'qwen3.8-max': 1000000, 'minimax-m2.7': 204800, 'minimax-m3': 1000000, 'gpt-5.6-luna': 1050000, 'gpt-6-luna': 1050000, 'claude-haiku-5-5': 1000000, 'grok-4.6': 500000, 'muse-spark-1.2-contributor': 1048576, 'longcat-2.0': 1000000 },
+          max_tokens: { 'deepseek-flash': 384000, 'deepseek-v4.1-flash': 384000, 'deepseek-v4-flash': 384000, 'deepseek-v4-pro': 384000, 'deepseek-v4-flash-vision-exp': 384000, 'glm-5.1': 32768, 'glm-5.2': 131072, 'glm-5.3': 131072, 'glm-5.3-flash': 131072, 'kimi-k3': 131072, 'kimi-k2.7-code': 262144, 'kimi-k2.6': 65536, 'kimi-k2.5': 262144, 'mimo-v2.6-pro': 131072, 'mimo-v2.6-flash': 131072, 'mimo-v2.5': 128000, 'mimo-v2.5-pro': 128000, 'hy3': 64000, 'hy4-preview': 64000, 'qwen3.6-plus': 65536, 'qwen3.7-max': 65536, 'qwen3.7-plus': 65536, 'qwen3.8-max': 131072, 'minimax-m2.7': 131072, 'minimax-m3': 131072, 'gpt-5.6-luna': 128000, 'gpt-6-luna': 128000, 'claude-haiku-5-5': 128000, 'grok-4.6': 500000, 'muse-spark-1.2-contributor': 131072, 'longcat-2.0': 131072 },
           protocol: 'chat_completions',
           input_types: {}, // 默认纯文本；多模态模型可在 Provider 设置勾选「图片」
         },
@@ -1927,7 +1929,7 @@ class MockTransport implements Transport {
     this.emit({ event_type: 'llm_start', session_id: sid, model, ...(requestId ? { request_id: requestId } : {}), ...(runId ? { run_id: runId } : {}), timestamp: ts() })
   }
   private llmEnd(over: Record<string, unknown>, sid = this.sid) {
-    // cost_usd 模拟真 bridge 打标（同价表：Input$0.14 / CacheRead$0.014 / Output$0.28 每 M）
+    // cost_usd 模拟真 bridge 打标（同价表：Input$0.15 / CacheRead$0.003 / Output$0.6 每 M）
     const u = (over.usage as { Input?: number; CacheRead?: number; CacheWrite?: number; Output?: number } | undefined) ?? {}
     // 上下文占用锚点（context_breakdown 用）：与真 bridge 的 reducer 同口径 —— 最近一次
     // llm_end 的 Input 即当前上下文占用（压缩/清空后会由后续轮次覆盖）。
@@ -1935,7 +1937,7 @@ class MockTransport implements Transport {
       this.ctxTokens.set(sid, u.Input)
       this.ctxEstimated.set(sid, false) // provider 真实 usage → 真实口径
     }
-    const costUsd = ((u.Input ?? 0) * 0.14 + (u.CacheRead ?? 0) * 0.014 + (u.CacheWrite ?? 0) * 0.175 + (u.Output ?? 0) * 0.28) / 1e6
+    const costUsd = ((u.Input ?? 0) * 0.15 + (u.CacheRead ?? 0) * 0.003 + (u.CacheWrite ?? 0) * 0.175 + (u.Output ?? 0) * 0.6) / 1e6
     this.emit({ event_type: 'llm_end', session_id: sid, model: this.model, timestamp: ts(), cost_usd: Number(costUsd.toFixed(8)), ...over })
   }
   private toolStart(id: string, name: string, args: string, runId: string, at: number, sid = this.sid, bg = false) {
@@ -2801,10 +2803,10 @@ $$`
 // ByWorkspace），这样设置页与空会话图表在浏览器里能按真实布局渲染。确定性伪随机（固定种子）
 // → 每次刷新曲线一致，便于截图比对。
 const MOCK_STATS_MODELS = [
-  { key: 'deepseek/deepseek-v4.1-flash', weight: 0.62, inTok: 26000, outTok: 900, price: { in: 0.14, out: 0.28 } },
-  { key: 'deepseek/deepseek-v4-pro', weight: 0.2, inTok: 41000, outTok: 1400, price: { in: 0.435, out: 0.87 } },
+  { key: 'deepseek/deepseek-v4.1-flash', weight: 0.62, inTok: 26000, outTok: 900, price: { in: 0.15, out: 0.6 } },
+  { key: 'deepseek/deepseek-v4-pro', weight: 0.2, inTok: 41000, outTok: 1400, price: { in: 0.66, out: 1.98 } },
   { key: 'opencode/glm-5.2', weight: 0.13, inTok: 52000, outTok: 1800, price: { in: 1.4, out: 4.4 } },
-  { key: 'anthropic/claude-opus-4.8', weight: 0.05, inTok: 68000, outTok: 2600, price: { in: 15, out: 75 } },
+  { key: 'anthropic/claude-opus-4.8', weight: 0.05, inTok: 68000, outTok: 2600, price: { in: 5, out: 25 } },
 ]
 
 function mockMetricsReport(from: string): Record<string, unknown> {

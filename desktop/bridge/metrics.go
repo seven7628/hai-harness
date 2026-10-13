@@ -33,21 +33,23 @@ var priceTableMu sync.RWMutex
 // 与内置 priceTable 分离：删除覆盖 = 从本表删条目（内置表永不污染）；读价时用户价优先。
 var userPriceTable = map[string]map[string]provider.ModelPrice{}
 
-// priceTable 模型价表（费率已由用户核实 2026-08-13），维度 = provider → model：
-// 同模型名在不同 provider 下费率不同（如 deepseek-v4-flash 缓存读取：DeepSeek 直连
-// $0.014/M，OpenCode Go $0.0028/M —— 1M 上下文下缓存读取占大头，混记会失真）。
-// OpenCode Go 价表来自官方端点表（2026-08）；CacheRead 用低价（缓存命中价远低于未命中）。
+// priceTable 宿主侧模型价表（2026-10-12 价表刷新），维度 = provider → model：
+// 同模型名在不同 provider 下费率不同（如 deepseek-v4-flash 缓存读取：DeepSeek 直连与
+// OpenCode Go 现在同为 $0.003/M —— 1M 上下文下缓存读取占大头，混记会失真）。
+// ⚠ 值是 providers.json（单一事实源）的镜像，必须与其保持逐字段一致 ——
+// overrideRegistryLocked 用它写注册表 info.Cost，**会遮盖内置价**（providers.json
+// 改了而这里没改，用户已配置的 provider 仍按旧价记账）。改 providers.json 时同步此表。
 // 用户覆盖：Provider 设置面板每模型单价会经 settings.json provider[].prices 落盘，
 // 启动/热更新时覆盖此表（见 syncUserPrices；注册表内置价经 overrideRegistryLocked
 // 写 info.Cost 时也是查此表 —— 因此覆盖此表 = 全链路（记账/成本字段）一致生效）。
 var priceTable = map[string]map[string]ModelPrice{
 	"deepseek": {
-		"deepseek-v4-flash": {Input: 0.14, CacheRead: 0.014, Output: 0.28},
-		"deepseek-chat":     {Input: 0.28, CacheRead: 0.028, Output: 0.56}, // flash 的 2 倍，占位待核
+		"deepseek-v4-flash": {Input: 0.15, CacheRead: 0.003, Output: 0.60},
+		"deepseek-chat":     {Input: 0.14, CacheRead: 0.0028, Output: 0.28},
 	},
 	"opencode": {
-		"deepseek-v4-flash": {Input: 0.14, CacheRead: 0.0028, Output: 0.28},
-		"deepseek-v4-pro":   {Input: 0.435, CacheRead: 0.003625, Output: 0.87},
+		"deepseek-v4-flash": {Input: 0.15, CacheRead: 0.003, Output: 0.60},
+		"deepseek-v4-pro":   {Input: 0.66, CacheRead: 0.022, Output: 1.98},
 		"glm-5.1":           {Input: 1.40, CacheRead: 0.26, Output: 4.40},
 		"glm-5.2":           {Input: 1.40, CacheRead: 0.26, Output: 4.40},
 		"glm-5.3":           {Input: 1.40, CacheRead: 0.26, Output: 4.40},
