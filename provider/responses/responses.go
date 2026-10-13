@@ -69,13 +69,14 @@ func NewResponsesProvider(deps provider.Dependencies, baseURL, apiKey string) *R
 		base: base,
 		isOR: strings.Contains(strings.ToLower(baseURL), "openrouter.ai"),
 	}
+	httpClient := &http.Client{Transport: inner}
 	// OpenCode Go 网关（opencode.ai/zen/go/v1）：网关准入要求 x-opencode-session +
 	// 自有 UA → 包在 affinity 之外最外层（各写各的头，互不覆盖）。
 	if provider.IsOpenCodeGateway(cfg.BaseURL) {
-		cfg.HTTPClient = provider.OpenCodeGatewayClient(&http.Client{Transport: inner})
-	} else {
-		cfg.HTTPClient = &http.Client{Transport: inner}
+		httpClient = provider.OpenCodeGatewayClient(httpClient)
 	}
+	// 上游自报费用：最外层尾部回看（只读响应体，与头注入互不干扰）。
+	cfg.HTTPClient = provider.WrapUpstreamCostClient(httpClient)
 	reg := deps.Registry
 	if reg == nil {
 		reg = provider.NewRegistry()
@@ -99,6 +100,9 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req *provider.StreamRequ
 	// 同一会话 id 经 provider 包的 ctx 键下传（OpenCode Go 网关 transport 读它写
 	// x-opencode-session；非网关端点无 transport 读取方，无副作用）。
 	ctx = provider.WithOpenCodeSession(ctx, req.SessionID)
+
+	// 上游自报费用槽位：传输层按 ctx 找到它并留下响应尾部，收尾时回看。
+	ctx, upCost := provider.WithUpstreamCost(ctx)
 
 	// 注册表（零值构造兜底：测试 mock 不走构造函数）；成本折算与错误路径都用它。
 	reg := p.registry
@@ -230,7 +234,7 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req *provider.StreamRequ
 		if err != nil {
 			// 失败尝试的已产生用量随错误上抛（折价后包 —— 同 openai/anthropic 口径；
 			// responses 的 usage 只在 response.completed 回，中途断流通常拿不到）。
-			reg.FillUsageCost(req.Provider, req.Model, &usage)
+			reg.ApplyUsageCost(req.Provider, req.Model, &usage, upCost)
 			return provider.WithPartialUsage(classifyResponsesError(err), usage)
 		}
 
@@ -344,7 +348,7 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req *provider.StreamRequ
 			}
 		case openai.ResponseStreamEventFailed:
 			// 失败帧：已收到的用量一并上抛（上游可能已计费）。
-			reg.FillUsageCost(req.Provider, req.Model, &usage)
+			reg.ApplyUsageCost(req.Provider, req.Model, &usage, upCost)
 			if ev.Error != nil {
 				return provider.WithPartialUsage(
 					provider.DetectContextExceeded(fmt.Errorf("responses error: %s: %s", ev.Error.Code, ev.Error.Message)), usage)
@@ -360,8 +364,8 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req *provider.StreamRequ
 	sort.Slice(toolCalls, func(i, j int) bool { return toolCalls[i].Index < toolCalls[j].Index })
 
 	// 归一化：Usage 从 provider 吐出即完整（Input 总输入口径 + Cost 实际支出 µUSD）
-	// —— 下游零协议特判。价表经注册表（bridge 覆盖注入）。
-	reg.FillUsageCost(req.Provider, req.Model, &usage)
+	// —— 下游零协议特判。计费口径：上游自报费用优先，拿不到才回退注册表价表。
+	reg.ApplyUsageCost(req.Provider, req.Model, &usage, upCost)
 
 	return handler(provider.LLMEndEvent{
 		RequestId:          requestId,

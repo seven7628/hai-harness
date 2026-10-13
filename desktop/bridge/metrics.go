@@ -107,11 +107,17 @@ func setUserPrice(provider string, prices map[string]provider.ModelPrice) {
 }
 
 // costUsd 算一次模型调用的金额（USD，前端展示）。
-// 优先 provider 层已按注册表价表（providers.json 单一事实源 + 用户价覆盖）折算的
-// µUSD（Usage.Cost，见 provider.FillUsageCost）——与 SDK MaxCost/持久化同口径，
-// 事件/checkpoint/指标聚合不再依赖宿主并行价表。
+// 优先 provider 层已定好的口径（Usage.Cost）：
+//   - Source=upstream：上游自报的**实收**（可能为 0 = 上游说免费），权威，不再做任何本地折算；
+//   - 其余：注册表价表折算值（providers.json 单一事实源 + 用户价覆盖，见 ApplyUsageCost）。
+//
+// 与 SDK MaxCost/持久化同口径，事件/checkpoint/指标聚合不再依赖宿主并行价表。
 // 回退（历史 JSONL 等 Usage.Cost 未填充的旧数据）：priceFor（用户价 > 内置价表）。
 func costUsd(provider, model string, u core.Usage) float64 {
+	// 上游实收优先：Total 为 0 也是正确结论（免费额度/订阅端点），不能当「没数据」再折算。
+	if u.Cost.Source == core.CostSourceUpstream {
+		return float64(u.Cost.Total) / 1e6
+	}
 	if u.Cost.Total > 0 {
 		return float64(u.Cost.Total) / 1e6
 	}

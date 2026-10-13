@@ -62,8 +62,10 @@ func newOpenAIProviderWithClient(baseURL, apiKey string, capabilities OpenAIComp
 		cfg.BaseURL = baseURL
 	}
 	sdkClient := http.DefaultClient
+	sdkIsCfg := false
 	if c, ok := cfg.HTTPClient.(*http.Client); ok && c != nil {
 		sdkClient = c
+		sdkIsCfg = true
 	}
 	minimalClient := injected
 	if minimalClient == nil {
@@ -81,6 +83,19 @@ func newOpenAIProviderWithClient(baseURL, apiKey string, capabilities OpenAIComp
 	}
 	if reg == nil {
 		reg = NewRegistry()
+	}
+	// 上游自报费用：两个通道各自的客户端**就地**包一层尾部回看（保留既有 Timeout 与
+	// 底层 Transport —— 非网关端点「注入 client 只作用于 minimal 通道」的分工不变）。
+	// 网关端点两通道同源，包一次后者复用。
+	shared := minimalClient == sdkClient
+	sdkClient = WrapUpstreamCostClient(sdkClient)
+	if sdkIsCfg {
+		cfg.HTTPClient = sdkClient
+	}
+	if shared {
+		minimalClient = sdkClient
+	} else {
+		minimalClient = WrapUpstreamCostClient(minimalClient)
 	}
 	return &OpenAIProvider{client: openai.NewClientWithConfig(cfg), capabilities: capabilities, baseURL: strings.TrimRight(cfg.BaseURL, "/"), apiKey: apiKey, httpClient: minimalClient, registry: reg}
 }
@@ -398,6 +413,9 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 	// 非网关端点 ctx 不变；空 SessionID 由 transport 兜底 id 接管。
 	ctx = WithOpenCodeSession(ctx, req.SessionID)
 
+	// 上游自报费用槽位：传输层按 ctx 找到它并留下响应尾部，收尾时回看（见 upstream_cost.go）。
+	ctx, upCost := WithUpstreamCost(ctx)
+
 	// 思考开关与强度（统一语义 → 模型能力）：
 	// ResolveThinking 按注册表：非推理模型默认关、档位 clamp 到模型支持范围、toggle-only 只发开关。
 	reg := p.registry
@@ -629,7 +647,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 			// 失败尝试的已产生用量随错误上抛（上游按已生成 token 计费）：先折价再包 ——
 			// 注意 chat-completions 的 usage 只在收尾帧回，中途断流通常拿不到（记录不到 ≠ 没花钱，
 			// 但宁可如实为零也不伪造估算；Anthropic 协议 message_start 带 input，能拿到）。
-			reg.FillUsageCost(req.Provider, req.Model, &usage)
+			reg.ApplyUsageCost(req.Provider, req.Model, &usage, upCost)
 			return WithPartialUsage(classifyAPIError(err), usage)
 		}
 
@@ -723,8 +741,9 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 	sort.Slice(toolCalls, func(i, j int) bool { return toolCalls[i].Index < toolCalls[j].Index })
 
 	// 归一化：LLMEndEvent.Usage 从 provider 吐出即完整（Input 总输入口径 +
-	// Cost 实际支出 µUSD）——下游零协议特判。价表经注册表（bridge 覆盖注入）。
-	reg.FillUsageCost(req.Provider, req.Model, &usage)
+	// Cost 实际支出 µUSD）——下游零协议特判。计费口径：上游自报费用优先，
+	// 拿不到才回退注册表价表（bridge 覆盖注入）。
+	reg.ApplyUsageCost(req.Provider, req.Model, &usage, upCost)
 
 	return handler(LLMEndEvent{
 		RequestId:    requestId,

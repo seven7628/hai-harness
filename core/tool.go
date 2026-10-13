@@ -378,4 +378,11 @@ const (
 	CostSourceOverride     = "override"      // override 表：用户手填价 / 宿主价 / 价源补价
 	CostSourceExplicitZero = "explicit_zero" // 有条目但价全 0（未知价，非免费）
 	CostSourceNone         = "none"          // 无条目
+	// CostSourceUpstream 上游响应**自报的实收费用**（Provider 层带回，见 provider.ApplyUsageCost）。
+	// 与上面几个的本质区别：那些是「本地按价表估算」，这个是「上游说实际扣了多少」—— 权威，
+	// 且**不可复现**（重放同一 token 数不会再问上游要一次价）。展示/报表据此可以分开统计。
+	//
+	// 注意：这是唯一允许「Total > 0 而四段全 0」的来源 —— 上游通常只报总额，不拆维度，
+	// 此时不伪造分摊（四段留 0，只有 Total 有意义）。
+	CostSourceUpstream = "upstream"
 )

@@ -505,8 +505,9 @@ func (bs *bridgeSession) emit(e events.Event) {
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
 		if ev.Usage != nil {
 			prov := bs.provider
-			// 成本金额已由 provider 填充进 Usage.Cost（µUSD，见 provider.FillUsageCost）
-			// 并随 MetricsEntry 持久化；cost_usd 浮点字段仅供前端展示（USD）。
+			// 成本金额已由 provider 填充进 Usage.Cost（µUSD，上游自报优先、缺失才按价表
+			// 折算，见 provider.ApplyUsageCost）并随 MetricsEntry 持久化；
+			// cost_usd 浮点字段仅供前端展示（USD）。
 			costUSD := costUsd(prov, ev.Model, *ev.Usage)
 			if bs.metrics != nil {
 				_ = bs.metrics.Record(MetricsEntry{
@@ -2270,7 +2271,7 @@ func (m *manager) dispatch(c command) {
 			}
 			out = append(out, entry)
 			// 预设模型内置价（注册表 Lookup：用户覆盖优先、内置兜底 —— 与运行时
-			// FillUsageCost 同源）。未知模型/无价 → 不下发（前端保持空覆盖占位）。
+			// 价表回退路径同源）。未知模型/无价 → 不下发（前端保持空覆盖占位）。
 			costs := map[string]any{}
 			reg := m.provCfg.registry
 			if reg == nil {

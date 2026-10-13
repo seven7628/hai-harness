@@ -83,6 +83,10 @@ func NewAnthropicProvider(deps provider.Dependencies, baseURL, apiKey string, op
 	if provider.IsOpenCodeGateway(baseURL) {
 		httpClient = provider.OpenCodeGatewayClient(httpClient)
 	}
+	// 上游自报费用：有 client 时在传输层加尾部回看；无 client 时保持 SDK 默认客户端
+	// 不动（其 ResponseHeaderTimeout=10m 是刻意设置，替换会丢掉 → 卡死连接不再快速失败），
+	// 那一路由 usage 的 ExtraFields 字段承担（见 upstreamCostFromExtra）。
+	httpClient = provider.WrapUpstreamCostClient(httpClient)
 	if httpClient != nil {
 		ropts = append(ropts, option.WithHTTPClient(httpClient))
 	}
@@ -161,6 +165,11 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *provider.StreamRequ
 	// OpenCode Go 网关：会话 id 经 ctx 下传（transport 读它写 x-opencode-session；
 	// 非网关端点无读取方，无副作用）。
 	ctx = provider.WithOpenCodeSession(ctx, req.SessionID)
+
+	// 上游自报费用槽位：两条来源都写进它 —— ①兼容端点把费用塞进 usage 的扩展字段
+	// （SDK 未建模 → ExtraFields，见下方 upstreamCostFromExtra）；②注入了 HTTP client
+	// 时（OAuth/网关）传输层尾部回看。都没有 → 回退本地价表。
+	ctx, upCost := provider.WithUpstreamCost(ctx)
 
 	// 图片降级（注册表 SupportsImage；Anthropic 支持 URL + base64，非视觉模型降级）
 	messages := p.registry.DowngradeImages(req.Provider, req.Model, req.Messages)
@@ -380,6 +389,9 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *provider.StreamRequ
 			if looksOpenAIUsageShape(variant.Message.Usage.JSON.ExtraFields) {
 				openAIShapedUsage = true
 			}
+			if micro, ok := upstreamCostFromExtra(variant.Message.Usage.JSON.ExtraFields); ok {
+				upCost.SetMicro(micro)
+			}
 
 		case anthropic.ContentBlockStartEvent:
 			idx := variant.Index
@@ -460,6 +472,9 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *provider.StreamRequ
 			if looksOpenAIUsageShape(variant.Usage.JSON.ExtraFields) {
 				openAIShapedUsage = true
 			}
+			if micro, ok := upstreamCostFromExtra(variant.Usage.JSON.ExtraFields); ok {
+				upCost.SetMicro(micro)
+			}
 			// stop_reason
 			switch variant.Delta.StopReason {
 			case anthropic.StopReasonEndTurn:
@@ -471,7 +486,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *provider.StreamRequ
 			case anthropic.StopReasonModelContextWindowExceeded:
 				// 上下文超限 → 语义错误（不可重试）。用量一并上抛（超限请求通常未计费，
 				// 但已收到的部分照记不丢 —— 与流末错误同一口径）。
-				p.finalizeUsage(req, &usage, openAIShapedUsage, sendThinking, oneHourTTL)
+				p.finalizeUsage(req, &usage, openAIShapedUsage, sendThinking, oneHourTTL, upCost)
 				return provider.WithPartialUsage(
 					provider.DetectContextExceeded(errors.New("anthropic: model context window exceeded")), usage)
 			}
@@ -483,13 +498,13 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *provider.StreamRequ
 	if err := stream.Err(); err != nil {
 		// 失败尝试的已产生用量（官方端点 message_start 就带 input/cache；流中途失败时
 		// output 可能为 0）也要进账：先归一 + 折价，再随错误上抛（2026-09-23 决策）。
-		p.finalizeUsage(req, &usage, openAIShapedUsage, sendThinking, oneHourTTL)
+		p.finalizeUsage(req, &usage, openAIShapedUsage, sendThinking, oneHourTTL, upCost)
 		return provider.WithPartialUsage(classifyAnthropicError(err), usage)
 	}
 
 	// 归一（Input 口径 + InputSemantics + 成本，含 1h 写入价修正）走 finalizeUsage：
 	// 成功与失败（部分用量随错误上抛）两条路径共用同一实现，口径不允许漂移。
-	p.finalizeUsage(req, &usage, openAIShapedUsage, sendThinking, oneHourTTL)
+	p.finalizeUsage(req, &usage, openAIShapedUsage, sendThinking, oneHourTTL, upCost)
 
 	toolCalls := make([]core.ToolCall, 0, len(pending))
 	for _, call := range pending {
@@ -516,8 +531,9 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *provider.StreamRequ
 // 为什么抽成方法（2026-09-23）：失败尝试的部分用量也要进账（上游已按已生成 token 计费），
 // 两条路径必须共用同一套归一 —— 否则失败路径的 Input 口径/成本会与成功路径漂移。
 // 参数：openAIShapedUsage = 流中是否见到 OpenAI/DeepSeek 形状计数；sendThinking =
-// 本轮是否请求了思考；oneHourTTL = 本轮缓存断点是否 1h 档（写入价 2× 输入价）。
-func (p *AnthropicProvider) finalizeUsage(req *provider.StreamRequest, u *core.Usage, openAIShapedUsage, sendThinking, oneHourTTL bool) {
+// 本轮是否请求了思考；oneHourTTL = 本轮缓存断点是否 1h 档（写入价 2× 输入价）；
+// up = 上游自报费用槽位（有值则优先，价表与 1h 修正都不参与）。
+func (p *AnthropicProvider) finalizeUsage(req *provider.StreamRequest, u *core.Usage, openAIShapedUsage, sendThinking, oneHourTTL bool, up *provider.UpstreamCost) {
 	// 统一口径（流结束统一归一，覆盖官方端点 message_start 带缓存、第三方
 	// message_delta 带缓存的两种形态）：
 	// core.Usage.Input = 总输入 token（含缓存命中/写入）—— 与 OpenAI 协议
@@ -585,13 +601,16 @@ func (p *AnthropicProvider) finalizeUsage(req *provider.StreamRequest, u *core.U
 	}
 
 	// 归一化：Usage 从 provider 吐出即完整（Input 总输入口径已在上方归一 +
-	// Cost 实际支出 µUSD）——下游零协议特判。价表经注册表（bridge 覆盖注入）。
-	reg.FillUsageCost(req.Provider, req.Model, u)
-	if oneHourTTL && u.CacheWrite > 0 {
-		// 1h 档的缓存写入按 **2× 基础输入价** 计费（5m 档才是价表 `cache_write` 的 1.25×，
-		// 上游数据只有这一个字段）。这里在**知道 TTL 的这一层**把写入段改成 2×：下游一律以
-		// core.Usage.Cost 为准（bridge costUsd 优先用它、metrics 聚合也复用它），于是官方端点
-		// （1h）与兼容端点 / 标注为 5m 的网关各自成本都准确，且无需维护第二份价表。
+	// Cost 实际支出 µUSD）——下游零协议特判。计费口径：上游自报费用优先
+	// （兼容端点把费用塞进 usage 扩展字段时），拿不到才回退注册表价表。
+	reg.ApplyUsageCost(req.Provider, req.Model, u, up)
+	// 1h 档的缓存写入按 **2× 基础输入价** 计费（5m 档才是价表 `cache_write` 的 1.25×，
+	// 上游数据只有这一个字段）。这里在**知道 TTL 的这一层**把写入段改成 2×：下游一律以
+	// core.Usage.Cost 为准（bridge costUsd 优先用它、metrics 聚合也复用它），于是官方端点
+	// （1h）与兼容端点 / 标注为 5m 的网关各自成本都准确，且无需维护第二份价表。
+	//
+	// 上游自报费用时**跳过**本修正：那是估算规则，对实收金额做加价会把账算错。
+	if u.Cost.Source != core.CostSourceUpstream && oneHourTTL && u.CacheWrite > 0 {
 		if price, ok := reg.PriceFor(req.Provider, req.Model); ok && price.Input > 0 {
 			write1h := int64(float64(u.CacheWrite) * 2 * price.Input)
 			u.Cost.Total += write1h - u.Cost.CacheWrite
@@ -624,4 +643,25 @@ func looksOpenAIUsageShape(extra map[string]respjson.Field) bool {
 		}
 	}
 	return false
+}
+
+// upstreamCostFromExtra 从 Anthropic usage 的**未建模字段**里取上游自报费用（µUSD）。
+// 官方端点不报费用，但兼容/聚合端点可能把 OpenAI 风格的 cost/total_cost 一并塞进 usage
+// —— 与 looksOpenAIUsageShape 同一取数通道（Raw() 判存在，因未建模字段 Valid() 恒 false）。
+// 没有 → ok=false（回退本地价表），不是 0。
+func upstreamCostFromExtra(extra map[string]respjson.Field) (int64, bool) {
+	for _, k := range provider.UpstreamCostKeys {
+		f, ok := extra[k]
+		if !ok {
+			continue
+		}
+		raw := f.Raw()
+		if raw == "" || raw == respjson.Null {
+			continue
+		}
+		if micro, ok := provider.UsdToMicro(raw); ok {
+			return micro, true
+		}
+	}
+	return 0, false
 }
