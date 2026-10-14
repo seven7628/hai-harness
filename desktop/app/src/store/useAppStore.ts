@@ -2,14 +2,14 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
-import type { CheckpointView, CheckpointNestedCall } from './checkpoint'
+import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
 import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
 import { visualKindOf, isVisualPath } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
-import { parseNestedCalls, spillPathFrom, type NestedCallView } from '../lib/codemodeNested'
+import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { t as i18nT } from '../i18n'
 
 export type RightTab = 'activity' | 'git' | 'agent' | 'file' | 'web'
@@ -506,7 +506,7 @@ export type MsgBlock =
   | { kind: 'assistant'; id: number; text: string; streaming: boolean; model?: string; runId?: string; thinking: string; thinkMs?: number; ttftMs?: number; durMs?: number; agentDurMs?: number; thinkStart?: number; outputTokens?: number; reasoningTokens?: number; thinkingSummarized?: boolean; genMs?: number; ts?: number }
   // 工具块：nestedCalls = 编排型工具（codemode）脚本内的嵌套调用清单（外层结果自带，
   // 子调用**不生成**自己的工具块）；spillPath = 完整输出落盘路径（缺失时渲染层不显示该行）。
-  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string }
+  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView }
   | { kind: 'agent'; id: number; runId: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean }
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
   | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
@@ -643,7 +643,7 @@ export type AgentItem =
   | { kind: 'thinking'; text: string; thinkStart?: number }
   // tool 项：nestedCalls / spillPath 仅编排型工具（codemode）有 —— 脚本内的嵌套调用清单与
   // 完整输出落盘路径（来源与语义见 lib/codemodeNested.ts；嵌套调用自身没有工具行）。
-  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string }
+  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView }
   | { kind: 'compression'; before: number; after: number; ctxTokens?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
 
 // PriceRefreshSummary refresh_prices 结果摘要（UI toast 用；字段对齐 bridge 响应）
@@ -5089,6 +5089,9 @@ export function dispatchEvent(raw: AnyEvent): void {
       //   · spillPath：完整输出落盘路径（结果里点名；取不到就不显示那一行）。
       const nestedCalls = parseNestedCalls(raw.nested_calls)
       const spillPath = spillPathFrom(toolResult, raw.structured) || undefined
+      // 脚本形态档位（Codemode Search / Execute）的判据：保留操作计数（后端 HostOps）。
+      // 与 nestedCalls 同源同刻（同一条 tool_response）——undefined = 非编排型工具。
+      const hostOps = parseHostOps(raw.host_ops)
       // 嵌套子调用（parent_call_id 非空）：**不改动任何工具行**（见 tool_start 处的契约注释）——
       // 子调用的明细已经在外层 codemode 结果的 nested_calls 里了，再建一行就是重复且来路不明。
       // 但会话级的事实照常入档（见下方 nested 分支）：文件变更 / 待办快照是真实发生的副作用，
@@ -5107,7 +5110,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                     ...b,
                     items: b.items.map((it) =>
                       it.kind === 'tool' && it.toolId === toolId
-                        ? { ...it, status: (raw.is_error ? 'error' : 'done') as Extract<AgentItem, { kind: 'tool' }>['status'], result: toolResult, errorInfo, durMs, diff: raw.diff ? pickDiff(raw.diff) : undefined, images: pickImages(raw.images), ...(callUsage ? { usage: callUsage } : {}), ...(nestedCalls ? { nestedCalls } : {}), ...(spillPath ? { spillPath } : {}) }
+                        ? { ...it, status: (raw.is_error ? 'error' : 'done') as Extract<AgentItem, { kind: 'tool' }>['status'], result: toolResult, errorInfo, durMs, diff: raw.diff ? pickDiff(raw.diff) : undefined, images: pickImages(raw.images), ...(callUsage ? { usage: callUsage } : {}), ...(nestedCalls ? { nestedCalls } : {}), ...(spillPath ? { spillPath } : {}), ...(hostOps ? { hostOps } : {}) }
                         : it,
                     ),
                   }
@@ -5136,6 +5139,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                   ...(Array.isArray(raw.todos) ? { todos: raw.todos as TodoItem[] } : {}),
                   ...(nestedCalls ? { nestedCalls } : {}),
                   ...(spillPath ? { spillPath } : {}),
+                  ...(hostOps ? { hostOps } : {}),
                 }
               }
               return {
@@ -5156,6 +5160,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                 // 同一次响应的重复投递用同一份值覆盖（幂等，不追加）。
                 ...(nestedCalls ? { nestedCalls } : {}),
                 ...(spillPath ? { spillPath } : {}),
+                ...(hostOps ? { hostOps } : {}),
               }
             })
         const blocks = nested ? v.blocks : mappedBlocks
@@ -6006,12 +6011,14 @@ function cpAgentItem(it: {
   usage?: { input?: number; output?: number; cache_read?: number; cacheRead?: number; cache_write?: number; cacheWrite?: number; cache_write_1h?: number; cacheWrite1h?: number; reasoning?: number; cost_usd?: number; costUsd?: number }
   error?: string; aborted?: boolean; active?: boolean; analysis?: string
   nested_calls?: CheckpointNestedCall[]
+  host_ops?: CheckpointHostOps
 }): AgentItem {
   if (it.kind === 'text') return { kind: 'text', text: it.text ?? '', error: it.is_error === true }
   if (it.kind === 'thinking') return { kind: 'thinking', text: it.text ?? '', ...(it.think_start != null ? { thinkStart: it.think_start } : {}) }
   if (it.kind === 'tool') {
     const cpNested = parseNestedCalls(it.nested_calls)
     const cpSpill = spillPathFrom(it.result ?? '')
+    const cpHostOps = parseHostOps(it.host_ops)
     return {
       kind: 'tool', toolId: it.tool_id ?? '', name: it.name ?? '', args: it.args,
       images: pickImages(it.images),
@@ -6025,6 +6032,7 @@ function cpAgentItem(it: {
       // 编排型工具（codemode）的嵌套调用清单：子 agent 转录里的脚本行同样要能展开清单
       ...(cpNested ? { nestedCalls: cpNested } : {}),
       ...(cpSpill ? { spillPath: cpSpill } : {}),
+      ...(cpHostOps ? { hostOps: cpHostOps } : {}),
     }
   }
   // compression
@@ -6076,6 +6084,7 @@ function checkpointToView(cp: CheckpointView): SessionView {
       case 'tool': {
         const cpNested = parseNestedCalls(b.nested_calls)
         const cpSpill = spillPathFrom(b.result ?? '')
+        const cpHostOps = parseHostOps(b.host_ops)
         blocks.push({
           kind: 'tool', id: b.id, toolId: b.tool_id ?? '', name: b.name ?? '', args: b.args,
           result: b.result, diff: b.diff ? cpDiff(b.diff) : undefined,
@@ -6092,6 +6101,7 @@ function checkpointToView(cp: CheckpointView): SessionView {
           // 编排型工具（codemode）的嵌套调用清单：恢复后行内清单不消失（Go 侧同名字段）。
           // 旧 checkpoint（追加字段之前）没有它 → 为空即不渲染，行为与从前一致。
           ...(cpNested ? { nestedCalls: cpNested } : {}),
+          ...(cpHostOps ? { hostOps: cpHostOps } : {}),
           // spill 路径是**文本里的事实**（它本身没进 checkpoint schema）：从结果原文提取，
           // 旧会话重放同样有效；取不到就不显示那一行。
           ...(cpSpill ? { spillPath: cpSpill } : {}),

@@ -2007,6 +2007,7 @@ class MockTransport implements Transport {
     }
     else if (/vue/.test(joined)) this.vueScript(sid, runId) // mock 钩子：读 .vue 组件（右侧文件栏高亮验证）
     else if (/readme/i.test(joined)) this.readmeScript(sid, runId) // mock 钩子：读项目 README（右侧 Markdown 预览 + 相对路径图片）
+    else if (/codemode|脚本编排|searchTools/i.test(joined)) this.codemodeScript(sid, runId) // mock 钩子：codemode 检索/执行两档（档位徽标 + 结果优先折叠）+ 失败档
     else if (/html|网页预览/.test(joined)) this.htmlScript(sid, runId) // mock 钩子：输出 html 代码块（iframe 实时预览验证）
     else if (/写个网页|写html|write_html/.test(joined)) this.writeHtmlScript(sid, runId) // mock 钩子：write_file 落盘 .html（「打开」右侧浏览器验证）
     else if (/mermaid|流程图|架构图/.test(joined)) this.mermaidScript(sid, runId, /错误|坏/.test(joined)) // mock 钩子：输出 mermaid 图表（markdown 渲染验证）；含「错误/坏」→ 输出语法错误的图（错误回退验证）
@@ -2110,6 +2111,83 @@ class MockTransport implements Transport {
     }, sid)
     this.after(1960, () => this.emit({ event_type: 'agent_end', session_id: sid, run_id: runId, index: 1, content: 'README 预览已就绪', finish_reason: 'end', model: this.model, timestamp: ts() }), sid)
     this.after(2000, () => this.finishRun(sid), sid)
+  }
+
+  // ---------- codemode 钩子：脚本编排行（档位徽标 + 结果优先折叠） ----------
+  // 三档各来一条，覆盖这次改动的全部视觉分支：
+  //   ① Search   —— 只 searchTools（host_ops 非零、nested_calls 为空）→ 检索徽标 + 「找回 N 个工具」
+  //   ② Execute  —— 有 nested_calls → 执行徽标 + 「N 次调用」+ 嵌套清单
+  //   ③ 失败     —— 表头 Script failed → 失败样式（结局 chip 的 err 分支）
+  // 结果文本刻意用**真实形态**（Script completed / Wall time / Output: 三行表头 + JSON）：
+  // 表头剥离与结果摘要都依赖它，用编造的文本演示不出真实效果。
+  private codemodeScript(sid: string, runId: string) {
+    const searchScript = '// @options: {"max_output_tokens": 4000}\nconst hits = await searchTools("ai-test", 50);\nreturn { count: hits.tools.length, names: hits.tools.map(t => t.name) };'
+    const searchResult = 'Script completed\nWall time 0.1 seconds\nOutput:\n'
+      + JSON.stringify({ count: 28, names: ['copy_scenario', 'create_environment', 'create_scenario', 'create_variable_set', 'describe_platform'] }, null, 1)
+    const execScript = 'const hits = await searchTools("scenario");\nconst first = hits.tools[0].name;\nconst out = await tools.bash({ command: "go test ./auth" });\nconst err = await tools.read_file({ path: "auth.go" });\nreturn { ran: out.exit_code, lines: err.split("\\n").length };'
+    // 长输出：验证「已折叠 N 行」+ spill 路径点名（尾部带 [Full output: …] 是引擎的既有文案）
+    const execResult = 'Script completed\nWall time 1.4 seconds\nOutput:\n'
+      + JSON.stringify({ ran: 0, lines: 842 }, null, 1)
+      + '\n' + Array.from({ length: 26 }, (_, i) => `ok  \tgithub.com/example/auth\t0.0${i % 10}s`).join('\n')
+      + '\n[Full output: /tmp/hai-harness-codemode-spill-1234/out.txt (read with offset/limit)]'
+    const failScript = '// @options: {"timeout_ms": 60000}\nthrow new Error("boom");'
+    const failResult = 'Script failed\nWall time 0.3 seconds\nOutput:\n[script error] Error: boom\n    at <anonymous>:4:7'
+
+    const nested = [
+      { id: 'n1', name: 'bash', args: '{"command":"go test ./auth"}', result: 'ok github.com/example/auth 0.04s', is_error: false, duration: 4_200_000 },
+      { id: 'n2', name: 'read_file', args: '{"path":"auth.go"}', result: 'package auth\n…', is_error: false, duration: 900_000 },
+    ]
+
+    this.llmTurn(0, {
+      requestId: `r-${runId}-cm1`, runId,
+      think: ['用户要看 codemode 的渲染：先做一次纯检索（只 searchTools、不调工具）——这一档该显示「检索」而不是「执行」。'],
+      stream: '先用脚本查一下 `ai-test` 这个 MCP 下有哪些工具：这是**纯检索**（`searchTools` 是保留操作，不算工具调用）。',
+      endAt: 700,
+      end: { finish_reason: 'tool_call', usage: { Input: 1500, Output: 90, CacheRead: 1400, TotalTokens: 1590 }, tool_calls: [{ id: 'cm-1', name: 'codemode', arguments: JSON.stringify({ code: searchScript }) }] },
+    }, sid)
+    this.toolStart('cm-1', 'codemode', JSON.stringify({ code: searchScript }), runId, 720, sid)
+    this.toolEnd('cm-1', 'codemode', searchResult, runId, 940, sid, {
+      host_ops: { search: 1, describe: 0 },
+      structured: { ok: true, truncated: false, nested_calls: 0, host_ops: { search: 1, describe: 0 } },
+    })
+
+    this.llmTurn(1000, {
+      requestId: `r-${runId}-cm2`, runId,
+      think: ['再演示「执行」档：脚本里既 searchTools 现查、又真调了 bash/read_file —— 有 nested_calls，档位必须是执行。'],
+      stream: '再跑一次**执行档**：脚本里先现查工具名，再真调 `bash` 与 `read_file`（这次有实际副作用）。',
+      endAt: 1700,
+      end: { finish_reason: 'tool_call', usage: { Input: 1800, Output: 110, CacheRead: 1700, TotalTokens: 1910 }, tool_calls: [{ id: 'cm-2', name: 'codemode', arguments: JSON.stringify({ code: execScript }) }] },
+    }, sid)
+    this.toolStart('cm-2', 'codemode', JSON.stringify({ code: execScript }), runId, 1720, sid)
+    this.toolEnd('cm-2', 'codemode', execResult, runId, 2060, sid, {
+      nested_calls: nested,
+      host_ops: { search: 1, describe: 0 },
+      structured: { ok: true, truncated: true, nested_calls: 2, host_ops: { search: 1, describe: 0 }, full_output_path: '/tmp/hai-harness-codemode-spill-1234/out.txt' },
+    })
+
+    this.llmTurn(2120, {
+      requestId: `r-${runId}-cm3`, runId,
+      think: ['再演示失败档：Script failed 的表头必须让结局 chip 走错误样式，而不是被当成普通输出。'],
+      stream: '最后一条演示**失败档**：脚本抛错，结局 chip 应显示「失败」。',
+      endAt: 2800,
+      end: { finish_reason: 'tool_call', usage: { Input: 1900, Output: 80, CacheRead: 1850, TotalTokens: 1980 }, tool_calls: [{ id: 'cm-3', name: 'codemode', arguments: JSON.stringify({ code: failScript }) }] },
+    }, sid)
+    this.toolStart('cm-3', 'codemode', JSON.stringify({ code: failScript }), runId, 2820, sid)
+    this.emit({
+      event_type: 'tool_run_end', session_id: sid, id: 'cm-3', run_id: runId, name: 'codemode',
+      result: failResult, is_error: true, timestamp: ts(),
+      structured: { ok: false, truncated: false, nested_calls: 0, script_error: 'Error: boom' },
+    })
+
+    this.llmTurn(2900, {
+      requestId: `r-${runId}-cm4`, runId,
+      think: ['三条演示齐了：纯检索（检索档）、真干活（执行档）、抛错（失败档）。'],
+      stream: '上面三条分别是 **检索档 / 执行档 / 失败档**：头部右侧的徽标、以及结果折叠块里的「结局 · 墙钟 · 数字摘要」一行，就是这次改动的重点。点「查看脚本」可以展开 JS 源码。',
+      endAt: 3700,
+      end: { finish_reason: 'stop', usage: { Input: 2200, Output: 140, CacheRead: 2100, TotalTokens: 2340 } },
+    }, sid)
+    this.after(3760, () => this.emit({ event_type: 'agent_end', session_id: sid, run_id: runId, index: 1, content: 'codemode 渲染演示完成', finish_reason: 'end', model: this.model, timestamp: ts() }), sid)
+    this.after(3800, () => this.finishRun(sid), sid)
   }
 
   // ---------- html 钩子：输出 ```html 代码块（iframe 沙箱实时预览验证） ----------

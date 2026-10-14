@@ -68,6 +68,7 @@
     "test:permission-policy": "esbuild electron/permission-policy.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/permission-policy.test.cjs && node --test /tmp/permission-policy.test.cjs",
     "test:read-image": "esbuild electron/read-image.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/read-image.test.cjs && node --test /tmp/read-image.test.cjs",
     "test:codemode-nested": "esbuild src/lib/codemodeNested-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/codemode-nested.test.cjs --loader:.png=dataurl --loader:.svg=dataurl --loader:.md=text && node --test /tmp/codemode-nested.test.cjs",
+    "e2e:codemode-row": "node e2e/verify_codemode_row.mjs",
     "e2e:clipboard": "node e2e/verify_clipboard_copy.mjs",
     "e2e:scoping": "node e2e/verify_preview_scoping.mjs",
     "e2e:container": "node e2e/verify_preview_container.mjs",

@@ -24,7 +24,7 @@ import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
 import { ToolNestedCalls, ToolOutputPreview } from './ToolNestedCalls'
-import { hasScriptOutput, type NestedCallView } from '../lib/codemodeNested'
+import { codemodeTier, hasScriptOutput, isCodemodeTool, scriptSourceOf, scriptSummary, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { useT } from '../i18n'
 
 /** 工具行渲染的统一数据：主对话 MsgBlock.tool 与子 agent AgentItem.tool 的共同子集。
@@ -51,6 +51,8 @@ export interface ToolRowData {
   nestedCalls?: NestedCallView[]
   /** 完整输出落盘路径（结果里点名；缺失 = 不显示该行，见 lib/codemodeNested.ts） */
   spillPath?: string
+  /** 编排型工具（codemode）脚本内的保留操作计数（后端 HostOps）——档位判据 */
+  hostOps?: HostOpsView
   /** 主对话块 id（React key / 定位用；AgentItem 没有） */
   id?: number
 }
@@ -238,6 +240,15 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
   const err = b.isError ?? b.status === 'error'
   const changed = b.status === 'done' && !err
   const summary = toolArgsSummary(b.name, b.args || '', t)
+  // 编排型工具（codemode）：档位徽标（检索 / 执行）——判据见 lib/codemodeNested.ts 的 codemodeTier。
+  // 判据用「名字命中 **或** 带编排型字段」：跑着的行还没有结果（hasScriptOutput 为 false），
+  // 但徽标该立刻出现 —— 它标的是「这次调用在干什么」，不是「结果长什么样」。
+  const isCodemode = isCodemodeTool(b.name) || hasScriptOutput(b)
+  // 脚本源码只解析一次（头部摘要、档位兜底判据、折叠块的「查看脚本」三处共用）。
+  const scriptSrc = isCodemode ? scriptSourceOf(b.args) : undefined
+  const tier = codemodeTier(b.hostOps, b.nestedCalls, scriptSrc)
+  // codemode 行没有 toolArgsSummary（那是别的工具的参数摘要）——头部摘要改显示脚本干了什么。
+  const scriptLine = scriptSrc ? scriptSummary(scriptSrc) : ''
   // SKILL = 命令结果合成的技能加载块（/skill 面板 → SDK /skills load）：渲染成 SKILL(code-review) 工具调用样式
   const isSkill = b.name === 'SKILL'
   // 文件工具：从参数提路径，可点开文件预览（read/write/edit 行内）
@@ -296,7 +307,8 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
         ) : (
           <>
             <span className={`t ${err ? 'err' : ''}`}>{b.name}</span>
-            {summary && (
+            {/* 编排型工具（codemode）显示「脚本干了什么」；其余工具显示 toolArgsSummary。 */}
+            {(scriptLine || summary) && (
               <span
                 className={`args ${path ? 'file' : ''}`}
                 // data-ft：文件引用按**文件类型**着色（与产出卡图标同一套色），
@@ -323,12 +335,23 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
                   }
                 }}
               >
-                {summary}
+                {scriptLine || summary}
               </span>
             )}
           </>
         )}
         <span className="grow" />
+        {/* 编排型工具（codemode）的档位徽标：只找工具（Search）还是真干活（Execute）。
+            判据来自后端 HostOps 计数 —— 保留操作不进 nested_calls，前端无法自行判定
+            「纯检索」（见 lib/codemodeNested.ts 的 codemodeTier）。 */}
+        {isCodemode && (
+          <span
+            className={`cm-tier ${tier}`}
+            title={tier === 'search' ? t('tool.codemode.searchHint') : t('tool.codemode.executeHint')}
+          >
+            {tier === 'search' ? t('tool.codemode.search') : 'Execute'}
+          </span>
+        )}
         {host === 'main' && b.promoted && b.taskId && (b.status === 'running' || b.interrupting) && (
           <button
             className="tool-promote"
@@ -370,7 +393,14 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
       {b.nestedCalls && b.nestedCalls.length > 0 && <ToolNestedCalls calls={b.nestedCalls} />}
       {/* 2) 脚本输出的折叠预览：按**视觉行**限 5 行（不是按 \n 数），下方点名 spill 路径。
              展开行时不再重复预览 —— 展开体里的「结果」区已经是全文（限高内滚）。 */}
-      {!open && hasScriptOutput(b) && <ToolOutputPreview text={b.result ?? ''} spillPath={b.spillPath} />}
+      {!open && hasScriptOutput(b) && (
+        <ToolOutputPreview
+          text={b.result ?? ''}
+          spillPath={b.spillPath}
+          script={scriptSrc}
+          nestedCount={b.nestedCalls?.length ?? 0}
+        />
+      )}
       {/* 行内 diff 预览（运行时变更可见性，2026-08-22）：write/edit 完成即自动展开，
           限高 + 内滚 + 可折叠（+n −m 摘要）；与「查看变更」的右侧完整视图并存。
           独立于行详情（open）的展开状态 —— 不点行也能看到改了什么。 */}

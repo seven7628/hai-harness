@@ -26,6 +26,232 @@ export const NESTED_ERROR_PREVIEW_CHARS = 500
 /** codemode 结果**折叠态**的输出预览行数（视觉行，不是逻辑行）。 */
 export const OUTPUT_PREVIEW_LINES = 5
 
+// —— 脚本形态（Search / Execute）+ 结果信封 ————————————————————————
+
+/**
+ * 宿主保留操作计数（events.ToolResponse.HostOps 的宿主侧投影）。
+ *
+ * 为什么需要它：searchTools / describeTool 是**保留操作**，按定义不是工具调用
+ *（tools/builtin/codemode/bridge.go 的 hostOp），所以 `nested_calls` 对纯检索脚本
+ * 恒为空 —— 只看嵌套记录无法区分「脚本在找工具」与「脚本什么都没干」。
+ */
+export interface HostOpsView {
+  search: number
+  describe: number
+}
+
+/** 解析 events.ToolResponse.HostOps。零值 / 缺失 → undefined（不渲染档位徽标）。 */
+export function parseHostOps(raw: unknown): HostOpsView | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as { search?: unknown; describe?: unknown }
+  const search = Number(o.search ?? 0)
+  const describe = Number(o.describe ?? 0)
+  const s = Number.isFinite(search) && search > 0 ? Math.floor(search) : 0
+  const d = Number.isFinite(describe) && describe > 0 ? Math.floor(describe) : 0
+  return s || d ? { search: s, describe: d } : undefined
+}
+
+/** codemode 脚本的形态档位。 */
+export type CodemodeTier = 'search' | 'execute'
+
+/**
+ * 档位判据：**只找工具、没干活** = Search，其余 = Execute。
+ *
+ * 为什么不是「有 searchTools 就是 Search」：脚本常常先 searchTools 现查、拿到名字再真调
+ *（deferred 档的正常用法，见 tools/exposure.go）—— 那是 Execute（它在干活），标成
+ * Search 会让人以为这一行只是检索。反过来，「一次工具调用都没有但发了 searchTools」
+ * 是纯检索，这正是模型在探索工具集时的形态，值得一眼看出来。
+ *
+ * 兜底（**旧 checkpoint 没有 host_ops 字段**）：退回看脚本源码里有没有 searchTools/
+ * describeTool 调用。这是启发式，只在恢复旧会话时生效 —— 新数据一律走精确计数。
+ */
+export function codemodeTier(
+  hostOps: HostOpsView | undefined,
+  nestedCalls: NestedCallView[] | undefined,
+  scriptSource?: string,
+): CodemodeTier {
+  const discover = hostOps
+    ? hostOps.search + hostOps.describe
+    : (countDiscoverCalls(scriptSource) ?? 0)
+  if (discover > 0 && !(nestedCalls && nestedCalls.length > 0)) return 'search'
+  return 'execute'
+}
+
+// 脚本源码里的发现型调用（旧 checkpoint 的兜底判据）。字面量写法都认：
+//   searchTools("x") / searchTools('x') / globalThis.searchTools(...) / await searchTools<(
+// 只数**调用**（后面跟左括号），避免把注释/字符串里的名字算进去 —— 做不到严格（那是
+// 解析器的事），但「名字后紧跟左括号」已经排掉绝大多数误判。
+const DISCOVER_RE = /(?:^|[^.\w$])(?:searchTools|describeTool)\s*\(/g
+
+function countDiscoverCalls(src?: string): number | undefined {
+  if (!src) return undefined
+  const m = src.match(DISCOVER_RE)
+  return m ? m.length : 0
+}
+
+/**
+ * 从 args JSON 里取脚本源码（`{"code": "…"}`）。
+ *
+ * 折叠态要显示「脚本干了什么」的缩略、展开态要显示高亮代码块，两处都要这一份源码。
+ * 拿不到（非 JSON / 无 code / code 全是空白）→ undefined：调用方**不渲染**代码块，
+ * 不编造一个空块。
+ */
+export function scriptSourceOf(args?: string): string | undefined {
+  if (!args) return undefined
+  try {
+    const o = JSON.parse(args) as { code?: unknown }
+    return typeof o?.code === 'string' && o.code.trim() ? o.code : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 脚本结果的表头（codemode 的 renderCompleted 固定产出这三行）。 */
+export interface ScriptEnvelope {
+  /** 首行是否是 `Script completed|failed` 的表头（false = 不是本形态，body 原样） */
+  recognized: boolean
+  /** recognized 且首行是 completed */
+  succeeded: boolean
+  /** `Wall time X seconds` 的秒数；取不到 = undefined */
+  wallSec?: number
+  /** 剥掉表头后的正文。**折叠预览的 5 行预算全给这里** —— 表头占掉前 3 行会让
+   *  真正的返回值只剩 2 行（用户实测：JSON 刚露个 { 就被折了）。 */
+  body: string
+}
+
+const ENV_HEAD_RE = /^Script (completed|failed)$/
+const ENV_WALL_RE = /^Wall time ([0-9.]+) seconds$/
+const ENV_OUTPUT_RE = /^Output:$/
+
+/**
+ * 剥掉 codemode 结果的固定表头，把「结局 / 墙钟」升级成结构化字段。
+ *
+ * 为什么必须剥（而不是让它占着预览行）：表头三行对**模型**是必要的（它据此知道脚本跑完没
+ * 跑完，见 bridge.go 的 renderCompleted），但对**人**是纯样板 —— 用户看的是返回值。
+ * 剥离后同一份文本在两处各取所需：模型读原文，界面读 body + 结构化字段。
+ *
+ * 严格只认**行首完整匹配**：表头只在最前面、顺序固定。被墙钟杀掉的脚本首行是
+ * `[TIMEOUT …]`（见 wallClockNoteNoOutput），不匹配 → recognized=false，body 原样
+ * —— 那种形态下「结局」由错误样式承担，不该被这里吞掉。
+ */
+export function parseScriptEnvelope(text: string): ScriptEnvelope {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n')
+  const head = ENV_HEAD_RE.exec(lines[0] ?? '')
+  if (!head) return { recognized: false, succeeded: true, body: text }
+  let i = 1
+  let wallSec: number | undefined
+  const w = ENV_WALL_RE.exec(lines[i] ?? '')
+  if (w) {
+    const n = Number(w[1])
+    if (Number.isFinite(n)) wallSec = n
+    i++
+  }
+  if (ENV_OUTPUT_RE.test(lines[i] ?? '')) i++
+  return { recognized: true, succeeded: head[1] === 'completed', wallSec, body: lines.slice(i).join('\n') }
+}
+
+/** 墙钟秒数 → 人读的一行（`0.1s` / `1.2s` / `12s`）。 */
+export function formatWall(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return ''
+  // <10s 保留一位小数（脚本的差别常在小数位），≥10s 取整（避免「12.3s」这种假精度）
+  return sec < 10 ? `${sec.toFixed(1)}s` : `${Math.round(sec)}s`
+}
+
+// —— 头部摘要 ————————————————————————————————————————————————
+
+/**
+ * 脚本源码的一行摘要（工具行头部）。
+ *
+ * 优先级刻意是「在检索什么」高于「第一行代码」：codemode 行最需要一眼看懂的是**意图**
+ *（`searchTools("ai-test")` 比 `const r = await searchTools(...)` 更直接）。找不到
+ * 发现型调用才回退第一行真代码（跳过注释与 @options 行）。
+ *
+ * 拿不到源码返回 ''（调用方回落纯工具名，与既有行为一致）。
+ */
+export function scriptSummary(src?: string, max = 44): string {
+  const s = (src ?? '').replace(/\r\n?/g, '\n').trim()
+  if (!s) return ''
+  return previewChars(discoverCallOf(s) ?? firstCodeLine(s), max).text
+}
+
+// 发现型调用：`searchTools("x")` / `describeTool('y')` / `globalThis.searchTools(…)`。
+//
+// 前缀判据排除 `foo.searchTools(...)`（别的对象的同名方法，不是宿主保留操作），但
+// `globalThis.` / `window.` / `self.` 三种**全局接收者**要放行 —— scaffold 就是把
+// searchTools 装在 globalThis 上的（tools/builtin/codemode/protocol.go），模型写全称是合法形态。
+//
+// 分两步匹配（名字+左括号，再看参数是不是字面量）：一步到位的正则要求参数必须是字符串，
+// 参数是变量时**整个调用都不匹配** → 摘要回退成第一行代码，看不出「它在检索」。
+const GLOBAL_RECV = '(?:(?:globalThis|window|self)\\.)?'
+const DISCOVER_CALL_RE = new RegExp(`(?:^|[^.\\w$])${GLOBAL_RECV}(searchTools|describeTool)\\s*\\(`, 'g')
+const STRING_ARG_RE = /^\s*(?:"([^"]*)"|'([^']*)')/
+
+function discoverCallOf(src: string): string | undefined {
+  DISCOVER_CALL_RE.lastIndex = 0 // 带 g 的正则跨调用共享 lastIndex，必须重置
+  const m = DISCOVER_CALL_RE.exec(src)
+  if (!m) return undefined
+  const lit = STRING_ARG_RE.exec(src.slice(m.index + m[0].length))
+  const arg = lit?.[1] ?? lit?.[2] ?? ''
+  // 参数不是字面量（变量/模板串）时给个 `(…)`：显示不出内容也不能编一个
+  return arg ? `${m[1]}("${arg}")` : `${m[1]}(…)`
+}
+
+function firstCodeLine(src: string): string {
+  for (const raw of src.split('\n')) {
+    const l = raw.trim()
+    if (l && !l.startsWith('//')) return l
+  }
+  return ''
+}
+
+// —— 结果摘要（折叠态的那一行「重点」）————————————————————————————
+
+/** 结果里数得出来的量：脚本找回了几个工具 / 发起了几次调用。 */
+export interface ResultMetric {
+  kind: 'tools' | 'calls'
+  n: number
+}
+
+/**
+ * 结果摘要（折叠态头部的那一小行）：**数字优先，文本兜底**。
+ *
+ * 为什么数字优先：检索脚本的返回值里，`names` 数组的长度（找回几个工具）就是全部重
+ * 点，读一行数字远比展开 5 行 JSON 快；而那 5 行预览预算要留给真正无从概括的输出。
+ *
+ * 判据只认**最外层**的 `count` / `names`（`{"count":28,"names":[…]}` 是 searchTools 的
+ * 既有回执形态）—— 不做递归搜索：深层同名键是别人的数据，拿它当「找回多少工具」是编造。
+ */
+export function resultDigest(env: ScriptEnvelope, nestedCount: number): ResultMetric | undefined {
+  const n = countFromResultBody(env.body)
+  if (n !== undefined) return { kind: 'tools', n }
+  if (nestedCount > 0) return { kind: 'calls', n: nestedCount }
+  return undefined
+}
+
+/** 从结果正文里取「找回多少工具」：`names` 数组长度优先，其次 `count` 数字。 */
+function countFromResultBody(body: string): number | undefined {
+  const t = body.trim()
+  if (!t.startsWith('{')) return undefined // 结果不是 JSON 对象（脚本往往 return 一段文本）
+  // 尺寸闸门：这是**渲染路径**上的一次 JSON.parse，而上限（max_output_tokens 200k）的正文
+  // 可以到几百 KB。摘要只是个「省一眼」的增益，为它解析几百 KB 不划算 —— 超限就当没有
+  //（预览照样显示、一样能展开）。16 KiB 足够覆盖任何正常的 searchTools 回执。
+  if (t.length > 16 << 10) return undefined
+  let o: { names?: unknown; count?: unknown }
+  try {
+    o = JSON.parse(t) as { names?: unknown; count?: unknown }
+  } catch {
+    return undefined // 被截断/带尾注的 JSON：宁可不给数字，也不能猜
+  }
+  if (Array.isArray(o.names)) return o.names.length
+  if (typeof o.count === 'number' && Number.isFinite(o.count) && o.count >= 0) return Math.floor(o.count)
+  return undefined
+}
+
+/** 结果摘要的人读文案（i18n 的 key 由 kind 决定，数字由这里给）。 */
+export function resultMetricKey(m: ResultMetric): string {
+  return m.kind === 'tools' ? 'tool.codemode.metric.tools' : 'tool.codemode.metric.calls'
+}
+
 /** 编排型工具名（渲染分支判据之一；未落地的工具不会带 nested_calls，故另需名字兜底）。 */
 export const CODEMODE_TOOL_NAME = 'codemode'
 
@@ -40,11 +266,12 @@ export function isCodemodeTool(name: string): boolean {
 
 /**
  * 折叠态是否该渲染脚本输出预览：有结果，且看起来是编排型工具的输出
- *（名字命中 / 带 spill 路径 / 带嵌套清单 —— 后两者是编排型工具的独有字段）。
+ *（名字命中 / 带 spill 路径 / 带嵌套清单 / 带保留操作计数 —— 后三者是编排型工具的
+ * 独有字段）。
  */
-export function hasScriptOutput(b: { name: string; result?: string; spillPath?: string; nestedCalls?: NestedCallView[] }): boolean {
+export function hasScriptOutput(b: { name: string; result?: string; spillPath?: string; nestedCalls?: NestedCallView[]; hostOps?: HostOpsView }): boolean {
   if (!b.result) return false
-  return isCodemodeTool(b.name) || Boolean(b.spillPath) || Boolean(b.nestedCalls && b.nestedCalls.length > 0)
+  return isCodemodeTool(b.name) || Boolean(b.spillPath) || Boolean(b.nestedCalls && b.nestedCalls.length > 0) || Boolean(b.hostOps)
 }
 
 // —— 事件字段 → 视图对象 ——————————————————————————————————————————————

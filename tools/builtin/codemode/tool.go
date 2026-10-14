@@ -206,6 +206,10 @@ func (t *Tool) OutputSchema() any {
 		"wall_time_seconds": tools.Number(
 			"本次调用的真实墙钟耗时（秒，含审批等待；墙钟预算只计不含审批等待的部分）"),
 		"nested_calls": tools.Int("脚本内发起的工具调用次数"),
+		"host_ops": tools.Obj(map[string]any{
+			"search":   tools.Int("脚本内 searchTools() 的调用次数（保留操作，不计入 nested_calls）"),
+			"describe": tools.Int("脚本内 describeTool() 的调用次数"),
+		}, "search", "describe"),
 		"store_error":  tools.Str("store 落盘被拒时的原因（正常为空串）"),
 		"script_error": tools.Str("脚本报错时的首行摘要（正常为空串）"),
 	}, "ok", "truncated", "exit_code", "wall_time_seconds", "nested_calls")

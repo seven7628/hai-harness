@@ -617,6 +617,79 @@ return rs.length;
 	}
 }
 
+// ---- ③b 保留操作计数：Search 档位的判据（不进 NestedCalls）----
+
+// TestHostOpsCountDiscoverOpsButNotNestedCalls 钉住「检索档位」的判据来源：
+// searchTools / describeTool 是**保留操作**（不是工具调用），故 NestedCalls 恒为空 ——
+// 宿主只能靠 HostOps 计数区分「脚本在找工具」与「脚本什么都没干」。
+//
+// 反向也钉住：store() 是数据搬运，不进 HostOps（字段一旦进了 checkpoint schema 就难拿掉，
+// 所以「只记有消费者的两类」是契约，不是实现细节）。
+func TestHostOpsCountDiscoverOpsButNotNestedCalls(t *testing.T) {
+	requireNode(t)
+	h := newHarness(t)
+	h.add(newReadFileStub())
+	h.installCodemode(nil)
+
+	res, evs := h.run(context.Background(), `
+await store("k", { n: 1 });          // 数据搬运：不该进 host_ops
+await searchTools("read");           // 检索 ×2
+await searchTools("file");
+await describeTool("read_file");     // 描述 ×1
+return "done";
+`)
+	if res.IsError {
+		t.Fatalf("脚本被判失败: %q", res.Result)
+	}
+	// 保留操作不是工具调用 —— 一条记录都不该有（这正是需要 HostOps 的原因）。
+	if len(res.NestedCalls) != 0 {
+		t.Fatalf("保留操作产生了嵌套记录 = %+v，want 空（它们不占调用预算）", res.NestedCalls)
+	}
+	if res.HostOps.Search != 2 || res.HostOps.Describe != 1 {
+		t.Fatalf("HostOps = %+v, want {Search:2 Describe:1}", res.HostOps)
+	}
+
+	// 事件侧必须同样带得到（bridge 的 finish 只做**非破坏性读**，清空发生在引擎的
+	// finish）—— 这条是那个「顺序坑」的回归闸：写反了这里就是零值。
+	var outer *events.ToolResponse
+	for _, ev := range evs {
+		tr, ok := ev.(*events.ToolResponse)
+		if !ok || tr.Name != ToolName || tr.ParentCallId != "" {
+			continue
+		}
+		outer = tr
+	}
+	if outer == nil {
+		t.Fatal("没抓到外层 codemode 的 ToolResponse 事件")
+	}
+	if outer.HostOps == nil {
+		t.Fatal("事件缺 host_ops —— bridge 与引擎之间被清空了（TakeHostOps 用在了 bridge 侧）")
+	}
+	if outer.HostOps.Search != 2 || outer.HostOps.Describe != 1 {
+		t.Fatalf("事件 HostOps = %+v, want {Search:2 Describe:1}", *outer.HostOps)
+	}
+}
+
+// TestHostOpsZeroForPlainTool 普通工具不该被这个字段污染（前端据此判「是不是编排型工具」）：
+// 零值不挂指针 → 事件 JSON 里连字段都不出现（struct 值的 omitempty 不生效，见 events/tool.go）。
+func TestHostOpsZeroForPlainTool(t *testing.T) {
+	requireNode(t)
+	h := newHarness(t)
+	h.add(newReadFileStub())
+	h.installCodemode(nil)
+
+	// 脚本里只做纯计算：没有保留操作、没有工具调用。
+	res, evs := h.run(context.Background(), `return 1 + 1;`)
+	if res.HostOps.Search != 0 || res.HostOps.Describe != 0 {
+		t.Fatalf("纯计算脚本的 HostOps = %+v, want 零值", res.HostOps)
+	}
+	for _, ev := range evs {
+		if tr, ok := ev.(*events.ToolResponse); ok && tr.HostOps != nil {
+			t.Fatalf("零值不该挂指针（会产生 {\"host_ops\":{}} 噪声）: %+v", tr.HostOps)
+		}
+	}
+}
+
 // ---- ④ 死循环被 timeout_ms 打断：首行 TIMEOUT + 无残留进程 + 有界返回 ----
 
 func TestWallClockTimeoutKillsLoopAndLeavesNoResidue(t *testing.T) {

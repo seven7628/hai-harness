@@ -135,7 +135,9 @@ type Block struct {
 	// NestedCalls 编排型工具（codemode）脚本内的嵌套调用摘要（与 AgentItem 同名字段同义）。
 	// 只出现在编排型工具那一块上；宿主折叠态只显示最后 8 条（desktop/app 的 pickNestedCalls）。
 	NestedCalls []NestedCall `json:"nested_calls,omitempty"`
-	StartedAt   int64        `json:"started_at,omitempty"`
+	// HostOps 编排型工具（codemode）脚本内发起的保留操作计数（见 AgentItem.HostOps 的注释）。
+	HostOps   *core.HostOps `json:"host_ops,omitempty"`
+	StartedAt int64         `json:"started_at,omitempty"`
 
 	// Settled 是内部结算标记（不序列化）：assistant 块收到 llm_end / tool 块收到
 	// tool_end 后置 true。归一化悬空态时据此区分「已结算但无正文」（纯工具调用轮）
@@ -234,6 +236,10 @@ type AgentItem struct {
 	// 稳定投影）。子调用**没有自己的工具行/工具项**，明细只挂在外层调用这一处 ——
 	// 宿主在行内联成清单渲染（设计文档 §17 第二条）。
 	NestedCalls []NestedCall `json:"nested_calls,omitempty"`
+	// HostOps 编排型工具（codemode）脚本内发起的**保留操作**计数（searchTools/describeTool）。
+	// 与 NestedCalls 的区别：保留操作不是工具调用，纯检索脚本的 NestedCalls 恒为空 ——
+	// 宿主只能靠这里的计数把工具行标成「Codemode Search」（见 core.HostOps）。
+	HostOps *core.HostOps `json:"host_ops,omitempty"`
 
 	// compression item
 	Before    int    `json:"before,omitempty"`
@@ -1572,6 +1578,7 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 					it.Images = contentBlocks(e.Images)
 					// 编排型工具（codemode）：脚本内的嵌套调用清单（子 agent 转录里的脚本行同样要能展开）
 					it.NestedCalls = nestedCalls(e.NestedCalls)
+					it.HostOps = e.HostOps
 					// 子 agent 卡片内的工具项：本次调用用量（仅子 agent 类工具非零）
 					if e.Usage != nil && !e.Usage.IsZero() {
 						u := taskUsageFromCore(*e.Usage)
@@ -1615,6 +1622,7 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 		b.Images = contentBlocks(e.Images)
 		// 编排型工具（codemode）的嵌套调用清单：与结果同一时刻定格（重放/恢复后清单不丢）
 		b.NestedCalls = nestedCalls(e.NestedCalls)
+		b.HostOps = e.HostOps
 		// 本次调用的用量（子 agent 类工具经 ToolUsageProvider 回传，含成本；普通工具全零）——
 		// 一次调用的用量是**一次性**值（非累计），直接覆盖；卡片/工具行据此展示 tokens + 成本。
 		if e.Usage != nil && !e.Usage.IsZero() {

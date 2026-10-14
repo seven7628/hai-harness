@@ -76,6 +76,9 @@ export interface CheckpointAgentItem {
   images?: CheckpointContent[] // tool item: 结果图片
   /** 编排型工具（codemode）脚本内的嵌套调用摘要（Go Block.NestedCalls，追加字段） */
   nested_calls?: CheckpointNestedCall[]
+  /** 编排型工具（codemode）脚本内的保留操作计数（Go Block.HostOps，追加字段）——
+   *  档位判据（Codemode Search / Execute）；保留操作不进 nested_calls。 */
+  host_ops?: CheckpointHostOps
   before?: number
   after?: number
   ctx_tokens?: number
@@ -100,6 +103,17 @@ export interface CheckpointNestedCall {
   is_error?: boolean
   error?: string
   duration?: number
+}
+
+// CheckpointHostOps 是 core.HostOps 的稳定投影（Go Block.HostOps）：
+// 编排型工具（codemode）脚本内发起的**保留操作**计数 —— searchTools / describeTool。
+//
+// 与 CheckpointNestedCall 的区别（宿主档位判据的全部依据）：保留操作按定义不是工具调用
+//（bridge 的 hostOp 不产生嵌套记录），所以纯检索脚本的 nested_calls 恒为空 ——
+// 只看记录分不出「在检索」与「什么都没干」。零值/缺失 = 非编排型工具或无发现型操作。
+export interface CheckpointHostOps {
+  search?: number
+  describe?: number
 }
 
 // CheckpointBlock 与 Go Block 平铺对应（可选字段按 kind 解释）。
@@ -149,6 +163,8 @@ export interface CheckpointBlock {
   todos?: CheckpointTodo[]
   /** 编排型工具（codemode）脚本内的嵌套调用摘要（Go Block.NestedCalls，Phase 2 追加字段） */
   nested_calls?: CheckpointNestedCall[]
+  /** 编排型工具（codemode）脚本内的保留操作计数（Go Block.HostOps，追加字段） */
+  host_ops?: CheckpointHostOps
   started_at?: number
   label?: string
   spawned_at?: number

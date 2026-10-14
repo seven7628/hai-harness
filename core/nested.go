@@ -52,6 +52,37 @@ type NestedCallRecord struct {
 	Usage *Usage `json:"usage,omitempty"`
 }
 
+// HostOps 一次外层调用内发起的**宿主保留操作**计数。
+//
+// 为什么单独存在（而不并进 NestedCallRecord）：保留操作按定义**不是工具调用**
+// （codemode bridge.go 的 hostOp 注释：它们不产生嵌套记录、不占调用预算），所以
+// NestedCalls 恒为空 —— 只看记录无法区分「脚本在检索工具」与「脚本什么都没干」。
+//
+// 只计两类**发现型**操作（searchTools / describeTool）：它们是「这个脚本是来找工具的」
+// 唯一判据（宿主渲染 Codemode Search 档）。store/image 是数据搬运，不计入 —— 记了也
+// 没有消费者，而字段一旦进了 checkpoint schema 就再难拿掉。
+type HostOps struct {
+	Search   int `json:"search,omitempty"`
+	Describe int `json:"describe,omitempty"`
+}
+
+// Add 累加计数。kind 取 "search" / "describe"；未知 kind 忽略（向前兼容：
+// 将来新增保留操作时，旧消费者不会因为多一个种类而错判）。
+func (h *HostOps) Add(kind string) {
+	if h == nil {
+		return
+	}
+	switch kind {
+	case "search":
+		h.Search++
+	case "describe":
+		h.Describe++
+	}
+}
+
+// IsZero 是否一次发现型操作都没发生（宿主据此不渲染档位徽标）。
+func (h HostOps) IsZero() bool { return h.Search == 0 && h.Describe == 0 }
+
 // NestedRecorder 一次外层调用内的嵌套记录器 + 用量累加器。
 //
 // 并发安全：脚本内可用 Promise.all 并发发起多个嵌套调用。
@@ -60,6 +91,7 @@ type NestedRecorder struct {
 	calls    []NestedCallRecord
 	argBytes int
 	dropped  int       // 因超限被丢弃的记录数（可观测：非零说明脚本调用量超过限额）
+	hostOps  HostOps   // 保留操作计数（搜索/描述；不占 NestedMaxCalls 限额）
 	usageBox *usageBox // 共享：嵌套派生出的子记录器与其父共用同一个用量累加器
 }
 
@@ -175,6 +207,44 @@ func (r *NestedRecorder) TakeRecord() []NestedCallRecord {
 	r.calls = nil
 	r.argBytes = 0
 	return out
+}
+
+// AddHostOp 记一次宿主保留操作（编排型工具在脚本内调用 searchTools/describeTool 时）。
+//
+// kind 取 "search" / "describe"（见 HostOps.Add）。与 Add 一样受 mutex 保护：
+// 脚本内 Promise.all 会并发发起多个保留操作。
+func (r *NestedRecorder) AddHostOp(kind string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hostOps.Add(kind)
+}
+
+// HostOps 返回当前保留操作计数（不取出、不清零）。
+func (r *NestedRecorder) HostOps() HostOps {
+	if r == nil {
+		return HostOps{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.hostOps
+}
+
+// TakeHostOps 返回并**清空**保留操作计数（引擎在最外层调用收尾时挂到 ToolResult 上）。
+//
+// 与 TakeRecord 分开的第二个理由：TakeRecord 只在 call.Depth == 0 时被调，而记录可能
+// 因为限额被丢弃 —— 计数不该跟着一起丢（它是「脚本是什么形态」的事实，不是采样）。
+func (r *NestedRecorder) TakeHostOps() HostOps {
+	if r == nil {
+		return HostOps{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	h := r.hostOps
+	r.hostOps = HostOps{}
+	return h
 }
 
 // Stats 返回被丢弃的记录数（可观测性：非零说明脚本调用量超过限额）。

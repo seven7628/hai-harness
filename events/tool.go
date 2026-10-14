@@ -168,6 +168,15 @@ type ToolResponse struct {
 	// NestedCalls 是**逐条**明细（供展示）。两者同源于 core.NestedRecorder。
 	NestedCalls []core.NestedCallRecord `json:"nested_calls,omitempty"`
 
+	// HostOps 本次调用内部发起的宿主保留操作计数（仅编排型工具填充，普通工具恒 nil）。
+	// 保留操作（codemode 的 searchTools/describeTool）不是工具调用，故不进 NestedCalls
+	// —— 纯检索脚本的 NestedCalls 恒为空，宿主只能靠这里的计数区分「检索」与「执行」。
+	// 消费方：宿主渲染工具行的 Codemode Search / Execute 档位。宿主可忽略。
+	//
+	// 指针 + omitempty 与上面的 Exec 同款：struct 值的 omitempty 不生效，会让每个工具
+	// 事件都多出一个 `"host_ops":{}`（全是普通工具的噪声）。
+	HostOps *core.HostOps `json:"host_ops,omitempty"`
+
 	EventType EventType `json:"event_type"`
 }
 

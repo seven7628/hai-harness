@@ -19,13 +19,21 @@ import {
   NESTED_ERROR_PREVIEW_CHARS,
   OUTPUT_PREVIEW_LINES,
   charCells,
+  codemodeTier,
+  formatWall,
   hasScriptOutput,
   isCodemodeTool,
   oneLine,
+  parseHostOps,
   parseNestedCalls,
+  parseScriptEnvelope,
   pickNestedCalls,
   previewChars,
   previewVisualLines,
+  resultDigest,
+  resultMetricKey,
+  scriptSourceOf,
+  scriptSummary,
   spillPathFrom,
   textCells,
   visualLineCount,
@@ -354,4 +362,193 @@ test('制表符按制表位（8 格）算宽度：按 1 格算会低估折行数
   const p = previewVisualLines('ab\tcd', { lines: 1, width: 8 })
   assert.equal(p.visualLines, 1)
   assert.equal(p.truncated, true)
+})
+
+// —— 8. 脚本形态档位（Search / Execute）————————————————————————————
+//
+// 为什么值得单测：这是**唯一**区分「脚本在找工具」与「脚本在干活」的判据，而它有三条
+// 容易写错的地方：
+//   ① 保留操作不进 nested_calls（bridge 的 hostOp 是保留操作，不产生嵌套记录）——
+//     只看 nested_calls 会把纯检索脚本判成「什么都没干」；
+//   ② 先 searchTools 再真调工具是 deferred 档的**正常用法**，那必须算 Execute
+//     （标成 Search 会让人以为这一行没产生副作用）；
+//   ③ 旧 checkpoint 没有 host_ops 字段 —— 必须能退回源码启发式，否则恢复旧会话后
+//     每一次检索都显示成 Execute。
+
+test('档位：只 searchTools / describeTool（零工具调用）= Search', () => {
+  assert.equal(codemodeTier({ search: 2, describe: 1 }, undefined), 'search')
+  assert.equal(codemodeTier({ search: 1, describe: 0 }, []), 'search')
+})
+
+test('档位：调了工具就是 Execute —— 哪怕之前 searchTools 现查过', () => {
+  const calls = makeCalls(1, { name: 'read_file' })
+  assert.equal(codemodeTier({ search: 3, describe: 0 }, calls), 'execute', '检索完再干活 = 干活')
+  assert.equal(codemodeTier(undefined, calls), 'execute', '没有保留操作、有工具调用 = Execute')
+})
+
+test('档位：零值 / 无数据 = Execute（兜底不误标）', () => {
+  assert.equal(codemodeTier(undefined, undefined), 'execute')
+  assert.equal(codemodeTier({ search: 0, describe: 0 }, undefined), 'execute') // parseHostOps 不会产出零值，但直接传也要安全
+})
+
+test('档位兜底：旧 checkpoint 无 host_ops → 看源码里有没有发现型调用', () => {
+  assert.equal(codemodeTier(undefined, undefined, 'const r = await searchTools("read"); return r'), 'search')
+  assert.equal(codemodeTier(undefined, undefined, 'await describeTool("read_file")'), 'search')
+  assert.equal(codemodeTier(undefined, undefined, 'return 1 + 1'), 'execute')
+  // 有工具调用时，源码启发式同样要让位给「它在干活」
+  assert.equal(codemodeTier(undefined, makeCalls(1), 'await searchTools("x"); await tools.read_file({})'), 'execute')
+  // 只认**调用**（名字后跟左括号）：注释/字符串里的名字不算
+  assert.equal(codemodeTier(undefined, undefined, '// searchTools is useful\nreturn 1'), 'execute')
+})
+
+test('parseHostOps：零值 / 脏数据 → undefined（不渲染档位徽标）', () => {
+  assert.equal(parseHostOps(undefined), undefined)
+  assert.equal(parseHostOps({}), undefined, 'host_ops:{} 等价的输入不该产出徽标')
+  assert.equal(parseHostOps({ search: 0, describe: 0 }), undefined)
+  assert.deepEqual(parseHostOps({ search: 2, describe: 1 }), { search: 2, describe: 1 })
+  assert.deepEqual(parseHostOps({ search: '2' }), { search: 2, describe: 0 }, '数值字符串要认（桥接层可能给字符串）')
+  assert.equal(parseHostOps({ search: -1, describe: 0 }), undefined, '负数当 0 处理')
+})
+
+test('scriptSourceOf：只认真实脚本源码，拿不到就 undefined（不编造空块）', () => {
+  assert.equal(scriptSourceOf('{"code":"return 1"}'), 'return 1')
+  assert.equal(scriptSourceOf('{"code":"  \\n "}'), undefined, '全空白 = 没有脚本')
+  assert.equal(scriptSourceOf('{"other":1}'), undefined)
+  assert.equal(scriptSourceOf('not json'), undefined)
+  assert.equal(scriptSourceOf(''), undefined)
+  assert.equal(scriptSourceOf(undefined), undefined)
+})
+
+// —— 9. 结果信封：表头的三行样板必须让出预览预算 ————————————————————————
+//
+// 用户实测的原始症状：折叠态显示的前 5 行**全是样板**（Script completed / Wall time /
+// Output:），真正的 JSON 返回值只露了个 `{` 就被折了 —— 表头占掉 5 行预算里的 3 行。
+// parseScriptEnvelope 把表头升级成结构化字段（结局/墙钟），body 的 5 行预算全给返回值。
+
+test('信封：剥掉三行表头，结局与墙钟变成结构化字段', () => {
+  const env = parseScriptEnvelope('Script completed\nWall time 0.1 seconds\nOutput:\n{"count":28}')
+  assert.equal(env.recognized, true)
+  assert.equal(env.succeeded, true)
+  assert.equal(env.wallSec, 0.1)
+  assert.equal(env.body, '{"count":28}', 'body 里不该再有表头（否则又占预览预算）')
+})
+
+test('信封：failed 结局被认出来（错误样式据此渲染，不是靠正则嗅 [script error]）', () => {
+  const env = parseScriptEnvelope('Script failed\nWall time 1.5 seconds\nOutput:\n[script error] boom')
+  assert.equal(env.succeeded, false)
+  assert.equal(env.wallSec, 1.5)
+  assert.match(env.body, /\[script error\] boom/)
+})
+
+test('信封：墙钟行缺失也能剥（顺序固定但行可选）', () => {
+  assert.equal(parseScriptEnvelope('Script completed\nOutput:\nbody').body, 'body')
+  assert.equal(parseScriptEnvelope('Script completed\nWall time 2 seconds\nbody').body, 'body')
+})
+
+test('信封：无表头 → recognized=false，body 原样（TIMEOUT 等形态不被吞掉）', () => {
+  const raw = '[TIMEOUT after 0.7s - the script was killed at the codemode wall-clock limit]'
+  const env = parseScriptEnvelope(raw)
+  assert.equal(env.recognized, false)
+  assert.equal(env.body, raw, '没认出表头就绝不能删任何一行')
+  assert.equal(env.succeeded, true, '未识别 → 不标失败（失败由工具行的 isError 承担）')
+})
+
+test('信封：表头行必须**整行**匹配（前缀像但不是的不认）', () => {
+  assert.equal(parseScriptEnvelope('Script completed with warnings\nOutput:\nx').recognized, false)
+  assert.equal(parseScriptEnvelope('Script completed\nWall time fast\nOutput:\nx').body, 'Wall time fast\nOutput:\nx', '墙钟行不匹配就停在那儿，不能跳着剥')
+})
+
+test('信封：剥完后 5 行预算全归返回值（回归：用户截图里的症状）', () => {
+  const text = 'Script completed\nWall time 0.1 seconds\nOutput:\n{\n  "count": 28,\n  "names": [\n    "a",\n    "b"\n  ]\n}'
+  const env = parseScriptEnvelope(text)
+  const before = previewVisualLines(text, { lines: OUTPUT_PREVIEW_LINES, width: 40 })
+  const after = previewVisualLines(env.body, { lines: OUTPUT_PREVIEW_LINES, width: 40 })
+  assert.match(before.text, /^Script completed/, '剥之前前 5 行被表头占满（这就是原始症状）')
+  assert.match(after.text, /^\{/, '剥之后第一行就是返回值')
+  assert.ok(after.text.includes('"count": 28'), '返回值真的看得见了')
+})
+
+test('formatWall：<10s 保留一位小数，≥10s 取整（不摆假精度）', () => {
+  assert.equal(formatWall(0.123), '0.1s')
+  assert.equal(formatWall(9.94), '9.9s')
+  assert.equal(formatWall(12.3), '12s')
+  assert.equal(formatWall(-1), '')
+  assert.equal(formatWall(NaN), '')
+})
+
+// —— 10. 头部摘要（脚本一行）与结果数字摘要 ————————————————————————————
+//
+// 这两条决定「一行里看得见重点吗」：
+//   头部摘要  —— codemode 行没有 toolArgsSummary（那是别的工具的参数摘要），
+//                不补一个摘要的话头部只剩一个光秃秃的 `codemode`；
+//   数字摘要  —— 检索脚本的返回值往往是 {count, names:[…]}，读一行「找回 28 个工具」
+//                远比展开 5 行 JSON 快，且省下的预览预算留给无从概括的输出。
+
+test('scriptSummary：优先显示「在检索什么」（意图比第一行代码更直接）', () => {
+  assert.equal(scriptSummary('const r = await searchTools("ai-test")\nreturn r'), 'searchTools("ai-test")')
+  assert.equal(scriptSummary("await describeTool('read_file')"), 'describeTool("read_file")')
+  assert.equal(scriptSummary('globalThis.searchTools("x")'), 'searchTools("x")')
+})
+
+test('scriptSummary：参数不是字面量 → 给 (…)（显示不出内容也不编造）', () => {
+  assert.equal(scriptSummary('const q = pick(); await searchTools(q)'), 'searchTools(…)')
+})
+
+test('scriptSummary：没有发现型调用 → 回退第一行真代码（跳过注释与 @options 行）', () => {
+  assert.equal(scriptSummary('// @options: {"timeout_ms": 60000}\n// 说明\nconst a = 1\nreturn a'), 'const a = 1')
+  assert.equal(scriptSummary('   \n\nreturn 42'), 'return 42')
+})
+
+test('scriptSummary：不把别的对象的同名方法当保留操作', () => {
+  // `client.searchTools(...)` 是别人的方法，不是宿主保留操作 —— 摘要该回退第一行代码
+  assert.equal(scriptSummary('await client.searchTools("x")'), 'await client.searchTools("x")')
+})
+
+test('scriptSummary：超长截断、空源码给空串（调用方回落纯工具名）', () => {
+  const long = `searchTools("${'x'.repeat(200)}")`
+  const got = scriptSummary(long, 30)
+  assert.ok(got.length <= 31, `截断后不该超预算: ${got.length}`)
+  assert.equal(scriptSummary(undefined), '')
+  assert.equal(scriptSummary('   '), '')
+})
+
+test('resultDigest：names 数组长度优先，其次 count 数字', () => {
+  const env = parseScriptEnvelope('Script completed\nWall time 0.1 seconds\nOutput:\n{"count":28,"names":["a","b","c"]}')
+  assert.deepEqual(resultDigest(env, 0), { kind: 'tools', n: 3 }, 'names.length 是「找回几个工具」的直接答案')
+  const env2 = parseScriptEnvelope('Script completed\nOutput:\n{"count":28}')
+  assert.deepEqual(resultDigest(env2, 0), { kind: 'tools', n: 28 })
+})
+
+test('resultDigest：没有数字摘要时用调用次数兜底，两者都无则 undefined', () => {
+  const plain = parseScriptEnvelope('Script completed\nOutput:\nhello world')
+  assert.deepEqual(resultDigest(plain, 4), { kind: 'calls', n: 4 })
+  assert.equal(resultDigest(plain, 0), undefined)
+})
+
+test('resultDigest：只认最外层键，绝不递归搜索（深层同名键是别人的数据）', () => {
+  const deep = parseScriptEnvelope('Script completed\nOutput:\n{"data":{"count":999}}')
+  assert.equal(resultDigest(deep, 0), undefined, '深层 count 不是「找回多少工具」')
+  const arr = parseScriptEnvelope('Script completed\nOutput:\n[1,2,3]')
+  assert.equal(resultDigest(arr, 0), undefined, '非对象结果不给数字')
+})
+
+test('resultDigest：JSON 被截断时宁可不给数字，也不猜', () => {
+  const broken = parseScriptEnvelope('Script completed\nOutput:\n{"count":2')
+  assert.equal(resultDigest(broken, 0), undefined)
+})
+
+test('resultMetricKey：kind → i18n key（文案在 i18n.ts，数字在这里）', () => {
+  assert.equal(resultMetricKey({ kind: 'tools', n: 1 }), 'tool.codemode.metric.tools')
+  assert.equal(resultMetricKey({ kind: 'calls', n: 1 }), 'tool.codemode.metric.calls')
+})
+
+test('resultDigest：超大正文不解析（渲染路径上的 JSON.parse 必须有尺寸闸门）', () => {
+  // 30 KB 的合法回执：超过 16 KiB 闸门 → 不给数字（预览与展开照旧可用）
+  const names = Array.from({ length: 3000 }, (_, i) => `tool_${i}`)
+  const big = parseScriptEnvelope(`Script completed\nOutput:\n${JSON.stringify({ names })}`)
+  assert.ok(big.body.length > 16 << 10, '用例本身要真的超过闸门')
+  assert.equal(resultDigest(big, 0), undefined)
+  // 刚好在闸门内的正常回执照常给数字
+  const small = parseScriptEnvelope(`Script completed\nOutput:\n${JSON.stringify({ names: ['a', 'b'] })}`)
+  assert.deepEqual(resultDigest(small, 0), { kind: 'tools', n: 2 })
 })

@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { fmtDuration } from './ui'
 import { copyText } from '../lib/clipboard'
 import { useT } from '../i18n'
@@ -8,10 +8,15 @@ import {
   NESTED_COLLAPSED_LIMIT,
   NESTED_ERROR_PREVIEW_CHARS,
   OUTPUT_PREVIEW_LINES,
+  formatWall,
   oneLine,
+  parseScriptEnvelope,
   pickNestedCalls,
   previewChars,
   previewVisualLines,
+  resultDigest,
+  resultMetricKey,
+  scriptSummary,
   type NestedCallView,
 } from '../lib/codemodeNested'
 
@@ -105,13 +110,20 @@ const FALLBACK_CELLS = 88
 // 探针长度：一个足够长的 '0' 串，除以后得到单字符像素宽（越短误差越大）。
 const PROBE_LEN = 32
 
-/** 脚本文本输出的折叠预览：视觉行限 OUTPUT_PREVIEW_LINES 行 + 下方单独一行点名 spill 路径。 */
-export const ToolOutputPreview = memo(function ToolOutputPreview({ text, spillPath }: { text: string; spillPath?: string }) {
+/** 脚本文本输出的折叠预览：**结果优先** —— 表头收成一行 chip，5 行预算全给返回值，
+ *  下方点名 spill 路径与「查看脚本」。 */
+export const ToolOutputPreview = memo(function ToolOutputPreview({ text, spillPath, script, nestedCount = 0 }: { text: string; spillPath?: string; script?: string; nestedCount?: number }) {
   const t = useT()
   const showToast = useAppStore((s) => s.showToast)
   const preRef = useRef<HTMLPreElement>(null)
   const probeRef = useRef<HTMLSpanElement>(null)
   const [cells, setCells] = useState(FALLBACK_CELLS)
+  const [scriptOpen, setScriptOpen] = useState(false)
+
+  // 表头剥离与摘要都只在 text/度量变化时重算：resultDigest 内部有一次 JSON.parse（虽有
+  // 尺寸闸门），而 cells 会在拖窗时连续变 —— 挂在 render 上会让每帧都重解析一遍。
+  const envelope = useMemo(() => parseScriptEnvelope(text), [text])
+  const metric = useMemo(() => resultDigest(envelope, nestedCount), [envelope, nestedCount])
 
   // —— 视觉行宽 = 容器放得下的**字符单元格**数 ——
   // 为什么必须量：限行要按「渲染后折了几行」算，而折行位置由真实宽度决定（窗口/侧栏拖动
@@ -138,24 +150,37 @@ export const ToolOutputPreview = memo(function ToolOutputPreview({ text, spillPa
     return () => ro.disconnect()
   }, [])
 
-  const preview = previewVisualLines(text, { lines: OUTPUT_PREVIEW_LINES, width: cells })
+  const preview = previewVisualLines(envelope.body, { lines: OUTPUT_PREVIEW_LINES, width: cells })
   const copySpill = async () => {
     if (spillPath && (await copyText(spillPath))) showToast(t('art.pathCopied').replace('{path}', spillPath))
     else showToast(t('art.copyFail'), 'error')
   }
+  const scriptHint = scriptSummary(script)
   return (
     <div className="tool-out">
       {/* 量宽探针：同字号（.tn-pre 同族字体）、不可见、不参与布局 */}
       <span className="tn-probe mono" ref={probeRef} aria-hidden="true">{'0'.repeat(PROBE_LEN)}</span>
+      {/* 一行「重点」：结局 · 墙钟 · 数字摘要。表头三行 → 一行 chip，省下的行预算归返回值。 */}
+      {(envelope.recognized || metric) && (
+        <div className="tn-summary">
+          {envelope.recognized && (
+            <span className={`tn-outcome ${envelope.succeeded ? 'ok' : 'err'}`}>
+              {envelope.succeeded ? t('tool.codemode.outcome.ok') : t('tool.codemode.outcome.failed')}
+            </span>
+          )}
+          {envelope.wallSec != null && <span className="tn-wall mono">{formatWall(envelope.wallSec)}</span>}
+          {metric && <span className="tn-metric mono">{t(resultMetricKey(metric)).replace('{n}', String(metric.n))}</span>}
+        </div>
+      )}
       {/* 折叠态预览：行数由 previewVisualLines 按视觉行算好，CSS 再兜一道 max-height 硬限。
           max-height 的**权威值**从这里注入（单一来源 = OUTPUT_PREVIEW_LINES）：写死在 CSS 里
           的两处数字会各自漂移，而这里一旦比 CSS 小，多出来的行会被静默裁掉（看不见也无人知）。
           CSS 里那条只是首帧/无 JS 时的兜底。 */}
       <pre className="tn-pre mono" ref={preRef} style={{ maxHeight: `calc(${OUTPUT_PREVIEW_LINES} * 1.55em + 12px)` }}>{preview.text}</pre>
-      {/* 藏了多少行 / 完整输出去哪了：**单独一行**点名路径（pi 的教训 —— 折叠预览会把
-          结果尾部的截断通知一起藏掉，不另起一行点名，用户就再也找不到全文）。
-          路径缺失时两行都不显示（不编造路径）。 */}
-      {(preview.truncated || spillPath) && (
+      {/* 藏了多少行 / 完整输出去哪了 / 脚本源码在哪：**各自单独一行**（pi 的教训 ——
+          折叠预览会把结果尾部的截断通知一起藏掉，不另起一行点名，用户就再也找不到全文）。
+          路径缺失时对应那一段不显示（不编造路径）。 */}
+      {(preview.truncated || spillPath || script) && (
         <div className="tn-foot">
           {preview.truncated && (
             <span className="tn-hidden">{t('tool.output.hiddenLines').replace('{n}', String(preview.hiddenVisualLines))}</span>
@@ -165,7 +190,22 @@ export const ToolOutputPreview = memo(function ToolOutputPreview({ text, spillPa
               {t('tool.output.spill').replace('{path}', spillPath)}
             </button>
           )}
+          {script && (
+            <button
+              className="tn-script"
+              onClick={() => setScriptOpen((v) => !v)}
+              title={scriptHint || t('tool.codemode.scriptHint')}
+            >
+              {scriptOpen ? t('tool.codemode.scriptHide') : t('tool.codemode.script')}
+            </button>
+          )}
         </div>
+      )}
+      {/* 脚本源码：**默认收起**（用户的取舍是「结果优先」）—— 想看代码的人点「查看脚本」。
+          这里用 <pre> 纯文本（不是 shiki 高亮）：折叠态是「快速确认」的场景，不值得为它
+          拖入高亮器的流式开销；完整高亮版本在展开行后的「参数」区（JsonView）。 */}
+      {scriptOpen && script && (
+        <pre className="tn-script-code mono">{script}</pre>
       )}
     </div>
   )

@@ -164,19 +164,20 @@ func (t *Tool) Call(ctx context.Context, _ string, args string) (string, error) 
 	childCtx := pausingCtx(runCtx, clock)
 
 	br := &bridge{
-		tool:    t,
-		engine:  t.opts.Engine,
-		ctx:     childCtx,
-		cat:     cat,
-		byRaw:   snap.byRaw,
-		ns:      snap.ns,
-		anchor:  t.nextAnchor(),
-		clock:   clock,
-		store:   st,
-		pending: pending,
-		scope:   tools.NewExecScope(events.NestedRecorderFrom(ctx), 0),
-		cancels: map[int64]context.CancelFunc{},
-		turns:   newTurnGate(),
+		tool:     t,
+		engine:   t.opts.Engine,
+		ctx:      childCtx,
+		cat:      cat,
+		byRaw:    snap.byRaw,
+		ns:       snap.ns,
+		anchor:   t.nextAnchor(),
+		clock:    clock,
+		store:    st,
+		pending:  pending,
+		scope:    tools.NewExecScope(events.NestedRecorderFrom(ctx), 0),
+		recorder: events.NestedRecorderFrom(ctx),
+		cancels:  map[int64]context.CancelFunc{},
+		turns:    newTurnGate(),
 	}
 	defer br.close()
 
@@ -235,6 +236,13 @@ type bridge struct {
 	// （真并发是它的合同）；store.Pending 自身不是并发安全的（它是「一次执行的写入批」，
 	// 按设计只有一个写者）。故串行化落在编排方这一层，别去改 store 的语义。
 	pendingMu sync.Mutex
+
+	// recorder 本次调用 ctx 上的嵌套记录器（**只写**：保留操作计数）。
+	//
+	// 与 scope 持的是同一个 recorder；这里单独存一份是因为「计数」是宿主形态事实，
+	// 与「执行记账」（ExecScope）无关 —— 借用 scope.Recorder() 会把两个关注点绑死。
+	// 可为 nil（直接调用工具/单测时 ctx 上没有 recorder）：那就不计数。
+	recorder *core.NestedRecorder
 }
 
 // initPayload 组装沙箱的初始化载荷：
@@ -447,6 +455,11 @@ func toScriptResult(r core.ToolResult) execproc.ScriptResult {
 
 // hostOp 保留操作：不走引擎，也不是「工具调用」—— 它们不产生嵌套记录、不占调用预算
 // （对齐 pi：store 与 searchTools 都不算一次工具调用）。
+//
+// 但**发现型**保留操作（searchTools / describeTool）要在 recorder 上记一笔：它们是
+// 「这个脚本是来找工具的」唯一判据，而保留操作按定义不进 NestedCalls —— 不记的话
+// 宿主只能看到「脚本跑完了、没调任何工具」，分不出「检索」与「空转」。
+// store/image 是数据搬运，不计（见 core.HostOps 的注释）。
 func (b *bridge) hostOp(ctx context.Context, op string, args json.RawMessage) execproc.ScriptResult {
 	switch op {
 	case opStore:
@@ -454,11 +467,35 @@ func (b *bridge) hostOp(ctx context.Context, op string, args json.RawMessage) ex
 	case opImage:
 		return b.opImage(ctx, args)
 	case opSearch:
+		b.countHostOp("search")
 		return b.opSearch(args)
 	case opDescribe:
+		b.countHostOp("describe")
 		return b.opDescribe(args)
 	}
 	return scriptError(fmt.Errorf("codemode: unknown host operation %q", op))
+}
+
+// countHostOp 在本次调用的 recorder 上记一次保留操作（nil recorder = 直接调用/单测，
+// 静默跳过：那不是错误，只是没有宿主在听）。
+func (b *bridge) countHostOp(kind string) {
+	if b == nil {
+		return
+	}
+	b.recorder.AddHostOp(kind)
+}
+
+// hostOpsRead 读本次的保留操作计数（写进结构化结果）。
+//
+// **非破坏性读**（HostOps 而不是 TakeHostOps）：引擎的 finish() 在工具 Call 返回**之后**
+// 才跑，它也要 TakeHostOps 一次把计数挂到事件上（前端据此渲染档位）。这里若清空，
+// 事件就永远拿到零值 —— 功能静默失效（与 fullOutputNoteFormat 那个「对不上就不显示路径」
+// 是同一类坑，故在此写明）。
+func (b *bridge) hostOpsRead() core.HostOps {
+	if b == nil {
+		return core.HostOps{}
+	}
+	return b.recorder.HostOps()
 }
 
 // opStore 暂存一次写入。限额在 Pending.Set 里就查（单值 256 KiB + JSON 合法性）——
@@ -763,6 +800,7 @@ func (b *bridge) finish(ctx context.Context, res execproc.RunResult, so ScriptOp
 		wall:      wall,
 		nested:    int(b.scope.ExecCount()),
 		storeErr:  errText(storeErr),
+		hostOps:   b.hostOpsRead(),
 	})
 	b.writeExecStatus(ctx, res, killed, failed)
 	return text
@@ -946,6 +984,7 @@ type structInfo struct {
 	wall      time.Duration
 	nested    int
 	storeErr  string
+	hostOps   core.HostOps
 }
 
 // codemodeResult 结构化结果（写进**引擎注入的 ctx 槽**）。
@@ -963,8 +1002,11 @@ type codemodeResult struct {
 	Canceled       bool            `json:"canceled,omitempty"`
 	WallTimeSec    float64         `json:"wall_time_seconds"`
 	NestedCalls    int             `json:"nested_calls"`
-	StoreError     string          `json:"store_error,omitempty"`
-	ScriptError    string          `json:"script_error,omitempty"`
+	// HostOps 本次脚本发起的保留操作计数（searchTools / describeTool）——「检索」判据。
+	// 与 nested_calls 无关：保留操作不是工具调用，纯检索脚本的 nested_calls 恒为 0。
+	HostOps     core.HostOps `json:"host_ops,omitempty"`
+	StoreError  string       `json:"store_error,omitempty"`
+	ScriptError string       `json:"script_error,omitempty"`
 }
 
 // writeStructured 写结构化结果。
@@ -986,6 +1028,7 @@ func (b *bridge) writeStructured(ctx context.Context, res execproc.RunResult, in
 		Canceled:       !b.clock.expired() && res.Canceled,
 		WallTimeSec:    in.wall.Seconds(),
 		NestedCalls:    in.nested,
+		HostOps:        in.hostOps,
 		StoreError:     in.storeErr,
 		ScriptError:    firstLineOf(execprocErrorLine(res)),
 	}

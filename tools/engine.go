@@ -1211,13 +1211,23 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 	// 不会与父累加重复计数。编排工具**不得**再把这份用量经 ToolUsageProvider
 	// 上报一遍（那才会双计）——契约写在 tools/nested.go 的 ExecuteOne godoc 里。
 	var nested []core.NestedCallRecord
+	var hostOps *core.HostOps
 	if call.Depth == 0 {
 		if rec := events.NestedRecorderFrom(ctx); rec != nil {
 			nested = rec.TakeRecord()
 			in.usage = in.usage.Add(rec.TakeUsage())
+			// 保留操作计数：与记录同源（同一个 recorder），但**独立**取出 —— 它不受
+			// NestedMaxCalls 限额影响（见 core.NestedRecorder.TakeHostOps）。
+			// 零值不挂指针：普通工具的事件里不该出现 `"host_ops":{}` 这种噪声。
+			if h := rec.TakeHostOps(); !h.IsZero() {
+				hostOps = &h
+			}
 		}
 	}
 	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec, NestedCalls: nested, Structured: in.structured}
+	if hostOps != nil {
+		r.HostOps = *hostOps
+	}
 	if in.isErr {
 		r.ToolError = parseToolError(in.result)
 	}
@@ -1260,6 +1270,7 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 			ParentCallId: call.ParentCallId,
 			Depth:        call.Depth,
 			NestedCalls:  nested,
+			HostOps:      hostOps,
 			Timestamp:    time.Now(),
 			EventType:    events.ToolRunEndType,
 		})

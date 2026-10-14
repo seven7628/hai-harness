@@ -174,3 +174,93 @@ func TestReducerNestedCallsSurviveRestore(t *testing.T) {
 		t.Fatalf("恢复后重放嵌套事件又建行了: %+v", tools)
 	}
 }
+
+// TestReducerHostOpsReachCheckpointAndSurviveRestore host_ops（脚本形态档位的判据）走
+// 与 nested_calls 同一条路：实时事件 → checkpoint → 恢复，往返不丢。
+//
+// 为什么必须单独钉一遍（而不是只测 nested_calls）：这两个字段的**来源不同** ——
+// nested_calls 是逐条记录，host_ops 是保留操作计数（保留操作不进记录）。曾经把
+// 「计数」写成「记录」的派生量（数 searchTools 的嵌套记录条数）看起来也能跑，
+// 但纯检索脚本一条记录都没有，计数恒为 0 —— 档位就永远标不出来。
+func TestReducerHostOpsReachCheckpointAndSurviveRestore(t *testing.T) {
+	r := NewViewReducer()
+	ts := time.Now().Add(-time.Minute)
+	mustApply(t, r, evToolStart(t, "root-1", "outer-1", "codemode", `{"code":"…"}`, ts))
+	outer := evToolEnd(t, "root-1", "outer-1", "codemode", "done", false, nil, ts.Add(time.Second))
+	// 纯检索脚本：零嵌套记录、只有保留操作计数（正是需要 host_ops 的形态）
+	outer.HostOps = &core.HostOps{Search: 3, Describe: 1}
+	mustApply(t, r, outer)
+
+	cp := r.Snapshot()
+	tools := blockByKind(t, cp, "tool")
+	if len(tools) != 1 {
+		t.Fatalf("工具块数 = %d, want 1", len(tools))
+	}
+	if tools[0].HostOps == nil || tools[0].HostOps.Search != 3 || tools[0].HostOps.Describe != 1 {
+		t.Fatalf("host_ops 未进 checkpoint: %+v", tools[0].HostOps)
+	}
+	// 纯检索脚本的 NestedCalls 必须仍为空 —— 这正是「档位不能从记录推」的证据。
+	if len(tools[0].NestedCalls) != 0 {
+		t.Fatalf("保留操作不该产生嵌套记录: %+v", tools[0].NestedCalls)
+	}
+
+	raw, err := json.Marshal(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Blocks []struct {
+			ToolID  string `json:"tool_id"`
+			HostOps *struct {
+				Search   int `json:"search"`
+				Describe int `json:"describe"`
+			} `json:"host_ops"`
+		} `json:"blocks"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, b := range wire.Blocks {
+		if b.ToolID == "outer-1" {
+			found = true
+			if b.HostOps == nil || b.HostOps.Search != 3 || b.HostOps.Describe != 1 {
+				t.Fatalf("wire 形态的 host_ops 不对: %+v", b.HostOps)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("wire 形态找不到外层工具块的 host_ops: %s", string(raw))
+	}
+
+	// 真实恢复路径：Snapshot → JSON → 校验 → Restore
+	parsed, err := parseCheckpoint(session.ViewCheckpoint(raw))
+	if err != nil {
+		t.Fatalf("parseCheckpoint: %v", err)
+	}
+	r2 := NewViewReducer()
+	if err := r2.Restore(parsed); err != nil {
+		t.Fatal(err)
+	}
+	got := blockByKind(t, r2.Snapshot(), "tool")
+	if len(got) != 1 || got[0].HostOps == nil || got[0].HostOps.Search != 3 {
+		t.Fatalf("恢复后 host_ops 丢失: %+v", got)
+	}
+}
+
+// TestReducerPlainToolHasNoHostOps 普通工具不该带 host_ops（零值不挂指针）——
+// 前端据此区分「编排型工具」与普通工具，多挂一个空对象会让每个工具块都多一个字段。
+func TestReducerPlainToolHasNoHostOps(t *testing.T) {
+	r := NewViewReducer()
+	ts := time.Now().Add(-time.Minute)
+	mustApply(t, r, evToolStart(t, "root-1", "c1", "read_file", `{"path":"a"}`, ts))
+	mustApply(t, r, evToolEnd(t, "root-1", "c1", "read_file", "hello", false, nil, ts.Add(time.Second)))
+
+	raw, err := json.Marshal(r.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "host_ops") {
+		t.Fatalf("普通工具的事件/checkpoint 里不该出现 host_ops: %s", string(raw))
+	}
+}

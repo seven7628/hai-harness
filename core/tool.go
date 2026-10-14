@@ -104,6 +104,14 @@ type ToolResult struct {
 	// 嵌套调用从不经过 runBatch 的返回值，不会在那里被二次累加。
 	NestedCalls []NestedCallRecord
 
+	// HostOps 本次调用**内部**发起的宿主保留操作计数（仅编排型工具填充，普通工具
+	// 恒为零值）。保留操作（codemode 的 searchTools/describeTool）按定义不是工具调用，
+	// 故**不进** NestedCalls —— 那一项对「纯检索脚本」恒为空，无法据此区分脚本形态。
+	//
+	// 消费方：宿主渲染「Codemode Search / Codemode Execute」档位（desktop/app 的
+	// codemodeTier）。不进 transcript、不影响计费。
+	HostOps HostOps
+
 	// Structured 结构化结果原文（实现 tools.OutputSchemaProvider 的工具产出；
 	// nil = 无结构化结果，退回文本路径）。
 	//
