@@ -134,6 +134,7 @@ export const TaskCard = memo(function TaskCard({
 export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<MsgBlock, { kind: 'agent' }> }) {
   const t = useT()
   const interruptTask = useAppStore((s) => s.interruptTask)
+  const loadAgentHistory = useAppStore((s) => s.loadAgentHistory)
   const running = b.status === 'running'
   const interrupting = b.status === 'interrupting'
   const canStop = Boolean(b.taskId) && (running || interrupting)
@@ -159,7 +160,15 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
       interrupting={interrupting}
       onStop={canStop ? () => interruptTask(b.taskId!) : undefined}
     >
-      <AgentTranscript items={b.items} running={running} />
+      <AgentTranscript
+        items={b.items}
+        running={running}
+        trimmed={b.itemsTrimmed}
+        loading={b.historyLoading}
+        hasMore={b.historyHasMore}
+        error={b.historyError}
+        onLoadOlder={b.taskId ? () => loadAgentHistory(b.id, b.taskId!) : undefined}
+      />
       {b.artifacts && b.artifacts.length > 0 && (
         <div className="ac-artifacts">
           <ArtifactCard items={b.artifacts} {...(b.artifactsTruncated ? { truncated: true } : {})} />

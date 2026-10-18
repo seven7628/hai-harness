@@ -294,6 +294,7 @@ export interface MCPProjectServer {
   args?: string[]
   url?: string
   env?: Record<string, string>
+  headers?: Record<string, string> // 远端传输请求头（明文；面板回显与编辑）
   enabled: boolean
   exposure?: string // 暴露档位（空 = 未声明，有效档由引擎侧解析，见 MCPServerCfg.exposure）
   file: string // 定义文件：.mcp.json（只读）| .go-code/settings.json（可编辑）
@@ -507,7 +508,7 @@ export type MsgBlock =
   // 工具块：nestedCalls = 编排型工具（codemode）脚本内的嵌套调用清单（外层结果自带，
   // 子调用**不生成**自己的工具块）；spillPath = 完整输出落盘路径（缺失时渲染层不显示该行）。
   | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView }
-  | { kind: 'agent'; id: number; runId: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean }
+  | { kind: 'agent'; id: number; runId: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean }
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
   | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
   | { kind: 'task_result'; id: number; taskId: string; result: string; error?: string }
@@ -2526,6 +2527,9 @@ interface AppState {
   releaseSandbox(approve: boolean): void // 沙箱拦截放行决策（放行=该命令绕过沙箱重跑一次）
   promoteTask(taskId: string): void // 运行中长工具 → 后台任务（主 loop 立即拿占位继续；后台完成自动回传）
   interruptTask(taskId: string): void
+  // loadAgentHistory 加载子智能体卡片「更早的记录」下一页（offset 从最新往回算）。
+  // 完整历史在子任务 journal 里（checkpoint 只留首屏），见 bridge/agent_history.go。
+  loadAgentHistory(blockId: number, taskId: string): void
   interrupt(): void
   compact(): void
   switchMode(mode: string): void
@@ -2739,6 +2743,9 @@ interface PendingCommand {
   // file_preview 的请求路径（阶段 2）：响应只带 path、错误响应连 path 都没有，而在途登记
   // 必须精确释放 —— 记在这里，成功/失败两条分支都能按**发起时**的键释放（见 filePreviewInFlight）。
   path?: string
+  // agent_history 的目标子任务：响应必须落回**发起时**的那张卡片（用户可能已切会话或
+  // 同会话里有多个子智能体），所以按 id 精确路由，而不是「找当前第一个 agent 块」。
+  taskId?: string
 }
 
 const pending: Record<number, PendingCommand> = {}
@@ -2802,6 +2809,7 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
     sessionId: sessionId || undefined,
     navigationGeneration: navigation ? ++navigationGeneration : navigationGeneration,
     ...(cmd.type === 'file_preview' ? { path: String(cmd.payload?.path ?? '') } : {}),
+    ...(cmd.type === 'agent_history' ? { taskId: String(cmd.payload?.task_id ?? '') } : {}),
   }
   // 恢复协议标识（问题四）：new_session 带 restore_id + attempt；响应回显，
   // renderer 据此丢弃陈旧响应（迟到的旧请求响应不得覆盖新会话）。
@@ -3041,6 +3049,80 @@ export function runningTaskCount(blocks: MsgBlock[]): number {
 
 // rollbackInterrupting interrupt_task 失败时按 id 回滚乐观 interrupting 态：
 // 仅回滚仍在「中断中」的任务（已收敛终态/已完成的不受影响——事件先于响应到达的竞态安全）。
+// agent_history 的一页 → AgentItem[]。
+//
+// bridge 返回的条目是**扁平**的（assistant / tool / user 三种），而 UI 的 AgentItem
+// 是渲染原语：tool 条要带 status/durMs 才能走 NarrativeBlocks.ToolRow 那套渲染。
+// 历史条目的工具调用必然已经结束 → 统一 status:'done'（journal 里没有单条耗时，
+// 不编造 durMs —— 留空比显示 0ms 诚实）。
+function historyEntryToAgentItem(e: {
+  kind?: string
+  text?: string
+  name?: string
+  args?: string
+  result?: string
+  tool_id?: string
+  index?: number
+}): AgentItem {
+  if (e.kind === 'tool') {
+    return {
+      kind: 'tool',
+      toolId: e.tool_id ?? `hist-${e.index ?? 0}`,
+      name: e.name ?? 'tool',
+      ...(e.args ? { args: e.args } : {}),
+      ...(e.result ? { result: e.result } : {}),
+      status: 'done',
+    }
+  }
+  if (e.kind === 'assistant' || e.kind === 'text') return { kind: 'text', text: e.text ?? '' }
+  // user（子任务输入）在卡片里以文本呈现：历史区的第一条通常就是它。
+  return { kind: 'text', text: e.text ?? '' }
+}
+
+// appendOlderItems 把「更早的一页」拼到卡片现有 items **前面**。
+//
+// 去重：分页窗口按 (offset, limit) 取，若在请求在途期间卡片又收到了新条目
+// （子 agent 仍在跑），total 会变，相邻页可能重叠。用 toolId + 文本做后置去重，
+// 保证 UI 里不会出现两条一样的记录。
+function appendOlderItems(
+  b: Extract<MsgBlock, { kind: 'agent' }>,
+  older: AgentItem[],
+  hasMore: boolean,
+  total?: number,
+  offset?: number,
+): Extract<MsgBlock, { kind: 'agent' }> {
+  const seen = new Set<string>()
+  for (const it of b.items) {
+    if (it.kind === 'tool') seen.add(`t:${it.toolId}`)
+    else if (it.kind === 'text') seen.add(`x:${it.text}`)
+  }
+  const fresh = older.filter((it) => {
+    const key = it.kind === 'tool' ? `t:${it.toolId}` : it.kind === 'text' ? `x:${it.text}` : ''
+    if (!key) return true
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  return {
+    ...b,
+    items: [...fresh, ...b.items],
+    // 下一页游标 = 已加载窗口的末端（从最新往回数）。
+    // 首屏本身已经占掉最新 len(b.items) 条，所以第一次加载必须从「首屏条数」起算 ——
+    // 否则第一页会与首屏重叠，去重后只多出一两条（实测踩到：101 条只加载出 51 条）。
+    // offset 参数是**本次请求**的游标；下一页 = 本次游标 + 本次真正拿到的窗口大小。
+    historyOffset: offset != null ? offset + older.length : (b.historyOffset ?? 0) + older.length,
+    historyHasMore: hasMore,
+    historyLoading: false,
+    historyError: undefined,
+    ...(total != null ? { historyTotal: total } : {}),
+    // itemsTrimmed 只用于**初始提示**（「还有 N 条」）与「是否显示入口」。
+    // 终止判定一律用 hasMore —— 两个数来自不同口径（trimmed 是 reducer 裁掉的
+    // AgentItem 数，total 是 journal messages 解析出的条目数，thinking 是否落
+    // journal 等差异会让它们不完全相等）。用 hasMore 就不会出现「加载完了按钮还在」。
+    itemsTrimmed: hasMore ? Math.max(0, (b.itemsTrimmed ?? 0) - fresh.length) : 0,
+  }
+}
+
 function rollbackInterrupting(sid: string, taskId: string): void {
   useAppStore.setState((s) => {
     const v = s.views[sid] ?? emptyView()
@@ -3878,6 +3960,33 @@ export function dispatchEvent(raw: AnyEvent): void {
         }
         break
       }
+      // agent_history：子智能体「更早的记录」分页（卡片上滑加载）。
+      // 只在成功时拼接；失败保持原样（卡片上的按钮可重试，绝不静默吞掉）。
+      // sid 用 meta.sessionId（发起时），迟到的响应不会写进用户已切到的新会话。
+      if (t === 'agent_history') {
+        const sid = String(meta?.sessionId || '')
+        const taskId = String(meta?.taskId || '')
+        if (r.ok && sid && taskId) {
+          const page = d as unknown as {
+            entries?: Array<{ kind?: string; text?: string; name?: string; args?: string; result?: string; tool_id?: string; index?: number }>
+            has_more?: boolean
+            total?: number
+            offset?: number
+          }
+          const older = (page.entries ?? []).map(historyEntryToAgentItem)
+          setState((s) => {
+            const v = s.views[sid]
+            if (!v) return {}
+            const blocks = v.blocks.map((b) => {
+              if (b.kind !== 'agent' || b.taskId !== taskId) return b
+              return appendOlderItems(b, older, page.has_more !== false, page.total, page.offset)
+            })
+            return setView(s, sid, { ...v, blocks })
+          })
+        }
+        break
+      }
+
       // file_preview：内容按**归一化路径**写进缓存（阶段 2）。
       // 为什么键里带 workspace：缓存是全局的（标签集才按 scope 隔离），而「相对路径」只有
       // 相对于工作区才有意义 —— 不带工作区的话，两个工作区里的同名 src/a.ts 会互相覆盖。
@@ -5593,7 +5702,18 @@ export function dispatchEvent(raw: AnyEvent): void {
         if (existing >= 0) {
           const blocks = [...v.blocks]
           const task = blocks[existing] as Extract<MsgBlock, { kind: 'agent' | 'async_task' }>
-          blocks[existing] = { ...task, status }
+          // 会话级恢复：同一 task_id 再次收到 task_started = 原地续跑（子任务与主会话同档
+          // 持久化，agent_resume 复用同一 id 重跑，见 docs/…TASKOUTPUT.md §13）。卡片据同一 id
+          // 从终态**翻回 running** —— 必须清掉上一轮的终态残留（结束时刻 / 时长 / 结果 / 错误），
+          // 否则卡片显示「运行中」却仍挂着旧结论与旧时长。
+          const resumed = task.status !== 'running' && task.status !== 'interrupting'
+          if (!resumed) {
+            blocks[existing] = { ...task, status }
+          } else if (task.kind === 'async_task') {
+            blocks[existing] = { ...task, status, endedAt: undefined, taskResult: undefined, taskError: undefined }
+          } else {
+            blocks[existing] = { ...task, status, durMs: undefined, taskResult: undefined, taskError: undefined }
+          }
           const upd = setView(s, sid, { ...v, blocks })
           return { ...upd, busySids: busySidsFromViews(upd.views) }
         }
@@ -5688,7 +5808,19 @@ export function dispatchEvent(raw: AnyEvent): void {
               : undefined
           : undefined
         const deliveryStatus = terminalTaskStatus(raw.status, error, fallbackStatus)
-        const alreadyNoticed = v.blocks.some((b) => b.kind === 'task_delivery' && b.taskId === taskId)
+        // 去重按「本轮交付」而不是「该任务」：会话级恢复下同一 task_id 会跑多轮
+        // （agent_resume 原地续跑，见 docs/…TASKOUTPUT.md §13），第二轮结束同样要发一条
+        // 交付通知。按 taskId 去重会把续跑那轮静默吞掉 —— 用户看到的是「任务结束了但
+        // 没有结果通知」。判据加 status+result 指纹：同轮重放/重复投递仍幂等去重。
+        // 引用同一 card 的 task_delivery 才算重复；上一轮的通知是**历史记录**，不该拦。
+        const deliveryKey = (d: { status?: unknown; result?: unknown; error?: unknown }) =>
+          `${String(d.status ?? '')}|${String(d.result ?? '')}|${String(d.error ?? '')}`
+        const thisKey = deliveryKey({ status: deliveryStatus, result, error: error || undefined })
+        const taskDeliveries = v.blocks.filter(
+          (b): b is Extract<MsgBlock, { kind: 'task_delivery' }> => b.kind === 'task_delivery' && b.taskId === taskId,
+        )
+        const alreadyNoticed =
+          taskDeliveries.length > 0 ? deliveryKey(taskDeliveries[taskDeliveries.length - 1]) === thisKey : false
         if (taskIndex < 0) {
           if (alreadyNoticed || v.blocks.some((b) => b.kind === 'task_result' && b.taskId === taskId)) return s
           return setView(s, sid, {
@@ -6115,6 +6247,9 @@ function checkpointToView(cp: CheckpointView): SessionView {
           status: b.status as AsyncTaskStatus, spawnedAt: b.spawned_at ?? b.ts ?? Date.now(),
           usage: cpUsage(b.usage),
           items: (b.items ?? []).map(cpAgentItem),
+          // items_trimmed = 该卡片被裁剪掉的更早条目数（checkpoint 只保留首屏）。
+          // > 0 时卡片底部显示「加载更早记录」，按页从子任务 journal 取回。
+          ...(b.items_trimmed ? { itemsTrimmed: b.items_trimmed } : {}),
           ...(b.task_id ? { taskId: b.task_id } : {}),
           ...(b.dur_ms != null ? { durMs: b.dur_ms } : {}),
           ...(b.think_ms != null ? { thinkMs: b.think_ms } : {}),
@@ -7103,6 +7238,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
     const id = send({ type: 'interrupt_task', payload: { session_id: sid, task_id: taskId } })
     interruptPending.set(id, { sid, taskId })
+  },
+
+  loadAgentHistory: (blockId, taskId) => {
+    const sid = get().activeSessionId
+    if (!sid || !taskId) return
+    let offset = 0
+    set((s) => {
+      const v = s.views[sid] ?? emptyView()
+      let nextOffset = 0
+      const blocks = v.blocks.map((b) => {
+        if (b.id !== blockId || b.kind !== 'agent') return b
+        // 已经是加载中/没有更多：重复点击不叠加请求（按钮本身也会禁用）。
+        if (b.historyLoading) return b
+        // 首次加载从「首屏条数」开始：checkpoint 里已保留最新的 len(b.items) 条，
+        // 从 0 开始必然与首屏重叠（见 appendOlderItems 的注释）。
+        nextOffset = b.historyOffset ?? b.items.length
+        return { ...b, historyLoading: true, historyError: undefined }
+      })
+      offset = nextOffset
+      return setView(s, sid, { ...v, blocks })
+    })
+    send({
+      type: 'agent_history',
+      payload: { session_id: sid, task_id: taskId, offset, limit: 50 },
+    })
   },
 
   interrupt: () => {

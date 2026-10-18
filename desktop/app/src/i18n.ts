@@ -514,7 +514,7 @@ const zh: Record<string, string> = {
   'provider.oauthManualPh': '粘贴授权码或重定向 URL…',
   'provider.oauthSubmit': '提交',
   // MCP 设置（MCP Server 管理）
-  'mcp.hint': '管理 MCP Server：工具以 mcp__<server>__<tool> 命名注入会话（连接失败不影响会话）。env 明文存 settings.json（v1）。',
+  'mcp.hint': '管理 MCP Server：工具以 mcp__<server>__<tool> 命名注入会话（连接失败不影响会话）。env / headers 明文存 settings.json（v1）。',
   'mcp.add': '添加 MCP Server',
   'mcp.save': '保存',
   'mcp.cancel': '取消',
@@ -524,6 +524,7 @@ const zh: Record<string, string> = {
   'mcp.refreshState': '刷新状态',
   'mcp.name': '服务器名',
   'mcp.type': '类型',
+  'mcp.type.streamable': 'streamable_http 与 http 是同一个传输（别名），填哪个都一样',
   'mcp.command': '命令',
   'mcp.args': '参数（空格分隔）',
   'mcp.url': 'URL',
@@ -531,6 +532,13 @@ const zh: Record<string, string> = {
   'mcp.env.key': 'Key',
   'mcp.env.value': 'Value',
   'mcp.env.add': '添加变量',
+  // headers 请求头（仅远端 http/streamable_http/sse 有意义）
+  'mcp.headers': '请求头（Headers）',
+  'mcp.headers.add': '添加请求头',
+  'mcp.headers.key': 'Header',
+  'mcp.headers.value': '值（如 Bearer …）',
+  'mcp.headers.count': '{n} 个请求头',
+  'mcp.headers.hint': '远端服务器（http / streamable_http / sse）每次请求都会带上这些请求头。常见的 Authorization: Bearer <token> 就填在这里——没有它，需要鉴权的 MCP 端点连不上。注意：请求头与 env 一样明文存在 settings.json 里。',
   // exposure 暴露档位（见 transport/types.ts 的 MCPServerCfg.exposure）
   'mcp.exposure': '模型可见性',
   'mcp.exposure.unset': '未声明（随 codemode 开关：开 = 按需可搜 deferred，关 = 模型直接可见 direct）',
@@ -1500,6 +1508,10 @@ const zh: Record<string, string> = {
   'rp.task.stopTask': '停止该后台任务（仅中断本任务，不动主会话）',
   'rp.task.stopTaskAria': '停止后台任务',
   'rp.agent.asyncTip': '异步任务（{n} 运行中）',
+  'agent.loadOlder': '加载更早的记录',
+  'agent.loadOlderN': '加载更早的记录（还有 {n} 条）',
+  'agent.loading': '正在加载更早的记录…',
+  'agent.loadOlderFailed': '加载失败，点击重试',
 
 }
 
@@ -2002,7 +2014,7 @@ const en: Record<string, string> = {
   'provider.oauthManualPh': 'Paste authorization code or redirect URL…',
   'provider.oauthSubmit': 'Submit',
   // MCP settings (MCP Server management)
-  'mcp.hint': 'Manage MCP servers: tools are injected as mcp__<server>__<tool> (a failed connection never blocks a session). env is stored plaintext in settings.json (v1).',
+  'mcp.hint': 'Manage MCP servers: tools are injected as mcp__<server>__<tool> (a failed connection never blocks a session). env / headers are stored plaintext in settings.json (v1).',
   'mcp.add': 'Add MCP Server',
   'mcp.save': 'Save',
   'mcp.cancel': 'Cancel',
@@ -2012,6 +2024,7 @@ const en: Record<string, string> = {
   'mcp.refreshState': 'Refresh',
   'mcp.name': 'Server name',
   'mcp.type': 'Type',
+  'mcp.type.streamable': 'streamable_http is the same transport as http (an alias) — either works',
   'mcp.command': 'Command',
   'mcp.args': 'Args (space-separated)',
   'mcp.url': 'URL',
@@ -2019,6 +2032,13 @@ const en: Record<string, string> = {
   'mcp.env.key': 'Key',
   'mcp.env.value': 'Value',
   'mcp.env.add': 'Add variable',
+  // request headers (only meaningful for remote http/streamable_http/sse)
+  'mcp.headers': 'Request headers',
+  'mcp.headers.add': 'Add header',
+  'mcp.headers.key': 'Header',
+  'mcp.headers.value': 'Value (e.g. Bearer …)',
+  'mcp.headers.count': '{n} headers',
+  'mcp.headers.hint': 'Remote servers (http / streamable_http / sse) send these headers with every request. The usual Authorization: Bearer <token> goes here — without it, an MCP endpoint that requires auth simply will not connect. Note: headers are stored plaintext in settings.json, same as env.',
   // exposure tier (see MCPServerCfg.exposure in transport/types.ts)
   'mcp.exposure': 'Model visibility',
   'mcp.exposure.unset': 'Unset (follows codemode: on = searchable on demand (deferred), off = directly visible to the model (direct))',
@@ -2959,6 +2979,10 @@ const en: Record<string, string> = {
   'rp.task.stopTask': 'Stop this background task (interrupts only this task, main session keeps running)',
   'rp.task.stopTaskAria': 'Stop background task',
   'rp.agent.asyncTip': 'Async tasks ({n} running)',
+  'agent.loadOlder': 'Load earlier records',
+  'agent.loadOlderN': 'Load earlier records ({n} more)',
+  'agent.loading': 'Loading earlier records…',
+  'agent.loadOlderFailed': 'Failed to load — click to retry',
 
 }
 

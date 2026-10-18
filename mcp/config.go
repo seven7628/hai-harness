@@ -24,19 +24,31 @@ import (
 )
 
 // ServerConfig 单个 MCP 服务器配置（与 Claude Code ~/.claude.json 的 mcpServers 同构，
-// 用户可跨工具拷贝配置）。Type 取值 "stdio" | "http" | "sse"。
+// 用户可跨工具拷贝配置）。Type 取值 "stdio" | "http" | "streamable_http" | "sse"
+// （"streamable-http" 为别名，见 Transport* 常量）。
 //
 //	{
 //	  "name": { "type": "stdio", "command": "npx", "args": ["-y", "@x/y"],
 //	            "env": {"TOKEN": "..."} },
-//	  "remote": { "type": "http", "url": "http://localhost:8080/mcp" }
+//	  "remote": { "type": "http", "url": "http://localhost:8080/mcp",
+//	              "headers": {"Authorization": "Bearer ..."} }
 //	}
 type ServerConfig struct {
-	Type    string            `json:"type"`              // stdio（默认）| http | sse
+	Type    string            `json:"type"`              // stdio（默认）| http | streamable_http | sse
 	Command string            `json:"command,omitempty"` // stdio 子进程命令
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"` // stdio 子进程附加环境（继承父进程环境）
 	URL     string            `json:"url,omitempty"` // http/sse 端点
+	// Headers 远端传输（http/streamable_http/sse）每次请求附带的 HTTP 头。
+	//
+	// 为什么必须有它：绝大多数托管 MCP 端点（自建网关 / SaaS）用 Authorization
+	// 把关，没有自定义头就只能连「无鉴权」的本地服务器——「http 模式不支持 Header
+	// 设置，导致链接无法成功」正是这个缺口。值与 env 同一决策：**明文存
+	// settings.json**（用户自己填的凭证，桌面端有设置面板；不引入 ${VAR} 展开）。
+	//
+	// 仅远端传输使用：stdio 是子进程，没有 HTTP 头这一层（写了不报错，但无效果——
+	// 与 Claude Code 的字段语义一致：该字段只在 http/sse 条目上有意义）。
+	Headers map[string]string `json:"headers,omitempty"`
 	// Enabled 显式关闭（false）：工具不注册、不连接。nil = 默认启用。
 	Enabled *bool `json:"enabled,omitempty"`
 	// Exposure 该 server 全部工具的暴露档位（config 层词汇，与引擎档 tools.ToolExposure
@@ -63,6 +75,47 @@ type ServerConfig struct {
 	//（通道不在时落 deferred 等于把 MCP 对模型整体不可达）。见 desktop/bridge/codemode.go 的
 	// mcpDefaultExposure / applyMCPDefaultExposure 与实施规范 §7.11/§7.17。
 	Exposure string `json:"exposure,omitempty"`
+}
+
+// 传输类型常量（归一化后的权威取值）。
+//
+// streamable-http（连字符）是 Claude Code / 部分文档里 `http` 的**别名**，仓库里也
+// 存在 `streamable_http` 的写法，三者语义完全相同 = 同一个 mcp-go StreamableHTTP
+// 传输。归一化放在 Validate 一处（唯一权威，V2 P1-PROTOCOL-06）：写任一种都能连上，
+// 归一后 Type 只剩一种取值 —— 下游（buildTransport / Status / 面板）不必各自再兜。
+const (
+	TransportStdio          = "stdio"
+	TransportHTTP           = "http" // 也接受 streamable_http / streamable-http（同一传输的两个别名）
+	TransportSSE            = "sse"
+	transportStreamableHTTP = "streamable_http"
+	transportStreamableDash = "streamable-http"
+)
+
+// mcpTransportAliases 别名 → 权威取值（键为小写去空白后的 type）。
+var mcpTransportAliases = map[string]string{
+	TransportStdio:          TransportStdio,
+	TransportHTTP:           TransportHTTP,
+	transportStreamableHTTP: TransportHTTP, // streamable_http = http（同一传输）
+	transportStreamableDash: TransportHTTP, // streamable-http（Claude Code 别名）
+	TransportSSE:            TransportSSE,
+}
+
+// transportTypesHint 错误提示里的类型列举（面板与文档共用同一句话的口径）。
+const transportTypesHint = "stdio/http/streamable_http/sse"
+
+// normalizeTransport 归一化传输类型：空 = stdio（Claude Code 同约定），
+// 别名折叠（streamable_http / streamable-http → http），未知类型报错。
+func normalizeTransport(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return TransportStdio, nil
+	}
+	if t, ok := mcpTransportAliases[v]; ok {
+		return t, nil
+	}
+	// 容错：分隔符写法混用（streamable HTTP / streamablehttp）不作静默兜底 ——
+	// 与 exposure 的口径一致：写错的配置要么生效要么报错，不猜（V2 P1-PROTOCOL-06）。
+	return "", fmt.Errorf("mcp 未知 type %q（支持 %s）", raw, transportTypesHint)
 }
 
 // mcpExposureValues 配置档合法值（顺序 = 错误提示里的列举顺序）。
@@ -99,21 +152,25 @@ func (c ServerConfig) IsEnabled() bool {
 
 // Validate 配置校验：类型合法 + 按类型补全必填字段。返回可直接使用的归一化配置。
 func (c ServerConfig) Validate() (ServerConfig, error) {
-	typ := strings.ToLower(strings.TrimSpace(c.Type))
-	if typ == "" {
-		typ = "stdio"
+	typ, err := normalizeTransport(c.Type)
+	if err != nil {
+		return c, err
 	}
 	switch typ {
-	case "stdio":
+	case TransportStdio:
+		// 有 url 却没有 type：几乎总是「远端服务器漏写 type」（Claude Code 同款错误，
+		// 它的原文是 `has a "url" but no "type"`）。不特别指出的话，下面的
+		// 「缺少 command」会把用户引向完全错误的方向（去填命令）。
+		if strings.TrimSpace(c.Type) == "" && strings.TrimSpace(c.URL) != "" {
+			return c, fmt.Errorf("mcp 服务器有 url 但没写 type：远端服务器请写 \"type\": \"http\"（或 sse）")
+		}
 		if strings.TrimSpace(c.Command) == "" {
 			return c, fmt.Errorf("mcp stdio 服务器缺少 command")
 		}
-	case "http", "streamable_http", "sse":
+	case TransportHTTP, TransportSSE:
 		if strings.TrimSpace(c.URL) == "" {
 			return c, fmt.Errorf("mcp %s 服务器缺少 url", typ)
 		}
-	default:
-		return c, fmt.Errorf("mcp 未知 type %q（支持 stdio/http/streamable_http/sse）", c.Type)
 	}
 	exp, err := normalizeExposure(c.Exposure)
 	if err != nil {

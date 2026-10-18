@@ -288,10 +288,14 @@ const MOCK_HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Pos
 export function validateMockMCPServers(servers: Record<string, MCPServerCfg>): string | null {
   for (const [name, c] of Object.entries(servers)) {
     if (!name.trim()) return '服务器名不能为空'
-    const type = c?.type ?? 'stdio'
-    if (!['stdio', 'http', 'streamable_http', 'sse'].includes(type)) return `未知 type ${type}`
-    if (type === 'stdio' && !c?.command?.trim()) return `${name}: stdio 需 command`
-    if (type !== 'stdio' && !c?.url?.trim()) return `${name}: 需 url`
+    // 归一与真 bridge（mcp.ServerConfig.Validate）同口径：streamable_http / streamable-http
+    // 都是 http 的别名。mock 校验若比真实现更严/更松，e2e 就会锁住错的行为。
+    const type = (c?.type ?? 'stdio').trim().toLowerCase()
+    const stdio = type === '' || type === 'stdio'
+    const remote = type === 'http' || type === 'streamable_http' || type === 'streamable-http' || type === 'sse'
+    if (!stdio && !remote) return `未知 type ${c?.type}`
+    if (stdio && !c?.command?.trim()) return `${name}: stdio 需 command`
+    if (remote && !c?.url?.trim()) return `${name}: 需 url`
   }
   return null
 }
@@ -456,7 +460,8 @@ class MockTransport implements Transport {
   // MCP 配置（mock：演示两个服务器；mcp_list 状态由此派生）
   private mockMCPCfg: Record<string, MCPServerCfg> = {
     github: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], enabled: true },
-    memory: { type: 'http', url: 'http://localhost:8080/mcp', enabled: true },
+    // 演示「http + 自定义请求头」（本次补齐的能力）：面板上应看到请求头一行可读可改。
+    memory: { type: 'http', url: 'http://localhost:8080/mcp', headers: { Authorization: 'Bearer demo-token' }, enabled: true },
   }
   // 已保存市场（mock：初始一个演示市场；market_* 命令维护）
   private mockMarkets: { name: string; url: string; added_at: string }[] = [
@@ -546,6 +551,7 @@ class MockTransport implements Transport {
         args: c.args,
         url: c.url,
         env: c.env,
+        headers: c.headers,
         enabled: c.enabled ?? true,
         file,
         editable,
@@ -1325,6 +1331,36 @@ class MockTransport implements Transport {
             ? ['deepseek-v4-flash', 'deepseek-v4-pro', 'glm-5.1', 'glm-5.2', 'glm-5.3', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6', 'mimo-v2.6-pro', 'mimo-v2.6-flash', 'mimo-v2.5', 'mimo-v2.5-pro', 'hy3']
             : ['deepseek-v4-flash-vision-exp', 'deepseek-chat', 'deepseek-reasoner']
         this.respond(cmd, { provider: prov, base_url: base, models: fake, count: fake.length })
+        break
+      }
+      case 'agent_history': {
+        // 子智能体「更早的记录」分页（真 bridge 从子任务 journal 读）。
+        // mock 没有 journal 可读 —— 生成**确定性的**伪历史，但严格守住真 bridge 的
+        // 契约：offset 从最新往回算、返回时间正序、has_more = 还有更老的。
+        // 这样「加载更早 → 拼接 → 加载完 → 按钮消失」这条 UI 路径在 mock 下可验。
+        const taskId = String((cmd.payload?.task_id as string) || '')
+        const offset = Number(cmd.payload?.offset ?? 0) || 0
+        const limit = Math.min(Number(cmd.payload?.limit ?? 50) || 50, 500)
+        const total = 137 // 固定总量：可预测地验证多页加载
+        const end = Math.max(0, total - offset)
+        const start = Math.max(0, end - limit)
+        const entries = []
+        for (let i = start; i < end; i++) {
+          // 每 3 条一个工具调用，其余是正文 —— 覆盖 ToolGroup 与 Markdown 两条渲染路径
+          if (i % 3 === 2) {
+            entries.push({
+              kind: 'tool',
+              tool_id: `hist-${taskId}-${i}`,
+              name: 'read_file',
+              args: JSON.stringify({ path: `hist/file-${i}.go` }),
+              result: `// mock 历史条目 ${i}`,
+              index: i,
+            })
+          } else {
+            entries.push({ kind: 'assistant', text: `更早的记录 #${i}（mock）`, index: i })
+          }
+        }
+        this.respond(cmd, { entries, total, offset, limit, has_more: start > 0 })
         break
       }
       case 'file_preview': {

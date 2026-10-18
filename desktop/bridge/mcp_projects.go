@@ -18,9 +18,12 @@ import (
 )
 
 // mcpServerKnownKeys 模型认识的服务器条目字段：这些键一律以模型（面板）为准，
-// 其余键（第三方/未来字段，如 cwd/headers）在名字未变时原样保留（见 config_patch.go）。
+// 其余键（第三方/未来字段，如 cwd）在名字未变时原样保留（见 config_patch.go）。
+// 新加的 headers 必须登记在这里——否则面板每次保存都会被「未识别字段」逻辑
+// 用文件里的旧值覆盖回（用户改了头但保存无效，且不报错）。
 var mcpServerKnownKeys = map[string]bool{
 	"type": true, "command": true, "args": true, "env": true, "url": true, "enabled": true,
+	"headers": true,
 }
 
 // mcpProjectLayerInfo 项目层单文件状态（契约 §5.1 layers；字段名与 mcp.LayerState 对齐，
@@ -44,6 +47,10 @@ type mcpProjectServerInfo struct {
 	Args    []string          `json:"args"`
 	URL     string            `json:"url"`
 	Env     map[string]string `json:"env"`
+	// Headers 远端传输（http/sse）的请求头（明文；面板原样回显与编辑）。
+	// 不带它的话用户在面板里看不到也改不了——保存时靠 mergeUnknownByName 侥幸
+	// 不丢（现在 headers 已登记为 known key，所以必须是可见可编辑的）。
+	Headers map[string]string `json:"headers"`
 	Enabled bool              `json:"enabled"`
 	// Exposure 该 server 的暴露档位（config 层值；空 = 未声明，有效档由引擎侧解析，
 	// 见 mcp.Manager.DefaultExposure）。面板据此回显与编辑 —— 不带它的话用户在面板里
@@ -171,6 +178,7 @@ func (m *manager) mcpProjectView(ws string) mcpProjectInfo {
 			Args:     c.Args,
 			URL:      c.URL,
 			Env:      c.Env,
+			Headers:  c.Headers,
 			Exposure: c.Exposure,
 			Enabled:  c.IsEnabled(),
 			File:     file,
@@ -181,6 +189,9 @@ func (m *manager) mcpProjectView(ws string) mcpProjectInfo {
 		}
 		if row.Env == nil {
 			row.Env = map[string]string{}
+		}
+		if row.Headers == nil {
+			row.Headers = map[string]string{}
 		}
 		if st, ok := status[name]; ok {
 			row.State, row.ToolCount, row.Error = st.State, st.ToolCount, st.Error
@@ -199,7 +210,8 @@ func mcpProjectSettingsPath(ws string) string {
 //
 // 语义（契约 §5.2）：
 //   - 校验与 mcp_set 同源（parseMCPConfig → mcp.ServerConfig.Validate）：name 非空、
-//     type ∈ {stdio,http,streamable_http,sse}、stdio 需 command、其余需 url；非法**拒绝保存**；
+//     type ∈ {stdio,http,streamable_http,sse}（streamable-http 为别名）、stdio 需 command、
+//     远端（http/sse）需 url，headers 仅远端有意义；非法**拒绝保存**；
 //   - servers 是**该项目层可编辑文件的完整期望值**（面板只把 editable=true 的条目发上来）：
 //     空 map → 删除该键（不留空壳），非空 → 整段替换（文件其他键保留）；
 //   - 条目级未识别字段按名保留（第三方/未来字段不因一次保存被抹掉）；

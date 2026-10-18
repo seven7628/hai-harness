@@ -211,9 +211,9 @@ sequenceDiagram
   非递归；工作区根递归；按优先级从低到高拼接）、四层系统提示（基础契约 → 产品层 →
   工作记忆 → 技能清单）、缓存友好的字节稳定前缀、压缩与恢复都幸存的 `todo_*`、
   **Agent Skills**（`SKILL.md` + 渐进披露 + 全局/工作区分层注册表 + 远程安装/更新/市场）。
-- **集成** —— MCP 客户端（分层配置 + stdio/http/streamable_http/sse + fsnotify 热重载 + 坏配置
-  last-known-good 兜底）、进程内 cron 调度器 + 运行账本、飞书 IM 网关、macOS Computer Use 辅助进程、
-  插件系统、可选的会话互联（P2P）。
+- **集成** —— MCP 客户端（分层配置 + stdio/http/streamable_http/sse + 每台服务器的请求头
+  Headers（需鉴权的远端端点）+ fsnotify 热重载 + 坏配置 last-known-good 兜底）、进程内 cron
+  调度器 + 运行账本、飞书 IM 网关、macOS Computer Use 辅助进程、插件系统、可选的会话互联（P2P）。
 - **可观测性** —— 单次调用与单次 Run 的用量/成本、缓存命中口径、上下文构成拆解、
   `agent_end` 上的产出收集，以及跨会话看板用的 metrics 账本。
 

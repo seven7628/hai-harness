@@ -231,13 +231,17 @@ interface ProviderCfg {
   cache_ttl_1h?: boolean // 缓存 TTL 标注：true=1h / false=5m（缺省=按端点默认）
   deleted?: boolean // 用户已删除（内置 5 家删除标记；bridge 重启不复活）
 }
-// MCPServerCfg 单台 MCP 服务器配置（与 bridge mcp 包 ServerConfig 同构；env 明文存 settings.json——v1 决策）
+// MCPServerCfg 单台 MCP 服务器配置（与 bridge mcp 包 ServerConfig 同构；env/headers
+// 明文存 settings.json——v1 决策，见 mcp/config.go 的 Headers 注释）。
 interface MCPServerCfg {
-  type?: 'stdio' | 'http' | 'streamable_http' | 'sse'
+  type?: 'stdio' | 'http' | 'streamable_http' | 'streamable-http' | 'sse'
   command?: string
   args?: string[]
   env?: Record<string, string>
   url?: string
+  // headers 远端传输（http/sse）每次请求附带的 HTTP 头（如 Authorization）。
+  // 与 bridge 的校验口径一致：仅 http/sse 有意义，stdio 忽略。
+  headers?: Record<string, string>
   enabled?: boolean
 }
 // 命令沙箱（macOS Seatbelt / sandbox-exec）：mode none=进程隔离直通 / seatbelt=沙箱。
@@ -1383,10 +1387,14 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!servers || typeof servers !== 'object') return { ok: false, error: '无效配置' }
     for (const [name, c] of Object.entries(servers)) {
       if (!name.trim()) return { ok: false, error: '服务器名不能为空' }
-      const t = c?.type ?? 'stdio'
-      if (!['stdio', 'http', 'streamable_http', 'sse'].includes(t)) return { ok: false, error: `未知 type ${t}` }
-      if (t === 'stdio' && !c?.command?.trim()) return { ok: false, error: `${name}: stdio 需 command` }
-      if (t !== 'stdio' && !c?.url?.trim()) return { ok: false, error: `${name}: 需 url` }
+      // 类型归一与 bridge 的 mcp.ServerConfig.Validate 同口径（streamable_http /
+      // streamable-http 都是 http 的别名）——不在这里归一就会把别名当未知类型拒掉。
+      const t = (c?.type ?? 'stdio').trim().toLowerCase()
+      const stdio = t === '' || t === 'stdio'
+      const remote = t === 'http' || t === 'streamable_http' || t === 'streamable-http' || t === 'sse'
+      if (!stdio && !remote) return { ok: false, error: `未知 type ${c?.type}` }
+      if (stdio && !c?.command?.trim()) return { ok: false, error: `${name}: stdio 需 command` }
+      if (remote && !c?.url?.trim()) return { ok: false, error: `${name}: 需 url` }
     }
     cur.mcpServers = servers
     const res = writeSettings(cur)

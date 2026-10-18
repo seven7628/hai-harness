@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -236,7 +238,7 @@ func (s *Server) dial(ctx context.Context) (*mcpclient.Client, []Tool, error) {
 	c := mcpclient.NewClient(tr)
 	if err := c.Start(s.serverCtx()); err != nil { // 传输绑定 Server 生命周期 ctx（子进程不随请求超时被杀）
 		_ = c.Close()
-		return nil, nil, fmt.Errorf("mcp %s: 启动: %w", s.name, err)
+		return nil, nil, s.startError(err)
 	}
 	s.setPhase(PhaseInitialize)
 	initReq := gomcp.InitializeRequest{}
@@ -273,24 +275,79 @@ func (s *Server) setPhase(p ConnectPhase) {
 	s.mu.Unlock()
 }
 
-// buildTransport 按配置构建传输：stdio 子进程（继承父环境 + cfg.Env）、http/sse。
+// buildTransport 按配置构建传输：stdio 子进程（继承父环境 + cfg.Env）、
+// http/streamable_http（StreamableHTTP）、sse；远端传输附带 cfg.Headers。
 // 未知 type 显式报错（不再静默当 stdio——绕过 Validate 直接构造时会 spawn 不存在
 // 的命令；V2 P1-PROTOCOL-06 校验统一）。
 func (s *Server) buildTransport() (transport.Interface, error) {
 	switch s.cfg.Type {
-	case "http", "streamable_http":
-		return transport.NewStreamableHTTP(s.cfg.URL)
-	case "sse":
-		return transport.NewSSE(s.cfg.URL)
-	case "stdio":
+	case TransportHTTP:
+		// WithHTTPHeaders：每个请求（POST/GET/初始化）都带上——多数托管端点靠
+		// Authorization 把关，缺了它连接必然失败（本字段的存在理由）。
+		return transport.NewStreamableHTTP(s.cfg.URL, transport.WithHTTPHeaders(s.cfg.Headers))
+	case TransportSSE:
+		return transport.NewSSE(s.cfg.URL, transport.WithHeaders(s.cfg.Headers))
+	case TransportStdio:
 		env := make([]string, 0, len(s.cfg.Env))
 		for k, v := range s.cfg.Env {
 			env = append(env, k+"="+v)
 		}
 		return transport.NewCommandWithEnv(s.cfg.Command, env, s.cfg.Args...), nil
 	default:
-		return nil, fmt.Errorf("mcp %s: 未知 transport type %q（支持 stdio/http/sse）", s.name, s.cfg.Type)
+		return nil, fmt.Errorf("mcp %s: 未知 transport type %q（支持 %s）", s.name, s.cfg.Type, transportTypesHint)
 	}
+}
+
+// commandProblem 返回 stdio 命令「不可用」的原因（空 = 看起来可用）：包含路径分隔符
+// 时查文件本身（不存在 / 是目录 / 没有可执行位），否则查 PATH。
+//
+// 为什么不用 exec.Error 类型判定：同一件事在 Go 里会以不同错误类型浮出——
+// PATH 里找不到 = *exec.Error(ErrNotFound)，绝对路径写错 = *fs.PathError；
+// 再叠上 mcp-go 的 "failed to start command: %w" 包装与平台差异，按类型判定必然漏。
+// 「启动失败后回查命令本身」是与类型无关的稳定判据，且把原因说得更准。
+func commandProblem(cmd string) string {
+	if strings.TrimSpace(cmd) == "" {
+		return "未填写命令"
+	}
+	if strings.ContainsRune(cmd, os.PathSeparator) {
+		st, err := os.Stat(cmd)
+		switch {
+		case err != nil:
+			return "文件不存在"
+		case st.IsDir():
+			return "是目录，不是可执行文件"
+		case st.Mode().Perm()&0o111 == 0:
+			return "没有可执行权限"
+		}
+		return ""
+	}
+	if _, err := exec.LookPath(cmd); err != nil {
+		return "PATH 中找不到该命令"
+	}
+	return ""
+}
+
+// startError 把传输启动失败翻译成用户可操作的报错。
+//
+// 为什么需要它：GUI（Finder/Dock）启动的 App 继承 launchd 的极简 PATH，uvx /
+// python3 / uv 这类解释器常常不在 PATH 上（现状只补了 node 目录，见 electron/node-path.ts），
+// 于是一个「装好 uv 的用户」配了 uvx 也会失败，而 exec 原文
+// （executable file not found in $PATH）既不说明是哪条命令、也不给出路。
+// 命中「命令不可用」时补上原因与三种处置办法；其余错误保持原文
+// （鉴权失败 / 端口不通等，用户要看到服务器自己的话）。
+func (s *Server) startError(err error) error {
+	base := fmt.Errorf("mcp %s: 启动: %w", s.name, err)
+	if s.cfg.Type != TransportStdio {
+		return base
+	}
+	reason := commandProblem(s.cfg.Command)
+	if reason == "" {
+		return base // 命令没问题：是启动/协议层的错，原文更有信息量
+	}
+	return fmt.Errorf("mcp %s: 启动失败：命令 %q 不可用（%s）。"+
+		"请确认已安装（uv / uvx / python3 等），或在「命令」里填可执行文件的绝对路径"+
+		"（如 /opt/homebrew/bin/uvx）；也可把安装目录加入 PATH 后重启应用",
+		s.name, s.cfg.Command, reason)
 }
 
 // Tools 返回已连接服务器的工具描述（未连接则先连；失败返回 nil）。

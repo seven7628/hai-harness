@@ -171,6 +171,10 @@ export interface CheckpointBlock {
   ended_at?: number
   usage?: CheckpointUsage
   items?: CheckpointAgentItem[]
+  // items_trimmed：该 agent 卡片被裁剪掉的更早条目数（Go Block.ItemsTrimmed）。
+  // > 0 表示 checkpoint 里只留了首屏，UI 据此显示「加载更早的记录」，
+  // 完整历史按页从子任务 journal 取（bridge/agent_history.go）。
+  items_trimmed?: number
   task_result?: string
   task_error?: string
   delivered_to_main?: boolean

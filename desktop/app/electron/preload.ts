@@ -18,11 +18,13 @@ export interface ProviderCfg {
   cache_ttl_1h?: boolean // 缓存 TTL 标注：true=1h / false=5m（缺省=按端点默认）
 }
 export interface MCPServerCfg {
-  type?: 'stdio' | 'http' | 'sse'
+  type?: 'stdio' | 'http' | 'streamable_http' | 'streamable-http' | 'sse'
   command?: string
   args?: string[]
   env?: Record<string, string>
   url?: string
+  // headers 远端传输（http/sse）每次请求附带的 HTTP 头（明文存 settings.json——v1 决策）
+  headers?: Record<string, string>
   enabled?: boolean
 }
 export interface GoalAlignmentSettings {

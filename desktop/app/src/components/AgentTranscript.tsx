@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import type { ReactElement } from 'react'
 import type { AgentItem } from '../store/useAppStore'
+import { useT } from '../i18n'
 import { Markdown } from './markdown'
 import { CompressionBlock, Thinking, ToolGroup } from './NarrativeBlocks'
 
@@ -19,7 +20,25 @@ import { CompressionBlock, Thinking, ToolGroup } from './NarrativeBlocks'
 //
 // memo：items 引用稳定时（块级 memo 保证），逐秒时钟 tick 不会重渲整个转录。
 // host='transcript'：工具行不渲染主 run 专属动作（后台 / 停止，见 ToolRow 的说明）。
-export const AgentTranscript = memo(function AgentTranscript({ items, running }: { items: AgentItem[]; running: boolean }) {
+export const AgentTranscript = memo(function AgentTranscript({
+  items,
+  running,
+  trimmed,
+  loading,
+  hasMore,
+  error,
+  onLoadOlder,
+}: {
+  items: AgentItem[]
+  running: boolean
+  // trimmed > 0：checkpoint 里该卡片只留了首屏，更早的条目在子任务 journal 里未加载。
+  trimmed?: number
+  loading?: boolean
+  hasMore?: boolean
+  error?: string
+  onLoadOlder?: () => void
+}) {
+  const t = useT()
   // 连续工具项归组（与 Narrative 的分组规则一致：并行工具上下排，共用一张分组框）
   const out: ReactElement[] = []
   for (let i = 0; i < items.length; i++) {
@@ -52,6 +71,27 @@ export const AgentTranscript = memo(function AgentTranscript({ items, running }:
       continue
     }
     out.push(<CompressionBlock key={`c${i}`} b={{ ...it, kind: 'compression', id: i }} />)
+  }
+  // 「加载更早的记录」放在转录**顶部**（历史是往上长的）。
+  // 只要 trimmed>0 或 hasMore 就显示 —— 用户必须能看见"这里还有更早的内容"，
+  // 绝不能因为裁剪而让历史看起来就是全部（那是静默丢数据）。
+  const showLoader = (trimmed ?? 0) > 0 || hasMore
+  if (showLoader) {
+    out.unshift(
+      <div className="at-more" key="at-more">
+        {error ? (
+          <button type="button" className="at-more-btn at-more-err" onClick={onLoadOlder} disabled={loading}>
+            {t('agent.loadOlderFailed')}
+          </button>
+        ) : loading ? (
+          <span className="at-more-busy">{t('agent.loading')}</span>
+        ) : (
+          <button type="button" className="at-more-btn" onClick={onLoadOlder} disabled={!onLoadOlder}>
+            {trimmed ? t('agent.loadOlderN').replace('{n}', String(trimmed)) : t('agent.loadOlder')}
+          </button>
+        )}
+      </div>,
+    )
   }
   return <div className="agent-tr">{out}</div>
 })

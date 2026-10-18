@@ -2208,6 +2208,46 @@ body.is-electron .left.collapsed .rail .rbtn {
   border-radius: 6px;
   padding: 6px 8px;
 }
+/* 「加载更早的记录」：子智能体卡片顶部的分页入口。
+   checkpoint 只保留首屏（见 bridge view_reducer 的 maxAgentItemsPerBlock），
+   更早的条目按页从子任务 journal 取回。位置在转录顶部 —— 历史是往上长的，
+   放在底部会让人以为「下面还有」。sticky 让它在长转录里始终可见。 */
+.agent-tr .at-more {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 4px;
+  background: linear-gradient(to bottom, var(--surface) 70%, transparent);
+}
+.agent-tr .at-more-btn {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 12px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.agent-tr .at-more-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-3);
+}
+.agent-tr .at-more-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.agent-tr .at-more-err {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
+}
+.agent-tr .at-more-busy {
+  font-size: 12px;
+  color: var(--text-3);
+}
 @keyframes agPulse {
   0%,
   100% {
@@ -9370,6 +9410,17 @@ select.prov-input option {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 1px 6px;
+}
+/* 请求头计数徽标（挂在服务器卡片上，鼠标悬停显示头名） */
+.mcp-hdr-badge {
+  color: var(--accent, #6ea8fe);
+  border-color: var(--accent, #6ea8fe);
+  cursor: help;
+}
+/* 请求头说明（明文提示：与 env 同一决策，用户要知情） */
+.mcp-headers-hint {
+  font-size: 11px;
+  margin: 2px 0 0;
 }
 .mcp-s-cmd {
   font-size: 11.5px;

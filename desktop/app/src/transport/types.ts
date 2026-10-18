@@ -65,13 +65,21 @@ export interface ProviderPreset {
     key_instead?: boolean
   }
 }
-// 单台 MCP 服务器配置（与 bridge mcp.ServerConfig 同构；env 明文存 settings.json——v1 决策）
+// 单台 MCP 服务器配置（与 bridge mcp.ServerConfig 同构；env/headers 明文存 settings.json——v1 决策）
 export interface MCPServerCfg {
-  type?: 'stdio' | 'http' | 'sse'
+  // type：stdio（默认）| http | streamable_http | sse。streamable_http / streamable-http
+  // 都是 http 的别名（同一个 MCP StreamableHTTP 传输，bridge 侧归一）。
+  type?: 'stdio' | 'http' | 'streamable_http' | 'streamable-http' | 'sse'
   command?: string
   args?: string[]
   env?: Record<string, string>
   url?: string
+  // headers 远端传输（http/sse）每次请求附带的 HTTP 头（如 Authorization: Bearer …）。
+  // 为什么必须有：多数托管 MCP 端点用 Authorization 把关，没有自定义头就连不上
+  // （原缺口：「http 模式不支持 Header 设置，导致链接无法成功」）。
+  // 明文存 settings.json 与面板原样回显（用户自己填的凭证——2026-10 决策，不做 ${VAR} 展开）。
+  // 仅远端有意义；stdio 是子进程，没有 HTTP 头这一层（写了不报错但无效果）。
+  headers?: Record<string, string>
   enabled?: boolean
   // exposure 暴露档位（config 层词汇，折法与默认见 mcp.Manager.DefaultExposure）：
   //   direct   直接声明给模型（工具多时会撑爆工具表）

@@ -191,6 +191,11 @@ function MCPUserDetail({ onBack }: { onBack: () => void }) {
                 </span>
                 <span className="mcp-name">{name}</span>
                 <span className="mcp-type">{c.type ?? 'stdio'}</span>
+                {(c.headers && Object.keys(c.headers).length > 0) && (
+                  <span className="mcp-type mcp-hdr-badge" title={Object.keys(c.headers).join(', ')}>
+                    {t('mcp.headers.count').replace('{n}', String(Object.keys(c.headers).length))}
+                  </span>
+                )}
                 <span className="grow" />
                 {st?.state === 'error' && <button className="btn" onClick={() => refreshMCP(name)}>{t('mcp.refresh')}</button>}
                 <button className="btn" onClick={() => (editingName === name ? closeForm() : openEdit(name))}>
@@ -248,6 +253,7 @@ function MCPProjectDetail({ proj, onBack }: { proj: MCPProjectInfo; onBack: () =
         ...(s.args?.length ? { args: s.args } : {}),
         ...(s.url ? { url: s.url } : {}),
         ...(s.env && Object.keys(s.env).length ? { env: s.env } : {}),
+        ...(s.headers && Object.keys(s.headers).length ? { headers: s.headers } : {}),
         ...(s.exposure ? { exposure: s.exposure as MCPServerCfg['exposure'] } : {}),
         enabled: s.enabled,
       }
@@ -404,25 +410,32 @@ function LayerRow({ layer }: { layer: MCPProjectLayer | MCPLayerInfo }) {
 
 type MCPServerDraft = {
   name: string
-  type: 'stdio' | 'http' | 'sse'
-  cmdType: 'npx' | 'uvx' | 'python3' | 'custom'
+  type: 'stdio' | 'http' | 'streamable_http' | 'sse'
+  cmdType: 'npx' | 'uvx' | 'python' | 'python3' | 'custom'
   command: string
   args: string
   url: string
   envRows: { key: string; value: string }[]
+  // headerRows 远端传输（http/streamable_http/sse）的请求头（如 Authorization: Bearer …）。
+  // 与 envRows 分开存：stdio 的子进程环境与远端请求头是两回事，不能混用一个列表
+  // （切类型时各自的已填值要保留）。
+  headerRows: { key: string; value: string }[]
   // exposure 暴露档位；'' = 未声明（有效档由宿主装配决策解析，见 MCPServerCfg.exposure）
   exposure: '' | 'direct' | 'codemode' | 'deferred' | 'hidden'
 }
 
-// 命令预设：npx / uvx / python3 一键填 command（args 留占位提示）；custom = 手填
-const CMD_PRESETS: Record<'npx' | 'uvx' | 'python3' | 'custom', { command: string; argsPh: string }> = {
+// 命令预设：npx / uvx / python3 一键填 command（args 留占位提示）；custom = 手填。
+// 预设只负责填词，能不能起来取决于本机 PATH —— 起了名但找不到时由
+// bridge 的连接状态给出可操作报错（见 mcp/server.go 的 startError）。
+const CMD_PRESETS: Record<'npx' | 'uvx' | 'python' | 'python3' | 'custom', { command: string; argsPh: string }> = {
   npx: { command: 'npx', argsPh: '-y @scope/mcp-server' },
   uvx: { command: 'uvx', argsPh: 'mcp-server-pkg' },
+  python: { command: 'python', argsPh: '-m module' },
   python3: { command: 'python3', argsPh: '-m module' },
   custom: { command: '', argsPh: '' },
 }
 
-const emptyDraft = (): MCPServerDraft => ({ name: '', type: 'stdio', cmdType: 'npx', command: 'npx', args: '', url: '', envRows: [], exposure: '' })
+const emptyDraft = (): MCPServerDraft => ({ name: '', type: 'stdio', cmdType: 'npx', command: 'npx', args: '', url: '', envRows: [], headerRows: [], exposure: '' })
 
 // cmdTypeOf 按 command 反推预设（匹配预设默认 command → 该预设；否则 custom）。
 function cmdTypeOf(command: string): MCPServerDraft['cmdType'] {
@@ -449,12 +462,14 @@ function draftOf(name: string, c: MCPServerCfg): MCPServerDraft {
   const command = c.command ?? CMD_PRESETS.npx.command
   return {
     name,
-    type: c.type ?? 'stdio',
+    // 别名（streamable-http）回填到「http」按钮：面板只有三种按钮，语义相同。
+    type: c.type === 'streamable-http' ? 'streamable_http' : (c.type ?? 'stdio'),
     cmdType: cmdTypeOf(command),
     command,
     args: (c.args ?? []).join(' '),
     url: c.url ?? '',
     envRows: envToRows(c.env),
+    headerRows: envToRows(c.headers),
     exposure: (c.exposure ?? '') as MCPServerDraft['exposure'],
   }
 }
@@ -468,6 +483,9 @@ function buildCfg(draft: MCPServerDraft): { ok: true; name: string; cfg: MCPServ
   if (isStdio && !command) return { ok: false, err: 'mcp.errCommand' }
   if (!isStdio && !draft.url.trim()) return { ok: false, err: 'mcp.errUrl' }
   const env = rowsToEnv(draft.envRows)
+  // headers 只在远端传输写入：切回 stdio 时留在行里的值不落盘（避免把 HTTP 头
+  // 悄悄写进一个子进程条目里，读回来时没人知道它是什么）。
+  const headers = isStdio ? undefined : rowsToEnv(draft.headerRows)
   return {
     ok: true,
     name,
@@ -477,6 +495,7 @@ function buildCfg(draft: MCPServerDraft): { ok: true; name: string; cfg: MCPServ
         ? { command, args: draft.args.trim() ? draft.args.split(/\s+/).filter(Boolean) : undefined }
         : { url: draft.url.trim() }),
       ...(env ? { env } : {}),
+      ...(headers ? { headers } : {}),
       ...(draft.exposure ? { exposure: draft.exposure } : {}),
     },
   }
@@ -485,6 +504,44 @@ function buildCfg(draft: MCPServerDraft): { ok: true; name: string; cfg: MCPServ
 function displayCmd(c: MCPServerCfg): string {
   const args = c.args ?? []
   return c.type === 'stdio' || !c.type ? `${c.command ?? ''}${args.length ? ' ' + args.join(' ') : ''}` : (c.url ?? '')
+}
+
+// ——— 通用「键 = 值」行列表（env 与 headers 共用同一形态与交互）———
+function KvRows({
+  rows, setRows, label, addLabel, keyPh, valPh, ariaPrefix,
+}: {
+  rows: { key: string; value: string }[]
+  setRows: (rows: { key: string; value: string }[]) => void
+  label: string
+  addLabel: string
+  keyPh: string
+  valPh: string
+  ariaPrefix: string
+}) {
+  return (
+    <div className="mcp-env-block">
+      <div className="set-label">{label}</div>
+      {rows.map((row, i) => (
+        <div className="mcp-env-row" key={i}>
+          <input
+            className="prov-input mcp-env-key" value={row.key} aria-label={`${ariaPrefix} key ${i + 1}`} spellCheck={false}
+            placeholder={keyPh}
+            onChange={(e) => { const next = [...rows]; next[i] = { ...next[i], key: e.target.value }; setRows(next) }}
+          />
+          <span className="mcp-env-eq">=</span>
+          <input
+            className="prov-input mcp-env-val" value={row.value} aria-label={`${ariaPrefix} value ${i + 1}`} spellCheck={false}
+            placeholder={valPh}
+            onChange={(e) => { const next = [...rows]; next[i] = { ...next[i], value: e.target.value }; setRows(next) }}
+          />
+          <button className="btn mcp-env-del" aria-label={`delete ${ariaPrefix} ${i + 1}`} onClick={() => setRows(rows.filter((_, j) => j !== i))}>✕</button>
+        </div>
+      ))}
+      <button className="btn mcp-env-add" onClick={() => setRows([...rows, { key: '', value: '' }])}>
+        + {addLabel}
+      </button>
+    </div>
+  )
 }
 
 function statusLabel(t: (k: string) => string, s: string): string {
@@ -515,8 +572,16 @@ function ServerForm({
       <div className="set-row">
         <div className="set-label">{t('mcp.type')}</div>
         <div className="seg" role="radiogroup" aria-label="mcp type">
-          {(['stdio', 'http', 'sse'] as const).map((tp) => (
-            <button key={tp} className={draft.type === tp ? 'cur' : ''} aria-pressed={draft.type === tp} onClick={() => setDraft((d) => ({ ...d, type: tp }))}>{tp}</button>
+          {(['stdio', 'http', 'streamable_http', 'sse'] as const).map((tp) => (
+            <button
+              key={tp}
+              className={draft.type === tp ? 'cur' : ''}
+              aria-pressed={draft.type === tp}
+              title={tp === 'streamable_http' ? t('mcp.type.streamable') : undefined}
+              onClick={() => setDraft((d) => ({ ...d, type: tp }))}
+            >
+              {tp}
+            </button>
           ))}
         </div>
       </div>
@@ -525,7 +590,7 @@ function ServerForm({
           <div className="set-row">
             <div className="set-label">{t('mcp.preset')}</div>
             <div className="seg" role="radiogroup" aria-label="mcp preset">
-              {(['npx', 'uvx', 'python3', 'custom'] as const).map((ct) => (
+              {(['npx', 'uvx', 'python', 'python3', 'custom'] as const).map((ct) => (
                 <button
                   key={ct}
                   className={draft.cmdType === ct ? 'cur' : ''}
@@ -551,33 +616,32 @@ function ServerForm({
           </div>
         </>
       ) : (
-        <div className="set-row">
-          <div className="set-label">{t('mcp.url')}</div>
-          <input className="prov-input" value={draft.url} onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))} aria-label="mcp url" spellCheck={false} placeholder="http://localhost:8080/mcp" />
-        </div>
-      )}
-      <div className="mcp-env-block">
-        <div className="set-label">{t('mcp.env')}</div>
-        {draft.envRows.map((row, i) => (
-          <div className="mcp-env-row" key={i}>
-            <input
-              className="prov-input mcp-env-key" value={row.key} aria-label={`env key ${i + 1}`} spellCheck={false}
-              placeholder={t('mcp.env.key')}
-              onChange={(e) => setDraft((d) => { const rows = [...d.envRows]; rows[i] = { ...rows[i], key: e.target.value }; return { ...d, envRows: rows } })}
-            />
-            <span className="mcp-env-eq">=</span>
-            <input
-              className="prov-input mcp-env-val" value={row.value} aria-label={`env value ${i + 1}`} spellCheck={false}
-              placeholder={t('mcp.env.value')}
-              onChange={(e) => setDraft((d) => { const rows = [...d.envRows]; rows[i] = { ...rows[i], value: e.target.value }; return { ...d, envRows: rows } })}
-            />
-            <button className="btn mcp-env-del" aria-label={`delete env ${i + 1}`} onClick={() => setDraft((d) => ({ ...d, envRows: d.envRows.filter((_, j) => j !== i) }))}>✕</button>
+        <>
+          <div className="set-row">
+            <div className="set-label">{t('mcp.url')}</div>
+            <input className="prov-input" value={draft.url} onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))} aria-label="mcp url" spellCheck={false} placeholder="http://localhost:8080/mcp" />
           </div>
-        ))}
-        <button className="btn mcp-env-add" onClick={() => setDraft((d) => ({ ...d, envRows: [...d.envRows, { key: '', value: '' }] }))}>
-          + {t('mcp.env.add')}
-        </button>
-      </div>
+          <KvRows
+            rows={draft.headerRows}
+            setRows={(rows) => setDraft((d) => ({ ...d, headerRows: rows }))}
+            label={t('mcp.headers')}
+            addLabel={t('mcp.headers.add')}
+            keyPh={t('mcp.headers.key')}
+            valPh={t('mcp.headers.value')}
+            ariaPrefix="header"
+          />
+          <p className="set-desc mcp-headers-hint">{t('mcp.headers.hint')}</p>
+        </>
+      )}
+      <KvRows
+        rows={draft.envRows}
+        setRows={(rows) => setDraft((d) => ({ ...d, envRows: rows }))}
+        label={t('mcp.env')}
+        addLabel={t('mcp.env.add')}
+        keyPh={t('mcp.env.key')}
+        valPh={t('mcp.env.value')}
+        ariaPrefix="env"
+      />
       <div className="set-row">
         <div className="set-label">{t('mcp.exposure')}</div>
         <select
