@@ -1574,24 +1574,49 @@ func (m *manager) dispatch(c command) {
 		// warm（wasLive=true，进程内已有）直接用内存 reducer 快照（秒出，不扫 events）。
 		// 仅当 reducer 无内容（新会话/无 record/旧数据）才回退 legacy 分支。
 		if bs.coord != nil {
-			rec, rerr := bs.coord.Load(context.Background())
-			if rerr == nil {
-				if _, perr := parseCheckpoint(rec.ViewCheckpoint); perr == nil {
+			// 快路径：本进程刚提交过，三个标量在内存里，无需碰磁盘。
+			// 慢路径（进程刚启动/尚未提交）：只读 record 头部元数据。
+			//
+			// 原实现调 Load 整条 record（线上 24~128MB）再 parseCheckpoint，
+			// 却只用 Rec.Revision/ReducerSeq/ClearGeneration 三个标量 ——
+			// payload 解析完即丢弃（返回给 UI 的视图来自下面的 reducer.Marshal）。
+			// 实测：636ms(全量 Load) → 202ms(读头部) → ~0ms(内存命中)。
+			meta, metaOK := bs.coord.Metadata()
+			// noRecord 严格区分「确实没有 record」与「record 存在但不可用」：
+			// 只有前者允许走懒迁移（迁移会重放 events 并**覆盖** record）。
+			// 原实现用 Load 成功与否二分：Load 失败（含 checksum/结构损坏）才迁移；
+			// Load 成功但 payload 不可解析时**不动磁盘**、回退 legacy 快照。
+			// 元数据路径必须保留这条边界，否则一个损坏的 record 会被「迁移」覆盖，
+			// 把尚可恢复的数据毁掉（V2 P1-PERSIST-03 的同一条红线）。
+			noRecord := false
+			if !metaOK {
+				loaded, lerr := bs.coord.MetadataFromStore(context.Background())
+				switch {
+				case lerr == nil:
+					meta, metaOK = loaded, true
+				case errors.Is(lerr, session.ErrRecordNotFound):
+					noRecord = true // 真没有 record → 允许懒迁移
+				default:
+					// 存在但不可用：不迁移、不覆盖，落到下面的 legacy 分支。
+				}
+			}
+			if metaOK {
+				{
 					// 进程内 reducer 已 hydrate（create 时 Restore + NormalizeForRestore）；
 					// 响应使用同一归一化快照，保证响应与进程内状态一致。
 					if viewRaw, merr := bs.reducer.Marshal(); merr == nil {
 						respData["restored"] = "checkpoint"
 						respData["checkpoint_version"] = checkpointSchemaVersion
-						respData["revision"] = rec.Revision
-						respData["reducer_seq"] = rec.ReducerSeq
-						respData["clear_generation"] = rec.ClearGeneration
+						respData["revision"] = meta.Revision
+						respData["reducer_seq"] = meta.ReducerSeq
+						respData["clear_generation"] = meta.ClearGeneration
 						respData["degraded"] = bs.reducer.IsDegraded()
 						respData["view_checkpoint"] = json.RawMessage(viewRaw)
 						m.resp(c, true, "", respData)
 						return
 					}
 				}
-			} else {
+			} else if noRecord {
 				// 无 record：懒迁移（旧会话首次访问）——读 events 重放生成 checkpoint。
 				// 同步完成（首次一次性成本），成功后响应 checkpoint；失败回退 legacy。
 				if !wasLive && bs.migrateLegacyToCheckpoint() {
@@ -1752,6 +1777,55 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		m.resp(c, true, "", map[string]any{"task_id": taskID})
+
+	case CmdAgentHistory:
+		// 子智能体完整历史分页（agent 卡片「加载更早记录」）。
+		//
+		// 安全边界：只读当前会话自己目录下的 agents/<taskId>.jsonl，taskId 经
+		// subagent.ValidTaskID 校验（拒路径穿越），workspace/sid 都会拼进路径并被
+		// 校验 —— 与 journalPathFor 同一套约束，不额外放宽。
+		bs := m.get(ws, sid)
+		if bs == nil {
+			m.respCode(c, false, "session not found", "session_not_found", nil)
+			return
+		}
+		taskID := str(c.Payload, "task_id")
+		if taskID == "" {
+			m.respCode(c, false, "task_id 为空", "invalid_argument", nil)
+			return
+		}
+		path, perr := journalPathFor(wsSessionsDir(bs.workspace), bs.id, taskID)
+		if perr != nil {
+			m.respCode(c, false, perr.Error(), "invalid_argument", nil)
+			return
+		}
+		offset, limit := 0, defaultAgentHistoryPage
+		if v, ok := c.Payload["offset"]; ok {
+			offset = int(toInt64(v))
+		}
+		if v, ok := c.Payload["limit"]; ok {
+			limit = int(toInt64(v))
+		}
+		page, herr := readAgentHistoryPage(path, offset, limit)
+		if herr != nil {
+			// 无 journal（任务太老/未落盘）不是错误：返回空页让 UI 显示「无更早记录」。
+			if os.IsNotExist(herr) {
+				m.resp(c, true, "", map[string]any{
+					"entries": []agentHistoryEntry{}, "total": 0,
+					"offset": offset, "limit": limit, "has_more": false,
+				})
+				return
+			}
+			m.resp(c, false, herr.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{
+			"entries":  page.Entries,
+			"total":    page.Total,
+			"offset":   page.Offset,
+			"limit":    page.Limit,
+			"has_more": page.HasMore,
+		})
 
 	case CmdApprove:
 		bs := m.get(ws, sid)
@@ -3141,6 +3215,55 @@ func removeSubagentJournals(storeDir, sid string) {
 	_ = os.RemoveAll(subagentsBase(storeDir, sid))
 }
 
+// subagentStateStore 构造子任务状态持久化端口（subagent.StateStore）：把**主会话同一套**
+// session.FileStore 复用为子任务的存储 —— 目录 `<sid>/agents/`、会话 id = taskId，
+// 于是落盘文件 `<sid>/agents/<taskId>.jsonl` 与 journal 同文件，且格式与主会话逐字段同构
+// （history/state 行）。这就是「子智能体的文件日志与主智能体一样，只是目录不同」。
+//
+// 恢复语义因此与主会话一致：每轮 checkpoint 落一条 state（有效上下文 + 用量），
+// agent_resume 读最后一条 state 原地续跑。
+//
+// DataDir 覆盖（appDataDirOverride，测试用）通过 wsSessionsDir 已生效；FileStore 构造的
+// MkdirAll 与 journalPathFor 的 MkdirAll 幂等，两者可自由先后。
+func subagentStateStore(workspace, sid string) subagent.StateStore {
+	base := subagentsBase(wsSessionsDir(workspace), sid)
+	fs, err := session.NewFileStore(base)
+	if err != nil {
+		// 目录不可建（权限/磁盘）→ 降级为端口零值（no-op）：子任务照跑，只是不可恢复。
+		// 与 journal 同一防线：落盘是旁路，绝不阻断派发。
+		return subagent.StateStore{}
+	}
+	return subagent.StateStore{
+		Load: func(ctx context.Context, taskID string) (*subagent.RunState, error) {
+			data, err := fs.Load(ctx, taskID)
+			if err != nil {
+				if errors.Is(err, session.ErrNotFound) {
+					return nil, nil // 新任务/尚无 checkpoint：按「无历史可续」处理
+				}
+				return nil, err
+			}
+			if data == nil || data.State == nil {
+				return nil, nil
+			}
+			return &subagent.RunState{Messages: data.State.Messages, Usage: data.State.Usage}, nil
+		},
+		Save: func(ctx context.Context, taskID string, st *subagent.RunState) error {
+			if st == nil {
+				return nil
+			}
+			return fs.SaveState(ctx, taskID, &session.State{
+				Messages:  st.Messages,
+				Usage:     st.Usage,
+				Cost:      st.Usage.Cost, // 成本内嵌于 Usage；State.Cost 是权威副本（与主会话同口径）
+				UpdatedAt: time.Now(),
+			})
+		},
+		AppendHistory: func(ctx context.Context, taskID string, msgs []core.Message) error {
+			return fs.AppendHistory(ctx, taskID, msgs)
+		},
+	}
+}
+
 // deleteWorkspace 删除一个工作区的全部 HAI 元数据（{ws}/.go-code），保留用户工作区文件本身
 // （那是用户真实项目，绝不代删）。停全部会话 → 摘除运行态 → 删元数据目录。
 func (m *manager) deleteWorkspace(wsPath string) {
@@ -4107,9 +4230,11 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 		journalPath := func(taskID string) (string, error) {
 			return journalPathFor(wsSessionsDir(workspace), sid, taskID)
 		}
+		// 子任务状态存储（与主会话同一套 FileStore，只是目录不同）：每轮 checkpoint 落
+		// 有效上下文 + 用量，agent_resume 据此原地续跑（见 subagentStateStore）。
+		subStore := subagentStateStore(workspace, sid)
 		for _, t := range subagent.NewAgentTools(spawnLoop, bgCtx, reg, journalPath, subagentsReg,
 			func(def *subagent.AgentDefinition) *agents.AgentLoop {
-				// 文件化 subagent（agent_spawn task 省略时按 name 加载）：人设 loop
 				// 每次调用新建 → 读当前档位（switch_effort 后派生的子 agent 立即同档）。
 				//
 				// `memory: true` 的定义拿到**自己那份** auto memory（官方：主会话记忆不进
@@ -4121,7 +4246,7 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 					pm = append(pm, personaMemory{Host: memHost, Name: def.Name, Ctx: bgCtx})
 				}
 				return buildPersonaLoop(eng, workspace, sid, pc, prov, model, string(effortRef.current()), def.Instructions, sk, pm...)
-			}) {
+			}, subagent.WithAgentStateStore(subStore)) {
 			eng.RegisterTool(context.Background(), t) // agent_spawn（动态 + 文件化双模式）/send/interrupt/list/output
 		}
 		// Explore 子 agent：专职用户问题分析，仅 read_file/grep/bash/glob 四个工具。
@@ -4129,7 +4254,8 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 		exploreLoop := buildExploreLoop(workspace, sid, pc, prov, model, effort, sk)
 		effortRef.track(exploreLoop) // 主 loop 切档时同步
 		eng.RegisterTool(context.Background(), subagent.NewBackgroundTool(subagent.Spec{
-			Name: "subagent_explore", Description: exploreToolDescription, Loop: exploreLoop, Background: true, JournalPath: journalPath, Slots: reg.AuxSlots(),
+			Name: "subagent_explore", Description: exploreToolDescription, Loop: exploreLoop, Background: true,
+			JournalPath: journalPath, Slots: reg.AuxSlots(), Store: subStore,
 		}, bgCtx, reg))
 		// plan_submit 不再注册：计划/文档使用 write_file，任务拆分使用 todo 工具。
 	}

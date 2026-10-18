@@ -12,8 +12,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -145,14 +147,17 @@ type Block struct {
 	Settled bool `json:"-"`
 
 	// agent
-	Label           string      `json:"label,omitempty"`
-	SpawnedAt       int64       `json:"spawned_at,omitempty"`
-	EndedAt         int64       `json:"ended_at,omitempty"`
-	Usage           Usage       `json:"usage,omitempty"`
-	Items           []AgentItem `json:"items,omitempty"`
-	TaskResult      string      `json:"task_result,omitempty"`
-	TaskError       string      `json:"task_error,omitempty"`
-	DeliveredToMain bool        `json:"delivered_to_main,omitempty"`
+	Label     string      `json:"label,omitempty"`
+	SpawnedAt int64       `json:"spawned_at,omitempty"`
+	EndedAt   int64       `json:"ended_at,omitempty"`
+	Usage     Usage       `json:"usage,omitempty"`
+	Items     []AgentItem `json:"items,omitempty"`
+	// ItemsTrimmed 表示该 agent 卡片的历史 items 被裁剪掉的条数
+	//（UI 可提示「更早的记录未保留」）。见 maxAgentItemsPerBlockDefault。
+	ItemsTrimmed    int    `json:"items_trimmed,omitempty"`
+	TaskResult      string `json:"task_result,omitempty"`
+	TaskError       string `json:"task_error,omitempty"`
+	DeliveredToMain bool   `json:"delivered_to_main,omitempty"`
 
 	// compression
 	Before    int      `json:"before,omitempty"`
@@ -416,6 +421,27 @@ const (
 
 	// maxDiagnostics 未知事件的诊断上限（超出按 FirstSeq 淘汰最旧）。
 	maxDiagnostics = 64
+
+	// maxAgentItemsPerBlockDefault 是**已完成** agent block 保留的 item 上限。
+	//
+	// 背景（实测 2026-10-18，120 轮子 agent 语料）：线上长会话 record 达 128.6MB，
+	// 其中 98% 是 blocks[kind=agent].items（子智能体的 tool/thinking/text 历史流水）。
+	// 这些条目只用于「展开子智能体卡片看历史」；reducer 只在 block **进行中**
+	// 才按 tool_id 查找/追加（hasAgentToolItem），agent_end 之后不再写入 ——
+	// 所以终态后裁剪是安全的，且不影响 SDK 续跑（续跑走 sdk_state）。
+	//
+	// 膝点实测（视图 / commit 耗时 / 提升）：
+	//   不裁剪 128.6MB / 6025ms / 1.0x
+	//   200     62.0MB / 2714ms / 2.2x
+	//   100     31.7MB / 1082ms / 5.6x
+	//    50     16.6MB /  568ms / 10.6x   ← 选它
+	//    20      7.5MB /  285ms / 21.2x
+	//
+	// **这不是截断，是首屏**：更早的记录通过 agent_history 命令从子任务
+	// journal 分页取回（见 agent_history.go，实测 23MB journal 首页读取 13ms）。
+	// UI 展开卡片时按 offset/limit 拉取即可看到全量；
+	// Block.ItemsTrimmed > 0 表示「还有更早的，可加载」。
+	maxAgentItemsPerBlockDefault = 50
 )
 
 // ---------------------------------------------------------------------------
@@ -433,6 +459,15 @@ type ViewReducer struct {
 	seq             uint64 // 已应用的 reducer 顺序号（dispatcher 单调分配）
 	clearGeneration uint64
 	degraded        bool
+
+	// marshalCache 缓存最近一次 Marshal 的结果（seq/generation 相同则复用）。
+	// 动机：Marshal 持锁序列化整份 checkpoint（线上 84MB，数十 ms），
+	// 而导航/保存路径可能在没有任何新事件时反复调用它 —— 每次都是同一份字节。
+	// 失效：任何 Apply（seq 递增）、Restore、NormalizeForRestore。
+	marshalCache    []byte
+	marshalCacheSeq uint64
+	marshalCacheGen uint64
+	marshalCacheOK  bool
 
 	blocks        []Block
 	runNodes      []RunNode
@@ -567,6 +602,8 @@ func (r *ViewReducer) Apply(ev events.Event, meta EventMeta) error {
 	defer r.mu.Unlock()
 	r.seq++
 	r.applyLocked(ev, meta)
+	// 防御性失效：缓存判据已含 seq，但显式清空以免依赖「seq 必递增」的隐含前提。
+	r.invalidateMarshalCache()
 	return nil
 }
 
@@ -649,6 +686,11 @@ func (r *ViewReducer) CtxAnchor() (int64, bool) {
 func (r *ViewReducer) Snapshot() *Checkpoint {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.snapshotLocked()
+}
+
+// snapshotLocked 是 Snapshot 的持锁实现（Marshal 已持锁时调用它，避免重入死锁）。
+func (r *ViewReducer) snapshotLocked() *Checkpoint {
 	r.flushChunkLocked()
 
 	out := &Checkpoint{
@@ -727,8 +769,55 @@ func normalizeDanglingState(cp *Checkpoint) {
 }
 
 // Marshal 返回 checkpoint 的规范 JSON（可直接作为 session.ViewCheckpoint）。
+// Marshal 序列化当前 checkpoint，带 (seq, clearGeneration) 缓存。
+//
+// 为什么缓存安全：Marshal 的输入完全由（seq, clearGeneration）决定 ——
+// 每个 Apply 都递增 seq，任何改变视图的路径都经过 Apply；
+// Restore / NormalizeForRestore 绕过 Apply，它们显式失效缓存。
+//
+// 返回的字节**只读**：多处以 json.RawMessage 直接塞进响应。
+// 不做防御性拷贝 —— 拷贝 84MB 会抵消全部收益，契约写在文档里。
 func (r *ViewReducer) Marshal() ([]byte, error) {
-	return json.Marshal(r.Snapshot())
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.marshalLocked()
+}
+
+// marshalLocked 是 Marshal 的持锁实现（供已持锁的调用方复用）。
+func (r *ViewReducer) marshalLocked() ([]byte, error) {
+	if r.marshalCacheOK && r.marshalCacheSeq == r.seq && r.marshalCacheGen == r.clearGeneration {
+		return r.marshalCache, nil
+	}
+	out := new(bytes.Buffer)
+	if r.marshalCacheOK {
+		out.Grow(len(r.marshalCache) + 1024)
+	} else {
+		out.Grow(64 * 1024)
+	}
+	enc := json.NewEncoder(out)
+	// 必须保持与 json.Marshal 相同的转义策略（默认转义 <>&）：
+	// SetEscapeHTML(false) 会改变输出字节，实测会破坏 golden 一致性。
+	if err := enc.Encode(r.snapshotLocked()); err != nil {
+		return nil, err
+	}
+	// Encoder.Encode 追加换行；历史行为是 json.Marshal（无换行）→ 去掉，
+	// 保证与改造前逐字节一致。
+	b := out.Bytes()
+	if n := len(b); n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+	}
+	r.marshalCache = b
+	r.marshalCacheSeq = r.seq
+	r.marshalCacheGen = r.clearGeneration
+	r.marshalCacheOK = true
+	return b, nil
+}
+
+// invalidateMarshalCache 让下一次 Marshal 重新序列化。
+// 由任何「绕过 Apply 直接改内部状态」的入口调用。
+func (r *ViewReducer) invalidateMarshalCache() {
+	r.marshalCacheOK = false
+	r.marshalCache = nil
 }
 
 // backfillOutputTokens 用 turns 回填 assistant 块的 OutputTokens/ReasoningTokens。
@@ -802,6 +891,8 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 	for _, d := range cp.Diagnostics {
 		r.diag[d.EventType] = &diagEntry{count: d.Count, firstSeq: d.FirstSeq, lastSeq: d.LastSeq}
 	}
+	// Restore 直接替换内部状态（不经过 Apply）→ 必须显式失效序列化缓存。
+	r.invalidateMarshalCache()
 
 	// 重建块 id 计数器（不依赖事件流）
 	var maxID uint64
@@ -848,9 +939,13 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 func (r *ViewReducer) NormalizeForRestore() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// 该方法直接改写 blocks/runNodes（收敛悬空态），绕过 Apply → 失效缓存。
+	r.invalidateMarshalCache()
 	hadRunningMain := false // 顶层 run（runNodes 根节点）仍在跑 → 进程关闭/重启被杀 → 插 shutdown divider
 	blocks := make([]Block, 0, len(r.blocks))
+	var wasRunning []bool // 与 blocks 同序：恢复**前**是否处于运行态
 	for _, b := range r.blocks {
+		wasRunning = append(wasRunning, b.Status == statusRunning || b.Status == "interrupting")
 		switch b.Kind {
 		case blockKindTool:
 			if b.Status == statusRunning {
@@ -870,6 +965,25 @@ func (r *ViewReducer) NormalizeForRestore() {
 				if b.EndedAt == 0 {
 					b.EndedAt = time.Now().UnixMilli()
 				}
+			}
+		}
+		// 恢复时对**终态** agent 卡片补做一次裁剪。
+		//
+		// applyAgentEndLocked 只在 agent_end 当刻裁剪；早于该特性上线的历史
+		// record（以及恢复时状态为 abandoned 的卡片）不会触发，于是 85% 体积
+		// 的老 items 会一直留在每次 checkpoint 里被反复重写。恢复是唯一能
+		// 一次性收敛它们的地方：此处裁剪不丢信息 —— 完整历史在子任务 journal
+		// 里，UI 通过 agent_history 分页取回。
+		//
+		// 只裁终态（done/failed/aborted/abandoned）：running 卡片的 items 之后
+		// 还会按 tool_id 追加，裁掉会让后续 hasAgentToolItem 查不到而重复插入。
+		// 判据必须是「恢复前」的状态：上面刚把 running 一律改成 abandoned，
+		// 若用改后状态判断，运行中的卡片也会被裁 —— 而它们复跑时还要按
+		// tool_id 追加 items。用 wasRunning[i] 而非 b.Status。
+		if (b.Kind == blockKindAgent || b.Kind == blockKindAsyncTask) && !wasRunning[len(blocks)] {
+			if n := len(b.Items); n > agentItemsLimit {
+				b.Items = append([]AgentItem(nil), b.Items[n-agentItemsLimit:]...)
+				b.ItemsTrimmed += n - agentItemsLimit
 			}
 		}
 		blocks = append(blocks, b)
@@ -1816,6 +1930,12 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 			if aborted {
 				b.Items = abortAgentCompressionItems(b.Items)
 			}
+			// 该 block 已到终态（agent_end 之后不再追加 items）→ 裁剪展示用历史。
+			// 这是 checkpoint 体积的大头（实测占 98%）。见 maxAgentItemsPerBlockDefault。
+			if n := len(b.Items); n > agentItemsLimit {
+				b.Items = append([]AgentItem(nil), b.Items[n-agentItemsLimit:]...)
+				b.ItemsTrimmed += n - agentItemsLimit
+			}
 			// 子运行权威用量（AgentEnd.Usage = 整次运行跨轮累计，含压缩轮与成本）——
 			// 覆盖按轮 llm_end 累加的近似值。异步子 agent 之后还会收到 TaskEnd（同源同值，
 			// 幂等覆盖）；**同步子 agent 没有 TaskEnd**（不是任务），这里是它唯一的权威来源。
@@ -1944,10 +2064,24 @@ func artifactRefs(in []core.Artifact) []ArtifactRef {
 	return out
 }
 
-// applyTaskStartedLocked 建立/更新 async_task 占位（taskId 幂等）。
+// taskLifecycleKey 任务生命周期的去重键（taskId + 事件时刻）。
+//
+// 为什么不能只按 taskId（会话级恢复引入，见 docs/…TASKOUTPUT.md §13）：agent_resume
+// **原地续跑**同一 task_id，同一任务会经历多个 start→end 生命周期。按 taskId 去重会让
+// 第二轮的 TaskStarted / TaskEnd / TaskResultDelivered 全部被丢弃 —— Go 侧 reducer
+// 不退终态、前端拿不到续跑结果，表现就是「任务结束了但没有结果通知」。
+// 加入事件时刻（纳秒精度）→ 同轮事件重放仍幂等，新一轮正常通过。
+func taskLifecycleKey(prefix, taskID string, ts time.Time) string {
+	if ts.IsZero() {
+		return prefix + ":" + taskID // 无时刻信息：退回按 task 去重（保守，不重复建块）
+	}
+	return prefix + ":" + taskID + ":" + strconv.FormatInt(ts.UnixNano(), 10)
+}
+
+// applyTaskStartedLocked 建立/更新 async_task 占位（同一生命周期内幂等）。
 func (r *ViewReducer) applyTaskStartedLocked(e *events.TaskStarted) {
 	r.flushChunkLocked()
-	key := "task_started:" + e.TaskId
+	key := taskLifecycleKey("task_started", e.TaskId, e.Timestamp)
 	if r.taskStartedSeen[key] {
 		return
 	}
@@ -1985,7 +2119,7 @@ func (r *ViewReducer) applyTaskStartedLocked(e *events.TaskStarted) {
 // applyTaskEndLocked 收敛任务终态（agent / async_task / promoted tool 卡）。
 func (r *ViewReducer) applyTaskEndLocked(e *events.TaskEnd) {
 	r.flushChunkLocked()
-	key := "task_end:" + e.TaskId
+	key := taskLifecycleKey("task_end", e.TaskId, e.Timestamp)
 	if r.taskEndSeen[key] {
 		return
 	}
@@ -2041,7 +2175,7 @@ func (r *ViewReducer) applyTaskEndLocked(e *events.TaskEnd) {
 // 找不到任务时保留独立结果块；taskId 幂等）。
 func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDelivered) {
 	r.flushChunkLocked()
-	key := "task_result:" + e.TaskId
+	key := taskLifecycleKey("task_result", e.TaskId, e.Timestamp)
 	if r.taskResultSeen[key] {
 		return
 	}
@@ -2827,3 +2961,13 @@ func cloneTodos(in []TodoItem) []TodoItem {
 func cloneDiffs(in []Diff) []Diff {
 	return append([]Diff{}, in...)
 }
+
+// agentItemsLimit 是当前生效的 agent items 上限（默认 maxAgentItemsPerBlockDefault）。
+// 提成变量是为了让 A/B 测试能切换它（见 checkpoint_items_trim_test.go）。
+var agentItemsLimit = maxAgentItemsPerBlockDefault
+
+// maxAgentItemsPerBlock 返回当前上限（供测试与诊断读取）。
+func maxAgentItemsPerBlock() int { return agentItemsLimit }
+
+// SetMaxAgentItemsForTest 临时修改上限（仅测试用）。
+func SetMaxAgentItemsForTest(n int) { agentItemsLimit = n }
