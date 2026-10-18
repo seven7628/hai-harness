@@ -20,6 +20,11 @@ const (
 	CmdAskBatch      Command = "ask_batch"
 	CmdInterrupt     Command = "interrupt"
 	CmdInterruptTask Command = "interrupt_task"
+	// CmdAgentHistory 子智能体完整历史分页（agent 卡片展开时按需拉取）。
+	//
+	// 背景：agent 卡片的 items 不再整份进 checkpoint（那曾占 record 体积 98%，
+	// 让每次提交要序列化近百 MB）。checkpoint 只留最近一屏，更早的从这里按页取。
+	CmdAgentHistory Command = "agent_history"
 	CmdApprove       Command = "approve"
 	CmdCompact       Command = "compact"
 	CmdDeleteSession Command = "delete_session"

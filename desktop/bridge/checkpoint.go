@@ -86,6 +86,14 @@ type checkpointCoordinator struct {
 	commits  uint64 // 成功提交计数（测试观测）
 	skipped  uint64 // 因缓冲满跳过的请求计数
 
+	// committedMeta 缓存「最近一次成功提交」写进 record 的那三个标量。
+	// 打开会话（open_session）只需要它们来填响应，原本却要 Load 整条
+	// record（线上 24~90MB）再解出来，解析完把 payload 丢掉 —— 实测 650ms。
+	// 这里在提交成功后顺手记下，导航时零磁盘 I/O 直接命中。
+	// 由 mu 保护；metaValid=false 时调用方退回磁盘读取。
+	committedMeta session.RecordMetadata
+	metaValid     bool
+
 	// onError 提交失败回调（宿主注入）：发结构化 SessionPersistError 事件，
 	// 让持久化失败可观察（V2 P1-PERSIST-04）——不能静默吞掉（用户会以为已保存）。
 	onError func(err error)
@@ -248,6 +256,11 @@ func (c *checkpointCoordinator) Delete(ctx context.Context) error {
 	if c == nil || c.store == nil {
 		return nil
 	}
+	// 先失效元数据缓存：删除后若仍命中缓存，open_session 会报「checkpoint 恢复成功」，
+	// 而磁盘上已经没有 record 了（本会话已删）。
+	c.mu.Lock()
+	c.metaValid = false
+	c.mu.Unlock()
 	return c.store.DeleteSessionRecord(ctx, c.wsKey, c.sessID)
 }
 
@@ -288,6 +301,47 @@ func (c *checkpointCoordinator) commitOnce() {
 	c.lastRev = rev
 	c.revKnown = true
 	c.commits++
+	// 记下刚落盘的元数据（与磁盘内容一致：rev/reducerSeq/clearGeneration 就是
+	// 本次写进 record 的值）。导航路径据此跳过整条 record 的读取与解析。
+	c.committedMeta = session.RecordMetadata{
+		Revision:        rev,
+		ReducerSeq:      record.ReducerSeq,
+		ClearGeneration: record.ClearGeneration,
+	}
+	c.metaValid = true
+}
+
+// MetadataFromStore 在内存没有元数据时（进程刚启动/新会话）读磁盘头部。
+// 只读三个标量，不 materialize payload。
+func (c *checkpointCoordinator) MetadataFromStore(ctx context.Context) (session.RecordMetadata, error) {
+	if c == nil || c.store == nil {
+		return session.RecordMetadata{}, session.ErrRecordNotFound
+	}
+	meta, err := c.store.LoadRecordMetadata(ctx, c.wsKey, c.sessID)
+	if err != nil {
+		return session.RecordMetadata{}, err
+	}
+	// 回填缓存：本次读到的就是磁盘上的权威值，后续导航直接用内存。
+	c.mu.Lock()
+	c.committedMeta = *meta
+	c.metaValid = true
+	c.mu.Unlock()
+	return *meta, nil
+}
+
+// Metadata 返回最近一次成功提交的 record 元数据。
+// ok=false 表示本进程还没提交过（新会话尚无 record / 刚启动），
+// 调用方应退回 LoadRecordMetadata 读磁盘。
+func (c *checkpointCoordinator) Metadata() (session.RecordMetadata, bool) {
+	if c == nil {
+		return session.RecordMetadata{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.metaValid {
+		return session.RecordMetadata{}, false
+	}
+	return c.committedMeta, true
 }
 
 // reportError 上报提交错误（幂等保护：onError 回调内不再回调自身）。
