@@ -12,32 +12,35 @@ import (
 	"github.com/seven7628/hai-harness/tools"
 )
 
-// agent_resume 恢复运行：把已结束的后台子 agent 从它自己的 journal 重建上下文，
-// 作为**一条新任务**继续跑。
+// agent_resume 恢复运行：让**已结束的后台子 agent 原地继续跑**（同一个 task_id）。
 //
-// 为什么是「新任务」而不是「原地续跑」（2026-10 决策，勿轻易改）：
-//   - 原任务已经终态收尾（done 通道关闭、终态已入账与推送、TaskEnd 已发），原地复活
-//     要重开 done、回滚已推送的终态 —— 每条都在推翻既有契约，且与「崩溃恢复一律
-//     AbandonAll」的设计（registry.go 头部注释）正面冲突；
-//   - 子运行的 goroutine 与 ctx 已销毁，AgentContext 不落地（不可序列化），本来就
-//     无法「接着跑」；真相只在 journal 里。
-// 于是恢复 = 读 journal → 组装交接简报 → 用**同一 loop**（同人设/同工具集）再跑一次。
-// 新任务继承原任务的 name/工具名/派发链（parentTaskID），结果照常自动回传；
-// ResumedFrom 记录恢复来源，TaskList 一眼看出这是续跑而不是新活。
+// 语义（2026-10 修订，与会话级恢复对齐）：
+//   - 子任务现在与主会话同档持久化：每轮 checkpoint 把**有效上下文 + 用量**落进
+//     `<taskId>.jsonl`（与 journal 同目录同文件），由宿主注入的 StateStore 提供；
+//   - 恢复 = 读回这份上下文，**复用同一个 task 对象再跑一轮**（Registry.restart），
+//     而不是新建一条任务 —— 同一 task_id、同一身份、同一派发链，前端卡片据此从
+//     终态翻回 running（TaskStarted 重发）；
+//   - 于是「不丢已完成的工作」不再依赖有损的交接简报（journal 截断 4000 runes、
+//     不记工具参数/结果），而是直接续用真实上下文 —— 与主会话崩溃恢复同一机制。
+//
+// 为什么可以原地续跑（旧实现认为不行，此处已推翻）：旧约束「终态已收尾、done 已关闭、
+// 运行态不可序列化」在**会话级持久化**下不再成立 —— 上下文已落盘，重跑只需重开 done
+// 通道并复位终态，宿主本就按同一 task_id 续看。
+//
+// 回落路径（两条，都不丢东西）：状态文件缺失（旧任务 / 未注入 store / 跨进程且无 state）
+// 时退回 journal 交接简报 + 新任务（有损但可用）；再退一步，连 journal 都没有则明确拒绝。
 //
 // 与 agent_send 的分工：agent_send 只能投给**仍在运行**的任务（终态任务回
 // ErrTaskFinished）——恢复已结束的任务正是本工具补的缺口。
 //
-// 跨进程恢复（这是本工具最实的价值）：Registry 是**内存态**（进程重启后任务对象不存在，
-// NewSession 走 AbandonAll），但 journal 是磁盘态且路径只是 taskID 的函数。因此本工具在
-// 注册表查不到任务时**回落到 journal 路径解析器**——只要 journal 文件还在，就能把
-// 上一次进程里跑了一半的调研/写作续起来（真实场景见记忆库 subagent-longform-doc-budget：
-// 三个调研子 agent 都在「正要动笔」时断掉，成果只在 journal 里）。
+// 跨进程恢复：Registry 是**内存态**（进程重启后任务对象不存在，NewSession 走 AbandonAll），
+// 但状态文件与 journal 都是磁盘态且路径只是 taskID 的函数。故注册表查不到任务时按 journal
+// 身份**重建任务对象**再原地续跑 —— 只要文件还在，上一次进程跑了一半的任务就能续起来。
 
 // agentResumeTool 恢复工具：内嵌派发工具（同一 loop / journal 解析器 / 槽池），
-// 只在入口多一道「原任务已结束且 journal 可读」的闸门与简报组装。
+// 只在入口多一道「原任务已结束且上下文/ journal 可读」的闸门。
 type agentResumeTool struct {
-	spawn *Tool // agent_spawn 的后台执行器（复用 runBackgroundFrom：同一条派发链路）
+	spawn *Tool // agent_spawn 的后台执行器（复用同一条派发链路与同一 StateStore）
 	reg   *Registry
 }
 
@@ -51,11 +54,11 @@ type resumeArgs struct {
 func (t *agentResumeTool) Name() string { return "agent_resume" }
 
 func (t *agentResumeTool) Description() string {
-	return "Resume a FINISHED background subagent task (task-XXXXXXXX) as a new task: its journal (original instruction + per-round progress + final result) is rebuilt into a handoff brief, and the subagent runs again from that brief. " +
+	return "Resume a FINISHED background subagent task (task-XXXXXXXX) so it continues in place: the same task_id is re-driven from its last checkpoint, which holds the full conversation context (not a lossy summary). " +
 		"Use it when a task ended without delivering what you needed — interrupted, failed, timed out, or abandoned after a restart — and you want the same subagent to continue instead of starting over from scratch. " +
-		"Why a new task: the original run goroutine and context are gone (nothing is serializable mid-run), so only its journal survives — that is what gets replayed. The resumed task keeps the original name/tool/delivery chain and its result is pushed back automatically like any spawned task; the response carries the NEW task_id, and the old one stays in its terminal state. " +
-		"Works even after a process restart: tasks live on disk as journals, so a task from a previous run can still be resumed as long as its journal file remains. " +
-		"This does NOT fit a completed task that already delivered the right result — re-running costs tokens and may duplicate side effects, so check the journal with TaskOutput first: if the work is actually done, do not resume. It cannot resume a task that is still running (use agent_send to steer it, or agent_interrupt to stop it). Promoted tool tasks (tooltask-*) have no journal and cannot be resumed."
+		"Subagent tasks persist like the main session: every round checkpoints the effective context plus usage to disk, so resuming restores real context and does not redo completed work. The task keeps its id, name and delivery chain; its result is pushed back automatically like any spawned task, and the response carries the SAME task_id (watch for its task_started event flipping the card back to running). " +
+		"Works even after a process restart: state and journal live on disk keyed by task_id, so a task from a previous run can still be resumed as long as its files remain. If no checkpoint exists (a task predating this, or a host without persistence), it falls back to rebuilding a handoff brief from the journal — lossy, but still better than starting over. " +
+		"This does NOT fit a completed task that already delivered the right result — re-running costs tokens and may duplicate side effects, so check with TaskOutput first: if the work is actually done, do not resume. It cannot resume a task that is still running (use agent_send to steer it, or agent_interrupt to stop it). Promoted tool tasks (tooltask-*) have no journal and cannot be resumed."
 }
 
 func (t *agentResumeTool) Parameters() any {
@@ -121,15 +124,6 @@ func (t *agentResumeTool) Call(ctx context.Context, _, arguments string) (string
 	}
 	taskID := strings.TrimSpace(a.TaskID)
 
-	src, err := t.resolveSource(taskID)
-	if err != nil {
-		return "", fmt.Errorf("agent_resume: %w", err)
-	}
-	brief, err := src.handoffBrief(a.Message)
-	if err != nil {
-		return "", fmt.Errorf("agent_resume: %w", err)
-	}
-
 	// 深度/发起方上下文：与 agent_spawn 同源（ToolContext 透传），续跑任务照常受深度限制。
 	tc := events.ToolContextFrom(ctx)
 	childDepth := 0
@@ -138,6 +132,15 @@ func (t *agentResumeTool) Call(ctx context.Context, _, arguments string) (string
 	}
 	if t.spawn.spec.MaxDepth > 0 && childDepth > t.spawn.spec.MaxDepth {
 		return "", fmt.Errorf("agent_resume: max depth %d exceeded", t.spawn.spec.MaxDepth)
+	}
+
+	src, err := t.resolveSource(taskID)
+	if err != nil {
+		return "", fmt.Errorf("agent_resume: %w", err)
+	}
+	// 运行中直接拒绝：那是 agent_send / agent_interrupt 的活（并发写同一 ctx 会互踩）
+	if src.Status == TaskRunning || src.Status == TaskInterrupting {
+		return "", fmt.Errorf("agent_resume: task %s is still %s — use agent_send to steer it or agent_interrupt to stop it", taskID, src.Status)
 	}
 
 	name := strings.TrimSpace(a.Name)
@@ -150,6 +153,25 @@ func (t *agentResumeTool) Call(ctx context.Context, _, arguments string) (string
 	if name == "" {
 		name = "resumed task"
 	}
+
+	// 主路径：原地续跑。前提是能取到落盘的有效上下文。
+	store := t.spawn.spec.Store.nilSafe()
+	if st, lerr := store.Load(ctx, taskID); lerr == nil && st != nil && len(st.Messages) > 0 {
+		if !t.reg.hasTask(taskID) {
+			// 跨进程：注册表没有这个任务对象 —— 按 journal 身份重建一个，再原地续跑。
+			if rerr := t.reg.adopt(taskID, src.Name, src.ToolName, src.OutputFile); rerr != nil {
+				return "", fmt.Errorf("agent_resume: %w", rerr)
+			}
+		}
+		return t.spawn.runBackgroundResume(ctx, tc, childDepth, taskID, name, a.Message, st)
+	}
+
+	// 回落：无落盘上下文（旧任务 / 宿主未注入 store）→ journal 交接简报 + 新任务。
+	// 有损但可用，总好过从头再来。两条路都没有 → 明确拒绝，绝不自造空任务。
+	brief, berr := src.handoffBrief(a.Message)
+	if berr != nil {
+		return "", fmt.Errorf("agent_resume: task %s has no checkpoint and no usable journal on disk (%v) — nothing to resume from; spawn a fresh task instead", taskID, berr)
+	}
 	return t.spawn.runBackgroundFrom(ctx, tc, childDepth, brief, name, taskID)
 }
 
@@ -161,7 +183,9 @@ func (t *agentResumeTool) Call(ctx context.Context, _, arguments string) (string
 //     taskID 的函数，所以上一次进程派生的任务只要 journal 还在就能恢复 —— 这正是
 //     「进程重启后子 agent 成果还在磁盘上」这一真实场景的入口。
 //
-// 两条路径都要求 journal 里**有 start 记录**（原始指令全文），否则无物可重建。
+// 本函数**不**在此处判「有物可重建」：原地续跑只需要状态文件（不依赖 journal），
+// 只有退回交接简报那条路才要求 start 记录。故 journal 缺失在这里是合法的（recs 为空），
+// 由 Call 按「能否取到 checkpoint」决定走哪条路，取不到才明确拒绝。
 func (t *agentResumeTool) resolveSource(taskID string) (resumeSource, error) {
 	info, err := t.reg.Snapshot(taskID)
 	if err == nil {
@@ -169,12 +193,13 @@ func (t *agentResumeTool) resolveSource(taskID string) (resumeSource, error) {
 		case TaskRunning, TaskInterrupting:
 			return resumeSource{}, fmt.Errorf("task %s is still %s — not resumable while running; use agent_send to steer it or agent_interrupt to stop it first, then resume", taskID, info.Status)
 		}
-		if info.OutputFile == "" {
-			return resumeSource{}, fmt.Errorf("task %s has no journal (output_file empty), so there is nothing to rebuild from — spawn a fresh task instead", taskID)
-		}
-		recs, rerr := ReadAll(info.OutputFile)
-		if rerr != nil {
-			return resumeSource{}, rerr
+		var recs []JournalRecord
+		if info.OutputFile != "" {
+			r, rerr := ReadAll(info.OutputFile)
+			if rerr != nil {
+				return resumeSource{}, rerr
+			}
+			recs = r
 		}
 		return resumeSource{
 			TaskID: taskID, Name: info.Name, ToolName: info.ToolName,
@@ -185,22 +210,24 @@ func (t *agentResumeTool) resolveSource(taskID string) (resumeSource, error) {
 		return resumeSource{}, err
 	}
 
-	// 跨进程回落：解析 journal 路径（未注入解析器 / 解析失败 → 明确说清为什么不能恢复）。
-	if t.spawn.spec.JournalPath == nil {
-		return resumeSource{}, fmt.Errorf("task %s is not in this session's task list and this session has no journal path resolver, so it cannot be located — use TaskList for the ids that are resumable here", taskID)
+	// 跨进程回落：解析 journal 路径。解析器缺失/失败不立即报错 —— 原地续跑可能只靠
+	// 状态文件（路径同为 taskID 的函数，由 store 适配器负责），故先返回一个「无 journal
+	// 身份」的 source，由 Call 决定是否真的无物可续。
+	path := ""
+	if t.spawn.spec.JournalPath != nil {
+		if p, perr := t.spawn.spec.JournalPath(taskID); perr == nil {
+			path = p
+		}
 	}
-	path, perr := t.spawn.spec.JournalPath(taskID)
-	if perr != nil || path == "" {
-		return resumeSource{}, fmt.Errorf("task %s is not in this session's task list and its journal path could not be resolved — use TaskList for the ids that are resumable here", taskID)
+	src := resumeSource{TaskID: taskID, OutputFile: path}
+	if path == "" {
+		return src, nil
 	}
 	recs, rerr := ReadAll(path)
 	if rerr != nil {
 		return resumeSource{}, rerr
 	}
-	if len(recs) == 0 {
-		return resumeSource{}, fmt.Errorf("task %s is not in this session's task list and has no journal on disk (%s) — nothing to rebuild from; spawn a fresh task instead", taskID, path)
-	}
-	src := resumeSource{TaskID: taskID, OutputFile: path, recs: recs}
+	src.recs = recs
 	// 身份从 journal 自身取（start 记录带 Name；result 记录带终态）。
 	for _, r := range recs {
 		if r.Type == "start" && r.Name != "" {

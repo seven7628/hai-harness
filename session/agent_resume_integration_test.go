@@ -29,10 +29,12 @@ func (p *rzFuncProvider) Stream(_ context.Context, req *provider.StreamRequest, 
 // agent_resume 续跑 → 续跑结果自动回传主会话（模型下一轮可见）。
 //
 // 这条链路是本功能的存在理由：被中断的任务原本无从续起（agent_send 拒绝终态任务），
-// 只能从头重新 spawn。此处钉住：
+// 只能从头重新 spawn。此处钉住**会话级恢复语义**（2026-10 修订）：
 //  1. agent_resume 在真实 Session 装配下可达（schema 注册 + 引擎分派）；
-//  2. 续跑产出**新** task id，且新任务的结果照常经 OnTaskDone → PushTaskResult 回传；
-//  3. 交接简报带原任务身份与原始指令（否则子 agent 无从知道自己在接手什么）。
+//  2. 续跑**原地复用同一 task id**（不新建任务对象）——任务卡按同一 id 从终态翻回
+//     running，恢复链不再靠 ResumedFrom 拼接；
+//  3. 续跑子 agent 收到的是**上一轮落盘的真实上下文**（含原任务原文），不是有损简报；
+//  4. 续跑结果照常经 OnTaskDone → PushTaskResult 回传主会话。
 func TestAgentResumeEndToEnd(t *testing.T) {
 	journalDir := t.TempDir()
 	journalPath := func(taskID string) (string, error) {
@@ -41,31 +43,31 @@ func TestAgentResumeEndToEnd(t *testing.T) {
 
 	// 子 agent 的脚本：用「阻塞开关」而不是轮次下标决定行为 —— 中断可能在子运行
 	// 发出第一次 LLM 调用之前就已到达（Registry 先登记任务再起 goroutine），
-	// 按下标脚本会错位把「阻塞轮」留给续跑任务。此处每次调用都捕获输入（续跑正是
-	// 要验证它收到了交接简报），并在开关打开时阻塞直到被放行。
+	// 按下标脚本会错位把「阻塞轮」留给续跑任务。此处每次调用都捕获**全部用户输入**
+	//（续跑正是要验证它收到了落盘上下文），并在开关打开时阻塞直到被放行。
 	gate := make(chan struct{})
 	var (
 		childMu    sync.Mutex
 		childCalls int
-		briefs     []string
+		inputs     []string
 		blockChild = true
 	)
 	childP := &rzFuncProvider{stream: func(req *provider.StreamRequest, handler func(e provider.StreamEvent) error) error {
-		var got string
+		var joined strings.Builder
 		for _, m := range req.Messages {
 			if m.Role != core.User {
 				continue
 			}
 			for _, c := range m.Content {
 				if c.Type == core.ContentTypeText && c.Content != "" {
-					got = c.Content
+					joined.WriteString(c.Content)
+					joined.WriteString("\n")
 				}
 			}
-			break
 		}
 		childMu.Lock()
 		childCalls++
-		briefs = append(briefs, got)
+		inputs = append(inputs, joined.String())
 		block := blockChild
 		childMu.Unlock()
 		if block {
@@ -79,7 +81,8 @@ func TestAgentResumeEndToEnd(t *testing.T) {
 	reg := subagent.NewRegistry()
 	var s *Session
 	eng := tools.NewToolEngine()
-	for _, tool := range subagent.NewAgentTools(childLoop, func() context.Context { return s.Context() }, reg, journalPath, nil, nil) {
+	for _, tool := range subagent.NewAgentTools(childLoop, func() context.Context { return s.Context() }, reg, journalPath, nil, nil,
+		subagent.WithAgentStateStore(subagent.NewMemoryStateStore())) { // 会话级恢复：注入状态持久化端口
 		eng.RegisterTool(context.Background(), tool)
 	}
 
@@ -118,12 +121,9 @@ func TestAgentResumeEndToEnd(t *testing.T) {
 			})
 		},
 		func(_ *provider.StreamRequest, handler func(e provider.StreamEvent) error) error {
+			// 原地续跑：注册表里始终只有同一个任务（同一 id），等待它再次收尾。
 			if infos := reg.List(); len(infos) >= 1 {
-				for _, in := range infos {
-					if in.ID != taskID && subagent.ValidTaskID(in.ID) {
-						resumedTaskID = in.ID
-					}
-				}
+				resumedTaskID = infos[0].ID
 			}
 			return handler(provider.LLMEndEvent{FinishReason: core.FinishReasonStop, Content: "done"})
 		},
@@ -167,7 +167,7 @@ func TestAgentResumeEndToEnd(t *testing.T) {
 		t.Fatalf("子任务未登记: %+v", reg.List())
 	}
 	// 中断它（模拟「任务没交付就结束了」）；放行阻塞开关让子运行收尾到 interrupted。
-	// 放行开关同时把 blockChild 置 false —— 之后派生的续跑任务不再阻塞（见 rzFuncProvider）。
+	// 放行开关同时把 blockChild 置 false —— 之后续跑不再阻塞（见 rzFuncProvider）。
 	if err := reg.Interrupt(spawned); err != nil {
 		t.Fatal(err)
 	}
@@ -193,62 +193,53 @@ func TestAgentResumeEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 续跑任务登记且最终完成；原任务保持 interrupted（新任务语义，不回滚旧终态）。
+	// 原地续跑：任务总数仍为 1（同一 task id 被重新驱动），最终回到 completed。
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		infos := reg.List()
-		if len(infos) >= 2 {
+		if info, err := reg.Snapshot(spawned); err == nil && info.Status == subagent.TaskCompleted {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	infos := reg.List()
-	if len(infos) < 2 {
-		t.Fatalf("续跑任务未登记，registry=%+v", infos)
+	if len(infos) != 1 {
+		t.Fatalf("续跑应原地复用同一任务（注册表应恒为 1 条），实际 %d 条: %+v", len(infos), infos)
 	}
-	if resumedTaskID == "" {
-		for _, in := range infos {
-			if in.ID != spawned {
-				resumedTaskID = in.ID
-			}
-		}
+	if resumedTaskID != spawned {
+		t.Fatalf("续跑必须是同一 task id：spawned=%s resumed=%s", spawned, resumedTaskID)
 	}
-	if resumedTaskID == "" || resumedTaskID == spawned {
-		t.Fatalf("续跑应产生新 task id：spawned=%s resumed=%s", spawned, resumedTaskID)
+	info, err := reg.Snapshot(spawned)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if info, err := reg.Snapshot(spawned); err != nil || info.Status != subagent.TaskInterrupted {
-		t.Fatalf("原任务终态不应被改写: %+v err=%v", info, err)
+	if info.Status != subagent.TaskCompleted {
+		t.Fatalf("续跑后任务应回到 completed，实际 %s", info.Status)
 	}
-	// 恢复链可追溯（TaskList 数据源）。
-	if info, err := reg.Snapshot(resumedTaskID); err != nil || info.ResumedFrom != spawned {
-		t.Fatalf("续跑任务的 resumed_from 应为 %s: %+v err=%v", spawned, info, err)
+	// 恢复链可追溯：原地续跑的 ResumedFrom 记为自身（同一身份）。
+	if info.ResumedFrom != spawned {
+		t.Fatalf("原地续跑的 resumed_from 应为自身 %s: %+v", spawned, info)
 	}
 
-	// 交接简报：续跑子 agent 真的收到了原任务身份与原始指令。
-	// 先放行阻塞开关（原任务那一轮），再等续跑任务收尾，最后在捕获器里找**带交接
-	// 标记**的那份输入（按内容而不是按下标取，避免受「中断可能早于首次调用」影响）。
+	// 上下文连续性（本功能的核心价值）：续跑子 agent 收到的是**落盘的真实上下文**，
+	// 含原任务原文 —— 不是有损简报，也不需要重做已完成的工作。
 	waitChild := time.Now().Add(5 * time.Second)
 	for time.Now().Before(waitChild) {
-		if info, err := reg.Snapshot(resumedTaskID); err == nil && !rzTaskActive(info.Status) {
+		if info, err := reg.Snapshot(spawned); err == nil && !rzTaskActive(info.Status) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	childMu.Lock()
-	all := append([]string(nil), briefs...)
+	all := append([]string(nil), inputs...)
 	childMu.Unlock()
-	brief := ""
-	for _, b := range all {
-		if strings.Contains(b, "[Resumed background task]") {
-			brief = b
-		}
+	if len(all) == 0 {
+		t.Fatal("续跑子 agent 未收到任何输入")
 	}
-	if brief == "" {
-		t.Fatalf("续跑子 agent 未收到交接简报，捕获到 %d 份输入: %q", len(all), all)
-	}
-	for _, want := range []string{spawned, "调研并写出长文报告", "接着写完报告"} {
-		if !strings.Contains(brief, want) {
-			t.Fatalf("交接简报缺 %q:\n%s", want, brief)
+	// 最后一次调用即续跑：输入应同时含**原任务原文**（从落盘上下文恢复）与本次增量指令。
+	resumedInput := all[len(all)-1]
+	for _, want := range []string{"调研并写出长文报告", "接着写完报告"} {
+		if !strings.Contains(resumedInput, want) {
+			t.Fatalf("续跑输入应同时含原任务原文与增量指令 %q:\n%s", want, resumedInput)
 		}
 	}
 

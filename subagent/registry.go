@@ -125,6 +125,51 @@ func (t *Task) setAbort(f func()) {
 	}
 }
 
+// hasTask 报告注册表是否已有该任务对象（跨进程恢复判定：无 → 需 adopt 重建）。
+func (r *Registry) hasTask(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.tasks[id]
+	return ok
+}
+
+// adopt 跨进程恢复：注册表里没有该任务对象时，按 journal 身份**重建一个终态占位**，
+// 供 restart 原地续跑（restart 只认 r.tasks 里的对象）。
+//
+// 状态取 TaskInterrupted 作为「上一进程未收尾」的保守落点——它既非 running
+// （restart 会拒绝）也非 completed（避免误报「已完成」），语义上最贴近事实：
+// 进程没了，任务无从收尾。resumedFrom 记为自身，TaskList 一眼看出这是续跑。
+// outputFile 由调用方传入（journal 路径解析器在 Tool 侧，Registry 不持有它）。
+func (r *Registry) adopt(id, name, toolName, outputFile string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return errors.New("task registry closed")
+	}
+	if _, ok := r.tasks[id]; ok {
+		return nil // 竞态：已被别处重建
+	}
+	r.tasks[id] = &Task{
+		ID:                id,
+		Name:              name,
+		ToolName:          toolName,
+		Status:            TaskInterrupted,
+		outputFile:        outputFile,
+		resumedFrom:       id,
+		acceptingDelivery: false,
+		done:              make(chan struct{}),
+		inbox:             make(chan core.Message, 16),
+	}
+	return nil
+}
+
+// usageSnapshot 读取当前累计用量的快照（mu 保护；checkpoint 落盘用）。
+func (t *Task) usageSnapshot() core.Usage {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.Usage
+}
+
 // addUsage 把一轮已完成 LLMEnd 的用量实时入账到任务（runBackground 的 handler 包装调用）。
 // 意义：子任务未达终态时（会话/宿主提前结束、后台任务被切断），其已完成轮的用量
 // 仍计入 Registry.TotalUsage —— 否则这些已计费 token 只进事件流、不进 Session.Usage
@@ -382,6 +427,14 @@ type StartOptions struct {
 	// ResumedFrom 本任务由恢复哪个已结束任务而来（agent_resume；"" = 原生派发）。
 	// 仅供展示与追溯（TaskList/TaskInfo 透出恢复链）——不参与投递判定。
 	ResumedFrom string
+	// ReuseTaskID 复用已存在的 task id（会话级恢复的原地续跑路径，agent_resume）：
+	// 非空时不新生成 id，而是把**同一个 task 对象**从终态重新驱动（见 Registry.resume）。
+	// 语义要点（为什么不是「新建一条任务」）：
+	//   - 同一 task_id、同一 Name/ToolName/ParentTaskID 与派发链——前端卡片、TaskList、
+	//     结果回传都认同一个身份，恢复链无需靠 ResumedFrom 拼接；
+	//   - journal 是 append-only：续跑在同一份 `<taskId>.jsonl` 追加新的 start 记录，
+	//     跨进程时「最后一条 start + 它的 turn/result」即最后一个生命周期。
+	ReuseTaskID string
 }
 
 // Start 启动后台任务：并发槽阻塞获取（ctx 感知——调用方传 Session 级 ctx，
@@ -419,6 +472,12 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 	r.mu.Unlock()
 	if closed {
 		return nil, errors.New("task registry closed")
+	}
+	// 会话级恢复的原地续跑（agent_resume）：复用已有 task 对象重跑，而不是新建。
+	// 走独立函数是因为「对象来源」与「done 通道重建」两处与新建路径本质不同；
+	// 收尾语义仍共用 runAndFinalize。
+	if o.ReuseTaskID != "" {
+		return r.restart(parent, o, run)
 	}
 	pool := o.Slots
 	if pool == nil {
@@ -464,49 +523,133 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 			release()
 			close(t.done)
 		}()
-		limit := r.currentAsyncTimeout()
-		ctx, cancel := context.WithTimeout(r.asyncCtx, limit)
-		defer cancel()
-		result, usage, err := run(ctx, t)
-		// 超时与逻辑失败区分：时限到点被终止时，err 往往是裸的
-		// "context deadline exceeded"，用户会误读为任务本身出错而不知该放大上限还是改方向。
-		// 用 r.asyncCtx.Err() 排除「会话关闭/AbandonAll 主动取消」这一类（那种不算超时）。
-		if err != nil && ctx.Err() == context.DeadlineExceeded && r.asyncCtx.Err() == nil {
-			err = fmt.Errorf("background task exceeded its time limit (%s) and was stopped; %w — the rounds completed so far are kept in its journal (readable via TaskOutput); raise the limit (Registry.SetAsyncTimeout) or split the task into smaller ones", limit, err)
-		}
-		t.mu.Lock()
-		abandoned := t.Status == TaskAbandoned // AbandonAll 已标记 → 不改终态、不通知（防往新会话乱推）
-		status := t.Status
-		if !abandoned {
-			t.Result, t.Usage, t.Err = result, usage, err
-			switch {
-			case t.abortRequested:
-				status = TaskInterrupted
-			case err != nil:
-				status = TaskFailed
-			default:
-				status = TaskCompleted
-			}
-			t.Status = status
-		}
-		waiting := t.waiting // 宿主 Wait 在途：结果已由 Wait 消费，不重复推送
-		t.mu.Unlock()
-		if abandoned || waiting {
-			return
-		}
-		// 子 agent 再派子 agent：结果投回**发起方子 agent 的 inbox**（其 Poll drain
-		// 在下个 stop 轮消费）——不进主会话，避免主 Agent 收到一条自己没派过的任务
-		// 结果而误判/重复委派。父已结束/未知/inbox 满 → 返回 false，回落主会话推送
-		//（宁可主会话收到一条，也不让结果彻底丢失）。
-		if t.parentTaskID != "" && r.deliverToParent(t, result, status, err) {
-			return
-		}
-		if r.onTaskDone != nil {
-			// usage 同源 t.Usage（run 返回值已在上方写入）——回调里不再读 t，避免锁外读竞态
-			r.onTaskDone(t.ID, t.Name, result, status, usage, err)
-		}
+		r.runAndFinalize(t, run)
 	}()
 	return t, nil
+}
+
+// restart 原地续跑：把**已结束的同一个任务**重新驱动（agent_resume 的会话级恢复路径）。
+//
+// 与新建路径（start）的差别只有三处：
+//   - 对象来源：复用 r.tasks[o.ReuseTaskID] 而非 newTaskID() 造新对象；
+//   - done 通道：终态时已 close，重跑需**重新分配**一个（Wait/TaskOutput 的阻塞点）；
+//   - 终态清零：Result/Err/abort 复位，否则新生命周期读到上一轮的残留值。
+//
+// 终态可回 running 是本路径存在的**前提**——即刻意推翻「done 一次性关闭」的旧契约。
+// 旧契约的理由（终态已推送、复活会推两条终态）在会话级恢复下不再成立：这里的语义是
+// 「同一个 agent 又跑了一轮」，宿主本就按同一 task_id 续看（重发 TaskStarted 让卡片
+// 回到 running）。**保留的边界**：running/interrupting 的任务不可续（那是 agent_send /
+// agent_interrupt 的活，并发写同一 ctx 会互相踩）——闸门在 agent_resume 入口判定。
+func (r *Registry) restart(parent context.Context, o StartOptions, run func(context.Context, *Task) (string, core.Usage, error)) (*Task, error) {
+	r.mu.Lock()
+	t := r.tasks[o.ReuseTaskID]
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return nil, errors.New("task registry closed")
+	}
+	if t == nil {
+		return nil, fmt.Errorf("%w: %s", ErrTaskNotFound, o.ReuseTaskID)
+	}
+
+	// 状态复位 + done 通道重建：必须在槽获取（可能长时间阻塞）**之前**完成，这样
+	// Wait/TaskOutput 一被唤醒看到的就是「running + 全新 done」的一致视图。若先
+	// Acquire 再重建，等待者可能读到旧 done（已关闭）而立刻返回上一轮的陈旧终态。
+	t.mu.Lock()
+	if t.Status == TaskRunning || t.Status == TaskInterrupting {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("task %s is still %s — not resumable while running", t.ID, t.Status)
+	}
+	t.Status = TaskRunning
+	t.Result = ""
+	t.Err = nil
+	t.abort = nil
+	t.abortRequested = false
+	t.acceptingDelivery = true // 续跑期重新接收孙任务结果投递（上一轮 closeDelivery 已关）
+	t.resumedFrom = o.ResumedFrom
+	t.done = make(chan struct{})
+	t.mu.Unlock()
+
+	pool := o.Slots
+	if pool == nil {
+		pool = r.slots
+	}
+	release, err := pool.Acquire(parent)
+	if err != nil {
+		// 槽获取失败：本次续跑**没有开始**。不能把任务留在 running（TaskList 会显示
+		// 「在跑」却永远等不到结果），故如实回退为 failed + 原因，并打开 done 释放等待者。
+		t.mu.Lock()
+		t.Status = TaskFailed
+		t.Err = err
+		t.mu.Unlock()
+		close(t.done)
+		return nil, err
+	}
+
+	// TaskStarted（同一 id 重发）：前端据 task_started 把卡片从终态翻回 running
+	if o.OnStarted != nil {
+		o.OnStarted(t.ID)
+	}
+
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		defer func() {
+			release()
+			t.mu.Lock()
+			d := t.done
+			t.mu.Unlock()
+			close(d)
+		}()
+		r.runAndFinalize(t, run)
+	}()
+	return t, nil
+}
+
+// runAndFinalize 执行子运行并结算终态（新建与续跑共用，防两条路径终态语义漂移）：
+// 超时归因、终态判定、waiting/abandoned 短路、子→孙投递与主会话回传。
+func (r *Registry) runAndFinalize(t *Task, run func(context.Context, *Task) (string, core.Usage, error)) {
+	limit := r.currentAsyncTimeout()
+	ctx, cancel := context.WithTimeout(r.asyncCtx, limit)
+	defer cancel()
+	result, usage, err := run(ctx, t)
+	// 超时与逻辑失败区分：时限到点被终止时，err 往往是裸的
+	// "context deadline exceeded"，用户会误读为任务本身出错而不知该放大上限还是改方向。
+	// 用 r.asyncCtx.Err() 排除「会话关闭/AbandonAll 主动取消」这一类（那种不算超时）。
+	if err != nil && ctx.Err() == context.DeadlineExceeded && r.asyncCtx.Err() == nil {
+		err = fmt.Errorf("background task exceeded its time limit (%s) and was stopped; %w — the rounds completed so far are kept in its journal (readable via TaskOutput); raise the limit (Registry.SetAsyncTimeout) or split the task into smaller ones", limit, err)
+	}
+	t.mu.Lock()
+	abandoned := t.Status == TaskAbandoned // AbandonAll 已标记 → 不改终态、不通知（防往新会话乱推）
+	status := t.Status
+	if !abandoned {
+		t.Result, t.Usage, t.Err = result, usage, err
+		switch {
+		case t.abortRequested:
+			status = TaskInterrupted
+		case err != nil:
+			status = TaskFailed
+		default:
+			status = TaskCompleted
+		}
+		t.Status = status
+	}
+	waiting := t.waiting // 宿主 Wait 在途：结果已由 Wait 消费，不重复推送
+	t.mu.Unlock()
+	if abandoned || waiting {
+		return
+	}
+	// 子 agent 再派子 agent：结果投回**发起方子 agent 的 inbox**（其 Poll drain
+	// 在下个 stop 轮消费）——不进主会话，避免主 Agent 收到一条自己没派过的任务
+	// 结果而误判/重复委派。父已结束/未知/inbox 满 → 返回 false，回落主会话推送
+	//（宁可主会话收到一条，也不让结果彻底丢失）。
+	if t.parentTaskID != "" && r.deliverToParent(t, result, status, err) {
+		return
+	}
+	if r.onTaskDone != nil {
+		// usage 同源 t.Usage（run 返回值已在上方写入）——回调里不再读 t，避免锁外读竞态
+		r.onTaskDone(t.ID, t.Name, result, status, usage, err)
+	}
 }
 
 // deliverToParent 把任务终态投回发起方子 agent 的 inbox（子→孙派发的结果通道）。

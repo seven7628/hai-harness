@@ -31,6 +31,23 @@ var taskIDPattern = regexp.MustCompile(`^task-[a-z0-9]{8}$`)
 // ValidTaskID 报告 id 是否为合法后台任务 id。
 func ValidTaskID(id string) bool { return taskIDPattern.MatchString(id) }
 
+// journalRecordType 判定一条记录是否属于 journal 自身（progress/audit 旁路）。
+//
+// 必要性（会话级恢复引入）：`<taskId>.jsonl` 现在**同时承载**两套记录 —— journal 的
+// start/turn/result/status 行，以及会话级状态的 history/state 行（见 store.go 与
+// docs §13.2）。journal 的读侧（ReadTail/ReadAll）必须只认前者，否则：
+//   - TaskOutput 的 records 会掺进 history/state 行，而 state 行携带**完整上下文**，
+//     单行可达 MB 级 —— 输出体积与解析成本都会被污染；
+//   - turn 计数（total_lines 口径）会把状态行算成「进展」，progress 唤醒语义失真。
+func journalRecordType(t string) bool {
+	switch t {
+	case "start", "turn", "result", "status":
+		return true
+	default:
+		return false
+	}
+}
+
 // turnTextCap turn 记录文本上限（runes）。D6：journal 用于进度感知，超长截断；
 // 全量文本留在子上下文与完成推送里。
 const turnTextCap = 4000
@@ -252,7 +269,7 @@ func ReadAll(path string) ([]JournalRecord, error) {
 			continue
 		}
 		var rec JournalRecord
-		if json.Unmarshal(trimmed, &rec) == nil && rec.Type != "" {
+		if json.Unmarshal(trimmed, &rec) == nil && journalRecordType(rec.Type) {
 			out = append(out, rec)
 		}
 	}
@@ -276,7 +293,7 @@ func parseJournalWindow(buf []byte, n int) ([]JournalRecord, int) {
 			continue
 		}
 		var rec JournalRecord
-		if json.Unmarshal(trimmed, &rec) == nil && rec.Type != "" {
+		if json.Unmarshal(trimmed, &rec) == nil && journalRecordType(rec.Type) {
 			total++
 			window[pos] = rec
 			pos = (pos + 1) % n

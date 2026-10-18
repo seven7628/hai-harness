@@ -33,8 +33,18 @@ const maxSpawnDepth = 2
 // 返回的工具逐个注册进 ToolEngine。
 // defReg / loopForDef（可选）：文件化 subagent 支持（2026-08-30 合并 spawn_agent）——
 // agent_spawn 未携带 task 时按 name 从 *.md 加载人设；nil = 仅动态 task 模式。
-func NewAgentTools(spawnLoop *agents.AgentLoop, bgCtx func() context.Context, reg *Registry, journalPath func(taskID string) (string, error), defReg *DefinitionRegistry, loopForDef func(def *AgentDefinition) *agents.AgentLoop) []tools.Tool {
-	spawnTool := NewBackgroundTool(Spec{
+// AgentToolsOption NewAgentTools 可选配置（变参：既有调用点零改动）。
+type AgentToolsOption func(*Spec)
+
+// WithAgentStateStore 注入子任务状态持久化端口（宿主用 session.FileStore 的适配器；
+// 不注入 → 进程内 MemoryStateStore 降级：同进程可恢复、跨进程不可）。
+// 与 JournalPath 同目录同文件（`<taskId>.jsonl`），只是记录类型不同（见 store.go）。
+func WithAgentStateStore(store StateStore) AgentToolsOption {
+	return func(s *Spec) { s.Store = store }
+}
+
+func NewAgentTools(spawnLoop *agents.AgentLoop, bgCtx func() context.Context, reg *Registry, journalPath func(taskID string) (string, error), defReg *DefinitionRegistry, loopForDef func(def *AgentDefinition) *agents.AgentLoop, opts ...AgentToolsOption) []tools.Tool {
+	toolSpec := Spec{
 		Name: "agent_spawn",
 		// 契约：name（必填、短标签≤40字符）= 子 agent 在干什么的简短标识，用于
 		// 创建结果 / TaskList / 右侧 Agent 视图展示；task 参数 = 子 agent 收到的唯一指令
@@ -58,14 +68,21 @@ func NewAgentTools(spawnLoop *agents.AgentLoop, bgCtx func() context.Context, re
 		Background:  true,
 		MaxDepth:    maxSpawnDepth, // 主 → sub → sub；再深拒绝（防递归自锁，见常量注释）
 		JournalPath: journalPath,
-	}, bgCtx, reg)
+		Store:       NewMemoryStateStore(), // 缺省降级：同进程可恢复；WithAgentStateStore 覆盖为文件存储
+	}
+	for _, o := range opts {
+		if o != nil {
+			o(&toolSpec)
+		}
+	}
+	spawnTool := NewBackgroundTool(toolSpec, bgCtx, reg)
 	spawnTool.defReg = defReg
 	spawnTool.loopForDef = loopForDef
 	return []tools.Tool{
 		spawnTool,
 		&agentSendTool{reg: reg}, // D2 已拍板保留：主 Agent 运行中主动通信 SubAgent 的手段
 		&agentInterruptTool{reg: reg},
-		&agentResumeTool{spawn: spawnTool, reg: reg}, // 恢复已结束的子 agent（从 journal 重建，跑成新任务）
+		&agentResumeTool{spawn: spawnTool, reg: reg}, // 恢复已结束的子 agent（原地续跑；无 checkpoint 时回落 journal 交接简报）
 		&taskListTool{reg: reg},
 		&taskOutputTool{reg: reg}, // 子→主过程监控（journal 最新记录 + 权威状态）
 	}

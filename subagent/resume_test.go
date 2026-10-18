@@ -287,8 +287,8 @@ func TestResumeUnknownTaskWithoutJournal(t *testing.T) {
 	if err == nil {
 		t.Fatal("未知任务且无 journal 必须拒绝")
 	}
-	if !strings.Contains(err.Error(), "no journal on disk") {
-		t.Fatalf("拒绝文案应说明磁盘上也没有 journal: %v", err)
+	if !strings.Contains(err.Error(), "no checkpoint") || !strings.Contains(err.Error(), "no usable journal on disk") {
+		t.Fatalf("拒绝文案应说明无 checkpoint 也无 journal: %v", err)
 	}
 }
 
@@ -317,8 +317,8 @@ func TestResumeRejectsMissingJournal(t *testing.T) {
 	if err == nil {
 		t.Fatal("无 journal 的任务必须拒绝恢复")
 	}
-	if !strings.Contains(err.Error(), "no journal") || !strings.Contains(err.Error(), "spawn a fresh task") {
-		t.Fatalf("拒绝文案应说明无 journal 并指引重新派发: %v", err)
+	if !strings.Contains(err.Error(), "no checkpoint") || !strings.Contains(err.Error(), "spawn a fresh task") {
+		t.Fatalf("拒绝文案应说明无 checkpoint 并指引重新派发: %v", err)
 	}
 }
 

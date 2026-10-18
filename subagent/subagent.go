@@ -64,6 +64,11 @@ type Spec struct {
 	// 子 agent 分到独立池（典型：subagent_explore 用 Registry.AuxSlots()），
 	// 避免它占满主池饿死 agent_spawn。
 	Slots *SlotPool
+
+	// Store 子任务状态持久化端口（宿主注入；零值 = 进程内 MemoryStore 降级）。
+	// 语义与主会话一致（见 store.go）：每轮 checkpoint 落 State（有效上下文 + 用量），
+	// 恢复据此原地续跑。bridge 注入 session.FileStore 的适配器，路径与 journal 同目录。
+	Store StateStore
 }
 
 // Tool 实现 tools.Tool 的子 agent 工具。
@@ -222,7 +227,7 @@ func (t *Tool) callWithDefinition(ctx context.Context, tc *events.ToolContext, c
 		}
 		tool := &Tool{
 			spec: Spec{Name: t.spec.Name, Loop: t.loopForDef(def), Background: true,
-				JournalPath: t.spec.JournalPath, Slots: t.spec.Slots},
+				JournalPath: t.spec.JournalPath, Slots: t.spec.Slots, Store: t.spec.Store},
 			bgCtx:    t.bgCtx,
 			registry: t.registry,
 		}
@@ -288,11 +293,43 @@ func (t *Tool) runBackground(ctx context.Context, tc *events.ToolContext, childD
 // 「为什么恢复要走同一条派发链路」：恢复任务与原生派发在生命周期上完全一致（同一 loop /
 // 同一槽池 / 同一 journal 解析器 / 同一结果回传与中断路由），唯一的差别是**输入文本**
 // 由 journal 重建、且多一个来源标记 —— 单开一条链路只会让两者慢慢漂移。
+// runSpec 一次后台派发的输入。会话级恢复与新任务**共用全部链路**（同一 loop / 槽池 /
+// journal 解析器 / 结果回传与中断路由），只在这两处不同：初始上下文来源、是否复用 task id。
+type runSpec struct {
+	instruct    string         // 本次指令（新任务 = 完整 Prompt+Task；恢复 = 增量指令，可空）
+	name        string         // 短标签
+	resumedFrom string         // 恢复链标记（展示用；原地续跑时 = 自身 id）
+	reuseTaskID string         // 非空 = 复用同一 task id 原地续跑（不新建任务对象）
+	seed        []core.Message // 非空 = 以此为初始上下文（恢复时 = 落盘的有效上下文）
+}
+
 func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, childDepth int, task, name, resumedFrom string) (string, error) {
+	return t.runBackgroundInternal(ctx, tc, childDepth, runSpec{instruct: task, name: name, resumedFrom: resumedFrom})
+}
+
+// runBackgroundResume 会话级恢复：**同一个 task** 再开一轮运行，初始上下文 = 上一轮
+// checkpoint 落盘的有效上下文（st.Messages），instruct 为本次增量指令。
+// 与新建的差别只有「复用 task id + 上下文来源」，收尾/投递/中断路由全部共用。
+func (t *Tool) runBackgroundResume(ctx context.Context, tc *events.ToolContext, childDepth int, taskID, name, instruct string, st *RunState) (string, error) {
+	var seed []core.Message
+	if st != nil {
+		seed = st.Messages
+	}
+	return t.runBackgroundInternal(ctx, tc, childDepth, runSpec{
+		instruct: instruct, name: name,
+		resumedFrom: taskID, reuseTaskID: taskID, seed: seed,
+	})
+}
+
+func (t *Tool) runBackgroundInternal(ctx context.Context, tc *events.ToolContext, childDepth int, rs runSpec) (string, error) {
 	if t.bgCtx == nil {
 		return "", fmt.Errorf("%s: background tool requires a session context provider", t.spec.Name)
 	}
-	opts := t.buildOptions(tc, childDepth, name)
+	// 状态存储：零值/未注入 → no-op（任务照跑，只是不可跨轮/跨进程恢复）。nilSafe 保证
+	// 调用点零分支；真正写盘失败一律忽略 —— 与 journal 同一条防线：落盘是尽力而为的
+	// 旁路，任何失败都不得传导到子运行（docs §3.3）。
+	store := t.spec.Store.nilSafe()
+	opts := t.buildOptions(tc, childDepth, rs.name)
 	var handler events.EventHandler
 	parentRun := ""
 	// parentTaskID 发起方后台任务 id（ToolContext.TaskId）：非空 = 本次派发发生在**另一个
@@ -309,13 +346,14 @@ func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, ch
 	//（闭包引用返回值会撞「Start 返回前 goroutine 先跑」竞态）。
 	// onStarted 在任务登记后、goroutine 启动前同步回调 —— TaskStarted（占位）必然先于
 	// 子运行的 AgentStart 到达前端，任务卡片可用 task_id 确定性关联（停止按钮/结果回填）。
+	// 续跑时同一 task_id 重发：前端据 task_started 把卡片从终态翻回 running（见其 reducer）。
 	onStarted := func(taskID string) {
 		if handler != nil {
 			handler(ctx, &events.TaskStarted{
 				RunId:     parentRun,
 				TaskId:    taskID,
 				ToolName:  t.spec.Name,
-				Name:      name,
+				Name:      rs.name,
 				Async:     true,
 				Status:    string(TaskRunning),
 				Timestamp: time.Now(),
@@ -327,16 +365,35 @@ func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, ch
 	// 打开/写入全部在下方 run 闭包（后台 goroutine）内，spawn 同步路径零开销。
 	taskRef, err := t.registry.StartToolWithOptions(t.bgCtx(), StartOptions{
 		ToolName:  t.spec.Name,
-		Name:      name,
+		Name:      rs.name,
 		OnStarted: onStarted,
 		Slots:     t.spec.Slots, // nil = Registry 主池；explore 类工具用独立辅池
 		// 子→孙派发：结果投回本 loop（发起方子 agent）的 inbox，不进主会话
 		ParentTaskID: parentTaskID,
 		JournalPath:  t.spec.JournalPath,
-		ResumedFrom:  resumedFrom,
+		ResumedFrom:  rs.resumedFrom,
+		ReuseTaskID:  rs.reuseTaskID, // 非空 = 原地续跑（复用同一 task 对象）
 	}, func(bg context.Context, tk *Task) (string, core.Usage, error) {
 		// 任务 id 注入运行选项：AgentStart/AgentEnd 事件携带 task_id（前端关联锚；不依赖事件顺序）
 		opts.TaskId = tk.ID
+		// 恢复：以落盘的**有效上下文**作为初始输入（与主会话 Run 把 s.messages 当 input
+		// 完全同构）；新任务：仅本次指令一条 user 消息。
+		input := []core.Message{core.NewUserMessage(core.Content{Type: "text", Content: rs.instruct})}
+		if len(rs.seed) > 0 {
+			input = append([]core.Message{}, rs.seed...)
+			if strings.TrimSpace(rs.instruct) != "" {
+				input = append(input, core.NewUserMessage(core.Content{Type: "text", Content: rs.instruct}))
+			}
+		}
+		// 用量基数：恢复时承接上一轮已计入 Registry 的累计量——新一轮的 addUsage 在其上
+		// 继续累加。闭包返回时把基数并回（base.Add(sub.Usage)），否则 runAndFinalize
+		// 用「本轮用量」覆盖 t.Usage，会把上一轮的 token/成本抹掉（本任务总账少算）。
+		var baseUsage core.Usage
+		if rs.reuseTaskID != "" {
+			tk.mu.Lock()
+			baseUsage = tk.Usage
+			tk.mu.Unlock()
+		}
 		// 消息接收：Task.inbox → Poll drain（stop 轮消费；工具轮投递延迟到下个 stop 轮）
 		// inbox 携带完整 Message：agent_send 的 user 文本、孙任务终态的 task_result
 		// 块原样入上下文（后者与主会话同源，见 Task.inbox 注释）。
@@ -386,11 +443,11 @@ func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, ch
 			if j, jerr := OpenTaskJournal(p); jerr == nil {
 				jr = j
 				defer j.Close()
-				excerpt, _ := truncateRunes(task, 200)
-				full, _ := truncateRunes(task, taskTextCap)
+				excerpt, _ := truncateRunes(rs.instruct, 200)
+				full, _ := truncateRunes(rs.instruct, taskTextCap)
 				_ = j.Append(JournalRecord{
 					Type: "start", Ts: time.Now(), TaskId: tk.ID,
-					Name: name, ParentRunID: parentRun, Depth: childDepth,
+					Name: rs.name, ParentRunID: parentRun, Depth: childDepth,
 					Text: excerpt,
 					// Task 存原始指令全文：agent_resume 的交接简报靠它重建任务意图
 					//（Text 的 200 字符摘要不够）。ResumedFrom 记录恢复链。
@@ -422,18 +479,45 @@ func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, ch
 				handler(hctx, e)
 			}
 		}
-		sub := t.spec.Loop.RunStream(bg, []core.Message{
-			core.NewUserMessage(core.Content{Type: "text", Content: task}),
-		}, streamHandler, opts)
+		// 每轮检查点：与主会话 Session.checkpoint 同构（粒度 = 轮），供崩溃/中断后
+		// 原地续跑。写入的是 ac.Messages（有效上下文，压缩后形态），不是 RunHistory。
+		// 失败仅忽略（下轮会再写）——落盘环节零失败面传导到子运行，与 journal 同一条防线。
+		opts.OnTurn = func(ac *agents.AgentContext) {
+			_ = store.Save(bg, tk.ID, &RunState{
+				Messages: append([]core.Message{}, ac.Messages...),
+				Usage:    tk.usageSnapshot(),
+			})
+		}
+		// 初始 checkpoint：第一条 user 消息（新任务）或上一轮恢复上下文（续跑）先落一条，
+		// 保证「运行中崩溃、一轮都没跑完」也有可续的上下文。
+		_ = store.Save(bg, tk.ID, &RunState{
+			Messages: append([]core.Message{}, input...),
+			Usage:    tk.usageSnapshot(),
+		})
+		if len(input) > 0 {
+			_ = store.AppendHistory(bg, tk.ID, input) // append-only 全量历史（展开前的原文）
+		}
+		sub := t.spec.Loop.RunStream(bg, input, streamHandler, opts)
 		// 子运行一返回即关闭"孙任务结果接收"：运行结束后 Poll 不会再 drain，本任务的
 		// inbox 无人消费。此后到达的孙任务结果按 Registry 收尾判定回落到主会话
 		//（而不是写进一口没人读的信箱）。放在 journal/事件之前：把窗口收到最小。
 		tk.closeDelivery()
 
+		// 本任务**总用量** = 恢复基数（续跑时上一轮累计）+ 本轮用量。三处（checkpoint /
+		// journal result / TaskEnd 事件 / 闭包返回值）必须同源同值：前端按「运行中逐轮累加、
+		// 终态全量覆盖」消费，若终态只给本轮，续跑会把上一轮的 token/成本从卡片上抹掉。
+		totalUsage := baseUsage.Add(sub.Usage)
+		// 终态 checkpoint：把本轮最终上下文与权威用量落盘（幂等覆盖最后一条 state）。
+		// 续跑时它同时是「下一轮恢复的起点」与「本轮已交付」的落盘凭据。
+		_ = store.Save(bg, tk.ID, &RunState{
+			Messages: append([]core.Message{}, sub.Messages...),
+			Usage:    totalUsage,
+		})
+
 		// 终态判定（TaskEnd 事件与 journal result 共用 classifySubEnd，防漂移）：
 		// 中断请求优先于错误（abort 非失败）；被 AbandonAll 弃置的任务以 abandoned
 		// 入账（journal 与权威终态一致；E7 竞窗内展示以 Registry 快照为准）。
-		usage := sub.Usage
+		usage := totalUsage
 		tk.mu.Lock()
 		status := classifySubEnd(sub.Err, tk.abortRequested)
 		if tk.Status == TaskAbandoned {
@@ -474,9 +558,9 @@ func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, ch
 			handler(bg, end)
 		}
 		if sub.Err != nil {
-			return "", sub.Usage, sub.Err
+			return "", baseUsage.Add(sub.Usage), sub.Err
 		}
-		return sub.FinalResponse, sub.Usage, nil
+		return sub.FinalResponse, baseUsage.Add(sub.Usage), nil
 	})
 	if err != nil {
 		return "", err
@@ -486,22 +570,22 @@ func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, ch
 	// 动作是"继续按自己的套路分析"（它没有"已委派"的概念）；hint 明确告知：
 	// ① 任务目标（从任务描述提取首句，主 Agent 据此判断哪些范围会被覆盖、避免重复劳动）；
 	// ② 后台运行、结果自动送达；③ 可用 TaskOutput 拉取进度（勿高频轮询）；④ 勿重复委派范围。
-	hint := backgroundHintFor(name, task, resumedFrom, parentTaskID)
+	hint := backgroundHintFor(rs.name, rs.instruct, rs.resumedFrom, parentTaskID)
 	payload := ""
-	if resumedFrom != "" {
+	if rs.resumedFrom != "" {
 		// 恢复：带上 resumed_from，模型/宿主一眼看出这是续跑而不是新活。
-		payload = fmt.Sprintf(`,"resumed_from":%q`, resumedFrom)
+		payload = fmt.Sprintf(`,"resumed_from":%q`, rs.resumedFrom)
 	}
 	return fmt.Sprintf(`{"task_id":%q,"status":"running","type":"subagent","name":%q,"output_file":%q%s,"hint":%q}`,
 		taskRef.ID, t.spec.Name, taskRef.OutputFile(), payload, hint), nil
 }
 
 // backgroundHintFor 选本次派发的行为提示（三种形态，措辞纪律各见其注释）：
-// resume（交接简报已在跑）> 子→孙（收件人是本 loop）> 主 Agent 直派。
+// resume（同一任务续跑）> 子→孙（收件人是本 loop）> 主 Agent 直派。
 func backgroundHintFor(name, task, resumedFrom, parentTaskID string) string {
 	if resumedFrom != "" {
 		return fmt.Sprintf(
-			"Resumed task %q as a NEW task (its previous run ended; the original instruction, progress and outcome were rebuilt into its prompt). Continue your other work; its result is pushed back automatically when done — do not wait for it, do not resume it again, and do not duplicate its scope.",
+			"Resumed task %q in place (same task_id; its previous run ended, its context and progress were restored from disk). Continue your other work; its result is pushed back automatically when done — do not wait for it, do not resume it again, and do not duplicate its scope.",
 			name)
 	}
 	if parentTaskID != "" {
