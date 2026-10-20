@@ -101,26 +101,17 @@ func (r *Registry) IsEnabled(name string) bool {
 
 // List 返回启用的技能元数据（发现阶段：仅 name/description，按名排序）。
 // 模型系统提示词的技能清单以此为数据源——禁用技能模型不可见。
+//
+// 注意：本方法**不**按能力过滤（等价于 ListFor(nil)）。会话装配请用 ListFor：
+// 同一个注册表会被不同模型/工具集的会话共享（desktop/bridge 的 per-workspace
+// 注册表就是这样），在这一层做全局过滤会把 A 会话的能力当成 B 会话的。
 func (r *Registry) List() []Descriptor {
-	var out []Descriptor
-	for name, s := range r.skills {
-		if !r.enabled[name] {
-			continue
-		}
-		out = append(out, Descriptor{Name: s.Name, Description: s.Description, Enabled: true})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return r.ListFor(nil)
 }
 
 // All 返回全部技能元数据（含禁用，带 Enabled 标志）——宿主 UI（SkillsPage/面板）展示用。
 func (r *Registry) All() []Descriptor {
-	out := make([]Descriptor, 0, len(r.skills))
-	for name, s := range r.skills {
-		out = append(out, Descriptor{Name: s.Name, Description: s.Description, Enabled: r.enabled[name]})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return r.AllFor(nil)
 }
 
 // Skill 按名取技能原始数据（不过滤启用状态）——宿主预览/管理用（skill_get 命令）。
@@ -131,19 +122,94 @@ func (r *Registry) Skill(name string) (*Skill, error) {
 		return nil, fmt.Errorf("skill %q not found", name)
 	}
 	out := *s
-	out.Resources = r.resources(s)
+	// 恒返回非 nil 切片：nil 切片序列化成 JSON `null`，而所有消费方（前端
+	// skillDetail.resources.length / 命令输出拼接）都按数组用 —— 一个没有
+	// scripts/references/assets 的技能会因此把整块 UI 打崩（2026-10 真机事故：
+	// visual-ui 等三个随包技能都没有资源目录 → 技能详情一打开就 TypeError）。
+	// 空技能给 `[]`，绝不返回 null。
+	out.Resources = append([]string{}, r.resources(s)...)
 	return &out, nil
+}
+
+// ListFor 返回在给定能力面下可用的已启用技能（发现阶段）。
+// caps == nil = 不过滤（等价 List），供不支持能力过滤的宿主/测试使用。
+// 按名排序；状态说明见 UnavailableFor。
+func (r *Registry) ListFor(caps *Capabilities) []Descriptor {
+	out := make([]Descriptor, 0, len(r.skills))
+	for _, name := range r.names() {
+		if !r.enabled[name] {
+			continue
+		}
+		s := r.skills[name]
+		if len(caps.Missing(s.Requires)) > 0 {
+			continue
+		}
+		out = append(out, Descriptor{Name: s.Name, Description: s.Description, Enabled: true, Requires: s.Requires})
+	}
+	return out
+}
+
+// AllFor 返回全部技能元数据（含禁用与**能力不足**的），caps == nil = 不过滤。
+// 宿主 UI 用它把"这个会话用不了、为什么"如实显示出来（UnavailableFor 给原因）。
+func (r *Registry) AllFor(caps *Capabilities) []Descriptor {
+	out := make([]Descriptor, 0, len(r.skills))
+	for _, name := range r.names() {
+		s := r.skills[name]
+		out = append(out, Descriptor{
+			Name: s.Name, Description: s.Description,
+			Enabled:  r.enabled[name] && len(caps.Missing(s.Requires)) == 0,
+			Requires: s.Requires,
+		})
+	}
+	return out
+}
+
+// UnavailableFor 技能在当前会话不可用的原因（空 = 可用或该技能不存在）。
+// 宿主 UI 展示 + load_skill 拒绝文案共用，保证「面板说的」和「工具说的」逐字一致。
+func (r *Registry) UnavailableFor(name string, caps *Capabilities) string {
+	s, ok := r.skills[name]
+	if !ok {
+		return ""
+	}
+	missing := caps.Missing(s.Requires)
+	if len(missing) == 0 {
+		return ""
+	}
+	return caps.reason(name, missing)
+}
+
+// names 已排序的技能名（List/All 共用，避免两处各自 sort 一份拷贝）。
+func (r *Registry) names() []string {
+	out := make([]string, 0, len(r.skills))
+	for name := range r.skills {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Load 按名加载技能完整指令与资源清单（激活阶段）——校验启用状态：
 // 已禁用的技能拒绝加载（发现清单外的东西模型不该能取到）。
+//
+// 等价于 LoadFor(name, nil)：**不**做能力过滤。会话装配请用 LoadFor，否则会与
+// ListFor 的过滤结果错位（清单里没有、工具却能加载同名技能）。
 func (r *Registry) Load(name string) (*Skill, error) {
+	return r.LoadFor(name, nil)
+}
+
+// LoadFor 按名加载技能，并校验能力面（caps == nil = 不过滤）。
+// 拒绝顺序刻意是「不存在 → 禁用 → 能力不足」：前两者是用户可修的配置问题，
+// 后者是"换个模型才行"，文案必须各自说清（见 Capabilities.reason）。
+func (r *Registry) LoadFor(name string, caps *Capabilities) (*Skill, error) {
 	s, err := r.Skill(name)
 	if err != nil {
 		return nil, err
 	}
 	if !r.enabled[name] {
 		return nil, fmt.Errorf("skill %q is disabled", name)
+	}
+	if msg := r.UnavailableFor(name, caps); msg != "" {
+		return nil, fmt.Errorf("%s", msg)
 	}
 	return s, nil
 }

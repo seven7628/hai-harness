@@ -83,7 +83,9 @@ func (a *AgentLoop) executeCommand(ac *AgentContext, opts *RunOptions, m core.Me
 		// 历史尾插只把新增消息写进缓存，前缀逐字不动。
 		if skillName, ok := strings.CutPrefix(strings.TrimSpace(args), "load "); ok && strings.TrimSpace(skillName) != "" {
 			skillName = strings.TrimSpace(skillName)
-			s, err := a.cfg.Skills.Load(skillName)
+			// LoadFor（而非 Load）：用户手动加载也要过同一份能力面 —— 否则能绕过清单过滤，
+			// 得到「模型看不到却已被注入上下文」的技能（同一会话里两份不一致的可见性）。
+			s, err := a.cfg.Skills.LoadFor(skillName, a.cfg.SkillCaps)
 			if err != nil {
 				emit("", err.Error())
 				return core.Message{}, false
@@ -93,7 +95,7 @@ func (a *AgentLoop) executeCommand(ac *AgentContext, opts *RunOptions, m core.Me
 		}
 		// "skills"：发现列表（渐进披露的清单视图，同 buildSkillManifest 数据源）
 		var b strings.Builder
-		for _, d := range a.cfg.Skills.List() {
+		for _, d := range a.cfg.Skills.ListFor(a.cfg.SkillCaps) {
 			fmt.Fprintf(&b, "- %s: %s\n", d.Name, d.Description)
 		}
 		emit(b.String(), "")

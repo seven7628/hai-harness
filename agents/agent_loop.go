@@ -147,6 +147,15 @@ type Config struct {
 	// Skills 技能注册表（渐进披露的发现来源：清单注入系统提示词），nil 表示无技能
 	Skills *skills.Registry
 
+	// SkillCaps 技能能力面（宿主按**本会话选中模型**+工具集算好）。
+	// nil = 不过滤（老宿主/测试/CLI）；非 nil 时清单与 /skills load 都按它过滤，
+	// 与 load_skill 工具用同一份（见 skills.LoadSkillTool.WithCapabilities）。
+	//
+	// 为什么放在 Config 而不是塞进 skills.Registry：注册表是**每工作区共享**的
+	// （多会话复用同一实例），而能力面是**每会话**的（切换模型会变）。把每会话的
+	// 东西写进共享注册表，等于让 A 会话的模型决定 B 会话能看到哪些技能。
+	SkillCaps *skills.Capabilities
+
 	// Subagents 自定义 subagent 注册表（渐进披露的发现来源：清单注入系统提示词），
 	// nil 表示无自定义 subagent。spawn_agent 工具在工具引擎侧注册（subagent 包）。
 	Subagents SubagentLister
@@ -401,6 +410,12 @@ func WithUserAgentMDDir(dir string) Option {
 
 func WithSkills(reg *skills.Registry) Option {
 	return func(c *Config) { c.Skills = reg }
+}
+
+// WithSkillCapabilities 注入本会话技能能力面（按选中模型 + 工具集算好；见
+// Config.SkillCaps）。不调用 = 不过滤。切换模型后宿主重建 loop 时重新注入。
+func WithSkillCapabilities(caps *skills.Capabilities) Option {
+	return func(c *Config) { c.SkillCaps = caps }
 }
 
 // WithMemoryInjection 注入 Project Memory 索引段（Step 3）。参数是**成品文本**，
@@ -1380,8 +1395,10 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 }
 
 // buildSkillManifest 组装技能清单（渐进披露的发现阶段：仅元数据注入系统提示词）。
-func buildSkillManifest(reg *skills.Registry) string {
-	list := reg.List()
+// caps = 本会话能力面（nil = 不过滤）：能力不足的技能**不进清单**，
+// 否则模型会加载一段注定做不成的流程（见 skills/capability.go 的动机）。
+func buildSkillManifest(reg *skills.Registry, caps *skills.Capabilities) string {
+	list := reg.ListFor(caps)
 	if len(list) == 0 {
 		return ""
 	}
@@ -1687,7 +1704,7 @@ func (a *AgentLoop) composeSystemPrompt() string {
 	}
 	// 技能清单（buildSkillManifest 自带 \n\n 前缀）
 	if a.cfg.Skills != nil {
-		b.WriteString(buildSkillManifest(a.cfg.Skills))
+		b.WriteString(buildSkillManifest(a.cfg.Skills, a.cfg.SkillCaps))
 	}
 	// 自定义 subagent 清单（buildSubagentManifest 自带 \n\n 前缀；渐进披露）
 	if a.cfg.Subagents != nil {

@@ -14,10 +14,24 @@ import (
 type LoadSkillTool struct {
 	reg *Registry
 
+	// caps 本会话能力面（宿主按选中模型 + 工具集注入）：与清单同一份过滤依据，
+	// 保证「系统提示词里没有的技能，工具也取不到」。nil = 不过滤。
+	caps *Capabilities
+
 	// OnLoad 可选钩子：技能成功加载后回调（参数 = 技能名）。宿主注入产品级副作用
 	// （如加载 ego-browser 技能时激活 ego lite 窗口）；工具层不关心具体逻辑。
 	// nil = 无钩子。实现应快速返回（不阻塞工具结果）。
 	OnLoad func(name string)
+}
+
+// WithCapabilities 设置本会话能力面（宿主装配时调用；返回自身便于链式）。
+// 传 nil = 不过滤（与不调用等价）。
+//
+// 只在**注册进工具引擎之前**调用：能力面在 Run 期间被并发读取，注册后再改就是
+// 数据竞争（引擎没有为这个字段加锁，也不该为它加 —— 能力面属于装配期输入）。
+func (t *LoadSkillTool) WithCapabilities(caps *Capabilities) *LoadSkillTool {
+	t.caps = caps
+	return t
 }
 
 // WithOnLoad 设置技能加载钩子（宿主装配时调用；返回自身便于链式）。
@@ -70,7 +84,7 @@ func (t *LoadSkillTool) Call(_ context.Context, _, arguments string) (string, er
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	s, err := t.reg.Load(a.Name)
+	s, err := t.reg.LoadFor(a.Name, t.caps)
 	if err != nil {
 		return "", err
 	}

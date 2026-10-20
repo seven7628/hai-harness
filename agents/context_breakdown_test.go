@@ -82,7 +82,7 @@ func TestContextBreakdownParts(t *testing.T) {
 	}
 
 	// 系统提示词 = composeSystemPrompt 去掉两个清单的字节；技能 = 技能清单字节。
-	manifest := buildSkillManifest(sk)
+	manifest := buildSkillManifest(sk, nil)
 	if manifest == "" {
 		t.Fatal("技能清单不应为空")
 	}

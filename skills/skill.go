@@ -29,6 +29,7 @@ type Skill struct {
 	Version      string         // 可选：内容版本（frontmatter version，如 "1.0.0"）——随包分发的技能靠它决定是否覆盖用户机上的旧副本（见 desktop/bridge/office_skill_sync.go）
 	Metadata     map[string]any // 可选：任意键值元数据（frontmatter metadata 子映射）
 	AllowedTools []string       // 可选：预批准工具白名单（allowed-tools 空格分隔；远端技能安全提示用）
+	Requires     Requires       // 可选：运行期能力需求（frontmatter requires）——按会话模型/工具集过滤技能
 
 	Instructions string   // 完整指令（SKILL.md 正文）
 	Resources    []string // 技能资源（scripts/references/assets 下的文件，相对路径）
@@ -41,7 +42,37 @@ type Descriptor struct {
 	Name        string
 	Description string
 	Enabled     bool
+	// Requires 技能声明的运行期能力需求（frontmatter requires，见 Skill.Requires）。
+	// 让宿主在没有能力过滤上下文时也能如实显示"这个技能需要什么"。
+	Requires Requires
 }
+
+// Requires 技能声明的**运行期能力需求**（frontmatter 顶层 requires），
+// 用于「按会话选中模型过滤技能」（见 Registry.ListFor / LoadFor）。
+//
+// 为什么在技能侧声明而不是在宿主侧写死名单：同一个技能在不同 provider/model 下
+// 可用性完全不同（GLM 系模型能用 glm-* 技能，纯文本模型连图片都读不了），
+// 把映射写在宿主里等于让技能与产品耦合；声明式则新增技能无需改 Go 代码。
+//
+// 语义（对齐 Agent Skills 生态的 metadata.openclaw.requires.env 习惯，但**只**取
+// 本 Harness 真能判定的两类）：
+//
+//	requires:
+//	  input: [image]        # 需要模型支持图片输入（provider.ModelInfo.SupportsImage）
+//	  tools: [run_python]   # 需要工具集里存在这些工具（本会话 profile 决定）
+//
+// 两类都是**合取**（全部满足才可用）；空 = 无需求，任何模型都能用。
+//
+// 刻意**不**支持 env / 二进制 / OS 之类：那些在技能正文里自述即可（模型读了正文
+// 会自己检查并告知用户），前置 gate 只做「模型/工具根本做不到」这一层的硬过滤 ——
+// 把无法判定的东西塞进 gate 只会让技能静默消失且无从排查。
+type Requires struct {
+	Input []string // 需要的模型输入模态（目前只判定 "image"）
+	Tools []string // 需要的工具名（如 run_python / bash）
+}
+
+// Empty 无任何能力需求（任何模型/工具集都可用）。
+func (r Requires) Empty() bool { return len(r.Input) == 0 && len(r.Tools) == 0 }
 
 // InstructionsBlock 渲染技能的完整指令块（激活阶段的上下文产物）：
 // 标题 + SKILL.md 正文 + 资源清单（可按需读取）。
@@ -80,6 +111,7 @@ func parseSkill(skillDir string) (*Skill, error) {
 		Version:      strOf(meta["version"]),
 		Metadata:     mapOf(meta["metadata"]),
 		AllowedTools: parseAllowedTools(meta["allowed-tools"]),
+		Requires:     parseRequires(meta["requires"]),
 		Instructions: strings.TrimSpace(body),
 		Dir:          skillDir,
 	}
@@ -131,6 +163,56 @@ func parseAllowedTools(v any) []string {
 		return nil
 	}
 	return strings.Fields(s)
+}
+
+// parseRequires 解析 frontmatter requires（嵌套映射或 "input: image" 单值都接受）。
+//
+// 宽容策略与 frontmatter 整体一致：**读不出来就当没有需求**（不报错、不拒载技能）——
+// 一个写错 requires 的技能应该是"任何模型都能用、用起来才发现不行"，
+// 而不是整条技能从清单里静默消失（那是最难排查的失败形态）。
+func parseRequires(v any) Requires {
+	m := mapOf(v)
+	if len(m) == 0 {
+		return Requires{}
+	}
+	return Requires{
+		Input: parseStringList(m["input"]),
+		Tools: parseStringList(m["tools"]),
+	}
+}
+
+// parseStringList 把 yaml 值转成字符串切片：接受列表、空格分隔字符串、单个字符串。
+// 空项与重复项剔除（frontmatter 里 `input: [image, image]` 是常见笔误）。
+func parseStringList(v any) []string {
+	var raw []string
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		for _, it := range x {
+			raw = append(raw, strings.Fields(strOf(it))...)
+		}
+	case []string:
+		for _, it := range x {
+			raw = append(raw, strings.Fields(it)...)
+		}
+	default:
+		raw = strings.Fields(strOf(v))
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for _, s := range raw {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // Validate 校验技能完整性：元数据必填、指令正文非空。

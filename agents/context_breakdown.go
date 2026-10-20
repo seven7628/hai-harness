@@ -87,7 +87,7 @@ func (a *AgentLoop) ContextBreakdown(ctx context.Context, messages []core.Messag
 	system := a.composeSystemPrompt()
 	skillsManifest := ""
 	if a.cfg.Skills != nil {
-		skillsManifest = buildSkillManifest(a.cfg.Skills)
+		skillsManifest = buildSkillManifest(a.cfg.Skills, a.cfg.SkillCaps)
 	}
 	subagentManifest := ""
 	if a.cfg.Subagents != nil {
