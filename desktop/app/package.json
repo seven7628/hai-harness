@@ -112,6 +112,10 @@
       {
         "from": "../vendor/office-skills",
         "to": "office-skills"
+      },
+      {
+        "from": "../vendor/visual-skills",
+        "to": "visual-skills"
       }
     ],
     "mac": {

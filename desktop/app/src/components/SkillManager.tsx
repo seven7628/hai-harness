@@ -49,19 +49,31 @@ export default function SkillManager() {
             <div className="sc-h">
               <span className="sc-nm">{s.name}</span>
               {s.source && <span className="sc-remote">remote</span>}
-              <span className={`sc-state ${s.enabled ? 'on' : ''}`}>{s.enabled ? t('skill.enabled') : t('skill.disabled')}</span>
-              <button
-                className={`switch ${s.enabled ? 'on' : ''}`}
-                role="switch"
-                aria-checked={s.enabled}
-                aria-label={t('skill.enableAria').replace('{name}', s.name)}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  toggleSkill(s.name, !s.enabled)
-                }}
-              />
+              {/* 三态：可用 / 用户禁用 / 当前模型不支持。
+                  后两者都是 enabled=false，但只有**用户禁用**该给开关 —— 给"模型不支持"
+                  的卡片一个开关，用户会以为拨一下就生效，而真正要做的是换模型。 */}
+              {s.unavailableReason ? (
+                <span className="sc-state cap" title={s.unavailableReason}>{t('skill.modelUnsupported')}</span>
+              ) : (
+                <>
+                  <span className={`sc-state ${s.enabled ? 'on' : ''}`}>{s.enabled ? t('skill.enabled') : t('skill.disabled')}</span>
+                  <button
+                    className={`switch ${s.enabled ? 'on' : ''}`}
+                    role="switch"
+                    aria-checked={s.enabled}
+                    aria-label={t('skill.enableAria').replace('{name}', s.name)}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      toggleSkill(s.name, !s.enabled)
+                    }}
+                  />
+                </>
+              )}
             </div>
             <div className="sc-desc">{s.description || t('skill.noDesc')}</div>
+            {s.unavailableReason && (
+              <div className="sc-cap-reason" title={s.unavailableReason}>{s.unavailableReason}</div>
+            )}
             {s.source && (
               <div className="sc-src">
                 <span className="mono" title={s.source}>{t('skill.remoteSource')}: {s.source}</span>
@@ -104,10 +116,13 @@ export default function SkillManager() {
               <button className="btn" onClick={closeSkill}>{t('skill.close')}</button>
             </div>
             <pre className="sd-body">{skillDetail.instructions}</pre>
-            {skillDetail.resources.length > 0 && (
+            {/* resources 可能是 null（旧版 bridge 对无资源技能返回 nil 切片 → JSON null）。
+                这里按 (… ?? []) 兜：一个字段的形状问题不该让整个技能面板白屏，
+                而且前端不该假设自己永远只跟同版本的 bridge 对话。 */}
+            {(skillDetail.resources ?? []).length > 0 && (
               <div className="sd-res">
                 <div className="sd-res-t">{t('skill.resources')}</div>
-                {skillDetail.resources.map((r) => (
+                {(skillDetail.resources ?? []).map((r) => (
                   <div key={r} className="mono">{r}</div>
                 ))}
               </div>

@@ -406,6 +406,7 @@ quotes and ESM for TypeScript.
 | `desktop/bridge/` | Go stdio host: multi-workspace sessions, commands, event flattening, checkpoints, trace projection | `desktop/bridge/main.go` |
 | `desktop/app/` | Electron + React client | `desktop/app/src`, `desktop/app/electron` |
 | `desktop/vendor/office-skills/` | Our own built-in skills (`SKILL.md` for docx / xlsx / pdf / pptx) that the client syncs into your skills directory | — |
+| `desktop/vendor/visual-skills/` | Our own visual/UI skills (`visual-ui`, `screenshot-to-ui`, `visual-review`). No vision API: the **session's selected model** reads the image and writes the output; visibility is gated by the model's input modalities (`requires.input: [image]`) | — |
 | `brand/` | Logo assets (light/dark) | `brand/hai-logo-light.svg` |
 
 ## Contributing

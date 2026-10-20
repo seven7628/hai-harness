@@ -941,6 +941,9 @@ const zh: Record<string, string> = {
   'skill.viewInstructions': '查看指令',
   'skill.enabled': '已启用',
   'skill.disabled': '已禁用',
+  // 第三种状态：能力不足（当前会话选中的模型/工具集不满足技能的 requires）。
+  // 与「已禁用」分开是刻意的——两者的修复动作完全不同（换模型 vs 拨开关）。
+  'skill.modelUnsupported': '当前模型不可用',
   'skill.enableAria': '{name} 启用',
   'skill.noDesc': '（无描述）',
   'skill.close': '关闭',
@@ -1241,6 +1244,10 @@ const zh: Record<string, string> = {
   'md.copy': '复制',
   'md.copyFail': '复制失败',
   'md.mermaidError': '图表渲染失败（源码如下）',
+  // 流式中的占位文案：此时 iframe 还没挂（半截 <script> 会被执行、srcDoc 反复重载会闪），
+  // 文案要让用户知道「正在生成」而不是「坏了」。
+  'md.htmlGenerating': '正在生成…',
+  'md.htmlGeneratingHint': 'HTML 写完后自动渲染（生成过程中不预渲染：不完整的脚本会被执行）',
   'md.htmlPreview': '渲染',
   'md.htmlSource': '源码',
   'md.htmlTabsAria': 'HTML 预览视图切换',
@@ -2197,6 +2204,7 @@ const en: Record<string, string> = {
   'skill.viewInstructions': 'View instructions',
   'skill.enabled': 'Enabled',
   'skill.disabled': 'Disabled',
+  'skill.modelUnsupported': 'Unavailable for this model',
   'skill.enableAria': 'Enable {name}',
   'skill.noDesc': '(no description)',
   'skill.close': 'Close',
@@ -2727,6 +2735,8 @@ const en: Record<string, string> = {
   'md.copy': 'Copy',
   'md.copyFail': 'Copy failed',
   'md.mermaidError': 'Diagram render failed (source below)',
+  'md.htmlGenerating': 'Generating…',
+  'md.htmlGeneratingHint': 'Renders when the HTML is complete (not previewed mid-stream: an unfinished script would run)',
   'md.htmlPreview': 'Preview',
   'md.htmlSource': 'Source',
   'md.htmlTabsAria': 'HTML preview view switch',

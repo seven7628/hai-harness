@@ -44,6 +44,12 @@ import (
 // 该目录下每个子目录 = 一个技能（docx/ xlsx/ pdf/ …）。
 const officeSkillsDirEnv = "GO_CODE_OFFICE_SKILLS_DIR"
 
+// visualSkillsDirEnv bridge 环境变量：内置**视觉/UI 技能**集合目录（Electron main 注入）。
+// 与办公技能同一套同步机制（逐子目录 → ~/.agents/skills，按 version 决定是否覆盖），
+// 差别只有源目录与技能内容：这几个技能全程由**会话选中的模型**执行
+// （模型自己 read_file 看图、自己写产出），不调用任何外部视觉 API。
+const visualSkillsDirEnv = "GO_CODE_VISUAL_SKILLS_DIR"
+
 // ensureOfficeSkillsSynced 启动同步内置办公技能到全局技能目录（~/.agents/skills/<name>）：
 //   - env 空（dev 无注入）→ no-op；
 //   - 每个技能目标已存在（symlink 或真实目录）→ 跳过该技能（幂等，尊重用户改过的版本）；
@@ -52,7 +58,20 @@ const officeSkillsDirEnv = "GO_CODE_OFFICE_SKILLS_DIR"
 //
 // 失败不阻断启动（技能面板缺某几个技能，其余技能与全部其他功能不受影响）。
 func ensureOfficeSkillsSynced() error {
-	src := os.Getenv(officeSkillsDirEnv)
+	return syncBundledSkills(os.Getenv(officeSkillsDirEnv), "内置办公技能")
+}
+
+// ensureVisualSkillsSynced 同步内置视觉/UI 技能（与办公技能同一实现，不同源目录）。
+// 这些技能要求模型支持图片输入（requires.input: [image]），可见性由
+// skill_capability.go 按会话选中模型决定 —— 同步本身不做能力判断（用户可能之后
+// 换成支持图片的模型，技能必须已经在盘上）。
+func ensureVisualSkillsSynced() error {
+	return syncBundledSkills(os.Getenv(visualSkillsDirEnv), "内置视觉技能")
+}
+
+// syncBundledSkills 把一个「技能集合目录」下的每个子目录同步到 ~/.agents/skills/<name>。
+// label 只用于错误文案（区分是哪个集合出的问题）。
+func syncBundledSkills(src, label string) error {
 	if src == "" {
 		return nil // dev 无 env 时跳过（技能由工作区 .agents/skills 提供）
 	}
@@ -62,7 +81,7 @@ func ensureOfficeSkillsSynced() error {
 	}
 	entries, err := os.ReadDir(src)
 	if err != nil {
-		return fmt.Errorf("内置办公技能源不可读（%s）: %w", src, err)
+		return fmt.Errorf("%s源不可读（%s）: %w", label, src, err)
 	}
 	dstRoot := filepath.Join(home, ".agents", "skills")
 	var errs []error

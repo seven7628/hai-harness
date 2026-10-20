@@ -21,7 +21,10 @@ const MOCK_TITLES = [
 ]
 
 // mock 技能（对齐真实 bridge skills 命令返回形状：name/description/enabled 真过滤）
-const MOCK_SKILLS: { name: string; description: string; instructions: string; resources: string[]; enabled: boolean; source?: string }[] = [
+// unavailable_reason：mock 数据源带上「当前模型不支持」这一态（与真 bridge 的
+// skillList 同字段）。没有它，三态 UI 在 mock 模式（无 key 的开发/截图环境）永远只有两态，
+// 改样式时看不到真实形态。
+const MOCK_SKILLS: { name: string; description: string; instructions: string; resources: string[]; enabled: boolean; source?: string; unavailable_reason?: string }[] = [
   {
     name: 'code-review',
     description: '对变更做多维度审查（正确性/安全/性能/测试覆盖），逐条验证后输出结论。',
@@ -49,6 +52,17 @@ const MOCK_SKILLS: { name: string; description: string; instructions: string; re
     instructions: '# 技术写作\n\n中文文档结构、标题层级、变更日志模板。',
     resources: [],
     enabled: false,
+  },
+  {
+    // 声明 requires.input: [image]，而 mock 会话的模型（如 glm-4.6）是纯文本 →
+    // 真 bridge 会返回 enabled=false + unavailable_reason。mock 复刻这一态，
+    // 让「当前模型不可用」在无 key 环境下也能看到与验证。
+    name: 'screenshot-to-ui',
+    description: '按截图/设计稿复刻前端（读图 → 结构清单 → 实现 → 逐页比对）。',
+    instructions: '# 截图转前端\n\n先读图写清单，再实现，最后逐页比对。',
+    resources: [],
+    enabled: false,
+    unavailable_reason: 'skill "screenshot-to-ui" is unavailable for this session（当前模型 glm-4.6）: requires model input: image; switch to a model or persona that provides it, or load the skill in a session that has it',
   },
 ]
 
@@ -1388,7 +1402,12 @@ class MockTransport implements Transport {
       case 'skills': {
         // 工作区技能清单（SkillsPage + /skill 面板数据源；含启用标志）
         this.respond(cmd, {
-          skills: MOCK_SKILLS.map((s) => ({ name: s.name, description: s.description, enabled: s.enabled })),
+          skills: MOCK_SKILLS.map((s) => ({
+            name: s.name,
+            description: s.description,
+            enabled: s.enabled,
+            ...(s.unavailable_reason ? { unavailable_reason: s.unavailable_reason } : {}),
+          })),
         })
         break
       }

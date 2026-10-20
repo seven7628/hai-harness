@@ -146,6 +146,22 @@ function bundledOfficeSkillsDir(): string {
   return path.resolve(APP_ROOT, '..', 'vendor', 'office-skills')
 }
 
+// 内置视觉/UI 技能集合目录（visual-ui / screenshot-to-ui / visual-review，2026-10；随包分发）：
+// 打包态 → Contents/Resources/visual-skills（electron-builder extraResources）；
+// dev → 仓库 desktop/vendor/visual-skills。与办公技能**完全同一套**同步机制
+// （Go 侧 syncBundledSkills，逐子目录 → ~/.agents/skills，按 frontmatter version 决定覆盖）。
+//
+// 与智谱 GLM-skills 的关键差别：这三个技能全程由**会话选中的模型**执行
+// （模型自己 read_file 看图、自己写 HTML/代码），不调用任何外部视觉 API、不需要额外
+// key 或 Python 依赖。哪些技能对当前会话可见由 bridge 的 skill_capability.go 按
+// 选中模型的能力（requires.input: [image]）决定。
+function bundledVisualSkillsDir(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'visual-skills')
+  }
+  return path.resolve(APP_ROOT, '..', 'vendor', 'visual-skills')
+}
+
 // activateEgoLite 把 ego lite 窗口带到前台（open -a，LaunchServices 路径）。
 // 不用 osascript `tell application to activate`：那需要宿主对目标 app 的 AppleEvent
 // 自动化授权（TCC：系统设置 → 隐私 → 自动化），首启未授权会失败；open -a 拉起/
@@ -185,6 +201,10 @@ function bridgeEnv(): NodeJS.ProcessEnv {
   // .agents/skills，换 workspace 或打包分发就丢了；同步到全局层后跨工作区可用。
   // （「已存在即跳过」是逐技能判断的：新增一个技能目录能到达已装用户，改既有技能内容则到不了。）
   env.GO_CODE_OFFICE_SKILLS_DIR = bundledOfficeSkillsDir()
+  // 内置视觉/UI 技能集合目录（随包分发）：dev = 仓库 desktop/vendor/visual-skills；
+  // 打包 = Resources/visual-skills。Go bridge 逐子目录同步到 ~/.agents/skills/<name>。
+  // 与上面办公技能同样的「集合目录」设计：新增一个视觉技能只加子目录，两侧接线都不动。
+  env.GO_CODE_VISUAL_SKILLS_DIR = bundledVisualSkillsDir()
   // GUI（Finder/Dock）启动的 PATH 通常不含用户 shell 配置（Homebrew/nvm 等）：
   // bridge 的 exec.LookPath("node") 找不到 → 误报「未检测到 Node.js」。PATH 上
   // 没有 node 时，把探测到的 node 所在目录前插（已有则不动——用户 PATH 优先）。

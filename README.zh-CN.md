@@ -401,6 +401,7 @@ npm run build                 # 生产打包 + bridge 二进制
 | `desktop/bridge/` | Go stdio 宿主：多工作区会话、命令路由、事件扁平化、检查点、trace 投影 | `desktop/bridge/main.go` |
 | `desktop/app/` | Electron + React 客户端 | `desktop/app/src`、`desktop/app/electron` |
 | `desktop/vendor/office-skills/` | 我们自己的内置技能（docx / xlsx / pdf / pptx 的 `SKILL.md`），客户端启动时同步到你的技能目录 | — |
+| `desktop/vendor/visual-skills/` | 我们自己的视觉/UI 技能（`visual-ui`、`screenshot-to-ui`、`visual-review`）。**不调任何视觉 API**：由**会话选中的模型**自己看图、自己产出；可见性按该模型的输入模态过滤（`requires.input: [image]`） | — |
 | `brand/` | 品牌 logo（深/亮两版） | `brand/hai-logo-light.svg` |
 
 ## 参与贡献
