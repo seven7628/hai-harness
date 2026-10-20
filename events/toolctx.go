@@ -20,6 +20,23 @@ type ToolContext struct {
 	// Hooks 发起运行的 hooks（PreToolUse/PostToolBatch/PreCompact）：子 agent
 	// 继承通道（subagent 组装子 RunOptions 时透传，Spec.DisableHookInherit 可关）。
 	Hooks *ToolHooks
+
+	// Todos 本运行自己的待办快照提供者（nil = 未注入）。引擎在 todo_* 工具结束时
+	// 调用它，把清单挂到 ToolResponse.Todos —— 属主是**发起本次调用的运行**：
+	// 主 run → 会话待办；子 agent run → 它自己那份独立 store。
+	// 为什么用闭包而不是直接传 *todo.Store：events 不能 import todo（成环），
+	// 引擎也不该知道待办语义；投影成 events.TodoSnapshot 后两边都只依赖事件层。
+	Todos func() []TodoSnapshot
+}
+
+// WithTodoSnapshot 给**已注入**的工具上下文挂上「本运行待办快照」提供者
+// （引擎在 todo_* 工具结束时取用，见 ToolContext.Todos）。未注入工具上下文时无处可挂，
+// 原样返回 —— 工具仍可用，只是宿主拿不到 run 级清单。
+func WithTodoSnapshot(ctx context.Context, fn func() []TodoSnapshot) context.Context {
+	if tc := ToolContextFrom(ctx); tc != nil {
+		tc.Todos = fn
+	}
+	return ctx
 }
 
 // WithToolContext 把工具执行上下文注入 context；approver nil = 不审批；hooks nil = 无。

@@ -3,6 +3,7 @@ import Narrative from './Narrative'
 import Composer from './Composer'
 import ApprovalPanel from './ApprovalPanel'
 import AskUserQuestionPanel from './AskUserQuestionPanel'
+import { AgentSessionView } from './AgentSessionView'
 import { useAppStore, titleKey, skeletonFinishExit } from '../store/useAppStore'
 import { useT } from '../i18n'
 
@@ -268,6 +269,9 @@ const SessionSkeleton = memo(function SessionSkeleton({
 
 export default function CenterPanel() {
   const t = useT()
+  // 子智能体「子会话」：左栏树选中某个子 agent 时，叙述区换成它自己的转录/用量/TODO。
+  // 这是**视图切换**而不是新会话（见 AgentSessionView 的注释）—— 顶部会话身份不变。
+  const focused = useAppStore((s) => s.focusedAgent)
   // issue 4：切换会话时的短暂加载态 → 叙述区模糊遮罩（有缓存约一帧、无缓存等激活，超时兜底）
   // 骨架屏状态机：pending 时不渲染（还没到显示阈值），visible/exit 才渲染。
   //
@@ -279,7 +283,7 @@ export default function CenterPanel() {
     <section className="center">
       <RecentBar />
       <div className="narrative-wrap">
-        <Narrative />
+        {focused ? <AgentSessionView focus={focused} /> : <Narrative />}
         {showSkeleton && <SessionSkeleton label={t('common.loading')} leaving={skeletonPhase === 'exit'} />}
       </div>
       {/* 决策停靠区（HITL，非模态）：审批 + ask_user 提问都停靠在输入框上方 —— 待决策时叙述区

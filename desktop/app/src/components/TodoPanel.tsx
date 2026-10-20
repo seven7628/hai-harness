@@ -1,13 +1,29 @@
 import { useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
+import type { TodoItem } from '../store/useAppStore'
 import { useT } from '../i18n'
+import { pickTodoList } from '../lib/todoScope'
 
 // 待办面板：右栏顶部常驻小结（默认折叠成一行进度条+计数，点开展开列表；不悬浮在叙述通道上，
-// 避免遮挡实时流式输出）。数据源 = 桥接层在 todo_* 工具结束时随事件带的 todos 字段
-// （SDK todo.Item：id/title/done/blocked_by）。已完成 ✓ 灰显删除线，未开始 ○，
-// 被依赖阻塞显示「阻塞 tN」标签。
-export default function TodoPanel() {
-  const todos = useAppStore((s) => s.todos)
+// 避免遮挡实时流式输出）。
+//
+// **作用域（scope）是这份组件最重要的参数**（用户 2026-10 报障：子智能体里显示了主会话的 TODO）：
+//   · scope='main'（默认）= 会话待办（主 agent 的清单，数据源 = store.todos）
+//   · scope='agent'      = 传进来的 todos（某个子智能体**自己的**清单，来自它卡片上的
+//                          todos 快照 —— 子 agent 是独立上下文，因此是独立 TODO）
+// 两者**绝不互相回退**：子 agent 没有清单时整块不渲染，而不是显示主会话的清单。
+// 回退会让「这个子智能体没有计划」被显示成「它有一份和主会话一样的计划」，是更难发现的错。
+export default function TodoPanel({
+  scope = 'main',
+  todos: scoped,
+}: {
+  scope?: 'main' | 'agent'
+  /** scope='agent' 时的清单（调用方给 = 该子 agent 自己的快照）；scope='main' 忽略 */
+  todos?: TodoItem[]
+}) {
+  const storeTodos = useAppStore((s) => (scope === 'main' ? s.todos : EMPTY))
+  // 取值规则单一来源（lib/todoScope.pickTodoList）：agent 作用域绝不回退会话清单
+  const todos = pickTodoList(scope, storeTodos, scoped)
   const [collapsed, setCollapsed] = useState(true)
   const t = useT()
 
@@ -55,3 +71,5 @@ export default function TodoPanel() {
     </section>
   )
 }
+
+const EMPTY: TodoItem[] = []

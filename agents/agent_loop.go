@@ -2186,6 +2186,7 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 			CtxTokens: a.RequestTokens(ac.ctx, ac.Messages, ac.Mode),
 			Usage:     failUsage,
 			Error:     err.Error(),
+			Todos:     ac.todoSnapshot(),
 			Timestamp: time.Now(),
 			EventType: events.CompressEndType,
 		})
@@ -2245,6 +2246,7 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 		Usage:     &evUsage,
 		Warnings:  result.Warnings,
 		Analysis:  result.Analysis, // O1/G7：压缩器决策过程留档（仅观测）
+		Todos:     ac.todoSnapshot(),
 		Timestamp: time.Now(),
 		EventType: events.CompressEndType,
 	})
@@ -2488,6 +2490,9 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 	}
 	ctx := events.WithToolContextForRunTask(ac.ctx, ac.RunId, ac.ParentRunId, taskID, ac.Depth, ac.Handler, ac.Approver, hooks)
 	ctx = todo.WithStore(ctx, ac.Todo)
+	// 待办快照的属主 = 本运行（ac.Todo）：主 run 是会话清单，子 agent 是它自己那份。
+	// 引擎在 todo_* 工具结束时取用，挂到 ToolResponse.Todos（宿主按 run_id 落档）。
+	ctx = events.WithTodoSnapshot(ctx, ac.todoSnapshot)
 	cancel := func() {}
 	if a.cfg.ToolBatchTimeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, a.cfg.ToolBatchTimeout)
@@ -2656,4 +2661,24 @@ func (a *AgentLoop) toolSchemas(ctx context.Context, mode *Mode) []core.ToolSche
 // 子 agent 等经 ToolResult.Usage 的传导同样落入两个字段）。
 func (ac *AgentContext) addUsage(u core.Usage) {
 	ac.Usage = ac.Usage.Add(u)
+}
+
+// todoSnapshot 本运行待办清单的事件层投影（events.ToolContext.Todos 的实现）。
+// nil 安全：ac 或 ac.Todo 缺失时返回 nil（宿主按「本条事件不带快照」处理）。
+func (ac *AgentContext) todoSnapshot() []events.TodoSnapshot {
+	if ac == nil || ac.Todo == nil {
+		return nil
+	}
+	items := ac.Todo.Items()
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]events.TodoSnapshot, 0, len(items))
+	for _, it := range items {
+		out = append(out, events.TodoSnapshot{
+			Id: it.Id, Title: it.Title, Done: it.Done,
+			BlockedBy: append([]string{}, it.BlockedBy...),
+		})
+	}
+	return out
 }

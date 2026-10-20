@@ -48,6 +48,11 @@ type CompressEnd struct {
 	// 随事件日志与会话 jsonl 的 compaction 记录落盘，绝不进模型上下文。
 	Analysis string `json:"analysis,omitempty"`
 
+	// Todos 压缩结束时该运行自己的待办快照（与 ToolResponse.Todos 同义：子 agent 的
+	// 清单归它自己的 run，主 run 的归会话）。压缩不改待办，这里只是给宿主一个
+	// 「压缩边界也刷新清单」的锚点（与旧行为等价，但归属正确）。
+	Todos []TodoSnapshot `json:"todos,omitempty"`
+
 	// Timestamp 压缩结束时刻（与 CompressStart.Timestamp 差即压缩 span 时长）。
 	Timestamp time.Time `json:"timestamp"`
 

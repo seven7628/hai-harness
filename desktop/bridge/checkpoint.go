@@ -419,6 +419,31 @@ func todoItems(in []todo.Item) []TodoItem {
 	return out
 }
 
+// todosOf 取一条事件携带的待办快照（**属主 = 发出该事件的运行**）。
+//
+// 事件自带快照时以它为准：子 agent 的 todo_* 带的是它自己那份独立清单，而
+// bs.s.TodoItems() 永远是**会话**清单 —— 一律读会话曾让子 agent 的 TODO 覆盖成
+// 主会话的（用户 2026-10 报障）。事件缺快照（旧日志重放 / 未接线 todo 的运行）
+// 才回退会话清单，行为与从前一致。
+func todosOf(bs *bridgeSession, snap []events.TodoSnapshot) []TodoItem {
+	if snap == nil {
+		// 没带快照（旧事件日志重放 / 未接线 todo 的运行）→ 回退会话清单（旧行为）。
+		// 注意与「带了一个空清单」区分：后者是事实（清单被清空），必须照实生效。
+		if bs == nil || bs.s == nil {
+			return nil
+		}
+		return todoItems(bs.s.TodoItems())
+	}
+	out := make([]TodoItem, 0, len(snap))
+	for _, it := range snap {
+		out = append(out, TodoItem{
+			ID: it.Id, Title: it.Title, Done: it.Done,
+			BlockedBy: append([]string{}, it.BlockedBy...),
+		})
+	}
+	return out
+}
+
 // observe 在 emit 漏斗中：reducer.Apply + 提交边界检测。
 // 必须在写 stdout/事件日志之前调用（保证 checkpoint 与实时事件同序）。
 func (bs *bridgeSession) observe(e events.Event) {
@@ -434,10 +459,10 @@ func (bs *bridgeSession) observe(e events.Event) {
 		}
 	case *events.ToolResponse:
 		if strings.HasPrefix(ev.Name, "todo_") {
-			meta.Todos = todoItems(bs.s.TodoItems())
+			meta.Todos = todosOf(bs, ev.Todos)
 		}
 	case *events.CompressEnd:
-		meta.Todos = todoItems(bs.s.TodoItems())
+		meta.Todos = todosOf(bs, ev.Todos)
 	}
 	_ = bs.reducer.Apply(e, meta)
 

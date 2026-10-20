@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import type { ReactElement } from 'react'
-import { useAppStore, runningTaskCount, asyncTaskBlocks, fileKeyOf, isPendingWebTab, rebuildWebTab } from '../store/useAppStore'
+import { useAppStore, runningTaskCount, fileKeyOf, isPendingWebTab, rebuildWebTab } from '../store/useAppStore'
 import type { RightTab, TabKind, TabInstance, TabSpec, FileTabInstance, MsgBlock, Diff, GitFile, GitStatus } from '../store/useAppStore'
 import type { AnyEvent } from '../store/events'
 import { projectAllTraces, liveRootRunId } from '../store/trace'
@@ -13,7 +13,6 @@ import ApprovalCard from './ApprovalCard'
 import ConfirmModal from './ConfirmModal'
 import { CompressionBlock } from './NarrativeBlocks'
 // 任务卡（子 agent / 后台任务 / 工具任务）：与主对话的子 agent 卡**同一份外壳**，见 TaskCard.tsx
-import { AgentTaskCard, AsyncTaskCard, ToolTaskCard } from './TaskCard'
 import { Markdown } from './markdown'
 import CsvPreview from './CsvPreview'
 import { codeToHtml } from './highlight'
@@ -25,6 +24,7 @@ import { visualKindOf } from '../lib/visualFile'
 import { copyText } from '../lib/clipboard'
 import { useT } from '../i18n'
 import TodoPanel from './TodoPanel'
+import { useFocusTodos } from './useFocusTodos'
 
 // Tab 分两段：主段 = 会话工作流核心（链路 · 变更）；辅段 = 监视/工具（Agent · 文件 · 网页）。
 // 跨会话用量看板在设置「使用统计」页（原「指标」tab 已下线，见 docs/DESKTOP.md §5.4）。
@@ -1941,21 +1941,20 @@ function MainCompressionMirror() {
   )
 }
 
-// 异步任务监视器（右侧栏「任务」tab）：并发子 agent + 工具任务统一展示。
-// 数据 = store 里 kind==='agent'（run_id 归属，输出按 SDK 事件 run_id 累计到卡片）
-// 与 kind==='tool' 且带 taskId（含 promoted 后台任务）的块。子 agent 详细执行内容
-// 能力保留在 AgentView（items 转录）。
-// 顶部另有两块「提示」区（与本任务监视并列，不是任务）：
-//   - 待审批：Session 统一 FIFO 队首（主/子共用，标注运行归属；与 Modal 共享 approve）
-//   - 主 Agent 压缩镜像：主会话 CompressionBlock 同源展示
+// 「任务」tab：**待决断 / 主会话级提示**（派生产出已全部搬到左栏树）。
+//
+// 2026-10（用户需求）：子智能体、孙智能体、异步 Bash（被摘离的工具调用）都住进左栏的
+// 会话树（见 AgentTree / AgentSessionView）——「一次会话派生出去的东西」是**层级**问题，
+// 左侧树才是它的正确位置；右栏是「这次会话的审阅面」（链路 / 变更 / 文件 / 网页）。
+// 于是这个 tab 只剩两件**不属于树**的东西，共同点是「要人现在做决定或现在知道」：
+//   · 待审批：Session 统一 FIFO 队首（主/子共用，标注运行归属；与 Modal 共享 approve）
+//   · 主 Agent 压缩镜像：主会话压缩是会话级事实，不归某个子 agent
+// 后台工具任务的细节（参数/结果）在它的子会话视图里展开（ToolTaskBody），不再单列卡。
 function TaskMonitor() {
   const t = useT()
   const blocks = useAppStore((s) => s.blocks)
-  const tasksRunning = useAppStore((s) => runningTaskCount(s.blocks))
   const approvals = useAppStore((s) => s.approvals)
   const compressing = useAppStore((s) => s.compressing)
-  const [open, setOpen] = useState(true)
-  const tasks = asyncTaskBlocks(blocks)
   const head = approvals[0]
   const lastComp = useMemo(() => [...blocks].reverse().find((b) => b.kind === 'compression'), [blocks])
   const headOwner = (runId?: string): string => {
@@ -1963,11 +1962,9 @@ function TaskMonitor() {
     const b = blocks.find((x) => x.kind === 'agent' && x.runId === runId)
     return b?.kind === 'agent' ? b.label : t('rp.task.subAgent')
   }
-  if (tasks.length === 0 && !head && !compressing && !lastComp) {
+  if (!head && !compressing && !lastComp) {
     return <div className="empty"><div className="big">{t('rp.task.noTasks')}</div>{t('rp.task.noTasksHint')}</div>
   }
-  // 运行中置顶（稳定排序），其余按出现顺序
-  const sorted = [...tasks].sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1))
   return (
     <div className="agent-monitor">
       {head && (
@@ -1980,43 +1977,10 @@ function TaskMonitor() {
         </div>
       )}
       <MainCompressionMirror />
-      <div
-        className="am-hd"
-        role="button"
-        aria-expanded={open}
-        tabIndex={0}
-        onClick={() => setOpen((v) => !v)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            setOpen((v) => !v)
-          }
-        }}
-      >
-        <span className="am-title">{t('rp.task.asyncTasks')}</span>
-        <span className="am-count mono">{t('rp.task.runningCount').replace('{n}', String(tasksRunning)).replace('{m}', String(tasks.length))}</span>
-        <span className="am-chev">{open ? '▾' : '▸'}</span>
-      </div>
-      {open && (
-        <div className="am-list">
-          {sorted.map((a) =>
-            a.kind === 'agent'
-              ? <AgentTaskCard key={a.id} b={a} />
-              : a.kind === 'async_task'
-                ? <AsyncTaskCard key={a.id} b={a} />
-                : <ToolTaskCard key={a.id} b={a} />,
-          )}
-        </div>
-      )}
     </div>
   )
 }
 
-// 面板级标签条（阶段 1，docs/RIGHT_PANEL_TABS_PLAN.md）：
-// 把原来的「5 个固定 tab 按钮」换成**已打开的标签**列表（可切 / 可关 / 可重开）。
-// 与折叠态 rail 的分工：rail = 启动器（5 类固定入口，收起态也能直接开标签，也是 e2e 的
-// 点击入口 `.rbtn`）；标签条 = 已打开的标签。两者共用下面这份 kind → 图标注册表。
-//
 // 「+」菜单里**没有** file：文件标签需要路径，由点文件产生（阶段 2 起是**多实例**：
 // 一个文件一个标签，同一文件的 diff / source 各一个 —— 见 store.openTab 的幂等键）。
 const ADDABLE_KINDS: TabKind[] = ['activity', 'git', 'agent', 'web']
@@ -2142,10 +2106,15 @@ export default function RightPanel() {
   // 现在面板标签条常驻、浏览器工具条又被合并成一行 → 默认收起它只会让用户看不到地址栏/文件名。
   const [immersive, setImmersive] = useState(false)
   const toolbarHidden = rightTab === 'web' && immersive
-  // 活跃待办数（未完成）→ 折叠图标条角标
-  const activeTodos = todos.filter((todo) => !todo.done).length
-  // 运行中的异步任务数（子 agent + 工具任务，随当前会话镜像）→ 折叠 rail / tab 角标
-  const runningTasks = runningTaskCount(useAppStore((s) => s.blocks))
+  // 看的是哪个子智能体 → 右栏待办面板跟随它（见下方 TodoPanel 的 scope）
+  const focusTodos = useFocusTodos()
+  // 活跃待办数（未完成）→ 折叠图标条角标（跟随焦点，与面板同源）
+  const activeTodos = (focusTodos?.todos ?? todos).filter((todo) => !todo.done).length
+  // 「有派生产出在跑」的角标：子 agent + 后台工具任务统一由 runningTaskCount 统计
+  //（与左栏树同源——树里每个节点都来自同一批块）。
+  // 语义说明：这个 tab 本身只剩待审批/压缩镜像，角标的作用是**提醒左栏有活动分支**；
+  // 因此口径必须与树一致，而不是与 tab 内容一致（否则用户会以为 tab 里有 N 条待办）。
+  const runningTasks = useAppStore((s) => runningTaskCount(s.blocks))
 
   // 标签显示名：file → 文件名；web → 当前页标题（退化到主机名）；其余 → kind 的 i18n 文案。
   const kindLabel = (k: TabKind) => t(`rp.tab.${k}`)
@@ -2225,7 +2194,9 @@ export default function RightPanel() {
   return (
     <aside className="right expanded" aria-label={t('rp.aria')}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <TodoPanel />
+        {/* 待办面板跟随「你在看谁」：看主会话 = 会话清单；看某个子智能体 = 它自己的清单
+            （子 agent 是独立上下文 → 独立 TODO，绝不回退到主会话清单）。 */}
+        <TodoPanel scope={focusTodos?.scope ?? 'main'} todos={focusTodos?.todos} />
         <div className="rtabs" role="tablist" aria-label={t('rp.aria')}>
           <button
             className="rtabs-more"
