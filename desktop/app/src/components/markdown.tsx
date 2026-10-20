@@ -20,6 +20,21 @@ import { copyText } from '../lib/clipboard'
 import { displayPath, isLocalAssetSrc, resolveLocalAssetPath, useLocalAsset } from '../lib/localAsset'
 import { t as tStatic, useLang, useT } from '../i18n'
 
+// 沙箱 UI 回复协议的校验常量 —— 与 vendor/visual-skills/visual-ui/references/reply-protocol.md
+// 的「Receiving」一节逐条对应。改这里必须同步改协议文档，反之亦然：
+// 两边漂移的表现是「widget 发了、宿主静默丢弃」，不报错，极难查。
+// 无 zod 依赖（本仓不新增前端校验库），手写足够 —— 规则只有 5 条。
+const REPLY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+const WIDGET_REPLY_KINDS: ReadonlySet<string> = new Set([
+  'choice',
+  'submit',
+  'rate',
+  'confirm',
+  'custom',
+])
+const WIDGET_REPLY_MAX_TEXT = 2000 // 单条回复正文上限（字符）
+const WIDGET_REPLY_MAX_DATA = 4096 // data 序列化后上限（字节）
+
 // mermaid 懒加载单例（与 shiki 同策略）：首次出现 mermaid 块才动态 import。
 // 避免初始 bundle 拖入 mermaid 本体（体积大，走独立 chunk）。
 let mermaidP: Promise<typeof import('mermaid')> | null = null
@@ -600,7 +615,20 @@ function canvasCss(theme: 'ink' | 'paper'): string {
 // 悬停等于「永远不浮出」。故复用已有的探针通道：子文档 mousemove → postMessage
 // 上报 → 父组件置 frameHover；「移出」则由父文档侧反推（能收到父文档指针事件 =
 // 指针已不在 iframe 上）。回归见 e2e/verify_html_preview_chrome.mjs。
-function HtmlPreviewBlock({ code }: { code: string }) {
+// streaming：本次 Markdown 仍在增长（assistant 块未结束）。
+//
+// **流式中不挂 iframe**（2026-10 真机事故）。原因不是"性能"，是正确性：
+//   - 流式时 code 每来一个 token 就变 → doc 重算 → srcDoc 变化 → iframe **整帧重载**。
+//     重载瞬间是空白（.htmlblock-frame 的底色），用户看到的就是"白板 + 闪烁"；
+//   - 更糟的是**半截 HTML 会被执行**：模型还没写完 `<script>` 时，浏览器把这段
+//     不完整的 JS 当脚本跑，抛 `Unexpected end of input`；而我们在末尾追加的探针
+//     `<script>` 会被那个未闭合的 `<script>` 吞进去一起解析 → about:srcdoc 上刷出
+//     十几条 SyntaxError（实测一次流式 12 条）。这不是"警告"，是模型代码真的被执行坏了。
+//
+// 故流式中只渲染与主题一致的骨架（高度固定，避免布局跳动），等围栏闭合/流结束后
+// 一次性挂 iframe。用户感知：先看到"正在生成"，结束后看到完整成品 —— 与修复前
+// "最后才显示完整 UI" 的观感一致，但过程不再闪、不再报错。
+function HtmlPreviewBlock({ code, streaming }: { code: string; streaming?: boolean }) {
   const t = useT()
   const resolved = useResolvedTheme()
   const ap = useAppearance()
@@ -666,12 +694,56 @@ function HtmlPreviewBlock({ code }: { code: string }) {
     return () => clearTimeout(timer)
   }, [code])
 
-  // 接收 iframe 内探针上报（校验来源：只认本组件 iframe）：高度 + 悬停。
+  // 接收 iframe 内探针上报：高度 + 悬停 + 「把这句话发回会话」。
+  //
+  // 校验分三层，缺一不可：
+  //  ① e.source —— 只认**本组件这个** iframe 的 window。沙箱是 opaque origin，
+  //     e.origin 恒为 "null"，用它判来源等于没判；页面里若有多块 UI，靠 source
+  //     才能区分「哪一块发的」（否则 A 块能冒充 B 块）。
+  //  ② __haireply === 1 —— 版本闸。未来协议升级时旧宿主自然丢弃新消息。
+  //  ③ shape —— id/kind/text/data 逐个校验，形状不对就丢，不做任何纠正/截断
+  //     （"尽力修复"会把畸形输入变成看似合法的输入）。
+  //
+  // 语义：**只写进草稿，绝不自动发送**。回复绕过 composer 就等于给生成代码开了
+  // 一条读者看不见的对模型信道（prompt injection）。文本一律当纯文本进 textarea，
+  // 这里不做任何 HTML 渲染。
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
       if (e.source !== frameRef.current?.contentWindow) return
-      const d = e.data as { __htmlh?: number; __htmlhover?: number } | null
-      if (!d || (d.__htmlh === undefined && d.__htmlhover === undefined)) return
+      const d = e.data as {
+        __htmlh?: number
+        __htmlhover?: number
+        __haireply?: number
+        id?: unknown
+        kind?: unknown
+        text?: unknown
+        data?: unknown
+      } | null
+      if (!d || typeof d !== 'object') return
+
+      if (d.__haireply === 1) {
+        probeSeenRef.current = true // 能发回复说明探针活着，不需要再等超时判死
+        const id = d.id
+        const kind = d.kind
+        const text = d.text
+        if (typeof id !== 'string' || !REPLY_ID_RE.test(id)) return
+        if (typeof kind !== 'string' || !WIDGET_REPLY_KINDS.has(kind)) return
+        if (typeof text !== 'string') return
+        const body = text.trim()
+        if (!body || text.length > WIDGET_REPLY_MAX_TEXT) return
+        if (d.data !== undefined) {
+          if (typeof d.data !== 'object' || d.data === null || Array.isArray(d.data)) return
+          try {
+            if (JSON.stringify(d.data).length > WIDGET_REPLY_MAX_DATA) return
+          } catch {
+            return
+          }
+        }
+        useAppStore.getState().receiveWidgetReply(body, id)
+        return
+      }
+
+      if (d.__htmlh === undefined && d.__htmlhover === undefined) return
       probeSeenRef.current = true
       const h = d.__htmlh
       if (typeof h === 'number' && h > 0) setHeight(Math.min(Math.max(h + 2, 40), MAX_H))
@@ -735,6 +807,24 @@ function HtmlPreviewBlock({ code }: { code: string }) {
     // 未落盘的纯展示代码块：内容本身即展示对象 → 右侧侧边栏（web tab）展示。
     // 有落盘文件的场景由 write_file 工具卡「打开」负责（file://），此处不猜路径。
     void useAppStore.getState().openHtmlContentInBrowser(cleanDoc)
+  }
+
+  // 流式中：不挂 iframe（见组件头注释）。骨架高度跟内容走一个保守估计，
+  // 且**不留白底** —— 底色用主题 token，深色主题下不会出现刺眼白块。
+  if (streaming) {
+    return (
+      <div ref={blockRef} className="htmlblock htmlblock-streaming">
+        <div className="htmlblock-hd hd-on">
+          <span className="htmlblock-tabs">
+            <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{t('md.htmlGenerating')}</span>
+          </span>
+          <span className="grow" />
+        </div>
+        <div className="htmlblock-skeleton" aria-busy="true" aria-live="polite">
+          <span className="mono">{t('md.htmlGeneratingHint')}</span>
+        </div>
+      </div>
+    )
   }
 
   const frame = (
@@ -935,7 +1025,7 @@ function MarkdownImage({ src, alt, baseDir, workspace, ...rest }: {
 // 流式中也实时渲染（未闭合围栏暂时按行内处理，闭合后升级为代码块）。
 // memo（问题3）：流的合并渲染下，只有「正在增长的那一条」assistant 块 text 变化才重 parse。
 // baseDir：引用本文的**文件所在目录**（「最终文件」预览传；对话区不传 → 本地图锚到工作区根）。
-export const Markdown = memo(function Markdown({ text, baseDir }: { text: string; baseDir?: string }) {
+export const Markdown = memo(function Markdown({ text, baseDir, streaming }: { text: string; baseDir?: string; streaming?: boolean }) {
   const lang = useLang()
   const resolved = useResolvedTheme()
   // 工作区是本地相对图的兜底锚点（对话区没有文件可锚）；它也是主进程侧的合法性判定依据。
@@ -996,7 +1086,7 @@ export const Markdown = memo(function Markdown({ text, baseDir }: { text: string
             // mermaid 图表：```mermaid 围栏 → 渲染为 SVG（而非高亮源码）
             if (match && match[1] === 'mermaid') return <MermaidBlock code={code} />
             // HTML：iframe 沙箱实时预览（渲染/源码可切换，见 HtmlPreviewBlock）
-            if (match && (match[1] === 'html' || match[1] === 'html-preview')) return <HtmlPreviewBlock code={code} />
+            if (match && (match[1] === 'html' || match[1] === 'html-preview')) return <HtmlPreviewBlock code={code} streaming={streaming} />
             if (match) return <CodeBlock lang={match[1]} code={code} />
             if (isBlock) return <CodeBlock lang="text" code={code} />
             return <code className={className}>{children as ReactNode}</code>

@@ -169,12 +169,28 @@ export interface FileFocus {
   startLine?: number
 }
 
+// 技能清单统一刷新：**总是**带上当前会话 id，让 bridge 按该会话选中的模型给出能力面。
+// 散落在各处手写 `send({type:'skills', payload:{}})` 的教训：漏传 session_id 时 bridge
+// 退回"不过滤"，响应里就没有 unavailable_reason —— 面板把「当前模型不支持」重新显示成
+// 「可用」，而 loop 里的清单仍然过滤着（两处不一致，且只在刷新后出现）。
+// 无活跃会话时 payload 为空（bridge 同样退回不过滤，与历史行为一致）。
+function skillsPayload(): Record<string, unknown> {
+  const sid = useAppStore.getState().activeSessionId
+  return sid ? { session_id: sid } : {}
+}
+
 // 技能（SkillsPage / /skill 面板数据源）：bridge skills 命令返回全部技能（含启用标志，真过滤）
 export interface SkillInfo {
   name: string
   description: string
+  // enabled 的真实含义取决于 unavailableReason：两者都为空 = 可用。
+  // 有 unavailableReason 时 enabled=false 但**不是用户禁用**——是当前会话选中的模型/
+  // 工具集不满足技能的 requires（见后端的 skill_capability.go）。区分这两者很重要：
+  // 写成"已禁用"会让用户去反复拨开关，而真正要改的是模型。
   enabled: boolean
   source?: string // 远程安装的技能：来源 URL（SkillsPage 区分远端 + 更新/卸载）
+  requires?: { input?: string[]; tools?: string[] } // 技能声明的运行期能力需求
+  unavailableReason?: string // 非空 = 当前模型/工具集不满足 requires（换模型即可）
 }
 export interface SkillDetail {
   name: string
@@ -2504,12 +2520,23 @@ interface AppState {
   pendingQueue: QueuedInput[]
   runningAgentCount: number // 活跃会话镜像：运行中的子 agent 数（右栏角标/Agent tab）
   busySids: ReadonlySet<string> // 正在运行（有 running run 节点）的会话 id 集合（左栏运行点；事件级维护，不随 chunk 扫描）
+  // 沙箱 UI（visual-ui 生成的 html 块）回传的待发送文本：
+  //   iframe → postMessage(__haireply) → markdown.tsx 校验 → 写这里 →
+  //   Composer 订阅后追加进草稿并**立即清空**（一次性信号）。
+  // 为什么不走 props：Composer 与 Narrative/Markdown 是兄弟节点（都挂在 CenterPanel），
+  // 中间隔着一层，透传回调会污染 4 个组件的签名；而"发到输入框"本质是全局意图。
+  // 为什么不存进 Composer 的 draftTexts：那个 state 是 Composer 私有的，外部写不进去。
+  widgetReply?: { id: string; text: string; ts: number }
 
   start(workspace?: string): Promise<void>
   autoBoot(): void // 启动：有持久项目 → 直接恢复（跳过 BootScreen）；无 → 保持 idle
   newSession(): void
   renameSession(path: string, sid: string, title: string): void
   setActiveSession(id: string, projectPath?: string): void
+  // 收下沙箱 UI 的回复（markdown 校验后调用）；Composer 消费后调 clearWidgetReply。
+  // 同 id 重复投递被丢弃（iframe 重挂载/重复点击都会重发同一条）。
+  receiveWidgetReply(text: string, id: string): void
+  clearWidgetReply(): void
   setActiveWorkspace(path: string): void // 切换活跃工作区（注册缺失项目 + 水合列表，不自动建会话）
   toggleWorkspacePin(path: string): void // 工作区置顶/取消置顶（最多 5 个，持久化）
   toggleSessionPin(path: string, sid: string): void // 会话置顶/取消置顶（每工作区最多 5 个，持久化到 bridge）
@@ -3887,7 +3914,7 @@ export function dispatchEvent(raw: AnyEvent): void {
       // /reload_skills 成功：bridge 已重扫 .agents/skills + .go-code/skills —— 立即刷新技能清单
       //（/ 自动补全 + SkillsPage 即时反映新增/修改的技能）
       if (t === 'command' && (line === '/reload_skills' || line === '/reload_skills ')) {
-        send({ type: 'skills', payload: {} })
+        send({ type: 'skills', payload: skillsPayload() })
       }
       const d = r.data || {}
       const respWs = typeof r.workspace === 'string' ? r.workspace : ''
@@ -3950,6 +3977,10 @@ export function dispatchEvent(raw: AnyEvent): void {
       if (t === 'switch_model') {
         if (!currentConfigResponse) break
         if (typeof d.model === 'string') setState({ model: d.model })
+        // 换模型 → 技能能力面变了（需要图/多模态的技能可能新出现或消失）。
+        // 必须重拉清单：否则技能面板与斜杠补全停留在旧模型的可见集合上，
+        // 而真实 loop 已经按新模型过滤过一轮（两处不一致）。
+        if (getState().inSkills) getState().fetchSkills()
         // bridge 回执目标 provider（自动切活跃后）→ 同步 store 活跃 Provider，保持 UI 一致
         if (typeof d.provider === 'string' && d.provider) {
           setState((s) => {
@@ -4003,7 +4034,17 @@ export function dispatchEvent(raw: AnyEvent): void {
       if (t === 'skills') {
         const skillWorkspace = respWs || meta?.workspace || ''
         if (skillWorkspace && skillWorkspace !== getState().workspace) break
-        if (Array.isArray(d.skills)) setState({ skills: d.skills as SkillInfo[] })
+        // bridge 用 snake_case（unavailable_reason）；前端接口是 camelCase。
+        // 在这里归一而不是让组件两处都认：组件读错一个字段名的表现是"原因永远不显示"，
+        // 静默且难查（与工具块的 differs 归一同一处理方式）。
+        if (Array.isArray(d.skills)) {
+          setState({
+            skills: (d.skills as Array<SkillInfo & { unavailable_reason?: string }>).map((x) => ({
+              ...x,
+              unavailableReason: x.unavailable_reason || undefined,
+            })),
+          })
+        }
         break
       }
       // skill_get：技能详情（SKILL.md 指令 + 资源清单；预览）
@@ -6711,6 +6752,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     send({ type: 'new_session' }, true) // send() 注入当前 workspace → 在活跃工作区下建会话
   },
 
+  // 沙箱 UI 回复入草稿通道（协议见 vendor/visual-skills/visual-ui/references/reply-protocol.md）。
+  // 只在 markdown.tsx 完成 e.source 校验 + shape 校验后调用；这里再做一层防御：
+  // 长度/类型/去重，因为 store 是全局可写的，不能假设调用方守规矩。
+  receiveWidgetReply: (text, id) => {
+    if (typeof text !== 'string') return
+    const body = text.trim()
+    if (!body || body.length > 2000) return
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return
+    const prev = get().widgetReply
+    if (prev && prev.id === id) return // 同一动作重复投递（iframe 重挂载/连点）：丢弃
+    set({ widgetReply: { id, text: body, ts: Date.now() } })
+  },
+
+  clearWidgetReply: () => {
+    if (get().widgetReply) set({ widgetReply: undefined })
+  },
+
   // 切换活跃工作区：注册（缺失则加入项目树）→ 激活 → 水合该工作区会话列表。
   // 不登记 recoverPaths → list 只并入列表，不自动建/恢复会话（新建会话是显式动作）。
   setActiveWorkspace: (path) => {
@@ -6733,7 +6791,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
     persistProjects(get())
     send({ type: 'list', payload: { workspace: path } })
-    send({ type: 'skills', payload: { workspace: path } }) // 自动加载对应工作目录内 .agents/skills + .go-code/skills
+    // 自动加载对应工作目录内 .agents/skills + .go-code/skills。
+    // 同时带 session_id（若有活跃会话）：切工作区后技能面板也要按当前模型给能力面。
+    send({ type: 'skills', payload: { workspace: path, ...skillsPayload() } })
     get().loadWsGit() // 工作区级 git 自动识别：无需先建会话，状态栏/变更面板立即可见
     get().loadWsGitHistory() // 提交历史同步拉取（docs/DESKTOP_GIT.md 刷新策略矩阵）
   },
@@ -7531,7 +7591,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   // 技能清单：进 SkillsPage / 开 /skill 面板时拉取
-  fetchSkills: () => send({ type: 'skills', payload: {} }),
+  // 带 session_id：bridge 按该会话**选中的模型**给出能力面，从而标出「当前模型用不了」
+  // 的技能及其原因。无活跃会话（如刚启动）→ 不带，bridge 退回不过滤（与历史行为一致）。
+  fetchSkills: () => send({ type: 'skills', payload: skillsPayload() }),
 
   // 上下文构成分区：Composer ctx 环 hover 时拉取（一次往返，毫秒级；响应见 command_response
   // 分发的 context_breakdown 分支）。无活跃会话（未建会话/恢复中）→ 不发命令（面板显示空态）。
@@ -7576,7 +7638,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleSkill: (name, enabled) => {
     set((s) => ({ skills: s.skills.map((x) => (x.name === name ? { ...x, enabled } : x)) }))
     send({ type: 'skill_toggle', payload: { name, enabled } })
-    send({ type: 'skills', payload: {} })
+    // 回拉确认带 session_id（skillsPayload）：否则响应里没有能力面，unavailableReason
+    // 会被抹掉、面板把「模型不支持」重新显示成「可用」。
+    send({ type: 'skills', payload: skillsPayload() })
   },
   getSkill: (name) => send({ type: 'skill_get', payload: { name } }),
   closeSkill: () => set({ skillDetail: undefined }),
@@ -7608,7 +7672,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const payload: Record<string, unknown> = { url, scope }
     if (name) payload.name = name
     send({ type: 'skill_install', payload })
-    send({ type: 'skills', payload: {} })
+    send({ type: 'skills', payload: skillsPayload() })
   },
   // 浏览远程市场（skill_browse，只读）：清旧结果 → 请求；响应经 dispatchEvent 落 marketSkills
   browseMarket: (url) => {
@@ -7622,11 +7686,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   updateSkill: (name) => {
     send({ type: 'skill_update', payload: { name } })
-    send({ type: 'skills', payload: {} })
+    send({ type: 'skills', payload: skillsPayload() })
   },
   uninstallSkill: (name) => {
     send({ type: 'skill_uninstall', payload: { name } })
-    send({ type: 'skills', payload: {} })
+    send({ type: 'skills', payload: skillsPayload() })
   },
   // —— 市场管理（SkillsPage）：保存市场免手填 + 按市场更新已装技能 ——
   fetchMarkets: () => send({ type: 'market_list', payload: {} }),
@@ -7640,7 +7704,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   updateMarketSkills: (url) => {
     send({ type: 'skill_update_market', payload: { url } })
-    send({ type: 'skills', payload: {} })
+    send({ type: 'skills', payload: skillsPayload() })
     send({ type: 'market_list', payload: {} })
   },
 

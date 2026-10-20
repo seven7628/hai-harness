@@ -387,7 +387,9 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
           {b.thinking && <Thinking text={b.thinking} live={b.streaming} thinkMs={b.thinkMs} thinkStart={b.thinkStart} />}
           {b.text || b.streaming ? (
             <div className="md-text">
-              {b.text ? <Markdown text={b.text} /> : null}
+              {/* streaming 透传：流式中 HTML 围栏不挂 iframe（半截 <script> 会被执行、
+                  且 srcDoc 每 token 重载 = 白板闪烁，见 HtmlPreviewBlock 注释）。 */}
+              {b.text ? <Markdown text={b.text} streaming={b.streaming} /> : null}
               {!b.streaming && (
                 <AssistantTurnMeta b={b} />
               )}

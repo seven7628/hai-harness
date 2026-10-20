@@ -288,6 +288,10 @@ type bridgeSession struct {
 	subagentEffort *subagentEffortRef
 	model          string // 当前模型（switch_model 设置；下一次请求生效）
 	provider       string // 当前 provider（set_provider 重建时更新；emit 打标价表用）
+	// skillCaps 本会话的技能能力面（装配期算好后随 loop 换代一起替换；见
+	// skill_capability.go）。宿主 UI 与 skills 命令读它，**不重算** —— 重算会让
+	// 「面板显示可用的技能」与「loop 实际注入的清单」变成两个事实源。
+	skillCaps *skills.Capabilities
 	// providerExplicit 本会话 Provider 是否由用户显式指定（switch_model 携带 provider /
 	// 新会话 UI 指定）。true 时 rebuildAll 不再按模型名全局字母序重解析归属——
 	// 避免「glm-5.3-flash 同时存在于 opencode+zhipu 时被字母序改写到 opencode」
@@ -981,7 +985,13 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	if err := ensureOfficeSkillsSynced(); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ 办公技能同步失败: %v\n", err)
 	}
-	startupLog("A5.officeSkillsSynced", officeSyncStart)
+	// 视觉/UI 技能（2026-10）：同一套同步机制，源目录 = GO_CODE_VISUAL_SKILLS_DIR
+	// （dev = desktop/vendor/visual-skills，打包 = Resources/visual-skills）。
+	// ⚠ 与上方同理必须早于 buildSkillsRegistry（注册表只扫一次目录）。
+	if err := ensureVisualSkillsSynced(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ 视觉技能同步失败: %v\n", err)
+	}
+	startupLog("A5.officeSkillsSynced", officeSyncStart) // 名字保留：启动日志的既有消费方按它计时
 	// ego-browser skill 随包分发同步（2026-09）：内置 skill（Resources/ego-browser-skill）
 	// → ~/.agents/skills/ego-browser（不存在才复制）。保证未装 ego lite 的机器上
 	// 打包版也能在技能面板看到 ego-browser（对齐 browser/computer 的 vendor 同步）。
@@ -1183,7 +1193,7 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	var s *session.Session
 	sk := m.runtime(wsPath).skills // 工作区技能注册表（WithSkills + load_skill 共享）
 	loopStart := time.Now()
-	loop, effortRef := m.buildLoop(wsPath, id, m.provCfg.providerName(), m.preferredModel(), effort,
+	loop, effortRef, skillCaps := m.buildLoop(wsPath, id, m.provCfg.providerName(), m.preferredModel(), effort,
 		func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
 	startupLog("A6.buildLoop", loopStart)
 	nsStart := time.Now()
@@ -1227,7 +1237,7 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, s: s, loop: loop, effort: effort, subagentEffort: effortRef, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw}
+	bs = &bridgeSession{id: id, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw}
 	if opts.cronEvDir != "" {
 		bs.cronEvDir = opts.cronEvDir
 	}
@@ -2481,7 +2491,14 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
-		m.resp(c, true, "", map[string]any{"skills": m.skillList(ws)})
+		// 带 session_id 时按该会话的**选中模型**给出能力面：面板能标出「当前模型用不了」
+		// 及其原因（而不是把所有技能都显示成可用、等用户点了才发现加载失败）。
+		// 不带（老前端/技能页未选会话）→ nil = 不过滤，与历史行为一致。
+		var caps *skills.Capabilities
+		if sid != "" {
+			caps = m.sessionSkillCapabilities(ws, sid)
+		}
+		m.resp(c, true, "", map[string]any{"skills": m.skillList(ws, caps)})
 
 	case CmdMemorySettings: // 读取 Project Memory 开关（设置面板打开时）
 		p := m.memPrefs.load()
@@ -3544,18 +3561,41 @@ func buildSubagentRegistry(ws string) *subagent.DefinitionRegistry {
 }
 
 // skillList 取工作区注册表全部技能元数据（含 Enabled 标志，宿主 UI 展示；远端技能附来源）。
-func (m *manager) skillList(wsPath string) []map[string]any {
+//
+// caps 非 nil 时额外给出 unavailable_reason（按**会话选中模型**判定的能力不足原因）：
+// 面板要能区分「用户禁用」和「当前模型用不了」—— 后者写成"已禁用"会让用户
+// 去技能面板反复开关，而真正要换的是模型。nil = 旧口径（只看启用集）。
+func (m *manager) skillList(wsPath string, caps *skills.Capabilities) []map[string]any {
 	reg := m.runtime(wsPath).skills
 	src := m.remoteSources()
 	out := []map[string]any{}
-	for _, d := range reg.All() {
+	for _, d := range reg.AllFor(caps) {
 		item := map[string]any{"name": d.Name, "description": d.Description, "enabled": d.Enabled}
+		if !d.Requires.Empty() {
+			item["requires"] = map[string]any{"input": d.Requires.Input, "tools": d.Requires.Tools}
+		}
+		if why := reg.UnavailableFor(d.Name, caps); why != "" {
+			item["unavailable_reason"] = why
+		}
 		if s, ok := src[d.Name]; ok {
 			item["source"] = s // 远程安装的技能：展示来源（SkillsPage 区分远端）
 		}
 		out = append(out, item)
 	}
 	return out
+}
+
+// sessionSkillCapabilities 某会话当前的能力面（skills 命令用；会话不存在 → nil = 不过滤）。
+// 与 loop 里的那份**同源同算法**（skillCapabilitiesFor），只是这里按会话读 model/provider。
+func (m *manager) sessionSkillCapabilities(wsPath, sid string) *skills.Capabilities {
+	bs := m.get(wsPath, sid)
+	if bs == nil {
+		return nil
+	}
+	// 读装配期存下的那份（buildLoop 里算完立刻写入）：与 loop 注入清单的**同一对象**。
+	// 重算会引入第二个事实源（persona → 工具集的映射、MCP/插件是否启用都要重判一次），
+	// 而漂移的表现是「面板说可用、模型加载失败」，最难排查。
+	return bs.skillCaps
 }
 
 // persistSkillsDisabled 从注册表当前状态同步持久化禁用集（skill_toggle 后调用）。
@@ -3976,6 +4016,10 @@ func buildPersonaLoop(eng *tools.Engine, workspace, sid string, pc *providerConf
 		agents.WithUserAgentMDDir(globalAgentMDDir()), // 用户级 ~/.agents/AGENTS.md（优先级低于工作区层）
 		agents.WithWorkingDir(workspace),              // Current Workspace 环境层：声明子任务文件操作根目录
 		agents.WithSkills(sk),                         // 技能发现清单注入 system（渐进披露；与主会话同实例，启用过滤一致）
+		// 能力面按**共享引擎的实际工具集**算（子 agent 继承主 Agent 全部工具，所以与主
+		// 会话通常同结果；但 keep it computed —— 引擎是可变的，凭"应该一样"写死会在
+		// 将来给子 agent 裁工具时静默错位）。模型同为父会话选中的那个。
+		agents.WithSkillCapabilities(skillCapabilitiesFor(pc, prov, model, eng)),
 		// 2026-08-22：拷贝主 Agent 的上下文窗口与压缩配置（**拷贝而非共享**）——
 		// 此前子 loop 缺省（无窗口/无压缩器），长任务上下文无限增长、必然撞超限。
 		// 独立 NewLLMCompressor 实例：与主 loop 的压缩器互不影响（各自状态/调用互不干扰）。
@@ -4032,17 +4076,25 @@ const exploreToolDescription = "Run a dedicated Explore subagent to analyze a us
 // exploreToolEngine Explore 子 agent 的受限工具引擎：注入 read_file / grep / glob / bash
 // + load_skill（技能渐进披露激活；2026-08-30 起 Explore 也能用技能，清单经 WithSkills 注入）。
 // 不注入写变更工具（专职问题分析，不落写变更）。暴露为函数便于单测守卫工具集。
-func exploreToolEngine(workspace string, sk *skills.Registry) *tools.Engine {
-	allowed := map[string]bool{"read_file": true, "grep": true, "glob": true, "bash": true}
+// exploreAllowedTools Explore 子 agent 允许的工具名（单一事实源：下面的装配循环与
+// 能力面计算都读它，两处各写一份会漂移成「能力面以为有 bash、实际没注册」）。
+var exploreAllowedTools = []string{"read_file", "grep", "glob", "bash"}
+
+// exploreToolEngine Explore 子 agent 的窄工具集（read_file/grep/glob/bash + load_skill）。
+// caps 由调用方按**本会话模型 + 本窄工具集**算好传入（能力面与清单必须同源，
+// 见 skill_capability.go）。sk == nil 时不注册 load_skill。
+func exploreToolEngine(workspace string, sk *skills.Registry, caps *skills.Capabilities) *tools.Engine {
+	allowed := make(map[string]bool, len(exploreAllowedTools))
+	for _, n := range exploreAllowedTools {
+		allowed[n] = true
+	}
 	eng := tools.NewToolEngine()
 	for _, t := range builtin.NewFileTools(workspace).Tools() {
 		if allowed[t.Name()] {
 			eng.RegisterTool(context.Background(), t)
 		}
 	}
-	if sk != nil {
-		eng.RegisterTool(context.Background(), skills.NewLoadSkillTool(sk)) // load_skill：技能激活（禁用技能拒绝）
-	}
+	registerLoadSkill(context.Background(), eng, sk, caps, nil)
 	return eng
 }
 
@@ -4053,11 +4105,16 @@ func buildExploreLoop(workspace, sid string, pc *providerConfig, prov, model, ef
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
+	// 能力面用**窄工具集**（不是主会话那份）：Explore 只有四个只读/执行工具，
+	// 声明 requires.tools: [run_python] 的技能对它必须不可见（它确实跑不了）。
+	// 同一份对象同时喂给清单（WithSkillCapabilities）与 load_skill（registerLoadSkill），
+	// 保证「清单里没有的，工具也取不到」。
+	exploreSkillCaps := skillCapabilitiesForTools(pc, prov, model, exploreAllowedTools)
 	opts := []agents.Option{
 		agents.WithProvider(pc.newProvider(prov)),
 		agents.WithProviderName(prov),
 		agents.WithModel(model),
-		agents.WithToolEngine(exploreToolEngine(workspace, sk)),
+		agents.WithToolEngine(exploreToolEngine(workspace, sk, exploreSkillCaps)),
 		agents.WithReasoningEffort(provider.ReasoningEffortLevel(effort)),
 		// 2026-09-18 统一超时/重试策略（与主 loop 一致）：首字预算 30s（agents 层），
 		// HTTP 层 60s 次级兜底 + 不限
@@ -4066,10 +4123,11 @@ func buildExploreLoop(workspace, sid string, pc *providerConfig, prov, model, ef
 		agents.WithMaxRetries(11),
 		agents.WithRetryBackoff(agents.FixedBackoff(time.Second)),
 		agents.WithSystemPrompt(prompt.DesktopExploreV2),
-		agents.WithAgentMDDir(workspace),              // 共享工作区 AGENTS.md/CLAUDE.md
-		agents.WithUserAgentMDDir(globalAgentMDDir()), // 用户级 ~/.agents/AGENTS.md（优先级低于工作区层）
-		agents.WithWorkingDir(workspace),              // Current Workspace 环境层
-		agents.WithSkills(sk),                         // 技能发现清单注入 system（渐进披露；与主会话同实例）
+		agents.WithAgentMDDir(workspace),               // 共享工作区 AGENTS.md/CLAUDE.md
+		agents.WithUserAgentMDDir(globalAgentMDDir()),  // 用户级 ~/.agents/AGENTS.md（优先级低于工作区层）
+		agents.WithWorkingDir(workspace),               // Current Workspace 环境层
+		agents.WithSkills(sk),                          // 技能发现清单注入 system（渐进披露；与主会话同实例）
+		agents.WithSkillCapabilities(exploreSkillCaps), // 与 load_skill 同一份能力面（窄工具集 + 本会话模型）
 		// 2026-08-22：拷贝主 Agent 的上下文窗口与压缩配置（**拷贝而非共享**）——
 		// 此前 Explore 子 loop 缺省（无窗口/无压缩器），长分析（大 grep/多文件）上下文
 		// 无限增长、必然撞模型窗口。独立 NewLLMCompressor 实例：与主 loop 互不影响。
@@ -4265,13 +4323,9 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 		eng.RegisterTool(context.Background(), builtin.NewGitWorktreeTool(workspace))
 	}
 	eng.RegisterTool(context.Background(), question.NewTool(qw)) // ask_user：模型→用户提问（HITL 反方向）
-	loadSkill := skills.NewLoadSkillTool(sk)                     // load_skill：技能渐进披露激活（禁用技能拒绝）
-	// ego lite 激活钩子（2026-09）：加载 ego-browser 技能（引擎=ego）→ 首次把 ego lite
-	// 窗口带到前台 + UI 提示（模型决定用 ego 浏览器的语义起点，比 bash 触发更精准）。
-	if egoOnLoad != nil {
-		loadSkill.WithOnLoad(egoOnLoad)
-	}
-	eng.RegisterTool(context.Background(), loadSkill)
+	// load_skill 的注册**必须在本函数末尾**（见结尾 registerLoadSkill）：它的能力面
+	// 需要「本会话完整的工具集」——MCP / 插件 / codemode / cron / mesh 工具都在它之后
+	// 注册，提前注册会让「依赖 mcp__x__y 的技能」被判成不可用（见 skill_capability.go）。
 	if mcpm != nil {
 		// MCP 工具（mcp__<server>__<tool>）：惰性连接（connectTimeout 内），连接失败
 		// 的服务器跳过（状态经 mcp_list 暴露，retryCooldown 防反复阻塞）。
@@ -4318,6 +4372,11 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	// codemode.go 文件头。沙箱/解释器/store/工具表都在 registerCodemode 里接（与 bash、
 	// run_python 同一个 sbx 实例、同一个工作区锚）。开关热更新走 reload_settings（rebuildAll）。
 	registerCodemode(eng, workspace, sid, sbx, loadCodemodeSettingsQuiet())
+	// load_skill：技能渐进披露激活。**放在最后**——它的能力面（skillCapabilitiesFor）
+	// 要读 eng 的完整工具集，提前注册会漏掉 MCP/插件/codemode/cron/mesh 工具，
+	// 于是声明 requires.tools 的技能会被误判不可用。
+	registerLoadSkill(context.Background(), eng, sk,
+		skillCapabilitiesFor(pc, prov, model, eng), egoOnLoad)
 	return eng, effortRef
 }
 
@@ -4327,7 +4386,7 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 // 模型窗口（WithContextWindow）与输出上限（WithMaxTokens）按 prov 显式解析（问题六：
 // 不随全局活跃 Provider 漂移——跨 Provider 会话重建时窗口/端点/价表保持本会话归属）。
 // Provider 面板标记 1M / 配置 max_tokens 的模型 → 真 1M 上下文 + 对应单次输出上限。
-func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef) {
+func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -4409,8 +4468,14 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	if profile.replaceBase {
 		opts = append(opts, agents.WithBaseSystemPrompt(""))
 	}
+	// 技能能力面：按**本会话选中的模型** + 本 persona 的工具集算（见 skill_capability.go）。
+	// 放在 newSessionEngine 之后才能拿到已注册的工具集；Explore/子 agent 各用自己那份引擎。
+	// 返回值交给 rebuildLoop 存进 bridgeSession.skillCaps —— 宿主 UI 的 skills 命令读同一份，
+	// 保证「面板显示可用的」== 「loop 实际注入清单的」。
+	skillCaps := skillCapabilitiesFor(m.provCfg, prov, model, eng)
 	opts = append(opts,
 		agents.WithSkills(sk),                                // 技能发现清单注入 system（渐进披露）+ /skills 命令
+		agents.WithSkillCapabilities(skillCaps),              // 清单/命令/load_skill 三处同源过滤（按选中模型）
 		agents.WithSubagents(m.runtime(workspace).subagents), // 自定义 subagent 清单注入 system（渐进披露）+ spawn_agent
 		agents.WithAgentMDDir(workspace),                     // 工作区 AGENTS.md/CLAUDE.md 递归发现（工作记忆层）
 		agents.WithUserAgentMDDir(globalAgentMDDir()),        // 用户级 ~/.agents/AGENTS.md（跨工作区，优先级最低）
@@ -4480,7 +4545,11 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	startupLog("A7.NewAgentLoop", loopStart)
 	// 同时返回子 agent 档位持有者：bridgeSession 保存它，switch_effort 据此同步
 	// 子 agent（spawn/explore/文件化人设 loop）—— 子 agent 追随主 loop。
-	return loop, effortRef
+	//
+	// 第三项 = 本次装配用的技能能力面：调用方（rebuildLoop / 会话创建）存进
+	// bridgeSession.skillCaps，宿主 UI 的 skills 命令读同一对象 ——
+	// 保证「面板显示可用的」与「loop 实际注入清单的」是同一份判定，不是两次重算。
+	return loop, effortRef, skillCaps
 }
 
 // rebuildLoop 按当前 persona/model/effort 重建会话 loop（switch_model/switch_persona/set_provider 共用）。
@@ -4488,11 +4557,12 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 // 跨 Provider 会话不随全局活跃漂移），重建即应用新配置（热切换不重启 bridge）。
 func (m *manager) rebuildLoop(bs *bridgeSession) {
 	profile := profiles[bs.persona]
-	loop, effortRef := m.buildLoop(bs.workspace, bs.id, bs.provider, bs.model, bs.effort,
+	loop, effortRef, caps := m.buildLoop(bs.workspace, bs.id, bs.provider, bs.model, bs.effort,
 		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, m.runtime(bs.workspace).skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
 	bs.s.SetLoop(loop)
 	bs.loop = loop
 	bs.subagentEffort = effortRef // 子 agent 档位持有者随新引擎换代（旧引擎的 loop 已废弃）
+	bs.skillCaps = caps           // 与本次 loop 注入清单的**同一对象**（skills 命令读它）
 }
 
 // setGoalAlignmentReminderRounds 把运行中的提醒阈值同步到所有已创建会话。

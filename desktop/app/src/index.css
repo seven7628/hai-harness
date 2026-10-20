@@ -3156,6 +3156,37 @@ body.is-electron .left.collapsed .rail .rbtn {
   border: 0;
   background: #fff;
 }
+/* 流式骨架：**不许白底**。修复前这里是 iframe 在反复重载，白色底一闪一闪；
+   现在换成主题底色的占位块，深色主题下不会出现刺眼白块（2026-10 真机反馈）。 */
+.htmlblock-streaming .htmlblock-skeleton {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+  min-height: 64px;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+/* 生成中的呼吸提示：尊重 reduced-motion（不动的用户不该被强制看动画）。 */
+.htmlblock-streaming .htmlblock-skeleton::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: htmlblockPulse 1.2s ease-in-out infinite;
+  flex: none;
+}
+@keyframes htmlblockPulse {
+  0%, 100% { opacity: .25; }
+  50%      { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .htmlblock-streaming .htmlblock-skeleton::before { animation: none; opacity: .6; }
+}
 /* 源码模式：复用代码块样式，横向溢出内滚 */
 .htmlblock.source-mode .cb-body {
   max-height: 480px;
@@ -7251,6 +7282,21 @@ body.is-electron .cron-head {
 .skill-card .sc-state.on {
   color: var(--success);
   background: rgba(63, 185, 80, 0.12);
+}
+/* 能力不足（当前模型不支持）：与「已禁用」视觉区分，但不做成错误红 ——
+   它不是故障，是当前模型的能力边界（换模型即可）。 */
+.skill-card .sc-state.cap {
+  color: var(--ochre);
+  background: rgba(217, 174, 94, 0.14);
+}
+/* 原因一行：默认单行省略（卡片高度必须一致），完整内容在 title 与详情里。 */
+.skill-card .sc-cap-reason {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .skill-card .sc-remote {
   font-size: 10px;

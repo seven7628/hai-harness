@@ -369,6 +369,31 @@ export default function Composer() {
     }
   }
 
+  // 沙箱 UI 回复 → 草稿（协议：vendor/visual-skills/visual-ui/references/reply-protocol.md）。
+  // 约定：**追加到现有草稿末尾**（不覆盖用户已经打了一半的字），然后聚焦并移动光标到末尾。
+  // 消费后立刻 clearWidgetReply()：store 里的是**一次性信号**，不清就会在下次挂载时
+  // 重复注入同一句话（Composer 切会话不卸载，但重新挂载会重放）。
+  const widgetReply = useAppStore((s) => s.widgetReply)
+  const clearWidgetReply = useAppStore((s) => s.clearWidgetReply)
+  useEffect(() => {
+    if (!widgetReply) return
+    const text = widgetReply.text
+    clearWidgetReply()
+    if (!text) return
+    // 草稿已含同一句（用户手动贴过/连点）：不再重复追加
+    setText((prev) => (prev.includes(text) ? prev : prev + (prev && !/\s$/.test(prev) ? ' ' : '') + text))
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(el.value.length, el.value.length)
+    })
+    // draftKey 必须进依赖：setText 内部写的是**渲染时捕获的** draftKey，
+    // 不重跑就会把回复写进切换前的那个会话草稿（跨会话串扰）。这里读的是
+    // widgetReply，而它一被消费就被清空，所以加 draftKey 不会造成重复注入。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [widgetReply, clearWidgetReply, draftKey])
+
   useEffect(() => {
     // 会话切换时关闭只对原草稿有意义的临时面板；草稿正文和附件由 draftKey 自动恢复。
     setCmdMenu(false)
