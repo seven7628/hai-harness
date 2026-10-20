@@ -172,6 +172,70 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   // 会出现按钮一直转圈/错误态不消。store 是唯一事实源。
   const olderLoading = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksOlderLoading ?? false : s.blocksOlderLoading))
   const olderError = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksOlderError ?? false : s.blocksOlderError))
+  // 会话进入序号：每次 checkpoint hydrate 变化 → 重播历史渐入（见 store 的 enteredAt 注释）
+  const enteredAt = useAppStore((s) =>
+    viewSid ? s.views[viewSid]?.enteredAt ?? 0 : (s.activeSessionId ? s.views[s.activeSessionId]?.enteredAt ?? 0 : 0),
+  )
+  // enterAnimAt：数据到达那一刻（与骨架屏卸载同一帧写入）。
+  // 用它决定「什么时候播渐入」——而不是自己起一个定时器猜。
+  const enterAnimAt = useAppStore((s) => s.enterAnimAt)
+  // 骨架屏是否参与过这次切换：只有它出现过，内容渐入才需要延后 90ms 让位
+  //（避免两层半透明叠加）。纯快速切换（骨架屏从未出现）则不加延迟。
+  const skeletonPhase = useAppStore((s) => s.skeleton.phase)
+  const crossFade = skeletonPhase === 'exit' || skeletonPhase === 'visible'
+
+  // —— 历史分批铺开（真正意义上的「缓慢展示」）——
+  //
+  // 长会话首屏有 200 个块，一次性全挂 DOM 会让主线程卡住：用户看到的是
+  // 骨架屏消失后**整块内容突然凝固**几百毫秒，然后才能滚动。
+  // 这里改成按帧递增可见块数：「先出最近一屏，再往上续」。
+  //
+  // 为什么从**最新往旧**铺：会话的阅读锚点在底部（最新消息）。用户切过来
+  // 第一眼要看的是最后发生了什么，不是最早的。所以先渲染尾部。
+  //
+  // 节奏：每帧 REVEAL_PER_FRAME 个块（约 60fps → 25ms/批）。
+  // 200 块 ≈ 8 批 ≈ 200ms 铺完；而一屏可见约 8~12 块，首批就把屏幕填满了，
+  // 后续补的是上方离屏内容（被 content-visibility 跳过布局，几乎无成本）。
+  // 这样「铺开动画」与「可交互」几乎同时发生，不会让人觉得在等。
+  const REVEAL_PER_FRAME = 25
+  const [revealCount, setRevealCount] = useState<number>(Infinity)
+  useEffect(() => {
+    // 只在「会话刚进入」时铺开：正常追加（流式/新消息）不限制。
+    //
+    // 触发源只用 enterAnimAt，**不能**用 crossFade —— 后者是
+    // skeleton.phase === 'exit' | 'visible'，骨架屏退场完成后 phase 变 idle，
+    // crossFade 随之变 false → effect 重跑 → revealCount 被重置为 Infinity
+    // → 铺开中途突然全部显示（正是要避免的）。enterAnimAt 是单调的时间戳，
+    // 一次会话进入只变一次，天然稳定。
+    if (!enterAnimAt) {
+      setRevealCount(Infinity)
+      return
+    }
+    const total = blocks.length
+    if (total <= REVEAL_PER_FRAME) {
+      setRevealCount(Infinity)
+      return
+    }
+    let shown = 0
+    let raf = 0
+    const step = () => {
+      shown += REVEAL_PER_FRAME
+      if (shown >= total) {
+        setRevealCount(Infinity)
+        return
+      }
+      setRevealCount(shown)
+      raf = requestAnimationFrame(step)
+    }
+    setRevealCount(REVEAL_PER_FRAME)
+    raf = requestAnimationFrame(step)
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+    }
+    // 依赖 enterAnimAt：每次会话进入重新铺一遍；blocks.length 变化不重置
+    // （否则流式新块会把铺开进度打回起点 —— 那是明显 bug）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enterAnimAt])
   const loadOlder = useAppStore((s) => s.loadOlderBlocks)
   const onLoadOlder = useCallback(() => {
     if (olderLoading) return
@@ -339,6 +403,13 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
       setFresh((f) => (blocks.length ? true : f)) // 离开底部期间有 blocks 更新 → fresh（按钮圆点）
       return
     }
+    // 历史铺开期间**不启动**校准循环（2026-10-21）。
+    //
+    // 铺开是从尾部向上补块：每批都会让 scrollHeight 增长、且新块插在上方。
+    // 校准循环会把 scrollTop 钉到底部，与铺开+锚定补偿争夺同一个属性，
+    // 表现为每补一批就抖一下。铺开结束后 effect 因 revealCount 变化重跑，
+    // 校准循环自然接管（此时内容已完整，一次到底即可）。
+    if (revealCount !== Infinity) return
     let raf = 0
     let lastMax = -1
     const tick = () => {
@@ -354,7 +425,7 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     }
     raf = requestAnimationFrame(tick)
     return () => { if (raf) cancelAnimationFrame(raf) }
-  }, [blocks])
+  }, [blocks, revealCount])
   // 会话切换：重置贴底状态。内容到达后的持续校准由 blocks effect 统一负责
   //（覆盖 content-visibility 慢布局：rAF 循环直到内容高度稳定）。
   // 这里只重置 + 若新会话内容已在（缓存切换），先滚一次减少等待。
@@ -495,14 +566,18 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     )
   }
 
+  // 铺开进度：只渲染尾部 revealCount 个（见上方「历史分批铺开」）。
+  // 从尾部开始，是因为阅读锚点在底部（最新消息）。
+  const visibleBlocks = revealCount >= blocks.length ? blocks : blocks.slice(blocks.length - revealCount)
+
   // 连续工具块归组（并行工具上下排列），其余原样
   const items: (ReactElement | null)[] = []
-  for (let i = 0; i < blocks.length; i++) {
-    const b = blocks[i]
+  for (let i = 0; i < visibleBlocks.length; i++) {
+    const b = visibleBlocks[i]
     if (b.kind === 'tool') {
       const group: Extract<MsgBlock, { kind: 'tool' }>[] = [b]
-      while (i + 1 < blocks.length && blocks[i + 1].kind === 'tool') {
-        group.push(blocks[i + 1] as Extract<MsgBlock, { kind: 'tool' }>)
+      while (i + 1 < visibleBlocks.length && visibleBlocks[i + 1].kind === 'tool') {
+        group.push(visibleBlocks[i + 1] as Extract<MsgBlock, { kind: 'tool' }>)
         i++
       }
       items.push(<ToolGroup key={group[0].id} tools={group} liveTodoId={liveTodoId} />)
@@ -512,7 +587,15 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   }
 
   return (
-    <div className="narrative" ref={ref} aria-live="polite">
+    <div
+      className={`narrative narrative-enter${crossFade ? ' is-crossfade' : ''}`}
+      // key 里带 enterAnimAt：数据到达 → key 变 → React 重新挂载 → 动画重新从头播。
+      // 这正是「历史缓慢展示」的触发点，由数据驱动而非计时器。
+      key={`n-${enteredAt}-${enterAnimAt}`}
+      ref={ref}
+      aria-live="polite"
+      data-entered={enteredAt}
+    >
       {/* 「加载更早」放最顶部（历史往上长）。只要 hasMore 就显示 ——
           用户必须能看见「这里还有更早的内容」，绝不能因为分页而让截断后的
           首屏看起来就是全部历史（那是静默丢数据，用户红线）。 */}

@@ -1301,6 +1301,122 @@ body.is-electron .left.collapsed .rail .rbtn {
   padding-top: 40px; /* 与 padding-bottom 对称：否则视觉中心下移 16px */
 }
 /* 切换会话的加载遮罩：轻模糊 + 右上角 spinner 提示，淡入淡出 */
+/* 切换会话的骨架屏（2026-10-21 替换原纯模糊遮罩）。
+   覆盖整个叙述区：数据到达后整块淡出，下方真实内容同时淡入（见 narrative-enter 动画）。 */
+.session-skeleton {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--bg, var(--surface));
+  animation: ssFadeIn 120ms var(--ease);
+}
+/* 退场：与内容渐入**交叉淡化**（同一帧开始，各自播完）。
+   时长与 narrativeEnter 对齐（320ms），视觉上是一段连续的「骨架化开 → 内容显影」，
+   而不是「骨架消失 → 空白 → 内容出现」的三段跳。 */
+.session-skeleton.is-leaving {
+  animation: ssFadeOut 320ms var(--ease) both;
+  pointer-events: none;
+}
+@keyframes ssFadeOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.ss-rows {
+  position: absolute;
+  inset: 0;
+  padding: 22px 24px 12px;
+  max-width: 800px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+.ss-row {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  /* 逐行显影：骨架屏出现时，各行的 animationDelay 由组件按下标给出（每行 40ms）。
+     这表达的是「历史正自上而下铺开」，与用户要的「缓慢展示」同一意图 ——
+     先给形状，数据到了再换成真实内容。 */
+  animation: ssRowIn 260ms var(--ease) both;
+}
+@keyframes ssRowIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ss-row.ss-right {
+  align-items: flex-start;
+}
+.ss-row.ss-left {
+  align-items: flex-end;
+}
+.ss-bar {
+  display: block;
+  height: 13px;
+  border-radius: 7px;
+  background: var(--border);
+}
+/* 工具行比正文细：视觉上区分「一行工具调用」与「一段正文」 */
+.ss-bar-tool {
+  height: 30px;
+  border-radius: 10px;
+  opacity: 0.7;
+}
+/* 缓慢横扫的高光带：整块只有一个动画元素，走合成层（transform），
+   比让 20 条 bar 各自脉动便宜得多。 */
+.ss-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 35%,
+    color-mix(in srgb, var(--text-3) 14%, transparent) 50%,
+    transparent 65%
+  );
+  transform: translateX(-100%);
+  animation: ssSheen 1.5s ease-in-out infinite;
+  will-change: transform;
+}
+@keyframes ssSheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes ssFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+/* 尊重系统「减少动态效果」：去掉横扫与淡入，只留静态骨架 */
+@media (prefers-reduced-motion: reduce) {
+  .ss-sheen {
+    animation: none;
+    opacity: 0;
+  }
+  .session-skeleton {
+    animation: none;
+  }
+}
+/* 旧类名保留：compact-loading 等仍复用 .session-loading 的定位/尺寸语义
+   （见 .compact-loading 覆写）。骨架屏走自己的类名，互不影响。 */
 .session-loading {
   position: absolute;
   inset: 0;
@@ -1377,6 +1493,59 @@ body.is-electron .left.collapsed .rail .rbtn {
     opacity: 0;
   }
 }
+/* 切换会话后的历史渐入（2026-10-21）。
+   目标：不是「一闪全出」，也不是逐条慢放 —— 用户原话「时间不要太长或太短」。
+   取 320ms 总时长：短于这个会显得生硬，长于 500ms 会让人等。
+
+   为什么只对前 12 个子元素做 stagger：
+   · 长会话首屏就有 100~200 个块，逐条 stagger 总时长会失控（12/条 × 200 = 数秒）；
+   · 视觉上真正需要「铺开感」的只有最上面几条，其余一起淡入即可。
+   所以前 12 条各自 delay，第 13 条起统一无 delay（仍在 320ms 内完成）。 */
+@keyframes narrativeEnter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.narrative-enter > * {
+  animation: narrativeEnter 320ms var(--ease) both;
+  /* 必须关掉 content-visibility：.msg 上有 content-visibility:auto（离屏跳过布局），
+     而渐入动画要改 opacity/transform —— 元素一旦被「跳过」，动画不会真正推进，
+     等它滚进视口时才突然播完，看起来像「滚到哪儿哪儿闪一下」。
+     渐入只发生在新会话刚进入的 500ms 内，此时离屏块本来也不多，关掉没有性能顾虑。 */
+  content-visibility: visible;
+}
+/* 逐条错峰：每条 18ms，第 1 条 -0ms，第 12 条 ~198ms，
+   加上 320ms 时长 → 最后一条在 ~518ms 内完成（略超但要留出阅读起始感）。
+   超出 12 条的一律同帧进入。 */
+/* 内容渐入整体延后 90ms：骨架屏淡出到 1/3 时内容才开始显影。
+   两者同时从 1→0 / 0→1，会在中间出现「半透明骨架 + 半透明内容」的浑浊帧；
+   错开一点，视觉上是「骨架先化开，内容再浮现」，更干净。 */
+.narrative-enter.is-crossfade > *:nth-child(1) { animation-delay: 90ms; }
+.narrative-enter.is-crossfade > *:nth-child(2) { animation-delay: 108ms; }
+.narrative-enter.is-crossfade > *:nth-child(3) { animation-delay: 126ms; }
+.narrative-enter.is-crossfade > *:nth-child(4) { animation-delay: 144ms; }
+.narrative-enter.is-crossfade > *:nth-child(5) { animation-delay: 162ms; }
+.narrative-enter.is-crossfade > *:nth-child(6) { animation-delay: 180ms; }
+.narrative-enter.is-crossfade > *:nth-child(7) { animation-delay: 198ms; }
+.narrative-enter.is-crossfade > *:nth-child(8) { animation-delay: 216ms; }
+.narrative-enter.is-crossfade > *:nth-child(9) { animation-delay: 234ms; }
+.narrative-enter.is-crossfade > *:nth-child(10) { animation-delay: 252ms; }
+.narrative-enter.is-crossfade > *:nth-child(11) { animation-delay: 270ms; }
+.narrative-enter.is-crossfade > *:nth-child(12) { animation-delay: 288ms; }
+.narrative-enter.is-crossfade > *:nth-child(n + 13) { animation-delay: 288ms; }
+
+/* 系统「减少动态效果」：直接显示，不做位移淡入 */
+@media (prefers-reduced-motion: reduce) {
+  .narrative-enter > * {
+    animation: none;
+  }
+}
+
 .narrative {
   flex: 1;
   overflow-y: auto;

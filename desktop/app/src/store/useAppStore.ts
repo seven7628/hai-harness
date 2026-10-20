@@ -792,6 +792,14 @@ export interface SessionView {
   checkpointRevision?: number
   checkpointGeneration?: number
   degraded?: boolean
+
+  // enteredAt 每次「会话内容被整体重建」时自增（切会话/checkpoint hydrate）。
+  //
+  // 用途：Narrative 据此**只播放一次**历史渐入动画。不能按 blocks.length 变化判断 ——
+  // 流式新块、工具卡追加都会改变长度；也不能按 activeSessionId 变化 ——
+  // 切到已缓存会话时 blocks 是同一批对象、不会触发重渲染。
+  // 自增计数值作为 React key 的一部分即可：值变 → 重新挂载动画。
+  enteredAt?: number
 }
 
 // 会话是否在运行：存在进行中的 run 节点（agent_start→agent_end 全程 status=running，
@@ -820,6 +828,7 @@ function emptyView(): SessionView {
     blocksOlderLoading: false,
     blocksOlderError: false,
     turnsTotal: 0,
+    enteredAt: 0,
     approvals: [],
     runNodes: [],
     diffs: [],
@@ -2385,7 +2394,22 @@ interface AppState {
   rightExpanded: boolean
   rightTab: RightTab
   rightSize: number | null // M3：期望的右侧面板宽度（null = 不强制；浏览器内嵌时按 viewport 设）
-  sessionLoading: boolean // 切换会话时的短暂加载态（导航模糊遮罩）
+  // skeleton：切换会话时的骨架屏状态机（2026-10-21 重设计）。
+  //
+  // 为什么不是一个 boolean：骨架屏最怕**闪烁**。实测本机会话加载耗时分布极宽
+  // （0.1MB → 1ms，90MB → 1.4s），如果「切过去就显示骨架屏」，
+  // 那 90% 的快速切换（<120ms）都会闪一下骨架再消失 —— 比现在什么都不显示更糟。
+  // 所以要分三段：pending（静默等待）→ 到阈值才 visible → 内容到达 exit。
+  //
+  //   pending：已发起加载，但还没到显示阈值（骨架屏不渲染，屏幕保持上一帧或空白）
+  //   visible：超过了 SKELETON_DELAY_MS，骨架屏出现，并至少停留 MIN_SHOW_MS
+  //   exit   ：内容已就位，骨架屏开始退场（由 CSS 淡出，随后卸载）
+  //
+  // 这三个状态全部由「数据到达」推进，唯一的时间量是阈值本身。
+  skeleton: { phase: 'idle' | 'pending' | 'visible' | 'exit'; at: number }
+  // enterAnimAt：最近一次「历史渐入」的起点（ms）。与骨架屏退场在同一次 setState
+  // 写入，因此骨架屏淡出与历史渐入发生在同一帧，构成一段连续动效。
+  enterAnimAt: number
   inSkills: boolean
   showNewWsModal: boolean // 「新建文件夹…」modal（创建文件夹并注册工作区）
   inSettings: boolean // 设置弹窗
@@ -2878,6 +2902,171 @@ export const BUILTIN_SLASH = ['/summary', '/clear', '/reload_skills']
 // 太大则失去优化意义（实测 200 块的传输量 ~1MB 量级）。
 // 只对**恢复已有会话**生效；新建空会话没有历史，带不带都一样。
 const OPEN_BLOCKS_LIMIT = 200
+
+// —— 骨架屏的三个时间常量（依据本机实测数据选取，2026-10-21）——
+//
+// 本机会话 record 大小 → 加载耗时实测：
+//     0.1MB →  1ms      1.6MB →  50ms     4.1MB →  64ms
+//     8.7MB → 261ms    21.7MB → 328ms     51MB → 776ms     91MB → 1467ms
+//
+// 也就是说 90% 的切换在 120ms 内完成，只有长会话才真的需要等。
+
+// SKELETON_DELAY_MS 延迟出现：加载快于它就不显示骨架屏。
+//
+// 120ms 是业界公认的「用户开始感觉卡顿」的门槛之下（Nielsen 100ms 即时感）。
+// 低于这个时长还闪一个骨架屏，属于「为了动画而动画」，观感比原地不动更差。
+const SKELETON_DELAY_MS = 120
+
+// SKELETON_MIN_SHOW_MS 最短展示：骨架屏出现后至少留这么久，才「值得补时」。
+//
+// ## 这个值解决的是一个真实的权衡（实测推演，2026-10-21）
+//
+// 延迟出现（120ms）与最短展示组合时，中间有一段尴尬区：骨架屏刚在 120ms
+// 出现、数据 130ms 就到了。此时两条路都难看：
+//   · 立刻退场 → 骨架屏只活了 10ms，闪一帧白影；
+//   · 补足最短展示 → 用户白等 170ms，明明内容已经好了。
+//
+// 取舍原则：**白等的代价 > 闪一下的代价**。内容已经就绪却让用户继续看骨架，
+// 是最伤信任的（「明明好了还卡着」）。
+//
+// 所以仅当「骨架屏已经显示了足够久、再闪退会显得突兀」时才补时。
+// 阈值取 40ms：短于这个的一帧影子和「切换时的正常过渡」没有区别；
+// 超过 40ms 用户已经把它当成一个阶段，就该温柔收尾。
+const SKELETON_MIN_SHOW_MS = 40
+
+// SKELETON_MIN_SHOW_TARGET_MS 需要补时的时候，补到这个总时长为止。
+// 180ms ≈ 骨架屏入场动画（逐行显影）跑到一半，视觉上「像样地结束」而不是被切断。
+const SKELETON_MIN_SHOW_TARGET_MS = 180
+
+// SKELETON_MAX_MS 兜底上限：bridge 卡死/崩溃/stdout 断流时强制退场。
+//
+// 正常路径永远不会用到它 —— 骨架屏由「响应到达」推进（见 new_session 处理器）。
+// 8s 依据：最长会话实测 1.5s，加上 bridge 冷启动与磁盘抖动留足余量。
+const SKELETON_MAX_MS = 8000
+
+// skeletonTimers 骨架屏的两个定时器（延迟出现 / 最短展示补偿）。
+//
+// 模块级而非 store 字段：它们是纯粹的调度句柄，不该触发重渲染，
+// 也不该进持久化/调试快照。
+let skeletonDelayTimer: ReturnType<typeof setTimeout> | undefined
+let skeletonMinShowTimer: ReturnType<typeof setTimeout> | undefined
+
+// skeletonGen 世代号：每次 begin/abort 自增。
+//
+// 为什么需要：用户可能在上一次切换的 exit 动画还没播完时又切一个会话。
+// 此时旧的定时器若不加判断地触发，会把新会话的骨架屏推进到 exit（闪一下）。
+// 所有延迟回调都带上发起时的世代号，不匹配就静默丢弃 —— 与 navigationGeneration
+// 是同一个思路（陈旧响应不得影响当前导航）。
+let skeletonGen = 0
+
+// beginSkeleton 进入「待加载」：先静默等待 SKELETON_DELAY_MS，超过才真正显示。
+//
+// 调用点：确认需要从磁盘/进程内加载会话时（缓存会话不会走到这里）。
+function beginSkeleton(): void {
+  const st = useAppStore.getState()
+  // 已在 pending/visible：不重置（重复点击同一会话不该让骨架屏重新计时）
+  if (st.skeleton.phase === 'pending' || st.skeleton.phase === 'visible') return
+  if (skeletonDelayTimer) clearTimeout(skeletonDelayTimer)
+  if (skeletonMinShowTimer) clearTimeout(skeletonMinShowTimer)
+  const gen = ++skeletonGen
+  useAppStore.setState({ skeleton: { phase: 'pending', at: Date.now() } })
+  skeletonDelayTimer = setTimeout(() => {
+    skeletonDelayTimer = undefined
+    if (gen !== skeletonGen) return // 已被新的切换取代
+    // 这段时间内数据可能已经到位（phase 被 endSkeleton 改掉）→ 不再显示
+    const cur = useAppStore.getState().skeleton
+    if (cur.phase !== 'pending') return
+    useAppStore.setState({ skeleton: { phase: 'visible', at: Date.now() } })
+  }, SKELETON_DELAY_MS)
+}
+
+// endSkeleton 数据已到位：推进到退场。
+//
+// 若骨架屏**还没显示**（仍在 pending）→ 直接回到 idle，全程不出现骨架屏（快速切换）；
+// 若已显示 → 补足最短展示时长后再退场（避免闪一帧）。
+function endSkeleton(): void {
+  if (skeletonDelayTimer) {
+    clearTimeout(skeletonDelayTimer)
+    skeletonDelayTimer = undefined
+  }
+  const cur = useAppStore.getState().skeleton
+  if (cur.phase === 'pending') {
+    // 快速路径：数据在阈值内就到了 —— 骨架屏从未出现，用户只看到内容直接切换。
+    useAppStore.setState({ skeleton: { phase: 'idle', at: 0 }, enterAnimAt: Date.now() })
+    return
+  }
+  if (cur.phase !== 'visible') {
+    // idle / exit：仍需给渐入打起点（内容已经换了一批）
+    useAppStore.setState({ enterAnimAt: Date.now() })
+    return
+  }
+  // 显示时长不足 40ms：内容已就绪，立刻退场（闪一帧总好过白等）。
+  // 超过 40ms：温柔收尾到 180ms，避免「骨架屏被一刀切断」的观感。
+  const shownFor = Date.now() - cur.at
+  if (shownFor < SKELETON_MIN_SHOW_MS) {
+    enterExit()
+    return
+  }
+  const remaining = SKELETON_MIN_SHOW_TARGET_MS - shownFor
+  if (remaining <= 0) {
+    enterExit()
+    return
+  }
+  if (skeletonMinShowTimer) clearTimeout(skeletonMinShowTimer)
+  const gen = skeletonGen
+  skeletonMinShowTimer = setTimeout(() => {
+    skeletonMinShowTimer = undefined
+    if (gen !== skeletonGen) return // 期间又切了会话
+    enterExit()
+  }, remaining)
+}
+
+// SKELETON_EXIT_MS 退场动画时长（必须与 CSS 的 ssFadeOut 一致）。
+//
+// 之所以在 JS 里也写一份：animationend 并不总会来 —— prefers-reduced-motion
+// 会禁用动画、标签页在后台时动画不推进、某些环境不派发该事件。
+// 少了这层兜底，骨架屏会永久挂在界面上（比不做动画严重得多）。
+// 两处数值不一致的代价只是「早/晚卸载一帧」，不影响正确性。
+const SKELETON_EXIT_MS = 320
+
+// enterExit 进入退场阶段，并挂一个兜底定时器保证最终一定卸载。
+function enterExit(): void {
+  useAppStore.setState({ skeleton: { phase: 'exit', at: Date.now() }, enterAnimAt: Date.now() })
+  if (skeletonMinShowTimer) {
+    clearTimeout(skeletonMinShowTimer)
+  }
+  const gen = skeletonGen
+  skeletonMinShowTimer = setTimeout(() => {
+    skeletonMinShowTimer = undefined
+    if (gen !== skeletonGen) return // 期间又切了会话，别把新的骨架屏收掉
+    finishSkeletonExit()
+  }, SKELETON_EXIT_MS + 80) // +80ms 余量：让 animationend 优先（它更快、更准）
+}
+
+// finishSkeletonExit 退场动画播完 → 卸载骨架屏（回到 idle）。
+//
+// 由骨架屏组件的 animationend 调用（CSS 派发），不再另设定时器 ——
+// 动画时长只写在 CSS 一处，JS 不会与它失配。
+function finishSkeletonExit(): void {
+  const cur = useAppStore.getState().skeleton
+  if (cur.phase !== 'exit') return // 期间用户又切了会话 → 可能已进入新的 pending
+  useAppStore.setState({ skeleton: { phase: 'idle', at: 0 } })
+  // 进入 idle 后代号不必再变：此时没有在途定时器（exit 的兜底已在上面清掉）。
+}
+
+// abortSkeleton 放弃本次骨架屏（导航被取消/失败/用户又切走了）。
+function abortSkeleton(): void {
+  skeletonGen++
+  if (skeletonDelayTimer) {
+    clearTimeout(skeletonDelayTimer)
+    skeletonDelayTimer = undefined
+  }
+  if (skeletonMinShowTimer) {
+    clearTimeout(skeletonMinShowTimer)
+    skeletonMinShowTimer = undefined
+  }
+  useAppStore.setState({ skeleton: { phase: 'idle', at: 0 } })
+}
 
 function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void): number {
   const id = ++cmdSeq
@@ -3538,6 +3727,8 @@ function pickDiff(d?: unknown): Diff | undefined {
 // —— 流式 chunk 合并（FIX_OPTIMIZATION 问题3①）：实时 reasoning/content chunk 先入缓冲，
 // 每 ~32ms 合并一次写入 blocks（一次 React 提交），避免逐 token 全量重渲。
 // 快照恢复期间（materializing）不启用：快照事件已提前 coalesce，需同步落库。 ——
+// enteredSeq 会话进入计数（每次 checkpoint hydrate 自增，驱动历史渐入动画）
+let enteredSeq = 0
 let materializing = false
 const chunkBuf: AnyEvent[] = []
 let chunkFlushTimer: ReturnType<typeof setTimeout> | null = null
@@ -4579,7 +4770,10 @@ export function dispatchEvent(raw: AnyEvent): void {
           }
           if (Array.isArray(d.todos)) nv = { ...nv, todos: d.todos as TodoItem[] }
           const target = respWs || s.workspace
-          let base: Partial<AppState> = { activeSessionId: sid, sessionLoading: false } // issue 4：会话激活即关加载遮罩
+          // 数据到位 → 推进骨架屏状态机（可能立刻 idle、也可能补齐最短展示后再退场）。
+          // endSkeleton 内部同时写 enterAnimAt —— 渐入起点与退场起点同源。
+          endSkeleton()
+          let base: Partial<AppState> = { activeSessionId: sid }
           if (switchTimer) clearTimeout(switchTimer) // 内容已加载：撤掉兜底定时器
           if (target) {
             let list: SessionMeta[]
@@ -6558,6 +6752,10 @@ export function hydrateCheckpoint(
         turnsTotal: meta?.turnsTotal ?? cp.turns?.length ?? 0,
         blocksOlderLoading: false,
         blocksOlderError: false,
+        // 内容整体重建 → 触发一次历史渐入（见 enteredAt 注释）。
+        // 用模块级计数器而不是 view 上的值自增：上面刚把 view 重置为 emptyView()，
+        // 从 view 读到的永远是 0，自增后恒为 1 —— 第二次切换就不会重新播动画了。
+        enteredAt: ++enteredSeq,
       }),
     )
   } finally {
@@ -6672,6 +6870,9 @@ export function metricsWindowFrom(days = 365): string {
   return localDayKey(d)
 }
 
+// skeletonFinishExit 供骨架屏组件在退场动画结束时调用（见 finishSkeletonExit）。
+export const skeletonFinishExit = finishSkeletonExit
+
 export const useAppStore = create<AppState>((set, get) => ({
   bridgeStatus: 'idle',
   // 主对话分页三态初始值（见 SessionView 同名注释）。
@@ -6729,7 +6930,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   rightExpanded: false,
   rightTab: 'activity',
   rightSize: null,
-  sessionLoading: false,
+  skeleton: { phase: 'idle' as const, at: 0 },
+  enterAnimAt: 0,
   inSkills: false,
   showNewWsModal: false,
   inSettings: false,
@@ -7011,9 +7213,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (id === s.activeSessionId && sameProject) {
       if (!restoreGaveUp.has(id)) return
       clearRestoreRetry(id)
-      set({ sessionLoading: true })
+      beginSkeleton()
       if (switchTimer) clearTimeout(switchTimer)
-      switchTimer = setTimeout(() => set({ sessionLoading: false }), 3000)
+      // 兜底护栏：正常路径由响应到达推进（见 new_session 处理里的 endSkeleton）
+      switchTimer = setTimeout(() => abortSkeleton(), SKELETON_MAX_MS)
       send({ type: 'new_session', payload: { id, blocks_limit: OPEN_BLOCKS_LIMIT } }, false)
       return
     }
@@ -7063,13 +7266,22 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (v.checkpointRevision != null) return true
       return false
     }
-    // 切换会话 → 短暂加载态（模糊遮罩通知「正在加载会话」）。
-    // 缓存会话：内容即时可见，仅一小段模糊淡出后清除；未缓存会话：等 new_session 真实加载
-    // 完成（其处理里 clearTimeout + 置 sessionLoading:false）再清除——避免「模糊先消失、历史
-    // 才姗姗来迟」的割裂感。下方 timeout 只是兜底护栏，防止加载失败时卡死。
-    set({ sessionLoading: true })
-    if (switchTimer) clearTimeout(switchTimer)
-    switchTimer = setTimeout(() => set({ sessionLoading: false }), isHydrated(id) ? 250 : 3000)
+    // 切换会话 → 骨架屏（2026-10-21 数据驱动 + 延迟出现）。
+    //
+    // 两种情形必须分开，因为它们「数据是否到位」的事实不同：
+    //   ① 缓存会话（view 已 hydrated）→ 历史**已经在内存里**，立刻就能渲染。
+    //      完全不进入骨架屏状态机。原先这里固定给 250ms 是假等待：
+    //      数据到了还要白等，用户看到「明明有内容却先模糊一下」。
+    //   ② 未缓存会话 → 真的要从磁盘/进程内 reducer 取。beginSkeleton 先静默等
+    //      120ms，超过才真正显示骨架屏；数据到达时由 endSkeleton 推进退场。
+    //      全程没有「预设加载时长」，唯一的时间量是「超过 120ms 才值得显示」。
+    //
+    // switchTimer 只做兜底：bridge 卡死/崩溃时不能让骨架屏永久停留。
+    if (!isHydrated(id)) {
+      beginSkeleton()
+      if (switchTimer) clearTimeout(switchTimer)
+      switchTimer = setTimeout(() => abortSkeleton(), SKELETON_MAX_MS)
+    }
     // 浏览器拉取是全局的：切会话后上一个会话在途的 browser_* 请求可能已失效/挂起，残留的
     // browserBusy 会挡住新挂载 web tab 的 fetch（都看 `!browserBusy`）→ 先回落 busy，让
     // 新会话的页面/截图即时重新拉取，不再永久卡「拉取中…」。

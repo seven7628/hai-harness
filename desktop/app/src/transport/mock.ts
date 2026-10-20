@@ -1102,7 +1102,24 @@ class MockTransport implements Transport {
           resp.blocks_cursor = total - 200 + 1 // 首屏最早块的 id
           resp.blocks_has_more = true
         }
-        this.respond(cmd, resp)
+        // 骨架屏联调开关（仅 mock）：mock 是同步响应，骨架屏永远来不及出现。
+        // 用 localStorage 注入一个人为延迟，就能在 dev 下验证
+        // 「延迟出现 / 最短展示 / 退场交叉淡化」整条动效链。
+        //
+        //   localStorage.setItem('mock.loadDelayMs', '800')   // 860ms 真实加载感
+        //   localStorage.setItem('mock.loadDelayMs', '130')   // 边界：10ms 闪退
+        //   localStorage.removeItem('mock.loadDelayMs')       // 恢复同步
+        let delayMs = 0
+        try {
+          delayMs = Number(globalThis.localStorage?.getItem('mock.loadDelayMs') ?? 0) || 0
+        } catch {
+          delayMs = 0
+        }
+        if (delayMs > 0) {
+          setTimeout(() => this.respond(cmd, resp), delayMs)
+        } else {
+          this.respond(cmd, resp)
+        }
         break
       }
       case 'delete_session': {
