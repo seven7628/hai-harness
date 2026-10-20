@@ -6,6 +6,7 @@ export default function Statusbar() {
   const t = useT()
   const usage = useAppStore((s) => s.usage)
   const turns = useAppStore((s) => s.turns)
+  const turnsTotal = useAppStore((s) => s.turnsTotal)
   const ctxTokens = useAppStore((s) => s.ctxTokens)
   const costUsd = useAppStore((s) => s.costUsd)
   const streaming = useAppStore((s) => s.streaming)
@@ -35,7 +36,12 @@ export default function Statusbar() {
   return (
     <footer className="statusbar">
       <span>{streaming ? 'running' : 'idle'} · run0</span>
-      <span>{t('status.turns')} <span className="mono">{turns.length}</span></span>
+      {/* 回合数取 turnsTotal（bridge 权威），不能直接 turns.length：
+          打开长会话时 turns 只带尾部若干条（见 bridge MarshalTail），
+          用数组长度会把「2 万多回合」显示成「200」。
+          取 max 兜住两种情况：实时流式时 turnsTotal 尚未被事件更新（数组已长）；
+          正常加载后 turnsTotal 是真实总数（数组可能被截断）。 */}
+      <span>{t('status.turns')} <span className="mono">{Math.max(turnsTotal, turns.length)}</span></span>
       <span>in/out <span className="mono" style={{ color: 'var(--text-2)' }}>{fmtTokens(usage.input)}/{fmtTokens(usage.output)}</span></span>
       <span>total <span className="mono">{fmtTokens(totalTokens)}</span></span>
       <span title={cacheTitle}>{t('status.cache')} <span style={{ color: 'var(--success)' }}>{cachePct}%</span></span>

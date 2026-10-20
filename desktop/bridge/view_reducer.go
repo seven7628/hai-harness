@@ -3191,3 +3191,230 @@ func maxAgentItemsPerBlock() int { return agentItemsLimit }
 
 // SetMaxAgentItemsForTest 临时修改上限（仅测试用）。
 func SetMaxAgentItemsForTest(n int) { agentItemsLimit = n }
+
+// ---------------------------------------------------------------------------
+// 打开会话的「尾部块」投影
+// ---------------------------------------------------------------------------
+
+// PartialView 是打开会话时的轻量投影：只有最近的 blocks，加上「还有更早」的游标。
+//
+// ## 为什么需要（实测 2026-10-20）
+//
+// 打开真实长会话（22269 块）时 `reducer.Marshal()` 要 138ms 生成 67MB JSON，
+// 而这 67MB 经 stdout 发给 UI、UI 再解析成 22269 个对象、全量渲染
+// （103794 个 DOM 节点，布局 1704ms）。后端已经把「按需分页读取」做到
+// 0.06ms/页，但打开路径仍一次吐全量 —— 分页能力完全没被用上。
+//
+// ## 为什么要嵌在完整 view 里，而不是新协议
+//
+// view_checkpoint 的**其余字段**（run_nodes/turns/usage/todos/...）UI 都要，
+// 且体积很小。只有 blocks 是大头。所以这里仍是完整的一份 checkpoint JSON，
+// 只把 blocks 数组**截成尾部若干块**，用两个额外字段说明截断情况：
+//
+//	blocks_partial: true        表示 blocks 不是全部
+//	blocks_cursor: <最早块的 id> UI 用这个 id 向前翻（见 agent_history 先例）
+//	blocks_total:  <总块数>     UI 显示「共 N 条」/ 判断是否还有更早
+//
+// 旧 UI 完全不受影响吗？**不完全**：它会把截断后的 blocks 当成全部。
+// 因此调用方必须显式请求（limit>0），默认行为保持全量。
+type PartialView struct {
+	View        []byte
+	Cursor      uint64 // 本次返回的最早块 id（请求更早时作为 BeforeID）
+	Total       int    // 全部块数
+	HasMore     bool   // 是否还有更早的块
+	Returned    int    // 本次返回的块数
+	MarshalCost int64  // 编码耗时（ns，诊断用）
+}
+
+// MarshalTail 只序列化最后 limit 个 block，并在 JSON 里标注截断游标。
+//
+// 与 Marshal 的关系：骨架（除 blocks 外的全部字段）走同一条编码路径，
+// 保证字段顺序与取值完全一致；只有 blocks 数组内容是尾部切片。
+//
+// limit <= 0 或块数不超过 limit 时等价于 Marshal（不标注 partial）。
+func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// 必须先取快照再切尾部：snapshotLocked 会调 flushChunkLocked，
+	// 后者可能**追加一个新块**（流式 chunk 落成正式块）。若先按 r.blocks
+	// 计数再取快照，total 会比投影里的实际块数少 1，且切出的尾部错位一格
+	//（实测 2026-10-20：total=22341 而全量 21890，差 451 是因为调用方
+	//  在两次 Marshal 之间还有别的变更并入 —— 但差 1 的切片错位更隐蔽）。
+	//
+	// 正确做法：以快照为唯一事实来源，total/tail/骨架全部来自同一份 cp.Blocks。
+	cp := r.snapshotLocked()
+	blocks := cp.Blocks
+	total := len(blocks)
+	if limit <= 0 || limit >= total {
+		// 不截断：走全量编码（带逐块字节缓存）。**不能**在这里自己拼 JSON ——
+		// 那会绕过 blockBytes 缓存，让每个会话每次打开都重新序列化全部块（小会话也变慢）。
+		view, _, err := r.marshalLockedSpans()
+		if err != nil {
+			return nil, err
+		}
+		return &PartialView{View: view, Total: total, Returned: total}, nil
+	}
+
+	start := total - limit
+	tail := blocks[start:]
+	cursor := tail[0].ID
+
+	// turns / diffs 同类裁剪：它们与 blocks 一样是「历史越长越大」的数组，
+	// 而 UI 对 turns 只用到「总条数」与「最后两条」（见 Statusbar / Composer）。
+	// 真实会话实测：turns 6.57MB、diffs 2.24MB —— 比 blocks 之外的全部字段都大，
+	// 不裁的话「首屏 200 块」仍要从 9.17MB 里减，收益被吃掉七成。
+	//
+	// 裁的是**发给 UI 的这份投影**，不影响 r.turns 本身，也不影响持久化：
+	// 提交路径走 marshalLockedSpans（全量），与这里互不影响。
+	// turns_total 让 UI 显示真实回合数，避免「加载了多少就显示多少」的错数。
+	turnsTotal := len(cp.Turns)
+	if len(cp.Turns) > limit {
+		cp.Turns = cp.Turns[len(cp.Turns)-limit:]
+	}
+	if len(cp.Diffs) > limit {
+		cp.Diffs = cp.Diffs[len(cp.Diffs)-limit:]
+	}
+
+	// 骨架：blocks 置 nil 后序列化，再注入尾部块 + 三个标注字段。
+	cp.Blocks = nil
+	head, err := json.Marshal(cp)
+	if err != nil {
+		return nil, err
+	}
+	const placeholder = `"blocks":null`
+	idx := bytes.Index(head, []byte(placeholder))
+	if idx < 0 {
+		// 结构异常 → 退回全量（正确性优先）
+		view, _, merr := r.marshalLockedSpans()
+		if merr != nil {
+			return nil, merr
+		}
+		return &PartialView{View: view, Total: total, Returned: total}, nil
+	}
+
+	if r.blockBytes == nil {
+		r.blockBytes = make(map[uint64][]byte, len(blocks))
+	}
+	parts := make([][]byte, len(tail))
+	totalBytes := 0
+	for i := range tail {
+		id := tail[i].ID
+		if b, ok := r.blockBytes[id]; ok {
+			parts[i] = b
+			totalBytes += len(b) + 1
+			continue
+		}
+		b, err := json.Marshal(&tail[i])
+		if err != nil {
+			return nil, err
+		}
+		parts[i] = b
+		r.blockBytes[id] = b
+		totalBytes += len(b) + 1
+	}
+
+	var buf bytes.Buffer
+	buf.Grow(len(head) + totalBytes + 128)
+	buf.Write(head[:idx])
+	buf.WriteString(`"blocks":`)
+	buf.WriteByte('[')
+	for i, p := range parts {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(p)
+	}
+	buf.WriteByte(']')
+	// 在 blocks 之后、其余字段之前插入标注（顺序无关，UI 按 key 读）
+	buf.WriteString(`,"blocks_partial":true,"blocks_cursor":`)
+	buf.WriteString(strconv.FormatUint(cursor, 10))
+	buf.WriteString(`,"blocks_total":`)
+	buf.WriteString(strconv.Itoa(total))
+	buf.WriteString(`,"turns_total":`)
+	buf.WriteString(strconv.Itoa(turnsTotal))
+	buf.Write(head[idx+len(placeholder):])
+	view := buf.Bytes()
+
+	// 缓存：下一轮增量 Marshal 仍可复用这些块字节（不必重排）
+	for _, b := range tail {
+		if _, ok := r.blockBytes[b.ID]; !ok {
+			if enc, e := json.Marshal(&b); e == nil {
+				r.blockBytes[b.ID] = enc
+			}
+		}
+	}
+	return &PartialView{
+		View:     view,
+		Cursor:   cursor,
+		Total:    total,
+		HasMore:  start > 0,
+		Returned: len(tail),
+	}, nil
+}
+
+// ReadBlockPage 按游标返回一页 block 的 JSON 字节（供 UI「加载更早」）。
+//
+// 与 MarshalTail 共用同一套块字节缓存，因此 UI 首次打开后再翻页不会
+// 重复序列化同一批块。
+func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.RawMessage, nextCursor uint64, hasMore bool, total int, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// 必须基于**归一化快照**而不是 r.blocks：
+	// snapshotLocked 会丢弃空壳 assistant 块（llm_start 无 llm_end，无正文/无思考、
+	// 未结算 —— 见 normalizeDanglingState）。真实长会话里这类块有 451 个（22341→21890），
+	// 若这里用 r.blocks，分页会返回 Marshal 里根本不存在的块，UI 出现「幽灵消息」。
+	//
+	// 代价：每页复制一次 blocks 切片（浅拷贝切片头 + 结构体数组）。21890 个 Block
+	// 结构体的拷贝是 ~10MB memcpy（实测数 ms），相对「返回错误数据」完全可接受。
+	// 只有真的翻页才走这里，打开热路径（MarshalTail）不受影响。
+	snap := r.snapshotLocked()
+	view := snap.Blocks
+	total = len(view)
+	if limit <= 0 {
+		limit = 50
+	}
+	// 定位 beforeID 之前的最后一页；beforeID==0 表示「最新一页」。
+	end := total
+	if beforeID > 0 {
+		// 用二分：blocks 按 id 严格递增（blockSeq 单调分配），
+		// 线性扫描在长会话里是 21890 次比较/页，没有必要。
+		end = sort.Search(total, func(i int) bool { return view[i].ID >= beforeID })
+	}
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	if end <= 0 {
+		return nil, 0, false, total, nil
+	}
+	page := view[start:end]
+	blocks = make([]json.RawMessage, 0, len(page))
+	if r.blockBytes == nil {
+		r.blockBytes = make(map[uint64][]byte, total)
+	}
+	for i := range page {
+		id := page[i].ID
+		b, ok := r.blockBytes[id]
+		if !ok {
+			b, err = json.Marshal(&page[i])
+			if err != nil {
+				return nil, 0, false, total, err
+			}
+			r.blockBytes[id] = b
+		}
+		blocks = append(blocks, json.RawMessage(b))
+	}
+	nextCursor = page[0].ID
+	hasMore = start > 0
+	return blocks, nextCursor, hasMore, total, nil
+}
+
+// BlockCount 返回当前 block 总数（UI 显示「共 N 条」/ 判断是否还有更早）。
+func (r *ViewReducer) BlockCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.blocks)
+}
+

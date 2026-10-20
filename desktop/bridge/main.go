@@ -1614,6 +1614,34 @@ func (m *manager) dispatch(c command) {
 				{
 					// 进程内 reducer 已 hydrate（create 时 Restore + NormalizeForRestore）；
 					// 响应使用同一归一化快照，保证响应与进程内状态一致。
+					//
+					// blocks_limit（payload，可选）：只返回最近 N 个 block，其余按需分页。
+					//
+					// 为什么默认关闭：旧 UI 拿到的是完整 blocks，**没有「加载更早」入口**，
+					// 一旦默认截断就会「历史消息看不到」——正是用户明确的红线。
+					// 因此只有 UI 显式传 blocks_limit 才走截断投影，并把游标一并带回。
+					//
+					// 实测（2026-10-20，22269 块）：全量 Marshal 138ms / 67MB；
+					// 尾部 200 块只需序列化 200 块，传输量降到 KB 级。
+					tailLimit := int(floatNum(c.Payload, "blocks_limit", 0))
+					if tailLimit > 0 {
+						pv, merr := bs.reducer.MarshalTail(tailLimit)
+						if merr == nil {
+							respData["restored"] = "checkpoint"
+							respData["checkpoint_version"] = checkpointSchemaVersion
+							respData["revision"] = meta.Revision
+							respData["reducer_seq"] = meta.ReducerSeq
+							respData["clear_generation"] = meta.ClearGeneration
+							respData["degraded"] = bs.reducer.IsDegraded()
+							respData["view_checkpoint"] = json.RawMessage(pv.View)
+							// 游标与总量：UI 据此显示「加载更早」并按 blocks_cursor 翻页。
+							respData["blocks_cursor"] = pv.Cursor
+							respData["blocks_total"] = pv.Total
+							respData["blocks_has_more"] = pv.HasMore
+							m.resp(c, true, "", respData)
+							return
+						}
+					}
 					if viewRaw, merr := bs.reducer.Marshal(); merr == nil {
 						respData["restored"] = "checkpoint"
 						respData["checkpoint_version"] = checkpointSchemaVersion
@@ -1622,6 +1650,7 @@ func (m *manager) dispatch(c command) {
 						respData["clear_generation"] = meta.ClearGeneration
 						respData["degraded"] = bs.reducer.IsDegraded()
 						respData["view_checkpoint"] = json.RawMessage(viewRaw)
+						respData["blocks_total"] = bs.reducer.BlockCount()
 						m.resp(c, true, "", respData)
 						return
 					}
@@ -1787,6 +1816,46 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		m.resp(c, true, "", map[string]any{"task_id": taskID})
+
+	case CmdBlocksPage:
+		// 主对话历史分页（UI「加载更早」）。
+		//
+		// 数据来源是**进程内 reducer**：打开会话时若带了 blocks_limit，UI 只拿到
+		// 最近一屏 + blocks_cursor；更早的从这里按 before_id 向前取。
+		//
+		// 为什么走进程内而不是磁盘：reducer 已经持有全部 block（Restore 过），
+		// 且 blockBytes 缓存让「同一块只序列化一次」。磁盘 sidecar 分页
+		// （session.ReadPage）留给「不开会话也能读历史」的场景。
+		//
+		// 游标语义：before_id==0 → 最新一页；否则取 id < before_id 的最后一页。
+		// 幂等：同一游标重复请求返回同一批块，UI 重试不会重复插入。
+		bs := m.get(ws, sid)
+		if bs == nil {
+			m.respCode(c, false, "session not found", "session_not_found", nil)
+			return
+		}
+		beforeID := uint64(0)
+		if v := floatNum(c.Payload, "before_id", 0); v > 0 {
+			beforeID = uint64(v)
+		}
+		limit := int(floatNum(c.Payload, "limit", 50))
+		if limit <= 0 {
+			limit = 50
+		}
+		if limit > 500 {
+			limit = 500 // 单页上限：防止一次拉爆 stdout
+		}
+		blocks, nextCursor, hasMore, total, berr := bs.reducer.ReadBlockPage(beforeID, limit)
+		if berr != nil {
+			m.resp(c, false, berr.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{
+			"blocks":   blocks,
+			"cursor":   nextCursor, // 下一页的 before_id（0 = 没有更早的了）
+			"has_more": hasMore,
+			"total":    total,
+		})
 
 	case CmdAgentHistory:
 		// 子智能体完整历史分页（agent 卡片「加载更早记录」）。

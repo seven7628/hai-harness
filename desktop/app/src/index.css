@@ -2248,6 +2248,46 @@ body.is-electron .left.collapsed .rail .rbtn {
   font-size: 12px;
   color: var(--text-3);
 }
+/* 主对话「加载更早」（2026-10-20）：与子 agent 转录的 .at-more 同款视觉，
+   但脱离 .agent-tr 作用域（那是卡片内部）。
+   sticky 到叙述区顶部：用户向上滚动时按钮始终可见，不必滚到最早一条才出现。 */
+.narrative-more {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 4px;
+  background: linear-gradient(to bottom, var(--surface) 70%, transparent);
+}
+.narrative-more-btn {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 12px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.narrative-more-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-3);
+}
+.narrative-more-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.narrative-more-btn.is-err {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
+}
+.narrative-more-busy {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
 @keyframes agPulse {
   0%,
   100% {

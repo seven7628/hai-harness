@@ -1081,7 +1081,28 @@ class MockTransport implements Transport {
           this.sessions.set(wsPath, [...list, sess])
         }
         this.sid = sess.id
-        this.respond(cmd, { session_id: sess.id, sessions: this.sessions.get(wsPath) ?? [sess], todos: [], live: wasLive })
+        // 主对话分页（2026-10-20）：真 bridge 在带 blocks_limit 时只回最近一屏，
+        // 并给出 blocks_total / blocks_cursor / blocks_has_more。mock 没有真实
+        // checkpoint 历史，但必须**如实**回这三态 —— 否则 dev 下滚到顶永远不触发
+        // 「加载更早」，这条路径根本没法验证（而它正是最容易出错的地方）。
+        //
+        // 只对「已存在的会话」给分页态：全新空会话没有历史，谎报 hasMore 会让
+        // UI 显示一个点了没反应的按钮。
+        const blocksLimit = Number(cmd.payload?.blocks_limit ?? 0) || 0
+        const resp: Record<string, unknown> = {
+          session_id: sess.id,
+          sessions: this.sessions.get(wsPath) ?? [sess],
+          todos: [],
+          live: wasLive,
+        }
+        if (blocksLimit > 0) {
+          // 与 blocks_page 的 mock 总量保持一致（2000），首屏 = 最新 200 条。
+          const total = 2000
+          resp.blocks_total = total
+          resp.blocks_cursor = total - 200 + 1 // 首屏最早块的 id
+          resp.blocks_has_more = true
+        }
+        this.respond(cmd, resp)
         break
       }
       case 'delete_session': {
@@ -1345,6 +1366,38 @@ class MockTransport implements Transport {
             ? ['deepseek-v4-flash', 'deepseek-v4-pro', 'glm-5.1', 'glm-5.2', 'glm-5.3', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6', 'mimo-v2.6-pro', 'mimo-v2.6-flash', 'mimo-v2.5', 'mimo-v2.5-pro', 'hy3']
             : ['deepseek-v4-flash-vision-exp', 'deepseek-chat', 'deepseek-reasoner']
         this.respond(cmd, { provider: prov, base_url: base, models: fake, count: fake.length })
+        break
+      }
+      case 'blocks_page': {
+        // 主对话「加载更早」分页（真 bridge 从进程内 reducer 取，见 bridge/main.go）。
+        // mock 没有真实历史可切 —— 生成**确定性**的伪块，但严格守住真 bridge 的契约：
+        //   · before_id 是游标（返回的块 id 全部 < before_id）；
+        //   · 返回块按 id 升序；
+        //   · has_more 表示「更早的还有」，为 false 后按钮必须消失。
+        // 这样「滚动到顶自动加载 → 拼接 → 不重复 → 加载完按钮消失」整条路径在 mock 下可验。
+        const beforeId = Number(cmd.payload?.before_id ?? 0) || 0
+        const limit = Math.min(Number(cmd.payload?.limit ?? 200) || 200, 500)
+        const total = 2000 // 固定总量：10 页（200/页），足够验证多页
+        // 首屏假设已加载最新 200 条（与 blocks_limit 对齐）
+        const loadedTop = total - 200
+        const cursor = beforeId || loadedTop
+        const end = Math.min(cursor, total)
+        const start = Math.max(0, end - limit)
+        const blocks = []
+        for (let i = start; i < end; i++) {
+          // id 用 1..total 保证严格单调且与游标语义一致
+          blocks.push(
+            i % 3 === 2
+              ? { kind: 'tool', id: i + 1, name: 'read_file', args: JSON.stringify({ path: `hist/file-${i}.go` }), result: `// mock 历史 ${i}`, status: 'done' }
+              : { kind: 'assistant', id: i + 1, text: `更早的消息 #${i}（mock）`, streaming: false },
+          )
+        }
+        this.respond(cmd, {
+          blocks,
+          cursor: start > 0 ? start + 1 : 0,
+          has_more: start > 0,
+          total,
+        })
         break
       }
       case 'agent_history': {
