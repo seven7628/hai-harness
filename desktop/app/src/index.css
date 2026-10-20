@@ -1330,12 +1330,21 @@ body.is-electron .left.collapsed .rail .rbtn {
 .ss-rows {
   position: absolute;
   inset: 0;
+  /* 与真实叙述区完全一致的排版参数（见 .narrative：padding 22px 24px 12px、
+     max-width 800px 居中）—— 骨架屏必须落在内容将要出现的位置上，
+     否则「骨架退场、内容出现」时会看到整体位移。 */
   padding: 22px 24px 12px;
   max-width: 800px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  gap: 22px; /* 与 .msg 的 margin-bottom 一致 */
+  overflow: hidden;
+  /* 底部柔化：行数按最高窗口给，超出视口的部分在这里淡出。
+     没有这层，高窗口下会在半空中出现一条硬截断的横条；
+     有它则是「内容还在继续往下」，符合加载中的语义。 */
+  mask-image: linear-gradient(to bottom, #000 0, #000 62%, transparent 96%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 62%, transparent 96%);
 }
 .ss-row {
   display: flex;
@@ -1356,23 +1365,84 @@ body.is-electron .left.collapsed .rail .rbtn {
     transform: none;
   }
 }
-.ss-row.ss-right {
+/* 真实消息是左对齐的（.msg 无 text-align:center、无气泡背景），
+   骨架屏必须一致。第一版做成左右交替气泡是错的 —— 它暗示了一种并不存在的布局。 */
+/* 真实消息是左对齐的（.msg 无 text-align:center、无气泡背景），
+   骨架屏必须一致。第一版做成左右交替气泡是错的 —— 它暗示了一种并不存在的布局。 */
+.ss-row {
   align-items: flex-start;
-}
-.ss-row.ss-left {
-  align-items: flex-end;
+  gap: 7px; /* 行间距：真实段落内 1.65 行高下的视觉间隙 */
 }
 .ss-bar {
   display: block;
-  height: 13px;
-  border-radius: 7px;
-  background: var(--border);
+  height: 12px;
+  border-radius: 6px;
+  /* 用 --border 与 --text-3 的混合：纯 --border 在深色主题下偏亮，会显得
+     「比真实文字还抢眼」；纯背景色又看不见。取中间值，让骨架是「暗示」
+     而非「内容」。 */
+  background: color-mix(in srgb, var(--border) 82%, transparent);
 }
-/* 工具行比正文细：视觉上区分「一行工具调用」与「一段正文」 */
-.ss-bar-tool {
-  height: 30px;
-  border-radius: 10px;
-  opacity: 0.7;
+/* who 占位（`用户` / `HAI` 标签行）：更矮更淡，与正文条拉开层次 */
+.ss-bar-who {
+  height: 9px;
+  border-radius: 5px;
+  opacity: 0.55;
+  margin-bottom: 4px;
+}
+/* 工具卡片组骨架：与真实 .tool-group 同构 ——
+   带边框的卡片（border + radius 8px + surface 背景 + 内边距），内部若干行。
+   这是真实对话里占比最高的形态（49.5% 的块是 tool），必须做出来，
+   否则骨架屏看起来像「一屏纯文字」，与用户实际看到的历史完全不像。 */
+.ss-tool-group {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 6px;
+}
+/* 分隔线骨架（divider / compression）：真实是一行小字 + 两侧细线，
+   这里只留一条极淡的居中短横线 —— 保持「有这件事发生」的暗示，
+   不抢注意力（真实分隔线本身也是弱化的）。 */
+.ss-divider {
+  width: 100%;
+  height: 1px;
+  margin: 18px 0;
+  background: color-mix(in srgb, var(--border) 65%, transparent);
+}
+/* 子智能体卡的状态点（真实 .agent-card 头部有个 running/ok 状态圆点） */
+.ss-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-3) 55%, transparent);
+}
+.ss-agent-card {
+  /* 子智能体卡比工具组更厚重一点（真实 .agent-card 也是同样的边框+surface） */
+  border-color: var(--border-strong);
+}
+.ss-tool-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  height: 18px;
+}
+/* 工具名占位：比正文条更窄更实（真实工具名是 12px mono 的强调色） */
+.ss-bar-toolname {
+  height: 10px;
+  border-radius: 5px;
+  flex: none;
+  background: color-mix(in srgb, var(--text-3) 45%, transparent);
+}
+/* 工具参数占位：更长更淡 */
+.ss-bar-toolarg {
+  height: 9px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
 }
 /* 缓慢横扫的高光带：整块只有一个动画元素，走合成层（transform），
    比让 20 条 bar 各自脉动便宜得多。 */
