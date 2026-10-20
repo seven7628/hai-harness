@@ -39,6 +39,19 @@ var wantVisualSkills = []string{"screenshot-to-ui", "visual-review", "visual-ui"
 // 它是模型判断「何时该用」的唯一依据。与办公技能同阈值（80）。
 const visualSkillMinDescriptionLen = 80
 
+// description 的写法约定（三段式，2026-10 定）：意图 → 简介 → 关键词。
+//   ① 意图：用户想达成什么（"showing beats telling"），不是形状清单；
+//   ② 简介：是什么、跑在哪（一个自包含 HTML 块 / 在沙箱 iframe 里）；
+//   ③ Triggers: 同义词与口语说法，**必须与①不重叠**（重叠 = 同一份清单付两遍钱）。
+// 中英关键词都放：用户用中文提问时，英文触发词匹配不上。
+//
+// ⚠ YAML 陷阱（踩过）：值里含 ": " 又没加引号 → 严格 YAML 报
+// "mapping values are not allowed"，parseFrontmatter 静默回退 lenient 模式，
+// 而 lenient 只做 key: value 逐行切分 → **requires 一起被丢掉**，能力过滤静默失效
+// （纯文本模型又看到"要读图"的技能，且除下面那条断言外全绿）。
+// 规则：description 一律用单引号包裹（内部单引号双写），见
+// skills/skill_test.go 的 TestLenientFallbackDropsRequires。
+
 // TestVisualSkillDirsExactlyMatch 随包视觉技能目录必须恰好是声明的三个。
 func TestVisualSkillDirsExactlyMatch(t *testing.T) {
 	entries, err := os.ReadDir(visualSkillsSourceDir)

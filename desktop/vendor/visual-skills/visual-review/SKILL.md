@@ -1,7 +1,7 @@
 ---
 name: visual-review
 version: 1.0.0
-description: Review a UI you or the user already has — screenshot, rendered page or component code — against accessibility, layout, typography, color and interaction-state criteria, and return prioritized findings with concrete fixes. Use this when the user asks to review, audit, critique or improve the look, feel, accessibility or polish of an interface.
+description: 'Use when something already looks built and the question is whether it is good - audit, critique, or ''why does this feel off''. Returns prioritized findings with concrete fixes (layout, type, color, states, a11y). Triggers: accessibility, contrast, spacing, typography, polish, usability, visual QA, 审查, 优化建议.'
 requires:
   input: [image]
 ---

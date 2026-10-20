@@ -1,7 +1,7 @@
 ---
 name: visual-ui
 version: 1.5.0
-description: Build charts, dashboards, comparison cards, timelines, tabbed panels, pricing tables, heatmaps, trees and small interactive widgets as a single self-contained HTML block that the app renders in a live sandboxed iframe. Use this when the user asks for a chart, a visual comparison, a dashboard, a calculator, a tabbed view, a timeline, a diagram or any answer where layout and styling carry meaning that plain Markdown cannot express.
+description: 'Use when showing beats telling - numbers that need comparing, a process, a hierarchy, alternatives, or inputs that change a result. Renders ONE self-contained HTML block in a sandboxed iframe (inherits no app CSS). Triggers: chart, plot, dashboard, KPI, diagram, flowchart, table, timeline, tabs, calculator, heatmap, pricing, visualization, 图表, 看板.'
 ---
 
 # Visual answers as sandboxed HTML

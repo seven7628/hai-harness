@@ -1,7 +1,7 @@
 ---
 name: screenshot-to-ui
 version: 1.0.0
-description: Turn a UI screenshot, a design mockup or a hand-drawn wireframe into working front-end code by reading the image yourself with read_file, inventorying the layout, then implementing it with the session's own model. Use this when the user asks to build, replicate, or fix a page or component from a screenshot, mockup, prototype image or wireframe.
+description: 'Use when the target already exists as an image and the user wants it as code - a screenshot, mockup, wireframe, or a photo of another product. You read the image yourself with read_file and implement it in the project''s existing stack. Triggers: convert design, Figma, pixel-perfect, replicate page, clone this UI, build from picture, 截图转代码, 还原界面.'
 requires:
   input: [image]
 ---
