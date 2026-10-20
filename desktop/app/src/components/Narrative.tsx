@@ -184,6 +184,26 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   const skeletonPhase = useAppStore((s) => s.skeleton.phase)
   const crossFade = skeletonPhase === 'exit' || skeletonPhase === 'visible'
 
+  // —— 渐入动画的重播控制（不重挂载组件）——
+  //
+  // 需求：每次会话进入都重播一次「历史渐入」，但**绝不能重新挂载容器**
+  //（重挂载 = DOM 重建 = scrollTop 归零 = 用户被拽回底部）。
+  //
+  // 做法：把 animation 挂在子元素上，用「类名 + 属性」的切换来重启动画：
+  //   1. 先移除类（animOff），一帧后再加回来（animOn）—— 强制浏览器重算样式，
+  //      动画从头播；
+  //   2. 只动动画类，不动 DOM 结构，滚动位置完全不受影响。
+  //
+  // 为什么需要两帧：同一帧内 remove + add 同一个类，浏览器会合并成「无变化」，
+  // 动画不会重播。必须让浏览器先看到「没有这个类」的状态。
+  const [animOn, setAnimOn] = useState(false)
+  useEffect(() => {
+    if (!enterAnimAt) return
+    setAnimOn(false)
+    const t = requestAnimationFrame(() => setAnimOn(true))
+    return () => cancelAnimationFrame(t)
+  }, [enterAnimAt])
+
   // —— 历史分批铺开（真正意义上的「缓慢展示」）——
   //
   // 长会话首屏有 200 个块，一次性全挂 DOM 会让主线程卡住：用户看到的是
@@ -604,10 +624,20 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
 
   return (
     <div
-      className={`narrative narrative-enter${crossFade ? ' is-crossfade' : ''}`}
-      // key 里带 enterAnimAt：数据到达 → key 变 → React 重新挂载 → 动画重新从头播。
-      // 这正是「历史缓慢展示」的触发点，由数据驱动而非计时器。
-      key={`n-${enteredAt}-${enterAnimAt}`}
+      className={`narrative${animOn ? ' narrative-enter' : ''}${crossFade ? ' is-crossfade' : ''}`}
+      // ## 为什么这里**没有** key（2026-10-21 修 bug）
+      //
+      // 上一版把 enterAnimAt 放进 key 来「重播渐入动画」：
+      //     key={`n-${enteredAt}-${enterAnimAt}`}
+      // 后果是每次 enterAnimAt 变化 → 组件重新挂载 → DOM 重建 → **scrollTop 归零**
+      // → 贴底校准循环发现 scrollTop !== max → 把视图拉回底部。
+      // 用户感受就是「上滑看历史总被拽回底部」。
+      //
+      // 重播动画不需要重挂载：用 data-enter 属性变化 + CSS animation 就够
+      //（属性的变化会重启同名的 animation，前提是 animation-name 相同但
+      // 属性选择器不同 —— 见 index.css 的 .narrative-enter[data-enter]）。
+      // 这里用 key 只锁「会话 id」，切会话才重建（那时本来就该丢滚动位置）。
+      key={viewSid ?? activeSessionId ?? 'none'}
       ref={ref}
       aria-live="polite"
       data-entered={enteredAt}

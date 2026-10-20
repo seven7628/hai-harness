@@ -2959,6 +2959,28 @@ let skeletonMinShowTimer: ReturnType<typeof setTimeout> | undefined
 // 是同一个思路（陈旧响应不得影响当前导航）。
 let skeletonGen = 0
 
+// markEnterAnim 为「历史渐入」打起点，**每次会话进入只调一次**。
+//
+// ## 为什么必须只调一次（2026-10-21 修 bug）
+//
+// Narrative 把 enterAnimAt 放进了 React key：
+//     key={`n-${enteredAt}-${enterAnimAt}`}
+// key 一变 → 组件**重新挂载** → DOM 重建 → scrollTop 归零 →
+// 贴底校准循环发现 scrollTop !== max → 把视图拉回底部。
+// 用户感受就是「上滑总被拽回底部」。
+//
+// 上一版在 endSkeleton 和 enterExit 里各写一次 Date.now()：
+// 数据到达时 endSkeleton 写一次（重挂载 #1），接着 enterExit 在定时器里
+// 又写一次（重挂载 #2）—— 中途用户已经上滑，就被这两次重挂载拽回底部。
+//
+// 现在改为：一次会话进入只有一个「进入序号」`enterSeq` 自增，
+// enterAnimAt 由它派生，所有路径都只读不写。
+let enterSeq = 0
+function markEnterAnim(): void {
+  enterSeq++
+  useAppStore.setState({ enterAnimAt: enterSeq })
+}
+
 // beginSkeleton 进入「待加载」：先静默等待 SKELETON_DELAY_MS，超过才真正显示。
 //
 // 调用点：确认需要从磁盘/进程内加载会话时（缓存会话不会走到这里）。
@@ -2992,12 +3014,12 @@ function endSkeleton(): void {
   const cur = useAppStore.getState().skeleton
   if (cur.phase === 'pending') {
     // 快速路径：数据在阈值内就到了 —— 骨架屏从未出现，用户只看到内容直接切换。
-    useAppStore.setState({ skeleton: { phase: 'idle', at: 0 }, enterAnimAt: Date.now() })
+    useAppStore.setState({ skeleton: { phase: 'idle', at: 0 } })
     return
   }
   if (cur.phase !== 'visible') {
-    // idle / exit：仍需给渐入打起点（内容已经换了一批）
-    useAppStore.setState({ enterAnimAt: Date.now() })
+    // idle / exit：数据可能重复到达（重试/迟到响应）→ 不动任何状态，
+    // 尤其不能重打渐入起点（会导致重挂载，见 markEnterAnim）。
     return
   }
   // 显示时长不足 40ms：内容已就绪，立刻退场（闪一帧总好过白等）。
@@ -3031,7 +3053,8 @@ const SKELETON_EXIT_MS = 320
 
 // enterExit 进入退场阶段，并挂一个兜底定时器保证最终一定卸载。
 function enterExit(): void {
-  useAppStore.setState({ skeleton: { phase: 'exit', at: Date.now() }, enterAnimAt: Date.now() })
+  // 只推进骨架屏阶段，**不碰** enterAnimAt（见 markEnterAnim 注释）
+  useAppStore.setState({ skeleton: { phase: 'exit', at: Date.now() } })
   if (skeletonMinShowTimer) {
     clearTimeout(skeletonMinShowTimer)
   }
@@ -4771,7 +4794,13 @@ export function dispatchEvent(raw: AnyEvent): void {
           if (Array.isArray(d.todos)) nv = { ...nv, todos: d.todos as TodoItem[] }
           const target = respWs || s.workspace
           // 数据到位 → 推进骨架屏状态机（可能立刻 idle、也可能补齐最短展示后再退场）。
-          // endSkeleton 内部同时写 enterAnimAt —— 渐入起点与退场起点同源。
+          //
+          // markEnterAnim 在这里**且只在这里**调用：一次会话进入打一次渐入起点。
+          // 不能放在 endSkeleton / enterExit 里 —— 那两个函数在这条路径上一共会被
+          // 调 2 次（数据到达 + 定时器/动画回调），每次写 enterAnimAt 都会改变
+          // Narrative 的 React key → 重挂载 → scrollTop 归零 → 贴底循环把用户
+          // 拽回底部（用户报障「上滑总被拽回」的真正原因）。
+          markEnterAnim()
           endSkeleton()
           let base: Partial<AppState> = { activeSessionId: sid }
           if (switchTimer) clearTimeout(switchTimer) // 内容已加载：撤掉兜底定时器
