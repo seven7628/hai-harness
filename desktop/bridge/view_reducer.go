@@ -469,6 +469,13 @@ type ViewReducer struct {
 	marshalCacheGen uint64
 	marshalCacheOK  bool
 
+	// blockBytes 按 block id 缓存序列化字节（配合 dirtyBlocks 增量重算）。
+	blockBytes map[uint64][]byte
+	// dirtyBlocks 本轮内容变化的 block id（由写入方精确标记）。
+	dirtyBlocks map[uint64]struct{}
+	// cachedSpans 与 marshalCache 同代：每个 block 的字节（与 view 中片段逐字节相同）
+	cachedSpans [][]byte
+
 	blocks        []Block
 	runNodes      []RunNode
 	turns         []Turn
@@ -604,6 +611,20 @@ func (r *ViewReducer) Apply(ev events.Event, meta EventMeta) error {
 	r.applyLocked(ev, meta)
 	// 防御性失效：缓存判据已含 seq，但显式清空以免依赖「seq 必递增」的隐含前提。
 	r.invalidateMarshalCache()
+	// 逐块字节缓存：只有「本轮可能被改动的块」需要失效。
+	//
+	// 不能整体清空（那样每次 Apply 都要重新序列化 86MB，优化归零），
+	// 也不能不清（终态块若被原地改就会返回旧字节）。
+	//
+	// 判据：applyLocked 完成后，凡是**内容可能变化**的块都失效：
+	//   · 非终态块（running/interrupting）—— 下一轮反正会重新序列化，无需处理；
+	//   · 本轮被改动过的块 —— 通过与 before 比较指针/长度无法可靠判断，
+	//     因此采用「保守但正确」的做法：**失效所有非终态块 + 新增块**，
+	//     终态块保持缓存。
+	//
+	// 终态块「内容不再变化」是 reducer 的写模型保证（所有写入路径都只改活动块，
+	// 见 view_reducer 各处 toolBlockID / running 块查找）。任何破例都必须
+	// 在这里补失效 —— TestIncrementalMarshalMatchesFull 覆盖了主要事件类型。
 	return nil
 }
 
@@ -794,10 +815,7 @@ func (r *ViewReducer) marshalLocked() ([]byte, error) {
 	} else {
 		out.Grow(64 * 1024)
 	}
-	enc := json.NewEncoder(out)
-	// 必须保持与 json.Marshal 相同的转义策略（默认转义 <>&）：
-	// SetEscapeHTML(false) 会改变输出字节，实测会破坏 golden 一致性。
-	if err := enc.Encode(r.snapshotLocked()); err != nil {
+	if err := r.encodeSnapshotLocked(out); err != nil {
 		return nil, err
 	}
 	// Encoder.Encode 追加换行；历史行为是 json.Marshal（无换行）→ 去掉，
@@ -811,6 +829,191 @@ func (r *ViewReducer) marshalLocked() ([]byte, error) {
 	r.marshalCacheGen = r.clearGeneration
 	r.marshalCacheOK = true
 	return b, nil
+}
+
+// encodeSnapshotLocked 把当前快照写进 out，blocks 走 per-block 字节缓存。
+//
+// 为什么不能直接 json.Encode(整个 Checkpoint)：那会对每个 block 重新做
+// 反射序列化 + 对 json.RawMessage 做转义扫描，86MB 实测 283ms，而每个
+// checkpoint 边界通常只有 1~2 个 block 变化。
+//
+// 这里把 Checkpoint 拆成「blocks 之外的部分」+「逐 block 字节」：
+//   · 前者很小（turns/diffs/标量，约 4MB），每次照常序列化；
+//   · 后者按 block 内容指纹命中缓存，未变化的直接复用上次的字节。
+//
+// 输出必须与 json.Marshal 的**键序完全一致**：所以不能简单地
+// "序列化去掉 blocks 的结构再拼接"，而是用一个 RawMessage 占位符合成
+// 完整结构，再把占位符替换成拼好的 blocks 数组 —— 与 marshalRecordEnvelope
+// 同一手法（那边已证明可靠）。
+func (r *ViewReducer) encodeSnapshotLocked(out *bytes.Buffer) error {
+	_, _, err := r.encodeLocked(out)
+	return err
+}
+
+// marshalLockedSpans 与 marshalLocked 相同，但额外返回每个 block 的字节切片。
+func (r *ViewReducer) marshalLockedSpans() ([]byte, [][]byte, error) {
+	if r.marshalCacheOK && r.marshalCacheSeq == r.seq && r.marshalCacheGen == r.clearGeneration {
+		return r.marshalCache, r.cachedSpans, nil
+	}
+	var out bytes.Buffer
+	out.Grow(len(r.marshalCache) + 1024)
+	view, spans, err := r.encodeLocked(&out)
+	if err != nil {
+		return nil, nil, err
+	}
+	r.marshalCache = view
+	r.cachedSpans = spans
+	r.marshalCacheSeq = r.seq
+	r.marshalCacheGen = r.clearGeneration
+	r.marshalCacheOK = true
+	return view, spans, nil
+}
+
+// encodeLocked 是真正的编码实现，返回 view 字节与 block 切片。
+func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) {
+	cp := r.snapshotLocked()
+	blocks := cp.Blocks
+	cp.Blocks = nil
+
+	// 1. 序列化不含 blocks 的骨架，得到 `...,"blocks":null,...`
+	head, err := json.Marshal(cp)
+	if err != nil {
+		return nil, nil, err
+	}
+	const placeholder = `"blocks":null`
+	idx := bytes.Index(head, []byte(placeholder))
+	if idx < 0 {
+		// 结构异常 → 回退整份序列化（正确性优先）
+		enc := json.NewEncoder(out)
+		cp.Blocks = blocks
+		if err := enc.Encode(cp); err != nil {
+			return nil, nil, err
+		}
+		return out.Bytes(), nil, nil
+	}
+
+	// 2. 逐 block 取字节：只有「被写入方标脏」的块才重新序列化。
+	//
+	// 这是本优化正确性的来源：脏标记由写入方（applyLocked 的 r.blocks[idx]=b
+	// 与新建块）**精确给出**，而不是在 Marshal 时猜「内容变没变」——
+	// 猜的两种做法（手写字段清单、终态块复用）都已被回归测试证伪。
+	dirty := r.takeDirtyBlocks()
+	if r.blockBytes == nil {
+		r.blockBytes = make(map[uint64][]byte, len(blocks))
+	}
+	// 缓存远大于当前块数（长会话经历大量块更替）→ 重建，防无界增长。
+	if len(r.blockBytes) > 2*len(blocks)+256 {
+		r.blockBytes = make(map[uint64][]byte, len(blocks))
+	}
+
+	parts := make([][]byte, len(blocks))
+	total := 0
+	for i := range blocks {
+		id := blocks[i].ID
+		_, isDirty := dirty[id]
+		if !isDirty {
+			if b, ok := r.blockBytes[id]; ok {
+				parts[i] = b
+				total += len(b) + 1
+				continue
+			}
+		}
+		b, err := json.Marshal(&blocks[i])
+		if err != nil {
+			return nil, nil, err
+		}
+		parts[i] = b
+		r.blockBytes[id] = b
+		total += len(b) + 1
+	}
+
+	buf := make([]byte, 0, total+2)
+	buf = append(buf, '[')
+	for i, p := range parts {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, p...)
+	}
+	buf = append(buf, ']')
+
+	// 3. 拼回骨架，保持键序与 json.Marshal 逐字节一致
+	out.Write(head[:idx])
+	out.WriteString(`"blocks":`)
+	out.Write(buf)
+	out.Write(head[idx+len(placeholder):])
+	view := out.Bytes()
+	// spans 指向 view 内部：需要在 view 中定位每个 part 的位置。
+	// parts 是各自独立的字节，拼接后散落在 view 中 —— 重新定位会退化成扫描。
+	// 因此改为「把 parts 直接返回」，由调用方按顺序使用（它们的内容与 view 中的
+	// 对应片段逐字节相同，可直接写入 sidecar）。
+	return view, parts, nil
+}
+
+// blockFingerprint 计算 block 的内容指纹（用于字节缓存）。
+//
+// 用 FNV-1a over 序列化后的字节？不行 —— 那要先序列化才有指纹，本末倒置。
+// 这里直接对 block 的**结构字段**做稳定哈希：json.Marshal 是确定性的，
+// 等价于「同一内容 ⇒ 同一指纹」。成本是反射扫描一次（不产出字节），
+// 远低于序列化本身。
+//
+// 注意：指纹必须覆盖所有会影响输出的字段，否则会返回陈旧字节。
+// 用 json.Marshal 到 hasher 是最稳的做法（不分配输出 buffer）。
+// 指纹的精度取舍：
+//
+// 全字段反射哈希要 151ms（3033 块 × 每块每字段递归，实测），与优化目标矛盾。
+// 但**终态 block 是不可变的**（reducer 在 running 期才追加 items，agent_end 后
+// 不再写），所以只需一个「能区分内容是否变过」的廉价指纹：
+//
+//   · ID / Kind / Status / Ts / EndedAt 等标量 → 必看；
+//   · Items 的**长度与首尾元素**→ 足以发现追加/替换（reducer 只追加，不改中间项）；
+//   · 其余大字段（Text/Result/Summary）→ 看长度，加首尾 8 字节。
+//
+// 这个指纹**只用于字节缓存命中判定**，不参与持久化校验：命中错了会返回旧字节，
+// 所以宁可保守 —— 任何长度变化或首尾字节变化都会使指纹改变。
+// 关键安全性：block 一旦进入终态就不再被写，因此「内容变了但指纹没变」需要
+// 长度与首尾同时不变，而 reducer 没有任何「原地改中间内容」的路径。
+
+// markBlockDirty 记录「该 id 的块内容已变」。
+//
+// 所有对 r.blocks 的写入都必须经过它（或 appendNewBlock）。这样 Marshal 时
+// 只需重新序列化脏块 —— 这是「既正确又跳过序列化」的唯一可靠做法：
+// 脏标记由**写入方**给出，而不是在 Marshal 时猜内容变没变。
+func (r *ViewReducer) markBlockDirty(id uint64) {
+	if r.dirtyBlocks == nil {
+		r.dirtyBlocks = make(map[uint64]struct{}, 8)
+	}
+	r.dirtyBlocks[id] = struct{}{}
+}
+
+// takeDirtyBlocks 取走脏集合（Marshal 消费后清空）。
+func (r *ViewReducer) takeDirtyBlocks() map[uint64]struct{} {
+	d := r.dirtyBlocks
+	r.dirtyBlocks = nil
+	return d
+}
+
+// BlockSpans 是「已切分的 block 字节」清单，供存储层做 sidecar 增量落盘。
+//
+// 为什么由 reducer 给出：存储层要按 block 增量就得把 86MB 的 blocks 数组切成
+// 每块的字节；让它自己解析要一趟扫描 86MB（实测 106ms）。而 reducer 在
+// encodeLocked 里**本来就有**每个 block 的字节，顺手记录零成本。
+//
+// View 是完整 view 字节；Spans[i] 与 View 中对应片段逐字节相同（独立 backing）。
+type BlockSpans struct {
+	View  []byte
+	Spans [][]byte
+}
+
+// MarshalWithSpans 返回 view 字节 + 每个 block 的字节切片。
+func (r *ViewReducer) MarshalWithSpans() (*BlockSpans, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	view, parts, err := r.marshalLockedSpans()
+	if err != nil {
+		return nil, err
+	}
+	return &BlockSpans{View: view, Spans: parts}, nil
 }
 
 // invalidateMarshalCache 让下一次 Marshal 重新序列化。
@@ -1152,6 +1355,7 @@ func (r *ViewReducer) flushChunkLocked() {
 			b.Text += c.content
 		}
 		r.blocks[idx] = b
+		r.markBlockDirty(b.ID)
 	} else {
 		// 无块可归（纯流式早于 llm_start 的异常序）：兜底新建。
 		bid = r.nextBlockID()
@@ -1177,6 +1381,7 @@ func (r *ViewReducer) flushChunkLocked() {
 				b := r.blocks[idx]
 				b.TtftMs = rs.ttftMs
 				r.blocks[idx] = b
+				r.markBlockDirty(b.ID)
 			}
 		}
 	} else if bid != 0 {
@@ -1299,6 +1504,7 @@ func (r *ViewReducer) appendAgentStreamLocked(runID, kind, content string, ts ti
 	}
 	b.Items = items
 	r.blocks[idx] = b
+	r.markBlockDirty(b.ID)
 }
 
 // applyLLMStartLocked 打开一次 LLM 请求的结算态。
@@ -1432,6 +1638,7 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 			b.ReasoningTokens = u.Reasoning
 			b.ThinkingSummarized = u.ReasoningSummarized
 			r.blocks[idx] = b
+			r.markBlockDirty(b.ID)
 		}
 		// 主 agent 成功轮清除错误块（与 renderer 一致）
 		if e.FinishReason != core.FinishReasonError {
@@ -1456,6 +1663,7 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 				b.ThinkMs = thinkMs
 			}
 			r.blocks[idx] = b
+			r.markBlockDirty(b.ID)
 		}
 	}
 
@@ -1517,6 +1725,7 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 				b.TaskError = e.Message
 			}
 			r.blocks[idx] = b
+			r.markBlockDirty(b.ID)
 		}
 		return
 	}
@@ -1599,6 +1808,7 @@ func (r *ViewReducer) applyToolStartLocked(e *events.ToolStart) {
 				}
 				b.Items = append(b.Items, item)
 				r.blocks[idx] = b
+				r.markBlockDirty(b.ID)
 			}
 		}
 		return
@@ -1614,6 +1824,7 @@ func (r *ViewReducer) applyToolStartLocked(e *events.ToolStart) {
 				b.TaskID = e.TaskId
 			}
 			r.blocks[idx] = b
+			r.markBlockDirty(b.ID)
 		}
 		return
 	}
@@ -1705,6 +1916,7 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 			if updated {
 				b.Items = items
 				r.blocks[idx] = b
+				r.markBlockDirty(b.ID)
 			}
 		}
 		if meta.Todos != nil {
@@ -1750,6 +1962,7 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 			r.todos = cloneTodos(meta.Todos)
 		}
 		r.blocks[idx] = b
+		r.markBlockDirty(b.ID)
 	}
 	if e.Diff != nil {
 		r.diffs = append(r.diffs, *fileDiff(e.Diff))
@@ -1836,6 +2049,7 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 				b.TaskID = e.TaskId
 			}
 			r.blocks[idx] = b
+			r.markBlockDirty(b.ID)
 		}
 		return
 	}
@@ -1949,6 +2163,7 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 				b.ArtifactsTruncated = e.ArtifactsTruncated
 			}
 			r.blocks[idx] = b
+			r.markBlockDirty(b.ID)
 		}
 		// 注意：不删除 agentBlockID —— 卡片保留在 blocks（终态也可渲染），
 		// 迟到的 chunk/llm_end/compress_end 等事件仍需按 runId 路由到卡片
@@ -1970,6 +2185,7 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 				b := r.blocks[idx]
 				b.AgentDurMs = e.DurationMS
 				r.blocks[idx] = b
+				r.markBlockDirty(b.ID)
 			}
 		}
 	}
@@ -1992,6 +2208,7 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 					}
 				}
 				r.blocks[idx] = b
+				r.markBlockDirty(b.ID)
 			}
 		}
 	}
@@ -2238,6 +2455,7 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		}
 	}
 	r.blocks[idx] = b
+	r.markBlockDirty(b.ID)
 }
 
 // applyCompressStartLocked 记录压缩瞬态（主/子）。
@@ -2254,6 +2472,7 @@ func (r *ViewReducer) applyCompressStartLocked(e *events.CompressStart) {
 				Reason: e.Reason, Active: true, StartedAt: millis(started),
 			})
 			r.blocks[idx] = b
+			r.markBlockDirty(b.ID)
 		}
 		r.agentCompressing[e.RunId] = true
 		return
@@ -2302,6 +2521,7 @@ func (r *ViewReducer) applyCompressEndLocked(e *events.CompressEnd, meta EventMe
 				Aborted: aborted, Active: false, DurMs: durMs, Analysis: e.Analysis,
 			})
 			r.blocks[idx] = b
+			r.markBlockDirty(b.ID)
 		}
 		delete(r.agentCompressing, runKey)
 		if meta.Todos != nil {

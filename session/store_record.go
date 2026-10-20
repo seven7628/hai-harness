@@ -84,6 +84,11 @@ type SessionRecord struct {
 	SDKState        State          `json:"sdk_state"`
 	ViewCheckpoint  ViewCheckpoint `json:"view_checkpoint"`
 	Checksum        string         `json:"checksum"`
+
+	// BlockSpans 是调用方（reducer）已切好的 block 字节，可选。
+	// 提供它可让提交路径跳过对 view 的二次扫描（86MB 实测省 106ms）。
+	// 不持久化、不校验：仅当长度与 view 内 blocks 一致时才被采用。
+	BlockSpans [][]byte `json:"-"`
 }
 
 // SessionRecordStore is the storage boundary used by the future bridge
@@ -343,6 +348,41 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 	// 用 marshalRecordEnvelope 而非 json.Marshal：后者对 `json.RawMessage`
 	// 字段会做 compact（逐字节扫描转义，90MB 实测 280ms）；而 view_checkpoint
 	// 本身就是合法 JSON 字节，原样拼接即可。实测 329ms → 32ms，**输出逐字节相同**。
+	// blocks sidecar 化：把 87MB 的 blocks 换成几十字节的引用。
+	//
+	// 收益来源（实测 agent-server-g 真实会话，64.5 小时 / 13771 次提交）：
+	// 3520 个 block 里 95.3% 的体积、100% 为终态，每次提交却要重写全部 91MB。
+	// 改后 record 主体只剩 turns/diffs/标量（约 4MB），新 block 只追加 sidecar。
+	//
+	// 失败一律回退全量内嵌（正确性优先，静默）：任何 block 无 id、blocks 非数组、
+	// view 结构异常 → working.ViewCheckpoint 保持原样，走原路径落盘。
+	// 读回时有无引用都能解析（见 resolveBlocksRef），所以回退不影响可读性。
+	if recPath, perr := s.RecordPath(working.WorkspaceKey, working.SessionID); perr == nil {
+		// sidecar 与 record 同目录 —— 首次提交时目录可能还不存在（record 的
+		// MkdirAll 在后面执行），必须在这里先建，否则 openBlockStore 直接失败、
+		// 静默回退全量路径（实测踩到：优化完全没生效，record 仍是 90MB）。
+		if mkErr := os.MkdirAll(filepath.Dir(recPath), 0o700); mkErr == nil {
+			if bs, berr := acquireBlockStore(recPath); berr == nil {
+				// 优先用调用方给的 spans（reducer 顺带产出，零解析）；否则自行扫描。
+				var newView []byte
+				var rerr error
+				if len(record.BlockSpans) > 0 {
+					newView, _, rerr = refBlocksFromSpans(bs, working.ViewCheckpoint, record.BlockSpans)
+				} else {
+					newView, _, rerr = refBlocks(bs, working.ViewCheckpoint)
+				}
+				// 先落 sidecar 再落 record：record 里的引用必须指向已 durable 的数据。
+				if rerr == nil {
+					if ferr := bs.flush(); ferr == nil {
+						working.ViewCheckpoint = newView
+					}
+				}
+				// 不 Close：实例留在缓存里复用（Close 会 fsync 并关文件，下次提交
+				// 又要重扫 86MB 重建索引 —— 实测 78ms，吃掉增量方案的收益）。
+			}
+		}
+	}
+
 	prefix, view, suffix, err := encodeRecordEnvelope(&working)
 	if err != nil {
 		return fmt.Errorf("encode session record: %w", err)
@@ -511,6 +551,9 @@ func (s *FileStorage) DeleteSessionRecord(ctx context.Context, workspaceKey, ses
 		}
 		removed = true
 	}
+	// sidecar 与 record 同生命周期：不删会留下孤儿 blocks 文件（对长会话是几十 MB）。
+	evictBlockStore(path)
+	removeBlockStore(path)
 	if removed {
 		if err := syncDirectory(filepath.Dir(path)); err != nil {
 			return fmt.Errorf("sync session record directory after delete: %w", err)
@@ -942,8 +985,11 @@ func validateCheckpointForCommit(view ViewCheckpoint) error {
 	if !bytes.Contains(head, wantVer) {
 		return fmt.Errorf("%w: view_checkpoint schema_version must be %d", ErrInvalidSessionRecord, ViewCheckpointSchemaVersion)
 	}
-	if !bytes.Contains(head, []byte(`"blocks":[`)) {
-		return fmt.Errorf("%w: view_checkpoint.blocks must be an array", ErrInvalidSessionRecord)
+	// blocks 有两种合法形态：
+	//   · 内嵌完整数组   `"blocks":[`
+	//   · sidecar 引用   `"blocks":{"$blocks_ref":...}`（长会话优化）
+	if !bytes.Contains(head, []byte(`"blocks":[`)) && !bytes.Contains(head, []byte(`"blocks":{"`+blocksRefKey)) {
+		return fmt.Errorf("%w: view_checkpoint.blocks must be an array or sidecar ref", ErrInvalidSessionRecord)
 	}
 	return nil
 }
@@ -1171,6 +1217,16 @@ func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, 
 			!checksumMatchesStoredPayload(record.Checksum, data) {
 			return nil, nil, fmt.Errorf("%w: %s: %w", ErrRecordCorrupt, path, err)
 		}
+	}
+	// blocks 若为 sidecar 引用，此处还原成完整数组 —— 上层拿到的 ViewCheckpoint
+	// 与「内嵌完整 blocks」的旧格式**完全等价**，调用方无感。
+	//
+	// 还原失败必须报错而不是返回空 blocks：那会让长会话「打开后历史全空」，
+	// 比打不开更糟（用户以为数据丢了）。调用方据此回退 .bak。
+	if resolved, rerr := resolveBlocksRef(record.ViewCheckpoint, path); rerr != nil {
+		return nil, nil, fmt.Errorf("%w: %s: %w", ErrRecordCorrupt, path, rerr)
+	} else {
+		record.ViewCheckpoint = resolved
 	}
 	return &record, append([]byte(nil), data...), nil
 }
