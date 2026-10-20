@@ -1583,11 +1583,20 @@ body.is-electron .left.collapsed .rail .rbtn {
 }
 .narrative-enter > * {
   animation: narrativeEnter 320ms var(--ease) both;
-  /* 必须关掉 content-visibility：.msg 上有 content-visibility:auto（离屏跳过布局），
-     而渐入动画要改 opacity/transform —— 元素一旦被「跳过」，动画不会真正推进，
-     等它滚进视口时才突然播完，看起来像「滚到哪儿哪儿闪一下」。
-     渐入只发生在新会话刚进入的 500ms 内，此时离屏块本来也不多，关掉没有性能顾虑。 */
-  content-visibility: visible;
+  /* ## 绝不能在这里关掉 content-visibility（2026-10-21 修 bug）
+   
+     曾经这里写着 content-visibility: visible，理由是「动画要改 opacity/transform，
+     被跳过的元素动画不推进」。但代价是灾难性的：
+   
+       · .narrative-enter 一旦挂上就长期存在（animOn 变 true 后不再移除）
+       · 于是**所有**历史块都失去 content-visibility:auto 的优化
+       · 几百个块的真实高度必须全部计算，scrollHeight 剧烈变化
+       · 浏览器在高度重算时钳制 scrollTop → 用户被顶回底部
+       · 流式输出期间高度持续变化 → 反复被顶回（用户报障的真因之一）
+   
+     而不加这条的实际影响只是：离屏块的渐入动画不会推进，等它们滚进视口时
+     才播完 —— 用户根本看不到（因为那时不在屏幕上）。
+     两害相权，**保留 content-visibility**。 */
 }
 /* 逐条错峰：每条 18ms，第 1 条 -0ms，第 12 条 ~198ms，
    加上 320ms 时长 → 最后一条在 ~518ms 内完成（略超但要留出阅读起始感）。

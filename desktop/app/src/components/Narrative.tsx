@@ -200,8 +200,24 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   useEffect(() => {
     if (!enterAnimAt) return
     setAnimOn(false)
-    const t = requestAnimationFrame(() => setAnimOn(true))
-    return () => cancelAnimationFrame(t)
+    let raf1 = 0
+    let timer: ReturnType<typeof setTimeout> | undefined
+    raf1 = requestAnimationFrame(() => {
+      setAnimOn(true)
+      // 动画播完就摘掉类（2026-10-21）。
+      //
+      // 为什么必须摘：这个类会给所有子元素挂 animation。留着不放的话，
+      // 任何布局变化都可能让动画重新求值/重排，在流式输出期间表现为
+      // 「内容高度反复变化 → 浏览器钳制 scrollTop → 用户被顶回底部」。
+      // 动画本来就只需要播这一次。
+      //
+      // 620ms = 最长一条的延迟 288ms + 时长 320ms + 少量余量。
+      timer = setTimeout(() => setAnimOn(false), 620)
+    })
+    return () => {
+      cancelAnimationFrame(raf1)
+      if (timer) clearTimeout(timer)
+    }
   }, [enterAnimAt])
 
   // —— 历史分批铺开（真正意义上的「缓慢展示」）——
@@ -218,7 +234,19 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   // 后续补的是上方离屏内容（被 content-visibility 跳过布局，几乎无成本）。
   // 这样「铺开动画」与「可交互」几乎同时发生，不会让人觉得在等。
   const REVEAL_PER_FRAME = 25
-  const [revealCount, setRevealCount] = useState<number>(Infinity)
+  // revealStart：已铺开的**起始下标**（不是「个数」）。
+  //
+  // ## 为什么必须用绝对下标（2026-10-21 修 bug）
+  //
+  // 上一版存的是「铺开多少个」revealCount，切片时算 blocks.length - revealCount。
+  // 流式输出让 blocks.length 变大，而 revealCount 不变 → 起点跟着变大 →
+  // **前面已渲染的块被丢弃** → DOM 高度骤减 → 浏览器把 scrollTop 夹到底部。
+  // 这正是「一有流式输出就被顶回贴底」的主因之一。
+  //
+  // 改用绝对下标后，铺开只做一件事：setRevealStart(n - REVEAL_PER_FRAME)，
+  // 起点单调减小（朝向 0），**永远不会因为尾部增长而后移**。
+  // Infinity 表示「全部显示」，与起点语义统一为 0。
+  const [revealStart, setRevealStart] = useState<number>(0)
   useEffect(() => {
     // 只在「会话刚进入」时铺开：正常追加（流式/新消息）不限制。
     //
@@ -228,32 +256,28 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     // → 铺开中途突然全部显示（正是要避免的）。enterAnimAt 是单调的时间戳，
     // 一次会话进入只变一次，天然稳定。
     if (!enterAnimAt) {
-      setRevealCount(Infinity)
+      setRevealStart(0) // 全部显示
       return
     }
     const total = blocks.length
-    if (total <= REVEAL_PER_FRAME) {
-      setRevealCount(Infinity)
+    let start = Math.max(0, total - REVEAL_PER_FRAME)
+    if (start === 0) {
+      setRevealStart(0)
       return
     }
-    let shown = 0
+    setRevealStart(start)
     let raf = 0
     const step = () => {
-      shown += REVEAL_PER_FRAME
-      if (shown >= total) {
-        setRevealCount(Infinity)
-        return
-      }
-      setRevealCount(shown)
-      raf = requestAnimationFrame(step)
+      start = Math.max(0, start - REVEAL_PER_FRAME)
+      setRevealStart(start)
+      if (start > 0) raf = requestAnimationFrame(step)
     }
-    setRevealCount(REVEAL_PER_FRAME)
     raf = requestAnimationFrame(step)
     return () => {
       if (raf) cancelAnimationFrame(raf)
     }
-    // 依赖 enterAnimAt：每次会话进入重新铺一遍；blocks.length 变化不重置
-    // （否则流式新块会把铺开进度打回起点 —— 那是明显 bug）。
+    // 依赖 enterAnimAt：每次会话进入重新铺一遍；blocks.length 变化不重启
+    // （否则流式新块会把铺开进度打回起点）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enterAnimAt])
   const loadOlder = useAppStore((s) => s.loadOlderBlocks)
@@ -371,6 +395,19 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   // **用户亲手滚动的那一刻**决定一次，之后 tick 不再改它。
   // 两者暂时并存（stickRef 供 away/fresh 按钮显示），后续可合并。
   const autoscrollRef = useRef(true)
+  // expectedTopRef：tick 上一次**自己**把 scrollTop 写成的值（跨 effect 重跑存活）。
+  //
+  // ## 为什么必须是 ref 而不是 effect 内的 let（2026-10-21，日志实证后定案）
+  //
+  // 判据是「我上次写到多少」，但 tick 所在的 effect 依赖 [blocks, revealStart]，
+  // 而流式输出**每帧都生成新的 blocks 数组** → effect 每帧取消重跑。
+  // 若把 expectedTop 放在闭包里，每次重跑都会被重置成「用户此刻刚滚到的位置」，
+  // 下一帧自比对必然相等 → 判据永远不触发（实测 [TICK-EXTERNAL] 一次未出现）。
+  // ref 跨重跑存活，才真正表达「我上次写到多少」。
+  const expectedTopRef = useRef(-1)
+  // 同上：lastMax 也必须跨重跑存活。放在闭包里会让 grew 每帧都为 true，
+  // 无论高度是否真的变化都无条件钉底。
+  const lastMaxRef = useRef(-1)
   // 用户手势标记：wheel / touchstart 置位（真实用户滚动输入）。程序滚动（校准
   // 循环赋值 scrollTop）不置位 —— 其 scroll 事件被 onScroll 忽略，stickRef 不受
   // 干扰。这解决了两个问题：
@@ -502,8 +539,13 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   useEffect(() => {
     const el = ref.current
     if (!el) return
+    // 离开底部时只需标记「有新内容」，不必启动 tick（省一次 rAF 循环）。
+    //
+    // 但注意：tick 现在自己会通过 expectedTop 检测用户滚动并关闭跟随
+    //（见下方注释），所以这里是**优化**而非正确性前提 ——
+    // 即使 stickRef 因时序错误而仍为 true，tick 也会在下一帧自我纠正。
     if (!stickRef.current) {
-      setFresh((f) => (blocks.length ? true : f)) // 离开底部期间有 blocks 更新 → fresh（按钮圆点）
+      setFresh((f) => (blocks.length ? true : f))
       return
     }
     // 历史铺开期间**不启动**校准循环（2026-10-21）。
@@ -512,14 +554,49 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     // 校准循环会把 scrollTop 钉到底部，与铺开+锚定补偿争夺同一个属性，
     // 表现为每补一批就抖一下。铺开结束后 effect 因 revealCount 变化重跑，
     // 校准循环自然接管（此时内容已完整，一次到底即可）。
-    if (revealCount !== Infinity) return
+    if (revealStart > 0) {
+      // 铺开期间 tick 不运行，基准会失真 → 清空，铺开结束后重新同步
+      expectedTopRef.current = -1
+      lastMaxRef.current = -1
+      return
+    }
     let raf = 0
-    let lastMax = -1
+    // expectedTop：tick 上一次**自己**把 scrollTop 写成的值。
+    //
+    // ## 这是唯一不会与用户抢跑的判据（2026-10-21，日志实证后定案）
+    //
+    // 日志显示：用户上滑后 autoscroll 恒为 true、[SETTLE] 一次都没出现，
+    // 而 tick 每帧都在把 top 钉回 max。原因是 tick 跑得比所有事件都快：
+    // 用户的滚动刚发生、scrollTop 还没被事件读到，tick 就已经把它改回底部了。
+    // 于是「top 变小」「wheel deltaY<0」「finger down」这些判据全部失效 ——
+    // 它们观察到的世界永远是「贴在底部」。
+    //
+    // 破局点：tick 完全知道自己把 top 写成了多少。下一帧如果发现
+    // `el.scrollTop !== expectedTop`，那**一定是外部改的**（用户滚动/滚动条/
+    // 键盘/浏览器钳制），因为 tick 自己只写这一个值。
+    // 这一帧就不能再钉底，并且要把 autoscroll 关掉。
+    //
+    // 它不依赖任何事件时序，也不依赖高度是否稳定 —— 只依赖「我写过什么」。
     const tick = () => {
       raf = 0
       const max = el.scrollHeight - el.clientHeight
-      const grew = max !== lastMax
-      lastMax = max
+      const prevMax = lastMaxRef.current
+      const grew = max !== prevMax
+      lastMaxRef.current = max
+      // 外部改过 scrollTop → 用户移动了视图 → 立即停止跟随。
+      //
+      // 只判「变小」：tick 自己只会把 top 往 max 推（单调增大），所以 top 变小
+      // 必然是外部改的（用户上滑/拖滚动条/键盘）。用 abs 差值会在浏览器
+      // scroll-anchoring 把 top 自动加大时误判成「用户动了」。
+      // 容差 2px：过滤亚像素/取整误差。
+      const exp = expectedTopRef.current
+      if (exp >= 0 && el.scrollTop < exp - 2 && !(max < prevMax)) {
+        if (autoscrollRef.current) {
+          autoscrollRef.current = false
+          stickRef.current = false
+          setAway(true)
+        }
+      }
       if (grew) {
         // 内容高度变化 → 只有「用户意图贴底」时才跟随。
         //
@@ -537,14 +614,21 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
         //   · 用户滚动后停在底部附近 → autoscroll=true  → 新内容顶上去（跟随）
         //   · 用户滚动后离开底部       → autoscroll=false → 新内容只加长，不动视图
         // 中间只有 tick 自己写入 scrollTop 时保持原值，不改变这个用户意图。
-        if (!autoscrollRef.current) { raf = requestAnimationFrame(tick); return }
-        if (max > 0 && el.scrollTop !== max) setScrollTop(el, max)
+        if (autoscrollRef.current && max > 0 && el.scrollTop !== max) {
+          setScrollTop(el, max)
+        }
       }
+      // 无论有没有钉底，都记下「本帧结束时 top 应该是多少」，供下一帧比对。
+      // 钉底分支里 top === max；未钉底时就是当前值（我们没动它）。
+      expectedTopRef.current = el.scrollTop
       raf = requestAnimationFrame(tick)
     }
+    // 首次进入（或某条路径清空过）才同步；**不得**每次 effect 重跑都覆盖，
+    // 否则用户上滑的位移会被当成基准吃掉（正是上一版失效的原因）。
+    if (expectedTopRef.current < 0) expectedTopRef.current = el.scrollTop
     raf = requestAnimationFrame(tick)
     return () => { if (raf) cancelAnimationFrame(raf) }
-  }, [blocks, revealCount])
+  }, [blocks, revealStart])
   // 会话切换：重置贴底状态。内容到达后的持续校准由 blocks effect 统一负责
   //（覆盖 content-visibility 慢布局：rAF 循环直到内容高度稳定）。
   // 这里只重置 + 若新会话内容已在（缓存切换），先滚一次减少等待。
@@ -554,9 +638,13 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     setAway(false)
     setFresh(false)
     const el = ref.current
+    // 内容整体换掉 → 旧基准无意义（否则首帧会把切会话的自动滚动误判成用户上滑）
+    expectedTopRef.current = -1
+    lastMaxRef.current = -1
     if (el) {
       setScrollTop(el, el.scrollHeight - el.clientHeight)
       lastTopRef.current = el.scrollTop
+      expectedTopRef.current = el.scrollTop
     }
   }, [activeSessionId])
   const jumpToBottom = () => {
@@ -564,7 +652,10 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     autoscrollRef.current = true // 点「回到底部」= 明确要恢复跟随
     setAway(false)
     setFresh(false)
+    expectedTopRef.current = -1
     anchorRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' })
+    const el = ref.current
+    if (el) expectedTopRef.current = el.scrollTop
   }
 
   // 渲染单个非工具块（工具已在上面归组处理）
@@ -692,7 +783,9 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
 
   // 铺开进度：只渲染尾部 revealCount 个（见上方「历史分批铺开」）。
   // 从尾部开始，是因为阅读锚点在底部（最新消息）。
-  const visibleBlocks = revealCount >= blocks.length ? blocks : blocks.slice(blocks.length - revealCount)
+  // revealStart 是绝对下标：0 = 全部显示。铺开过程中它单调减小、永不后移，
+  // 因此流式追加新块不会挤掉前面已渲染的内容（见上方注释）。
+  const visibleBlocks = revealStart <= 0 ? blocks : blocks.slice(revealStart)
 
   // 连续工具块归组（并行工具上下排列），其余原样
   const items: (ReactElement | null)[] = []
