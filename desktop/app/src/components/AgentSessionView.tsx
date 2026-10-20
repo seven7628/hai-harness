@@ -9,9 +9,9 @@ import { ToolTaskBody } from './TaskCard'
 import { TaskResultInline } from './NarrativeBlocks'
 import { ElapsedTimer } from './ElapsedTimer'
 import { fmtUsd, UsageChip } from './ui'
+import { useScopedCompression } from './sessionScope'
 import { Bot, ChevronRight, Clock } from './icons'
 import { useT } from '../i18n'
-import TodoPanel from './TodoPanel'
 
 // 子智能体「子会话」视图：选中左栏树里的某个子智能体时，叙述区展示**它**的一切。
 //
@@ -30,6 +30,8 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   const focusAgent = useAppStore((s) => s.focusAgent)
   const interruptTask = useAppStore((s) => s.interruptTask)
   const loadAgentHistory = useAppStore((s) => s.loadAgentHistory)
+  // 压缩态按同一套作用域判定（子会话的压缩是它自己的上下文压缩，与主会话互不影响）
+  const comp = useScopedCompression()
 
   const treeBlocks = useMemo(
     () => blocks.filter((b) => b.kind === 'agent' || b.kind === 'async_task' || (b.kind === 'tool' && b.promoted)),
@@ -115,9 +117,21 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
       </div>
 
       <div className="as-body">
-        {/* 子智能体自己的 TODO（独立上下文 → 独立待办）：只显示它自己的清单，
-            没有就整块不渲染 —— 绝不回退到主会话清单（那正是用户 2026-10 报障的 bug）。 */}
-        <TodoPanel scope="agent" todos={card?.todos ?? []} />
+        {/* 这里**不再**放待办面板：待办归右栏顶部那一份（它跟随当前作用域 —— 看主会话
+            是会话清单，看子会话是这个子 agent 自己的清单）。同一份清单在两处显示会让人
+            怀疑「是不是两份不同的计划」。子 agent 的 todo_* 调用仍会在转录里渲染成计划卡
+            （定格当时状态），那是**历史**而不是当前清单，语义不同。 */}
+        {/* 压缩中：与主会话同一个提示形态（气泡 → spinner → 说明），只是归属这个子会话。
+            子 agent 压缩自己的上下文时，用户看到的是「它在压」而不是主会话在压。 */}
+        {comp.active && (
+          <div className="as-compressing" role="status" aria-live="polite">
+            <span className="composer-status-spinner" aria-hidden="true" />
+            <strong>{t('composer.compressing')}</strong>
+            {comp.before != null && (
+              <span className="composer-status-detail">{t('composer.compressing.detail')}</span>
+            )}
+          </div>
+        )}
         {card ? (
           <>
             <AgentTranscript

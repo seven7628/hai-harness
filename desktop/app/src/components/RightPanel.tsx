@@ -1,18 +1,15 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import type { ReactElement } from 'react'
-import { useAppStore, runningTaskCount, fileKeyOf, isPendingWebTab, rebuildWebTab } from '../store/useAppStore'
+import { useAppStore, fileKeyOf, isPendingWebTab, rebuildWebTab } from '../store/useAppStore'
 import type { RightTab, TabKind, TabInstance, TabSpec, FileTabInstance, MsgBlock, Diff, GitFile, GitStatus } from '../store/useAppStore'
 import type { AnyEvent } from '../store/events'
 import { projectAllTraces, liveRootRunId } from '../store/trace'
 import type { TraceDetail } from '../store/trace'
 import TraceWaterfall, { buildRows } from './TraceWaterfall'
 import SpanSheet, { lookupPayload } from './SpanSheet'
-import { Activity, GitBranch, FileIcon, Bot, BarChart, CheckList, Globe, PanelRight, ImageIcon, ChevronDown, Plus } from './icons'
+import { Activity, GitBranch, FileIcon, BarChart, CheckList, Globe, PanelRight, ImageIcon, ChevronDown, Plus } from './icons'
 import { fmtTokens, fmtUsd, fmtDuration, UnifiedDiff } from './ui'
-import ApprovalCard from './ApprovalCard'
 import ConfirmModal from './ConfirmModal'
-import { CompressionBlock } from './NarrativeBlocks'
-// 任务卡（子 agent / 后台任务 / 工具任务）：与主对话的子 agent 卡**同一份外壳**，见 TaskCard.tsx
 import { Markdown } from './markdown'
 import CsvPreview from './CsvPreview'
 import { codeToHtml } from './highlight'
@@ -26,7 +23,10 @@ import { useT } from '../i18n'
 import TodoPanel from './TodoPanel'
 import { useFocusTodos } from './useFocusTodos'
 
-// Tab 分两段：主段 = 会话工作流核心（链路 · 变更）；辅段 = 监视/工具（Agent · 文件 · 网页）。
+// Tab 分两段：主段 = 会话工作流核心（链路 · 变更）；辅段 = 预览工具（文件 · 网页）。
+// 这里**没有**「任务」tab（2026-10 用户拍板退役）：子智能体/异步 Bash 就是另一个会话，
+// 住在左栏会话树里，点开即子会话视图；它的待审批/压缩/待办与主会话**同一套**面板，
+// 只是按「你在看谁」分域渲染（见 sessionScope.ts）。
 // 跨会话用量看板在设置「使用统计」页（原「指标」tab 已下线，见 docs/DESKTOP.md §5.4）。
 // 分组让「主次」从视觉层级表达出来，而非 6 个平级小字挤一行。
 function primaryTabs(t: (k: string) => string): { key: RightTab; label: string; icon: ReactElement }[] {
@@ -37,7 +37,6 @@ function primaryTabs(t: (k: string) => string): { key: RightTab; label: string; 
 }
 function secondaryTabs(t: (k: string) => string): { key: RightTab; label: string; icon: ReactElement }[] {
   return [
-    { key: 'agent', label: t('rp.tab.agent'), icon: <Bot /> },
     { key: 'file', label: t('rp.tab.file'), icon: <FileIcon /> },
     { key: 'web', label: t('rp.tab.web'), icon: <Globe /> },
   ]
@@ -1920,74 +1919,12 @@ function BrowserTab({ toolbarHidden, onToggleTabs, panelVisible, activePageId, m
 // 主 Agent 压缩镜像（右栏任务 tab）：与主会话同一数据源 —— 进行中显示活动条
 // （顶层 compressing/compressBefore 镜像），完成后渲染主会话同一个 compression block
 // （blocks 尾部最后一条 kind==='compression'）。不新建第二套活动状态。
-function MainCompressionMirror() {
-  const t = useT()
-  const blocks = useAppStore((s) => s.blocks)
-  const compressing = useAppStore((s) => s.compressing)
-  const compressBefore = useAppStore((s) => s.compressBefore)
-  const last = useMemo(() => [...blocks].reverse().find((b) => b.kind === 'compression'), [blocks])
-  const showActive = compressing || Boolean(last)
-  if (!showActive) return null
-  return (
-    <div className="rail-compression">
-      {compressing ? (
-        <div className="rail-compressing" role="status">
-          {t('rp.task.mainCompressing').replace('{n}', String(compressBefore ?? '—'))}
-        </div>
-      ) : last?.kind === 'compression' ? (
-        <CompressionBlock b={last} />
-      ) : null}
-    </div>
-  )
-}
-
-// 「任务」tab：**待决断 / 主会话级提示**（派生产出已全部搬到左栏树）。
-//
-// 2026-10（用户需求）：子智能体、孙智能体、异步 Bash（被摘离的工具调用）都住进左栏的
-// 会话树（见 AgentTree / AgentSessionView）——「一次会话派生出去的东西」是**层级**问题，
-// 左侧树才是它的正确位置；右栏是「这次会话的审阅面」（链路 / 变更 / 文件 / 网页）。
-// 于是这个 tab 只剩两件**不属于树**的东西，共同点是「要人现在做决定或现在知道」：
-//   · 待审批：Session 统一 FIFO 队首（主/子共用，标注运行归属；与 Modal 共享 approve）
-//   · 主 Agent 压缩镜像：主会话压缩是会话级事实，不归某个子 agent
-// 后台工具任务的细节（参数/结果）在它的子会话视图里展开（ToolTaskBody），不再单列卡。
-function TaskMonitor() {
-  const t = useT()
-  const blocks = useAppStore((s) => s.blocks)
-  const approvals = useAppStore((s) => s.approvals)
-  const compressing = useAppStore((s) => s.compressing)
-  const head = approvals[0]
-  const lastComp = useMemo(() => [...blocks].reverse().find((b) => b.kind === 'compression'), [blocks])
-  const headOwner = (runId?: string): string => {
-    if (!runId) return t('rp.task.mainAgent')
-    const b = blocks.find((x) => x.kind === 'agent' && x.runId === runId)
-    return b?.kind === 'agent' ? b.label : t('rp.task.subAgent')
-  }
-  if (!head && !compressing && !lastComp) {
-    return <div className="empty"><div className="big">{t('rp.task.noTasks')}</div>{t('rp.task.noTasksHint')}</div>
-  }
-  return (
-    <div className="agent-monitor">
-      {head && (
-        <div className="rail-approval">
-          <div className="rail-approval-hd">
-            <span>{t('rp.task.pendingApproval').replace('{name}', head.name)}</span>
-            <span className="mono rail-approval-owner">{headOwner(head.runId)}</span>
-          </div>
-          <ApprovalCard a={head} ownerLabel={headOwner(head.runId)} />
-        </div>
-      )}
-      <MainCompressionMirror />
-    </div>
-  )
-}
-
 // 「+」菜单里**没有** file：文件标签需要路径，由点文件产生（阶段 2 起是**多实例**：
 // 一个文件一个标签，同一文件的 diff / source 各一个 —— 见 store.openTab 的幂等键）。
-const ADDABLE_KINDS: TabKind[] = ['activity', 'git', 'agent', 'web']
+const ADDABLE_KINDS: TabKind[] = ['activity', 'git', 'web']
 function kindIcon(kind: TabKind): ReactElement {
   switch (kind) {
     case 'git': return <GitBranch size={12} />
-    case 'agent': return <Bot size={12} />
     case 'file': return <FileIcon size={12} />
     case 'web': return <Globe size={12} />
     default: return <Activity size={12} />
@@ -2106,15 +2043,10 @@ export default function RightPanel() {
   // 现在面板标签条常驻、浏览器工具条又被合并成一行 → 默认收起它只会让用户看不到地址栏/文件名。
   const [immersive, setImmersive] = useState(false)
   const toolbarHidden = rightTab === 'web' && immersive
-  // 看的是哪个子智能体 → 右栏待办面板跟随它（见下方 TodoPanel 的 scope）
+  // 看的是哪个子智能体 → 待办面板/角标跟随它（判定在 useFocusTodos，与面板同一份）
   const focusTodos = useFocusTodos()
   // 活跃待办数（未完成）→ 折叠图标条角标（跟随焦点，与面板同源）
   const activeTodos = (focusTodos?.todos ?? todos).filter((todo) => !todo.done).length
-  // 「有派生产出在跑」的角标：子 agent + 后台工具任务统一由 runningTaskCount 统计
-  //（与左栏树同源——树里每个节点都来自同一批块）。
-  // 语义说明：这个 tab 本身只剩待审批/压缩镜像，角标的作用是**提醒左栏有活动分支**；
-  // 因此口径必须与树一致，而不是与 tab 内容一致（否则用户会以为 tab 里有 N 条待办）。
-  const runningTasks = useAppStore((s) => runningTaskCount(s.blocks))
 
   // 标签显示名：file → 文件名；web → 当前页标题（退化到主机名）；其余 → kind 的 i18n 文案。
   const kindLabel = (k: TabKind) => t(`rp.tab.${k}`)
@@ -2172,7 +2104,7 @@ export default function RightPanel() {
               : 0
             return (
               <button key={tab.key} className={`rbtn ${rightTab === tab.key ? 'on' : ''}`}
-                data-tip={tab.key === 'agent' && runningTasks > 0 ? t('rp.agent.asyncTip').replace('{n}', String(runningTasks)) : tab.label}
+                data-tip={tab.label}
                 aria-label={tab.label}
                 onClick={() => {
                   setRightTab(tab.key)
@@ -2180,9 +2112,6 @@ export default function RightPanel() {
                 }}>
                 {unread > 0 && <span className="todo-badge unread-badge mono">{unread}</span>}
                 {tab.icon}
-                {tab.key === 'agent' && runningTasks > 0 && (
-                  <span className="todo-badge agent-badge mono">{runningTasks}</span>
-                )}
               </button>
             )
           })}
@@ -2194,9 +2123,9 @@ export default function RightPanel() {
   return (
     <aside className="right expanded" aria-label={t('rp.aria')}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        {/* 待办面板跟随「你在看谁」：看主会话 = 会话清单；看某个子智能体 = 它自己的清单
-            （子 agent 是独立上下文 → 独立 TODO，绝不回退到主会话清单）。 */}
-        <TodoPanel scope={focusTodos?.scope ?? 'main'} todos={focusTodos?.todos} />
+        {/* 待办面板跟随「你在看谁」（作用域判定在面板内部，见 TodoPanel）：看主会话 =
+            会话清单；看某个子智能体 = 它自己的清单（绝不回退到主会话清单）。 */}
+        <TodoPanel />
         <div className="rtabs" role="tablist" aria-label={t('rp.aria')}>
           <button
             className="rtabs-more"
@@ -2240,7 +2169,6 @@ export default function RightPanel() {
                     ? <span className="browser-page-dot" title={t('browser.tabUnread')} />
                     : <span className="rtab-ico">{tabIconEl(tab)}</span>}
                   <span className="rtab-t">{restoring ? t('browser.tabRestoring') : tabTitle(tab)}</span>
-                  {tab.kind === 'agent' && runningTasks > 0 && <span className="tab-count mono">{runningTasks}</span>}
                   <button
                     className="rtab-close"
                     title={t('rp.tabs.close')}
@@ -2336,7 +2264,6 @@ export default function RightPanel() {
           )}
           {activeTab?.kind === 'activity' && <ActivityTab />}
           {activeTab?.kind === 'git' && <ChangesTab />}
-          {activeTab?.kind === 'agent' && <TaskMonitor />}
           {/* key={activeTab.id}：**每个 file 标签一份组件实例**（阶段 2 的隔离手段）。
               为什么不共用一个实例再按 props 复位：file 标签之间切换时元素类型/位置不变，
               React 会复用实例 → 组件 state（mdMode/csvMode/detailMode/列表展开…）会从上一个

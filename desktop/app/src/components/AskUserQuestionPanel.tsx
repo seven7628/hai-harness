@@ -4,6 +4,7 @@ import { useClock } from '../lib/useNow'
 import { parseQuestionOptions } from '../lib/questionOptions'
 import { Markdown } from './markdown'
 import { useT } from '../i18n'
+import { useScopedQuestion } from './sessionScope'
 
 // 决策倒计时（2026-09-20 用户要求：让用户知道还剩多长时间做决策）：
 // 剩 = timeoutMs - (提问以来的毫秒)。时钟复用应用唯一的 1s tick（useClock，
@@ -38,7 +39,10 @@ function useCountdown(q?: { timeoutMs?: number; ts?: number }): { leftMs: number
 // 仅单选题走这个版面 —— 多选带预览会被后端 tools/question 直接拒绝。
 export default function AskUserQuestionPanel() {
   const t = useT()
-  const question = useAppStore((s) => s.question)
+  // 作用域感知（2026-10，与 ApprovalPanel 同一条判定）：看主会话 → 主 run 的提问；
+  // 看子会话 → 那个子 agent 的提问。提问通道在后端同样是 Session 级单槽，
+  // 这里只做展示过滤（别人的提问不该在你眼前挡住面板）。
+  const question = useScopedQuestion()
   const answerQuestion = useAppStore((s) => s.answerQuestion)
   // 每题作答：'' = 未答；点选选项或自由输入即答
   const [answers, setAnswers] = useState<Record<string, string>>({})

@@ -13,7 +13,14 @@ import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type N
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
 
-export type RightTab = 'activity' | 'git' | 'agent' | 'file' | 'web'
+// 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
+//
+// 2026-10 起「agent」（任务）tab 已**删除**（用户拍板）：子智能体不是「任务列表里的一项」，
+// 而是一个**子会话** —— 它有自己的待审批、自己的压缩、自己的 TODO，与主会话同构，
+// 差别只有「结果会回推到主会话」。因此它住在左栏会话树里，点开就是子会话视图，
+// 不需要也不应该在右栏再有一份平铺列表。审批/压缩因此改为**按当前查看的 session 分域**
+// 渲染（见 components/SessionScope 与 ApprovalPanel / AgentSessionView）。
+export type RightTab = 'activity' | 'git' | 'file' | 'web'
 
 // —— 右侧栏标签模型（docs/RIGHT_PANEL_TABS_PLAN.md 阶段 1）——
 //
@@ -39,7 +46,6 @@ export type WebTabInstance = { id: string; kind: 'web'; viewId?: string; pageId?
 export type TabInstance =
   | { id: string; kind: 'activity' }
   | { id: string; kind: 'git' }
-  | { id: string; kind: 'agent' }
   | FileTabInstance
   | WebTabInstance
 export interface TabSet {
@@ -1126,7 +1132,7 @@ const TABS_PERSIST_DEBOUNCE_MS = 300
 
 // 持久化形态：标签实例**剥掉运行时字段**（viewId / pageId / openSeq），web 换成 url 快照。
 type PersistedTab =
-  | { id: string; kind: 'activity' | 'git' | 'agent' }
+  | { id: string; kind: 'activity' | 'git' }
   | { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source'; toolId?: string; startLine?: number }
   | { id: string; kind: 'web'; url: string; srcPath?: string }
 interface PersistedTabSet { tabs: PersistedTab[]; activeId: string | null }
@@ -1165,7 +1171,7 @@ function webUrlSnapshot(t: WebTabInstance, s: AppState): { url: string; srcPath?
 // 也不要恢复一个点不开的死标签。
 function toPersistedTab(t: TabInstance, s: AppState): PersistedTab | undefined {
   switch (t.kind) {
-    case 'activity': case 'git': case 'agent':
+    case 'activity': case 'git':
       return { id: t.id, kind: t.kind }
     case 'file':
       // openSeq **不存**：它是「每次打开回默认视图」的触发器，恢复时从 1 起（见 fromPersistedTab）。
@@ -1189,7 +1195,7 @@ function toPersistedTab(t: TabInstance, s: AppState): PersistedTab | undefined {
 // web → 待重建态（只带 url/srcPath 快照，不带池身份）；file 的 openSeq 从 1 起。
 function fromPersistedTab(p: PersistedTab, id: string): TabInstance {
   switch (p.kind) {
-    case 'activity': case 'git': case 'agent':
+    case 'activity': case 'git':
       return { id, kind: p.kind }
     case 'file':
       return { id, kind: 'file', ...(p.path ? { path: p.path } : {}), ...(p.mode ? { mode: p.mode } : {}), ...(p.toolId ? { toolId: p.toolId } : {}), ...(p.startLine != null ? { startLine: p.startLine } : {}), openSeq: 1 }
@@ -1198,7 +1204,7 @@ function fromPersistedTab(p: PersistedTab, id: string): TabInstance {
   }
 }
 
-const TAB_KINDS: TabKind[] = ['activity', 'git', 'agent', 'file', 'web']
+const TAB_KINDS: TabKind[] = ['activity', 'git', 'file', 'web']
 
 // sanitizePersistedTab：逐字段校验一条存储记录。**坏数据不炸**（规格 §2 要求 4）——
 // 结构不对/类型不对的字段一律丢弃（能救的字段救回来，救不了的整条丢），绝不抛错。
@@ -3500,6 +3506,16 @@ function rollbackPromote(sid: string, taskId: string, error?: string): void {
 
 // 异步任务完整清单。task_started 会先建立 async_task 占位，agent_start 到达后会把同一
 // taskId 合并进 agent 卡片；因此通常不会重复，异常/延迟事件下仍能展示占位和数量徽章。
+// focusNodeIdFor 由 runId 求「树节点键」（taskId 优先，退化 runId）。
+// 为什么要有这一步：树节点身份是 taskId（同一个后台子智能体有 task_started 占位与
+// agent_start 两条来源，靠 taskId 合成一个节点），而事件只带 runId —— 不换算的话
+// 「聚焦这个 run」会找不到节点（见 lib/agentTree 的 id/runId 分工）。
+export function focusNodeIdFor(v: SessionView, runId: string): string {
+  const card = v.blocks.find((b) => b.kind === 'agent' && b.runId === runId)
+  if (card?.kind === 'agent' && card.taskId) return card.taskId
+  return runId
+}
+
 // withAgentTodos 把一份待办快照写到**某个子 agent 卡片**上（其它块原样保留）。
 // 子 agent 是独立上下文 → 独立 TODO：它的清单只能落它自己的卡片，绝不进会话清单。
 // 待办归属规则本身在 lib/todoScope.ts（可单测，两条硬约束见那里的注释）。这里是它的
@@ -5362,11 +5378,15 @@ export function dispatchEvent(raw: AnyEvent): void {
               arrivedAt: Date.now(),
             },
           ],
-          // Only a SubAgent-originated HITL may take over the active right rail.
-          // Main-agent approvals keep the existing modal behavior; both kinds
-          // still live in the same Session-level FIFO queue.
-          ...((isActive && Boolean(runId) && isSubAgentRun(v, runId ?? ''))
-            ? { rightExpanded: true, rightTab: 'agent' as const }
+          // 子智能体的审批到达 → 把用户**带去看它**（不再有「任务 tab」可切）。
+          //
+          // 2026-10：子 agent 是子会话，审批归属它自己。原来的行为是「展开右栏 + 切到
+          // 任务 tab」，现在没有那个 tab 了 → 直接聚焦那个子会话：审批卡就停靠在它的
+          // 输入区上方，与主会话同一个位置、同一份组件。
+          // 仅在**活跃会话**里自动聚焦：后台会话的审批不该抢走用户当前的视线
+          // （切回该会话时它仍在队列里，队首即展示）。
+          ...(isActive && Boolean(runId) && isSubAgentRun(v, runId ?? '')
+            ? { focusedAgent: { nodeId: focusNodeIdFor(v, runId!), runId: runId! } }
             : {}),
         })
       })

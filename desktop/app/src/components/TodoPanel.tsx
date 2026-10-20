@@ -3,27 +3,26 @@ import { useAppStore } from '../store/useAppStore'
 import type { TodoItem } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { pickTodoList } from '../lib/todoScope'
+import { useFocusTodos } from './useFocusTodos'
 
 // 待办面板：右栏顶部常驻小结（默认折叠成一行进度条+计数，点开展开列表；不悬浮在叙述通道上，
 // 避免遮挡实时流式输出）。
 //
-// **作用域（scope）是这份组件最重要的参数**（用户 2026-10 报障：子智能体里显示了主会话的 TODO）：
-//   · scope='main'（默认）= 会话待办（主 agent 的清单，数据源 = store.todos）
-//   · scope='agent'      = 传进来的 todos（某个子智能体**自己的**清单，来自它卡片上的
-//                          todos 快照 —— 子 agent 是独立上下文，因此是独立 TODO）
+// **作用域跟随「你在看谁」**（用户 2026-10 报障：子智能体里显示了主会话的 TODO；
+// 以及随后拍板的「子智能体等同于切换个 session」）：
+//   · 看主会话 → 会话待办（主 agent 的清单，数据源 = store.todos）
+//   · 看子会话 → 该子智能体**自己的**清单（它卡片上的 todos 快照 —— 子 agent 是独立
+//                上下文，因此是独立 TODO）
 // 两者**绝不互相回退**：子 agent 没有清单时整块不渲染，而不是显示主会话的清单。
 // 回退会让「这个子智能体没有计划」被显示成「它有一份和主会话一样的计划」，是更难发现的错。
-export default function TodoPanel({
-  scope = 'main',
-  todos: scoped,
-}: {
-  scope?: 'main' | 'agent'
-  /** scope='agent' 时的清单（调用方给 = 该子 agent 自己的快照）；scope='main' 忽略 */
-  todos?: TodoItem[]
-}) {
-  const storeTodos = useAppStore((s) => (scope === 'main' ? s.todos : EMPTY))
+//
+// 作用域由面板**自己**解析（不靠调用方传参）：两个调用点各传一份，迟早漂移成
+// 「面板在这边显示 A、角标在那边数 B」。判定收在 useFocusTodos + lib/todoScope.pickTodoList。
+export default function TodoPanel() {
+  const storeTodos = useAppStore((s) => (s.focusedAgent ? EMPTY : s.todos))
+  const focus = useFocusTodos()
   // 取值规则单一来源（lib/todoScope.pickTodoList）：agent 作用域绝不回退会话清单
-  const todos = pickTodoList(scope, storeTodos, scoped)
+  const todos = pickTodoList(focus?.scope ?? 'main', storeTodos, focus?.todos)
   const [collapsed, setCollapsed] = useState(true)
   const t = useT()
 

@@ -121,6 +121,7 @@ export default function Composer() {
   // 排除 aborted：点击停止后 interrupt() 乐观置位 aborted，按钮立即回「发送」态
   //（不等 agent_end 往返）；agent_end(abort) 到达后幂等覆盖。
   const runActive = useAppStore((s) => (s.activeSessionId ? mainRunActive(s.views[s.activeSessionId]) && !s.views[s.activeSessionId]?.aborted : false))
+  // 压缩态：主会话的压缩才阻塞输入（子会话压缩它自己的上下文，不该卡住主会话的输入框）。
   const compressing = useAppStore((s) => Boolean(s.activeSessionId && s.views[s.activeSessionId]?.compressing))
   const ctxTokens = useAppStore((s) => s.ctxTokens) // 当前上下文占用（事件推导，压缩后反映压后大小）
   const ctxBreakdown = useAppStore((s) => s.ctxBreakdown) // 上下文构成分区（ctx 环 hover 面板）

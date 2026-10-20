@@ -12156,3 +12156,17 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   font-size: 11px;
   line-height: 1.5;
 }
+/* 子会话的「正在压缩」提示：与 Composer 里主会话那条同一个形态（spinner + 说明），
+   只是归属这个子智能体 —— 两处必须长得一样，否则「谁在压缩」这件事会看起来是两种状态。 */
+.agent-session .as-compressing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+}
