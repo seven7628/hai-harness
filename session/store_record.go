@@ -311,7 +311,6 @@ func (s *FileStorage) LoadRecordMetadata(ctx context.Context, workspaceKey, sess
 	return nil, fmt.Errorf("%w: %v", ErrRecordCorrupt, err)
 }
 
-
 // CommitRecord atomically replaces the formal record after validating identity,
 // schema, monotonic revision and canonical checksum. The previous valid formal
 // record is copied to one bounded .bak before replacement. The caller's record
@@ -377,6 +376,15 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 						working.ViewCheckpoint = newView
 					}
 				}
+				// sidecar 回收（append-only 的必然副作用）。
+				//
+				// 子智能体卡片在 running 期每次事件都重写同一 block，同一 id 的历史
+				// 版本会无限堆积：真实会话实测 23893 条记录只有 21551 个唯一 id
+				//（93% 废弃），文件涨到 1.4GB 而有效内容仅 58MB。
+				//
+				// 判据 O(1)（废弃计数在写入侧维护），超阈值才真正重写；
+				// 重写本身失败不影响本次提交的正确性（sidecar 保持原样，下次再试）。
+				_ = bs.maybeCompact()
 				// 不 Close：实例留在缓存里复用（Close 会 fsync 并关文件，下次提交
 				// 又要重扫 86MB 重建索引 —— 实测 78ms，吃掉增量方案的收益）。
 			}
@@ -738,8 +746,8 @@ func checksumBytes(data []byte) (string, bool) {
 		return "", false
 	}
 	h := sha256.New()
-	h.Write(data[:span.fieldStart])   // checksum 字段之前
-	h.Write([]byte{'}'})              // 补上对象收尾
+	h.Write(data[:span.fieldStart]) // checksum 字段之前
+	h.Write([]byte{'}'})            // 补上对象收尾
 	sum := h.Sum(nil)
 	return checksumV2Prefix + hex.EncodeToString(sum), true
 }
@@ -844,8 +852,6 @@ func checksumForRecord(r *SessionRecord) (string, error) {
 	sum := sha256.Sum256(canonical)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
-
-
 
 // checksumForStoredPayload 用**存盘字节**复算 checksum（checksumForRecord 的字节口径补充）。
 //
@@ -965,7 +971,9 @@ func validateSessionRecordShape(r *SessionRecord) error {
 // RawMessage），是提交路径的第二大开销。
 //
 // 保留的最小断言（防止明显错用，如传了空/别的 JSON）：
-//   非空、非 null、是对象、schema_version 字面量正确、`"blocks":[` 存在
+//
+//	非空、非 null、是对象、schema_version 字面量正确、`"blocks":[` 存在
+//
 // —— 这些都出现在 payload 的前几十字节（reducer 的 struct 顺序固定：
 // schema_version 第一、blocks 第二，实测偏移 20/39 字节）。
 func validateCheckpointForCommit(view ViewCheckpoint) error {
@@ -1110,7 +1118,7 @@ func readRecordBaseline(path, workspaceKey, sessionID string) (*recordBaseline, 
 		// 「解到 view_checkpoint 就停」拿到它，也不能解整条 struct（会复制 90MB）。
 		// 直接从字节里定位取值 —— 与 checksumBytes 用同一个 span 逻辑。
 		if span, sok := checksumFieldSpan(data); sok {
-			stored := string(data[span.valueStart:span.valueEnd-1])
+			stored := string(data[span.valueStart : span.valueEnd-1])
 			if strings.HasPrefix(stored, checksumV2Prefix) && sameChecksum(stored, sum) {
 				if head, herr := parseRecordHeadScalars(data, workspaceKey, sessionID); herr == nil {
 					return &recordBaseline{Revision: head.Revision, Checksum: stored}, data, nil
@@ -1153,26 +1161,42 @@ func parseRecordHeadScalars(data []byte, workspaceKey, sessionID string) (*Sessi
 		key, _ := kt.(string)
 		switch key {
 		case "type":
-			if err := dec.Decode(&out.Type); err != nil { return nil, err }
+			if err := dec.Decode(&out.Type); err != nil {
+				return nil, err
+			}
 		case "schema_version":
-			if err := dec.Decode(&out.SchemaVersion); err != nil { return nil, err }
+			if err := dec.Decode(&out.SchemaVersion); err != nil {
+				return nil, err
+			}
 		case "session_id":
-			if err := dec.Decode(&out.SessionID); err != nil { return nil, err }
+			if err := dec.Decode(&out.SessionID); err != nil {
+				return nil, err
+			}
 		case "workspace_key":
-			if err := dec.Decode(&out.WorkspaceKey); err != nil { return nil, err }
+			if err := dec.Decode(&out.WorkspaceKey); err != nil {
+				return nil, err
+			}
 		case "revision":
-			if err := dec.Decode(&out.Revision); err != nil { return nil, err }
+			if err := dec.Decode(&out.Revision); err != nil {
+				return nil, err
+			}
 		case "reducer_seq":
-			if err := dec.Decode(&out.ReducerSeq); err != nil { return nil, err }
+			if err := dec.Decode(&out.ReducerSeq); err != nil {
+				return nil, err
+			}
 		case "clear_generation":
-			if err := dec.Decode(&out.ClearGeneration); err != nil { return nil, err }
+			if err := dec.Decode(&out.ClearGeneration); err != nil {
+				return nil, err
+			}
 		case "view_checkpoint":
 			// 头部标量都在它之前（struct 定义顺序）→ 到此为止。
 			out.ViewCheckpoint = ViewCheckpoint{} // 非 nil，表示「存在」
 			return out, nil
 		default:
 			var skip json.RawMessage
-			if err := dec.Decode(&skip); err != nil { return nil, err }
+			if err := dec.Decode(&skip); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return nil, fmt.Errorf("view_checkpoint missing")
@@ -1248,7 +1272,7 @@ func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, 
 // 那才是原来 543ms 的来源。
 //
 // 旧口径（sha256:）记录没有字节 checksum 可用，退回完整校验路径
-//（readRecordCandidate，会解 payload）。只发生在新旧混合期，之后全是 v2。
+// （readRecordCandidate，会解 payload）。只发生在新旧混合期，之后全是 v2。
 func loadMetadataCandidate(path, workspaceKey, sessionID string) (*RecordMetadata, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1507,5 +1531,3 @@ func contextError(ctx context.Context) error {
 		return nil
 	}
 }
-
-
