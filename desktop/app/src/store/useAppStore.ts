@@ -704,6 +704,20 @@ interface RawUsage {
 // 会话级视图状态（views 真相源；顶层字段是活跃会话的镜像，组件读顶层零改动）
 export interface SessionView {
   blocks: MsgBlock[]
+  // —— 主对话分页（2026-10-20）——
+  // 打开会话时 bridge 只回最近一屏 blocks（blocks_limit 参数）；更早的经
+  // blocks_page 命令按 id 游标向前取。三态与 AgentTranscript 的 items_trimmed
+  // 同构：blocksHasMore 为真时 UI 顶部必须显示「加载更早」，
+  // **绝不能**让截断后的首屏看起来就是全部历史。
+  blocksTotal?: number // 全部块数（bridge 权威）
+  blocksCursor?: number // 已加载的最早块 id（下一页的 before_id）
+  blocksHasMore?: boolean // 是否还有更早的
+  blocksOlderLoading?: boolean // 「加载更早」在途（按钮禁用 + 防并发）
+  blocksOlderError?: boolean // 上一页加载失败（按钮变「点击重试」）
+  // turnsTotal：真实回合总数。打开会话时 turns 数组可能只带尾部若干条
+  //（见 bridge MarshalTail），Statusbar 必须显示这个值而不是 turns.length，
+  // 否则长会话会显示「回合 = 已加载条数」这种明显错误的小数字。
+  turnsTotal?: number
   approvals: Approval[]
   runNodes: RunNode[]
   diffs: Diff[]
@@ -800,6 +814,12 @@ export function mainRunActive(v: SessionView | undefined): boolean {
 function emptyView(): SessionView {
   return {
     blocks: [],
+    blocksTotal: 0,
+    blocksCursor: 0,
+    blocksHasMore: false,
+    blocksOlderLoading: false,
+    blocksOlderError: false,
+    turnsTotal: 0,
     approvals: [],
     runNodes: [],
     diffs: [],
@@ -843,6 +863,12 @@ function emptyView(): SessionView {
 function viewFields(nv: SessionView): Partial<AppState> {
   return {
     blocks: nv.blocks,
+    blocksTotal: nv.blocksTotal ?? 0,
+    blocksCursor: nv.blocksCursor ?? 0,
+    blocksHasMore: nv.blocksHasMore ?? false,
+    blocksOlderLoading: nv.blocksOlderLoading ?? false,
+    blocksOlderError: nv.blocksOlderError ?? false,
+    turnsTotal: nv.turnsTotal ?? nv.turns.length,
     approvals: nv.approvals,
     runNodes: nv.runNodes,
     diffs: nv.diffs,
@@ -907,6 +933,12 @@ function setView(s: AppState, sid: string, nv: SessionView, extra?: Partial<AppS
 function topViewFields(s: AppState): Partial<SessionView> {
   return {
     blocks: s.blocks,
+    blocksTotal: s.blocksTotal,
+    blocksCursor: s.blocksCursor,
+    blocksHasMore: s.blocksHasMore,
+    blocksOlderLoading: s.blocksOlderLoading,
+    blocksOlderError: s.blocksOlderError,
+    turnsTotal: s.turnsTotal,
     approvals: s.approvals,
     runNodes: s.runNodes,
     diffs: s.diffs,
@@ -2392,6 +2424,13 @@ interface AppState {
   release?: PendingRelease // 沙箱拦截放行确认（sandbox_blocked；活跃会话镜像，弹放行 modal）
 
   blocks: MsgBlock[]
+  // 顶层镜像：主对话分页三态（见 SessionView 同名注释）
+  blocksTotal: number
+  blocksCursor: number
+  blocksHasMore: boolean
+  blocksOlderLoading: boolean
+  blocksOlderError: boolean
+  turnsTotal: number
   approvals: Approval[]
   runNodes: RunNode[]
   diffs: Diff[]
@@ -2554,6 +2593,9 @@ interface AppState {
   releaseSandbox(approve: boolean): void // 沙箱拦截放行决策（放行=该命令绕过沙箱重跑一次）
   promoteTask(taskId: string): void // 运行中长工具 → 后台任务（主 loop 立即拿占位继续；后台完成自动回传）
   interruptTask(taskId: string): void
+  // loadOlderBlocks 主对话「加载更早」下一页（before_id 游标向前取）。
+  // viewSid 缺省 = 活跃会话（cron 详情页显式传它自己的 view）。
+  loadOlderBlocks(viewSid?: string): void
   // loadAgentHistory 加载子智能体卡片「更早的记录」下一页（offset 从最新往回算）。
   // 完整历史在子任务 journal 里（checkpoint 只留首屏），见 bridge/agent_history.go。
   loadAgentHistory(blockId: number, taskId: string): void
@@ -2826,6 +2868,17 @@ export const BUILTIN_SLASH = ['/summary', '/clear', '/reload_skills']
 // onResp：命令响应回调（可选）。**必须在 transport.send 之前登记**——mock transport 是
 // 同步回响应（真 bridge 异步），调用方若「先 send 再 onCommandResponseOnce」会漏掉响应
 // （表现为 10s 超时失败）。与下面 im_chat_list 先登记 id→gateway_id 同因。
+// OPEN_BLOCKS_LIMIT 打开会话时请求的 blocks 条数（0 = 全量，旧行为）。
+//
+// 长会话打开慢的两个大头都是「一次吐全量」：bridge 侧 Marshal 67MB/138ms，
+// UI 侧解析成 2 万多个对象再全量渲染。后端已支持按需分页（blocks_page），
+// 这里只要改成「先要最近一屏」，首屏就变成 KB 级。
+//
+// 取值 200：约等于一屏可见 + 一屏预取。太小会在滚动加载前出现空白，
+// 太大则失去优化意义（实测 200 块的传输量 ~1MB 量级）。
+// 只对**恢复已有会话**生效；新建空会话没有历史，带不带都一样。
+const OPEN_BLOCKS_LIMIT = 200
+
 function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void): number {
   const id = ++cmdSeq
   const ws = String(cmd.payload?.workspace || useAppStore.getState().workspace || '')
@@ -3937,7 +3990,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               sessionPending = true
               recovered = true
               const recoverId = sessions.some((x) => x.id === pref) ? pref : sessions[0].id
-              send({ type: 'new_session', payload: { id: recoverId } }, true)
+              send({ type: 'new_session', payload: { id: recoverId, blocks_limit: OPEN_BLOCKS_LIMIT } }, true)
             }
             // 空列表不自动建会话（用户拍板 2026-08-14：不建空会话；首会话由用户显式「新建会话」）
           }
@@ -4013,6 +4066,54 @@ export function dispatchEvent(raw: AnyEvent): void {
               return appendOlderItems(b, older, page.has_more !== false, page.total, page.offset)
             })
             return setView(s, sid, { ...v, blocks })
+          })
+        }
+        break
+      }
+
+      // blocks_page：主对话「加载更早」的一页。
+      //
+      // 关键约束（
+      // 用户红线「不能因为按需加载导致历史消息看不到」）：
+      //   · 只在成功时拼接；失败必须把 loading 复位并置 error，让按钮可重试；
+      //   · 拼接是**前插**（历史往上长），且按 id 去重 —— 重复响应/重试
+      //     绝不能把同一块插入两次（那会让用户看到重复消息）；
+      //   · sid 用 meta.sessionId（发起时），迟到的响应不会写进用户已切走的新会话。
+      if (t === 'blocks_page') {
+        const sid = String(meta?.sessionId || '')
+        if (sid) {
+          if (!r.ok) {
+            setState((s) => {
+              const v = s.views[sid]
+              if (!v) return {}
+              return setView(s, sid, { ...v, blocksOlderLoading: false, blocksOlderError: true })
+            })
+            break
+          }
+          const page = d as unknown as {
+            blocks?: Array<Record<string, unknown>>
+            cursor?: number
+            has_more?: boolean
+            total?: number
+          }
+          const incoming = (page.blocks ?? []) as unknown as MsgBlock[]
+          setState((s) => {
+            const v = s.views[sid]
+            if (!v) return {}
+            // 按 id 去重：已存在的不再插入（重试/迟到响应安全）
+            const have = new Set(v.blocks.map((b) => b.id))
+            const fresh = incoming.filter((b) => !have.has(b.id))
+            // 前插并保持 id 升序：历史块的 id 一定小于当前首块。
+            const blocks = fresh.length ? [...fresh, ...v.blocks] : v.blocks
+            return setView(s, sid, {
+              ...v,
+              blocks,
+              blocksCursor: page.cursor ?? v.blocksCursor,
+              blocksHasMore: page.has_more === true,
+              blocksTotal: page.total ?? v.blocksTotal,
+              blocksOlderLoading: false,
+              blocksOlderError: false,
+            })
           })
         }
         break
@@ -4438,6 +4539,13 @@ export function dispatchEvent(raw: AnyEvent): void {
               revision: typeof d.revision === 'number' ? d.revision : undefined,
               clearGeneration: typeof d.clear_generation === 'number' ? d.clear_generation : undefined,
               degraded: d.degraded === true,
+              // 分页三态由 bridge 权威给出（见 bridge/main.go new_session 的 blocks_limit 分支）。
+              // 缺省（旧 bridge / 未启用分页）→ hasMore=false，UI 不显示「加载更早」，
+              // 与「历史完整」语义一致 —— 不会让用户误以为还有更多。
+              blocksTotal: typeof d.blocks_total === 'number' ? d.blocks_total : undefined,
+              blocksCursor: typeof d.blocks_cursor === 'number' ? d.blocks_cursor : undefined,
+              blocksHasMore: d.blocks_has_more === true,
+              turnsTotal: typeof d.turns_total === 'number' ? d.turns_total : undefined,
             })
           } catch (err) {
             // hydrate 失败（checkpoint 结构异常）：不残留空 view，回退 legacy snapshot /
@@ -5967,7 +6075,7 @@ function scheduleRestoreRetry(sid: string, reason: string, loud: boolean, expect
     if (isViewHydrated(sid) || snapshotPending.has(sid)) return
     // navigation=false：重试不占导航代际 —— 不打断用户的新导航；若期间用户又导航了，
     // 本响应会按陈旧丢弃，由那条路径的失败点再触发一次重试（直至上限）。
-    send({ type: 'new_session', payload: { id: sid } }, false)
+    send({ type: 'new_session', payload: { id: sid, blocks_limit: OPEN_BLOCKS_LIMIT } }, false)
   }, delay)
 }
 
@@ -6406,7 +6514,15 @@ export function hydrateCheckpoint(
   sid: string,
   cp: CheckpointView,
   requestId?: number,
-  meta?: { revision?: number; clearGeneration?: number; degraded?: boolean },
+  meta?: {
+    revision?: number
+    clearGeneration?: number
+    degraded?: boolean
+    blocksTotal?: number
+    blocksCursor?: number
+    blocksHasMore?: boolean
+    turnsTotal?: number
+  },
 ): void {
   // 同步块 id 计数器：checkpoint 的块 id 由 bridge 分配（从 1 起），后端实时事件的
   // 新块必须以更大 id 追加，否则与历史块 id 重复导致按 id 更新错块。
@@ -6433,6 +6549,15 @@ export function hydrateCheckpoint(
         ...(meta?.clearGeneration != null ? { checkpointGeneration: meta.clearGeneration } : {}),
         // degraded 始终写入（false 也保留可读标记，供 UI/后续校验）
         ...(meta?.degraded != null ? { degraded: meta.degraded } : {}),
+        // 分页三态：blocksHasMore=true 时 Narrative 顶部显示「加载更早」。
+        // 这里必须显式写 false/0（而非 undefined），否则切换会话时会残留上一个会话的值
+        // → 用户在完整会话里看到「加载更早」，点了却什么都取不回来。
+        blocksTotal: meta?.blocksTotal ?? (cp.blocks?.length ?? 0),
+        blocksCursor: meta?.blocksCursor ?? 0,
+        blocksHasMore: meta?.blocksHasMore === true,
+        turnsTotal: meta?.turnsTotal ?? cp.turns?.length ?? 0,
+        blocksOlderLoading: false,
+        blocksOlderError: false,
       }),
     )
   } finally {
@@ -6549,6 +6674,15 @@ export function metricsWindowFrom(days = 365): string {
 
 export const useAppStore = create<AppState>((set, get) => ({
   bridgeStatus: 'idle',
+  // 主对话分页三态初始值（见 SessionView 同名注释）。
+  // 必须在这里给全：AppState 把 blocksTotal/blocksCursor/blocksHasMore 声明为非可选
+  // （组件读顶层零判空），缺初始值会让整个 store 类型不成立。
+  blocksTotal: 0,
+  blocksCursor: 0,
+  blocksHasMore: false,
+  blocksOlderLoading: false,
+  blocksOlderError: false,
+  turnsTotal: 0,
   workspace: initWorkspace, // 持久恢复（模块加载时读 localStorage）；无 → undefined（BootScreen）
   projects: initProjects,
   sessions: [],
@@ -6880,7 +7014,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ sessionLoading: true })
       if (switchTimer) clearTimeout(switchTimer)
       switchTimer = setTimeout(() => set({ sessionLoading: false }), 3000)
-      send({ type: 'new_session', payload: { id } }, false)
+      send({ type: 'new_session', payload: { id, blocks_limit: OPEN_BLOCKS_LIMIT } }, false)
       return
     }
     // 记录最近点开（顶部横条 + 快捷键切换）：队列语义见 withRecent —— 新打开的
@@ -6963,7 +7097,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 注意：setActiveSession 开头已 ++navigationGeneration（本次点击 = 一次导航），
       // send 不能再传 navigation=true（否则 pending 记录的代际 = 二次递增后的值，
       // 响应在途时任何并发导航会再 ++ → 校验失败 → 响应被静默丢弃 → 历史不显示）。
-      send({ type: 'new_session', payload: { id } }, false)
+      send({ type: 'new_session', payload: { id, blocks_limit: OPEN_BLOCKS_LIMIT } }, false)
       get().refreshGit()
     }
     evictViews(id)
@@ -7298,6 +7432,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
     const id = send({ type: 'interrupt_task', payload: { session_id: sid, task_id: taskId } })
     interruptPending.set(id, { sid, taskId })
+  },
+
+  // loadOlderBlocks 主对话「加载更早」：按游标从 bridge 取一页更早的块，拼到最前面。
+  //
+  // 与 loadAgentHistory 同构，但目标不是卡片而是主对话 blocks 本身。
+  // 幂等性：游标用 block id（单调唯一），重复点击只会返回同一页；
+  // 这里额外用 loading 标记防止并发请求 —— 两页同时到达会打乱顺序。
+  loadOlderBlocks: (viewSid?: string) => {
+    const sid = viewSid ?? get().activeSessionId
+    if (!sid) return
+    let cursor = 0
+    set((s) => {
+      const v = s.views[sid] ?? emptyView()
+      if (!v.blocksHasMore || v.blocksOlderLoading) return {}
+      cursor = v.blocksCursor ?? 0
+      if (!cursor) return {}
+      return setView(s, sid, { ...v, blocksOlderLoading: true, blocksOlderError: false })
+    })
+    if (!cursor) return
+    send({
+      type: 'blocks_page',
+      payload: { session_id: sid, before_id: cursor, limit: 200 },
+    })
   },
 
   loadAgentHistory: (blockId, taskId) => {

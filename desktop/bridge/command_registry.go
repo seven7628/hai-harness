@@ -25,6 +25,13 @@ const (
 	// 背景：agent 卡片的 items 不再整份进 checkpoint（那曾占 record 体积 98%，
 	// 让每次提交要序列化近百 MB）。checkpoint 只留最近一屏，更早的从这里按页取。
 	CmdAgentHistory Command = "agent_history"
+	// CmdBlocksPage 主对话历史分页（「加载更早」）。
+	//
+	// 与 agent_history 同构，但取自**进程内 reducer** 而不是子 agent journal：
+	// 打开会话时 bridge 可用 blocks_limit 只回最近一屏（见 main.go new_session），
+	// 更早的从这里按 id 游标向前取。游标用 block id 而非 offset —— id 单调唯一，
+	// 新块追加不会让用户正在看的内容跳位。
+	CmdBlocksPage Command = "blocks_page"
 	CmdApprove       Command = "approve"
 	CmdCompact       Command = "compact"
 	CmdDeleteSession Command = "delete_session"

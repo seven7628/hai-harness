@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { useAppStore, genMsOf } from '../store/useAppStore'
 import type { MsgBlock } from '../store/useAppStore'
@@ -160,6 +160,90 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const ref = useRef<HTMLDivElement>(null)
   const anchorRef = useRef<HTMLDivElement>(null)
+  // —— 主对话分页（2026-10-20）——
+  // 后端 BlocksPage 的游标：最早已加载块的 id 与「还有更早」标记。
+  // 注意这两个值来自 store（由 hydrateCheckpoint 写入），不是本地 state ——
+  // 会话切换时随视图一起重置，避免把上一个会话的游标带到新会话。
+  const total = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksTotal ?? 0 : s.blocksTotal))
+  const moreCursor = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksCursor ?? 0 : s.blocksCursor))
+  const hasMore = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksHasMore ?? false : s.blocksHasMore))
+  // 按钮用的 loading/error 走 store（不是本地 state）：响应由 store 的
+  // blocks_page 处理器写回，本地 state 无法感知「已经加载完了」，
+  // 会出现按钮一直转圈/错误态不消。store 是唯一事实源。
+  const olderLoading = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksOlderLoading ?? false : s.blocksOlderLoading))
+  const olderError = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksOlderError ?? false : s.blocksOlderError))
+  const loadOlder = useAppStore((s) => s.loadOlderBlocks)
+  const onLoadOlder = useCallback(() => {
+    if (olderLoading) return
+    loadOlder(viewSid)
+  }, [olderLoading, loadOlder, viewSid])
+
+  // —— 滚动锚定补偿（分页前插历史时保持视觉位置）——
+  //
+  // 从顶部前插 N 个块会让 scrollHeight 突然变大，浏览器把原本的内容整体下推，
+  // 用户正在读的那一行会**跳走**。长会话里这比「加载慢」更让人恼火。
+  //
+  // 做法：前插前记下 scrollHeight 与 scrollTop；同一帧内（useLayoutEffect，浏览器
+  // 绘制之前）按高度差把 scrollTop 补回去，视觉上完全不动。
+  //
+  // 只在「用户不在贴底」时补偿：贴底状态下新内容本来就该把视图留在底部，
+  // 由下面的 rAF 校准循环接管（补了反而会与它打架）。
+  const anchorRef2 = useRef<{ height: number; top: number; count: number } | null>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const prev = anchorRef2.current
+    if (!prev) return
+    // 只在块数**增加**时补偿（删除/替换不算前插）。
+    if (blocks.length <= prev.count) {
+      anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, count: blocks.length }
+      return
+    }
+    anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, count: blocks.length }
+    if (stickRef.current) return // 贴底：交给校准循环
+    const grew = el.scrollHeight - prev.height
+    if (grew > 0) el.scrollTop = prev.top + grew
+  }, [blocks])
+
+  // —— 滚动到顶部自动加载（你要求的「滚动加载」）——
+  //
+  // 与按钮并存：按钮是「知道有更多、主动点」；滚动加载是「一直往上翻，
+  // 到底了就自动续上」，长会话翻历史时不必反复找按钮。
+  //
+  // 触发条件（全部满足）：
+  //   · 有更早的块、没在加载中、没有未处理的错误（失败后不自动重试，
+  //     否则后端持续失败会变成无限请求循环 —— 交给按钮手动重试）；
+  //   · 容器滚到距顶 < 阈值，且最近 400ms 内有用户手势（见下方 onScroll）。
+  //     不用纯 scrollTop 判定：切会话/前插补偿/贴底校准都会产生 scroll 事件，
+  //     不加手势判据会把它们当成「用户翻到了顶部」而无限拉取历史。
+  //
+  // 节流：一次加载到响应之间可能连续触发多帧，靠 store 的 blocksOlderLoading
+  // 天然节流（在途时 loadOlderBlocks 直接返回）。
+  const TOP_THRESHOLD = 320 // px：距顶多远开始预取（提前一屏，滚动更顺）
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const maybeLoad = () => {
+      if (!hasMore || olderLoading || olderError) return
+      if (!moreCursor) return
+      if (el.scrollTop > TOP_THRESHOLD) return
+      // 前插前记锚点（供上面的 useLayoutEffect 补偿）
+      anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, count: blocks.length }
+      onLoadOlder()
+    }
+    const onScroll = () => {
+      // 只认用户手势产生的滚动（时间窗内最近有过 wheel/touch/键盘操作）。
+      // 程序滚动（贴底校准、锚定补偿）没有手势，不触发预取 —— 否则贴底 tick
+      // 的每一帧都可能把历史当成「用户翻到了顶部」而无限拉取。
+      //
+      // 窗口 400ms：滚动惯性期间的事件都算用户意图；静默超过这个时长的
+      // scroll 变化一定是程序触发的。
+      if (performance.now() - lastGestureAtRef.current > 400) return
+      maybeLoad()
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [hasMore, olderLoading, olderError, moreCursor, onLoadOlder, blocks.length])
   // 最新一张待办工具卡（todo_add / todo_update）：仅它展开并实时反映 todos 快照
   // （倒序扫第一个即最新；旧卡随 live 翻 false 自动折叠，见 TodoToolCard）
   const liveTodoId = useMemo(() => {
@@ -184,6 +268,13 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   // ② 切会话时内容暴涨触发 scrollTop 钳制（无用户手势）→ 不会误置 stickRef=false
   //    → 新会话内容到达后仍正常跟随。
   const userGestureRef = useRef(false)
+  // 最近一次用户手势的时刻。
+  //
+  // 为什么不能复用 userGestureRef 做「用户滚动了吗」的判据：那是**一次性标记**，
+  // 第一个 scroll 监听器消费后即清空（见下方 onScroll）。分页预取需要的是
+  // 「这帧 scroll 是否源于用户」，用一个带时限的时间戳更稳，也避免两个监听器
+  // 抢同一个标记导致贴底逻辑失灵。
+  const lastGestureAtRef = useRef(0)
   const [away, setAway] = useState(false) // 用户已离开底部（显示「回到底部」按钮）
   const [fresh, setFresh] = useState(false) // 离开期间有新内容到达（按钮带圆点）
   const BOTTOM_THRESHOLD = 120 // px：视为「贴底」的容差（content-visibility 高度为估算值）
@@ -202,7 +293,10 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    const mark = () => { userGestureRef.current = true }
+    const mark = () => {
+      userGestureRef.current = true
+      lastGestureAtRef.current = performance.now()
+    }
     const onScroll = () => {
       if (!userGestureRef.current) return // 非用户手势的 scroll（程序滚动/钳制）→ 忽略
       userGestureRef.current = false
@@ -419,6 +513,29 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
 
   return (
     <div className="narrative" ref={ref} aria-live="polite">
+      {/* 「加载更早」放最顶部（历史往上长）。只要 hasMore 就显示 ——
+          用户必须能看见「这里还有更早的内容」，绝不能因为分页而让截断后的
+          首屏看起来就是全部历史（那是静默丢数据，用户红线）。 */}
+      {hasMore && (
+        <div className="narrative-more">
+          {olderError ? (
+            <button type="button" className="narrative-more-btn is-err" onClick={onLoadOlder} disabled={olderLoading}>
+              {t('agent.loadOlderFailed')}
+            </button>
+          ) : olderLoading ? (
+            <span className="narrative-more-busy">{t('agent.loading')}</span>
+          ) : (
+            <button
+              type="button"
+              className="narrative-more-btn"
+              onClick={onLoadOlder}
+              disabled={!moreCursor}
+            >
+              {t('agent.loadOlderN').replace('{n}', String(Math.max(0, total - blocks.length)))}
+            </button>
+          )}
+        </div>
+      )}
       {blocks.length === 0 && (
         <EmptyChat persona={persona} />
       )}
