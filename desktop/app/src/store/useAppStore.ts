@@ -10,6 +10,7 @@ import { parseQuestionOptions, type QuestionOption } from '../lib/questionOption
 import { visualKindOf, isVisualPath } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
+import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
 
 export type RightTab = 'activity' | 'git' | 'agent' | 'file' | 'web'
@@ -523,10 +524,12 @@ export type MsgBlock =
   | { kind: 'assistant'; id: number; text: string; streaming: boolean; model?: string; runId?: string; thinking: string; thinkMs?: number; ttftMs?: number; durMs?: number; agentDurMs?: number; thinkStart?: number; outputTokens?: number; reasoningTokens?: number; thinkingSummarized?: boolean; genMs?: number; ts?: number }
   // 工具块：nestedCalls = 编排型工具（codemode）脚本内的嵌套调用清单（外层结果自带，
   // 子调用**不生成**自己的工具块）；spillPath = 完整输出落盘路径（缺失时渲染层不显示该行）。
-  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView }
-  | { kind: 'agent'; id: number; runId: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean }
+  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; parentRunId?: string }
+  // todos：该子 agent **自己**的待办清单（它是独立上下文，因此也是独立 TODO ——
+  // 与会话级视图字段 SessionView.todos 互不相干，见 events.TodoSnapshot 的注释）。
+  | { kind: 'agent'; id: number; runId: string; parentRunId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean }
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
-  | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
+  | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; parentRunId?: string; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
   | { kind: 'task_result'; id: number; taskId: string; result: string; error?: string }
   | { kind: 'task_delivery'; id: number; taskId: string; status: TerminalTaskStatus; result?: string; error?: string }
   | CompressionInfo
@@ -586,6 +589,19 @@ export interface RunNode {
   durMs?: number // span 时长（run：agent_end 结算；tool：tool_run_end 结算）
   taskId?: string // 工具任务 id（tool_run_start 携带；task_promoted 据此标记后台态）
   promoted?: boolean // 已被摘离为后台任务
+}
+
+// AgentFocus 左栏树里被选中的子智能体。
+//
+// 三个 id 各有不可替代的用途（合并成一个会出错，这是实测踩过的）：
+//   · nodeId = **树节点身份**（taskId 优先，退化 runId）：折叠/选中的键。同一个后台子智能体
+//     有 task_started 占位与 agent_start 两条来源，树把它们合成一个节点，节点键就得是 taskId。
+//   · runId  = 真实运行 id（agent_start.run_id）：找它的卡片（blocks 里 kind==='agent'）用它。
+//   · taskId = 后台任务 id：停止（interrupt_task）/ 历史分页用它，同步子智能体没有。
+export interface AgentFocus {
+  nodeId: string
+  runId: string
+  taskId?: string
 }
 
 export interface SessionMeta {
@@ -660,7 +676,9 @@ export type AgentItem =
   | { kind: 'thinking'; text: string; thinkStart?: number }
   // tool 项：nestedCalls / spillPath 仅编排型工具（codemode）有 —— 脚本内的嵌套调用清单与
   // 完整输出落盘路径（来源与语义见 lib/codemodeNested.ts；嵌套调用自身没有工具行）。
-  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView }
+  // todos：todo_* 工具项那一刻**该子 agent 自己**的清单快照（历史计划卡定格显示，
+  // 语义与主对话工具块的 todos 同源，但归属是它自己的卡片，不是会话清单）
+  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[] }
   | { kind: 'compression'; before: number; after: number; ctxTokens?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
 
 // PriceRefreshSummary refresh_prices 结果摘要（UI toast 用；字段对齐 bridge 响应）
@@ -728,6 +746,12 @@ export interface SessionView {
   compressRunId?: string // 主 Agent 当前压缩所属 run（旧事件缺失时为空）
   compressReason?: string
   todos: TodoItem[]
+  // focusedAgent 当前**正在查看的子智能体**（左栏树的选中项；undefined = 看主会话）。
+  //
+  // 为什么放在会话视图里（而不是全局）：子智能体的身份是 run_id/task_id，属于某个会话；
+  // 切到别的会话再切回来，「刚才在看哪个子智能体」应当恢复（与 rightTab 同类）。
+  // 它只影响**展示**（叙述区渲染谁），不改变「消息发给谁」—— 输入框永远发给主会话。
+  focusedAgent?: AgentFocus
   usage: UsageAgg
   ctxTokens?: number // 当前主 Agent 上下文占用
   // ctxTokens 的口径：true = 值来自 compress_end 的字符/token 估算（压缩后尚无新一轮真实
@@ -838,6 +862,7 @@ function emptyView(): SessionView {
     compressRunId: undefined,
     compressReason: undefined,
     todos: [],
+    focusedAgent: undefined,
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 },
     ctxTokens: undefined,
     ctxTokensEstimated: undefined,
@@ -882,6 +907,7 @@ function viewFields(nv: SessionView): Partial<AppState> {
     runNodes: nv.runNodes,
     diffs: nv.diffs,
     todos: nv.todos,
+    focusedAgent: nv.focusedAgent,
     usage: nv.usage,
     ctxTokens: nv.ctxTokens,
     ctxTokensEstimated: nv.ctxTokensEstimated,
@@ -952,6 +978,7 @@ function topViewFields(s: AppState): Partial<SessionView> {
     runNodes: s.runNodes,
     diffs: s.diffs,
     todos: s.todos,
+    focusedAgent: s.focusedAgent,
     usage: s.usage,
     turns: s.turns,
     costUsd: s.costUsd,
@@ -2512,6 +2539,8 @@ interface AppState {
   thinkStartTs: Record<string, number>
   turnThinkMs: Record<string, number>
   lastLLMBlockId?: number
+  // focusedAgent 左栏树选中的子智能体（SessionView 同名字段的顶层镜像；undefined = 主会话）
+  focusedAgent?: AgentFocus
   metrics?: MetricsReport // 跨会话聚合看板（metrics 命令报告）
   metricsAt?: number // 报告到达时刻（使用统计页/空会话图表判断是否 stale，避免重复全量扫描）
   metricsFrom?: string // 报告窗口起点（YYYY-MM-DD；null = 全历史）
@@ -2713,6 +2742,10 @@ interface AppState {
   setRightExpanded(b: boolean): void
   togglePin(): void
   setRightTab(t: RightTab): void
+  // focusAgent：左栏树点选一个子智能体 → 叙述区改为展示它的转录（同一次运行的两处视图）。
+  // 传 undefined = 回到主会话。**不改变消息投递目标**（输入框永远发给主会话）：
+  // 这只是"看哪个"，与"发给谁"是两个问题（子智能体的输入通道是 agent_send）。
+  focusAgent(f?: AgentFocus): void
   // —— 右侧栏标签（阶段 1，docs/RIGHT_PANEL_TABS_PLAN.md）——
   openTab(spec: TabSpec, opts?: { activate?: boolean }): string // 打开或激活（阶段 1 幂等键 = kind）；返回标签 id
   activateTab(id: string): void // 激活指定标签（切 scope 内的显示）
@@ -3444,13 +3477,12 @@ function rollbackPromote(sid: string, taskId: string, error?: string): void {
 
 // 异步任务完整清单。task_started 会先建立 async_task 占位，agent_start 到达后会把同一
 // taskId 合并进 agent 卡片；因此通常不会重复，异常/延迟事件下仍能展示占位和数量徽章。
-export function asyncTaskBlocks(blocks: MsgBlock[]): Extract<MsgBlock, { kind: 'async_task' } | { kind: 'agent' } | { kind: 'tool' }>[] {
-  const out: Extract<MsgBlock, { kind: 'async_task' } | { kind: 'agent' } | { kind: 'tool' }>[] = []
-  for (const b of blocks) {
-    if (b.kind === 'async_task' || b.kind === 'agent') out.push(b)
-    else if (b.kind === 'tool' && b.promoted) out.push(b)
-  }
-  return out
+// withAgentTodos 把一份待办快照写到**某个子 agent 卡片**上（其它块原样保留）。
+// 子 agent 是独立上下文 → 独立 TODO：它的清单只能落它自己的卡片，绝不进会话清单。
+// 待办归属规则本身在 lib/todoScope.ts（可单测，两条硬约束见那里的注释）。这里是它的
+// 适配层：把 cpTodo 归一化后交给纯函数 —— 规则只有一份，测试也钉在那份上。
+function withAgentTodos(blocks: MsgBlock[], runId: string, todos: TodoItem[]): MsgBlock[] {
+  return scopeWithAgentTodos(blocks, runId, todos.map(cpTodo))
 }
 
 // view 级辅助：开新 assistant 块 / 流式追加（llmStartTs 用 llm_start 事件 timestamp）
@@ -5238,7 +5270,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               })
             : dupMain
               ? v.blocks.map((b) => (b.kind === 'tool' && b.toolId === toolId ? { ...b, name, args, ...(tid ? { taskId: tid } : {}) } : b))
-              : [...v.blocks, { kind: 'tool', id: blockSeq++, toolId, name, args, status: 'running', startedAt: startClient, ...(tid ? { taskId: tid } : {}) }],
+              : [...v.blocks, { kind: 'tool', id: blockSeq++, toolId, name, args, status: 'running', startedAt: startClient, ...(tid ? { taskId: tid } : {}), ...(runId ? { parentRunId: runId } : {}) }],
           toolStartTs: { ...v.toolStartTs, [toolId]: startTs },
           runNodes: runId
             ? (v.runNodes.some((n) => n.id === `tool-${toolId}`)
@@ -5562,9 +5594,13 @@ export function dispatchEvent(raw: AnyEvent): void {
                     ...b,
                     items: b.items.map((it) =>
                       it.kind === 'tool' && it.toolId === toolId
-                        ? { ...it, status: (raw.is_error ? 'error' : 'done') as Extract<AgentItem, { kind: 'tool' }>['status'], result: toolResult, errorInfo, durMs, diff: raw.diff ? pickDiff(raw.diff) : undefined, images: pickImages(raw.images), ...(callUsage ? { usage: callUsage } : {}), ...(nestedCalls ? { nestedCalls } : {}), ...(spillPath ? { spillPath } : {}), ...(hostOps ? { hostOps } : {}) }
+                        ? { ...it, status: (raw.is_error ? 'error' : 'done') as Extract<AgentItem, { kind: 'tool' }>['status'], result: toolResult, errorInfo, durMs, diff: raw.diff ? pickDiff(raw.diff) : undefined, images: pickImages(raw.images), ...(callUsage ? { usage: callUsage } : {}), ...(nestedCalls ? { nestedCalls } : {}), ...(spillPath ? { spillPath } : {}), ...(hostOps ? { hostOps } : {}), ...(Array.isArray(raw.todos) ? { todos: raw.todos as TodoItem[] } : {}) }
                         : it,
                     ),
+                    // todo_* 调用：把**该子 agent 自己**的清单滚动到卡片上（计划卡与
+                    // 「子 agent 的 TODO」面板读它）。会话级 v.todos 保持不动 —— 那是主
+                    // agent 的清单，子 agent 是独立上下文，因此也是独立 TODO。
+                    ...(Array.isArray(raw.todos) ? { todos: raw.todos as TodoItem[] } : {}),
                   }
                 : b,
             )
@@ -5615,7 +5651,12 @@ export function dispatchEvent(raw: AnyEvent): void {
                 ...(hostOps ? { hostOps } : {}),
               }
             })
-        const blocks = nested ? v.blocks : mappedBlocks
+        // 嵌套子调用不建工具行，但**待办是会话级事实**（脚本里的 todo_* 真改了清单）：
+        // 归属仍按 run —— 子 agent 脚本里的调用记到它自己的卡片，主 run 的落会话清单。
+        const nestTodos = nested && isSub && runId && Array.isArray(raw.todos)
+          ? withAgentTodos(v.blocks, runId, raw.todos as TodoItem[])
+          : v.blocks
+        const blocks = nested ? nestTodos : mappedBlocks
         const toolStartTs = { ...v.toolStartTs }
         delete toolStartTs[toolId]
         const upd = setView(s, sid, {
@@ -5630,7 +5671,13 @@ export function dispatchEvent(raw: AnyEvent): void {
                   ? { ...n, status: (raw.is_error ? 'error' : 'done') as RunNode['status'], result: toolResult, isError: Boolean(raw.is_error), errorInfo, durMs }
                   : n,
               ),
-          todos: Array.isArray(raw.todos) ? (raw.todos as TodoItem[]) : v.todos,
+          // 会话待办=主 agent 的清单：只有**主 run** 的 todo_* 才能改它（判定在
+          // lib/todoScope.todoTargetOf，单测钉在那里）。子 agent 的调用在上面 isSub
+          // 分支里写进它自己的卡片 —— 此前这里无条件覆盖，导致子 agent 的计划顶掉
+          // 主会话的 TODO（用户 2026-10 报障）。
+          todos: todoTargetOf(isSub, runId).kind === 'session' && Array.isArray(raw.todos)
+            ? (raw.todos as TodoItem[])
+            : v.todos,
           approvals: v.approvals.filter((a) => a.id !== toolId),
           // ask_user 工具结束（回答/超时/打断）→ 清除提问（modal 关闭；避免超时后残留）
           question: raw.name === 'ask_user' ? undefined : v.question,
@@ -5806,7 +5853,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                 const withoutPlaceholder = taskId
                   ? v.blocks.filter((b) => !(b.kind === 'async_task' && b.taskId === taskId))
                   : v.blocks
-                return [...withoutPlaceholder, { kind: 'agent', id: blockSeq++, runId: id, label: subName || String(raw.content || 'agent'), status: 'running', spawnedAt: ts, taskId, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 }, items: [] }]
+                return [...withoutPlaceholder, { kind: 'agent', id: blockSeq++, runId: id, parentRunId: parentId, label: subName || String(raw.content || 'agent'), status: 'running', spawnedAt: ts, taskId, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 }, items: [] }]
               })()
             : clearErrorBlocks(v.blocks), // 新顶层 run 开始：清上次失败的错误块
           runningAgentCount: parentId ? v.runningAgentCount + 1 : v.runningAgentCount,
@@ -6060,7 +6107,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           const upd = setView(s, sid, { ...v, blocks })
           return { ...upd, busySids: busySidsFromViews(upd.views) }
         }
-        const block = { kind: 'async_task' as const, id: blockSeq++, taskId, label: String(raw.name || raw.tool_name || '后台任务'), toolName: raw.tool_name ? String(raw.tool_name) : undefined, status, startedAt: ts }
+        const block = { kind: 'async_task' as const, id: blockSeq++, taskId, label: String(raw.name || raw.tool_name || '后台任务'), toolName: raw.tool_name ? String(raw.tool_name) : undefined, status, startedAt: ts, ...(raw.parent_run_id ? { parentRunId: String(raw.parent_run_id) } : {}) }
         const upd = setView(s, sid, { ...v, blocks: [...v.blocks, block] })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
@@ -6487,6 +6534,7 @@ function cpAgentItem(it: {
   error?: string; aborted?: boolean; active?: boolean; analysis?: string
   nested_calls?: CheckpointNestedCall[]
   host_ops?: CheckpointHostOps
+  todos?: { id: string; title: string; done: boolean; blocked_by?: string[] }[]
 }): AgentItem {
   if (it.kind === 'text') return { kind: 'text', text: it.text ?? '', error: it.is_error === true }
   if (it.kind === 'thinking') return { kind: 'thinking', text: it.text ?? '', ...(it.think_start != null ? { thinkStart: it.think_start } : {}) }
@@ -6508,6 +6556,9 @@ function cpAgentItem(it: {
       ...(cpNested ? { nestedCalls: cpNested } : {}),
       ...(cpSpill ? { spillPath: cpSpill } : {}),
       ...(cpHostOps ? { hostOps: cpHostOps } : {}),
+      // 该子 agent 自己的待办快照（历史计划卡定格）：与主对话工具块同名字段同义，
+      // 但归属是子 agent 卡片，不从会话清单回填。
+      ...(it.todos?.length ? { todos: it.todos.map(cpTodo) } : {}),
     }
   }
   // compression
@@ -6588,8 +6639,12 @@ function checkpointToView(cp: CheckpointView): SessionView {
         blocks.push({
           kind: 'agent', id: b.id, runId: b.run_id ?? '', label: b.label ?? 'agent',
           status: b.status as AsyncTaskStatus, spawnedAt: b.spawned_at ?? b.ts ?? Date.now(),
+          ...(b.parent_run_id ? { parentRunId: b.parent_run_id } : {}),
           usage: cpUsage(b.usage),
           items: (b.items ?? []).map(cpAgentItem),
+          // 子 agent 自己的待办清单（独立于会话 todos）：恢复后卡片/面板仍显示它，
+          // 不会被主会话清单覆盖。
+          ...(b.todos?.length ? { todos: b.todos.map(cpTodo) } : {}),
           // items_trimmed = 该卡片被裁剪掉的更早条目数（checkpoint 只保留首屏）。
           // > 0 时卡片底部显示「加载更早记录」，按页从子任务 journal 取回。
           ...(b.items_trimmed ? { itemsTrimmed: b.items_trimmed } : {}),
@@ -8313,6 +8368,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     set(setView(s, sid, { ...v, rightExpanded: b }))
   },
   togglePin: () => set((s) => ({ leftPinned: !s.leftPinned })),
+  focusAgent: (f) => {
+    const s = get()
+    const sid = s.activeSessionId
+    if (!sid) return
+    const v = s.views[sid] ?? emptyView()
+    // 同一个焦点重复点：不变更（否则每点一下都触发一次全量重渲）
+    if (v.focusedAgent?.nodeId === f?.nodeId) return
+    set(setView(s, sid, { ...v, focusedAgent: f }))
+  },
   setRightTab: (t) => {
     // 兼容入口（e2e 与既有调用点仍按 kind 切标签）：语义 = **打开或激活**该 kind 的标签。
     // 为什么不让它直接写 rightTab：那会绕过标签集，出现「切过去了、标签条上却没有这个标签」。

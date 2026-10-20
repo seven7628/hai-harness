@@ -20,7 +20,7 @@ import { Bot } from './icons'
 import { fmtDuration, fmtUsd, UsageChip } from './ui'
 import { ElapsedTimer } from './ElapsedTimer'
 import { AgentTranscript } from './AgentTranscript'
-import { TaskResultInline, ToolIcon } from './NarrativeBlocks'
+import { TaskResultInline } from './NarrativeBlocks'
 import { ArtifactCard } from './ArtifactCard'
 import JsonView from './JsonView'
 import { ToolImages } from './ToolImages'
@@ -135,6 +135,7 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
   const t = useT()
   const interruptTask = useAppStore((s) => s.interruptTask)
   const loadAgentHistory = useAppStore((s) => s.loadAgentHistory)
+  const focusAgent = useAppStore((s) => s.focusAgent)
   const running = b.status === 'running'
   const interrupting = b.status === 'interrupting'
   const canStop = Boolean(b.taskId) && (running || interrupting)
@@ -160,6 +161,15 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
       interrupting={interrupting}
       onStop={canStop ? () => interruptTask(b.taskId!) : undefined}
     >
+      {/* 「打开」入口：子智能体在左栏树里是一个节点，点它可以像子会话那样看它自己的
+          转录/用量/TODO（AgentSessionView）。这里给同一条通路 —— 用户在主对话看到卡片的
+          那一刻就能进去，不必先去左栏找它。 */}
+      <button
+        className="ac-open"
+        onClick={() => focusAgent({ nodeId: b.taskId || b.runId, runId: b.runId, ...(b.taskId ? { taskId: b.taskId } : {}) })}
+      >
+        {t('agentTree.openAsSession')}
+      </button>
       <AgentTranscript
         items={b.items}
         running={running}
@@ -179,55 +189,16 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
   )
 })
 
-// 后台任务卡（右栏「任务」tab 专用）：只有 task_started 占位、还没有 agent 运行数据时
-// 的形态 —— 外壳同一份，展开体只有结果（没有转录可看）。
-export const AsyncTaskCard = memo(function AsyncTaskCard({ b }: { b: Extract<MsgBlock, { kind: 'async_task' }> }) {
+// 工具任务的**展开体**（参数 / 结果 / 执行中）：与主对话工具行同一套原语
+//（.tr-sec / .tr-code / 结果图）—— 同一次调用在哪个宿主里都长得一样。
+//
+// 宿主只有一个：子会话视图（AgentSessionView 渲染后台工具任务节点时）。2026-10 起
+// 「被摘到后台的工具调用」不再在右栏列一张卡（右栏退役为审阅台），而是和其它派生运行
+// 一样住在左栏树里；点进去才展开这份细节。
+export const ToolTaskBody = memo(function ToolTaskBody({ b }: { b: Extract<MsgBlock, { kind: 'tool' }> }) {
   const t = useT()
-  const interruptTask = useAppStore((s) => s.interruptTask)
-  const running = b.status === 'running'
-  const interrupting = b.status === 'interrupting'
-  const hasResult = Boolean(b.taskResult || b.taskError)
   return (
-    <TaskCard
-      status={b.status}
-      icon={b.toolName ? <ToolIcon name={b.toolName} /> : <Bot size={16} />}
-      label={b.label}
-      delivered={b.deliveredToMain}
-      usage={b.usage}
-      interrupting={interrupting}
-      stopTitle={t('rp.task.stopTask')}
-      stopAria={t('rp.task.stopTaskAria')}
-      onStop={(running || interrupting) && b.taskId ? () => interruptTask(b.taskId) : undefined}
-    >
-      {hasResult ? <TaskResultInline delivered={b.deliveredToMain} result={b.taskResult} error={b.taskError} /> : null}
-    </TaskCard>
-  )
-})
-
-// 工具任务卡（右栏「任务」tab 专用）：被摘到后台的工具调用 —— 外壳同一份，
-// 展开体 = 主对话工具行的同一套（.tr-sec / .tr-code / 结果图），同一次调用在
-// 「对话里的工具行」与这里长得一样。
-export const ToolTaskCard = memo(function ToolTaskCard({ b }: { b: Extract<MsgBlock, { kind: 'tool' }> }) {
-  const t = useT()
-  const interruptTask = useAppStore((s) => s.interruptTask)
-  const meta = taskStatusMeta(b.taskStatus ?? (b.status === 'running' ? 'running' : 'completed'), t)
-  const active = meta.active
-  const canStop = Boolean(b.promoted && b.taskId) && (b.status === 'running' || b.interrupting)
-  return (
-    <TaskCard
-      status={b.taskStatus ?? (b.status === 'running' ? 'running' : 'completed')}
-      icon={<ToolIcon name={b.name} />}
-      label={<>{b.name}{b.promoted ? <span className="task-promoted" title={t('rp.task.promoted')}>⬆</span> : null}</>}
-      labelTitle={b.name}
-      usage={b.usage}
-      startAt={b.startedAt}
-      durMs={b.durMs}
-      active={active}
-      interrupting={b.interrupting}
-      stopTitle={t('rp.task.stopTask')}
-      stopAria={t('rp.task.stopTaskAria')}
-      onStop={canStop ? () => interruptTask(b.taskId!) : undefined}
-    >
+    <>
       {b.args && (
         <div className="tr-sec">
           <div className="tr-sec-h">{t('tool.args')}</div>
@@ -243,6 +214,6 @@ export const ToolTaskCard = memo(function ToolTaskCard({ b }: { b: Extract<MsgBl
       ) : b.status === 'running' ? (
         <div className="tr-sec"><div className="tr-sec-h">{t('tool.executing')}</div></div>
       ) : null}
-    </TaskCard>
+    </>
   )
 })

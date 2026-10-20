@@ -11735,3 +11735,345 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   color: var(--text-dim);
   font-size: 11px;
 }
+
+/* ============ 子智能体树（左栏会话树下 + 对话区子会话） ============
+   设计要点（用户 2026-10 需求「像参考产品那样把子会话画成树」）：
+   · 连线用 per-row 的 guide 列 + 伪元素画，不用 SVG：左栏可拖宽（140–360px）、行高随
+     字号/皮肤变化，字符网格方案（├─ └─）在异高/滚动下依然对齐，也不需要测量。
+   · 缩进粒度是 --atree-step（14px）：比工作区到会话的 16px 略小 —— 树的层级是「会话内部」，
+     视觉上要能看出它挂在会话下面，而不是另一层会话。
+   · 状态色复用全仓的语义色（--running/--success/--crimson/--text-3），与任务卡同源。 */
+.agent-tree {
+  --atree-step: 14px;
+  display: flex;
+  flex-direction: column;
+  margin: 1px 6px 3px 26px; /* 左外边距对齐会话标题（.ws-body .session-item 的 16px + 行内 padding） */
+  animation: fadeIn 160ms var(--ease);
+}
+.agent-tree.at-center {
+  margin: 0;
+  gap: 2px;
+}
+.agent-tree .atree-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.agent-tree .atree-count {
+  margin-left: auto;
+  font-size: 10.5px;
+}
+.atree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  min-height: 22px;
+}
+.atree-row:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.atree-row.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.atree-row.on .atree-label {
+  color: var(--text);
+}
+/* —— 连线列 ——
+   .atree-guide：祖先层。on = 该层祖先后面还有兄弟 → 画一条贯穿全行的竖线（┆）。
+   .atree-elbow：本层。非末位 = ├（竖线到行中 + 向右横线）；末位 = └（竖线只到行中）。
+   颜色刻意弱（--border-strong）：连线是结构提示，不该比标签更抢眼。 */
+.atree-guide {
+  flex: 0 0 var(--atree-step);
+  align-self: stretch;
+  position: relative;
+}
+.atree-guide.on::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--atree-step) / 2 - 0.5px);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-strong);
+}
+.atree-elbow {
+  flex: 0 0 calc(var(--atree-step) - 2px);
+  align-self: stretch;
+  position: relative;
+}
+.atree-elbow::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--atree-step) / 2 - 1px);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-strong);
+}
+/* 末位：竖线只画到行中线（└），下半段留空 */
+.atree-elbow.last::before {
+  bottom: 50%;
+}
+.atree-elbow::after {
+  content: '';
+  position: absolute;
+  left: calc(var(--atree-step) / 2 - 1px);
+  top: 50%;
+  width: calc(var(--atree-step) / 2);
+  height: 1px;
+  background: var(--border-strong);
+}
+/* 选中态的连线点亮（accent）：从根到当前节点的那条链 —— 回答「我是从哪条链上下来的」。
+   只亮这个节点自己的 elbow 不够，祖先层的 guide 也要亮，否则链是断的。 */
+.atree-guide.lit::before,
+.atree-elbow.lit::before,
+.atree-elbow.lit::after {
+  background: var(--accent);
+}
+.atree-chev,
+.atree-chev-sp {
+  flex: 0 0 14px;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: transform 120ms var(--ease);
+}
+.atree-chev {
+  transform: rotate(-90deg); /* 折叠：▸（chevron 朝右） */
+}
+.atree-chev.open {
+  transform: none; /* 展开：▾ */
+}
+.atree-chev:hover {
+  color: var(--text);
+}
+.atree-dot {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.atree-dot.running {
+  background: var(--running);
+  animation: pulse 1.6s infinite;
+}
+.atree-dot.done { background: var(--success); }
+.atree-dot.error { background: var(--crimson); }
+.atree-dot.interrupted,
+.atree-dot.abandoned { background: var(--text-3); }
+.atree-dot.interrupting {
+  background: var(--running);
+  opacity: 0.6;
+}
+.atree-row .atree-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.atree-row.st-error .atree-label { color: var(--crimson); }
+.atree-row.st-interrupted .atree-label,
+.atree-row.st-abandoned .atree-label { color: var(--text-3); }
+.atree-more {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-3);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 0 5px;
+}
+.atree-st {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-3);
+}
+.atree-stop {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 5px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.atree-stop:hover {
+  background: var(--surface);
+  color: var(--crimson);
+}
+@media (prefers-reduced-motion: reduce) {
+  .atree-dot.running { animation: none; }
+}
+
+/* ============ 子会话视图（对话区渲染某个子智能体） ============
+   与主对话共享同一套渲染原语（AgentTranscript → Markdown/ToolRow/plan 卡），
+   这里只负责"它是一个独立会话"的外壳：面包屑 + 动作条 + 自己的 TODO。 */
+.agent-session {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  animation: fadeIn 160ms var(--ease);
+}
+.agent-session .as-hd {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-3);
+}
+.agent-session .as-icon {
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+}
+.agent-session .as-crumb {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+.agent-session .as-crumb-link,
+.agent-session .as-crumb-cur {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-session .as-crumb-link {
+  padding: 1px 4px;
+  border: none;
+  background: none;
+  border-radius: 5px;
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.agent-session .as-crumb-link:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.agent-session .as-crumb-cur {
+  color: var(--text);
+  font-weight: 500;
+}
+.agent-session .as-st.running { color: var(--running); }
+.agent-session .as-st.done { color: var(--success); }
+.agent-session .as-st.error { color: var(--crimson); }
+.agent-session .as-st.interrupted,
+.agent-session .as-st.abandoned { color: var(--text-3); }
+.agent-session .as-stop {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 6px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.agent-session .as-stop:hover {
+  color: var(--crimson);
+  border-color: var(--crimson);
+}
+.agent-session .as-back {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.agent-session .as-back:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.agent-session .as-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 14px 24px;
+}
+/* 子会话里的待办面板：不贴在右栏那种"面板头"，改成内容块（有内边距、圆角） */
+.agent-session .as-body .todo-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  background: var(--surface);
+}
+.agent-session .as-placeholder {
+  padding: 28px 4px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.agent-session .as-ph-title {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.agent-session .as-ph-meta {
+  font-size: 11.5px;
+  margin-bottom: 10px;
+}
+.agent-session .as-ph-hint {
+  max-width: 52ch;
+  line-height: 1.6;
+}
+/* 子 agent 卡片里的「在会话视图中打开」（TaskCard 内，主对话与右栏同源） */
+.ac-open {
+  align-self: flex-start;
+  margin: 6px 0 2px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ac-open:hover {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+/* 子会话视角下的输入归属提示（Composer 顶部一条，弱化但不可忽略） */
+.composer-target-hint {
+  margin: 0 0 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: 7px;
+  background: var(--accent-weak);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.5;
+}

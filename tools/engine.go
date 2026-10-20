@@ -1228,6 +1228,16 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 	if hostOps != nil {
 		r.HostOps = *hostOps
 	}
+	// 待办快照（todo_* 工具才有）：属主 = **发起本次调用的运行**（ToolContext.Todos 由
+	// AgentLoop 按 ac.Todo 注入）。取在这里而不是工具里：工具实例是共享的、且不需要知道
+	// "现在是谁在调用我"；同时宿主拿到的是与该 run 的 run_id 严格配对的清单。
+	// 只取最外层（Depth==0）：编排脚本内的 todo_* 子调用不改工具行，画面归属外层调用。
+	var todoSnap []events.TodoSnapshot
+	if call.Depth == 0 && strings.HasPrefix(call.Name, "todo_") {
+		if tc := events.ToolContextFrom(ctx); tc != nil && tc.Todos != nil {
+			todoSnap = tc.Todos()
+		}
+	}
 	if in.isErr {
 		r.ToolError = parseToolError(in.result)
 	}
@@ -1271,6 +1281,7 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 			Depth:        call.Depth,
 			NestedCalls:  nested,
 			HostOps:      hostOps,
+			Todos:        todoSnap,
 			Timestamp:    time.Now(),
 			EventType:    events.ToolRunEndType,
 		})

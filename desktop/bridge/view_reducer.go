@@ -133,7 +133,11 @@ type Block struct {
 	TaskID     string         `json:"task_id,omitempty"`
 	Promoted   bool           `json:"promoted,omitempty"`
 	TaskStatus string         `json:"task_status,omitempty"`
-	Todos      []TodoItem     `json:"todos,omitempty"` // todo_* 工具调用时刻快照
+	// Todos 待办清单快照，按 kind 解释（同名字段、两种宿主）：
+	//   · tool 块 → 该次 todo_* 调用完成时刻的**会话**清单（历史计划卡定格）
+	//   · agent 块 → 该子 agent **自己的**清单（与顶层 Checkpoint.Todos 分开存：
+	//     子 agent 有独立 TODO，两者不得串味）
+	Todos []TodoItem `json:"todos,omitempty"`
 	// NestedCalls 编排型工具（codemode）脚本内的嵌套调用摘要（与 AgentItem 同名字段同义）。
 	// 只出现在编排型工具那一块上；宿主折叠态只显示最后 8 条（desktop/app 的 pickNestedCalls）。
 	NestedCalls []NestedCall `json:"nested_calls,omitempty"`
@@ -147,11 +151,14 @@ type Block struct {
 	Settled bool `json:"-"`
 
 	// agent
-	Label     string      `json:"label,omitempty"`
-	SpawnedAt int64       `json:"spawned_at,omitempty"`
-	EndedAt   int64       `json:"ended_at,omitempty"`
-	Usage     Usage       `json:"usage,omitempty"`
-	Items     []AgentItem `json:"items,omitempty"`
+	Label string `json:"label,omitempty"`
+	// ParentRunID 该 agent 卡片的父 run（agent_start.ParentRunId）：左栏子智能体树的
+	// 父子锚点。runNodes 里也有（但有界收敛/裁剪后不一定在），块级字段是更稳的来源。
+	ParentRunID string      `json:"parent_run_id,omitempty"`
+	SpawnedAt   int64       `json:"spawned_at,omitempty"`
+	EndedAt     int64       `json:"ended_at,omitempty"`
+	Usage       Usage       `json:"usage,omitempty"`
+	Items       []AgentItem `json:"items,omitempty"`
 	// ItemsTrimmed 表示该 agent 卡片的历史 items 被裁剪掉的条数
 	//（UI 可提示「更早的记录未保留」）。见 maxAgentItemsPerBlockDefault。
 	ItemsTrimmed    int    `json:"items_trimmed,omitempty"`
@@ -245,6 +252,9 @@ type AgentItem struct {
 	// 与 NestedCalls 的区别：保留操作不是工具调用，纯检索脚本的 NestedCalls 恒为空 ——
 	// 宿主只能靠这里的计数把工具行标成「Codemode Search」（见 core.HostOps）。
 	HostOps *core.HostOps `json:"host_ops,omitempty"`
+	// Todos todo_* 工具项那一刻**该子 agent 自己**的清单快照（与块级 Todos 同源，
+	// 后者是「最近一次」的滚动值；这里定格本次调用，历史计划卡才显示当时状态）。
+	Todos []TodoItem `json:"todos,omitempty"`
 
 	// compression item
 	Before    int    `json:"before,omitempty"`
@@ -1876,8 +1886,13 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 		if e.Diff != nil {
 			r.diffs = append(r.diffs, *fileDiff(e.Diff))
 		}
+		// 待办归属仍按 run 判定：脚本由子 agent 发起 → 归那张子卡片（不污染主会话清单）。
 		if meta.Todos != nil {
-			r.todos = cloneTodos(meta.Todos)
+			if r.isSubRunLocked(e.RunId) {
+				r.applySubTodosLocked(e.RunId, meta.Todos)
+			} else {
+				r.todos = cloneTodos(meta.Todos)
+			}
 		}
 		delete(r.approvalSeen, "approval:"+e.Id)
 		return
@@ -1904,6 +1919,11 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 					// 编排型工具（codemode）：脚本内的嵌套调用清单（子 agent 转录里的脚本行同样要能展开）
 					it.NestedCalls = nestedCalls(e.NestedCalls)
 					it.HostOps = e.HostOps
+					// todo_* 子 agent 调用：定格**该子 agent 自己**的清单快照（历史计划卡
+					// 显示当时状态；缺失时渲染层回退卡片级 Todos）
+					if meta.Todos != nil {
+						it.Todos = cloneTodos(meta.Todos)
+					}
 					// 子 agent 卡片内的工具项：本次调用用量（仅子 agent 类工具非零）
 					if e.Usage != nil && !e.Usage.IsZero() {
 						u := taskUsageFromCore(*e.Usage)
@@ -1919,8 +1939,9 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 				r.markBlockDirty(b.ID)
 			}
 		}
+		// **不再写 r.todos**：那是主会话的待办清单，子 agent 的清单归它自己的卡片。
 		if meta.Todos != nil {
-			r.todos = cloneTodos(meta.Todos)
+			r.applySubTodosLocked(e.RunId, meta.Todos)
 		}
 		return
 	}
@@ -2045,6 +2066,9 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 			b := r.blocks[idx]
 			b.Label = label
 			b.SpawnedAt = millis(ts)
+			if e.ParentRunId != "" {
+				b.ParentRunID = e.ParentRunId
+			}
 			if e.TaskId != "" {
 				b.TaskID = e.TaskId
 			}
@@ -2074,7 +2098,7 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 		blocks = append(blocks, b)
 	}
 	r.blocks = append(blocks, Block{
-		Kind: blockKindAgent, ID: bid, RunID: e.RunId, Label: label,
+		Kind: blockKindAgent, ID: bid, RunID: e.RunId, ParentRunID: e.ParentRunId, Label: label,
 		Status: statusRunning, SpawnedAt: millis(ts), TaskID: taskID,
 		Items: make([]AgentItem, 0),
 	})
@@ -2524,8 +2548,9 @@ func (r *ViewReducer) applyCompressEndLocked(e *events.CompressEnd, meta EventMe
 			r.markBlockDirty(b.ID)
 		}
 		delete(r.agentCompressing, runKey)
+		// 子 agent 的压缩边界同样只刷新**它自己**的清单（主会话清单不动）
 		if meta.Todos != nil {
-			r.todos = cloneTodos(meta.Todos)
+			r.applySubTodosLocked(runKey, meta.Todos)
 		}
 		return
 	}
@@ -2769,6 +2794,22 @@ func retryStateFrom(e *events.LLMError) retryState {
 		st.startedAt = at // 首次失败即本轮起点；后续失败由 upsert 沿用旧值
 	}
 	return st
+}
+
+// applySubTodosLocked 把快照写到**该子 agent 自己的卡片**上（不碰 r.todos）。
+// 子 agent 有独立待办清单：它调用 todo_* 时，清单属主是它那份 store（见
+// agents.AgentContext.todoSnapshot 与 subagent.buildOptions 刻意不继承父 Todo），
+// 宿主的会话清单必须保持不动 —— 否则子 agent 的计划会顶掉主会话的（用户 2026-10 报障）。
+func (r *ViewReducer) applySubTodosLocked(runID string, todos []TodoItem) {
+	bid := r.agentBlockID[runID]
+	idx := r.findBlockLocked(bid)
+	if idx < 0 || r.blocks[idx].Kind != blockKindAgent {
+		return
+	}
+	b := r.blocks[idx]
+	b.Todos = cloneTodos(todos)
+	r.blocks[idx] = b
+	r.markBlockDirty(b.ID)
 }
 
 // isSubRunLocked 判断 run 是否子 agent（有 agent 卡片或有父的 run 节点）。
@@ -3417,4 +3458,3 @@ func (r *ViewReducer) BlockCount() int {
 	defer r.mu.Unlock()
 	return len(r.blocks)
 }
-

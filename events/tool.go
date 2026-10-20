@@ -177,6 +177,11 @@ type ToolResponse struct {
 	// 事件都多出一个 `"host_ops":{}`（全是普通工具的噪声）。
 	HostOps *core.HostOps `json:"host_ops,omitempty"`
 
+	// Todos 本次调用结束时**发出该调用的运行自己**的待办清单快照（todo_* 工具才有；
+	// 其他工具恒 nil）。子 agent 的 todo_add 带的是子 agent 那份独立清单 —— 宿主要
+	// 按 run 归属落档，不能一律读会话级 store（否则子 agent 的 TODO 会显示成主会话的）。
+	Todos []TodoSnapshot `json:"todos,omitempty"`
+
 	EventType EventType `json:"event_type"`
 }
 

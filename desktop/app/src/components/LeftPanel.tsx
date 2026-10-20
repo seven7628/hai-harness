@@ -1,10 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useAppStore, titleKey, MAX_WORKSPACE_PINS, MAX_SESSION_PINS } from '../store/useAppStore'
 import ConfirmModal from './ConfirmModal'
 import WorkspaceFiles from './WorkspaceFiles'
 import HaiLogo from './HaiLogo'
 import { ChevronDown, Plus, FolderPlus, FolderIcon, FolderOpenIcon, SessionPlus, PinIcon, Sparkles, Gear, SessionIcon, PanelLeft, Clock, MoreIcon } from './icons'
 import { useT } from '../i18n'
+import { AgentTree } from './AgentTree'
 
 // 工作区行内操作（查看文件/置顶/新建/删除）需要的最小面板宽度：低于它就收成一个「⋯」溢出菜单。
 // 算法：行左右 margin 12 + padding 10 + 预留 81 + chevron 11 + 图标 15 + 两处 gap 14 + 计数 ~10
@@ -364,8 +365,8 @@ export default function LeftPanel() {
                               }
                               const cancelEdit = () => setEditing(null)
                               return (
+                                <Fragment key={s.id}>
                                 <div
-                                  key={s.id}
                                   className={`session-item ${s.id === activeSessionId ? 'active' : ''} ${s.pinned ? 'pinned' : ''}`}
                                   onClick={() => { if (!isEditing) setActiveSession(s.id, p.path) }}
                                   onDoubleClick={() => { setEditing({ path: p.path, sid: s.id }); setDraft(title) }}
@@ -423,6 +424,12 @@ export default function LeftPanel() {
                                     </>
                                   )}
                                 </div>
+                                {/* 该会话派出去的子智能体树（递归：孙智能体在子节点下），紧跟
+                                    在会话行下面 —— 视觉上「属于这个会话」。只对**正在查看**的会话
+                                    渲染：store 只维护活跃会话的完整视图，别的会话画出来是一棵
+                                    空树，比不画更误导。 */}
+                                {s.id === activeSessionId && <AgentTree />}
+                                </Fragment>
                               )
                             })}
                             {hasMore && (

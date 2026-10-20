@@ -106,6 +106,10 @@ function highlightInput(text: string, commands: string[]): React.ReactNode {
 }
 
 export default function Composer() {
+  const t = useT()
+  // 正在看子智能体时：输入框照常发**主会话**（协议上子智能体的通道是 agent_send，只有模型
+  // 会用它）。这个提示存在的唯一理由：避免用户在子会话视角里输入后，惊讶于"回答来自主 agent"。
+  const focused = useAppStore((s) => s.focusedAgent)
   const ask = useAppStore((s) => s.ask)
   const interrupt = useAppStore((s) => s.interrupt)
   // 流式 = 有 LLM 流式（主会话正在产出）→ 发送钮变「停止」。不把后台子 agent
@@ -126,7 +130,6 @@ export default function Composer() {
   const activeView = useAppStore((s) => (s.activeSessionId ? s.views[s.activeSessionId] : undefined))
   const effort = useAppStore((s) => s.effort)
   const switchEffort = useAppStore((s) => s.switchEffort)
-  const t = useT()
   // Effort 菜单项：'none' 的说明文案走 i18n（其余为英文品牌名，无需翻译）
   const effortItems = EFFORTS.map((e) =>
     e.key === 'none' ? { ...e, desc: t('composer.effort.none') } : e,
@@ -863,6 +866,13 @@ export default function Composer() {
   return (
     <div className="composer-wrap">
       <AgentRunningBar />
+      {/* 正在看子智能体：明确告知输入的投递目标（否则用户会以为在跟它对话）。
+          这不是禁用理由 —— 主会话随时可以继续输入，子智能体的产出会作为结果回填。 */}
+      {focused && (
+        <div className="composer-target-hint" role="status">
+          {t('agentTree.composerTarget')}
+        </div>
+      )}
       <div
         className={`composer${compressing ? ' compressing' : ''}${dragActive ? ' drag-active' : ''}`}
         aria-busy={compressing}

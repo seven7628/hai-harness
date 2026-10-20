@@ -540,7 +540,9 @@ func (bs *bridgeSession) emit(e events.Event) {
 	case *events.ToolResponse:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
 		if strings.HasPrefix(ev.Name, "todo_") {
-			extras = map[string]any{"todos": bs.s.TodoItems()}
+			// 快照属主 = 发出本次调用的运行（事件携带；见 events.ToolResponse.Todos）：
+			// 子 agent 的 todo_* 带它自己那份清单，主会话清单不得被顶掉。
+			extras = map[string]any{"todos": todosOf(bs, ev.Todos)}
 		}
 		if strings.HasPrefix(ev.Name, "Cron") {
 			bs.out.writeLine(map[string]any{"event_type": "cron_changed", "workspace": bs.workspace, "session_id": bs.id})
@@ -568,7 +570,7 @@ func (bs *bridgeSession) emit(e events.Event) {
 				SessionID: bs.id, Provider: bs.provider, Model: ev.Model, Usage: *ev.Usage,
 			})
 		}
-		extras = map[string]any{"todos": bs.s.TodoItems()}
+		extras = map[string]any{"todos": todosOf(bs, ev.Todos)}
 	}
 	if len(extras) > 0 {
 		// 直接构造 jsonKeyVal（避免 marshal→unmarshal 中间 map）

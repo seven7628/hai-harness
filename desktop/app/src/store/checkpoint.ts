@@ -168,6 +168,9 @@ export interface CheckpointBlock {
   started_at?: number
   label?: string
   spawned_at?: number
+  // parent_run_id：子 agent 卡片的父 run（左栏子智能体树的父子锚点）。
+  // runNodes 里也有同一事实，但卡片是更稳的来源（runNodes 有界/收敛后可能不再含父）。
+  parent_run_id?: string
   ended_at?: number
   usage?: CheckpointUsage
   items?: CheckpointAgentItem[]
