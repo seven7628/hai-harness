@@ -242,30 +242,45 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     loadOlder(viewSid)
   }, [olderLoading, loadOlder, viewSid])
 
-  // —— 滚动锚定补偿（分页前插历史时保持视觉位置）——
+  // —— 滚动锚定补偿（仅在「前插历史」时保持视觉位置）——
   //
-  // 从顶部前插 N 个块会让 scrollHeight 突然变大，浏览器把原本的内容整体下推，
-  // 用户正在读的那一行会**跳走**。长会话里这比「加载慢」更让人恼火。
+  // 从顶部前插 N 个块会让 scrollHeight 变大、原有内容整体下移，用户正在读的
+  // 那一行会跳走。补偿方式：按高度差把 scrollTop 推回去。
   //
-  // 做法：前插前记下 scrollHeight 与 scrollTop；同一帧内（useLayoutEffect，浏览器
-  // 绘制之前）按高度差把 scrollTop 补回去，视觉上完全不动。
+  // ## 为什么必须区分「前插」与「追加」（2026-10-21 修 bug）
   //
-  // 只在「用户不在贴底」时补偿：贴底状态下新内容本来就该把视图留在底部，
-  // 由下面的 rAF 校准循环接管（补了反而会与它打架）。
-  const anchorRef2 = useRef<{ height: number; top: number; count: number } | null>(null)
+  // 上一版只要 blocks.length 变大就补偿，结果**流式输出把用户往下拽**：
+  // 用户上滑读历史（stickRef=false），新内容追加在**底部**，scrollHeight 变大，
+  // 补偿逻辑执行 scrollTop += grew → 视图被推回底部。
+  // 用户感受就是「上划总被拉回去」，实测 0.5s 内被拽 305px。
+  //
+  // 正确判据是**增长发生在哪一端**：
+  //   · 前插（历史）：新块 id 小于原首块 id → 增长在顶部 → 需要补偿；
+  //   · 追加（流式/新消息）：新块 id 大于原尾块 id → 增长在底部 → **不能补偿**
+  //     （用户正在上方阅读，底部增长不该影响他的位置）。
+  //
+  // 用 id 而不是 length 判断：id 单调递增，且分页返回的历史块 id 必然更小。
+  const anchorRef2 = useRef<{ height: number; top: number; firstID: number } | null>(null)
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
     const prev = anchorRef2.current
-    if (!prev) return
-    // 只在块数**增加**时补偿（删除/替换不算前插）。
-    if (blocks.length <= prev.count) {
-      anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, count: blocks.length }
+    const firstID = blocks.length ? blocks[0].id : 0
+    if (!prev) {
+      anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, firstID }
       return
     }
-    anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, count: blocks.length }
-    if (stickRef.current) return // 贴底：交给校准循环
+    // 前插的判据：首块 id 变小了（有更早的块插到了前面）。
+    // 只是追加（首块 id 不变）→ 什么都不做。
+    const prepended = firstID > 0 && prev.firstID > 0 && firstID < prev.firstID
+    if (!prepended) {
+      anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, firstID }
+      return
+    }
     const grew = el.scrollHeight - prev.height
+    anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, firstID }
+    // 贴底时由校准循环接管（前插后仍应贴底）；用户在上方阅读时才补偿。
+    if (stickRef.current) return
     if (grew > 0) el.scrollTop = prev.top + grew
   }, [blocks])
 
@@ -291,8 +306,9 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
       if (!hasMore || olderLoading || olderError) return
       if (!moreCursor) return
       if (el.scrollTop > TOP_THRESHOLD) return
-      // 前插前记锚点（供上面的 useLayoutEffect 补偿）
-      anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, count: blocks.length }
+      // 不需要在这里手工记锚点：补偿 effect 自己在每次 blocks 变化时维护
+      // anchorRef2（它用首块 id 判断是否前插）。这里再写一次反而会写入
+      // 「还没前插」的状态，导致补偿时 grew 算错。
       onLoadOlder()
     }
     const onScroll = () => {
