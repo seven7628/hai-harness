@@ -360,6 +360,17 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   // 离开底部 → 停自动滚动（也不再做任何强制布局）；新块只悄悄标记 fresh（按钮加圆点）；
   // 回到底部附近 / 点击按钮 / 切换会话 → 恢复贴底。
   const stickRef = useRef(true)
+  // autoscrollRef：是否应该「让新内容把视图往上顶」。
+  //
+  // 这是本轮重写的核心（2026-10-21，用户点出矛盾本质）：
+  //   没上划 → true  → 新内容到达时跟随到底部（底部往上顶）
+  //   上划过 → false → 新内容只在下面增长，视图一动不动
+  //
+  // 与 stickRef 的区别：stickRef 由 scroll 事件里的「距底距离」推算，
+  // 会被 content-visibility 造成的高度抖动干扰；autoscrollRef 只由
+  // **用户亲手滚动的那一刻**决定一次，之后 tick 不再改它。
+  // 两者暂时并存（stickRef 供 away/fresh 按钮显示），后续可合并。
+  const autoscrollRef = useRef(true)
   // 用户手势标记：wheel / touchstart 置位（真实用户滚动输入）。程序滚动（校准
   // 循环赋值 scrollTop）不置位 —— 其 scroll 事件被 onScroll 忽略，stickRef 不受
   // 干扰。这解决了两个问题：
@@ -375,6 +386,10 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   // 「这帧 scroll 是否源于用户」，用一个带时限的时间戳更稳，也避免两个监听器
   // 抢同一个标记导致贴底逻辑失灵。
   const lastGestureAtRef = useRef(0)
+  // 上一次观察到的 scrollTop：用于「变小 ⇒ 用户在往上看」这个与事件源无关的判据
+  const lastTopRef = useRef(0)
+  // 触摸滑动上一次的 Y（判断方向）
+  const touchYRef = useRef(0)
   const [away, setAway] = useState(false) // 用户已离开底部（显示「回到底部」按钮）
   const [fresh, setFresh] = useState(false) // 离开期间有新内容到达（按钮带圆点）
   const BOTTOM_THRESHOLD = 120 // px：视为「贴底」的容差（content-visibility 高度为估算值）
@@ -388,37 +403,89 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     if (el.scrollTop === v) return
     el.scrollTop = v
   }
-  // 用户手势监听：wheel（鼠标/触摸板滚动）+ touchstart（触屏）。置位后下一个
-  // scroll 事件消费它并更新 stickRef；无手势的 scroll（程序/钳制）一律忽略。
+  // 用户滚动 → 更新「是否该跟随」的意图（autoscrollRef）。
+  //
+  // ## 设计原则（用户点出的矛盾本质）
+  //
+  //   没上划 → 希望新内容把视图往上顶
+  //   上划后 → 绝不希望被顶回去
+  //
+  // 所以这不是「滚动位置的推算」，而是**用户意图的状态机**。
+  // 唯一的输入是用户亲手滚动（wheel / touch / 键盘 / 拖滚动条），
+  // 唯一的输出是 autoscrollRef 的 true/false。tick 只读不写。
+  //
+  // ## 为什么需要多种事件源
+  //
+  // 单靠 wheel 不够：拖滚动条、键盘翻页、触控板惯性都不产生 wheel。
+  // 所以额外用「scrollTop 变小」这个**方向信号**兜底 —— 程序性钉底只会让
+  // scrollTop 变大（趋向 max），绝不会变小，因此「变小」必然源于用户。
   useEffect(() => {
     const el = ref.current
     if (!el) return
+    lastTopRef.current = el.scrollTop
+    // 收到用户滚动后重新评估：贴底 → 跟随；离开底部 → 不跟随。
+    const settle = () => {
+      const nb = isNearBottom()
+      autoscrollRef.current = nb
+      if (nb !== stickRef.current) {
+        stickRef.current = nb
+        setAway(!nb)
+      }
+      if (nb) setFresh(false)
+    }
     const mark = () => {
       userGestureRef.current = true
       lastGestureAtRef.current = performance.now()
     }
+    const onWheel = (e: WheelEvent) => {
+      mark()
+      // 向上滚 → 立刻停止跟随（不等 scroll 事件，避免被 tick 抢跑）。
+      // 向下滚不立刻恢复：用户可能只是往下挪一点，还没到底 —— 交给 settle 判断。
+      if (e.deltaY < 0) autoscrollRef.current = false
+    }
     const onScroll = () => {
-      if (!userGestureRef.current) return // 非用户手势的 scroll（程序滚动/钳制）→ 忽略
+      const top = el.scrollTop
+      const prevTop = lastTopRef.current
+      lastTopRef.current = top
+      // 通用方向判据：scrollTop 变小 = 用户往上看更早的内容。
+      if (top < prevTop - 2) {
+        autoscrollRef.current = false
+        if (stickRef.current) {
+          stickRef.current = false
+          setAway(true)
+        }
+      }
+      // 用户手势引发的 scroll 才重新评估「是否回到底部」。
+      // （tick 自己写的 scrollTop 不算用户意图，不能让它把 autoscroll 打开）
+      if (!userGestureRef.current) return
       userGestureRef.current = false
-      const nb = isNearBottom()
-      if (nb === stickRef.current) return
-      stickRef.current = nb
-      setAway(!nb)
-      if (nb) setFresh(false)
+      settle()
     }
     const onKey = (e: KeyboardEvent) => {
-      // 键盘滚动键（方向键/翻页/空格）→ 算用户滚动意图
-      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) {
-        mark()
-      }
+      if (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) return
+      mark()
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') autoscrollRef.current = false
     }
-    el.addEventListener('wheel', mark, { passive: true })
-    el.addEventListener('touchstart', mark, { passive: true })
+    const onTouchStart = (e: TouchEvent) => {
+      mark()
+      touchYRef.current = e.touches[0]?.clientY ?? 0
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? 0
+      const dy = y - touchYRef.current
+      touchYRef.current = y
+      // 手指向下拖 = 内容往上走 = 看历史
+      if (dy > 0) autoscrollRef.current = false
+    }
+    el.addEventListener('wheel', onWheel, { passive: true })
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: true })
     el.addEventListener('keydown', onKey, { passive: true })
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => {
-      el.removeEventListener('wheel', mark)
-      el.removeEventListener('touchstart', mark)
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
       el.removeEventListener('keydown', onKey)
       el.removeEventListener('scroll', onScroll)
     }
@@ -454,8 +521,24 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
       const grew = max !== lastMax
       lastMax = max
       if (grew) {
-        // 内容高度变化：用户仍在贴底状态 → 钉到最新底部（流式/异步渲染跟随）
-        if (stickRef.current && max > 0 && el.scrollTop !== max) setScrollTop(el, max)
+        // 内容高度变化 → 只有「用户意图贴底」时才跟随。
+        //
+        // ## 判据为什么必须是 autoscrollRef 而不是「距底部多远」
+        //
+        // 用户点出的本质矛盾（2026-10-21）：
+        //   · 没上划时，希望新内容把视图往上顶（跟随最新）；
+        //   · 上划之后，绝不希望被顶回去。
+        //
+        // 用「距离底部的像素差」做判据是错的：content-visibility 让离屏块
+        // 从 200px 估算高变成真实高，scrollHeight 每帧都在涨，
+        // 距离随时变化 —— 判据会抖动，用户的意图被淹没。
+        //
+        // 正确做法：**以用户最后一次亲手滚动的位置为唯一基准**（autoscrollRef）。
+        //   · 用户滚动后停在底部附近 → autoscroll=true  → 新内容顶上去（跟随）
+        //   · 用户滚动后离开底部       → autoscroll=false → 新内容只加长，不动视图
+        // 中间只有 tick 自己写入 scrollTop 时保持原值，不改变这个用户意图。
+        if (!autoscrollRef.current) { raf = requestAnimationFrame(tick); return }
+        if (max > 0 && el.scrollTop !== max) setScrollTop(el, max)
       }
       raf = requestAnimationFrame(tick)
     }
@@ -467,13 +550,18 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   // 这里只重置 + 若新会话内容已在（缓存切换），先滚一次减少等待。
   useEffect(() => {
     stickRef.current = true
+    autoscrollRef.current = true // 新会话默认跟随（用户没表达过「看历史」意图）
     setAway(false)
     setFresh(false)
     const el = ref.current
-    if (el) setScrollTop(el, el.scrollHeight - el.clientHeight)
+    if (el) {
+      setScrollTop(el, el.scrollHeight - el.clientHeight)
+      lastTopRef.current = el.scrollTop
+    }
   }, [activeSessionId])
   const jumpToBottom = () => {
     stickRef.current = true
+    autoscrollRef.current = true // 点「回到底部」= 明确要恢复跟随
     setAway(false)
     setFresh(false)
     anchorRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' })
