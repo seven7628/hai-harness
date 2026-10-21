@@ -28,9 +28,16 @@ func TestContextSlimWiredForAllHosts(t *testing.T) {
 		if tn.firstChunkTimeout > 0 {
 			base++
 		}
-		if n := len(tn.options()); n != base+len(want) {
-			t.Fatalf("%s: options() = %d 项，期望 %d（基线 %d + slim %d）",
-				host, n, base+len(want), base, len(want))
+		// async-promote 阈值（长工具自动摘离）：与 slim 不同**不是恒有** ——
+		// settings 显式写 0 = 关，那时不产生选项。这里按配置算出应有的项数，
+		// 断言的仍是「三宿主都不许漏传」这件事本身。
+		wantAsync := 0
+		if tn.asyncPromoteAfter > 0 {
+			wantAsync = 1
+		}
+		if n := len(tn.options()); n != base+len(want)+wantAsync {
+			t.Fatalf("%s: options() = %d 项，期望 %d（基线 %d + slim %d + async-promote %d）",
+				host, n, base+len(want)+wantAsync, base, len(want), wantAsync)
 		}
 	}
 	// 逃生舱：enabled=false 时不得产生任何 slim 选项

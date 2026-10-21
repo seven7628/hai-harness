@@ -35,3 +35,19 @@ func TestEffectivePromoteAfter(t *testing.T) {
 		}
 	}
 }
+
+// 没有 TaskSink 时**永不摘离**：摘离 = 占位结果 + 真实结果经 sink 回传，没有 sink 就没人收。
+// 这条闸挡的是「默认开 120s 之后，子 agent 里超过 2 分钟的工具静默丢结果」——
+// 子 agent 的 RunOptions 不带 TaskSink，而 loop 级阈值对三个宿主通用。
+func TestPromoteAfterForRequiresSink(t *testing.T) {
+	loop := 120 * time.Second
+	if got := promoteAfterFor(0, loop, false); got != 0 {
+		t.Fatalf("无 sink 时必须为 0（不摘离），实际 %v", got)
+	}
+	if got := promoteAfterFor(0, loop, true); got != loop {
+		t.Fatalf("有 sink 时应取 loop 级默认 %v，实际 %v", loop, got)
+	}
+	if got := promoteAfterFor(5*time.Second, loop, true); got != 5*time.Second {
+		t.Fatalf("RunOptions 非零应压过 loop 级，实际 %v", got)
+	}
+}

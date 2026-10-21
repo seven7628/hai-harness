@@ -287,6 +287,19 @@ func WithFirstChunkTimeout(d time.Duration) Option {
 	return func(c *Config) { c.FirstChunkTimeout = d }
 }
 
+// promoteAfterFor 在 effectivePromoteAfter 之上加一道**结果回收**闸：没有 TaskSink
+// （onDone == nil）时永不摘离。
+//
+// 为什么这道闸不能省：摘离的语义是「调用方先拿到占位结果，真实结果稍后经 TaskSink 回传」。
+// 没有 sink 的宿主（子 agent 的 RunOptions、部分测试）摘离后结果无处可去 —— 模型看到
+// running 占位就以为任务在后台跑，而实际上它既不会回来，也没人知道它跑完了。
+func promoteAfterFor(run, loop time.Duration, hasSink bool) time.Duration {
+	if !hasSink {
+		return 0
+	}
+	return effectivePromoteAfter(run, loop)
+}
+
 // effectivePromoteAfter 解析一次运行生效的自动摘离阈值（毫秒级 Duration；0 = 关）。
 //
 // 两级：RunOptions（单次运行，非零优先）→ Config（loop 级默认，宿主装配点单一来源）。
@@ -2538,7 +2551,12 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 		onDone = opts.TaskSink
 		promoteAfter = opts.AsyncPromoteAfter
 	}
-	promoteAfter = effectivePromoteAfter(promoteAfter, a.cfg.AsyncPromoteAfter)
+	// 没有结果回收通道（TaskSink）时**一律不摘离**：摘离后调用方拿到的是占位
+	// `{task_id,status:"running"}`，真实结果只能经 TaskSink 回传 —— 没有 sink 就没人收，
+	// 结果凭空消失，模型以为任务还在跑。子 agent 的 RunOptions 不带 TaskSink，
+	// 而 loop 级阈值对三个宿主（主/spawn/explore）通用，这道闸必须在这一层，
+	// 否则默认开 120s 会让子 agent 里所有超过 2 分钟的工具静默丢结果。
+	promoteAfter = promoteAfterFor(promoteAfter, a.cfg.AsyncPromoteAfter, onDone != nil)
 	batch := tools.NewBatchController(len(seq)+len(par), onDone)
 	if opts != nil {
 		if opts.BatchCreated != nil {

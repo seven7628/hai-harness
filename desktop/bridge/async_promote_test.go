@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// settings 的 agent.async_promote_after_seconds → 生效阈值（0 = 关）。
+// settings 的 agent.async_promote_after_seconds → 生效阈值（缺失 = 默认 120s；显式 0 = 关）。
 //
 // 钳制理由写在该常量块：下界 10s（低于它与常态无异，摘离只会制造占位往返）、
 // 上界 1h（再长等于关闭，不如写 0）。越界不报错而是钳制 —— 这条设置错了只会让
@@ -18,7 +18,7 @@ func TestAsyncPromoteAfterOf(t *testing.T) {
 		in   *int
 		want time.Duration
 	}{
-		{"未配置 → 关", nil, 0},
+		{"未配置 → 默认 120s（2026-10 用户决策：默认开）", nil, 120 * time.Second},
 		{"显式 0 → 关", i(0), 0},
 		{"负值 → 关", i(-5), 0},
 		{"正常值原样生效", i(120), 120 * time.Second},
