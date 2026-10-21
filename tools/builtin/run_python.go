@@ -313,10 +313,15 @@ func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, 
 	//   区分，脚本跑完就无从得知；同 write_file 的 lock==nil）。失败声明不阻塞执行，见
 	//   declaredOutputs 注释；无 outputs 声明时这里零 IO。
 	outs := t.declaredOutputs(a.Outputs)
+	// 运行中的输出尾巴（tail -f，**只给人看**）：与 bash 同一条链路（同一个节流发射器 +
+	// 同一个事件类型）。无事件出口（直调工具 / 脚本路径里的嵌套调用）时 OnOutput 保持 nil
+	// —— 执行层走历史路径，零开销。模型侧完全无感：本工具照旧阻塞到脚本结束才返回。
+	tailer := newOutputTailer(ctx)
 	out, err := sbx.Run(ctx, sandbox.ExecSpec{
-		Command: cmdline,
-		Cwd:     t.Cwd,
-		Timeout: scriptTimeout,
+		Command:  cmdline,
+		Cwd:      t.Cwd,
+		Timeout:  scriptTimeout,
+		OnOutput: spec0OnOutput(tailer),
 	})
 	if err != nil {
 		return out, err // 执行后端本身失败（非脚本非零退出）：不产生产出（engine 也不会读 diff）
