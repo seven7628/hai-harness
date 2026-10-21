@@ -1575,6 +1575,28 @@ func (m *manager) dispatch(c command) {
 		ok := m.workspaceRemove(str(c.Payload, "path"))
 		m.resp(c, true, "", map[string]any{"removed": ok, "workspaces": m.workspaceEntries()})
 
+	case CmdWorkspaceUpdate: // 重命名 / 置顶工作区（手机端与桌面共用同一份清单）
+		path := str(c.Payload, "path")
+		var title *string
+		if v, ok := c.Payload["title"]; ok {
+			t := ""
+			if sv, isStr := v.(string); isStr {
+				t = strings.TrimSpace(sv)
+			}
+			title = &t
+		}
+		var pinned *bool
+		if v, ok := c.Payload["pinned"]; ok {
+			b := boolVal(v)
+			pinned = &b
+		}
+		entry, ok := m.workspaceUpdate(path, title, pinned)
+		if !ok {
+			m.resp(c, false, "工作区不存在", nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{"workspace": entry, "workspaces": m.workspaceEntries()})
+
 	case CmdWorkspaceSync: // 渲染进程首次迁移：把 localStorage 里的项目列表灌进来（只增不减）
 		m.resp(c, true, "", map[string]any{"workspaces": m.workspaceSync(strSlice(c.Payload, "paths"))})
 
@@ -3326,6 +3348,23 @@ func (m *manager) dispatch(c command) {
 		m.deleteSession(ws, sid)
 		m.resp(c, true, "", map[string]any{"sessions": m.listSessions(ws)})
 
+	case CmdSessionRename: // 重命名会话（手动标题，跨端共享；空标题 = 清除覆盖）
+		if ws == "" || sid == "" {
+			m.resp(c, false, "workspace/session_id 为空", nil)
+			return
+		}
+		if err := session.ValidateSessionID(sid); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		title := strings.TrimSpace(str(c.Payload, "title"))
+		if len([]rune(title)) > 80 {
+			m.resp(c, false, "标题过长（≤80 字）", nil)
+			return
+		}
+		changed := sessionManualTitles.set(workspaceKey(ws), sid, title)
+		m.resp(c, true, "", map[string]any{"changed": changed, "sessions": m.listSessions(ws)})
+
 	case CmdSessionPin: // 置顶/取消置顶会话（持久化到 ~/.go-code/sessions/<wsKey>/sessions.json）
 		if ws == "" || sid == "" {
 			m.resp(c, false, "workspace/session_id 为空", nil)
@@ -3470,8 +3509,9 @@ func (m *manager) deleteSession(wsPath, id string) {
 	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".record.json"))
 	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".record.json.bak"))
 	removeSubagentJournals(wsSessionsDir(wsPath), id)
-	// 清理该会话的置顶标记（防 pin 文件残留已删除会话）
+	// 清理该会话的置顶标记与手动标题（防残留文件把已删会话又「复活」）
 	sessionPins.set(workspaceKey(wsPath), id, false)
+	sessionManualTitles.set(workspaceKey(wsPath), id, "")
 }
 
 // subagentsBase 子任务输出 journal 根目录（D1 路径规则：sessions/<wsKey>/<sid>/agents）。
@@ -3704,6 +3744,10 @@ func sessionUpdatedAt(ws *workspaceRuntime, id string, lastActive int64) int64 {
 // > titles.json 缓存 > 首条 user 文本截断 > "New Chat"）。供 listSessions 与 mesh
 // 标题桥共用。
 func resolveLiveSessionTitle(wsKey string, bs *bridgeSession, id string) string {
+	// 用户手动重命名优先（跨端共享；桌面端仍可用 localStorage 覆盖）
+	if manual := sessionManualTitles.get(wsKey, id); manual != "" {
+		return manual
+	}
 	if bs != nil && bs.s != nil {
 		if ai := bs.s.AITitle(); ai != "" {
 			return ai
@@ -3726,6 +3770,9 @@ func resolveLiveSessionTitle(wsKey string, bs *bridgeSession, id string) string 
 // 与 meta 里的 AI 标题）。优先级同 resolveLiveSessionTitle：AI 标题（缓存 → jsonl meta）
 // > 首条 user 文本截断 > "New Chat"。
 func resolveDiskSessionTitle(wsKey, path, id string) string {
+	if manual := sessionManualTitles.get(wsKey, id); manual != "" {
+		return manual
+	}
 	if ai := sessionTitles.get(wsKey, id); ai != "" {
 		return ai
 	}

@@ -103,7 +103,9 @@ func TestMobileCmdAllowlistRejectsDangerous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, cmd := range []string{"delete_session", "mcp_set", "skill_install", "switch_model"} {
+	// delete_session 现在**允许**（手机端会话管理，UI 有二次确认），
+	// 这里只保留真正的越权面：改设置、装技能、放开监听、回填目录选择结果。
+	for _, cmd := range []string{"mcp_set", "skill_install", "switch_model", "mobile_set_listen", "workspace_pick_result"} {
 		r := postJSON(t, ts.URL+"/api/cmd", map[string]any{"cmd": cmd}, token)
 		if r.StatusCode != http.StatusForbidden {
 			r.Body.Close()
@@ -185,5 +187,23 @@ func TestWorkspacePickTableTTLAndReplay(t *testing.T) {
 	}
 	if p.consume("wp_missing", now) {
 		t.Fatal("不存在的请求不应被接受")
+	}
+}
+
+func TestMobileCmdAllowsSessionManagement(t *testing.T) {
+	// 会话管理是手机端的正当能力（重命名/置顶/删除），但删除必须走 UI 二次确认。
+	s, ts := testMobileServer(t)
+	code, _ := s.pair.newCode(time.Now())
+	token, _, err := s.pair.pair(code, "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []string{"session_rename", "session_pin", "delete_session", "workspace_update"} {
+		r := postJSON(t, ts.URL+"/api/cmd", map[string]any{"cmd": cmd, "payload": map[string]any{}}, token)
+		if r.StatusCode != http.StatusOK {
+			r.Body.Close()
+			t.Fatalf("%s 应被允许，得到 %d", cmd, r.StatusCode)
+		}
+		r.Body.Close()
 	}
 }

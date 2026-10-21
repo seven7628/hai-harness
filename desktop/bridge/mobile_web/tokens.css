@@ -1,0 +1,104 @@
+/* tokens.css —— 手机端复用桌面端的设计 token（唯一来源：desktop/app/src/index.css）。
+ *
+ * 为什么要抄一份而不是 import：手机页面由 bridge 用 go:embed 托管，不在 Vite 里，
+ * 跨目录 import 拿不到桌面端的样式。所以这里**逐字复制** token 层，并用
+ * `tokens_sync_test.go` 守住「手机端出现的颜色必须在桌面端存在」，防止另起色板。
+ *
+ * 语义别名层（--bg/--surface/--text/--accent…）与桌面完全一致：
+ * 组件样式只准用别名，不直接用 --paper-* / --ink-*，这样换主题不用改组件。
+ */
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('fonts/ibm-plex-sans-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/ibm-plex-mono-400.woff2') format('woff2');
+}
+
+/* 深色（默认）：墨 */
+:root,
+[data-theme='ink'] {
+  --paper: #1a1614;
+  --paper-2: #231d1a;
+  --paper-3: #2e2622;
+  --ink: #f0e9e4;
+  --ink-2: #ada19a;
+  --ink-3: #857a73;
+  --ink-line: #332b26;
+  --ink-line-2: #42382f;
+  --cinnabar: #e68c74;
+  --cinnabar-2: #d97a66;
+  --bamboo: #7bc199;
+  --ochre: #d9ae5e;
+  --indigo: #9daed2;
+  --crimson: #e4746a;
+  --danger-solid: #b33a31;
+  --accent-weak: rgba(217, 122, 102, 0.14);
+  --accent-border: rgba(217, 122, 102, 0.45);
+  --accent-solid: #b8492f;
+  --accent-hover: #ce5b3f;
+  --cat-read: #91b6de;
+  --cat-cmd: #91d1de;
+  --cat-write: #c491de;
+  --cat-net: #debf91;
+  --cat-agent: #de919f;
+}
+
+/* 亮色：宣纸 */
+[data-theme='paper'] {
+  --paper: #fdfcfb;
+  --paper-2: #ffffff;
+  --paper-3: #f5f2f0;
+  --ink: #1b1917;
+  --ink-2: #5e5955;
+  --ink-3: #918b86;
+  --ink-line: #eae5e1;
+  --ink-line-2: #d9d2cc;
+  --cinnabar: #9e2c22;
+  --cinnabar-2: #b23a2c;
+  --bamboo: #1b7a45;
+  --ochre: #8a6414;
+  --indigo: #4a5aa8;
+  --crimson: #c0392b;
+  --danger-solid: #c0392b;
+  --accent-weak: rgba(178, 58, 44, 0.09);
+  --accent-border: rgba(178, 58, 44, 0.42);
+  --accent-solid: #b23a2c;
+  --accent-hover: #9e2c22;
+  --cat-read: #225287;
+  --cat-cmd: #227687;
+  --cat-write: #652287;
+  --cat-net: #875e22;
+  --cat-agent: #872234;
+}
+
+:root {
+  --bg: var(--paper);
+  --surface: var(--paper-2);
+  --elevated: var(--paper-3);
+  --border: var(--ink-line);
+  --border-strong: var(--ink-line-2);
+  --text: var(--ink);
+  --text-2: var(--ink-2);
+  --text-3: var(--ink-3);
+  --accent: var(--cinnabar-2);
+  --accent-strong: var(--cinnabar);
+  --running: var(--indigo);
+  --success: var(--bamboo);
+  --error: var(--crimson);
+  --danger: var(--crimson);
+  --warning: var(--ochre);
+  --focus-ring: var(--indigo);
+  --font-ui: 'IBM Plex Sans', -apple-system, 'PingFang SC', sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Menlo, monospace;
+  --radius: 8px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}

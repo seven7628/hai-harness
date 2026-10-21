@@ -121,6 +121,34 @@ func (r *workspaceRegistry) add(path string) (workspaceEntry, error) {
 	return e, nil
 }
 
+// update 改标题/置顶；两个指针都可空（只改传了的字段）。
+func (r *workspaceRegistry) update(path string, title *string, pinned *bool) (workspaceEntry, bool) {
+	p := normalizeWorkspacePath(path)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, e := range r.entries {
+		if e.Path != p {
+			continue
+		}
+		if title != nil {
+			t := strings.TrimSpace(*title)
+			if len([]rune(t)) > 60 {
+				t = string([]rune(t)[:60])
+			}
+			r.entries[i].Title = t
+			if t == "" {
+				r.entries[i].Title = filepath.Base(p) // 清空标题 = 回到目录名
+			}
+		}
+		if pinned != nil {
+			r.entries[i].Pinned = *pinned
+		}
+		_ = r.saveLocked()
+		return r.entries[i], true
+	}
+	return workspaceEntry{}, false
+}
+
 func (r *workspaceRegistry) remove(path string) bool {
 	p := normalizeWorkspacePath(path)
 	r.mu.Lock()
@@ -228,4 +256,11 @@ func (m *manager) workspaceSync(paths []string) []workspaceEntry {
 		return []workspaceEntry{}
 	}
 	return m.wsReg.sync(paths)
+}
+
+func (m *manager) workspaceUpdate(path string, title *string, pinned *bool) (workspaceEntry, bool) {
+	if m == nil || m.wsReg == nil {
+		return workspaceEntry{}, false
+	}
+	return m.wsReg.update(path, title, pinned)
 }

@@ -47,7 +47,15 @@ var mobileAllowedCommands = map[Command]bool{
 	CmdWorkspaceRemove: true,
 	CmdWorkspaceSync:   true,
 	CmdWorkspacePick:   true,
-	CmdMobileStatus:    true,
+	CmdWorkspaceUpdate: true,
+	CmdSessionRename:   true,
+	CmdSessionPin:      true,
+	CmdDeleteSession:   true,
+	// 子智能体（子 Session）：列表由 new_session.agents 带回，下面是查看与对话
+	CmdAgentHistory:  true,
+	CmdAgentSend:     true,
+	CmdInterruptTask: true,
+	CmdMobileStatus:  true,
 }
 
 type mobileServer struct {
