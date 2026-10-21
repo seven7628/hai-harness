@@ -110,6 +110,17 @@ export default function Composer() {
   // 正在看子智能体时：输入框照常发**主会话**（协议上子智能体的通道是 agent_send，只有模型
   // 会用它）。这个提示存在的唯一理由：避免用户在子会话视角里输入后，惊讶于"回答来自主 agent"。
   const focused = useAppStore((s) => s.focusedAgent)
+  const sendToAgent = useAppStore((s) => s.sendToAgent)
+  const agentSendError = useAppStore((s) => s.agentSendError)
+  const clearAgentSendError = useAppStore((s) => s.clearAgentSendError)
+  const focusAgent = useAppStore((s) => s.focusAgent)
+  // 提示条里显示子智能体的**名字**（不是 task id）：用户认的是名字
+  const focusedLabel = useAppStore((s) => {
+    const f = s.focusedAgent
+    if (!f) return ''
+    const b = s.blocks.find((x) => x.kind === 'agent' && x.runId === f.runId)
+    return b?.kind === 'agent' ? b.label : (f.taskId ?? '')
+  })
   const ask = useAppStore((s) => s.ask)
   const interrupt = useAppStore((s) => s.interrupt)
   // 流式 = 有 LLM 流式（主会话正在产出）→ 发送钮变「停止」。不把后台子 agent
@@ -841,6 +852,19 @@ export default function Composer() {
         ...imageBlocks,
       ]
     }
+    // —— 子会话：这条消息发给**正在看的那个子智能体**（用户 2026-10 要求）——
+    //
+    // 只在它有 task_id 时才能发：agent_send 的决策锚是后台任务 id（Registry 的键），
+    // 同步子智能体（in-loop，没有后台任务）在协议上没有独立的收件箱 —— 那种情况仍发给
+    // 主会话，由主模型转达。这个区别要在提示条里说清楚，不能静默改道。
+    if (focused?.taskId) {
+      sendToAgent(focused.taskId, withDocRefs(raw))
+      setText('')
+      setCmdMenu(false)
+      setAttachments([])
+      setDocRefs([])
+      return
+    }
     setExpanding(true)
     const lines = raw.split('\n')
     const first = lines[0].trim()
@@ -867,11 +891,24 @@ export default function Composer() {
   return (
     <div className="composer-wrap">
       <AgentRunningBar />
-      {/* 正在看子智能体：明确告知输入的投递目标（否则用户会以为在跟它对话）。
-          这不是禁用理由 —— 主会话随时可以继续输入，子智能体的产出会作为结果回填。 */}
+      {/* 正在看子智能体：这里就是**对它的输入框**（用户 2026-10 要求「打字发送应该发给
+          子智能体」）。同时给一条明确的回程 —— 用户此刻的注意力在输入框，把「返回主会话」
+          只放在顶部一行的话，切回来要找。 */}
       {focused && (
         <div className="composer-target-hint" role="status">
-          {t('agentTree.composerTarget')}
+          <span>
+            {focused.taskId
+              ? t('agentTree.composerToSub').replace('{name}', focusedLabel)
+              : t('agentTree.composerNoChannel')}
+          </span>
+          <button className="cth-back" onClick={() => focusAgent(undefined)}>
+            {t('agentTree.backToMain')}
+          </button>
+        </div>
+      )}
+      {agentSendError && (
+        <div className="composer-target-hint err" role="alert" onClick={clearAgentSendError}>
+          {t('agentTree.sendFailed').replace('{err}', agentSendError)}
         </div>
       )}
       <div

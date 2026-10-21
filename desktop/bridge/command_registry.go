@@ -25,13 +25,19 @@ const (
 	// 背景：agent 卡片的 items 不再整份进 checkpoint（那曾占 record 体积 98%，
 	// 让每次提交要序列化近百 MB）。checkpoint 只留最近一屏，更早的从这里按页取。
 	CmdAgentHistory Command = "agent_history"
+	// CmdAgentSend 用户直接对某个子智能体说话（子会话视图的输入框）。
+	//
+	// 与模型调用的 agent_send 工具**同一条通道**（Registry.Send → Task.inbox）：
+	// 子智能体是独立上下文，「我想让它改一下」和模型再派它一次不是一件事。
+	// 语义与工具一致：仅运行中的任务可投；已结束要 agent_resume，未知任务报错。
+	CmdAgentSend Command = "agent_send"
 	// CmdBlocksPage 主对话历史分页（「加载更早」）。
 	//
 	// 与 agent_history 同构，但取自**进程内 reducer** 而不是子 agent journal：
 	// 打开会话时 bridge 可用 blocks_limit 只回最近一屏（见 main.go new_session），
 	// 更早的从这里按 id 游标向前取。游标用 block id 而非 offset —— id 单调唯一，
 	// 新块追加不会让用户正在看的内容跳位。
-	CmdBlocksPage Command = "blocks_page"
+	CmdBlocksPage    Command = "blocks_page"
 	CmdApprove       Command = "approve"
 	CmdCompact       Command = "compact"
 	CmdDeleteSession Command = "delete_session"

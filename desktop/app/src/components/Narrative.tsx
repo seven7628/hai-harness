@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf } from '../store/useAppStore'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
@@ -153,10 +153,41 @@ const AssistantTurnMeta = memo(function AssistantTurnMeta({ b }: { b: Extract<Ms
   )
 })
 
-export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
+/**
+ * NarrativeSource 数据源覆盖：**子智能体子会话**用它把「自己的转录」喂给同一个 Narrative。
+ *
+ * 为什么用 props 覆盖而不是再造一个页面组件：用户 2026-10 的要求是「子会话完全可以复用
+ * 主会话的页面样式与功能；不需要有独立的了」。滚动/贴底跟随/历史渐入/加载更早/空态
+ * 都住在这个组件里 —— 另写一份的结果是「样式看着像、行为全没有」（下方空白不能贴底、
+ * 没有加载更早）。所以子会话 = 同一个 Narrative + 另一个数据源。
+ */
+export interface NarrativeSource {
+  blocks: MsgBlock[]
+  /** 分页三态（子 agent 的分页在子任务 journal 里，不走 blocks_page） */
+  total?: number
+  hasMore?: boolean
+  loading?: boolean
+  error?: boolean
+  onLoadOlder?: () => void
+  /** 空态覆盖（子会话没有消息时不该显示「开始新对话」引导） */
+  empty?: ReactNode
+}
+
+export default function Narrative({ viewSid, source, header, footer }: {
+  viewSid?: string
+  source?: NarrativeSource
+  /** 首行插槽（子会话的「返回主会话 + 身份/用量」）。放在容器**内部**：
+   *  这样它与正文同宽同内边距，视觉上就是叙述区的第一行，而不是一条通栏的卡片头。 */
+  header?: ReactNode
+  /** 末行插槽（子会话的任务结果）。用插槽而不是合成块：主会话里这份内容渲染在
+   *  子智能体卡内（TaskResultInline），两处必须是**同一个组件**才谈得上复用。 */
+  footer?: ReactNode
+} = {}) {
   const t = useT()
-  // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话
-  const blocks = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocks ?? [] : s.blocks))
+  // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话。
+  // source 优先（子会话）：hooks 必须无条件调用，所以先取 store 再覆盖。
+  const storeBlocks = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocks ?? [] : s.blocks))
+  const blocks = source ? source.blocks : storeBlocks
   const persona = useAppStore((s) => s.persona)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -183,14 +214,18 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   // 后端 BlocksPage 的游标：最早已加载块的 id 与「还有更早」标记。
   // 注意这两个值来自 store（由 hydrateCheckpoint 写入），不是本地 state ——
   // 会话切换时随视图一起重置，避免把上一个会话的游标带到新会话。
-  const total = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksTotal ?? 0 : s.blocksTotal))
+  const storeTotal = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksTotal ?? 0 : s.blocksTotal))
   const moreCursor = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksCursor ?? 0 : s.blocksCursor))
-  const hasMore = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksHasMore ?? false : s.blocksHasMore))
+  const storeHasMore = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksHasMore ?? false : s.blocksHasMore))
+  const total = source ? (source.total ?? 0) : storeTotal
+  const hasMore = source ? Boolean(source.hasMore) : storeHasMore
   // 按钮用的 loading/error 走 store（不是本地 state）：响应由 store 的
   // blocks_page 处理器写回，本地 state 无法感知「已经加载完了」，
   // 会出现按钮一直转圈/错误态不消。store 是唯一事实源。
-  const olderLoading = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksOlderLoading ?? false : s.blocksOlderLoading))
-  const olderError = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksOlderError ?? false : s.blocksOlderError))
+  const storeOlderLoading = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksOlderLoading ?? false : s.blocksOlderLoading))
+  const storeOlderError = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksOlderError ?? false : s.blocksOlderError))
+  const olderLoading = source ? Boolean(source.loading) : storeOlderLoading
+  const olderError = source ? Boolean(source.error) : storeOlderError
   // 会话进入序号：每次 checkpoint hydrate 变化 → 重播历史渐入（见 store 的 enteredAt 注释）
   const enteredAt = useAppStore((s) =>
     viewSid ? s.views[viewSid]?.enteredAt ?? 0 : (s.activeSessionId ? s.views[s.activeSessionId]?.enteredAt ?? 0 : 0),
@@ -299,11 +334,13 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     // （否则流式新块会把铺开进度打回起点）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enterAnimAt])
-  const loadOlder = useAppStore((s) => s.loadOlderBlocks)
+  const storeLoadOlder = useAppStore((s) => s.loadOlderBlocks)
+  const sourceLoadOlder = source?.onLoadOlder
   const onLoadOlder = useCallback(() => {
     if (olderLoading) return
-    loadOlder(viewSid)
-  }, [olderLoading, loadOlder, viewSid])
+    if (sourceLoadOlder) sourceLoadOlder()
+    else storeLoadOlder(viewSid)
+  }, [olderLoading, sourceLoadOlder, storeLoadOlder, viewSid])
 
   // —— 滚动锚定补偿（仅在「前插历史」时保持视觉位置）——
   //
@@ -961,10 +998,10 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
           )}
         </div>
       )}
-      {blocks.length === 0 && (
-        <EmptyChat persona={persona} />
-      )}
+      {header}
+      {blocks.length === 0 && (source ? source.empty ?? null : <EmptyChat persona={persona} />)}
       {items}
+      {footer}
       <div className="narrative-anchor" ref={anchorRef} aria-hidden="true" />
       {(away || fresh) && (
         <button

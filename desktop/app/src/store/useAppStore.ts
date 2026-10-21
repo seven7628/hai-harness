@@ -2486,6 +2486,10 @@ interface AppState {
   // 为什么字段名不叫 xlsxBusy：它从 2026-09 起覆盖三种格式，旧名会让后来者以为只跟 xlsx 相关。
   officeBusy?: string
   questions: PendingQuestion[] // 模型→用户提问（ask_user；活跃会话镜像，按 run 归属）
+  // agentSendError 最近一次「发给子智能体」的失败原因（undefined = 没有未读错误）。
+  // 放在顶层而不是子会话视图里：失败发生在哪一层都要能被看到，且要能跨视图提示
+  // （例如任务刚结束、用户还在看它的转录）。
+  agentSendError?: string
   release?: PendingRelease // 沙箱拦截放行确认（sandbox_blocked；活跃会话镜像，弹放行 modal）
 
   blocks: MsgBlock[]
@@ -2659,6 +2663,13 @@ interface AppState {
   // batchId 显式传入（不再从「当前那一条提问」推断）：主/子可能各有一批在等，
   // 推断会把回答发错批次。见 SessionView.questions 的注释。
   answerQuestion(batchId: string, answers: { question_id: string; answer: string }[]): void
+  // sendToAgent 用户直接对某个子智能体说话（子会话视图的输入框）。
+  //
+  // 与模型的 agent_send 工具**同一条通道**（bridge → Registry.Send → Task.inbox）：
+  // 子智能体是独立上下文，「我想让它改一下」和让主智能体再派一次是两件事。
+  // 失败原因可区分（已结束 / 队列满 / 找不到任务），见 agentSendError。
+  sendToAgent(taskId: string, text: string): void
+  clearAgentSendError(): void
   releaseSandbox(approve: boolean): void // 沙箱拦截放行决策（放行=该命令绕过沙箱重跑一次）
   promoteTask(taskId: string): void // 运行中长工具 → 后台任务（主 loop 立即拿占位继续；后台完成自动回传）
   interruptTask(taskId: string): void
@@ -7115,6 +7126,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   streaming: false,
   pendingQueue: [],
   runningAgentCount: 0,
+  agentSendError: undefined,
   questions: [],
   busySids: new Set<string>(),
   compressing: false,
@@ -7716,6 +7728,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
     send({ type: 'answer_question', payload: { session_id: sid, batch_id: batchId, answers } })
   },
+
+  sendToAgent: (taskId, text) => {
+    const sid = get().activeSessionId
+    const body = text.trim()
+    if (!sid || !taskId || !body) return
+    set({ agentSendError: undefined })
+    send(
+      { type: 'agent_send', payload: { session_id: sid, task_id: taskId, text: body } },
+      false,
+      (r) => {
+        if (!r.ok) set({ agentSendError: r.error || 'send failed' })
+      },
+    )
+  },
+  clearAgentSendError: () => set({ agentSendError: undefined }),
 
   // 把运行中的长工具调用摘离为后台任务（决策 #5：用户主动 promote 恒可用）：
   // bridge promote_task → Session.PromoteTask → 引擎批释放（主 loop 拿占位继续）；

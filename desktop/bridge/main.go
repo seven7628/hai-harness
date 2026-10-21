@@ -1335,6 +1335,20 @@ func (m *manager) resp(c command, ok bool, errMsg string, data map[string]any) {
 // respCode 同 resp，但携带稳定错误码（V2 P2-PROTOCOL-05）：前端可据 code 区分
 // 认证失败/配置错误/超时/限流/永久错误，而非解析 error 字符串。code 为空 = 兼容旧行为。
 // 高频语义错误（认证/超时/配置/限流/not_found）在调用点显式传 code。
+// sendErrCode 把 Registry.Send 的三种失败翻成可区分的错误码：
+// 前端据此给不同的说法（「已结束 → 需要恢复」/「队列满 → 稍后再发」/「找不到任务」）。
+// 都回同一个 "failed" 的话，用户只会看到「发送失败」，无从判断该做什么。
+func sendErrCode(err error) string {
+	switch {
+	case errors.Is(err, subagent.ErrTaskFinished):
+		return "task_finished"
+	case errors.Is(err, subagent.ErrTaskInboxFull):
+		return "inbox_full"
+	default:
+		return "task_not_found"
+	}
+}
+
 func (m *manager) respCode(c command, ok bool, errMsg, code string, data map[string]any) {
 	if data == nil {
 		data = map[string]any{}
@@ -1918,6 +1932,35 @@ func (m *manager) dispatch(c command) {
 		approve := boolVal(c.Payload["approve"])
 		if err := bs.s.Approve(toolID, approve); err != nil {
 			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", nil)
+
+	case "agent_send": // 用户直接对某个子智能体说话（子会话视图的输入框）
+		//
+		// 与模型的 agent_send 工具同一条通道（Registry.Send → Task.inbox）：子智能体是
+		// 独立上下文，用户「让它改一下」和模型再派它一次不是同一件事。
+		// 只投运行中的任务：已结束的要 agent_resume（重跑），未知 id 直接报错 ——
+		// 三种情况在 UI 上是三句不同的话，不能都回「失败」。
+		bs := m.get(ws, sid)
+		if bs == nil {
+			m.respCode(c, false, "session not found", "session_not_found", nil)
+			return
+		}
+		reg := bs.s.Registry()
+		if reg == nil {
+			m.respCode(c, false, "subagent registry unavailable", "no_registry", nil)
+			return
+		}
+		taskID := str(c.Payload, "task_id")
+		text := str(c.Payload, "text")
+		if taskID == "" || text == "" {
+			m.respCode(c, false, "task_id and text are required", "bad_request", nil)
+			return
+		}
+		if err := reg.Send(taskID, text); err != nil {
+			// ErrTaskFinished / ErrTaskInboxFull / 未知任务：原样回传，前端据此给不同的说法
+			m.respCode(c, false, err.Error(), sendErrCode(err), nil)
 			return
 		}
 		m.resp(c, true, "", nil)

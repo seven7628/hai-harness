@@ -42,6 +42,8 @@ export default function LeftPanel() {
   const titleOverrides = useAppStore((s) => s.titleOverrides)
   const newSession = useAppStore((s) => s.newSession)
   const setActiveSession = useAppStore((s) => s.setActiveSession)
+  const focusAgent = useAppStore((s) => s.focusAgent)
+  const focusedAgent = useAppStore((s) => s.focusedAgent)
   const renameSession = useAppStore((s) => s.renameSession)
   const deleteSession = useAppStore((s) => s.deleteSession)
   const deleteWorkspace = useAppStore((s) => s.deleteWorkspace)
@@ -368,7 +370,18 @@ export default function LeftPanel() {
                                 <Fragment key={s.id}>
                                 <div
                                   className={`session-item ${s.id === activeSessionId ? 'active' : ''} ${s.pinned ? 'pinned' : ''}`}
-                                  onClick={() => { if (!isEditing) setActiveSession(s.id, p.path) }}
+                                  onClick={() => {
+                                    if (isEditing) return
+                                    // 点会话行 = 回到它的**主会话**。
+                                    // 正在看某个子智能体时，点当前会话原先什么都不做（same id →
+                                    // setActiveSession 是空操作），于是「点主会话没反应」——
+                                    // 用户 2026-10 报障。这里显式退出子会话视图。
+                                    if (s.id === activeSessionId) {
+                                      if (focusedAgent) focusAgent(undefined)
+                                      return
+                                    }
+                                    setActiveSession(s.id, p.path)
+                                  }}
                                   onDoubleClick={() => { setEditing({ path: p.path, sid: s.id }); setDraft(title) }}
                                   title={t('left.renameHint')}
                                 >

@@ -3,10 +3,11 @@ import { useAppStore } from '../store/useAppStore'
 import type { AgentFocus, MsgBlock } from '../store/useAppStore'
 import { agentTreeFromView, pathOfNode } from '../lib/agentTree'
 import type { AgentTreeNode } from '../lib/agentTree'
-import { AgentTranscript } from './AgentTranscript'
-import { ArtifactCard } from './ArtifactCard'
-import { ToolTaskBody } from './TaskCard'
+import { agentItemsToBlocks } from '../lib/agentSession'
 import { TaskResultInline } from './NarrativeBlocks'
+import { ArtifactCard } from './ArtifactCard'
+import Narrative from './Narrative'
+import type { NarrativeSource } from './Narrative'
 import { ElapsedTimer } from './ElapsedTimer'
 import { fmtUsd, UsageChip } from './ui'
 import { useScopedCompression } from './sessionScope'
@@ -15,17 +16,25 @@ import { useT } from '../i18n'
 
 // 子智能体「子会话」视图：选中左栏树里的某个子智能体时，叙述区展示**它**的一切。
 //
-// 设计取舍（用户 2026-10 需求「子智能体可以看成独立的 session」）：
-//   · 它是一个**视图**，不是另一个会话：消息仍然只发给主会话（子智能体的输入通道是
-//     agent_send，且只有模型会用它）。所以这里没有输入框 —— 有输入框就等于暗示
-//     「你可以直接跟它说话」，而协议上没有这条路。
-//   · 停止/续跑等**动作**与任务卡同源（interrupt_task），不新开一套动作语义。
-//   · 顶部面包屑显示祖先链（父 → 子 → 孙）：递归场景下「我现在看的是哪一层」必须可判读。
-//   · **版式就是主会话页**（用户 2026-10 要求「样式复用主智能体页面样式，只不过多个
-//     返回主会话」）：内容容器直接复用 `.narrative`（同 800px 居中、同 padding、同
-//     scroll-anchor/scrollbar-gutter 规则）——**复用 class 而不是抄一遍数值**，否则主
-//     会话那边调一次这里就漂一次，而这类漂移只有肉眼能发现。头部因此也不再是「卡片头」
-//     （没有分隔线），它就是叙述区里的第一行元信息。
+// ## 它现在是「主会话页 + 一个返回」（用户 2026-10 拍板）
+//
+// 原话：「子会话完全可以复用主会话的页面样式与功能；不需要有独立的了」。
+//
+// 之前这里是**一套独立的渲染**（自己的滚动容器 + AgentTranscript）。样式能对齐（两边
+// 都调 NarrativeBlocks 的原语），但**页面级行为**对齐不了 —— 贴底跟随、历史渐入、
+// 「加载更早」、空态都住在 Narrative 里，子会话那份只能各写一遍或干脆没有，于是
+// 「下方一大片空白、不能跟随、翻不到更早」。
+//
+// 现在这个组件只做三件事，一件都不碰版式：
+//   1. 把子智能体的活动记录映射成会话块（lib/agentSession.agentItemsToBlocks）
+//   2. 把它的分页态接成 NarrativeSource（子 agent 的历史在子任务 journal 里）
+//   3. 顶部那一行「面包屑 / 状态 / 用量 / 停止 / 返回主会话」作为 Narrative 的 header
+//
+// ## 仍然是「视图」而不是「会话」
+//
+// 消息只发给主会话（子智能体的输入通道是 agent_send，只有模型会用它）—— 所以这里没有
+// 自己的输入框，Composer 仍是主会话的，并明示了这一点。
+// 停止/续跑与任务卡同源（interrupt_task），不新开一套动作语义。
 export const AgentSessionView = memo(function AgentSessionView({ focus }: { focus: AgentFocus }) {
   // 树节点身份用于定位节点/祖先链；真实 runId 用于找卡片（两者不同，见 AgentFocus 注释）
   const { nodeId, runId } = focus
@@ -70,113 +79,110 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     )
   }, [blocks, chain])
 
-  if (chain.length === 0) return <div className="empty">{t('agentTree.gone')}</div>
   const node = chain[chain.length - 1]
+  // 数据源：agent 卡的活动记录 → 会话块。后台工具任务没有 items，就把它那一个工具块
+  // 直接交给 Narrative（走主对话同一套 ToolRow/ToolGroup 渲染，而不是右栏那套展开体）。
+  const subBlocks = useMemo(
+    () => (card ? agentItemsToBlocks(card.items) : toolBlock ? [toolBlock] : []),
+    [card, toolBlock],
+  )
+
+  if (!node) return <div className="empty">{t('agentTree.gone')}</div>
   const running = node.status === 'running' || node.status === 'interrupting'
   const canStop = Boolean(node.taskId) && running
   const usage = card?.usage
+  const trimmed = card?.itemsTrimmed ?? 0
 
-  return (
-    <div className="agent-session" role="region" aria-label={t('agentTree.subSession')}>
-      {/* 内容容器 = 主会话的 .narrative（同宽同内边距同滚动）。头部放在它**内部**：
-          在主会话页里，会话身份/用量这些就是叙述区顶部的一行元信息，不该另起一条
-          通栏的「卡片头」——那会让子会话页看起来像另一种页面。 */}
-      <div className="narrative as-body">
-      {/* 面包屑 + 动作条：祖先链每一层都可点（递归场景下直接回到上游某一层） */}
-      <div className="as-hd">
-        <span className="as-icon" aria-hidden="true">{node.kind === 'task' ? <Clock size={14} /> : <Bot size={14} />}</span>
-        <span className="as-crumb">
-          {chain.slice(0, -1).map((a) => (
-            <button
-              key={a.id}
-              className="as-crumb-link"
-              onClick={() => focusAgent({ nodeId: a.id, runId: a.runId ?? a.id, ...(a.taskId ? { taskId: a.taskId } : {}) })}
-              title={a.label}
-            >
-              {a.label}
-              <ChevronRight size={10} />
-            </button>
-          ))}
-          <span className="as-crumb-cur" title={node.label}>{node.label}</span>
-        </span>
-        <span className={`as-st mono st-${statusCls(node.status)}`}>{statusLabel(node, t)}</span>
-        {usage && (usage.input > 0 || usage.output > 0) && (
-          <UsageChip
-            className="as-usage mono"
-            usage={usage}
-            title={t('task.usage.tip')
-              .replace('{tok}', String(usage.input + usage.output))
-              .replace('{cost}', fmtUsd(usage.costUsd ?? 0))}
-          />
-        )}
-        {(running || card?.durMs != null) && (
-          <ElapsedTimer className="as-dur mono" startAt={node.startedAt} running={running} durMs={running ? undefined : card?.durMs} />
-        )}
-        {canStop && (
+  const source: NarrativeSource = {
+    blocks: subBlocks,
+    // 分页：checkpoint 只留首屏，更早的在子任务 journal 里（agent_history 命令）。
+    // 有 trimmed（被裁掉的条数）也算「还有更早」—— 否则裁剪过的历史看起来就是全部。
+    total: card?.historyTotal ?? 0,
+    hasMore: trimmed > 0 || Boolean(card?.historyHasMore),
+    loading: Boolean(card?.historyLoading),
+    error: Boolean(card?.historyError),
+    ...(card?.taskId ? { onLoadOlder: () => loadAgentHistory(card.id, card.taskId!) } : {}),
+    empty: (
+      // 点进来是想知道「它在干什么」—— 给状态而不是空白
+      <div className="as-placeholder">
+        <div className="as-ph-title">{node.label}</div>
+        <div className="as-ph-meta mono">
+          {statusLabel(node, t)}
+          {node.toolName ? ` · ${node.toolName}` : ''}
+          {node.taskId ? ` · ${node.taskId}` : ''}
+        </div>
+        <div className="as-ph-hint">{t('agentTree.noTranscript')}</div>
+      </div>
+    ),
+  }
+
+  const header = (
+    <div className="as-hd">
+      <span className="as-icon" aria-hidden="true">{node.kind === 'task' ? <Clock size={14} /> : <Bot size={14} />}</span>
+      {/* 面包屑：祖先链每一层都可点（递归场景下直接回到上游某一层） */}
+      <span className="as-crumb">
+        {chain.slice(0, -1).map((a) => (
           <button
-            className="as-stop"
-            title={t('rp.task.stopTask')}
-            aria-label={t('rp.task.stopTaskAria')}
-            onClick={() => interruptTask(node.taskId!)}
+            key={a.id}
+            className="as-crumb-link"
+            onClick={() => focusAgent({ nodeId: a.id, runId: a.runId ?? a.id, ...(a.taskId ? { taskId: a.taskId } : {}) })}
+            title={a.label}
           >
-            ⏹
+            {a.label}
+            <ChevronRight size={10} />
           </button>
-        )}
-        <button className="as-back" onClick={() => focusAgent(undefined)}>{t('agentTree.backToMain')}</button>
-      </div>
-        {/* 这里**不再**放待办面板：待办归右栏顶部那一份（它跟随当前作用域 —— 看主会话
-            是会话清单，看子会话是这个子 agent 自己的清单）。同一份清单在两处显示会让人
-            怀疑「是不是两份不同的计划」。子 agent 的 todo_* 调用仍会在转录里渲染成计划卡
-            （定格当时状态），那是**历史**而不是当前清单，语义不同。 */}
-        {/* 压缩中：与主会话同一个提示形态（气泡 → spinner → 说明），只是归属这个子会话。
-            子 agent 压缩自己的上下文时，用户看到的是「它在压」而不是主会话在压。 */}
-        {comp.active && (
-          <div className="as-compressing" role="status" aria-live="polite">
-            <span className="composer-status-spinner" aria-hidden="true" />
-            <strong>{t('composer.compressing')}</strong>
-            {comp.before != null && (
-              <span className="composer-status-detail">{t('composer.compressing.detail')}</span>
-            )}
-          </div>
-        )}
-        {card ? (
-          <>
-            <AgentTranscript
-              items={card.items}
-              running={running}
-              trimmed={card.itemsTrimmed}
-              loading={card.historyLoading}
-              hasMore={card.historyHasMore}
-              error={card.historyError}
-              onLoadOlder={card.taskId ? () => loadAgentHistory(card.id, card.taskId!) : undefined}
-            />
-            {card.artifacts && card.artifacts.length > 0 && (
-              <div className="ac-artifacts">
-                <ArtifactCard items={card.artifacts} {...(card.artifactsTruncated ? { truncated: true } : {})} />
-              </div>
-            )}
-            <TaskResultInline delivered={card.deliveredToMain} result={card.taskResult} error={card.taskError} />
-          </>
-        ) : toolBlock ? (
-          // 后台工具任务（异步 bash 等）：展示它的参数/结果 —— 与主对话工具行同一套原语
-          //（ToolTaskBody）。这就是它从右栏「任务」tab 搬过来的那份内容。
-          <ToolTaskBody b={toolBlock} />
-        ) : (
-          // 有树节点但没有任何内容块：占位（卡片被 checkpoint 裁剪 / 事件尚未到达）。
-          // 展示状态而不是空白 —— 用户点进来是想知道「它在干什么」。
-          <div className="as-placeholder">
-            <div className="as-ph-title">{node.label}</div>
-            <div className="as-ph-meta mono">
-              {statusLabel(node, t)}
-              {node.toolName ? ` · ${node.toolName}` : ''}
-              {node.taskId ? ` · ${node.taskId}` : ''}
-            </div>
-            <div className="as-ph-hint">{t('agentTree.noTranscript')}</div>
-          </div>
-        )}
-      </div>
+        ))}
+        <span className="as-crumb-cur" title={node.label}>{node.label}</span>
+      </span>
+      <span className={`as-st mono st-${statusCls(node.status)}`}>{statusLabel(node, t)}</span>
+      {usage && (usage.input > 0 || usage.output > 0) && (
+        <UsageChip
+          className="as-usage mono"
+          usage={usage}
+          title={t('task.usage.tip')
+            .replace('{tok}', String(usage.input + usage.output))
+            .replace('{cost}', fmtUsd(usage.costUsd ?? 0))}
+        />
+      )}
+      {(running || card?.durMs != null) && (
+        <ElapsedTimer className="as-dur mono" startAt={node.startedAt} running={running} durMs={running ? undefined : card?.durMs} />
+      )}
+      {canStop && (
+        <button
+          className="as-stop"
+          title={t('rp.task.stopTask')}
+          aria-label={t('rp.task.stopTaskAria')}
+          onClick={() => interruptTask(node.taskId!)}
+        >
+          ⏹
+        </button>
+      )}
+      <button className="as-back" onClick={() => focusAgent(undefined)}>{t('agentTree.backToMain')}</button>
+      {/* 压缩中：与主会话同一个提示形态，只是归属这个子会话（子 agent 压缩自己的上下文） */}
+      {comp.active && (
+        <span className="as-compressing" role="status" aria-live="polite">
+          <span className="composer-status-spinner" aria-hidden="true" />
+          <strong>{t('composer.compressing')}</strong>
+          {comp.before != null && <span className="composer-status-detail">{t('composer.compressing.detail')}</span>}
+        </span>
+      )}
     </div>
   )
+
+  // 末行：任务结果 + 本轮产出。主会话里这两块渲染在子智能体**卡内**（TaskResultInline /
+  // ArtifactCard），子会话没有卡壳 → 用 footer 插槽放同一批组件，两处仍是同一份实现。
+  const footer = card && (card.taskResult || card.taskError || (card.artifacts && card.artifacts.length > 0)) ? (
+    <>
+      {card.artifacts && card.artifacts.length > 0 && (
+        <div className="ac-artifacts">
+          <ArtifactCard items={card.artifacts} {...(card.artifactsTruncated ? { truncated: true } : {})} />
+        </div>
+      )}
+      <TaskResultInline delivered={card.deliveredToMain} result={card.taskResult} error={card.taskError} />
+    </>
+  ) : undefined
+
+  return <Narrative source={source} header={header} footer={footer} />
 })
 
 function statusCls(s: AgentTreeNode['status']): string {
@@ -192,13 +198,5 @@ function statusCls(s: AgentTreeNode['status']): string {
 }
 
 function statusLabel(n: AgentTreeNode, t: (k: string) => string): string {
-  switch (n.status) {
-    case 'running': return t('task.status.running')
-    case 'interrupting': return t('task.status.interrupting')
-    case 'completed': case 'done': return t('task.status.completed')
-    case 'interrupted': return t('task.status.interrupted')
-    case 'failed': case 'error': return t('task.status.failed')
-    case 'abandoned': return t('task.status.abandoned')
-    default: return t('agentTree.unknown')
-  }
+  return n.status ? t(`task.status.${n.status === 'done' ? 'completed' : n.status}`) : t('agentTree.unknown')
 }

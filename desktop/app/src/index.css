@@ -11816,6 +11816,10 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 
 /* ============ 子智能体树（左栏会话树下 + 对话区子会话） ============
+   子会话**没有自己的页面外壳**（2026-10 用户拍板「子会话完全可以复用主会话的页面样式与
+   功能」）：它就是主会话的 .narrative，这里只有它注入的头部行（.as-*）。因此这些选择器
+   一律不带祖先前缀 —— 带前缀会让样式依赖一个已经不存在的外壳，删外壳时静默失效
+   （实测：头部塌成每行一个元素）。 */
    设计要点（用户 2026-10 需求「像参考产品那样把子会话画成树」）：
    · 连线用 per-row 的 guide 列 + 伪元素画，不用 SVG：左栏可拖宽（140–360px）、行高随
      字号/皮肤变化，字符网格方案（├─ └─）在异高/滚动下依然对齐，也不需要测量。
@@ -12029,16 +12033,9 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 /* ============ 子会话视图（对话区渲染某个子智能体） ============
    与主对话共享同一套渲染原语（AgentTranscript → Markdown/ToolRow/plan 卡），
    这里只负责"它是一个独立会话"的外壳：面包屑 + 动作条 + 自己的 TODO。 */
-.agent-session {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  animation: fadeIn 160ms var(--ease);
-}
 /* 头部 = 叙述区里的第一行元信息（**不是**卡片头）：没有分隔线、没有整宽底色。
    子会话页与主会话页同版式（用户 2026-10：样式复用主智能体页面，只多一个返回）。 */
-.agent-session .as-hd {
+.as-hd {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -12049,12 +12046,12 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   color: var(--text-3);
   flex-wrap: wrap;
 }
-.agent-session .as-icon {
+.as-icon {
   display: grid;
   place-items: center;
   color: var(--accent);
 }
-.agent-session .as-crumb {
+.as-crumb {
   flex: 1;
   display: flex;
   align-items: center;
@@ -12062,8 +12059,8 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   min-width: 0;
   overflow: hidden;
 }
-.agent-session .as-crumb-link,
-.agent-session .as-crumb-cur {
+.as-crumb-link,
+.as-crumb-cur {
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -12072,7 +12069,7 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.agent-session .as-crumb-link {
+.as-crumb-link {
   padding: 1px 4px;
   border: none;
   background: none;
@@ -12081,20 +12078,20 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   font-size: 12px;
   cursor: pointer;
 }
-.agent-session .as-crumb-link:hover {
+.as-crumb-link:hover {
   background: var(--surface);
   color: var(--text);
 }
-.agent-session .as-crumb-cur {
+.as-crumb-cur {
   color: var(--text);
   font-weight: 500;
 }
-.agent-session .as-st.running { color: var(--running); }
-.agent-session .as-st.done { color: var(--success); }
-.agent-session .as-st.error { color: var(--crimson); }
-.agent-session .as-st.interrupted,
-.agent-session .as-st.abandoned { color: var(--text-3); }
-.agent-session .as-stop {
+.as-st.running { color: var(--running); }
+.as-st.done { color: var(--success); }
+.as-st.error { color: var(--crimson); }
+.as-st.interrupted,
+.as-st.abandoned { color: var(--text-3); }
+.as-stop {
   width: 20px;
   height: 20px;
   padding: 0;
@@ -12104,11 +12101,11 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   color: var(--text-3);
   cursor: pointer;
 }
-.agent-session .as-stop:hover {
+.as-stop:hover {
   color: var(--crimson);
   border-color: var(--crimson);
 }
-.agent-session .as-back {
+.as-back {
   padding: 3px 9px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -12118,32 +12115,25 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   cursor: pointer;
   white-space: nowrap;
 }
-.agent-session .as-back:hover {
+.as-back:hover {
   color: var(--text);
   border-color: var(--border-strong);
 }
-/* 内容容器同时带 .narrative（见 AgentSessionView）：宽度/居中/padding/滚动锚定
-   **全部**来自主会话那一份 —— 这里刻意一条布局值都不写。写任何一条都是第二份规格：
-   主会话那边调一次，这里就漂一次，而这种漂移只有肉眼能发现（用户要求「复用」而不是
-   「长得差不多」）。 */
-.agent-session .as-body {
-  min-height: 0;
-}
-.agent-session .as-placeholder {
+.as-placeholder {
   padding: 28px 4px;
   color: var(--text-3);
   font-size: 12.5px;
 }
-.agent-session .as-ph-title {
+.as-ph-title {
   font-size: 14px;
   color: var(--text);
   margin-bottom: 6px;
 }
-.agent-session .as-ph-meta {
+.as-ph-meta {
   font-size: 11.5px;
   margin-bottom: 10px;
 }
-.agent-session .as-ph-hint {
+.as-ph-hint {
   max-width: 52ch;
   line-height: 1.6;
 }
@@ -12164,6 +12154,35 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   border-color: var(--accent-border);
 }
 /* 子会话视角下的输入归属提示（Composer 顶部一条，弱化但不可忽略） */
+/* 子会话的输入目标提示：一句话 + 一个明确的回程按钮（注意力在输入框时，
+   把「返回主会话」只放在顶部一行等于让人去找）。 */
+.composer-target-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.composer-target-hint.err {
+  border-color: var(--crimson);
+  background: color-mix(in srgb, var(--crimson) 12%, transparent);
+  color: var(--crimson);
+  cursor: pointer;
+}
+.composer-target-hint .cth-back {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.composer-target-hint .cth-back:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
 .composer-target-hint {
   margin: 0 0 4px;
   padding: 3px 10px;
@@ -12176,7 +12195,7 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 /* 子会话的「正在压缩」提示：与 Composer 里主会话那条同一个形态（spinner + 说明），
    只是归属这个子智能体 —— 两处必须长得一样，否则「谁在压缩」这件事会看起来是两种状态。 */
-.agent-session .as-compressing {
+.as-compressing {
   display: flex;
   align-items: center;
   gap: 8px;
