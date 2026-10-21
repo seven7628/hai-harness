@@ -11837,7 +11837,7 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   --atree-step: 14px;
   display: flex;
   flex-direction: column;
-  margin: 1px 6px 3px 26px; /* 左外边距对齐会话标题（.ws-body .session-item 的 16px + 行内 padding） */
+  margin: 0 6px 2px 26px; /* 左外边距对齐会话标题（.ws-body .session-item 的 16px + 行内 padding） */
   animation: fadeIn 160ms var(--ease);
 }
 .agent-tree.at-center {
@@ -11862,13 +11862,13 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 6px 3px 0;
+  padding: 1px 6px 1px 0;
   border-radius: 6px;
   cursor: pointer;
   font-size: 12px;
   color: var(--text-2);
   white-space: nowrap;
-  min-height: 22px;
+  min-height: 20px;
 }
 .atree-row:hover {
   background: var(--surface);
@@ -11927,12 +11927,26 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   height: 1px;
   background: var(--border-strong);
 }
-/* 选中态的连线点亮（accent）：从根到当前节点的那条链 —— 回答「我是从哪条链上下来的」。
-   只亮这个节点自己的 elbow 不够，祖先层的 guide 也要亮，否则链是断的。 */
-.atree-guide.lit::before,
-.atree-elbow.lit::before,
-.atree-elbow.lit::after {
-  background: var(--accent);
+/* 选中链：**一条**从会话行连到选中节点的折线（accent），而不是逐行点亮 guide。
+   旧做法每层一列、每行只覆盖自己那格，同一列由多行拼出来 —— 看着是并排几条竖线，
+   而且它从根节点开始画，永远接不到上面的会话行（用户 2026-10：「这个关系效果也不太美观」
+   「我期望的是从主 session 一直连接到对应的子智能体」）。
+   几何由 AgentTree 的 useLayoutEffect 量出来（行高随字号/皮肤变，不能写死）。 */
+.agent-tree { position: relative; }
+.atree-path {
+  position: absolute;
+  inset: 0;
+  overflow: visible; /* 路径要能画到自身顶边之外（伸向会话行） */
+  pointer-events: none;
+}
+.atree-path-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* 与行内 hover/选中底色叠在一起时不要糊成一团 */
+  opacity: 0.9;
 }
 .atree-chev,
 .atree-chev-sp {

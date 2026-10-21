@@ -1,7 +1,7 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import type { RunNode } from '../store/useAppStore'
-import { agentTreeFromView, flattenVisible, collectTreeKeys, focusedPathKeys, pathKeyOf, subtreeSize, pageRoots, DEFAULT_ROOT_PAGE } from '../lib/agentTree'
+import { agentTreeFromView, flattenVisible, collectTreeKeys, pathOfNode, pathKeyOf, subtreeSize, pageRoots, DEFAULT_ROOT_PAGE } from '../lib/agentTree'
 import type { AgentTreeNode } from '../lib/agentTree'
 import { useT } from '../i18n'
 import { Bot, ChevronDown, Clock } from './icons'
@@ -74,8 +74,58 @@ export const AgentTree = memo(function AgentTree({
     [roots, showAll, focused?.nodeId],
   )
   const rows = useMemo(() => flattenVisible(paged.roots, mine), [paged, mine])
-  // 选中子会话时点亮整条祖先链的连线（见 lib/agentTree.focusedPathKeys 的注释）
-  const litKeys = useMemo(() => (focused ? focusedPathKeys(roots, focused.nodeId) : EMPTY_SET), [roots, focused])
+  // —— 选中链的连线：一条从**主会话行**一路画到选中节点的折线 ——
+  //
+  // 为什么不用「逐行点亮 guide」（旧做法）：guide 每层一列、每行只覆盖自己那一格，
+  // 于是同一列会由多行拼出来 —— 视觉上是并排的几条竖线（用户 2026-10：「这个关系效果
+  // 也不太美观」），而且它从**根节点**开始画，永远接不到上面的会话行。
+  //
+  // 现在按真实几何画一条路径：起点 = 会话行下沿（"从主 session 一直连过来"），
+  // 沿祖先各层的连线列向下，到祖先节点行心右折，最后进选中节点。选中的越靠下，
+  // 线就越长（用户明确要的效果）。坐标全部相对 .agent-tree 量一次，随折叠/分页/宽度变化
+  // 重算 —— 不用估算行高，行高本来就会随字号与皮肤变。
+  const treeRef = useRef<HTMLDivElement | null>(null)
+  const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  const [pathD, setPathD] = useState<string | null>(null)
+  useLayoutEffect(() => {
+    const el = treeRef.current
+    const target = focused ? pathOfNode(roots, focused.nodeId) : []
+    if (!el || target.length === 0) {
+      setPathD((prev) => (prev === null ? prev : null))
+      return
+    }
+    const box = el.getBoundingClientRect()
+    const step = parseFloat(getComputedStyle(el).getPropertyValue('--atree-step')) || 14
+    // 起点：紧邻的**会话行**下沿（tree 是会话行的兄弟节点，见 LeftPanel）。
+    // 量不到就贴住自身顶边 —— 宁可短一点，也不要悬空画到别处去。
+    const prev = el.previousElementSibling as HTMLElement | null
+    const startY = prev ? prev.getBoundingClientRect().bottom - box.top + 1 : -4
+    const pts: Array<{ x: number; y: number }> = []
+    for (const n of target) {
+      const row = rowRefs.current.get(n.id)
+      if (!row) {
+        // 有祖先被折叠/分页挡住 → 没有可达的几何：撤掉旧线，别留一条接不上的残线
+        setPathD((prevD) => (prevD === null ? prevD : null))
+        return
+      }
+      const r = row.getBoundingClientRect()
+      // 该层连线列的**中心**：第 d 层前面有 d-1 个 guide 列，elbow 列宽 step-2
+      pts.push({ x: (n.depth - 1) * step + step / 2, y: r.top - box.top + r.height / 2 })
+    }
+    const last = pts[pts.length - 1]
+    let d = `M ${startY >= 0 ? pts[0].x : pts[0].x} ${startY} L ${pts[0].x} ${pts[0].y}`
+    const r = Math.min(4, step / 3)
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i]
+      // 拐角用圆弧过渡（直角在 1.5px 细线上很生硬）
+      d += ` L ${a.x + (b.x > a.x ? -r : r)} ${a.y} Q ${a.x} ${a.y} ${a.x} ${a.y + r}`
+        + ` L ${a.x} ${b.y - r} Q ${a.x} ${b.y} ${a.x + (b.x > a.x ? r : -r)} ${b.y}`
+    }
+    // 收尾：在选中行心向右伸一小段，指进图标（与行内 elbow 的横线同一长度语义）
+    d += ` L ${last.x + step / 2 + 1} ${last.y}`
+    setPathD((prevD) => (prevD === d ? prevD : d))
+  })
+
   if (rows.length === 0) return null
 
   // 点行 = 把叙述区切到这个子智能体（它有自己的转录 / 用量 / TODO，像一个子会话）。
@@ -90,7 +140,13 @@ export const AgentTree = memo(function AgentTree({
   }
 
   return (
-    <div className={`agent-tree at-${variant}`} role="tree" aria-label={t('left.agents')}>
+    <div className={`agent-tree at-${variant}`} role="tree" aria-label={t('left.agents')} ref={treeRef}>
+      {/* 选中链：一条从会话行连到选中节点的折线（几何见上方 useLayoutEffect） */}
+      {pathD && (
+        <svg className="atree-path" aria-hidden="true">
+          <path className="atree-path-line" d={pathD} />
+        </svg>
+      )}
       {variant === 'center' && (
         <div className="atree-hd">
           <Bot size={13} />
@@ -102,7 +158,6 @@ export const AgentTree = memo(function AgentTree({
         const key = keys.get(n.id) ?? pathKeyOf(n)
         const hasKids = n.children.length > 0
         const isCollapsed = mine.has(key)
-        const onChain = litKeys.has(key)
         const running = n.status === 'running' || n.status === 'interrupting'
         const st = statusMeta(n.status, t)
         return (
@@ -115,16 +170,19 @@ export const AgentTree = memo(function AgentTree({
             aria-selected={focused?.nodeId === n.id}
             data-run={n.kind === 'agent' ? n.id : ''}
             data-task={n.taskId ?? ''}
+            ref={(el) => {
+              if (el) rowRefs.current.set(n.id, el)
+              else rowRefs.current.delete(n.id)
+            }}
             onClick={() => open(n)}
             title={n.label}
           >
             {/* 连线列：每层一个 guide（祖先还有后续兄弟则画竖线），最后一层画 ├ 或 └。
                 缩进量与行高都交给 CSS → 行高变化/拖宽都不需要重算几何。 */}
             {n.guides.map((on, i) => (
-              // 该行在选中链上 → 它的每一列 guide 都指向链上的祖先（见 focusedPathKeys），一并点亮
-              <span key={i} className={`atree-guide${on ? ' on' : ''}${on && onChain ? ' lit' : ''}`} aria-hidden="true" />
+              <span key={i} className={`atree-guide${on ? ' on' : ''}`} aria-hidden="true" />
             ))}
-            <span className={`atree-elbow${n.last ? ' last' : ''}${onChain ? ' lit' : ''}`} aria-hidden="true" />
+            <span className={`atree-elbow${n.last ? ' last' : ''}`} aria-hidden="true" />
             {hasKids ? (
               <button
                 className={`atree-chev${isCollapsed ? '' : ' open'}`}
