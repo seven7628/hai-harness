@@ -4,20 +4,21 @@ import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, SUBAGENT
 import { useT } from '../i18n'
 import { meshUUID, meshToken } from '../lib/meshRand'
 import { copyText } from '../lib/clipboard'
-import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, ImageIcon, PaletteIcon, PinIcon, SendIcon, SessionIcon, Sparkles, TerminalIcon } from './icons'
+import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, ImageIcon, PaletteIcon, PinIcon, SendIcon, SessionIcon, Smartphone, Sparkles, TerminalIcon } from './icons'
 import { BrowserSettingsEditor } from './BrowserSettingsEditor'
 import { ComputerSettingsEditor } from './ComputerSettingsEditor'
 import { IMSettingsEditor } from './IMSettingsEditor'
 import AppearanceTab from './AppearanceTab'
 import { MCPTab } from './MCPTab'
 import { HooksTab } from './HooksTab'
+import MobileTab from './MobileTab'
 import UsageStats from './UsageStats'
 import type { ProviderCfg, ProviderPreset, MeshSettings, AppSettings } from '../transport/types'
 import { getTransport } from '../transport'
 
 // 左侧导航分组（对齐设计稿：基础项 → 模型 → Agent 能力 → 数据与统计）。
 // 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不分组，顶部基础项）。
-type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'im' | 'mesh' | 'memory' | 'usage'
+type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'im' | 'mesh' | 'mobile' | 'memory' | 'usage'
 const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab; label: string; icon: ReactElement }[] }[] = [
   {
     id: 'base',
@@ -42,6 +43,7 @@ const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab;
       { key: 'plugin', label: 'settings.plugin', icon: <AccessIcon size={14} /> },
       { key: 'im', label: 'settings.im', icon: <SessionIcon size={14} /> },
       { key: 'mesh', label: 'settings.mesh', icon: <SendIcon size={14} /> },
+      { key: 'mobile', label: 'settings.mobile', icon: <Smartphone size={14} /> },
       { key: 'memory', label: 'settings.memory', icon: <PinIcon size={14} /> },
     ],
   },
@@ -116,6 +118,7 @@ export default function SettingsModal() {
           {tab === 'plugin' && <PluginTab />}
           {tab === 'im' && <IMTab />}
           {tab === 'mesh' && <MeshTab />}
+          {tab === 'mobile' && <MobileTab />}
           {tab === 'memory' && <MemoryTab />}
           {tab === 'usage' && <UsageStats />}
         </div>

@@ -137,6 +137,16 @@ const (
 
 	// —— 工作区/系统 ——
 	CmdWorkspaceList   Command = "workspace_list"
+	CmdWorkspaceAdd    Command = "workspace_add"
+	CmdWorkspaceRemove Command = "workspace_remove"
+	// CmdWorkspaceSync 渲染进程首次迁移：把 localStorage 的旧项目列表灌进
+	// ~/.go-code/workspaces.json（只增不减，避免覆盖手机刚加的工作区）。
+	CmdWorkspaceSync Command = "workspace_sync"
+
+	// —— 手机端接入（见 mobile_server.go）——
+	CmdAnswerQuestion  Command = "answer_question"
+	CmdMobileStatus    Command = "mobile_status"
+	CmdMobileRevoke    Command = "mobile_revoke"
 	CmdDeleteWorkspace Command = "delete_workspace"
 	CmdShutdown        Command = "shutdown"
 	CmdMetrics         Command = "metrics"

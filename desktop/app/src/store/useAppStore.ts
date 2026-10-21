@@ -297,6 +297,22 @@ export interface MCPLayerInfo {
   updated_at?: string
 }
 
+// 手机端连接（SettingsModal 手机 tab；bridge mobile_status 返回）
+export interface MobileDeviceInfo {
+  id: string
+  name: string
+  created_at: number
+  last_seen?: number
+}
+
+export interface MobileStatus {
+  enabled: boolean
+  addr?: string
+  code?: string
+  expires?: number
+  devices?: MobileDeviceInfo[]
+}
+
 // —— MCP / 钩子 设置面板（全局 × 项目两级；契约见 docs/MCP_HOOKS_SETTINGS_PANEL_2026-09-21.md）——
 
 // 某项目的一个 MCP 配置层文件状态（bridge mcp_projects.layers；仅项目两层，低 → 高）。
@@ -2609,6 +2625,7 @@ interface AppState {
   marketSkills?: MarketSkill[] // 远程市场浏览结果（skill_browse；SkillsPage 市场区块）
   markets: MarketInfo[] // 已保存市场（market_list；SkillsPage 市场管理）
   mcpServers: MCPServerInfo[] // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
+  mobileStatus?: MobileStatus // 手机连接面板（mobile_status；SettingsModal 手机 tab）
   mcpLayers: MCPLayerInfo[] // 配置层状态（mcp_list.layers；项目维度查看 + 损坏恢复可见）
   mcpSaving: boolean // MCP 配置保存中（mcpSave + mcp_set 热应用）
   // 项目级 MCP 汇总（bridge mcp_projects；MCP 页「项目」区数据源）。
@@ -2751,6 +2768,8 @@ interface AppState {
   removeMarket(url: string): void // 移除市场（market_remove）
   updateMarketSkills(url: string): void // 按市场更新该市场全部已装技能（skill_update_market）
   fetchMCPServers(): void // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
+  fetchMobileStatus(): void // 手机连接面板（mobile_status：端口/配对码/设备）
+  revokeMobileDevice(deviceId: string): void // 撤销一台已配对手机（mobile_revoke）
   saveMCP(servers: Record<string, MCPServerCfg>): Promise<{ ok: boolean; error?: string }> // 持久化（mcpSave）+ 热应用（mcp_set）
   refreshMCP(name: string): void // 强制重连单个服务器（mcp_refresh）
   // 项目级 MCP（MCP 页「项目」区）：按前端项目列表汇总 / 保存某项目的项目层配置
@@ -3167,6 +3186,13 @@ function abortSkeleton(): void {
     skeletonMinShowTimer = undefined
   }
   useAppStore.setState({ skeleton: { phase: 'idle', at: 0 } })
+}
+
+// syncWorkspacesToBridge 把桌面的项目列表灌进 bridge（只增不减）。
+// 首次启动 = 迁移 localStorage；之后 bridge 是桌面与手机共用的真相源。
+function syncWorkspacesToBridge(paths: string[]): void {
+  const list = paths.filter(Boolean)
+  if (list.length) send({ type: 'workspace_sync', payload: { paths: list } })
 }
 
 function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void): number {
@@ -4603,6 +4629,16 @@ export function dispatchEvent(raw: AnyEvent): void {
       if (t === 'mcp_list') {
         if (Array.isArray(d.servers)) setState({ mcpServers: d.servers as MCPServerInfo[], mcpSaving: false })
         setState({ mcpLayers: Array.isArray(d.layers) ? (d.layers as MCPLayerInfo[]) : [] })
+        break
+      }
+      // mobile_status：手机连接面板（端口 + 配对码 + 已配对设备）
+      if (t === 'mobile_status') {
+        setState({ mobileStatus: d as unknown as MobileStatus })
+        break
+      }
+      // mobile_revoke：撤销成功后重拉清单（配对码不变）
+      if (t === 'mobile_revoke') {
+        send({ type: 'mobile_status', payload: {} })
         break
       }
       // cron_list：定时任务清单 + 开关态（CronPage 数据源）
@@ -7126,6 +7162,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   externalSkillsImported: undefined,
   markets: [],
   mcpServers: [],
+  mobileStatus: undefined,
   mcpLayers: [],
   mcpSaving: false,
   mcpProjects: [],
@@ -7259,6 +7296,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     booting = false
     set({ bridgeStatus: 'running' })
+    // 工作区清单上移（手机端要看到与桌面相同的列表）：localStorage 只是缓存，
+    // bridge 的 ~/.go-code/workspaces.json 才是真相源。只增不减，见 workspace_registry.go。
+    syncWorkspacesToBridge(get().projects.map((p) => p.path))
     // 启动即自动加载当前工作区 .agents/skills + .go-code/skills 技能清单（SkillsPage / 斜杠命令补全数据源；
     // 避免用户必须先进 Skills 页才会拉取技能列表）。
     get().fetchSkills()
@@ -7351,6 +7391,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       sessions: existing ? existing.sessions : [],
     })
     persistProjects(get())
+    send({ type: 'workspace_add', payload: { path } })
     send({ type: 'list', payload: { workspace: path } })
     // 自动加载对应工作目录内 .agents/skills + .go-code/skills。
     // 同时带 session_id（若有活跃会话）：切工作区后技能面板也要按当前模型给能力面。
@@ -8324,6 +8365,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // MCP（SettingsModal MCP tab）：清单/保存（持久化 + 热应用）/刷新
   fetchMCPServers: () => send({ type: 'mcp_list', payload: {} }),
+  fetchMobileStatus: () => {
+    set({ mobileStatus: get().mobileStatus }) // 保留旧值，避免刷新时面板闪空
+    send({ type: 'mobile_status', payload: {} })
+  },
+  revokeMobileDevice: (deviceId) => send({ type: 'mobile_revoke', payload: { device_id: deviceId } }),
   saveMCP: async (servers: Record<string, MCPServerCfg>) => {
     set({ mcpSaving: true })
     const r = await transport.mcpSave(servers) // Electron 写 settings.json mcpServers 段
