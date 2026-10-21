@@ -1657,58 +1657,66 @@ func (m *manager) dispatch(c command) {
 					metaOK = false
 				}
 			}
-			if metaOK {
-				{
-					// 进程内 reducer 已 hydrate（create 时 Restore + NormalizeForRestore）；
-					// 响应使用同一归一化快照，保证响应与进程内状态一致。
-					//
-					// blocks_limit（payload，可选）：只返回最近 N 个 block，其余按需分页。
-					//
-					// 为什么默认关闭：旧 UI 拿到的是完整 blocks，**没有「加载更早」入口**，
-					// 一旦默认截断就会「历史消息看不到」——正是用户明确的红线。
-					// 因此只有 UI 显式传 blocks_limit 才走截断投影，并把游标一并带回。
-					//
-					// 实测（2026-10-20，22269 块）：全量 Marshal 138ms / 67MB；
-					// 尾部 200 块只需序列化 200 块，传输量降到 KB 级。
-					tailLimit := int(floatNum(c.Payload, "blocks_limit", 0))
-					if tailLimit > 0 {
-						pv, merr := bs.reducer.MarshalTail(tailLimit)
-						if merr == nil {
-							respData["restored"] = "checkpoint"
-							respData["checkpoint_version"] = checkpointSchemaVersion
-							respData["revision"] = meta.Revision
-							respData["reducer_seq"] = meta.ReducerSeq
-							respData["clear_generation"] = meta.ClearGeneration
-							respData["degraded"] = bs.reducer.IsDegraded()
-							respData["view_checkpoint"] = json.RawMessage(pv.View)
-							// 游标与总量：UI 据此显示「加载更早」并按 blocks_cursor 翻页。
-							respData["blocks_cursor"] = pv.Cursor
-							respData["blocks_total"] = pv.Total
-							respData["blocks_has_more"] = pv.HasMore
-							// 窗口外的子智能体/任务卡片（树的数据源，见 PartialView.Agents）。
-							// 与 blocks 分开带：它们不进对话流（那是历史里的卡片，混进
-							// 首屏会让会话开头凭空多几张旧卡），只供左栏树 + 打开子会话。
-							if len(pv.Agents) > 0 {
-								if raw, aerr := json.Marshal(pv.Agents); aerr == nil {
-									respData["agents"] = json.RawMessage(raw)
-								}
-							}
-							m.resp(c, true, "", respData)
-							return
-						}
-					}
-					if viewRaw, merr := bs.reducer.Marshal(); merr == nil {
+			// blocks_limit（payload，可选）：只返回最近 N 个 block，其余按需分页。
+			//
+			// 为什么默认关闭：旧 UI 拿到的是完整 blocks，**没有「加载更早」入口**，
+			// 一旦默认截断就会「历史消息看不到」——正是用户明确的红线。
+			// 因此只有 UI 显式传 blocks_limit 才走截断投影，并把游标一并带回。
+			//
+			// 实测（2026-10-20，22269 块）：全量 Marshal 138ms / 67MB；
+			// 尾部 200 块只需序列化 200 块，传输量降到 KB 级。
+			tailLimit := int(floatNum(c.Payload, "blocks_limit", 0))
+
+			// respondView 用「尾部投影优先」的规则回 checkpoint。
+			//
+			// 抽出来是为了让**自愈路径**和正常路径走同一套投影：刚修好的长会话
+			// （实测 2500+ 块）若一次吐全量，等于把分页优化在最需要它的时刻关掉 ——
+			// 而窗口外的子智能体卡片也必须照常由 agents 字段带回（否则树又空了）。
+			respondView := func(rev, seq, gen uint64) bool {
+				if tailLimit > 0 {
+					if pv, merr := bs.reducer.MarshalTail(tailLimit); merr == nil {
 						respData["restored"] = "checkpoint"
 						respData["checkpoint_version"] = checkpointSchemaVersion
-						respData["revision"] = meta.Revision
-						respData["reducer_seq"] = meta.ReducerSeq
-						respData["clear_generation"] = meta.ClearGeneration
+						respData["revision"] = rev
+						respData["reducer_seq"] = seq
+						respData["clear_generation"] = gen
 						respData["degraded"] = bs.reducer.IsDegraded()
-						respData["view_checkpoint"] = json.RawMessage(viewRaw)
-						respData["blocks_total"] = bs.reducer.BlockCount()
+						respData["view_checkpoint"] = json.RawMessage(pv.View)
+						// 游标与总量：UI 据此显示「加载更早」并按 blocks_cursor 翻页。
+						respData["blocks_cursor"] = pv.Cursor
+						respData["blocks_total"] = pv.Total
+						respData["blocks_has_more"] = pv.HasMore
+						// 窗口外的子智能体/任务卡片（树的数据源，见 PartialView.Agents）。
+						// 与 blocks 分开带：它们不进对话流（那是历史里的卡片，混进
+						// 首屏会让会话开头凭空多几张旧卡），只供左栏树 + 打开子会话。
+						if len(pv.Agents) > 0 {
+							if raw, aerr := json.Marshal(pv.Agents); aerr == nil {
+								respData["agents"] = json.RawMessage(raw)
+							}
+						}
 						m.resp(c, true, "", respData)
-						return
+						return true
 					}
+				}
+				if viewRaw, merr := bs.reducer.Marshal(); merr == nil {
+					respData["restored"] = "checkpoint"
+					respData["checkpoint_version"] = checkpointSchemaVersion
+					respData["revision"] = rev
+					respData["reducer_seq"] = seq
+					respData["clear_generation"] = gen
+					respData["degraded"] = bs.reducer.IsDegraded()
+					respData["view_checkpoint"] = json.RawMessage(viewRaw)
+					respData["blocks_total"] = bs.reducer.BlockCount()
+					m.resp(c, true, "", respData)
+					return true
+				}
+				return false
+			}
+			if metaOK {
+				// 进程内 reducer 已 hydrate（create 时 Restore + NormalizeForRestore）；
+				// 响应使用同一归一化快照，保证响应与进程内状态一致。
+				if respondView(meta.Revision, meta.ReducerSeq, meta.ClearGeneration) {
+					return
 				}
 			} else if noRecord || bs.recordCorrupt {
 				// 无 record / record 读不出来：懒迁移——读 events 重放生成 checkpoint。
@@ -1721,15 +1729,7 @@ func (m *manager) dispatch(c command) {
 				// 视图，也能重写一份自洽的 record。
 				if !wasLive && bs.migrateLegacyToCheckpoint() {
 					if rec2, rerr2 := bs.coord.Load(context.Background()); rerr2 == nil {
-						if viewRaw, merr := bs.reducer.Marshal(); merr == nil {
-							respData["restored"] = "checkpoint"
-							respData["checkpoint_version"] = checkpointSchemaVersion
-							respData["revision"] = rec2.Revision
-							respData["reducer_seq"] = rec2.ReducerSeq
-							respData["clear_generation"] = rec2.ClearGeneration
-							respData["degraded"] = bs.reducer.IsDegraded()
-							respData["view_checkpoint"] = json.RawMessage(viewRaw)
-							m.resp(c, true, "", respData)
+						if respondView(rec2.Revision, rec2.ReducerSeq, rec2.ClearGeneration) {
 							return
 						}
 					}
