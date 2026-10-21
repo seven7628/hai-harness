@@ -74,56 +74,77 @@ export const AgentTree = memo(function AgentTree({
     [roots, showAll, focused?.nodeId],
   )
   const rows = useMemo(() => flattenVisible(paged.roots, mine), [paged, mine])
-  // —— 选中链的连线：一条从**主会话行**一路画到选中节点的折线 ——
+  // —— 连线：静态骨架 + 选中链，都是量出几何后画的一条 SVG 折线 ——
   //
-  // 为什么不用「逐行点亮 guide」（旧做法）：guide 每层一列、每行只覆盖自己那一格，
-  // 于是同一列会由多行拼出来 —— 视觉上是并排的几条竖线（用户 2026-10：「这个关系效果
-  // 也不太美观」），而且它从**根节点**开始画，永远接不到上面的会话行。
+  // 为什么不用 CSS 伪元素逐行画（旧做法）：每行的 guide/elbow 只覆盖自己那一格，
+  // 同一列由多行拼出来 —— 视觉上是"梯子"（每行一个短横 + 一段竖线），用户 2026-10
+  // 连着两次说「不够丝滑」。参考设计的做法相反：**一条连续的细线**从会话行贯下来，
+  // 节点只是挂在它右边。
   //
-  // 现在按真实几何画一条路径：起点 = 会话行下沿（"从主 session 一直连过来"），
-  // 沿祖先各层的连线列向下，到祖先节点行心右折，最后进选中节点。选中的越靠下，
-  // 线就越长（用户明确要的效果）。坐标全部相对 .agent-tree 量一次，随折叠/分页/宽度变化
-  // 重算 —— 不用估算行高，行高本来就会随字号与皮肤变。
+  // 所以这里量一次真实几何，画两条路径：
+  //   · 静态骨架（faint）：会话行下沿 → 各层"父节点行心 → 最后一个可见子节点行心"的竖线
+  //   · 选中链（accent）：会话行下沿 → 沿祖先各层向下 → 行心右折 → 指进选中节点
+  // 行高随字号/皮肤变，几何必须是量的；折叠/分页/改宽都重算。
   const treeRef = useRef<HTMLDivElement | null>(null)
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
-  const [pathD, setPathD] = useState<string | null>(null)
+  const [lines, setLines] = useState<{ bone: string; sel: string | null } | null>(null)
   useLayoutEffect(() => {
     const el = treeRef.current
-    const target = focused ? pathOfNode(roots, focused.nodeId) : []
-    if (!el || target.length === 0) {
-      setPathD((prev) => (prev === null ? prev : null))
+    if (!el) {
+      setLines((prev) => (prev === null ? prev : null))
       return
     }
     const box = el.getBoundingClientRect()
     const step = parseFloat(getComputedStyle(el).getPropertyValue('--atree-step')) || 14
-    // 起点：紧邻的**会话行**下沿（tree 是会话行的兄弟节点，见 LeftPanel）。
-    // 量不到就贴住自身顶边 —— 宁可短一点，也不要悬空画到别处去。
+    // 第 d 层的连线列中心：前面有 d-1 个 guide 列，elbow 列宽 step-2。
+    // 子节点列与父节点这一列重合（子行比父行多一个 guide，正好补上这一步）。
+    const xOf = (depth: number) => (depth - 1) * step + step / 2
+    const yOf = (id: string) => {
+      const r = rowRefs.current.get(id)?.getBoundingClientRect()
+      return r ? r.top - box.top + r.height / 2 : null
+    }
     const prev = el.previousElementSibling as HTMLElement | null
     const startY = prev ? prev.getBoundingClientRect().bottom - box.top + 1 : -4
+
+    // 静态骨架：根层一条主线（会话行 → 最后一个根的行心）+ 每层"父 → 末子"的竖线
+    const bones: string[] = []
+    const rootRows = rows.filter((r) => r.depth === 1)
+    const lastRootY = rootRows.length ? yOf(rootRows[rootRows.length - 1].id) : null
+    if (lastRootY != null) bones.push(`M ${xOf(1)} ${startY} L ${xOf(1)} ${lastRootY}`)
+    for (const r of rows) {
+      if (!r.children.length) continue
+      const kids = r.children.filter((c) => rowRefs.current.has(c.id))
+      if (!kids.length) continue
+      const a = yOf(r.id)
+      const b = yOf(kids[kids.length - 1].id)
+      if (a == null || b == null) continue
+      bones.push(`M ${xOf(r.depth)} ${a} L ${xOf(r.depth)} ${b}`)
+    }
+
+    // 选中链：从会话行一路连到选中节点（选得越靠下，线越长）
+    let sel: string | null = null
+    const chain = focused ? pathOfNode(roots, focused.nodeId) : []
     const pts: Array<{ x: number; y: number }> = []
-    for (const n of target) {
-      const row = rowRefs.current.get(n.id)
-      if (!row) {
-        // 有祖先被折叠/分页挡住 → 没有可达的几何：撤掉旧线，别留一条接不上的残线
-        setPathD((prevD) => (prevD === null ? prevD : null))
-        return
+    for (const n of chain) {
+      const y = yOf(n.id)
+      if (y == null) break // 祖先被折叠/分页挡住 → 没有可达的几何，别画半条线
+      pts.push({ x: xOf(n.depth), y })
+    }
+    if (pts.length === chain.length && pts.length > 0) {
+      const r = Math.min(4, step / 3)
+      sel = `M ${pts[0].x} ${startY} L ${pts[0].x} ${pts[0].y}`
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i]
+        // 拐角用圆弧过渡（直角在 1.5px 细线上很生硬）
+        sel += ` L ${a.x + (b.x > a.x ? -r : r)} ${a.y} Q ${a.x} ${a.y} ${a.x} ${a.y + r}`
+          + ` L ${a.x} ${b.y - r} Q ${a.x} ${b.y} ${a.x + (b.x > a.x ? r : -r)} ${b.y}`
       }
-      const r = row.getBoundingClientRect()
-      // 该层连线列的**中心**：第 d 层前面有 d-1 个 guide 列，elbow 列宽 step-2
-      pts.push({ x: (n.depth - 1) * step + step / 2, y: r.top - box.top + r.height / 2 })
+      const last = pts[pts.length - 1]
+      // 收尾：在行心向右伸一小段，指进图标
+      sel += ` L ${last.x + step / 2 + 1} ${last.y}`
     }
-    const last = pts[pts.length - 1]
-    let d = `M ${startY >= 0 ? pts[0].x : pts[0].x} ${startY} L ${pts[0].x} ${pts[0].y}`
-    const r = Math.min(4, step / 3)
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1], b = pts[i]
-      // 拐角用圆弧过渡（直角在 1.5px 细线上很生硬）
-      d += ` L ${a.x + (b.x > a.x ? -r : r)} ${a.y} Q ${a.x} ${a.y} ${a.x} ${a.y + r}`
-        + ` L ${a.x} ${b.y - r} Q ${a.x} ${b.y} ${a.x + (b.x > a.x ? r : -r)} ${b.y}`
-    }
-    // 收尾：在选中行心向右伸一小段，指进图标（与行内 elbow 的横线同一长度语义）
-    d += ` L ${last.x + step / 2 + 1} ${last.y}`
-    setPathD((prevD) => (prevD === d ? prevD : d))
+    const next = { bone: bones.join(' '), sel }
+    setLines((prevLines) => (prevLines && prevLines.bone === next.bone && prevLines.sel === next.sel ? prevLines : next))
   })
 
   if (rows.length === 0) return null
@@ -141,10 +162,11 @@ export const AgentTree = memo(function AgentTree({
 
   return (
     <div className={`agent-tree at-${variant}`} role="tree" aria-label={t('left.agents')} ref={treeRef}>
-      {/* 选中链：一条从会话行连到选中节点的折线（几何见上方 useLayoutEffect） */}
-      {pathD && (
+      {/* 连线（几何见上方 useLayoutEffect）：静态骨架一条细线贯穿，选中链 accent 叠在上面 */}
+      {lines && (lines.bone || lines.sel) && (
         <svg className="atree-path" aria-hidden="true">
-          <path className="atree-path-line" d={pathD} />
+          {lines.bone && <path className="atree-path-bone" d={lines.bone} />}
+          {lines.sel && <path className="atree-path-line" d={lines.sel} />}
         </svg>
       )}
       {variant === 'center' && (
@@ -182,7 +204,19 @@ export const AgentTree = memo(function AgentTree({
             {n.guides.map((on, i) => (
               <span key={i} className={`atree-guide${on ? ' on' : ''}`} aria-hidden="true" />
             ))}
-            <span className={`atree-elbow${n.last ? ' last' : ''}`} aria-hidden="true" />
+            {/* 本层连线列：**节点标记画在这条线上**（参考设计的样子：一条贯通的细线 +
+                每行一个标记），而不是另起一列画状态点。标记自带一圈底色把线"打断"，
+                线与节点就融为一体了。 */}
+            <span className={`atree-elbow${n.last ? ' last' : ''}`} aria-hidden="true">
+              <span className={`atree-node st-${st.cls}${running ? ' running' : ''}`} />
+            </span>
+            {n.kind === 'task' ? <Clock size={11} /> : <Bot size={11} />}
+            <span className="atree-label">{n.label}</span>
+            {isCollapsed && hasKids && (
+              <span className="atree-more mono" title={t('left.agentsHidden').replace('{n}', String(subtreeSize(n) - 1))}>
+                +{subtreeSize(n) - 1}
+              </span>
+            )}
             {hasKids ? (
               <button
                 className={`atree-chev${isCollapsed ? '' : ' open'}`}
@@ -194,17 +228,7 @@ export const AgentTree = memo(function AgentTree({
               >
                 <ChevronDown size={11} />
               </button>
-            ) : (
-              <span className="atree-chev-sp" aria-hidden="true" />
-            )}
-            <span className={`atree-dot ${st.cls}${running ? ' running' : ''}`} aria-hidden="true" />
-            {n.kind === 'task' ? <Clock size={11} /> : <Bot size={11} />}
-            <span className="atree-label">{n.label}</span>
-            {isCollapsed && hasKids && (
-              <span className="atree-more mono" title={t('left.agentsHidden').replace('{n}', String(subtreeSize(n) - 1))}>
-                +{subtreeSize(n) - 1}
-              </span>
-            )}
+            ) : null}
             {variant === 'center' && (
               <>
                 <span className="atree-st mono">{st.label}</span>
