@@ -96,7 +96,9 @@ export default function AskUserQuestionPanel() {
 
   const submitAll = () => {
     if (!allAnswered) return // 有未答 → 不提交（按钮禁用兜底）
-    answerQuestion(items.map((it) => ({ question_id: it.id, answer: finalAnswer(it) })))
+    // 带上面板正在显示的**这批**的 batch id：主/子可能各有一批在等，
+    // 由面板（而非 store 里"最后到达那条"）决定回答发去哪一批。
+    answerQuestion(question.id, items.map((it) => ({ question_id: it.id, answer: finalAnswer(it) })))
   }
 
   // 预览锚：显示**用户当前选中**选项的预览；还没选时显示第一个带预览的选项

@@ -1,5 +1,7 @@
 import { useAppStore } from '../store/useAppStore'
-import type { Approval, PendingQuestion, SessionView, MsgBlock } from '../store/useAppStore'
+import type { SessionView, MsgBlock } from '../store/useAppStore'
+import { approvalsInScope, questionInScope } from '../lib/sessionScope'
+import type { ScopeSessionView } from '../lib/sessionScope'
 
 // 会话分域（2026-10）。
 //
@@ -8,10 +10,14 @@ import type { Approval, PendingQuestion, SessionView, MsgBlock } from '../store/
 // 就是子智能体的任务结果同样会回推到主智能体。」
 //
 // 于是「当前要看哪一份 HITL / 压缩」不是两条代码路径，而是**一个作用域判定**：
-//   · 看主会话 → runId 缺省（主 run 的事件不带 parent）
-//   · 看子会话 → 该子 agent 的 runId
+//   · 看主会话 → 显示所有**不属于任何子 run** 的条目
+//   · 看子会话 → 只显示那个子 agent 的条目
 // 两个面板（ApprovalPanel / AskUserQuestionPanel）与压缩镜像都走这里，判定只写一次 ——
 // 分开写必然出现「审批按子会话过滤、压缩忘了一起改」这种半对状态。
+//
+// **判定本体在 lib/sessionScope.ts**（纯函数、可单测）：这条规则的错误形态是
+// 「面板完全不出现」而类型上完全合法 —— 第一版按「run_id 有没有值」判主/子，结果把
+// 主 run 的 ask_user 和审批全过滤掉了（2026-10 真机报障）。这里只做 store 接线。
 //
 // **一个必须保留的例外**：审批队列在**后端是 Session 级单 FIFO**（主/子共用，
 // 见 session/approval.go —— 决策锚是调用 id，不是运行 id）。所以这里做的是**展示过滤**，
@@ -24,30 +30,26 @@ export function useScopeRunId(): string | undefined {
   return useAppStore((s) => s.focusedAgent?.runId)
 }
 
-/** 把审批队列过滤到当前作用域（保持后端 FIFO 顺序）。 */
-export function approvalsInScope(list: Approval[], scopeRunId?: string): Approval[] {
-  return list.filter((a) => (a.runId ?? '') === (scopeRunId ?? ''))
-}
-
-/** 待答问题是否属于当前作用域（ask_user 同样是 Session 级的单槽）。 */
-export function questionInScope(q: PendingQuestion | undefined, scopeRunId?: string): PendingQuestion | undefined {
-  if (!q) return undefined
-  return (q.runId ?? '') === (scopeRunId ?? '') ? q : undefined
+/** 当前活跃会话视图（作用域判定与压缩态都要读它）。 */
+function useScopeView(): ScopeSessionView | undefined {
+  return useAppStore((s) => (s.activeSessionId ? s.views[s.activeSessionId] : undefined))
 }
 
 /** 当前作用域的队首审批（undefined = 没有要你决定的事）。 */
-export function useScopedApproval(): Approval | undefined {
+export function useScopedApproval() {
   const list = useAppStore((s) => s.approvals)
+  const view = useScopeView()
   const scope = useScopeRunId()
   // 每次渲染都算一次过滤（列表通常 0~2 条，不值得引入浅比较 selector 的复杂度）
-  return approvalsInScope(list, scope)[0]
+  return approvalsInScope(view, list, scope)[0]
 }
 
-/** 当前作用域的待答问题。 */
-export function useScopedQuestion(): PendingQuestion | undefined {
-  const q = useAppStore((s) => s.question)
+/** 当前作用域的待答问题（多批并存 → 取该作用域里最早到达的那批）。 */
+export function useScopedQuestion() {
+  const list = useAppStore((s) => s.questions)
+  const view = useScopeView()
   const scope = useScopeRunId()
-  return questionInScope(q, scope)
+  return questionInScope(view, list, scope)
 }
 
 /**

@@ -7,6 +7,7 @@ import { TRACE_SPAN_TYPES } from './trace'
 import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
+import { looksSubRun } from '../lib/sessionScope'
 import { visualKindOf, isVisualPath } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
@@ -791,7 +792,14 @@ export interface SessionView {
   runningAgentCount: number // 本会话运行中的子 agent 数（agent_start/end 维护；右栏角标与 Agent tab 计数）
   thinkStartTs: Record<string, number> // 思考开始时刻（key = run_id，'' = 主 agent；首个 reasoning_chunk 记）
   turnThinkMs: Record<string, number> // 已结算的思考耗时（key = run_id；content_chunk 记，llm_end 并入每轮指标）
-  question?: PendingQuestion // 模型→用户提问（ask_user；一次性，回答/工具结束清除）
+  // questions 模型→用户提问（ask_user），**每个 run 一条**（锚 = batch id）。
+  //
+  // 为什么是数组而不是单槽（2026-10 真机验证发现）：ask_user 等待器在后端是 Session 级
+  // 单实例，但**可以同时有多批在等**（主 run 问一句 → 子 agent 也问一句）。单槽时后到的
+  // 直接覆盖先到的：主会话正在等你答的那批凭空消失，而子 agent 面板却显示着它自己的 ——
+  // 两边的"看得见"完全由到达顺序决定。
+  // 归属用 runId（事件里 tc.RunId），显示按作用域过滤（lib/sessionScope）。
+  questions: PendingQuestion[]
   release?: PendingRelease // 沙箱拦截放行确认（sandbox_blocked；随 bash 工具结束清除）
   pendingQueue: QueuedInput[] // 客户端暂存队列（未推送 / 已推送待确认；逐条可编辑，LLM End 时整队推送）
   rightExpanded: boolean // 右侧栏是否展开（会话级，切换会话各自恢复）
@@ -890,7 +898,7 @@ function emptyView(): SessionView {
     runningAgentCount: 0,
     thinkStartTs: {},
     turnThinkMs: {},
-    question: undefined,
+    questions: [],
     release: undefined,
     pendingQueue: [],
     rightExpanded: false,
@@ -943,7 +951,7 @@ function viewFields(nv: SessionView): Partial<AppState> {
     turnThinkMs: nv.turnThinkMs,
     lastLLMBlockId: nv.lastLLMBlockId,
     runningAgentCount: nv.runningAgentCount,
-    question: nv.question,
+    questions: nv.questions,
     release: nv.release,
     pendingQueue: nv.pendingQueue,
     rightExpanded: nv.rightExpanded,
@@ -1003,7 +1011,7 @@ function topViewFields(s: AppState): Partial<SessionView> {
     turnThinkMs: s.turnThinkMs,
     lastLLMBlockId: s.lastLLMBlockId,
     runningAgentCount: s.runningAgentCount,
-    question: s.question,
+    questions: s.questions,
     release: s.release,
     pendingQueue: s.pendingQueue,
     rightExpanded: s.rightExpanded,
@@ -2477,7 +2485,7 @@ interface AppState {
   //
   // 为什么字段名不叫 xlsxBusy：它从 2026-09 起覆盖三种格式，旧名会让后来者以为只跟 xlsx 相关。
   officeBusy?: string
-  question?: PendingQuestion // 模型→用户提问（ask_user；活跃会话镜像，弹提问 modal）
+  questions: PendingQuestion[] // 模型→用户提问（ask_user；活跃会话镜像，按 run 归属）
   release?: PendingRelease // 沙箱拦截放行确认（sandbox_blocked；活跃会话镜像，弹放行 modal）
 
   blocks: MsgBlock[]
@@ -2648,7 +2656,9 @@ interface AppState {
   removePending(id: number): void // 从暂存队列移除某条（推送前）
   flushPending(sid?: string): void // 把暂存队列整队一次性推送（ask_batch）；幂等（仅推送未推送项）
   approve(id: string, approve: boolean, editedArgs?: string): void
-  answerQuestion(answers: { question_id: string; answer: string }[]): void
+  // batchId 显式传入（不再从「当前那一条提问」推断）：主/子可能各有一批在等，
+  // 推断会把回答发错批次。见 SessionView.questions 的注释。
+  answerQuestion(batchId: string, answers: { question_id: string; answer: string }[]): void
   releaseSandbox(approve: boolean): void // 沙箱拦截放行决策（放行=该命令绕过沙箱重跑一次）
   promoteTask(taskId: string): void // 运行中长工具 → 后台任务（主 loop 立即拿占位继续；后台完成自动回传）
   interruptTask(taskId: string): void
@@ -3675,10 +3685,12 @@ function isAgentRun(v: SessionView, runId: string): boolean {
 // 审批/提示事件可能在子 Agent 卡片建立前到达（旧日志/事件重排时尤其如此）。
 // RunNode 仍保留父子关系，因此用它作为 SubAgent 归属的只读兜底；没有
 // run_id 的旧事件继续按主 Agent 处理。
+//
+// 判据本体在 lib/sessionScope.looksSubRun —— **必须只有一份**：HITL 面板的显示过滤
+// （看主会话时挡掉子 agent 的审批）与这里的事件归属走的都是它。两份判据漂移的后果是
+// 「审批卡片显示了、但面板按另一个口径把它过滤掉」，用户看到的就是「面板没弹出来」。
 export function isSubAgentRun(v: SessionView, runId: string): boolean {
-  if (!runId) return false
-  if (isAgentRun(v, runId)) return true
-  return v.runNodes.some((n) => n.kind === 'run' && n.id === runId && Boolean(n.parentId))
+  return looksSubRun(v, runId)
 }
 
 // 审批/提示归属的只读判定；view 缺失（尚未建立）时按主 Agent 处理。
@@ -5577,23 +5589,27 @@ export function dispatchEvent(raw: AnyEvent): void {
       const evTs = typeof raw.timestamp === 'string' ? Date.parse(raw.timestamp) : NaN
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
-        return setView(s, sid, {
-          ...v,
-          question: {
-            id: String(raw.id || ''),
-            runId: raw.run_id ? String(raw.run_id) : undefined,
-            timeoutMs,
-            // 提问时刻：优先事件时间戳（与后端计时同源），缺失时回退接收时刻
-            ts: Number.isFinite(evTs) ? evTs : Date.now(),
-            items: rawItems.map((it) => ({
-              id: String(it.id ?? ''),
-              question: String(it.question ?? ''),
-              // 选项兼容 {"label","preview"} 与纯字符串（历史事件/回放）——归一化在 lib 里
-              options: parseQuestionOptions(it.options),
-              multi: it.multi === true,
-            })),
-          },
-        })
+        const next: PendingQuestion = {
+          id: String(raw.id || ''),
+          runId: raw.run_id ? String(raw.run_id) : undefined,
+          timeoutMs,
+          // 提问时刻：优先事件时间戳（与后端计时同源），缺失时回退接收时刻
+          ts: Number.isFinite(evTs) ? evTs : Date.now(),
+          items: rawItems.map((it) => ({
+            id: String(it.id ?? ''),
+            question: String(it.question ?? ''),
+            // 选项兼容 {"label","preview"} 与纯字符串（历史事件/回放）——归一化在 lib 里
+            options: parseQuestionOptions(it.options),
+            multi: it.multi === true,
+          })),
+        }
+        // 按 batch id 去重（重放/重复投递），保留到达顺序 —— 不同 run 的提问**并存**：
+        // 主 run 在等你答的同时子 agent 也能问，两边各自显示（作用域过滤见 lib/sessionScope）。
+        const idx = v.questions.findIndex((q) => q.id === next.id)
+        const questions = idx >= 0
+          ? v.questions.map((q, i) => (i === idx ? next : q))
+          : [...v.questions, next]
+        return setView(s, sid, { ...v, questions })
       })
       break
     }
@@ -5728,8 +5744,10 @@ export function dispatchEvent(raw: AnyEvent): void {
             ? (raw.todos as TodoItem[])
             : v.todos,
           approvals: v.approvals.filter((a) => a.id !== toolId),
-          // ask_user 工具结束（回答/超时/打断）→ 清除提问（modal 关闭；避免超时后残留）
-          question: raw.name === 'ask_user' ? undefined : v.question,
+          // ask_user 工具结束（回答/超时/打断）→ 清除**该 run 的**提问（面板关闭；避免超时后残留）。
+          // 按 runId 清而不是全清：主 run 与子 agent 可能各有一批在等（见 SessionView.questions），
+          // 清空会让另一边的面板跟着消失。
+          questions: raw.name === 'ask_user' ? v.questions.filter((q) => (q.runId ?? '') !== (runId ?? '')) : v.questions,
           // bash 工具结束（放行/拒绝/超时均汇于此）→ 清除沙箱放行确认（modal 关闭）
           release: raw.name === 'bash' ? undefined : v.release,
           // computer_* 工具结束 → 清除「正在操作桌面」指示（只清同名，防跨工具误清）
@@ -6060,7 +6078,10 @@ export function dispatchEvent(raw: AnyEvent): void {
           streaming: !isSub ? false : v.streaming,
           aborted: aborted && !isSub ? true : v.aborted, // 主 run 中断置位：拦截后续残留 chunk
           approvals: aborted && !isSub ? [] : v.approvals,
-          question: aborted && !isSub ? undefined : v.question,
+          // abort → 只清**这个 run 自己**的提问（主/子各清各的）：
+          // 该 run 的工具已经中止，它的 ask_user 不可能再有人答；而别的 run 的提问
+          // 仍然有效（主 run 中断不代表子 agent 的提问失效，反之亦然）。
+          questions: aborted ? v.questions.filter((q) => (q.runId ?? '') !== id) : v.questions,
           release: aborted && !isSub ? undefined : v.release,
         })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
@@ -6431,7 +6452,7 @@ function finalizeReplayView(v: SessionView): SessionView {
     toolStartTs: {},
     thinkStartTs: {},
     turnThinkMs: {},
-    question: undefined,
+    questions: [],
     release: undefined,
     approvals: [],
     // 快照中 compress_start 无配套 compress_end（中断）→ 复位活动态，防右栏幽灵「压缩中」
@@ -7094,6 +7115,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   streaming: false,
   pendingQueue: [],
   runningAgentCount: 0,
+  questions: [],
   busySids: new Set<string>(),
   compressing: false,
   compressStartTs: undefined,
@@ -7682,15 +7704,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // 回答 ask_user 提问批次：乐观清除 modal + send answer_question（一次命令注入整批回答；
   // bridge 注入解阻工具；工具结束兜底清除）
-  answerQuestion: (answers) => {
-    const q = get().question
+  answerQuestion: (batchId, answers) => {
+    // 批次 id 由**面板**传（它知道自己在显示哪一批）：此前取 get().question（单槽）——
+    // 多批并存时会把回答发给"最后到达的那批"，用户看到的是 A、回答却进了 B。
     const sid = get().activeSessionId
-    if (!q || !sid || !answers.length) return
+    if (!batchId || !sid || !answers.length) return
     set((s) => {
       const v = s.views[sid] ?? emptyView()
-      return setView(s, sid, { ...v, question: undefined }, { question: undefined })
+      const questions = v.questions.filter((q) => q.id !== batchId)
+      return setView(s, sid, { ...v, questions }, { questions })
     })
-    send({ type: 'answer_question', payload: { session_id: sid, batch_id: q.id, answers } })
+    send({ type: 'answer_question', payload: { session_id: sid, batch_id: batchId, answers } })
   },
 
   // 把运行中的长工具调用摘离为后台任务（决策 #5：用户主动 promote 恒可用）：

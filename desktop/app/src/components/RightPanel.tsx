@@ -1564,9 +1564,9 @@ function BrowserTab({ toolbarHidden, onToggleTabs, panelVisible, activePageId, m
   const inSkills = useAppStore((s) => s.inSkills)
   const inCron = useAppStore((s) => s.inCron)
   const showNewWsModal = useAppStore((s) => s.showNewWsModal)
-  const askQuestion = useAppStore((s) => s.question)
+  const askQuestion = useAppStore((s) => s.questions.length > 0)
   const askRelease = useAppStore((s) => s.release)
-  const uiModalOpen = inSettings || inSkills || inCron || showNewWsModal || !!askQuestion || !!askRelease
+  const uiModalOpen = inSettings || inSkills || inCron || showNewWsModal || askQuestion || !!askRelease
 
   // —— M5/M6：工具条 / AI 动作可视化 / 回退可见化 状态（embed 事件由 store 层全局订阅）——
   const nav = useAppStore((s) => s.embedNav)
