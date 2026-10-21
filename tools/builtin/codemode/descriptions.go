@@ -111,6 +111,11 @@ const DESCRIPTION_INTRO = `Run JavaScript that calls other tools: chain them, lo
 calls concurrently, and filter large results down to what you need instead of issuing
 many separate tool calls.
 
+Reach for this only when the step is a script. One tool call is not a script: a shell
+step belongs in ONE bash call (commands joined with &&, loops, heredocs), a file read
+belongs in read_file. A single-call script only adds a process spawn and returns the same
+result as JSON instead of text.
+
 Pass raw JavaScript source - not JSON, not a quoted string, not a markdown code fence.
 Top-level "await" and "return" work, and the value you return becomes this tool's result.
 
@@ -141,8 +146,9 @@ Helpers:
   256 KiB of JSON and the whole store to 1 MiB; exceeding either fails the call. Use
   store(key, undefined) to delete a key. Writes are kept only when the script finishes
   successfully - a failed script discards all of its writes.
-- searchTools(query) and describeTool(name) find tools that are not listed below, so this
-  catalog is never the complete list of what you can call.
+- await searchTools(query) and await describeTool(name) find tools that are not listed
+  below, so this catalog is never the complete list of what you can call. Both are async:
+  an un-awaited call hands you a pending Promise, not a result.
 
 Isolation: the script runs in its own process with an allowlisted environment and enforced
 quotas (memory, wall clock, output size). The supported way to reach anything outside that

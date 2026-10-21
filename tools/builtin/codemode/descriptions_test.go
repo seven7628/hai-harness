@@ -37,6 +37,10 @@ func TestDescriptionIntroContract(t *testing.T) {
 		{"store 限额", "256 KiB of JSON and the whole store to 1 MiB"},
 		{"仅成功脚本保留写入", "Writes are kept only when the script finishes"},
 		{"deferred 现查", "searchTools(query)"},
+		{"helpers 是 async，须 await", "await searchTools(query)"},
+		// 与 bash 的分工判据：没有这句，模型会把单条 bash 命令包进脚本（实测 187 次
+		// codemode 调用里 39 次脚本里只有一个 tools.bash —— 纯开销），见 REVIEW 讨论。
+		{"单调用不算脚本", "One tool call is not a script"},
 		{"双键（raw 名）", `tools["mcp__some-server__some-tool"](args)`},
 		{"说实话的隔离承诺", "its own process with an allowlisted environment"},
 	}
