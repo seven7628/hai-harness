@@ -19,6 +19,7 @@ import { isCsvPath } from '../lib/csv'
 import { baseDirFor } from '../lib/localAsset'
 import { visualKindOf } from '../lib/visualFile'
 import { copyText } from '../lib/clipboard'
+import { withAgentToolBlocks } from '../lib/agentSession'
 import { useT } from '../i18n'
 import TodoPanel from './TodoPanel'
 import { useFocusTodos } from './useFocusTodos'
@@ -980,7 +981,15 @@ function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
   const panelRef = useRef<HTMLDivElement>(null)
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const highlightTimer = useRef<number | undefined>(undefined)
-  const activities = useMemo(() => aggregateFileActivity(blocks, files), [blocks, files])
+  // 子智能体的工具调用同样要进文件活动（用户 2026-10 报障：子会话里点 write/edit 的路径
+  // 「查看变更」与主会话不一致）。
+  //
+  // 机制：文件面板按 toolId 找 operation 来定位本次变更（见 FilePreviewTab 的
+  // item.operations.find(op => op.toolId === selectedTool)）。而子运行的转录不在
+  // v.blocks 里 —— 它在 agent 卡片的 items 上。只喂 v.blocks 的话，子会话里点开文件
+  // 找不到那条调用，只能退回「最终文件」，看起来就像"主会话能看变更、子会话不能"。
+  const blocksWithSubTools = useMemo(() => withAgentToolBlocks(blocks), [blocks])
+  const activities = useMemo(() => aggregateFileActivity(blocksWithSubTools, files), [blocksWithSubTools, files])
   const changed = useMemo(() => activities.filter((f) => f.changed), [activities])
   const readOnly = useMemo(() => activities.filter((f) => !f.changed), [activities])
   const visibleGroups = filter === 'changed'

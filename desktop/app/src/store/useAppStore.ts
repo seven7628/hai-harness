@@ -6043,6 +6043,12 @@ export function dispatchEvent(raw: AnyEvent): void {
       // llm_end 累加的近似值。异步子 agent 随后还有 task_end（同源同值，幂等覆盖）；
       // **同步子 agent（in-loop，非后台任务）没有 task_end** —— 这里是它唯一的权威来源。
       const runUsage = taskUsageFromEvent(raw.usage as RawUsage | undefined)
+      // 本轮产出（AgentEnd.Artifacts）：**子运行的产出归它的卡片**（Go 侧 view_reducer
+      // applyAgentEndLocked 是同一判定）。此前这里只落 status/用量/耗时 —— 刷新后
+      // （checkpoint 里带 artifacts）能看到产出，运行中反而看不到，用户报障
+      // 「子智能体里没有 artifacts」。主 run 的产出仍走独立的 artifacts 块（下方）。
+      const endArtifacts = pickArtifacts(raw.artifacts)
+      const endArtifactsTruncated = raw.artifacts_truncated === true
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         // 主 run（无 agent 卡片）abort = 用户中断：复位流式态让发送钮恢复、叙述追加
@@ -6091,6 +6097,9 @@ export function dispatchEvent(raw: AnyEvent): void {
                   // 终态清理：中断/完成时 if llm_end 未到，retry 徽章不得残留成矛盾展示
                   retrying: false,
                   retryMessage: undefined,
+                  // 产出清单：卡片尾部 / 子会话 footer 的 ArtifactCard 就靠它
+                  ...(endArtifacts ? { artifacts: endArtifacts } : {}),
+                  ...(endArtifacts && endArtifactsTruncated ? { artifactsTruncated: true } : {}),
                 }
               : aborted && !isSub && b.kind === 'tool' && b.status === 'running'
                 ? { ...b, status: 'done' as const }

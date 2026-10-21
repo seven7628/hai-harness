@@ -5,7 +5,6 @@ import { agentTreeFromView, pathOfNode } from '../lib/agentTree'
 import type { AgentTreeNode } from '../lib/agentTree'
 import { agentItemsToBlocks } from '../lib/agentSession'
 import { TaskResultInline } from './NarrativeBlocks'
-import { ArtifactCard } from './ArtifactCard'
 import Narrative from './Narrative'
 import type { NarrativeSource } from './Narrative'
 import { ElapsedTimer } from './ElapsedTimer'
@@ -99,10 +98,25 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   const node = chain[chain.length - 1]
   // 数据源：agent 卡的活动记录 → 会话块。后台工具任务没有 items，就把它那一个工具块
   // 直接交给 Narrative（走主对话同一套 ToolRow/ToolGroup 渲染，而不是右栏那套展开体）。
-  const subBlocks = useMemo(
-    () => (card ? agentItemsToBlocks(card.items) : toolBlock ? [toolBlock] : []),
-    [card, toolBlock],
-  )
+  const subBlocks = useMemo(() => {
+    if (!card) return toolBlock ? [toolBlock] : []
+    const blocks = agentItemsToBlocks(card.items)
+    // 产出 / 任务结果：走**主会话的同一批渲染块**（Narrative 的 artifacts / task_result 分支），
+    // 而不是卡片内的 .ac-artifacts / TaskResultInline。
+    //
+    // 后者是「卡片内附件」的形态：带 border-top 与卡片内的边距，放进叙述区会明显矮一截、
+    // 贴不住正文 —— 用户 2026-10 报障「子智能体里没有 artifacts」，除了数据没挂上卡片，
+    // 另一层就是它长得不像主会话那张产出卡。
+    //
+    // id 用远离 agentItemsToBlocks 的负数区间（那边从 -1 递减），避免 React key 撞车。
+    if (card.artifacts && card.artifacts.length > 0) {
+      blocks.push({
+        kind: 'artifacts', id: -1_000_000, items: card.artifacts,
+        ...(card.artifactsTruncated ? { truncated: true } : {}),
+      })
+    }
+    return blocks
+  }, [card, toolBlock])
 
   if (!node) return <div className="empty">{t('agentTree.gone')}</div>
   const running = node.status === 'running' || node.status === 'interrupting'
@@ -186,17 +200,10 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     </div>
   )
 
-  // 末行：任务结果 + 本轮产出。主会话里这两块渲染在子智能体**卡内**（TaskResultInline /
-  // ArtifactCard），子会话没有卡壳 → 用 footer 插槽放同一批组件，两处仍是同一份实现。
-  const footer = card && (card.taskResult || card.taskError || (card.artifacts && card.artifacts.length > 0)) ? (
-    <>
-      {card.artifacts && card.artifacts.length > 0 && (
-        <div className="ac-artifacts">
-          <ArtifactCard items={card.artifacts} {...(card.artifactsTruncated ? { truncated: true } : {})} />
-        </div>
-      )}
-      <TaskResultInline delivered={card.deliveredToMain} result={card.taskResult} error={card.taskError} />
-    </>
+  // 末行：任务结果。用卡片内同一个 TaskResultInline —— 它是 Markdown 正文（.md），
+  // 与主会话里那张卡的结果区完全同一份实现；产出走上方的 artifacts 块（叙述区形态）。
+  const footer = card && (card.taskResult || card.taskError) ? (
+    <TaskResultInline delivered={card.deliveredToMain} result={card.taskResult} error={card.taskError} />
   ) : undefined
 
   return <Narrative source={source} header={header} footer={footer} />

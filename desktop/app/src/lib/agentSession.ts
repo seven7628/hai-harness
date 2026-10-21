@@ -109,3 +109,33 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
   }
   return out
 }
+
+/**
+ * withAgentToolBlocks 把「子智能体转录里的工具调用」并进会话级块列表。
+ *
+ * 为什么需要：会话级聚合只看 v.blocks（文件活动 / 变更定位就是如此），而子运行的
+ * 工具调用活在 agent 卡片的 items 上。少了它们，**子会话里点 write/edit 的路径
+ * 「查看变更」就找不到那次调用**，只能退回「最终文件」——用户看到的差异是
+ * 「主会话能看变更，子智能体点开看不到」（2026-10 报障）。
+ *
+ * 只并 tool 块：其它类型（assistant/thinking）进会话级聚合没有意义，白白放大列表。
+ */
+export function withAgentToolBlocks(blocks: readonly MsgBlock[]): MsgBlock[] {
+  const cards = blocks.filter((b): b is Extract<MsgBlock, { kind: 'agent' }> => b.kind === 'agent')
+  if (!cards.length) return blocks as MsgBlock[]
+  const extra: MsgBlock[] = []
+  for (const c of cards) {
+    // 按 items 数组缓存：流式期间 blocks 每个 chunk 都换新（调用方 useMemo 因此每次都跑），
+    // 而一张卡片的 items 只在它自己更新时换新。没有这层缓存，长会话里每来一个 chunk 都要
+    // 把全部卡片的 items（最多 50×N 条）重新映射一遍。
+    let tools = toolCache.get(c.items)
+    if (!tools) {
+      tools = agentItemsToBlocks(c.items).filter((b) => b.kind === 'tool')
+      toolCache.set(c.items, tools)
+    }
+    extra.push(...tools)
+  }
+  return extra.length ? [...blocks, ...extra] : (blocks as MsgBlock[])
+}
+
+const toolCache = new WeakMap<readonly AgentItem[], MsgBlock[]>()
