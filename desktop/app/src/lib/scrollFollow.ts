@@ -75,3 +75,16 @@ export function isExternalMoveUp(a: {
   if (a.max < a.prevMax) return false
   return a.top < a.expectedTop - EPS
 }
+
+/**
+ * 校准帧是否应该写 scrollTop。
+ *
+ * **不要求「高度刚变过」**：上一版要求 `max !== prevMax` 才钉底，于是「高度已
+ * 稳定、但位置是错的」永远修不回来 —— 刷新后停在半途就一直停着。用户报的
+ * 「刷新后不在最底部，在某个位置停住了」正是它。
+ *
+ * 跟随态下「在底部」是不变式，所以只要不在底部就对齐；不跟随时一帧都不写。
+ */
+export function shouldPinBottom(a: { follow: boolean; top: number; max: number }): boolean {
+  return a.follow && a.max > 0 && a.top !== a.max
+}

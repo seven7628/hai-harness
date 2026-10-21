@@ -10,7 +10,7 @@
 // 下面的断言就是这三条的可执行规格。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, FOLLOW_THRESHOLD } from './scrollFollow'
+import { decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, shouldPinBottom, FOLLOW_THRESHOLD } from './scrollFollow'
 
 // 便捷构造：容器高 500、内容高 3000 → max = 2500
 const MAX = 2500
@@ -97,4 +97,20 @@ test('组合：完整复现「上滑后流式继续」这条路径', () => {
     expectedTop = top
     assert.equal(top, MAX - 400, `第 ${i} 帧后位置必须原封不动`)
   }
+})
+
+test('④ 跟随态：高度没变但位置不对，也必须对齐底部（刷新后停在半途的成因）', () => {
+  // 上一版要求「高度刚变过」才钉底 → 进入后高度稳定但位置错时就永远不修
+  assert.equal(shouldPinBottom({ follow: true, top: 1000, max: 2500 }), true)
+  // 已经在底部 → 不写（避免每帧无意义的写入）
+  assert.equal(shouldPinBottom({ follow: true, top: 2500, max: 2500 }), false)
+})
+
+test('④ 不跟随时一帧都不写（用户在看历史）', () => {
+  assert.equal(shouldPinBottom({ follow: false, top: 0, max: 2500 }), false)
+  assert.equal(shouldPinBottom({ follow: false, top: 2500, max: 2500 }), false)
+})
+
+test('④ 空内容（max=0）不写，避免把 0 当成底部', () => {
+  assert.equal(shouldPinBottom({ follow: true, top: 0, max: 0 }), false)
 })

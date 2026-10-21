@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { useAppStore, genMsOf } from '../store/useAppStore'
-import { decideFollow, isExternalMoveUp, isUserScrollUp } from '../lib/scrollFollow'
+import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
@@ -646,27 +646,20 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    // 离开底部时只需标记「有新内容」，不必启动 tick（省一次 rAF 循环）。
+    // ## 校准循环**始终**运行（2026-10-21 修「刷新后停在某个位置不动」）
     //
-    // 但注意：tick 现在自己会通过 expectedTop 检测用户滚动并关闭跟随
-    //（见下方注释），所以这里是**优化**而非正确性前提 ——
-    // 即使 stickRef 因时序错误而仍为 true，tick 也会在下一帧自我纠正。
-    if (!stickRef.current) {
-      setFresh((f) => (blocks.length ? true : f))
-      return
-    }
-    // 历史铺开期间**不启动**校准循环（2026-10-21）。
+    // 之前这里有两处早退：`!stickRef.current` 直接 return、`revealStart > 0`
+    // 直接 return。它们让 tick「根本没启动」，而启动与否依赖 blocks/revealStart
+    // 的变化时机 —— 一旦某个时序下 effect 跑在 follow=true 之前、之后又不再变，
+    // 循环就永远不启动：内容继续长高，视图却停在原地不动。
+    // 这正是用户报的「刷新后不在最底部，在某个位置停住了」（能跑就会跟到底）。
     //
-    // 铺开是从尾部向上补块：每批都会让 scrollHeight 增长、且新块插在上方。
-    // 校准循环会把 scrollTop 钉到底部，与铺开+锚定补偿争夺同一个属性，
-    // 表现为每补一批就抖一下。铺开结束后 effect 因 revealCount 变化重跑，
-    // 校准循环自然接管（此时内容已完整，一次到底即可）。
-    if (revealStart > 0) {
-      // 铺开期间 tick 不运行，基准会失真 → 清空，铺开结束后重新同步
-      expectedTopRef.current = -1
-      lastMaxRef.current = -1
-      return
-    }
+    // 现在改为「循环常驻、每帧自己判断」：
+    //   · follow=true  → 高度变化就钉底；
+    //   · follow=false → 一帧不写，只做「外部改动」检测（用户上滑的兜底判据）。
+    // 代价是离开底部时每帧一次 scrollTop 读取，可忽略；换来的是不再有
+    // 「循环没启动」这个状态分支。
+    if (!stickRef.current && blocks.length) setFresh(true)
     let raf = 0
     // expectedTop：tick 上一次**自己**把 scrollTop 写成的值。
     //
@@ -688,7 +681,6 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
       raf = 0
       const max = el.scrollHeight - el.clientHeight
       const prevMax = lastMaxRef.current
-      const grew = max !== prevMax
       lastMaxRef.current = max
       // 外部改过 scrollTop → 用户移动了视图 → 立即停止跟随。
       //
@@ -710,26 +702,16 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
           setAway(true)
         }
       }
-      if (grew) {
-        // 内容高度变化 → 只有「用户意图贴底」时才跟随。
-        //
-        // ## 判据为什么必须是 autoscrollRef 而不是「距底部多远」
-        //
-        // 用户点出的本质矛盾（2026-10-21）：
-        //   · 没上划时，希望新内容把视图往上顶（跟随最新）；
-        //   · 上划之后，绝不希望被顶回去。
-        //
-        // 用「距离底部的像素差」做判据是错的：content-visibility 让离屏块
-        // 从 200px 估算高变成真实高，scrollHeight 每帧都在涨，
-        // 距离随时变化 —— 判据会抖动，用户的意图被淹没。
-        //
-        // 正确做法：**以用户最后一次亲手滚动的位置为唯一基准**（autoscrollRef）。
-        //   · 用户滚动后停在底部附近 → autoscroll=true  → 新内容顶上去（跟随）
-        //   · 用户滚动后离开底部       → autoscroll=false → 新内容只加长，不动视图
-        // 中间只有 tick 自己写入 scrollTop 时保持原值，不改变这个用户意图。
-        if (autoscrollRef.current && max > 0 && el.scrollTop !== max) {
-          setScrollTop(el, max)
-        }
+      // ## 只要「跟随 + 不在底部」就钉，不再要求高度刚变过（2026-10-21）
+      //
+      // 上一版是 `if (grew)` —— 只有 scrollHeight 变化才钉。于是「高度已稳定、
+      // 但位置是错的」这种状态永远修不回来：刷新后停在半途就一直停着，内容
+      // 长高前它不会再动一下。用户报的「不在最底部，在某个位置停住了」正是它。
+      //
+      // 去掉 grew 门槛为什么安全：跟随态下钉底是不变式（本来就该在底部），
+      // 而用户一旦上滑，外部改动判据会先把 autoscroll 置 false —— 不会抢跑。
+      if (shouldPinBottom({ follow: autoscrollRef.current, top: el.scrollTop, max })) {
+        setScrollTop(el, max)
       }
       // 无论有没有钉底，都记下「本帧结束时 top 应该是多少」，供下一帧比对。
       // 钉底分支里 top === max；未钉底时就是当前值（我们没动它）。
