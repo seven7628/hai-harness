@@ -49,6 +49,12 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
       })
       continue
     }
+    if (it.kind === 'user') {
+      // 子运行上下文里的一条消息（用户 / 模型 / 孙任务结果）。映射成主会话的 **user 块** ——
+      // 这样「我对它说的」和主会话里「我对主 agent 说的」长得一模一样，而不是任务结果那种卡。
+      out.push({ kind: 'user', id: id--, text: it.text, ...(it.startedAt != null ? { ts: it.startedAt } : {}) })
+      continue
+    }
     if (it.kind === 'text') {
       // 失败/超限提示（llm_error 挂在卡片上，不污染主叙述）：原样保留「红字提示」的语义。
       // 映射成主会话的 **system + tone:error** 块，而不是 assistant 正文 ——

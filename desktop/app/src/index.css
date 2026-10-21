@@ -11977,6 +11977,27 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .atree-row.st-error .atree-label { color: var(--crimson); }
 .atree-row.st-interrupted .atree-label,
 .atree-row.st-abandoned .atree-label { color: var(--text-3); }
+/* 子智能体转录里「人对它说的话」：一句人话，不是它的产出 —— 用低饱和底色与正文区分，
+   但仍在同一列（与主会话 .msg.user 同族，不同处只是它嵌在卡片/子会话内容流里）。 */
+.at-user {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 6px 0 10px;
+  padding: 4px 10px;
+  border-left: 2px solid var(--accent-border);
+  background: color-mix(in srgb, var(--accent-weak) 45%, transparent);
+  border-radius: 0 6px 6px 0;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.at-user-who {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.at-user-text { white-space: pre-wrap; }
+
 .atree-more {
   flex: 0 0 auto;
   font-size: 10px;

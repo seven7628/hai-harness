@@ -1517,6 +1517,8 @@ const zh: Record<string, string> = {
   'agentTree.composerToSub': '发给「{name}」—— 它自己的上下文（与 agent_send 同一条通道）',
   'agentTree.composerNoChannel': '这个子智能体没有独立收件箱（同步子智能体）—— 输入仍发给主会话',
   'agentTree.sendFailed': '发送失败：{err}（任务已结束的话需要恢复它才能继续）',
+  // 子智能体转录里「人对它说的话」（与主会话的 user 块同语义）
+  'agentItem.you': '你',
   'agentTree.backToMain': '返回主会话',
   'agentTree.gone': '该子智能体已不在当前会话中（可能已被清理）',
   'agentTree.noTranscript': '这个任务还没有可读的转录（后台工具任务的结果在右侧「任务」标签里）。',
@@ -2996,6 +2998,7 @@ const en: Record<string, string> = {
   'agentTree.composerToSub': 'Sending to "{name}" — its own context (same channel as agent_send)',
   'agentTree.composerNoChannel': 'This sub-agent has no inbox of its own (synchronous) — messages still go to the main session',
   'agentTree.sendFailed': 'Send failed: {err} (a finished task must be resumed before it can take messages)',
+  'agentItem.you': 'You',
   'agentTree.backToMain': 'Back to main session',
   'agentTree.gone': 'This sub-agent is no longer part of the session (it may have been pruned)',
   'agentTree.noTranscript': 'No readable transcript for this task (background tool results live in the right-hand Tasks tab).',

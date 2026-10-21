@@ -16,8 +16,12 @@ const (
 	// TaskPromotedType 运行中的工具/同步子 agent 已被摘离为后台任务（promote 成功时发出）。
 	TaskPromotedType EventType = "task_promoted"
 
-	AgentStartType            EventType = "agent_start"
-	AgentEndType              EventType = "agent_end"
+	AgentStartType EventType = "agent_start"
+	AgentEndType   EventType = "agent_end"
+	// AgentUserMessageType 有一条 user 消息被投入子运行上下文（见 AgentUserMessage）。
+	// 让子会话的转录里能看到「谁对它说了什么」—— 在此之前 agent_send 只往 inbox 投递，
+	// 宿主完全看不见，发完屏幕上什么都不显示。
+	AgentUserMessageType      EventType = "agent_user_message"
 	GoalAlignmentReminderType EventType = "goal_alignment_reminder"
 	// RunSilentEndType run 在**收尾轮无文本**时的自然结束（原判据为「全程无文本」，
 	// C9 2026-09-18 放宽；两种形态由 SawAssistantText 拆分，见 events.RunSilentEnd）。

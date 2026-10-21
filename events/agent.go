@@ -208,3 +208,38 @@ type TaskResultDelivered struct {
 }
 
 func (t *TaskResultDelivered) Type() EventType { return t.EventType }
+
+// AgentUserMessage 有一条**投向子运行上下文的 user 消息**（用户/模型/孙任务），
+// 在它被投入上下文的那一刻产生 —— 让子会话的转录里也能看到「谁对它说了什么」。
+//
+// ## 为什么必须有这个事件（用户 2026-10 的质疑）
+//
+// 用户原话：「子智能体发送消息，不能等同于主智能体吗？理论上就是不同的 session 管理，
+// 只不过子智能体的 session 有父级的 sessionId 而已」。这个判断是对的：子运行有自己的
+// 上下文、自己的转录、自己的历史；**用户对它说的话，就是它上下文里的一条 user 消息**，
+// 和主会话里用户说的话没有语义差别。
+//
+// 在此之前它没有事件：agent_send（无论来自用户还是模型）只是往 Task.inbox 投一条
+// core.Message，下一次 stop 轮被 Poll 消费进上下文 —— 宿主完全看不见。后果是
+// 「我在子会话里发了一句话，屏幕上什么都不显示」，发完只能等它下一轮回应才知道送达。
+//
+// ## 谁产生它
+//
+// subagent 的 Poll（所有投递源的唯一汇合点：用户 agent_send / 模型 agent_send 工具 /
+// 孙任务终态 task_result）。放在那一处而不是每个投递点上，才不会漏掉某一条通道。
+//
+// TaskId 是归属锚（子运行的后台任务 id），与 AgentStart.TaskId 同一个键 ——
+// 同步子智能体（in-loop，无 task_id）没有 inbox，因此不会有本事件。
+type AgentUserMessage struct {
+	TaskId string `json:"task_id"`
+	// Text 消息正文（多块内容拼接；图片等非文本块以占位说明表示）
+	Text string `json:"text"`
+	// Source 来源：user（用户在子会话里打字）/ agent（模型用 agent_send 工具）/
+	// child_task（孙任务终态结果投回本运行）。UI 用它在转录里区分「谁说的」。
+	Source    string    `json:"source,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+
+	EventType EventType `json:"event_type"`
+}
+
+func (e *AgentUserMessage) Type() EventType { return e.EventType }

@@ -417,6 +417,10 @@ const (
 	agentItemThinking    = "thinking"
 	agentItemTool        = "tool"
 	agentItemCompression = "compression"
+	// agentItemUser 子运行上下文里的一条 **user 消息**（用户/模型 agent_send、孙任务结果回投）。
+	// 出自 events.AgentUserMessage（在消息被投入上下文的那一刻发出）—— 子会话的转录因此
+	// 与主会话同构：user / assistant / tool / compression 四种块都有。
+	agentItemUser = "user"
 
 	runNodeKindRun  = "run"
 	runNodeKindTool = "tool"
@@ -1264,6 +1268,8 @@ func (r *ViewReducer) applyLocked(ev events.Event, meta EventMeta) {
 		r.applyAgentStartLocked(e)
 	case *events.AgentEnd:
 		r.applyAgentEndLocked(e)
+	case *events.AgentUserMessage:
+		r.applyAgentUserMessageLocked(e)
 	case *events.GoalAlignmentReminder:
 		r.flushChunkLocked()
 		text := "已注入目标一致性提醒"
@@ -2028,6 +2034,48 @@ func (r *ViewReducer) applyTaskPromotedLocked(e *events.TaskPromoted) {
 }
 
 // applyAgentStartLocked 建立主/子 run 节点与子 agent 卡片。
+// applyAgentUserMessageLocked 把一条投向子运行上下文的 user 消息记进它自己的转录。
+//
+// 归属锚是 **TaskId**（与 AgentStart.TaskId 同一个键）：同步子智能体（in-loop）没有
+// 后台任务 id，也就没有 inbox，因此不会有本事件 —— 那种情况下没有"对它单独说话"这条路。
+//
+// 找不到卡片（start 还没到 / 卡片已收敛）时**静默丢弃**：这条消息在子运行的上下文里
+// 仍然有效（它已经进了 LLM 请求），只是没有卡片可挂。为它凭空建一张卡片会让左栏树
+// 多出一个没有 run 的孤儿节点。
+func (r *ViewReducer) applyAgentUserMessageLocked(e *events.AgentUserMessage) {
+	r.flushChunkLocked()
+	if e.TaskId == "" {
+		return
+	}
+	for i := range r.blocks {
+		b := &r.blocks[i]
+		if b.Kind != blockKindAgent || b.TaskID != e.TaskId {
+			continue
+		}
+		text := strings.TrimSpace(e.Text)
+		if text == "" {
+			return
+		}
+		ts := e.Timestamp
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		b.Items = append(b.Items, AgentItem{
+			Kind:      agentItemUser,
+			Text:      text,
+			StartedAt: millis(ts),
+			// Source 不进 AgentItem 的展示字段（主会话的 user 块也没有"谁说的"），
+			// 仅用于日志/诊断时区分投递来源。
+		})
+		// 与被裁到上限的其它 item 一样：超出部分只在 journal 里（见 agentItemsLimit）。
+		if n := len(b.Items); n > agentItemsLimit {
+			b.Items = append([]AgentItem(nil), b.Items[n-agentItemsLimit:]...)
+			b.ItemsTrimmed += n - agentItemsLimit
+		}
+		return
+	}
+}
+
 func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 	r.flushChunkLocked()
 	key := "agent_start:" + e.RunId

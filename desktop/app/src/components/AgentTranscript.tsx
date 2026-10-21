@@ -70,6 +70,18 @@ export const AgentTranscript = memo(function AgentTranscript({
       )
       continue
     }
+    if (it.kind === 'user') {
+      // 有一条消息被投进了子运行的上下文（用户 agent_send / 模型 agent_send / 孙任务结果）。
+      // 卡内用与主对话 .msg.user 同族的紧凑行：它是**这条对话里的一句人话**，
+      // 不是子 agent 的产出，混在正文里会看不出是谁说的。
+      out.push(
+        <div className="at-user" key={`u${i}`}>
+          <span className="at-user-who mono">{t('agentItem.you')}</span>
+          <span className="at-user-text">{it.text}</span>
+        </div>,
+      )
+      continue
+    }
     out.push(<CompressionBlock key={`c${i}`} b={{ ...it, kind: 'compression', id: i }} />)
   }
   // 「加载更早的记录」放在转录**顶部**（历史是往上长的）。

@@ -397,12 +397,27 @@ func (t *Tool) runBackgroundInternal(ctx context.Context, tc *events.ToolContext
 		// 消息接收：Task.inbox → Poll drain（stop 轮消费；工具轮投递延迟到下个 stop 轮）
 		// inbox 携带完整 Message：agent_send 的 user 文本、孙任务终态的 task_result
 		// 块原样入上下文（后者与主会话同源，见 Task.inbox 注释）。
-		opts.Poll = func(context.Context) []core.Message {
+		opts.Poll = func(ctx context.Context) []core.Message {
 			var msgs []core.Message
 			for {
 				select {
 				case m := <-tk.inbox:
 					msgs = append(msgs, m)
+					// 这条消息**进了子运行的上下文** → 发事件让宿主的转录里出现它。
+					//
+					// 为什么在这里而不是各个投递点：inbox 是三条通道的唯一汇合处
+					// （用户 agent_send 命令 / 模型 agent_send 工具 / 孙任务终态
+					// task_result）。分开发必然漏一条，而漏的那条恰好会表现为
+					// 「我发的消息不见了」——用户 2026-10 报障的正是这个。
+					if handler != nil {
+						handler(ctx, &events.AgentUserMessage{
+							TaskId:    tk.ID,
+							Text:      inboxMessageText(m),
+							Source:    inboxMessageSource(m),
+							Timestamp: time.Now(),
+							EventType: events.AgentUserMessageType,
+						})
+					}
 				default:
 					return msgs
 				}
@@ -699,3 +714,42 @@ func (t *Tool) Usage() core.Usage {
 }
 
 func (t *Tool) AfterCall(context.Context, core.ToolCall) {}
+
+// inboxMessageText 从投递进 inbox 的 Message 里取可展示正文。
+//
+// 多块内容拼成一段（用户消息可能是「文本 + @引用」或纯图片）：文本块原样、图片块写成
+// 占位说明 —— 转录里需要「他说了什么」，而不是把 base64 铺满屏幕。
+func inboxMessageText(m core.Message) string {
+	var parts []string
+	for _, c := range m.Content {
+		switch c.Type {
+		case core.ContentTypeText:
+			if t := strings.TrimSpace(c.Content); t != "" {
+				parts = append(parts, t)
+			}
+		case "image":
+			parts = append(parts, "[图片]")
+		default:
+			if t := strings.TrimSpace(c.Content); t != "" {
+				parts = append(parts, t)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// inboxMessageSource 判断这条 inbox 消息「谁说的」：UI 据此在转录里区分
+// 用户（子会话输入框）/ 模型（agent_send 工具）/ 孙任务（终态结果回投）。
+//
+// 判据只有一件事可依：内容块的类型。孙任务结果以 task_result 类内容块投递
+// （见 Task.inbox 注释），其余都是 user 文本 —— user 与 agent 在 Message 层面
+// 不可区分（都是 User 角色、text 块），因此统一标 user：谁说的对用户判断
+// 「这条要不要我回」没有影响，而猜错来源会给出错误的归属。
+func inboxMessageSource(m core.Message) string {
+	for _, c := range m.Content {
+		if strings.Contains(c.Type, "task_result") {
+			return "child_task"
+		}
+	}
+	return "user"
+}

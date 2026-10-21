@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/seven7628/hai-harness/core"
+	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/subagent"
 )
 
@@ -94,5 +96,47 @@ func TestAgentSendCommand(t *testing.T) {
 	m.dispatch(cmd(5, "agent_send", map[string]any{"workspace": ws, "session_id": sid, "task_id": task.ID, "text": "还在吗"}))
 	if r := respOf(5); r == nil || r["ok"] != false || str(r, "code") != "task_finished" {
 		t.Fatalf("任务已结束应当回 task_finished: %+v", r)
+	}
+}
+
+// TestAgentSendShowsInTranscript 用户对子智能体说的话，必须出现在**它自己的转录**里。
+//
+// 用户 2026-10 的质疑：「子智能体发送消息，不能等同于主智能体吗？理论上就是不同的 session
+// 管理，只不过子智能体的 session 有父级的 sessionId 而已」。判断正确 —— 在它之前
+// agent_send 只往 Task.inbox 投一条 core.Message，宿主看不见，「我发了一句话，屏幕上
+// 什么都不显示」。现在由 subagent 的 Poll（所有投递源的唯一汇合点）发
+// events.AgentUserMessage → reducer 追加一条 user 项。
+//
+// 本测试钉住的是**数据链路**（事件 → 卡片 item）：Poll 的触发时机由子 loop 决定，
+// 这里直接投事件验证 reducer 侧，避免依赖真实 LLM 轮次。
+func TestAgentUserMessageEntersAgentTranscript(t *testing.T) {
+	r := NewViewReducer()
+	_ = r.ApplyPlain(&events.AgentStart{RunId: "sub-1", ParentRunId: "main-1", Depth: 1, TaskId: "task-1", Name: "auth 审查", Timestamp: time.Now(), EventType: events.AgentStartType})
+	_ = r.ApplyPlain(&events.AgentUserMessage{TaskId: "task-1", Text: "把返回 401 的分支也改掉", Source: "user", Timestamp: time.Now(), EventType: events.AgentUserMessageType})
+
+	var card *Block
+	for i := range r.blocks {
+		if r.blocks[i].Kind == blockKindAgent && r.blocks[i].TaskID == "task-1" {
+			card = &r.blocks[i]
+		}
+	}
+	if card == nil {
+		t.Fatal("agent 卡片不存在")
+	}
+	found := false
+	for _, it := range card.Items {
+		if it.Kind == agentItemUser && it.Text == "把返回 401 的分支也改掉" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("用户消息应当进子运行的转录（items=%+v）", card.Items)
+	}
+
+	// 未知任务：静默丢弃（消息已在上下文里，只是没有卡片可挂；不能凭空造孤儿卡片）
+	before := len(r.blocks)
+	_ = r.ApplyPlain(&events.AgentUserMessage{TaskId: "task-nope", Text: "hello", Timestamp: time.Now(), EventType: events.AgentUserMessageType})
+	if len(r.blocks) != before {
+		t.Fatalf("未知任务不得凭空建卡片，blocks %d → %d", before, len(r.blocks))
 	}
 }

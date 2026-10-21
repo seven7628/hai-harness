@@ -686,6 +686,9 @@ export type AgentItem =
   // todos：todo_* 工具项那一刻**该子 agent 自己**的清单快照（历史计划卡定格显示，
   // 语义与主对话工具块的 todos 同源，但归属是它自己的卡片，不是会话清单）
   | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[] }
+  // user 子运行上下文里的一条用户/模型消息（来源见 events.AgentUserMessage）。
+  // 它是**转录的一部分**（子会话里能看到「我对它说了什么」），不是任务结果。
+  | { kind: 'user'; text: string; startedAt?: number }
   | { kind: 'compression'; before: number; after: number; ctxTokens?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
 
 // PriceRefreshSummary refresh_prices 结果摘要（UI toast 用；字段对齐 bridge 响应）
@@ -3600,6 +3603,21 @@ function appendAgentStream(blocks: MsgBlock[], runId: string, kind: 'text' | 'th
   })
 }
 
+// appendAgentUser 把一条投向子运行上下文的消息记进它的转录（events.AgentUserMessage）。
+//
+// 归属锚是 **taskId**（不是 runId）：事件的产生点是 subagent 的 Poll，那里只知道后台任务
+// id；卡片同时带 taskId 与 runId，所以这里按 taskId 找。找不到就静默跳过 —— 消息本身
+// 已经进了子运行的上下文，只是没有卡片可挂。
+function appendAgentUser(blocks: MsgBlock[], taskId: string, text: string, ts?: number): MsgBlock[] {
+  const body = text.trim()
+  if (!taskId || !body) return blocks
+  return blocks.map((b) => {
+    if (b.kind !== 'agent' || b.taskId !== taskId) return b
+    const items = [...b.items, { kind: 'user' as const, text: body, ...(ts != null ? { startedAt: ts } : {}) }]
+    return { ...b, items }
+  })
+}
+
 type AgentCompressionItem = Extract<AgentItem, { kind: 'compression' }>
 
 // 子 agent 压缩活动按 run_id 原位更新：开始事件建立 active 项，结束事件
@@ -5000,6 +5018,22 @@ export function dispatchEvent(raw: AnyEvent): void {
           nv.blocks[idxT] = { ...ab, ttftMs: ab.ttftMs ?? nv.ttftMs }
         }
         return setView(s, sid, { ...nv, thinkStartTs })
+      })
+      break
+    }
+    case 'agent_user_message': {
+      // 有一条消息被投进子运行的上下文（用户 agent_send / 模型 agent_send / 孙任务结果）。
+      // 它属于**那个运行的转录**，所以渲染在它的会话视图里，而不是主会话叙述区。
+      const sid = getSid(raw, getState().activeSessionId)
+      const taskId = raw.task_id ? String(raw.task_id) : ''
+      const text = String(raw.text || '')
+      if (!taskId || !text.trim()) break
+      const ts = evTs(raw)
+      setState((s) => {
+        const v = s.views[sid] ?? emptyView()
+        const blocks = appendAgentUser(v.blocks, taskId, text, ts)
+        if (blocks === v.blocks) return s
+        return setView(s, sid, { ...v, blocks })
       })
       break
     }
