@@ -21,6 +21,11 @@ import { useT } from '../i18n'
 //     「你可以直接跟它说话」，而协议上没有这条路。
 //   · 停止/续跑等**动作**与任务卡同源（interrupt_task），不新开一套动作语义。
 //   · 顶部面包屑显示祖先链（父 → 子 → 孙）：递归场景下「我现在看的是哪一层」必须可判读。
+//   · **版式就是主会话页**（用户 2026-10 要求「样式复用主智能体页面样式，只不过多个
+//     返回主会话」）：内容容器直接复用 `.narrative`（同 800px 居中、同 padding、同
+//     scroll-anchor/scrollbar-gutter 规则）——**复用 class 而不是抄一遍数值**，否则主
+//     会话那边调一次这里就漂一次，而这类漂移只有肉眼能发现。头部因此也不再是「卡片头」
+//     （没有分隔线），它就是叙述区里的第一行元信息。
 export const AgentSessionView = memo(function AgentSessionView({ focus }: { focus: AgentFocus }) {
   // 树节点身份用于定位节点/祖先链；真实 runId 用于找卡片（两者不同，见 AgentFocus 注释）
   const { nodeId, runId } = focus
@@ -73,6 +78,10 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
 
   return (
     <div className="agent-session" role="region" aria-label={t('agentTree.subSession')}>
+      {/* 内容容器 = 主会话的 .narrative（同宽同内边距同滚动）。头部放在它**内部**：
+          在主会话页里，会话身份/用量这些就是叙述区顶部的一行元信息，不该另起一条
+          通栏的「卡片头」——那会让子会话页看起来像另一种页面。 */}
+      <div className="narrative as-body">
       {/* 面包屑 + 动作条：祖先链每一层都可点（递归场景下直接回到上游某一层） */}
       <div className="as-hd">
         <span className="as-icon" aria-hidden="true">{node.kind === 'task' ? <Clock size={14} /> : <Bot size={14} />}</span>
@@ -115,8 +124,6 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
         )}
         <button className="as-back" onClick={() => focusAgent(undefined)}>{t('agentTree.backToMain')}</button>
       </div>
-
-      <div className="as-body">
         {/* 这里**不再**放待办面板：待办归右栏顶部那一份（它跟随当前作用域 —— 看主会话
             是会话清单，看子会话是这个子 agent 自己的清单）。同一份清单在两处显示会让人
             怀疑「是不是两份不同的计划」。子 agent 的 todo_* 调用仍会在转录里渲染成计划卡

@@ -11981,6 +11981,27 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   border-radius: 8px;
   padding: 0 5px;
 }
+/* 「加载更早的子智能体」：根层分页（默认最近 5 个）之后的入口。
+   缩进与行对齐到 label 列（= 连线列宽度 + 肘 + 图标那一串），看起来像树的续行而不是
+   一个突兀的按钮；hover 才显形，静止时是低频操作，不该抢视线。 */
+.atree-more-btn {
+  align-self: flex-start;
+  margin: 2px 0 2px 0;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--text-3);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.atree-more-btn:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.atree-more-btn.less { color: var(--text-3); opacity: .8; }
+
 .atree-st {
   flex: 0 0 auto;
   font-size: 10px;
@@ -12015,15 +12036,18 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   min-height: 0;
   animation: fadeIn 160ms var(--ease);
 }
+/* 头部 = 叙述区里的第一行元信息（**不是**卡片头）：没有分隔线、没有整宽底色。
+   子会话页与主会话页同版式（用户 2026-10：样式复用主智能体页面，只多一个返回）。 */
 .agent-session .as-hd {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--border);
+  margin: 0 0 10px;
+  padding: 0;
   font-size: 12px;
   color: var(--text-3);
+  flex-wrap: wrap;
 }
 .agent-session .as-icon {
   display: grid;
@@ -12098,18 +12122,12 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   color: var(--text);
   border-color: var(--border-strong);
 }
+/* 内容容器同时带 .narrative（见 AgentSessionView）：宽度/居中/padding/滚动锚定
+   **全部**来自主会话那一份 —— 这里刻意一条布局值都不写。写任何一条都是第二份规格：
+   主会话那边调一次，这里就漂一次，而这种漂移只有肉眼能发现（用户要求「复用」而不是
+   「长得差不多」）。 */
 .agent-session .as-body {
-  flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  padding: 10px 14px 24px;
-}
-/* 子会话里的待办面板：不贴在右栏那种"面板头"，改成内容块（有内边距、圆角） */
-.agent-session .as-body .todo-panel {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 10px;
-  background: var(--surface);
 }
 .agent-session .as-placeholder {
   padding: 28px 4px;

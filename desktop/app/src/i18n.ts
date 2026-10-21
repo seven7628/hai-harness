@@ -222,6 +222,8 @@ const zh: Record<string, string> = {
   'left.agentsExpand': '展开该分支',
   'left.agentsCollapse': '折叠该分支',
   'left.agentsHidden': '该分支还有 {n} 个节点',
+  'left.agentsMore': '加载更早的子智能体（还有 {n} 个）',
+  'left.agentsLess': '收起更早的',
   'left.viewFilesIn': '查看文件（该工作区）',
   // —— 左栏文件浏览（目录切换 + 点击文件在右侧展示）——
   'files.aria': '工作区文件',
@@ -1738,6 +1740,8 @@ const en: Record<string, string> = {
   'left.agentsExpand': 'Expand branch',
   'left.agentsCollapse': 'Collapse branch',
   'left.agentsHidden': '{n} more node(s) in this branch',
+  'left.agentsMore': 'Load earlier sub-agents ({n} more)',
+  'left.agentsLess': 'Collapse earlier ones',
   'left.viewFilesIn': 'View files in this workspace',
   // —— Left-panel file browser (directory switching + open file on the right) ——
   'files.aria': 'Workspace files',

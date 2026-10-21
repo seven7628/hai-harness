@@ -65,9 +65,12 @@ export interface AgentTreeNode {
  *   2. 环（异常日志 / 重放的错序事件）→ 打断成根，绝不死循环；
  *   3. 同 id 重复（agent_start 重复投递 / task 与 agent 同 taskId）→ 只补字段，不新增。
  *
- * 排序：同层按 startedAt 升序（派发顺序），缺失时按输入顺序。
+ * 排序：同层按 startedAt **倒序**（最新的在前 —— 用户 2026-10 要求；子智能体是越派越多，
+ * 关心的是「刚刚派出去的那个」，从头往下翻越过一堆旧的没有意义）。时间戳缺失的一律垫底
+ * （它们最不可信，不能因为"没有时间"显示成最新）。
  */
-export function buildAgentTree(input: AgentTreeInput[]): AgentTreeNode[] {
+export function buildAgentTree(input: AgentTreeInput[], opts?: { order?: 'asc' | 'desc' }): AgentTreeNode[] {
+  const dir = opts?.order ?? 'desc'
   const nodes = new Map<string, AgentTreeNode>()
   const order: string[] = []
   for (const it of input) {
@@ -126,13 +129,21 @@ export function buildAgentTree(input: AgentTreeInput[]): AgentTreeNode[] {
     }
   }
 
-  // 同层排序（派发顺序）+ 深度/连线列
+  // 同层排序（见函数注释：默认倒序，最新在前）+ 深度/连线列
   const sortChildren = (list: AgentTreeNode[]) => {
     list.sort((a, b) => {
-      const sa = a.startedAt ?? Number.MAX_SAFE_INTEGER
-      const sb = b.startedAt ?? Number.MAX_SAFE_INTEGER
-      if (sa !== sb) return sa - sb
-      return order.indexOf(a.id) - order.indexOf(b.id)
+      // 时间戳缺失的**一律垫底**：先按「有没有」分组，再按方向比大小。
+      // 直接拿 MAX_SAFE_INTEGER 当缺省会在倒序时把它们顶到最前面（错得很隐蔽）。
+      const hasA = a.startedAt != null
+      const hasB = b.startedAt != null
+      if (hasA !== hasB) return hasA ? -1 : 1
+      if (hasA && hasB && a.startedAt !== b.startedAt) {
+        return dir === 'desc' ? b.startedAt! - a.startedAt! : a.startedAt! - b.startedAt!
+      }
+      // 时间戳相同 / 都缺失 → 按输入（派发）顺序，方向与排序方向一致
+      const ia = order.indexOf(a.id)
+      const ib = order.indexOf(b.id)
+      return dir === 'desc' ? ib - ia : ia - ib
     })
     for (let i = 0; i < list.length; i++) {
       const n = list[i]
@@ -195,6 +206,47 @@ export function flattenVisible(roots: AgentTreeNode[], collapsed: ReadonlySet<st
   }
   for (const r of roots) walk(r, '')
   return out
+}
+
+/**
+ * 根层默认显示几棵（用户 2026-10 要求：默认只加载最近 5 个，支持加载更多）。
+ *
+ * 为什么是「根层」而不是「整棵树最多 5 个」：折叠/展开与分页是两种不同的意图。
+ * 用户要的是「别一进来就被几十个历史子智能体淹掉」，而某个分支里点开的子节点
+ * 是他自己主动展开的，不该再被二次截断。
+ */
+export const DEFAULT_ROOT_PAGE = 5
+
+/** 该子树里有没有这个 id（分页时判断「聚焦节点藏在哪棵根下」）。 */
+function subtreeHasId(n: AgentTreeNode, id: string): boolean {
+  if (n.id === id) return true
+  for (const c of n.children) if (subtreeHasId(c, id)) return true
+  return false
+}
+
+/**
+ * pageRoots 根层分页（树已按倒序排好 = 最近的在前，所以「前 limit 棵」就是最近的那几个）。
+ *
+ * mustShowId（= 当前聚焦的节点）所在的那棵根**即使排在 limit 之外也必须显示** ——
+ * 这是分页与选中态的交叉点，也是最容易漏的一条：审批到达会自动聚焦到子会话
+ * （见 store 的 tool_approval_requested），若那棵根恰好被分页挡掉，左栏里就看不到
+ * 任何高亮，用户会以为「自动聚焦没生效」。
+ *
+ * 补进来的那棵**追加在末尾**（不插到它原本的时间位置）：把它插到中间会让"最近 5 个"
+ * 这个承诺失效 —— 用户看到的是 5 个最近的 + 1 个被选中但很旧的，位置分得开才不会误读。
+ */
+export function pageRoots(
+  roots: AgentTreeNode[],
+  limit: number,
+  opts?: { mustShowId?: string; showAll?: boolean },
+): { roots: AgentTreeNode[]; hidden: number } {
+  if (opts?.showAll || limit <= 0 || roots.length <= limit) return { roots, hidden: 0 }
+  const head = roots.slice(0, limit)
+  const id = opts?.mustShowId
+  if (!id || head.some((r) => subtreeHasId(r, id))) return { roots: head, hidden: roots.length - head.length }
+  const extra = roots.slice(limit).find((r) => subtreeHasId(r, id))
+  if (!extra) return { roots: head, hidden: roots.length - head.length }
+  return { roots: [...head, extra], hidden: roots.length - head.length - 1 }
 }
 
 /** countRunningNodes 树内「在跑」节点数（角标用；interrupting 也算在跑）。 */

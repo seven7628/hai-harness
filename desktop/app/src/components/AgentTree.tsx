@@ -1,7 +1,7 @@
 import { memo, useMemo, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import type { RunNode } from '../store/useAppStore'
-import { agentTreeFromView, flattenVisible, collectTreeKeys, focusedPathKeys, pathKeyOf, subtreeSize } from '../lib/agentTree'
+import { agentTreeFromView, flattenVisible, collectTreeKeys, focusedPathKeys, pathKeyOf, subtreeSize, pageRoots, DEFAULT_ROOT_PAGE } from '../lib/agentTree'
 import type { AgentTreeNode } from '../lib/agentTree'
 import { useT } from '../i18n'
 import { Bot, ChevronDown, Clock } from './icons'
@@ -16,8 +16,13 @@ import { Bot, ChevronDown, Clock } from './icons'
 // 一条竖线要跟着行高与缩进走；用 per-row 的 guide 列（见 lib/agentTree 的 guides）
 // 交给 CSS 画，滚动/换行/异高都自然对齐，也不需要测量。
 //
-// 交互：点行 = 打开该 agent 的转录（右栏任务 tab 定位）；▸/▾ = 折叠整棵子树；
+// 交互：点行 = 打开该 agent 的子会话；▸/▾ = 折叠整棵子树；
 // 运行中的行带脉冲点，停止按钮走 interrupt_task（与任务卡同一个 action）。
+//
+// 排序与分页（用户 2026-10 要求「倒序排列；默认只加载最近 5 个，支持加载更多」）：
+//   · 倒序在 lib/agentTree.buildAgentTree 里做（按 startedAt 降序，连线几何跟着视觉顺序走）；
+//   · 分页**只在根层**做：一进来不该被几十个历史子智能体淹掉，而某个分支里主动展开的
+//     子节点不该被二次截断。判定与「聚焦节点必须可见」的规则在 lib 的 pageRoots（可单测）。
 export const AgentTree = memo(function AgentTree({
   variant = 'left',
 }: {
@@ -33,6 +38,9 @@ export const AgentTree = memo(function AgentTree({
   // 折叠集合按**会话**记：切会话再回来，用户的折叠选择还在（纯 UI 偏好，不落盘）
   const sid = useAppStore((s) => s.activeSessionId) || ''
   const [collapsed, setCollapsed] = useState<Record<string, Set<string>>>({})
+  // 「加载更多」按会话记：切走再回来仍是展开态（与 collapsed 同一种纯 UI 偏好，不落盘）
+  const [expandedAll, setExpandedAll] = useState<Record<string, boolean>>({})
+  const showAll = expandedAll[sid] ?? false
   const mine = collapsed[sid] ?? EMPTY_SET
   const toggle = (key: string) => {
     setCollapsed((prev) => {
@@ -54,7 +62,12 @@ export const AgentTree = memo(function AgentTree({
     [runNodes, treeBlocks],
   )
   const keys = useMemo(() => collectTreeKeys(roots), [roots])
-  const rows = useMemo(() => flattenVisible(roots, mine), [roots, mine])
+  // 根层分页：默认最近 DEFAULT_ROOT_PAGE 个；聚焦节点被挡掉时它那棵会被补进来（见 pageRoots）
+  const paged = useMemo(
+    () => pageRoots(roots, DEFAULT_ROOT_PAGE, { mustShowId: focused?.nodeId, showAll }),
+    [roots, showAll, focused?.nodeId],
+  )
+  const rows = useMemo(() => flattenVisible(paged.roots, mine), [paged, mine])
   // 选中子会话时点亮整条祖先链的连线（见 lib/agentTree.focusedPathKeys 的注释）
   const litKeys = useMemo(() => (focused ? focusedPathKeys(roots, focused.nodeId) : EMPTY_SET), [roots, focused])
   if (rows.length === 0) return null
@@ -149,6 +162,18 @@ export const AgentTree = memo(function AgentTree({
           </div>
         )
       })}
+      {/* 还有更早的子智能体没显示 → 给一个明确入口（否则用户会以为它们没了）。
+          「还有 N 个」用的是 hidden（被分页挡掉的**根**数），与折叠提示的 +N 不是一个口径。 */}
+      {paged.hidden > 0 && (
+        <button className="atree-more-btn" onClick={() => setExpandedAll((prev) => ({ ...prev, [sid]: true }))}>
+          {t('left.agentsMore').replace('{n}', String(paged.hidden))}
+        </button>
+      )}
+      {showAll && roots.length > DEFAULT_ROOT_PAGE && (
+        <button className="atree-more-btn less" onClick={() => setExpandedAll((prev) => ({ ...prev, [sid]: false }))}>
+          {t('left.agentsLess')}
+        </button>
+      )}
     </div>
   )
 })
