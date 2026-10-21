@@ -742,6 +742,16 @@ export interface SessionView {
   blocksHasMore?: boolean // 是否还有更早的
   blocksOlderLoading?: boolean // 「加载更早」在途（按钮禁用 + 防并发）
   blocksOlderError?: boolean // 上一页加载失败（按钮变「点击重试」）
+  // agentDetached 本会话里**落在首屏窗口之外**的子智能体/任务卡片（bridge 响应的
+  // agents 字段，见 bridge/view_reducer.go 的 PartialView.Agents）。
+  //
+  // 为什么不并进 blocks：它们不属于「已加载的对话历史」，并进去会让会话开头凭空
+  // 多出几张旧卡片（首屏第一条是 agent 卡而不是消息）。它们只服务两件事 ——
+  // 左栏树（TREE 投影把它们和窗口内的卡片一起画）与「打开某个子会话看转录」。
+  //
+  // 数据形态：有 task_id 的卡片只带骨架（items 为空 + itemsTrimmed 记条数），
+  // 打开时按 task_id 从子任务 journal 取首屏（agent_history，offset=0）。
+  agentDetached?: MsgBlock[]
   // turnsTotal：真实回合总数。打开会话时 turns 数组可能只带尾部若干条
   //（见 bridge MarshalTail），Statusbar 必须显示这个值而不是 turns.length，
   // 否则长会话会显示「回合 = 已加载条数」这种明显错误的小数字。
@@ -868,6 +878,7 @@ function emptyView(): SessionView {
     blocksHasMore: false,
     blocksOlderLoading: false,
     blocksOlderError: false,
+    agentDetached: [],
     turnsTotal: 0,
     enteredAt: 0,
     approvals: [],
@@ -919,6 +930,7 @@ function viewFields(nv: SessionView): Partial<AppState> {
     blocksHasMore: nv.blocksHasMore ?? false,
     blocksOlderLoading: nv.blocksOlderLoading ?? false,
     blocksOlderError: nv.blocksOlderError ?? false,
+    agentDetached: nv.agentDetached ?? [],
     turnsTotal: nv.turnsTotal ?? nv.turns.length,
     approvals: nv.approvals,
     runNodes: nv.runNodes,
@@ -990,6 +1002,7 @@ function topViewFields(s: AppState): Partial<SessionView> {
     blocksHasMore: s.blocksHasMore,
     blocksOlderLoading: s.blocksOlderLoading,
     blocksOlderError: s.blocksOlderError,
+    agentDetached: s.agentDetached,
     turnsTotal: s.turnsTotal,
     approvals: s.approvals,
     runNodes: s.runNodes,
@@ -2502,6 +2515,8 @@ interface AppState {
   blocksHasMore: boolean
   blocksOlderLoading: boolean
   blocksOlderError: boolean
+  // 顶层镜像：窗口外的子智能体/任务卡片（见 SessionView.agentDetached）
+  agentDetached: MsgBlock[]
   turnsTotal: number
   approvals: Approval[]
   runNodes: RunNode[]
@@ -4364,11 +4379,18 @@ export function dispatchEvent(raw: AnyEvent): void {
           setState((s) => {
             const v = s.views[sid]
             if (!v) return {}
-            const blocks = v.blocks.map((b) => {
-              if (b.kind !== 'agent' || b.taskId !== taskId) return b
-              return appendOlderItems(b, older, page.has_more !== false, page.total, page.offset)
+            const append = (b: MsgBlock) =>
+              b.kind === 'agent' && b.taskId === taskId
+                ? appendOlderItems(b, older, page.has_more !== false, page.total, page.offset)
+                : b
+            // 窗口外的卡片（骨架形态）同样要接这一页：点开一个历史子智能体时，首屏正是
+            // 从这里来的（见 AgentSessionView 的自动补拉）。只更新 blocks 会让那颗「加
+            // 载中」永远转下去、内容永远空着。
+            return setView(s, sid, {
+              ...v,
+              blocks: v.blocks.map(append),
+              agentDetached: (v.agentDetached ?? []).map(append),
             })
-            return setView(s, sid, { ...v, blocks })
           })
         }
         break
@@ -4408,9 +4430,16 @@ export function dispatchEvent(raw: AnyEvent): void {
             const fresh = incoming.filter((b) => !have.has(b.id))
             // 前插并保持 id 升序：历史块的 id 一定小于当前首块。
             const blocks = fresh.length ? [...fresh, ...v.blocks] : v.blocks
+            // 翻页翻到了某张「窗口外卡片」的真实块 → 从 detached 里摘掉它：
+            // blocks 里那份是完整版，留着两份会让历史分页只更新其中一份。
+            const detachedNow = v.agentDetached ?? []
+            const inBlocks = new Set(blocks.map((b) => b.id))
             return setView(s, sid, {
               ...v,
               blocks,
+              ...(detachedNow.some((b) => inBlocks.has(b.id))
+                ? { agentDetached: detachedNow.filter((b) => !inBlocks.has(b.id)) }
+                : {}),
               blocksCursor: page.cursor ?? v.blocksCursor,
               blocksHasMore: page.has_more === true,
               blocksTotal: page.total ?? v.blocksTotal,
@@ -4849,6 +4878,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               blocksCursor: typeof d.blocks_cursor === 'number' ? d.blocks_cursor : undefined,
               blocksHasMore: d.blocks_has_more === true,
               turnsTotal: typeof d.turns_total === 'number' ? d.turns_total : undefined,
+              agents: Array.isArray(d.agents) ? (d.agents as unknown[]) : undefined,
             })
           } catch (err) {
             // hydrate 失败（checkpoint 结构异常）：不残留空 view，回退 legacy snapshot /
@@ -6872,6 +6902,16 @@ function checkpointToView(cp: CheckpointView): SessionView {
   }
 }
 
+// cpAgentsToBlocks 把 bridge 单独带回的「窗口外卡片」映射成客户端块。
+//
+// 复用 checkpointToView 的块映射（传一份只带 blocks 的伪 checkpoint：其余字段在
+// 那里全部 `?? []` / `?? 0` 兜底，只有 blocks 参与映射）—— 卡片字段的语义只有一处
+// 定义，加新字段时不会出现「对话里的卡片认得、左栏树里的不认得」。
+function cpAgentsToBlocks(list: unknown[]): MsgBlock[] {
+  const mapped = checkpointToView({ blocks: list } as unknown as CheckpointView).blocks
+  return mapped.filter((b) => b.kind === 'agent' || b.kind === 'async_task' || b.kind === 'tool')
+}
+
 // hydrateCheckpoint 用 bridge 的 view_checkpoint 投影重建会话视图（一次提交）。
 // 不在 hydrate 前叠加 preBuf；响应在途事件由 preBuf 暂存、hydrate 后补应用（同 snapshot 路径）。
 export function hydrateCheckpoint(
@@ -6886,6 +6926,8 @@ export function hydrateCheckpoint(
     blocksCursor?: number
     blocksHasMore?: boolean
     turnsTotal?: number
+    // agents 窗口外的子智能体/任务卡片（bridge 的 agents 字段；见 SessionView.agentDetached）
+    agents?: unknown[]
   },
 ): void {
   // 同步块 id 计数器：checkpoint 的块 id 由 bridge 分配（从 1 起），后端实时事件的
@@ -6922,6 +6964,7 @@ export function hydrateCheckpoint(
         turnsTotal: meta?.turnsTotal ?? cp.turns?.length ?? 0,
         blocksOlderLoading: false,
         blocksOlderError: false,
+        agentDetached: Array.isArray(meta?.agents) ? cpAgentsToBlocks(meta!.agents!) : [],
         // 内容整体重建 → 触发一次历史渐入（见 enteredAt 注释）。
         // 用模块级计数器而不是 view 上的值自增：上面刚把 view 重置为 emptyView()，
         // 从 view 读到的永远是 0，自增后恒为 1 —— 第二次切换就不会重新播动画了。
@@ -7053,6 +7096,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   blocksHasMore: false,
   blocksOlderLoading: false,
   blocksOlderError: false,
+  agentDetached: [],
   turnsTotal: 0,
   workspace: initWorkspace, // 持久恢复（模块加载时读 localStorage）；无 → undefined（BootScreen）
   projects: initProjects,
@@ -7865,17 +7909,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const v = s.views[sid] ?? emptyView()
       let nextOffset = 0
-      const blocks = v.blocks.map((b) => {
+      const mark = (b: MsgBlock) => {
         if (b.id !== blockId || b.kind !== 'agent') return b
         // 已经是加载中/没有更多：重复点击不叠加请求（按钮本身也会禁用）。
         if (b.historyLoading) return b
         // 首次加载从「首屏条数」开始：checkpoint 里已保留最新的 len(b.items) 条，
         // 从 0 开始必然与首屏重叠（见 appendOlderItems 的注释）。
+        // 窗口外卡片是骨架（items 为空）→ 0 起算，正好取最新一页。
         nextOffset = b.historyOffset ?? b.items.length
         return { ...b, historyLoading: true, historyError: undefined }
-      })
+      }
+      const blocks = v.blocks.map(mark)
+      const agentDetached = (v.agentDetached ?? []).map(mark)
       offset = nextOffset
-      return setView(s, sid, { ...v, blocks })
+      return setView(s, sid, { ...v, blocks, agentDetached })
     })
     send({
       type: 'agent_history',

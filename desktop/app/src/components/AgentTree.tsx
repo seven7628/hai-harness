@@ -32,6 +32,9 @@ export const AgentTree = memo(function AgentTree({
   const t = useT()
   const runNodes = useAppStore((s) => s.runNodes)
   const blocks = useAppStore((s) => s.blocks)
+  // 窗口外的卡片（首屏只回最近 200 块，跑半天的会话里 agent 卡片早就在窗口之外 ——
+  // 不并进来，刷新一次树就空一次。见 store 的 SessionView.agentDetached）
+  const detached = useAppStore((s) => s.agentDetached)
   const interruptTask = useAppStore((s) => s.interruptTask)
   const focusAgent = useAppStore((s) => s.focusAgent)
   const focused = useAppStore((s) => s.focusedAgent)
@@ -54,8 +57,11 @@ export const AgentTree = memo(function AgentTree({
   // 只把与树相关的两类块投影进去（user/assistant/… 与树无关，传全量会让
   // memo 在每次流式 chunk 后都重算 —— 这里只依赖「块的身份」而非内容）
   const treeBlocks = useMemo(
-    () => blocks.filter((b) => b.kind === 'agent' || b.kind === 'async_task' || (b.kind === 'tool' && b.promoted)),
-    [blocks],
+    () => [
+      ...blocks.filter((b) => b.kind === 'agent' || b.kind === 'async_task' || (b.kind === 'tool' && b.promoted)),
+      ...detached,
+    ],
+    [blocks, detached],
   )
   const roots = useMemo(
     () => agentTreeFromView(runNodes as RunNode[], treeBlocks as Parameters<typeof agentTreeFromView>[1]),

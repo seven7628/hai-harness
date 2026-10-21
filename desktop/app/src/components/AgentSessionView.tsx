@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react'
+import { memo, useEffect, useMemo } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import type { AgentFocus, MsgBlock } from '../store/useAppStore'
 import { agentTreeFromView, pathOfNode } from '../lib/agentTree'
@@ -41,15 +41,19 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   const t = useT()
   const runNodes = useAppStore((s) => s.runNodes)
   const blocks = useAppStore((s) => s.blocks)
+  const detached = useAppStore((s) => s.agentDetached)
   const focusAgent = useAppStore((s) => s.focusAgent)
   const interruptTask = useAppStore((s) => s.interruptTask)
   const loadAgentHistory = useAppStore((s) => s.loadAgentHistory)
   // 压缩态按同一套作用域判定（子会话的压缩是它自己的上下文压缩，与主会话互不影响）
   const comp = useScopedCompression()
 
+  // 查找顺序 = 先「首屏窗口内的块」再「窗口外卡片」：同一张卡两边都在时（翻页翻到它
+  // 之后）以 blocks 里的完整版为准。
+  const allBlocks = useMemo(() => [...blocks, ...detached], [blocks, detached])
   const treeBlocks = useMemo(
-    () => blocks.filter((b) => b.kind === 'agent' || b.kind === 'async_task' || (b.kind === 'tool' && b.promoted)),
-    [blocks],
+    () => allBlocks.filter((b) => b.kind === 'agent' || b.kind === 'async_task' || (b.kind === 'tool' && b.promoted)),
+    [allBlocks],
   )
   const roots = useMemo(
     () => agentTreeFromView(runNodes, treeBlocks as Parameters<typeof agentTreeFromView>[1]),
@@ -59,13 +63,13 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   // 卡片按**真实 runId** 找；退化到 taskId（agent 卡片先到、runNode 已收敛的恢复场景）
   const card = useMemo(
     () =>
-      blocks.find((b): b is Extract<MsgBlock, { kind: 'agent' }> => {
+      allBlocks.find((b): b is Extract<MsgBlock, { kind: 'agent' }> => {
         if (b.kind !== 'agent') return false
         if (runId && b.runId === runId) return true
         const node = chain[chain.length - 1]
         return Boolean(node?.taskId && b.taskId === node.taskId)
       }),
-    [blocks, runId, chain],
+    [allBlocks, runId, chain],
   )
 
   // 后台工具任务的块（kind='tool' + promoted + 同 taskId）：内容在它身上，不在 agent 卡里
@@ -73,11 +77,24 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     const node = chain[chain.length - 1]
     const key = node?.taskId
     if (!key) return undefined
-    return blocks.find(
+    return allBlocks.find(
       (b): b is Extract<MsgBlock, { kind: 'tool' }> =>
         b.kind === 'tool' && Boolean(b.promoted) && b.taskId === key,
     )
-  }, [blocks, chain])
+  }, [allBlocks, chain])
+
+  // 窗口外的卡片只带骨架（items 清空、itemsTrimmed 记条数）：点进来要真能看到内容，
+  // 所以在这里补拉首屏 —— offset=0 取的正是最新一页（见 store.loadAgentHistory）。
+  // 只在「空 + 有 task_id（有 journal）+ 还没拉过」时拉一次：失败不自动重试（会打圈），
+  // 由下方的「加载更早」按钮手动重试（historyHasMore/trimmed 仍为真，按钮在）。
+  const cardId = card?.id
+  const cardTaskId = card?.taskId
+  const needFirstScreen = Boolean(card && card.items.length === 0 && cardTaskId && card.historyOffset == null)
+  const loadingFirst = Boolean(card?.historyLoading || card?.historyError)
+  useEffect(() => {
+    if (!cardId || !cardTaskId || !needFirstScreen || loadingFirst) return
+    loadAgentHistory(cardId, cardTaskId)
+  }, [cardId, cardTaskId, needFirstScreen, loadingFirst, loadAgentHistory])
 
   const node = chain[chain.length - 1]
   // 数据源：agent 卡的活动记录 → 会话块。后台工具任务没有 items，就把它那一个工具块
