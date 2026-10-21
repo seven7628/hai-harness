@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { useAppStore, genMsOf } from '../store/useAppStore'
+import { decideFollow, isExternalMoveUp, isUserScrollUp } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
@@ -158,7 +159,25 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   const blocks = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocks ?? [] : s.blocks))
   const persona = useAppStore((s) => s.persona)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
-  const ref = useRef<HTMLDivElement>(null)
+  const ref = useRef<HTMLDivElement | null>(null)
+  // nodeGen：滚动容器的「节点世代」。
+  //
+  // ## 为什么必须有（2026-10-21 修 bug）
+  //
+  // 根节点的 key 锁了会话 id（切会话时重建 DOM 以丢弃滚动位置）。React 换 key
+  // 会**销毁旧节点、创建新节点**，而挂监听器的 effect 依赖是 []，它不会重跑 ——
+  // 于是 wheel / touch / scroll / keydown 全部挂在**已脱离文档的旧节点**上，
+  // 从此再也收不到任何用户手势。
+  //
+  // 后果：手势判据（上滑停跟随）彻底失效，而程序性钉底仍然工作（tick 每次
+  // 重新读 ref.current，用的是新节点）→ 「上滑永远被拽回底部」。
+  // 用 callback ref 记录节点身份变化，让监听器跟着节点走。
+  const [nodeGen, setNodeGen] = useState(0)
+  const setNodeRef = useCallback((n: HTMLDivElement | null) => {
+    if (ref.current === n) return
+    ref.current = n
+    setNodeGen((g) => g + 1)
+  }, [])
   const anchorRef = useRef<HTMLDivElement>(null)
   // —— 主对话分页（2026-10-20）——
   // 后端 BlocksPage 的游标：最早已加载块的 id 与「还有更早」标记。
@@ -325,7 +344,13 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, firstID }
     // 贴底时由校准循环接管（前插后仍应贴底）；用户在上方阅读时才补偿。
     if (stickRef.current) return
-    if (grew > 0) el.scrollTop = prev.top + grew
+    if (grew > 0) {
+      el.scrollTop = prev.top + grew
+      // tick 的「外部改动」判据只认「tick 自己写过什么」。这里是补偿写入，
+      // 不同步基准会让下一帧把它误判成用户上滑而关掉跟随。
+      expectedTopRef.current = el.scrollTop
+      lastTopRef.current = el.scrollTop
+    }
   }, [blocks])
 
   // —— 滚动到顶部自动加载（你要求的「滚动加载」）——
@@ -367,7 +392,7 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
-  }, [hasMore, olderLoading, olderError, moreCursor, onLoadOlder, blocks.length])
+  }, [hasMore, olderLoading, olderError, moreCursor, onLoadOlder, blocks.length, nodeGen])
   // 最新一张待办工具卡（todo_add / todo_update）：仅它展开并实时反映 todos 快照
   // （倒序扫第一个即最新；旧卡随 live 翻 false 自动折叠，见 TodoToolCard）
   const liveTodoId = useMemo(() => {
@@ -427,18 +452,34 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
   const lastTopRef = useRef(0)
   // 触摸滑动上一次的 Y（判断方向）
   const touchYRef = useRef(0)
+  // intentRef：本次手势的方向（'up' = 看更早的内容）。
+  //
+  // 不能用「滚完之后离底部多远」代替：tick 会把位置钉回底部，用户在 threshold
+  // 内时 settle 读到的永远是「在底部」。方向只有用户的手势知道。
+  const intentRef = useRef<'up' | 'down' | null>(null)
+  // scroll 监听里观察到的 max（scrollHeight - clientHeight）。
+  // 用于区分「用户上滑」与「内容塌缩导致的 scrollTop 钳制」：切会话时
+  // blocks 被清空 → 容器塌缩 → 浏览器把 scrollTop 从上一会话的底部钳到 0，
+  // 这个「变小」不是用户意图，不能据此关掉跟随。
+  const scrollMaxRef = useRef(-1)
   const [away, setAway] = useState(false) // 用户已离开底部（显示「回到底部」按钮）
   const [fresh, setFresh] = useState(false) // 离开期间有新内容到达（按钮带圆点）
+  // 贴底/方向判定统一走 lib/scrollFollow（纯函数，不变量由 scrollFollow-test 钉住）
   const BOTTOM_THRESHOLD = 120 // px：视为「贴底」的容差（content-visibility 高度为估算值）
-  const isNearBottom = () => {
-    const el = ref.current
-    if (!el) return true
-    return el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_THRESHOLD
-  }
-  // 程序滚动辅助：直接赋值（不置任何标记 —— 其 scroll 事件因无用户手势被忽略）
+  // 程序滚动的**唯一入口**。
+  //
+  // ## 单写口径（2026-10-21）
+  //
+  // tick 的「外部改动」判据依赖「tick 知道每一次自己写入了多少」。任何绕过
+  // 这里的 el.scrollTop 赋值都会让基准失真，判据随即失效（上一版把基准放在
+  // effect 闭包里就栽在这上面）。所以写入后立刻同步两个基准：
+  //   · expectedTopRef：我刚写到多少 → 下一帧据此识别外部改动
+  //   · lastTopRef：让这次写入产生的 scroll 事件不被误判成「用户往上滚」
   const setScrollTop = (el: HTMLElement, v: number) => {
     if (el.scrollTop === v) return
     el.scrollTop = v
+    expectedTopRef.current = el.scrollTop
+    lastTopRef.current = el.scrollTop
   }
   // 用户滚动 → 更新「是否该跟随」的意图（autoscrollRef）。
   //
@@ -460,59 +501,100 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     const el = ref.current
     if (!el) return
     lastTopRef.current = el.scrollTop
-    // 收到用户滚动后重新评估：贴底 → 跟随；离开底部 → 不跟随。
-    const settle = () => {
-      const nb = isNearBottom()
-      autoscrollRef.current = nb
-      if (nb !== stickRef.current) {
-        stickRef.current = nb
-        setAway(!nb)
+    scrollMaxRef.current = el.scrollHeight - el.clientHeight
+    // 停止跟随：唯一的状态转移，所有手势/外部改动都收敛到这里。
+    const stopFollow = () => {
+      autoscrollRef.current = false
+      if (stickRef.current) {
+        stickRef.current = false
+        setAway(true)
       }
-      if (nb) setFresh(false)
     }
-    const mark = () => {
+    // 恢复跟随（仅在**用户自己**把视图带回底部时）。
+    const startFollow = () => {
+      autoscrollRef.current = true
+      // 基准必须同步成当前位置：否则 tick 的下一帧会把「距旧基准的落差」
+      // 当成外部改动，刚恢复的跟随又被自己关掉。
+      expectedTopRef.current = el.scrollTop
+      lastTopRef.current = el.scrollTop
+      if (!stickRef.current) {
+        stickRef.current = true
+        setAway(false)
+      }
+      setFresh(false)
+    }
+    // 手势结束后重新评估。
+    //
+    // ## 为什么必须传方向（2026-10-21 修 bug）
+    //
+    // 上一版这里是 `const nb = isNearBottom(); autoscrollRef.current = nb`。
+    // 而 tick 会把位置钉回底部，用户在阈值内时 isNearBottom() 永远为 true ——
+    // 于是 onScroll 里刚由「top 变小」置的 false，在同一函数末尾被 settle
+    // 又改回 true。表现：上滑瞬间 away 按钮闪一下就没，视图继续被拽回。
+    // 方向只有用户手势知道，position 不可信。
+    const settle = (dir: 'up' | 'down' | null) => {
+      const follow = decideFollow({
+        dir,
+        top: el.scrollTop,
+        max: el.scrollHeight - el.clientHeight,
+        threshold: BOTTOM_THRESHOLD
+      })
+      if (follow) startFollow()
+      else stopFollow()
+    }
+    const mark = (dir: 'up' | 'down' | null) => {
       userGestureRef.current = true
       lastGestureAtRef.current = performance.now()
+      if (dir) intentRef.current = dir
     }
     const onWheel = (e: WheelEvent) => {
-      mark()
+      const dir = e.deltaY < 0 ? 'up' : 'down'
+      mark(dir)
       // 向上滚 → 立刻停止跟随（不等 scroll 事件，避免被 tick 抢跑）。
-      // 向下滚不立刻恢复：用户可能只是往下挪一点，还没到底 —— 交给 settle 判断。
-      if (e.deltaY < 0) autoscrollRef.current = false
+      if (dir === 'up') stopFollow()
     }
     const onScroll = () => {
       const top = el.scrollTop
       const prevTop = lastTopRef.current
       lastTopRef.current = top
-      // 通用方向判据：scrollTop 变小 = 用户往上看更早的内容。
-      if (top < prevTop - 2) {
-        autoscrollRef.current = false
-        if (stickRef.current) {
-          stickRef.current = false
-          setAway(true)
-        }
-      }
+      const max = el.scrollHeight - el.clientHeight
+      const prevMax = scrollMaxRef.current
+      scrollMaxRef.current = max
+      // 方向兜底：scrollTop 变小 = 用户往上看更早的内容。
+      //
+      // 必须排除两种**非用户**的变小（2026-10-21，端到端实测踩到）：
+      //  ① 内容塌缩导致钳制：切会话/清空 blocks 时容器变矮，浏览器把
+      //     scrollTop 从上一会话底部钳到 0 —— 实测这一步会把跟随永久关掉，
+      //     表现为新会话再也不自动贴底（gap 一路涨到 850px）。
+      //  ② 钳到当前底部：top 已经贴着 max，再变小只是高度变化的结果。
+      const movedUp = isUserScrollUp({ top, prevTop, max, prevMax })
+      if (movedUp) stopFollow()
       // 用户手势引发的 scroll 才重新评估「是否回到底部」。
-      // （tick 自己写的 scrollTop 不算用户意图，不能让它把 autoscroll 打开）
       if (!userGestureRef.current) return
       userGestureRef.current = false
-      settle()
+      const dir = intentRef.current ?? (movedUp ? 'up' : 'down')
+      intentRef.current = null
+      settle(dir)
     }
     const onKey = (e: KeyboardEvent) => {
       if (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) return
-      mark()
-      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') autoscrollRef.current = false
+      const up = e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home'
+      mark(up ? 'up' : 'down')
+      if (up) stopFollow()
     }
     const onTouchStart = (e: TouchEvent) => {
-      mark()
+      mark(null)
       touchYRef.current = e.touches[0]?.clientY ?? 0
     }
     const onTouchMove = (e: TouchEvent) => {
       const y = e.touches[0]?.clientY ?? 0
       const dy = y - touchYRef.current
       touchYRef.current = y
+      if (Math.abs(dy) < 1) return
       // 手指向下拖 = 内容往上走 = 看历史
-      if (dy > 0) autoscrollRef.current = false
+      const dir = dy > 0 ? 'up' : 'down'
+      mark(dir)
+      if (dir === 'up') stopFollow()
     }
     el.addEventListener('wheel', onWheel, { passive: true })
     el.addEventListener('touchstart', onTouchStart, { passive: true })
@@ -526,7 +608,8 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
       el.removeEventListener('keydown', onKey)
       el.removeEventListener('scroll', onScroll)
     }
-  }, [])
+    // nodeGen：切会话换 key 会替换 DOM 节点，监听器必须重新挂到新节点
+  }, [nodeGen])
   // 内容变化（流式 / 异步渲染撑高 / 快照到达）：贴底状态下持续校准到最新底部。
   // 为什么不能「内容稳定就停」：mermaid SVG / 图片 / shiki 高亮等**异步渲染**
   // 在 blocks 稳定后仍会陆续撑高 scrollHeight（实测流式结束后 mermaid 2→9 个，
@@ -589,8 +672,14 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
       // 必然是外部改的（用户上滑/拖滚动条/键盘）。用 abs 差值会在浏览器
       // scroll-anchoring 把 top 自动加大时误判成「用户动了」。
       // 容差 2px：过滤亚像素/取整误差。
-      const exp = expectedTopRef.current
-      if (exp >= 0 && el.scrollTop < exp - 2 && !(max < prevMax)) {
+      if (
+        isExternalMoveUp({
+          top: el.scrollTop,
+          expectedTop: expectedTopRef.current,
+          max,
+          prevMax
+        })
+      ) {
         if (autoscrollRef.current) {
           autoscrollRef.current = false
           stickRef.current = false
@@ -628,7 +717,8 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     if (expectedTopRef.current < 0) expectedTopRef.current = el.scrollTop
     raf = requestAnimationFrame(tick)
     return () => { if (raf) cancelAnimationFrame(raf) }
-  }, [blocks, revealStart])
+    // nodeGen：切会话换 key 会替换 DOM 节点，tick 必须钉到新节点上
+  }, [blocks, revealStart, nodeGen])
   // 会话切换：重置贴底状态。内容到达后的持续校准由 blocks effect 统一负责
   //（覆盖 content-visibility 慢布局：rAF 循环直到内容高度稳定）。
   // 这里只重置 + 若新会话内容已在（缓存切换），先滚一次减少等待。
@@ -819,7 +909,7 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
       // 属性选择器不同 —— 见 index.css 的 .narrative-enter[data-enter]）。
       // 这里用 key 只锁「会话 id」，切会话才重建（那时本来就该丢滚动位置）。
       key={viewSid ?? activeSessionId ?? 'none'}
-      ref={ref}
+      ref={setNodeRef}
       aria-live="polite"
       data-entered={enteredAt}
     >
