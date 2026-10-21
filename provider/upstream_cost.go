@@ -168,11 +168,15 @@ type upstreamCostTransport struct{ base http.RoundTripper }
 // Unwrap 暴露被包装的 transport —— 调用方/测试要按类型断言既有 transport 时必须穿过本层。
 func (t *upstreamCostTransport) Unwrap() http.RoundTripper { return t.base }
 
-// BaseTransport 剥掉本包加的尾部回看层，返回原始 transport（不是本包包装则原样返回）。
+// BaseTransport 剥掉本包在各层加的响应体包装（尾部回看 / 思考字段归一化），
+// 返回原始 transport（不是本包包装则原样返回）。
 // 用途：需要在包装后仍按类型断言既有 transport 的调用方（如 *openCodeGatewayTransport 的
 // 网关准入检查）。
 func BaseTransport(rt http.RoundTripper) http.RoundTripper {
-	if t, ok := rt.(*upstreamCostTransport); ok {
+	switch t := rt.(type) {
+	case *upstreamCostTransport:
+		return BaseTransport(t.base)
+	case *reasoningStreamTransport:
 		return BaseTransport(t.base)
 	}
 	return rt

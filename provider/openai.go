@@ -87,15 +87,18 @@ func newOpenAIProviderWithClient(baseURL, apiKey string, capabilities OpenAIComp
 	// 上游自报费用：两个通道各自的客户端**就地**包一层尾部回看（保留既有 Timeout 与
 	// 底层 Transport —— 非网关端点「注入 client 只作用于 minimal 通道」的分工不变）。
 	// 网关端点两通道同源，包一次后者复用。
+	//
+	// 思考字段名归一化（reasoning_stream.go）在同一层再包一圈：两个通道唯一的共同交汇
+	// 处就是 resp.Body（SDK 在 Recv() 内部 unmarshal，调用方拿不到原始 JSON）。
 	shared := minimalClient == sdkClient
-	sdkClient = WrapUpstreamCostClient(sdkClient)
+	sdkClient = WrapReasoningStreamClient(WrapUpstreamCostClient(sdkClient))
 	if sdkIsCfg {
 		cfg.HTTPClient = sdkClient
 	}
 	if shared {
 		minimalClient = sdkClient
 	} else {
-		minimalClient = WrapUpstreamCostClient(minimalClient)
+		minimalClient = WrapReasoningStreamClient(WrapUpstreamCostClient(minimalClient))
 	}
 	return &OpenAIProvider{client: openai.NewClientWithConfig(cfg), capabilities: capabilities, baseURL: strings.TrimRight(cfg.BaseURL, "/"), apiKey: apiKey, httpClient: minimalClient, registry: reg}
 }
