@@ -329,6 +329,29 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     if (!el) return
     const prev = anchorRef2.current
     const firstID = blocks.length ? blocks[0].id : 0
+    // ── 跟随态：**绘制前**钉到底部 ──────────────────────────────────────
+    //
+    // ## 为什么必须在 useLayoutEffect 里做（2026-10-21 修「刷新/进入定位不准」）
+    //
+    // 进入会话（刷新页面、切长会话）时只渲染尾部的 REVEAL_PER_FRAME 个块，
+    // 其余靠铺开逐帧补到上方。而铺开期间 rAF tick 是**关掉的**（见下方
+    // `if (revealStart > 0) return`），容器的 scrollTop 又是 0 —— 于是首帧
+    // 显示的是「尾部窗口的顶部」，比最新消息早二十来条，几百毫秒后才跳到底部。
+    // 块数 ≤ 25 时 revealStart 恒为 0，所以短会话看不出来，长会话才明显。
+    //
+    // 放在 layout effect 里而不是等 tick：layout effect 在 DOM 变更后、浏览器
+    // 绘制**前**执行，所以这个错误位置一帧都不会被画出来。
+    if (stickRef.current) {
+      const max = el.scrollHeight - el.clientHeight
+      if (max > 0 && el.scrollTop !== max) {
+        el.scrollTop = max
+        // 单写口径：tick 的「外部改动」判据依赖它知道自己写过什么
+        expectedTopRef.current = el.scrollTop
+        lastTopRef.current = el.scrollTop
+      }
+      anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, firstID }
+      return
+    }
     if (!prev) {
       anchorRef2.current = { height: el.scrollHeight, top: el.scrollTop, firstID }
       return
@@ -351,7 +374,8 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
       expectedTopRef.current = el.scrollTop
       lastTopRef.current = el.scrollTop
     }
-  }, [blocks])
+    // revealStart：铺开每推进一批都会改变可见范围，必须在绘制前重新钉底
+  }, [blocks, revealStart])
 
   // —— 滚动到顶部自动加载（你要求的「滚动加载」）——
   //
@@ -743,9 +767,28 @@ export default function Narrative({ viewSid }: { viewSid?: string } = {}) {
     setAway(false)
     setFresh(false)
     expectedTopRef.current = -1
-    anchorRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' })
     const el = ref.current
-    if (el) expectedTopRef.current = el.scrollTop
+    if (!el) return
+    // ## 为什么不再用 scrollIntoView（2026-10-21）
+    //
+    // 它把「末尾锚点元素的底边」对齐到容器底边，但锚点后面还有「回到最新」
+    // 按钮、且下方内容可能被异步撑高（shiki/mermaid）—— 落点会差几十~几百像素，
+    // 表现为「点了回底，但没到底」（端到端实测偶发 377px）。
+    // 直接钉 max 才是「回到底部」的语义；再补一次下一帧的 rAF，覆盖
+    // 同一帧内后续的撑高（异步渲染）。
+    el.scrollTop = el.scrollHeight - el.clientHeight
+    expectedTopRef.current = el.scrollTop
+    lastTopRef.current = el.scrollTop
+    requestAnimationFrame(() => {
+      const cur = ref.current
+      if (!cur || !stickRef.current) return
+      const max = cur.scrollHeight - cur.clientHeight
+      if (max > 0 && cur.scrollTop !== max) {
+        cur.scrollTop = max
+        expectedTopRef.current = cur.scrollTop
+        lastTopRef.current = cur.scrollTop
+      }
+    })
   }
 
   // 渲染单个非工具块（工具已在上面归组处理）
