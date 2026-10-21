@@ -58,6 +58,10 @@ input, select, textarea, button {
   border-radius: var(--radius); padding: 11px 12px;
 }
 input, select { width: 100%; margin-bottom: 10px; }
+/* 单选/复选不能吃上面的 width:100%（否则整行被控件占满，文字被挤到右边换行） */
+input[type='radio'], input[type='checkbox'] {
+  width: auto; margin: 0; padding: 0; flex: 0 0 auto; accent-color: var(--accent);
+}
 textarea { resize: none; max-height: 120px; }
 
 button { cursor: pointer; }
@@ -103,6 +107,9 @@ button[disabled] { opacity: .5; }
 .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--accent); }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* 配对页的主按钮铺满：单列表单里左对齐的小按钮看着像没做完 */
+#screen-pair .primary { width: 100%; }
+
 #composer {
   display: flex; gap: 8px; padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
   border-top: 1px solid var(--line); background: var(--bg);
@@ -124,5 +131,6 @@ button[disabled] { opacity: .5; }
 
 .q { margin-bottom: 14px; }
 .q .qt { font-weight: 600; margin-bottom: 8px; }
-.q label { display: flex; gap: 8px; align-items: flex-start; padding: 8px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 6px; }
+.q label { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 6px; }
+.q label span { flex: 1; }
 .q input[type=text] { margin-top: 6px; }
