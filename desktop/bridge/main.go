@@ -304,8 +304,12 @@ type bridgeSession struct {
 	wake             chan struct{}
 	out              *out
 
-	workspace string            // 工作区根（审批 diff 读取原文件用）
-	metrics   *FileMetricsStore // 跨会话 usage/成本指标（每 llm_end 记录一条；全局共享）
+	workspace string     // 工作区根（审批 diff 读取原文件用）
+	mobile    *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
+	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
+	running atomic.Bool
+	metrics *FileMetricsStore // 跨会话 usage/成本指标（每 llm_end 记录一条；全局共享）
 	// im IM 事件桥（IM 插件启用后装配；emit 全事件漏斗里转发给 Renderer → 飞书推送）
 	im *imBridge
 	// 注意：字段用具体类型而非 MetricsStore 接口 —— m.metrics（*FileMetricsStore）为 nil 时
@@ -605,8 +609,20 @@ func (bs *bridgeSession) emit(e events.Event) {
 		}
 	}
 
+	// 运行态（会话列表状态点；重启后由下一次事件纠正）
+	switch e.Type() {
+	case events.AgentStartType:
+		bs.running.Store(true)
+	case events.AgentEndType:
+		bs.running.Store(false)
+	}
+
 	// 写 stdout 与事件日志用同一行（事件自包含，含注入的 session_id/workspace/run_id/diff/todos）
 	bs.out.writeRaw(injected)
+	// 手机端扇出：复用同一行字节（非阻塞；订阅者慢只丢 chunk，见 mobile_hub.go）
+	if bs.mobile != nil {
+		bs.mobile.broadcast(bs.workspace, bs.id, injected)
+	}
 	// 流式增量只走 stdout（前端实时渲染），不落盘：可重建（llm_end 携带最终文本），
 	// 实测占事件日志体积 78.5%。落盘只保留时间线（run_id/timestamp/工具起止/usage）。
 	if !isStreamingChunkType(e.Type()) {
@@ -715,6 +731,20 @@ type manager struct {
 	meshGW *meshremote.Gateway
 	// meshWired Hub 宿主侧回调是否已接线（唤醒/标题；进程内一次）。
 	meshWired bool
+
+	// mobile 手机端接入（HTTP 命令代理 + WS 事件流；nil = 未启动）。
+	// 见 mobile_server.go / docs/mobile-remote/TECH_PLAN.md。
+	mobile *mobileServer
+	// respTap 命令响应拦截：手机端 HTTP 请求等同一个 id 的响应。
+	// 返回 true = 已被消费，不再写 stdout（桌面端看不到这条响应，符合预期）。
+	respTap func(map[string]any) bool
+	// dispatchMu 命令分发串行化。stdin 循环本来是单线程的；手机 HTTP 进来后
+	// 有了第二个来源，而 manager.dispatch 不是并发安全的（读改写共享 map）。
+	dispatchMu sync.Mutex
+	// wsReg 工作区清单（~/.go-code/workspaces.json）——桌面与手机共用的真相源。
+	wsReg *workspaceRegistry
+	// wsPick 「让电脑选目录」的待回填请求（5 分钟 TTL；见 mobile_workspace_pick.go）。
+	wsPick *workspacePickTable
 	// lastMeshCfg 最近一次成功启动网关用的 remote 配置（meshCfgEquals 对比用）。
 	lastMeshCfg meshremote.Settings
 	// titleGenMu 保护 titleInFlight（AI 标题生成去重：同一会话只允许一个在途任务）。
@@ -1264,7 +1294,7 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw}
+	bs = &bridgeSession{id: id, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub()}
 	if opts.cronEvDir != "" {
 		bs.cronEvDir = opts.cronEvDir
 	}
@@ -1385,6 +1415,10 @@ func (m *manager) respCode(c command, ok bool, errMsg, code string, data map[str
 	}
 	if ws := str(c.Payload, "workspace"); ws != "" {
 		line["workspace"] = ws
+	}
+	// 手机端在等这条响应 → 投递并终止（不写 stdout，避免桌面端收到别人的响应）
+	if m.respTap != nil && m.respTap(line) {
+		return
 	}
 	m.out.writeLine(line)
 }
@@ -1534,6 +1568,110 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		m.resp(c, true, "", map[string]any{"session_id": sid, "hash": str(c.Payload, "hash"), "diff": diff})
+
+	case CmdWorkspaceList: // 工作区清单（桌面左栏 + 手机共用；见 workspace_registry.go）
+		m.resp(c, true, "", map[string]any{"workspaces": m.workspaceEntries()})
+
+	case CmdWorkspaceAdd: // 手机端添加工作区（输入绝对路径；P1 改为让桌面弹选择器）
+		entry, err := m.workspaceAdd(str(c.Payload, "path"))
+		if err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{"workspace": entry, "workspaces": m.workspaceEntries()})
+
+	case CmdWorkspaceRemove:
+		ok := m.workspaceRemove(str(c.Payload, "path"))
+		m.resp(c, true, "", map[string]any{"removed": ok, "workspaces": m.workspaceEntries()})
+
+	case CmdWorkspaceUpdate: // 重命名 / 置顶工作区（手机端与桌面共用同一份清单）
+		path := str(c.Payload, "path")
+		var title *string
+		if v, ok := c.Payload["title"]; ok {
+			t := ""
+			if sv, isStr := v.(string); isStr {
+				t = strings.TrimSpace(sv)
+			}
+			title = &t
+		}
+		var pinned *bool
+		if v, ok := c.Payload["pinned"]; ok {
+			b := boolVal(v)
+			pinned = &b
+		}
+		entry, ok := m.workspaceUpdate(path, title, pinned)
+		if !ok {
+			m.resp(c, false, "工作区不存在", nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{"workspace": entry, "workspaces": m.workspaceEntries()})
+
+	case CmdWorkspaceSync: // 渲染进程首次迁移：把 localStorage 里的项目列表灌进来（只增不减）
+		m.resp(c, true, "", map[string]any{"workspaces": m.workspaceSync(strSlice(c.Payload, "paths"))})
+
+	case CmdWorkspacePick: // 手机请求桌面弹目录选择器（结果异步经事件回传）
+		if m.wsPick == nil {
+			m.wsPick = newWorkspacePickTable()
+		}
+		id := m.wsPick.begin(time.Now())
+		m.emitApp(map[string]any{
+			"event_type": "workspace_pick_request",
+			"request_id": id,
+			"timestamp":  time.Now().UnixMilli(),
+		})
+		m.resp(c, true, "", map[string]any{"request_id": id})
+
+	case CmdWorkspacePickResult: // Electron 回填（桌面主进程；手机白名单外）
+		if m.wsPick == nil || !m.wsPick.consume(str(c.Payload, "request_id"), time.Now()) {
+			m.resp(c, false, "请求已过期或不存在", nil)
+			return
+		}
+		rid := str(c.Payload, "request_id")
+		path := str(c.Payload, "path")
+		if path == "" {
+			m.emitApp(map[string]any{"event_type": "workspace_pick_canceled", "request_id": rid})
+			m.resp(c, true, "", nil)
+			return
+		}
+		entry, err := m.workspaceAdd(path)
+		if err != nil {
+			m.emitApp(map[string]any{"event_type": "workspace_pick_canceled", "request_id": rid, "error": err.Error()})
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		m.emitApp(map[string]any{
+			"event_type": "workspace_picked",
+			"request_id": rid,
+			"workspace":  entry,
+			"workspaces": m.workspaceEntries(),
+		})
+		m.resp(c, true, "", nil)
+
+	case CmdMobileStatus: // 手机连接面板：端口 / 配对码 / 已配对设备
+		if m.mobile == nil {
+			m.resp(c, true, "", map[string]any{"enabled": false})
+			return
+		}
+		m.resp(c, true, "", m.mobile.status())
+
+	case CmdMobileSetListen: // 切换监听范围：回环 ↔ 局域网（手机不能调，白名单外）
+		if m.mobile == nil {
+			m.resp(c, false, "手机端未启用", nil)
+			return
+		}
+		if err := m.mobile.setLan(boolVal(c.Payload["lan"])); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", m.mobile.status())
+
+	case CmdMobileRevoke: // 撤销一台手机（丢失/换机）
+		if m.mobile == nil {
+			m.resp(c, false, "手机端未启用", nil)
+			return
+		}
+		ok := m.mobile.pair.revoke(str(c.Payload, "device_id"))
+		m.resp(c, true, "", map[string]any{"revoked": ok})
 
 	case "list":
 		if ws == "" {
@@ -3219,6 +3357,23 @@ func (m *manager) dispatch(c command) {
 		m.deleteSession(ws, sid)
 		m.resp(c, true, "", map[string]any{"sessions": m.listSessions(ws)})
 
+	case CmdSessionRename: // 重命名会话（手动标题，跨端共享；空标题 = 清除覆盖）
+		if ws == "" || sid == "" {
+			m.resp(c, false, "workspace/session_id 为空", nil)
+			return
+		}
+		if err := session.ValidateSessionID(sid); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		title := strings.TrimSpace(str(c.Payload, "title"))
+		if len([]rune(title)) > 80 {
+			m.resp(c, false, "标题过长（≤80 字）", nil)
+			return
+		}
+		changed := sessionManualTitles.set(workspaceKey(ws), sid, title)
+		m.resp(c, true, "", map[string]any{"changed": changed, "sessions": m.listSessions(ws)})
+
 	case CmdSessionPin: // 置顶/取消置顶会话（持久化到 ~/.go-code/sessions/<wsKey>/sessions.json）
 		if ws == "" || sid == "" {
 			m.resp(c, false, "workspace/session_id 为空", nil)
@@ -3242,6 +3397,9 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		m.deleteWorkspace(ws)
+		if m.wsReg != nil {
+			m.wsReg.remove(ws)
+		}
 		m.resp(c, true, "", nil)
 
 	case CmdShutdown:
@@ -3360,8 +3518,9 @@ func (m *manager) deleteSession(wsPath, id string) {
 	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".record.json"))
 	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".record.json.bak"))
 	removeSubagentJournals(wsSessionsDir(wsPath), id)
-	// 清理该会话的置顶标记（防 pin 文件残留已删除会话）
+	// 清理该会话的置顶标记与手动标题（防残留文件把已删会话又「复活」）
 	sessionPins.set(workspaceKey(wsPath), id, false)
+	sessionManualTitles.set(workspaceKey(wsPath), id, "")
 }
 
 // subagentsBase 子任务输出 journal 根目录（D1 路径规则：sessions/<wsKey>/<sid>/agents）。
@@ -3540,6 +3699,7 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 			"title":      resolveLiveSessionTitle(wsKey, bs, id),
 			"updated_at": sessionUpdatedAt(ws, id, bs.lastActive.Load()),
 			"pinned":     sessionPins.isPinned(wsKey, id),
+			"running":    bs.running.Load(),
 		})
 	}
 	ws.mu.Unlock()
@@ -3593,6 +3753,10 @@ func sessionUpdatedAt(ws *workspaceRuntime, id string, lastActive int64) int64 {
 // > titles.json 缓存 > 首条 user 文本截断 > "New Chat"）。供 listSessions 与 mesh
 // 标题桥共用。
 func resolveLiveSessionTitle(wsKey string, bs *bridgeSession, id string) string {
+	// 用户手动重命名优先（跨端共享；桌面端仍可用 localStorage 覆盖）
+	if manual := sessionManualTitles.get(wsKey, id); manual != "" {
+		return manual
+	}
 	if bs != nil && bs.s != nil {
 		if ai := bs.s.AITitle(); ai != "" {
 			return ai
@@ -3615,6 +3779,9 @@ func resolveLiveSessionTitle(wsKey string, bs *bridgeSession, id string) string 
 // 与 meta 里的 AI 标题）。优先级同 resolveLiveSessionTitle：AI 标题（缓存 → jsonl meta）
 // > 首条 user 文本截断 > "New Chat"。
 func resolveDiskSessionTitle(wsKey, path, id string) string {
+	if manual := sessionManualTitles.get(wsKey, id); manual != "" {
+		return manual
+	}
 	if ai := sessionTitles.get(wsKey, id); ai != "" {
 		return ai
 	}
@@ -5549,6 +5716,19 @@ func serve() error {
 	// 重启后立即生效——不再依赖前端再触发一次 reload_settings（原缺陷：重启后网关静默停，
 	// 保存的节点列表不拨号，跨机 session_list 为空）。
 	m.applyMeshSettings()
+	// 工作区清单（桌面左栏与手机共用）。文件缺失时由渲染进程首次 workspace_sync 灌入。
+	m.wsReg = newWorkspaceRegistry(filepath.Join(appDataDir(), "workspaces.json"))
+	// 手机端接入：默认只绑回环；HAI_MOBILE=off 可整体关闭（测试/排障）。
+	if os.Getenv("HAI_MOBILE") != "off" {
+		ms := newMobileServer(m, appDataDir())
+		if err := ms.start("127.0.0.1:47800"); err != nil {
+			fmt.Fprintln(os.Stderr, "mobile: 启动失败:", err)
+			m.respTap = nil
+		} else {
+			m.mobile = ms
+			fmt.Fprintf(os.Stderr, "mobile: http://%s/m/\n", ms.addr)
+		}
+	}
 	cronStart := time.Now()
 	m.startCron()
 	startupLog("A3.startCron", cronStart)
@@ -5594,7 +5774,9 @@ func serve() error {
 			}
 			continue
 		}
+		m.dispatchMu.Lock()
 		m.dispatch(c)
+		m.dispatchMu.Unlock()
 		if err == io.EOF {
 			break
 		}

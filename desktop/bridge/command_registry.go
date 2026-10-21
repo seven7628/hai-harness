@@ -137,9 +137,29 @@ const (
 
 	// —— 工作区/系统 ——
 	CmdWorkspaceList   Command = "workspace_list"
-	CmdDeleteWorkspace Command = "delete_workspace"
-	CmdShutdown        Command = "shutdown"
-	CmdMetrics         Command = "metrics"
+	CmdWorkspaceAdd    Command = "workspace_add"
+	CmdWorkspaceRemove Command = "workspace_remove"
+	// CmdWorkspaceSync 渲染进程首次迁移：把 localStorage 的旧项目列表灌进
+	// ~/.go-code/workspaces.json（只增不减，避免覆盖手机刚加的工作区）。
+	CmdWorkspaceSync Command = "workspace_sync"
+	// CmdWorkspaceUpdate 重命名 / 置顶工作区（手机端管理页）。
+	CmdWorkspaceUpdate Command = "workspace_update"
+
+	// —— 手机端接入（见 mobile_server.go）——
+	CmdAnswerQuestion Command = "answer_question"
+	CmdMobileStatus   Command = "mobile_status"
+	CmdMobileRevoke   Command = "mobile_revoke"
+	// CmdSessionRename 手动重命名会话（跨端共享；空标题 = 清除覆盖）。
+	CmdSessionRename Command = "session_rename"
+	// CmdMobileSetListen 切换监听范围（回环 / 局域网）。桌面端专属：手机不能自己放开。
+	CmdMobileSetListen Command = "mobile_set_listen"
+	// CmdWorkspacePick / CmdWorkspacePickResult：「让电脑弹目录选择器」的两端。
+	// 手机只发 request；result 由 Electron 主进程回填（不在手机白名单）。
+	CmdWorkspacePick       Command = "workspace_pick_request"
+	CmdWorkspacePickResult Command = "workspace_pick_result"
+	CmdDeleteWorkspace     Command = "delete_workspace"
+	CmdShutdown            Command = "shutdown"
+	CmdMetrics             Command = "metrics"
 	// CmdRefreshPrices 用实时价源（models.dev / OpenRouter 自报价）补「无价」模型的价，
 	// 免发版（内置价表是编译期快照）。详见 desktop/bridge/price_refresh.go。
 	CmdRefreshPrices Command = "refresh_prices"

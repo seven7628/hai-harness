@@ -10,6 +10,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.68.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/larksuite/oapi-sdk-go/v3 v3.11.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	gopkg.in/yaml.v3 v3.0.1
 	nhooyr.io/websocket v1.8.17
 )
