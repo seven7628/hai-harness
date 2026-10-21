@@ -6,6 +6,7 @@ import { useAppStore } from '../store/useAppStore'
 import { useClock } from '../lib/useNow'
 import {
   DEFAULT_SCRIPT_TIMEOUT_MS,
+  RUN_STRIP_DELAY_MS,
   NESTED_ARGS_PREVIEW_CHARS,
   NESTED_COLLAPSED_LIMIT,
   NESTED_ERROR_PREVIEW_CHARS,
@@ -156,10 +157,18 @@ const NestedCallLine = memo(function NestedCallLine({ call }: { call: NestedCall
 // 每秒重渲的范围必须止步于此，不能把正文/工具行拖下水。
 export const ToolScriptRun = memo(function ToolScriptRun({ script, startedAt }: { script?: string; startedAt?: number }) {
   const t = useT()
+  // 延迟出现（RUN_STRIP_DELAY_MS）：0.17s 的调用根本活不到这里 —— 见该常量的注释。
+  // armed 在组件挂载后翻 true；工具结束时本组件随工具行一起卸载，定时器在 cleanup 里清掉。
+  const [armed, setArmed] = useState(false)
+  useEffect(() => {
+    const timer = setTimeout(() => setArmed(true), RUN_STRIP_DELAY_MS)
+    return () => clearTimeout(timer)
+  }, [])
   const opts = useMemo(() => parseScriptOptions(script), [script])
   const sites = useMemo(() => scriptCallSites(script), [script])
   const budgetMs = opts?.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS
   const elapsed = useClock(startedAt, startedAt != null)
+  if (!armed) return null
   const used = Math.max(0, Math.min(elapsed ?? 0, budgetMs))
   const pct = budgetMs > 0 ? (used / budgetMs) * 100 : 0
   return (

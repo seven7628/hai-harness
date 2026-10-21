@@ -590,6 +590,17 @@ function normalizePath(raw?: string): string {
  */
 export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000
 
+/**
+ * 执行中控制台条（.tool-run）的**延迟出现**阈值（毫秒）。
+ *
+ * 实测（95 次真实调用）：codemode 墙钟 p50 0.17s、p95 0.81s —— 也就是说绝大多数脚本活不到
+ * 这个阈值。没有这道闸，进度条会在十几帧里出现又消失，观感是「抖了一下」而不是「在跑」。
+ * 长跑的脚本（浏览器自动化 / 长测试）仍能正常看到它，只是晚 0.4 秒。
+ *
+ * 与 NESTED_COLLAPSED_LIMIT 那类「显示规则」同性质：这是**视觉降噪**，不是性能优化。
+ */
+export const RUN_STRIP_DELAY_MS = 400
+
 /** 与后端 MaxScriptTimeoutMs 同口径（1 小时）。这里夹紧只为不让手滑写出的大数字把
  *  进度条压成 0.1%（后端对超范围的声明会直接报错，脚本根本不会跑）。 */
 export const MAX_SCRIPT_TIMEOUT_MS = 3_600_000
