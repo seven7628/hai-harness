@@ -412,6 +412,65 @@ func payloadDigest(p []byte) [8]byte {
 	return out
 }
 
+// delete 追加一条删除记录（同 id 后续 put 可再覆盖回来）。
+//
+// 只用于「本次快照不再引用的块」（见 pruneTo）。为什么必须落成记录而不是从内存
+// 索引里抹掉：索引会被 `rebuild` 从 sidecar 重扫出来，不落盘的话删除在下次启动
+// 就失效了。
+func (bs *blockStore) delete(id string) error {
+	head := buildBlockRecordHead(blockRecDel, id, nil)
+	if _, err := bs.w.Write(head); err != nil {
+		return err
+	}
+	// 删除记录同样带 8 字节摘要（空 payload 的摘要），读取端按统一布局跳过。
+	d := payloadDigest(nil)
+	if _, err := bs.w.Write(d[:]); err != nil {
+		return err
+	}
+	if _, existed := bs.index[id]; existed {
+		bs.staleRecords++
+	}
+	delete(bs.index, id)
+	bs.recordsWritten++
+	bs.bytesWritten += int64(len(head) + 8)
+	bs.sortedDirty = true
+	bs.nBytes += int64(len(head) + 8)
+	return nil
+}
+
+// pruneTo 把索引里**不再被本次快照引用**的块写成删除记录。
+//
+// ## 为什么必须有（2026-10-21 线上事故：刷新后会话与左栏子智能体全没了）
+//
+// sidecar 是 append-only 的，而 reducer 的 blocks 集合会**变小**：
+//
+//	· Marshal 的空壳 assistant 块被 normalizeDanglingState 丢弃（真实长会话实测 451 个）
+//	· 新顶层 run 清掉旧 error 块（applyAgentStartLocked）
+//	· 清空上下文 / 会话重置
+//
+// 被丢弃的块留在索引里 → `ref.Count`（本次引用块数）与 `store.Len()`（索引块数）
+// 对不上 —— 而读取端把这个对账当完整性信号（见 LoadRecord 的 resolveBlockRef），
+// 于是**下一次打开会话直接判定 record corrupt**。create 里的 reducer 因此是空的，
+// 打开会话回一份 0 块 checkpoint：用户看到「刷新后会话、子智能体都不见了」。
+// 实测两份真实会话分别差 3 块与 630 块。
+func (bs *blockStore) pruneTo(keep map[string]struct{}) error {
+	if len(bs.index) <= len(keep) {
+		return nil // 常见的「只增不减」路径在这里 O(1) 退出
+	}
+	stale := make([]string, 0, len(bs.index)-len(keep))
+	for id := range bs.index {
+		if _, ok := keep[id]; !ok {
+			stale = append(stale, id)
+		}
+	}
+	for _, id := range stale {
+		if err := bs.delete(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // put 追加一条 block（同 id 后续记录覆盖前者）。
 func (bs *blockStore) put(id string, payload []byte) error {
 	off := bs.nBytes
@@ -815,10 +874,15 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 	}
 
 	refIDs := make([]string, 0, len(elems))
+	keep := make(map[string]struct{}, len(elems))
 	for _, e := range elems {
 		if id, ok := blockID(e); ok {
 			refIDs = append(refIDs, id)
+			keep[id] = struct{}{}
 		}
+	}
+	if err := bs.pruneTo(keep); err != nil {
+		return nil, 0, err
 	}
 	setSum, serr := blocksSetSum(bs, refIDs)
 	if serr != nil {
@@ -845,7 +909,12 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 // 数量对不上就回退全量路径。
 func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, int, error) {
 	if len(spans) == 0 {
-		// 空 blocks：仍要写引用，避免下次被当作旧格式
+		// 空 blocks：仍要写引用，避免下次被当作旧格式。
+		// 同时把索引里残留的块清掉 —— 否则 ref.Count=0 与 store.Len()>0 对不上，
+		// 下次读这份 record 会被判成 corrupt（见 pruneTo 的事故说明）。
+		if err := bs.pruneTo(nil); err != nil {
+			return nil, 0, err
+		}
 		emptySum, _ := blocksSetSum(bs, nil)
 		ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: emptySum, Count: 0, Schema: 1}
 		refJSON, _ := json.Marshal(map[string]blocksRefDoc{blocksRefKey: ref})
@@ -878,10 +947,15 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 		wrote++
 	}
 	refIDs2 := make([]string, 0, len(spans))
+	keep2 := make(map[string]struct{}, len(spans))
 	for _, e := range spans {
 		if id, ok := blockID(e); ok {
 			refIDs2 = append(refIDs2, id)
+			keep2[id] = struct{}{}
 		}
+	}
+	if err := bs.pruneTo(keep2); err != nil {
+		return nil, 0, err
 	}
 	setSum2, serr2 := blocksSetSum(bs, refIDs2)
 	if serr2 != nil {

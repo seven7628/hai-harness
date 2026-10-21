@@ -852,8 +852,9 @@ func (r *ViewReducer) marshalLocked() ([]byte, error) {
 // checkpoint 边界通常只有 1~2 个 block 变化。
 //
 // 这里把 Checkpoint 拆成「blocks 之外的部分」+「逐 block 字节」：
-//   · 前者很小（turns/diffs/标量，约 4MB），每次照常序列化；
-//   · 后者按 block 内容指纹命中缓存，未变化的直接复用上次的字节。
+//
+//	· 前者很小（turns/diffs/标量，约 4MB），每次照常序列化；
+//	· 后者按 block 内容指纹命中缓存，未变化的直接复用上次的字节。
 //
 // 输出必须与 json.Marshal 的**键序完全一致**：所以不能简单地
 // "序列化去掉 blocks 的结构再拼接"，而是用一个 RawMessage 占位符合成
@@ -3313,6 +3314,15 @@ type PartialView struct {
 	HasMore     bool   // 是否还有更早的块
 	Returned    int    // 本次返回的块数
 	MarshalCost int64  // 编码耗时（ns，诊断用）
+
+	// Agents 是**落在窗口之外**的子智能体 / 后台任务卡片（见 detachAgentsLocked）。
+	//
+	// 为什么必须单独带回来（用户 2026-10 报障「刷新后左侧子智能体全没了」）：
+	// 左栏的子智能体树是从 blocks 投影出来的（lib/agentTree.agentTreeFromView），
+	// 而打开会话默认只回最近 200 块 —— 跑半天的会话里 agent 卡片早就在窗口之外，
+	// 于是**每次刷新树都是空的**。run_nodes 救不了：新顶层 run 会把 runNodes
+	// 重置成 {主 run}（见 applyAgentStartLocked），子 run 的历史只活在卡片里。
+	Agents []Block
 }
 
 // MarshalTail 只序列化最后 limit 个 block，并在 JSON 里标注截断游标。
@@ -3364,6 +3374,8 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	if len(cp.Diffs) > limit {
 		cp.Diffs = cp.Diffs[len(cp.Diffs)-limit:]
 	}
+	// 窗口之外的子智能体/任务卡片：独立于 blocks 带回（见 PartialView.Agents 的注释）
+	agents := detachAgents(blocks[:start])
 
 	// 骨架：blocks 置 nil 后序列化，再注入尾部块 + 三个标注字段。
 	cp.Blocks = nil
@@ -3439,7 +3451,42 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 		Total:    total,
 		HasMore:  start > 0,
 		Returned: len(tail),
+		Agents:   agents,
 	}, nil
+}
+
+// detachAgents 从窗口外的块里挑出「树要用的卡片」，并把重内容换成可回落的分页句柄。
+//
+// 两类卡片，处理方式不同：
+//
+//   - **有 task_id**（后台子智能体 / 后台工具任务）：items 是完整转录，实测单卡
+//     100–185KB。这里只发骨架 —— UI 打开它时按 task_id 从子任务 journal 取首屏
+//     （agent_history，offset=0 就取最新一页）。裁掉的条数记进 ItemsTrimmed，
+//     否则 UI 会以为「这条卡片本来就没有记录」而不显示加载入口。
+//   - **没有 task_id**（同步子智能体，in-loop）：没有 journal 可取，checkpoint 里的
+//     items 是唯一副本 → 整份带上，宁可多传也不能让它变成空白页。
+//
+// 只挑树投影认的那三种：agent / async_task / 被摘离的（promoted）工具任务。
+// 其余块留在窗口以外由「加载更早」逐页取回，不进这个数组。
+func detachAgents(out []Block) []Block {
+	var agents []Block
+	for _, b := range out {
+		switch {
+		case b.Kind == blockKindAgent, b.Kind == blockKindAsyncTask:
+		case b.Kind == blockKindTool && b.Promoted && b.TaskID != "":
+		default:
+			continue
+		}
+		if b.TaskID == "" || len(b.Items) == 0 {
+			agents = append(agents, b)
+			continue
+		}
+		slim := b // 值拷贝：Items 切片头置空不影响 r.blocks 本体
+		slim.ItemsTrimmed += len(slim.Items)
+		slim.Items = nil
+		agents = append(agents, slim)
+	}
+	return agents
 }
 
 // ReadBlockPage 按游标返回一页 block 的 JSON 字节（供 UI「加载更早」）。

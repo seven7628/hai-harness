@@ -232,9 +232,9 @@ func TestSidecarBlockOrderByID(t *testing.T) {
 	ctx := context.Background()
 
 	// 故意乱序写入（模拟不同提交时序）
-	v := sidecarTestView(t, `[` +
-		`{"id":5,"kind":"assistant","status":"done","ts":5},` +
-		`{"id":2,"kind":"assistant","status":"done","ts":2}` +
+	v := sidecarTestView(t, `[`+
+		`{"id":5,"kind":"assistant","status":"done","ts":5},`+
+		`{"id":2,"kind":"assistant","status":"done","ts":2}`+
 		`]`)
 	if err := s.CommitRecord(ctx, sidecarRecord(t, 1, v)); err != nil {
 		t.Fatal(err)
@@ -256,5 +256,98 @@ func TestSidecarBlockOrderByID(t *testing.T) {
 	}
 	if cp.Blocks[0].ID != 2 || cp.Blocks[1].ID != 5 {
 		t.Fatalf("读回顺序应按 id 递增，实为 %d,%d", cp.Blocks[0].ID, cp.Blocks[1].ID)
+	}
+}
+
+// TestSidecarSurvivesBlockSetShrink 块集合变小后，record 必须仍然可读。
+//
+// 2026-10-21 线上事故：刷新后会话与左栏子智能体全没了。
+// 真因链条：reducer 的 blocks 会删（normalize 丢弃空壳 assistant 块 / 新 run 清 error
+// 块 / 清空上下文），而 sidecar 是 append-only —— 被删的块留在索引里，
+// `$blocks_ref.count` 与索引块数对不上 → LoadRecord 判定 corrupt → create 的 reducer
+// 为空 → 打开会话回一份 0 块 checkpoint。实测两份真实会话差 3 / 630 块。
+//
+// 这条测试直接演那个形态：先写 5 块，再写一份只剩 3 块的快照，然后必须能读回。
+func TestSidecarSurvivesBlockSetShrink(t *testing.T) {
+	s, err := NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	first := `[` +
+		`{"id":1,"kind":"assistant","status":"done","ts":100,"text":"一"},` +
+		`{"id":2,"kind":"assistant","ts":101,"text":""},` + // 空壳：下一份快照里会消失
+		`{"id":3,"kind":"tool","status":"done","ts":102,"name":"bash"},` +
+		`{"id":4,"kind":"user","status":"done","ts":103,"text":"四"},` +
+		`{"id":5,"kind":"assistant","ts":104,"text":""}` +
+		`]`
+	if err := s.CommitRecord(ctx, sidecarRecord(t, 1, sidecarTestView(t, first))); err != nil {
+		t.Fatal(err)
+	}
+	// 第二份快照丢掉了两个空壳块（真实 reducer 每次 Marshal 都会这么丢）
+	second := `[` +
+		`{"id":1,"kind":"assistant","status":"done","ts":100,"text":"一"},` +
+		`{"id":3,"kind":"tool","status":"done","ts":102,"name":"bash"},` +
+		`{"id":4,"kind":"user","status":"done","ts":103,"text":"四"}` +
+		`]`
+	if err := s.CommitRecord(ctx, sidecarRecord(t, 2, sidecarTestView(t, second))); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := s.LoadRecord(ctx, "ws-a", "sess-1")
+	if err != nil {
+		t.Fatalf("块集合变小后 record 必须仍可读（否则用户刷新一次历史就没了）: %v", err)
+	}
+	var doc struct {
+		Blocks []struct {
+			ID int `json:"id"`
+		} `json:"blocks"`
+	}
+	if err := json.Unmarshal(loaded.ViewCheckpoint, &doc); err != nil {
+		t.Fatalf("读回的 view 不是合法 JSON: %v", err)
+	}
+	ids := make([]int, 0, len(doc.Blocks))
+	for _, b := range doc.Blocks {
+		ids = append(ids, b.ID)
+	}
+	if len(ids) != 3 || ids[0] != 1 || ids[1] != 3 || ids[2] != 4 {
+		t.Fatalf("读回的就是最后那份快照（不重不漏），实际 %v", ids)
+	}
+
+	// 引用计数与索引块数必须严格一致（这是读取端唯一的完整性信号之一）
+	path, _ := s.RecordPath("ws-a", "sess-1")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec struct {
+		View struct {
+			Blocks struct {
+				Ref struct {
+					Count int `json:"count"`
+				} `json:"$blocks_ref"`
+			} `json:"blocks"`
+		} `json:"view_checkpoint"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.View.Blocks.Ref.Count != 3 {
+		t.Fatalf("$blocks_ref.count 应等于快照块数 3，实际 %d", rec.View.Blocks.Ref.Count)
+	}
+	bs, err := openBlockStore(blockStorePath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bs.Close()
+	if bs.Len() != 3 {
+		t.Fatalf("索引里只能剩下被引用的 3 块（被丢弃的块必须落删除记录），实际 %d", bs.Len())
+	}
+	if !bs.has("1") || !bs.has("3") || !bs.has("4") {
+		t.Fatal("被引用的块不能被子集裁剪误删")
+	}
+	if bs.has("2") || bs.has("5") {
+		t.Fatal("不再被引用的块必须从索引里消失（否则下次读还会对不上）")
 	}
 }

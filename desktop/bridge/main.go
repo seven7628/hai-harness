@@ -321,7 +321,16 @@ type bridgeSession struct {
 	// 语义边界触发异步 CommitRecord（SessionRecord = sdk_state + view_checkpoint）。
 	reducer *ViewReducer
 	coord   *checkpointCoordinator
-	wsKey   string // workspaceKey（record 路径维度）
+	// recordCorrupt 本会话的 record 存在但读不出来（块存储计数/摘要对不上）。
+	//
+	// 为什么必须显式记：create 里 LoadRecord 失败只让 reducer 保持空，而打开会话
+	// （new_session）只看 LoadRecordMetadata（只读头部，永远成功）→ 会直接回一份
+	// **0 块**的 checkpoint，用户看到的就是「刷新后会话和左栏子智能体全没了」
+	//（2026-10-21 实测两份真实会话：块数差 3 / 630）。
+	// 置位后：打开路径改走事件重放自愈，且空 reducer 期间不许提交（否则用一份空视图
+	// 覆盖掉还能从事件日志重建的历史）。
+	recordCorrupt bool
+	wsKey         string // workspaceKey（record 路径维度）
 
 	// 序列化缓存：session_id/workspace 的 JSON 字节（会话级不变，emit 高频复用，
 	// 避免每个事件（尤其流式 chunk）重复 json.Marshal 这两个常量键值）。
@@ -1154,6 +1163,7 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	var recoveryState *session.State // 冷恢复时从 record.sdk_state 注入 SDK 恢复源
 	var recordStore *session.FileStorage
 	var recordSetupErr error
+	recordCorrupt := false // record 在但读不出来 → 打开时要靠事件重放自愈（见字段注释）
 	if !opts.noRecord {
 		if recordStore, recordSetupErr = newRecordStore(); recordSetupErr == nil {
 			if rec, lerr := recordStore.LoadRecord(context.Background(), wsKey, id); lerr == nil {
@@ -1166,6 +1176,12 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 				//（含 pending 积压；session.NewSession 的 WithRecoveryState 分支使用）
 				stateCopy := rec.SDKState
 				recoveryState = &stateCopy
+			} else if !errors.Is(lerr, session.ErrRecordNotFound) {
+				// record 存在但读不出来：**不能**当作空会话处理（那会让打开会话回一份
+				// 0 块 checkpoint —— 用户看到「刷新后全没了」，且下一次提交会用空视图
+				// 盖掉还能从事件日志重建的历史）。标记后由打开路径重放自愈。
+				recordCorrupt = true
+				startupLog("A6.recordCorrupt: "+lerr.Error(), time.Now())
 			}
 		}
 	}
@@ -1251,6 +1267,7 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	if !opts.noRecord && recordStore != nil {
 		bs.reducer = reducer
 		bs.wsKey = wsKey
+		bs.recordCorrupt = recordCorrupt
 		// 测试隔离环境（appDataDirOverride 非空）用同步提交，避免异步 worker
 		// 与测试 TempDir 清理竞态；生产保持异步 + 关闭时 drain。
 		bs.coord = newCheckpointCoordinator(wsKey, id, recordStore, reducer, s, ctx.Done(), appDataDirOverride != "")
@@ -1626,6 +1643,20 @@ func (m *manager) dispatch(c command) {
 					// 存在但不可用：不迁移、不覆盖，落到下面的 legacy 分支。
 				}
 			}
+			// 损坏自愈**优先于**「按元数据回 checkpoint」：record 读不出来时 create 的
+			// reducer 是空的，而元数据只读头部（永远成功）—— 直接按元数据回，就是一份
+			// 0 块视图，用户看到「刷新后会话和左栏子智能体全没了」（2026-10-21 事故）。
+			// 救不回来（没有事件日志/重放失败）时把 metaOK 打掉，落到下方的快照重放分支，
+			// 同样不会回空视图；本进程内已存在的会话（wasLive）不走这条路。
+			if metaOK && bs.recordCorrupt {
+				if !wasLive && bs.migrateLegacyToCheckpoint() {
+					if m2, merr2 := bs.coord.MetadataFromStore(context.Background()); merr2 == nil {
+						meta = m2
+					}
+				} else {
+					metaOK = false
+				}
+			}
 			if metaOK {
 				{
 					// 进程内 reducer 已 hydrate（create 时 Restore + NormalizeForRestore）；
@@ -1654,6 +1685,14 @@ func (m *manager) dispatch(c command) {
 							respData["blocks_cursor"] = pv.Cursor
 							respData["blocks_total"] = pv.Total
 							respData["blocks_has_more"] = pv.HasMore
+							// 窗口外的子智能体/任务卡片（树的数据源，见 PartialView.Agents）。
+							// 与 blocks 分开带：它们不进对话流（那是历史里的卡片，混进
+							// 首屏会让会话开头凭空多几张旧卡），只供左栏树 + 打开子会话。
+							if len(pv.Agents) > 0 {
+								if raw, aerr := json.Marshal(pv.Agents); aerr == nil {
+									respData["agents"] = json.RawMessage(raw)
+								}
+							}
 							m.resp(c, true, "", respData)
 							return
 						}
@@ -1671,9 +1710,15 @@ func (m *manager) dispatch(c command) {
 						return
 					}
 				}
-			} else if noRecord {
-				// 无 record：懒迁移（旧会话首次访问）——读 events 重放生成 checkpoint。
+			} else if noRecord || bs.recordCorrupt {
+				// 无 record / record 读不出来：懒迁移——读 events 重放生成 checkpoint。
 				// 同步完成（首次一次性成本），成功后响应 checkpoint；失败回退 legacy。
+				//
+				// recordCorrupt 分支是**自愈**：block store 计数对不上（块集合变小后索引
+				// 残留，见 session/block_store.go 的 pruneTo）会让整条 record 不可读。
+				// 若在这里当作空会话返回，UI 拿到 0 块 checkpoint —— 用户看到「刷新后
+				// 会话和左栏子智能体全没了」。事件日志是完整的历史源：重放一遍既能救回
+				// 视图，也能重写一份自洽的 record。
 				if !wasLive && bs.migrateLegacyToCheckpoint() {
 					if rec2, rerr2 := bs.coord.Load(context.Background()); rerr2 == nil {
 						if viewRaw, merr := bs.reducer.Marshal(); merr == nil {

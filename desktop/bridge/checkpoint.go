@@ -29,6 +29,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -365,6 +366,11 @@ func (c *checkpointCoordinator) nextRevisionLocked(ctx context.Context) (uint64,
 	rec, err := c.store.LoadRecord(ctx, c.wsKey, c.sessID)
 	if err != nil {
 		if !isRecordNotFound(err) {
+			// record 读不出来（损坏）但**它存在**：revision 基线仍可从头部元数据拿到。
+			// 自愈提交必须能继续 —— 否则修好的视图永远落不了盘，每次打开都重放一遍。
+			if meta, merr := c.store.LoadRecordMetadata(ctx, c.wsKey, c.sessID); merr == nil {
+				return meta.Revision + 1, true, nil
+			}
 			return 0, false, err
 		}
 		rec = nil
@@ -375,8 +381,14 @@ func (c *checkpointCoordinator) nextRevisionLocked(ctx context.Context) (uint64,
 	return rev + 1, true, nil
 }
 
+// isRecordNotFound 只认真正的「没有 record」。
+//
+// 历史实现是子串判定（strings.Contains(err, "not found")），而 record 损坏时的错误
+// 文本是「formal=<损坏> backup=session record not found」—— **备份缺失的措辞**让它
+// 被判成「没有 record」，于是 revision 基线从 0 起算、自愈提交撞上 revision 冲突
+// （2026-10-21 复盘时实测踩到：修好的视图永远落不了盘，每次打开都要重放一遍）。
 func isRecordNotFound(err error) bool {
-	return err != nil && (strings.Contains(err.Error(), "not found") || os.IsNotExist(err))
+	return errors.Is(err, session.ErrRecordNotFound) || os.IsNotExist(err)
 }
 
 // sdkState 构造 record 中的 sdk_state 快照。
@@ -467,7 +479,10 @@ func (bs *bridgeSession) observe(e events.Event) {
 	_ = bs.reducer.Apply(e, meta)
 
 	if commitBoundary(e) {
-		if bs.coord != nil {
+		// record 损坏且 reducer 仍是空的（还没重放自愈）→ **不许提交**：
+		// 那会把一份 0 块/残缺的视图写成新的权威 record，覆盖掉还能从事件日志
+		// 完整重建的历史（2026-10-21 事故的第二步）。等打开路径重放完再恢复提交。
+		if bs.coord != nil && !(bs.recordCorrupt && bs.reducer.BlockCount() == 0) {
 			bs.coord.Request()
 		}
 	}
@@ -492,6 +507,11 @@ func commitBoundary(e events.Event) bool {
 // 之后该会话走 checkpoint 秒出。events 缺失/空 → 返回 false（保持 legacy 路径）。
 func (bs *bridgeSession) migrateLegacyToCheckpoint() bool {
 	if bs == nil || bs.coord == nil || bs.reducer == nil || bs.eventsDir == "" {
+		return false
+	}
+	// reducer 已有内容 → 绝不能重放（事件会在内存里被应用两遍，块与用量翻倍）。
+	// 正常入口只在「新建/损坏」时调用，那时 reducer 是空的；这里防御异常调用顺序。
+	if bs.reducer.BlockCount() > 0 {
 		return false
 	}
 	path := filepath.Join(bs.eventsDir, bs.id+".jsonl")
@@ -523,6 +543,8 @@ func (bs *bridgeSession) migrateLegacyToCheckpoint() bool {
 	if applied == 0 {
 		return false // 无有效事件：不生成空 checkpoint
 	}
+	// 重放成功 = reducer 重新装上了完整历史 → 解除「损坏」状态，恢复常规提交。
+	bs.recordCorrupt = false
 	// 落盘 record（同步提交：迁移是一次性的，响应需要 record 已存在才能返回 checkpoint）
 	if bs.coord != nil {
 		// 直接调 commitOnce（持锁同步），不等异步 worker

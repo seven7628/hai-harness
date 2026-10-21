@@ -237,3 +237,103 @@ func TestReadBlockPageDropsEmptyAssistantShells(t *testing.T) {
 		t.Fatalf("正常块不该被丢弃: total=%d n=%d", total2, len(blks2))
 	}
 }
+
+// TestMarshalTailCarriesAgentsOutsideWindow 窗口外的子智能体卡片必须随投影一起回给 UI。
+//
+// 用户报障（2026-10）：「我的子智能体左侧侧边栏怎么看不到了？？？刷新后近期的也看不到了」。
+// 真因：左栏的树是**从 blocks 投影出来**的（lib/agentTree.agentTreeFromView），而打开
+// 会话只回最近 200 块 —— 真实会话实测（487 块）6 张卡片全在窗口之外，于是刷新一次
+// 树就空一次。run_nodes 也救不了：新顶层 run 会把 runNodes 重置成 {主 run}。
+//
+// 这条测试钉住三件事：
+//  1. 窗口外的 agent/async_task 卡片进 pv.Agents（树有东西可画）；
+//  2. 有 task_id 的卡片只发骨架（items 清空 + items_trimmed 记账），否则「首屏 200 块」
+//     省下来的传输量又被卡片 item 吐回去（实测单卡 100–185KB）；
+//  3. 没有 task_id 的同步子智能体整份带上 —— 它没有 journal 可回落，Items 是唯一副本。
+func TestMarshalTailCarriesAgentsOutsideWindow(t *testing.T) {
+	r := NewViewReducer()
+	cp := &Checkpoint{SchemaVersion: checkpointSchemaVersion}
+	add := func(b Block) { cp.Blocks = append(cp.Blocks, b) }
+	items := func(n int) []AgentItem {
+		out := make([]AgentItem, n)
+		for i := range out {
+			out[i] = AgentItem{Kind: agentItemText, Text: "记录"}
+		}
+		return out
+	}
+	add(Block{Kind: blockKindUser, ID: 1, Text: "开始"})
+	// ① 后台子智能体：有 task_id → 骨架（items 裁掉，条数记账）
+	add(Block{Kind: blockKindAgent, ID: 2, RunID: "run-bg", ParentRunID: "run-main", Label: "后台子智能体",
+		Status: statusCompleted, SpawnedAt: 10, TaskID: "task-bg", Items: items(30)})
+	// ② 同步子智能体：没有 task_id → 整份带上（没有 journal 可回落）
+	add(Block{Kind: blockKindAgent, ID: 3, RunID: "run-sync", ParentRunID: "run-main", Label: "同步子智能体",
+		Status: statusCompleted, SpawnedAt: 20, Items: items(4)})
+	// ③ 后台任务占位
+	add(Block{Kind: blockKindAsyncTask, ID: 4, Label: "后台任务", Status: statusRunning, TaskID: "task-async"})
+	// ④ 被摘离的工具任务（树投影也认它）
+	add(Block{Kind: blockKindTool, ID: 5, Name: "bash", Status: statusDone, TaskID: "task-tool", Promoted: true})
+	// ⑤ 普通工具块：不进 Agents（它在对话流里，由「加载更早」取回）
+	add(Block{Kind: blockKindTool, ID: 6, Name: "bash", Status: statusDone})
+	// 填充到窗口之外
+	for i := 7; i <= 120; i++ {
+		add(Block{Kind: blockKindAssistant, ID: uint64(i), Text: "正文"})
+	}
+	// ⑥ 窗口**内**的卡片：已经在 blocks 里，不能再重复进 Agents
+	add(Block{Kind: blockKindAgent, ID: 121, RunID: "run-recent", ParentRunID: "run-main", Label: "最近的",
+		Status: statusRunning, SpawnedAt: 30, TaskID: "task-recent"})
+	if err := r.Restore(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	pv, err := r.MarshalTail(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[uint64]Block{}
+	for _, b := range pv.Agents {
+		byID[b.ID] = b
+	}
+	if len(byID) != 4 {
+		t.Fatalf("窗口外卡片应有 4 张（agent×2/async_task/工具任务），实际 %d 张: %v", len(byID), keysOf(byID))
+	}
+	bg, ok := byID[2]
+	if !ok {
+		t.Fatal("后台子智能体卡片必须回给 UI（否则左栏树刷新后就是空的）")
+	}
+	if len(bg.Items) != 0 || bg.ItemsTrimmed != 30 {
+		t.Fatalf("有 task_id 的卡片应只发骨架: items=%d trimmed=%d（want 0/30）", len(bg.Items), bg.ItemsTrimmed)
+	}
+	if bg.TaskID != "task-bg" || bg.RunID != "run-bg" || bg.ParentRunID != "run-main" || bg.Label != "后台子智能体" {
+		t.Fatalf("骨架必须保留身份字段（树的父子连线靠它）: %+v", bg)
+	}
+	sync, ok := byID[3]
+	if !ok || len(sync.Items) != 4 {
+		t.Fatalf("没有 task_id 的同步子智能体必须整份带上（无 journal 可回落）: %+v", sync)
+	}
+	if _, ok := byID[5]; !ok {
+		t.Fatal("promoted 工具任务在树里也是一个节点，必须带上")
+	}
+	if _, has := byID[6]; has {
+		t.Fatal("普通工具块不属于树，不该进 Agents")
+	}
+	if _, has := byID[121]; has {
+		t.Fatal("窗口内的卡片已在 blocks 里，不能重复进 Agents（会出现两个同名节点）")
+	}
+	// 未截断时没有窗口外卡片
+	small := buildPagingReducer(t, 10)
+	pv2, err := small.MarshalTail(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pv2.Agents) != 0 {
+		t.Fatalf("未截断时不该有 Agents，实际 %d", len(pv2.Agents))
+	}
+}
+
+func keysOf(m map[uint64]Block) []uint64 {
+	out := make([]uint64, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
