@@ -171,7 +171,22 @@ export function formatWall(sec: number): string {
 export function scriptSummary(src?: string, max = 44): string {
   const s = (src ?? '').replace(/\r\n?/g, '\n').trim()
   if (!s) return ''
-  return previewChars(discoverCallOf(s) ?? firstCodeLine(s), max).text
+  // 顺序：先真调用、再发现型调用、最后第一行代码。
+  // 为什么真调用优先：混合脚本（既 searchTools 现查、又真调工具）的档位是**执行**，
+  // 头部若只显示 `searchTools("x")`，这一行就和「检索档」撞脸 —— 那正是用户抱怨的
+  // 「分不出 Search 和 Execute」。纯检索脚本没有 tools.x 调用，仍会显示搜索什么。
+  return previewChars(firstToolCallOf(s) ?? discoverCallOf(s) ?? firstCodeLine(s), max).text
+}
+
+// 第一处 `tools.xxx(` / `tools["raw"](`（含实参的省略写法）。
+// MCP 工具的 raw 名（`mcp__x__y_ab12cd`）只能双键调用，摘要也照脚本里能跑通的写法给。
+function firstToolCallOf(src: string): string | undefined {
+  TOOL_SITE_RE.lastIndex = 0
+  const m = TOOL_SITE_RE.exec(src)
+  if (!m) return undefined
+  const raw = m[1] ?? m[2] ?? m[3] ?? ''
+  if (!raw) return undefined
+  return /^[A-Za-z_$][\w$]*$/.test(raw) ? `tools.${raw}(…)` : `tools["${raw}"](…)`
 }
 
 // 发现型调用：`searchTools("x")` / `describeTool('y')` / `globalThis.searchTools(…)`。
@@ -553,4 +568,219 @@ function normalizePath(raw?: string): string {
   // 当成路径显示出来 —— 宁可少显示（不显示），不可编造。
   if (!/[/\\]|[A-Za-z]:|\.\w{1,8}$/.test(p)) return ''
   return p
+}
+
+// —— 脚本静态画像（预算 / 调用点 / 找回的工具）——————————————————————————
+//
+// 下面三样都是**只读脚本源码/结果**就能得到的确定事实，用来把「执行中」与「检索」两档
+// 渲染成有信息量的形态（而不只是一个转圈）：
+//   · parseScriptOptions → 进度条的分母（脚本自己声明的墙钟预算）
+//   · scriptCallSites    → 执行中就能显示的「脚本准备调这些工具」
+//   · parseFoundTools    → 检索档真正的产出（工具清单）而不是一坨 JSON
+// 一条纪律：全部**best-effort**。解析不出来 = 返回 undefined/[]，渲染层退回既有形态；
+// 绝不猜一个数字或一条工具（显示错的预算比不显示预算糟得多）。
+
+/**
+ * 后端未声明 timeout_ms 时的墙钟上限（对齐 tools/builtin/codemode/descriptions.go 的
+ * DefaultScriptTimeoutMs，那边用测试钉了 30000）。
+ *
+ * 它**只是进度条的分母**：真正的墙钟 owner 是宿主 ExecScope，脚本声明的
+ * `@options.timeout_ms` 优先。前后端漂移不会让任何调用出错，只会让进度条按错的刻度走，
+ * 所以两边改动时要一起看。
+ */
+export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000
+
+/** 与后端 MaxScriptTimeoutMs 同口径（1 小时）。这里夹紧只为不让手滑写出的大数字把
+ *  进度条压成 0.1%（后端对超范围的声明会直接报错，脚本根本不会跑）。 */
+export const MAX_SCRIPT_TIMEOUT_MS = 3_600_000
+
+/** 脚本首行 `// @options:` 的声明（只取渲染用得到的两个数）。 */
+export interface ScriptOptions {
+  /** 墙钟上限（毫秒）；未声明 = undefined（渲染层用 DEFAULT_SCRIPT_TIMEOUT_MS） */
+  timeoutMs?: number
+  /** 模型可见输出预算（token）；本文件只透传，进度条不用它 */
+  maxOutputTokens?: number
+}
+
+// 只认**第一行**，与前端的对手方同口径：`[ \t]*//[ \t]*@options:[ \t]*{…}`。
+// 后端（ParseOptionsLine）还容忍行尾空白之外的严格 JSON；这里只要 JSON.parse 成功即可 ——
+// 解析失败时后端会让整次调用失败，进度条显示不显示预算已经不重要。
+const OPTIONS_LINE_RE = /^[ \t]*\/\/[ \t]*@options:[ \t]*(\{.*\})[ \t]*$/
+
+/**
+ * 解析脚本首行的 `// @options: {...}`（拿墙钟预算画进度条）。
+ *
+ * 严格只看第一行**且**要求 `@options:` 前缀：写在第二行的 `@options` 后端不认（脚本会
+ * 按宿主默认预算跑），前端若也认，就会画出一条「按 5 分钟走」而实际 30 秒就被杀的进度条。
+ */
+export function parseScriptOptions(src?: string): ScriptOptions | undefined {
+  const first = (src ?? '').replace(/\r\n?/g, '\n').split('\n')[0] ?? ''
+  const m = OPTIONS_LINE_RE.exec(first)
+  if (!m) return undefined
+  let raw: { timeout_ms?: unknown; max_output_tokens?: unknown }
+  try {
+    raw = JSON.parse(m[1]) as typeof raw
+  } catch {
+    return undefined
+  }
+  if (!raw || typeof raw !== 'object') return undefined
+  const timeoutMs = intInRange(raw.timeout_ms, 1, MAX_SCRIPT_TIMEOUT_MS)
+  const maxOutputTokens = intInRange(raw.max_output_tokens, 1, 200_000)
+  if (timeoutMs === undefined && maxOutputTokens === undefined) return undefined
+  return { ...(timeoutMs !== undefined ? { timeoutMs } : {}), ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}) }
+}
+
+/** 十进制整数且在闭区间内 → 该整数；其余（浮点/字符串/越界/缺失）→ undefined。 */
+function intInRange(v: unknown, min: number, max: number): number | undefined {
+  if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) return undefined
+  if (v < min || v > max) return undefined
+  return v
+}
+
+/** 脚本里一处**调用点**（静态分析结果，不是运行时记录）。 */
+export interface CallSite {
+  name: string
+  /** tool = 真调工具；discover = searchTools / describeTool（保留操作，不算工具调用） */
+  kind: 'tool' | 'discover'
+}
+
+// `tools.x(` / `tools["x"](` / `tools['x'](` —— 三种写法都认（后两种是 raw 名双键，
+// MCP 工具只能这么写：名字里有 `-`/`.`，不是合法标识符）。
+const TOOL_SITE_RE = /(?:^|[^.\w$])tools\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*(?:'([^']+)'|"([^"]+)")\s*\])\s*\(/g
+
+// 保留操作（发现型）的调用点。**自带捕获组**：上面那个 DISCOVER_CALL_RE 只回答「有没有」，
+// 这里要名字。两个正则分开，是为了不改动 codemodeTier 依赖的那个既有判据。
+const DISCOVER_SITE_RE = /(?:^|[^.\w$])(searchTools|describeTool)\s*\(/g
+
+/**
+ * 脚本里出现的**调用点**（去重、保序、最多 max 条）。
+ *
+ * 用途只有一个：脚本还在跑的那几十秒里，告诉人「这段脚本准备调什么」。所以它是
+ * **静态**的 —— 循环里的调用算一处、条件分支里不会执行的也算一处。渲染层必须如实标注
+ * 「脚本内的调用点」，不能包装成实时进度（那是编造：宿主目前不转发嵌套工具的中间事件）。
+ *
+ * 保守判据：只认 `tools.xxx(` 与双键写法，以及全局接收者的 searchTools/describeTool。
+ * 认不出的写法（解构、动态拼名字）就是认不出 —— 少显示一条调用点，好过显示一条假的。
+ */
+export function scriptCallSites(src?: string, max = 8): CallSite[] {
+  const s = blankWholeLineComments(src ?? '')
+  if (!s) return []
+  const hits: Array<{ index: number; site: CallSite }> = []
+  TOOL_SITE_RE.lastIndex = 0
+  for (let m = TOOL_SITE_RE.exec(s); m; m = TOOL_SITE_RE.exec(s)) {
+    const name = m[1] ?? m[2] ?? m[3] ?? ''
+    if (name) hits.push({ index: m.index, site: { name, kind: 'tool' } })
+  }
+  DISCOVER_SITE_RE.lastIndex = 0
+  for (let m = DISCOVER_SITE_RE.exec(s); m; m = DISCOVER_SITE_RE.exec(s)) {
+    hits.push({ index: m.index, site: { name: m[1], kind: 'discover' } })
+  }
+  hits.sort((a, b) => a.index - b.index) // 按脚本里的出现顺序（人读的是执行顺序的近似）
+  const out: CallSite[] = []
+  const seen = new Set<string>()
+  for (const h of hits) {
+    const key = `${h.site.kind}:${h.site.name}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(h.site)
+    if (out.length >= Math.max(1, Math.floor(max))) break
+  }
+  return out
+}
+
+/**
+ * 把**整行注释**抹成等长空白（索引不变）：被注释掉的 `// await tools.bash(...)` 是这段
+ * 脚本里最容易被读错的东西 —— 它在这段脚本里根本不会执行。
+ *
+ * 为什么只抹整行、不抹行尾注释与块注释：`const u = 'http://x'; await tools.bash(...)`
+ * 这种行一旦按 `//` 切，会连真正的调用点一起丢掉（假阴性比假阳性糟得多）。
+ * 行尾注释与字符串里的同名文本仍可能被算作调用点 —— 这是**已知**的近似，标签上也写明了
+ * 「静态分析，不是实时进度」。
+ */
+function blankWholeLineComments(src: string): string {
+  if (!src.includes('//')) return src
+  return src
+    .split('\n')
+    .map((line) => (line.trimStart().startsWith('//') ? ' '.repeat(line.length) : line))
+    .join('\n')
+}
+
+/** 检索脚本找回的一个工具（检索档的「产出」）。 */
+export interface FoundTool {
+  name: string
+  summary?: string
+  namespace?: string
+}
+
+/**
+ * 从脚本结果正文里取回「找回了哪些工具」，供检索档渲染成工具名 chip。
+ *
+ * 认三种既有回执形态（都在真实会话里出现过）：
+ *   1. `{ "tools": [{ name, summary, namespace }] }` —— searchTools 的原始回执；
+ *   2. `{ "names": ["a", "b"] }` —— 模型最常见的写法（`hits.tools.map(t => t.name)`）；
+ *   3. 裸数组（字符串或对象）。
+ * 其余一律 undefined（渲染层退回原来的 JSON 预览）。16 KiB 闸门与 resultDigest 同口径：
+ * 这是渲染路径上的 JSON.parse，不为一个「好看点」去解析几百 KB。
+ */
+export function parseFoundTools(body: string, max = 24): FoundTool[] | undefined {
+  const t = (body ?? '').trim()
+  if (!t || t.length > 16 << 10) return undefined
+  const head = t[0]
+  if (head !== '{' && head !== '[') return undefined
+  let v: unknown
+  try {
+    v = JSON.parse(t)
+  } catch {
+    return undefined // 被截断/带尾注的 JSON：不猜
+  }
+  let list: unknown = v
+  if (!Array.isArray(v)) {
+    if (!v || typeof v !== 'object') return undefined
+    const o = v as { tools?: unknown; names?: unknown }
+    list = Array.isArray(o.tools) ? o.tools : o.names
+  }
+  if (!Array.isArray(list) || list.length === 0) return undefined
+  const out: FoundTool[] = []
+  const seen = new Set<string>()
+  for (const it of list) {
+    const ft = foundToolOf(it)
+    if (!ft || seen.has(ft.name)) continue
+    seen.add(ft.name)
+    out.push(ft)
+    if (out.length >= Math.max(1, Math.floor(max))) break
+  }
+  return out.length ? out : undefined
+}
+
+function foundToolOf(it: unknown): FoundTool | undefined {
+  if (typeof it === 'string') {
+    const name = it.trim()
+    return name ? { name } : undefined
+  }
+  if (!it || typeof it !== 'object') return undefined
+  const o = it as { name?: unknown; summary?: unknown; namespace?: unknown }
+  const name = String(o.name ?? '').trim()
+  if (!name) return undefined
+  const summary = String(o.summary ?? '').trim().replace(/\s+/g, ' ')
+  const namespace = String(o.namespace ?? '').trim()
+  return { name, ...(summary ? { summary } : {}), ...(namespace ? { namespace } : {}) }
+}
+
+/** 珠链（执行档的「一眼看完」形态）要显示哪几颗珠子。 */
+export interface FlowBeads {
+  /** 头部若干条（时间序）—— 与折叠明细的「取尾部」刻意相反，见下 */
+  visible: NestedCallView[]
+  /** 没进珠子、留给明细列表的条数（> 0 时渲染 `+N`） */
+  more: number
+}
+
+/**
+ * 珠链取**头部** max 条（折叠明细取的是尾部，两者刻意相反）：
+ * 珠链回答的是「这段脚本长什么样」（脚本的顺序性 → 从头读才对），
+ * 明细列表回答的是「最后发生了什么 / 谁失败了」（→ 取尾部）。
+ */
+export function flowBeads(calls: NestedCallView[], max = 6): FlowBeads {
+  const n = Math.max(1, Math.floor(max))
+  if (calls.length <= n) return { visible: calls, more: 0 }
+  return { visible: calls.slice(0, n), more: calls.length - n }
 }

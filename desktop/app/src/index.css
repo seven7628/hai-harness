@@ -11549,9 +11549,15 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .tool-row .tn-label {
   color: var(--text-2);
 }
+/* 条数是这一行的**主语**（「3 次调用」），做成小徽标：三个数字挤在一起
+   （`3  1 个失败  检索 1`）时，光靠灰字间距读不出哪个数字属于谁。 */
 .tool-row .tn-count {
-  color: var(--text-3);
-  font-size: 11px;
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--paper-3);
 }
 /* 失败的嵌套调用数：这是「脚本跑通了但里面有的调用炸了」的唯一提示，用错误色 */
 .tool-row .tn-failed {
@@ -11751,23 +11757,216 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   flex: 0 0 auto;
   color: var(--accent);
 }
-/* 档位徽标（Codemode 检索 / Execute）：工具行头部右侧。
-   Search 用强调色（它是「这一行只是探索工具集」的快速信号），Execute 用中性色
-  （绝大多数调用都是它，默认态越安静越好）。 */
-.tool-row .cm-tier {
+/* ═══════════ Codemode：一条「脚本」，不是一条命令 ═══════════
+   一排相邻的 bash / read_file 行是**平面**的（每行一件事，扫一眼就够）；codemode 是**容器**
+   （一次调用里发生了多件事），所以它需要自己的视觉语法，否则只能靠名字里那三个字认出来。
+   两档（Search / Execute）的身份同时由**三样**东西表达 —— 只靠颜色在长转录里读不出来：
+     ① 竖脊 data-cm：贴在卡片左内缘的一根 2px 轴，检索=观看色（--cat-read）、执行=运行色
+        （--cat-cmd）；连续多个 codemode 调用会连成一串可数的节奏（与左栏子智能体树的
+        「珠子」同一套语言：有轴 = 这是一段有步骤的东西）；
+     ② 档位标签 .cm-mode：图标（⌕ 找 / ❯ 跑）+ 词，紧跟在工具名后面（不是行尾 —— 行尾被
+        时间、用量、结局「✕/✓」占着，一眼扫过去只剩药丸的边）；
+     ③ 珠链 .cm-flow：脚本按顺序碰过的工具。单个 bash 行永远没有这串东西。 */
+.tool-row[data-cm] {
+  position: relative;
+}
+.tool-row[data-cm]::before {
+  content: '';
+  position: absolute;
+  left: -6px; /* 贴住 .tool-group 卡片的内边距，竖脊落在卡片的「轨道」上 */
+  top: 3px;
+  bottom: 3px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--cm-accent);
+  opacity: .5;
+}
+.tool-row[data-cm='search'] {
+  --cm-accent: var(--cat-read);
+}
+.tool-row[data-cm='execute'] {
+  --cm-accent: var(--cat-cmd);
+}
+.tool-row[data-cm]:hover::before,
+.tool-row[data-cm].open::before {
+  opacity: .85;
+}
+/* 档位标签：淡底 + 同色描边（两档色相不同 → 一眼分开），字号比工具名小一档：
+   它是**限定语**而不是主语。 */
+.tool-row .cm-mode {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   border-radius: 999px;
-  padding: 0 6px;
+  padding: 0 7px 0 5px;
   font-size: 10px;
   line-height: 15px;
   letter-spacing: .02em;
   white-space: nowrap;
+  color: var(--cm-accent);
+  border: 1px solid color-mix(in srgb, var(--cm-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--cm-accent) 12%, transparent);
+}
+.tool-row .cm-mode-mark {
+  font-size: 10px;
+  line-height: 1;
+  opacity: .9;
+}
+/* 珠链：一眼看完「按顺序碰了什么」。头部取前 6 颗（明细取尾部，见 flowBeads 的理由）。 */
+.tool-row .cm-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 4px;
+  padding: 0 0 5px 18px;
+  font-size: 11px;
+}
+.tool-row .cm-flow-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tool-row .cm-flow-arrow {
+  color: var(--text-3);
+  font-size: 10px;
+}
+.tool-row .cm-bead {
   border: 1px solid var(--border-strong);
+  background: var(--bg);
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 17px;
+  color: var(--text-2);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-row .cm-bead.err {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+}
+.tool-row .cm-flow-more {
+  color: var(--text-3);
+  font-size: 10px;
+  padding: 0 2px;
+}
+/* 检索档的「产出」：找回的工具名 chip。可点（复制名字）—— 名字正是模型下一步要写进脚本
+   的东西，也是人常要贴进 issue / 脚本里的东西。 */
+.tool-row .cm-found {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 0 6px 18px;
+}
+.tool-row .cm-tool {
+  display: inline-block;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--cm-accent) 35%, transparent);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.tool-row .cm-tool:hover {
+  border-color: var(--cm-accent);
+  color: var(--cm-accent);
+}
+/* 执行中的「脚本控制台条」：只表达三件事 —— 在跑、用掉了多少预算、脚本里的调用点。
+   动效只有一个 1.05s 的方块插入符（「还活着」）；进度条是**真实比值**，不是动画。 */
+.tool-run {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 6px 8px 18px;
+}
+.tool-run .run-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.tool-run .run-caret {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--cm-accent);
+  animation: cmCaret 1.05s steps(2, start) infinite;
+}
+@keyframes cmCaret {
+  50% {
+    opacity: 0;
+  }
+}
+.tool-run .run-clock {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tool-run .run-bar {
+  position: relative;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.tool-run .run-bar > i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--cm-accent);
+  border-radius: 2px;
+  /* 1s 时钟的台阶用线性过渡抹平：读起来是「在走」而不是「在跳」 */
+  transition: width .9s linear;
+}
+.tool-run .run-sites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 5px;
+  padding-top: 1px;
+}
+.tool-run .run-site {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 4px;
+  /* 虚线 = 「还没发生」：这些调用点是脚本里写的，宿主目前不转发嵌套工具的中间事件 */
+  border: 1px dashed var(--border-strong);
   color: var(--text-3);
 }
-.tool-row .cm-tier.search {
-  border-color: var(--accent);
-  color: var(--accent);
+.tool-run .run-site.discover {
+  border-style: dotted;
+}
+.tool-run .run-site-mark {
+  opacity: .8;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-run .run-caret {
+    animation: none;
+  }
+  .tool-run .run-bar > i {
+    transition: none;
+  }
+}
+/* 嵌套清单头部的「检索 N」：保留操作不在明细里，不在这说一句就是一片空白。 */
+.tool-row .tn-discover {
+  flex: 0 0 auto;
+  color: var(--cat-read);
+  font-size: 10px;
+  letter-spacing: .02em;
 }
 
 @import './narrative-skin.css';

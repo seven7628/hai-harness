@@ -23,7 +23,7 @@ import { splitThinkingParagraphs } from '../lib/thinkingText'
 import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
-import { ToolNestedCalls, ToolOutputPreview } from './ToolNestedCalls'
+import { ToolNestedCalls, ToolOutputPreview, ToolScriptRun } from './ToolNestedCalls'
 import { codemodeTier, hasScriptOutput, isCodemodeTool, scriptSourceOf, scriptSummary, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { useT } from '../i18n'
 
@@ -246,7 +246,10 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
   const isCodemode = isCodemodeTool(b.name) || hasScriptOutput(b)
   // 脚本源码只解析一次（头部摘要、档位兜底判据、折叠块的「查看脚本」三处共用）。
   const scriptSrc = isCodemode ? scriptSourceOf(b.args) : undefined
-  const tier = codemodeTier(b.hostOps, b.nestedCalls, scriptSrc)
+  // 执行中一律按「执行」渲染：此刻还没有 host_ops / nested_calls，codemodeTier 的兜底
+  // 启发式（源码里有 searchTools 且无嵌套 → search）会把一个正要大干一场的脚本标成「检索」——
+  // 那是**谎报**。档位是「结果的性质」，没结果时只有「在跑」这一个事实。
+  const tier = b.status === 'running' ? 'execute' : codemodeTier(b.hostOps, b.nestedCalls, scriptSrc)
   // codemode 行没有 toolArgsSummary（那是别的工具的参数摘要）——头部摘要改显示脚本干了什么。
   const scriptLine = scriptSrc ? scriptSummary(scriptSrc) : ''
   // SKILL = 命令结果合成的技能加载块（/skill 面板 → SDK /skills load）：渲染成 SKILL(code-review) 工具调用样式
@@ -285,7 +288,14 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
   return (
     // data-family：分类色板的挂钩（看=蓝/跑=青/写=紫/托=橙…，规则在 index.css）。
     // 组件只声明"这是什么工具"，不声明颜色 —— 换皮肤时不碰 .tsx。
-    <div className={`tool-row ${changed ? 'changed' : ''} ${open ? 'open' : ''}`} data-family={toolFamily(b.name)}>
+    // 编排型工具（codemode）按**档位**取分类色：检索=看（蓝）/ 执行=跑（青）——「它这一次到底
+    // 在干嘛」比「它的工具名」重要；data-cm 再叠一条档位竖脊（见 index.css 的 .tool-row[data-cm]），
+    // 让一排 codemode 调用在长转录里连成可数的节奏，而不是混进 bash 行里。
+    <div
+      className={`tool-row ${changed ? 'changed' : ''} ${open ? 'open' : ''}`}
+      data-family={isCodemode ? (tier === 'search' ? 'read' : 'cmd') : toolFamily(b.name)}
+      data-cm={isCodemode ? tier : undefined}
+    >
       <div
         className="tool-row-hd"
         role="button"
@@ -300,13 +310,25 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
         }}
       >
         {/* V3 行首图标（默认皮肤不渲染）：读=文档 · 检索=放大镜 · 执行=终端 · 改=笔 */}
-        <span className="ic" aria-hidden="true"><ToolIcon name={b.name} /></span>
+        <span className="ic" aria-hidden="true"><ToolIcon name={isCodemode ? (tier === 'search' ? 'search' : 'bash') : b.name} /></span>
         <span className="chev">{open ? '▾' : '▸'}</span>
         {isSkill ? (
           <span className={`t ${err ? 'err' : ''}`}>SKILL({b.args})</span>
         ) : (
           <>
             <span className={`t ${err ? 'err' : ''}`}>{b.name}</span>
+            {/* 档位标签：只找工具（检索）还是真干活（执行）。判据来自后端 HostOps 计数 ——
+                保留操作不进 nested_calls，前端无法自行判定「纯检索」（见 codemodeTier）。
+                放在名字**后面**而不是行尾：行尾被时间/用量/结果占着，一眼扫过去只剩药丸的边。 */}
+            {isCodemode && (
+              <span
+                className={`cm-mode ${tier}`}
+                title={tier === 'search' ? t('tool.codemode.searchHint') : t('tool.codemode.executeHint')}
+              >
+                <span className="cm-mode-mark" aria-hidden="true">{tier === 'search' ? '⌕' : '❯'}</span>
+                <span className="cm-mode-word">{tier === 'search' ? t('tool.codemode.search') : t('tool.codemode.execute')}</span>
+              </span>
+            )}
             {/* 编排型工具（codemode）显示「脚本干了什么」；其余工具显示 toolArgsSummary。 */}
             {(scriptLine || summary) && (
               <span
@@ -341,17 +363,6 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
           </>
         )}
         <span className="grow" />
-        {/* 编排型工具（codemode）的档位徽标：只找工具（Search）还是真干活（Execute）。
-            判据来自后端 HostOps 计数 —— 保留操作不进 nested_calls，前端无法自行判定
-            「纯检索」（见 lib/codemodeNested.ts 的 codemodeTier）。 */}
-        {isCodemode && (
-          <span
-            className={`cm-tier ${tier}`}
-            title={tier === 'search' ? t('tool.codemode.searchHint') : t('tool.codemode.executeHint')}
-          >
-            {tier === 'search' ? t('tool.codemode.search') : 'Execute'}
-          </span>
-        )}
         {host === 'main' && b.promoted && b.taskId && (b.status === 'running' || b.interrupting) && (
           <button
             className="tool-promote"
@@ -380,8 +391,8 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
             {t('tool.promote')}
           </button>
         )}
-        {b.status === 'running' && <span className="run">…</span>}
-        {(b.status === 'running' || b.durMs != null) && (
+        {b.status === 'running' && !isCodemode && <span className="run">…</span>}
+        {((b.status === 'running' && !isCodemode) || b.durMs != null) && (
           <ElapsedTimer className="ms" startAt={b.startedAt} running={asyncTask} durMs={asyncTask ? undefined : b.durMs} />
         )}
         <UsageChip className="mono tu" usage={b.usage} title={t('usage.tip').replace('{tok}', String((b.usage?.input ?? 0) + (b.usage?.output ?? 0))).replace('{cost}', fmtUsd(b.usage?.costUsd ?? 0))} />
@@ -390,7 +401,11 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
       {/* —— 编排型工具（codemode）的两块附加渲染（设计文档 §17）—— */}
       {/* 1) 脚本内的嵌套调用清单：**只挂在外面这一行**下面（子调用不占独立工具行）。
              折叠态 = 最后 8 条 + 「…N earlier calls」，展开态 = 全部 —— 组件自带折叠交互。 */}
-      {b.nestedCalls && b.nestedCalls.length > 0 && <ToolNestedCalls calls={b.nestedCalls} />}
+      {/* 0) 执行中：脚本控制台条（已用/预算 + 脚本内的调用点）。只有 codemode 有预算可画。 */}
+      {isCodemode && b.status === 'running' && <ToolScriptRun script={scriptSrc} startedAt={b.startedAt} />}
+      {b.nestedCalls && b.nestedCalls.length > 0 && (
+        <ToolNestedCalls calls={b.nestedCalls} discover={(b.hostOps?.search ?? 0) + (b.hostOps?.describe ?? 0)} />
+      )}
       {/* 2) 脚本输出的折叠预览：按**视觉行**限 5 行（不是按 \n 数），下方点名 spill 路径。
              展开行时不再重复预览 —— 展开体里的「结果」区已经是全文（限高内滚）。 */}
       {!open && hasScriptOutput(b) && (
@@ -399,6 +414,7 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
           spillPath={b.spillPath}
           script={scriptSrc}
           nestedCount={b.nestedCalls?.length ?? 0}
+          tier={tier}
         />
       )}
       {/* 行内 diff 预览（运行时变更可见性，2026-08-22）：write/edit 完成即自动展开，

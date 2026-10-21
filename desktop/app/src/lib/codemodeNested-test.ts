@@ -20,18 +20,22 @@ import {
   OUTPUT_PREVIEW_LINES,
   charCells,
   codemodeTier,
+  flowBeads,
   formatWall,
   hasScriptOutput,
   isCodemodeTool,
   oneLine,
   parseHostOps,
   parseNestedCalls,
+  parseFoundTools,
   parseScriptEnvelope,
+  parseScriptOptions,
   pickNestedCalls,
   previewChars,
   previewVisualLines,
   resultDigest,
   resultMetricKey,
+  scriptCallSites,
   scriptSourceOf,
   scriptSummary,
   spillPathFrom,
@@ -494,6 +498,16 @@ test('scriptSummary：参数不是字面量 → 给 (…)（显示不出内容�
   assert.equal(scriptSummary('const q = pick(); await searchTools(q)'), 'searchTools(…)')
 })
 
+test('scriptSummary：混合脚本先显示真调用（否则执行档会和检索档撞脸）', () => {
+  const mixed = 'const hits = await searchTools("scenario")\nconst o = await tools.bash({ command: "ls" })\nreturn o'
+  assert.equal(scriptSummary(mixed), 'tools.bash(…)')
+  // 只有含 - / . 的 raw 名才必须双键（那种名字写成点号是语法错误）；纯下划线的裸 id 照常点号
+  assert.equal(scriptSummary('await tools["mcp__pricing-api__get_quote"]({})'), 'tools["mcp__pricing-api__get_quote"](…)')
+  assert.equal(scriptSummary('await tools["mcp__ai_test__list_scenarios_c9b05b"]({})'), 'tools.mcp__ai_test__list_scenarios_c9b05b(…)')
+  // 纯检索脚本仍显示「在查什么」（没有被真调用抢走）
+  assert.equal(scriptSummary('const h = await searchTools("scenario")\nreturn h'), 'searchTools("scenario")')
+})
+
 test('scriptSummary：没有发现型调用 → 回退第一行真代码（跳过注释与 @options 行）', () => {
   assert.equal(scriptSummary('// @options: {"timeout_ms": 60000}\n// 说明\nconst a = 1\nreturn a'), 'const a = 1')
   assert.equal(scriptSummary('   \n\nreturn 42'), 'return 42')
@@ -551,4 +565,104 @@ test('resultDigest：超大正文不解析（渲染路径上的 JSON.parse 必�
   // 刚好在闸门内的正常回执照常给数字
   const small = parseScriptEnvelope(`Script completed\nOutput:\n${JSON.stringify({ names: ['a', 'b'] })}`)
   assert.deepEqual(resultDigest(small, 0), { kind: 'tools', n: 2 })
+})
+
+// —— 脚本静态画像：预算 / 调用点 / 找回的工具 ————————————————————————————
+//
+// 这三样只在**渲染**里用，但每一条都会在「解析失败」时静默降级成另一种界面，
+// 所以判据（尤其是「不猜」的那几条）必须钉住。
+
+test('parseScriptOptions：只认第一行（第二行的 @options 后端根本不认）', () => {
+  assert.deepEqual(parseScriptOptions('// @options: {"timeout_ms": 5000}\nreturn 1'), { timeoutMs: 5000 })
+  // 后端 ParseOptionsLine 只看第一行：写在第二行的声明不会生效，前端若认了就会画一条
+  // 「按 5 分钟走」而实际 30 秒被杀掉的进度条。
+  assert.equal(parseScriptOptions('\n// @options: {"timeout_ms": 5000}\nreturn 1'), undefined)
+  assert.equal(parseScriptOptions('return 1\n// @options: {"timeout_ms": 5000}'), undefined)
+})
+
+test('parseScriptOptions：容错前导空白/Tab，但不容错写错的键名', () => {
+  assert.deepEqual(parseScriptOptions('  \t// @options: {"timeout_ms": 1500}'), { timeoutMs: 1500 })
+  // 驼峰名后端会直接报错（整次调用失败），这里也不该把它当成预算
+  assert.equal(parseScriptOptions('// @options: {"timeoutMs": 1500}'), undefined)
+  assert.equal(parseScriptOptions('// @options: {\n"timeout_ms": 1500}'), undefined, '跨行的 @options 不是首行声明')
+})
+
+test('parseScriptOptions：非整数/越界/非数字一律 undefined（不猜一个数字）', () => {
+  assert.equal(parseScriptOptions('// @options: {"timeout_ms": 1.5}'), undefined)
+  assert.equal(parseScriptOptions('// @options: {"timeout_ms": "5000"}'), undefined)
+  assert.equal(parseScriptOptions('// @options: {"timeout_ms": 0}'), undefined)
+  assert.equal(parseScriptOptions('// @options: {"timeout_ms": 99999999999}'), undefined, '超过 1h 上限')
+  assert.equal(parseScriptOptions('// @options: {'), undefined, '坏 JSON')
+  assert.deepEqual(parseScriptOptions('// @options: {"max_output_tokens": 4000}'), { maxOutputTokens: 4000 })
+  assert.equal(parseScriptOptions(), undefined)
+  // 语法糖：不带 // 的裸对象不算声明
+  assert.equal(parseScriptOptions('{"timeout_ms": 5000}'), undefined)
+})
+
+
+test('scriptCallSites：三种 tools 写法都认，去重、保序、discover 单列', () => {
+  const src = `
+    const a = await tools.read_file({ path: 'x' })
+    for (const f of fs) { await tools.bash({ command: f }) }
+    const hits = await searchTools('scenario')
+    const raw = await tools["mcp__ai_test__list_scenarios_c9b05b"]({})
+    await tools.read_file({ path: 'y' })
+    const d = await describeTool('run_scenarios')
+  `
+  assert.deepEqual(scriptCallSites(src), [
+    { name: 'read_file', kind: 'tool' },
+    { name: 'bash', kind: 'tool' },
+    { name: 'searchTools', kind: 'discover' },
+    { name: 'mcp__ai_test__list_scenarios_c9b05b', kind: 'tool' },
+    { name: 'describeTool', kind: 'discover' },
+  ])
+})
+
+test('scriptCallSites：上限、空脚本、非调用不误判', () => {
+  const many = Array.from({ length: 20 }, (_, i) => `await tools.t${i}({})`).join('\n')
+  assert.equal(scriptCallSites(many).length, 8)
+  assert.equal(scriptCallSites(many, 3).length, 3)
+  assert.deepEqual(scriptCallSites(''), [])
+  assert.deepEqual(scriptCallSites(undefined), [])
+  // 只在「真的调」时算：属性访问不算
+  assert.deepEqual(scriptCallSites('const f = tools.read_file'), [])
+  // 整行注释里的调用不算（被注释掉的代码不会执行 —— 这正是最容易被读错的地方）
+  assert.deepEqual(scriptCallSites('// await tools.bash({})' + '\n' + '//const x = await tools.read_file({})'), [])
+  // 但**行尾**注释里仍会算进来：按 `//` 切行会误杀 `const u='http://x'; tools.bash()` 这类
+  // 真调用，假阴性比假阳性糟 —— 这条近似是已知且可接受的（标签写明「静态分析」）。
+  assert.deepEqual(scriptCallSites('const f = 1 // tools.bash({})'), [{ name: 'bash', kind: 'tool' }])
+  // 别的对象的同名方法不是保留操作（与 scriptSummary 的双键判据同口径）
+  assert.deepEqual(scriptCallSites('await ctx.searchTools("x")'), [])
+})
+
+test('parseFoundTools：三种回执形态（tools / names / 裸数组）', () => {
+  assert.deepEqual(parseFoundTools('{"tools":[{"name":"a","summary":"A 工具"},{"name":"b"}]}'), [
+    { name: 'a', summary: 'A 工具' },
+    { name: 'b' },
+  ])
+  assert.deepEqual(parseFoundTools('{"count":28,"names":["a","b"]}'), [{ name: 'a' }, { name: 'b' }])
+  assert.deepEqual(parseFoundTools('["a",{"name":"b","namespace":"mcp__x"}]'), [{ name: 'a' }, { name: 'b', namespace: 'mcp__x' }])
+  assert.deepEqual(parseFoundTools('{"tools":[]}'), undefined, '空清单不渲染 chip 区')
+})
+
+test('parseFoundTools：不猜 —— 非 JSON / 截断 / 超尺寸 / 空名字都退回 JSON 预览', () => {
+  assert.equal(parseFoundTools('{ "tools": [ {"name": "a"'), undefined)
+  assert.equal(parseFoundTools('Name  A\nName  B'), undefined)
+  assert.equal(parseFoundTools('{"names":[]}'), undefined)
+  assert.equal(parseFoundTools('{"names":["  ", ""]}'), undefined)
+  assert.equal(parseFoundTools(`{"names":["${'x'.repeat(17 << 10)}"]}`), undefined, '16 KiB 闸门')
+  // 同名去重（searchTools 同一个工具会在多组命中里重复出现）
+  assert.deepEqual(parseFoundTools('{"names":["a","a","b"]}'), [{ name: 'a' }, { name: 'b' }])
+})
+
+test('flowBeads：取头部（明细取尾部，刻意相反），超出给 +N', () => {
+  const calls = makeCalls(9)
+  assert.deepEqual(flowBeads(calls).visible.map((c) => c.name), ['tool_0', 'tool_1', 'tool_2', 'tool_3', 'tool_4', 'tool_5'])
+  assert.equal(flowBeads(calls).more, 3)
+  assert.equal(flowBeads(calls, 3).more, 6)
+  const few = makeCalls(2)
+  assert.deepEqual(flowBeads(few), { visible: few, more: 0 })
+  // 与折叠明细的方向必须相反：明细留最后 8 条、珠链留最前 6 条
+  assert.equal(pickNestedCalls(calls, true).visible[0].name, 'tool_1')
+  assert.equal(flowBeads(calls).visible[0].name, 'tool_0')
 })
