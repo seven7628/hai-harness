@@ -11839,9 +11839,13 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   --atree-step: 12px;
   display: flex;
   flex-direction: column;
-  /* 左外边距只留一条连线的位置（10px）：树干挨着会话行的圆点，视觉上"挂在这个会话下面"，
-     而不是缩进到会话标题之后 —— 后者在窄栏里等于白扔 26px。 */
-  margin: 0 6px 2px 10px;
+  /* 左边距让**树干正好落在会话行那颗圆点下面**：
+       .ws-body .session-item 覆盖掉左右 margin → 行框从 16 起，padding-left 10 →
+       圆点 6px 宽，心在 16 + 10 + 3 = 29
+       树干在树内部 x = --atree-step/2 = 6 → margin-left = 29 - 6 = 23
+     这个数不是随便定的：树干若比会话的圆点更靠左，子节点就"伸到父节点左边"去了 ——
+     用户 2026-10 一眼看出来的正是这个（「左侧超过了主智能体」）。 */
+  margin: 0 6px 2px 23px;
   animation: fadeIn 160ms var(--ease);
 }
 .agent-tree.at-center {
