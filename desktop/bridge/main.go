@@ -1572,6 +1572,17 @@ func (m *manager) dispatch(c command) {
 		}
 		m.resp(c, true, "", m.mobile.status())
 
+	case CmdMobileSetListen: // 切换监听范围：回环 ↔ 局域网（手机不能调，白名单外）
+		if m.mobile == nil {
+			m.resp(c, false, "手机端未启用", nil)
+			return
+		}
+		if err := m.mobile.setLan(boolVal(c.Payload["lan"])); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", m.mobile.status())
+
 	case CmdMobileRevoke: // 撤销一台手机（丢失/换机）
 		if m.mobile == nil {
 			m.resp(c, false, "手机端未启用", nil)

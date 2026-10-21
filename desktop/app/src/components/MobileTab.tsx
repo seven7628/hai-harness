@@ -12,6 +12,7 @@ export default function MobileTab() {
   const status = useAppStore((s) => s.mobileStatus)
   const fetchMobileStatus = useAppStore((s) => s.fetchMobileStatus)
   const revoke = useAppStore((s) => s.revokeMobileDevice)
+  const setMobileLan = useAppStore((s) => s.setMobileLan)
   const [copied, setCopied] = useState<'url' | 'code' | null>(null)
 
   useEffect(() => {
@@ -31,7 +32,7 @@ export default function MobileTab() {
   if (!status) return <div className="set-desc">{t('mobile.loading')}</div>
   if (!status.enabled) return <div className="set-desc">{t('mobile.disabled')}</div>
 
-  const url = status.addr ? `http://${status.addr}/m/` : ''
+  const urls = status.urls && status.urls.length ? status.urls : status.addr ? [`http://${status.addr}/m/`] : []
   const devices = status.devices ?? []
 
   return (
@@ -41,15 +42,29 @@ export default function MobileTab() {
       </div>
       <p className="set-desc">{t('mobile.hint')}</p>
 
-      <div className="set-row">
-        <div className="set-label">{t('mobile.addr')}</div>
-        <code className="text-input" style={{ flex: 1, userSelect: 'all' }}>
-          {url || '—'}
-        </code>
-        <button className="btn" disabled={!url} onClick={() => copy('url', url)}>
-          <CopyIcon size={13} /> {copied === 'url' ? t('mobile.copied') : t('mobile.copy')}
-        </button>
+      <label className="set-row" style={{ gap: 8, cursor: 'pointer' }}>
+        <input type="checkbox" checked={!!status.lan} onChange={(e) => setMobileLan(e.target.checked)} />
+        <span className="set-label">{t('mobile.lan')}</span>
+      </label>
+      <p className="set-desc">{t('mobile.lanHint')}</p>
+
+      <div className="settings-sec-title" style={{ marginTop: 12 }}>
+        {t('mobile.addr')}
       </div>
+      {urls.length === 0 ? (
+        <p className="set-desc">—</p>
+      ) : (
+        urls.map((u) => (
+          <div className="set-row" key={u}>
+            <code className="text-input" style={{ flex: 1, userSelect: 'all' }}>
+              {u}
+            </code>
+            <button className="btn" onClick={() => copy('url', u)}>
+              <CopyIcon size={13} /> {copied === 'url' ? t('mobile.copied') : t('mobile.copy')}
+            </button>
+          </div>
+        ))
+      )}
 
       <div className="set-row">
         <div className="set-label">{t('mobile.code')}</div>

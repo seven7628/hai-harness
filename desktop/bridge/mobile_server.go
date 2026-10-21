@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +52,8 @@ type mobileServer struct {
 	pair *mobilePairing
 	hub  *mobileHub
 	addr string
+	lan  bool   // true = 绑 0.0.0.0（手机经局域网/Tailscale 访问）
+	cfg  string // ~/.go-code/mobile/config.json
 
 	ln   net.Listener
 	http *http.Server
@@ -69,6 +70,7 @@ func newMobileServer(m *manager, dataDir string) *mobileServer {
 	dir := filepath.Join(dataDir, "mobile")
 	s := &mobileServer{
 		mgr:     m,
+		cfg:     filepath.Join(dir, "config.json"),
 		pair:    newMobilePairing(filepath.Join(dir, "devices.json")),
 		hub:     newMobileHub(),
 		nextID:  1_000_000_000, // 与 stdin 命令 id 错开，避免响应串线
@@ -82,14 +84,20 @@ func newMobileServer(m *manager, dataDir string) *mobileServer {
 }
 
 // start 绑定监听。优先复用上次的端口（手机端保存的 URL 才不会每次失效）。
+//
+// 监听范围由 ~/.go-code/mobile/config.json 的 lan 决定：
+//   - false（默认）：只绑回环，手机必须经 Tailscale/端口转发才够得着；
+//   - true：绑 0.0.0.0，同 Wi-Fi 直连。任何能拿到 token 的设备都可访问，
+//     所以这是用户显式开关，不是默认值。
 func (s *mobileServer) start(preferred string) error {
+	s.lan = s.loadLan()
 	if preferred == "" {
-		preferred = s.lastAddr()
+		preferred = s.listenAddr()
 	}
 	ln, err := net.Listen("tcp", preferred)
-	if err != nil && preferred != "127.0.0.1:0" {
+	if err != nil && !strings.HasSuffix(preferred, ":0") {
 		// 上次的端口被别的进程占了 → 退到随机端口（只影响 URL，不影响 token）
-		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		ln, err = net.Listen("tcp", s.listenAddrRandom())
 	}
 	if err != nil {
 		return err
@@ -107,7 +115,79 @@ func (s *mobileServer) start(preferred string) error {
 	return nil
 }
 
-// routes 独立出来：测试用 httptest 直接挂它，不必真的监听端口。
+// listenAddr 固定端口 + 当前模式；listenAddrRandom 同模式随机端口（端口被占时兜底）。
+func (s *mobileServer) listenAddr() string {
+	if s.lan {
+		return "0.0.0.0:47800"
+	}
+	return "127.0.0.1:47800"
+}
+
+func (s *mobileServer) listenAddrRandom() string {
+	if s.lan {
+		return "0.0.0.0:0"
+	}
+	return "127.0.0.1:0"
+}
+
+func (s *mobileServer) loadLan() bool {
+	b, err := os.ReadFile(s.cfg)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		Lan bool `json:"lan"`
+	}
+	return json.Unmarshal(b, &doc) == nil && doc.Lan
+}
+
+func (s *mobileServer) saveLan(lan bool) error {
+	if err := os.MkdirAll(filepath.Dir(s.cfg), 0o700); err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(map[string]any{"lan": lan}, "", "  ")
+	return writeMobileAtomic(s.cfg, b)
+}
+
+// setLan 切换监听范围：落盘 → 重建 listener。已连接的手机 WS 会断开并自动重连。
+func (s *mobileServer) setLan(lan bool) error {
+	if s.lan == lan {
+		return nil
+	}
+	if err := s.saveLan(lan); err != nil {
+		return err
+	}
+	return s.relisten(lan)
+}
+
+func (s *mobileServer) relisten(lan bool) error {
+	if s.http != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = s.http.Shutdown(ctx)
+		cancel()
+	}
+	s.lan = lan
+	ln, err := net.Listen("tcp", s.listenAddr())
+	if err != nil {
+		ln, err = net.Listen("tcp", s.listenAddrRandom())
+		if err != nil {
+			return err
+		}
+	}
+	s.ln = ln
+	s.addr = ln.Addr().String()
+	s.http = &http.Server{Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		if err := s.http.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintln(os.Stderr, "mobile server:", err)
+		}
+	}()
+	s.saveAddr(s.addr)
+	return nil
+}
+
+// status 给桌面设置页与手机端自身用：端口、配对码、设备列表。
+
 func (s *mobileServer) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ping", s.handlePing)
@@ -379,6 +459,8 @@ func (s *mobileServer) status() map[string]any {
 	return map[string]any{
 		"enabled": s != nil && s.addr != "",
 		"addr":    s.addr,
+		"lan":     s.lan,
+		"urls":    mobileURLs(s.addr, s.lan),
 		"code":    code,
 		"expires": exp.Unix(),
 		"devices": safe,
@@ -408,25 +490,6 @@ func mustMobileJSON(v any) []byte {
 	return b
 }
 
-func (s *mobileServer) lastAddr() string {
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(s.pair.path), "server.json"))
-	if err != nil {
-		return ""
-	}
-	var doc struct {
-		Addr string `json:"addr"`
-	}
-	if json.Unmarshal(b, &doc) != nil || doc.Addr == "" {
-		return ""
-	}
-	// 只接受回环地址：旧文件若被改成 0.0.0.0，不在启动时静默继承。
-	host, _, err := net.SplitHostPort(doc.Addr)
-	if err != nil || (host != "127.0.0.1" && host != "localhost") {
-		return ""
-	}
-	return doc.Addr
-}
-
 func (s *mobileServer) saveAddr(addr string) {
 	dir := filepath.Dir(s.pair.path)
 	_ = os.MkdirAll(dir, 0o700)
@@ -434,12 +497,40 @@ func (s *mobileServer) saveAddr(addr string) {
 	_ = writeMobileAtomic(filepath.Join(dir, "server.json"), b)
 }
 
-// mobilePortHint 供测试/启动日志用：从 addr 取端口。
-func mobilePortHint(addr string) int {
-	_, p, err := net.SplitHostPort(addr)
+// mobileURLs 手机可用的入口地址：回环模式只给 127.0.0.1；局域网模式枚举
+// 非回环 IPv4（含 Tailscale 的 100.x），跳过链路本地 169.254。
+func mobileURLs(addr string, lan bool) []string {
+	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return 0
+		return nil
 	}
-	n, _ := strconv.Atoi(p)
-	return n
+	if !lan {
+		return []string{"http://127.0.0.1:" + port + "/m/"}
+	}
+	out := []string{}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipnet.IP.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			out = append(out, "http://"+ip.String()+":"+port+"/m/")
+		}
+	}
+	return out
 }

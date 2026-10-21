@@ -308,6 +308,8 @@ export interface MobileDeviceInfo {
 export interface MobileStatus {
   enabled: boolean
   addr?: string
+  lan?: boolean
+  urls?: string[]
   code?: string
   expires?: number
   devices?: MobileDeviceInfo[]
@@ -2770,6 +2772,7 @@ interface AppState {
   fetchMCPServers(): void // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
   fetchMobileStatus(): void // 手机连接面板（mobile_status：端口/配对码/设备）
   revokeMobileDevice(deviceId: string): void // 撤销一台已配对手机（mobile_revoke）
+  setMobileLan(lan: boolean): void // 切换监听范围（mobile_set_listen；桌面专属）
   saveMCP(servers: Record<string, MCPServerCfg>): Promise<{ ok: boolean; error?: string }> // 持久化（mcpSave）+ 热应用（mcp_set）
   refreshMCP(name: string): void // 强制重连单个服务器（mcp_refresh）
   // 项目级 MCP（MCP 页「项目」区）：按前端项目列表汇总 / 保存某项目的项目层配置
@@ -8370,6 +8373,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     send({ type: 'mobile_status', payload: {} })
   },
   revokeMobileDevice: (deviceId) => send({ type: 'mobile_revoke', payload: { device_id: deviceId } }),
+  setMobileLan: (lan) => send({ type: 'mobile_set_listen', payload: { lan } }),
   saveMCP: async (servers: Record<string, MCPServerCfg>) => {
     set({ mcpSaving: true })
     const r = await transport.mcpSave(servers) // Electron 写 settings.json mcpServers 段

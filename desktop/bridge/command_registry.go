@@ -144,9 +144,11 @@ const (
 	CmdWorkspaceSync Command = "workspace_sync"
 
 	// —— 手机端接入（见 mobile_server.go）——
-	CmdAnswerQuestion  Command = "answer_question"
-	CmdMobileStatus    Command = "mobile_status"
-	CmdMobileRevoke    Command = "mobile_revoke"
+	CmdAnswerQuestion Command = "answer_question"
+	CmdMobileStatus   Command = "mobile_status"
+	CmdMobileRevoke   Command = "mobile_revoke"
+	// CmdMobileSetListen 切换监听范围（回环 / 局域网）。桌面端专属：手机不能自己放开。
+	CmdMobileSetListen Command = "mobile_set_listen"
 	CmdDeleteWorkspace Command = "delete_workspace"
 	CmdShutdown        Command = "shutdown"
 	CmdMetrics         Command = "metrics"
