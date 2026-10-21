@@ -65,6 +65,41 @@ type agentSettings struct {
 	// 每轮都在 30s 被切成「上游故障」，重试 10 次全废。默认值已调宽到 90s，此处留给
 	// 按 provider 特性自行调宽/关掉的用户。语义详见 agents.Config.FirstChunkTimeout。
 	FirstChunkTimeoutSec *int `json:"first_chunk_timeout,omitempty"`
+
+	// AsyncPromoteAfterSec 工具运行超过该秒数**自动摘离**为后台任务（0/缺失 = 关，默认）。
+	// 语义：主 loop 不再钉死在一次长工具上 —— 超过阈值的调用返回占位
+	// `{task_id,status:"running"}`（提示词里已有这条契约），真实结果稍后经
+	// task_result 推回，模型下轮续跑。
+	//
+	// 为什么默认关：摘离会**改变模型的回合结构**（一次调用变成两段），阈值太低会把
+	// 常态的 10~30s 构建推进后台，制造无谓的占位往返。指针字段区分「未配置」与「显式 0」。
+	//
+	// 实测参考（本机 83346 条工具结果）：bash 命令中位长度 303~460 字符、codemode p50
+	// 0.17s —— 绝大多数调用在秒级内结束，60s 起步的阈值只碰真正的长跑（全量测试、
+	// 数据迁移、外部 API 长轮询）。
+	AsyncPromoteAfterSec *int `json:"async_promote_after_seconds,omitempty"`
+}
+
+// 自动摘离阈值的钳制区间（秒）。下界 10s：低于它的「长工具」与常态无异，摘离只会制造
+// 占位往返；上界 1h：再长就等于关闭，不如显式写 0。
+const (
+	asyncPromoteMinSec = 10
+	asyncPromoteMaxSec = 3600
+)
+
+// asyncPromoteAfter 读到生效的自动摘离阈值（0 = 关）。纯函数化以便单测（不读盘）。
+func asyncPromoteAfterOf(sec *int) time.Duration {
+	if sec == nil || *sec <= 0 {
+		return 0
+	}
+	v := *sec
+	if v < asyncPromoteMinSec {
+		v = asyncPromoteMinSec
+	}
+	if v > asyncPromoteMaxSec {
+		v = asyncPromoteMaxSec
+	}
+	return time.Duration(v) * time.Second
 }
 
 // MaxFirstChunkTimeoutSec 首字预算的钳制上界（秒）：防误配成 3600s 这种「其实等于关掉」

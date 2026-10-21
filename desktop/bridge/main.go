@@ -4036,6 +4036,9 @@ type codeAgentTuning struct {
 	// contextSlim 上下文瘦身（C/D/E + F 图片）——三宿主全开，见
 	// contextSlimTuning 注释与 agents 侧实测数据。
 	contextSlim contextSlimTuning
+	// asyncPromoteAfter 长工具自动摘离阈值（0 = 关；settings 的
+	// agent.async_promote_after_seconds，见 providers.go asyncPromoteAfterOf）。
+	asyncPromoteAfter time.Duration
 }
 
 // contextSlimTuning 上下文瘦身开关组。取值与依据集中在此，避免散落三处。
@@ -4080,6 +4083,17 @@ func (c contextSlimTuning) options() []agents.Option {
 	}
 }
 
+// asyncPromoteOption 自动摘离阈值的装配项：0 = 不接线（引擎/loop 两级的默认都是「关」）。
+//
+// 为什么与 contextSlim 分开：那三项是「上下文瘦身」，默认全开；这一项改变的是**回合结构**
+// （一次调用 → 占位 + 稍后回传），必须由用户显式打开，不能混进默认开的那一组。
+func (c codeAgentTuning) asyncPromoteOption() []agents.Option {
+	if c.asyncPromoteAfter <= 0 {
+		return nil
+	}
+	return []agents.Option{agents.WithAsyncPromoteAfter(c.asyncPromoteAfter)}
+}
+
 // codeAgentTuningFor 返回某宿主的可调项取值（单一事实源）。
 // 与提取前逐项一致：postToolNudge 三宿主全开；goalAlignmentRounds 仅主会话（值 =
 // 装配时读 settings 的 loadAgentSettings().ReminderRounds，与提取前同一时点）；
@@ -4091,6 +4105,7 @@ func codeAgentTuningFor(host codeAgentHost) codeAgentTuning {
 		compressThreshold: codeAgentCompressThresholdFor(),
 		firstChunkTimeout: loadAgentSettings().firstChunkTimeout(),
 		contextSlim:       contextSlimTuningFor(),
+		asyncPromoteAfter: asyncPromoteAfterOf(loadAgentSettings().AsyncPromoteAfterSec),
 	}
 	if host == hostMainLoop {
 		rounds := loadAgentSettings().ReminderRounds
@@ -4125,6 +4140,7 @@ func (t codeAgentTuning) options() []agents.Option {
 		opts = append(opts, agents.WithFirstChunkTimeout(t.firstChunkTimeout))
 	}
 	opts = append(opts, t.contextSlim.options()...)
+	opts = append(opts, t.asyncPromoteOption()...)
 	return opts
 }
 

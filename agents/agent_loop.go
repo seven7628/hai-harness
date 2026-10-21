@@ -51,8 +51,13 @@ type Config struct {
 	// 运行边界
 	MaxIterations int // 单次运行的最大轮数（防失控护栏）；0 = 不限制，
 	// 失控兜底交给成本预算（Session WithMaxCost）或外部取消
-	MaxParallelTools int           // 工具并发上限
-	LLMTimeout       time.Duration // 可选挂死兜底：整轮 LLM 调用（含流）总时限；
+	MaxParallelTools int // 工具并发上限
+	// AsyncPromoteAfter 工具运行超过该阈值自动摘离为后台任务（0 = 关，默认；决策 #5）。
+	// 与 RunOptions.AsyncPromoteAfter 是「loop 级默认 / 单次运行覆盖」的关系：RunOptions 里
+	// 非零值优先，零值 = 用本字段。为什么要有 loop 级：宿主只有一个装配点
+	//（codeAgentTuning），不该让每个 RunOptions 组装处各抄一遍。
+	AsyncPromoteAfter time.Duration
+	LLMTimeout        time.Duration // 可选挂死兜底：整轮 LLM 调用（含流）总时限；
 	// 0 = 不限制（bridge 生产装配传 0 —— 首字预算在 FirstChunkTimeout，流开始后不限总时长）。
 	// 测试/旧调用方传 >0 时生效。默认 90s（NewAgentLoop 零值语义，被 bridge 覆盖）。
 	// FirstChunkTimeout 首字预算（2026-09-18 定策，2026-10-11 调宽默认值）：**单次尝试**
@@ -280,6 +285,29 @@ func WithLLMTimeout(d time.Duration) Option {
 // 语义与取值理由见 Config.FirstChunkTimeout。
 func WithFirstChunkTimeout(d time.Duration) Option {
 	return func(c *Config) { c.FirstChunkTimeout = d }
+}
+
+// effectivePromoteAfter 解析一次运行生效的自动摘离阈值（毫秒级 Duration；0 = 关）。
+//
+// 两级：RunOptions（单次运行，非零优先）→ Config（loop 级默认，宿主装配点单一来源）。
+// 负值是**显式关闭**哨兵（与工具级 AsyncPromoteAfter 同款语义）：调用方想压过 loop 级默认
+// 关掉时必须能表达「这一次不要摘离」，用 0 表达不了（0 已经被解释成「没声明」）。
+func effectivePromoteAfter(run, loop time.Duration) time.Duration {
+	if run < 0 {
+		return 0
+	}
+	if run > 0 {
+		return run
+	}
+	if loop < 0 {
+		return 0
+	}
+	return loop
+}
+
+// WithAsyncPromoteAfter 设置自动摘离阈值（0 = 关；语义与取值理由见 Config.AsyncPromoteAfter）。
+func WithAsyncPromoteAfter(d time.Duration) Option {
+	return func(c *Config) { c.AsyncPromoteAfter = d }
 }
 
 // WithStreamStallTimeout 设置流内停滞预算（每次尝试独立计时；0 = 不限制）。
@@ -2510,6 +2538,7 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 		onDone = opts.TaskSink
 		promoteAfter = opts.AsyncPromoteAfter
 	}
+	promoteAfter = effectivePromoteAfter(promoteAfter, a.cfg.AsyncPromoteAfter)
 	batch := tools.NewBatchController(len(seq)+len(par), onDone)
 	if opts != nil {
 		if opts.BatchCreated != nil {
