@@ -179,6 +179,25 @@ function activateEgoLite(message: string): void {
   })
 }
 
+// handleWorkspacePick 手机端「在电脑上选目录」：弹目录选择器并把结果回填给 bridge。
+// 失败/取消都回填 canceled，避免手机一直转圈（bridge 侧还有 5 分钟 TTL 兜底）。
+async function handleWorkspacePick(requestId: string): Promise<void> {
+  const payload: Record<string, unknown> = { request_id: requestId }
+  try {
+    if (!mainWindow) throw new Error('窗口不可用')
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: '为手机端添加工作区',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (r.canceled || !r.filePaths[0]) payload.canceled = true
+    else payload.path = r.filePaths[0]
+  } catch (e) {
+    payload.canceled = true
+    payload.error = (e as Error).message
+  }
+  await sendBridgeRequest('workspace_pick_result', payload)
+}
+
 // bridgeEnv 构造 spawn env：继承 process.env + provider key 注入 + PATH 补 node
 // 目录（GUI 启动 PATH 缺 node 时）。多实例模式：HOME 指向数据根（见 MULTI_DATA_DIR）。
 function bridgeEnv(): NodeJS.ProcessEnv {
@@ -817,6 +836,18 @@ function spawnBridge(bin: string): boolean {
   rl.on('line', (line) => {
     const t = line.trim()
     if (!t || !mainWindow) return
+    // 手机端请求「在电脑上选目录」：主进程弹选择器 → 回填 workspace_pick_result。
+    // 不回给渲染进程：结果由 bridge 广播 workspace_picked，桌面左栏走常规刷新。
+    if (t.includes('"event_type":"workspace_pick_request"')) {
+      let rid = ''
+      try {
+        rid = String((JSON.parse(t) as { request_id?: string }).request_id ?? '')
+      } catch {
+        /* 解析失败忽略 */
+      }
+      if (rid) void handleWorkspacePick(rid)
+      return
+    }
     // ego lite 激活请求（2026-09 方案 1）：bridge 发意图，主进程执行激活——
     // bridge 子进程无 TCC「自动化控制 ego lite」授权（osascript 会失败），
     // Electron 主进程有（chrome-import osascript 先例）。执行后回传结果给前端。

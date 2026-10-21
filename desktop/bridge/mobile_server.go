@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	qrcode "github.com/skip2/go-qrcode"
 	"nhooyr.io/websocket"
 )
 
@@ -44,6 +46,7 @@ var mobileAllowedCommands = map[Command]bool{
 	CmdWorkspaceAdd:    true,
 	CmdWorkspaceRemove: true,
 	CmdWorkspaceSync:   true,
+	CmdWorkspacePick:   true,
 	CmdMobileStatus:    true,
 }
 
@@ -456,11 +459,13 @@ func (s *mobileServer) status() map[string]any {
 			"created_at": d.CreatedAt, "last_seen": d.LastSeen,
 		})
 	}
+	urls := mobileURLs(s.addr, s.lan)
 	return map[string]any{
 		"enabled": s != nil && s.addr != "",
 		"addr":    s.addr,
 		"lan":     s.lan,
-		"urls":    mobileURLs(s.addr, s.lan),
+		"urls":    urls,
+		"qr":      mobilePairQR(urls, code),
 		"code":    code,
 		"expires": exp.Unix(),
 		"devices": safe,
@@ -533,4 +538,29 @@ func mobileURLs(addr string, lan bool) []string {
 		}
 	}
 	return out
+}
+
+// mobilePairQR 把「入口地址 + 配对码」编成二维码（data URL）。
+//
+// 只编局域网地址：回环地址手机扫了也打不开，宁可不给码也别给错码。
+// 码本身已经在同一块面板上明文显示，编进二维码不增加暴露面（5 分钟、单次）。
+func mobilePairQR(urls []string, code string) string {
+	if len(urls) == 0 || code == "" {
+		return ""
+	}
+	target := ""
+	for _, u := range urls {
+		if !strings.Contains(u, "127.0.0.1") && !strings.Contains(u, "localhost") {
+			target = u
+			break
+		}
+	}
+	if target == "" {
+		return ""
+	}
+	png, err := qrcode.Encode(target+"#pair="+code, qrcode.Medium, 320)
+	if err != nil {
+		return ""
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
 }

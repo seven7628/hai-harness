@@ -15,6 +15,8 @@
     ws: '',
     sid: '',
     blocks: [],
+    cursor: 0,
+    hasMore: false,
     live: { text: '', thinking: '' },
     running: false,
     approval: null,
@@ -143,9 +145,50 @@
       m.className = 'm'
       m.textContent = fmtTime(s.updated_at)
       li.append(t, m)
+      if (s.running) {
+        const d = document.createElement('span')
+        d.className = 'dot'
+        d.title = '运行中'
+        li.appendChild(d)
+      }
       li.addEventListener('click', () => openSession(s.id))
       ul.appendChild(li)
     }
+  }
+
+  // 让电脑弹目录选择器：手机只发请求，然后轮询工作区清单（比再开一条 WS 简单）。
+  let pickTimer = null
+  async function pickOnDesktop() {
+    if (pickTimer) return
+    $('ws-wait').hidden = false
+    const before = state.workspaces.length
+    try {
+      await api('workspace_pick_request')
+    } catch (e) {
+      $('ws-wait').hidden = true
+      alert(e.message)
+      return
+    }
+    const started = Date.now()
+    pickTimer = setInterval(async () => {
+      const done = () => {
+        clearInterval(pickTimer)
+        pickTimer = null
+        $('ws-wait').hidden = true
+      }
+      try {
+        const data = await api('workspace_list')
+        const list = data.workspaces || []
+        if (list.length !== before) {
+          done()
+          await loadWorkspaces()
+          return
+        }
+      } catch {
+        /* 网络抖动继续等 */
+      }
+      if (Date.now() - started > 90000) done()
+    }, 1500)
   }
 
   async function addWorkspace() {
@@ -173,12 +216,36 @@
     state.sid = data.session_id || sid
     localStorage.setItem(LS.sid, state.sid)
     state.blocks = parseBlocks(data.view_checkpoint)
+    state.cursor = data.blocks_cursor || 0
+    state.hasMore = !!data.blocks_has_more
     state.live = { text: '', thinking: '' }
     state.running = false
     renderMessages()
     show('screen-chat')
     connect()
     scrollToEnd()
+  }
+
+  async function loadEarlier() {
+    if (!state.hasMore || !state.cursor) return
+    const box = $('messages')
+    const before = box.scrollHeight
+    const btn = $('load-earlier')
+    if (btn) btn.disabled = true
+    try {
+      const data = await api('blocks_page', {
+        workspace: state.ws, session_id: state.sid, before_id: state.cursor, limit: 50,
+      })
+      const older = Array.isArray(data.blocks) ? data.blocks : []
+      state.blocks = older.concat(state.blocks)
+      state.cursor = data.cursor || 0
+      state.hasMore = !!data.has_more
+      renderMessages()
+      // 前插后把视口钉在原来那条消息上（否则会跳到顶部）
+      box.scrollTop = box.scrollHeight - before
+    } catch (e) {
+      appendError(e.message)
+    }
   }
 
   function parseBlocks(vc) {
@@ -194,6 +261,12 @@
   function renderMessages() {
     const box = $('messages')
     box.textContent = ''
+    if (state.hasMore) {
+      const more = el('button', 'ghost', '加载更早')
+      more.id = 'load-earlier'
+      more.addEventListener('click', loadEarlier)
+      box.appendChild(more)
+    }
     for (const b of state.blocks) box.appendChild(renderBlock(b))
     if (state.live.thinking) box.appendChild(el('div', 'msg thinking', state.live.thinking))
     if (state.live.text) {
@@ -249,6 +322,11 @@
   // ---------- 事件流 ----------
 
   function disconnect() {
+    if (pickTimer) {
+      clearInterval(pickTimer)
+      pickTimer = null
+      $('ws-wait').hidden = true
+    }
     state.disposed = true
     if (state.conn) {
       try { state.conn.close() } catch {}
@@ -525,6 +603,7 @@
     })
     $('ws-select').addEventListener('change', () => { disconnect(); loadSessions() })
     $('ws-add').addEventListener('click', addWorkspace)
+    $('ws-pick').addEventListener('click', pickOnDesktop)
     $('new-session').addEventListener('click', newSession)
     $('send').addEventListener('click', send)
     $('stop').addEventListener('click', stop)
@@ -546,6 +625,18 @@
     window.addEventListener('beforeunload', disconnect)
   }
 
+  // 扫码进入：桌面端二维码把配对码放在 hash 里（#pair=123456）。
+  // 用掉即从地址栏抹掉，刷新页面不会重复配对（码本来就是单次的）。
+  function pairFromHash() {
+    const m = location.hash.match(/pair=(\d{6})/)
+    if (!m) return false
+    history.replaceState(null, '', location.pathname + location.search)
+    if (state.token) return false
+    $('pair-code').value = m[1]
+    return true
+  }
+
   bind()
-  boot()
+  if (pairFromHash()) doPair()
+  else boot()
 })()

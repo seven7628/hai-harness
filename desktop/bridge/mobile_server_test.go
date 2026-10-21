@@ -146,3 +146,44 @@ func postJSON(t *testing.T, url string, body map[string]any, token string) *http
 	}
 	return resp
 }
+
+func TestMobilePairQROnlyForReachableURLs(t *testing.T) {
+	// 回环地址手机扫了也打不开 → 不生成
+	if got := mobilePairQR([]string{"http://127.0.0.1:47800/m/"}, "123456"); got != "" {
+		t.Fatal("回环地址不应生成二维码")
+	}
+	if got := mobilePairQR(nil, "123456"); got != "" {
+		t.Fatal("没有地址不应生成二维码")
+	}
+	got := mobilePairQR([]string{"http://127.0.0.1:47800/m/", "http://192.168.1.7:47800/m/"}, "123456")
+	if !strings.HasPrefix(got, "data:image/png;base64,") {
+		t.Fatalf("局域网地址应生成 PNG data URL，得到 %q", got)
+	}
+	if mobilePairQR([]string{"http://192.168.1.7:47800/m/"}, "") != "" {
+		t.Fatal("没有配对码不应生成二维码")
+	}
+}
+
+func TestWorkspacePickTableTTLAndReplay(t *testing.T) {
+	p := newWorkspacePickTable()
+	now := time.Now()
+
+	id := p.begin(now)
+	if id == "" {
+		t.Fatal("request id 不应为空")
+	}
+	if !p.consume(id, now) {
+		t.Fatal("首次回填应成功")
+	}
+	if p.consume(id, now) {
+		t.Fatal("同一请求不应能被重放")
+	}
+
+	old := p.begin(now)
+	if p.consume(old, now.Add(workspacePickTTL+time.Second)) {
+		t.Fatal("过期请求不应被接受")
+	}
+	if p.consume("wp_missing", now) {
+		t.Fatal("不存在的请求不应被接受")
+	}
+}

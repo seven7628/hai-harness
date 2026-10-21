@@ -304,9 +304,12 @@ type bridgeSession struct {
 	wake             chan struct{}
 	out              *out
 
-	workspace string            // 工作区根（审批 diff 读取原文件用）
-	mobile    *mobileHub        // 手机端事件扇出（nil = 未启用；emit 尾部投递）
-	metrics   *FileMetricsStore // 跨会话 usage/成本指标（每 llm_end 记录一条；全局共享）
+	workspace string     // 工作区根（审批 diff 读取原文件用）
+	mobile    *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
+	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
+	running atomic.Bool
+	metrics *FileMetricsStore // 跨会话 usage/成本指标（每 llm_end 记录一条；全局共享）
 	// im IM 事件桥（IM 插件启用后装配；emit 全事件漏斗里转发给 Renderer → 飞书推送）
 	im *imBridge
 	// 注意：字段用具体类型而非 MetricsStore 接口 —— m.metrics（*FileMetricsStore）为 nil 时
@@ -597,6 +600,14 @@ func (bs *bridgeSession) emit(e events.Event) {
 		}
 	}
 
+	// 运行态（会话列表状态点；重启后由下一次事件纠正）
+	switch e.Type() {
+	case events.AgentStartType:
+		bs.running.Store(true)
+	case events.AgentEndType:
+		bs.running.Store(false)
+	}
+
 	// 写 stdout 与事件日志用同一行（事件自包含，含注入的 session_id/workspace/run_id/diff/todos）
 	bs.out.writeRaw(injected)
 	// 手机端扇出：复用同一行字节（非阻塞；订阅者慢只丢 chunk，见 mobile_hub.go）
@@ -723,6 +734,8 @@ type manager struct {
 	dispatchMu sync.Mutex
 	// wsReg 工作区清单（~/.go-code/workspaces.json）——桌面与手机共用的真相源。
 	wsReg *workspaceRegistry
+	// wsPick 「让电脑选目录」的待回填请求（5 分钟 TTL；见 mobile_workspace_pick.go）。
+	wsPick *workspacePickTable
 	// lastMeshCfg 最近一次成功启动网关用的 remote 配置（meshCfgEquals 对比用）。
 	lastMeshCfg meshremote.Settings
 	// titleGenMu 保护 titleInFlight（AI 标题生成去重：同一会话只允许一个在途任务）。
@@ -1564,6 +1577,44 @@ func (m *manager) dispatch(c command) {
 
 	case CmdWorkspaceSync: // 渲染进程首次迁移：把 localStorage 里的项目列表灌进来（只增不减）
 		m.resp(c, true, "", map[string]any{"workspaces": m.workspaceSync(strSlice(c.Payload, "paths"))})
+
+	case CmdWorkspacePick: // 手机请求桌面弹目录选择器（结果异步经事件回传）
+		if m.wsPick == nil {
+			m.wsPick = newWorkspacePickTable()
+		}
+		id := m.wsPick.begin(time.Now())
+		m.emitApp(map[string]any{
+			"event_type": "workspace_pick_request",
+			"request_id": id,
+			"timestamp":  time.Now().UnixMilli(),
+		})
+		m.resp(c, true, "", map[string]any{"request_id": id})
+
+	case CmdWorkspacePickResult: // Electron 回填（桌面主进程；手机白名单外）
+		if m.wsPick == nil || !m.wsPick.consume(str(c.Payload, "request_id"), time.Now()) {
+			m.resp(c, false, "请求已过期或不存在", nil)
+			return
+		}
+		rid := str(c.Payload, "request_id")
+		path := str(c.Payload, "path")
+		if path == "" {
+			m.emitApp(map[string]any{"event_type": "workspace_pick_canceled", "request_id": rid})
+			m.resp(c, true, "", nil)
+			return
+		}
+		entry, err := m.workspaceAdd(path)
+		if err != nil {
+			m.emitApp(map[string]any{"event_type": "workspace_pick_canceled", "request_id": rid, "error": err.Error()})
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+		m.emitApp(map[string]any{
+			"event_type": "workspace_picked",
+			"request_id": rid,
+			"workspace":  entry,
+			"workspaces": m.workspaceEntries(),
+		})
+		m.resp(c, true, "", nil)
 
 	case CmdMobileStatus: // 手机连接面板：端口 / 配对码 / 已配对设备
 		if m.mobile == nil {
@@ -3599,6 +3650,7 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 			"title":      resolveLiveSessionTitle(wsKey, bs, id),
 			"updated_at": sessionUpdatedAt(ws, id, bs.lastActive.Load()),
 			"pinned":     sessionPins.isPinned(wsKey, id),
+			"running":    bs.running.Load(),
 		})
 	}
 	ws.mu.Unlock()

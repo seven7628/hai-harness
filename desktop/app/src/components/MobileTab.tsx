@@ -48,6 +48,21 @@ export default function MobileTab() {
       </label>
       <p className="set-desc">{t('mobile.lanHint')}</p>
 
+      {status.qr ? (
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center', margin: '10px 0 4px' }}>
+          <img
+            src={status.qr}
+            alt="pairing qr"
+            width={168}
+            height={168}
+            style={{ borderRadius: 10, background: '#fff', padding: 6 }}
+          />
+          <div className="set-desc">{t('mobile.scan')}</div>
+        </div>
+      ) : (
+        <p className="set-desc">{t('mobile.noQr')}</p>
+      )}
+
       <div className="settings-sec-title" style={{ marginTop: 12 }}>
         {t('mobile.addr')}
       </div>

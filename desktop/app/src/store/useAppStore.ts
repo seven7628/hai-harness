@@ -310,6 +310,7 @@ export interface MobileStatus {
   addr?: string
   lan?: boolean
   urls?: string[]
+  qr?: string
   code?: string
   expires?: number
   devices?: MobileDeviceInfo[]

@@ -117,3 +117,29 @@ func eventTypeOf(line []byte) string {
 	}
 	return ""
 }
+
+// broadcastGlobal 应用级事件（不属于任何会话，如「电脑选目录」的结果）：
+// 不受 workspace/session 过滤，投给所有在线手机。仍保持「控制事件优先」。
+func (h *mobileHub) broadcastGlobal(line []byte) {
+	if h == nil || len(line) == 0 {
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for s := range h.subs {
+		select {
+		case s.ch <- line:
+			continue
+		default:
+		}
+		select {
+		case <-s.ch:
+		default:
+		}
+		select {
+		case s.ch <- line:
+		default:
+			s.dropped.Store(true)
+		}
+	}
+}
