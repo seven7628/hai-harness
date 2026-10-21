@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -38,6 +39,8 @@ type Engine struct {
 	tools       map[string]Tool
 	maxParallel int
 	maxResponse int
+	// spillDir 截断落盘目录（"" = 不落盘）。见 WithSpillDir。
+	spillDir    string
 	toolTimeout time.Duration // 单次工具执行兜底超时（工具可经 ToolTimeoutProvider 覆盖）
 
 	// 图片闸门（ToolImageProvider 产出经此过滤；0 = 不限）。
@@ -95,6 +98,20 @@ func (e *Engine) SetMaxParallel(n int) {
 // WithMaxResponseSize 设置工具响应的最大截断长度（默认 20000，0 表示不截断）。
 func WithMaxResponseSize(n int) Option {
 	return func(e *Engine) { e.maxResponse = n }
+}
+
+// WithSpillDir 设置「截断即落盘」的目录（"" = 关闭，行为与历史逐字节相同）。
+//
+// 为什么需要它：truncate 只保留头尾各一半，**中段直接消失**——模型只能看到
+// 「[省略 122 MB]」然后重跑命令。实测本机历史里 680 条结果被截断、累计丢掉
+// 1.17 GB 中段（最惨单条 122 MB，来自 `grep -rn --include=*` 扫到巨型文件）。
+// 落盘后模型拿到的是「头 + 尾 + 完整文本的路径」，可以按需分段读，不必重跑。
+//
+// 目录由引擎惰性创建（0700），文件名 spill-<调用id>-<随机>.txt（0600）：
+// 系统临时目录（与 bash 的结构化 spill 同一套约定），**不在工作区内** ——
+// 文件工具接受绝对路径，所以模型读得到；但它不该进 git status 也不该被 grep 扫到。
+func WithSpillDir(dir string) Option {
+	return func(e *Engine) { e.spillDir = dir }
 }
 
 // WithToolTimeout 设置单次工具执行的兜底超时（默认 30s，0 表示不设超时）。
@@ -1111,7 +1128,7 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	// 的输出反而缺尾（设计文档 §4.2 阻断项 B）。豁免**只对文本**生效，图片闸门照旧。
 	text := out
 	if st, ok := tool.(SkipTruncateProvider); !ok || !st.SkipTruncate() {
-		text = e.truncate(out)
+		text = e.truncate(out, call.Id)
 	}
 	text, images := e.limitImages(text, sink)
 	return e.finish(ctx, handler, call, finishInput{
@@ -1315,7 +1332,7 @@ func runOf(tc *events.ToolContext) string {
 // 为什么不是纯 s[:max]：对 grep/find，前 N 字节只是按路径字母序最早的命中（与相关性无关）；
 // 对编译/测试输出，诊断信息总在尾部（FAIL/堆栈）——纯头部截断会把最关键的一段整段丢掉。
 // 模型必须同时知道三件事：总量、看到了多少、省略了多少（用户 2026-09-18 明确要求）。
-func (e *Engine) truncate(s string) string {
+func (e *Engine) truncate(s string, callID string) string {
 	if e.maxResponse <= 0 || len(s) <= e.maxResponse {
 		return s
 	}
@@ -1327,10 +1344,80 @@ func (e *Engine) truncate(s string) string {
 		return s[:headEnd] + fmt.Sprintf("\n\n[... %d bytes omitted ...]", len(s)-headEnd)
 	}
 	omitted := tailStart - headEnd
+	// 落盘（spillDir 配置了才做）：中段本来会被**永久丢弃**，落盘把它变成「可读的事实」。
+	// 文案差异只在「去哪拿」：有文件就给他路径与分页方法，没有就沿用历史上那句
+	// 「Narrow the output to see it all」——没落盘却让人去读文件是纯粹的谎话。
+	if path := e.spillText(callID, s); path != "" {
+		return s[:headEnd] + fmt.Sprintf(
+			"\n\n[... %d bytes omitted from the middle (%.2f%% of %d bytes total); showing the first %d and the last %d bytes — both ends are present, the middle is not. The **full** output is written to %s — read the missing middle from that file (read_file with start_line/end_line for line-oriented logs; for a huge single line use `sed -n`/`tail -c`/`grep` on that path) instead of re-running this command ...]\n\n",
+			omitted, 100*float64(omitted)/float64(len(s)), len(s), headEnd, len(s)-tailStart, path) +
+			s[tailStart:]
+	}
 	return s[:headEnd] + fmt.Sprintf(
 		"\n\n[... %d bytes omitted from the middle (%.2f%% of %d bytes total); showing the first %d and the last %d bytes — both ends are present, the middle is not. Narrow the output to see it all (e.g. `head`/`-l`/`wc`, a smaller path or pattern) ...]\n\n",
 		omitted, 100*float64(omitted)/float64(len(s)), len(s), headEnd, len(s)-tailStart) +
 		s[tailStart:]
+}
+
+// maxSpillBytes 单次落盘上限（256 MiB）。实测最坏的一条是 122 MB（`grep -rn --include=*`
+// 扫到巨型文件）—— 上限存在的意义不是「省空间」而是不让一次手滑把盘写满。
+// 超限 = 不落盘（退回历史文案），不报错：截断本来就是兜底路径，落盘是它的增强。
+const maxSpillBytes = 256 << 20
+
+// spillText 把**未截断**的全文写进 spillDir，返回绝对路径；失败/未配置返回 ""。
+//
+// 纪律：
+//   - 失败一律静默（磁盘满/目录不可写/清理器抢跑）：截断照旧，模型看到的是历史文案；
+//   - 文件 0600、目录 0700（工具输出可能含密钥）；
+//   - 文件名带调用 id，便于把上下文里的路径和某次工具调用对上；
+//   - 落盘的是 `s`（未截断全文），不是截断后的文本 —— 否则落盘毫无意义。
+func (e *Engine) spillText(callID, s string) string {
+	if e.spillDir == "" || len(s) > maxSpillBytes {
+		return ""
+	}
+	if err := os.MkdirAll(e.spillDir, 0o700); err != nil {
+		return ""
+	}
+	f, err := os.CreateTemp(e.spillDir, "spill-"+safeFileToken(callID)+"-*.txt")
+	if err != nil {
+		return ""
+	}
+	path := f.Name()
+	if _, err := f.WriteString(s); err != nil {
+		f.Close()
+		os.Remove(path) // 半截文件比没有文件更糟：路径在手却读不全
+		return ""
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return ""
+	}
+	return path
+}
+
+// safeFileToken 把调用 id 变成文件名安全片段（调用 id 来自 provider，可能是任意字符串）。
+// 只保留 [A-Za-z0-9._-]，其余替换成 '_'，最长 64。
+func safeFileToken(s string) string {
+	if s == "" {
+		return "call"
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+		if b.Len() >= 64 {
+			break
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "call"
+	}
+	return out
 }
 
 // cutPrefixUTF8 返回 <= n 且落在 rune 边界上的长度。

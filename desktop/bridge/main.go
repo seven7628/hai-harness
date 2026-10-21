@@ -4247,7 +4247,7 @@ func exploreToolEngine(workspace string, sk *skills.Registry, caps *skills.Capab
 	for _, n := range exploreAllowedTools {
 		allowed[n] = true
 	}
-	eng := tools.NewToolEngine()
+	eng := tools.NewToolEngine(tools.WithSpillDir(toolSpillDir("")))
 	for _, t := range builtin.NewFileTools(workspace).Tools() {
 		if allowed[t.Name()] {
 			eng.RegisterTool(context.Background(), t)
@@ -4371,13 +4371,32 @@ func (r *subagentEffortRef) set(level provider.ReasoningEffortLevel) {
 // （run_python 的固定解释器来源；nil = 不注册 run_python —— 未装配运行时的 SDK 用法
 // 不注册比注册一个必然失败的工具更好，诊断留给宿主）。按 persona profile 决定工具集：
 // Work 无 bash（办公助理不跑命令）、无 agent_*/plan_submit（不派子 agent / 不规划）。
+// toolSpillDir 工具结果「截断即落盘」的目录（见 tools.WithSpillDir）。
+//
+// 落点选**系统临时目录**而不是工作区或 ~/.go-code：工作区会被 git status / grep 扫到，
+// 而 ~/.go-code 是宿主配置区（沙箱与敏感路径策略对它另有说法）。这正是 bash 结构化
+// spill（builtin.BashTool.spillFile）与 codemode 输出 spill 的既有约定 —— 三处同一种
+// 「不在工作区内、用绝对路径读」的语义，模型只需要学一次。
+//
+// 按会话分目录：便于人排查「这个会话的原始输出在哪」，也避免同名调用 id 互相覆盖。
+// 会话 id 不可用时退到 adhoc 桶（引擎会懒建目录，失败也只是不落盘）。
+func toolSpillDir(sid string) string {
+	safe := "adhoc"
+	if sid != "" {
+		if err := session.ValidateSessionID(sid); err == nil {
+			safe = sid
+		}
+	}
+	return filepath.Join(os.TempDir(), "hai-harness-toolspill", safe)
+}
+
 func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
 	// 子 agent 档位持有者：装配期与主 loop 同档，之后由 switch_effort 同步（见类型注释）。
 	effortRef := newSubagentEffortRef(provider.ReasoningEffortLevel(effort))
-	eng := tools.NewToolEngine()
+	eng := tools.NewToolEngine(tools.WithSpillDir(toolSpillDir(sid)))
 	ft := builtin.NewFileTools(workspace)
 	// Project Memory 的 Step 4 钩子：记忆文件由模型用标准 write_file / edit_file
 	// 写入，官方规定写入时补 `modified`，没有别的入口。宿主钩子在**写成功之后**触发。
