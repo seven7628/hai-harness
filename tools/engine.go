@@ -1198,7 +1198,9 @@ func callTool(tool Tool, ctx context.Context, call core.ToolCall) (out string, e
 			err = fmt.Errorf("tool %s panicked: %v", call.Name, r)
 		}
 	}()
-	return tool.Call(ctx, call.Name, call.Arguments)
+	// 逐次注入调用 id（复制 ToolContext，见 events.WithCallId 的并发理由）：
+	// 工具发「归属于本行」的事件（ToolOutput 的 tail 帧）全靠它。
+	return tool.Call(events.WithCallId(ctx, call.Id), call.Name, call.Arguments)
 }
 
 // finishInput finish 的入参（字段多，用具名结构避免位置参数拼错）。

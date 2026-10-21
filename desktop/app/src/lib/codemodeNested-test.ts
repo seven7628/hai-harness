@@ -666,3 +666,47 @@ test('flowBeads：取头部（明细取尾部，刻意相反），超出给 +N',
   assert.equal(pickNestedCalls(calls, true).visible[0].name, 'tool_1')
   assert.equal(flowBeads(calls).visible[0].name, 'tool_0')
 })
+
+// —— 运行中的输出尾巴（tail -f）———————————————————————————————————————
+//
+// 事件是**纯展示层**的：不进 Messages、不进用量、不落盘。三条行为必须钉住：
+// 替换语义（seq 单调）、工具结束即清除、乱序/重复帧被丢弃。任何一条破了都不会报错，
+// 只会让一行挂着过期输出 —— 典型「不报错、只是数据错」。
+
+test('store：tool_output 贴到对应工具行，且 seq 单调（乱序/重复帧丢弃）', () => {
+  const sid = 's-tail'
+  dispatchEvent({ event_type: 'tool_start', session_id: sid, run_id: 'r1', id: 'tail-1', name: 'bash', arguments: '{"command":"sleep 5"}' })
+
+  dispatchEvent({ event_type: 'tool_output', session_id: sid, run_id: 'r1', id: 'tail-1', seq: 1, tail: 'phase-1\n', total_bytes: 8 })
+  let row = toolBlocks(sid).find((b) => b.toolId === 'tail-1')
+  assert.equal(row?.liveTail, 'phase-1\n', '第一帧应贴到该行')
+  assert.equal(row?.liveTotal, 8)
+
+  // 重复/更旧的帧：内容不同也必须丢弃（替换语义靠 seq 兜底）
+  dispatchEvent({ event_type: 'tool_output', session_id: sid, run_id: 'r1', id: 'tail-1', seq: 1, tail: 'STALE\n', total_bytes: 6 })
+  row = toolBlocks(sid).find((b) => b.toolId === 'tail-1')
+  assert.equal(row?.liveTail, 'phase-1\n', 'seq 不变/更小的帧必须丢弃')
+
+  dispatchEvent({ event_type: 'tool_output', session_id: sid, run_id: 'r1', id: 'tail-1', seq: 2, tail: 'phase-1\nphase-2\n', total_bytes: 16 })
+  row = toolBlocks(sid).find((b) => b.toolId === 'tail-1')
+  assert.equal(row?.liveTail, 'phase-1\nphase-2\n', '更新的帧整段替换窗口')
+  assert.equal(row?.liveTotal, 16)
+})
+
+test('store：工具结束清掉尾巴（最终结果才是权威），未知 id 不影响别人', () => {
+  const sid = 's-tail-end'
+  dispatchEvent({ event_type: 'tool_start', session_id: sid, run_id: 'r1', id: 'tail-2', name: 'bash', arguments: '{"command":"sleep 5"}' })
+  dispatchEvent({ event_type: 'tool_start', session_id: sid, run_id: 'r1', id: 'other-2', name: 'bash', arguments: '{"command":"ls"}' })
+  dispatchEvent({ event_type: 'tool_output', session_id: sid, run_id: 'r1', id: 'tail-2', seq: 1, tail: 'x\n', total_bytes: 2 })
+  // 不存在的调用 id：静默忽略（事件可能来自已恢复/已清理的会话）
+  dispatchEvent({ event_type: 'tool_output', session_id: sid, run_id: 'r1', id: 'ghost', seq: 1, tail: 'zz\n', total_bytes: 3 })
+
+  dispatchEvent({ event_type: 'tool_response', session_id: sid, run_id: 'r1', id: 'tail-2', name: 'bash', result: 'done', is_error: false })
+  const rows = toolBlocks(sid)
+  const ended = rows.find((b) => b.toolId === 'tail-2')
+  assert.equal(ended?.liveTail, undefined, '工具结束后必须清掉尾巴（否则一行永久挂着过期输出）')
+  assert.equal(ended?.result, 'done', '最终结果照常落位')
+  const other = rows.find((b) => b.toolId === 'other-2')
+  assert.equal(other?.liveTail, undefined, '其它行不受影响')
+  assert.equal(rows.length, 2, '不该因为 tail 事件多出行')
+})

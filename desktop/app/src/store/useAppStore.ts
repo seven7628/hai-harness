@@ -526,12 +526,45 @@ export interface CompressionInfo {
   runId?: string
 }
 
+// —— 运行中的输出尾巴（tail -f）的两支纯函数 ————————————————————————————
+// 事件是**纯展示层**的（不进 Messages/用量/checkpoint，也不落盘），语义是**替换窗口**：
+// 客户端整段换掉手里的尾巴，于是重复投递、乱序、丢帧都不会把界面弄脏。
+type LiveTailHost = { toolId?: string; status?: string; liveTail?: string; liveSeq?: number; liveTotal?: number }
+
+/** 把一帧尾巴贴到目标工具行：只认「正在跑」的行，且 seq 必须单调递增。 */
+function applyLiveTail<T extends LiveTailHost>(row: T, toolId: string, tail: string, seq: number, total: number): T {
+  if (row.toolId !== toolId) return row
+  if (row.status !== 'running') return row // 已结束的行不再接受尾巴（最终结果才是权威）
+  if (seq > 0 && seq <= (row.liveSeq ?? 0)) return row // 乱序/重复帧：丢弃
+  return { ...row, liveTail: tail, liveSeq: seq, liveTotal: total }
+}
+
+/** 工具结束：把该行的尾巴清掉（主块与子 agent 卡片里的工具项都算）。 */
+function stripLiveTail(blocks: MsgBlock[], toolId: string): MsgBlock[] {
+  return blocks.map((b) => {
+    if (b.kind === 'tool') {
+      if (b.toolId !== toolId || b.liveTail === undefined) return b
+      const { liveTail: _t, liveSeq: _s, liveTotal: _n, ...rest } = b
+      return rest as MsgBlock
+    }
+    if (b.kind === 'agent') {
+      const items = b.items.map((it) => {
+        if (it.kind !== 'tool' || it.toolId !== toolId || it.liveTail === undefined) return it
+        const { liveTail: _t, liveSeq: _s, liveTotal: _n, ...rest } = it
+        return rest as typeof it
+      })
+      return { ...b, items }
+    }
+    return b
+  })
+}
+
 export type MsgBlock =
   | { kind: 'user'; id: number; text: string; ts?: number; contents?: QueuedContent[]; refs?: RefLoadInfo[] } // contents = 附件（图片等；对话页渲染缩略图）；refs = @引用展开结果（refs_loaded 事件，对话页状态行）
   | { kind: 'assistant'; id: number; text: string; streaming: boolean; model?: string; runId?: string; thinking: string; thinkMs?: number; ttftMs?: number; durMs?: number; agentDurMs?: number; thinkStart?: number; outputTokens?: number; reasoningTokens?: number; thinkingSummarized?: boolean; genMs?: number; ts?: number }
   // 工具块：nestedCalls = 编排型工具（codemode）脚本内的嵌套调用清单（外层结果自带，
   // 子调用**不生成**自己的工具块）；spillPath = 完整输出落盘路径（缺失时渲染层不显示该行）。
-  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; parentRunId?: string }
+  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; parentRunId?: string; liveTail?: string; liveSeq?: number; liveTotal?: number }
   // todos：该子 agent **自己**的待办清单（它是独立上下文，因此也是独立 TODO ——
   // 与会话级视图字段 SessionView.todos 互不相干，见 events.TodoSnapshot 的注释）。
   | { kind: 'agent'; id: number; runId: string; parentRunId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean }
@@ -685,7 +718,7 @@ export type AgentItem =
   // 完整输出落盘路径（来源与语义见 lib/codemodeNested.ts；嵌套调用自身没有工具行）。
   // todos：todo_* 工具项那一刻**该子 agent 自己**的清单快照（历史计划卡定格显示，
   // 语义与主对话工具块的 todos 同源，但归属是它自己的卡片，不是会话清单）
-  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[] }
+  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[]; liveTail?: string; liveSeq?: number; liveTotal?: number }
   // user 子运行上下文里的一条用户/模型消息（来源见 events.AgentUserMessage）。
   // 它是**转录的一部分**（子会话里能看到「我对它说了什么」），不是任务结果。
   | { kind: 'user'; text: string; startedAt?: number }
@@ -5697,6 +5730,37 @@ export function dispatchEvent(raw: AnyEvent): void {
       })
       break
     }
+    // 运行中的输出尾巴（tail -f）：**只给人看**，不进 Messages、不进用量。
+    // 后端按调用 id 节流发帧（250ms/帧、每帧 ≤4 KiB），语义是**替换**不是追加：
+    // 客户端整段换掉自己的窗口，于是重复投递/乱序/丢帧都不会把界面弄脏。
+    case 'tool_output': {
+      const sid = getSid(raw, getState().activeSessionId)
+      const toolId = String(raw.id || '')
+      const seq = Number(raw.seq ?? 0)
+      const tail = String(raw.tail ?? '')
+      const total = Number(raw.total_bytes ?? 0)
+      if (!toolId || !tail) break
+      const runId = raw.run_id ? String(raw.run_id) : undefined
+      setState((s) => {
+        const v = s.views[sid] ?? emptyView()
+        const isSub = runId ? isSubAgentRun(v, runId) : false
+        if (isSub && runId) {
+          return setView(s, sid, {
+            ...v,
+            blocks: v.blocks.map((b) =>
+              b.kind === 'agent' && b.runId === runId
+                ? { ...b, items: b.items.map((it) => (it.kind === 'tool' ? applyLiveTail(it, toolId, tail, seq, total) : it)) }
+                : b,
+            ),
+          })
+        }
+        return setView(s, sid, {
+          ...v,
+          blocks: v.blocks.map((b) => (b.kind === 'tool' ? applyLiveTail(b, toolId, tail, seq, total) : b)),
+        })
+      })
+      break
+    }
     case 'tool_run_end':
     case 'tool_response': {
       const sid = getSid(raw, getState().activeSessionId)
@@ -5796,7 +5860,10 @@ export function dispatchEvent(raw: AnyEvent): void {
         const nestTodos = nested && isSub && runId && Array.isArray(raw.todos)
           ? withAgentTodos(v.blocks, runId, raw.todos as TodoItem[])
           : v.blocks
-        const blocks = nested ? nestTodos : mappedBlocks
+        // 工具结束：清掉运行中的尾巴（事件不落盘，尾巴只在"正在跑"时有意义）。
+        // 放在这里而不是每个分支里：分支有四五条（promoted/中断/普通/子项），漏一条就会
+        // 让一行永远挂着一段过期输出。
+        const blocks = stripLiveTail(nested ? nestTodos : mappedBlocks, toolId)
         const toolStartTs = { ...v.toolStartTs }
         delete toolStartTs[toolId]
         const upd = setView(s, sid, {

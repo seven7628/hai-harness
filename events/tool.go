@@ -188,3 +188,33 @@ type ToolResponse struct {
 func (l *ToolResponse) Type() EventType {
 	return l.EventType
 }
+
+// ToolOutput 工具**运行中**的输出尾部（客户端「tail -f」用，**不进模型上下文**）。
+//
+// 与 ToolResponse.Result 的分工是刻意的：
+//   - Result 是**最终结果**（引擎截断 + 必要时落盘），模型下一次请求才会看到；
+//   - ToolOutput 只是**围观窗口**：客户端拿到后**替换**自己手里的尾巴（不是追加），
+//     于是重复投递、乱序、中途丢帧都不影响正确性；一帧都没收到也不影响任何结论
+//     （最终结论永远来自 ToolResponse）。
+//
+// 所以这个事件是**纯展示层**的：不进 Messages、不进用量、不进 checkpoint、不落盘。
+// 谁想把它塞进上下文，先回答「为什么模型需要看一个还在跑的命令的中间输出」。
+type ToolOutput struct {
+	RunId string `json:"run_id,omitempty"`
+	Id    string `json:"id"` // 所属工具调用 id（客户端据此把尾巴挂到那一行）
+	// Seq 同一调用的帧号（1 起、单调递增）。客户端「更大才采纳」，用来丢弃乱序/重复。
+	Seq int64 `json:"seq"`
+	// Tail 最近的输出窗口（**替换**语义）。空 = 目前还没有输出。
+	// 长度由发射方按 maxOutputTailBytes 自限 —— 事件里不放整份输出。
+	Tail string `json:"tail,omitempty"`
+	// TotalBytes 到目前为止累计输出的字节数：Tail 只留窗口，这个数仍是真值
+	// （客户端用它显示「已输出 1.2 MB」，人一眼知道跑了多少东西）。
+	TotalBytes int64 `json:"total_bytes,omitempty"`
+	// Truncated Tail 是否只是尾部窗口（= 更早的输出没含在 Tail 里）。
+	Truncated bool `json:"truncated,omitempty"`
+
+	Timestamp time.Time `json:"timestamp"`
+	EventType EventType `json:"event_type"`
+}
+
+func (o *ToolOutput) Type() EventType { return o.EventType }

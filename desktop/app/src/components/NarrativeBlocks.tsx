@@ -23,7 +23,7 @@ import { splitThinkingParagraphs } from '../lib/thinkingText'
 import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
-import { ToolNestedCalls, ToolOutputPreview, ToolScriptRun } from './ToolNestedCalls'
+import { ToolLiveTail, ToolNestedCalls, ToolOutputPreview, ToolScriptRun } from './ToolNestedCalls'
 import { codemodeTier, hasScriptOutput, isCodemodeTool, scriptSourceOf, scriptSummary, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { useT } from '../i18n'
 
@@ -53,6 +53,10 @@ export interface ToolRowData {
   spillPath?: string
   /** 编排型工具（codemode）脚本内的保留操作计数（后端 HostOps）——档位判据 */
   hostOps?: HostOpsView
+  /** 运行中的输出尾巴（tail -f，**只给人看**；工具结束即清除 —— 见 store 的 tool_output） */
+  liveTail?: string
+  /** 已累计输出字节数（真值，尾巴只是窗口） */
+  liveTotal?: number
   /** 主对话块 id（React key / 定位用；AgentItem 没有） */
   id?: number
 }
@@ -401,6 +405,9 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
       {/* —— 编排型工具（codemode）的两块附加渲染（设计文档 §17）—— */}
       {/* 1) 脚本内的嵌套调用清单：**只挂在外面这一行**下面（子调用不占独立工具行）。
              折叠态 = 最后 8 条 + 「…N earlier calls」，展开态 = 全部 —— 组件自带折叠交互。 */}
+      {/* 运行中的输出尾巴（tail -f）：**只给人看** —— bash 照旧阻塞到命令结束，
+          模型只拿最终结果。文本是替换语义（后端每 250ms 一帧窗口），不做追加。 */}
+      {b.status === 'running' && b.liveTail && <ToolLiveTail text={b.liveTail} total={b.liveTotal} />}
       {/* 0) 执行中：脚本控制台条（已用/预算 + 脚本内的调用点）。只有 codemode 有预算可画。 */}
       {isCodemode && b.status === 'running' && <ToolScriptRun script={scriptSrc} startedAt={b.startedAt} />}
       {b.nestedCalls && b.nestedCalls.length > 0 && (

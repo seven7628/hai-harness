@@ -373,7 +373,16 @@ type bridgeSession struct {
 // 事件行的 JSON key 按字母序排列（content 在 event_type 之前），长 chunk 会把
 // event_type 推到很后面，靠行首子串匹配会漏判；反过来在工具结果里搜子串又会误判。
 func isStreamingChunkType(t events.EventType) bool {
-	return t == events.ContentChunkType || t == events.ReasoningChunkType
+	switch t {
+	case events.ContentChunkType, events.ReasoningChunkType:
+		return true
+	// 工具运行中的输出尾巴（tail -f）：同一类「可重建的展示层增量」——
+	// 最终结果一定由 tool_run_end 携带，尾巴只是等待时的窗口。落盘只会让事件日志
+	// 按「命令跑了多久」线性膨胀（一条 10 分钟的命令 ≈ 2400 帧）。
+	case events.ToolOutputType:
+		return true
+	}
+	return false
 }
 
 // logEventLine 把转发给前端的事件行旁路追加到该会话事件日志（展示时间线，可重放重建链路）。

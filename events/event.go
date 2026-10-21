@@ -13,6 +13,9 @@ const (
 	ToolRunStartType   EventType = "tool_run_start"
 	ToolRunEndType     EventType = "tool_run_end"
 	ToolApprovalType   EventType = "tool_approval_requested"
+	// ToolOutputType 工具**运行中**的输出尾部（客户端 tail -f 用，绝不进模型上下文）。
+	// 不落盘：可重建的展示层增量，与 content_chunk / reasoning_chunk 同口径。
+	ToolOutputType EventType = "tool_output"
 	// TaskPromotedType 运行中的工具/同步子 agent 已被摘离为后台任务（promote 成功时发出）。
 	TaskPromotedType EventType = "task_promoted"
 

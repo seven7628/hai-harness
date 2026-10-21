@@ -51,6 +51,20 @@ type ExecSpec struct {
 	// 跑完并返回 exit 0，调用方看到的是「成功但什么都没输出」，排查成本极高。
 	// 由 TestExecSpecStdinFeedsSeatbelt 钉住（曾只接 NoSandbox）。
 	Stdin io.Reader
+
+	// OnOutput 可选：子进程的**输出增量**回调（stdout+stderr 合并，按写入顺序）。
+	// nil = 不回调（**默认，行为与历史逐字节一致**）。
+	//
+	// 用途只有一个：宿主把「命令正在输出什么」实时给**人**看（tail -f）。它**不**改变
+	// Run 的返回值语义 —— Run 仍然阻塞到子进程结束、仍返回完整输出。谁想用它给模型
+	// 做增量上下文，先读 events.ToolOutput 的注释。
+	//
+	// 实现约束（写在这里是因为踩了就是数据竞争）：
+	//   - stdout 与 stderr 各自一个拷贝协程，本回调**可能并发**调用 → 实现必须自带锁；
+	//   - 本回调在拷贝协程里同步执行，**必须快速返回**（几十微秒级）；
+	//     阻塞它会直接反压子进程输出，把「看日志」变成「拖慢命令」；
+	//   - p 只在调用期间有效（底层缓冲会被复用）→ 需要留存就拷贝一份。
+	OnOutput func(p []byte)
 }
 
 // Sandbox 沙箱执行后端。
@@ -168,8 +182,24 @@ func runExec(ctx context.Context, cmd *exec.Cmd, spec ExecSpec) (string, error) 
 	// 输出走 lockedBuffer 而不是裸 bytes.Buffer：极端分支会在 cmd.Wait 的拷贝协程仍
 	// 在往管道读/写时取部分输出，无锁会构成数据竞争（见 lockedBuffer 注释）。
 	var out lockedBuffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	// 输出接线：默认（OnOutput == nil）就是历史行为 —— 两条流直接写同一个缓冲区。
+	// 有 OnOutput 时先落缓冲（最终结果仍以缓冲区为准），再把**同一批字节**喂给回调。
+	// 为什么用 writerFunc 而不是包一层 TeeWriter：TeeWriter 会引入第二条写路径的锁序
+	// 问题，而这里只需要「写完之后顺带通知一下」。
+	writeStdout := io.Writer(&out)
+	writeStderr := io.Writer(&out)
+	if spec.OnOutput != nil {
+		hook := writerFunc(func(p []byte) (int, error) {
+			n, err := out.Write(p)
+			if n > 0 {
+				spec.OnOutput(p[:n])
+			}
+			return n, err
+		})
+		writeStdout, writeStderr = hook, hook
+	}
+	cmd.Stdout = writeStdout
+	cmd.Stderr = writeStderr
 	// ExecSpec.Stdin 的统一接线点（两个后端共用本骨架）：nil = 不碰 cmd.Stdin
 	// （os/exec 把子进程 stdin 接到 /dev/null，即本字段加入前的行为）。
 	if spec.Stdin != nil {
@@ -344,6 +374,11 @@ func killErrNote(errs ...error) string {
 // lockedBuffer 并发安全的输出缓冲。为什么需要锁：极端分支（升级后命令仍未结束）会在
 // cmd.Wait 的拷贝协程**仍在读写输出管道**的同时取部分输出 —— 裸 bytes.Buffer 与那个
 // 协程构成数据竞争（-race 会报，而"返回部分输出"是本包承诺的契约）。
+// writerFunc 把函数当 io.Writer 用（os/exec 输出接线需要）。
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

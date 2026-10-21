@@ -11961,6 +11961,58 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
     transition: none;
   }
 }
+/* 运行中的输出尾巴（tail -f）——**只给人看**：命令仍在跑，模型什么都不知道
+   （bash 照旧阻塞到结束才返回最终结果）。所以它可以尽情做「跟随」，代价只在渲染层。
+   固定高度 + 自动滚到底：日志看的是最新几行；等宽 + 不折行：对齐和缩进是信息的一部分。 */
+.tool-row .tool-tail {
+  margin: 2px 6px 6px 18px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+.tool-row .tool-tail .tt-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border);
+}
+.tool-row .tool-tail .tt-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--running);
+  animation: tailPulse 1.2s ease-in-out infinite;
+}
+@keyframes tailPulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+.tool-row .tool-tail .tt-bytes {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tool-row .tool-tail .tt-pre {
+  margin: 0;
+  padding: 6px 8px;
+  /* 7 行左右：再多会把人正在读的正文挤出屏幕（尾巴只是等待时的窗口） */
+  max-height: 126px;
+  overflow: auto;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+  color: var(--text-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-row .tool-tail .tt-dot {
+    animation: none;
+  }
+}
 /* 嵌套清单头部的「检索 N」：保留操作不在明细里，不在这说一句就是一片空白。 */
 .tool-row .tn-discover {
   flex: 0 0 auto;

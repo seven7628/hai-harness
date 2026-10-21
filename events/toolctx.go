@@ -11,7 +11,11 @@ type toolCtxKey struct{}
 type ToolContext struct {
 	// RunId 是当前正在执行工具的运行 ID；工具事件/审批事件使用它做归属。
 	// ParentRunId 仍表示发起当前运行的父运行 ID，不能混用。
-	RunId       string
+	RunId string
+	// CallId 本次**工具调用**的 id（不是 run 的）。由引擎在 Call 之前逐次注入
+	// （WithCallId），供工具发出「归属于这一行工具卡」的事件 —— 例如
+	// events.ToolOutput 的 tail -f 帧。空 = 未知（直接调用工具/测试）。
+	CallId      string
 	ParentRunId string       // 发起运行的 RunId（子 agent 的父）
 	TaskId      string       // 发起运行的后台任务 id（"" = 非后台任务 = 主 Agent 直调）
 	Depth       int          // 发起运行的深度（根 = 0）
@@ -37,6 +41,23 @@ func WithTodoSnapshot(ctx context.Context, fn func() []TodoSnapshot) context.Con
 		tc.Todos = fn
 	}
 	return ctx
+}
+
+// WithCallId 给当前工具调用挂上调用 id，返回**新的** ctx。
+//
+// 为什么是复制而不是原地改：同一 run 内并行的工具调用共享同一份 *ToolContext（run 级
+// 注入一次），原地写 CallId 会让两个并发工具的尾巴互相串号 —— 那是典型的「不报错、
+// 只是数据错」的竞争。复制成本是一个小结构体（含几个函数指针），可以忽略。
+//
+// 未注入 ToolContext（工具被直接调用/测试）时原样返回：调用方不必判断。
+func WithCallId(ctx context.Context, callID string) context.Context {
+	tc := ToolContextFrom(ctx)
+	if tc == nil || callID == "" {
+		return ctx
+	}
+	cp := *tc
+	cp.CallId = callID
+	return context.WithValue(ctx, toolCtxKey{}, &cp)
 }
 
 // WithToolContext 把工具执行上下文注入 context；approver nil = 不审批；hooks nil = 无。

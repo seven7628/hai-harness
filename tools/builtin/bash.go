@@ -234,6 +234,10 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	var exitCode int
 	var timedOut, canceled bool
 	started := time.Now() // 墙钟只包住真实执行（cd 解析/高危拦截不算命令耗时）
+	// 运行中的输出尾巴（tail -f，**只给人看**）：没有事件出口（嵌套调用/直调）时
+	// tailer == nil，OnOutput 保持 nil → 执行层走历史路径，逐字节不变。
+	tailer := newOutputTailer(ctx)
+	onOutput := spec0OnOutput(tailer)
 	out, err := sbx.Run(ctx, sandbox.ExecSpec{
 		Command:  cmd,
 		Cwd:      cwd,
@@ -241,6 +245,7 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 		ExitCode: &exitCode,
 		TimedOut: &timedOut,
 		Canceled: &canceled,
+		OnOutput: onOutput,
 	})
 	wall := time.Since(started)
 	// 上报结构化结局（旁路：Call 必须返回 nil error，否则引擎会丢弃 out，见非目标 1）

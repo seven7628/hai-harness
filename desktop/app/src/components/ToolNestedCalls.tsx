@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { fmtDuration, fmtRun } from './ui'
 import { copyText } from '../lib/clipboard'
+import { fmtBytes } from '../lib/imageAttach'
 import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
 import { useClock } from '../lib/useNow'
@@ -205,6 +206,42 @@ export const ToolScriptRun = memo(function ToolScriptRun({ script, startedAt }: 
           ))}
         </div>
       )}
+    </div>
+  )
+})
+
+// —— 运行中的输出尾巴（tail -f）——————————————————————————————————————
+//
+// 只给人看：这条尾巴**不进模型上下文**（后端 events.ToolOutput 是不落盘的展示层增量），
+// bash 工具照旧阻塞到命令结束才把最终结果交给模型。所以这里可以放心做「跟随」——
+// 它不改变任何结论，只在等待时回答「它到底在干什么」。
+//
+// 三条实现细节：
+//   · 文本是**替换**语义（后端每 250ms 发一帧窗口），所以这里不做拼接，直接渲染；
+//   · 固定高度 + 自动滚到底：日志类输出看的是最新几行，不是开头；
+//   · 等宽字体 + 不折行（横向可滚）：日志的对齐与缩进是信息的一部分。
+export const ToolLiveTail = memo(function ToolLiveTail({ text, total }: { text: string; total?: number }) {
+  const t = useT()
+  const preRef = useRef<HTMLPreElement>(null)
+  // 只在内容变化时滚到底。不能放进 render（每次 render 都改 scrollTop 会打架）；
+  // behavior:'auto' 而不是 smooth —— 每 250ms 一帧的平滑滚动会自己叠成抖动。
+  useEffect(() => {
+    const el = preRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [text])
+  return (
+    <div className="tool-tail">
+      <div className="tt-hd">
+        <span className="tt-dot" aria-hidden="true" />
+        <span className="tt-label">{t('tool.tail.live')}</span>
+        <span className="grow" />
+        {total != null && total > 0 && (
+          <span className="tt-bytes mono" title={t('tool.tail.bytesHint')}>
+            {t('tool.tail.bytes').replace('{n}', fmtBytes(total))}
+          </span>
+        )}
+      </div>
+      <pre className="tt-pre mono" ref={preRef}>{text}</pre>
     </div>
   )
 })
