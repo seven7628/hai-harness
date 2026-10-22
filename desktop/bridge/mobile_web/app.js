@@ -97,6 +97,33 @@
     return n
   }
 
+  // 轻量 markdown：``` 代码块、`行内代码`、**粗体**。
+  // 只用于**定稿**消息（记录/快照）；流式过程每帧重排太贵，直接 textContent 出纯文本。
+  function mdLite(text) {
+    const frag = document.createDocumentFragment()
+    String(text)
+      .split('```')
+      .forEach((seg, i) => {
+        if (i % 2 === 1) {
+          // 代码块：首行若是语言标注（```js）丢掉
+          const body = seg.replace(/^[^\n]*\n/, '').replace(/\n+$/, '')
+          frag.appendChild(el('pre', '', body))
+          return
+        }
+        for (const part of seg.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/)) {
+          if (!part) continue
+          if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
+            frag.appendChild(el('code', '', part.slice(1, -1)))
+          } else if (part.length > 4 && part.startsWith('**') && part.endsWith('**')) {
+            frag.appendChild(el('b', '', part.slice(2, -2)))
+          } else {
+            frag.appendChild(document.createTextNode(part))
+          }
+        }
+      })
+    return frag
+  }
+
   function fmtTime(ms) {
     if (!ms) return ''
     const d = new Date(ms)
@@ -418,19 +445,22 @@
       box.appendChild(more)
     }
     for (const b of state.blocks) box.appendChild(renderBlock(b))
-    if (state.live.thinking) box.appendChild(el('div', 'msg thinking', state.live.thinking))
+    if (state.live.thinking) {
+      const t = el('div', 'msg thinking', state.live.thinking)
+      t.dataset.live = '1'
+      box.appendChild(t)
+    }
     if (state.live.text) {
-      box.appendChild(el('div', 'msg assistant' + (state.running ? ' cursor' : ''), state.live.text))
+      const n = el('div', 'msg assistant' + (state.running ? ' cursor' : ''), state.live.text)
+      n.dataset.live = '1'
+      box.appendChild(n)
     }
     updateRunning()
   }
 
   function userMsg(text) {
     const wrap = el('div', 'msg user')
-    const who = el('div', 'who')
-    who.append(el('b', '', '你'))
-    if (text) who.appendChild(el('span', 'msg-ts', ''))
-    wrap.append(who, el('div', 'body', text || ''))
+    wrap.appendChild(el('div', 'body', text || ''))
     return wrap
   }
 
@@ -441,7 +471,11 @@
       case 'assistant': {
         const wrap = document.createDocumentFragment()
         if (b.thinking) wrap.appendChild(el('div', 'msg thinking', b.thinking))
-        if (b.text) wrap.appendChild(el('div', 'msg assistant', b.text))
+        if (b.text) {
+          const node = el('div', 'msg assistant')
+          node.appendChild(mdLite(b.text))
+          wrap.appendChild(node)
+        }
         return wrap
       }
       case 'tool': {
@@ -654,6 +688,13 @@
 
   // ---------- 事件流 ----------
 
+  // 每建一条连接 generation +1，旧连接的回调一律作废。
+  // 原因：Safari 息屏/切后台后 WebSocket 半死不活，旧连接仍可能继续推消息；
+  // 两条连接同时活着时，同一帧被 onEvent 处理两遍 —— 表现就是每个 token 都重复
+  // （"add add a a"），而落盘记录是干净的。
+  let connGen = 0
+  let retryTimer = null
+
   function disconnect() {
     if (pickTimer) {
       clearInterval(pickTimer)
@@ -662,6 +703,11 @@
     }
     stopAgentPoll()
     state.disposed = true
+    if (retryTimer) {
+      clearTimeout(retryTimer)
+      retryTimer = null
+    }
+    connGen++
     if (state.conn) {
       try {
         state.conn.close()
@@ -672,18 +718,36 @@
     }
   }
 
+  // 同一条事件被投递两遍的兜底：帧内容逐字节相同才丢弃（时间戳不同即视为新帧，
+  // 所以正常的重复词 "the the" 不会被误删）。
+  const seenFrames = new Map()
+  function isDuplicateFrame(raw) {
+    const now = Date.now()
+    const prev = seenFrames.get(raw)
+    if (prev !== undefined && now - prev < 3000) return true
+    seenFrames.set(raw, now)
+    if (seenFrames.size > 600) {
+      for (const [k, t] of seenFrames) if (now - t > 3000) seenFrames.delete(k)
+    }
+    return false
+  }
+
   function connect() {
     if (!state.token || !state.sid) return
     disconnect()
     state.disposed = false
+    const gen = connGen
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const q = `token=${encodeURIComponent(state.token)}&workspace=${encodeURIComponent(state.ws)}&session_id=${encodeURIComponent(state.sid)}`
     const conn = new WebSocket(`${proto}://${location.host}/api/events?${q}`)
     state.conn = conn
     conn.onopen = () => {
+      if (gen !== connGen) return
       state.retry = 0
     }
     conn.onmessage = (m) => {
+      if (gen !== connGen) return
+      if (isDuplicateFrame(m.data)) return
       let ev
       try {
         ev = JSON.parse(m.data)
@@ -693,11 +757,16 @@
       onEvent(ev)
     }
     conn.onclose = () => {
+      if (gen !== connGen) return
       state.conn = null
       if (state.disposed) return
       const delay = Math.min(1000 * 2 ** state.retry, 15000)
       state.retry++
-      setTimeout(connect, delay)
+      if (retryTimer) clearTimeout(retryTimer)
+      retryTimer = setTimeout(() => {
+        retryTimer = null
+        connect()
+      }, delay)
     }
   }
 
@@ -780,13 +849,19 @@
 
   function patchLive() {
     const box = $('messages')
-    const last = box.lastElementChild
-    if (state.live.thinking && (!last || !last.classList.contains('thinking'))) {
-      box.appendChild(el('div', 'msg thinking', state.live.thinking))
+    // 只有已经贴在底部时才自动跟随；否则用户正在往回读历史，不该被拽走
+    const stick = nearBottom(box)
+    if (state.live.thinking) {
+      let t = box.querySelector('.msg.thinking[data-live="1"]')
+      if (!t) {
+        t = el('div', 'msg thinking')
+        t.dataset.live = '1'
+        box.appendChild(t)
+      }
+      t.textContent = state.live.thinking
     }
-    const nodes = box.querySelectorAll('.msg.assistant')
-    let node = nodes[nodes.length - 1]
-    if (!node || node.dataset.live !== '1') {
+    let node = box.querySelector('.msg.assistant[data-live="1"]')
+    if (!node) {
       node = el('div', 'msg assistant')
       node.dataset.live = '1'
       box.appendChild(node)
@@ -794,7 +869,11 @@
     node.textContent = state.live.text
     node.classList.toggle('cursor', state.running)
     updateRunning()
-    scrollToEnd()
+    if (stick) scrollToEnd()
+  }
+
+  function nearBottom(box) {
+    return box.scrollHeight - box.scrollTop - box.clientHeight < 80
   }
 
   function appendTool(t) {

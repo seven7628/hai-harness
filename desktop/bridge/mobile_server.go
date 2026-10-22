@@ -103,9 +103,18 @@ func newMobileServer(m *manager, dataDir string) *mobileServer {
 //     所以这是用户显式开关，不是默认值。
 func (s *mobileServer) start(preferred string) error {
 	s.lan = s.loadLan()
-	if preferred == "" {
-		preferred = s.listenAddr()
+	// preferred 只用来复用端口，绑定接口由 lan 决定：调用方（main.go）固定传
+	// "127.0.0.1:47800"，若整串照用，config 里的 lan 就永远被覆盖 —— 表现为
+	// 「面板里开了局域网，重启后又只剩回环，手机连不上」。
+	port := "47800"
+	if _, p, err := net.SplitHostPort(preferred); err == nil && p != "" {
+		port = p
 	}
+	bindHost := "127.0.0.1"
+	if s.lan {
+		bindHost = "0.0.0.0"
+	}
+	preferred = net.JoinHostPort(bindHost, port)
 	ln, err := net.Listen("tcp", preferred)
 	if err != nil && !strings.HasSuffix(preferred, ":0") {
 		// 上次的端口被别的进程占了 → 退到随机端口（只影响 URL，不影响 token）
@@ -206,8 +215,8 @@ func (s *mobileServer) routes() http.Handler {
 	mux.HandleFunc("/api/pair", s.handlePair)
 	mux.HandleFunc("/api/cmd", s.handleCmd)
 	mux.HandleFunc("/api/events", s.handleEvents)
-	if sub, err := fs.Sub(mobileWebFS, "mobile_web"); err == nil {
-		mux.Handle("/m/", http.StripPrefix("/m/", noStore(http.FileServer(http.FS(sub)))))
+	if sub := mobileWebSub(os.Getenv("HAI_MOBILE_WEB_DIR")); sub != nil {
+		mux.Handle("/m/", http.StripPrefix("/m/", noStore(http.FileServer(sub))))
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/" {
 				http.Redirect(w, r, "/m/", http.StatusFound)
@@ -217,6 +226,22 @@ func (s *mobileServer) routes() http.Handler {
 		})
 	}
 	return mux
+}
+
+// mobileWebSub 手机端静态资源根。开发态（HAI_MOBILE_WEB_DIR 指向仓库 mobile_web/）
+// 直接读磁盘 —— 改样式/脚本只需手机刷新，不必 go build + 重启 bridge；目录不存在
+// 或打包态回落 go:embed，交付产物永远自带页面。
+func mobileWebSub(diskDir string) http.FileSystem {
+	if diskDir != "" {
+		if st, err := os.Stat(diskDir); err == nil && st.IsDir() {
+			return http.Dir(diskDir)
+		}
+	}
+	sub, err := fs.Sub(mobileWebFS, "mobile_web")
+	if err != nil {
+		return nil
+	}
+	return http.FS(sub)
 }
 
 func (s *mobileServer) close() {
