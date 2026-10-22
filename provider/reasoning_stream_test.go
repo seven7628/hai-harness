@@ -179,7 +179,7 @@ func TestReasoningAliasKeepsOriginalFields(t *testing.T) {
 	payload := []byte(`{"id":"c1","choices":[{"index":0,"delta":{"reasoning":"R",` +
 		`"reasoning_details":[{"index":0,"type":"reasoning.text","text":"R"}]},` +
 		`"custom_big":12345678901234567890}],"vendor":{"x":1.50}}`)
-	out, changed := normalizeReasoningPayload(payload)
+	out, changed := normalizeStreamPayload(payload, true, false)
 	if !changed {
 		t.Fatal("带 reasoning 的帧应被归一化")
 	}
@@ -315,4 +315,61 @@ func TestReasoningUsageUnaffected(t *testing.T) {
 	if usage.Output != 20 || usage.Input != 10 {
 		t.Fatalf("用量被兼容层影响: %+v", usage)
 	}
+}
+
+// usage 归一（2026-10）：字段名与位置都因端点而异，SDK 只认标准形态。
+// 实测：DeepSeek 两个字段都发（cached_tokens=3840 / prompt_cache_hit_tokens=3840），
+// 但「只发原生名」的网关会把缓存命中记成 miss（成本虚高）；Moonshot 把 usage
+// 放进 choices[].usage 则会被整帧丢弃（usage 归零）。
+func TestUsageAliasNormalization(t *testing.T) {
+	t.Run("只发 prompt_cache_hit_tokens → 补进明细", func(t *testing.T) {
+		in := `data: {"id":"c","choices":[],"usage":{"prompt_tokens":4000,"completion_tokens":8,` +
+			`"total_tokens":4008,"prompt_cache_hit_tokens":3840}}`
+		out := string(rewriteSSELine([]byte(in)))
+		for _, want := range []string{
+			`"cached_tokens":3840`,
+			`"prompt_cache_hit_tokens":3840`, // 原字段保留（只增不改）
+			`"prompt_tokens":4000`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("缺少 %s:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("明细已给出（含 0）→ 不改写", func(t *testing.T) {
+		in := `data: {"choices":[],"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":0},` +
+			`"prompt_cache_hit_tokens":3840}}`
+		if out := string(rewriteSSELine([]byte(in))); out != in {
+			t.Fatalf("明细存在时不应改写:\n in=%s\nout=%s", in, out)
+		}
+	})
+
+	t.Run("choices[].usage（Moonshot 位置）→ 提升到顶层", func(t *testing.T) {
+		in := `data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop",` +
+			`"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}]}`
+		out := string(rewriteSSELine([]byte(in)))
+		if !strings.Contains(out, `"usage":{"prompt_tokens":11`) {
+			t.Fatalf("顶层 usage 未提升:\n%s", out)
+		}
+		if !strings.Contains(out, `"choices"`) {
+			t.Fatalf("choices 被吞:\n%s", out)
+		}
+	})
+
+	t.Run("顶层已有 usage → 不动 choices 里的", func(t *testing.T) {
+		in := `data: {"choices":[{"index":0,"usage":{"prompt_tokens":99}}],` +
+			`"usage":{"prompt_tokens":11}}`
+		out := string(rewriteSSELine([]byte(in)))
+		if !strings.Contains(out, `"usage":{"prompt_tokens":11}`) {
+			t.Fatalf("顶层 usage 被覆盖:\n%s", out)
+		}
+	})
+
+	t.Run("usage 为 null 的普通帧 → 一字节不动", func(t *testing.T) {
+		in := `data: {"choices":[{"index":0,"delta":{"content":"hi"}}],"usage":null}`
+		if out := string(rewriteSSELine([]byte(in))); out != in {
+			t.Fatalf("普通帧不应改写:\n in=%s\nout=%s", in, out)
+		}
+	})
 }

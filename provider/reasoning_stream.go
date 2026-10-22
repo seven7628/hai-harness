@@ -1,4 +1,6 @@
-// reasoning_stream.go —— 「思考文本叫什么」的兼容层（2026-10 真机实证）。
+// reasoning_stream.go —— SSE 帧归一化层：①「思考文本叫什么」②「usage 字段在哪/叫什么」。
+// 两类问题同一性质（字段名与位置因端点而异），且都只能在**响应体**这一层修（见下），
+// 故合并成一次解析、一条通道。
 //
 // 触发场景：opendesign 网关（deepseek-v4.1-flash 等）把流式思考文本放在
 // choices[].delta.**reasoning**（+ reasoning_details），而 SDK 结构体只认
@@ -17,6 +19,14 @@
 //
 // 只增不改：原字段全部保留（SDK 忽略未知键），审计/排查仍能看到上游真实形态。
 // 且仅当帧里**没有** reasoning_content 时才重写 —— 已是标准形态的端点一个字节都不动。
+//
+// usage 归一（2026-10，对齐 pi openai-completions.ts:1498-1539 的字段探测）：
+//
+//	a) 缓存命中字段名：部分网关只发 `prompt_cache_hit_tokens`（DeepSeek/Kimi 的原生名），
+//	   不发 `prompt_tokens_details.cached_tokens` —— SDK 只认后者，前者的命中会被记成 miss
+//	   （成本虚高、命中率虚低）。这里在**明细缺失**时补进明细；已有明细（哪怕值是 0）不动。
+//	b) 非标准位置：Moonshot 系把 usage 放进 `choices[].usage` —— 顶层缺 usage 时提升一份。
+//	   （实测 DeepSeek 两个字段都发且一致，所以这条只影响「只发原生名」的网关。）
 package provider
 
 import (
@@ -133,13 +143,15 @@ func rewriteSSELine(line []byte) []byte {
 	// 快速路径（长回答的每帧都走这里，必须零成本跳过）：已经是标准形态 → 直接透传；
 	// 连别名字样都没有 → 不必解析 JSON。`"reasoning` 带前引号做边界，可同时覆盖
 	// reasoning / reasoning_details（后者是 `"reasoning"` 前缀，靠引号区分不开，故取前缀）。
-	if bytes.Contains(payload, []byte(`"reasoning_content"`)) {
+	needsReasoning := !bytes.Contains(payload, []byte(`"reasoning_content"`)) &&
+		(bytes.Contains(payload, []byte(`"reasoning`)) || bytes.Contains(payload, []byte(`"thinking`)))
+	// usage 帧只在收尾出现（或每帧都带 usage 的网关），命中 `"usage"` 才解析。
+	needsUsage := bytes.Contains(payload, []byte(`"prompt_cache_hit_tokens"`)) ||
+		bytes.Contains(payload, []byte(`"usage"`))
+	if !needsReasoning && !needsUsage {
 		return line
 	}
-	if !bytes.Contains(payload, []byte(`"reasoning`)) && !bytes.Contains(payload, []byte(`"thinking`)) {
-		return line
-	}
-	rewritten, changed := normalizeReasoningPayload(payload)
+	rewritten, changed := normalizeStreamPayload(payload, needsReasoning, needsUsage)
 	if !changed {
 		return line
 	}
@@ -152,26 +164,46 @@ func rewriteSSELine(line []byte) []byte {
 	return out
 }
 
-// normalizeReasoningPayload 把一帧里的思考文本别名补成 reasoning_content。
-// 返回 changed=false 表示该帧不需要（或无法）改写，调用方据此原样透传。
+// normalizeStreamPayload 一帧里的两类别名归一：思考文本 → reasoning_content；
+// usage 字段名/位置 → SDK 认的形态。返回 changed=false 表示该帧不需要（或无法）改写。
 //
 // 用 map[string]json.RawMessage 逐层解析：未触碰的键保持**原始字节**
 // （大整数、浮点精度、unknown 扩展字段都不会因重编码而变样）。
-func normalizeReasoningPayload(payload []byte) ([]byte, bool) {
+// needsReasoning / needsUsage 由调用方的快速路径判定，避免每帧都解析 JSON。
+func normalizeStreamPayload(payload []byte, needsReasoning, needsUsage bool) ([]byte, bool) {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(payload, &top) != nil {
 		return nil, false
 	}
+	changed := false
+
+	// usage（a）顶层缓存命中字段名：只在明细缺失时补，已有明细不动。
+	if needsUsage {
+		if normalizeUsageFields(top) {
+			changed = true
+		}
+	}
+	// usage（b）非标准位置 choices[].usage：顶层没有 usage 时才需要看 choices。
+	needChoices := needsReasoning || (needsUsage && len(top["usage"]) == 0)
+	if !needChoices {
+		return marshalIfChanged(top, changed)
+	}
 	choicesRaw, ok := top["choices"]
 	if !ok {
-		return nil, false
+		return marshalIfChanged(top, changed)
 	}
 	var choices []map[string]json.RawMessage
 	if json.Unmarshal(choicesRaw, &choices) != nil {
-		return nil, false
+		return marshalIfChanged(top, changed)
 	}
+	if needsUsage && len(top["usage"]) == 0 {
+		if hoisted, ok := hoistChoiceUsage(choices); ok {
+			top["usage"] = hoisted
+			changed = true
+		}
+	}
+	reasoningChanged := false
 
-	changed := false
 	for _, choice := range choices {
 		deltaRaw, ok := choice["delta"]
 		if !ok {
@@ -198,17 +230,84 @@ func normalizeReasoningPayload(payload []byte) ([]byte, bool) {
 			continue
 		}
 		choice["delta"] = newDelta
+		reasoningChanged = true
+	}
+	// 必须写回 top["choices"]：choices 是解析出的副本，只改元素不会影响原始顶层 map。
+	if reasoningChanged {
+		encodedChoices, err := json.Marshal(choices)
+		if err != nil {
+			return nil, false
+		}
+		top["choices"] = encodedChoices
 		changed = true
 	}
+	return marshalIfChanged(top, changed)
+}
+
+// normalizeUsageFields 缓存命中字段名归一：`prompt_cache_hit_tokens`（DeepSeek/Kimi 原生名）
+// → `prompt_tokens_details.cached_tokens`（SDK 认的明细字段）。
+//
+// 只在明细**缺失**时补：明细存在（哪怕值 0）一律不动 —— 上游自己给了口径就听它的。
+func normalizeUsageFields(top map[string]json.RawMessage) bool {
+	usageRaw, ok := top["usage"]
+	if !ok || len(usageRaw) == 0 || bytes.Equal(bytes.TrimSpace(usageRaw), []byte("null")) {
+		return false
+	}
+	var usage map[string]json.RawMessage
+	if json.Unmarshal(usageRaw, &usage) != nil {
+		return false
+	}
+	// 原生名字段在 usage **内部**（DeepSeek 实测：usage.prompt_cache_hit_tokens）。
+	hitRaw, ok := usage["prompt_cache_hit_tokens"]
+	if !ok {
+		if hitRaw, ok = top["prompt_cache_hit_tokens"]; !ok {
+			return false // 没有原生名字段：无事可做（usage 可能在 choices 里，交给 hoist）
+		}
+	}
+	var details map[string]json.RawMessage
+	if raw, ok := usage["prompt_tokens_details"]; ok {
+		if json.Unmarshal(raw, &details) != nil {
+			return false
+		}
+		if _, exists := details["cached_tokens"]; exists {
+			return false // 明细已给出（含 0）→ 不改写
+		}
+	}
+	if details == nil {
+		details = map[string]json.RawMessage{}
+	}
+	details["cached_tokens"] = hitRaw
+	encodedDetails, err := json.Marshal(details)
+	if err != nil {
+		return false
+	}
+	usage["prompt_tokens_details"] = encodedDetails
+	encodedUsage, err := json.Marshal(usage)
+	if err != nil {
+		return false
+	}
+	top["usage"] = encodedUsage
+	return true
+}
+
+// hoistChoiceUsage 把 `choices[].usage`（Moonshot 系非标准位置）提升到顶层。
+// 返回第一个非 null 的 usage 原始字节（原样搬运，不解析内部字段）。
+func hoistChoiceUsage(choices []map[string]json.RawMessage) (json.RawMessage, bool) {
+	for _, choice := range choices {
+		raw, ok := choice["usage"]
+		if !ok || len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		return raw, true
+	}
+	return nil, false
+}
+
+// marshalIfChanged 仅在确有改写时重编码顶层对象（未改写一字节都不动）。
+func marshalIfChanged(top map[string]json.RawMessage, changed bool) ([]byte, bool) {
 	if !changed {
 		return nil, false
 	}
-	// 必须写回 top["choices"]：choices 是解析出的副本，只改元素不会影响原始顶层 map。
-	encodedChoices, err := json.Marshal(choices)
-	if err != nil {
-		return nil, false
-	}
-	top["choices"] = encodedChoices
 	out, err := json.Marshal(top)
 	if err != nil {
 		return nil, false
