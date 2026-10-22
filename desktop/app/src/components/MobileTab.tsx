@@ -18,6 +18,10 @@ export default function MobileTab() {
 
   useEffect(() => {
     fetchMobileStatus()
+    // 配对码 5 分钟过期且只在拉状态时换新：面板开着就每 30s 拉一次，
+    // 屏幕上的码永远有效（原来过期后仍显示旧码，照抄必然「已过期」）。
+    const id = setInterval(() => fetchMobileStatus(), 30_000)
+    return () => clearInterval(id)
   }, [fetchMobileStatus])
 
   const copy = async (kind: 'url' | 'code', text: string) => {

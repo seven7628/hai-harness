@@ -34,6 +34,41 @@
     agentPoll: null,
   }
 
+  // 无头/隐私模式的浏览器（以及部分 App 内嵌 WebView）不持久化 localStorage：
+  // 每次启动都会丢凭据、被迫重新配对（服务端 token 其实永不过期）。
+  // 兜底两条：cookie 作第二存储；凭据也可以直接写在 URL 里 —— ?t=<token> 或 #t=<token>，
+  // 固定导航到这条 URL（或存书签）就永远不用再输配对码。它等价于密码，别外传。
+  function tokenFromURL() {
+    const h = location.hash.match(/[#&]t=([0-9a-f]{64})/i)
+    if (h) return h[1]
+    const q = new URLSearchParams(location.search).get('t') || ''
+    return /^[0-9a-f]{64}$/i.test(q) ? q : ''
+  }
+
+  function cookieToken() {
+    const m = document.cookie.match(/(?:^|;\s*)hai_token=([0-9a-f]{64})/i)
+    return m ? m[1] : ''
+  }
+
+  function rememberToken(tok) {
+    state.token = tok
+    try {
+      localStorage.setItem(LS.token, tok)
+    } catch {
+      /* 隐私模式：忽略 */
+    }
+    try {
+      document.cookie = 'hai_token=' + tok + '; path=/; max-age=31536000; SameSite=Lax'
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 免配对链接：把当前凭据写进 URL，给无持久化存储的浏览器用
+  function bookmarkURL() {
+    return `${location.origin}/m/?t=${encodeURIComponent(state.token)}`
+  }
+
   // 主题：与桌面同一套 data-theme（ink=墨 / paper=宣纸），跟随系统
   const themeMQ = window.matchMedia('(prefers-color-scheme: light)')
   function applyTheme() {
@@ -77,20 +112,17 @@
       body: JSON.stringify({ cmd, payload }),
     })
     if (r.status === 401) {
-      resetAuth()
+      // 不再静默删 token：一次抖动/服务端重启就把凭据清掉，等于每次都要重新扫码。
+      // 留着，由用户显式重新配对覆盖（见 pair 屏提示）。
+      disconnect()
+      show('pair')
+      pairError('设备凭据已失效（可能被撤销），请重新配对')
       throw new Error('设备凭据失效，请重新配对')
     }
     const data = await r.json().catch(() => ({}))
     if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status)
     if (data.ok === false) throw new Error(data.error || '命令失败')
     return data.data || {}
-  }
-
-  function resetAuth() {
-    state.token = ''
-    localStorage.removeItem(LS.token)
-    disconnect()
-    show('pair')
   }
 
   function el(tag, cls, text) {
@@ -165,9 +197,12 @@
       })
       const data = await r.json().catch(() => ({}))
       if (!r.ok) return pairError(data.error || '配对失败')
-      state.token = data.token
-      localStorage.setItem(LS.token, data.token)
-      localStorage.setItem(LS.name, name)
+      rememberToken(data.token)
+      try {
+        localStorage.setItem(LS.name, name)
+      } catch {
+        /* ignore */
+      }
       await boot()
     } catch (e) {
       pairError(e.message || '网络错误')
@@ -1124,10 +1159,29 @@
       return
     }
     try {
+      if (!(await verifyToken())) {
+        show('pair')
+        pairError('凭据失效或已在桌面端撤销，请重新配对（也可用桌面端给的免配对链接进入）')
+        return
+      }
       await loadWorkspaces()
     } catch (e) {
       if (state.token) pairError(e.message)
       show('pair')
+    }
+  }
+
+  // verifyToken 用最轻的 /api/ping 自检：凭据无效时把 token 留着不删，
+  // 让「重新配对」覆盖它——静默清空会让每次抖动都变成一次扫码。
+  async function verifyToken() {
+    if (!state.token) return false
+    try {
+      const r = await fetch('/api/ping', { headers: { Authorization: 'Bearer ' + state.token } })
+      if (!r.ok) return true // 5xx/网关问题不算凭据失效
+      const d = await r.json().catch(() => ({}))
+      return d.paired !== false
+    } catch {
+      return true // 离线：先放行，进列表会给出网络错误
     }
   }
 
@@ -1176,6 +1230,19 @@
     $('new-session').addEventListener('click', newSession)
     $('agents-bar').addEventListener('click', openAgents)
     $('send').addEventListener('click', send)
+    $('copy-link').addEventListener('click', async () => {
+      const url = bookmarkURL()
+      try {
+        await navigator.clipboard.writeText(url)
+        $('copy-link').textContent = '已复制免配对链接'
+        setTimeout(() => {
+          $('copy-link').textContent = '复制免配对链接'
+        }, 1800)
+      } catch {
+        // 无剪贴板权限（无头/非安全上下文）：直接把链接摊开，手抄或脚本取用
+        prompt('免配对链接（等价于密码，勿外传）', url)
+      }
+    })
     $('jump').addEventListener('click', () => {
       $('jump').hidden = true
       scrollToEnd()
@@ -1221,6 +1288,18 @@
   }
 
   bind()
+
+  // 凭据优先级：URL（免配对链接）> localStorage > cookie
+  const urlTok = tokenFromURL()
+  if (urlTok) rememberToken(urlTok)
+  else if (!state.token) {
+    const ck = cookieToken()
+    if (ck) state.token = ck
+  }
+
+  // 配对屏常驻显示当前访问地址：换了主机/端口（= 换了 localStorage 作用域）时一眼可见
+  $('pair-addr').textContent = '当前地址：' + location.origin + '/m/'
+
   if (pairFromHash()) doPair()
   else boot()
 })()

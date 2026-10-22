@@ -278,11 +278,14 @@ func (s *mobileServer) auth(r *http.Request) (string, bool) {
 
 // ---------- HTTP 端点 ----------
 
+// handlePing 同时充当凭据自检：手机带着 token 打一次就知道还用不用重新配对。
+// 不带 token 也返回 200（用于探测服务是否在线），只是 paired=false。
 func (s *mobileServer) handlePing(w http.ResponseWriter, r *http.Request) {
+	_, paired := s.auth(r)
 	writeMobileJSON(w, http.StatusOK, map[string]any{
 		"app":     "hai",
 		"version": "mobile-p0",
-		"paired":  false,
+		"paired":  paired,
 	})
 }
 
