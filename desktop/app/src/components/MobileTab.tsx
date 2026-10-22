@@ -13,6 +13,7 @@ export default function MobileTab() {
   const fetchMobileStatus = useAppStore((s) => s.fetchMobileStatus)
   const revoke = useAppStore((s) => s.revokeMobileDevice)
   const setMobileLan = useAppStore((s) => s.setMobileLan)
+  const mobileError = useAppStore((s) => s.mobileError)
   const [copied, setCopied] = useState<'url' | 'code' | null>(null)
 
   useEffect(() => {
@@ -47,6 +48,7 @@ export default function MobileTab() {
         <span className="set-label">{t('mobile.lan')}</span>
       </label>
       <p className="set-desc">{t('mobile.lanHint')}</p>
+      {mobileError ? <p className="set-desc" style={{ color: 'var(--error)' }}>{mobileError}</p> : null}
 
       {status.qr ? (
         <div style={{ display: 'flex', gap: 16, alignItems: 'center', margin: '10px 0 4px' }}>

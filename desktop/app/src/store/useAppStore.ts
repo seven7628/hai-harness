@@ -2662,6 +2662,8 @@ interface AppState {
   markets: MarketInfo[] // 已保存市场（market_list；SkillsPage 市场管理）
   mcpServers: MCPServerInfo[] // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
   mobileStatus?: MobileStatus // 手机连接面板（mobile_status；SettingsModal 手机 tab）
+  // mobile_set_listen 的失败原因（老 bridge 不认识该命令时不能静默：用户只会觉得"点了没用"）
+  mobileError?: string
   mcpLayers: MCPLayerInfo[] // 配置层状态（mcp_list.layers；项目维度查看 + 损坏恢复可见）
   mcpSaving: boolean // MCP 配置保存中（mcpSave + mcp_set 热应用）
   // 项目级 MCP 汇总（bridge mcp_projects；MCP 页「项目」区数据源）。
@@ -4668,9 +4670,12 @@ export function dispatchEvent(raw: AnyEvent): void {
         setState({ mcpLayers: Array.isArray(d.layers) ? (d.layers as MCPLayerInfo[]) : [] })
         break
       }
-      // mobile_status：手机连接面板（端口 + 配对码 + 已配对设备）
-      if (t === 'mobile_status') {
-        setState({ mobileStatus: d as unknown as MobileStatus })
+      // mobile_status / mobile_set_listen：手机连接面板（端口 + 配对码 + 设备）。
+      // 两个命令的 data 同形（status）；set_listen 的回包也必须处理，否则开关是
+      // 受控组件——点了以后状态不刷新，表现为"勾选无效"。
+      if (t === 'mobile_status' || t === 'mobile_set_listen') {
+        if (r.ok) setState({ mobileStatus: d as unknown as MobileStatus, mobileError: undefined })
+        else setState({ mobileError: r.error || '切换监听范围失败' })
         break
       }
       // mobile_revoke：撤销成功后重拉清单（配对码不变）
