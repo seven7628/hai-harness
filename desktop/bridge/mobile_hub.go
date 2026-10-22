@@ -91,6 +91,26 @@ func (h *mobileHub) broadcast(ws, sid string, line []byte) {
 	}
 }
 
+// drainControl 排空订阅者积压，只留下控制事件。
+// 场景：订阅者丢过帧，服务端先补一帧 live 快照——快照已包含全部已产出的 chunk，
+// 积压里的 chunk 再发一遍会让同一段文本出现两次。closed=true 表示通道已被 close
+// （订阅者被移除），调用方应直接退出写循环。
+func drainControl(sub *mobileSub) (kept [][]byte, closed bool) {
+	for {
+		select {
+		case next, ok := <-sub.ch:
+			if !ok {
+				return kept, true
+			}
+			if !isChunkEvent(next) {
+				kept = append(kept, next)
+			}
+		default:
+			return kept, false
+		}
+	}
+}
+
 // isChunkEvent 流式增量（可丢、可重建）。用前缀扫描而不是反序列化：热路径上每秒几十次。
 func isChunkEvent(line []byte) bool {
 	t := eventTypeOf(line)

@@ -32,6 +32,8 @@ const (
 	mobileBodyLimit    = 1 << 20 // 1MB：手机只发命令，不该有更大体积
 	mobileChunkBatch   = 16      // 一次最多连续写多少帧（chunk 合流的轻量版）
 	mobilePingInterval = 25 * time.Second
+	// mobileAppPingInterval 应用层心跳间隔：手机 45s 收不到任何帧即判定链路已死并重连。
+	mobileAppPingInterval = 15 * time.Second
 )
 
 // mobileAllowedCommands 手机能调的**全部**命令。默认拒绝：新增能力要显式加进来。
@@ -363,6 +365,26 @@ func (s *mobileServer) handleCmd(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleEvents 把该会话的事件行推给手机。订阅粒度 = workspace + session。
+// liveFrame 当前会话「正在流的那一段」（正文 + 思考）快照。
+// 手机 WS 重连、或弱网丢帧后据此直接替换 live 屏，不必整页重拉会话快照。
+// 返回 nil 表示会话不存在（此时调用方退回 resync）。
+func (s *mobileServer) liveFrame(ws, sid string) []byte {
+	if s == nil || s.mgr == nil || sid == "" {
+		return nil
+	}
+	bs := s.mgr.get(ws, sid)
+	if bs == nil {
+		return nil
+	}
+	text, think := bs.liveSnapshot()
+	return mustMobileJSON(map[string]any{
+		"type":     "live",
+		"text":     text,
+		"thinking": think,
+		"running":  bs.running.Load(),
+	})
+}
+
 func (s *mobileServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	device, ok := s.auth(r)
 	if !ok {
@@ -386,9 +408,17 @@ func (s *mobileServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	_ = c.Write(ctx, websocket.MessageText, mustMobileJSON(map[string]any{
 		"type": "hello", "workspace": ws, "session_id": sid,
 	}))
+	// 连上先把「正在流的那一段」补上：手机息屏/切后台期间断流，重连时不能空屏等下一个 token。
+	if f := s.liveFrame(ws, sid); f != nil {
+		if err := c.Write(ctx, websocket.MessageText, f); err != nil {
+			return
+		}
+	}
 
 	ping := time.NewTicker(mobilePingInterval)
 	defer ping.Stop()
+	appPing := time.NewTicker(mobileAppPingInterval)
+	defer appPing.Stop()
 	pingCtx, cancelPing := context.WithCancel(ctx)
 	defer cancelPing()
 	go func() {
@@ -409,15 +439,39 @@ func (s *mobileServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-appPing.C:
+			// 应用层心跳（主循环单写者）：iOS 息屏常出现「链路已死但 socket 未 close」，
+			// 协议级 ping 由浏览器自动回 pong、看不出问题；手机靠这条帧判断该不该重连。
+			if err := c.Write(ctx, websocket.MessageText, mustMobileJSON(map[string]any{"type": "ping"})); err != nil {
+				return
+			}
 		case line, ok := <-sub.ch:
 			if !ok {
 				return
 			}
 			if sub.dropped.Swap(false) {
-				if err := c.Write(ctx, websocket.MessageText, mustMobileJSON(map[string]any{"type": "resync"})); err != nil {
+				// 丢过帧：先补「正在流的那一段」快照，再发积压里剩下的事件。
+				// 积压的 chunk 已包含在快照文本里，必须丢弃 —— 否则同一段话会出现两遍；
+				// 控制事件（审批/提问/agent_end）不能丢，攒起来按原序补发。
+				kept, closed := drainControl(sub)
+				if closed {
 					return
 				}
-				// resync 之后手机重拉快照；这里的增量继续发，重复由手机按 block id 去重。
+				frame := s.liveFrame(ws, sid)
+				if frame == nil {
+					frame = mustMobileJSON(map[string]any{"type": "resync"})
+				}
+				if err := c.Write(ctx, websocket.MessageText, frame); err != nil {
+					return
+				}
+				for _, f := range kept {
+					if err := c.Write(ctx, websocket.MessageText, f); err != nil {
+						return
+					}
+				}
+				if isChunkEvent(line) {
+					continue // 当前帧同样已在快照里
+				}
 			}
 			frames := [][]byte{line}
 			for len(frames) < mobileChunkBatch {

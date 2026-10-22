@@ -23,6 +23,9 @@
     conn: null,
     retry: 0,
     disposed: false,
+    lastMsgAt: 0, // 最近一次收到任何帧的时刻（链路看门狗用）
+    chunkKey: '', // 当前流式请求标识（request_id/run_id）+ 已处理的块序号
+    chunkIdx: -1,
     screen: 'pair',
     nav: [],
     agents: new Map(), // task_id → { task_id, label, status, result }
@@ -406,6 +409,8 @@
     state.cursor = data.blocks_cursor || 0
     state.hasMore = !!data.blocks_has_more
     state.live = { text: '', thinking: '' }
+    state.chunkKey = ''
+    state.chunkIdx = -1
     state.running = false
     state.agents = new Map()
     for (const a of data.agents || []) {
@@ -744,9 +749,11 @@
     conn.onopen = () => {
       if (gen !== connGen) return
       state.retry = 0
+      state.lastMsgAt = Date.now() // 刚连上：别让看门狗把新连接判成「没消息」
     }
     conn.onmessage = (m) => {
       if (gen !== connGen) return
+      state.lastMsgAt = Date.now()
       if (isDuplicateFrame(m.data)) return
       let ev
       try {
@@ -773,14 +780,16 @@
   function onEvent(ev) {
     switch (ev.event_type) {
       case 'content_chunk':
+        if (isStaleChunk(ev)) break
         state.running = true
         state.live.text += ev.content || ''
-        patchLive()
+        scheduleLive()
         break
       case 'reasoning_chunk':
+        if (isStaleChunk(ev)) break
         state.running = true
         state.live.thinking += ev.content || ''
-        patchLive()
+        scheduleLive()
         break
       case 'llm_start':
         state.running = true
@@ -833,6 +842,9 @@
       case 'agent_end':
         state.running = false
         state.live = { text: '', thinking: '' }
+        state.chunkKey = ''
+        state.chunkIdx = -1
+        $('jump').hidden = true
         updateRunning()
         setTimeout(() => {
           if (!state.disposed) openSession(state.sid)
@@ -842,7 +854,14 @@
         appendError('保存失败：' + (ev.error || ''))
         break
       default:
-        if (ev.type === 'resync') openSession(state.sid)
+        // 服务端帧（没有 event_type）
+        if (ev.type === 'live') {
+          applyLiveFrame(ev)
+        } else if (ev.type === 'resync') {
+          // 老服务端才发 resync：整页重拉快照
+          openSession(state.sid)
+        }
+        // type === 'ping'：只用来刷新 lastMsgAt（已在 onmessage 里更新）
         break
     }
   }
@@ -870,10 +889,57 @@
     node.classList.toggle('cursor', state.running)
     updateRunning()
     if (stick) scrollToEnd()
+    // 没贴底说明用户在往回读：给一个「最新」入口，别让流式内容"消失"在下面
+    $('jump').hidden = stick || !state.running
   }
 
   function nearBottom(box) {
     return box.scrollHeight - box.scrollTop - box.clientHeight < 80
+  }
+
+  // 流式块去重：同一 (request_id, index) 只处理一次。
+  // 两条连接各投一遍、或重连补发时 index 不会前进 —— 直接丢，比字符串比较精确。
+  function isStaleChunk(ev) {
+    if (typeof ev.index !== 'number') return false
+    const key = ev.request_id || ev.run_id || ''
+    if (key !== state.chunkKey) {
+      state.chunkKey = key
+      state.chunkIdx = ev.index
+      return false
+    }
+    if (ev.index > state.chunkIdx) {
+      state.chunkIdx = ev.index
+      return false
+    }
+    // index 回退到 0 = 新一轮请求（provider 没给 request_id 时靠这条兜底）
+    if (ev.index === 0 && state.chunkIdx > 0) {
+      state.chunkIdx = 0
+      return false
+    }
+    return true
+  }
+
+  // 每帧最多重排一次：chunk 可能每秒几十条，逐条改 textContent 会让手机掉帧。
+  let liveRaf = 0
+  function scheduleLive() {
+    if (liveRaf) return
+    liveRaf = requestAnimationFrame(() => {
+      liveRaf = 0
+      patchLive()
+    })
+  }
+
+  // 服务端 live 快照：直接替换「正在流的那一段」（重连/丢帧自愈）。
+  function applyLiveFrame(ev) {
+    const box = $('messages')
+    for (const n of box.querySelectorAll('[data-live="1"]')) n.remove()
+    state.live = { text: ev.text || '', thinking: ev.thinking || '' }
+    state.running = !!ev.running
+    state.chunkKey = ''
+    state.chunkIdx = -1
+    updateRunning()
+    if (state.live.text || state.live.thinking) patchLive()
+    else $('jump').hidden = true
   }
 
   function appendTool(t) {
@@ -1065,6 +1131,27 @@
     }
   }
 
+  // ---------- 链路自愈 ----------
+  // iOS 息屏/切后台后 socket 常常「假活」：onclose 不触发，事件却不再到达。
+  // 两个手段：回前台立刻检查并重建；运行中长时间收不到任何帧（含服务端 15s 心跳）也重建。
+  // 重建后服务端会在 subscribe 时推一帧 live 快照，屏幕不会空。
+  const WATCHDOG_MS = 45000
+  function reviveConn() {
+    if (state.screen !== 'chat' && state.screen !== 'agent') return
+    state.retry = 0
+    connect()
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return
+    if (!state.conn || state.conn.readyState !== WebSocket.OPEN) reviveConn()
+  })
+  setInterval(() => {
+    if (state.disposed) return
+    if (state.screen !== 'chat' && state.screen !== 'agent') return
+    if (Date.now() - state.lastMsgAt < WATCHDOG_MS) return
+    reviveConn()
+  }, 10000)
+
   function bind() {
     $('pair-btn').addEventListener('click', doPair)
     $('pair-code').addEventListener('keydown', (e) => {
@@ -1089,6 +1176,10 @@
     $('new-session').addEventListener('click', newSession)
     $('agents-bar').addEventListener('click', openAgents)
     $('send').addEventListener('click', send)
+    $('jump').addEventListener('click', () => {
+      $('jump').hidden = true
+      scrollToEnd()
+    })
     $('stop').addEventListener('click', stop)
     $('agent-send').addEventListener('click', sendToAgent)
     $('agent-stop').addEventListener('click', stopAgent)

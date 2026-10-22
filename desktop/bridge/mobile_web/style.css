@@ -67,6 +67,9 @@ body {
   padding: 0;
   overflow: hidden;
 }
+#screen-chat {
+  position: relative; /* 「↓ 最新」按钮的定位基准 */
+}
 #messages,
 #agent-messages {
   flex: 1;
@@ -429,6 +432,23 @@ button[disabled] {
   50% {
     opacity: 0;
   }
+}
+
+/* 流式中你往上读历史时出现：给一个回到最新的入口，避免误判「流式停了」 */
+.jump {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom) + 78px);
+  z-index: 5;
+  width: auto;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
 }
 
 /* ── 输入区：与桌面 .composer-wrap 同结构 ── */

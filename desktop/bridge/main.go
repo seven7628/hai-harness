@@ -309,7 +309,13 @@ type bridgeSession struct {
 	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
 	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
 	running atomic.Bool
-	metrics *FileMetricsStore // 跨会话 usage/成本指标（每 llm_end 记录一条；全局共享）
+	// liveText/liveThink 当前 run 已产出的正文与思考（手机端流式快照）。
+	// 流式 chunk 不落盘、hub 也只丢不补：手机弱网丢帧或 WS 重连后，屏幕上
+	// 「正在流的那一段」只能靠这份内存快照补回来（见 mobile_server.liveFrame）。
+	liveMu    sync.Mutex
+	liveText  strings.Builder
+	liveThink strings.Builder
+	metrics   *FileMetricsStore // 跨会话 usage/成本指标（每 llm_end 记录一条；全局共享）
 	// im IM 事件桥（IM 插件启用后装配；emit 全事件漏斗里转发给 Renderer → 飞书推送）
 	im *imBridge
 	// 注意：字段用具体类型而非 MetricsStore 接口 —— m.metrics（*FileMetricsStore）为 nil 时
@@ -527,8 +533,15 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// 宿主附加字段（按事件类型）
 	var extras map[string]any
 	switch ev := e.(type) {
+	case *events.ContentChunk:
+		bs.appendLiveText(ev.Content)
+	case *events.ReasoningChunk:
+		bs.appendLiveThink(ev.Content)
+	case *events.AgentStart:
+		bs.resetLive() // 新 run：旧 run 的残留文本不能串到这一轮
 	case *events.LLMEnd:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
+		bs.setLiveText(ev.Content)                  // 与手机端一致：最终文本覆盖累计增量
 		if ev.Usage != nil {
 			prov := bs.provider
 			// 成本金额已由 provider 填充进 Usage.Cost（µUSD，上游自报优先、缺失才按价表
@@ -573,6 +586,7 @@ func (bs *bridgeSession) emit(e events.Event) {
 		// 注意：快照归档（finishCronRun 内 ExtractMessages 读事件日志）必须在本事件
 		// 写入日志之后执行，否则 agent_end 尚未落盘，最后一条助手回复会丢失。
 		// 因此这里只记录状态，归档推迟到 logEventLine 之后（见 emit 尾部）。
+		bs.resetLive() // run 结束：手机端已清空 live，快照不能留旧文本（否则重连会重影）
 		bs.cronEndStatus = cron.StatusSuccess
 		bs.cronEndErr = ""
 		if ev.FinishReason == core.FinishReasonError || ev.Error != "" {
@@ -835,6 +849,48 @@ type workspaceRuntime struct {
 	pluginsAuto bool
 	mu          sync.Mutex
 	sessions    map[string]*bridgeSession
+}
+
+// ── 手机端流式快照 ──────────────────────────────────────────────
+// 语义与手机端 state.live 完全对齐：chunk 累加、llm_end 用最终文本覆盖、
+// agent_start 重置、agent_end 清空。快照是「重连自愈」的唯一数据来源。
+
+func (bs *bridgeSession) resetLive() {
+	bs.liveMu.Lock()
+	bs.liveText.Reset()
+	bs.liveThink.Reset()
+	bs.liveMu.Unlock()
+}
+
+func (bs *bridgeSession) appendLiveText(s string) {
+	if s == "" {
+		return
+	}
+	bs.liveMu.Lock()
+	bs.liveText.WriteString(s)
+	bs.liveMu.Unlock()
+}
+
+func (bs *bridgeSession) appendLiveThink(s string) {
+	if s == "" {
+		return
+	}
+	bs.liveMu.Lock()
+	bs.liveThink.WriteString(s)
+	bs.liveMu.Unlock()
+}
+
+func (bs *bridgeSession) setLiveText(s string) {
+	bs.liveMu.Lock()
+	bs.liveText.Reset()
+	bs.liveText.WriteString(s)
+	bs.liveMu.Unlock()
+}
+
+func (bs *bridgeSession) liveSnapshot() (text, think string) {
+	bs.liveMu.Lock()
+	defer bs.liveMu.Unlock()
+	return bs.liveText.String(), bs.liveThink.String()
 }
 
 func (m *manager) get(wsPath, id string) *bridgeSession {
