@@ -371,7 +371,8 @@
   }
 
   async function openSession(sid) {
-    const data = await api('new_session', { workspace: state.ws, session_id: sid, blocks_limit: 30 })
+    // bridge 的恢复字段是 id（历史协议），session_id 只是兼容写法 —— 两个都传
+    const data = await api('new_session', { workspace: state.ws, id: sid, session_id: sid, blocks_limit: 30 })
     state.sid = data.session_id || sid
     localStorage.setItem(LS.sid, state.sid)
     state.blocks = parseBlocks(data.view_checkpoint)

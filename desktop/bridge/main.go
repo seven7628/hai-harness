@@ -1722,7 +1722,12 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
+		// 恢复会话用 id（历史协议）；兼容只传 session_id 的客户端（手机端早期版本
+		// 传错字段时会被当成"新建"，用户每点一次历史会话就多一个 New Chat）。
 		id := str(c.Payload, "id")
+		if id == "" {
+			id = str(c.Payload, "session_id")
+		}
 		if id == "" {
 			id = m.genID()
 		}
