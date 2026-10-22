@@ -1257,6 +1257,15 @@ func (pc *providerConfig) overrideRegistryLocked(name string) {
 		}
 		info.Provider = name
 		info.ID = model
+		// 端点指纹兜底（对齐 pi detectCompat，2026-10）：内置表没有该模型的字段名时，
+		// 按 provider 名 / base_url host / 模型名 vendor 前缀推断输出上限字段名。
+		// 不补这一步，自定义 provider（用户在 UI 里手加端点）的模型一律发
+		// max_completion_tokens —— DeepSeek 官方对该字段**静默忽略**（实测 cap=4 仍输出
+		// 85 token，没有任何报错），上限形同虚设；opendesign2 这类聚合网关则因 host
+		// 命中内置 opendesign 预设而直接拿到正确口径。
+		if info.MaxTokensField == "" {
+			info.MaxTokensField = provider.DetectMaxTokensField(name, pc.baseURL[name], model)
+		}
 		if window, ok := pc.models[name][model]; ok && window > 0 {
 			info.ContextWindow = window
 		}
