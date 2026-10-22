@@ -638,7 +638,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 		finishReason       core.FinishReason
 		rawFinishReason    string // 上游原样值（NULL/未知值保留，见收尾归一）
 		usage              core.Usage
-		pending            = make(map[int]*core.ToolCall)
+		toolAcc            = newToolCallAccumulator() // 工具调用增量合并（index 主键 + id 辅键）
 		// 流式块序号（content/reasoning 各自从 0 自增）：宿主流式渲染与审计
 		// 用（丢块检测、首字耗时定位）。曾取 choices[].index —— SDK 恒单 choice
 		// 恒 0，信息量为零（真实环境验证 2026-08-10 trace 审计发现）。
@@ -700,27 +700,15 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 				contentSeq++
 			}
 			for _, tc := range delta.ToolCalls {
-				index := 0
-				if tc.Index != nil {
-					index = *tc.Index
-				}
-				call, ok := pending[index]
-				if !ok {
-					call = &core.ToolCall{Index: int64(index), RequestId: requestId}
-					pending[index] = call
+				call, isNew := toolAcc.resolve(requestId, tc)
+				if isNew {
 					if err := handler(LLMToolCallStartEvent{
-						Id:    tc.ID,
-						Index: int64(index),
-						Name:  tc.Function.Name,
+						Id:    call.Id,
+						Index: call.Index,
+						Name:  call.Name,
 					}); err != nil {
 						return err
 					}
-				}
-				if tc.ID != "" {
-					call.Id = tc.ID
-				}
-				if tc.Function.Name != "" {
-					call.Name = tc.Function.Name
 				}
 				if tc.Function.Arguments != "" {
 					call.Arguments += tc.Function.Arguments
@@ -741,12 +729,8 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 		}
 	}
 
-	// 按 Index 排序输出完整工具调用
-	toolCalls := make([]core.ToolCall, 0, len(pending))
-	for _, call := range pending {
-		toolCalls = append(toolCalls, *call)
-	}
-	sort.Slice(toolCalls, func(i, j int) bool { return toolCalls[i].Index < toolCalls[j].Index })
+	// 工具调用输出（累加器内部按 Index 稳定排序）
+	toolCalls := toolAcc.list()
 
 	// finish_reason 三态归一（2026-10，对齐 pi openai-completions.ts:680-688）：
 	//   ① 流里没有 finish_reason + 有工具调用 → toolCall；没有工具调用 → stop；
