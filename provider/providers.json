@@ -338,6 +338,28 @@
     "is_subscription": true,
     "login_label": "Sign in with Kimi Code"
    }
+  },
+  {
+   "name": "OpenDesign",
+   "base_url": "https://amr-link.open-design.ai/v1",
+   "protocol": "chat_completions",
+   "env_keys": [
+    "OPENDESIGN_API_KEY"
+   ],
+   "id": "opendesign",
+   "models": [
+    "deepseek-v4.1-flash",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash-vision-exp",
+    "glm-5.3-flash",
+    "glm-5.3-flashx",
+    "kimi-k2.7-code",
+    "mimo-v2.6-pro",
+    "mimo-v2.6-flash",
+    "claude-haiku-5.5",
+    "gpt-6-luna"
+   ]
   }
  ],
  "models": {
@@ -18892,6 +18914,261 @@
      "output": 8
     },
     "protocol": "anthropic"
+   }
+  ],
+  "opendesign": [
+   {
+    "id": "claude-haiku-5.5",
+    "context_window": 128000,
+    "max_tokens": 8192,
+    "input": [
+     "text"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_levels": {
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "deepseek-v4-flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_format": "deepseek",
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "requires_reasoning_content": true,
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "deepseek-v4-flash-vision-exp",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_format": "deepseek",
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "requires_reasoning_content": true,
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "deepseek-v4-pro",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_format": "deepseek",
+    "thinking_levels": {
+     "high": "high",
+     "max": "max",
+     "xhigh": "max"
+    },
+    "thinking_supported_efforts": [
+     "high",
+     "max"
+    ],
+    "requires_reasoning_content": true,
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "deepseek-v4.1-flash",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_format": "deepseek",
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max",
+     "xhigh": "high"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "requires_reasoning_content": true,
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "glm-5.3-flash",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "glm-5.3-flashx",
+    "context_window": 128000,
+    "max_tokens": 8192,
+    "input": [
+     "text"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_levels": {
+     "low": "low",
+     "high": "high",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "low",
+     "high",
+     "max"
+    ],
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "gpt-6-luna",
+    "context_window": 128000,
+    "max_tokens": 8192,
+    "input": [
+     "text"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_levels": {
+     "none": "none",
+     "low": "low",
+     "medium": "medium",
+     "high": "high",
+     "xhigh": "xhigh",
+     "max": "max"
+    },
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "kimi-k2.7-code",
+    "context_window": 256000,
+    "max_tokens": 32000,
+    "input": [
+     "text",
+     "image"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "mimo-v2.6-flash",
+    "context_window": 1048576,
+    "max_tokens": 131072,
+    "input": [
+     "text",
+     "image",
+     "audio",
+     "video"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high"
+    ],
+    "requires_reasoning_content": true,
+    "protocol": "chat_completions",
+    "source": "compat"
+   },
+   {
+    "id": "mimo-v2.6-pro",
+    "context_window": 1048576,
+    "max_tokens": 131072,
+    "input": [
+     "text",
+     "image",
+     "audio",
+     "video"
+    ],
+    "max_tokens_field": "max_tokens",
+    "reasoning": true,
+    "thinking_supported_efforts": [
+     "none",
+     "low",
+     "medium",
+     "high"
+    ],
+    "requires_reasoning_content": true,
+    "protocol": "chat_completions",
+    "source": "compat"
    }
   ]
  }
