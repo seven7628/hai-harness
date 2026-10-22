@@ -476,16 +476,28 @@ func (t *Tool) runBackgroundInternal(ctx context.Context, tc *events.ToolContext
 		// 子 agent 每轮 LLMEnd 实时累进 tk.Usage 并写一条 turn —— 压缩轮不经此
 		// handler 发 LLMEnd（压缩器私有 provider 流，docs §1.4-1），计数即决策轮数。
 		round := 0
+		// 整次运行累计「产出文件」（turn 行记本轮，result 行记累计去重）——
+		// TaskOutput 的默认视图据此直给「这次委派产出了什么」，不必再翻全文。
+		var produced []string
+		producedSeen := map[string]bool{}
 		streamHandler := func(hctx context.Context, e events.Event) {
 			if le, ok := e.(*events.LLMEnd); ok && le.Usage != nil {
 				tk.addUsage(*le.Usage)
 				if jr != nil {
 					round++
 					text, trunc := truncateRunes(le.Content, turnTextCap)
+					files := producedFiles(le.ToolCalls)
+					for _, f := range files {
+						if !producedSeen[f] {
+							producedSeen[f] = true
+							produced = append(produced, f)
+						}
+					}
 					_ = jr.Append(JournalRecord{
 						Type: "turn", Ts: time.Now(), TaskId: tk.ID,
 						Round: round, Text: text, Truncated: trunc,
 						ToolNames: toolCallNames(le.ToolCalls),
+						Files:     files,
 						Usage:     le.Usage,
 					})
 				}
@@ -549,7 +561,8 @@ func (t *Tool) runBackgroundInternal(ctx context.Context, tc *events.ToolContext
 			u := usage
 			_ = jr.Append(JournalRecord{
 				Type: "result", Ts: time.Now(), TaskId: tk.ID,
-				Status: string(status), Text: sub.FinalResponse, Error: errText, Usage: &u,
+				Status: string(status), Text: sub.FinalResponse, Error: errText,
+				Files: produced, Usage: &u,
 			})
 		}
 
