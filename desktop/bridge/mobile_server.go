@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -556,13 +557,7 @@ func mobilePairQR(urls []string, code string) string {
 	if len(urls) == 0 || code == "" {
 		return ""
 	}
-	target := ""
-	for _, u := range urls {
-		if !strings.Contains(u, "127.0.0.1") && !strings.Contains(u, "localhost") {
-			target = u
-			break
-		}
-	}
+	target := pickPairURL(urls)
 	if target == "" {
 		return ""
 	}
@@ -571,4 +566,34 @@ func mobilePairQR(urls []string, code string) string {
 		return ""
 	}
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+}
+
+// pickPairURL 选二维码里编哪个地址：优先 Tailscale（100.64.0.0/10），
+// 其次任一非回环地址。理由：同一 Wi-Fi 下两个地址都能用，而在外面时
+// 只有 100.x 能用 —— 选它 = 两种场景都不出错。
+func pickPairURL(urls []string) string {
+	fallback := ""
+	for _, raw := range urls {
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		host := u.Hostname()
+		if host == "" || host == "127.0.0.1" || host == "localhost" {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil && isTailscaleIP(ip) {
+			return raw
+		}
+		if fallback == "" {
+			fallback = raw
+		}
+	}
+	return fallback
+}
+
+// isTailscaleIP Tailscale 用 CGNAT 段 100.64.0.0/10 分配节点地址。
+func isTailscaleIP(ip net.IP) bool {
+	_, cg, err := net.ParseCIDR("100.64.0.0/10")
+	return err == nil && cg.Contains(ip)
 }

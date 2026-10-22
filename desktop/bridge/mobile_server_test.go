@@ -207,3 +207,19 @@ func TestMobileCmdAllowsSessionManagement(t *testing.T) {
 		r.Body.Close()
 	}
 }
+
+func TestPickPairURLPrefersTailscale(t *testing.T) {
+	// 同 Wi-Fi 时两者都能用；在外面只有 100.x 能用 → 二维码必须选它
+	got := pickPairURL([]string{"http://192.168.1.7:47800/m/", "http://100.101.102.103:47800/m/"})
+	if got != "http://100.101.102.103:47800/m/" {
+		t.Fatalf("应优先 Tailscale，得到 %q", got)
+	}
+	// 没有 Tailscale → 退回第一个非回环
+	if got := pickPairURL([]string{"http://127.0.0.1:47800/m/", "http://10.0.0.5:47800/m/"}); got != "http://10.0.0.5:47800/m/" {
+		t.Fatalf("应退回非回环地址，得到 %q", got)
+	}
+	// 只有回环 → 不编
+	if got := pickPairURL([]string{"http://127.0.0.1:47800/m/"}); got != "" {
+		t.Fatalf("只有回环时不应出码，得到 %q", got)
+	}
+}
