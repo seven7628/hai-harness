@@ -140,3 +140,67 @@ func TestAgentUserMessageEntersAgentTranscript(t *testing.T) {
 		t.Fatalf("未知任务不得凭空建卡片，blocks %d → %d", before, len(r.blocks))
 	}
 }
+
+// TestSubAgentTurnMetaReachesItems 子 agent 每轮的消息指标（模型 / 时刻 / TTFT · LLM 耗时 /
+// tokens / Agent 总耗时）必须落到它的转录项上。
+//
+// 用户 2026-10 报障：「子智能体没有模型信息、消息事件信息、也没有（LLM 总耗时 43.8s ·
+// Agent 总耗时 16m 19s · 15.88 tokens/s）」。子会话页复用的是主会话的渲染原语，它按
+// assistant 块上的 model / ts / ttftMs / durMs / outputTokens / agentDurMs 渲染这一行；
+// 而子 run 的这些值一直只在 reducer 里算进用量、**没落到 items** —— 于是整行都不出现。
+func TestSubAgentTurnMetaReachesItems(t *testing.T) {
+	r := NewViewReducer()
+	base := time.Now()
+	_ = r.ApplyPlain(&events.AgentStart{RunId: "sub-1", ParentRunId: "main-1", Depth: 1, TaskId: "task-1",
+		Name: "auth 审查", Timestamp: base, EventType: events.AgentStartType})
+	_ = r.ApplyPlain(&events.LLMStart{RunId: "sub-1", RequestId: "req-1", Model: "deepseek-v4-flash",
+		Timestamp: base.Add(10 * time.Millisecond), EventType: events.LLMStartType})
+	_ = r.ApplyPlain(&events.ReasoningChunk{RunId: "sub-1", RequestId: "req-1", Content: "先看目录结构。",
+		Timestamp: base.Add(400 * time.Millisecond), EventType: events.ReasoningChunkType})
+	_ = r.ApplyPlain(&events.ContentChunk{RunId: "sub-1", RequestId: "req-1", Content: "我先找到工作目录。",
+		Timestamp: base.Add(600 * time.Millisecond), EventType: events.ContentChunkType})
+	_ = r.ApplyPlain(&events.LLMEnd{RunId: "sub-1", RequestId: "req-1", Model: "deepseek-v4-flash",
+		Content: "我先找到工作目录。", Usage: &core.Usage{Input: 1200, Output: 300, Reasoning: 80},
+		Timestamp: base.Add(2 * time.Second), EventType: events.LLMEndType})
+	_ = r.ApplyPlain(&events.AgentEnd{RunId: "sub-1", FinishReason: core.FinishReasonStop, DurationMS: 979_000,
+		Usage: &core.Usage{Input: 1200, Output: 300, Reasoning: 80}, Model: "deepseek-v4-flash",
+		Timestamp: base.Add(980 * time.Second), EventType: events.AgentEndType})
+
+	var card *Block
+	for i := range r.blocks {
+		if r.blocks[i].Kind == blockKindAgent {
+			card = &r.blocks[i]
+		}
+	}
+	if card == nil {
+		t.Fatal("agent 卡片不存在")
+	}
+	var text *AgentItem
+	for i := range card.Items {
+		if card.Items[i].Kind == agentItemText {
+			text = &card.Items[i]
+		}
+	}
+	if text == nil {
+		t.Fatalf("正文项不存在（items=%+v）", card.Items)
+	}
+	if text.Model != "deepseek-v4-flash" {
+		t.Errorf("模型名没落到项上（got %q）——子会话里就没有「用的是哪个模型」", text.Model)
+	}
+	if text.Ts == 0 {
+		t.Error("时刻没落到项上 —— 子会话里每条消息缺时间")
+	}
+	if text.DurMs <= 0 {
+		t.Errorf("本轮 LLM 耗时没落到项上（got %d）——「LLM 总耗时」那一段会消失", text.DurMs)
+	}
+	if text.TTFTMs <= 0 {
+		t.Errorf("TTFT 没落到项上（got %d）", text.TTFTMs)
+	}
+	if text.OutputTokens != 300 || text.ReasoningTokens != 80 {
+		t.Errorf("输出 token 没落到项上（got out=%d reason=%d）——tokens/s 算不出来",
+			text.OutputTokens, text.ReasoningTokens)
+	}
+	if text.AgentDurMs != 979_000 {
+		t.Errorf("Agent 总耗时没落到项上（got %d）——「Agent 总耗时 16m 19s」那一段会消失", text.AgentDurMs)
+	}
+}
