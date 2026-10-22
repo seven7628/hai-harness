@@ -285,6 +285,7 @@ export default function Composer() {
     anthropic: 'Anthropic', groq: 'Groq', xai: 'xAI (Grok)', mistral: 'Mistral', minimax: 'MiniMax',
     qwen: t('composer.providerDisplay.qwen'), xiaomi: t('composer.providerDisplay.xiaomi'), together: t('composer.providerDisplay.together'), fireworks: t('composer.providerDisplay.fireworks'),
     cerebras: 'Cerebras', baseten: 'Baseten', nvidia: 'NVIDIA NIM', huggingface: 'Hugging Face', openrouter: 'OpenRouter',
+    opendesign: 'OpenDesign',
   }
   const activeProv = settings.provider.active
   // 模型下拉数据源：全部 Provider × 模型（分组渲染，组头 = Provider 名）。

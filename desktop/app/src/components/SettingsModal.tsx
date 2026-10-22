@@ -773,6 +773,7 @@ function providerDisplay(t: (k: string) => string, key: string): string {
     anthropic: 'Anthropic', groq: 'Groq', xai: 'xAI (Grok)', mistral: 'Mistral', minimax: 'MiniMax',
     cerebras: 'Cerebras', baseten: 'Baseten', nvidia: 'NVIDIA NIM', huggingface: 'Hugging Face', openrouter: 'OpenRouter',
     'openai-codex': 'OpenAI Codex', 'github-copilot': 'GitHub Copilot', 'kimi-coding': 'Kimi Coding',
+    opendesign: 'OpenDesign',
   }
   return fixed[key] ?? key
 }

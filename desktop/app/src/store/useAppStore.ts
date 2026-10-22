@@ -78,7 +78,7 @@ export interface ToastState {
 
 // 内置 provider 预设清单（对齐 SettingsModal BUILTIN_PROVIDERS；addProvider 判断
 // 是否该用 minimal compat 默认 —— 内置/preset 走官方完整能力，只有自定义走 minimal）。
-export const BUILTIN_PROVIDER_IDS = ['deepseek', 'openai', 'opencode', 'kimi', 'zhipu', 'anthropic', 'groq', 'xai', 'mistral', 'minimax', 'qwen', 'xiaomi', 'together', 'fireworks', 'cerebras', 'baseten', 'nvidia', 'huggingface', 'openrouter', 'openai-codex', 'github-copilot', 'kimi-coding']
+export const BUILTIN_PROVIDER_IDS = ['deepseek', 'openai', 'opencode', 'kimi', 'zhipu', 'anthropic', 'groq', 'xai', 'mistral', 'minimax', 'qwen', 'xiaomi', 'together', 'fireworks', 'cerebras', 'baseten', 'nvidia', 'huggingface', 'openrouter', 'openai-codex', 'github-copilot', 'kimi-coding', 'opendesign']
 
 export interface GitStatus { is_repo: boolean; root?: string; branch?: string; head?: string; detached?: boolean; ahead: number; behind: number; staged: number; modified: number; untracked: number; conflicted: number; clean: boolean }
 export interface GitFile { path: string; status: string; staged: boolean; additions: number; deletions: number; diff?: string; changedAt?: number }

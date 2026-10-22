@@ -1333,6 +1333,7 @@ class MockTransport implements Transport {
           { name: 'OpenAI Codex', id: 'openai-codex', base_url: 'https://chatgpt.com/backend-api', protocol: 'responses', models: [], oauth: { name: 'OpenAI (ChatGPT Plus/Pro)', flow: 'openai-codex', is_subscription: true } },
           { name: 'GitHub Copilot', id: 'github-copilot', base_url: 'https://api.individual.githubcopilot.com', protocol: 'anthropic', models: [], oauth: { name: 'GitHub Copilot', flow: 'github-copilot', is_subscription: true } },
           { name: 'Kimi Coding', id: 'kimi-coding', base_url: 'https://api.kimi.com/coding', protocol: 'anthropic', models: [], oauth: { name: 'Kimi Code (subscription)', flow: 'kimi-coding', is_subscription: true, login_label: 'Sign in with Kimi Code' } },
+          { name: 'OpenDesign', id: 'opendesign', base_url: 'https://amr-link.open-design.ai/v1', protocol: 'chat_completions', models: [] },
         ]
         this.respond(cmd, { presets, models_cost: this.builtinModelsCost(presets) })
         break
