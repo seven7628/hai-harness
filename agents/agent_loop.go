@@ -1834,6 +1834,19 @@ func (a *AgentLoop) streamWithRetry(ac *AgentContext, r *roundResult) error {
 		}
 
 		willRetry := attempt < maxAttempts && retryable(err)
+		// 上游重试提示（Retry-After / x-should-retry，2026-10）：服务器说了算 ——
+		//   - `x-should-retry: false` → 不重试（别再撞）；
+		//   - `Retry-After` 超过 MaxRetryAfter → 不重试（硬限流/配额，等下去不会好转）；
+		//   - 否则等待时长取 max(本地退避, 服务器要求)，避免「退了但还在限流窗口内」。
+		hint, hasHint := provider.RetryHintOf(err)
+		if hasHint {
+			if hint.ShouldRetry != nil && !*hint.ShouldRetry {
+				willRetry = false
+			}
+			if hint.HasAfter && hint.After > MaxRetryAfter {
+				willRetry = false
+			}
+		}
 		// 退避等待时长（不重试则为 0）；事件先发，消费者立即看到错误与等待窗口
 		delay := time.Duration(0)
 		if willRetry {
@@ -1842,6 +1855,9 @@ func (a *AgentLoop) streamWithRetry(ac *AgentContext, r *roundResult) error {
 				backoff = DefaultBackoff
 			}
 			delay = backoff(attempt, err)
+			if hasHint && hint.HasAfter && hint.After > delay {
+				delay = hint.After
+			}
 		}
 		// 失败尝试的已产生用量（上游已计费，如 Anthropic message_start 就带 input）：
 		// 计入运行结算 + 随事件上抛。契约：**每次尝试各自记账一次** —— 失败尝试走本事件，

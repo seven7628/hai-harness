@@ -26,6 +26,11 @@ func FixedBackoff(d time.Duration) Backoff {
 	}
 }
 
+// MaxRetryAfter 上游 `Retry-After` 允许的最大等待（对齐 pi maxRetryDelayMs 默认 60s，
+// 留 5s 余量）。超过它一律**不重试**：让用户立刻看到失败原因，比静默等十几分钟好；
+// 这类多是配额/账单类硬限流，等下去也不会好转。
+const MaxRetryAfter = 65 * time.Second
+
 // DefaultBackoff 默认退避：指数退避 + 等额抖动（AWS 风格）——
 //
 //	temp  = min(cap, base × 2^(attempt-1))

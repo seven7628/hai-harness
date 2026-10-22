@@ -178,6 +178,8 @@ func BaseTransport(rt http.RoundTripper) http.RoundTripper {
 		return BaseTransport(t.base)
 	case *reasoningStreamTransport:
 		return BaseTransport(t.base)
+	case *retryHintTransport:
+		return BaseTransport(t.base)
 	}
 	return rt
 }

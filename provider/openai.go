@@ -91,14 +91,14 @@ func newOpenAIProviderWithClient(baseURL, apiKey string, capabilities OpenAIComp
 	// 思考字段名归一化（reasoning_stream.go）在同一层再包一圈：两个通道唯一的共同交汇
 	// 处就是 resp.Body（SDK 在 Recv() 内部 unmarshal，调用方拿不到原始 JSON）。
 	shared := minimalClient == sdkClient
-	sdkClient = WrapReasoningStreamClient(WrapUpstreamCostClient(sdkClient))
+	sdkClient = WrapRetryHintClient(WrapReasoningStreamClient(WrapUpstreamCostClient(sdkClient)))
 	if sdkIsCfg {
 		cfg.HTTPClient = sdkClient
 	}
 	if shared {
 		minimalClient = sdkClient
 	} else {
-		minimalClient = WrapReasoningStreamClient(WrapUpstreamCostClient(minimalClient))
+		minimalClient = WrapRetryHintClient(WrapReasoningStreamClient(WrapUpstreamCostClient(minimalClient)))
 	}
 	return &OpenAIProvider{client: openai.NewClientWithConfig(cfg), capabilities: capabilities, baseURL: strings.TrimRight(cfg.BaseURL, "/"), apiKey: apiKey, httpClient: minimalClient, registry: reg}
 }
@@ -400,6 +400,9 @@ func listModelsWithClient(ctx context.Context, client *http.Client, baseURL, api
 }
 
 func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler func(e StreamEvent) error) error {
+	// 重试提示槽位（2026-10）：传输层从响应头捕获 retry-after / x-should-retry →
+	// 出错时挂到 error 上，agents 重试层据此决定等多久 / 要不要重试。
+	ctx, hintSlot := withRetryHintSlot(ctx)
 	// LLMStart 延迟到首个 chunk 后发出（拿到厂商 requestId——事件自包含原则：
 	// LLMStart 需与 LLMEnd/chunk 字段级关联；原实现 Stream 入口即发、无
 	// requestId，trace 审计 2026-08-10 发现）。Timestamp 保留真实发起时刻，
@@ -625,7 +628,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 		stream, err = p.client.CreateChatCompletionStream(ctx, apiReq)
 	}
 	if err != nil {
-		return classifyAPIError(err)
+		return attachRetryHint(hintSlot, classifyAPIError(err))
 	}
 	defer stream.Close()
 
@@ -652,7 +655,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 			// 注意 chat-completions 的 usage 只在收尾帧回，中途断流通常拿不到（记录不到 ≠ 没花钱，
 			// 但宁可如实为零也不伪造估算；Anthropic 协议 message_start 带 input，能拿到）。
 			reg.ApplyUsageCost(req.Provider, req.Model, &usage, upCost)
-			return WithPartialUsage(classifyAPIError(err), usage)
+			return attachRetryHint(hintSlot, WithPartialUsage(classifyAPIError(err), usage))
 		}
 
 		if requestId == "" && chunk.ID != "" {
