@@ -51,6 +51,13 @@ type OpenAICompatCapabilities struct {
 	// DeferredToolsMode kimi 延迟工具模式（"kimi"）；tool_result 带 added_tool_names
 	// 时把延迟工具转为正式 tools（大工具集优化）。空 = 不启用。
 	DeferredToolsMode string `json:"deferred_tools_mode,omitempty"`
+
+	// RequiresFinishReason 严格结束原因（默认 false）：声明支持的端点若一条流里**没有**
+	// finish_reason，按「流被截断」处理（可重试的上游故障），而不是静默当成自然 stop。
+	// 对齐 pi 的 supportsFinishReason（openai-completions.ts:680-688）与它的
+	// "Stream ended without finish_reason"。默认关：大量兼容网关本来就不发该字段，
+	// 宽松推断（有工具调用 → toolCall，否则 stop）才是可用默认。
+	RequiresFinishReason *bool `json:"requires_finish_reason,omitempty"`
 }
 
 // FullOpenAICompatCapabilities 保持历史默认行为：发送所有已支持的可选字段。
@@ -122,6 +129,14 @@ func (c OpenAICompatCapabilities) supportsStreamUsage() bool {
 		return *c.StreamUsage
 	}
 	return !c.Minimal
+}
+
+// requiresFinishReason 缺失 finish_reason 时是否按截断错误处理（默认 false，见字段注释）。
+func (c OpenAICompatCapabilities) requiresFinishReason() bool {
+	if c.RequiresFinishReason != nil {
+		return *c.RequiresFinishReason
+	}
+	return false
 }
 
 func (c OpenAICompatCapabilities) supportsTools() bool {

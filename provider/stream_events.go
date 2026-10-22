@@ -68,6 +68,11 @@ type LLMEndEvent struct {
 
 	FinishReason core.FinishReason
 
+	// RawFinishReason 上游原样上报的 finish_reason（未归一）：空 = 上游没发。
+	// 归一会把「缺失/stop 但有工具调用」改写成 toolCall（见 openai.go 收尾归一），
+	// 原始值留在这里供归因与审计（对齐 pi 的 rawStopReason）。
+	RawFinishReason string
+
 	Usage core.Usage
 
 	Timestamp time.Time

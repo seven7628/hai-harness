@@ -633,6 +633,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 		requestId          string // 请求 ID（厂商响应 id，首个 chunk 起）
 		content, reasoning strings.Builder
 		finishReason       core.FinishReason
+		rawFinishReason    string // 上游原样值（NULL/未知值保留，见收尾归一）
 		usage              core.Usage
 		pending            = make(map[int]*core.ToolCall)
 		// 流式块序号（content/reasoning 各自从 0 自增）：宿主流式渲染与审计
@@ -731,6 +732,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 				}
 			}
 			if choice.FinishReason != "" {
+				rawFinishReason = string(choice.FinishReason)
 				finishReason = mapFinishReason(choice.FinishReason)
 			}
 		}
@@ -743,20 +745,45 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 	}
 	sort.Slice(toolCalls, func(i, j int) bool { return toolCalls[i].Index < toolCalls[j].Index })
 
+	// finish_reason 三态归一（2026-10，对齐 pi openai-completions.ts:680-688）：
+	//   ① 流里没有 finish_reason + 有工具调用 → toolCall；没有工具调用 → stop；
+	//   ② 上游明确报 stop 但流里确实有工具调用 → toolCall（网关常见形态：工具调用配
+	//      stop 上报，或压根不发该字段）；
+	//   ③ 未知取值 → 保留原始值供归因（RawFinishReason），结束原因按 ①② 回退。
+	// 为什么必须做：agents 层只在 FinishReason == toolCall 时执行工具
+	//（agents/agent_loop.go:1156）——归一漏掉 = 工具调用被静默丢弃、会话看着像正常结束。
+	if len(toolCalls) > 0 && finishReason != core.FinishReasonToolCall &&
+		finishReason != core.FinishReasonContentFilter {
+		finishReason = core.FinishReasonToolCall
+	}
+	if finishReason == "" {
+		finishReason = core.FinishReasonStop
+	}
+	// 严格模式（openai_compat.requires_finish_reason=true）：声明支持的端点没发
+	// finish_reason = 流被截断，按可重试的上游故障上抛（pi 同款语义）。默认关：
+	// 宽松推断才是兼容网关的可用默认。
+	if rawFinishReason == "" && p.capabilities.requiresFinishReason() {
+		reg.ApplyUsageCost(req.Provider, req.Model, &usage, upCost)
+		return WithPartialUsage(&UpstreamUnavailableError{
+			Err: errors.New("stream ended without finish_reason"),
+		}, usage)
+	}
+
 	// 归一化：LLMEndEvent.Usage 从 provider 吐出即完整（Input 总输入口径 +
 	// Cost 实际支出 µUSD）——下游零协议特判。计费口径：上游自报费用优先，
 	// 拿不到才回退注册表价表（bridge 覆盖注入）。
 	reg.ApplyUsageCost(req.Provider, req.Model, &usage, upCost)
 
 	return handler(LLMEndEvent{
-		RequestId:    requestId,
-		Model:        req.Model,
-		Content:      content.String(),
-		Reasoning:    reasoning.String(),
-		ToolCalls:    toolCalls,
-		FinishReason: finishReason,
-		Usage:        usage,
-		Timestamp:    time.Now(),
+		RequestId:       requestId,
+		Model:           req.Model,
+		Content:         content.String(),
+		Reasoning:       reasoning.String(),
+		ToolCalls:       toolCalls,
+		FinishReason:    finishReason,
+		RawFinishReason: rawFinishReason,
+		Usage:           usage,
+		Timestamp:       time.Now(),
 	})
 }
 
