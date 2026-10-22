@@ -35,9 +35,13 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
     const it = items[i]
     if (it.kind === 'thinking') {
       const next = items[i + 1]
+      // 指标（模型/时刻/TTFT/耗时/tokens）落在**本轮最后一条**项上，而思考项总在正文
+      // 之前 —— 合并时要取正文那份，缺了才回落到思考那份。
       if (next?.kind === 'text') {
         out.push({
           kind: 'assistant', id: id--, text: next.text, thinking: it.text, streaming: false,
+          ...turnMeta(next),
+          ...(!hasTurnMeta(next) ? turnMeta(it) : {}),
           ...(it.thinkStart != null ? { thinkStart: it.thinkStart } : {}),
         })
         i++ // 已并入本块
@@ -45,6 +49,7 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
       }
       out.push({
         kind: 'assistant', id: id--, text: '', thinking: it.text, streaming: false,
+        ...turnMeta(it),
         ...(it.thinkStart != null ? { thinkStart: it.thinkStart } : {}),
       })
       continue
@@ -52,7 +57,8 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
     if (it.kind === 'user') {
       // 子运行上下文里的一条消息（用户 / 模型 / 孙任务结果）。映射成主会话的 **user 块** ——
       // 这样「我对它说的」和主会话里「我对主 agent 说的」长得一模一样，而不是任务结果那种卡。
-      out.push({ kind: 'user', id: id--, text: it.text, ...(it.startedAt != null ? { ts: it.startedAt } : {}) })
+      const ts = it.ts ?? it.startedAt
+      out.push({ kind: 'user', id: id--, text: it.text, ...(ts != null ? { ts } : {}) })
       continue
     }
     if (it.kind === 'text') {
@@ -63,7 +69,7 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
         out.push({ kind: 'system', id: id--, text: it.text, tone: 'error' })
         continue
       }
-      out.push({ kind: 'assistant', id: id--, text: it.text, thinking: '', streaming: false })
+      out.push({ kind: 'assistant', id: id--, text: it.text, thinking: '', streaming: false, ...turnMeta(it) })
       continue
     }
     if (it.kind === 'tool') {
@@ -139,3 +145,33 @@ export function withAgentToolBlocks(blocks: readonly MsgBlock[]): MsgBlock[] {
 }
 
 const toolCache = new WeakMap<readonly AgentItem[], MsgBlock[]>()
+
+/**
+ * turnMeta 把「一轮的指标」从 AgentItem 搬到 assistant 块上。
+ *
+ * 为什么需要搬：子会话页复用主会话的渲染原语（Narrative），它按 assistant 块上的
+ * model / ts / ttftMs / durMs / outputTokens / agentDurMs 渲染
+ * 「谁在什么时候、用什么模型、本轮 TTFT · LLM 总耗时 · Agent 总耗时 · tokens/s」。
+ * 子 agent 的那几个值一直只在 Go 的 reducer 里算进用量、没落到 items ——
+ * 于是子会话里整行元信息都不出现（用户 2026-10 报障）。
+ *
+ * 逐项「有才带」：缺哪段就不渲染哪段，与主 run 的 assistant 块同一口径。
+ */
+function turnMeta(it: Extract<AgentItem, { kind: 'text' | 'thinking' }>) {
+  return {
+    ...(it.model ? { model: it.model } : {}),
+    ...(it.ts != null ? { ts: it.ts } : {}),
+    ...(it.ttftMs != null ? { ttftMs: it.ttftMs } : {}),
+    ...(it.thinkMs != null ? { thinkMs: it.thinkMs } : {}),
+    ...(it.durMs != null ? { durMs: it.durMs } : {}),
+    ...(it.outputTokens != null ? { outputTokens: it.outputTokens } : {}),
+    ...(it.reasoningTokens != null ? { reasoningTokens: it.reasoningTokens } : {}),
+    ...(it.thinkingSummarized ? { thinkingSummarized: true } : {}),
+    ...(it.agentDurMs != null ? { agentDurMs: it.agentDurMs } : {}),
+  }
+}
+
+/** 这一项身上有没有「本轮指标」（决定合并块时用正文那份还是回落思考那份） */
+function hasTurnMeta(it: Extract<AgentItem, { kind: 'text' | 'thinking' }>): boolean {
+  return it.model != null || it.ts != null || it.ttftMs != null || it.durMs != null || it.outputTokens != null
+}

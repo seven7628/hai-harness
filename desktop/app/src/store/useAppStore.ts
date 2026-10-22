@@ -730,9 +730,23 @@ export interface PendingRelease {
 }
 
 // 子 agent 活动记录（与主 agent 同构：思考/输出/工具调用按时间序，SDK 事件全量转发）
+// 一轮的指标（text/thinking 项）：子会话页复用主会话的渲染原语，它按
+// model / ts / ttft / dur / outputTokens 渲染「模型 · 时刻 · LLM 总耗时 · tokens/s」。
+// 这些字段此前只有主 run 的 assistant 块有 —— 子 agent 的每条消息因此缺这一行（用户 2026-10 报障）。
+interface AgentTurnMeta {
+  model?: string
+  ts?: number
+  ttftMs?: number
+  thinkMs?: number
+  durMs?: number
+  outputTokens?: number
+  reasoningTokens?: number
+  thinkingSummarized?: boolean
+  agentDurMs?: number
+}
 export type AgentItem =
-  | { kind: 'text'; text: string; error?: boolean } // error=true = LLM 失败/上下文超限提示（卡片内醒目显示）
-  | { kind: 'thinking'; text: string; thinkStart?: number }
+  | ({ kind: 'text'; text: string; error?: boolean } & AgentTurnMeta) // error=true = LLM 失败/上下文超限提示（卡片内醒目显示）
+  | ({ kind: 'thinking'; text: string; thinkStart?: number } & AgentTurnMeta)
   // tool 项：nestedCalls / spillPath 仅编排型工具（codemode）有 —— 脚本内的嵌套调用清单与
   // 完整输出落盘路径（来源与语义见 lib/codemodeNested.ts；嵌套调用自身没有工具行）。
   // todos：todo_* 工具项那一刻**该子 agent 自己**的清单快照（历史计划卡定格显示，
@@ -740,7 +754,7 @@ export type AgentItem =
   | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[]; liveTail?: string; liveSeq?: number; liveTotal?: number }
   // user 子运行上下文里的一条用户/模型消息（来源见 events.AgentUserMessage）。
   // 它是**转录的一部分**（子会话里能看到「我对它说了什么」），不是任务结果。
-  | { kind: 'user'; text: string; startedAt?: number }
+  | { kind: 'user'; text: string; startedAt?: number; ts?: number }
   | { kind: 'compression'; before: number; after: number; ctxTokens?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
 
 // PriceRefreshSummary refresh_prices 结果摘要（UI toast 用；字段对齐 bridge 响应）
@@ -3670,17 +3684,46 @@ function appendToAssistant(v: SessionView, bid: number | undefined, field: 'text
 }
 
 // 子 agent 流式追加：思考/文本归并到其卡片活动记录（同类型连续追加，跨轮/跨工具各自成项）
-function appendAgentStream(blocks: MsgBlock[], runId: string, kind: 'text' | 'thinking', c: string, thinkStart?: number): MsgBlock[] {
+function appendAgentStream(blocks: MsgBlock[], runId: string, kind: 'text' | 'thinking', c: string, thinkStart?: number, meta?: AgentTurnMeta): MsgBlock[] {
   return blocks.map((b) => {
     if (b.kind !== 'agent' || b.runId !== runId) return b
     const items = [...b.items]
     const last = items[items.length - 1]
     // kind 是变量参数，TS 无法经 last.kind === kind 收缩 last——显式判 text 分支
-    if (last && last.kind === kind && !(kind === 'text' && last.kind === 'text' && last.error)) items[items.length - 1] = { ...last, text: last.text + c }
-    else if (kind === 'thinking') items.push({ kind, text: c, ...(thinkStart != null ? { thinkStart } : {}) } as AgentItem)
-    else items.push({ kind, text: c } as AgentItem)
+    if (last && last.kind === kind && !(kind === 'text' && last.kind === 'text' && last.error)) {
+      // 续写同一条消息：时刻/TTFT 属于**这一条的第一个 chunk**，已经有的不覆盖
+      items[items.length - 1] = {
+        ...last, text: last.text + c,
+        ...(last.ts == null && meta?.ts != null ? { ts: meta.ts } : {}),
+        ...(last.ttftMs == null && meta?.ttftMs != null ? { ttftMs: meta.ttftMs } : {}),
+      }
+    } else if (kind === 'thinking') items.push({ kind, text: c, ...(thinkStart != null ? { thinkStart } : {}), ...(meta ?? {}) } as AgentItem)
+    else items.push({ kind, text: c, ...(meta ?? {}) } as AgentItem)
     return { ...b, items }
   })
+}
+
+// setAgentItemMeta 把一轮的指标写到子 agent **最后一条文本/思考项**上。
+//
+// 子会话页复用的是主会话的渲染原语（Narrative 的 assistant 分支），它按
+// model / ts / ttftMs / durMs / outputTokens / agentDurMs 渲染「模型 · 时刻 ·
+// 本轮 TTFT · LLM 总耗时 · Agent 总耗时 · tokens/s」。主 run 一条消息 = 一个 assistant
+// 块，这些字段直接挂在块上；子 run 一条消息 = 卡片里的一项，此前只在 reducer 里算进
+// 用量、**没落到项上** —— 于是子会话里整行都不出现（用户 2026-10 报障）。
+// 已存在的时刻/TTFT 不覆盖：它们属于这条消息的第一个 chunk。
+// 与 Go 侧 view_reducer.applyLLMEndLocked 子 run 分支同一口径（实时与刷新后必须一致）。
+function setAgentItemMeta(items: AgentItem[], meta: AgentTurnMeta): AgentItem[] {
+  const i = items.findLastIndex((it) => it.kind === 'text' || it.kind === 'thinking')
+  if (i < 0) return items
+  const cur = items[i] as Extract<AgentItem, { kind: 'text' }> | Extract<AgentItem, { kind: 'thinking' }>
+  const out = [...items]
+  out[i] = {
+    ...cur,
+    ...meta,
+    ...(cur.ts != null && meta.ts != null ? { ts: cur.ts } : {}),
+    ...(cur.ttftMs != null && meta.ttftMs != null ? { ttftMs: cur.ttftMs } : {}),
+  } as AgentItem
+  return out
 }
 
 // appendAgentUser 把一条投向子运行上下文的消息记进它的转录（events.AgentUserMessage）。
@@ -5113,7 +5156,15 @@ export function dispatchEvent(raw: AnyEvent): void {
         if (thinkStartTs[key] == null) thinkStartTs[key] = ts // 事件时间戳 → 结算 thinkMs（重放可重建）
         const startClient = Date.now() // 客户端接收时刻 → 块 thinkStart（实时时钟锚点，重放不虚高）
         if (runId && isSubAgentRun(v, runId)) {
-          return setView(s, sid, { ...v, blocks: appendAgentStream(v.blocks, runId, 'thinking', c, startClient), thinkStartTs })
+          // 子 run 的 TTFT 与主 run 同口径：本 run 的 llm_start（turnStartTs[runId]）→
+          // 首个任意 chunk（思考模型 reasoning 先行，TTFT 不该被整段思考虚高）。
+          const llmStart = v.turnStartTs?.[key]
+          const ttftMs = llmStart != null ? Math.max(0, ts - llmStart) : undefined
+          return setView(s, sid, {
+            ...v,
+            blocks: appendAgentStream(v.blocks, runId, 'thinking', c, startClient, { ts, ...(ttftMs != null ? { ttftMs } : {}) }),
+            thinkStartTs,
+          })
         }
         const bid = raw.request_id ? v.reqBlock[String(raw.request_id)] : undefined
         const nv = appendToAssistant(v, bid, 'thinking', c, startClient, runId)
@@ -5167,9 +5218,10 @@ export function dispatchEvent(raw: AnyEvent): void {
           turnThinkMs[key] = thinkMs as number
         }
         if (runId && isSubAgentRun(v, runId)) {
-          const blocks = thinkMs != null
-            ? setAgentThinkMs(appendAgentStream(v.blocks, runId, 'text', c), runId, thinkMs)
-            : appendAgentStream(v.blocks, runId, 'text', c)
+          const llmStart = v.turnStartTs?.[key]
+          const ttftMs = llmStart != null ? Math.max(0, now - llmStart) : undefined
+          const streamed = appendAgentStream(v.blocks, runId, 'text', c, undefined, { ts: now, ...(ttftMs != null ? { ttftMs } : {}) })
+          const blocks = thinkMs != null ? setAgentThinkMs(streamed, runId, thinkMs) : streamed
           return setView(s, sid, { ...v, blocks, thinkStartTs, turnThinkMs })
         }
         const bid = raw.request_id ? v.reqBlock[String(raw.request_id)] : undefined
@@ -5251,6 +5303,17 @@ export function dispatchEvent(raw: AnyEvent): void {
               retrying: false,
               retryMessage: undefined,
               ...(thinkMs != null ? { thinkMs } : {}),
+              // 本轮指标落到这条 run 的最后一条消息上 —— 子会话里那句
+              // 「deepseek-v4 · 22:31 · TTFT 1.2s · LLM 总耗时 43.8s · 15.88 tokens/s」
+              // 就靠它。缺了它，子会话每条消息都只有正文。
+              items: setAgentItemMeta(ag.items, {
+                ...(raw.model ? { model: String(raw.model) } : {}),
+                ...(durMs != null ? { durMs } : {}),
+                ...(thinkMs != null ? { thinkMs } : {}),
+                outputTokens: ru.Output ?? 0,
+                reasoningTokens: ru.Reasoning ?? 0,
+                ...(ru.ReasoningSummarized === true ? { thinkingSummarized: true } : {}),
+              }),
               usage: {
                 input: ag.usage.input + (ru.Input ?? 0),
                 output: ag.usage.output + (ru.Output ?? 0),
@@ -6197,6 +6260,13 @@ export function dispatchEvent(raw: AnyEvent): void {
               ? {
                   ...b,
                   status: taskStatus,
+                  // 整次运行的耗时落到最后一条文本/思考项（主 run 是 assistant 块上的
+                  // agentDurMs，同名字段同语义）—— 子会话里「Agent 总耗时 16m 19s」靠它。
+                  // 缺 duration_ms 时用「spawnedAt → 现在」兜底，与下方卡片 durMs、与 Go 侧
+                  // view_reducer.applyAgentEndLocked 同一口径（否则中断/旧日志那一行会整段消失）。
+                  items: setAgentItemMeta(b.items, {
+                    agentDurMs: typeof raw.duration_ms === 'number' ? raw.duration_ms : now - b.spawnedAt,
+                  }),
                   // 2026-08-22：任务 id 兜底补挂（AgentStart/AgentEnd 现已携带；旧日志缺失时
                   // 靠 task_started/result 匹配的兜底锚）—— 有 taskId 右栏才有精确停止按钮
                   taskId: b.taskId || (raw.task_id ? String(raw.task_id) : undefined),
@@ -6790,6 +6860,9 @@ function cpUsage(u?: { input?: number; output?: number; cache_read?: number; cac
 }
 function cpAgentItem(it: {
   kind: string; text?: string; is_error?: boolean; think_start?: number
+  // 一轮的指标（见 AgentTurnMeta 注释）
+  ts?: number; ttft_ms?: number; think_ms?: number
+  output_tokens?: number; reasoning_tokens?: number; thinking_summarized?: boolean; agent_dur_ms?: number
   tool_id?: string; name?: string; args?: string; status?: string; result?: string
   error_info?: { code?: string; changed?: string; retryable?: boolean; nextAction?: string; recovery?: string }
   dur_ms?: number; started_at?: number; task_id?: string
@@ -6802,8 +6875,20 @@ function cpAgentItem(it: {
   host_ops?: CheckpointHostOps
   todos?: { id: string; title: string; done: boolean; blocked_by?: string[] }[]
 }): AgentItem {
-  if (it.kind === 'text') return { kind: 'text', text: it.text ?? '', error: it.is_error === true }
-  if (it.kind === 'thinking') return { kind: 'thinking', text: it.text ?? '', ...(it.think_start != null ? { thinkStart: it.think_start } : {}) }
+  // 指标逐项「有才带」：缺了就不渲染那一段（与主 run 的 assistant 块同一口径，
+  // AssistantTurnMeta 也是「缺哪段省哪段」）。
+  const meta = {
+    ...(it.model ? { model: it.model } : {}),
+    ...(it.ts != null ? { ts: it.ts } : {}),
+    ...(it.ttft_ms != null ? { ttftMs: it.ttft_ms } : {}),
+    ...(it.think_ms != null ? { thinkMs: it.think_ms } : {}),
+    ...(it.output_tokens != null ? { outputTokens: it.output_tokens } : {}),
+    ...(it.reasoning_tokens != null ? { reasoningTokens: it.reasoning_tokens } : {}),
+    ...(it.thinking_summarized ? { thinkingSummarized: true } : {}),
+    ...(it.agent_dur_ms != null ? { agentDurMs: it.agent_dur_ms } : {}),
+  }
+  if (it.kind === 'text') return { kind: 'text', text: it.text ?? '', error: it.is_error === true, ...meta }
+  if (it.kind === 'thinking') return { kind: 'thinking', text: it.text ?? '', ...(it.think_start != null ? { thinkStart: it.think_start } : {}), ...meta }
   if (it.kind === 'tool') {
     const cpNested = parseNestedCalls(it.nested_calls)
     const cpSpill = spillPathFrom(it.result ?? '')

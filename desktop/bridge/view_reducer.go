@@ -256,6 +256,22 @@ type AgentItem struct {
 	// 后者是「最近一次」的滚动值；这里定格本次调用，历史计划卡才显示当时状态）。
 	Todos []TodoItem `json:"todos,omitempty"`
 
+	// —— 一轮的指标（text/thinking item 上）——
+	//
+	// 子 agent 的转录此前只有正文：宿主在子会话里复用的是**主会话同一套渲染原语**，
+	// 而那一套按 model / ts / ttft_ms / dur_ms / output_tokens / agent_dur_ms 渲染
+	// 「谁在什么时候、用什么模型、这轮花了多久、多少 tokens/s」。这些字段只在主 run 的
+	// assistant 块上有过，子 run 的一律丢在 reducer 里 —— 于是子会话里
+	// 「模型名 / 时刻 / LLM 总耗时 · Agent 总耗时 · tokens/s」整行都不出现
+	//（用户 2026-10 报障）。这里补到 items 上，与主 run 同名字段同语义。
+	Ts                 int64 `json:"ts,omitempty"` // 这条消息的时刻（llm 首字 / 投递时刻）
+	TTFTMs             int64 `json:"ttft_ms,omitempty"`
+	ThinkMs            int64 `json:"think_ms,omitempty"`
+	OutputTokens       int64 `json:"output_tokens,omitempty"`
+	ReasoningTokens    int64 `json:"reasoning_tokens,omitempty"`
+	ThinkingSummarized bool  `json:"thinking_summarized,omitempty"`
+	AgentDurMs         int64 `json:"agent_dur_ms,omitempty"` // 整次运行的耗时（落在最后一条文本项）
+
 	// compression item
 	Before    int    `json:"before,omitempty"`
 	After     int    `json:"after,omitempty"`
@@ -1355,7 +1371,7 @@ func (r *ViewReducer) flushChunkLocked() {
 	}
 
 	if r.isSubRunLocked(c.runID) {
-		r.appendAgentStreamLocked(c.runID, c.kind, c.content, ts)
+		r.appendAgentStreamLocked(c.runID, c.kind, c.content, ts, r.settleSubTTFTLocked(c.requestID, c.runID, ts))
 		return
 	}
 	// 主 agent：路由到 request 对应的 assistant 块；缺失回退最后一条 assistant。
@@ -1489,7 +1505,28 @@ func (r *ViewReducer) noteBlockAppendLocked(id uint64) {
 
 // appendAgentStreamLocked 把流式文本/思考追加到子 agent 卡片活动记录
 // （同类型连续项合并，跨轮/跨工具各自成项）。
-func (r *ViewReducer) appendAgentStreamLocked(runID, kind, content string, ts time.Time) {
+// settleSubTTFTLocked 在子 run 的首个 chunk 到达时结算 TTFT 并返回它（0 = 尚未结算）。
+//
+// 主 agent 的 TTFT 在 flushChunkLocked 尾部挂到 assistant 块上；子 run 在那之前就
+// 分流去写卡片项了，reqState.ttftMs 因此**永远停在 0** —— llm_end 读到 0 就不写
+// items[].TTFTMs，子会话每条消息的「模型 · 时刻 · LLM 总耗时 · tokens/s」于是缺一段
+// （用户 2026-10 报障：子智能体没有模型信息、消息时刻、显存指标行）。
+func (r *ViewReducer) settleSubTTFTLocked(requestID, runID string, ts time.Time) int64 {
+	key := requestID
+	if key == "" {
+		key = "$" + runID
+	}
+	rs, ok := r.reqState[key]
+	if !ok {
+		return 0
+	}
+	if rs.ttftMs == 0 && !rs.start.IsZero() {
+		rs.ttftMs = msBetween(rs.start, ts)
+	}
+	return rs.ttftMs
+}
+
+func (r *ViewReducer) appendAgentStreamLocked(runID, kind, content string, ts time.Time, ttftMs int64) {
 	// chunk kind（reasoning/content）→ 卡片项 kind（thinking/text）
 	switch kind {
 	case "reasoning":
@@ -1513,11 +1550,16 @@ func (r *ViewReducer) appendAgentStreamLocked(runID, kind, content string, ts ti
 	if last >= 0 && items[last].Kind == kind && items[last].Text != "" && !items[last].IsError {
 		items[last].Text += content
 	} else {
-		item := AgentItem{Kind: kind, Text: content}
+		item := AgentItem{Kind: kind, Text: content, Ts: millis(ts)}
 		if kind == "thinking" {
 			item.ThinkStart = millis(ts)
 		}
 		items = append(items, item)
+		last = len(items) - 1
+	}
+	// 这条消息的首个 chunk 就是它的 TTFT 终点：落到它自己头上，而不是只记在请求态里。
+	if ttftMs > 0 && last >= 0 && items[last].TTFTMs == 0 {
+		items[last].TTFTMs = ttftMs
 	}
 	b.Items = items
 	r.blocks[idx] = b
@@ -1667,9 +1709,34 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 			r.ctxTokens = u.Input
 			r.ctxTokensEst = false
 		}
-	} else if bid != 0 {
-		if idx := r.findBlockLocked(bid); idx >= 0 && r.blocks[idx].Kind == blockKindAgent {
+	} else if abid := r.agentBlockID[e.RunId]; abid != 0 {
+		// 子 run：本轮指标落到**这条 run 的最后一个文本/思考项**上 —— 子会话页复用的是
+		// 主会话的渲染原语，它按 model / ts / ttft / dur / output_tokens 渲染
+		// 「模型 · 时刻 · LLM 总耗时 · tokens/s」。这些值此前只算进用量、没落到 items，
+		// 于是子 agent 的每条消息都缺这一行（用户 2026-10 报障）。
+		if idx := r.findBlockLocked(abid); idx >= 0 && r.blocks[idx].Kind == blockKindAgent {
 			b := r.blocks[idx]
+			items := b.Items
+			for i := len(items) - 1; i >= 0; i-- {
+				if items[i].Kind != agentItemText && items[i].Kind != agentItemThinking {
+					continue
+				}
+				items[i].Model = e.Model
+				if durMs > 0 {
+					items[i].DurMs = durMs
+				}
+				if ttftMs > 0 {
+					items[i].TTFTMs = ttftMs
+				}
+				if thinkMs > 0 {
+					items[i].ThinkMs = thinkMs
+				}
+				items[i].OutputTokens = u.Output
+				items[i].ReasoningTokens = u.Reasoning
+				items[i].ThinkingSummarized = u.ReasoningSummarized
+				break
+			}
+			b.Items = items
 			b.Usage.Input += agg.Input
 			b.Usage.Output += agg.Output
 			b.Usage.CacheRead += agg.CacheRead
@@ -2228,6 +2295,19 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 			// 幂等覆盖）；**同步子 agent 没有 TaskEnd**（不是任务），这里是它唯一的权威来源。
 			if e.Usage != nil && !e.Usage.IsZero() {
 				b.Usage = taskUsageFromCore(*e.Usage)
+			}
+			// 整次运行的耗时落在**最后一条文本/思考项**上（主 run 是挂在最后一条 assistant
+			// 块上的 agent_dur_ms，同名字段同语义）——子会话里那句
+			// 「Agent 总耗时 16m 19s」就靠它。
+			if b.DurMs > 0 {
+				items := b.Items
+				for i := len(items) - 1; i >= 0; i-- {
+					if items[i].Kind == agentItemText || items[i].Kind == agentItemThinking {
+						items[i].AgentDurMs = b.DurMs
+						break
+					}
+				}
+				b.Items = items
 			}
 			// 子 agent 的产出归入其卡片（不产生独立块——避免主对话被每个子 agent 的
 			// 产出卡片刷屏；卡片展开即见）。宿主渲染为卡片尾部的 ArtifactCard。
