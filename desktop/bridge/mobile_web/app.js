@@ -510,7 +510,9 @@
         return userMsg(b.text || '')
       case 'assistant': {
         const wrap = document.createDocumentFragment()
-        if (b.thinking) wrap.appendChild(el('div', 'msg thinking', b.thinking))
+        // 只有 "." / 空白 的 reasoning 块没有信息量（模型只调工具时常见），
+        // 直接渲染会在时间线上留一串孤零零的点。
+        if ((b.thinking || '').trim().length > 1) wrap.appendChild(el('div', 'msg thinking', b.thinking))
         if (b.text) {
           const node = el('div', 'msg assistant')
           node.appendChild(mdLite(b.text))

@@ -81,6 +81,23 @@ body {
   -webkit-overflow-scrolling: touch;
   padding: 16px 16px 10px;
 }
+/* flex 列里的消息必须保持自然高度：overflow:auto 的元素（thinking）在 flex 里
+   自动最小尺寸为 0，会被压成几像素高 —— 表现就是「思考过程整段消失」。 */
+#messages > *,
+#agent-messages > * {
+  flex: 0 0 auto;
+}
+
+/* 分隔线：flex 列里 hr 默认 width:auto + 自动外边距会缩成一个点 */
+#messages hr,
+#agent-messages hr {
+  width: 100%;
+  height: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 4px 0;
+}
+
 /* flex 容器里的按钮不要被拉成整行 */
 #messages > .ghost,
 #agent-messages > .ghost {
@@ -325,6 +342,7 @@ button[disabled] {
 
 /* 思考过程：淡、小、左侧发丝线，不抢正文注意力，也不无限占屏 */
 .msg.thinking {
+  position: relative;
   color: var(--text-3);
   font-size: 12.5px;
   line-height: 1.55;
@@ -332,8 +350,17 @@ button[disabled] {
   overflow-wrap: anywhere;
   border-left: 2px solid var(--border);
   padding: 2px 0 2px 10px;
-  max-height: 40vh;
-  overflow-y: auto;
+  /* 不限高、不内滚：手机上是整页滚动，嵌套滚动区既难拖又容易被 flex 压扁 */
+}
+/* 一眼区分「思考」与「正文」：淡标签，不抢注意力 */
+.msg.thinking::before {
+  content: '思考';
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  opacity: 0.7;
+  margin-bottom: 2px;
 }
 .msg.error {
   color: var(--error);
