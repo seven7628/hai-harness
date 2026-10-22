@@ -41,21 +41,21 @@ func TestMobileHubFiltersBySession(t *testing.T) {
 
 func TestMobileHubNeverDropsControlEvents(t *testing.T) {
 	h := newMobileHub()
-	s := h.subscribe("", "")
+	s := h.subscribe("/w", "s1")
 	// 灌满缓冲：全是可丢的 chunk
 	for i := 0; i < mobileSubBuf; i++ {
-		h.broadcast("", "", []byte(fmt.Sprintf(`{"event_type":"content_chunk","content":"%d"}`, i)))
+		h.broadcast("/w", "s1", []byte(fmt.Sprintf(`{"event_type":"content_chunk","content":"%d"}`, i)))
 	}
 	if s.dropped.Load() {
 		t.Fatal("缓冲刚好满时不应标记丢弃")
 	}
 	// 再来一个 chunk → 丢 + 标记
-	h.broadcast("", "", []byte(`{"event_type":"content_chunk","content":"x"}`))
+	h.broadcast("/w", "s1", []byte(`{"event_type":"content_chunk","content":"x"}`))
 	if !s.dropped.Load() {
 		t.Fatal("溢出时应标记 dropped（写循环据此补 resync）")
 	}
 	// 控制事件必须挤进去
-	h.broadcast("", "", []byte(`{"event_type":"agent_end"}`))
+	h.broadcast("/w", "s1", []byte(`{"event_type":"agent_end"}`))
 	var last []byte
 	for {
 		select {
@@ -80,4 +80,21 @@ func TestMobileHubUnsubscribeClosesChannel(t *testing.T) {
 	}
 	// 重复退订不 panic
 	h.unsubscribe(s)
+}
+
+// 空过滤不能等于「订阅全部」：漏传 session_id 的客户端会收下整个工作区的流，
+// 手机上表现为「切换会话后仍在显示别的会话的内容」。
+func TestMobileHubRejectsEmptyFilter(t *testing.T) {
+	h := newMobileHub()
+	loose := h.subscribe("", "") // 漏传 workspace / session_id
+	exact := h.subscribe("/w", "s1")
+
+	h.broadcast("/w", "s1", []byte(`{"event_type":"content_chunk","content":"x"}`))
+
+	if len(loose.ch) != 0 {
+		t.Fatalf("空过滤订阅者不该收到会话事件，实际收到 %d 条", len(loose.ch))
+	}
+	if len(exact.ch) != 1 {
+		t.Fatalf("匹配的订阅者应收到 1 条，实际 %d 条", len(exact.ch))
+	}
 }

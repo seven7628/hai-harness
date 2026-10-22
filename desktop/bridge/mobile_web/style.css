@@ -280,6 +280,13 @@ button[disabled] {
   white-space: nowrap;
 }
 
+/* 子智能体页顶部状态行：没有这条 padding 会贴着屏幕左边缘被切 */
+#agent-meta {
+  flex: 0 0 auto;
+  padding: 8px 16px 0;
+  font-size: 12px;
+}
+
 /* ── 消息：手机以会话为主 —— 你的话走右侧气泡，助手正文左对齐、按阅读排版 ── */
 .msg {
   max-width: 100%;

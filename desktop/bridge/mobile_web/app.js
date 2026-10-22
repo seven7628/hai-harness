@@ -435,9 +435,16 @@
     await openSession(state.sid)
   }
 
+  // 每次打开会话 +1；迟到的响应（用户已经切走）按序号丢弃。
+  let openSeq = 0
+
   async function openSession(sid) {
+    const seq = ++openSeq
+    // 先断流：切换期间旧会话的流式事件绝不能落到新会话的屏幕上
+    disconnect()
     // bridge 的恢复字段是 id（历史协议），session_id 只是兼容写法 —— 两个都传
     const data = await api('new_session', { workspace: state.ws, id: sid, session_id: sid, blocks_limit: 30 })
+    if (seq !== openSeq) return // 迟到的响应：用户已切到别的会话
     state.sid = data.session_id || sid
     localStorage.setItem(LS.sid, state.sid)
     state.blocks = parseBlocks(data.view_checkpoint)
@@ -673,10 +680,14 @@
     box.textContent = ''
     for (const e of state.agentEntries) {
       if (e.kind === 'user') box.appendChild(el('div', 'msg user', e.text || ''))
-      else if (e.kind === 'assistant') box.appendChild(el('div', 'msg assistant', e.text || ''))
+      else if (e.kind === 'assistant') {
+        const n = el('div', 'msg assistant')
+        n.appendChild(mdLite(e.text || ''))
+        box.appendChild(n)
+      }
       else if (e.kind === 'tool') {
         const d = document.createElement('details')
-        d.className = 'tool'
+        d.className = 'tool-group' // 与主会话同一个样式类（原来写 'tool'，没有对应 CSS）
         const s = document.createElement('summary')
         s.textContent = e.name || 'tool'
         d.appendChild(s)
@@ -814,7 +825,22 @@
     }
   }
 
+  // 会画到对话流里的事件类型；只有这些必须严格属于当前会话。
+  const SESSION_SCOPED = new Set([
+    'content_chunk',
+    'reasoning_chunk',
+    'llm_start',
+    'llm_end',
+    'tool_run_start',
+    'tool_run_end',
+    'agent_end',
+    'session_persist_error',
+  ])
+
   function onEvent(ev) {
+    // emit 给每行注入了 session_id：不是当前会话的一条都不画。
+    // 这是「串台」的最后一道闸 —— 双连接、hub 过滤失效、切会话竞态都挡得住。
+    if (ev.session_id && state.sid && ev.session_id !== state.sid && SESSION_SCOPED.has(ev.event_type)) return
     switch (ev.event_type) {
       case 'content_chunk':
         if (isStaleChunk(ev)) break
@@ -914,7 +940,7 @@
         t.dataset.live = '1'
         box.appendChild(t)
       }
-      t.textContent = state.live.thinking
+      patchText(t, state.live.thinking)
     }
     let node = box.querySelector('.msg.assistant[data-live="1"]')
     if (!node) {
@@ -922,12 +948,24 @@
       node.dataset.live = '1'
       box.appendChild(node)
     }
-    node.textContent = state.live.text
+    patchText(node, state.live.text)
     node.classList.toggle('cursor', state.running)
     updateRunning()
     if (stick) scrollToEnd()
     // 没贴底说明用户在往回读：给一个「最新」入口，别让流式内容"消失"在下面
     $('jump').hidden = stick || !state.running
+  }
+
+  // 只追加新增部分：每帧整段重写 textContent 会让长文本反复重排，
+  // 在 iPhone 上表现为内容抖动/闪烁（滚动位置被反复钳制）。
+  function patchText(node, text) {
+    const cur = node.textContent || ''
+    if (text === cur) return
+    if (cur && text.startsWith(cur)) {
+      node.appendChild(document.createTextNode(text.slice(cur.length)))
+      return
+    }
+    node.textContent = text // 首次渲染 / live 快照整段替换
   }
 
   function nearBottom(box) {

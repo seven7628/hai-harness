@@ -63,10 +63,12 @@ func (h *mobileHub) broadcast(ws, sid string, line []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for s := range h.subs {
-		if s.ws != "" && s.ws != ws {
+		// 只投给「同一工作区 + 同一会话」：空过滤**不等于**订阅全部 ——
+		// 否则一个漏传 session_id 的客户端会收下整个工作区的流（会话串台）。
+		if s.ws == "" || ws == "" || s.ws != ws {
 			continue
 		}
-		if s.sid != "" && s.sid != sid {
+		if s.sid == "" || sid == "" || s.sid != sid {
 			continue
 		}
 		select {
