@@ -60,7 +60,14 @@ export default function MobileTab() {
           <div className="set-desc">{t('mobile.scan')}</div>
         </div>
       ) : (
-        <p className="set-desc">{t('mobile.noQr')}</p>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', margin: '10px 0 4px', flexWrap: 'wrap' }}>
+          <button className="btn primary" onClick={() => setMobileLan(true)}>
+            {t('mobile.enableQr')}
+          </button>
+          <span className="set-desc" style={{ flex: 1, minWidth: 220 }}>
+            {t('mobile.noQr')}
+          </span>
+        </div>
       )}
 
       <div className="settings-sec-title" style={{ marginTop: 12 }}>
