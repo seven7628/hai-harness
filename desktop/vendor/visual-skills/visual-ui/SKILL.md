@@ -1,7 +1,7 @@
 ---
 name: visual-ui
-version: 1.5.0
-description: 'Use when showing beats telling - numbers that need comparing, a process, a hierarchy, alternatives, or inputs that change a result. Renders ONE self-contained HTML block in a sandboxed iframe (inherits no app CSS). Triggers: chart, plot, dashboard, KPI, diagram, flowchart, table, timeline, tabs, calculator, heatmap, pricing, visualization, 图表, 看板.'
+version: 1.7.1
+description: 'Use when the user wants a summary, explanation, report, review, walkthrough or comparison of a system, a change, a decision or a set of numbers, or wants a chart or diagram. Deliver summary-like answers as a designed page: the ```html``` block IS the answer (verdict, sections, inline mini-diagrams, tables, footnote), not a chart glued to prose; a single visual inside a Markdown reply is the lighter mode. Triggers: summary, brief, report, review, retrospective, architecture, system design, request flow, sequence, ERD, entity relationship, schema, class diagram, state machine, mind map, org chart, flowchart, chart, plot, dashboard, KPI, heatmap, table, timeline, pricing, tabs, calculator, visualization, 总结, 汇报, 复盘, 评审, 方案, 架构图, 系统结构, 调用链, 时序图, 流程图, ER图, 实体关系, 数据模型, 状态机, 类图, 关系图, 思维导图, 图表, 看板.'
 ---
 
 # Visual answers as sandboxed HTML
@@ -15,12 +15,30 @@ description: 'Use when showing beats telling - numbers that need comparing, a pr
   CSS and sits on a light canvas. Unstyled output renders as bare browser defaults.
 - Prefer the theme variables below over hardcoded colors. They are injected for you and follow the
   app's current light/dark theme, so a widget written with them looks native in both.
-- Keep the block focused on the visual. Put the explanation in normal Markdown around it.
 - Verify before you ship: no `NaN`, no empty denominators, no control that does nothing, and every
   number carries its unit.
 - **Pick a shape from the catalogue below before writing markup.** Defaulting to "card + a few
   paragraphs" for a comparison, a sequence or a set of alternatives is the most common way to
   produce something that is technically valid HTML and still worse than plain Markdown.
+
+### Two modes — pick the lighter one that still works
+
+| The ask | Mode | Outside the block |
+|---|---|---|
+| "总结 / 汇报 / 复盘 / 评审 / 讲讲这块" — an answer with parts, or one that ends in a decision | **Full answer**: the page *is* the answer | one lead-in line at most; never a second copy of the content |
+| "画个图 / 对比一下 / 这组数据什么样" — one visual inside an explanation | **Single visual**: one card inside a normal reply | the prose that explains it |
+
+Full-answer mode is not "a card with paragraphs". It needs a masthead, a verdict in the first screen,
+2–5 sections that each carry evidence (a number row, a mini diagram, a short table, a code excerpt),
+and a footnote for scope/omissions. Use it when the answer has at least three parts or ends in a
+decision; **a two-sentence answer or a single fact stays in Markdown** — a page-shaped paragraph is
+worse than a paragraph. Reach for the full page when the reader will scan it, forward it, or come
+back to it; not to make a small answer look important.
+
+**Precedence.** The app-level rule is "prefer GFM" — that is the default for ordinary answers, and
+this skill does not overturn it for a one-liner. But once this skill is loaded for a summary,
+review or walkthrough, full-answer mode **replaces** the Markdown reply: the page *is* the answer,
+not an illustration attached to one. Do not hedge by writing both.
 
 ## Where the HTML actually runs
 
@@ -102,7 +120,9 @@ The frame is narrow-to-medium typically (300–560 px visible width). Build for 
 ```
 
 - **One card per block.** If the answer genuinely has two unrelated visuals, use two stacked cards, not
-  one card with two unrelated things inside.
+  one card with two unrelated things inside. A **full answer** is the exception in the other
+  direction: one page card with sections inside it, never three sibling cards that each hold a part
+  of the same answer.
 - Do not set a fixed `width` on the card. It fills the frame.
 - `padding: 16px 18px` and `border-radius: 10px` are the house defaults; stay near them so blocks
   generated at different times look like they belong to the same app.
@@ -150,6 +170,35 @@ label-to-value `3–4`. If everything is `10px` the visual has no hierarchy.
 
 The stamp is where the "示例数据" honesty label lives — visible, in the widget, not only in prose.
 
+### Full-answer page
+
+A full answer is a page: **masthead → verdict → sections → footnote**. It uses the same card, the
+same tokens and the same type scale — only the sequence is different.
+
+```css
+.page h1 { margin: 0; font-size: 18px; font-weight: 650; line-height: 1.35; }
+.verdict { margin: 0 0 16px; padding: 2px 0 2px 12px; font-size: 13px;
+           border-left: 3px solid var(--hai-accent); }
+.page h2 { margin: 20px 0 8px; font-size: 13px; font-weight: 600; }
+.page h2 + p, .page h2 + ul { margin-top: 0; }
+.foot { margin-top: 20px; padding-top: 10px; font-size: 11px; color: var(--hai-text-2);
+        border-top: 1px solid var(--hai-line); }
+```
+
+- **Order is the design.** Masthead and verdict first, then the evidence that would change the
+  reader's mind. The first ~560 px must contain the verdict and at least one piece of evidence; a
+  conclusion below the fold is a scroll, not an answer.
+- **2–5 sections, one idea each.** A section heading that only restates the previous sentence is a
+  divider, not structure.
+- **Each section carries one artifact**: a number row, a mini diagram, a short table, a code excerpt.
+  A section that is three paragraphs of prose belongs in Markdown instead.
+- **No table of contents, no jump links, no "back to top".** The frame already scrolls; those are
+  controls that do nothing.
+- **The footnote is part of the answer**: scope (which files/versions), what was omitted, whether the
+  numbers are 示例数据. This is where honesty is cheap.
+- **Do not restate the page in Markdown.** One lead-in sentence, then the block; after it, at most a
+  next-step line. If the prose outside repeats the page, delete one of them.
+
 ### Typography scale
 
 | Role | Size | Weight | Notes |
@@ -168,7 +217,9 @@ The stamp is where the "示例数据" honesty label lives — visible, in the wi
 
 ## Shape catalogue
 
-Pick one. Each entry is the *shape*, not a fixed design — adapt content.
+Single-visual mode: pick **one** shape. Full-answer mode: pick a few page blocks from
+`references/summary-page.md` and keep the page order (verdict → evidence → footnote). Each entry is
+the *shape*, not a fixed design — adapt content.
 
 | The answer is… | Use | Avoid |
 |---|---|---|
@@ -182,12 +233,43 @@ Pick one. Each entry is the *shape*, not a fixed design — adapt content.
 | alternatives that need detail each | **tabbed panels** | one enormous table |
 | a sequence of steps / events | **timeline** (vertical, status per node) | bulleted list |
 | hierarchy / dependencies | **SVG diagram** with arrow markers | ASCII art |
+| how a system is put together | **layered architecture** (stacked bands, components as chips) | one SVG with 15 boxes |
+| who calls whom, in what order | **sequence diagram** (lifelines + numbered messages) | a flowchart with numbered arrows |
+| entities and how they relate | **ER diagram** (entity cards + cardinality) | a table of tables |
+| one thing's lifecycle | **state machine** (states + labelled transitions) | a step list that hides branching |
+| object model / fields per type | **class boxes** (fields, methods, `extends` edges) | prose listing fields |
 | a plan vs reality gap | **progress bars** with an explicit target | a single "% done" |
 | inputs that change a result | **calculator / simulator** with live output | static numbers |
 | one item chosen from N | **pricing / plan cards** | table with 12 columns |
 | status of many items | **status list** with a badge per row | traffic-light emoji |
 | before / after | **two-column diff** or **split bar** | two separate charts |
 | ranking | **sorted bar list** with rank numbers | unsorted table |
+
+### Diagram answers (architecture, sequence, ER, state)
+
+A diagram question is almost never "draw every box" — it is "explain the shape of this thing", so
+which diagram you pick *is* part of the answer:
+
+- **Pick by the question, not by the noun.** "总结一下系统架构" is usually composition → layered
+  architecture. Add a sequence only when *how a request travels* is part of the question; add an ER
+  only when the data model is. One diagram per answer: the frame shows ~560 px, so the second one
+  is already below the fold.
+- **Vertical beats horizontal.** Layers stack, sequence messages run top-down, entities sit side by
+  side only in pairs. Horizontal sprawl dies at 300–560 px.
+- **There is a budget: ~8 boxes or ~6 messages.** Past that, keep the three that answer the
+  question and say in prose what you left out. Cut content, never shrink the type to fit.
+- **Do not invent topology.** If the code does not show that A calls B, draw what you can support
+  and mark the rest as inferred. An invented arrow is the same lie as an invented number.
+- **Say what the notation means** in the caption: solid = request, dashed = return, `PK`/`FK`,
+  `1:N`. The reader is not in your head.
+- **Label the container, not just the shapes.** `role="img"` + an `aria-label` that walks the flow
+  in words (layers top to bottom, messages in order), on the `<svg>` or on the DOM wrapper.
+- **"Explain how X works" is not automatically a diagram.** If the answer is three sentences of
+  causality, ship the prose. A diagram is justified when the reader has to see *structure* — parts,
+  order, edges, states — to follow the explanation; a box per sentence is just a paragraph with
+  borders.
+
+Skeletons live in `references/architecture-and-uml.md`.
 
 ## Interaction policy
 
@@ -206,7 +288,7 @@ If yes → the control is part of the answer, build it. If no → ship it static
 | **Required** | Without the control the shape cannot answer its question. | calculator / simulator, tabbed panels |
 | **Conditional** | Add the control **only** when the reader is genuinely deciding something and the weighting/ordering is not yet fixed. | comparison table (weights), bar chart (sort), ranking list |
 | **Hover only** | The data is static, but reading a dense cell needs help. Hover/focus reveals a value that is also present in the DOM. | heatmap, line chart (crosshair) |
-| **Static** | The answer is fixed. Adding controls would be decoration. | KPI strip, line chart, timeline, SVG diagram, pricing cards, status list, progress |
+| **Static** | The answer is fixed. Adding controls would be decoration. | KPI strip, line chart, timeline, SVG diagram, layered architecture, sequence, ER, state machine, pricing cards, status list, progress |
 | **Outbound** | The widget sends a message back to the conversation. Rare — see below. | an explicit "reply with this" button |
 
 ### Rules
@@ -251,10 +333,12 @@ them for a single KPI card would waste most of the context.
 
 | The shape you picked | Read this file |
 |---|---|
+| **the whole answer as a page** (summary / review / retrospective) | `references/summary-page.md` |
 | bar chart · line chart · heatmap | `references/charts.md` |
 | tabbed panels · calculator / simulator | `references/interactive.md` |
 | comparison table · timeline · progress · pricing cards | `references/compare-and-sequence.md` |
 | SVG diagram · KPI strip · status list | `references/diagram-and-status.md` |
+| layered architecture · sequence · ER · state machine · class | `references/architecture-and-uml.md` |
 | **the widget must send something back to the conversation** | `references/reply-protocol.md` |
 
 All paths are relative to this skill's directory. The absolute directory is listed in
@@ -271,7 +355,7 @@ reader is expected to answer something inside the widget (pick an option, rate s
 step). Most widgets do not need it — a visual answer is usually something to read, not a form.
 
 If nothing in the table fits, build from the primitives in **Layout system** above and follow the
-**Stability checklist** below. Do not invent a reference file path — the five above are the only
+**Stability checklist** below. Do not invent a reference file path — the files above are the only
 ones.
 
 

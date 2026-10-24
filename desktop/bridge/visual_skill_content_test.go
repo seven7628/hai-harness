@@ -105,6 +105,60 @@ func TestVisualSkillContentLoadable(t *testing.T) {
 	}
 }
 
+// TestVisualSkillDescriptionMatchesDiagramQuestions 守住 2026-10 的触发回归：
+// 「帮我总结一下系统架构」这类请求**不触发** visual-ui。
+//
+// 发现阶段模型只看到 name + description，所以 description 的意图句就是触发器。旧版意图句
+// 枚举的是「数字对比 / 流程 / 层级 / 备选 / 输入」，Triggers 里中文只有「图表 / 看板」——
+// 「系统架构图」「时序图」「ER 图」这些图族名词一个都没有。而架构总结恰恰最需要这个技能：
+// 里面本来就会包含组成、调用顺序、数据模型三种图。
+//
+// 断言按**图族**分组、中英各留一个说法，命中任一即可：不是钉死一份词表（description 可以
+// 改写得更自然），而是保证「架构 / 时序 / 数据模型」这三类问题仍能被认出来。
+func TestVisualSkillDescriptionMatchesDiagramQuestions(t *testing.T) {
+	reg, err := skills.NewRegistry(visualSkillsSourceDir)
+	if err != nil {
+		t.Fatalf("加载随包视觉技能目录失败: %v", err)
+	}
+	s, err := reg.Skill("visual-ui")
+	if err != nil {
+		t.Fatalf("技能 visual-ui 无法加载: %v", err)
+	}
+	desc := strings.ToLower(s.Description)
+
+	families := []struct {
+		question string
+		terms    []string
+	}{
+		{"总结/解释类提问", []string{"summarize", "explain", "总结", "梳理", "讲解"}},
+		{"整页产出（总结页而不仅是图）", []string{"whole answer", "full answer", "整页", "page"}},
+		{"系统组成（架构图）", []string{"architecture", "架构", "system design", "系统结构"}},
+		{"调用顺序（时序图）", []string{"sequence", "时序", "request flow", "调用链"}},
+		{"数据模型（ER 图）", []string{"entity relationship", "erd", "er图", "实体关系", "数据模型"}},
+	}
+	for _, f := range families {
+		hit := false
+		for _, term := range f.terms {
+			if strings.Contains(desc, strings.ToLower(term)) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			t.Errorf("visual-ui 的 description 认不出「%s」这一类问题——"+
+				"这类请求在发现阶段看到的只有 description，认不出就不会触发。\n"+
+				"期望出现其一: %v\n实际: %q", f.question, f.terms, s.Description)
+		}
+	}
+
+	// 反向守一条：Triggers 不能是 description 的全部。只堆关键词的写法里没有
+	// "use when"，模型读到的是形状清单而不是使用场景，正是这次回归的形态。
+	if !strings.Contains(desc, "use when") {
+		t.Errorf("visual-ui 的 description 缺意图句（应以 \"Use when ...\" 说明什么情况下用，"+
+			"再列 Triggers）——只有关键词清单时模型按词面匹配，换个说法就漏:\n%q", s.Description)
+	}
+}
+
 // TestVisualSkillRequirementsGateByModel 能力面过滤的核心内容断言：
 // 读图的两个技能必须声明 requires.input: [image]（纯文本模型下不可见），
 // 而 visual-ui（只写 HTML，不需要看图）必须**不**声明 —— 声明了会把纯文本模型
@@ -190,6 +244,39 @@ func TestVisualSkillSyncsToGlobalLayer(t *testing.T) {
 		}
 		if name != "visual-ui" && len(s.Requires.Input) == 0 {
 			t.Errorf("全局层技能 %s 丢了 requires（同步/解析链路丢字段）", name)
+		}
+	}
+}
+
+// TestVisualUIFullAnswerMode visual-ui 支持**整页答案**，不只是「一张图塞在文字里」。
+//
+// 2026-10 需求：用户要的是「用 HTML 完整表述一段总结」，图表只是其中一种用法。
+// 这条一旦被删（把模式收窄回 chart-only），架构总结就会退回「一段文字 + 一张图」，
+// 而用户明确要的是可扫读、可转发的整页。守三件事：
+//  1. 两种模式都写在 SKILL.md（整页 / 单图），不能只剩单图；
+//  2. 整页的骨架文件被引用表登记（渐进披露的路径不能断）；
+//  3. 骨架里真的有页面结构（verdict + 脚注），不是一个换了名字的 card。
+func TestVisualUIFullAnswerMode(t *testing.T) {
+	skillDir := filepath.Join(visualSkillsSourceDir, "visual-ui")
+	raw, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := string(raw)
+	for _, want := range []string{"Full answer", "Single visual", "references/summary-page.md"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("visual-ui/SKILL.md 缺少 %q —— 整页模式（HTML 承载完整总结）被收窄了",
+				want)
+		}
+	}
+	page, err := os.ReadFile(filepath.Join(skillDir, "references", "summary-page.md"))
+	if err != nil {
+		t.Fatalf("整页骨架 %s 不可读: %v", "references/summary-page.md", err)
+	}
+	for _, want := range []string{"```html", "verdict", "foot"} {
+		if !strings.Contains(string(page), want) {
+			t.Errorf("summary-page.md 缺少 %q —— 它应该是一个完整页面骨架"+
+				"（结论块 + 脚注），而不是又一张卡片", want)
 		}
 	}
 }
