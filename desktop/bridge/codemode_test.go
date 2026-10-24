@@ -257,6 +257,18 @@ func (s *codemodeTierStub) Call(context.Context, string, string) (string, error)
 func (s *codemodeTierStub) ValidParams(context.Context, string, string) error    { return nil }
 func (s *codemodeTierStub) Exposure() tools.ToolExposure                         { return tools.ExposureCodemode }
 
+// codemodeAdvertisedStub 直接档 + 显式 opt-in（MCP 适配器的形态）：唯一会收到
+// loadout 推销片段的类别（见 tools/exposure.go CodemodeAdvertiser 的注释）。
+type codemodeAdvertisedStub struct {
+	tools.BaseTool
+}
+
+func (s *codemodeAdvertisedStub) Call(context.Context, string, string) (string, error) {
+	return "ok", nil
+}
+func (s *codemodeAdvertisedStub) ValidParams(context.Context, string, string) error { return nil }
+func (s *codemodeAdvertisedStub) AdvertiseCodemode() bool                           { return true }
+
 // TestInlineBudgetZeroMeansDefaultNotZeroBudget 「没配 inline_budget」必须翻成 nil
 // （codemode 的 DefaultInlineBudget），而**不是**「返回 0 的函数」—— 后者在 codemode 的
 // 契约里是「一条都不列」的极端档，会把目录装配成永远空的（模型只能靠 searchTools 瞎搜）。
@@ -428,14 +440,29 @@ func TestSessionEngineCodemodeRegisteredWhenEnabled(t *testing.T) {
 		t.Fatal("codemode 档工具不该进 ToolParams（分层失效）")
 	}
 
-	// mode:"on" 的定义：给**已声明**且可编排的工具追一句「也能从脚本调用」。
-	// read_file 是 direct 档（既有工具不实现 ExposureProvider），必须被追加。
+	// mode:"on" 的推销片段只落在**显式 opt-in** 的已声明工具上（2026-10-24 评测后）：
+	// 内置工具（read_file 等）保持描述逐字节不变 —— 原先片段发给所有已声明工具，
+	// 而 MCP 工具是 deferred（不在声明集里），于是推销语只落在内置工具上，
+	// codemode 反而在推销最不该推销的东西。
 	rf := schemaNamed(t, eng, "read_file")
 	if rf == nil {
 		t.Fatal("ToolParams 缺 read_file")
 	}
-	if !strings.Contains(rf.Description, "Also callable from a codemode script: tools.read_file({...})") {
-		t.Fatalf("loadout 片段没追加到 read_file（mode:on 的收益没了）:\n%s", rf.Description)
+	if strings.Contains(rf.Description, "Also callable from a codemode script") {
+		t.Fatalf("内置工具不该被追加推销片段（它会与 bash 描述里「别包单条命令」直接矛盾）:\n%s", rf.Description)
+	}
+	// 正向：opt-in 的直接档（MCP 适配器形态）必须被追加。
+	adm := &codemodeAdvertisedStub{BaseTool: tools.BaseTool{
+		Name_: "mcp__dev__advertised", Description_: "Advertised MCP probe.",
+		Params_: tools.Obj(map[string]any{}),
+	}}
+	eng.RegisterTool(context.Background(), adm)
+	view = schemaNamed(t, eng, "mcp__dev__advertised")
+	if view == nil {
+		t.Fatal("直接档的 opt-in 工具应进 ToolParams")
+	}
+	if !strings.Contains(view.Description, "Also callable from a codemode script: tools.mcp__dev__advertised({...})") {
+		t.Fatalf("opt-in 工具没被追加推销片段:\n%s", view.Description)
 	}
 	// 反向：codemode 档的工具**不**该被追加（它不在模型工具表里，追加了也没人看）。
 	if got := schemaNamed(t, eng, "codemode_probe"); got != nil {

@@ -41,6 +41,11 @@ const (
 	// 由脚本内 searchTools() 现查 —— 这是「描述不随工具集膨胀」的闸门。
 	DefaultInlineBudget = 3000
 
+	// serverHintMaxTools 每个 server 最多列出几个工具名（能力提示的粒度）。
+	serverHintMaxTools = 5
+	// serverHintMaxServers 最多列几个 server（超出用 "…"）。
+	serverHintMaxServers = 6
+
 	// charsPerToken 估算口径（对齐 pi CHARS_PER_TOKEN，tool.ts:226）：4 字符 ≈ 1 token。
 	charsPerToken = 4
 
@@ -102,6 +107,11 @@ const optionsLinePrefix = "// @options:"
 //     describeTool）；新增/删除全局必须同步改这里。
 //  3. 这段文本进的是**每次请求都带的工具 schema**，属于前缀缓存的一部分：
 //     改一个字就击穿一次全量缓存，所以只在契约变化时改，别做「顺手润色」。
+//     2026-10-24 改过一次（定位收窄到 MCP/未知能力检索）：依据是工具选择评测
+//     （desktop/bridge/codemode_toolchoice_eval_test.go）与全量日志——codemode 的
+//     129 次真实调用里 35.7% 是「单次内置调用」，只有 17.1% 用过 searchTools。
+//     评测里这段新措辞把 MCP 场景的 searchTools 发现率从 18/24 提到 22/24（两模型
+//     合并，样本小、只算方向性证据），内置工具首调率无变化。
 //  4. 预算上它和目录共享 DefaultInlineBudget，长度受 TestDescriptionIntroBudget 守护。
 //  5. 正文里的**默认值必须与代码一致**：`timeout_ms` 未声明 = DefaultScriptTimeoutMs（30s）。
 //     原句写 "default: unlimited"，与 D3 修好后的代码正好相反（模型会以为自己没有墙钟上限，
@@ -111,10 +121,10 @@ const DESCRIPTION_INTRO = `Run JavaScript that calls other tools: chain them, lo
 calls concurrently, and filter large results down to what you need instead of issuing
 many separate tool calls.
 
-Reach for this only when the step is a script. One tool call is not a script: a shell
-step belongs in ONE bash call (commands joined with &&, loops, heredocs), a file read
-belongs in read_file. A single-call script only adds a process spawn and returns the same
-result as JSON instead of text.
+Use this mainly for tools that are NOT in your tool list - e.g. MCP server tools: call
+searchTools(query), then call them. Built-in tools (bash, read_file, grep, todo_*) are
+called directly, never through a script - a single call only adds a process spawn and
+returns JSON instead of text. Scripts are for loops, concurrency, filtering large results.
 
 Pass raw JavaScript source - not JSON, not a quoted string, not a markdown code fence.
 Top-level "await" and "return" work, and the value you return becomes this tool's result.
@@ -737,6 +747,85 @@ type CatalogEntry struct {
 	Cost      int    // Line 的估算 token
 }
 
+// renderServerHints 把「延迟档（deferred）工具」按 namespace 聚合成一句能力提示。
+//
+// # 为什么必须有这句（2026-10-24 端到端评测，脚本真执行）
+//
+// 隐式需求 —— 用户只说「agent-server 项目现在有哪些测试环境」，既没提工具也没提 MCP：
+//
+//	改动前线上（这句不存在）      8% 真调到 MCP（隐式需求，n=12；全 5 条 prompt 约 20%）
+//	只说 server 名字              40% 真调到
+//	名字 + 少量工具名（本函数）    **62.5%**（隐式需求，n=80）/ 70%（全部 prompt，n=100）
+//	名字 + 手写能力描述           90~93%（上界参考，样本较小）
+//
+// 两句补充：① 只给名字不够 —— 模型不知道「测试环境」归 ai-test 管；② 工具名比手写描述
+// 略差但无需用户配置，是 8% → 62.5% 的主要来源（"改了也不动"的两个候选见文件末尾注释）。
+//
+// 读数：**光有名字不够**（模型不知道「测试环境」归 ai-test 管），必须给能力词；而能力词
+// 从已注册工具名就能自动推导，不需要用户额外写描述 —— 这就是选「工具名」而不是「配置里
+// 加 description 字段」的原因。
+//
+// # 缓存边界（诚实说明，别当它是 bug）
+//
+// 这句**随延迟档工具集合变化**，与「指引段不提名字」的取舍不同：
+//   - 会话内稳定：MCP 适配器在会话装配时一次性注册，连接/断线不改工具集，故同一会话里
+//     每次生成的字节相同（TestServerHintsStableAcrossCalls 钉住）；
+//   - 跨会话变化：新增/移除一个 server 会改这句 —— 而这正是「能力面变了」该有的信号，
+//     重建会话本来就会让前缀缓存失效一次。
+func renderServerHints(callable []CatalogTool, deferred map[string]bool) string {
+	byNS := map[string][]string{}
+	for _, t := range callable {
+		if t.Namespace == "" || !deferred[t.Name] {
+			continue // 无命名空间（内置工具）/ 已列举（codemode、direct）都不算「隐藏能力面」
+		}
+		byNS[t.Namespace] = append(byNS[t.Namespace], shortToolName(t.Namespace, t.Name))
+	}
+	if len(byNS) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(byNS))
+	for ns := range byNS {
+		names = append(names, ns)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("Connected MCP servers (their tools are not in your tool list): ")
+	for i, ns := range names {
+		if i >= serverHintMaxServers {
+			b.WriteString("…")
+			break
+		}
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		tools := byNS[ns]
+		sort.Strings(tools)
+		b.WriteString(ns)
+		b.WriteString(" (")
+		for j, name := range tools {
+			if j >= serverHintMaxTools {
+				b.WriteString(", …")
+				break
+			}
+			if j > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(name)
+		}
+		b.WriteString(")")
+	}
+	b.WriteString(". Call searchTools(query) to find them, then call them.")
+	return b.String()
+}
+
+// shortToolName 去掉引擎名前缀 mcp__<server>__（server 名里的 - 在引擎名里是 _）。
+// 只做前缀剥离，保留工具名原文（含 server 自带的短哈希），不猜、不改写。
+func shortToolName(namespace, raw string) string {
+	prefix := "mcp__" + strings.ReplaceAll(namespace, "-", "_") + "__"
+	return strings.TrimPrefix(raw, prefix)
+}
+
 // Catalog 一次描述生成的完整产物。
 type Catalog struct {
 	Description string              // 描述正文（同输入 ⇒ 同字节）
@@ -901,11 +990,24 @@ func BuildCatalog(opts DescribeOptions) (*Catalog, error) {
 		groups = append(groups, CatalogGroup{Namespace: ns, Description: desc, Tools: byNS[ns]})
 	}
 
+	// 5.5) 延迟档 server 的能力提示（见 renderServerHints）。
+	deferredSet := make(map[string]bool, len(cat.Deferred))
+	for _, name := range cat.Deferred {
+		deferredSet[name] = true
+	}
+	serverHint := renderServerHints(callable, deferredSet)
+
 	// 6) 前缀（固定开销）+ 装箱 + 渲染。
 	// 指引段**无条件**拼接：若按「有没有 deferred 工具」条件拼接，MCP 一连上就把整段
-	// 描述撑长 172 字节（复核实测 2589→2761），provider 前缀缓存当场失效。指引段本身
-	// 不提任何工具名，故无条件拼接不会泄漏 deferred 工具的存在。
+	// 描述撑长 172 字节（复核实测 2589→2761），provider 前缀缓存当场失效。
+	//
+	// serverHint 则**有条件**（有延迟档 server 才出现），且刻意点名工具 —— 它与「指引段
+	// 不提任何名字」是两条不同的取舍，理由见 renderServerHints 注释：不提名字的代价是
+	// 模型根本想不到去搜（实测 0/5）。
 	prefix := DESCRIPTION_INTRO + "\n\n" + DEFERRED_TOOLS_GUIDANCE + "\n\n"
+	if serverHint != "" {
+		prefix += serverHint + "\n\n"
+	}
 	overhead := estimateTokens(prefix + catalogHeading + "\n")
 
 	sel := SelectCatalog(groups, overhead, budget)
@@ -961,3 +1063,18 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(out)
 	return out
 }
+
+// # 已测但**未采纳**的两个候选（2026-10-24，隐式需求，n=80~100/臂）
+//
+// 记录在这里是为了让后来者不必重新推导同一假设；翻案请先把 n 做到 ≥100/臂，并注意
+// 网关限流（tier_limit_exceeded）必须被装置当成 `model-error` 单列，不能算「模型没调工具」。
+//
+//	① 在延迟档指引里追加「已连接的 server 见下，先搜它、查到直接调、别问用户」
+//	   线上 56.2%（18/32） vs 候选 68.8%（22/32），CI 大幅重叠（z≈0.66，p≈0.5），
+//	   且 n=12 那次反向（66.7% vs 58.3%）。
+//	② 在「只搜没调」的脚本结果后追加一句 [next step]（作用点在结果而非描述）
+//	   线上 70%（70/100） vs 候选 72%（72/100），CI 重叠；search-only 7→4 但 bash 23→24，
+//	   净效应为零。
+//
+// 结论：剩下的失败主要是「根本没考虑 codemode、直接走 bash」（约 23%），文案层已经到顶；
+// 再往下要动的是**能力面本身**（例如把少数高频 MCP 工具按需声明为 direct），不是描述措辞。

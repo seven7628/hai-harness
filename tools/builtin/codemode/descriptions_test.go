@@ -9,6 +9,7 @@ package codemode
 //   - 超预算按轮转公平装箱裁剪，每个 namespace 至少出一条。
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -38,9 +39,13 @@ func TestDescriptionIntroContract(t *testing.T) {
 		{"仅成功脚本保留写入", "Writes are kept only when the script finishes"},
 		{"deferred 现查", "searchTools(query)"},
 		{"helpers 是 async，须 await", "await searchTools(query)"},
-		// 与 bash 的分工判据：没有这句，模型会把单条 bash 命令包进脚本（实测 187 次
-		// codemode 调用里 39 次脚本里只有一个 tools.bash —— 纯开销），见 REVIEW 讨论。
-		{"单调用不算脚本", "One tool call is not a script"},
+		// 定位判据（2026-10-24 评测后改写）：codemode 服务的是「不在工具表里的工具」
+		// （典型是 MCP），内置工具必须直调。旧措辞只说「单调用不算脚本」，没有指出去处，
+		// 评测里 MCP 场景的 searchTools 发现率只有 75%（18/24）；新措辞把它抬到
+		// 22/24，内置工具首调率不变（评测：desktop/bridge/codemode_toolchoice_eval_test.go）。
+		{"定位：只服务工具表外的工具", "NOT in your tool list"},
+		{"内置工具直调", "called directly, never through a script"},
+		{"单调用不算脚本", "a single call only adds a process spawn"},
 		{"双键（raw 名）", `tools["mcp__some-server__some-tool"](args)`},
 		{"说实话的隔离承诺", "its own process with an allowlisted environment"},
 	}
@@ -216,16 +221,20 @@ func TestBuildCatalogBytesStable(t *testing.T) {
 	}
 }
 
-// TestDeferredChurnKeepsOtherEntryBytes MCP 工具（deferred 档）增删时：
-//   - 描述全文不得出现任何 MCP 工具名（pi #10212：MCP 一连接就改写描述 → 击穿缓存）；
-//   - 已列举条目的行字节不变（「加一个工具不能动别的条目」）。
+// TestDeferredChurnKeepsOtherEntryBytes deferred 工具的出现/消失**不得**改变其他条目
+// 的字节，也不得把 deferred 工具变成目录条目。
+//
+// 2026-10-24 有意变更：整段描述的字节**会**随「有哪些 deferred server」变化 —— 新增一句
+// 「Connected MCP servers: …」能力提示（只列 server 名 + 最多 5 个工具名）。理由是端到端
+// 评测：不说名字时模型 0/5 想到 codemode、80% 直接走 bash；说了以后真调到 MCP 的比例
+// 从 20% 升到 80~93%。所以这里钉的是**条目行**稳定，而不是整段描述稳定。
 func TestDeferredChurnKeepsOtherEntryBytes(t *testing.T) {
 	base := []CatalogTool{
 		mkTool("read_file", "读文件", "core", tools.ExposureCodemode, Param{Name: "path"}),
 		mkTool("bash", "跑命令", "core", tools.ExposureDirect),
 	}
-	deferred := mkTool("mcp__dev-radius__get", "取一条", "mcp__dev-radius", tools.ExposureDeferred)
-	otherDeferred := mkTool("mcp__other__list", "列一批", "mcp__other", tools.ExposureDeferred)
+	deferred := mkTool("mcp__dev_radius__get", "取一条", "dev-radius", tools.ExposureDeferred)
+	otherDeferred := mkTool("mcp__other__list", "列一批", "other", tools.ExposureDeferred)
 
 	one, err := BuildCatalog(DescribeOptions{Tools: append(append([]CatalogTool{}, base...), deferred)})
 	if err != nil {
@@ -240,36 +249,35 @@ func TestDeferredChurnKeepsOtherEntryBytes(t *testing.T) {
 		t.Fatalf("BuildCatalog: %v", err)
 	}
 
+	// ① deferred 工具**不是条目**：不出现可调用行（server 提示句里出现名字是另一回事）。
 	for _, c := range []struct {
 		name string
 		cat  *Catalog
 	}{{"one-deferred", one}, {"two-deferred", two}, {"no-deferred", none}} {
-		for _, bad := range []string{"mcp__dev-radius__get", "mcp__dev_radius__get", "mcp__other__list", "mcp__other__list"} {
-			if strings.Contains(c.cat.Description, bad) {
-				t.Errorf("%s：描述里出现了 deferred 工具名 %q", c.name, bad)
-			}
+		if strings.Contains(c.cat.Description, "\n  get(") || strings.Contains(c.cat.Description, "\n  list(") {
+			t.Errorf("%s：deferred 工具被渲染成了目录条目", c.name)
 		}
 	}
-	// 非空 → 非空（一次真实的 MCP 连接/断开）：整段描述逐字节相同。
-	if one.Description != two.Description {
-		t.Errorf("deferred 集合从 1 个变 2 个改变了描述字节 —— 前缀缓存会被击穿")
+	// ② 能力提示句：有 deferred server 才出现，且没有 server 时一个字节都不多。
+	if !strings.Contains(one.Description, "Connected MCP servers") {
+		t.Error("有 deferred server 时缺少能力提示句（模型会想不到去搜）")
 	}
-	// 0 个 → 1 个（用户连上第一个 MCP server）：**整段描述逐字节相同**。
-	// 指引段无条件拼接 + 后缀与集合解耦之后，MCP 连接/断开对描述字节零影响
-	//（复核缺陷 D1 的两条路径都堵在这里；此前 0→1 会多 172 字节并可能给已列举条目改名）。
-	if none.Description != one.Description {
-		t.Errorf("首次出现 deferred 工具时描述字节变了 —— 前缀缓存会被击穿：\n--- no-deferred ---\n%s\n--- one-deferred ---\n%s", none.Description, one.Description)
+	if !strings.Contains(two.Description, "other (list)") {
+		t.Errorf("第二个 server 没进提示句：\n%s", two.Description)
 	}
-	lines := func(c *Catalog) []string {
+	if strings.Contains(none.Description, "Connected MCP servers") {
+		t.Error("没有任何 deferred server 时不该出现提示句（会白白改变描述字节）")
+	}
+	// ③ 条目行与非 deferred 文本前缀稳定：deferred 集合变化不改写别人的字节。
+	lines := func(c *Catalog) string {
 		out := make([]string, 0, len(c.Entries))
 		for _, e := range c.Entries {
 			out = append(out, e.Line)
 		}
-		return out
+		return strings.Join(out, "")
 	}
-	a, b := lines(one), lines(none)
-	if strings.Join(a, "") != strings.Join(b, "") {
-		t.Errorf("deferred 工具出现/消失改变了条目行：\n%v\n%v", a, b)
+	if lines(one) != lines(none) || lines(two) != lines(none) {
+		t.Errorf("deferred 工具出现/消失改变了条目行：\nno=%q\none=%q\ntwo=%q", lines(none), lines(one), lines(two))
 	}
 }
 
@@ -835,11 +843,11 @@ func TestBuildCatalogGolden(t *testing.T) {
 		Tools: []CatalogTool{
 			mkTool("read_file", "读文件并返回内容", "fs", tools.ExposureCodemode, Param{Name: "path"}, Param{Name: "limit", Optional: true}),
 			mkTool("bash", "跑一条命令", "", tools.ExposureDirect),
-			mkTool("mcp__dev-radius__get", "远端只读接口", "mcp__dev-radius", tools.ExposureDeferred),
+			mkTool("mcp__dev_radius__get", "远端只读接口", "dev-radius", tools.ExposureDeferred),
 		},
 		Namespaces: map[string]*tools.ToolNamespace{
-			"fs":              {Name: "fs", Description: "文件系统（只读语义由工具自己声明）"},
-			"mcp__dev-radius": {Name: "mcp__dev-radius", Description: "远端只读数据"},
+			"fs":         {Name: "fs", Description: "文件系统（只读语义由工具自己声明）"},
+			"dev-radius": {Name: "dev-radius", Description: "远端只读数据"},
 		},
 		ListDirect:   true,
 		InlineBudget: &budget,
@@ -847,7 +855,12 @@ func TestBuildCatalogGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCatalog: %v", err)
 	}
-	const wantTail = DEFERRED_TOOLS_GUIDANCE + "\n\n" + `Nested tools:
+	// 2026-10-24 有意变更：deferred server 现在会以**能力提示句**出现（只列 server 名 +
+	// 少量工具名），因为不提名字时模型根本想不到去搜（端到端评测：0/5 → 80~93%）。
+	// 它仍然**不进目录条目**——下面单独断言这一点。
+	const serverHint = "Connected MCP servers (their tools are not in your tool list): " +
+		"dev-radius (get). Call searchTools(query) to find them, then call them."
+	const wantTail = DEFERRED_TOOLS_GUIDANCE + "\n\n" + serverHint + "\n\n" + `Nested tools:
 [default]
   bash(): 跑一条命令
 [fs] 文件系统（只读语义由工具自己声明）
@@ -857,11 +870,105 @@ func TestBuildCatalogGolden(t *testing.T) {
 	if cat.Description != want {
 		t.Fatalf("描述字节变了（若是有意变更，请更新 golden 并写明理由）：\n%q", cat.Description)
 	}
-	// deferred 的 namespace 一条都不该出现（它只有 deferred 工具）。
-	if strings.Contains(cat.Description, "mcp__dev-radius") {
-		t.Error("只有 deferred 工具的 namespace 不该出现在描述里")
+	// deferred 工具**不进目录条目**（能力提示句里出现名字是另一回事）：目录段里不该有
+	// 它的可调用行（"get(" 这种 scriptName 形态）。
+	if strings.Contains(cat.Description, "dev-radius]") || strings.Contains(cat.Description, "\n  get(") {
+		t.Error("只有 deferred 工具的 namespace 不该作为目录分组出现")
 	}
 	if cat.UsedTokens >= budget {
 		t.Errorf("示例描述 %d token 逼近预算 %d，golden 失去了「预算有余量」的意义", cat.UsedTokens, budget)
+	}
+}
+
+// ---- 延迟档 server 的能力提示句（2026-10-24 评测驱动）----
+
+// TestServerHintsListDeferredServersOnly 只有「延迟档（deferred）+ 有 namespace」的工具
+// 才进能力提示：已声明（direct）的工具模型本来就看得到，hidden 不该被提示，内置工具
+// 没有 namespace 更不该出现。
+func TestServerHintsListDeferredServersOnly(t *testing.T) {
+	cat, err := BuildCatalog(DescribeOptions{Tools: []CatalogTool{
+		mkTool("read_file", "读文件", "core", tools.ExposureCodemode),
+		mkTool("mcp__ai_test__list_environments_7e382c", "列环境", "ai-test", tools.ExposureDeferred),
+		mkTool("mcp__ai_test__get_environment_7b3d55", "取环境", "ai-test", tools.ExposureDeferred),
+		mkTool("mcp__direct_srv__x", "直接档", "direct-srv", tools.ExposureDirect),
+		mkTool("mcp__gone_srv__y", "撤下", "gone-srv", tools.ExposureHidden),
+	}})
+	if err != nil {
+		t.Fatalf("BuildCatalog: %v", err)
+	}
+	d := cat.Description
+	for _, want := range []string{
+		"Connected MCP servers",
+		"ai-test (get_environment_7b3d55, list_environments_7e382c)", // 去掉了 mcp__<server>__ 前缀，组内排序
+		"Call searchTools(query) to find them, then call them.",
+	} {
+		if !strings.Contains(d, want) {
+			t.Errorf("能力提示句缺 %q:\n%s", want, d)
+		}
+	}
+	for _, bad := range []string{"direct-srv", "gone-srv", "mcp__ai_test__"} {
+		if strings.Contains(d, bad) {
+			t.Errorf("不该出现在能力提示里的名字 %q:\n%s", bad, d)
+		}
+	}
+}
+
+// TestServerHintsCapped 每个 server 最多列 serverHintMaxTools 个工具名，最多列
+// serverHintMaxServers 个 server —— 描述是每次请求都带的工具 schema，不能被提示句撑爆。
+func TestServerHintsCapped(t *testing.T) {
+	var ts []CatalogTool
+	for i := 0; i < serverHintMaxTools+3; i++ {
+		ts = append(ts, mkTool(fmt.Sprintf("mcp__big__t%02d", i), "x", "big", tools.ExposureDeferred))
+	}
+	for i := 0; i < serverHintMaxServers+2; i++ {
+		ts = append(ts, mkTool(fmt.Sprintf("mcp__srv%d__t", i), "x", fmt.Sprintf("srv%d", i), tools.ExposureDeferred))
+	}
+	cat, err := BuildCatalog(DescribeOptions{Tools: ts})
+	if err != nil {
+		t.Fatalf("BuildCatalog: %v", err)
+	}
+	d := cat.Description
+	if !strings.Contains(d, "…") {
+		t.Errorf("超额时该用省略号截断:\n%s", d)
+	}
+	if strings.Contains(d, fmt.Sprintf("t%02d", serverHintMaxTools+2)) {
+		t.Error("每个 server 的工具名没有被截断到上限")
+	}
+	// 排序后是 big, srv0..srv7；big 占掉一个名额，故只该列出 srv0..srv4（共 6 个）。
+	for i := 0; i < serverHintMaxServers-1; i++ {
+		if !strings.Contains(d, fmt.Sprintf("srv%d ", i)) {
+			t.Errorf("前 %d 个 server 都该列出，缺 srv%d:\n%s", serverHintMaxServers, i, d)
+		}
+	}
+	if strings.Contains(d, "srv5 ") {
+		t.Errorf("server 数超过上限后不该继续列（srv5）:\n%s", d)
+	}
+	// 提示句不该让描述失控（预算 3000 token ≈ 12000 字符，这里只守一个数量级）。
+	if len(d) > 6*DefaultInlineBudget {
+		t.Errorf("描述 %d 字符，提示句把预算撑坏了", len(d))
+	}
+}
+
+// TestServerHintsStableAcrossCalls 同一工具集多次生成必须逐字节相同（provider 前缀缓存
+// 依赖它）。变了就说明渲染路径漏了排序。
+func TestServerHintsStableAcrossCalls(t *testing.T) {
+	opts := DescribeOptions{Tools: []CatalogTool{
+		mkTool("read_file", "读文件", "core", tools.ExposureCodemode),
+		mkTool("mcp__b__two", "b2", "b-srv", tools.ExposureDeferred),
+		mkTool("mcp__b__one", "b1", "b-srv", tools.ExposureDeferred),
+		mkTool("mcp__a__x", "a1", "a-srv", tools.ExposureDeferred),
+	}}
+	first, err := BuildCatalog(opts)
+	if err != nil {
+		t.Fatalf("BuildCatalog: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		again, err := BuildCatalog(opts)
+		if err != nil {
+			t.Fatalf("BuildCatalog: %v", err)
+		}
+		if again.Description != first.Description {
+			t.Fatalf("第 %d 次生成的字节不同（排序不稳定）:\n%q\n%q", i, first.Description, again.Description)
+		}
 	}
 }

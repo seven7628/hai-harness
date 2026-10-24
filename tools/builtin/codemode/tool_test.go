@@ -175,17 +175,24 @@ func TestSnapshotSkipsCodemodeItself(t *testing.T) {
 
 func TestPrepareLoadoutAppendsOnlyToCallableTools(t *testing.T) {
 	t.Parallel()
-	direct := &tierStub{BaseTool: tools.BaseTool{Name_: "read_file", Description_: "read", Params_: map[string]any{}},
+	// 内置工具口径：direct 但**不** opt-in（tools.CodemodeAdvertiser 默认 false）——
+	// loadout 片段不再落在它身上（2026-10-24 评测：推销语原先只落在内置工具上，
+	// 因为 MCP 工具是 deferred，永远不在「已声明」集合里）。
+	builtin := &tierStub{BaseTool: tools.BaseTool{Name_: "read_file", Description_: "read", Params_: map[string]any{}},
 		exp: tools.ExposureDirect}
 	deferred := &tierStub{BaseTool: tools.BaseTool{Name_: "mcp__dev__x", Description_: "mcp", Params_: map[string]any{}},
-		exp: tools.ExposureDeferred}
+		exp: tools.ExposureDeferred, advertise: true}
 	hidden := &tierStub{BaseTool: tools.BaseTool{Name_: "gone", Description_: "gone", Params_: map[string]any{}},
-		exp: tools.ExposureHidden}
+		exp: tools.ExposureHidden, advertise: true}
 	modelOnly := &tierStub{BaseTool: tools.BaseTool{Name_: "ghost", Description_: "ghost", Params_: map[string]any{}},
-		exp: tools.ExposureModelOnly}
+		exp: tools.ExposureModelOnly, advertise: true}
+	// opt-in 的直接档：MCP 适配器（或被宿主显式打开的 MCP 工具）就是这个形态。
+	advertised := &tierStub{BaseTool: tools.BaseTool{Name_: "mcp__dev__direct", Description_: "direct", Params_: map[string]any{}},
+		exp: tools.ExposureDirect, advertise: true}
+	// 需归一化的名字：片段里用归一 + 后缀后的脚本名（与目录表一致）。
 	hyphen := &tierStub{BaseTool: tools.BaseTool{Name_: "read-file", Description_: "hyphen", Params_: map[string]any{}},
-		exp: tools.ExposureDirect}
-	list := []tools.Tool{direct, deferred, hidden, modelOnly, hyphen}
+		exp: tools.ExposureDirect, advertise: true}
+	list := []tools.Tool{builtin, deferred, hidden, modelOnly, advertised, hyphen}
 	tool := New(Options{Tools: func() []tools.Tool { return list }})
 
 	declared := []core.ToolSchema{
@@ -193,6 +200,7 @@ func TestPrepareLoadoutAppendsOnlyToCallableTools(t *testing.T) {
 		{Name: "mcp__dev__x", Description: "mcp"},
 		{Name: "gone", Description: "gone"},
 		{Name: "ghost", Description: "ghost"},
+		{Name: "mcp__dev__direct", Description: "direct"},
 		{Name: "read-file", Description: "hyphen"},
 		{Name: ToolName, Description: DESCRIPTION_INTRO},
 	}
@@ -204,8 +212,11 @@ func TestPrepareLoadoutAppendsOnlyToCallableTools(t *testing.T) {
 	for _, s := range out {
 		got[s.Name] = s.Description
 	}
-	if !strings.Contains(got["read_file"], "tools.read_file({...})") {
-		t.Errorf("direct 工具必须被追加脚本调用片段: %q", got["read_file"])
+	if got["read_file"] != "read" {
+		t.Errorf("内置工具（未 opt-in）不该被追加推销片段: %q", got["read_file"])
+	}
+	if !strings.Contains(got["mcp__dev__direct"], "tools.mcp__dev__direct({...})") {
+		t.Errorf("opt-in 的直接档工具必须被追加脚本调用片段: %q", got["mcp__dev__direct"])
 	}
 	if !strings.Contains(got["mcp__dev__x"], "tools.mcp__dev__x({...})") {
 		t.Errorf("deferred 工具也可编排，描述同样要追加: %q", got["mcp__dev__x"])
@@ -534,4 +545,70 @@ func descOf(list []core.ToolSchema, name string) string {
 		}
 	}
 	return ""
+}
+
+// TestPrepareLoadoutPutsCodemodeFirst 顺序也是「模型看到什么」的一部分：
+// codemode 必须排在声明集最前（其余相对顺序不变）。
+//
+// 依据（2026-10-24 评测，隐式 MCP 需求，两次 n=100 复测）：按字典序时 codemode 排在
+// bash 之后，真调到 MCP 的比例 63%/69%；移到最前后 77%/77%（z≈2.44，p≈0.015），
+// 且内置工具被抢无回归（11.9% vs 9.5%，n=42，差 1 例）。
+func TestPrepareLoadoutPutsCodemodeFirst(t *testing.T) {
+	t.Parallel()
+	bash := &tierStub{BaseTool: tools.BaseTool{Name_: "bash", Description_: "跑命令", Params_: map[string]any{}},
+		exp: tools.ExposureDirect}
+	read := &tierStub{BaseTool: tools.BaseTool{Name_: "read_file", Description_: "读", Params_: map[string]any{}},
+		exp: tools.ExposureDirect}
+	mcp := &tierStub{BaseTool: tools.BaseTool{Name_: "mcp__dev__x", Description_: "mcp", Params_: map[string]any{}},
+		exp: tools.ExposureDeferred, advertise: true}
+	tool := New(Options{Tools: func() []tools.Tool { return []tools.Tool{bash, read, mcp} }})
+
+	declared := []core.ToolSchema{
+		{Name: "bash", Description: "跑命令"},
+		{Name: "read_file", Description: "读"},
+		{Name: ToolName, Description: DESCRIPTION_INTRO},
+		{Name: "mcp__dev__x", Description: "mcp"},
+	}
+	out := tool.PrepareLoadout(context.Background(), declared)
+	if len(out) != len(declared) {
+		t.Fatalf("不得增删条目: %d → %d", len(declared), len(out))
+	}
+	if out[0].Name != ToolName {
+		t.Fatalf("codemode 必须排第一，实际首条 = %q（顺序：%v）", out[0].Name, namesOf(out))
+	}
+	// 其余相对顺序不变（只做「把 self 提到最前」这一次移动，不整体重排）。
+	want := []string{ToolName, "bash", "read_file", "mcp__dev__x"}
+	if got := namesOf(out); !equalStrings(got, want) {
+		t.Fatalf("顺序 = %v, want %v", got, want)
+	}
+	// 字节稳定：同样的输入两次结果相同（顺序若依赖 map 遍历会在这里炸）。
+	if again := tool.PrepareLoadout(context.Background(), declared); !equalSchemas(out, again) {
+		t.Fatal("PrepareLoadout 两次结果不同（顺序必须确定）")
+	}
+
+	// 声明集里没有 codemode（理论上不会发生）且没有可推销工具 → 不改写（返回 nil）。
+	noSelf := []core.ToolSchema{{Name: "bash", Description: "跑命令"}}
+	if got := tool.PrepareLoadout(context.Background(), noSelf); got != nil {
+		t.Fatalf("无 self 且无可推销条目时不该改写，返回 %v", namesOf(got))
+	}
+}
+
+func namesOf(schemas []core.ToolSchema) []string {
+	out := make([]string, 0, len(schemas))
+	for _, s := range schemas {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

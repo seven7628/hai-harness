@@ -325,8 +325,15 @@ func (s *sleepStub) ValidParams(context.Context, string, string) error { return 
 // tierStub 记录「是否被执行过」的档位工具（⑥：hidden/model-only 不可被脚本调用）。
 type tierStub struct {
 	tools.BaseTool
-	exp  tools.ToolExposure
-	runs atomic.Int64
+	exp       tools.ToolExposure
+	advertise bool // tools.CodemodeAdvertiser：是否接受 loadout 推销片段
+	runs      atomic.Int64
+}
+
+func newAdvertisedTierStub(name string, exp tools.ToolExposure) *tierStub {
+	s := newTierStub(name, exp)
+	s.advertise = true
+	return s
 }
 
 func newTierStub(name string, exp tools.ToolExposure) *tierStub {
@@ -338,6 +345,10 @@ func newTierStub(name string, exp tools.ToolExposure) *tierStub {
 }
 
 func (s *tierStub) Exposure() tools.ToolExposure { return s.exp }
+
+// AdvertiseCodemode 实现 tools.CodemodeAdvertiser（默认 false = 内置工具口径：
+// 不接受「也能从脚本调」的推销语，见 tools/exposure.go 的接口注释）。
+func (s *tierStub) AdvertiseCodemode() bool { return s.advertise }
 
 func (s *tierStub) ValidParams(context.Context, string, string) error { return nil }
 
@@ -882,7 +893,10 @@ return out;
 func TestDescriptionBytesStableAcrossMCPChurn(t *testing.T) {
 	t.Parallel() // 纯描述生成，不需要 node
 	h := newHarness(t)
-	h.add(newReadFileStub(), newTierStub("mcp__dev__alpha", tools.ExposureDeferred))
+	// mcp__dev__direct 是**显式 opt-in** 的直接档（MCP 适配器口径）：工具表里能看到它，
+	// loadout 追加片段只落在这种工具上（内置 read_file 不再被追加，2026-10-24 评测后）。
+	h.add(newReadFileStub(), newTierStub("mcp__dev__alpha", tools.ExposureDeferred),
+		newAdvertisedTierStub("mcp__dev__direct", tools.ExposureDirect))
 	h.installCodemode(nil)
 
 	snapshot := func() (string, string) {
@@ -943,9 +957,13 @@ func TestDescriptionBytesStableAcrossMCPChurn(t *testing.T) {
 			t.Fatalf("条目名被改了: %q → %q", orig.Name, s.Name)
 		}
 		switch s.Name {
+		case "mcp__dev__direct":
+			if !strings.Contains(s.Description, "tools.mcp__dev__direct({...})") {
+				t.Fatalf("opt-in 工具必须被追加脚本调用片段: %q", s.Description)
+			}
 		case "read_file":
-			if !strings.Contains(s.Description, "tools.read_file({...})") {
-				t.Fatalf("mode:on 必须给已声明工具追加脚本调用片段: %q", s.Description)
+			if s.Description != orig.Description {
+				t.Fatalf("内置工具不该被追加推销片段（默认不 opt-in）: %q", s.Description)
 			}
 		case ToolName:
 			if s.Description != orig.Description {

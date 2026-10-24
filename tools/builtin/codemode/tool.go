@@ -234,10 +234,15 @@ func (t *Tool) Description() string {
 // PrepareLoadout 实现 tools.LoadoutProvider：mode:"on" 时给**已声明**工具的描述追加
 // 「本工具也可从脚本调用」片段。
 //
-// 三条纪律：
+// 四条纪律：
 //   - 只给**脚本里真能调到**的工具追加（tools.CallableFromScript 是唯一真源）：
 //     给 model-only / hidden 的条目写「也能从脚本调」是纯谎话，而 codemode 自己就是
 //     model-only —— 于是它天然不会被追加（不需要特判名字）；
+//   - 只给**显式要求推销**的工具追加（tools.AdvertisesCodemode）。2026-10-24 评测后加：
+//     原先把片段发给每一个已声明工具，而 MCP 工具在引擎里是 deferred（既不声明也不进
+//     目录）—— 结果这句推销语只落在内置工具上（bash/todo/grep/...），codemode 反而在
+//     推销它最不该推销的东西，还与 bash 描述里「别把单条命令包进脚本」直接矛盾。
+//     内置工具现在保持描述逐字节不变（默认 false = 零迁移成本），MCP 适配器显式 opt-in；
 //   - 片段只依赖**该条自己**的 raw 名（字节稳定，见 codemodeDeclarationFormat）；
 //   - 不改 Name / Parameters，也不新增/删除条目（只改 Description）。
 //
@@ -251,7 +256,7 @@ func (t *Tool) PrepareLoadout(_ context.Context, declared []core.ToolSchema) []c
 	changed := false
 	for _, s := range declared {
 		tl := snap.byRaw[s.Name]
-		if tl == nil || !tools.CallableFromScript(tl) {
+		if tl == nil || !tools.CallableFromScript(tl) || !tools.AdvertisesCodemode(tl) {
 			out = append(out, s)
 			continue
 		}
@@ -259,10 +264,39 @@ func (t *Tool) PrepareLoadout(_ context.Context, declared []core.ToolSchema) []c
 		changed = true
 		out = append(out, s)
 	}
+	// 把 codemode 自己挪到声明集**最前面**。
+	//
+	// 依据（2026-10-24 评测，隐式 MCP 需求，两次 n=100 复测）：
+	//
+	//	按字典序（codemode 排在 bash 之后）  63% / 69%  → 真调到 MCP 的比例 66%
+	//	codemode 排第一                     77% / 77%  → 77%（two-proportion z≈2.44，p≈0.015）
+	//
+	// 抢用无回归：内置工具被抢 11.9% vs 9.5%（n=42，差 1 例），首调分布不变；MCP 指路
+	// 用例的发现率同为 94.4%。机制上说得通：工具表按名字排序时 bash 永远在前，模型扫到
+	// 一个「能干活的」就不再往下看；把编排入口放前面，长工具表下才容易被看见。
+	//
+	// 为什么不改 Engine.ToolParams 的排序：那是全库共享的缓存不变量，动它影响所有宿主；
+	// LoadoutProvider 的本职就是「模型最终看到什么由工具自己改写」，顺序也算其中一项。
+	if i := indexSchema(out, ToolName); i > 0 {
+		self := out[i]
+		out = append(out[:i], out[i+1:]...)
+		out = append([]core.ToolSchema{self}, out...)
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
 	return out
+}
+
+// indexSchema 按名字找条目下标（-1 = 不在集合里）。
+func indexSchema(schemas []core.ToolSchema, name string) int {
+	for i, s := range schemas {
+		if s.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // ---- 目录投影（注册表 → descriptions.CatalogTool）----

@@ -74,6 +74,35 @@ func CallableFromScript(t Tool) bool {
 	return false
 }
 
+// CodemodeAdvertiser 工具声明「值得到模型可见的工具描述里追加一句『也能从脚本调』」。
+//
+// 为什么要显式 opt-in（2026-10-24 评测结论）：mode:"on" 的 loadout 片段原本追加给
+// **每一个**已声明且可编排的工具，而 MCP 工具在引擎里是 deferred —— 既不声明给模型、
+// 也不进 codemode 目录。于是那句推销语实际只落在**内置工具**上（bash/todo/grep/...），
+// codemode 反而在推销它最不该推销的东西，还与 bash 自己那句「别把单条命令包进脚本」
+// 直接矛盾。
+//
+// 本机真实数据（~/.go-code/events 全量 354,844 条 tool_run_start，截至 2026-10-23）：
+// codemode 129 次调用中，单次内置调用 46 次（35.7%）、多次内置批处理 35 次（27.1%）、
+// 真正 MCP 26 次（20.2%）、用到 searchTools/describeTool 仅 22 次（17.1%）。
+//
+// 默认 false = 内置工具零改动（描述逐字节不变，前缀缓存不吃一次无谓失效）；
+// MCP 适配器显式声明 true（它的工具是脚本编排的真正对象）。
+type CodemodeAdvertiser interface {
+	AdvertiseCodemode() bool
+}
+
+// AdvertisesCodemode 该工具是否接受 loadout 脚本调用片段（未实现 = 不接受）。
+func AdvertisesCodemode(t Tool) bool {
+	if t == nil {
+		return false
+	}
+	if a, ok := t.(CodemodeAdvertiser); ok {
+		return a.AdvertiseCodemode()
+	}
+	return false
+}
+
 // ListedInCodemodeCatalog 该工具是否进 codemode 的描述目录（deferred 刻意不列举：
 // 模型该用 searchTools() 现查，否则 MCP 工具会重新把描述撑爆 —— pi #10212）。
 func ListedInCodemodeCatalog(t Tool) bool {

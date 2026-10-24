@@ -102,9 +102,19 @@ func (a *mcpTool) RequiresApproval(_ context.Context, _ core.ToolCall) bool {
 
 // 编译期断言：适配器必须满足暴露层接口（见 tools/exposure.go）。
 var (
-	_ tools.ExposureProvider  = (*mcpTool)(nil)
-	_ tools.NamespaceProvider = (*mcpTool)(nil)
+	_ tools.ExposureProvider   = (*mcpTool)(nil)
+	_ tools.NamespaceProvider  = (*mcpTool)(nil)
+	_ tools.CodemodeAdvertiser = (*mcpTool)(nil)
 )
+
+// AdvertiseCodemode 实现 tools.CodemodeAdvertiser：MCP 工具是脚本编排的**真正对象**，
+// 当它被声明给模型（exposure=direct，即宿主关掉 codemode 后又打开、或显式 direct）时，
+// 描述里该带一句「也能从脚本调」。
+//
+// 注意这条**不是**让 MCP 工具挤进 codemode 目录：deferred 档依旧靠 searchTools 现查
+// （描述字节必须随 MCP 连/断保持稳定，见 Exposure 的注释）。它只负责「该被推销的时候
+// 别漏掉自己」，与内置工具（内置工具不实现本接口）正好相反。
+func (a *mcpTool) AdvertiseCodemode() bool { return true }
 
 // Exposure 实现 tools.ExposureProvider：MCP 工具的暴露档位（配置档 → 引擎档；
 // 出厂默认 deferred，见 ServerConfig.Exposure 与 toToolExposure）。
