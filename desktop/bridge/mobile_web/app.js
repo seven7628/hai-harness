@@ -523,7 +523,12 @@
         const wrap = document.createDocumentFragment()
         // 只有 "." / 空白 的 reasoning 块没有信息量（模型只调工具时常见），
         // 直接渲染会在时间线上留一串孤零零的点。
-        if ((b.thinking || '').trim().length > 1) wrap.appendChild(el('div', 'msg thinking', b.thinking))
+        if ((b.thinking || '').trim().length > 1) {
+          const d = makeThinking(false) // 历史轮次：默认收起
+          d.querySelector('.think-body').textContent = b.thinking
+          setThinkSummary(d, b.thinking)
+          wrap.appendChild(d)
+        }
         if (b.text) {
           const node = el('div', 'msg assistant')
           node.appendChild(mdLite(b.text))
@@ -849,6 +854,7 @@
     switch (ev.event_type) {
       case 'content_chunk':
         if (isStaleChunk(ev, 'c')) break
+        if (!state.live.text) collapseLiveThinking() // 思考结束 → 正文开始
         state.running = true
         state.live.text += ev.content || ''
         scheduleLive()
@@ -946,13 +952,14 @@
     // 只有已经贴在底部时才自动跟随；否则用户正在往回读历史，不该被拽走
     const stick = nearBottom(box)
     if (state.live.thinking) {
-      let t = box.querySelector('.msg.thinking[data-live="1"]')
-      if (!t) {
-        t = el('div', 'msg thinking')
-        t.dataset.live = '1'
-        box.appendChild(t)
+      let d = box.querySelector('details.thinking[data-live="1"]')
+      if (!d) {
+        d = makeThinking(true) // 流式中展开
+        d.dataset.live = '1'
+        box.appendChild(d)
       }
-      patchText(t, state.live.thinking)
+      patchText(d.querySelector('.think-body'), state.live.thinking)
+      setThinkSummary(d, state.live.thinking)
     }
     if (state.live.text || state.running) {
       let node = box.querySelector('.msg.assistant[data-live="1"]')
@@ -968,6 +975,31 @@
     if (stick) scrollToEnd()
     // 没贴底说明用户在往回读：给一个「最新」入口，别让流式内容"消失"在下面
     $('jump').hidden = stick || !state.running
+  }
+
+  // 思考块：流式时展开（看得见进度），本轮定稿后收起成一行「思考 · N 字」，
+  // 点开仍可看全文 —— 否则長 reasoning 会把对话顶出好几屏。
+  function makeThinking(open) {
+    const d = el('details', 'msg thinking')
+    if (open) d.open = true
+    d.appendChild(el('summary', 'think-summary', '思考'))
+    d.appendChild(el('div', 'think-body'))
+    return d
+  }
+
+  function setThinkSummary(node, text) {
+    const sm = node.querySelector('summary')
+    if (sm) sm.textContent = '思考 · ' + [...(text || '')].length + ' 字'
+  }
+
+  // 思考阶段一结束（正文第一个 chunk 到达）就折叠：不必等到本轮的 llm_end，
+  // 更不必等整轮 run 结束 —— 那期间展开的 reasoning 一直占着屏幕。
+  function collapseLiveThinking() {
+    const d = $('messages').querySelector('details.thinking[data-live="1"]')
+    if (!d || !d.open) return
+    if (d.dataset.autoclosed === '1') return // 用户手动展开过就不再强行收起
+    d.open = false
+    d.dataset.autoclosed = '1'
   }
 
   // 一次 run（agent_start → agent_end）里有**多轮** LLM：每轮 reasoning/content
@@ -995,6 +1027,10 @@
       }
       n.removeAttribute('data-live')
       n.classList.remove('cursor')
+      if (n.tagName === 'DETAILS' && n.classList.contains('thinking')) {
+        n.open = false // 一轮结束：思考收起，只留一行摘要
+        setThinkSummary(n, (n.querySelector('.think-body') || {}).textContent || '')
+      }
     }
     state.live = { text: '', thinking: '' }
     state.chunkSeen.clear()
