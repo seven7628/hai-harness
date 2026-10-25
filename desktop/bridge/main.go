@@ -1814,6 +1814,13 @@ func (m *manager) dispatch(c command) {
 			"todos":      bs.s.TodoItems(), // 恢复会话时带当前待办（宿主 TODO 面板）
 			"live":       wasLive,          // true=进程内复用，后台运行态仍有效；false=磁盘冷恢复
 		}
+		// 当前轮已产出、但还没进 blocks 的文本：中途打开会话或 WS 重连时，
+		// 手机靠它把「正在流的那一轮」补上（blocks 只到上一个轮次边界）。
+		if liveText, liveThink := bs.liveSnapshot(); liveText != "" || liveThink != "" {
+			respData["live_text"] = liveText
+			respData["live_thinking"] = liveThink
+			respData["live_running"] = bs.running.Load()
+		}
 		if restoreID != "" {
 			respData["restore_id"] = restoreID // 回显：前端按 会话+请求+attempt 校验
 		}

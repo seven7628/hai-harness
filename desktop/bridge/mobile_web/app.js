@@ -24,8 +24,7 @@
     retry: 0,
     disposed: false,
     lastMsgAt: 0, // 最近一次收到任何帧的时刻（链路看门狗用）
-    chunkKey: '', // 当前流式请求标识（request_id/run_id）+ 已处理的块序号
-    chunkIdx: -1,
+    chunkSeen: new Map(), // (类型|request_id) → 已处理的最大块序号
     screen: 'pair',
     nav: [],
     agents: new Map(), // task_id → { task_id, label, status, result }
@@ -451,8 +450,7 @@
     state.cursor = data.blocks_cursor || 0
     state.hasMore = !!data.blocks_has_more
     state.live = { text: '', thinking: '' }
-    state.chunkKey = ''
-    state.chunkIdx = -1
+    state.chunkSeen.clear()
     state.running = false
     state.agents = new Map()
     for (const a of data.agents || []) {
@@ -464,6 +462,12 @@
           result: a.task_result || '',
         })
       }
+    }
+    // 服务端把「当前轮已产出的文本」一并带回（blocks 只到上一个轮次边界），
+    // 否则中途打开/重连时这一段是空的，要等下一个 token 才出现。
+    if (data.live_text || data.live_thinking) {
+      state.live = { text: data.live_text || '', thinking: data.live_thinking || '' }
+      state.running = !!data.live_running
     }
     renderMessages()
     renderAgentsBar()
@@ -530,6 +534,7 @@
       case 'tool': {
         const d = document.createElement('details')
         d.className = 'tool-group'
+        if (b.tool_id) d.dataset.toolId = b.tool_id
         const sum = document.createElement('summary')
         sum.append(el('span', 'name', b.name || 'tool'))
         sum.appendChild(el('span', 'st', (b.status || '') + (b.is_error ? ' · 失败' : '')))
@@ -843,26 +848,34 @@
     if (ev.session_id && state.sid && ev.session_id !== state.sid && SESSION_SCOPED.has(ev.event_type)) return
     switch (ev.event_type) {
       case 'content_chunk':
-        if (isStaleChunk(ev)) break
+        if (isStaleChunk(ev, 'c')) break
         state.running = true
         state.live.text += ev.content || ''
         scheduleLive()
         break
       case 'reasoning_chunk':
-        if (isStaleChunk(ev)) break
+        if (isStaleChunk(ev, 'r')) break
         state.running = true
         state.live.thinking += ev.content || ''
         scheduleLive()
         break
+      case 'agent_start':
+        commitLive() // 新 run：上一轮残留不串到这一轮
+        state.running = true
+        updateRunning()
+        break
       case 'llm_start':
+        commitLive() // 新一轮 LLM：上一轮先定稿
         state.running = true
         updateRunning()
         break
       case 'llm_end':
+        // 本轮最终文本（权威）；然后立刻冻结成块，后续工具卡才能排在它后面
         if (typeof ev.content === 'string' && ev.content) state.live.text = ev.content
-        patchLive()
+        commitLive()
         break
       case 'tool_run_start':
+        commitLive() // 工具卡之前的内容先定稿，避免文字被"推"到卡片下方
         state.running = true
         appendTool({ kind: 'tool', tool_id: ev.id, name: ev.name, args: ev.arguments, status: 'running' })
         break
@@ -903,10 +916,9 @@
         if (state.screen === 'agent' && state.agentTask === ev.task_id) loadAgentHistory()
         break
       case 'agent_end':
+        commitLive()
         state.running = false
         state.live = { text: '', thinking: '' }
-        state.chunkKey = ''
-        state.chunkIdx = -1
         $('jump').hidden = true
         updateRunning()
         setTimeout(() => {
@@ -942,18 +954,50 @@
       }
       patchText(t, state.live.thinking)
     }
-    let node = box.querySelector('.msg.assistant[data-live="1"]')
-    if (!node) {
-      node = el('div', 'msg assistant')
-      node.dataset.live = '1'
-      box.appendChild(node)
+    if (state.live.text || state.running) {
+      let node = box.querySelector('.msg.assistant[data-live="1"]')
+      if (!node) {
+        node = el('div', 'msg assistant')
+        node.dataset.live = '1'
+        box.appendChild(node)
+      }
+      patchText(node, state.live.text)
+      node.classList.toggle('cursor', state.running)
     }
-    patchText(node, state.live.text)
-    node.classList.toggle('cursor', state.running)
     updateRunning()
     if (stick) scrollToEnd()
     // 没贴底说明用户在往回读：给一个「最新」入口，别让流式内容"消失"在下面
     $('jump').hidden = stick || !state.running
+  }
+
+  // 一次 run（agent_start → agent_end）里有**多轮** LLM：每轮 reasoning/content
+  // 之后可能跟工具调用，然后是下一轮。轮次边界必须把 live 冻结成永久块，
+  // 否则：(1) 后一轮的 llm_end 会整段覆盖前一轮；(2) 文本永远堆在最后，
+  // 工具卡插在它前面，顺序与桌面 blocks 不一致。
+  function commitLive() {
+    // 先冲刷待渲染的帧：chunk 与 llm_end 常在同一帧内到达（rAF 还没跑），
+    // 此时 DOM 里根本没有 live 节点，直接清 state.live 会把本轮文本丢掉。
+    if (liveRaf) {
+      cancelAnimationFrame(liveRaf)
+      liveRaf = 0
+    }
+    if (state.live.text || state.live.thinking) patchLive()
+    // 记进 blocks：updateTool / 分页 / 重连等任何一次 renderMessages() 都要能
+    // 重新画出这些已定稿的轮次（否则一次工具结束就把前面冲掉）
+    const text = (state.live.text || '').trim()
+    const think = (state.live.thinking || '').trim()
+    if (text || think) state.blocks.push({ kind: 'assistant', text: state.live.text, thinking: state.live.thinking })
+    const box = $('messages')
+    for (const n of box.querySelectorAll('[data-live="1"]')) {
+      if (!(n.textContent || '').trim()) {
+        n.remove() // 空块不留占位
+        continue
+      }
+      n.removeAttribute('data-live')
+      n.classList.remove('cursor')
+    }
+    state.live = { text: '', thinking: '' }
+    state.chunkSeen.clear()
   }
 
   // 只追加新增部分：每帧整段重写 textContent 会让长文本反复重排，
@@ -972,23 +1016,21 @@
     return box.scrollHeight - box.scrollTop - box.clientHeight < 80
   }
 
-  // 流式块去重：同一 (request_id, index) 只处理一次。
+  // 流式块去重：同一 (类型, request_id, index) 只处理一次。
   // 两条连接各投一遍、或重连补发时 index 不会前进 —— 直接丢，比字符串比较精确。
-  function isStaleChunk(ev) {
+  // 类型必须分开计数：reasoning 与 content 的 index 是各自独立的序列
+  //（共用计数器会把交替到达的第一个 content 块当成重复而丢掉）。
+  function isStaleChunk(ev, kind) {
     if (typeof ev.index !== 'number') return false
-    const key = ev.request_id || ev.run_id || ''
-    if (key !== state.chunkKey) {
-      state.chunkKey = key
-      state.chunkIdx = ev.index
-      return false
-    }
-    if (ev.index > state.chunkIdx) {
-      state.chunkIdx = ev.index
+    const key = kind + '|' + (ev.request_id || ev.run_id || '')
+    const last = state.chunkSeen.get(key)
+    if (last === undefined || ev.index > last) {
+      state.chunkSeen.set(key, ev.index)
       return false
     }
     // index 回退到 0 = 新一轮请求（provider 没给 request_id 时靠这条兜底）
-    if (ev.index === 0 && state.chunkIdx > 0) {
-      state.chunkIdx = 0
+    if (ev.index === 0 && last > 0) {
+      state.chunkSeen.set(key, 0)
       return false
     }
     return true
@@ -1010,8 +1052,7 @@
     for (const n of box.querySelectorAll('[data-live="1"]')) n.remove()
     state.live = { text: ev.text || '', thinking: ev.thinking || '' }
     state.running = !!ev.running
-    state.chunkKey = ''
-    state.chunkIdx = -1
+    state.chunkSeen.clear()
     updateRunning()
     if (state.live.text || state.live.thinking) patchLive()
     else $('jump').hidden = true
@@ -1030,7 +1071,16 @@
       b.is_error = isError
       b.status = 'done'
     }
-    renderMessages()
+    // 原地替换这一个卡片即可。**不能** renderMessages()：那是按 state.blocks 整页重绘，
+    // 而本轮正在流的节点还不在 blocks 里，一重绘就把前面的内容冲掉（顺序全乱）。
+    const sel = id ? `#messages .tool-group[data-tool-id="${CSS.escape(String(id))}"]` : ''
+    const old = sel ? document.querySelector(sel) : null
+    if (old && b) {
+      old.replaceWith(renderBlock(b))
+      scrollToEnd()
+      return
+    }
+    if (b) renderMessages() // 兜底：节点不在当前窗口（例如刚分页进来）
     scrollToEnd()
   }
 
