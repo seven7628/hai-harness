@@ -5,6 +5,7 @@ import { parseQuestionOptions } from '../lib/questionOptions'
 import { Markdown } from './markdown'
 import { useT } from '../i18n'
 import { useScopedQuestion } from './sessionScope'
+import { useSkin } from '../lib/useSkin'
 import './ask-runtime.css'
 import './ask-runtime.css'
 
@@ -41,6 +42,10 @@ function useCountdown(q?: { timeoutMs?: number; ts?: number }): { leftMs: number
 // 仅单选题走这个版面 —— 多选带预览会被后端 tools/question 直接拒绝。
 export default function AskUserQuestionPanel() {
   const t = useT()
+  // 运行时皮肤：同一份作答状态渲染两套类名。通用 .q-* / .btn 的规则和设计的
+  // .ask-* 同权重、又写在后面（index.css 先加载但选择器更具体），共存就会出现
+  // 「设计的间距对了、底色却是旧的」——类名互斥比堆 !important 干净。
+  const rt = useSkin() === 'runtime'
   // 作用域感知（2026-10，与 ApprovalPanel 同一条判定）：看主会话 → 主 run 的提问；
   // 看子会话 → 那个子 agent 的提问。提问通道在后端同样是 Session 级单槽，
   // 这里只做展示过滤（别人的提问不该在你眼前挡住面板）。
@@ -119,7 +124,7 @@ export default function AskUserQuestionPanel() {
     const pv = it.multi ? null : previewFor(it)
     const list = (
       <div
-        className={`q-options ask-list${pv ? ' col' : ''}`}
+        className={`${rt ? 'ask-list' : `q-options${pv ? ' col' : ''}`}`}
         role="group"
         aria-label={t('ask.optionsAria').replace('{n}', String(i + 1))}
       >
@@ -129,7 +134,7 @@ export default function AskUserQuestionPanel() {
           return (
             <button
               key={o.label}
-              className={`q-option ask-opt${sel ? ' sel' : ''}`}
+              className={rt ? 'ask-opt' : `q-option${sel ? ' sel' : ''}`}
               role={it.multi ? 'checkbox' : 'radio'}
               aria-checked={sel}
               onClick={() => (it.multi ? toggle(it.id, o.label) : setAnswer(it.id, o.label))}
@@ -149,12 +154,12 @@ export default function AskUserQuestionPanel() {
       <div className="q-split">
         {list}
         {/* 预览走正文同一个 Markdown 渲染器：模型写的代码块/表格/公式在预览里也成立 */}
-        <div className="q-preview ask-pv" role="figure" aria-label={t('ask.previewAria').replace('{label}', pv.label)}>
-          <div className="q-preview-hd mono ask-pv-head">
+        <div className={rt ? 'ask-pv' : 'q-preview'} role="figure" aria-label={t('ask.previewAria').replace('{label}', pv.label)}>
+          <div className={rt ? 'ask-pv-head mono' : 'q-preview-hd mono'}>
             <span>{t('ask.previewFor').replace('{label}', pv.label)}</span>
             <span className="ask-pv-which">{pv.label}</span>
           </div>
-          <div className="q-preview-body ask-pv-pre">
+          <div className={rt ? 'ask-pv-pre' : 'q-preview-body'}>
             <Markdown text={pv.preview} />
           </div>
         </div>
@@ -164,11 +169,10 @@ export default function AskUserQuestionPanel() {
 
   return (
     // 非模态：role="region"（不是 dialog/aria-modal —— 叙述区与左右栏都还能用）
-    <div className={`dock ask-scope${folded ? ' folded' : ''}`} role="region" aria-label={t('ask.title')}>
-      <div
-        className="dock-box ask"
-        data-form={items.some((x) => x.multi) ? 'multi' : items.some((x) => !x.multi && previewFor(x)) ? 'preview' : 'plain'}
-      >
+    <div className={`dock${rt ? ' ask-scope' : ''}${folded ? ' folded' : ''}`} role="region" aria-label={t('ask.title')}>
+      {/* 壳不再是卡片：这档皮肤下一张卡 = 一个问题（.q-item.ask），
+          批次里问三条就是三张卡，壳只负责折叠与倒计时 */}
+      <div className="dock-box">
         <h3
           className="dock-hd"
           role="button"
@@ -205,7 +209,7 @@ export default function AskUserQuestionPanel() {
             <div className="q-list">
               {items.map((it, i) => (
                 <div
-                  className="q-item ask"
+                  className={rt ? 'ask' : 'q-item'}
                   key={it.id}
                   data-form={it.multi ? 'multi' : previewFor(it) ? 'preview' : 'plain'}
                   onKeyDown={(e) => {
@@ -221,9 +225,9 @@ export default function AskUserQuestionPanel() {
                     else setAnswer(it.id, opt.label)
                   }}
                 >
-                  <div className="q-title ask-head">
+                  <div className={rt ? 'ask-head' : 'q-title'}>
                     <span className="q-no">{i + 1}</span>
-                    <span className="q-text ask-q">{it.question}</span>
+                    <span className={rt ? 'ask-q' : 'q-text'}>{it.question}</span>
                   </div>
                   {it.options.length > 0 && renderOptions(it, i)}
                   <input
@@ -245,11 +249,15 @@ export default function AskUserQuestionPanel() {
                 </div>
               ))}
             </div>
-            <div className="acts ask-foot">
+            <div className={rt ? 'ask-foot' : 'acts'}>
               <span className="timeout">
                 {cd && cd.leftMs === 0 ? t('ask.timedOutHint') : t('ask.allRequired')}
               </span>
-              <button className="btn primary ask-btn go" disabled={!allAnswered || (cd?.leftMs === 0)} onClick={submitAll}>
+              <button
+                className={rt ? 'ask-btn go' : 'btn primary'}
+                disabled={!allAnswered || (cd?.leftMs === 0)}
+                onClick={submitAll}
+              >
                 {t('ask.submitAll').replace('{answered}', String(answered)).replace('{total}', String(items.length))}
               </button>
             </div>

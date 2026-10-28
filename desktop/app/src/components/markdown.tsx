@@ -891,13 +891,14 @@ function HtmlPreviewBlock({ code, streaming }: { code: string; streaming?: boole
                   </button>
                 </div>
                 <div className="pv-body">
+                  {/* 高度由设计给（136px，≤720px 时 178px）：不让产出的内容
+                      把回答里的一行撑成半屏 */}
                   {mode === 'preview' ? (
                     <iframe
                       ref={frameRef}
                       className="pv-frame"
                       sandbox="allow-scripts"
                       srcDoc={doc}
-                      style={height != null ? { height } : undefined}
                       title={t('md.htmlPreview')}
                     />
                   ) : (

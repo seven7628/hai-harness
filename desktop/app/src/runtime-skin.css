@@ -944,6 +944,7 @@ html[data-skin='runtime'] .rt-act:focus-visible,
 html[data-skin='runtime'] .thinking-toggle:focus-visible,
 html[data-skin='runtime'] .la-head:focus-visible,
 html[data-skin='runtime'] .rt-ledger:focus-visible,
+html[data-skin='runtime'] .cy-act:focus-visible,
 html[data-skin='runtime'] .answer-acts .act:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1232,4 +1233,16 @@ html[data-skin='runtime'] .pv-foot {
   html[data-skin='runtime'] .pv-btn { height: 28px; padding: 0 8px; font-size: 10.5px; }
   /* a fold has to keep a finger-sized target on a phone */
   html[data-skin='runtime'] .cy-act { min-height: 30px; }
+}
+
+/* A7 lands after the main reduced-motion block, so its motion is switched off
+   here — a plain media query does not win on source order alone. */
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .cy-act,
+  html[data-skin='runtime'] .pv-btn {
+    transition: none;
+  }
+  html[data-skin='runtime'] .pv-state i {
+    animation: none;
+  }
 }
