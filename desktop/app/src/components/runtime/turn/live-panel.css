@@ -1,0 +1,137 @@
+/* 运行面板 —— 逐字搬自 design/agent-runtime/v2（ui.components.css:2101-2133）。 */
+
+html[data-skin='runtime'] .cy-live {
+  display: grid;
+  gap: 3px;
+}
+
+html[data-skin='runtime'] .cy-live-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font: 400 11.5px/1.6 var(--mono);
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .cy-live-head .lv-lbl {
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .cy-live-head .lv-clock {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .cy-live-head .lv-sep {
+  opacity: 0.4;
+}
+
+html[data-skin='runtime'] .cy-live-head .lv-n {
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .cy-live-head .lv-act {
+  margin-left: auto;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+}
+
+html[data-skin='runtime'] .cy-live-rows {
+  display: grid;
+  gap: 1px;
+}
+
+html[data-skin='runtime'] .lv-row {
+  display: grid;
+  grid-template-columns: 12px 46px minmax(0, 1fr) auto 46px;
+  align-items: center;
+  gap: 8px;
+  min-height: 21px;
+  padding: 0 6px 0 2px;
+  font: 400 11.5px/1.4 var(--mono);
+  color: var(--ink-3);
+  animation: tail-in 200ms var(--ease-out) both;
+}
+
+html[data-skin='runtime'] .lv-row .lv-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--ink-3) 45%, transparent);
+}
+
+html[data-skin='runtime'] .lv-row[data-s='run'] .lv-dot {
+  background: var(--accent);
+  animation: breathe 1.4s var(--ease) infinite;
+}
+
+html[data-skin='runtime'] .lv-row .v {
+  font-weight: 500;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+html[data-skin='runtime'] .lv-row[data-s='run'] .v {
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .lv-row .o {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-skin='runtime'] .lv-row .m,
+html[data-skin='runtime'] .lv-row .dur {
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .lv-row .dur {
+  text-align: right;
+}
+
+html[data-skin='runtime'] .cy-live.is-done {
+  animation: live-out 240ms var(--ease) both;
+}
+
+@keyframes live-out {
+  to {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes tail-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .lv-row,
+  html[data-skin='runtime'] .lv-row[data-s='run'] .lv-dot,
+  html[data-skin='runtime'] .cy-live.is-done {
+    animation: none;
+  }
+}

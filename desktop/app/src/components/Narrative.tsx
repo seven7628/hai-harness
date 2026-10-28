@@ -13,6 +13,7 @@ import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
 import { UserBlock } from './runtime/blocks/UserBlock'
 import { Lane } from './runtime/lane/Lane'
+import { LivePanel } from './runtime/turn/LivePanel'
 import { Signal } from './runtime/signals/Signal'
 import './runtime/turn/turn.css'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
@@ -982,6 +983,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const stats = turnStats(turn)
     const usage = turnUsage(turn, turnMetrics)
     const head = turnHead(turn)
+    const turnStart = head.t0
     const concise = density === 'concise'
     // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
     // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
@@ -1011,6 +1013,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         ) : null}
         {/* 「Worked for 8.2 s」是**结算**，不是进度：运行中这一行只该是「正在做什么」，
             汇总的时长与批次要到 AgentEnd 才成立 —— 与轮尾账同一时刻出现。 */}
+        {concise && work && turn.running ? (
+          <LivePanel items={turn.items} startedAt={turnStart} />
+        ) : null}
         {concise && work && !turn.running ? (
           <WorkFold
             stats={stats}
@@ -1019,7 +1024,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             onToggle={() => setOpenTurns((m) => ({ ...m, [turn.key]: !open }))}
           />
         ) : null}
-        {workItems.length ? (
+        {/* 运行中这一轮不摊开：你看的是面板里最后四行，而不是一堵把整轮往下推的墙 */}
+        {workItems.length && !(turn.running && skin === 'runtime') ? (
           <div className="rt-turn-body">
             <div className="rt-turn-in">{workItems}</div>
           </div>
