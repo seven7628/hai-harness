@@ -12026,6 +12026,7 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 
 @import './narrative-skin.css';
+@import './runtime-palette.css';
 @import './runtime-skin.css';
 
 /* —— Project Memory 记忆浏览（官方 §2.7 的 /memory）——

@@ -1,0 +1,173 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 运行时皮肤 · 色板与字体（v2 设计页的真实取值）
+ *
+ * ## 为什么是"覆盖基色层"而不是"再定义一套组件色"
+ *
+ * index.css 的组织方式是：基色（--paper / --ink / --cinnabar / --bamboo …）在
+ * `:root` 与 `[data-theme='ink'|'paper']` 里定义，随后 `:root` 再派生一层语义别名
+ * （`--bg: var(--paper)`、`--text: var(--ink)`、`--accent: var(--cinnabar-2)`…，见
+ * index.css 的 "derived" 段）。所以**只改基色**，127 个派生令牌会全部跟着走。
+ *
+ * 上一版（runtime-tokens.css）只做"改名"——把 v2 的语义名指向 app 令牌，一个颜色都
+ * 没定义，于是运行时的主色落在朱砂、底色落在暖纸上，与设计页无关。这是这次返工的根因。
+ *
+ * ## 取值来源
+ *
+ * 全部逐字取自 design/agent-runtime/v2/ui.css 的 `:root`（深色）与
+ * `:root[data-theme='light']`（亮色）两块。唯一偏离见下面 --accent-solid 的注释。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Inter / JetBrains Mono：设计页自带的两个字体（v2/assets/fonts）。
+   Inter 无 CJK 字形，中文照旧落到系统字体（PingFang SC）—— 设计页也是这个行为。 */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./assets/fonts/inter-latin.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./assets/fonts/jbmono-latin.woff2') format('woff2');
+}
+
+html[data-skin='runtime'],
+html[data-skin='runtime'][data-theme='ink'] {
+  /* —— 面 —— */
+  --paper: #0b0b0c; /* 页面底：一处表面，不是一叠盒子 */
+  --paper-2: #0c0c0d; /* 卡面：与底几乎同色，靠 1px 描边分层 */
+  --paper-3: #141416; /* 凹陷/浮层：井、输入、代码 */
+  --ink-line: #26262a;
+  --ink-line-2: #34343a;
+
+  /* —— 字 —— */
+  --ink: #f2f2f3;
+  --ink-2: #b0b0b6;
+  --ink-3: #9a9aa1;
+
+  /* —— 语义色 —— */
+  --cinnabar: #8aa0ff; /* 强调文字 */
+  --cinnabar-2: #8aa0ff; /* 强调图标/边框 */
+  --bamboo: #45d6a5; /* 成功 */
+  --ochre: #f5b544; /* 警告 */
+  --indigo: #8aa0ff; /* 运行中 / 焦点环（v2 里 running 就是 accent） */
+  --crimson: #ff7386; /* 错误 */
+  --danger-solid: #b3303f;
+
+  --accent-weak: rgba(124, 147, 255, 0.14);
+  --accent-border: rgba(138, 160, 255, 0.45);
+  /* 唯一的色值偏离：v2 的实心强调块配**深色字**（--accent-ink:#0a0a0c），而 app 的按钮
+     体系是"实心块承载白字"。要白字读得清，只能把实心档压深（白字 5.1:1）；
+     v2 的 #8aa0ff 上压白字只有 2.1:1。文字/图标/边框仍用 #8aa0ff，不受影响。 */
+  --accent-solid: #4a5fd0;
+  --accent-hover: #5f76e8;
+
+  --diff-add: rgba(69, 214, 165, 0.12);
+  --diff-del: rgba(255, 115, 134, 0.12);
+  --diff-add-text: #45d6a5;
+  --diff-del-text: #ff7386;
+  --code-surface-ink: #0c0c0d;
+  --code-surface-paper: #0c0c0d;
+
+  /* 分类/文件类型色：v2 没有"族色"，工具行只有中性动词 + 状态图标色
+     （ui.components.css .tool-row）。运行时皮肤下统一退到弱字色；
+     默认皮肤不受影响（这段只在 data-skin='runtime' 生效）。 */
+  --cat-read: #9a9aa1;
+  --cat-cmd: #9a9aa1;
+  --cat-write: #9a9aa1;
+  --cat-net: #9a9aa1;
+  --cat-agent: #9a9aa1;
+  --cat-skill: #9a9aa1;
+  --ft-code: #9a9aa1;
+  --ft-doc: #9a9aa1;
+  --ft-sheet: #9a9aa1;
+  --ft-slide: #9a9aa1;
+  --ft-pdf: #9a9aa1;
+  --ft-image: #9a9aa1;
+  --ft-data: #9a9aa1;
+  --ctx-moss: #9a9aa1;
+
+  /* —— 皮肤局部变量（v2 里没有对应 app 令牌的那几个）—— */
+  --rt-card-2: #141416;
+  --rt-raised: #1a1a1c;
+  --rt-line-soft: #17171a;
+  --rt-code-ink: #ff9f43;
+  --rt-code-bg: rgba(255, 145, 45, 0.14);
+  --rt-violet: #b492ff;
+  --rt-measure: 46rem;
+
+  /* —— 字族与几何 —— */
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
+  /* 设计里标题无衬线（.bl-h 用 --font 继承），app 的 .md 标题用衬线（index.css:2800），
+     所以这一支也要一起改，否则"问题根因"这类小标题仍是宋体 */
+  --font-serif: 'Inter', -apple-system, 'PingFang SC', system-ui, sans-serif;
+  --radius: 12px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* —— 时序（v2 的四档）—— */
+  --rt-t-fast: 130ms;
+  --rt-t-base: 220ms;
+  --rt-t-slow: 380ms;
+  --rt-ease: cubic-bezier(0.2, 0, 0, 1);
+  --rt-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --rt-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+}
+
+html[data-skin='runtime'][data-theme='paper'] {
+  --paper: #f7f7f8;
+  --paper-2: #ffffff;
+  --paper-3: #fafafa;
+  --ink-line: #e5e5e7;
+  --ink-line-2: #d6d6d9;
+
+  --ink: #131316;
+  --ink-2: #55555c;
+  --ink-3: #6b6b73;
+
+  --cinnabar: #3b5bdb;
+  --cinnabar-2: #3b5bdb;
+  --bamboo: #0d9b74;
+  --ochre: #b47500;
+  --indigo: #3b5bdb;
+  --crimson: #dc3552;
+  --danger-solid: #dc3552;
+
+  --accent-weak: rgba(59, 91, 219, 0.09);
+  --accent-border: rgba(59, 91, 219, 0.42);
+  --accent-solid: #3b5bdb;
+  --accent-hover: #2f4bc0;
+
+  --diff-add: rgba(13, 155, 116, 0.1);
+  --diff-del: rgba(220, 53, 82, 0.09);
+  --diff-add-text: #0d9b74;
+  --diff-del-text: #dc3552;
+  --code-surface-ink: #fafafa;
+  --code-surface-paper: #fafafa;
+
+  --cat-read: #6b6b73;
+  --cat-cmd: #6b6b73;
+  --cat-write: #6b6b73;
+  --cat-net: #6b6b73;
+  --cat-agent: #6b6b73;
+  --cat-skill: #6b6b73;
+  --ft-code: #6b6b73;
+  --ft-doc: #6b6b73;
+  --ft-sheet: #6b6b73;
+  --ft-slide: #6b6b73;
+  --ft-pdf: #6b6b73;
+  --ft-image: #6b6b73;
+  --ft-data: #6b6b73;
+  --ctx-moss: #6b6b73;
+
+  --rt-card-2: #fafafa;
+  --rt-raised: #f1f1f2;
+  --rt-line-soft: #efeff0;
+  --rt-code-ink: #a34a00;
+  --rt-code-bg: rgba(232, 112, 20, 0.15);
+  --rt-violet: #6d4bd8;
+}
