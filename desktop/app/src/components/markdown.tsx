@@ -18,6 +18,8 @@ import { useResolvedTheme } from '../lib/useTheme'
 import { useAppearance } from '../lib/appearance'
 import { copyText } from '../lib/clipboard'
 import { displayPath, isLocalAssetSrc, resolveLocalAssetPath, useLocalAsset } from '../lib/localAsset'
+import { FoldIcon } from './runtime/FoldIcon'
+import { useSkin } from '../lib/useSkin'
 import { t as tStatic, useLang, useT } from '../i18n'
 
 // 沙箱 UI 回复协议的校验常量 —— 与 vendor/visual-skills/visual-ui/references/reply-protocol.md
@@ -639,6 +641,11 @@ function HtmlPreviewBlock({ code, streaming }: { code: string; streaming?: boole
   const [height, setHeight] = useState<number | undefined>(undefined) // iframe 实测高度（未测前 undefined → CSS 兜底 240px）
   const [frameHover, setFrameHover] = useState(false) // 指针在预览 iframe 内容上方（子探针上报）
   const [probeDead, setProbeDead] = useState(false) // 子探针没跑起来（如 HTML 自带 CSP script-src 'none'）→ 退回恒显
+  // 运行时皮肤下，视觉产出在回答里占**一行**（`.cy-frameline` 的无框文本行），
+  // 点开才铺出 .pv 面板；默认收起 —— 设计：它是「这一轮产出了什么」的一句话，
+  // 不是一进来就占半屏的 iframe。
+  const [frameOpen, setFrameOpen] = useState(false)
+  const rt = useSkin() === 'runtime'
   const frameRef = useRef<HTMLIFrameElement>(null)
   const blockRef = useRef<HTMLDivElement>(null)
   const probeSeenRef = useRef(false) // 本次 srcDoc 是否收到过探针上报
@@ -837,6 +844,77 @@ function HtmlPreviewBlock({ code, streaming }: { code: string; streaming?: boole
       title={t('md.htmlPreview')}
     />
   )
+
+  // 运行时皮肤：这一轮的视觉产出先是一行（ui.components.css:2209-2213 的
+  // .cy-frameline > .cy-act），点开才铺出 .pv 面板（:1536-1560）。原来的
+  // htmlblock 壳（渲染/源码 tab + 悬停浮出的工具条）在这档皮肤下不出现 ——
+  // 同一份能力换成了设计自己的分段控件与页脚。
+  if (rt) {
+    const kb = (code.length / 1024).toFixed(1)
+    const toggle = () => setFrameOpen((v) => !v)
+    return (
+      <div className="cy-frameline" data-slot="artifact">
+        <div
+          className="cy-act"
+          role="button"
+          tabIndex={0}
+          aria-expanded={frameOpen}
+          onClick={toggle}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return
+            e.preventDefault()
+            toggle()
+          }}
+        >
+          <span className="cy-act-t">{t('md.visualOutput')} · index.html</span>
+          <span className="cy-dur">{kb} KB</span>
+          <FoldIcon open={frameOpen} />
+        </div>
+        <div className={`rt-collapse${frameOpen ? ' open' : ''}`} aria-hidden={!frameOpen}>
+          <div>
+            <div className="cy-frame">
+              <div className="pv">
+                <div className="pv-head">
+                  <span className="pv-name">index.html</span>
+                  <span className="pv-seg" role="group" aria-label={t('md.htmlTabsAria')}>
+                    <button className="pv-btn" aria-pressed={mode === 'preview'} onClick={() => setMode('preview')}>
+                      {t('md.htmlPreview')}
+                    </button>
+                    <button className="pv-btn" aria-pressed={mode === 'source'} onClick={() => setMode('source')}>
+                      {t('md.htmlSource')}
+                    </button>
+                  </span>
+                  <span className="pv-spacer" />
+                  <button className="pv-btn" onClick={copy} aria-label={t('md.copyAria')}>{copyLabel(t, copyState)}</button>
+                  <button className="pv-btn" onClick={openInBrowser} title={t('md.htmlOpenBrowser')}>
+                    {t('md.htmlOpenBrowserBtn')}
+                  </button>
+                </div>
+                <div className="pv-body">
+                  {mode === 'preview' ? (
+                    <iframe
+                      ref={frameRef}
+                      className="pv-frame"
+                      sandbox="allow-scripts"
+                      srcDoc={doc}
+                      style={height != null ? { height } : undefined}
+                      title={t('md.htmlPreview')}
+                    />
+                  ) : (
+                    <pre className="pv-code">{code}</pre>
+                  )}
+                </div>
+                <div className="pv-foot">
+                  <span>{t('md.visualFoot')}</span>
+                  <span>{kb} KB</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div ref={blockRef} className={`htmlblock ${mode === 'source' ? 'source-mode' : ''} ${frameHover ? 'hd-on' : ''} ${probeDead ? 'probe-dead' : ''}`}>

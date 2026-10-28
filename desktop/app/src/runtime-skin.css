@@ -1092,3 +1092,144 @@ html[data-skin='runtime'] .cp-caret {
     animation: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   A7 · the turn's visual output  (ui.components.css `.cy-act` 2087-2094、
+   `.cy-frameline`/`.cy-frame` 2210-2213、`.pv*` 1536-1560，逐字)
+   ------------------------------------------------------------------------ */
+
+/* the line of work: one dim sentence with a chevron, the way a session reads */
+html[data-skin='runtime'] .cy-act {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 62ch;
+  padding: 1px 6px 1px 0;
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .cy-act:hover { color: var(--ink-2); }
+
+html[data-skin='runtime'] .cy-act .chev { flex: none; width: 11px; height: 11px; }
+
+html[data-skin='runtime'] .cy-act-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the size sits at the end of the sentence, like a duration on a tool row */
+html[data-skin='runtime'] .cy-frameline .cy-dur {
+  flex: none;
+  font: 400 10.5px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .cy-frame { margin-top: 14px; }
+html[data-skin='runtime'] .cy-frame[hidden] { display: none; }
+html[data-skin='runtime'] .cy-frame .pv { border-radius: var(--r-md); }
+html[data-skin='runtime'] .cy-frame .pv-frame {
+  display: block;
+  width: 100%;
+  height: 136px;
+  border: 0;
+  background: #0c0c10;
+}
+
+html[data-skin='runtime'] .pv { padding: 12px 14px 11px; }
+html[data-skin='runtime'] .pv-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+html[data-skin='runtime'] .pv-name { font: 400 10.5px/1 var(--mono); color: var(--ink-2); }
+html[data-skin='runtime'] .pv-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 400 10px/1 var(--mono);
+  color: var(--ink-3);
+}
+html[data-skin='runtime'] .pv-state i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--violet);
+  animation: rt-breathe 1.6s var(--ease) infinite;
+}
+html[data-skin='runtime'] .pv-spacer { flex: 1; }
+html[data-skin='runtime'] .pv-seg {
+  display: inline-flex;
+  gap: 1px;
+  padding: 1px;
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--ink-3) 10%, transparent);
+}
+html[data-skin='runtime'] .pv-btn {
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font: 400 10px/1 var(--mono);
+  color: var(--ink-3);
+  transition: color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+html[data-skin='runtime'] .pv-btn:hover { color: var(--ink); }
+html[data-skin='runtime'] .pv-btn[aria-pressed='true'] { background: var(--raised); color: var(--ink); }
+html[data-skin='runtime'] .pv-body {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--card-2);
+}
+html[data-skin='runtime'] .pv-frame {
+  display: block;
+  width: 100%;
+  height: 296px;
+  border: 0;
+  background: transparent;
+}
+html[data-skin='runtime'] .pv-code {
+  margin: 0;
+  padding: 11px 12px;
+  height: 296px;
+  overflow: auto;
+  font: 400 11px/1.65 var(--mono);
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+html[data-skin='runtime'] .pv-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 9px;
+  font: 400 10px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+@media (max-width: 720px) {
+  html[data-skin='runtime'] .pv-frame,
+  html[data-skin='runtime'] .pv-code { height: 300px; }
+  html[data-skin='runtime'] .pv { padding: 13px 14px 11px; }
+}
+
+/* port/motion.css:120 — the .pv-state dot's pulse (global name: breathe would
+   collide with the base stylesheet's, so it is namespaced like the rest) */
+@keyframes rt-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* the same two density breakpoints the design uses for this part
+   (ui.components.css:2307-2310, 2334-2340) */
+@media (max-width: 720px) {
+  /* the artifact inside a turn is shorter than a stand-alone preview panel */
+  html[data-skin='runtime'] .cy-frame .pv-frame { height: 178px; }
+}
+
+@media (max-width: 640px) {
+  html[data-skin='runtime'] .pv-btn { height: 28px; padding: 0 8px; font-size: 10.5px; }
+  /* a fold has to keep a finger-sized target on a phone */
+  html[data-skin='runtime'] .cy-act { min-height: 30px; }
+}

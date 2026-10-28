@@ -6,6 +6,7 @@ import { Markdown } from './markdown'
 import { useT } from '../i18n'
 import { useScopedQuestion } from './sessionScope'
 import './ask-runtime.css'
+import './ask-runtime.css'
 
 // 决策倒计时（2026-09-20 用户要求：让用户知道还剩多长时间做决策）：
 // 剩 = timeoutMs - (提问以来的毫秒)。时钟复用应用唯一的 1s tick（useClock，
@@ -203,10 +204,26 @@ export default function AskUserQuestionPanel() {
           <>
             <div className="q-list">
               {items.map((it, i) => (
-                <div className="q-item" key={it.id}>
-                  <div className="q-title">
+                <div
+                  className="q-item ask"
+                  key={it.id}
+                  data-form={it.multi ? 'multi' : previewFor(it) ? 'preview' : 'plain'}
+                  onKeyDown={(e) => {
+                    // 数字键直选（kbd 列给出的承诺）：只认 1-9、不带修饰键、
+                    // 且焦点不在自由输入框里（那里数字是正文）。
+                    if (e.metaKey || e.ctrlKey || e.altKey) return
+                    if ((e.target as HTMLElement).tagName === 'INPUT') return
+                    const n = Number(e.key)
+                    if (!Number.isInteger(n) || n < 1 || n > Math.min(9, it.options.length)) return
+                    const opt = it.options[n - 1]
+                    e.preventDefault()
+                    if (it.multi) toggle(it.id, opt.label)
+                    else setAnswer(it.id, opt.label)
+                  }}
+                >
+                  <div className="q-title ask-head">
                     <span className="q-no">{i + 1}</span>
-                    <span className="q-text">{it.question}</span>
+                    <span className="q-text ask-q">{it.question}</span>
                   </div>
                   {it.options.length > 0 && renderOptions(it, i)}
                   <input

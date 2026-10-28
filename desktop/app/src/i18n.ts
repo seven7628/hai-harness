@@ -1319,6 +1319,8 @@ const zh: Record<string, string> = {
   // 文案要让用户知道「正在生成」而不是「坏了」。
   'md.htmlGenerating': '正在生成…',
   'md.htmlGeneratingHint': 'HTML 写完后自动渲染（生成过程中不预渲染：不完整的脚本会被执行）',
+  'md.visualOutput': '视觉产出',
+  'md.visualFoot': '视觉产出 · 边到边渲染',
   'md.htmlPreview': '渲染',
   'md.htmlSource': '源码',
   'md.htmlTabsAria': 'HTML 预览视图切换',
@@ -2877,6 +2879,8 @@ const en: Record<string, string> = {
   'md.mermaidError': 'Diagram render failed (source below)',
   'md.htmlGenerating': 'Generating…',
   'md.htmlGeneratingHint': 'Renders when the HTML is complete (not previewed mid-stream: an unfinished script would run)',
+  'md.visualOutput': 'Visual output',
+  'md.visualFoot': 'visual output · rendered while it arrives',
   'md.htmlPreview': 'Preview',
   'md.htmlSource': 'Source',
   'md.htmlTabsAria': 'HTML preview view switch',

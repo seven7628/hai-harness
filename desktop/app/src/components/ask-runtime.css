@@ -352,3 +352,19 @@ html[data-skin='runtime'] @container (max-width: 480px) {
     animation-duration: 1ms !important;
   }
 }
+
+/* 面板壳让位：这档皮肤下卡片本身就是问题（parts/ask.css 的 .ask，
+   自带 border/radius/background/shadow），dock 不再叠一层同款壳，
+   否则问一句会看到两层边框。标题条降级成一行 mono 说明。 */
+html[data-skin='runtime'] .dock .dock-box {
+  background: none;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+
+html[data-skin='runtime'] .dock .dock-hd {
+  padding: 0 2px 7px;
+  font: 400 10.5px/1 var(--mono);
+  color: var(--ink-3);
+}
