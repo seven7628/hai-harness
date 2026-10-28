@@ -42,12 +42,9 @@ export const Compact = memo(function Compact({ b }: { b: CompressionInfo }) {
   // 所以配比只在成功落地时画
   const cut = state === 'done' && before > 0
   // the meta reads left to right as: what the context is now · how long it took
-  const meta = useMemo(() => {
-    const parts: string[] = []
-    if (!active && b.ctxTokens != null && b.ctxTokens > 0) parts.push(t('compact.ctx').replace('{n}', fmtTokens(b.ctxTokens)))
-    if (dur) parts.push(dur)
-    return parts
-  }, [active, b.ctxTokens, dur, t])
+  const meta: string[] = []
+  if (!active && b.ctxTokens != null && b.ctxTokens > 0) meta.push(t('compact.ctx').replace('{n}', fmtTokens(b.ctxTokens)))
+  if (dur) meta.push(dur)
 
   const label = active
     ? t('compression.inProgress')

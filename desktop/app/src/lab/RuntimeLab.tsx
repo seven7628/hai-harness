@@ -7,8 +7,8 @@ import { selectTurns, turnStats } from '../components/runtime/turn/selectTurns'
 import { Ledger } from '../components/runtime/turn/Ledger'
 import { Thinking } from '../components/NarrativeBlocks'
 import { Compact } from '../components/runtime/blocks/Compact'
+import { TodoBlock } from '../components/runtime/blocks/Todo'
 import type { MsgBlock } from '../store/useAppStore'
-import { useState } from 'react'
 
 const SYSTEMS = ['pip', 'cat', 'ghost'] as const
 const STATES = ['run', 'work', 'done', 'engaged'] as const
@@ -52,7 +52,6 @@ const COMPACTS: { name: string; b: Extract<MsgBlock, { kind: 'compression' }> }[
 ]
 
 export function RuntimeLab() {
-  const [open, setOpen] = useState(false)
   const turn = selectTurns(SAMPLE)[0]
   const stats = turnStats(turn)
   return (
@@ -79,6 +78,33 @@ export function RuntimeLab() {
             <Compact b={c.b} />
           </div>
         ))}
+      </div>
+
+      <div style={row}>
+        <span style={lab}>todo · one sheet, two writes (delta rail + updated 2×)</span>
+        <div style={{ maxWidth: 640 }}>
+          <TodoBlock
+            writes={[
+              { items: [
+                { id: 't1', title: '复现 TestSessionRestore 偶发失败：日志指向 fixture 写死了 HOME', done: true },
+                { id: 't2', title: 'grep os.UserHomeDir() 在 *_test.go 里的调用点', done: true },
+                { id: 't3', title: '把 t.TempDir() 注入 session.Restore 的 fixture', done: false },
+                { id: 't4', title: '跑 go test ./session -run TestSessionRestore -count=5', done: false },
+                { id: 't5', title: '决定 mock.ts 里那份硬编码路径留不留', done: false, blockedBy: ['t3'] },
+                { id: 't6', title: '更新 README「测试与沙箱」段', done: false },
+              ] },
+              { items: [
+                { id: 't1', title: '复现 TestSessionRestore 偶发失败：日志指向 fixture 写死了 HOME', done: true },
+                { id: 't2', title: 'grep os.UserHomeDir() 在 *_test.go 里的调用点', done: true },
+                { id: 't3', title: '把 t.TempDir() 注入 session.Restore 的 fixture', done: true },
+                { id: 't4', title: '跑 go test ./session -run TestSessionRestore -count=5', done: false },
+                { id: 't5', title: '决定 mock.ts 里那份硬编码路径留不留', done: false, blockedBy: ['t4'] },
+                { id: 't7', title: '补一条连跑 5 次不挂的回归测试', done: false },
+                { id: 't6', title: '更新 README「测试与沙箱」段', done: false },
+              ] },
+            ]}
+          />
+        </div>
       </div>
 
       <div style={row}>

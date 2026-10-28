@@ -11,17 +11,18 @@
 //
 // 宿主差异只允许一项：主 run 专属动作（工具行的「后台/停止」）—— 见 ToolRow 的 host。
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import type { CompressionInfo, Diff, QueuedContent, ToolErrorInfo, TodoItem, UsageAgg } from '../store/useAppStore'
 import { Markdown } from './markdown'
 import { Bot, CheckList, FileIcon, PencilIcon, PlayIcon, SearchIcon, Sparkles, TerminalIcon } from './icons'
-import { fmtDuration, fmtUsd, UsageChip, UnifiedDiff } from './ui'
+import { fmtUsd, UsageChip, UnifiedDiff } from './ui'
 import { toolArgsSummary } from '../lib/toolSummary'
 import { toolFamily, fileTypeOf } from '../lib/palette'
 import { splitThinkingParagraphs } from '../lib/thinkingText'
 import { Face } from './runtime/Face'
 import { Compact } from './runtime/blocks/Compact'
+import { TodoBlock, type TodoWrite } from './runtime/blocks/Todo'
 import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
@@ -129,120 +130,19 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
   )
 })
 
-// 待办工具卡片（todo_add / todo_update）：对话内「计划」视图 —— 头部 = 清单图标 +
-// 进度（done/total · 已完成/全部完成）+ 耗时，可折叠；展开 = 全量待办清单：
-// ✓ 已完成（绿 · 灰显删除线）/ ◎ 进行中（accent 朱砂高亮，= 第一个未完成项）/
-// ○ 未开始（弱化），被依赖阻塞的项带「阻塞 tN」标签。数据源 = 会话级 todos 快照
-// （桥接层随 todo_* 工具结束事件携带，与右栏待办面板同源）；仅最新一张卡展开
-// （live），新卡到达后旧卡自动折叠，保持对话时间线整洁。
-// 子 agent 转录里的 todo_* 调用同样走这张卡（同一份数据 → 同一套渲染）：转录没有
-// 「最新一张」的上下文，live 恒 false → 默认折叠，点开才看清单。
-const TodoToolCard = memo(function TodoToolCard({ b, live }: { b: ToolRowData; live: boolean }) {
-  const [open, setOpen] = useState(live)
-  const [raw, setRaw] = useState(false) // 原始参数/结果详情（「详情」按钮切换）
-  const todos = useAppStore((s) => s.todos)
-  const t = useT()
-  // 新计划卡出现（live true→false）：旧卡自动折叠（默认态管理，用户可再手动展开）
-  useEffect(() => {
-    if (!live) setOpen(false)
-  }, [live])
-  const running = b.status === 'running'
-  const err = b.isError ?? b.status === 'error'
-  // 渲染列表：优先用「本次调用完成时刻」的定格快照（bridge 随 tool_response 携带，
-  // 历史卡显示当时状态而非最终态）；无存档（运行中 / 旧日志）回退当前 store 快照。
-  const list = b.todos ?? todos
-  const done = list.filter((x) => x.done).length
-  const total = list.length
-  const allDone = total > 0 && done === total
-  const activeId = list.find((x) => !x.done)?.id
-  // 每次调用的参数摘要：区分多次 todo 调用（如批量更新时 N 张卡各改了什么一目了然）
-  let callSummary = ''
-  try {
-    const a = JSON.parse(b.args || '{}') as { id?: string; title?: string; done?: boolean }
-    if (b.name === 'todo_update' && a.id) {
-      callSummary = `#${a.id} ${a.done === true ? t('todo.updated') : a.done === false ? t('todo.reopened') : t('todo.updated2')}`
-    } else if (b.name === 'todo_add' && a.title) {
-      callSummary = `+ ${a.title.slice(0, 14)}`
-    }
-  } catch { /* 非 JSON 参数：无摘要 */ }
-  return (
-    <div className={`plan-card${err ? ' error' : ''}${open ? ' open' : ''}`}>
-      <div
-        className="plan-hd"
-        role="button"
-        aria-expanded={open}
-        tabIndex={0}
-        onClick={() => setOpen((v) => !v)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v) }
-        }}
-      >
-        <span className="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>
-        <CheckList size={13} />
-        <span className="plan-title">{t('plan.title')}</span>
-        {running ? (
-          <span className="plan-meta">…</span>
-        ) : err ? (
-          <span className="plan-meta err">{t('plan.failed')}</span>
-        ) : (
-          <>
-            <span className={`plan-count mono${allDone ? ' ok' : ''}`}>{done}/{total}</span>
-            <span className="plan-meta">{allDone ? t('plan.allDone') : t('plan.done')}</span>
-          </>
-        )}
-        {callSummary && <span className="plan-call mono">{callSummary}</span>}
-        <span className="grow" />
-        {(b.args || b.result) && !running && (
-          <button
-            className="plan-raw-toggle"
-            onClick={(e) => { e.stopPropagation(); setRaw((v) => !v) }}
-            title={t('tool.rawDetail')}
-          >
-            {raw ? t('json.collapse') : t('tool.rawDetailToggle')}
-          </button>
-        )}
-        {b.durMs != null && <span className="mono plan-meta">{fmtDuration(b.durMs)}</span>}
-        {running && <ElapsedTimer className="ms" startAt={b.startedAt} running />}
-      </div>
-      {open && !err && total > 0 && (
-        <ul className="plan-list">
-          {list.map((todo) => {
-            const blocked = !todo.done && todo.blockedBy && todo.blockedBy.length > 0
-            return (
-              <li key={todo.id} className={`plan-item${todo.done ? ' done' : ''}${todo.id === activeId ? ' active' : ''}`}>
-                <span className="plan-st" aria-hidden="true">{todo.done ? '✓' : todo.id === activeId ? '◎' : '○'}</span>
-                <span className="plan-txt" title={todo.title}>{todo.title}</span>
-                {blocked && <span className="plan-blk mono">{t('todo.blockedBy').replace('{ids}', todo.blockedBy!.join(','))}</span>}
-              </li>
-            )
-          })}
-        </ul>
-      )}
-      {open && err && <div className="plan-err" role="alert">{b.result || t('todo.updateFailed')}</div>}
-      {raw && (
-        <div className="plan-raw">
-          {b.args && <div className="tr-sec"><div className="tr-sec-h">{t('tool.args')}</div><JsonView text={b.args} className="json-box" /></div>}
-          {b.result && <div className="tr-sec"><div className="tr-sec-h">{t('tool.result')}</div><pre className="tr-code">{b.result}</pre></div>}
-        </div>
-      )}
-    </div>
-  )
-})
-
 // 工具调用行：名称(按族着色) + 参数摘要 + 耗时/状态；点击可展开查看完整参数与结果。
 // 文件工具（read/write/edit）额外提供路径预览 + 变更查看入口。
 // host 只挡一件事：主 run 专属动作（「后台」promote / 「停止」interrupt）——
 // 它们作用于**主 run 的工具任务**，子 agent 转录里既不该出现也没有对应语义
 //（后台工具任务在右栏「任务」tab 有自己的卡与精确停止）。其余一切（族色 / 行首图标 /
 // 参数文件名着色 / 点击打开文件 / 计划卡 / 错误恢复提示）两处完全一致。
-export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }: { b: ToolRowData; live?: boolean; host?: ToolRowHost }) {
+export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowData; host?: ToolRowHost }) {
   const [open, setOpen] = useState(false)
   const [diffOpen, setDiffOpen] = useState(true) // 行内 diff 默认展开（运行时变更立即可见）
   const setRightTab = useAppStore((s) => s.setRightTab)
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)
   const openFile = useAppStore((s) => s.openFile)
   const openHtmlInBrowser = useAppStore((s) => s.openHtmlInBrowser)
-  const todos = useAppStore((s) => s.todos)
   const promoteTask = useAppStore((s) => s.promoteTask)
   const t = useT()
   // 出错归一化：主对话块用 isError，子 agent 项用 status==='error'（两边同义）
@@ -289,11 +189,6 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
   const running = b.status === 'running'
   const asyncTask = running && (b.promoted || Boolean(b.taskId))
   const interruptTask = useAppStore((s) => s.interruptTask)
-  // 待办工具（todo_add / todo_update）→ 计划卡片（对话内计划视图）。
-  // 快照为空且已结束（如历史会话 todos 未随恢复带出）→ 回落通用工具行，保底可展开看参数。
-  if ((b.name === 'todo_add' || b.name === 'todo_update') && (running || todos.length > 0)) {
-    return <TodoToolCard b={b} live={live} />
-  }
   return (
     // data-family：分类色板的挂钩（看=蓝/跑=青/写=紫/托=橙…，规则在 index.css）。
     // 组件只声明"这是什么工具"，不声明颜色 —— 换皮肤时不碰 .tsx。
@@ -564,7 +459,7 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
 })
 
 // 连续工具块 → 纵向分组卡片（并行工具上下排；单工具 = 单行卡片）
-// liveTodoId：最新一张待办工具卡（todo_*）的 toolId —— 仅它展开实时清单，旧卡折叠。
+// 待办（todo_*）不在这里出现：连续的写会先被并成一张表（见下方 ToolGroup）。
 /** V3 皮肤的行首图标：按工具名取语义（与 docs/agent-ui-lab 的 ICON 映射一致）。
  *  默认皮肤下 .ic 被 CSS 隐藏（html:not([data-skin='v3']) .ic { display: none }），零影响。
  *  工具行与任务卡（TaskCard 的 .ic）共用这一份映射。 */
@@ -578,14 +473,31 @@ export const ToolIcon = memo(function ToolIcon({ name }: { name: string }) {
   return <TerminalIcon size={16} />
 })
 
-export const ToolGroup = memo(function ToolGroup({ tools, liveTodoId = '', host = 'main' }: { tools: ToolRowData[]; liveTodoId?: string; host?: ToolRowHost }) {
-  return (
-    <div className="tool-group">
-      {tools.map((t, i) => (
-        <ToolRow key={t.id ?? t.toolId ?? i} b={t} live={t.toolId === liveTodoId} host={host} />
-      ))}
-    </div>
-  )
+/* todo_* 的契约是「一次调用 = 整张表」，所以连续几次写是**同一张表的几张快照**，
+   不是几行转录。这里把连续的写并成一个块：列表取最后一张，变化由组件自己比出来。 */
+const isTodoTool = (b: ToolRowData) => (b.name === 'todo_add' || b.name === 'todo_update')
+
+export const ToolGroup = memo(function ToolGroup({ tools, host = 'main' }: { tools: ToolRowData[]; host?: ToolRowHost }) {
+  const sessionTodos = useAppStore((s) => s.todos)
+  const nodes: ReactNode[] = []
+  for (let i = 0; i < tools.length; i++) {
+    const t = tools[i]
+    // 快照为空且已结束（历史会话 todos 未随恢复带出）→ 回落通用工具行，保底可展开看参数
+    const hasTodo = isTodoTool(t) && (t.status === 'running' || (t.todos ?? sessionTodos).length > 0)
+    if (!hasTodo) {
+      nodes.push(<ToolRow key={t.id ?? t.toolId ?? i} b={t} host={host} />)
+      continue
+    }
+    const writes: TodoWrite[] = []
+    let j = i
+    while (j < tools.length && isTodoTool(tools[j]) && (tools[j].status === 'running' || (tools[j].todos ?? sessionTodos).length > 0)) {
+      writes.push({ items: tools[j].todos ?? sessionTodos, running: tools[j].status === 'running' })
+      j++
+    }
+    nodes.push(<TodoBlock key={t.id ?? t.toolId ?? i} writes={writes} />)
+    i = j - 1
+  }
+  return <div className="tool-group">{nodes}</div>
 })
 
 // 任务结果（卡片底部）：主对话卡（AgentCard）与右栏任务卡（AgentView /

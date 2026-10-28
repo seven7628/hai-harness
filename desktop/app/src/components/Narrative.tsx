@@ -472,16 +472,6 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
   }, [hasMore, olderLoading, olderError, moreCursor, onLoadOlder, blocks.length, nodeGen])
-  // 最新一张待办工具卡（todo_add / todo_update）：仅它展开并实时反映 todos 快照
-  // （倒序扫第一个即最新；旧卡随 live 翻 false 自动折叠，见 TodoToolCard）
-  const liveTodoId = useMemo(() => {
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const b = blocks[i]
-      if (b.kind === 'tool' && (b.name === 'todo_add' || b.name === 'todo_update')) return b.toolId
-    }
-    return ''
-  }, [blocks])
-
   // —— 智能置底（2026-08-22）：流式输出期间用户上滑浏览历史时，不再被新块拽回底部 ——
   // stickRef：是否贴底。纯 ref（滚动是高频事件，绝不逐 tick setState）；
   // 只有「跨过」底部边界时才 setState（away/fresh 指示器显隐，一次手势最多一次重渲）。
@@ -969,7 +959,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           group.push(list[i + 1] as Extract<MsgBlock, { kind: 'tool' }>)
           i++
         }
-        out.push(<ToolGroup key={group[0].id} tools={group} liveTodoId={liveTodoId} />)
+        out.push(<ToolGroup key={group[0].id} tools={group} />)
       } else {
         out.push(renderBlock(b))
       }

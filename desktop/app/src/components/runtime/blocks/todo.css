@@ -1,0 +1,206 @@
+/* Ported from design/agent-runtime/v2/parts/todo.css.
+   State is a glyph plus a colour, never a bar. The only numbers printed are how
+   many steps are done and how many times the sheet was rewritten. */
+
+.rt-td {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 8px 0 10px;
+  /* the fold is dropped into a column whose width this component does not own */
+  container-type: inline-size;
+}
+
+/* The summary line is the tool's return value: the counts, then the write
+   clock. The 9px inset is the change gutter plus its gap, so the summary and
+   the items start on the same line and only the rule runs full width. */
+.rt-td-head {
+  display: flex;
+  align-items: baseline;
+  gap: 3px 10px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding: 0 0 8px 9px;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+  transition: border-color 150ms var(--ease);
+}
+
+.rt-td[data-open] .rt-td-head {
+  border-bottom-color: var(--border);
+}
+
+.rt-td-head:hover { color: var(--text-2); }
+
+.rt-td-sum {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.rt-td-sum .sep { opacity: 0.55; }
+
+.rt-td[data-s='run'] .rt-td-sum { color: var(--text-2); }
+
+.rt-td-writes {
+  margin-left: auto;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.rt-td-chev {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  align-self: center;
+  color: var(--text-3);
+  transition: transform 180ms var(--ease);
+}
+
+.rt-td-head[aria-expanded='true'] .rt-td-chev { transform: rotate(90deg); }
+
+.rt-td-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms var(--ease);
+}
+
+.rt-td-fold.open { grid-template-rows: 1fr; }
+.rt-td-fold > div { min-height: 0; overflow: hidden; }
+
+.rt-td-list { display: grid; grid-template-columns: minmax(0, 1fr); }
+
+/* Three tracks, and the first two never change width: a 2px change gutter, the
+   state glyph, the sentence. A trailing column was tried and cut — the glyph
+   already says the state, so a right-hand word would be a second thing to read
+   and would put the tail of a row 600px from its head. */
+.rt-td-row {
+  display: grid;
+  grid-template-columns: 2px 14px minmax(0, 1fr);
+  column-gap: 7px;
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.rt-td-row:last-child { border-bottom: 0; }
+
+.rt-td-mark {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--text-3) 42%, var(--border));
+  border-radius: 50%;
+  color: transparent;
+  transition: background-color 180ms var(--ease), border-color 180ms var(--ease), color 180ms var(--ease);
+}
+
+.rt-td-mark svg { width: 10px; height: 10px; display: block; }
+
+.rt-td-row[data-s='completed'] .rt-td-mark {
+  /* white, not --bg: a check on a saturated green is a light mark in both
+     themes, and the page colour is not light in one of them */
+  background: var(--success);
+  border-color: var(--success);
+  color: #fff;
+}
+
+/* The only thing in motion: a 2.6s breath. Slow on purpose — a checklist step
+   being worked on is not a spinner, and the range is narrow because a dot that
+   fades to nothing reads as the empty ring, which is the pending state. */
+.rt-td-row[data-s='in_progress'] .rt-td-mark {
+  border-color: var(--accent-border);
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+.rt-td-row[data-s='in_progress'] .rt-td-mark svg {
+  transform-origin: center;
+  animation: rt-td-breathe 2.6s var(--ease) infinite;
+}
+
+@keyframes rt-td-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.58; transform: scale(0.8); }
+}
+
+.rt-td-row[data-s='blocked'] .rt-td-mark {
+  border-color: color-mix(in srgb, var(--warning) 58%, var(--border));
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+}
+
+/* The change mark: a 2px bar in its own gutter. Nothing shifts when a write
+   lands because the gutter is always there, and a column of bars is the
+   quietest thing that can still be found by scanning one edge. */
+.rt-td-delta {
+  width: 2px;
+  height: 12px;
+  margin-top: 4px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background-color 180ms var(--ease);
+}
+
+.rt-td-row[data-delta='new'] .rt-td-delta { background: color-mix(in srgb, var(--accent) 82%, transparent); }
+.rt-td-row[data-delta='changed'] .rt-td-delta { background: color-mix(in srgb, var(--text-3) 42%, transparent); }
+
+.rt-td-t {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: -0.005em;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.rt-td-t code {
+  font: 400 0.88em/1.45 var(--font-mono);
+  letter-spacing: -0.01em;
+  padding: 0 1px;
+}
+
+.rt-td-row[data-s='in_progress'] .rt-td-t { color: var(--text); font-weight: 500; }
+
+.rt-td-row[data-s='completed'] .rt-td-t {
+  color: var(--text-3);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--text-3) 52%, transparent);
+}
+
+/* amber on the words, not on a badge: what is held has to say what holds it */
+.rt-td-row[data-s='blocked'] .rt-td-t { color: color-mix(in srgb, var(--warning) 84%, var(--text)); }
+
+.rt-td-wait {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.rt-td-wait .w { color: var(--warning); }
+
+@container (max-width: 520px) {
+  .rt-td-writes { margin-left: 0; }
+  .rt-td-t { font-size: 12.5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rt-td-fold,
+  .rt-td-chev,
+  .rt-td-mark { transition: none; }
+  .rt-td-row[data-s='in_progress'] .rt-td-mark svg { animation: none; }
+}
