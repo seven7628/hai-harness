@@ -226,9 +226,24 @@ export default function AskUserQuestionPanel() {
                   }}
                 >
                   <div className={rt ? 'ask-head' : 'q-title'}>
-                    <span className="q-no">{i + 1}</span>
+                    {/* 设计的问题是「一个图标 + 一句话」两列（--ask-lead 26px），
+                        不是带序号的徽标；批次里的序号由 kbd 列承担 */}
+                    <span className={rt ? 'ask-ic' : 'q-no'} aria-hidden="true">
+                      {rt ? (
+                        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                          <circle cx="6" cy="6" r="4.5" />
+                          <path d="M4.85 4.7a1.2 1.2 0 1 1 1.55 1.14c-.3.12-.4.36-.4.66" />
+                          <path d="M6 8.3h.01" />
+                        </svg>
+                      ) : (
+                        i + 1
+                      )}
+                    </span>
                     <span className={rt ? 'ask-q' : 'q-text'}>{it.question}</span>
                   </div>
+                  {/* 设计的卡分三段：head / body / foot。body 自带 12px 6px 内距，
+                      没有它选项会贴到卡的边框上 */}
+                  <div className={rt ? 'ask-body' : undefined}>
                   {it.options.length > 0 && renderOptions(it, i)}
                   <input
                     ref={i === 0 ? firstRef : undefined}
@@ -246,6 +261,7 @@ export default function AskUserQuestionPanel() {
                     aria-label={t('ask.inputAria').replace('{n}', String(i + 1))}
                     spellCheck={false}
                   />
+                  </div>
                 </div>
               ))}
             </div>
