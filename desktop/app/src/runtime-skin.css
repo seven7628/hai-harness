@@ -842,3 +842,41 @@ html[data-skin='runtime'] .rt-collapse > * {
 html[data-skin='runtime'] .rt-collapse.open {
   grid-template-rows: 1fr;
 }
+
+/* 这一条**故意不带皮肤前缀**：光标在默认皮肤下也必须有形（它原来是一个 ▍ 字符）。
+   皮肤只改它的颜色（accent vs running）。 */
+.rt-caret {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--running);
+  border-radius: 1px;
+  animation: blink 1.05s steps(1) infinite;
+}
+
+/* port/transcript.css:216 — the streaming caret: a 6×14 accent block that
+   blinks on steps(1), so it is either there or it is not */
+html[data-skin='runtime'] .rt-caret {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: blink 1.05s steps(1) infinite;
+}
+
+/* port/motion.css:122 */
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}

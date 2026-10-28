@@ -895,7 +895,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
               {!b.streaming && (
                 <AssistantTurnMeta b={b} />
               )}
-              {b.streaming && <span className="mono" style={{ color: 'var(--running)' }}>▍</span>}
+              {/* 流式光标：设计是 6×14 的 accent 方块，闪在 steps(1) 上（`.rt-caret`，
+                  1.05s）—— 一个字符做不到方块的高宽比，也闪不出阶梯而不是渐变 */}
+              {b.streaming ? <span className="rt-caret" aria-hidden="true" /> : null}
             </div>
           ) : null}
         </div>
