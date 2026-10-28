@@ -7,6 +7,7 @@ import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
 import { foldedBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
+import { batchLine } from './runtime/turn/batch'
 import { WorkFold } from './runtime/turn/WorkFold'
 import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
@@ -956,9 +957,13 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const groupRounds = (list: MsgBlock[]): (ReactElement | null)[] => {
     const rs = roundsOf(list)
     return rs.map((r, ri) => {
+      const tools = r.items.filter((b): b is Extract<MsgBlock, { kind: 'tool' }> => b.kind === 'tool')
+      const line = tools.length ? batchLine(tools) : ''
       const inner = groupBlocks(r.say ? [r.say, ...r.items] : r.items)
       return (
         <div className="rt-grp" key={r.key + ri}>
+          {/* 一组调用先折成一行（动词 + 对象 + 它数的量 + 耗时），再是逐条行 */}
+          {line ? <div className="rt-batch">{line}</div> : null}
           {inner}
         </div>
       )

@@ -991,3 +991,20 @@ html[data-skin='runtime'] .rt-grp {
 html[data-skin='runtime'] .rt-grp + .rt-grp {
   margin-top: calc(var(--rt-work-gap, 6px) * 2);
 }
+
+/* ---------------------------------------------------------------------------
+   A5 · the batch line  (ui.components.css:2079-2090 `.cy-act` 形态，逐字)
+   ------------------------------------------------------------------------ */
+
+html[data-skin='runtime'] .rt-batch {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 62ch;
+  padding: 1px 6px 1px 0;
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
