@@ -8,6 +8,7 @@ import { Ledger } from '../components/runtime/turn/Ledger'
 import { Thinking } from '../components/NarrativeBlocks'
 import { Compact } from '../components/runtime/blocks/Compact'
 import { TodoBlock } from '../components/runtime/blocks/Todo'
+import { ArtifactCard } from '../components/ArtifactCard'
 import type { MsgBlock } from '../store/useAppStore'
 
 const SYSTEMS = ['pip', 'cat', 'ghost'] as const
@@ -102,6 +103,22 @@ export function RuntimeLab() {
                 { id: 't7', title: '补一条连跑 5 次不挂的回归测试', done: false },
                 { id: 't6', title: '更新 README「测试与沙箱」段', done: false },
               ] },
+            ]}
+          />
+        </div>
+      </div>
+
+      <div style={row}>
+        <span style={lab}>artifacts · hero + 5 others (hover the rows)</span>
+        <div style={{ maxWidth: 640 }}>
+          <ArtifactCard
+            items={[
+              { name: 'view_reducer.go', path: 'desktop/bridge/view_reducer.go', kind: 'modified', added: 38, removed: 6, size: 118420, lines: 3298, sha256: 'c02e5b9d' },
+              { name: 'artifacts.js', path: 'design/agent-runtime/v2/parts/artifacts.js', kind: 'created', added: 214, removed: 0, size: 8412, lines: 214, sha256: '9f3c1a77' },
+              { name: 'artifacts.css', path: 'design/agent-runtime/v2/parts/artifacts.css', kind: 'created', added: 186, removed: 0, size: 6104, lines: 186, sha256: '4b81de0c' },
+              { name: 'README.md', path: 'README.md', kind: 'modified', added: 12, removed: 3, size: 4210, lines: 96 },
+              { name: 'shot.png', path: 'design/agent-runtime/shots/shot.png', kind: 'created', added: 0, removed: 0, size: 384120 },
+              { name: 'bench.csv', path: 'benchmark/out/bench.csv', kind: 'created', added: 40, removed: 0, size: 2210, lines: 40 },
             ]}
           />
         </div>

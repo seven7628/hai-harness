@@ -179,3 +179,120 @@ html[data-skin='runtime'] .thinking-toggle .mono {
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   3. artifacts — the headline file is the card, the card is not
+   ------------------------------------------------------------------------ */
+
+/* v2's rule: a part drops into the transcript column and must not draw a second
+   card around itself. Our card has a frame, a 104px tile and an inner list; in
+   the runtime skin the frame goes, the tile shrinks to a glyph, and the file
+   that matters keeps a quiet outline of its own. */
+html[data-skin='runtime'] .artifacts-card {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  overflow: visible;
+}
+
+html[data-skin='runtime'] .art-hero {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+html[data-skin='runtime'] .art-tile {
+  flex: 0 0 auto;
+  width: 22px;
+  padding: 10px 0 0 11px;
+  align-items: flex-start;
+  justify-content: flex-start;
+  background: none;
+  border-right: 0;
+}
+
+html[data-skin='runtime'] .art-tile .glyph > svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* the extension is already in the filename; a second copy in caps is noise */
+html[data-skin='runtime'] .art-tile .ext {
+  display: none;
+}
+
+html[data-skin='runtime'] .art-hero-body {
+  padding: 9px 11px 9px 6px;
+}
+
+html[data-skin='runtime'] .art-hero-name {
+  font-size: 13px;
+  font-weight: 550;
+}
+
+html[data-skin='runtime'] .art-rest {
+  border-top: 0;
+  padding: 2px 0 0;
+}
+
+html[data-skin='runtime'] .art-rest-hd {
+  border-bottom: 0;
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+html[data-skin='runtime'] .art-rest .art {
+  padding: 6px 11px;
+  border-radius: 6px;
+}
+
+html[data-skin='runtime'] .art-rest .art:hover {
+  background: var(--rt-hover);
+}
+
+html[data-skin='runtime'] .art-ft {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 8px;
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+/* the folder is a hover fact, not a permanent line: five rows of path text is a
+   file manager, and this is a tail of a turn. The row grows downward so the
+   pointer never leaves the row that grew. */
+html[data-skin='runtime'] .art-rest .art-path {
+  display: none;
+}
+
+html[data-skin='runtime'] .art-rest .art:hover .art-path,
+html[data-skin='runtime'] .art-rest .art:focus-within .art-path {
+  display: block;
+}
+
+@media (hover: none) {
+  html[data-skin='runtime'] .art-rest .art-path { display: block; }
+}
+
+/* the footer's two buttons are furniture in the default skin; here they are the
+   same quiet mono sentence as the rest of the line until pointed at */
+html[data-skin='runtime'] .art-ft .btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  height: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+html[data-skin='runtime'] .art-ft .btn:hover {
+  color: var(--text);
+  background: none;
+  border: 0;
+}
+
+html[data-skin='runtime'] .art-ft .btn.icon {
+  padding: 0;
+  width: auto;
+}
