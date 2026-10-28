@@ -20,6 +20,7 @@ import { fmtTokens, fmtDuration, fmtUsd, UsageChip, UnifiedDiff } from './ui'
 import { toolArgsSummary } from '../lib/toolSummary'
 import { toolFamily, fileTypeOf } from '../lib/palette'
 import { splitThinkingParagraphs } from '../lib/thinkingText'
+import { Face } from './runtime/Face'
 import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
@@ -106,6 +107,9 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
       <div className="thinking-hd">
         <button className="thinking-toggle" onClick={() => setOpen((v) => !v)} aria-expanded={showFull} aria-label={showFull ? t('thinking.collapse') : t('thinking.expand')}>
           {/* V3 皮肤的行首图标：thinking=灵感（默认皮肤下 .ic 不渲染 → 现状不变） */}
+          {/* 运行时皮肤的脸：状态由这一段自己的状态给（生成中/展开/折叠），
+              不另设一套。`.ic` 留给 v3 皮肤，默认皮肤下它整片 display:none。 */}
+          <Face state={running ? 'run' : showFull ? 'engaged' : 'done'} />
           <span className="ic" aria-hidden="true">{<Sparkles size={16} />}</span>
           <span className="mono">▸ {t('thinking.label')}{<ElapsedTimer startAt={thinkStart} running={running} durMs={thinkMs} />}</span>
         </button>

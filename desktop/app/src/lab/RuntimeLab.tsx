@@ -4,6 +4,8 @@ import { AGENT_KINDS } from '../components/runtime/agent-marks'
 import { Orbit } from '../components/runtime/Orbit'
 import { WorkFold } from '../components/runtime/turn/WorkFold'
 import { selectTurns, turnStats } from '../components/runtime/turn/selectTurns'
+import { Ledger } from '../components/runtime/turn/Ledger'
+import { Thinking } from '../components/NarrativeBlocks'
 import type { MsgBlock } from '../store/useAppStore'
 import { useState } from 'react'
 
@@ -67,6 +69,21 @@ export function RuntimeLab() {
         <span style={{ font: '400 10px/1.4 var(--font-mono)', color: 'var(--ink-3)' }}>
           stats: {JSON.stringify(stats)}
         </span>
+      </div>
+
+      <div style={row}>
+        <span style={lab}>ledger · rest / hover(tap) · 4 facts + 3 timings</span>
+        <Ledger calls={10} tokens={4746407} cacheRead={4731008} input={4736569}
+          wallMs={249000} ttftMs={3306} llmMs={118400} outputTokens={9838} />
+        <Ledger calls={1} tokens={833719} cacheRead={827136} input={830616} wallMs={31000} />
+        <span style={{ font: '400 10px/1.4 var(--font-mono)', color: 'var(--ink-3)' }}>
+          第二行没有计时字段 → 不渲染展开（宁缺勿造）
+        </span>
+      </div>
+
+      <div style={row}>
+        <span style={lab}>thinking · live / settled (face + duration)</span>
+        <Thinking text="先确认这条链路上有没有别的读取点：grep os.UserHomeDir 在会话恢复里只出现两次，其中一次在测试夹具。" live={false} thinkMs={4820} />
       </div>
 
       <div style={row}>
