@@ -6,6 +6,7 @@ import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from 
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
 import { foldedBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
+import { roundsOf } from './runtime/turn/rounds'
 import { WorkFold } from './runtime/turn/WorkFold'
 import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
@@ -949,6 +950,21 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     return out.map((el, i) => (el ? cloneElement(el, { style: { ...(el.props.style || {}), '--i': i } }) : el))
   }
 
+  /* 运行时皮肤下，一轮内部先分「round」再铺开：一条 assistant（它的 reasoning 与文字）
+     开一个 round，其后的工具/子 agent 归它；没有前置 assistant 的连续工具自成一段。
+     设计用这个边界表达 6px（段内）与 12px（段间）—— 没有分组，那两个数就没有意义。 */
+  const groupRounds = (list: MsgBlock[]): (ReactElement | null)[] => {
+    const rs = roundsOf(list)
+    return rs.map((r, ri) => {
+      const inner = groupBlocks(r.say ? [r.say, ...r.items] : r.items)
+      return (
+        <div className="rt-grp" key={r.key + ri}>
+          {inner}
+        </div>
+      )
+    })
+  }
+
   /* 一轮 = 一条 user 消息到下一条之间。store 里没有这个对象（见 PORT-PLAN §5），
      所以这里派生：轮尾账要 usage、轮首要有折叠行，两者都靠 selectTurns 的归属。
 
@@ -971,8 +987,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        「我看看 X」的旁白、思考、工具全在工作过程里。展开才按原顺序读全过程。
        详细档：原顺序整段展开，不折叠（v2 里详细档根本没有折叠行）。 */
     const shut = concise && !open
-    const workItems = concise ? groupBlocks(turn.items.filter(isWork)) : []
-    const body = groupBlocks(shut ? foldedBody(turn) : turn.items)
+    const workItems = concise ? (skin === 'runtime' ? groupRounds(turn.items.filter(isWork)) : groupBlocks(turn.items.filter(isWork))) : []
+    const body = skin === 'runtime' ? groupRounds(shut ? foldedBody(turn) : turn.items) : groupBlocks(shut ? foldedBody(turn) : turn.items)
     if (!body.length && !workItems.length && !work) continue
     items.push(
       <div

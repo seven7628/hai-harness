@@ -975,3 +975,19 @@ html[data-skin='runtime'] .answer-acts .act:focus-visible {
     opacity: 1;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   A4 · rounds inside a turn  (transcript.css:378-390, ui.components.css:1941)
+   ------------------------------------------------------------------------ */
+
+html[data-skin='runtime'] .rt-grp {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: var(--rt-work-gap, 6px);
+}
+
+/* rounds are the bigger unit, so they take twice the inside-a-round gap */
+html[data-skin='runtime'] .rt-grp + .rt-grp {
+  margin-top: calc(var(--rt-work-gap, 6px) * 2);
+}
