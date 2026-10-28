@@ -24,6 +24,7 @@ html[data-skin='runtime'] .cy-file .n {
 html[data-skin='runtime'] .cy-file .cy-dstat {
   margin-left: auto;
   display: inline-flex;
+  flex: none;
   gap: 5px;
   font: 400 11px/1 var(--mono);
 }
@@ -43,8 +44,10 @@ html[data-skin='runtime'] .cy-file .chev {
   color: var(--ink-3);
 }
 
+/* 设计里 --line-strong 从未定义，回退到 --line —— 也就是悬停不换边框色，
+   那一行本来就是「可点的一句」，不是按钮。照抄，不自己造一个颜色。 */
 html[data-skin='runtime'] .cy-file:hover {
-  border-color: var(--ink-line-2);
+  border-color: var(--line-strong, var(--line));
 }
 
 html[data-skin='runtime'] .cy-file:focus-visible {
