@@ -4,7 +4,7 @@ import { useAppStore, genMsOf } from '../store/useAppStore'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
-import { foldedBody, selectTurns, turnStats, turnUsage } from './runtime/turn/selectTurns'
+import { foldedBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
 import { WorkFold } from './runtime/turn/WorkFold'
 import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
@@ -17,8 +17,9 @@ import { CompressionBlock, InlineCode, Thinking, ToolGroup } from './NarrativeBl
 import { AgentTaskCard } from './TaskCard'
 import HaiLogo from './HaiLogo'
 import { CheckCircleIcon, PaperclipIcon } from './icons'
-import { fmtDuration, fmtRun, fmtClock, fmtUsd } from './ui'
+import { fmtDuration, fmtRun, fmtClock, fmtTime, fmtUsd } from './ui'
 import { useClock } from '../lib/useNow'
+import { useSkin } from '../lib/useSkin'
 import { ArtifactCard } from './ArtifactCard'
 import { UsageActivityMini } from './UsageStats'
 import { useT } from '../i18n'
@@ -159,9 +160,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const persona = useAppStore((s) => s.persona)
   const turnMetrics = useAppStore((s) => (viewSid ? s.views[viewSid]?.turns : s.turns))
   const storedDensity = useAppStore((s) => s.settings.narrative_density ?? 'concise')
-  // 会话页样式（current/v3/runtime）：用户块按设计重塑只在 runtime 皮肤下生效，
-  // 另两档保留原结构 —— 那是它们已经被验证过的样子。
-  const skin = useAppStore((s) => s.settings.narrative_skin ?? 'current')
+  // 会话页样式（current/v3/runtime）：用户块与轮头按设计重塑只在 runtime 皮肤下生效，
+  // 另两档保留原结构 —— 那是它们已经被验证过的样子。读 data-skin 属性而非 store：
+  // 属性是「实际渲染成什么」的唯一事实，store 是意图（见 lib/useSkin.ts）。
+  const skin = useSkin()
   const density = densityProp ?? storedDensity
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
@@ -937,6 +939,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     if (turn.user) items.push(renderBlock(turn.user))
     const stats = turnStats(turn)
     const usage = turnUsage(turn, turnMetrics)
+    const head = turnHead(turn)
     const concise = density === 'concise'
     // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
     // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
@@ -958,6 +961,12 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         data-foot={usage.matched ? '1' : undefined}
         key={turn.key}
       >
+        {skin === 'runtime' && (head.model || head.t0 != null) ? (
+          <div className="rt-head">
+            {head.model ? <span>{head.model}</span> : null}
+            {head.t0 != null ? <span className="rt-t">{fmtTime(head.t0)}</span> : null}
+          </div>
+        ) : null}
         {concise && work ? (
           <WorkFold
             stats={stats}

@@ -87,6 +87,15 @@ export function fmtClock(ts?: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+/* 只有时刻，没有日期：轮头一行是「哪个模型 · 什么时候」，日期在会话标题上
+   已经有了（设计里的轮头就是 19:20:02 这个形态）。 */
+export function fmtTime(ts?: number): string {
+  if (ts == null) return ''
+  const d = new Date(ts)
+  const pad = (v: number) => String(v).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 // unified diff 渲染（变更 Tab / 审批弹窗共用）：行号 + +/-/ctx 着色
 export function UnifiedDiff({ unified, className = '' }: { unified: string; className?: string }) {
   return (

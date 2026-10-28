@@ -128,6 +128,25 @@ export function turnStats(turn: Turn): TurnStats {
   }
 }
 
+/* The turn head is one dim line: which model answered it, and when it opened.
+   The model is taken from the answer when there is one — a turn can switch
+   models halfway, and the head should name the one that produced the text, not
+   whichever call happened to come first. */
+export interface TurnHead {
+  model?: string
+  t0?: number
+}
+
+export function turnHead(turn: Turn): TurnHead {
+  const fromAnswer = turn.answer?.model
+  const fromItems = turn.items.find((b) => b.kind === 'assistant' && b.model)
+  const model = fromAnswer || (fromItems && fromItems.kind === 'assistant' ? fromItems.model : undefined)
+  // 轮的开口时刻 = 用户那句话的时刻；没有 user 块（会话截断）才退到首块
+  const first = turn.user ?? turn.items.find((b) => 'ts' in b && b.ts)
+  const t0 = first && 'ts' in first ? first.ts : undefined
+  return { model, t0 }
+}
+
 export function turnUsage(turn: Turn, metrics: TurnMetric[] | undefined): TurnUsage {
   const runs = new Set<string>()
   turn.items.forEach((b) => {

@@ -680,3 +680,25 @@ html[data-skin='runtime'] .rt-turn .md table th.n {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+/* ---------------------------------------------------------------------------
+   F4 · the turn head
+   port/transcript.css: .rt-head 292 · .rt-who 227
+   ------------------------------------------------------------------------ */
+
+/* One dim line per turn: which model answered, and when the turn opened. It
+   replaced nothing that was visible — the per-block `.who` (logo + model + time,
+   12px) is hidden under this skin because the same two facts now sit here once
+   per turn instead of once per paragraph. */
+html[data-skin='runtime'] .rt-head {
+  display: flex;
+  gap: 9px;
+  margin-bottom: 8px;
+  font: 400 10.5px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+/* the clock is the quieter half: a time you can find, not a time that competes */
+html[data-skin='runtime'] .rt-head .rt-t {
+  color: color-mix(in oklab, var(--ink-3) 66%, transparent);
+}
