@@ -201,13 +201,11 @@ export function foldedBody(turn: Turn): MsgBlock[] {
   return turn.items.filter((b) => b === turn.answer || ALWAYS_SHOWN.has(b.kind))
 }
 
-/* Running, folded density: the only thing allowed outside the working block is
-   the sentence being written right now. Every earlier llm_content, every
-   thought and every tool call lives inside it — that is what "working" means
-   (AgentStart → AgentEnd is one block). Records always stay visible. */
+/* Running, folded density: nothing of the run is outside the working block —
+   not a thought, not a mid-run sentence, not a tool. Everything the turn
+   contains lives in the box; only the record (signals, artifacts, receipts)
+   stays outside, because a record is not "work in progress". The final reply
+   appears outside at AgentEnd, when the fold closes. */
 export function runningBody(turn: Turn): MsgBlock[] {
-  const last = turn.items[turn.items.length - 1]
-  return turn.items.filter(
-    (b) => ALWAYS_SHOWN.has(b.kind) || (b === last && b.kind === 'assistant' && b.streaming),
-  )
+  return turn.items.filter((b) => ALWAYS_SHOWN.has(b.kind))
 }

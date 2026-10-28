@@ -1279,3 +1279,12 @@ html[data-skin='runtime'] .pv-foot {
     animation: none;
   }
 }
+
+/* 运行中的这一段不能用 content-visibility：它一边长高一边自动滚到底，
+   浏览器会在「跳过绘制 / 开始绘制」之间反复切（实测 18s 内 21 次），
+   每次切换都是一次闪屏。只关**当前这一轮**的（历史仍保留该优化）。 */
+html[data-skin='runtime'] .rt-turn[data-open] .msg,
+html[data-skin='runtime'] .rt-turn .msg:has(.rt-caret) {
+  content-visibility: visible;
+  contain-intrinsic-size: auto none;
+}

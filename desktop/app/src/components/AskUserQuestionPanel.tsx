@@ -57,6 +57,10 @@ export default function AskUserQuestionPanel() {
   const [multiSel, setMultiSel] = useState<Record<string, string[]>>({})
   // 面板收起（只留标题条）——把版面让给叙述区；作答状态都在本组件里，收起不丢
   const [folded, setFolded] = useState(false)
+  // 分页：设计一次只问一道（.ask-step 那行「question 1 of 2」+ 圆点），
+  // 不是把两三个问题上下摞成两三张卡 —— 摞起来读的人不知道自己在第几问。
+  const [step, setStep] = useState(0)
+  const [cursor, setCursor] = useState(-1) // ↑↓ 的落点（设计 .ask-opt[data-cursor]）
   const firstRef = useRef<HTMLInputElement>(null)
   const cd = useCountdown(question)
 
@@ -65,6 +69,8 @@ export default function AskUserQuestionPanel() {
   useEffect(() => {
     setAnswers({})
     setMultiSel({})
+    setStep(0)
+    setCursor(-1)
     if (question) requestAnimationFrame(() => firstRef.current?.focus({ preventScroll: true }))
   }, [question?.id])
 
@@ -120,7 +126,7 @@ export default function AskUserQuestionPanel() {
 
   // 选项组：带预览时左列竖排、右侧并排预览（预览只在单选出现——多选带 preview 会被
   // 后端 tools/question 拒绝，这里再兜一层）；无预览沿用原来的横排换行按钮。
-  const renderOptions = (it: PendingQuestionItem, i: number) => {
+  const renderOptions = (it: PendingQuestionItem, i: number, cur = -1) => {
     const pv = it.multi ? null : previewFor(it)
     const list = (
       <div
@@ -135,6 +141,7 @@ export default function AskUserQuestionPanel() {
             <button
               key={o.label}
               className={rt ? 'ask-opt' : `q-option${sel ? ' sel' : ''}`}
+              {...(rt && it.options.indexOf(o) === cur ? { 'data-cursor': '1' } : {})}
               role={it.multi ? 'checkbox' : 'radio'}
               aria-checked={sel}
               onClick={() => (it.multi ? toggle(it.id, o.label) : setAnswer(it.id, o.label))}
@@ -178,6 +185,175 @@ export default function AskUserQuestionPanel() {
       </>
     )
     return rt ? pvEl : <div className="q-split">{pvEl}</div>
+  }
+
+
+  if (rt) {
+    const at = Math.min(step, Math.max(0, items.length - 1))
+    const it = items[at]
+    const last = at + 1 >= items.length
+    const here = isAnswered(it)
+    const goNext = () => {
+      if (!here || cd?.leftMs === 0) return
+      if (last) submitAll()
+      else {
+        setStep(at + 1)
+        setCursor(-1)
+        requestAnimationFrame(() => firstRef.current?.focus({ preventScroll: true }))
+      }
+    }
+    return (
+      <div className={`dock ask-scope${folded ? ' folded' : ''}`} role="region" aria-label={t('ask.title')}>
+        <div className="dock-box">
+          <h3
+            className="dock-hd"
+            role="button"
+            tabIndex={0}
+            aria-expanded={!folded}
+            title={folded ? t('ask.expand') : t('ask.fold')}
+            onClick={() => setFolded((v) => !v)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                setFolded((v) => !v)
+              }
+            }}
+          >
+            <span className="chev" aria-hidden="true">{folded ? '▸' : '▾'}</span>
+            <span className="q-mark">?</span> {t('ask.title')}
+            {items.length > 1 ? t('ask.count').replace('{n}', String(items.length)) : ''}
+            {question.runId && <span className="mono q-run">run {question.runId}</span>}
+            {cd && (
+              <span
+                className={`mono dock-countdown${cd.leftMs === 0 ? ' over' : cd.leftMs <= 60_000 ? ' soon' : ''}`}
+                title={t('ask.countdownTitle').replace('{total}', String(Math.round((question.timeoutMs ?? 0) / 60_000)))}
+              >
+                {cd.leftMs === 0 ? t('ask.timedOut') : t('ask.timeLeft').replace('{t}', cd.label)}
+              </span>
+            )}
+            {folded && (
+              <span className="dock-fold-hint">
+                {t('ask.folded').replace('{answered}', String(answered)).replace('{total}', String(items.length))}
+              </span>
+            )}
+          </h3>
+          {!folded && (
+            <>
+              <div className="q-list">
+                <div
+                  className="ask"
+                  data-form={it.multi ? 'multi' : previewFor(it) ? 'preview' : 'plain'}
+                  {...(items.length > 1 ? { 'data-step': '' } : {})}
+                  role="group"
+                  aria-labelledby={`ask-q-${it.id}`}
+                  onKeyDown={(e) => {
+                    if (e.metaKey || e.ctrlKey || e.altKey) return
+                    const inInput = (e.target as HTMLElement).tagName === 'INPUT'
+                    if (!inInput && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                      e.preventDefault()
+                      const n = it.options.length
+                      if (!n) return
+                      const next = cursor < 0 ? 0 : (cursor + (e.key === 'ArrowDown' ? 1 : -1) + n) % n
+                      setCursor(next)
+                      return
+                    }
+                    if (!inInput) {
+                      const k = Number(e.key)
+                      if (Number.isInteger(k) && k >= 1 && k <= Math.min(9, it.options.length)) {
+                        e.preventDefault()
+                        const o = it.options[k - 1]
+                        setCursor(k - 1)
+                        if (it.multi) toggle(it.id, o.label)
+                        else setAnswer(it.id, o.label)
+                        return
+                      }
+                    }
+                    if (e.key === 'Enter') {
+                      // ⏎：光标处还没选就先选它，已选就下一问/提交
+                      if (!inInput && cursor >= 0 && !here) {
+                        const o = it.options[cursor]
+                        if (o) {
+                          e.preventDefault()
+                          if (it.multi) toggle(it.id, o.label)
+                          else setAnswer(it.id, o.label)
+                          return
+                        }
+                      }
+                      if (!inInput) {
+                        e.preventDefault()
+                        goNext()
+                      }
+                    }
+                  }}
+                >
+                  {items.length > 1 && (
+                    <div className="ask-step">
+                      <span>{t('ask.stepOf').replace('{i}', String(at + 1)).replace('{n}', String(items.length))}</span>
+                      <span className="ask-dots" aria-hidden="true">
+                        {items.map((_, k) => (
+                          <i key={k} data-on={k < at ? 'past' : k === at ? 'now' : 'next'} />
+                        ))}
+                      </span>
+                    </div>
+                  )}
+                  <div className="ask-head">
+                    <span className="ask-ic" aria-hidden="true">
+                      <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                        <circle cx="6" cy="6" r="4.5" />
+                        <path d="M4.85 4.7a1.2 1.2 0 1 1 1.55 1.14c-.3.12-.4.36-.4.66" />
+                        <path d="M6 8.3h.01" />
+                      </svg>
+                    </span>
+                    <div className="ask-q" id={`ask-q-${it.id}`}>{it.question}</div>
+                  </div>
+                  <div className="ask-body">
+                    {it.options.length > 0 && renderOptions(it, at, cursor)}
+                  </div>
+                  <input
+                    ref={firstRef}
+                    name={`question-answer-${at}`}
+                    value={answers[it.id] ?? ''}
+                    onChange={(e) => setAnswer(it.id, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter') return
+                      if (e.nativeEvent.isComposing || e.keyCode === 229) return
+                      e.preventDefault()
+                      goNext()
+                    }}
+                    placeholder={it.multi ? t('ask.placeholderExtra') : it.options.length ? t('ask.placeholderOptions') : t('ask.placeholder')}
+                    aria-label={t('ask.inputAria').replace('{n}', String(at + 1))}
+                    spellCheck={false}
+                  />
+                  <div className="ask-foot">
+                    <span className="ask-note">
+                      {cd && cd.leftMs === 0
+                        ? t('ask.timedOutHint')
+                        : t('ask.stepNote').replace('{done}', String(answered)).replace('{total}', String(items.length))}
+                    </span>
+                    <div className="ask-acts">
+                      <button
+                        type="button"
+                        className="ask-btn ghost"
+                        disabled={at === 0}
+                        onClick={() => {
+                          setStep(at - 1)
+                          setCursor(-1)
+                        }}
+                      >
+                        {t('ask.back')}
+                      </button>
+                      <button type="button" className="ask-btn go" disabled={!here || cd?.leftMs === 0} onClick={goNext}>
+                        {last ? t('ask.done') : t('ask.next')}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    )
   }
 
   return (

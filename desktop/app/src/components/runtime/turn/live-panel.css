@@ -135,3 +135,16 @@ html[data-skin='runtime'] .cy-live.is-done {
     animation: none;
   }
 }
+
+/* Working 盒子里的内容是整段转录（同详细档），所以这里给它高度上限：
+   一轮跑三十次工具时，不封顶就是把整页交给它往下推。超出在此滚动。 */
+html[data-skin='runtime'] .cy-live .rt-work-body {
+  max-height: min(52vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--ink-3) 40%, transparent) transparent;
+}
+
+/* 盒子里第一行不该再顶一段距离 */
+html[data-skin='runtime'] .cy-live .rt-turn-in > .rt-grp:first-child { margin-top: 0; }

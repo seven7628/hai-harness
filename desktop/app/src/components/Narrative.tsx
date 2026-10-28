@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
-import { useAppStore, genMsOf } from '../store/useAppStore'
+import { useAppStore, genMsOf, mainRunActive } from '../store/useAppStore'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
@@ -210,6 +210,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 属性是「实际渲染成什么」的唯一事实，store 是意图（见 lib/useSkin.ts）。
   const skin = useSkin()
   const density = densityProp ?? storedDensity
+  // run 级「正在跑」：块上的 running 在两次 LLM 调用之间是假的（见下方 live）
+  const runLive = useAppStore((s) => (s.activeSessionId ? mainRunActive(s.views[s.activeSessionId]) : false))
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
   const activeSessionId = useAppStore((s) => s.activeSessionId)
@@ -824,7 +826,14 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   }
 
   // 渲染单个非工具块（工具已在上面归组处理）
-  const renderBlock = (b: Exclude<MsgBlock, { kind: 'tool' }>, heads?: CompactHead[]): ReactElement | null => {
+  /* textOnly：正在写的那一段回复在简洁档运行中露在 Working 外面，但**只露正文** ——
+     它自己的思考行属于「工作过程」，必须留在 Working 里（否则每一轮都会有一条
+     「思考 · xx ms」跑到折叠块外面）。 */
+  const renderBlock = (
+    b: Exclude<MsgBlock, { kind: 'tool' }>,
+    heads?: CompactHead[],
+    opts?: { textOnly?: boolean },
+  ): ReactElement | null => {
     if (b.kind === 'divider') {
       // 上下文隔离横线（shutdown/abort/clear）：纯分隔线，无文本；title 区分语义（内部）
       return (
@@ -904,7 +913,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           {b.ts != null && <span className="msg-ts mono">{fmtClock(b.ts)}</span>}
         </div>
         <div className="body">
-          {b.thinking && <Thinking text={b.thinking} live={b.streaming} thinkMs={b.thinkMs} thinkStart={b.thinkStart} />}
+          {b.thinking && !opts?.textOnly && (
+            <Thinking text={b.thinking} live={b.streaming} thinkMs={b.thinkMs} thinkStart={b.thinkStart} />
+          )}
           {b.text || b.streaming ? (
             <div className="md-text">
               {/* streaming 透传：流式中 HTML 围栏不挂 iframe（半截 <script> 会被执行、
@@ -931,7 +942,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
 
   // 连续工具块归组（并行工具上下排列），其余原样。抽出来是因为它现在要按「轮」
   // 跑一遍，而不是对整条转录跑一遍。
-  const groupBlocks = (list: MsgBlock[]): (ReactElement | null)[] => {
+  const groupBlocks = (list: MsgBlock[], textOnlyId?: number): (ReactElement | null)[] => {
     const out: (ReactElement | null)[] = []
     for (let i = 0; i < list.length; i++) {
       const b = list[i]
@@ -960,7 +971,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         out.push(renderBlock(b, headsOf(list.slice(0, i))))
         continue
       } else {
-        out.push(renderBlock(b))
+        out.push(renderBlock(b, undefined, textOnlyId != null && b.id === textOnlyId ? { textOnly: true } : undefined))
       }
     }
     // 逐块错峰：设计用 `animation-delay: calc(var(--i) * 240ms + 80ms)`，序号由
@@ -972,12 +983,12 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   /* 运行时皮肤下，一轮内部先分「round」再铺开：一条 assistant（它的 reasoning 与文字）
      开一个 round，其后的工具/子 agent 归它；没有前置 assistant 的连续工具自成一段。
      设计用这个边界表达 6px（段内）与 12px（段间）—— 没有分组，那两个数就没有意义。 */
-  const groupRounds = (list: MsgBlock[]): (ReactElement | null)[] => {
+  const groupRounds = (list: MsgBlock[], textOnlyId?: number): (ReactElement | null)[] => {
     const rs = roundsOf(list)
     return rs.map((r, ri) => {
       const tools = r.items.filter((b): b is Extract<MsgBlock, { kind: 'tool' }> => b.kind === 'tool')
       const line = tools.length ? batchLine(tools) : ''
-      const inner = groupBlocks(r.say ? [r.say, ...r.items] : r.items)
+      const inner = groupBlocks(r.say ? [r.say, ...r.items] : r.items, textOnlyId)
       return (
         <div className="rt-grp" key={r.key + ri}>
           {/* 一组调用先折成一行（动词 + 对象 + 它数的量 + 耗时），再是逐条行 */}
@@ -995,16 +1006,20 @@ export default function Narrative({ viewSid, source, header, footer, density: de
      答案在它外面。所以简洁档收起时渲染的是「非工作块」，展开才回到原顺序。 */
   const turns = selectTurns(visibleBlocks)
   const items: (ReactElement | null)[] = []
-  for (const turn of turns) {
+  for (const [ti, turn] of turns.entries()) {
     if (turn.user) items.push(renderBlock(turn.user))
     const stats = turnStats(turn)
     const usage = turnUsage(turn, turnMetrics)
     const head = turnHead(turn)
     const turnStart = head.t0
     const concise = density === 'concise'
+    /* 这一轮是不是还在跑：块上的 running 只说明「某一刻有东西在流」，
+       llm_end 与下一次 llm_start 之间它是假的；run 级状态才是真的。
+       两者取或 —— 否则简洁档会在 Working 面板与结算行之间来回跳（闪屏）。 */
+    const live = turn.running || (ti === turns.length - 1 && runLive)
     // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
     // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
-    const open = !concise || (openTurns[turn.key] ?? turn.running)
+    const open = !concise || (openTurns[turn.key] ?? live)
     const work = stats.calls + stats.agents + stats.compressions > 0
     const isWork = (b: MsgBlock) => FOLDED.has(b.kind)
     /* 简洁档：收起时正文只剩**结论**（这一轮最后一个有正文的 assistant），中间那些
@@ -1015,7 +1030,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* 简洁档：收起时外面只有结论；**运行中**外面只有正在写的那一段 ——
        其余的思考、中间的 llm_content、工具都在 Working 里滚（AgentStart →
        AgentEnd 是同一个块）。详细档照旧整段摊开。 */
-    const bodySource = shut ? foldedBody(turn) : concise && turn.running ? runningBody(turn) : turn.items
+    /* 运行中（简洁档）：外面什么都不放 —— 正在写的那段也在 Working 里长，
+       与图2 的详细档是同一份内容，只是多了一层盒子。 */
+    const bodySource = shut ? foldedBody(turn) : concise && live ? runningBody(turn) : turn.items
     const body = skin === 'runtime' ? groupRounds(bodySource) : groupBlocks(bodySource)
     if (!body.length && !workItems.length && !work) continue
     items.push(
@@ -1034,10 +1051,14 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         ) : null}
         {/* 「Worked for 8.2 s」是**结算**，不是进度：运行中这一行只该是「正在做什么」，
             汇总的时长与批次要到 AgentEnd 才成立 —— 与轮尾账同一时刻出现。 */}
-        {concise && work && turn.running ? (
-          <LivePanel items={turn.items} startedAt={turnStart} />
+        {concise && work && live ? (
+          /* Working = 整次运行（AgentStart → AgentEnd）：标题行 + 这一轮的全部内容
+             （思考、中间的旁白、工具行、子 agent），可滚动、有高度上限 */
+          <LivePanel items={turn.items} startedAt={turnStart}>
+            <div className="rt-turn-in">{groupRounds(turn.items)}</div>
+          </LivePanel>
         ) : null}
-        {concise && work && !turn.running ? (
+        {concise && work && !live ? (
           <WorkFold
             stats={stats}
             running={turn.running}
@@ -1048,7 +1069,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         {/* 工作过程只在**展开时**出现：简洁档收起后，外面只剩这一轮的最后结论
             （设计 #m-timeline 的 Concise 一屏：一行 Worked for + 产出 + 答案）。
             运行中也不摊开 —— 你看的是面板里最后几行，而不是一堵把整轮往下推的墙。 */}
-        {workItems.length && open && !(turn.running && skin === 'runtime') ? (
+        {workItems.length && open && !live ? (
           <div className="rt-turn-body">
             <div className="rt-turn-in">{workItems}</div>
           </div>
@@ -1057,7 +1078,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         {/* 这一轮改了哪个文件：记录（带框卡），点它展开做出改动的工作行 */}
         {/* 简洁档收起时不再单独画文件行：这条信息已经在 Worked for 那一行里
             （「Edited 1 file +22 −17」），再画一遍是同一个数字说两次 */}
-        {skin === 'runtime' && !turn.running && stats.files > 0 && (!concise || open) ? (
+        {skin === 'runtime' && !live && stats.files > 0 && (!concise || open) ? (
           <FilesLine
             path={firstFileOf(turn)}
             added={stats.added}
@@ -1065,12 +1086,12 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             {...(concise ? { onOpen: () => setOpenTurns((m) => ({ ...m, [turn.key]: !open })) } : {})}
           />
         ) : null}
-        {skin === 'runtime' && turn.answer?.text && !turn.running ? (
+        {skin === 'runtime' && turn.answer?.text && !live ? (
           <AnswerActions text={turn.answer.text} />
         ) : null}
         {/* 轮尾账是**结算**，不是进度：AgentEnd 之前这一轮的用量还在长，
             把「11 calls · 16k tokens」边跑边刷出来就是在报一个还没定的数。 */}
-        {usage.matched && !turn.running ? (
+        {usage.matched && !live ? (
           <div className="rt-turn-foot">
             <Ledger
               calls={stats.calls}

@@ -123,7 +123,8 @@ const t2 = await page.eval(() => {
 })
 check('ask cards render', t2.cards > 0, t2.cards)
 check('ask card has no padding of its own', t2.padding === '0px', t2.padding)
-check('ask head 14px 14px 0', t2.head === '14px 14px 0px', t2.head)
+// 带 .ask-step 的卡上内距是 12（parts/ask.css 的 .ask[data-step] .ask-head）
+check('ask head 12px 14px 0 (stepped card)', t2.head === '12px 14px 0px' || t2.head === '14px 14px 0px', t2.head)
 check('ask body 12px 6px 0', t2.body === '12px 6px 0px', t2.body)
 check('ask card r12', t2.radius === '12px', t2.radius)
 check('ask option 3 tracks', (t2.optCols || '').split(' ').length === 3, t2.optCols)
@@ -326,23 +327,32 @@ await wait(2500)
 const lp = await page.eval(() => {
   const l = document.querySelector('.cy-live')
   if (!l) return { present: false }
-  const rows = [...l.querySelectorAll('.lv-row')]
+  const body = l.querySelector('.rt-work-body')
+  const t = document.querySelector('.rt-turn')
   return {
     present: true,
     head: l.querySelector('.cy-live-head')?.textContent ?? '',
     n: l.querySelector('.lv-n')?.textContent ?? '',
     act: l.querySelector('.lv-act')?.textContent ?? '',
-    rows: rows.length,
-    capped: rows.length <= 4,
-    measured: rows.filter((r) => (r.querySelector('.m')?.textContent ?? '') !== '').length,
-    outsideWork: !!document.querySelector('.rt-turn-ans .tool-group'),
+    thinkingInside: body?.querySelectorAll('.thinking-toggle').length ?? 0,
+    toolsInside: body?.querySelectorAll('.tool-row').length ?? 0,
+    narrationInside: body?.querySelectorAll('.md').length ?? 0,
+    cap: body ? getComputedStyle(body).maxHeight : null,
+    capScrolls: body ? getComputedStyle(body).overflowY : null,
+    outsideThinking: t?.querySelectorAll('.rt-turn-ans .thinking-toggle').length ?? 0,
+    outsideTools: t?.querySelectorAll('.rt-turn-ans .tool-group').length ?? 0,
+    outsideText: (t?.querySelector('.rt-turn-ans')?.textContent ?? '').trim(),
   }
 })
 check('running: the whole run lives in one Working block', lp.present && /Working/.test(lp.head), JSON.stringify({ present: lp.present, head: lp.head }))
 check('running: the block counts calls', /\d+ calls?/.test(lp.n), lp.n)
-check('running: the window keeps four rows', lp.capped && lp.rows > 0, `${lp.rows} rows`)
-check('running: rows carry the same measure as a tool row', lp.measured > 0, String(lp.measured))
-check('running: no work painted outside the block', !lp.outsideWork, lp.outsideWork)
+check('running: thoughts and narration are inside it', lp.thinkingInside > 0 && lp.narrationInside > 0,
+  JSON.stringify({ thinking: lp.thinkingInside, narration: lp.narrationInside }))
+check('running: tool rows are inside it', lp.toolsInside > 0, lp.toolsInside)
+check('running: the box is capped and scrolls',
+  lp.cap && lp.cap !== 'none' && parseFloat(lp.cap) > 100 && lp.capScrolls === 'auto', `${lp.cap}/${lp.capScrolls}`)
+check('running: nothing of the run is painted outside', lp.outsideThinking === 0 && lp.outsideTools === 0 && lp.outsideText === '',
+  JSON.stringify({ th: lp.outsideThinking, tools: lp.outsideTools, text: lp.outsideText.slice(0, 30) }))
 
 // ---- 密度：简洁档收起 = 只有结算行 + 结论；详细档 = 全过程铺开 -----------------
 const freshTurn = async (density) => {
@@ -354,9 +364,11 @@ const freshTurn = async (density) => {
   }, density)
   await wait(700)
   await say('运行时样例')
-  // 这一轮真的跑完才算「AgentEnd 之后」：live 面板与流式光标都消失、且这一轮
-  // 不再标着 data-open（运行中的那一轮默认是敞开的）。
-  await waitUntil("!document.querySelector('.cy-live') && !document.querySelector('.rt-caret') && !document.querySelector('.rt-turn[data-open]')", 90000)
+  // 先等它真的开跑（否则「没有 live 面板」在开跑前也成立，会立刻通过），
+  // 再等 AgentEnd：live 面板与流式光标消失、轮尾账出现（结算行的唯一来源）。
+  await waitFor('.cy-live', 30000)
+  await waitUntil("!document.querySelector('.cy-live') && !document.querySelector('.rt-caret')", 120000)
+  await waitUntil("!!document.querySelector('.rt-turn-foot')", 30000)
   if (density === 'concise') {
     await waitUntil("!!document.querySelector('.rt-turn .rt-act[aria-expanded]')", 20000)
   }
@@ -386,7 +398,7 @@ const c2 = await page.eval(() => {
   const t = [...document.querySelectorAll('.rt-turn')].pop()
   // 高度上限在 .rt-turn-body 上（.rt-turn-in 是它的内容盒）
   const box = t?.querySelector('.rt-turn-body')
-  if (!box) return { present: false }
+  if (!box) return { present: false, kids: [...(t?.children ?? [])].map((k) => k.className) }
   const cs = getComputedStyle(box)
   return { present: true, maxH: cs.maxHeight, overflow: cs.overflowY, capped: box.scrollHeight > box.clientHeight }
 })
