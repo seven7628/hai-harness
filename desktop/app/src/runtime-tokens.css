@@ -3,43 +3,80 @@
  *
  * v2 的组件是照一套 29 个语义令牌画的（--line/--card/--accent/--green…），
  * desktop 的 127 个令牌里有一半同名同义，另一半叫法不同（朱砂三支、竹/赭/靛）。
- * 这一层只做「改名」，不定义任何新颜色，而且**只在运行时组件自己的根节点上生效**
- * —— 与 index.css 的全局令牌互不影响，也不会改到任何现有组件。
+ * 这一层只做「改名」，值全部来自设计（ui.css :root[data-theme] 与 ui.css:87-97
+ * 的四档时序），并且**只在 data-skin='runtime' 的根节点上生效**。
  *
- * 主色是三分支，别混用：
- *   --accent     文字/图标（压在底上要够亮）        → --cinnabar
- *   --accent-2   图标/选中底/边框                    → --cinnabar-2
- *   --accent-solid 实心填充（承载白字）              → --accent-solid（不重映射）
+ * 为什么挂在根节点而不是组件根（2026-10 修）：
+ *   上一版挂在 :is(.rt-face, .rt-agent-mark, .rt-orbit, .rt-sa, .rt-mk) 上 ——
+ *   只有那五个元素自己看得见，而转录面（.md、.tool-row、.rt-turn）既不是这五个
+ *   类，也不是它们的祖先传下来的值能救的：自定义属性是**继承**，只要元素自身
+ *   有一条同名声明（这里没有）才覆盖，继承不会。结果 var(--line)/var(--card-2)/
+ *   var(--mono) 在转录面里全是"未定义"→ 声明在该处变成 invalid at
+ *   computed-value time → 整条 border/background/font 退化为初始值。表现就是
+ *   "颜色和细节没按设计走"，而每条规则单看都是对的。挂在根上，整棵树一次覆盖。
+ *
+ * 值也一并纠正：--t-fast 设计是 130ms（旧 120ms）、--t-base 220ms（旧 180ms）、
+ * --spring cubic-bezier(.34,1.4,.5,1)（旧 1.1/.3）、--r-xs/--r-sm 6px/8px（旧
+ * 4px/6px）。这些数字散落在 port/*.css 的每一条 transition 里，错一位就整体
+ * 不一样（见 PORT-PLAN §11.16）。
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-:is(.rt-face, .rt-agent-mark, .rt-orbit, .rt-sa, .rt-mk) {
+html[data-skin='runtime'] {
   /* 面 / 线 / 字 */
   --line: var(--ink-line);
-  --line-soft: var(--ink-line-2);
+  --line-soft: var(--rt-line-soft);
   --card: var(--paper-2);
-  --card-2: var(--paper-3);
-  --raised: var(--paper-3);
+  --card-2: var(--rt-card-2);
+  --raised: var(--rt-raised);
 
-  /* 主色与语义色 */
+  /* 主色是三分支，别混用：
+     --accent      文字/图标（压在底上要够亮）        → --cinnabar
+     --accent-2    图标/选中底/边框                    → --cinnabar-2
+     --accent-ink  压在 --accent 实心块上的字          → --rt-accent-ink
+     --accent-solid 实心填充（承载白字）               → --accent-solid（不重映射） */
   --accent: var(--cinnabar);
   --accent-2: var(--cinnabar-2);
+  --accent-ink: var(--rt-accent-ink);
   --accent-soft: var(--accent-weak);
-  --accent-ink: var(--cinnabar);
+
+  /* 语义色 */
   --green: var(--bamboo);
   --amber: var(--ochre);
-  --violet: var(--indigo);
+  --violet: var(--rt-violet); /* 设计里 violet ≠ accent（#b492ff vs #8aa0ff） */
   --red: var(--crimson);
 
-  /* 字族与几何 */
-  --mono: var(--font-mono);
-  --r-xs: 4px;
-  --r-sm: 6px;
-  --r-md: var(--radius);
+  /* 链接：设计里链接的颜色只画在下划线上（.bl-a），字本身仍是墨色 */
+  --link: var(--accent);
 
-  /* 动效：app 里这两档时间散落成字面量，这里给它们名字 */
-  --t-fast: 120ms;
-  --t-base: 180ms;
-  --spring: cubic-bezier(0.2, 1.1, 0.3, 1);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.18);
-  --shadow-lift: 0 8px 24px -8px rgba(0, 0, 0, 0.45);
+  /* 字族 */
+  --font: var(--font-ui);
+  --mono: var(--font-mono);
+
+  /* 字面量：行内代码是正文里唯一的暖色，别用冷调（ui.css:66-71） */
+  --code-ink: var(--rt-code-ink);
+  --code-bg: var(--rt-code-bg);
+
+  /* 回答的度量：46rem 是一行不用回视的宽度 */
+  --md-measure: var(--rt-measure);
+
+  /* 圆角四档（设计 ui.css:87-91；app 的 --radius=12px 只对应 --r-md） */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: var(--radius);
+  --r-lg: 16px;
+  --r-xl: 22px;
+
+  /* 时序四档 + 三条曲线：--ease 在 runtime-palette.css 里已按设计改过 */
+  --t-fast: var(--rt-t-fast);
+  --t-base: var(--rt-t-base);
+  --t-slow: var(--rt-t-slow);
+  --t-slower: var(--rt-t-slower);
+  --ease-out: var(--rt-ease-out);
+  --spring: var(--rt-spring);
+
+  /* 语义色调：组件只说要什么调子，不写色值 */
+  --tone-fact: var(--ink-3);
+  --tone-attention: var(--amber);
+  --tone-danger: var(--red);
+  --tone-ok: var(--green);
 }

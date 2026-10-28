@@ -437,3 +437,246 @@ html[data-skin='runtime'] .msg.divider .divider-line {
 html[data-skin='runtime'] .msg.assistant .who {
   display: none;
 }
+
+/* ---------------------------------------------------------------------------
+   F2 · the column, and how an answer is set
+   port/transcript.css: .rt-col 222 · .md 117-216 · answer 429-465
+   ------------------------------------------------------------------------ */
+
+/* One column, four numbers and nothing else: 6 between things inside a round,
+   8 between a round's own parts (and its answer, twice), 22 between two turns.
+   The column is 700 — at 800 a 14.5px line runs past the point where the eye
+   has to jump back to find the next one. */
+html[data-skin='runtime'] .narrative {
+  --rt-work-gap: 6px;
+  --rt-turn-gap: 8px;
+  --rt-block-gap: 8px;
+  --rt-turn-break: 22px;
+  max-width: 700px;
+  padding: 18px 20px 16px;
+}
+
+/* A turn is a grid of parts 8 apart in the design; ours are blocks, so the same
+   numbers go on margins. Block margins and grid gaps both have to be right:
+   a margin here plus a gap there is how a 22 becomes a 44. */
+html[data-skin='runtime'] .rt-turn {
+  margin-bottom: var(--rt-turn-break);
+}
+
+html[data-skin='runtime'] .rt-turn > .rt-act {
+  margin-bottom: 0;
+}
+
+/* the work rows hang 6 below their line, and nothing when they're closed */
+html[data-skin='runtime'] .rt-turn-body {
+  margin-top: var(--rt-work-gap);
+}
+
+html[data-skin='runtime'] .rt-turn[data-density='concise']:not([data-open]) > .rt-turn-body {
+  margin-top: 0;
+}
+
+html[data-skin='runtime'] .rt-turn-in > .msg,
+html[data-skin='runtime'] .rt-turn-ans > .msg {
+  margin-bottom: var(--rt-turn-gap);
+}
+
+html[data-skin='runtime'] .rt-turn-in > .msg:last-child,
+html[data-skin='runtime'] .rt-turn-ans > .msg:last-child {
+  margin-bottom: 0;
+}
+
+/* the answer is the payoff: 8 of its own plus the 8 the turn already puts
+   between parts. A turn that is only an answer gets none of it. */
+html[data-skin='runtime'] .rt-turn-ans {
+  margin-top: 16px;
+}
+
+html[data-skin='runtime'] .rt-turn-ans:first-child {
+  margin-top: 0;
+}
+
+/* the ledger already carries the turn's bottom margin (turn.css); in the runtime
+   skin the turn box owns it, so the two must not both */
+html[data-skin='runtime'] .rt-turn > .rt-turn-foot {
+  margin-bottom: 0;
+}
+
+/* --- prose ---------------------------------------------------------------
+   14.5/1.66 is a reading size, not a UI size: the app set 1.7 with headings in
+   a serif, the design keeps everything sans and puts the hierarchy in weight
+   and 0.68em. The measure is 46rem — wider than the 660px column, so it only
+   binds once the column does. */
+html[data-skin='runtime'] .rt-turn .md {
+  line-height: 1.66;
+}
+
+html[data-skin='runtime'] .rt-turn .md p {
+  margin: 0 0 0.68em;
+  max-width: var(--md-measure);
+  font-size: 14.5px;
+  line-height: 1.66;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .rt-turn .md p:first-child {
+  font-size: 15px;
+}
+
+html[data-skin='runtime'] .rt-turn .md :is(h1, h2, h3) {
+  margin: 1.45em 0 0.5em;
+  max-width: var(--md-measure);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.012em;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .rt-turn .md :is(h1, h2, h3):first-child {
+  margin-top: 0;
+}
+
+html[data-skin='runtime'] .rt-turn .md :is(h1, h2, h3) + p {
+  margin-top: 0;
+}
+
+html[data-skin='runtime'] .rt-turn .md h4 {
+  margin: 1.2em 0 0.4em;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.004em;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .rt-turn .md :is(ul, ol) {
+  margin: 0 0 0.68em;
+  max-width: var(--md-measure);
+  padding-inline-start: 1.4em;
+}
+
+html[data-skin='runtime'] .rt-turn .md :is(ul, ol) li {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.64;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .rt-turn .md :is(ul, ol) li + li {
+  margin-top: 0.34em;
+}
+
+html[data-skin='runtime'] .rt-turn .md ul li::marker {
+  color: color-mix(in oklab, var(--accent) 62%, var(--ink-3));
+}
+
+html[data-skin='runtime'] .rt-turn .md ol li::marker {
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .rt-turn .md :is(strong, b) {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* A link is drawn with a rule, not a colour: the words stay ink and only the
+   underline carries the hue until you point at it. */
+html[data-skin='runtime'] .rt-turn .md a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in oklab, var(--link) 52%, transparent);
+  transition:
+    color var(--t-fast) var(--ease),
+    text-decoration-color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .rt-turn .md a:hover,
+html[data-skin='runtime'] .rt-turn .md a:focus-visible {
+  color: var(--link);
+  text-decoration-color: var(--link);
+}
+
+html[data-skin='runtime'] .rt-turn .md blockquote {
+  margin: 0 0 0.68em;
+  max-width: var(--md-measure);
+  padding: 0 0 0 0.9em;
+  border-left: 2px solid var(--line);
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .rt-turn .md blockquote p {
+  margin: 0 0 0.4em;
+}
+
+html[data-skin='runtime'] .rt-turn .md blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+html[data-skin='runtime'] .rt-turn .md hr {
+  margin: 1.5em 0;
+  max-width: var(--md-measure);
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+/* The one warm accent in a cool page: a literal should look like a literal, and
+   a cool tint on cool prose read as dim. No border, no second background — the
+   wash is the whole mark, and `clone` keeps a wrapped literal in one piece. */
+html[data-skin='runtime'] .rt-turn .md :not(pre) > code {
+  font: 400 0.87em/1.5 var(--mono);
+  padding: 0.08em 0.34em;
+  border: 0;
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+html[data-skin='runtime'] .rt-turn .md .codeblock {
+  margin: 0 0 0.68em;
+  max-width: var(--md-measure);
+}
+
+html[data-skin='runtime'] .rt-turn .md .md-table-wrap {
+  margin: 0 0 0.68em;
+  max-width: var(--md-measure);
+}
+
+html[data-skin='runtime'] .rt-turn .md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+html[data-skin='runtime'] .rt-turn .md table th {
+  padding: 0 14px 7px 0;
+  border-bottom: 1px solid var(--line);
+  font: 500 10.5px/1.3 var(--mono);
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .rt-turn .md table td {
+  padding: 7px 14px 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-2);
+  vertical-align: top;
+}
+
+html[data-skin='runtime'] .rt-turn .md table tr:last-child td {
+  border-bottom: 0;
+}
+
+html[data-skin='runtime'] .rt-turn .md table .n,
+html[data-skin='runtime'] .rt-turn .md table th.n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

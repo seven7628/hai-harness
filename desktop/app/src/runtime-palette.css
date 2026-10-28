@@ -99,6 +99,8 @@ html[data-skin='runtime'][data-theme='ink'] {
   --rt-code-bg: rgba(255, 145, 45, 0.14);
   --rt-violet: #b492ff;
   --rt-measure: 46rem;
+  /* 实心强调块上的字（v2：深色主题压深色字，亮色主题压白字） */
+  --rt-accent-ink: #0a0a0c;
 
   /* —— 字族与几何 —— */
   --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', system-ui, sans-serif;
@@ -113,6 +115,7 @@ html[data-skin='runtime'][data-theme='ink'] {
   --rt-t-fast: 130ms;
   --rt-t-base: 220ms;
   --rt-t-slow: 380ms;
+  --rt-t-slower: 620ms;
   --rt-ease: cubic-bezier(0.2, 0, 0, 1);
   --rt-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --rt-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
@@ -170,4 +173,5 @@ html[data-skin='runtime'][data-theme='paper'] {
   --rt-code-ink: #a34a00;
   --rt-code-bg: rgba(232, 112, 20, 0.15);
   --rt-violet: #6d4bd8;
+  --rt-accent-ink: #ffffff;
 }
