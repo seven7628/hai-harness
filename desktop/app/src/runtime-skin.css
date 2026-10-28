@@ -429,3 +429,11 @@ html[data-skin='runtime'] .msg.error .body .err-text {
 html[data-skin='runtime'] .msg.divider .divider-line {
   opacity: 0.55;
 }
+
+/* The per-answer stamp ("deepseek-v4-flash-vision-exp · 23:04:09") repeats on
+   every message, and everything it says is already on the turn's last line —
+   the model is in the ctx panel, the timing in the ledger. It is the loudest
+   piece of furniture in the transcript for the least information. */
+html[data-skin='runtime'] .msg.assistant .who {
+  display: none;
+}
