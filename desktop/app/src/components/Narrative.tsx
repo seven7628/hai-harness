@@ -8,6 +8,7 @@ import { foldedBody, selectTurns, turnStats, turnUsage } from './runtime/turn/se
 import { WorkFold } from './runtime/turn/WorkFold'
 import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
+import { UserBlock } from './runtime/blocks/UserBlock'
 import './runtime/turn/turn.css'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
 // —— 见 NarrativeBlocks.tsx 的文件头（两处宿主、一套 DOM、一套皮肤）。
@@ -158,6 +159,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const persona = useAppStore((s) => s.persona)
   const turnMetrics = useAppStore((s) => (viewSid ? s.views[viewSid]?.turns : s.turns))
   const storedDensity = useAppStore((s) => s.settings.narrative_density ?? 'concise')
+  // 会话页样式（current/v3/runtime）：用户块按设计重塑只在 runtime 皮肤下生效，
+  // 另两档保留原结构 —— 那是它们已经被验证过的样子。
+  const skin = useAppStore((s) => s.settings.narrative_skin ?? 'current')
   const density = densityProp ?? storedDensity
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
@@ -798,6 +802,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         </div>
       )
     }
+    if (b.kind === 'user' && skin === 'runtime') return <UserBlock key={b.id} b={b} />
     if (b.kind === 'user') {
       // 图文消息：文本 + 图片附件缩略图（data URL 直显）
       const imgs = b.contents?.filter((c) => c.type === 'image') ?? []

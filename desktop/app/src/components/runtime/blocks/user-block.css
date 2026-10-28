@@ -1,0 +1,282 @@
+/* The prompt, echoed into the record. A quote rail, not a bubble: the sentence
+   arrives with the four things that travelled with it — a command, a skill, a
+   referenced path, a screenshot — drawn in the same token language as the
+   composer, because it is the same object at a different moment.
+
+   Ported from design/agent-runtime/v2 (ui.components.css:1914-1920, 2704-2800).
+   Every value here is the design's; the selectors are renamed, nothing else. */
+
+html[data-skin='runtime'] .rt-you {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+}
+
+/* 10px mono, uppercased: a name for the speaker, not a heading */
+html[data-skin='runtime'] .rt-you .rt-who {
+  font: 400 10px/1 var(--mono);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .rt-you > p {
+  max-width: 62ch;
+  padding: 0 0 0 12px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink);
+  border-left: 2px solid color-mix(in oklab, var(--ink-3) 45%, transparent);
+  overflow-wrap: anywhere;
+}
+
+/* --- the tokens ----------------------------------------------------------- */
+html[data-skin='runtime'] .rt-toks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 0 0 12px;
+}
+
+html[data-skin='runtime'] .rt-tok,
+html[data-skin='runtime'] .rt-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 19px;
+  padding: 0 7px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font: 400 11px/1 var(--mono);
+  color: var(--ink-2);
+  background: var(--card-2);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the 4×4 mark: a command is a square, a skill is a dot */
+html[data-skin='runtime'] .rt-tok::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.85;
+  flex: none;
+}
+
+html[data-skin='runtime'] .rt-tok[data-kind='cmd'] {
+  border-color: color-mix(in oklab, var(--accent) 34%, var(--line));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+html[data-skin='runtime'] .rt-tok[data-kind='skill'] {
+  border-color: color-mix(in oklab, var(--violet) 38%, var(--line));
+  background: color-mix(in oklab, var(--violet) 14%, transparent);
+  color: var(--violet);
+}
+
+html[data-skin='runtime'] .rt-tok[data-kind='skill']::before {
+  border-radius: 50%;
+}
+
+html[data-skin='runtime'] .rt-ref svg {
+  width: 11px;
+  height: 11px;
+  stroke-width: 1.8;
+  color: var(--ink-3);
+  flex: none;
+}
+
+html[data-skin='runtime'] .rt-ref[data-dir='1'] svg {
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .rt-ref[data-dir='1'] {
+  border-color: color-mix(in oklab, var(--amber) 26%, var(--line));
+}
+
+/* A reference that did not load is still a fact about the message: the design
+   has no such state (its specimen always resolves), so the chip keeps its shape
+   and takes the tone — red for gone, amber for protected. Dropping it would
+   turn "this never arrived" into silence. */
+html[data-skin='runtime'] .rt-ref[data-state='missing'] {
+  border-color: color-mix(in oklab, var(--red) 46%, var(--line));
+  color: var(--red);
+}
+
+html[data-skin='runtime'] .rt-ref[data-state='blocked'] {
+  border-color: color-mix(in oklab, var(--amber) 46%, var(--line));
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .rt-ref[data-state] svg {
+  color: currentColor;
+}
+
+html[data-skin='runtime'] .rt-ref-state {
+  color: inherit;
+  opacity: 0.75;
+}
+
+/* --- the fan --------------------------------------------------------------
+   Three screenshots overlap into a hand of cards; hovering one lifts it out of
+   the fan, straightens it and dims its neighbours. Clicking opens it full size.
+   The strip keeps room above itself: a lifted card must not land on the chips
+   it belongs to. */
+html[data-skin='runtime'] .rt-imgs {
+  display: flex;
+  align-items: flex-end;
+  padding: 7px 0 0 12px;
+}
+
+html[data-skin='runtime'] .rt-im {
+  width: 64px;
+  height: 45px;
+  flex: none;
+  margin-left: -13px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card-2);
+  overflow: hidden;
+  cursor: zoom-in;
+  transform-origin: bottom center;
+  transform: rotate(calc((var(--i) - var(--mid)) * 6deg));
+  transition:
+    transform 180ms var(--spring),
+    box-shadow 180ms var(--ease),
+    opacity 180ms var(--ease);
+}
+
+html[data-skin='runtime'] .rt-im:first-child {
+  margin-left: 0;
+}
+
+/* one picture is not a hand of cards: it is a thumbnail, and it can afford to
+   be one you can actually see */
+html[data-skin='runtime'] .rt-imgs[data-n='1'] .rt-im {
+  width: 128px;
+  height: 88px;
+}
+
+html[data-skin='runtime'] .rt-im img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+html[data-skin='runtime'] .rt-im:hover,
+html[data-skin='runtime'] .rt-im:focus-visible {
+  transform: rotate(0deg) translateY(-4px) scale(1.05);
+  z-index: 3;
+  box-shadow: var(--shadow-lift);
+  outline: none;
+}
+
+/* the same lift for the keyboard, but the ring has to stay visible: it is the
+   only thing telling you which card Enter will open */
+html[data-skin='runtime'] .rt-im:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+html[data-skin='runtime'] .rt-imgs:hover .rt-im:not(:hover) {
+  opacity: 0.8;
+}
+
+/* --- the lightbox --------------------------------------------------------- */
+html[data-skin='runtime'] .rt-lb {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  background: color-mix(in oklab, #000 68%, transparent);
+  backdrop-filter: blur(3px);
+  animation: rt-lb-in 160ms var(--ease-out) both;
+}
+
+@keyframes rt-lb-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+html[data-skin='runtime'] .rt-lb figure {
+  margin: 0;
+  display: grid;
+  gap: 9px;
+  justify-items: center;
+  position: relative;
+}
+
+html[data-skin='runtime'] .rt-lb img {
+  display: block;
+  width: min(88vw, 860px);
+  max-width: 100%;
+  max-height: 76vh;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in oklab, #fff 14%, transparent);
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8);
+  background: var(--card);
+}
+
+html[data-skin='runtime'] .rt-lb figcaption {
+  font: 400 11px/1.4 var(--mono);
+  color: color-mix(in oklab, #fff 72%, transparent);
+}
+
+html[data-skin='runtime'] .rt-lb-x {
+  position: absolute;
+  top: -34px;
+  right: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: color-mix(in oklab, #fff 12%, transparent);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+}
+
+html[data-skin='runtime'] .rt-lb-x:hover {
+  background: color-mix(in oklab, #fff 22%, transparent);
+}
+
+@media (max-width: 640px) {
+  html[data-skin='runtime'] .rt-im {
+    width: 52px;
+    height: 37px;
+    margin-left: -12px;
+  }
+
+  html[data-skin='runtime'] .rt-imgs[data-n='1'] .rt-im {
+    width: 108px;
+    height: 74px;
+  }
+
+  html[data-skin='runtime'] .rt-toks {
+    padding-left: 0;
+  }
+
+  html[data-skin='runtime'] .rt-imgs {
+    padding: 7px 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .rt-im,
+  html[data-skin='runtime'] .rt-lb {
+    transition: none;
+    animation: none;
+  }
+}

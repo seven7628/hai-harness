@@ -74,6 +74,9 @@ html[data-skin='runtime'] {
   --ease-out: var(--rt-ease-out);
   --spring: var(--rt-spring);
 
+  --shadow-card: var(--rt-shadow-card);
+  --shadow-lift: var(--rt-shadow-lift);
+
   /* 语义色调：组件只说要什么调子，不写色值 */
   --tone-fact: var(--ink-3);
   --tone-attention: var(--amber);

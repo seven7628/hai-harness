@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Face } from '../components/runtime/Face'
 import { AgentMark } from '../components/runtime/AgentMark'
 import { AGENT_KINDS } from '../components/runtime/agent-marks'
@@ -11,6 +12,8 @@ import { TodoBlock } from '../components/runtime/blocks/Todo'
 import { ArtifactCard } from '../components/ArtifactCard'
 import { AgentTaskCard } from '../components/TaskCard'
 import { AsyncNote } from '../components/runtime/blocks/AsyncNote'
+import { UserBlock } from '../components/runtime/blocks/UserBlock'
+import { useAppStore } from '../store/useAppStore'
 import type { MsgBlock } from '../store/useAppStore'
 
 const SYSTEMS = ['pip', 'cat', 'ghost'] as const
@@ -34,6 +37,37 @@ const SAMPLE: MsgBlock[] = [
 
 const C = (over: Partial<MsgBlock>) => ({ kind: 'compression', id: 99, before: 18, after: 3, ...over }) as MsgBlock
 
+/* three stand-ins for screenshots: the fan only needs something to fan */
+function shot(hue: number) {
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220" width="320" height="220">' +
+    '<rect width="320" height="220" fill="hsl(' + hue + ' 18% 12%)"/>' +
+    '<rect y="0" width="320" height="20" fill="hsl(' + hue + ' 12% 18%)"/>' +
+    '<circle cx="12" cy="10" r="3" fill="hsl(' + hue + ' 60% 70%)" opacity=".55"/>' +
+    '<circle cx="23" cy="10" r="3" fill="hsl(' + hue + ' 60% 70%)" opacity=".4"/>' +
+    '<rect x="26" y="44" width="180" height="7" rx="3" fill="hsl(' + hue + ' 50% 70%)" opacity=".5"/>' +
+    '<rect x="26" y="64" width="132" height="7" rx="3" fill="hsl(' + hue + ' 50% 70%)" opacity=".3"/>' +
+    '<rect x="26" y="96" width="268" height="96" rx="8" fill="hsl(' + hue + ' 20% 16%)"/>' +
+    '</svg>'
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+}
+
+const SHOTS = [shot(212), shot(150), shot(28)]
+
+const ASKED: MsgBlock = {
+  kind: 'user',
+  id: 900,
+  text: '切工作区的时候 /visual-ui 没有重新加载，@session/restore.go 里的路径还是写死的 `HOME`',
+  ts: Date.now(),
+  refs: [
+    { path: '@session/restore.go', status: 'loaded', kind: 'file' },
+    { path: '@design/agent-runtime', status: 'loaded', kind: 'dir' },
+    { path: '@session/nope.go', status: 'missing' },
+    { path: '@.env', status: 'blocked' },
+  ],
+  contents: SHOTS.map((src) => ({ type: 'image' as const, content: src })),
+}
+
 const COMPACTS: { name: string; b: Extract<MsgBlock, { kind: 'compression' }> }[] = [
   { name: 'running', b: C({ active: true, startedAt: Date.now() }) as never },
   {
@@ -56,6 +90,15 @@ const COMPACTS: { name: string; b: Extract<MsgBlock, { kind: 'compression' }> }[
 ]
 
 export function RuntimeLab() {
+  // the lab has no bridge: seed the two skills the token chips need to exist
+  useEffect(() => {
+    useAppStore.setState({
+      skills: [
+        { name: 'visual-ui', description: '', enabled: true },
+        { name: 'docx', description: '', enabled: false },
+      ],
+    })
+  }, [])
   const turn = selectTurns(SAMPLE)[0]
   const stats = turnStats(turn)
   return (
@@ -73,6 +116,18 @@ export function RuntimeLab() {
             ))}
           </div>
         ))}
+      </div>
+
+      <div style={row}>
+        <span style={lab}>user · rail + tokens + fan (hover a card, click to open)</span>
+        <div style={{ maxWidth: 640 }}>
+          <UserBlock b={ASKED as never} />
+        </div>
+        <div style={{ maxWidth: 640 }}>
+          <UserBlock
+            b={{ kind: 'user', id: 901, text: '只有一句话 + 一张图（data-n=1 → 128×88）', ts: Date.now(), contents: [{ type: 'image', content: SHOTS[1] }] } as never}
+          />
+        </div>
       </div>
 
       <div style={row}>
