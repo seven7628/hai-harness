@@ -929,3 +929,49 @@ html[data-skin='runtime'] .answer-acts .act:hover {
 html[data-skin='runtime'] .answer-acts .act:active {
   transform: scale(0.9);
 }
+
+/* ---------------------------------------------------------------------------
+   A11 · focus, and motion for people who asked for none
+   The design gives every row a visible ring (`.act:focus-visible`,
+   `.cy-im:focus-visible`, `.la-head` etc.) and closes each part with a
+   prefers-reduced-motion block. Ours had the ring on some rows and none on
+   others: a row you can Tab to and cannot see is worse than one you cannot
+   reach.
+   ------------------------------------------------------------------------ */
+
+html[data-skin='runtime'] .tool-row .tool-row-hd:focus-visible,
+html[data-skin='runtime'] .rt-act:focus-visible,
+html[data-skin='runtime'] .thinking-toggle:focus-visible,
+html[data-skin='runtime'] .la-head:focus-visible,
+html[data-skin='runtime'] .rt-ledger:focus-visible,
+html[data-skin='runtime'] .answer-acts .act:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .rt-collapse,
+  html[data-skin='runtime'] .rt-fold > .rt-fi,
+  html[data-skin='runtime'] .thinking-toggle .rt-face,
+  html[data-skin='runtime'] .la-open,
+  html[data-skin='runtime'] .sig,
+  html[data-skin='runtime'] .answer-acts,
+  html[data-skin='runtime'] .answer-acts .act,
+  html[data-skin='runtime'] .tool-row .tool-row-hd,
+  html[data-skin='runtime'] .rt-im {
+    transition: none;
+  }
+
+  html[data-skin='runtime'] .la-live,
+  html[data-skin='runtime'] .rt-caret,
+  html[data-skin='runtime'] .rt-lb,
+  html[data-skin='runtime'] .rt-im {
+    animation: none;
+  }
+
+  /* the caret still has to say "this is where text is arriving": it stays
+     solid instead of blinking */
+  html[data-skin='runtime'] .rt-caret {
+    opacity: 1;
+  }
+}
