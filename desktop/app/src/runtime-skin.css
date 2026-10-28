@@ -296,3 +296,136 @@ html[data-skin='runtime'] .art-ft .btn.icon {
   padding: 0;
   width: auto;
 }
+
+/* ---------------------------------------------------------------------------
+   4. subagent lanes — a row with a clock, never a card with a progress bar
+   ------------------------------------------------------------------------ */
+
+/* A parent cannot know how far a child has got, so the lane draws the clock and
+   the last thing the child did. What it must not draw is a percentage — there
+   is no honest denominator for one. The card shell goes; the row keeps the
+   shared anatomy it already had (status, label, state word, clock, disclosure),
+   because the right panel renders the same component and must not drift. */
+html[data-skin='runtime'] .agent-card {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  font-size: 12px;
+}
+
+html[data-skin='runtime'] .agent-card .ac-main {
+  min-height: 30px;
+  gap: 9px;
+  padding: 0 8px;
+  border-radius: 7px;
+  transition: background-color 120ms var(--ease);
+}
+
+html[data-skin='runtime'] .agent-card .ac-main:hover {
+  background: var(--rt-hover);
+}
+
+/* the state word is a fact on the line, not a pill in a colour */
+html[data-skin='runtime'] .agent-card .ag-sec {
+  background: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+html[data-skin='runtime'] .agent-card .ag-t {
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .agent-card .ac-body {
+  border-top: 1px solid var(--border);
+  padding: 7px 2px 3px;
+}
+
+/* the same quiet treatment for a background task's result block */
+html[data-skin='runtime'] .task-result,
+html[data-skin='runtime'] .task-result-inline {
+  border: 0;
+  background: none;
+  padding: 0;
+}
+
+html[data-skin='runtime'] .task-result-inline-title {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+/* Two marks on one left edge (a bot glyph and a status character) is one too
+   many: the bot says "this is a subagent", and state is carried by that same
+   glyph's colour and its slow pulse instead of a second character beside it. */
+html[data-skin='runtime'] .agent-card .ag-st {
+  display: none;
+}
+
+html[data-skin='runtime'] .agent-card .ac-main > .ic {
+  color: var(--text-3);
+  transition: color 180ms var(--ease);
+}
+
+html[data-skin='runtime'] .agent-card.running .ac-main > .ic {
+  color: var(--running);
+}
+
+html[data-skin='runtime'] .agent-card.running .ac-main > .ic svg {
+  animation: rt-lane-pulse 2.2s var(--ease) infinite;
+}
+
+@keyframes rt-lane-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+html[data-skin='runtime'] .agent-card.completed .ac-main > .ic {
+  color: var(--success);
+}
+
+/* ---------------------------------------------------------------------------
+   5. signals — a notice is a dim line, not a pill
+   ------------------------------------------------------------------------ */
+
+/* A system notice ("上下文已压缩", "已切换模型") is the quietest thing in the
+   transcript, so it must not be a bordered pill in the middle of the column: a
+   pill is a container, and this sentence has no content to contain. */
+html[data-skin='runtime'] .msg.system {
+  margin: 6px auto 16px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  gap: 7px;
+}
+
+html[data-skin='runtime'] .msg.system .sys-dot {
+  width: 4px;
+  height: 4px;
+  opacity: 0.65;
+}
+
+/* an error keeps its weight — it is the one signal that has to interrupt — but
+   loses the box: a rule on the left says "this block failed" without adding a
+   second frame around the words. */
+html[data-skin='runtime'] .msg.error .body .err-text {
+  background: none;
+  border: 0;
+  border-left: 2px solid var(--error);
+  border-radius: 0;
+  padding: 2px 0 2px 10px;
+  font-size: 11.5px;
+}
+
+html[data-skin='runtime'] .msg.divider .divider-line {
+  opacity: 0.55;
+}

@@ -9,6 +9,7 @@ import { Thinking } from '../components/NarrativeBlocks'
 import { Compact } from '../components/runtime/blocks/Compact'
 import { TodoBlock } from '../components/runtime/blocks/Todo'
 import { ArtifactCard } from '../components/ArtifactCard'
+import { AgentTaskCard } from '../components/TaskCard'
 import type { MsgBlock } from '../store/useAppStore'
 
 const SYSTEMS = ['pip', 'cat', 'ghost'] as const
@@ -104,6 +105,27 @@ export function RuntimeLab() {
                 { id: 't6', title: '更新 README「测试与沙箱」段', done: false },
               ] },
             ]}
+          />
+        </div>
+      </div>
+
+      <div style={row}>
+        <span style={lab}>lane · running / done (a row with a clock)</span>
+        <div style={{ maxWidth: 640, display: 'grid', gap: 4 }}>
+          <AgentTaskCard
+            b={{
+              kind: 'agent', id: 71, runId: 'r-scan', label: 'scan callers of Restore', status: 'running',
+              spawnedAt: Date.now() - 42000, usage: { input: 18400, output: 2100, cacheRead: 16200, cacheWrite: 0, cacheWrite1h: 0, reasoning: 900 },
+              items: [], durMs: undefined,
+            }}
+          />
+          <AgentTaskCard
+            b={{
+              kind: 'agent', id: 72, runId: 'r-bench', label: 'benchmark the cache path', status: 'completed',
+              spawnedAt: Date.now() - 300000, durMs: 184000, thinkMs: 12400, deliveredToMain: true,
+              usage: { input: 52000, output: 6100, cacheRead: 48000, cacheWrite: 0, cacheWrite1h: 0, reasoning: 2100 },
+              items: [],
+            }}
           />
         </div>
       </div>
