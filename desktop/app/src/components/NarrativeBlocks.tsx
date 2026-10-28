@@ -15,12 +15,13 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import type { CompressionInfo, Diff, QueuedContent, ToolErrorInfo, TodoItem, UsageAgg } from '../store/useAppStore'
 import { Markdown } from './markdown'
-import { Bot, CheckList, FileIcon, MinimizeIcon, PencilIcon, PlayIcon, SearchIcon, Sparkles, TerminalIcon } from './icons'
-import { fmtTokens, fmtDuration, fmtUsd, UsageChip, UnifiedDiff } from './ui'
+import { Bot, CheckList, FileIcon, PencilIcon, PlayIcon, SearchIcon, Sparkles, TerminalIcon } from './icons'
+import { fmtDuration, fmtUsd, UsageChip, UnifiedDiff } from './ui'
 import { toolArgsSummary } from '../lib/toolSummary'
 import { toolFamily, fileTypeOf } from '../lib/palette'
 import { splitThinkingParagraphs } from '../lib/thinkingText'
 import { Face } from './runtime/Face'
+import { Compact } from './runtime/blocks/Compact'
 import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
@@ -605,73 +606,9 @@ export const TaskResultInline = memo(function TaskResultInline({ delivered, resu
 // 上下文压缩块：主对话（本 run 的自动/手动压缩）与子 agent 转录（子 agent 自己的压缩）
 // 共用同一张卡。active = 压缩正在进行（子 agent 侧会带这个态；主 run 的进行中压缩只进
 // 右栏任务区，所以主对话看不到 active 卡）。
+/* 上下文压缩块：主对话（本 run 的自动/手动压缩）与子 agent 转录（子 agent 自己的
+   压缩）共用同一张卡 —— 现在是同**一行**。v2 的 Compact 移植：30px 折叠行，
+   摘要/配比/事实都在折叠里（见 runtime/blocks/Compact.tsx）。 */
 export const CompressionBlock = memo(function CompressionBlock({ b }: { b: CompressionInfo }) {
-  const t = useT()
-  const [open, setOpen] = useState(false)
-  const failed = Boolean(b.error)
-  const aborted = Boolean(b.aborted)
-  const active = Boolean(b.active) && !failed && !aborted
-  const usage = b.usage
-  const total = usage ? usage.input + usage.output : 0
-  const saved = Math.max(0, b.before - b.after)
-  const toggle = () => setOpen((v) => !v)
-  return (
-    <div className={`compression-card ${failed ? 'error' : 'success'} ${open ? 'open' : ''}`}>
-      <div className="compression-card-hd" role="button" tabIndex={0} aria-expanded={open} onClick={toggle} onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle() }
-      }}>
-        <span className="ic" aria-hidden="true">{<MinimizeIcon size={16} />}</span>
-        <span className="chev">{open ? '▾' : '▸'}</span>
-        <span className={`compression-icon${active ? ' compression-active' : ''}`} aria-hidden="true">{failed ? '✗' : aborted ? '■' : active ? '◐' : '✓'}</span>
-        <strong className={active ? 'compression-active' : undefined}>{failed ? t('compression.failed') : aborted ? t('compression.aborted') : active ? t('compression.inProgress') : t('compression.done')}</strong>
-        <span className="compression-summary">{active ? '' : failed || aborted ? t('compression.kept') : t('compression.summary').replace('{before}', String(b.before)).replace('{after}', String(b.after))}</span>
-        <span className="grow" />
-        {b.durMs != null && <span className="mono compression-meta">{fmtDuration(b.durMs)}</span>}
-        {usage && <UsageChip className="mono compression-meta" usage={usage} title={t('usage.tip').replace('{tok}', String(total)).replace('{cost}', fmtUsd(usage.costUsd ?? 0))} />}
-      </div>
-      {open && (
-        <div className="compression-card-body">
-          {failed ? <div className="compression-error" role="alert">{b.error}</div> : aborted ? (
-            <div className="compression-error">{t('compression.abortedDesc')}</div>
-          ) : (
-            <>
-              {b.summary && <div className="compression-summary-preview"><div className="compression-summary-label">{t('compression.summaryLabel')}</div><Markdown text={b.summary} /></div>}
-              {b.analysis && <AnalysisBlock analysis={b.analysis} />}
-              <div className="compression-grid">
-              <span>{t('compression.history')}</span><b>{b.before} → {b.after}（{t('compression.reduced').replace('{n}', String(saved))}）</b>
-              {b.ctxTokens != null && <><span>{t('compression.afterCtx')}</span><b>{fmtTokens(b.ctxTokens)} tok</b></>}
-              {b.durMs != null && <><span>{t('compression.dur')}</span><b>{fmtDuration(b.durMs)}</b></>}
-              {b.model && <><span>{t('compression.model')}</span><b className="mono">{b.model}</b></>}
-              {usage && <>
-                <span>{t('compression.inputOutput')}</span><b>{fmtTokens(usage.input)} / {fmtTokens(usage.output)} tok</b>
-                {usage.cacheRead > 0 && <><span>{t('compression.cacheRead')}</span><b>{fmtTokens(usage.cacheRead)} tok</b></>}
-                {usage.cacheWrite > 0 && <><span>{t('compression.cacheWrite')}</span><b>{fmtTokens(usage.cacheWrite)} tok</b></>}
-                {usage.reasoning > 0 && <><span>{t('compression.reasoning')}</span><b>{fmtTokens(usage.reasoning)} tok</b></>}
-                {usage.costUsd ? <><span>{t('compression.cost')}</span><b className="mono">{fmtUsd(usage.costUsd)}</b></> : null}
-              </>}
-              {b.reason && <><span>{t('compression.reason')}</span><b>{b.reason === 'automatic' ? t('compression.auto') : t('compression.manual')}</b></>}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  )
-})
-
-// 压缩器 <analysis> 块展示：摘要的决策过程（状态迁移/决策/预算/锚点），默认折叠。
-// 仅供观测压缩 Prompt 决策——与摘要正文分开，不参与续跑上下文。
-const AnalysisBlock = memo(function AnalysisBlock({ analysis }: { analysis: string }) {
-  const t = useT()
-  const [open, setOpen] = useState(false)
-  return (
-    <div className={`compression-analysis ${open ? 'open' : ''}`}>
-      <div className="compression-analysis-hd" role="button" tabIndex={0} aria-expanded={open}
-        onClick={() => setOpen((v) => !v)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v) } }}>
-        <span className="chev">{open ? '▾' : '▸'}</span>
-        <span>{t('compression.analysisLabel')}</span>
-      </div>
-      {open && <pre className="compression-analysis-body mono">{analysis}</pre>}
-    </div>
-  )
+  return <Compact b={b} />
 })

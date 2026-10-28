@@ -6,6 +6,7 @@ import { WorkFold } from '../components/runtime/turn/WorkFold'
 import { selectTurns, turnStats } from '../components/runtime/turn/selectTurns'
 import { Ledger } from '../components/runtime/turn/Ledger'
 import { Thinking } from '../components/NarrativeBlocks'
+import { Compact } from '../components/runtime/blocks/Compact'
 import type { MsgBlock } from '../store/useAppStore'
 import { useState } from 'react'
 
@@ -28,6 +29,28 @@ const SAMPLE: MsgBlock[] = [
   { kind: 'assistant', id: 7, text: '已定位并修复该问题。', streaming: false, thinking: '', durMs: 3120 },
 ]
 
+const C = (over: Partial<MsgBlock>) => ({ kind: 'compression', id: 99, before: 18, after: 3, ...over }) as MsgBlock
+
+const COMPACTS: { name: string; b: Extract<MsgBlock, { kind: 'compression' }> }[] = [
+  { name: 'running', b: C({ active: true, startedAt: Date.now() }) as never },
+  {
+    name: 'done',
+    b: C({
+      ctxTokens: 6800,
+      durMs: 1800,
+      reason: 'automatic',
+      model: 'deepseek-v4-flash',
+      usage: { input: 42100, output: 900, cacheRead: 39000, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, costUsd: 0.0021 },
+      summary:
+        '用户报告 TestSessionRestore 连跑 5 次挂 2 次。根因不在被测代码：夹具把 HOME 指向仓库内的 fixture 目录，并行跑时两个进程互相清空对方的状态。已把夹具改成 t.TempDir()，restore.go 的路径解析收敛为单一入口。未决：mock.ts 里那份硬编码路径是否一并删除。',
+      analysis:
+        '18 条里只有 4 条改变了结论：两次失败、一次 diff、一次 5 次跑。\n工具结果头要留（复现结论要用），grep 原始输出 4 条没有被再次引用过，可以丢。\n压成一段 summary 而不是 summary + 片段：下一轮要的是结论和未决项，不是旧原文。',
+    }) as never,
+  },
+  { name: 'failed', b: C({ error: 'llm_error: context length exceeded (400)' }) as never },
+  { name: 'aborted', b: C({ aborted: true }) as never },
+]
+
 export function RuntimeLab() {
   const [open, setOpen] = useState(false)
   const turn = selectTurns(SAMPLE)[0]
@@ -45,6 +68,15 @@ export function RuntimeLab() {
                 <Face system={s} state={st} size={40} />
               </span>
             ))}
+          </div>
+        ))}
+      </div>
+
+      <div style={row}>
+        <span style={lab}>compact · running / done / failed / aborted</span>
+        {COMPACTS.map((c) => (
+          <div key={c.name} style={{ maxWidth: 640 }}>
+            <Compact b={c.b} />
           </div>
         ))}
       </div>

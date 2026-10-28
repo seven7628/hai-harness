@@ -1,0 +1,311 @@
+/* Ported from design/agent-runtime/v2/parts/compact.css.
+   One fold row in the transcript, 30px at rest — the same weight a tool call
+   gets. Everything that would make it a card lives behind the chevron. */
+
+.rt-cp {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  /* the fold is dropped into a column whose width this component does not own —
+     a phone, or a narrow column on a wide screen. Both must lose the same word,
+     so the query is on the component, not the viewport. */
+  container-type: inline-size;
+}
+
+.rt-cp-row {
+  display: grid;
+  /* mark · label · ratio · facts · chevron. The ratio sits outside the fold
+     because it is the one thing a reader wants without opening the row. */
+  grid-template-columns: 16px minmax(0, 1fr) auto auto 11px;
+  column-gap: 9px;
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 2px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease);
+}
+
+.rt-cp-row:hover {
+  background: var(--accent-weak);
+}
+
+.rt-cp-g {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+}
+
+.rt-cp-g svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  overflow: visible;
+}
+
+.rt-cp[data-s='run'] .rt-cp-g { color: var(--accent); }
+.rt-cp[data-s='done'] .rt-cp-g { color: var(--success); }
+.rt-cp[data-s='fail'] .rt-cp-g { color: var(--error); }
+.rt-cp[data-s='abort'] .rt-cp-g { color: var(--text-3); }
+
+/* the label gives way before the numbers do */
+.rt-cp-lab {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: -0.006em;
+  color: var(--text);
+}
+
+.rt-cp[data-s='done'] .rt-cp-lab { font-weight: 450; color: var(--text-2); }
+.rt-cp-row:hover .rt-cp-lab { color: var(--text); }
+.rt-cp[data-s='fail'] .rt-cp-lab { color: var(--error); }
+
+.rt-cp-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.rt-cp-meta .sep { opacity: 0.45; }
+/* the only place the saved share is coloured: it is the point of the row */
+.rt-cp-meta .cut { color: var(--success); }
+
+.rt-cp-chev {
+  width: 11px;
+  height: 11px;
+  color: var(--text-3);
+  transition: transform 180ms var(--ease), color 120ms var(--ease);
+}
+
+.rt-cp-row[aria-expanded='true'] .rt-cp-chev { transform: rotate(90deg); }
+.rt-cp-row:hover .rt-cp-chev { color: var(--text-2); }
+
+/* the compressed share at a glance: 54px of 3px line, no legend, no label */
+.rt-cp-ratio {
+  width: 54px;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-3) 26%, transparent);
+  overflow: hidden;
+  flex: none;
+}
+
+.rt-cp-ratio i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+/* the fold: 0fr → 1fr, the same motion a tool call opens with */
+.rt-cp-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms var(--ease);
+}
+
+.rt-cp-fold.open { grid-template-rows: 1fr; }
+.rt-cp-fold > div { min-height: 0; overflow: hidden; }
+
+.rt-cp-in { padding: 1px 2px 11px 25px; }
+
+/* ---- the summary that replaced the messages: the reason the row exists ---- */
+.rt-cp-sum {
+  margin: 8px 0 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.rt-cp-sum .rt-cp-k {
+  display: block;
+  margin-bottom: 5px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+
+.rt-cp-sum p {
+  font-size: 12px;
+  line-height: 1.62;
+  color: var(--text-2);
+  margin: 0 0 6px;
+}
+
+.rt-cp-sum p:last-child { margin-bottom: 0; }
+
+/* the trace is folded by default: it answers "why these messages", which is a
+   question the reader asks only after reading the summary */
+.rt-cp-think { margin: 0 0 10px; }
+
+.rt-cp-think > summary {
+  cursor: pointer;
+  list-style: none;
+  width: max-content;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text-3);
+  padding: 4px 0;
+}
+
+.rt-cp-think > summary::-webkit-details-marker { display: none; }
+.rt-cp-think > summary::before { content: '\203A  '; }
+.rt-cp-think[open] > summary::before { content: '\2304  '; }
+.rt-cp-think > summary:hover { color: var(--text-2); }
+
+.rt-cp-think ol {
+  margin: 2px 0 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+  counter-reset: rt-cp-t;
+}
+
+.rt-cp-think li {
+  position: relative;
+  padding: 3px 0 3px 18px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.rt-cp-think li::before {
+  counter-increment: rt-cp-t;
+  content: counter(rt-cp-t);
+  position: absolute;
+  left: 0;
+  top: 4px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: color-mix(in srgb, var(--text-3) 70%, transparent);
+}
+
+/* ---- done: what went, what stayed ------------------------------------- */
+.rt-cp-bar {
+  display: flex;
+  gap: 2px;
+  height: 3px;
+  margin: 7px 0;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.rt-cp-bar .keep { background: var(--accent); border-radius: 2px; }
+
+.rt-cp-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-3);
+}
+
+.rt-cp-legend .l { display: inline-flex; align-items: baseline; gap: 5px; }
+
+/* a 14×3 segment, not a dot: the swatch is the bar's own unit */
+.rt-cp-legend .l::before {
+  content: '';
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  flex: none;
+  background: var(--accent);
+  align-self: center;
+}
+
+.rt-cp-legend .l.drop::before { background: color-mix(in srgb, var(--text-3) 45%, transparent); }
+.rt-cp-legend b { font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+/* two words, one column: `kept` / `dropped` are the answer to the only question
+   anybody asks of a compression */
+.rt-cp-facts { display: grid; gap: 1px; margin-top: 9px; }
+
+.rt-cp-li {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  column-gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+.rt-cp-li > span { min-width: 0; overflow-wrap: anywhere; }
+.rt-cp-li .k { color: var(--text-3); }
+.rt-cp-li[data-k='kept'] .k { color: var(--success); }
+
+.rt-cp-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.rt-cp-err {
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--error) 40%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--error);
+}
+
+/* A phone drops the verb and keeps the facts: "15 条消息 → 3 条" is the
+   compression, "压缩完成" is only how it got there. */
+@container (max-width: 560px) {
+  .rt-cp-row {
+    grid-template-columns: 16px minmax(0, 1fr) 11px;
+    grid-template-areas:
+      'g lab chev'
+      '. meta .';
+    row-gap: 3px;
+    padding: 8px 0 7px;
+  }
+  .rt-cp-g { grid-area: g; align-self: start; margin-top: 2px; }
+  .rt-cp-lab { grid-area: lab; }
+  .rt-cp-chev { grid-area: chev; align-self: start; margin-top: 4px; }
+  .rt-cp-ratio { grid-area: meta; justify-self: start; width: 34px; margin-top: 5px; }
+  .rt-cp-meta { grid-area: meta; margin-left: 44px; }
+  .rt-cp-li { grid-template-columns: 64px minmax(0, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rt-cp-row,
+  .rt-cp-chev,
+  .rt-cp-fold {
+    transition: none;
+  }
+}
