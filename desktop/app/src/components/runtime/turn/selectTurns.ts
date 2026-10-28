@@ -1,4 +1,4 @@
-import type { MsgBlock } from '../../../store/useAppStore'
+import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 /* The transcript is a flat list of blocks — there is no "turn" object anywhere
    in the store (see PORT-PLAN §5: `turns[]` holds metrics only, the content
@@ -18,6 +18,20 @@ export interface Turn {
   compressions: M<'compression'>[]
   artifacts?: M<'artifacts'>
   running: boolean
+}
+
+/* A turn's cost is not on any block: usage lives in `SessionView.turns[]`, one
+   entry per LLM call, tagged with the `runId` it belongs to. So the join key is
+   the runId the blocks already carry — no timestamp arithmetic, no guessing. */
+export interface TurnUsage {
+  input: number
+  output: number
+  cacheRead: number
+  reasoning: number
+  total: number
+  llmMs: number
+  ttftMs?: number
+  matched: boolean
 }
 
 export interface TurnStats {
@@ -110,6 +124,31 @@ export function turnStats(turn: Turn): TurnStats {
     agents: turn.agents.length,
     compressions: turn.compressions.length,
   }
+}
+
+export function turnUsage(turn: Turn, metrics: TurnMetric[] | undefined): TurnUsage {
+  const runs = new Set<string>()
+  turn.items.forEach((b) => {
+    if (b.kind === 'assistant' && b.runId) runs.add(b.runId)
+    if (b.kind === 'agent' && b.runId) runs.add(b.runId)
+  })
+  const u: TurnUsage = { input: 0, output: 0, cacheRead: 0, reasoning: 0, total: 0, llmMs: 0, matched: false }
+  if (!metrics || !runs.size) return u
+  metrics.forEach((m) => {
+    if (!m.runId || !runs.has(m.runId)) return
+    u.matched = true
+    u.input += m.input || 0
+    u.output += m.output || 0
+    u.cacheRead += m.cacheRead || 0
+    u.reasoning += m.reasoning || 0
+    u.llmMs += m.durMs || 0
+  })
+  u.total = u.input + u.output
+  if (!u.ttftMs) {
+    const a = turn.items.find((b) => b.kind === 'assistant' && b.ttftMs)
+    if (a && a.kind === 'assistant') u.ttftMs = a.ttftMs
+  }
+  return u
 }
 
 /** "31 s" / "4.2 m" — the same rounding the canvas uses. */
