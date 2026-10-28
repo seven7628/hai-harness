@@ -1,0 +1,45 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 运行时的令牌别名层
+ *
+ * v2 的组件是照一套 29 个语义令牌画的（--line/--card/--accent/--green…），
+ * desktop 的 127 个令牌里有一半同名同义，另一半叫法不同（朱砂三支、竹/赭/靛）。
+ * 这一层只做「改名」，不定义任何新颜色，而且**只在运行时组件自己的根节点上生效**
+ * —— 与 index.css 的全局令牌互不影响，也不会改到任何现有组件。
+ *
+ * 主色是三分支，别混用：
+ *   --accent     文字/图标（压在底上要够亮）        → --cinnabar
+ *   --accent-2   图标/选中底/边框                    → --cinnabar-2
+ *   --accent-solid 实心填充（承载白字）              → --accent-solid（不重映射）
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+:is(.rt-face, .rt-agent-mark, .rt-orbit, .rt-sa, .rt-mk) {
+  /* 面 / 线 / 字 */
+  --line: var(--ink-line);
+  --line-soft: var(--ink-line-2);
+  --card: var(--paper-2);
+  --card-2: var(--paper-3);
+  --raised: var(--paper-3);
+
+  /* 主色与语义色 */
+  --accent: var(--cinnabar);
+  --accent-2: var(--cinnabar-2);
+  --accent-soft: var(--accent-weak);
+  --accent-ink: var(--cinnabar);
+  --green: var(--bamboo);
+  --amber: var(--ochre);
+  --violet: var(--indigo);
+  --red: var(--crimson);
+
+  /* 字族与几何 */
+  --mono: var(--font-mono);
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: var(--radius);
+
+  /* 动效：app 里这两档时间散落成字面量，这里给它们名字 */
+  --t-fast: 120ms;
+  --t-base: 180ms;
+  --spring: cubic-bezier(0.2, 1.1, 0.3, 1);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.18);
+  --shadow-lift: 0 8px 24px -8px rgba(0, 0, 0, 0.45);
+}

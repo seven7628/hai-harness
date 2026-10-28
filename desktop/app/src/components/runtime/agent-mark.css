@@ -1,0 +1,218 @@
+/* Ported verbatim from design/agent-runtime/v2/parts/marks-agent.css.
+   .rt-sa / .sa-* belong to components/runtime/*; zero collisions in index.css. */
+.rt-agent-mark { display: inline-flex; --sa-size: 14px; }
+.rt-sa { width: var(--sa-size); height: var(--sa-size); }
+/* ============================================================================
+   hai · subagent marks — ten workers, three states
+   The drawing lives in marks-agent.js (mask + silhouette); this file is the
+   behaviour and the colour. Load after ui.css: everything below asks for a
+   token and never for a hex, so the marks follow the theme for free.
+
+   Sizes: the mark is 14px by default because that is the size a subagent row
+   actually gives it. It holds to 20px; below 12px the tools stop separating and
+   the mark should fall back to a plain dot instead of growing detail.
+   ========================================================================== */
+
+/* ---------- the mark ------------------------------------------------------
+   One box, three tones. The tone is the state's first signal — a running
+   worker is the accent, an interrupted one is the amber this system already
+   uses for "needs a look", a finished one is the green it uses for settled.
+   -------------------------------------------------------------------------- */
+.rt-sa {
+  width: var(--sa-size, 14px);
+  height: var(--sa-size, 14px);
+  flex: none;
+  display: block;
+  overflow: visible;
+  color: var(--ink-2);
+}
+.rt-sa[data-sa-state='run'] { color: var(--accent); }
+.rt-sa[data-sa-state='stop'] { color: var(--amber); }
+.rt-sa[data-sa-state='done'] { color: var(--green); }
+
+/* in a sentence, not in a row: drops the block box so a mark can sit inside
+   running text — 2px is the offset that puts the body's centre on the x-height */
+.sa--inline { display: inline-block; vertical-align: -2px; margin: 0 1.5px; }
+
+/* ---------- the hooks -----------------------------------------------------
+   view-box, not fill-box: an eye-slot or a 1.2 wide prong has almost no box of
+   its own, so origins have to come from the 16 grid instead.
+   -------------------------------------------------------------------------- */
+.sa-pop, .sa-body, .sa-feat, .sa-blink { transform-box: view-box; }
+.sa-pop { transform-origin: 8px 13.2px; transition: transform var(--t-base) var(--spring); }
+.sa-body { transform-origin: 8px 13.2px; }
+.sa-blink { transform-origin: 8px 8.05px; }
+/* the scout's ball swings from the base of its mast, not from the grid origin */
+.rt-sa[data-sa-kind='scout'] .sa-feat { transform-origin: 8px 5.6px; }
+
+/* ---------- run: alive, at a walk -----------------------------------------
+   Two motions only, and both are small: the body settles under its own weight
+   every 2.6s, the lids drop every 4.4s. Neither repeats on a beat you can tap,
+   which is the difference between "working" and a loading spinner you want to
+   close. The scout's mast gets a third, because a probe that never moves reads
+   as a pin rather than a probe.
+   -------------------------------------------------------------------------- */
+.rt-sa[data-sa-state='run'] .sa-body { animation: sa-breathe 2.6s var(--ease) infinite; }
+.rt-sa[data-sa-state='run'] .sa-blink { animation: sa-blink 4.4s linear infinite; }
+.rt-sa[data-sa-kind='scout'][data-sa-state='run'] .sa-feat { animation: sa-sway 3.2s var(--ease) infinite; }
+
+@keyframes sa-breathe {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  46% { transform: translateY(0.3px) scaleY(0.975); }
+  74% { transform: translateY(-0.15px) scaleY(1.008); }
+}
+@keyframes sa-blink {
+  0%, 91% { transform: scaleY(1); }
+  94% { transform: scaleY(0.12); }
+  97%, 100% { transform: scaleY(1); }
+}
+@keyframes sa-sway {
+  0%, 100% { transform: rotate(-5.5deg); }
+  50% { transform: rotate(5.5deg); }
+}
+
+/* ---------- stop: knocked, not finished -----------------------------------
+   The state that is easy to get wrong. A red cross says "failed", a spinner
+   says "still going", and two shut eyes say "done" — so an interruption is
+   drawn as an interruption: hit from the left, the body leans right and the
+   lid on the struck side comes down while the other stays open. Frozen, because
+   nothing about an interrupted worker is still moving.
+   -------------------------------------------------------------------------- */
+.rt-sa[data-sa-state='stop'] .sa-pop { transform: rotate(9deg) translateY(0.35px); }
+.rt-sa[data-sa-state='stop']:hover .sa-pop { transform: rotate(9deg) translateY(0.35px) scale(1.08); }
+
+/* ---------- done: quiet ---------------------------------------------------
+   No motion at all. The state is the absence of it plus two closed lids; adding
+   anything here (a tick, a fade) would make "finished" compete with "running"
+   for the eye, and finished work should not.
+   -------------------------------------------------------------------------- */
+
+/* hover — the icon perks up, and only the icon: a 14px target is not a target,
+   so the row that owns it can opt in with `.sa-live:hover` on the row instead */
+.rt-sa:hover .sa-pop { transform: scale(1.08); }
+
+/* an icon that keeps ticking for someone who asked the page to stop is a bug,
+   not a flourish — including the stop state's lean, which is a transition */
+@media (prefers-reduced-motion: reduce) {
+  .rt-sa, .rt-sa * { animation: none !important; transition-duration: 1ms !important; }
+}
+
+/* ============================================================================
+   the probe page — not part of the shipped component, but it is how the ten
+   were checked, so it ships next to them
+   ========================================================================== */
+.sa-page { max-width: 1040px; margin: 0 auto; padding: 44px 28px 104px; }
+.sa-kicker {
+  font: 500 10.5px/1 var(--mono); letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+.sa-page h1 {
+  margin: 10px 0 0; font-size: 26px; font-weight: 600; letter-spacing: -0.022em; line-height: 1.15;
+}
+.sa-lede { margin-top: 10px; max-width: 62ch; font-size: 13px; line-height: 1.65; color: var(--ink-2); }
+.sa-lede code, .sa-note code {
+  font: 400 11.5px/1 var(--mono); color: var(--ink);
+  background: var(--card-2); padding: 1px 4px; border-radius: 4px;
+}
+.sa-page h2 {
+  display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+  margin: 44px 0 14px; font-size: 14px; font-weight: 600; letter-spacing: -0.01em;
+}
+/* the number and the title stay a pair; the gloss drops to its own line rather
+   than squeezing the title into two words */
+.sa-page h2 .n { flex: none; }
+.sa-page h2 .t { flex: none; white-space: nowrap; }
+.sa-page h2 .n { font: 500 10.5px/1 var(--mono); color: var(--ink-3); }
+.sa-page h2 .sub { font-size: 12px; font-weight: 400; color: var(--ink-3); }
+.sa-note { font-size: 12px; line-height: 1.6; color: var(--ink-3); max-width: 66ch; }
+.sa-page p + p { margin-top: 9px; }
+
+.sa-bar {
+  display: flex; align-items: center; gap: 10px; margin-top: 20px;
+  padding-top: 16px; border-top: 1px solid var(--line);
+}
+.sa-bar .sa-note { margin-right: auto; }
+.sa-tgl {
+  height: 26px; padding: 0 11px; border-radius: 7px; border: 1px solid var(--line);
+  font: 400 11px/1 var(--mono); color: var(--ink-3); background: none;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.sa-tgl:hover { color: var(--ink); border-color: color-mix(in oklab, var(--ink-3) 55%, var(--line)); }
+
+/* ---------- the lab: one row per worker, three states, at 14px ----------- */
+.sa-lab { display: grid; gap: 2px; max-width: 720px; }
+.sa-lab-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center; gap: 20px;
+  padding: 9px 0; border-bottom: 1px solid var(--line-soft);
+}
+.sa-lab-row:last-child { border-bottom: 0; }
+.sa-who { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.sa-who b { width: 10px; font: 500 10px/1 var(--mono); color: var(--ink-3); }
+.sa-who .nm { font-size: 12.5px; color: var(--ink); }
+.sa-who .zh { font-size: 11px; color: var(--ink-3); }
+.sa-who .bd { flex: 0 0 100%; margin-left: 18px; font-size: 11.5px; line-height: 1.5; color: var(--ink-3); }
+
+.sa-cells { display: flex; gap: 6px; }
+.sa-cell {
+  display: grid; justify-items: center; gap: 7px;
+  width: 70px; padding: 10px 4px 7px;
+  border-radius: 9px; border: 1px solid transparent; background: var(--raised);
+}
+.sa-cell .stage { display: grid; place-items: center; width: 30px; height: 18px; }
+.sa-cap { font: 400 9.5px/1 var(--mono); letter-spacing: 0.02em; color: var(--ink-3); }
+/* the caption borrows the state's tone, at the value of a caption: the icon has
+   to be legible alone, but a reader checking the lab should not have to guess */
+.sa-cell[data-s='run'] .sa-cap { color: color-mix(in oklab, var(--accent) 80%, var(--ink)); }
+.sa-cell[data-s='stop'] .sa-cap { color: color-mix(in oklab, var(--amber) 80%, var(--ink)); }
+.sa-cell[data-s='done'] .sa-cap { color: color-mix(in oklab, var(--green) 80%, var(--ink)); }
+
+/* the ladder: the same drawing at the top of its range, so the 20px claim is
+   something you can see rather than something I assert */
+.sa-ladder { display: flex; gap: 22px; align-items: flex-end; padding: 4px 0 0; }
+.sa-ladder-cell { display: grid; justify-items: center; gap: 8px; }
+.sa-ladder-cell .cap { font: 400 9.5px/1 var(--mono); color: var(--ink-3); }
+
+/* ---------- in a session: the real row ---------------------------------- */
+.sa-roster { display: grid; gap: 0; max-width: 560px; }
+.sa-row {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) 62px 54px;
+  align-items: center; gap: 10px; min-height: 28px; padding: 0 4px 0 2px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12.5px; line-height: 1.4; color: var(--ink-3);
+}
+.sa-row:last-child { border-bottom: 0; }
+.sa-row .rt-sa { justify-self: center; }
+.sa-row .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.sa-row .word { font: 400 10.5px/1 var(--mono); letter-spacing: 0.01em; }
+.sa-row .dur { font: 400 10.5px/1 var(--mono); color: var(--ink-3); text-align: right; font-variant-numeric: tabular-nums; }
+.sa-row[data-s='run'] .word { color: color-mix(in oklab, var(--accent) 78%, var(--ink)); }
+.sa-row[data-s='stop'] .word { color: color-mix(in oklab, var(--amber) 78%, var(--ink)); }
+.sa-row[data-s='done'] .word { color: var(--ink-3); }
+/* a stopped row keeps its name at full ink and only loses its motion: the work
+   was real, the run was cut — dimming the name would say "discard" */
+.sa-row[data-s='stop'] .nm { color: color-mix(in oklab, var(--ink) 82%, var(--ink-3)); }
+
+/* a denser variant, 11px name, for the nested case (a child of a child) */
+.sa-roster--tight .sa-row { min-height: 24px; font-size: 11.5px; }
+
+/* ---------- the rejected list ------------------------------------------- */
+.sa-try { display: grid; gap: 10px; margin-top: 6px; }
+.sa-try-item { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.sa-try-item .x { font: 400 11px/1.7 var(--mono); color: var(--ink-3); }
+.sa-try-item b { color: var(--ink-2); font-weight: 500; }
+
+/* ---------- narrow: the lab folds, the cells stay square ------------------ */
+@media (max-width: 620px) {
+  .sa-page { padding: 30px 16px 72px; }
+  .sa-page h1 { font-size: 22px; }
+  .sa-lab-row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .sa-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .sa-cell { width: auto; }
+  .sa-who .bd { margin-left: 0; }
+  /* the duration stays: it is the one number that proves the run was real, and
+     at 390 a truncated name still leaves 190px for it */
+  .sa-row { grid-template-columns: 16px minmax(0, 1fr) 58px 50px; gap: 8px; }
+  .sa-ladder { gap: 14px; flex-wrap: wrap; }
+  .sa-page h2 .sub { flex: 0 0 100%; }
+}

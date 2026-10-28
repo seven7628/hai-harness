@@ -1,0 +1,29 @@
+/* Ported from design/agent-runtime/v2/ui.components.css. */
+/* Two rings, two dots going round them in opposite directions — the shape the
+   session uses while it is starting. It is driven by one number (`--s`) so the
+   same component can shrink to 16px and sit in a tool row: the compress step
+   and the start of a run are the same statement ("still going"), so they are
+   the same object, not two drawings that happen to resemble each other. */
+.rt-orbit { --s: 26px; position: relative; width: var(--s); height: var(--s); }
+.rt-orbit.sm { --s: 16px; }
+.rt-orbit .ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1px solid var(--line);
+}
+.rt-orbit .ring:nth-child(2) { inset: calc(var(--s) * 0.23); border-color: var(--line-soft); }
+.rt-orbit .spin {
+  position: absolute; inset: 0; border-radius: 50%;
+  animation: spin 1.9s linear infinite;
+}
+.rt-orbit .spin:nth-child(3) { animation-duration: 1.3s; animation-direction: reverse; }
+.rt-orbit .spin::after {
+  content: ''; position: absolute; left: 50%;
+  top: calc(var(--s) * -0.077);
+  width: calc(var(--s) * 0.154); height: calc(var(--s) * 0.154);
+  margin-left: calc(var(--s) * -0.077);
+  border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 calc(var(--s) * 0.3) color-mix(in oklab, var(--accent) 70%, transparent);
+}
+.rt-orbit .spin:nth-child(3)::after { background: var(--violet); box-shadow: 0 0 8px color-mix(in oklab, var(--violet) 60%, transparent); }
+@keyframes spin { to { transform: rotate(360deg); } }
+

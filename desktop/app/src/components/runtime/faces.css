@@ -1,0 +1,79 @@
+/* Ported verbatim from design/agent-runtime/v2 (ui.components.css, "the mark").
+   Ownership: class prefixes .rt-mk / .mk-* belong to components/runtime/*;
+   checked against index.css — zero collisions. Keep it verbatim so the two
+   canvases can be diffed. */
+.rt-face { display: inline-flex; --mk-size: 14px; }
+.rt-mk { width: var(--mk-size); height: var(--mk-size); }
+/* ---------- the mark ------------------------------------------------------
+   Six faces, three states each: running, done, engaged (the row it sits in is
+   open), plus a hover. A mark is a body painted through a mask with the eyes cut
+   out of it, so at 14px you read a solid little face with the page showing
+   through its eyes — the same economy as the reference, none of its drawing.
+   Every face animates the way a face does: it breathes, it blinks, it looks to
+   the side, its antennae or its steam move. Nothing spins.
+   -------------------------------------------------------------------------- */
+.rt-mk { width: 14px; height: 14px; flex: none; display: block; overflow: visible; color: var(--ink-2); }
+/* Three states, three colours — grey was invisible next to a line of grey text,
+   and a face that is nearly the same value as the label beside it reads as a
+   smudge. Live is the accent; finished is the colour this system already uses
+   for "settled"; open is the inspection colour, because opening a row is you
+   looking into it. */
+.rt-mk[data-mk-state='run'] { color: var(--accent); }
+.rt-mk[data-mk-state='done'] { color: color-mix(in oklab, var(--green) 70%, var(--ink)); }
+.rt-mk[data-mk-state='engaged'] { color: color-mix(in oklab, var(--violet) 92%, var(--ink)); }
+
+/* the body: a slow breath, hinged at the feet so it never floats */
+.mk-pop, .mk-body, .mk-look, .mk-wide, .mk-blink { transform-box: view-box; }
+.mk-pop { transform-origin: 8px 14px; transition: transform 180ms var(--spring); }
+.mk-body { transform-origin: 8px 14px; }
+.rt-mk[data-mk-state='run'] .mk-body { animation: mk-bob 2.1s var(--ease) infinite; }
+.mk-look { transform-origin: 8px var(--mk-eye-y, 7px); }
+.mk-wide { transform-origin: 8px var(--mk-eye-y, 7px); transition: transform 180ms var(--spring); }
+.mk-blink { transform-origin: 8px var(--mk-eye-y, 7px); }
+.rt-mk[data-mk-state='run'] .mk-blink { animation: mk-blink 3.8s linear infinite; }
+.rt-mk[data-mk-state='run'] .mk-look { animation: mk-glance 2.8s var(--ease) infinite alternate; }
+
+/* the eyes sit at a different height on each body */
+.mk-pip { --mk-eye-y: 7.1px; }
+.mk-cat { --mk-eye-y: 7.2px; }
+.mk-ghost { --mk-eye-y: 7px; }
+
+
+/* the working tempo: the same face, breathing faster */
+.mk-work.mk-body, .mk-work .mk-body { animation-duration: 1.15s; }
+.mk-work .mk-blink { animation-duration: 2.2s; }
+.mk-work .mk-look { animation-duration: 1.6s; }
+/* the open row is awake: the face swells a little when you open it and settles
+   back when you close it — that transition is the answer to "did it react" */
+.rt-mk[data-mk-state='engaged'] .mk-pop { transform: scale(1.06); }
+.rt-mk[data-mk-state='engaged'] .mk-wide { transform: scaleY(1.2); }
+/* and while a phase is running at working tempo the breath is faster */
+
+/* the halo: only on hover, and it is the whole answer to "did it notice me" */
+.mk-halo {
+  fill: none; stroke: currentColor; stroke-width: 0.7; opacity: 0;
+  transition: opacity 200ms var(--ease);
+}
+
+/* hover — the icon perks up: body pops, eyes widen, a ring appears.
+   The row that owns the mark counts as hovering too, because a 14px target is
+   not a target. */
+.rt-mk:hover .mk-pop,
+.rt-mk:hover .mk-wide,
+.rt-mk:hover .mk-halo,
+
+@keyframes mk-bob {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  45% { transform: translateY(0.4px) scaleY(0.965); }
+  70% { transform: translateY(-0.2px) scaleY(1.012); }
+}
+@keyframes mk-blink {
+  0%, 88% { transform: scaleY(1); }
+  91% { transform: scaleY(0.1); }
+  94%, 100% { transform: scaleY(1); }
+}
+@keyframes mk-glance {
+  from { transform: translateX(-0.55px); }
+  to { transform: translateX(0.55px); }
+}
+
