@@ -14,6 +14,7 @@ import { AsyncNote } from './runtime/blocks/AsyncNote'
 import { UserBlock } from './runtime/blocks/UserBlock'
 import { Lane } from './runtime/lane/Lane'
 import { LivePanel } from './runtime/turn/LivePanel'
+import { FilesLine } from './runtime/turn/FilesLine'
 import { Signal } from './runtime/signals/Signal'
 import './runtime/turn/turn.css'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
@@ -170,6 +171,14 @@ function AnswerActions({ text }: { text: string }) {
       </button>
     </div>
   )
+}
+
+/* 文件行只印**第一个**被改的文件；增删是整轮的合计（设计 ui.js fileHTML） */
+function firstFileOf(turn: { items: MsgBlock[] }): string {
+  for (const b of turn.items) {
+    if (b.kind === 'tool' && b.diff?.path) return b.diff.path
+  }
+  return ''
 }
 
 export default function Narrative({ viewSid, source, header, footer, density: densityProp }: {
@@ -1031,6 +1040,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           </div>
         ) : null}
         {body.length ? <div className="rt-turn-ans">{body}</div> : null}
+        {/* 这一轮改了哪个文件：记录（带框卡），点它展开做出改动的工作行 */}
+        {skin === 'runtime' && !turn.running && stats.files > 0 ? (
+          <FilesLine
+            path={firstFileOf(turn)}
+            added={stats.added}
+            removed={stats.removed}
+            {...(concise ? { onOpen: () => setOpenTurns((m) => ({ ...m, [turn.key]: !open })) } : {})}
+          />
+        ) : null}
         {skin === 'runtime' && turn.answer?.text && !turn.running ? (
           <AnswerActions text={turn.answer.text} />
         ) : null}
