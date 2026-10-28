@@ -84,7 +84,7 @@
     "test:todos-scope": "node e2e/verify_todos_scope.mjs",
     "test:session-scope": "esbuild src/lib/sessionScope-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/session-scope.test.cjs && node --test /tmp/session-scope.test.cjs",
     "test:agent-session": "esbuild src/lib/agentSession-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/agent-session.test.cjs && node --test /tmp/agent-session.test.cjs",
-    "test:runtime-turns": "esbuild scripts/test-runtime-turns.ts --bundle --platform=node --format=esm --loader:.md=text --loader:.png=dataurl --loader:.svg=dataurl --loader:.woff2=dataurl --outfile=/tmp/runtime-turns.test.mjs && node --test /tmp/runtime-turns.test.mjs",
+    "test:runtime-turns": "esbuild lab/test-runtime-turns.ts --bundle --platform=node --format=esm --loader:.md=text --loader:.png=dataurl --loader:.svg=dataurl --loader:.woff2=dataurl --outfile=/tmp/runtime-turns.test.mjs && node --test /tmp/runtime-turns.test.mjs",
     "test:runtime-skin": "node lab/verify-runtime-skin.mjs"
   },
   "build": {

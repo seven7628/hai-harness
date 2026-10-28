@@ -1926,6 +1926,9 @@ func (r *ViewReducer) applyToolStartLocked(e *events.ToolStart) {
 	r.blocks = append(r.blocks, Block{
 		Kind: blockKindTool, ID: bid, ToolID: e.Id, Name: e.Name, Args: e.Arguments,
 		Status: statusRunning, StartedAt: millis(ts), TaskID: e.TaskId,
+		// 归属键：工具块也要能自己说清「我是哪次运行的哪一轮调用的」。
+		// 缺了它们，前端只能靠相邻性猜轮次（一次运行里 N 轮 LLM 的同名工具分不开）。
+		RunID: e.RunId, RequestID: e.RequestId,
 	})
 	r.noteBlockAppendLocked(bid)
 	if e.RunId != "" {
@@ -2035,7 +2038,7 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 		// 异常序：只有 end 无 start —— 兜底补块（保持终态可见）
 		bid = r.nextBlockID()
 		r.toolBlockID[e.Id] = bid
-		r.blocks = append(r.blocks, Block{Kind: blockKindTool, ID: bid, ToolID: e.Id})
+		r.blocks = append(r.blocks, Block{Kind: blockKindTool, ID: bid, ToolID: e.Id, RunID: e.RunId, RequestID: e.RequestId})
 		r.noteBlockAppendLocked(bid)
 		idx = r.findBlockLocked(bid)
 	}

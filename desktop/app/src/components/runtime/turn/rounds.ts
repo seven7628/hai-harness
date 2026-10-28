@@ -9,6 +9,10 @@ import type { MsgBlock } from '../../../store/useAppStore'
 
 export interface Round {
   key: string
+  /** 这一段属于哪一轮 LLM 调用（tool/agent 块上的 request_id）。
+      有了它，「同一次运行里的第几轮」不用靠相邻性猜；旧数据没有 → undefined，
+      行为退回相邻性。 */
+  req?: string
   /** the assistant block that opened this round, if any */
   say?: MsgBlock
   items: MsgBlock[]
@@ -23,6 +27,15 @@ export function roundsOf(items: MsgBlock[]): Round[] {
     cur = { key: 'r' + out.length + '-' + (b ? b.id : 'x'), ...(b ? { say: b } : {}), items: [] }
     out.push(cur)
   }
+  // open() 会写 cur，但 TS 看不到闭包里的赋值 —— 用它拿到「当前段」的非空视图
+  const ensure = (): Round => {
+    if (!cur) open()
+    return cur as unknown as Round
+  }
+  const reqOf = (b: MsgBlock): string | undefined => {
+    const r = (b as { requestId?: string }).requestId
+    return typeof r === 'string' && r ? r : undefined
+  }
   for (const b of items) {
     if (b.kind === 'assistant') {
       // the assistant's own words open a round; a previous round of bare tool
@@ -31,8 +44,18 @@ export function roundsOf(items: MsgBlock[]): Round[] {
       continue
     }
     if (WORK.has(b.kind)) {
-      if (!cur) open()
-      cur!.items.push(b)
+      const req = reqOf(b)
+      let c = cur as unknown as Round | null
+      if (!c) c = ensure()
+      else if (req && c.req && req !== c.req) {
+        // 新的一轮 LLM 调用发起的工具（哪怕没有 assistant 夹在中间）——
+        // 之前只按相邻性归段，会把两轮的同名工具并成一段
+        open()
+        c = ensure()
+      }
+      // 段还没有归属就先认领（assistant 块目前不带 request_id）
+      if (!c.req && req) c.req = req
+      c.items.push(b)
       continue
     }
     // anything else (user, artifacts, system, results) is not part of a round

@@ -587,7 +587,7 @@ export type MsgBlock =
   | { kind: 'assistant'; id: number; text: string; streaming: boolean; model?: string; runId?: string; thinking: string; thinkMs?: number; ttftMs?: number; durMs?: number; agentDurMs?: number; thinkStart?: number; outputTokens?: number; reasoningTokens?: number; thinkingSummarized?: boolean; genMs?: number; ts?: number }
   // 工具块：nestedCalls = 编排型工具（codemode）脚本内的嵌套调用清单（外层结果自带，
   // 子调用**不生成**自己的工具块）；spillPath = 完整输出落盘路径（缺失时渲染层不显示该行）。
-  | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; parentRunId?: string; liveTail?: string; liveSeq?: number; liveTotal?: number }
+  | { kind: 'tool'; id: number; toolId: string; name: string; runId?: string; requestId?: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; parentRunId?: string; liveTail?: string; liveSeq?: number; liveTotal?: number }
   // todos：该子 agent **自己**的待办清单（它是独立上下文，因此也是独立 TODO ——
   // 与会话级视图字段 SessionView.todos 互不相干，见 events.TodoSnapshot 的注释）。
   | { kind: 'agent'; id: number; runId: string; parentRunId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean; endKind?: string }
@@ -5520,6 +5520,9 @@ export function dispatchEvent(raw: AnyEvent): void {
       const name = String(raw.name || '')
       const args = String(raw.arguments || '')
       const taskId = String(raw.task_id || '') // 工具任务 id（promote 关联锚；无 = 旧版/无批任务）
+      // 归属键：哪次运行（run_id）、哪一轮 LLM 调用（request_id）发起的。
+      // 有了它，轮次分组不必靠相邻性猜（见 components/runtime/turn/rounds.ts）。
+      const reqId = raw.request_id ? String(raw.request_id) : undefined
       const startTs = evTs(raw) ?? Date.now() // 工具开始时刻（事件时间戳，结算 durMs 用，重放可重建）
       const startClient = Date.now() // 客户端接收时刻（实时时钟锚点：从「接收到 Start」起走，重放不虚高）
       // —— 嵌套子调用（parent_call_id 非空）**不生成独立工具行** ——
@@ -5549,7 +5552,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               })
             : dupMain
               ? v.blocks.map((b) => (b.kind === 'tool' && b.toolId === toolId ? { ...b, name, args, ...(tid ? { taskId: tid } : {}) } : b))
-              : [...v.blocks, { kind: 'tool', id: blockSeq++, toolId, name, args, status: 'running', startedAt: startClient, ...(tid ? { taskId: tid } : {}), ...(runId ? { parentRunId: runId } : {}) }],
+              : [...v.blocks, { kind: 'tool', id: blockSeq++, toolId, name, args, status: 'running', startedAt: startClient, ...(tid ? { taskId: tid } : {}), ...(runId ? { parentRunId: runId } : {}), ...(reqId ? { requestId: reqId } : {}) }],
           toolStartTs: { ...v.toolStartTs, [toolId]: startTs },
           runNodes: runId
             ? (v.runNodes.some((n) => n.id === `tool-${toolId}`)
@@ -6984,6 +6987,10 @@ function checkpointToView(cp: CheckpointView): SessionView {
         const cpHostOps = parseHostOps(b.host_ops)
         blocks.push({
           kind: 'tool', id: b.id, toolId: b.tool_id ?? '', name: b.name ?? '', args: b.args,
+          // 归属键（Go Block.RunID/RequestID）：旧 checkpoint 没有 → undefined，
+          // 轮次分组会退回到相邻性
+          ...(b.run_id ? { runId: b.run_id } : {}),
+          ...(b.request_id ? { requestId: b.request_id } : {}),
           result: b.result, diff: b.diff ? cpDiff(b.diff) : undefined,
           images: pickImages(b.images), isError: b.is_error === true,
           errorInfo: cpToolError(b.error_info), durMs: b.dur_ms,
