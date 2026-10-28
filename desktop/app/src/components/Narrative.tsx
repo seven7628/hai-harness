@@ -1,12 +1,13 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf } from '../store/useAppStore'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
-import { selectTurns, turnStats, turnUsage } from './runtime/turn/selectTurns'
+import { foldedBody, selectTurns, turnStats, turnUsage } from './runtime/turn/selectTurns'
 import { WorkFold } from './runtime/turn/WorkFold'
 import { Ledger } from './runtime/turn/Ledger'
+import { AsyncNote } from './runtime/blocks/AsyncNote'
 import './runtime/turn/turn.css'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
 // —— 见 NarrativeBlocks.tsx 的文件头（两处宿主、一套 DOM、一套皮肤）。
@@ -21,64 +22,15 @@ import { ArtifactCard } from './ArtifactCard'
 import { UsageActivityMini } from './UsageStats'
 import { useT } from '../i18n'
 
-function taskDeliveryLabel(status: Extract<MsgBlock, { kind: 'task_delivery' }>['status'], t: (k: string) => string) {
-  switch (status) {
-    case 'completed': return t('task.status.completed')
-    case 'interrupted': return t('task.status.interrupted')
-    case 'failed': return t('task.status.failed')
-    case 'abandoned': return t('task.status.abandoned')
-  }
-}
 
-// 异步任务完成通知（task_result_delivered 的轻量回执）：默认折叠，展开后查看
-// 完整执行结果或错误（与工具调用卡片同构——先看状态行，需要时再展开全文）。
+/* 后台任务落地：两种块（回执 / 完整结果）用同一个 note 渲染 —— 它们说的是同一句
+   话，差别只是展开后是纯输出还是 Markdown（见 runtime/blocks/AsyncNote.tsx）。 */
 const TaskDeliveryBlock = memo(function TaskDeliveryBlock({ b }: { b: Extract<MsgBlock, { kind: 'task_delivery' }> }) {
-  const t = useT()
-  const [open, setOpen] = useState(false)
-  const isErr = b.status === 'failed' || Boolean(b.error)
-  const hasBody = Boolean(b.result || b.error)
-  const expanded = open && hasBody
-  return (
-    <div className={`msg system ${isErr ? 'error' : b.status === 'completed' ? 'success' : 'info'}${expanded ? ' task-delivery-open' : ''}`} role="status">
-      <span className="sys-dot" aria-hidden="true" />
-      <button
-        className="task-delivery-toggle"
-        onClick={() => hasBody && setOpen((v) => !v)}
-        aria-expanded={hasBody ? open : undefined}
-        aria-label={open ? t('task.result.collapse') : t('task.result.expand')}
-      >
-        <span className="mono">{hasBody ? (open ? '▾' : '▸') : ''} <InlineCode text={`\`${b.taskId}\``} /> {taskDeliveryLabel(b.status, t)} · {t('task.result.notified')}</span>
-      </button>
-      {expanded && (
-        <pre className={isErr ? 'task-result-err' : 'task-result-ok'}>{b.error || b.result}</pre>
-      )}
-    </div>
-  )
+  return <AsyncNote taskId={b.taskId} status={b.status} result={b.result} error={b.error} />
 })
 
-// 后台任务结果（自动回传 task_result_delivered）：可折叠 Markdown 块（类似思考过程）——
-// 默认折叠：`▸ 任务结果 · task-3 · ✓/✗`；展开渲染全文（复用 Markdown + shiki 管线）。
 const TaskResultBlock = memo(function TaskResultBlock({ b }: { b: Extract<MsgBlock, { kind: 'task_result' }> }) {
-  const [open, setOpen] = useState(false)
-  const t = useT()
-  const isErr = Boolean(b.error)
-  return (
-    <div className={`task-result ${isErr ? 'err' : 'ok'}`} key={b.id}>
-      <button
-        className="task-result-toggle"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        aria-label={open ? t('task.result.collapse') : t('task.result.expand')}
-      >
-        <span className="mono">{open ? '▾' : '▸'} {t('task.result')} · {b.taskId} · {isErr ? '✗' : '✓'}</span>
-      </button>
-      {open && (
-        <div className="task-result-body">
-          {isErr ? <div className="task-result-err">{b.error}</div> : <Markdown text={b.result} />}
-        </div>
-      )}
-    </div>
-  )
+  return <AsyncNote taskId={b.taskId} status={b.error ? 'failed' : 'completed'} result={b.result} error={b.error} rich />
 })
 
 // 压缩结果：和工具调用一样保留在对话流中，默认展示结果概要，展开后给出完整用量与上下文变化。
@@ -130,7 +82,9 @@ function RetryProgress({ ts, delayMs, retrying, startedAt, costUsd }: { ts?: num
 /* 简洁档收起时留在正文里的，是「读了什么」，不是「怎么做的」。工具、子智能体、
    后台任务结果都属于工作过程，收进折叠行；system / error / divider / compression
    是信号不是工作，始终可见。 */
-const FOLDED = new Set<MsgBlock['kind']>(['tool', 'agent', 'async_task', 'task_result', 'task_delivery'])
+/* 收进折叠行的：工作过程本身。信号/产出/回执留在正文（判据与实现同在
+   runtime/turn/selectTurns.ts 的 foldedBody —— 那条规则要有测试才算数）。 */
+const FOLDED = new Set<MsgBlock['kind']>(['tool', 'agent', 'async_task'])
 
 const AssistantTurnMeta = memo(function AssistantTurnMeta({ b }: { b: Extract<MsgBlock, { kind: 'assistant' }> }) {
   const t = useT()
@@ -989,7 +943,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        详细档：原顺序整段展开，不折叠（v2 里详细档根本没有折叠行）。 */
     const shut = concise && !open
     const workItems = concise ? groupBlocks(turn.items.filter(isWork)) : []
-    const body = groupBlocks(shut ? (turn.answer ? [turn.answer] : []) : turn.items)
+    const body = groupBlocks(shut ? foldedBody(turn) : turn.items)
     if (!body.length && !workItems.length && !work) continue
     items.push(
       <div

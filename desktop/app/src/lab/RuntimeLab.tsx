@@ -10,6 +10,7 @@ import { Compact } from '../components/runtime/blocks/Compact'
 import { TodoBlock } from '../components/runtime/blocks/Todo'
 import { ArtifactCard } from '../components/ArtifactCard'
 import { AgentTaskCard } from '../components/TaskCard'
+import { AsyncNote } from '../components/runtime/blocks/AsyncNote'
 import type { MsgBlock } from '../store/useAppStore'
 
 const SYSTEMS = ['pip', 'cat', 'ghost'] as const
@@ -106,6 +107,19 @@ export function RuntimeLab() {
               ] },
             ]}
           />
+        </div>
+      </div>
+
+      <div style={row}>
+        <span style={lab}>async note · running / finished / failed</span>
+        <div style={{ maxWidth: 640, display: 'grid' }}>
+          <AsyncNote taskId="task-3f21" status="running" liveLabel="go test ./session -count=5" />
+          <AsyncNote
+            taskId="task-3f21"
+            status="completed"
+            result={'PASS\nok  \tgithub.com/seven7628/hai-harness/session\t2.941s\n\n5/5 runs green'}
+          />
+          <AsyncNote taskId="task-9a04" status="failed" error="exit status 1: fixture wrote HOME outside the sandbox" />
         </div>
       </div>
 

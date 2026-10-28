@@ -162,3 +162,22 @@ export function durText(ms: number): string {
   const m = Math.floor(s / 60)
   return m + ' m ' + Math.round(s - m * 60) + ' s'
 }
+
+/* What a folded turn still shows. Folding is about the working phase, never
+   about the record: a signal, the run's artifacts, or a background task's
+   receipt are things that happened, not things that were done to get here, and
+   folding them away would hide a record the reader has no other way to find
+   (the red line: never silently drop data). The answer is included wherever it
+   sits in the turn, so the order of what is left is the order it happened. */
+export const ALWAYS_SHOWN = new Set<MsgBlock['kind']>([
+  'system',
+  'error',
+  'divider',
+  'artifacts',
+  'task_result',
+  'task_delivery',
+])
+
+export function foldedBody(turn: Turn): MsgBlock[] {
+  return turn.items.filter((b) => b === turn.answer || ALWAYS_SHOWN.has(b.kind))
+}

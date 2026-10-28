@@ -1,0 +1,146 @@
+/* Ported from design/agent-runtime/v2/parts/async.css.
+   Two lines, one hairline frame more than the prose around it: it arrived at a
+   moment, and the eye was somewhere else in the stream. */
+
+.rt-as {
+  --rt-as-tone: var(--success);
+  /* small tone text: 84% of the tone into the ink is what lets 11px green /
+     amber / red clear AA on both papers */
+  --rt-as-tone-ink: color-mix(in srgb, var(--rt-as-tone) 84%, var(--text));
+
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-areas:
+    'ico l1 acts'
+    'ico l2 acts'
+    'body body body';
+  align-items: center;
+  column-gap: 9px;
+  row-gap: 1px;
+  margin: 6px 0 12px;
+  padding: 8px 8px 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  /* one shot, 2px up and a fade. Nothing pulses afterwards: an arrival is an
+     event, and an event that keeps moving is an alarm. */
+  animation: rt-as-in 260ms var(--ease) both;
+}
+
+@keyframes rt-as-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
+.rt-as[data-r='fail'] { --rt-as-tone: var(--error); }
+.rt-as[data-r='run'] { --rt-as-tone: var(--running); }
+
+.rt-as-ico {
+  grid-area: ico;
+  align-self: start;
+  margin-top: 1px;
+  color: var(--rt-as-tone);
+}
+
+.rt-as-ico svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  overflow: visible;
+}
+
+.rt-as-l1 {
+  grid-area: l1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rt-as-l1 b {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.rt-as-verb { color: var(--rt-as-tone-ink); }
+
+.rt-as-l2 {
+  grid-area: l2;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.rt-as-out { color: var(--rt-as-tone-ink); font-variant-numeric: tabular-nums; }
+.rt-as-out.bad { color: var(--error); }
+
+.rt-as-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rt-as .sep { opacity: 0.5; }
+
+.rt-as-act {
+  grid-area: acts;
+  align-self: start;
+  background: none;
+  border: 0;
+  padding: 1px 2px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-3);
+  border-radius: 4px;
+  transition: color 120ms var(--ease);
+}
+
+.rt-as-act:hover { color: var(--text); }
+
+.rt-as-body {
+  grid-area: body;
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+
+.rt-as-body .md-text { font-size: 12.5px; }
+
+.rt-as-pre {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rt-as-err {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--error);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rt-as { animation: none; }
+}
