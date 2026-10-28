@@ -48,6 +48,15 @@ export function Ledger({
       role="group"
       aria-label="turn cost"
       onClick={() => more.length && setOpen((v) => !v)}
+      onKeyDown={(e) => {
+        // 触屏/键盘都要能展开：设计把它当按钮（cursor:pointer + .is-open），
+        // 只给 onClick 等于只给鼠标
+        if (!more.length) return
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          setOpen((v) => !v)
+        }
+      }}
     >
       {fact(calls, calls === 1 ? 'call' : 'calls')}
       {' \u00b7 '}{fact(tok, 'tokens')}

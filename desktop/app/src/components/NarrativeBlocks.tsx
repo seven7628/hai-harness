@@ -96,7 +96,9 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
   // 时钟：仅思考中挂（ElapsedTimer 订阅，每秒走）；结束 timer=thinkMs 显示总耗时
   const bodyRef = useRef<HTMLDivElement>(null)
   const long = text.length > 200
-  const showFull = live || open || !long
+  // 设计里思考行永远可开可合（不是「短就不用折」）：短文本也走同一个折叠，
+  // 否则这一行的折角在第一帧就是个死图标。流式中保持展开（正在写）。
+  const showFull = live || open
   // 折叠交给 CSS 的高度动画（设计 .collapse = grid-template-rows 0fr↔1fr 380ms）：
   // 正文始终整段渲染，折叠只是把它夹住 —— 换文本的话没有过渡，点击会「跳」一下。
   const shown = text
