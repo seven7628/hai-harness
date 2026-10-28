@@ -5,6 +5,7 @@ import { parseQuestionOptions } from '../lib/questionOptions'
 import { Markdown } from './markdown'
 import { useT } from '../i18n'
 import { useScopedQuestion } from './sessionScope'
+import './ask-runtime.css'
 
 // 决策倒计时（2026-09-20 用户要求：让用户知道还剩多长时间做决策）：
 // 剩 = timeoutMs - (提问以来的毫秒)。时钟复用应用唯一的 1s tick（useClock，
@@ -117,7 +118,7 @@ export default function AskUserQuestionPanel() {
     const pv = it.multi ? null : previewFor(it)
     const list = (
       <div
-        className={`q-options${pv ? ' col' : ''}`}
+        className={`q-options ask-list${pv ? ' col' : ''}`}
         role="group"
         aria-label={t('ask.optionsAria').replace('{n}', String(i + 1))}
       >
@@ -127,11 +128,16 @@ export default function AskUserQuestionPanel() {
           return (
             <button
               key={o.label}
-              className={`q-option${sel ? ' sel' : ''}`}
-              aria-pressed={sel}
+              className={`q-option ask-opt${sel ? ' sel' : ''}`}
+              role={it.multi ? 'checkbox' : 'radio'}
+              aria-checked={sel}
               onClick={() => (it.multi ? toggle(it.id, o.label) : setAnswer(it.id, o.label))}
             >
-              {o.label}
+              {/* 设计的三段结构：标记（圆点/勾）· 文案 · 序号键位（各占一列，
+                  否则每个标签后跟着数字会参差，参差读起来像失误） */}
+              <span className="ask-mark" aria-hidden="true" />
+              <span className="ask-lab">{o.label}</span>
+              {it.options.indexOf(o) < 9 ? <kbd aria-hidden="true">{it.options.indexOf(o) + 1}</kbd> : null}
             </button>
           )
         })}
@@ -142,9 +148,12 @@ export default function AskUserQuestionPanel() {
       <div className="q-split">
         {list}
         {/* 预览走正文同一个 Markdown 渲染器：模型写的代码块/表格/公式在预览里也成立 */}
-        <div className="q-preview" role="figure" aria-label={t('ask.previewAria').replace('{label}', pv.label)}>
-          <div className="q-preview-hd mono">{t('ask.previewFor').replace('{label}', pv.label)}</div>
-          <div className="q-preview-body">
+        <div className="q-preview ask-pv" role="figure" aria-label={t('ask.previewAria').replace('{label}', pv.label)}>
+          <div className="q-preview-hd mono ask-pv-head">
+            <span>{t('ask.previewFor').replace('{label}', pv.label)}</span>
+            <span className="ask-pv-which">{pv.label}</span>
+          </div>
+          <div className="q-preview-body ask-pv-pre">
             <Markdown text={pv.preview} />
           </div>
         </div>
@@ -154,8 +163,11 @@ export default function AskUserQuestionPanel() {
 
   return (
     // 非模态：role="region"（不是 dialog/aria-modal —— 叙述区与左右栏都还能用）
-    <div className={`dock${folded ? ' folded' : ''}`} role="region" aria-label={t('ask.title')}>
-      <div className="dock-box">
+    <div className={`dock ask-scope${folded ? ' folded' : ''}`} role="region" aria-label={t('ask.title')}>
+      <div
+        className="dock-box ask"
+        data-form={items.some((x) => x.multi) ? 'multi' : items.some((x) => !x.multi && previewFor(x)) ? 'preview' : 'plain'}
+      >
         <h3
           className="dock-hd"
           role="button"
@@ -216,11 +228,11 @@ export default function AskUserQuestionPanel() {
                 </div>
               ))}
             </div>
-            <div className="acts">
+            <div className="acts ask-foot">
               <span className="timeout">
                 {cd && cd.leftMs === 0 ? t('ask.timedOutHint') : t('ask.allRequired')}
               </span>
-              <button className="btn primary" disabled={!allAnswered || (cd?.leftMs === 0)} onClick={submitAll}>
+              <button className="btn primary ask-btn go" disabled={!allAnswered || (cd?.leftMs === 0)} onClick={submitAll}>
                 {t('ask.submitAll').replace('{answered}', String(answered)).replace('{total}', String(items.length))}
               </button>
             </div>
