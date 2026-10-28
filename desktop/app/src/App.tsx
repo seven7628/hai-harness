@@ -16,7 +16,7 @@ import ToastView from './components/ToastView'
 import BootScreen from './components/BootScreen'
 import { useAppStore } from './store/useAppStore'
 import { applyTheme } from './lib/theme'
-import { applyNarrativeSkin } from './lib/narrativeSkin'
+import { applyNarrativeDensity, applyNarrativeSkin } from './lib/narrativeSkin'
 import { applyAppearance, useAppearance } from './lib/appearance'
 
 // 三栏面板的稳定 id：Group.onLayoutChanged 的 layout 以 id 为键（`{[id]: percentage}`）——
@@ -52,6 +52,7 @@ export default function App() {
   // 会话页样式（data-skin）与主题正交，共用这条 effect（切换实时；缺省 current）
   const theme = useAppStore((s) => s.settings.theme)
   const narrativeSkin = useAppStore((s) => s.settings.narrative_skin ?? 'current')
+  const narrativeDensity = useAppStore((s) => s.settings.narrative_density ?? 'concise')
   // TEMP-STARTUP 打点单独一次（挂载时）：它与"主题/皮肤"无关，
   // 混在同一条 effect 里会让用户切一次皮肤就往启动时间轴里多写一条 app-mounted。
   useEffect(() => {
@@ -64,9 +65,10 @@ export default function App() {
   useEffect(() => {
     applyTheme(theme)
     applyNarrativeSkin(narrativeSkin)
+    applyNarrativeDensity(narrativeDensity)
     applyAppearance(appearance) // 必须在 applyTheme 之后：它读的是解析后的 data-theme
     if (window.desktop) void window.desktop.applyTheme(theme)
-  }, [theme, narrativeSkin, appearance])
+  }, [theme, narrativeSkin, narrativeDensity, appearance])
 
   // 折叠图标条 tooltip 定位（fixed，避开图标条 overflow 裁剪；左右 rail 共用一次委托）
   useRailTips()

@@ -209,7 +209,8 @@ export interface AppSettings {
   browser_engine?: 'mcp' | 'ego'
   // 会话页样式（可选的纯样式层开关）：current（默认，现状）| v3（组件样式）。
   // 缺省 = current，老 settings.json 没有该字段时行为不变。
-  narrative_skin?: 'current' | 'v3'
+  narrative_skin?: 'current' | 'v3' | 'runtime'
+  narrative_density?: 'concise' | 'detailed'
   provider: {
     active: string // 当前活跃 provider id
     deepseek: ProviderCfg

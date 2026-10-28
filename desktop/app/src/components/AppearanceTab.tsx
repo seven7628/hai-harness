@@ -70,6 +70,7 @@ export default function AppearanceTab() {
   const settings = useAppStore((s) => s.settings)
   const setTheme = useAppStore((s) => s.setTheme)
   const setNarrativeSkin = useAppStore((s) => s.setNarrativeSkin)
+  const setNarrativeDensity = useAppStore((s) => s.setNarrativeDensity)
   const ap = useAppearance()
 
   const themeOptions: { value: 'dark' | 'light' | 'system'; label: string }[] = [
@@ -77,14 +78,39 @@ export default function AppearanceTab() {
     { value: 'light', label: t('settings.light') },
     { value: 'system', label: t('settings.system') },
   ]
-  const skinOptions: { value: 'current' | 'v3'; label: string }[] = [
+  const skinOptions: { value: 'current' | 'v3' | 'runtime'; label: string }[] = [
     { value: 'current', label: t('settings.narrativeSkin.current') },
     { value: 'v3', label: t('settings.narrativeSkin.v3') },
+    { value: 'runtime', label: t('settings.narrativeSkin.runtime') },
+  ]
+
+  const densityOptions: { value: 'concise' | 'detailed'; label: string }[] = [
+    { value: 'concise', label: t('settings.narrativeDensity.concise') },
+    { value: 'detailed', label: t('settings.narrativeDensity.detailed') },
   ]
 
   return (
     <>
       <div className="settings-sec-title">{t('settings.appearance')}</div>
+
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.narrativeDensity')}</div>
+          <div className="set-desc">{t('settings.narrativeDensity.desc')}</div>
+        </div>
+        <div className="seg" role="radiogroup" aria-label={t('settings.narrativeDensity')}>
+          {densityOptions.map((o) => (
+            <button
+              key={o.value}
+              className={(settings.narrative_density ?? 'concise') === o.value ? 'cur' : ''}
+              aria-pressed={(settings.narrative_density ?? 'concise') === o.value}
+              onClick={() => setNarrativeDensity(o.value)}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="set-row">
         <div>

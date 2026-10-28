@@ -182,7 +182,7 @@ export interface NarrativeSource {
   empty?: ReactNode
 }
 
-export default function Narrative({ viewSid, source, header, footer, density = 'concise' }: {
+export default function Narrative({ viewSid, source, header, footer, density: densityProp }: {
   viewSid?: string
   source?: NarrativeSource
   /** 首行插槽（子会话的「返回主会话 + 身份/用量」）。放在容器**内部**：
@@ -192,8 +192,8 @@ export default function Narrative({ viewSid, source, header, footer, density = '
    *  子智能体卡内（TaskResultInline），两处必须是**同一个组件**才谈得上复用。 */
   footer?: ReactNode
   /** 详细 / 简洁。详细 = 旧观感（工作块全展开、无折叠行）；简洁 = 一轮的工作
-   *  收进一行，跑着的时候敞开、跑完收起，点开读全过程。默认简洁 —— v2 画布的默认
-   *  档就是 concise，移植过来的东西不该以另一副样子出现。 */
+   *  收进一行，跑着的时候敞开、跑完收起，点开读全过程。缺省读设置（默认简洁 ——
+   *  v2 画布的默认档就是 concise，移植过来的东西不该以另一副样子出现）。 */
   density?: 'concise' | 'detailed'
 } = {}) {
   const t = useT()
@@ -203,6 +203,8 @@ export default function Narrative({ viewSid, source, header, footer, density = '
   const blocks = source ? source.blocks : storeBlocks
   const persona = useAppStore((s) => s.persona)
   const turnMetrics = useAppStore((s) => (viewSid ? s.views[viewSid]?.turns : s.turns))
+  const storedDensity = useAppStore((s) => s.settings.narrative_density ?? 'concise')
+  const density = densityProp ?? storedDensity
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
   const activeSessionId = useAppStore((s) => s.activeSessionId)

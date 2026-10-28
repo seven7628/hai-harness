@@ -2060,7 +2060,8 @@ export const KNOWN_MODEL_INPUT_TYPES: Record<string, Record<string, string[]>> =
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   lang: 'zh',
-  narrative_skin: 'current', // 会话页样式：默认现状样式（v3 为组件样式，见 lib/narrativeSkin.ts）
+  narrative_skin: 'current', // 会话页样式：默认现状样式（v3 为组件样式、runtime 为 v2 移植，见 lib/narrativeSkin.ts）
+  narrative_density: 'concise', // 会话密度：简洁 = 工作过程收进一行（v2 画布默认档）
   provider: {
     active: 'deepseek',
     deepseek: {
@@ -2930,7 +2931,8 @@ interface AppState {
   toast: ToastState | null // 全局 Toast（保存成功/失败等轻提示；自动消失）
   showToast(msg: string, kind?: 'ok' | 'error'): void // 弹全局 Toast（覆盖旧 Toast；~2.5s 自动消失）
   setTheme(theme: 'dark' | 'light' | 'system'): void // 乐观 + 持久化 + Electron 窗口底色跟随
-  setNarrativeSkin(skin: 'current' | 'v3'): void // 会话页样式（乐观 + 持久化；实际视觉由 App.tsx 的 effect 写 data-skin）
+  setNarrativeSkin(skin: 'current' | 'v3' | 'runtime'): void // 会话页样式（乐观 + 持久化；实际视觉由 App.tsx 的 effect 写 data-skin）
+  setNarrativeDensity(d: 'concise' | 'detailed'): void // 会话密度（乐观 + 持久化；视觉由 Narrative 的 density prop 读同一份设置）
   setLang(lang: 'zh' | 'en'): void // 乐观 + 持久化（i18n 立即重渲染）
   setSandboxMode(mode: 'none' | 'seatbelt'): void // 命令沙箱模式（乐观 + 持久化；bridge loop 重建时生效）
   computerApprovedSave(apps: string[]): void // Computer Use 已授权 App（统一授权；乐观 + 持久化 + 热生效）
@@ -9504,6 +9506,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ settings: { ...s.settings, narrative_skin: skin } }))
     void transport.settingsSet({ narrative_skin: skin })
     // 实际视觉应用（data-skin）由 App.tsx 的 effect 统一处理
+  },
+  setNarrativeDensity: (d) => {
+    set((s) => ({ settings: { ...s.settings, narrative_density: d } }))
+    void transport.settingsSet({ narrative_density: d })
+    // 实际渲染由 Narrative 读 settings.narrative_density；data-narrative-density 由 App.tsx 落
   },
   setLang: (lang) => {
     set((s) => ({ settings: { ...s.settings, lang } }))

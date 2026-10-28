@@ -317,9 +317,10 @@ export const ToolRow = memo(function ToolRow({ b, live = false, host = 'main' }:
           }
         }}
       >
-        {/* V3 行首图标（默认皮肤不渲染）：读=文档 · 检索=放大镜 · 执行=终端 · 改=笔 */}
-        <span className="ic" aria-hidden="true"><ToolIcon name={isCodemode ? (tier === 'search' ? 'search' : 'bash') : b.name} /></span>
+        {/* 展开箭头在图标之前：一列行读下来，左侧是「可点开」，右侧才是「这是什么」。 */}
         <span className="chev">{open ? '▾' : '▸'}</span>
+        {/* V3 / 运行时皮肤的行首图标（默认皮肤不渲染）：读=文档 · 检索=放大镜 · 执行=终端 · 改=笔 */}
+        <span className="ic" aria-hidden="true"><ToolIcon name={isCodemode ? (tier === 'search' ? 'search' : 'bash') : b.name} /></span>
         {isSkill ? (
           <span className={`t ${err ? 'err' : ''}`}>SKILL({b.args})</span>
         ) : (

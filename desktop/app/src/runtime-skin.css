@@ -1,0 +1,181 @@
+/* ============================================================================
+   Runtime skin — the v2 session canvas, ported to this app.
+
+   Every rule here is prefixed `html[data-skin='runtime']`, so the default skin
+   is untouched and one settings toggle takes the whole thing away. Structure
+   lives in the components (turn box, fold line, ledger, faces); this file only
+   decides how the things that were already there should read.
+
+   The three ideas, in order of how much they change:
+     1. a tool call is a line, not a card   — no box, no border, 28px per call
+     2. the family colour names the verb    — the mark and the numbers stay quiet
+     3. thinking is a line too              — no accent chip, a rail instead
+   ========================================================================== */
+
+html[data-skin='runtime'] {
+  --rt-fast: 120ms;
+  --rt-hover: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+/* The v3 skin owns `.ic`; the default skin hides it. The runtime look needs the
+   icons (a row's first read is "what kind of thing is this"), so turn them on
+   with a size and a quiet colour of their own. */
+html[data-skin='runtime'] .ic {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--text-3);
+}
+
+/* ---------------------------------------------------------------------------
+   1. tool rows
+   ------------------------------------------------------------------------ */
+
+/* The group was a card with a border, and every call inside sat in it. A turn
+   can hold a dozen calls; a dozen borders is a table, not a trace. */
+html[data-skin='runtime'] .tool-group {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  gap: 0;
+  margin: 8px 0 10px;
+}
+
+html[data-skin='runtime'] .tool-row {
+  font-size: 12px;
+}
+
+html[data-skin='runtime'] .tool-row .tool-row-hd {
+  min-height: 28px;
+  gap: 9px;
+  padding: 0 8px 0 6px;
+  border-radius: 7px;
+  transition: background-color var(--rt-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .tool-row .tool-row-hd:hover {
+  background: var(--rt-hover);
+}
+
+/* The verb keeps the family colour: in this app the family is a real
+   distinction (read / run / write / net / agent / skill), and a column of
+   coloured verbs is what makes a long turn countable at a glance. What
+   changes is the weight around it — the argument is mono and recedes, the
+   numbers are tabular and right-aligned, so the verb is the only thing
+   asking to be read first. */
+html[data-skin='runtime'] .tool-row .t {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.004em;
+}
+
+html[data-skin='runtime'] .tool-row .args {
+  flex: 1 1 auto;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* the spacer had the leftover width; the argument should have it */
+html[data-skin='runtime'] .tool-row .grow {
+  flex: 0 0 0;
+}
+
+html[data-skin='runtime'] .tool-row .ms,
+html[data-skin='runtime'] .tool-row .tu {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+html[data-skin='runtime'] .tool-row .st {
+  width: 12px;
+  text-align: center;
+}
+
+/* A running call is the one thing in a folded turn that must not look like the
+   rest: its verb breathes. Nothing spins — a spinner says "wait", a slow
+   pulse says "working". */
+html[data-skin='runtime'] .tool-row .run {
+  color: var(--running);
+}
+
+/* the inline diff keeps its box — it is a document, not a line */
+html[data-skin='runtime'] .tool-row .tool-diff {
+  margin: 2px 8px 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   2. thinking
+   ------------------------------------------------------------------------ */
+
+/* It was an accent pill with a border in a corner of the transcript — the
+   loudest thing on the page for the one part that is meant to be optional.
+   v2 draws it as a line: a mark, "Thought for 4.8 s", a chevron. */
+/* A thought carries a face (state: running / open / folded). Two marks on one
+   line — the face and the v3 sparkle — is one too many. */
+html[data-skin='runtime'] .thinking-hd .ic {
+  display: none;
+}
+
+html[data-skin='runtime'] .thinking-toggle .mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-3);
+  background: none;
+  border: 0;
+  padding: 0;
+  transition: color var(--rt-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .thinking-hd:hover .thinking-toggle .mono {
+  color: var(--text-2);
+  border-color: transparent;
+}
+
+html[data-skin='runtime'] .thinking-more {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+html[data-skin='runtime'] .thinking-more:hover {
+  color: var(--text-2);
+}
+
+/* The reasoning hangs off a hairline instead of a second box: the line says
+   "this is subordinate", which a border cannot say without adding weight. */
+html[data-skin='runtime'] .thinking-body {
+  position: relative;
+  margin-top: 2px;
+  padding-left: 15px;
+}
+
+html[data-skin='runtime'] .thinking-body::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  background: var(--border);
+  border-radius: 1px;
+}
+
+/* the reasoning is prose read at a glance, not a code block: one step tighter */
+html[data-skin='runtime'] .thinking .thinking-body .tk-p {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .tool-row .tool-row-hd,
+  /* A thought carries a face (state: running / open / folded). Two marks on one
+   line — the face and the v3 sparkle — is one too many. */
+html[data-skin='runtime'] .thinking-hd .ic {
+  display: none;
+}
+
+html[data-skin='runtime'] .thinking-toggle .mono {
+    transition: none;
+  }
+}
