@@ -1008,3 +1008,87 @@ html[data-skin='runtime'] .rt-batch {
   line-height: 1.5;
   color: var(--ink-3);
 }
+
+/* ---------------------------------------------------------------------------
+   A9 · what a running compression is reading  (parts/compact.css:171-196)
+   ------------------------------------------------------------------------ */
+
+html[data-skin='runtime'] .cp-scan {
+  display: grid;
+  gap: 1px;
+  margin-top: 3px;
+}
+
+/* flex, not grid: the caret has to sit against the end of the line it is
+   reading, and a 1fr column would park it at the far edge of the card */
+html[data-skin='runtime'] .cp-scan li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  font: 400 10.5px/1.7 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .cp-scan .t {
+  flex: none;
+  width: 40px;
+  text-align: right;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .cp-scan li > span:last-child {
+  flex: none;
+}
+
+html[data-skin='runtime'] .cp-scan .h {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the oldest of the three is on its way out, the newest is the one being read */
+html[data-skin='runtime'] .cp-scan li:first-child {
+  opacity: 0.45;
+}
+
+html[data-skin='runtime'] .cp-scan li:last-child {
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .cp-scan li:last-child .t {
+  opacity: 0.85;
+}
+
+html[data-skin='runtime'] .cp-caret {
+  display: inline-block;
+  width: 4px;
+  height: 10px;
+  margin-left: 3px;
+  flex: none;
+  border-radius: var(--r-xs);
+  background: var(--accent);
+  vertical-align: -1px;
+  animation: cp-blink 1.1s steps(1) infinite;
+}
+
+@keyframes cp-blink {
+  0%,
+  64% {
+    opacity: 1;
+  }
+  65%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .cp-caret {
+    animation: none;
+  }
+}

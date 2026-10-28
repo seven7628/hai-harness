@@ -29,7 +29,14 @@ const CHECK =
   'M2.5 6.3l2.3 2.3L9.5 3.7'
 const CHEV = 'M4.2 2.6L8.6 6.8l-4.4 4.2'
 
-export const Compact = memo(function Compact({ b }: { b: CompressionInfo }) {
+export interface CompactHead {
+  /** 相对时刻（如 +00.4），拿不到就空 */
+  t: string
+  /** 这条消息的一行描述（动词 + 对象，或正文首行） */
+  h: string
+}
+
+export const Compact = memo(function Compact({ b, heads }: { b: CompressionInfo; heads?: CompactHead[] }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const failed = Boolean(b.error)
@@ -88,6 +95,9 @@ export const Compact = memo(function Compact({ b }: { b: CompressionInfo }) {
   const total = b.usage ? b.usage.input + b.usage.output : 0
   // 运行中的秒数走全局 1s 时钟（只有这一处订阅，正文不跟着重渲）
   const liveMs = useClock(b.startedAt, active && b.startedAt != null)
+  // 运行中在读哪几条：由调用方从**压缩前真实存在的块**推来（一行描述）。拿不到就空着 ——
+  // 画三行假消息比不画更糟（设计 .cp-scan 是「正在读的窗口」，不是装饰）。
+  const scan = active ? (heads ?? []).slice(-3) : []
 
   return (
     <div className="rt-cp" data-s={state}>
@@ -125,6 +135,17 @@ export const Compact = memo(function Compact({ b }: { b: CompressionInfo }) {
           >
             <i style={{ width: keepPct.toFixed(1) + '%' }} />
           </span>
+        ) : null}
+        {scan.length ? (
+          <ul className="cp-scan">
+            {scan.map((h, i) => (
+              <li key={i}>
+                <span className="t">{h.t}</span>
+                <span className="h">{h.h}</span>
+                <span>{i === scan.length - 1 ? <i className="cp-caret" /> : null}</span>
+              </li>
+            ))}
+          </ul>
         ) : null}
         <span className="rt-cp-meta">
           {active && b.startedAt ? <span className="rt-cp-el">{fmtRun(liveMs) + '\u2026'}</span> : null}

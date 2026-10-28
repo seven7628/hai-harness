@@ -16,6 +16,8 @@ import { Lane } from './runtime/lane/Lane'
 import { LivePanel } from './runtime/turn/LivePanel'
 import { FilesLine } from './runtime/turn/FilesLine'
 import { Signal } from './runtime/signals/Signal'
+import { headsOf } from './runtime/blocks/heads'
+import type { CompactHead } from './runtime/blocks/Compact'
 import './runtime/turn/turn.css'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
 // —— 见 NarrativeBlocks.tsx 的文件头（两处宿主、一套 DOM、一套皮肤）。
@@ -822,7 +824,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   }
 
   // 渲染单个非工具块（工具已在上面归组处理）
-  const renderBlock = (b: Exclude<MsgBlock, { kind: 'tool' }>): ReactElement | null => {
+  const renderBlock = (b: Exclude<MsgBlock, { kind: 'tool' }>, heads?: CompactHead[]): ReactElement | null => {
     if (b.kind === 'divider') {
       // 上下文隔离横线（shutdown/abort/clear）：纯分隔线，无文本；title 区分语义（内部）
       return (
@@ -951,6 +953,12 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           i++
         }
         out.push(<ToolGroup key={group[0].id} tools={group} />)
+        continue
+      }
+      if (b.kind === 'compression' && skin === 'runtime') {
+        // 运行中的压缩要显示「正在读哪几条」：它们就是压缩前的那些块，一行一条
+        out.push(renderBlock(b, headsOf(list.slice(0, i))))
+        continue
       } else {
         out.push(renderBlock(b))
       }

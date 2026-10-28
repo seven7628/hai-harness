@@ -23,7 +23,7 @@ import { FoldIcon } from './runtime/FoldIcon'
 import { toolFamily, fileTypeOf } from '../lib/palette'
 import { splitThinkingParagraphs } from '../lib/thinkingText'
 import { Face } from './runtime/Face'
-import { Compact } from './runtime/blocks/Compact'
+import { Compact, type CompactHead } from './runtime/blocks/Compact'
 import { TodoBlock, type TodoWrite } from './runtime/blocks/Todo'
 import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
@@ -554,6 +554,12 @@ export const TaskResultInline = memo(function TaskResultInline({ delivered, resu
 /* 上下文压缩块：主对话（本 run 的自动/手动压缩）与子 agent 转录（子 agent 自己的
    压缩）共用同一张卡 —— 现在是同**一行**。v2 的 Compact 移植：30px 折叠行，
    摘要/配比/事实都在折叠里（见 runtime/blocks/Compact.tsx）。 */
-export const CompressionBlock = memo(function CompressionBlock({ b }: { b: CompressionInfo }) {
-  return <Compact b={b} />
+export const CompressionBlock = memo(function CompressionBlock({
+  b,
+  heads,
+}: {
+  b: CompressionInfo
+  heads?: CompactHead[]
+}) {
+  return <Compact b={b} heads={heads} />
 })
