@@ -4,7 +4,8 @@
 // 判据一律是**计算值/属性**，不是截图：每条纹样的数值来自 design/agent-runtime/v2。
 import { Browser } from '/Users/admin/.agents/skills/design-taste-frontend/scripts/lib/cdp.mjs'
 
-const URL = process.env.LAB_URL || 'http://localhost:5173/'
+// 别用 5173：那是开发者自己的 dev 实例（另一个检出）。这里默认起在 5288。
+const URL = process.env.LAB_URL || 'http://localhost:5288/'
 const results = []
 const check = (name, ok, detail) => results.push({ name, ok, detail })
 
@@ -182,6 +183,111 @@ if (t5.present) {
   check('artifact frame is 136px (in a turn)', t6.frame === '136px', t6.frame)
   check('artifact panel padding 12/14/11', t6.pv === '12px 14px 11px', t6.pv)
 }
+
+
+// ---- P3 · composer：`/` 技能、`@` 文件目录、多图扇形 + 灯箱 -------------------
+await page.goto(URL, { settleMs: 3000 })
+await page.eval(() => { document.documentElement.dataset.skin = 'runtime' })
+await wait(700)
+
+const setText = (v) => page.eval((x) => {
+  const ta = document.querySelector('textarea')
+  ta.focus()
+  const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+  set.call(ta, x)
+  ta.dispatchEvent(new Event('input', { bubbles: true }))
+}, v)
+
+await setText('/')
+await wait(500)
+const p1 = await page.eval(() => {
+  const cs = (el, ...p) => (el ? Object.fromEntries(p.map((k) => [k, getComputedStyle(el)[k]])) : null)
+  const pop = document.querySelector('.pop[data-pop="cmd"]')
+  const row = pop?.querySelector('.pop-row')
+  return {
+    present: !!pop,
+    search: !!pop?.querySelector('.pop-search input'),
+    labels: [...(pop?.querySelectorAll('.pop-label') ?? [])].map((l) => l.textContent),
+    rows: pop?.querySelectorAll('.pop-row').length ?? 0,
+    kbd: row?.querySelector('kbd')?.textContent,
+    hasM: !!row?.querySelector('.m')?.textContent,
+    rowH: cs(row, 'height')?.height,
+    foot: pop?.querySelector('.pop-foot')?.textContent,
+    legacyMenu: !!document.querySelector('.cmd-menu'),
+  }
+})
+check('/ opens the design popover', p1.present && !p1.legacyMenu, `${p1.present} legacy=${p1.legacyMenu}`)
+check('/ rows are 28px with a kbd column', p1.rowH === '28px' && p1.kbd === '1', `${p1.rowH} kbd=${p1.kbd}`)
+check('/ groups say how many are in them', p1.labels.length >= 1 && /\d/.test(p1.labels[0] || ''), p1.labels.join('|'))
+check('/ row carries its one-line reason', p1.hasM, p1.hasM)
+
+// ↑↓ 移动 + Enter 插入
+await page.eval(() => document.querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })))
+await wait(300)
+const p2 = await page.eval(() => ({ active: [...document.querySelectorAll('.pop[data-pop="cmd"] .pop-row')].findIndex((r) => r.classList.contains('is-active')) }))
+check('I4 ↓ moves the active row', p2.active === 1, p2.active)
+await page.eval(() => document.querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })))
+await wait(400)
+const p3 = await page.eval(() => ({ text: document.querySelector('textarea')?.value, open: !!document.querySelector('.pop[data-pop="cmd"]') }))
+check('I5 Enter inserts the active command', p3.text.startsWith('/') && !p3.open, JSON.stringify(p3))
+
+// @ 文件目录
+await setText('@')
+await wait(900)
+const p4 = await page.eval(() => {
+  const pop = document.querySelector('.pop[data-pop="src"]')
+  return {
+    present: !!pop,
+    dirs: pop?.querySelectorAll('.pop-row.dir').length ?? 0,
+    hasFoot: !!pop?.querySelector('.pop-foot'),
+    hasSearch: !!pop?.querySelector('.pop-search input'),
+  }
+})
+check('@ opens the design file popover', p4.present && p4.hasSearch, JSON.stringify(p4))
+check('@ lists directories as .pop-row.dir', p4.dirs > 0, p4.dirs)
+
+// 多图扇形 + 灯箱
+await setText('')
+await page.eval(async () => {
+  const c = document.createElement('canvas'); c.width = c.height = 8
+  c.getContext('2d').fillRect(0, 0, 8, 8)
+  const blob = await new Promise((r) => c.toBlob(r, 'image/png'))
+  const ta = document.querySelector('textarea')
+  for (let i = 0; i < 3; i++) {
+    const dt = new DataTransfer()
+    dt.items.add(new File([blob], `shot${i}.png`, { type: 'image/png' }))
+    ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+  }
+})
+await wait(1500)
+const p5 = await page.eval(() => {
+  const cs = (el, ...p) => (el ? Object.fromEntries(p.map((k) => [k, getComputedStyle(el)[k]])) : null)
+  const wrap = document.querySelector('.cy-imgs')
+  const im = wrap?.querySelector('.cy-im')
+  return {
+    present: !!wrap,
+    n: wrap?.getAttribute('data-n'),
+    count: wrap?.querySelectorAll('.cy-im').length ?? 0,
+    w: cs(im, 'width')?.width,
+    h: cs(im, 'height')?.height,
+    mid: im?.style.getPropertyValue('--mid'),
+    rotates: [...(wrap?.querySelectorAll('.cy-im') ?? [])].map((e) => getComputedStyle(e).transform),
+  }
+})
+check('images are a fan of three', p5.present && p5.n === '3' && p5.count === 3, JSON.stringify({ n: p5.n, c: p5.count }))
+check('fan cards are 64x45 and overlapped', p5.w === '64px' && p5.h === '45px', `${p5.w}x${p5.h}`)
+check('each card is rotated around the middle', new Set(p5.rotates).size === 3, p5.rotates.join(' | '))
+
+await page.eval(() => document.querySelector('.cy-im')?.click())
+await wait(400)
+const p6 = await page.eval(() => {
+  const box = document.querySelector('.cy-lb')
+  return { present: !!box, caption: box?.querySelector('figcaption')?.textContent, x: !!box?.querySelector('.cy-lb-x') }
+})
+check('I10 clicking a card opens the lightbox', p6.present && p6.x, JSON.stringify(p6))
+await page.eval(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+await wait(300)
+check('I11 esc closes the lightbox', !(await page.eval(() => !!document.querySelector('.cy-lb'))), 'still open')
 
 // ---- 减少动效 ---------------------------------------------------------------
 await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })

@@ -1,0 +1,117 @@
+/* 多图扇形 + 灯箱 —— 逐字搬自 design/agent-runtime/v2 ui.components.css:2729-2801。
+   一张图不是一叠牌（data-n='1' 走大缩略图）；三张叠成扇形，悬停抽出来，
+   点击开全屏。风琴角由 --i / --mid 算：`rotate((i - mid) * 6deg)`。 */
+
+/* the strip keeps room above itself: a lifted card must not land on the
+   chips it belongs to */
+html[data-skin='runtime'] .cy-imgs { display: flex; align-items: flex-end; padding: 7px 0 0 12px; }
+
+html[data-skin='runtime'] .cy-im {
+  width: 64px;
+  height: 45px;
+  flex: none;
+  margin-left: -13px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card-2);
+  overflow: hidden;
+  cursor: zoom-in;
+  transform-origin: bottom center;
+  transform: rotate(calc((var(--i) - var(--mid)) * 6deg))
+             translateY(calc((var(--i) - var(--mid)) * (var(--i) - var(--mid)) * 0px));
+  transition: transform 180ms var(--spring), box-shadow 180ms var(--ease), opacity 180ms var(--ease);
+}
+
+html[data-skin='runtime'] .cy-im:first-child { margin-left: 0; }
+
+/* one picture is not a hand of cards: it is a thumbnail, and it can afford to
+   be one you can actually see */
+html[data-skin='runtime'] .cy-imgs[data-n='1'] .cy-im { width: 128px; height: 88px; }
+
+html[data-skin='runtime'] .cy-im img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+html[data-skin='runtime'] .cy-im:hover,
+html[data-skin='runtime'] .cy-im:focus-visible {
+  transform: rotate(0deg) translateY(-4px) scale(1.05);
+  z-index: 3;
+  box-shadow: var(--shadow-lift);
+  outline: none;
+}
+
+/* the same lift for the keyboard, but the ring has to stay visible: it is the
+   only thing telling you which card Enter will open */
+html[data-skin='runtime'] .cy-im:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+html[data-skin='runtime'] .cy-imgs:hover .cy-im:not(:hover) { opacity: 0.8; }
+
+/* --- the lightbox --------------------------------------------------------- */
+
+html[data-skin='runtime'] .cy-lb {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  background: color-mix(in oklab, #000 68%, transparent);
+  backdrop-filter: blur(3px);
+  animation: rt-cy-lb-in 160ms var(--ease-out) both;
+}
+
+html[data-skin='runtime'] .cy-lb[hidden] { display: none; }
+
+@keyframes rt-cy-lb-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+html[data-skin='runtime'] .cy-lb figure {
+  margin: 0;
+  display: grid;
+  gap: 9px;
+  justify-items: center;
+  position: relative;
+}
+
+html[data-skin='runtime'] .cy-lb img {
+  display: block;
+  width: min(88vw, 860px);
+  max-width: 100%;
+  max-height: 76vh;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in oklab, #fff 14%, transparent);
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8);
+  background: var(--card);
+}
+
+html[data-skin='runtime'] .cy-lb figcaption {
+  font: 400 11px/1.4 var(--mono);
+  color: color-mix(in oklab, #fff 72%, transparent);
+}
+
+html[data-skin='runtime'] .cy-lb-x {
+  position: absolute;
+  top: -34px;
+  right: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: color-mix(in oklab, #fff 12%, transparent);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+}
+
+html[data-skin='runtime'] .cy-lb-x:hover { background: color-mix(in oklab, #fff 22%, transparent); }
+
+@media (max-width: 640px) {
+  html[data-skin='runtime'] .cy-im { width: 52px; height: 37px; margin-left: -12px; }
+  html[data-skin='runtime'] .cy-imgs[data-n='1'] .cy-im { width: 108px; height: 74px; }
+  html[data-skin='runtime'] .cy-imgs { padding: 7px 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .cy-im,
+  html[data-skin='runtime'] .cy-lb { transition: none; animation: none; }
+}

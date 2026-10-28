@@ -7,6 +7,9 @@ import { CtxRing, fmtTokens, ChipMenu } from './ui'
 import CompactConfirm from './CompactConfirm'
 import CtxBreakdownPanel from './CtxBreakdown'
 import FileRefPanel from './FileRefPanel'
+import { useSkin } from '../lib/useSkin'
+import './runtime/pop/pop.css'
+import './runtime/fan/fan.css'
 import { AgentRunningBar } from './AgentRunningBar'
 import { useT } from '../i18n'
 import { getTransport } from '../transport'
@@ -158,6 +161,18 @@ export default function Composer() {
   const [editingId, setEditingId] = useState<number | null>(null) // 正在编辑的暂存队列项 id
   const [editText, setEditText] = useState('')
   const skills = useAppStore((s) => s.skills)
+  // 运行时皮肤：斜杠菜单与 @ 面板换成设计自己的弹层（.pop*），另两档继续走 .cmd-menu
+  const rt = useSkin() === 'runtime'
+  // 灯箱：图片附件的放大视图（设计 .cy-lb）。null = 关。
+  const [zoom, setZoom] = useState<number | null>(null)
+  useEffect(() => {
+    if (zoom == null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setZoom(null)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [zoom])
   const fetchSkills = useAppStore((s) => s.fetchSkills)
   // 权限/行为模式（三种）：会话中可随时切换，下一轮生效。
   // hitl=用户确认（带风险的工具执行前需确认）；auto=自动执行（不弹确认，工具层
@@ -551,10 +566,13 @@ export default function Composer() {
   // 斜杠命令列表：启用技能（/技能名）+ 内置（/summary /clear）；按输入前缀过滤。
   // 补全只在「正在输命令前缀」时展示：第一行首个词是某命令的严格前缀（未完整、后无内容）。
   // 命令完整（/code-review）或命令后已跟正文（/code-review 帮我…）→ 菜单关闭，不误报「无匹配」。
-  const slashCommands = [
-    ...skills.filter((s) => s.enabled).map((s) => `/${s.name}`),
-    ...BUILTIN_SLASH,
+  // 每行两段：命令名（.k，mono）+ 一句话说明（.m）。技能用注册表里的 description，
+  // 内置命令用固定短句 —— `.m` 是设计给的「这一行是干什么的」，空着等于把承诺撤了。
+  const slashItems = [
+    ...skills.filter((s) => s.enabled).map((s) => ({ cmd: `/${s.name}`, desc: s.description || '' })),
+    ...BUILTIN_SLASH.map((c) => ({ cmd: c, desc: t(`composer.cmdHint.${c.slice(1)}`) })),
   ]
+  const slashCommands = slashItems.map((i) => i.cmd)
   const firstLine = text.split('\n')[0]
   const firstToken = (firstLine.split(/\s/)[0] ?? '').trim()
   const completing = firstToken.startsWith('/') && slashCommands.some((c) => c.toLowerCase().startsWith(firstToken.toLowerCase()) && c.toLowerCase() !== firstToken.toLowerCase())
@@ -562,10 +580,39 @@ export default function Composer() {
   // 只有存在匹配项且仍在输入命令前缀时显示补全菜单；未知的 /path
   //（例如 /api-test/xxx）保持普通文本，不显示“未识别 command”。
   const cmdOpen = cmdMenu && completing && filtered.length > 0
+  // 弹层里的搜索框：镜像第一行已输入的 `/x`，改它就是改正文（单一数据源）
+  const slashQuery = firstToken.slice(1)
+  const [slashActive, setSlashActive] = useState(0)
+  // 前缀变了 → 光标回第一行（否则停在上一份列表的第 3 行上，读起来像随机）
+  useEffect(() => setSlashActive(0), [firstToken])
+
+  const acceptCommand = (cmd: string) => {
+    const prefixLen = firstToken.length
+    setText((prev) => cmd + prev.slice(prefixLen))
+    setCmdMenu(false)
+    requestAnimationFrame(() => {
+      const input = textareaRef.current
+      if (input) {
+        input.focus()
+        const pos = cmd.length
+        input.setSelectionRange(pos, pos)
+      }
+    })
+  }
+
+  // 数字键直选第 n 行（kbd 列给出的承诺）。只在菜单打开时生效。
+  const pickDigit = (e: React.KeyboardEvent) => {
+    if (!cmdOpen || e.metaKey || e.ctrlKey || e.altKey) return false
+    const n = Number(e.key)
+    if (!Number.isInteger(n) || n < 1 || n > Math.min(9, filtered.length)) return false
+    e.preventDefault()
+    acceptCommand(filtered[n - 1])
+    return true
+  }
 
   const completeCommand = () => {
     if (!cmdOpen || filtered.length === 0) return false
-    const selected = filtered[0]
+    const selected = filtered[Math.min(slashActive, filtered.length - 1)] ?? filtered[0]
     const prefixLen = firstToken.length
     setText((prev) => selected + prev.slice(prefixLen))
     setCmdMenu(false)
@@ -1004,6 +1051,85 @@ export default function Composer() {
         )}
         <div ref={cmdRef}>
           {cmdOpen && (
+            rt ? (
+              <div
+                className="pop"
+                data-pop="cmd"
+                role="listbox"
+                aria-label={t('composer.cmdMenuAria')}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* 搜索框镜像正文第一行的 `/x`：在这里改就是改正文（单一数据源） */}
+                <div className="pop-search">
+                  <Sparkles size={12} />
+                  <input
+                    value={slashQuery}
+                    onChange={(e) => {
+                      const v = e.target.value.replace(/^\//, '')
+                      setText((prev) => '/' + v + prev.slice(firstToken.length))
+                    }}
+                    placeholder={t('composer.cmdSearch')}
+                    aria-label={t('composer.cmdSearch')}
+                    spellCheck={false}
+                    onKeyDown={(e) => {
+                      // 搜索框里同样受这套键位管：↑↓ 移、⏎ 插入、数字直选、esc 收起
+                      if (pickDigit(e)) return
+                      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                        e.preventDefault()
+                        setSlashActive((i) => {
+                          const n = filtered.length
+                          if (!n) return 0
+                          return (i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n
+                        })
+                        return
+                      }
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        completeCommand()
+                        return
+                      }
+                      if (e.key === 'Escape') {
+                        e.preventDefault()
+                        setCmdMenu(false)
+                        textareaRef.current?.focus()
+                      }
+                    }}
+                  />
+                </div>
+                {filtered.length === 0 ? (
+                  <div className="pop-row"><span className="k">{t('composer.noCmd')}</span></div>
+                ) : null}
+                {[
+                  { label: t('composer.cmdGroupSkills'), rows: filtered.filter((c) => c !== '/summary' && c !== '/clear' && c !== '/reload_skills') },
+                  { label: t('composer.cmdGroupBuiltin'), rows: filtered.filter((c) => c === '/summary' || c === '/clear' || c === '/reload_skills') },
+                ].filter((g) => g.rows.length > 0).map((g) => (
+                  <div key={g.label}>
+                    <div className="pop-label">{g.label}<b>{g.rows.length}</b></div>
+                    {g.rows.map((c) => {
+                      const i = filtered.indexOf(c)
+                      return (
+                        <button
+                          key={c}
+                          type="button"
+                          className={`pop-row sk${i === slashActive ? ' is-active' : ''}`}
+                          role="option"
+                          aria-selected={i === slashActive}
+                          onClick={() => acceptCommand(c)}
+                          onMouseEnter={() => setSlashActive(i)}
+                          title={c}
+                        >
+                          <Sparkles size={12} />
+                          <span className="k">{c}</span>
+                          <span className="m">{slashItems.find((x) => x.cmd === c)?.desc ?? ''}</span>
+                          {i < 9 ? <kbd aria-hidden="true">{i + 1}</kbd> : null}
+                        </button>
+                      )
+                    })}
+                  </div>
+                ))}
+                <div className="pop-foot">{t('composer.cmdFoot')}</div>
+              </div>
+            ) : (
             <div className="cmd-menu" role="listbox" aria-label={t('composer.cmdMenuAria')} onClick={(e) => e.stopPropagation()}>
               {filtered.length === 0 ? (
                 <div className="hint">{t('composer.noCmd')}</div>
@@ -1016,6 +1142,7 @@ export default function Composer() {
                 ))
               )}
             </div>
+            )
           )}
         </div>
         {atOpen && workspace && (
@@ -1028,20 +1155,42 @@ export default function Composer() {
             />
           </div>
         )}
-        {(attachments.length > 0 || docRefs.length > 0) && (
-          <div className="attach-strip" role="list" aria-label={t('composer.attach.strip')}>
+        {rt && attachments.length > 0 && (
+          /* 扇形：一张图不是一叠牌（data-n='1' 走设计的大缩略图），多张按
+             --i/--mid 叠成一手牌，悬停抽出来，点击开全屏 */
+          <div className="cy-imgs" data-n={attachments.length} role="list" aria-label={t('composer.attach.strip')}>
             {attachments.map((a, i) =>
               a.type === 'image' ? (
-                <div className="attach-chip" role="listitem" key={i} title={t('composer.attach.remove')}>
+                <button
+                  type="button"
+                  className="cy-im"
+                  role="listitem"
+                  key={i}
+                  style={{ ['--i' as string]: i, ['--mid' as string]: (attachments.length - 1) / 2 }}
+                  onClick={() => setZoom(i)}
+                  aria-label={t('composer.attach.zoom').replace('{i}', String(i + 1)).replace('{n}', String(attachments.length))}
+                >
                   <img src={a.content} alt="" />
-                  <button
-                    className="attach-x"
-                    onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
-                    aria-label={t('composer.attach.remove')}
-                  >×</button>
-                </div>
+                </button>
               ) : null,
             )}
+          </div>
+        )}
+        {(docRefs.length > 0 || (!rt && attachments.length > 0)) && (
+          <div className="attach-strip" role="list" aria-label={t('composer.attach.strip')}>
+            {!rt &&
+              attachments.map((a, i) =>
+                a.type === 'image' ? (
+                  <div className="attach-chip" role="listitem" key={i} title={t('composer.attach.remove')}>
+                    <img src={a.content} alt="" />
+                    <button
+                      className="attach-x"
+                      onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                      aria-label={t('composer.attach.remove')}
+                    >×</button>
+                  </div>
+                ) : null,
+              )}
             {/* 文档附件：文件名 + 大小 + 移除（不复制，仅记路径 → 发送时进 @引用）。
                 size < 0 = stat 不可用，显示 — 而不是假造 0B。 */}
             {docRefs.map((d, i) => (
@@ -1057,6 +1206,25 @@ export default function Composer() {
             ))}
           </div>
         )}
+        {rt && zoom != null && attachments[zoom] ? (
+          <div className="cy-lb" role="dialog" aria-modal="true" aria-label={t('composer.attach.zoomTitle')} onClick={() => setZoom(null)}>
+            <figure onClick={(e) => e.stopPropagation()}>
+              <button
+                className="cy-lb-x"
+                style={{ right: 34 }}
+                onClick={() => {
+                  setAttachments((prev) => prev.filter((_, j) => j !== zoom))
+                  setZoom(null)
+                }}
+                aria-label={t('composer.attach.remove')}
+                title={t('composer.attach.remove')}
+              >×</button>
+              <button className="cy-lb-x" onClick={() => setZoom(null)} aria-label={t('narrative.zoomClose')}>✕</button>
+              <img src={attachments[zoom].content} alt="" />
+              <figcaption>{t('composer.attach.zoomTitle')} · {zoom + 1}/{attachments.length}</figcaption>
+            </figure>
+          </div>
+        ) : null}
         {attachmentNotice && <div className="attach-notice" role="status" aria-live="polite">{attachmentNotice}</div>}
         <div className="input-wrap">
           <div className="input-hl" aria-hidden>
@@ -1111,6 +1279,29 @@ export default function Composer() {
                   e.stopPropagation()
                   return
                 }
+                return
+              }
+              // 斜杠菜单打开时：↑↓ 移光标（行的 kbd 序号是承诺，得能按）、
+              // Enter 接受补全而不是发送、Esc 收起。
+              if (cmdOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                e.preventDefault()
+                setSlashActive((i) => {
+                  const n = filtered.length
+                  if (!n) return 0
+                  return (i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n
+                })
+                return
+              }
+              if (pickDigit(e)) return
+              if (cmdOpen && e.key === 'Escape') {
+                e.preventDefault()
+                setCmdMenu(false)
+                return
+              }
+              if (cmdOpen && e.key === 'Enter' && !e.shiftKey) {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return
+                e.preventDefault()
+                completeCommand()
                 return
               }
               if (e.key === 'Enter' && !e.shiftKey) {

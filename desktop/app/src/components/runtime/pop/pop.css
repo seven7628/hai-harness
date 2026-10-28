@@ -1,0 +1,168 @@
+/* 弹出面板（`/` 技能、`@` 文件目录）—— 逐字搬自 design/agent-runtime/v2
+   ui.components.css:694-740（.pop / .pop-label / .pop-row / .pop-foot / .pop-search）
+   与 2545-2572（[data-pop] 窄面板、lifted sheet、.sk/.dir 变体）。
+
+   唯一不照抄的是 `.pop` 的定位块（left/right/bottom/z-index）：设计里它锚在输入卡
+   内部，我们的锚点是 `.composer`（position:relative），照抄会把面板放到错的地方。
+   视觉部分（内距、圆角、底色、阴影、入场动效）逐字保留。 */
+
+html[data-skin='runtime'] .pop {
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--card);
+  box-shadow: var(--shadow-lift), 0 24px 48px -24px rgba(0, 0, 0, 0.6);
+  animation: rt-pop-in 160ms var(--ease-out) both;
+}
+
+@keyframes rt-pop-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.99); }
+  to { opacity: 1; transform: none; }
+}
+
+html[data-skin='runtime'] .pop-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 8px 6px;
+  font: 400 10px/1 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .pop-label b {
+  margin-left: auto;
+  font: 400 10px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .pop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-xs);
+  font-size: 12px;
+  color: var(--ink-2);
+  text-align: left;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .pop-row:hover,
+html[data-skin='runtime'] .pop-row.is-active { background: var(--raised); color: var(--ink); }
+html[data-skin='runtime'] .pop-row.is-on { color: var(--ink); }
+html[data-skin='runtime'] .pop-row.is-on::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: -2px;
+}
+html[data-skin='runtime'] .pop-row .k {
+  white-space: nowrap;
+  font: 400 11px/1 var(--mono);
+  color: var(--ink);
+}
+html[data-skin='runtime'] .pop-row .m {
+  margin-left: auto;
+  font: 400 10.5px/1 var(--mono);
+  color: var(--ink-3);
+}
+html[data-skin='runtime'] .pop-row svg { width: 12px; height: 12px; stroke-width: 1.8; color: var(--ink-3); }
+html[data-skin='runtime'] .pop-row kbd {
+  margin-left: auto;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--ink-3) 14%, transparent);
+  font: 400 9px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .pop-foot {
+  /* the footer is the last line of a sheet, not a caption pinned to the edge:
+     it needs the same air under it as a row has above it */
+  margin-top: 3px;
+  padding: 7px 8px 8px;
+  border-top: 1px solid var(--line-soft);
+  font: 400 10px/1.4 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .pop-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin: 1px 1px 4px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--card-2);
+}
+html[data-skin='runtime'] .pop-search svg { width: 12px; height: 12px; stroke-width: 1.8; color: var(--ink-3); }
+html[data-skin='runtime'] .pop-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  outline: none;
+  font-size: 12px;
+  color: var(--ink);
+}
+html[data-skin='runtime'] .pop-search input::placeholder { color: var(--ink-3); }
+
+/* a menu the caret opened is not a panel: it hugs the input instead of spanning
+   the card, so it reads as a completion and not as a dialog */
+html[data-skin='runtime'] .pop[data-pop='cmd'],
+html[data-skin='runtime'] .pop[data-pop='src'] {
+  right: auto;
+  width: min(386px, calc(100% - 14px));
+  max-height: min(430px, 62vh);
+  overflow: auto;
+  /* without a visible bar a clipped row reads as a broken row, not as more */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--ink-3) 40%, transparent) transparent;
+}
+
+/* a popover is a lifted sheet: in the one-face dark theme the card colour is the
+   page colour, so the menu has to come up one step or it has no edge at all */
+html[data-skin='runtime'] .pop {
+  background: var(--raised);
+  border-color: color-mix(in oklab, var(--ink-3) 22%, var(--line));
+  box-shadow: 0 1px 0 color-mix(in oklab, #fff 6%, transparent) inset, 0 22px 44px -20px rgba(0, 0, 0, 0.85);
+}
+html[data-skin='runtime'] .pop .pop-search { background: var(--card); }
+/* a skill name and its one-line reason belong on the same line, not at two ends */
+html[data-skin='runtime'] .pop-row.sk { justify-content: flex-start; }
+html[data-skin='runtime'] .pop-row.sk .m { margin-left: 10px; font-size: 10.5px; color: var(--ink-3); }
+html[data-skin='runtime'] .pop-row.sk .k { color: var(--ink-2); font-size: 11.5px; }
+html[data-skin='runtime'] .pop-row.dir .k { color: var(--ink); }
+html[data-skin='runtime'] .pop-row.dir svg { color: var(--amber); }
+html[data-skin='runtime'] .pop-row.dir .m { color: var(--ink-3); }
+html[data-skin='runtime'] .chip.src[data-kind='dir'] svg { color: var(--amber); }
+html[data-skin='runtime'] .chip.src[data-kind='dir'] { border-color: color-mix(in oklab, var(--amber) 30%, var(--line)); }
+
+/* 位置块：我们自己的锚点（`.composer` 是 position:relative），与 `.cmd-menu`
+   同一套几何；只在这里，不把设计相对它自己卡片的数值搬过来 */
+html[data-skin='runtime'] .pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 100%;
+  z-index: 60;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .pop,
+  html[data-skin='runtime'] .pop-row {
+    animation: none;
+    transition: none;
+  }
+}
