@@ -9,6 +9,7 @@ import { WorkFold } from './runtime/turn/WorkFold'
 import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
 import { UserBlock } from './runtime/blocks/UserBlock'
+import { Lane } from './runtime/lane/Lane'
 import './runtime/turn/turn.css'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
 // —— 见 NarrativeBlocks.tsx 的文件头（两处宿主、一套 DOM、一套皮肤）。
@@ -914,6 +915,17 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const out: (ReactElement | null)[] = []
     for (let i = 0; i < list.length; i++) {
       const b = list[i]
+      // 连续的子 agent 合成一条「车道」：设计里它们是一块（组标题 + 每行四个事实），
+      // 不是一张张并列的卡片。另两档皮肤保留卡片（那是它们验证过的样子）。
+      if (b.kind === 'agent' && skin === 'runtime') {
+        const group: Extract<MsgBlock, { kind: 'agent' }>[] = [b]
+        while (i + 1 < list.length && list[i + 1].kind === 'agent') {
+          group.push(list[i + 1] as Extract<MsgBlock, { kind: 'agent' }>)
+          i++
+        }
+        out.push(<Lane key={'la' + group[0].id} agents={group} />)
+        continue
+      }
       if (b.kind === 'tool') {
         const group: Extract<MsgBlock, { kind: 'tool' }>[] = [b]
         while (i + 1 < list.length && list[i + 1].kind === 'tool') {

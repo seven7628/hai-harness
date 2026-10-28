@@ -1,0 +1,325 @@
+/* 子 agent 车道 —— 逐字搬自 design/agent-runtime/v2/parts/lane.css。
+   父 run 对子 agent 只能知道四件事：谁去了、走到哪、最后一句是什么、多久了。
+   所以一行就是这四个事实，唯一自己动的是那个 1px 呼吸条（不画百分比 —— 那没人知道）。 */
+
+html[data-skin='runtime'] .la {
+  --la-ico: 15px;
+  --la-state: 6.2rem;
+  --la-dur: 4.4rem;
+  --la-gap: 10px;
+  --la-pad: 8px;
+  --la-tone: var(--ink-2);
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 派发顺序只在这行标题里说清：同时开跑的两个子 agent 不能被读成一前一后，
+   而时间轴要说清这件事就必须编一个起始偏移。 */
+html[data-skin='runtime'] .la-grp {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 7px;
+  padding: 0 0 5px;
+  font: 400 10px/1.5 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .la-grp b {
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .la-grp .sep {
+  opacity: 0.55;
+}
+
+html[data-skin='runtime'] .la-row {
+  position: relative;
+}
+
+html[data-skin='runtime'] .la-row + .la-row {
+  border-top: 1px solid var(--line-soft);
+}
+
+html[data-skin='runtime'] .la-head {
+  display: grid;
+  grid-template-columns:
+    var(--la-ico) minmax(7.5rem, auto) var(--la-state) minmax(0, 1fr) var(--la-dur) 12px;
+  align-items: center;
+  gap: var(--la-gap);
+  width: calc(100% + var(--la-pad) * 2);
+  margin: 0 calc(var(--la-pad) * -1);
+  padding: 7px var(--la-pad);
+  border-radius: 8px;
+  text-align: left;
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .la-head:hover {
+  background: var(--card-2);
+}
+
+html[data-skin='runtime'] .la-ico {
+  width: var(--la-ico);
+  height: var(--la-ico);
+  display: grid;
+  place-items: center;
+  color: var(--la-tone);
+}
+
+html[data-skin='runtime'] .la-ico:empty::after {
+  content: '';
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--ink-3) 45%, transparent);
+}
+
+html[data-skin='runtime'] .la-ico svg {
+  width: 100%;
+  height: 100%;
+}
+
+html[data-skin='runtime'] .la-id {
+  display: block;
+  min-width: 0;
+}
+
+html[data-skin='runtime'] .la-name {
+  font-size: 13px;
+  font-weight: 450;
+  letter-spacing: -0.006em;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+html[data-skin='runtime'] .la-state {
+  font: 500 10.5px/1 var(--mono);
+  letter-spacing: -0.015em;
+  color: var(--la-tone-ink, var(--la-tone));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html[data-skin='runtime'] .la-state .sep {
+  font-weight: 400;
+  opacity: 0.5;
+}
+
+html[data-skin='runtime'] .la-state .why {
+  font-weight: 400;
+}
+
+html[data-skin='runtime'] .la-act {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font: 400 11px/1.5 var(--mono);
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .la-act-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 唯一自己动的东西：最后一行末尾的 1px 光标。它说「这句会被替换」，而不说
+   「我们已经 62%」，后者没人知道。它不会前进，所以不会被读成速率。 */
+html[data-skin='runtime'] .la-live {
+  flex: none;
+  width: 1px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: la-breathe 1.9s var(--ease) infinite;
+}
+
+@keyframes la-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.18;
+  }
+}
+
+html[data-skin='runtime'] .la-dur {
+  font: 400 11px/1.5 var(--mono);
+  color: var(--ink-2);
+  text-align: right;
+  white-space: nowrap;
+}
+
+html[data-skin='runtime'] .la-row[data-s='run'] {
+  --la-tone: var(--accent);
+}
+
+html[data-skin='runtime'] .la-row[data-s='stop'] {
+  --la-tone: var(--amber);
+}
+
+html[data-skin='runtime'] .la-row[data-s='done'] {
+  --la-tone: var(--green);
+}
+
+/* 10.5px 的 --green 压在亮色纸上只有 3.5:1：把 16% 的墨混进色调，保住色调又抬过 AA */
+html[data-skin='runtime'] .la-row[data-s='run'] {
+  --la-tone-ink: color-mix(in oklab, var(--accent) 84%, var(--ink));
+}
+
+html[data-skin='runtime'] .la-row[data-s='stop'] {
+  --la-tone-ink: color-mix(in oklab, var(--amber) 84%, var(--ink));
+}
+
+html[data-skin='runtime'] .la-row[data-s='done'] {
+  --la-tone-ink: color-mix(in oklab, var(--green) 84%, var(--ink));
+}
+
+/* 结束的是记录，不是要盯的东西 */
+html[data-skin='runtime'] .la-row[data-s='done'] .la-name {
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .la-row[data-s='done'] .la-act {
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .la-row[data-s='done'] .la-dur {
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .la-head:hover .la-name {
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .la-open {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--t-base) var(--ease-out);
+}
+
+html[data-skin='runtime'] .la-open > .la-evs-wrap {
+  min-height: 0;
+  overflow: hidden;
+}
+
+html[data-skin='runtime'] .la-row[data-open] .la-open {
+  grid-template-rows: 1fr;
+}
+
+html[data-skin='runtime'] .la-evs {
+  display: grid;
+  gap: 1px;
+  padding: 0 0 9px calc(var(--la-ico) + var(--la-gap));
+}
+
+html[data-skin='runtime'] .la-ev {
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--la-gap);
+  padding: 2px 0;
+  font: 400 11px/1.5 var(--mono);
+}
+
+html[data-skin='runtime'] .la-ev .t {
+  color: var(--ink-2);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+html[data-skin='runtime'] .la-ev .a {
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-skin='runtime'] .la-ev .s {
+  color: var(--ink-3);
+  font-size: 10.5px;
+  white-space: nowrap;
+  text-align: right;
+}
+
+html[data-skin='runtime'] .la-foot {
+  padding: 3px 0 1px;
+  font: 400 10px/1.5 var(--mono);
+  color: var(--ink-3);
+}
+
+@media (max-width: 620px) {
+  html[data-skin='runtime'] .la {
+    --la-state: 5.9rem;
+    --la-gap: 7px;
+    --la-pad: 7px;
+  }
+
+  html[data-skin='runtime'] .la-act {
+    font-size: 10.5px;
+    gap: 5px;
+  }
+
+  html[data-skin='runtime'] .la-head {
+    grid-template-columns: var(--la-ico) var(--la-state) minmax(0, 1fr) auto 12px;
+    grid-template-areas:
+      'ico id    id  dur  chev'
+      'ico state act act  act';
+    row-gap: 4px;
+    padding: 9px var(--la-pad);
+  }
+
+  html[data-skin='runtime'] .la-ico {
+    grid-area: ico;
+    align-self: start;
+    margin-top: 3px;
+  }
+
+  html[data-skin='runtime'] .la-id {
+    grid-area: id;
+  }
+
+  html[data-skin='runtime'] .la-state {
+    grid-area: state;
+    font-size: 10px;
+  }
+
+  html[data-skin='runtime'] .la-act {
+    grid-area: act;
+  }
+
+  html[data-skin='runtime'] .la-dur {
+    grid-area: dur;
+  }
+
+  html[data-skin='runtime'] .la-head > .rt-fold {
+    grid-area: chev;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .la-live {
+    animation: none;
+    opacity: 0.9;
+  }
+
+  html[data-skin='runtime'] .la-open,
+  html[data-skin='runtime'] .la-head .rt-fold > .rt-fi {
+    transition: none;
+  }
+
+  html[data-skin='runtime'] .la-head .rt-fold > .rt-fi-closed {
+    transform: none;
+  }
+}
