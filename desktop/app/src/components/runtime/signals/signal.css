@@ -1,0 +1,84 @@
+/* 一行信号 —— 逐字搬自 design/agent-runtime/v2（ui.components.css:970-990）。 */
+html[data-skin='runtime'] .sig-list {
+  display: grid;
+  gap: 1px;
+}
+
+html[data-skin='runtime'] .sig {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 4px;
+  border-radius: var(--r-xs);
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .sig:hover {
+  background: var(--card-2);
+}
+
+html[data-skin='runtime'] .sig > svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
+  flex: none;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .sig b {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .sig span {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .sig .sig-t {
+  margin-left: auto;
+  font: 400 9.5px/1 var(--mono);
+  color: var(--ink-3);
+  opacity: 0.8;
+}
+
+html[data-skin='runtime'] .sig[data-kind='memory'] > svg {
+  color: var(--violet);
+}
+
+html[data-skin='runtime'] .sig[data-kind='hook'] > svg {
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .sig[data-kind='silent'] > svg {
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .sig[data-kind='goal'] > svg {
+  color: var(--accent);
+}
+
+html[data-skin='runtime'] .sig[data-kind='promote'] > svg {
+  color: var(--violet);
+}
+
+html[data-skin='runtime'] .sig[data-kind='inputs'] > svg {
+  color: var(--accent);
+}
+
+html[data-skin='runtime'] .sig[data-kind='budget'] > svg {
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .sig[data-kind='persist'] > svg {
+  color: var(--red);
+}
+
+html[data-skin='runtime'] .sig[data-kind='closed'] > svg {
+  color: var(--green);
+}

@@ -11,6 +11,7 @@ import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
 import { UserBlock } from './runtime/blocks/UserBlock'
 import { Lane } from './runtime/lane/Lane'
+import { Signal } from './runtime/signals/Signal'
 import './runtime/turn/turn.css'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
 // —— 见 NarrativeBlocks.tsx 的文件头（两处宿主、一套 DOM、一套皮肤）。
@@ -823,9 +824,29 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         </div>
       )
     }
-    if (b.kind === 'task_result') return <TaskResultBlock key={b.id} b={b} />
-    if (b.kind === 'task_delivery') return <TaskDeliveryBlock key={b.id} b={b} />
+    // 任务结果/回执：运行时皮肤下是一行信号（设计「Small signals」），另两档保留卡片
+    if (b.kind === 'task_result' || b.kind === 'task_delivery') {
+      if (skin !== 'runtime') {
+        return b.kind === 'task_result' ? <TaskResultBlock key={b.id} b={b} /> : <TaskDeliveryBlock key={b.id} b={b} />
+      }
+      const st = b.kind === 'task_delivery' ? b.status : b.error ? 'failed' : 'completed'
+      const first = ((b.kind === 'task_delivery' ? b.result || b.error : b.error || b.result) || '').split('\n')[0].trim()
+      return (
+        <div className="sig-list" key={b.id}>
+          <Signal kind="promote" title={`Task ${b.taskId} · ${st}`} detail={first.slice(0, 160)} type={b.kind} />
+        </div>
+      )
+    }
     if (b.kind === 'compression') return <CompressionBlock key={b.id} b={b} />
+    if (b.kind === 'system' && skin === 'runtime') {
+      const [first, ...rest] = b.text.split('\n').map((l) => l.trim()).filter(Boolean)
+      const kind = b.tone === 'error' ? 'persist' : b.tone === 'success' ? 'closed' : 'silent'
+      return (
+        <div className="sig-list" key={b.id}>
+          <Signal kind={kind as never} title={(first || b.text).slice(0, 120)} detail={rest.join(' ').slice(0, 160)} type="system" />
+        </div>
+      )
+    }
     if (b.kind === 'system') {
       return (
         <div className={`msg system ${b.tone || 'info'}`} key={b.id} role="status">
@@ -835,52 +856,6 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       )
     }
     if (b.kind === 'user' && skin === 'runtime') return <UserBlock key={b.id} b={b} />
-    if (b.kind === 'user') {
-      // 图文消息：文本 + 图片附件缩略图（data URL 直显）
-      const imgs = b.contents?.filter((c) => c.type === 'image') ?? []
-      // @引用展开状态行（refs_loaded 事件）：loaded → 勾 + 已加载；missing/blocked → 警示
-      const refs = b.refs?.length
-        ? (() => {
-            const loaded = b.refs!.filter((r) => r.status === 'loaded')
-            const missing = b.refs!.filter((r) => r.status === 'missing')
-            const blocked = b.refs!.filter((r) => r.status === 'blocked')
-            // 有缺失/受保护时逐条列出；全成功时合并计数
-            const issues = [...missing.map((r) => ({ ...r, label: t('composer.refs.missing') })), ...blocked.map((r) => ({ ...r, label: t('composer.refs.blocked') }))]
-            return { loaded, issues, allLoaded: issues.length === 0 }
-          })()
-        : undefined
-      return (
-        <div className="msg user" key={b.id}>
-          <div className="who"><b>{t('narrative.user')}</b>{b.ts != null && <span className="msg-ts mono">{fmtClock(b.ts)}</span>}</div>
-          <div className="body"><p><InlineCode text={b.text} /></p></div>
-          {imgs.length > 0 && (
-            <div className="user-imgs">
-              {imgs.map((c, i) => (
-                <img key={i} src={c.content} alt={t('narrative.attachAlt')} />
-              ))}
-            </div>
-          )}
-          {refs && (
-            <div className="user-refs" role="status" aria-label={t('composer.refs.aria')}>
-              {refs.loaded.length > 0 && (
-                <span className={`user-refs-line ${refs.allLoaded ? 'ok' : ''}`}>
-                  <CheckCircleIcon size={12} />
-                  {refs.allLoaded
-                    ? t('composer.refs.loaded').replace('{n}', String(refs.loaded.length))
-                    : t('composer.refs.loadedList').replace('{list}', refs.loaded.map((r) => r.path).join('、'))}
-                </span>
-              )}
-              {refs.issues.map((r, i) => (
-                <span className="user-refs-line warn" key={i}>
-                  <PaperclipIcon size={12} />
-                  <code>{r.path}</code> {r.label}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )
-    }
     if (b.kind === 'agent') return <AgentTaskCard key={b.id} b={b} />
     // 本轮产出汇总（AgentEnd.Artifacts）：对话页尾部的「本次产出」卡片。
     // 位于本轮最终回复之后（AgentEnd 到达时追加），与截图里的 artifact 卡片同位置。
