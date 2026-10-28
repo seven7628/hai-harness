@@ -539,9 +539,37 @@ html[data-skin='runtime'] .rt-turn[data-density='concise']:not([data-open]) > .r
   margin-top: 0;
 }
 
+/* 展开的工作过程有高度上限：一轮跑三十次工具时，摊开它是把一个页面的高度
+   交给它一条条撑开（用户要的是「能翻，但别把答案推到看不见」）。超出滚动。 */
+html[data-skin='runtime'] .rt-turn[data-density='concise'][data-open] > .rt-turn-body {
+  max-height: min(46vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--ink-3) 40%, transparent) transparent;
+}
+
+/* 段内每一行之间的空当只有一个来源：.rt-grp 的 6px 网格间距（设计值）。
+   旧的 .msg / .tool-group 自带外边距（22px / 8px·10px）在皮肤下会叠成
+   36px 的空当 —— 实测「思考 → 旁白 → 工具行」之间就是它。 */
+/* 最后一个块的下外边距收掉：段落的 0.68em 是「段落之间」的距离，
+   它后面跟的是工具行时，那 10.2px 会叠在 6px 的网格间距上（用户看到的
+   「每个 llm_content 之后间距变大」就是它）。设计同一条：
+   `.rt-col .rt-say .md p:last-child { margin-bottom: 0 }`。 */
+html[data-skin='runtime'] .rt-turn .md > *:last-child,
+html[data-skin='runtime'] .rt-turn .md p:last-child,
+html[data-skin='runtime'] .rt-turn .md ul:last-child,
+html[data-skin='runtime'] .rt-turn .md ol:last-child,
+html[data-skin='runtime'] .rt-turn .md pre:last-child {
+  margin-bottom: 0;
+}
+
+html[data-skin='runtime'] .rt-turn .msg,
+html[data-skin='runtime'] .rt-turn .tool-group,
 html[data-skin='runtime'] .rt-turn-in > .msg,
 html[data-skin='runtime'] .rt-turn-ans > .msg {
-  margin-bottom: var(--rt-turn-gap);
+  margin-top: 0;
+  margin-bottom: 0;
 }
 
 html[data-skin='runtime'] .rt-turn-in > .msg:last-child,
@@ -814,15 +842,19 @@ html[data-skin='runtime'] [aria-expanded='true'] .rt-fold > .rt-fi {
   color: var(--ink-2);
 }
 
-/* the face turns with the disclosure, the way the design's star does: 90° over
-   380ms, easing out (ui.components.css:72-73). The face is our star — see
-   PORT-PLAN §11.16 M5 for why the mark is stateful instead of a sparkle. */
+/* 行首那个标记**不转**：设计的星转 90° 是给一颗静态的星配的动作，我们这里是
+   一张有状态的脸（run/engaged/done），把它转过来会把「表情」转成侧脸。
+   展开只换颜色 —— 展开中压暗一档，读作「这段已经翻开了」。
+   折角（.rt-fold 的双图标交叉淡入）继续承担开合的指示。 */
 html[data-skin='runtime'] .thinking-toggle .rt-face {
-  transition: transform var(--t-slow) var(--ease-out);
+  transition: color var(--t-slow) var(--ease-out), opacity var(--t-slow) var(--ease-out);
 }
 
+/* 只换颜色：展开时压暗一档（--ink-2 → --ink-3），和设计里
+   `[aria-expanded='true'] .el { color: var(--ink-3) }` 是同一个意思 ——
+   开口的方向由折角说，标记只负责「这段已经翻开了」。 */
 html[data-skin='runtime'] .thinking-toggle[aria-expanded='true'] .rt-face {
-  transform: rotate(90deg) scale(1.1);
+  color: var(--ink-3);
 }
 
 /* the design's collapse, verbatim (port/transcript.css:6-12): a grid row going
@@ -988,9 +1020,10 @@ html[data-skin='runtime'] .rt-grp {
   gap: var(--rt-work-gap, 6px);
 }
 
-/* rounds are the bigger unit, so they take twice the inside-a-round gap */
+/* 段（round）之间的 12px 已经由容器的网格间距给出；再叠一条 margin-top
+   就是 24px（实测），不是设计的 12px。 */
 html[data-skin='runtime'] .rt-grp + .rt-grp {
-  margin-top: calc(var(--rt-work-gap, 6px) * 2);
+  margin-top: 0;
 }
 
 /* ---------------------------------------------------------------------------

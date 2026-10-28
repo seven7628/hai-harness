@@ -26,6 +26,16 @@ const say = async (text) => {
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // 等某块真的出现（mock 是定时推送的，固定 sleep 在慢机器上会踩空）
+// 等一个条件成真（比固定 sleep 稳：mock 的每一轮长度随内容变）
+const waitUntil = async (expr, timeout = 45000) => {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeout) {
+    if (await page.eval(new Function('return (' + expr + ')'))) return true
+    await wait(400)
+  }
+  return false
+}
+
 const waitFor = async (selector, timeout = 30000) => {
   const t0 = Date.now()
   while (Date.now() - t0 < timeout) {
@@ -36,8 +46,18 @@ const waitFor = async (selector, timeout = 30000) => {
 }
 
 await page.goto(URL, { settleMs: 4000 })
-await page.eval(() => { document.documentElement.dataset.skin = 'runtime' })
-await wait(700)
+// 走 store 的动作，不手写 data-skin：任何一次 settings 变更都会让 App 的 effect
+// 重新 applyNarrativeSkin(settings.narrative_skin)，手工属性会被静默盖回 current。
+await page.eval(() => {
+  const store = window.__store
+  if (!store) throw new Error('lab hook missing: window.__store（main.tsx 的 dev 钩子）')
+  const st = store.getState()
+  st.setNarrativeSkin('runtime')
+  // 工具行/思考折叠这一段的断言要能看见工作行：简洁档运行中它们收在
+  // Working 面板里（这是它该有的样子），详细档才是摊开的
+  st.setNarrativeDensity('detailed')
+})
+await wait(900)
 
 // ---- 一轮带工具/思考的回答 -------------------------------------------------
 await say('运行时样例')
@@ -135,8 +155,8 @@ check('picked option gets the accent ground', t4.bg !== 'rgba(0, 0, 0, 0)', t4.b
 // ---- 视觉产出行 -------------------------------------------------------------
 // 新开一轮干净的会话：提问面板还挂着（没作答 = 工具阻塞），会挡住后面的断言
 await page.goto(URL, { settleMs: 3000 })
-await page.eval(() => { document.documentElement.dataset.skin = 'runtime' })
-await wait(600)
+await page.eval(() => window.__store.getState().setNarrativeSkin('runtime'))
+await wait(700)
 await say('html 预览')
 await waitFor('.cy-frameline .cy-act', 25000)
 // 等这一轮流完（流式中代码块会被重建，这时点开的折叠状态会被重置）
@@ -288,6 +308,123 @@ check('I10 clicking a card opens the lightbox', p6.present && p6.x, JSON.stringi
 await page.eval(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
 await wait(300)
 check('I11 esc closes the lightbox', !(await page.eval(() => !!document.querySelector('.cy-lb'))), 'still open')
+
+
+
+// 运行时（AgentStart → AgentEnd）这一整段都在「Working」里：标题 + 四行窗口，
+// 每行带度量（与工具行同一口径）。这是设计 图1 的形态。
+await page.goto(URL, { settleMs: 3000 })
+await page.eval(() => {
+  const st = window.__store.getState()
+  st.setNarrativeSkin('runtime')
+  st.setNarrativeDensity('concise')
+})
+await wait(700)
+await say('运行时样例')
+await waitFor('.cy-live', 30000)
+await wait(2500)
+const lp = await page.eval(() => {
+  const l = document.querySelector('.cy-live')
+  if (!l) return { present: false }
+  const rows = [...l.querySelectorAll('.lv-row')]
+  return {
+    present: true,
+    head: l.querySelector('.cy-live-head')?.textContent ?? '',
+    n: l.querySelector('.lv-n')?.textContent ?? '',
+    act: l.querySelector('.lv-act')?.textContent ?? '',
+    rows: rows.length,
+    capped: rows.length <= 4,
+    measured: rows.filter((r) => (r.querySelector('.m')?.textContent ?? '') !== '').length,
+    outsideWork: !!document.querySelector('.rt-turn-ans .tool-group'),
+  }
+})
+check('running: the whole run lives in one Working block', lp.present && /Working/.test(lp.head), JSON.stringify({ present: lp.present, head: lp.head }))
+check('running: the block counts calls', /\d+ calls?/.test(lp.n), lp.n)
+check('running: the window keeps four rows', lp.capped && lp.rows > 0, `${lp.rows} rows`)
+check('running: rows carry the same measure as a tool row', lp.measured > 0, String(lp.measured))
+check('running: no work painted outside the block', !lp.outsideWork, lp.outsideWork)
+
+// ---- 密度：简洁档收起 = 只有结算行 + 结论；详细档 = 全过程铺开 -----------------
+const freshTurn = async (density) => {
+  await page.goto(URL, { settleMs: 3000 })
+  await page.eval((d) => {
+    const st = window.__store.getState()
+    st.setNarrativeSkin('runtime')
+    st.setNarrativeDensity(d)
+  }, density)
+  await wait(700)
+  await say('运行时样例')
+  // 这一轮真的跑完才算「AgentEnd 之后」：live 面板与流式光标都消失、且这一轮
+  // 不再标着 data-open（运行中的那一轮默认是敞开的）。
+  await waitUntil("!document.querySelector('.cy-live') && !document.querySelector('.rt-caret') && !document.querySelector('.rt-turn[data-open]')", 90000)
+  if (density === 'concise') {
+    await waitUntil("!!document.querySelector('.rt-turn .rt-act[aria-expanded]')", 20000)
+  }
+  await wait(800)
+}
+
+await freshTurn('concise')
+const c1 = await page.eval(() => {
+  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  return {
+    open: t?.getAttribute('data-open'),
+    inTheTurn: !!t?.querySelector('.rt-turn-in'),
+    fold: !!t?.querySelector('.rt-act[aria-expanded]'),
+    foldText: t?.querySelector('.rt-act[aria-expanded]')?.textContent ?? '',
+    fileLine: !!t?.querySelector('.cy-file'),
+    kinds: [...(t?.children ?? [])].map((k) => k.className.toString().slice(0, 18)),
+  }
+})
+check('concise: the working phase is behind one fold row', c1.fold && !c1.inTheTurn, JSON.stringify({ fold: c1.fold, inner: c1.inTheTurn }))
+check('concise: the fold row settles the numbers', /Worked for/.test(c1.foldText) && /calls/.test(c1.foldText), c1.foldText)
+check('concise: no second copy of the file line', !c1.fileLine, c1.fileLine)
+
+// 展开：工作过程进来，并且有高度上限（超出滚动）
+await page.eval(() => document.querySelector('.rt-turn .rt-act[aria-expanded]')?.click())
+await wait(700)
+const c2 = await page.eval(() => {
+  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  // 高度上限在 .rt-turn-body 上（.rt-turn-in 是它的内容盒）
+  const box = t?.querySelector('.rt-turn-body')
+  if (!box) return { present: false }
+  const cs = getComputedStyle(box)
+  return { present: true, maxH: cs.maxHeight, overflow: cs.overflowY, capped: box.scrollHeight > box.clientHeight }
+})
+check('concise: expanding brings the work back', c2.present, c2.present)
+check('concise: the expanded work has a height cap', c2.present && c2.maxH !== 'none' && c2.overflow === 'auto', JSON.stringify(c2))
+
+await freshTurn('detailed')
+const d1 = await page.eval(() => {
+  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  return {
+    density: t?.getAttribute('data-density'),
+    fold: !!t?.querySelector('.rt-act[aria-expanded]'),
+    groups: t?.querySelectorAll('.rt-turn-ans .rt-grp').length ?? 0,
+    gaps: [...(t?.querySelectorAll('.rt-grp') ?? [])].map((g) => getComputedStyle(g).rowGap),
+    msgMargin: t?.querySelector('.rt-turn-ans .msg') ? getComputedStyle(t.querySelector('.rt-turn-ans .msg')).marginBottom : null,
+  }
+})
+check('detailed: no fold row, everything inline', !d1.fold && d1.groups >= 1, JSON.stringify({ fold: d1.fold, groups: d1.groups }))
+check('detailed: rows sit 6px apart (no legacy 22px margins)',
+  d1.gaps.every((g) => g === '6px') && d1.msgMargin === '0px', `${d1.gaps.join(',')} msg=${d1.msgMargin}`)
+
+// 思考行：展开不转标记，只换颜色
+await page.eval(() => document.querySelector('.thinking-toggle')?.click())
+await wait(700)
+const th = await page.eval(() => {
+  const btn = document.querySelector('.thinking-toggle')
+  const mk = btn?.querySelector('.rt-mk')
+  const face = btn?.querySelector('.rt-face')
+  return {
+    expanded: btn?.getAttribute('aria-expanded'),
+    state: mk?.getAttribute('data-mk-state'),
+    mkColor: mk ? getComputedStyle(mk).color : null,
+    faceTransform: face ? getComputedStyle(face).transform : null,
+    foldTransform: btn?.querySelector('.rt-fold') ? getComputedStyle(btn.querySelector('.rt-fold')).transform : null,
+  }
+})
+check('thinking: expanding changes the mark colour', th.expanded === 'true' && th.state === 'engaged' && th.mkColor !== 'rgb(69, 214, 165)', `${th.state} ${th.mkColor}`)
+check('thinking: the mark does not rotate', th.faceTransform === 'none', th.faceTransform)
 
 // ---- 减少动效 ---------------------------------------------------------------
 await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })

@@ -200,3 +200,14 @@ export const ALWAYS_SHOWN = new Set<MsgBlock['kind']>([
 export function foldedBody(turn: Turn): MsgBlock[] {
   return turn.items.filter((b) => b === turn.answer || ALWAYS_SHOWN.has(b.kind))
 }
+
+/* Running, folded density: the only thing allowed outside the working block is
+   the sentence being written right now. Every earlier llm_content, every
+   thought and every tool call lives inside it — that is what "working" means
+   (AgentStart → AgentEnd is one block). Records always stay visible. */
+export function runningBody(turn: Turn): MsgBlock[] {
+  const last = turn.items[turn.items.length - 1]
+  return turn.items.filter(
+    (b) => ALWAYS_SHOWN.has(b.kind) || (b === last && b.kind === 'assistant' && b.streaming),
+  )
+}

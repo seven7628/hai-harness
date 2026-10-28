@@ -24,6 +24,15 @@ function injectCJKFonts(): void {
   }
 }
 
+// 开发期验证钩子：把 store 暴露到 window（**仅 dev 构建**）。lab/ 下的浏览器断言
+// 需要在真应用里切档（密度/皮肤/会话）——这些是 store 上的动作，不是 DOM 属性；
+// 靠点设置页去切会把「验证一条规则」变成「走一遍 UI」。生产构建不含这段。
+if (import.meta.env.DEV) {
+  void import('./store/useAppStore').then((m) => {
+    ;(window as unknown as { __store?: unknown }).__store = m.useAppStore
+  })
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />

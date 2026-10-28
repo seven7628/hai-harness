@@ -389,3 +389,44 @@ html[data-skin='runtime'] .dock .dock-hd:focus-visible {
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+/* 批次里可能一次问好几条，我们的卡是「一题一卡」（设计一次只问一题，靠
+   「question 1 of 2」+ 圆点表达进度）。所以宽度必须由列表决定：各自
+   fit-content 会让两条问题长成两个宽度（实测 750px / 245px），右边那条
+   的预览窗还会顶出卡外 175px。 */
+html[data-skin='runtime'] .dock .q-list .ask {
+  width: 100%;
+  max-width: none;
+}
+
+/* 自由输入是设计里没有的那一格（设计的卡只有选项）。把它放成占满一行的
+   一格，并压住它的内在宽度 —— 否则 input 的 max-content 会撑大选项列
+   （实测把第一列撑到 687px，预览窗被挤出卡外）。样式取设计同一套 token：
+   card-2 底、--line 边、r-xs 圆角。 */
+/* 自由输入在 .ask-body 之外（设计里没有这一格；留在网格里它的 max-content
+   会把选项列撑到 687px、把预览窗顶出卡外）。内距取设计的卡内距 14px。 */
+html[data-skin='runtime'] .ask > input {
+  width: calc(100% - 28px);
+  min-width: 0;
+  height: 30px;
+  margin: 8px 14px 12px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--card-2);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .ask-body input::placeholder { color: var(--ink-3); }
+
+html[data-skin='runtime'] .ask-body input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 预览窗也压住：minmax(220px,1fr) 里的 1fr 在没有 min-width:0 时不会收缩 */
+html[data-skin='runtime'] .ask-pv {
+  min-width: 0;
+}

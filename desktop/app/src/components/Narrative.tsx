@@ -5,7 +5,7 @@ import { useAppStore, genMsOf } from '../store/useAppStore'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
-import { foldedBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
+import { foldedBody, runningBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine } from './runtime/turn/batch'
 import { WorkFold } from './runtime/turn/WorkFold'
@@ -1012,7 +1012,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        详细档：原顺序整段展开，不折叠（v2 里详细档根本没有折叠行）。 */
     const shut = concise && !open
     const workItems = concise ? (skin === 'runtime' ? groupRounds(turn.items.filter(isWork)) : groupBlocks(turn.items.filter(isWork))) : []
-    const body = skin === 'runtime' ? groupRounds(shut ? foldedBody(turn) : turn.items) : groupBlocks(shut ? foldedBody(turn) : turn.items)
+    /* 简洁档：收起时外面只有结论；**运行中**外面只有正在写的那一段 ——
+       其余的思考、中间的 llm_content、工具都在 Working 里滚（AgentStart →
+       AgentEnd 是同一个块）。详细档照旧整段摊开。 */
+    const bodySource = shut ? foldedBody(turn) : concise && turn.running ? runningBody(turn) : turn.items
+    const body = skin === 'runtime' ? groupRounds(bodySource) : groupBlocks(bodySource)
     if (!body.length && !workItems.length && !work) continue
     items.push(
       <div
@@ -1041,15 +1045,19 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             onToggle={() => setOpenTurns((m) => ({ ...m, [turn.key]: !open }))}
           />
         ) : null}
-        {/* 运行中这一轮不摊开：你看的是面板里最后四行，而不是一堵把整轮往下推的墙 */}
-        {workItems.length && !(turn.running && skin === 'runtime') ? (
+        {/* 工作过程只在**展开时**出现：简洁档收起后，外面只剩这一轮的最后结论
+            （设计 #m-timeline 的 Concise 一屏：一行 Worked for + 产出 + 答案）。
+            运行中也不摊开 —— 你看的是面板里最后几行，而不是一堵把整轮往下推的墙。 */}
+        {workItems.length && open && !(turn.running && skin === 'runtime') ? (
           <div className="rt-turn-body">
             <div className="rt-turn-in">{workItems}</div>
           </div>
         ) : null}
         {body.length ? <div className="rt-turn-ans">{body}</div> : null}
         {/* 这一轮改了哪个文件：记录（带框卡），点它展开做出改动的工作行 */}
-        {skin === 'runtime' && !turn.running && stats.files > 0 ? (
+        {/* 简洁档收起时不再单独画文件行：这条信息已经在 Worked for 那一行里
+            （「Edited 1 file +22 −17」），再画一遍是同一个数字说两次 */}
+        {skin === 'runtime' && !turn.running && stats.files > 0 && (!concise || open) ? (
           <FilesLine
             path={firstFileOf(turn)}
             added={stats.added}

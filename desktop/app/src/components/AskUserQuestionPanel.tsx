@@ -150,21 +150,34 @@ export default function AskUserQuestionPanel() {
       </div>
     )
     if (!pv) return list
-    return (
-      <div className="q-split">
+    // 运行时皮肤：设计的 .ask-body 本身就是两列（选项 max-content + 预览 1fr），
+    // 再套一层 .q-split 会让它变成「一格」，实测把选项列撑到 687px、预览顶出卡外。
+    const pvEl = (
+      <>
         {list}
         {/* 预览走正文同一个 Markdown 渲染器：模型写的代码块/表格/公式在预览里也成立 */}
         <div className={rt ? 'ask-pv' : 'q-preview'} role="figure" aria-label={t('ask.previewAria').replace('{label}', pv.label)}>
           <div className={rt ? 'ask-pv-head mono' : 'q-preview-hd mono'}>
-            <span>{t('ask.previewFor').replace('{label}', pv.label)}</span>
+            {/* 设计只写一个词（preview），右侧才是选项名 —— 两处都印名字会把
+                同一句话在一行里说两遍（原来那版就是这样） */}
+            <span>{rt ? 'preview' : t('ask.previewFor').replace('{label}', pv.label)}</span>
             <span className="ask-pv-which">{pv.label}</span>
           </div>
-          <div className={rt ? 'ask-pv-pre' : 'q-preview-body'}>
-            <Markdown text={pv.preview} />
-          </div>
+          {rt ? (
+            /* 预览是**排版好的纯文本**（parts/ask.css:238-247：mono + pre + 保留
+               缩进，ASCII 图换行就不是图了）。所以这里不过 markdown 渲染器。 */
+            <pre key={pv.label} className="ask-pv-pre ask-swap" data-empty={pv.preview ? undefined : '1'}>
+              {pv.preview || ''}
+            </pre>
+          ) : (
+            <div className="q-preview-body">
+              <Markdown text={pv.preview} />
+            </div>
+          )}
         </div>
-      </div>
+      </>
     )
+    return rt ? pvEl : <div className="q-split">{pvEl}</div>
   }
 
   return (
@@ -245,6 +258,7 @@ export default function AskUserQuestionPanel() {
                       没有它选项会贴到卡的边框上 */}
                   <div className={rt ? 'ask-body' : undefined}>
                   {it.options.length > 0 && renderOptions(it, i)}
+                  </div>
                   <input
                     ref={i === 0 ? firstRef : undefined}
                     name={`question-answer-${i}`}
@@ -261,7 +275,6 @@ export default function AskUserQuestionPanel() {
                     aria-label={t('ask.inputAria').replace('{n}', String(i + 1))}
                     spellCheck={false}
                   />
-                  </div>
                 </div>
               ))}
             </div>
