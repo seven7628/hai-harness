@@ -993,7 +993,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           </div>
         ) : null}
         {body.length ? <div className="rt-turn-ans">{body}</div> : null}
-        {usage.matched ? (
+        {/* 轮尾账是**结算**，不是进度：AgentEnd 之前这一轮的用量还在长，
+            把「11 calls · 16k tokens」边跑边刷出来就是在报一个还没定的数。 */}
+        {usage.matched && !turn.running ? (
           <div className="rt-turn-foot">
             <Ledger
               calls={stats.calls}

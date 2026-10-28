@@ -813,3 +813,32 @@ html[data-skin='runtime'] :where(.rt-act, .tool-row, .thinking-toggle):hover .rt
 html[data-skin='runtime'] [aria-expanded='true'] .rt-fold > .rt-fi {
   color: var(--ink-2);
 }
+
+/* the face turns with the disclosure, the way the design's star does: 90° over
+   380ms, easing out (ui.components.css:72-73). The face is our star — see
+   PORT-PLAN §11.16 M5 for why the mark is stateful instead of a sparkle. */
+html[data-skin='runtime'] .thinking-toggle .rt-face {
+  transition: transform var(--t-slow) var(--ease-out);
+}
+
+html[data-skin='runtime'] .thinking-toggle[aria-expanded='true'] .rt-face {
+  transform: rotate(90deg) scale(1.1);
+}
+
+/* the design's collapse, verbatim (port/transcript.css:6-12): a grid row going
+   0fr ↔ 1fr animates a height nobody has to measure, and the inner box keeps the
+   body from painting outside it */
+html[data-skin='runtime'] .rt-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--t-slow) var(--ease-out);
+}
+
+html[data-skin='runtime'] .rt-collapse > * {
+  overflow: hidden;
+  min-height: 0;
+}
+
+html[data-skin='runtime'] .rt-collapse.open {
+  grid-template-rows: 1fr;
+}

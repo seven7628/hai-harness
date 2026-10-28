@@ -97,7 +97,9 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
   const bodyRef = useRef<HTMLDivElement>(null)
   const long = text.length > 200
   const showFull = live || open || !long
-  const shown = showFull ? text : text.slice(0, 160) + '…'
+  // 折叠交给 CSS 的高度动画（设计 .collapse = grid-template-rows 0fr↔1fr 380ms）：
+  // 正文始终整段渲染，折叠只是把它夹住 —— 换文本的话没有过渡，点击会「跳」一下。
+  const shown = text
   // 段落切分：思考正文是纯文本 + white-space: pre-wrap，段落之间的空行会渲染成**整个行盒**
   // （行高 21px → 段落间隔 ≈ 2 倍行高），比正文段落间距（.msg .body p 的 4px）松得多。
   // 拆成 <p class="tk-p"> 后间距交给 CSS：默认皮肤沿用原空行高度（观感不变），V3 收紧到正文一致。
@@ -125,10 +127,14 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
           </button>
         )}
       </div>
-      <div className={`thinking-body ${long ? 'scroll' : ''} ${showFull ? '' : 'collapsed'}`} ref={bodyRef}>
-        {paras.map((para, i) => (
-          <p className="tk-p" key={i}><InlineCode text={para} /></p>
-        ))}
+      <div className={`rt-collapse${showFull ? ' open' : ''}`}>
+        <div>
+          <div className={`thinking-body ${long ? 'scroll' : ''}`} ref={bodyRef}>
+            {paras.map((para, i) => (
+              <p className="tk-p" key={i}><InlineCode text={para} /></p>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   )
