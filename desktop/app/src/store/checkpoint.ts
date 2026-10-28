@@ -180,6 +180,9 @@ export interface CheckpointBlock {
   items_trimmed?: number
   task_result?: string
   task_error?: string
+  // end_kind：子运行为什么收场（Go Block.EndKind ← AgentEnd.ErrorKind）。
+  // 车道行「killed · <原因>」用它；旧 checkpoint 没有这个键 → 不显示原因，行为如常。
+  end_kind?: string
   delivered_to_main?: boolean
   before?: number
   after?: number

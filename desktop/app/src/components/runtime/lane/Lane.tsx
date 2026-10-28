@@ -29,6 +29,27 @@ function clock(ms: number): string {
   return m + 'm ' + String(Math.floor(s % 60)).padStart(2, '0') + 's'
 }
 
+/* 「killed 必须带原因」（design parts/lane.js）：只说它停了不是信息。
+   原因来自 AgentEnd.ErrorKind（中断/截断时桥侧补上 aborted/max_iterations），
+   这里只把它翻成一句人话；认不出来的原样显示，不硬编一个「未知」。 */
+const END_WHY: Record<string, string> = {
+  aborted: 'stopped by you',
+  canceled: 'canceled',
+  context_exceeded: 'context limit',
+  rate_limit: 'rate limit',
+  output_truncated: 'output limit',
+  upstream_unavailable: 'upstream down',
+  permanent: 'request rejected',
+  max_iterations: 'iteration limit',
+  generic: 'error',
+  error: 'error',
+}
+
+function endWhy(b: AgentMsg): string {
+  if (b.endKind) return END_WHY[b.endKind] ?? b.endKind
+  return b.status === 'abandoned' ? 'abandoned' : ''
+}
+
 function stateOf(b: AgentMsg): 'run' | 'stop' | 'done' {
   if (b.status === 'running' || b.status === 'interrupting') return 'run'
   if (b.status === 'completed') return 'done'
@@ -107,10 +128,12 @@ export function Lane({ agents }: { agents: AgentMsg[] }) {
               </span>
               <span className="la-state">
                 {WORD[s]}
-                {b.status === 'abandoned' ? (
+                {/* 只有停下来的那一档需要解释；running 的「为什么」还没发生，
+                    done 的原因是它交回的结果本身 */}
+                {s === 'stop' && endWhy(b) ? (
                   <>
                     <span className="sep"> · </span>
-                    <span className="why">abandoned</span>
+                    <span className="why">{endWhy(b)}</span>
                   </>
                 ) : null}
               </span>

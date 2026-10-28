@@ -590,7 +590,7 @@ export type MsgBlock =
   | { kind: 'tool'; id: number; toolId: string; name: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; parentRunId?: string; liveTail?: string; liveSeq?: number; liveTotal?: number }
   // todos：该子 agent **自己**的待办清单（它是独立上下文，因此也是独立 TODO ——
   // 与会话级视图字段 SessionView.todos 互不相干，见 events.TodoSnapshot 的注释）。
-  | { kind: 'agent'; id: number; runId: string; parentRunId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean }
+  | { kind: 'agent'; id: number; runId: string; parentRunId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean; endKind?: string }
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
   | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; parentRunId?: string; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
   | { kind: 'task_result'; id: number; taskId: string; result: string; error?: string }
@@ -6285,6 +6285,17 @@ export function dispatchEvent(raw: AnyEvent): void {
                   ...(runUsage ? { usage: runUsage } : {}),
                   // 失败原因随 agent_end 立即挂卡片（不依赖 task_result_delivered 事件顺序）
                   ...(taskStatus === 'failed' && raw.error ? { taskError: String(raw.error) } : {}),
+                  // 「killed 必须带原因」（design parts/lane.js）：有 error_kind 用它，
+                  // 否则按收场方式给一个词。与 Go 侧 view_reducer.applyAgentEndLocked 同口径，
+                  // 否则刷新前后那一行会变样。
+                  ...((): { endKind?: string } => {
+                    const kind = String(raw.error_kind || '')
+                    if (kind) return { endKind: kind }
+                    if (aborted) return { endKind: 'aborted' }
+                    if (truncated) return { endKind: 'max_iterations' }
+                    if (taskStatus === 'failed' && raw.error) return { endKind: 'error' }
+                    return {}
+                  })(),
                   // 终态清理：中断/完成时 if llm_end 未到，retry 徽章不得残留成矛盾展示
                   retrying: false,
                   retryMessage: undefined,
@@ -7013,6 +7024,8 @@ function checkpointToView(cp: CheckpointView): SessionView {
           ...(b.think_ms != null ? { thinkMs: b.think_ms } : {}),
           ...(b.task_result ? { taskResult: b.task_result } : {}),
           ...(b.task_error ? { taskError: b.task_error } : {}),
+          // 收场原因（Go 侧 Block.EndKind 落盘）：车道行在 killed 后面说清为什么
+          ...(b.end_kind ? { endKind: b.end_kind } : {}),
           ...(b.delivered_to_main ? { deliveredToMain: true } : {}),
           // 子 agent 的产出（AgentEnd.Artifacts 挂卡片）——恢复后卡片内仍可见
           ...(artItems ? { artifacts: artItems } : {}),

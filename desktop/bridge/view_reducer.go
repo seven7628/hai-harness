@@ -129,6 +129,10 @@ type Block struct {
 	IsError    bool           `json:"is_error,omitempty"`
 	ErrorInfo  *ToolErrorInfo `json:"error_info,omitempty"`
 	Status     string         `json:"status,omitempty"` // tool: running|done; task: running|completed|failed|interrupted|abandoned
+	// EndKind agent 块：这次子运行为什么收场（AgentEnd.ErrorKind；中断/截断时补语义值）。
+	// 设计 parts/lane.js 的规矩是「killed 必须带原因 —— 只说『它停了』不是信息」，
+	// 所以随 checkpoint 落盘：刷新后那一行仍然说得清，而不是只剩一个 killed。
+	EndKind string `json:"end_kind,omitempty"`
 	Diff       *Diff          `json:"diff,omitempty"`
 	TaskID     string         `json:"task_id,omitempty"`
 	Promoted   bool           `json:"promoted,omitempty"`
@@ -2275,6 +2279,18 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 		if idx := r.findBlockLocked(bid); idx >= 0 && r.blocks[idx].Kind == blockKindAgent {
 			b := r.blocks[idx]
 			b.Status = taskStatus
+			// 收场原因（见 Block.EndKind）：有 error_kind 用它，否则按收场方式给一个
+			// 说得清的词 —— 与前端 useAppStore 的 agent_end 分支同一口径。
+			switch {
+			case e.ErrorKind != "":
+				b.EndKind = e.ErrorKind
+			case aborted:
+				b.EndKind = "aborted"
+			case truncated:
+				b.EndKind = "max_iterations"
+			case runStatus == statusError && e.Error != "":
+				b.EndKind = "error"
+			}
 			if b.TaskID == "" && e.TaskId != "" {
 				b.TaskID = e.TaskId
 			}
