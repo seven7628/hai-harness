@@ -4942,10 +4942,11 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 		agents.WithCompressor(agents.NewLLMCompressor(p, model,
 			compressTorOptions(prov, model, sid, m.provCfg)...)),
 	)
-	// D3（方案 B2/C3.2）：stop 检查点在途任务提醒（Work 无 agent_* 工具时快照恒空
-	// = 天然 no-op）+ 自动压缩失败退避 3min（防失控重试，实测 211k/231k 样本）。
+	// D3（方案 B2/C3.2）：自动压缩失败退避 3min（防失控重试，实测 211k/231k 样本）。
+	// 注：原装配的 agents.WithPendingTasksNudge()（stop 检查点在途任务提醒）已于 2026-10
+	// 随该门控整体删除 —— 判据错（全量台账当在途）+ 冗余（结果经 OnTaskDone → wakeRun
+	// 起新 Run，投递不依赖 loop 存活）。见 agents/agent_loop.go 收尾分支注释。
 	opts = append(opts,
-		agents.WithPendingTasksNudge(),
 		agents.WithCompactBackoff(3*time.Minute),
 		// 会话稳定标识：Responses prompt cache key + session affinity 头（对齐 pi
 		// options.sessionId —— 同一会话多轮共享缓存前缀；空 sid 不启用）。

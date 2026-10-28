@@ -91,10 +91,6 @@ type Config struct {
 	// 零值 = 不启用（默认：空轮即结束，维持原语义）——空轮无法区分「卡住」与
 	// 「已完成但静默」，是否兜底由宿主按模型特性显式开启（WithPostToolNudgeEnabled）。
 	EnablePostToolNudge bool
-	// PendingTasksNudge 启用 stop 检查点在途任务提醒（R1/B2，目录 §10.8）：
-	// 模型产出最终回复即将结束时清点在途后台任务，非空则注入一次性
-	// PendingTasksReminder 多跑一轮。零值 = 不启用（WithPendingTasksNudge 开启）。
-	PendingTasksNudge bool
 	// CompactBackoff 自动压缩失败后的退避时长（R3/C3.2；WithCompactBackoff 配置）：
 	// 失败后该窗口内不触发自动压缩。零值 = 不退避。
 	CompactBackoff time.Duration
@@ -246,14 +242,6 @@ func WithMaxIterations(n int) Option {
 // 默认不启用；对「工具结果返回后常静默 stop」的模型建议开启。
 func WithPostToolNudgeEnabled() Option {
 	return func(c *Config) { c.EnablePostToolNudge = true }
-}
-
-// WithPendingTasksNudge 启用 stop 检查点在途任务提醒（R1/B2，2026-08-24 §10.8）：
-// 模型产出最终回复即将结束时，若仍有在途后台任务且本 Run 未提醒过 → 注入一次性
-// PendingTasksReminder 并多跑一轮（再次坚持结束则放行，防死循环）。
-// 默认不启用（宿主显式开启；桌面 Bridge 打开——弱模型"提前宣布完成"是高频失败模式）。
-func WithPendingTasksNudge() Option {
-	return func(c *Config) { c.PendingTasksNudge = true }
 }
 
 // WithCompactBackoff 设置自动压缩失败后的退避时长（R3/C3.2）：失败后该窗口内不再
@@ -530,12 +518,6 @@ type AgentContext struct {
 	postToolNudgePending bool
 	// postToolNudgeUsed 本次 Run 是否已用过空轮续跑提醒（仅一次，防死循环）。
 	postToolNudgeUsed bool
-	// todoGateUsed 本次 Run 是否已做过收尾前完成度检查（A4/B4：每 Run 至多一次，
-	// 模型再次坚持结束则放行，防死循环）。对齐 pendingTasksNudged 的既有范式。
-	todoGateUsed bool
-	// pendingTasksNudged 本次 Run 是否已注入过 stop 检查点在途任务提醒
-	// （R1/B2：每 Run 至多一次，模型再次坚持结束则放行，防死循环）。
-	pendingTasksNudged bool
 	// stopHookBlocks Stop hook（hooks 能力扩展）要求"继续回合"的已用次数：带上限
 	// （maxStopHookBlocks = 8，对标 Claude Code 的连续 block 上限），超出即放行结束
 	// —— 一个写错的 hook 不能把会话卡死在循环里。
@@ -680,7 +662,6 @@ type AgentLoop struct {
 	goalAlignmentMu             sync.RWMutex
 	goalAlignmentReminderRounds int
 	enablePostToolNudge         bool
-	pendingTasksNudge           bool
 	// maxParallelOnce 并发上限同步（runTools 首轮执行一次，防重复设置与并发竞争）
 	maxParallelOnce sync.Once
 }
@@ -722,7 +703,6 @@ func NewAgentLoop(opts ...Option) *AgentLoop {
 		contextWindow:               cfg.ContextWindow,
 		goalAlignmentReminderRounds: cfg.GoalAlignmentReminderRounds,
 		enablePostToolNudge:         cfg.EnablePostToolNudge,
-		pendingTasksNudge:           cfg.PendingTasksNudge,
 	}
 }
 
@@ -1196,40 +1176,30 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 					ac.RunHistory = append(ac.RunHistory, sigMsg)
 				}
 			}
-			// R1/B2 stop 检查点在途任务提醒（目录 §10.8）：模型产出"最终回复"的瞬间
-			// 恰是后台任务语义离它最远的时刻——此处清点在途任务，非空且本 Run 未提醒过
-			// → 注入一次性 PendingTasksReminder 并多跑一轮；模型再次坚持结束则放行
-			// （nudged 位已置，防死循环）。插话优先级更高：上面 Poll 分支已 continue。
-			if a.pendingTasksNudge && opts != nil && opts.TaskState != nil && !ac.pendingTasksNudged {
-				if snap := opts.TaskState(); snap != "" {
-					ac.pendingTasksNudged = true
-					ac.Messages = append(ac.Messages,
-						core.NewSystemMessage(fmt.Sprintf(prompt.PendingTasksReminder, snap)))
-					a.onTurn(ac, opts) // 检查点：提醒已就绪
-					continue
-				}
-			}
-			// A4/B4 收尾前验收门控（走机制，不改 Code 提示词）：模型产出"最终回复"、即将
-			// 自然结束，而会话 todo 仍有未完成项——引擎在此拦一次，把未完成清单放到决策
-			// 眼前并多跑一轮；模型再次坚持结束则放行（todoGateUsed 已置，防死循环）。
-			// 同 PendingTasksNudge 范式：提醒写进 ac.Messages（持久化，模型做完剩余工作
-			// 期间一直可见）并立即 onTurn 落盘；顺序排在插话（上面 Poll 已 continue）与在途
-			// 任务提醒之后。
-			// 为何走机制而非提示词：Code 主会话提示词的工程流程节（含 Verification）是用户
-			// 特意移除的（TestDesktopCodePromptV2Concise 防回归），且实测提示词约束行为会失效。
-			// 为何默认开启、不加 Config 开关：postToolNudge 因 WithPostToolNudgeEnabled 仅测试
-			// 接线而成为生产死代码（TestPostToolNudgeDefaultOff，2026-08-24）——本门控不接受
-			// 同一命运，如需 opt-out 请在评审中提出而非预先埋开关。
-			// 效果经会话长度 / 未完成 todo 率间接观测（本批不加事件类型，避免牵动 events/ 与桥接）。
-			// 只在自然结束路径生效：abort / ctx 取消不做门控（此时收尾属打断，不该再拖一轮，
-			// 更不该把提醒写进即将落盘的历史）；出错路径已在上面 err != nil 处 break。
-			if !ac.todoGateUsed && !ac.IsAborted() && ac.ctx.Err() == nil && hasUnfinishedTodos(ac.Todo) {
-				ac.todoGateUsed = true
-				ac.Messages = append(ac.Messages,
-					core.NewSystemMessage(fmt.Sprintf(prompt.IncompleteTodosReminder, renderUnfinishedTodos(ac.Todo))))
-				a.onTurn(ac, opts) // 检查点：提醒已就绪
-				continue
-			}
+			// 收尾门控（2026-10 决策：已删除两道「引擎替模型决定再跑一轮」的门控）
+			//
+			// 删除的是：① R1/B2 在途任务提醒（旧 agent_loop 门控 3，PendingTasksNudge）；
+			// ② A4/B4 收尾前完成度检查（旧门控 4，TodoGate / IncompleteTodosReminder）。
+			//
+			// 为什么删（会话日志实测，925 个会话快照）：
+			//  - 门控 3 触发 461 次，其中 344 次（74.6%）清单里 0 个在途任务 —— 它消费的是
+			//    session.taskStateSnapshot（reg.List() 全量台账，终态任务也在内、registry
+			//    只增不删），却当成「有在途任务」的布尔判据，于是在什么都没跑的时候也注入
+			//    "Background tasks are still running"，并把已完成任务列成在途。
+			//  - 这些误报开出 184 次后续工具轮（bash 141），另有 190 次纯文字轮补白
+			//    （88.5KB）——模型只能自己找活干，甚至回头推翻上一条正确结论。
+			//  - 门控 4 判据没错，但代价结构错：145 次触发里 123 次的下一轮只调了
+			//    todo_update（记账），用最贵的机制做最廉价的记账。
+			//
+			// 为什么删了不丢东西：后台任务结果经 registry.OnTaskDone → Session.PushTaskResult
+			// （入 inbox）→ bridge 的 bs.wakeRun()（desktop/bridge/main.go，注释「空闲续跑」）
+			// 唤醒 run loop 起**新 Run**，模型照样看到结果——投递不依赖本 loop 还活着。
+			// 语义差异：结果到达现在是「AgentEnd 之后的新 Run（AgentStart）」，而不是同一个
+			// Run 里莫名多一轮。
+			//
+			// 保留：Stop hook（外部显式声明「继续」，见下）与工具轮空回复续跑（模型侧空轮，
+			// 非引擎替模型判断）。子 loop 的在途孙任务门控（subagent.go，判据用
+			// InFlightDescendants 且按 running/interrupting 过滤）不动。
 			// Stop（hooks 能力扩展）：模型即将自然结束本轮前的**最后一个**门控点。
 			// 外部 hook 可要求"再跑一轮"（社区里 Stop-hook loop 类工具的用法：让 agent
 			// 继续未完成的工作）。三重护栏缺一不可：① 只在自然结束路径生效（abort /
@@ -1606,54 +1576,10 @@ func (a *AgentLoop) onTurn(ac *AgentContext, opts *RunOptions) {
 	}
 }
 
-// maxUnfinishedTodosInReminder 收尾前完成度检查里最多列出的未完成项数：上限只为
-// 避免超长清单塞进请求，超出部分以一行省略标记代替（清单本身仍在会话状态里）。
-const maxUnfinishedTodosInReminder = 10
-
 // maxStopHookBlocks Stop hook（hooks 能力扩展）单次 Run 内"要求继续回合"的次数上限。
 // 对标 Claude Code 的连续 block 上限（默认 8，超限强制结束回合）：注入型 hook 写错、
 // 或 Stop-hook loop 类工具陷入自激时，这是最后一道护栏。
 const maxStopHookBlocks = 8
-
-// hasUnfinishedTodos 会话 todo 是否存在未完成项（A4/B4 门控条件）。nil 安全：
-// 未接线 todo 的运行（ac.Todo 被置空）不门控、不 panic。
-func hasUnfinishedTodos(s *todo.Store) bool {
-	if s == nil {
-		return false
-	}
-	for _, it := range s.Items() {
-		if !it.Done {
-			return true
-		}
-	}
-	return false
-}
-
-// renderUnfinishedTodos 渲染未完成项清单（每行 "- <id>: <title>"，上限
-// maxUnfinishedTodosInReminder 项；nil / 全完成返回空串）。纯读取，遍历的是
-// Store.Items 返回的副本，不改 todo 状态。
-func renderUnfinishedTodos(s *todo.Store) string {
-	if s == nil {
-		return ""
-	}
-	var sb strings.Builder
-	n := 0
-	for _, it := range s.Items() {
-		if it.Done {
-			continue
-		}
-		if n >= maxUnfinishedTodosInReminder {
-			sb.WriteString("\n- (more unfinished items omitted)")
-			break
-		}
-		if n > 0 {
-			sb.WriteString("\n")
-		}
-		fmt.Fprintf(&sb, "- %s: %s", it.Id, it.Title)
-		n++
-	}
-	return sb.String()
-}
 
 // newRunID 生成一次运行唯一标识（8 字节随机 hex）。
 func newRunID() string {
