@@ -42,55 +42,116 @@ html[data-skin='runtime'] .tool-group {
   margin: 8px 0 10px;
 }
 
+/* --- the row: six columns, verbatim from port/transcript.css:62-108 ---------
+   Our row is a wrapper around a clickable header, so the grid lives on the
+   header; every number below is the design's. The text chevron is replaced by
+   the two-glyph fold (design .fold-i, transcript.css:255-275). */
 html[data-skin='runtime'] .tool-row {
+  display: block;
   font-size: 12px;
 }
 
 html[data-skin='runtime'] .tool-row .tool-row-hd {
-  min-height: 28px;
-  gap: 9px;
+  display: grid;
+  grid-template-columns: 14px 14px 56px minmax(0, 1fr) auto 52px;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
   padding: 0 8px 0 6px;
-  border-radius: 7px;
-  transition: background-color var(--rt-fast) var(--ease);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease);
 }
 
 html[data-skin='runtime'] .tool-row .tool-row-hd:hover {
-  background: var(--rt-hover);
+  background: var(--card-2);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
 }
 
-/* The verb keeps the family colour: in this app the family is a real
-   distinction (read / run / write / net / agent / skill), and a column of
-   coloured verbs is what makes a long turn countable at a glance. What
-   changes is the weight around it — the argument is mono and recedes, the
-   numbers are tabular and right-aligned, so the verb is the only thing
-   asking to be read first. */
+html[data-skin='runtime'] .tool-row .ic {
+  width: 12.5px;
+  height: 12.5px;
+  flex: none;
+  color: var(--ink-3);
+  stroke-width: 1.7;
+}
+
+html[data-skin='runtime'] .tool-row .ic[data-s='warn'] {
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .tool-row .ic[data-s='fail'] {
+  color: var(--red);
+}
+
+html[data-skin='runtime'] .tool-row[data-s='fail'] .t {
+  color: color-mix(in oklab, var(--red) 55%, var(--ink));
+}
+
 html[data-skin='runtime'] .tool-row .t {
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
-  letter-spacing: -0.004em;
-}
-
-html[data-skin='runtime'] .tool-row .args {
-  flex: 1 1 auto;
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-
-/* the spacer had the leftover width; the argument should have it */
-html[data-skin='runtime'] .tool-row .grow {
-  flex: 0 0 0;
-}
-
-html[data-skin='runtime'] .tool-row .ms,
-html[data-skin='runtime'] .tool-row .tu {
-  font-variant-numeric: tabular-nums;
-  text-align: right;
+  letter-spacing: -0.006em;
+  color: var(--ink-2);
   white-space: nowrap;
 }
 
+html[data-skin='runtime'] .tool-row.open .t,
+html[data-skin='runtime'] .tool-row .tool-row-hd:hover .t {
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .tool-row .args {
+  min-width: 0;
+  font: 400 11.5px/1.4 var(--mono);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-skin='runtime'] .tool-row .m {
+  font: 400 11px/1 var(--mono);
+  color: var(--ink-3);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .tool-row .m .p {
+  color: var(--green);
+}
+
+html[data-skin='runtime'] .tool-row .m .d {
+  color: var(--red);
+}
+
+html[data-skin='runtime'] .tool-row .m.bad {
+  color: var(--red);
+}
+
+html[data-skin='runtime'] .tool-row .dur {
+  font: 400 11px/1 var(--mono);
+  color: var(--ink-3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .tool-row .dur.bad {
+  color: var(--red);
+}
+
+/* the six columns are the design's; everything the app added to a row would
+   land in a seventh, so those extras are taken out of the line — a spacer, a
+   "…" that the fold icon already says, a per-call usage chip (the ledger below
+   the turn is where usage belongs) and a ✓/✗ whose meaning the icon colour and
+   the metric already carry. A stop button is not decoration: it keeps an
+   implicit seventh column when it is there, and the row stays readable. */
+html[data-skin='runtime'] .tool-row .grow,
+html[data-skin='runtime'] .tool-row .run,
+html[data-skin='runtime'] .tool-row .tu,
 html[data-skin='runtime'] .tool-row .st {
-  width: 12px;
-  text-align: center;
+  display: none;
 }
 
 /* A running call is the one thing in a folded turn that must not look like the
@@ -111,73 +172,75 @@ html[data-skin='runtime'] .tool-row .tool-diff {
 
 /* It was an accent pill with a border in a corner of the transcript — the
    loudest thing on the page for the one part that is meant to be optional.
-   v2 draws it as a line: a mark, "Thought for 4.8 s", a chevron. */
-/* A thought carries a face (state: running / open / folded). Two marks on one
-   line — the face and the v3 sparkle — is one too many. */
+   v2 draws it as a line: a mark, the words, a fold glyph, and the reasoning
+   hanging off a hairline. Values are transcript.css:14-38 and
+   ui.components.css:65-84 verbatim. */
 html[data-skin='runtime'] .thinking-hd .ic {
   display: none;
 }
 
+html[data-skin='runtime'] .thinking-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  text-align: left;
+  color: var(--ink-2);
+  font-size: 13px;
+  transition: color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .thinking-toggle:hover {
+  color: var(--ink);
+}
+
+/* the label is prose, not a code sample: 13px of the reading face, the elapsed
+   time one step quieter */
 html[data-skin='runtime'] .thinking-toggle .mono {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text-3);
+  font: 400 13px/1.35 var(--font-ui);
+  color: var(--ink-2);
   background: none;
   border: 0;
   padding: 0;
-  transition: color var(--rt-fast) var(--ease);
 }
 
-html[data-skin='runtime'] .thinking-hd:hover .thinking-toggle .mono {
-  color: var(--text-2);
-  border-color: transparent;
+html[data-skin='runtime'] .thinking-toggle[aria-expanded='true'] .mono {
+  color: var(--ink);
 }
 
 html[data-skin='runtime'] .thinking-more {
-  color: var(--text-3);
+  color: var(--ink-3);
   font-size: 11px;
 }
 
 html[data-skin='runtime'] .thinking-more:hover {
-  color: var(--text-2);
+  color: var(--ink-2);
 }
 
-/* The reasoning hangs off a hairline instead of a second box: the line says
-   "this is subordinate", which a border cannot say without adding weight. */
+/* the reasoning hangs off a hairline instead of a second box: the line says
+   "this is subordinate", which a border cannot say without adding weight */
 html[data-skin='runtime'] .thinking-body {
   position: relative;
-  margin-top: 2px;
+  margin-top: 4px;
   padding-left: 15px;
 }
 
 html[data-skin='runtime'] .thinking-body::before {
   content: '';
   position: absolute;
-  left: 3px;
-  top: 3px;
-  bottom: 3px;
+  left: 3.5px;
+  top: 2px;
+  bottom: 10px;
   width: 1px;
-  background: var(--border);
-  border-radius: 1px;
+  background: var(--line);
 }
 
-/* the reasoning is prose read at a glance, not a code block: one step tighter */
 html[data-skin='runtime'] .thinking .thinking-body .tk-p {
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  html[data-skin='runtime'] .tool-row .tool-row-hd,
-  /* A thought carries a face (state: running / open / folded). Two marks on one
-   line — the face and the v3 sparkle — is one too many. */
-html[data-skin='runtime'] .thinking-hd .ic {
-  display: none;
-}
-
-html[data-skin='runtime'] .thinking-toggle .mono {
-    transition: none;
-  }
+  font-size: 12.5px;
+  line-height: 1.66;
+  color: var(--ink-2);
+  max-width: 58ch;
+  margin: 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -701,4 +764,52 @@ html[data-skin='runtime'] .rt-head {
 /* the clock is the quieter half: a time you can find, not a time that competes */
 html[data-skin='runtime'] .rt-head .rt-t {
   color: color-mix(in oklab, var(--ink-3) 66%, transparent);
+}
+
+/* ---------------------------------------------------------------------------
+   F5 · the fold glyph  (port/transcript.css:255-275, verbatim)
+   ------------------------------------------------------------------------ */
+
+html[data-skin='runtime'] .rt-fold {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+html[data-skin='runtime'] .rt-fold > .rt-fi {
+  position: absolute;
+  inset: 0;
+  width: 12px;
+  height: 12px;
+  color: var(--ink-3);
+  transition:
+    opacity var(--t-fast) var(--ease),
+    transform var(--t-base) var(--spring);
+}
+
+html[data-skin='runtime'] .rt-fold > .rt-fi-closed {
+  opacity: 1;
+  transform: none;
+}
+
+html[data-skin='runtime'] .rt-fold > .rt-fi-open {
+  opacity: 0;
+  transform: rotate(-30deg) scale(0.86);
+}
+
+html[data-skin='runtime'] [aria-expanded='true'] .rt-fold > .rt-fi-closed {
+  opacity: 0;
+  transform: rotate(30deg) scale(0.86);
+}
+
+html[data-skin='runtime'] [aria-expanded='true'] .rt-fold > .rt-fi-open {
+  opacity: 1;
+  transform: none;
+}
+
+html[data-skin='runtime'] :where(.rt-act, .tool-row, .thinking-toggle):hover .rt-fold > .rt-fi,
+html[data-skin='runtime'] [aria-expanded='true'] .rt-fold > .rt-fi {
+  color: var(--ink-2);
 }

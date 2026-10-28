@@ -17,7 +17,9 @@ import type { CompressionInfo, Diff, QueuedContent, ToolErrorInfo, TodoItem, Usa
 import { Markdown } from './markdown'
 import { Bot, CheckList, FileIcon, PencilIcon, PlayIcon, SearchIcon, Sparkles, TerminalIcon } from './icons'
 import { fmtUsd, UsageChip, UnifiedDiff } from './ui'
-import { toolArgsSummary } from '../lib/toolSummary'
+import { fmtMs, toolArgsSummary, toolMetric, toolVerb } from '../lib/toolSummary'
+import { useSkin } from '../lib/useSkin'
+import { FoldIcon } from './runtime/FoldIcon'
 import { toolFamily, fileTypeOf } from '../lib/palette'
 import { splitThinkingParagraphs } from '../lib/thinkingText'
 import { Face } from './runtime/Face'
@@ -88,6 +90,7 @@ export const InlineCode = memo(function InlineCode({ text }: { text: string }) {
 // 判断留在调用点，渲染只在这里。
 export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart }: { text: string; live: boolean; thinkMs?: number; thinkStart?: number }) {
   const t = useT()
+  const rt = useSkin() === 'runtime'
   const [open, setOpen] = useState(false)
   const running = live && thinkStart != null && thinkMs == null // 思考中：还在生成、已开始且未结算
   // 时钟：仅思考中挂（ElapsedTimer 订阅，每秒走）；结束 timer=thinkMs 显示总耗时
@@ -113,7 +116,8 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
               不另设一套。`.ic` 留给 v3 皮肤，默认皮肤下它整片 display:none。 */}
           <Face state={running ? 'run' : showFull ? 'engaged' : 'done'} />
           <span className="ic" aria-hidden="true">{<Sparkles size={16} />}</span>
-          <span className="mono">▸ {t('thinking.label')}{<ElapsedTimer startAt={thinkStart} running={running} durMs={thinkMs} />}</span>
+          <span className="mono">{rt ? null : '▸ '}{t('thinking.label')}{<ElapsedTimer startAt={thinkStart} running={running} durMs={thinkMs} />}</span>
+          {rt ? <FoldIcon open={showFull} /> : null}
         </button>
         {long && !live && (
           <button className="thinking-more" onClick={() => setOpen((v) => !v)}>
@@ -147,6 +151,10 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
   const t = useT()
   // 出错归一化：主对话块用 isError，子 agent 项用 status==='error'（两边同义）
   const err = b.isError ?? b.status === 'error'
+  // 运行时皮肤的工具行是六列（折角 · 图标 · 动词 · 对象 · 度量 · 时长）：动词用工具名
+  // 的大写形式、度量从结果算；另两档皮肤保留原名与旧版面（.t 里仍是原始工具名）。
+  const rt = useSkin() === 'runtime'
+  const metric = rt ? toolMetric(b.name, b.args || '', b.result, b.diff) : null
   const changed = b.status === 'done' && !err
   const summary = toolArgsSummary(b.name, b.args || '', t)
   // 编排型工具（codemode）：档位徽标（检索 / 执行）——判据见 lib/codemodeNested.ts 的 codemodeTier。
@@ -197,6 +205,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
     // 让一排 codemode 调用在长转录里连成可数的节奏，而不是混进 bash 行里。
     <div
       className={`tool-row ${changed ? 'changed' : ''} ${open ? 'open' : ''}`}
+      data-s={err ? 'fail' : running ? 'warn' : undefined}
       data-family={isCodemode ? (tier === 'search' ? 'read' : 'cmd') : toolFamily(b.name)}
       data-cm={isCodemode ? tier : undefined}
     >
@@ -214,14 +223,14 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
         }}
       >
         {/* 展开箭头在图标之前：一列行读下来，左侧是「可点开」，右侧才是「这是什么」。 */}
-        <span className="chev">{open ? '▾' : '▸'}</span>
+        {rt ? <FoldIcon open={open} /> : <span className="chev">{open ? '▾' : '▸'}</span>}
         {/* V3 / 运行时皮肤的行首图标（默认皮肤不渲染）：读=文档 · 检索=放大镜 · 执行=终端 · 改=笔 */}
-        <span className="ic" aria-hidden="true"><ToolIcon name={isCodemode ? (tier === 'search' ? 'search' : 'bash') : b.name} /></span>
+        <span className="ic" data-s={err ? 'fail' : running ? 'warn' : undefined} aria-hidden="true"><ToolIcon name={isCodemode ? (tier === 'search' ? 'search' : 'bash') : b.name} /></span>
         {isSkill ? (
           <span className={`t ${err ? 'err' : ''}`}>SKILL({b.args})</span>
         ) : (
           <>
-            <span className={`t ${err ? 'err' : ''}`}>{b.name}</span>
+            <span className={`t ${err ? 'err' : ''}`}>{rt ? toolVerb(b.name) : b.name}</span>
             {/* 档位标签：只找工具（检索）还是真干活（执行）。判据来自后端 HostOps 计数 ——
                 保留操作不进 nested_calls，前端无法自行判定「纯检索」（见 codemodeTier）。
                 放在名字**后面**而不是行尾：行尾被时间/用量/结果占着，一眼扫过去只剩药丸的边。 */}
@@ -297,8 +306,26 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
           </button>
         )}
         {b.status === 'running' && !isCodemode && <span className="run">…</span>}
-        {((b.status === 'running' && !isCodemode) || b.durMs != null) && (
-          <ElapsedTimer className="ms" startAt={b.startedAt} running={asyncTask} durMs={asyncTask ? undefined : b.durMs} />
+        {/* 度量列：+a −b / N lines / N hits / N files / x.x KB —— 算不出就不画 */}
+        {rt && metric ? (
+          <span className={`m${err ? ' bad' : ''}`}>
+            {metric.kind === 'diff' ? (
+              <>
+                <span className="p">+{metric.added}</span> <span className="d">−{metric.removed}</span>
+              </>
+            ) : (
+              metric.text
+            )}
+          </span>
+        ) : null}
+        {rt ? (
+          <span className={`dur${err ? ' bad' : ''}`}>
+            {b.status === 'running' ? <ElapsedTimer startAt={b.startedAt} running durMs={undefined} /> : fmtMs(b.durMs ?? undefined)}
+          </span>
+        ) : (
+          ((b.status === 'running' && !isCodemode) || b.durMs != null) && (
+            <ElapsedTimer className="ms" startAt={b.startedAt} running={asyncTask} durMs={asyncTask ? undefined : b.durMs} />
+          )
         )}
         <UsageChip className="mono tu" usage={b.usage} title={t('usage.tip').replace('{tok}', String((b.usage?.input ?? 0) + (b.usage?.output ?? 0))).replace('{cost}', fmtUsd(b.usage?.costUsd ?? 0))} />
         <span className={`st ${err ? 'err' : changed ? 'ok' : ''}`}>{err ? '✗' : changed ? '✓' : ''}</span>

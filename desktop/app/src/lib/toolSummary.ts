@@ -70,3 +70,97 @@ export function toolNodeLabel(name: string, args: string): string {
   const s = toolArgsSummary(name, args)
   return s ? `${name} ${s}` : name
 }
+
+/* ── 运行时皮肤的工具行：动词、对象、度量 ──────────────────────────────────────
+   v2 的工具行是六列（折角 · 图标 · 动词 · 对象 · 度量 · 时长）。三个纯函数把
+   「这次调用是什么、动了多少、花了多久」算出来；算不出就返回 null —— 行里那一格
+   宁可为空，也不许填一个猜的数（设计与红线都要求这一点）。 */
+
+// 动词：个体行用工具名的大写形式（设计 §11.6.3：批处理行才用过去式）
+const VERBS: Record<string, string> = {
+  read_file: 'Read',
+  write_file: 'Write',
+  edit_file: 'Edit',
+  multi_edit: 'Edit',
+  list_dir: 'List',
+  glob: 'Glob',
+  grep: 'Grep',
+  bash: 'Bash',
+  todo_add: 'Todo',
+  todo_update: 'Todo',
+  todo_write: 'Todo',
+  todo_list: 'Todo',
+  ask_user: 'Ask',
+  agent_spawn: 'Agent',
+  agent_send: 'Tell',
+  agent_wait: 'Wait',
+  agent_interrupt: 'Stop',
+  SKILL: 'Skill',
+  codemode: 'Codemode',
+  plan_submit: 'Plan',
+  web_fetch: 'Fetch',
+  web_search: 'Search',
+}
+
+export function toolVerb(name: string): string {
+  const v = VERBS[name]
+  if (v) return v
+  if (!name) return ''
+  return name.charAt(0).toUpperCase() + name.slice(1).replace(/_/g, ' ')
+}
+
+export type ToolMetric =
+  | { kind: 'diff'; added: number; removed: number }
+  | { kind: 'text'; text: string }
+  | null
+
+function argNum(args: string, key: string): number | undefined {
+  try {
+    const v = (JSON.parse(args) as Record<string, unknown>)[key]
+    return typeof v === 'number' ? v : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/* 度量口径（与设计一致）：
+   diff → +a −b；读文件 → 行数（优先参数区间，其次结果行数）；检索 → 命中行数；
+   列目录/glob → 文件数；bash → 结果字节数（KB，一位小数）。其余工具没有可数的东西。 */
+export function toolMetric(
+  name: string,
+  args: string,
+  result: string | undefined,
+  diff?: { added?: number; removed?: number } | null,
+): ToolMetric {
+  if (diff && (diff.added != null || diff.removed != null)) {
+    return { kind: 'diff', added: diff.added ?? 0, removed: diff.removed ?? 0 }
+  }
+  const res = result ?? ''
+  const lines = res ? res.split('\n').filter((l) => l.trim().length > 0).length : 0
+  if (name === 'read_file') {
+    const s = argNum(args, 'start_line')
+    const e = argNum(args, 'end_line')
+    const n = s && e && e >= s ? e - s + 1 : lines
+    return n > 0 ? { kind: 'text', text: `${n} lines` } : null
+  }
+  if (name === 'grep' || name === 'web_search') {
+    return lines > 0 ? { kind: 'text', text: `${lines} ${lines === 1 ? 'hit' : 'hits'}` } : null
+  }
+  if (name === 'glob' || name === 'list_dir') {
+    return lines > 0 ? { kind: 'text', text: `${lines} ${lines === 1 ? 'file' : 'files'}` } : null
+  }
+  if (name === 'bash') {
+    if (!res) return null
+    const kb = res.length / 1024
+    return { kind: 'text', text: `${kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb.toFixed(1) + ' KB'}` }
+  }
+  return null
+}
+
+/* 设计里的时长档：<10s 一位小数秒，≥10s 整数秒，<1s 毫秒 */
+export function fmtMs(ms?: number): string {
+  if (ms == null || ms < 0) return ''
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  const s = ms / 1000
+  return `${s >= 10 ? s.toFixed(0) : s.toFixed(1)} s`
+}

@@ -2139,6 +2139,7 @@ class MockTransport implements Transport {
     else if (/mermaid|流程图|架构图/.test(joined)) this.mermaidScript(sid, runId, /错误|坏/.test(joined)) // mock 钩子：输出 mermaid 图表（markdown 渲染验证）；含「错误/坏」→ 输出语法错误的图（错误回退验证）
     else if (/宽表/.test(joined)) this.wideTableScript(sid, runId) // mock 钩子：输出超宽表格（表格横滚验证；输入「宽表格」命中）
     else if (/长会话|长历史/.test(joined)) this.longHistoryScript(sid, runId) // mock 钩子：一次性注入大量历史消息（切会话滚动定位验证）
+    else if (/运行时样例|runtime demo|设计样例/i.test(joined)) this.runtimeDemoScript(sid, runId) // mock 钩子：v2 运行时设计全量样例（工具批处理 / 待办增量 / 压缩 / 子 agent 车道 / 产出）
     else this.normalScript(sid, runId)
   }
 
@@ -2937,6 +2938,264 @@ $$`
     }, sid)
     this.after(6420, () => this.emit({ event_type: 'agent_end', session_id: sid, run_id: `${runId}-2`, index: 1, content: '全量通过', finish_reason: 'end', model: this.model, timestamp: ts() }), sid)
     this.after(6460, () => this.finishRun(sid), sid)
+  }
+
+  // ---------- v2 运行时设计全量样例 -------------------------------------------------
+  // 与 design/agent-runtime/v2（「One real run, four ways」）同一段故事，一次跑完：
+  // 三条并行调用（批处理行 + 度量）→ 待办两版（增量竖栏）→ 9.1 s 的 bash（耗时档）
+  // → 带 diff 的 edit（变更行）→ 一次压缩（token 前后配比）→ 两个子 agent 并行（车道）
+  // → 带标题/表格/行内码/代码块的长回答 → AgentEnd 携带产出清单。
+  //
+  // 为什么单独一条脚本而不是改 normalScript：那条脚本的时序被「旧 run 折叠」「批准后
+  // 续跑」「ask_user 提问」三处依赖着，插事件会打乱它们的相对位置；这条只服务「看设计」。
+  private runtimeDemoScript(sid: string, runId: string) {
+    const S = (ms: number, fn: () => void) => this.after(ms, fn, sid)
+    const emitBg = (ms: number, ev: Record<string, unknown>) => this.afterBg(ms, () => this.emit({ session_id: sid, timestamp: ts(), ...ev }), sid)
+
+    // 第 1 段：三条并行检索（glob + grep ×2），批处理行的数据来源
+    this.llmTurn(0, {
+      requestId: `r-${runId}-1`, runId,
+      think: [
+        '先确认这条链路上有没有别的读取点：grep os.UserHomeDir 在会话恢复里只出现两次，其中一次在测试夹具。',
+        '夹具把 HOME 指到仓库内目录，连跑 5 次会挂 2 次 —— 并行时两个进程互相清空对方的状态。',
+      ],
+      stream: '先并行三件事：列出文档范围、找 `os.UserHomeDir` 的调用点、找 `t.Setenv` 的用法。',
+      endAt: 1100,
+      end: {
+        finish_reason: 'tool_call', usage: { Input: 2400, Output: 64, CacheRead: 2200, Reasoning: 18, TotalTokens: 2464 },
+        tool_calls: [
+          { id: 'd-1', name: 'glob', arguments: '{"pattern":"**/*.md"}' },
+          { id: 'd-2', name: 'grep', arguments: '{"pattern":"os.UserHomeDir","path":"session"}' },
+          { id: 'd-3', name: 'grep', arguments: '{"pattern":"t.Setenv","path":"session"}' },
+        ],
+      },
+    }, sid)
+    this.toolStart('d-1', 'glob', '{"pattern":"**/*.md"}', runId, 1120, sid)
+    this.toolStart('d-2', 'grep', '{"pattern":"os.UserHomeDir","path":"session"}', runId, 1128, sid)
+    this.toolStart('d-3', 'grep', '{"pattern":"t.Setenv","path":"session"}', runId, 1134, sid)
+    this.toolEnd('d-1', 'glob', Array.from({ length: 202 }, (_, i) => `docs/file-${i + 1}.md`).join('\n'), runId, 1397, sid)
+    this.toolEnd('d-2', 'grep', 'session/restore.go:142: home, _ := os.UserHomeDir()\nsession/restore_test.go:38: dir, _ := os.UserHomeDir()\nsession/sandbox.go:96: home, _ := os.UserHomeDir()', runId, 1430, sid)
+    this.toolEnd('d-3', 'grep', 'session/restore_test.go:31: t.Setenv("HOME", fixtureDir)\nsession/restore_test.go:57: t.Setenv("HOME", fixtureDir)', runId, 1440, sid)
+
+    // 第 2 段：待办第一版（三条）
+    this.llmTurn(1480, {
+      requestId: `r-${runId}-2`, runId,
+      think: ['三处读取点里只有测试夹具在改 HOME；先立三条待办。'],
+      stream: '先把这轮的活儿写下来：复现 → 收敛入口 → 补回归。',
+      endAt: 1900,
+      end: {
+        finish_reason: 'tool_call', usage: { Input: 3100, Output: 52, CacheRead: 2900, TotalTokens: 3152 },
+        tool_calls: [{ id: 'd-4', name: 'todo_write', arguments: '{"items":["复现 TestSessionRestore 偶发失败","把 HOME 解析收敛到单一入口","补一条连跑 5 次不挂的回归测试"]}' }],
+      },
+    }, sid)
+    this.toolStart('d-4', 'todo_write', '{"items":["复现 TestSessionRestore 偶发失败","把 HOME 解析收敛到单一入口","补一条连跑 5 次不挂的回归测试"]}', runId, 1920, sid)
+    this.toolEnd('d-4', 'todo_write', '[todo: 3 open, 0 done]', runId, 1960, sid, {
+      todos: [
+        { id: 't1', title: '复现 TestSessionRestore 偶发失败', done: false },
+        { id: 't2', title: '把 HOME 解析收敛到单一入口', done: false },
+        { id: 't3', title: '补一条连跑 5 次不挂的回归测试', done: false },
+      ],
+    })
+
+    // 第 3 段：读代码 → 跑测试（失败）
+    this.llmTurn(2000, {
+      requestId: `r-${runId}-3`, runId,
+      think: ['读 restore.go 的 118-164 行：路径解析与夹具都在这段。'],
+      stream: '读 `session/restore.go:118-164`，再跑一次那个偶发失败的用例。',
+      endAt: 2400,
+      end: {
+        finish_reason: 'tool_call', usage: { Input: 3600, Output: 44, CacheRead: 3400, TotalTokens: 3644 },
+        tool_calls: [
+          { id: 'd-5', name: 'read_file', arguments: '{"path":"session/restore.go","start_line":118,"end_line":164}' },
+          { id: 'd-6', name: 'bash', arguments: '{"command":"go test ./session -run TestSessionRestore -count=5"}' },
+        ],
+      },
+    }, sid)
+    this.toolStart('d-5', 'read_file', '{"path":"session/restore.go","start_line":118,"end_line":164}', runId, 2420, sid)
+    this.toolEnd('d-5', 'read_file', readResult('session/restore.go', 118, 164), runId, 2426, sid)
+    this.toolStart('d-6', 'bash', '{"command":"go test ./session -run TestSessionRestore -count=5"}', runId, 2430, sid)
+    this.toolEnd('d-6', 'bash', '--- FAIL: TestSessionRestore (0.00s)\n    restore_test.go:71: state file gone: /repo/fixture/home/.hai/state.json\nFAIL\ngithub.com/seven7628/hai-harness/session\t4.132s', runId, 11530, sid)
+
+    // 第 4 段：改夹具（带 diff）+ 待办第二版（勾掉一条、加一条、换顺序）
+    this.llmTurn(11600, {
+      requestId: `r-${runId}-4`, runId,
+      think: ['根因不在被测代码：夹具把 HOME 固定到仓库内目录，并行跑时互相清空。改成 t.TempDir()。'],
+      stream: '根因确认：夹具写死了仓库内的 `fixture/home`。改成 `t.TempDir()`，并把路径解析收敛到单一入口。',
+      endAt: 12200,
+      end: {
+        finish_reason: 'tool_call', usage: { Input: 4200, Output: 88, CacheRead: 3900, Reasoning: 40, TotalTokens: 4288 },
+        tool_calls: [
+          { id: 'd-7', name: 'edit_file', arguments: '{"path":"session/restore_test.go"}' },
+          { id: 'd-8', name: 'todo_update', arguments: '{"id":"t1","done":true}' },
+        ],
+      },
+    }, sid)
+    this.toolStart('d-7', 'edit_file', '{"path":"session/restore_test.go"}', runId, 12220, sid)
+    this.toolEnd('d-7', 'edit_file', 'updated session/restore_test.go', runId, 12342, sid, {
+      diff: {
+        path: 'session/restore_test.go', added: 8, removed: 5,
+        unified: '@@ -28,9 +28,12 @@\n func TestSessionRestore(t *testing.T) {\n-\tfixtureDir := filepath.Join("fixture", "home")\n-\tt.Setenv("HOME", fixtureDir)\n+\t// 每个测试自己的临时目录：并行跑不会互相清空状态文件\n+\thome := t.TempDir()\n+\tt.Setenv("HOME", home)\n@@ -52,6 +55,7 @@\n-\tif _, err := os.Stat(filepath.Join(fixtureDir, ".hai")); err != nil {\n+\tif _, err := os.Stat(filepath.Join(home, ".hai")); err != nil {',
+      },
+    })
+    this.toolStart('d-8', 'todo_update', '{"id":"t1","done":true}', runId, 12230, sid)
+    this.toolEnd('d-8', 'todo_update', '[todo: 2 open, 1 done]', runId, 12360, sid, {
+      todos: [
+        { id: 't1', title: '复现 TestSessionRestore 偶发失败', done: true },
+        { id: 't2', title: '把 HOME 解析收敛到单一入口', done: false },
+        { id: 't3', title: '补一条连跑 5 次不挂的回归测试', done: false },
+      ],
+    })
+
+    // 第 5 段：回归（这次通过）+ 一次上下文压缩（token 前后配比）
+    this.llmTurn(12400, {
+      requestId: `r-${runId}-5`, runId,
+      think: ['回归一次，同时这轮上下文已经到 42k，该压了。'],
+      stream: '跑回归。',
+      endAt: 12800,
+      end: {
+        finish_reason: 'tool_call', usage: { Input: 4400, Output: 30, CacheRead: 4100, TotalTokens: 4430 },
+        tool_calls: [{ id: 'd-9', name: 'bash', arguments: '{"command":"go test ./session -run TestSessionRestore -count=5"}' }],
+      },
+    }, sid)
+    this.toolStart('d-9', 'bash', '{"command":"go test ./session -run TestSessionRestore -count=5"}', runId, 12820, sid)
+    this.toolEnd('d-9', 'bash', 'ok  \tgithub.com/seven7628/hai-harness/session\t2.941s', runId, 15730, sid)
+
+    S(15800, () => this.emit({ event_type: 'compress_start', session_id: sid, before: 18, reason: 'automatic', run_id: runId, timestamp: ts() }))
+    S(17600, () =>
+      this.emit({
+        event_type: 'compress_end', session_id: sid, before: 18, after: 1, reason: 'automatic', run_id: runId,
+        ctx_tokens: 6800, ctx_tokens_before: 42100, model: 'deepseek-v4-flash',
+        summary:
+          '用户报告 TestSessionRestore 连跑 5 次挂 2 次。根因不在被测代码：夹具把 HOME 指向仓库内的 fixture 目录，并行跑时两个进程互相清空对方的状态。已把夹具改成 t.TempDir()，restore.go 的路径解析收敛为单一入口。未决：mock.ts 里那份硬编码路径是否一并删除。',
+        analysis:
+          '18 条里只有 4 条改变了结论：两次失败、一次 diff、一次 5 次跑。\n工具结果头要留（复现结论要用），grep 原始输出 4 条没有被再次引用过，可以丢。\n压成一段 summary 而不是 summary + 片段：下一轮要的是结论和未决项，不是旧原文。',
+        usage: { Input: 42100, Output: 900, CacheRead: 39000, OutputTokens: 900, TotalTokens: 43000 },
+        todos: [
+          { id: 't1', title: '复现 TestSessionRestore 偶发失败', done: true },
+          { id: 't2', title: '把 HOME 解析收敛到单一入口', done: true },
+          { id: 't3', title: '补一条连跑 5 次不挂的回归测试', done: false },
+        ],
+        timestamp: ts(),
+      }),
+    )
+
+    // 第 6 段：两个子 agent 并行（车道）。dispatch 的两条工具行 + 两条后台任务
+    this.llmTurn(17900, {
+      requestId: `r-${runId}-6`, runId,
+      think: ['剩下两件事彼此独立：跑一遍全量测试、审一遍这次 diff。派出去并行。'],
+      stream: '派两个子 agent 并行：一个跑全量测试，一个审这次 diff。',
+      endAt: 18400,
+      end: {
+        finish_reason: 'tool_call', usage: { Input: 7200, Output: 120, CacheRead: 6800, Reasoning: 30, TotalTokens: 7320 },
+        tool_calls: [
+          { id: 'd-10', name: 'agent_spawn', arguments: '{"task":"go test ./..."}' },
+          { id: 'd-11', name: 'agent_spawn', arguments: '{"task":"审查这次的 diff"}' },
+        ],
+      },
+    }, sid)
+    this.toolStart('d-10', 'agent_spawn', '{"task":"go test ./..."}', runId, 18420, sid)
+    this.toolStart('d-11', 'agent_spawn', '{"task":"审查这次的 diff"}', runId, 18426, sid)
+    this.toolEnd('d-10', 'agent_spawn', 'task a1 started (background)', runId, 18480, sid)
+    this.toolEnd('d-11', 'agent_spawn', 'task a2 started (background)', runId, 18490, sid)
+
+    emitBg(18500, { event_type: 'task_started', run_id: runId, task_id: 'a1', parent_run_id: runId })
+    emitBg(18510, { event_type: 'task_started', run_id: runId, task_id: 'a2', parent_run_id: runId })
+    emitBg(18520, { event_type: 'agent_start', run_id: `sub-${runId}-A`, parent_run_id: runId, depth: 1, content: 'run the full suite', name: 'sub-1' })
+    emitBg(18530, { event_type: 'agent_start', run_id: `sub-${runId}-B`, parent_run_id: runId, depth: 1, content: 'audit the diff', name: 'sub-2' })
+
+    // sub-1：先读一遍测试入口，再跑全量
+    this.llmTurn(18600, {
+      requestId: `r-${runId}-A1`, runId: `sub-${runId}-A`, stoppedOk: true,
+      think: ['先确认全量测试的入口脚本，再跑。'],
+      stream: '读 `Makefile` 的 test 目标，然后跑全量。',
+      endAt: 19400,
+      end: { finish_reason: 'tool_call', usage: { Input: 900, Output: 30, CacheRead: 820, TotalTokens: 930 }, tool_calls: [{ id: 'd-12', name: 'read_file', arguments: '{"path":"session/restore.go","start_line":1,"end_line":96}' }] },
+    }, sid)
+    this.toolStart('d-12', 'read_file', '{"path":"session/restore.go","start_line":1,"end_line":96}', `sub-${runId}-A`, 19420, sid, true)
+    this.toolEnd('d-12', 'read_file', readResult('session/restore.go', 1, 96), `sub-${runId}-A`, 19480, sid, undefined, true)
+    this.llmTurn(19600, {
+      requestId: `r-${runId}-A2`, runId: `sub-${runId}-A`, stoppedOk: true,
+      think: ['全量跑过了。'],
+      stream: '`go test ./...` 全部通过（12 个包）。',
+      endAt: 21400,
+      end: { finish_reason: 'stop', usage: { Input: 1100, Output: 60, CacheRead: 980, TotalTokens: 1160 } },
+    }, sid)
+    emitBg(21500, { event_type: 'agent_end', run_id: `sub-${runId}-A`, parent_run_id: runId, depth: 1, content: 'run the full suite', name: 'sub-1', finish_reason: 'end', model: this.model, duration_ms: 2980 })
+    emitBg(21600, { event_type: 'task_end', task_id: 'a1', run_id: runId, result: 'ok\ngithub.com/seven7628/hai-harness/session\t2.941s', usage: { Input: 2000, Output: 90, CacheRead: 1800, TotalTokens: 2090, Cost: { Input: 22, CacheRead: 18, Output: 30, Total: 70 } } })
+    emitBg(21700, { event_type: 'task_result_delivered', task_id: 'a1', result: 'ok', usage: { Input: 2000, Output: 90, CacheRead: 1800, TotalTokens: 2090, Cost: { Input: 22, CacheRead: 18, Output: 30, Total: 70 } } })
+
+    // sub-2：审 diff（更久，落定更晚）
+    this.llmTurn(18700, {
+      requestId: `r-${runId}-B1`, runId: `sub-${runId}-B`, stoppedOk: true,
+      think: ['逐一核对 diff 里的错误分支语义。'],
+      stream: '审查这次的 8 增 5 删…',
+      endAt: 20200,
+      end: { finish_reason: 'tool_call', usage: { Input: 1000, Output: 40, CacheRead: 900, TotalTokens: 1040 }, tool_calls: [{ id: 'd-13', name: 'read_file', arguments: '{"path":"auth_test.go","start_line":1,"end_line":80}' }] },
+    }, sid)
+    this.toolStart('d-13', 'read_file', '{"path":"auth_test.go","start_line":1,"end_line":80}', `sub-${runId}-B`, 20220, sid, true)
+    this.toolEnd('d-13', 'read_file', readResult('auth_test.go', 1, 80), `sub-${runId}-B`, 20280, sid, undefined, true)
+    this.llmTurn(20400, {
+      requestId: `r-${runId}-B2`, runId: `sub-${runId}-B`, stoppedOk: true,
+      think: ['夹具改动没有覆盖缺口，回归测试真的能拦住。'],
+      stream: '审查通过：夹具换 t.TempDir() 之后，连跑不再互相清空；回归用例覆盖了失败那一支。',
+      endAt: 22800,
+      end: { finish_reason: 'stop', usage: { Input: 1300, Output: 90, CacheRead: 1100, TotalTokens: 1390 } },
+    }, sid)
+    emitBg(22900, { event_type: 'agent_end', run_id: `sub-${runId}-B`, parent_run_id: runId, depth: 1, content: 'audit the diff', name: 'sub-2', finish_reason: 'end', model: this.model, duration_ms: 4370 })
+    emitBg(23000, { event_type: 'task_end', task_id: 'a2', run_id: runId, result: '审查通过：夹具与回归用例都到位', usage: { Input: 2300, Output: 130, CacheRead: 2000, TotalTokens: 2430, Cost: { Input: 26, CacheRead: 20, Output: 42, Total: 88 } } })
+    emitBg(23100, { event_type: 'task_result_delivered', task_id: 'a2', result: '审查通过：夹具与回归用例都到位', usage: { Input: 2300, Output: 130, CacheRead: 2000, TotalTokens: 2430, Cost: { Input: 26, CacheRead: 20, Output: 42, Total: 88 } } })
+
+    // 第 7 段：长回答（标题 / 列表 / 表格 / 行内码 / 代码块都到位）
+    this.llmTurn(23400, {
+      requestId: `r-${runId}-7`, runId,
+      think: ['两个子 agent 都回来了，写总结。'],
+      stream: `两条都回来了：\`go test ./...\` 全绿，diff 审查通过。
+
+## 根因
+
+失败不在被测代码。夹具把 \`HOME\` 指向仓库内的 \`fixture/home\`，而 \`-count=5\` 是并行跑的 —— 两个进程互相清空对方的 \`state.json\`，所以"偶发"。
+
+## 改了什么
+
+- \`restore_test.go\`：夹具改用 \`t.TempDir()\`，每个测试自己一份 HOME
+- \`restore.go\`：HOME 解析收敛到 \`homeDir()\` 一个入口，测试与运行期同源
+
+| 文件 | 变更 | 说明 |
+| --- | --- | --- |
+| session/restore_test.go | +8 −5 | 夹具改 t.TempDir() |
+| session/restore.go | +2 −2 | 路径解析收敛 |
+
+## 验证
+
+\`\`\`go
+func TestSessionRestoreParallel(t *testing.T) {
+\tt.Parallel()
+\thome := t.TempDir()
+\tt.Setenv("HOME", home)
+\tif err := Restore(); err != nil {
+\t\tt.Fatalf("restore: %v", err)
+\t}
+}
+\`\`\`
+
+连跑 5 次全绿（2.9 s）；全量 12 个包通过。
+
+未决：\`transport/mock.ts\` 里那份硬编码路径要不要一并删掉 —— 它只在 mock 里，删掉不影响真机，但会让演示页少一条路径。`,
+      endAt: 26800,
+      end: { finish_reason: 'stop', usage: { Input: 9200, Output: 520, CacheRead: 8600, Reasoning: 60, TotalTokens: 9720 } },
+    }, sid)
+
+    S(27000, () =>
+      this.emit({
+        event_type: 'agent_end', session_id: sid, run_id: runId, index: 3, content: '修好了', finish_reason: 'end', model: this.model, timestamp: ts(),
+        duration_ms: 27000,
+        artifacts: [
+          { name: 'restore_test.go', path: 'session/restore_test.go', kind: 'modified', added: 8, removed: 5, size: 8412, lines: 214, sha256: 'c02e5b9d' },
+          { name: 'restore.go', path: 'session/restore.go', kind: 'modified', added: 2, removed: 2, size: 11842, lines: 164, sha256: '9f3c1a77' },
+        ],
+      }),
+    )
+    S(27200, () => this.finishRun(sid))
   }
 
   // ---------- 长工具 promote 演示（docs/ASYNC_TOOLS_AND_PROMOTE.md）：bash sleep 30 → 用户「移到后台」→ 自动回传 ----------
