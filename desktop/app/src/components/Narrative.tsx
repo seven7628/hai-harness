@@ -979,7 +979,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             {head.t0 != null ? <span className="rt-t">{fmtTime(head.t0)}</span> : null}
           </div>
         ) : null}
-        {concise && work ? (
+        {/* 「Worked for 8.2 s」是**结算**，不是进度：运行中这一行只该是「正在做什么」，
+            汇总的时长与批次要到 AgentEnd 才成立 —— 与轮尾账同一时刻出现。 */}
+        {concise && work && !turn.running ? (
           <WorkFold
             stats={stats}
             running={turn.running}
