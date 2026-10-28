@@ -880,3 +880,52 @@ html[data-skin='runtime'] .rt-caret {
     opacity: 0;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   A6 · the answer's actions (ui.components.css:145-160, verbatim)
+   ------------------------------------------------------------------------ */
+
+html[data-skin='runtime'] .answer-acts {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 15px 0 0;
+  opacity: 0;
+  transform: translateY(3px);
+  transition:
+    opacity var(--t-base) var(--ease),
+    transform var(--t-base) var(--ease);
+}
+
+html[data-skin='runtime'] .answer-acts.ready {
+  opacity: 1;
+  transform: none;
+}
+
+html[data-skin='runtime'] .answer-acts .act {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  transition:
+    color var(--t-fast) var(--ease),
+    background-color var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .answer-acts .act svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.6;
+}
+
+html[data-skin='runtime'] .answer-acts .act:hover {
+  color: var(--ink);
+  background: var(--card-2);
+}
+
+html[data-skin='runtime'] .answer-acts .act:active {
+  transform: scale(0.9);
+}

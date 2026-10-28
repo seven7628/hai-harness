@@ -18,10 +18,11 @@ import { CompressionBlock, InlineCode, Thinking, ToolGroup } from './NarrativeBl
 // 任务卡外壳（子 agent 卡）：与右栏「任务」tab 的同类卡共用同一份实现，见 TaskCard.tsx
 import { AgentTaskCard } from './TaskCard'
 import HaiLogo from './HaiLogo'
-import { CheckCircleIcon, PaperclipIcon } from './icons'
+import { CheckCircleIcon, CopyIcon, PaperclipIcon } from './icons'
 import { fmtDuration, fmtRun, fmtClock, fmtTime, fmtUsd } from './ui'
 import { useClock } from '../lib/useNow'
 import { useSkin } from '../lib/useSkin'
+import { copyText } from '../lib/clipboard'
 import { ArtifactCard } from './ArtifactCard'
 import { UsageActivityMini } from './UsageStats'
 import { useT } from '../i18n'
@@ -138,6 +139,33 @@ export interface NarrativeSource {
   onLoadOlder?: () => void
   /** 空态覆盖（子会话没有消息时不该显示「开始新对话」引导） */
   empty?: ReactNode
+}
+
+// 回答下方的动作行（设计 .answer-acts / .act）：只放**能真的做**的。赞/踩/重试/分支
+// 在我们的运行时里没有接口，画出来就是假按钮 —— 空位比假功能诚实（PORT-PLAN §11.13 B）。
+function AnswerActions({ text }: { text: string }) {
+  const t = useT()
+  const [done, setDone] = useState(false)
+  useEffect(() => {
+    if (!done) return
+    const timer = window.setTimeout(() => setDone(false), 1100)
+    return () => window.clearTimeout(timer)
+  }, [done])
+  return (
+    <div className="answer-acts ready">
+      <button
+        className="act"
+        type="button"
+        title={done ? t('md.copied') : t('md.copy')}
+        aria-label={t('md.copyAria')}
+        onClick={() => {
+          void copyText(text).then((ok) => ok && setDone(true))
+        }}
+      >
+        <CopyIcon size={14} />
+      </button>
+    </div>
+  )
 }
 
 export default function Narrative({ viewSid, source, header, footer, density: densityProp }: {
@@ -1001,6 +1029,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           </div>
         ) : null}
         {body.length ? <div className="rt-turn-ans">{body}</div> : null}
+        {skin === 'runtime' && turn.answer?.text && !turn.running ? (
+          <AnswerActions text={turn.answer.text} />
+        ) : null}
         {/* 轮尾账是**结算**，不是进度：AgentEnd 之前这一轮的用量还在长，
             把「11 calls · 16k tokens」边跑边刷出来就是在报一个还没定的数。 */}
         {usage.matched && !turn.running ? (
