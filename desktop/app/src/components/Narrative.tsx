@@ -4,6 +4,10 @@ import { useAppStore, genMsOf } from '../store/useAppStore'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
+import { selectTurns, turnStats, turnUsage } from './runtime/turn/selectTurns'
+import { WorkFold } from './runtime/turn/WorkFold'
+import { Ledger } from './runtime/turn/Ledger'
+import './runtime/turn/turn.css'
 // 过程块的渲染原语（思考 / 工具行 / 计划卡 / 压缩块 / 行内码）与子 agent 转录共用一份
 // —— 见 NarrativeBlocks.tsx 的文件头（两处宿主、一套 DOM、一套皮肤）。
 import { CompressionBlock, InlineCode, Thinking, ToolGroup } from './NarrativeBlocks'
@@ -123,6 +127,11 @@ function RetryProgress({ ts, delayMs, retrying, startedAt, costUsd }: { ts?: num
 // 一个门上 —— 中断、run 级失败、达轮数上限截断这三种收尾都没有 llm_end（durMs 的唯一
 // 来源），于是 durMs 缺失把整行藏掉，连已经挂在块上的 Agent 总耗时、已经拿到的 usage
 // 一起消失，用户读作「AgentEnd 时前端没展示耗时信息」。现在缺哪段省哪段，取不到就不显示。
+/* 简洁档收起时留在正文里的，是「读了什么」，不是「怎么做的」。工具、子智能体、
+   后台任务结果都属于工作过程，收进折叠行；system / error / divider / compression
+   是信号不是工作，始终可见。 */
+const FOLDED = new Set<MsgBlock['kind']>(['tool', 'agent', 'async_task', 'task_result', 'task_delivery'])
+
 const AssistantTurnMeta = memo(function AssistantTurnMeta({ b }: { b: Extract<MsgBlock, { kind: 'assistant' }> }) {
   const t = useT()
   // 输出速度 = outputTokens / 生成窗口。分母口径见 store 的 genMsOf：
@@ -173,7 +182,7 @@ export interface NarrativeSource {
   empty?: ReactNode
 }
 
-export default function Narrative({ viewSid, source, header, footer }: {
+export default function Narrative({ viewSid, source, header, footer, density = 'concise' }: {
   viewSid?: string
   source?: NarrativeSource
   /** 首行插槽（子会话的「返回主会话 + 身份/用量」）。放在容器**内部**：
@@ -182,6 +191,10 @@ export default function Narrative({ viewSid, source, header, footer }: {
   /** 末行插槽（子会话的任务结果）。用插槽而不是合成块：主会话里这份内容渲染在
    *  子智能体卡内（TaskResultInline），两处必须是**同一个组件**才谈得上复用。 */
   footer?: ReactNode
+  /** 详细 / 简洁。详细 = 旧观感（工作块全展开、无折叠行）；简洁 = 一轮的工作
+   *  收进一行，跑着的时候敞开、跑完收起，点开读全过程。默认简洁 —— v2 画布的默认
+   *  档就是 concise，移植过来的东西不该以另一副样子出现。 */
+  density?: 'concise' | 'detailed'
 } = {}) {
   const t = useT()
   // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话。
@@ -189,6 +202,9 @@ export default function Narrative({ viewSid, source, header, footer }: {
   const storeBlocks = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocks ?? [] : s.blocks))
   const blocks = source ? source.blocks : storeBlocks
   const persona = useAppStore((s) => s.persona)
+  const turnMetrics = useAppStore((s) => (viewSid ? s.views[viewSid]?.turns : s.turns))
+  // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
+  const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const ref = useRef<HTMLDivElement | null>(null)
   // nodeGen：滚动容器的「节点世代」。
@@ -939,20 +955,88 @@ export default function Narrative({ viewSid, source, header, footer }: {
   // 因此流式追加新块不会挤掉前面已渲染的内容（见上方注释）。
   const visibleBlocks = revealStart <= 0 ? blocks : blocks.slice(revealStart)
 
-  // 连续工具块归组（并行工具上下排列），其余原样
-  const items: (ReactElement | null)[] = []
-  for (let i = 0; i < visibleBlocks.length; i++) {
-    const b = visibleBlocks[i]
-    if (b.kind === 'tool') {
-      const group: Extract<MsgBlock, { kind: 'tool' }>[] = [b]
-      while (i + 1 < visibleBlocks.length && visibleBlocks[i + 1].kind === 'tool') {
-        group.push(visibleBlocks[i + 1] as Extract<MsgBlock, { kind: 'tool' }>)
-        i++
+  // 连续工具块归组（并行工具上下排列），其余原样。抽出来是因为它现在要按「轮」
+  // 跑一遍，而不是对整条转录跑一遍。
+  const groupBlocks = (list: MsgBlock[]): (ReactElement | null)[] => {
+    const out: (ReactElement | null)[] = []
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i]
+      if (b.kind === 'tool') {
+        const group: Extract<MsgBlock, { kind: 'tool' }>[] = [b]
+        while (i + 1 < list.length && list[i + 1].kind === 'tool') {
+          group.push(list[i + 1] as Extract<MsgBlock, { kind: 'tool' }>)
+          i++
+        }
+        out.push(<ToolGroup key={group[0].id} tools={group} liveTodoId={liveTodoId} />)
+      } else {
+        out.push(renderBlock(b))
       }
-      items.push(<ToolGroup key={group[0].id} tools={group} liveTodoId={liveTodoId} />)
-    } else {
-      items.push(renderBlock(b))
     }
+    return out
+  }
+
+  /* 一轮 = 一条 user 消息到下一条之间。store 里没有这个对象（见 PORT-PLAN §5），
+     所以这里派生：轮尾账要 usage、轮首要有折叠行，两者都靠 selectTurns 的归属。
+
+     折叠的**只有工作过程**，不含回答 —— v2 里折叠行包的是 groups（工具/子智能体），
+     答案在它外面。所以简洁档收起时渲染的是「非工作块」，展开才回到原顺序。 */
+  const turns = selectTurns(visibleBlocks)
+  const items: (ReactElement | null)[] = []
+  for (const turn of turns) {
+    if (turn.user) items.push(renderBlock(turn.user))
+    const stats = turnStats(turn)
+    const usage = turnUsage(turn, turnMetrics)
+    const concise = density === 'concise'
+    // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
+    // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
+    const open = !concise || (openTurns[turn.key] ?? turn.running)
+    const work = stats.calls + stats.agents + stats.compressions > 0
+    const isWork = (b: MsgBlock) => FOLDED.has(b.kind)
+    /* 简洁档：收起时正文只剩**结论**（这一轮最后一个有正文的 assistant），中间那些
+       「我看看 X」的旁白、思考、工具全在工作过程里。展开才按原顺序读全过程。
+       详细档：原顺序整段展开，不折叠（v2 里详细档根本没有折叠行）。 */
+    const shut = concise && !open
+    const workItems = concise ? groupBlocks(turn.items.filter(isWork)) : []
+    const body = groupBlocks(shut ? (turn.answer ? [turn.answer] : []) : turn.items)
+    if (!body.length && !workItems.length && !work) continue
+    items.push(
+      <div
+        className="rt-turn"
+        data-density={density}
+        data-open={open ? '1' : undefined}
+        data-foot={usage.matched ? '1' : undefined}
+        key={turn.key}
+      >
+        {concise && work ? (
+          <WorkFold
+            stats={stats}
+            running={turn.running}
+            open={open}
+            onToggle={() => setOpenTurns((m) => ({ ...m, [turn.key]: !open }))}
+          />
+        ) : null}
+        {workItems.length ? (
+          <div className="rt-turn-body">
+            <div className="rt-turn-in">{workItems}</div>
+          </div>
+        ) : null}
+        {body.length ? <div className="rt-turn-ans">{body}</div> : null}
+        {usage.matched ? (
+          <div className="rt-turn-foot">
+            <Ledger
+              calls={stats.calls}
+              tokens={usage.total}
+              cacheRead={usage.cacheRead}
+              input={usage.input}
+              wallMs={stats.workedMs}
+              ttftMs={usage.ttftMs}
+              llmMs={usage.llmMs}
+              outputTokens={usage.output}
+            />
+          </div>
+        ) : null}
+      </div>,
+    )
   }
 
   return (

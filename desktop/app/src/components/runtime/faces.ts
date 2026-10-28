@@ -8,7 +8,6 @@ interface Eyes { open: string; wide: string; shut: string }
 
 const MK_SEQ = { n: 0 };
 const P = (d: string) => '<path d="' + d + '"/>';
-const S = (d: string) => '<path d="' + d + '" fill="none" stroke="#fff" stroke-width="1.1" stroke-linecap="round"/>';
 const O = (x: number, y: number, w: number, h: number, r: number) => '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="' + r + '"/>';
 const C = (cx: number, cy: number, r: number, paint?: string) => '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '"' + (paint ? ' fill="' + paint + '"' : '') + '/>';
 

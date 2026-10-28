@@ -1581,7 +1581,10 @@ body.is-electron .left.collapsed .rail .rbtn {
     transform: none;
   }
 }
-.narrative-enter > * {
+/* 轮盒（.rt-turn）把块包了一层，所以逐条渐入要同时命中盒内那一层 —— 否则流式
+   追加的新块不再渐入，只有整个轮盒会动。 */
+.narrative-enter > *,
+.narrative-enter .rt-turn-in > * {
   animation: narrativeEnter 320ms var(--ease) both;
   /* ## 绝不能在这里关掉 content-visibility（2026-10-21 修 bug）
    
@@ -1620,7 +1623,8 @@ body.is-electron .left.collapsed .rail .rbtn {
 
 /* 系统「减少动态效果」：直接显示，不做位移淡入 */
 @media (prefers-reduced-motion: reduce) {
-  .narrative-enter > * {
+  .narrative-enter > *,
+  .narrative-enter .rt-turn-in > * {
     animation: none;
   }
 }

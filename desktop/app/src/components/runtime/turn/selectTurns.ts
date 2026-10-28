@@ -91,7 +91,9 @@ export function selectTurns(blocks: MsgBlock[]): Turn[] {
     if (!cur) {
       // a session can start mid-run (restored transcript): the first blocks have
       // no user message of their own, and they still need a home
-      cur = emptyTurn(turns.length, 't0-' + i)
+      // key 用块 id 而不是下标：分页「加载更早」会改变可见切片，下标一变轮盒
+      // 就要重挂，已展开的代码块/工具详情会丢状态。
+      cur = emptyTurn(turns.length, 't0-' + b.id)
       turns.push(cur)
     }
     push(cur, b)

@@ -28,11 +28,16 @@ export function Ledger({
   const [open, setOpen] = useState(false)
   const fact = (v: string | number, k: string) => (<><b>{v}</b> {k}</>)
   const hit = input ? ((cacheRead / input) * 100).toFixed(1) + '%' : '\u2014'
+  // a short turn is not "0.01M tokens": scale the unit, never print noise
+  const tok = tokens >= 1e6 ? (tokens / 1e6).toFixed(2) + 'M'
+    : tokens >= 1e3 ? Math.round(tokens / 1e3) + 'k'
+    : String(Math.round(tokens))
   const tps = llmMs && outputTokens ? Math.round(outputTokens / (llmMs / 1000)) : 0
   const stamp = (k: string, v: string) => (<><span className="rt-lg-k">{k}</span> <b>{v}</b></>)
 
   const more: React.ReactNode[] = []
-  if (ttftMs) more.push(stamp('TTFT', (ttftMs / 1000).toFixed(1) + ' s'))
+  // under 50ms the number is measurement noise, not a first token
+  if (ttftMs && ttftMs >= 50) more.push(stamp('TTFT', (ttftMs / 1000).toFixed(ttftMs < 1000 ? 2 : 1) + ' s'))
   if (llmMs) more.push(stamp('LLM', (llmMs / 1000).toFixed(1) + ' s'))
   if (tps) more.push(fact(tps, 'tok/s'))
 
@@ -45,7 +50,7 @@ export function Ledger({
       onClick={() => more.length && setOpen((v) => !v)}
     >
       {fact(calls, calls === 1 ? 'call' : 'calls')}
-      {' \u00b7 '}{fact((tokens / 1e6).toFixed(2) + 'M', 'tokens')}
+      {' \u00b7 '}{fact(tok, 'tokens')}
       {' \u00b7 '}{fact(hit, 'cache')}
       {' \u00b7 '}{fact(Math.round(wallMs / 1000), 's turn')}
       {more.length ? (

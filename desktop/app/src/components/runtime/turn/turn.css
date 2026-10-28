@@ -1,0 +1,61 @@
+/* A turn is a box, not a decoration: it gives the fold line, the work and the
+   ledger a common owner. Without it the fold line of one turn visually belongs
+   to the answer of the previous one.
+
+   Nothing here changes the blocks inside — the .msg margin-bottom that already
+   separates them keeps doing that job, so the box adds no spacing of its own
+   beyond the two rows it introduces. */
+
+.rt-turn {
+  display: block;
+}
+
+/* The fold line sits above the work it describes, tight. */
+.rt-turn > .rt-act {
+  margin-bottom: 10px;
+}
+
+/* Collapse without measuring: a 1fr → 0fr grid row animates a height we never
+   have to compute, and the inner box keeps the body from painting outside. */
+.rt-turn-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--t-med, 220ms) var(--ease, ease);
+}
+
+.rt-turn-in {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rt-turn[data-density='concise']:not([data-open]) > .rt-turn-body {
+  grid-template-rows: 0fr;
+}
+
+/* The last block inside a turn already carries a 22px bottom margin; the ledger
+   is the turn's real last line, so it takes that margin instead of doubling it. */
+.rt-turn-in > *:last-child {
+  margin-bottom: 0;
+}
+
+.rt-turn-foot {
+  margin-top: 10px;
+  margin-bottom: 22px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rt-turn-body {
+    transition: none;
+  }
+}
+
+/* 轮尾账接手了旧指标行（TTFT / LLM / 速度）说的同一件事 —— 两者并存就是每条回答
+   底下两行时间。只在账已渲染的轮里隐藏旧行：无用量指标的轮仍靠它显示耗时。 */
+.rt-turn[data-foot] .assistant-turn-meta {
+  display: none;
+}
+
+/* 回答不参与折叠：折叠的是它前面的工作过程，不是它。 */
+.rt-turn-ans > *:last-child {
+  margin-bottom: 0;
+}
