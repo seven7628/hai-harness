@@ -75,6 +75,9 @@ func TestSubagentLoopsShareHostRegistryForCompressThinking(t *testing.T) {
 // 未配置 settings 时子 loop 拿到默认 codeAgentCompressThreshold（设置面板那个滑杆
 // 在子 loop 上的落点；默认值的钉住见装配断言）。
 func TestSubagentCompressThresholdDefault(t *testing.T) {
+	// 「默认值」只有在封闭 HOME 下才是默认值：读真实 ~/.go-code/settings.json 时
+	// 用户滑杆上的任何数都会顶掉默认（本机 0.4 → 断言红，但不是代码回归）。
+	t.Setenv("HOME", t.TempDir())
 	pc := &providerConfig{
 		active:    "opencode",
 		models:    map[string]map[string]int64{"opencode": {"m": 1000000}},
