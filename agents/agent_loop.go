@@ -2212,6 +2212,9 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 
 	// before 用原上下文长度（不含注入串——注入串不持久化，事件语义对齐压缩产物）
 	before := len(ac.Messages)
+	// 压缩前的上下文 token 估算：与 CompressEnd.CtxTokens 同一口径（请求组装口径），
+	// 两者成对才构成"压缩把上下文从多少压到多少"。必须在 Compact 替换消息**之前**取。
+	beforeTokens := a.RequestTokens(ac.ctx, ac.Messages, ac.Mode)
 	reason := "automatic"
 	if forced {
 		reason = "manual"
@@ -2241,11 +2244,13 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 			// 未变上下文大小（请求组装口径：含工具/MCP schema 与系统提示词，
 			// 与 ctx 分区面板同源 —— 只算消息会漏掉几千 token 的前缀）
 			CtxTokens: a.RequestTokens(ac.ctx, ac.Messages, ac.Mode),
-			Usage:     failUsage,
-			Error:     err.Error(),
-			Todos:     ac.todoSnapshot(),
-			Timestamp: time.Now(),
-			EventType: events.CompressEndType,
+			// 失败降级：上下文未变，前后相同（前端据此不画配比条）
+			CtxTokensBefore: beforeTokens,
+			Usage:           failUsage,
+			Error:           err.Error(),
+			Todos:           ac.todoSnapshot(),
+			Timestamp:       time.Now(),
+			EventType:       events.CompressEndType,
 		})
 		return
 	}
@@ -2297,15 +2302,16 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 		Reason: reason,
 		RunId:  ac.RunId,
 		// 压后有效上下文大小（前端 ctx 环数据源；请求组装口径，含前缀 —— 见 RequestTokens）
-		CtxTokens: a.RequestTokens(ac.ctx, ac.Messages, ac.Mode),
-		Model:     result.Model,
-		Summary:   result.Summary,
-		Usage:     &evUsage,
-		Warnings:  result.Warnings,
-		Analysis:  result.Analysis, // O1/G7：压缩器决策过程留档（仅观测）
-		Todos:     ac.todoSnapshot(),
-		Timestamp: time.Now(),
-		EventType: events.CompressEndType,
+		CtxTokens:       a.RequestTokens(ac.ctx, ac.Messages, ac.Mode),
+		CtxTokensBefore: beforeTokens,
+		Model:           result.Model,
+		Summary:         result.Summary,
+		Usage:           &evUsage,
+		Warnings:        result.Warnings,
+		Analysis:        result.Analysis, // O1/G7：压缩器决策过程留档（仅观测）
+		Todos:           ac.todoSnapshot(),
+		Timestamp:       time.Now(),
+		EventType:       events.CompressEndType,
 	})
 }
 

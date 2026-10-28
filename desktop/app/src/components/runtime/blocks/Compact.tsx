@@ -21,6 +21,10 @@ import './compact.css'
    cut — a single number cannot make a ratio. So the bar keeps the unit it can
    be honest in, and the tokens appear as the fact they are ("ctx 6.8k"). */
 
+/* 设计里的记法：42.1k / 6.8k / 1.09M —— 一位小数，单位随量级走 */
+const tokShort = (n: number): string =>
+  n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n))
+
 const CHECK =
   'M2.5 6.3l2.3 2.3L9.5 3.7'
 const CHEV = 'M4.2 2.6L8.6 6.8l-4.4 4.2'
@@ -35,15 +39,32 @@ export const Compact = memo(function Compact({ b }: { b: CompressionInfo }) {
 
   const before = Math.max(0, b.before)
   const after = Math.max(0, b.after)
-  const keepPct = before ? Math.min(100, (after / before) * 100) : 0
-  const saved = before ? Math.max(0, 100 - Math.round(keepPct)) : 0
+  /* 配比的第一口径是 token（设计里 42.1k → 6.8k），因为"18 条 → 1 条"读者没有体感。
+     这一对来自 CompressEnd.CtxTokens/ctx_tokens_before（同一请求组装口径）；拿不到
+     才退回消息数 —— 两个数都缺时干脆不画配比（见下方 cut）。 */
+  const tokIn = b.ctxTokensBefore && b.ctxTokensBefore > 0 ? b.ctxTokensBefore : 0
+  const tokOut = b.ctxTokens && b.ctxTokens > 0 ? b.ctxTokens : 0
+  const byToken = tokIn > 0 && tokOut > 0 && tokOut < tokIn
+  const keepPct = byToken
+    ? Math.min(100, (tokOut / tokIn) * 100)
+    : before
+      ? Math.min(100, (after / before) * 100)
+      : 0
+  const saved = keepPct || byToken ? Math.max(0, 100 - Math.round(keepPct)) : 0
   const dur = b.durMs != null ? fmtDuration(b.durMs) : null
   // 失败/中止都没有真的切下去（after == before）：显示「−0%」是一句假话，
   // 所以配比只在成功落地时画
   const cut = state === 'done' && before > 0
   // the meta reads left to right as: what the context is now · how long it took
   const meta: string[] = []
-  if (!active && b.ctxTokens != null && b.ctxTokens > 0) meta.push(t('compact.ctx').replace('{n}', fmtTokens(b.ctxTokens)))
+  if (!active) {
+    if (byToken) {
+      // the shape the canvas uses: 42.1k → 6.8k
+      meta.push(tokShort(tokIn) + ' \u2192 ' + tokShort(tokOut))
+    } else if (b.ctxTokens != null && b.ctxTokens > 0) {
+      meta.push(t('compact.ctx').replace('{n}', fmtTokens(b.ctxTokens)))
+    }
+  }
   if (dur) meta.push(dur)
 
   const label = active
@@ -98,7 +119,9 @@ export const Compact = memo(function Compact({ b }: { b: CompressionInfo }) {
           <span
             className="rt-cp-ratio"
             role="img"
-            aria-label={t('compact.keptOf').replace('{kept}', String(after)).replace('{all}', String(before))}
+            aria-label={t('compact.keptOf')
+              .replace('{kept}', byToken ? tokShort(tokOut) : String(after))
+              .replace('{all}', byToken ? tokShort(tokIn) : String(before))}
           >
             <i style={{ width: keepPct.toFixed(1) + '%' }} />
           </span>
@@ -157,16 +180,18 @@ export const Compact = memo(function Compact({ b }: { b: CompressionInfo }) {
                     <div
                       className="rt-cp-bar"
                       role="img"
-                      aria-label={t('compact.keptOf').replace('{kept}', String(after)).replace('{all}', String(before))}
+                      aria-label={t('compact.keptOf')
+              .replace('{kept}', byToken ? tokShort(tokOut) : String(after))
+              .replace('{all}', byToken ? tokShort(tokIn) : String(before))}
                     >
                       <i className="keep" style={{ width: keepPct.toFixed(1) + '%' }} />
                     </div>
                     <div className="rt-cp-legend">
                       <span className="l keep">
-                        {t('compact.kept')} <b>{after}</b>
+                        {t('compact.kept')} <b>{byToken ? tokShort(tokOut) : after}</b>
                       </span>
                       <span className="l drop">
-                        {t('compact.dropped')} <b>{before - after}</b>
+                        {t('compact.dropped')} <b>{byToken ? tokShort(tokIn - tokOut) : before - after}</b>
                       </span>
                       <span>{t('compact.saved').replace('{n}', String(saved))}</span>
                     </div>

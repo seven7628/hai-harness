@@ -36,6 +36,14 @@ type CompressEnd struct {
 
 	// CtxTokens 压缩后有效上下文 token 估算（>0；失败降级时 = 压前大小）。
 	CtxTokens int64 `json:"ctx_tokens,omitempty"`
+	// CtxTokensBefore 压缩**前**有效上下文 token 估算（与 CtxTokens 同一口径：
+	// 请求组装口径，含工具/MCP schema 与系统提示词）。
+	//
+	// 为什么要有：Before/After 是**消息数**，读者对"18 条 → 1 条"没有体感；
+	// 只有这一对（before → after 的 token）才能回答"这轮省了多少上下文"。
+	// 前端据此画压缩配比条与 `42.1k → 6.8k · −84%` 这行文案（见 v2 设计的 Compact）。
+	// 失败降级时与 CtxTokens 相等（上下文未变）。
+	CtxTokensBefore int64 `json:"ctx_tokens_before,omitempty"`
 
 	Model   string      `json:"model,omitempty"`   // 生成摘要的模型
 	Summary string      `json:"summary,omitempty"` // 压缩后展示给用户的摘要正文

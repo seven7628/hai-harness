@@ -167,15 +167,18 @@ type Block struct {
 	DeliveredToMain bool   `json:"delivered_to_main,omitempty"`
 
 	// compression
-	Before    int      `json:"before,omitempty"`
-	After     int      `json:"after,omitempty"`
-	Reason    string   `json:"reason,omitempty"`
-	Summary   string   `json:"summary,omitempty"`
-	CtxTokens int64    `json:"ctx_tokens,omitempty"`
-	Error     string   `json:"error,omitempty"`
-	Aborted   bool     `json:"aborted,omitempty"`
-	Warnings  []string `json:"warnings,omitempty"`
-	Analysis  string   `json:"analysis,omitempty"` // 压缩器 <analysis> 块留档（O1/G7，仅观测）
+	Before    int    `json:"before,omitempty"`
+	After     int    `json:"after,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	CtxTokens int64  `json:"ctx_tokens,omitempty"`
+	// CtxTokensBefore 压缩前上下文 token（与 CtxTokens 成对）：前端画配比条与
+	// `42.1k → 6.8k` 文案的唯一来源；Before/After 是消息数，不可替代。
+	CtxTokensBefore int64    `json:"ctx_tokens_before,omitempty"`
+	Error           string   `json:"error,omitempty"`
+	Aborted         bool     `json:"aborted,omitempty"`
+	Warnings        []string `json:"warnings,omitempty"`
+	Analysis        string   `json:"analysis,omitempty"` // 压缩器 <analysis> 块留档（O1/G7，仅观测）
 
 	// artifacts（本轮产出汇总，AgentEnd 携带）：宿主渲染「本次产出」卡片。
 	// 独立块而非挂 assistant —— assistant 块在部分运行里不存在（纯工具轮后 abort），
@@ -273,12 +276,14 @@ type AgentItem struct {
 	AgentDurMs         int64 `json:"agent_dur_ms,omitempty"` // 整次运行的耗时（落在最后一条文本项）
 
 	// compression item
-	Before    int    `json:"before,omitempty"`
-	After     int    `json:"after,omitempty"`
-	CtxTokens int64  `json:"ctx_tokens,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Summary   string `json:"summary,omitempty"`
+	Before    int   `json:"before,omitempty"`
+	After     int   `json:"after,omitempty"`
+	CtxTokens int64 `json:"ctx_tokens,omitempty"`
+	// CtxTokensBefore 压缩前上下文 token（与 CtxTokens 成对；子 agent 的压缩同样带）
+	CtxTokensBefore int64  `json:"ctx_tokens_before,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Model           string `json:"model,omitempty"`
+	Summary         string `json:"summary,omitempty"`
 	// Usage 本项用量：compression item = 该次压缩调用；tool item = 该次调用
 	// （仅子 agent 类工具非零）。含成本（CostUSD，USD）。
 	Usage    *Usage `json:"usage,omitempty"`
@@ -2669,7 +2674,7 @@ func (r *ViewReducer) applyCompressEndLocked(e *events.CompressEnd, meta EventMe
 			b.Usage.CostUSD += compCost
 			b.Items = upsertAgentCompressionItem(b.Items, AgentItem{
 				Kind: agentItemCompression, Before: e.Before, After: e.After,
-				CtxTokens: e.CtxTokens, Reason: e.Reason, Model: e.Model,
+				CtxTokens: e.CtxTokens, CtxTokensBefore: e.CtxTokensBefore, Reason: e.Reason, Model: e.Model,
 				Summary: e.Summary, Usage: taskUsagePtr(e.Usage), Error: e.Error,
 				Aborted: aborted, Active: false, DurMs: durMs, Analysis: e.Analysis,
 			})
@@ -2697,7 +2702,7 @@ func (r *ViewReducer) applyCompressEndLocked(e *events.CompressEnd, meta EventMe
 	blk := Block{
 		Kind: blockKindCompression, ID: r.nextBlockID(),
 		Before: e.Before, After: e.After, Reason: e.Reason, RunID: e.RunId,
-		CtxTokens: e.CtxTokens, Model: e.Model, Summary: e.Summary,
+		CtxTokens: e.CtxTokens, CtxTokensBefore: e.CtxTokensBefore, Model: e.Model, Summary: e.Summary,
 		Error: e.Error, Aborted: aborted, DurMs: durMs, Warnings: append([]string{}, e.Warnings...),
 		Analysis: e.Analysis,
 	}

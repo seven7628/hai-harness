@@ -1268,7 +1268,7 @@ class MockTransport implements Transport {
           // 静态前缀：系统提示词/技能/工具 schema），故仍高于静态合计 → 面板不 degraded。
           this.ctxTokens.set(sid, 268)
           this.ctxEstimated.set(sid, true)
-          this.emit({ event_type: 'compress_end', session_id: sid, before: 45000, after: 21000, ctx_tokens: 268 })
+          this.emit({ event_type: 'compress_end', session_id: sid, before: 45000, after: 21000, ctx_tokens: 268, ctx_tokens_before: 3400 })
         }, sid)
         break
       }
@@ -1681,7 +1681,7 @@ class MockTransport implements Transport {
           this.respond(cmd, {})
           this.ctxTokens.set(sid, 244) // 压缩后锚点同步（估算口径：含静态前缀）
           this.ctxEstimated.set(sid, true)
-          this.emit({ event_type: 'compress_end', session_id: sid, before: 12, after: 3, ctx_tokens: 244, timestamp: ts() })
+          this.emit({ event_type: 'compress_end', session_id: sid, before: 12, after: 3, ctx_tokens: 244, ctx_tokens_before: 6800, timestamp: ts() })
         } else if (raw === 'clear') {
           this.respond(cmd, {})
           this.emit({ event_type: 'command_result', session_id: sid, name: 'clear', result: 'context cleared', timestamp: ts() })

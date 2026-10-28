@@ -532,6 +532,10 @@ export interface CompressionInfo {
   before: number
   after: number
   ctxTokens?: number
+  /** 压缩**前**上下文 token（与 ctxTokens 成对，同一请求组装口径）。
+   *  before/after 是消息数，读者没有体感；这一对才回答"省了多少上下文"。
+   *  失败降级时两者相等（上下文未变）。 */
+  ctxTokensBefore?: number
   reason?: string
   model?: string
   summary?: string
@@ -755,7 +759,7 @@ export type AgentItem =
   // user 子运行上下文里的一条用户/模型消息（来源见 events.AgentUserMessage）。
   // 它是**转录的一部分**（子会话里能看到「我对它说了什么」），不是任务结果。
   | { kind: 'user'; text: string; startedAt?: number; ts?: number }
-  | { kind: 'compression'; before: number; after: number; ctxTokens?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
+  | { kind: 'compression'; before: number; after: number; ctxTokens?: number; ctxTokensBefore?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
 
 // PriceRefreshSummary refresh_prices 结果摘要（UI toast 用；字段对齐 bridge 响应）
 export interface PriceRefreshSummary {
@@ -5678,6 +5682,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           const before = Number(raw.before ?? (activeItem?.kind === 'compression' ? activeItem.before : 0))
           const after = Number(raw.after ?? before)
           const ctxTokens = typeof raw.ctx_tokens === 'number' ? raw.ctx_tokens : undefined
+          const ctxTokensBefore = typeof raw.ctx_tokens_before === 'number' ? raw.ctx_tokens_before : undefined
           // 压缩调用用量（含成本）：与任务卡/工具行同一投影（taskUsageFromEvent）
           const usage = taskUsageFromEvent(raw.usage as RawUsage | undefined)
           const item: AgentCompressionItem = {
@@ -5685,6 +5690,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             before,
             after,
             ctxTokens,
+            ctxTokensBefore,
             reason: raw.reason ? String(raw.reason) : undefined,
             model: raw.model ? String(raw.model) : undefined,
             summary: raw.summary ? String(raw.summary) : undefined,
@@ -5728,6 +5734,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             before: Number(raw.before ?? 0),
             after: Number(raw.after ?? 0),
             ctxTokens,
+            ctxTokensBefore: typeof raw.ctx_tokens_before === 'number' ? raw.ctx_tokens_before : undefined,
             reason: raw.reason ? String(raw.reason) : undefined,
             model: raw.model ? String(raw.model) : undefined,
             summary: raw.summary ? String(raw.summary) : undefined,

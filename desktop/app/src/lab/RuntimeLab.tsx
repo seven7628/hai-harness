@@ -40,6 +40,7 @@ const COMPACTS: { name: string; b: Extract<MsgBlock, { kind: 'compression' }> }[
     name: 'done',
     b: C({
       ctxTokens: 6800,
+      ctxTokensBefore: 42100,
       durMs: 1800,
       reason: 'automatic',
       model: 'deepseek-v4-flash',
