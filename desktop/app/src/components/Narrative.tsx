@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf } from '../store/useAppStore'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
@@ -939,7 +940,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         out.push(renderBlock(b))
       }
     }
-    return out
+    // 逐块错峰：设计用 `animation-delay: calc(var(--i) * 240ms + 80ms)`，序号由
+    // 渲染处给出（设计页也是 style="--i:n"）。这里把序号挂到块自己身上，
+    // 不再用 nth-child 硬写一条阶梯 —— 那条阶梯既不是 240ms，也无法超过 13 个。
+    return out.map((el, i) => (el ? cloneElement(el, { style: { ...(el.props.style || {}), '--i': i } }) : el))
   }
 
   /* 一轮 = 一条 user 消息到下一条之间。store 里没有这个对象（见 PORT-PLAN §5），

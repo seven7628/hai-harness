@@ -1585,7 +1585,9 @@ body.is-electron .left.collapsed .rail .rbtn {
    追加的新块不再渐入，只有整个轮盒会动。 */
 .narrative-enter > *,
 .narrative-enter .rt-turn-in > * {
-  animation: narrativeEnter 320ms var(--ease) both;
+  /* 入场照设计：bl-in 460ms var(--ease-out)，逐块 240ms 错峰（port/motion.css） */
+  animation: narrativeEnter 460ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: calc(var(--i, 0) * 240ms + 80ms);
   /* ## 绝不能在这里关掉 content-visibility（2026-10-21 修 bug）
    
      曾经这里写着 content-visibility: visible，理由是「动画要改 opacity/transform，
@@ -1607,19 +1609,6 @@ body.is-electron .left.collapsed .rail .rbtn {
 /* 内容渐入整体延后 90ms：骨架屏淡出到 1/3 时内容才开始显影。
    两者同时从 1→0 / 0→1，会在中间出现「半透明骨架 + 半透明内容」的浑浊帧；
    错开一点，视觉上是「骨架先化开，内容再浮现」，更干净。 */
-.narrative-enter.is-crossfade > *:nth-child(1) { animation-delay: 90ms; }
-.narrative-enter.is-crossfade > *:nth-child(2) { animation-delay: 108ms; }
-.narrative-enter.is-crossfade > *:nth-child(3) { animation-delay: 126ms; }
-.narrative-enter.is-crossfade > *:nth-child(4) { animation-delay: 144ms; }
-.narrative-enter.is-crossfade > *:nth-child(5) { animation-delay: 162ms; }
-.narrative-enter.is-crossfade > *:nth-child(6) { animation-delay: 180ms; }
-.narrative-enter.is-crossfade > *:nth-child(7) { animation-delay: 198ms; }
-.narrative-enter.is-crossfade > *:nth-child(8) { animation-delay: 216ms; }
-.narrative-enter.is-crossfade > *:nth-child(9) { animation-delay: 234ms; }
-.narrative-enter.is-crossfade > *:nth-child(10) { animation-delay: 252ms; }
-.narrative-enter.is-crossfade > *:nth-child(11) { animation-delay: 270ms; }
-.narrative-enter.is-crossfade > *:nth-child(12) { animation-delay: 288ms; }
-.narrative-enter.is-crossfade > *:nth-child(n + 13) { animation-delay: 288ms; }
 
 /* 系统「减少动态效果」：直接显示，不做位移淡入 */
 @media (prefers-reduced-motion: reduce) {

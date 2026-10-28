@@ -1,4 +1,5 @@
 import { Face } from '../Face'
+import { FoldIcon } from '../FoldIcon'
 import { durText, type TurnStats } from './selectTurns'
 import './work-fold.css'
 
@@ -42,11 +43,7 @@ export function WorkFold({
         {dur ? <><span className="rt-act-k">{label}</span> <b>{dur}</b></> : <span className="rt-act-k">{running ? 'Working' : 'Worked'}</span>}
         {parts.length ? <span className="rt-act-rest">{' \u00b7 '}{parts.join(' \u00b7 ')}</span> : null}
       </span>
-      <span className={'rt-chev' + (open ? ' open' : '')} aria-hidden="true">
-        <svg viewBox="0 0 12 12" width="12" height="12">
-          <path d="M4.2 2.6L8.6 6.8l-4.4 4.2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </span>
+      <FoldIcon open={open} />
     </button>
   )
 }
