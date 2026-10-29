@@ -37,12 +37,15 @@
 
 html[data-skin='runtime'],
 html[data-skin='runtime'][data-theme='ink'] {
-  /* —— 面 —— */
-  --paper: #0b0b0c; /* 页面底：一处表面，不是一叠盒子 */
-  --paper-2: #0c0c0d; /* 卡面：与底几乎同色，靠 1px 描边分层 */
-  --paper-3: #141416; /* 凹陷/浮层：井、输入、代码 */
-  --ink-line: #26262a;
-  --ink-line-2: #34343a;
+  /* —— 面（黑曜石）——
+     原来是中性近黑（#0b0b0c）：在深色屏上偏「灰」，大面积看发闷。黑曜石是黑里
+     带一点冷、且层次更靠**明度阶梯**而不是描边：底层几乎纯黑，卡面 +2，凹陷面 +6。
+     三个数字一起看才有「玻璃面」的感觉，单改一个只会让描边显出来。 */
+  --paper: #08080a; /* 页面底 */
+  --paper-2: #0a0a0d; /* 卡面 */
+  --paper-3: #101015; /* 凹陷/浮层：井、输入、代码 */
+  --ink-line: #22222a;
+  --ink-line-2: #2f2f39;
 
   /* —— 字 —— */
   --ink: #f2f2f3;
@@ -92,9 +95,9 @@ html[data-skin='runtime'][data-theme='ink'] {
   --ctx-moss: #9a9aa1;
 
   /* —— 皮肤局部变量（v2 里没有对应 app 令牌的那几个）—— */
-  --rt-card-2: #141416;
-  --rt-raised: #1a1a1c;
-  --rt-line-soft: #17171a;
+  --rt-card-2: #0f0f14;
+  --rt-raised: #16161c;
+  --rt-line-soft: #131319;
   --rt-code-ink: #ff9f43;
   --rt-code-bg: rgba(255, 145, 45, 0.14);
   --rt-violet: #b492ff;
@@ -127,11 +130,13 @@ html[data-skin='runtime'][data-theme='ink'] {
 }
 
 html[data-skin='runtime'][data-theme='paper'] {
-  --paper: #f7f7f8;
-  --paper-2: #ffffff;
-  --paper-3: #fafafa;
-  --ink-line: #e5e5e7;
-  --ink-line-2: #d6d6d9;
+  /* 亮色底原来近白（#f7f7f8 + 纯白卡面）：大面积看刺眼、也不柔和。改成**暖纸**
+     一档（纸上加一点米色），卡面不再纯白 —— 层次靠 2 个明度台阶，而不是白到发光。 */
+  --paper: #f4f3f1;
+  --paper-2: #fbfaf9;
+  --paper-3: #f0efec;
+  --ink-line: #e4e2de;
+  --ink-line-2: #d5d2cd;
 
   --ink: #131316;
   --ink-2: #55555c;
@@ -172,9 +177,9 @@ html[data-skin='runtime'][data-theme='paper'] {
   --ft-data: #6b6b73;
   --ctx-moss: #6b6b73;
 
-  --rt-card-2: #fafafa;
-  --rt-raised: #f1f1f2;
-  --rt-line-soft: #efeff0;
+  --rt-card-2: #faf9f7;
+  --rt-raised: #efeeea;
+  --rt-line-soft: #eeede9;
   --rt-code-ink: #a34a00;
   --rt-code-bg: rgba(232, 112, 20, 0.15);
   --rt-violet: #6d4bd8;

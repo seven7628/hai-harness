@@ -3176,7 +3176,8 @@ body.is-electron .left.collapsed .rail .rbtn {
   border: 1px solid transparent;
   border-radius: 8px;
   overflow: hidden;
-  background: var(--code-bg);
+  /* 底板跟主题面走（--code-block-bg 由皮肤层给）；没定义它的皮肤退回旧行为 */
+  background: var(--code-block-bg, var(--code-bg));
   /* 代码块定高容器：shiki 高亮异步加载完成后替换 <pre> 内容（高度变化），
      流式抖动修复：容器高度稳定 = 正文不因高亮完成而跳动。
      用能容纳最大行的最坏尺寸估算 —— max-height 让短代码块自然收缩，

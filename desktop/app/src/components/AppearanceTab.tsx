@@ -4,6 +4,7 @@ import { useT } from '../i18n'
 import { codeToHtml } from './highlight'
 import { useResolvedTheme } from '../lib/useTheme'
 import {
+  ACCENT_PRESETS,
   BG_PRESETS,
   DARK_CODE_THEMES,
   DEFAULT_APPEARANCE,
@@ -198,6 +199,41 @@ export default function AppearanceTab() {
           </label>
           <button className="btn" onClick={() => setAppearance({ lightBg: DEFAULT_APPEARANCE.lightBg })}>
             {t('settings.appearance.bg.reset')}
+          </button>
+        </div>
+      </div>
+
+      {/* 强调色：预设有九支，取色器给任意 RGB —— 存的是深色那一支，
+          亮色主题按对比度自动压深（lib/appearance.ts 的 accentForLight） */}
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.appearance.accent')}</div>
+          <div className="set-desc">{t('settings.appearance.accent.desc')}</div>
+        </div>
+        <div className="bg-picker">
+          {ACCENT_PRESETS.map((p2) => (
+            <button
+              key={p2.id}
+              type="button"
+              className={`bg-sw ${ap.accent === p2.dark ? 'cur' : ''}`}
+              style={{ background: p2.dark }}
+              title={`${p2.label} · ${p2.dark}`}
+              aria-label={p2.label}
+              aria-pressed={ap.accent === p2.dark}
+              onClick={() => setAppearance({ accent: p2.dark })}
+            />
+          ))}
+          <label className="bg-custom" title={t('settings.appearance.custom')}>
+            <input
+              type="color"
+              value={ap.accent || ACCENT_PRESETS[0].dark}
+              aria-label={t('settings.appearance.accent')}
+              onChange={(e) => setAppearance({ accent: e.target.value })}
+            />
+            <span className="mono">{ap.accent || t('settings.appearance.accent.auto')}</span>
+          </label>
+          <button className="btn" onClick={() => setAppearance({ accent: '' })}>
+            {t('settings.appearance.accent.reset')}
           </button>
         </div>
       </div>

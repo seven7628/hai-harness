@@ -17,6 +17,14 @@ export interface Appearance {
   codeThemeDark: string // shiki 主题名（深色）
   scale: number // 界面缩放：0.9 / 1 / 1.1 / 1.25
   lightBg: string // 亮色主题的底色覆盖（默认 #ffffff = 不改）
+  /**
+   * 强调色（#rrggbb，'' = 跟随皮肤默认）。
+   *
+   * 存的是**一个**值，两种主题共用一个身份：深色主题原样用（它压深底，亮度天然够），
+   * 亮色主题按对比度自动压深（见 accentForLight）—— 用户在取色器里挑「他想要的那个
+   * 颜色」，系统负责让它在浅底上依然读得清，而不是让他再挑一次。
+   */
+  accent: string
   // 'one-light → catppuccin-latte' 那次迁移的**一次性标记**（见 normalize）。
   // 为什么需要它：迁移条件写成"值是 one-light 就改掉"时，用户**主动**选 one-light
   // 也会被同一条规则打回 latte —— 表现为「第一张卡点了没反应」（2026-09-21 用户报障）。
@@ -33,6 +41,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
   codeThemeDark: 'catppuccin-mocha',
   scale: 1,
   lightBg: '#ffffff',
+  accent: '',
 }
 
 // 亮色代码主题候选：即 code-theme-compare.png 里那六套（用户挑图定稿的候选集）。
@@ -61,6 +70,52 @@ export const SCALE_OPTIONS: { value: number; labelKey: string }[] = [
   { value: 1.1, labelKey: 'settings.appearance.scale.large' },
   { value: 1.25, labelKey: 'settings.appearance.scale.xlarge' },
 ]
+
+/* 强调色预设：设计那一支 + 几个「深色下不刺眼」的替代支。
+   值取深色主题的那一支（亮色会按对比度自动压深，见 accentForLight）。 */
+export const ACCENT_PRESETS: { id: string; label: string; dark: string }[] = [
+  { id: 'periwinkle', label: 'Periwinkle', dark: '#8aa0ff' },
+  { id: 'blue-deep', label: 'Blue', dark: '#6f82d6' },
+  { id: 'steel', label: 'Steel', dark: '#9fb0c8' },
+  { id: 'teal', label: 'Teal', dark: '#5fc9c2' },
+  { id: 'jade', label: 'Jade', dark: '#8fbf9f' },
+  { id: 'amber', label: 'Amber', dark: '#f5b544' },
+  { id: 'cinnabar', label: 'Cinnabar', dark: '#ef7a4d' },
+  { id: 'rose', label: 'Rose', dark: '#e8798b' },
+  { id: 'violet', label: 'Violet', dark: '#b492ff' },
+]
+
+const ACCENT_VARS = ['--cinnabar', '--cinnabar-2', '--accent-weak', '--accent-solid', '--accent-hover', '--rt-accent-ink']
+
+function contrast(a: string, b: string): number {
+  const la = luminance(a)
+  const lb = luminance(b)
+  const hi = Math.max(la, lb)
+  const lo = Math.min(la, lb)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
+/** 亮色底上的那一支：保证与底色对比 ≥ 4.5:1（每步 -6% 明度，最多 20 步）。 */
+function accentForLight(hex: string, paper: string): string {
+  if (contrast(hex, paper) >= 4.5) return hex
+  let n = parseInt(hex.slice(1), 16)
+  let r = (n >> 16) & 255
+  let g = (n >> 8) & 255
+  let b = n & 255
+  for (let i = 0; i < 20; i++) {
+    r = Math.round(r * 0.94)
+    g = Math.round(g * 0.94)
+    b = Math.round(b * 0.94)
+    const cur = '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')
+    if (contrast(cur, paper) >= 4.5) return cur
+  }
+  return '#111111'
+}
+
+const hexAlpha = (hex: string, a: number): string => {
+  const n = parseInt(hex.slice(1), 16)
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`
+}
 
 // 预设底色：中性白系（纯白 / 灰白 / 浅灰 / 冷灰）。要别的颜色走取色器。
 export const BG_PRESETS = ['#ffffff', '#fafafa', '#f5f5f5', '#f1f5f9']
@@ -133,6 +188,7 @@ function normalize(raw: unknown): Appearance {
     codeThemeDark: typeof r.codeThemeDark === 'string' && dark.has(r.codeThemeDark) ? r.codeThemeDark : DEFAULT_APPEARANCE.codeThemeDark,
     scale: typeof r.scale === 'number' && SCALE_OPTIONS.some((o) => o.value === r.scale) ? r.scale : 1,
     lightBg: typeof r.lightBg === 'string' && /^#[0-9a-f]{6}$/i.test(r.lightBg) ? r.lightBg.toLowerCase() : DEFAULT_APPEARANCE.lightBg,
+    accent: typeof r.accent === 'string' && /^#[0-9a-f]{6}$/i.test(r.accent) ? r.accent.toLowerCase() : '',
     // 归一化后的对象一律带标记：任何一次写入（setAppearance）都会把它落盘，
     // 于是"这条数据已经迁过了"这件事有了持久记录。老数据没这个字段 → 迁一次 → 下次不再迁。
     oneLightMigrated: true,
@@ -211,6 +267,23 @@ export function applyAppearance(pref: Appearance = current): void {
   } else {
     for (const v of BG_OVERRIDE_VARS) root.style.removeProperty(v)
   }
+  // —— 强调色（外观里可自定义；空 = 跟随皮肤）——
+  // 三档皮肤都从 --cinnabar 家族取 accent，实心块另走 --accent-solid / --accent-hover
+  //（设计里它们刻意不重映射），所以一次要写全；清空时必须 removeProperty，
+  // 否则 inline 会盖住切主题后的皮肤默认值。
+  if (pref.accent) {
+    const base = isPaper ? accentForLight(pref.accent, pref.lightBg && pref.lightBg !== '#ffffff' ? pref.lightBg : '#f4f3f1') : pref.accent
+    root.style.setProperty('--cinnabar', base)
+    root.style.setProperty('--cinnabar-2', base)
+    root.style.setProperty('--accent-weak', hexAlpha(base, isPaper ? 0.1 : 0.14))
+    root.style.setProperty('--accent-solid', base)
+    root.style.setProperty('--accent-hover', base)
+    // 实心块上的字：浅色强调色压深字，深色强调色压白字
+    root.style.setProperty('--rt-accent-ink', luminance(base) > 0.3 ? '#0a0a0c' : '#ffffff')
+  } else {
+    for (const v of ACCENT_VARS) root.style.removeProperty(v)
+  }
+
   // —— 界面缩放 ——
   // Electron 下走**原生缩放**（等于 Ctrl +/-）：vh / position:fixed / 媒体查询一并跟着变。
   //

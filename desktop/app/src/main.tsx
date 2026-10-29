@@ -31,12 +31,6 @@ if (import.meta.env.DEV) {
   void import('./store/useAppStore').then((m) => {
     ;(window as unknown as { __store?: unknown }).__store = m.useAppStore
   })
-  // 强调色试色条：dev 才挂（见 dev/AccentSwitcher.tsx）。定色后连同文件一起删。
-  void Promise.all([import('./dev/AccentSwitcher'), import('./dev/accent-switcher.css')]).then(([m]) => {
-    const host = document.createElement('div')
-    document.body.appendChild(host)
-    ReactDOM.createRoot(host).render(React.createElement(m.AccentSwitcher))
-  })
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

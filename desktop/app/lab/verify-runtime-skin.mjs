@@ -192,7 +192,8 @@ await wait(700)
 await say('html 预览')
 await waitFor('.cy-frameline .cy-act', 25000)
 // 等这一轮流完（流式中代码块会被重建，这时点开的折叠状态会被重置）
-await waitFor('.answer-acts', 25000)
+// 结算的哨兵是轮尾账（.rt-turn-foot）——回答下方的动作行（复制）已按用户要求移除
+await waitFor('.rt-turn-foot', 25000)
 await wait(1200)
 const t5 = await page.eval(() => {
   const cs = (el, ...p) => (el ? Object.fromEntries(p.map((k) => [k, getComputedStyle(el)[k]])) : null)
@@ -446,11 +447,16 @@ const c3 = await page.eval(() => {
   const body = box?.querySelector(':scope > .rt-work-body')
   const ans = t?.querySelector(':scope > .rt-turn-ans')
   if (!box || !body) return { present: false, boxKids: [...(t?.children ?? [])].map((k) => k.className) }
-  const b = box.getBoundingClientRect(), i = body.getBoundingClientRect()
+  const b = box.getBoundingClientRect()
+  const row = body.querySelector('.rt-grp > *')
+  const r = row ? row.getBoundingClientRect() : null
   return {
     present: true,
     boxW: Math.round(b.width),
-    bodyW: Math.round(i.width),
+    // 缩进量要从**行的左边缘**量：padding 是 body 自己的内边距（border-box 下
+    // 它的 rect 仍等于盒宽），真正的「窄一层」发生在内容区
+    indentPx: r ? Math.round(r.left - b.left) : null,
+    rowW: r ? Math.round(r.width) : null,
     indent: getComputedStyle(body).paddingLeft,
     // 盒子里的是工作行；外面只该有最后一轮的正文（所以数的是**工作类**的行，
     // 不是所有行 —— 正文自己也是 .rt-grp 里的一个孩子）
@@ -462,7 +468,7 @@ const c3 = await page.eval(() => {
   }
 })
 check('concise: work rows stay inside the box after the run (not spilled into the flow)', c3.present && c3.rowsInBox > 0 && c3.ansBlocks <= 1, JSON.stringify(c3))
-check('concise: inside the box is narrower than the box (the indent carries the nesting)', c3.present && c3.bodyW < c3.boxW && c3.indent === '14px', JSON.stringify({ boxW: c3.boxW, bodyW: c3.bodyW, indent: c3.indent }))
+check('concise: inside the box is narrower than the box (the indent carries the nesting)', c3.present && c3.indent === '14px' && c3.indentPx === 14 && c3.rowW < c3.boxW, JSON.stringify({ boxW: c3.boxW, rowW: c3.rowW, indentPx: c3.indentPx }))
 
 await freshTurn('detailed')
 const d1 = await page.eval(() => {
