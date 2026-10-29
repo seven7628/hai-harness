@@ -18,7 +18,7 @@ import { useResolvedTheme } from '../lib/useTheme'
 import { useAppearance } from '../lib/appearance'
 import { copyText } from '../lib/clipboard'
 import { displayPath, isLocalAssetSrc, resolveLocalAssetPath, useLocalAsset } from '../lib/localAsset'
-import { FoldIcon } from './runtime/FoldIcon'
+import { markTableNumbers } from '../lib/tableNumbers'
 import { useSkin } from '../lib/useSkin'
 import { t as tStatic, useLang, useT } from '../i18n'
 
@@ -348,6 +348,23 @@ function rehypeHeadingIds() {
   }
 }
 
+// 表格的数字列：设计 `.bl-table .n` 是手写类名（ui.components.css:1509-1525），
+// markdown 里没有对应的语法，只能按列内容推断（判定规则见 lib/tableNumbers.ts）。
+// 在这里做而不是在 table 组件里：组件的 children 此时已经渲染成 React 元素，
+// 改 AST 来不及；rehype 阶段改元素的 className 才会落到 th/td 上。
+function rehypeTableNumbers() {
+  return (tree: Root) => {
+    const walk = (node: Root | Element) => {
+      if (node.type === 'element' && node.tagName === 'table') {
+        markTableNumbers(node)
+        return
+      }
+      for (const child of node.children) if (child.type === 'element') walk(child)
+    }
+    walk(tree)
+  }
+}
+
 // headingText：标题的纯文本（含行内 code 与图片 alt —— GitHub 的 slug 也把 alt 算进去）。
 function headingText(node: Nodes): string {
   let s = node.type === 'text' ? node.value : ''
@@ -641,10 +658,6 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
   const [height, setHeight] = useState<number | undefined>(undefined) // iframe 实测高度（未测前 undefined → CSS 兜底 240px）
   const [frameHover, setFrameHover] = useState(false) // 指针在预览 iframe 内容上方（子探针上报）
   const [probeDead, setProbeDead] = useState(false) // 子探针没跑起来（如 HTML 自带 CSP script-src 'none'）→ 退回恒显
-  // 运行时皮肤下，视觉产出在回答里占**一行**（`.cy-frameline` 的无框文本行），
-  // 点开才铺出 .pv 面板；默认收起 —— 设计：它是「这一轮产出了什么」的一句话，
-  // 不是一进来就占半屏的 iframe。
-  const [frameOpen, setFrameOpen] = useState(false)
   const rt = useSkin() === 'runtime'
   const frameRef = useRef<HTMLIFrameElement>(null)
   const blockRef = useRef<HTMLDivElement>(null)
@@ -667,8 +680,14 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
   // <body> 上且是普通声明，模型写了 body{background} 会自然覆盖（同优先级、后者胜）。
   // 另外给上默认字体栈/行高/文字色，让「完全没写样式」的产出也读得下去。
   const doc = useMemo(() => {
+    // 高度上报不能只报一次：iframe 可能先落在**收起的容器**里（工作盒 / content-visibility
+    // 折叠段），那时 body.scrollHeight 还是 0，等它展开时不会再有 load 事件 ——
+    // 结果就是这块永远停在兜底高度（实测：套件里同一条断言时绿时红）。
+    // 所以先按 200ms 重试到拿到非 0 值（最多 20 次 ≈ 4s），再交给 ResizeObserver 盯变化。
     const probe = '<script>(function(){' +
-      'function h(){try{parent.postMessage({__htmlh:document.body.scrollHeight||0},\'*\')}catch(e){}}' +
+      'var n=0;' +
+      'function h(){var v=document.body.scrollHeight||0;try{parent.postMessage({__htmlh:v},\'*\')}catch(e){}' +
+      'if(v>0)return;if(++n<20)setTimeout(h,200)}' +
       'h();' + // 立即报一次：让父组件尽早确认「探针活着」（探针失效兜底判定用，见下）
       'document.addEventListener(\'DOMContentLoaded\',h);' +
       'window.addEventListener(\'load\',function(){h();setTimeout(h,100);setTimeout(h,400)});' +
@@ -1114,7 +1133,7 @@ export const Markdown = memo(function Markdown({ text, baseDir, streaming }: { t
   // 顺序有意：raw HTML 先定型（<picture> 要按主题挑图 + 打标记），再补标题 id，最后 KaTeX
   //（KaTeX 会产出一棵自己的元素树，排在最后就不会被前面的遍历碰到）。
   const rehypePlugins = useMemo(
-    () => [[rehypeRawHtml, { dark }], rehypeHeadingIds, rehypeKatex] as const,
+    () => [[rehypeRawHtml, { dark }], rehypeHeadingIds, rehypeTableNumbers, rehypeKatex] as const,
     [dark],
   )
   return (

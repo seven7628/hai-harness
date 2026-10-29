@@ -250,6 +250,60 @@ const tk = await page.eval(() => {
 check('think text is measured like the answer text (not 58ch)', tk.tk === tk.md && tk.tk !== 'none', JSON.stringify(tk))
 check('that measure is the design token --md-measure', tk.tk === tk.tok && tk.tok !== '', `${tk.tk} vs ${tk.tok}`)
 
+// 表格：照设计 .bl-table（ui.components.css:1509-1525）量计算值。
+// 这一段是把一张同构表塞进真实的 .rt-turn .md 里 —— 量的是我们自己的 CSS，
+// 插件给数字列打 .n 的部分由 test:table-numbers 覆盖（hast 单测）。
+const tb = await page.eval(() => {
+  const host = document.querySelector('.rt-turn .md')
+  if (!host) return null
+  const probe = document.createElement('i')
+  probe.style.color = 'var(--ink-3)'
+  document.body.appendChild(probe)
+  const ink3 = getComputedStyle(probe).color
+  probe.style.color = 'var(--ink-2)'
+  const ink2 = getComputedStyle(probe).color
+  probe.remove()
+  const wrap = document.createElement('div')
+  wrap.className = 'md-table-wrap'
+  wrap.innerHTML =
+    '<table><thead><tr><th>调用</th><th class="n">耗时</th></tr></thead>' +
+    '<tbody><tr><td>3</td><td class="n">1.2s</td></tr><tr><td>12</td><td class="n">880ms</td></tr></tbody></table>'
+  host.appendChild(wrap)
+  const cs = (el, ...p) => Object.fromEntries(p.map((k) => [k, getComputedStyle(el)[k]]))
+  const table = wrap.querySelector('table')
+  const th = wrap.querySelector('th')
+  const thN = wrap.querySelector('th.n')
+  const td = wrap.querySelector('td')
+  const lastTd = wrap.querySelector('tbody tr:last-child td')
+  const out = {
+    ink3, ink2,
+    table: cs(table, 'borderCollapse', 'fontSize', 'borderTopWidth', 'borderTopStyle'),
+    th: cs(th, 'padding', 'borderBottomWidth', 'borderBottomStyle', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'textTransform', 'color', 'textAlign', 'backgroundColor'),
+    td: cs(td, 'padding', 'borderBottomWidth', 'borderBottomStyle', 'color', 'verticalAlign', 'fontSize'),
+    lastTd: cs(lastTd, 'borderBottomWidth'),
+    thN: cs(thN, 'textAlign'),
+    tdN: cs(wrap.querySelector('td.n'), 'textAlign', 'fontVariantNumeric'),
+  }
+  wrap.remove()
+  return out
+})
+check('table: an audit grid, not a card — no outer frame, 13px text',
+  tb?.table.borderCollapse === 'collapse' && tb.table.fontSize === '13px' && tb.table.borderTopWidth === '0px',
+  JSON.stringify(tb?.table))
+check('table: the header recedes to a mono label (10.5px/500, 0.05em, uppercase, ink-3)',
+  tb?.th.fontSize === '10.5px' && tb.th.fontWeight === '500' && tb.th.letterSpacing === '0.525px' && tb.th.textTransform === 'uppercase' && tb.th.color === tb.ink3 && tb.th.backgroundColor === 'rgba(0, 0, 0, 0)',
+  JSON.stringify(tb?.th))
+check('table: header cell is 0/14/7 padding with a hairline under it',
+  tb?.th.padding === '0px 14px 7px 0px' && tb.th.borderBottomWidth === '1px' && tb.th.borderBottomStyle === 'solid' && tb.th.textAlign === 'left',
+  JSON.stringify({ p: tb?.th.padding, w: tb?.th.borderBottomWidth, a: tb?.th.textAlign }))
+check('table: body cells are 7/14 padding, ink-2, top-aligned',
+  tb?.td.padding === '7px 14px 7px 0px' && tb.td.color === tb.ink2 && tb.td.verticalAlign === 'top' && tb.td.borderBottomWidth === '1px',
+  JSON.stringify({ p: tb?.td.padding, c: tb?.td.color, v: tb?.td.verticalAlign }))
+check('table: the last row has no hairline under it', tb?.lastTd.borderBottomWidth === '0px', tb?.lastTd.borderBottomWidth)
+check('table: numeric columns are right-aligned with tabular figures',
+  tb?.thN.textAlign === 'right' && tb?.tdN.textAlign === 'right' && tb.tdN.fontVariantNumeric === 'tabular-nums',
+  JSON.stringify({ th: tb?.thN.textAlign, td: tb?.tdN.textAlign, fv: tb?.tdN.fontVariantNumeric }))
+
 // ---- 提问卡 ---------------------------------------------------------------
 await say('修复登录接口返回 401')
 // 60s 而不是默认 30s：这一问要等上一轮跑完（mock 的脚本化回放 15s 左右）+ 队列推送，
@@ -446,23 +500,41 @@ await waitFor('.cy-frame .pv-frame', 30000)
 // 结算哨兵：流式中块会被重建，量到的节点下一秒就没了
 await waitFor('.rt-turn-foot', 30000)
 await wait(1500)
+// 诊断：装了监听才知道是「消息根本没来」还是「来了被 source 校验丢掉」
+await page.eval(() => {
+  window.__msgs = []
+  window.addEventListener('message', (e) => {
+    const d = e.data
+    if (!d || typeof d !== 'object') return
+    if (d.__htmlh === undefined && d.__htmlhover === undefined) return
+    window.__msgs.push({ h: d.__htmlh, hv: d.__htmlhover, fromFrame: e.source === document.querySelector('.cy-frame .pv-frame')?.contentWindow })
+  })
+})
 // 探针（iframe 里的 $__htmlh）可能比这一帧晚到：等内联高度出现，最多 8s
 for (let i = 0; i < 32; i++) {
   const has = await page.eval(() => !!document.querySelector('.cy-frame .pv-frame[style*=height]'))
   if (has) break
   await wait(250)
 }
-// 量之前先把它滚到视口中央：后面派的是真实鼠标坐标，元素在屏外就永远 hover 不到
+// 量之前先把它滚到视口中央：后面派的是真实鼠标坐标，元素在屏外就永远 hover 不到。
+// 滚动要等它落地再量 —— 应用里 scroll-behavior 可能是 smooth，scrollIntoView 后立刻
+// 读 rect 拿到的是上一帧的位置，派出去的坐标就落在了别处（这就是这条断言时红时绿的来源）。
+await page.eval(() => {
+  const frames = [...document.querySelectorAll('.cy-frame .pv-frame')]
+  frames.at(-1)?.scrollIntoView({ block: 'center', behavior: 'instant' })
+})
+await wait(500)
 const hr = await page.eval(() => {
-  const frame = document.querySelector('.cy-frame .pv-frame')
-  frame?.scrollIntoView({ block: 'center' })
-  const bar = document.querySelector('.cy-frame .pv-bar')
+  // 取**最后一块**：同一轮里旧的视觉产出可能还在（折叠盒里），它永远滚不进视口
+  const frame = [...document.querySelectorAll('.cy-frame .pv-frame')].at(-1)
+  const bar = frame?.closest('.cy-frame')?.querySelector('.pv-bar')
   const r = frame?.getBoundingClientRect()
   return {
     hasFrame: !!frame,
     foldRow: !!document.querySelector('.cy-frameline .cy-act'),
     head: !!document.querySelector('.cy-frame .pv-head'),
     foot: !!document.querySelector('.cy-frame .pv-foot'),
+    blockCount: document.querySelectorAll('.cy-frame').length,
     barOpacity: bar ? getComputedStyle(bar).opacity : null,
     barPos: bar ? getComputedStyle(bar).position : null,
     inline: frame?.getAttribute('style') ?? null,
@@ -473,13 +545,26 @@ const hr = await page.eval(() => {
 })
 check('visual output: no fold row, no captions — just the frame', hr.hasFrame && hr.foldRow === false && hr.head === false && hr.foot === false,
   JSON.stringify({ frame: hr.hasFrame, fold: hr.foldRow, head: hr.head, foot: hr.foot }))
+if (hr.inline == null) {
+  const dbg = await page.eval(() => ({
+    msgs: (window.__msgs || []).slice(-6),
+    count: (window.__msgs || []).length,
+    frames: document.querySelectorAll('.cy-frame .pv-frame').length,
+    srcdocHasProbe: (document.querySelector('.cy-frame .pv-frame')?.getAttribute('srcdoc') || '').includes('__htmlh'),
+    srcdocLen: (document.querySelector('.cy-frame .pv-frame')?.getAttribute('srcdoc') || '').length,
+  }))
+  console.log('DIAG  html probe', JSON.stringify(dbg))
+}
 check('visual output: the frame fits its content (measured, not capped at 136)', hr.inline != null && hr.h > 136, `${hr.inline} → ${hr.h}px`)
 check('visual output: the actions are hidden until the pointer arrives', hr.barOpacity === '0' && hr.barPos === 'absolute', `${hr.barOpacity} ${hr.barPos}`)
 
-// 真的把指针移到画面上（iframe 内的指针事件父文档收不到，但 :hover 仍会命中）
+// 真的把指针移到画面上（iframe 内的指针事件父文档收不到，但 :hover 仍会命中）。
+// 先挪一次到角落，让起点是干净的 —— 上一次运行残留的 hover 不该让这一条假绿。
 if (hr.cx) {
   // CDP 偶发超时不该让整套断在后面全红：hover 失败由下面的断言说，不在这里崩
   try {
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'none', buttons: 0 })
+    await wait(300)
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hr.cx, y: hr.cy, button: 'none', buttons: 0 })
   } catch (e) {
     console.log('WARN  mouse move did not go through:', e.message)
@@ -489,7 +574,7 @@ if (hr.cx) {
 let hb = null
 for (let i = 0; i < 20; i++) {
   hb = await page.eval(() => {
-    const bar = document.querySelector('.cy-frame .pv-bar')
+    const bar = [...document.querySelectorAll('.cy-frame .pv-bar')].at(-1)
     return {
       opacity: bar ? getComputedStyle(bar).opacity : null,
       buttons: bar ? [...bar.querySelectorAll('button')].map((b) => b.textContent.trim()) : [],
@@ -497,6 +582,22 @@ for (let i = 0; i < 20; i++) {
   })
   if (hb.opacity === '1') break
   await wait(150)
+}
+if (hb?.opacity !== '1') {
+  // 红的时候给线索，而不是只说「没亮」：那个坐标上到底是谁、.pv 认不认 hover
+  const diag = await page.eval(([x, y]) => {
+    const el = document.elementFromPoint(x, y)
+    const pv = document.querySelector('.cy-frame .pv')
+    const r = pv?.getBoundingClientRect()
+    return {
+      at: el ? `${el.tagName.toLowerCase()}.${(el.className || '').toString().split(' ')[0]}` : null,
+      pvHover: pv?.matches(':hover') ?? null,
+      pvRect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null,
+      mouse: [x, y],
+      scrim: !!document.querySelector('.scrim, .modal, [role=dialog]'),
+    }
+  }, [hr.cx, hr.cy])
+  console.log('DIAG  hover miss', JSON.stringify(diag))
 }
 check('visual output: hover shows the three actions', hb?.opacity === '1' && hb?.buttons.length === 3, JSON.stringify(hb))
 check('visual output: preview / source / open (no path here, so it says browser)',

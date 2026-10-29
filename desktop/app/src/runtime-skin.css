@@ -1173,12 +1173,18 @@ html[data-skin='runtime'] .rt-turn .md table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  /* 老皮肤把整张表画成带外框的卡（index.css:2855 起的 .md table/.md th/.md td）；
+     设计是“一串细横线”，外框显式清零（Tailwind preflight 的 border-style:solid 还在，
+     所以宽度必须自己写 0） */
+  border: 0;
 }
 
+/* 宽表在自己的容器里横滚，但度量仍与正文一致（设计 .bl-table-wrap 同样受
+   .md 的 --md-measure 约束）—— 两处都写会让后者盖掉前者，只留这一份 */
 html[data-skin='runtime'] .rt-turn .md-table-wrap {
   overflow-x: auto;
   margin: 0 0 0.68em;
-  max-width: 100%;
+  max-width: var(--md-measure);
 }
 
 html[data-skin='runtime'] .rt-turn .md th {
@@ -1299,44 +1305,6 @@ html[data-skin='runtime'] .rt-turn .md :not(pre) > code {
 html[data-skin='runtime'] .rt-turn .md .codeblock {
   margin: 0 0 0.68em;
   max-width: var(--md-measure);
-}
-
-html[data-skin='runtime'] .rt-turn .md .md-table-wrap {
-  margin: 0 0 0.68em;
-  max-width: var(--md-measure);
-}
-
-html[data-skin='runtime'] .rt-turn .md table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-html[data-skin='runtime'] .rt-turn .md table th {
-  padding: 0 14px 7px 0;
-  border-bottom: 1px solid var(--line);
-  font: 500 10.5px/1.3 var(--mono);
-  letter-spacing: 0.05em;
-  text-align: left;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-html[data-skin='runtime'] .rt-turn .md table td {
-  padding: 7px 14px 7px 0;
-  border-bottom: 1px solid var(--line-soft);
-  color: var(--ink-2);
-  vertical-align: top;
-}
-
-html[data-skin='runtime'] .rt-turn .md table tr:last-child td {
-  border-bottom: 0;
-}
-
-html[data-skin='runtime'] .rt-turn .md table .n,
-html[data-skin='runtime'] .rt-turn .md table th.n {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
 }
 
 /* ---------------------------------------------------------------------------
