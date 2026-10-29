@@ -591,6 +591,184 @@ html[data-skin='runtime'] .pop.model-pop .hint.pop-foot {
   color: var(--ink-3);
 }
 
+/* 队列条（composer 的 pending-queue）= 设计的 .pq（ui.components.css:608-642）：
+   琥珀描边 + amber-soft 底 + 顶部滑入。原文案与"每条可编辑/删除"的行为都不动，
+   这里只换度量：11px mono 的头行、9.5px 的序号方块、每行 3px 的上留白。
+   设计里展开/发送是 .pq-act；我们对应的是 .pq-btn（编辑 / 确认 / 取消 / ×），
+   保持它的 20px 高度与琥珀底，读起来是同一个东西。 */
+html[data-skin='runtime'] .composer .pending-queue {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in oklab, var(--amber) 30%, var(--line));
+  border-radius: var(--r-sm);
+  background: color-mix(in oklab, var(--amber) 8%, transparent);
+  animation: rt-pq-in var(--t-base) var(--ease-out) both;
+}
+
+@keyframes rt-pq-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+
+html[data-skin='runtime'] .composer .pending-queue .pq-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 400 11px/1 var(--mono);
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .composer .pending-queue .pq-sub {
+  margin-left: auto;
+  font: 400 10.5px/1 var(--mono);
+  color: color-mix(in oklab, var(--amber) 70%, var(--ink-3));
+}
+
+html[data-skin='runtime'] .composer .pending-queue .pq-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 3px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .composer .pending-queue .pq-no {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  flex: none;
+  background: color-mix(in oklab, var(--amber) 16%, transparent);
+  font: 500 9.5px/1 var(--mono);
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .composer .pending-queue .pq-text {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--t-fast) var(--ease);
+}
+
+/* 每条正文都是「点一下就改这一条」的入口：悬停给一点墨色，不画框不换底色 */
+html[data-skin='runtime'] .composer .pending-queue .pq-text:hover:not(:disabled) { color: var(--ink); }
+
+html[data-skin='runtime'] .composer .pending-queue .pq-text:disabled { cursor: default; color: var(--ink-3); }
+
+html[data-skin='runtime'] .composer .pending-queue .pq-actions { margin-left: auto; }
+
+html[data-skin='runtime'] .composer .pending-queue .pq-btn {
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font: 500 10.5px/1 var(--mono);
+  color: var(--ink-2);
+  transition: background-color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .composer .pending-queue .pq-btn:hover {
+  background: color-mix(in oklab, var(--amber) 18%, transparent);
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .composer .pending-queue .pq-btn:active { transform: scale(0.96); }
+
+html[data-skin='runtime'] .composer .pending-queue .pq-btn.primary {
+  color: var(--ink);
+  background: color-mix(in oklab, var(--amber) 18%, transparent);
+}
+
+/* 单条编辑输入：多行可见（一句长消息不该被 24px 的框裁掉），聚焦不跳行 */
+html[data-skin='runtime'] .composer .pending-queue .pq-edit-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in oklab, var(--amber) 40%, var(--line));
+  border-radius: var(--r-xs);
+  background: var(--card-2);
+  font: 400 11.5px/1.45 var(--sans);
+  color: var(--ink);
+  resize: none;
+}
+
+/* 附件 chip = 设计 .att（ui.components.css:645-662）：24px 高、mono 11px、
+   左侧文件图标用强调色、大小是 em（10px ink-3）、移除键 16px 方块贴在里面。
+   复用现有 .attach-strip / .doc-chip 的 DOM（文件名 + 大小 + ×，行为不动），
+   只把度量换成设计那一条 —— 底部的 58px 图片格子那一档不受影响（rt 下图片走 .cy-imgs 扇形）。 */
+html[data-skin='runtime'] .composer .attach-strip {
+  gap: 6px;
+  padding: 10px 12px 4px;
+}
+
+html[data-skin='runtime'] .composer .attach-chip.doc-chip {
+  width: auto;
+  max-width: 230px;
+  height: 24px;
+  padding: 0 4px 0 7px;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--raised);
+  box-shadow: none;
+  font: 400 11px/1 var(--mono);
+  color: var(--ink-2);
+  animation: rt-att-in 180ms var(--spring) both;
+}
+
+@keyframes rt-att-in {
+  from { opacity: 0; transform: scale(0.94); }
+  to { opacity: 1; transform: none; }
+}
+
+html[data-skin='runtime'] .composer .doc-chip .att-i {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  color: var(--accent);
+  stroke-width: 1.8;
+}
+
+html[data-skin='runtime'] .composer .doc-chip-name {
+  font: 400 11px/1 var(--mono);
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .composer .doc-chip-size {
+  font: 400 10px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+/* 设计的 × 是流内 16px 方块（不是浮在右上角的圆点）：覆盖基础档的 absolute */
+html[data-skin='runtime'] .composer .attach-chip.doc-chip .attach-x {
+  position: static;
+  transform: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  border-radius: 4px;
+  background: none;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .composer .attach-chip.doc-chip .attach-x:hover {
+  background: var(--line);
+  color: var(--ink);
+}
+
 /* 输入卡的底部工具条 = 设计 .prompt-bar 的 .ptool（ui.components.css:1050-1079）。
    只改**度量与色**，不动结构与行为：三个 chip 还是原来的 ChipMenu（键盘/开合/选项
    全照旧），只是长得像设计里的那一排：26px 高、11px mono、悬停才浮出底色，
@@ -635,7 +813,8 @@ html[data-skin='runtime'] .row2 .chip-full-label > span:first-child {
 
 /* 设计的 .p-div：13px 高、1px 的竖线，落在两枚工具之间（不是每枚都带） */
 html[data-skin='runtime'] .row2 .mode-chip::after,
-html[data-skin='runtime'] .row2 .model-chip::after {
+html[data-skin='runtime'] .row2 .model-chip::after,
+html[data-skin='runtime'] .row2 .effort-chip::after {
   content: '';
   position: absolute;
   right: -1px;
@@ -651,6 +830,42 @@ html[data-skin='runtime'] .row2 .model-chip::after {
 html[data-skin='runtime'] .row2 .spark {
   display: none;
 }
+
+/* 能力入口 = 设计 .caps-btn（index.html:901：图标 + 「能力」+ 数量 + chevron，落在
+   .ptool 那排里）。数量口径见 Composer：启用技能 + 内置斜杠命令 = 这份输入框真能
+   触发的清单，点击即打开同一份 `/` 菜单（不另造一套能力列表）。 */
+html[data-skin='runtime'] .row2 .caps-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 6px 0 7px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font: 400 11px/1 var(--mono);
+  color: var(--ink-3);
+  transition: background-color var(--t-fast), color var(--t-fast), transform var(--t-fast);
+}
+
+html[data-skin='runtime'] .row2 .caps-btn:hover:not(:disabled) {
+  background: var(--raised);
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .row2 .caps-btn:active:not(:disabled) { transform: scale(0.97); }
+
+html[data-skin='runtime'] .row2 .caps-btn:disabled { opacity: 0.45; }
+
+html[data-skin='runtime'] .row2 .caps-btn svg { width: 12px; height: 12px; flex: none; }
+
+html[data-skin='runtime'] .row2 .caps-btn b {
+  font-weight: 500;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .row2 .caps-btn .chev { color: var(--ink-3); opacity: 0.7; }
 
 /* 上下文占用：唯一把两个数字放在一起的地方，琥珀描边胶囊 */
 html[data-skin='runtime'] .row2 .ctx {
@@ -1149,6 +1364,7 @@ html[data-skin='runtime'] .thinking-toggle:focus-visible,
 html[data-skin='runtime'] .la-head:focus-visible,
 html[data-skin='runtime'] .rt-ledger:focus-visible,
 html[data-skin='runtime'] .cy-act:focus-visible,
+html[data-skin='runtime'] .pending-queue .pq-text:focus-visible,
 html[data-skin='runtime'] .answer-acts .act:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

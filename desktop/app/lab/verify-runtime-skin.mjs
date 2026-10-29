@@ -463,11 +463,14 @@ const c3 = await page.eval(() => {
     rowsInBox: body.querySelectorAll('.rt-grp > *').length,
     // 外面只该有「最后一轮的正文」这**一个**块（块内部可以自带嵌套行，
     // 例如末轮的 codemode 结果，那不是被摊出来的工作行）
+    // 盒外可以有：末轮正文、产出卡、系统信号（这三类各自成 bare 段，属设计里的流内块）；
+    // 不许有的是**工作行**（工具/思考/运行面板）—— 那才是「没收敛在 working 内部」。
+    workRowsOutside: ans ? ans.querySelectorAll('.tool-row, .cy-live, .rt-work-body').length : 0,
     ansBlocks: ans ? ans.querySelectorAll(':scope > .rt-grp > *').length : 0,
     ansText: (ans?.textContent || '').slice(0, 40),
   }
 })
-check('concise: work rows stay inside the box after the run (not spilled into the flow)', c3.present && c3.rowsInBox > 0 && c3.ansBlocks <= 1, JSON.stringify(c3))
+check('concise: work rows stay inside the box after the run (not spilled into the flow)', c3.present && c3.rowsInBox > 0 && c3.workRowsOutside === 0, JSON.stringify(c3))
 check('concise: inside the box is narrower than the box (the indent carries the nesting)', c3.present && c3.indent === '14px' && c3.indentPx === 14 && c3.rowW < c3.boxW, JSON.stringify({ boxW: c3.boxW, rowW: c3.rowW, indentPx: c3.indentPx }))
 
 await freshTurn('detailed')
@@ -502,6 +505,182 @@ const th = await page.eval(() => {
 })
 check('thinking: expanding changes the mark colour', th.expanded === 'true' && th.state === 'engaged' && th.mkColor !== 'rgb(69, 214, 165)', `${th.state} ${th.mkColor}`)
 check('thinking: the mark does not rotate', th.faceTransform === 'none', th.faceTransform)
+
+// ---- 队列条：逐条编辑 / 保存 ------------------------------------------------
+// 设计要求队列行可逐条处置（.pq-act）；我们的暂存队列同一条规矩：点哪一条只改
+// 那一条，保存后其他条原样，Esc 放弃。整段放在**一次** page eval 里跑：队列会在
+// 下一个 llm_end 被 flushPending 整队推走（mock 一直在推事件），跨多次 eval 的
+// 等待会让刚种进去的两条在中途被消费掉 —— 那测的就不是渲染，是竞态。
+const qq = await page.eval(async () => {
+  const store = window.__store
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const pick = () => {
+    const st = store.getState()
+    return st.activeSessionId
+      ?? Object.keys(st.views).find((k) => (st.views[k]?.blocks?.length ?? 0) > 0)
+      ?? Object.keys(st.views)[0]
+  }
+  let sid = pick()
+  if (!sid) {
+    await store.getState().newSession?.()
+    await sleep(1500)
+    sid = pick()
+  }
+  if (!sid) throw new Error('no session to seed the queue into')
+
+  const mk = (id, text) => ({ id, contents: [{ type: 'text', content: text }], pushed: false })
+  const seed = () => [mk(900001, 'alpha 这一条'), mk(900002, 'beta 这一条')]
+  // Composer 读的是**顶层** s.pendingQueue（setView 会镜像一份），所以两处都写：
+  // 只写 views[sid] 的话 store 里有、屏幕上没有 —— 上一版就是这样假绿的。
+  const setQ = (q) => store.setState((s) => ({
+    activeSessionId: sid,
+    pendingQueue: q,
+    views: { ...s.views, [sid]: { ...s.views[sid], pendingQueue: q } },
+  }))
+  const rows = () => [...document.querySelectorAll('.pending-queue .pq-item')]
+  const texts = () => [...document.querySelectorAll('.pending-queue .pq-text')].map((e) => e.textContent.trim())
+  const storeTexts = () => (store.getState().pendingQueue ?? []).map((x) => x.contents.map((c) => c.content).join(''))
+  const setVal = (el, v) => {
+    Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+  const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }))
+  // 队列会在下一个 llm_end 被 flushPending 整队推走（mock 一直在推事件）。所以每打开
+  // 一条都先确认队列还在：没了就重新种，再点。这不是掩盖问题——它测的是「点这条只改
+  // 这条」，不是「mock 什么时候收走队列」。
+  const openEdit = async (i) => {
+    for (let k = 0; k < 4; k++) {
+      if (rows().length < 2) { setQ(seed()); await sleep(150) }
+      rows()[i]?.querySelector('.pq-text')?.click()
+      await sleep(150)
+      const t = document.querySelector('.pending-queue .pq-item:nth-child(' + (i + 1) + ') textarea')
+      if (t) return t
+    }
+    return null
+  }
+  const out = {}
+
+  setQ(seed())
+  await sleep(150)
+  out.seeded = { n: rows().length, texts: texts() }
+
+  // 点第二条正文 = 只编辑第二条
+  const ta = await openEdit(1)
+  out.opened = {
+    value: ta?.value ?? null,
+    editing: document.querySelectorAll('.pending-queue .pq-item.editing').length,
+    focused: document.activeElement === ta,
+    save: document.querySelector('.pending-queue .pq-btn.primary')?.textContent?.trim() ?? null,
+  }
+
+  // 改文本 → Enter 保存
+  if (ta) {
+    setVal(ta, 'beta 改过了')
+    await sleep(60)
+    key(ta, 'Enter')
+    await sleep(200)
+  }
+  out.saved = { texts: texts(), store: storeTexts(), editing: document.querySelectorAll('.pending-queue .pq-item.editing').length }
+
+  // Esc 放弃：改到一半按 Esc，内容与 store 都不动
+  const ta2 = await openEdit(0)
+  if (ta2) {
+    setVal(ta2, 'alpha 改了但不要')
+    await sleep(60)
+    key(ta2, 'Escape')
+    await sleep(200)
+  }
+  out.escaped = { texts: texts(), store: storeTexts(), editing: document.querySelectorAll('.pending-queue .pq-item.editing').length }
+
+  // 收尾：清空，别让后面的断言看见队列条
+  setQ([])
+  await sleep(120)
+  out.cleared = rows().length
+  return out
+})
+check('queue: two rows seeded', qq.seeded.n === 2 && qq.seeded.texts[0] === 'alpha 这一条' && qq.seeded.texts[1] === 'beta 这一条', JSON.stringify(qq.seeded))
+check('queue: clicking a row edits that row only', qq.opened.value === 'beta 这一条' && qq.opened.editing === 1, JSON.stringify(qq.opened))
+check('queue: the edit box takes focus', qq.opened.focused === true, qq.opened.focused)
+check('queue: the primary button says save', qq.opened.save === '保存', qq.opened.save)
+check('queue: Enter saves that row', qq.saved.texts[1] === 'beta 改过了' && qq.saved.editing === 0, JSON.stringify(qq.saved.texts))
+check('queue: the other row is untouched', qq.saved.texts[0] === 'alpha 这一条', qq.saved.texts[0])
+check('queue: the save is in the store, not just on screen', qq.saved.store[1] === 'beta 改过了' && qq.saved.store[0] === 'alpha 这一条', JSON.stringify(qq.saved.store))
+check('queue: Esc drops the edit', qq.escaped.editing === 0 && qq.escaped.texts[0] === 'alpha 这一条' && qq.escaped.store[0] === 'alpha 这一条', JSON.stringify(qq.escaped))
+check('queue: seeded rows are cleaned up', qq.cleared === 0, qq.cleared)
+
+// ---- 能力入口（设计 .caps-btn）+ 附件 chip（设计 .att）---------------------
+// 能力的数量口径必须是「这份输入框真能触发的清单」= 启用技能 + 内置命令；
+// 点击打开的就是同一个 `/` 菜单（不另造一份能力表，避免出现两处不一致的数字）。
+const caps = await page.eval(() => {
+  const btn = document.querySelector('.row2 .caps-btn')
+  if (!btn) return null
+  const out = {
+    n: Number(btn.querySelector('b')?.textContent),
+    expected: window.__store.getState().skills.filter((s) => s.enabled).length + 3, // 3 = /summary /clear /reload_skills
+    label: btn.querySelector('.lbl')?.textContent ?? null,
+    h: Math.round(btn.getBoundingClientRect().height * 10) / 10,
+  }
+  btn.click()
+  return out
+})
+await wait(450)
+const capsPop = await page.eval(() => {
+  const pop = document.querySelector('.pop[data-pop="cmd"]')
+  return { open: !!pop, rows: pop ? pop.querySelectorAll('.pop-row, [role="option"]').length : 0 }
+})
+check('caps: shown in the tool row at 26px', caps?.h === 26, caps?.h)
+check('caps: labelled 能力', caps?.label === '能力', caps?.label)
+check('caps: the number is the list the composer can trigger', caps && caps.n === caps.expected, JSON.stringify(caps))
+check('caps: clicking it opens the capability menu', capsPop.open === true && capsPop.rows > 0, JSON.stringify(capsPop))
+// 收尾：Esc 关菜单、清掉写进正文的 `/`
+await page.eval(() => {
+  const ta = document.querySelector('textarea')
+  ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(ta, '')
+  ta.dispatchEvent(new Event('input', { bubbles: true }))
+})
+await wait(200)
+
+// 附件 chip 的度量：docRefs 是选文件的组件态（浏览器里拿不到 Electron 的 file.path），
+// 这里量的是**同一组规则**落在真 DOM 上的计算值 —— 断言的仍是设计给的那几个字面值。
+const chip = await page.eval(async () => {
+  const host = document.querySelector('.composer') || document.body
+  const strip = document.createElement('div')
+  strip.className = 'attach-strip'
+  const c = document.createElement('div')
+  c.className = 'attach-chip doc-chip'
+  c.innerHTML = '<svg class="att-i" viewBox="0 0 16 16"></svg><span class="doc-chip-name">merge_test.go</span>'
+    + '<span class="doc-chip-size">4.1 KB</span><button class="attach-x">×</button>'
+  strip.appendChild(c)
+  host.appendChild(strip)
+  // 入场动画 from{scale:.94}：不等它跑完，量到的是 22.56 而不是 24
+  const anim = c.getAnimations?.()[0]
+  if (anim) await anim.finished.catch(() => {})
+  const cs = getComputedStyle(c)
+  const x = c.querySelector('.attach-x')
+  const xr = x.getBoundingClientRect()
+  const out = {
+    h: c.getBoundingClientRect().height,
+    font: cs.fontSize,
+    mono: cs.fontFamily.toLowerCase().includes('mono'),
+    pad: cs.padding,
+    radius: cs.borderTopLeftRadius,
+    xPos: getComputedStyle(x).position,
+    xSize: [Math.round(xr.width), Math.round(xr.height)],
+    sizeFont: getComputedStyle(c.querySelector('.doc-chip-size')).fontSize,
+    icon: getComputedStyle(c.querySelector('.att-i')).width,
+    anim: cs.animationName,
+  }
+  strip.remove()
+  return out
+})
+check('chip: 24px tall', chip.h === 24, chip.h)
+check('chip: it animates in (design att-in)', chip.anim === 'rt-att-in', chip.anim)
+check('chip: 11px mono text', chip.font === '11px' && chip.mono, `${chip.font} mono=${chip.mono}`)
+check('chip: padding matches the design (0 4px 0 7px)', chip.pad === '0px 4px 0px 7px', chip.pad)
+check('chip: file icon is 11px', chip.icon === '11px', chip.icon)
+check('chip: the size reads as 10px', chip.sizeFont === '10px', chip.sizeFont)
+check('chip: the × is an inline 16px square, not an overlay', chip.xPos === 'static' && chip.xSize[0] === 16 && chip.xSize[1] === 16, JSON.stringify(chip.xSize))
 
 // ---- 减少动效 ---------------------------------------------------------------
 await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from 'react'
 import { useAppStore, modelWindowOf, QUEUE_CAP, queuedText, queuedHasAttach, modelSupportsImage, inputTypesForProvider, BUILTIN_SLASH, mainRunActive, isSubAgentRun } from '../store/useAppStore'
 import type { QueuedContent } from '../store/useAppStore'
-import { SendIcon, StopIcon, ChevronDown, ChevronLeft, ChevronRight, ImageIcon, AccessIcon, EffortIcon, Sparkles, MicIcon, PaperclipIcon } from './icons'
+import { SendIcon, StopIcon, ChevronDown, ChevronLeft, ChevronRight, ImageIcon, AccessIcon, EffortIcon, Sparkles, MicIcon, PaperclipIcon, FileIcon, LayersIcon } from './icons'
 import { CtxRing, fmtTokens, ChipMenu } from './ui'
 import CompactConfirm from './CompactConfirm'
 import CtxBreakdownPanel from './CtxBreakdown'
@@ -1022,6 +1022,12 @@ export default function Composer() {
                         autoFocus
                         onChange={(e) => setEditText(e.target.value)}
                         onKeyDown={(e) => {
+                          if (e.key === 'Escape') {
+                            // Esc = 放弃这条的改动，队列其他条不受影响
+                            e.preventDefault()
+                            setEditingId(null)
+                            return
+                          }
                           if (e.key === 'Enter' && !e.shiftKey) {
                             // 输入法组合态（中文等用 Enter 选字/上屏）不得提交编辑
                             if (e.nativeEvent.isComposing || e.keyCode === 229) return
@@ -1038,10 +1044,18 @@ export default function Composer() {
                     </>
                   ) : (
                     <>
-                      <span className="pq-text" title={queuedText(q) || t('composer.pq.attach')}>
+                      {/* 点正文即进入这条的编辑态（比只靠右侧「编辑」按钮小字更好用；
+                          推送到服务端的那条不可编辑，与 updatePending 的 pushed 守卫同口径） */}
+                      <button
+                        type="button"
+                        className="pq-text"
+                        title={queuedText(q) || t('composer.pq.attach')}
+                        disabled={q.pushed}
+                        onClick={() => { setEditingId(q.id); setEditText(queuedText(q)) }}
+                      >
                         {queuedHasAttach(q) && <span className="pq-attach">📎</span>}
                         {queuedText(q) || t('composer.pq.attach')}
-                      </span>
+                      </button>
                       <span className="pq-actions">
                         {q.pushed ? (
                           <span className="pq-pushed" title={t('composer.pq.pushedHint')}>{t('composer.pq.pushed')}</span>
@@ -1205,6 +1219,7 @@ export default function Composer() {
                 size < 0 = stat 不可用，显示 — 而不是假造 0B。 */}
             {docRefs.map((d, i) => (
               <div className="attach-chip doc-chip" role="listitem" key={`doc-${d.path}`} title={`${d.path}\n${t('composer.attach.docHint')}`}>
+                {rt && <FileIcon size={11} className="att-i" />}
                 <span className="doc-chip-name">{d.name}</span>
                 <span className="doc-chip-size">{d.size >= 0 ? fmtBytes(d.size) : '—'}</span>
                 <button
@@ -1442,6 +1457,28 @@ export default function Composer() {
               value={effort}
               onSelect={compressing ? () => undefined : switchEffort}
             />
+            {/* 能力入口（设计 index.html:901）：图标 + 「能力」+ 数量 + chevron，落在
+                Effort 之后。数量 = 启用技能 + 内置斜杠命令（这个输入框真能触发的清单），
+                点它写入 `/` 打开**同一份**菜单 —— 不另造一份能力表。 */}
+            {rt && (
+              <button
+                type="button"
+                className="ptool caps-btn"
+                onClick={() => {
+                  setText('/')
+                  setCmdMenu(true)
+                  textareaRef.current?.focus()
+                }}
+                disabled={queueFull || compressing}
+                title={t('composer.caps.hint').replace('{n}', String(slashItems.length))}
+                aria-label={t('composer.caps.aria').replace('{n}', String(slashItems.length))}
+              >
+                <LayersIcon size={12} />
+                <span className="lbl">{t('composer.caps')}</span>
+                <b>{slashItems.length}</b>
+                <ChevronDown size={11} className="chev" />
+              </button>
+            )}
             {/* hover / 键盘聚焦都能展开构成面板（focus 走同一条路径：键盘用户也能看到占比） */}
             <div
               className="ctx-wrap"
