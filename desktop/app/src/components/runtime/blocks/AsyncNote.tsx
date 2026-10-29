@@ -17,7 +17,10 @@ import './async.css'
    has been running, so that is the number it shows.
 
    No dismiss: our blocks are the transcript, not a notification tray. Closing
-   the note would delete history, and the app already has no way to put it back. */
+   the note would delete history, and the app already has no way to put it back.
+   The design draws an 「Dismiss」 on this row; we looked at it and asked, and the
+   answer was 明确不需要 (2026-10) — so this is a decision, not an omission. Do not
+   add one back while porting: the row is a record of something that happened. */
 
 const ICON = {
   ok: 'M2.5 6.3l2.3 2.3L9.5 3.7',
