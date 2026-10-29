@@ -1226,6 +1226,8 @@ const zh: Record<string, string> = {
   'tool.codemode.sitesHint': '脚本内出现的调用点（静态分析，不是实时进度）',
   'tool.codemode.discover': '检索 {n}',
   'tool.codemode.discoverHint': '脚本内还用了 searchTools / describeTool 查找工具（保留操作，不算工具调用，所以不在下面的明细里）',
+  'tool.codemode.innerFailed': '内层失败 {n}',
+  'tool.codemode.innerFailedHint': '外层脚本跑完了（Script completed），但它调用的工具里有失败 —— 脚本把错误 catch 掉了，所以结局看着是成功',
   'tool.codemode.toolCopied': '已复制 {name}',
   // 运行中的输出尾巴（tail -f）：**只给人看**（模型只拿最终结果）
   'tool.tail.live': '运行中输出',
@@ -2760,6 +2762,8 @@ const en: Record<string, string> = {
   'tool.codemode.sitesHint': 'Call sites found in the script (static analysis, not live progress)',
   'tool.codemode.discover': '{n} lookups',
   'tool.codemode.discoverHint': 'The script also used searchTools / describeTool to find tools (reserved ops - not tool calls, so they never appear in the list below)',
+  'tool.codemode.innerFailed': '{n} inner failed',
+  'tool.codemode.innerFailedHint': 'The script finished (Script completed) but one of the calls it made failed - the script caught the error, so the outcome looks successful',
   'tool.codemode.toolCopied': 'Copied {name}',
   'tool.tail.live': 'Live output',
   'tool.tail.bytes': '{n} out',

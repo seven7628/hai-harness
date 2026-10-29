@@ -11793,6 +11793,24 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 /* 档位标签：淡底 + 同色描边（两档色相不同 → 一眼分开），字号比工具名小一档：
    它是**限定语**而不是主语。 */
+/* 「外层成功、内层有失败」角标（cm-inner-failed）：
+   脚本 catch 掉工具错误再兜底输出时，行尾结局是 ✓（Script completed），真实失败只躺在
+   嵌套清单头部 —— 一眼扫过去读作成功。用警告色（不是错误色）刻意与「外层失败」区分：
+   这次调用**本身**是完成的，只是它内部有 N 次工具调用失败。 */
+.tool-row .cm-inner-failed {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+  color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 50%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
 .tool-row .cm-mode {
   flex: 0 0 auto;
   display: inline-flex;
