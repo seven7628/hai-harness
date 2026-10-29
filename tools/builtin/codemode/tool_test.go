@@ -507,7 +507,7 @@ func TestSearchScoringIsDeterministicAndWeighted(t *testing.T) {
 	}
 	b := &bridge{cat: cat, byRaw: snap.byRaw, ns: snap.ns}
 
-	hits := b.search("read", defaultSearchLimit)
+	hits := b.search("read", defaultSearchLimit, "", false)
 	if len(hits) == 0 {
 		t.Fatal("search(read) 无命中")
 	}
@@ -519,16 +519,16 @@ func TestSearchScoringIsDeterministicAndWeighted(t *testing.T) {
 	if hits[0].Name != "read_file" {
 		t.Fatalf("命中排序 = %+v, want read_file 第一（名字命中权重最高）", hits)
 	}
-	if again := b.search("read", defaultSearchLimit); len(again) != len(hits) || again[0].Name != hits[0].Name {
+	if again := b.search("read", defaultSearchLimit, "", false); len(again) != len(hits) || again[0].Name != hits[0].Name {
 		t.Fatal("检索结果不稳定（必须确定性排序）")
 	}
-	if got := b.search("read", 1); len(got) != 1 {
+	if got := b.search("read", 1, "", false); len(got) != 1 {
 		t.Fatalf("limit 未生效: %+v", got)
 	}
-	if got := b.search("", defaultSearchLimit); len(got) != 0 {
+	if got := b.search("", defaultSearchLimit, "", false); len(got) != 0 {
 		t.Fatalf("空查询不该有命中: %+v", got)
 	}
-	if got := b.search("read_file", defaultSearchLimit); len(got) == 0 || got[0].Name != "read_file" {
+	if got := b.search("read_file", defaultSearchLimit, "", false); len(got) == 0 || got[0].Name != "read_file" {
 		t.Fatalf("下划线应作为分隔符切分: %+v", got)
 	}
 }

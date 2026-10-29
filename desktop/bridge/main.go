@@ -834,17 +834,19 @@ func (m *manager) pptxPreviewer(pyRT *goruntime.Runtime) *builtin.PptxPreviewer 
 
 // workspaceRuntime：单个工作区的会话集合 + 持久化目录 + 技能注册表 + 自定义 subagent 注册表 + MCP 管理器（按工作区隔离）
 type workspaceRuntime struct {
-	path       string
-	storeDir   string
-	eventsDir  string
-	skills     *skills.Registry             // 分层技能注册表（全局 .agents/.go-code + 工作区 .agents/.go-code，工作区优先）
-	subagents  *subagent.DefinitionRegistry // 自定义 subagent 定义注册表（全局 ~/.go-code/agents + 工作区 agents，工作区优先）
-	mcp        *mcp.Manager                 // MCP 服务器管理器（每工作区共享连接；配置分层：用户 settings.json + 项目 .mcp.json/.go-code/settings.json）
-	mcpCfg     *mcp.Loader                  // 分层加载器（每层 last-good：坏文件沿用上次有效，见 mcp/loader.go）
-	mcpLayers  []mcp.LayerState             // 最近一次分层加载状态（mcp_list 展示：stale/err/skipped）
-	mcpApplied map[string]mcp.ServerConfig  // 已应用的合并配置（watcher 变化检测：相同则零副作用）
-	mcpWatch   *mcpWatcher                  // 配置文件监听（fsnotify；delete_workspace/shutdown 停止）
-	plugins    *plugin.Registry             // 插件注册表（每工作区：Browser Use 私有连接隔离；组件目录全局共享）
+	path            string
+	storeDir        string
+	eventsDir       string
+	skills          *skills.Registry             // 分层技能注册表（全局 .agents/.go-code + 工作区 .agents/.go-code，工作区优先）
+	subagents       *subagent.DefinitionRegistry // 自定义 subagent 定义注册表（全局 ~/.go-code/agents + 工作区 agents，工作区优先）
+	mcp             *mcp.Manager                 // MCP 服务器管理器（每工作区共享连接；配置分层：用户 settings.json + 项目 .mcp.json/.go-code/settings.json）
+	mcpCfg          *mcp.Loader                  // 分层加载器（每层 last-good：坏文件沿用上次有效，见 mcp/loader.go）
+	mcpLayers       []mcp.LayerState             // 最近一次分层加载状态（mcp_list 展示：stale/err/skipped）
+	mcpApplied      map[string]mcp.ServerConfig  // 已应用的合并配置（watcher 变化检测：相同则零副作用）
+	mcpWatch        *mcpWatcher                  // 配置文件监听（fsnotify；delete_workspace/shutdown 停止）
+	mcpHealthCancel context.CancelFunc           // MCP 低频探活（Ping + 断线重连；见 mcp_health.go）
+	mcpHealthDone   chan struct{}                // 探活 goroutine 退出信号（stop 等它）
+	plugins         *plugin.Registry             // 插件注册表（每工作区：Browser Use 私有连接隔离；组件目录全局共享）
 	// pluginsAuto 本次进程内是否已做过「自动恢复启用」判定（每工作区一次，避免每次会话创建重复尝试）。
 	pluginsAuto bool
 	mu          sync.Mutex
@@ -1187,6 +1189,8 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	// 配置监听（fsnotify）：登记进 m.workspaces 之后再启动——watcher 的 apply 回调会经
 	// m.runtime(path) 取运行态，早于登记会新建一份（重复运行态）。
 	m.startMCPWatch(ws)
+	// MCP 低频探活（Ping + 断线重连）：与配置监听同生命周期，见 mcp_health.go。
+	m.startMCPHealth(ws)
 	return ws
 }
 
@@ -3546,6 +3550,7 @@ func (m *manager) shutdownAll() {
 	m.mu.Unlock()
 	for _, ws := range wss {
 		ws.stopMCPWatch()
+		ws.stopMCPHealth() // 探活 goroutine 收尾（Refresh 会取 Manager 锁：不得持锁调用）
 	}
 	// Session Mesh 远程网关关闭（mesh 常驻 manager 级，不随工作区）
 	if m.meshGW != nil {
@@ -3710,6 +3715,7 @@ func (m *manager) deleteWorkspace(wsPath string) {
 		ws.mcp.Close()                         // 关闭工作区 MCP 服务器连接（子进程清理）
 		ws.plugins.Close(context.Background()) // 关闭插件私有连接（Browser Use 子进程清理）
 		ws.stopMCPWatch()                      // 停止配置监听（goroutine + fd 收尾；不得持锁调用）
+		ws.stopMCPHealth()                     // 停止 MCP 低频探活（同上）
 	}
 	// 只删 harness 自有元数据（工作区 .go-code 下的 skills.json），**保留**用户文件：
 	// 项目级配置 {ws}/.go-code/settings.json（手写的 MCP 等）、skills/ 项目技能、

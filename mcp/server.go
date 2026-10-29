@@ -2,7 +2,10 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -453,9 +456,90 @@ func (s *Server) callTool(ctx context.Context, toolName string, arguments map[st
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
-	return client.CallTool(ctx, gomcp.CallToolRequest{
+	res, err := client.CallTool(ctx, gomcp.CallToolRequest{
 		Params: gomcp.CallToolParams{Name: toolName, Arguments: arguments},
 	})
+	if err != nil && ctx.Err() == nil && transportDead(err) {
+		// 连接本身死了 → 打回错误态，下一次调用重拨（markBroken 不走 retryCooldown）。
+		// 条件里排除 ctx.Err()：调用方自己取消/超时是「这次调用没结果」，不是连接坏了；
+		// 业务层错误（invalid params 等 JSON-RPC error）不算——那类重拨也照样错。
+		s.markBroken(err)
+	}
+	return res, err
+}
+
+// transportDead 判定一次失败是否意味着「连接本身死了」（而不是本次调用/远端业务出错）。
+//
+// 依据 mcp-go v0.58 的错误面：streamable HTTP 的会话失效直接返回 ErrSessionTerminated
+// （404：服务端重启、空闲回收、多副本漂移），stdio 关闭返回 ErrTransportClosed，其余
+// 传输层故障是 net/io 错误（EOF、connection reset/refused、i/o timeout）。JSON-RPC 层的
+// 业务错误不在此列——它每次调用都会重犯，重拨无意义还平白重启 stdio 子进程。
+func transportDead(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, transport.ErrSessionTerminated) || errors.Is(err, transport.ErrTransportClosed) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	var oe *net.OpError
+	if errors.As(err, &oe) {
+		return true
+	}
+	// 兜底：mcp-go 有些路径把传输错误包成纯文本（fmt.Errorf 不带 %w），errors.Is 抓不到。
+	msg := strings.ToLower(err.Error())
+	for _, k := range []string{
+		"session terminated", "transport closed", "connection reset", "broken pipe",
+		"unexpected eof", "use of closed network connection", "client is not running",
+	} {
+		if strings.Contains(msg, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// markBroken 把「显示已连接、实际已死」的连接打回错误态（调用失败/探活失败时用）。
+//
+// 为什么必须有：EnsureConnected 的短路只认 state（连接成功过一次就永远判 connected），
+// callTool 失败原本**不改** state —— 一条死了的 HTTP 会话会永远显示 connected，每次调用
+// 都打在同一具尸体上，只有 mcp_refresh / 改配置 / 重启桥能救。
+//
+// 与 Close 只差两点：state=Error（错误在 mcp_list 里可见）+ lastAttempt 归零
+// （**不**进入 retryCooldown，下一次调用立刻重拨，而不是先等 10s 冷却）。
+func (s *Server) markBroken(err error) {
+	s.mu.Lock()
+	if s.client == nil && s.state != StateConnected {
+		s.mu.Unlock() // 已经不在「已连接」态（并发 markBroken / Close）：不重复收尾
+		return
+	}
+	client := s.client
+	oldCancel := s.cancel
+	connecting := s.connecting
+	s.client = nil
+	s.tools = nil
+	s.state = StateError
+	s.lastErr = err
+	s.phase = PhaseError
+	s.errorCode = phaseErrorCode(err)
+	s.lastAttempt = time.Time{} // 归零 = 下一次 EnsureConnected 立即重拨（不受 retryCooldown 约束）
+	s.closed = true             // 与 Close 同语义：在途 dial 完成后丢弃其 client
+	s.connecting = nil
+	s.ctx, s.cancel = context.WithCancel(context.Background()) // 重建生命周期 ctx，可重连
+	s.mu.Unlock()
+	if connecting != nil {
+		close(connecting) // 与 Close 一致：唤醒等待中的连接请求，不留 goroutine 挂在旧 client 上
+	}
+	if client != nil {
+		client.Close()
+	}
+	oldCancel()
 }
 
 // CallTool 执行工具调用并返回原始结果（含 content/StructuredContent 原文；常规路径走

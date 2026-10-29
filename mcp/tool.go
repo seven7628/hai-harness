@@ -102,9 +102,10 @@ func (a *mcpTool) RequiresApproval(_ context.Context, _ core.ToolCall) bool {
 
 // 编译期断言：适配器必须满足暴露层接口（见 tools/exposure.go）。
 var (
-	_ tools.ExposureProvider   = (*mcpTool)(nil)
-	_ tools.NamespaceProvider  = (*mcpTool)(nil)
-	_ tools.CodemodeAdvertiser = (*mcpTool)(nil)
+	_ tools.ExposureProvider     = (*mcpTool)(nil)
+	_ tools.NamespaceProvider    = (*mcpTool)(nil)
+	_ tools.CodemodeAdvertiser   = (*mcpTool)(nil)
+	_ tools.OutputSchemaProvider = (*mcpTool)(nil)
 )
 
 // AdvertiseCodemode 实现 tools.CodemodeAdvertiser：MCP 工具是脚本编排的**真正对象**，
@@ -207,15 +208,65 @@ func (a *mcpTool) Call(ctx context.Context, _, arguments string) (string, error)
 			return "", fmt.Errorf("%s: %w", a.Name(), err)
 		}
 	}
+	// 每次调用前确保连接（幂等：已连接只是一次锁内判断）。这是「用一次就自愈」的落点 ——
+	// 适配器此前**只**调用 callTool，连接完全依赖 Tools() 那一刻建好的那个 client：
+	// 连接一死，每次调用都打在同一具尸体上，且没有任何东西会再拨一次（真机上表现为
+	// 「接口一直空/一直错，重开新会话也没用」）。markBroken 已把 lastAttempt 归零，
+	// 所以这里会立刻重拨而不是等 retryCooldown。
+	if connErr := a.server.EnsureConnected(ctx); connErr != nil {
+		return "", connErr
+	}
 	res, err := a.server.callTool(ctx, a.tool.name, args)
 	if err != nil {
 		return "", err
 	}
 	tools.ImageSinkFrom(ctx).Add(imagesOfResult(res)...)
-	if res.IsError {
-		return serializeResult(res), fmt.Errorf("mcp %s.%s: %s", a.tool.server, a.tool.name, shortResult(res))
+	out := serializeResult(res)
+	if !res.IsError && tools.IsScriptCall(ctx) {
+		// 结构化结果（**只在编排脚本路径**写）：模型路径照旧只看文本，与 bash 同款
+		// （tools/builtin/bash.go 也只在 IsScriptCall 时写槽）——结构化结果只有 codemode
+		// 消费（bridge.go 的 toScriptResult），在模型路径重复落一份没有读者。
+		//
+		// IsError 刻意不写：脚本侧「IsError + 有结构化」是 **resolve**（codemode §15.4），
+		// 写进去会让错误变成一个能点字段的对象、脚本的 try/catch 收不到，失败被静默吃掉。
+		tools.StructuredSinkFrom(ctx).Set(structuredResult(res, out))
 	}
-	return serializeResult(res), nil
+	if res.IsError {
+		return out, fmt.Errorf("mcp %s.%s: %s", a.tool.server, a.tool.name, shortResult(res))
+	}
+	return out, nil
+}
+
+// OutputSchema 实现 tools.OutputSchemaProvider：声明「本工具会写结构化结果」。
+//
+// 返回 nil（不声明 schema）：MCP 服务器不告诉调用方输出的 schema，硬编一个就是撒谎；
+// 引擎只按「接口是否实现」决定读不读槽位（见 tools/engine.go），schema 仅用于描述生成。
+func (a *mcpTool) OutputSchema() any { return nil }
+
+// structuredResult 取本次调用可编程的结构化值（nil = 本次退回文本路径）。
+//
+// 优先级：服务器给的 StructuredContent（协议原生字段）> 文本内容本身是**严格合法 JSON**。
+//
+// 为什么必须补这一层：codemode 的表（§15.4）是「仅文本 → resolve 成单个 string」，
+// 而 MCP 工具的历史实现只返回文本 —— 于是脚本拿到的是一个 JSON **字符串**，
+// `r.count` 恒 undefined、`(r.items||[]).length` 恒 0，**零值且不报错**。实测代价：
+// 同一会话里同一条 ai-test 调用，打印原文拿到 25 条/scanned=154，改成取字段就变成
+// got=0 scanned=undefined，模型据此判成「MCP 会话死了」，白等一轮人工重连。
+// 而同机的 bash 工具（OutputSchemaProvider + StructuredSink）一直给对象，这个不对称
+// 正是「从 bash 学来的写法在 MCP 上静默归零」的来源。
+//
+// "null"/空白不算结构化：那与「本次没有结构化结果」无法区分，交回文本路径。
+func structuredResult(res *gomcp.CallToolResult, text string) []byte {
+	if res != nil && res.StructuredContent != nil {
+		if raw, err := json.Marshal(res.StructuredContent); err == nil {
+			return raw
+		}
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || trimmed == "null" || !json.Valid([]byte(trimmed)) {
+		return nil
+	}
+	return []byte(trimmed)
 }
 
 // imagesOfResult 从 MCP 结果提取图片内容块（ImageContent → data URL）。

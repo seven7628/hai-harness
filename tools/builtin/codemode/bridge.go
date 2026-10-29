@@ -334,9 +334,15 @@ func (b *bridge) resolve(name string) (string, error) {
 	if _, ok := b.cat.RawNames[name]; ok {
 		return name, nil
 	}
-	return "", fmt.Errorf("unknown tool %q: it is not in this call's codemode tool table "+
+	msg := fmt.Sprintf("unknown tool %q: it is not in this call's codemode tool table "+
 		"(hidden, model-only and otherwise non-callable tools are not listed) - use "+
 		"searchTools(query) or read the tool list in the codemode description", name)
+	// 近似名建议：模型手拼 MCP 工具名最容易差一段（server 段的连字符/下划线、归一化后缀）。
+	// 只说「unknown tool」会让它去翻目录再猜一次；给出候选就能一次改对。
+	if hints := b.suggest(name, 3); len(hints) > 0 {
+		msg += "; did you mean " + strings.Join(hints, ", ") + "?"
+	}
+	return "", errors.New(msg)
 }
 
 // runTool 派发一次子调用。
@@ -654,7 +660,7 @@ func (b *bridge) opSearch(args json.RawMessage) execproc.ScriptResult {
 	if limit > maxSearchLimit {
 		limit = maxSearchLimit
 	}
-	hits := b.search(req.Query, limit)
+	hits := b.search(req.Query, limit, req.Namespace, req.Exact)
 	return jsonResult(searchReply{Tools: hits})
 }
 
@@ -686,8 +692,15 @@ func (b *bridge) opDescribe(args json.RawMessage) execproc.ScriptResult {
 }
 
 // search 朴素检索：命中词打分（名字权重最高），按分数降序、同分按名字升序（确定性）。
-func (b *bridge) search(query string, limit int) []searchHit {
+//
+// 两条可选约束（2026-10-28 补，来自真机排障）：
+//   - namespace 非空 → 只在该 namespace 里找。多台 MCP 同时在册时，查 "get_stream"
+//     会把别的 server 的同名片段一起捞回来，模型据此以为「我要的工具没暴露」。
+//   - exact=true → 只回**名字完全相等**的那一条（脚本名或原始名，大小写不敏感）。
+//     精确名命中在任何情况下都置顶：拼对了名字却排在 8 条模糊命中之后，等于没有精确匹配。
+func (b *bridge) search(query string, limit int, namespace string, exact bool) []searchHit {
 	terms := searchTerms(query)
+	lnsFilter := strings.ToLower(strings.TrimSpace(namespace))
 	type scored struct {
 		hit   searchHit
 		score int
@@ -709,7 +722,25 @@ func (b *bridge) search(query string, limit int) []searchHit {
 		lname := strings.ToLower(raw)
 		lsummary := strings.ToLower(summary)
 		lns := strings.ToLower(nsName)
+		if lnsFilter != "" && lns != lnsFilter {
+			continue // namespace 过滤：多 server 场景下「只在我这台里搜」
+		}
+		script := b.cat.RawNames[raw]
+		exactHit := strings.EqualFold(raw, query) || strings.EqualFold(script, query)
+		if exact {
+			if !exactHit {
+				continue // 只要精确命中
+			}
+			out = append(out, scored{
+				hit:   searchHit{Name: script, Canonical: raw, Summary: summary, Namespace: nsName},
+				score: 1,
+			})
+			continue
+		}
 		score := 0
+		if exactHit {
+			score += 100 // 精确命中置顶（不受词表权重影响）
+		}
 		for _, t := range terms {
 			switch {
 			case strings.Contains(lname, t):
@@ -727,7 +758,7 @@ func (b *bridge) search(query string, limit int) []searchHit {
 			continue
 		}
 		out = append(out, scored{
-			hit:   searchHit{Name: b.cat.RawNames[raw], Summary: summary, Namespace: nsName},
+			hit:   searchHit{Name: script, Canonical: raw, Summary: summary, Namespace: nsName},
 			score: score,
 		})
 	}
@@ -745,6 +776,81 @@ func (b *bridge) search(query string, limit int) []searchHit {
 		hits = append(hits, s.hit)
 	}
 	return hits
+}
+
+// suggest 为「未知工具」给出最近的几个名字（确定性：分数降序、名字升序）。
+//
+// 判据刻意便宜（不引 Levenshtein）：名字按 '_' 切成 token 求交集大小 —— 模型手写 MCP
+// 工具名时错的是「server 段的连字符/下划线、归一化后缀」这类局部，token 交集对它们足够；
+// 再叠一层「互相包含」加分，覆盖「少写/多写一段」的情形。返回**脚本名 + 原始名**，
+// 因为两种写法都可调用，列两个名字比列一个更能一次改对。
+func (b *bridge) suggest(name string, limit int) []string {
+	q := strings.ToLower(strings.TrimSpace(name))
+	if q == "" || b.cat == nil {
+		return nil
+	}
+	qt := nameTokens(q)
+	type cand struct {
+		label string
+		score int
+	}
+	var cands []cand
+	for _, raw := range b.cat.Names {
+		script := b.cat.RawNames[raw]
+		lraw := strings.ToLower(raw)
+		lscript := strings.ToLower(script)
+		score := len(intersectTokens(qt, nameTokens(lraw)))
+		if strings.EqualFold(lraw, q) || strings.EqualFold(lscript, q) {
+			score += 100
+		}
+		if strings.Contains(lraw, q) || strings.Contains(lscript, q) ||
+			(q != "" && (strings.Contains(q, lraw) || strings.Contains(q, lscript))) {
+			score += 5
+		}
+		if score <= 0 {
+			continue
+		}
+		label := script
+		if script != raw {
+			label = script + " (" + raw + ")"
+		}
+		cands = append(cands, cand{label: label, score: score})
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].score != cands[j].score {
+			return cands[i].score > cands[j].score
+		}
+		return cands[i].label < cands[j].label
+	})
+	if len(cands) > limit {
+		cands = cands[:limit]
+	}
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, strconv.Quote(c.label))
+	}
+	return out
+}
+
+// nameTokens 名字切成 token 集合（'_' 与 '__' 都按分隔符处理，小写）。
+func nameTokens(name string) map[string]bool {
+	out := map[string]bool{}
+	for _, t := range strings.Split(strings.ToLower(name), "_") {
+		if t = strings.TrimSpace(t); t != "" {
+			out[t] = true
+		}
+	}
+	return out
+}
+
+func intersectTokens(a, b map[string]bool) []string {
+	var out []string
+	for t := range a {
+		if b[t] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ---- 收尾 ----
