@@ -132,7 +132,9 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
       </div>
       <div className={`rt-collapse${showFull ? ' open' : ''}`}>
         <div>
-          <div className={`thinking-body ${long ? 'scroll' : ''}`} ref={bodyRef}>
+          {/* data-live：思考正在写的时候这一块是有界的（设计 .think-body[data-live]：
+              只留最后几行 + 顶部渐隐），跑完才按折叠行展开 */}
+          <div className={`thinking-body ${long ? 'scroll' : ''}`} data-live={running ? '' : undefined} ref={bodyRef}>
             {paras.map((para, i) => (
               <p className="tk-p" key={i}><InlineCode text={para} /></p>
             ))}

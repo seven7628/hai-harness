@@ -705,6 +705,22 @@ html[data-skin='runtime'] .composer .p-drop .pd-what {
   color: var(--ink-2);
 }
 
+/* 正在写的思考 = 设计 .think-body[data-live]（ui.components.css:2136-2143）：
+   流式时这块**有界**（78px，只看得见最后几行），顶部用遮罩渐隐说明上面还有 ——
+   一堵不断长高的推理文本会把答案顶到屏幕外。结算后回到折叠行，不再受这条约束。
+   （默认皮肤仍是 160px 的内滚动条；这里只改运行时这一档。） */
+html[data-skin='runtime'] .thinking-body[data-live] {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: 78px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, transparent, #000 30%);
+}
+
+/* 写的那一行在最底下：段落不能收缩到盒子大小，否则被裁掉的是最新的一行 */
+html[data-skin='runtime'] .thinking-body[data-live] > * { flex: none; }
+
 /* 队列条（composer 的 pending-queue）= 设计的 .pq（ui.components.css:608-642）：
    琥珀描边 + amber-soft 底 + 顶部滑入。原文案与"每条可编辑/删除"的行为都不动，
    这里只换度量：11px mono 的头行、9.5px 的序号方块、每行 3px 的上留白。
