@@ -591,6 +591,120 @@ html[data-skin='runtime'] .pop.model-pop .hint.pop-foot {
   color: var(--ink-3);
 }
 
+/* 输入卡的三种活态 = 设计 ui.components.css:2445-2534 的 variant 段：
+   ① 运行中（data-live）：盒子自己呼吸，两道 4.6s 的环错开 2.3s 往外散；
+   ② 停止键：安静的红（面色底 + 红字形 + 内描边），不是一块红砖；
+   ③ 拖拽（.p-drop）：虚线强调边 + 28px 图标块 + 粗体标题 + mono 说明。
+   这三样都是**交互态**，只在运行时这档皮肤下生效，另两档仍是原来的样子。 */
+html[data-skin='runtime'] .composer[data-live] {
+  border-color: color-mix(in oklab, var(--accent) 28%, var(--line));
+  animation: rt-p-breathe 4.6s var(--ease) infinite;
+}
+
+html[data-skin='runtime'] .composer[data-live]::before,
+html[data-skin='runtime'] .composer[data-live]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 40%, transparent);
+  animation: rt-p-ring 4.6s var(--ease-out) infinite;
+  opacity: 0;
+}
+
+html[data-skin='runtime'] .composer[data-live]::after { animation-delay: 2.3s; }
+
+@keyframes rt-p-ring {
+  0% { opacity: 0; box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 34%, transparent); }
+  14% { opacity: 0.62; }
+  100% { opacity: 0; box-shadow: 0 0 0 11px color-mix(in oklab, var(--accent) 0%, transparent); }
+}
+
+@keyframes rt-p-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 6%, transparent); }
+}
+
+/* 发送/停止键 = 设计 .send（ui.components.css:465-475）：28px、r8、accent 面、
+   accent-ink 字形、-8px 的投影；按下缩到 .92 */
+html[data-skin='runtime'] .row2 .send-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 6px 16px -8px color-mix(in oklab, var(--accent) 80%, transparent);
+  transition: transform var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .row2 .send-btn svg { width: 14px; height: 14px; stroke-width: 2; }
+
+html[data-skin='runtime'] .row2 .send-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent) 88%, #fff);
+}
+
+html[data-skin='runtime'] .row2 .send-btn:active:not(:disabled) { transform: scale(0.92); }
+
+/* 运行中：停止是可控动作，不该报警（设计原文：a full red square is a fire alarm） */
+html[data-skin='runtime'] .row2 .send-btn.is-stop {
+  background: color-mix(in oklab, var(--red) 13%, var(--raised));
+  color: var(--red);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--red) 32%, transparent);
+}
+
+html[data-skin='runtime'] .row2 .send-btn.is-stop:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--red) 20%, var(--raised));
+}
+
+/* 拖拽覆盖层 = 设计 .p-drop（ui.components.css:2492-2504） */
+html[data-skin='runtime'] .composer .p-drop {
+  position: absolute;
+  inset: -1px;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 3px;
+  border: 1px dashed color-mix(in oklab, var(--accent) 58%, var(--line));
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--card-2) 90%, transparent);
+  backdrop-filter: blur(2px);
+  text-align: center;
+  pointer-events: none;
+  animation: rt-p-drop-in 160ms var(--ease-out) both;
+}
+
+@keyframes rt-p-drop-in {
+  from { opacity: 0; transform: scale(0.995); }
+  to { opacity: 1; transform: none; }
+}
+
+html[data-skin='runtime'] .composer .p-drop .pd-ic {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 3px;
+  border-radius: 9px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+html[data-skin='runtime'] .composer .p-drop .pd-ic svg { width: 15px; height: 15px; stroke-width: 1.9; }
+
+html[data-skin='runtime'] .composer .p-drop b {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .composer .p-drop .pd-what {
+  font: 400 11px/1.5 var(--mono);
+  color: var(--ink-2);
+}
+
 /* 队列条（composer 的 pending-queue）= 设计的 .pq（ui.components.css:608-642）：
    琥珀描边 + amber-soft 底 + 顶部滑入。原文案与"每条可编辑/删除"的行为都不动，
    这里只换度量：11px mono 的头行、9.5px 的序号方块、每行 3px 的上留白。
@@ -1371,6 +1485,11 @@ html[data-skin='runtime'] .answer-acts .act:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .composer[data-live],
+  html[data-skin='runtime'] .composer[data-live]::before,
+  html[data-skin='runtime'] .composer[data-live]::after,
+  html[data-skin='runtime'] .composer .p-drop,
+  html[data-skin='runtime'] .composer .attach-chip.doc-chip,
   html[data-skin='runtime'] .rt-collapse,
   html[data-skin='runtime'] .rt-fold > .rt-fi,
   html[data-skin='runtime'] .thinking-toggle .rt-face,

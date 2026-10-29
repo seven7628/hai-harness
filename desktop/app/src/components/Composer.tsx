@@ -946,6 +946,18 @@ export default function Composer() {
     }
   }
 
+  // 拖拽提示的正文：能不能放、为什么不能放，判据全在这里，两档皮肤只是画法不同
+  const dropText = dragKind === 'image'
+    ? (canAcceptImageDrop
+      ? t('composer.attach.drop').replace('{n}', String(MAX_IMAGE_ATTACHMENTS - attachments.length))
+      : !canImage ? t('composer.attach.noImage') : t('composer.attach.busy'))
+    // 文档（或混合）拖拽：@引用与模型输入类型无关，只要队列/压缩态允许就收
+    : (queueFull || compressing)
+      ? t('composer.attach.busy')
+      : docRefs.length >= MAX_DOC_REFS
+        ? t('composer.attach.docMax').replace('{n}', String(MAX_DOC_REFS))
+        : t('composer.attach.docDrop')
+
   return (
     <div className="composer-wrap">
       <AgentRunningBar />
@@ -971,26 +983,25 @@ export default function Composer() {
       )}
       <div
         className={`composer${compressing ? ' compressing' : ''}${dragActive ? ' drag-active' : ''}`}
+        // 设计 .prompt-box[data-live]：跑起来时盒子自己会呼吸（两道 4.6s 的环，错开 2.3s）
+        data-live={runActive ? '' : undefined}
         aria-busy={compressing}
         onDragEnter={onDragEnter}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
-        {dragActive && (
-          <div className="drop-hint" role="status" aria-live="polite">
-            {dragKind === 'image'
-              ? (canAcceptImageDrop
-                ? t('composer.attach.drop').replace('{n}', String(MAX_IMAGE_ATTACHMENTS - attachments.length))
-                : !canImage ? t('composer.attach.noImage') : t('composer.attach.busy'))
-              // 文档（或混合）拖拽：@引用与模型输入类型无关，只要队列/压缩态允许就收
-              : (queueFull || compressing)
-                ? t('composer.attach.busy')
-                : docRefs.length >= MAX_DOC_REFS
-                  ? t('composer.attach.docMax').replace('{n}', String(MAX_DOC_REFS))
-                  : t('composer.attach.docDrop')}
+        {dragActive && (rt ? (
+          /* 设计 .p-drop（ui.components.css:2492）：虚线强调边 + 28px 图标块 + 粗体标题 +
+             mono 说明，落在整张输入卡上（inset -1px） */
+          <div className="p-drop" role="status" aria-live="polite">
+            <span className="pd-ic">{dragKind === 'image' ? <ImageIcon size={15} /> : <PaperclipIcon size={15} />}</span>
+            <b>{t(dragKind === 'image' ? 'composer.drop.titleImage' : 'composer.drop.titleDoc')}</b>
+            <span className="pd-what">{dropText}</span>
           </div>
-        )}
+        ) : (
+          <div className="drop-hint" role="status" aria-live="polite">{dropText}</div>
+        ))}
         {compressing && (
           <div className="composer-status" role="status" aria-live="polite">
             <span className="composer-status-spinner" aria-hidden="true" />
@@ -1569,7 +1580,7 @@ export default function Composer() {
             )}
             {sttError && <span className="mic-error" role="alert">{sttError}</span>}
             <button
-              className="send-btn"
+              className={`send-btn${stopping ? ' is-stop' : ''}`}
               onClick={stopping ? interrupt : () => void submit()}
               disabled={expanding || (queueFull && !stopping)}
               title={compressing ? t('composer.compressing.abort') : expanding ? t('composer.expanding') : stopping ? t('composer.stop') : t('composer.send')}

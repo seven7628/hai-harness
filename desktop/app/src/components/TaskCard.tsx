@@ -21,7 +21,9 @@ import { fmtDuration, fmtUsd, UsageChip } from './ui'
 import { ElapsedTimer } from './ElapsedTimer'
 import Narrative from './Narrative'
 import { TaskResultInline } from './NarrativeBlocks'
-import { ArtifactCard } from './ArtifactCard'
+import { ArtifactCard, absArtifactPath } from './ArtifactCard'
+import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
+import { useSkin } from '../lib/useSkin'
 import JsonView from './JsonView'
 import { agentItemsToBlocks } from '../lib/agentSession'
 import { ToolImages } from './ToolImages'
@@ -134,6 +136,9 @@ export const TaskCard = memo(function TaskCard({
 // 「卡片出现在哪里」。
 export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<MsgBlock, { kind: 'agent' }> }) {
   const t = useT()
+  const skin = useSkin()
+  const openFile = useAppStore((s) => s.openFile)
+  const workspace = useAppStore((s) => s.workspace)
   const interruptTask = useAppStore((s) => s.interruptTask)
   const loadAgentHistory = useAppStore((s) => s.loadAgentHistory)
   const focusAgent = useAppStore((s) => s.focusAgent)
@@ -190,9 +195,25 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
           }}
         />
       </div>
+      {/* 产出卡：与主会话同一个组件（子会话＝主会话，只是 session 不同）。
+          以前这里固定走旧的 ArtifactCard —— 于是同一个 run 的产出，主对话里是 v2 的
+          「主卡 + 另外 N 个」，任务卡片里却是大图标 + 「共 N 个」的另一套。 */}
       {b.artifacts && b.artifacts.length > 0 && (
         <div className="ac-artifacts">
-          <ArtifactCard items={b.artifacts} {...(b.artifactsTruncated ? { truncated: true } : {})} />
+          {skin === 'runtime' ? (
+            <ArtifactsBlock
+              items={b.artifacts}
+              {...(b.artifactsTruncated ? { truncated: true } : {})}
+              onPreview={(a) => openFile(a.path)}
+              onReveal={(a) => {
+                const d = window.desktop
+                if (!d?.showItemInFolder) return
+                void d.showItemInFolder(absArtifactPath(a.path, workspace))
+              }}
+            />
+          ) : (
+            <ArtifactCard items={b.artifacts} {...(b.artifactsTruncated ? { truncated: true } : {})} />
+          )}
         </div>
       )}
       <TaskResultInline delivered={b.deliveredToMain} result={b.taskResult} error={b.taskError} />

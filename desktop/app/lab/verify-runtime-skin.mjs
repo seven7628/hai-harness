@@ -61,6 +61,34 @@ await wait(900)
 
 // ---- 一轮带工具/思考的回答 -------------------------------------------------
 await say('运行时样例')
+
+// ---- 运行中：盒子的呼吸 + 安静的停止键 -------------------------------------
+// 设计把「跑起来了」写成两件事：盒子自己有呼吸（.prompt-box[data-live] 的
+// p-breathe + 两道错开 2.3s 的 p-ring），以及停止键退回面色底、只留红字形 +
+// 内描边（原文：a full red square is a fire alarm）。两样都量计算值。
+await waitUntil("!!document.querySelector('.composer[data-live]')", 20000)
+const live = await page.eval(() => {
+  const c = document.querySelector('.composer[data-live]')
+  if (!c) return null
+  const stop = document.querySelector('.row2 .send-btn.is-stop')
+  const scs = stop ? getComputedStyle(stop) : null
+  const r = stop?.getBoundingClientRect()
+  return {
+    breathe: getComputedStyle(c).animationName,
+    ring: getComputedStyle(c, '::before').animationName,
+    ringDelay: getComputedStyle(c, '::after').animationDelay,
+    stop: !!stop,
+    stopColor: scs?.color ?? null,
+    stopShadow: scs?.boxShadow ?? null,
+    stopBg: scs?.backgroundColor ?? null,
+    size: r ? [Math.round(r.width), Math.round(r.height)] : null,
+  }
+})
+check('live: the prompt box breathes while a run is live', live?.breathe === 'rt-p-breathe', live?.breathe)
+check('live: two rings, staggered 2.3s', live?.ring === 'rt-p-ring' && live?.ringDelay === '2.3s', `${live?.ring} @${live?.ringDelay}`)
+check('live: the stop key turns quiet red', live?.stop === true && live?.stopShadow?.includes('inset'), `${live?.stopBg} ${live?.stopShadow}`)
+check('live: send/stop key is 28px', live?.size?.[0] === 28 && live?.size?.[1] === 28, JSON.stringify(live?.size))
+
 await wait(13000)
 
 const t1 = await page.eval(() => {
@@ -505,6 +533,62 @@ const th = await page.eval(() => {
 })
 check('thinking: expanding changes the mark colour', th.expanded === 'true' && th.state === 'engaged' && th.mkColor !== 'rgb(69, 214, 165)', `${th.state} ${th.mkColor}`)
 check('thinking: the mark does not rotate', th.faceTransform === 'none', th.faceTransform)
+
+// ---- 轮尾只有一条账：calls · tokens · cache · s turn -------------------------
+// 设计里一轮结束时只有一条账；「本轮 TTFT · LLM 总耗时 · Agent 总耗时 · tok/s」那行
+// 是另两档皮肤的写法，两个并排等于把同一份事实报两遍 —— 运行时皮肤下它不该出现。
+const foot = await page.eval(() => {
+  const led = document.querySelector('.rt-ledger')
+  const meta = document.querySelectorAll('.assistant-turn-meta').length
+  const arts = {
+    modern: document.querySelectorAll('.msg.artifacts .ar').length,
+    legacy: document.querySelectorAll('.art').length,
+    taskLegacy: document.querySelectorAll('.ac-artifacts .art, .ac-artifacts .art-rest').length,
+  }
+  const txt = led?.textContent?.replace(/\s+/g, ' ').trim() ?? null
+  return { ledger: !!led, txt, meta, arts }
+})
+check('turn: the cost line exists and is the ledger', foot.ledger === true && /calls/.test(foot.txt || ''), foot.txt)
+check('turn: the legacy TTFT line is gone (one fact, one line)', foot.meta === 0, foot.meta)
+check('artifacts: the runtime card is the design one (.ar), not the old .art', foot.arts.modern > 0 && foot.arts.legacy === 0, JSON.stringify(foot.arts))
+// 任务卡片里的产出也必须同一套（子会话＝主会话，只是 session 不同）：任何一处
+// .ac-artifacts 里都不该再出现旧卡。没有任务卡时这条自然成立，有就必须是 .ar。
+check('artifacts: the task card uses the same card', foot.arts.taskLegacy === 0, foot.arts.taskLegacy)
+
+// ---- 拖拽：盒子变成一个可以往里放东西的地方 -------------------------------
+// 设计 .p-drop（ui.components.css:2492）：虚线强调边、28px 图标块、12.5px 标题、
+// 11px mono 说明，落在整张输入卡上（inset -1px）。这里真的发一个带文件的
+// dragenter —— 走的是组件自己的 hasFileDrag/onDragEnter，不是给类名打补丁。
+const drop = await page.eval(async () => {
+  const box = document.querySelector('.composer')
+  if (!box) return { open: false, why: 'no composer' }
+  const dt = new DataTransfer()
+  dt.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' }))
+  box.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt }))
+  await new Promise((r) => setTimeout(r, 300))
+  const d = document.querySelector('.composer .p-drop')
+  if (!d) return { open: false, why: 'overlay missing' }
+  const b = box.getBoundingClientRect()
+  const r = d.getBoundingClientRect()
+  const out = {
+    open: true,
+    border: getComputedStyle(d).borderStyle,
+    edgeToEdge: r.width >= b.width && r.height >= b.height,
+    delta: [Math.round(r.width - b.width), Math.round(r.height - b.height)],
+    icon: Math.round(d.querySelector('.pd-ic')?.getBoundingClientRect().width ?? 0),
+    title: getComputedStyle(d.querySelector('b')).fontSize,
+    what: getComputedStyle(d.querySelector('.pd-what')).fontSize,
+    text: (d.textContent || '').trim().slice(0, 40),
+  }
+  box.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true, dataTransfer: dt }))
+  await new Promise((r2) => setTimeout(r2, 250))
+  out.closed = !document.querySelector('.composer .p-drop')
+  return out
+})
+check('drop: the card shows a drop target', drop.open === true && drop.border === 'dashed', JSON.stringify(drop))
+check('drop: the overlay covers the whole card', drop.edgeToEdge === true, JSON.stringify(drop.delta))
+check('drop: 28px icon block, 12.5px title, 11px mono detail', drop.icon === 28 && drop.title === '12.5px' && drop.what === '11px', `${drop.icon} ${drop.title} ${drop.what}`)
+check('drop: leaving puts the card back', drop.closed === true, drop.closed)
 
 // ---- 队列条：逐条编辑 / 保存 ------------------------------------------------
 // 设计要求队列行可逐条处置（.pq-act）；我们的暂存队列同一条规矩：点哪一条只改

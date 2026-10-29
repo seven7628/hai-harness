@@ -912,7 +912,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
               {/* streaming 透传：流式中 HTML 围栏不挂 iframe（半截 <script> 会被执行、
                   且 srcDoc 每 token 重载 = 白板闪烁，见 HtmlPreviewBlock 注释）。 */}
               {b.text ? <Markdown text={b.text} streaming={b.streaming} /> : null}
-              {!b.streaming && (
+              {/* 运行时皮肤不画这一行：设计的轮尾只有一条账（calls · tokens · cache ·
+                  s turn，TTFT/LLM/tok-s 在悬停里展开）。这行的 TTFT/LLM/Agent/速度与那条账
+                  是同一份事实，两行并排等于把同一个数报两遍 —— 见 rt-turn-foot 的 Ledger。 */}
+              {!b.streaming && skin !== 'runtime' && (
                 <AssistantTurnMeta b={b} />
               )}
               {/* 流式光标：设计是 6×14 的 accent 方块，闪在 steps(1) 上（`.rt-caret`，
