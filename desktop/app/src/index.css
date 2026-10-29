@@ -4933,6 +4933,22 @@ body.is-electron .left.collapsed .rail .rbtn {
   font-size: 10.5px;
   color: var(--text-3);
 }
+/* 面板尾部的压缩入口（只在运行时皮肤渲染：那一档点 ctx 环是「打开面板」，
+   压缩需要一个落脚点；另两档点环就是压缩确认，不需要这个按钮） */
+.ctx-compact {
+  width: 100%;
+  margin-top: 7px;
+  padding: 5px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: none;
+  text-align: left;
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 120ms var(--ease);
+}
+.ctx-compact:hover { color: var(--text); }
 .send-btn {
   display: grid;
   place-items: center;

@@ -277,6 +277,10 @@ export default function Composer() {
   // ctx 环 hover：上下文构成面板。140ms 延迟——快速划过（如去点发送）不弹面板；
   // 面板是 ctx 的同级兄弟节点（不是 .ctx 的子节点），所以点面板不会误触「点击压缩」。
   const [ctxPanelOpen, setCtxPanelOpen] = useState(false)
+  // 运行时皮肤：点 ctx 环 = 打开这块构成面板（设计 index.html:1028 的 .pop[data-pop=ctx]）。
+  // 另两档仍是「点击 → 压缩确认」的老路径，不能一起改。钉住之后鼠标移开不关，
+  // 再点一次或点面板外才关。
+  const [ctxPinned, setCtxPinned] = useState(false)
   const ctxHoverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => () => { if (ctxHoverTimer.current) clearTimeout(ctxHoverTimer.current) }, [])
   const openCtxPanel = () => {
@@ -288,6 +292,7 @@ export default function Composer() {
   }
   const closeCtxPanel = () => {
     if (ctxHoverTimer.current) clearTimeout(ctxHoverTimer.current)
+    if (ctxPinned) return // 钉住时移开鼠标不关（否则「点开」和「悬停」没区别）
     setCtxPanelOpen(false)
   }
   // 面板数据只认当前会话（切会话后迟到的响应已在 store 丢弃，此处再兜一层）
@@ -1505,13 +1510,35 @@ export default function Composer() {
                 aria-label={t('composer.ctxAria').replace('{used}', fmtTokens(ctxUsed)).replace('{total}', fmtTokens(window)).replace('{pct}', String(pct))}
                 title={ctxEstimated ? t('composer.ctxTipEstimate') : pct >= 90 ? t('composer.ctxNear') : t('composer.ctxTip')}
                 aria-disabled={compressing}
-                onClick={() => { if (!compressing) setConfirmCompact(true) }}
+                onClick={() => {
+                  if (compressing) return
+                  if (rt) {
+                    // 设计里这一下是打开构成面板；压缩入口移进面板里（见 CtxBreakdown 的 onCompact），
+                    // 否则运行时段就没有任何进压缩的入口了
+                    setCtxPinned((v) => {
+                      const next = !v
+                      setCtxPanelOpen(next)
+                      if (next) fetchCtxBreakdown()
+                      return next
+                    })
+                    return
+                  }
+                  setConfirmCompact(true)
+                }}
                 onKeyDown={(e) => {
                   if (compressing) return
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setConfirmCompact(true)
+                  if (e.key !== 'Enter' && e.key !== ' ') return
+                  e.preventDefault()
+                  if (rt) {
+                    setCtxPinned((v) => {
+                      const next = !v
+                      setCtxPanelOpen(next)
+                      if (next) fetchCtxBreakdown()
+                      return next
+                    })
+                    return
                   }
+                  setConfirmCompact(true)
                 }}
               >
                 <CtxRing pct={pct} />
@@ -1521,6 +1548,13 @@ export default function Composer() {
               {/* hover 面板：上下文构成分区（Tools/Skills/MCP/系统提示词/消息/其他） */}
               {ctxPanelOpen && (
                 <CtxBreakdownPanel
+                  {...(rt ? {
+                    onCompact: () => {
+                      setCtxPinned(false)
+                      setCtxPanelOpen(false)
+                      setConfirmCompact(true)
+                    },
+                  } : {})}
                   used={ctxUsed}
                   window={window}
                   pct={pct}

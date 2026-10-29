@@ -27,6 +27,7 @@ export default function CtxBreakdownPanel({
   sessionCachePct,
   ctxCacheWrite,
   sessionCacheWrite,
+  onCompact,
 }: {
   used: number
   window: number
@@ -36,6 +37,9 @@ export default function CtxBreakdownPanel({
   sessionCachePct?: number // 会话累计命中率（= 状态栏「缓存」同一个数）
   ctxCacheWrite?: number // 本轮写入缓存量（Anthropic cache_creation；其余协议恒 0/缺省）
   sessionCacheWrite?: number // 本会话累计写入缓存量
+  /** 压缩入口。设计里点 ctx 环只打开这块面板，压缩是别处的动作；我们原本把压缩挂在
+      环的点击上，改成「点环开面板」之后必须有地方放它 —— 面板尾部就是那个地方。 */
+  onCompact?: () => void
 }) {
   const t = useT()
   const activeSessionId = useAppStore((s) => s.activeSessionId)
@@ -106,6 +110,13 @@ export default function CtxBreakdownPanel({
         )}
       </div>
       <div className="ctx-panel-note">{note}</div>
+      {/* 压缩入口（只有运行时皮肤传了 onCompact）：设计里点 ctx 环是打开这块面板，
+          压缩是另一处的动作；我们原本把它挂在环的点击上，改过来之后必须有落脚点。 */}
+      {onCompact ? (
+        <button type="button" className="ctx-compact" onClick={onCompact}>
+          {t('ctx.panel.compact')}
+        </button>
+      ) : null}
     </div>
   )
 }

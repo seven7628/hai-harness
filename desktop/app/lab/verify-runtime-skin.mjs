@@ -742,6 +742,40 @@ check('artifacts: the runtime card is the design one (.ar), not the old .art', f
 // .ac-artifacts 里都不该再出现旧卡。没有任务卡时这条自然成立，有就必须是 .ar。
 check('artifacts: the task card uses the same card', foot.arts.taskLegacy === 0, foot.arts.taskLegacy)
 
+// ---- 上下文环：点它是「打开构成面板」，不是「压缩」 ------------------------
+// 设计 index.html:1028 里 .ctx-ring 打开的是 .pop[data-pop="ctx"]（容量条 + 分区行 +
+// 缓存命中率）；压缩不在这一下上。我们原本把压缩挂在环的点击上，等于点「详情」弹「确认」。
+// 运行时皮肤改成设计那样，压缩入口移到面板尾部（否则这一档就没有入口了）。
+const ctxClick = await page.eval(async () => {
+  const DIALOG = '.modal-hint[role="dialog"]'
+  document.querySelector(DIALOG)?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  const ring = document.querySelector('.row2 .ctx')
+  if (!ring) return { present: false }
+  ring.click()
+  await new Promise((r) => setTimeout(r, 700))
+  const panel = document.querySelector('.ctx-panel')
+  const compactBtn = document.querySelector('.ctx-compact')
+  const out = {
+    present: true,
+    panel: !!panel,
+    dialogAfterRing: !!document.querySelector('.modal-hint[role="dialog"]'),
+    compactLabel: compactBtn?.textContent?.trim() ?? null,
+  }
+  if (compactBtn) {
+    compactBtn.click()
+    await new Promise((r) => setTimeout(r, 500))
+    out.dialogAfterPanelBtn = !!document.querySelector('.modal-hint[role="dialog"]')
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  // 收尾：把面板关掉（再点一次环）
+  document.querySelector('.row2 .ctx')?.click()
+  await new Promise((r) => setTimeout(r, 300))
+  return out
+})
+check('ctx: clicking the ring opens the breakdown', ctxClick.panel === true && ctxClick.dialogAfterRing === false, JSON.stringify(ctxClick))
+check('ctx: compaction still has an entry, in the panel', ctxClick.compactLabel === '压缩上下文…' && ctxClick.dialogAfterPanelBtn === true, JSON.stringify(ctxClick))
+
 // ---- 拖拽：盒子变成一个可以往里放东西的地方 -------------------------------
 // 设计 .p-drop（ui.components.css:2492）：虚线强调边、28px 图标块、12.5px 标题、
 // 11px mono 说明，落在整张输入卡上（inset -1px）。这里真的发一个带文件的

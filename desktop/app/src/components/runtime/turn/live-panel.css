@@ -53,56 +53,13 @@ html[data-skin='runtime'] .cy-live-rows {
   gap: 1px;
 }
 
-html[data-skin='runtime'] .lv-row {
-  display: grid;
-  grid-template-columns: 12px 46px minmax(0, 1fr) auto 46px;
-  align-items: center;
-  gap: 8px;
-  min-height: 21px;
-  padding: 0 6px 0 2px;
-  font: 400 11.5px/1.4 var(--mono);
-  color: var(--ink-3);
-  animation: tail-in 200ms var(--ease-out) both;
-}
 
-html[data-skin='runtime'] .lv-row .lv-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: color-mix(in oklab, var(--ink-3) 45%, transparent);
-}
 
-html[data-skin='runtime'] .lv-row[data-s='run'] .lv-dot {
-  background: var(--accent);
-  animation: breathe 1.4s var(--ease) infinite;
-}
 
-html[data-skin='runtime'] .lv-row .v {
-  font-weight: 500;
-  color: var(--ink-2);
-  white-space: nowrap;
-  overflow: hidden;
-}
 
-html[data-skin='runtime'] .lv-row[data-s='run'] .v {
-  color: var(--ink);
-}
 
-html[data-skin='runtime'] .lv-row .o {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-html[data-skin='runtime'] .lv-row .m,
-html[data-skin='runtime'] .lv-row .dur {
-  font-variant-numeric: tabular-nums;
-}
 
-html[data-skin='runtime'] .lv-row .dur {
-  text-align: right;
-}
 
 html[data-skin='runtime'] .cy-live.is-done {
   animation: live-out 240ms var(--ease) both;
@@ -137,8 +94,6 @@ html[data-skin='runtime'] .cy-live.is-done {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html[data-skin='runtime'] .lv-row,
-  html[data-skin='runtime'] .lv-row[data-s='run'] .lv-dot,
   html[data-skin='runtime'] .cy-live.is-done {
     animation: none;
   }
