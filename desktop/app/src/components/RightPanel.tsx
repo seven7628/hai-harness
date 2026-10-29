@@ -18,6 +18,7 @@ import { useAppearance } from '../lib/appearance'
 import { isCsvPath } from '../lib/csv'
 import { baseDirFor } from '../lib/localAsset'
 import { visualKindOf } from '../lib/visualFile'
+import { centerOf, overlayCoversRect, rectsIntersect } from '../lib/overlayHit'
 import { copyText } from '../lib/clipboard'
 import { withAgentToolBlocks } from '../lib/agentSession'
 import { useT } from '../i18n'
@@ -1778,15 +1779,25 @@ function BrowserTab({ toolbarHidden, onToggleTabs, panelVisible, activePageId, m
     if (!nativeViewMode) return
     // 全屏弹窗（.modal-hint / .settings-overlay / .img-zoom）+ 光标处浮层（.ctx-menu / .sel-popup /
     // .settings-pop）：后者只有真的压在右栏上时才隐藏 —— 在中栏弹出的右键菜单不该让右栏黑一下。
-    const SEL = '.modal-hint.open, .settings-overlay, .img-zoom, .ctx-menu, .sel-popup, .settings-pop'
+    const SEL = '.modal-hint.open, .settings-overlay, .img-zoom, .rt-lb, .cy-lb, .ctx-menu, .sel-popup, .settings-pop'
+    // 名单之外再问一句 DOM：右栏矩形**中点**上最顶层的元素是不是还在右栏里（判据与测试
+    // 见 lib/overlayHit.ts）。原生视图不参与 DOM 命中测试，所以「中点被别的元素占住」
+    // 只可能是 DOM 覆盖层压在它上面 —— 包括以后新加、名字还没进名单的那些。
+    // 用户 2026-10 报的正是漏掉的那一类：先开右栏的 HTML 预览、再点开聊天里的大图，
+    // 大图（`.rt-lb`，fixed inset:0）整个躲在原生预览画面后面。
     const compute = () => {
-      const panel = shotRef.current?.getBoundingClientRect()
-      let hit = false
+      const hostRect = shotRef.current?.getBoundingClientRect()
+      const host = shotRef.current
+      const pt = centerOf(hostRect ?? undefined, { width: window.innerWidth, height: window.innerHeight })
+      let hit = !!host && overlayCoversRect(
+        hostRect ?? undefined,
+        pt ? document.elementsFromPoint(pt.x, pt.y) : [],
+        { contains: (el) => host.contains(el as Node), positionOf: (el) => getComputedStyle(el as Element).position, viewport: { width: window.innerWidth, height: window.innerHeight } },
+      )
       for (const el of document.querySelectorAll(SEL)) {
         const r = el.getBoundingClientRect()
         if (r.width < 1 || r.height < 1) continue
-        const overlaps = !panel || (r.left < panel.right && r.right > panel.left && r.top < panel.bottom && r.bottom > panel.top)
-        if (overlaps) { hit = true; break }
+        if (rectsIntersect(hostRect ?? undefined, r)) { hit = true; break }
       }
       // 同值不 set（MutationObserver 每次 class 变动都会走到这里，避免无谓重渲染）
       setDomOverlayOpen((prev) => (prev === hit ? prev : hit))

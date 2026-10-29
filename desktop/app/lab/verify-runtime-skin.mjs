@@ -512,7 +512,8 @@ await page.eval(() => {
 })
 // 探针（iframe 里的 $__htmlh）可能比这一帧晚到：等内联高度出现，最多 8s
 for (let i = 0; i < 32; i++) {
-  const has = await page.eval(() => !!document.querySelector('.cy-frame .pv-frame[style*=height]'))
+  // 轮询**最后一块**（与后面量的是同一块）；一轮里可能有两块视觉产出，前面的可能停在兜底高度
+  const has = await page.eval(() => !!document.querySelector('.cy-frame .pv-frame[style*=height]') && !!document.querySelectorAll('.cy-frame .pv-frame[style*=height]').length)
   if (has) break
   await wait(250)
 }
@@ -547,6 +548,7 @@ check('visual output: no fold row, no captions — just the frame', hr.hasFrame 
   JSON.stringify({ frame: hr.hasFrame, fold: hr.foldRow, head: hr.head, foot: hr.foot }))
 if (hr.inline == null) {
   const dbg = await page.eval(() => ({
+    framesInline: [...document.querySelectorAll('.cy-frame .pv-frame')].map((f) => f.getAttribute('style')),
     msgs: (window.__msgs || []).slice(-6),
     count: (window.__msgs || []).length,
     frames: document.querySelectorAll('.cy-frame .pv-frame').length,
@@ -725,6 +727,21 @@ const p6 = await page.eval(() => {
   return { present: !!box, caption: box?.querySelector('figcaption')?.textContent, x: !!box?.querySelector('.cy-lb-x') }
 })
 check('I10 clicking a card opens the lightbox', p6.present && p6.x, JSON.stringify(p6))
+// 原生预览视图恒在 DOM 之上（CSS 压不住），所以右栏有预览时，任何全屏覆盖层都会躲在它后面
+// —— 用户 2026-10 报的「右栏 html 预览先开、聊天里的大图后开，大图被挡住」就是它。
+// 这里证明判据本身成立：灯箱开着时，右栏矩形中点上最顶层的元素已经不在右栏里 → 该隐藏视图。
+const cover = await page.eval(() => {
+  const host = document.querySelector('.browser-shot')
+  if (!host) return { skipped: true }
+  const r = host.getBoundingClientRect()
+  if (r.width < 2 || r.height < 2) return { skipped: true }
+  const el = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2))
+  return { skipped: false, insideHost: !!el && host.contains(el), top: el ? el.className?.toString().split(' ')[0] : null }
+})
+if (!cover.skipped) {
+  check('an open lightbox covers the right panel (native view must be hidden then)',
+    cover.insideHost === false && /cy-lb|rt-lb/.test(cover.top || ''), JSON.stringify(cover))
+}
 await page.eval(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
 await wait(300)
 check('I11 esc closes the lightbox', !(await page.eval(() => !!document.querySelector('.cy-lb'))), 'still open')
