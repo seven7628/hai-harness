@@ -15,6 +15,8 @@ export interface Round {
   req?: string
   /** the assistant block that opened this round, if any */
   say?: MsgBlock
+  /** 不是一轮 LLM 调用，而是一个「记录」块（artifacts / system / 回执），单独成段 */
+  bare?: boolean
   items: MsgBlock[]
 }
 
@@ -58,7 +60,11 @@ export function roundsOf(items: MsgBlock[]): Round[] {
       c.items.push(b)
       continue
     }
-    // anything else (user, artifacts, system, results) is not part of a round
+    /* 其余块（artifacts / system / task_result / divider）不属于任何一轮，但它们
+       **必须留在原位**而不是被丢掉：产出卡、系统信号、回执都是在两轮之间发生的
+       记录，丢了就是「agent_end 之后没有产出块」——用户报的就是这个。
+       各自成为一段（bare：没有 assistant 开口，groupRounds 因此不画批处理行）。 */
+    out.push({ key: 's' + out.length + '-' + b.id, items: [b], bare: true })
     cur = null
   }
   return out

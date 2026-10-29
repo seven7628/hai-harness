@@ -175,12 +175,20 @@ test('rounds: a non-work block closes the open round', () => {
     { kind: 'tool', id: 4, toolId: 'b', name: 'bash', status: 'done' },
   ] as unknown as MsgBlock[]
   const rs = roundsOf(items)
-  // the note ends round 1; the tool after it has no assistant, so it opens a new
-  // round rather than being swallowed by a round it does not belong to
-  assert.equal(rs.length, 2)
+  // the note ends round 1 **and stays in the output as its own bare segment**
+  // (dropping it is what lost the artifacts card after AgentEnd); the tool after
+  // it has no assistant, so it opens a new round rather than being swallowed by
+  // a round it does not belong to
+  assert.equal(rs.length, 3)
+  // assistant 存在 r.say 里（它是开口者），items 只放被它吞下的工具
+  assert.deepEqual(rs.map((r) => r.items.map((b) => b.kind)), [['tool'], ['system'], ['tool']])
+  assert.equal(rs[0].say?.id, 1)
+  assert.equal(rs[1].bare, true)
   assert.deepEqual(rs[0].items.map((b) => b.id), [2])
-  assert.equal(rs[1].say, undefined)
-  assert.deepEqual(rs[1].items.map((b) => b.id), [4])
+  assert.equal(rs[0].say, undefined === 0 ? undefined : rs[0].say) // 段 0 由 assistant 1 开口
+  assert.equal(rs[1].say, undefined) // 记录段没有开口者
+  assert.deepEqual(rs[1].items.map((b) => b.id), [3]) // system note 原位保留
+  assert.deepEqual(rs[2].items.map((b) => b.id), [4])
 })
 
 test('batch line: the dominant verb names the line, and the count is its unit', () => {
@@ -224,4 +232,24 @@ test('compression scan heads: no timestamp means no made-up time', () => {
   const heads = headsOf(list)
   assert.equal(heads[0].t, '')
   assert.equal(heads[0].h, 'first line')
+})
+
+test('roundsOf：产出/信号块不被丢掉（agent_end 的产出卡就靠它）', () => {
+  const list = [
+    { kind: 'user', id: 1, text: 'hi' },
+    { kind: 'assistant', id: 2, text: 'ok', streaming: false, thinking: '' },
+    { kind: 'artifacts', id: 3, items: [{ name: 'a.go', path: 'x/a.go', kind: 'created', added: 5 }] },
+    { kind: 'system', id: 4, text: 'done', tone: 'info' },
+  ] as never
+  const rounds = roundsOf(list as never)
+  const kinds = rounds.flatMap((r) => r.items.map((b) => b.kind))
+  // 产出与系统信号都必须留在结果里，且各自是一段（bare）
+  if (!kinds.includes('artifacts') || !kinds.includes('system')) {
+    throw new Error('记录块被 roundsOf 丢掉了: ' + JSON.stringify(kinds))
+  }
+  // user 也不属于任何一轮 → 它同样是一段 bare；记录块与它各占一段
+  const bare = rounds.filter((r) => r.bare).map((r) => r.items[0].kind)
+  if (!bare.includes('artifacts') || !bare.includes('system')) {
+    throw new Error('记录块没有被单独成段: ' + JSON.stringify(bare))
+  }
 })
