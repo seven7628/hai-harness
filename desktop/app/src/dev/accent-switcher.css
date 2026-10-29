@@ -1,0 +1,48 @@
+/* 试色条（仅 dev）：贴左下角，压在最上层但不吃点击面积 */
+.accent-switcher {
+  position: fixed;
+  left: 12px;
+  /* 让开底部状态条（idle · 回合 · in/out · total …），它也是 fixed */
+  bottom: 46px;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(12, 12, 13, 0.88);
+  backdrop-filter: blur(8px);
+  font: 400 10.5px/1 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  color: #9a9aa1;
+}
+
+.accent-switcher .as-lab {
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+.accent-switcher .as-dot {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.accent-switcher .as-dot:hover {
+  transform: scale(1.12);
+}
+
+.accent-switcher .as-dot[data-on='1'] {
+  box-shadow: 0 0 0 2px #0c0c0d, 0 0 0 3.5px currentColor;
+}
+
+.accent-switcher .as-name {
+  margin-left: 2px;
+  min-width: 108px;
+  color: #d5d5da;
+}

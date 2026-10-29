@@ -8220,15 +8220,19 @@ body.is-electron .cron-head {
   gap: 2px;
 }
 /* 格子：正方形（aspect-ratio）随容器宽度缩放，窄窗不溢出 */
+/* 热度图是**九十个格子 × 七行**的密度图：用强调色画，一屏里就有 ~600 块饱和色，
+   页面立刻被那一支色相占满（用户报障：「深色系统下大量这种蓝色系搭配，很不舒适」）。
+   密度本身用墨阶表达最省事，也最耐看：5 档从 7% 到 52% 的 --text，
+   与正文同一条色轴 —— 看出「哪天多」不需要颜色，只需要深浅。 */
 .us-heat-cell {
   aspect-ratio: 1;
   border-radius: 2px;
-  background: color-mix(in srgb, var(--text) 7%, transparent);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
 }
-.us-heat-cell.lv1 { background: color-mix(in srgb, var(--accent) 26%, transparent); }
-.us-heat-cell.lv2 { background: color-mix(in srgb, var(--accent) 48%, transparent); }
-.us-heat-cell.lv3 { background: color-mix(in srgb, var(--accent) 72%, transparent); }
-.us-heat-cell.lv4 { background: var(--accent); }
+.us-heat-cell.lv1 { background: color-mix(in srgb, var(--text) 16%, transparent); }
+.us-heat-cell.lv2 { background: color-mix(in srgb, var(--text) 28%, transparent); }
+.us-heat-cell.lv3 { background: color-mix(in srgb, var(--text) 40%, transparent); }
+.us-heat-cell.lv4 { background: color-mix(in srgb, var(--text) 54%, transparent); }
 /* 未来格（今天之后的当周）/ 窗口前导格（窗口外的占位格）：不画底，网格形状保留 */
 .us-heat-cell.future,
 .us-heat-cell.before {

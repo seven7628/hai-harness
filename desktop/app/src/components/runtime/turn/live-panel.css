@@ -1,19 +1,16 @@
 /* 运行面板 —— 逐字搬自 design/agent-runtime/v2（ui.components.css:2101-2133）。 */
 
-/* 运行中的这一段是一个**盒子**，不是一个无边界的区域。
-   设计里它是无边线的（ui.components.css:2103），但那样「哪几行属于这次运行」
-   只能靠读，用户报障的正是这句（「没有全部收敛在 working 内部、没有局部高度」）：
-   内容其实都在里面，可外面没有一条线告诉你在哪儿结束。所以给一层最安静的壳
-   —— line-soft 的边、半档底色、不加阴影，高度上限见下面 .rt-work-body。
-   结算后的 WorkBox 用同一个壳（同一个选择器）。 */
+/* 运行中的这一段**不是一个卡片**：没有边、没有底、没有圆角（用户两轮反馈的合并
+   结论 —— 先要「内容都得在里面且有局部高度」，再加边框又「看着不自然」）。
+   容器靠三件事表达，不靠线：
+     · 一行头（Working · 时钟 · 调用数 · 正在做什么）
+     · 内容缩进 14px（宽度差本身就说明从属关系）
+     · 46vh 封顶后自己滚（谁在里面、滚到哪儿，一眼看得出）
+   结算后的 .rt-workbox 与它同形（同一个选择器），所以展开时也只是「头 + 缩进的内容」。 */
 html[data-skin='runtime'] .cy-live,
 html[data-skin='runtime'] .rt-workbox {
   display: grid;
   gap: 3px;
-  padding: 8px 10px 9px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-md);
-  background: color-mix(in oklab, var(--card) 55%, transparent);
 }
 
 html[data-skin='runtime'] .cy-live-head {
