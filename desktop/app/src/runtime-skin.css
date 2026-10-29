@@ -591,6 +591,82 @@ html[data-skin='runtime'] .pop.model-pop .hint.pop-foot {
   color: var(--ink-3);
 }
 
+/* 输入卡的底部工具条 = 设计 .prompt-bar 的 .ptool（ui.components.css:1050-1079）。
+   只改**度量与色**，不动结构与行为：三个 chip 还是原来的 ChipMenu（键盘/开合/选项
+   全照旧），只是长得像设计里的那一排：26px 高、11px mono、悬停才浮出底色，
+   模型名用强调色、上下文是琥珀描边的胶囊。
+   为什么这三条要写在这里而不是改 index.css：另两档皮肤仍在用原来的 chip 造型，
+   皮肤层覆盖才不会把别的档一起改了。 */
+html[data-skin='runtime'] .row2 {
+  gap: 2px;
+  padding: 6px 7px 7px;
+}
+
+html[data-skin='runtime'] .row2 .mode-chip,
+html[data-skin='runtime'] .row2 .model-chip,
+html[data-skin='runtime'] .row2 .effort-chip {
+  position: relative;
+  height: 26px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font: 400 11px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .row2 .mode-chip:hover,
+html[data-skin='runtime'] .row2 .model-chip:hover,
+html[data-skin='runtime'] .row2 .effort-chip:hover,
+html[data-skin='runtime'] .row2 .model-chip[aria-expanded='true'] {
+  background: var(--raised);
+  color: var(--ink);
+}
+
+/* 模型名是这一排里唯一该被读到的值：provider 退成 ink-3，名字用强调色 */
+html[data-skin='runtime'] .row2 .model-chip-label {
+  font-weight: 500;
+  color: var(--violet);
+}
+
+html[data-skin='runtime'] .row2 .chip-full-label > span:first-child {
+  color: var(--ink-3);
+}
+
+/* 设计的 .p-div：13px 高、1px 的竖线，落在两枚工具之间（不是每枚都带） */
+html[data-skin='runtime'] .row2 .mode-chip::after,
+html[data-skin='runtime'] .row2 .model-chip::after {
+  content: '';
+  position: absolute;
+  right: -1px;
+  top: 50%;
+  width: 1px;
+  height: 13px;
+  margin-top: -6.5px;
+  background: var(--line);
+  pointer-events: none;
+}
+
+/* 设计里模型按钮没有前面那个星标（图标在 .ptool 里是可选档） */
+html[data-skin='runtime'] .row2 .spark {
+  display: none;
+}
+
+/* 上下文占用：唯一把两个数字放在一起的地方，琥珀描边胶囊 */
+html[data-skin='runtime'] .row2 .ctx {
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--amber) 45%, var(--line));
+  background: color-mix(in oklab, var(--amber) 8%, transparent);
+  font: 400 10.5px/1 var(--mono);
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .row2 .ctx:hover {
+  border-color: var(--amber);
+  background: color-mix(in oklab, var(--amber) 14%, transparent);
+}
+
 /* 命令输出的定级着色（设计 #m-tail 的 .tl .ok/.warn/.err/.dim，ui.components.css:851-855）
    —— 只在这一档皮肤下生效：别的皮肤拿到的是同一段文本、没有颜色，行为不变。 */
 html[data-skin='runtime'] .rt-out .rt-out-ts {
