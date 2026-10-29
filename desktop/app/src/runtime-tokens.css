@@ -43,6 +43,11 @@ html[data-skin='runtime'] {
   --green: var(--bamboo);
   --amber: var(--ochre);
   --violet: var(--rt-violet); /* 设计里 violet ≠ accent（#b492ff vs #8aa0ff） */
+  /* 两个 -soft 是设计的对话框底色：漏了近一年没人发现，因为 var() 失效只是
+     「背景变透明」——提问卡的头像（.ask-ic）因此一直是一颗裸 ?，没有那层 18px
+     的淡紫底，用户看到的「小图标没对齐/不对」有一半是它。 */
+  --violet-soft: var(--rt-violet-soft);
+  --green-soft: var(--rt-green-soft);
   --red: var(--crimson);
 
   /* 链接：设计里链接的颜色只画在下划线上（.bl-a），字本身仍是墨色 */

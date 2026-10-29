@@ -23,6 +23,14 @@ html[data-skin='runtime'] .ask-scope .ask {
   box-shadow: var(--shadow-card);
   overflow: hidden;
   color: var(--ink-2);
+
+  /* 卡自己给自己封顶，里面滚动 —— 而不是让外面的列表去裁它（裁的那一刀
+     正好落在页脚上：实测两道按钮在 y=785，卡片底 789，只剩 4px 可见，
+     用户报障「按钮看不见」就是这么来的）。三段各归其位：step 栏与页脚
+     是定位用的，永远在；只有 body（选项 + 预览）会滚。 */
+  display: flex;
+  flex-direction: column;
+  max-height: min(64vh, 560px);
 }
 
 html[data-skin='runtime'] .ask-scope .ask-step {
@@ -58,9 +66,12 @@ html[data-skin='runtime'] .ask-scope .ask-head {
 
 html[data-skin='runtime'] .ask-scope .ask[data-step] .ask-head { padding-top: 12px; }
 
+/* 图标对齐的是**首行文字**，不是整块：所以用 align-items:start 的轨道 +
+   一个按行盒算出来的上边距。1px 是设计值，实测这边仍低 1px（13.5px 的字，
+   墨色中心比行盒中心高约 0.8px），所以归零，让 18px 方块的盒心落在墨色中心上。 */
 html[data-skin='runtime'] .ask-scope .ask-ic {
   display: grid; place-items: center;
-  width: 18px; height: 18px; margin-top: 1px;
+  width: 18px; height: 18px; margin-top: 0;
   border-radius: 5px;
   background: var(--violet-soft);
   color: var(--violet);
@@ -80,7 +91,14 @@ html[data-skin='runtime'] .ask-scope .ask-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   padding: 12px 6px 0;
+  overflow-y: auto; /* 唯一可滚的一段（见 .ask 的 max-height 注释） */
+  min-height: 0;
 }
+
+html[data-skin='runtime'] .ask-scope .ask-step,
+html[data-skin='runtime'] .ask-scope .ask-head,
+html[data-skin='runtime'] .ask-scope .ask-foot,
+html[data-skin='runtime'] .ask-scope .ask > input { flex: none; }
 
 html[data-skin='runtime'] .ask-scope .ask[data-form='preview'] .ask-body {
   
@@ -126,7 +144,7 @@ html[data-skin='runtime'] .ask-scope .ask-opt:focus-visible { outline: 2px solid
 html[data-skin='runtime'] .ask-scope .ask-mark {
   position: relative;
   width: var(--ask-glyph); height: var(--ask-glyph);
-  margin-top: 1.5px;
+  margin-top: 1px; /* 16px 环落在 13px/1.45 的首行墨色中心（设计写 1.5，实测偏 0.5 低） */
   border-radius: 50%;
   box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--ink-3) 45%, transparent);
   transition: box-shadow var(--t-fast) var(--ease);
@@ -169,8 +187,8 @@ html[data-skin='runtime'] .ask-scope .ask-lab {
 
 html[data-skin='runtime'] .ask-scope .ask-opt kbd {
   width: var(--ask-glyph); height: var(--ask-glyph);
-  margin: 0 0 0 12px;
-  display: grid; place-items: center; align-self: center;
+  margin: 1px 0 0 12px;
+  display: grid; place-items: center; align-self: start;
   border-radius: 4px;
   background: color-mix(in oklab, var(--ink-3) 12%, transparent);
   font: 400 9.5px/1 var(--mono);
@@ -279,9 +297,17 @@ html[data-skin='runtime'] .ask-scope .ask-btn.go { border-color: transparent; ba
 
 html[data-skin='runtime'] .ask-scope .ask-btn.go:hover { background: color-mix(in oklab, var(--accent) 88%, #fff); }
 
+/* 设计的「还没到」是无边、更淡——但 .62 的不透明度叠在 ink-3 上只剩 ~3.2:1
+   （11.5px 正文要 4.5:1），实测在卡片底色上几乎看不见，用户的原话是
+   「都不知道是不是下一页的按钮」。保留无边与无底色，把颜色收回 ink-3 全值；
+   主按钮变灰时仍留一点强调色 —— 它在等一个答案，不是在告罄。 */
 html[data-skin='runtime'] .ask-scope .ask-btn[disabled] {
   border-color: transparent; background: none; color: var(--ink-3);
-  opacity: 0.62; cursor: default; transform: none;
+  opacity: 1; cursor: default; transform: none;
+}
+
+html[data-skin='runtime'] .ask-scope .ask-btn.go[disabled] {
+  color: color-mix(in oklab, var(--accent) 62%, var(--ink-3));
 }
 
 html[data-skin='runtime'] .ask-scope .ask-btn[disabled]:hover { background: none; }
@@ -366,10 +392,57 @@ html[data-skin='runtime'] .dock .dock-box {
   padding: 0;
 }
 
+/* 标题条是**这一页的一行**，不是面板自己的小标题：12px 正文色、9px 折角、
+   右侧 mono 10.5 的元信息 —— 与 `.rt-grp` / WorkFold 的行语言同一套。原来的
+   10.5px 全 mono、全 ink-3 是旧 .dock 的写法，放在运行时页面里像别的产品的东西
+   （用户报障：折叠起来样式也很丑、不协调）。 */
 html[data-skin='runtime'] .dock .dock-hd {
-  padding: 0 2px 7px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 2px 8px;
+  font-size: 12px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: var(--ink-2);
+  transition: color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .dock .dock-hd:hover { color: var(--ink); }
+
+html[data-skin='runtime'] .dock .dock-hd .chev {
+  font-size: 9px;
+  color: var(--ink-3);
+  transition: color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .dock .dock-hd:hover .chev { color: var(--ink-2); }
+
+/* 元信息（run id / 倒计时 / 收起提示）靠右、mono、比正文低一档 */
+html[data-skin='runtime'] .dock .q-run,
+html[data-skin='runtime'] .dock .dock-countdown,
+html[data-skin='runtime'] .dock .dock-fold-hint {
   font: 400 10.5px/1 var(--mono);
   color: var(--ink-3);
+  white-space: nowrap;
+}
+
+html[data-skin='runtime'] .dock .dock-fold-hint { margin-left: 8px; }
+
+/* 标题条上的 ? 与卡里的 .ask-ic 是同一个东西（一个提问），所以同色同形：
+   16px 方块、5px 圆角、violet-soft 底 + violet 字。原来这里是强调色的圆点，
+   两个 ? 长得不一样，一眼就是两处风格拼起来的。 */
+html[data-skin='runtime'] .dock .q-mark {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  font-size: 10.5px;
+  line-height: 1;
+  border-radius: 5px;
+  background: var(--violet-soft);
+  color: var(--violet);
 }
 
 /* 页脚（提示 + 提交）在面板里，不在某一张卡里，所以设计在 .ask 上声明的
@@ -399,6 +472,13 @@ html[data-skin='runtime'] .dock .q-list .ask {
   max-width: none;
 }
 
+/* 列表只负责「放不下时整列滚」，封顶要高于卡片自己的上限（64vh），
+   否则又会先于页脚裁一刀；2px 右内距去掉，卡片右边线才和正文列同一条线。 */
+html[data-skin='runtime'] .dock .q-list {
+  max-height: min(72vh, 640px);
+  padding-right: 0;
+}
+
 /* 自由输入是设计里没有的那一格（设计的卡只有选项）。把它放成占满一行的
    一格，并压住它的内在宽度 —— 否则 input 的 max-content 会撑大选项列
    （实测把第一列撑到 687px，预览窗被挤出卡外）。样式取设计同一套 token：
@@ -421,9 +501,14 @@ html[data-skin='runtime'] .ask > input {
 
 html[data-skin='runtime'] .ask-body input::placeholder { color: var(--ink-3); }
 
-html[data-skin='runtime'] .ask-body input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+/* 自由输入是这张卡里唯一能打字的地方，用不着一条 2px 的整圈蓝光（通用
+   input:focus-visible 给的那条）抢走整张卡的注意力：边线上一档强调色 + 一层
+   很薄的柔光就够说明「焦点在这里」。 */
+html[data-skin='runtime'] .ask > input:focus,
+html[data-skin='runtime'] .ask > input:focus-visible {
+  outline: none;
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 12%, transparent);
 }
 
 /* 预览窗也压住：minmax(220px,1fr) 里的 1fr 在没有 min-width:0 时不会收缩 */

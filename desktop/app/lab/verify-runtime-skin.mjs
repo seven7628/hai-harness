@@ -131,6 +131,30 @@ check('ask option 3 tracks', (t2.optCols || '').split(' ').length === 3, t2.optC
 check('ask scope is a container', t2.scope === 'inline-size', t2.scope)
 check('I3 continue is disabled until answered', t2.btnDisabled === true, t2.btnDisabled)
 
+/* 页脚永远在卡里：卡自己封顶、body 滚，而不是外面的 .q-list 裁一刀
+   （那一刀落在页脚上时，按钮只露 4px —— 用户报障「按钮看不见」的根因）。 */
+const t2b = await page.eval(() => {
+  const card = document.querySelector('.dock .ask')
+  const foot = card?.querySelector('.ask-foot')
+  const btn = card?.querySelector('.ask-btn')
+  const body = card?.querySelector('.ask-body')
+  if (!card || !foot || !btn) return { ok: false }
+  const c = card.getBoundingClientRect(), f = foot.getBoundingClientRect(), b = btn.getBoundingClientRect()
+  return {
+    ok: true,
+    footInside: Math.round(f.bottom) <= Math.round(c.bottom),
+    btnFullyVisible: Math.round(b.bottom) <= Math.round(c.bottom) && Math.round(b.top) >= Math.round(c.top),
+    btnH: Math.round(b.height),
+    cardFlex: getComputedStyle(card).display,
+    bodyScrolls: body ? getComputedStyle(body).overflowY : null,
+    cardCap: getComputedStyle(card).maxHeight,
+    violetSoft: getComputedStyle(card.querySelector('.ask-ic')).backgroundColor,
+  }
+})
+check('ask footer sits inside the card (nothing clips the buttons)', t2b.footInside && t2b.btnFullyVisible, JSON.stringify(t2b))
+check('ask card is a capped flex column and only its body scrolls', t2b.cardFlex === 'flex' && t2b.cardCap !== 'none' && t2b.bodyScrolls === 'auto', JSON.stringify(t2b))
+check('ask icon chip has its violet ground (--violet-soft resolves)', t2b.violetSoft !== 'rgba(0, 0, 0, 0)', t2b.violetSoft)
+
 // I4：数字键直选 + 选后按钮可用
 const t3 = await page.eval(() => {
   const card = document.querySelector('.dock .ask')
@@ -140,6 +164,13 @@ const t3 = await page.eval(() => {
   return opts.length
 })
 await wait(400)
+const t2c = await page.eval(() => {
+  const a = document.querySelector('.dock .ask')?.getBoundingClientRect()
+  const t = document.querySelector('.rt-turn')?.getBoundingClientRect()
+  return { ask: a ? Math.round(a.width) : null, col: t ? Math.round(t.width) : null }
+})
+check('the question card is as wide as the transcript column', t2c.ask != null && t2c.ask === t2c.col, JSON.stringify(t2c))
+
 const t4 = await page.eval(() => {
   const card = document.querySelector('.dock .ask')
   const opts = [...card.querySelectorAll('.ask-opt')]
@@ -396,14 +427,42 @@ await page.eval(() => document.querySelector('.rt-turn .rt-act[aria-expanded]')?
 await wait(700)
 const c2 = await page.eval(() => {
   const t = [...document.querySelectorAll('.rt-turn')].pop()
-  // 高度上限在 .rt-turn-body 上（.rt-turn-in 是它的内容盒）
-  const box = t?.querySelector('.rt-turn-body')
+  // 展开态是**同一个盒子**（.rt-workbox：头 = 折角行，内容 = .rt-work-body），
+  // 高度上限在内容盒上；不再把工作行摊进流里
+  const box = t?.querySelector('.rt-workbox .rt-work-body')
   if (!box) return { present: false, kids: [...(t?.children ?? [])].map((k) => k.className) }
   const cs = getComputedStyle(box)
   return { present: true, maxH: cs.maxHeight, overflow: cs.overflowY, capped: box.scrollHeight > box.clientHeight }
 })
-check('concise: expanding brings the work back', c2.present, c2.present)
+check('concise: expanding brings the work back — inside the box, not into the flow', c2.present, JSON.stringify(c2))
 check('concise: the expanded work has a height cap', c2.present && c2.maxH !== 'none' && c2.overflow === 'auto', JSON.stringify(c2))
+
+/* 盒子里的内容比盒子窄一层，盒子外只有最后一轮正文 —— 用户的三条要求，
+   逐条钉住：① 运行中盒子外没有思考/工具；② 结算后工作行仍在盒子里（不摊进流）；
+   ③ 内容缩进（宽度差）与框本身分得开。 */
+const c3 = await page.eval(() => {
+  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  const box = t?.querySelector('.rt-workbox')
+  const body = box?.querySelector(':scope > .rt-work-body')
+  const ans = t?.querySelector(':scope > .rt-turn-ans')
+  if (!box || !body) return { present: false, boxKids: [...(t?.children ?? [])].map((k) => k.className) }
+  const b = box.getBoundingClientRect(), i = body.getBoundingClientRect()
+  return {
+    present: true,
+    boxW: Math.round(b.width),
+    bodyW: Math.round(i.width),
+    indent: getComputedStyle(body).paddingLeft,
+    // 盒子里的是工作行；外面只该有最后一轮的正文（所以数的是**工作类**的行，
+    // 不是所有行 —— 正文自己也是 .rt-grp 里的一个孩子）
+    rowsInBox: body.querySelectorAll('.rt-grp > *').length,
+    // 外面只该有「最后一轮的正文」这**一个**块（块内部可以自带嵌套行，
+    // 例如末轮的 codemode 结果，那不是被摊出来的工作行）
+    ansBlocks: ans ? ans.querySelectorAll(':scope > .rt-grp > *').length : 0,
+    ansText: (ans?.textContent || '').slice(0, 40),
+  }
+})
+check('concise: work rows stay inside the box after the run (not spilled into the flow)', c3.present && c3.rowsInBox > 0 && c3.ansBlocks <= 1, JSON.stringify(c3))
+check('concise: inside the box is narrower than the box (the indent carries the nesting)', c3.present && c3.bodyW < c3.boxW && c3.indent === '14px', JSON.stringify({ boxW: c3.boxW, bodyW: c3.bodyW, indent: c3.indent }))
 
 await freshTurn('detailed')
 const d1 = await page.eval(() => {

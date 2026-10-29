@@ -8,12 +8,12 @@ import { Markdown } from './markdown'
 import { foldedBody, runningBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine } from './runtime/turn/batch'
-import { WorkFold } from './runtime/turn/WorkFold'
 import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
 import { UserBlock } from './runtime/blocks/UserBlock'
 import { Lane } from './runtime/lane/Lane'
 import { LivePanel } from './runtime/turn/LivePanel'
+import { WorkBox } from './runtime/turn/WorkBox'
 import { FilesLine } from './runtime/turn/FilesLine'
 import { Signal } from './runtime/signals/Signal'
 import { headsOf } from './runtime/blocks/heads'
@@ -1025,14 +1025,21 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* 简洁档：收起时正文只剩**结论**（这一轮最后一个有正文的 assistant），中间那些
        「我看看 X」的旁白、思考、工具全在工作过程里。展开才按原顺序读全过程。
        详细档：原顺序整段展开，不折叠（v2 里详细档根本没有折叠行）。 */
-    const shut = concise && !open
     const workItems = concise ? (skin === 'runtime' ? groupRounds(turn.items.filter(isWork)) : groupBlocks(turn.items.filter(isWork))) : []
     /* 简洁档：收起时外面只有结论；**运行中**外面只有正在写的那一段 ——
        其余的思考、中间的 llm_content、工具都在 Working 里滚（AgentStart →
        AgentEnd 是同一个块）。详细档照旧整段摊开。 */
     /* 运行中（简洁档）：外面什么都不放 —— 正在写的那段也在 Working 里长，
        与图2 的详细档是同一份内容，只是多了一层盒子。 */
-    const bodySource = shut ? foldedBody(turn) : concise && live ? runningBody(turn) : turn.items
+    /* 简洁档的**外面**永远只有两样：最后一轮的正文，和记录（信号 / 产出 / 回执）。
+       工作内容（思考、旁白、工具、子 agent）无论运行中还是跑完、无论展开还是收起，
+       都只存在于工作盒子里 —— 展开的是盒子，不是把行摊进流里。所以这里不掺
+       开合判定：开合只决定盒子自己显示多少，决定不了外面有什么。
+       运行中更严格：那一轮的正文还在长，它属于「工作过程」，所以连正文也在盒子里，
+       外面只剩记录 —— 到 AgentEnd 才把它交出来（这就是「最后一轮的 llm content」）。
+       （旧写法 `open ? items : foldedBody` 会在展开时把整轮再画一遍到外面，
+       实测盒子 3 行、外面 20 行 —— 用户在截图里看到的正是这个。） */
+    const bodySource = concise && live ? runningBody(turn) : concise ? foldedBody(turn) : turn.items
     const body = skin === 'runtime' ? groupRounds(bodySource) : groupBlocks(bodySource)
     if (!body.length && !workItems.length && !work) continue
     items.push(
@@ -1058,21 +1065,18 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             <div className="rt-turn-in">{groupRounds(turn.items)}</div>
           </LivePanel>
         ) : null}
+        {/* 结算后：收起是一行 Worked for，展开还是**同一个盒子**（头 + 内容，46vh 封顶）。
+            以前展开是把这些行摊进流里，于是「跑完的一轮」看起来仍在跑：答案被推到
+            一堵工具行下面，而本该兜住它们的盒子没有底。外面从头到尾只有最后一轮正文。 */}
         {concise && work && !live ? (
-          <WorkFold
+          <WorkBox
             stats={stats}
             running={turn.running}
             open={open}
             onToggle={() => setOpenTurns((m) => ({ ...m, [turn.key]: !open }))}
-          />
-        ) : null}
-        {/* 工作过程只在**展开时**出现：简洁档收起后，外面只剩这一轮的最后结论
-            （设计 #m-timeline 的 Concise 一屏：一行 Worked for + 产出 + 答案）。
-            运行中也不摊开 —— 你看的是面板里最后几行，而不是一堵把整轮往下推的墙。 */}
-        {workItems.length && open && !live ? (
-          <div className="rt-turn-body">
-            <div className="rt-turn-in">{workItems}</div>
-          </div>
+          >
+            {workItems.length ? workItems : null}
+          </WorkBox>
         ) : null}
         {body.length ? <div className="rt-turn-ans">{body}</div> : null}
         {/* 这一轮改了哪个文件：记录（带框卡），点它展开做出改动的工作行 */}

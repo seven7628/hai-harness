@@ -508,15 +508,22 @@ html[data-skin='runtime'] .msg.assistant .who {
 
 /* One column, four numbers and nothing else: 6 between things inside a round,
    8 between a round's own parts (and its answer, twice), 22 between two turns.
-   The column is 700 — at 800 a 14.5px line runs past the point where the eye
-   has to jump back to find the next one. */
+   The width is the **same shell as the dock** above the composer (`.dock`:
+   800 with 24 gutters, index.css:10105) — 752 of content. The design's own
+   column is 700 (port/transcript.css:222), but a question card is 750 wide
+   (its body is two columns: options + preview), so a 660 column left the card
+   hanging 90px wider than every other line on the page. One width for the
+   reading column and the cards in it beats either number on its own. */
 html[data-skin='runtime'] .narrative {
   --rt-work-gap: 6px;
   --rt-turn-gap: 8px;
   --rt-block-gap: 8px;
   --rt-turn-break: 22px;
-  max-width: 700px;
-  padding: 18px 20px 16px;
+  --rt-shell: 800px;
+  --rt-gut: 24px;
+  max-width: var(--rt-shell);
+  padding: 18px var(--rt-gut) 16px;
+  margin: 0 auto;
 }
 
 /* A turn is a grid of parts 8 apart in the design; ours are blocks, so the same
@@ -531,23 +538,9 @@ html[data-skin='runtime'] .rt-turn > .rt-act {
 }
 
 /* the work rows hang 6 below their line, and nothing when they're closed */
-html[data-skin='runtime'] .rt-turn-body {
-  margin-top: var(--rt-work-gap);
-}
-
-html[data-skin='runtime'] .rt-turn[data-density='concise']:not([data-open]) > .rt-turn-body {
-  margin-top: 0;
-}
-
-/* 展开的工作过程有高度上限：一轮跑三十次工具时，摊开它是把一个页面的高度
-   交给它一条条撑开（用户要的是「能翻，但别把答案推到看不见」）。超出滚动。 */
-html[data-skin='runtime'] .rt-turn[data-density='concise'][data-open] > .rt-turn-body {
-  max-height: min(46vh, 520px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in oklab, var(--ink-3) 40%, transparent) transparent;
-}
+/* 简洁档的工作过程不再有「摊进流里」的形态：收起是一行 Worked for，展开是
+   .rt-workbox（头 + 内容，封顶 46vh，见 live-panel.css）。原来是
+   .rt-turn[data-open] > .rt-turn-body 在这里封顶，那条路径已删除。 */
 
 /* 段内每一行之间的空当只有一个来源：.rt-grp 的 6px 网格间距（设计值）。
    旧的 .msg / .tool-group 自带外边距（22px / 8px·10px）在皮肤下会叠成
