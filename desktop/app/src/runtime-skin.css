@@ -501,6 +501,21 @@ html[data-skin='runtime'] .msg.assistant .who {
   display: none;
 }
 
+/* 任务卡片里的子会话：现在也是 Narrative（与左侧树点进去的那一屏同一个组件），
+   所以这里只需要给它一个**局部高度**——卡片里不该再长出一个整屏滚动区。 */
+html[data-skin='runtime'] .ac-narrative {
+  max-height: 46vh;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 10px;
+}
+
+html[data-skin='runtime'] .ac-narrative .narrative {
+  max-width: none;
+  padding: 10px 0 6px;
+  background: none;
+}
+
 /* 命令输出的定级着色（设计 #m-tail 的 .tl .ok/.warn/.err/.dim，ui.components.css:851-855）
    —— 只在这一档皮肤下生效：别的皮肤拿到的是同一段文本、没有颜色，行为不变。 */
 html[data-skin='runtime'] .rt-out .rt-out-ts {

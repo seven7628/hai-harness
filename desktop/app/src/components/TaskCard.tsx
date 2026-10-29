@@ -19,10 +19,11 @@ import type { MsgBlock, AsyncTaskStatus, UsageAgg } from '../store/useAppStore'
 import { Bot } from './icons'
 import { fmtDuration, fmtUsd, UsageChip } from './ui'
 import { ElapsedTimer } from './ElapsedTimer'
-import { AgentTranscript } from './AgentTranscript'
+import Narrative from './Narrative'
 import { TaskResultInline } from './NarrativeBlocks'
 import { ArtifactCard } from './ArtifactCard'
 import JsonView from './JsonView'
+import { agentItemsToBlocks } from '../lib/agentSession'
 import { ToolImages } from './ToolImages'
 import { useT } from '../i18n'
 
@@ -170,15 +171,25 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
       >
         {t('agentTree.openAsSession')}
       </button>
-      <AgentTranscript
-        items={b.items}
-        running={running}
-        trimmed={b.itemsTrimmed}
-        loading={b.historyLoading}
-        hasMore={b.historyHasMore}
-        error={b.historyError}
-        onLoadOlder={b.taskId ? () => loadAgentHistory(b.id, b.taskId!) : undefined}
-      />
+      {/* 子会话＝主会话（用户 2026-10 方案：能力全复用，只是 session 不同）。
+          这里原来走 AgentTranscript —— 子 agent 的第二套精简渲染，于是同一个子 agent
+          从左侧树点进去是 v2 的样子、从任务卡片展开却是旧样子。现在两个入口都是
+          Narrative：同一套工作盒子、同一套工具行、同一套密度与皮肤。
+          高度由外层 .ac-narrative 封顶（卡片里不该再长出一个整屏滚动区）。 */}
+      <div className="ac-narrative">
+        <Narrative
+          source={{
+            // 与 AgentSessionView 同一个转换器：AgentItem → 会话块（缺了它，
+            // 卡片里的子会话就是另一套数据形状，Narrative 渲染不出来）
+            blocks: agentItemsToBlocks(b.items),
+            total: b.items.length + (b.itemsTrimmed ?? 0),
+            hasMore: Boolean(b.itemsTrimmed) || Boolean(b.historyHasMore),
+            loading: Boolean(b.historyLoading),
+            error: Boolean(b.historyError),
+            ...(b.taskId ? { onLoadOlder: () => loadAgentHistory(b.id, b.taskId!) } : {}),
+          }}
+        />
+      </div>
       {b.artifacts && b.artifacts.length > 0 && (
         <div className="ac-artifacts">
           <ArtifactCard items={b.artifacts} {...(b.artifactsTruncated ? { truncated: true } : {})} />
