@@ -318,7 +318,17 @@ export default function Composer() {
       })),
     }))
   const activeProvLabel = PROVIDER_LABELS[activeProv] ?? activeProv
-  const visibleProviders = providerFilter === 'all' ? providers : providers.filter((provider) => provider.key === providerFilter)
+  // 模型搜索：真实用户手里十几家渠道、上百个模型，靠滚动找不到东西。
+  // 命中渠道名也算命中（"deepseek" 时整个渠道都留着），与设计 #m-prompt 的筛选框同义。
+  const [modelQ, setModelQ] = useState('')
+  const modelTerm = modelQ.trim().toLowerCase()
+  const visibleProviders = (providerFilter === 'all' ? providers : providers.filter((provider) => provider.key === providerFilter))
+    .map((prov) => {
+      if (!modelTerm) return prov
+      const provHit = prov.key.toLowerCase().includes(modelTerm) || prov.label.toLowerCase().includes(modelTerm)
+      return { ...prov, models: provHit ? prov.models : prov.models.filter((m) => m.name.toLowerCase().includes(modelTerm)) }
+    })
+    .filter((prov) => prov.models.length > 0)
   // 当前模型是否支持图片输入（Provider 设置里该模型 input_types 含 image）→ 控制上传按钮显隐
   const canImage = modelSupportsImage(settings, model)
   // 拖拽/粘贴落图的统一前置条件（模型支持 + 未满 + 队列未满 + 非压缩中 + 未在压图中）
@@ -1340,7 +1350,25 @@ export default function Composer() {
             >
               <span className="spark"><Sparkles size={14} /></span><span className="model-chip-label">{activeProvLabel} · {model}</span><ChevronDown size={12} />
               {menu && (
-                <div className="popup open" role="listbox" onClick={(e) => e.stopPropagation()}>
+                <div className="popup open pop model-pop" role="listbox" onClick={(e) => e.stopPropagation()}>
+                  {/* 筛选框：设计 #m-prompt 的 .pop-search（与 / 命令、@ 引用同一套外壳语言） */}
+                  <div className="pop-search">
+                    <input
+                      type="text"
+                      value={modelQ}
+                      autoFocus
+                      placeholder={t('composer.modelFilter')}
+                      aria-label={t('composer.modelFilter')}
+                      onChange={(e) => setModelQ(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.stopPropagation()
+                          setModelQ('')
+                          setMenu(false)
+                        }
+                      }}
+                    />
+                  </div>
                   <div className="model-provider-filter-wrap" id="provider-filter-wrap">
                     {/* Provider 筛选条：横向滑动（滚轮/拖拽/‹ › 箭头），19 家不溢出；
                         选中 Provider 自动滚动定位（useEffect 按 activeProv 对齐） */}
@@ -1402,7 +1430,8 @@ export default function Composer() {
                       </div>
                     ))}
                   </div>
-                  <div className="hint">{t('composer.modelHint')}</div>
+                  {visibleProviders.length === 0 ? <div className="pop-empty">{t('composer.modelNone')}</div> : null}
+                  <div className="hint pop-foot">{t('composer.modelHint')}</div>
                 </div>
               )}
             </div>

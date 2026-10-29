@@ -516,6 +516,81 @@ html[data-skin='runtime'] .ac-narrative .narrative {
   background: none;
 }
 
+/* 模型弹层 = 设计 #m-prompt 的 .pop（与 / 命令、@ 引用同一套外壳语言）。
+   内容结构沿用现有实现（.mi 里有 ✓ / 名称 / 图像徽标 / 窗口），只把**度量**搬到
+   pop 的那一套：28px 行、组标题 9.5px 大写、页脚 mono 10.5。选择器多带一个
+   .model-pop，是为了压过 pop.css 里的 .pop-row 规则（同权重时会看文件顺序）。 */
+/* 模型名比命令名长（deepseek-v4-flash-vision-exp），弹层要按内容放宽：
+   .pop 的默认宽度是给 / 命令那种短标签调的，套在模型表上会把名字压成一列省略号。 */
+html[data-skin='runtime'] .pop.model-pop {
+  min-width: 340px;
+  max-width: 420px;
+}
+
+html[data-skin='runtime'] .pop.model-pop .model-provider-filter-wrap {
+  padding: 0 8px 6px;
+}
+
+html[data-skin='runtime'] .pop.model-pop .model-provider-filter {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+html[data-skin='runtime'] .pop.model-pop .model-provider-filter button {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .pop.model-pop .model-provider-filter button:hover { background: var(--raised); color: var(--ink); }
+html[data-skin='runtime'] .pop.model-pop .model-provider-filter button.on { background: var(--raised); color: var(--ink); }
+
+html[data-skin='runtime'] .pop.model-pop .popup-body {
+  overflow-y: auto;
+  max-height: min(52vh, 420px);
+  padding: 2px 6px 4px;
+}
+
+html[data-skin='runtime'] .pop.model-pop .popup-group-hd {
+  padding: 8px 8px 4px;
+  font: 400 9.5px/1 var(--mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .pop.model-pop .mi {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto 44px;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  min-height: 28px; /* index.css 的 .mi 带 36px 下限，设计行是 28 */
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+html[data-skin='runtime'] .pop.model-pop .mi:hover { background: var(--raised); color: var(--ink); }
+html[data-skin='runtime'] .pop.model-pop .mi.cur { color: var(--ink); }
+html[data-skin='runtime'] .pop.model-pop .mi .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html[data-skin='runtime'] .pop.model-pop .mi .cap { text-align: right; font: 400 10.5px/1 var(--mono); color: var(--ink-3); }
+
+html[data-skin='runtime'] .pop.model-pop .hint.pop-foot {
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--line-soft);
+  font: 400 10.5px/1.4 var(--mono);
+  color: var(--ink-3);
+}
+
 /* 命令输出的定级着色（设计 #m-tail 的 .tl .ok/.warn/.err/.dim，ui.components.css:851-855）
    —— 只在这一档皮肤下生效：别的皮肤拿到的是同一段文本、没有颜色，行为不变。 */
 html[data-skin='runtime'] .rt-out .rt-out-ts {
