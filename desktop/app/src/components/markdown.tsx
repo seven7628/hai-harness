@@ -630,7 +630,7 @@ function canvasCss(theme: 'ink' | 'paper'): string {
 // 故流式中只渲染与主题一致的骨架（高度固定，避免布局跳动），等围栏闭合/流结束后
 // 一次性挂 iframe。用户感知：先看到"正在生成"，结束后看到完整成品 —— 与修复前
 // "最后才显示完整 UI" 的观感一致，但过程不再闪、不再报错。
-function HtmlPreviewBlock({ code, streaming }: { code: string; streaming?: boolean }) {
+function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?: boolean; path?: string }) {
   const t = useT()
   const resolved = useResolvedTheme()
   const ap = useAppearance()
@@ -753,7 +753,9 @@ function HtmlPreviewBlock({ code, streaming }: { code: string; streaming?: boole
       if (d.__htmlh === undefined && d.__htmlhover === undefined) return
       probeSeenRef.current = true
       const h = d.__htmlh
-      if (typeof h === 'number' && h > 0) setHeight(Math.min(Math.max(h + 2, 40), MAX_H))
+      // 不在这里截断：运行时这档要按内容**完整**渲染，上限只在非运行时那档的
+      // 渲染处施加（见下方 frame 的 height 计算）
+      if (typeof h === 'number' && h > 0) setHeight(Math.max(h + 2, 40))
       if (d.__htmlhover === 1) setFrameHover(true)
     }
     window.addEventListener('message', onMsg)
@@ -840,77 +842,48 @@ function HtmlPreviewBlock({ code, streaming }: { code: string; streaming?: boole
       className="htmlblock-frame"
       sandbox="allow-scripts"
       srcDoc={doc}
-      style={height != null ? { height } : undefined}
+      style={height != null ? { height: Math.min(height, MAX_H) } : undefined}
       title={t('md.htmlPreview')}
     />
   )
 
-  // 运行时皮肤：这一轮的视觉产出先是一行（ui.components.css:2209-2213 的
-  // .cy-frameline > .cy-act），点开才铺出 .pv 面板（:1536-1560）。原来的
-  // htmlblock 壳（渲染/源码 tab + 悬停浮出的工具条）在这档皮肤下不出现 ——
-  // 同一份能力换成了设计自己的分段控件与页脚。
+  // 运行时皮肤：这块**不折叠**，直接按内容完整渲染（高度由 iframe 内探针上报），
+  // 指针移上来才浮出三个动作：预览 / 源码 / 在访达中打开（没有落盘路径时那一位是
+  // 「在浏览器打开」—— 同一个位置、说真话，不冒充访达）。
   if (rt) {
-    const kb = (code.length / 1024).toFixed(1)
-    const toggle = () => setFrameOpen((v) => !v)
+    const revealLabel = path ? t('md.htmlReveal') : t('md.htmlOpenBrowserBtn')
+    const onReveal = () => {
+      if (path && window.desktop?.showItemInFolder) {
+        void window.desktop.showItemInFolder(path)
+        return
+      }
+      openInBrowser()
+    }
     return (
-      <div className="cy-frameline" data-slot="artifact">
-        <div
-          className="cy-act"
-          role="button"
-          tabIndex={0}
-          aria-expanded={frameOpen}
-          onClick={toggle}
-          onKeyDown={(e) => {
-            if (e.key !== 'Enter' && e.key !== ' ') return
-            e.preventDefault()
-            toggle()
-          }}
-        >
-          <span className="cy-act-t">{t('md.visualOutput')} · index.html</span>
-          <span className="cy-dur">{kb} KB</span>
-          <FoldIcon open={frameOpen} />
-        </div>
-        <div className={`rt-collapse${frameOpen ? ' open' : ''}`} aria-hidden={!frameOpen}>
-          <div>
-            <div className="cy-frame">
-              <div className="pv">
-                <div className="pv-head">
-                  <span className="pv-name">index.html</span>
-                  <span className="pv-seg" role="group" aria-label={t('md.htmlTabsAria')}>
-                    <button className="pv-btn" aria-pressed={mode === 'preview'} onClick={() => setMode('preview')}>
-                      {t('md.htmlPreview')}
-                    </button>
-                    <button className="pv-btn" aria-pressed={mode === 'source'} onClick={() => setMode('source')}>
-                      {t('md.htmlSource')}
-                    </button>
-                  </span>
-                  <span className="pv-spacer" />
-                  <button className="pv-btn" onClick={copy} aria-label={t('md.copyAria')}>{copyLabel(t, copyState)}</button>
-                  <button className="pv-btn" onClick={openInBrowser} title={t('md.htmlOpenBrowser')}>
-                    {t('md.htmlOpenBrowserBtn')}
-                  </button>
-                </div>
-                <div className="pv-body">
-                  {/* 高度由设计给（136px，≤720px 时 178px）：不让产出的内容
-                      把回答里的一行撑成半屏 */}
-                  {mode === 'preview' ? (
-                    <iframe
-                      ref={frameRef}
-                      className="pv-frame"
-                      sandbox="allow-scripts"
-                      srcDoc={doc}
-                      title={t('md.htmlPreview')}
-                    />
-                  ) : (
-                    <pre className="pv-code">{code}</pre>
-                  )}
-                </div>
-                <div className="pv-foot">
-                  <span>{t('md.visualFoot')}</span>
-                  <span>{kb} KB</span>
-                </div>
-              </div>
-            </div>
+      <div className="cy-frame" data-slot="artifact">
+        <div className={`pv${frameHover ? ' hd-on' : ''}`}>
+          <div className="pv-bar" role="group" aria-label={t('md.htmlTabsAria')}>
+            <button className="pv-btn" aria-pressed={mode === 'preview'} onClick={() => setMode('preview')}>
+              {t('md.htmlPreviewAction')}
+            </button>
+            <button className="pv-btn" aria-pressed={mode === 'source'} onClick={() => setMode('source')}>
+              {t('md.htmlSource')}
+            </button>
+            <button className="pv-btn" onClick={onReveal}>{revealLabel}</button>
+          </div>
+          <div className="pv-body">
+            {mode === 'preview' ? (
+              <iframe
+                ref={frameRef}
+                className="pv-frame"
+                sandbox="allow-scripts"
+                srcDoc={doc}
+                style={height != null ? { height } : undefined}
+                title={t('md.htmlPreview')}
+              />
+            ) : (
+              <pre className="pv-code">{code}</pre>
+            )}
           </div>
         </div>
       </div>

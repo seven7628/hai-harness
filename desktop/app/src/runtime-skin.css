@@ -235,11 +235,16 @@ html[data-skin='runtime'] .thinking-body::before {
   background: var(--line);
 }
 
+/* 思考正文的度量跟回答正文**同一把尺**。设计里 `.reasoning-text` 的 58ch 是散用时的
+   默认值（ui.components.css:107），一旦进了转写就被改写成 `--md-measure`
+   （ui.components.css:2241 `.cy .reasoning-text`）。原先这里只抄了 58ch，
+   而回答段落走的是 --md-measure —— 同一列里两种度量，思考右边就空出半屏。
+   用户报障「思考内容没沾满、右侧很大空白」就是这个。 */
 html[data-skin='runtime'] .thinking .thinking-body .tk-p {
   font-size: 12.5px;
   line-height: 1.66;
   color: var(--ink-2);
-  max-width: 58ch;
+  max-width: var(--md-measure);
   margin: 0;
 }
 
@@ -1160,6 +1165,51 @@ html[data-skin='runtime'] .rt-turn .md h4 {
   color: var(--ink);
 }
 
+/* 表格 = 设计 ui.components.css:1509-1525 的 .bl-table：
+   一串细横线，不是一张卡（没有外框、没有表头底色）；表头退成标签
+   （10.5px mono、大写、字距 .05em、ink-3）；数字列右对齐并用等宽数位。
+   宽表在自己的容器里横滚（.md-table-wrap），窄表仍占满列宽。 */
+html[data-skin='runtime'] .rt-turn .md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+html[data-skin='runtime'] .rt-turn .md-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 0.68em;
+  max-width: 100%;
+}
+
+html[data-skin='runtime'] .rt-turn .md th {
+  padding: 0 14px 7px 0;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  font: 500 10.5px/1.3 var(--mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .rt-turn .md td {
+  padding: 7px 14px 7px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-2);
+  vertical-align: top;
+}
+
+html[data-skin='runtime'] .rt-turn .md tr:last-child td { border-bottom: 0; }
+
+html[data-skin='runtime'] .rt-turn .md table .n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .rt-turn .md th.n { text-align: right; }
+
 html[data-skin='runtime'] .rt-turn .md :is(ul, ol) {
   margin: 0 0 0.68em;
   max-width: var(--md-measure);
@@ -1687,82 +1737,72 @@ html[data-skin='runtime'] .cy-frameline .cy-dur {
   color: var(--ink-3);
 }
 
-html[data-skin='runtime'] .cy-frame { margin-top: 14px; }
-html[data-skin='runtime'] .cy-frame[hidden] { display: none; }
-html[data-skin='runtime'] .cy-frame .pv { border-radius: var(--r-md); }
-html[data-skin='runtime'] .cy-frame .pv-frame {
-  display: block;
-  width: 100%;
-  height: 136px;
-  border: 0;
-  background: #0c0c10;
+/* 视觉产出块（运行时）：**不折叠**，按内容完整渲染；指针移上来浮出三个动作。
+   这一段替代了原来「一行句子 + 点开 .pv 面板」的形态（用户 2026-10：不要折叠、
+   默认自适应完整渲染、悬停出 [预览 / 源码 / 在访达中打开]）。 */
+html[data-skin='runtime'] .cy-frame { margin: 10px 0 2px; }
+
+html[data-skin='runtime'] .cy-frame .pv {
+  position: relative;
+  padding: 0;
+  border-radius: var(--r-md);
 }
 
-html[data-skin='runtime'] .pv { padding: 12px 14px 11px; }
-html[data-skin='runtime'] .pv-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
-html[data-skin='runtime'] .pv-name { font: 400 10.5px/1 var(--mono); color: var(--ink-2); }
-html[data-skin='runtime'] .pv-state {
-  display: inline-flex;
+/* 动作条：浮在内容右上角，只在指针进来（或键盘聚焦）时出现 */
+html[data-skin='runtime'] .cy-frame .pv-bar {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  display: flex;
   align-items: center;
-  gap: 5px;
-  font: 400 10px/1 var(--mono);
-  color: var(--ink-3);
-}
-html[data-skin='runtime'] .pv-state i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--violet);
-  animation: rt-breathe var(--t-breathe) var(--ease) infinite;
-}
-html[data-skin='runtime'] .pv-spacer { flex: 1; }
-html[data-skin='runtime'] .pv-seg {
-  display: inline-flex;
   gap: 1px;
-  padding: 1px;
-  border-radius: 6px;
-  background: color-mix(in oklab, var(--ink-3) 10%, transparent);
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 8px 18px -12px rgba(0, 0, 0, 0.7);
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+  pointer-events: none;
 }
-html[data-skin='runtime'] .pv-btn {
-  height: 20px;
-  padding: 0 7px;
-  border-radius: 5px;
-  font: 400 10px/1 var(--mono);
-  color: var(--ink-3);
-  transition: color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+
+html[data-skin='runtime'] .cy-frame .pv.hd-on .pv-bar,
+html[data-skin='runtime'] .cy-frame .pv:hover .pv-bar,
+html[data-skin='runtime'] .cy-frame .pv-bar:focus-within {
+  opacity: 1;
+  pointer-events: auto;
 }
-html[data-skin='runtime'] .pv-btn:hover { color: var(--ink); }
-html[data-skin='runtime'] .pv-btn[aria-pressed='true'] { background: var(--raised); color: var(--ink); }
-html[data-skin='runtime'] .pv-body {
+
+/* 内容本体：高度由 iframe 内探针上报（完整渲染），这里只兜底一个矮高度，
+   避免探针还没回报时闪成 0 高 */
+html[data-skin='runtime'] .cy-frame .pv-body {
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   overflow: hidden;
   background: var(--card-2);
 }
-html[data-skin='runtime'] .pv-frame {
+
+html[data-skin='runtime'] .cy-frame .pv-frame {
   display: block;
   width: 100%;
-  height: 296px;
+  /* 探针回报前的兜底：宁可先矮一点，也不闪成 0 高；量到之后由内联 height 接管 */
+  height: 240px;
   border: 0;
   background: transparent;
 }
-html[data-skin='runtime'] .pv-code {
+
+html[data-skin='runtime'] .cy-frame .pv-code {
   margin: 0;
   padding: 11px 12px;
-  height: 296px;
+  height: auto;
+  max-height: 70vh;
   overflow: auto;
   font: 400 11px/1.65 var(--mono);
   color: var(--ink-2);
   white-space: pre-wrap;
   word-break: break-word;
-}
-html[data-skin='runtime'] .pv-foot {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-top: 9px;
-  font: 400 10px/1 var(--mono);
-  color: var(--ink-3);
 }
 
 @media (max-width: 720px) {

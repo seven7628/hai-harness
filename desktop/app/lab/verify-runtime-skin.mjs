@@ -227,6 +227,29 @@ if (t1.think) {
   check('I2 thinking toggle flips aria-expanded', exp !== t1.thinkExpanded, `${t1.thinkExpanded} -> ${exp}`)
 }
 
+// 思考正文与回答正文同一把尺：设计里的 58ch 只是散用默认值，进转写后被改成
+// --md-measure（ui.components.css:2241）。两边不一致的话思考右边会空出半屏
+// —— 用户 2026-10 报障「思考内容没沾满、右侧很大空白」就是这个。
+const tk = await page.eval(() => {
+  const tkP = document.querySelector('.rt-turn .thinking-body .tk-p')
+  const mdP = document.querySelector('.rt-turn .md p')
+  // 令牌是 rem，计算值是 px —— 让浏览器自己换算，别拿字符串比
+  const probe = document.createElement('i')
+  probe.style.maxWidth = 'var(--md-measure)'
+  document.body.appendChild(probe)
+  const meas = getComputedStyle(probe).maxWidth
+  probe.remove()
+  return {
+    tk: tkP ? getComputedStyle(tkP).maxWidth : null,
+    md: mdP ? getComputedStyle(mdP).maxWidth : null,
+    tok: meas,
+    tkBox: tkP ? Math.round(tkP.getBoundingClientRect().width) : null,
+    col: Math.round((document.querySelector('.rt-turn .md')?.getBoundingClientRect().width) || 0),
+  }
+})
+check('think text is measured like the answer text (not 58ch)', tk.tk === tk.md && tk.tk !== 'none', JSON.stringify(tk))
+check('that measure is the design token --md-measure', tk.tk === tk.tok && tk.tok !== '', `${tk.tk} vs ${tk.tok}`)
+
 // ---- 提问卡 ---------------------------------------------------------------
 await say('修复登录接口返回 401')
 // 60s 而不是默认 30s：这一问要等上一轮跑完（mock 的脚本化回放 15s 左右）+ 队列推送，
@@ -411,60 +434,94 @@ const askEsc = await page.eval(() => {
 check('ask: Esc skips the batch instead of only closing the panel', askEsc.panel === false || askEsc.questions === 0, JSON.stringify(askEsc))
 
 
-// ---- 视觉产出行 -------------------------------------------------------------
-// 新开一轮干净的会话：提问面板还挂着（没作答 = 工具阻塞），会挡住后面的断言
+// ---- 视觉产出块（运行时）：不折叠、按内容完整渲染、悬停出三个动作 -----------
+// 用户 2026-10：不要折叠行、不要那些描述，默认自适应完整渲染 html frame，
+// 指针移上来浮出 [预览 / 源码 / 在访达中打开]。
 await page.goto(URL, { settleMs: 3000 })
 await waitStore()
 await page.eval(() => window.__store.getState().setNarrativeSkin('runtime'))
 await wait(700)
 await say('html 预览')
-await waitFor('.cy-frameline .cy-act', 25000)
-// 等这一轮流完（流式中代码块会被重建，这时点开的折叠状态会被重置）
-// 结算的哨兵是轮尾账（.rt-turn-foot）——回答下方的动作行（复制）已按用户要求移除
-await waitFor('.rt-turn-foot', 25000)
-await wait(1200)
-const t5 = await page.eval(() => {
-  const cs = (el, ...p) => (el ? Object.fromEntries(p.map((k) => [k, getComputedStyle(el)[k]])) : null)
-  const act = document.querySelector('.cy-frameline .cy-act')
-  const col = document.querySelector('.cy-frameline .rt-collapse')
+await waitFor('.cy-frame .pv-frame', 30000)
+// 结算哨兵：流式中块会被重建，量到的节点下一秒就没了
+await waitFor('.rt-turn-foot', 30000)
+await wait(1500)
+// 探针（iframe 里的 $__htmlh）可能比这一帧晚到：等内联高度出现，最多 8s
+for (let i = 0; i < 32; i++) {
+  const has = await page.eval(() => !!document.querySelector('.cy-frame .pv-frame[style*=height]'))
+  if (has) break
+  await wait(250)
+}
+// 量之前先把它滚到视口中央：后面派的是真实鼠标坐标，元素在屏外就永远 hover 不到
+const hr = await page.eval(() => {
+  const frame = document.querySelector('.cy-frame .pv-frame')
+  frame?.scrollIntoView({ block: 'center' })
+  const bar = document.querySelector('.cy-frame .pv-bar')
+  const r = frame?.getBoundingClientRect()
   return {
-    present: !!act,
-    rows: cs(col, 'gridTemplateRows')?.gridTemplateRows,
-    expanded: act?.getAttribute('aria-expanded'),
+    hasFrame: !!frame,
+    foldRow: !!document.querySelector('.cy-frameline .cy-act'),
+    head: !!document.querySelector('.cy-frame .pv-head'),
+    foot: !!document.querySelector('.cy-frame .pv-foot'),
+    barOpacity: bar ? getComputedStyle(bar).opacity : null,
+    barPos: bar ? getComputedStyle(bar).position : null,
+    inline: frame?.getAttribute('style') ?? null,
+    h: r ? Math.round(r.height) : null,
+    cx: r ? Math.round(r.x + r.width / 2) : 0,
+    cy: r ? Math.round(r.y + Math.min(r.height / 2, 40)) : 0,
   }
 })
-check('visual output is one frameless row', t5.present, t5.present)
-check('I9 the artifact row starts folded', t5.rows === '0px', t5.rows)
-// 流式期间 markdown 块会被重建，点开的折叠状态跟着丢 —— 先等光标消失
-// （这一轮真的写完了），再点；仍被重建就再点一次，最多八次。
-const openFrameline = async () => {
-  for (let i = 0; i < 8; i++) {
-    const caret = await page.eval(() => !!document.querySelector('.rt-caret'))
-    if (caret) { await wait(700); continue }
-    await page.eval(() => document.querySelector('.cy-frameline .cy-act')?.click())
-    await wait(700)
-    const exp = await page.eval(() => document.querySelector('.cy-frameline .cy-act')?.getAttribute('aria-expanded'))
-    if (exp === 'true') return true
+check('visual output: no fold row, no captions — just the frame', hr.hasFrame && hr.foldRow === false && hr.head === false && hr.foot === false,
+  JSON.stringify({ frame: hr.hasFrame, fold: hr.foldRow, head: hr.head, foot: hr.foot }))
+check('visual output: the frame fits its content (measured, not capped at 136)', hr.inline != null && hr.h > 136, `${hr.inline} → ${hr.h}px`)
+check('visual output: the actions are hidden until the pointer arrives', hr.barOpacity === '0' && hr.barPos === 'absolute', `${hr.barOpacity} ${hr.barPos}`)
+
+// 真的把指针移到画面上（iframe 内的指针事件父文档收不到，但 :hover 仍会命中）
+if (hr.cx) {
+  // CDP 偶发超时不该让整套断在后面全红：hover 失败由下面的断言说，不在这里崩
+  try {
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hr.cx, y: hr.cy, button: 'none', buttons: 0 })
+  } catch (e) {
+    console.log('WARN  mouse move did not go through:', e.message)
   }
-  return false
 }
-if (t5.present) {
-  const opened = await openFrameline()
-  check('I9 the artifact row opens', opened, opened)
-  const t6 = await page.eval(() => {
-    const cs = (el, ...p) => (el ? Object.fromEntries(p.map((k) => [k, getComputedStyle(el)[k]])) : null)
-    const fl = document.querySelector('.cy-frameline')
+// opacity 有过渡（--t-fast 一档），等它走完再判，最多 2s
+let hb = null
+for (let i = 0; i < 20; i++) {
+  hb = await page.eval(() => {
+    const bar = document.querySelector('.cy-frame .pv-bar')
     return {
-      expanded: fl?.querySelector('.cy-act')?.getAttribute('aria-expanded'),
-      rows: cs(fl?.querySelector('.rt-collapse'), 'gridTemplateRows')?.gridTemplateRows,
-      frame: cs(fl?.querySelector('.pv-frame'), 'height')?.height,
-      pv: cs(fl?.querySelector('.pv'), 'padding')?.padding,
+      opacity: bar ? getComputedStyle(bar).opacity : null,
+      buttons: bar ? [...bar.querySelectorAll('button')].map((b) => b.textContent.trim()) : [],
     }
   })
-  check('artifact frame is 136px (in a turn)', t6.frame === '136px', t6.frame)
-  check('artifact panel padding 12/14/11', t6.pv === '12px 14px 11px', t6.pv)
+  if (hb.opacity === '1') break
+  await wait(150)
 }
+check('visual output: hover shows the three actions', hb?.opacity === '1' && hb?.buttons.length === 3, JSON.stringify(hb))
+check('visual output: preview / source / open (no path here, so it says browser)',
+  hb?.buttons[0] === '预览' && hb?.buttons[1] === '源码' && hb?.buttons[2] === '在浏览器打开', JSON.stringify(hb?.buttons))
 
+const hs = await page.eval(async () => {
+  const pick = (i) => document.querySelectorAll('.cy-frame .pv-bar button')[i]
+  const until = async (fn, ms = 1500) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise((r) => setTimeout(r, 100)) }
+    return false
+  }
+  let src = false
+  for (let i = 0; i < 3 && !src; i++) {
+    pick(1)?.click()
+    src = await until(() => !!document.querySelector('.cy-frame .pv-code'))
+  }
+  let back = false
+  for (let i = 0; i < 3 && !back; i++) {
+    pick(0)?.click()
+    back = await until(() => !!document.querySelector('.cy-frame .pv-frame'))
+  }
+  return { src, backToFrame: back }
+})
+check('visual output: 源码 shows the code, 预览 goes back', hs.src && hs.backToFrame, JSON.stringify(hs))
 
 // ---- P3 · composer：`/` 技能、`@` 文件目录、多图扇形 + 灯箱 -------------------
 await page.goto(URL, { settleMs: 3000 })

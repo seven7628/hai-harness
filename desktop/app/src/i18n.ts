@@ -1384,6 +1384,8 @@ const zh: Record<string, string> = {
   'md.htmlSource': '源码',
   'md.htmlTabsAria': 'HTML 预览视图切换',
   'md.htmlOpenBrowser': '在浏览器打开此 HTML',
+  'md.htmlReveal': '在访达中打开',
+  'md.htmlPreviewAction': '预览',
   'md.htmlOpenBrowserBtn': '在浏览器打开',
   // ===== 内联 HTML / 锚点 / 本地图（markdown 渲染增强）=====
   'md.alertNote': '注意',
@@ -3003,6 +3005,8 @@ const en: Record<string, string> = {
   'md.htmlSource': 'Source',
   'md.htmlTabsAria': 'HTML preview view switch',
   'md.htmlOpenBrowser': 'Open this HTML in browser',
+  'md.htmlReveal': 'Reveal in Finder',
+  'md.htmlPreviewAction': 'Preview',
   'md.htmlOpenBrowserBtn': 'Open in browser',
   // ===== Inline HTML / anchors / local images (markdown render extras) =====
   'md.alertNote': 'Note',
