@@ -686,8 +686,11 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
     // 所以先按 200ms 重试到拿到非 0 值（最多 20 次 ≈ 4s），再交给 ResizeObserver 盯变化。
     const probe = '<script>(function(){' +
       'var n=0;' +
+      // 报 12 次（~2.4s）而不是「报一次就停」：第一条消息可能在宿主**挂上监听之前**就发出去了
+      // （srcDoc 的脚本比 React 的 effect 早），也可能因为流式重建丢掉那一条 —— 实测就是这样
+      // 让这一块永远停在兜底高度。多报几次是幂等的（同一个数写同一个 state）。
       'function h(){var v=document.body.scrollHeight||0;try{parent.postMessage({__htmlh:v},\'*\')}catch(e){}' +
-      'if(v>0)return;if(++n<20)setTimeout(h,200)}' +
+      'if(++n<12)setTimeout(h,200)}' +
       'h();' + // 立即报一次：让父组件尽早确认「探针活着」（探针失效兜底判定用，见下）
       'document.addEventListener(\'DOMContentLoaded\',h);' +
       'window.addEventListener(\'load\',function(){h();setTimeout(h,100);setTimeout(h,400)});' +

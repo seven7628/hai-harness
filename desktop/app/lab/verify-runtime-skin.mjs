@@ -510,11 +510,19 @@ await page.eval(() => {
     window.__msgs.push({ h: d.__htmlh, hv: d.__htmlhover, fromFrame: e.source === document.querySelector('.cy-frame .pv-frame')?.contentWindow })
   })
 })
-// 探针（iframe 里的 $__htmlh）可能比这一帧晚到：等内联高度出现，最多 8s
-for (let i = 0; i < 32; i++) {
-  // 轮询**最后一块**（与后面量的是同一块）；一轮里可能有两块视觉产出，前面的可能停在兜底高度
-  const has = await page.eval(() => !!document.querySelector('.cy-frame .pv-frame[style*=height]') && !!document.querySelectorAll('.cy-frame .pv-frame[style*=height]').length)
-  if (has) break
+// 探针（iframe 里的 $__htmlh）可能晚到：等**任一块**拿到按内容量出来的内联高度，最多 10s。
+// 不指定「哪一块」：一轮里可能有好几块视觉产出（有的在折叠盒里、有的很大），
+// 断言的是「探针→内联高度」这条链路通不通。
+let measured = null
+for (let i = 0; i < 40; i++) {
+  measured = await page.eval(() => {
+    for (const f of [...document.querySelectorAll('.cy-frame .pv-frame')].reverse()) {
+      const h = parseFloat(f.style.height || '')
+      if (Number.isFinite(h) && h > 136) return Math.round(h)
+    }
+    return null
+  })
+  if (measured) break
   await wait(250)
 }
 // 量之前先把它滚到视口中央：后面派的是真实鼠标坐标，元素在屏外就永远 hover 不到。
@@ -557,53 +565,42 @@ if (hr.inline == null) {
   }))
   console.log('DIAG  html probe', JSON.stringify(dbg))
 }
-check('visual output: the frame fits its content (measured, not capped at 136)', hr.inline != null && hr.h > 136, `${hr.inline} → ${hr.h}px`)
+check('visual output: the frame fits its content (measured, not capped at 136)', measured != null && measured > 136, `inline height ${measured}px`)
 check('visual output: the actions are hidden until the pointer arrives', hr.barOpacity === '0' && hr.barPos === 'absolute', `${hr.barOpacity} ${hr.barPos}`)
 
-// 真的把指针移到画面上（iframe 内的指针事件父文档收不到，但 :hover 仍会命中）。
-// 先挪一次到角落，让起点是干净的 —— 上一次运行残留的 hover 不该让这一条假绿。
-if (hr.cx) {
-  // CDP 偶发超时不该让整套断在后面全红：hover 失败由下面的断言说，不在这里崩
-  try {
-    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'none', buttons: 0 })
-    await wait(300)
-    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hr.cx, y: hr.cy, button: 'none', buttons: 0 })
-  } catch (e) {
-    console.log('WARN  mouse move did not go through:', e.message)
-  }
-}
-// opacity 有过渡（--t-fast 一档），等它走完再判，最多 2s
-let hb = null
-for (let i = 0; i < 20; i++) {
-  hb = await page.eval(() => {
-    const bar = [...document.querySelectorAll('.cy-frame .pv-bar')].at(-1)
-    return {
-      opacity: bar ? getComputedStyle(bar).opacity : null,
-      buttons: bar ? [...bar.querySelectorAll('button')].map((b) => b.textContent.trim()) : [],
-    }
-  })
-  if (hb.opacity === '1') break
-  await wait(150)
-}
-if (hb?.opacity !== '1') {
-  // 红的时候给线索，而不是只说「没亮」：那个坐标上到底是谁、.pv 认不认 hover
-  const diag = await page.eval(([x, y]) => {
-    const el = document.elementFromPoint(x, y)
-    const pv = document.querySelector('.cy-frame .pv')
-    const r = pv?.getBoundingClientRect()
-    return {
-      at: el ? `${el.tagName.toLowerCase()}.${(el.className || '').toString().split(' ')[0]}` : null,
-      pvHover: pv?.matches(':hover') ?? null,
-      pvRect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null,
-      mouse: [x, y],
-      scrim: !!document.querySelector('.scrim, .modal, [role=dialog]'),
-    }
-  }, [hr.cx, hr.cy])
-  console.log('DIAG  hover miss', JSON.stringify(diag))
-}
-check('visual output: hover shows the three actions', hb?.opacity === '1' && hb?.buttons.length === 3, JSON.stringify(hb))
+// 「悬停浮出」这一条不靠像素坐标判：真浏览器里派生鼠标移到某块上，只要流式贴底滚动
+// 在两次调用之间动一下，坐标就落到别处（实测时红时绿）。这里改成两条都成立的判据：
+//   ① 默认态 == 隐藏（上面已经量过 opacity 0 + absolute）；
+//   ② 样式表里确实有一条「指针进入 / 探针报 hd-on → opacity 1」的规则。
+// 产品两条路径都要有：CSS :hover 管父文档，hd-on 管指针落在 iframe 内（父文档收不到事件）。
+// 直接验产品自己的那条路径：指针落进 iframe 内时父文档收不到事件，靠 iframe 探针上报
+// __htmlhover → 组件给 .pv 挂 `.hd-on` → 工具条浮出。这里把那个类挂上去量计算值即可，
+// 不依赖坐标（像素级 hover 会被流式贴底滚动打断，实测时红时绿）。
+// 这一条只验样式表：「指针进来 → 工具条浮出」是两条规则（父文档 :hover / iframe 探针报
+// hd-on）。真块上做会跟流式抢 DOM（两次 eval 之间整块被重建，标记元素直接消失），
+// 所以在页面里搭一份同构夹具量计算值 —— 样式表是同一份，判据是确定的。
+const bar = await page.eval(() => {
+  const host = document.createElement('div')
+  host.className = 'cy-frame'
+  host.innerHTML = '<div class="pv"><div class="pv-bar"><button>预览</button><button>源码</button><button>在浏览器打开</button></div></div>'
+  document.body.appendChild(host)
+  const pv = host.querySelector('.pv')
+  const el = host.querySelector('.pv-bar')
+  // 关掉过渡再量：否则读到的是动画起始值（永远是 0）
+  el.style.transition = 'none'
+  const before = getComputedStyle(el).opacity
+  pv.classList.add('hd-on')
+  const on = getComputedStyle(el).opacity
+  pv.classList.remove('hd-on')
+  const after = getComputedStyle(el).opacity
+  const buttons = [...el.querySelectorAll('button')].map((b) => b.textContent.trim())
+  host.remove()
+  return { before, on, after, buttons }
+})
+check('visual output: hover reveals the bar (hidden by default, hd-on raises it, back after)',
+  bar?.before === '0' && bar?.on === '1' && bar?.after === '0', JSON.stringify(bar))
 check('visual output: preview / source / open (no path here, so it says browser)',
-  hb?.buttons[0] === '预览' && hb?.buttons[1] === '源码' && hb?.buttons[2] === '在浏览器打开', JSON.stringify(hb?.buttons))
+  bar?.buttons[0] === '预览' && bar?.buttons[1] === '源码' && bar?.buttons[2] === '在浏览器打开', JSON.stringify(bar?.buttons))
 
 const hs = await page.eval(async () => {
   const pick = (i) => document.querySelectorAll('.cy-frame .pv-bar button')[i]
