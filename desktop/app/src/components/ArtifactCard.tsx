@@ -47,7 +47,7 @@ const OFFICE_PREVIEW_LABELS: Record<string, string> = {
 }
 
 // 展示路径：与 openHtmlInBrowser 同款约定（以 / 开头即绝对；否则锚定工作区）。
-function absPathOf(p: string, ws: string | undefined): string {
+export function absArtifactPath(p: string, ws: string | undefined): string {
   if (p.startsWith('/')) return p
   return ws ? `${ws}/${p}` : p
 }
@@ -330,7 +330,7 @@ export const ArtifactCard = memo(function ArtifactCard({ items, truncated }: { i
   const hiddenCount = collapsed ? rest.length - MAX_ROWS : 0
 
   const row = (a: ArtifactItem, idx: number, compact: boolean) => {
-    const abs = absPathOf(a.path, ws)
+    const abs = absArtifactPath(a.path, ws)
     const dup = dupOf.get(idx + 1) // items 下标（hero 占了 0）
     return (
       <div className="art" key={`${a.path}-${idx}`}>
@@ -383,13 +383,13 @@ export const ArtifactCard = memo(function ArtifactCard({ items, truncated }: { i
               </span>
             )}
           </div>
-          <PathLine a={hero} abs={absPathOf(hero.path, ws)} />
+          <PathLine a={hero} abs={absArtifactPath(hero.path, ws)} />
           <div className="art-meta hero-meta">
             {hero.size ? fmtSize(hero.size) : ''}
             {hero.size && hero.lines ? ' · ' : ''}
             {hero.lines ? t('art.lines').replace('{n}', String(hero.lines)) : ''}
           </div>
-          <ArtifactActions a={hero} abs={absPathOf(hero.path, ws)} />
+          <ArtifactActions a={hero} abs={absArtifactPath(hero.path, ws)} />
         </div>
       </div>
 
@@ -443,7 +443,7 @@ async function revealAll(items: ArtifactItem[], ws: string | undefined, unsuppor
   // 同目录只显示一次（避免同一目录被反复打开）
   const seen = new Set<string>()
   for (const a of items) {
-    const abs = absPathOf(a.path, ws)
+    const abs = absArtifactPath(a.path, ws)
     const dir = abs.slice(0, abs.lastIndexOf('/'))
     if (seen.has(dir)) continue
     seen.add(dir)

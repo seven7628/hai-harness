@@ -29,7 +29,8 @@ import { CheckCircleIcon, PaperclipIcon } from './icons'
 import { fmtDuration, fmtRun, fmtClock, fmtTime, fmtUsd } from './ui'
 import { useClock } from '../lib/useNow'
 import { useSkin } from '../lib/useSkin'
-import { ArtifactCard } from './ArtifactCard'
+import { ArtifactCard, absArtifactPath } from './ArtifactCard'
+import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
 import { UsageActivityMini } from './UsageStats'
 import { useT } from '../i18n'
 
@@ -184,6 +185,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const density = densityProp ?? storedDensity
   // run 级「正在跑」：块上的 running 在两次 LLM 调用之间是假的（见下方 live）
   const runLive = useAppStore((s) => (s.activeSessionId ? mainRunActive(s.views[s.activeSessionId]) : false))
+  // 产出卡的动作：预览 = 用户在文件栏点它的同一条路；Finder = workspace + 相对路径
+  const openFile = useAppStore((s) => s.openFile)
+  const workspace = useAppStore((s) => s.workspace)
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
   const activeSessionId = useAppStore((s) => s.activeSessionId)
@@ -857,7 +861,22 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     if (b.kind === 'artifacts') {
       return (
         <div className="msg artifacts" key={b.id}>
-          <ArtifactCard items={b.items} {...(b.truncated ? { truncated: true } : {})} />
+          {/* 运行时皮肤：产出卡照 parts/artifacts.js 的形态（主卡 + 另外 N 个 + 展开剩余）。
+              其他皮肤仍走原 ArtifactCard（两条路径都在，切换皮肤不丢功能）。 */}
+          {skin === 'runtime' ? (
+            <ArtifactsBlock
+              items={b.items}
+              {...(b.truncated ? { truncated: true } : {})}
+              onPreview={(a) => openFile(a.path)}
+              onReveal={(a) => {
+                const d = window.desktop
+                if (!d?.showItemInFolder) return
+                void d.showItemInFolder(absArtifactPath(a.path, workspace))
+              }}
+            />
+          ) : (
+            <ArtifactCard items={b.items} {...(b.truncated ? { truncated: true } : {})} />
+          )}
         </div>
       )
     }

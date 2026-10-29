@@ -1,0 +1,318 @@
+/* 产出卡（artifacts）—— 逐条搬自 design/agent-runtime/v2/parts/artifacts.css，
+   选择器统一前缀到 html[data-skin='runtime']（与 ask/pop 同一套做法）。
+   数值一个没改：这就是设计稿里的 312 行，只加了皮肤作用域。
+   DOM 与交互动画见 ArtifactsBlock.tsx（.ar-more 的展开、行的 hover 出动作、
+   主卡的 预览/在文件夹中显示 都由组件驱动，不在这里）。 */
+
+/* ============================================================================
+   parts/artifacts.css · AgentEnd → the run's产出 · `ar-`
+   ---------------------------------------------------------------------------
+   This is the tail of a turn: what the run left behind. One headline file gets
+   a frame, the rest are a list, and the frame carries the only colour on the
+   surface (the kind: green = created, accent = modified). Reader-visible
+   numbers are all measurements from the payload — this sheet adds no number,
+   no "≈", and no percentage.
+
+   Two rules shape everything below:
+
+   1. No frame of its own. Like every other part it drops into the transcript
+      column, so it must not draw a second card around itself — the headline
+      file is the card.
+   2. The folder is shown on hover, and hover must not be able to flicker.
+      The row grows downward (0fr → 1fr) so the pointer stays inside the row
+      that grew; nothing above the pointer ever moves.
+
+   Names no colour of its own: only ui.css tokens, and `color-mix` of them.
+   ========================================================================== */
+
+html[data-skin='runtime'] .ar{
+  /* the wash reaches this far past the text on both sides, so the row reads as
+     a row and not as a line of text. The list pulls itself out by the same
+     amount and this component's padding absorbs it, so the wash bleeds without
+     any element reporting a horizontal overflow. */
+  --ar-bleed: 8px;
+  /* row icon 22 + gap 8: where the hover line's folder starts, under the name */
+  --ar-ind: 30px;
+  /* the kind tone, defaulted to the "acted on" one and overridden per row */
+  --ar-tone: var(--accent);
+  --ar-tone-soft: var(--accent-soft);
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  /* the wash is wider than the text on both sides and the component is exactly
+     as wide as its box: the rows' negative margin is cancelled by this padding,
+     so the band bleeds without the card ever reporting a horizontal overflow */
+  padding: 0 var(--ar-bleed);
+  /* the column's width belongs to the transcript, not to this component — at
+     390 the phone and at 1440 a narrow column must lose the same things, so the
+     query is on the component. Note a container query measures the *content*
+     box: the 560/430 thresholds below fire at a column of 576/446, because this
+     component keeps 8px of its own on each side. */
+  container-type: inline-size;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Kind is one tone, not two colours: created grows the tree (green, the page's
+   "landed"), modified reshapes a file that already existed (accent, the page's
+   "acted on"). Amber and red stay reserved for attention and failure — neither
+   describes a file, and grey would make the one difference that matters look
+   like metadata. */
+html[data-skin='runtime'] .ar [data-k='created']{ --ar-tone: var(--green); --ar-tone-soft: var(--green-soft); }
+html[data-skin='runtime'] .ar [data-k='modified']{ --ar-tone: var(--accent); --ar-tone-soft: var(--accent-soft); }
+
+/* ---- header: how many, how much, how long ------------------------------- */
+html[data-skin='runtime'] .ar-h{
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px;
+}
+html[data-skin='runtime'] .ar-h-t{
+  min-width: 0;
+  font-size: 12.5px; font-weight: 450; letter-spacing: -0.006em;
+  color: var(--ink-2);
+}
+html[data-skin='runtime'] .ar-h-t b{ font-weight: 550; color: var(--ink); }
+/* the total is the sum of the deltas printed per file, in the same colours they
+   are printed in — so it is checkable by eye against the rows below */
+html[data-skin='runtime'] .ar-h-df{ display: inline-flex; gap: 6px; font: 500 11px/1 var(--mono); }
+html[data-skin='runtime'] .ar-h-df .p{ color: var(--green); }
+html[data-skin='runtime'] .ar-h-df .m{ color: var(--red); }
+/* the run's clock qualifies the whole card, so it sits at the far edge and
+   wraps instead of squeezing the count */
+html[data-skin='runtime'] .ar-h-w{ margin-left: auto; font: 400 10.5px/1 var(--mono); color: var(--ink-3); }
+
+/* truncated is a caveat, not a detail: the sums above are then only the listed
+   files, and the card has to say so in the same breath */
+html[data-skin='runtime'] .ar-note{
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px;
+  margin: 7px 0 0;
+  font-size: 11px; line-height: 1.55; color: var(--ink-3);
+}
+html[data-skin='runtime'] .ar-note .k{ color: var(--amber); font-weight: 500; }
+
+/* ---- the headline file: the only frame on the surface ------------------- */
+html[data-skin='runtime'] .ar-main{
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  grid-template-areas: 'ico body acts';
+  column-gap: 10px;
+  margin-top: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--card-2);
+  /* the kind rail: 2px, inset so nothing shifts, mixed toward the line so it
+     reads as a hint of the tone rather than a second colour */
+  box-shadow: inset 2px 0 0 color-mix(in oklab, var(--ar-tone) 55%, transparent),
+              var(--shadow-card);
+  transition: border-color var(--t-base) var(--ease);
+}
+html[data-skin='runtime'] .ar-main:hover{ border-color: color-mix(in oklab, var(--ink-3) 26%, var(--line)); }
+
+html[data-skin='runtime'] .ar-ico{
+  width: 34px; height: 34px; border-radius: var(--r-sm);
+  display: grid; place-items: center;
+  font: 500 9.5px/1 var(--mono); letter-spacing: 0.02em;
+  color: var(--ar-tone);
+  background: var(--ar-tone-soft);
+}
+/* created is a filled block, modified an outline: shape reads at 9px faster
+   than hue, and the hue is still there for anyone who needs it */
+html[data-skin='runtime'] .ar [data-k='modified'] .ar-ico{
+  background: none;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--ar-tone) 42%, transparent);
+}
+
+html[data-skin='runtime'] .ar-main > .ar-ico{ grid-area: ico; }
+html[data-skin='runtime'] .ar-m-b{ grid-area: body; min-width: 0; display: grid; gap: 2px; }
+html[data-skin='runtime'] .ar-m-n{ display: flex; align-items: center; gap: 7px; min-width: 0; }
+
+/* a file name is a name, not code: sans, so the path in mono below it is the
+   only "this is a path" signal the card needs */
+html[data-skin='runtime'] .ar-nm{
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12.5px; font-weight: 500; letter-spacing: -0.006em;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .ar-badge{
+  flex: none; height: 16px; padding: 0 5px;
+  display: inline-flex; align-items: center;
+  border-radius: 4px;
+  font-size: 10px; font-weight: 500; line-height: 1;
+  color: var(--ar-tone);
+  background: var(--ar-tone-soft);
+}
+
+html[data-skin='runtime'] .ar-df{ display: inline-flex; gap: 5px; flex: none; font: 500 10.5px/1 var(--mono); }
+html[data-skin='runtime'] .ar-df .p{ color: var(--green); }
+html[data-skin='runtime'] .ar-df .m{ color: var(--red); }
+
+/* the path and its measurement are one line: `where · how big` reads as a pair,
+   so the path gives up its middle rather than pushing the size to a second row
+   (a wrapped card is three lines taller and the numbers stop lining up) */
+html[data-skin='runtime'] .ar-m-p{
+  display: flex; align-items: baseline; flex-wrap: nowrap; gap: 0 8px;
+  min-width: 0;
+}
+/* middle truncation: the head keeps its beginning, the tail keeps the whole
+   basename, and the ellipsis in between is `text-overflow` on the head — no
+   measurement, no re-render on resize. `text-overflow` on the path itself would
+   cut the basename, which is the one part being looked for. */
+html[data-skin='runtime'] .ar-p{ display: flex; flex: 0 1 auto; max-width: 100%; min-width: 0; font: 400 10.5px/1.5 var(--mono); }
+html[data-skin='runtime'] .ar-p-h{
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink-3);
+}
+html[data-skin='runtime'] .ar-p-t{
+  flex: 0 0 auto; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink-2);
+}
+html[data-skin='runtime'] .ar-m-meta{ flex: none; margin-left: auto; font: 400 10.5px/1.5 var(--mono); color: var(--ink-3); }
+
+html[data-skin='runtime'] .ar-m-a{ grid-area: acts; display: flex; align-items: center; gap: 2px; align-self: center; }
+
+/* ---- one button, three places (headline, hover, footer) ----------------- */
+html[data-skin='runtime'] .ar-btn{
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 24px; padding: 0 8px; border-radius: var(--r-xs);
+  border: 1px solid transparent;
+  font: 400 11px/1 var(--font); color: var(--ink-3);
+  white-space: nowrap;
+  transition: color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+html[data-skin='runtime'] .ar-btn svg{ width: 11px; height: 11px; flex: none; }
+html[data-skin='runtime'] .ar-btn:hover{ color: var(--ink); background: var(--raised); border-color: var(--line); }
+html[data-skin='runtime'] .ar-btn:active{ transform: scale(0.97); }
+
+/* ---- the rest of the run ------------------------------------------------- */
+html[data-skin='runtime'] .ar-cap{
+  display: flex; align-items: baseline; gap: 4px;
+  margin-top: 12px; padding: 0 0 2px;
+  font-size: 11px; color: var(--ink-3);
+}
+html[data-skin='runtime'] .ar-cap b{ font-weight: 500; color: var(--ink-2); }
+
+/* the list is the full width of the component (the rows' wash reaches into the
+   component's own padding), so nothing here reports a horizontal overflow:
+   772 content + 8 + 8 of negative margin = the component's 788 exactly */
+html[data-skin='runtime'] .ar-list{
+  display: grid; grid-template-columns: minmax(0, 1fr);
+  margin: 0 calc(var(--ar-bleed) * -1);
+}
+
+/* a row: the line, then the folder line that only exists while pointed at */
+html[data-skin='runtime'] .ar-f{
+  position: relative;
+  padding: 0 var(--ar-bleed);
+  border-radius: var(--r-sm);
+  min-width: 0;
+  transition: background-color var(--t-fast) var(--ease);
+}
+/* the rule belongs to the row, not to the text: a hairline that spans the wash
+   is what makes a list of 6 files scannable */
+html[data-skin='runtime'] .ar-f + .ar-f::before{
+  content: ''; position: absolute; top: 0; left: var(--ar-bleed); right: var(--ar-bleed); height: 1px;
+  background: var(--line-soft);
+}
+html[data-skin='runtime'] .ar-f:hover, .ar-f:focus-within{ background: var(--card-2); }
+html[data-skin='runtime'] .ar-f[hidden]{ display: none; }
+
+html[data-skin='runtime'] .ar-f-r{
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 0;
+}
+html[data-skin='runtime'] .ar-ico-sm{ width: 22px; height: 22px; border-radius: 5px; font-size: 7.5px; letter-spacing: 0; }
+
+html[data-skin='runtime'] .ar-f-n{
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--ink-2);
+  transition: color var(--t-fast) var(--ease);
+}
+html[data-skin='runtime'] .ar-f:hover .ar-f-n, .ar-f:focus-within .ar-f-n{ color: var(--ink); }
+
+/* Hover, without the flicker. The reveal is a 0fr track that opens to 1fr: the
+   row grows *downward*, so the pointer that opened it stays inside it, and no
+   re-entry / collapse loop is possible. The folder and the actions exist on
+   every row (they are in the DOM and Tab reaches them), they just take no
+   height and no opacity until the row is hovered or holds focus. A 0fr track
+   still renders a child's padding, so the padding lives one level deeper. */
+html[data-skin='runtime'] .ar-f-x{
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows var(--t-base) var(--ease-out),
+              opacity var(--t-base) var(--ease);
+}
+html[data-skin='runtime'] .ar-f-xin{ overflow: hidden; min-height: 0; }
+html[data-skin='runtime'] .ar-f:hover .ar-f-x, .ar-f:focus-within .ar-f-x{ grid-template-rows: 1fr; opacity: 1; }
+
+html[data-skin='runtime'] .ar-f-xrow{
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px;
+  padding: 0 0 8px var(--ar-ind);
+  min-width: 0;
+}
+/* one step below the path in the headline (ink-2 → ink-3): the folder is where
+   the file is, the name is what it is, and the name has to win */
+html[data-skin='runtime'] .ar-dir{
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 400 10.5px/1.5 var(--mono); color: var(--ink-3);
+}
+html[data-skin='runtime'] .ar-f-a{ flex: none; display: flex; gap: 2px; margin-left: auto; }
+/* the actions are the reason the row opened, so they sit one step brighter here
+   than the quiet buttons in the headline and the footer */
+html[data-skin='runtime'] .ar-f-a .ar-btn{ height: 22px; padding: 0 6px; font-size: 10.5px; color: var(--ink-2); }
+
+/* ---- how much of the list is on screen ---------------------------------- */
+html[data-skin='runtime'] .ar-more{
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px 10px;
+  margin-top: 3px;
+}
+html[data-skin='runtime'] .ar-more-k{ font-size: 11px; color: var(--ink-3); }
+html[data-skin='runtime'] .ar-more-k b{ font-weight: 500; color: var(--ink-2); }
+html[data-skin='runtime'] .ar-more-b{ height: 22px; padding: 0 6px; font-size: 10.5px; color: var(--ink-2); }
+
+html[data-skin='runtime'] .ar-foot{
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px 10px;
+  margin-top: 10px; padding: 9px 0 0;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px; color: var(--ink-3);
+}
+html[data-skin='runtime'] .ar-foot-k b{ font-weight: 500; color: var(--ink-2); }
+html[data-skin='runtime'] .ar-foot .ar-btn{ margin-left: auto; height: 22px; padding: 0 6px; font-size: 10.5px; }
+
+/* ---- narrow: the column gives way in this order -------------------------
+   first the actions move under the name (they are the thing you can live
+   without seeing), then the paddings tighten. The name, the kind badge, the
+   +/− and the path never go: they are the card. */
+@container (max-width: 560px){
+html[data-skin='runtime'] .ar-main{
+    grid-template-columns: 30px minmax(0, 1fr);
+    grid-template-areas: 'ico body' 'ico acts';
+    row-gap: 6px;
+    padding: 10px;
+  }
+  /* the headline icon only: the row icon stays 22px, because --ar-ind is
+     measured from it and the hover line would stop lining up with the name */
+html[data-skin='runtime'] .ar-main > .ar-ico{ width: 30px; height: 30px; font-size: 8.5px; }
+  /* the label, not the wash, is what lines up with the name */
+html[data-skin='runtime'] .ar-m-a{ align-self: start; margin-left: -8px; }
+}
+
+@container (max-width: 430px){
+html[data-skin='runtime'] .ar-h-t{ font-size: 12px; }
+html[data-skin='runtime'] .ar-cap{ margin-top: 10px; }
+html[data-skin='runtime'] .ar-m-meta{ font-size: 10px; }
+html[data-skin='runtime'] .ar-foot .ar-btn{ margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .ar-f-x { transition: none; }
+  html[data-skin='runtime'] .ar-btn:active { transform: none; }
+}
