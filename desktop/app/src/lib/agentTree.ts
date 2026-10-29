@@ -32,6 +32,8 @@ export interface AgentTreeInput {
   toolName?: string
   status?: AgentNodeStatus
   startedAt?: number
+  /** 结算时长（runNodes/blocks 的 dur_ms）：子会话页顶部的时长用它兜底 */
+  durMs?: number
 }
 
 export interface AgentTreeNode {
@@ -48,6 +50,8 @@ export interface AgentTreeNode {
   depth: number
   status?: AgentNodeStatus
   startedAt?: number
+  /** 结算时长（缺省 = 还没结算：卡片/节点都没给过） */
+  durMs?: number
   children: AgentTreeNode[]
   /** 在父的 children 中的序号（画连线用） */
   index: number
@@ -87,6 +91,7 @@ export function buildAgentTree(input: AgentTreeInput[], opts?: { order?: 'asc' |
       if (!prev.taskId && it.taskId) prev.taskId = it.taskId
       if (!prev.toolName && it.toolName) prev.toolName = it.toolName
       if (!prev.startedAt && it.startedAt) prev.startedAt = it.startedAt
+      if (!prev.durMs && it.durMs) prev.durMs = it.durMs
       if (!prev.status && it.status) prev.status = it.status
       // 占位（task）升级成 agent：agent 是更具体的身份，它的转写才有内容，
       // 名字也以 agent 的为准（占位贴的是「后台任务」这种泛称）。
@@ -109,6 +114,7 @@ export function buildAgentTree(input: AgentTreeInput[], opts?: { order?: 'asc' |
       depth: 1, // 占位，下面按父链重算
       status: it.status,
       startedAt: it.startedAt,
+      durMs: it.durMs,
       children: [],
       index: 0,
       last: false,
@@ -305,6 +311,7 @@ export interface ViewRunNode {
   kind: string // 'run' | 'tool'
   taskId?: string
   startedAt?: number
+  durMs?: number
 }
 
 /** store.MsgBlock 里与树相关的两种块的最小子集 */
@@ -316,6 +323,7 @@ export interface ViewAgentBlock {
   label?: string
   status?: string
   spawnedAt?: number
+  durMs?: number
 }
 export interface ViewTaskBlock {
   kind: 'async_task' | 'tool'
@@ -368,6 +376,7 @@ export function agentTreeFromView(
       taskId: n.taskId,
       status: runStatusToNode(n.status),
       startedAt: n.startedAt,
+      durMs: n.durMs,
     })
   }
   for (const b of blocks) {
@@ -382,6 +391,7 @@ export function agentTreeFromView(
         taskId: b.taskId,
         status: b.status as AgentNodeStatus | undefined,
         startedAt: b.spawnedAt,
+        durMs: b.durMs,
       })
       continue
     }

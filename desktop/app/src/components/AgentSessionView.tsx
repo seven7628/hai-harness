@@ -8,6 +8,7 @@ import { TaskResultInline } from './NarrativeBlocks'
 import Narrative from './Narrative'
 import type { NarrativeSource } from './Narrative'
 import { ElapsedTimer } from './ElapsedTimer'
+import { agentDurationOf } from '../lib/agentDuration'
 import { fmtUsd, UsageChip } from './ui'
 import { useScopedCompression } from './sessionScope'
 import { Bot, ChevronRight, Clock } from './icons'
@@ -119,7 +120,18 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   }, [card, toolBlock])
 
   if (!node) return <div className="empty">{t('agentTree.gone')}</div>
-  const running = node.status === 'running' || node.status === 'interrupting'
+  // 时长口径收在一处（lib/agentDuration.ts）：卡片结算 → 节点结算 → 该 run 末条 item 的整轮耗时；
+  // 三者都没有才算「还在跑」，用 spawnedAt 走实时计时。此前只看卡片 durMs + 节点 status：
+  // 卡片没加载出来时长整段消失，节点状态停在 running 时计时器会一直往上走（用户 2026-10
+  // 报障「子智能体的运行时长显示的是主智能体的」）。
+  const lastItemDur = (() => {
+    const items = card?.items
+    const last = items && items.length ? items[items.length - 1] : undefined
+    // agentDurMs 只挂在文本项（kind='text'）与思考项上（工具项没有这个字段）
+    return last && (last.kind === 'text' || last.kind === 'thinking') ? last.agentDurMs : undefined
+  })()
+  const dur = agentDurationOf({ status: node.status, cardDurMs: card?.durMs, nodeDurMs: node.durMs, lastItemAgentDurMs: lastItemDur })
+  const running = dur.running
   const canStop = Boolean(node.taskId) && running
   const usage = card?.usage
   const trimmed = card?.itemsTrimmed ?? 0
@@ -175,8 +187,8 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
             .replace('{cost}', fmtUsd(usage.costUsd ?? 0))}
         />
       )}
-      {(running || card?.durMs != null) && (
-        <ElapsedTimer className="as-dur mono" startAt={node.startedAt} running={running} durMs={running ? undefined : card?.durMs} />
+      {(running || dur.durMs != null) && (
+        <ElapsedTimer className="as-dur mono" startAt={node.startedAt} running={running} durMs={dur.durMs} />
       )}
       {canStop && (
         <button
