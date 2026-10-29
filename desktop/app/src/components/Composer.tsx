@@ -10,6 +10,8 @@ import FileRefPanel from './FileRefPanel'
 import { useSkin } from '../lib/useSkin'
 import './runtime/pop/pop.css'
 import './runtime/fan/fan.css'
+import { CapsPop, capsCountOf } from './runtime/prompt/CapsPop'
+import './runtime/prompt/caps.css'
 import { AgentRunningBar } from './AgentRunningBar'
 import { useT } from '../i18n'
 import { getTransport } from '../transport'
@@ -281,6 +283,11 @@ export default function Composer() {
   // 另两档仍是「点击 → 压缩确认」的老路径，不能一起改。钉住之后鼠标移开不关，
   // 再点一次或点面板外才关。
   const [ctxPinned, setCtxPinned] = useState(false)
+  // 「能力」弹层：设计里点它是打开一份「本轮可用」的清单（技能/MCP/记忆/钩子/子智能体），
+  // 不是把 `/` 塞进输入框再让补全菜单顶上来 —— 那是两个不同的东西
+  const [capsOpen, setCapsOpen] = useState(false)
+  // 按钮上的数 = 弹层里那个「N 项」：同源（capsCountOf），否则同一个按钮会报两个数
+  const capsN = useAppStore(capsCountOf)
   const ctxHoverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => () => { if (ctxHoverTimer.current) clearTimeout(ctxHoverTimer.current) }, [])
   const openCtxPanel = () => {
@@ -1368,6 +1375,16 @@ export default function Composer() {
             value={mode}
             onSelect={compressing ? () => undefined : switchMode}
           />
+          {rt && capsOpen && (
+            <CapsPop
+              onClose={() => setCapsOpen(false)}
+              onInsertSkill={(cmd) => {
+                setCapsOpen(false)
+                setText((prev) => (prev.trim() ? cmd + prev : cmd))
+                requestAnimationFrame(() => textareaRef.current?.focus())
+              }}
+            />
+          )}
           <div className="row2-right">
             <div
               ref={chipRef}
@@ -1480,11 +1497,9 @@ export default function Composer() {
               <button
                 type="button"
                 className="ptool caps-btn"
-                onClick={() => {
-                  setText('/')
-                  setCmdMenu(true)
-                  textareaRef.current?.focus()
-                }}
+                onClick={() => setCapsOpen((v) => !v)}
+                aria-expanded={capsOpen}
+                aria-haspopup="dialog"
                 disabled={queueFull || compressing}
                 title={t('composer.caps.hint').replace('{n}', String(slashItems.length))}
                 aria-label={t('composer.caps.aria').replace('{n}', String(slashItems.length))}

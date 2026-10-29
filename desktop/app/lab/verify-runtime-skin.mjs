@@ -932,29 +932,59 @@ check('queue: Esc drops the edit', qq.escaped.editing === 0 && qq.escaped.texts[
 check('queue: seeded rows are cleaned up', qq.cleared === 0, qq.cleared)
 
 // ---- 能力入口（设计 .caps-btn）+ 附件 chip（设计 .att）---------------------
-// 能力的数量口径必须是「这份输入框真能触发的清单」= 启用技能 + 内置命令；
-// 点击打开的就是同一个 `/` 菜单（不另造一份能力表，避免出现两处不一致的数字）。
+// 「能力」= 设计 index.html:916 的 .pop.caps-pop：本轮可用 <N 项> + 按类折叠。
+// 判据：按钮上的数 = 弹层里的「N 项」（同源 capsCountOf），技能展开有行，
+// 点技能行把 `/名字 ` 写进输入框并关掉弹层 —— 而且**不能**顺手把 `/` 菜单顶出来。
 const caps = await page.eval(() => {
   const btn = document.querySelector('.row2 .caps-btn')
   if (!btn) return null
   const out = {
     n: Number(btn.querySelector('b')?.textContent),
-    expected: window.__store.getState().skills.filter((s) => s.enabled).length + 3, // 3 = /summary /clear /reload_skills
     label: btn.querySelector('.lbl')?.textContent ?? null,
     h: Math.round(btn.getBoundingClientRect().height * 10) / 10,
+    aria: btn.getAttribute('aria-expanded'),
   }
   btn.click()
   return out
 })
-await wait(450)
+await wait(600)
 const capsPop = await page.eval(() => {
-  const pop = document.querySelector('.pop[data-pop="cmd"]')
-  return { open: !!pop, rows: pop ? pop.querySelectorAll('.pop-row, [role="option"]').length : 0 }
+  const pop = document.querySelector('.caps-pop')
+  if (!pop) return { open: false }
+  return {
+    open: true,
+    head: (pop.querySelector('.caps-head')?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+    total: Number((pop.querySelector('.caps-head b')?.textContent ?? '').replace(/\D/g, '')),
+    w: Math.round(pop.getBoundingClientRect().width),
+    groups: [...pop.querySelectorAll('.acc-row')].map((r) => (r.textContent ?? '').replace(/\s+/g, ' ').trim()),
+    skillRows: pop.querySelectorAll('.acc-body .pop-row.two').length,
+    cmdMenu: !!document.querySelector('.pop[data-pop="cmd"]'),
+  }
 })
 check('caps: shown in the tool row at 26px', caps?.h === 26, caps?.h)
 check('caps: labelled 能力', caps?.label === '能力', caps?.label)
-check('caps: the number is the list the composer can trigger', caps && caps.n === caps.expected, JSON.stringify(caps))
-check('caps: clicking it opens the capability menu', capsPop.open === true && capsPop.rows > 0, JSON.stringify(capsPop))
+check('caps: the button number is the popover total (one source)', caps && caps.n === capsPop.total, `${caps?.n} vs ${capsPop.total}`)
+check('caps: clicking it opens the capability list, not the slash menu', capsPop.open === true && capsPop.cmdMenu === false, JSON.stringify({ open: capsPop.open, cmd: capsPop.cmdMenu }))
+check('caps: it says how many are available this turn', /本轮可用/.test(capsPop.head || '') && capsPop.total > 0, capsPop.head)
+check('caps: groups are counted rows', (capsPop.groups || []).length >= 2, JSON.stringify(capsPop.groups))
+check('caps: the skills group lists real skills', capsPop.skillRows > 0, capsPop.skillRows)
+
+// 点技能行 = 把 `/名字 ` 写进输入框（设计：只有技能行会插入文本）
+const capsPick = await page.eval(async () => {
+  const row = document.querySelector('.caps-pop .acc-body .pop-row.two')
+  const name = row?.querySelector('.k')?.textContent?.trim() ?? null
+  row?.click()
+  await new Promise((r) => setTimeout(r, 500))
+  const ta = document.querySelector('.composer textarea') || document.querySelector('textarea')
+  const out = { name, value: ta?.value ?? null, popGone: !document.querySelector('.caps-pop'), cmd: !!document.querySelector('.pop[data-pop="cmd"]') }
+  // 收尾：清掉写进正文的内容
+  const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+  set.call(ta, '')
+  ta.dispatchEvent(new Event('input', { bubbles: true }))
+  return out
+})
+check('caps: a skill row inserts its command and closes', capsPick.name != null && capsPick.value === `/${capsPick.name} ` && capsPick.popGone === true, JSON.stringify(capsPick))
+check('caps: inserting a skill does not open the slash menu', capsPick.cmd === false, capsPick.cmd)
 // 收尾：Esc 关菜单、清掉写进正文的 `/`
 await page.eval(() => {
   const ta = document.querySelector('textarea')

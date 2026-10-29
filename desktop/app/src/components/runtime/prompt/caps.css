@@ -1,0 +1,133 @@
+/* 「能力」弹层 —— 设计 ui.components.css:1119-1149（.caps-pop / .caps-head / .acc-row /
+   .acc-body / .pop-row.two / .acc-note）逐字移植，选择器统一挂皮肤前缀。
+   时长一律引用 --t-* 表（见 src/runtime-tokens.css）。 */
+
+html[data-skin='runtime'] .caps-pop {
+  position: absolute;
+  left: 12px;
+  right: auto;
+  bottom: 54px;
+  z-index: 40;
+  width: 322px;
+  padding: 8px;
+  max-height: 58vh;
+  overflow: auto;
+}
+
+html[data-skin='runtime'] .caps-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 2px 8px 7px;
+}
+
+html[data-skin='runtime'] .caps-head span {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+html[data-skin='runtime'] .caps-head b {
+  font: 400 10.5px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .acc-row {
+  display: grid;
+  grid-template-columns: 6px 1fr auto 12px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  font-size: 12px;
+  color: var(--ink-2);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .acc-row:hover,
+html[data-skin='runtime'] .acc-row[aria-expanded='true'] {
+  background: var(--raised);
+  color: var(--ink);
+}
+
+/* 五类的点各一个色相（设计里是内联 style，这里按类名给；色相只用来区分，不带语义） */
+html[data-skin='runtime'] .acc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+html[data-skin='runtime'] .acc-dot-skills { background: var(--violet); }
+html[data-skin='runtime'] .acc-dot-mcp { background: var(--amber); }
+html[data-skin='runtime'] .acc-dot-mem { background: var(--green); }
+html[data-skin='runtime'] .acc-dot-hooks { background: var(--ink-3); }
+html[data-skin='runtime'] .acc-dot-agents { background: var(--accent); }
+
+html[data-skin='runtime'] .acc-row > b {
+  font: 400 10.5px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+html[data-skin='runtime'] .acc-row .chev {
+  width: 11px;
+  height: 11px;
+  color: var(--ink-3);
+  transition: transform var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .acc-row[aria-expanded='true'] .chev { transform: rotate(180deg); }
+
+html[data-skin='runtime'] .acc-body {
+  display: grid;
+  gap: 1px;
+  padding: 3px 0 5px 13px;
+}
+
+html[data-skin='runtime'] .acc-body .pop-row { height: 26px; }
+
+html[data-skin='runtime'] .acc-body .pop-row.two {
+  height: auto;
+  padding: 5px 7px;
+  cursor: pointer;
+}
+
+html[data-skin='runtime'] .acc-note {
+  padding: 3px 8px 1px;
+  font: 400 10px/1.45 var(--mono);
+  color: var(--ink-3);
+}
+
+/* .pop-row.two：名字在左、类目在右、描述占满下一行 */
+html[data-skin='runtime'] .caps-pop .pop-row.two {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  height: auto;
+  padding: 6px 8px;
+  align-items: baseline;
+  border: 0;
+  background: none;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+}
+html[data-skin='runtime'] .caps-pop .pop-row.two .k { grid-column: 1; font-size: 11.5px; color: var(--ink); }
+html[data-skin='runtime'] .caps-pop .pop-row.two .m { grid-column: 2; grid-row: 1; margin: 0; font-size: 10px; color: var(--ink-3); }
+html[data-skin='runtime'] .caps-pop .pop-row.two small {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-3);
+}
+html[data-skin='runtime'] .caps-pop .pop-row.two:hover small { color: var(--ink-2); }
+
+html[data-skin='runtime'] .caps-pop .dot.ok {
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--green) 18%, transparent);
+}
+html[data-skin='runtime'] .caps-pop .dot.warn { background: var(--amber); }
