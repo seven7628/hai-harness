@@ -1125,6 +1125,9 @@ const zh: Record<string, string> = {
   'ask.title': '模型提问',
   'ask.count': '（{n} 题）',
   'ask.multi': '可多选',
+  'ask.skip': '跳过',
+  'ask.selectAll': '全选',
+  'ask.clearAll': '清空选择',
   'ask.optionsAria': '问题 {n} 快捷选项',
   // 选项预览（模型可给选项带 preview；并排展示「选项 ↔ 预览」，仅单选）
   'ask.previewFor': '预览：{label}',
@@ -2742,6 +2745,9 @@ const en: Record<string, string> = {
   'ask.title': 'Question from the model',
   'ask.count': '({n} questions)',
   'ask.multi': 'Multiple choice',
+  'ask.skip': 'Skip',
+  'ask.selectAll': 'Select all',
+  'ask.clearAll': 'Clear all',
   'ask.optionsAria': 'Quick options for question {n}',
   // Option previews (the model may attach a `preview` to an option; options and preview sit side by side, single-select only)
   'ask.previewFor': 'Preview: {label}',

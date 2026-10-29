@@ -8,6 +8,7 @@ import { Markdown } from './markdown'
 import { foldedBody, runningBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine } from './runtime/turn/batch'
+import { BatchGroup } from './runtime/turn/BatchGroup'
 import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
 import { UserBlock } from './runtime/blocks/UserBlock'
@@ -981,13 +982,18 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const rs = roundsOf(list)
     return rs.map((r, ri) => {
       const tools = r.items.filter((b): b is Extract<MsgBlock, { kind: 'tool' }> => b.kind === 'tool')
+      const others = r.items.filter((b) => b.kind !== 'tool')
       const line = tools.length ? batchLine(tools) : ''
-      const inner = groupBlocks(r.say ? [r.say, ...r.items] : r.items, textOnlyId)
       return (
         <div className="rt-grp" key={r.key + ri}>
-          {/* 一组调用先折成一行（动词 + 对象 + 它数的量 + 耗时），再是逐条行 */}
-          {line ? <div className="rt-batch">{line}</div> : null}
-          {inner}
+          {/* 这一轮的旁白/记录照原顺序留在外面 */}
+          {r.say ? groupBlocks([r.say], textOnlyId) : null}
+          {others.length ? groupBlocks(others, textOnlyId) : null}
+          {/* 一组调用折成一行，行本身是折角按钮（设计 .cy-act）：动词 + 对象 + 它数的量
+              + 耗时，点开/收起的是**这一组逐条的行**，不牵动旁白与记录 */}
+          {line ? (
+            <BatchGroup line={line}>{groupBlocks(tools, textOnlyId)}</BatchGroup>
+          ) : null}
         </div>
       )
     })

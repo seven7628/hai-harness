@@ -14,14 +14,39 @@ const page = await b.newPage({ width: 1440, height: 1200 })
 const errs = []
 b.on(page.sessionId, 'Runtime.exceptionThrown', (p) => errs.push(p.exceptionDetails?.text))
 
+// 发一条消息，并**确认它真的发出去了**：直接写 .value 再发 ⏎ 是模拟键盘的常用手法，
+// 但只要那一下没落进 React 的 onChange（焦点不在、元素刚被替换、队列条里那个 textarea
+// 排在前面），⏎ 就是一次空提交 —— 后面所有断言都在等一个永远不会开始的新轮。
+// 所以这里读回 value、发完再看轮数/队列有没有变，没变就重试（最多三次）。
 const say = async (text) => {
-  await page.eval((t) => {
-    const ta = document.querySelector('textarea')
-    const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
-    set.call(ta, t)
-    ta.dispatchEvent(new Event('input', { bubbles: true }))
-    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
-  }, text)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const before = await page.eval(() => ({
+      turns: document.querySelectorAll('.rt-turn').length,
+      queue: (window.__store.getState().pendingQueue ?? []).length,
+    }))
+    await page.eval((t) => {
+      // 明确取输入卡的 textarea：队列条里那条「编辑某一条」的 textarea 也符合 textarea
+      const ta = document.querySelector('.composer textarea') || document.querySelector('textarea')
+      ta.focus()
+      const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      set.call(ta, t)
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    }, text)
+    await wait(160)
+    const typed = await page.eval(() => (document.querySelector('.composer textarea') || document.querySelector('textarea'))?.value ?? '')
+    if (!typed.trim()) continue
+    await page.eval(() => {
+      const ta = document.querySelector('.composer textarea') || document.querySelector('textarea')
+      ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    })
+    await wait(500)
+    const after = await page.eval(() => ({
+      turns: document.querySelectorAll('.rt-turn').length,
+      queue: (window.__store.getState().pendingQueue ?? []).length,
+    }))
+    if (after.turns > before.turns || after.queue > before.queue) return true
+  }
+  return false
 }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -108,6 +133,69 @@ check('tool rows render', t1.rows > 0, t1.rows)
 check('I1 tool row is a button', t1.hdClickable, t1.hdClickable)
 check('tool row six columns', (t1.grid || '').split(' ').length === 6, t1.grid)
 
+// ---- 一组调用的折叠行 = 设计 .cy-act ----------------------------------------
+// 「动词 · 对象 · 这个动词数的量 · 耗时」+ 折角，行本身是按钮（role 由 button 自带），
+// 点它收起/展开**这一组逐条的行**。判据是行为：aria-expanded 翻转、行真的不见。
+const batch1 = await page.eval(async () => {
+  const btn = document.querySelector('.rt-batch')
+  if (!btn) return { present: false }
+  const rowsOf = () => btn.parentElement.querySelector('.rt-collapse .tool-row')
+  const out = {
+    present: true,
+    tag: btn.tagName,
+    text: btn.textContent.trim().slice(0, 70),
+    chev: !!btn.querySelector('.rt-fold'),
+    aria: btn.getAttribute('aria-expanded'),
+    rows: btn.parentElement.querySelectorAll('.rt-collapse .tool-row').length,
+    // 语法四段：动词 … 数字 … 单位 … 耗时的单位
+    grammar: /\s.*·.*(hits|lines|files|KB|[+\u2212])/.test(btn.textContent) && /ms|s$/.test(btn.textContent.trim()),
+  }
+  btn.click()
+  await new Promise((r) => setTimeout(r, 450))
+  out.closed = { aria: btn.getAttribute('aria-expanded'), rowH: rowsOf() ? rowsOf().getBoundingClientRect().height : null }
+  btn.click()
+  await new Promise((r) => setTimeout(r, 450))
+  out.reopened = btn.getAttribute('aria-expanded')
+  return out
+})
+check('batch: the calls fold into one line', batch1.present === true && batch1.text.length > 8, JSON.stringify(batch1))
+check('batch: the line is a button with a fold mark', batch1.tag === 'BUTTON' && batch1.chev === true, `${batch1.tag} chev=${batch1.chev}`)
+check('batch: it carries verb, object, the number the verb counts, and the time', batch1.grammar === true, batch1.text)
+check('batch: clicking folds the rows away', batch1.closed?.aria === 'false', JSON.stringify(batch1.closed))
+check('batch: clicking again brings them back', batch1.reopened === 'true', batch1.reopened)
+
+// ---- 一组的折叠行（设计 .cy-act）：动词 + 对象 + 它数的量 + 耗时，行本身能开合 ----
+// 截图里那几条红线要的就是这个东西：一行读完「做了什么、多少、多久」，折角决定
+// 下面那几条逐条行露不露。
+const bt = await page.eval(async () => {
+  const btn = document.querySelector('.rt-batch')
+  if (!btn) return { present: false }
+  const body = btn.nextElementSibling
+  const rows = () => body?.querySelectorAll('.tool-row').length ?? 0
+  const out = {
+    present: true,
+    tag: btn.tagName,
+    aria: btn.getAttribute('aria-expanded'),
+    chev: !!btn.querySelector('.rt-fold'),
+    text: (btn.textContent || '').trim(),
+    rowsOpen: rows(), // 函数过不了 CDP 的序列化，必须在这里就地数出来
+  }
+  btn.click()
+  await new Promise((r) => setTimeout(r, 450))
+  out.collapsed = { aria: btn.getAttribute('aria-expanded'), visible: (body?.getBoundingClientRect().height ?? 0) > 4 }
+  btn.click()
+  await new Promise((r) => setTimeout(r, 450))
+  out.reopened = btn.getAttribute('aria-expanded')
+  return out
+})
+check('batch: the group folds into one line you can click', bt.present === true && bt.tag === 'BUTTON' && bt.chev === true, JSON.stringify({ tag: bt.tag, chev: bt.chev }))
+check('batch: the line carries verb · measure · duration', /·/.test(bt.text || '') && /\d+\s*(ms|s)\b/.test(bt.text || ''), bt.text)
+// bt.rows 是个函数（要等 DOM 真的画完才数），这里必须调用它 —— 之前写成 bt.rows > 0
+// 是在拿函数和 0 比，永远假红
+check('batch: open by default, so nothing is hidden behind a click', bt.aria === 'true' && bt.rowsOpen > 0, JSON.stringify({ aria: bt.aria, rows: bt.rowsOpen }))
+check('batch: clicking folds the rows away', bt.collapsed?.aria === 'false' && bt.collapsed?.visible === false, JSON.stringify(bt.collapsed))
+check('batch: clicking again brings them back', bt.reopened === 'true', bt.reopened)
+
 // I1：真的点一下工具行，看它展开
 if (t1.hdClickable) {
   await page.eval(() => document.querySelector('.tool-row .tool-row-hd')?.click())
@@ -129,8 +217,23 @@ if (t1.think) {
 
 // ---- 提问卡 ---------------------------------------------------------------
 await say('修复登录接口返回 401')
-if (!(await waitFor('.dock .ask'))) {
-  console.log('FAIL  the ask card never appeared')
+// 60s 而不是默认 30s：这一问要等上一轮跑完（mock 的脚本化回放 15s 左右）+ 队列推送，
+// 机器忙的时候 30s 会踩空 —— 踩空是测试的错，不是产品的错
+if (!(await waitFor('.dock .ask', 60000))) {
+  // 诊断而不是一句「没出现」：发出去没有（queue）、有没有提问事件（qs）、
+  // 输入框还在不在、叙述区到哪了 —— 这四项能区分「没发」与「发了没回」
+  const diag = await page.eval(() => {
+    const st = window.__store.getState()
+    return {
+      queue: (st.pendingQueue ?? []).length,
+      questions: (st.questions ?? []).length,
+      textarea: !!document.querySelector('textarea'),
+      turns: document.querySelectorAll('.rt-turn').length,
+      composer: !!document.querySelector('.composer'),
+      lastText: (document.querySelector('.narrative')?.textContent || '').trim().slice(-120),
+    }
+  })
+  console.log('FAIL  the ask card never appeared', JSON.stringify(diag))
   process.exit(1)
 }
 await wait(600)
@@ -211,6 +314,90 @@ const t4 = await page.eval(() => {
 })
 check('I4 digit key picks the nth option', t3 > 1 && t4.checked[1] === 'true', `${t3} opts / ${JSON.stringify(t4.checked)}`)
 check('picked option gets the accent ground', t4.bg !== 'rgba(0, 0, 0, 0)', t4.bg)
+
+// ---- 提问卡的交互动词（设计 parts/ask.js 的 click / pointerdown / pointerover /
+// keydown 四路）--------------------------------------------------------------
+// 判据都是**行为**：焦点落在卡上、数字键选中、←→ 与 ↑↓ 同义、指针抢走高亮、
+// Esc 跳过（未答的题按空答案交，不是关掉面板）。
+const ask1 = await page.eval(() => {
+  const card = document.querySelector('.dock.ask-scope .ask')
+  if (!card) return { present: false }
+  card.focus()
+  return {
+    present: true,
+    focusable: card.tabIndex === 0 && document.activeElement === card,
+    opts: card.querySelectorAll('.ask-opt').length,
+    foot: [...card.querySelectorAll('.ask-foot .ask-all, .ask-foot .ask-btn')].map((b) => b.textContent.trim()),
+  }
+})
+check('ask: the card itself takes focus, so 1-9 need no Tab', ask1.present === true && ask1.focusable === true, JSON.stringify(ask1))
+// 页脚按设计的两种形态：单题卡 = [全选?] 跳过 提交；分步批次 = 上一问 下一问/提交
+// （设计 parts/ask.js:190-208 明确不做「分步里的跳过」——中途跳过会让后面几问失去上下文）
+{
+  const foot = ask1.foot || []
+  const isSteps = foot.includes('上一问')
+  const rule = isSteps ? !foot.includes('跳过') : foot.includes('跳过')
+  check('ask: the footer matches its form (skip on a single question, back/next on a batch)', rule, JSON.stringify(foot))
+}
+
+const askDigit = await page.eval(async () => {
+  const card = document.querySelector('.dock.ask-scope .ask')
+  if (!card) return { missing: true }
+  card.focus()
+  card.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true }))
+  await new Promise((r) => setTimeout(r, 180))
+  const opts = [...card.querySelectorAll('.ask-opt')]
+  return { checked: opts.map((o) => o.getAttribute('aria-checked')), n: opts.length }
+})
+check('ask: a number key picks that option', askDigit.checked.includes('true'), JSON.stringify(askDigit))
+
+const askAxis = await page.eval(async () => {
+  const card = document.querySelector('.dock.ask-scope .ask')
+  if (!card) return { missing: true }
+  const cur = () => [...card.querySelectorAll('.ask-opt')].findIndex((o) => o.dataset.cursor === '1')
+  card.focus()
+  card.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  const afterDown = cur()
+  card.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  const afterRight = cur()
+  return { afterDown, afterRight }
+})
+check('ask: ArrowRight moves the cursor like ArrowDown', askAxis.afterDown >= 0 && askAxis.afterRight !== askAxis.afterDown, JSON.stringify(askAxis))
+
+const askHover = await page.eval(async () => {
+  const card = document.querySelector('.dock.ask-scope .ask')
+  if (!card) return { missing: true }
+  card.focus()
+  card.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  const has = () => [...card.querySelectorAll('.ask-opt')].some((o) => o.dataset.cursor === '1')
+  const before = has()
+  const opt = card.querySelectorAll('.ask-opt')[1] || card.querySelectorAll('.ask-opt')[0]
+  // React 的 enter/leave 是 pointerover/out 合成的，所以要发 pointerover
+  opt.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, relatedTarget: document.body }))
+  await new Promise((r) => setTimeout(r, 180))
+  return { before, after: has() }
+})
+check('ask: the pointer takes the highlight from the keyboard', askHover.before === true && askHover.after === false, JSON.stringify(askHover))
+
+await page.eval(() => {
+  const card = document.querySelector('.dock.ask-scope .ask')
+  if (!card) return
+  card.focus()
+  card.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+})
+await wait(1500)
+const askEsc = await page.eval(() => {
+  const st = window.__store.getState()
+  return {
+    panel: !!document.querySelector('.dock.ask-scope'),
+    questions: (st.questions ?? []).length,
+  }
+})
+check('ask: Esc skips the batch instead of only closing the panel', askEsc.panel === false || askEsc.questions === 0, JSON.stringify(askEsc))
+
 
 // ---- 视觉产出行 -------------------------------------------------------------
 // 新开一轮干净的会话：提问面板还挂着（没作答 = 工具阻塞），会挡住后面的断言
@@ -573,8 +760,10 @@ const drop = await page.eval(async () => {
   const out = {
     open: true,
     border: getComputedStyle(d).borderStyle,
-    edgeToEdge: r.width >= b.width && r.height >= b.height,
+    inset: getComputedStyle(d).top + '/' + getComputedStyle(d).left,
     delta: [Math.round(r.width - b.width), Math.round(r.height - b.height)],
+    covers: Math.abs(r.width - b.width) <= 2 && Math.abs(r.height - b.height) <= 2
+      && Math.abs(r.x - b.x) <= 2 && Math.abs(r.y - b.y) <= 2,
     icon: Math.round(d.querySelector('.pd-ic')?.getBoundingClientRect().width ?? 0),
     title: getComputedStyle(d.querySelector('b')).fontSize,
     what: getComputedStyle(d.querySelector('.pd-what')).fontSize,
@@ -586,7 +775,7 @@ const drop = await page.eval(async () => {
   return out
 })
 check('drop: the card shows a drop target', drop.open === true && drop.border === 'dashed', JSON.stringify(drop))
-check('drop: the overlay covers the whole card', drop.edgeToEdge === true, JSON.stringify(drop.delta))
+check('drop: the overlay is the design inset (-1px) and sits on the card', drop.inset === '-1px/-1px' && drop.covers === true, `${drop.inset} ${JSON.stringify(drop.delta)}`)
 check('drop: 28px icon block, 12.5px title, 11px mono detail', drop.icon === 28 && drop.title === '12.5px' && drop.what === '11px', `${drop.icon} ${drop.title} ${drop.what}`)
 check('drop: leaving puts the card back', drop.closed === true, drop.closed)
 

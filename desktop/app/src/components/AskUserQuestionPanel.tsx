@@ -61,7 +61,14 @@ export default function AskUserQuestionPanel() {
   // 不是把两三个问题上下摞成两三张卡 —— 摞起来读的人不知道自己在第几问。
   const [step, setStep] = useState(0)
   const [cursor, setCursor] = useState(-1) // ↑↓ 的落点（设计 .ask-opt[data-cursor]）
+  // 预览跟着**指针**走（设计 parts/ask.js:132-137 的 shownIdx：hover > cursor > 已选 > 第一条）：
+  // 只在点选之后才换预览，等于要用户先做决定再看备选的差别
+  const [hoverIdx, setHoverIdx] = useState(-1)
   const firstRef = useRef<HTMLInputElement>(null)
+  // 键盘的入口是**卡片本身**，不是自由输入框：设计 parts/ask.js:454-460 写明
+  // 「点卡片任意空白处就聚焦它，否则数字键要先 Tab 进去才生效」。焦点在输入框里时
+  // 数字键属于正文（下面的 inInput 守卫），所以默认焦点给卡片。
+  const cardRef = useRef<HTMLDivElement>(null)
   const cd = useCountdown(question)
 
   // 每次新批次：重置作答 + 聚焦第一个输入（键盘直达；有选项的可先点选）。
@@ -71,7 +78,8 @@ export default function AskUserQuestionPanel() {
     setMultiSel({})
     setStep(0)
     setCursor(-1)
-    if (question) requestAnimationFrame(() => firstRef.current?.focus({ preventScroll: true }))
+    setHoverIdx(-1)
+    if (question) requestAnimationFrame(() => cardRef.current?.focus({ preventScroll: true }))
   }, [question?.id])
 
   if (!question) return null
@@ -107,8 +115,12 @@ export default function AskUserQuestionPanel() {
     return (answers[it.id] ?? '').trim()
   }
 
-  const submitAll = () => {
-    if (!allAnswered) return // 有未答 → 不提交（按钮禁用兜底）
+  // allowEmpty=false：整批都要有答案（继续/完成按钮的语义）；
+  // allowEmpty=true：跳过 —— 未答的题按空答案交上去，Go 侧 formatAnswers 会明确写成
+  // 「(no answer from the user — no option selected, no text typed)」，模型分得清
+  // 「用户跳过了」和「用户答了但答的是空」。设计里 Skip 就是这个语义（parts/ask.js:445-448）。
+  const submitAll = (allowEmpty = false) => {
+    if (!allowEmpty && !allAnswered) return // 有未答 → 不提交（按钮禁用兜底）
     // 带上面板正在显示的**这批**的 batch id：主/子可能各有一批在等，
     // 由面板（而非 store 里"最后到达那条"）决定回答发去哪一批。
     answerQuestion(question.id, items.map((it) => ({ question_id: it.id, answer: finalAnswer(it) })))
@@ -120,8 +132,15 @@ export default function AskUserQuestionPanel() {
   const previewFor = (it: PendingQuestionItem): { label: string; preview: string } | null => {
     const withPv = it.options.filter((o) => o.preview)
     if (withPv.length === 0) return null
-    const pick = withPv.find((o) => o.label === answers[it.id]) ?? withPv[0]
-    return { label: pick.label, preview: pick.preview as string }
+    // 顺序照设计：指针 > 键盘光标 > 已选 > 第一条带预览的。指针压过键盘，
+    // 因为指针的位置是用户刚放下的，键盘光标可能还停在上一次的方向键上。
+    const cand = [
+      hoverIdx >= 0 ? it.options[hoverIdx] : undefined,
+      cursor >= 0 ? it.options[cursor] : undefined,
+      withPv.find((o) => o.label === answers[it.id]),
+      withPv[0],
+    ].find((o) => o && o.preview)
+    return cand ? { label: cand.label, preview: cand.preview as string } : null
   }
 
   // 选项组：带预览时左列竖排、右侧并排预览（预览只在单选出现——多选带 preview 会被
@@ -133,6 +152,7 @@ export default function AskUserQuestionPanel() {
         className={`${rt ? 'ask-list' : `q-options${pv ? ' col' : ''}`}`}
         role="group"
         aria-label={t('ask.optionsAria').replace('{n}', String(i + 1))}
+        onPointerLeave={() => setHoverIdx(-1)}
       >
         {it.multi && <span className="q-multi-hint">{t('ask.multi')}</span>}
         {it.options.map((o) => {
@@ -144,6 +164,14 @@ export default function AskUserQuestionPanel() {
               {...(rt && it.options.indexOf(o) === cur ? { 'data-cursor': '1' } : {})}
               role={it.multi ? 'checkbox' : 'radio'}
               aria-checked={sel}
+              // 指针落在一行上时键盘光标要让位（设计 ask.js:461-472 的 sync）：
+              // 两个高亮同时亮着，用户会以为选了两个；预览也跟着指针换（shownIdx）
+              {...(rt ? {
+                onPointerEnter: () => {
+                  setCursor(-1)
+                  setHoverIdx(it.options.indexOf(o))
+                },
+              } : {})}
               onClick={() => (it.multi ? toggle(it.id, o.label) : setAnswer(it.id, o.label))}
             >
               {/* 设计的三段结构：标记（圆点/勾）· 文案 · 序号键位（各占一列，
@@ -242,18 +270,32 @@ export default function AskUserQuestionPanel() {
               <div className="q-list">
                 <div
                   className="ask"
+                  ref={cardRef}
+                  tabIndex={0}
                   data-form={it.multi ? 'multi' : previewFor(it) ? 'preview' : 'plain'}
                   {...(items.length > 1 ? { 'data-step': '' } : {})}
                   role="group"
                   aria-labelledby={`ask-q-${it.id}`}
+                  // 点卡片空白处 = 把键盘拿回来（设计 parts/ask.js:454-460）；落在按钮上
+                  // 时不抢焦点，否则按钮自己的 ⏎ 会被这一下吃掉
+                  onPointerDown={(e) => {
+                    if ((e.target as HTMLElement).closest('button')) return
+                    cardRef.current?.focus({ preventScroll: true })
+                  }}
                   onKeyDown={(e) => {
                     if (e.metaKey || e.ctrlKey || e.altKey) return
-                    const inInput = (e.target as HTMLElement).tagName === 'INPUT'
-                    if (!inInput && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                    const tgt = e.target as HTMLElement
+                    const inInput = tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA'
+                    // 页脚按钮保留自己的键：⏎ 在「上一步」上就该是上一步（设计 ask.js:489）
+                    if (tgt.closest('.ask-btn, .ask-all')) return
+                    if (!inInput && (e.key === 'ArrowDown' || e.key === 'ArrowUp'
+                      || e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
                       e.preventDefault()
                       const n = it.options.length
                       if (!n) return
-                      const next = cursor < 0 ? 0 : (cursor + (e.key === 'ArrowDown' ? 1 : -1) + n) % n
+                      // 设计里 ←↑ 同义、↓→ 同义（parts/ask.js:497-498）：网格里两个轴都该走
+                      const fwd = e.key === 'ArrowDown' || e.key === 'ArrowRight'
+                      const next = cursor < 0 ? 0 : (cursor + (fwd ? 1 : -1) + n) % n
                       setCursor(next)
                       return
                     }
@@ -267,6 +309,12 @@ export default function AskUserQuestionPanel() {
                         else setAnswer(it.id, o.label)
                         return
                       }
+                    }
+                    if (e.key === 'Escape') {
+                      // Esc = 跳过这批（设计 ask.js:508）：未答的题按空答案交，不是关掉面板
+                      e.preventDefault()
+                      submitAll(true)
+                      return
                     }
                     if (e.key === 'Enter') {
                       // ⏎：光标处还没选就先选它，已选就下一问/提交
@@ -331,17 +379,46 @@ export default function AskUserQuestionPanel() {
                         : t('ask.stepNote').replace('{done}', String(answered)).replace('{total}', String(items.length))}
                     </span>
                     <div className="ask-acts">
-                      <button
-                        type="button"
-                        className="ask-btn ghost"
-                        disabled={at === 0}
-                        onClick={() => {
-                          setStep(at - 1)
-                          setCursor(-1)
-                        }}
-                      >
-                        {t('ask.back')}
-                      </button>
+                      {/* 单选卡（非分步）按设计给三样：多选的全选/清空、跳过、继续。
+                          分步批次只给「上一步 / 下一问」，因为中途跳过会让后面几问失去
+                          上下文（设计 parts/ask.js:190-208 也是这么分的）。 */}
+                      {items.length === 1 && it.multi && it.options.length > 1 && (() => {
+                        const picked = multiSel[it.id] ?? []
+                        const allPicked = it.options.length > 0 && it.options.every((o) => picked.includes(o.label))
+                        return (
+                          <button
+                            type="button"
+                            className="ask-all"
+                            onClick={() => {
+                              // 全选 ⇄ 清空：一个按钮两种文案（设计 ask.js:428-435）
+                              it.options.forEach((o) => {
+                                const has = picked.includes(o.label)
+                                if (allPicked ? has : !has) toggle(it.id, o.label)
+                              })
+                              setCursor(-1)
+                            }}
+                          >
+                            {allPicked ? t('ask.clearAll') : t('ask.selectAll')}
+                          </button>
+                        )
+                      })()}
+                      {items.length === 1 ? (
+                        <button type="button" className="ask-btn ghost" onClick={() => submitAll(true)}>
+                          {t('ask.skip')}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="ask-btn ghost"
+                          disabled={at === 0}
+                          onClick={() => {
+                            setStep(at - 1)
+                            setCursor(-1)
+                          }}
+                        >
+                          {t('ask.back')}
+                        </button>
+                      )}
                       <button type="button" className="ask-btn go" disabled={!here || cd?.leftMs === 0} onClick={goNext}>
                         {last ? t('ask.done') : t('ask.next')}
                       </button>
@@ -461,7 +538,7 @@ export default function AskUserQuestionPanel() {
               <button
                 className={rt ? 'ask-btn go' : 'btn primary'}
                 disabled={!allAnswered || (cd?.leftMs === 0)}
-                onClick={submitAll}
+                onClick={() => submitAll()}
               >
                 {t('ask.submitAll').replace('{answered}', String(answered)).replace('{total}', String(items.length))}
               </button>
