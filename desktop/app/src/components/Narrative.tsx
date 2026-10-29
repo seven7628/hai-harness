@@ -7,7 +7,7 @@ import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
 import { foldedBody, runningBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
-import { batchLine } from './runtime/turn/batch'
+import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
 import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
@@ -97,7 +97,12 @@ function RetryProgress({ ts, delayMs, retrying, startedAt, costUsd }: { ts?: num
    是信号不是工作，始终可见。 */
 /* 收进折叠行的：工作过程本身。信号/产出/回执留在正文（判据与实现同在
    runtime/turn/selectTurns.ts 的 foldedBody —— 那条规则要有测试才算数）。 */
-const FOLDED = new Set<MsgBlock['kind']>(['tool', 'agent', 'async_task'])
+// 工作过程的种类：简洁档收起时它们全部进工作盒子（外面只剩最后一轮正文 + 产出卡）。
+// system / task_result / task_delivery 是**关于这次运行**的行，不是运行结果本身 ——
+// 用户 2026-10 明确它们在简洁档也不该跑到盒子外面。
+const FOLDED = new Set<MsgBlock['kind']>([
+  'tool', 'agent', 'async_task', 'system', 'task_result', 'task_delivery',
+])
 
 const AssistantTurnMeta = memo(function AssistantTurnMeta({ b }: { b: Extract<MsgBlock, { kind: 'assistant' }> }) {
   const t = useT()
@@ -981,8 +986,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const groupRounds = (list: MsgBlock[], textOnlyId?: number): (ReactElement | null)[] => {
     const rs = roundsOf(list)
     return rs.map((r, ri) => {
-      const tools = r.items.filter((b): b is Extract<MsgBlock, { kind: 'tool' }> => b.kind === 'tool')
-      const others = r.items.filter((b) => b.kind !== 'tool')
+      // 派发调用（agent_spawn/…）不进转录：子 agent 由车道那一行讲完，再画一遍就是
+      // 同一个子 agent 出现两次（见 batch.ts 的 isDispatchTool）
+      const rItems = r.items.filter((b) => !(b.kind === 'tool' && isDispatchTool(b.name)))
+      const tools = rItems.filter((b): b is Extract<MsgBlock, { kind: 'tool' }> => b.kind === 'tool')
+      const others = rItems.filter((b) => b.kind !== 'tool')
       const line = tools.length ? batchLine(tools) : ''
       return (
         <div className="rt-grp" key={r.key + ri}>

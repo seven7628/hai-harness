@@ -141,7 +141,7 @@ html[data-skin='runtime'] .la-live {
   height: 12px;
   border-radius: 1px;
   background: var(--accent);
-  animation: la-breathe 1.9s var(--ease) infinite;
+  animation: la-breathe var(--t-lane) var(--ease) infinite;
 }
 
 @keyframes la-breathe {

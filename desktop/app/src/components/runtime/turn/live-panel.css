@@ -62,7 +62,7 @@ html[data-skin='runtime'] .cy-live-rows {
 
 
 html[data-skin='runtime'] .cy-live.is-done {
-  animation: live-out 240ms var(--ease) both;
+  animation: live-out var(--t-out) var(--ease) both;
 }
 
 @keyframes live-out {

@@ -47,14 +47,14 @@
 
 /* ---------- run: alive, at a walk -----------------------------------------
    Two motions only, and both are small: the body settles under its own weight
-   every 2.6s, the lids drop every 4.4s. Neither repeats on a beat you can tap,
+   every var(--t-todo), the lids drop every var(--t-blink). Neither repeats on a beat you can tap,
    which is the difference between "working" and a loading spinner you want to
    close. The scout's mast gets a third, because a probe that never moves reads
    as a pin rather than a probe.
    -------------------------------------------------------------------------- */
-.rt-sa[data-sa-state='run'] .sa-body { animation: sa-breathe 2.6s var(--ease) infinite; }
-.rt-sa[data-sa-state='run'] .sa-blink { animation: sa-blink 4.4s linear infinite; }
-.rt-sa[data-sa-kind='scout'][data-sa-state='run'] .sa-feat { animation: sa-sway 3.2s var(--ease) infinite; }
+.rt-sa[data-sa-state='run'] .sa-body { animation: sa-breathe var(--t-todo) var(--ease) infinite; }
+.rt-sa[data-sa-state='run'] .sa-blink { animation: sa-blink var(--t-blink) linear infinite; }
+.rt-sa[data-sa-kind='scout'][data-sa-state='run'] .sa-feat { animation: sa-sway var(--t-sway) var(--ease) infinite; }
 
 @keyframes sa-breathe {
   0%, 100% { transform: translateY(0) scaleY(1); }

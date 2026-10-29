@@ -24,7 +24,7 @@
   background: var(--surface);
   /* one shot, 2px up and a fade. Nothing pulses afterwards: an arrival is an
      event, and an event that keeps moving is an alarm. */
-  animation: rt-as-in 260ms var(--ease) both;
+  animation: rt-as-in var(--t-sig) var(--ease) both;
 }
 
 @keyframes rt-as-in {
@@ -105,7 +105,7 @@
   line-height: 1.4;
   color: var(--text-3);
   border-radius: 4px;
-  transition: color 120ms var(--ease);
+  transition: color var(--t-hover) var(--ease);
 }
 
 .rt-as-act:hover { color: var(--text); }

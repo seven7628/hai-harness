@@ -20,7 +20,7 @@ html[data-skin='runtime'] .cy-im {
   transform-origin: bottom center;
   transform: rotate(calc((var(--i) - var(--mid)) * 6deg))
              translateY(calc((var(--i) - var(--mid)) * (var(--i) - var(--mid)) * 0px));
-  transition: transform 180ms var(--spring), box-shadow 180ms var(--ease), opacity 180ms var(--ease);
+  transition: transform var(--t-in) var(--spring), box-shadow var(--t-in) var(--ease), opacity var(--t-in) var(--ease);
 }
 
 html[data-skin='runtime'] .cy-im:first-child { margin-left: 0; }
@@ -55,7 +55,7 @@ html[data-skin='runtime'] .cy-lb {
   place-items: center;
   background: color-mix(in oklab, #000 68%, transparent);
   backdrop-filter: blur(3px);
-  animation: rt-cy-lb-in 160ms var(--ease-out) both;
+  animation: rt-cy-lb-in var(--t-enter) var(--ease-out) both;
 }
 
 html[data-skin='runtime'] .cy-lb[hidden] { display: none; }

@@ -20,7 +20,7 @@
 .rt-turn-body {
   display: grid;
   grid-template-rows: 1fr;
-  transition: grid-template-rows var(--t-med, 220ms) var(--ease, ease);
+  transition: grid-template-rows var(--t-base) var(--ease, ease);
 }
 
 .rt-turn-in {

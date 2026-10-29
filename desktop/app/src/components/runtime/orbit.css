@@ -13,9 +13,9 @@
 .rt-orbit .ring:nth-child(2) { inset: calc(var(--s) * 0.23); border-color: var(--line-soft); }
 .rt-orbit .spin {
   position: absolute; inset: 0; border-radius: 50%;
-  animation: spin 1.9s linear infinite;
+  animation: spin var(--t-lane) linear infinite;
 }
-.rt-orbit .spin:nth-child(3) { animation-duration: 1.3s; animation-direction: reverse; }
+.rt-orbit .spin:nth-child(3) { animation-duration: var(--t-orbit); animation-direction: reverse; }
 .rt-orbit .spin::after {
   content: ''; position: absolute; left: 50%;
   top: calc(var(--s) * -0.077);

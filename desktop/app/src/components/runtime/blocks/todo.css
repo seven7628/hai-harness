@@ -29,7 +29,7 @@
   font-size: 10.5px;
   line-height: 1.5;
   color: var(--text-3);
-  transition: border-color 150ms var(--ease);
+  transition: border-color var(--t-tap) var(--ease);
 }
 
 .rt-td[data-open] .rt-td-head {
@@ -62,7 +62,7 @@
   flex: none;
   align-self: center;
   color: var(--text-3);
-  transition: transform 180ms var(--ease);
+  transition: transform var(--t-in) var(--ease);
 }
 
 .rt-td-head[aria-expanded='true'] .rt-td-chev { transform: rotate(90deg); }
@@ -70,7 +70,7 @@
 .rt-td-fold {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 220ms var(--ease);
+  transition: grid-template-rows var(--t-base) var(--ease);
 }
 
 .rt-td-fold.open { grid-template-rows: 1fr; }
@@ -102,7 +102,7 @@
   border: 1px solid color-mix(in srgb, var(--text-3) 42%, var(--border));
   border-radius: 50%;
   color: transparent;
-  transition: background-color 180ms var(--ease), border-color 180ms var(--ease), color 180ms var(--ease);
+  transition: background-color var(--t-in) var(--ease), border-color var(--t-in) var(--ease), color var(--t-in) var(--ease);
 }
 
 .rt-td-mark svg { width: 10px; height: 10px; display: block; }
@@ -126,7 +126,7 @@
 
 .rt-td-row[data-s='in_progress'] .rt-td-mark svg {
   transform-origin: center;
-  animation: rt-td-breathe 2.6s var(--ease) infinite;
+  animation: rt-td-breathe var(--t-todo) var(--ease) infinite;
 }
 
 @keyframes rt-td-breathe {
@@ -149,7 +149,7 @@
   margin-top: 4px;
   border-radius: 1px;
   background: transparent;
-  transition: background-color 180ms var(--ease);
+  transition: background-color var(--t-in) var(--ease);
 }
 
 .rt-td-row[data-delta='new'] .rt-td-delta { background: color-mix(in srgb, var(--accent) 82%, transparent); }

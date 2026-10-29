@@ -78,6 +78,60 @@ html[data-skin='runtime'] {
   --r-xl: 22px;
 
   /* 时序四档 + 三条曲线：--ease 在 runtime-palette.css 里已按设计改过 */
+  /* ---------------------------------------------------------------------
+     动效表（唯一出处）：设计只给了四档 + 三条曲线（runtime-palette.css 的
+     --rt-t-fast/base/slow/slower = 130/220/380/620ms），但它的**组件**里还有一批
+     写死的时长（入场 180、退场 240、tail-in 200、预览交换 190、覆盖层 160…）。
+     那些值不能凭感觉改，也不能散在十几个文件里 —— 在这里各给一个名字，
+     组件只引用名字，日后要调就调这一张表（lab/check-motion.mjs 守着这条）。
+
+       名字              值        用在哪
+       --t-hover       120ms     悬停时的颜色/底色过渡（行、按钮、链接）
+       --t-fast        130ms     设计四档之一：按下回弹、焦点环
+       --t-tap         150ms     待办条目的边框（设计中唯一用 150 的地方）
+       --t-enter       160ms     弹层 / 拖拽覆盖层 / 灯箱入场
+       --t-in          180ms     小元素入场、图标转向、行浮现（设计组件里最常用的一个）
+       --t-swap        190ms     预览面板换内容（.ask-swap）
+       --t-tail        200ms     运行面板新行 tail-in
+       --t-base        220ms     设计四档之一：折叠轨、网格轨道
+       --t-out         240ms     退场（live-out）：跑完的面板淡出
+       --t-sig         260ms     信号 / 异步骤行入场
+       --t-collapse    300ms     轮尾账展开更多数字
+       --t-slow        380ms     设计四档之一：折叠动画（0fr↔1fr）
+       --t-slower      620ms     设计四档之一：最慢的一档（进场错峰的总和）
+       --t-caret       1.05s     流式光标（steps(1) 硬闪）
+       --t-scan        1.1s      压缩扫描窗口的光标
+       --t-breathe     1.6s      运行指示灯呼吸
+       --t-lane        1.9s      子 agent 车道呼吸
+       --t-pulse        2.2s     车道脉冲
+       --t-todo        2.6s      待办条目呼吸
+       --t-ring        4.6s      输入卡运行中的两道环
+       --t-ring-gap    2.3s      第二道环的错峰延迟
+     --------------------------------------------------------------------- */
+  --t-hover: 120ms;
+  --t-tap: 150ms;
+  --t-enter: 160ms;
+  --t-in: 180ms;
+  --t-swap: 190ms;
+  --t-tail: 200ms;
+  --t-out: 240ms;
+  --t-sig: 260ms;
+  --t-collapse: 300ms;
+  --t-caret: 1.05s;
+  --t-scan: 1.1s;
+  --t-breathe: 1.6s;
+  --t-lane: 1.9s;
+  --t-pulse: 2.2s;
+  --t-todo: 2.6s;
+  --t-ring: 4.6s;
+  --t-ring-gap: 2.3s;
+  --t-blink: 4.4s;     /* 子 agent 面具的眨眼 */
+  --t-sway: 3.2s;      /* 侦察面具的摆动 */
+  --t-bob: 2.1s;       /* 运行中面具的上下浮动 */
+  --t-blink-mk: 3.8s;  /* 面具眨眼（主对话那张脸，与车道那张 4.4s 不同源） */
+  --t-glance: 2.8s;    /* 面具的视线游移 */
+  --t-work: 1.15s;     /* 「正在干活」那张脸的身体摆动 */
+  --t-orbit: 1.3s;     /* 轨道弧的自转（第二圈反向） */
   --t-fast: var(--rt-t-fast);
   --t-base: var(--rt-t-base);
   --t-slow: var(--rt-t-slow);

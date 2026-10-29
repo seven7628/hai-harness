@@ -246,7 +246,7 @@ html[data-skin='runtime'] .ask-scope .ask-pv-pre[data-empty]::after {
   color: var(--ink-3);
 }
 
-html[data-skin='runtime'] .ask-scope .ask-pv-pre.ask-swap { animation: ask-swap 190ms var(--ease-out) both; }
+html[data-skin='runtime'] .ask-scope .ask-pv-pre.ask-swap { animation: ask-swap var(--t-swap) var(--ease-out) both; }
 
 @keyframes ask-swap {
   from { opacity: 0.35; transform: translateY(2px); }

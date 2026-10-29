@@ -24,14 +24,14 @@
 
 /* the body: a slow breath, hinged at the feet so it never floats */
 .mk-pop, .mk-body, .mk-look, .mk-wide, .mk-blink { transform-box: view-box; }
-.mk-pop { transform-origin: 8px 14px; transition: transform 180ms var(--spring); }
+.mk-pop { transform-origin: 8px 14px; transition: transform var(--t-in) var(--spring); }
 .mk-body { transform-origin: 8px 14px; }
-.rt-mk[data-mk-state='run'] .mk-body { animation: mk-bob 2.1s var(--ease) infinite; }
+.rt-mk[data-mk-state='run'] .mk-body { animation: mk-bob var(--t-bob) var(--ease) infinite; }
 .mk-look { transform-origin: 8px var(--mk-eye-y, 7px); }
-.mk-wide { transform-origin: 8px var(--mk-eye-y, 7px); transition: transform 180ms var(--spring); }
+.mk-wide { transform-origin: 8px var(--mk-eye-y, 7px); transition: transform var(--t-in) var(--spring); }
 .mk-blink { transform-origin: 8px var(--mk-eye-y, 7px); }
-.rt-mk[data-mk-state='run'] .mk-blink { animation: mk-blink 3.8s linear infinite; }
-.rt-mk[data-mk-state='run'] .mk-look { animation: mk-glance 2.8s var(--ease) infinite alternate; }
+.rt-mk[data-mk-state='run'] .mk-blink { animation: mk-blink var(--t-blink-mk) linear infinite; }
+.rt-mk[data-mk-state='run'] .mk-look { animation: mk-glance var(--t-glance) var(--ease) infinite alternate; }
 
 /* the eyes sit at a different height on each body */
 .mk-pip { --mk-eye-y: 7.1px; }
@@ -40,9 +40,9 @@
 
 
 /* the working tempo: the same face, breathing faster */
-.mk-work.mk-body, .mk-work .mk-body { animation-duration: 1.15s; }
-.mk-work .mk-blink { animation-duration: 2.2s; }
-.mk-work .mk-look { animation-duration: 1.6s; }
+.mk-work.mk-body, .mk-work .mk-body { animation-duration: var(--t-work); }
+.mk-work .mk-blink { animation-duration: var(--t-pulse); }
+.mk-work .mk-look { animation-duration: var(--t-breathe); }
 /* the open row is awake: the face swells a little when you open it and settles
    back when you close it — that transition is the answer to "did it react" */
 .rt-mk[data-mk-state='engaged'] .mk-pop { transform: scale(1.06); }
@@ -52,7 +52,7 @@
 /* the halo: only on hover, and it is the whole answer to "did it notice me" */
 .mk-halo {
   fill: none; stroke: currentColor; stroke-width: 0.7; opacity: 0;
-  transition: opacity 200ms var(--ease);
+  transition: opacity var(--t-tail) var(--ease);
 }
 
 /* hover — the icon perks up: body pops, eyes widen, a ring appears.

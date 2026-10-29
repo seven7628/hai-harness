@@ -26,7 +26,7 @@
   border: 0;
   border-radius: 6px;
   cursor: pointer;
-  transition: background-color 120ms var(--ease);
+  transition: background-color var(--t-hover) var(--ease);
 }
 
 .rt-cp-row:hover {
@@ -89,7 +89,7 @@
   width: 11px;
   height: 11px;
   color: var(--text-3);
-  transition: transform 180ms var(--ease), color 120ms var(--ease);
+  transition: transform var(--t-in) var(--ease), color var(--t-hover) var(--ease);
 }
 
 .rt-cp-row[aria-expanded='true'] .rt-cp-chev { transform: rotate(90deg); }
@@ -116,7 +116,7 @@
 .rt-cp-fold {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 220ms var(--ease);
+  transition: grid-template-rows var(--t-base) var(--ease);
 }
 
 .rt-cp-fold.open { grid-template-rows: 1fr; }

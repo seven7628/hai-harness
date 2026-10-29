@@ -147,9 +147,9 @@ html[data-skin='runtime'] .rt-im {
   transform-origin: bottom center;
   transform: rotate(calc((var(--i) - var(--mid)) * 6deg));
   transition:
-    transform 180ms var(--spring),
-    box-shadow 180ms var(--ease),
-    opacity 180ms var(--ease);
+    transform var(--t-in) var(--spring),
+    box-shadow var(--t-in) var(--ease),
+    opacity var(--t-in) var(--ease);
 }
 
 html[data-skin='runtime'] .rt-im:first-child {
@@ -198,7 +198,7 @@ html[data-skin='runtime'] .rt-lb {
   place-items: center;
   background: color-mix(in oklab, #000 68%, transparent);
   backdrop-filter: blur(3px);
-  animation: rt-lb-in 160ms var(--ease-out) both;
+  animation: rt-lb-in var(--t-enter) var(--ease-out) both;
 }
 
 @keyframes rt-lb-in {

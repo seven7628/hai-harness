@@ -86,9 +86,24 @@ test('a folded turn keeps the record and drops the work', () => {
   ] as unknown as MsgBlock[]
   const [turn] = selectTurns(withRecord)
   const kept = foldedBody(turn).map((b) => b.kind)
-  // the tool and the mid-turn narration are the working phase; everything else
-  // is the record and must survive the fold
-  assert.deepEqual(kept, ['error', 'assistant', 'artifacts', 'task_delivery'])
+  // the tool and the mid-turn narration are the working phase; the error line and the
+  // produced-files card are the record and must survive the fold. 任务回执不属于这一类：
+  // 它是「关于这次运行的行」，简洁档里随工作过程一起进盒子（见 ALWAYS_SHOWN 注释）
+  assert.deepEqual(kept, ['error', 'assistant', 'artifacts'])
+})
+
+test('a receipt is folded into the working phase, not left outside', () => {
+  const blocks = [
+    { kind: 'user', id: 1, text: 'q' },
+    { kind: 'assistant', id: 2, text: 'the answer', thinking: '', streaming: false },
+    { kind: 'task_delivery', id: 3, taskId: 'task-1', status: 'completed' },
+    { kind: 'system', id: 4, text: 'run ended', tone: 'info' },
+  ] as unknown as MsgBlock[]
+  const [turn] = selectTurns(blocks)
+  const outside = foldedBody(turn).map((b) => b.kind)
+  const inside = turn.items.filter((b) => !outside.includes(b.kind)).map((b) => b.kind)
+  assert.deepEqual(outside, ['assistant'])
+  assert.deepEqual(inside, ['task_delivery', 'system'])
 })
 
 test('while running, the working block holds the whole run', () => {
@@ -252,4 +267,16 @@ test('roundsOf：产出/信号块不被丢掉（agent_end 的产出卡就靠它�
   if (!bare.includes('artifacts') || !bare.includes('system')) {
     throw new Error('记录块没有被单独成段: ' + JSON.stringify(bare))
   }
+})
+
+test('dispatch tools are not transcript rows (the lane already tells that story)', async () => {
+  const { isDispatchTool } = await import('../src/components/runtime/turn/batch')
+  assert.equal(isDispatchTool('agent_spawn'), true)
+  assert.equal(isDispatchTool('agent_send'), true)
+  assert.equal(isDispatchTool('agent_resume'), true)
+  // 普通工具照旧占一行
+  assert.equal(isDispatchTool('grep'), false)
+  assert.equal(isDispatchTool('read_file'), false)
+  // 名字像但不是派发的不要误杀
+  assert.equal(isDispatchTool('agent_wait_notes'), false)
 })

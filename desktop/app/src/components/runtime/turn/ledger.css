@@ -12,8 +12,8 @@
 .rt-lg-k { color: var(--ink-3); }
 /* the three trace numbers live in a track that animates 0fr -> 1fr: a width
    transition with no measured magic number, so the line stays one line */
-.rt-lg-more { display: inline-grid; grid-template-columns: 0fr; transition: grid-template-columns 300ms var(--ease); }
-.rt-lg-in { overflow: hidden; min-width: 0; white-space: nowrap; opacity: 0; transition: opacity 160ms var(--ease); }
+.rt-lg-more { display: inline-grid; grid-template-columns: 0fr; transition: grid-template-columns var(--t-collapse) var(--ease); }
+.rt-lg-in { overflow: hidden; min-width: 0; white-space: nowrap; opacity: 0; transition: opacity var(--t-enter) var(--ease); }
 .rt-ledger:hover .rt-lg-more,
 .rt-ledger:focus-visible .rt-lg-more,
 .rt-ledger.is-open .rt-lg-more { grid-template-columns: 1fr; }
@@ -25,7 +25,7 @@
 /* narrow: the same reveal runs downwards — an extra row is cheaper than a
    horizontal squeeze that clips a number in half */
 @media (max-width: 700px) {
-  .rt-lg-more { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 0fr; transition: grid-template-rows 260ms var(--ease); }
+  .rt-lg-more { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 0fr; transition: grid-template-rows var(--t-sig) var(--ease); }
   .rt-ledger:hover .rt-lg-more,
   .rt-ledger:focus-visible .rt-lg-more,
   .rt-ledger.is-open .rt-lg-more { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr; }

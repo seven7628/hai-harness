@@ -62,3 +62,10 @@ export function batchLine(calls: Tool[]): string {
   const dur = calls.reduce((n, c) => n + (c.durMs ?? 0), 0)
   return [title, num, dur ? fmtMs(dur) : ''].filter(Boolean).join(' \u00b7 ')
 }
+
+/* 子 agent 的**派发调用**不自己占一行：agent_spawn / agent_send 是「让某个子 agent
+   跑起来」这个动作的实现细节，而子 agent 自己由车道（Lane / .la-row）用一行讲完
+   ——「subagent · go test ./auth · done · 结果 · 2.2 s」。两处都画就是同一个子 agent
+   出现两次（用户截图里上面两行「Agent」+ 下面两行「subagent」正是这个）。
+   别的皮肤不动：判据只在运行时皮肤的分组里用（见 Narrative 的 groupRounds）。 */
+export const isDispatchTool = (name: string): boolean => /^agent_(spawn|send|resume|stop)$/.test(name)

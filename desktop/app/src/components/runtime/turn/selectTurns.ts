@@ -187,14 +187,18 @@ export function durText(ms: number): string {
    receipt are things that happened, not things that were done to get here, and
    folding them away would hide a record the reader has no other way to find
    (the red line: never silently drop data). The answer is included wherever it
-   sits in the turn, so the order of what is left is the order it happened. */
+   sits in the turn, so the order of what is left is the order it happened.
+
+   What counts as "a record" is narrower than it looks: 系统信号 / 任务回执
+   (system, task_result, task_delivery) are rows *about the run*, and the user's rule
+   for the concise density is that only the last round's reply and the produced-files
+   card sit outside the working box — so those three belong to the working phase and
+   are folded with it (they are still rendered, just inside the box). Artifacts stay
+   out: it is the one record that is the *result* of the turn. */
 export const ALWAYS_SHOWN = new Set<MsgBlock['kind']>([
-  'system',
   'error',
   'divider',
   'artifacts',
-  'task_result',
-  'task_delivery',
 ])
 
 export function foldedBody(turn: Turn): MsgBlock[] {

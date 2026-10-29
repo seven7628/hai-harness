@@ -13,7 +13,7 @@
    ========================================================================== */
 
 html[data-skin='runtime'] {
-  --rt-fast: 120ms;
+  --rt-fast: var(--t-hover);
   --rt-hover: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
@@ -382,7 +382,7 @@ html[data-skin='runtime'] .agent-card .ac-main {
   gap: 9px;
   padding: 0 8px;
   border-radius: 7px;
-  transition: background-color 120ms var(--ease);
+  transition: background-color var(--t-hover) var(--ease);
 }
 
 html[data-skin='runtime'] .agent-card .ac-main:hover {
@@ -432,7 +432,7 @@ html[data-skin='runtime'] .agent-card .ag-st {
 
 html[data-skin='runtime'] .agent-card .ac-main > .ic {
   color: var(--text-3);
-  transition: color 180ms var(--ease);
+  transition: color var(--t-in) var(--ease);
 }
 
 html[data-skin='runtime'] .agent-card.running .ac-main > .ic {
@@ -440,7 +440,7 @@ html[data-skin='runtime'] .agent-card.running .ac-main > .ic {
 }
 
 html[data-skin='runtime'] .agent-card.running .ac-main > .ic svg {
-  animation: rt-lane-pulse 2.2s var(--ease) infinite;
+  animation: rt-lane-pulse var(--t-pulse) var(--ease) infinite;
 }
 
 @keyframes rt-lane-pulse {
@@ -592,13 +592,13 @@ html[data-skin='runtime'] .pop.model-pop .hint.pop-foot {
 }
 
 /* 输入卡的三种活态 = 设计 ui.components.css:2445-2534 的 variant 段：
-   ① 运行中（data-live）：盒子自己呼吸，两道 4.6s 的环错开 2.3s 往外散；
+   ① 运行中（data-live）：盒子自己呼吸，两道 var(--t-ring) 的环错开 var(--t-ring-gap) 往外散；
    ② 停止键：安静的红（面色底 + 红字形 + 内描边），不是一块红砖；
    ③ 拖拽（.p-drop）：虚线强调边 + 28px 图标块 + 粗体标题 + mono 说明。
    这三样都是**交互态**，只在运行时这档皮肤下生效，另两档仍是原来的样子。 */
 html[data-skin='runtime'] .composer[data-live] {
   border-color: color-mix(in oklab, var(--accent) 28%, var(--line));
-  animation: rt-p-breathe 4.6s var(--ease) infinite;
+  animation: rt-p-breathe var(--t-ring) var(--ease) infinite;
 }
 
 html[data-skin='runtime'] .composer[data-live]::before,
@@ -609,11 +609,11 @@ html[data-skin='runtime'] .composer[data-live]::after {
   border-radius: inherit;
   pointer-events: none;
   box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 40%, transparent);
-  animation: rt-p-ring 4.6s var(--ease-out) infinite;
+  animation: rt-p-ring var(--t-ring) var(--ease-out) infinite;
   opacity: 0;
 }
 
-html[data-skin='runtime'] .composer[data-live]::after { animation-delay: 2.3s; }
+html[data-skin='runtime'] .composer[data-live]::after { animation-delay: var(--t-ring-gap); }
 
 @keyframes rt-p-ring {
   0% { opacity: 0; box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 34%, transparent); }
@@ -673,7 +673,7 @@ html[data-skin='runtime'] .composer .p-drop {
   backdrop-filter: blur(2px);
   text-align: center;
   pointer-events: none;
-  animation: rt-p-drop-in 160ms var(--ease-out) both;
+  animation: rt-p-drop-in var(--t-enter) var(--ease-out) both;
 }
 
 @keyframes rt-p-drop-in {
@@ -854,7 +854,7 @@ html[data-skin='runtime'] .composer .attach-chip.doc-chip {
   box-shadow: none;
   font: 400 11px/1 var(--mono);
   color: var(--ink-2);
-  animation: rt-att-in 180ms var(--spring) both;
+  animation: rt-att-in var(--t-in) var(--spring) both;
 }
 
 @keyframes rt-att-in {
@@ -1402,7 +1402,7 @@ html[data-skin='runtime'] .rt-collapse.open {
   vertical-align: -2px;
   background: var(--running);
   border-radius: 1px;
-  animation: blink 1.05s steps(1) infinite;
+  animation: blink var(--t-caret) steps(1) infinite;
 }
 
 /* port/transcript.css:216 — the streaming caret: a 6×14 accent block that
@@ -1415,7 +1415,7 @@ html[data-skin='runtime'] .rt-caret {
   vertical-align: -2px;
   background: var(--accent);
   border-radius: 1px;
-  animation: blink 1.05s steps(1) infinite;
+  animation: blink var(--t-caret) steps(1) infinite;
 }
 
 /* port/motion.css:122 */
@@ -1630,7 +1630,7 @@ html[data-skin='runtime'] .cp-caret {
   border-radius: var(--r-xs);
   background: var(--accent);
   vertical-align: -1px;
-  animation: cp-blink 1.1s steps(1) infinite;
+  animation: cp-blink var(--t-scan) steps(1) infinite;
 }
 
 @keyframes cp-blink {
@@ -1713,7 +1713,7 @@ html[data-skin='runtime'] .pv-state i {
   height: 5px;
   border-radius: 50%;
   background: var(--violet);
-  animation: rt-breathe 1.6s var(--ease) infinite;
+  animation: rt-breathe var(--t-breathe) var(--ease) infinite;
 }
 html[data-skin='runtime'] .pv-spacer { flex: 1; }
 html[data-skin='runtime'] .pv-seg {

@@ -61,6 +61,17 @@ const waitUntil = async (expr, timeout = 45000) => {
   return false
 }
 
+// 每次 page.goto 之后都要等 window.__store —— 应用还在 boot 时它是 undefined，
+// 直接 getState() 会在慢机器/热更新重载的瞬间炸掉（不是产品的错，是测试的时序）
+const waitStore = async (timeout = 20000) => {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeout) {
+    if (await page.eval(() => !!window.__store)) return true
+    await wait(200)
+  }
+  throw new Error('window.__store never appeared')
+}
+
 const waitFor = async (selector, timeout = 30000) => {
   const t0 = Date.now()
   while (Date.now() - t0 < timeout) {
@@ -71,6 +82,7 @@ const waitFor = async (selector, timeout = 30000) => {
 }
 
 await page.goto(URL, { settleMs: 4000 })
+await waitStore()
 // 走 store 的动作，不手写 data-skin：任何一次 settings 变更都会让 App 的 effect
 // 重新 applyNarrativeSkin(settings.narrative_skin)，手工属性会被静默盖回 current。
 await page.eval(() => {
@@ -402,6 +414,7 @@ check('ask: Esc skips the batch instead of only closing the panel', askEsc.panel
 // ---- 视觉产出行 -------------------------------------------------------------
 // 新开一轮干净的会话：提问面板还挂着（没作答 = 工具阻塞），会挡住后面的断言
 await page.goto(URL, { settleMs: 3000 })
+await waitStore()
 await page.eval(() => window.__store.getState().setNarrativeSkin('runtime'))
 await wait(700)
 await say('html 预览')
@@ -455,6 +468,7 @@ if (t5.present) {
 
 // ---- P3 · composer：`/` 技能、`@` 文件目录、多图扇形 + 灯箱 -------------------
 await page.goto(URL, { settleMs: 3000 })
+await waitStore()
 await page.eval(() => { document.documentElement.dataset.skin = 'runtime' })
 await wait(700)
 
@@ -562,6 +576,7 @@ check('I11 esc closes the lightbox', !(await page.eval(() => !!document.querySel
 // 运行时（AgentStart → AgentEnd）这一整段都在「Working」里：标题 + 四行窗口，
 // 每行带度量（与工具行同一口径）。这是设计 图1 的形态。
 await page.goto(URL, { settleMs: 3000 })
+await waitStore()
 await page.eval(() => {
   const st = window.__store.getState()
   st.setNarrativeSkin('runtime')
@@ -604,6 +619,7 @@ check('running: nothing of the run is painted outside', lp.outsideThinking === 0
 // ---- 密度：简洁档收起 = 只有结算行 + 结论；详细档 = 全过程铺开 -----------------
 const freshTurn = async (density) => {
   await page.goto(URL, { settleMs: 3000 })
+await waitStore()
   await page.eval((d) => {
     const st = window.__store.getState()
     st.setNarrativeSkin('runtime')

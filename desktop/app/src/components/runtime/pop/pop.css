@@ -12,7 +12,7 @@ html[data-skin='runtime'] .pop {
   border-radius: var(--r-md);
   background: var(--card);
   box-shadow: var(--shadow-lift), 0 24px 48px -24px rgba(0, 0, 0, 0.6);
-  animation: rt-pop-in 160ms var(--ease-out) both;
+  animation: rt-pop-in var(--t-enter) var(--ease-out) both;
 }
 
 @keyframes rt-pop-in {
