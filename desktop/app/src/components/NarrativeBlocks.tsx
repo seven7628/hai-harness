@@ -30,6 +30,7 @@ import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
 import { ToolLiveTail, ToolNestedCalls, ToolOutputPreview, ToolScriptRun } from './ToolNestedCalls'
 import { codemodeTier, hasScriptOutput, isCodemodeTool, scriptSourceOf, scriptSummary, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
+import { splitOutput } from '../lib/logLines'
 import { useT } from '../i18n'
 
 /** 工具行渲染的统一数据：主对话 MsgBlock.tool 与子 agent AgentItem.tool 的共同子集。
@@ -444,7 +445,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
             <div className="tr-sec">
               <div className="tr-sec-h">{t('tool.result')}</div>
               <ToolImages images={b.images ?? []} label={t('tool.resultImages')} />
-              <pre className="tr-code">{b.result}</pre>
+              <ToolOutput text={b.result} name={b.name} />
             </div>
           )}
           {!b.result && b.status === 'running' && (
@@ -539,6 +540,31 @@ export const ToolGroup = memo(function ToolGroup({ tools, host = 'main' }: { too
 // AsyncTaskPlaceholder）共用 —— 同一条结果在两处必须同一形态。
 // 历史：右栏曾渲染成 mono 11px 的 <pre>（.av-out），主对话渲染 Markdown，
 // 同一条「已完成」的交付结果两处长得不一样（2026-09-23 一并统一）。
+/* 命令输出：逐行定级后着色（lib/logLines.ts）。着色只认行首能认出来的东西，
+   认不出的行保持正文色 —— 宁可少染，不要猜错。超过 300 行整段不染（大结果里
+   逐行 span 的收益远不上开销）。
+   只对「输出本身就是日志」的工具做：bash / 以及名字里带 shell/exec 的。 */
+function isLogTool(name: string): boolean {
+  return /^(bash|sh|shell|exec|run|run_python|terminal)$/i.test(name) || /shell|bash/i.test(name)
+}
+
+export function ToolOutput({ text, name }: { text: string; name: string }) {
+  if (!isLogTool(name)) return <pre className="tr-code">{text}</pre>
+  const lines = splitOutput(text)
+  if (!lines) return <pre className="tr-code">{text}</pre>
+  return (
+    <pre className="tr-code rt-out">
+      {lines.map((l, i) => (
+        <span className="rt-out-ln" key={i}>
+          {l.stamp ? <span className="rt-out-ts">{l.stamp}</span> : null}
+          {l.level ? <span className={`rt-out-${l.level}`}>{l.text}</span> : l.text}
+          {i < lines.length - 1 ? '\n' : null}
+        </span>
+      ))}
+    </pre>
+  )
+}
+
 export const TaskResultInline = memo(function TaskResultInline({ delivered, result, error }: { delivered?: boolean; result?: string; error?: string }) {
   const t = useT()
   if (!result && !error) return null

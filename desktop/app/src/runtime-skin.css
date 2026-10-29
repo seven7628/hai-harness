@@ -501,6 +501,19 @@ html[data-skin='runtime'] .msg.assistant .who {
   display: none;
 }
 
+/* 命令输出的定级着色（设计 #m-tail 的 .tl .ok/.warn/.err/.dim，ui.components.css:851-855）
+   —— 只在这一档皮肤下生效：别的皮肤拿到的是同一段文本、没有颜色，行为不变。 */
+html[data-skin='runtime'] .rt-out .rt-out-ts {
+  color: var(--ink-3);
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .rt-out .rt-out-ok { color: var(--green); }
+html[data-skin='runtime'] .rt-out .rt-out-warn { color: var(--amber); }
+html[data-skin='runtime'] .rt-out .rt-out-err { color: var(--red); }
+html[data-skin='runtime'] .rt-out .rt-out-dim { color: var(--ink-3); }
+
 /* ---------------------------------------------------------------------------
    F2 · the column, and how an answer is set
    port/transcript.css: .rt-col 222 · .md 117-216 · answer 429-465
