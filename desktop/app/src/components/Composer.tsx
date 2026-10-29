@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from 'react'
+import { ctxEstimatedOf, ctxTokensOf, ctxWindowOf } from '../lib/ctxScope'
 import { useAppStore, modelWindowOf, QUEUE_CAP, queuedText, queuedHasAttach, modelSupportsImage, inputTypesForProvider, BUILTIN_SLASH, mainRunActive, isSubAgentRun } from '../store/useAppStore'
 import type { QueuedContent } from '../store/useAppStore'
 import { SendIcon, StopIcon, ChevronDown, ChevronLeft, ChevronRight, ImageIcon, AccessIcon, EffortIcon, Sparkles, MicIcon, PaperclipIcon, FileIcon, LayersIcon } from './icons'
@@ -139,7 +140,9 @@ export default function Composer() {
   const runActive = useAppStore((s) => (s.activeSessionId ? mainRunActive(s.views[s.activeSessionId]) && !s.views[s.activeSessionId]?.aborted : false))
   // 压缩态：主会话的压缩才阻塞输入（子会话压缩它自己的上下文，不该卡住主会话的输入框）。
   const compressing = useAppStore((s) => Boolean(s.activeSessionId && s.views[s.activeSessionId]?.compressing))
-  const ctxTokens = useAppStore((s) => s.ctxTokens) // 当前上下文占用（事件推导，压缩后反映压后大小）
+  // 当前上下文占用：**看谁报谁** —— 聚焦子智能体时用那个 run 自己的轮与窗口
+  //（用户 2026-10 报障：子会话里显示的窗口/占比是主智能体的）
+  const ctxTokens = useAppStore(ctxTokensOf)
   const ctxBreakdown = useAppStore((s) => s.ctxBreakdown) // 上下文构成分区（ctx 环 hover 面板）
   const fetchCtxBreakdown = useAppStore((s) => s.fetchCtxBreakdown)
   const usage = useAppStore((s) => s.usage) // 会话累计用量（缓存命中率两个口径都取它 + turns）
@@ -244,9 +247,9 @@ export default function Composer() {
   const ctxUsed = ctxTokens ?? 0 // 无事件（旧会话/新会话）→ 0
   // ctx 占用口径：true = 压缩后的字符估算（尚无新一轮真实 usage）→ 读数前缀 ≈，
   // 与 hover 面板底部的口径说明同源（bridge CtxAnchor / checkpoint ctx_tokens_estimated）。
-  const ctxEstimated = useAppStore((s) => s.ctxTokensEstimated) === true
+  const ctxEstimated = useAppStore(ctxEstimatedOf)
   const settings = useAppStore((s) => s.settings)
-  const contextWindow = useAppStore((s) => s.contextWindow)
+  const contextWindow = useAppStore(ctxWindowOf)
   // 当前模型上下文窗口：优先 harness 上报，本地表兜底（Provider 面板可标 1M；问题六）
   const window = modelWindowOf(settings, model, contextWindow)
   const pct = Math.round((ctxUsed / window) * 100)

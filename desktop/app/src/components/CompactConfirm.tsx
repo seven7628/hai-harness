@@ -1,4 +1,5 @@
 import { useAppStore, modelWindowOf } from '../store/useAppStore'
+import { ctxTokensOf, ctxWindowOf } from '../lib/ctxScope'
 import { fmtTokens } from './ui'
 import { useT } from '../i18n'
 
@@ -6,11 +7,11 @@ import { useT } from '../i18n'
 // 显示当前占用 + 阈值建议（90% 琥珀建议 / 95% 绛红强烈建议）；确认 → compact 命令。
 export default function CompactConfirm({ onClose }: { onClose: () => void }) {
   const t = useT()
-  const ctxTokens = useAppStore((s) => s.ctxTokens) // 当前上下文占用（事件推导）
+  const ctxTokens = useAppStore(ctxTokensOf) // 当前上下文占用（看谁报谁，见 lib/ctxScope）
   const compact = useAppStore((s) => s.compact)
   const model = useAppStore((s) => s.model)
   const settings = useAppStore((s) => s.settings)
-  const contextWindow = useAppStore((s) => s.contextWindow)
+  const contextWindow = useAppStore(ctxWindowOf)
   const window = modelWindowOf(settings, model, contextWindow) // 分母优先 harness 上报（问题六）
   const ctxUsed = ctxTokens ?? 0
   const pct = Math.round((ctxUsed / window) * 100)

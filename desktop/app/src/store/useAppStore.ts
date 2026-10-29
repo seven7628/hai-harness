@@ -590,7 +590,7 @@ export type MsgBlock =
   | { kind: 'tool'; id: number; toolId: string; name: string; runId?: string; requestId?: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; parentRunId?: string; liveTail?: string; liveSeq?: number; liveTotal?: number }
   // todos：该子 agent **自己**的待办清单（它是独立上下文，因此也是独立 TODO ——
   // 与会话级视图字段 SessionView.todos 互不相干，见 events.TodoSnapshot 的注释）。
-  | { kind: 'agent'; id: number; runId: string; parentRunId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean; endKind?: string }
+  | { kind: 'agent'; id: number; runId: string; parentRunId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; ctxWindow?: number; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean; endKind?: string }
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
   | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; parentRunId?: string; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
   | { kind: 'task_result'; id: number; taskId: string; result: string; error?: string }
@@ -652,6 +652,9 @@ export interface RunNode {
   durMs?: number // span 时长（run：agent_end 结算；tool：tool_run_end 结算）
   taskId?: string // 工具任务 id（tool_run_start 携带；task_promoted 据此标记后台态）
   promoted?: boolean // 已被摘离为后台任务
+  /** 该 run 自己的上下文窗口（agent_start.context_window）。子 agent 可能跑在另一个
+   *  模型上，用会话级那一个数当分母，子智能体视角里的占比就是错的。 */
+  ctxWindow?: number
 }
 
 // AgentFocus 左栏树里被选中的子智能体。
@@ -6156,7 +6159,15 @@ export function dispatchEvent(raw: AnyEvent): void {
       // span 起点：root/子 agent 都记，agent_end 结算 durMs（事件 timestamp → 重放可重建）
       const ts = evTs(raw) ?? Date.now()
       const subName = String(raw.name || '')
-      const node: RunNode = { id, parentId, label: subName || String(raw.content || 'run'), status: 'running', depth: Number(raw.depth ?? 0), kind: 'run', startedAt: ts }
+      // 这个 run 自己的窗口（agent_start.context_window）：子 agent 可能跑在另一个模型上，
+      // 记在**它自己**身上，而不是覆盖会话级那一个（用户 2026-10 报障：子会话里
+      // 上下文窗口/占比显示的是主智能体的）。
+      const cw = Number(raw.context_window ?? 0)
+      const node: RunNode = {
+        id, parentId, label: subName || String(raw.content || 'run'), status: 'running',
+        depth: Number(raw.depth ?? 0), kind: 'run', startedAt: ts,
+        ...(cw > 0 ? { ctxWindow: cw } : {}),
+      }
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         // 新顶层 run = 新 trace：直接丢弃旧 trace（链路只保留最近一次 agent_start→agent_end 子树，减少数据量）
@@ -6164,11 +6175,12 @@ export function dispatchEvent(raw: AnyEvent): void {
         // 新顶层 run → 链路 tab 自动跟随最新（用户在历史 trace 上查看时也切回实时，
         // 否则新 run 开始后链路 tab 会「停在过去」且无提示）。
         const followLatest = parentId ? {} : { activeTraceId: undefined, traceDetail: undefined }
-        // harness 上报的上下文窗口（问题六）：占比分母单一事实源，本地模型表仅兜底
-        const cw = Number(raw.context_window ?? 0)
+        // harness 上报的上下文窗口（问题六）：占比分母单一事实源，本地模型表仅兜底。
+        // **只有根 run 改会话级的那一个**：子 run 的窗口记在它自己的节点/卡片上，
+        // 否则「主会话正在跑 + 子 agent 换了个小窗模型」会把主会话的分母改掉。
         const upd = setView(s, sid, {
           ...v,
-          ...(cw > 0 ? { contextWindow: cw } : {}),
+          ...(cw > 0 && !parentId ? { contextWindow: cw } : {}),
           ...followLatest,
           runNodes,
           // 子 agent（有父 run）→ 对话页异步 Agent 卡片 + 右侧 Agent 监视器数据源
@@ -6182,7 +6194,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                 const withoutPlaceholder = taskId
                   ? v.blocks.filter((b) => !(b.kind === 'async_task' && b.taskId === taskId))
                   : v.blocks
-                return [...withoutPlaceholder, { kind: 'agent', id: blockSeq++, runId: id, parentRunId: parentId, label: subName || String(raw.content || 'agent'), status: 'running', spawnedAt: ts, taskId, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 }, items: [] }]
+                return [...withoutPlaceholder, { kind: 'agent', id: blockSeq++, runId: id, parentRunId: parentId, label: subName || String(raw.content || 'agent'), status: 'running', spawnedAt: ts, taskId, ...(cw > 0 ? { ctxWindow: cw } : {}), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 }, items: [] }]
               })()
             : clearErrorBlocks(v.blocks), // 新顶层 run 开始：清上次失败的错误块
           runningAgentCount: parentId ? v.runningAgentCount + 1 : v.runningAgentCount,
@@ -7029,6 +7041,9 @@ function checkpointToView(cp: CheckpointView): SessionView {
           ...(b.task_id ? { taskId: b.task_id } : {}),
           ...(b.dur_ms != null ? { durMs: b.dur_ms } : {}),
           ...(b.think_ms != null ? { thinkMs: b.think_ms } : {}),
+          // 这个子 agent 自己的上下文窗口（Go 侧 Block.CtxWindow）：子会话视角的
+          // 占比分母用它，不拿主会话那一个数（用户 2026-10 报障）
+          ...(b.ctx_window != null && b.ctx_window > 0 ? { ctxWindow: b.ctx_window } : {}),
           ...(b.task_result ? { taskResult: b.task_result } : {}),
           ...(b.task_error ? { taskError: b.task_error } : {}),
           // 收场原因（Go 侧 Block.EndKind 落盘）：车道行在 killed 后面说清为什么
@@ -7119,6 +7134,7 @@ function checkpointToView(cp: CheckpointView): SessionView {
       ...(n.is_error ? { isError: true } : {}),
       ...(n.started_at != null ? { startedAt: n.started_at } : {}),
       ...(n.dur_ms != null ? { durMs: n.dur_ms } : {}),
+      ...(n.ctx_window != null && n.ctx_window > 0 ? { ctxWindow: n.ctx_window } : {}),
       ...(n.task_id ? { taskId: n.task_id } : {}),
       ...(n.promoted ? { promoted: true } : {}),
     })),

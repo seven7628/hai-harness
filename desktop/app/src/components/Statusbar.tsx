@@ -1,4 +1,5 @@
 import { useAppStore, modelWindowOf } from '../store/useAppStore'
+import { ctxTokensOf, ctxWindowOf } from '../lib/ctxScope'
 import { fmtTokens, fmtUsd } from './ui'
 import { useT } from '../i18n'
 
@@ -7,7 +8,8 @@ export default function Statusbar() {
   const usage = useAppStore((s) => s.usage)
   const turns = useAppStore((s) => s.turns)
   const turnsTotal = useAppStore((s) => s.turnsTotal)
-  const ctxTokens = useAppStore((s) => s.ctxTokens)
+  // 上下文读数跟着「正在看谁」走（聚焦子智能体 = 那个 run 自己的分子/分母）
+  const ctxTokens = useAppStore(ctxTokensOf)
   const costUsd = useAppStore((s) => s.costUsd)
   const streaming = useAppStore((s) => s.streaming)
   const bridgeStatus = useAppStore((s) => s.bridgeStatus)
@@ -15,7 +17,7 @@ export default function Statusbar() {
   const persona = useAppStore((s) => s.persona)
   const model = useAppStore((s) => s.model)
   const settings = useAppStore((s) => s.settings)
-  const contextWindow = useAppStore((s) => s.contextWindow)
+  const contextWindow = useAppStore(ctxWindowOf)
   const git = useAppStore((s) => (s.git.is_repo ? s.git : s.wsGit ?? s.git))
   const setRightTab = useAppStore((s) => s.setRightTab)
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)

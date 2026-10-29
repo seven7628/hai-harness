@@ -142,6 +142,8 @@ export interface CheckpointBlock {
   ttft_ms?: number
   dur_ms?: number
   agent_dur_ms?: number
+  /** 子 agent 卡片自己的上下文窗口（Go 侧 Block.CtxWindow） */
+  ctx_window?: number
   // 输出速度（tokens/s）的分子：本轮输出 token（含 reasoning）与其中 reasoning 部分。
   // 落库保证刷新/重放后消息底部的 tokens/s 不消失（分母由 genMsOf 纯函数重算）。
   output_tokens?: number
@@ -226,6 +228,8 @@ export interface CheckpointRunNode {
   dur_ms?: number
   task_id?: string
   promoted?: boolean
+  /** 该 run 自己的上下文窗口（agent_start.context_window） */
+  ctx_window?: number
 }
 
 export interface CheckpointTurn {
