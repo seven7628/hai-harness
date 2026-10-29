@@ -4946,7 +4946,7 @@ body.is-electron .left.collapsed .rail .rbtn {
   font: 400 10.5px/1 var(--font-mono);
   color: var(--text-3);
   cursor: pointer;
-  transition: color 120ms var(--ease);
+  transition: color var(--t-hover) var(--ease);
 }
 .ctx-compact:hover { color: var(--text); }
 .send-btn {
