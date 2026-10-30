@@ -23,7 +23,9 @@ import {
   flowBeads,
   formatWall,
   hasScriptOutput,
+  innerFailureHint,
   isCodemodeTool,
+  nestedFailureCount,
   oneLine,
   parseHostOps,
   parseNestedCalls,
@@ -709,4 +711,39 @@ test('store：工具结束清掉尾巴（最终结果才是权威），未知 id
   const other = rows.find((b) => b.toolId === 'other-2')
   assert.equal(other?.liveTail, undefined, '其它行不受影响')
   assert.equal(rows.length, 2, '不该因为 tail 事件多出行')
+})
+
+// —— 「外层成功、内层有失败」角标（2026-10-28）——————————————————————
+//
+// 事故垫底：某条会话里脚本把 6 次工具错误 catch 掉、兜底 `text("got=0")`，外层结局是
+// `Script completed`（✓ 绿），而「真实失败」只躺在嵌套清单头部 —— 一眼扫过去读作成功，
+// 模型据此判成「接口坏了」并要求人工重连。角标就为这个形态存在。
+
+test('innerFailureHint：外层成功 + 内层 1 条失败 → 角标 1', () => {
+  const calls = [
+    { id: 'n1', name: 'bash', args: '{}', result: 'ok', error: '', isError: false },
+    { id: 'n2', name: 'read_file', args: '{}', result: '', error: 'no such file', isError: true },
+  ]
+  assert.equal(innerFailureHint(false, calls), 1)
+  assert.equal(nestedFailureCount(calls), 1)
+})
+
+test('innerFailureHint：外层自己失败 → 不叠角标（行尾 ✗ 已经说明一切）', () => {
+  assert.equal(innerFailureHint(true, [{ id: 'n1', name: 'bash', args: '{}', result: 'boom', error: 'boom', isError: true }]), 0)
+})
+
+test('innerFailureHint：内层全成功 / 无嵌套 / 未给 → 0（不渲染）', () => {
+  assert.equal(innerFailureHint(false, [{ id: 'n1', name: 'bash', args: '{}', result: 'ok', error: '', isError: false }]), 0)
+  assert.equal(innerFailureHint(false, []), 0)
+  assert.equal(innerFailureHint(false, undefined), 0)
+  assert.equal(nestedFailureCount(undefined), 0)
+})
+
+test('innerFailureHint：失败条数按 isError 计数（不是按 error 文本有无）', () => {
+  const calls = [
+    { id: 'a', name: 'x', args: '{}', result: '', error: '', isError: true },
+    { id: 'b', name: 'y', args: '{}', result: 'boom', error: 'boom', isError: true },
+    { id: 'c', name: 'z', args: '{}', result: 'Error: looks like an error but is a result', error: '', isError: false },
+  ]
+  assert.equal(innerFailureHint(false, calls), 2)
 })

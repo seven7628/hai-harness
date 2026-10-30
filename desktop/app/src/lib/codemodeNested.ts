@@ -51,6 +51,30 @@ export function parseHostOps(raw: unknown): HostOpsView | undefined {
   return s || d ? { search: s, describe: d } : undefined
 }
 
+/** 嵌套调用里的失败条数（0 = 没失败；未给 = 0）。 */
+export function nestedFailureCount(calls?: NestedCallView[]): number {
+  if (!calls || calls.length === 0) return 0
+  let n = 0
+  for (const c of calls) if (c.isError) n++
+  return n
+}
+
+/**
+ * 「外层成功、内层有失败」角标的条数（0 = 不渲染）。
+ *
+ * 为什么需要它：脚本**可以 catch** 掉工具错误再兜底输出（`catch (e) { return {got: 0} }`），
+ * 于是外层结局是 `Script completed`（✓ 绿），而真实发生的失败只躺在嵌套清单的头部
+ * （「N 个失败」）里 —— 一眼扫过去是「成功」。用户实测的会话就是这样：6 次失败被吞掉，
+ * 正文变成 `got=0`，外层显示成功，模型据此判成「接口坏了」。
+ *
+ * 判据刻意只有「外层没失败」这一条：外层本身就失败时，行尾的 ✗ 已经说明一切，
+ * 再叠一个「内层失败 N」是噪声（那种场景下更要紧的是看错误本身）。
+ */
+export function innerFailureHint(outerFailed: boolean, calls?: NestedCallView[]): number {
+  if (outerFailed) return 0
+  return nestedFailureCount(calls)
+}
+
 /** codemode 脚本的形态档位。 */
 export type CodemodeTier = 'search' | 'execute'
 

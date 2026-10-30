@@ -218,6 +218,69 @@ func (m *Manager) Ping(ctx context.Context, name string) error {
 	return s.Ping(ctx)
 }
 
+// defaultHealthInterval 低频探活周期（没传/传非正值时用）。
+//
+// 60s 的取舍：比一次对话的思考+工具轮短，用户撞上死连接的概率可忽略；又远大于服务器
+// 重启/回收的时间尺度之外的人工操作频率，一轮探活在面板里是零噪声。
+const defaultHealthInterval = 60 * time.Second
+
+// WatchHealth 低频探活 + 失败自动重连，直到 ctx 结束。
+//
+// **只 Ping 已连接（StateConnected）的服务器**：没人用过的 server 不该被探活顺手 dial 出来
+// （stdio 会 spawn 子进程、http 会建会话），"惰性连接"这条设计不能被探活破坏。
+//
+// 失败即 Refresh（Close + 重连）：这样下一次工具调用不会打在死连接上。两条自愈通道各有
+// 分工，缺一不可：
+//   - 用一次就自愈：Server.callTool 失败 → markBroken → 下一次调用重拨（延迟最低，
+//     但只覆盖"真的被调用过"的服务器）；
+//   - 闲着也自愈：本方法（覆盖"放着不用、服务端先重启"——用户下次打开面板或发起对话时
+//     连接已经好了，不必先吃一次失败）。
+//
+// interval <= 0 用 defaultHealthInterval。阻塞直到 ctx 结束；调用方负责 goroutine。
+func (m *Manager) WatchHealth(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = defaultHealthInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			m.probeOnce(ctx)
+		}
+	}
+}
+
+// probeOnce 一轮探活（WatchHealth 的 tick 体；单独拆出便于测试与将来手动触发）。
+func (m *Manager) probeOnce(ctx context.Context) {
+	m.mu.Lock()
+	servers := make(map[string]*Server, len(m.servers))
+	for name, s := range m.servers {
+		servers[name] = s
+	}
+	m.mu.Unlock()
+	for name, s := range servers {
+		if ctx.Err() != nil {
+			return
+		}
+		if !s.Connected() {
+			continue // 惰性连接：未连接的服务器不碰
+		}
+		pctx, cancel := context.WithTimeout(ctx, pingTimeout)
+		err := s.Ping(pctx)
+		cancel()
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		_ = m.Refresh(ctx, name) // 断线：Close + 重连；失败留给 Status（错误码/阶段可见）
+	}
+}
+
 // CallTool 原始调用单个服务器工具（返回 mcp-go 结果含 content 原文；web tab 截图等场景）。
 func (m *Manager) CallTool(ctx context.Context, server, tool string, arguments map[string]any) (*gomcp.CallToolResult, error) {
 	m.mu.Lock()
@@ -225,6 +288,10 @@ func (m *Manager) CallTool(ctx context.Context, server, tool string, arguments m
 	m.mu.Unlock()
 	if s == nil {
 		return nil, fmt.Errorf("mcp 服务器 %q 不存在", server)
+	}
+	// 与适配器路径一致：调用前确保连接（幂等；断线后自动重拨，见 Server.markBroken）。
+	if err := s.EnsureConnected(ctx); err != nil {
+		return nil, err
 	}
 	return s.CallTool(ctx, tool, arguments)
 }

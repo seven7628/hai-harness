@@ -156,13 +156,13 @@ Helpers:
   256 KiB of JSON and the whole store to 1 MiB; exceeding either fails the call. Use
   store(key, undefined) to delete a key. Writes are kept only when the script finishes
   successfully - a failed script discards all of its writes.
-- await searchTools(query) and await describeTool(name) find tools that are not listed
-  below, so this catalog is never the complete list of what you can call. Both are async:
-  an un-awaited call hands you a pending Promise, not a result.
+- await searchTools(query) and await describeTool(name) find tools not listed below
+  (searchTools takes {limit, namespace, exact}). Hits carry both "name" and
+  "canonical_name"; either works in tools[...]. Both are async - an un-awaited call just
+  hands you a Promise.
 
 Isolation: the script runs in its own process with an allowlisted environment and enforced
-quotas (memory, wall clock, output size). The supported way to reach anything outside that
-process is tools.*.`
+quotas (memory, wall clock, output size); tools.* is the supported way out.`
 
 // DEFERRED_TOOLS_GUIDANCE 有 deferred 档工具时追加的指引（对齐 pi
 // DEFERRED_TOOLS_GUIDANCE，tool.ts:220-221）。

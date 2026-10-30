@@ -31,7 +31,7 @@ import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
 import { ToolLiveTail, ToolNestedCalls, ToolOutputPreview, ToolScriptRun } from './ToolNestedCalls'
-import { codemodeTier, hasScriptOutput, isCodemodeTool, parseScriptEnvelope, scriptSourceOf, scriptSummary, formatWall, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
+import { codemodeTier, hasScriptOutput, innerFailureHint, isCodemodeTool, parseScriptEnvelope, scriptSourceOf, scriptSummary, formatWall, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { batchProgressOf } from '../lib/codemodeBatch'
 import { ToolBatchProgress } from './runtime/ToolBatchProgress'
 import { splitOutput } from '../lib/logLines'
@@ -192,6 +192,8 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
     const env = parseScriptEnvelope(b.result)
     return env.recognized && env.wallSec != null ? formatWall(env.wallSec) : undefined
   })()
+  // 外层成功但内层有失败（脚本把错误 catch 了）：折叠态也要看得见，见 innerFailureHint。
+  const innerFailed = isCodemode ? innerFailureHint(err, b.nestedCalls) : 0
   // codemode 行没有 toolArgsSummary（那是别的工具的参数摘要）——头部摘要改显示脚本干了什么。
   const scriptLine = scriptSrc ? scriptSummary(scriptSrc) : ''
   // SKILL = 命令结果合成的技能加载块（/skill 面板 → SDK /skills load）：渲染成 SKILL(code-review) 工具调用样式
@@ -273,6 +275,16 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
                   <span className="cm-mode-word">{tier === 'search' ? t('tool.codemode.search') : t('tool.codemode.execute')}</span>
                 </span>
               )}
+              {/* 「外层成功、内层有失败」角标：脚本 catch 掉工具错误再兜底输出时，外层结局是
+                  Script completed（行尾 ✓ 绿），真实失败只躺在嵌套清单的「N 个失败」里 ——
+                  一眼扫过去读作「成功」。判据见 lib/codemodeNested.ts 的 innerFailureHint。 */}
+              {innerFailed > 0 && (
+                <span className="cm-inner-failed" title={t('tool.codemode.innerFailedHint')}>
+                  <span aria-hidden="true">⚠</span>
+                  {t('tool.codemode.innerFailed').replace('{n}', String(innerFailed))}
+                </span>
+              )}
+
             {/* 编排型工具（codemode）显示「脚本干了什么」；其余工具显示 toolArgsSummary。 */}
             {(scriptLine || summary) && (
               <span

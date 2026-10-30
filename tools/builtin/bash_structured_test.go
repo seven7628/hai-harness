@@ -233,9 +233,13 @@ func TestBashModelPathProducesNoStructuredContent(t *testing.T) {
 	}
 }
 
-// TestBashStructuredScriptCallKeepsFullOutput 脚本路径（带脚本标记）：结构化 output 是
-// 未截断的全文（1 MiB 以内），而**模型/文本路径仍被引擎截断** —— 两条路径的差异只体现在
-// 结构化字段上，文本口径零变化。
+// TestBashStructuredScriptCallKeepsFullOutput 脚本路径（带脚本标记）：结构化 output 与
+// 文本都是未截断的全文（1 MiB 以内）。
+//
+// 2026-10-28 变更：此前脚本路径的**文本**仍被引擎 20 KB 头尾截断（只有结构化字段完整）。
+// 那条契约对 JSON 结果是致命的 —— 中间省略标记是值的一部分，脚本 JSON.parse 必失败
+// （MCP search_scenarios 真机踩过）。现在脚本路径整体豁免 20 KB 中间省略（见
+// tools/engine.go 的 scriptTruncate），超限则整条落盘、只回一句带路径的说明。
 func TestBashStructuredScriptCallKeepsFullOutput(t *testing.T) {
 	const total = 60 * 1024
 	cmd := fmt.Sprintf("head -c %d /dev/zero | tr '\\0' b", total)
@@ -251,8 +255,8 @@ func TestBashStructuredScriptCallKeepsFullOutput(t *testing.T) {
 	if got.ExitCode != 0 {
 		t.Fatalf("exit_code = %d, want 0", got.ExitCode)
 	}
-	if !strings.Contains(r.Result, "bytes omitted from the middle") {
-		t.Fatalf("文本路径必须仍被引擎 20 KB 截断（模型看到的是同一份内容）：len=%d", len(r.Result))
+	if strings.Contains(r.Result, "bytes omitted") {
+		t.Fatalf("脚本路径的文本不该被截断（中间省略会破坏 JSON）：len=%d", len(r.Result))
 	}
 	if !strings.HasPrefix(r.Result, got.Output[:512]) || !strings.HasSuffix(r.Result, got.Output[len(got.Output)-512:]) {
 		t.Fatal("文本头尾必须来自结构化 output（两者同源）")

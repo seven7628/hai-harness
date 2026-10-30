@@ -39,6 +39,9 @@ type Engine struct {
 	tools       map[string]Tool
 	maxParallel int
 	maxResponse int
+	// maxScriptResponse 脚本路径（编排脚本里的 tools.x(...)）单次结果硬上限（0 = 不限）。
+	// 与 maxResponse 是两套口径：脚本要能零损耗读到完整结果，见 scriptTruncate。
+	maxScriptResponse int
 	// spillDir 截断落盘目录（"" = 不落盘）。见 WithSpillDir。
 	spillDir    string
 	toolTimeout time.Duration // 单次工具执行兜底超时（工具可经 ToolTimeoutProvider 覆盖）
@@ -114,6 +117,15 @@ func WithSpillDir(dir string) Option {
 	return func(e *Engine) { e.spillDir = dir }
 }
 
+// WithMaxScriptResponseSize 设置**脚本路径**单次工具结果的硬上限（默认 1 MiB）。
+//
+// 与 maxResponse（模型路径 20 KB 头尾截断）是两件事：脚本能读大结果、JSON.parse 后只
+// 取一个字段（成本几十 token），所以在读的那一步截断等于把零成本场景变成不可用。
+// 见 scriptTruncate 的注释。
+func WithMaxScriptResponseSize(n int) Option {
+	return func(e *Engine) { e.maxScriptResponse = n }
+}
+
 // WithToolTimeout 设置单次工具执行的兜底超时（默认 30s，0 表示不设超时）。
 // 未实现 ToolTimeoutProvider 的工具统一受此限制 —— 防单个失控工具挂死整个 agent；
 // 实现该接口的工具可覆盖（>0 用自身值，<0 显式不受限）。
@@ -134,12 +146,13 @@ func WithMaxResultImages(n int) Option {
 
 func NewToolEngine(opts ...Option) *Engine {
 	e := &Engine{
-		tools:         make(map[string]Tool),
-		maxParallel:   8,
-		maxResponse:   defaultMaxResponseSize,
-		toolTimeout:   defaultToolTimeout,
-		maxImageBytes: defaultMaxImageBytes,
-		maxImages:     defaultMaxResultImages,
+		tools:             make(map[string]Tool),
+		maxParallel:       8,
+		maxResponse:       defaultMaxResponseSize,
+		maxScriptResponse: defaultMaxScriptResponseSize,
+		toolTimeout:       defaultToolTimeout,
+		maxImageBytes:     defaultMaxImageBytes,
+		maxImages:         defaultMaxResultImages,
 	}
 	for _, o := range opts {
 		o(e)
@@ -1126,8 +1139,15 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	// SkipTruncateProvider 是唯一的豁免：编排型工具（codemode）的输出预算由它自己
 	// 按 max_output_tokens + spill 管理，被引擎再砍一刀会让「脚本已按模型要求筛过」
 	// 的输出反而缺尾（设计文档 §4.2 阻断项 B）。豁免**只对文本**生效，图片闸门照旧。
+	//
+	// 脚本路径（codemode 的 tools.x(...)）另走 scriptTruncate：那里**不打洞**（见其注释）。
 	text := out
-	if st, ok := tool.(SkipTruncateProvider); !ok || !st.SkipTruncate() {
+	switch st, ok := tool.(SkipTruncateProvider); {
+	case ok && st.SkipTruncate():
+		// 自管预算（codemode 本体：max_output_tokens + spill）
+	case IsScriptCall(ctx):
+		text = e.scriptTruncate(out, call.Id)
+	default:
 		text = e.truncate(out, call.Id)
 	}
 	text, images := e.limitImages(text, sink)
@@ -1359,6 +1379,41 @@ func (e *Engine) truncate(s string, callID string) string {
 		"\n\n[... %d bytes omitted from the middle (%.2f%% of %d bytes total); showing the first %d and the last %d bytes — both ends are present, the middle is not. Narrow the output to see it all (e.g. `head`/`-l`/`wc`, a smaller path or pattern) ...]\n\n",
 		omitted, 100*float64(omitted)/float64(len(s)), len(s), headEnd, len(s)-tailStart) +
 		s[tailStart:]
+}
+
+// defaultMaxScriptResponseSize 脚本路径单次工具结果的默认硬上限（1 MiB，与 bash 的
+// 结构化输出上限 maxBashStructuredOutput 同量级）。
+const defaultMaxScriptResponseSize = 1 << 20
+
+// scriptTruncate 脚本路径（编排脚本里的 tools.x(...)）的结果闸门：**绝不打洞**。
+//
+// 为什么不能复用 truncate：它在中间塞一段「[... N bytes omitted from the middle ...]」，
+// 那是**值的一部分** —— 对 JSON 结果等于把返回值破坏成非法 JSON。实测（MCP
+// search_scenarios(limit=100)）：原文 20427 字节被挖掉 427 字节，脚本 JSON.parse 直接
+// SyntaxError("Bad control character")，脚本只能靠 s.includes("bytes omitted") 嗅探；
+// 而脚本完全有能力读 100 KB、parse 后只 text() 一个字段（成本几十 token）。读的那一步
+// 被破坏，等于把「零成本」变成「不可用」，还把「内容太多」这条信息写成了数据。
+//
+// 所以：<= 上限零损耗；> 上限则**整条**落盘并只回一句带路径的说明（不返回半截数据 ——
+// 半截 JSON 比一句说明危险得多：前者会被当成真值用，后者 parse 必失败、必然被看见）。
+func (e *Engine) scriptTruncate(s, callID string) string {
+	limit := e.maxScriptResponse
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	if path := e.spillText(callID, s); path != "" {
+		return fmt.Sprintf(
+			"[tool result not inlined: %d bytes exceeds the %d-byte script limit. The full text "+
+				"was written to %s — read it from the script (tools.read_file with start_line/end_line) "+
+				"or narrow the tool's own output (limit/pagination), then call it again. "+
+				"This note **replaces** the result: no partial data is returned on purpose, so a "+
+				"JSON.parse here fails loudly instead of silently seeing half an object.]",
+			len(s), limit, path)
+	}
+	return fmt.Sprintf(
+		"[tool result not inlined: %d bytes exceeds the %d-byte script limit and it could not be "+
+			"saved to disk — narrow the tool's own output (limit/pagination) and call it again. "+
+			"No partial data is returned on purpose.]", len(s), limit)
 }
 
 // maxSpillBytes 单次落盘上限（256 MiB）。实测最坏的一条是 122 MB（`grep -rn --include=*`

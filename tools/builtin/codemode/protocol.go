@@ -105,10 +105,15 @@ type imageReply struct {
 	Bytes int    `json:"bytes"`
 }
 
-// searchRequest 一次 searchTools(query[, limit])。Limit<=0 = 用默认条数。
+// searchRequest 一次 searchTools(query[, options])。
+//
+// Limit<=0 = 用默认条数；Namespace 非空 = 只在这一个 namespace 里找（多 server 场景下
+// 想「只在我这台 MCP 里搜」的必要条件）；Exact=true = 只回精确命中的那一条。
 type searchRequest struct {
-	Query string `json:"query"`
-	Limit int    `json:"limit,omitempty"`
+	Query     string `json:"query"`
+	Limit     int    `json:"limit,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Exact     bool   `json:"exact,omitempty"`
 }
 
 // searchReply searchTools 的回执。
@@ -117,8 +122,15 @@ type searchReply struct {
 }
 
 // searchHit 一条检索命中。
+//
+// **两个名字都给**：Name 是脚本里的形态（归一化 + 撞名后缀，如
+// mcp__ai_test__search_scenarios_59f182），Canonical 是引擎内原始名
+// （mcp__ai-test__search_scenarios）。两者在脚本里都可调用（transport 两把键都注册），
+// 但此前只有 Name 可见 —— 模型拿目录里的 mcp__ai-test__x 去比对命中名字，32 个工具
+// 全是 NOT FOUND（实测），只能靠 searchTools 拼哈希名，白跑一轮。
 type searchHit struct {
 	Name      string `json:"name"`
+	Canonical string `json:"canonical_name,omitempty"`
 	Summary   string `json:"summary,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -265,11 +277,22 @@ globalThis.store = async (key, value) => {
 
 // searchTools / describeTool：检索与描述都在宿主侧（目录与 namespace 的 instructions
 // 都在那里）。宿主侧实现的价值是「换检索算法不动沙箱」—— BM25 排在 P2-b。
-globalThis.searchTools = async (query, limit) => {
+globalThis.searchTools = async (query, options) => {
   if (typeof query !== 'string') {
     throw new Error('searchTools(query): query must be a string');
   }
-  const res = await hostCall(OP_SEARCH, { query: query, limit: typeof limit === 'number' ? limit : 0 });
+  // 第二个参数两种形态都认：数字（老写法 searchTools(q, 50)）与对象
+  // {limit, namespace, exact}（新写法）。老写法必须继续可用 —— 已写好的脚本不该因为
+  // 多出几个选项就失效。
+  const o = typeof options === 'number'
+    ? { limit: options }
+    : (options && typeof options === 'object' ? options : {});
+  const res = await hostCall(OP_SEARCH, {
+    query: query,
+    limit: typeof o.limit === 'number' ? o.limit : 0,
+    namespace: typeof o.namespace === 'string' ? o.namespace : '',
+    exact: o.exact === true,
+  });
   return res && Array.isArray(res.tools) ? res.tools : [];
 };
 

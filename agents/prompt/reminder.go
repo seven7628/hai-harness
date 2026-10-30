@@ -114,24 +114,10 @@ Your previous turn ended with no visible output right after tool results were re
 Do not stop silently.
 </system-remind>`
 
-// IncompleteTodosReminder 收尾前的完成度检查（stop 检查点注入，写进 ac.Messages 持久化，
-// 同 PendingTasksReminder 范式——模型做完剩余工作的期间一直可见）。
-// 触发：本轮即将以 stop 结束，而会话 todo 仍有未完成项（引擎已知的事实，不依赖模型自述）。
-// 中文说明：这是运行时信号，不是新用户需求；若确有未完成项应继续做完，
-// 若确实无法完成应明确说明剩余项与原因，不得把未完成的项标成已完成。
+// IncompleteTodosReminder 已于 2026-10 删除（连同 agent_loop 收尾检查点门控 4）。
 //
-// %s = 引擎渲染的未完成项清单（agent_loop.renderUnfinishedTodos，每行 "- <id>: <title>"，
-// 上限 10 项，超出以 "- (more unfinished items omitted)" 省略；无未完成项时不会注入）。
-//
-// 用法（A4/B4 收尾前验收门控）：agent_loop stop 检查点检测到未完成 todo → 注入本提醒并
-// 多跑一轮；每 Run 至多一次（模型再次 stop 且 todo 仍未完成则按现状放行，防死循环）。
-// 走机制而非提示词：Code 主会话的产品提示词已按用户要求移除工程流程节（含 Verification），
-// 提示词层约束在实测中反复失效，故由引擎在收尾时刻拦截。
-const IncompleteTodosReminder = `<system-remind>
-You are about to finish, but the session todo list still has unfinished items:
-%s
-Check them before you stop: finish the remaining work now, or — if it is genuinely
-blocked or no longer needed — say explicitly which items are unfinished and why.
-Never mark an item done that is not actually done, and never claim the task is
-complete while an item you added for it is still open.
-</system-remind>`
+// 历史：收尾时把未完成 todo 清单塞到模型眼前并强制再跑一轮。判据本身没错，但代价结构
+// 错——925 个会话快照实测 145 次触发里 123 次的下一轮只调用了 todo_update（记账），
+// 等于用一整轮 LLM 做最廉价的记账；另有 15 个会话同一 item 被反复提醒（todo 会话级
+// 持久，而门控守卫是 per-Run 重置）。
+// 决策：删门控而非改文案。审计信号若要回来，应走 AgentEnd / 事件，不要再插一轮。

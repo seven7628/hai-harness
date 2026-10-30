@@ -430,10 +430,13 @@ func (t *Tool) runBackgroundInternal(ctx context.Context, tc *events.ToolContext
 		// 模型产出最终回复、准备自然收尾时，若本 agent 名下还有在途孙任务，注入一次
 		// 清单提醒并多跑一轮 —— 否则 loop 先结束，孙结果只能回落主会话（等于没修）。
 		// 为什么不能只靠投递：子 agent 的常态是「干完自己的活就收尾」，而孙任务往往
-		// 才是重活；主 loop 有 pendingTasksNudge（desktop/bridge WithPendingTasksNudge
-		// + Session 的 RunOptions.TaskState）解决同一问题，但**子 loop 两样都没有**，
-		// 也不该为此去改宿主装配 —— 故用 RunOptions.Stop（Run 级、引擎自带
-		// maxStopHookBlocks=8 上限）在子 loop 内部自给自足。
+		// 才是重活，把结果甩给父会话等于把重活的开销记到父账上。
+		// 判据必须是**在途**：InFlightDescendants 按 running/interrupting 过滤——主 loop 曾
+		// 有同款门控（WithPendingTasksNudge + RunOptions.TaskState），但它把全量台账
+		// （含终态任务）当成在途，实测 461 次触发里 344 次清单 0 个在途，已于 2026-10
+		// 整体删除（见 agents/agent_loop.go 收尾分支注释）。**本门控不随之删除**：判据正确、
+		// 作用域是「本任务的后代」、且用 RunOptions.Stop（Run 级、引擎自带
+		// maxStopHookBlocks=8 上限）在子 loop 内部自给自足，不依赖宿主装配。
 		// 边界：至多提醒一次（模型再次坚持收尾即放行，防空转）；孙任务仍未回 → 本轮
 		// 结束、结果按投递判据回落主会话（不丢）。叶子任务（无后代）查一次空即放行。
 		// 注意：buildOptions 不继承宿主的 Stop（见其注释），此处不会覆盖宿主 hook。
