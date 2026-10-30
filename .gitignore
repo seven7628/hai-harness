@@ -137,3 +137,11 @@ coverage.out
 build_out.txt
 test_out.txt
 tsc_out.txt
+
+# —— 设计 / 评审 / 评测的过程产物（生成物或一次性脚本，可重跑，不入库）——
+// 这些是本地跑设计评审、产物页、评测时留下的目录：内容随每次重跑变化，
+// 入库只会制造无意义的 diff（与本文件上面几条同一口径）。
+/agent-runtime-session.html
+/design-review/
+/lunar-seat/
+/evals/
