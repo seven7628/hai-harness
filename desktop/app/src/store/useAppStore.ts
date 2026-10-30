@@ -872,6 +872,11 @@ export interface SessionView {
   turnStartTs?: Record<string, number>
   toolStartTs: Record<string, number>
   streaming: boolean
+  // runEnded 主 run 是否已由 **AgentEnd** 结算（2026-10 用户口径：折叠行与轮尾账只在
+  // AgentEnd 之后出现）。与 streaming 是两件事：streaming 说「此刻有没有在流」，
+  // 它在两个 llm 调用之间是 false；runEnded 说「这次运行交卷了没有」。
+  // 判据见 lib/turnSettle.ts（含「为什么不能只靠 run 节点 status」）。
+  runEnded: boolean
   aborted: boolean // 本次 run 已被用户中断（agent_end abort 置位；agent_start 复位）——chunk 防御
   reqBlock: Record<string, number> // 流式块归属（per-session，防跨会话 request_id 串）
   lastLLMBlockId?: number
@@ -943,6 +948,19 @@ export function mainRunActive(v: SessionView | undefined): boolean {
   return !!v && v.runNodes.some((n) => n.kind === 'run' && n.status === 'running' && !n.parentId)
 }
 
+/**
+ * 主 run 是否已由 **AgentEnd** 结算 —— 折叠行（Worked for）与轮尾账（tokens/cache）
+ * 唯一允许出现的时机（用户 2026-10 口径：这两样是结算，不是进度）。
+ *
+ * 首选视图上那个显式位（agent_start 置 false / agent_end 置 true）；老快照没有这一位时
+ * 退回「没有在跑的顶层 run 节点」这个近似 —— 恢复出来的会话本来就不该有在跑的 run。
+ */
+export function mainRunEnded(v: SessionView | undefined): boolean {
+  if (!v) return true
+  if (typeof v.runEnded === 'boolean') return v.runEnded
+  return !mainRunActive(v)
+}
+
 function emptyView(): SessionView {
   return {
     blocks: [],
@@ -979,6 +997,7 @@ function emptyView(): SessionView {
     costUsd: 0,
     toolStartTs: {},
     streaming: false,
+    runEnded: true, // 空会话没有在跑的 run → 已结算
     aborted: false,
     reqBlock: {},
     lastLLMBlockId: undefined,
@@ -1029,6 +1048,7 @@ function viewFields(nv: SessionView): Partial<AppState> {
     turnStartTs: nv.turnStartTs,
     toolStartTs: nv.toolStartTs,
     streaming: nv.streaming,
+    runEnded: nv.runEnded ?? true,
     compressing: nv.compressing,
     compressStartTs: nv.compressStartTs,
     compressBefore: nv.compressBefore,
@@ -1090,6 +1110,7 @@ function topViewFields(s: AppState): Partial<SessionView> {
     turnStartTs: s.turnStartTs,
     toolStartTs: s.toolStartTs,
     streaming: s.streaming,
+    runEnded: s.runEnded,
     compressing: s.compressing,
     compressStartTs: s.compressStartTs,
     compressBefore: s.compressBefore,
@@ -2831,6 +2852,7 @@ interface AppState {
   turnStartTs?: Record<string, number> // 按 run_id 分槽（见 SessionView 同名字段注释）
   toolStartTs: Record<string, number>
   streaming: boolean
+  runEnded: boolean // 活跃会话镜像：主 run 是否已收到 AgentEnd（见 SessionView 同名字段）
   pendingQueue: QueuedInput[]
   runningAgentCount: number // 活跃会话镜像：运行中的子 agent 数（右栏角标/Agent tab）
   busySids: ReadonlySet<string> // 正在运行（有 running run 节点）的会话 id 集合（左栏运行点；事件级维护，不随 chunk 扫描）
@@ -6293,6 +6315,8 @@ export function dispatchEvent(raw: AnyEvent): void {
         // 否则「主会话正在跑 + 子 agent 换了个小窗模型」会把主会话的分母改掉。
         const upd = setView(s, sid, {
           ...v,
+          // 主 run 起跑 = 重新进入「未结算」。子 run 不改这一位（结算只由主 run 的 AgentEnd 决定）
+          ...(parentId ? {} : { runEnded: false }),
           ...(cw > 0 && !parentId ? { contextWindow: cw } : {}),
           ...followLatest,
           runNodes,
@@ -6478,6 +6502,9 @@ export function dispatchEvent(raw: AnyEvent): void {
         delete turnStartTs[id]
         const upd = setView(s, sid, {
           ...v,
+          // 主 run 的 AgentEnd = 结算边界：折叠行与轮尾账从这一刻起才允许出现
+          //（判据的唯一来源，见 lib/turnSettle.ts）。子 run 的结束不动主 run 的结算位。
+          ...(isSub ? {} : { runEnded: true }),
           runNodes: v.runNodes.map((n) =>
             id && n.id === id
               ? { ...n, status: runStatus, durMs: typeof raw.duration_ms === 'number' ? raw.duration_ms : (n.startedAt != null ? now - n.startedAt : n.durMs) }
@@ -7461,6 +7488,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   blocksOlderLoading: false,
   blocksOlderError: false,
   agentDetached: [],
+  // 初始即「已结算」：没有在跑的 run，折叠行/轮尾账可以正常显示历史轮
+  runEnded: true,
   turnsTotal: 0,
   workspace: initWorkspace, // 持久恢复（模块加载时读 localStorage）；无 → undefined（BootScreen）
   projects: initProjects,

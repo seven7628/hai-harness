@@ -2483,6 +2483,11 @@ class MockTransport implements Transport {
       endAt: 1000 + frames.length * 250 + 1400,
       end: { usage: { Input: 2400, Output: 96, CacheRead: 2200, CacheWrite: 0 }, finish_reason: 'stop' },
     }, sid)
+    // 主 run 的结算边界：折叠行（Worked for）与轮尾账（tokens）都以它为闸门
+    this.after(1000 + frames.length * 250 + 1500, () => this.emit({
+      event_type: 'agent_end', session_id: sid, run_id: runId, index: 1,
+      content: '测试跑完', finish_reason: 'end', model: this.model, timestamp: ts(),
+    }), sid)
   }
 
   // ---------- codemode 钩子：脚本编排行（档位徽标 + 结果优先折叠） ----------

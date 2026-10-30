@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
-import { useAppStore, genMsOf, mainRunActive } from '../store/useAppStore'
+import { useAppStore, genMsOf, mainRunEnded } from '../store/useAppStore'
+import { turnLive } from '../lib/turnSettle'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
@@ -190,7 +191,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const skin = useSkin()
   const density = densityProp ?? storedDensity
   // run 级「正在跑」：块上的 running 在两次 LLM 调用之间是假的（见下方 live）
-  const runLive = useAppStore((s) => (s.activeSessionId ? mainRunActive(s.views[s.activeSessionId]) : false))
+  // 主 run 是否已结算（AgentEnd）：折叠行与轮尾账的**唯一**放行信号。
+  // 不用 run 节点 status 推断 —— 那一路上「llm_end 与下一次 llm_start 之间」会被判成已结束
+  // （用户 2026-10 报障：Worked for 与 tokens 早于 AgentEnd 出现），见 lib/turnSettle.ts。
+  const runEnded = useAppStore((s) => (s.activeSessionId ? mainRunEnded(s.views[s.activeSessionId]) : true))
   // 本次运行（AgentStart）的时刻：Working 的累计时长从它起算，而不是从「用户点发送」起算
   // —— 排队等前置任务、压缩这些时间不属于这次运行。
   const runStartedAt = useAppStore((s) => {
@@ -1086,7 +1090,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* 这一轮是不是还在跑：块上的 running 只说明「某一刻有东西在流」，
        llm_end 与下一次 llm_start 之间它是假的；run 级状态才是真的。
        两者取或 —— 否则简洁档会在 Working 面板与结算行之间来回跳（闪屏）。 */
-    const live = turn.running || (ti === turns.length - 1 && runLive)
+    const live = turnLive({ isLast: ti === turns.length - 1, turnRunning: turn.running, runEnded })
     // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
     // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
     const open = !concise || (openTurns[turn.key] ?? live)

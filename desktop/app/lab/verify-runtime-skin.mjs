@@ -1522,6 +1522,48 @@ check('chip: the size reads as 10px', chip.sizeFont === '10px', chip.sizeFont)
 check('chip: the × is an inline 16px square, not an overlay', chip.xPos === 'static' && chip.xSize[0] === 16 && chip.xSize[1] === 16, JSON.stringify(chip.xSize))
 
 // ---- 减少动效 ---------------------------------------------------------------
+// ---- 结算时机：折叠行与轮尾账只许在 AgentEnd 之后出现 ---------------------------
+// 用户 2026-10 报障：这两样在 llm_end 就出现了（llm_end 与下一次 llm_start 之间
+// `turn.running` 是 false，旧判据于是把最后一轮当成跑完了）。现在闸门是视图上的
+// runEnded（agent_start 置 false / agent_end 置 true），见 lib/turnSettle.ts。
+await page.goto(URL, { settleMs: 3000 })
+await waitStore()
+await page.eval(() => {
+  const st = window.__store.getState()
+  st.setNarrativeSkin('runtime')
+  st.setNarrativeDensity('concise')
+})
+await wait(400)
+await say('live output 尾巴')
+await waitUntil("!!document.querySelector('.cy-live')", 20000)
+const during = await page.eval(() => {
+  const st = window.__store.getState()
+  const v = st.views[st.activeSessionId]
+  return {
+    runEnded: v.runEnded,
+    worked: [...document.querySelectorAll('.rt-act')].some((n) => /Worked/.test(n.textContent || '')),
+    foot: document.querySelectorAll('.rt-turn-foot').length,
+  }
+})
+check('settle: while the run is live, nothing is settled yet (runEnded=false)',
+  during.runEnded === false, JSON.stringify(during))
+check('settle: no "Worked for" line and no ledger before AgentEnd',
+  during.worked === false && during.foot === 0, JSON.stringify(during))
+await waitUntil("(window.__store.getState().views[window.__store.getState().activeSessionId].runEnded === true)", 60000)
+await wait(900)
+const after = await page.eval(() => {
+  const st = window.__store.getState()
+  const v = st.views[st.activeSessionId]
+  return {
+    runEnded: v.runEnded,
+    worked: [...document.querySelectorAll('.rt-act')].some((n) => /Worked/.test(n.textContent || '')),
+    foot: document.querySelectorAll('.rt-turn-foot').length,
+    ledger: document.querySelector('.rt-turn-foot')?.textContent?.replace(/\s+/g, ' ').slice(0, 60) ?? null,
+  }
+})
+check('settle: after AgentEnd the fold line and the ledger appear',
+  after.runEnded === true && after.worked && after.foot > 0, JSON.stringify(after))
+
 await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
 await wait(400)
 const t7 = await page.eval(() => {
