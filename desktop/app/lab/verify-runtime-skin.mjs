@@ -355,6 +355,52 @@ check('table: numeric columns are right-aligned with tabular figures',
   tb?.thN.textAlign === 'right' && tb?.tdN.textAlign === 'right' && tb.tdN.fontVariantNumeric === 'tabular-nums',
   JSON.stringify({ th: tb?.thN.textAlign, td: tb?.tdN.textAlign, fv: tb?.tdN.fontVariantNumeric }))
 
+// ---- codemode：Search / Execute 分型 + 批量进度 --------------------------------
+// 用户 2026-10 规格：Search 与 Execute 必须一眼可辨（标签+信息重点，不只靠颜色）；
+// 批量执行要有真实进度，**没有分母就不许画百分比**（协议只在 tool_run_end 给 nested_calls）。
+await page.goto(URL, { settleMs: 3000 })
+await waitStore()
+await page.eval(() => {
+  const st = window.__store.getState()
+  st.setNarrativeSkin('runtime')
+  st.setNarrativeDensity('concise')
+})
+await wait(500)
+await say('codemode 脚本编排')
+await waitFor('.cy-live', 30000)
+await waitUntil("!document.querySelector('.cy-live') && !!document.querySelector('.rt-turn-foot')", 120000)
+// 工作盒子结算后是收起的：展开才看得到那三行
+await page.eval(() => [...document.querySelectorAll('.rt-turn')].filter((x) => x.querySelector('.rt-act[aria-expanded]')).pop()?.querySelector('.rt-act[aria-expanded]')?.click())
+await wait(900)
+const cm = await page.eval(() => {
+  const rows = [...document.querySelectorAll('.tool-row')].filter((r) => r.querySelector('.cm-mode'))
+  return rows.map((r) => ({
+    mode: r.querySelector('.cm-mode')?.textContent?.replace(/\s+/g, ' ').trim() ?? null,
+    mark: r.querySelector('.cm-mode .cm-mode-mark')?.textContent?.trim() ?? null,
+    bp: r.querySelector('.cm-bp-line')?.textContent?.replace(/\s+/g, ' ').trim() ?? null,
+    aria: r.querySelector('.cm-bp-bar')?.getAttribute('aria-valuenow') ?? null,
+    width: r.querySelector('.cm-bp-fill')?.getAttribute('style') ?? null,
+    failed: !!r.querySelector('.cm-bp-fail'),
+    nested: r.querySelector('.tn-hd')?.textContent?.replace(/\s+/g, ' ').trim() ?? null,
+    state: r.getAttribute('data-s') ?? null,
+    text: (r.textContent || '').replace(/\s+/g, ' ').slice(0, 160),
+  }))
+})
+check('codemode: the demo renders three calls', cm.length === 3, JSON.stringify(cm.map((r) => r.mode)))
+check('codemode: search and execute are told apart by a word and a mark, not just colour',
+  /搜索|检索|Search/i.test(cm[0]?.mode ?? '') && /执行|Execute/i.test(cm[1]?.mode ?? '') && cm[0]?.mark !== cm[1]?.mark,
+  JSON.stringify(cm.map((r) => `${r.mark}${r.mode}`)))
+check('codemode: the pure-search call carries no batch progress (nothing was executed)',
+  cm[0]?.bp == null, cm[0]?.bp)
+check('codemode: the execute call reports real counts from nested_calls',
+  /Execute/i.test(cm[1]?.bp ?? '') && /2\/2 completed/.test(cm[1]?.bp ?? ''), cm[1]?.bp)
+check('codemode: that progress bar is a real percentage, not a guess',
+  cm[1]?.aria === '100' && /100%/.test(cm[1]?.width ?? ''), `${cm[1]?.aria} ${cm[1]?.width}`)
+check('codemode: the failed call shows its failure while collapsed',
+  cm[2]?.state === 'fail' && /boom|script error|失败/i.test(cm[2]?.text ?? ''), JSON.stringify({ state: cm[2]?.state, text: (cm[2]?.text ?? '').slice(0, 60) }))
+check('codemode: a finished call with no sub-calls shows no fake progress bar',
+  cm[0]?.bp == null && cm[2]?.bp == null, JSON.stringify([cm[0]?.bp, cm[2]?.bp]))
+
 // ---- 数字的身份色：+N 绿 / −N 红 / 计时一支色 ---------------------------------
 // 用户 2026-10：文件变更要红绿对应（与工具行一致），所有计时信息要有一个与主题搭配的颜色。
 // 用页面里的同构夹具量计算值：颜色令牌与 --md-measure 那样由浏览器自己换算成 rgb。

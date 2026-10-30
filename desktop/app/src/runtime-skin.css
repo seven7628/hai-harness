@@ -1872,3 +1872,15 @@ html[data-skin='runtime'] .elapsed {
   color: var(--tone-time);
   font-variant-numeric: tabular-nums;
 }
+
+/* 失败行在收缩态的原因（规格 §5/§6）：一行 mono 红字，与工具行的度量/耗时同一行距，
+   不占额外高度预算（它替换的是「什么都看不到」）。 */
+html[data-skin='runtime'] .tool-row .tool-err {
+  margin: 2px 0 3px 28px;
+  max-width: 62ch;
+  font: 400 11px/1.5 var(--mono);
+  color: var(--tone-del);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

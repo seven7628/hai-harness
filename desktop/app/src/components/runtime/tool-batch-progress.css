@@ -1,0 +1,56 @@
+/* 批量执行进度（规格 §3/§7）：低饱和、细条、不占地方。
+   条高 2px —— 它是一条「进度」不是一块仪表盘；红色段只在真的失败时出现。 */
+html[data-skin='runtime'] .cm-bp {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0 4px 6px;
+  max-width: 62ch;
+}
+
+html[data-skin='runtime'] .cm-bp-bar {
+  position: relative;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+html[data-skin='runtime'] .cm-bp-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in oklab, var(--accent) 55%, var(--ink-3));
+  border-radius: inherit;
+  transition: width var(--t-base) var(--ease);
+}
+
+html[data-skin='runtime'] .cm-bp-fail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--tone-del);
+  border-radius: inherit;
+}
+
+/* 运行中：没有分母就没有百分比 —— 一条来回的亮点（不确定态） */
+html[data-skin='runtime'] .cm-bp[data-indeterminate] .cm-bp-fill {
+  width: 34%;
+  animation: cm-bp-slide var(--t-ring) var(--ease) infinite;
+}
+
+@keyframes cm-bp-slide {
+  0% { left: -34%; }
+  100% { left: 100%; }
+}
+
+html[data-skin='runtime'] .cm-bp-line {
+  font: 400 10.5px/1.4 var(--mono);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .cm-bp[data-indeterminate] .cm-bp-fill { animation: none; width: 100%; opacity: 0.5; }
+  html[data-skin='runtime'] .cm-bp-fill { transition: none; }
+}

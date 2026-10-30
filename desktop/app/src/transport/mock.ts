@@ -2300,11 +2300,14 @@ class MockTransport implements Transport {
       end: { finish_reason: 'tool_call', usage: { Input: 1900, Output: 80, CacheRead: 1850, TotalTokens: 1980 }, tool_calls: [{ id: 'cm-3', name: 'codemode', arguments: JSON.stringify({ code: failScript }) }] },
     }, sid)
     this.toolStart('cm-3', 'codemode', JSON.stringify({ code: failScript }), runId, 2820, sid)
-    this.emit({
+    // 必须**排在 start 之后**发：以前这里是同步 this.emit(...)，于是 tool_run_end 在
+    // tool_run_start 之前就到了（脚本构建时就发出），store 找不到对应行 → 丢掉这次结束，
+    // 那一行永远停在 running（实测：失败档的进度条一直显示 Execute · running · 0s）。
+    this.after(2900, () => this.emit({
       event_type: 'tool_run_end', session_id: sid, id: 'cm-3', run_id: runId, name: 'codemode',
       result: failResult, is_error: true, timestamp: ts(),
       structured: { ok: false, truncated: false, nested_calls: 0, script_error: 'Error: boom' },
-    })
+    }), sid)
 
     this.llmTurn(2900, {
       requestId: `r-${runId}-cm4`, runId,

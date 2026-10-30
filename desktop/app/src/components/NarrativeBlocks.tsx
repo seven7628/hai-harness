@@ -30,7 +30,9 @@ import JsonView from './JsonView'
 import { ElapsedTimer } from './ElapsedTimer'
 import { ToolImages } from './ToolImages'
 import { ToolLiveTail, ToolNestedCalls, ToolOutputPreview, ToolScriptRun } from './ToolNestedCalls'
-import { codemodeTier, hasScriptOutput, isCodemodeTool, scriptSourceOf, scriptSummary, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
+import { codemodeTier, hasScriptOutput, isCodemodeTool, parseScriptEnvelope, scriptSourceOf, scriptSummary, formatWall, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
+import { batchProgressOf } from '../lib/codemodeBatch'
+import { ToolBatchProgress } from './runtime/ToolBatchProgress'
 import { splitOutput } from '../lib/logLines'
 import { useT } from '../i18n'
 
@@ -179,6 +181,25 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
   // 启发式（源码里有 searchTools 且无嵌套 → search）会把一个正要大干一场的脚本标成「检索」——
   // 那是**谎报**。档位是「结果的性质」，没结果时只有「在跑」这一个事实。
   const tier = b.status === 'running' ? 'execute' : codemodeTier(b.hostOps, b.nestedCalls, scriptSrc)
+  // 批量进度与墙钟：都只从真实数据来（nested_calls / 结果信封里的 `Wall time N seconds`）
+  const collapsedError = (() => {
+    if (!err) return ''
+    const fromResult = (b.result ?? '')
+      .replace(/^Script (failed|completed)\s*\n/i, '')
+      .replace(/^Wall time [0-9.]+ seconds\s*\n/i, '')
+      .replace(/^Output:\s*\n?/i, '')
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? ''
+    const text = fromResult || b.errorInfo?.code || b.errorInfo?.nextAction || ''
+    return text.length > 140 ? text.slice(0, 137) + '…' : text
+  })()
+  const codemodeProgress = batchProgressOf(b.nestedCalls)
+  const envelopeWall = (() => {
+    if (!isCodemode || !b.result) return undefined
+    const env = parseScriptEnvelope(b.result)
+    return env.recognized && env.wallSec != null ? formatWall(env.wallSec) : undefined
+  })()
   // codemode 行没有 toolArgsSummary（那是别的工具的参数摘要）——头部摘要改显示脚本干了什么。
   const scriptLine = scriptSrc ? scriptSummary(scriptSrc) : ''
   // SKILL = 命令结果合成的技能加载块（/skill 面板 → SDK /skills load）：渲染成 SKILL(code-review) 工具调用样式
@@ -352,6 +373,23 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
       {b.status === 'running' && b.liveTail && <ToolLiveTail text={b.liveTail} total={b.liveTotal} />}
       {/* 0) 执行中：脚本控制台条（已用/预算 + 脚本内的调用点）。只有 codemode 有预算可画。 */}
       {isCodemode && b.status === 'running' && <ToolScriptRun script={scriptSrc} startedAt={b.startedAt} />}
+      {/* 失败行：收缩态也必须看得见原因（规格 §5/§6）—— 只留一个 ✗ 不算「清晰」。
+          原因取自结果文本里的第一行有内容的部分（脚本错误的形态是 `[script error] …`），
+          与展开体里显示的同一份文本，不另编一句话。 */}
+      {err && !open && collapsedError && (
+        <div className="tool-err mono" title={collapsedError}>✗ {collapsedError}</div>
+      )}
+      {/* 批量进度（用户 2026-10 规格 §3）：结束后是真账（nested_calls），
+          运行中协议还没给任何子任务数据 → 不确定态 + 已用时长，不画百分比 */}
+      {isCodemode && (b.status === 'running' || (b.nestedCalls?.length ?? 0) > 0) && (
+        <ToolBatchProgress
+          tier={tier}
+          progress={codemodeProgress}
+          running={b.status === 'running'}
+          startedAt={b.startedAt}
+          {...(envelopeWall ? { wall: envelopeWall } : {})}
+        />
+      )}
       {b.nestedCalls && b.nestedCalls.length > 0 && (
         <ToolNestedCalls calls={b.nestedCalls} discover={(b.hostOps?.search ?? 0) + (b.hostOps?.describe ?? 0)} />
       )}

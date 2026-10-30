@@ -1008,9 +1008,14 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           {others.length ? groupBlocks(others, textOnlyId) : null}
           {/* 一组调用折成一行，行本身是折角按钮（设计 .cy-act）：动词 + 对象 + 它数的量
               + 耗时，点开/收起的是**这一组逐条的行**，不牵动旁白与记录 */}
+          {/* 没有批次语法可拼的调用（codemode / MCP 之类不在 BATCH_VERB 表里）**必须**逐条画：
+              之前只在 line 非空时渲染 BatchGroup，于是这些工具整段消失 ——
+              运行时皮肤里 codemode 行根本看不见（用户 2026-10 报障的根源）。 */}
           {line ? (
             <BatchGroup line={line} calls={tools}>{groupBlocks(tools, textOnlyId)}</BatchGroup>
-          ) : null}
+          ) : (
+            tools.length ? groupBlocks(tools, textOnlyId) : null
+          )}
         </div>
       )
     })
