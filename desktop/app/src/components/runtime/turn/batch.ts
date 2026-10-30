@@ -1,5 +1,4 @@
 import type { MsgBlock } from '../../../store/useAppStore'
-import { failureLine } from '../../../lib/failureLine'
 import { fmtMs, toolArgsSummary } from '../../../lib/toolSummary'
 
 /* 一个 round 里的调用折成一行，语法与轮自己的折叠行相同：动词、对象、这个动词
@@ -113,9 +112,4 @@ export function batchRunningLine(calls: Tool[]): string {
 }
 
 /** 失败调用的一行摘要（收缩态也要看得见）：名字 + 结果/错误的首行。 */
-export function failedCallLine(c: Tool): string {
-  // 与工具行收缩态那行**同一来源**（lib/failureLine.ts）：绝不把 `---` / `Script failed`
-  // 或者一个 `.` 当成原因搬给用户看。
-  const brief = failureLine(c.result, c.errorInfo)
-  return [c.name, brief].filter(Boolean).join(' \u00b7 ')
-}
+

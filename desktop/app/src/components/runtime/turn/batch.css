@@ -74,20 +74,3 @@ html[data-skin='runtime'] .rt-batch .rt-batch-x {
   font-variant-numeric: tabular-nums;
   color: var(--red);
 }
-
-/* 收缩态下的失败摘要行：每条失败一行（名字 + 结果首行） */
-html[data-skin='runtime'] .rt-batch-fails {
-  display: grid;
-  gap: 1px;
-  margin: 1px 0 0 1px;
-}
-
-html[data-skin='runtime'] .rt-batch-fail {
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--red);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 62ch;
-}

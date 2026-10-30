@@ -164,3 +164,17 @@ export function fmtMs(ms?: number): string {
   const s = ms / 1000
   return `${s >= 10 ? s.toFixed(0) : s.toFixed(1)} s`
 }
+
+/** 从工具参数 JSON 里取 bash 的**命令原文**（Live output 的 `$ …` 提示行）。
+ *  解析不了（不是 JSON / 没有 command）就返回 undefined —— 提示行退化成
+ *  「命令未记录」，绝不把半截 JSON 当命令显示。 */
+export function bashCommandOf(args: string): string | undefined {
+  if (!args) return undefined
+  try {
+    const o = JSON.parse(args) as { command?: unknown; cmd?: unknown }
+    const c = typeof o.command === 'string' ? o.command : typeof o.cmd === 'string' ? o.cmd : ''
+    return c.trim() || undefined
+  } catch {
+    return undefined
+  }
+}

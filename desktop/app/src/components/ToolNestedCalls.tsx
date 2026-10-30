@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { fmtDuration, fmtRun } from './ui'
 import { copyText } from '../lib/clipboard'
+import { tailLines } from '../lib/tailLine'
 import { fmtBytes } from '../lib/imageAttach'
 import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
@@ -220,28 +221,79 @@ export const ToolScriptRun = memo(function ToolScriptRun({ script, startedAt }: 
 //   · 文本是**替换**语义（后端每 250ms 发一帧窗口），所以这里不做拼接，直接渲染；
 //   · 固定高度 + 自动滚到底：日志类输出看的是最新几行，不是开头；
 //   · 等宽字体 + 不折行（横向可滚）：日志的对齐与缩进是信息的一部分。
-export const ToolLiveTail = memo(function ToolLiveTail({ text, total }: { text: string; total?: number }) {
+export const ToolLiveTail = memo(function ToolLiveTail({
+  text,
+  total,
+  cmd,
+  startedAt,
+  onStop,
+}: {
+  text: string
+  total?: number
+  cmd?: string
+  startedAt?: number
+  onStop?: () => void
+}) {
   const t = useT()
   const preRef = useRef<HTMLPreElement>(null)
+  const running = startedAt != null
+  const now = useClock(startedAt, running)
   // 只在内容变化时滚到底。不能放进 render（每次 render 都改 scrollTop 会打架）；
   // behavior:'auto' 而不是 smooth —— 每 250ms 一帧的平滑滚动会自己叠成抖动。
   useEffect(() => {
     const el = preRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [text])
+  const lines = useMemo(() => tailLines(text), [text])
+  const elapsed = startedAt != null && now != null ? Math.max(0, now - startedAt) : undefined
   return (
-    <div className="tool-tail">
-      <div className="tt-hd">
-        <span className="tt-dot" aria-hidden="true" />
-        <span className="tt-label">{t('tool.tail.live')}</span>
-        <span className="grow" />
-        {total != null && total > 0 && (
-          <span className="tt-bytes mono" title={t('tool.tail.bytesHint')}>
-            {t('tool.tail.bytes').replace('{n}', fmtBytes(total))}
+    // 设计（v2 §18.2 Live output）：运行中的调用不是一个"另一种组件"，而是**同一个终端**
+    // 的另一种状态 —— 提示行（$ + 命令）、按行带刻度槽的输出、脚注（窗口与帧率）。
+    <div className="tool-tail" data-variant="running">
+      <div className="sh-head">
+        <span className="ps" aria-hidden="true">$</span>
+        <span className="sh-cmd mono" title={cmd}>{cmd || t('tool.tail.command')}</span>
+        <span className="t">
+          <span className="mark" data-s="run">
+            <i aria-hidden="true" />
+            <span>{t('tool.tail.live')}</span>
           </span>
+          {elapsed != null && (
+            <>
+              <span className="sep" aria-hidden="true">·</span>
+              <span>{fmtRun(elapsed)}</span>
+            </>
+          )}
+          {total != null && total > 0 && (
+            <>
+              <span className="sep" aria-hidden="true">·</span>
+              <span title={t('tool.tail.bytesHint')}>{fmtBytes(total)}</span>
+            </>
+          )}
+        </span>
+      </div>
+      <pre className="sh-out--live mono" ref={preRef}>
+        {lines.map((l, i) => (
+          <div className="tl" data-k={l.kind} key={i}>
+            <span className="tt" aria-hidden="true">{l.gut}</span>
+            <span className="tx">{l.text}</span>
+          </div>
+        ))}
+      </pre>
+      <div className="well-foot">
+        {/* 脚注是**协议事实**，不是装饰：窗口 4 KiB、每 250 ms 一帧（见
+            tools/builtin/bash_tail.go 的 maxTailBytes / tailMinInterval）。 */}
+        <span>{t('tool.tail.foot')}</span>
+        {onStop && (
+          <span className="more" role="button" tabIndex={0} onClick={onStop}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' && e.key !== ' ') return
+              e.preventDefault()
+              onStop()
+            }}
+          >{t('tool.tail.stop')}</span>
         )}
       </div>
-      <pre className="tt-pre mono" ref={preRef}>{text}</pre>
     </div>
   )
 })

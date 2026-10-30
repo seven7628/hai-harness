@@ -1886,3 +1886,82 @@ html[data-skin='runtime'] .tool-row .tool-err {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* --- 运行中的 bash 尾巴：设计 v2 §18.2「Live output」---------------------------
+   设计原文的三句话都落在这一块上：① running 的调用是**同一个终端**的另一种状态
+   （同一个 $ 提示行 + 同一条脚注）；② 输出按**行**给刻度槽与级色，不是一坨 pre；
+   ③ 脚注写的是协议事实：窗口 4 KiB、每 250 ms 一帧（tools/builtin/bash_tail.go）。
+   几何在 index.css（两档皮肤共用），这里只把颜色/圆角/动效换成运行时令牌。 */
+html[data-skin='runtime'] .tool-row .tool-tail {
+  margin: 3px 6px 8px 18px;
+  background: color-mix(in oklab, var(--card-2) 88%, var(--paper));
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-card);
+  /* running 的边框偏强调色：一眼能看出这条还在动 */
+  border-color: color-mix(in oklab, var(--accent) 26%, var(--line));
+  transition: border-color var(--t-base) var(--ease);
+}
+
+html[data-skin='runtime'] .tool-row .tool-tail .sh-head {
+  border-bottom-color: var(--line-soft);
+  color: var(--ink-2);
+  font: 400 11px/1 var(--mono);
+}
+
+html[data-skin='runtime'] .tool-row .tool-tail .sh-head .ps { color: var(--ink-3); }
+html[data-skin='runtime'] .tool-row .tool-tail .sh-head .t { color: var(--ink-3); }
+html[data-skin='runtime'] .tool-row .tool-tail .mark i { background: var(--accent); }
+
+html[data-skin='runtime'] .tool-row .tool-tail .sh-out--live {
+  color: var(--ink-2);
+  font: 400 12px/1.75 var(--mono);
+}
+
+html[data-skin='runtime'] .tool-row .tool-tail .well-foot {
+  border-top-color: var(--line-soft);
+  color: var(--ink-3);
+  font: 400 11px/1.4 var(--mono);
+}
+
+html[data-skin='runtime'] .tool-row .tool-tail .well-foot .more { color: var(--ink-2); }
+html[data-skin='runtime'] .tool-row .tool-tail .well-foot .more:hover { color: var(--accent); }
+
+html[data-skin='runtime'] .tool-row .tool-tail .tl[data-k='ok'] .tx { color: var(--green); }
+html[data-skin='runtime'] .tool-row .tool-tail .tl[data-k='warn'] .tx { color: var(--amber); }
+html[data-skin='runtime'] .tool-row .tool-tail .tl[data-k='err'] .tx { color: var(--red); }
+html[data-skin='runtime'] .tool-row .tool-tail .tl[data-k='dim'] .tx { color: var(--ink-3); }
+
+/* 逐行入场（设计 .tl 的 tail-in 220ms）：新到的那一行从下方 4px 浮上来，
+   已有行不动 —— 每 250ms 一帧的替换语义下，这条动画是「又冒出几行」的唯一线索 */
+html[data-skin='runtime'] .tool-row .tool-tail .tl {
+  animation: tail-in var(--t-base) var(--ease-out) both;
+}
+
+@keyframes tail-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 还在跑：最后一行尾巴上挂一个闪烁光标（设计 .sh-shell[data-variant='running']） */
+html[data-skin='runtime'] .tool-row .tool-tail[data-variant='running'] .tl:last-child::after {
+  content: '';
+  flex: none;
+  align-self: center;
+  width: 6px;
+  height: 12px;
+  margin-left: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: tail-blink var(--t-caret) steps(1) infinite;
+}
+
+@keyframes tail-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin='runtime'] .tool-row .tool-tail .tl { animation: none; }
+  html[data-skin='runtime'] .tool-row .tool-tail[data-variant='running'] .tl:last-child::after { animation: none; }
+}

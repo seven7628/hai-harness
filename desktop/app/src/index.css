@@ -12163,25 +12163,54 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 /* 运行中的输出尾巴（tail -f）——**只给人看**：命令仍在跑，模型什么都不知道
    （bash 照旧阻塞到结束才返回最终结果）。所以它可以尽情做「跟随」，代价只在渲染层。
-   固定高度 + 自动滚到底：日志看的是最新几行；等宽 + 不折行：对齐和缩进是信息的一部分。 */
+   形态照设计 v2 §18.2「Live output」：运行中的调用**不是一个新组件**，而是同一个终端的
+   另一种状态 —— 提示行（$ + 命令）、带刻度槽的输出行、脚注（窗口 4 KiB / 250 ms 一帧）。
+   几何在这里（两档皮肤共用），运行时皮肤的配色在 runtime-skin.css 里覆盖。 */
 .tool-row .tool-tail {
   margin: 2px 6px 6px 18px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--code-bg);
   overflow: hidden;
 }
-.tool-row .tool-tail .tt-hd {
+.tool-row .tool-tail .sh-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  font-size: 11px;
-  color: var(--text-3);
+  gap: 8px;
+  padding: 8px 12px 7px;
   border-bottom: 1px solid var(--border);
+  font: 400 11px/1 var(--font-mono);
+  color: var(--text-2);
 }
-.tool-row .tool-tail .tt-dot {
-  flex: 0 0 auto;
+.tool-row .tool-tail .sh-head .ps {
+  flex: none;
+  color: var(--text-3);
+}
+.tool-row .tool-tail .sh-head .sh-cmd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-row .tool-tail .sh-head .t {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tool-row .tool-tail .sh-head .t .sep {
+  opacity: 0.45;
+}
+/* 运行指示：一个会呼吸的点 + 一个词（不靠颜色单独承担「在跑」这件事） */
+.tool-row .tool-tail .mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tool-row .tool-tail .mark i {
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -12189,27 +12218,72 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   animation: tailPulse 1.2s ease-in-out infinite;
 }
 @keyframes tailPulse {
-  50% {
-    opacity: 0.25;
-  }
+  50% { opacity: 0.25; }
 }
-.tool-row .tool-tail .tt-bytes {
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
-.tool-row .tool-tail .tt-pre {
+.tool-row .tool-tail .sh-out--live {
   margin: 0;
-  padding: 6px 8px;
-  /* 7 行左右：再多会把人正在读的正文挤出屏幕（尾巴只是等待时的窗口） */
-  max-height: 126px;
+  padding: 9px 12px 10px;
+  /* 贴住底部：尾巴永远显示最新的几行，短命令也不会在顶部留一块空白 */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  height: auto;
+  /* 约 7 行：再多会把人正在读的正文挤出屏幕（尾巴只是等待时的窗口） */
+  max-height: 150px;
   overflow: auto;
   font-size: 11.5px;
-  line-height: 1.45;
-  white-space: pre;
+  line-height: 1.72;
   color: var(--text-2);
 }
+.tool-row .tool-tail .tl {
+  display: flex;
+  gap: 8px;
+  flex: none;
+  white-space: pre;
+}
+.tool-row .tool-tail .tl .tt {
+  flex: none;
+  /* 刻度槽固定宽度：行很长时数字也不会把正文挤得东倒西歪 */
+  min-width: 4.6ch;
+  text-align: right;
+  opacity: 0.5;
+}
+.tool-row .tool-tail .tl .tx {
+  min-width: 0;
+  white-space: pre;
+}
+.tool-row .tool-tail .tl[data-k='ok'] .tx { color: var(--success); }
+.tool-row .tool-tail .tl[data-k='warn'] .tx { color: var(--warning); }
+.tool-row .tool-tail .tl[data-k='err'] .tx { color: var(--error); }
+.tool-row .tool-tail .tl[data-k='dim'] .tx { color: var(--text-3); }
+.tool-row .tool-tail .well-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--border);
+  font: 400 11px/1.4 var(--font-mono);
+  color: var(--text-3);
+}
+.tool-row .tool-tail .well-foot .more {
+  margin-left: auto;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.tool-row .tool-tail .well-foot .more:hover {
+  color: var(--accent);
+}
+.tool-row .tool-tail .well-foot .more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
 @media (prefers-reduced-motion: reduce) {
-  .tool-row .tool-tail .tt-dot {
+  .tool-row .tool-tail .mark i {
+    animation: none;
+  }
+  .tool-row .tool-tail .tl {
     animation: none;
   }
 }

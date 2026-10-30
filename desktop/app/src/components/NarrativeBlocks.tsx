@@ -21,6 +21,7 @@ import { shortPath } from '../lib/shortPath'
 import { failureLine } from '../lib/failureLine'
 import { fmtMs, toolArgsSummary, toolMetric, toolVerb } from '../lib/toolSummary'
 import { useSkin } from '../lib/useSkin'
+import { bashCommandOf } from '../lib/toolSummary'
 import { FoldIcon } from './runtime/FoldIcon'
 import { toolFamily, fileTypeOf } from '../lib/palette'
 import { splitThinkingParagraphs } from '../lib/thinkingText'
@@ -380,7 +381,17 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
              折叠态 = 最后 8 条 + 「…N earlier calls」，展开态 = 全部 —— 组件自带折叠交互。 */}
       {/* 运行中的输出尾巴（tail -f）：**只给人看** —— bash 照旧阻塞到命令结束，
           模型只拿最终结果。文本是替换语义（后端每 250ms 一帧窗口），不做追加。 */}
-      {b.status === 'running' && b.liveTail && <ToolLiveTail text={b.liveTail} total={b.liveTotal} />}
+      {b.status === 'running' && b.liveTail && (
+        <ToolLiveTail
+          text={b.liveTail}
+          total={b.liveTotal}
+          cmd={b.args ? bashCommandOf(b.args) : undefined}
+          startedAt={b.startedAt}
+          // 「停止」只在真能停的时候画：只有被摘成后台任务（taskId）的调用能打断 ——
+          // 普通运行中的 bash 前端没有停止入口，画一个按不动的按钮比不画更糟。
+          {...(b.promoted && b.taskId ? { onStop: () => interruptTask(b.taskId!) } : {})}
+        />
+      )}
       {/* 0) 执行中：脚本控制台条（已用/预算 + 脚本内的调用点）。只有 codemode 有预算可画。 */}
       {isCodemode && b.status === 'running' && <ToolScriptRun script={scriptSrc} startedAt={b.startedAt} />}
       {/* 失败行：收缩态也必须看得见原因（规格 §5/§6）—— 只留一个 ✗ 不算「清晰」。

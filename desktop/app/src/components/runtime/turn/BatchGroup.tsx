@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { MsgBlock } from '../../../store/useAppStore'
 import { FoldIcon } from '../FoldIcon'
-import { batchRunningLine, batchStatus, failedCallLine } from './batch'
+import { batchRunningLine, batchStatus } from './batch'
 import { RichStats } from './RichStats'
 import './batch.css'
 
@@ -58,14 +58,10 @@ export const BatchGroup = memo(function BatchGroup({ line, calls, children }: { 
       <div className={'rt-collapse' + (open ? ' open' : '')}>
         <div>{children}</div>
       </div>
-      {/* 收缩态也要看得见失败：每条失败调用一行摘要（结果首行就是错误信息） */}
-      {!open && failed.length ? (
-        <div className="rt-batch-fails">
-          {failed.map((c) => (
-            <div className="rt-batch-fail mono" key={c.id}>✗ {failedCallLine(c)}</div>
-          ))}
-        </div>
-      ) : null}
+      {/* 失败不再另起一份摘要（2026-10 用户口径）：每条失败调用**自己**那行就带着
+          「✗ 原因」（ToolRow 的 .tool-err，原因走 lib/failureLine.ts）。组头已经有
+          「✗ N」说明这一组里有几处失败，再抄一遍原因行只是重复，还会在展开态和行内
+          那行并排出现（用户截图里就是这么读成"两条失败"的）。 */}
     </>
   )
 })

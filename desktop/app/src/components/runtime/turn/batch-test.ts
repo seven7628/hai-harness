@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { batchRunningLine, batchStatus, failedCallLine } from './batch'
+import { batchRunningLine, batchStatus } from './batch'
 
 const call = (o: Partial<{ status: 'running' | 'done'; isError: boolean; durMs: number; name: string; result: string }> = {}) => ({
   kind: 'tool' as const, id: 1, toolId: 't', name: o.name ?? 'read_file', status: o.status ?? 'done',
@@ -38,10 +38,4 @@ test('运行中的组头：总数 + 完成 + 运行中 + 失败 + 耗时', () =>
 
 test('单数说 tool call，不留个复数', () => {
   assert.match(batchRunningLine([call({ status: 'running' })] as never), /^1 tool call ·/)
-})
-
-test('失败行摘要：名字 + 结果首行，超长截断', () => {
-  assert.equal(failedCallLine(call({ name: 'bash', result: '\n\nboom: exit 1\nmore' }) as never), 'bash · boom: exit 1')
-  const long = failedCallLine(call({ name: 'bash', result: 'x'.repeat(400) }) as never)
-  assert.ok(long.length <= 130 && long.endsWith('…'))
 })

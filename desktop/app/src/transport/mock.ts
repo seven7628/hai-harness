@@ -2337,7 +2337,8 @@ class MockTransport implements Transport {
     }
     else if (/vue/.test(joined)) this.vueScript(sid, runId) // mock 钩子：读 .vue 组件（右侧文件栏高亮验证）
     else if (/readme/i.test(joined)) this.readmeScript(sid, runId) // mock 钩子：读项目 README（右侧 Markdown 预览 + 相对路径图片）
-    else if (/codemode|脚本编排|searchTools/i.test(joined)) this.codemodeScript(sid, runId) // mock 钩子：codemode 检索/执行两档（档位徽标 + 结果优先折叠）+ 失败档
+    else if (/codemode|脚本编排|searchTools/i.test(joined)) this.codemodeScript(sid, runId)
+    else if (/live output|运行中输出|尾巴|tail -f/i.test(joined)) this.tailScript(sid, runId) // mock 钩子：运行中的输出尾巴（tool_output 节流帧） // mock 钩子：codemode 检索/执行两档（档位徽标 + 结果优先折叠）+ 失败档
     else if (/html|网页预览/.test(joined)) this.htmlScript(sid, runId) // mock 钩子：输出 html 代码块（iframe 实时预览验证）
     else if (/写个网页|写html|write_html/.test(joined)) this.writeHtmlScript(sid, runId) // mock 钩子：write_file 落盘 .html（「打开」右侧浏览器验证）
     else if (/mermaid|流程图|架构图/.test(joined)) this.mermaidScript(sid, runId, /错误|坏/.test(joined)) // mock 钩子：输出 mermaid 图表（markdown 渲染验证）；含「错误/坏」→ 输出语法错误的图（错误回退验证）
@@ -2442,6 +2443,46 @@ class MockTransport implements Transport {
     }, sid)
     this.after(1960, () => this.emit({ event_type: 'agent_end', session_id: sid, run_id: runId, index: 1, content: 'README 预览已就绪', finish_reason: 'end', model: this.model, timestamp: ts() }), sid)
     this.after(2000, () => this.finishRun(sid), sid)
+  }
+
+  // ---------- 运行中输出尾巴（tool_output）：设计 v2 §18.2「Live output」 ----------
+  // 真 bridge 的口径：每 250 ms 一帧、每帧 ≤ 4 KiB、语义是**替换**（不是追加）。
+  // 这里按同样的节奏发 8 帧累积文本，让前端那条「贴底的窗口 + 逐行刻度槽」能被真数据驱动。
+  private tailScript(sid: string, runId: string): void {
+    const id = `call-tail-${Date.now()}`
+    this.llmTurn(0, {
+      think: ['跑一次带 -race 的集成测试：命令要跑几秒，期间只有输出尾巴能证明它活着。'],
+      stream: '先跑起来，边跑边看输出（尾巴只给人看，模型只拿最终结果）。',
+      endAt: 700,
+      end: { usage: { Input: 1800, Output: 48, CacheRead: 1600, CacheWrite: 0 }, finish_reason: 'tool_calls' },
+    }, sid)
+    this.toolStart(id, 'bash', JSON.stringify({ command: 'go test ./internal/run -race' }), runId, 800, sid)
+    const frames = [
+      '+0.18 === RUN   TestCheckpointResume',
+      '+1.02 WARN  checkpoint encode took 412ms',
+      '+1.24 --- PASS: TestCheckpointResume (0.84s)',
+      '+1.26 === RUN   TestMergeConcurrentFlush',
+      '+2.08 FAIL  merge: peak rss 452MB > 256MB',
+      '+2.11 === RUN   TestCheckpointResume/rotate',
+      '+2.86 --- PASS: TestCheckpointResume/rotate',
+      '+3.02 ok    internal/run  3.02s',
+    ]
+    let acc = ''
+    frames.forEach((line, i) => {
+      acc = acc ? `${acc}\n${line}` : line
+      const tail = acc
+      const total = new TextEncoder().encode(tail).length
+      this.after(1000 + i * 250, () => this.emit({
+        event_type: 'tool_output', session_id: sid, id, run_id: runId,
+        seq: i + 1, tail, total_bytes: total, truncated: false, timestamp: ts(),
+      }), sid)
+    })
+    this.toolEnd(id, 'bash', 'ok  internal/run  3.02s\n--- PASS: TestCheckpointResume', runId, 1000 + frames.length * 250 + 240, sid)
+    this.llmTurn(1000 + frames.length * 250 + 400, {
+      stream: '测试跑完了：`TestCheckpointResume` 与它的 rotate 子用例都过，`TestMergeConcurrentFlush` 因为峰值内存超限失败。',
+      endAt: 1000 + frames.length * 250 + 1400,
+      end: { usage: { Input: 2400, Output: 96, CacheRead: 2200, CacheWrite: 0 }, finish_reason: 'stop' },
+    }, sid)
   }
 
   // ---------- codemode 钩子：脚本编排行（档位徽标 + 结果优先折叠） ----------
