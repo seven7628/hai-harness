@@ -74,6 +74,10 @@ export interface ExternalSkillsImportResult {
   imported: ExternalSkillImport[]
 }
 
+// 文件树写操作的统一回复形状（与 electron/fs-ops.ts 的 FsOpResult 同构）。
+// code 是给渲染层分流用的（EXISTS 同名冲突 / DENIED 越界或受保护 / INVALID_NAME …）。
+export type FsOpReply = { ok: boolean; path?: string; error?: string; code?: string }
+
 contextBridge.exposeInMainWorld('desktop', {
   startupMark: (phase: string) => ipcRenderer.invoke('startup-mark', phase),
   pickWorkspace: () => ipcRenderer.invoke('pick-workspace'),
@@ -107,6 +111,20 @@ contextBridge.exposeInMainWorld('desktop', {
   // 与 fsReadRef 同类（渲染进程给路径、主进程读盘），但只读图片、回 data URL 给 <img> 用。
   fsReadImage: (req: { path: string; workspace: string }) => ipcRenderer.invoke('fs:read-image', req) as Promise<{ ok: boolean; dataUrl?: string; mime?: string; error?: string }>,
   fsStat: (p: string) => ipcRenderer.invoke('fs:stat', p) as Promise<{ ok: boolean; size?: number; isFile?: boolean; error?: string }>,
+  // 文件树写操作（左栏「工作区文件」的文件夹管理）。workspace 随 payload 注入 → 主进程
+  // 据此把作用域限死在当前工作区内（见 electron/fs-ops.ts）；path = 结果绝对路径。
+  // 六个动作共用一个回复形状，渲染层只需一处错误处理。
+  fsRename: (p: { workspace: string; path: string; name: string }) => ipcRenderer.invoke('fs:rename', p) as Promise<FsOpReply>,
+  fsMove: (p: { workspace: string; src: string; destDir: string }) => ipcRenderer.invoke('fs:move', p) as Promise<FsOpReply>,
+  fsMkdir: (p: { workspace: string; dir: string; name: string }) => ipcRenderer.invoke('fs:mkdir', p) as Promise<FsOpReply>,
+  fsCreateFile: (p: { workspace: string; dir: string; name: string }) => ipcRenderer.invoke('fs:create-file', p) as Promise<FsOpReply>,
+  fsDuplicate: (p: { workspace: string; path: string }) => ipcRenderer.invoke('fs:duplicate', p) as Promise<FsOpReply>,
+  fsCopy: (p: { workspace: string; src: string; destDir: string }) => ipcRenderer.invoke('fs:copy', p) as Promise<FsOpReply>,
+  // 从访达拖入：一次性导入多个源，逐个报告失败（同名不阻断其它文件）。
+  fsImport: (p: { workspace: string; destDir: string; sources: string[] }) =>
+    ipcRenderer.invoke('fs:import', p) as Promise<{ ok: boolean; imported: string[]; failed: { name: string; error: string }[] }>,
+  // 删除 = 移进系统废纸篓（shell.trashItem，可恢复）；二次确认由渲染层弹。
+  fsTrash: (p: { workspace: string; path: string }) => ipcRenderer.invoke('fs:trash', p) as Promise<FsOpReply>,
   // 无 opts 时保持既有返回（string | null）；opts.multi 时返回 string[]（取消 → []）。
   pickFsFile: (opts?: { multi?: boolean; filters?: { name: string; extensions: string[] }[] }) =>
     ipcRenderer.invoke('fs:pick-file', opts) as Promise<string | null | string[]>,

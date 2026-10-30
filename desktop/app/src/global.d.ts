@@ -1,4 +1,4 @@
-import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult } from './transport/types'
+import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply } from './transport/types'
 
 export {}
 
@@ -34,6 +34,15 @@ declare global {
       // 与 fsReadRef 同类（渲染进程给路径、主进程读盘），但只读图片、回 data URL 给 <img> 用。
       fsReadImage: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; dataUrl?: string; mime?: string; error?: string }>
       fsStat: (p: string) => Promise<{ ok: boolean; size?: number; isFile?: boolean; error?: string }>
+      // 文件树写操作（左栏「工作区文件」）：与 Transport 同名方法一一对应，见 transport/types.ts。
+      fsRename: (p: { workspace: string; path: string; name: string }) => Promise<FsOpReply>
+      fsMove: (p: { workspace: string; src: string; destDir: string }) => Promise<FsOpReply>
+      fsMkdir: (p: { workspace: string; dir: string; name: string }) => Promise<FsOpReply>
+      fsCreateFile: (p: { workspace: string; dir: string; name: string }) => Promise<FsOpReply>
+      fsDuplicate: (p: { workspace: string; path: string }) => Promise<FsOpReply>
+      fsCopy: (p: { workspace: string; src: string; destDir: string }) => Promise<FsOpReply>
+      fsImport: (p: { workspace: string; destDir: string; sources: string[] }) => Promise<FsImportReply>
+      fsTrash: (p: { workspace: string; path: string }) => Promise<FsOpReply>
       pickFsFile: (opts?: { multi?: boolean; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null | string[]>
       pickFsDir: () => Promise<string | null>
       // 拖拽/选择得到的 File → 磁盘路径（JS 构造的 File 返回空串）

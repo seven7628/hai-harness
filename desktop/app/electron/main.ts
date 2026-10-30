@@ -16,6 +16,8 @@ import { isMainWindowPermissionAllowed } from './permission-policy'
 import { isSensitiveFsPath } from './fs-guard'
 // Markdown 预览的本地图片：绝对路径 → data URL（README 里的 <img src="brand/x.svg">）
 import { readImageAsDataUrl } from './read-image'
+// 文件树写操作（重命名/移动/新建/复制副本）：守卫与实现同源，见 fs-ops.ts
+import { copyEntry, createDir, createFile, duplicateEntry, guardTrash, importEntry, moveEntry, renameEntry } from './fs-ops'
 
 let mainWindow: BrowserWindow | null = null
 let bridge: ChildProcessWithoutNullStreams | null = null
@@ -1127,6 +1129,53 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   })
   // 引用附件的体积展示（Composer 文档附件条用「文件名 + 大小」）。只读 stat，不读内容。
   ipcMain.handle('fs:stat', (_e, p: string) => fsStat(p))
+  // —— 文件树写操作（左栏「工作区文件」的文件夹管理，实现与守卫见 fs-ops.ts）——
+  // 全部 async（fs-ops 对外统一返回 Promise）：O(1) 的 rename/mkdir 立刻返回，
+  // O(bytes) 的拷贝（副本/拷贝到别处/跨卷移动/访达导入）走 fs.promises.cp 分块流式 ——
+  // 大目录不会再占住主进程（此前用 cpSync 时窗口输入与其它 IPC 会一起迟滞）。
+  // workspace 由渲染层随 payload 注入（与 fs:read-ref 同口径），主进程据此做包含判断 ——
+  // 文件树的作用域就是用户眼前这棵树，写操作不允许越出它。
+  ipcMain.handle('fs:rename', (_e, p: { workspace: string; path: string; name: string }) =>
+    renameEntry(p?.workspace ?? '', p?.path ?? '', p?.name ?? '', cfgDir()))
+  ipcMain.handle('fs:move', (_e, p: { workspace: string; src: string; destDir: string }) =>
+    moveEntry(p?.workspace ?? '', p?.src ?? '', p?.destDir ?? '', cfgDir()))
+  ipcMain.handle('fs:mkdir', (_e, p: { workspace: string; dir: string; name: string }) =>
+    createDir(p?.workspace ?? '', p?.dir ?? '', p?.name ?? '', cfgDir()))
+  ipcMain.handle('fs:create-file', (_e, p: { workspace: string; dir: string; name: string }) =>
+    createFile(p?.workspace ?? '', p?.dir ?? '', p?.name ?? '', cfgDir()))
+  // 从访达拖入：源在工作区外，逐个拷进 destDir（一个 IPC 处理整批，避免 N 次往返）。
+  // 逐个报告失败而不是整批失败：拖 5 个进来、其中 1 个同名，另外 4 个应该照样进去。
+  ipcMain.handle('fs:import', async (_e, p: { workspace: string; destDir: string; sources: string[] }) => {
+    const ws = p?.workspace ?? ''
+    const destDir = p?.destDir ?? ''
+    const sources = Array.isArray(p?.sources) ? p.sources : []
+    const imported: string[] = []
+    const failed: { name: string; error: string }[] = []
+    for (const src of sources) {
+      // 逐个 await：源可能很大，并发拷反而拖慢磁盘；也让失败报告的顺序与拖入顺序一致。
+      const r = await importEntry(ws, destDir, src, cfgDir())
+      if (r.ok && r.path) imported.push(r.path)
+      else failed.push({ name: String(src).split('/').pop() || String(src), error: r.error ?? '导入失败' })
+    }
+    return { ok: true, imported, failed }
+  })
+  ipcMain.handle('fs:copy', (_e, p: { workspace: string; src: string; destDir: string }) =>
+    copyEntry(p?.workspace ?? '', p?.src ?? '', p?.destDir ?? '', cfgDir()))
+  ipcMain.handle('fs:duplicate', (_e, p: { workspace: string; path: string }) =>
+    duplicateEntry(p?.workspace ?? '', p?.path ?? '', cfgDir()))
+  // 删除 = 移进系统废纸篓（可恢复，与 Cmd+Delete 的 Mac 口径一致），**不做 rm**。
+  // 二次确认由渲染层弹（ConfirmModal），主进程只负责守卫 + 动作：IPC 也可能被将来的
+  // 快捷键/菜单复用，把「确认」放主进程会让 e2e 与非交互调用都无法绕开。
+  ipcMain.handle('fs:trash', async (_e, p: { workspace: string; path: string }) => {
+    const g = guardTrash(p?.workspace ?? '', p?.path ?? '', cfgDir())
+    if (!g.ok || !g.path) return g
+    try {
+      await shell.trashItem(g.path)
+    } catch (e) {
+      return { ok: false, error: (e as Error).message, code: 'IO' }
+    }
+    return { ok: true, path: g.path }
+  })
   ipcMain.handle('fs:pick-dir', async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender) ?? undefined
     const r = win ? await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }) : await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })

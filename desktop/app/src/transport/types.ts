@@ -342,6 +342,27 @@ export interface ExternalSkillsImportResult {
   imported: ExternalSkillImport[]
 }
 
+/**
+ * 文件树写操作的统一回复（与 electron/fs-ops.ts 的 FsOpResult 同构）。
+ * code 供渲染层分流：EXISTS（同名冲突）/ DENIED（越界或受保护）/ INVALID_NAME / NOT_FOUND / IS_ROOT / CYCLE / IO。
+ */
+/**
+ * 批量导入的回复：imported = 落地后的绝对路径；failed 带原始 name（源文件名）与原因。
+ * 与 FsOpReply 分开是因为「部分成功」是这条通路的正常结果，不是错误。
+ */
+export interface FsImportReply {
+  ok: boolean
+  imported: string[]
+  failed: { name: string; error: string }[]
+}
+
+export interface FsOpReply {
+  ok: boolean
+  path?: string
+  error?: string
+  code?: string
+}
+
 export interface FsListResult {
   ok: boolean
   path: string // 请求浏览的目录（绝对路径）
@@ -388,6 +409,25 @@ export interface Transport {
   fsReadImage(req: { path: string; workspace: string }): Promise<FsImageResult>
   /** 单路径元信息（引用附件条展示文件名 + 大小；不读内容）。 */
   fsStat(p: string): Promise<{ ok: boolean; size?: number; isFile?: boolean; error?: string }>
+  // —— 文件树写操作（左栏「工作区文件」的文件夹管理）——
+  // 作用域：源与目标都必须落在 workspace 内（主进程 realpath 包含判断，见 electron/fs-ops.ts）。
+  // 同名冲突一律**拒绝**（code=EXISTS），不自动改名、不弹覆盖询问 —— 产品口径。
+  // 全部返回结果绝对路径（path），供调用方选中/重载目录。
+  fsRename(req: { workspace: string; path: string; name: string }): Promise<FsOpReply>
+  fsMove(req: { workspace: string; src: string; destDir: string }): Promise<FsOpReply>
+  fsMkdir(req: { workspace: string; dir: string; name: string }): Promise<FsOpReply>
+  fsCreateFile(req: { workspace: string; dir: string; name: string }): Promise<FsOpReply>
+  /** 复制副本：a.go → a copy.go（副本名由我们生成，冲突自动递增）。 */
+  fsDuplicate(req: { workspace: string; path: string }): Promise<FsOpReply>
+  /** 拷贝到另一个目录（⌘C/⌘V）：同名 → EXISTS（与移动同一口径，不自动改名）。 */
+  fsCopy(req: { workspace: string; src: string; destDir: string }): Promise<FsOpReply>
+  /**
+   * 从访达拖入：把工作区外的文件/目录拷进 destDir。
+   * 逐个报告失败（同名只挡那一个，不整批中断）；敏感目录与配置目录的源一律拒绝。
+   */
+  fsImport(req: { workspace: string; destDir: string; sources: string[] }): Promise<FsImportReply>
+  /** 删除 = 移进系统废纸篓（可恢复）。二次确认由调用方弹。 */
+  fsTrash(req: { workspace: string; path: string }): Promise<FsOpReply>
   /**
    * 原生「选择文件」单选（工作区外引用）：取消 → null。既有调用方（FileRefPanel）语义不变。
    */

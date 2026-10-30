@@ -10098,6 +10098,160 @@ select.prov-input option {
   color: var(--danger, #e06c6c);
 }
 
+/* ============ 文件树的文件夹管理（2026-10）============
+   选中 / 拖动 / 投放 / 内联输入 四态。配色只用既有语义 token（--accent / --accent-weak /
+   --accent-border），纸墨两套主题自动跟随；不引新的硬编码颜色。
+   四态必须**互不混淆**，因为同一行可能同时是「打开的文件」和「选中项」：
+     .active = 文件面板正在展示这个文件（弱底 + 主色文字，来自既有样式）
+     .sel    = 键盘/鼠标选中（同一弱底 + 1px 主色描边，可叠加在 .active 上）
+     .dz     = 拖动投放目标（实线 1.5px 主色 + 更实的底）
+     .pending= 操作进行中（淡出，且不吃点击，避免重复提交） */
+
+.lf-row.sel {
+  background: var(--accent-weak);
+  color: var(--text-1);
+}
+/* 锚点行（最后点的那一行）才有描边：多选 4 行时每行都描边会看成一摞卡片，
+   而访达/VS Code 的选中都是「整块底色」。锚点带描边还兼作「键盘当前行」的指示。 */
+.lf-row.sel.sel-primary {
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+.lf-row.sel.sel-primary.active {
+  /* 选中 + 正在展示：底色相同，用描边区分，避免叠成一块看不出来的深色 */
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.lf-row.pending {
+  opacity: 0.45;
+  pointer-events: none;
+}
+.lf-row.dragging {
+  opacity: 0.45;
+}
+/* 投放高亮：整行都要亮起来（不只是名字），否则「拖到哪」在窄面板里看不准 */
+.lf-row.dz {
+  background: var(--accent-weak);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  color: var(--text-1);
+}
+/* 「移入」角标：光环只说明「有东西被指着」，这个词说明「东西要**进去**」——
+   与选中态（同样有环，窄栏里几乎看不出粗细差别）区分开，拖动时不会看错目标。 */
+.lf-dz-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--accent-weak);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+  font-size: 10px;
+  line-height: 1.5;
+}
+/* 被拖起的那一行即使同时是选中项，也不再画选中环：它已经「在手上」了，
+   留着环会让人误以为它是投放目标。 */
+.lf-row.dragging.sel {
+  box-shadow: none;
+}
+/* 文件名是唯一的弹性项：给了 min-width:0 才会真的出现省略号（默认 min-width:auto 时
+   长名字会把行撑出去被 .lf-tree 硬裁，看起来就是"名字被切掉一截"）。 */
+.lf-nm {
+  flex: 1;
+  min-width: 0;
+}
+.lf-row.dz .lf-ic,
+.lf-row.dz .lf-chev {
+  color: var(--accent);
+}
+/* 拖到列表空白处 = 移到工作区根目录：给整棵树一层虚线框，比任何一行的高亮都更"外" */
+.lf-tree.dz-root {
+  /* 虚线 = 「这是一块区域」，实线（.lf-row.dz）= 「这一个条目」——两种投放语义在视觉上分开 */
+  outline: 1.5px dashed var(--accent);
+  outline-offset: -2px;
+  border-radius: 8px;
+  /* 直接用 --accent-weak（本身就是低透明度底）：再叠一层 color-mix 会把纸墨主题的
+     0.09 透明度乘成 0.04，浅色下等于看不见。 */
+  background: var(--accent-weak);
+}
+/* 树容器可聚焦（tabIndex=0，键盘导航的落点）：默认轮廓在窄栏里会糊住行首，
+   点到行上时也不该出现焦点框 —— 只在键盘聚焦时给一条内描边。 */
+.lf-tree:focus {
+  outline: none;
+}
+.lf-tree:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.lf-tree.dz-root:focus-visible {
+  outline: 1.5px dashed var(--accent);
+}
+/* 内联重命名 / 新建输入框：看起来像「行里的文字」，不是表单控件。
+   高度与 .lf-nm 一致（不撑高行），焦点框用 1px 主色 —— 与选中态同色系但更亮。 */
+.lf-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0 3px;
+  margin: -1px 0;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-1);
+  font-size: 12.5px;
+  font-family: inherit;
+  line-height: 1.5;
+  outline: none;
+}
+.lf-row.new .lf-ic {
+  color: var(--text-3);
+}
+/* 拖拽时贴底的一条提示（sticky：树可滚动，绝对定位会随滚动跑掉） */
+.lf-drop-hint {
+  position: sticky;
+  bottom: 0;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--accent-weak);
+  color: var(--text-1);
+  font-size: 11px;
+  text-align: center;
+  pointer-events: none;
+}
+.lf-refresh:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.lf-refresh:disabled:hover {
+  background: transparent;
+  color: var(--text-3);
+}
+/* 菜单的键盘焦点：↑↓ 在菜单项之间移动时必须有可见落点（否则「按了没反应」）。
+   只在键盘操作时出现（:focus-visible），鼠标点击不会留下焦点环。 */
+.lf-menu .ctx-item:focus {
+  outline: none;
+}
+.lf-menu .ctx-item:focus-visible {
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+.lf-menu .ctx-item.danger:focus-visible {
+  color: var(--crimson);
+}
+
+/* 右键菜单：复用全局 .ctx-menu/.ctx-item（标签右键菜单同款），只补两处文件树特有样式 */
+.ctx-item .ctx-hint {
+  margin-left: auto;
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.ctx-menu .ctx-item.danger:hover {
+  background: color-mix(in srgb, var(--crimson) 14%, transparent);
+  color: var(--crimson);
+}
+
 /* ============ 模型提问面板（ask_user 批次，HITL 反方向） ============
    2026-09-20 起是**停靠面板**（此前是全屏 `.modal-hint` scrim）：停在叙述区与输入框之间，
    叙述区只被压矮、照常滚动/选中 —— 用户要能边翻历史边决定怎么答（用户报障 + DESKTOP_HANDOFF §5 #12）。
