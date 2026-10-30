@@ -1,4 +1,5 @@
 import { FileIcon } from '../../icons'
+import { shortPath } from '../../../lib/shortPath'
 import './files-line.css'
 
 /* 这一轮改了哪个文件：一行，带框。设计里它与「视觉产出」是两种东西 ——
@@ -34,8 +35,9 @@ export function FilesLine({
       }}
     >
       <FileIcon size={13} />
+      {/* 长路径先短掉，否则 +N −N 被挤出可视区（用户 2026-10）；完整路径在 title 里 */}
       <span className="n" title={path}>
-        {path}
+        {shortPath(path)}
       </span>
       <span className="cy-dstat">
         <span className="p">+{added}</span>

@@ -146,5 +146,11 @@ html[data-skin='runtime'] {
   --tone-fact: var(--ink-3);
   --tone-attention: var(--amber);
   --tone-danger: var(--red);
+  /* 时间是有身份的数字（用户 2026-10：所有计时信息给一个与主题搭配的颜色）：
+     由主题的 indigo 压低饱和度混进 ink-3 —— 一眼是「这是耗时」，又不抢正文字色。
+     +/− 变更量直接复用语义色，与工具行、文件页签的 add/del 同一对。 */
+  --tone-time: color-mix(in oklab, var(--indigo) 45%, var(--ink-3));
+  --tone-add: var(--green);
+  --tone-del: var(--red);
   --tone-ok: var(--green);
 }

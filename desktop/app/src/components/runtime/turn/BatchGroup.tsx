@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import type { MsgBlock } from '../../../store/useAppStore'
 import { FoldIcon } from '../FoldIcon'
 import { batchRunningLine, batchStatus, failedCallLine } from './batch'
+import { RichStats } from './RichStats'
 import './batch.css'
 
 type Tool = Extract<MsgBlock, { kind: 'tool' }>
@@ -50,7 +51,7 @@ export const BatchGroup = memo(function BatchGroup({ line, calls, children }: { 
           toggle()
         }}
       >
-        <span className="rt-batch-t">{head}</span>
+        <span className="rt-batch-t"><RichStats text={head} /></span>
         {failed.length ? <span className="rt-batch-x" aria-label={`${failed.length} failed`}>✗ {failed.length}</span> : null}
         <FoldIcon open={open} />
       </button>

@@ -602,7 +602,7 @@ html[data-skin='runtime'] .pop.model-pop .hint.pop-foot {
    ③ 拖拽（.p-drop）：虚线强调边 + 28px 图标块 + 粗体标题 + mono 说明。
    这三样都是**交互态**，只在运行时这档皮肤下生效，另两档仍是原来的样子。 */
 html[data-skin='runtime'] .composer[data-live] {
-  border-color: color-mix(in oklab, var(--accent) 28%, var(--line));
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--line));
   animation: rt-p-breathe var(--t-ring) var(--ease) infinite;
 }
 
@@ -613,7 +613,7 @@ html[data-skin='runtime'] .composer[data-live]::after {
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
-  box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 40%, transparent);
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 70%, transparent);
   animation: rt-p-ring var(--t-ring) var(--ease-out) infinite;
   opacity: 0;
 }
@@ -621,14 +621,31 @@ html[data-skin='runtime'] .composer[data-live]::after {
 html[data-skin='runtime'] .composer[data-live]::after { animation-delay: var(--t-ring-gap); }
 
 @keyframes rt-p-ring {
-  0% { opacity: 0; box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 34%, transparent); }
-  14% { opacity: 0.62; }
-  100% { opacity: 0; box-shadow: 0 0 0 11px color-mix(in oklab, var(--accent) 0%, transparent); }
+  0% {
+    opacity: 0;
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 70%, transparent),
+      0 0 22px 2px color-mix(in oklab, var(--accent) 34%, transparent);
+  }
+  14% { opacity: 1; }
+  100% {
+    opacity: 0;
+    box-shadow: 0 0 0 22px color-mix(in oklab, var(--accent) 0%, transparent),
+      0 0 30px 8px color-mix(in oklab, var(--accent) 0%, transparent);
+  }
 }
 
+/* 盒子自己也在呼吸：内侧一圈 accent 亮边 + 外侧软光，两层一起跳动，
+   才能在深色底上看出「它在动」（只靠 3px/6% 的描边，屏幕上几乎看不见）。 */
 @keyframes rt-p-breathe {
-  0%, 100% { box-shadow: 0 0 0 0 transparent; }
-  50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 6%, transparent); }
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 18%, transparent),
+      0 0 12px 0 color-mix(in oklab, var(--accent) 10%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 42%, transparent),
+      0 0 26px 4px color-mix(in oklab, var(--accent) 26%, transparent);
+  }
 }
 
 /* 发送/停止键 = 设计 .send（ui.components.css:465-475）：28px、r8、accent 面、
@@ -1818,4 +1835,40 @@ html[data-skin='runtime'] .rt-turn[data-open] .msg,
 html[data-skin='runtime'] .rt-turn .msg:has(.rt-caret) {
   content-visibility: visible;
   contain-intrinsic-size: auto none;
+}
+
+/* ---------------------------------------------------------------------------
+   数字的身份色（用户 2026-10）
+   +N 绿 / −N 红 = 与工具行、文件页签完全同一对令牌；计时统一 --tone-time。
+   三个类由 runtime/turn/RichStats.tsx 打在一行统计里的数字上。
+   ------------------------------------------------------------------------ */
+html[data-skin='runtime'] :is(.rt-add, .rt-time, .rt-del) {
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-skin='runtime'] .rt-add {
+  color: var(--tone-add);
+}
+
+html[data-skin='runtime'] .rt-del {
+  color: var(--tone-del);
+}
+
+html[data-skin='runtime'] .rt-time {
+  color: var(--tone-time);
+}
+
+/* 工具行里的计时列、思考行的耗时、运行面板的时钟：同一支颜色 */
+html[data-skin='runtime'] .tool-row .dur {
+  color: var(--tone-time);
+}
+
+html[data-skin='runtime'] .cy-live-head .lv-clock {
+  color: var(--tone-time);
+}
+
+/* 所有 ElapsedTimer（思考行、子会话时长、工具行、任务卡）同一支计时色 */
+html[data-skin='runtime'] .elapsed {
+  color: var(--tone-time);
+  font-variant-numeric: tabular-nums;
 }

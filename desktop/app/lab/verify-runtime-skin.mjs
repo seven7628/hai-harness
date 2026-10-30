@@ -126,6 +126,54 @@ check('live: two rings, staggered 2.3s', live?.ring === 'rt-p-ring' && live?.rin
 check('live: the stop key turns quiet red', live?.stop === true && live?.stopShadow?.includes('inset'), `${live?.stopBg} ${live?.stopShadow}`)
 check('live: send/stop key is 28px', live?.size?.[0] === 28 && live?.size?.[1] === 28, JSON.stringify(live?.size))
 
+// 光晕要**看得出来**（用户 2026-10：外围光晕不够明显、闪烁看不太出来）。
+// 判据不是「有动画」（上面已经验过），而是动画过程中真能达到的扩散/亮度：
+// 采样若干帧，取 box-shadow 里最大的扩散半径与最高不透明度。
+const glow = await page.eval(async () => {
+  const el = document.querySelector('.composer[data-live]')
+  if (!el) return { present: false }
+  let maxSpread = 0
+  let maxAlpha = 0
+  const nums = (s) => (s.match(/-?\d*\.?\d+px/g) || []).map((x) => Math.abs(parseFloat(x)))
+  // 颜色的序列化形式随令牌而定：rgba(...) / color(srgb … / a) / oklab(… / a)。
+  // 统一按「最后一个 / 之后是 alpha」取，rgba 的第 4 个参数另算。
+  const alphas = (str) => {
+    const out = []
+    for (const m of str.matchAll(/(?:rgba?|oklab|oklch|lab|lch|color)\(([^)]*)\)/g)) {
+      const body = m[1]
+      const slash = body.split('/')
+      if (slash.length > 1) {
+        const a = parseFloat(slash[1])
+        if (!Number.isNaN(a)) out.push(a)
+      } else {
+        const parts = body.split(',').map((x) => x.trim())
+        if (parts.length > 3) {
+          const a = parseFloat(parts[3])
+          if (!Number.isNaN(a)) out.push(a)
+        } else out.push(1)
+      }
+    }
+    return out
+  }
+  // 有效亮度 = 阴影颜色的 alpha × 该层自己的 opacity（::before 的 0→1 是另一段动画）。
+  // 采样 34 帧 × 70ms ≈ 一个完整周期，避开「刚好采在 0 上」。
+  for (let i = 0; i < 34; i++) {
+    const layers = [
+      { shadow: getComputedStyle(el).boxShadow, opacity: 1 },
+      { shadow: getComputedStyle(el, '::before').boxShadow, opacity: parseFloat(getComputedStyle(el, '::before').opacity) || 0 },
+      { shadow: getComputedStyle(el, '::after').boxShadow, opacity: parseFloat(getComputedStyle(el, '::after').opacity) || 0 },
+    ]
+    for (const layer of layers) {
+      for (const v of nums(layer.shadow)) maxSpread = Math.max(maxSpread, v)
+      for (const a of alphas(layer.shadow)) maxAlpha = Math.max(maxAlpha, a * layer.opacity)
+    }
+    await new Promise((r) => setTimeout(r, 70))
+  }
+  return { present: true, maxSpread, maxAlpha, sample: getComputedStyle(el).boxShadow.slice(0, 160), ring: getComputedStyle(el, '::before').boxShadow.slice(0, 120) }
+})
+check('live: the glow actually reaches out (max spread ≥ 8px)', glow.present === true && glow.maxSpread >= 8, JSON.stringify(glow))
+check('live: and it is visible, not a whisper (effective alpha ≥ 0.45)', glow.present === true && glow.maxAlpha >= 0.45, JSON.stringify(glow))
+
 await wait(13000)
 
 const t1 = await page.eval(() => {
@@ -306,6 +354,29 @@ check('table: the last row has no hairline under it', tb?.lastTd.borderBottomWid
 check('table: numeric columns are right-aligned with tabular figures',
   tb?.thN.textAlign === 'right' && tb?.tdN.textAlign === 'right' && tb.tdN.fontVariantNumeric === 'tabular-nums',
   JSON.stringify({ th: tb?.thN.textAlign, td: tb?.tdN.textAlign, fv: tb?.tdN.fontVariantNumeric }))
+
+// ---- 数字的身份色：+N 绿 / −N 红 / 计时一支色 ---------------------------------
+// 用户 2026-10：文件变更要红绿对应（与工具行一致），所有计时信息要有一个与主题搭配的颜色。
+// 用页面里的同构夹具量计算值：颜色令牌与 --md-measure 那样由浏览器自己换算成 rgb。
+const tone = await page.eval(() => {
+  const host = document.createElement('div')
+  host.innerHTML = '<span class="rt-add">+96</span><span class="rt-del">−3</span><span class="rt-time">17 ms</span>'
+  const probe = document.createElement('i')
+  probe.style.color = 'var(--tone-add)'
+  document.body.appendChild(probe)
+  const add = getComputedStyle(probe).color
+  probe.style.color = 'var(--tone-del)'
+  const del = getComputedStyle(probe).color
+  probe.style.color = 'var(--tone-time)'
+  const time = getComputedStyle(probe).color
+  probe.remove()
+  document.body.appendChild(host)
+  const [a, d, t] = [...host.children].map((el) => getComputedStyle(el).color)
+  host.remove()
+  return { a, d, t, add, del, time }
+})
+check('numbers: additions are green and deletions red (same tokens as the tool rows)', tone.a === tone.add && tone.d === tone.del && tone.a !== tone.d, JSON.stringify(tone))
+check('numbers: timings carry one identity colour from the theme', tone.t === tone.time && tone.t !== tone.a && tone.t !== tone.d, JSON.stringify({ t: tone.t, time: tone.time }))
 
 // ---- 跟随/暂停：上滚即停、提示可点 -------------------------------------------
 // 规格：用户向上滚动后立即暂停自动跟随，并给出明确的 Jump to latest 提示；

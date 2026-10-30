@@ -17,6 +17,7 @@ import type { CompressionInfo, Diff, QueuedContent, ToolErrorInfo, TodoItem, Usa
 import { Markdown } from './markdown'
 import { Bot, CheckList, FileIcon, PencilIcon, PlayIcon, SearchIcon, Sparkles, TerminalIcon } from './icons'
 import { fmtUsd, UsageChip, UnifiedDiff } from './ui'
+import { shortPath } from '../lib/shortPath'
 import { fmtMs, toolArgsSummary, toolMetric, toolVerb } from '../lib/toolSummary'
 import { useSkin } from '../lib/useSkin'
 import { FoldIcon } from './runtime/FoldIcon'
@@ -282,7 +283,9 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
                   }
                 }}
               >
-                {scriptLine || summary}
+                {/* 超长路径先收成 `…/最后两段`：完整路径在 title 里（点击也用它），
+                    这里只保证度量与耗时留在可视区（用户 2026-10） */}
+                {scriptLine || (path ? shortPath(summary) : summary)}
               </span>
             )}
           </>

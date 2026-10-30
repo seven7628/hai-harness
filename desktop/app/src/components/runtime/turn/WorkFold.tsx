@@ -1,6 +1,7 @@
 import { Face } from '../Face'
 import { FoldIcon } from '../FoldIcon'
 import { durText, type TurnStats } from './selectTurns'
+import { RichStats } from './RichStats'
 import './work-fold.css'
 
 /* One dim line that answers "did it do anything, and how much" without opening
@@ -40,8 +41,8 @@ export function WorkFold({
     >
       <Face state={running ? 'run' : open ? 'engaged' : 'done'} />
       <span className="rt-act-t">
-        {dur ? <><span className="rt-act-k">{label}</span> <b>{dur}</b></> : <span className="rt-act-k">{running ? 'Working' : 'Worked'}</span>}
-        {parts.length ? <span className="rt-act-rest">{' \u00b7 '}{parts.join(' \u00b7 ')}</span> : null}
+        {dur ? <><span className="rt-act-k">{label}</span> <b className="rt-time">{dur}</b></> : <span className="rt-act-k">{running ? 'Working' : 'Worked'}</span>}
+        {parts.length ? <span className="rt-act-rest"><RichStats text={' \u00b7 ' + parts.join(' \u00b7 ')} /></span> : null}
       </span>
       <FoldIcon open={open} />
     </button>
