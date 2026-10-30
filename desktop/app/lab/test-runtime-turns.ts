@@ -106,6 +106,29 @@ test('a receipt is folded into the working phase, not left outside', () => {
   assert.deepEqual(inside, ['task_delivery', 'system'])
 })
 
+test('a signal row stays outside the working box, running or settled', () => {
+  // 一行信号是「关于这次运行的记录」：折进 WorkBox 就等于把它藏了 —— 它存在的理由
+  // 正是让转录不会在没有说明的情况下突然安静。运行中也必须露在盒子外面。
+  const sig = { kind: 'signal', id: 4, fact: { sig: 'memory', etype: 'memory_activity', n: 2 } } as unknown as MsgBlock
+  const settled = [
+    { kind: 'user', id: 1, text: 'q' },
+    { kind: 'tool', id: 2, toolId: 'x', name: 'grep', status: 'done' },
+    sig,
+    { kind: 'assistant', id: 3, text: 'the answer', thinking: '', streaming: false },
+  ] as unknown as MsgBlock[]
+  const [t1] = selectTurns(settled)
+  assert.deepEqual(foldedBody(t1).map((b) => b.id), [4, 3])
+  assert.deepEqual(workBody(t1).map((b) => b.id), [2])
+
+  const live = [
+    { kind: 'user', id: 1, text: 'q' },
+    { kind: 'assistant', id: 2, text: 'looking', thinking: '', streaming: true },
+    sig,
+  ] as unknown as MsgBlock[]
+  const [t2] = selectTurns(live)
+  assert.deepEqual(runningBody(t2).map((b) => b.id), [4])
+})
+
 test('while running, the working block holds the whole run', () => {
   const live = [
     { kind: 'user', id: 1, text: 'q' },

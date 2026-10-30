@@ -1564,6 +1564,96 @@ const after = await page.eval(() => {
 check('settle: after AgentEnd the fold line and the ledger appear',
   after.runEnded === true && after.worked && after.foot > 0, JSON.stringify(after))
 
+// ---- 一行信号（Small signals）：九类事件 --------------------------------------------------
+// 判据全部来自 design/agent-runtime/v2 的 .sig 规则（ui.components.css:970-990）：
+// 图标 14 / gap 10 / padding 9·4 / 标题 12.5·500 / 副题 11 / 右侧事件名 9.5 mono 靠右。
+// 数据走**真事件通道**（window.__mockEmit → store 门禁 → signal 块 → Signal 组件），
+// 不直接改 store，也不 mock 组件；字段名照 Go events/event.go 的原名。
+await say('信号样例')
+await wait(600)
+const sigInjected = await page.eval(() => {
+  const emit = window.__mockEmit
+  if (!emit) return 'no __mockEmit hook'
+  const sid = window.__store.getState().activeSessionId
+  const at = Date.now() / 1000
+  // 两条 memory 事件聚成一行（store 里 900ms 内的同向写入是一条），file 是副题
+  emit({ event_type: 'memory_activity', session_id: sid, action: 'saved', file: 'a.md', timestamp: at })
+  emit({ event_type: 'memory_activity', session_id: sid, action: 'saved', file: 'b.md', timestamp: at })
+  emit({ event_type: 'tool_hook_warning', session_id: sid, name: 'gofmt', message: 'returned 2', timestamp: at })
+  // 故意不给 tool_calls：缺字段不该被编出来
+  emit({ event_type: 'run_silent_end', session_id: sid, rounds: 4, saw_assistant_text: true, timestamp: at })
+  emit({ event_type: 'goal_alignment_reminder', session_id: sid, round: 7, timestamp: at })
+  emit({ event_type: 'task_promoted', session_id: sid, task_id: 'tooltask-abc', kind: 'tool', name: 'bash', timestamp: at })
+  emit({ event_type: 'session_budget_exceeded', session_id: sid, cost: 0.0234, max_cost: 0.02, timestamp: at })
+  emit({ event_type: 'session_persist_error', session_id: sid, error: 'disk full', timestamp: at })
+  emit({ event_type: 'session_closed', session_id: sid, timestamp: at })
+  // 同一条再来一次：不该刷出第二行（去重）
+  emit({ event_type: 'tool_hook_warning', session_id: sid, name: 'gofmt', message: 'returned 2', timestamp: at })
+  return 'ok'
+})
+check('signals: real event channel accepts the events', sigInjected === 'ok', sigInjected)
+// memory 那行是 900ms 防抖后落块的，所以等够再断
+await wait(1600)
+const gotSig = await waitUntil("document.querySelectorAll('.sig').length >= 8", 15000)
+const sigRows = await page.eval(() => {
+  const rows = [...document.querySelectorAll('.sig')]
+  const one = (k) => rows.find((r) => r.dataset.kind === k)
+  const cs = (el, p) => (el ? getComputedStyle(el)[p] : null)
+  const row = one('hook')
+  const icon = row?.querySelector('svg')
+  const title = row?.querySelector('b')
+  const detail = row?.querySelector('span:not(.sig-t)')
+  const type = row?.querySelector('.sig-t')
+  return {
+    n: rows.length,
+    kinds: rows.map((r) => r.dataset.kind),
+    display: cs(row, 'display'),
+    gap: cs(row, 'gap'),
+    padding: cs(row, 'padding'),
+    iconSize: [cs(icon, 'width'), cs(icon, 'height'), cs(icon, 'strokeWidth')],
+    titleSize: [cs(title, 'fontSize'), cs(title, 'fontWeight')],
+    detailSize: [cs(detail, 'fontSize'), cs(detail, 'color')],
+    typeSize: [cs(type, 'fontSize'), type && cs(type, 'fontFamily').toLowerCase(), cs(type, 'marginLeft')],
+    typeText: type?.textContent ?? null,
+    typeRightGap: type && row ? Math.round(row.getBoundingClientRect().right - type.getBoundingClientRect().right) : null,
+    colors: Object.fromEntries(rows.map((r) => { const s = r.querySelector('svg'); return [r.dataset.kind, s ? getComputedStyle(s).color : null] })),
+    titles: Object.fromEntries(rows.map((r) => [r.dataset.kind, r.querySelector('b')?.textContent ?? ''])),
+    details: Object.fromEntries(rows.map((r) => [r.dataset.kind, r.querySelector('span:not(.sig-t)')?.textContent ?? ''])),
+    insideWork: rows.some((r) => !!r.closest('.rt-work')),
+    height: row ? Math.round(row.getBoundingClientRect().height) : null,
+  }
+})
+check('signals: the nine kinds render as one row each', gotSig && sigRows.n === 9, JSON.stringify({ n: sigRows.n, kinds: sigRows.kinds }))
+check('signals: a repeated event does not add a row (dedupe)', sigRows.n === 9, sigRows.n)
+check('signals: row is a 10px flex with 9/4 padding',
+  sigRows.display === 'flex' && sigRows.gap === '10px' && sigRows.padding === '9px 4px', JSON.stringify({ d: sigRows.display, g: sigRows.gap, p: sigRows.padding }))
+check('signals: icon 14px / stroke 1.8', sigRows.iconSize.join('|') === '14px|14px|1.8px', sigRows.iconSize.join('|'))
+check('signals: title 12.5px / weight 500', sigRows.titleSize[0] === '12.5px' && sigRows.titleSize[1] === '500', sigRows.titleSize.join('|'))
+check('signals: detail 11px', sigRows.detailSize[0] === '11px', sigRows.detailSize.join('|'))
+// margin-left:auto 在 Chromium 里读到的是**用值**（px），所以这里只要求「有正的左外距」，
+// 真正判「靠右」的是下一条：与行右边缘刚好差 4px（行内 padding）。
+check('signals: event name on the right, 9.5px mono',
+  sigRows.typeSize[0] === '9.5px' && /mono|menlo|ui-monospace|sfmono/.test(sigRows.typeSize[1] ?? '') &&
+    parseFloat(String(sigRows.typeSize[2])) > 0,
+  JSON.stringify(sigRows.typeSize))
+check('signals: event name sits 4px off the row edge', sigRows.typeRightGap === 4, sigRows.typeRightGap)
+check('signals: event name is the raw event_type, untranslated', sigRows.typeText === 'tool_hook_warning', sigRows.typeText)
+// 九类图标各归其色（violet / amber / accent / red / green / ink-3）：至少 5 种不同颜色
+const distinct = new Set(Object.values(sigRows.colors).filter(Boolean))
+check('signals: icon colour differs by kind', distinct.size >= 5, JSON.stringify(sigRows.colors))
+check('signals: zh copy is built from the fact, not prose in the store',
+  sigRows.titles.memory === '已保存 2 条记忆' && sigRows.titles.hook === '工具钩子发出警告' &&
+    sigRows.titles.silent === '这次运行没有产出文本' && sigRows.titles.budget === '会话预算已用尽',
+  JSON.stringify(sigRows.titles))
+check('signals: sub-line carries only the facts we were given',
+  sigRows.details.memory === 'a.md · b.md' && sigRows.details.hook === 'gofmt · returned 2' &&
+    sigRows.details.persist === 'disk full' && sigRows.details.budget === '$0.0234 / $0.0200',
+  JSON.stringify(sigRows.details))
+check('signals: a missing field is absent, not invented',
+  (sigRows.details.silent ?? '') === '4 轮' && (sigRows.details.closed ?? '') === '',
+  JSON.stringify({ silent: sigRows.details.silent, closed: sigRows.details.closed }))
+check('signals: rows live outside the working box (a record, not work)', sigRows.insideWork === false, sigRows.insideWork)
+
 await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
 await wait(400)
 const t7 = await page.eval(() => {

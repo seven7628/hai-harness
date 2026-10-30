@@ -3,6 +3,7 @@ import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf, mainRunEnded } from '../store/useAppStore'
 import { turnLive } from '../lib/turnSettle'
+import { signalText } from '../lib/signalFacts'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
@@ -904,6 +905,23 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       )
     }
     if (b.kind === 'compression') return <CompressionBlock key={b.id} b={b} />
+    // 一行信号（设计 v2 §「Small signals」）：store 已经把它做成 'signal' 块，文案在
+    // lib/signalFacts.ts 里由**事实**构造（右侧那一列是原始 event_type，不翻译）。
+    if (b.kind === 'signal') {
+      const txt = signalText(b.fact, t)
+      return (
+        <div className="sig-list" key={b.id}>
+          <Signal
+            kind={b.fact.sig}
+            title={txt.title}
+            {...(txt.detail ? { detail: txt.detail } : {})}
+            type={b.fact.etype}
+          />
+        </div>
+      )
+    }
+    // 老快照里没有 'signal' 块（checkpoint 以前写的是 system 块）：仍按信号行渲染，
+    // 但文案只能取那一段文本本身 —— 不为新形态丢掉历史转录。
     if (b.kind === 'system' && skin === 'runtime') {
       const [first, ...rest] = b.text.split('\n').map((l) => l.trim()).filter(Boolean)
       const kind = b.tone === 'error' ? 'persist' : b.tone === 'success' ? 'closed' : 'silent'

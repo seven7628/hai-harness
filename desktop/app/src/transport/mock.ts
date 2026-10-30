@@ -3682,5 +3682,16 @@ function mockMetricsReport(from: string): Record<string, unknown> {
 }
 
 export function mockTransport(): Transport {
-  return new MockTransport()
+  const tr = new MockTransport()
+  // 演示/lab 接缝：把真实事件注入 mock 的推送通道（走的是真 store 门禁、真渲染路径，
+  // 只是数据源换成了这次调用）。用来演示那些**只有服务端才会发**的事件 ——
+  // memory_activity / run_silent_end / session_budget_exceeded 之类，mock 的脚本里
+  // 没有对应流程，但它们在前端的呈现（一行信号）必须能被看见、被断言。
+  const dev = (import.meta as { env?: { DEV?: boolean } }).env?.DEV
+  if (dev) {
+    (globalThis as { __mockEmit?: (e: Record<string, unknown>) => void }).__mockEmit = (e) => {
+      ;(tr as unknown as { emit: (x: Record<string, unknown>) => void }).emit(e)
+    }
+  }
+  return tr
 }

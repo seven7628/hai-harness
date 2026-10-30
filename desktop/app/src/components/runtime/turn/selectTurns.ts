@@ -199,6 +199,11 @@ export const ALWAYS_SHOWN = new Set<MsgBlock['kind']>([
   'error',
   'divider',
   'artifacts',
+  // 一行信号（Small signals）：这九类事件存在的理由就是「转录不会在没有说明的情况下
+  // 突然安静」。折进 Working 就等于把它藏了 —— 用户看到的仍然是「什么都没发生」。
+  // 它是**关于这次运行的记录**，不是工作过程，所以和产出卡一样留在盒子外面，
+  // 并且运行中（runningBody 只放 ALWAYS_SHOWN）也要能看见。
+  'signal',
 ])
 
 export function foldedBody(turn: Turn): MsgBlock[] {

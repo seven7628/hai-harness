@@ -13,6 +13,7 @@ import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAtt
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
+import type { SignalFact } from '../lib/signalFacts'
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
 //
@@ -604,12 +605,41 @@ export type MsgBlock =
   // retryCostUsd = 本轮重试**已花费**金额（USD，2026-09-23）：失败尝试的已产生用量
   //（上游按已生成 token 计费）折算，跨多次重试累加 —— 重试块显示「+$x」，会话成本含它。
   | { kind: 'error'; id: number; text: string; ts?: number; retrying?: boolean; retryAttempt?: number; retryMax?: number; retryDelayMs?: number; retryStartedAt?: number; retryCostUsd?: number }
+  // 「Small signals」一行信号（设计 v2 §11）：关于**这次运行**的一条事实，不是工作过程
+  // 也不是结论。9 类事件各落一条（memory_activity / tool_hook_warning / run_silent_end /
+  // goal_alignment_reminder / task_promoted / user_inputs_consumed / session_budget_exceeded /
+  // session_persist_error / session_closed）。文案由 lib/signalFacts.ts 从事实构造，
+  // 存进来的是**事实**而不是句子 —— 换语言、查数据都还认得。
+  | { kind: 'signal'; id: number; fact: SignalFact }
   // 上下文隔离分隔线：进程关闭/重启（shutdown）、用户中断（abort）或清空上下文（clear）
   // 时插入的横线。UI 统一渲染为分隔线，内部按 reason 区分语义。
   | { kind: 'divider'; id: number; reason?: 'shutdown' | 'abort' | 'clear'; ts?: number }
   // 本轮产出汇总（AgentEnd.Artifacts）：对话页尾部「本次产出」卡片。
   // 数据来自运行结束时的文件汇总（write_file/edit_file 落盘），不含文件内容。
   | { kind: 'artifacts'; id: number; runId?: string; items: ArtifactItem[]; truncated?: boolean }
+
+// pushSignal 往叙述通道追加一行信号。**去重**：同一类事件在同一秒内重复到达
+// （bridge 会从多个 EventHandler 各转一次）不该刷出两行 —— 键 = 类型 + 关键事实。
+// core.Cost 的形状（{Total, Input, Output, …}）→ 只取 Total（美元）。缺失 → undefined，
+// 免得把 undefined 当成 0 报出「已用 $0 / 上限 $0」。
+function costOf(raw: unknown): number | undefined {
+  if (typeof raw === 'number') return raw
+  if (raw && typeof raw === 'object') {
+    const total = (raw as { Total?: unknown; total?: unknown }).Total ?? (raw as { total?: unknown }).total
+    if (typeof total === 'number') return total
+  }
+  return undefined
+}
+
+function pushSignal(blocks: MsgBlock[], fact: SignalFact): MsgBlock[] {
+  const key = `${fact.sig}|${fact.etype}|${fact.n ?? ''}|${fact.name ?? ''}|${fact.message ?? ''}|${fact.round ?? ''}`
+  const last = blocks[blocks.length - 1]
+  if (last?.kind === 'signal') {
+    const lk = `${last.fact.sig}|${last.fact.etype}|${last.fact.n ?? ''}|${last.fact.name ?? ''}|${last.fact.message ?? ''}|${last.fact.round ?? ''}`
+    if (lk === key) return blocks
+  }
+  return [...blocks, { kind: 'signal', id: blockSeq++, fact }]
+}
 
 // 单个产出文件（对齐服务端 core.Artifact）。
 export interface ArtifactItem {
@@ -6239,7 +6269,25 @@ export function dispatchEvent(raw: AnyEvent): void {
             blocks.push({ kind: 'user', id: blockSeq++, text: texts[i] ?? '', ts })
           }
         }
-        return setView(s, sid, { ...v, pendingQueue: rest, pendingQueueError: undefined, blocks: [...v.blocks, ...blocks] })
+        // 一行信号（设计「Small signals」的 user_inputs_consumed）：两条以上排队消息被
+        // 合并进同一次模型调用时，转录里只会看到一条用户块 —— 差掉的那几条得有人交代。
+        // 单条输入是常态，不写信号（否则每次提问都多一行噪音）。
+        const sigFacts = consumeCount > 1
+          ? [
+              ...blocks,
+              {
+                kind: 'signal' as const,
+                id: blockSeq++,
+                fact: ({
+                  sig: 'inputs',
+                  etype: 'user_inputs_consumed',
+                  n: consumeCount,
+                  ...(texts.length ? { texts: texts.map((x) => String(x)) } : {}),
+                } satisfies SignalFact) as SignalFact,
+              },
+            ]
+          : blocks
+        return setView(s, sid, { ...v, pendingQueue: rest, pendingQueueError: undefined, blocks: [...v.blocks, ...sigFacts] })
       })
       break
     }
@@ -6253,7 +6301,9 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = s.views[sid] ?? emptyView()
         return setView(s, sid, {
           ...v,
-          blocks: [...v.blocks, { kind: 'system', id: blockSeq++, text: round ? `已注入目标一致性提醒（第 ${round} 轮）` : '已注入目标一致性提醒', tone: 'info' }],
+          // 一行信号（设计 §「Small signals」的 goal_alignment_reminder）：之前是 system 块，
+          // 形态与"关于这次运行的一条事实"不符 —— 它会和真正的系统提示混在一起。
+          blocks: pushSignal(v.blocks, { sig: 'goal', etype: 'goal_alignment_reminder', ...(round != null ? { round } : {}) }),
         })
       })
       return
@@ -6349,16 +6399,39 @@ export function dispatchEvent(raw: AnyEvent): void {
     // 窗口结束才弹一次。这正是官方那句话的形状（"Saved 2 memories" 而不是两次
     // "Saved 1 memory"）。
     case 'memory_activity': {
+      const sid = getSid(raw, getState().activeSessionId)
       const action = String(raw.action || '')
       if (action !== 'saved' && action !== 'recalled') break
       const key = action === 'saved' ? 'memPendingSaved' : 'memPendingRecalled'
       const prev = (getState() as unknown as Record<string, number>)[key] || 0
       setState({ [key]: prev + 1 } as unknown as Partial<AppState>)
+      // 文件名一起攒（设计那行的副题就是文件名），窗口结束随聚合行一起落
+      const fkey = action === 'saved' ? 'memFilesSaved' : 'memFilesRecalled'
+      const file = String(raw.file || '')
+      if (file) {
+        const list = ((getState() as unknown as Record<string, string[]>)[fkey] || []).slice()
+        if (!list.includes(file)) list.push(file)
+        setState({ [fkey]: list } as unknown as Partial<AppState>)
+      }
       // 每次事件都重置定时器：一串写入聚成一条，一串之后再来的另起一条。
       setTimeout(() => {
         const n = ((getState() as unknown as Record<string, number>)[key] || 0) as number
         if (n <= 0) return
-        setState({ [key]: 0 } as unknown as Partial<AppState>)
+        const files = ((getState() as unknown as Record<string, string[]>)[fkey] || []).slice()
+        setState({ [key]: 0, [fkey]: [] } as unknown as Partial<AppState>)
+        // 一行信号（设计「Small signals」的 memory_activity）：设计里那一行是
+        // 「Saved 2 memories / checkpoint-commit-perf · journal-paging」，正是这里的形状。
+        setState((st) => {
+          const v = st.views[sid] ?? emptyView()
+          const fact: SignalFact = {
+            sig: 'memory',
+            etype: action === 'saved' ? 'memory_activity' : 'memory_activity_recalled',
+            n,
+            ...(files.length ? { files } : {}),
+          }
+          const upd = setView(st, sid, { ...v, blocks: pushSignal(v.blocks, fact) })
+          return upd
+        })
         getState().showToast(
           action === 'saved'
             ? i18nT('settings.memory.savedToast').replace('{n}', String(n))
@@ -6581,12 +6654,100 @@ export function dispatchEvent(raw: AnyEvent): void {
       flushQueueOnRunEnd(sid)
       break
     }
+    // ---- 「Small signals」的四类宿主提示（设计 v2 §11）------------------------
+    // 这几个事件此前在 store 里**完全没有 case**：落 default 静默丢弃，于是屏幕上
+    // 什么都不发生 —— 而设计里它们正是「转录不会莫名安静」的那句说明。
+    case 'tool_hook_warning': {
+      const sid = getSid(raw, getState().activeSessionId)
+      const message = String(raw.message || '')
+      if (!message) break
+      setState((st) => {
+        const v = st.views[sid] ?? emptyView()
+        return setView(st, sid, {
+          ...v,
+          blocks: pushSignal(v.blocks, {
+            sig: 'hook',
+            etype: 'tool_hook_warning',
+            ...(raw.name ? { name: String(raw.name) } : {}),
+            message,
+          }),
+        })
+      })
+      break
+    }
+    case 'run_silent_end': {
+      const sid = getSid(raw, getState().activeSessionId)
+      const rounds = typeof raw.rounds === 'number' ? raw.rounds : undefined
+      const toolCalls = typeof raw.tool_calls === 'number' ? raw.tool_calls : undefined
+      const sawText = typeof raw.saw_assistant_text === 'boolean' ? raw.saw_assistant_text : undefined
+      setState((st) => {
+        const v = st.views[sid] ?? emptyView()
+        return setView(st, sid, {
+          ...v,
+          blocks: pushSignal(v.blocks, {
+            sig: 'silent',
+            etype: 'run_silent_end',
+            ...(rounds != null ? { rounds } : {}),
+            ...(toolCalls != null ? { toolCalls } : {}),
+            ...(sawText != null ? { sawText } : {}),
+          }),
+        })
+      })
+      break
+    }
+    case 'session_budget_exceeded': {
+      const sid = getSid(raw, getState().activeSessionId)
+      const cost = costOf(raw.cost)
+      const maxCost = costOf(raw.max_cost)
+      setState((st) => {
+        const v = st.views[sid] ?? emptyView()
+        return setView(st, sid, {
+          ...v,
+          blocks: pushSignal(v.blocks, {
+            sig: 'budget',
+            etype: 'session_budget_exceeded',
+            ...(cost != null ? { cost } : {}),
+            ...(maxCost != null ? { maxCost } : {}),
+          }),
+        })
+      })
+      break
+    }
+    case 'session_persist_error': {
+      const sid = getSid(raw, getState().activeSessionId)
+      const message = String(raw.error || '')
+      setState((st) => {
+        const v = st.views[sid] ?? emptyView()
+        return setView(st, sid, {
+          ...v,
+          blocks: pushSignal(v.blocks, {
+            sig: 'persist',
+            etype: 'session_persist_error',
+            ...(message ? { message } : {}),
+          }),
+        })
+      })
+      break
+    }
     case 'session_closed': {
       const sid = getSid(raw, getState().activeSessionId)
       disarmSessionCompressWatchdogs(sid) // 会话关闭：取消该会话全部压缩看门狗（主 + 各 SubAgent）
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
-        const upd = setView(s, sid, { ...v, streaming: false, pendingQueue: [] }, { bridgeStatus: 'idle' })
+        const upd = setView(
+          s,
+          sid,
+          {
+            ...v,
+            streaming: false,
+            pendingQueue: [],
+            // 一行信号：会话关闭是**结论级**事实（设计 session_closed），不写一行的话
+            // 用户只看到界面忽然安静下来。
+            blocks: pushSignal(v.blocks, { sig: 'closed', etype: 'session_closed' }),
+            runEnded: true, // 关闭后不可能再有 AgentEnd：结算位必须落地，否则永远停在 Working
+          },
+          { bridgeStatus: 'idle' },
+        )
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
       break
@@ -6675,12 +6836,16 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = s.views[sid] ?? emptyView()
         return setView(s, sid, {
           ...v,
-          blocks: v.blocks.map((b) =>
-            b.kind === 'tool' && b.taskId === taskId
-              ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
-              : b,
-          ),
           runNodes: v.runNodes.map((n) => (n.kind === 'tool' && n.taskId === taskId ? { ...n, promoted: true } : n)),
+          blocks: pushSignal(
+            v.blocks.map((b) =>
+              b.kind === 'tool' && b.taskId === taskId
+                ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
+                : b,
+            ),
+            // 一行信号：工具行折叠/收起后，「这次调用被摘成后台任务」仍要能看见
+            { sig: 'promote', etype: 'task_promoted', ...(raw.name ? { name: String(raw.name) } : {}), message: taskId },
+          ),
         })
       })
       break
