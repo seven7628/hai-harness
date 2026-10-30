@@ -88,3 +88,60 @@ export function isExternalMoveUp(a: {
 export function shouldPinBottom(a: { follow: boolean; top: number; max: number }): boolean {
   return a.follow && a.max > 0 && a.top !== a.max
 }
+
+/**
+ * 「不跟随」状态下，是否该把跟随恢复回来（== 按钮该消失）。
+ *
+ * ## 为什么需要这条（用户 2026-10）
+ *
+ * `away`（「↓ 回到最新」按钮）由两种完全不同的原因被置位，之前**混成一个布尔**，
+ * 于是第二类一旦误置就没有任何路径能撤销：
+ *   ① 用户**真的**往上翻（wheel / 触摸 / 键盘 / 拖滚动条）—— 意图明确，必须尊重；
+ *   ② tick 观察到「scrollTop 变小」（`isExternalMoveUp`）—— 这是个**启发式兜底**，
+ *      用来接住没有 wheel 事件的手势，但它也会被**内容塌缩**骗到：一轮结束时
+ *      Working / 工具组 / 折叠块自动收起，高度几帧内变矮，浏览器把 scrollTop 下调，
+ *      只要有一帧读成「外部往上移」，按钮就永久挂住。用户截图里就是这个：
+ *      明明停在最底部，按钮还在。
+ *
+ * 所以判据按**置位的原因**分开（`hardAway` = 原因①）：
+ *   · 原因① → 只有用户自己把视图带回底部才恢复（这条保住既有的「上滑不被拽回」）；
+ *   · 原因② → 允许用**几何**撤销：非跟随态下 tick 一帧都不写 scrollTop，位置可信；
+ *   · 特例 max<=0（内容塌到不需要滚动）→ 无论哪种原因都该消失，按钮已经没有意义。
+ */
+export function shouldResumeFollow(a: {
+  follow: boolean
+  top: number
+  max: number
+  hardAway?: boolean
+  threshold?: number
+}): boolean {
+  if (a.follow) return false
+  if (a.max <= 0) return true
+  if (a.hardAway) return false
+  return isNearBottom({ top: a.top, max: a.max }, a.threshold)
+}
+
+/**
+ * 一次 wheel 事件是不是被**内层滚动容器**吃掉了（因此不能当成「对话在往上翻」）。
+ *
+ * ## 为什么需要判（用户 2026-10：自动折叠后「回到最新」按钮行为异常）
+ *
+ * 对话里现在有大量可滚动的小容器：工具输出 `<pre>`、diff 体、思考折叠体、运行面板……
+ * wheel 事件**会冒泡**到 `.narrative`，而上层的处理是「向上滚 → 立刻停止跟随」。
+ * 于是用户只是在工具输出里往回翻两行，整个对话就被判定成「用户要离开底部」，
+ * 按钮出现；此后内容一变矮，位置判据又互相矛盾 —— 表现得就像按钮坏了。
+ *
+ * 判据只看两个事实：内层容器在**这个方向**上还能不能滚。能滚 = 它消费了这次滚动。
+ */
+export function wheelConsumedByScroller(a: {
+  deltaY: number
+  scrollTop: number
+  scrollHeight: number
+  clientHeight: number
+}): boolean {
+  const max = a.scrollHeight - a.clientHeight
+  if (max <= 0) return false
+  if (a.deltaY < 0) return a.scrollTop > 0 // 往回翻：还有更早的内容
+  if (a.deltaY > 0) return a.scrollTop < max - 1 // 往前翻：还没到底
+  return false
+}

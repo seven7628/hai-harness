@@ -101,7 +101,13 @@ html[data-skin='runtime'] .tool-row .tool-row-hd:hover .t {
   color: var(--ink);
 }
 
+/* 1fr 那一格现在是 .args-cell（徽标 + 对象）：网格只认单元格，里面怎么排由 flex 说了算 */
+html[data-skin='runtime'] .tool-row .args-cell {
+  min-width: 0;
+}
+
 html[data-skin='runtime'] .tool-row .args {
+  flex: 1 1 auto;
   min-width: 0;
   font: 400 11.5px/1.4 var(--mono);
   color: var(--ink-3);
@@ -126,19 +132,15 @@ html[data-skin='runtime'] .tool-row .m .d {
   color: var(--red);
 }
 
-html[data-skin='runtime'] .tool-row .m.bad {
-  color: var(--red);
-}
+/* 度量与耗时**不穿判决色**（用户 2026-10：一个 29 ms 的失败调用让整行的两个数字都变红，
+   看着像"上一次的失败还没消"）。数字是事实，判决由动词色 + 行首图标 + ✗ 承担：
+   `0.0 KB` 就是 0.0 KB，`29 ms` 就是 29 ms，成功失败都一样。 */
 
 html[data-skin='runtime'] .tool-row .dur {
   font: 400 11px/1 var(--mono);
   color: var(--ink-3);
   text-align: right;
   font-variant-numeric: tabular-nums;
-}
-
-html[data-skin='runtime'] .tool-row .dur.bad {
-  color: var(--red);
 }
 
 /* the six columns are the design's; everything the app added to a row would

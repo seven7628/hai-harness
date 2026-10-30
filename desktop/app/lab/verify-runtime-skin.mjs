@@ -401,6 +401,147 @@ check('codemode: the failed call shows its failure while collapsed',
 check('codemode: a finished call with no sub-calls shows no fake progress bar',
   cm[0]?.bp == null && cm[2]?.bp == null, JSON.stringify([cm[0]?.bp, cm[2]?.bp]))
 
+// ---- 行头六列：徽标不许抢列（列宽挤压 / 折成两行） ------------------------------
+// 用户 2026-10 报障的根源：行头是设计给的六列网格，档位徽标若作为第 7 个网格子项，
+// 网格会把它塞进 1fr 那格（药丸被拉宽到 260px），并把对象/度量/时长挤到第二行。
+const cmGeom = await page.eval(() => {
+  const rows = [...document.querySelectorAll('.tool-row')].filter((r) => r.querySelector('.cm-mode'))
+  return rows.map((r) => {
+    const hd = r.querySelector('.tool-row-hd')
+    const hr = hd.getBoundingClientRect()
+    const kids = [...hd.children].filter((c) => getComputedStyle(c).display !== 'none')
+    const onRow = kids.filter((k) => {
+      const b = k.getBoundingClientRect()
+      return b.top < hr.bottom - 4 && b.bottom > hr.top + 4
+    })
+    return {
+      hdH: Math.round(hr.height),
+      kids: kids.length,
+      onRow: onRow.length,
+      pill: Math.round(r.querySelector('.cm-mode').getBoundingClientRect().width),
+      argsW: Math.round(r.querySelector('.args')?.getBoundingClientRect().width ?? 0),
+      durW: Math.round(r.querySelector('.dur')?.getBoundingClientRect().width ?? 0),
+    }
+  })
+})
+check('codemode: the tier pill is a flex child, not a grid track it can stretch',
+  cmGeom.length > 0 && cmGeom.every((g) => g.pill < 90), JSON.stringify(cmGeom.map((g) => g.pill)))
+check('codemode: the header stays ONE line (nothing wraps to a second grid row)',
+  cmGeom.every((g) => g.hdH <= 40 && g.onRow === g.kids), JSON.stringify(cmGeom))
+check('codemode: the object text keeps the flexible column, so the numbers keep their own',
+  cmGeom.every((g) => g.argsW > 100 && g.durW > 20), JSON.stringify(cmGeom.map((g) => [g.argsW, g.durW])))
+
+// ---- 失败行的呈现：数字不穿判决色；没有内容的原因行干脆不画 ---------------------
+// 用户 2026-10 截图：一个 29 ms 的失败 bash 让「0.0 KB」「29 ms」都变红，还挂着一行
+// `✗ .`，看着像上一次的失败状态没消。
+const injected = await page.eval(() => {
+  const st = window.__store.getState()
+  const sid = st.activeSessionId
+  const v = st.views[sid]
+  window.__labBlocks = v.blocks
+  const extra = [{
+    kind: 'tool', id: 'lab-fail-1', toolId: 'lab-fail-1', name: 'bash', status: 'done',
+    isError: true, durMs: 29, startedAt: Date.now(),
+    args: JSON.stringify({ command: 'cd /Users/admin/Desktop/agent-server-g && ls' }),
+    // 真实形态：分隔线 + 引擎退出码标记（首行**没有**信息量）
+    result: '---\nls: cannot access: No such file or directory\n[exit: exit status 1]',
+  }]
+  const blocks = [...v.blocks, ...extra]
+  window.__store.setState({ views: { ...st.views, [sid]: { ...v, blocks } }, blocks })
+  return blocks.length
+})
+await wait(700)
+const failRow = await page.eval(() => {
+  const row = [...document.querySelectorAll('.tool-row')].find((r) => r.textContent.includes('agent-server-g') && r.getAttribute('data-s') === 'fail')
+  if (!row) return null
+  // 计算值可能是 oklab(...)（color-mix 的产物）—— 交给 canvas 归一成 rgb 再判红，
+  // 否则「是不是红色」这件事根本无从比较（正则读不出 oklab 的分量）。
+  // 直接画一个像素再读回来：fillStyle 的字符串往返对不同颜色空间不可靠（oklab 会原样回显），
+  // 而 getImageData 拿到的一定是 sRGB 分量。
+  const cv = document.createElement('canvas')
+  cv.width = 1
+  cv.height = 1
+  const ctx = cv.getContext('2d')
+  const rgb = (c) => {
+    if (!c) return null
+    ctx.clearRect(0, 0, 1, 1)
+    ctx.fillStyle = 'rgb(0, 0, 0)'
+    ctx.fillStyle = c
+    ctx.fillRect(0, 0, 1, 1)
+    const d = ctx.getImageData(0, 0, 1, 1).data
+    return `rgb(${d[0]}, ${d[1]}, ${d[2]})`
+  }
+  const cs = (sel) => {
+    const el = row.querySelector(sel)
+    return el ? rgb(getComputedStyle(el).color) : null
+  }
+  return {
+    metric: cs('.m'),
+    dur: cs('.dur'),
+    verb: cs('.t'),
+    err: row.querySelector('.tool-err')?.textContent?.trim() ?? null,
+    progress: !!row.querySelector('.cm-bp-bar'),
+    text: (row.textContent || '').replace(/\s+/g, ' ').slice(0, 80),
+  }
+})
+// 红 = 明显偏红的那一族（截图里是 #e4746a / #c0392b 这一档）
+const reddish = (c) => {
+  const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(c ?? '')
+  const rgbm = /rgba?\((\d+), (\d+), (\d+)/.exec(c ?? '')
+  const [r, g, b] = hex ? [parseInt(hex[1], 16), parseInt(hex[2], 16), parseInt(hex[3], 16)]
+    : rgbm ? [+rgbm[1], +rgbm[2], +rgbm[3]] : [0, 0, 0]
+  return r > 120 && r - g > 40 && r - b > 40
+}
+check('failure: the numbers stay neutral (a 29 ms call is not "everything is red")',
+  failRow && !reddish(failRow.metric) && !reddish(failRow.dur),
+  JSON.stringify({ metric: failRow?.metric, dur: failRow?.dur }))
+check('failure: the verdict still lands on the verb',
+  failRow && reddish(failRow.verb), JSON.stringify({ verb: failRow?.verb }))
+check('failure: the reason line says something, or is not drawn at all',
+  failRow && (failRow.err === null || /[\p{L}\p{N}]{2,}/u.test(failRow.err)), JSON.stringify({ err: failRow?.err, text: failRow?.text }))
+check('failure: a plain bash row never paints a codemode progress bar',
+  failRow && failRow.progress === false, JSON.stringify({ progress: failRow?.progress }))
+await page.eval(() => {
+  const st = window.__store.getState()
+  const sid = st.activeSessionId
+  window.__store.setState({ views: { ...st.views, [sid]: { ...st.views[sid], blocks: window.__labBlocks } }, blocks: window.__labBlocks })
+})
+await wait(500)
+
+// ---- wheel 冒泡：内层滚动容器吃掉的滚动不算「翻这个对话」 ----------------------
+// 用户 2026-10：自动折叠后可滚动的小容器变多，在工具输出里往回翻两行就会把整个对话
+// 判成「用户离开底部」，按钮出现后又被塌缩的高度变化搅乱 —— 看起来就是按钮坏了。
+const nestedWheel = await page.eval(async () => {
+  const nar = document.querySelector('.narrative')
+  if (!nar) return { skipped: true }
+  nar.scrollTop = nar.scrollHeight // 先贴底（按钮不该在）
+  const box = document.createElement('div')
+  box.setAttribute('data-lab-inner', '1')
+  box.style.cssText = 'height:80px;overflow-y:auto'
+  box.innerHTML = '<div style="height:600px">inner</div>'
+  nar.appendChild(box)
+  const t0 = Date.now()
+  await new Promise((r) => setTimeout(r, 260))
+  box.scrollTop = 100 // 内层还能往回滚 → 这次 wheel 该被内层消费
+  box.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  const withInner = !!document.querySelector('.narrative-jump')
+  box.scrollTop = 0 // 内层到顶了 → 再往回滚就是用户在翻对话
+  box.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  const atTop = !!document.querySelector('.narrative-jump')
+  box.remove()
+  // 复位：滚回底部并点掉按钮（如果出现了）
+  document.querySelector('.narrative-jump')?.click()
+  await new Promise((r) => setTimeout(r, 300))
+  nar.scrollTop = nar.scrollHeight
+  return { withInner, atTop, ms: Date.now() - t0 }
+})
+check('scroll: a wheel inside a nested scroller does not summon "jump to latest"',
+  nestedWheel.skipped || nestedWheel.withInner === false, JSON.stringify(nestedWheel))
+check('scroll: once the nested scroller is at its end, the wheel belongs to the transcript',
+  nestedWheel.skipped || nestedWheel.atTop === true, JSON.stringify(nestedWheel))
+
 // ---- 数字的身份色：+N 绿 / −N 红 / 计时一支色 ---------------------------------
 // 用户 2026-10：文件变更要红绿对应（与工具行一致），所有计时信息要有一个与主题搭配的颜色。
 // 用页面里的同构夹具量计算值：颜色令牌与 --md-measure 那样由浏览器自己换算成 rgb。

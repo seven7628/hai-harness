@@ -10,7 +10,7 @@
 // 下面的断言就是这三条的可执行规格。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, shouldPinBottom, FOLLOW_THRESHOLD } from './scrollFollow'
+import { decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller, FOLLOW_THRESHOLD } from './scrollFollow'
 
 // 便捷构造：容器高 500、内容高 3000 → max = 2500
 const MAX = 2500
@@ -113,4 +113,76 @@ test('④ 不跟随时一帧都不写（用户在看历史）', () => {
 
 test('④ 空内容（max=0）不写，避免把 0 当成底部', () => {
   assert.equal(shouldPinBottom({ follow: true, top: 0, max: 0 }), false)
+})
+
+// —— ⑤ 自动折叠导致的「按钮挂住」（用户 2026-10 报障） ————————————————
+//
+// 现场：一轮结束时 Working / 工具组 / 折叠块自动收起 → 内容几帧内变矮 → 浏览器下调
+// scrollTop。只要有一帧被 isExternalMoveUp 读成「外部往上移」，away 就永久为 true，
+// 于是明明停在最底部，按钮还挂着。修法不是把那个启发式删掉（它接住的是没有 wheel
+// 事件的滚动条拖动/键盘翻页），而是把 away 的**原因**分开，并让非用户原因的 away
+// 可以被几何撤销。
+
+test('⑤ 塌缩误判（非用户原因）在贴底后自动撤销：按钮不该挂住', () => {
+  assert.equal(
+    shouldResumeFollow({ follow: false, top: MAX, max: MAX, hardAway: false }),
+    true,
+    '已经贴底且不是用户亲手翻的 → 恢复跟随（按钮消失）',
+  )
+})
+
+test('⑤ 用户亲手翻上去的，即使位置还在阈值内也不撤销（保住 bug ①）', () => {
+  assert.equal(
+    shouldResumeFollow({ follow: false, top: MAX - 50, max: MAX, hardAway: true }),
+    false,
+    '用户意图优先：阈值内上滑也不许被自动翻案',
+  )
+})
+
+test('⑤ 内容塌到不需要滚动（max=0）：任何原因都恢复，按钮已无意义', () => {
+  assert.equal(shouldResumeFollow({ follow: false, top: 0, max: 0, hardAway: true }), true)
+})
+
+test('⑤ 真离开了底部（非用户原因也不该撤销）', () => {
+  assert.equal(
+    shouldResumeFollow({ follow: false, top: MAX - 800, max: MAX, hardAway: false }),
+    false,
+  )
+})
+
+test('⑤ 跟随态下不重复恢复（幂等，不产生多余 setState）', () => {
+  assert.equal(shouldResumeFollow({ follow: true, top: MAX, max: MAX }), false)
+})
+
+// —— ⑥ wheel 冒泡：内层滚动容器吃掉的滚动不算「翻这个对话」 ————————————
+test('⑥ 工具输出里往回翻：内层还能滚 → 由它消费，不动对话的跟随状态', () => {
+  assert.equal(
+    wheelConsumedByScroller({ deltaY: -100, scrollTop: 200, scrollHeight: 1000, clientHeight: 300 }),
+    true,
+  )
+})
+
+test('⑥ 内层已经到顶还继续往回滚：交给对话（用户确实想往上）', () => {
+  assert.equal(
+    wheelConsumedByScroller({ deltaY: -100, scrollTop: 0, scrollHeight: 1000, clientHeight: 300 }),
+    false,
+  )
+})
+
+test('⑥ 内层不可滚（内容比容器矮）→ 不消费', () => {
+  assert.equal(
+    wheelConsumedByScroller({ deltaY: -100, scrollTop: 0, scrollHeight: 200, clientHeight: 300 }),
+    false,
+  )
+})
+
+test('⑥ 往前翻：内层还没到底 → 消费；到底了 → 不消费', () => {
+  assert.equal(
+    wheelConsumedByScroller({ deltaY: 100, scrollTop: 100, scrollHeight: 1000, clientHeight: 300 }),
+    true,
+  )
+  assert.equal(
+    wheelConsumedByScroller({ deltaY: 100, scrollTop: 700, scrollHeight: 1000, clientHeight: 300 }),
+    false,
+  )
 })

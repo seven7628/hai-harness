@@ -93,6 +93,7 @@
     "test:agent-duration": "esbuild src/lib/agentDuration-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/agent-duration.test.cjs && node --test /tmp/agent-duration.test.cjs",
     "test:active-elapsed": "esbuild src/lib/activeElapsed-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/active-elapsed.test.cjs && node --test /tmp/active-elapsed.test.cjs",
     "test:batch": "esbuild src/components/runtime/turn/batch-test.ts --bundle --platform=node --format=cjs --loader:.md=text --loader:.png=dataurl --loader:.svg=dataurl --outfile=/tmp/batch.test.cjs && node --test /tmp/batch.test.cjs",
+    "test:failure-line": "esbuild src/lib/failureLine-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/failure-line.test.cjs && node --test /tmp/failure-line.test.cjs",
     "test:short-path": "esbuild src/lib/shortPath-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/short-path.test.cjs && node --test /tmp/short-path.test.cjs"
   },
   "build": {

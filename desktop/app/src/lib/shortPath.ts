@@ -28,3 +28,26 @@ function truncate(s: string, max = SEG_MAX): string {
   if (s.length <= max) return s
   return s.slice(0, Math.max(1, max - 1)) + '…'
 }
+
+// 文件**名**（不是路径）在窄栏里要保留尾部：扩展名 + 名字末段才是有辨识度的部分。
+// 右栏标签最宽 168px，长名字现在是从尾巴截断的（`conversation_route…`），
+// 于是 `conversation_router.go` 与 `conversation_router_test.go` 长得一模一样，
+// 分不清哪个是测试、哪个是源码（用户 2026-10）。这里改成中间截断。
+//
+//   conversation_router_helper_test.go  →  conversation_rout…_test.go
+//
+// 短名字原样返回（绝大多数文件不该被改动）；完整名字始终在 title 里。
+const NAME_MAX = 24
+// 尾巴 = 名字末段（5 字符，够放下 `_test` / `_util` / `_view` 这类区分段）+ 扩展名。
+// 预算不能给太多：尾巴每多一字符，头部的辨识度就少一字符，而文件名开头往往才是检索词。
+const NAME_TAIL_BASE = 5
+
+export function shortName(input: string, max = NAME_MAX): string {
+  if (!input || input.length <= max) return input
+  const dot = input.lastIndexOf('.')
+  const base = dot > 0 ? input.slice(0, dot) : input
+  const ext = dot > 0 ? input.slice(dot) : ''
+  const tail = base.slice(-NAME_TAIL_BASE) + ext
+  const head = input.slice(0, Math.max(1, max - tail.length - 1))
+  return head + '…' + tail
+}

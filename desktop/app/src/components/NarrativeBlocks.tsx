@@ -18,6 +18,7 @@ import { Markdown } from './markdown'
 import { Bot, CheckList, FileIcon, PencilIcon, PlayIcon, SearchIcon, Sparkles, TerminalIcon } from './icons'
 import { fmtUsd, UsageChip, UnifiedDiff } from './ui'
 import { shortPath } from '../lib/shortPath'
+import { failureLine } from '../lib/failureLine'
 import { fmtMs, toolArgsSummary, toolMetric, toolVerb } from '../lib/toolSummary'
 import { useSkin } from '../lib/useSkin'
 import { FoldIcon } from './runtime/FoldIcon'
@@ -182,18 +183,9 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
   // 那是**谎报**。档位是「结果的性质」，没结果时只有「在跑」这一个事实。
   const tier = b.status === 'running' ? 'execute' : codemodeTier(b.hostOps, b.nestedCalls, scriptSrc)
   // 批量进度与墙钟：都只从真实数据来（nested_calls / 结果信封里的 `Wall time N seconds`）
-  const collapsedError = (() => {
-    if (!err) return ''
-    const fromResult = (b.result ?? '')
-      .replace(/^Script (failed|completed)\s*\n/i, '')
-      .replace(/^Wall time [0-9.]+ seconds\s*\n/i, '')
-      .replace(/^Output:\s*\n?/i, '')
-      .split('\n')
-      .map((l) => l.trim())
-      .find((l) => l.length > 0) ?? ''
-    const text = fromResult || b.errorInfo?.code || b.errorInfo?.nextAction || ''
-    return text.length > 140 ? text.slice(0, 137) + '…' : text
-  })()
+  // 收缩态那一句话：与批量组里的失败摘要同一来源（lib/failureLine.ts），
+  // 取不到有信息量的原因就**不渲染** —— 一个 `✗ .` 比没有更糟（用户 2026-10 报障）。
+  const collapsedError = err ? failureLine(b.result, b.errorInfo, 140) : ''
   const codemodeProgress = batchProgressOf(b.nestedCalls)
   const envelopeWall = (() => {
     if (!isCodemode || !b.result) return undefined
@@ -264,18 +256,23 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
         ) : (
           <>
             <span className={`t ${err ? 'err' : ''}`}>{rt ? toolVerb(b.name) : b.name}</span>
-            {/* 档位标签：只找工具（检索）还是真干活（执行）。判据来自后端 HostOps 计数 ——
-                保留操作不进 nested_calls，前端无法自行判定「纯检索」（见 codemodeTier）。
-                放在名字**后面**而不是行尾：行尾被时间/用量/结果占着，一眼扫过去只剩药丸的边。 */}
-            {isCodemode && (
-              <span
-                className={`cm-mode ${tier}`}
-                title={tier === 'search' ? t('tool.codemode.searchHint') : t('tool.codemode.executeHint')}
-              >
-                <span className="cm-mode-mark" aria-hidden="true">{tier === 'search' ? '⌕' : '❯'}</span>
-                <span className="cm-mode-word">{tier === 'search' ? t('tool.codemode.search') : t('tool.codemode.execute')}</span>
-              </span>
-            )}
+            {/* 档位徽标与对象文本共用行头的第五格（1fr）。
+                行头是设计给的六列网格（14 · 14 · 56 · 1fr · auto · 52）；徽标若作为第七个
+                网格子项，网格会把它放进 1fr 那格、把对象/度量/时长挤到第二行 —— 用户 2026-10
+                报障的「列宽挤压」就是它。所以徽标是单元格**内部**的 flex 子项，不参与列分配。 */}
+            <span className="args-cell">
+              {/* 档位标签：只找工具（检索）还是真干活（执行）。判据来自后端 HostOps 计数 ——
+                  保留操作不进 nested_calls，前端无法自行判定「纯检索」（见 codemodeTier）。
+                  放在名字**后面**而不是行尾：行尾被时间/用量/结果占着，一眼扫过去只剩药丸的边。 */}
+              {isCodemode && (
+                <span
+                  className={`cm-mode ${tier}`}
+                  title={tier === 'search' ? t('tool.codemode.searchHint') : t('tool.codemode.executeHint')}
+                >
+                  <span className="cm-mode-mark" aria-hidden="true">{tier === 'search' ? '⌕' : '❯'}</span>
+                  <span className="cm-mode-word">{tier === 'search' ? t('tool.codemode.search') : t('tool.codemode.execute')}</span>
+                </span>
+              )}
             {/* 编排型工具（codemode）显示「脚本干了什么」；其余工具显示 toolArgsSummary。 */}
             {(scriptLine || summary) && (
               <span
@@ -309,6 +306,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
                 {scriptLine || (path ? shortPath(summary) : summary)}
               </span>
             )}
+            </span>
           </>
         )}
         <span className="grow" />
@@ -343,7 +341,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
         {b.status === 'running' && !isCodemode && <span className="run">…</span>}
         {/* 度量列：+a −b / N lines / N hits / N files / x.x KB —— 算不出就不画 */}
         {rt && metric ? (
-          <span className={`m${err ? ' bad' : ''}`}>
+          <span className="m">
             {metric.kind === 'diff' ? (
               <>
                 <span className="p">+{metric.added}</span> <span className="d">−{metric.removed}</span>
@@ -354,7 +352,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
           </span>
         ) : null}
         {rt ? (
-          <span className={`dur${err ? ' bad' : ''}`}>
+          <span className="dur">
             {b.status === 'running' ? <ElapsedTimer startAt={b.startedAt} running durMs={undefined} /> : fmtMs(b.durMs ?? undefined)}
           </span>
         ) : (
@@ -381,7 +379,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
       )}
       {/* 批量进度（用户 2026-10 规格 §3）：结束后是真账（nested_calls），
           运行中协议还没给任何子任务数据 → 不确定态 + 已用时长，不画百分比 */}
-      {isCodemode && (b.status === 'running' || (b.nestedCalls?.length ?? 0) > 0) && (
+      {isCodemodeTool(b.name) && (b.status === 'running' || (b.nestedCalls?.length ?? 0) > 0) && (
         <ToolBatchProgress
           tier={tier}
           progress={codemodeProgress}

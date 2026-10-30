@@ -19,6 +19,7 @@ import { isCsvPath } from '../lib/csv'
 import { baseDirFor } from '../lib/localAsset'
 import { visualKindOf } from '../lib/visualFile'
 import { centerOf, overlayCoversRect, rectsIntersect } from '../lib/overlayHit'
+import { shortName } from '../lib/shortPath'
 import { copyText } from '../lib/clipboard'
 import { withAgentToolBlocks } from '../lib/agentSession'
 import { useT } from '../i18n'
@@ -2081,7 +2082,10 @@ export default function RightPanel() {
   const tabTitle = (tab: TabInstance): string => {
     if (tab.kind === 'file') {
       const base = (tab.path ?? '').split('/').filter(Boolean).pop()
-      return base || kindLabel('file')
+      // 长文件名中间截断（保留 `_test.go` 这类尾巴）：标签最宽 168px，从尾巴截断时
+      // `conversation_router.go` 与 `conversation_router_test.go` 会长得一模一样。
+      // 完整路径在 title 里（见渲染点的 title 属性）。
+      return (base && shortName(base)) || kindLabel('file')
     }
     if (tab.kind === 'web') {
       const tp = embedNav?.targets?.find((x) => x.id === tab.viewId)
@@ -2178,7 +2182,7 @@ export default function RightPanel() {
                   role="tab"
                   aria-selected={on}
                   tabIndex={on ? 0 : -1}
-                  title={restoring ? t('browser.tabRestoring') : sleeping ? t('browser.tabSleeping') : (webTabUrl(tab) || tabTitle(tab))}
+                  title={restoring ? t('browser.tabRestoring') : sleeping ? t('browser.tabSleeping') : (webTabUrl(tab) || (tab.kind === 'file' ? (tab.path || tabTitle(tab)) : tabTitle(tab)))}
                   onClick={() => activateTab(tab.id)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTab(tab.id) }

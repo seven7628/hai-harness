@@ -2114,6 +2114,20 @@ body.is-electron .left.collapsed .rail .rbtn {
 .tool-row .t.err {
   color: var(--error);
 }
+/* 行头的「对象」一格：档位徽标 + 参数摘要共处一个容器。
+   为什么必须包一层：运行时皮肤的行头是六列 grid（14·14·56·1fr·auto·52），
+   第 7 个网格子项会被塞进 1fr 那格并把对象/度量/时长挤到第二行；包成 flex 单元格
+   后，徽标只是单元格内部的子项，不再参与列分配（用户 2026-10 报障的列宽挤压）。 */
+.tool-row .args-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.tool-row .args-cell > .args {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .tool-row .args {
   flex: 0 1 auto;
   min-width: 0;

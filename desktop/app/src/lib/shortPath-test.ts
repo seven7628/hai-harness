@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { shortPath } from './shortPath'
+import { shortName, shortPath } from './shortPath'
 
 test('短路径原样返回', () => {
   assert.equal(shortPath('auth.go'), 'auth.go')
@@ -31,4 +31,25 @@ test('单段超长（没有斜杠）也能截断', () => {
 test('空串 / 带尾斜杠都不炸', () => {
   assert.equal(shortPath(''), '')
   assert.ok(shortPath('/very/long/'.repeat(8) + 'x').startsWith('…/'))
+})
+
+test('shortName：短名字原样返回（绝大多数文件不该被改动）', () => {
+  assert.equal(shortName('main.go'), 'main.go')
+  assert.equal(shortName('a'.repeat(24)), 'a'.repeat(24))
+})
+
+test('shortName：长名字中间截断，尾部（扩展名 + 末段）保住', () => {
+  const out = shortName('conversation_router_helper_test.go')
+  assert.ok(out.length <= 24, `长度必须 <= 24，实际 ${out.length}: ${out}`)
+  assert.ok(out.includes('…'), '必须出现省略号')
+  assert.ok(out.endsWith('_test.go'), `尾巴要能区分测试/源码，实际 ${out}`)
+  assert.ok(out.startsWith('conversation_r'), `头部要保留辨识度，实际 ${out}`)
+  // 同一目录下的「源码 / 测试」两个文件截断后必须还能区分
+  assert.notEqual(shortName('conversation_router_helper_test.go'), shortName('conversation_router_helper.go'))
+})
+
+test('shortName：没有扩展名的长名字照样截断', () => {
+  const out = shortName('a'.repeat(40))
+  assert.ok(out.length <= 24)
+  assert.ok(out.includes('…'))
 })

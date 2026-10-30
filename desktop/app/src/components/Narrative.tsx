@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf, mainRunActive } from '../store/useAppStore'
-import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
+import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
 import { FOLDED_KINDS, foldedBody, runningBody, selectTurns, turnHead, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
@@ -531,6 +531,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const scrollMaxRef = useRef(-1)
   const [away, setAway] = useState(false) // 用户已离开底部（显示「回到底部」按钮）
   const [fresh, setFresh] = useState(false) // 离开期间有新内容到达（按钮带圆点）
+  // away 是**为什么**被置位的：true = 用户自己往上翻了（意图，必须尊重）；
+  // false = tick 的「外部位移」启发式（内容塌缩会骗它，允许用几何撤销）。
+  // 不分开的话，自动折叠造成的一次误判会让按钮永久挂住（用户 2026-10 报障）。
+  const awayHardRef = useRef(false)
   // 贴底/方向判定统一走 lib/scrollFollow（纯函数，不变量由 scrollFollow-test 钉住）
   const BOTTOM_THRESHOLD = 120 // px：视为「贴底」的容差（content-visibility 高度为估算值）
   // 程序滚动的**唯一入口**。
@@ -570,8 +574,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     lastTopRef.current = el.scrollTop
     scrollMaxRef.current = el.scrollHeight - el.clientHeight
     // 停止跟随：唯一的状态转移，所有手势/外部改动都收敛到这里。
-    const stopFollow = () => {
+    // `hard` = 这次停止是不是**用户亲手**翻上去的（见 awayHardRef 的注释）。
+    const stopFollow = (hard = false) => {
       autoscrollRef.current = false
+      if (hard) awayHardRef.current = true
       if (stickRef.current) {
         stickRef.current = false
         setAway(true)
@@ -580,6 +586,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     // 恢复跟随（仅在**用户自己**把视图带回底部时）。
     const startFollow = () => {
       autoscrollRef.current = true
+      awayHardRef.current = false
       // 基准必须同步成当前位置：否则 tick 的下一帧会把「距旧基准的落差」
       // 当成外部改动，刚恢复的跟随又被自己关掉。
       expectedTopRef.current = el.scrollTop
@@ -607,18 +614,37 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         threshold: BOTTOM_THRESHOLD
       })
       if (follow) startFollow()
-      else stopFollow()
+      else stopFollow(dir === 'up') // 手势方向是 up → 用户意图（硬停止）；否则只是位置判断
     }
     const mark = (dir: 'up' | 'down' | null) => {
       userGestureRef.current = true
       lastGestureAtRef.current = performance.now()
       if (dir) intentRef.current = dir
     }
+    // target → el 之间最近的**可垂直滚动**祖先（工具输出 <pre>、diff 体、思考折叠体…）。
+    // wheel 会冒泡到 .narrative，若不排除，用户只是在输出里往回翻两行，整个对话就被
+    // 判定成「他要离开底部」（用户 2026-10：自动折叠后按钮行为异常，一半原因在这）。
+    const nestedScrollerOf = (target: EventTarget | null): HTMLElement | null => {
+      let node = target instanceof HTMLElement ? target : null
+      while (node && node !== el) {
+        const oy = getComputedStyle(node).overflowY
+        if ((oy === 'auto' || oy === 'scroll') && node.scrollHeight > node.clientHeight + 1) return node
+        node = node.parentElement
+      }
+      return null
+    }
     const onWheel = (e: WheelEvent) => {
+      const inner = nestedScrollerOf(e.target)
+      if (inner && wheelConsumedByScroller({
+        deltaY: e.deltaY,
+        scrollTop: inner.scrollTop,
+        scrollHeight: inner.scrollHeight,
+        clientHeight: inner.clientHeight,
+      })) return
       const dir = e.deltaY < 0 ? 'up' : 'down'
       mark(dir)
       // 向上滚 → 立刻停止跟随（不等 scroll 事件，避免被 tick 抢跑）。
-      if (dir === 'up') stopFollow()
+      if (dir === 'up') stopFollow(true)
     }
     const onScroll = () => {
       const top = el.scrollTop
@@ -635,7 +661,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       //     表现为新会话再也不自动贴底（gap 一路涨到 850px）。
       //  ② 钳到当前底部：top 已经贴着 max，再变小只是高度变化的结果。
       const movedUp = isUserScrollUp({ top, prevTop, max, prevMax })
-      if (movedUp) stopFollow()
+      if (movedUp) stopFollow(true)
       // 用户手势引发的 scroll 才重新评估「是否回到底部」。
       if (!userGestureRef.current) return
       userGestureRef.current = false
@@ -647,7 +673,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       if (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) return
       const up = e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home'
       mark(up ? 'up' : 'down')
-      if (up) stopFollow()
+      if (up) stopFollow(true)
     }
     const onTouchStart = (e: TouchEvent) => {
       mark(null)
@@ -661,7 +687,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       // 手指向下拖 = 内容往上走 = 看历史
       const dir = dy > 0 ? 'up' : 'down'
       mark(dir)
-      if (dir === 'up') stopFollow()
+      if (dir === 'up') stopFollow(true)
     }
     el.addEventListener('wheel', onWheel, { passive: true })
     el.addEventListener('touchstart', onTouchStart, { passive: true })
@@ -742,8 +768,28 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         if (autoscrollRef.current) {
           autoscrollRef.current = false
           stickRef.current = false
+          awayHardRef.current = false // 启发式停止，不是用户亲口说的
           setAway(true)
         }
+      }
+      // 几何兜底（用户 2026-10：自动折叠让「回到最新」按钮挂住）：
+      // 非跟随态下 tick 不写 scrollTop，位置可信 —— 既然已经贴底，按钮就不该在。
+      // 用户亲手翻上去的（awayHard）不在此列：那一路必须由用户自己滚回来才恢复，
+      // 否则「在阈值内上滑 50px」会被立刻翻案（就是历史上的 bug ①）。
+      else if (
+        shouldResumeFollow({
+          follow: autoscrollRef.current,
+          top: el.scrollTop,
+          max,
+          hardAway: awayHardRef.current,
+        })
+      ) {
+        autoscrollRef.current = true
+        stickRef.current = true
+        awayHardRef.current = false
+        expectedTopRef.current = el.scrollTop
+        setAway(false)
+        setFresh(false)
       }
       // ## 只要「跟随 + 不在底部」就钉，不再要求高度刚变过（2026-10-21）
       //
@@ -774,6 +820,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   useEffect(() => {
     stickRef.current = true
     autoscrollRef.current = true // 新会话默认跟随（用户没表达过「看历史」意图）
+    awayHardRef.current = false
     setAway(false)
     setFresh(false)
     const el = ref.current
@@ -789,6 +836,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const jumpToBottom = () => {
     stickRef.current = true
     autoscrollRef.current = true // 点「回到底部」= 明确要恢复跟随
+    awayHardRef.current = false
     setAway(false)
     setFresh(false)
     expectedTopRef.current = -1
