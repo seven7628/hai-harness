@@ -51,6 +51,9 @@ export const ToolBatchProgress = memo(function ToolBatchProgress({
         data-failed={progress.failed > 0 ? '1' : undefined}
       >
         <i className="cm-bp-fill" style={{ width: `${pct}%` }} />
+        {/* 红色失败段从绿段末尾开始，占据剩下的那段进度：pct 只算**成功**的份额
+            （lib/codemodeBatch.ts 的 done/total），所以两段合起来正好是「跑完的部分」。
+            特例：全部子调用都失败时 pct=0、失败段满格 —— 条上整条红，这是正确表达。 */}
         {failPct > 0 ? <i className="cm-bp-fail" style={{ width: `${failPct}%`, left: `${pct}%` }} /> : null}
       </div>
       <div className="cm-bp-line mono">
