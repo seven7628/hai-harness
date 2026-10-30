@@ -363,25 +363,202 @@ const MOCK_FS_FILES: Record<string, string[]> = {
   '/mock/proj-notify/src': ['notify.go'],
 }
 
+// —— 可变虚拟文件树 ——
+//
+// 上面两张表是**种子**（e2e 依赖这些固定名字）。文件树写操作（重命名/移动/新建/删除）必须
+// 改变后续 fsList 的返回 —— 否则 e2e 只能断言「菜单点了没报错」，无法证明「文件真的过去了」。
+// 于是把静态表摊平成一张 路径 → 类型 的 Map，所有读写都走它：种子的语义不变（同一批名字、
+// 同样的目录/文件划分），但可以被修改。
+const mockTree = new Map<string, 'dir' | 'file'>()
+function seedMockTree(): void {
+  mockTree.clear()
+  for (const [dir, kids] of Object.entries(MOCK_FS_DIRS)) {
+    mockTree.set(dir, 'dir')
+    for (const n of kids) mockTree.set(`${dir}/${n}`, 'dir')
+  }
+  for (const [dir, kids] of Object.entries(MOCK_FS_FILES)) {
+    if (!mockTree.has(dir)) mockTree.set(dir, 'dir')
+    for (const n of kids) mockTree.set(`${dir}/${n}`, 'file')
+  }
+}
+seedMockTree()
+
+const mockNorm = (p: string): string => String(p ?? '').replace(/\/+$/, '')
+const mockKind = (p: string): 'dir' | 'file' | null => mockTree.get(mockNorm(p)) ?? null
+const mockIsDir = (p: string): boolean => mockKind(p) === 'dir'
+const mockIsFile = (p: string): boolean => mockKind(p) === 'file'
+
 // mockFsChildren 虚拟目录子项（目录已知 → 子项列表；未知 → null 表示不存在）
 function mockFsChildren(dir: string): { name: string; path: string; isDir: boolean }[] | null {
-  const base = String(dir ?? '').replace(/\/+$/, '')
+  const base = mockNorm(dir)
   if (!base.startsWith('/mock')) return null
-  if (!Object.prototype.hasOwnProperty.call(MOCK_FS_DIRS, base)) return null
+  if (!mockIsDir(base)) return null
   const out: { name: string; path: string; isDir: boolean }[] = []
-  for (const n of MOCK_FS_DIRS[base] ?? []) out.push({ name: n, path: `${base}/${n}`, isDir: true })
-  for (const n of MOCK_FS_FILES[base] ?? []) out.push({ name: n, path: `${base}/${n}`, isDir: false })
+  for (const [k, kind] of mockTree) {
+    if (k === base || !k.startsWith(base + '/')) continue
+    const rest = k.slice(base.length + 1)
+    if (rest.includes('/')) continue // 只列直接子项
+    out.push({ name: rest, path: `${base}/${rest}`, isDir: kind === 'dir' })
+  }
   return out
 }
-function mockIsDir(p: string): boolean {
-  return Object.prototype.hasOwnProperty.call(MOCK_FS_DIRS, p.replace(/\/+$/, ''))
+
+// rekeyMockTree 把 oldPath 及其整棵子树改挂到 newPath（重命名/移动共用）。
+function rekeyMockTree(oldPath: string, newPath: string): void {
+  const from = mockNorm(oldPath)
+  const moved: [string, string, 'dir' | 'file'][] = []
+  for (const [k, kind] of mockTree) {
+    if (k === from) moved.push([k, newPath, kind])
+    else if (k.startsWith(from + '/')) moved.push([k, newPath + k.slice(from.length), kind])
+  }
+  for (const [k] of moved) mockTree.delete(k)
+  for (const [, to, kind] of moved) mockTree.set(to, kind)
 }
-function mockIsFile(p: string): boolean {
-  const base = p.replace(/\/+$/, '')
-  const i = base.lastIndexOf('/')
-  const parent = base.slice(0, i)
-  const name = base.slice(i + 1)
-  return Boolean(MOCK_FS_FILES[parent]?.includes(name))
+
+// copyMockTree 把 src 整棵子树**复制**到 dest（duplicate 用；rekey 是移动，别混用）。
+function copyMockTree(src: string, dest: string): void {
+  const from = mockNorm(src)
+  const entries: [string, 'dir' | 'file'][] = []
+  for (const [k, kind] of mockTree) {
+    if (k === from) entries.push([dest, kind])
+    else if (k.startsWith(from + '/')) entries.push([dest + k.slice(from.length), kind])
+  }
+  for (const [to, kind] of entries) mockTree.set(to, kind)
+}
+
+function mockInside(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent + '/')
+}
+
+// 写操作守卫：与 electron/fs-ops.ts 同口径的**最小集**（绝对路径、不越出工作区、不动根、
+// 名字合法、同名拒绝）。mock 不模拟敏感目录（浏览器里没有真实 HOME）。
+function mockGuard(workspace: string, p: string, allowRoot: boolean): string | null {
+  if (!workspace || !p || !p.startsWith('/')) return '无效路径'
+  if (!mockInside(mockNorm(p), mockNorm(workspace))) return '只能操作当前工作区内的文件'
+  if (!allowRoot && mockNorm(p) === mockNorm(workspace)) return '不能操作工作区根目录'
+  return null
+}
+
+function mockNameError(name: string): string | null {
+  const n = String(name ?? '').trim()
+  if (!n) return '名称不能为空'
+  if (n === '.' || n === '..') return '名称无效'
+  if (n.includes('/')) return '名称不能包含斜杠'
+  return null
+}
+
+const mockParent = (p: string): string => mockNorm(p).slice(0, mockNorm(p).lastIndexOf('/')) || '/'
+const mockBase = (p: string): string => mockNorm(p).split('/').pop() ?? ''
+
+// mockOpRename / Move / Mkdir / CreateFile / Duplicate / Trash：返回与真实主进程同形状的结果。
+function mockOpRename(req: { workspace: string; path: string; name: string }): { ok: boolean; path?: string; error?: string; code?: string } {
+  const nameErr = mockNameError(req?.name)
+  if (nameErr) return { ok: false, error: nameErr, code: 'INVALID_NAME' }
+  const err = mockGuard(req?.workspace, req?.path, false)
+  if (err) return { ok: false, error: err, code: 'DENIED' }
+  if (!mockKind(req.path)) return { ok: false, error: '文件不存在', code: 'NOT_FOUND' }
+  const dest = `${mockParent(req.path)}/${String(req.name).trim()}`
+  if (dest === mockNorm(req.path)) return { ok: true, path: dest }
+  if (mockTree.has(dest)) return { ok: false, error: '目标位置已存在同名项目', code: 'EXISTS' }
+  rekeyMockTree(req.path, dest)
+  return { ok: true, path: dest }
+}
+
+function mockOpMove(req: { workspace: string; src: string; destDir: string }): { ok: boolean; path?: string; error?: string; code?: string } {
+  const err = mockGuard(req?.workspace, req?.src, false) ?? mockGuard(req?.workspace, req?.destDir, true)
+  if (err) return { ok: false, error: err, code: 'DENIED' }
+  if (!mockIsDir(req.destDir)) return { ok: false, error: '目标目录不存在', code: 'NOT_FOUND' }
+  if (mockParent(req.src) === mockNorm(req.destDir)) return { ok: true, path: mockNorm(req.src) }
+  if (mockInside(mockNorm(req.destDir), mockNorm(req.src))) {
+    return { ok: false, error: '不能把目录移动到它自己里面', code: 'CYCLE' }
+  }
+  const dest = `${mockNorm(req.destDir)}/${mockBase(req.src)}`
+  if (mockTree.has(dest)) return { ok: false, error: '目标目录已存在同名项目', code: 'EXISTS' }
+  rekeyMockTree(req.src, dest)
+  return { ok: true, path: dest }
+}
+
+function mockOpCreate(req: { workspace: string; dir: string; name: string }, kind: 'dir' | 'file'): { ok: boolean; path?: string; error?: string; code?: string } {
+  const nameErr = mockNameError(req?.name)
+  if (nameErr) return { ok: false, error: nameErr, code: 'INVALID_NAME' }
+  const err = mockGuard(req?.workspace, req?.dir, true)
+  if (err) return { ok: false, error: err, code: 'DENIED' }
+  if (!mockIsDir(req.dir)) return { ok: false, error: '目标目录不存在', code: 'NOT_FOUND' }
+  const dest = `${mockNorm(req.dir)}/${String(req.name).trim()}`
+  if (mockTree.has(dest)) return { ok: false, error: '已存在同名项目', code: 'EXISTS' }
+  mockTree.set(dest, kind)
+  return { ok: true, path: dest }
+}
+
+function mockOpDuplicate(req: { workspace: string; path: string }): { ok: boolean; path?: string; error?: string; code?: string } {
+  const err = mockGuard(req?.workspace, req?.path, false)
+  if (err) return { ok: false, error: err, code: 'DENIED' }
+  const kind = mockKind(req.path)
+  if (!kind) return { ok: false, error: '文件不存在', code: 'NOT_FOUND' }
+  const dir = mockParent(req.path)
+  const base = mockBase(req.path)
+  const ext = kind === 'file' && base.includes('.') ? base.slice(base.lastIndexOf('.')) : ''
+  const stem = ext ? base.slice(0, -ext.length) : base
+  for (let i = 1; i <= 99; i++) {
+    const candidate = `${dir}/${stem}${i === 1 ? ' copy' : ` copy ${i}`}${ext}`
+    if (mockTree.has(candidate)) continue
+    copyMockTree(req.path, candidate)
+    return { ok: true, path: candidate }
+  }
+  return { ok: false, error: '副本过多，无法命名', code: 'EXISTS' }
+}
+
+function mockOpCopy(req: { workspace: string; src: string; destDir: string }): { ok: boolean; path?: string; error?: string; code?: string } {
+  const err = mockGuard(req?.workspace, req?.src, false) ?? mockGuard(req?.workspace, req?.destDir, true)
+  if (err) return { ok: false, error: err, code: 'DENIED' }
+  if (!mockIsDir(req.destDir)) return { ok: false, error: '目标目录不存在', code: 'NOT_FOUND' }
+  if (mockInside(mockNorm(req.destDir), mockNorm(req.src))) {
+    return { ok: false, error: '不能把目录复制到它自己里面', code: 'CYCLE' }
+  }
+  const dest = `${mockNorm(req.destDir)}/${mockBase(req.src)}`
+  if (mockTree.has(dest)) return { ok: false, error: '目标目录已存在同名项目', code: 'EXISTS' }
+  copyMockTree(req.src, dest)
+  return { ok: true, path: dest }
+}
+
+// mockOpImport：浏览器 mock 没有真实磁盘，源只按 basename 落地。
+// 与真实主进程的差别（不校验源是否存在）是刻意的：e2e 要能造一个「从访达拖进来的文件」，
+// 而浏览器里那个 File 永远不对应任何真实路径。
+function mockOpImport(req: { workspace: string; destDir: string; sources: string[] }): {
+  ok: boolean
+  imported: string[]
+  failed: { name: string; error: string }[]
+} {
+  const imported: string[] = []
+  const failed: { name: string; error: string }[] = []
+  const err = mockGuard(req?.workspace, req?.destDir, true)
+  if (err) return { ok: false, imported, failed: [{ name: '', error: err }] }
+  if (!mockIsDir(req.destDir)) return { ok: false, imported, failed: [{ name: '', error: '目标目录不存在' }] }
+  for (const src of Array.isArray(req?.sources) ? req.sources : []) {
+    const name = String(src).split('/').pop() || ''
+    if (!name) {
+      failed.push({ name: '', error: '无效的源路径' })
+      continue
+    }
+    const dest = `${mockNorm(req.destDir)}/${name}`
+    if (mockTree.has(dest)) {
+      failed.push({ name, error: '目标目录已存在同名项目' })
+      continue
+    }
+    mockTree.set(dest, 'file')
+    imported.push(dest)
+  }
+  return { ok: true, imported, failed }
+}
+
+function mockOpTrash(req: { workspace: string; path: string }): { ok: boolean; path?: string; error?: string; code?: string } {
+  const err = mockGuard(req?.workspace, req?.path, false)
+  if (err) return { ok: false, error: err, code: 'DENIED' }
+  if (!mockKind(req.path)) return { ok: false, error: '文件不存在', code: 'NOT_FOUND' }
+  for (const k of [...mockTree.keys()]) {
+    if (k === mockNorm(req.path) || k.startsWith(mockNorm(req.path) + '/')) mockTree.delete(k)
+  }
+  return { ok: true, path: mockNorm(req.path) }
 }
 
 // mock 侧「算不算图片」的扩展名集合：与 electron/read-image.ts 的 IMAGE_MIMES 同集合，
@@ -1006,6 +1183,33 @@ class MockTransport implements Transport {
     return { ok: false, error: `mock 路径不存在: ${p}` }
   }
 
+  // —— 文件树写操作（浏览器 mock：改内存树，让 e2e 能断言「真的搬过去了」）——
+  // 返回形状与真实主进程一致（ok/path/error/code），所以左栏的整套交互在 mock 下可完整走通。
+  async fsRename(req: { workspace: string; path: string; name: string }) {
+    return mockOpRename(req)
+  }
+  async fsMove(req: { workspace: string; src: string; destDir: string }) {
+    return mockOpMove(req)
+  }
+  async fsMkdir(req: { workspace: string; dir: string; name: string }) {
+    return mockOpCreate(req, 'dir')
+  }
+  async fsCreateFile(req: { workspace: string; dir: string; name: string }) {
+    return mockOpCreate(req, 'file')
+  }
+  async fsDuplicate(req: { workspace: string; path: string }) {
+    return mockOpDuplicate(req)
+  }
+  async fsTrash(req: { workspace: string; path: string }) {
+    return mockOpTrash(req)
+  }
+  async fsCopy(req: { workspace: string; src: string; destDir: string }) {
+    return mockOpCopy(req)
+  }
+  async fsImport(req: { workspace: string; destDir: string; sources: string[] }) {
+    return mockOpImport(req)
+  }
+
   // xlsx 工作簿预览（mock）：不真转（无 Python/浏览器渲染），直接给一个失败结果并说明
   // 原因 —— 比「假成功 + 打不开的白面板」更诚实；e2e 需要成功路径时注入 window.desktop.watchXlsx。
   async watchXlsx(): Promise<{ ok: boolean; html_path?: string; error?: string }> {
@@ -1113,7 +1317,7 @@ class MockTransport implements Transport {
         try {
           delayMs = Number(globalThis.localStorage?.getItem('mock.loadDelayMs') ?? 0) || 0
         } catch {
-          delayMs = 0
+          /* localStorage 不可用（隐私模式等）：保持 0 = 同步响应 */
         }
         if (delayMs > 0) {
           setTimeout(() => this.respond(cmd, resp), delayMs)

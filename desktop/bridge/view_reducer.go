@@ -158,11 +158,14 @@ type Block struct {
 	Label string `json:"label,omitempty"`
 	// ParentRunID 该 agent 卡片的父 run（agent_start.ParentRunId）：左栏子智能体树的
 	// 父子锚点。runNodes 里也有（但有界收敛/裁剪后不一定在），块级字段是更稳的来源。
-	ParentRunID string      `json:"parent_run_id,omitempty"`
-	SpawnedAt   int64       `json:"spawned_at,omitempty"`
-	EndedAt     int64       `json:"ended_at,omitempty"`
-	Usage       Usage       `json:"usage,omitempty"`
-	Items       []AgentItem `json:"items,omitempty"`
+	ParentRunID string `json:"parent_run_id,omitempty"`
+	SpawnedAt   int64  `json:"spawned_at,omitempty"`
+	// CtxWindow 这个子 agent 自己的上下文窗口（agent_start.ContextWindow）。
+	// runNodes 会被裁剪，块是更稳的来源（与 ParentRunID 的理由相同）。
+	CtxWindow int64       `json:"ctx_window,omitempty"`
+	EndedAt   int64       `json:"ended_at,omitempty"`
+	Usage     Usage       `json:"usage,omitempty"`
+	Items     []AgentItem `json:"items,omitempty"`
 	// ItemsTrimmed 表示该 agent 卡片的历史 items 被裁剪掉的条数
 	//（UI 可提示「更早的记录未保留」）。见 maxAgentItemsPerBlockDefault。
 	ItemsTrimmed    int    `json:"items_trimmed,omitempty"`
@@ -313,6 +316,10 @@ type RunNode struct {
 	DurMs     int64  `json:"dur_ms,omitempty"`
 	TaskID    string `json:"task_id,omitempty"`
 	Promoted  bool   `json:"promoted,omitempty"`
+	// CtxWindow 该 run 自己 loop 的上下文窗口（agent_start.ContextWindow）。
+	// 必需按 run 存：子 agent 可能跑在另一个模型上（窗口和小/大不一样），
+	// 拿会话级那一个数当分母，子智能体视角里的占比就是错的（用户 2026-10 报障）。
+	CtxWindow int64 `json:"ctx_window,omitempty"`
 }
 
 // Turn 是单次 LLM 调用（llm_end 一条）的指标明细。
@@ -2175,6 +2182,8 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 	node := RunNode{
 		ID: e.RunId, ParentID: e.ParentRunId, Label: label, Status: statusRunning,
 		Depth: e.Depth, Kind: runNodeKindRun, StartedAt: millis(ts),
+		// 每个 run 都记自己的窗口（含子 agent）：子 agent 可能跑在另一个模型上
+		CtxWindow: e.ContextWindow,
 	}
 	if e.ParentRunId == "" {
 		// 新顶层 run = 新 trace：丢弃旧 trace 与错误块
@@ -2228,7 +2237,8 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 	r.blocks = append(blocks, Block{
 		Kind: blockKindAgent, ID: bid, RunID: e.RunId, ParentRunID: e.ParentRunId, Label: label,
 		Status: statusRunning, SpawnedAt: millis(ts), TaskID: taskID,
-		Items: make([]AgentItem, 0),
+		CtxWindow: e.ContextWindow, // 子 agent 自己的窗口（与 runNodes 同源，块更不易被裁剪）
+		Items:     make([]AgentItem, 0),
 	})
 	r.blockIdxDirty = true // blocks 由 filter 产物重建（含去占位）
 	r.noteBlockAppendLocked(bid)

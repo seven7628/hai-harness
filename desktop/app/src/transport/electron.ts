@@ -40,6 +40,15 @@ export function electronTransport(): Transport {
     fsReadRef: (req) => d.fsReadRef(req) as Promise<{ ok: boolean; content?: string; error?: string }>,
     fsReadImage: (req) => d.fsReadImage(req) as Promise<FsImageResult>,
     fsStat: (p) => d.fsStat(p),
+    // 文件树写操作：workspace 随 payload 注入（主进程据此限定作用域）。
+    fsRename: (req) => d.fsRename(req),
+    fsMove: (req) => d.fsMove(req),
+    fsMkdir: (req) => d.fsMkdir(req),
+    fsCreateFile: (req) => d.fsCreateFile(req),
+    fsDuplicate: (req) => d.fsDuplicate(req),
+    fsCopy: (req) => d.fsCopy(req),
+    fsImport: (req) => d.fsImport(req),
+    fsTrash: (req) => d.fsTrash(req),
     // 无参 → 主进程按 opts 缺省分支返回 string | null（既有单选语义）；显式 multi → string[]。
     pickFsFile: async () => {
       const r = await d.pickFsFile()

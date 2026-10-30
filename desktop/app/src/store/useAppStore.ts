@@ -1743,6 +1743,115 @@ function relIfInside(path: string, ws: string | undefined): string {
   return n // 工作区外：保持绝对（bridge 的 resolveWorkspacePath 支持绝对路径）
 }
 
+// —— 文件树写操作后的右栏收敛（2026-10 左栏「文件夹管理」）——
+//
+// 移动/重命名/删除改的是**磁盘上的文件**，而右栏有三处按路径存了它的身份：
+//   ① filePreviews（键 = 工作区相对路径）→ 内容缓存：不换键就「内容凭空消失」，而且因为
+//      「旧键还在、新键没有」还会再读一遍盘；
+//   ② file 标签的 payload.path（绝对/相对两种写法都可能）→ 不换就是指向旧路径的死标签；
+//   ③ fileFocus（左栏选中锚 + 空文件标签的初值）→ 不换就是「选中的文件已经不存在」。
+// 三处必须在**同一次 set** 里收敛：分三次 set 会让文件栏在中途用「新内容 + 旧标签」渲染
+// 一帧（用户看到闪一下或空白）。
+//
+// 为什么遍历所有 scope 而不是只改当前会话：标签集按会话隔离（tabsByScope），同一工作区的
+// 多个会话都可能开着这个文件；只改当前会话，用户切回另一个会话时会看到「文件读取失败」。
+// 匹配按**那个 scope 自己的工作区**归一化，因此别的工作区里的同名相对路径不会被误改
+// （fromAbs 是绝对路径，不在它的 workspace 内，fileKeyOf 保持绝对形式，与相对路径永不相等）。
+function scopeWorkspaceOf(s: AppState, scope: ScopeKey): string | undefined {
+  for (const p of s.projects) {
+    if (p.path === scope) return p.path
+    if (p.sessions.some((x) => x.id === scope)) return p.path
+  }
+  // 认不出归属时只给**当前** scope 兜底（它就是 s.workspace 这一侧）；其余一律不猜 ——
+  // 猜错会把另一个工作区的同名文件改掉，比留一个陈旧路径更难查。
+  return scope === scopeKeyOf(s) ? s.workspace : undefined
+}
+
+// keySuffix：标签路径相对被改条目键的尾部（"/a/b.ts" 之类；非子树 → 空串）。
+// 单独提出来是因为「绝对 / 相对」两种写法都要拼同一条尾巴，拼错的表现是标签指向一个
+// 不存在的混合路径（前半新、后半旧），比不换还难查。
+function keySuffix(key: string, base: string): string {
+  return key === base ? '' : key.slice(base.length)
+}
+
+// applyFsPathChange：toAbs = null 表示「路径没了」（删除），否则表示「路径换了」。
+// isDir=true 时按**前缀**处理整棵子树 —— 重命名/移动一个目录，它下面所有已打开的文件都
+// 必须跟着走（否则用户改个目录名，右栏里同目录下的文件全变成「读取失败」）。
+function applyFsPathChange(s: AppState, fromAbs: string, toAbs: string | null, isDir = false): Partial<AppState> {
+  const patch: Partial<AppState> = {}
+  const fromKey = fileKeyOf(fromAbs, s.workspace)
+  const toKey = toAbs ? fileKeyOf(toAbs, s.workspace) : ''
+
+  // 键是否属于被改名的那个条目：文件 → 全等；目录 → 自身或任意后代。
+  const hit = (k: string, base: string): boolean =>
+    k === base || (isDir && k.startsWith(base + '/'))
+  // 把旧键映射成新键（toKey 已保证与 fromKey 同形，故直接替换前缀）。
+  const remap = (k: string): string => toKey + k.slice(fromKey.length)
+
+  // ① 内容缓存换键（值里的 path 一起换：文件栏标题与定位读的是它）
+  {
+    const next: Record<string, FilePreview> = {}
+    let changed = false
+    for (const [k, pv] of Object.entries(s.filePreviews)) {
+      if (hit(k, fromKey)) {
+        changed = true
+        if (toAbs) {
+          const nk = remap(k)
+          next[nk] = { ...pv, path: nk }
+        }
+        continue
+      }
+      next[k] = pv
+    }
+    if (changed) patch.filePreviews = next
+  }
+
+  // ② 标签：换 path，或整条摘掉
+  let tabsByScope: Record<ScopeKey, TabSet> | null = null
+  for (const [scope, set0] of Object.entries(s.tabsByScope)) {
+    const ws = scopeWorkspaceOf(s, scope)
+    const keyOf = (p: string) => fileKeyOf(p, ws)
+    let changed = false
+    const tabs: TabInstance[] = []
+    for (const t of set0.tabs) {
+      if (t.kind === 'file' && t.path && hit(keyOf(t.path), keyOf(fromAbs))) {
+        changed = true
+        if (!toAbs) continue // 删除：这条标签没有内容可显示了
+        // 标签里的 path 有绝对/相对两种写法，换路径时保持它原来的写法（RightPanel 与
+        // bridge 都同时接受两者，这里只为「用户看不出变化」）。
+        const suffix = keySuffix(keyOf(t.path), keyOf(fromAbs))
+        tabs.push({ ...t, path: t.path.startsWith('/') ? toAbs + suffix : fileKeyOf(toAbs, ws) + suffix })
+        continue
+      }
+      tabs.push(t)
+    }
+    if (!changed) continue
+    // 激活标签被摘掉 → 顺延右邻居再左邻居（与 closeTab 同口径）；全摘光 → activeId=null
+    let activeId = set0.activeId
+    if (!tabs.some((t) => t.id === activeId)) {
+      const i = set0.tabs.findIndex((t) => t.id === set0.activeId)
+      activeId = (tabs[i] ?? tabs[i - 1])?.id ?? null
+    }
+    tabsByScope = tabsByScope ?? { ...s.tabsByScope }
+    tabsByScope[scope] = { ...set0, tabs, activeId }
+  }
+  if (tabsByScope) patch.tabsByScope = tabsByScope
+
+  // ③ 左栏选中锚
+  if (s.fileFocus) {
+    const fk = fileKeyOf(s.fileFocus.path, s.workspace)
+    if (hit(fk, fromKey)) {
+      // 选中锚保持**原来的写法**（绝对/相对都可能：文件树传绝对、对话里点开传相对）。
+      // 统一改写成相对会让左栏文件树的「正在展示」高亮对不上（它比较的是绝对路径）。
+      const suffix = fk.slice(fromKey.length)
+      patch.fileFocus = toAbs
+        ? { ...s.fileFocus, path: (s.fileFocus.path.startsWith('/') ? toAbs : fileKeyOf(toAbs, s.workspace)) + suffix }
+        : undefined
+    }
+  }
+  return patch
+}
+
 /**
  * fileKeyOf：文件内容缓存与 file 标签身份的**归一化键**（阶段 2）。
  *
@@ -2803,6 +2912,10 @@ interface AppState {
   openFile(path: string, toolId?: string, mode?: 'source', startLine?: number): void
   locateFile(path: string, toolId?: string, mode?: 'source', startLine?: number): void // R3：只定位（fileFocus + file_preview），**不切 tab、不展开右栏**
   ensureFilePreview(path: string): void // 阶段 2：内容缓存缺失时按需补拉（切回标签 / 缓存被淘汰 / 切工作区后）
+  // 左栏文件树的写操作改的是**磁盘上的文件**，右栏按路径存了三处身份（内容缓存 / file 标签 /
+  // fileFocus）→ 这两个动作把它们一次性收敛（实现见 applyFsPathChange）。
+  filePathMoved(fromPath: string, toPath: string, opts?: { isDir?: boolean }): void // 移动/重命名：路径跟着走
+  filePathRemoved(path: string, opts?: { isDir?: boolean }): void // 删除：摘掉指向它的 file 标签与缓存
   closeFile(): void
   fetchMetrics(opts?: { from?: string; to?: string; project?: string }): void // 强制拉取聚合报告
   ensureMetrics(): void // 按需拉取：报告缺失或超龄才发命令（空会话图表等高频入口）
@@ -8434,6 +8547,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     ))
     set({ ...tabPatch(s, scope, { ...set0, tabs }), fileFocus: undefined })
   },
+
+  // 左栏文件树的写操作 → 右栏同源收敛（见 applyFsPathChange）。
+  filePathMoved: (fromPath, toPath, opts) => set((s) => applyFsPathChange(s, fromPath, toPath, opts?.isDir)),
+  filePathRemoved: (path, opts) => set((s) => applyFsPathChange(s, path, null, opts?.isDir)),
 
   // 拉取使用统计报告（全局用量；metrics 命令忽略注入的 workspace，返回全项目）。
   // from/to = 窗口（YYYY-MM-DD，只裁剪序列；Stats 恒为全历史）——热力图窗口取近一年，
