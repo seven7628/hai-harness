@@ -5,7 +5,7 @@ import { useAppStore, genMsOf, mainRunActive } from '../store/useAppStore'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
-import { foldedBody, runningBody, selectTurns, turnHead, turnStats, turnUsage } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, foldedBody, runningBody, selectTurns, turnHead, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -100,9 +100,9 @@ function RetryProgress({ ts, delayMs, retrying, startedAt, costUsd }: { ts?: num
 // 工作过程的种类：简洁档收起时它们全部进工作盒子（外面只剩最后一轮正文 + 产出卡）。
 // system / task_result / task_delivery 是**关于这次运行**的行，不是运行结果本身 ——
 // 用户 2026-10 明确它们在简洁档也不该跑到盒子外面。
-const FOLDED = new Set<MsgBlock['kind']>([
-  'tool', 'agent', 'async_task', 'system', 'task_result', 'task_delivery',
-])
+// 工作盒子里装什么：判据在 selectTurns.workBody（含中间轮正文与思考 —— 历史轮
+// 的 reasoning 也要能展开读到，见那里的注释）。这里保留这个集合给「有没有工作」用。
+const FOLDED = FOLDED_KINDS
 
 const AssistantTurnMeta = memo(function AssistantTurnMeta({ b }: { b: Extract<MsgBlock, { kind: 'assistant' }> }) {
   const t = useT()
@@ -191,6 +191,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const density = densityProp ?? storedDensity
   // run 级「正在跑」：块上的 running 在两次 LLM 调用之间是假的（见下方 live）
   const runLive = useAppStore((s) => (s.activeSessionId ? mainRunActive(s.views[s.activeSessionId]) : false))
+  // 本次运行（AgentStart）的时刻：Working 的累计时长从它起算，而不是从「用户点发送」起算
+  // —— 排队等前置任务、压缩这些时间不属于这次运行。
+  const runStartedAt = useAppStore((s) => {
+    const nodes = (s.views[s.activeSessionId ?? ''] ?? { runNodes: s.runNodes }).runNodes ?? []
+    const root = nodes.find((n) => !n.parentId)
+    return root?.startedAt
+  })
+  // 等待用户：审批 / 提问。两者都是「运行暂停、等外部回应」，不是 AgentEnd。
+  const waiting = useAppStore((s) => ((s.approvals?.length ?? 0) > 0 ? 'approval' : (s.questions?.length ?? 0) > 0 ? 'input' : null))
   // 产出卡的动作：预览 = 用户在文件栏点它的同一条路；Finder = workspace + 相对路径
   const openFile = useAppStore((s) => s.openFile)
   const workspace = useAppStore((s) => s.workspace)
@@ -1000,7 +1009,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           {/* 一组调用折成一行，行本身是折角按钮（设计 .cy-act）：动词 + 对象 + 它数的量
               + 耗时，点开/收起的是**这一组逐条的行**，不牵动旁白与记录 */}
           {line ? (
-            <BatchGroup line={line}>{groupBlocks(tools, textOnlyId)}</BatchGroup>
+            <BatchGroup line={line} calls={tools}>{groupBlocks(tools, textOnlyId)}</BatchGroup>
           ) : null}
         </div>
       )
@@ -1033,7 +1042,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* 简洁档：收起时正文只剩**结论**（这一轮最后一个有正文的 assistant），中间那些
        「我看看 X」的旁白、思考、工具全在工作过程里。展开才按原顺序读全过程。
        详细档：原顺序整段展开，不折叠（v2 里详细档根本没有折叠行）。 */
-    const workItems = concise ? (skin === 'runtime' ? groupRounds(turn.items.filter(isWork)) : groupBlocks(turn.items.filter(isWork))) : []
+    const workItems = concise
+      ? (skin === 'runtime'
+        ? groupRounds(workBody(turn))
+        : groupBlocks(turn.items.filter((b) => isWork(b) || (b.kind === 'assistant' && b !== turn.answer) || b.kind === 'compression')))
+      : []
     /* 简洁档：收起时外面只有结论；**运行中**外面只有正在写的那一段 ——
        其余的思考、中间的 llm_content、工具都在 Working 里滚（AgentStart →
        AgentEnd 是同一个块）。详细档照旧整段摊开。 */
@@ -1069,7 +1082,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         {concise && work && live ? (
           /* Working = 整次运行（AgentStart → AgentEnd）：标题行 + 这一轮的全部内容
              （思考、中间的旁白、工具行、子 agent），可滚动、有高度上限 */
-          <LivePanel items={turn.items} startedAt={turnStart}>
+          <LivePanel items={turn.items} startedAt={runStartedAt ?? turnStart} waiting={waiting}>
             <div className="rt-turn-in">{groupRounds(turn.items)}</div>
           </LivePanel>
         ) : null}
@@ -1174,7 +1187,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           title={fresh ? t('narrative.newArrived') : t('narrative.backToLatest')}
         >
           {fresh && <span className="narrative-jump-dot" aria-hidden="true" />}
-          ↓ {t('narrative.backToLatest')}
+          ↓ {fresh ? t('narrative.newOutput') : t('narrative.jumpLatest')}
         </button>
       )}
     </div>

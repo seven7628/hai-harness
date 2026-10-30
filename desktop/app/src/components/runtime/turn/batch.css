@@ -1,3 +1,11 @@
+
+/* 展开着的已结算盒子：头吸顶（长内容滚动时「Worked for 8.2 s」也一直在） */
+html[data-skin='runtime'] .rt-workbox > .rt-act {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--paper);
+}
 /* 一组调用的折叠行（设计 .cy-act，ui.components.css:2086-2091，逐字）。
    这里只补三样设计没写、但 HTML button 自带的东西：清掉按钮的默认外观、
    键盘焦点环（设计在可达性一节给所有可交互行都画）、按下时的一点回弹。 */
@@ -52,4 +60,34 @@ html[data-skin='runtime'] .rt-batch + .rt-collapse > div {
 
 @media (prefers-reduced-motion: reduce) {
   html[data-skin='runtime'] .rt-batch { transition: none; }
+}
+
+/* 失败标记：一组的头在收缩态也要说清「有失败」——这是规格里唯一允许留在收缩态的
+   细节，因为失败不是「细节」，是结论的一部分。 */
+html[data-skin='runtime'] .rt-batch[data-failed] {
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .rt-batch .rt-batch-x {
+  flex: none;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--red);
+}
+
+/* 收缩态下的失败摘要行：每条失败一行（名字 + 结果首行） */
+html[data-skin='runtime'] .rt-batch-fails {
+  display: grid;
+  gap: 1px;
+  margin: 1px 0 0 1px;
+}
+
+html[data-skin='runtime'] .rt-batch-fail {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--red);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 62ch;
 }

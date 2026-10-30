@@ -69,3 +69,51 @@ export function batchLine(calls: Tool[]): string {
    出现两次（用户截图里上面两行「Agent」+ 下面两行「subagent」正是这个）。
    别的皮肤不动：判据只在运行时皮肤的分组里用（见 Narrative 的 groupRounds）。 */
 export const isDispatchTool = (name: string): boolean => /^agent_(spawn|send|resume|stop)$/.test(name)
+
+/* 一组调用「进行到哪了」—— 运行中要说清 完成几 / 还在跑几 / 失败几，
+   而不是只报一句静态的「Read 202 files」。规格（2026-10）：
+     「工具组执行期间保持展开，展示总数、已完成数、运行中数量、失败数量和执行时长」
+   结算之后才回到设计那句话（动词 · 对象 · 量 · 耗时）。 */
+export interface BatchStatus {
+  total: number
+  done: number
+  running: number
+  failed: number
+  /** 已结算调用的耗时之和（只加有值的：跑着的那条还没有 durMs） */
+  durMs: number
+  /** 全部结束（没有一条还在跑）—— 组可以自动收缩了 */
+  settled: boolean
+}
+
+export function batchStatus(calls: Tool[]): BatchStatus {
+  let done = 0
+  let running = 0
+  let failed = 0
+  let durMs = 0
+  for (const c of calls) {
+    if (c.status === 'running') running++
+    else if (c.isError) failed++
+    else done++
+    if (typeof c.durMs === 'number') durMs += c.durMs
+  }
+  return { total: calls.length, done, running, failed, durMs, settled: running === 0 }
+}
+
+/** 运行中那一版的组头：数字全部来自真实状态，不猜也不四舍五入。 */
+export function batchRunningLine(calls: Tool[]): string {
+  const s = batchStatus(calls)
+  if (!s.total) return ''
+  const parts = [`${s.total} tool ${s.total === 1 ? 'call' : 'calls'}`]
+  if (s.done) parts.push(`${s.done} completed`)
+  if (s.running) parts.push(`${s.running} running`)
+  if (s.failed) parts.push(`${s.failed} failed`)
+  if (s.durMs) parts.push(fmtMs(s.durMs))
+  return parts.join(' \u00b7 ')
+}
+
+/** 失败调用的一行摘要（收缩态也要看得见）：名字 + 结果/错误的首行。 */
+export function failedCallLine(c: Tool): string {
+  const first = (c.result ?? '').split('\n').find((l) => l.trim()) ?? ''
+  const brief = first.length > 120 ? first.slice(0, 117) + '…' : first
+  return [c.name, brief].filter(Boolean).join(' \u00b7 ')
+}

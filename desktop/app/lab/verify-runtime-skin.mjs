@@ -173,8 +173,9 @@ const batch1 = await page.eval(async () => {
 check('batch: the calls fold into one line', batch1.present === true && batch1.text.length > 8, JSON.stringify(batch1))
 check('batch: the line is a button with a fold mark', batch1.tag === 'BUTTON' && batch1.chev === true, `${batch1.tag} chev=${batch1.chev}`)
 check('batch: it carries verb, object, the number the verb counts, and the time', batch1.grammar === true, batch1.text)
-check('batch: clicking folds the rows away', batch1.closed?.aria === 'false', JSON.stringify(batch1.closed))
-check('batch: clicking again brings them back', batch1.reopened === 'true', batch1.reopened)
+// 默认态由规格定（结算后自动收起）；这里只验「点一下会翻转、再点回来」
+check('batch: clicking toggles the rows', batch1.closed?.aria !== batch1.aria, JSON.stringify({ before: batch1.aria, after: batch1.closed?.aria }))
+check('batch: clicking again flips it back', batch1.reopened === batch1.aria, `${batch1.aria} → ${batch1.reopened}`)
 
 // ---- 一组的折叠行（设计 .cy-act）：动词 + 对象 + 它数的量 + 耗时，行本身能开合 ----
 // 截图里那几条红线要的就是这个东西：一行读完「做了什么、多少、多久」，折角决定
@@ -204,9 +205,11 @@ check('batch: the group folds into one line you can click', bt.present === true 
 check('batch: the line carries verb · measure · duration', /·/.test(bt.text || '') && /\d+\s*(ms|s)\b/.test(bt.text || ''), bt.text)
 // bt.rows 是个函数（要等 DOM 真的画完才数），这里必须调用它 —— 之前写成 bt.rows > 0
 // 是在拿函数和 0 比，永远假红
-check('batch: open by default, so nothing is hidden behind a click', bt.aria === 'true' && bt.rowsOpen > 0, JSON.stringify({ aria: bt.aria, rows: bt.rowsOpen }))
-check('batch: clicking folds the rows away', bt.collapsed?.aria === 'false' && bt.collapsed?.visible === false, JSON.stringify(bt.collapsed))
-check('batch: clicking again brings them back', bt.reopened === 'true', bt.reopened)
+// 规格（2026-10）：工具组**全部结束后自动收缩**。所以这里的默认态是收起的
+// ——「什么都没藏在一次点击后面」不再成立，取而代之的是「收起的行仍然说清做了什么」。
+check('batch: a settled group folds itself away', bt.aria === 'false' && bt.rowsOpen > 0, JSON.stringify({ aria: bt.aria, rows: bt.rowsOpen }))
+check('batch: clicking brings the rows back', bt.collapsed?.aria === 'true' && bt.collapsed?.visible === true, JSON.stringify(bt.collapsed))
+check('batch: clicking again folds them away', bt.reopened === 'false', bt.reopened)
 
 // I1：真的点一下工具行，看它展开
 if (t1.hdClickable) {
@@ -304,7 +307,37 @@ check('table: numeric columns are right-aligned with tabular figures',
   tb?.thN.textAlign === 'right' && tb?.tdN.textAlign === 'right' && tb.tdN.fontVariantNumeric === 'tabular-nums',
   JSON.stringify({ th: tb?.thN.textAlign, td: tb?.tdN.textAlign, fv: tb?.tdN.fontVariantNumeric }))
 
+// ---- 跟随/暂停：上滚即停、提示可点 -------------------------------------------
+// 规格：用户向上滚动后立即暂停自动跟随，并给出明确的 Jump to latest 提示；
+// 点击提示恢复跟随。判据是**滚动容器自己**的位置（不是页面滚动）。
+const jump = await page.eval(async () => {
+  const el = document.querySelector('.narrative')
+  if (!el) return { skipped: true }
+  const overflow = el.scrollHeight - el.clientHeight
+  if (overflow < 200) return { skipped: true, overflow }
+  el.scrollTop = 0
+  el.dispatchEvent(new Event('scroll', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  const btn = document.querySelector('.narrative-jump')
+  return { skipped: false, overflow, present: !!btn, label: btn?.textContent?.trim() ?? null, title: btn?.getAttribute('title') ?? null }
+})
+if (!jump.skipped) {
+  check('follow: scrolling up stops the follow and offers a jump back', jump.present === true, JSON.stringify(jump))
+  check('follow: that offer says Jump to latest (not a bare arrow)', /最新|latest/i.test(jump.label || ''), `${jump.label} / ${jump.title}`)
+}
+const resumed = await page.eval(async () => {
+  const el = document.querySelector('.narrative')
+  document.querySelector('.narrative-jump')?.click()
+  await new Promise((r) => setTimeout(r, 600))
+  const max = el.scrollHeight - el.clientHeight
+  return { top: Math.round(el.scrollTop), max: Math.round(max), atBottom: Math.abs(el.scrollTop - max) < 4 }
+})
+if (!jump.skipped) check('follow: clicking the offer goes back to the latest output', resumed.atBottom === true, JSON.stringify(resumed))
+
 // ---- 提问卡 ---------------------------------------------------------------
+// 这一段要看**简洁档**的 Working 头（LivePanel 只在简洁档渲染），前面的密度段
+// 结束时可能停在详细档 —— 显式设回来，别让断言的成败取决于上一段的残留状态
+await page.eval(() => { window.__store.getState().setNarrativeSkin('runtime'); window.__store.getState().setNarrativeDensity('concise') })
 await say('修复登录接口返回 401')
 // 60s 而不是默认 30s：这一问要等上一轮跑完（mock 的脚本化回放 15s 左右）+ 队列推送，
 // 机器忙的时候 30s 会踩空 —— 踩空是测试的错，不是产品的错
@@ -326,6 +359,27 @@ if (!(await waitFor('.dock .ask', 60000))) {
   process.exit(1)
 }
 await wait(600)
+// 等待用户 = 运行暂停：Working 头必须说出来，而且**时钟停住**（活跃时长不含等待）。
+// 读两次间隔 1.4s，两次相等才算停 —— 规格里的「不能把等待时间伪装成活跃执行时间」。
+const waitCss = (await page.eval(() => {
+  const live = document.querySelector('.cy-live')
+  if (!live) return null
+  const cs = getComputedStyle(live.querySelector('.cy-live-head'))
+  return {
+    state: live.getAttribute('data-waiting'),
+    lbl: live.querySelector('.lv-lbl')?.textContent?.trim() ?? null,
+    act: live.querySelector('.lv-act')?.textContent?.trim() ?? null,
+    sticky: cs.position,
+    top: cs.top,
+  }
+})) ?? { missing: true }
+check('waiting: the working head says it is waiting for input', waitCss.state === 'input' && waitCss.lbl === 'Waiting' && waitCss.act === 'waiting for input', JSON.stringify(waitCss))
+check('waiting: the head is sticky while the run is long', waitCss.sticky === 'sticky' && waitCss.top === '0px', `${waitCss.sticky} ${waitCss.top}`)
+const clock1 = await page.eval(() => document.querySelector('.cy-live .lv-clock')?.textContent ?? null)
+await wait(1400)
+const clock2 = await page.eval(() => document.querySelector('.cy-live .lv-clock')?.textContent ?? null)
+check('waiting: the active clock is frozen while we wait (waiting time is not execution time)', clock1 != null && clock1 === clock2, `${clock1} → ${clock2}`)
+
 const t2 = await page.eval(() => {
   const cs = (el, ...p) => (el ? Object.fromEntries(p.map((k) => [k, getComputedStyle(el)[k]])) : null)
   const card = document.querySelector('.dock .ask')
@@ -812,7 +866,7 @@ await waitStore()
 
 await freshTurn('concise')
 const c1 = await page.eval(() => {
-  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  const t = [...document.querySelectorAll('.rt-turn')].filter((x) => x.querySelector('.rt-act[aria-expanded]')).pop()
   return {
     open: t?.getAttribute('data-open'),
     inTheTurn: !!t?.querySelector('.rt-turn-in'),
@@ -827,10 +881,12 @@ check('concise: the fold row settles the numbers', /Worked for/.test(c1.foldText
 check('concise: no second copy of the file line', !c1.fileLine, c1.fileLine)
 
 // 展开：工作过程进来，并且有高度上限（超出滚动）
-await page.eval(() => document.querySelector('.rt-turn .rt-act[aria-expanded]')?.click())
+// 点**最后一轮**的折角：会话恢复后页面上可能有更早的轮，`querySelector` 命中的
+// 会是第一轮，点开的是别人的盒子（断言又在看最后一轮 → 假红）
+await page.eval(() => [...document.querySelectorAll('.rt-turn')].filter((x) => x.querySelector('.rt-act[aria-expanded]')).pop()?.querySelector('.rt-act[aria-expanded]')?.click())
 await wait(700)
 const c2 = await page.eval(() => {
-  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  const t = [...document.querySelectorAll('.rt-turn')].filter((x) => x.querySelector('.rt-workbox, .rt-act[aria-expanded]')).pop()
   // 展开态是**同一个盒子**（.rt-workbox：头 = 折角行，内容 = .rt-work-body），
   // 高度上限在内容盒上；不再把工作行摊进流里
   const box = t?.querySelector('.rt-workbox .rt-work-body')
@@ -845,7 +901,7 @@ check('concise: the expanded work has a height cap', c2.present && c2.maxH !== '
    逐条钉住：① 运行中盒子外没有思考/工具；② 结算后工作行仍在盒子里（不摊进流）；
    ③ 内容缩进（宽度差）与框本身分得开。 */
 const c3 = await page.eval(() => {
-  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  const t = [...document.querySelectorAll('.rt-turn')].filter((x) => x.querySelector('.rt-workbox')).pop()
   const box = t?.querySelector('.rt-workbox')
   const body = box?.querySelector(':scope > .rt-work-body')
   const ans = t?.querySelector(':scope > .rt-turn-ans')

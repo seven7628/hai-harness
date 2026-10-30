@@ -13,13 +13,34 @@ html[data-skin='runtime'] .rt-workbox {
   gap: 3px;
 }
 
+/* 长任务：这一行必须一直看得见。内容在盒子里自滚时它本来就在顶部；但用户往上翻
+   叙述区（.narrative 自己滚）时盒子整体会被滚出去 —— 所以给它吸顶。底色要从令牌
+   取（不是 transparent），否则下面的行会从字缝里穿过去。 */
 html[data-skin='runtime'] .cy-live-head {
   display: flex;
   align-items: center;
   gap: 7px;
   font: 400 11.5px/1.6 var(--mono);
   color: var(--ink-2);
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: 2px 0 3px;
+  background: var(--paper);
 }
+
+/* 等待用户：这一行说的是「模型没在动」，与跑起来的语气要能一眼分开（琥珀 = 待处理） */
+html[data-skin='runtime'] .cy-live[data-waiting] .lv-lbl,
+html[data-skin='runtime'] .cy-live-end[data-waiting] .lv-lbl {
+  color: var(--amber);
+}
+
+html[data-skin='runtime'] .cy-live-head .lv-act[data-waiting] {
+  color: var(--amber);
+  opacity: 1;
+}
+
+/* 等待期间时钟是**停住**的（活跃执行时长），所以不需要跑动的强调 */
 
 html[data-skin='runtime'] .cy-live-head .lv-lbl {
   color: var(--ink);

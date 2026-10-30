@@ -1,7 +1,7 @@
 import { headsOf } from '../src/components/runtime/blocks/heads'
 import { batchLine } from '../src/components/runtime/turn/batch'
 import { roundsOf } from '../src/components/runtime/turn/rounds'
-import { foldedBody, runningBody, selectTurns, turnStats, turnUsage } from '../src/components/runtime/turn/selectTurns'
+import { foldedBody, runningBody, selectTurns, turnStats, turnUsage, workBody } from '../src/components/runtime/turn/selectTurns'
 import { roundsOf } from '../src/components/runtime/turn/rounds'
 import assert from 'node:assert'
 import test from 'node:test'
@@ -125,6 +125,26 @@ test('while running, the working block holds the whole run', () => {
   ] as unknown as MsgBlock[]
   const [t2] = selectTurns(withRecord)
   assert.deepEqual(runningBody(t2).map((b) => b.id), [9])
+})
+
+test('the working box keeps mid-run narration and thoughts, but never the answer twice', () => {
+  // 一轮里三次 LLM：中间两轮的话与思考必须在盒子里（规格：中间轮 Content 保留在
+  // Working 内、历史轮 Reasoning 默认收缩）——此前它们既不在外面（外面只留最后一轮）
+  // 也不在盒子里（workBody 只认 tool/agent/…），展开盒子也读不到。
+  const blocks = [
+    { kind: 'user', id: 1, text: 'q' },
+    { kind: 'assistant', id: 2, text: 'first look', thinking: 'round 1 thought', streaming: false },
+    { kind: 'tool', id: 3, toolId: 'a', name: 'grep', status: 'done' },
+    { kind: 'assistant', id: 4, text: 'second look', thinking: 'round 2 thought', streaming: false },
+    { kind: 'compression', id: 5, before: 12, after: 4 },
+    { kind: 'assistant', id: 6, text: 'the answer', thinking: '', streaming: false },
+  ] as unknown as MsgBlock[]
+  const [turn] = selectTurns(blocks)
+  const inside = workBody(turn).map((b) => b.id)
+  assert.deepEqual(inside, [2, 3, 4, 5], 'mid-run narration, tool, thought and the compression belong inside')
+  // 最后那条答案交给 Worked 区，盒子里不能再出现一次
+  assert.ok(!inside.includes(6))
+  assert.deepEqual(turn.answer?.id, 6)
 })
 
 test('rounds: a new request id starts a new round, even with no assistant in between', () => {

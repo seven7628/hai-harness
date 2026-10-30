@@ -213,3 +213,28 @@ export function foldedBody(turn: Turn): MsgBlock[] {
 export function runningBody(turn: Turn): MsgBlock[] {
   return turn.items.filter((b) => ALWAYS_SHOWN.has(b.kind))
 }
+
+/* What the working box holds (concise). Everything that is *work*: tools, subagents,
+   background tasks, the run's own rows — plus the mid-run narration and thoughts.
+
+   Why assistant blocks belong here too (2026-10, from the spec «历史轮次的 Reasoning
+   默认收缩…中间轮次的 Content 保留在 Working 内»): a run with five LLM rounds used to
+   drop rounds 1–4 entirely — they were neither outside (only the last round's reply is)
+   nor inside the box (this list had no `assistant`). The reader could expand the box
+   and still not find what the model said in round 2. They belong inside, and the
+   Thinking component already folds itself when it is not live, so they arrive
+   collapsed — which is exactly the "history rounds stay shut" rule.
+
+   The one assistant left out is the turn's answer: it is handed over to the Worked
+   area at AgentEnd and must not appear twice. Compression blocks come along for the
+   same reason — they are part of what happened during the run. */
+export function workBody(turn: Turn): MsgBlock[] {
+  return turn.items.filter(
+    (b) => FOLDED_KINDS.has(b.kind) || ((b.kind === 'assistant' || b.kind === 'compression') && b !== turn.answer),
+  )
+}
+
+/** Blocks that belong to the working phase even though they are not "a tool". */
+export const FOLDED_KINDS: ReadonlySet<MsgBlock['kind']> = new Set<MsgBlock['kind']>([
+  'tool', 'agent', 'async_task', 'system', 'task_result', 'task_delivery',
+])
