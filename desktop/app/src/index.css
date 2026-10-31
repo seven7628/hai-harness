@@ -94,6 +94,18 @@
   --cat-skill: #debe91; /* 技能：SKILL(...) */
   /* 记忆：苔绿。单独定义而不复用 --cat-skill（与 --cat-net 只差一个通道，不可分） */
   --ctx-moss: #91c79b;
+  /* —— 上下文构成面板（分区色，7 段）——
+     别和工具族 --cat-* 合并：面板里 7 个分区会同时出现，要的是**彼此分得开**；
+     工具族是语义取色，运行时皮肤还会整体退到弱字色（那边单独换一套，见
+     runtime-palette.css）。记忆段没有复用 --cat-skill：它与 --cat-net 只差一个
+     通道，肉眼不可分，而这两段会同时出现（MCP 开启时）。 */
+  --ctx-c-messages: var(--cat-read);
+  --ctx-c-tools: var(--cat-cmd);
+  --ctx-c-mcp: var(--cat-net);
+  --ctx-c-system_prompt: var(--cat-write);
+  --ctx-c-skills: var(--cat-agent);
+  --ctx-c-memory: var(--ctx-moss);
+  --ctx-c-other: var(--text-3);
   /* —— 分类色板（文件类型）—— */
   --ft-code: #9591de;
   --ft-doc: #91b6de;
@@ -142,6 +154,14 @@
   --cat-agent: #872234;
   --cat-skill: #875d22;
   --ctx-moss: #2f7a48;
+  /* —— 上下文构成面板（分区色，见 :root 同名段）—— */
+  --ctx-c-messages: var(--cat-read);
+  --ctx-c-tools: var(--cat-cmd);
+  --ctx-c-mcp: var(--cat-net);
+  --ctx-c-system_prompt: var(--cat-write);
+  --ctx-c-skills: var(--cat-agent);
+  --ctx-c-memory: var(--ctx-moss);
+  --ctx-c-other: var(--text-3);
   /* —— 分类色板（文件类型）—— */
   --ft-code: #272287;
   --ft-doc: #225287;
@@ -4797,24 +4817,13 @@ body.is-electron .left.collapsed .rail .rbtn {
   flex: 0 0 auto;
 }
 /* ── 上下文构成面板（ctx 环 hover）────────────────────────────────────────
-   分区配色（水墨调色板内取色，两套主题自动跟随）：
-   消息=黛青（与 ctx 环主色一致）/ 工具=赭石 / MCP=朱砂（外部集成）/
+   分区配色走 --ctx-c-* 令牌族（定义在 :root/[data-theme='paper']，运行时皮肤
+   在 runtime-palette.css 里另换一套）：7 段会在同一张面板里同时出现，需要 7 个
+   彼此分得开的色相，所以不能直接借工具族的 --cat-*（运行时皮肤把 --cat-* 统一
+   退到弱字色 → 7 段同色，2026-10 用户实测）。
+   默认皮肤取值：消息=黛青（同 ctx 环主色）/ 工具=赭石 / MCP=朱砂（外部集成）/
    系统提示词=竹青 / 技能=黛青×朱砂混色 / 记忆=苔绿 / 其他=灰。 */
 .ctx-panel {
-  /* 7 段取分类色板（2026-09-21 首发 6 段，2026-09-29 加记忆）：原来混用
-     indigo/ochre/cinnabar/bamboo ——
-     亮色下 --cinnabar 已变墨黑，与"其他"撞色，6 段里有 2 段分不出来。
-     语义色一律不参与：这里的段是**分类**。
-     记忆段**没有**复用 --cat-skill：它(#debe91) 与 --cat-net(#debf91) 只差一个
-     通道，肉眼不可分，而这两段恰好会同时出现（MCP 开启时）。所以新取一个
-     苔绿，两套主题各自成对定义。 */
-  --ctx-c-messages: var(--cat-read);
-  --ctx-c-tools: var(--cat-cmd);
-  --ctx-c-mcp: var(--cat-net);
-  --ctx-c-system_prompt: var(--cat-write);
-  --ctx-c-skills: var(--cat-agent);
-  --ctx-c-memory: var(--ctx-moss);
-  --ctx-c-other: var(--text-3);
   position: absolute;
   bottom: calc(100% + 10px);
   right: 0;
@@ -4828,6 +4837,10 @@ body.is-electron .left.collapsed .rail .rbtn {
   z-index: 60; /* 高于 popup（50）：两者不会同时开，但同层才不会被叙述区截断 */
   font-size: 12px;
   color: var(--text-2);
+  /* 面板挂在 .row2-right 里（那一层 white-space: nowrap 是给 chip 用的），
+     不重置的话底部说明不折行、直接画出面板右边界（用户 2026-10 实测）。
+     面板内除刻意省略的行（.ctx-name / .ctx-panel-total）外一律允许折行。 */
+  white-space: normal;
   animation: fadeInUp 120ms var(--ease);
 }
 .ctx-panel-hd {
@@ -4846,6 +4859,7 @@ body.is-electron .left.collapsed .rail .rbtn {
   font-size: 11px;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap; /* 头部总量恒单行（面板已重置为可折行，见 .ctx-panel） */
 }
 .ctx-panel-total .dim {
   color: var(--text-3);
@@ -4941,7 +4955,9 @@ body.is-electron .left.collapsed .rail .rbtn {
 .ctx-panel-note {
   margin-top: 5px;
   font-size: 10.5px;
+  line-height: 1.5; /* 折行后两行之间的呼吸（悬停面板正文是 12px/1.4） */
   color: var(--text-3);
+  overflow-wrap: anywhere; /* 中英混排的说明不靠断词规则，长串也能折 */
 }
 .ctx .pct {
   font-size: 10.5px;

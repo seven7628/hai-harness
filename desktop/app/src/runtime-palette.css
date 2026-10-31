@@ -92,7 +92,17 @@ html[data-skin='runtime'][data-theme='ink'] {
   --ft-pdf: #9a9aa1;
   --ft-image: #9a9aa1;
   --ft-data: #9a9aa1;
-  --ctx-moss: #9a9aa1;
+  /* 上下文构成面板是**唯一**例外：7 个分区同时出现，全灰就分不出占比（用户实测）。
+     所以不退弱，而是按 v2 自己的强调色语言另取一套（面板底 = --paper-3 #101015）：
+     消息=强调蓝（与 ctx 环同色）/ 工具=琥珀 / 技能=品紫 / 记忆=竹青绿 /
+     系统提示词=青 / MCP=朱砂 / 其他=弱字色。全部 ≥6.7:1，最小色差 ΔE(OKLab)≈11。 */
+  --ctx-c-messages: var(--accent);
+  --ctx-c-tools: var(--ochre);
+  --ctx-c-skills: #d982ff;
+  --ctx-c-memory: var(--bamboo);
+  --ctx-c-system_prompt: #55c8e6;
+  --ctx-c-mcp: var(--crimson);
+  --ctx-c-other: var(--text-3);
 
   /* —— 皮肤局部变量（v2 里没有对应 app 令牌的那几个）—— */
   --rt-card-2: #0f0f14;
@@ -175,7 +185,15 @@ html[data-skin='runtime'][data-theme='paper'] {
   --ft-pdf: #6b6b73;
   --ft-image: #6b6b73;
   --ft-data: #6b6b73;
-  --ctx-moss: #6b6b73;
+  /* 同上（亮色档）：色相与深色一一对应，但一律压深到 ≥4.5:1 —— 6px 的段/8px 的点
+     压在暖纸 #f0efec 上，主题原值（--ochre/--bamboo/--crimson）只有 3.1~3.9:1。 */
+  --ctx-c-messages: var(--accent);
+  --ctx-c-tools: #a34a00;
+  --ctx-c-skills: #8a2fb0;
+  --ctx-c-memory: #0c7a55;
+  --ctx-c-system_prompt: #0d6b8c;
+  --ctx-c-mcp: #c02a46;
+  --ctx-c-other: var(--text-3);
 
   --rt-card-2: #faf9f7;
   --rt-raised: #efeeea;
