@@ -456,5 +456,73 @@ const bashBlock = v11.blocks.find((b) => b.kind === 'tool' && b.toolId === 'tw-b
 assert.equal(bashBlock?.todos, undefined, '非 todo 工具不应落 todos 字段')
 console.log('PASS 场景11：todo 工具块定格调用时刻快照；历史卡不被后续调用改写')
 
+
+// ===== 场景 12：AgentEnd 之后才完成的后台任务 —— 回执归属所属轮 + 输入不被后台任务扣住 =====
+// ① 回执落位：轮边界是 user 块（见 components/runtime/turn/selectTurns）。回执若按「到达
+//    时刻」追加到 blocks 末尾，用户已经发了下一条消息时就会算进**下一轮** —— 时间线与
+//    Working 盒同时错位（用户 2026-10 报障的形态：后台任务完成的通知跑到新一轮里）。
+setup()
+EV('user_inputs_consumed', { user_texts: ['开个后台任务'] })
+EV('task_started', { task_id: 'tk1', name: 'bg' })
+EV('user_inputs_consumed', { user_texts: ['下一条'] })
+EV('task_result_delivered', { task_id: 'tk1', result: 'done' })
+const v12 = useAppStore.getState().views.s1
+const cardIdx = v12.blocks.findIndex((b) => b.kind === 'async_task' && b.taskId === 'tk1')
+const didx = v12.blocks.findIndex((b) => b.kind === 'task_delivery' && b.taskId === 'tk1')
+const u2 = v12.blocks.findIndex((b) => b.kind === 'user' && b.text === '下一条')
+assert.ok(cardIdx >= 0 && didx > cardIdx, '回执应在任务卡片之后')
+assert.ok(u2 > 0 && didx > 0 && didx < u2, '回执必须落在所属轮（下一条 user 之前），不得算进下一轮')
+
+// ② 发送闸门与 Composer 的按钮同源（mainRunActive，不含后台子 agent）：主 run 已交卷、
+//    后台子 agent 仍在跑 → 新输入立即推送。旧判据 sessionBusy（含子 run）会让消息停在
+//    「待发送」，等子 run 的下一个 llm_end 才代劳。
+setup()
+EV('agent_start', { run_id: 'r-main' })
+EV('agent_start', { run_id: 'r-sub', parent_run_id: 'r-main' })
+EV('agent_end', { run_id: 'r-main', finish_reason: 'stop' })
+assert.ok(busy(), '子 run 仍在跑 → sessionBusy 仍为真（左栏运行点保留）')
+useAppStore.getState().ask('主 run 结束后立刻发')
+const q12 = pending().find((q) => text(q) === '主 run 结束后立刻发')
+assert.ok(q12 && q12.pushed, '主 run 已交卷时，新输入必须立即推送（不等后台子 agent）')
+console.log('PASS 场景12：迟到回执归属所属轮；主 run 交卷后输入不再被后台任务扣住')
+
+
+// ===== 场景 13：失败 attempt 的记账与轮次收尾（会重试的**不算**一轮）=====
+// 用户 2026-10 口径：中断恰好发生在 llm_start ↔ llm_end 之间时，这一轮永远没有 llm_end
+// —— 不在这里收尾，轮尾账（按 turns 求和）与回合数就少一轮。但自动重试的中间失败
+// 不是轮尾（同一个逻辑轮会换 request id 重来），只记账、不落 Turn。
+setup()
+EV('llm_start', { run_id: 'r-abort', request_id: 'q1', model: 'm1' })
+const a1 = { Input: 100, Output: 10, TotalTokens: 110, Cost: { Input: 1, Output: 1, Total: 2, Priced: true } }
+EV('llm_error', { run_id: 'r-abort', request_id: 'q1', model: 'm1', attempt: 1, max_attempts: 3, will_retry: true, error_kind: 'rate_limit', message: 'boom', usage: a1, cost_usd: 2e-6 })
+let v13 = useAppStore.getState().views.s1
+assert.equal(v13.turns.length, 0, 'will_retry=true 的中间失败不得落轮次')
+assert.equal(v13.usage.input, 100, '失败 attempt 的 tokens 必须进会话累计（此前只记成本）')
+assert.ok(v13.turnStartTs['r-abort'] != null, '中间失败不得清轮起点')
+// 第二次尝试（新 request id）→ 最终失败（aborted）：轮次收尾
+EV('llm_start', { run_id: 'r-abort', request_id: 'q2', model: 'm1' })
+const a2 = { Input: 120, Output: 12, TotalTokens: 132, Cost: { Input: 2, Output: 1, Total: 3, Priced: true } }
+EV('llm_error', { run_id: 'r-abort', request_id: 'q2', model: 'm1', attempt: 2, max_attempts: 3, will_retry: false, error_kind: 'aborted', message: 'aborted', usage: a2, cost_usd: 3e-6 })
+v13 = useAppStore.getState().views.s1
+assert.equal(v13.turns.length, 1, '最终失败应补一条轮次（被中断的那轮不再缺席）')
+assert.equal(v13.turns[0].runId, 'r-abort')
+assert.equal(v13.turns[0].input, 120, '轮次用量只含最终失败那次 attempt')
+assert.ok(v13.turns[0].durMs != null && v13.turns[0].durMs >= 0, '轮次应带时长')
+assert.equal(v13.usage.input, 220, '两次 attempt 的 tokens 都进累计')
+assert.equal(v13.turnStartTs['r-abort'], undefined, '收尾后不得残留轮起点')
+EV('agent_end', { run_id: 'r-abort', finish_reason: 'abort', usage: { Input: 220, Output: 22 } })
+v13 = useAppStore.getState().views.s1
+assert.equal(v13.turns.length, 1, 'AgentEnd 不得重复补轮（轮起点已清）')
+
+// 退避等待中被 abort：只有 agent_end → 兜底一条「只带时长」的轮次
+setup()
+EV('llm_start', { run_id: 'r-orphan', request_id: 'q9', model: 'm1' })
+EV('llm_error', { run_id: 'r-orphan', request_id: 'q9', model: 'm1', attempt: 1, max_attempts: 3, will_retry: true, error_kind: 'rate_limit', message: 'boom' })
+EV('agent_end', { run_id: 'r-orphan', finish_reason: 'abort' })
+v13 = useAppStore.getState().views.s1
+assert.equal(v13.turns.length, 1, 'AgentEnd 应兜底收尾本轮')
+assert.ok((v13.turns[0].durMs ?? -1) >= 0 && v13.turns[0].input === 0, '兜底只记时长，token 不编')
+console.log('PASS 场景13：失败 attempt 记账；重试不算轮尾，最终失败/AgentEnd 才收尾')
+
 console.log('STORE_TEST_PASS')
 process.exit(0)

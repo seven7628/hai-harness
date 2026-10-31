@@ -90,6 +90,7 @@
     "test:agent-session": "esbuild src/lib/agentSession-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/agent-session.test.cjs && node --test /tmp/agent-session.test.cjs",
     "test:runtime-turns": "esbuild lab/test-runtime-turns.ts --bundle --platform=node --format=esm --loader:.md=text --loader:.png=dataurl --loader:.svg=dataurl --loader:.woff2=dataurl --outfile=/tmp/runtime-turns.test.mjs && node --test /tmp/runtime-turns.test.mjs",
     "test:runtime-skin": "node lab/verify-runtime-skin.mjs",
+    "test:concise-fold": "node lab/verify-concise-fold.mjs",
     "test:motion": "node lab/check-motion.mjs",
     "test:table-numbers": "esbuild src/lib/tableNumbers-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/table-numbers.test.cjs && node --test /tmp/table-numbers.test.cjs",
     "test:overlay-hit": "esbuild src/lib/overlayHit-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/overlay-hit.test.cjs && node --test /tmp/overlay-hit.test.cjs",
@@ -100,6 +101,7 @@
     "test:short-reason": "esbuild src/lib/shortReason-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/short-reason.test.cjs && node --test /tmp/short-reason.test.cjs",
     "test:signal-facts": "esbuild src/lib/signalFacts-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/signal-facts.test.cjs && node --test /tmp/signal-facts.test.cjs",
     "test:turn-settle": "esbuild src/lib/turnSettle-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/turn-settle.test.cjs && node --test /tmp/turn-settle.test.cjs",
+    "test:turn-layout": "esbuild src/components/runtime/turn/selectTurns-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/turn-layout.test.cjs && node --test /tmp/turn-layout.test.cjs",
     "test:tail-line": "esbuild src/lib/tailLine-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/tail-line.test.cjs && node --test /tmp/tail-line.test.cjs",
     "test:failure-line": "esbuild src/lib/failureLine-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/failure-line.test.cjs && node --test /tmp/failure-line.test.cjs",
     "test:short-path": "esbuild src/lib/shortPath-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/short-path.test.cjs && node --test /tmp/short-path.test.cjs"

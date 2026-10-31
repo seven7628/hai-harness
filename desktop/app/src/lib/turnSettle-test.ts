@@ -20,6 +20,11 @@ test('历史轮里仍有工具在跑（运行中插了新的用户消息）→ �
   assert.equal(turnLive({ isLast: false, turnRunning: true, runEnded: false }), true)
 })
 
-test('已结算但块上残留 running 态（中断收尾）→ 以块为准，仍算在跑，避免半截结论', () => {
-  assert.equal(turnLive({ isLast: true, turnRunning: true, runEnded: true }), true)
+test('已交卷 + 后台任务仍在跑（块上残留 running）→ 折叠，不得拉回 Working', () => {
+  // 用户 2026-10 报障的形态：主 run 8 秒结束、agent_spawn 的后台子 agent 还在跑，
+  // 旧判据（turnRunning 优先）让 Working 与时钟一直挂着，Worked for / 轮尾账永不出现。
+  // AgentEnd 是这次运行的交卷时刻；后台任务的完成走自己的记录行（task_delivery），
+  // 不是把整轮重新打开。
+  assert.equal(turnLive({ isLast: true, turnRunning: true, runEnded: true }), false)
+  assert.equal(turnLive({ isLast: false, turnRunning: true, runEnded: true }), false)
 })

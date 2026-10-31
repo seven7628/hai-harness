@@ -1716,6 +1716,9 @@ type roundResult struct {
 	content            string
 	reasoning          string
 	reasoningSignature string // Anthropic thinking signature（多轮回传）
+	// requestId 本次尝试的请求 id（provider 的 LLMStart 带来；首事件前就失败时为空）。
+	// 每个 attempt 重置一次：重试 = 新 request id，失败事件要归到**自己那次**。
+	requestId string
 }
 
 // isContextOverflowError 识别上下文超限类错误（R2/C7）：优先用 provider 层的
@@ -1753,6 +1756,7 @@ func (a *AgentLoop) streamWithRetry(ac *AgentContext, r *roundResult) error {
 		if ac.IsAborted() {
 			return ac.ctx.Err()
 		}
+		r.requestId = "" // 新 attempt：上一次的 request id 不能串到这次的失败事件上
 		receivedEnd, err := a.streamOnce(ac, r)
 		// 校验契约：一轮调用必须收到 LLMEnd 事件，否则视为失败（防「假成功」）
 		if err == nil && !receivedEnd {
@@ -1805,6 +1809,7 @@ func (a *AgentLoop) streamWithRetry(ac *AgentContext, r *roundResult) error {
 		ac.Handler(ac.ctx, &events.LLMError{
 			RunId:        ac.RunId,
 			Model:        a.currentModel(),
+			RequestId:    r.requestId, // 失败 attempt 的请求 id（空 = 首事件前就失败）
 			Message:      err.Error(),
 			Attempt:      attempt,
 			MaxAttempts:  maxAttempts, // 总次数上限：前端显示「第 N/M 次失败 → 重试第 N+1/M 次」
@@ -1992,6 +1997,7 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 		if ts.IsZero() {
 			ts = time.Now() // provider 未设置时间戳时兜底
 		}
+		r.requestId = ev.RequestId // 失败事件据此归轮（见 roundResult.requestId）
 		ac.Handler(ac.ctx, &events.LLMStart{
 			RunId:     ac.RunId, // 事件自包含：多并发 agent 归属
 			Model:     ev.Model,

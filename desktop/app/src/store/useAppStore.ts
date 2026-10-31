@@ -641,6 +641,20 @@ function pushSignal(blocks: MsgBlock[], fact: SignalFact): MsgBlock[] {
   return [...blocks, { kind: 'signal', id: blockSeq++, fact }]
 }
 
+// insertAtTurnEnd 把「记录/回执」类块插到**所属轮**的末尾：owner 之后、下一条 user 之前。
+//
+// 轮边界 = user 块（轮是派生的，见 components/runtime/turn/selectTurns）。后台任务可能
+// 在 AgentEnd **之后**才完成 —— 那时按 blocks 末尾追加，会把这条回执算进用户已经开始的
+// 下一轮（新 run 的盒子里），既归属错轮、也破坏时间线顺序。插到 owner 所在轮的尾部：
+// 归属对（属于发起它的那一轮），先后顺序也对（晚于该轮全部过程行）。
+function insertAtTurnEnd(blocks: MsgBlock[], ownerIndex: number, add: MsgBlock[]): MsgBlock[] {
+  let at = blocks.length
+  for (let i = Math.max(0, ownerIndex); i < blocks.length; i++) {
+    if (blocks[i].kind === 'user') { at = i; break }
+  }
+  return [...blocks.slice(0, at), ...add, ...blocks.slice(at)]
+}
+
 // 单个产出文件（对齐服务端 core.Artifact）。
 export interface ArtifactItem {
   name: string
@@ -5597,6 +5611,10 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 失败尝试的已产生成本（2026-09-23）：桥按价表折算后随事件 cost_usd 下发 ——
       // 会话成本累计（与 llm_end 同口径）+ 重试块显示 + 子 agent 卡片成本。
       const attemptCost = typeof raw.cost_usd === 'number' ? raw.cost_usd : 0
+      // 失败尝试的已产生用量（2026-10）：此前只记成本、不记 token —— 顶栏 in/out 与
+      // 轮尾账都少这一份，而 Go/bridge 的 metrics 一直记全（Kind=attempt_failed）。
+      // 口径与 llm_end 一致：都是本次 attempt 自己的量（拿不到时 undefined，不编 0）。
+      const attemptUsage = taskUsageFromEvent(raw.usage as RawUsage | undefined)
       const errorKind = String(raw.error_kind || '')
       const runId = raw.run_id ? String(raw.run_id) : undefined
       const isContextExceeded = errorKind === 'context_exceeded'
@@ -5621,6 +5639,45 @@ export function dispatchEvent(raw: AnyEvent): void {
                 : `（LLM 请求失败：${failedLabel}、重试已耗尽）${msg}`
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
+        // —— 失败 attempt 的记账（2026-10）——
+        // 1) 用量进会话累计（此前只记成本，token 漏了）；口径与 llm_end 一致。
+        // 2) 轮次收尾：只有**不会再重试**的失败才是这一轮的结束（aborted / canceled /
+        //    permanent / context_exceeded）。will_retry=true 的中间失败**不是**轮尾 ——
+        //    同一个逻辑轮会换一个 request id 重来（llm_end 或最终失败再来收尾），
+        //    这里只记账、不落 Turn、不动轮起点槽位，否则每次退避重试都会多出一“轮”。
+        //    中断恰好发生在 llm_start ↔ llm_end 之间时，这一轮永远不会有 llm_end ——
+        //    不在这里收尾，轮尾账（按 turns 求和）与回合数就少一轮。
+        //    只在**轮起点还在**时收尾：起点已清 = 这一轮已被别的路径收过（AgentEnd 兜底，
+        //    或事件乱序时 AgentEnd 先到）—— 再补一条就是同一轮记两次。
+        const runKey = runId ?? ''
+        const turnStarted = v.turnStartTs?.[runKey]
+        const failedAt = evTs(raw) ?? Date.now()
+        const usage = attemptUsage
+          ? {
+              input: v.usage.input + attemptUsage.input,
+              output: v.usage.output + attemptUsage.output,
+              cacheRead: v.usage.cacheRead + attemptUsage.cacheRead,
+              cacheWrite: v.usage.cacheWrite + attemptUsage.cacheWrite,
+              cacheWrite1h: v.usage.cacheWrite1h + attemptUsage.cacheWrite1h,
+              reasoning: v.usage.reasoning + attemptUsage.reasoning,
+            }
+          : v.usage
+        const closedTurn: TurnMetric | undefined = willRetry || turnStarted == null
+          ? undefined
+          : {
+              model: String(raw.model || ''),
+              input: attemptUsage?.input ?? 0,
+              output: attemptUsage?.output ?? 0,
+              cacheRead: attemptUsage?.cacheRead ?? 0,
+              cacheWrite: attemptUsage?.cacheWrite ?? 0,
+              reasoning: attemptUsage?.reasoning ?? 0,
+              durMs: failedAt - turnStarted,
+              costUsd: attemptCost,
+              runId,
+            }
+        const turns = closedTurn ? [...v.turns, closedTurn] : v.turns
+        const turnStartTs = { ...v.turnStartTs }
+        if (closedTurn) delete turnStartTs[runKey]
         // 子 agent 的 LLM 错误：挂到其卡片活动记录（卡片终态一并收敛；上下文超限 = failed）
         if (runId && isSubAgentRun(v, runId)) {
           const agentBlock = v.blocks.find((b) => b.kind === 'agent' && b.runId === runId)
@@ -5632,7 +5689,16 @@ export function dispatchEvent(raw: AnyEvent): void {
                   retrying: willRetry && !isContextExceeded,
                   retryMessage: willRetry && !isContextExceeded ? text : undefined,
                   items: upsertAgentErrorItem(b.items, text),
-                  usage: { ...b.usage, costUsd: (b.usage?.costUsd ?? 0) + attemptCost },
+                  usage: {
+                    ...b.usage,
+                    input: b.usage.input + (attemptUsage?.input ?? 0),
+                    output: b.usage.output + (attemptUsage?.output ?? 0),
+                    cacheRead: b.usage.cacheRead + (attemptUsage?.cacheRead ?? 0),
+                    cacheWrite: b.usage.cacheWrite + (attemptUsage?.cacheWrite ?? 0),
+                    cacheWrite1h: b.usage.cacheWrite1h + (attemptUsage?.cacheWrite1h ?? 0),
+                    reasoning: b.usage.reasoning + (attemptUsage?.reasoning ?? 0),
+                    costUsd: (b.usage?.costUsd ?? 0) + attemptCost,
+                  },
                   retryCount,
                   // 总次数：卡片徽章显示「重试 N/M」（与主叙述同口径）
                   ...(maxAttempts > 0 ? { retryMax: maxAttempts } : {}),
@@ -5643,6 +5709,9 @@ export function dispatchEvent(raw: AnyEvent): void {
           const upd = setView(s, sid, {
             ...v,
             blocks,
+            usage,
+            turns,
+            turnStartTs,
             costUsd: v.costUsd + attemptCost, // 子 agent 的重试浪费同样进会话成本（与 llm_end 同口径）
           })
           return { ...upd, busySids: busySidsFromViews(upd.views) }
@@ -5672,6 +5741,9 @@ export function dispatchEvent(raw: AnyEvent): void {
         // 退避倒计时与「本次尝试已进行 Xs」—— 只有 ts 与 delay 两个静态值，实时数字在渲染层算。
         return setView(s, sid, {
           ...v,
+          usage,
+          turns,
+          turnStartTs,
           costUsd: v.costUsd + attemptCost, // 失败尝试的已产生成本计入会话累计（重试浪费不丢）
           blocks: upsertErrorBlock(blocks, text, {
             ts: evTs(raw) ?? Date.now(),
@@ -6578,8 +6650,27 @@ export function dispatchEvent(raw: AnyEvent): void {
         // llm_end。**子 run 同样要清** —— 末轮无 llm_end 的中断/失败路径下，那一格没人
         // 消费，每个子 agent 结束都留一格，长会话无界增长。只删自己那格，不动并发中的
         // 其它 run（父 run 正在计时的轮、子 agent 兄弟轮）。
+        //
+        // 若这一格还在，说明本轮**连失败收尾都没等到**（典型：重试退避等待期间被 abort ——
+        // 上一条 llm_error 还是 will_retry=true，之后既无 llm_end 也无 final llm_error）。
+        // 补一条只带时长的轮次记录：token 缺省（上游没报，不编），否则这一轮在轮尾账
+        // 与回合数里完全不存在。与 Go 侧 view_reducer 的 AgentEnd 兜底同一口径。
+        const orphanStart = v.turnStartTs?.[id]
         const turnStartTs = { ...v.turnStartTs }
         delete turnStartTs[id]
+        const turns = orphanStart != null
+          ? [...v.turns, {
+              model: String(raw.model || ''),
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+              durMs: Math.max(0, now - orphanStart),
+              costUsd: 0,
+              ...(id ? { runId: id } : {}),
+            } satisfies TurnMetric]
+          : v.turns
         const upd = setView(s, sid, {
           ...v,
           // 主 run 的 AgentEnd = 结算边界：折叠行与轮尾账从这一刻起才允许出现
@@ -6591,6 +6682,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               : n,
           ),
           blocks,
+          turns,
           turnStartTs,
           runningAgentCount: countRunningAgents(blocks),
           // 主 run 结束（任何 finish_reason）即解除流式态：此前只对 abort/max_iterations
@@ -6915,6 +7007,9 @@ export function dispatchEvent(raw: AnyEvent): void {
             ],
           })
         }
+        // 回执落位（2026-10）：插到**卡片所在轮**的尾部（下一条 user 之前），不按到达
+        // 时刻追加到 blocks 末尾 —— 后台任务常在 AgentEnd 之后才完成，末尾追加会把它算进
+        // 下一轮。见 insertAtTurnEnd。
         const blocks = [...v.blocks]
         const t = blocks[taskIndex]
         if (t.kind === 'tool') {
@@ -6940,7 +7035,15 @@ export function dispatchEvent(raw: AnyEvent): void {
           }
         }
         if (!alreadyNoticed) {
-          blocks.push({ kind: 'task_delivery', id: blockSeq++, taskId, status: deliveryStatus, result: result || undefined, error: error || undefined })
+          const delivery: MsgBlock = {
+            kind: 'task_delivery',
+            id: blockSeq++,
+            taskId,
+            status: deliveryStatus,
+            result: result || undefined,
+            error: error || undefined,
+          }
+          return setView(s, sid, { ...v, blocks: applyTaskUsage(insertAtTurnEnd(blocks, taskIndex, [delivery]), taskId, usage) })
         }
         // 用量覆盖（终态权威值）：TaskEnd 已写过则同值覆盖，未写过则补齐
         return setView(s, sid, { ...v, blocks: applyTaskUsage(blocks, taskId, usage) })
@@ -8257,7 +8360,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       const v = s.views[sid] ?? emptyView()
       return setView(s, sid, { ...v, pendingQueue: [...v.pendingQueue, { id: blockSeq++, contents: msgContents, pushed: false }] })
     })
-    if (!sessionBusy(get().views[sid])) get().flushPending(sid)
+    // 闸门与 Composer 的发送按钮同源（mainRunActive，**不含**后台子 agent）：主 run
+    // 已交卷、后台任务仍在跑时，输入必须立刻发出去起新 run —— 否则按钮显示「可发送」
+    // 而消息永远停在待发送（子 run 要等它自己的下一个 llm_end 才会代劳 flush）。
+    if (!mainRunActive(get().views[sid])) get().flushPending(sid)
   },
 
   // 编辑暂存队列某条（推送前，逐条独立编辑）：只改文本内容。纯文本消息 → 整条替换为单个

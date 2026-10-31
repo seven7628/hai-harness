@@ -7,7 +7,7 @@ import { signalText } from '../lib/signalFacts'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, foldedBody, runningBody, selectTurns, turnHead, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, foldedBody, hasWork, runningBody, selectTurns, turnHead, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -1105,37 +1105,41 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const head = turnHead(turn)
     const turnStart = head.t0
     const concise = density === 'concise'
-    /* 这一轮是不是还在跑：块上的 running 只说明「某一刻有东西在流」，
-       llm_end 与下一次 llm_start 之间它是假的；run 级状态才是真的。
-       两者取或 —— 否则简洁档会在 Working 面板与结算行之间来回跳（闪屏）。 */
+    /* 这一轮还在不在跑 = **主 run 交卷了没有**（AgentEnd 是唯一折叠时刻）。
+       AgentEnd 之后一律折叠：块上残留的 running（后台子 agent / 被 promote 的工具）
+       属于任务自己的生命周期，不得把整轮重新拉回 Working。见 lib/turnSettle.ts。 */
     const live = turnLive({ isLast: ti === turns.length - 1, turnRunning: turn.running, runEnded })
     // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
     // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
     const open = !concise || (openTurns[turn.key] ?? live)
-    const work = stats.calls + stats.agents + stats.compressions > 0
+    /* 盒子装什么、要不要画盒子：同一个事实源（workBody 非空 = 有东西可装）。
+       之前「有没有工具」决定画不画盒子 —— async_task-only / system-only 的轮次
+       workBody 有行却没有盒子，那些行就整轮消失。 */
+    const workBlocks = workBody(turn)
+    const work = hasWork(turn)
+    /* 运行中的盒子内容 = 工作行 + 正在写的那一段正文（turn.answer）。
+       正文在交卷前属于「工作过程」（外面只剩记录），但它不在 workBody 里（那里排除了
+       answer）—— 少了这一步，工具轮的流式正文会既不在盒子里也不在外面。
+       记录（信号/回执）不在这个集合里：它们是时间线，外面已经画过。 */
+    const workSet = new Set(workBlocks)
+    const liveBox = turn.items.filter((b) => workSet.has(b) || b === turn.answer)
     const isWork = (b: MsgBlock) => FOLDED.has(b.kind)
     /* 简洁档：收起时正文只剩**结论**（这一轮最后一个有正文的 assistant），中间那些
        「我看看 X」的旁白、思考、工具全在工作过程里。展开才按原顺序读全过程。
        详细档：原顺序整段展开，不折叠（v2 里详细档根本没有折叠行）。 */
     const workItems = concise
       ? (skin === 'runtime'
-        ? groupRounds(workBody(turn))
+        ? groupRounds(workBlocks)
         : groupBlocks(turn.items.filter((b) => isWork(b) || (b.kind === 'assistant' && b !== turn.answer) || b.kind === 'compression')))
       : []
-    /* 简洁档：收起时外面只有结论；**运行中**外面只有正在写的那一段 ——
-       其余的思考、中间的 llm_content、工具都在 Working 里滚（AgentStart →
-       AgentEnd 是同一个块）。详细档照旧整段摊开。 */
-    /* 运行中（简洁档）：外面什么都不放 —— 正在写的那段也在 Working 里长，
-       与图2 的详细档是同一份内容，只是多了一层盒子。 */
-    /* 简洁档的**外面**永远只有两样：最后一轮的正文，和记录（信号 / 产出 / 回执）。
-       工作内容（思考、旁白、工具、子 agent）无论运行中还是跑完、无论展开还是收起，
-       都只存在于工作盒子里 —— 展开的是盒子，不是把行摊进流里。所以这里不掺
-       开合判定：开合只决定盒子自己显示多少，决定不了外面有什么。
-       运行中更严格：那一轮的正文还在长，它属于「工作过程」，所以连正文也在盒子里，
-       外面只剩记录 —— 到 AgentEnd 才把它交出来（这就是「最后一轮的 llm content」）。
+    /* 简洁档的外面 = **时间线**：记录（signal / 产出 / 错误 / 分隔线 / 后台任务回执），
+       加上结论正文。工作内容（思考、旁白、工具、子 agent、压缩）无论运行中还是跑完、
+       无论展开还是收起，都只存在于工作盒子里 —— 展开的是盒子，不是把行摊进流里。
+       运行中：盒子存在时正文还在盒子里长（到 AgentEnd 交出来）；**没有盒子时正文就是
+       时间线**（纯对话轮没有工作过程可装，把它关进不存在的盒子等于整轮不显示）。
        （旧写法 `open ? items : foldedBody` 会在展开时把整轮再画一遍到外面，
        实测盒子 3 行、外面 20 行 —— 用户在截图里看到的正是这个。） */
-    const bodySource = concise && live ? runningBody(turn) : concise ? foldedBody(turn) : turn.items
+    const bodySource = concise && live ? runningBody(turn, !work) : concise ? foldedBody(turn) : turn.items
     const body = skin === 'runtime' ? groupRounds(bodySource) : groupBlocks(bodySource)
     if (!body.length && !workItems.length && !work) continue
     items.push(
@@ -1156,9 +1160,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             汇总的时长与批次要到 AgentEnd 才成立 —— 与轮尾账同一时刻出现。 */}
         {concise && work && live ? (
           /* Working = 整次运行（AgentStart → AgentEnd）：标题行 + 这一轮的全部内容
-             （思考、中间的旁白、工具行、子 agent），可滚动、有高度上限 */
-          <LivePanel items={turn.items} startedAt={runStartedAt ?? turnStart} waiting={waiting}>
-            <div className="rt-turn-in">{groupRounds(turn.items)}</div>
+             （思考、中间的旁白、工具行、子 agent），可滚动、有高度上限。
+             内容取 liveBox（工作行 + 正在写的正文），不是 turn.items —— 记录（信号/回执）
+             属于时间线，已经在外面渲染过，再塞进面板就是同一行画两遍。 */
+          <LivePanel items={liveBox} startedAt={runStartedAt ?? turnStart} waiting={waiting}>
+            <div className="rt-turn-in">{groupRounds(liveBox)}</div>
           </LivePanel>
         ) : null}
         {/* 结算后：收起是一行 Worked for，展开还是**同一个盒子**（头 + 内容，46vh 封顶）。
@@ -1167,7 +1173,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         {concise && work && !live ? (
           <WorkBox
             stats={stats}
-            running={turn.running}
+            /* 结算盒永远不是“在跑”：`!live` 已经是 AgentEnd 之后的唯一分支
+               （turnSettle: runEnded 压过 turnRunning）。这里传 turn.running 会让
+               「主 run 已交卷、后台任务还在跑」的盒子显示成 Working · …（时钟还在涨），
+               而它本该是 Worked for <时长>。 */
+            running={false}
             open={open}
             onToggle={() => setOpenTurns((m) => ({ ...m, [turn.key]: !open }))}
           >

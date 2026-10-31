@@ -1787,15 +1787,17 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 	// 条目没人回收 —— 每次失败重试在 map 里留一条（会话存活期内累积），且条目带着过期的
 	// blockID / start，迟到事件按 request_id 命中它会读到错误的结算锚。
 	//
-	// 为什么按 run 整扫而不是按 request_id 精确删：events.LLMError 不携带失败 attempt 的
-	// request_id，Runtime 侧 roundResult 也没有，要从 provider 流里把它拽出来是侵入式改动
-	// （要改 provider 事件 → translate → streamWithRetry 三处）。而 runID 是 reqState 自带的
-	// 字段，且同一 run 内 LLM 调用严格串行（streamWithRetry 是阻塞调用，单 goroutine 循环），
-	// llm_error 到达时该 run 名下唯一活着的条目就是这次失败 attempt 的 —— 整扫安全，
-	// 也不会误删并发中的其它 run（父 run 正在计时的轮、兄弟子 agent 各占各的 key）。
-	for k, rs := range r.reqState {
-		if rs.runID == e.RunId {
-			delete(r.reqState, k)
+	// 2026-10：events.LLMError 现在携带失败 attempt 自己的 RequestId（roundResult.requestId），
+	// 所以**精确删那一格**。没有 id 的旧日志 / 首事件前就失败（连接失败、首字超时）
+	// 退回按 run 整扫：同 run 内 LLM 调用严格串行，该 run 名下唯一活着的条目就是这次
+	// attempt 的，安全，也不会误删并发中的其它 run（父 run 正在计时的轮、兄弟子 agent 各占各的 key）。
+	if e.RequestId != "" {
+		delete(r.reqState, e.RequestId)
+	} else {
+		for k, rs := range r.reqState {
+			if rs.runID == e.RunId {
+				delete(r.reqState, k)
+			}
 		}
 	}
 
@@ -1803,6 +1805,15 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 	r.lastError = &LastError{Message: e.Message, Kind: e.ErrorKind, At: at}
 
 	text := llmRetryText(e)
+	// 失败尝试的用量（2026-10 补齐 tokens）：此前只记成本，顶栏 in/out 与轮尾账都少
+	// 这一份 —— 而 Go/runtime 的 metrics 一直是记全的（Kind=attempt_failed），
+	// 于是同一件事两套账。口径与 llm_end 一致（都是本次 attempt 自己的量）。
+	var agg Usage
+	if e.Usage != nil {
+		agg = usageFromCore(*e.Usage)
+		addUsage(&r.usage, agg)
+		addUsage(&r.lifetime, agg)
+	}
 	// 失败尝试的已产生成本（2026-09-23）：上游按已生成 token 计费，这笔钱此前整个丢弃。
 	// 口径与 llm_end 一致（同一价表/同一 costUsd 兜底），只是记在「重试浪费」上：
 	// 会话展示成本 + 子 agent 卡片 + 错误块（重试块显示 +$x）。
@@ -1814,11 +1825,50 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 		r.costUSD += cost
 		r.lifetimeCost += cost
 	}
+
+	// 轮次收尾：只有**不会再重试**的失败才是这一轮的结束（aborted / canceled /
+	// permanent / context_exceeded）。WillRetry=true 的中间失败**不是**轮尾 ——
+	// 同一个逻辑轮会换一个 request id 重来（llm_end 或最终失败再来收尾），
+	// 这里只记账（tokens/cost 进累计），不落 Turn、不动轮起点。
+	//
+	// 为什么要有这条：中断发生在 llm_start ↔ llm_end 之间时，这一轮永远不会有
+	// llm_end，此前在 Turns 里完全不存在 —— 轮尾账（按 turns 求和）与回合数都少一轮。
+	if !e.WillRetry {
+		ts := e.Timestamp
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		// 只在轮起点还在时收尾：起点已清 = 这一轮已经被别的路径收过（AgentEnd 兜底，
+		// 或事件乱序时 AgentEnd 先到）—— 再补一条就是同一轮记两次。
+		if started, ok := r.turnStart[e.RunId]; ok {
+			durMs := msBetween(started, ts)
+			delete(r.turnStart, e.RunId) // 本轮已由这次失败收尾：AgentEnd 不再兜底
+			finish := string(core.FinishReasonError)
+			if e.ErrorKind == "aborted" || e.ErrorKind == "canceled" {
+				finish = string(core.FinishReasonAbort)
+			}
+			r.turns = append(r.turns, Turn{
+				Model: e.Model, Input: agg.Input, Output: agg.Output,
+				CacheRead: agg.CacheRead, CacheWrite: agg.CacheWrite, Reasoning: agg.Reasoning,
+				DurMs: durMs, CostUSD: cost,
+				RunID: e.RunId, RequestID: e.RequestId, FinishReason: finish,
+			})
+		}
+	}
+
 	if r.isSubRunLocked(e.RunId) {
 		bid := r.agentBlockID[e.RunId]
 		if idx := r.findBlockLocked(bid); idx >= 0 && r.blocks[idx].Kind == blockKindAgent {
 			b := r.blocks[idx]
 			b.Items = upsertAgentErrorItem(b.Items, text)
+			// 子 agent 卡片也累加 tokens（成本原本就累加）：终态 TaskEnd 的权威值会覆盖，
+			// 运行中这张卡读的就是这些增量。
+			b.Usage.Input += agg.Input
+			b.Usage.Output += agg.Output
+			b.Usage.CacheRead += agg.CacheRead
+			b.Usage.CacheWrite += agg.CacheWrite
+			b.Usage.CacheWrite1h += agg.CacheWrite1h
+			b.Usage.Reasoning += agg.Reasoning
 			b.Usage.CostUSD += cost // 子 agent 卡片成本含重试浪费（终态 TaskEnd 权威值会覆盖）
 			if e.ErrorKind == "context_exceeded" || !e.WillRetry {
 				b.Status = statusFailed
@@ -2398,6 +2448,14 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 				r.markBlockDirty(b.ID)
 			}
 		}
+		// 轮次收尾的最后一道：这一轮连「最终失败」都没等到 —— 典型是重试退避等待期间
+		// 被 abort（上一条 LLMError 还是 will_retry=true，之后既无 llm_end 也无 final
+		// LLMError）。前面各条收尾路径都不成立，本轮在 turns 里会是空白 —— 补一条
+		// 只带时长的 Turn：token 缺省（上游没报，不编）。
+		r.turns = append(r.turns, Turn{
+			Model: e.Model, DurMs: elapsed,
+			RunID: e.RunId, FinishReason: string(e.FinishReason),
+		})
 	}
 	delete(r.turnStart, e.RunId)
 	delete(r.thinkStart, e.RunId) // 末轮思考计时在此落地（llm_end 不会再来），清瞬态

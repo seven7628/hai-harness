@@ -195,16 +195,21 @@ export function durText(ms: number): string {
    (the red line: never silently drop data). The answer is included wherever it
    sits in the turn, so the order of what is left is the order it happened.
 
-   What counts as "a record" is narrower than it looks: 系统信号 / 任务回执
-   (system, task_result, task_delivery) are rows *about the run*, and the user's rule
-   for the concise density is that only the last round's reply and the produced-files
-   card sit outside the working box — so those three belong to the working phase and
-   are folded with it (they are still rendered, just inside the box). Artifacts stay
-   out: it is the one record that is the *result* of the turn. */
+   Where the line sits (2026-10，用户口径：简洁档 = 时间线 + 一个 Working 块):
+   · 记录留在时间线上（盒子外面）—— signal / artifacts / task_delivery / error / divider；
+   · 工作过程进盒子 —— tool / agent / async_task / compression / 中间轮正文 / 思考；
+   · `system` 与 `task_result` 是**执行阶段的载荷**（命令回显、任务全文），跟工作行
+     一起进盒子；`task_delivery` 是「这件事结束了」的**回执**，留在外面。
+   AgentEnd 之后才到达的后台任务回执尤其必须在外：那一刻盒子已经折叠，折进去就
+   等于「跑完之后什么都没发生」（用户 2026-10 报障的形态）。 */
 export const ALWAYS_SHOWN = new Set<MsgBlock['kind']>([
   'error',
   'divider',
   'artifacts',
+  // 后台任务回执（task_delivery）：任务可能在 AgentEnd **之后**才完成 —— 它是这次
+  // 运行留下的一条记录，不是工作过程。与 signal 同一条判据；位置见 store 的
+  // insertAtTurnEnd（按所属轮落位，不按到达时刻落位）。
+  'task_delivery',
   // 一行信号（Small signals）：这九类事件存在的理由就是「转录不会在没有说明的情况下
   // 突然安静」。折进 Working 就等于把它藏了 —— 用户看到的仍然是「什么都没发生」。
   // 它是**关于这次运行的记录**，不是工作过程，所以和产出卡一样留在盒子外面，
@@ -216,13 +221,17 @@ export function foldedBody(turn: Turn): MsgBlock[] {
   return turn.items.filter((b) => b === turn.answer || ALWAYS_SHOWN.has(b.kind))
 }
 
-/* Running, folded density: nothing of the run is outside the working block —
-   not a thought, not a mid-run sentence, not a tool. Everything the turn
-   contains lives in the box; only the record (signals, artifacts, receipts)
-   stays outside, because a record is not "work in progress". The final reply
-   appears outside at AgentEnd, when the fold closes. */
-export function runningBody(turn: Turn): MsgBlock[] {
-  return turn.items.filter((b) => ALWAYS_SHOWN.has(b.kind))
+/* Running, folded density: while the box exists, nothing of the run is outside
+   it — not a thought, not a mid-run sentence, not a tool; only the record
+   (signals, artifacts, receipts) stays outside, because a record is not "work
+   in progress". The final reply appears outside at AgentEnd, when the fold
+   closes.
+
+   includeAnswer 覆盖「这一轮根本没有 Working 盒子」的形态（纯对话轮：没有工具、
+   没有子 agent，workBody 为空 ⇒ 不画盒子）。此时正文若仍被排除在外面，它就既不在
+   盒子里（没有盒子）也不在外面 —— 整轮在 AgentEnd 之前一个字都渲染不出来。 */
+export function runningBody(turn: Turn, includeAnswer = false): MsgBlock[] {
+  return turn.items.filter((b) => ALWAYS_SHOWN.has(b.kind) || (includeAnswer && b === turn.answer))
 }
 
 /* What the working box holds (concise). Everything that is *work*: tools, subagents,
@@ -245,7 +254,14 @@ export function workBody(turn: Turn): MsgBlock[] {
   )
 }
 
+/* 这一轮有没有东西要装进 Working 盒子？盒子存在当且仅当 workBody 非空 ——
+   不是「有没有工具」。按工具数判会把 async_task-only / system-only 的轮次整轮丢掉：
+   workBody 里明明有行，却没有任何地方渲染它（盒子是按工具数决定画不画的）。 */
+export function hasWork(turn: Turn): boolean {
+  return workBody(turn).length > 0
+}
+
 /** Blocks that belong to the working phase even though they are not "a tool". */
 export const FOLDED_KINDS: ReadonlySet<MsgBlock['kind']> = new Set<MsgBlock['kind']>([
-  'tool', 'agent', 'async_task', 'system', 'task_result', 'task_delivery',
+  'tool', 'agent', 'async_task', 'system', 'task_result',
 ])
