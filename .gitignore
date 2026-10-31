@@ -133,7 +133,16 @@ desktop/app/package-lock.json
 /brand/screenshot-readme-zh-*.png
 
 # —— 其它本机 / 临时产物 ——
-desktop/*.pdf
+# —— 文档 / 视频 / 办公文档产物：生成物一律不入库 ——
+# 调研、评审、汇报这类过程文档，以及渲染出来的视频 / 办公文档都是可重跑的产物；
+# 唯一入库的成品是 README 引用的横版宣传片（下面显式放行，必须排在本规则之后）。
+*.mp4
+*.mov
+*.webm
+*.docx
+*.pptx
+*.pdf
+!/brand/hai-promo.mp4
 *.test
 *.out
 coverage.out
