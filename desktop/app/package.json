@@ -97,6 +97,7 @@
     "test:agent-duration": "esbuild src/lib/agentDuration-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/agent-duration.test.cjs && node --test /tmp/agent-duration.test.cjs",
     "test:active-elapsed": "esbuild src/lib/activeElapsed-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/active-elapsed.test.cjs && node --test /tmp/active-elapsed.test.cjs",
     "test:batch": "esbuild src/components/runtime/turn/batch-test.ts --bundle --platform=node --format=cjs --loader:.md=text --loader:.png=dataurl --loader:.svg=dataurl --outfile=/tmp/batch.test.cjs && node --test /tmp/batch.test.cjs",
+    "test:short-reason": "esbuild src/lib/shortReason-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/short-reason.test.cjs && node --test /tmp/short-reason.test.cjs",
     "test:signal-facts": "esbuild src/lib/signalFacts-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/signal-facts.test.cjs && node --test /tmp/signal-facts.test.cjs",
     "test:turn-settle": "esbuild src/lib/turnSettle-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/turn-settle.test.cjs && node --test /tmp/turn-settle.test.cjs",
     "test:tail-line": "esbuild src/lib/tailLine-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/tail-line.test.cjs && node --test /tmp/tail-line.test.cjs",

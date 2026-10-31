@@ -106,6 +106,21 @@ test('a receipt is folded into the working phase, not left outside', () => {
   assert.deepEqual(inside, ['task_delivery', 'system'])
 })
 
+test('a block with no text field does not take the transcript down', () => {
+  // 真事故（2026-10）：Go 侧 Block.Text 是 `json:"text,omitempty"`，一个只有思考、
+  // 没有正文的 assistant 块序列化后**没有** text 字段；历史分页把它交给 UI 后，
+  // 这里读 b.text.trim() 抛 TypeError，整页转录变白（用户只是往上滚了一屏）。
+  const blocks = [
+    { kind: 'user', id: 1, text: 'q' },
+    { kind: 'assistant', id: 2, thinking: 'only thoughts, no answer' }, // 没有 text
+    { kind: 'assistant', id: 3, text: 'the answer', thinking: '', streaming: false },
+  ] as unknown as MsgBlock[]
+  const [turn] = selectTurns(blocks)
+  // user 块挂成 turn.user，其余进 items：两条 assistant 都要在（畸形的那条不许被丢）
+  assert.deepEqual(turn.items.map((b) => b.id), [2, 3], '畸形的块仍留在转录里，不许静默丢掉')
+  assert.equal(turn.answer?.id, 3, '没有正文的块不能当这一轮的结论')
+})
+
 test('a signal row stays outside the working box, running or settled', () => {
   // 一行信号是「关于这次运行的记录」：折进 WorkBox 就等于把它藏了 —— 它存在的理由
   // 正是让转录不会在没有说明的情况下突然安静。运行中也必须露在盒子外面。

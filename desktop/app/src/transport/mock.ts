@@ -54,6 +54,17 @@ const MOCK_SKILLS: { name: string; description: string; instructions: string; re
     enabled: false,
   },
   {
+    // 真 SKILL.md 的 description 是**整段**（几十到几百字），不是一句话。mock 里必须留
+    // 至少一个这样的样本 —— 否则「`/` 菜单里说明文字折成十几行、压到相邻行上并溢出面板」
+    // 这条真实故障在 mock 下永远复现不出来（2026-10 用户截图）。
+    name: 'design-taste-frontend',
+    description:
+      'tasteskill v2, the anti-slop frontend skill. Art direction for websites, distilled from a study of 247 curated gallery sites (One Page Love, Awwwards Sites of the Day). Deals researched directions (idea, composition, type, palette, photographs, section blueprints) from a library, enforces a strict no-slop house style with a real-browser inspector, and runs a look-and-fix loop on screenshots.',
+    instructions: '# 版式判定\n\n先给方向，再落版式，最后真浏览器复核。',
+    resources: [],
+    enabled: true,
+  },
+  {
     // 声明 requires.input: [image]，而 mock 会话的模型（如 glm-4.6）是纯文本 →
     // 真 bridge 会返回 enabled=false + unavailable_reason。mock 复刻这一态，
     // 让「当前模型不可用」在无 key 环境下也能看到与验证。

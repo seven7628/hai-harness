@@ -4703,7 +4703,14 @@ export function dispatchEvent(raw: AnyEvent): void {
             has_more?: boolean
             total?: number
           }
-          const incoming = (page.blocks ?? []) as unknown as MsgBlock[]
+          // 分页块是 bridge 的**原始** Block JSON，而 Go 侧字段几乎全是 `omitempty`：
+          // 一个「只有思考、没有正文」的 assistant 块序列化后连 text 字段都没有（`Block.Text`
+          // 是 `json:"text,omitempty"`），tool 块同理可能没有 name/args/result/status。
+          // 以前这里直接 `as unknown as MsgBlock[]` 塞进视图，下游读 b.text.trim() 就炸，
+          // 表现是往上滚一屏、整页转录变白（2026-10 用户报障）。
+          // 现在过一遍 checkpoint 的块映射（块形状的**唯一**定义，见 checkpointToView）：
+          // 缺字段按空值补齐、未知 kind 跳过、id 原样保留（游标与去重都靠它）。
+          const incoming = checkpointToView({ blocks: page.blocks } as unknown as CheckpointView).blocks
           setState((s) => {
             const v = s.views[sid]
             if (!v) return {}

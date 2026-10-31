@@ -1471,6 +1471,72 @@ const capsPick = await page.eval(async () => {
 })
 check('caps: a skill row inserts its command and closes', capsPick.name != null && capsPick.value === `/${capsPick.name} ` && capsPick.popGone === true, JSON.stringify(capsPick))
 check('caps: inserting a skill does not open the slash menu', capsPick.cmd === false, capsPick.cmd)
+
+// ---- `/` 菜单：一行就是一行 ---------------------------------------------------
+// 真实故障（2026-10）：技能的 description 是整段话，被原样塞进 28px 高的补全行 →
+// 折成十几行、压到相邻行、溢出面板，整块菜单看上去是「字挤成一团」。
+// 两道防线一起量：文案收敛（shortReason）+ 行裁切（overflow/nowrap/ellipsis）。
+await page.eval(() => {
+  const ta = document.querySelector('.composer textarea') || document.querySelector('textarea')
+  ta.focus()
+  const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+  set.call(ta, '/')
+  ta.dispatchEvent(new Event('input', { bubbles: true }))
+})
+await wait(700)
+const slash = await page.eval(() => {
+  const pop = document.querySelector('.pop[data-pop="cmd"]')
+  if (!pop) return null
+  const rows = [...pop.querySelectorAll('.pop-row')]
+  const cs = getComputedStyle(pop)
+  const m = (r) => r.querySelector('.m')
+  return {
+    width: Math.round(pop.getBoundingClientRect().width),
+    maxH: cs.maxHeight,
+    overflow: cs.overflowY,
+    rowHeights: rows.map((r) => Math.round(r.getBoundingClientRect().height)),
+    // 说明格必须是一行：字体 10.5 → 行高 16 左右，两行就会是 21+（故障现场实测 21/42…）
+    descHeights: rows.filter((r) => m(r)).map((r) => Math.round(m(r).getBoundingClientRect().height)),
+    // 每行内容的右边界不能越过行本身（溢出面板的前兆）
+    bleed: rows.filter((r) => {
+      const rb = r.getBoundingClientRect()
+      return [...r.children].some((c) => {
+        const cb = c.getBoundingClientRect()
+        return cb.bottom > rb.bottom + 1 || cb.right > rb.right + 1
+      })
+    }).length,
+    longest: Math.max(0, ...rows.filter((r) => m(r)).map((r) => (m(r).textContent ?? '').length)),
+    // 被截断的那些行：title 里必须还是**全文**（截断只发生在视觉上，不许丢信息）
+    truncated: rows
+      .filter((r) => (r.querySelector('.m')?.textContent ?? '').endsWith('…'))
+      .map((r) => ({ m: r.querySelector('.m').textContent, title: r.title || '' })),
+    rowOverflow: rows.length ? getComputedStyle(rows[0]).overflow : null,
+    ellipsis: (() => { const mm = rows.map(m).find((x) => x && (x.textContent ?? '').endsWith('…')); return mm ? getComputedStyle(mm)['textOverflow'] : null })(),
+  }
+})
+check('slash menu: it is a completion popover, not a panel (386 / 430 cap)',
+  slash?.width === 386 && slash?.maxH === '430px' && slash?.overflow === 'auto', JSON.stringify(slash && { w: slash.width, m: slash.maxH, o: slash.overflow }))
+check('slash menu: every row is one 28px line', (slash?.rowHeights ?? []).every((h) => h === 28), JSON.stringify(slash?.rowHeights))
+check('slash menu: the description cell never wraps to a second line',
+  (slash?.descHeights ?? []).every((h) => h <= 17), JSON.stringify(slash?.descHeights))
+check('slash menu: no row content bleeds outside its row', slash?.bleed === 0, slash?.bleed)
+check('slash menu: a whole-paragraph description is shortened, not dumped',
+  (slash?.longest ?? 0) <= 31, slash?.longest)
+check('slash menu: the row clips and ellipsizes', slash?.rowOverflow === 'hidden' && slash?.ellipsis === 'ellipsis',
+  JSON.stringify({ o: slash?.rowOverflow, e: slash?.ellipsis }))
+check('slash menu: the full description survives in the hover title',
+  (slash?.truncated ?? []).length > 0 &&
+    (slash.truncated ?? []).every((r) => r.title.length > r.m.length) &&
+    (slash.truncated ?? []).some((r) => r.title.includes('tasteskill v2')),
+  JSON.stringify((slash?.truncated ?? []).map((r) => r.title.slice(0, 50))))
+await page.eval(() => {
+  const ta = document.querySelector('.composer textarea') || document.querySelector('textarea')
+  const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+  set.call(ta, '')
+  ta.dispatchEvent(new Event('input', { bubbles: true }))
+  ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+})
+await wait(300)
 // 收尾：Esc 关菜单、清掉写进正文的 `/`
 await page.eval(() => {
   const ta = document.querySelector('textarea')

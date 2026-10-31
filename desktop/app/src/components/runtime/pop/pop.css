@@ -43,6 +43,10 @@ html[data-skin='runtime'] .pop-row {
   gap: 8px;
   width: 100%;
   height: 28px;
+  /* 一行就是一行：设计给的 .pop-row 是定高 28px 的补全行，行里的文字必须被裁掉，
+     不能折行 —— 折出来的字会压在下一行上、溢出面板（那是「字挤成一团」的样子，
+     不是「更多内容」）。说明短语本身也已经过 lib/shortReason 收敛。 */
+  overflow: hidden;
   padding: 0 8px;
   border-radius: var(--r-xs);
   font-size: 12px;
@@ -141,7 +145,17 @@ html[data-skin='runtime'] .pop {
 html[data-skin='runtime'] .pop .pop-search { background: var(--card); }
 /* a skill name and its one-line reason belong on the same line, not at two ends */
 html[data-skin='runtime'] .pop-row.sk { justify-content: flex-start; }
-html[data-skin='runtime'] .pop-row.sk .m { margin-left: 10px; font-size: 10.5px; color: var(--ink-3); }
+html[data-skin='runtime'] .pop-row.sk .m {
+  margin-left: 10px;
+  font-size: 10.5px;
+  color: var(--ink-3);
+  /* 技能名长短不一，说明吃掉剩余宽度并在末尾省略；kbd 列不许被挤掉 */
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 html[data-skin='runtime'] .pop-row.sk .k { color: var(--ink-2); font-size: 11.5px; }
 html[data-skin='runtime'] .pop-row.dir .k { color: var(--ink); }
 html[data-skin='runtime'] .pop-row.dir svg { color: var(--amber); }

@@ -15,6 +15,7 @@ import { CapsPop, capsCountOf } from './runtime/prompt/CapsPop'
 import './runtime/prompt/caps.css'
 import { AgentRunningBar } from './AgentRunningBar'
 import { useT } from '../i18n'
+import { shortReason } from '../lib/shortReason'
 import { getTransport } from '../transport'
 import {
   acceptImages, dataUrlBytes, fmtBytes,
@@ -594,9 +595,13 @@ export default function Composer() {
   // 每行两段：命令名（.k，mono）+ 一句话说明（.m）。技能用注册表里的 description，
   // 内置命令用固定短句 —— `.m` 是设计给的「这一行是干什么的」，空着等于把承诺撤了。
   const slashItems = [
-    ...skills.filter((s) => s.enabled).map((s) => ({ cmd: `/${s.name}`, desc: s.description || '' })),
-    ...BUILTIN_SLASH.map((c) => ({ cmd: c, desc: t(`composer.cmdHint.${c.slice(1)}`) })),
+    ...skills.filter((s) => s.enabled).map((s) => ({ cmd: `/${s.name}`, desc: s.description || '', full: s.description || '' })),
+    ...BUILTIN_SLASH.map((c) => ({ cmd: c, desc: t(`composer.cmdHint.${c.slice(1)}`), full: t(`composer.cmdHint.${c.slice(1)}`) })),
   ]
+  // 一行一行的说明：`.m` 是设计给「它管什么」的**一行短语**槽位，不是描述正文。
+  // 技能注册表给的是整段 description → 取第一句 + 截断（见 lib/shortReason.ts）；
+  // 全文进 title，鼠标停一下就够读。
+  const descOf = (cmd: string) => slashItems.find((x) => x.cmd === cmd) ?? { desc: '', full: '' }
   const slashCommands = slashItems.map((i) => i.cmd)
   const firstLine = text.split('\n')[0]
   const firstToken = (firstLine.split(/\s/)[0] ?? '').trim()
@@ -1166,11 +1171,11 @@ export default function Composer() {
                           aria-selected={i === slashActive}
                           onClick={() => acceptCommand(c)}
                           onMouseEnter={() => setSlashActive(i)}
-                          title={c}
+                          title={descOf(c).full ? `${c} — ${descOf(c).full}` : c}
                         >
                           <Sparkles size={12} />
                           <span className="k">{c}</span>
-                          <span className="m">{slashItems.find((x) => x.cmd === c)?.desc ?? ''}</span>
+                          <span className="m">{shortReason(descOf(c).desc)}</span>
                           {i < 9 ? <kbd aria-hidden="true">{i + 1}</kbd> : null}
                         </button>
                       )

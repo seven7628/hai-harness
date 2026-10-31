@@ -46,7 +46,13 @@ export interface TurnStats {
   compressions: number
 }
 
-const isText = (b: MsgBlock) => b.kind === 'assistant' && b.text.trim().length > 0
+// 文本判据必须容忍**缺字段**：Go 那边 Block.Text 是 `json:"text,omitempty"`，
+// 一个「只有思考、没有正文」的 assistant 块序列化后根本没有 text 字段。历史分页
+// （blocks_page）把这种块原样交给 UI，之前的 `b.text.trim()` 直接把整个转录打成
+// 空白页 —— 用户只是往上滚了一屏（2026-10 报障：滚一下就 Cannot read 'trim'）。
+// 一条畸形块不该让整页崩：这里按空串处理，缺什么当没有。
+const textOf = (b: MsgBlock): string => (typeof (b as { text?: string }).text === 'string' ? (b as { text: string }).text : '')
+const isText = (b: MsgBlock) => b.kind === 'assistant' && textOf(b).trim().length > 0
 
 function emptyTurn(index: number, key: string): Turn {
   return { key, index, items: [], tools: [], agents: [], compressions: [], running: false }
@@ -56,7 +62,7 @@ function push(t: Turn, b: MsgBlock) {
   t.items.push(b)
   switch (b.kind) {
     case 'assistant':
-      if (isText(b)) t.answer = t.answer ? (b.text.trim() ? b : t.answer) : b
+      if (isText(b)) t.answer = t.answer ? (textOf(b).trim() ? b : t.answer) : b
       if (b.streaming) t.running = true
       break
     case 'tool':
