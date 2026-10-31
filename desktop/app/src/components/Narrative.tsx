@@ -29,7 +29,7 @@ import { CompressionBlock, InlineCode, Thinking, ToolGroup } from './NarrativeBl
 import { AgentTaskCard } from './TaskCard'
 import HaiLogo from './HaiLogo'
 import { CheckCircleIcon, PaperclipIcon } from './icons'
-import { fmtDuration, fmtRun, fmtClock, fmtTime, fmtUsd } from './ui'
+import { fmtDuration, fmtRun, fmtClock, fmtUsd } from './ui'
 import { useClock } from '../lib/useNow'
 import { useSkin } from '../lib/useSkin'
 import { ArtifactCard, absArtifactPath } from './ArtifactCard'
@@ -1158,7 +1158,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         {skin === 'runtime' && (head.model || head.t0 != null) ? (
           <div className="rt-head">
             {head.model ? <span>{head.model}</span> : null}
-            {head.t0 != null ? <span className="rt-t">{fmtTime(head.t0)}</span> : null}
+            {/* 轮头 = 「哪个模型 · 什么时候」。用户 2026-10：只要时刻读不出这是哪天 ——
+                隔天回来翻记录时，07:57:27 到底是今天还是上周的完全无法判断。
+                日期用 fmtClock 的全量写法（YYYY-MM-DD HH:MM:SS，与消息时间戳同一函数）。 */}
+            {head.t0 != null ? <span className="rt-t" title={fmtClock(head.t0)}>{fmtClock(head.t0)}</span> : null}
           </div>
         ) : null}
         {/* 「Worked for 8.2 s」是**结算**，不是进度：运行中这一行只该是「正在做什么」，

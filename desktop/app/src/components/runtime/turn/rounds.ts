@@ -38,6 +38,11 @@ export function roundsOf(items: MsgBlock[]): Round[] {
     const r = (b as { requestId?: string }).requestId
     return typeof r === 'string' && r ? r : undefined
   }
+  /* 同一个 request 发起的调用**永远**在同一段里（用户 2026-10：并行的工具调用必须是
+     同一个 Ran 组件，不能画成两条并排的行）。只按相邻性归段挡不住这种形态：并行调用
+     之间夹了一条 assistant（例如同一次调用的思考摘要、或结果先到、下一段正文后到），
+     第二条就会被 assistant 开的**新段**接走 —— 屏幕上就是两条各 1 个调用的行。 */
+  const byReq = new Map<string, Round>()
   for (const b of items) {
     if (b.kind === 'assistant') {
       // the assistant's own words open a round; a previous round of bare tool
@@ -47,6 +52,14 @@ export function roundsOf(items: MsgBlock[]): Round[] {
     }
     if (WORK.has(b.kind)) {
       const req = reqOf(b)
+      if (req) {
+        const known = byReq.get(req)
+        if (known) {
+          // 同一请求：回到它那一段（cur 不动，后面没带 request_id 的调用仍挨着走）
+          known.items.push(b)
+          continue
+        }
+      }
       let c = cur as unknown as Round | null
       if (!c) c = ensure()
       else if (req && c.req && req !== c.req) {
@@ -57,6 +70,7 @@ export function roundsOf(items: MsgBlock[]): Round[] {
       }
       // 段还没有归属就先认领（assistant 块目前不带 request_id）
       if (!c.req && req) c.req = req
+      if (req) byReq.set(req, c)
       c.items.push(b)
       continue
     }

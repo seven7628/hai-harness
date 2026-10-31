@@ -19,8 +19,10 @@ export const MAX_IMAGE_DATA_URL_BYTES = 3 * 1024 * 1024
 export const MAX_MESSAGE_IMAGE_BYTES = 3 * 1024 * 1024
 /** 内嵌图片长边像素上限（视觉模型有效分辨率）。 */
 export const MAX_IMAGE_DIM = 1568
-/** 附件数量上限。 */
-export const MAX_IMAGE_ATTACHMENTS = 4
+/** 附件数量上限（用户 2026-10：4 张太少，扩到 10 张）。
+ *  注意总量闸门仍然是 MAX_MESSAGE_IMAGE_BYTES（3MiB/条，bridge 的传输上限）——
+ *  10 张图是**张数**放开，不是字节数放开：超预算时采集仍会压缩/拒绝并给出提示。 */
+export const MAX_IMAGE_ATTACHMENTS = 10
 
 /** data URL 的体积（字节数；String.length 对 base64 即字节数，ASCII 安全）。 */
 export function dataUrlBytes(dataUrl: string): number {
@@ -153,7 +155,7 @@ export async function acceptImages(
   let rejected = files.length - targets.length
   let tooLarge = 0
   let used = existingBytes
-  for (const file of targets) {
+  for (const [i, file] of targets.entries()) {
     let raw: string
     try {
       raw = await readFileAsDataURL(file)
@@ -161,9 +163,16 @@ export async function acceptImages(
       rejected++
       continue
     }
+    /* 每张图的预算 = 剩余额度 / 后面还要放的张数（含这一张）。
+       一张图时就是整条预算（行为不变）；10 张时每张 ~300KB —— 否则前几张各吃掉
+       一大块，第 5 张起就开始报「图片过大」，张数放开等于没放开（用户 2026-10：
+       数量上限扩到 10 张）。压到多少由 normalizeImage 逐级降质量/尺寸决定。 */
+    const slotsLeft = targets.length - i
+    const remainingNow = MAX_MESSAGE_IMAGE_BYTES - used
+    const perImage = Math.min(MAX_IMAGE_DATA_URL_BYTES, Math.max(64 * 1024, Math.floor(remainingNow / slotsLeft)))
     let norm: NormalizedImage
     try {
-      norm = await normalizeImage(raw, file.type || 'image/png', MAX_IMAGE_DATA_URL_BYTES)
+      norm = await normalizeImage(raw, file.type || 'image/png', perImage)
     } catch {
       rejected++
       tooLarge++

@@ -293,8 +293,28 @@ test('batch line: the dominant verb names the line, and the count is its unit', 
     { kind: 'tool', id: 2, toolId: 'b', name: 'grep', args: '{"pattern":"x"}', result: 'f.go:1:x', status: 'done', durMs: 25 },
     { kind: 'tool', id: 3, toolId: 'c', name: 'grep', args: '{"pattern":"y"}', result: 'f.go:2:y\ng.go:9:y', status: 'done', durMs: 30 },
   ] as unknown as MsgBlock[]
-  // grep wins on count (2 vs 1): verb is the past of what was done most
-  assert.equal(batchLine(calls as never), 'Searched x +1 \u00b7 3 hits \u00b7 332 ms')
+  // grep wins on count (2 vs 1): verb is the past of what was done most。
+  // 对象只在一组里独一份时出现（`Searched x`），多条时报条数 —— 用户 2026-10：
+  // 行头要「简洁明确 + 关键信息」，同一批调用的参数原文每行都一样，读不出做了什么。
+  // 「+1」是另一种动词的调用（glob）：混合时补个数，不丢。
+  // 只锁行头（动词 + 数出来的量 + 度量），时长单独一格 —— 时长写法是另一件事，
+  // 锁死在这里等于把两件事绑在一次改动上。
+  const line = batchLine(calls as never)
+  assert.ok(line.startsWith('Searched 2 queries +1 \u00b7 3 hits'), line)
+  assert.ok(line.split(' \u00b7 ').length === 3, line)
+})
+
+test('batch line: parallel bash calls are one line with a count, not raw commands', () => {
+  const calls = [
+    { kind: 'tool', id: 1, toolId: 'a', name: 'bash', args: '{"command":"cd /Users/admin/workspace/go-code && grep -n x"}', result: 'x'.repeat(1130), status: 'done', durMs: 41 },
+    { kind: 'tool', id: 2, toolId: 'b', name: 'bash', args: '{"command":"cd /Users/admin/workspace/go-code && sed -n 1,2p"}', result: 'y'.repeat(2460), status: 'done', durMs: 35 },
+  ] as unknown as MsgBlock[]
+  // 参数原文不进行头（每条都一样 = 没有信息）；报几条命令 + 输出体量 + 耗时
+  const two = batchLine(calls as never)
+  const one = batchLine([calls[0]] as never)
+  assert.ok(two.startsWith('Ran 2 commands \u00b7 3.5 KB'), two)
+  assert.ok(one.startsWith('Ran 1 command \u00b7 1.1 KB'), one)
+  assert.ok(!two.includes('cd /Users/admin'), '行头不得出现命令原文：' + two)
 })
 
 test('batch line: an edit reports the diff, not a count of calls', () => {
@@ -348,6 +368,21 @@ test('roundsOf：产出/信号块不被丢掉（agent_end 的产出卡就靠它�
   if (!bare.includes('artifacts') || !bare.includes('system')) {
     throw new Error('记录块没有被单独成段: ' + JSON.stringify(bare))
   }
+})
+
+test('roundsOf：同一 request 的并行调用夹着 assistant 也归同一段（一个 Ran 组件）', () => {
+  const list = [
+    { kind: 'user', id: 1, text: 'q' },
+    { kind: 'assistant', id: 2, text: '', thinking: '先看现状', streaming: false },
+    { kind: 'tool', id: 3, toolId: 'a', name: 'bash', args: '{"command":"grep -n x"}', status: 'running', requestId: 'req-1' },
+    // 并行调用的中途又有正文/思考块到达（同一次请求）
+    { kind: 'assistant', id: 4, text: '', thinking: '', streaming: true },
+    { kind: 'tool', id: 5, toolId: 'b', name: 'bash', args: '{"command":"sed -n 1,2p"}', status: 'running', requestId: 'req-1' },
+  ] as unknown as MsgBlock[]
+  const rs = roundsOf(list)
+  const withTools = rs.filter((r) => r.items.some((b) => b.kind === 'tool'))
+  assert.equal(withTools.length, 1, '同一 request 的两次调用必须在同一段（否则屏幕上两个 Ran 行）')
+  assert.deepEqual(withTools[0].items.map((b) => b.id), [3, 5])
 })
 
 test('dispatch tools are not transcript rows (the lane already tells that story)', async () => {

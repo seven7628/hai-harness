@@ -1,5 +1,5 @@
 import type { MsgBlock } from '../../../store/useAppStore'
-import { fmtMs, toolArgsSummary } from '../../../lib/toolSummary'
+import { fmtMs, toolArgsSummary, toolVerb } from '../../../lib/toolSummary'
 
 /* 一个 round 里的调用折成一行，语法与轮自己的折叠行相同：动词、对象、这个动词
    数的那个量、再是耗时。逐字搬自 design/agent-runtime/v2/ui.js:2143-2202
@@ -20,18 +20,59 @@ function linesOf(s: string | undefined): number {
   return s ? s.split('\n').filter((l) => l.trim().length > 0).length : 0
 }
 
+const UNIT: Record<string, [string, string]> = {
+  command: ['command', 'commands'],
+  file: ['file', 'files'],
+  query: ['query', 'queries'],
+  pattern: ['pattern', 'patterns'],
+  todo: ['todo', 'todos'],
+  call: ['call', 'calls'],
+}
+
+const plural = (n: number, unit: string): string => {
+  const pair = UNIT[unit]
+  const word = pair ? (n === 1 ? pair[0] : pair[1]) : unit + (n === 1 ? '' : 's')
+  return n + ' ' + word
+}
+
+/* 行头 = 动词 + 数出来的量（+ 混合时的 "+N"），再是这一组里那件事的度量与耗时。
+   用户 2026-10 的口径：工具组描述要**简洁明确、给关键信息**（文件变更 / 读取行数 /
+   执行了几个命令），不是把参数原文截 44 个字贴上去 ——「Ran cd /Users/… && grep -n」
+   每条都长得一样，读不出做了什么。参数原文在展开后的每一行里，行头只报数。
+
+   只有「一组的对象本身就短且唯一」时才用对象说话（一个文件、一个 pattern）：
+   `Read auth.go:12-40 · 40 lines`、`Edited turn.css · +12 −0`。
+   bash 例外：命令原文没有信息密度，一律报条数 —— `Ran 2 commands · 3.5 KB · 76ms`。 */
+/* 对象缩写：路径只留文件名（`desktop/app/src/…/turn.css` → `turn.css`）。
+   行头是「做了什么」，不是「在哪个目录做的」——完整路径在展开后的那一行里。 */
+function shortObj(s: string): string {
+  const cut = s.indexOf(':')
+  const path = cut >= 0 ? s.slice(0, cut) : s
+  const tail = cut >= 0 ? s.slice(cut) : ''
+  const base = path.includes('/') ? path.slice(path.lastIndexOf('/') + 1) : path
+  const out = base + tail
+  return out.length > 40 ? out.slice(0, 39) + '\u2026' : out
+}
+
 export function batchLine(calls: Tool[]): string {
   if (!calls.length) return ''
-  const groups = BATCH_VERB.map(([k, v, u]) => ({ v, u, list: calls.filter((c) => k.test(c.name)) }))
+  let groups = BATCH_VERB.map(([k, v, u]) => ({ v, u, list: calls.filter((c) => k.test(c.name)) }))
     .filter((g) => g.list.length)
     .sort((a, b) => b.list.length - a.list.length)
-  if (!groups.length) return ''
+  /* 表里没有的工具（MCP / TaskOutput / codemode 之外的宿主工具）不因为「拼不出动词」
+     就退回逐条：同名重复调用照样折成一行 —— `TaskOutput 2 calls`。否则并行的一批
+     MCP 调用又是几条并排的行（用户 2026-10 的同一条口径）。 */
+  if (!groups.length) {
+    const byName = new Map<string, Tool[]>()
+    for (const c of calls) byName.set(c.name, [...(byName.get(c.name) ?? []), c])
+    const [name, list] = [...byName.entries()].sort((a, b) => b[1].length - a[1].length)[0]
+    groups = [{ v: toolVerb(name), u: 'call', list }]
+  }
   const top = groups[0]
-  const obj = toolArgsSummary(top.list[0].name, top.list[0].args || '').trim()
   const rest = calls.length - top.list.length
-  const n0 = top.list.length
-  const count = n0 + ' ' + (n0 === 1 ? top.u : top.u === 'query' ? 'queries' : top.u + 's')
-  const title = top.v + ' ' + (obj || count) + (rest ? ' +' + rest : '')
+  const obj = top.v === 'Ran' ? '' : shortObj(toolArgsSummary(top.list[0].name, top.list[0].args || '').trim())
+  const subject = top.list.length === 1 && obj ? obj : plural(top.list.length, top.u)
+  const title = top.v + ' ' + subject + (rest ? ' +' + rest : '')
 
   let num = ''
   if (top.v === 'Edited') {
