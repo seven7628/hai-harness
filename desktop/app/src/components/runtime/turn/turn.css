@@ -43,6 +43,13 @@
   margin-bottom: 22px;
 }
 
+/* 用户 2026-10：轮尾账排在产出卡上方 —— 账与卡之间 10px（账自身的下外边距在运行时
+   皮肤里归零，见 runtime-skin.css；轮间距由 .rt-turn 自己承担，卡不再重复一遍）。
+   产出卡不再借 .rt-turn-ans：那是「回答是这一轮的交代」的 16px 节奏，卡是记录。 */
+.rt-turn-artifacts {
+  margin-top: 10px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .rt-turn-body {
     transition: none;

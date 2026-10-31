@@ -1235,10 +1235,27 @@ const foot = await page.eval(() => {
     taskLegacy: document.querySelectorAll('.ac-artifacts .art, .ac-artifacts .art-rest').length,
   }
   const txt = led?.textContent?.replace(/\s+/g, ' ').trim() ?? null
-  return { ledger: !!led, txt, meta, arts }
+  // 轮尾顺序（用户 2026-10）：账在产出卡上方，产出卡是最后一块；有产出卡时不再
+  // 单独画文件行（卡里已经逐个列了文件）。取**同一条轮**里的两个元素比对，跨轮比
+  // 文档顺序没有意义。间距也取几何值：账底 → 卡顶应当是一个 10px 的节奏。
+  const turn = [...document.querySelectorAll('.rt-turn')]
+    .filter((t) => t.querySelector('.rt-ledger') && t.querySelector('.msg.artifacts'))
+    .pop()
+  const tLed = turn?.querySelector('.rt-ledger')
+  const tArt = turn?.querySelector('.msg.artifacts')
+  const order = {
+    sameTurn: !!tLed && !!tArt,
+    ledgerBeforeArtifacts: !!(tLed && tArt && (tLed.compareDocumentPosition(tArt) & Node.DOCUMENT_POSITION_FOLLOWING)),
+    fileLine: !!turn?.querySelector('.cy-file'),
+    gap: tLed && tArt ? Math.round(tArt.getBoundingClientRect().top - tLed.getBoundingClientRect().bottom) : null,
+  }
+  return { ledger: !!led, txt, meta, arts, order }
 })
 check('turn: the cost line exists and is the ledger', foot.ledger === true && /calls/.test(foot.txt || ''), foot.txt)
 check('turn: the legacy TTFT line is gone (one fact, one line)', foot.meta === 0, foot.meta)
+check('turn: the ledger sits above the artifacts card', foot.order.sameTurn && foot.order.ledgerBeforeArtifacts, JSON.stringify(foot.order))
+check('turn: artifacts replace the standalone file line', foot.order.sameTurn && !foot.order.fileLine, JSON.stringify(foot.order))
+check('turn: ledger → artifacts keeps the 10px rhythm', foot.order.gap != null && foot.order.gap >= 6 && foot.order.gap <= 14, `${foot.order.gap}px`)
 check('artifacts: the runtime card is the design one (.ar), not the old .art', foot.arts.modern > 0 && foot.arts.legacy === 0, JSON.stringify(foot.arts))
 // 任务卡片里的产出也必须同一套（子会话＝主会话，只是 session 不同）：任何一处
 // .ac-artifacts 里都不该再出现旧卡。没有任务卡时这条自然成立，有就必须是 .ar。

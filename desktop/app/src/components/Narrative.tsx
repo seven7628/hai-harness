@@ -1140,8 +1140,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        （旧写法 `open ? items : foldedBody` 会在展开时把整轮再画一遍到外面，
        实测盒子 3 行、外面 20 行 —— 用户在截图里看到的正是这个。） */
     const bodySource = concise && live ? runningBody(turn, !work) : concise ? foldedBody(turn) : turn.items
-    const body = skin === 'runtime' ? groupRounds(bodySource) : groupBlocks(bodySource)
-    if (!body.length && !workItems.length && !work) continue
+    /* 用户 2026-10：轮尾账排在产出卡**上方** —— 先结算这一轮，再看这一轮的产出。
+       产出卡仍是轮尾最后一块（它是「记录」，不属于工作过程）。只在运行时皮肤、且账
+       真的会渲染时把产出卡拆出来；运行中/无用量归属的轮保持原序（账本来就不出现）。 */
+    const ledgerShown = usage.matched && !live
+    const artBlocks = skin === 'runtime' && ledgerShown ? bodySource.filter((b) => b.kind === 'artifacts') : []
+    const bodyBlocks = artBlocks.length ? bodySource.filter((b) => b.kind !== 'artifacts') : bodySource
+    const body = skin === 'runtime' ? groupRounds(bodyBlocks) : groupBlocks(bodyBlocks)
+    const hasArtifacts = turn.items.some((b) => b.kind === 'artifacts')
+    if (!body.length && !artBlocks.length && !workItems.length && !work) continue
     items.push(
       <div
         className="rt-turn"
@@ -1187,8 +1194,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         {body.length ? <div className="rt-turn-ans">{body}</div> : null}
         {/* 这一轮改了哪个文件：记录（带框卡），点它展开做出改动的工作行 */}
         {/* 简洁档收起时不再单独画文件行：这条信息已经在 Worked for 那一行里
-            （「Edited 1 file +22 −17」），再画一遍是同一个数字说两次 */}
-        {skin === 'runtime' && !live && stats.files > 0 && (!concise || open) ? (
+            （「Edited 1 file +22 −17」），再画一遍是同一个数字说两次。
+            有产出卡的轮次也不画：卡里已经逐个列了这次产出的文件，这张卡是同一份
+            事实的第三份拷贝（用户 2026-10 截图里「很突兀」的那一行）。 */}
+        {skin === 'runtime' && !live && !hasArtifacts && stats.files > 0 && (!concise || open) ? (
           <FilesLine
             path={firstFileOf(turn)}
             added={stats.added}
@@ -1198,7 +1207,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         ) : null}
         {/* 轮尾账是**结算**，不是进度：AgentEnd 之前这一轮的用量还在长，
             把「11 calls · 16k tokens」边跑边刷出来就是在报一个还没定的数。 */}
-        {usage.matched && !live ? (
+        {ledgerShown ? (
           <div className="rt-turn-foot">
             <Ledger
               calls={stats.calls}
@@ -1211,6 +1220,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
               outputTokens={usage.output}
             />
           </div>
+        ) : null}
+        {/* 产出卡排在轮尾账之后（用户 2026-10 的轮尾顺序）：账说「这一轮花了多少」，
+            卡说「这一轮产出了什么」；卡仍是最后一块，轮间距由它承担（见 turn.css）。 */}
+        {artBlocks.length ? (
+          <div className="rt-turn-artifacts">{groupRounds(artBlocks)}</div>
         ) : null}
       </div>,
     )
