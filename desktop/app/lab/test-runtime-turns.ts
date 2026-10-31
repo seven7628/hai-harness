@@ -87,23 +87,34 @@ test('a folded turn keeps the record and drops the work', () => {
   const [turn] = selectTurns(withRecord)
   const kept = foldedBody(turn).map((b) => b.kind)
   // the tool and the mid-turn narration are the working phase; the error line and the
-  // produced-files card are the record and must survive the fold. 任务回执不属于这一类：
-  // 它是「关于这次运行的行」，简洁档里随工作过程一起进盒子（见 ALWAYS_SHOWN 注释）
-  assert.deepEqual(kept, ['error', 'assistant', 'artifacts'])
+  // produced-files card are the record and must survive the fold. 这里的回执排在回答
+  // **之后** = 交卷后才到达 → 时间线上的一条记录，同样留在外面（判据见
+  // selectTurns.recordAfterRun：运行中到达的记录才进盒子）
+  assert.deepEqual(kept, ['error', 'assistant', 'artifacts', 'task_delivery'])
 })
 
-test('a receipt is folded into the working phase, not left outside', () => {
-  const blocks = [
+test('a receipt that arrived mid-run is folded into the working phase; a late one is not', () => {
+  const midRun = [
     { kind: 'user', id: 1, text: 'q' },
-    { kind: 'assistant', id: 2, text: 'the answer', thinking: '', streaming: false },
+    { kind: 'tool', id: 2, toolId: 'x', name: 'bash', status: 'done' },
     { kind: 'task_delivery', id: 3, taskId: 'task-1', status: 'completed' },
     { kind: 'system', id: 4, text: 'run ended', tone: 'info' },
+    { kind: 'assistant', id: 5, text: 'the answer', thinking: '', streaming: false },
   ] as unknown as MsgBlock[]
-  const [turn] = selectTurns(blocks)
-  const outside = foldedBody(turn).map((b) => b.kind)
-  const inside = turn.items.filter((b) => !outside.includes(b.kind)).map((b) => b.kind)
-  assert.deepEqual(outside, ['assistant'])
-  assert.deepEqual(inside, ['task_delivery', 'system'])
+  const [t1] = selectTurns(midRun)
+  assert.deepEqual(foldedBody(t1).map((b) => b.kind), ['assistant'])
+  assert.deepEqual(workBody(t1).map((b) => b.kind), ['tool', 'task_delivery', 'system'])
+
+  // 同样一条回执，晚一步（回答之后）到达就属于时间线
+  const late = [
+    { kind: 'user', id: 1, text: 'q' },
+    { kind: 'tool', id: 2, toolId: 'x', name: 'bash', status: 'done' },
+    { kind: 'assistant', id: 3, text: 'the answer', thinking: '', streaming: false },
+    { kind: 'task_delivery', id: 4, taskId: 'task-1', status: 'completed' },
+  ] as unknown as MsgBlock[]
+  const [t2] = selectTurns(late)
+  assert.deepEqual(foldedBody(t2).map((b) => b.kind), ['assistant', 'task_delivery'])
+  assert.deepEqual(workBody(t2).map((b) => b.kind), ['tool'])
 })
 
 test('a block with no text field does not take the transcript down', () => {
@@ -121,19 +132,19 @@ test('a block with no text field does not take the transcript down', () => {
   assert.equal(turn.answer?.id, 3, '没有正文的块不能当这一轮的结论')
 })
 
-test('a signal row stays outside the working box, running or settled', () => {
-  // 一行信号是「关于这次运行的记录」：折进 WorkBox 就等于把它藏了 —— 它存在的理由
-  // 正是让转录不会在没有说明的情况下突然安静。运行中也必须露在盒子外面。
+test('a signal row goes with the run it describes; only a late one stays on the timeline', () => {
+  // 一行信号是这次运行的**过程说明**（用户 2026-10：简洁档里它属于 Working 内部，按
+  // 事件顺序夹在工作行之间）；只有 AgentEnd 之后才到达的那条才是时间线上的记录。
   const sig = { kind: 'signal', id: 4, fact: { sig: 'memory', etype: 'memory_activity', n: 2 } } as unknown as MsgBlock
-  const settled = [
+  const midRun = [
     { kind: 'user', id: 1, text: 'q' },
     { kind: 'tool', id: 2, toolId: 'x', name: 'grep', status: 'done' },
     sig,
     { kind: 'assistant', id: 3, text: 'the answer', thinking: '', streaming: false },
   ] as unknown as MsgBlock[]
-  const [t1] = selectTurns(settled)
-  assert.deepEqual(foldedBody(t1).map((b) => b.id), [4, 3])
-  assert.deepEqual(workBody(t1).map((b) => b.id), [2])
+  const [t1] = selectTurns(midRun)
+  assert.deepEqual(foldedBody(t1).map((b) => b.id), [3], '信号不进时间线')
+  assert.deepEqual(workBody(t1).map((b) => b.id), [2, 4], '信号按位置夹在工作行之后')
 
   const live = [
     { kind: 'user', id: 1, text: 'q' },
@@ -141,7 +152,19 @@ test('a signal row stays outside the working box, running or settled', () => {
     sig,
   ] as unknown as MsgBlock[]
   const [t2] = selectTurns(live)
-  assert.deepEqual(runningBody(t2).map((b) => b.id), [4])
+  assert.deepEqual(runningBody(t2).map((b) => b.id), [], '运行中：信号在盒子里，外面没有')
+  assert.deepEqual(workBody(t2).map((b) => b.id), [4])
+
+  // 交卷之后到达（排在回答之后）→ 时间线
+  const late = [
+    { kind: 'user', id: 1, text: 'q' },
+    { kind: 'tool', id: 2, toolId: 'x', name: 'grep', status: 'done' },
+    { kind: 'assistant', id: 3, text: 'the answer', thinking: '', streaming: false },
+    sig,
+  ] as unknown as MsgBlock[]
+  const [t3] = selectTurns(late)
+  assert.deepEqual(foldedBody(t3).map((b) => b.id), [3, 4])
+  assert.deepEqual(workBody(t3).map((b) => b.id), [2])
 })
 
 test('while running, the working block holds the whole run', () => {

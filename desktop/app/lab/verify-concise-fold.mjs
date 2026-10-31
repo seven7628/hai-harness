@@ -5,6 +5,7 @@
 //   B 工具轮运行中    → 有盒子，正文在盒子里，外面只有记录
 //   C AgentEnd + 后台任务仍 running → 折叠行是 Worked（不是 Working），盒子不再出现
 //   D AgentEnd 之后才到的后台任务回执 → 在**时间线**上（盒子外面）
+//   E 运行中到达的回执 / 一行信号 → 在**盒子里**（按事件顺序，不是时间线上的记录）
 //
 // 用法：npx vite --port 5288 之后 node lab/verify-concise-fold.mjs
 import { Browser } from '/Users/admin/.agents/skills/design-taste-frontend/scripts/lib/cdp.mjs'
@@ -122,12 +123,37 @@ requireTurn('D', s.turns)
 check('D 回执渲染在时间线（.rt-turn-ans 里）', s.ansText.includes('task-9'), JSON.stringify(s.ansText.slice(-80)))
 check('D 回执不在折叠行/盒子里', !s.foldText.includes('task-9') && s.signalsInBox === 0, `inFold=${s.foldText.includes('task-9')} signalsInBox=${s.signalsInBox}`)
 
-// ---- E 运行中 + 后台任务回执：外面一行，Working 面板里不得再画一遍 -----------
+// ---- E 运行中到达的回执：属于这次运行的过程 → 在 Working 面板里（盒内）-------
 await inject(`[${user(1, '跑一下')}, ${tool(2, 'running')}, ${delivery(3)}, ${asst(4, '正在写…', true)}]`, false)
 s = await snap()
 requireTurn('E', s.turns)
-check('E 运行中回执在时间线', s.ansText.includes('task-9'), JSON.stringify(s.ansText.slice(-60)))
-check('E 回执不在 Working 面板里（不重复渲染）', !s.liveText.includes('task-9'), JSON.stringify(s.liveText.slice(-60)))
+check('E 运行中回执在 Working 面板里', s.liveText.includes('task-9'), JSON.stringify(s.liveText.slice(-60)))
+check('E 回执不在时间线上（不重复渲染）', !s.ansText.includes('task-9') && s.ansSignals.length === 0, JSON.stringify(s.ansText.slice(-60)))
+
+// ---- E2 运行中到达的一行信号（task_promoted）：同样在盒子里，且不打乱顺序 ------
+const promote = (id) => `{ kind: 'signal', id: ${id}, fact: { sig: 'promote', etype: 'task_promoted', name: 'bash', message: 'task-9' } }`
+const namedTool = (id, name) => `{ kind: 'tool', id: ${id}, toolId: 'x${id}', name: ${JSON.stringify(name)}, status: 'running' }`
+await inject(
+  `[${user(1, '跑一下')}, ${namedTool(2, 'alpha')}, ${promote(3)}, ${namedTool(4, 'beta')}, ${asst(5, '正在写…', true)}]`,
+  false,
+)
+s = await snap()
+requireTurn('E2', s.turns)
+check('E2 信号在 Working 面板里', s.liveText.includes('task_promoted'), JSON.stringify(s.liveText.slice(-80)))
+check('E2 信号不在时间线上', !s.ansText.includes('task_promoted'), JSON.stringify(s.ansText.slice(-80)))
+// 顺序：promote 行必须夹在两条工具行之间（alpha < sig < beta），否则就是「没按时间顺序」
+check(
+  'E2 信号按事件顺序夹在工作行之间',
+  (() => {
+    // 工具名渲染时首字母大写（Alpha/Beta），比较前统一小写
+    const text = s.liveText.toLowerCase()
+    const ia = text.indexOf('alpha')
+    const isig = text.indexOf('task_promoted')
+    const ib = text.indexOf('beta')
+    return ia >= 0 && isig > ia && ib > isig
+  })(),
+  JSON.stringify(s.liveText.slice(0, 240)),
+)
 
 // ---- F abort 那一轮：轮尾账要出现（此前没有 llm_end → 账缺失）---------------
 await inject(

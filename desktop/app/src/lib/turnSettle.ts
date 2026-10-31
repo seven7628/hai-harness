@@ -24,7 +24,8 @@
 // Worked for 与轮尾账永远不结算。
 //
 // AgentEnd 是**这次运行**的交卷时刻，后台任务的后续属于它自己的生命周期（完成时
-// 落一条 task_delivery 记录在时间线上，见 selectTurns.ALWAYS_SHOWN）。所以：
+// 落一条 task_delivery 记录：运行中到达的进盒子按事件顺序，交卷后到达的留在时间线上，
+// 见 selectTurns 的 workBody / recordAfterRun）。所以：
 // 已交卷 → 一律折叠，块上的 running 不得把它拉回来。
 export function turnLive(a: { isLast: boolean; turnRunning: boolean; runEnded: boolean }): boolean {
   if (a.runEnded) return false

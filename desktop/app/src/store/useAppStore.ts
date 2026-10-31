@@ -595,7 +595,7 @@ export type MsgBlock =
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
   | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; parentRunId?: string; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
   | { kind: 'task_result'; id: number; taskId: string; result: string; error?: string }
-  | { kind: 'task_delivery'; id: number; taskId: string; status: TerminalTaskStatus; result?: string; error?: string }
+  | { kind: 'task_delivery'; id: number; taskId: string; status: TerminalTaskStatus; result?: string; error?: string; afterRun?: boolean }
   | CompressionInfo
   | { kind: 'system'; id: number; text: string; tone?: 'info' | 'success' | 'error' }
   // 运行失败反馈（llm_error 重试 / session_run_error 最终失败）：叙述通道醒目错误块。
@@ -610,7 +610,11 @@ export type MsgBlock =
   // goal_alignment_reminder / task_promoted / user_inputs_consumed / session_budget_exceeded /
   // session_persist_error / session_closed）。文案由 lib/signalFacts.ts 从事实构造，
   // 存进来的是**事实**而不是句子 —— 换语言、查数据都还认得。
-  | { kind: 'signal'; id: number; fact: SignalFact }
+  // afterRun：这条记录是**主 run 交卷之后**才到达的（晚到的后台任务回执、会话级提示…）。
+  // 判据决定它渲染在哪：运行期间的信号属于那次运行的工作过程（简洁档在 Working 盒子里、
+  // 按事件顺序夹在工作行之间）；交卷之后到达的是**时间线上的记录**（必须在盒子外，
+  // 否则盒子一折叠就什么都看不见了）。判据见 selectTurns.recordAfterRun。
+  | { kind: 'signal'; id: number; fact: SignalFact; afterRun?: boolean }
   // 上下文隔离分隔线：进程关闭/重启（shutdown）、用户中断（abort）或清空上下文（clear）
   // 时插入的横线。UI 统一渲染为分隔线，内部按 reason 区分语义。
   | { kind: 'divider'; id: number; reason?: 'shutdown' | 'abort' | 'clear'; ts?: number }
@@ -631,14 +635,21 @@ function costOf(raw: unknown): number | undefined {
   return undefined
 }
 
-function pushSignal(blocks: MsgBlock[], fact: SignalFact): MsgBlock[] {
+function pushSignal(blocks: MsgBlock[], fact: SignalFact, afterRun = false): MsgBlock[] {
   const key = `${fact.sig}|${fact.etype}|${fact.n ?? ''}|${fact.name ?? ''}|${fact.message ?? ''}|${fact.round ?? ''}`
   const last = blocks[blocks.length - 1]
   if (last?.kind === 'signal') {
     const lk = `${last.fact.sig}|${last.fact.etype}|${last.fact.n ?? ''}|${last.fact.name ?? ''}|${last.fact.message ?? ''}|${last.fact.round ?? ''}`
     if (lk === key) return blocks
   }
-  return [...blocks, { kind: 'signal', id: blockSeq++, fact }]
+  return [...blocks, { kind: 'signal', id: blockSeq++, fact, ...(afterRun ? { afterRun: true } : {}) }]
+}
+
+// afterRunNow 这条记录是不是主 run 交卷之后才到的（决定渲染在盒子里还是时间线上）。
+// runEnded：agent_start 置 false、agent_end 置 true；旧视图缺这一位时按「已结算」处理
+//（与 mainRunEnded 的兜底同向：宁可当成记录放外面，也不要藏进一个可能已折叠的盒子）。
+function afterRunNow(v: SessionView): boolean {
+  return v.runEnded !== false
 }
 
 // insertAtTurnEnd 把「记录/回执」类块插到**所属轮**的末尾：owner 之后、下一条 user 之前。
@@ -6363,6 +6374,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                   n: consumeCount,
                   ...(texts.length ? { texts: texts.map((x) => String(x)) } : {}),
                 } satisfies SignalFact) as SignalFact,
+                ...(afterRunNow(v) ? { afterRun: true } : {}),
               },
             ]
           : blocks
@@ -6382,7 +6394,11 @@ export function dispatchEvent(raw: AnyEvent): void {
           ...v,
           // 一行信号（设计 §「Small signals」的 goal_alignment_reminder）：之前是 system 块，
           // 形态与"关于这次运行的一条事实"不符 —— 它会和真正的系统提示混在一起。
-          blocks: pushSignal(v.blocks, { sig: 'goal', etype: 'goal_alignment_reminder', ...(round != null ? { round } : {}) }),
+          blocks: pushSignal(
+            v.blocks,
+            { sig: 'goal', etype: 'goal_alignment_reminder', ...(round != null ? { round } : {}) },
+            afterRunNow(v),
+          ),
         })
       })
       return
@@ -6508,7 +6524,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             n,
             ...(files.length ? { files } : {}),
           }
-          const upd = setView(st, sid, { ...v, blocks: pushSignal(v.blocks, fact) })
+          const upd = setView(st, sid, { ...v, blocks: pushSignal(v.blocks, fact, afterRunNow(v)) })
           return upd
         })
         getState().showToast(
@@ -6764,12 +6780,16 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushSignal(v.blocks, {
-            sig: 'hook',
-            etype: 'tool_hook_warning',
-            ...(raw.name ? { name: String(raw.name) } : {}),
-            message,
-          }),
+          blocks: pushSignal(
+            v.blocks,
+            {
+              sig: 'hook',
+              etype: 'tool_hook_warning',
+              ...(raw.name ? { name: String(raw.name) } : {}),
+              message,
+            },
+            afterRunNow(v),
+          ),
         })
       })
       break
@@ -6783,13 +6803,19 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushSignal(v.blocks, {
-            sig: 'silent',
-            etype: 'run_silent_end',
-            ...(rounds != null ? { rounds } : {}),
-            ...(toolCalls != null ? { toolCalls } : {}),
-            ...(sawText != null ? { sawText } : {}),
-          }),
+          blocks: pushSignal(
+            v.blocks,
+            {
+              sig: 'silent',
+              etype: 'run_silent_end',
+              ...(rounds != null ? { rounds } : {}),
+              ...(toolCalls != null ? { toolCalls } : {}),
+              ...(sawText != null ? { sawText } : {}),
+            },
+            // 它是这次运行的**结论**（Go 在 AgentEnd 之前一条发出）：折进盒子就等于
+            // 「跑完了但屏幕上什么都没发生」，正是这条信号存在的理由所反对的形态。
+            true,
+          ),
         })
       })
       break
@@ -6802,12 +6828,16 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushSignal(v.blocks, {
-            sig: 'budget',
-            etype: 'session_budget_exceeded',
-            ...(cost != null ? { cost } : {}),
-            ...(maxCost != null ? { maxCost } : {}),
-          }),
+          blocks: pushSignal(
+            v.blocks,
+            {
+              sig: 'budget',
+              etype: 'session_budget_exceeded',
+              ...(cost != null ? { cost } : {}),
+              ...(maxCost != null ? { maxCost } : {}),
+            },
+            afterRunNow(v),
+          ),
         })
       })
       break
@@ -6819,11 +6849,15 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushSignal(v.blocks, {
-            sig: 'persist',
-            etype: 'session_persist_error',
-            ...(message ? { message } : {}),
-          }),
+          blocks: pushSignal(
+            v.blocks,
+            {
+              sig: 'persist',
+              etype: 'session_persist_error',
+              ...(message ? { message } : {}),
+            },
+            afterRunNow(v),
+          ),
         })
       })
       break
@@ -6844,15 +6878,20 @@ export function dispatchEvent(raw: AnyEvent): void {
             // 用户只看到界面忽然安静下来。
             // 运行账（设计「18 runs · 17 consumed · 1 abandoned mid-tool」）：
             // 三个数由 Go 的 Session.recordRunOutcome 统计，缺字段就不画（不编 0）。
-            blocks: pushSignal(v.blocks, {
-              sig: 'closed',
-              etype: 'session_closed',
-              ...(typeof raw.runs === 'number' ? { runs: raw.runs } : {}),
-              ...(typeof raw.consumed === 'number' ? { consumed: raw.consumed } : {}),
-              ...(typeof raw.abandoned_mid_tool === 'number' && raw.abandoned_mid_tool > 0
-                ? { abandoned: raw.abandoned_mid_tool }
-                : {}),
-            }),
+            blocks: pushSignal(
+              v.blocks,
+              {
+                sig: 'closed',
+                etype: 'session_closed',
+                ...(typeof raw.runs === 'number' ? { runs: raw.runs } : {}),
+                ...(typeof raw.consumed === 'number' ? { consumed: raw.consumed } : {}),
+                ...(typeof raw.abandoned_mid_tool === 'number' && raw.abandoned_mid_tool > 0
+                  ? { abandoned: raw.abandoned_mid_tool }
+                  : {}),
+              },
+              // 会话关闭 = 盒子之外的最后一条记录（此后不会再有工作发生）。
+              true,
+            ),
             runEnded: true, // 关闭后不可能再有 AgentEnd：结算位必须落地，否则永远停在 Working
           },
           { bridgeStatus: 'idle' },
@@ -6954,6 +6993,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             ),
             // 一行信号：工具行折叠/收起后，「这次调用被摘成后台任务」仍要能看见
             { sig: 'promote', etype: 'task_promoted', ...(raw.name ? { name: String(raw.name) } : {}), message: taskId },
+            afterRunNow(v),
           ),
         })
       })
@@ -6998,12 +7038,21 @@ export function dispatchEvent(raw: AnyEvent): void {
           taskDeliveries.length > 0 ? deliveryKey(taskDeliveries[taskDeliveries.length - 1]) === thisKey : false
         if (taskIndex < 0) {
           if (alreadyNoticed || v.blocks.some((b) => b.kind === 'task_result' && b.taskId === taskId)) return s
+          const afterRun = afterRunNow(v)
           return setView(s, sid, {
             ...v,
             blocks: [
               ...v.blocks,
               { kind: 'task_result', id: blockSeq++, taskId, result, error: error || undefined },
-              { kind: 'task_delivery', id: blockSeq++, taskId, status: deliveryStatus, result: result || undefined, error: error || undefined },
+              {
+                kind: 'task_delivery',
+                id: blockSeq++,
+                taskId,
+                status: deliveryStatus,
+                result: result || undefined,
+                error: error || undefined,
+                ...(afterRun ? { afterRun: true } : {}),
+              },
             ],
           })
         }
@@ -7035,6 +7084,9 @@ export function dispatchEvent(raw: AnyEvent): void {
           }
         }
         if (!alreadyNoticed) {
+          // 交卷之后才到 → 时间线上的一条记录，按**所属轮**落在轮尾；运行中到 → 就是
+          // 这次运行的一行过程，按到达位置留在原地（进盒子、按事件顺序）。
+          const afterRun = afterRunNow(v)
           const delivery: MsgBlock = {
             kind: 'task_delivery',
             id: blockSeq++,
@@ -7042,8 +7094,16 @@ export function dispatchEvent(raw: AnyEvent): void {
             status: deliveryStatus,
             result: result || undefined,
             error: error || undefined,
+            ...(afterRun ? { afterRun: true } : {}),
           }
-          return setView(s, sid, { ...v, blocks: applyTaskUsage(insertAtTurnEnd(blocks, taskIndex, [delivery]), taskId, usage) })
+          return setView(s, sid, {
+            ...v,
+            blocks: applyTaskUsage(
+              afterRun ? insertAtTurnEnd(blocks, taskIndex, [delivery]) : [...blocks, delivery],
+              taskId,
+              usage,
+            ),
+          })
         }
         // 用量覆盖（终态权威值）：TaskEnd 已写过则同值覆盖，未写过则补齐
         return setView(s, sid, { ...v, blocks: applyTaskUsage(blocks, taskId, usage) })

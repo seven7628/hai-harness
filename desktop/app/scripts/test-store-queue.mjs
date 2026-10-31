@@ -473,6 +473,21 @@ const u2 = v12.blocks.findIndex((b) => b.kind === 'user' && b.text === '下一�
 assert.ok(cardIdx >= 0 && didx > cardIdx, '回执应在任务卡片之后')
 assert.ok(u2 > 0 && didx > 0 && didx < u2, '回执必须落在所属轮（下一条 user 之前），不得算进下一轮')
 
+// ①b 运行中到达的回执：不是「时间线上的记录」，而是这次运行的一行过程 —— 落在**到达
+//     位置**（后面还有工作行就排在它前面），不得被挪到轮尾，也不得打上 afterRun。
+setup()
+EV('user_inputs_consumed', { user_texts: ['跑一下'] })
+EV('agent_start', { run_id: 'r-in-run' })
+EV('task_started', { task_id: 'tk2', name: 'bg' })
+EV('task_result_delivered', { task_id: 'tk2', result: 'done' })
+EV('tool_start', { id: 'after-1', name: 'bash', arguments: '{"command":"ls"}', run_id: 'r-in-run' })
+const v12b = useAppStore.getState().views.s1
+const dIdx = v12b.blocks.findIndex((b) => b.kind === 'task_delivery' && b.taskId === 'tk2')
+const afterIdx = v12b.blocks.findIndex((b) => b.kind === 'tool' && b.toolId === 'after-1')
+const dBlock = v12b.blocks[dIdx]
+assert.ok(dIdx > 0 && afterIdx > dIdx, '运行中到达的回执按到达位置落位（在后续工作行之前），不挪到轮尾')
+assert.notEqual(dBlock?.afterRun, true, '运行中到达的回执不得打上 afterRun 位（否则渲染层会把它折到盒子外）')
+
 // ② 发送闸门与 Composer 的按钮同源（mainRunActive，不含后台子 agent）：主 run 已交卷、
 //    后台子 agent 仍在跑 → 新输入立即推送。旧判据 sessionBusy（含子 run）会让消息停在
 //    「待发送」，等子 run 的下一个 llm_end 才代劳。

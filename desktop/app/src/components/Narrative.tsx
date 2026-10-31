@@ -94,16 +94,14 @@ function RetryProgress({ ts, delayMs, retrying, startedAt, costUsd }: { ts?: num
 // 一个门上 —— 中断、run 级失败、达轮数上限截断这三种收尾都没有 llm_end（durMs 的唯一
 // 来源），于是 durMs 缺失把整行藏掉，连已经挂在块上的 Agent 总耗时、已经拿到的 usage
 // 一起消失，用户读作「AgentEnd 时前端没展示耗时信息」。现在缺哪段省哪段，取不到就不显示。
-/* 简洁档收起时留在正文里的，是「读了什么」，不是「怎么做的」。工具、子智能体、
-   后台任务结果都属于工作过程，收进折叠行；system / error / divider / compression
-   是信号不是工作，始终可见。 */
-/* 收进折叠行的：工作过程本身。信号/产出/回执留在正文（判据与实现同在
-   runtime/turn/selectTurns.ts 的 foldedBody —— 那条规则要有测试才算数）。 */
-// 工作过程的种类：简洁档收起时它们全部进工作盒子（外面只剩最后一轮正文 + 产出卡）。
-// system / task_result / task_delivery 是**关于这次运行**的行，不是运行结果本身 ——
-// 用户 2026-10 明确它们在简洁档也不该跑到盒子外面。
-// 工作盒子里装什么：判据在 selectTurns.workBody（含中间轮正文与思考 —— 历史轮
-// 的 reasoning 也要能展开读到，见那里的注释）。这里保留这个集合给「有没有工作」用。
+/* 盒子外面（时间线）的判据不在这里，也不只看种类：error / divider / artifacts 始终在
+   外面，而记录类（signal / task_delivery）看**到达时刻** —— 运行中到达的属于这次运行
+   的过程（盒内、按事件顺序），AgentEnd 之后到达的才留在时间线上。实现与理由同在
+   runtime/turn/selectTurns.ts 的 foldedBody / workBody（那条规则要有测试才算数）。 */
+// 工作过程的种类：简洁档收起时它们全部进工作盒子（外面只剩最后一轮正文、产出卡、
+// 交卷后到达的记录）。运行中到达的 signal / task_delivery 同样进盒子，判据见
+// selectTurns.workBody（含中间轮正文与思考 —— 历史轮的 reasoning 也要能展开读到）。
+// 这里保留这个集合给「有没有工作」用。
 const FOLDED = FOLDED_KINDS
 
 const AssistantTurnMeta = memo(function AssistantTurnMeta({ b }: { b: Extract<MsgBlock, { kind: 'assistant' }> }) {

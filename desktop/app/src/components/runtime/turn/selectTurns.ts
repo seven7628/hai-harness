@@ -189,49 +189,75 @@ export function durText(ms: number): string {
 }
 
 /* What a folded turn still shows. Folding is about the working phase, never
-   about the record: a signal, the run's artifacts, or a background task's
-   receipt are things that happened, not things that were done to get here, and
-   folding them away would hide a record the reader has no other way to find
-   (the red line: never silently drop data). The answer is included wherever it
-   sits in the turn, so the order of what is left is the order it happened.
+   about the record: the answer, the error that explains why there is no
+   answer, the context divider and the produced files stay outside; everything
+   else is what it took to get here.
 
-   Where the line sits (2026-10，用户口径：简洁档 = 时间线 + 一个 Working 块):
-   · 记录留在时间线上（盒子外面）—— signal / artifacts / task_delivery / error / divider；
-   · 工作过程进盒子 —— tool / agent / async_task / compression / 中间轮正文 / 思考；
-   · `system` 与 `task_result` 是**执行阶段的载荷**（命令回显、任务全文），跟工作行
-     一起进盒子；`task_delivery` 是「这件事结束了」的**回执**，留在外面。
-   AgentEnd 之后才到达的后台任务回执尤其必须在外：那一刻盒子已经折叠，折进去就
-   等于「跑完之后什么都没发生」（用户 2026-10 报障的形态）。 */
+   Records (signal / task_delivery) are the interesting case — their place
+   depends on **when they arrived**, not on what kind they are (2026-10，
+   用户口径：简洁档 = 时间线 + 一个 Working 块):
+   · 运行中到达 → 属于那次运行的过程，进盒子、按事件顺序夹在工作行之间。
+     九类 Small signals（memory_activity / tool_hook_warning / run_silent_end /
+     goal_alignment_reminder / task_promoted / user_inputs_consumed /
+     session_budget_exceeded / session_persist_error / session_closed）与
+     后台任务回执 task_delivery 同一判据：它们是「正在发生的事」的一行说明。
+   · AgentEnd 之后到达 → 盒子已经折叠，折进去等于「跑完之后什么都没发生」。
+     它们留在时间线上（store 按所属轮落位，见 insertAtTurnEnd）。
+   判据见 recordAfterRun：块上的 afterRun 位（store 在落块时按 runEnded 盖戳），
+   旧快照没有这一位时退回位置 —— 排在轮内最后一段正文之后即交卷后到达。 */
 export const ALWAYS_SHOWN = new Set<MsgBlock['kind']>([
+  // 失败/重试进度：这一轮为什么没有答案。折进盒子 = 让失败看起来像「什么都没发生」。
   'error',
+  // 上下文隔离横线（shutdown / abort / clear）：结构边界，不是这一轮的内容。
   'divider',
+  // 本轮产出（AgentEnd.Artifacts）：这一轮的**结果**，轮尾固定落位（见 Narrative）。
   'artifacts',
-  // 后台任务回执（task_delivery）：任务可能在 AgentEnd **之后**才完成 —— 它是这次
-  // 运行留下的一条记录，不是工作过程。与 signal 同一条判据；位置见 store 的
-  // insertAtTurnEnd（按所属轮落位，不按到达时刻落位）。
-  'task_delivery',
-  // 一行信号（Small signals）：这九类事件存在的理由就是「转录不会在没有说明的情况下
-  // 突然安静」。折进 Working 就等于把它藏了 —— 用户看到的仍然是「什么都没发生」。
-  // 它是**关于这次运行的记录**，不是工作过程，所以和产出卡一样留在盒子外面，
-  // 并且运行中（runningBody 只放 ALWAYS_SHOWN）也要能看见。
-  'signal',
 ])
 
-export function foldedBody(turn: Turn): MsgBlock[] {
-  return turn.items.filter((b) => b === turn.answer || ALWAYS_SHOWN.has(b.kind))
+/** 记录类块：一行信号 / 后台任务回执。它们的位置按到达时刻决定，见上方注释。 */
+const isRecord = (b: MsgBlock): b is M<'signal'> | M<'task_delivery'> =>
+  b.kind === 'signal' || b.kind === 'task_delivery'
+
+/* 这条记录是不是 AgentEnd **之后**才到的。afterRun 位优先（store 的 afterRunNow 在落块
+   那一刻盖戳，之后还可能被 insertAtTurnEnd 挪位置，位置本身已经不是证据）；旧快照没有
+   这一位时按位置判：轮内最后一段正文（turn.answer）之后到达的即交卷后。 */
+const recordAfterRun = (b: MsgBlock, i: number, answerAt: number): boolean => {
+  if (!isRecord(b)) return false
+  if (b.afterRun != null) return b.afterRun
+  return answerAt >= 0 && i > answerAt
 }
 
-/* Running, folded density: while the box exists, nothing of the run is outside
-   it — not a thought, not a mid-run sentence, not a tool; only the record
-   (signals, artifacts, receipts) stays outside, because a record is not "work
-   in progress". The final reply appears outside at AgentEnd, when the fold
-   closes.
+/* 位置兜底的分界点 = 这一轮的结论（最后一段正文）。正在流式输出的那一段还不是结论：
+   此刻到达的记录仍属于这次运行，否则「边跑边来的信号」会在打字期间被甩到盒子外。 */
+const answerIndex = (turn: Turn): number => {
+  const a = turn.answer
+  return a && !a.streaming ? turn.items.indexOf(a) : -1
+}
+
+/** 盒子外面（时间线上）的块：结构性/结论性块 + 交卷后到达的记录。 */
+function outsideOf(turn: Turn): (b: MsgBlock, i: number) => boolean {
+  const answerAt = answerIndex(turn)
+  return (b, i) => ALWAYS_SHOWN.has(b.kind) || recordAfterRun(b, i, answerAt)
+}
+
+export function foldedBody(turn: Turn): MsgBlock[] {
+  const outside = outsideOf(turn)
+  return turn.items.filter((b, i) => b === turn.answer || outside(b, i))
+}
+
+/* Running, folded density: while the box exists the box holds the run — work
+   rows *and* the records that arrived while it was live (in the order they
+   happened). Outside stays only what is not the run's progress: the answer,
+   the failure that explains its absence, the divider, the produced files, and
+   the records that arrive after AgentEnd (the box is already folded then —
+   folding those in would read as "nothing happened once it finished").
 
    includeAnswer 覆盖「这一轮根本没有 Working 盒子」的形态（纯对话轮：没有工具、
    没有子 agent，workBody 为空 ⇒ 不画盒子）。此时正文若仍被排除在外面，它就既不在
    盒子里（没有盒子）也不在外面 —— 整轮在 AgentEnd 之前一个字都渲染不出来。 */
 export function runningBody(turn: Turn, includeAnswer = false): MsgBlock[] {
-  return turn.items.filter((b) => ALWAYS_SHOWN.has(b.kind) || (includeAnswer && b === turn.answer))
+  const outside = outsideOf(turn)
+  return turn.items.filter((b, i) => outside(b, i) || (includeAnswer && b === turn.answer))
 }
 
 /* What the working box holds (concise). Everything that is *work*: tools, subagents,
@@ -249,8 +275,13 @@ export function runningBody(turn: Turn, includeAnswer = false): MsgBlock[] {
    area at AgentEnd and must not appear twice. Compression blocks come along for the
    same reason — they are part of what happened during the run. */
 export function workBody(turn: Turn): MsgBlock[] {
+  const answerAt = answerIndex(turn)
   return turn.items.filter(
-    (b) => FOLDED_KINDS.has(b.kind) || ((b.kind === 'assistant' || b.kind === 'compression') && b !== turn.answer),
+    (b, i) =>
+      FOLDED_KINDS.has(b.kind)
+      // 运行中到达的记录：这一次运行的过程说明，按事件顺序夹在工作行之间。
+      || (isRecord(b) && !recordAfterRun(b, i, answerAt))
+      || ((b.kind === 'assistant' || b.kind === 'compression') && b !== turn.answer),
   )
 }
 
