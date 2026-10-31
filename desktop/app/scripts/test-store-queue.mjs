@@ -1,0 +1,460 @@
+// 客户端暂存队列 store 行为回归测试（真实 store + esbuild 打包，Node 直接跑，无需浏览器/vitest）。
+//
+// 覆盖：Agent 运行中连发 → 本地暂存（不立即推送）；Agent End → 会话回到空闲；空闲再发 →
+// 立即整队推送（残留暂存 + 新消息一起 ask_batch），绝不把新消息误判为 busy 塞回暂存。
+//
+// 用法：npm run test:store
+import { build } from 'esbuild'
+import assert from 'node:assert'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url))
+const require = createRequire(import.meta.url)
+
+// 1) shim localStorage（store 模块加载时读取项目树/偏好）
+const mem = new Map()
+global.localStorage = {
+  getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+  setItem: (k, v) => mem.set(k, String(v)),
+  removeItem: (k) => mem.delete(k),
+}
+
+// 2) esbuild 打包 store（含真实 mock transport）到临时 CJS
+const dir = mkdtempSync(join(tmpdir(), 'store-queue-'))
+const outfile = join(dir, 'store-bundle.cjs')
+// mock transport 会 import 带 `?raw` / `?url` / `?no-inline` 后缀的静态资源
+// （README、logo、截图）。esbuild 不认识这些后缀，必须显式 stub 掉，
+// 否则打包阶段直接失败（此脚本因此长期跑不起来）。
+const assetPlugin = {
+  name: 'asset-suffix',
+  setup(b) {
+    b.onResolve({ filter: /\?(raw|url|no-inline)$/ }, () => ({
+      path: 'asset',
+      namespace: 'asset-stub',
+    }))
+    b.onLoad({ filter: /.*/, namespace: 'asset-stub' }, () => ({
+      contents: 'module.exports = ""',
+      loader: 'js',
+    }))
+  },
+}
+
+await build({
+  entryPoints: [join(__dirname, '../src/store/useAppStore.ts')],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  outfile,
+  logLevel: 'silent',
+  plugins: [assetPlugin],
+})
+const { useAppStore, sessionBusy, dispatchEvent, applySessionPrefs, runningTaskCount } = require(outfile)
+// 2026-10：右栏「任务」tab 退役后 asyncTaskBlocks（给它用的平铺投影）已删除。
+// 它原来的两条判据（「有占位卡」「占位有状态」）在这里按**块本身**判，不再借道那个投影。
+const liveTasks = (blocks) => blocks.filter((b) => b.kind === 'async_task' || b.kind === 'agent'
+  || (b.kind === 'tool' && b.promoted))
+
+const text = (q) => q.contents.map((c) => (c.type === 'text' ? c.content : '')).join('\n')
+
+function setup() {
+  useAppStore.setState({
+    workspace: '/mock/w',
+    activeSessionId: 's1',
+    bridgeStatus: 'running',
+    sessions: [{ id: 's1', title: 't' }],
+    projects: [{ path: '/mock/w', sessions: [{ id: 's1', title: 't' }] }],
+    views: {},
+    streaming: false,
+    pendingQueue: [],
+    blocks: [],
+    runNodes: [],
+    approvals: [],
+    diffs: [],
+    todos: [],
+    usage: { input: 0, output: 0, cacheRead: 0, reasoning: 0 },
+    turns: [],
+    costUsd: 0,
+    toolStartTs: {},
+  })
+}
+const pending = () => useAppStore.getState().views.s1?.pendingQueue ?? []
+const busy = () => {
+  const v = useAppStore.getState().views.s1
+  return v ? sessionBusy(v) : false
+}
+const EV = (t, p = {}) => dispatchEvent({ event_type: t, session_id: 's1', ...p })
+
+// ===== 场景 1：空闲 → 发送 → 会话进入运行态 → Agent End → 空闲 → 再发立即推送 =====
+setup()
+useAppStore.getState().ask('第一条') // 空闲 → 立即推送（启动 run）
+assert.deepStrictEqual(pending().map(text), ['第一条'])
+EV('agent_start', { run_id: 'r1' })
+assert.ok(busy(), 'agent_start 后应 busy')
+EV('agent_end', { run_id: 'r1', finish_reason: 'stop' })
+assert.ok(!busy(), 'Agent End 后应空闲')
+useAppStore.getState().ask('第二条') // 空闲 → 立即推送
+assert.ok(pending().find((q) => text(q) === '第二条')?.pushed, '空闲再发应立即推送')
+console.log('PASS 场景1：Agent End 后空闲，新消息立即推送')
+
+// ===== 场景 2（核心回归）：运行中连发统一在 llm_end 整队 ask_batch；agent_end 不补发 =====
+setup()
+useAppStore.getState().ask('M1')
+EV('agent_start', { run_id: 'r1' })
+useAppStore.getState().ask('运行中A')
+useAppStore.getState().ask('运行中B')
+let staged = pending().filter((q) => !q.pushed).map(text)
+assert.deepStrictEqual(staged, ['运行中A', '运行中B'], '运行中连发应暂存，不逐条推送')
+EV('llm_end', { run_id: 'r1', request_id: 'req-batch', model: 'gpt-test', usage: {} })
+assert.ok(pending().every((q) => q.pushed), 'llm_end 应把运行中积累的消息一次性 ask_batch 推送')
+assert.deepStrictEqual(pending().map(text), ['M1', '运行中A', '运行中B'], '批量内容及顺序应保持')
+EV('agent_end', { run_id: 'r1', finish_reason: 'stop' })
+assert.ok(!busy(), 'Agent End 后会话应空闲')
+staged = pending().filter((q) => !q.pushed).map(text)
+assert.deepStrictEqual(staged, [], 'agent_end 不应留下或补发未推送消息')
+// 空闲没有未来 llm_end：新消息必须立即以 ask_batch 启动下一轮（用户已确认）。
+useAppStore.getState().ask('新消息')
+assert.ok(pending().find((q) => text(q) === '新消息')?.pushed, '空闲消息应立即 ask_batch，避免等待不存在的 llm_end')
+console.log('PASS 场景2：忙时消息在 llm_end 统一批量发送；空闲消息立即启动下一轮')
+
+// ===== 场景 2b（回归）：推送时机 = 本轮结束；编辑窗口 = 推送之前 =====
+// 用户反馈①：消息进了等待队列后点「停止」，队列数据没有自动推送到服务端（一直挂「待发送」）。
+// 用户反馈②：修好后「立马就推送」，没有编辑时间 —— 明确语义：队列项在**推送前**始终可逐条
+// 编辑/删除（运行中 llm_start→llm_end 之间、点停止后中断生效前、LLM 异常重试期间），
+// 推送只发生在「本轮真的结束了」那一刻（llm_end / 停止生效 / 运行失败）。
+setup()
+useAppStore.getState().ask('先来一条')
+EV('agent_start', { run_id: 'r-stop' })
+useAppStore.getState().ask('停止前的A')
+useAppStore.getState().ask('停止前的B')
+let staged2b = pending().filter((q) => !q.pushed)
+assert.deepStrictEqual(staged2b.map(text), ['停止前的A', '停止前的B'], '运行中连发应暂存（未推送）')
+assert.equal(staged2b.length, 2, '待发送必须非空（否则下面的 every() 会空真）')
+// 运行中：可编辑、可删除（编辑窗口）
+useAppStore.getState().updatePending(staged2b[0].id, '停止前改过的A')
+assert.deepStrictEqual(pending().filter((q) => !q.pushed).map(text), ['停止前改过的A', '停止前的B'], '运行中应可逐条编辑')
+useAppStore.getState().removePending(pending().find((q) => text(q) === '停止前的B').id)
+assert.deepStrictEqual(pending().filter((q) => !q.pushed).map(text), ['停止前改过的A'], '运行中应可删除待发送项')
+// 异常重试阶段：同样可编辑（用户明确要求）
+EV('llm_error', {
+  run_id: 'r-stop', attempt: 1, max_attempts: 11, will_retry: true, retry_delay_ms: 1000,
+  error_kind: 'upstream_unavailable', message: 'upstream unavailable',
+})
+assert.deepStrictEqual(pending().filter((q) => !q.pushed).map(text), ['停止前改过的A'], '重试阶段不得推送（保持可编辑）')
+useAppStore.getState().ask('重试时又输入的一条')
+assert.deepStrictEqual(
+  pending().filter((q) => !q.pushed).map(text),
+  ['停止前改过的A', '重试时又输入的一条'],
+  '重试阶段连发同样暂存（可编辑）',
+)
+// 点「停止」→ 中断在途（agent_end 尚未到达）：仍可编辑、尚未推送
+useAppStore.getState().interrupt()
+assert.deepStrictEqual(
+  pending().filter((q) => !q.pushed).map(text),
+  ['停止前改过的A', '重试时又输入的一条'],
+  '中断生效前（agent_end 未到）必须保持可编辑',
+)
+EV('agent_end', { run_id: 'r-stop', finish_reason: 'abort' }) // 中断生效：后端 abort 收尾
+assert.equal(pending().filter((q) => !q.pushed).length, 0, '推送后不得留下未推送项（推送只打 pushed 标记）')
+assert.ok(pending().every((q) => q.pushed), '中断生效后必须把暂存队列整队推送到服务端')
+assert.ok(!busy(), '中断后会话应空闲')
+// 子 agent 的中断不得借机启动主会话新一轮
+setup()
+useAppStore.getState().ask('主消息')
+EV('agent_start', { run_id: 'r-main' })
+EV('agent_start', { run_id: 'r-sub', parent_run_id: 'r-main', name: 'sub' })
+useAppStore.getState().ask('子跑时的输入')
+EV('agent_end', { run_id: 'r-sub', finish_reason: 'abort' })
+assert.deepStrictEqual(
+  pending().filter((q) => !q.pushed).map(text),
+  ['子跑时的输入'],
+  '子 agent 中断不得推送暂存队列（主 run 未结束）',
+)
+// 运行失败（session_run_error）：同样整队推送（用户要求补充）—— 失败后不会再有 llm_end，
+// 不推则「失败前排队等待的消息」永远滞留本机。
+setup()
+useAppStore.getState().ask('M1')
+EV('agent_start', { run_id: 'r-err' })
+useAppStore.getState().ask('失败前排队的消息')
+EV('agent_end', { run_id: 'r-err', finish_reason: 'error' })
+assert.deepStrictEqual(
+  pending().filter((q) => !q.pushed).map(text),
+  ['失败前排队的消息'],
+  'agent_end(error) 本身不推送（等会话级失败事件，避免错误块与新 run 交错）',
+)
+EV('session_run_error', { error: 'upstream failed', error_kind: 'permanent' })
+assert.equal(pending().filter((q) => !q.pushed).length, 0, '失败推送后不得留下未推送项')
+assert.ok(pending().every((q) => q.pushed), '运行失败后必须把暂存队列整队推送到服务端')
+assert.ok(!busy(), '失败后会话应收敛为空闲')
+// 自然结束（stop）仍不推送：既有语义（避免用旧输入触发「意外新 run」）；但下一条输入会整队推送
+setup()
+useAppStore.getState().ask('M1')
+EV('agent_start', { run_id: 'r-tail' })
+EV('llm_end', { run_id: 'r-tail', request_id: 'req-tail', model: 'gpt-test', usage: {} })
+useAppStore.getState().ask('末轮后输入')
+assert.deepStrictEqual(pending().filter((q) => !q.pushed).map(text), ['末轮后输入'], 'llm_end 之后的输入仍暂存')
+EV('agent_end', { run_id: 'r-tail', finish_reason: 'stop' })
+assert.deepStrictEqual(
+  pending().filter((q) => !q.pushed).map(text),
+  ['末轮后输入'],
+  '自然结束不得补发暂存消息（既有语义不变）',
+)
+useAppStore.getState().ask('下一条')
+assert.ok(pending().every((q) => q.pushed), '空闲时发送应把残留暂存一起整队推送（消息不丢）')
+console.log('PASS 场景2b：推送时机 = 本轮结束（停止/失败）；编辑窗口 = 推送前（运行中/重试中/停止生效前）')
+
+// ===== 场景 3：LLM 重试/最终失败在叙述通道可见，且 run/streaming 收敛 =====
+setup()
+EV('agent_start', { run_id: 'r-error' })
+EV('llm_error', {
+  run_id: 'r-error', attempt: 1, max_attempts: 11, will_retry: true, retry_delay_ms: 1000,
+  error_kind: 'upstream_unavailable', message: 'upstream unavailable', timestamp: 1000,
+})
+let view = useAppStore.getState().views.s1
+// 文案语义（2026-09-18）：Attempt 是**已失败的那一次** —— 必须显示「第 N/M 次失败 → 重试
+// 第 N+1/M 次」（旧的「正在重试 1」在下一次尝试挂住时被读成「卡住/重试没了」）。
+let errBlock = view.blocks.find((b) => b.kind === 'error')
+assert.ok(errBlock && errBlock.text.includes('第 1/11 次尝试失败'), '重试应显示进度错误块')
+assert.ok(errBlock.text.includes('重试第 2/11 次'), '重试应显示下一次尝试序号')
+// RetryProgress 的实时状态依据（倒计时 → 本次尝试已进行 Xs）
+assert.equal(errBlock.retrying, true, '重试态应落块（前端据此计时）')
+assert.equal(errBlock.retryAttempt, 1)
+assert.equal(errBlock.retryMax, 11)
+assert.equal(errBlock.retryDelayMs, 1000)
+assert.equal(errBlock.retryStartedAt, 1000, '本轮重试起点 = 首个失败时刻')
+assert.equal(view.streaming, true, '重试期间停止按钮应保持可用')
+EV('agent_end', { run_id: 'r-error', finish_reason: 'error' })
+EV('session_run_error', { error: 'upstream failed', error_kind: 'permanent' })
+view = useAppStore.getState().views.s1
+assert.ok(view.blocks.some((b) => b.kind === 'error' && b.text.includes('（运行失败）upstream failed')), '最终失败应更新为可见错误')
+errBlock = view.blocks.find((b) => b.kind === 'error')
+assert.equal(errBlock.retrying, undefined, '最终失败后不得再打重试态（否则计时器一直走）')
+assert.equal(view.streaming, false, '最终失败应清流式态')
+assert.ok(!sessionBusy(view), '最终失败后 run 应收敛为空闲')
+console.log('PASS 场景3：重试与最终失败均在叙述通道可见')
+
+// ===== 场景 4：重试后成功清除临时错误块 =====
+setup()
+EV('agent_start', { run_id: 'r-recover' })
+EV('llm_error', { run_id: 'r-recover', attempt: 1, will_retry: true, message: 'temporary' })
+EV('llm_start', { run_id: 'r-recover', request_id: 'req-ok', model: 'gpt-test' })
+EV('llm_end', { run_id: 'r-recover', request_id: 'req-ok', model: 'gpt-test', usage: {} })
+view = useAppStore.getState().views.s1
+assert.ok(!view.blocks.some((b) => b.kind === 'error'), '成功响应应清除临时重试错误块')
+console.log('PASS 场景4：重试成功后清除临时错误块')
+
+// ===== 场景 5：session view 严格 10 项 LRU（VIEW_CACHE_MAX=10）；活跃会话保留，最久未访问项淘汰 =====
+setup()
+for (let i = 1; i <= 11; i++) {
+  dispatchEvent({ event_type: 'agent_start', session_id: `s${i}`, run_id: `r${i}` })
+  dispatchEvent({ event_type: 'agent_end', session_id: `s${i}`, run_id: `r${i}`, finish_reason: 'stop' })
+}
+// setView 在首次创建后台 view 后以 microtask 执行淘汰，等待队列收敛。
+await Promise.resolve()
+const cached = Object.keys(useAppStore.getState().views)
+assert.ok(cached.length <= 10, `session view 缓存应最多 10 项，实际 ${cached.length}`)
+assert.ok(cached.includes('s1'), '当前活跃 session 必须保留')
+assert.ok(!cached.includes('s2'), '应淘汰最久未访问的非活跃 session')
+assert.ok(cached.includes('s11'), '最近访问 session 应保留')
+console.log('PASS 场景5：空闲 session view 严格 10 项 LRU')
+
+// ===== 场景 6：并发运行 session 不淘汰；结束后自动按 10 项 LRU 收敛（VIEW_CACHE_MAX=10） =====
+setup()
+for (let i = 1; i <= 12; i++) {
+  dispatchEvent({ event_type: 'agent_start', session_id: `s${i}`, run_id: `concurrent-${i}` })
+}
+await Promise.resolve()
+let concurrent = useAppStore.getState().views
+assert.equal(Object.keys(concurrent).length, 12, '12 个并发运行 session 必须全部保留，允许临时超过 10')
+for (let i = 1; i <= 12; i++) assert.ok(sessionBusy(concurrent[`s${i}`]), `s${i} 应保持运行态`)
+// 结束两个非活跃会话；agent_end 会安排 LRU 收敛。其余 10 个运行会话仍不可淘汰。
+for (const i of [2, 3]) {
+  dispatchEvent({ event_type: 'agent_end', session_id: `s${i}`, run_id: `concurrent-${i}`, finish_reason: 'stop' })
+}
+await Promise.resolve()
+concurrent = useAppStore.getState().views
+assert.equal(Object.keys(concurrent).length, 10, '并发会话结束后应自动收敛到 10 项')
+assert.ok(concurrent.s1, '当前活跃 session 必须保留')
+for (const i of [4, 5, 6, 7, 8, 9, 10, 11, 12]) assert.ok(concurrent[`s${i}`], `仍在运行的 s${i} 不得淘汰`)
+assert.ok(!concurrent.s2 && !concurrent.s3, '已结束且最久未访问的会话应被淘汰')
+console.log('PASS 场景6：并发运行会话全部保留，结束后 LRU 自动收敛到 10')
+
+// ===== 场景 7：不同 session 的 provider/model/mode/effort 在缓存切换与冷恢复时独立 =====
+setup()
+const settings = useAppStore.getState().settings
+useAppStore.setState({
+  workspace: '/mock/w', // 与 path 一致：缓存分支（sameProject=true）才走 applySessionPrefs 恢复
+  settings: {
+    ...settings,
+    provider: {
+      ...settings.provider,
+      active: 'deepseek',
+      deepseek: { ...settings.provider.deepseek, models: { 'deepseek-chat': 128000 } },
+      opencode: { ...settings.provider.opencode, models: { 'deepseek-v4-pro': 1000000 } },
+    },
+  },
+  sessions: [{ id: 's1', title: 'A' }, { id: 's2', title: 'B' }],
+  projects: [{ path: '/mock/w', sessions: [{ id: 's1', title: 'A' }, { id: 's2', title: 'B' }] }],
+})
+// 建立 A 的缓存 view（需有内容块：isHydrated 判定 blocks>0 才走缓存恢复分支），
+// 并保存一组跨 Provider 配置。
+EV('agent_start', { run_id: 'prefs-a' })
+EV('agent_end', { run_id: 'prefs-a', finish_reason: 'stop' })
+// 标记 s1 view 已恢复（isHydrated 判定 checkpointRevision != null 才走缓存恢复分支）
+useAppStore.setState((s) => ({
+  views: { ...s.views, s1: { ...s.views.s1, checkpointRevision: 1 } },
+}))
+useAppStore.getState().switchMode('hitl')
+useAppStore.getState().switchEffort('high')
+useAppStore.getState().switchModel('deepseek-v4-pro', 'opencode')
+let savedPrefs = JSON.parse(mem.get('go-code.sessionPrefs'))
+assert.deepStrictEqual(
+  savedPrefs['/mock/w s1'],
+  { mode: 'hitl', model: 'deepseek-v4-pro', provider: 'opencode', effort: 'high', persona: 'code' },
+  'A 应持久化完整 provider/model/mode/effort',
+)
+// 切到 B（首次冷恢复），再保存另一组配置。
+useAppStore.getState().setActiveSession('s2', '/mock/w')
+useAppStore.getState().switchMode('auto')
+useAppStore.getState().switchEffort('low')
+useAppStore.getState().switchModel('deepseek-chat', 'deepseek')
+savedPrefs = JSON.parse(mem.get('go-code.sessionPrefs'))
+assert.equal(savedPrefs['/mock/w s2'].provider, 'deepseek', 'B 应保存自己的 Provider')
+// A 仍在缓存：切回时也必须恢复其配置，而不是沿用 B。
+useAppStore.getState().setActiveSession('s1', '/mock/w')
+let prefState = useAppStore.getState()
+assert.equal(prefState.settings.provider.active, 'opencode', '缓存切回 A 应恢复 Provider')
+assert.equal(prefState.model, 'deepseek-v4-pro', '缓存切回 A 应恢复 model')
+assert.equal(prefState.mode, 'hitl', '缓存切回 A 应恢复 mode')
+assert.equal(prefState.effort, 'high', '缓存切回 A 应恢复 effort')
+// 模拟 LRU 淘汰/应用重启后的冷恢复：删掉 A view，再从 new_session 响应路径恢复。
+const withoutA = { ...prefState.views }
+delete withoutA.s1
+useAppStore.setState({ views: withoutA, activeSessionId: 's1', settings: { ...prefState.settings, provider: { ...prefState.settings.provider, active: 'deepseek' } }, model: 'deepseek-chat', mode: 'auto', effort: 'low' })
+applySessionPrefs('/mock/w', 's1')
+prefState = useAppStore.getState()
+assert.equal(prefState.settings.provider.active, 'opencode', '冷恢复 A 应恢复 Provider')
+assert.equal(prefState.model, 'deepseek-v4-pro', '冷恢复 A 应恢复 model')
+assert.equal(prefState.mode, 'hitl', '冷恢复 A 应恢复 mode')
+assert.equal(prefState.effort, 'high', '冷恢复 A 应恢复 effort')
+console.log('PASS 场景7：会话级 Provider/model/mode/effort 缓存切换与冷恢复均独立')
+
+// ===== 场景 8：warm session 快照不把真实运行任务伪标完成；task_end 后才完成 =====
+setup()
+EV('task_started', { task_id: 'task-live', name: 'review reminder semantics', status: 'running' })
+let liveView = useAppStore.getState().views.s1
+assert.equal(runningTaskCount(liveView.blocks), 1, '仅 task_started 时数量徽章也应显示 1')
+assert.equal(liveTasks(liveView.blocks).length, 1, '仅 task_started 时应有一个任务占位（agent_start 还没合并）')
+EV('agent_start', { run_id: 'sub-live', parent_run_id: 'root-live', name: 'review reminder semantics' })
+liveView = useAppStore.getState().views.s1
+assert.ok(liveView.blocks.some((b) => (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === 'task-live' && b.status === 'running'), '运行任务应显示 running')
+assert.ok(liveView.blocks.some((b) => b.kind === 'agent' && b.runId === 'sub-live' && b.status === 'running'), '运行 agent 应显示 running')
+assert.equal(runningTaskCount(liveView.blocks), 1, 'task_started 占位与 agent 卡片合并后徽章不得重复或消失')
+// 真实 warm 切换由 bridge data.live=true 标识；其快照不得走冷恢复 finalize。
+// 这里直接验证 task_end 是唯一把 async task 标为完成的事件。
+EV('task_end', { task_id: 'task-live', status: 'completed', result: 'done' })
+liveView = useAppStore.getState().views.s1
+assert.ok(liveView.blocks.some((b) => (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === 'task-live' && b.status === 'completed'), 'task_end 后才应显示 completed')
+EV('task_result_delivered', { task_id: 'task-live', status: 'completed', result: '# 真实任务结果' })
+liveView = useAppStore.getState().views.s1
+const deliveredCard = liveView.blocks.find((b) => (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === 'task-live')
+assert.equal(deliveredCard?.deliveredToMain, true, '交付事件应标记匹配卡片已交付主任务')
+assert.ok(deliveredCard?.taskResult?.includes('真实任务结果'), '完整结果应只挂在匹配卡片上')
+const notices = liveView.blocks.filter((b) => b.kind === 'task_delivery' && b.taskId === 'task-live')
+assert.equal(notices.length, 1, '交付事件应追加一条轻量叙述通知')
+assert.equal(notices[0].status, 'completed', '交付通知应携带终态')
+assert.ok(!liveView.blocks.some((b) => b.kind === 'task_result' && b.taskId === 'task-live'), '已有卡片时不得复制完整结果块')
+EV('task_result_delivered', { task_id: 'task-live', status: 'completed', result: '# 真实任务结果' })
+liveView = useAppStore.getState().views.s1
+assert.equal(liveView.blocks.filter((b) => b.kind === 'task_delivery' && b.taskId === 'task-live').length, 1, '重复交付不得重复通知')
+console.log('PASS 场景8：运行任务不提前完成；交付卡片、轻量通知与去重正确')
+
+// ===== 场景 9：后端六态与旧状态兼容；interrupted 不得伪装完成 =====
+setup()
+for (const [taskId, status, expected] of [
+  ['new-interrupting', 'interrupting', 'interrupting'],
+  ['new-interrupted', 'interrupted', 'interrupted'],
+  ['new-failed', 'failed', 'failed'],
+  ['new-abandoned', 'abandoned', 'abandoned'],
+  ['legacy-done', 'done', 'completed'],
+  ['legacy-error', 'error', 'failed'],
+]) {
+  EV('task_started', { task_id: taskId, name: taskId })
+  EV('task_end', { task_id: taskId, status })
+  const card = useAppStore.getState().views.s1.blocks.find((b) => (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === taskId)
+  assert.equal(card?.status, expected, `${status} 应归一化为 ${expected}`)
+}
+assert.equal(runningTaskCount(useAppStore.getState().views.s1.blocks), 1, 'interrupting 仍应计入运行任务')
+EV('task_result_delivered', { task_id: 'new-interrupted', status: 'interrupted', result: 'partial' })
+const interruptedNotice = useAppStore.getState().views.s1.blocks.find((b) => b.kind === 'task_delivery' && b.taskId === 'new-interrupted')
+assert.equal(interruptedNotice?.status, 'interrupted', '已中断交付通知必须保留 interrupted 终态')
+console.log('PASS 场景9：异步任务六态与旧状态兼容，interrupted 状态准确')
+
+// ===== 场景 10：promoted 工具任务 tool_run_end 即收敛（交付回执丢失不再卡「执行中」）=====
+// 回归（2026-08-25）：tool_run_end 此前只置 status='done' 不收敛 taskStatus → 卡片读
+// taskStatus 永远「执行中」计时器空转，角标 runningTaskCount 读 status 却已归零 ——
+// 列表与徽标互相矛盾。tool_run_end 是工具运行结束的权威信号（交付回执在会话停止/
+// bridge 重启时不保证可达），必须在到达时收敛任务态；task_end / task_result_delivered
+// 只做权威终态的覆盖修正。
+setup()
+// 任务 A：正常完成，但 task_end / task_result_delivered 均未达（回执丢失）
+EV('tool_start', { id: 'tw-1', name: 'bash', arguments: '{"command":"sleep 60"}', task_id: 'tooltask-1', run_id: 'r1' })
+EV('task_promoted', { task_id: 'tooltask-1', kind: 'tool', name: 'bash' })
+let v10 = useAppStore.getState().views.s1
+assert.equal(runningTaskCount(v10.blocks), 1, 'promote 后徽章应计 1')
+EV('tool_response', { id: 'tw-1', name: 'bash', result: 'ok', run_id: 'r1' })
+v10 = useAppStore.getState().views.s1
+const doneTool = v10.blocks.find((b) => b.kind === 'tool' && b.toolId === 'tw-1')
+assert.equal(doneTool?.status, 'done', 'tool_run_end 应结束工具行')
+assert.equal(doneTool?.taskStatus, 'completed', 'tool_run_end 应收敛任务态为 completed（回执丢失不卡执行中）')
+assert.notEqual(doneTool?.interrupting, true, '正常完成不得残留中断标记')
+assert.equal(runningTaskCount(v10.blocks), 0, 'tool_run_end 后徽章应归零（与卡片状态一致）')
+// 任务 B：用户点停止 → 取消回执（tool_run_end）先到、交付回执丢失 → 应收敛 interrupted
+EV('tool_start', { id: 'tw-2', name: 'bash', arguments: '{"command":"sleep 600"}', task_id: 'tooltask-2', run_id: 'r1' })
+EV('task_promoted', { task_id: 'tooltask-2', kind: 'tool', name: 'bash' })
+useAppStore.getState().interruptTask('tooltask-2')
+v10 = useAppStore.getState().views.s1
+const stopping = v10.blocks.find((b) => b.kind === 'tool' && b.toolId === 'tw-2')
+assert.equal(stopping?.taskStatus, 'interrupting', '点停止后应乐观进入中断中')
+assert.equal(runningTaskCount(v10.blocks), 1, '中断中仍应计入运行（尚未确认停止）')
+EV('tool_response', { id: 'tw-2', name: 'bash', result: '[exit: context canceled]', run_id: 'r1' })
+v10 = useAppStore.getState().views.s1
+const stopped = v10.blocks.find((b) => b.kind === 'tool' && b.toolId === 'tw-2')
+assert.equal(stopped?.status, 'done', '取消回执应结束工具行')
+assert.equal(stopped?.taskStatus, 'interrupted', '取消回执应收敛为已中断（计时器停走）')
+assert.notEqual(stopped?.interrupting, true, '收敛后应清除中断标记')
+assert.equal(runningTaskCount(v10.blocks), 0, '确认中断后徽章应归零')
+// 交付回执迟到：以权威终态覆盖（停止竞态下任务实际跑完 → completed）
+EV('task_result_delivered', { task_id: 'tooltask-2', status: 'completed', result: 'late delivery' })
+v10 = useAppStore.getState().views.s1
+assert.equal(v10.blocks.find((b) => b.kind === 'tool' && b.toolId === 'tw-2')?.taskStatus, 'completed', '迟到回执应覆盖为权威终态')
+console.log('PASS 场景10：promoted 工具 tool_run_end 即收敛；徽标与卡片一致，迟到回执可覆盖')
+
+// ===== 场景 11：todo 工具块定格「调用完成时刻」的 todos 快照 =====
+// 历史计划卡必须显示当时状态（bridge 随 tool_response 携带 todos），不能全部跟随
+// store 最新列表 —— 否则多次更新时每张卡都显示最终态（#t5 的卡也显示 6/6）。
+setup()
+EV('tool_start', { id: 'tw-t1', name: 'todo_add', arguments: '{"title":"A"}', run_id: 'r1' })
+EV('tool_response', { id: 'tw-t1', name: 'todo_add', result: 'ok', run_id: 'r1', todos: [{ id: 't1', title: 'A', done: false }] })
+let v11 = useAppStore.getState().views.s1
+const addBlock = v11.blocks.find((b) => b.kind === 'tool' && b.toolId === 'tw-t1')
+assert.equal(addBlock?.todos?.length, 1, 'todo_add 响应应定格当刻 todos 快照')
+EV('tool_start', { id: 'tw-t2', name: 'todo_update', arguments: '{"id":"t1","done":true}', run_id: 'r1' })
+EV('tool_response', { id: 'tw-t2', name: 'todo_update', result: 'ok', run_id: 'r1', todos: [{ id: 't1', title: 'A', done: true }] })
+v11 = useAppStore.getState().views.s1
+const updBlock = v11.blocks.find((b) => b.kind === 'tool' && b.toolId === 'tw-t2')
+assert.equal(updBlock?.todos?.[0]?.done, true, 'todo_update 响应应定格当刻 todos 快照')
+assert.equal(addBlock?.todos?.[0]?.done, false, '前一张卡的快照不得被后续调用改写（历史态保持）')
+// 非 todo 工具不携带 todos → 不落字段（零额外内存）
+EV('tool_start', { id: 'tw-b1', name: 'bash', arguments: '{"command":"ls"}', run_id: 'r1' })
+EV('tool_response', { id: 'tw-b1', name: 'bash', result: 'x', run_id: 'r1' })
+v11 = useAppStore.getState().views.s1
+const bashBlock = v11.blocks.find((b) => b.kind === 'tool' && b.toolId === 'tw-b1')
+assert.equal(bashBlock?.todos, undefined, '非 todo 工具不应落 todos 字段')
+console.log('PASS 场景11：todo 工具块定格调用时刻快照；历史卡不被后续调用改写')
+
+console.log('STORE_TEST_PASS')
+process.exit(0)

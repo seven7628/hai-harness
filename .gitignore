@@ -62,7 +62,10 @@ brand/boot-preview*
 *.test.mjs
 *.test.js
 /desktop/app/e2e/
-/desktop/app/scripts/
+# desktop/app/scripts 里的 test-*.mjs 是 package.json 各 test:<name> 脚本的实现，
+# 曾经被整目录忽略 → 干净检出里 npm run test:store 之类全部 MODULE_NOT_FOUND
+# （与 desktop/bridge 测试包是同一类事故）。脚本本身入库；只有一次性草稿不入库。
+/desktop/app/scripts/_tmp_*
 /desktop/bridge/e2e_*.py
 testdata/
 # 真实会话回放基准的夹具（tools/bench/export_real_sessions.py 生成）：
