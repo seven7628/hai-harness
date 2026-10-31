@@ -20,14 +20,47 @@ html[data-skin='runtime'] .rt-you .rt-who {
   color: var(--ink-3);
 }
 
-html[data-skin='runtime'] .rt-you > p {
-  max-width: 62ch;
+/* 用户块正文：一道竖轨 + 用户自己写的 Markdown。
+   **不再限宽**（设计原文是 max-width: 62ch）：62ch 在这个字号下只有 534px，而对话列
+   是 752px —— 用户自己说的话比模型的回答窄一大截，读起来像"引用别人的话"
+  （2026-10 用户报障「宽度与整体会话不一致」）。竖轨 + 说话人标签已经足够区分角色，
+   宽度跟整列对齐才是对的。 */
+html[data-skin='runtime'] .rt-you > .rt-body {
   padding: 0 0 0 12px;
   font-size: 13.5px;
   line-height: 1.6;
   color: var(--ink);
   border-left: 2px solid color-mix(in oklab, var(--ink-3) 45%, transparent);
   overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+/* Markdown 容器在用户块里要"消失"：不额外加边距、不换字号，段落间距按一句一行收紧。
+   关键一条 white-space: pre-wrap —— remark 把用户敲的单个换行留在段落文本里，浏览器
+   默认把它折叠成空格（这就是"换行没有了"）。pre-wrap 让 ⏎ 原样生效，而列表/代码块
+   仍走 Markdown 自己的版式。 */
+html[data-skin='runtime'] .rt-you .md {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+html[data-skin='runtime'] .rt-you .md > :first-child { margin-top: 0; }
+html[data-skin='runtime'] .rt-you .md > :last-child { margin-bottom: 0; }
+html[data-skin='runtime'] .rt-you .md p,
+html[data-skin='runtime'] .rt-you .md li {
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+}
+html[data-skin='runtime'] .rt-you .md p { margin: 6px 0; }
+html[data-skin='runtime'] .rt-you .md ul,
+html[data-skin='runtime'] .rt-you .md ol { margin: 6px 0; padding-left: 22px; }
+html[data-skin='runtime'] .rt-you .md li { margin: 1px 0; }
+html[data-skin='runtime'] .rt-you .md code {
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--amber) 12%, transparent);
 }
 
 /* --- the tokens ----------------------------------------------------------- */

@@ -4,6 +4,7 @@ import { BUILTIN_SLASH, useAppStore } from '../../../store/useAppStore'
 import type { MsgBlock } from '../../../store/useAppStore'
 import { useT } from '../../../i18n'
 import { FileIcon, FolderIcon } from '../../icons'
+import { Markdown } from '../../markdown'
 import { fmtClock } from '../../ui'
 import './user-block.css'
 
@@ -62,16 +63,15 @@ export function UserBlock({ b }: { b: UserMsg }) {
       <span className="rt-who" title={b.ts != null ? fmtClock(b.ts) : undefined}>
         {t('narrative.user')}
       </span>
+      {/* 用户输入按 **Markdown** 渲染（用户 2026-10 报障两件事：换行没了、
+          自己打的 Markdown 不生效）。此前这里是手写的「只认行内 code」渲染器，
+          于是 `1. a\n2. b` 折成一段、`**重点**` 原样显示、`- 列表` 变成一个小横线。
+          换行的兜底在 CSS（.rt-you .md 的 white-space: pre-wrap）：remark 把单换行
+          留在段落文本里，浏览器默认折叠它 —— pre-wrap 让「用户按了 ⏎」原样回来。 */}
       {b.text ? (
-        <p>
-          {b.text.split(/(`[^`\n]+`)/).map((seg, i) =>
-            seg.startsWith('`') && seg.endsWith('`') && seg.length > 2 ? (
-              <code key={i}>{seg.slice(1, -1)}</code>
-            ) : (
-              <span key={i}>{seg}</span>
-            ),
-          )}
-        </p>
+        <div className="rt-body">
+          <Markdown text={b.text} />
+        </div>
       ) : null}
       {toks.length + refs.length > 0 ? (
         <div className="rt-toks">

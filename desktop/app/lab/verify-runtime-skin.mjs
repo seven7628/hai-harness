@@ -1244,39 +1244,56 @@ check('artifacts: the runtime card is the design one (.ar), not the old .art', f
 // .ac-artifacts 里都不该再出现旧卡。没有任务卡时这条自然成立，有就必须是 .ar。
 check('artifacts: the task card uses the same card', foot.arts.taskLegacy === 0, foot.arts.taskLegacy)
 
-// ---- 上下文环：点它是「打开构成面板」，不是「压缩」 ------------------------
-// 设计 index.html:1028 里 .ctx-ring 打开的是 .pop[data-pop="ctx"]（容量条 + 分区行 +
-// 缓存命中率）；压缩不在这一下上。我们原本把压缩挂在环的点击上，等于点「详情」弹「确认」。
-// 运行时皮肤改成设计那样，压缩入口移到面板尾部（否则这一档就没有入口了）。
-const ctxClick = await page.eval(async () => {
-  const DIALOG = '.modal-hint[role="dialog"]'
-  document.querySelector(DIALOG)?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-  const ring = document.querySelector('.row2 .ctx')
-  if (!ring) return { present: false }
-  ring.click()
-  await new Promise((r) => setTimeout(r, 700))
-  const panel = document.querySelector('.ctx-panel')
-  const compactBtn = document.querySelector('.ctx-compact')
-  const out = {
-    present: true,
-    panel: !!panel,
-    dialogAfterRing: !!document.querySelector('.modal-hint[role="dialog"]'),
-    compactLabel: compactBtn?.textContent?.trim() ?? null,
-  }
-  if (compactBtn) {
-    compactBtn.click()
-    await new Promise((r) => setTimeout(r, 500))
-    out.dialogAfterPanelBtn = !!document.querySelector('.modal-hint[role="dialog"]')
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-    await new Promise((r) => setTimeout(r, 300))
-  }
-  // 收尾：把面板关掉（再点一次环）
-  document.querySelector('.row2 .ctx')?.click()
-  await new Promise((r) => setTimeout(r, 300))
-  return out
+// ---- 上下文环：悬停看构成，点它问「要不要压缩」 ----------------------------
+// 用户 2026-10 口径（覆盖设计里「点环 = 打开构成面板」的写法）：
+//   ① 悬停 → 展开占用面板；移开后 **0.5s** 才收（慢半拍，不是一离开就断）；
+//   ② 点击 / 回车 → 弹「压缩上下文？」确认。一个控件两种意图，点击不再兼作展开。
+// 面板尾部的「压缩上下文…」仍是同一件事的第二入口（运行时段也够得着）。
+const ctxMove = async (x, y) => page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' })
+const ctxRing = await page.eval(() => {
+  const r = document.querySelector('.row2 .ctx')?.getBoundingClientRect()
+  return r ? { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) } : null
 })
-check('ctx: clicking the ring opens the breakdown', ctxClick.panel === true && ctxClick.dialogAfterRing === false, JSON.stringify(ctxClick))
-check('ctx: compaction still has an entry, in the panel', ctxClick.compactLabel === '压缩上下文…' && ctxClick.dialogAfterPanelBtn === true, JSON.stringify(ctxClick))
+const ctxPanel = () => page.eval(() => !!document.querySelector('.ctx-panel'))
+const ctxDialog = () => page.eval(() => !!document.querySelector('.modal-hint[role="dialog"]'))
+await ctxMove(ctxRing.x, ctxRing.y)
+await wait(240)
+const ctxHover = await ctxPanel()
+await ctxMove(12, 12)
+await wait(220)
+const ctxGrace = await ctxPanel() // 0.5s 宽限内：还开着
+await wait(420)
+const ctxGone = await ctxPanel() // 超过 0.5s：收掉
+check('ctx ring: hovering opens the breakdown panel', ctxHover === true, ctxHover)
+check('ctx ring: it stays open inside the 0.5s grace after the pointer leaves', ctxGrace === true, ctxGrace)
+check('ctx ring: it closes 0.5s after the pointer leaves', ctxGone === false, ctxGone)
+
+await page.eval(() => document.querySelector('.row2 .ctx').click())
+await wait(400)
+const ctxDialogOpen = await ctxDialog()
+await page.eval(() => { document.querySelectorAll('.modal-hint .acts button')[0]?.click() })
+await wait(250)
+const ctxDialogClosed = await ctxDialog()
+check('ctx ring: clicking asks whether to compact (not just opening the panel)',
+  ctxDialogOpen === true && (await ctxPanel()) === false && ctxDialogClosed === false,
+  JSON.stringify({ dialog: ctxDialogOpen, closedAfterCancel: ctxDialogClosed }))
+
+// 面板里的第二入口（悬停打开 → 尾部按钮 → 同一个确认）
+await ctxMove(ctxRing.x, ctxRing.y)
+await wait(300)
+const ctxCompactEntry = await page.eval(async () => {
+  const btn = document.querySelector('.ctx-compact')
+  const label = btn?.textContent?.trim() ?? null
+  if (btn) btn.click()
+  await new Promise((r) => setTimeout(r, 400))
+  const dialog = !!document.querySelector('.modal-hint[role="dialog"]')
+  document.querySelectorAll('.modal-hint .acts button')[0]?.click()
+  return { label, dialog }
+})
+check('ctx: compaction keeps a second entry in the panel', ctxCompactEntry.label === '压缩上下文…' && ctxCompactEntry.dialog === true,
+  JSON.stringify(ctxCompactEntry))
+await ctxMove(12, 12)
+await wait(600)
 
 // ---- 拖拽：盒子变成一个可以往里放东西的地方 -------------------------------
 // 设计 .p-drop（ui.components.css:2492）：虚线强调边、28px 图标块、12.5px 标题、
@@ -1630,6 +1647,125 @@ const after = await page.eval(() => {
 check('settle: after AgentEnd the fold line and the ledger appear',
   after.runEnded === true && after.worked && after.foot > 0, JSON.stringify(after))
 
+// ---- 骨架屏（切换会话的加载动画）-----------------------------------------------
+// 直接驱动状态机：mock 的 new_session 是同步响应，靠真实加载时序测不到它 —— 而这里要
+// 验的是「骨架屏长什么样、动效在不在」，不是「这次加载用了多久」。
+const skel = async (phase) => {
+  await page.eval((p) => { window.__store.setState({ skeleton: { phase: p, at: Date.now() } }) }, phase)
+  await wait(120)
+  return page.eval(() => {
+    const el = document.querySelector('.session-skeleton')
+    if (!el) return { present: false }
+    const cs = getComputedStyle(el)
+    const sheen = el.querySelector('.ss-sheen')
+    const bar = el.querySelector('.ss-bar')
+    return {
+      present: true,
+      rows: el.querySelectorAll('.ss-row').length,
+      anim: cs.animationName,
+      dur: cs.animationDuration,
+      sheen: sheen ? getComputedStyle(sheen).animationName : null,
+      barH: bar ? Math.round(bar.getBoundingClientRect().height) : 0,
+      cls: el.className,
+      leaving: el.classList.contains('is-leaving'),
+    }
+  })
+}
+const skPending = await skel('pending')
+const skVisible = await skel('visible')
+const skExit = await skel('exit')
+check('skeleton: nothing is painted while the load is still under the threshold', skPending.present === false, JSON.stringify(skPending))
+check('skeleton: it draws the conversation shape (rows with bars + scanning sheen)',
+  skVisible.present && skVisible.rows > 3 && skVisible.sheen === 'ssSheen' && skVisible.barH === 9,
+  JSON.stringify({ rows: skVisible.rows, sheen: skVisible.sheen, barH: skVisible.barH }))
+check('skeleton: it fades in', skVisible.anim === 'ssFadeIn', `${skVisible.anim} ${skVisible.dur}`)
+check('skeleton: the exit is a cross-fade, not a cut',
+  skExit.present && skExit.leaving && skExit.anim === 'ssFadeOut' && skExit.dur === '0.32s',
+  JSON.stringify({ anim: skExit.anim, dur: skExit.dur, cls: skExit.cls }))
+// 立刻收回（后面的断言不该看到一个假加载态）
+await page.eval(() => { window.__store.setState({ skeleton: { phase: 'idle', at: 0 } }) })
+await wait(120)
+
+// ---- 切回看过的会话：也要有一次入场动画 ----------------------------------------
+// 用户 2026-10：「骨架屏/加载动画没有了」——他切的是**看过的**会话（缓存命中，
+// 按设计不进骨架屏）。缓存路径必须补上「历史渐入」，否则是瞬间替换。
+const enterAnim = await page.eval(() => {
+  const st = window.__store.getState()
+  const ids = Object.keys(st.views)
+  if (ids.length < 2) return { skipped: true, ids }
+  const target = ids.find((id) => id !== st.activeSessionId)
+  st.setActiveSession(target)
+  return { skipped: false, target }
+})
+await wait(120)
+const enterState = await page.eval(() => {
+  const n = document.querySelector('.narrative')
+  const child = n?.querySelector('.rt-turn, .msg')
+  return {
+    cls: n?.className ?? '',
+    childAnim: child ? getComputedStyle(child).animationName : null,
+    childDur: child ? getComputedStyle(child).animationDuration : null,
+    enterAnimAt: window.__store.getState().enterAnimAt,
+  }
+})
+check('session switch: a cached switch still replays the history entrance',
+  enterAnim.skipped || (/narrative-enter/.test(enterState.cls) && /narrativeEnter/.test(enterState.childAnim ?? '')),
+  JSON.stringify({ enterAnim, ...enterState }))
+
+// ---- 用户块：整列宽度 + 用户自己写的 Markdown + 换行 -----------------------------
+// 用户 2026-10 报障两件事：① 用户块比整列窄一大截（设计原文 max-width: 62ch，
+// 在这个字号下只有 534px，而列宽 752px）——自己说的话比模型的回答窄，读起来像引用；
+// ② 换行没了、自己打的 Markdown 不生效（此前是手写的「只认行内 code」渲染器）。
+// 直接往视图里追加一条用户块（形状与真实输入完全一致：{kind:'user', id, text}）。
+// 为什么不用 say()：mock 的脚本 run 还在跑时新输入会排在 pendingQueue 里，要等这条
+// run 结束才落块 —— 那一段是「队列语义」的测试，不是这段要验的**渲染**；而且它要等
+// 十几秒，还会让后面所有断言都排在一个不确定的时刻上。
+await page.eval(() => {
+  // 活跃会话的转录就是顶层 blocks（Narrative 无 viewSid 时读它）
+  const blocks = [...window.__store.getState().blocks, { kind: 'user', id: 999001, text: '第一行\n第二行\n\n- 条目一\n- 条目二\n\n**粗体** 和 `inline`' }]
+  window.__store.setState({ blocks })
+})
+const you = await waitUntil(
+  "[...document.querySelectorAll('.rt-you .md')].some((m) => m.textContent.includes('第一行'))",
+  20000,
+)
+const user = await page.eval(() => {
+  const block = [...document.querySelectorAll('.rt-you')].filter((el) => el.textContent.includes('第一行')).pop()
+  const turn = block?.closest('.rt-turn')
+  const body = block?.querySelector('.rt-body')
+  const md = block?.querySelector('.md')
+  const ps = md ? [...md.querySelectorAll('p')] : []
+  const p0 = ps[0]
+  const lh = p0 ? parseFloat(getComputedStyle(p0).lineHeight) : 0
+  const cs = (el, k) => el ? getComputedStyle(el)[k] : null
+  return {
+    bodyW: body ? Math.round(body.getBoundingClientRect().width) : null,
+    // 参照物 = 同一列的其它块（用户块自己在 grid 里就是整列宽；列宽含 12px 竖轨内距）
+    youW: block ? Math.round(block.getBoundingClientRect().width) : null,
+    colW: turn ? Math.round(turn.getBoundingClientRect().width) : null,
+    maxW: cs(body, 'maxWidth'),
+    ws: cs(p0, 'whiteSpace'),
+    // 「第一行 / 第二行」必须占两行（单行高度 = lineHeight）
+    firstLines: p0 && lh ? Math.round(p0.getBoundingClientRect().height / lh) : 0,
+    firstText: p0?.textContent ?? '',
+    items: md ? [...md.querySelectorAll('li')].map((el) => el.textContent) : [],
+    strong: md ? [...md.querySelectorAll('strong')].map((el) => el.textContent) : [],
+    codes: md ? [...md.querySelectorAll('code')].map((el) => el.textContent) : [],
+    rail: cs(body, 'borderLeftWidth'),
+    font: cs(p0, 'fontSize'),
+  }
+})
+check('user block: the prompt spans the conversation column (no 62ch cap)',
+  you && user.bodyW === user.youW && user.maxW === 'none' && user.bodyW > 700,
+  JSON.stringify({ body: user.bodyW, column: user.youW, max: user.maxW }))
+check('user block: line breaks the user typed survive', user.ws === 'pre-wrap' && user.firstLines === 2,
+  JSON.stringify({ ws: user.ws, lines: user.firstLines, text: user.firstText.slice(0, 24) }))
+check('user block: the user\'s own markdown is rendered (list / bold / inline code)',
+  user.items.length === 2 && user.strong.includes('粗体') && user.codes.includes('inline'),
+  JSON.stringify({ items: user.items, strong: user.strong, codes: user.codes }))
+check('user block: it keeps the design rail and size', user.rail === '2px' && user.font === '13.5px',
+  JSON.stringify({ rail: user.rail, font: user.font }))
+
 // ---- 一行信号（Small signals）：九类事件 --------------------------------------------------
 // 判据全部来自 design/agent-runtime/v2 的 .sig 规则（ui.components.css:970-990）：
 // 图标 14 / gap 10 / padding 9·4 / 标题 12.5·500 / 副题 11 / 右侧事件名 9.5 mono 靠右。
@@ -1652,7 +1788,7 @@ const sigInjected = await page.eval(() => {
   emit({ event_type: 'task_promoted', session_id: sid, task_id: 'tooltask-abc', kind: 'tool', name: 'bash', timestamp: at })
   emit({ event_type: 'session_budget_exceeded', session_id: sid, cost: 0.0234, max_cost: 0.02, timestamp: at })
   emit({ event_type: 'session_persist_error', session_id: sid, error: 'disk full', timestamp: at })
-  emit({ event_type: 'session_closed', session_id: sid, timestamp: at })
+  emit({ event_type: 'session_closed', session_id: sid, runs: 18, consumed: 17, abandoned_mid_tool: 1, timestamp: at })
   // 同一条再来一次：不该刷出第二行（去重）
   emit({ event_type: 'tool_hook_warning', session_id: sid, name: 'gofmt', message: 'returned 2', timestamp: at })
   return 'ok'
@@ -1716,8 +1852,10 @@ check('signals: sub-line carries only the facts we were given',
     sigRows.details.persist === 'disk full' && sigRows.details.budget === '$0.0234 / $0.0200',
   JSON.stringify(sigRows.details))
 check('signals: a missing field is absent, not invented',
-  (sigRows.details.silent ?? '') === '4 轮' && (sigRows.details.closed ?? '') === '',
-  JSON.stringify({ silent: sigRows.details.silent, closed: sigRows.details.closed }))
+  (sigRows.details.silent ?? '') === '4 轮', sigRows.details.silent)
+// session_closed 的运行账：三个数都是后端事实（Go 的 Session.recordRunOutcome）
+check('signals: session_closed reports the run ledger',
+  sigRows.details.closed === '18 次运行 · 17 次正常收尾 · 1 次停在工具中间', sigRows.details.closed)
 check('signals: rows live outside the working box (a record, not work)', sigRows.insideWork === false, sigRows.insideWork)
 
 await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })

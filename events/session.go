@@ -35,6 +35,20 @@ type SessionClosed struct {
 	SessionId string    `json:"session_id"`
 	Timestamp time.Time `json:"timestamp"`
 
+	// Runs/Consumed/AbandonedMidTool —— 这个会话的运行账（设计 v2 的 session_closed
+	// 那一行：「18 runs · 17 consumed · 1 abandoned mid-tool」）。
+	//
+	//   Runs             会话内启动的运行数（每次 takeBatch 后跑一次 loop = 一次运行）
+	//   Consumed         正常收尾的运行数（拿到 AgentEnd，既没 abort 也没出错）
+	//   AbandonedMidTool 被打断在工具执行中间的运行数（收场时还有工具在飞）
+	//
+	// 三者不必相加等于 Runs：在「思考/流式输出」阶段被用户停掉的运行既不算 consumed
+	// 也不算 abandoned mid-tool —— 它没死在工具上。宿主按事实渲染，不要做算术假设。
+	// omitempty：老 bridge 不发这三个字段，UI 据此不画副题（而不是画 "0 runs"）。
+	Runs             int `json:"runs,omitempty"`
+	Consumed         int `json:"consumed,omitempty"`
+	AbandonedMidTool int `json:"abandoned_mid_tool,omitempty"`
+
 	EventType EventType `json:"event_type"`
 }
 

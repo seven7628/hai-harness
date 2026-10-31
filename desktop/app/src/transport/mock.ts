@@ -1683,7 +1683,11 @@ class MockTransport implements Transport {
       case 'switch_effort':
       case 'shutdown':
         this.respond(cmd, {})
-        if (cmd.type === 'shutdown') this.emit({ event_type: 'session_closed', session_id: this.sid, timestamp: ts() })
+        // 运行账（真 bridge 的 SessionClosed.Runs/Consumed/AbandonedMidTool）：mock 用一组
+        // 固定值，让「18 次运行 · 17 次正常收尾 · 1 次停在工具中间」这一行在 mock 下可断言。
+        if (cmd.type === 'shutdown') {
+          this.emit({ event_type: 'session_closed', session_id: this.sid, runs: 18, consumed: 17, abandoned_mid_tool: 1, timestamp: ts() })
+        }
         break
       case 'skills': {
         // 工作区技能清单（SkillsPage + /skill 面板数据源；含启用标志）

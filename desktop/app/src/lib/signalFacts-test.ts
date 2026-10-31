@@ -46,10 +46,24 @@ test('budget：金额用同一把尺（<1 美元 4 位小数）', () => {
   assert.equal(signalText({ sig: 'budget', etype: 'session_budget_exceeded' }, t).detail, undefined)
 })
 
-test('persist / closed：persist 有 error 才写副题，closed 永远只有标题', () => {
+test('persist：有 error 才写副题', () => {
   assert.equal(signalText({ sig: 'persist', etype: 'session_persist_error', message: 'disk full' }, t).detail, 'disk full')
   assert.equal(signalText({ sig: 'persist', etype: 'session_persist_error' }, t).detail, undefined)
-  assert.deepEqual(signalText({ sig: 'closed', etype: 'session_closed' }, t), { title: 'sig.closed' })
+})
+
+test('closed：运行账三个数都是事实，缺哪个省哪个', () => {
+  // 设计那一行：「18 runs · 17 consumed · 1 abandoned mid-tool」
+  const full = signalText(
+    { sig: 'closed', etype: 'session_closed', runs: 18, consumed: 17, abandoned: 1 },
+    (k) => k,
+  )
+  assert.equal(full.title, 'sig.closed')
+  assert.equal(full.detail, 'sig.closed.runs · sig.closed.consumed · sig.closed.abandoned')
+  // 一次都没死在工具上 → 不写「0 次停在工具中间」（那是废话，也像是故障）
+  const clean = signalText({ sig: 'closed', etype: 'session_closed', runs: 3, consumed: 3 }, (k) => k)
+  assert.equal(clean.detail, 'sig.closed.runs · sig.closed.consumed')
+  // 老 bridge 不发这些字段 → 只有标题
+  assert.deepEqual(signalText({ sig: 'closed', etype: 'session_closed' }, (k) => k), { title: 'sig.closed' })
 })
 
 test('goal / promote：轮次与任务名各自成副题', () => {

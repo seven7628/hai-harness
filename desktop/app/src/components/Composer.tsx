@@ -283,18 +283,24 @@ export default function Composer() {
   // ctx 环 hover：上下文构成面板。140ms 延迟——快速划过（如去点发送）不弹面板；
   // 面板是 ctx 的同级兄弟节点（不是 .ctx 的子节点），所以点面板不会误触「点击压缩」。
   const [ctxPanelOpen, setCtxPanelOpen] = useState(false)
-  // 运行时皮肤：点 ctx 环 = 打开这块构成面板（设计 index.html:1028 的 .pop[data-pop=ctx]）。
-  // 另两档仍是「点击 → 压缩确认」的老路径，不能一起改。钉住之后鼠标移开不关，
-  // 再点一次或点面板外才关。
-  const [ctxPinned, setCtxPinned] = useState(false)
   // 「能力」弹层：设计里点它是打开一份「本轮可用」的清单（技能/MCP/记忆/钩子/子智能体），
   // 不是把 `/` 塞进输入框再让补全菜单顶上来 —— 那是两个不同的东西
   const [capsOpen, setCapsOpen] = useState(false)
   // 按钮上的数 = 弹层里那个「N 项」：同源（capsCountOf），否则同一个按钮会报两个数
   const capsN = useAppStore(capsCountOf)
   const ctxHoverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  useEffect(() => () => { if (ctxHoverTimer.current) clearTimeout(ctxHoverTimer.current) }, [])
+  // 移开后的宽限：设计口径是「慢半拍收」，不是「一离开就断」（2026-10 用户口径 0.5s）。
+  // 用两个定时器而不是一个：进场 140ms（快速划过不弹）、退场 500ms（手抖/移到面板上不闪）。
+  const ctxCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(
+    () => () => {
+      if (ctxHoverTimer.current) clearTimeout(ctxHoverTimer.current)
+      if (ctxCloseTimer.current) clearTimeout(ctxCloseTimer.current)
+    },
+    [],
+  )
   const openCtxPanel = () => {
+    if (ctxCloseTimer.current) clearTimeout(ctxCloseTimer.current) // 半秒内回到环上 = 继续显示
     if (ctxHoverTimer.current) clearTimeout(ctxHoverTimer.current)
     ctxHoverTimer.current = setTimeout(() => {
       setCtxPanelOpen(true)
@@ -303,8 +309,8 @@ export default function Composer() {
   }
   const closeCtxPanel = () => {
     if (ctxHoverTimer.current) clearTimeout(ctxHoverTimer.current)
-    if (ctxPinned) return // 钉住时移开鼠标不关（否则「点开」和「悬停」没区别）
-    setCtxPanelOpen(false)
+    if (ctxCloseTimer.current) clearTimeout(ctxCloseTimer.current)
+    ctxCloseTimer.current = setTimeout(() => setCtxPanelOpen(false), 500)
   }
   // 面板数据只认当前会话（切会话后迟到的响应已在 store 丢弃，此处再兜一层）
   const ctxPanelData = ctxBreakdown && ctxBreakdown.sessionId === activeSessionId ? ctxBreakdown : undefined
@@ -1535,32 +1541,18 @@ export default function Composer() {
                 aria-disabled={compressing}
                 onClick={() => {
                   if (compressing) return
-                  if (rt) {
-                    // 设计里这一下是打开构成面板；压缩入口移进面板里（见 CtxBreakdown 的 onCompact），
-                    // 否则运行时段就没有任何进压缩的入口了
-                    setCtxPinned((v) => {
-                      const next = !v
-                      setCtxPanelOpen(next)
-                      if (next) fetchCtxBreakdown()
-                      return next
-                    })
-                    return
-                  }
+                  // 点这一下 = 问「要不要压缩上下文」（用户 2026-10 口径；运行时皮肤也一样）。
+                  // 构成面板仍归 hover 管（见 openCtxPanel/closeCtxPanel），点击不再兼作展开
+                  // —— 一个控件两种意图，用户永远猜不到点下去会发生哪件。
+                  setCtxPanelOpen(false)
                   setConfirmCompact(true)
                 }}
                 onKeyDown={(e) => {
                   if (compressing) return
                   if (e.key !== 'Enter' && e.key !== ' ') return
                   e.preventDefault()
-                  if (rt) {
-                    setCtxPinned((v) => {
-                      const next = !v
-                      setCtxPanelOpen(next)
-                      if (next) fetchCtxBreakdown()
-                      return next
-                    })
-                    return
-                  }
+                  // 键盘与鼠标同一语义（与 onClick 一致）
+                  setCtxPanelOpen(false)
                   setConfirmCompact(true)
                 }}
               >
@@ -1573,7 +1565,6 @@ export default function Composer() {
                 <CtxBreakdownPanel
                   {...(rt ? {
                     onCompact: () => {
-                      setCtxPinned(false)
                       setCtxPanelOpen(false)
                       setConfirmCompact(true)
                     },

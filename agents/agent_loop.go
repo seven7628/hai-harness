@@ -497,6 +497,12 @@ type AgentContext struct {
 	cancel  context.CancelFunc
 	aborted atomic.Bool
 
+	// toolAborted 本次运行是否**死在工具执行中间**（工具批在跑时 ctx 被取消：
+	// abort / Shutdown / 父取消）。会话用它给 session_closed 记账（设计 v2 的
+	// 「1 abandoned mid-tool」）——「被打断在思考阶段」不算这一类，两者对用户
+	// 是不同的事实（一个丢了工具结果，一个只是没说完）。
+	toolAborted atomic.Bool
+
 	Usage core.Usage // 累计用量与成本（含压缩调用；Cost 内嵌于 Usage）
 
 	// failures 本 Run 工具失败账本（C5 去重守卫 + C6 压缩交接 [RecentFailures] 的
@@ -584,6 +590,9 @@ func (ac *AgentContext) Cancel() {
 }
 
 // IsAborted 是否收到中断请求。
+// ToolAborted 本次运行是否死在工具执行中间（见 toolAborted 字段）。
+func (ac *AgentContext) ToolAborted() bool { return ac.toolAborted.Load() }
+
 func (ac *AgentContext) IsAborted() bool {
 	return ac.aborted.Load()
 }
@@ -2531,6 +2540,12 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 			return nil, err
 		}
 		results = append(results, r...)
+	}
+	// 「死在工具上」的判据：工具批刚跑完，而这次运行的 ctx 已经取消（abort /
+	// Shutdown / 父取消）—— 取消落在工具执行期间，而不是思考/流式输出期间。
+	// 只记事实，不改行为（记账在会话层，见 Session.recordRunOutcome）。
+	if ac.ctx.Err() != nil {
+		ac.toolAborted.Store(true)
 	}
 	// 子 agent 类工具的用量计入父运行结算（成本传导 → AgentEnd/Session 预算）
 	for _, r := range results {

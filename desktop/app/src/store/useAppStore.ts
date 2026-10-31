@@ -6750,7 +6750,17 @@ export function dispatchEvent(raw: AnyEvent): void {
             pendingQueue: [],
             // 一行信号：会话关闭是**结论级**事实（设计 session_closed），不写一行的话
             // 用户只看到界面忽然安静下来。
-            blocks: pushSignal(v.blocks, { sig: 'closed', etype: 'session_closed' }),
+            // 运行账（设计「18 runs · 17 consumed · 1 abandoned mid-tool」）：
+            // 三个数由 Go 的 Session.recordRunOutcome 统计，缺字段就不画（不编 0）。
+            blocks: pushSignal(v.blocks, {
+              sig: 'closed',
+              etype: 'session_closed',
+              ...(typeof raw.runs === 'number' ? { runs: raw.runs } : {}),
+              ...(typeof raw.consumed === 'number' ? { consumed: raw.consumed } : {}),
+              ...(typeof raw.abandoned_mid_tool === 'number' && raw.abandoned_mid_tool > 0
+                ? { abandoned: raw.abandoned_mid_tool }
+                : {}),
+            }),
             runEnded: true, // 关闭后不可能再有 AgentEnd：结算位必须落地，否则永远停在 Working
           },
           { bridgeStatus: 'idle' },
@@ -8078,6 +8088,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     if (isHydrated(id)) {
       touchView(id)
+      // 缓存命中也要重播「历史渐入」：骨架屏只属于「真的要等磁盘」的那条路，
+      // 但一次会话进入得有个交代 —— 否则切回看过的会话是**瞬间替换**，没有任何
+      // 过渡（用户 2026-10 报障「骨架屏/加载动画没有了」：他切的就是看过的会话）。
+      // markEnterAnim 只写一个递增序号，Narrative 用它重播子元素动画，不重挂载
+      //（React key 里已经不含它，见 lib 注释 —— 重挂载会把 scrollTop 拉回底部）。
+      markEnterAnim()
       set({ activeSessionId: id, views, ...loadViewToTop(nextState, id), browserBusy: false })
       applySessionPrefs(path || get().workspace || '', id)
       // 恢复后立即固化为该会话自己的记录：老会话（无会话级记录）首次查看时即

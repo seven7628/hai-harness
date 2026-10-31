@@ -195,14 +195,22 @@ type Session struct {
 	todo     *todo.Store          // 会话级待办清单（跨轮/跨压缩/跨恢复存活）
 	approver *approvalWaiter      // 工具审批等待器（WithApprovalTimeout 启用；nil = 不审批）
 
-	mu              sync.Mutex
-	messages        []core.Message // 有效上下文（发给模型的）
-	history         []core.Message // 完整历史（Ask 输入 + 每轮 RunHistory，append-only）
-	persistedCount  int            // 已写入消息日志的历史条数（增量持久化）
-	checkpointed    int            // 本轮已并入 history 的 RunHistory 条数（检查点去重）
-	usage           core.Usage     // 累计用量与成本（Cost 内嵌于 Usage，无独立成本字段）
-	persistErr      error
-	closed          bool                   // Shutdown 已调用（拒绝新输入/新运行；mu 保护）
+	mu             sync.Mutex
+	messages       []core.Message // 有效上下文（发给模型的）
+	history        []core.Message // 完整历史（Ask 输入 + 每轮 RunHistory，append-only）
+	persistedCount int            // 已写入消息日志的历史条数（增量持久化）
+	checkpointed   int            // 本轮已并入 history 的 RunHistory 条数（检查点去重）
+	usage          core.Usage     // 累计用量与成本（Cost 内嵌于 Usage，无独立成本字段）
+	persistErr     error
+	closed         bool // Shutdown 已调用（拒绝新输入/新运行；mu 保护）
+
+	// 运行账（mu 保护）：session_closed 事件的三个人数字（设计 v2「18 runs ·
+	// 17 consumed · 1 abandoned mid-tool」）。只在本进程的会话生命周期内累计 ——
+	// 恢复出来的会话从零开始数，它报的是「这次进程里跑了几轮」，不是历史总量。
+	runsTotal     int // 启动过的运行数
+	runsConsumed  int // 正常收尾的运行数（AgentEnd，未 abort/未出错）
+	runsAbandoned int // 死在工具执行中间的运行数（见 agents.AgentContext.ToolAborted）
+
 	inRun           bool                   // Run 正在执行（Shutdown 等待收尾的边界；mu 保护）
 	runCancel       context.CancelFunc     // Run 的 ctx 取消句柄（Shutdown 窗口期取消用；mu 保护）
 	runningSnapshot []core.Message         // 运行中 checkpoint 的上下文快照（record 提交用；mu 保护）
@@ -729,6 +737,7 @@ func (s *Session) Run(ctx context.Context, handler events.EventHandler) error {
 		}
 
 		s.mu.Lock()
+		s.runsTotal++
 		s.messages = append(s.messages, batch...)
 		s.mu.Unlock()
 
@@ -828,6 +837,7 @@ func (s *Session) Run(ctx context.Context, handler events.EventHandler) error {
 		s.running = nil
 		s.mu.Unlock()
 		s.absorb(ac)
+		s.recordRunOutcome(ac)
 
 		if err := s.persist(runCtx, s.messages); err != nil { // Run 后快照：记录本轮结果
 			return err
@@ -844,6 +854,29 @@ func (s *Session) Run(ctx context.Context, handler events.EventHandler) error {
 			})
 			return ac.Err // 打断（abort）不是失败：继续处理队列中的新输入
 		}
+	}
+}
+
+// recordRunOutcome 记一次运行怎么收场（session_closed 的运行账）。
+//
+// 三类事实，互不推断：
+//   - 正常收尾（consumed）：拿到 AgentEnd，既没 abort 也没出错 —— 这一轮的产出
+//     交到了用户手里；
+//   - 死在工具上（abandoned mid-tool）：ctx 在工具执行期间被取消（abort / Shutdown /
+//     父取消）。用户丢的不是"一段话"，是**工具的中间结果**，性质不同；
+//   - 其余（思考/流式阶段被打断）：两类都不计 —— 它没死在工具上，也没正常收尾。
+//     所以 runs 不一定等于 consumed+abandoned，宿主按事实渲染即可。
+func (s *Session) recordRunOutcome(ac *agents.AgentContext) {
+	if ac == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case ac.Err == nil && !ac.IsAborted():
+		s.runsConsumed++
+	case ac.ToolAborted():
+		s.runsAbandoned++
 	}
 }
 
@@ -901,10 +934,18 @@ func (s *Session) Shutdown(ctx context.Context) error {
 		}
 	}
 	// Session context cancellation is retained for non-registry infrastructure.
+	// 运行账随关闭事件一起给出（设计 v2 的 session_closed 行）：这里已等到 Run 收尾
+	// （inRun=false 是它写完 recordRunOutcome 之后才置的），数字是最终值。
+	s.mu.Lock()
+	runs, consumed, abandoned := s.runsTotal, s.runsConsumed, s.runsAbandoned
+	s.mu.Unlock()
 	s.emit(&events.SessionClosed{
-		SessionId: s.id,
-		Timestamp: time.Now(),
-		EventType: events.SessionClosedType,
+		SessionId:        s.id,
+		Runs:             runs,
+		Consumed:         consumed,
+		AbandonedMidTool: abandoned,
+		Timestamp:        time.Now(),
+		EventType:        events.SessionClosedType,
 	})
 	return nil
 }

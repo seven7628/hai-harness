@@ -37,6 +37,10 @@ export interface SignalFact {
   round?: number
   /** 合并输入的原文（只取前两条做副题） */
   texts?: string[]
+  /** session_closed 的运行账（Go 的 SessionClosed.Runs/Consumed/AbandonedMidTool） */
+  runs?: number
+  consumed?: number
+  abandoned?: number
 }
 
 export interface SignalText {
@@ -92,7 +96,15 @@ export function signalText(f: SignalFact, t: T): SignalText {
     case 'persist': {
       return { title: t('sig.persist'), ...(f.message ? { detail: f.message } : {}) }
     }
-    default:
-      return { title: t('sig.closed') }
+    default: {
+      // session_closed：设计的副题是「18 runs · 17 consumed · 1 abandoned mid-tool」。
+      // 三个数都是后端的事实，缺哪个就不写哪个（老 bridge 一个都不发 → 只有标题）。
+      // 不做算术：runs 不一定等于 consumed + abandoned（思考阶段被打断的运行两类都不算）。
+      const facts: string[] = []
+      if (f.runs != null) facts.push(rep('sig.closed.runs', { n: f.runs }))
+      if (f.consumed != null) facts.push(rep('sig.closed.consumed', { n: f.consumed }))
+      if (f.abandoned) facts.push(rep('sig.closed.abandoned', { n: f.abandoned }))
+      return { title: t('sig.closed'), ...(facts.length ? { detail: facts.join(' · ') } : {}) }
+    }
   }
 }
