@@ -551,18 +551,31 @@ assert.ok(
   useAppStore.getState().views.s1.blocks.some((b) => b.kind === 'signal' && b.fact.round === 4),
   'run 找不到归属时退回当前会话（不静默丢弃）',
 )
-// ③ 子 agent 自己的工具被摘成后台任务：这一行也归它的卡片，不往主转录写
+// ③ 任务级提示是**例外**：异步任务是会话级对象（卡片在主转录、结果回填主会话 inbox），
+//    「被摘成后台任务」「任务完成」两行始终通知主会话 —— 哪怕任务是被子 agent 摘离的
+//    （用户 2026-10：异步任务完成的通知应该通知到主 session，这个比较特殊）。
 setup()
 EV('agent_start', { run_id: 'r-main' })
 EV('agent_start', { run_id: 'r-sub2', parent_run_id: 'r-main', name: 'sub' })
 EV('tool_start', { id: 'tt1', name: 'bash', arguments: '{"command":"sleep 60"}', run_id: 'r-sub2', task_id: 'tooltask-sub' })
 EV('task_promoted', { task_id: 'tooltask-sub', name: 'bash' })
-const v14c = useAppStore.getState().views.s1
-assert.equal(v14c.blocks.filter((b) => b.kind === 'signal').length, 0, '子 agent 的摘离提示不得进主转录')
+let v14c = useAppStore.getState().views.s1
 const subCard2 = v14c.blocks.find((b) => b.kind === 'agent' && b.runId === 'r-sub2')
+assert.equal(
+  subCard2.items.filter((it) => it.kind === 'signal').length,
+  0,
+  '任务级提示不得折进子 agent 卡片（主会话看不到「它从哪来」）',
+)
 assert.ok(
-  subCard2.items.some((it) => it.kind === 'signal' && it.fact.etype === 'task_promoted'),
-  '摘离提示应挂在该子 agent 卡片的 items 上',
+  v14c.blocks.some((b) => b.kind === 'signal' && b.fact.etype === 'task_promoted'),
+  '摘离提示必须落在主会话转录',
+)
+// 完成通知同样必须在主会话（子 agent 摘离的任务也不例外）
+EV('task_result_delivered', { task_id: 'tooltask-sub', name: 'bash', result: 'done' })
+v14c = useAppStore.getState().views.s1
+assert.ok(
+  v14c.blocks.some((b) => b.kind === 'task_delivery' && b.taskId === 'tooltask-sub'),
+  '任务完成的通知必须通知到主会话（不得只留在子 agent 里）',
 )
 
 console.log('PASS 场景14：信号按 session / 子 agent 隔离')

@@ -645,22 +645,6 @@ function pushSignal(blocks: MsgBlock[], fact: SignalFact, afterRun = false): Msg
   return [...blocks, { kind: 'signal', id: blockSeq++, fact, ...(afterRun ? { afterRun: true } : {}) }]
 }
 
-/* 任务级提示（task_promoted）归**哪个子 agent**：卡片 items 里有这个 taskId 的工具，
-   就说明「这次调用被摘成后台任务」是那个子 agent 的事，不该往主转录写一行。 */
-function pushTaskSignal(v: SessionView, taskId: string, fact: SignalFact): MsgBlock[] | null {
-  if (!taskId) return null
-  const at = v.blocks.findIndex(
-    (b) => b.kind === 'agent' && b.items.some((it) => it.kind === 'tool' && it.taskId === taskId),
-  )
-  if (at < 0) return null
-  const card = v.blocks[at] as Extract<MsgBlock, { kind: 'agent' }>
-  const dup = card.items.some(
-    (it) => it.kind === 'signal' && it.fact.etype === fact.etype && (it.fact.message ?? '') === (fact.message ?? ''),
-  )
-  if (dup) return v.blocks
-  return v.blocks.map((b, i) => (i === at ? { ...card, items: [...card.items, { kind: 'signal' as const, fact }] } : b))
-}
-
 /* 事件上的 run_id（有些运行级事件只带它，见 getSid 的注释）。 */
 function runIdOf(raw: AnyEvent): string | undefined {
   const r = (raw as { run_id?: unknown }).run_id
@@ -7054,24 +7038,21 @@ export function dispatchEvent(raw: AnyEvent): void {
         return setView(s, sid, {
           ...v,
           runNodes: v.runNodes.map((n) => (n.kind === 'tool' && n.taskId === taskId ? { ...n, promoted: true } : n)),
-          blocks:
-            // 子 agent 的工具被摘离：这一行属于它的卡片（同一句话挂在主转录就是主 run 说的）
-            pushTaskSignal(v, taskId, {
-              sig: 'promote',
-              etype: 'task_promoted',
-              ...(raw.name ? { name: String(raw.name) } : {}),
-              message: taskId,
-            }) ??
-            pushSignal(
-              v.blocks.map((b) =>
-                b.kind === 'tool' && b.taskId === taskId
-                  ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
-                  : b,
-              ),
-              // 一行信号：工具行折叠/收起后，「这次调用被摘成后台任务」仍要能看见
-              { sig: 'promote', etype: 'task_promoted', ...(raw.name ? { name: String(raw.name) } : {}), message: taskId },
-              afterRunNow(v),
+          /* 任务级提示**始终在主会话**（用户 2026-10：异步任务完成的通知必须通知到主
+             session，这条比较特殊）。异步任务是会话级的对象：卡片挂在主转录、结果回填
+             主会话的 inbox，所以「被摘成后台任务」「任务完成」两行也归这里 —— 哪怕这个
+             任务是被子 agent 摘离的。塞进子 agent 卡片，主会话就只看到「任务完成了」而
+             没有「它从哪来」，读起来像凭空冒出来的一行。 */
+          blocks: pushSignal(
+            v.blocks.map((b) =>
+              b.kind === 'tool' && b.taskId === taskId
+                ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
+                : b,
             ),
+            // 一行信号：工具行折叠/收起后，「这次调用被摘成后台任务」仍要能看见
+            { sig: 'promote', etype: 'task_promoted', ...(raw.name ? { name: String(raw.name) } : {}), message: taskId },
+            afterRunNow(v),
+          ),
         })
       })
       break
