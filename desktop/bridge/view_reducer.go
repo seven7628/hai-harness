@@ -1945,7 +1945,7 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 		}
 		return
 	}
-	r.upsertErrorBlockLocked(text, e, cost)
+	r.upsertErrorBlockLocked(text, e, cost, millis(e.Timestamp))
 }
 
 // llmRetryText 组「重试进度」文案（2026-09-18 改）：
@@ -2995,7 +2995,7 @@ func (r *ViewReducer) applySessionRunErrorLocked(e *events.SessionRunError) {
 		at = time.Now()
 	}
 	r.lastError = &LastError{Message: e.Error, Kind: e.ErrorKind, At: millis(at)}
-	r.upsertErrorBlockLocked("（运行失败）"+msg, nil, 0) // nil = 非重试错误（无重试进度/无重试成本）
+	r.upsertErrorBlockLocked("（运行失败）"+msg, nil, 0, millis(at)) // nil = 非重试错误（无重试进度/无重试成本）
 }
 
 // clearLocked 执行 clear 代际重置（持锁调用）。
@@ -3031,9 +3031,18 @@ func (r *ViewReducer) clearLocked() {
 	// todos 与 lifetime 保留；去重集合不清（同一事件重送依然幂等）
 }
 
-// upsertErrorBlockLocked 叙述通道错误块：原位更新（多次重试只留一条）。
-func (r *ViewReducer) upsertErrorBlockLocked(text string, e *events.LLMError, costUSD float64) {
+// upsertErrorBlockLocked 叙述通道错误块：原位更新（多次重试只留一条）；首次出现按事件
+// 时刻落位。
+//
+// 落位与记录类块同一判据（前端 store 的 upsertErrorAt，用户 2026-10：错误也不能例外）：
+// 失败事件是**事件时刻**的事实，可能晚于已经开始的下一次运行被处理 —— 一律 append 就把
+// 「这次运行失败在哪」排到新的 Working 之下，刷新前后顺序还不一致。
+func (r *ViewReducer) upsertErrorBlockLocked(text string, e *events.LLMError, costUSD float64, evTs int64) {
 	retry := retryStateFrom(e)
+	if e == nil && evTs > 0 {
+		// 运行级失败（session_run_error）没有重试锚点：用事件时刻，别用「处理时刻」
+		retry.at = evTs
+	}
 	for i := range r.blocks {
 		if r.blocks[i].Kind == blockKindError {
 			b := r.blocks[i]
@@ -3054,7 +3063,7 @@ func (r *ViewReducer) upsertErrorBlockLocked(text string, e *events.LLMError, co
 			return
 		}
 	}
-	r.blocks = append(r.blocks, Block{
+	r.insertBlockAtLocked(r.insertAtAfterTsLocked(-1, retry.at), Block{
 		Kind: blockKindError, ID: r.nextBlockID(), Text: text, Ts: retry.at,
 		Retrying: retry.retrying, RetryAttempt: retry.attempt, RetryMax: retry.max,
 		RetryDelayMs: retry.delayMs, RetryStartedAt: retry.startedAt,

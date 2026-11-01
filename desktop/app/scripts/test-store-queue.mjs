@@ -665,6 +665,26 @@ const v16c = useAppStore.getState().views.s1.blocks
 const lateCardIdx = v16c.findIndex((b) => b.kind === 'async_task' && b.taskId === 'tk-late-start')
 const runDIdx = v16c.findIndex((b) => b.runId === 'r-d' || b.parentRunId === 'r-d')
 assert.ok(lateCardIdx >= 0 && runDIdx >= 0 && lateCardIdx < runDIdx, `任务卡片必须排在 r-d 之前（card@${lateCardIdx}, runD@${runDIdx}）`)
+/* 错误块同样按事件时刻落位（用户明确要求：error 不能例外） */
+setup()
+EV('agent_start', { run_id: 'r-e1', timestamp: at(0) })
+EV('agent_start', { run_id: 'r-e2', timestamp: at(100) })
+EV('tool_start', { id: 'e-1', name: 'bash', arguments: '{}', run_id: 'r-e2', timestamp: at(200) })
+EV('llm_error', {
+  run_id: 'r-e1',
+  request_id: 'q-e1',
+  model: 'm1',
+  error_kind: 'rate_limit',
+  message: 'boom',
+  will_retry: false,
+  timestamp: at(50),
+})
+const v16d = useAppStore.getState().views.s1.blocks
+const errIdx = v16d.findIndex((b) => b.kind === 'error')
+const runE2Idx = v16d.findIndex((b) => b.runId === 'r-e2' || b.parentRunId === 'r-e2')
+assert.ok(errIdx >= 0, '错误块必须存在')
+assert.ok(errIdx < runE2Idx, `错误块必须排在 r-e2 之前（err@${errIdx}, runE2@${runE2Idx}）`)
+
 console.log('PASS 场景16：记录按事件时刻落位（任务回执/信号都先于新 run 的 Working）')
 
 // ===== 场景 13：失败 attempt 的记账与轮次收尾（会重试的**不算**一轮）=====

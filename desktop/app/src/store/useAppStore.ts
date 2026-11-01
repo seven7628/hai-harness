@@ -4171,6 +4171,22 @@ function upsertErrorBlock(blocks: MsgBlock[], text: string, retry?: RetryPatch):
   return [...blocks, { kind: 'error', id: blockSeq++, text, ...patch }]
 }
 
+/* 错误块落位：已有错误块 → 原位更新（重试多次只留一条，位置不动）；
+   没有 → 按**事件时刻**插到它发生的位置（与信号/回执同一判据，见 insertRecordAt）。
+   用户 2026-10：错误的排位不能例外 —— 一次迟到的失败必须出现在它发生的那一刻，
+   而不是积在已经开始的下一次运行下面。 */
+function upsertErrorAt(
+  v: SessionView,
+  blocks: MsgBlock[],
+  text: string,
+  retry?: RetryPatch,
+  evTime?: number,
+): MsgBlock[] {
+  const next = upsertErrorBlock(blocks, text, retry)
+  if (next.length <= blocks.length) return next // 原位更新
+  return insertRecordAt(blocks, -1, [next[next.length - 1]], { evTime, run: currentRun(v) })
+}
+
 // 清除错误反馈块（成功响应 / 新一轮 run 开始时调用，避免旧错误残留）
 function clearErrorBlocks(blocks: MsgBlock[]): MsgBlock[] {
   return blocks.filter((b) => b.kind !== 'error')
@@ -5845,14 +5861,14 @@ export function dispatchEvent(raw: AnyEvent): void {
           turns,
           turnStartTs,
           costUsd: v.costUsd + attemptCost, // 失败尝试的已产生成本计入会话累计（重试浪费不丢）
-          blocks: upsertErrorBlock(blocks, text, {
+          blocks: upsertErrorAt(v, blocks, text, {
             ts: evTs(raw) ?? Date.now(),
             retrying: willRetry && !isContextExceeded,
             retryAttempt: attempt,
             ...(maxAttempts > 0 ? { retryMax: maxAttempts } : {}),
             ...(retryDelayMs > 0 ? { retryDelayMs } : {}),
             ...(attemptCost > 0 ? { retryCostUsd: attemptCost } : {}),
-          }),
+          }, evTs(raw)),
           streaming: v.aborted ? false : isContextExceeded ? false : willRetry ? true : false,
         })
       })
@@ -6853,7 +6869,7 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = s.views[sid] ?? emptyView()
         const upd = setView(s, sid, {
           ...v,
-          blocks: upsertErrorBlock(v.blocks, `（运行失败）${msg}`),
+          blocks: upsertErrorAt(v, v.blocks, `（运行失败）${msg}`, undefined, evTs(raw)),
           streaming: false,
           llmStartTs: undefined,
           turnStartTs: {}, // run 级失败：所有 run（含在跑的子 agent）的轮起点一并作废
