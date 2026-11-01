@@ -614,6 +614,38 @@ assert.equal(mainArts.length, 1, '主运行的产出仍然要落「本轮产出�
 assert.ok(mainArts[0].items.some((a) => a.path === 'desktop/app/src/components/App.tsx'), '块里是主运行自己的文件')
 console.log('PASS 场景15：产出按运行归属（父运行 id 优先，子运行不进主转录）')
 
+// ===== 场景 16：记录按**事件时刻**落位（任务完成的通知必须先于新的 Working）=====
+// 用户 2026-10 报障：后台任务完成的通知被排到了「新的 AgentStart 的 Working」最底下。
+// 成因：一轮的结束不等于下一条 user 消息 —— 任务结果推回会话后主 run 会自动续跑，
+// 同一个 user 轮里再起一次 AgentStart；那一刻「轮尾」已经在新的 Working 之后。
+const base = Date.now() - 60_000
+const at = (ms) => new Date(base + ms).toISOString()
+setup()
+EV('agent_start', { run_id: 'r-first', timestamp: at(0) })
+EV('task_started', { task_id: 'tk-order', run_id: 'r-first', name: 'bg', timestamp: at(10) })
+EV('agent_end', { run_id: 'r-first', finish_reason: 'stop', timestamp: at(100) })
+// 新的一次运行（同一个 user 轮里续跑），先来了它自己的行
+EV('agent_start', { run_id: 'r-second', timestamp: at(200) })
+EV('tool_start', { id: 'order-t1', name: 'bash', arguments: '{"command":"x"}', run_id: 'r-second', timestamp: at(300) })
+// 任务完成事件**此刻才被处理**，但它的时刻（150）早于 r-second 的开始（200）
+EV('task_result_delivered', { task_id: 'tk-order', result: 'done', timestamp: at(150) })
+let v16 = useAppStore.getState().views.s1.blocks
+const orderIdx = v16.findIndex((b) => b.kind === 'task_delivery' && b.taskId === 'tk-order')
+// 工具块记的是 parentRunId（主 run 也走这条），assistant 块记 runId —— 两种都算
+const newRunIdx = v16.findIndex((b) => b.runId === 'r-second' || b.parentRunId === 'r-second')
+assert.ok(orderIdx >= 0, '回执必须存在')
+assert.ok(newRunIdx >= 0, '新 run 的块必须存在')
+assert.ok(orderIdx < newRunIdx, `任务完成通知必须排在新 Working 之前（delivery@${orderIdx}, run@${newRunIdx}）`)
+
+// 同样一条规则适用于**所有信号**：事件时刻早于当前 run 的信号也插到那次 run 之前
+EV('tool_hook_warning', { name: 'PreToolUse', message: 'late hook', run_id: 'r-first', timestamp: at(120) })
+v16 = useAppStore.getState().views.s1.blocks
+const sigIdx = v16.findIndex((b) => b.kind === 'signal' && b.fact.etype === 'tool_hook_warning')
+assert.ok(sigIdx >= 0, '信号必须存在')
+const newRunIdx2 = v16.findIndex((b) => b.runId === 'r-second' || b.parentRunId === 'r-second')
+assert.ok(sigIdx < newRunIdx2, '信号同样按事件时刻落位，不得积在最底部')
+console.log('PASS 场景16：记录按事件时刻落位（任务回执/信号都先于新 run 的 Working）')
+
 // ===== 场景 13：失败 attempt 的记账与轮次收尾（会重试的**不算**一轮）=====
 // 用户 2026-10 口径：中断恰好发生在 llm_start ↔ llm_end 之间时，这一轮永远没有 llm_end
 // —— 不在这里收尾，轮尾账（按 turns 求和）与回合数就少一轮。但自动重试的中间失败

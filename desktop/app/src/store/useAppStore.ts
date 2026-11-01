@@ -671,6 +671,15 @@ function pushRunSignal(v: SessionView, runId: string | undefined, fact: SignalFa
   return v.blocks.map((b, i) => (i === at ? { ...card, items: [...card.items, { kind: 'signal' as const, fact }] } : b))
 }
 
+/* 一行信号落到它**发生的位置**（判据见 insertRecordAt）：事件时刻早于当前 run 的开始
+   就插到那次 run 之前，否则落在所属轮末尾。九类信号共用这一条落位规则 —— 之前它们是
+   一律 append，于是「上一轮/上一个任务之后才被处理到」的那条永远排在最底下。 */
+function pushSignalAt(v: SessionView, fact: SignalFact, afterRun: boolean, evTime?: number): MsgBlock[] {
+  const next = pushSignal(v.blocks, fact, afterRun)
+  if (next === v.blocks) return next // 去重命中，不重复落块
+  return insertRecordAt(v.blocks, -1, [next[next.length - 1]], { evTime, run: currentRun(v) })
+}
+
 // afterRunNow 这条记录是不是主 run 交卷之后才到的（决定渲染在盒子里还是时间线上）。
 // runEnded：agent_start 置 false、agent_end 置 true；旧视图缺这一位时按「已结算」处理
 //（与 mainRunEnded 的兜底同向：宁可当成记录放外面，也不要藏进一个可能已折叠的盒子）。
@@ -678,16 +687,42 @@ function afterRunNow(v: SessionView): boolean {
   return v.runEnded !== false
 }
 
-// insertAtTurnEnd 把「记录/回执」类块插到**所属轮**的末尾：owner 之后、下一条 user 之前。
-//
-// 轮边界 = user 块（轮是派生的，见 components/runtime/turn/selectTurns）。后台任务可能
-// 在 AgentEnd **之后**才完成 —— 那时按 blocks 末尾追加，会把这条回执算进用户已经开始的
-// 下一轮（新 run 的盒子里），既归属错轮、也破坏时间线顺序。插到 owner 所在轮的尾部：
-// 归属对（属于发起它的那一轮），先后顺序也对（晚于该轮全部过程行）。
-function insertAtTurnEnd(blocks: MsgBlock[], ownerIndex: number, add: MsgBlock[]): MsgBlock[] {
+/* 正在跑的那次运行（顶层 run 节点）：id 与开始时刻。
+   agent_start 里 `runNodes = [node]`（新的顶层 run 丢弃旧 trace），所以 find(!parentId)
+   拿到的就是「当前这次」；startedAt 来自事件时间戳，与记录的事件时间**同一时钟**。 */
+function currentRun(v: SessionView): { id?: string; startedAt?: number } {
+  const root = v.runNodes.find((n) => n.kind === 'run' && !n.parentId)
+  return { ...(root?.id ? { id: root.id } : {}), ...(root?.startedAt != null ? { startedAt: root.startedAt } : {}) }
+}
+
+/* 记录的落位：**按事件时刻**插进它发生的位置，而不是一律落到轮尾。
+ *
+ * 为什么不能只插到轮尾（用户 2026-10 报障）：一轮的结束不等于下一条 user 消息 ——
+ * 后台任务的结果被推回会话后，主 run 会自动续跑（同一个 user 轮里再起一次 AgentStart，
+ * session.PushTaskResultUsage 先入队再发事件）。那一刻「轮尾」已经在**新的 Working**
+ * 之后，于是「Task … completed」被排到它下面，读起来像「跑完之后才完成」。
+ *
+ * 判据只有一条，且只用**服务端时钟**（事件时间 vs AgentStart 时间）：
+ *   事件时刻早于当前 run 的开始 → 它发生在这次 run 之前 → 插到那次 run 的第一块之前。
+ * 其余情况仍然落在所属轮的末尾（下一条 user 之前），归属与顺序都对。
+ */
+function insertRecordAt(
+  blocks: MsgBlock[],
+  ownerIndex: number,
+  add: MsgBlock[],
+  opts: { evTime?: number; run?: { id?: string; startedAt?: number } },
+): MsgBlock[] {
   let at = blocks.length
   for (let i = Math.max(0, ownerIndex); i < blocks.length; i++) {
     if (blocks[i].kind === 'user') { at = i; break }
+  }
+  const run = opts.run
+  if (opts.evTime != null && run?.id && run.startedAt != null && opts.evTime < run.startedAt) {
+    for (let i = Math.max(0, ownerIndex); i < at; i++) {
+      // 工具块记的是 parentRunId（主 run 也走这条），assistant 块记 runId —— 两者都算
+      const b = blocks[i] as { runId?: string; parentRunId?: string }
+      if (b.runId === run.id || b.parentRunId === run.id) { at = i; break }
+    }
   }
   return [...blocks.slice(0, at), ...add, ...blocks.slice(at)]
 }
@@ -6449,7 +6484,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           ...v,
           // 一行信号（设计 §「Small signals」的 goal_alignment_reminder）：之前是 system 块，
           // 形态与"关于这次运行的一条事实"不符 —— 它会和真正的系统提示混在一起。
-          blocks: pushRunSignal(v, runIdOf(raw), goalFact) ?? pushSignal(v.blocks, goalFact, afterRunNow(v)),
+          blocks: pushRunSignal(v, runIdOf(raw), goalFact) ?? pushSignalAt(v, goalFact, afterRunNow(v), evTs(raw)),
         })
       })
       return
@@ -6577,7 +6612,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           }
           const upd = setView(st, sid, {
             ...v,
-            blocks: pushRunSignal(v, runIdOf(raw), fact) ?? pushSignal(v.blocks, fact, afterRunNow(v)),
+            blocks: pushRunSignal(v, runIdOf(raw), fact) ?? pushSignalAt(v, fact, afterRunNow(v), evTs(raw)),
           })
           return upd
         })
@@ -6846,7 +6881,7 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushRunSignal(v, runIdOf(raw), hookFact) ?? pushSignal(v.blocks, hookFact, afterRunNow(v)),
+          blocks: pushRunSignal(v, runIdOf(raw), hookFact) ?? pushSignalAt(v, hookFact, afterRunNow(v), evTs(raw)),
         })
       })
       break
@@ -6868,12 +6903,13 @@ export function dispatchEvent(raw: AnyEvent): void {
         return setView(st, sid, {
           ...v,
           blocks: pushRunSignal(v, runIdOf(raw), silentFact) ??
-            pushSignal(
-              v.blocks,
+            pushSignalAt(
+              v,
               silentFact,
               // 它是这次运行的**结论**（Go 在 AgentEnd 之前一条发出）：折进盒子就等于
               // 「跑完了但屏幕上什么都没发生」，正是这条信号存在的理由所反对的形态。
               true,
+              evTs(raw),
             ),
         })
       })
@@ -6887,8 +6923,8 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushSignal(
-            v.blocks,
+          blocks: pushSignalAt(
+            v,
             {
               sig: 'budget',
               etype: 'session_budget_exceeded',
@@ -6896,6 +6932,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               ...(maxCost != null ? { maxCost } : {}),
             },
             afterRunNow(v),
+            evTs(raw),
           ),
         })
       })
@@ -6908,14 +6945,15 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushSignal(
-            v.blocks,
+          blocks: pushSignalAt(
+            v,
             {
               sig: 'persist',
               etype: 'session_persist_error',
               ...(message ? { message } : {}),
             },
             afterRunNow(v),
+            evTs(raw),
           ),
         })
       })
@@ -6937,8 +6975,8 @@ export function dispatchEvent(raw: AnyEvent): void {
             // 用户只看到界面忽然安静下来。
             // 运行账（设计「18 runs · 17 consumed · 1 abandoned mid-tool」）：
             // 三个数由 Go 的 Session.recordRunOutcome 统计，缺字段就不画（不编 0）。
-            blocks: pushSignal(
-              v.blocks,
+            blocks: pushSignalAt(
+              v,
               {
                 sig: 'closed',
                 etype: 'session_closed',
@@ -6950,6 +6988,7 @@ export function dispatchEvent(raw: AnyEvent): void {
               },
               // 会话关闭 = 盒子之外的最后一条记录（此后不会再有工作发生）。
               true,
+              evTs(raw),
             ),
             runEnded: true, // 关闭后不可能再有 AgentEnd：结算位必须落地，否则永远停在 Working
           },
@@ -7049,15 +7088,20 @@ export function dispatchEvent(raw: AnyEvent): void {
              主会话的 inbox，所以「被摘成后台任务」「任务完成」两行也归这里 —— 哪怕这个
              任务是被子 agent 摘离的。塞进子 agent 卡片，主会话就只看到「任务完成了」而
              没有「它从哪来」，读起来像凭空冒出来的一行。 */
-          blocks: pushSignal(
-            v.blocks.map((b) =>
-              b.kind === 'tool' && b.taskId === taskId
-                ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
-                : b,
-            ),
+          blocks: pushSignalAt(
+            {
+              ...v,
+              // 工具行本身也要标 promoted（卡片角的「后台」徽标）
+              blocks: v.blocks.map((b) =>
+                b.kind === 'tool' && b.taskId === taskId
+                  ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
+                  : b,
+              ),
+            },
             // 一行信号：工具行折叠/收起后，「这次调用被摘成后台任务」仍要能看见
             { sig: 'promote', etype: 'task_promoted', ...(raw.name ? { name: String(raw.name) } : {}), message: taskId },
             afterRunNow(v),
+            evTs(raw),
           ),
         })
       })
@@ -7122,7 +7166,7 @@ export function dispatchEvent(raw: AnyEvent): void {
         }
         // 回执落位（2026-10）：插到**卡片所在轮**的尾部（下一条 user 之前），不按到达
         // 时刻追加到 blocks 末尾 —— 后台任务常在 AgentEnd 之后才完成，末尾追加会把它算进
-        // 下一轮。见 insertAtTurnEnd。
+        // 下一轮。见 insertRecordAt（轮边界 + 事件时刻）。
         const blocks = [...v.blocks]
         const t = blocks[taskIndex]
         if (t.kind === 'tool') {
@@ -7162,8 +7206,10 @@ export function dispatchEvent(raw: AnyEvent): void {
           }
           return setView(s, sid, {
             ...v,
+            // 按**事件时刻**落位（见 insertRecordAt）：任务结果推回会话后主 run 会自动
+            // 续跑，那一刻「轮尾」已经在新的 Working 之后 —— 通知会被排到它下面。
             blocks: applyTaskUsage(
-              afterRun ? insertAtTurnEnd(blocks, taskIndex, [delivery]) : [...blocks, delivery],
+              insertRecordAt(blocks, taskIndex, [delivery], { evTime: evTs(raw), run: currentRun(v) }),
               taskId,
               usage,
             ),
