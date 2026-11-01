@@ -257,7 +257,8 @@ func TestReducerAcceptsResumedTaskLifecycle(t *testing.T) {
 	// 结果回填（续跑那轮的结论必须落到卡片上）
 	var result string
 	for _, b := range cp.Blocks {
-		if b.TaskID == tid {
+		// 只看任务卡片：交付通知行（task_delivery）也带同一个 TaskID，但它没有 TaskResult
+		if b.TaskID == tid && (b.Kind == "agent" || b.Kind == "async_task") {
 			result = b.TaskResult
 		}
 	}

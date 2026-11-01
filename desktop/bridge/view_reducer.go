@@ -1033,6 +1033,72 @@ func (r *ViewReducer) markBlockDirty(id uint64) {
 	r.dirtyBlocks[id] = struct{}{}
 }
 
+// insertBlockAtLocked 把块插到 at 处（后面的块后移），并标脏。
+//
+// 为什么需要「插入」而不是一律 append：记录类块（任务回执 / 产出）带的是**事件时刻**，
+// 而事件可能晚于已经开始的下一次运行被处理（后台任务结果推回会话后主 run 会自动续跑）。
+// 一律 append 就把「任务完成」排到新的 AgentStart 之后 —— 前端实时路径已按事件时刻落位
+// （store 的 insertRecordAt），checkpoint 必须同序，否则刷新前后转录顺序不一样。
+func (r *ViewReducer) insertBlockAtLocked(at int, b Block) {
+	if at < 0 {
+		at = 0
+	}
+	if at > len(r.blocks) {
+		at = len(r.blocks)
+	}
+	r.blocks = append(r.blocks, Block{})
+	copy(r.blocks[at+1:], r.blocks[at:])
+	r.blocks[at] = b
+	r.markBlockDirty(b.ID)
+}
+
+// blockTime 一个块「什么时候发生的」：优先事件时刻 Ts；工具/后台任务/子 agent 的块只落
+// started_at / spawned_at（这两个就是它们的事件时刻），同样参与先后比较。
+func blockTime(b Block) int64 {
+	if b.Ts != 0 {
+		return b.Ts
+	}
+	if b.StartedAt != 0 {
+		return b.StartedAt
+	}
+	return b.SpawnedAt
+}
+
+// insertAtAfterTsLocked 计算「事件时刻为 ts 的块」应插到哪：跳过尾部所有比它更晚的块
+// （Ts==0 的块不参与比较：没有时刻就不猜先后）。after 是插入点的下界（如任务卡片所在处；
+// -1 = 不设下界，允许插到第一块之前）。
+func (r *ViewReducer) insertAtAfterTsLocked(after int, ts int64) int {
+	at := len(r.blocks)
+	if ts <= 0 {
+		return at
+	}
+	if after < -1 {
+		after = -1
+	}
+	for i := len(r.blocks) - 1; i > after; i-- {
+		t := blockTime(r.blocks[i])
+		if t == 0 {
+			continue
+		}
+		if t <= ts {
+			break
+		}
+		at = i
+	}
+	return at
+}
+
+// lastTaskDeliveryLocked 该任务最近一条交付通知（与前端同一条去重口径：只和**上一条**比，
+// 续跑产生的新结论不算重复）。
+func (r *ViewReducer) lastTaskDeliveryLocked(taskID string) *Block {
+	for i := len(r.blocks) - 1; i >= 0; i-- {
+		if r.blocks[i].Kind == blockKindTaskDelivery && r.blocks[i].TaskID == taskID {
+			return &r.blocks[i]
+		}
+	}
+	return nil
+}
+
 // takeDirtyBlocks 取走脏集合（Marshal 消费后清空）。
 func (r *ViewReducer) takeDirtyBlocks() map[uint64]struct{} {
 	d := r.dirtyBlocks
@@ -2666,11 +2732,11 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		}
 	}
 	if idx < 0 {
-		// 旧日志/异常顺序找不到任务：保留结果块避免丢失（去重后仅一次）
-		r.blocks = append(r.blocks,
-			Block{Kind: blockKindTaskResult, ID: r.nextBlockID(), TaskID: e.TaskId, Result: e.Result, Error: e.Error, Ts: millis(ts)},
-			Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts)},
-		)
+		// 旧日志/异常顺序找不到任务：保留结果块避免丢失（去重后仅一次）。
+		// 落位同前端：按事件时刻插到它发生的位置，不一律堆到最底部。
+		at := r.insertAtAfterTsLocked(-1, millis(ts))
+		r.insertBlockAtLocked(at, Block{Kind: blockKindTaskResult, ID: r.nextBlockID(), TaskID: e.TaskId, Result: e.Result, Error: e.Error, Ts: millis(ts)})
+		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts)})
 		return
 	}
 	b := r.blocks[idx]
@@ -2701,6 +2767,17 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 	}
 	r.blocks[idx] = b
 	r.markBlockDirty(b.ID)
+	// 交付通知行：旧实现只在内存里由前端补，checkpoint 里没有 —— 刷新后
+	// 「Task … completed」整行消失（用户 2026-10 报障的同类：实时与恢复后不一致）。
+	// 去重只与**上一条**同任务的通知比（续跑的新结论不算重复），位置按事件时刻。
+	if last := r.lastTaskDeliveryLocked(e.TaskId); last == nil ||
+		last.Status != status || last.Result != e.Result || last.Error != e.Error {
+		at := r.insertAtAfterTsLocked(idx, millis(ts))
+		r.insertBlockAtLocked(at, Block{
+			Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId,
+			Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts),
+		})
+	}
 }
 
 // applyCompressStartLocked 记录压缩瞬态（主/子）。
