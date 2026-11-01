@@ -195,6 +195,7 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
           }}
           /* 同一件事：卡片里这段转录也是**子 agent 自己的**运行态 */
           runState={{ live: b.status === 'running', startedAt: b.spawnedAt, ...(b.runId ? { runId: b.runId } : {}) }}
+          sourceKey={b.runId || b.taskId || String(b.id)}
         />
       </div>
       {/* 产出卡：与主会话同一个组件（子会话＝主会话，只是 session 不同）。

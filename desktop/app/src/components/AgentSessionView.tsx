@@ -226,6 +226,9 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
       header={header}
       footer={footer}
       runState={{ live: running, startedAt: node.startedAt, ...(node.runId ? { runId: node.runId } : {}) }}
+      /* 转录身份：子 agent 的 run_id（后台任务节点退化为 task_id）。滚动容器按它重建 ——
+         从 A 切到 B 是新的一段转录，不是同一段滚到别处。 */
+      sourceKey={node.runId ?? node.taskId ?? node.id}
     />
   )
 })

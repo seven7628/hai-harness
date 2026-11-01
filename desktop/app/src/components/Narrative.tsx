@@ -162,7 +162,7 @@ function firstFileOf(turn: { items: MsgBlock[] }): string {
   return ''
 }
 
-export default function Narrative({ viewSid, source, header, footer, density: densityProp, runState }: {
+export default function Narrative({ viewSid, source, header, footer, density: densityProp, runState, sourceKey }: {
   viewSid?: string
   source?: NarrativeSource
   /** 首行插槽（子会话的「返回主会话 + 身份/用量」）。放在容器**内部**：
@@ -178,6 +178,13 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   /** 这段转录**自己的**运行态（子会话页 / 任务卡内的子转录）。缺省 = 读主会话视图的
    *  AgentEnd 结算位与顶层 run 节点 —— 子 agent 在跑不能拿主 agent 的结算位代表。 */
   runState?: { live: boolean; startedAt?: number; runId?: string }
+  /** 这段转录的**身份**（子会话：该子 agent 的 run_id / 后台任务 task_id）。
+   *
+   *  它是滚动容器的 key —— 与主会话的 session id 同一个语义：换身份 = 换一段转录 =
+   *  重建节点、丢掉旧滚动位置、重新贴底。此前子会话页没有它，key 退化成**主会话** id，
+   *  于是「左栏从子 agent A 切到 B」容器不重建：转录换了，滚动位置还停在 A 的某处，
+   *  A 的上滑意图也会带给 B。 */
+  sourceKey?: string
 } = {}) {
   const t = useT()
   // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话。
@@ -227,6 +234,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
   const activeSessionId = useAppStore((s) => s.activeSessionId)
+  /* 这段转录的身份：滚动容器（滚动位置 / 贴底意图 / 手势监听）都挂在它上面。
+     viewSid = 独立 view（cron / 恢复页）；sourceKey = 子会话页（子 agent 的 run_id）；
+     都没有 = 当前主会话。三者同义：「这是哪一段转录」。 */
+  const transcriptKey = viewSid ?? sourceKey ?? activeSessionId ?? 'none'
   const ref = useRef<HTMLDivElement | null>(null)
   // nodeGen：滚动容器的「节点世代」。
   //
@@ -863,7 +874,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       lastTopRef.current = el.scrollTop
       expectedTopRef.current = el.scrollTop
     }
-  }, [activeSessionId])
+    // 依赖是「哪一段转录」而不是「哪个会话」：子会话页没有自己的 session id，
+    // 用 sourceKey（子 agent 的 run_id）—— 否则 A→B 切换不重置贴底与滚动位置。
+  }, [transcriptKey])
   const jumpToBottom = () => {
     stickRef.current = true
     autoscrollRef.current = true // 点「回到底部」= 明确要恢复跟随
@@ -1277,7 +1290,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       //（属性的变化会重启同名的 animation，前提是 animation-name 相同但
       // 属性选择器不同 —— 见 index.css 的 .narrative-enter[data-enter]）。
       // 这里用 key 只锁「会话 id」，切会话才重建（那时本来就该丢滚动位置）。
-      key={viewSid ?? activeSessionId ?? 'none'}
+      key={transcriptKey}
       ref={setNodeRef}
       aria-live="polite"
       data-entered={enteredAt}

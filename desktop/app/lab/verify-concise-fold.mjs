@@ -293,6 +293,52 @@ check('I 子 agent 交卷后结算成 Worked', !subDone.live && /Worked/.test(su
 await page.eval(() => window.__store.getState().focusAgent(undefined))
 await wait(400)
 
+// ---- J 子会话之间切换：滚动容器按**转录身份**重建，落回最新 -------------------
+// 用户 2026-10：子会话页的容器 key 退化成主会话 id，于是左栏从子 agent A 切到 B 时
+// 容器不重建 —— 转录换了、滚动位置还是 A 那一段的，A 的上滑意图也带给 B。
+// 正文与工具交替：连续的同类工具会被 groupRounds 折成一行「Ran N commands」，
+// 那样转录撑不高，滚动断言就测不到（case J 第一版 max=0 的原因）。
+const manyTools = (p) => {
+  const out = []
+  for (let i = 0; i < 14; i++) {
+    out.push(`{ kind: 'text', id: '${p}t${i}', text: '${p} 第 ${i} 段正文：${'这是一段用来撑高转录的说明文字。'.repeat(4)}' }`)
+    out.push(`{ kind: 'tool', id: '${p}${i}', toolId: '${p}${i}', name: 'bash', status: 'done', args: '{"command":"echo ${i}"}', result: 'done' }`)
+  }
+  return `[${out.join(',')}]`
+}
+const subCardJ = (id, runId) => `{ kind: 'agent', id: ${id}, runId: '${runId}', label: '${runId}', status: 'running', spawnedAt: Date.now() - 5000, items: ${manyTools(runId)} }`
+await inject(
+  `[${user(1, '跑一下')}, ${subCardJ(2, 'sub-a')}, ${subCardJ(3, 'sub-b')}]`,
+  true,
+  '[]',
+  `[{ id: 'root', kind: 'run', status: 'done', label: 'run', depth: 0, startedAt: Date.now() - 600000 }, { id: 'sub-a', kind: 'run', parentId: 'root', status: 'running', label: 'sub-a', depth: 1, startedAt: Date.now() - 5000 }, { id: 'sub-b', kind: 'run', parentId: 'root', status: 'running', label: 'sub-b', depth: 1, startedAt: Date.now() - 5000 }]`,
+)
+// 详细档：子转录整段摊在流里（简洁档全在 46vh 的盒子里，外层叙述区不滚，断言会空转）
+await page.eval(() => window.__store.getState().setNarrativeDensity('detailed'))
+await wait(300)
+await page.eval(() => window.__store.getState().focusAgent({ nodeId: 'sub-a', runId: 'sub-a' }))
+await wait(800)
+// 模拟用户在子会话 A 里上滑看到顶部（并给这个 DOM 节点打个标记，用于识别「是否重建」）
+const j0 = await page.eval(() => {
+  const n = document.querySelector('.narrative')
+  n.scrollTop = 0
+  n.dataset.mark = 'A'
+  return { max: n.scrollHeight - n.clientHeight }
+})
+await wait(300)
+await page.eval(() => window.__store.getState().focusAgent({ nodeId: 'sub-b', runId: 'sub-b' }))
+await wait(900)
+const j1 = await page.eval(() => {
+  const n = document.querySelector('.narrative')
+  return { mark: n.dataset.mark ?? '', top: n.scrollTop, max: n.scrollHeight - n.clientHeight }
+})
+check('J 子会话页面可滚动（用例前提）', j0.max > 100, JSON.stringify(j0))
+check('J 切到另一个子会话：容器重建（旧节点被替换）', j1.mark === '', `mark=${j1.mark}`)
+check('J 切到另一个子会话：落回最新而不是沿用上一段的滚动位置', j1.max - j1.top < 120, JSON.stringify(j1))
+await page.eval(() => window.__store.getState().focusAgent(undefined))
+await page.eval(() => window.__store.getState().setNarrativeDensity('concise'))
+await wait(400)
+
 if (errs.length) check('无运行期异常', false, errs.join(' | '))
 else check('无运行期异常', true, '')
 
