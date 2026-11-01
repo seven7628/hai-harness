@@ -644,6 +644,16 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     }
     const onWheel = (e: WheelEvent) => {
       const inner = nestedScrollerOf(e.target)
+      /* 运行盒子（Working / Worked，两种浓度里只有简洁档有）本身**就是这一轮的
+         转录**：在它里面往回翻 = 用户在看历史。它占掉大半屏，用户的手几乎总是落在
+         它上面 —— 若照「内层可滚就吞掉」处理，外层一直被钉在底部、按钮也不出现，
+         表现就是「运行中完全上不去看历史」(用户 2026-10)。这里只截住它自己那层；
+         盒子**里面**的工具输出/思考折叠体仍是内层滚动，不该打断跟随（下方判据）。 */
+      if (inner && inner.classList.contains('rt-work-body') && e.deltaY < 0) {
+        mark('up')
+        stopFollow(true)
+        return
+      }
       if (inner && wheelConsumedByScroller({
         deltaY: e.deltaY,
         scrollTop: inner.scrollTop,

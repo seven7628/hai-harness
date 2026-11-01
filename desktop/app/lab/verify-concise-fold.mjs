@@ -194,6 +194,55 @@ check('G 上一轮不因新 run 重新变 Working', s.all[0]?.live === false, JS
 check('G 上一轮仍是 Worked 折叠行', /Worked/.test(s.all[0]?.act ?? ''), JSON.stringify(s.all[0]?.act))
 check('G 当前轮才是 Working', s.all[1]?.live === true, JSON.stringify(s.all[1]))
 
+// ---- H 运行中能上滑看历史（盒子不能吃掉 wheel），并能一键回到底部 -----------
+// 用户 2026-10：简洁档 Working 运行中、详细档流式输出时「上滑不了去翻历史」，
+// 也看不到「回到最新」。根因：工作盒子的 .rt-work-body 是内层滚动容器
+//（max-height 46vh + overscroll-behavior: contain），wheel 被它吞掉且不再向外交付。
+const long = []
+let hid = 1
+for (let i = 0; i < 6; i++) {
+  long.push(user(hid++, '旧问题 ' + i))
+  long.push(asst(hid++, ('旧回答 ' + i + ' ').repeat(8), false))
+}
+for (let i = 0; i < 12; i++) long.push(`{ kind: 'tool', id: ${hid++}, toolId: 'old${i}', name: 'bash', args: '{"command":"echo ${i}"}', status: 'done', durMs: 30, result: 'x'.repeat(200) }`)
+long.push(user(hid++, '现在的问题'))
+for (let i = 0; i < 25; i++) long.push(`{ kind: 'tool', id: ${hid++}, toolId: 'live${i}', name: 'bash', args: '{"command":"echo run ${i}"}', status: 'running' }`)
+await inject(`[${long.join(',')}]`, false, '[]', `[{ id: 'run-live', kind: 'run', status: 'running', label: 'run', depth: 0, startedAt: Date.now() - 5000 }]`)
+await wait(600)
+const geo = () =>
+  page.eval(() => {
+    const n = document.querySelector('.narrative')
+    const body = document.querySelector('.rt-work-body')
+    return {
+      top: n.scrollTop,
+      max: n.scrollHeight - n.clientHeight,
+      jump: !!document.querySelector('.narrative-jump'),
+      contain: body ? getComputedStyle(body).overscrollBehaviorY : '',
+    }
+  })
+let g = await geo()
+check('H 起始贴在底部', g.max - g.top < 120, JSON.stringify(g))
+check('H 盒子不允许 contain（wheel 要能交付给叙述区）', g.contain !== 'contain', g.contain)
+// 真实滚轮：指针落在工作盒子上，向上滚
+const pt = await page.eval(() => {
+  const box = document.querySelector('.rt-work-body') || document.querySelector('.narrative')
+  const r = box.getBoundingClientRect()
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + Math.min(r.height - 20, 120)) }
+})
+await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pt.x, y: pt.y })
+await wait(120)
+await page.wheel(-1500, { step: 300, pauseMs: 60 })
+await wait(400)
+g = await geo()
+check('H 上滑能看到历史（叙述区真的动了）', g.max - g.top > 200, JSON.stringify(g))
+check('H 出现「回到最新」', g.jump, JSON.stringify(g))
+// 点它回到底部并恢复跟随
+await page.eval(() => document.querySelector('.narrative-jump')?.click())
+await wait(500)
+g = await geo()
+check('H 点「回到最新」回到最底', g.max - g.top < 6, JSON.stringify(g))
+check('H 回到底部后按钮消失', !g.jump, JSON.stringify(g))
+
 if (errs.length) check('无运行期异常', false, errs.join(' | '))
 else check('无运行期异常', true, '')
 

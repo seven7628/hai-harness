@@ -135,7 +135,10 @@ html[data-skin='runtime'] .cy-live .rt-work-body,
 html[data-skin='runtime'] .rt-workbox .rt-work-body {
   max-height: min(46vh, 520px);
   overflow-y: auto;
-  overscroll-behavior: contain;
+  /* 不要 contain（用户 2026-10：运行中完全上不去看历史）。
+     盒子占了大半屏，滚到它自己顶部之后，wheel 必须能**继续传给**叙述区 ——
+     否则用户在这个高度上限里撞墙：外层一动不动、也不出现「↓ 回到最新」。
+     默认的 auto 就是链式滚动，这正是这里要的行为。 */
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklab, var(--ink-3) 40%, transparent) transparent;
 }
