@@ -6614,7 +6614,13 @@ export function dispatchEvent(raw: AnyEvent): void {
         // 运行中工具行收尾为 done（abort 时工具结果事件可能不达）。
         // SubAgent 的 abort/完成不得清 Session 级等待态（审批队列是 Session 统一 FIFO，
         // SubAgent 中断只收敛它自己的调用，后端按 ctx/超时自行出队）。
-        const isSub = id !== '' && isSubAgentRun(v, id)
+        /* 「这是不是子运行」按**事件本身**先判一次：AgentEnd 自带 ParentRunId（子运行
+           非空、主运行空）。以前只看视图里有没有它的登记（agent 卡片 / runNode），而
+           runNodes 会在每次新的顶层 run 开始时被重置（agent_start 里 runNodes=[node]）——
+           与主 run 并发、或晚于下一轮才收尾的子运行于是被判成「主运行」：它的产出清单
+           （worktree 里那些文件）被当成「本轮产出」追加到主转录，用户看到的是别的
+           session/子任务的文件（2026-10 报障）。 */
+        const isSub = Boolean(raw.parent_run_id) || (id !== '' && isSubAgentRun(v, id))
         // AgentEnd = 本 run 最后一轮已定局。**仍在流式的块在此冻结**（2026-09-29）：
         // 中断 / run 级失败 / 达轮数上限截断这三种收尾都没有 llm_end（durMs、usage 的
         // 唯一来源），块就永远停在 streaming=true —— 渲染门 `!b.streaming` 过不去，
@@ -6785,9 +6791,9 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 漏网情形；同一文件重复由 autoOpenVisualFile 内部的路径去重挡住（实测两次事件
       // 只打开一次），不会把用户已切走的视图反复拽回来。
       // 只对主 run 生效（与产出块同理：子 agent 的产出归其卡片，不抢主视图）。
-      // 判定方式与上方 setState 内一致：runId 已在视图里登记为子 run。
+      // 判定方式与上方 setState 内一致（ParentRunId 优先 —— 视图里的登记会被新顶层 run 重置）。
       const endView = getState().views[sid]
-      const isSubRun = id !== '' && isSubAgentRun(endView ?? emptyView(), id)
+      const isSubRun = Boolean(raw.parent_run_id) || (id !== '' && isSubAgentRun(endView ?? emptyView(), id))
       if (!isSubRun) {
         const arts = pickArtifacts(raw.artifacts)
         const visual = arts?.find((a) => isVisualPath(a.path))

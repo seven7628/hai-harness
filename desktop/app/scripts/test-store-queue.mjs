@@ -580,6 +580,40 @@ assert.ok(
 
 console.log('PASS 场景14：信号按 session / 子 agent 隔离')
 
+// ===== 场景 15：本轮产出（artifacts）按**运行**归属，子运行的产出不进主转录 =====
+// 用户 2026-10 报障：主转录里冒出「本轮产出 4 个文件」，路径全在别的 worktree —— 那是
+// 一个**子运行**的产出。判据以前只看视图里有没有它的登记（agent 卡片 / runNode），而
+// runNodes 在每次新的顶层 run 开始时被重置，晚收尾的子运行于是被判成「主运行」。
+// 现在先看事件自己的 ParentRunId。
+const art = (p) => ({ name: p.split('/').pop(), path: p, kind: 'modified', added: 3, removed: 1 })
+setup()
+EV('agent_start', { run_id: 'r-main' })
+EV('task_started', { task_id: 'task-bg', run_id: 'r-main', name: 'bg' }) // 后台任务卡片，无 runId 登记
+EV('agent_start', { run_id: 'r-main-2' }) // 新顶层 run：runNodes 被重置，旧登记消失
+EV('agent_end', {
+  run_id: 'r-bg',
+  parent_run_id: 'r-main',
+  finish_reason: 'stop',
+  artifacts: [art('.go-code/worktrees/ent-c345/internal/co/permission_reader.go')],
+})
+let v15 = useAppStore.getState().views.s1
+assert.equal(
+  v15.blocks.filter((b) => b.kind === 'artifacts').length,
+  0,
+  '子运行的产出不得作为「本轮产出」追加到主转录',
+)
+// 主运行自己收尾照常落块（别把正常路径一起挡掉）
+EV('agent_end', {
+  run_id: 'r-main-2',
+  finish_reason: 'stop',
+  artifacts: [art('desktop/app/src/components/App.tsx')],
+})
+v15 = useAppStore.getState().views.s1
+const mainArts = v15.blocks.filter((b) => b.kind === 'artifacts')
+assert.equal(mainArts.length, 1, '主运行的产出仍然要落「本轮产出」块')
+assert.ok(mainArts[0].items.some((a) => a.path === 'desktop/app/src/components/App.tsx'), '块里是主运行自己的文件')
+console.log('PASS 场景15：产出按运行归属（父运行 id 优先，子运行不进主转录）')
+
 // ===== 场景 13：失败 attempt 的记账与轮次收尾（会重试的**不算**一轮）=====
 // 用户 2026-10 口径：中断恰好发生在 llm_start ↔ llm_end 之间时，这一轮永远没有 llm_end
 // —— 不在这里收尾，轮尾账（按 turns 求和）与回合数就少一轮。但自动重试的中间失败
