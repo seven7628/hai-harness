@@ -28,3 +28,14 @@ test('已交卷 + 后台任务仍在跑（块上残留 running）→ 折叠，�
   assert.equal(turnLive({ isLast: true, turnRunning: true, runEnded: true }), false)
   assert.equal(turnLive({ isLast: false, turnRunning: true, runEnded: true }), false)
 })
+
+test('新一次 run 开始后，上一轮残留的 running 不得把上一轮重新点亮（sameRun=false）', () => {
+  // 用户 2026-10 报障：上一轮 AgentEnd 已交卷，用户紧接着发下一条 → 视图级 runEnded 被
+  // 新的 agent_start 翻回 false，而上一轮里还挂着后台子 agent / promoted 工具的
+  // status='running'。只看 turnRunning 就会让上一轮的 Working 与时钟重新开始。
+  assert.equal(turnLive({ isLast: false, turnRunning: true, runEnded: false, sameRun: false }), false)
+  // 正在跑的那一轮不受影响
+  assert.equal(turnLive({ isLast: true, turnRunning: true, runEnded: false, sameRun: true }), true)
+  // 没有 runId 的旧数据（sameRun 省略）沿用老行为
+  assert.equal(turnLive({ isLast: false, turnRunning: true, runEnded: false }), true)
+})

@@ -45,7 +45,7 @@ await wait(600)
 
 // 注入一段确定的块序列（等价于后端事件流落库后的 view）。
 // Narrative 读顶层 blocks 镜像 + views[sid].runEnded —— 两处都要写。
-const inject = async (blocksExpr, runEnded, turnsExpr) => {
+const inject = async (blocksExpr, runEnded, turnsExpr, runsExpr) => {
   // 注意：交给 page.eval 的必须是**会执行**的函数体（new Function(body) 而非
   // new Function('() => {...}') —— 后者只是把箭头函数当表达式求值，什么都不会发生）
   await page.eval(new Function(`
@@ -55,11 +55,12 @@ const inject = async (blocksExpr, runEnded, turnsExpr) => {
     const blocks = ${blocksExpr}
     const v = st.views[sid] ?? {}
     const turns = ${typeof turnsExpr === 'undefined' ? '[]' : turnsExpr}
+    const runNodes = ${typeof runsExpr === 'undefined' ? '[]' : runsExpr}
     store.setState({
       blocks,
       turns,
       runEnded: ${runEnded},
-      views: { ...st.views, [sid]: { ...v, blocks, runEnded: ${runEnded}, streaming: false, turns, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 } } },
+      views: { ...st.views, [sid]: { ...v, blocks, runEnded: ${runEnded}, runNodes, streaming: false, turns, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 } } },
     })
   `))
   await wait(260)
@@ -82,6 +83,11 @@ const snap = () =>
       footFlag: t?.getAttribute('data-foot') ?? '',
       foldText: t?.querySelector('.rt-act')?.textContent ?? '',
       signalsInBox: [...(t?.querySelectorAll('.rt-workbox .sig') ?? [])].length,
+      // 每一轮的「还在跑吗」：G 用例要同时看上一轮与当前轮
+      all: turns.map((x) => ({
+        live: !!x.querySelector('.cy-live'),
+        act: x.querySelector('.rt-act')?.textContent ?? '',
+      })),
     }
   })
 
@@ -165,6 +171,28 @@ s = await snap()
 requireTurn('F', s.turns)
 check('F 被中断那轮在轮尾账里（有 foot 行）', s.footFlag === '1' && s.foot.length > 0, JSON.stringify(s.foot.slice(0, 80)))
 check('F 轮尾账含该轮 tokens', /120|132|12/.test(s.foot), JSON.stringify(s.foot.slice(0, 80)))
+
+// ---- G 上一轮已交卷、用户又发一条：新 run 不得把上一轮的 Working 重新点亮 -------
+// 用户 2026-10 报障：上一轮 AgentEnd 之后 Worked for 已经出来了，用户紧接着发下一条，
+// 上一轮的 Working 与时钟又转起来（还带得动滚动位置）。根因是判据只看视图级 runEnded，
+// 而上一轮里还挂着 status='running' 的后台块。修法：轮上的 runId 必须等于正在跑的 run。
+await inject(
+  `[
+    ${user(1, '第一问')},
+    { kind: 'tool', id: 2, toolId: 't2', name: 'bash', status: 'running', runId: 'run-1', taskId: 'task-bg', promoted: true },
+    { kind: 'assistant', id: 3, text: '第一答', streaming: false, thinking: '', runId: 'run-1' },
+    ${user(4, '第二问')},
+    { kind: 'tool', id: 5, toolId: 't5', name: 'bash', status: 'running', runId: 'run-2' },
+  ]`,
+  false,
+  '[]',
+  `[{ id: 'run-2', kind: 'run', status: 'running', label: 'run', depth: 0, startedAt: Date.now() - 1200 }]`,
+)
+s = await snap()
+requireTurn('G', s.turns)
+check('G 上一轮不因新 run 重新变 Working', s.all[0]?.live === false, JSON.stringify(s.all[0]))
+check('G 上一轮仍是 Worked 折叠行', /Worked/.test(s.all[0]?.act ?? ''), JSON.stringify(s.all[0]?.act))
+check('G 当前轮才是 Working', s.all[1]?.live === true, JSON.stringify(s.all[1]))
 
 if (errs.length) check('无运行期异常', false, errs.join(' | '))
 else check('无运行期异常', true, '')

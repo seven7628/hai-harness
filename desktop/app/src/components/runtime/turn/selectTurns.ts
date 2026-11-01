@@ -11,6 +11,13 @@ export interface Turn {
   key: string
   index: number
   user?: M<'user'>
+  /* 这一轮属于哪一次运行（AgentStart 的 run_id，来自块上的 runId）。
+     轮是**派生**的（user 块到下一个 user 块），运行却是显式的 —— 两者不是一一对应：
+     后台子 agent / promoted 工具会把一个 run 的余温带进下一次运行。判「这一轮还在不在
+     跑」必须同时看 run（见 lib/turnSettle.ts 的 sameRun 与用户 2026-10 的报障：
+     上一轮 AgentEnd 之后又发一条消息，上一轮的 Working 被新 run 重新点亮）。
+     agent 块的 runId 是**子** run，不能拿来当这一轮的 run → 只看正文与工具块。 */
+  run?: string
   items: MsgBlock[]
   answer?: M<'assistant'>
   tools: M<'tool'>[]
@@ -60,6 +67,12 @@ function emptyTurn(index: number, key: string): Turn {
 
 function push(t: Turn, b: MsgBlock) {
   t.items.push(b)
+  // 取**最后一个**带 runId 的正文/工具块：agent_resume 会在同一轮里续跑第二次 run，
+  // 那一轮属于**新** run（取第一个会把续跑判成「上一轮」而永远不亮 Working）。
+  if (b.kind === 'assistant' || b.kind === 'tool') {
+    const r = (b as { runId?: string }).runId
+    if (typeof r === 'string' && r) t.run = r
+  }
   switch (b.kind) {
     case 'assistant':
       if (isText(b)) t.answer = t.answer ? (textOf(b).trim() ? b : t.answer) : b

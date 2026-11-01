@@ -201,6 +201,12 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const root = nodes.find((n) => !n.parentId)
     return root?.startedAt
   })
+  /* 正在跑的是**哪一次**运行：顶层 run 节点的 id。runEnded 是视图级的一位，单看它
+     挡不住「上一轮的残留 running 块被新 run 点亮」—— 见 lib/turnSettle.ts 的长注释。 */
+  const activeRunId = useAppStore((s) => {
+    const nodes = (s.views[s.activeSessionId ?? ''] ?? { runNodes: s.runNodes }).runNodes ?? []
+    return nodes.find((n) => n.kind === 'run' && !n.parentId)?.id
+  })
   // 等待用户：审批 / 提问。两者都是「运行暂停、等外部回应」，不是 AgentEnd。
   const waiting = useAppStore((s) => ((s.approvals?.length ?? 0) > 0 ? 'approval' : (s.questions?.length ?? 0) > 0 ? 'input' : null))
   // 产出卡的动作：预览 = 用户在文件栏点它的同一条路；Finder = workspace + 相对路径
@@ -1106,7 +1112,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* 这一轮还在不在跑 = **主 run 交卷了没有**（AgentEnd 是唯一折叠时刻）。
        AgentEnd 之后一律折叠：块上残留的 running（后台子 agent / 被 promote 的工具）
        属于任务自己的生命周期，不得把整轮重新拉回 Working。见 lib/turnSettle.ts。 */
-    const live = turnLive({ isLast: ti === turns.length - 1, turnRunning: turn.running, runEnded })
+    /* sameRun：这一轮的 run 与正在跑的那次运行是不是同一个。没有 runId 的旧数据
+       （块上缺 run_id）按「同一轮」处理 —— 宁可沿用老行为，也不要凭空把在跑的轮判死。 */
+    const sameRun = !turn.run || !activeRunId ? true : turn.run === activeRunId
+    const live = turnLive({ isLast: ti === turns.length - 1, turnRunning: sameRun && turn.running, runEnded, sameRun })
     // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
     // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
     const open = !concise || (openTurns[turn.key] ?? live)

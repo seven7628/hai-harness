@@ -27,7 +27,24 @@
 // 落一条 task_delivery 记录：运行中到达的进盒子按事件顺序，交卷后到达的留在时间线上，
 // 见 selectTurns 的 workBody / recordAfterRun）。所以：
 // 已交卷 → 一律折叠，块上的 running 不得把它拉回来。
-export function turnLive(a: { isLast: boolean; turnRunning: boolean; runEnded: boolean }): boolean {
+//
+// ## 光看 runEnded 不够：必须问「这是哪一次运行」
+//
+// runEnded 是**视图级**的一位：agent_start 置 false、agent_end 置 true。用户 2026-10
+// 报障的形态是：上一轮 AgentEnd 已交卷（Worked for 正确出现），用户紧接着发下一条 →
+// 新的 agent_start 把视图级的 runEnded 翻回 false，而上一轮里还挂着 status='running'
+// 的块（后台子 agent / promoted 工具，本来就活到下一次运行）—— `turnRunning` 于是
+// 为真，上一轮的 Working 与时钟被**新的一次运行**重新点亮，还在滚动的对话页跟着跳。
+// 判据补一位：轮上的 runId 必须等于正在跑的那次 run（Narrative 传 sameRun）。
+export function turnLive(a: {
+  isLast: boolean
+  turnRunning: boolean
+  runEnded: boolean
+  /* 这一轮的 run 是不是**正在跑的那一次**（比较轮上的 runId 与视图里顶层 run 节点的 id）。
+     省略 = 旧数据没有 runId，按同一轮处理（老行为）。 */
+  sameRun?: boolean
+}): boolean {
   if (a.runEnded) return false
+  if (a.sameRun === false) return false
   return a.turnRunning || a.isLast
 }

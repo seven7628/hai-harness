@@ -112,3 +112,17 @@ test('结构性/结论性块始终在外面；执行阶段载荷在盒子里', (
     assert.equal(FOLDED_KINDS.has(k), true, k + ' 应进工作过程')
   }
 })
+
+test('轮上记着自己属于哪次运行（agent 块的 runId 是子 run，不能拿来当这一轮的 run）', () => {
+  const blocks: MsgBlock[] = [
+    user(1),
+    {
+      kind: 'agent', id: 2, runId: 'sub-run', label: 'subagent', status: 'completed', spawnedAt: 0,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, costUsd: 0 }, items: [],
+    },
+    { kind: 'tool', id: 3, toolId: 't3', name: 'bash', status: 'done', runId: 'main-run' },
+    assistant(4, '结论'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  assert.equal(turn.run, 'main-run', '取正文/工具块的 runId，跳过子 run')
+})
