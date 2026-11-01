@@ -644,6 +644,27 @@ const sigIdx = v16.findIndex((b) => b.kind === 'signal' && b.fact.etype === 'too
 assert.ok(sigIdx >= 0, '信号必须存在')
 const newRunIdx2 = v16.findIndex((b) => b.runId === 'r-second' || b.parentRunId === 'r-second')
 assert.ok(sigIdx < newRunIdx2, '信号同样按事件时刻落位，不得积在最底部')
+// 产出块与任务卡片同一判据：迟到的事件不得把「本轮产出」排到下一次运行之后
+setup()
+EV('agent_start', { run_id: 'r-a', timestamp: at(0) })
+EV('agent_start', { run_id: 'r-b', timestamp: at(100) })
+EV('tool_start', { id: 'a-1', name: 'bash', arguments: '{}', run_id: 'r-b', timestamp: at(200) })
+EV('agent_end', { run_id: 'r-a', finish_reason: 'stop', timestamp: at(50), artifacts: [{ name: 'x.go', path: 'x.go', kind: 'modified', added: 1, removed: 0 }] })
+const v16b = useAppStore.getState().views.s1.blocks
+const artIdx = v16b.findIndex((b) => b.kind === 'artifacts')
+const runBIdx = v16b.findIndex((b) => b.runId === 'r-b' || b.parentRunId === 'r-b')
+assert.ok(artIdx >= 0 && runBIdx >= 0, '产出块与 run-b 的块都要在')
+assert.ok(artIdx < runBIdx, `本轮产出必须排在 r-b 的块之前（art@${artIdx}, runB@${runBIdx}）`)
+/* 另：延迟到达的 task_started 也要落在发起它的那次运行那一侧，而不是新的 Working 之后 */
+setup()
+EV('agent_start', { run_id: 'r-c', timestamp: at(0) })
+EV('agent_start', { run_id: 'r-d', timestamp: at(100) })
+EV('tool_start', { id: 'd-1', name: 'bash', arguments: '{}', run_id: 'r-d', timestamp: at(200) })
+EV('task_started', { task_id: 'tk-late-start', run_id: 'r-c', name: 'bg', timestamp: at(50) })
+const v16c = useAppStore.getState().views.s1.blocks
+const lateCardIdx = v16c.findIndex((b) => b.kind === 'async_task' && b.taskId === 'tk-late-start')
+const runDIdx = v16c.findIndex((b) => b.runId === 'r-d' || b.parentRunId === 'r-d')
+assert.ok(lateCardIdx >= 0 && runDIdx >= 0 && lateCardIdx < runDIdx, `任务卡片必须排在 r-d 之前（card@${lateCardIdx}, runD@${runDIdx}）`)
 console.log('PASS 场景16：记录按事件时刻落位（任务回执/信号都先于新 run 的 Working）')
 
 // ===== 场景 13：失败 attempt 的记账与轮次收尾（会重试的**不算**一轮）=====

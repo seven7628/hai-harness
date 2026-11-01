@@ -6733,11 +6733,13 @@ export function dispatchEvent(raw: AnyEvent): void {
         if (!isSub) {
           const arts = pickArtifacts(raw.artifacts)
           if (arts && !blocks.some((b) => b.kind === 'artifacts' && b.runId === id)) {
-            blocks = [...blocks, {
+            // 与信号/回执同一条落位判据（见 insertRecordAt）：迟到的 agent_end 不得把
+            // 「本轮产出」排到已经开始的下一次运行之后。
+            blocks = insertRecordAt(blocks, -1, [{
               kind: 'artifacts', id: blockSeq++, items: arts,
               ...(id ? { runId: id } : {}),
               ...(raw.artifacts_truncated === true ? { truncated: true } : {}),
-            }]
+            }], { evTime: evTs(raw), run: currentRun(v) })
           }
         }
         if (aborted && !isSub) {
@@ -7026,7 +7028,12 @@ export function dispatchEvent(raw: AnyEvent): void {
           return { ...upd, busySids: busySidsFromViews(upd.views) }
         }
         const block = { kind: 'async_task' as const, id: blockSeq++, taskId, label: String(raw.name || raw.tool_name || '后台任务'), toolName: raw.tool_name ? String(raw.tool_name) : undefined, status, startedAt: ts, ...(raw.parent_run_id ? { parentRunId: String(raw.parent_run_id) } : {}) }
-        const upd = setView(s, sid, { ...v, blocks: [...v.blocks, block] })
+        // 卡片与它自己的说明行落在一起（同一判据见 insertRecordAt）：任务是由哪次运行
+        // 发起的，就排在那次运行的位置上，不因为晚到而积到新的 Working 下面。
+        const upd = setView(s, sid, {
+          ...v,
+          blocks: insertRecordAt(v.blocks, -1, [block], { evTime: ts, run: currentRun(v) }),
+        })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
       break
@@ -7149,8 +7156,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           const afterRun = afterRunNow(v)
           return setView(s, sid, {
             ...v,
-            blocks: [
-              ...v.blocks,
+            blocks: insertRecordAt(v.blocks, -1, [
               { kind: 'task_result', id: blockSeq++, taskId, result, error: error || undefined },
               {
                 kind: 'task_delivery',
@@ -7161,7 +7167,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                 error: error || undefined,
                 ...(afterRun ? { afterRun: true } : {}),
               },
-            ],
+            ], { evTime: evTs(raw), run: currentRun(v) }),
           })
         }
         // 回执落位（2026-10）：插到**卡片所在轮**的尾部（下一条 user 之前），不按到达
