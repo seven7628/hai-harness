@@ -3,6 +3,8 @@ import type { MsgBlock, AgentItem } from '../../../store/useAppStore'
 import { AgentMark } from '../AgentMark'
 import { FoldIcon } from '../FoldIcon'
 import { toolArgsSummary, toolVerb } from '../../../lib/toolSummary'
+import { signalText } from '../../../lib/signalFacts'
+import { t as i18nT } from '../../../i18n'
 import './lane.css'
 
 type AgentMsg = Extract<MsgBlock, { kind: 'agent' }>
@@ -67,6 +69,9 @@ function lastAction(items: AgentItem[] | undefined): string {
   }
   if (it.kind === 'thinking') return 'thinking'
   if (it.kind === 'compression') return 'compacting'
+  // 子 agent 自己的一行信号（hook 警告 / 静默收尾 / 目标提醒）：车道这一列只放标题，
+  // 完整的一行在卡片里（agentItemsToBlocks 会把它交回 Signal 组件）。
+  if (it.kind === 'signal') return signalText(it.fact, i18nT).title
   if (it.kind === 'text') return (it.text || '').split('\n')[0].slice(0, 72)
   return ''
 }
@@ -74,14 +79,18 @@ function lastAction(items: AgentItem[] | undefined): string {
 function eventRows(items: AgentItem[] | undefined) {
   return (items || []).slice(-6).map((it, i) => {
     const isTool = it.kind === 'tool' && it.name
+    const sigItem = it.kind === 'signal' ? it : undefined
+    const sig = sigItem ? signalText(sigItem.fact, i18nT) : undefined
     return {
       key: i,
-      t: isTool ? toolVerb(it.name!) : it.kind,
-      a: isTool
-        ? toolArgsSummary(it.name!, it.args || '')
-        : it.kind === 'text'
-          ? (it.text || '').split('\n')[0].slice(0, 90)
-          : '',
+      t: sig ? sig.title : isTool ? toolVerb(it.name!) : it.kind,
+      a: sig
+        ? (sig.detail ?? sigItem?.fact.etype ?? '')
+        : isTool
+          ? toolArgsSummary(it.name!, it.args || '')
+          : it.kind === 'text'
+            ? (it.text || '').split('\n')[0].slice(0, 90)
+            : '',
       s: isTool ? (it.status === 'error' ? 'fail' : it.durMs != null ? clock(it.durMs) : '') : '',
     }
   })

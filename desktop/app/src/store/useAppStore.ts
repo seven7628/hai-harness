@@ -645,6 +645,48 @@ function pushSignal(blocks: MsgBlock[], fact: SignalFact, afterRun = false): Msg
   return [...blocks, { kind: 'signal', id: blockSeq++, fact, ...(afterRun ? { afterRun: true } : {}) }]
 }
 
+/* 任务级提示（task_promoted）归**哪个子 agent**：卡片 items 里有这个 taskId 的工具，
+   就说明「这次调用被摘成后台任务」是那个子 agent 的事，不该往主转录写一行。 */
+function pushTaskSignal(v: SessionView, taskId: string, fact: SignalFact): MsgBlock[] | null {
+  if (!taskId) return null
+  const at = v.blocks.findIndex(
+    (b) => b.kind === 'agent' && b.items.some((it) => it.kind === 'tool' && it.taskId === taskId),
+  )
+  if (at < 0) return null
+  const card = v.blocks[at] as Extract<MsgBlock, { kind: 'agent' }>
+  const dup = card.items.some(
+    (it) => it.kind === 'signal' && it.fact.etype === fact.etype && (it.fact.message ?? '') === (fact.message ?? ''),
+  )
+  if (dup) return v.blocks
+  return v.blocks.map((b, i) => (i === at ? { ...card, items: [...card.items, { kind: 'signal' as const, fact }] } : b))
+}
+
+/* 事件上的 run_id（有些运行级事件只带它，见 getSid 的注释）。 */
+function runIdOf(raw: AnyEvent): string | undefined {
+  const r = (raw as { run_id?: unknown }).run_id
+  return typeof r === 'string' && r ? r : undefined
+}
+
+/* 运行级信号归**它自己那次运行**：run_id 属于子 agent 时，挂到那张卡片的 items 上
+   （卡片里读得到「它跑的时候发生过什么」），而不是往主转录追加一行 —— 两件事混在
+   一起，用户读到的是「主 run 说了这句」（2026-10 报障）。
+   返回 null = 这不是子 run 的信号，调用方照常 pushSignal。 */
+function pushRunSignal(v: SessionView, runId: string | undefined, fact: SignalFact): MsgBlock[] | null {
+  if (!runId || !isSubAgentRun(v, runId)) return null
+  const at = v.blocks.findIndex((b) => b.kind === 'agent' && b.runId === runId)
+  if (at < 0) return null
+  const card = v.blocks[at] as Extract<MsgBlock, { kind: 'agent' }>
+  // 与 pushSignal 同一条去重口径（同一类事实只留一条）
+  const dup = card.items.some(
+    (it) =>
+      it.kind === 'signal' &&
+      `${it.fact.sig}|${it.fact.etype}|${it.fact.name ?? ''}|${it.fact.message ?? ''}` ===
+        `${fact.sig}|${fact.etype}|${fact.name ?? ''}|${fact.message ?? ''}`,
+  )
+  if (dup) return v.blocks
+  return v.blocks.map((b, i) => (i === at ? { ...card, items: [...card.items, { kind: 'signal' as const, fact }] } : b))
+}
+
 // afterRunNow 这条记录是不是主 run 交卷之后才到的（决定渲染在盒子里还是时间线上）。
 // runEnded：agent_start 置 false、agent_end 置 true；旧视图缺这一位时按「已结算」处理
 //（与 mainRunEnded 的兜底同向：宁可当成记录放外面，也不要藏进一个可能已折叠的盒子）。
@@ -818,6 +860,10 @@ export type AgentItem =
   // 它是**转录的一部分**（子会话里能看到「我对它说了什么」），不是任务结果。
   | { kind: 'user'; text: string; startedAt?: number; ts?: number }
   | { kind: 'compression'; before: number; after: number; ctxTokens?: number; ctxTokensBefore?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
+  // 一行信号（Small signals）落在**它自己那次运行**里：hook 警告 / 静默收尾 / 目标提醒
+  // 是子 agent 跑出来的事实，不属于主转录（用户 2026-10：subagent 的提示混进主会话的
+  // Working 里，读起来像主 run 自己说的）。
+  | { kind: 'signal'; fact: SignalFact }
 
 // PriceRefreshSummary refresh_prices 结果摘要（UI toast 用；字段对齐 bridge 响应）
 export interface PriceRefreshSummary {
@@ -3590,7 +3636,31 @@ function busySidsFromViews(views: Record<string, SessionView> | undefined): Read
 // 事件路由目标会话（SDK 事件带 session_id；缺省回退活跃会话，避免建空 '' view）
 function getSid(raw: AnyEvent, fallback?: string): string {
   const sid = typeof raw.session_id === 'string' && raw.session_id ? raw.session_id : ''
-  return sid || fallback || ''
+  if (sid) return sid
+  /* 有些事件只带 run_id（ToolHookWarning / RunSilentEnd / GoalAlignmentReminder /
+     MemoryActivity —— events/*.go 里就是没有 session_id 字段）。以前直接退回
+     「当前打开的那个会话」，于是别的会话（后台会话、另一个标签页、IM 会话）跑出来的
+     一行信号会落到你正在看的这一份转录里（用户 2026-10 报障的跨会话串台）。
+     先按 run_id 找拥有它的视图，找不到才退回 active。 */
+  const run = typeof raw.run_id === 'string' && raw.run_id ? raw.run_id : ''
+  if (run) {
+    const owner = sidOfRun(run)
+    if (owner) return owner
+  }
+  return fallback || ''
+}
+
+/* run 属于哪个会话：先看 run 节点（新一次顶层 run 会重置该数组，所以只有**活着**的 run
+   在这里），再看块上的 runId（历史轮次的记录还在）。都没有 → undefined。 */
+function sidOfRun(runId: string): string | undefined {
+  const views = useAppStore.getState().views
+  for (const sid of Object.keys(views)) {
+    if (views[sid].runNodes.some((n: RunNode) => n.id === runId)) return sid
+  }
+  for (const sid of Object.keys(views)) {
+    if (views[sid].blocks.some((b: MsgBlock) => (b as { runId?: string }).runId === runId)) return sid
+  }
+  return undefined
 }
 
 // 事件时间戳（RFC3339Nano 字符串或毫秒数）：所有耗时计算以事件自带 timestamp 为准
@@ -6388,17 +6458,14 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 「只加载一段」+ 会话不激活（无活跃标记）。改为标准 setState + setView + blockSeq。
       const sid = getSid(raw, getState().activeSessionId)
       const round = typeof raw.round === 'number' ? raw.round : undefined
+      const goalFact: SignalFact = { sig: 'goal', etype: 'goal_alignment_reminder', ...(round != null ? { round } : {}) }
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         return setView(s, sid, {
           ...v,
           // 一行信号（设计 §「Small signals」的 goal_alignment_reminder）：之前是 system 块，
           // 形态与"关于这次运行的一条事实"不符 —— 它会和真正的系统提示混在一起。
-          blocks: pushSignal(
-            v.blocks,
-            { sig: 'goal', etype: 'goal_alignment_reminder', ...(round != null ? { round } : {}) },
-            afterRunNow(v),
-          ),
+          blocks: pushRunSignal(v, runIdOf(raw), goalFact) ?? pushSignal(v.blocks, goalFact, afterRunNow(v)),
         })
       })
       return
@@ -6524,7 +6591,10 @@ export function dispatchEvent(raw: AnyEvent): void {
             n,
             ...(files.length ? { files } : {}),
           }
-          const upd = setView(st, sid, { ...v, blocks: pushSignal(v.blocks, fact, afterRunNow(v)) })
+          const upd = setView(st, sid, {
+            ...v,
+            blocks: pushRunSignal(v, runIdOf(raw), fact) ?? pushSignal(v.blocks, fact, afterRunNow(v)),
+          })
           return upd
         })
         getState().showToast(
@@ -6776,20 +6846,17 @@ export function dispatchEvent(raw: AnyEvent): void {
       const sid = getSid(raw, getState().activeSessionId)
       const message = String(raw.message || '')
       if (!message) break
+      const hookFact: SignalFact = {
+        sig: 'hook',
+        etype: 'tool_hook_warning',
+        ...(raw.name ? { name: String(raw.name) } : {}),
+        message,
+      }
       setState((st) => {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushSignal(
-            v.blocks,
-            {
-              sig: 'hook',
-              etype: 'tool_hook_warning',
-              ...(raw.name ? { name: String(raw.name) } : {}),
-              message,
-            },
-            afterRunNow(v),
-          ),
+          blocks: pushRunSignal(v, runIdOf(raw), hookFact) ?? pushSignal(v.blocks, hookFact, afterRunNow(v)),
         })
       })
       break
@@ -6799,23 +6866,25 @@ export function dispatchEvent(raw: AnyEvent): void {
       const rounds = typeof raw.rounds === 'number' ? raw.rounds : undefined
       const toolCalls = typeof raw.tool_calls === 'number' ? raw.tool_calls : undefined
       const sawText = typeof raw.saw_assistant_text === 'boolean' ? raw.saw_assistant_text : undefined
+      const silentFact: SignalFact = {
+        sig: 'silent',
+        etype: 'run_silent_end',
+        ...(rounds != null ? { rounds } : {}),
+        ...(toolCalls != null ? { toolCalls } : {}),
+        ...(sawText != null ? { sawText } : {}),
+      }
       setState((st) => {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushSignal(
-            v.blocks,
-            {
-              sig: 'silent',
-              etype: 'run_silent_end',
-              ...(rounds != null ? { rounds } : {}),
-              ...(toolCalls != null ? { toolCalls } : {}),
-              ...(sawText != null ? { sawText } : {}),
-            },
-            // 它是这次运行的**结论**（Go 在 AgentEnd 之前一条发出）：折进盒子就等于
-            // 「跑完了但屏幕上什么都没发生」，正是这条信号存在的理由所反对的形态。
-            true,
-          ),
+          blocks: pushRunSignal(v, runIdOf(raw), silentFact) ??
+            pushSignal(
+              v.blocks,
+              silentFact,
+              // 它是这次运行的**结论**（Go 在 AgentEnd 之前一条发出）：折进盒子就等于
+              // 「跑完了但屏幕上什么都没发生」，正是这条信号存在的理由所反对的形态。
+              true,
+            ),
         })
       })
       break
@@ -6985,16 +7054,24 @@ export function dispatchEvent(raw: AnyEvent): void {
         return setView(s, sid, {
           ...v,
           runNodes: v.runNodes.map((n) => (n.kind === 'tool' && n.taskId === taskId ? { ...n, promoted: true } : n)),
-          blocks: pushSignal(
-            v.blocks.map((b) =>
-              b.kind === 'tool' && b.taskId === taskId
-                ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
-                : b,
+          blocks:
+            // 子 agent 的工具被摘离：这一行属于它的卡片（同一句话挂在主转录就是主 run 说的）
+            pushTaskSignal(v, taskId, {
+              sig: 'promote',
+              etype: 'task_promoted',
+              ...(raw.name ? { name: String(raw.name) } : {}),
+              message: taskId,
+            }) ??
+            pushSignal(
+              v.blocks.map((b) =>
+                b.kind === 'tool' && b.taskId === taskId
+                  ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
+                  : b,
+              ),
+              // 一行信号：工具行折叠/收起后，「这次调用被摘成后台任务」仍要能看见
+              { sig: 'promote', etype: 'task_promoted', ...(raw.name ? { name: String(raw.name) } : {}), message: taskId },
+              afterRunNow(v),
             ),
-            // 一行信号：工具行折叠/收起后，「这次调用被摘成后台任务」仍要能看见
-            { sig: 'promote', etype: 'task_promoted', ...(raw.name ? { name: String(raw.name) } : {}), message: taskId },
-            afterRunNow(v),
-          ),
         })
       })
       break

@@ -502,6 +502,71 @@ assert.ok(q12 && q12.pushed, '主 run 已交卷时，新输入必须立即推送
 console.log('PASS 场景12：迟到回执归属所属轮；主 run 交卷后输入不再被后台任务扣住')
 
 
+// ===== 场景 14：一行信号的归属 —— 按 session 隔离，按子 agent 隔离 =====
+// ① 子 run 的提示归卡片：hook 警告 / 静默收尾 / 目标提醒是**那次运行**的事实。挂到主转录
+//    就是「主 run 说了这句」（用户 2026-10 报障：subagent 的提示混进主会话）。
+setup()
+EV('agent_start', { run_id: 'r-main' })
+EV('agent_start', { run_id: 'r-sub', parent_run_id: 'r-main', name: 'sub' })
+dispatchEvent({ event_type: 'tool_hook_warning', run_id: 'r-sub', name: 'PreToolUse', message: 'blocked by policy' })
+let v14 = useAppStore.getState().views.s1
+assert.equal(
+  v14.blocks.filter((b) => b.kind === 'signal').length,
+  0,
+  '子 run 的信号不得进主转录',
+)
+const subCard = v14.blocks.find((b) => b.kind === 'agent' && b.runId === 'r-sub')
+assert.ok(subCard, '子 agent 卡片应存在')
+assert.ok(
+  subCard.items.some((it) => it.kind === 'signal' && it.fact.etype === 'tool_hook_warning'),
+  '子 run 的信号应挂在该子 agent 卡片的 items 上',
+)
+// 同一事实重复投递不刷两条
+dispatchEvent({ event_type: 'tool_hook_warning', run_id: 'r-sub', name: 'PreToolUse', message: 'blocked by policy' })
+v14 = useAppStore.getState().views.s1
+assert.equal(
+  v14.blocks.find((b) => b.kind === 'agent' && b.runId === 'r-sub').items.filter((it) => it.kind === 'signal').length,
+  1,
+  '同一子 run 的同类信号只留一条',
+)
+
+// ② 事件不带 session_id 时，按 run_id 归属会话 —— 不落到「当前打开的那个会话」
+setup()
+EV('agent_start', { run_id: 'r-s1' }) // s1 自己的 run
+dispatchEvent({ event_type: 'agent_start', session_id: 's2', run_id: 'r-s2' }) // 另一个会话在跑
+dispatchEvent({ event_type: 'goal_alignment_reminder', run_id: 'r-s2', round: 3 }) // 只带 run_id
+const views = useAppStore.getState().views
+assert.equal(
+  (views.s1?.blocks ?? []).filter((b) => b.kind === 'signal').length,
+  0,
+  '别会话的 run 信号不得落到当前会话（跨会话串台）',
+)
+assert.ok(
+  (views.s2?.blocks ?? []).some((b) => b.kind === 'signal' && b.fact.etype === 'goal_alignment_reminder'),
+  '信号应落到拥有该 run 的会话',
+)
+// 找不到归属才退回 active（宁可在当前会话里留一条，也不要静默丢）
+dispatchEvent({ event_type: 'goal_alignment_reminder', run_id: 'r-unknown', round: 4 })
+assert.ok(
+  useAppStore.getState().views.s1.blocks.some((b) => b.kind === 'signal' && b.fact.round === 4),
+  'run 找不到归属时退回当前会话（不静默丢弃）',
+)
+// ③ 子 agent 自己的工具被摘成后台任务：这一行也归它的卡片，不往主转录写
+setup()
+EV('agent_start', { run_id: 'r-main' })
+EV('agent_start', { run_id: 'r-sub2', parent_run_id: 'r-main', name: 'sub' })
+EV('tool_start', { id: 'tt1', name: 'bash', arguments: '{"command":"sleep 60"}', run_id: 'r-sub2', task_id: 'tooltask-sub' })
+EV('task_promoted', { task_id: 'tooltask-sub', name: 'bash' })
+const v14c = useAppStore.getState().views.s1
+assert.equal(v14c.blocks.filter((b) => b.kind === 'signal').length, 0, '子 agent 的摘离提示不得进主转录')
+const subCard2 = v14c.blocks.find((b) => b.kind === 'agent' && b.runId === 'r-sub2')
+assert.ok(
+  subCard2.items.some((it) => it.kind === 'signal' && it.fact.etype === 'task_promoted'),
+  '摘离提示应挂在该子 agent 卡片的 items 上',
+)
+
+console.log('PASS 场景14：信号按 session / 子 agent 隔离')
+
 // ===== 场景 13：失败 attempt 的记账与轮次收尾（会重试的**不算**一轮）=====
 // 用户 2026-10 口径：中断恰好发生在 llm_start ↔ llm_end 之间时，这一轮永远没有 llm_end
 // —— 不在这里收尾，轮尾账（按 turns 求和）与回合数就少一轮。但自动重试的中间失败

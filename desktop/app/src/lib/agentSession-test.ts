@@ -112,3 +112,11 @@ test('id 全部为负且互不相同（合成块不能与会话里真实的块�
 test('空列表 → 空数组（子会话无转录时交给 Narrative 的空态）', () => {
   assert.deepEqual(agentItemsToBlocks([]), [])
 })
+
+test('signal → signal 块（子 agent 自己的一行信号，原样交给 Signal 渲染）', () => {
+  const fact = { sig: 'hook', etype: 'tool_hook_warning', name: 'PreToolUse', message: 'blocked' } as const
+  const out = agentItemsToBlocks([{ kind: 'signal', fact }])
+  assert.equal(out.length, 1)
+  assert.equal(out[0].kind, 'signal')
+  assert.deepEqual((out[0] as Extract<(typeof out)[number], { kind: 'signal' }>).fact, fact)
+})

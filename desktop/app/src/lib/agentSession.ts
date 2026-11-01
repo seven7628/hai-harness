@@ -95,6 +95,11 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
       })
       continue
     }
+    if (it.kind === 'signal') {
+      // 子运行自己的一行信号：原样交给 Signal 组件渲染（同一套事实 → 文案的规则）。
+      out.push({ kind: 'signal', id: id--, fact: it.fact })
+      continue
+    }
     if (it.kind === 'compression') {
       out.push({
         kind: 'compression', id: id--, before: it.before, after: it.after,
