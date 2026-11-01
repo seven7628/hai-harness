@@ -243,6 +243,56 @@ g = await geo()
 check('H 点「回到最新」回到最底', g.max - g.top < 6, JSON.stringify(g))
 check('H 回到底部后按钮消失', !g.jump, JSON.stringify(g))
 
+// ---- I 子会话页：子 agent 在跑 → 最后一轮是 Working（不是 Worked）-----------
+// 用户 2026-10 报障：左栏点进一个正在跑的子智能体，顶部写着「执行中 5m37s」，正文第一屏
+// 却是「Worked for 4m47s」。根因：Narrative 的 runEnded / runStartedAt / activeRunId
+// 一律读**主会话**视图，而子会话页渲染的是**子 agent** 的转录 —— 主 agent 交卷（后台
+// 子 agent 还在跑）就把子会话整段判成已结算。修法：AgentSessionView 传 runState
+//（node.status / startedAt），走 lib/turnSettle.resolveRunState。
+const subCard = `{ kind: 'agent', id: 3, runId: 'sub-1', label: 'subagent', status: 'running', spawnedAt: Date.now() - 4000,
+  items: [{ kind: 'tool', id: 'i1', toolId: 'x1', name: 'bash', status: 'running' }, { kind: 'text', id: 'i2', text: '正在跑…' }] }`
+await inject(
+  `[${user(1, '跑一下')}, ${subCard}]`,
+  true,
+  '[]',
+  `[{ id: 'root', kind: 'run', status: 'done', label: 'run', depth: 0, startedAt: Date.now() - 600000 }, { id: 'sub-1', kind: 'run', parentId: 'root', status: 'running', label: 'subagent', depth: 1, startedAt: Date.now() - 4000 }]`,
+)
+await page.eval(() => window.__store.getState().focusAgent({ nodeId: 'sub-1', runId: 'sub-1' }))
+await wait(700)
+const sub = await page.eval(() => {
+  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  return {
+    turns: document.querySelectorAll('.rt-turn').length,
+    live: !!t?.querySelector('.cy-live'),
+    liveText: t?.querySelector('.cy-live')?.textContent ?? '',
+    act: t?.querySelector('.rt-act')?.textContent ?? '',
+  }
+})
+check('I 子会话页已切进去', sub.turns >= 1, `turns=${sub.turns}`)
+check('I 子 agent 在跑 → 有 Working 盒', sub.live, `live=${sub.live} act=${JSON.stringify(sub.act.slice(0, 40))}`)
+check('I 子会话不显示 Worked for', !/Worked/.test(sub.act), JSON.stringify(sub.act.slice(0, 60)))
+// 子 agent 交卷（status 收敛）→ 同一页应结算成 Worked
+await page.eval(() => {
+  const st = window.__store.getState()
+  st.focusAgent({ nodeId: 'sub-1', runId: 'sub-1' })
+})
+await page.eval(() => {
+  const st = window.__store.getState()
+  const sid = st.activeSessionId
+  const v = st.views[sid]
+  const runNodes = (v.runNodes ?? []).map((n) => (n.id === 'sub-1' ? { ...n, status: 'done' } : n))
+  const blocks = v.blocks.map((b) => (b.kind === 'agent' ? { ...b, status: 'done', durMs: 4700 } : b))
+  window.__store.setState({ blocks, views: { ...st.views, [sid]: { ...v, blocks, runNodes } } })
+})
+await wait(600)
+const subDone = await page.eval(() => {
+  const t = [...document.querySelectorAll('.rt-turn')].pop()
+  return { live: !!t?.querySelector('.cy-live'), act: t?.querySelector('.rt-act')?.textContent ?? '' }
+})
+check('I 子 agent 交卷后结算成 Worked', !subDone.live && /Worked/.test(subDone.act), JSON.stringify(subDone))
+await page.eval(() => window.__store.getState().focusAgent(undefined))
+await wait(400)
+
 if (errs.length) check('无运行期异常', false, errs.join(' | '))
 else check('无运行期异常', true, '')
 

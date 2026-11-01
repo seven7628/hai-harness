@@ -193,6 +193,8 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
             error: Boolean(b.historyError),
             ...(b.taskId ? { onLoadOlder: () => loadAgentHistory(b.id, b.taskId!) } : {}),
           }}
+          /* 同一件事：卡片里这段转录也是**子 agent 自己的**运行态 */
+          runState={{ live: b.status === 'running', startedAt: b.spawnedAt, ...(b.runId ? { runId: b.runId } : {}) }}
         />
       </div>
       {/* 产出卡：与主会话同一个组件（子会话＝主会话，只是 session 不同）。

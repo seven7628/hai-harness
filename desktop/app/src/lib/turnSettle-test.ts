@@ -1,7 +1,7 @@
 // turnSettle-test.ts —— 「这一轮是否还在跑」的判定（结算时机唯一口径，node:test 无 DOM）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { turnLive } from './turnSettle'
+import { resolveRunState, turnLive } from './turnSettle'
 
 test('运行中的空档（llm_end 之后、下一次 llm_start 之前）仍算在跑 —— 这是提前折叠的根因', () => {
   // 上一版：turn.running=false 且 run 节点缺失 → 判成已结算（用户报障的形态）
@@ -38,4 +38,17 @@ test('新一次 run 开始后，上一轮残留的 running 不得把上一轮重
   assert.equal(turnLive({ isLast: true, turnRunning: true, runEnded: false, sameRun: true }), true)
   // 没有 runId 的旧数据（sameRun 省略）沿用老行为
   assert.equal(turnLive({ isLast: false, turnRunning: true, runEnded: false }), true)
+})
+
+test('子会话页用自己的运行态 —— 主 agent 已交卷不能把子会话判成 Worked', () => {
+  // 用户 2026-10 报障：左栏点进一个子智能体，顶部写着「执行中 5m37s」，正文第一屏却是
+  // 「Worked for 4m47s」。Narrative 的运行态三件套此前一律读主会话视图，于是主 agent
+  // 交卷（后台子 agent 还在跑，或主/子 run id 不同）就把子会话整段判成已结算。
+  const own = resolveRunState({ own: { live: true, startedAt: 100, runId: 'r-sub' }, mainEnded: true, mainStartedAt: 1, mainRunId: 'r-main' })
+  assert.deepEqual(own, { ended: false, startedAt: 100, runId: 'r-sub' }, '子会话在跑：不得用主会话的 ended，时钟从子 run 起算')
+  assert.equal(turnLive({ isLast: true, turnRunning: false, runEnded: own.ended }), true, '子会话在跑 → 最后一轮是 Working')
+  // 子 agent 自己结束了 → 结算（与主会话是否在跑无关）
+  assert.equal(resolveRunState({ own: { live: false }, mainEnded: false }).ended, true, '子 agent 交卷后一律结算')
+  // 主会话页没有 own → 行为不变
+  assert.deepEqual(resolveRunState({ mainEnded: false, mainStartedAt: 7, mainRunId: 'r-main' }), { ended: false, startedAt: 7, runId: 'r-main' })
 })

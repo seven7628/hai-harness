@@ -218,7 +218,16 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     <TaskResultInline delivered={card.deliveredToMain} result={card.taskResult} error={card.taskError} />
   ) : undefined
 
-  return <Narrative source={source} header={header} footer={footer} />
+  // 运行态是**这个子 agent 自己的**（node.status / startedAt）：主 agent 可能早就交卷了，
+  // 拿主会话的 runEnded 判它，子会话第一屏就会是 Worked for（用户 2026-10 报障）。
+  return (
+    <Narrative
+      source={source}
+      header={header}
+      footer={footer}
+      runState={{ live: running, startedAt: node.startedAt, ...(node.runId ? { runId: node.runId } : {}) }}
+    />
+  )
 })
 
 function statusCls(s: AgentTreeNode['status']): string {

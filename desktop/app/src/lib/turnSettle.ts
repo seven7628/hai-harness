@@ -48,3 +48,28 @@ export function turnLive(a: {
   if (a.sameRun === false) return false
   return a.turnRunning || a.isLast
 }
+
+/**
+ * 这段转录的「运行态」该看谁 —— 主会话看视图，**子会话看它自己**。
+ *
+ * 用户 2026-10 报障：左栏点进一个子智能体，顶部明明写着「执行中 5m37s」，正文却是
+ * 「Worked for 4m47s」。原因是 Narrative 的三样运行态（runEnded / runStartedAt /
+ * activeRunId）一律读 `views[activeSessionId]` —— 子会话页渲染的是**子 agent 的转录**
+ * （agent 卡 items 映射出来的块），却拿主会话的 run 结算位来判「还在不在跑」：
+ * 主 agent 早就交卷了（后台子 agent 还在跑，或主 run 的 id 与子 run 不同），
+ * 于是子会话第一屏就被判成已结算，Working 从来没出现过。
+ *
+ * 自己那段转录有独立的运行事实（agent 节点的 status / startedAt / runId）时，就用它：
+ * 子 agent 在跑 ≠ 主 agent 在跑，两者不能互相代表。
+ */
+export function resolveRunState(a: {
+  /* 子会话页（AgentSessionView / 任务卡内的子转录）自己的运行态。给了就不看主会话。 */
+  own?: { live: boolean; startedAt?: number; runId?: string }
+  /* 主会话视图的两位：AgentEnd 结算位与顶层 run 节点。 */
+  mainEnded: boolean
+  mainStartedAt?: number
+  mainRunId?: string
+}): { ended: boolean; startedAt?: number; runId?: string } {
+  if (a.own) return { ended: !a.own.live, startedAt: a.own.startedAt, runId: a.own.runId }
+  return { ended: a.mainEnded, startedAt: a.mainStartedAt, runId: a.mainRunId }
+}

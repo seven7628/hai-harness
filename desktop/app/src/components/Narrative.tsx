@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf, mainRunEnded } from '../store/useAppStore'
-import { turnLive } from '../lib/turnSettle'
+import { resolveRunState, turnLive } from '../lib/turnSettle'
 import { signalText } from '../lib/signalFacts'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
@@ -162,7 +162,7 @@ function firstFileOf(turn: { items: MsgBlock[] }): string {
   return ''
 }
 
-export default function Narrative({ viewSid, source, header, footer, density: densityProp }: {
+export default function Narrative({ viewSid, source, header, footer, density: densityProp, runState }: {
   viewSid?: string
   source?: NarrativeSource
   /** 首行插槽（子会话的「返回主会话 + 身份/用量」）。放在容器**内部**：
@@ -175,6 +175,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
    *  收进一行，跑着的时候敞开、跑完收起，点开读全过程。缺省读设置（默认简洁 ——
    *  v2 画布的默认档就是 concise，移植过来的东西不该以另一副样子出现）。 */
   density?: 'concise' | 'detailed'
+  /** 这段转录**自己的**运行态（子会话页 / 任务卡内的子转录）。缺省 = 读主会话视图的
+   *  AgentEnd 结算位与顶层 run 节点 —— 子 agent 在跑不能拿主 agent 的结算位代表。 */
+  runState?: { live: boolean; startedAt?: number; runId?: string }
 } = {}) {
   const t = useT()
   // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话。
@@ -193,19 +196,28 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 主 run 是否已结算（AgentEnd）：折叠行与轮尾账的**唯一**放行信号。
   // 不用 run 节点 status 推断 —— 那一路上「llm_end 与下一次 llm_start 之间」会被判成已结束
   // （用户 2026-10 报障：Worked for 与 tokens 早于 AgentEnd 出现），见 lib/turnSettle.ts。
-  const runEnded = useAppStore((s) => (s.activeSessionId ? mainRunEnded(s.views[s.activeSessionId]) : true))
+  const mainEnded = useAppStore((s) => (s.activeSessionId ? mainRunEnded(s.views[s.activeSessionId]) : true))
   // 本次运行（AgentStart）的时刻：Working 的累计时长从它起算，而不是从「用户点发送」起算
   // —— 排队等前置任务、压缩这些时间不属于这次运行。
-  const runStartedAt = useAppStore((s) => {
+  const mainStartedAt = useAppStore((s) => {
     const nodes = (s.views[s.activeSessionId ?? ''] ?? { runNodes: s.runNodes }).runNodes ?? []
     const root = nodes.find((n) => !n.parentId)
     return root?.startedAt
   })
   /* 正在跑的是**哪一次**运行：顶层 run 节点的 id。runEnded 是视图级的一位，单看它
      挡不住「上一轮的残留 running 块被新 run 点亮」—— 见 lib/turnSettle.ts 的长注释。 */
-  const activeRunId = useAppStore((s) => {
+  const mainRunId = useAppStore((s) => {
     const nodes = (s.views[s.activeSessionId ?? ''] ?? { runNodes: s.runNodes }).runNodes ?? []
     return nodes.find((n) => n.kind === 'run' && !n.parentId)?.id
+  })
+  /* 子会话页（AgentSessionView / 任务卡内的子转录）渲染的是**子 agent 的**转录，运行态
+     必须看它自己：主 agent 交卷了，后台子 agent 还在跑（用户 2026-10 报障：点进子会话
+     第一屏就是 Worked for，顶部却写着执行中）。判据收在 lib/turnSettle.resolveRunState。 */
+  const { ended: runEnded, startedAt: runStartedAt, runId: activeRunId } = resolveRunState({
+    own: runState,
+    mainEnded,
+    mainStartedAt,
+    mainRunId,
   })
   // 等待用户：审批 / 提问。两者都是「运行暂停、等外部回应」，不是 AgentEnd。
   const waiting = useAppStore((s) => ((s.approvals?.length ?? 0) > 0 ? 'approval' : (s.questions?.length ?? 0) > 0 ? 'input' : null))
