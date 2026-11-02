@@ -1335,6 +1335,9 @@ func collectUserContents(msgs []core.Message) (texts []string, contents [][]core
 
 // pollInputs AgentLoop 插话检查点回调：drain 当前积压 + 发 UserInputsConsumed（前端感知
 // 插话消费，与 takeBatch 路径一致），再返回给循环插入下一轮。
+//
+// Injected=true：这条路径消费的是**运行中**插进来的输入（takeBatch 才是新运行的开口）。
+// 前端据此把它留在同一个 Working 盒子里，而不是新开一轮。
 func (s *Session) pollInputs(ctx context.Context) []core.Message {
 	batch := s.drainInputs(ctx)
 	if texts, contents := collectUserContents(batch); len(texts) > 0 || len(contents) > 0 {
@@ -1342,6 +1345,7 @@ func (s *Session) pollInputs(ctx context.Context) []core.Message {
 			SessionId:    s.id,
 			UserTexts:    texts,
 			UserContents: contents,
+			Injected:     true,
 			Timestamp:    time.Now(),
 			EventType:    events.UserInputsConsumedType,
 		})

@@ -85,7 +85,11 @@ type UserInputsConsumed struct {
 	SessionId    string           `json:"session_id"`
 	UserTexts    []string         `json:"user_texts"`              // 被消费的用户消息文本（顺序 = 入队顺序）
 	UserContents [][]core.Content `json:"user_contents,omitempty"` // 每条消息的完整内容块（含图片；与 UserTexts 平行）
-	Timestamp    time.Time        `json:"timestamp"`
+	// Injected 这批输入是在**运行中**被消费的（AgentLoop 插话 Poll），不是一次新运行的开口
+	//（Session.Run 的 takeBatch）。同一个 run 里被插入的用户消息仍然属于这一轮：消费方
+	//（桌面端转录）据此不把它当成新的一轮 —— 否则一次运行会画出两个 Working 盒子。
+	Injected  bool      `json:"injected,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
 
 	EventType EventType `json:"event_type"`
 }

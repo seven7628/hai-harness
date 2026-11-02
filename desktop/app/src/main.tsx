@@ -29,7 +29,14 @@ function injectCJKFonts(): void {
 // 靠点设置页去切会把「验证一条规则」变成「走一遍 UI」。生产构建不含这段。
 if (import.meta.env.DEV) {
   void import('./store/useAppStore').then((m) => {
-    ;(window as unknown as { __store?: unknown }).__store = m.useAppStore
+    const w = window as unknown as { __store?: unknown; __dispatch?: unknown; __hydrate?: unknown }
+    w.__store = m.useAppStore
+    // 恢复路径（checkpoint hydrate）也是验证入口：lab/ 要能构造「刷新时 run 还在跑」
+    // 这种形态（live 位 + checkpoint 里 running 的顶层 run 节点），而不是只注入最终块。
+    w.__hydrate = m.hydrateCheckpoint
+    // 事件分发也是验证入口：lab/ 的断言要能构造「事件顺序」这类场景
+    //（例如运行中插话的 injected 位、子 agent 摘离的任务），而不是只注入最终块。
+    w.__dispatch = m.dispatchEvent
   })
 }
 

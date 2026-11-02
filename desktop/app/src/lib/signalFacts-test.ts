@@ -70,3 +70,12 @@ test('goal / promote：轮次与任务名各自成副题', () => {
   assert.equal(signalText({ sig: 'goal', etype: 'goal_alignment_reminder', round: 7 }, (k) => rep(k, 7)).detail, 'sig.goal.round')
   assert.equal(signalText({ sig: 'promote', etype: 'task_promoted', name: 'bash', message: 'tooltask-1' }, t).detail, 'bash · tooltask-1')
 })
+
+test('compact：压缩完成只报手里的两个数，缺一端不编', () => {
+  const full = signalText({ sig: 'compact', etype: 'compress_end', before: 40, after: 12 }, (k) => k)
+  assert.equal(full.title, 'sig.compact')
+  assert.equal(full.detail, 'sig.compact.msgs')
+  // 老事件没有 before/after → 只留标题（不写「0 → 0 条消息」）
+  assert.deepEqual(signalText({ sig: 'compact', etype: 'compress_end' }, (k) => k), { title: 'sig.compact' })
+  assert.deepEqual(signalText({ sig: 'compact', etype: 'compress_end', after: 12 }, (k) => k), { title: 'sig.compact' })
+})

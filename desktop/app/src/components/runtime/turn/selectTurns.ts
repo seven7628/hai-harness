@@ -1,4 +1,5 @@
-import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
+import type { ArtifactItem, MsgBlock, TurnMetric } from '../../../store/useAppStore'
+import { fmtDuration } from '../../../lib/duration'
 
 /* The transcript is a flat list of blocks — there is no "turn" object anywhere
    in the store (see PORT-PLAN §5: `turns[]` holds metrics only, the content
@@ -100,7 +101,17 @@ function push(t: Turn, b: MsgBlock) {
 export function selectTurns(blocks: MsgBlock[]): Turn[] {
   const turns: Turn[] = []
   let cur: Turn | null = null
-  blocks.forEach((b, i) => {
+  blocks.forEach((b) => {
+    if (b.kind === 'user' && b.injected && cur) {
+      /* 运行中插话（agent_loop 的插话 Poll 消费进来的一条用户消息）：它进的是**同一个
+         run**，所以属于当前这一轮，按事件顺序留在 items 里 —— 不另起一轮。
+         用户 2026-11 报障的形态是：Working 正在跑时再说一句，转录里冒出**第二个
+         Working 盒子**（同一个 run 被切成两轮，两轮都还 live）。一次运行只有一个盒子，
+         盒子内部按时间顺序说话；AgentEnd 之后整盒折叠（与工具行同样的归属）。
+         没有当前轮（会话从中间恢复）时退回普通路径：它需要一个能落脚的家。 */
+      push(cur, b)
+      return
+    }
     if (b.kind === 'user') {
       cur = emptyTurn(turns.length, 't' + b.id)
       cur.user = b
@@ -120,10 +131,13 @@ export function selectTurns(blocks: MsgBlock[]): Turn[] {
   return turns
 }
 
-export function turnStats(turn: Turn): TurnStats {
+/* 一段运行 / 一轮的统计。抽成 items 版本是为了**按 run 分别结算**：简洁档一个 run
+   一个盒子，每个盒子的「Worked for 2m · 3 calls」必须是**这一段自己的**数，而不是整轮
+   合起来的（用户 2026-11 的两形态：一轮里可以有两次运行，两个 AgentEnd）。 */
+export function statsOfItems(items: MsgBlock[]): TurnStats {
   const files = new Map<string, { add: number; del: number }>()
   let workedMs = 0
-  turn.items.forEach((b) => {
+  items.forEach((b) => {
     if (b.kind === 'assistant' && b.durMs) workedMs += b.durMs
     if (b.kind === 'tool' && b.durMs) workedMs += b.durMs
     if (b.kind === 'tool' && b.diff && b.diff.path) {
@@ -137,14 +151,18 @@ export function turnStats(turn: Turn): TurnStats {
   let removed = 0
   files.forEach((f) => { added += f.add; removed += f.del })
   return {
-    calls: turn.tools.length,
+    calls: items.filter((b) => b.kind === 'tool').length,
     workedMs,
     files: files.size,
     added,
     removed,
-    agents: turn.agents.length,
-    compressions: turn.compressions.length,
+    agents: items.filter((b) => b.kind === 'agent').length,
+    compressions: items.filter((b) => b.kind === 'compression').length,
   }
+}
+
+export function turnStats(turn: Turn): TurnStats {
+  return statsOfItems(turn.items)
 }
 
 /* The turn head is one dim line: which model answered it, and when it opened.
@@ -167,10 +185,16 @@ export function turnHead(turn: Turn): TurnHead {
 }
 
 export function turnUsage(turn: Turn, metrics: TurnMetric[] | undefined): TurnUsage {
+  /* 只算**这一轮自己的 run**（正文块上的 runId）—— 子 agent 的 runId 不算。
+     子 agent 的用量会持续到主 run 交卷之后（后台子 agent / promoted 工具），
+     而它那张卡一直留在这一轮的 items 里；把子 run 也算进来，已经结算的轮尾账
+     会在**下一次运行开始后继续变大**（用户 2026-11 报障：AgentEnd 时是 7k，
+     发下一条消息变成 17k，LLM 秒数也跟着涨）。子 agent 的花费在它自己的卡片上
+     （card.usage，TaskEnd 结算），不在这里重复记一遍。
+     一次轮里可能有多个主 run（agent_resume 原地续跑），所以是集合并集。 */
   const runs = new Set<string>()
   turn.items.forEach((b) => {
     if (b.kind === 'assistant' && b.runId) runs.add(b.runId)
-    if (b.kind === 'agent' && b.runId) runs.add(b.runId)
   })
   const u: TurnUsage = { input: 0, output: 0, cacheRead: 0, reasoning: 0, total: 0, llmMs: 0, matched: false }
   if (!metrics || !runs.size) return u
@@ -191,14 +215,10 @@ export function turnUsage(turn: Turn, metrics: TurnMetric[] | undefined): TurnUs
   return u
 }
 
-/** "31 s" / "4.2 m" — the same rounding the canvas uses. */
+/** 轮尾 / 折叠行的时长：口径同全仓 fmtDuration（1h30m / 1m25s / 1s666ms / 880ms）。 */
 export function durText(ms: number): string {
   if (!ms) return ''
-  if (ms < 1000) return Math.round(ms) + ' ms'
-  const s = ms / 1000
-  if (s < 60) return (s < 10 ? s.toFixed(1) : Math.round(s)) + ' s'
-  const m = Math.floor(s / 60)
-  return m + ' m ' + Math.round(s - m * 60) + ' s'
+  return fmtDuration(ms)
 }
 
 /* What a folded turn still shows. Folding is about the working phase, never
@@ -242,13 +262,13 @@ const recordAfterRun = (b: MsgBlock, i: number, answerAt: number): boolean => {
 
 /* 位置兜底的分界点 = 这一轮的结论（最后一段正文）。正在流式输出的那一段还不是结论：
    此刻到达的记录仍属于这次运行，否则「边跑边来的信号」会在打字期间被甩到盒子外。 */
-const answerIndex = (turn: Turn): number => {
+export const answerIndex = (turn: Turn): number => {
   const a = turn.answer
   return a && !a.streaming ? turn.items.indexOf(a) : -1
 }
 
 /** 盒子外面（时间线上）的块：结构性/结论性块 + 交卷后到达的记录。 */
-function outsideOf(turn: Turn): (b: MsgBlock, i: number) => boolean {
+export function outsideOf(turn: Turn): (b: MsgBlock, i: number) => boolean {
   const answerAt = answerIndex(turn)
   return (b, i) => ALWAYS_SHOWN.has(b.kind) || recordAfterRun(b, i, answerAt)
 }
@@ -292,9 +312,98 @@ export function workBody(turn: Turn): MsgBlock[] {
   return turn.items.filter(
     (b, i) =>
       FOLDED_KINDS.has(b.kind)
+      // 运行中插话：属于这次运行的过程（它不在外面 —— 外面是时间线，盒子已经收起了）。
+      || (b.kind === 'user' && b.injected)
       // 运行中到达的记录：这一次运行的过程说明，按事件顺序夹在工作行之间。
       || (isRecord(b) && !recordAfterRun(b, i, answerAt))
       || ((b.kind === 'assistant' || b.kind === 'compression') && b !== turn.answer),
+  )
+}
+
+/* 一轮里可能有**多次运行**（后台任务结果回推后主 run 自动续跑 / agent_resume 原地续跑），
+   而产出清单是**每次运行**的 AgentEnd 各带一份 —— 同一轮于是会有多个 artifacts 块
+   （store 与 Go 的 view_reducer 都按 runId 去重，所以「一个 AgentEnd 一块」是对的）。
+   卡片问的是「这一轮产出了什么」：两张卡都写「本轮产出 N 个文件」，是同一份事实报两遍
+   （用户 2026-11 截图：连续两张「本轮产出 1 个文件」）。
+
+   合并口径（纯展示层，store 里的块保持每 run 一份，续跑/对账都还要它）：
+   · 按 path 去重，**后出现的覆盖先出现的**（同一文件在两个 run 里都改过 → 取最终那次）；
+   · 顺序按首次出现（读起来还是时间顺序）；
+   · truncated 取或（任一 run 的清单被截断，卡片就要说）。
+   id 用第一块的（React key 稳定，合并前后不会重挂）。 */
+export function mergeArtifacts(blocks: Extract<MsgBlock, { kind: 'artifacts' }>[]): Extract<MsgBlock, { kind: 'artifacts' }> {
+  const first = blocks[0]
+  if (blocks.length <= 1) return first
+  const byPath = new Map<string, ArtifactItem>()
+  for (const b of blocks) for (const it of b.items) byPath.set(it.path, it)
+  return { ...first, items: [...byPath.values()], ...(blocks.some((b) => b.truncated) ? { truncated: true } : {}) }
+}
+
+/* —— 一轮里的**多次运行**（用户 2026-11 的口径，两个形态）——
+   情况一：一次运行 → 一个盒子，运行中到达的记录在盒内按时间夹在工作行之间；
+   情况二：run1 正常 AgentEnd → 异步任务结果通知到达（**顶层，盒外**）→ run2 起一个新盒子。
+   判据落在「盒子 = 一次运行」上，所以先把轮切成段。
+
+   段键取块上的**主 run id**：assistant 看 runId、tool 看 parentRunId（工具块记的是父 run）、
+   compression 看 runId。子 agent 卡片 / 异步任务卡看 **parentRunId** —— 卡片自己那个 runId
+   是子 run，拿它切段会把父 run 切成两截。没有主 run id 的块（记录、插话）跟着当前段走。 */
+export interface TurnRun {
+  key: string
+  runId?: string
+  /** 在 turn.items 里的下标区间（[start, end)）—— 渲染按 turn.items 的顺序交错走。 */
+  start: number
+  end: number
+  items: MsgBlock[]
+}
+
+const owningRunId = (b: MsgBlock): string | undefined => {
+  switch (b.kind) {
+    case 'assistant': return b.runId
+    case 'compression': return b.runId
+    case 'tool': return b.parentRunId ?? b.runId
+    case 'agent': return b.parentRunId
+    case 'async_task': return b.parentRunId
+    default: return undefined
+  }
+}
+
+export function turnRuns(turn: Turn): TurnRun[] {
+  const runs: TurnRun[] = []
+  let curId: string | undefined
+  let start = 0
+  const seal = (end: number) => {
+    runs.push({
+      key: `${turn.key}#${runs.length}`,
+      ...(curId ? { runId: curId } : {}),
+      start, end, items: turn.items.slice(start, end),
+    })
+    start = end
+  }
+  turn.items.forEach((b, i) => {
+    const rid = owningRunId(b)
+    // 已经在一段里，又遇到**另一个**主 run 的块 → 上一段到此为止（这就是情况二的边界）
+    if (rid && curId && rid !== curId) seal(i)
+    if (rid) curId = rid
+  })
+  seal(turn.items.length)
+  return runs.filter((r) => r.end > r.start)
+}
+
+/* 一段运行装进盒子的行：与 workBody 同一条判据，只是作用域是一段。
+   answer 传**整轮**的结论（中间那次运行的正文属于过程，跟着自己的盒子走，
+   否则两次运行各吐一段正文，时间线上会凭空多出两段"结论"）。
+   offset = 这一段在 turn.items 里的起点：位置兜底（旧快照没有 afterRun 位）用的还是
+   全局下标，否则每一段都会把自己的记录判成"交卷后到达"。 */
+export function runWorkBody(
+  items: MsgBlock[],
+  opts: { answer?: MsgBlock; answerAt: number; offset: number },
+): MsgBlock[] {
+  return items.filter(
+    (b, i) =>
+      FOLDED_KINDS.has(b.kind)
+      || (b.kind === 'user' && b.injected)
+      || (isRecord(b) && !recordAfterRun(b, i + opts.offset, opts.answerAt))
+      || ((b.kind === 'assistant' || b.kind === 'compression') && b !== opts.answer),
   )
 }
 

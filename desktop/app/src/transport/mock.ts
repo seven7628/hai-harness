@@ -2303,6 +2303,10 @@ class MockTransport implements Transport {
     // 缺省时 store 按 lastLLMBlockId 兜底关联，块级 TTFT 无法结算（content_chunk
     // 的 ttftMs 只在能按 request_id 定位块时挂），消息底部耗时行/输出速度会缺失。
     const rid = opts.requestId ?? `req-${runId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    // 插话 Poll（对齐 agents/agent_loop 的 pollInputs）：每一轮**主 run** 的起点把
+    // 运行中排队的输入消费进来，事件带 injected=true（同一次 run，不另起一轮）。
+    // 子 agent 轮（显式传 runId）读不到会话 inbox —— 与真实现一致。
+    if (!opts.runId) this.after(Math.max(0, at - 6), () => this.drainInjections(sid), sid)
     // llm_start 也带 run_id（与 SDK 事件自包含一致）：子 agent 轮不建叙述块，输出走其卡片
     this.after(at, () => this.llmStart(this.model, rid, runId, sid), sid, okStop)
     let t = at + 40
@@ -2319,6 +2323,16 @@ class MockTransport implements Transport {
   private ask(sid: string, text: string) {
     if (!text.length) return
     this.askBatch(sid, [text])
+  }
+
+  // 运行中排队的输入：下一轮 LLM 起点消费进来（injected=true）。与 startRun 的
+  // takeBatch 路径区分开 —— 那条是「新运行的开口」，这条是同一个 run 的插话。
+  private drainInjections(sid: string) {
+    const st = this.state(sid)
+    if (!st.askQueue.length) return
+    const batch = st.askQueue.slice()
+    st.askQueue.length = 0
+    this.emit({ event_type: 'user_inputs_consumed', session_id: sid, user_texts: batch, injected: true, timestamp: ts() })
   }
 
   // 批量输入（客户端暂存队列整队推送）：空闲 → 一批开 run；运行中 → 整批入队（SDK takeBatch 语义）

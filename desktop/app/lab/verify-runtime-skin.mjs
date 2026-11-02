@@ -514,6 +514,15 @@ await wait(500)
 const nestedWheel = await page.eval(async () => {
   const nar = document.querySelector('.narrative')
   if (!nar) return { skipped: true }
+  // 这条用例的前提是「叙述区自己可滚」：贴底、再往回滚才谈得上离开底部。
+  // 收紧后的折叠态在 1440×1200 下可能整段放得下（实测 scrollHeight == clientHeight），
+  // 那样 onWheel 的 stopFollow 没有可滚的余量、按钮永远不会出现 —— 断言测的就不是
+  // wheel 归属了。先垫一段占位内容把滚动条造出来，结束时移除。
+  const spacer = document.createElement('div')
+  spacer.setAttribute('data-lab-spacer', '1')
+  spacer.style.cssText = 'height:1200px'
+  nar.appendChild(spacer)
+  await new Promise((r) => setTimeout(r, 120))
   nar.scrollTop = nar.scrollHeight // 先贴底（按钮不该在）
   const box = document.createElement('div')
   box.setAttribute('data-lab-inner', '1')
@@ -535,6 +544,7 @@ const nestedWheel = await page.eval(async () => {
   document.querySelector('.narrative-jump')?.click()
   await new Promise((r) => setTimeout(r, 300))
   nar.scrollTop = nar.scrollHeight
+  spacer.remove()
   return { withInner, atTop, ms: Date.now() - t0 }
 })
 check('scroll: a wheel inside a nested scroller does not summon "jump to latest"',
@@ -1136,6 +1146,10 @@ const c1 = await page.eval(() => {
 })
 check('concise: the working phase is behind one fold row', c1.fold && !c1.inTheTurn, JSON.stringify({ fold: c1.fold, inner: c1.inTheTurn }))
 check('concise: the fold row settles the numbers', /Worked for/.test(c1.foldText) && /calls/.test(c1.foldText), c1.foldText)
+// 2026-10 用户口径：所有计时归一化、最多两级单位（1h30m / 1m25s / 1s666ms / 880ms）——
+// 进位才有 h/m，单位之间不留空格，不出 `1 m 11 s` / `1.3s` 这种旧写法。
+check('concise: the fold duration uses the normalized ladder',
+  /Worked for (?:\d+h\d*m|\d+h|\d+m\d+s|\d+m|\d+s\d+ms|\d+s|\d+ms) ·/.test(c1.foldText), c1.foldText)
 check('concise: no second copy of the file line', !c1.fileLine, c1.fileLine)
 
 // 展开：工作过程进来，并且有高度上限（超出滚动）
@@ -1253,6 +1267,16 @@ const foot = await page.eval(() => {
 })
 check('turn: the cost line exists and is the ledger', foot.ledger === true && /calls/.test(foot.txt || ''), foot.txt)
 check('turn: the legacy TTFT line is gone (one fact, one line)', foot.meta === 0, foot.meta)
+// 账上的四个数（turn）、悬停展开的三个时间（TTFT / LLM）、以及 tok/s 的速度值：
+// 时间必须是归一化写法 —— 无小数秒、数字与单位之间无空格。
+const fmtLedger = {
+  txt: foot.txt,
+  ladder: / · (?:\d+h\d*m|\d+h|\d+m\d+s|\d+m|\d+s\d+ms|\d+s|\d+ms) turn/.test(foot.txt || ''),
+  noDecimalSec: !/\d\.\d+\s*s\b/.test(foot.txt || ''),
+  noSpaceUnit: !/\d\s+(?:ms|s)\b/.test(foot.txt || ''),
+}
+check('turn: the ledger timings use the normalized ladder',
+  fmtLedger.ladder && fmtLedger.noDecimalSec && fmtLedger.noSpaceUnit, JSON.stringify(fmtLedger))
 check('turn: the ledger sits above the artifacts card', foot.order.sameTurn && foot.order.ledgerBeforeArtifacts, JSON.stringify(foot.order))
 check('turn: artifacts replace the standalone file line', foot.order.sameTurn && !foot.order.fileLine, JSON.stringify(foot.order))
 check('turn: ledger → artifacts keeps the 10px rhythm', foot.order.gap != null && foot.order.gap >= 6 && foot.order.gap <= 14, `${foot.order.gap}px`)

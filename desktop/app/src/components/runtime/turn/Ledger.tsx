@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { fmtDuration } from '../../../lib/duration'
 import './ledger.css'
 
 /* The last line of a turn: what it cost. Four facts at rest — calls, tokens,
@@ -37,8 +38,8 @@ export function Ledger({
 
   const more: React.ReactNode[] = []
   // under 50ms the number is measurement noise, not a first token
-  if (ttftMs && ttftMs >= 50) more.push(stamp('TTFT', (ttftMs / 1000).toFixed(ttftMs < 1000 ? 2 : 1) + ' s'))
-  if (llmMs) more.push(stamp('LLM', (llmMs / 1000).toFixed(1) + ' s'))
+  if (ttftMs && ttftMs >= 50) more.push(stamp('TTFT', fmtDuration(ttftMs)))
+  if (llmMs) more.push(stamp('LLM', fmtDuration(llmMs)))
   if (tps) more.push(fact(tps, 'tok/s'))
 
   return (
@@ -61,7 +62,7 @@ export function Ledger({
       {fact(calls, calls === 1 ? 'call' : 'calls')}
       {' \u00b7 '}{fact(tok, 'tokens')}
       {' \u00b7 '}{fact(hit, 'cache')}
-      {' \u00b7 '}{fact(Math.round(wallMs / 1000), 's turn')}
+      {' \u00b7 '}{fact(fmtDuration(wallMs), 'turn')}
       {more.length ? (
         <span className="rt-lg-more">
           <span className="rt-lg-in">

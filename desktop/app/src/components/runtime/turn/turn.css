@@ -66,3 +66,14 @@
 .rt-turn-ans > *:last-child {
   margin-bottom: 0;
 }
+
+/* 盒与盒之间的时间线（一轮多次运行时，异步任务结果通知这类记录落在两个盒子之间）。
+   它与 working 盒同级：不缩进、不借用 .rt-turn-ans 的 16px「交代」节奏。 */
+.rt-turn-line {
+  display: block;
+  min-width: 0;
+}
+.rt-turn-line > .sig-list {
+  margin-top: 4px;
+  margin-bottom: 2px;
+}

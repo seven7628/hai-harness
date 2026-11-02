@@ -584,7 +584,7 @@ function stripLiveTail(blocks: MsgBlock[], toolId: string): MsgBlock[] {
 }
 
 export type MsgBlock =
-  | { kind: 'user'; id: number; text: string; ts?: number; contents?: QueuedContent[]; refs?: RefLoadInfo[] } // contents = 附件（图片等；对话页渲染缩略图）；refs = @引用展开结果（refs_loaded 事件，对话页状态行）
+  | { kind: 'user'; id: number; text: string; ts?: number; contents?: QueuedContent[]; refs?: RefLoadInfo[]; injected?: boolean } // contents = 附件（图片等；对话页渲染缩略图）；refs = @引用展开结果（refs_loaded 事件，对话页状态行）；injected = 运行中插话（属于当前 run，不另起一轮）
   | { kind: 'assistant'; id: number; text: string; streaming: boolean; model?: string; runId?: string; thinking: string; thinkMs?: number; ttftMs?: number; durMs?: number; agentDurMs?: number; thinkStart?: number; outputTokens?: number; reasoningTokens?: number; thinkingSummarized?: boolean; genMs?: number; ts?: number }
   // 工具块：nestedCalls = 编排型工具（codemode）脚本内的嵌套调用清单（外层结果自带，
   // 子调用**不生成**自己的工具块）；spillPath = 完整输出落盘路径（缺失时渲染层不显示该行）。
@@ -642,7 +642,12 @@ function pushSignal(blocks: MsgBlock[], fact: SignalFact, afterRun = false): Msg
     const lk = `${last.fact.sig}|${last.fact.etype}|${last.fact.n ?? ''}|${last.fact.name ?? ''}|${last.fact.message ?? ''}|${last.fact.round ?? ''}`
     if (lk === key) return blocks
   }
-  return [...blocks, { kind: 'signal', id: blockSeq++, fact, ...(afterRun ? { afterRun: true } : {}) }]
+  /* afterRun **两位都显式写**（不是只在 true 时写）：位置兜底
+     （selectTurns.recordAfterRun 的 `i > answerAt`）只该服务旧快照。恢复出来的视图里
+     正在写的那段正文已经不 streaming 了，于是它被当成「这一轮的结论」—— 之后到达的
+     记录全被判成「交卷后」甩出 Working 盒。把「运行中到达」这个事实本身写进块里，
+     位置就不再是证据（用户 2026-11：刷新后 compress_end 没有收缩进 working）。 */
+  return [...blocks, { kind: 'signal', id: blockSeq++, fact, afterRun }]
 }
 
 /* 事件上的 run_id（有些运行级事件只带它，见 getSid 的注释）。 */
@@ -651,24 +656,54 @@ function runIdOf(raw: AnyEvent): string | undefined {
   return typeof r === 'string' && r ? r : undefined
 }
 
+/* —— 子 agent 卡片：视图里的两个数组都要找 ——
+   `blocks` 是首屏窗口内的块，`agentDetached` 是窗口外的卡片（bridge 的 agents 字段）。
+   只找 blocks 的写法会让「卡片被翻页翻出去」的那条信号掉进主转录（用户 2026-11：
+   信号必须绑定 session，尤其子 agent 的 session）。 */
+type AgentCardBlock = Extract<MsgBlock, { kind: 'agent' }>
+type CardHit = { card: AgentCardBlock; detached: boolean }
+type ViewPatch = { blocks: MsgBlock[]; agentDetached?: MsgBlock[] }
+
+function findAgentCard(v: SessionView, match: (c: AgentCardBlock) => boolean): CardHit | undefined {
+  const at = v.blocks.findIndex((b): b is AgentCardBlock => b.kind === 'agent' && match(b))
+  if (at >= 0) return { card: v.blocks[at] as AgentCardBlock, detached: false }
+  const detached = v.agentDetached ?? []
+  const dt = detached.findIndex((b): b is AgentCardBlock => b.kind === 'agent' && match(b))
+  if (dt >= 0) return { card: detached[dt] as AgentCardBlock, detached: true }
+  return undefined
+}
+
+/** 用新卡片替换命中位置（同一份对象引用 → 两个数组都不用下标）。 */
+function withAgentCard(v: SessionView, hit: CardHit, card: AgentCardBlock): ViewPatch {
+  if (!hit.detached) return { blocks: v.blocks.map((b) => (b === hit.card ? card : b)) }
+  return {
+    blocks: v.blocks,
+    agentDetached: (v.agentDetached ?? []).map((b) => (b === hit.card ? card : b)),
+  }
+}
+
+/** 同一类事实只留一条（与 pushSignal 同一条去重口径）。 */
+function cardHasSignal(card: AgentCardBlock, fact: SignalFact): boolean {
+  const key = `${fact.sig}|${fact.etype}|${fact.name ?? ''}|${fact.message ?? ''}`
+  return card.items.some((it) => it.kind === 'signal' &&
+    `${it.fact.sig}|${it.fact.etype}|${it.fact.name ?? ''}|${it.fact.message ?? ''}` === key)
+}
+
 /* 运行级信号归**它自己那次运行**：run_id 属于子 agent 时，挂到那张卡片的 items 上
    （卡片里读得到「它跑的时候发生过什么」），而不是往主转录追加一行 —— 两件事混在
    一起，用户读到的是「主 run 说了这句」（2026-10 报障）。
-   返回 null = 这不是子 run 的信号，调用方照常 pushSignal。 */
-function pushRunSignal(v: SessionView, runId: string | undefined, fact: SignalFact): MsgBlock[] | null {
-  if (!runId || !isSubAgentRun(v, runId)) return null
-  const at = v.blocks.findIndex((b) => b.kind === 'agent' && b.runId === runId)
-  if (at < 0) return null
-  const card = v.blocks[at] as Extract<MsgBlock, { kind: 'agent' }>
-  // 与 pushSignal 同一条去重口径（同一类事实只留一条）
-  const dup = card.items.some(
-    (it) =>
-      it.kind === 'signal' &&
-      `${it.fact.sig}|${it.fact.etype}|${it.fact.name ?? ''}|${it.fact.message ?? ''}` ===
-        `${fact.sig}|${fact.etype}|${fact.name ?? ''}|${fact.message ?? ''}`,
-  )
-  if (dup) return v.blocks
-  return v.blocks.map((b, i) => (i === at ? { ...card, items: [...card.items, { kind: 'signal' as const, fact }] } : b))
+   返回 null = 这个 run 没有卡片（不是子 run / 卡片还没到），调用方照常 pushSignal。 */
+function pushRunSignal(v: SessionView, runId: string | undefined, fact: SignalFact): ViewPatch | null {
+  if (!runId) return null
+  const hit = findAgentCard(v, (c) => c.runId === runId)
+  if (!hit) return null
+  if (cardHasSignal(hit.card, fact)) return { blocks: v.blocks } // 已归属卡片（去重命中）
+  return withAgentCard(v, hit, { ...hit.card, items: [...hit.card.items, { kind: 'signal' as const, fact }] })
+}
+
+/** 把一行信号落到「它自己的会话」：子 agent 卡片优先，没有卡片才是主转录。 */
+function signalToOwner(v: SessionView, runId: string | undefined, fact: SignalFact, afterRun: boolean, evTime?: number): ViewPatch {
+  return pushRunSignal(v, runId, fact) ?? { blocks: pushSignalAt(v, fact, afterRun, evTime) }
 }
 
 /* 一行信号落到它**发生的位置**（判据见 insertRecordAt）：事件时刻早于当前 run 的开始
@@ -712,13 +747,25 @@ function insertRecordAt(
   add: MsgBlock[],
   opts: { evTime?: number; run?: { id?: string; startedAt?: number } },
 ): MsgBlock[] {
+  /* ownerIndex < 0 = 「当前这一轮」（调用方不知道也不会给卡片下标）：它的起点是**最后
+     一条 user 之后**，不是数组开头。
+     旧写法从 0 开始找「下一条 user」，于是在只有一轮的会话里第一个 user 就把它拦住 →
+     记录被插到**用户消息上方**。表现是一轮被切成两段：开头一条光秃秃的信号/回执行，
+     下面才是真正的这一轮（用户 2026-11 的截图正是这个形态）。 */
+  let start = ownerIndex
+  if (start < 0) {
+    start = 0
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      if (blocks[i].kind === 'user') { start = i + 1; break }
+    }
+  }
   let at = blocks.length
-  for (let i = Math.max(0, ownerIndex); i < blocks.length; i++) {
+  for (let i = start; i < blocks.length; i++) {
     if (blocks[i].kind === 'user') { at = i; break }
   }
   const run = opts.run
   if (opts.evTime != null && run?.id && run.startedAt != null && opts.evTime < run.startedAt) {
-    for (let i = Math.max(0, ownerIndex); i < at; i++) {
+    for (let i = start; i < at; i++) {
       // 工具块记的是 parentRunId（主 run 也走这条），assistant 块记 runId —— 两者都算
       const b = blocks[i] as { runId?: string; parentRunId?: string }
       if (b.runId === run.id || b.parentRunId === run.id) { at = i; break }
@@ -874,7 +921,7 @@ export type AgentItem =
   // 完整输出落盘路径（来源与语义见 lib/codemodeNested.ts；嵌套调用自身没有工具行）。
   // todos：todo_* 工具项那一刻**该子 agent 自己**的清单快照（历史计划卡定格显示，
   // 语义与主对话工具块的 todos 同源，但归属是它自己的卡片，不是会话清单）
-  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[]; liveTail?: string; liveSeq?: number; liveTotal?: number }
+  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; promoted?: boolean; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[]; liveTail?: string; liveSeq?: number; liveTotal?: number }
   // user 子运行上下文里的一条用户/模型消息（来源见 events.AgentUserMessage）。
   // 它是**转录的一部分**（子会话里能看到「我对它说了什么」），不是任务结果。
   | { kind: 'user'; text: string; startedAt?: number; ts?: number }
@@ -4327,6 +4374,20 @@ function flushQueueOnRunEnd(sid: string): void {
   useAppStore.getState().flushPending(sid)
 }
 
+/* 工具结束：把暂存队列推上去，让它在**下一个 LLM 起点**就被插话 Poll 带进上下文。
+   为什么不能只等下一次 llm_end（用户 2026-11 讨论的默认语义「工具结束后送达」）：
+   一次工具调用的顺序是 llm_start → llm_end(tool_call) → 工具跑 → 下一轮 llm_start。
+   用户在工具跑的时候输入，队列要等到「工具返回 + 下一轮模型跑完」才 flush，而插话 Poll
+   在**每轮 llm_start 之前**，于是这条消息要再等一整轮才被模型看到。工具结束就推送，
+   它正好赶上下一轮（工具结果也在那次请求里）—— 不打断任何东西，只是别多等一轮。
+   幂等：没有未推送项时 flushPending 直接返回。 */
+function flushQueueAfterTool(sid: string): void {
+  if (materializing) return // 恢复重放：历史事件不产生新请求
+  const v = useAppStore.getState().views[sid]
+  if (!v || !v.pendingQueue.some((q) => !q.pushed)) return
+  useAppStore.getState().flushPending(sid)
+}
+
 // bridge 事件 → 状态更新：按 session_id 路由进 views[sid]（后台会话事件进自己 view，不打扰当前显示）；
 // 活跃会话同步顶层镜像（组件读顶层零改动）。
 export function dispatchEvent(raw: AnyEvent): void {
@@ -5310,6 +5371,10 @@ export function dispatchEvent(raw: AnyEvent): void {
               blocksCursor: typeof d.blocks_cursor === 'number' ? d.blocks_cursor : undefined,
               blocksHasMore: d.blocks_has_more === true,
               turnsTotal: typeof d.turns_total === 'number' ? d.turns_total : undefined,
+              // 进程内复用 vs 磁盘冷恢复（bridge new_session 的 live 位）。
+              // snapshot 路径早就用它（见 materializeSnapshot 的 cold 参数），
+              // checkpoint 路径上一版漏了 —— 刷新一次就把在跑的 run 判成已交卷。
+              live: d.live === true,
               agents: Array.isArray(d.agents) ? (d.agents as unknown[]) : undefined,
             })
           } catch (err) {
@@ -6033,6 +6098,9 @@ export function dispatchEvent(raw: AnyEvent): void {
       const isSub = Boolean(runId && isSubAgentRun(current, runId))
       disarmCompressWatchdog(sid, isSub ? runId : undefined)
       const err = raw.error ? String(raw.error) : ''
+      // 成功压缩才发「压缩完成」的一行 signal：失败/中止的原因已经写在压缩块上，
+      // 再来一行同义提示只是噪音。
+      const okCompress = !err && !(raw.aborted === true) && raw.finish_reason !== 'abort'
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         if (isSub && runId) {
@@ -6069,6 +6137,17 @@ export function dispatchEvent(raw: AnyEvent): void {
             durMs: startedAt != null ? Math.max(0, ts - startedAt) : undefined,
           }
           const blocks = upsertAgentCompression(v.blocks, runId, item)
+          // 压缩完成的一行 signal（用户 2026-11）：卡片里多一行「压缩完了」，
+          // 与主会话同一套事实/文案 —— 归属仍是**这个子 agent 的会话**。
+          if (okCompress) {
+            const fact: SignalFact = {
+              sig: 'compact', etype: 'compress_end',
+              ...(before ? { before } : {}),
+              ...(after ? { after } : {}),
+            }
+            const owned = signalToOwner({ ...v, blocks }, runId, fact, afterRunNow(v), ts)
+            return setView(s, sid, { ...v, ...owned })
+          }
           return setView(s, sid, { ...v, blocks })
         }
         // Main Agent compression remains a first-class conversation block;
@@ -6094,23 +6173,37 @@ export function dispatchEvent(raw: AnyEvent): void {
           todos,
           ctxTokens,
           ctxTokensEstimated,
-          blocks: [...v.blocks, {
-            kind: 'compression',
-            id: blockSeq++,
-            before: Number(raw.before ?? 0),
-            after: Number(raw.after ?? 0),
-            ctxTokens,
-            ctxTokensBefore: typeof raw.ctx_tokens_before === 'number' ? raw.ctx_tokens_before : undefined,
-            reason: raw.reason ? String(raw.reason) : undefined,
-            model: raw.model ? String(raw.model) : undefined,
-            summary: raw.summary ? String(raw.summary) : undefined,
-            analysis: raw.analysis ? String(raw.analysis) : undefined,
-            usage,
-            error: aborted ? undefined : (err || undefined),
-            aborted: aborted || undefined,
-            durMs,
-            runId,
-          }],
+          blocks: (() => {
+            const next: MsgBlock[] = [...v.blocks, {
+              kind: 'compression',
+              id: blockSeq++,
+              before: Number(raw.before ?? 0),
+              after: Number(raw.after ?? 0),
+              ctxTokens,
+              ctxTokensBefore: typeof raw.ctx_tokens_before === 'number' ? raw.ctx_tokens_before : undefined,
+              reason: raw.reason ? String(raw.reason) : undefined,
+              model: raw.model ? String(raw.model) : undefined,
+              summary: raw.summary ? String(raw.summary) : undefined,
+              analysis: raw.analysis ? String(raw.analysis) : undefined,
+              usage,
+              error: aborted ? undefined : (err || undefined),
+              aborted: aborted || undefined,
+              durMs,
+              runId,
+            }]
+            if (!okCompress) return next
+            // 压缩完成的一行 signal（主会话）。落位与其它记录同一判据：运行中 → 盒子内
+            // 按事件顺序，AgentEnd 之后 → 时间线。副题只报 compress_end 给的消息数。
+            const before = Number(raw.before ?? 0)
+            const after = Number(raw.after ?? 0)
+            const fact: SignalFact = {
+              sig: 'compact', etype: 'compress_end',
+              ...(before ? { before } : {}),
+              ...(after ? { after } : {}),
+            }
+            const owner = signalToOwner({ ...v, blocks: next }, runId, fact, afterRunNow(v), ts)
+            return owner.blocks
+          })(),
         })
       })
       break
@@ -6406,6 +6499,9 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 2026-09：run_python 产出可视文件也走这里（Go 侧把产出填进 Diff.path）——同文件
       // 再次产出由 autoOpenVisualFile 刷新已有标签，不会多开。
       if (endDiff?.path) autoOpenVisualFile(endDiff.path, sid)
+      // 工具批次结束：把用户在工具运行期间的输入推到服务端 inbox（默认语义：工具结束后
+      // 送达；见 flushQueueAfterTool）。「立即发送」按钮走同一个 flushPending，只是更早。
+      flushQueueAfterTool(sid)
       break
     }
     case 'user_inputs_consumed': {
@@ -6420,6 +6516,10 @@ export function dispatchEvent(raw: AnyEvent): void {
         ? (raw.user_contents as { type?: string; content?: string; mime_type?: string }[][])
         : undefined
       if (!texts.length && !(contentGroups && contentGroups.length)) break
+      // 运行中插话（AgentLoop 的插话 Poll）消费的输入：它属于**当前这一轮**，
+      // 不另起一轮（见 selectTurns：注入的 user 块进当前轮）。缺字段的旧事件/旧日志
+      // 一律按「新运行的开口」处理 —— 老行为不变。
+      const injected = raw.injected === true
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         // 消费数按"消息条数"取：内容块组（每消息一组）为权威；旧日志无组 → 按文本条数。
@@ -6442,9 +6542,10 @@ export function dispatchEvent(raw: AnyEvent): void {
         //（权威 + 恢复可重建），缺失（旧日志）回退队列 contents。
         const blocks: MsgBlock[] = consumed.map((q, i) => {
           const g = contentGroups?.[i]
+          const mid = injected ? { injected: true as const } : {}
           if (g && g.length) {
             const contents = normGroup(g)
-            return { kind: 'user' as const, id: blockSeq++, text: groupText(contents) || '(附件)', ts, contents }
+            return { kind: 'user' as const, id: blockSeq++, text: groupText(contents) || '(附件)', ts, contents, ...mid }
           }
           return {
             kind: 'user' as const,
@@ -6452,16 +6553,18 @@ export function dispatchEvent(raw: AnyEvent): void {
             text: queuedText(q) || '(附件)',
             ts,
             contents: q.contents?.length ? q.contents : undefined,
+            ...mid,
           }
         })
         // 事件多于待发送（其他来源输入，如 agent_send / 恢复重放无本地队列）→ 按事件内容补齐
         for (let i = n; i < Math.max(texts.length, contentGroups?.length ?? 0); i++) {
           const g = contentGroups?.[i]
+          const mid = injected ? { injected: true as const } : {}
           if (g && g.length) {
             const contents = normGroup(g)
-            blocks.push({ kind: 'user', id: blockSeq++, text: groupText(contents) || '(附件)', ts, contents })
+            blocks.push({ kind: 'user', id: blockSeq++, text: groupText(contents) || '(附件)', ts, contents, ...mid })
           } else {
-            blocks.push({ kind: 'user', id: blockSeq++, text: texts[i] ?? '', ts })
+            blocks.push({ kind: 'user', id: blockSeq++, text: texts[i] ?? '', ts, ...mid })
           }
         }
         // 一行信号（设计「Small signals」的 user_inputs_consumed）：两条以上排队消息被
@@ -6500,7 +6603,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           ...v,
           // 一行信号（设计 §「Small signals」的 goal_alignment_reminder）：之前是 system 块，
           // 形态与"关于这次运行的一条事实"不符 —— 它会和真正的系统提示混在一起。
-          blocks: pushRunSignal(v, runIdOf(raw), goalFact) ?? pushSignalAt(v, goalFact, afterRunNow(v), evTs(raw)),
+          ...signalToOwner(v, runIdOf(raw), goalFact, afterRunNow(v), evTs(raw)),
         })
       })
       return
@@ -6628,7 +6731,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           }
           const upd = setView(st, sid, {
             ...v,
-            blocks: pushRunSignal(v, runIdOf(raw), fact) ?? pushSignalAt(v, fact, afterRunNow(v), evTs(raw)),
+            ...signalToOwner(v, runIdOf(raw), fact, afterRunNow(v), evTs(raw)),
           })
           return upd
         })
@@ -6899,7 +7002,7 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushRunSignal(v, runIdOf(raw), hookFact) ?? pushSignalAt(v, hookFact, afterRunNow(v), evTs(raw)),
+          ...signalToOwner(v, runIdOf(raw), hookFact, afterRunNow(v), evTs(raw)),
         })
       })
       break
@@ -6920,15 +7023,9 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = st.views[sid] ?? emptyView()
         return setView(st, sid, {
           ...v,
-          blocks: pushRunSignal(v, runIdOf(raw), silentFact) ??
-            pushSignalAt(
-              v,
-              silentFact,
-              // 它是这次运行的**结论**（Go 在 AgentEnd 之前一条发出）：折进盒子就等于
-              // 「跑完了但屏幕上什么都没发生」，正是这条信号存在的理由所反对的形态。
-              true,
-              evTs(raw),
-            ),
+          // 它是这次运行的**结论**（Go 在 AgentEnd 之前一条发出）：折进盒子就等于
+          // 「跑完了但屏幕上什么都没发生」，正是这条信号存在的理由所反对的形态。
+          ...signalToOwner(v, runIdOf(raw), silentFact, true, evTs(raw)),
         })
       })
       break
@@ -7097,36 +7194,49 @@ export function dispatchEvent(raw: AnyEvent): void {
       break
     }
     case 'task_promoted': {
-      // 运行中的工具已被摘离为后台任务（promote_task 命令成功）：该工具行 → 后台任务态
+      // 运行中的工具/同步子 agent 已被摘离为后台任务（promote_task 命令成功）。
+      //
+      // 归属（用户 2026-11 的口径，与 409a99c 相反的一半）：
+      //   · **摘离**这条信号属于**它自己的会话**。子 agent 在自己的会话里把工具摘成后台
+      //     任务 → 那行挂在**它的卡片**上（子会话页/卡片里读得到「它跑了什么」），
+      //     不能因为「任务最终回到主会话」就把摘离也画到主转录里 —— 主转录里根本没有
+      //     那次工具调用，凭空一行「已摘为后台任务」读起来像从天上掉下来的。
+      //   · **完成**（task_result_delivered）仍然推回主会话（下一 case）：结果是会话级的，
+      //     模型会在主 run 的下一轮里读到它，signal 组件也显示在主会话。
       const sid = getSid(raw, getState().activeSessionId)
       const taskId = String(raw.task_id || '')
       if (!taskId) break
+      const fact: SignalFact = {
+        sig: 'promote', etype: 'task_promoted',
+        ...(raw.name ? { name: String(raw.name) } : {}),
+        message: taskId,
+      }
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
-        return setView(s, sid, {
-          ...v,
-          runNodes: v.runNodes.map((n) => (n.kind === 'tool' && n.taskId === taskId ? { ...n, promoted: true } : n)),
-          /* 任务级提示**始终在主会话**（用户 2026-10：异步任务完成的通知必须通知到主
-             session，这条比较特殊）。异步任务是会话级的对象：卡片挂在主转录、结果回填
-             主会话的 inbox，所以「被摘成后台任务」「任务完成」两行也归这里 —— 哪怕这个
-             任务是被子 agent 摘离的。塞进子 agent 卡片，主会话就只看到「任务完成了」而
-             没有「它从哪来」，读起来像凭空冒出来的一行。 */
-          blocks: pushSignalAt(
-            {
-              ...v,
-              // 工具行本身也要标 promoted（卡片角的「后台」徽标）
-              blocks: v.blocks.map((b) =>
-                b.kind === 'tool' && b.taskId === taskId
-                  ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
-                  : b,
-              ),
-            },
-            // 一行信号：工具行折叠/收起后，「这次调用被摘成后台任务」仍要能看见
-            { sig: 'promote', etype: 'task_promoted', ...(raw.name ? { name: String(raw.name) } : {}), message: taskId },
-            afterRunNow(v),
-            evTs(raw),
-          ),
-        })
+        // 主转录里的工具行 / 运行节点：后台态（主 run 自己的工具走这条）
+        const blocks = v.blocks.map((b) =>
+          b.kind === 'tool' && b.taskId === taskId
+            ? { ...b, promoted: true, taskStatus: b.interrupting ? ('interrupting' as const) : ('running' as const) }
+            : b,
+        )
+        const runNodes = v.runNodes.map((n) => (n.kind === 'tool' && n.taskId === taskId ? { ...n, promoted: true } : n))
+        const base = { ...v, blocks, runNodes }
+        // 这个任务属于哪张子 agent 卡片？卡片自己的 taskId（同步子 agent 被摘离），
+        // 或卡片里某个工具项的 taskId（子 agent 在自己的会话里把工具摘成后台任务）。
+        const hit = findAgentCard(base, (c) =>
+          c.taskId === taskId || c.items.some((it) => it.kind === 'tool' && it.taskId === taskId),
+        )
+        if (!hit) {
+          // 主 run 自己的任务：一行信号落在主会话（工具行收起后仍能看见；按事件时刻落位）
+          return setView(s, sid, { ...base, blocks: pushSignalAt(base, fact, afterRunNow(v), evTs(raw)) })
+        }
+        // 卡片里的工具项也要切后台态（否则子会话里那行还写着「运行中」而信号说已摘离）
+        const card: AgentCardBlock = {
+          ...hit.card,
+          items: hit.card.items.map((it) => (it.kind === 'tool' && it.taskId === taskId ? { ...it, promoted: true } : it)),
+        }
+        const owned = cardHasSignal(card, fact) ? card : { ...card, items: [...card.items, { kind: 'signal' as const, fact }] }
+        return setView(s, sid, { ...base, ...withAgentCard(base, hit, owned) })
       })
       break
     }
@@ -7168,21 +7278,52 @@ export function dispatchEvent(raw: AnyEvent): void {
         const alreadyNoticed =
           taskDeliveries.length > 0 ? deliveryKey(taskDeliveries[taskDeliveries.length - 1]) === thisKey : false
         if (taskIndex < 0) {
-          if (alreadyNoticed || v.blocks.some((b) => b.kind === 'task_result' && b.taskId === taskId)) return s
           const afterRun = afterRunNow(v)
+          const delivery: MsgBlock = {
+            kind: 'task_delivery',
+            id: blockSeq++,
+            taskId,
+            status: deliveryStatus,
+            result: result || undefined,
+            error: error || undefined,
+            afterRun, // 两位都写：见 pushSignal 的注释（位置兜底只服务旧快照）
+          }
+          // 「找不到顶层任务」有两种情况：a) 旧日志/事件乱序（卡片确实不在）；b) 任务的
+          // 工具行在**子 agent 卡片的 items 里**（子 agent 在自己的会话里摘离的工具）。
+          // b 必须把终态收回那一项 —— 否则子会话里那行永远写着「运行中」，而主会话
+          // 收到一条「完成」的 signal（用户 2026-11：归属必须和它自己的会话对得上）。
+          const hit = findAgentCard(v, (c) =>
+            c.items.some((it) => it.kind === 'tool' && it.taskId === taskId),
+          )
+          if (hit) {
+            if (alreadyNoticed) return s
+            const card: AgentCardBlock = {
+              ...hit.card,
+              items: hit.card.items.map((it) =>
+                it.kind === 'tool' && it.taskId === taskId
+                  ? {
+                      ...it,
+                      status: deliveryStatus === 'failed' ? ('error' as const) : ('done' as const),
+                      result: result || error || it.result,
+                    }
+                  : it,
+              ),
+            }
+            const patched = withAgentCard(v, hit, card)
+            return setView(s, sid, {
+              ...v,
+              ...patched,
+              // 主会话只收**一行**交付 signal（完整结果在它自己的会话里），
+              // 落位与其它记录同一判据（事件时刻 + 所属轮）。
+              blocks: insertRecordAt(patched.blocks, -1, [delivery], { evTime: evTs(raw), run: currentRun(v) }),
+            })
+          }
+          if (alreadyNoticed || v.blocks.some((b) => b.kind === 'task_result' && b.taskId === taskId)) return s
           return setView(s, sid, {
             ...v,
             blocks: insertRecordAt(v.blocks, -1, [
               { kind: 'task_result', id: blockSeq++, taskId, result, error: error || undefined },
-              {
-                kind: 'task_delivery',
-                id: blockSeq++,
-                taskId,
-                status: deliveryStatus,
-                result: result || undefined,
-                error: error || undefined,
-                ...(afterRun ? { afterRun: true } : {}),
-              },
+              delivery,
             ], { evTime: evTs(raw), run: currentRun(v) }),
           })
         }
@@ -7224,7 +7365,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             status: deliveryStatus,
             result: result || undefined,
             error: error || undefined,
-            ...(afterRun ? { afterRun: true } : {}),
+            afterRun, // 两位都写：见 pushSignal 的注释（位置兜底只服务旧快照）
           }
           return setView(s, sid, {
             ...v,
@@ -7345,32 +7486,52 @@ function armSnapshotWatchdog(sid: string, requestId: number): void {
   }, SNAPSHOT_WATCHDOG_MS)
 }
 
-// finalizeReplayView 快照/历史归一化：残留的流式/running 态强制落地
-//（被中断的会话不能卡输入/显示幽灵运行点），交互态（提问/审批/沙箱放行）不跨重启存活；
-// 运行中子 agent 计数收敛到归一化后的最终 blocks。
-function finalizeReplayView(v: SessionView): SessionView {
+/* finalizeReplayView 快照/历史归一化：残留的流式/running 态强制落地
+   （被中断的会话不能卡输入/显示幽灵运行点），交互态（提问/审批/沙箱放行）不跨重启存活；
+   运行中子 agent 计数收敛到归一化后的最终 blocks。
+
+   ## live：这条路径是不是「进程内复用」（用户 2026-11 报障的根因）
+   bridge 的 new_session 已经带 `live` 位：「true = 进程内复用，后台运行态仍有效；
+   false = 磁盘冷恢复」。**只有冷恢复**才有「残留 running 是幽灵」这个前提 —— 冷恢复时
+   进程死了，谁也不会再发 agent_end/tool_run_end。写得进 record 的 running 一定是硬中断。
+
+   warm（live）恰恰相反：主 run 真的还在跑（这正是「页面刷新」的常态）。上一版对 checkpoint
+   路径**无条件**归一化，于是刷新一次就把顶层 run 节点改成 done、runEnded 恒 true：
+     · 折叠行立刻从 Working 变成 Worked for（明明还在跑）；
+     · afterRunNow() 恒 true → 之后到达的每一条记录（compress_end / task_delivery…）
+       都被判成「交卷后才到」，一律甩到 Working 盒子外面的时间线上 —— 用户看到的就是
+       「AgentEnd 还没来，signal 却没收缩到 working 里面」。
+   冷/暖的判据只有 bridge 知道，所以从调用方透传进来（见 hydrateCheckpoint / materializeSnapshot）。 */
+function finalizeReplayView(v: SessionView, opts?: { live?: boolean }): SessionView {
+  const live = opts?.live === true
   const blocks = v.blocks.map((b) =>
     b.kind === 'assistant'
       // 恢复归一化：流式态复位 + 未结算的思考计时强制落地 —— 会话中断/日志截断时
       // thinkStart 已打点但 llm_end 未到，不结算会留下永远跳动的「思考 · Ns…」幽灵计时器。
-      ? { ...b, streaming: false, ...(b.thinkStart != null && b.thinkMs == null ? { thinkMs: Math.max(0, Date.now() - b.thinkStart) } : {}) }
-      : b.kind === 'tool' && b.status === 'running'
-        ? { ...b, status: 'done' as const, interrupting: false, ...(b.taskStatus ? { taskStatus: 'abandoned' as const } : {}) }
-        : b.kind === 'agent' && (b.status === 'running' || b.status === 'interrupting')
-          ? { ...b, status: 'abandoned' as const }
-          : b.kind === 'async_task' && (b.status === 'running' || b.status === 'interrupting')
+      // 流式态**始终**复位：chunk 连续性已经断了，接着往旧块追加会把两段正文粘成一段。
+      ? { ...b, streaming: false, ...(!live && b.thinkStart != null && b.thinkMs == null ? { thinkMs: Math.max(0, Date.now() - b.thinkStart) } : {}) }
+      : live
+        ? b // 暖恢复：工具的 running 是真的在跑（tool_run_end 还会来），不许改成 done
+        : b.kind === 'tool' && b.status === 'running'
+          ? { ...b, status: 'done' as const, interrupting: false, ...(b.taskStatus ? { taskStatus: 'abandoned' as const } : {}) }
+          : b.kind === 'agent' && (b.status === 'running' || b.status === 'interrupting')
             ? { ...b, status: 'abandoned' as const }
-            : b,
+            : b.kind === 'async_task' && (b.status === 'running' || b.status === 'interrupting')
+              ? { ...b, status: 'abandoned' as const }
+              : b,
   )
   return {
     ...v,
     streaming: false,
+    // 瞬时计时器一律清空（暖恢复也一样）：它们是「本次渲染进程里我亲眼看见的开始时刻」，
+    // 恢复出来的视图没有它，硬留着只会得到一个从 0 开始跳的假时钟。
     llmStartTs: undefined,
     turnStartTs: {},
     toolStartTs: {},
     thinkStartTs: {},
     turnThinkMs: {},
-    questions: [],
+    // 暖恢复保留待答批次（run 真的还在等这个回答）；冷恢复清空（通道随进程没了）
+    questions: live ? v.questions : [],
     release: undefined,
     approvals: [],
     // 快照中 compress_start 无配套 compress_end（中断）→ 复位活动态，防右栏幽灵「压缩中」
@@ -7381,7 +7542,10 @@ function finalizeReplayView(v: SessionView): SessionView {
     compressReason: undefined,
     blocks,
     runningAgentCount: countRunningAgents(blocks),
-    runNodes: v.runNodes.map((n) => (n.status === 'running' ? { ...n, status: 'done' as const } : n)),
+    // 结算位：冷恢复一律 true（进程死了，不会再有 AgentEnd）；暖恢复保留 checkpoint 的推断
+    //（顶层 run 节点还在跑 → false，见 checkpointToView）。
+    runEnded: live ? v.runEnded : true,
+    runNodes: live ? v.runNodes : v.runNodes.map((n) => (n.status === 'running' ? { ...n, status: 'done' as const } : n)),
   }
 }
 
@@ -7580,7 +7744,11 @@ function checkpointToView(cp: CheckpointView): SessionView {
   for (const b of cp.blocks ?? []) {
     switch (b.kind) {
       case 'user':
-        blocks.push({ kind: 'user', id: b.id, text: b.text ?? '', ts: b.ts, ...(b.contents?.length ? { contents: b.contents.map(cpQueuedContent) } : {}) })
+        blocks.push({
+          kind: 'user', id: b.id, text: b.text ?? '', ts: b.ts,
+          ...(b.contents?.length ? { contents: b.contents.map(cpQueuedContent) } : {}),
+          ...(b.injected ? { injected: true } : {}),
+        })
         break
       case 'assistant':
         // 过滤历史「（已中断）」「（上下文已清空）」文本块：旧版 Go 把它们作为文本块
@@ -7693,6 +7861,9 @@ function checkpointToView(cp: CheckpointView): SessionView {
           status: (b.status ?? 'completed') as TerminalTaskStatus,
           ...(b.result ? { result: b.result } : {}),
           ...(b.error ? { error: b.error } : {}),
+          // 两位都透传（bridge 落块时按当时的运行态盖章）：缺省的 undefined 走位置兜底，
+          // 只服务这份字段之前的老 checkpoint。
+          ...(typeof b.after_run === 'boolean' ? { afterRun: b.after_run } : {}),
         })
         break
       case 'compression':
@@ -7738,26 +7909,50 @@ function checkpointToView(cp: CheckpointView): SessionView {
         break // 未知 kind：跳过（受版本约束的诊断不由 renderer 渲染）
     }
   }
+  const runNodes: RunNode[] = (cp.run_nodes ?? []).map((n) => ({
+    id: n.id, parentId: n.parent_id, label: n.label, status: n.status as RunNode['status'],
+    depth: n.depth, kind: n.kind as RunNode['kind'],
+    ...(n.name ? { name: n.name } : {}),
+    ...(n.args ? { args: n.args } : {}),
+    ...(n.result ? { result: n.result } : {}),
+    ...(n.is_error ? { isError: true } : {}),
+    ...(n.started_at != null ? { startedAt: n.started_at } : {}),
+    ...(n.dur_ms != null ? { durMs: n.dur_ms } : {}),
+    ...(n.ctx_window != null && n.ctx_window > 0 ? { ctxWindow: n.ctx_window } : {}),
+    ...(n.task_id ? { taskId: n.task_id } : {}),
+    ...(n.promoted ? { promoted: true } : {}),
+  }))
+  /* runEnded 由**顶层 run 节点**反推：它是 checkpoint 里唯一能说明「这次运行交卷没有」的
+     事实（AgentEnd 已写进 status）。缺省的 true 是给冷恢复用的 —— 暖恢复必须靠这一位
+     才知道 run 真的还在跑，否则刷新一次就折叠成 Worked for（见 finalizeReplayView 的 live
+     注释）。旧 checkpoint 没有 run_nodes / 没有顶层 run → 按「已结算」。 */
+  const rootRun = runNodes.find((n) => n.kind === 'run' && !n.parentId)
   return {
     ...emptyView(),
     blocks,
     approvals: [],
-    runNodes: (cp.run_nodes ?? []).map((n) => ({
-      id: n.id, parentId: n.parent_id, label: n.label, status: n.status as RunNode['status'],
-      depth: n.depth, kind: n.kind as RunNode['kind'],
-      ...(n.name ? { name: n.name } : {}),
-      ...(n.args ? { args: n.args } : {}),
-      ...(n.result ? { result: n.result } : {}),
-      ...(n.is_error ? { isError: true } : {}),
-      ...(n.started_at != null ? { startedAt: n.started_at } : {}),
-      ...(n.dur_ms != null ? { durMs: n.dur_ms } : {}),
-      ...(n.ctx_window != null && n.ctx_window > 0 ? { ctxWindow: n.ctx_window } : {}),
-      ...(n.task_id ? { taskId: n.task_id } : {}),
-      ...(n.promoted ? { promoted: true } : {}),
-    })),
+    runNodes,
+    runEnded: rootRun ? rootRun.status !== 'running' : true,
     diffs: (cp.diffs ?? []).map(cpDiff),
     compressing: false,
     todos: (cp.todos ?? []).map(cpTodo),
+    /* 待答的 ask_user 批次：checkpoint 里的镜像（刷新后抽屉面板靠它复原）。
+       是否保留由 finalizeReplayView 的 live 决定 —— 冷恢复时 harness 已经死了，
+       回答通道不存在，再画一个「等你回答」的面板只会骗人。 */
+    questions: (cp.pending_questions ?? [])
+      .filter((q) => q && typeof q.id === 'string' && q.id !== '')
+      .map((q) => ({
+        id: q.id,
+        ...(q.run_id ? { runId: q.run_id } : {}),
+        ...(q.timeout_ms ? { timeoutMs: q.timeout_ms } : {}),
+        ...(q.ts ? { ts: q.ts } : {}),
+        items: (Array.isArray(q.items) ? q.items : []).map((it) => ({
+          id: String(it?.id ?? ''),
+          question: String(it?.question ?? ''),
+          options: parseQuestionOptions(it?.options),
+          ...(it?.multi === true ? { multi: true } : {}),
+        })),
+      })),
     usage: cpUsage(cp.usage),
     ctxTokens: cp.ctx_tokens,
     ctxTokensEstimated: cp.ctx_tokens_estimated,
@@ -7794,6 +7989,9 @@ export function hydrateCheckpoint(
     blocksCursor?: number
     blocksHasMore?: boolean
     turnsTotal?: number
+    // bridge 的 `live` 位：true = 进程内复用（运行态仍有效），false = 磁盘冷恢复。
+    // 决定最终归一化要不要把 running 收敛成 done（见 finalizeReplayView 的 live 注释）。
+    live?: boolean
     // agents 窗口外的子智能体/任务卡片（bridge 的 agents 字段；见 SessionView.agentDetached）
     agents?: unknown[]
   },
@@ -7813,9 +8011,10 @@ export function hydrateCheckpoint(
     if (!cp || typeof cp !== 'object' || !Array.isArray(cp.blocks)) {
       throw new Error('checkpoint 结构非法: blocks 缺失')
     }
-    // checkpoint 已是稳定投影（streaming 恒 false、running 已由 bridge 归一化），
-    // 仍防御式归一化残留态（与 snapshot 路径共用 finalizeReplayView 语义）。
-    const v = finalizeReplayView(checkpointToView(cp))
+    // checkpoint 是稳定投影（streaming 恒 false），但 running **不是**残留：暖恢复
+    // （live）时主 run 真的还在跑，bridge 的 run_nodes 里那条顶层节点就是证据。
+    // 归一化只对冷恢复做收敛，见 finalizeReplayView 的 live 注释。
+    const v = finalizeReplayView(checkpointToView(cp), { live: meta?.live === true })
     useAppStore.setState((st) =>
       setView(st, sid, {
         ...v,

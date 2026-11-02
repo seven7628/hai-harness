@@ -313,3 +313,14 @@ html[data-skin='runtime'] .rt-lb-x:hover {
     animation: none;
   }
 }
+
+/* 运行中插话：同一位说话人，但它在 Working 盒子内部 —— 名字后面补一句
+   灰字，否则读起来像是这一轮的开口（用户 2026-11：同一个 run 不该出现第二个
+   Working，插话必须能看出「这是在它跑的时候补的」）。 */
+html[data-skin='runtime'] .rt-you .rt-who .rt-who-mid {
+  margin-left: 7px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  opacity: 0.75;
+  text-transform: none;
+}

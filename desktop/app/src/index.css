@@ -2089,6 +2089,11 @@ body.is-electron .left.collapsed .rail .rbtn {
   border-radius: 8px;
   padding: 4px 6px;
   max-width: 100%;
+  /* 简洁档的 .rt-grp 是 grid：grid item 的自动最小尺寸是 min-content，
+     里面一行不许折的 `white-space: pre`（bash 尾巴）会把整行撑到内容宽度，
+     于是工具框越过叙述列、被 .narrative 的 overflow-x 裁掉（用户 2026-11 报障）。
+     min-width: 0 = 「可以比内容窄」，宽度始终由列宽决定。 */
+  min-width: 0;
 }
 .tool-group:has(.tool-row:first-child:last-child) {
   padding: 2px 6px;
@@ -2100,6 +2105,8 @@ body.is-electron .left.collapsed .rail .rbtn {
   font-size: 12px;
   color: var(--text-2);
   border-radius: 6px;
+  /* 同 .tool-group：作为 flex/grid 的子项时不得被内容的最小宽度顶宽（见上）。 */
+  min-width: 0;
 }
 .tool-row .tool-row-hd {
   display: flex;
@@ -3948,6 +3955,30 @@ body.is-electron .left.collapsed .rail .rbtn {
 }
 .pq-sub {
   color: var(--text-3);
+}
+/* 头部右侧：状态说明 + 【立即发送】（不打断正在跑的工具，只是别多等一轮） */
+.pq-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pq-send {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pq-send:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  filter: brightness(0.98);
 }
 .pq-item {
   display: flex;
@@ -12188,6 +12219,7 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   border-radius: 8px;
   background: var(--code-bg);
   overflow: hidden;
+  min-width: 0;
 }
 .tool-row .tool-tail .sh-head {
   display: flex;
@@ -12265,8 +12297,13 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   opacity: 0.5;
 }
 .tool-row .tool-tail .tl .tx {
+  /* 尾巴只给人看（模型拿的是最终结果），所以它必须**在列宽内换行**：
+     终端式的 pre 会把长命令/PASS 行推出叙述列（用户 2026-11 报障）。
+     break-anywhere 兜住没有空格的路径；刻度槽是独立 flex 单元格，
+     换行后的续行自然缩进在正文列下面。 */
   min-width: 0;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .tool-row .tool-tail .tl[data-k='ok'] .tx { color: var(--success); }
 .tool-row .tool-tail .tl[data-k='warn'] .tx { color: var(--warning); }

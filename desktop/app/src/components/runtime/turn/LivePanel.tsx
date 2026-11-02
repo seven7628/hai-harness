@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Face } from '../Face'
-import { fmtMs, toolArgsSummary, toolMetric, toolVerb } from '../../../lib/toolSummary'
+import { toolArgsSummary, toolMetric, toolVerb } from '../../../lib/toolSummary'
+import { fmtRun } from '../../../lib/duration'
 import { activeElapsed, settlePause } from '../../../lib/activeElapsed'
 import { useNow } from '../../../lib/useNow'
 import type { MsgBlock } from '../../../store/useAppStore'
@@ -74,7 +75,7 @@ export function LivePanel({
         {/* 等待时不转：状态脸给 'work'（在等一个外部回应），跑起来才是 'run' */}
         <Face state={waiting ? 'work' : 'run'} />
         <span className="lv-lbl">{waiting ? 'Waiting' : 'Working'}</span>
-        <span className="lv-clock">{fmtMs(elapsed)}</span>
+        <span className="lv-clock">{fmtRun(elapsed)}</span>
         <span className="lv-sep">·</span>
         <span className="lv-n">{calls} {calls === 1 ? 'call' : 'calls'}</span>
         <span className="lv-act" data-waiting={waiting ?? undefined}>

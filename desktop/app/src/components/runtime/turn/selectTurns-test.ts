@@ -7,20 +7,22 @@
 //   3. 盒子存在 = workBody 非空（不是「有工具」）；没有盒子的轮（纯对话）正文回到时间线。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ALWAYS_SHOWN, FOLDED_KINDS, foldedBody, hasWork, runningBody, selectTurns, workBody } from './selectTurns'
-import type { MsgBlock } from '../../../store/useAppStore'
+import { ALWAYS_SHOWN, FOLDED_KINDS, foldedBody, hasWork, mergeArtifacts, runningBody, runWorkBody, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
+import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 const user = (id: number, text = 'go'): MsgBlock => ({ kind: 'user', id, text })
+const interjected = (id: number, text = '插一句'): MsgBlock => ({ kind: 'user', id, text, injected: true })
 const assistant = (id: number, text: string, streaming = false): MsgBlock => ({ kind: 'assistant', id, text, streaming, thinking: '' })
 const tool = (id: number, status: 'running' | 'done' = 'done'): MsgBlock => ({ kind: 'tool', id, toolId: 't' + id, name: 'bash', status })
+// afterRun 传 undefined = 旧快照（没有这一位，走位置兜底）；true/false = store 显式盖的戳。
 const delivery = (id: number, taskId = 'task-1', afterRun?: boolean): MsgBlock => ({
-  kind: 'task_delivery', id, taskId, status: 'completed', result: 'done', ...(afterRun ? { afterRun: true } : {}),
+  kind: 'task_delivery', id, taskId, status: 'completed', result: 'done', ...(afterRun != null ? { afterRun } : {}),
 })
 const signal = (id: number, afterRun?: boolean): MsgBlock => ({
   kind: 'signal',
   id,
   fact: { sig: 'promote', etype: 'task_promoted', name: 'bash' },
-  ...(afterRun ? { afterRun: true } : {}),
+  ...(afterRun != null ? { afterRun } : {}),
 })
 
 // 主 run：user → 工具行 → 运行中到达的 promote / 回执 → 收尾正文；AgentEnd 之后回执才到。
@@ -56,6 +58,17 @@ test('afterRun 位压过位置（续跑在同一轮里又产出正文时，位�
   const turn = selectTurns(blocks)[0]
   assert.deepEqual(workBody(turn).map((b) => b.id), [2])
   assert.deepEqual(foldedBody(turn).map((b) => b.id), [3, 4])
+})
+
+test('恢复后的视图：运行中到达（afterRun:false）的记录仍在盒内，哪怕位置在正文之后', () => {
+  // 用户 2026-11 报障：刷新（暖恢复）之后 compress_end 没有收缩进 Working 盒子。
+  // 恢复出来的视图里「正在写的那段正文」已经不再是 streaming —— answerIndex 把它当成
+  // 这一轮的结论，位置判据（i > answerAt）于是把之后到达的每条记录都判成「交卷后」。
+  // 块上的 afterRun:false 是「它是运行中到达的」这个事实，压过位置。
+  const blocks: MsgBlock[] = [user(1), assistant(2, '写到一半'), signal(3, false), delivery(4, 'task-1', false)]
+  const turn = selectTurns(blocks)[0]
+  assert.deepEqual(workBody(turn).map((b) => b.id), [3, 4], '运行中到达的记录必须还在盒子里')
+  assert.deepEqual(foldedBody(turn).map((b) => b.id), [2], '正文是这一轮的结论，留在外面')
 })
 
 test('同一批块不会既在盒子里又在外面（无重复渲染）', () => {
@@ -125,4 +138,166 @@ test('轮上记着自己属于哪次运行（agent 块的 runId 是子 run，不
   ]
   const turn = selectTurns(blocks)[0]
   assert.equal(turn.run, 'main-run', '取正文/工具块的 runId，跳过子 run')
+})
+
+// —— 轮尾账（Ledger）的归属：只算这一轮**自己的 run** ——
+//
+// 用户 2026-11 报障：AgentEnd 时这行是「7k tokens · LLM 2s」，发下一条消息后变成
+// 「17k tokens · LLM 3s」。原因是子 agent 的 runId 挂在卡片上也被算进了这一轮，
+// 而后台子 agent 在主 run 交卷之后还在产生 llm_end —— 已结算的轮尾账被后来的事件改写。
+const metric = (runId: string, input: number, output: number, durMs = 1000): TurnMetric => ({
+  model: 'm', input, output, cacheRead: 0, cacheWrite: 0, reasoning: 0, durMs, costUsd: 0, runId,
+})
+const agentBlock = (id: number, runId: string, status: 'running' | 'completed' = 'running'): MsgBlock => ({
+  kind: 'agent', id, runId, label: 'subagent', status, spawnedAt: 0,
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, costUsd: 0 }, items: [],
+})
+const withRun = (b: MsgBlock, runId: string): MsgBlock => ({ ...b, runId } as MsgBlock)
+
+test('轮尾账只算这一轮自己的 run：子 agent 的用量不进这一轮', () => {
+  const blocks: MsgBlock[] = [
+    user(1),
+    withRun(tool(2), 'r1'),
+    agentBlock(3, 'sub-1'),
+    withRun(assistant(4, '结论'), 'r1'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  const first = turnUsage(turn, [metric('r1', 1000, 100), metric('sub-1', 5000, 500)])
+  assert.equal(first.matched, true)
+  assert.equal(first.input, 1000, '子 run 的 5000 不进来')
+  assert.equal(first.total, 1100)
+
+  // 下一轮开始后，子 agent 又完成一次调用（迟到 metric）：已交卷那一轮的数不得变化
+  const later = turnUsage(turn, [
+    metric('r1', 1000, 100),
+    metric('sub-1', 5000, 500),
+    metric('sub-1', 9000, 900),
+  ])
+  assert.deepEqual(later, first, '已结算的轮尾账不得被后来的子 run 事件改写')
+})
+
+test('同一轮里的多段主 run（agent_resume 续跑）都算进这一轮', () => {
+  const blocks: MsgBlock[] = [
+    user(1),
+    withRun(tool(2), 'r1'),
+    withRun(assistant(3, '先到这'), 'r1'),
+    withRun(tool(4), 'r2'),
+    withRun(assistant(5, '续跑结论'), 'r2'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  assert.equal(turn.run, 'r2', '轮上的 run = 最近一次')
+  const u = turnUsage(turn, [metric('r1', 1000, 100), metric('r2', 2000, 200)])
+  assert.equal(u.input, 3000)
+  assert.equal(u.output, 300)
+})
+
+// —— 运行中插话：同一个 run 只有一个 Working 盒子 ——
+//
+// 用户 2026-11：Working 正在跑时又说一句，转录里出现**第二个** Working 盒子
+// （同一个 run 被 user 块切成两轮，两轮都 live）。插话属于当前这一轮：
+// 按事件顺序留在 items / 盒子内部，轮的开口仍然是第一句。
+test('运行中插话不另起一轮：留在当前轮，轮的开口还是第一条消息', () => {
+  const blocks: MsgBlock[] = [user(1, '第一句'), tool(2, 'running'), interjected(3, '再补一句'), tool(4, 'running')]
+  const turns = selectTurns(blocks)
+  assert.equal(turns.length, 1, '插话不能把同一 run 切成两轮')
+  assert.equal(turns[0].user?.id, 1)
+  assert.deepEqual(turns[0].items.map((b) => b.id), [2, 3, 4], '插话按事件顺序夹在工作行之间')
+})
+
+test('插话在盒子里；盒子仍然只有一个（没有第二行 Working）', () => {
+  const blocks: MsgBlock[] = [user(1), tool(2, 'running'), interjected(3), assistant(4, '正在写…', true)]
+  const turn = selectTurns(blocks)[0]
+  assert.deepEqual(workBody(turn).map((b) => b.id), [2, 3])
+  assert.equal(hasWork(turn), true)
+})
+
+test('没有当前轮时的插话（会话从中间恢复）仍然有一个家', () => {
+  const blocks: MsgBlock[] = [interjected(1, '半途恢复'), assistant(2, '结论')]
+  const turns = selectTurns(blocks)
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0].user?.id, 1)
+})
+
+test('总览：一轮工作里只有第一条 user 在外面（插话不画第二遍）', () => {
+  const blocks: MsgBlock[] = [user(1), tool(2, 'running'), interjected(3), assistant(4, '答')]
+  const turn = selectTurns(blocks)[0]
+  assert.equal(foldedBody(turn).some((b) => b.id === 3), false, '插话不在时间线上')
+})
+
+// —— 产出卡：一轮里的多次运行合并成一张 ——
+type ArtifactsBlock = Extract<MsgBlock, { kind: 'artifacts' }>
+const art = (id: number, runId: string, items: Array<[string, number, number]>, truncated = false): ArtifactsBlock => ({
+  kind: 'artifacts', id, runId, truncated,
+  items: items.map(([path, added, removed]) => ({ name: path.split('/').pop() ?? path, path, kind: 'modified' as const, added, removed })),
+})
+
+test('同一轮两次运行的产出合并成一张卡：按 path 去重，后一次覆盖前一次', () => {
+  // 用户 2026-11 截图：同一轮连续两张「本轮产出 1 个文件」（后台任务结果回推 → 续跑 →
+  // 第二个 AgentEnd 又带一份清单）。一个 AgentEnd 一块是对的，卡片只该画一张。
+  const merged = mergeArtifacts([
+    art(1, 'r1', [['a.md', 75, 0], ['same.md', 10, 2]]),
+    art(2, 'r2', [['b.md', 60, 0], ['same.md', 12, 3]]),
+  ])
+  assert.deepEqual(merged.items.map((i) => i.path), ['a.md', 'same.md', 'b.md'], '按首次出现排序')
+  assert.deepEqual(merged.items.find((i) => i.path === 'same.md'), {
+    name: 'same.md', path: 'same.md', kind: 'modified', added: 12, removed: 3,
+  }, '同一文件取最后一次的数字')
+  assert.equal(merged.id, 1, 'key 用第一块，合并前后不重挂')
+})
+
+test('产出合并：只有一块时原样返回；truncated 取或', () => {
+  const one = art(1, 'r1', [['a.md', 1, 0]])
+  assert.equal(mergeArtifacts([one]), one)
+  const merged = mergeArtifacts([art(1, 'r1', [['a.md', 1, 0]]), art(2, 'r2', [['b.md', 2, 0]], true)])
+  assert.equal(merged.truncated, true)
+})
+
+// —— 一轮多次运行（用户 2026-11 的两个形态）——
+const toolOf = (id: number, runId: string, status: 'running' | 'done' = 'done'): MsgBlock =>
+  ({ kind: 'tool', id, toolId: 't' + id, name: 'bash', status, parentRunId: runId })
+const asstOf = (id: number, runId: string, text: string): MsgBlock =>
+  ({ kind: 'assistant', id, text, streaming: false, thinking: '', runId })
+
+test('case 2：run1 交卷 → 任务回执 → run2 起新段（回执在段与段之间）', () => {
+  // 用户口径：一个盒子 = 一次运行；交卷后到达的回执在**顶层时间线**上，下一个盒子在它后面。
+  const blocks: MsgBlock[] = [
+    user(1),
+    asstOf(2, 'A', '第一段'),
+    toolOf(3, 'A'),
+    delivery(4, 'task-x', true), // 交卷后到达
+    asstOf(5, 'B', '第二段'),
+    toolOf(6, 'B'),
+    signal(7, false),             // 运行中到达（store 显式盖 afterRun:false）
+  ]
+  const turn = selectTurns(blocks)[0]
+  const runs = turnRuns(turn)
+  assert.equal(runs.length, 2, '两次运行 = 两段')
+  assert.deepEqual(runs.map((r) => r.runId), ['A', 'B'])
+  // user 块是 turn.user，不在 items 里 —— 段从第一块工作行开始
+  assert.deepEqual(runs.map((r) => r.items.map((b) => b.id)), [[2, 3, 4], [5, 6, 7]], '每段是自己的连续区间')
+  const answerAt = turn.items.indexOf(turn.answer as MsgBlock)
+  // 段内的盒子内容：A 段只有工作行（回执是交卷后到达 → 不在盒子里）
+  assert.deepEqual(runWorkBody(runs[0].items, { answer: turn.answer, answerAt, offset: runs[0].start }).map((b) => b.id), [2, 3])
+  // B 段：运行中到达的 signal 在盒子里
+  assert.deepEqual(runWorkBody(runs[1].items, { answer: turn.answer, answerAt, offset: runs[1].start }).map((b) => b.id), [6, 7])
+  // 每段报自己的数
+  assert.equal(statsOfItems(runs[0].items).calls, 1)
+  assert.equal(statsOfItems(runs[1].items).calls, 1)
+})
+
+test('case 2 分段：子 agent 卡片（runId 是子 run）不切段，工具按 parentRunId 归属', () => {
+  const sub: MsgBlock = {
+    kind: 'agent', id: 3, runId: 'sub-1', parentRunId: 'A', label: 'sub', status: 'completed',
+    spawnedAt: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 }, items: [],
+  }
+  const blocks: MsgBlock[] = [user(1), asstOf(2, 'A', 'x'), sub, toolOf(4, 'A'), asstOf(5, 'B', 'y')]
+  const runs = turnRuns(selectTurns(blocks)[0])
+  assert.equal(runs.length, 2, '子 agent 卡片 / 工具都不许把 A 段切断')
+  assert.deepEqual(runs[0].items.map((b) => b.id), [2, 3, 4])
+})
+
+test('case 1 不分段：单 run 仍然是一段（老路径一行不变）', () => {
+  const blocks: MsgBlock[] = [user(1), tool(2), signal(3), assistant(4, '答'), delivery(5)]
+  const runs = turnRuns(selectTurns(blocks)[0])
+  assert.equal(runs.length, 1)
 })

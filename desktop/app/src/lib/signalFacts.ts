@@ -41,6 +41,9 @@ export interface SignalFact {
   runs?: number
   consumed?: number
   abandoned?: number
+  /** compress_end 的压缩前后消息数（上下文压缩完成的那一行） */
+  before?: number
+  after?: number
 }
 
 export interface SignalText {
@@ -95,6 +98,13 @@ export function signalText(f: SignalFact, t: T): SignalText {
     }
     case 'persist': {
       return { title: t('sig.persist'), ...(f.message ? { detail: f.message } : {}) }
+    }
+    case 'compact': {
+      // 只报手里有的数：compress_end 的 before/after 是消息数，缺任一端就不写副题
+      const detail = f.before != null && f.after != null
+        ? rep('sig.compact.msgs', { before: f.before, after: f.after })
+        : undefined
+      return { title: t('sig.compact'), ...(detail ? { detail } : {}) }
     }
     default: {
       // session_closed：设计的副题是「18 runs · 17 consumed · 1 abandoned mid-tool」。

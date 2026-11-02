@@ -85,6 +85,9 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
         ...(it.startedAt != null ? { startedAt: it.startedAt } : {}),
         ...(it.durMs != null ? { durMs: it.durMs } : {}),
         ...(it.taskId ? { taskId: it.taskId } : {}),
+        // 子 agent 自己的会话里，运行中的工具被摘成后台任务：行上要挂「后台」态，
+        // 与主会话工具行同一枚徽标（否则子会话里那行还写着「运行中」）。
+        ...(it.promoted ? { promoted: true } : {}),
         ...(it.diff ? { diff: it.diff } : {}),
         ...(it.images ? { images: it.images } : {}),
         ...(it.usage ? { usage: it.usage } : {}),

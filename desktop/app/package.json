@@ -92,6 +92,7 @@
     "test:runtime-turns": "esbuild lab/test-runtime-turns.ts --bundle --platform=node --format=esm --loader:.md=text --loader:.png=dataurl --loader:.svg=dataurl --loader:.woff2=dataurl --outfile=/tmp/runtime-turns.test.mjs && node --test /tmp/runtime-turns.test.mjs",
     "test:runtime-skin": "node lab/verify-runtime-skin.mjs",
     "test:concise-fold": "node lab/verify-concise-fold.mjs",
+    "test:transcript": "node lab/verify-transcript-fixes.mjs",
     "test:motion": "node lab/check-motion.mjs",
     "test:table-numbers": "esbuild src/lib/tableNumbers-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/table-numbers.test.cjs && node --test /tmp/table-numbers.test.cjs",
     "test:overlay-hit": "esbuild src/lib/overlayHit-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/overlay-hit.test.cjs && node --test /tmp/overlay-hit.test.cjs",

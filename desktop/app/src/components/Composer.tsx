@@ -163,7 +163,13 @@ export default function Composer() {
   const pendingQueueError = useAppStore((s) => s.pendingQueueError) // 推送失败提示（ask_batch ok:false 回滚，问题十）
   const updatePending = useAppStore((s) => s.updatePending)
   const removePending = useAppStore((s) => s.removePending)
+  // 【立即发送】= 不打断正在跑的工具，把暂存队列立刻推到服务端 inbox。
+  // 与「默认排队」走同一个 flushPending：区别只是**什么时候**推，不是推什么。
+  const flushPending = useAppStore((s) => s.flushPending)
+  const activeSid = useAppStore((s) => s.activeSessionId)
   const queueFull = pendingQueue.length >= QUEUE_CAP
+  // 队列里还有没推送的消息 → 显示【立即发送】（已推送的等待下一轮消费，催也没用）
+  const hasUnpushed = pendingQueue.some((q) => !q.pushed)
   const [editingId, setEditingId] = useState<number | null>(null) // 正在编辑的暂存队列项 id
   const [editText, setEditText] = useState('')
   const skills = useAppStore((s) => s.skills)
@@ -1039,7 +1045,20 @@ export default function Composer() {
           <div className="pending-queue" role="status" aria-label={t('composer.pending')}>
             <div className={`pq-head ${queueFull ? 'full' : ''}`}>
               <span>{t('composer.pending')} {pendingQueue.length}/{QUEUE_CAP}</span>
-              <span className="pq-sub">{queueFull ? t('composer.pq.full') : t('composer.pq.busy')}</span>
+              <span className="pq-tail">
+                <span className="pq-sub">{queueFull ? t('composer.pq.full') : t('composer.pq.busy')}</span>
+                {/* 只在**还没推上去**的时候出现：推完就没什么可催的了（下一轮起点自动带进去）。 */}
+                {hasUnpushed && (
+                  <button
+                    type="button"
+                    className="pq-send"
+                    title={t('composer.pq.sendNowHint')}
+                    onClick={() => flushPending(activeSid ?? undefined)}
+                  >
+                    {t('composer.pq.sendNow')}
+                  </button>
+                )}
+              </span>
             </div>
             {pendingQueueError && (
               <div className="pq-error" role="alert" style={{ color: 'var(--error, #e5484d)', padding: '2px 8px', fontSize: 12 }}>

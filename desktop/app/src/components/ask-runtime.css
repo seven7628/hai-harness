@@ -232,8 +232,14 @@ html[data-skin='runtime'] .ask-scope .ask-pv-pre {
   margin: 0;
   padding: 10px 11px 12px;
   min-width: 0; max-width: 100%;
-  min-height: 13em;
-  overflow-x: auto;
+  /* 固定高度的**窗口**，不是随内容长高的盒子（用户 2026-11 报障：hover 选项时闪屏）。
+     实测现场：短预览 164px / 26 行长预览 491px —— 卡片高度 337 ↔ 560（撞上 .ask 的
+     max-height），整块底栏 +223px、转录可视高度 −224px，并且跟随到底把 scrollTop
+     推了 +224px。于是在上下相邻的选项之间来回移动 = 整个下半屏反复泵送。
+     钉死高度 + 内部滚动：卡片高度只由选项列决定，hover 不再改任何布局。
+     13em（≈137px 盒高）就是原来 min-height 的值 —— 短预览的观感完全不变。 */
+  height: 13em;
+  overflow: auto;
   font: 400 10.5px/1.62 var(--mono);
   color: var(--ink-2);
   white-space: pre;
@@ -360,7 +366,7 @@ html[data-skin='runtime'] .ask-scope @container (max-width: 620px) {
   
   .ask[data-form='preview'] .ask-body { grid-template-columns: minmax(0, 1fr); row-gap: 10px; }
   .ask[data-form='preview'] .ask-list { padding-bottom: 0; }
-  .ask-pv-pre { min-height: 10em; }
+  .ask-pv-pre { height: 10em; }
 }
 
 html[data-skin='runtime'] .ask-scope @container (max-width: 480px) {

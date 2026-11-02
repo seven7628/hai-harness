@@ -59,9 +59,12 @@ export function UserBlock({ b }: { b: UserMsg }) {
   }, [open])
 
   return (
-    <div className="msg user rt-you">
+    <div className="msg user rt-you" data-injected={b.injected ? '1' : undefined}>
       <span className="rt-who" title={b.ts != null ? fmtClock(b.ts) : undefined}>
         {t('narrative.user')}
+        {/* 运行中插话：它出现在 Working 盒子内部，读起来不能像是这一轮的开口。
+            一行灰字说明「这是在它跑的时候补的」，与盒子里的工具行同一层级。 */}
+        {b.injected ? <span className="rt-who-mid">{t('narrative.interjected')}</span> : null}
       </span>
       {/* 用户输入按 **Markdown** 渲染（用户 2026-10 报障两件事：换行没了、
           自己打的 Markdown 不生效）。此前这里是手写的「只认行内 code」渲染器，

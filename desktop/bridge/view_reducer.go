@@ -62,6 +62,12 @@ type Checkpoint struct {
 
 	Diffs []Diff `json:"diffs,omitempty"` // 工具 diff 汇总（按事件顺序）
 
+	// PendingQuestions 待答的 ask_user 批次（UI 停靠提问面板的镜像）。
+	// 为什么要进 checkpoint（用户 2026-11）：刷新 = 重新 hydrate，而 run 还在等这个回答；
+	// 不落盘就会出现「面板没了、run 卡在等，直到超时」。权威仍在 harness 侧（回答通道 +
+	// 超时窗口），这里只是展示镜像：tool_run_end(ask_user) / AgentEnd / 会话清空时删除。
+	PendingQuestions []PendingQuestion `json:"pending_questions,omitempty"`
+
 	LastRun   *LastRun   `json:"last_run,omitempty"`
 	LastError *LastError `json:"last_error,omitempty"`
 
@@ -83,6 +89,16 @@ type Block struct {
 	Text     string    `json:"text,omitempty"`
 	Thinking string    `json:"thinking,omitempty"`
 	Contents []Content `json:"contents,omitempty"` // user 附件（图片等）
+	// Injected user 块：这条输入是**运行中插话**被消费的（UserInputsConsumed.Injected），
+	// 不是一次新运行的开口。UI 据此不把它切成新的一轮 —— 同一个 run 只有一个 Working 盒子。
+	Injected bool `json:"injected,omitempty"`
+	// AfterRun 这条**记录**（task_delivery）是主 run 交卷之后才到达的。UI 据此决定它渲染在
+	// Working 盒子内部（运行中到达 = 这次运行的一行过程）还是盒子外的时间线上（交卷后到达
+	// = 盒子已经折叠，折进去就等于「跑完之后什么都没发生」）。
+	// 为什么由 bridge 落盘而不是只在前端算（用户 2026-11 报障）：前端恢复时只拿得到块的位置，
+	// 而正在写的那段正文在 checkpoint 里已经不算 streaming 了 —— 位置判据会把它当成
+	// 「这一轮的结论」，之后到达的记录就全被甩出盒子。运行态只有 bridge 知道，所以在这里盖章。
+	AfterRun bool `json:"after_run,omitempty"`
 	// Images 工具结果携带的图片内容块（read_file 读图 / 截图 / MCP image）：
 	// 随 tool_run_end 事件到达，checkpoint 落盘 → 恢复时 UI 仍能展示「模型看过的图」
 	//（data URL 直显；不参与 LLM 上下文——那是 AgentLoop 侧的 ToolResult.Blocks）。
@@ -122,21 +138,21 @@ type Block struct {
 	ThinkingSummarized bool `json:"thinking_summarized,omitempty"`
 
 	// tool
-	ToolID     string         `json:"tool_id,omitempty"`
-	Name       string         `json:"name,omitempty"`
-	Args       string         `json:"args,omitempty"`
-	Result     string         `json:"result,omitempty"`
-	IsError    bool           `json:"is_error,omitempty"`
-	ErrorInfo  *ToolErrorInfo `json:"error_info,omitempty"`
-	Status     string         `json:"status,omitempty"` // tool: running|done; task: running|completed|failed|interrupted|abandoned
+	ToolID    string         `json:"tool_id,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Args      string         `json:"args,omitempty"`
+	Result    string         `json:"result,omitempty"`
+	IsError   bool           `json:"is_error,omitempty"`
+	ErrorInfo *ToolErrorInfo `json:"error_info,omitempty"`
+	Status    string         `json:"status,omitempty"` // tool: running|done; task: running|completed|failed|interrupted|abandoned
 	// EndKind agent 块：这次子运行为什么收场（AgentEnd.ErrorKind；中断/截断时补语义值）。
 	// 设计 parts/lane.js 的规矩是「killed 必须带原因 —— 只说『它停了』不是信息」，
 	// 所以随 checkpoint 落盘：刷新后那一行仍然说得清，而不是只剩一个 killed。
-	EndKind string `json:"end_kind,omitempty"`
-	Diff       *Diff          `json:"diff,omitempty"`
-	TaskID     string         `json:"task_id,omitempty"`
-	Promoted   bool           `json:"promoted,omitempty"`
-	TaskStatus string         `json:"task_status,omitempty"`
+	EndKind    string `json:"end_kind,omitempty"`
+	Diff       *Diff  `json:"diff,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
+	Promoted   bool   `json:"promoted,omitempty"`
+	TaskStatus string `json:"task_status,omitempty"`
 	// Todos 待办清单快照，按 kind 解释（同名字段、两种宿主）：
 	//   · tool 块 → 该次 todo_* 调用完成时刻的**会话**清单（历史计划卡定格）
 	//   · agent 块 → 该子 agent **自己的**清单（与顶层 Checkpoint.Todos 分开存：
@@ -252,8 +268,11 @@ type AgentItem struct {
 	DurMs     int64          `json:"dur_ms,omitempty"`
 	StartedAt int64          `json:"started_at,omitempty"`
 	TaskID    string         `json:"task_id,omitempty"`
-	Diff      *Diff          `json:"diff,omitempty"`
-	Images    []Content      `json:"images,omitempty"` // tool item: 结果图片（read_file 读图 / 截图）
+	// Promoted 工具项已被摘离为后台任务（TaskPromoted 事件）：子会话里那一行也要切
+	// 「后台」态 —— 否则主会话知道它摘离了，子 agent 的转录还写着「运行中」。
+	Promoted bool      `json:"promoted,omitempty"`
+	Diff     *Diff     `json:"diff,omitempty"`
+	Images   []Content `json:"images,omitempty"` // tool item: 结果图片（read_file 读图 / 截图）
 	// NestedCalls 编排型工具（codemode）脚本内发生的嵌套调用摘要（core.NestedCallRecord 的
 	// 稳定投影）。子调用**没有自己的工具行/工具项**，明细只挂在外层调用这一处 ——
 	// 宿主在行内联成清单渲染（设计文档 §17 第二条）。
@@ -402,6 +421,30 @@ type LastRun struct {
 	EndedAt      int64  `json:"ended_at,omitempty"`
 }
 
+// PendingQuestion 是待答的 ask_user 批次（events.AskUserQuestion 的稳定投影）。
+// 字段与前端 PendingQuestion 一一对应（ts 用于倒计时：剩余 = ts + timeout_ms - now）。
+type PendingQuestion struct {
+	ID        string                `json:"id"`
+	RunID     string                `json:"run_id,omitempty"`
+	TimeoutMs int64                 `json:"timeout_ms,omitempty"`
+	Ts        int64                 `json:"ts,omitempty"`
+	Items     []PendingQuestionItem `json:"items"`
+}
+
+// PendingQuestionItem 单题。
+type PendingQuestionItem struct {
+	ID       string                  `json:"id"`
+	Question string                  `json:"question"`
+	Options  []PendingQuestionOption `json:"options,omitempty"`
+	Multi    bool                    `json:"multi,omitempty"`
+}
+
+// PendingQuestionOption 单个快捷选项（label 原样成为回答；preview 仅单选可用）。
+type PendingQuestionOption struct {
+	Label   string `json:"label"`
+	Preview string `json:"preview,omitempty"`
+}
+
 // LastError 是最后一次运行/LLM 错误摘要。
 type LastError struct {
 	Message string `json:"message"`
@@ -522,21 +565,23 @@ type ViewReducer struct {
 	// cachedSpans 与 marshalCache 同代：每个 block 的字节（与 view 中片段逐字节相同）
 	cachedSpans [][]byte
 
-	blocks        []Block
-	runNodes      []RunNode
-	turns         []Turn
-	usage         Usage
-	lifetime      Usage
-	costUSD       float64
-	lifetimeCost  float64
-	todos         []TodoItem
-	lastRun       *LastRun
-	lastError     *LastError
-	ctxTokens     int64
-	ctxTokensEst  bool // ctxTokens 口径：true = compress_end 字符估算（非真实 usage）
-	contextWindow int64
-	diffs         []Diff
-	diag          map[string]*diagEntry // event_type → 计数（有界，序列化时展开）
+	blocks       []Block
+	runNodes     []RunNode
+	turns        []Turn
+	usage        Usage
+	lifetime     Usage
+	costUSD      float64
+	lifetimeCost float64
+	todos        []TodoItem
+	// pendingQuestions 待答的 ask_user 批次（checkpoint 镜像，见 PendingQuestion 注释）。
+	pendingQuestions []PendingQuestion
+	lastRun          *LastRun
+	lastError        *LastError
+	ctxTokens        int64
+	ctxTokensEst     bool // ctxTokens 口径：true = compress_end 字符估算（非真实 usage）
+	contextWindow    int64
+	diffs            []Diff
+	diag             map[string]*diagEntry // event_type → 计数（有界，序列化时展开）
 
 	// 稳定去重集合（内存态；Restore 后清空——恢复之后到达的都是新事件）
 	llmEndSeen        map[string]bool
@@ -770,6 +815,7 @@ func (r *ViewReducer) snapshotLocked() *Checkpoint {
 		LifetimeUsage:      r.lifetime,
 		LifetimeCostUSD:    r.lifetimeCost,
 		Todos:              cloneTodos(r.todos),
+		PendingQuestions:   clonePendingQuestions(r.pendingQuestions),
 		CtxTokens:          r.ctxTokens,
 		CtxTokensEstimated: r.ctxTokensEst,
 		ContextWindow:      r.contextWindow,
@@ -1392,6 +1438,8 @@ func (r *ViewReducer) applyLocked(ev events.Event, meta EventMeta) {
 		r.applyCompressEndLocked(e, meta)
 	case *events.CommandResult:
 		r.applyCommandResultLocked(e)
+	case *events.AskUserQuestion:
+		r.applyAskUserQuestionLocked(e)
 	case *events.UserInputsConsumed:
 		r.applyUserInputsConsumedLocked(e)
 	case *events.SessionRunError:
@@ -2071,6 +2119,11 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 		return
 	}
 	r.toolEndSeen[key] = true
+	// ask_user 结束（用户回答 / 超时 / 中断）→ 待答面板的 checkpoint 镜像同步移除。
+	// 与前端 useAppStore 的 `raw.name === 'ask_user'` 清理同一条判据。
+	if e.Name == "ask_user" {
+		r.clearPendingQuestionsLocked(e.RunId)
+	}
 
 	// 嵌套子调用（parent_call_id 非空）不结算任何工具块/工具项/链路节点 —— 与 applyToolStartLocked
 	// 同一条规则（设计文档 §17 第一条；宿主侧同规则见 desktop/app 的 useAppStore）。
@@ -2227,6 +2280,22 @@ func (r *ViewReducer) applyTaskPromotedLocked(e *events.TaskPromoted) {
 			b.Promoted = true
 			b.TaskStatus = statusRunning
 			r.blocks[i] = b
+			continue
+		}
+		// 子 agent 在自己会话里摘离的工具：命中卡片里的工具项（顶层块里没有那一行）。
+		if b.Kind == blockKindAgent {
+			touched := false
+			items := b.Items
+			for j := range items {
+				if items[j].Kind == agentItemTool && items[j].TaskID == e.TaskId {
+					items[j].Promoted = true
+					touched = true
+				}
+			}
+			if touched {
+				b.Items = items
+				r.blocks[i] = b
+			}
 		}
 	}
 	for i := range r.runNodes {
@@ -2362,6 +2431,8 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 
 // applyAgentEndLocked 结算 run 节点、子 agent 卡片与主 run 中断/截断提示。
 func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
+	// 交卷 = 这次运行不会再等回答了（提问要么已答、要么随中断取消）→ 镜像同步移除。
+	r.clearPendingQuestionsLocked(e.RunId)
 	r.flushChunkLocked()
 	key := "agent_end:" + e.RunId
 	if r.agentEndSeen[key] {
@@ -2701,6 +2772,19 @@ func (r *ViewReducer) applyTaskEndLocked(e *events.TaskEnd) {
 
 // applyTaskResultDeliveredLocked 回填任务结果（agent/async_task/promoted tool；
 // 找不到任务时保留独立结果块；taskId 幂等）。
+// runLiveLocked 顶层 run（kind=run 且无 parent）是否还在跑 —— 与前端 runEnded 同一事实源。
+// 记录类块的 AfterRun 由它盖章（见 Block.AfterRun 的注释）。
+func (r *ViewReducer) runLiveLocked() bool {
+	for i := len(r.runNodes) - 1; i >= 0; i-- {
+		n := r.runNodes[i]
+		if n.Kind != runNodeKindRun || n.ParentID != "" {
+			continue
+		}
+		return n.Status == statusRunning
+	}
+	return false
+}
+
 func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDelivered) {
 	r.flushChunkLocked()
 	key := taskLifecycleKey("task_result", e.TaskId, e.Timestamp)
@@ -2736,7 +2820,7 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		// 落位同前端：按事件时刻插到它发生的位置，不一律堆到最底部。
 		at := r.insertAtAfterTsLocked(-1, millis(ts))
 		r.insertBlockAtLocked(at, Block{Kind: blockKindTaskResult, ID: r.nextBlockID(), TaskID: e.TaskId, Result: e.Result, Error: e.Error, Ts: millis(ts)})
-		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts)})
+		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts), AfterRun: !r.runLiveLocked()})
 		return
 	}
 	b := r.blocks[idx]
@@ -2776,6 +2860,7 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		r.insertBlockAtLocked(at, Block{
 			Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId,
 			Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts),
+			AfterRun: !r.runLiveLocked(),
 		})
 	}
 }
@@ -2918,6 +3003,60 @@ func (r *ViewReducer) applyCommandResultLocked(e *events.CommandResult) {
 }
 
 // applyUserInputsConsumedLocked 按服务端确认把用户消息（含附件）加入对话。
+// applyAskUserQuestionLocked 把 ask_user 批次记进 checkpoint（UI 刷新后仍能看到待答面板）。
+// 只做**展示镜像**：回答通道与超时都在 harness 侧，这里不参与裁决。
+// 去重按批次 id（IPC 重放/重复投递）；同一个 run 的新批次替换旧批次（模型不会并发问两批）。
+func (r *ViewReducer) applyAskUserQuestionLocked(e *events.AskUserQuestion) {
+	r.flushChunkLocked()
+	ts := e.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	pq := PendingQuestion{ID: e.Id, RunID: e.RunId, TimeoutMs: e.TimeoutMs, Ts: millis(ts)}
+	for _, it := range e.Questions {
+		item := PendingQuestionItem{ID: it.Id, Question: it.Question, Multi: it.Multi}
+		for _, o := range it.Options {
+			item.Options = append(item.Options, PendingQuestionOption{Label: o.Label, Preview: o.Preview})
+		}
+		pq.Items = append(pq.Items, item)
+	}
+	if pq.ID == "" {
+		return
+	}
+	// 同一 id 覆盖；同一 run 的旧批次丢弃（幂等重放不会堆两批）
+	out := make([]PendingQuestion, 0, len(r.pendingQuestions)+1)
+	for _, q := range r.pendingQuestions {
+		if q.ID == pq.ID {
+			continue
+		}
+		if pq.RunID != "" && q.RunID == pq.RunID {
+			continue
+		}
+		out = append(out, q)
+	}
+	r.pendingQuestions = append(out, pq)
+}
+
+// clearPendingQuestionsLocked 删除某个 run 的待答批次（回答/超时/中断/交卷都走这里）。
+// runID 为空表示清空全部（会话被 clear/shutdown）。
+func (r *ViewReducer) clearPendingQuestionsLocked(runID string) {
+	if len(r.pendingQuestions) == 0 {
+		return
+	}
+	if runID == "" {
+		r.pendingQuestions = nil
+		return
+	}
+	out := r.pendingQuestions[:0]
+	for _, q := range r.pendingQuestions {
+		if q.RunID == runID {
+			continue
+		}
+		out = append(out, q)
+	}
+	r.pendingQuestions = out
+}
+
 func (r *ViewReducer) applyUserInputsConsumedLocked(e *events.UserInputsConsumed) {
 	r.flushChunkLocked()
 	key := userInputsKey(e)
@@ -2960,7 +3099,7 @@ func (r *ViewReducer) applyUserInputsConsumedLocked(e *events.UserInputsConsumed
 		}
 		r.blocks = append(r.blocks, Block{
 			Kind: blockKindUser, ID: r.nextBlockID(), Text: text,
-			Contents: contents, Ts: millis(ts),
+			Contents: contents, Ts: millis(ts), Injected: e.Injected,
 		})
 	}
 }
@@ -3008,6 +3147,7 @@ func (r *ViewReducer) clearLocked() {
 	// 内部 reason=clear 与 shutdown/abort 区分（UI 同款横线，无文本）。
 	r.blocks = []Block{{Kind: blockKindDivider, ID: r.nextBlockID(), DividerReason: "clear", Ts: nowMillis()}}
 	r.runNodes = []RunNode{}
+	r.pendingQuestions = nil
 	r.turns = []Turn{}
 	r.diffs = []Diff{}
 	r.lastRun = nil
@@ -3508,6 +3648,29 @@ func cloneAgentItems(in []AgentItem) []AgentItem {
 
 func cloneRunNodes(in []RunNode) []RunNode {
 	return append([]RunNode{}, in...)
+}
+
+// clonePendingQuestions 深拷贝待答批次（快照与 reducer 不得共享底层数组）。
+func clonePendingQuestions(in []PendingQuestion) []PendingQuestion {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]PendingQuestion, len(in))
+	for i, q := range in {
+		cq := q
+		if len(q.Items) > 0 {
+			cq.Items = make([]PendingQuestionItem, len(q.Items))
+			for j, it := range q.Items {
+				ci := it
+				if len(it.Options) > 0 {
+					ci.Options = append([]PendingQuestionOption{}, it.Options...)
+				}
+				cq.Items[j] = ci
+			}
+		}
+		out[i] = cq
+	}
+	return out
 }
 
 func cloneTurns(in []Turn) []Turn {

@@ -1,4 +1,4 @@
-import { Bot, CheckCircleIcon, Clock, GitBranch, HookIcon, Sparkles } from '../../icons'
+import { Bot, CheckCircleIcon, Clock, GitBranch, HookIcon, LayersIcon, Sparkles } from '../../icons'
 import './signal.css'
 
 export type SignalKind =
@@ -11,6 +11,8 @@ export type SignalKind =
   | 'budget'
   | 'persist'
   | 'closed'
+  // 上下文压缩完成（compress_end）：一次性的会话级维护，不是工作过程
+  | 'compact'
 
 const ICONS: Record<SignalKind, (p: { size?: number }) => JSX.Element> = {
   memory: Sparkles,
@@ -22,6 +24,8 @@ const ICONS: Record<SignalKind, (p: { size?: number }) => JSX.Element> = {
   budget: Clock,
   persist: AccessIconFallback,
   closed: CheckCircleIcon,
+  // 压缩 = 上下文收拢：设计 compaction 那一节用的是向内的箭头
+  compact: ({ size = 14 }) => <LayersIcon size={size} />,
 }
 
 /* 图标按设计用 14px / stroke 1.8，颜色由 data-kind 决定（ui.components.css:970-990）。 */

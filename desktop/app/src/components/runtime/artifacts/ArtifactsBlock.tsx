@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { ArtifactItem } from '../../../store/useAppStore'
 import { useT } from '../../../i18n'
+import { fmtDuration } from '../../../lib/duration'
 import { EyeIcon, FolderOpenIcon } from '../../icons'
 import './artifacts.css'
 
@@ -127,7 +128,7 @@ export function ArtifactsBlock({
   const wallText = (() => {
     const v = num(wall)
     if (!Number.isFinite(v) || v <= 0) return ''
-    return v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms'
+    return fmtDuration(v)
   })()
 
   return (

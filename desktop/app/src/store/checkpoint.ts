@@ -124,6 +124,13 @@ export interface CheckpointBlock {
   text?: string
   thinking?: string
   contents?: CheckpointContent[]
+  // user 块：这条输入是**运行中插话**被消费的（Go 侧 UserInputsConsumed.Injected）。
+  // 同一个 run 只有一个 Working 盒子 —— 恢复后这一位必须还在，否则一轮又被切成两轮。
+  injected?: boolean
+  // task_delivery：这条回执是主 run 交卷之后才到达的（Go Block.AfterRun）。
+  // 决定它渲染在 Working 盒子内部（运行中到达）还是盒子外的时间线上（交卷后到达）——
+  // 位置不是证据：恢复出来的视图里，正在写的那段正文已经不再是 streaming 了。
+  after_run?: boolean
   images?: CheckpointContent[] // tool 结果图片（read_file 读图 / 截图）
   model?: string
   run_id?: string
@@ -286,6 +293,10 @@ export interface CheckpointView {
   ctx_tokens_estimated?: boolean
   context_window?: number
   diffs?: CheckpointDiff[]
+  // pending_questions 待答的 ask_user 批次（Go PendingQuestion）。
+  // 为什么需要它（用户 2026-11）：刷新 = 重新 hydrate，而 run 还在等这个回答；
+  // 不落盘就是「面板没了、run 卡在等，直到超时」。answer_question 命令的 batch_id 也在其中。
+  pending_questions?: CheckpointPendingQuestion[]
   last_run?: CheckpointLastRun
   last_error?: CheckpointLastError
   degraded: boolean
@@ -293,6 +304,15 @@ export interface CheckpointView {
 }
 
 // CheckpointResponseData 是 new_session 响应中 restored="checkpoint" 分支的 data 字段。
+// CheckpointPendingQuestion 待答批次（与 Go PendingQuestion 一一对应）。
+export interface CheckpointPendingQuestion {
+  id: string
+  run_id?: string
+  timeout_ms?: number
+  ts?: number
+  items: { id: string; question: string; options?: { label: string; preview?: string }[]; multi?: boolean }[]
+}
+
 export interface CheckpointResponseData {
   restored: 'checkpoint'
   checkpoint_version: number

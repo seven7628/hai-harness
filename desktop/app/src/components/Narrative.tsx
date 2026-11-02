@@ -7,7 +7,7 @@ import { signalText } from '../lib/signalFacts'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, foldedBody, hasWork, runningBody, selectTurns, turnHead, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, answerIndex, foldedBody, hasWork, mergeArtifacts, outsideOf, runningBody, runWorkBody, selectTurns, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -1186,9 +1186,60 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        产出卡仍是轮尾最后一块（它是「记录」，不属于工作过程）。只在运行时皮肤、且账
        真的会渲染时把产出卡拆出来；运行中/无用量归属的轮保持原序（账本来就不出现）。 */
     const ledgerShown = usage.matched && !live
-    const artBlocks = skin === 'runtime' && ledgerShown ? bodySource.filter((b) => b.kind === 'artifacts') : []
+    /* 一轮可能跨多次运行（后台任务回推后续跑），每 run 一个产出块 —— 卡片只画一张，
+       按 path 合并（见 mergeArtifacts）。store 里仍是每 run 一块。
+       闸门是 `!live`（AgentEnd 已到）而**不是** ledgerShown：产出是 AgentEnd 的事实，
+       与「这一轮有没有拿到 usage 指标」无关（没有 llm_end 的轮次也该看到产出清单）。 */
+    const artRaw = skin === 'runtime' && !live ? bodySource.filter((b) => b.kind === 'artifacts') : []
+    const artBlocks = artRaw.length > 1 ? [mergeArtifacts(artRaw)] : artRaw
     const bodyBlocks = artBlocks.length ? bodySource.filter((b) => b.kind !== 'artifacts') : bodySource
     const body = skin === 'runtime' ? groupRounds(bodyBlocks) : groupBlocks(bodyBlocks)
+    /* —— 情况二（一轮多次运行）：盒子按 run 分开，记录留在段与段之间的时间线上 ——
+       用户 2026-11 的两个形态：run1 AgentEnd → 异步任务结果通知（顶层、盒外）→ run2 新盒子。
+       盒子是按 run 算的，所以这里按 turn.items 的**顺序**交错渲染：
+         [盒子A] … [盒间记录] … [盒子B] … [整轮的结论正文]
+       单 run（情况一）继续走上面那套老路径，一行不变。 */
+    const runs = concise && skin === 'runtime' ? turnRuns(turn) : []
+    const multiRun = runs.length > 1
+    const segAnswerAt = answerIndex(turn)
+    const segs = multiRun
+      ? runs.map((r, i) => {
+          /* 正在跑的那一段：**正文留在盒子里**（与单 run 的 liveBox 同一条规则 ——
+             运行中它还是「工作过程」，交卷时才作为结论交到时间线上）。
+             已交卷的段：正文（只有整轮最后那段可能是 turn.answer）不进盒子，避免画两遍。 */
+          const segLive = i === runs.length - 1 && live
+          const its = runWorkBody(r.items, {
+            answer: segLive ? undefined : turn.answer,
+            answerAt: segAnswerAt,
+            offset: r.start,
+          })
+          return { run: r, items: its, stats: statsOfItems(r.items), live: segLive }
+        })
+      : []
+    /* 时间线上的块只可能是记录/结构块（工具行永远在工作过程里）—— 类型上收窄一次，
+       下面的 renderBlock 才接得住。 */
+    type PlanBlock = Exclude<MsgBlock, { kind: 'tool' }>
+    const plan: ({ box: number } | { b: PlanBlock })[] = []
+    if (multiRun) {
+      const boxAt = new Map<number, number>()
+      segs.forEach((s, i) => { if (s.items.length) boxAt.set(s.run.start, i) })
+      const outside = outsideOf(turn)
+      for (let i = 0; i < turn.items.length; i++) {
+        // 盒子只在段首出现一次；**不跳过**段内其余下标 —— 段内可能夹着「交卷后到达」
+        // 的记录（上一段运行刚结束、下一段还没开始），它们要在盒子之后按顺序落出来。
+        const bi = boxAt.get(i)
+        if (bi != null) plan.push({ box: bi })
+        const b = turn.items[i]
+        // 产出卡在轮尾统一渲染（还会跨 run 合并），这里跳过，避免画两遍；工具行不进时间线
+        if (b.kind === 'tool' || b.kind === 'artifacts') continue
+        // 结论正文只在**交卷之后**才上线：运行中它在最后一段的盒子里长
+        if (b === turn.answer) {
+          if (!live) plan.push({ b })
+          continue
+        }
+        if (outside(b, i)) plan.push({ b })
+      }
+    }
     const hasArtifacts = turn.items.some((b) => b.kind === 'artifacts')
     if (!body.length && !artBlocks.length && !workItems.length && !work) continue
     items.push(
@@ -1208,9 +1259,53 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             {head.t0 != null ? <span className="rt-t" title={fmtClock(head.t0)}>{fmtClock(head.t0)}</span> : null}
           </div>
         ) : null}
+        {/* 一轮多次运行（情况二）：按 run 分开的盒子 + 段间记录，按 turn.items 顺序交错。
+            单 run（情况一）走下面那两条老分支，判据完全不变。 */}
+        {multiRun
+          ? plan.map((p, pi) => {
+              if ('b' in p) {
+                /* 盒与盒之间的时间线（异步任务结果通知、会话级提示…）：顶层，不缩进，
+                   与 working 盒同级。结论正文保留「交代」的 16px 节奏，其余按记录自己走。 */
+                const el = renderBlock(p.b)
+                if (!el) return null
+                return p.b === turn.answer
+                  ? <div className="rt-turn-ans" key={`pl-${pi}`}>{el}</div>
+                  : <div className="rt-turn-line" key={`pl-${pi}`}>{el}</div>
+              }
+              const seg = segs[p.box]
+              if (!seg) return null
+              const segLive = seg.live
+              const rows = groupRounds(seg.items)
+              if (segLive) {
+                // 这一段自己的起点（首块的时间戳）—— 不是整轮的起点，否则第二个盒子的钟从 0 起涨
+                const first = seg.run.items[0]
+                const startedAt = first && 'startedAt' in first && typeof first.startedAt === 'number'
+                  ? first.startedAt
+                  : first && 'ts' in first && typeof first.ts === 'number' ? first.ts : turnStart
+                return (
+                  <LivePanel key={seg.run.key} items={seg.items} startedAt={startedAt ?? runStartedAt} waiting={waiting}>
+                    <div className="rt-turn-in">{rows}</div>
+                  </LivePanel>
+                )
+              }
+              const segKey = `${turn.key}#${p.box}`
+              const segOpen = openTurns[segKey] ?? false
+              return (
+                <WorkBox
+                  key={seg.run.key}
+                  stats={seg.stats}
+                  running={false}
+                  open={segOpen}
+                  onToggle={() => setOpenTurns((m) => ({ ...m, [segKey]: !segOpen }))}
+                >
+                  {rows.length ? rows : null}
+                </WorkBox>
+              )
+            })
+          : null}
         {/* 「Worked for 8.2 s」是**结算**，不是进度：运行中这一行只该是「正在做什么」，
             汇总的时长与批次要到 AgentEnd 才成立 —— 与轮尾账同一时刻出现。 */}
-        {concise && work && live ? (
+        {!multiRun && concise && work && live ? (
           /* Working = 整次运行（AgentStart → AgentEnd）：标题行 + 这一轮的全部内容
              （思考、中间的旁白、工具行、子 agent），可滚动、有高度上限。
              内容取 liveBox（工作行 + 正在写的正文），不是 turn.items —— 记录（信号/回执）
@@ -1222,7 +1317,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         {/* 结算后：收起是一行 Worked for，展开还是**同一个盒子**（头 + 内容，46vh 封顶）。
             以前展开是把这些行摊进流里，于是「跑完的一轮」看起来仍在跑：答案被推到
             一堵工具行下面，而本该兜住它们的盒子没有底。外面从头到尾只有最后一轮正文。 */}
-        {concise && work && !live ? (
+        {!multiRun && concise && work && !live ? (
           <WorkBox
             stats={stats}
             /* 结算盒永远不是“在跑”：`!live` 已经是 AgentEnd 之后的唯一分支
@@ -1236,7 +1331,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             {workItems.length ? workItems : null}
           </WorkBox>
         ) : null}
-        {body.length ? <div className="rt-turn-ans">{body}</div> : null}
+        {/* 多 run 时时间线上的块已经按顺序进了 plan（含结论正文），不再整体再画一遍 */}
+        {!multiRun && body.length ? <div className="rt-turn-ans">{body}</div> : null}
         {/* 这一轮改了哪个文件：记录（带框卡），点它展开做出改动的工作行 */}
         {/* 简洁档收起时不再单独画文件行：这条信息已经在 Worked for 那一行里
             （「Edited 1 file +22 −17」），再画一遍是同一个数字说两次。

@@ -5,6 +5,7 @@ import { FoldIcon } from '../FoldIcon'
 import { toolArgsSummary, toolVerb } from '../../../lib/toolSummary'
 import { signalText } from '../../../lib/signalFacts'
 import { t as i18nT } from '../../../i18n'
+import { fmtDuration, fmtRun } from '../../../lib/duration'
 import './lane.css'
 
 type AgentMsg = Extract<MsgBlock, { kind: 'agent' }>
@@ -23,12 +24,10 @@ const WORD: Record<string, string> = {
   done: 'done',
 }
 
-/* 十位秒 → 整秒：读的时候不跳，结束时与最后一帧同形 */
-function clock(ms: number): string {
-  const s = Math.max(0, ms) / 1000
-  if (s < 60) return s.toFixed(1) + ' s'
-  const m = Math.floor(s / 60)
-  return m + 'm ' + String(Math.floor(s % 60)).padStart(2, '0') + 's'
+/* 车道上的计时：结算行用 fmtDuration（带毫秒），还在跑的用 fmtRun（按秒走）。
+   两者同一套进位写法，运行中与结束时的数字是同一个形态。 */
+function clock(ms: number, running = false): string {
+  return running ? fmtRun(ms) : fmtDuration(ms)
 }
 
 /* 「killed 必须带原因」（design parts/lane.js）：只说它停了不是信息。
@@ -150,7 +149,7 @@ export function Lane({ agents }: { agents: AgentMsg[] }) {
                 <span className="la-act-t">{lastAction(b.items)}</span>
                 {live ? <span className="la-live" aria-hidden="true" /> : null}
               </span>
-              <span className="la-dur">{clock(dur)}</span>
+              <span className="la-dur">{clock(dur, live)}</span>
               <FoldIcon open={isOpen} />
             </button>
             <div className="la-open">

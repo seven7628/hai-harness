@@ -321,7 +321,7 @@ test('batch line: an edit reports the diff, not a count of calls', () => {
   const calls = [
     { kind: 'tool', id: 1, toolId: 'a', name: 'edit_file', args: '{"path":"a.go"}', diff: { path: 'a.go', added: 8, removed: 5 }, status: 'done', durMs: 1200 },
   ] as unknown as MsgBlock[]
-  assert.equal(batchLine(calls as never), 'Edited a.go \u00b7 +8 \u22125 \u00b7 1.2 s')
+  assert.equal(batchLine(calls as never), 'Edited a.go \u00b7 +8 \u22125 \u00b7 1s200ms')
 })
 
 test('batch line: nothing to say is nothing, not a zero', () => {

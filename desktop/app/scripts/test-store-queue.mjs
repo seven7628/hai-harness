@@ -52,7 +52,7 @@ await build({
   logLevel: 'silent',
   plugins: [assetPlugin],
 })
-const { useAppStore, sessionBusy, dispatchEvent, applySessionPrefs, runningTaskCount } = require(outfile)
+const { useAppStore, sessionBusy, dispatchEvent, applySessionPrefs, runningTaskCount, hydrateCheckpoint } = require(outfile)
 // 2026-10：右栏「任务」tab 退役后 asyncTaskBlocks（给它用的平铺投影）已删除。
 // 它原来的两条判据（「有占位卡」「占位有状态」）在这里按**块本身**判，不再借道那个投影。
 const liveTasks = (blocks) => blocks.filter((b) => b.kind === 'async_task' || b.kind === 'agent'
@@ -551,9 +551,12 @@ assert.ok(
   useAppStore.getState().views.s1.blocks.some((b) => b.kind === 'signal' && b.fact.round === 4),
   'run 找不到归属时退回当前会话（不静默丢弃）',
 )
-// ③ 任务级提示是**例外**：异步任务是会话级对象（卡片在主转录、结果回填主会话 inbox），
-//    「被摘成后台任务」「任务完成」两行始终通知主会话 —— 哪怕任务是被子 agent 摘离的
-//    （用户 2026-10：异步任务完成的通知应该通知到主 session，这个比较特殊）。
+// ③ 任务级提示分两半（用户 2026-11 的口径，修正 409a99c 的一半）：
+//    · **摘离**归它自己的会话：子 agent 在自己的会话里把工具摘成后台任务 → 那行挂在
+//      **它的卡片**上。主转录里根本没有那次工具调用，凭空一行「已摘为后台任务」读起来
+//      像从天上掉下来的（用户 2026-11 截图报障）。
+//    · **完成**推回主会话：结果是会话级的（卡片在主转录、结果回填主会话 inbox），
+//      模型在主 run 的下一轮读到它，signal 组件也显示在主会话。
 setup()
 EV('agent_start', { run_id: 'r-main' })
 EV('agent_start', { run_id: 'r-sub2', parent_run_id: 'r-main', name: 'sub' })
@@ -561,21 +564,45 @@ EV('tool_start', { id: 'tt1', name: 'bash', arguments: '{"command":"sleep 60"}',
 EV('task_promoted', { task_id: 'tooltask-sub', name: 'bash' })
 let v14c = useAppStore.getState().views.s1
 const subCard2 = v14c.blocks.find((b) => b.kind === 'agent' && b.runId === 'r-sub2')
-assert.equal(
-  subCard2.items.filter((it) => it.kind === 'signal').length,
-  0,
-  '任务级提示不得折进子 agent 卡片（主会话看不到「它从哪来」）',
-)
 assert.ok(
-  v14c.blocks.some((b) => b.kind === 'signal' && b.fact.etype === 'task_promoted'),
-  '摘离提示必须落在主会话转录',
+  subCard2.items.some((it) => it.kind === 'signal' && it.fact.etype === 'task_promoted'),
+  '子 agent 摘离的任务：摘离信号要挂回**它的**会话（卡片项）',
 )
-// 完成通知同样必须在主会话（子 agent 摘离的任务也不例外）
+assert.equal(
+  subCard2.items.find((it) => it.kind === 'tool' && it.taskId === 'tooltask-sub')?.promoted,
+  true,
+  '卡片里的工具行也要切后台态（子会话里那行不能再写「运行中」）',
+)
+assert.equal(
+  v14c.blocks.filter((b) => b.kind === 'signal' && b.fact.etype === 'task_promoted').length,
+  0,
+  '子 agent 摘离的任务：摘离提示不得画到主转录（主转录里没有那次调用）',
+)
+// 主 run 自己的工具摘离 → 仍然落在主转录（工具行就在那里）
+EV('tool_start', { id: 'tt2', name: 'bash', arguments: '{"command":"sleep 90"}', run_id: 'r-main', task_id: 'tooltask-main' })
+EV('task_promoted', { task_id: 'tooltask-main', name: 'bash' })
+v14c = useAppStore.getState().views.s1
+assert.ok(
+  v14c.blocks.some((b) => b.kind === 'signal' && b.fact.etype === 'task_promoted' && b.fact.message === 'tooltask-main'),
+  '主 run 自己的工具摘离：一行信号落在主会话',
+)
+// 完成通知必须在主会话（子 agent 摘离的任务也不例外）
 EV('task_result_delivered', { task_id: 'tooltask-sub', name: 'bash', result: 'done' })
 v14c = useAppStore.getState().views.s1
 assert.ok(
   v14c.blocks.some((b) => b.kind === 'task_delivery' && b.taskId === 'tooltask-sub'),
   '任务完成的通知必须通知到主会话（不得只留在子 agent 里）',
+)
+// 终态也要收回**它自己的会话**：子会话里那行不能永远写着「运行中」
+const subTool = v14c.blocks
+  .find((b) => b.kind === 'agent' && b.runId === 'r-sub2')
+  .items.find((it) => it.kind === 'tool' && it.taskId === 'tooltask-sub')
+assert.equal(subTool?.status, 'done', '完成回执要把卡片里的工具项收敛成 done')
+assert.equal(subTool?.result, 'done', '结果写回那一项（子会话里读得到）')
+assert.equal(
+  v14c.blocks.filter((b) => b.kind === 'task_result' && b.taskId === 'tooltask-sub').length,
+  0,
+  '结果已在它自己的会话里，主会话不再多一张完整结果卡（只留一行 signal）',
 )
 
 console.log('PASS 场景14：信号按 session / 子 agent 隔离')
@@ -723,6 +750,208 @@ v13 = useAppStore.getState().views.s1
 assert.equal(v13.turns.length, 1, 'AgentEnd 应兜底收尾本轮')
 assert.ok((v13.turns[0].durMs ?? -1) >= 0 && v13.turns[0].input === 0, '兜底只记时长，token 不编')
 console.log('PASS 场景13：失败 attempt 记账；重试不算轮尾，最终失败/AgentEnd 才收尾')
+
+// ===== 场景 17：运行中插话（injected）留在同一个 run 里 =====
+// 服务端两条消费路径：Session.Run 的 takeBatch（新运行开口）与 AgentLoop 的插话 Poll
+// （运行中插进来的一条）。事件带 injected 位 —— 前者没有，后者有；转录据此不另起一轮
+// （否则同一个 run 画出两个 Working 盒子，用户 2026-11 报障）。
+setup()
+EV('agent_start', { run_id: 'r-mid' })
+EV('user_inputs_consumed', { user_texts: ['第一句'] }) // 新运行的开头（无 injected）
+EV('user_inputs_consumed', { user_texts: ['跑的时候补一句'], injected: true })
+const v17 = useAppStore.getState().views.s1
+const users17 = v17.blocks.filter((b) => b.kind === 'user')
+assert.equal(users17.length, 2)
+assert.notEqual(users17[0].injected, true, '新运行的开口不是插话')
+assert.equal(users17[1].injected, true, '插话 Poll 消费的消息带 injected 位（渲染层据此不切轮）')
+
+// ===== 场景 18：上下文压缩完成 → 对应会话的一行 signal =====
+// 用户 2026-11：压缩结束后，对应的 session 没有「压缩完成」的一行通知。
+// 归属与其它信号同一条规则：子 run 的压缩挂在它的卡片上，主 run 的落主会话。
+setup()
+EV('agent_start', { run_id: 'r-main' })
+EV('compress_start', { run_id: 'r-main', before: 40 })
+EV('compress_end', { run_id: 'r-main', before: 40, after: 12, ctx_tokens: 2000 })
+const v18 = useAppStore.getState().views.s1
+assert.ok(
+  v18.blocks.some((b) => b.kind === 'compression' && b.runId === 'r-main'),
+  '压缩块照旧落库',
+)
+const compact18 = v18.blocks.find((b) => b.kind === 'signal' && b.fact.etype === 'compress_end')
+assert.ok(compact18, '主 run 压缩完成要有一行 signal（落在主会话）')
+assert.equal(compact18.fact.sig, 'compact')
+assert.equal(compact18.fact.before, 40)
+assert.equal(compact18.fact.after, 12)
+
+// 子 run 的压缩：挂回子 agent 的卡片，不进主转录
+EV('agent_start', { run_id: 'r-sub18', parent_run_id: 'r-main', name: 'sub' })
+EV('compress_start', { run_id: 'r-sub18', before: 30 })
+EV('compress_end', { run_id: 'r-sub18', before: 30, after: 9 })
+const v18b = useAppStore.getState().views.s1
+const card18 = v18b.blocks.find((b) => b.kind === 'agent' && b.runId === 'r-sub18')
+assert.ok(
+  card18.items.some((it) => it.kind === 'signal' && it.fact.etype === 'compress_end'),
+  '子 agent 压缩完成的一行要挂在它的卡片上（它的会话）',
+)
+assert.equal(
+  v18b.blocks.filter((b) => b.kind === 'signal' && b.fact.etype === 'compress_end').length,
+  1,
+  '子 run 的压缩完成不得多出一条到主转录',
+)
+// 失败/中止的压缩没有「完成」可报：不写 signal（原因已在压缩块上）
+EV('agent_start', { run_id: 'r-bad', parent_run_id: 'r-main', name: 'sub2' })
+EV('compress_start', { run_id: 'r-bad', before: 20 })
+EV('compress_end', { run_id: 'r-bad', before: 20, after: 20, error: 'upstream failed' })
+const v18c = useAppStore.getState().views.s1
+const badCard = v18c.blocks.find((b) => b.kind === 'agent' && b.runId === 'r-bad')
+assert.equal(
+  badCard.items.filter((it) => it.kind === 'signal' && it.fact.etype === 'compress_end').length,
+  0,
+  '失败的压缩不写「压缩完成」信号',
+)
+console.log('PASS 场景17-18：插话带 injected 位；压缩完成的一行 signal 归对应会话')
+
+// ===== 场景 19：记录落在**这一轮内部**，不得插到用户消息上方 =====
+// 用户 2026-11 报障（截图里一条光秃秃的信号行 + 下面才是正文）：只有一轮时，
+// 「下一条 user 之前」被实现成从数组开头找 user —— 第一个 user 立刻命中，于是运行中
+// 到达的信号/回执全都插到了用户消息**上方**，一轮被切成两段（第一段没有 user）。
+setup()
+const b19t = Date.now() - 5000
+const at19 = (ms) => new Date(b19t + ms).toISOString()
+EV('agent_start', { run_id: 'r19', timestamp: at19(0) })
+EV('user_inputs_consumed', { user_texts: ['这一轮的问题'], timestamp: at19(10) })
+EV('tool_start', { id: 'x19', name: 'bash', arguments: '{"command":"sleep 1"}', run_id: 'r19', timestamp: at19(20) })
+EV('tool_hook_warning', { run_id: 'r19', name: 'PreToolUse', message: 'warn', timestamp: at19(30) })
+EV('task_result_delivered', { task_id: 'tk19', result: 'done', timestamp: at19(40) })
+const b19 = useAppStore.getState().views.s1.blocks
+const u19 = b19.findIndex((b) => b.kind === 'user')
+const s19 = b19.findIndex((b) => b.kind === 'signal' && b.fact.etype === 'tool_hook_warning')
+const d19 = b19.findIndex((b) => b.kind === 'task_delivery' && b.taskId === 'tk19')
+assert.ok(u19 >= 0 && s19 >= 0 && d19 >= 0, '用户消息 / 信号 / 回执都要在')
+assert.ok(s19 > u19, `运行中到达的信号必须在这一轮内部（信号@${s19}, user@${u19}）`)
+assert.ok(d19 > u19, `运行中到达的回执必须在这一轮内部（回执@${d19}, user@${u19}）`)
+
+// 迟到的事件仍按事件时刻落位，但**下界是这一轮的开头**（不能跑到上一轮/用户上方）
+setup()
+EV('agent_start', { run_id: 'r19a', timestamp: at19(1000) })
+EV('user_inputs_consumed', { user_texts: ['第二轮的问题'], timestamp: at19(1100) })
+EV('agent_start', { run_id: 'r19b', timestamp: at19(1200) })
+EV('tool_start', { id: 'x19b', name: 'bash', arguments: '{}', run_id: 'r19b', timestamp: at19(1300) })
+// 事件时刻早于 r19b 的开始：插到 r19b 第一块之前，但仍在 user 之后
+EV('task_result_delivered', { task_id: 'tk19b', result: 'done', timestamp: at19(1150) })
+const b19b = useAppStore.getState().views.s1.blocks
+const u19b = b19b.findIndex((b) => b.kind === 'user')
+const d19b = b19b.findIndex((b) => b.kind === 'task_delivery' && b.taskId === 'tk19b')
+const run19b = b19b.findIndex((b) => b.runId === 'r19b' || b.parentRunId === 'r19b')
+assert.ok(d19b > u19b, `迟到的回执也不能插到用户消息上方（回执@${d19b}, user@${u19b}）`)
+assert.ok(run19b < 0 || d19b < run19b, `迟到的回执仍要排在新 run 的块之前（回执@${d19b}, run@${run19b}）`)
+console.log('PASS 场景19：记录落在这一轮内部（不再插到用户消息上方）')
+
+// ===== 场景 20：暖恢复（刷新，进程内 run 还在跑）不许把这次运行判成交卷 =====
+// 用户 2026-11 报障：上下文压缩之后刷新页面，Working 变成 Worked for，压缩完成那一行
+// 也没有收缩到 Working 盒子里面（落在盒外的时间线上）。两个破坏点：
+//   a) checkpoint 恢复**无条件**归一化：running 的 run 节点被改成 done、runEnded 恒 true
+//      → afterRunNow() 恒真 → 之后到达的每条记录都被判成「交卷后到达」；
+//   b) 运行中到达的记录只在 true 时写位 → 位置兜底（正文之后 = 交卷后）兜回来又把它甩出去。
+setup()
+const cp20 = {
+  schema_version: 1,
+  blocks: [
+    { kind: 'user', id: 1, text: '这一轮的问题', ts: 1000 },
+    { kind: 'assistant', id: 2, text: '写到一半的正文', run_id: 'r20', ts: 2000 },
+    { kind: 'tool', id: 3, name: 'bash', args: '{}', status: 'running', run_id: 'r20', ts: 2100 },
+  ],
+  run_nodes: [{ id: 'r20', label: 'run', status: 'running', depth: 0, kind: 'run', started_at: 1000 }],
+  turns: [],
+}
+hydrateCheckpoint('s1', cp20, undefined, { live: true })
+let v20 = useAppStore.getState().views.s1
+assert.strictEqual(v20.runEnded, false, '暖恢复：runEnded 必须保持 false（AgentEnd 还没来）')
+assert.strictEqual(v20.runNodes[0]?.status, 'running', '暖恢复：在跑的 run 节点不许收敛成 done')
+assert.strictEqual(v20.blocks.find((b) => b.kind === 'tool')?.status, 'running', '暖恢复：在跑的工具不许改成 done')
+EV('tool_hook_warning', { run_id: 'r20', name: 'PreToolUse', message: 'warn' })
+EV('task_result_delivered', { task_id: 'tk20', result: 'done' })
+v20 = useAppStore.getState().views.s1
+assert.strictEqual(v20.blocks.find((b) => b.kind === 'signal')?.afterRun, false,
+  '运行中到达的信号必须盖 afterRun:false（否则它被甩出 Working 盒子）')
+assert.strictEqual(v20.blocks.find((b) => b.kind === 'task_delivery')?.afterRun, false,
+  '运行中到达的回执必须盖 afterRun:false（否则它被甩出 Working 盒子）')
+
+// 冷恢复（进程重启/磁盘）：残留 running 就是幽灵 —— 必须收敛，记录按位置落到盒外
+setup()
+hydrateCheckpoint('s1', cp20)
+v20 = useAppStore.getState().views.s1
+assert.strictEqual(v20.runEnded, true, '冷恢复：结算位必须是 true')
+assert.strictEqual(v20.runNodes[0]?.status, 'done', '冷恢复：幽灵 run 收敛为 done')
+assert.strictEqual(v20.blocks.find((b) => b.kind === 'tool')?.status, 'done', '冷恢复：幽灵工具收敛为 done')
+EV('tool_hook_warning', { run_id: 'r20', name: 'PreToolUse', message: 'warn' })
+v20 = useAppStore.getState().views.s1
+assert.strictEqual(v20.blocks.find((b) => b.kind === 'signal')?.afterRun, true, '交卷之后到达 = 时间线上的记录')
+console.log('PASS 场景20：暖恢复保留运行态 / 冷恢复收敛；记录按到达时刻归属盒子')
+
+// ===== 场景 21：待答的 ask_user 批次进 checkpoint（刷新后提问面板还能复原）=====
+// 用户 2026-11：ask_user 是工具调用，理论上就该进 checkpoint —— 事实是它只活在前端的
+// views[sid].questions 里，刷新一次面板就没了，而 run 还在等这个回答（等到超时才动）。
+setup()
+const cp21 = {
+  schema_version: 1,
+  blocks: [{ kind: 'user', id: 1, text: '问一句', ts: 1000 }],
+  run_nodes: [{ id: 'r21', kind: 'run', status: 'running', label: 'run', depth: 0, started_at: 1000 }],
+  turns: [],
+  pending_questions: [{
+    id: 'qb21', run_id: 'r21', timeout_ms: 60000, ts: Date.now(),
+    items: [{ id: 'q21-1', question: '选哪个？', options: [{ label: 'A', preview: 'a' }, { label: 'B' }] }],
+  }],
+}
+hydrateCheckpoint('s1', cp21, undefined, { live: true })
+let v21 = useAppStore.getState().views.s1
+assert.strictEqual(v21.questions.length, 1, '暖恢复：待答批次必须还在')
+assert.strictEqual(v21.questions[0].id, 'qb21', '批次 id 是 answer_question 的锚')
+assert.strictEqual(v21.questions[0].runId, 'r21')
+assert.strictEqual(v21.questions[0].timeoutMs, 60000, '倒计时窗口要一起回来')
+assert.strictEqual(v21.questions[0].items[0].options.length, 2, '选项（含 preview）要一起回来')
+assert.strictEqual(v21.questions[0].items[0].options[0].preview, 'a')
+// 回答/超时/中断都汇于 tool_run_end(ask_user) → 镜像同步清掉
+EV('tool_run_end', { id: 'aq21', name: 'ask_user', run_id: 'r21', result: 'A', is_error: false })
+assert.strictEqual(useAppStore.getState().views.s1.questions.length, 0, '答完面板与镜像一起消失')
+
+// 冷恢复（进程死了，回答通道不存在）→ 不许画一个骗人的「等你回答」
+setup()
+hydrateCheckpoint('s1', cp21)
+assert.strictEqual(useAppStore.getState().views.s1.questions.length, 0, '冷恢复不带待答批次')
+console.log('PASS 场景21：ask_user 批次进 checkpoint；暖恢复复原、冷恢复丢弃')
+
+// ===== 场景 22：产出卡的归属（AgentEnd + 那个 run + 这个 session）=====
+// 用户 2026-11 问：产出卡与轮尾账是不是也按 AgentEnd / session 归属？
+//   · 只有**主 run** 的 AgentEnd 落产物块（子运行的产出归它自己的卡片）；
+//   · 一个 AgentEnd 一块（同 runId 重放不追加第二块）；
+//   · 子运行的 AgentEnd 不得把文件写进主转录。
+setup()
+const at22 = (ms) => new Date(Date.now() - 20000 + ms).toISOString()
+EV('agent_start', { run_id: 'm22', timestamp: at22(0) })
+EV('user_inputs_consumed', { user_texts: ['主 run'], timestamp: at22(10) })
+EV('llm_start', { run_id: 'm22', request_id: 'q22', timestamp: at22(20) })
+EV('content_chunk', { run_id: 'm22', request_id: 'q22', content: '正文', timestamp: at22(30) })
+EV('llm_end', { run_id: 'm22', request_id: 'q22', timestamp: at22(40), usage: { Input: 100, Output: 20 } })
+// 子运行的 AgentEnd（带产出）：不得在主转录落产出块
+EV('agent_start', { run_id: 's22sub', parent_run_id: 'm22', depth: 1, timestamp: at22(50) })
+EV('agent_end', { run_id: 's22sub', parent_run_id: 'm22', finish_reason: 'stop', timestamp: at22(60),
+  artifacts: [{ name: 'sub.md', path: 'w/sub.md', kind: 'created', added: 5 }] })
+let b22 = useAppStore.getState().views.s1.blocks
+assert.strictEqual(b22.filter((b) => b.kind === 'artifacts').length, 0, '子运行的产出不落主转录')
+// 主 AgentEnd：一块，runId 是这个 run
+EV('agent_end', { run_id: 'm22', finish_reason: 'stop', timestamp: at22(70),
+  artifacts: [{ name: 'a.md', path: 'w/a.md', kind: 'created', added: 75 }] })
+b22 = useAppStore.getState().views.s1.blocks
+let arts22 = b22.filter((b) => b.kind === 'artifacts')
+assert.strictEqual(arts22.length, 1, '主 run 的 AgentEnd 落一块产出')
+assert.strictEqual(arts22[0].runId, 'm22', '产出块记住是哪个 run 的')
+// 重连补发 / 重放同一条 AgentEnd：不追加第二块
+EV('agent_end', { run_id: 'm22', finish_reason: 'stop', timestamp: at22(70),
+  artifacts: [{ name: 'a.md', path: 'w/a.md', kind: 'created', added: 75 }] })
+arts22 = useAppStore.getState().views.s1.blocks.filter((b) => b.kind === 'artifacts')
+assert.strictEqual(arts22.length, 1, '同一 runId 的 agent_end 重放不得再落一块')
+console.log('PASS 场景22：产出按 AgentEnd 的 run 与 session 归属，同 run 幂等')
 
 console.log('STORE_TEST_PASS')
 process.exit(0)

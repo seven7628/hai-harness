@@ -82,3 +82,8 @@ html[data-skin='runtime'] .sig[data-kind='persist'] > svg {
 html[data-skin='runtime'] .sig[data-kind='closed'] > svg {
   color: var(--green);
 }
+
+/* 上下文压缩完成：中性的维护事件 —— 用强调色，不是警告（琥珀留给「需要注意」） */
+html[data-skin='runtime'] .sig[data-kind='compact'] > svg {
+  color: var(--accent);
+}
