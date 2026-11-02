@@ -170,7 +170,10 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
   // 运行时皮肤的工具行是六列（折角 · 图标 · 动词 · 对象 · 度量 · 时长）：动词用工具名
   // 的大写形式、度量从结果算；另两档皮肤保留原名与旧版面（.t 里仍是原始工具名）。
   const rt = useSkin() === 'runtime'
-  const metric = rt ? toolMetric(b.name, b.args || '', b.result, b.diff) : null
+  // 度量描述的是**结果**：运行中不画。live 路径的 running 块本来没有 result，但恢复路径会带上
+  // checkpoint 里的部分输出（Block.Output）—— 那时画出来的是「已收到的那一截有多大」，
+  // 既不是结果也是半句话，还会让行头多占一格（见下面 tool-tail-cell 的注释）。
+  const metric = rt && b.status !== 'running' ? toolMetric(b.name, b.args || '', b.result, b.diff) : null
   const changed = b.status === 'done' && !err
   const summary = toolArgsSummary(b.name, b.args || '', t)
   // 编排型工具（codemode）：档位徽标（检索 / 执行）——判据见 lib/codemodeNested.ts 的 codemodeTier。
@@ -323,47 +326,58 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
           </>
         )}
         <span className="grow" />
-        {host === 'main' && b.promoted && b.taskId && (b.status === 'running' || b.interrupting) && (
-          <button
-            className="tool-promote"
-            disabled={b.interrupting}
-            onClick={(e) => {
-              e.stopPropagation() // 避免触发展开/收起
-              interruptTask(b.taskId!)
-            }}
-            title={b.interrupting ? t('task.stopping') : t('task.stop')}
-          >
-            {b.interrupting ? t('task.interrupting') : t('task.stopBtn')}
-          </button>
-        )}
-        {host === 'main' && b.promoted && b.status === 'running' && (
-          <span className="badge bg" title={b.taskId || ''}>{t('tool.promoted')}</span>
-        )}
-        {host === 'main' && !b.promoted && b.status === 'running' && b.taskId && (
-          <button
-            className="tool-promote"
-            onClick={(e) => {
-              e.stopPropagation()
-              promoteTask(b.taskId!)
-            }}
-            title={t('tool.promote.hint')}
-          >
-            {t('tool.promote')}
-          </button>
-        )}
-        {b.status === 'running' && !isCodemode && <span className="run">…</span>}
-        {/* 度量列：+a −b / N lines / N hits / N files / x.x KB —— 算不出就不画 */}
-        {rt && metric ? (
-          <span className="m">
-            {metric.kind === 'diff' ? (
-              <>
-                <span className="p">+{metric.added}</span> <span className="d">−{metric.removed}</span>
-              </>
-            ) : (
-              metric.text
-            )}
-          </span>
-        ) : null}
+        {/* 行头是设计给的六列网格（14·14·56·1fr·auto·52，见 runtime-skin.css）。
+            「控件簇 + 度量」共占**一个**单元格，内部用 flex 排：一个控件一个子项就会溢出到
+            隐式第二行，时长 `· 2m43s…` 掉到单独一行（用户 2026-11 截图）。这条教训有**两个**
+            来源：摘离后多出「停止 / 后台运行中」；恢复时 running 块带着部分输出 → 度量 `.m`
+            又多占一格（同样两行）。所以整簇收进一个盒子，行头永远不超过六格。 */}
+        <span className="tool-tail-cell">
+          {host === 'main' && b.promoted && b.taskId ? (
+            <span className="tool-ctl">
+              {(b.status === 'running' || b.interrupting) && (
+                <button
+                  className="tool-promote"
+                  disabled={b.interrupting}
+                  onClick={(e) => {
+                    e.stopPropagation() // 避免触发展开/收起
+                    interruptTask(b.taskId!)
+                  }}
+                  title={b.interrupting ? t('task.stopping') : t('task.stop')}
+                >
+                  {b.interrupting ? t('task.interrupting') : t('task.stopBtn')}
+                </button>
+              )}
+              {b.status === 'running' && (
+                <span className="badge bg" title={b.taskId}>{t('tool.promoted')}</span>
+              )}
+            </span>
+          ) : null}
+          {host === 'main' && !b.promoted && b.status === 'running' && b.taskId && (
+            <button
+              className="tool-promote"
+              onClick={(e) => {
+                e.stopPropagation()
+                promoteTask(b.taskId!)
+              }}
+              title={t('tool.promote.hint')}
+            >
+              {t('tool.promote')}
+            </button>
+          )}
+          {b.status === 'running' && !isCodemode && <span className="run">…</span>}
+          {/* 度量列：+a −b / N lines / N hits / N files / x.x KB —— 算不出就不画 */}
+          {rt && metric ? (
+            <span className="m">
+              {metric.kind === 'diff' ? (
+                <>
+                  <span className="p">+{metric.added}</span> <span className="d">−{metric.removed}</span>
+                </>
+              ) : (
+                metric.text
+              )}
+            </span>
+          ) : null}
+        </span>
         {rt ? (
           <span className="dur">
             {b.status === 'running' ? <ElapsedTimer startAt={b.startedAt} running durMs={undefined} /> : fmtMs(b.durMs ?? undefined)}

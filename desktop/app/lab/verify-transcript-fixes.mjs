@@ -525,6 +525,99 @@ await page.eval((cp) => {
 await wait(600)
 check('H 冷恢复：不画「等你回答」的假面板', !(await page.eval(() => !!document.querySelector('.ask'))), '')
 
+// ------------------------------------------------- I 工具行：摘离后不许被控件撑成两行
+// 用户 2026-11 截图：运行中的 bash 被摘成后台任务后，行头里的「停止 + 后台运行中」把六列网格
+// 挤到隐式第二行，时长 `· 2m43s…` 掉到下面单独一行（看起来像样式坏了）。行头是设计给的
+// 六列（14·14·56·1fr·auto·52），控件必须合成**一个**单元格。
+const rowSid = 's-row'
+const rowFire = async (list) => {
+  for (const [t, payload] of list) {
+    await page.eval((p) => window.__dispatch({ event_type: p.t, session_id: p.sid, ...p.payload }), { t, sid: rowSid, payload })
+    await wait(110)
+  }
+  await wait(450)
+}
+const rowGeo = () => page.eval(() => {
+  const hd = document.querySelector('.tool-row-hd')
+  if (!hd) return null
+  const kids = [...hd.children].filter((el) => el.getBoundingClientRect().width > 0).map((el) => ({
+    cls: String(el.className || '').split(' ')[0],
+    top: Math.round(el.getBoundingClientRect().top),
+  }))
+  // 同一行的子项 top 会差几像素（字形基线与按钮高度不同）→ 6px 内算同一行
+  const clusters = []
+  for (const k of kids.map((x) => x.top).sort((a, b) => a - b)) {
+    if (!clusters.length || k - clusters[clusters.length - 1] > 6) clusters.push(k)
+  }
+  return {
+    hdH: Math.round(hd.getBoundingClientRect().height),
+    rows: clusters.length,
+    ctl: hd.querySelectorAll('.tool-ctl').length,
+    dur: kids.find((k) => k.cls === 'dur')?.top ?? null,
+    maxOther: Math.max(...kids.filter((k) => k.cls !== 'dur').map((k) => k.top)),
+  }
+})
+await page.eval((sid) => {
+  window.__store.setState({ activeSessionId: sid, sessions: [{ id: sid, title: 'row' }] })
+  window.__hydrate(sid, { schema_version: 1, blocks: [], run_nodes: [], turns: [] }, undefined, { live: true })
+}, rowSid)
+await rowFire([
+  ['agent_start', { run_id: 'rr', timestamp: new Date(Date.now() - 170000).toISOString() }],
+  ['user_inputs_consumed', { user_texts: ['跑一个长命令'] }],
+  ['tool_run_start', { id: 'xr', name: 'bash', arguments: JSON.stringify({ command: 'ls ~/.go-code/events | head -5; echo ---' }), run_id: 'rr', task_id: 'tooltask-row' }],
+  ['tool_output', { id: 'xr', run_id: 'rr', tail: '$ ls\na\nb\n', total_bytes: 4096, seq: 1 }],
+])
+const rowPlain = await rowGeo()
+check('I 运行中的 bash 行：行头只有一行（时长不掉到第二行）',
+  !!rowPlain && rowPlain.hdH <= 36 && rowPlain.rows === 1, JSON.stringify(rowPlain))
+await rowFire([['task_promoted', { session_id: rowSid, task_id: 'tooltask-row', name: 'bash', kind: 'tool' }]])
+const rowPromoted = await rowGeo()
+check('I 摘成后台任务后：停止 + 后台运行中 合成一个单元格，行头仍是一行',
+  !!rowPromoted && rowPromoted.rows === 1 && rowPromoted.ctl === 1, JSON.stringify(rowPromoted))
+check('I 摘离前后行头高度不变（32px 一档）',
+  !!rowPlain && !!rowPromoted && rowPromoted.hdH === rowPlain.hdH, JSON.stringify({ plain: rowPlain?.hdH, promoted: rowPromoted?.hdH }))
+check('I 时长与行内其它项同排（不再单独一行）',
+  !!rowPromoted && rowPromoted.dur != null && Math.abs(rowPromoted.dur - rowPromoted.maxOther) <= 12, JSON.stringify(rowPromoted))
+
+// 同一个症状的**第二个来源**：恢复路径上 running 块在 checkpoint 里带着部分输出（Go Block.Output），
+// 于是度量 `.m` 也有内容 → 行头多出第七格，时长又一次掉到第二行（用户 2026-11 截图 2，
+// 那条 bash 是刷新/重连后从 checkpoint 复原的）。尾簇收进一个单元格后两种来源都只有六格。
+await page.eval(() => {
+  const store = window.__store
+  const st = store.getState()
+  const sid = st.activeSessionId
+  const startedAt = Date.now() - 163000
+  const blocks = [
+    { kind: 'user', id: 1, text: '跑一个长命令' },
+    { kind: 'tool', id: 2, toolId: 'xr', name: 'bash', status: 'running', runId: 'rr',
+      args: JSON.stringify({ command: 'ls ~/.go-code/events | head -5; echo ---' }),
+      result: 'Users_admin_a\nUsers_admin_b\n', startedAt,
+      promoted: true, taskId: 'tooltask-row', taskStatus: 'running' },
+  ]
+  const v = st.views[sid] ?? {}
+  store.setState({
+    blocks,
+    views: { ...st.views, [sid]: { ...v, blocks, runEnded: false,
+      runNodes: [{ id: 'rr', kind: 'run', status: 'running', label: 'run', depth: 0, startedAt }],
+      streaming: true, turns: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 } } },
+  })
+})
+await wait(600)
+const rowRestored = await rowGeo()
+const rowRestoredMetric = await page.eval(() => {
+  const hd = document.querySelector('.tool-row-hd')
+  const m = hd?.querySelector('.m')
+  return m ? (m.textContent || '').trim() : null
+})
+check('I 恢复路径的 running 块：行头仍是一行（部分输出不占第七格）',
+  !!rowRestored && rowRestored.rows === 1 && rowRestored.hdH <= 36,
+  JSON.stringify({ ...rowRestored, metric: rowRestoredMetric }))
+check('I 运行中不画「结果度量」（部分输出的大小不是结果）',
+  rowRestoredMetric === null, JSON.stringify(rowRestoredMetric))
+check('I 度量与控件同格，时长仍在同排',
+  !!rowRestored && rowRestored.dur != null && Math.abs(rowRestored.dur - rowRestored.maxOther) <= 12,
+  JSON.stringify(rowRestored))
+
 check('无未捕获异常', errs.length === 0, JSON.stringify(errs.slice(0, 2)))
 
 await b.close()

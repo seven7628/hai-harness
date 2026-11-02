@@ -1965,3 +1965,42 @@ html[data-skin='runtime'] .tool-row .tool-tail[data-variant='running'] .tl:last-
   html[data-skin='runtime'] .tool-row .tool-tail .tl { animation: none; }
   html[data-skin='runtime'] .tool-row .tool-tail[data-variant='running'] .tl:last-child::after { animation: none; }
 }
+
+/* 工具行的「尾簇」：控件（停止 / 后台运行中 / 后台）+ 度量 共占**一个**网格单元
+   （见 NarrativeBlocks 的注释）。行头只有六列，尾簇里逐个占列就会溢出到隐式第二行 ——
+   时长会掉到单独一行。非 runtime 档位退回 display:contents：不新增盒子，子项照旧
+   参与原来的 flex 行内排布。 */
+.tool-tail-cell {
+  display: contents;
+}
+
+html[data-skin='runtime'] .tool-row .tool-tail-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: none;
+}
+
+/* 「后台运行中」徽标：状态色只出现在这颗药丸**里面**（v3 的同一个决定：填充，不描边）。
+   runtime 档位原先落到 index.css 的基础规则上 —— 一个 1px 靛蓝描边的小框，与相邻的
+   「停止」按钮长得像同一个控件族，一行里两个按钮抢注意力（用户 2026-11 截图）。 */
+html[data-skin='runtime'] .tool-row .badge.bg {
+  margin-left: 0;
+  border: 0;
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+  background: color-mix(in srgb, var(--running) 14%, transparent);
+  color: color-mix(in srgb, var(--running) 88%, var(--ink));
+}
+
+/* 控件簇内部再排一次（停止 + 徽标）：尾簇是一个单元格，里面怎么摆由 flex 说了算 */
+html[data-skin='runtime'] .tool-row .tool-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: none;
+}
