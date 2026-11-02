@@ -3,6 +3,7 @@ import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
 import type { CronJob, CronRun } from '../transport/types'
 import { Back, Clock } from './icons'
+import { fmtDuration } from '../lib/duration'
 
 function fmtTime(v?: string): string {
   if (!v) return '—'
@@ -95,7 +96,7 @@ export default function CronRunsPage() {
                       <tr key={r.run_id} className="cron-run-row" onClick={() => openRun(r)}>
                         <td>{fmtTime(r.fired_at)}</td>
                         <td><span className={`cron-status ${r.status}`}>{statusText(r.status)}</span></td>
-                        <td>{r.duration_ms ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—'}</td>
+                        <td>{r.duration_ms ? fmtDuration(r.duration_ms) : '—'}</td>
                         <td className="mono">{r.session_id || '—'}</td>
                         <td className="cron-prompt">{r.error || r.final_result || '—'}</td>
                         <td className="cron-actions">

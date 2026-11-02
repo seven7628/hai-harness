@@ -1,4 +1,5 @@
 import { t as defaultT } from '../i18n'
+import { fmtDuration } from './duration'
 
 // 工具调用参数摘要（链路树工具节点 / 消息工具 chip 共用）。
 // 依据 SDK 工具参数结构（tools/builtin、todo、subagent、plan）：
@@ -157,12 +158,11 @@ export function toolMetric(
   return null
 }
 
-/* 设计里的时长档：<10s 一位小数秒，≥10s 整数秒，<1s 毫秒 */
+/* 工具调用时长的既有入口：口径同 fmtDuration（全仓归一化写法），空值仍返回 ''。
+   保留这个函数名是因为批量行 / 工具行 / 嵌套调用都从这里取。 */
 export function fmtMs(ms?: number): string {
   if (ms == null || ms < 0) return ''
-  if (ms < 1000) return `${Math.round(ms)} ms`
-  const s = ms / 1000
-  return `${s >= 10 ? s.toFixed(0) : s.toFixed(1)} s`
+  return fmtDuration(ms)
 }
 
 /** 从工具参数 JSON 里取 bash 的**命令原文**（Live output 的 `$ …` 提示行）。

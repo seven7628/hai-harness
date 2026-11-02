@@ -54,30 +54,9 @@ export function UsageChip({ usage, title, className = 'mono' }: { usage?: UsageA
   )
 }
 
-// 格式化为人类可读耗时（工具 / SubAgent / LLM 执行时间）：<1s → 毫秒；<1min → 秒；
-// <1h → 分+秒；≥1h → 小时+分。未知（null/undefined）→ '—'。
-export function fmtDuration(ms?: number): string {
-  if (ms == null || ms < 0) return '—'
-  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  if (ms < 3_600_000) {
-    const m = Math.floor(ms / 60_000)
-    const s = Math.round((ms % 60_000) / 1000)
-    return s >= 1 ? `${m}m ${s}s` : `${m}m`
-  }
-  const h = Math.floor(ms / 3_600_000)
-  const m = Math.floor((ms % 3_600_000) / 60_000)
-  return m >= 1 ? `${h}h ${m}m` : `${h}h`
-}
-
-// fmtRun：运行中时钟的整秒显示（0s → 1s → 2s → … → 1m 30s），逐秒感知，不显示小数。
-export function fmtRun(ms?: number): string {
-  if (ms == null || ms < 0) return '—'
-  const total = Math.floor(ms / 1000)
-  const m = Math.floor(total / 60)
-  const s = total % 60
-  return m >= 1 ? `${m}m ${s}s` : `${s}s`
-}
+// 统一时长写法（1h30m / 1m25s / 1s666ms / 880ms）见 lib/duration.ts —— 全仓唯一
+// 实现；这里 re-export，既有调用方的 import 不用改。
+export { fmtDuration, fmtRun } from '../lib/duration'
 
 // 格式化为本地日期时间（YYYY-MM-DD HH:MM:SS），用于消息时间戳回显。
 export function fmtClock(ts?: number): string {

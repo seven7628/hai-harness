@@ -408,13 +408,9 @@ function spanGlyph(s: TraceSpan): string {
   return '✓'
 }
 
-/** 短时长文本（刻度/提示用）。 */
+/** 短时长文本（刻度/提示用）：口径同全仓 fmtDuration。 */
 export function fmtDurShort(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  const m = Math.floor(ms / 60_000)
-  const s = Math.round((ms % 60_000) / 1000)
-  return s >= 1 ? `${m}m${s}s` : `${m}m`
+  return fmtDuration(ms)
 }
 
 /** 刻度文本：按量级给 m/s 形式。 */

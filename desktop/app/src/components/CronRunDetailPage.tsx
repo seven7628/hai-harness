@@ -2,6 +2,7 @@ import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { Back, Clock } from './icons'
 import Narrative from './Narrative'
+import { fmtDuration } from '../lib/duration'
 
 function fmtTime(v?: string): string {
   if (!v) return '—'
@@ -11,7 +12,7 @@ function fmtTime(v?: string): string {
 
 function fmtDur(ms?: number): string {
   if (!ms) return '—'
-  return `${(ms / 1000).toFixed(1)}s`
+  return fmtDuration(ms)
 }
 
 export default function CronRunDetailPage() {

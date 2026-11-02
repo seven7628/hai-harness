@@ -14,6 +14,8 @@
 //      minified JSON，按 \n 数「行」会当场炸屏（pi 踩过：CHANGELOG.md:39；
 //      不变量「单行输出不炸屏」= §20.3）。
 
+import { fmtDuration } from './duration'
+
 /** 折叠态显示的嵌套调用条数（对齐 pi renderer.ts 的「最后 8 条」）。 */
 export const NESTED_COLLAPSED_LIMIT = 8
 
@@ -174,11 +176,10 @@ export function parseScriptEnvelope(text: string): ScriptEnvelope {
   return { recognized: true, succeeded: head[1] === 'completed', wallSec, body: lines.slice(i).join('\n') }
 }
 
-/** 墙钟秒数 → 人读的一行（`0.1s` / `1.2s` / `12s`）。 */
+/** 墙钟秒数 → 人读的一行（`123ms` / `1s200ms` / `12s300ms`）：口径同全仓 fmtDuration。 */
 export function formatWall(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return ''
-  // <10s 保留一位小数（脚本的差别常在小数位），≥10s 取整（避免「12.3s」这种假精度）
-  return sec < 10 ? `${sec.toFixed(1)}s` : `${Math.round(sec)}s`
+  return fmtDuration(sec * 1000)
 }
 
 // —— 头部摘要 ————————————————————————————————————————————————

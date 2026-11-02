@@ -474,10 +474,10 @@ test('信封：剥完后 5 行预算全归返回值（回归：用户截图里�
   assert.ok(after.text.includes('"count": 28'), '返回值真的看得见了')
 })
 
-test('formatWall：<10s 保留一位小数，≥10s 取整（不摆假精度）', () => {
-  assert.equal(formatWall(0.123), '0.1s')
-  assert.equal(formatWall(9.94), '9.9s')
-  assert.equal(formatWall(12.3), '12s')
+test('formatWall：统一时长写法（毫秒精度、按进位出单位）', () => {
+  assert.equal(formatWall(0.123), '123ms')
+  assert.equal(formatWall(9.94), '9s940ms')
+  assert.equal(formatWall(12.3), '12s300ms')
   assert.equal(formatWall(-1), '')
   assert.equal(formatWall(NaN), '')
 })
