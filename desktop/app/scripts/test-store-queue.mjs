@@ -953,5 +953,43 @@ arts22 = useAppStore.getState().views.s1.blocks.filter((b) => b.kind === 'artifa
 assert.strictEqual(arts22.length, 1, '同一 runId 的 agent_end 重放不得再落一块')
 console.log('PASS 场景22：产出按 AgentEnd 的 run 与 session 归属，同 run 幂等')
 
+// ===== 场景 23：跨会话/跨项目的「已摘为后台任务」不得落到当前会话 =====
+// 用户 2026-11 报障：agent-server-g 的会话里出现了 cybertron-gogroup 那次的
+// 「已摘为后台任务（bash · tooltask-42rsycmw）」。
+// 根因（事件日志实证）：events.TaskPromoted 自带 `"session_id":""`（无 omitempty），
+// bridge 又在首部注入了一份正确的 —— JSON 重复键**后者胜**，前端读到空串；而该事件既没有
+// run_id 可反查，旧实现就回退成「当前打开的会话」，于是串台。
+// 修法两层：bridge 先删事件自带的同名键再注入（见 jsonwire）；前端在没有归属时**丢弃**，
+// 并且允许按 task_id 反查它到底在哪个视图里。
+const EV2 = (sid, t, p = {}) => dispatchEvent({ event_type: t, session_id: sid, ...p })
+const signalsIn = (sid) => (useAppStore.getState().views[sid]?.blocks ?? [])
+  .filter((b) => b.kind === 'signal' && b.fact?.etype === 'task_promoted')
+
+setup()
+// 别的会话里有这个任务（工具块带 taskId），当前会话 s1 里没有
+EV2('s2', 'tool_run_start', { id: 'x23', name: 'bash', arguments: '{}', run_id: 'r23', task_id: 'tk-other' })
+// 事件既没有 session_id、也没有 run_id（正是事故里的形态）
+EV('task_promoted', { session_id: '', task_id: 'tk-other', name: 'bash' })
+const v23 = useAppStore.getState().views
+assert.strictEqual(signalsIn('s1').length, 0, '当前会话（s1）不得收到别的会话的摘离信号')
+const tool23 = (v23.s2?.blocks ?? []).find((b) => b.kind === 'tool' && b.taskId === 'tk-other')
+assert.ok(tool23 && tool23.promoted === true, '信号要落回任务所在的会话（s2），并把工具行标成后台态')
+
+// 连 task_id 都找不到归属（视图没加载/被翻页裁掉）→ 丢弃，不许猜「当前会话」
+setup()
+EV('task_promoted', { session_id: '', task_id: 'tk-nowhere', name: 'bash' })
+assert.strictEqual(signalsIn('s1').length, 0, '归属不明的摘离信号必须丢弃，不得回退到当前会话')
+assert.strictEqual(useAppStore.getState().views[''] == null, true, '不得写出 views[""] 幽灵视图')
+
+// 正常路径不受影响：同一会话里的工具被摘离 → 一行信号 + 工具行后台态
+setup()
+EV('agent_start', { run_id: 'r23b' })
+EV('tool_run_start', { id: 'x23b', name: 'bash', arguments: '{}', run_id: 'r23b', task_id: 'tk-own' })
+EV('task_promoted', { session_id: 's1', task_id: 'tk-own', name: 'bash' })
+const own = useAppStore.getState().views.s1.blocks
+assert.strictEqual(signalsIn('s1').length, 1, '本会话的摘离仍要有一行信号')
+assert.strictEqual(own.find((b) => b.kind === 'tool' && b.taskId === 'tk-own')?.promoted, true, '工具行切后台态')
+console.log('PASS 场景23：摘离信号按 session/任务归属，归属不明则丢弃（不再串台）')
+
 console.log('STORE_TEST_PASS')
 process.exit(0)

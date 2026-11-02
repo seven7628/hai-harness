@@ -33,6 +33,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -54,6 +55,7 @@ import (
 	"github.com/seven7628/hai-harness/computer"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/cron"
+	"github.com/seven7628/hai-harness/desktop/bridge/jsonwire"
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/hooks"
 	"github.com/seven7628/hai-harness/mcp"
@@ -523,7 +525,23 @@ func (bs *bridgeSession) emit(e events.Event) {
 	}
 	// 在 {"event_type":"...","run_id":"..."} 首部注入 session_id/workspace
 	//（保持合法 JSON：在第一个 { 后插入键值对）。键值字节已缓存（会话级不变）。
-	injected, err := injectJSONKeys(b, []jsonKeyVal{
+	//
+	// **先删后注入**（2026-11 用户报障的真实事故）：events.TaskPromoted 等结构自己带
+	// `session_id`（无 omitempty，值为空串），注入是前置的，而 JSON 重复键**后者胜** ——
+	// 后端读到空串，就把「已摘为后台任务」路由到当前打开的会话（cybertron-gogroup 的一行
+	// 出现在 agent-server-g 的转录里）。这里把事件自带的同名键摘掉，只留宿主那一份。
+	// 只有字节里真的出现该键才走扫描：绝大多数事件没有这两个键（热路径就一次 Contains）。
+	if bytes.Contains(b, []byte(`"session_id"`)) {
+		if stripped := jsonwire.RemoveField(b, "session_id"); stripped != nil {
+			b = stripped
+		}
+	}
+	if bytes.Contains(b, []byte(`"workspace"`)) {
+		if stripped := jsonwire.RemoveField(b, "workspace"); stripped != nil {
+			b = stripped
+		}
+	}
+	injected, err := jsonwire.InjectKeys(b, []jsonwire.KV{
 		{Key: "session_id", Value: bs.sidKV},
 		{Key: "workspace", Value: bs.wsKV},
 	})
@@ -609,16 +627,16 @@ func (bs *bridgeSession) emit(e events.Event) {
 		extras = map[string]any{"todos": todosOf(bs, ev.Todos)}
 	}
 	if len(extras) > 0 {
-		// 直接构造 jsonKeyVal（避免 marshal→unmarshal 中间 map）
-		exKVs := make([]jsonKeyVal, 0, len(extras))
+		// 直接构造 jsonwire.KV（避免 marshal→unmarshal 中间 map）
+		exKVs := make([]jsonwire.KV, 0, len(extras))
 		for k, v := range extras {
 			vb, err := json.Marshal(v)
 			if err != nil {
 				continue
 			}
-			exKVs = append(exKVs, jsonKeyVal{Key: k, Value: vb})
+			exKVs = append(exKVs, jsonwire.KV{Key: k, Value: vb})
 		}
-		if injected, err = injectJSONKeys(injected, exKVs); err != nil {
+		if injected, err = jsonwire.InjectKeys(injected, exKVs); err != nil {
 			return
 		}
 	}

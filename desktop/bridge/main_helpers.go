@@ -373,42 +373,4 @@ func readFilePreview(workspace, raw string) (content string, lines int, truncate
 }
 
 // maxPreviewBytes file_preview 单文件预览上限（1 MiB；超限截断 + truncated 标记）。
-// injectJSONKeys 把键值对注入 JSON 对象首部（保持合法 JSON）。
-// 每个 kv 的 Value 是已 JSON 序列化的值（string 用 json.Marshal 转义，map 用预序列化）。
-type jsonKeyVal struct {
-	Key   string
-	Value []byte // 已 JSON 序列化的值
-}
-
-func injectJSONKeys(base []byte, kvs []jsonKeyVal) ([]byte, error) {
-	if len(kvs) == 0 {
-		return base, nil
-	}
-	out := make([]byte, 0, len(base)+128)
-	out = append(out, '{')
-	for i, kv := range kvs {
-		if i > 0 {
-			out = append(out, ',')
-		}
-		kb, _ := json.Marshal(kv.Key)
-		out = append(out, kb...)
-		out = append(out, ':')
-		out = append(out, kv.Value...)
-	}
-	// 追加原对象内容（跳过首 { 与尾 }）
-	rest := base
-	if len(rest) > 0 && rest[0] == '{' {
-		rest = rest[1:]
-	}
-	if len(rest) > 0 && rest[len(rest)-1] == '}' {
-		rest = rest[:len(rest)-1]
-	}
-	if len(rest) > 0 {
-		out = append(out, ',')
-		out = append(out, rest...)
-	}
-	out = append(out, '}')
-	return out, nil
-}
-
 // approvalExtras 计算审批预演 diff 的宿主附加字段（替代原 augmentApprovalDiff 的 map 操作）。

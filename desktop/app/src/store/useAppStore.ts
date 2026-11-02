@@ -1244,6 +1244,9 @@ function viewFields(nv: SessionView): Partial<AppState> {
 
 // 更新 views[sid]；若该会话是活跃会话（或 active=true 强制），同步顶层镜像
 function setView(s: AppState, sid: string, nv: SessionView, extra?: Partial<AppState>, active?: boolean): Partial<AppState> {
+  // 空 sid = 这条事件没有归属（见 getSid / task_promoted）：写进去只会造一份 `views[""]`
+  // 幽灵视图，下一次读出来还会当成「有个会话」。
+  if (!sid) return extra ? { ...extra } : {}
   const isNew = !s.views[sid]
   touchView(sid)
   const views = { ...s.views, [sid]: nv }
@@ -3714,6 +3717,21 @@ function getSid(raw: AnyEvent, fallback?: string): string {
     if (owner) return owner
   }
   return fallback || ''
+}
+
+/* 任务（promoted 工具 / 异步任务 / 子 agent 卡片）在哪个会话里：用于**没有 session_id**
+   的事件按任务反查归属。找不到就返回 undefined —— 调用方不许回退成「当前打开的会话」
+   （用户 2026-11：cybertron-gogroup 的「已摘为后台任务」出现在 agent-server-g 的转录里）。 */
+function sidOfTask(taskId: string): string | undefined {
+  if (!taskId) return undefined
+  const views = useAppStore.getState().views
+  for (const sid of Object.keys(views)) {
+    const v = views[sid]
+    const hit = (v.blocks ?? []).some((b) => (b as { taskId?: string }).taskId === taskId)
+      || (v.agentDetached ?? []).some((b) => (b as { taskId?: string }).taskId === taskId)
+    if (hit) return sid
+  }
+  return undefined
 }
 
 /* run 属于哪个会话：先看 run 节点（新一次顶层 run 会重置该数组，所以只有**活着**的 run
@@ -7203,9 +7221,14 @@ export function dispatchEvent(raw: AnyEvent): void {
       //     那次工具调用，凭空一行「已摘为后台任务」读起来像从天上掉下来的。
       //   · **完成**（task_result_delivered）仍然推回主会话（下一 case）：结果是会话级的，
       //     模型会在主 run 的下一轮里读到它，signal 组件也显示在主会话。
-      const sid = getSid(raw, getState().activeSessionId)
       const taskId = String(raw.task_id || '')
       if (!taskId) break
+      /* 归属（用户 2026-11 的跨会话串台）：session_id（bridge 注入的权威值）→ run 拥有者
+         → **任务自己所在的视图**。三者都没有就**丢弃**：TaskPromoted 事件既没有 run_id、
+         又自带一个空的 session_id 字段（JSON 重复键后者胜），旧实现于是把它回退成「当前
+         打开的会话」—— 别的项目里摘离的后台任务，通知落进了你正在看的这一份转录。 */
+      const sid = getSid(raw, '') || sidOfTask(taskId)
+      if (!sid) { console.debug('[signal] 丢弃无法归属的 task_promoted', taskId); break }
       const fact: SignalFact = {
         sig: 'promote', etype: 'task_promoted',
         ...(raw.name ? { name: String(raw.name) } : {}),
