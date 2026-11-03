@@ -428,8 +428,15 @@ const shape = () => page.eval(() => {
 const order2 = await shape()
 check('G3 情况二：一轮两次运行画出**两个**盒子（run1 一个、run2 一个）',
   order2.filter((x) => /^(rt-act|cy-live)/.test(x)).length === 2, JSON.stringify(order2))
-check('G3 情况二：交卷后到达的「Task … completed」在两个盒子**之间**（顶层，不在盒里）',
-  order2.length >= 3 && /^rt-act/.test(order2[0]) && /^line:Task /.test(order2[1]) && /^rt-act/.test(order2[2]),
+/* 整轮都交卷时：每段结论在盒外，账 + 合并卡在轮尾，**结算之后**才轮到交卷后到达的回执
+   （用户 2026-11 口径：signal 只可能在 Working 盒子里，或者在 tokens/artifacts 后面）。 */
+const at2 = (re) => order2.findIndex((x) => re.test(x))
+check('G3 情况二：两段运行的结论都在盒外（各一段，不折进 Worked 盒子）',
+  order2.filter((x) => /^rt-turn-ans/.test(x)).length === 2 &&
+    at2(/^rt-turn-ans/) === 1 && at2(/^rt-turn-ans/) < at2(/^rt-turn-foot/),
+  JSON.stringify(order2))
+check('G3 情况二：交卷后到达的「Task … completed」在**结算之后**（顶层，不在盒里）',
+  at2(/^line:Task /) > at2(/^rt-turn-artifacts/) && at2(/^rt-turn-artifacts/) > at2(/^rt-turn-foot/) && at2(/^rt-turn-foot/) > 0,
   JSON.stringify(order2))
 // 展开第二个盒子：段内那条 compress 信号必须在盒子里（情况二的下半段）
 await page.eval(() => {

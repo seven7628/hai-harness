@@ -115,6 +115,42 @@ await fire2([
 ])
 console.log('\n### 单 run 收尾 + 迟到回执\n' + JSON.stringify(await snap('single-late-record'), null, 2))
 
+// 两段运行**都交卷**（用户刷新后的形态）：上一段的正文必须在盒外，账/卡在轮尾，
+// 交卷后到达的回执排在账与卡之后
+await page.eval(() => window.__store.getState().newSession())
+await wait(1200)
+const sid3 = await page.eval(() => window.__store.getState().activeSessionId)
+const fire3 = async (list) => {
+  for (const [t, payload] of list) {
+    await page.eval((p) => window.__dispatch({ event_type: p.t, session_id: p.sid, ...p.payload }), { t, sid: sid3, payload })
+    await wait(80)
+  }
+  await wait(700)
+}
+await fire3([
+  ['agent_start', { run_id: 'k1', timestamp: new Date(Date.now() - 30000).toISOString() }],
+  ['user_inputs_consumed', { user_texts: ['探针：两段都交卷'] }],
+  ['tool_run_start', { id: 'kt1', name: 'bash', arguments: '{}', run_id: 'k1' }],
+  ['tool_run_end', { id: 'kt1', name: 'bash', result: 'ok', is_error: false, run_id: 'k1' }],
+  ['llm_start', { run_id: 'k1', request_id: 'k1r', model: 'm' }],
+  ['content_chunk', { run_id: 'k1', request_id: 'k1r', content: '第一段交付的正文' }],
+  ['llm_end', { run_id: 'k1', request_id: 'k1r', model: 'm', usage: { Input: 900, Output: 200, CacheRead: 700 } }],
+  ['agent_end', { run_id: 'k1', finish_reason: 'stop', artifacts: [A1] }],
+  ['task_result_delivered', { task_id: 'tk3', result: 'done' }],
+  ['agent_start', { run_id: 'k2', timestamp: new Date().toISOString() }],
+  ['llm_start', { run_id: 'k2', request_id: 'k2r', model: 'm' }],
+  ['reasoning_chunk', { run_id: 'k2', request_id: 'k2r', content: '第二段想一想' }],
+  ['content_chunk', { run_id: 'k2', request_id: 'k2r', content: '第二段交付的正文' }],
+  ['llm_end', { run_id: 'k2', request_id: 'k2r', model: 'm', usage: { Input: 120, Output: 30 } }],
+  ['agent_end', { run_id: 'k2', finish_reason: 'stop' }],
+])
+const settled = await snap('two-runs-settled')
+const box1 = await page.eval(() => {
+  const box = document.querySelector('.rt-workbox')
+  return { text: (box?.textContent ?? '').slice(0, 120), hasAns1: (box?.textContent ?? '').includes('第一段交付的正文') }
+})
+console.log('\n### 两段都交卷\n' + JSON.stringify({ ...settled, box1 }, null, 2))
+
 await page.eval(() => document.querySelector('.rt-turn')?.scrollIntoView({ block: 'center' }))
 await wait(300)
 await page.screenshot({ path: '/tmp/probe-two-run.png' })

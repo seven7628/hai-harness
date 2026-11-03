@@ -1204,11 +1204,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const artRaw = skin === 'runtime' && !live ? bodySource.filter((b) => b.kind === 'artifacts') : []
     const artBlocks = artRaw.length > 1 ? [mergeArtifacts(artRaw)] : artRaw
     const noArt = artBlocks.length ? bodySource.filter((b) => b.kind !== 'artifacts') : bodySource
-    /* 结算之后到达的记录挪到结算（账 + 产出卡）后面。运行中不动：那时它们在盒子里，
-       或者本来就是时间线上的「当下」。 */
-    /* 只走单 run 这条路：多 run 时记录已经在 plan 里按位置画过了（两套同时开 = 同一行两遍）。 */
-    const postBlocks = skin === 'runtime' && !live && !multiRun
-      ? noArt.filter((b) => postRecord(b, turn.items.indexOf(b)))
+    /* 交卷之后到达的记录（见 postRecord）一律排在**结算之后**：账与产出卡是这一轮的交付，
+       通知不属于交付序列（用户 2026-11 口径）。整轮交卷时不论几段运行都走这条；
+       还在跑的段由 plan 的分段结算负责（那里也保证记录落在账/卡之后）。 */
+    const postBlocks = skin === 'runtime' && !live
+      ? turn.items.filter((b, i) => postRecord(b, i))
       : []
     const bodyBlocks = postBlocks.length ? noArt.filter((b) => !postBlocks.includes(b)) : noArt
     const body = skin === 'runtime' ? groupRounds(bodyBlocks) : groupBlocks(bodyBlocks)
@@ -1228,10 +1228,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const segs = multiRun
       ? runs.map((r, i) => {
           const segLive = i === runs.length - 1 && live
-          /* 交卷后的结论：`live` 时按**这一段自己**的最后一段正文（整轮的 turn.answer
-             此刻可能已经是下一段在打字）；整轮都交卷时仍旧用 turn.answer（中间那些段的
-             旁白属于过程，跟着自己的盒子走，时间线上不凭空多出「结论」）。 */
-          const segAnswer = segLive ? undefined : live ? answerOf(r.items) : turn.answer
+          /* 结论按**这一段自己**的最后一段正文（整轮的 turn.answer 只等于「最后那段」的结论，
+             拿它当每一段的结论，前几段交付的正文就会被收回各自的 Worked 盒子 ——
+             用户 2026-11 两连问：先问「正文进了盒子」，再问「刷新后上方的 Worked 为什么
+             没有 llm_content 在外侧」。两处是同一件事：整轮交卷了也一样按段判）。 */
+          const segAnswer = segLive ? undefined : answerOf(r.items)
           const its = runWorkBody(r.items, {
             answer: segAnswer,
             answerAt: segAnswerAt,
@@ -1249,11 +1250,14 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        只在下半段还在跑（`live`）时这样画：整轮都交卷后由轮尾统一的账与合并卡负责，
        两套不能同时开（会画两遍）。 */
     const settles = new Map<number, number>() // turn.items 下标 → segs 下标
+    /* 每一段自己的结论：**永远**在盒外（「上方的 Worked 没有 llm_content 在外侧」= 它被折进盒子了） */
     const segAnswerSet = new Set<MsgBlock>()
+    segs.forEach((s) => { if (s.answer) segAnswerSet.add(s.answer) })
+    /* 分段结算（账 / 卡跟随它自己那一段）只在「下半段还在跑」时用：整轮交卷后由轮尾统一的
+       一行账 + 合并一张卡负责，两套不能同时开（会画两遍）。 */
     if (multiRun && live) {
       segs.forEach((s, i) => {
         if (s.live) return
-        if (s.answer) segAnswerSet.add(s.answer)
         const hasArt = s.run.items.some((b) => b.kind === 'artifacts')
         if (s.usage.matched || hasArt) settles.set(settleIndexOf(turn, s.run, s.answer), i)
       })
@@ -1270,8 +1274,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         const b = turn.items[i]
         // 工具行永远在工作过程里；产出卡不进时间线（轮尾合并渲染，或跟随已交卷段的结算）
         if (b.kind !== 'tool' && b.kind !== 'artifacts') {
+          // 交卷之后到达的记录：整轮交卷时统一延后到结算后面（见 postBlocks），这里跳过
+          const deferred = postBlocks.includes(b)
           // 已交卷那一段的结论：即使整轮还在跑，它也已经交出去了，必须留在时间线上
-          if (segAnswerSet.has(b)) plan.push({ b })
+          if (deferred) { /* 见 postBlocks */ }
+          else if (segAnswerSet.has(b)) plan.push({ b })
           // 结论正文只在**交卷之后**才上线：运行中它在最后一段的盒子里长
           else if (b === turn.answer) { if (!live) plan.push({ b }) }
           else if (outside(b, i)) plan.push({ b })
