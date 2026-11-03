@@ -184,7 +184,13 @@ export function turnHead(turn: Turn): TurnHead {
   return { model, t0 }
 }
 
-export function turnUsage(turn: Turn, metrics: TurnMetric[] | undefined): TurnUsage {
+export function turnUsage(
+  turn: Turn,
+  metrics: TurnMetric[] | undefined,
+  /* 只结算这几段 run（一轮多次运行时的**分段结算**：上一段已交卷、下一段还在跑，
+     轮尾账只能报已经定下来的数，见 Narrative 的 settles / settleIndexOf）。省略 = 整轮。 */
+  only?: ReadonlySet<string>,
+): TurnUsage {
   /* 只算**这一轮自己的 run**（正文块上的 runId）—— 子 agent 的 runId 不算。
      子 agent 的用量会持续到主 run 交卷之后（后台子 agent / promoted 工具），
      而它那张卡一直留在这一轮的 items 里；把子 run 也算进来，已经结算的轮尾账
@@ -194,7 +200,7 @@ export function turnUsage(turn: Turn, metrics: TurnMetric[] | undefined): TurnUs
      一次轮里可能有多个主 run（agent_resume 原地续跑），所以是集合并集。 */
   const runs = new Set<string>()
   turn.items.forEach((b) => {
-    if (b.kind === 'assistant' && b.runId) runs.add(b.runId)
+    if (b.kind === 'assistant' && b.runId && (!only || only.has(b.runId))) runs.add(b.runId)
   })
   const u: TurnUsage = { input: 0, output: 0, cacheRead: 0, reasoning: 0, total: 0, llmMs: 0, matched: false }
   if (!metrics || !runs.size) return u
@@ -209,7 +215,9 @@ export function turnUsage(turn: Turn, metrics: TurnMetric[] | undefined): TurnUs
   })
   u.total = u.input + u.output
   if (!u.ttftMs) {
-    const a = turn.items.find((b) => b.kind === 'assistant' && b.ttftMs)
+    const a = turn.items.find(
+      (b) => b.kind === 'assistant' && b.ttftMs && (!only || (b.runId != null && only.has(b.runId))),
+    )
     if (a && a.kind === 'assistant') u.ttftMs = a.ttftMs
   }
   return u
@@ -320,6 +328,18 @@ export function workBody(turn: Turn): MsgBlock[] {
   )
 }
 
+/** 一段运行自己的结论 = 这一段里**最后一个有正文**的 assistant。
+    别拿整轮的 `turn.answer` 当结论：下一段运行一开始吐字，它就跟着移走了 —— 上一段
+    已经交付的正文会被判成过程行收回 Worked 盒子（用户 2026-11：Worked for 41m10s 之后
+    来了 Task completed，上一段的 llm_content 就「进了盒子」、时间线上看不见了）。 */
+export function answerOf(items: MsgBlock[]): MsgBlock | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const b = items[i]
+    if (b.kind === 'assistant' && textOf(b).trim().length > 0) return b
+  }
+  return undefined
+}
+
 /* 一轮里可能有**多次运行**（后台任务结果回推后主 run 自动续跑 / agent_resume 原地续跑），
    而产出清单是**每次运行**的 AgentEnd 各带一份 —— 同一轮于是会有多个 artifacts 块
    （store 与 Go 的 view_reducer 都按 runId 去重，所以「一个 AgentEnd 一块」是对的）。
@@ -387,6 +407,24 @@ export function turnRuns(turn: Turn): TurnRun[] {
   })
   seal(turn.items.length)
   return runs.filter((r) => r.end > r.start)
+}
+
+/** 一次运行的**结算**（账 / 产出卡）该落在哪个下标之后：它自己最后一块要跳过
+    「结算之后才到达」的记录（signal / task_delivery 的 afterRun 位）与产出卡本身 ——
+    否则「Task … completed」会排到账和卡上面，读起来像回执先于结算。
+    旧快照没有 afterRun 位时按位置兜底：排在这次运行的结论之后即交卷后到达。 */
+export function settleIndexOf(turn: Turn, run: TurnRun, answer: MsgBlock | undefined): number {
+  const ansAt = answer ? turn.items.indexOf(answer) : -1
+  let k = run.end - 1
+  while (k > run.start) {
+    const b = turn.items[k]
+    const stamped = b.kind === 'signal' || b.kind === 'task_delivery'
+      ? ('afterRun' in b ? (b as { afterRun?: boolean }).afterRun !== false : ansAt >= 0 && k > ansAt)
+      : false
+    if (b.kind !== 'artifacts' && !stamped) break
+    k--
+  }
+  return k
 }
 
 /* 一段运行装进盒子的行：与 workBody 同一条判据，只是作用域是一段。

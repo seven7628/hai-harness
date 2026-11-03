@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf, mainRunEnded } from '../store/useAppStore'
@@ -6,8 +6,9 @@ import { resolveRunState, turnLive } from '../lib/turnSettle'
 import { signalText } from '../lib/signalFacts'
 import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
+import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, answerIndex, foldedBody, hasWork, mergeArtifacts, outsideOf, runningBody, runWorkBody, selectTurns, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, answerIndex, answerOf, foldedBody, hasWork, mergeArtifacts, outsideOf, runningBody, runWorkBody, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -1182,64 +1183,119 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        （旧写法 `open ? items : foldedBody` 会在展开时把整轮再画一遍到外面，
        实测盒子 3 行、外面 20 行 —— 用户在截图里看到的正是这个。） */
     const bodySource = concise && live ? runningBody(turn, !work) : concise ? foldedBody(turn) : turn.items
+    /* 一轮可能跨**多次运行**（后台任务回推后续跑）：盒子按 run 切段（见 selectTurns.turnRuns）。
+       声明提到这里，是因为下面的「结论 / 账 / 卡」闸门都要按**段**判，而不只按整轮判。 */
+    const runs = concise && skin === 'runtime' ? turnRuns(turn) : []
+    const multiRun = runs.length > 1
     /* 用户 2026-10：轮尾账排在产出卡**上方** —— 先结算这一轮，再看这一轮的产出。
        产出卡仍是轮尾最后一块（它是「记录」，不属于工作过程）。只在运行时皮肤、且账
        真的会渲染时把产出卡拆出来；运行中/无用量归属的轮保持原序（账本来就不出现）。 */
     const ledgerShown = usage.matched && !live
+    /* 交卷**之后**到达的记录（signal / 后台任务回执）不属于这一轮的结论，也不许排在账上面：
+       用户 2026-11 的口径 —— 这类通知只有两个合法位置，要么在 Working 盒子里（运行中到达），
+       要么在 tokens/artifacts **之后**（AgentEnd 之后到达）。 */
+    const outside = outsideOf(turn)
+    const postRecord = (b: MsgBlock, i: number) =>
+      (b.kind === 'signal' || b.kind === 'task_delivery') && outside(b, i)
     /* 一轮可能跨多次运行（后台任务回推后续跑），每 run 一个产出块 —— 卡片只画一张，
        按 path 合并（见 mergeArtifacts）。store 里仍是每 run 一块。
        闸门是 `!live`（AgentEnd 已到）而**不是** ledgerShown：产出是 AgentEnd 的事实，
        与「这一轮有没有拿到 usage 指标」无关（没有 llm_end 的轮次也该看到产出清单）。 */
     const artRaw = skin === 'runtime' && !live ? bodySource.filter((b) => b.kind === 'artifacts') : []
     const artBlocks = artRaw.length > 1 ? [mergeArtifacts(artRaw)] : artRaw
-    const bodyBlocks = artBlocks.length ? bodySource.filter((b) => b.kind !== 'artifacts') : bodySource
+    const noArt = artBlocks.length ? bodySource.filter((b) => b.kind !== 'artifacts') : bodySource
+    /* 结算之后到达的记录挪到结算（账 + 产出卡）后面。运行中不动：那时它们在盒子里，
+       或者本来就是时间线上的「当下」。 */
+    /* 只走单 run 这条路：多 run 时记录已经在 plan 里按位置画过了（两套同时开 = 同一行两遍）。 */
+    const postBlocks = skin === 'runtime' && !live && !multiRun
+      ? noArt.filter((b) => postRecord(b, turn.items.indexOf(b)))
+      : []
+    const bodyBlocks = postBlocks.length ? noArt.filter((b) => !postBlocks.includes(b)) : noArt
     const body = skin === 'runtime' ? groupRounds(bodyBlocks) : groupBlocks(bodyBlocks)
     /* —— 情况二（一轮多次运行）：盒子按 run 分开，记录留在段与段之间的时间线上 ——
        用户 2026-11 的两个形态：run1 AgentEnd → 异步任务结果通知（顶层、盒外）→ run2 新盒子。
        盒子是按 run 算的，所以这里按 turn.items 的**顺序**交错渲染：
          [盒子A] … [盒间记录] … [盒子B] … [整轮的结论正文]
        单 run（情况一）继续走上面那套老路径，一行不变。 */
-    const runs = concise && skin === 'runtime' ? turnRuns(turn) : []
-    const multiRun = runs.length > 1
     const segAnswerAt = answerIndex(turn)
+    /* 一段运行的**结算**（结论正文 / 轮尾账 / 产出卡）归它自己，不归「整轮」：
+       下一段运行一起跑，整轮的 `live` 又变真、`turn.answer` 又移走 —— 拿这两个当闸门，
+       上一段已经交付的东西就整块消失（用户 2026-11 截图：`Worked for 41m10s` 之后来了
+       `Task … completed`，上一段的 llm_content 被收回盒子、产出卡与 tokens 都不见了）。
+       所以：**已交卷的段**在盒外自己结算（正文对自己的最后一块、账按自己的 run、卡按自己的
+       AgentEnd），**还在跑的段**照旧正文留在盒子里长。整轮都交卷时仍走老路径（合并成一张
+       卡 + 一行账，见下面的 artBlocks/ledgerShown）。 */
     const segs = multiRun
       ? runs.map((r, i) => {
-          /* 正在跑的那一段：**正文留在盒子里**（与单 run 的 liveBox 同一条规则 ——
-             运行中它还是「工作过程」，交卷时才作为结论交到时间线上）。
-             已交卷的段：正文（只有整轮最后那段可能是 turn.answer）不进盒子，避免画两遍。 */
           const segLive = i === runs.length - 1 && live
+          /* 交卷后的结论：`live` 时按**这一段自己**的最后一段正文（整轮的 turn.answer
+             此刻可能已经是下一段在打字）；整轮都交卷时仍旧用 turn.answer（中间那些段的
+             旁白属于过程，跟着自己的盒子走，时间线上不凭空多出「结论」）。 */
+          const segAnswer = segLive ? undefined : live ? answerOf(r.items) : turn.answer
           const its = runWorkBody(r.items, {
-            answer: segLive ? undefined : turn.answer,
+            answer: segAnswer,
             answerAt: segAnswerAt,
             offset: r.start,
           })
-          return { run: r, items: its, stats: statsOfItems(r.items), live: segLive }
+          const segUsage = turnUsage(turn, turnMetrics, r.runId ? new Set([r.runId]) : undefined)
+          return { run: r, items: its, stats: statsOfItems(r.items), live: segLive, answer: segAnswer, usage: segUsage }
         })
       : []
     /* 时间线上的块只可能是记录/结构块（工具行永远在工作过程里）—— 类型上收窄一次，
        下面的 renderBlock 才接得住。 */
     type PlanBlock = Exclude<MsgBlock, { kind: 'tool' }>
-    const plan: ({ box: number } | { b: PlanBlock })[] = []
+    type ArtBlock = Extract<MsgBlock, { kind: 'artifacts' }>
+    /* 已交卷那一段的**结算**插在它自己最后一块之后：盒子 → 正文 → 账 → 产出卡 → 回时间线。
+       只在下半段还在跑（`live`）时这样画：整轮都交卷后由轮尾统一的账与合并卡负责，
+       两套不能同时开（会画两遍）。 */
+    const settles = new Map<number, number>() // turn.items 下标 → segs 下标
+    const segAnswerSet = new Set<MsgBlock>()
+    if (multiRun && live) {
+      segs.forEach((s, i) => {
+        if (s.live) return
+        if (s.answer) segAnswerSet.add(s.answer)
+        const hasArt = s.run.items.some((b) => b.kind === 'artifacts')
+        if (s.usage.matched || hasArt) settles.set(settleIndexOf(turn, s.run, s.answer), i)
+      })
+    }
+    const plan: ({ box: number } | { b: PlanBlock } | { settle: number })[] = []
     if (multiRun) {
       const boxAt = new Map<number, number>()
       segs.forEach((s, i) => { if (s.items.length) boxAt.set(s.run.start, i) })
-      const outside = outsideOf(turn)
       for (let i = 0; i < turn.items.length; i++) {
         // 盒子只在段首出现一次；**不跳过**段内其余下标 —— 段内可能夹着「交卷后到达」
         // 的记录（上一段运行刚结束、下一段还没开始），它们要在盒子之后按顺序落出来。
         const bi = boxAt.get(i)
         if (bi != null) plan.push({ box: bi })
         const b = turn.items[i]
-        // 产出卡在轮尾统一渲染（还会跨 run 合并），这里跳过，避免画两遍；工具行不进时间线
-        if (b.kind === 'tool' || b.kind === 'artifacts') continue
-        // 结论正文只在**交卷之后**才上线：运行中它在最后一段的盒子里长
-        if (b === turn.answer) {
-          if (!live) plan.push({ b })
-          continue
+        // 工具行永远在工作过程里；产出卡不进时间线（轮尾合并渲染，或跟随已交卷段的结算）
+        if (b.kind !== 'tool' && b.kind !== 'artifacts') {
+          // 已交卷那一段的结论：即使整轮还在跑，它也已经交出去了，必须留在时间线上
+          if (segAnswerSet.has(b)) plan.push({ b })
+          // 结论正文只在**交卷之后**才上线：运行中它在最后一段的盒子里长
+          else if (b === turn.answer) { if (!live) plan.push({ b }) }
+          else if (outside(b, i)) plan.push({ b })
         }
-        if (outside(b, i)) plan.push({ b })
+        const si = settles.get(i)
+        if (si != null) plan.push({ settle: si })
       }
     }
+    /* 轮尾账的 markup 只写一份：轮尾（整轮交卷）与分段结算（上一段交了卷、下一段还在跑）
+       是同一块东西，两处必须一模一样。 */
+    const ledgerEl = (st: TurnStats, u: TurnUsage, key?: string) => (
+      <div className="rt-turn-foot" key={key}>
+        <Ledger
+          calls={st.calls}
+          tokens={u.total}
+          cacheRead={u.cacheRead}
+          input={u.input}
+          wallMs={st.workedMs}
+          ttftMs={u.ttftMs}
+          llmMs={u.llmMs}
+          outputTokens={u.output}
+        />
+      </div>
+    )
     const hasArtifacts = turn.items.some((b) => b.kind === 'artifacts')
     if (!body.length && !artBlocks.length && !workItems.length && !work) continue
     items.push(
@@ -1268,9 +1324,25 @@ export default function Narrative({ viewSid, source, header, footer, density: de
                    与 working 盒同级。结论正文保留「交代」的 16px 节奏，其余按记录自己走。 */
                 const el = renderBlock(p.b)
                 if (!el) return null
-                return p.b === turn.answer
+                return p.b === turn.answer || segAnswerSet.has(p.b)
                   ? <div className="rt-turn-ans" key={`pl-${pi}`}>{el}</div>
                   : <div className="rt-turn-line" key={`pl-${pi}`}>{el}</div>
+              }
+              if ('settle' in p) {
+                /* 已交卷那一段的结算：账（按**那一段自己的 run** 结算）+ 它自己的产出卡。
+                   下半段还在跑时，这两块不许消失（用户 2026-11：`Task … completed` 一到，
+                   上一段的 tokens 与产出卡整块不见了）。 */
+                const s = segs[p.settle]
+                if (!s) return null
+                const arts = s.run.items.filter((b): b is ArtBlock => b.kind === 'artifacts')
+                const card = arts.length > 1 ? [mergeArtifacts(arts)] : arts
+                if (!s.usage.matched && !card.length) return null
+                return (
+                  <Fragment key={`st-${pi}`}>
+                    {s.usage.matched ? ledgerEl(s.stats, s.usage) : null}
+                    {card.length ? <div className="rt-turn-artifacts">{groupRounds(card)}</div> : null}
+                  </Fragment>
+                )
               }
               const seg = segs[p.box]
               if (!seg) return null
@@ -1348,25 +1420,18 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         ) : null}
         {/* 轮尾账是**结算**，不是进度：AgentEnd 之前这一轮的用量还在长，
             把「11 calls · 16k tokens」边跑边刷出来就是在报一个还没定的数。 */}
-        {ledgerShown ? (
-          <div className="rt-turn-foot">
-            <Ledger
-              calls={stats.calls}
-              tokens={usage.total}
-              cacheRead={usage.cacheRead}
-              input={usage.input}
-              wallMs={stats.workedMs}
-              ttftMs={usage.ttftMs}
-              llmMs={usage.llmMs}
-              outputTokens={usage.output}
-            />
-          </div>
-        ) : null}
+        {ledgerShown ? ledgerEl(stats, usage) : null}
         {/* 产出卡排在轮尾账之后（用户 2026-10 的轮尾顺序）：账说「这一轮花了多少」，
             卡说「这一轮产出了什么」；卡仍是最后一块，轮间距由它承担（见 turn.css）。 */}
         {artBlocks.length ? (
           <div className="rt-turn-artifacts">{groupRounds(artBlocks)}</div>
         ) : null}
+        {/* 结算之后到达的记录（见 postRecord）：账和卡是这一轮的交付，通知排在它们**后面** */}
+        {postBlocks.map((b, pi) => {
+          if (b.kind === 'tool') return null
+          const el = renderBlock(b)
+          return el ? <div className="rt-turn-line" key={`post-${pi}`}>{el}</div> : null
+        })}
       </div>,
     )
   }

@@ -79,6 +79,9 @@ const snap = () =>
       ans: t?.querySelector('.rt-turn-ans')?.textContent ?? '',
       ansSignals: [...(t?.querySelectorAll('.rt-turn-ans .sig, .rt-turn-ans .sig-list') ?? [])].map((x) => x.textContent ?? ''),
       ansText: t?.querySelector('.rt-turn-ans')?.textContent ?? '',
+      // 交卷之后到达的记录走在**结算后面**（用户 2026-11 口径：通知只可能在盒子里，
+      // 或者在账/产出卡之后），形状是 .rt-turn-line —— 不再是 .rt-turn-ans 的一段
+      tails: [...(t?.querySelectorAll('.rt-turn-line') ?? [])].map((x) => x.textContent ?? '').join('\n'),
       foot: t?.querySelector('.rt-turn-foot')?.textContent ?? '',
       footFlag: t?.getAttribute('data-foot') ?? '',
       foldText: t?.querySelector('.rt-act')?.textContent ?? '',
@@ -126,7 +129,7 @@ check('C 结论在外面', s.ans.includes('主 run 已交卷'), JSON.stringify(s
 await inject(`[${user(1, '开个后台任务')}, ${tool(2, 'done')}, ${agentBlock(3)}, ${asst(4, '主 run 已交卷', false)}, ${delivery(5)}]`, true)
 s = await snap()
 requireTurn('D', s.turns)
-check('D 回执渲染在时间线（.rt-turn-ans 里）', s.ansText.includes('task-9'), JSON.stringify(s.ansText.slice(-80)))
+check('D 回执渲染在时间线上（结算之后的那条通道）', s.tails.includes('task-9'), JSON.stringify({ tails: s.tails.slice(-80), ans: s.ansText.slice(-60) }))
 check('D 回执不在折叠行/盒子里', !s.foldText.includes('task-9') && s.signalsInBox === 0, `inFold=${s.foldText.includes('task-9')} signalsInBox=${s.signalsInBox}`)
 
 // ---- E 运行中到达的回执：属于这次运行的过程 → 在 Working 面板里（盒内）-------
@@ -134,7 +137,7 @@ await inject(`[${user(1, '跑一下')}, ${tool(2, 'running')}, ${delivery(3)}, $
 s = await snap()
 requireTurn('E', s.turns)
 check('E 运行中回执在 Working 面板里', s.liveText.includes('task-9'), JSON.stringify(s.liveText.slice(-60)))
-check('E 回执不在时间线上（不重复渲染）', !s.ansText.includes('task-9') && s.ansSignals.length === 0, JSON.stringify(s.ansText.slice(-60)))
+check('E 回执不在时间线上（不重复渲染）', !s.ansText.includes('task-9') && !s.tails.includes('task-9') && s.ansSignals.length === 0, JSON.stringify({ ans: s.ansText.slice(-40), tails: s.tails.slice(-40) }))
 
 // ---- E2 运行中到达的一行信号（task_promoted）：同样在盒子里，且不打乱顺序 ------
 const promote = (id) => `{ kind: 'signal', id: ${id}, fact: { sig: 'promote', etype: 'task_promoted', name: 'bash', message: 'task-9' } }`

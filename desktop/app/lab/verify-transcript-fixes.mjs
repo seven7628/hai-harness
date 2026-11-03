@@ -257,7 +257,10 @@ const heads = () => page.eval(() => ({
   livePanel: !!document.querySelector('.cy-live'),
   fold: document.querySelector('.rt-act-k')?.textContent ?? '',
   insideSig: [...document.querySelectorAll('.cy-live .sig')].map((x) => x.textContent ?? ''),
-  outsideSig: [...document.querySelectorAll('.rt-turn-ans .sig')].map((x) => x.textContent ?? ''),
+  // 盒外的时间线 = 结论区 + 结算之后的那条记录通道（见 postRecord：交卷后到达的记录
+  // 排在账与产出卡后面，形状是 .rt-turn-line）
+  outsideSig: [...document.querySelectorAll('.rt-turn-ans .sig, .rt-turn-line .sig')].map((x) => x.textContent ?? ''),
+  order: [...(document.querySelector('.rt-turn')?.children ?? [])].map((el) => (el.className || '').split(' ')[0]),
 }))
 
 await density('concise')
@@ -290,6 +293,9 @@ check('F 冷恢复（live=false）：幽灵 run 收敛，显示 Worked for',
 await compactEv()
 await poll('[...document.querySelectorAll(".rt-turn-ans .sig")].some((x) => /上下文压缩完成/.test(x.textContent ?? ""))')
 const cold1 = await heads()
+check('F 冷恢复：交卷之后到达的 signal 排在账/产出卡之后（不是夹在结论与账之间）',
+  (() => { const o = cold1.order; const i = o.lastIndexOf('rt-turn-line'); return i >= 0 && i >= o.indexOf('rt-turn-foot') && i > o.indexOf('rt-turn-artifacts') })(),
+  JSON.stringify(cold1.order))
 check('F 冷恢复：交卷之后到达的 signal 落在盒外的时间线上',
   cold1.outsideSig.some((t) => /上下文压缩完成/.test(t)), JSON.stringify({ inside: cold1.insideSig.slice(0, 2), outside: cold1.outsideSig.slice(0, 2) }))
 
@@ -459,15 +465,19 @@ await fire([['agent_end', { run_id: 'g4', finish_reason: 'stop', artifacts: [A2]
 const g4 = await facts()
 check('G4 收尾后：一行账 + 一张卡', g4.foot === 1 && g4.cards === 1, JSON.stringify(g4))
 
-// G5 情况二的「下半段还在跑」：第二个盒子必须是 Working（不许被第一个盒子的 AgentEnd 带走）
+// G5 情况二的「下半段还在跑」：第二个盒子必须是 Working（不许被第一个盒子的 AgentEnd 带走）；
+//    并且**已经交卷那一段**的三件套（正文 / 轮尾账 / 产出卡）必须留在时间线上 —— 以前它们
+//    跟着整轮的 `live` 一起消失：正文被收进 Worked 盒子、账与卡整块不见（用户 2026-11 截图）。
 await reset()
 await fire([
   ['agent_start', { run_id: 'g5a', timestamp: new Date(Date.now() - 8000).toISOString() }],
   ['user_inputs_consumed', { user_texts: ['G5'] }],
+  ['tool_run_start', { id: 'g5t', name: 'bash', arguments: '{}', run_id: 'g5a' }],
+  ['tool_run_end', { id: 'g5t', name: 'bash', result: 'ok', is_error: false, run_id: 'g5a' }],
   ['llm_start', { run_id: 'g5a', request_id: 'g5ar', model: 'm' }],
-  ['content_chunk', { run_id: 'g5a', request_id: 'g5ar', content: '第一段' }],
+  ['content_chunk', { run_id: 'g5a', request_id: 'g5ar', content: '第一段的结论' }],
   ['llm_end', { run_id: 'g5a', request_id: 'g5ar', usage: { Input: 100, Output: 20 } }],
-  ['agent_end', { run_id: 'g5a', finish_reason: 'stop' }],
+  ['agent_end', { run_id: 'g5a', finish_reason: 'stop', artifacts: [A1] }],
   ['task_result_delivered', { task_id: 'tg5', result: '回推' }],
   ['agent_start', { run_id: 'g5b', timestamp: new Date().toISOString() }],
   ['llm_start', { run_id: 'g5b', request_id: 'g5br', model: 'm' }],
@@ -478,9 +488,52 @@ await poll('!!document.querySelector(".cy-live")')
 const order5 = await shape()
 const g5 = await facts()
 check('G5 情况二（下半段还在跑）：第一个盒子折叠 + 回执在中间 + 第二个盒子是 Working',
-  order5.length >= 3 && /^rt-act/.test(order5[0]) && /^line:Task /.test(order5[1]) && /^cy-live/.test(order5[2]),
+  order5.length >= 3 && /^rt-act/.test(order5[0]) && /^cy-live/.test(order5[order5.length - 1]),
   JSON.stringify(order5))
-check('G5 情况二（下半段还在跑）：轮尾账不出（整轮还没交卷）', g5.foot === 0, JSON.stringify(g5))
+// 顺序 = 盒子 → 结论正文 → 账 → 产出卡 → 回执 → Working：通知只可能在盒子里面，
+// 或者在 tokens/artifacts **后面**（用户 2026-11 的口径）
+const at5 = (re) => order5.findIndex((x) => re.test(x))
+check('G5 下半段在跑：上一段的结论正文仍在时间线上（没被收回 Worked 盒子）',
+  at5(/^rt-turn-ans/) >= 0, JSON.stringify(order5))
+check('G5 下半段在跑：上一段的轮尾账还在（不跟着整轮的 live 消失）',
+  g5.foot === 1 && at5(/^rt-turn-foot/) >= 0, JSON.stringify({ foot: g5.foot, order5 }))
+check('G5 下半段在跑：上一段的产出卡还在', g5.cards === 1, JSON.stringify({ cards: g5.cards }))
+check('G5 顺序：正文 → 账 → 卡 → 回执 → 下一个盒子（回执排在结算后面）',
+  at5(/^rt-turn-ans/) < at5(/^rt-turn-foot/) && at5(/^rt-turn-foot/) < at5(/^rt-turn-artifacts/)
+    && at5(/^rt-turn-artifacts/) < at5(/^line:Task /) && at5(/^line:Task /) < at5(/^cy-live/),
+  JSON.stringify(order5))
+// 第一段的正文不许在盒子里（盒子里只有过程）—— 判据：Worked 盒子正文里没有那句话
+const g5Box = await page.eval(() => {
+  const box = document.querySelector('.rt-workbox')
+  const t = box?.textContent ?? ''
+  return { hasAnswer: t.includes('第一段的结论'), workboxes: document.querySelectorAll('.rt-workbox').length }
+})
+check('G5 上一段的结论正文不在 Worked 盒子里', !g5Box.hasAnswer, JSON.stringify(g5Box))
+
+// G3b 整轮都交卷（两次运行）：回执只画一遍，且仍在两个盒子之间
+const dup = await page.eval(() => ({
+  lines: [...document.querySelectorAll('.rt-turn-line')].filter((el) => /Task /.test(el.textContent ?? '')).length,
+}))
+check('G3 整轮交卷后：回执只有一行（结算通道不与 plan 重复渲染）', dup.lines === 1, JSON.stringify(dup))
+
+// G6 单 run 交卷后**迟到**的回执（没有人再续跑）：账与卡是交付，通知排在它们后面
+await reset()
+await fire([
+  ['agent_start', { run_id: 'g6', timestamp: new Date(Date.now() - 9000).toISOString() }],
+  ['user_inputs_consumed', { user_texts: ['G6'] }],
+  ['tool_run_start', { id: 'g6t', name: 'bash', arguments: '{}', run_id: 'g6' }],
+  ['tool_run_end', { id: 'g6t', name: 'bash', result: 'ok', is_error: false, run_id: 'g6' }],
+  ['llm_start', { run_id: 'g6', request_id: 'g6r', model: 'm' }],
+  ['content_chunk', { run_id: 'g6', request_id: 'g6r', content: '收尾后的结论' }],
+  ['llm_end', { run_id: 'g6', request_id: 'g6r', usage: { Input: 400, Output: 90, CacheRead: 300 } }],
+  ['agent_end', { run_id: 'g6', finish_reason: 'stop', artifacts: [A2] }],
+  ['task_result_delivered', { task_id: 'tg6', result: 'done' }],
+])
+const order6 = await shape()
+const at6 = (re) => order6.findIndex((x) => re.test(x))
+check('G6 交卷后迟到的回执：排在账与产出卡**之后**（不在结论与账之间）',
+  at6(/^rt-turn-foot/) >= 0 && at6(/^rt-turn-artifacts/) >= 0 && at6(/^line:Task /) > at6(/^rt-turn-artifacts/),
+  JSON.stringify(order6))
 
 // ------------------------------------------------- H 待答的 ask_user 跨刷新复原
 // 用户 2026-11：ask_user 是工具调用，就该进 checkpoint —— 之前只活在前端，
