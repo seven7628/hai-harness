@@ -144,6 +144,18 @@ func injectPreCompactContext(msgs []core.Message, inject string) []core.Message 
 	if pos == 0 && len(msgs) > 0 && msgs[0].Role == core.System {
 		pos = 1 // 保 system 首条不变量（splitMessages 只保留 i==0 的 system）
 	}
+	// 不能切进工具批次（2026-11-04 真实 400）：压缩输入末尾常是「工具批 + 用户插话」，
+	// start-1 正好落在同批 tool 回执中间 —— 注入串（assistant）夹在回执之间，就变成
+	// assistant(tool_calls) → tool → tool → assistant(注入) → tool，上游判
+	// "insufficient tool messages following tool_calls message"；更糟的是这一批会随
+	// 近窗（KeepRecentMessages）原样保留下来，压完整轮都不可运行。
+	// 退到该批的 assistant 之前：注入串仍紧贴尾部（history 段、进压缩输入），批次完整。
+	for pos > 0 && msgs[pos].Role == core.Tool {
+		pos--
+	}
+	if pos == 0 && len(msgs) > 0 && msgs[0].Role == core.System {
+		pos = 1 // 极端：system 后紧跟无主回执 —— 保 system 首位，孤儿回执交给 NormalizeToolBatches
+	}
 	out := make([]core.Message, 0, len(msgs)+1)
 	out = append(out, msgs[:pos]...)
 	out = append(out, core.NewAssistantMessage(

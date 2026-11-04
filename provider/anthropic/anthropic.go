@@ -172,7 +172,9 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *provider.StreamRequ
 	ctx, upCost := provider.WithUpstreamCost(ctx)
 
 	// 图片降级（注册表 SupportsImage；Anthropic 支持 URL + base64，非视觉模型降级）
-	messages := p.registry.DowngradeImages(req.Provider, req.Model, req.Messages)
+	// 请求组装前的确定性修复（Anthropic 同样要求 tool_result 紧跟其 tool_use、
+	// 图片单边不超限）：见 provider.RepairMessages。
+	messages := provider.RepairMessages(p.registry.DowngradeImages(req.Provider, req.Model, req.Messages))
 
 	// 系统提示 → 顶层 system 参数（不是 system role 消息）。
 	// cache_control 决策：构造默认开（WithCacheControl 可强制开关），再按模型

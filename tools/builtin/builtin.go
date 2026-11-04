@@ -491,7 +491,7 @@ func (t *readFileTool) Call(ctx context.Context, _, arguments string) (string, e
 			if ierr != nil {
 				return "", ierr
 			}
-			tools.ImageSinkFrom(ctx).Add(res.block)
+			tools.ImageSinkFrom(ctx).Add(res.blocks...)
 			return res.text, nil
 		}
 		// 非图片的二进制（可执行文件/压缩包/媒体容器）：明确拒绝而不是倒乱码。

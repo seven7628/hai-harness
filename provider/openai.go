@@ -430,7 +430,9 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *StreamRequest, handler
 	}
 	td := reg.ResolveThinking(req.Provider, req.Model, cfg)
 
-	coreMsgs := reg.DowngradeImages(req.Provider, req.Model, req.Messages)
+	// 请求组装前的确定性修复（见 RepairMessages）：超尺寸图片降级 + 工具批次不变量。
+	// 破法不止一处（压缩注入顶开 / 近窗裁剪 / 摘离 / 检查点恢复），故在协议入口统一修。
+	coreMsgs := RepairMessages(reg.DowngradeImages(req.Provider, req.Model, req.Messages))
 	msgs, err := translateMessages(coreMsgs,
 		reg.ShouldRetainReasoning(req.Provider, req.Model, cfg),
 		reg.SupportsDeveloperRole(req.Provider, req.Model),

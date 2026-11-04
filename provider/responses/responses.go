@@ -113,8 +113,9 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req *provider.StreamRequ
 	// 思考（注册表：默认关/档位 clamp/toggle-only）
 	td := p.registry.ResolveThinking(req.Provider, req.Model, cfg)
 
-	// 图片降级（注册表 SupportsImage）
-	messages := p.registry.DowngradeImages(req.Provider, req.Model, req.Messages)
+	// 图片降级（注册表 SupportsImage）+ 请求组装前修复（超尺寸图片 / 工具批次）：
+	// 见 provider.RepairMessages。
+	messages := provider.RepairMessages(p.registry.DowngradeImages(req.Provider, req.Model, req.Messages))
 
 	// 系统提示 → instructions；翻译消息为 input items（developer role：仅 openai 官方推理模型）
 	instructions, msgs := translateMessages(messages, p.registry.SupportsDeveloperRole(req.Provider, req.Model))

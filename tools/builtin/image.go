@@ -6,22 +6,28 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/jpeg"
+	"image/png"
 	"path/filepath"
 	"strings"
 
 	"github.com/seven7628/hai-harness/core"
 
-	// 标准库解码器注册（image.Decode / DecodeConfig 走注册表；png 由下方显式引用）。
+	// 标准库解码器注册（image.Decode / DecodeConfig 走注册表；png/gif 由下方引用与
+	// 空导入共同保证：png 要显式引用（切片无重编码走 png.Encode），gif 只需注册）。
 	_ "image/gif"
-	_ "image/png"
 )
 
 // 图片读取（read_file 的二进制分支）：
 //   - 仅标准库可解码的格式可内嵌（png / jpeg / gif）；webp/heic/bmp 明确报错
 //     并提示转换 —— 比丢一堆乱码或静默失败对模型有用。
-//   - 超过体积闸门的图自动降采样（长边 ≤ maxImageDim、JPEG 重编码），
-//     保证「视觉模型够看清」且不撞链路闸门（stdin 单行 / 事件日志 / 上下文）。
+//   - 超过**体积**闸门的图自动降采样（长边 ≤ maxImageDim、JPEG 重编码）。
+//   - 超过**单边**闸门（maxImageSidePx）的图切片而不是缩小 —— 全页截图是窄高图，
+//     等比缩到 1568 会长边达标而正文不可读（见 sliceTallImage）。
+//
+// 两道闸门互相独立：体积达标 ≠ 尺寸达标。2026-11-04 事故正是「体积达标所以原样
+// 内嵌」的旧判据放行了一张 390x9697 的合法 PNG，上游直接 400（且报错文案谎称格式错）。
 const (
 	// maxImageDim 内嵌图片的长边像素上限。依据：主流视觉模型把长边 >1568px 的
 	// 图像降采样到该量级后再编码成视觉 token —— 再大只是白烧字节数与上下文。
@@ -31,6 +37,13 @@ const (
 	maxInlineImageBytes = 3 << 20
 	// reencodeQuality JPEG 重编码质量（降采样路径；85 在文字/UI 截图上肉眼无损）。
 	reencodeQuality = 85
+	// maxImageSidePx 单边像素硬上限（判据与实测见 core.MaxImageSidePx：任一边 >8192
+	// 上游直接 400，而报错文案谎称是格式错误）。取 8192 而不是 maxImageDim，是为了
+	// 不砍掉本来就合格的常规长截图（1440x4151 / 2560x5644 上游都收，模型也读得出来）。
+	maxImageSidePx = core.MaxImageSidePx
+	// maxImageTiles 高窄超限图的切片数上限（与 tools.defaultMaxResultImages=4 同一
+	// 口径：引擎在结果出口按 4 张卡上限，切更多也会被丢弃并告警）。
+	maxImageTiles = 4
 )
 
 // imageFormat 图片格式说明（内嵌可用性 + 重编码能力）。
@@ -95,16 +108,17 @@ func LookBinary(data []byte) bool {
 
 // imageContentResult 一次图片内嵌的结果。
 type imageContentResult struct {
-	block core.Content // image 内容块（data URL）
-	text  string       // 结果文本（路径/尺寸/编码说明 —— 模型据此知道看了什么）
+	blocks []core.Content // image 内容块（data URL）；高窄超限图可能有多块（切片）
+	text   string         // 结果文本（路径/尺寸/编码说明 —— 模型据此知道看了什么）
 }
 
 // loadImageForModel 把文件读成可内嵌的图片内容块：
 //   - 格式不可解码（webp/heic/bmp）→ error 说明（模型改用 bash 转换等替代路径）；
-//   - 体积已达标 → 原样内嵌（不解码、不重编码，零质量损失）；
+//   - 体积达标 + 单边 ≤ maxImageSidePx → 原样内嵌（不解码、不重编码，零质量损失）；
+//   - 体积达标但单边超限（窄高全页截图）→ **按原生分辨率切片**，见 sliceTallImage；
 //   - 体积超限 → 降采样 + JPEG 重编码（长边 ≤ maxImageDim，必要时逐级缩小）。
 //
-// maxBytes = data URL 体积上限（0 = 用 maxInlineImageBytes）。
+// maxBytes = 单张 data URL 的体积上限（0 = 用 maxInlineImageBytes）。
 func loadImageForModel(path string, data []byte, maxBytes int) (imageContentResult, error) {
 	if maxBytes <= 0 {
 		maxBytes = maxInlineImageBytes
@@ -114,19 +128,35 @@ func loadImageForModel(path string, data []byte, maxBytes int) (imageContentResu
 		return imageContentResult{}, fmt.Errorf("%s is not a supported image format", path)
 	}
 	name := filepath.Base(path)
+	w, h, sizeErr := decodeImageSize(data)
+	sizeOK := encodedLen(len(data)) <= maxBytes
+	// 单边闸门的三态：
+	//   - 读得出尺寸 → 按 8192 判；
+	//   - 读不出且**可解码**（png/jpeg/gif 头坏了）→ 当尺寸不达标处理，走下方解码报错，
+	//     不把坏图原样发出去；
+	//   - 读不出且**不可解码**（webp/bmp/heic，标准库没有解码器）→ 无从判断，保持旧行为
+	//     「体积达标就原样内嵌」（webp 本来就在上游支持列表里，不能因为量不到就拒）。
+	sideOK := true
+	switch {
+	case sizeErr == nil:
+		sideOK = maxInt(w, h) <= maxImageSidePx
+	case format.decodable:
+		sideOK = false
+	}
 
-	// 原图已达标：直接内嵌（保持原始字节 —— PNG 截图无损，正是视觉模型最需要的）。
-	if encodedLen(len(data)) <= maxBytes {
+	// 原图双闸门都达标：直接内嵌（保持原始字节 —— PNG 截图无损，正是视觉模型最需要的）。
+	// 注意两道闸门必须同时判：只看体积会放行 390x9697 这种 837KB 的超限图（上游 400）。
+	if sizeOK && sideOK {
 		dim := ""
-		if w, h, err := decodeImageSize(data); err == nil {
+		if sizeErr == nil {
 			dim = fmt.Sprintf(", %dx%d", w, h)
 		}
 		return imageContentResult{
-			block: core.Content{
+			blocks: []core.Content{{
 				Type:     core.ContentTypeImage,
 				Content:  "data:" + format.mime + ";base64," + base64.StdEncoding.EncodeToString(data),
 				MimeType: format.mime,
-			},
+			}},
 			text: fmt.Sprintf("[read_file: %s — %s%s, %s, embedded as-is for direct viewing]", name, format.mime, dim, humanSize(len(data))),
 		}, nil
 	}
@@ -137,11 +167,17 @@ func loadImageForModel(path string, data []byte, maxBytes int) (imageContentResu
 			name, format.mime, humanSize(len(data)), humanSize(maxBytes), format.ext)
 	}
 
-	// 超限且可解码 → 降采样重编码。
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return imageContentResult{}, fmt.Errorf("%s: decode %s failed: %w", name, format.mime, err)
 	}
+
+	// 体积达标、只是单边超限 → 切片（保住原生分辨率），不缩成一条看不懂的细线。
+	if sizeOK {
+		return sliceTallImage(name, format, src, data, maxBytes)
+	}
+
+	// 体积超限 → 降采样重编码（原行为）。
 	bounds := src.Bounds()
 	origW, origH := bounds.Dx(), bounds.Dy()
 
@@ -151,14 +187,126 @@ func loadImageForModel(path string, data []byte, maxBytes int) (imageContentResu
 			name, origW, origH, format.mime, humanSize(maxBytes), err)
 	}
 	return imageContentResult{
-		block: core.Content{
+		blocks: []core.Content{{
 			Type:     core.ContentTypeImage,
 			Content:  "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(encoded),
 			MimeType: "image/jpeg",
-		},
+		}},
 		text: fmt.Sprintf("[read_file: %s — %s %dx%d %s, downscaled to %dx%d JPEG %s to fit the inline limit]",
 			name, format.mime, origW, origH, humanSize(len(data)), outW, outH, humanSize(len(encoded))),
 	}, nil
+}
+
+// maxInt 两个 int 取大（Go 1.21 的 max 只对同类型内置，这里保持显式）。
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// sliceTallImage 单边超限的图按原生分辨率切成 ≤ maxImageTiles 片，每片单边 ≤ maxImageSidePx。
+//
+// 为什么切而不缩：全页截图是窄高图（390x9697 这类）。等比缩到长边 1568 会得到
+// 63x1568 —— 边长「达标」了，但正文字号被压成 1px 宽的竖条，模型什么都读不出来；
+// 而原生分辨率的一刀切（390x4849）在视觉模型里是清晰的。所以先切，切不下才缩
+// （片数上限 4 与引擎的结果图片上限同口径）。
+func sliceTallImage(name string, format imageFormat, src image.Image, data []byte, maxBytes int) (imageContentResult, error) {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	rects := tileRects(w, h, maxImageSidePx, maxImageTiles)
+
+	blocks := make([]core.Content, 0, len(rects))
+	dims := make([]string, 0, len(rects))
+	native := true // 是否保持了原生分辨率（片数封顶时会降采样，文案不能说谎）
+	for n, r := range rects {
+		tile := cropImage(src, r)
+		raw, mime, tw, th, err := encodeTile(tile, maxBytes)
+		if err != nil {
+			return imageContentResult{}, fmt.Errorf("%s: cannot slice %dx%d %s image (tile %d/%d): %w",
+				name, w, h, format.mime, n+1, len(rects), err)
+		}
+		blocks = append(blocks, core.Content{
+			Type:     core.ContentTypeImage,
+			Content:  "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw),
+			MimeType: mime,
+		})
+		if tw != r.Dx() || th != r.Dy() {
+			native = false
+		}
+		dims = append(dims, fmt.Sprintf("%dx%d", tw, th))
+	}
+	resolution := "original resolution"
+	if !native {
+		resolution = "downscaled to fit the tile limit"
+	}
+	return imageContentResult{
+		blocks: blocks,
+		text: fmt.Sprintf("[read_file: %s — %s %dx%d %s, single side exceeds the %dpx gateway limit → split into %d tiles (%s, same page top to bottom, %s) for direct viewing]",
+			name, format.mime, w, h, humanSize(len(data)), maxImageSidePx, len(rects), strings.Join(dims, ", "), resolution),
+	}, nil
+}
+
+// tileRects 沿长边把 w×h 切成 ≤ maxTiles 块，使每块长边尽量 ≤ maxSide。
+// 片数先按 maxSide 求（能切就切到合法），超过 maxTiles 才退化为「片数封顶 +
+// 每片可能仍超限」——后者由 encodeTile 再降采样兜底。
+func tileRects(w, h, maxSide, maxTiles int) []image.Rectangle {
+	long, horizontal := h, false
+	if w > h {
+		long, horizontal = w, true
+	}
+	if long <= maxSide || maxTiles <= 1 {
+		return []image.Rectangle{image.Rect(0, 0, w, h)}
+	}
+	n := (long + maxSide - 1) / maxSide
+	if n > maxTiles {
+		n = maxTiles
+	}
+	rects := make([]image.Rectangle, 0, n)
+	for i := 0; i < n; i++ {
+		if horizontal {
+			rects = append(rects, image.Rect(w*i/n, 0, w*(i+1)/n, h))
+			continue
+		}
+		rects = append(rects, image.Rect(0, h*i/n, w, h*(i+1)/n))
+	}
+	return rects
+}
+
+// cropImage 按矩形裁剪（整图等价时零拷贝返回原图）。
+func cropImage(src image.Image, r image.Rectangle) image.Image {
+	b := src.Bounds()
+	if r == b {
+		return src
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
+	draw.Draw(dst, dst.Bounds(), src, r.Min, draw.Src)
+	return dst
+}
+
+// encodeTile 把一片图编码成能过闸门的 data URL 主体：
+// 片内单边仍超限（片数封顶时）→ 先缩到 maxSide；PNG 优先（无损，截图文字最怕 JPEG），
+// PNG 体积过不了闸门才退 JPEG q85，再不行交给 shrinkToLimit。
+func encodeTile(img image.Image, maxBytes int) (data []byte, mime string, w, h int, err error) {
+	bb := img.Bounds()
+	if maxInt(bb.Dx(), bb.Dy()) > maxImageSidePx {
+		img = scaleToFit(img, maxImageSidePx)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err == nil && encodedLen(buf.Len()) <= maxBytes {
+		b := img.Bounds()
+		return buf.Bytes(), "image/png", b.Dx(), b.Dy(), nil
+	}
+	buf.Reset()
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: reencodeQuality}); err == nil && encodedLen(buf.Len()) <= maxBytes {
+		b := img.Bounds()
+		return buf.Bytes(), "image/jpeg", b.Dx(), b.Dy(), nil
+	}
+	raw, ow, oh, err := shrinkToLimit(img, maxBytes)
+	if err != nil {
+		return nil, "", 0, 0, err
+	}
+	return raw, "image/jpeg", ow, oh, nil
 }
 
 // shrinkToLimit 逐级降采样直到 data URL 体积达标：

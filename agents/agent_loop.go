@@ -2195,7 +2195,12 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 		})
 		return
 	}
-	ac.Messages = result.Messages
+	// 压缩产物也要满足工具批次不变量：近窗（KeepRecentMessages）可能把压缩输入里
+	// 注入的元数据 assistant 消息连同被顶开的工具批一起留下来（2026-11-04 实证：
+	// assistant → tool → tool → assistant([TodoSnapshot]) → tool）。请求层的
+	// NormalizeToolBatches 是最后一道闸，但落盘的上下文（record / UI / 下一轮组装）
+	// 也必须是合法的，否则每次请求都靠翻译层救火、UI 还会显示悬空回执。
+	ac.Messages = core.NormalizeToolBatches(result.Messages)
 	ac.inputMark = len(ac.Messages) // 压缩替换 Messages：@展开边界重置（摘要无待展开原文）
 	// 压缩后统一交接提醒（S1-B/S1-E，替代单句 CompactContinueReminder 的注入定位）：
 	// 模型看到 [system, 摘要, TaskAnchorReminder?, 近窗?, 最新输入]，提醒它从摘要继续、
