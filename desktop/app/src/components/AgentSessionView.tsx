@@ -153,10 +153,13 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   const canStop = Boolean(node.taskId) && running
   const usage = card?.usage
   const trimmed = cards.reduce((n, c) => n + (c.itemsTrimmed ?? 0), 0)
-  // 「还有更早」的判据：任一轮卡片被裁过 / 后端说还有 / **只要有 task_id 就有 journal**
-  // （续跑轮的卡片本身就是「前面的轮次在 journal 里」的证据：items 非空且 trimmed=0
-  //  时旧判据会连按钮都不给，用户无路可走）。
-  const hasMoreHistory = trimmed > 0 || cards.some((c) => Boolean(c.historyHasMore)) || Boolean(oldestCard?.taskId)
+  // 「还有更早」的判据：**有 task_id 就有 journal** —— 续跑轮的卡片 items 非空、trimmed=0，
+  // 旧判据连按钮都不给，用户无路可走（问题二）。但一旦后端给了权威答案（historyHasMore），
+  // 就听它的：否则翻到底之后按钮永远不消失。
+  const historyAnswered = cards.some((c) => c.historyHasMore !== undefined)
+  const hasMoreHistory = historyAnswered
+    ? cards.some((c) => c.historyHasMore === true)
+    : trimmed > 0 || Boolean(oldestCard?.taskId)
 
   const source: NarrativeSource = {
     blocks: subBlocks,
