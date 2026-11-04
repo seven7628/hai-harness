@@ -42,11 +42,11 @@ import { useT } from '../i18n'
 /* 后台任务落地：两种块（回执 / 完整结果）用同一个 note 渲染 —— 它们说的是同一句
    话，差别只是展开后是纯输出还是 Markdown（见 runtime/blocks/AsyncNote.tsx）。 */
 const TaskDeliveryBlock = memo(function TaskDeliveryBlock({ b }: { b: Extract<MsgBlock, { kind: 'task_delivery' }> }) {
-  return <AsyncNote taskId={b.taskId} status={b.status} result={b.result} error={b.error} />
+  return <AsyncNote taskId={b.taskId} status={b.status} result={b.result} error={b.error} from={b.parentTaskId} />
 })
 
 const TaskResultBlock = memo(function TaskResultBlock({ b }: { b: Extract<MsgBlock, { kind: 'task_result' }> }) {
-  return <AsyncNote taskId={b.taskId} status={b.error ? 'failed' : 'completed'} result={b.result} error={b.error} rich />
+  return <AsyncNote taskId={b.taskId} status={b.error ? 'failed' : 'completed'} result={b.result} error={b.error} from={b.parentTaskId} rich />
 })
 
 // 压缩结果：和工具调用一样保留在对话流中，默认展示结果概要，展开后给出完整用量与上下文变化。

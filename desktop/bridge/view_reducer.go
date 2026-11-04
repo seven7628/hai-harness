@@ -2841,8 +2841,8 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		// 旧日志/异常顺序找不到任务：保留结果块避免丢失（去重后仅一次）。
 		// 落位同前端：按事件时刻插到它发生的位置，不一律堆到最底部。
 		at := r.insertAtAfterTsLocked(-1, millis(ts))
-		r.insertBlockAtLocked(at, Block{Kind: blockKindTaskResult, ID: r.nextBlockID(), TaskID: e.TaskId, Result: e.Result, Error: e.Error, Ts: millis(ts)})
-		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts), AfterRun: !r.runLiveLocked()})
+		r.insertBlockAtLocked(at, Block{Kind: blockKindTaskResult, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId, Result: e.Result, Error: e.Error, Ts: millis(ts)})
+		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts), AfterRun: !r.runLiveLocked()})
 		return
 	}
 	b := r.blocks[idx]
@@ -2880,7 +2880,7 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		last.Status != status || last.Result != e.Result || last.Error != e.Error {
 		at := r.insertAtAfterTsLocked(idx, millis(ts))
 		r.insertBlockAtLocked(at, Block{
-			Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId,
+			Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId,
 			Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts),
 			AfterRun: !r.runLiveLocked(),
 		})

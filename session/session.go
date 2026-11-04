@@ -512,18 +512,29 @@ func (s *Session) PushTaskResultStatus(taskID, name, result, status string, err 
 //
 // usage 只随事件给宿主/UI（任务卡片展示 tokens + 成本），**不进 LLM 上下文** ——
 // task_result 消息正文不携用量，避免用无关的记账信息占用子任务结果模型的注意力。
+// parentTaskIDOf 查询任务发起方（子→孙派发时 = 子智能体的 task_id）。
+// nil Registry（测试/未接线）→ 空串：事件照发，只是没有父归属。
+func (s *Session) parentTaskIDOf(taskID string) string {
+	reg := s.registry
+	if reg == nil {
+		return ""
+	}
+	return reg.ParentTaskIDOf(taskID)
+}
+
 func (s *Session) PushTaskResultUsage(taskID, name, result, status string, usage core.Usage, err error) error {
 	// TaskResultDelivered 事件先发：客户端任务卡片的终态收敛不依赖入队成功 ——
 	// Ask 失败（队列满 / 预算超 / 会话关闭）只说明「模型侧收不到结果」
 	//（结果仍在 Registry，宿主可 Wait 补取），UI 不能因此永远停在「执行中/中断中」。
 	ev := &events.TaskResultDelivered{
-		SessionId: s.id,
-		TaskId:    taskID,
-		Name:      name,
-		Status:    status,
-		Result:    result,
-		Timestamp: time.Now(),
-		EventType: events.TaskResultDeliveredType,
+		SessionId:    s.id,
+		TaskId:       taskID,
+		ParentTaskId: s.parentTaskIDOf(taskID),
+		Name:         name,
+		Status:       status,
+		Result:       result,
+		Timestamp:    time.Now(),
+		EventType:    events.TaskResultDeliveredType,
 	}
 	if !usage.IsZero() {
 		ev.Usage = &usage

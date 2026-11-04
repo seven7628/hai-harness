@@ -35,6 +35,7 @@ export const AsyncNote = memo(function AsyncNote({
   error,
   liveLabel,
   rich = false,
+  from,
 }: {
   taskId: string
   status: TerminalTaskStatus | 'running'
@@ -44,6 +45,9 @@ export const AsyncNote = memo(function AsyncNote({
   liveLabel?: string
   /** the result is Markdown (a task_result block) rather than plain output */
   rich?: boolean
+  /** 派发方**任务** id（子→孙派发时非空）：这条结果是「某个子智能体的下级任务」送来的，
+      不是主会话自己的活。归属必须写在行内，否则用户会以为主智能体自己在跑这个任务。 */
+  from?: string
 }) {
   const t = useT()
   const [open, setOpen] = useState(false)
@@ -81,6 +85,14 @@ export const AsyncNote = memo(function AsyncNote({
         {t('async.label')} <span className="rt-as-verb">{verb}</span>
         <span className="sep">{'\u00b7'}</span>
         <b>{taskId}</b>
+        {from ? (
+          <>
+            <span className="sep">{'\u00b7'}</span>
+            <span className="rt-as-from" title={`dispatched by ${from}`}>
+              {t('async.from')} {from}
+            </span>
+          </>
+        ) : null}
       </div>
       {detail ? (
         <div className="rt-as-l2" title={detail}>

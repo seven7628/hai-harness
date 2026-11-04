@@ -594,8 +594,8 @@ export type MsgBlock =
   | { kind: 'agent'; id: number; runId: string; parentRunId?: string; parentTaskId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; ctxWindow?: number; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean; endKind?: string }
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
   | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; parentRunId?: string; parentTaskId?: string; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
-  | { kind: 'task_result'; id: number; taskId: string; result: string; error?: string }
-  | { kind: 'task_delivery'; id: number; taskId: string; status: TerminalTaskStatus; result?: string; error?: string; afterRun?: boolean }
+  | { kind: 'task_result'; id: number; taskId: string; result: string; error?: string; parentTaskId?: string }
+  | { kind: 'task_delivery'; id: number; taskId: string; status: TerminalTaskStatus; result?: string; error?: string; afterRun?: boolean; parentTaskId?: string }
   | CompressionInfo
   | { kind: 'system'; id: number; text: string; tone?: 'info' | 'success' | 'error' }
   // 运行失败反馈（llm_error 重试 / session_run_error 最终失败）：叙述通道醒目错误块。
@@ -7331,6 +7331,8 @@ export function dispatchEvent(raw: AnyEvent): void {
             status: deliveryStatus,
             result: result || undefined,
             error: error || undefined,
+            // 归属：这条结果是「某个子智能体的下级任务」送来的（子→孙派发时非空）
+            ...(raw.parent_task_id ? { parentTaskId: String(raw.parent_task_id) } : {}),
             afterRun, // 两位都写：见 pushSignal 的注释（位置兜底只服务旧快照）
           }
           // 「找不到顶层任务」有两种情况：a) 旧日志/事件乱序（卡片确实不在）；b) 任务的
@@ -7367,7 +7369,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           return setView(s, sid, {
             ...v,
             blocks: insertRecordAt(v.blocks, -1, [
-              { kind: 'task_result', id: blockSeq++, taskId, result, error: error || undefined },
+              { kind: 'task_result', id: blockSeq++, taskId, result, error: error || undefined, ...(raw.parent_task_id ? { parentTaskId: String(raw.parent_task_id) } : {}) },
               delivery,
             ], { evTime: evTs(raw), run: currentRun(v) }),
           })
@@ -7410,6 +7412,8 @@ export function dispatchEvent(raw: AnyEvent): void {
             status: deliveryStatus,
             result: result || undefined,
             error: error || undefined,
+            // 归属：这条结果是「某个子智能体的下级任务」送来的（子→孙派发时非空）
+            ...(raw.parent_task_id ? { parentTaskId: String(raw.parent_task_id) } : {}),
             afterRun, // 两位都写：见 pushSignal 的注释（位置兜底只服务旧快照）
           }
           return setView(s, sid, {

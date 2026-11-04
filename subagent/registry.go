@@ -652,6 +652,21 @@ func (r *Registry) runAndFinalize(t *Task, run func(context.Context, *Task) (str
 	}
 }
 
+// ParentTaskIDOf 返回某任务发起方的后台任务 id（"" = 主 Agent 直派 / 未知）。
+// 宿主用它给终态事件标注归属（孙任务的结果不该在主会话里显示成「主会话自己的活」）。
+func (r *Registry) ParentTaskIDOf(taskID string) string {
+	if r == nil || taskID == "" {
+		return ""
+	}
+	t, err := r.get(taskID)
+	if err != nil {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.parentTaskID
+}
+
 // deliverToParent 把任务终态投回发起方子 agent 的 inbox（子→孙派发的结果通道）。
 // 父仍在 running 且仍接收投递（acceptingDelivery）时非阻塞写入并返回 true；父未知/
 // 已收尾/已关闭接收/inbox 满（16）返回 false，调用方回落到 OnTaskDone（主会话）——

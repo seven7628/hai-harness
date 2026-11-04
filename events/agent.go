@@ -201,15 +201,19 @@ func (t *TaskEnd) Type() EventType { return t.EventType }
 // Usage 是该任务全量用量（含成本 µUSD；nil = 无用量信息，如不花模型钱的普通后台工具
 // 任务）——与 TaskEnd.Usage 同源（push 路径原本只有文本，宿主此前拿不到任务成本）。
 type TaskResultDelivered struct {
-	SessionId string      `json:"session_id"`
-	TaskId    string      `json:"task_id"`
-	Name      string      `json:"name,omitempty"`   // 任务短标签（这个 agent 在干什么；空=工具任务）
-	Status    string      `json:"status"`           // 已注入主会话的任务终态
-	Result    string      `json:"result,omitempty"` // Markdown 正文（全量）
-	Error     string      `json:"error,omitempty"`
-	Usage     *core.Usage `json:"usage,omitempty"`
-	Timestamp time.Time   `json:"timestamp"`
-	EventType EventType   `json:"event_type"`
+	SessionId string `json:"session_id"`
+	TaskId    string `json:"task_id"`
+	// ParentTaskId 发起方的**后台任务** id（子→孙派发时 = 那个子智能体的 task_id；
+	// 空 = 主 Agent 直派）。宿主据此把这条「结果已入主会话」的通知**归属**到真正
+	// 派发它的子智能体（而不是让它看起来像主会话自己的工作）。
+	ParentTaskId string      `json:"parent_task_id,omitempty"`
+	Name         string      `json:"name,omitempty"`   // 任务短标签（这个 agent 在干什么；空=工具任务）
+	Status       string      `json:"status"`           // 已注入主会话的任务终态
+	Result       string      `json:"result,omitempty"` // Markdown 正文（全量）
+	Error        string      `json:"error,omitempty"`
+	Usage        *core.Usage `json:"usage,omitempty"`
+	Timestamp    time.Time   `json:"timestamp"`
+	EventType    EventType   `json:"event_type"`
 }
 
 func (t *TaskResultDelivered) Type() EventType { return t.EventType }
