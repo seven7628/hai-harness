@@ -175,7 +175,10 @@ type Block struct {
 	// ParentRunID 该 agent 卡片的父 run（agent_start.ParentRunId）：左栏子智能体树的
 	// 父子锚点。runNodes 里也有（但有界收敛/裁剪后不一定在），块级字段是更稳的来源。
 	ParentRunID string `json:"parent_run_id,omitempty"`
-	SpawnedAt   int64  `json:"spawned_at,omitempty"`
+	// ParentTaskID 该卡片的父**后台任务** id（task_started.ParentTaskId）：子→孙派发时
+	// = 那个子智能体的 task_id。左栏树优先按它连边 —— 父卡被裁/在窗口外也能挂对父亲。
+	ParentTaskID string `json:"parent_task_id,omitempty"`
+	SpawnedAt    int64  `json:"spawned_at,omitempty"`
 	// CtxWindow 这个子 agent 自己的上下文窗口（agent_start.ContextWindow）。
 	// runNodes 会被裁剪，块是更稳的来源（与 ParentRunID 的理由相同）。
 	CtxWindow int64       `json:"ctx_window,omitempty"`
@@ -254,7 +257,7 @@ type ArtifactRef struct {
 
 // AgentItem 是子 agent 卡片内的活动记录项。
 type AgentItem struct {
-	Kind       string `json:"kind"` // text|thinking|tool|compression
+	Kind       string `json:"kind"` // text|thinking|tool|compression|user（user = 进入子运行上下文的 user 消息）
 	Text       string `json:"text,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"` // text item: LLM 失败提示
 	ThinkStart int64  `json:"think_start,omitempty"`
@@ -2308,20 +2311,28 @@ func (r *ViewReducer) applyTaskPromotedLocked(e *events.TaskPromoted) {
 // applyAgentStartLocked 建立主/子 run 节点与子 agent 卡片。
 // applyAgentUserMessageLocked 把一条投向子运行上下文的 user 消息记进它自己的转录。
 //
-// 归属锚是 **TaskId**（与 AgentStart.TaskId 同一个键）：同步子智能体（in-loop）没有
-// 后台任务 id，也就没有 inbox，因此不会有本事件 —— 那种情况下没有"对它单独说话"这条路。
+// 归属锚 **TaskId 优先、RunId 兜底**：后台子运行有任务 id（与 AgentStart.TaskId 同键）；
+// 同步子智能体（in-loop）没有 task id，只有 run id —— 只认 TaskId 的话，子运行开始时
+// 补发的初始 Prompt（AgentUserMessage{Source:prompt}）永远挂不上卡片。
 //
 // 找不到卡片（start 还没到 / 卡片已收敛）时**静默丢弃**：这条消息在子运行的上下文里
 // 仍然有效（它已经进了 LLM 请求），只是没有卡片可挂。为它凭空建一张卡片会让左栏树
 // 多出一个没有 run 的孤儿节点。
 func (r *ViewReducer) applyAgentUserMessageLocked(e *events.AgentUserMessage) {
 	r.flushChunkLocked()
-	if e.TaskId == "" {
+	if e.TaskId == "" && e.RunId == "" {
 		return
 	}
 	for i := range r.blocks {
 		b := &r.blocks[i]
-		if b.Kind != blockKindAgent || b.TaskID != e.TaskId {
+		if b.Kind != blockKindAgent {
+			continue
+		}
+		if e.TaskId != "" {
+			if b.TaskID != e.TaskId {
+				continue
+			}
+		} else if b.RunID != e.RunId {
 			continue
 		}
 		text := strings.TrimSpace(e.Text)
@@ -2413,6 +2424,15 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 			}
 		}
 	}
+	// 占位卡的父**任务**锚点要带到升级后的 agent 卡上（占位即将被移除）：
+	// 孙节点靠它挂到发起的子智能体下，而不是回落成主会话下的根节点。
+	parentTaskID := ""
+	for _, b := range r.blocks {
+		if taskID != "" && b.Kind == blockKindAsyncTask && b.TaskID == taskID {
+			parentTaskID = b.ParentTaskID
+			break
+		}
+	}
 	for _, b := range r.blocks {
 		if taskID != "" && b.Kind == blockKindAsyncTask && b.TaskID == taskID {
 			continue
@@ -2421,7 +2441,8 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 	}
 	r.blocks = append(blocks, Block{
 		Kind: blockKindAgent, ID: bid, RunID: e.RunId, ParentRunID: e.ParentRunId, Label: label,
-		Status: statusRunning, SpawnedAt: millis(ts), TaskID: taskID,
+		ParentTaskID: parentTaskID,
+		Status:       statusRunning, SpawnedAt: millis(ts), TaskID: taskID,
 		CtxWindow: e.ContextWindow, // 子 agent 自己的窗口（与 runNodes 同源，块更不易被裁剪）
 		Items:     make([]AgentItem, 0),
 	})
@@ -2711,7 +2732,8 @@ func (r *ViewReducer) applyTaskStartedLocked(e *events.TaskStarted) {
 	}
 	r.blocks = append(r.blocks, Block{
 		Kind: blockKindAsyncTask, ID: r.nextBlockID(), TaskID: e.TaskId, Label: label,
-		Name: e.ToolName, Status: statusRunning, StartedAt: millis(ts),
+		ParentTaskID: e.ParentTaskId,
+		Name:         e.ToolName, Status: statusRunning, StartedAt: millis(ts),
 	})
 }
 

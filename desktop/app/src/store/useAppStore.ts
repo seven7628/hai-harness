@@ -591,9 +591,9 @@ export type MsgBlock =
   | { kind: 'tool'; id: number; toolId: string; name: string; runId?: string; requestId?: string; args?: string; result?: string; diff?: Diff; images?: QueuedContent[]; isError?: boolean; errorInfo?: ToolErrorInfo; durMs?: number; status: 'running' | 'done'; taskId?: string; promoted?: boolean; interrupting?: boolean; startedAt?: number; taskStatus?: AsyncTaskStatus; todos?: TodoItem[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; parentRunId?: string; liveTail?: string; liveSeq?: number; liveTotal?: number }
   // todos：该子 agent **自己**的待办清单（它是独立上下文，因此也是独立 TODO ——
   // 与会话级视图字段 SessionView.todos 互不相干，见 events.TodoSnapshot 的注释）。
-  | { kind: 'agent'; id: number; runId: string; parentRunId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; ctxWindow?: number; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean; endKind?: string }
+  | { kind: 'agent'; id: number; runId: string; parentRunId?: string; parentTaskId?: string; label: string; status: AsyncTaskStatus; spawnedAt: number; taskId?: string; toolName?: string; ctxWindow?: number; durMs?: number; thinkMs?: number; usage: UsageAgg; items: AgentItem[]; todos?: TodoItem[]; itemsTrimmed?: number; historyOffset?: number; historyLoading?: boolean; historyError?: string; historyHasMore?: boolean; historyTotal?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; retrying?: boolean; retryCount?: number; retryMax?: number; retryMessage?: string; compressing?: boolean; compressStartTs?: number; artifacts?: ArtifactItem[]; artifactsTruncated?: boolean; endKind?: string }
   // 后台任务结果会优先挂到对应任务卡片；无法匹配旧事件/占位任务时才保留独立结果块。
-  | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; parentRunId?: string; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
+  | { kind: 'async_task'; id: number; taskId: string; label: string; toolName?: string; status: AsyncTaskStatus; startedAt: number; parentRunId?: string; parentTaskId?: string; endedAt?: number; taskResult?: string; taskError?: string; deliveredToMain?: boolean; usage?: UsageAgg }
   | { kind: 'task_result'; id: number; taskId: string; result: string; error?: string }
   | { kind: 'task_delivery'; id: number; taskId: string; status: TerminalTaskStatus; result?: string; error?: string; afterRun?: boolean }
   | CompressionInfo
@@ -3303,6 +3303,9 @@ interface PendingCommand {
   // agent_history 的目标子任务：响应必须落回**发起时**的那张卡片（用户可能已切会话或
   // 同会话里有多个子智能体），所以按 id 精确路由，而不是「找当前第一个 agent 块」。
   taskId?: string
+  // 目标**卡片** id：同一个 task 会有多张卡（agent_resume 原地续跑 = 同 task 新 run，
+  // 卡片以 run 为单位），只按 taskId 路由会把同一页历史广播进同 task 的每一张卡。
+  blockId?: number
 }
 
 const pending: Record<number, PendingCommand> = {}
@@ -3572,7 +3575,9 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
     sessionId: sessionId || undefined,
     navigationGeneration: navigation ? ++navigationGeneration : navigationGeneration,
     ...(cmd.type === 'file_preview' ? { path: String(cmd.payload?.path ?? '') } : {}),
-    ...(cmd.type === 'agent_history' ? { taskId: String(cmd.payload?.task_id ?? '') } : {}),
+    ...(cmd.type === 'agent_history'
+      ? { taskId: String(cmd.payload?.task_id ?? ''), blockId: Number(cmd.payload?.block_id ?? 0) || undefined }
+      : {}),
   }
   // 恢复协议标识（问题四）：new_session 带 restore_id + attempt；响应回显，
   // renderer 据此丢弃陈旧响应（迟到的旧请求响应不得覆盖新会话）。
@@ -3877,7 +3882,9 @@ function historyEntryToAgentItem(e: {
     }
   }
   if (e.kind === 'assistant' || e.kind === 'text') return { kind: 'text', text: e.text ?? '' }
-  // user（子任务输入）在卡片里以文本呈现：历史区的第一条通常就是它。
+  // user（子任务输入）：保持 user 身份 —— 降级成 text 会让「我派的活」看起来像子智能体
+  // 自己说的话（历史分页里第一条通常就是派给它的 Prompt）。
+  if (e.kind === 'user') return { kind: 'user', text: e.text ?? '' }
   return { kind: 'text', text: e.text ?? '' }
 }
 
@@ -4084,11 +4091,15 @@ function setAgentItemMeta(items: AgentItem[], meta: AgentTurnMeta): AgentItem[] 
 // 归属锚是 **taskId**（不是 runId）：事件的产生点是 subagent 的 Poll，那里只知道后台任务
 // id；卡片同时带 taskId 与 runId，所以这里按 taskId 找。找不到就静默跳过 —— 消息本身
 // 已经进了子运行的上下文，只是没有卡片可挂。
-function appendAgentUser(blocks: MsgBlock[], taskId: string, text: string, ts?: number): MsgBlock[] {
+function appendAgentUser(blocks: MsgBlock[], taskId: string, text: string, ts?: number, runId?: string): MsgBlock[] {
   const body = text.trim()
-  if (!taskId || !body) return blocks
+  if ((!taskId && !runId) || !body) return blocks
   return blocks.map((b) => {
-    if (b.kind !== 'agent' || b.taskId !== taskId) return b
+    if (b.kind !== 'agent') return b
+    // 归属锚 TaskId 优先、RunId 兜底：后台子运行有 task id；同步子智能体（in-loop）
+    // 只有 run id —— 子运行开始时补发的初始 Prompt（source=prompt）走的就是后者。
+    const hit = taskId ? b.taskId === taskId : b.runId === runId
+    if (!hit) return b
     const items = [...b.items, { kind: 'user' as const, text: body, ...(ts != null ? { startedAt: ts } : {}) }]
     return { ...b, items }
   })
@@ -4867,11 +4878,13 @@ export function dispatchEvent(raw: AnyEvent): void {
             offset?: number
           }
           const older = (page.entries ?? []).map(historyEntryToAgentItem)
+          const blockId = Number(meta?.blockId ?? 0) || 0
           setState((s) => {
             const v = s.views[sid]
             if (!v) return {}
+            // 精确命中：有 block_id 就只写那一张卡（同 task 的其它轮卡片不受影响）。
             const append = (b: MsgBlock) =>
-              b.kind === 'agent' && b.taskId === taskId
+              b.kind === 'agent' && (blockId ? b.id === blockId : b.taskId === taskId)
                 ? appendOlderItems(b, older, page.has_more !== false, page.total, page.offset)
                 : b
             // 窗口外的卡片（骨架形态）同样要接这一页：点开一个历史子智能体时，首屏正是
@@ -5579,12 +5592,13 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 它属于**那个运行的转录**，所以渲染在它的会话视图里，而不是主会话叙述区。
       const sid = getSid(raw, getState().activeSessionId)
       const taskId = raw.task_id ? String(raw.task_id) : ''
+      const runId = raw.run_id ? String(raw.run_id) : ''
       const text = String(raw.text || '')
-      if (!taskId || !text.trim()) break
+      if ((!taskId && !runId) || !text.trim()) break
       const ts = evTs(raw)
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
-        const blocks = appendAgentUser(v.blocks, taskId, text, ts)
+        const blocks = appendAgentUser(v.blocks, taskId, text, ts, runId)
         if (blocks === v.blocks) return s
         return setView(s, sid, { ...v, blocks })
       })
@@ -5763,21 +5777,27 @@ export function dispatchEvent(raw: AnyEvent): void {
         // 「纯思考→工具调用」轮的 thinkMs 结算会被丢弃 → 思考计时器永不停止。
         const finalBid = bid ?? v.lastLLMBlockId
         const finalIdx = finalBid != null ? withThink.findIndex((b) => b.id === finalBid) : -1
-        if (finalIdx >= 0 && withThink[finalIdx].kind === 'assistant' && (withThink[finalIdx] as Extract<MsgBlock, { kind: 'assistant' }>).text) {
+        if (finalIdx >= 0 && withThink[finalIdx].kind === 'assistant') {
           const ab = withThink[finalIdx] as Extract<MsgBlock, { kind: 'assistant' }>
+          // 该轮的耗时/TTFT **无条件**落到块上（与 Go 侧 applyLLMEndLocked 同口径）：
+          // 轮尾账的 workedMs 是「Σ 块 durMs」，而纯工具调用轮的块没有正文 —— 以前
+          // 把 durMs 一起关在 `text` 门里，整段工作耗时等于没计（2026-11-04 实证：
+          // 181 个工具轮全漏，Worked 26m28s < LLM 31m48s，两颗数字自相矛盾）。
           // ttftMs：块上 content_chunk 已结算则沿用；缺失（无 request_id 的旧流 /
-          // chunk 缓冲时序）兜底用 llm_start → llm_end 差分 —— 保证消息底部
-          // TTFT/耗时行稳定显示。
-          // outputTokens：本轮输出 token（usage.Output，**含 reasoning**）——消息底部
-          // 展示输出速度（tokens/s）用。仅主回复轮挂（有 text 才展示）。
-          // genMs：分母（生成窗口）——口径见 genMsOf 注释（思考未流式时必须用整轮 durMs）。
-          const reasoningTok = ru.Reasoning ?? 0
-          // 摘要化思考（Anthropic display=summarized）：provider 标记进 usage，落块以便
-          // checkpoint 重放时 genMsOf 用同一口径重算（刷新前后 tokens/s 不跳变）。
-          const thinkingSummarized = ru.ReasoningSummarized === true
+          // chunk 缓冲时序）兜底用 llm_start → llm_end 差分。
           const ttft = ab.ttftMs ?? (v.llmStartTs != null ? now - v.llmStartTs : undefined)
-          const genMs = genMsOf({ thinking: ab.thinking, durMs, ttftMs: ttft, reasoningTokens: reasoningTok, thinkingSummarized })
-          withThink[finalIdx] = { ...ab, ttftMs: ttft, durMs, outputTokens: ru.Output ?? 0, reasoningTokens: reasoningTok, thinkingSummarized, genMs }
+          if (!ab.text) {
+            // 纯工具调用轮：只有耗时/TTFT 有意义（没有正文行要展示指标）
+            withThink[finalIdx] = { ...ab, ttftMs: ttft, durMs }
+          } else {
+            // outputTokens / genMs：消息底部「tokens/s」的分母与分子（仅回复轮展示）。
+            const reasoningTok = ru.Reasoning ?? 0
+            // 摘要化思考（Anthropic display=summarized）：provider 标记进 usage，落块以便
+            // checkpoint 重放时 genMsOf 用同一口径重算（刷新前后 tokens/s 不跳变）。
+            const thinkingSummarized = ru.ReasoningSummarized === true
+            const genMs = genMsOf({ thinking: ab.thinking, durMs, ttftMs: ttft, reasoningTokens: reasoningTok, thinkingSummarized })
+            withThink[finalIdx] = { ...ab, ttftMs: ttft, durMs, outputTokens: ru.Output ?? 0, reasoningTokens: reasoningTok, thinkingSummarized, genMs }
+          }
         }
         return setView(s, sid, { ...v, blocks: withThink, reqBlock, streaming: false, llmStartTs: undefined, turnStartTs, usage: g, turns, costUsd, thinkStartTs, turnThinkMs, ctxTokens, ctxTokensEstimated })
       })
@@ -7158,7 +7178,9 @@ export function dispatchEvent(raw: AnyEvent): void {
           const upd = setView(s, sid, { ...v, blocks })
           return { ...upd, busySids: busySidsFromViews(upd.views) }
         }
-        const block = { kind: 'async_task' as const, id: blockSeq++, taskId, label: String(raw.name || raw.tool_name || '后台任务'), toolName: raw.tool_name ? String(raw.tool_name) : undefined, status, startedAt: ts, ...(raw.parent_run_id ? { parentRunId: String(raw.parent_run_id) } : {}) }
+        // parentTaskId = 发起方**后台任务** id（子→孙派发时非空）：左栏树的父锚点，
+        // 不靠 parent_run_id 反查（父卡被裁/窗口外就查不到 → 孙节点会掉成主会话下的根）。
+        const block = { kind: 'async_task' as const, id: blockSeq++, taskId, label: String(raw.name || raw.tool_name || '后台任务'), toolName: raw.tool_name ? String(raw.tool_name) : undefined, status, startedAt: ts, ...(raw.parent_run_id ? { parentRunId: String(raw.parent_run_id) } : {}), ...(raw.parent_task_id ? { parentTaskId: String(raw.parent_task_id) } : {}) }
         // 卡片与它自己的说明行落在一起（同一判据见 insertRecordAt）：任务是由哪次运行
         // 发起的，就排在那次运行的位置上，不因为晚到而积到新的 Working 下面。
         const upd = setView(s, sid, {
@@ -7751,6 +7773,15 @@ function cpAgentItem(it: {
       ...(it.todos?.length ? { todos: it.todos.map(cpTodo) } : {}),
     }
   }
+  // user（进入子运行上下文的 user 消息：初始 Prompt / agent_send / 孙任务结果）。
+  // 必须早于下面 compression 的兜底 return —— 漏在这里的表现是刷新后 user 行变成
+  // 一条「上下文压缩 · 0 → 0」。
+  if (it.kind === 'user') {
+    return {
+      kind: 'user', text: it.text ?? '',
+      ...(it.started_at != null ? { startedAt: it.started_at } : {}),
+    }
+  }
   // compression
   return {
     kind: 'compression', before: it.before ?? 0, after: it.after ?? 0,
@@ -7838,6 +7869,7 @@ function checkpointToView(cp: CheckpointView): SessionView {
           kind: 'agent', id: b.id, runId: b.run_id ?? '', label: b.label ?? 'agent',
           status: b.status as AsyncTaskStatus, spawnedAt: b.spawned_at ?? b.ts ?? Date.now(),
           ...(b.parent_run_id ? { parentRunId: b.parent_run_id } : {}),
+          ...(b.parent_task_id ? { parentTaskId: b.parent_task_id } : {}),
           usage: cpUsage(b.usage),
           items: (b.items ?? []).map(cpAgentItem),
           // 子 agent 自己的待办清单（独立于会话 todos）：恢复后卡片/面板仍显示它，
@@ -9032,7 +9064,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
     send({
       type: 'agent_history',
-      payload: { session_id: sid, task_id: taskId, offset, limit: 50 },
+      // block_id：同 task 可能有多张 agent 卡（agent_resume 原地续跑 = 同 task 新 run），
+      // 响应用它精确命中发起请求的那张，不按 taskId 广播（否则一页内容会在每张卡上重复）。
+      payload: { session_id: sid, task_id: taskId, block_id: blockId, offset, limit: 50 },
     })
   },
 

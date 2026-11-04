@@ -1296,7 +1296,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           tokens={u.total}
           cacheRead={u.cacheRead}
           input={u.input}
-          wallMs={st.workedMs}
+          wallMs={st.wallMs ?? st.workedMs}
           ttftMs={u.ttftMs}
           llmMs={u.llmMs}
           outputTokens={u.output}

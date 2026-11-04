@@ -350,14 +350,17 @@ func (t *Tool) runBackgroundInternal(ctx context.Context, tc *events.ToolContext
 	onStarted := func(taskID string) {
 		if handler != nil {
 			handler(ctx, &events.TaskStarted{
-				RunId:     parentRun,
-				TaskId:    taskID,
-				ToolName:  t.spec.Name,
-				Name:      rs.name,
-				Async:     true,
-				Status:    string(TaskRunning),
-				Timestamp: time.Now(),
-				EventType: events.TaskStartedType,
+				RunId:  parentRun,
+				TaskId: taskID,
+				// 父**任务**锚点（子→孙派发时非空）：树的父链靠它，不靠 parent_run_id
+				// 反查（父卡可能在窗口外/已被裁）。
+				ParentTaskId: parentTaskID,
+				ToolName:     t.spec.Name,
+				Name:         rs.name,
+				Async:        true,
+				Status:       string(TaskRunning),
+				Timestamp:    time.Now(),
+				EventType:    events.TaskStartedType,
 			})
 		}
 	}
@@ -764,8 +767,8 @@ func inboxMessageText(m core.Message) string {
 func inboxMessageSource(m core.Message) string {
 	for _, c := range m.Content {
 		if strings.Contains(c.Type, "task_result") {
-			return "child_task"
+			return events.AgentUserSourceChildTask
 		}
 	}
-	return "user"
+	return events.AgentUserSourceUser
 }

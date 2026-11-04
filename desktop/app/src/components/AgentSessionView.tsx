@@ -60,17 +60,33 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     [runNodes, treeBlocks],
   )
   const chain = useMemo(() => pathOfNode(roots, nodeId), [roots, nodeId])
-  // 卡片按**真实 runId** 找；退化到 taskId（agent 卡片先到、runNode 已收敛的恢复场景）
-  const card = useMemo(
-    () =>
-      allBlocks.find((b): b is Extract<MsgBlock, { kind: 'agent' }> => {
-        if (b.kind !== 'agent') return false
-        if (runId && b.runId === runId) return true
-        const node = chain[chain.length - 1]
-        return Boolean(node?.taskId && b.taskId === node.taskId)
-      }),
-    [allBlocks, runId, chain],
-  )
+  // 卡片按**真实 runId** 找；退化到 taskId（agent 卡片先到、runNode 已收敛的恢复场景）。
+  //
+  // 关键：agent_resume 原地续跑复用同一个 task_id、但每轮都是**新的 run_id**，而卡片
+  // 以 run 为单位 → 同一个「子智能体」会产出多张卡。子会话页是「这个任务」的视图，
+  // 必须把同 task 的所有轮按时间串起来；否则续跑后打开只有最新一轮（用户 2026-11-04
+  // 报障「A 结束后恢复继续运行，此前的会话信息看不到了」）。
+  const cards = useMemo(() => {
+    const node = chain[chain.length - 1]
+    const taskKey = node?.taskId
+    const sameTask = allBlocks.filter(
+      (b): b is Extract<MsgBlock, { kind: 'agent' }> =>
+        b.kind === 'agent' && Boolean(taskKey) && b.taskId === taskKey,
+    )
+    if (sameTask.length > 0) {
+      // 时间序（缺时间垫底）→ 最后一轮是「当前」卡（状态/时长/用量以它为准）
+      return [...sameTask].sort((a, b) => (a.spawnedAt ?? 0) - (b.spawnedAt ?? 0))
+    }
+    const one = allBlocks.find(
+      (b): b is Extract<MsgBlock, { kind: 'agent' }> => b.kind === 'agent' && Boolean(runId) && b.runId === runId,
+    )
+    return one ? [one] : []
+  }, [allBlocks, runId, chain])
+  // 当前（最新一轮）卡片：头部状态/时长/用量、以及「能不能停止」都以它为准
+  const card = cards.length > 0 ? cards[cards.length - 1] : undefined
+  // 最早一轮卡片：分页「加载更早」必须挂在它身上 —— 早先的页会被 prepend 到它前面，
+  // 视觉上正好接在合并后转录的开头（挂最新卡会让更早的内容插到中间）。
+  const oldestCard = cards.length > 0 ? cards[0] : undefined
 
   // 后台工具任务的块（kind='tool' + promoted + 同 taskId）：内容在它身上，不在 agent 卡里
   const toolBlock = useMemo(() => {
@@ -87,10 +103,11 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   // 所以在这里补拉首屏 —— offset=0 取的正是最新一页（见 store.loadAgentHistory）。
   // 只在「空 + 有 task_id（有 journal）+ 还没拉过」时拉一次：失败不自动重试（会打圈），
   // 由下方的「加载更早」按钮手动重试（historyHasMore/trimmed 仍为真，按钮在）。
-  const cardId = card?.id
-  const cardTaskId = card?.taskId
-  const needFirstScreen = Boolean(card && card.items.length === 0 && cardTaskId && card.historyOffset == null)
-  const loadingFirst = Boolean(card?.historyLoading || card?.historyError)
+  const cardId = oldestCard?.id
+  const cardTaskId = oldestCard?.taskId
+  const mergedItemCount = cards.reduce((n, c) => n + c.items.length, 0)
+  const needFirstScreen = Boolean(cardId && cardTaskId && mergedItemCount === 0 && oldestCard?.historyOffset == null)
+  const loadingFirst = Boolean(oldestCard?.historyLoading || oldestCard?.historyError)
   useEffect(() => {
     if (!cardId || !cardTaskId || !needFirstScreen || loadingFirst) return
     loadAgentHistory(cardId, cardTaskId)
@@ -99,9 +116,10 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   const node = chain[chain.length - 1]
   // 数据源：agent 卡的活动记录 → 会话块。后台工具任务没有 items，就把它那一个工具块
   // 直接交给 Narrative（走主对话同一套 ToolRow/ToolGroup 渲染，而不是右栏那套展开体）。
+  const mergedItems = useMemo(() => cards.flatMap((c) => c.items), [cards])
   const subBlocks = useMemo(() => {
     if (!card) return toolBlock ? [toolBlock] : []
-    const blocks = agentItemsToBlocks(card.items)
+    const blocks = agentItemsToBlocks(mergedItems)
     // 产出 / 任务结果：走**主会话的同一批渲染块**（Narrative 的 artifacts / task_result 分支），
     // 而不是卡片内的 .ac-artifacts / TaskResultInline。
     //
@@ -117,7 +135,7 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
       })
     }
     return blocks
-  }, [card, toolBlock])
+  }, [card, mergedItems, toolBlock])
 
   if (!node) return <div className="empty">{t('agentTree.gone')}</div>
   // 时长口径收在一处（lib/agentDuration.ts）：卡片结算 → 节点结算 → 该 run 末条 item 的整轮耗时；
@@ -125,7 +143,7 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   // 卡片没加载出来时长整段消失，节点状态停在 running 时计时器会一直往上走（用户 2026-10
   // 报障「子智能体的运行时长显示的是主智能体的」）。
   const lastItemDur = (() => {
-    const items = card?.items
+    const items = mergedItems
     const last = items && items.length ? items[items.length - 1] : undefined
     // agentDurMs 只挂在文本项（kind='text'）与思考项上（工具项没有这个字段）
     return last && (last.kind === 'text' || last.kind === 'thinking') ? last.agentDurMs : undefined
@@ -134,17 +152,21 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   const running = dur.running
   const canStop = Boolean(node.taskId) && running
   const usage = card?.usage
-  const trimmed = card?.itemsTrimmed ?? 0
+  const trimmed = cards.reduce((n, c) => n + (c.itemsTrimmed ?? 0), 0)
+  // 「还有更早」的判据：任一轮卡片被裁过 / 后端说还有 / **只要有 task_id 就有 journal**
+  // （续跑轮的卡片本身就是「前面的轮次在 journal 里」的证据：items 非空且 trimmed=0
+  //  时旧判据会连按钮都不给，用户无路可走）。
+  const hasMoreHistory = trimmed > 0 || cards.some((c) => Boolean(c.historyHasMore)) || Boolean(oldestCard?.taskId)
 
   const source: NarrativeSource = {
     blocks: subBlocks,
     // 分页：checkpoint 只留首屏，更早的在子任务 journal 里（agent_history 命令）。
     // 有 trimmed（被裁掉的条数）也算「还有更早」—— 否则裁剪过的历史看起来就是全部。
     total: card?.historyTotal ?? 0,
-    hasMore: trimmed > 0 || Boolean(card?.historyHasMore),
+    hasMore: hasMoreHistory,
     loading: Boolean(card?.historyLoading),
     error: Boolean(card?.historyError),
-    ...(card?.taskId ? { onLoadOlder: () => loadAgentHistory(card.id, card.taskId!) } : {}),
+    ...(oldestCard?.taskId ? { onLoadOlder: () => loadAgentHistory(oldestCard.id, oldestCard.taskId!) } : {}),
     empty: (
       // 点进来是想知道「它在干什么」—— 给状态而不是空白
       <div className="as-placeholder">

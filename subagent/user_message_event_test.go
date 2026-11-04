@@ -147,10 +147,22 @@ func TestSubAgentInboxMessageEmitsAgentUserMessage(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("Poll 消费 inbox 时必须发 AgentUserMessage（否则宿主看不到人对子智能体说的话）")
 	}
-	if got[0].TaskId != taskID {
-		t.Fatalf("事件归属错的 task_id（%q want %q）", got[0].TaskId, taskID)
+	// 子运行开始时还会补发一条 Source=prompt 的初始 Prompt 事件（2026-11-04 修复：
+	// 子会话转录此前缺第一条 user）。这里只认**inbox 投递**那条。
+	var inboxMsg *events.AgentUserMessage
+	for _, e := range got {
+		if e.Source != events.AgentUserSourcePrompt {
+			inboxMsg = e
+			break
+		}
 	}
-	if !strings.Contains(got[0].Text, "把返回 401 的分支也改掉") {
-		t.Fatalf("事件正文不对: %q", got[0].Text)
+	if inboxMsg == nil {
+		t.Fatalf("inbox 投递必须发一条（非 prompt 来源）的 AgentUserMessage，got %d 条", len(got))
+	}
+	if inboxMsg.TaskId != taskID {
+		t.Fatalf("事件归属错的 task_id（%q want %q）", inboxMsg.TaskId, taskID)
+	}
+	if !strings.Contains(inboxMsg.Text, "把返回 401 的分支也改掉") {
+		t.Fatalf("事件正文不对: %q", inboxMsg.Text)
 	}
 }

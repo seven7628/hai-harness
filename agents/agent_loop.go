@@ -1045,6 +1045,27 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 		Timestamp:     time.Now(),
 		EventType:     events.AgentStartType,
 	})
+	// 子运行的初始输入（主智能体派给它的 Prompt）在 AgentStart **之后**补一条 user 消息
+	// 事件：子会话转录此前只有 assistant 输出，第一条 user（「我派的活」）永久空缺
+	// （2026-11-04 用户报障）。初始 prompt 原先只进 checkpoint/journal，没有走事件流；
+	// 唯一的 AgentUserMessage 发出点在 subagent 的 Poll（只覆盖 inbox 投递）。
+	//
+	// 时机是硬约束：两侧 reducer（Go view_reducer / 前端 appendAgentUser）都只往
+	// **已存在的 agent 卡片**追加 user 项，早于 AgentStart 发出会被静默丢弃。
+	// 门控 ParentRunId 非空（= 子运行）：主会话的用户输入走 UserInputsConsumed，
+	// 这里补发会双份。
+	if ac.ParentRunId != "" {
+		if promptText := firstUserInput(input); promptText != "" {
+			ac.Handler(ac.ctx, &events.AgentUserMessage{
+				RunId:     ac.RunId,
+				TaskId:    opts.TaskId,
+				Text:      promptText,
+				Source:    events.AgentUserSourcePrompt,
+				Timestamp: time.Now(),
+				EventType: events.AgentUserMessageType,
+			})
+		}
+	}
 
 	lastContent := ""
 	lastReasoning := ""

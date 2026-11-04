@@ -301,3 +301,41 @@ test('case 1 不分段：单 run 仍然是一段（老路径一行不变）', ()
   const runs = turnRuns(selectTurns(blocks)[0])
   assert.equal(runs.length, 1)
 })
+
+// ---------------------------------------------------------------------------
+// 时长口径：workedMs（可归因片段之和）vs wallMs（真墙钟 = AgentEnd.DurationMS）
+//
+// 2026-11-04 实名报障：Worked for 26m28s < LLM 31m48s。两个量取自两把尺子 ——
+// 「Worked/turn」是 Σ 块 durMs（漏掉无正文的工具调用轮、并行工具还重复计入），
+// 「LLM」是 Σ 每次调用的区间长度。修复后结算态优先用 wallMs。
+// ---------------------------------------------------------------------------
+const assistantWith = (id: number, text: string, extra: Record<string, unknown>): MsgBlock =>
+  ({ kind: 'assistant', id, text, thinking: '', ...extra }) as MsgBlock
+const toolWith = (id: number, durMs: number, runId?: string): MsgBlock =>
+  ({ kind: 'tool', id, toolId: 't' + id, name: 'bash', status: 'done', durMs, ...(runId ? { runId } : {}) }) as MsgBlock
+
+test('statsOfItems：wallMs 按 run 取一次 AgentEnd 时长，多 run 相加', () => {
+  const items: MsgBlock[] = [
+    // 同一 run 的两条 assistant 块都带 agentDurMs（只应计一次）
+    assistantWith(1, '', { runId: 'r1', agentDurMs: 60_000, durMs: 20_000 }),
+    assistantWith(2, 'ok', { runId: 'r1', agentDurMs: 60_000, durMs: 40_000 }),
+    // 第二轮（agent_resume 原地续跑 = 新 run）→ 串行相加
+    assistantWith(3, 'again', { runId: 'r2', agentDurMs: 30_000, durMs: 10_000 }),
+  ]
+  const st = statsOfItems(items)
+  assert.equal(st.workedMs, 70_000) // Σ 块 durMs（不带 agentDurMs 的块不参与）
+  assert.equal(st.wallMs, 90_000) // 60s + 30s：真墙钟
+})
+
+test('statsOfItems：没有 AgentEnd 时长（还在跑 / 旧数据）时 wallMs 缺省', () => {
+  const st = statsOfItems([assistantWith(1, '', { runId: 'r1', durMs: 1000 }), toolWith(2, 2000, 'r1')])
+  assert.equal(st.workedMs, 3000)
+  assert.equal(st.wallMs, undefined)
+})
+
+test('statsOfItems：纯工具调用轮（无正文）的 durMs 也进 workedMs', () => {
+  // 回归：store 曾把 durMs 关在「有正文」的门里 → 181 个工具轮整段漏计。
+  const st = statsOfItems([assistantWith(1, '', { runId: 'r1', durMs: 5000 }), toolWith(2, 1000, 'r1')])
+  assert.equal(st.workedMs, 6000)
+  assert.ok(st.workedMs >= 5000, '工具轮的空正文块必须计入工作耗时')
+})

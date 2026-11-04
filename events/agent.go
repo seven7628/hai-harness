@@ -147,14 +147,19 @@ func (e *RunSilentEnd) Type() EventType { return e.EventType }
 
 // TaskStarted 后台任务启动（异步多 agent）：工具 Call 立即返回 taskId 时发出。
 type TaskStarted struct {
-	RunId       string    `json:"run_id,omitempty"` // 发起运行的 RunId
-	TaskId      string    `json:"task_id"`
-	ParentRunId string    `json:"parent_run_id,omitempty"`
-	ToolName    string    `json:"tool_name,omitempty"`
-	Name        string    `json:"name,omitempty"`
-	Async       bool      `json:"async"`
-	Status      string    `json:"status,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
+	RunId       string `json:"run_id,omitempty"` // 发起运行的 RunId
+	TaskId      string `json:"task_id"`
+	ParentRunId string `json:"parent_run_id,omitempty"`
+	// ParentTaskId 发起方**后台任务** id（子→孙派发时 = 那个子智能体的 task_id；
+	// 空 = 主 Agent 直派）。左栏树的父锚点用它，而不是靠 parent_run_id 反查：
+	// 反查要求「父 run 的卡片还在当前窗口里」，长会话里父卡被裁/窗口外就查不到 →
+	// 孙节点被当成根节点挂到主会话下（用户 2026-11-04 报障「嵌套通知回到了主 session」）。
+	ParentTaskId string    `json:"parent_task_id,omitempty"`
+	ToolName     string    `json:"tool_name,omitempty"`
+	Name         string    `json:"name,omitempty"`
+	Async        bool      `json:"async"`
+	Status       string    `json:"status,omitempty"`
+	Timestamp    time.Time `json:"timestamp"`
 
 	EventType EventType `json:"event_type"`
 }
@@ -225,21 +230,44 @@ func (t *TaskResultDelivered) Type() EventType { return t.EventType }
 //
 // ## 谁产生它
 //
-// subagent 的 Poll（所有投递源的唯一汇合点：用户 agent_send / 模型 agent_send 工具 /
-// 孙任务终态 task_result）。放在那一处而不是每个投递点上，才不会漏掉某一条通道。
+// 两个来源，覆盖「一条 user 消息进入子运行上下文」的全部通道：
+//  1. subagent 的 Poll —— 投递源汇合点（用户 agent_send / 模型 agent_send 工具 /
+//     孙任务终态 task_result）。放在那一处而不是每个投递点上，才不会漏掉某条通道。
+//  2. AgentLoop 在 **AgentStart 之后**为子运行补发的初始输入（Source=prompt）——
+//     主智能体派给它的 Prompt。此前这条只进 checkpoint/journal、从未走事件流，
+//     于是子会话转录的第一条 user 消息永久空缺（2026-11-04 用户报障）。
+//     时机是硬约束：两侧 reducer 都只往**已存在的** agent 卡片追加 user 项
+//     （Go view_reducer.applyAgentUserMessageLocked / 前端 appendAgentUser），
+//     早于 AgentStart 发出会被静默丢弃。
 //
-// TaskId 是归属锚（子运行的后台任务 id），与 AgentStart.TaskId 同一个键 ——
-// 同步子智能体（in-loop，无 task_id）没有 inbox，因此不会有本事件。
+// ## 归属锚
+//
+// TaskId 优先（后台子运行 = 任务 id，与 AgentStart.TaskId 同键），RunId 兜底
+// （同步子智能体 in-loop 没有 task id，只有 run id —— 没有 RunId 就永远挂不上卡片）。
 type AgentUserMessage struct {
-	TaskId string `json:"task_id"`
+	TaskId string `json:"task_id,omitempty"`
+	// RunId 产生本条消息的**子运行** run id（TaskId 为空时的归属锚；也是幂等键：
+	// 同一次运行的初始 prompt 只应有一条）。
+	RunId string `json:"run_id,omitempty"`
 	// Text 消息正文（多块内容拼接；图片等非文本块以占位说明表示）
 	Text string `json:"text"`
-	// Source 来源：user（用户在子会话里打字）/ agent（模型用 agent_send 工具）/
+	// Source 来源：prompt（主智能体派的初始 Prompt）/ user（用户在子会话里打字）/
 	// child_task（孙任务终态结果投回本运行）。UI 用它在转录里区分「谁说的」。
 	Source    string    `json:"source,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 
 	EventType EventType `json:"event_type"`
 }
+
+// AgentUserMessage.Source 取值（单一事实源：产生方与消费方都引用这里）。
+const (
+	// AgentUserSourcePrompt 主智能体派给子运行的初始 Prompt（子运行开始时由
+	// AgentLoop 在 AgentStart 之后补发）。
+	AgentUserSourcePrompt = "prompt"
+	// AgentUserSourceUser agent_send 投递的 user 文本（用户或模型发起，Message 层面不可区分）。
+	AgentUserSourceUser = "user"
+	// AgentUserSourceChildTask 孙任务终态结果回投（task_result 内容块）。
+	AgentUserSourceChildTask = "child_task"
+)
 
 func (e *AgentUserMessage) Type() EventType { return e.EventType }

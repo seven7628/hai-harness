@@ -11,7 +11,7 @@
 // 运行：esbuild bundle 后 node --test（见 package.json 的 test:agent-tree）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildAgentTree, collectTreeKeys, focusedPathKeys, countRunningNodes, flattenAgentTree, flattenVisible, pathKeyOf, subtreeSize, pageRoots, DEFAULT_ROOT_PAGE } from './agentTree'
+import { agentTreeFromView, buildAgentTree, collectTreeKeys, focusedPathKeys, countRunningNodes, flattenAgentTree, flattenVisible, pathKeyOf, subtreeSize, pageRoots, DEFAULT_ROOT_PAGE } from './agentTree'
 
 test('嵌套：子智能体下的子智能体挂在子节点下（不是平级）', () => {
   const roots = buildAgentTree([
@@ -240,4 +240,30 @@ test('分页：聚焦节点被分页挡掉时必须补进来（否则左栏看�
   assert.ok(p.roots.some((r) => r.id === 'old'), '后代被聚焦 → 它所在的那棵根必须显示')
   // 找不到这个 id（节点已清理）→ 只是普通分页
   assert.equal(pageRoots(roots, 5, { mustShowId: 'gone' }).roots.length, 5)
+})
+
+// ---------------------------------------------------------------------------
+// 嵌套（子 → 孙）的父锚点：parentTaskId 优先，不靠 parent_run_id 反查。
+//
+// 2026-11-04 报障「子智能体的子智能体的通知回到主 session」：孙任务的 parent_run_id
+// 指向**子智能体的 run**，而父 run 的卡片一旦被裁到窗口外，keyOfRun 里就没有它 →
+// 父 id 对不上任何节点 → 按「父不在列表里 → 提为根」提成根节点，视觉上就挂到主会话下。
+// 修复：task_started 直接带 parent_task_id（任务身份），树按它连边。
+// ---------------------------------------------------------------------------
+test('嵌套任务：parentTaskId 优先于 parent_run_id（父卡不在窗口里也挂得住）', () => {
+  const roots = agentTreeFromView(
+    [],
+    [
+      // 子智能体（父 = 主会话，无 parentRunId）
+      { kind: 'agent', runId: 'child-run', taskId: 'task-child', label: '子智能体', status: 'running', spawnedAt: 1 },
+      // 孙任务：parent_run_id 是子 run（窗口里已没有这张卡片的 runNode），
+      // 但 parentTaskId 说清了「我是 task-child 派的」
+      { kind: 'async_task', taskId: 'task-grand', parentRunId: 'child-run', parentTaskId: 'task-child', label: '孙任务', status: 'running', startedAt: 2 },
+    ],
+  )
+  const child = roots.find((n) => n.id === 'task-child')
+  assert.ok(child, '子智能体应是根节点')
+  assert.equal(child!.children.length, 1, '孙任务必须挂在子智能体下，不能掉成主会话下的根')
+  assert.equal(child!.children[0].id, 'task-grand')
+  assert.equal(roots.length, 1, '根只有一个（主会话下的子智能体）')
 })

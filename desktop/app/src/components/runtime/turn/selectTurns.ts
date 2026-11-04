@@ -45,8 +45,15 @@ export interface TurnUsage {
 export interface TurnStats {
   calls: number
   /** measured segments only: Σ assistant.durMs + Σ tool.durMs. Not wall time —
-      the gaps between them are not attributable to anything we can name. */
+      the gaps between them are not attributable to anything we can name.
+      （并行工具会重复计入；纯工具调用轮曾因「无正文不写 durMs」整段漏计 —— 见
+      store 的 llm_end：现在无论有没有正文都把 durMs 落到块上。） */
   workedMs: number
+  /** 真墙钟 = 本段内每个 run 的 AgentEnd.DurationMS 之和（同 run 只取一次）。
+      结算前（还在跑）没有这个值 → 调用方回落到 workedMs（滚动计时）。
+      为什么要它：`turn` 这个标签承诺的是墙钟，而 workedMs 是「可归因片段之和」——
+      2026-11-04 实名报障 Worked 26m28s < LLM 31m48s，就是这两把尺子混用。 */
+  wallMs?: number
   files: number
   added: number
   removed: number
@@ -150,9 +157,24 @@ export function statsOfItems(items: MsgBlock[]): TurnStats {
   let added = 0
   let removed = 0
   files.forEach((f) => { added += f.add; removed += f.del })
+  // 墙钟：AgentEnd.DurationMS 只挂在该 run 的末条 assistant 块上（agentDurMs）→
+  // 同 run 取一次（max），一轮内多次运行（续跑/分段结算）串行 → 相加。
+  // 没有 runId 的旧数据只能按块累加（退化，但仍优于直接用 workedMs）。
+  const wallByRun = new Map<string, number>()
+  let wallAnon = 0
+  items.forEach((b) => {
+    const d = (b as { agentDurMs?: number }).agentDurMs
+    if (!d || d <= 0) return
+    const r = (b as { runId?: string }).runId
+    if (r) wallByRun.set(r, Math.max(wallByRun.get(r) ?? 0, d))
+    else wallAnon += d
+  })
+  let wallMs = wallAnon
+  wallByRun.forEach((d) => { wallMs += d })
   return {
     calls: items.filter((b) => b.kind === 'tool').length,
     workedMs,
+    ...(wallMs > 0 ? { wallMs } : {}),
     files: files.size,
     added,
     removed,

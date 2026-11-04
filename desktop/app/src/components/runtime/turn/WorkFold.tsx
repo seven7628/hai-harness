@@ -20,7 +20,10 @@ export function WorkFold({
   onToggle: () => void
   label?: string
 }) {
-  const dur = running ? '…' : durText(stats.workedMs)
+  // 结算后优先用**真墙钟**（stats.wallMs = AgentEnd.DurationMS）；未结算（还在跑）
+  // 或旧数据没有墙钟时回落到 workedMs 的滚动值。
+  const settledMs = stats.wallMs ?? stats.workedMs
+  const dur = running ? '…' : durText(settledMs)
   const parts: string[] = []
   if (stats.calls) parts.push(stats.calls + (stats.calls === 1 ? ' call' : ' calls'))
   if (stats.agents) parts.push(stats.agents + (stats.agents === 1 ? ' subagent' : ' subagents'))

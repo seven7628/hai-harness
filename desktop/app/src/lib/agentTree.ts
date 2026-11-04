@@ -319,6 +319,8 @@ export interface ViewAgentBlock {
   kind: 'agent'
   runId: string
   parentRunId?: string
+  /** 父**后台任务** id（task_started.parent_task_id）：子→孙派发时的父锚点 */
+  parentTaskId?: string
   taskId?: string
   label?: string
   status?: string
@@ -329,6 +331,8 @@ export interface ViewTaskBlock {
   kind: 'async_task' | 'tool'
   taskId?: string
   parentRunId?: string
+  /** 父**后台任务** id（task_started.parent_task_id）：子→孙派发时的父锚点 */
+  parentTaskId?: string
   label?: string
   name?: string
   toolName?: string
@@ -385,7 +389,10 @@ export function agentTreeFromView(
       input.push({
         id: key,
         runId: b.runId,
-        parentId: b.parentRunId ? (keyOfRun.get(b.parentRunId) || b.parentRunId) : undefined,
+        // 父锚点：parentTaskId（任务身份）优先 —— parent_run_id 反查要求父 run 的卡片
+        // 还在**当前窗口**里，长会话里父卡被裁/在窗口外就查不到，孙节点会掉成根节点
+        // （显示成「回到主 session」）。
+        parentId: b.parentTaskId || (b.parentRunId ? (keyOfRun.get(b.parentRunId) || b.parentRunId) : undefined),
         kind: 'agent',
         label: b.label,
         taskId: b.taskId,
@@ -400,7 +407,7 @@ export function agentTreeFromView(
     if (b.kind === 'tool' && !b.promoted) continue
     input.push({
       id: b.taskId,
-      parentId: b.parentRunId ? (keyOfRun.get(b.parentRunId) || b.parentRunId) : undefined,
+      parentId: b.parentTaskId || (b.parentRunId ? (keyOfRun.get(b.parentRunId) || b.parentRunId) : undefined),
       kind: 'task',
       label: b.kind === 'async_task' ? b.label : b.name,
       taskId: b.taskId,
