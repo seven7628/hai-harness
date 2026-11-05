@@ -195,3 +195,82 @@ func TestHubAgentUpdateReapplyKeepsVisibleTools(t *testing.T) {
 	}
 	_ = agenthub.AgentID(p.ID)
 }
+
+// B-1：跨 provider 切过模型后，资料页只改 model（或只改 provider）必须成对更新，
+// 不能留下 openai/deepseek-v4-pro 这种不存在的组合。
+func TestHubAgentUpdateKeepsProviderModelPaired(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "PairGuard")
+	bs, err := m.hubDMSession(string(p.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	switchTo := func(id int, model, prov string) {
+		t.Helper()
+		ok, errMsg, _ := dispatchResp(t, m, buf, id, "switch_model", map[string]any{
+			"workspace": bs.workspace, "session_id": bs.id, "model": model, "provider": prov,
+		})
+		if !ok {
+			t.Fatalf("switch_model %s/%s: %s", prov, model, errMsg)
+		}
+	}
+	check := func(wantProv, wantModel string) {
+		t.Helper()
+		prov, model, _ := bs.modelCfg()
+		if prov != wantProv || model != wantModel {
+			t.Fatalf("session pair = %s/%s, want %s/%s", prov, model, wantProv, wantModel)
+		}
+		if got := bs.loop.Model(); got != wantModel {
+			t.Fatalf("loop model = %q, want %q", got, wantModel)
+		}
+	}
+
+	// 只改 model：profile provider 仍是 deepseek，必须把 provider 一起拉回来。
+	switchTo(10, "gpt-5", "openai")
+	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_agent_update", map[string]any{
+		"agent_id": string(p.ID), "patch": map[string]any{"model": "deepseek-v4-pro"},
+	}); !ok {
+		t.Fatalf("update model: %s", errMsg)
+	}
+	check("deepseek", "deepseek-v4-pro")
+
+	// 只改 provider：用一个 profile 为 openai/gpt-5 的智能体，会话先切到 deepseek，
+	// 再只改 provider（openai → deepseek），model 跟随 profile（gpt-5）。
+	ok, errMsg, data := hubCmd(t, m, buf, 12, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "PairGuardTwo", "provider": "openai", "model": "gpt-5", "role": "测试"},
+	})
+	if !ok {
+		t.Fatalf("create second agent: %s", errMsg)
+	}
+	p2 := agentFromData(t, data)
+	bs2, err := m.hubDMSession(string(p2.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, errMsg, _ := dispatchResp(t, m, buf, 13, "switch_model", map[string]any{
+		"workspace": bs2.workspace, "session_id": bs2.id, "model": "deepseek-v4-flash", "provider": "deepseek",
+	}); !ok {
+		t.Fatalf("switch_model for p2: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 14, "hub_agent_update", map[string]any{
+		"agent_id": string(p2.ID), "patch": map[string]any{"provider": "deepseek"},
+	}); !ok {
+		t.Fatalf("update provider: %s", errMsg)
+	}
+	prov2, model2, _ := bs2.modelCfg()
+	if prov2 != "deepseek" || model2 != "gpt-5" {
+		t.Fatalf("provider-only pair = %s/%s, want deepseek/gpt-5", prov2, model2)
+	}
+	if got := bs2.loop.Model(); got != "gpt-5" {
+		t.Fatalf("p2 loop model = %q, want gpt-5", got)
+	}
+
+	// 只改人格仍然不能动会话级选择（这里与 profile 相同，改成人格后仍是 deepseek）。
+	switchTo(16, "gpt-5", "openai")
+	if ok, errMsg, _ := hubCmd(t, m, buf, 17, "hub_agent_update", map[string]any{
+		"agent_id": string(p.ID), "patch": map[string]any{"role": "只改职责"},
+	}); !ok {
+		t.Fatalf("update role: %s", errMsg)
+	}
+	check("openai", "gpt-5")
+}

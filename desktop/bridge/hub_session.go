@@ -526,21 +526,26 @@ func (m *manager) syncHubSessionProfile(agentID string, prev, next *agenthub.Age
 	}
 	ws.mu.Unlock()
 
+	providerOrModelChanged := prev.Provider != next.Provider || prev.Model != next.Model
+	effortChanged := prev.Effort != next.Effort
 	changed := false
 	for _, bs := range items {
 		if bs == nil || bs.ctx.Err() != nil {
 			continue
 		}
-		if prev.Provider != next.Provider {
-			bs.provider = next.Provider
+		if providerOrModelChanged {
+			// provider/model 必须**成对**更新：只改 model 会留下 openai/deepseek-v4-pro
+			// 这种不存在的组合，下一轮直接打错 provider（P1-10 复审 B-1）。
+			bs.editModelCfg(next.Provider, next.Model, "")
 			changed = true
 		}
-		if prev.Model != next.Model {
-			bs.model = next.Model
-			changed = true
-		}
-		if prev.Effort != next.Effort {
-			bs.effort = string(next.Effort)
+		if effortChanged {
+			bs.editModelCfg("", "", string(next.Effort))
+			// 子 agent 追随主档位：只改 bs.effort 会让 spawn/explore 继续用旧档位
+			// （P1-10 复审 B4 非阻塞 #2）。
+			if bs.subagentEffort != nil {
+				bs.subagentEffort.set(provider.ReasoningEffortLevel(next.Effort))
+			}
 			changed = true
 		}
 	}
@@ -601,14 +606,15 @@ func (m *manager) applyHubSessionLoop(bs *bridgeSession, p *agenthub.AgentProfil
 		return
 	}
 	cur := *p
-	if bs.provider != "" {
-		cur.Provider = bs.provider
+	prov, model, effort := bs.modelCfg()
+	if prov != "" {
+		cur.Provider = prov
 	}
-	if bs.model != "" {
-		cur.Model = bs.model
+	if model != "" {
+		cur.Model = model
 	}
-	if bs.effort != "" {
-		cur.Effort = bs.effort
+	if effort != "" {
+		cur.Effort = effort
 	}
 	spec := m.hubSpecFor(&cur, hubScopeFromSID(bs.id), ws.path)
 	bs.loop = m.buildHubLoop(ws, bs.id, spec, bs.hubEngine)

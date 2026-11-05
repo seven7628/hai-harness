@@ -288,12 +288,16 @@ type bridgeSession struct {
 	runtime *workspaceRuntime
 	s       *session.Session
 	loop    *agents.AgentLoop // per-session loop（model/effort 运行时可切；persona 切换重建）
-	effort  string
+	// cfgMu 保护 provider/model/effort/providerExplicit：dispatch goroutine（资料页保存、
+	// switch_*）写，run goroutine（emit/metrics/checkpoint）每条事件读 —— 不加锁就是
+	// data race（P1-10 复审 B-2）。
+	cfgMu    sync.RWMutex
+	effort   string
+	model    string // 当前模型（switch_model 设置；下一次请求生效）
+	provider string // 当前 provider（set_provider 重建时更新；emit 打标价表用）
 	// subagentEffort 子 agent 档位持有者（spawn/explore/文件化人设 loop）：switch_effort
 	// 时与主 loop 同步 —— 子 agent 追随主 loop（2026-09 决策）。rebuildLoop 换代。
 	subagentEffort *subagentEffortRef
-	model          string // 当前模型（switch_model 设置；下一次请求生效）
-	provider       string // 当前 provider（set_provider 重建时更新；emit 打标价表用）
 	// skillCaps 本会话的技能能力面（装配期算好后随 loop 换代一起替换；见
 	// skill_capability.go）。宿主 UI 与 skills 命令读它，**不重算** —— 重算会让
 	// 「面板显示可用的技能」与「loop 实际注入的清单」变成两个事实源。
@@ -302,7 +306,7 @@ type bridgeSession struct {
 	// 新会话 UI 指定）。true 时 rebuildAll 不再按模型名全局字母序重解析归属——
 	// 避免「glm-5.3-flash 同时存在于 opencode+zhipu 时被字母序改写到 opencode」
 	//（2026-09 修复：会话 Provider 归属以用户选择为准，不用模型名猜）。
-	providerExplicit bool
+	providerExplicit bool // guarded by cfgMu
 	mode             *agents.Mode
 	persona          string // 当前 Persona（"code"/"work"；switch_persona 重建 loop）
 	ctx              context.Context
@@ -515,6 +519,7 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// 必须按同一序列执行（并发子 agent / 任务结果事件不得与主 run 交错）。
 	bs.dispatchMu.Lock()
 	defer bs.dispatchMu.Unlock()
+	prov, _, _, _ := bs.cfgSnapshot() // 价表/指标打标（run goroutine 与资料页写并发）
 
 	// Hub DM：本轮最终回复进 DM 索引（左栏预览/搜索/未读）。上下文仍以 session jsonl
 	// 为准 —— 两份数据分工见 §6.1.3。空回复（纯工具轮/中断）由 appendHubReply 跳过。
@@ -583,7 +588,6 @@ func (bs *bridgeSession) emit(e events.Event) {
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
 		bs.setLiveText(ev.Content)                  // 与手机端一致：最终文本覆盖累计增量
 		if ev.Usage != nil {
-			prov := bs.provider
 			// 成本金额已由 provider 填充进 Usage.Cost（µUSD，上游自报优先、缺失才按价表
 			// 折算，见 provider.ApplyUsageCost）并随 MetricsEntry 持久化；
 			// cost_usd 浮点字段仅供前端展示（USD）。
@@ -603,11 +607,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 		// —— 此时仍记一行（FailedAttempts 计数用），不污染 token/成本合计。
 		entry := MetricsEntry{
 			Timestamp: ev.Timestamp, Workspace: bs.workspace, SessionID: bs.id,
-			Provider: bs.provider, Model: ev.Model, Kind: MetricsKindAttemptFailed,
+			Provider: prov, Model: ev.Model, Kind: MetricsKindAttemptFailed,
 		}
 		if ev.Usage != nil {
 			entry.Usage = *ev.Usage
-			extras = map[string]any{"cost_usd": costUsd(bs.provider, ev.Model, *ev.Usage)}
+			extras = map[string]any{"cost_usd": costUsd(prov, ev.Model, *ev.Usage)}
 		}
 		if bs.metrics != nil {
 			_ = bs.metrics.Record(entry)
@@ -643,7 +647,7 @@ func (bs *bridgeSession) emit(e events.Event) {
 		if ev.Usage != nil && ev.Usage.Cost.Total > 0 && bs.metrics != nil {
 			_ = bs.metrics.Record(MetricsEntry{
 				Timestamp: time.Now(), Workspace: bs.workspace,
-				SessionID: bs.id, Provider: bs.provider, Model: ev.Model, Usage: *ev.Usage,
+				SessionID: bs.id, Provider: prov, Model: ev.Model, Usage: *ev.Usage,
 			})
 		}
 		extras = map[string]any{"todos": todosOf(bs, ev.Todos)}
@@ -697,6 +701,42 @@ func (bs *bridgeSession) emit(e events.Event) {
 			bs.hubPumpQueue(bs.workspace, bs.id)
 		}
 	}
+}
+
+// cfgSnapshot 一次性读出 provider/model/effort/providerExplicit（run goroutine 用）。
+func (bs *bridgeSession) cfgSnapshot() (provider, model, effort string, explicit bool) {
+	bs.cfgMu.RLock()
+	defer bs.cfgMu.RUnlock()
+	return bs.provider, bs.model, bs.effort, bs.providerExplicit
+}
+
+// modelCfg 只读 provider/model/effort。
+func (bs *bridgeSession) modelCfg() (provider, model, effort string) {
+	bs.cfgMu.RLock()
+	defer bs.cfgMu.RUnlock()
+	return bs.provider, bs.model, bs.effort
+}
+
+// editModelCfg 在写锁内修改 provider/model/effort（空串 = 不改）。
+func (bs *bridgeSession) editModelCfg(provider, model, effort string) {
+	bs.cfgMu.Lock()
+	defer bs.cfgMu.Unlock()
+	if provider != "" {
+		bs.provider = provider
+	}
+	if model != "" {
+		bs.model = model
+	}
+	if effort != "" {
+		bs.effort = effort
+	}
+}
+
+// setProviderExplicit 写 providerExplicit（与 modelCfg 同一把锁）。
+func (bs *bridgeSession) setProviderExplicit(v bool) {
+	bs.cfgMu.Lock()
+	bs.providerExplicit = v
+	bs.cfgMu.Unlock()
 }
 
 // approvalWindow 审批等待窗口（与提问窗口 events.MaxQuestionTimeout 同值：最长 30 分钟）。
@@ -1488,8 +1528,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	if opts.hub != nil {
 		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：
 		// rebuildLoop 据此走 buildHubLoop，而不会被当成项目会话的 code persona 重建。
-		bs.provider = opts.hub.Agent.Provider
-		bs.model = opts.hub.Agent.Model
+		bs.editModelCfg(opts.hub.Agent.Provider, opts.hub.Agent.Model, "")
 		bs.persona = "hub"
 		hubSpec := opts.hub
 		bs.hubOnAgentEnd = func(content string) { m.appendHubReply(hubSpec, content) }
@@ -2447,7 +2486,7 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		bs.loop.SetReasoningEffort(provider.ReasoningEffortLevel(eff)) // 下一次 LLM 请求生效
-		bs.effort = eff
+		bs.editModelCfg("", "", eff)
 		// 子 agent 追随主 loop（2026-09 决策）：共享 spawn/explore loop 就地同步，
 		// 之后派生的文件化 subagent 由工厂读新档位（见 subagentEffortRef）。
 		if bs.subagentEffort != nil {
@@ -2527,10 +2566,9 @@ func (m *manager) dispatch(c command) {
 			m.lastModel = name
 			m.mu.Unlock()
 		}
-		bs.model = name
-		bs.provider = prov // 价表打标：本会话按所属 Provider 记账（不随全局活跃漂移）
-		if str(c.Payload, "provider") != "" && bs.provider == prov {
-			bs.providerExplicit = true // 用户显式选定 Provider → 后续 rebuildAll 保留归属
+		bs.editModelCfg(prov, name, "")
+		if str(c.Payload, "provider") != "" {
+			bs.setProviderExplicit(true) // 用户显式选定 Provider → 后续 rebuildAll 保留归属
 		}
 		// 下一轮 LLM 生效：当前 loop 就地切 model/max_tokens/contextWindow ——
 		// 运行中的 Run 下一轮 LLM 立即读到新值（streamOnce/maybeCompact 按 current 取）。
@@ -5177,7 +5215,8 @@ func (m *manager) rebuildLoop(bs *bridgeSession) {
 	if ws == nil {
 		ws = m.runtime(bs.workspace) // 兜底：本提交之前创建的会话没有 runtime 快照
 	}
-	loop, effortRef, caps := m.buildLoop(ws, bs.id, bs.provider, bs.model, bs.effort,
+	prov, model, effort := bs.modelCfg()
+	loop, effortRef, caps := m.buildLoop(ws, bs.id, prov, model, effort,
 		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, ws.skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
 	bs.s.SetLoop(loop)
 	bs.loop = loop
@@ -5511,7 +5550,7 @@ func (m *manager) maybeGenSessionTitle(wsPath string, bs *bridgeSession, firstTe
 		return
 	}
 	// 会话绑定的 provider/model（异步期间快照）
-	provName, model, effort := bs.provider, bs.model, bs.effort
+	provName, model, effort := bs.modelCfg()
 	if provName == "" || model == "" {
 		return
 	}
@@ -5773,27 +5812,30 @@ func (m *manager) rebuildAll() {
 			//    仅当原 Provider 已删除/不再含该模型才回退全局解析（防字母序改写：glm-5.3-flash
 			//    同时存在于 opencode+zhipu 时曾因 o<z 被改到 opencode，请求打到错误网关）。
 			// 2) 否则（旧会话无显式归属）按模型名解析一次并记录归属，后续不再漂移。
-			keep := bs.providerExplicit && m.provCfg.hasModelIn(bs.provider, bs.model)
-			if !keep && bs.provider != "" && m.provCfg.hasModelIn(bs.provider, bs.model) {
+			provName, model, effort, explicit := bs.cfgSnapshot()
+			keep := explicit && m.provCfg.hasModelIn(provName, model)
+			if !keep && provName != "" && m.provCfg.hasModelIn(provName, model) {
 				keep = true // 会话已有归属且模型仍在该 Provider → 保留（不因 rebuildAll 漂移）
 			}
 			if !keep {
-				if prov := m.provCfg.providerForModel(bs.model); prov != "" {
-					bs.provider = prov
+				if prov := m.provCfg.providerForModel(model); prov != "" {
+					provName = prov
 				} else {
-					bs.provider = m.provCfg.providerName()
-					if !m.provCfg.hasModel(bs.model) {
-						bs.model = m.provCfg.defaultModel()
+					provName = m.provCfg.providerName()
+					if !m.provCfg.hasModel(model) {
+						model = m.provCfg.defaultModel()
 					}
 				}
+				bs.editModelCfg(provName, model, "")
 			}
 			// 旧 loop 保活：in-flight Run 持旧 loop 引用直到本轮结束，就地推送运行时值，
 			// 其后续轮次即按新窗口判定压缩（rebuildLoop 只换引用，覆盖不到在跑的 Run）。
 			if bs.loop != nil {
-				bs.loop.SetModel(bs.model)
-				bs.loop.SetMaxTokens(m.provCfg.maxTokensForIn(bs.provider, bs.model))
-				bs.loop.SetContextWindow(m.provCfg.windowForIn(bs.provider, bs.model))
+				bs.loop.SetModel(model)
+				bs.loop.SetMaxTokens(m.provCfg.maxTokensForIn(provName, model))
+				bs.loop.SetContextWindow(m.provCfg.windowForIn(provName, model))
 			}
+			_ = effort
 			m.rebuildLoop(bs)
 		}
 	}
