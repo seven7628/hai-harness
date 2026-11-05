@@ -57,6 +57,12 @@ func (s *FileStore) AppendProfileVersion(ctx context.Context, p *AgentProfile) e
 	if err != nil {
 		return err
 	}
+	// 幂等：上一次保存失败（rename 失败/掉电）会留下「当前版本已归档」的状态，
+	// 重试时再追加一次就会出现两行同一个版本号（P1-06 复核 N4）。
+	// 版本号单调、归档按保存前的版本追加，因此「最后一行同版本」= 已经归档过。
+	if n := len(versions); n > 0 && versions[n-1].Version == v.Version {
+		return nil
+	}
 	versions = append(versions, v)
 	if len(versions) > MaxProfileVersions {
 		versions = versions[len(versions)-MaxProfileVersions:]

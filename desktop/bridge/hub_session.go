@@ -238,6 +238,12 @@ func (m *manager) hubLoopOptions(ws *workspaceRuntime, sid string, spec *hubSess
 	// 装配层再钳一次 [0.5, 0.95]（与 agenthub.AgentProfile.Normalize 同口径）：
 	// 走 Store/CRUD 的路径已经 Normalize 过，但手工 spec（测试/恢复快照）能绕过那层，
 	// 0.97 这种值会让每轮都压缩（成本爆炸），0.1 会把上下文压穿（P1-02 复核）。
+	//
+	// NaN 必须单独挡：math.Min/Max 传播 NaN，触发线「窗口×NaN」恒为 false → 压缩永不
+	// 触发（静默失效）。Normalize 是直接拒绝 NaN 的，这里退回默认值（P1-07 复核 N2）。
+	if math.IsNaN(threshold) {
+		threshold = agenthub.DefaultCompressThreshold
+	}
 	threshold = math.Min(agenthub.MaxCompressThreshold, math.Max(agenthub.MinCompressThreshold, threshold))
 	systemPrompt := agenthub.RenderSystem(agenthub.PromptSpec{Agent: &spec.Agent, Group: spec.Group, Members: spec.Members})
 	sameProvider := m.provCfg.newProvider(p.Provider)
@@ -528,6 +534,22 @@ func hubScopeFromSID(sid string) agenthub.Scope {
 		return agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: agenthub.GroupID(gid)}
 	}
 	return agenthub.Scope{Kind: agenthub.ScopeDM}
+}
+
+// hubAgentRunning 该智能体是否有会话正在跑（更新资料时别把运行环刷成 idle）。
+func (m *manager) hubAgentRunning(agentID string) bool {
+	ws := m.hubRuntimeIfExists(agentID)
+	if ws == nil {
+		return false
+	}
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	for _, bs := range ws.sessions {
+		if bs != nil && bs.running.Load() {
+			return true
+		}
+	}
+	return false
 }
 
 // hubAgentIDFromSID 从 `hub.<agentID>.dm` / `hub.<agentID>.g.<groupID>` 取 agentID。

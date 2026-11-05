@@ -116,7 +116,8 @@ func TestHubAgentRollbackRebuildsLoop(t *testing.T) {
 	}
 }
 
-// 分层预览：L1/L3 必在；记忆为空时不产生 L4 层；写了记忆后 L4 == 真正注入的文本。
+// 分层预览：L1/L2/L3 必在，L4（记忆）即使为空也有引导文本；写了记忆后 L4 == 真正注入的文本，
+// 且 L1–L3 拼起来 == 运行中 loop 的 system 分区（预览与下发同源）。
 func TestHubPromptPreviewLayers(t *testing.T) {
 	m, buf := testManager(t)
 	p := createHubAgent(t, m, buf, 1, "Preview")
@@ -137,12 +138,13 @@ func TestHubPromptPreviewLayers(t *testing.T) {
 		}
 		total += float64(len(str(layer, "text")))
 	}
-	// DM 无名册 → L1/L3；L4 记忆索引即使为空也有说明文本，所以恒在最后一层。
-	if strings.Join(keys, ",") != "protocol,identity,memory" {
-		t.Fatalf("DM preview layers = %v, want [protocol identity memory]", keys)
+	// DM 无名册 → L1 + L2 身份；L3 环境恒在（内核一定追加 Current Workspace）；
+	// L4 记忆即使为空也有引导文本，所以恒在最后一层。
+	if strings.Join(keys, ",") != "protocol,identity,environment,memory" {
+		t.Fatalf("DM preview layers = %v, want [protocol identity environment memory]", keys)
 	}
-	if got := float64(floatNum(data, "total_chars", 0)); got != total {
-		t.Fatalf("total_chars = %v, want %v", got, total)
+	if got := float64(floatNum(data, "total_bytes", 0)); got != total {
+		t.Fatalf("total_bytes = %v, want %v", got, total)
 	}
 	if note := str(data, "note"); !strings.Contains(note, "L5") {
 		t.Fatalf("note must say L5 is assembled by the kernel: %q", note)
@@ -164,6 +166,20 @@ func TestHubPromptPreviewLayers(t *testing.T) {
 	}
 	if !strings.Contains(str(last, "text"), "预览里要能看到这行") {
 		t.Fatalf("memory layer missing content: %q", str(last, "text"))
+	}
+	// 与装配同源：各层按 "\n\n" 拼起来必须与运行中 loop 的**完整系统提示词**逐字节相等
+	// （含当前版本的内核分隔符/环境层/记忆段）。只比字符数会漏掉分隔符与层序错误。
+	bs, berr := m.hubDMSession(agentID)
+	if berr != nil {
+		t.Fatal(berr)
+	}
+	texts := make([]string, 0, len(layers))
+	for _, raw := range layers {
+		layer, _ := raw.(map[string]any)
+		texts = append(texts, str(layer, "text"))
+	}
+	if got, want := strings.Join(texts, "\n\n"), bs.loop.SystemPromptText(); got != want {
+		t.Fatalf("preview != composed system prompt (len %d vs %d)", len(got), len(want))
 	}
 	// 与装配同源：长度必须等于当前注入（两份文案漂移会在这一步暴露）。
 	loaded, _, lerr := m.hubLoadAgent(agentID)

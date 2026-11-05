@@ -23,16 +23,27 @@ func TestHubAgentCompressThresholdRebuild(t *testing.T) {
 		t.Fatalf("default threshold = %v, want 0.8", got)
 	}
 	before := bs.loop
-	if ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_update", map[string]any{
+	// 会话级选择（switch_model/switch_effort）优先于 Profile：改阈值触发的重建不能把
+	// 它们静默改回默认值（P1-07 复核 N6 —— 此前这条只有 P1-05 的用例在挡）。
+	bs.model, bs.provider, bs.effort = "deepseek-v4-pro", "deepseek", "high"
+	if ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_agent_update", map[string]any{
 		"agent_id": agentID, "patch": map[string]any{"compress_threshold": 0.62},
 	}); !ok {
 		t.Fatalf("update failed: %s", errMsg)
+	} else if data["effective"] != "next_run" {
+		t.Fatalf("update response effective = %v, want next_run（UI 要显示生效时机）", data["effective"])
 	}
 	if bs.loop == before {
 		t.Fatal("changing compress_threshold must rebuild the loop (下一个 Run 生效)")
 	}
 	if got := bs.loop.CompressThreshold(); math.Abs(got-0.62) > 1e-9 {
 		t.Fatalf("threshold after update = %v, want 0.62", got)
+	}
+	if got := bs.loop.Model(); got != "deepseek-v4-pro" {
+		t.Fatalf("rebuilt loop model = %q, want session model deepseek-v4-pro", got)
+	}
+	if got := bs.loop.ReasoningEffort(); string(got) != "high" {
+		t.Fatalf("rebuilt loop effort = %q, want high", got)
 	}
 	if bs.s.Loop() != bs.loop {
 		t.Fatal("session still runs the old loop")
@@ -64,21 +75,21 @@ func TestHubCompressThresholdNotGlobal(t *testing.T) {
 	}); !ok {
 		t.Fatalf("update failed: %s", errMsg)
 	}
-	m.dispatch(command{Id: 3, Type: "set_compress_threshold", Payload: map[string]any{
-		"compress_threshold": 0.31,
-	}})
-	if got := bs.loop.CompressThreshold(); math.Abs(got-0.66) > 1e-9 {
-		t.Fatalf("global set_compress_threshold leaked into hub loop: %v, want 0.66", got)
-	}
-	// 而同一次广播确实会改工作区会话（证明命令生效，不是失败静默）。
+	// 先建工作区会话，再走**命令**广播：顺序反了的话断言的是「直接调用 setCompressThreshold」
+	// 而不是 handler（P1-07 复核 N1：删掉 handler 里的下发，旧写法仍全绿）。
 	ws := m.runtime(t.TempDir())
 	plain, err := m.createIn(ws, "s-global", "", sessionOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	plain.loop.SetCompressThreshold(0.8)
-	m.setCompressThreshold(0.31)
+	m.dispatch(command{Id: 3, Type: "set_compress_threshold", Payload: map[string]any{
+		"compress_threshold": 0.31,
+	}})
+	if got := bs.loop.CompressThreshold(); math.Abs(got-0.66) > 1e-9 {
+		t.Fatalf("global set_compress_threshold leaked into hub loop: %v, want 0.66", got)
+	}
 	if got := plain.loop.CompressThreshold(); math.Abs(got-0.31) > 1e-9 {
-		t.Fatalf("project loop threshold = %v, want 0.31 (broadcast broken?)", got)
+		t.Fatalf("project loop threshold = %v, want 0.31 (broadcast did not reach workspaces)", got)
 	}
 }

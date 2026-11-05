@@ -70,13 +70,14 @@ func RenderLayers(spec PromptSpec) []PromptLayer {
 		layers = append(layers, PromptLayer{Key: "roster", Title: "L2 · 群名册", Text: roster})
 	}
 	if identity := renderIdentity(spec.Agent); identity != "" {
-		layers = append(layers, PromptLayer{Key: "identity", Title: "L3 · 身份与职责", Text: identity})
+		layers = append(layers, PromptLayer{Key: "identity", Title: "L2 · 身份与职责", Text: identity})
 	}
 	return layers
 }
 
-// RenderSystem 返回 L1 + L2；L3–L5 为空时不产生空层。结果逐字节稳定，
-// 相同输入必须完全相同（golden 测试依赖这一点）。
+// RenderSystem 返回 L1 协议 + L2 身份（群里再加 L2 名册）；L3 环境/AGENTS.md、L4 记忆、
+// L5 技能清单由内核在请求期追加，不在这里。结果逐字节稳定，相同输入必须完全相同
+// （golden 测试依赖这一点）。
 func RenderSystem(spec PromptSpec) string {
 	layers := RenderLayers(spec)
 	parts := make([]string, 0, len(layers))

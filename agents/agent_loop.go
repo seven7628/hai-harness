@@ -728,6 +728,11 @@ func (a *AgentLoop) currentEffort() provider.ReasoningEffortLevel {
 	return a.effort
 }
 
+// SystemPromptText 下一次请求的完整系统提示词（宿主「提示词预览」自检用：
+// 预览拼出来的文本必须与这里逐字节相等，否则「用户看到的 = 模型看到的」不成立）。
+// 含 Base/产品层/Current Workspace/AGENTS.md/记忆/技能清单，按真实拼接顺序。
+func (a *AgentLoop) SystemPromptText() string { return a.composeSystemPrompt() }
+
 // Model 当前模型名（会话面板/重建后自检用；与 SetModel 同一把锁）。
 func (a *AgentLoop) Model() string { return a.currentModel() }
 

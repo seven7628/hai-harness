@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -265,11 +267,16 @@ func (m *manager) hubAgentUpdate(c command) {
 	// 人格/记忆开关/阈值都进 loop：改完就把已装配会话的 loop 换掉（下一个 Run 生效）。
 	// 不重建的话，「关闭记忆」这类改动要等到重启或下一次写记忆才生效 —— 面板说关了、
 	// 模型照旧看得到（§6.11.2）。
-	data := map[string]any{"agent": next}
+	data := map[string]any{"agent": next, "effective": "next_run"}
 	if err := m.refreshHubLoops(string(next.ID)); err != nil {
+		data["effective"] = "next_session"
 		data["warning"] = "重建会话 loop 失败，重启后生效: " + err.Error()
 	}
-	m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
+	// 有 run 正在跑时不能发 idle：前端把 hub_agent_status 映射成运行环，会把正在跑的
+	// 智能体显示成空闲（P1-07 复核 N9）。收尾由 agent_end 自己负责。
+	if !m.hubAgentRunning(string(next.ID)) {
+		m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
+	}
 	m.resp(c, true, "", data)
 }
 
@@ -569,8 +576,8 @@ func (m *manager) hubAgentVersions(c command) {
 	items := make([]map[string]any, 0, len(versions))
 	for i := len(versions) - 1; i >= 0; i-- { // 新的在前：UI 从头往下看
 		v := versions[i]
-		if v.Profile == nil {
-			continue // 坏行（历史文件被手工改过）：列表跳过，不阻断
+		if v.Profile == nil || v.Profile.Name == "" {
+			continue // 坏行/空 profile（历史文件被手工改过）：列表跳过，不阻断
 		}
 		items = append(items, map[string]any{
 			"version":  v.Version,
@@ -602,7 +609,12 @@ func (m *manager) hubAgentRollback(c command) {
 		m.resp(c, false, "agent_id 不能为空", nil)
 		return
 	}
+	// 协议里 JSON 解出来是 float64，脚本/测试常给 int；非整数（2.9）必须拒绝而不是
+	// 静默截断成 2 然后真的回滚（P1-06 复核 N9）。
 	version := intNum(c.Payload, "version", 0)
+	if f, ok := c.Payload["version"].(float64); ok && f != math.Trunc(f) {
+		version = 0
+	}
 	if version <= 0 {
 		m.resp(c, false, "version 必须是正整数", nil)
 		return
@@ -610,6 +622,14 @@ func (m *manager) hubAgentRollback(c command) {
 	cur, err := st.LoadAgent(ctx, id)
 	if err != nil {
 		m.resp(c, false, "读取智能体失败: "+err.Error(), nil)
+		return
+	}
+	if cur.Deleted {
+		m.resp(c, false, "智能体已删除，先恢复再回滚", nil)
+		return
+	}
+	if version == cur.Version {
+		m.resp(c, false, "这已经是当前版本，无需回滚", nil)
 		return
 	}
 	all, err := st.ListProfileVersions(ctx, id, 0)
@@ -666,11 +686,14 @@ func (m *manager) hubAgentRollback(c command) {
 		return
 	}
 	// 人格变了 → 已装配的会话按新 profile 重建 loop（下一个 Run 生效）。
-	data := map[string]any{"agent": next, "restored_from": version}
+	data := map[string]any{"agent": next, "restored_from": version, "effective": "next_run"}
 	if err := m.refreshHubLoops(string(next.ID)); err != nil {
+		data["effective"] = "next_session"
 		data["warning"] = "重建会话 loop 失败，重启后生效: " + err.Error()
 	}
-	m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
+	if !m.hubAgentRunning(string(next.ID)) {
+		m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
+	}
 	m.resp(c, true, "", data)
 }
 
@@ -685,9 +708,20 @@ func (m *manager) hubPromptPreview(c command) {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
+	home := hubAgentHome(string(p.ID))
 	layers := agenthub.RenderLayers(agenthub.PromptSpec{Agent: p})
-	if inj := m.hubMemoryInjection(p, hubAgentHome(string(p.ID))); strings.TrimSpace(inj) != "" {
-		layers = append(layers, agenthub.PromptLayer{Key: "memory", Title: "L4 · 记忆索引", Text: inj})
+	// 内核在系统提示词尾部还会追加「## Current Workspace」与 home 里的 AGENTS.md：
+	// 不预览这两段，「用户看到的 = 模型看到的」就不成立（P1-06 复核实测差 94 字节，
+	// 写 AGENTS.md 后差更多）。顺序与 agents.composeSystemPrompt 一致。
+	var env strings.Builder
+	fmt.Fprintf(&env, "## Current Workspace\n- %s", home)
+	if body, err := os.ReadFile(filepath.Join(home, "AGENTS.md")); err == nil && len(body) > 0 {
+		env.WriteString("\n\n")
+		env.Write(body)
+	}
+	layers = append(layers, agenthub.PromptLayer{Key: "environment", Title: "L3 · 环境与 AGENTS.md", Text: env.String()})
+	if inj := m.hubMemoryInjection(p, home); strings.TrimSpace(inj) != "" {
+		layers = append(layers, agenthub.PromptLayer{Key: "memory", Title: "L4 · 记忆", Text: inj})
 	}
 	total := 0
 	for _, layer := range layers {
@@ -696,8 +730,8 @@ func (m *manager) hubPromptPreview(c command) {
 	m.resp(c, true, "", map[string]any{
 		"agent_id":    string(p.ID),
 		"layers":      layers,
-		"total_chars": total,
-		"note":        "L5 技能清单与工具 schema 在请求期由内核装配，不在预览内；L0 对 Hub 已关闭（D17）。",
+		"total_bytes": total,
+		"note":        "L0 对 Hub 已关闭（D17）；L5 技能清单与工具 schema 在请求期由内核装配，不在预览内。",
 	})
 }
 
