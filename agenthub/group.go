@@ -1,6 +1,13 @@
 package agenthub
 
-import "time"
+import (
+	"fmt"
+	"math"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+)
 
 // GroupID 是群组的稳定标识。
 type GroupID string
@@ -89,4 +96,224 @@ func (s Scope) SessionID(agentID AgentID) string {
 	default:
 		return ""
 	}
+}
+
+// P0-03：群组默认值、角色与成员校验。
+const (
+	DefaultGroupMaxParallelRuns  = 3
+	DefaultGroupMaxHandoffDepth  = 3
+	DefaultGroupMaxTurnsPerHuman = 8
+	DefaultGroupMaxMentions      = 3
+)
+
+// Normalize 应用群组默认值并校验；失败时调用方应丢弃该对象。
+func (g *Group) Normalize() error {
+	if g == nil {
+		return fmt.Errorf("%w: group is nil", ErrInvalid)
+	}
+	g.ApplyDefaults()
+	return g.Validate()
+}
+
+// ApplyDefaults 填零值并规范化成员；不吞掉非法 role/mode，留给 Validate。
+func (g *Group) ApplyDefaults() {
+	g.Name = strings.TrimSpace(g.Name)
+	g.OwnerAgentID = AgentID(strings.TrimSpace(string(g.OwnerAgentID)))
+	g.Policy.ApplyDefaults()
+
+	for i := range g.Members {
+		g.Members[i].AgentID = AgentID(strings.TrimSpace(string(g.Members[i].AgentID)))
+		g.Members[i].Role = MemberRole(strings.ToLower(strings.TrimSpace(string(g.Members[i].Role))))
+		if g.Members[i].Role == "" {
+			g.Members[i].Role = RoleMember
+		}
+		if g.Members[i].JoinedAt.IsZero() {
+			g.Members[i].JoinedAt = time.Now().UTC()
+		}
+	}
+
+	if g.OwnerAgentID == "" {
+		var owner AgentID
+		count := 0
+		for _, m := range g.Members {
+			if m.Role == RoleOwner {
+				owner = m.AgentID
+				count++
+			}
+		}
+		if count == 1 {
+			g.OwnerAgentID = owner
+		}
+	}
+}
+
+// ApplyDefaults 填 GroupPolicy 的零值（§5.9）。
+func (p *GroupPolicy) ApplyDefaults() {
+	if p.Mode == "" {
+		p.Mode = GroupModeAsk
+	}
+	if p.MaxParallelRuns == 0 {
+		p.MaxParallelRuns = DefaultGroupMaxParallelRuns
+	}
+	if p.MaxHandoffDepth == 0 {
+		p.MaxHandoffDepth = DefaultGroupMaxHandoffDepth
+	}
+	if p.MaxTurnsPerHuman == 0 {
+		p.MaxTurnsPerHuman = DefaultGroupMaxTurnsPerHuman
+	}
+	if p.MaxMentions == 0 {
+		p.MaxMentions = DefaultGroupMaxMentions
+	}
+}
+
+// Validate 校验群名、成员、角色与策略。
+func (g *Group) Validate() error {
+	if g == nil {
+		return fmt.Errorf("%w: group is nil", ErrInvalid)
+	}
+	if g.ID != "" && !strings.HasPrefix(string(g.ID), PrefixGroup+"_") {
+		return fmt.Errorf("%w: group.id must start with %q", ErrInvalid, PrefixGroup+"_")
+	}
+	if err := validateGroupName(g.Name); err != nil {
+		return err
+	}
+	if err := g.Policy.Validate(); err != nil {
+		return err
+	}
+	if len(g.Members) == 0 {
+		return fmt.Errorf("%w: group must have at least one member", ErrInvalid)
+	}
+	if len(g.Members) > MaxGroupMembers {
+		return fmt.Errorf("%w: group has %d members, limit is %d", ErrInvalid, len(g.Members), MaxGroupMembers)
+	}
+	if g.OwnerAgentID == "" {
+		return fmt.Errorf("%w: group.owner_agent_id is required", ErrInvalid)
+	}
+	if !strings.HasPrefix(string(g.OwnerAgentID), PrefixAgent+"_") {
+		return fmt.Errorf("%w: group.owner_agent_id must start with %q", ErrInvalid, PrefixAgent+"_")
+	}
+
+	seen := make(map[AgentID]struct{}, len(g.Members))
+	owners := 0
+	for _, m := range g.Members {
+		if m.AgentID == "" || !strings.HasPrefix(string(m.AgentID), PrefixAgent+"_") {
+			return fmt.Errorf("%w: group member %q must be an agent id", ErrInvalid, m.AgentID)
+		}
+		if _, dup := seen[m.AgentID]; dup {
+			return fmt.Errorf("%w: duplicate group member %s", ErrInvalid, m.AgentID)
+		}
+		seen[m.AgentID] = struct{}{}
+		switch m.Role {
+		case RoleOwner, RoleMember, RoleObserver:
+		default:
+			return fmt.Errorf("%w: group member %s has invalid role %q", ErrInvalid, m.AgentID, m.Role)
+		}
+		if m.Role == RoleOwner {
+			owners++
+			if m.AgentID != g.OwnerAgentID {
+				return fmt.Errorf("%w: owner member %s does not match owner_agent_id %s", ErrInvalid, m.AgentID, g.OwnerAgentID)
+			}
+		} else if m.AgentID == g.OwnerAgentID {
+			return fmt.Errorf("%w: owner_agent_id %s must have role owner", ErrInvalid, g.OwnerAgentID)
+		}
+	}
+	if owners != 1 {
+		return fmt.Errorf("%w: group must have exactly one owner, got %d", ErrInvalid, owners)
+	}
+	if _, ok := seen[g.OwnerAgentID]; !ok {
+		return fmt.Errorf("%w: owner %s is not a group member", ErrInvalid, g.OwnerAgentID)
+	}
+	return nil
+}
+
+// Validate 校验群策略；零值按默认处理。
+func (p GroupPolicy) Validate() error {
+	mode := p.Mode
+	if mode == "" {
+		mode = GroupModeAsk
+	}
+	switch mode {
+	case GroupModeAuto, GroupModeAsk, GroupModeReadonly:
+	default:
+		return fmt.Errorf("%w: group.policy.mode must be auto, ask or readonly", ErrInvalid)
+	}
+	if p.MaxParallelRuns < 0 {
+		return fmt.Errorf("%w: group.policy.max_parallel_runs must be >= 0", ErrInvalid)
+	}
+	if p.MaxHandoffDepth < 0 {
+		return fmt.Errorf("%w: group.policy.max_handoff_depth must be >= 0", ErrInvalid)
+	}
+	if p.MaxTurnsPerHuman < 0 {
+		return fmt.Errorf("%w: group.policy.max_turns_per_human must be >= 0", ErrInvalid)
+	}
+	if p.MaxMentions < 0 {
+		return fmt.Errorf("%w: group.policy.max_mentions_per_message must be >= 0", ErrInvalid)
+	}
+	if p.DailyBudgetUSD < 0 || math.IsNaN(p.DailyBudgetUSD) || math.IsInf(p.DailyBudgetUSD, 0) {
+		return fmt.Errorf("%w: group.policy.daily_budget_usd must be >= 0", ErrInvalid)
+	}
+	return nil
+}
+
+// ValidateGroupName 校验群名形状；唯一性见 ValidateGroupNameUnique。
+func ValidateGroupName(name string) error {
+	return validateGroupName(name)
+}
+
+// ValidateGroupNameUnique 在已有群中做大小写不敏感的重名检查。
+func ValidateGroupNameUnique(name string, existing []*Group, except GroupID) error {
+	if err := validateGroupName(name); err != nil {
+		return err
+	}
+	want := strings.TrimSpace(name)
+	for _, g := range existing {
+		if g == nil || g.ID == except || g.Deleted {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(g.Name), want) {
+			return fmt.Errorf("%w: group name %q already used by %s", ErrInvalid, want, g.ID)
+		}
+	}
+	return nil
+}
+
+// ValidateGroupMemberNames 检查同一群内成员的显示名不重复（不区分大小写）。
+// profiles 必须包含所有成员；缺失/已删除的智能体视为非法成员。
+func ValidateGroupMemberNames(g *Group, profiles map[AgentID]*AgentProfile) error {
+	if g == nil {
+		return fmt.Errorf("%w: group is nil", ErrInvalid)
+	}
+	seen := make(map[string]AgentID, len(g.Members))
+	for _, m := range g.Members {
+		p, ok := profiles[m.AgentID]
+		if !ok || p == nil {
+			return fmt.Errorf("%w: group member %s has no profile", ErrInvalid, m.AgentID)
+		}
+		if p.Deleted {
+			return fmt.Errorf("%w: group member %s is deleted", ErrInvalid, m.AgentID)
+		}
+		if err := validateProfileName(p.Name); err != nil {
+			return err
+		}
+		key := strings.ToLower(strings.TrimSpace(p.Name))
+		if other, dup := seen[key]; dup {
+			return fmt.Errorf("%w: group member names %q and %s collide", ErrInvalid, p.Name, other)
+		}
+		seen[key] = m.AgentID
+	}
+	return nil
+}
+
+func validateGroupName(name string) error {
+	name = strings.TrimSpace(name)
+	n := utf8.RuneCountInString(name)
+	if n < 1 || n > 32 {
+		return fmt.Errorf("%w: group.name must be 1-32 characters", ErrInvalid)
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%w: group.name must not contain control characters", ErrInvalid)
+		}
+	}
+	return nil
 }

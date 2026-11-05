@@ -87,10 +87,11 @@
       ],
       "files": [
         "agenthub/profile.go",
-        "agenthub/group.go"
+        "agenthub/group.go",
+        "agenthub/profile_test.go"
       ],
       "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；accent 颜色校验且缺省由 avatar.bg/名字 hash 稳定派生；ToolPolicy 零值=全开，disable/allow/MCP 开关可校验；max_agents=50 / max_group_members=12；错误可读。",
-      "tests": "go test ./agenthub/ -run Profile",
+      "tests": "go test ./agenthub/ -run 'Profile|Group'",
       "commit": "feat(hub-p0-03): Profile/Group 校验与默认值"
     },
     {
