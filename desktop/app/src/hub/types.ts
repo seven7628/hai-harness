@@ -141,3 +141,54 @@ export interface HubRunEntry {
   ms?: number
   at: number
 }
+
+/** 群组成员/策略/群头（hub_group_list/get）。 */
+export interface HubGroupMember {
+  agent_id: string
+  role?: string
+  joined_at?: string
+}
+
+export interface HubGroupPolicy {
+  mode?: string
+  max_parallel_runs?: number
+  max_handoff_depth?: number
+  max_turns_per_human?: number
+  max_mentions_per_message?: number
+  daily_budget_usd?: number
+}
+
+export interface HubGroup {
+  id: string
+  name: string
+  owner_agent_id?: string
+  members?: HubGroupMember[]
+  policy?: HubGroupPolicy
+  pinned?: boolean
+  deleted?: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface HubRound {
+  id: string
+  group_id?: string
+  trigger_seq?: number
+  targets?: string[]
+  mention_all?: boolean
+  dropped?: number
+  unknown?: string[]
+}
+
+export interface HubGroupActivity {
+  group_id: string
+  agent_id?: string
+  run_id?: string
+  after_seq: number
+  kind: string
+  name?: string
+  status?: string
+  summary?: string
+  ms?: number
+  at?: string
+}

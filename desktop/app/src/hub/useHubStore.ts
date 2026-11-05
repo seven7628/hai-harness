@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
-import type { HubAgent, HubDMInfo, HubHistoryPage, HubMessage, HubNeed, HubPage, HubRunEntry, HubTask } from './types'
+import type { HubAgent, HubDMInfo, HubGroup, HubHistoryPage, HubMessage, HubGroupActivity, HubNeed, HubPage, HubRound, HubRunEntry, HubTask } from './types'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -52,6 +52,14 @@ interface HubState {
   runLog: HubRunEntry[]
   /** 系统动作行（压缩回执/清空等），与用户气泡同列显示。 */
   actions: HubMessage[]
+  /** 群组（P3a-08）：列表/当前群/时间线/最近一轮路由。 */
+  groups: HubGroup[]
+  groupsLoading: boolean
+  activeGroupId: string | null
+  groupMessages: HubMessage[]
+  groupRound: HubRound | null
+  groupActivity: HubGroupActivity[]
+  groupSending: boolean
 
   openHub(): void
   closeHub(): void
@@ -66,6 +74,10 @@ interface HubState {
   clearNotice(): void
   setInspector(panel: 'tasks' | 'needs' | 'session' | null): void
   setView(view: 'chat' | 'run'): void
+  loadGroups(): Promise<void>
+  selectGroup(groupID: string): Promise<void>
+  clearGroup(): void
+  sendGroup(text: string): Promise<boolean>
   loadTasks(): Promise<void>
   loadNeeds(): Promise<void>
   cancelTask(taskID: string): Promise<void>
@@ -104,12 +116,20 @@ export const useHubStore = create<HubState>((set, get) => ({
   view: 'chat',
   runLog: [],
   actions: [],
+  groups: [],
+  groupsLoading: false,
+  activeGroupId: null,
+  groupMessages: [],
+  groupRound: null,
+  groupActivity: [],
+  groupSending: false,
 
   openHub() {
     set({ open: true })
     void get().refresh()
     void get().loadTasks()
     void get().loadNeeds()
+    void get().loadGroups()
   },
 
   closeHub() {
@@ -142,6 +162,9 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (!agentID) return
     set((s) => ({
       activeId: agentID,
+      activeGroupId: null,
+      groupMessages: [],
+      groupRound: null,
       messages: [],
       hasMore: false,
       live: '',
@@ -351,6 +374,73 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (id) void get().select(id)
   },
 
+  async loadGroups() {
+    set({ groupsLoading: true })
+    const r = await hubCommand<{ groups?: HubGroup[] }>('hub_group_list', {})
+    if (!r.ok) {
+      set({ groupsLoading: false, error: r.error || '读取群组失败' })
+      return
+    }
+    set({ groupsLoading: false, groups: r.data?.groups ?? [] })
+  },
+
+  async selectGroup(groupID) {
+    if (!groupID) return
+    set({
+      activeGroupId: groupID, activeId: null, profile: null, sid: null,
+      groupMessages: [], groupRound: null, messages: [], live: '', rootRunId: null,
+      error: null, loading: true,
+    })
+    const r = await hubCommand<{ group?: HubGroup }>('hub_group_get', { group_id: groupID })
+    if (get().activeGroupId !== groupID) return
+    if (!r.ok) {
+      set({ loading: false, error: r.error || '打开群组失败' })
+      return
+    }
+    const h = await hubCommand<{ messages?: HubMessage[] }>('hub_group_history', { group_id: groupID, limit: 50 })
+    if (get().activeGroupId !== groupID) return
+    const a = await hubCommand<{ activity?: HubGroupActivity[] }>('hub_group_activity', { group_id: groupID })
+    if (get().activeGroupId !== groupID) return
+    set({
+      loading: false,
+      groupMessages: h.ok ? (h.data?.messages ?? []) : [],
+      groupActivity: a.ok ? (a.data?.activity ?? []) : [],
+      groups: get().groups.map((g) => (g.id === groupID ? (r.data?.group ?? g) : g)),
+    })
+  },
+
+  clearGroup() {
+    set({ activeGroupId: null, groupMessages: [], groupRound: null })
+  },
+
+  async sendGroup(text) {
+    const { activeGroupId, groupSending } = get()
+    const body = text.trim()
+    if (!activeGroupId || !body || groupSending) return false
+    const clientMsgId = `g-${Date.now()}-${++optimisticSeq}`
+    set((s) => ({
+      groupSending: true,
+      groupMessages: [...s.groupMessages, { seq: -optimisticSeq, sender: { kind: 'human' }, text: body, pending: true, clientMsgId }],
+    }))
+    const r = await hubCommand<{ seq?: number; round?: HubRound }>('hub_group_send', {
+      group_id: activeGroupId, text: body, client_msg_id: clientMsgId,
+    })
+    if (get().activeGroupId !== activeGroupId) return false
+    if (!r.ok) {
+      set((s) => ({
+        groupSending: false, error: r.error || '发送失败',
+        groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
+      }))
+      return false
+    }
+    set((s) => ({
+      groupSending: false,
+      groupRound: r.data?.round ?? s.groupRound,
+      groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId && r.data?.seq ? { ...m, seq: r.data.seq, pending: false } : m)),
+    }))
+    return true
+  },
+
   handleEvent(line) {
     let ev: {
       event_type?: string
@@ -376,6 +466,8 @@ export const useHubStore = create<HubState>((set, get) => ({
       before?: number
       after?: number
       reason?: string
+      group_id?: string
+      round?: HubRound
     }
     try {
       ev = JSON.parse(line) as typeof ev
@@ -386,6 +478,19 @@ export const useHubStore = create<HubState>((set, get) => ({
     const isRoot = (ev.parent_run_id ?? '') === '' && (ev.depth ?? 0) === 0
     switch (ev.event_type) {
       case 'hub_message': {
+        if (ev.group_id) {
+          if (ev.group_id !== get().activeGroupId) return
+          const msg = ev.message
+          if (!msg) return
+          set((s) => {
+            const withoutPending = ev.client_msg_id
+              ? s.groupMessages.filter((m) => m.clientMsgId !== ev.client_msg_id)
+              : s.groupMessages
+            if (withoutPending.some((m) => m.seq === msg.seq)) return {}
+            return { groupMessages: [...withoutPending, msg].sort((a, b) => a.seq - b.seq) }
+          })
+          return
+        }
         const agentID = ev.agent_id || ''
         const msg = ev.message
         if (!msg) return
@@ -512,6 +617,11 @@ export const useHubStore = create<HubState>((set, get) => ({
             refs: { action: 'compress' }, created_at: new Date().toISOString(),
           }],
         }))
+        return
+      }
+      case 'hub_round': {
+        if (!ev.group_id || ev.group_id !== get().activeGroupId) return
+        set({ groupRound: ev.round ?? null })
         return
       }
       case 'hub_agent_status': {

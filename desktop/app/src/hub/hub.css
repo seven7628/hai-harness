@@ -530,3 +530,26 @@
   .hub { grid-template-columns: 220px minmax(0, 1fr); }
   .hub-inspector { position: absolute; right: 0; top: 0; bottom: 0; width: 330px; z-index: 5; box-shadow: -8px 0 24px rgba(0,0,0,0.12); }
 }
+
+/* —— P3a-08：群组视图（群头/成员叠图/回执/审批占位） —— */
+.hub-rail-tabs {
+  display: flex; gap: 2px; padding: 6px 8px 4px; border-bottom: 1px solid var(--border);
+}
+.hub-rail-tabs button {
+  flex: 1; border: 0; background: transparent; color: var(--text-2);
+  font-size: 12px; padding: 4px 6px; border-radius: 6px; cursor: pointer;
+}
+.hub-rail-tabs button.on { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
+.hub-member-stack { display: inline-flex; align-items: center; padding-left: 4px; }
+.hub-member-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; margin-left: -4px; border-radius: 50%;
+  border: 2px solid var(--paper); background: color-mix(in srgb, var(--ink) 12%, var(--paper));
+  color: var(--ink); font-size: 11px; font-weight: 600;
+}
+.hub-member-dot.more { font-size: 9px; color: var(--text-2); }
+.hub-group-author { font-size: 10.5px; color: var(--text-2); margin-bottom: 2px; }
+.hub-approval-stub { display: flex; align-items: center; gap: 8px; }
+.hub-chip.group-mode-auto { color: #2f7a4f; }
+.hub-chip.group-mode-ask { color: #b8772a; }
+.hub-chip.group-mode-readonly { color: var(--text-2); }

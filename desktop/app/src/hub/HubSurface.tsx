@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Markdown } from '../components/markdown'
 import { Bot, SendIcon } from '../components/icons'
 import { useT } from '../i18n'
 import { attachHubEvents, useHubStore } from './useHubStore'
 import AgentEditor from './AgentEditor'
 import HubInspector from './HubInspector'
+import GroupView from './GroupView'
 import type { HubAgent, HubMessage, HubRunEntry } from './types'
 import './hub.css'
 
@@ -48,6 +49,12 @@ export default function HubSurface() {
   const actions = useHubStore((s) => s.actions)
   const tasks = useHubStore((s) => s.tasks)
   const needs = useHubStore((s) => s.needs)
+  const groups = useHubStore((s) => s.groups)
+  const groupsLoading = useHubStore((s) => s.groupsLoading)
+  const activeGroupId = useHubStore((s) => s.activeGroupId)
+  const selectGroup = useHubStore((s) => s.selectGroup)
+  const activeGroup = groups.find((g) => g.id === activeGroupId) ?? null
+  const [railTab, setRailTab] = React.useState<'agents' | 'groups'>('agents')
   const activeTasks = tasks.filter((t) => !['completed', 'failed', 'interrupted', 'delivered', 'canceled', 'blocked_budget', 'declined'].includes(t.status ?? '')).length
 
   // null = 关闭；'new' = 新建；HubAgent = 编辑该智能体。
@@ -120,7 +127,32 @@ export default function HubSurface() {
             </button>
           </span>
         </div>
-        {agents.length === 0 && !loading ? (
+        <div className="hub-rail-tabs" role="tablist">
+          <button role="tab" aria-selected={railTab === 'agents'} className={railTab === 'agents' ? 'on' : ''} onClick={() => setRailTab('agents')}>智能体</button>
+          <button role="tab" aria-selected={railTab === 'groups'} className={railTab === 'groups' ? 'on' : ''} onClick={() => setRailTab('groups')}>群组</button>
+        </div>
+        {railTab === 'groups' ? (
+          groupsLoading ? <div className="hub-rail-empty">加载中…</div> :
+          groups.length === 0 ? <div className="hub-rail-empty">还没有群组</div> : (
+            <div className="hub-rail-list">
+              {groups.map((g) => (
+                <button key={g.id} className={`hub-row ${g.id === activeGroupId ? 'on' : ''}`} onClick={() => void selectGroup(g.id)}>
+                  <span className="hub-member-stack">
+                    {(g.members ?? []).slice(0, 3).map((m, i) => (
+                      <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 3 - i }}>
+                        {(agents.find((a) => a.id === m.agent_id)?.name ?? m.agent_id).slice(0, 1)}
+                      </span>
+                    ))}
+                  </span>
+                  <span className="hub-row-text">
+                    <span className="hub-row-top"><span className="hub-name">{g.name}</span></span>
+                    <span className="hub-preview">{(g.members ?? []).length} 名成员 · {g.policy?.mode ?? 'ask'}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )
+        ) : agents.length === 0 && !loading ? (
           <div className="hub-rail-empty">{t('hub.noAgents')}</div>
         ) : (
           <div className="hub-rail-list">
@@ -156,6 +188,9 @@ export default function HubSurface() {
         ) : null}
       </aside>
 
+      {activeGroup ? (
+        <GroupView group={activeGroup} />
+      ) : (
       <section className="hub-dm">
         {!activeAgent ? (
           <div className="hub-empty">
@@ -245,8 +280,9 @@ export default function HubSurface() {
           </>
         )}
       </section>
+      )}
 
-      <HubInspector />
+      {activeGroup ? null : <HubInspector />}
 
       {editing ? (
         <AgentEditor
