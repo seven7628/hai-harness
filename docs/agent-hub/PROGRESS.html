@@ -304,7 +304,7 @@ const BASE = {
   "version": 1,
   "project": "Agent Hub",
   "subtitle": "多智能体工作台 · 统一任务跟进看板",
-  "updated": "2026-11-04",
+  "updated": "2026-11-05",
   "phases": [
     {
       "id": "P0",
@@ -1211,9 +1211,15 @@ const BASE = {
     },
     "P1-01": {
       "status": "review",
-      "commit": "2b26d8f feat(hub-p1-01): Hub 工具引擎与策略",
+      "commit": "3448554 fix(hub-p1-01): 撤销改用引擎级 hidden 表 + 策略覆盖动态工具 + 沙箱只读根",
       "review": "pending",
-      "reviewNote": "buildHubEngine 复用 newSessionEngine（同一份工具面），按 Profile 用 hidden 档撤下工具（模型不可见 + codemode 不可编排）；不传 mesh Hub，session_send/list 不注册。沙箱 root=智能体 home、不传 WithHomeWrite；bash_roots 只读。为 ~/.go-code 下的 home 新增 sandbox.WithOpenSubpaths（敏感 deny 之后重开）+ WithReadOnlyPaths，并用策略文本顺序与显式 deny 优先两条测试钉住。测试：agenthub 策略 6 组、bridge TestHubEngine* 4 条、sandbox 3 条；go build ./... 通过；相关包全绿。"
+      "reviewNote": "首轮 changes_requested（6 blocking：基线不可构建、hiddenTool 丢 Optional 接口、hidden 只是不可见不是调用期硬约束、MCP 名字含 __ 绕过开关、workspace_roots 没接线、WithReadOnlyPaths 破坏敏感 deny 且不是真只读）→ 3448554 逐条修复：tools.Hide wrapper 删除，改引擎级 hidden 名字表（GetTool 报 disabled by policy、ToolParams 不声明、工具实例与 ApprovalRequired/ToolTimeoutProvider/PerCallTimeout/ReadOnlyTool 原样保留）；新增 Engine.SetToolFilter 让策略覆盖装配后注册的工具（MCP 重连/插件热装）；mcp 适配器暴露 MCPServerName/MCPToolName，名字反解只在无访问器时兜底，且歧义 + Profile 有限制时 fail-closed；workspace_roots 接线为只读根；sandbox read-allow 移到敏感 deny 之前并补 (deny file-write*)；顺带 readonly 不看 Allow、resolveHome 展开 ~、可写 home 与 policy 存储物理分开（homes/<id> vs agents/<id>，§9.1）。验证：干净 HOME 下 agenthub/sandbox/bridge/session/core 全绿；三条 mutation 能失败；hub 侧 4 条 HubLoop + HubEngine 用例全绿。"
+    },
+    "P1-02": {
+      "status": "review",
+      "commit": "090a7c6 feat(hub-p1-02): Hub AgentLoop 装配（L0 关闭 / 显式 provider 采样 / 记忆注入）",
+      "review": "pending",
+      "reviewNote": "hubLoopOptions/buildHubLoop：WithBaseSystemPrompt(\"\") 显式关 L0（P0-06 复审遗留项 5）、WithSystemPrompt 只产 L1+L2（L3/L4/L5 仍由内核按序追加）、显式 provider/model + samplingDefaultsFor（旧 samplingDefaults 等价于按 active 取）、memory 注入、compress 阈值、子代理与技能能力清单。测试 go test ./desktop/bridge/ -run HubLoop 4 条全绿；mutation：去掉 WithBaseSystemPrompt → L0 泄漏断言失败；采样改回全局 active → openai 沾上 1.0 失败。遗留：compress 阈值无行为级断言（内核无 getter）。"
     }
   }
 };
