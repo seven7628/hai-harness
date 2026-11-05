@@ -156,10 +156,10 @@ func TestBuildRoundSummaryDeterministic(t *testing.T) {
 		{AgentID: "ag_a", Tool: "read", Status: "done", Summary: "README"},
 	}
 	at := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
-	first := BuildRoundSummary("grp_1", "rnd_1", items, at)
+	first := BuildRoundSummary("grp_aaaaaa", "rnd_1", items, at)
 	// 打乱输入顺序，输出必须一致。
 	shuffled := []RoundItem{items[2], items[0], items[1]}
-	second := BuildRoundSummary("grp_1", "rnd_1", shuffled, at)
+	second := BuildRoundSummary("grp_aaaaaa", "rnd_1", shuffled, at)
 	if first.Text != second.Text {
 		t.Fatalf("summary not deterministic:\n%s\n---\n%s", first.Text, second.Text)
 	}
