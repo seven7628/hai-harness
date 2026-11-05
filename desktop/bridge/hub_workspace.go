@@ -30,20 +30,42 @@ type hubWorkspaceOps struct {
 
 func newHubWorkspaceOps(m *manager) *hubWorkspaceOps { return &hubWorkspaceOps{m: m} }
 
-// ListWorkspaces 只列已登记的项目工作区（不含 Hub home：那里不是工作区）。
+// ListWorkspaces 列「已登记的项目工作区」（不含 Hub home：那里不是工作区）。
+//
+// 真相源是 workspaces.json（workspace_registry）：只列内存里的 m.workspaces 会漏掉
+// 「刚建好、还没装配 runtime」和「重启后还没打开」的工作区。两处合并去重，
+// 内存里的标题优先（用户可能刚改过名）。
 func (o *hubWorkspaceOps) ListWorkspaces(ctx context.Context) ([]agenthub.WorkspaceInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	byPath := map[string]agenthub.WorkspaceInfo{}
+	if o.m.wsReg != nil {
+		for _, e := range o.m.wsReg.list() {
+			if e.Path == "" || isHubHomePath(e.Path) {
+				continue
+			}
+			name := e.Title
+			if name == "" {
+				name = filepath.Base(e.Path)
+			}
+			byPath[e.Path] = agenthub.WorkspaceInfo{Path: e.Path, Name: name}
+		}
+	}
 	o.m.mu.Lock()
-	out := make([]agenthub.WorkspaceInfo, 0, len(o.m.workspaces))
 	for path, ws := range o.m.workspaces {
 		if ws == nil || ws.kind == runtimeHubAgent || isHubHomePath(path) {
 			continue
 		}
-		out = append(out, agenthub.WorkspaceInfo{Path: path, Name: filepath.Base(path)})
+		if _, ok := byPath[path]; !ok {
+			byPath[path] = agenthub.WorkspaceInfo{Path: path, Name: filepath.Base(path)}
+		}
 	}
 	o.m.mu.Unlock()
+	out := make([]agenthub.WorkspaceInfo, 0, len(byPath))
+	for _, info := range byPath {
+		out = append(out, info)
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
 }
@@ -97,7 +119,20 @@ func (o *hubWorkspaceOps) CreateWorkspace(ctx context.Context, req agenthub.Crea
 		}
 		return agenthub.WorkspaceInfo{}, err
 	}
-	return agenthub.WorkspaceInfo{Path: path, Name: filepath.Base(path), UpdatedAt: time.Now().UTC()}, nil
+	name := filepath.Base(path)
+	if o.m.wsReg != nil {
+		// 落 workspaces.json：不登记的工作区重启后既不显示也无法派任务。
+		e, err := o.m.wsReg.add(path)
+		if err != nil {
+			// 目录是刚 mkdir 的空目录，回滚掉比留一个「建了但不可用」的路径更干净。
+			_ = os.Remove(path)
+			return agenthub.WorkspaceInfo{}, fmt.Errorf("登记工作区失败: %w", err)
+		}
+		if e.Title != "" {
+			name = e.Title
+		}
+	}
+	return agenthub.WorkspaceInfo{Path: path, Name: name, UpdatedAt: time.Now().UTC()}, nil
 }
 
 // ListSessions 只允许已登记的工作区（不存在/未登记 → ErrNotFound，顺带阻止 m.runtime 造目录）。
@@ -177,6 +212,12 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 	}
 	bs := o.m.get(path, sid)
 	if bs == nil {
+		// 会话在盘上但工作区还没装配（重启后第一次派发）：装配一次再找，
+		// 不自动建会话 —— 不存在的 session 仍然报 NotFound。
+		o.m.runtime(path)
+		bs = o.m.get(path, sid)
+	}
+	if bs == nil {
 		return agenthub.DispatchResult{}, fmt.Errorf("%w: session %q", agenthub.ErrNotFound, sid)
 	}
 	if err := bs.s.Ask(ctx, core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})); err != nil {
@@ -220,10 +261,22 @@ func (o *hubWorkspaceOps) knownWorkspace(path string) (string, error) {
 	o.m.mu.Lock()
 	ws := o.m.workspaces[clean]
 	o.m.mu.Unlock()
-	if ws == nil || ws.kind == runtimeHubAgent || isHubHomePath(clean) {
-		return "", fmt.Errorf("%w: workspace %q 未登记", agenthub.ErrNotFound, clean)
+	if ws != nil && ws.kind != runtimeHubAgent && !isHubHomePath(clean) {
+		return clean, nil
 	}
-	return clean, nil
+	// 已登记但还没装配 runtime（刚建好 / 重启后未打开）：允许，但目录必须在。
+	if o.m.wsReg != nil && !isHubHomePath(clean) {
+		for _, e := range o.m.wsReg.list() {
+			if e.Path != clean {
+				continue
+			}
+			if st, err := os.Stat(clean); err == nil && st.IsDir() {
+				return clean, nil
+			}
+			break
+		}
+	}
+	return "", fmt.Errorf("%w: workspace %q 未登记", agenthub.ErrNotFound, clean)
 }
 
 // hubAbsExisting 把路径解析成绝对真实路径（必须存在）。

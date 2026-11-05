@@ -27,7 +27,7 @@ func createWorkspaceAgent(t *testing.T, m *manager, buf *syncBuf, id int, name s
 }
 
 // 新建路径：只允许 workspace_roots 下的新目录；分隔符/.. /已存在/符号链接逃逸全部拒绝。
-func TestHubCreateWorkspacePath(t *testing.T) {
+func TestHubWorkspaceCreatePath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	root := filepath.Join(home, "projects")
@@ -91,6 +91,8 @@ func TestHubCreateWorkspacePath(t *testing.T) {
 // CreateWorkspace 从 policy 读白名单；未配置 roots 明确失败（不是「默认可写任意目录」）。
 func TestHubWorkspaceOpsCreateAndList(t *testing.T) {
 	m, buf := testManager(t)
+	regPath := filepath.Join(t.TempDir(), "workspaces.json")
+	m.wsReg = newWorkspaceRegistry(regPath)
 	root := t.TempDir()
 	roots := []string{root}
 
@@ -124,11 +126,39 @@ func TestHubWorkspaceOpsCreateAndList(t *testing.T) {
 	}); !errors.Is(err, agenthub.ErrForbidden) {
 		t.Fatalf("out-of-roots create must be forbidden, got %v", err)
 	}
+	// 落在 workspaces.json：重启后（新 registry 实例）仍能看到，且不必先装配 runtime。
+	reloaded := newWorkspaceRegistry(regPath).list()
+	found := false
+	for _, e := range reloaded {
+		if e.Path == info.Path {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("workspace %q 未写入 workspaces.json: %+v", info.Path, reloaded)
+	}
+	list, err := ops.ListWorkspaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWorkspacePath(list, info.Path) {
+		t.Fatalf("ListWorkspaces 漏掉新建但未装配的工作区: %+v", list)
+	}
+	// 已登记但未装配：可以开会话（装配后 Dispatch 才有目标）。
+	if _, ok := m.workspaces[info.Path]; ok {
+		t.Fatal("CreateWorkspace 不应顺手装配 runtime（装配留给首次使用）")
+	}
+	sessInfo, err := ops.CreateSession(context.Background(), agenthub.CreateSessionReq{
+		AgentID: p.ID, Workspace: info.Path, Title: "首个会话",
+	})
+	if err != nil || sessInfo.ID == "" {
+		t.Fatalf("CreateSession in fresh workspace = %+v, %v", sessInfo, err)
+	}
 	// ListWorkspaces 不含 Hub home。
 	if _, err := m.hubDMSession(string(p.ID)); err != nil {
 		t.Fatal(err)
 	}
-	list, err := ops.ListWorkspaces(context.Background())
+	list, err = ops.ListWorkspaces(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +167,15 @@ func TestHubWorkspaceOpsCreateAndList(t *testing.T) {
 			t.Fatalf("ListWorkspaces leaked hub home %q", ws.Path)
 		}
 	}
+}
+
+func hasWorkspacePath(list []agenthub.WorkspaceInfo, path string) bool {
+	for _, ws := range list {
+		if ws.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 // 未登记的工作区：ListSessions/CreateSession/Dispatch 一律拒绝，且不得装配 runtime。
@@ -202,5 +241,15 @@ func TestHubWorkspaceOpsDispatch(t *testing.T) {
 		AgentID: p.ID, Workspace: wsPath, SessionID: bs.id, Text: "   ",
 	}); err == nil {
 		t.Fatal("empty dispatch text must be rejected")
+	}
+	// 中断：已存在的会话幂等成功（没有在跑也不报错），未知 sid 明确失败。
+	if err := ops.InterruptSession(context.Background(), bs.id); err != nil {
+		t.Fatalf("interrupt idle session = %v, want nil", err)
+	}
+	if err := ops.InterruptSession(context.Background(), "missing"); !errors.Is(err, agenthub.ErrNotFound) {
+		t.Fatalf("interrupt missing session = %v, want ErrNotFound", err)
+	}
+	if err := ops.InterruptSession(context.Background(), " "); err == nil {
+		t.Fatal("interrupt with empty sid must fail")
 	}
 }
