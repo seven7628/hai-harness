@@ -58,6 +58,14 @@ const (
 	// CmdMeshPing 主动 ping 一个已连/出站节点（连接检测；设置页「检测连接」按钮）。
 	CmdMeshPing Command = "mesh_ping"
 
+	// —— Agent Hub（P1：智能体 CRUD） ——
+	// 命令面按 docs/AGENT_HUB_TECH_PLAN.md §7.1.2 命名；hub_* 一律由 dispatchHub 分派。
+	CmdHubAgentCreate Command = "hub_agent_create"
+	CmdHubAgentUpdate Command = "hub_agent_update"
+	CmdHubAgentGet    Command = "hub_agent_get"
+	CmdHubAgentList   Command = "hub_agent_list"
+	CmdHubAgentDelete Command = "hub_agent_delete"
+
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"
 	CmdTestConnection      Command = "test_connection"

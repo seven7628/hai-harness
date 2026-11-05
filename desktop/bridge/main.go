@@ -50,6 +50,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/agents/prompt"
 	"github.com/seven7628/hai-harness/computer"
@@ -745,6 +746,8 @@ type manager struct {
 	// hubRuntimes Agent Hub 智能体的运行时，key = agentID（方案 §6.1.1）。
 	// 刻意不放进 workspaces：那些遍历是项目语义（workspace_list / reload / MCP 重放）。
 	hubRuntimes map[string]*workspaceRuntime
+	// hubFS Hub 领域存储（~/.go-code/hub，懒开；见 hubStore）。
+	hubFS       *agenthub.FileStore
 	provCfg     *providerConfig  // 全局 provider 配置（热切换；set_provider 更新）
 	memPrefs    *memoryPrefStore // Project Memory 用户开关（设置面板；下一个会话生效）
 	out         *out
@@ -1542,6 +1545,10 @@ func (m *manager) respCode(c command, ok bool, errMsg, code string, data map[str
 }
 
 func (m *manager) dispatch(c command) {
+	// Hub 命令分派集中在新文件里（命令面会持续变长，不往这个 switch 里再塞 20 个 case）。
+	if m.dispatchHub(c) {
+		return
+	}
 	// TEMP-STARTUP A9：命令耗时（仅启动相关命令，避免全量噪音）
 	cmdStart := time.Now()
 	defer func() {

@@ -679,6 +679,22 @@ func (pc *providerConfig) loadSettings() {
 	}
 }
 
+// providerConfigured 该 provider 是否已配置且未被删除（Hub 保存 profile 的校验，§5.1）。
+//
+// 事实源是 baseURL：内置五家预置在构造期就填好，loadSettings 对 deleted 的 provider
+// 会把 baseURL/apiKey/... 全删掉，自定义 provider 则是 settings 里根本没有这一项 ——
+// 所以「baseURL 里有键」= 用户当前可用。
+func (pc *providerConfig) providerConfigured(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	_, ok := pc.baseURL[name]
+	return ok
+}
+
 // validProviderName provider 命名校验（内置三卡 deepseek/openai/opencode 与用户自定义共用）：
 // 非空、非保留键 "active"，仅字母/数字/短横/下划线且首字符为字母（与前端添加表单同规则）。
 // set_provider / settings.json 解析 / provider 增删共用。
