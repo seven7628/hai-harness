@@ -30,6 +30,8 @@ type hubWorkspaceOps struct {
 
 func newHubWorkspaceOps(m *manager) *hubWorkspaceOps { return &hubWorkspaceOps{m: m} }
 
+var _ agenthub.WorkspaceOps = (*hubWorkspaceOps)(nil)
+
 // ListWorkspaces 列「已登记的项目工作区」（不含 Hub home：那里不是工作区）。
 //
 // 真相源是 workspaces.json（workspace_registry）：只列内存里的 m.workspaces 会漏掉
@@ -88,7 +90,7 @@ func (o *hubWorkspaceOps) workspaceRoots(agentID agenthub.AgentID) ([]string, er
 	}
 	roots := make([]string, 0, len(prof.Policy.WorkspaceRoots))
 	for _, root := range prof.Policy.WorkspaceRoots {
-		abs, err := hubAbsExisting(root)
+		abs, err := hubAbsExisting(hubExpandHome(root))
 		if err != nil {
 			continue // 不存在的根在运行期就等于不可用：跳过而不是让整个动作失败
 		}
@@ -120,17 +122,20 @@ func (o *hubWorkspaceOps) CreateWorkspace(ctx context.Context, req agenthub.Crea
 		return agenthub.WorkspaceInfo{}, err
 	}
 	name := filepath.Base(path)
-	if o.m.wsReg != nil {
-		// 落 workspaces.json：不登记的工作区重启后既不显示也无法派任务。
-		e, err := o.m.wsReg.add(path)
-		if err != nil {
-			// 目录是刚 mkdir 的空目录，回滚掉比留一个「建了但不可用」的路径更干净。
-			_ = os.Remove(path)
-			return agenthub.WorkspaceInfo{}, fmt.Errorf("登记工作区失败: %w", err)
-		}
-		if e.Title != "" {
-			name = e.Title
-		}
+	if o.m.wsReg == nil {
+		// 没有 registry 时「创建成功」是假的：目录建了但不可列出、不可派任务。
+		_ = os.Remove(path)
+		return agenthub.WorkspaceInfo{}, fmt.Errorf("%w: 工作区登记未初始化", agenthub.ErrInvalid)
+	}
+	// 落 workspaces.json：不登记的工作区重启后既不显示也无法派任务。
+	e, err := o.m.wsReg.add(path)
+	if err != nil {
+		// 目录是刚 mkdir 的空目录，回滚掉比留一个「建了但不可用」的路径更干净。
+		_ = os.Remove(path)
+		return agenthub.WorkspaceInfo{}, fmt.Errorf("登记工作区失败: %w", err)
+	}
+	if e.Title != "" {
+		name = e.Title
 	}
 	return agenthub.WorkspaceInfo{Path: path, Name: name, UpdatedAt: time.Now().UTC()}, nil
 }
@@ -210,13 +215,10 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		// 双保险：knownWorkspace 已挡，但这里错了就是「把工作区任务派进智能体自己」。
 		return agenthub.DispatchResult{}, fmt.Errorf("%w: Hub home 不是工作区", agenthub.ErrInvalid)
 	}
+	// 注意：m.get 自己会按路径装配 runtime，所以「先 get 再 runtime 再 get」没有意义；
+	// 而磁盘上的 session 不会自动回灌 ws.sessions。重启后要派任务，需要先让 UI
+	// workspace_list/session_list 打开该工作区（P2-03 任务账本会补会话恢复）。
 	bs := o.m.get(path, sid)
-	if bs == nil {
-		// 会话在盘上但工作区还没装配（重启后第一次派发）：装配一次再找，
-		// 不自动建会话 —— 不存在的 session 仍然报 NotFound。
-		o.m.runtime(path)
-		bs = o.m.get(path, sid)
-	}
 	if bs == nil {
 		return agenthub.DispatchResult{}, fmt.Errorf("%w: session %q", agenthub.ErrNotFound, sid)
 	}
@@ -258,16 +260,31 @@ func (o *hubWorkspaceOps) knownWorkspace(path string) (string, error) {
 	if clean == "" || clean == "." {
 		return "", fmt.Errorf("%w: workspace 不能为空", agenthub.ErrInvalid)
 	}
+	if isHubHomePath(clean) || hubSensitivePath(clean) {
+		// registry 里的路径是用户显式加的（workspace_add/sync 不查敏感目录），
+		// 但 §9.2 的敏感目录是硬线：登记过也不许派任务（P2-01 复审 N5）。
+		return "", fmt.Errorf("%w: workspace %q 是敏感目录或 Hub home", agenthub.ErrForbidden, clean)
+	}
 	o.m.mu.Lock()
 	ws := o.m.workspaces[clean]
+	if ws == nil {
+		// m.workspaces 的 key 是调用方原样字符串（可能带尾斜杠/..）：再按归一比较一次，
+		// 否则「用 ./proj/ 打开过的 runtime」永远匹配不上（P2-01 复审 N6）。
+		for key, cand := range o.m.workspaces {
+			if filepath.Clean(key) == clean {
+				ws = cand
+				break
+			}
+		}
+	}
 	o.m.mu.Unlock()
-	if ws != nil && ws.kind != runtimeHubAgent && !isHubHomePath(clean) {
+	if ws != nil && ws.kind != runtimeHubAgent {
 		return clean, nil
 	}
 	// 已登记但还没装配 runtime（刚建好 / 重启后未打开）：允许，但目录必须在。
-	if o.m.wsReg != nil && !isHubHomePath(clean) {
+	if o.m.wsReg != nil {
 		for _, e := range o.m.wsReg.list() {
-			if e.Path != clean {
+			if e.Path != clean || isHubHomePath(e.Path) {
 				continue
 			}
 			if st, err := os.Stat(clean); err == nil && st.IsDir() {
@@ -277,6 +294,24 @@ func (o *hubWorkspaceOps) knownWorkspace(path string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%w: workspace %q 未登记", agenthub.ErrNotFound, clean)
+}
+
+// hubExpandHome 展开 ~ / ~/xxx（policy.workspace_roots 的文档默认值就是 ~/hai-workspaces）。
+// 不展开的话 filepath.Abs("~/ws") 会变成 <cwd>/~/ws，EvalSymlinks 失败后被静默跳过，
+// 最后报「未配置 workspace_roots」——配了但说没配（P2-01 复审 N1）。
+func hubExpandHome(p string) string {
+	p = strings.TrimSpace(p)
+	if p != "~" && !strings.HasPrefix(p, "~"+string(filepath.Separator)) {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
 }
 
 // hubAbsExisting 把路径解析成绝对真实路径（必须存在）。
@@ -309,7 +344,7 @@ func hubCreateWorkspacePath(parent, name string, roots []string) (string, error)
 	if len([]rune(name)) > 64 {
 		return "", fmt.Errorf("%w: 工作区名过长", agenthub.ErrInvalid)
 	}
-	parentReal, err := hubAbsExisting(parent)
+	parentReal, err := hubAbsExisting(hubExpandHome(parent))
 	if err != nil {
 		return "", fmt.Errorf("%w: 父目录不可用: %v", agenthub.ErrInvalid, err)
 	}
@@ -338,7 +373,7 @@ func hubCreateWorkspacePath(parent, name string, roots []string) (string, error)
 	if _, err := os.Lstat(target); err == nil {
 		return "", fmt.Errorf("%w: %s 已存在（不接管已有目录）", agenthub.ErrConflict, target)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
+		return "", fmt.Errorf("%w: 目标路径不可用: %v", agenthub.ErrInvalid, err)
 	}
 	if hubSensitivePath(target) {
 		return "", fmt.Errorf("%w: 目标命中敏感目录", agenthub.ErrForbidden)
@@ -357,28 +392,58 @@ func hubSensitivePath(abs string) bool {
 	}
 	// 两边都归一：macOS 上 $HOME 可能是 /var/folders/...，而调用方给的是 EvalSymlinks
 	// 之后的 /private/var/...（前缀比较会漏判）。
-	clean := filepath.Clean(abs)
-	if real, err := filepath.EvalSymlinks(clean); err == nil {
-		clean = real
-	}
-	if real, err := filepath.EvalSymlinks(home); err == nil {
-		home = real
-	}
+	clean := hubCanonicalPath(abs)
+	home = hubCanonicalPath(home)
 	cfgDir := filepath.Join(home, ".go-code")
-	if clean == cfgDir || strings.HasPrefix(clean, cfgDir+string(os.PathSeparator)) {
+	if hubPathWithin(clean, cfgDir) {
 		for _, sub := range []string{"plugins", "runtime"} {
-			dir := filepath.Join(cfgDir, sub)
-			if clean == dir || strings.HasPrefix(clean, dir+string(os.PathSeparator)) {
+			if hubPathWithin(clean, filepath.Join(cfgDir, sub)) {
 				return false
 			}
 		}
 		return true
 	}
 	for _, name := range []string{".ssh", ".aws", ".gnupg", ".netrc", ".kube"} {
-		base := filepath.Join(home, name)
-		if clean == base || strings.HasPrefix(clean, base+string(os.PathSeparator)) {
+		if hubPathWithin(clean, filepath.Join(home, name)) {
 			return true
 		}
 	}
 	return false
+}
+
+// hubCanonicalPath 能解析就解析真实路径，不存在则保持 Clean（父级仍可比较）。
+func hubCanonicalPath(p string) string {
+	clean := filepath.Clean(p)
+	if real, err := filepath.EvalSymlinks(clean); err == nil {
+		return real
+	}
+	if dir, base := filepath.Split(clean); dir != "" {
+		if realDir, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
+			return filepath.Join(realDir, base)
+		}
+	}
+	return clean
+}
+
+// hubPathWithin 判断 p 是 base 本身还是其后代。
+//
+// **不能用字符串前缀比较**：macOS APFS 默认大小写不敏感，~/.SSH 与 ~/.ssh 是同一个
+// inode，但字符串不相等 → 敏感目录检查会被绕过（P2-01 复审 B1）。这里逐级祖先做
+// os.SameFile（一并覆盖符号链接/firmlink）；base 不存在时退回大小写折叠比较。
+func hubPathWithin(p, base string) bool {
+	if info, err := os.Stat(base); err == nil {
+		for cur := filepath.Clean(p); ; {
+			if ci, err := os.Stat(cur); err == nil && os.SameFile(ci, info) {
+				return true
+			}
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				return false
+			}
+			cur = parent
+		}
+	}
+	pFold := strings.ToLower(filepath.Clean(p))
+	bFold := strings.ToLower(filepath.Clean(base))
+	return pFold == bFold || strings.HasPrefix(pFold, bFold+string(os.PathSeparator))
 }

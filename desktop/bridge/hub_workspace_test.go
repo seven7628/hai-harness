@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -206,8 +207,8 @@ func TestHubWorkspaceOpsRejectsUnknownWorkspace(t *testing.T) {
 	}
 	// hub home 也不能被当成工作区。
 	home := m.hubRuntime(string(p.ID)).path
-	if _, err := ops.ListSessions(context.Background(), home); !errors.Is(err, agenthub.ErrNotFound) {
-		t.Fatalf("ListSessions(hub home) = %v, want ErrNotFound", err)
+	if _, err := ops.ListSessions(context.Background(), home); !errors.Is(err, agenthub.ErrForbidden) {
+		t.Fatalf("ListSessions(hub home) = %v, want ErrForbidden", err)
 	}
 }
 
@@ -251,5 +252,149 @@ func TestHubWorkspaceOpsDispatch(t *testing.T) {
 	}
 	if err := ops.InterruptSession(context.Background(), " "); err == nil {
 		t.Fatal("interrupt with empty sid must fail")
+	}
+}
+
+// 敏感目录必须按 inode 判（macOS 大小写不敏感：~/.SSH 与 ~/.ssh 是同一目录）。
+func TestHubWorkspaceSensitiveCaseVariant(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ssh := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(ssh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	upper := filepath.Join(home, ".SSH")
+	lowerInfo, err := os.Stat(ssh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upperInfo, err := os.Stat(upper)
+	if err != nil || !os.SameFile(lowerInfo, upperInfo) {
+		t.Skip("文件系统大小写敏感，跳过大小写变体用例")
+	}
+	if !hubSensitivePath(upper) {
+		t.Fatal("hubSensitivePath must treat ~/.SSH as ~/.ssh (case-insensitive FS)")
+	}
+	if _, err := hubCreateWorkspacePath(upper, "proj", []string{home}); !errors.Is(err, agenthub.ErrForbidden) {
+		t.Fatalf("create under ~/.SSH = %v, want ErrForbidden", err)
+	}
+}
+
+// 超长名字（>64 rune）必须拒绝（P2-01 复审 M6）。
+func TestHubWorkspaceNameTooLong(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "projects")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("名", 65)
+	if _, err := hubCreateWorkspacePath(root, long, []string{root}); !errors.Is(err, agenthub.ErrInvalid) {
+		t.Fatalf("65-rune name = %v, want ErrInvalid", err)
+	}
+}
+
+// 没有 registry 时不能「假成功」：目录不能留下，错误要可读（P2-01 复审 N3）。
+func TestHubWorkspaceRequiresRegistry(t *testing.T) {
+	m, buf := testManager(t)
+	root := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "NoRegistry", []string{root})
+	ops := newHubWorkspaceOps(m) // m.wsReg == nil
+	_, err := ops.CreateWorkspace(context.Background(), agenthub.CreateWorkspaceReq{
+		AgentID: p.ID, Parent: root, Name: "proj",
+	})
+	if err == nil || !strings.Contains(err.Error(), "登记未初始化") {
+		t.Fatalf("create without registry = %v, want 登记未初始化", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "proj")); !os.IsNotExist(statErr) {
+		t.Fatalf("directory left behind: %v", statErr)
+	}
+}
+
+// registry 里被登记成敏感目录（手机/UI 的 workspace_add 不查敏感目录）也必须拒绝（N5）。
+func TestHubWorkspaceRegistrySensitiveRejected(t *testing.T) {
+	m, buf := testManager(t)
+	home := os.Getenv("HOME")
+	ssh := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(ssh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(ssh); err != nil {
+		t.Fatal(err)
+	}
+	p := createWorkspaceAgent(t, m, buf, 1, "SensitiveRegistry", []string{home})
+	ops := newHubWorkspaceOps(m)
+	if _, err := ops.ListSessions(context.Background(), ssh); !errors.Is(err, agenthub.ErrForbidden) {
+		t.Fatalf("ListSessions(~/.ssh) = %v, want ErrForbidden", err)
+	}
+	if _, err := ops.CreateSession(context.Background(), agenthub.CreateSessionReq{
+		AgentID: p.ID, Workspace: ssh,
+	}); !errors.Is(err, agenthub.ErrForbidden) {
+		t.Fatalf("CreateSession(~/.ssh) = %v, want ErrForbidden", err)
+	}
+}
+
+// Hub home 即使被塞进 m.workspaces / workspaces.json 也不能当工作区（复审 M9/M10）。
+func TestHubWorkspaceNeverTreatsHubHomeAsWorkspace(t *testing.T) {
+	m, buf := testManager(t)
+	p := createWorkspaceAgent(t, m, buf, 1, "HubHomeGuard", []string{t.TempDir()})
+	home := m.hubRuntime(string(p.ID)).path
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(home); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.workspaces[home] = &workspaceRuntime{kind: runtimeProject, path: home, sessions: map[string]*bridgeSession{}}
+	m.mu.Unlock()
+	ops := newHubWorkspaceOps(m)
+	list, err := ops.ListWorkspaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWorkspacePath(list, home) {
+		t.Fatalf("ListWorkspaces leaked hub home %q", home)
+	}
+	if _, err := ops.ListSessions(context.Background(), home); !errors.Is(err, agenthub.ErrForbidden) {
+		t.Fatalf("ListSessions(hub home) = %v, want ErrForbidden", err)
+	}
+}
+
+// 未登记工作区的错误必须区分于「会话不存在」（复审 mutation M4 的断言缺口）。
+func TestHubWorkspaceStrangerErrorMentionsUnregistered(t *testing.T) {
+	m, buf := testManager(t)
+	p := createWorkspaceAgent(t, m, buf, 1, "StrangerText", []string{t.TempDir()})
+	ops := newHubWorkspaceOps(m)
+	_, err := ops.Dispatch(context.Background(), agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: t.TempDir(), SessionID: "s1", Text: "hi",
+	})
+	if err == nil || !strings.Contains(err.Error(), "未登记") {
+		t.Fatalf("dispatch(stranger) = %v, want 未登记", err)
+	}
+}
+
+// policy.workspace_roots 支持 ~ 展开（文档默认值就是 ~/hai-workspaces）。
+func TestHubWorkspaceExpandsHomeRoot(t *testing.T) {
+	m, buf := testManager(t)
+	home := os.Getenv("HOME")
+	root := filepath.Join(home, "spaces")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	p := createWorkspaceAgent(t, m, buf, 1, "HomeRoot", []string{"~/spaces"})
+	ops := newHubWorkspaceOps(m)
+	info, err := ops.CreateWorkspace(context.Background(), agenthub.CreateWorkspaceReq{
+		AgentID: p.ID, Parent: "~/spaces", Name: "proj",
+	})
+	if err != nil {
+		t.Fatalf("create under ~ root: %v", err)
+	}
+	realRoot, err := filepath.EvalSymlinks(root) // macOS /tmp → /private/tmp
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(realRoot, "proj"); info.Path != want {
+		t.Fatalf("path = %q, want %q", info.Path, want)
 	}
 }

@@ -116,6 +116,9 @@ func (r *workspaceRegistry) add(path string) (workspaceEntry, error) {
 	e := workspaceEntry{Path: p, Title: filepath.Base(p), LastOpened: time.Now().Unix()}
 	r.entries = append(r.entries, e)
 	if err := r.saveLocked(); err != nil {
+		// 落盘失败必须回滚内存：否则 list()/ListWorkspaces 会列出「保存失败却看起来
+		// 已登记」的幽灵条目，而它重启后并不存在（P2-01 复审 N4）。
+		r.entries = r.entries[:len(r.entries)-1]
 		return workspaceEntry{}, err
 	}
 	return e, nil

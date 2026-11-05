@@ -105,3 +105,21 @@ func mkdir(t *testing.T, p string) {
 		t.Fatal(err)
 	}
 }
+
+// 落盘失败必须回滚内存条目：否则 list() 会列出重启后并不存在的幽灵工作区。
+func TestWorkspaceRegistryAddRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "proj")
+	mkdir(t, proj)
+	// path 指向一个目录：writeMobileAtomic 的 rename 必失败。
+	badPath := filepath.Join(dir, "is-a-dir")
+	mkdir(t, badPath)
+	reg := newWorkspaceRegistry(badPath)
+
+	if _, err := reg.add(proj); err == nil {
+		t.Fatal("save failure must surface an error")
+	}
+	if got := len(reg.list()); got != 0 {
+		t.Fatalf("failed add left %d phantom entries: %+v", got, reg.list())
+	}
+}
