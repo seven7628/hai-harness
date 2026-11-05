@@ -1068,6 +1068,12 @@
       "commit": "feat(hub-p3a-05 部分): hub_group_send",
       "review": "pending",
       "reviewNote": "hub_group_send：人消息落群日志 + 严格 @ 路由 + Round 活动回执 + hub_message/hub_round 事件；无 @ 不唤醒；@all 人类可用。测试 TestHubGroupSendRoutesAndReceipts。**部分完成**：group_history/group_members/group_say 模型工具与群会话唤醒未做（P3b）。"
+    },
+    "P3a-08": {
+      "status": "review",
+      "commit": "feat(hub-p3a-08 部分): 群组视图",
+      "review": "pending",
+      "reviewNote": "Rail 智能体/群组 tab；GroupView 群头成员叠图、群日志时间线、路由回执动作行、审批占位、Chat|Run（活动流）、hub_group_send 发言；store 接线 group 事件。tsc/eslint(src)/vite build 通过。**部分完成**：智能体群回复与同轮合并依赖 P3b 群会话，三主题/群态 Inspector 未做。"
     }
   }
 }
