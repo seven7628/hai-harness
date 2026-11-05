@@ -31,8 +31,15 @@ export default function HubSurface() {
   const refresh = useHubStore((s) => s.refresh)
   const closeHub = useHubStore((s) => s.closeHub)
   const clearError = useHubStore((s) => s.clearError)
+  const drafts = useHubStore((s) => s.drafts)
+  const setDraft = useHubStore((s) => s.setDraft)
+  const failedText = useHubStore((s) => s.failedText)
+  const retry = useHubStore((s) => s.retry)
+  const clearSelection = useHubStore((s) => s.clearSelection)
+  const notice = useHubStore((s) => s.notice)
+  const clearNotice = useHubStore((s) => s.clearNotice)
+  const draft = activeId ? (drafts[activeId] ?? '') : ''
 
-  const [draft, setDraft] = useState('')
   // null = 关闭；'new' = 新建；HubAgent = 编辑该智能体。
   const [editing, setEditing] = useState<HubAgent | 'new' | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -41,7 +48,13 @@ export default function HubSurface() {
   useEffect(() => attachHubEvents(), [])
   useEffect(() => {
     void refresh()
-  }, [refresh])
+    // 中途离开再回来：重开当前 DM —— 回复可能是在没有订阅时落定的（B3），
+    // 只 refresh() 会留下半截流式气泡与常亮运行点。
+    const id = useHubStore.getState().activeId
+    if (id) void select(id)
+    // 只在挂载时跑一次（select/refresh 自身的引用变化不需要重开）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // 滚到底：只有用户本来就在底部时才自动跟随（翻历史时别把视图拽走）。
   useEffect(() => {
@@ -63,11 +76,12 @@ export default function HubSurface() {
     if (el.scrollTop < 60 && hasMore && !loadingOlder) void loadOlder()
   }
 
-  function submit(): void {
-    if (!draft.trim() || sending) return
-    void send(draft)
-    setDraft('')
+  async function submit(): Promise<void> {
+    if (!draft.trim() || sending || !activeId) return
     stickBottom.current = true
+    const ok = await send(draft)
+    // 成功才清草稿；失败保留原文（store 同时把它放进 failedText，气泡标 failed）。
+    if (ok) setDraft(activeId, '')
   }
 
   return (
@@ -100,8 +114,20 @@ export default function HubSurface() {
           </div>
         )}
         {error ? (
-          <div className="hub-error" role="alert" onClick={clearError} title={t('hub.dismiss')}>
-            {error}
+          <div className="hub-error" role="alert">
+            <span>{error}</span>
+            {failedText ? (
+              <button className="hub-link" onClick={() => void retry()} disabled={sending}>
+                {t('hub.retry')}
+              </button>
+            ) : null}
+            <button className="hub-link" onClick={clearError} aria-label={t('hub.dismiss')}>×</button>
+          </div>
+        ) : null}
+        {notice ? (
+          <div className="hub-notice" role="status">
+            <span>{notice}</span>
+            <button className="hub-link" onClick={clearNotice} aria-label={t('hub.dismiss')}>×</button>
           </div>
         ) : null}
       </aside>
@@ -159,7 +185,7 @@ export default function HubSurface() {
               <textarea
                 value={draft}
                 placeholder={t('hub.placeholder')}
-                onChange={(e) => setDraft(e.target.value)}
+                onChange={(e) => activeId && setDraft(activeId, e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
@@ -168,7 +194,13 @@ export default function HubSurface() {
                 }}
                 rows={2}
               />
-              <button className="hub-send" onClick={submit} disabled={sending || !draft.trim()} title={t('hub.send')}>
+              <button
+                className="hub-send"
+                onClick={() => void submit()}
+                disabled={sending || !draft.trim()}
+                title={t('hub.send')}
+                aria-label={t('hub.send')}
+              >
                 <SendIcon />
               </button>
             </div>
@@ -183,6 +215,7 @@ export default function HubSurface() {
           onSaved={(id) => {
             void refresh()
             if (id) void select(id)
+            else clearSelection()
           }}
         />
       ) : null}

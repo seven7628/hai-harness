@@ -141,9 +141,9 @@ export default function App() {
     <div className={`app-root ${inSkills ? 'in-skills' : ''}${inCron ? 'in-cron' : ''}${leaving ? ' leaving' : ''}`}>
       {mainReady && (
         <main className="main">
-          {hubOpen ? (
-            <HubSurface />
-          ) : (
+          {/* Hub 打开时**不卸载**工作区树：composer 草稿/附件在组件本地 state，
+              卸载即丢（P1-08 复核 B1）。用 display:none 隐藏，尺寸由 .main-surface 撑开。 */}
+          <div className={hubOpen ? 'main-surface hidden' : 'main-surface'}>
           <Group
             orientation="horizontal"
             className="main-group"
@@ -205,7 +205,8 @@ export default function App() {
               <RightPanel />
             </Panel>
           </Group>
-          )}
+          </div>
+          {hubOpen ? <HubSurface /> : null}
         </main>
       )}
       {splash && (

@@ -2208,8 +2208,10 @@ class MockTransport implements Transport {
         break
       }
       case 'hub_agent_list': {
+        const includeDeleted = cmd.payload?.include_deleted === true
+        const liveAgents = this.hubAgents.filter((a) => includeDeleted || a.deleted !== true)
         const dm: Record<string, unknown> = {}
-        for (const a of this.hubAgents) {
+        for (const a of liveAgents) {
           const id = String(a.id)
           const log = this.hubLog(id)
           const last = log[log.length - 1]
@@ -2222,7 +2224,7 @@ class MockTransport implements Transport {
             last_at: last?.created_at,
           }
         }
-        this.respond(cmd, { agents: this.hubAgents, dm })
+        this.respond(cmd, { agents: liveAgents, dm })
         break
       }
       case 'hub_open': {
@@ -2242,7 +2244,7 @@ class MockTransport implements Transport {
           session_id: `hub.${agentID}.dm`,
           messages: page,
           has_more: upto.length > page.length,
-          cursor: this.hubCursor.get(agentID),
+          cursor: { human_read_seq: this.hubCursor.get(agentID) ?? 0 },
           exists: true,
         })
         break
@@ -2261,20 +2263,24 @@ class MockTransport implements Transport {
         const agentID = String(target.agent_id ?? '')
         const text = String(cmd.payload?.text ?? '').trim()
         if (!agentID || !text) { this.respondErr(cmd, 'text 不能为空'); break }
+        if (text === '__fail__') { this.respondErr(cmd, 'provider 未配置（mock 注入失败）'); break }
         const log = this.hubLog(agentID)
         const seq = (this.hubSeq.get(agentID) ?? 0) + 1
         this.hubSeq.set(agentID, seq)
         const created = new Date().toISOString()
         log.push({ seq, sender: { kind: 'human' }, text, created_at: created })
         this.hubCursor.set(agentID, seq)
-        this.respond(cmd, { seq, session_id: `hub.${agentID}.dm` })
+        // 真 bridge 先 emit hub_message 再 resp（hub_commands.go 的 hub_send）：
+        // mock 必须同序，否则前端「事件先到/响应先到」两条路径里有一条永远测不到。
         this.emit({ event_type: 'hub_message', agent_id: agentID, seq, message: { seq, sender: { kind: 'human' }, text, created_at: created }, client_msg_id: String(cmd.payload?.client_msg_id ?? '') })
+        this.respond(cmd, { seq, session_id: `hub.${agentID}.dm` })
         // 模拟一轮回复：agent_start → content_chunk 流 → hub_message → agent_end
         const sid = `hub.${agentID}.dm`
-        this.after(350, () => this.emit({ event_type: 'agent_start', session_id: sid }), sid)
+        const runID = `mock-run-${seq}`
+        this.after(350, () => this.emit({ event_type: 'agent_start', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 }), sid)
         const reply = '收到。我按「价格 / 功能 / 公开情报」三栏整理一版，先把对比表发你。'
         reply.split('').forEach((ch, i) => {
-          this.after(450 + i * 18, () => this.emit({ event_type: 'content_chunk', session_id: sid, text: ch }), sid)
+          this.after(450 + i * 18, () => this.emit({ event_type: 'content_chunk', session_id: sid, run_id: runID, content: ch }), sid)
         })
         this.after(450 + reply.length * 18 + 120, () => {
           const rseq = (this.hubSeq.get(agentID) ?? 0) + 1
@@ -2282,7 +2288,7 @@ class MockTransport implements Transport {
           const rcreated = new Date().toISOString()
           this.hubLog(agentID).push({ seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text: reply, created_at: rcreated })
           this.emit({ event_type: 'hub_message', agent_id: agentID, seq: rseq, message: { seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text: reply, created_at: rcreated } })
-          this.emit({ event_type: 'agent_end', session_id: sid })
+          this.emit({ event_type: 'agent_end', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 })
         }, sid)
         break
       }
@@ -2308,17 +2314,33 @@ class MockTransport implements Transport {
         const cur = this.hubAgents[idx]
         const patch = (cmd.payload?.patch ?? {}) as Record<string, unknown>
         const versions = this.hubVersions.get(id) ?? []
-        versions.unshift({ version: Number(cur.version ?? 1), saved_at: new Date().toISOString(), profile: { ...cur } })
+        versions.unshift({ version: Number(cur.version ?? 1), saved_at: new Date().toISOString(), profile: JSON.parse(JSON.stringify(cur)) })
         this.hubVersions.set(id, versions)
-        const next = { ...cur, ...patch, version: Number(cur.version ?? 1) + 1 }
+        // 深合并（真 bridge 的 mergeJSONInto 是深合并）：浅合并会把 tools.allow/mcp 一起清掉，
+        // 让 mock 与真机行为不同（P1-09 复核 N5）。
+        const next = { ...deepMerge(cur, patch), version: Number(cur.version ?? 1) + 1 }
         this.hubAgents[idx] = next
-        this.respond(cmd, { agent: next })
+        this.respond(cmd, { agent: next, effective: 'next_run' })
         break
       }
       case 'hub_agent_delete': {
         const id = String(cmd.payload?.agent_id ?? '')
-        this.hubAgents = this.hubAgents.filter((a) => a.id !== id)
-        this.respond(cmd, { agent_id: id })
+        const idx = this.hubAgents.findIndex((a) => a.id === id)
+        if (idx < 0) { this.respondErr(cmd, '智能体不存在'); break }
+        const purge = cmd.payload?.purge === true
+        if (purge) this.hubAgents = this.hubAgents.filter((a) => a.id !== id)
+        else this.hubAgents[idx] = { ...this.hubAgents[idx], deleted: true }
+        this.respond(cmd, { agent_id: id, purged: purge })
+        this.emit({ event_type: 'hub_agent_status', agent_id: id, status: purge ? 'deleted' : 'idle' })
+        break
+      }
+      case 'hub_agent_restore': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const idx = this.hubAgents.findIndex((a) => a.id === id)
+        if (idx < 0) { this.respondErr(cmd, '智能体不存在'); break }
+        const next = { ...this.hubAgents[idx], deleted: false, version: Number(this.hubAgents[idx].version ?? 1) + 1 }
+        this.hubAgents[idx] = next
+        this.respond(cmd, { agent: next })
         break
       }
       case 'hub_agent_versions': {
@@ -2344,7 +2366,7 @@ class MockTransport implements Transport {
         if (idx < 0 || !snap) { this.respondErr(cmd, `找不到第 ${version} 版`); break }
         const cur = this.hubAgents[idx]
         versions.unshift({ version: Number(cur.version ?? 1), saved_at: new Date().toISOString(), profile: { ...cur } })
-        const next = { ...snap.profile, id, version: Number(cur.version ?? 1) + 1 }
+        const next = { ...JSON.parse(JSON.stringify(snap.profile)), id, version: Number(cur.version ?? 1) + 1 }
         this.hubAgents[idx] = next
         this.respond(cmd, { agent: next, restored_from: version })
         break
@@ -2369,7 +2391,9 @@ class MockTransport implements Transport {
           this.respond(cmd, { entries, dir: `~/.go-code/hub/agents/${id}/memory` })
           break
         }
-        this.respond(cmd, { path, content: files.get(path) ?? '', exists: files.has(path) })
+        // 读文件给一个真实 IPC 量级的延迟：mock 同步响应会掩盖「回执被迟到的读响应
+        // 清空」这类竞态（P1-09 复核 B2 的复现条件）。
+        setTimeout(() => this.respond(cmd, { path, content: files.get(path) ?? '', exists: files.has(path) }), 120)
         break
       }
       case 'hub_agent_memory_write': {
@@ -3928,4 +3952,18 @@ export function mockTransport(): Transport {
     }
   }
   return tr
+}
+
+// deepMerge：真 bridge 的 mergeJSONInto 语义（对象递归合并，数组/标量整体替换）。
+function deepMerge(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base }
+  for (const [k, v] of Object.entries(patch)) {
+    const cur = out[k]
+    if (v && typeof v === 'object' && !Array.isArray(v) && cur && typeof cur === 'object' && !Array.isArray(cur)) {
+      out[k] = deepMerge(cur as Record<string, unknown>, v as Record<string, unknown>)
+    } else {
+      out[k] = v
+    }
+  }
+  return out
 }

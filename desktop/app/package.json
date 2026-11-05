@@ -106,7 +106,8 @@
     "test:turn-layout": "esbuild src/components/runtime/turn/selectTurns-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/turn-layout.test.cjs && node --test /tmp/turn-layout.test.cjs",
     "test:tail-line": "esbuild src/lib/tailLine-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/tail-line.test.cjs && node --test /tmp/tail-line.test.cjs",
     "test:failure-line": "esbuild src/lib/failureLine-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/failure-line.test.cjs && node --test /tmp/failure-line.test.cjs",
-    "test:short-path": "esbuild src/lib/shortPath-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/short-path.test.cjs && node --test /tmp/short-path.test.cjs"
+    "test:short-path": "esbuild src/lib/shortPath-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/short-path.test.cjs && node --test /tmp/short-path.test.cjs",
+    "test:hub-patch": "node scripts/test-agent-patch.mjs"
   },
   "build": {
     "appId": "ai.hai.desktop",

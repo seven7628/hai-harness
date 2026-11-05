@@ -24,6 +24,7 @@ export interface HubAgent {
   effort?: string
   compress_threshold?: number
   memory?: { enabled?: boolean; max_index_lines?: number }
+  tools?: { preset?: string; disable?: string[]; allow?: string[]; bash_roots?: string[]; disable_network?: boolean }
   version?: number
   deleted?: boolean
 }
@@ -52,6 +53,8 @@ export interface HubMessage {
   refs?: Record<string, unknown>
   /** 前端乐观消息：等待 hub_message 回执（含 client_msg_id）后替换/移除。 */
   pending?: boolean
+  /** 发送失败（可重试）：气泡保留在列表里，原文同时进 store.failedText。 */
+  failed?: boolean
   clientMsgId?: string
 }
 

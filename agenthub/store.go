@@ -24,7 +24,10 @@ var (
 	ErrConflict          = errors.New("agenthub: conflict")
 	ErrCorrupt           = errors.New("agenthub: corrupt")
 	ErrUnsupportedSchema = errors.New("agenthub: unsupported schema")
-	ErrTooLarge          = errors.New("agenthub: too large")
+	// ErrForbidden 信任边界拒绝（路径不在允许根内、命中敏感目录等）。
+	// 与 ErrInvalid 分开：这不是「参数写错」，而是「这个参数合法但你没权限」。
+	ErrForbidden = errors.New("agenthub: forbidden")
+	ErrTooLarge  = errors.New("agenthub: too large")
 )
 
 // Store 是 Hub 的持久化接口。领域规则不依赖具体实现；FileStore 落盘，MemoryStore 供测试/评测。

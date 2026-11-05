@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { hubCommand } from './api'
 import type { HubAgent } from './types'
 import { useT } from '../i18n'
+import { buildAgentPatch, buildAgentProfile, type AgentForm } from './agentPatch'
 
 // 智能体资料页（§8.5）：新建/编辑，5 个页签。
 //
@@ -70,8 +71,8 @@ export default function AgentEditor({
   const [instructions, setInstructions] = useState(agent?.instructions ?? '')
 
   // —— 工具与权限 ——
-  const [preset, setPreset] = useState((agent as { tools?: { preset?: string } })?.tools?.preset ?? 'all')
-  const [disable, setDisable] = useState('')
+  const [preset, setPreset] = useState(agent?.tools?.preset ?? 'all')
+  const [disable, setDisable] = useState((agent?.tools?.disable ?? []).join(' '))
 
   // —— 记忆 ——
   const [entries, setEntries] = useState<MemoryEntry[]>([])
@@ -79,6 +80,7 @@ export default function AgentEditor({
   const [memoryBody, setMemoryBody] = useState('')
   const [memoryExists, setMemoryExists] = useState(false)
   const [memoryNote, setMemoryNote] = useState('')
+  const [note, setNote] = useState('')
 
   // —— 版本 ——
   const [versions, setVersions] = useState<VersionRow[]>([])
@@ -98,6 +100,15 @@ export default function AgentEditor({
     [t],
   )
 
+  // Esc 关闭（遮罩点击已支持；键盘用户不该只能点鼠标）。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && !busy) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [busy, onClose])
+
   useEffect(() => {
     if (!agentID) return
     void loadMemory()
@@ -114,7 +125,7 @@ export default function AgentEditor({
       return
     }
     setEntries(list.data?.entries ?? [])
-    void openMemoryFile(memoryPath)
+    await openMemoryFile(memoryPath)
   }
 
   async function openMemoryFile(path: string): Promise<void> {
@@ -136,7 +147,7 @@ export default function AgentEditor({
   async function saveMemory(): Promise<void> {
     if (!agentID) return
     setBusy(true)
-    const r = await hubCommand<{ backup?: string; effective?: string }>('hub_agent_memory_write', {
+    const r = await hubCommand<{ backup?: string; effective?: string; warning?: string }>('hub_agent_memory_write', {
       agent_id: agentID,
       path: memoryPath,
       content: memoryBody,
@@ -150,7 +161,7 @@ export default function AgentEditor({
     const when = r.data?.effective === 'next_session' ? t('hub.effective.nextSession') : t('hub.effective.nextRun')
     // 先重载清单（重载会把 note 清空），再写回执 —— 否则用户永远看不到「已备份为 xxx」。
     await loadMemory()
-    setMemoryNote(`${backup} · ${when}`)
+    setMemoryNote(`${backup} · ${when}${r.data?.warning ? ` · ${r.data.warning}` : ''}`)
   }
 
   async function loadVersions(): Promise<void> {
@@ -169,6 +180,7 @@ export default function AgentEditor({
 
   async function rollback(version: number): Promise<void> {
     if (!agentID) return
+    if (!window.confirm(t('hub.versions.confirm').replace('{v}', String(version)))) return
     setBusy(true)
     const r = await hubCommand<{ agent?: HubAgent; warning?: string }>('hub_agent_rollback', {
       agent_id: agentID,
@@ -180,6 +192,11 @@ export default function AgentEditor({
       return
     }
     setError(r.data?.warning ?? null)
+    setNote(
+      t('hub.versions.rolledBack')
+        .replace('{from}', String(version))
+        .replace('{to}', String(r.data?.agent?.version ?? 0)),
+    )
     void loadVersions()
     onSaved(agentID)
   }
@@ -208,29 +225,15 @@ export default function AgentEditor({
     }
     setBusy(true)
     setError(null)
-    const tools = {
-      preset,
-      disable: disable
-        .split(/[\s,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean),
+    // 表单 → payload 是纯函数（agentPatch.ts）：只发改动字段，tools.disable 不会被清空。
+    const form: AgentForm = {
+      name, emoji, accent, role, description, instructions, provider, model, effort,
+      threshold, memoryOn, preset, disable,
     }
-    const body = {
-      name: name.trim(),
-      avatar: { kind: 'emoji', value: emoji },
-      accent,
-      role: role.trim(),
-      description: description.trim(),
-      instructions,
-      provider: provider.trim(),
-      model: model.trim(),
-      effort,
-      compress_threshold: threshold,
-      memory: { enabled: memoryOn },
-      tools,
-    }
+    const patch = buildAgentPatch(form, agent)
     if (isNew) {
-      const r = await hubCommand<{ agent?: HubAgent }>('hub_agent_create', { profile: body })
+      const profile = buildAgentProfile(form)
+      const r = await hubCommand<{ agent?: HubAgent }>('hub_agent_create', { profile })
       setBusy(false)
       if (!r.ok || !r.data?.agent) {
         setError(r.error ?? t('hub.err.create'))
@@ -240,9 +243,9 @@ export default function AgentEditor({
       onClose()
       return
     }
-    const r = await hubCommand<{ agent?: HubAgent; warning?: string }>('hub_agent_update', {
+    const r = await hubCommand<{ agent?: HubAgent; warning?: string; effective?: string }>('hub_agent_update', {
       agent_id: agentID,
-      patch: body,
+      patch,
     })
     setBusy(false)
     if (!r.ok) {
@@ -250,8 +253,12 @@ export default function AgentEditor({
       return
     }
     onSaved(agentID)
-    if (r.data?.warning) setError(r.data.warning)
-    else onClose()
+    if (r.data?.warning) {
+      setError(r.data.warning)
+      void loadVersions() // 版本号变了：卡片「第 N 版」要跟着刷新
+    } else {
+      onClose()
+    }
   }
 
   async function remove(): Promise<void> {
@@ -477,6 +484,11 @@ export default function AgentEditor({
             </div>
 
             {error ? <div className="hub-error" onClick={() => setError(null)}>{error}</div> : null}
+            {note ? (
+              <div className="hub-notice" role="status" onClick={() => setNote('')}>
+                {note}
+              </div>
+            ) : null}
 
             <footer className="hub-modal-foot">
               <button className="hub-link" onClick={onClose}>{t('hub.cancel')}</button>

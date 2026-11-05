@@ -8153,6 +8153,9 @@ function wire(): void {
   transport.onEvent((line) => {
     try {
       const ev = JSON.parse(line) as AnyEvent
+      // Hub 事件只归 useHubStore（§17.6 单一入口）：主 store 的 views/busySids 只认工作区
+      // 会话，把 hub.<id>.dm 的流灌进来会留下永不清理的正文与常亮运行点（P1-08 复核 N1）。
+      if (typeof ev.event_type === 'string' && ev.event_type.startsWith('hub_')) return
       // 快照分流（FIX_OPTIMIZATION 问题2③）：new_session 快照在途时，发往该 sid 的事件先入
       // preBuf 暂存（防御，正常为空；响应到达后由 materializeSnapshot / 下方补应用），
       // 其余事件正常分发。
