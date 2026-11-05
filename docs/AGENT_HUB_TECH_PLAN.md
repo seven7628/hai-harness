@@ -3835,20 +3835,24 @@ type Store interface {
     LoadTask(ctx context.Context, id TaskID) (*Task, error)
     SaveTask(ctx context.Context, t *Task) error
     AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) error
+    ReadTaskEvents(ctx context.Context, id TaskID) ([]TaskEvent, error) // 事件 seq 由 Store 分配
     ListTasks(ctx context.Context, filter TaskFilter) ([]*Task, error)
 
     // Needs you / artifacts / 游标
+    LoadNeed(ctx context.Context, id NeedID) (*Need, error)
     SaveNeed(ctx context.Context, n *Need) error
     ListNeeds(ctx context.Context, filter NeedFilter) ([]*Need, error)
     SaveArtifact(ctx context.Context, a *Artifact) error
     LoadArtifact(ctx context.Context, id ArtifactID) (*Artifact, error)
     SaveCursor(ctx context.Context, c *Cursor) error
-    LoadCursor(ctx context.Context, groupID GroupID, agentID AgentID) (int64, error)
+    LoadCursor(ctx context.Context, groupID GroupID, agentID AgentID) (*Cursor, error)
 }
 ```
 
 > Store 的配套 DTO（`Activity` / `TaskEvent` / `TaskFilter` / `Need` / `NeedFilter` /
 > `Cursor` / `Artifact` 产物记录）由 **P0-02** 在 `agenthub/store_types.go` 定义。
+> `TaskEvent.Seq` 是每任务单调序号（Store 分配），恢复时从 `events.jsonl` 重建；
+> `LoadCursor` 返回完整 `*Cursor`，不能只取 `human_read_seq` 而丢掉 `agent_context_seq`。
 > `TaskArtifact` 只是任务结果摘要，不是可版本化的产物记录；两者不要混用。
 
 **FileStore 实现要点**：
