@@ -896,10 +896,10 @@
       "reviewNote": "独立 Review pass（0 blocking，评审用 mutation 反证 Validate allowlist 与 Pending 清空都被测试钉住；另核 provider 三条翻译路径都会把非 image 块按文本送出、标题 fallback 三处只认 text）。收尾两笔：940e01e 按 non-blocking #1/#5 把「store==nil + WithRecoveryState」改为构造期报错、恢复积压超过 inbox 缓冲时先扩容（goroutine+10s 超时把死锁变成可读失败）；6e7a0e3 把同一预扩容补到 legacy 恢复分支。前置修复：11a521e 补回 session/store_record_test.go（从未入库 → 干净检出编译不过）。go test ./core/... ./session/... 全绿。遗留 non-blocking 转后续：UI 侧 headerJSON 会当正文渲染（并入 P0-08）、provider 翻译缺「非 image → 文本」回归断言、压缩路径 messageText 白名单不含 hub_task（P2 派发中途压缩会丢 header 提示）、已知无关 -race 断言失败 TestAgentResumeEndToEnd（subagent.Registry 竞争，父提交同红）。"
     },
     "P0-08": {
-      "status": "review",
-      "commit": "9f94391 fix(hub-p0-08): createIn/buildLoop 不再按路径重查 runtime（复审 blocking）",
-      "review": "pending",
-      "reviewNote": "首轮 changes_requested（createIn 残留 m.runtime(wsPath).skills → hub 会话按路径新造项目 runtime、污染 m.workspaces、hub 全局层成死代码；buildLoop 内部仍按路径取 plugins/mcp/subagents）→ 9f94391 修复（sk 用入参 ws；buildLoop 改吃 *workspaceRuntime；bridgeSession.runtime + rebuildLoop 复用；hub wsKey=hub-<agentID>；mesh Register 只给项目会话；closeHubRuntimes 补插件收尾）→ 待复审。新增 TestCreateInHubUsesGivenRuntime（mutation 反证：改回按路径重查即报 m.workspaces 被污染）。另：P0-08 的验收文案归位（buildHubLoop 断言→P1-02，hub_task UI 分流→P2-04）。"
+      "status": "done",
+      "commit": "8c9f5e7 fix(hub-p0-08): 收尾复审三条 non-blocking（hub 关停、record 维度）",
+      "review": "passed",
+      "reviewNote": "首轮 changes_requested（createIn 残留 m.runtime(wsPath).skills → hub 会话按路径新造项目 runtime、污染 m.workspaces、hub 全局层成死代码；buildLoop 内部仍按路径取 plugins/mcp/subagents）→ 9f94391 修复（sk 用入参 ws；buildLoop 改吃 *workspaceRuntime；bridgeSession.runtime + rebuildLoop 复用；hub wsKey=hub-<agentID>；mesh Register 只给项目会话；closeHubRuntimes 补插件收尾）→ 复审 pass（评审用 mutation 反证：把 sk 改回按路径即报 m.workspaces 被污染）；8c9f5e7 收尾三条 non-blocking（关停先 Shutdown 会话、bs.runtime 置 nil、sessionRecordKey 抽出并加 TestSessionRecordKey）。验证：干净 HOME 下 bridge 全量 49s 绿、vet 干净。遗留：hub runtime 不跑 EnsureSynced（纯 hub 首启可能缺插件组件）、按智能体的 disabled 技能集待 P1 接 settings。"
     }
   }
 }
