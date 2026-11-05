@@ -612,13 +612,13 @@ const BASE = {
       ],
       "files": [
         "desktop/app/src/App.tsx",
-        "desktop/app/src/components/hub/HubRail.tsx",
-        "desktop/app/src/components/hub/HubRow.tsx",
-        "desktop/app/src/components/hub/HubHeader.tsx",
-        "desktop/app/src/components/hub/ViewToggle.tsx",
-        "desktop/app/src/store/useHubStore.ts"
+        "desktop/app/src/hub/HubSurface.tsx",
+        "desktop/app/src/hub/useHubStore.ts",
+        "desktop/app/src/hub/hub.css",
+        "desktop/app/src/components/LeftPanel.tsx",
+        "desktop/app/src/transport/mock.ts"
       ],
-      "acceptance": "工作区↔Hub 切换；默认开启（显式 false 才关，默认值不回写 settings.json）；左栏单列混排智能体/群组（群组叠图）、两行行解剖、last_outcome 预览、Needs you；DM 默认 Chat + Run 切换（复用 Narrative）；系统动作行；未读/状态点；三主题。",
+      "acceptance": "工作区↔Hub 切换（工作区树隐藏不卸载：草稿/滚动保留）；左栏单列智能体 rail（两行行解剖、last_outcome 预览、未读/状态点、排序）；DM 流式正文与失败重试（原文保留、重试幂等）；只认根 run（子 agent 事件不串流）；三主题。延期（reviewNote 已登记）：群组叠图/Needs you → P3a；DM Chat|Run 切换（复用 Narrative）与系统动作行 → P2-06；lastTarget 恢复/相对时间/6px 未读点 → P2 前端收尾。",
       "tests": "npm run lint && npm run test:agent-tree",
       "commit": "feat(hub-p1-08): Hub Rail 与 DM 视图"
     },
@@ -632,9 +632,13 @@ const BASE = {
         "P1-06"
       ],
       "files": [
-        "desktop/app/src/components/hub/AgentProfilePage.tsx"
+        "desktop/app/src/hub/AgentEditor.tsx",
+        "desktop/app/src/hub/agentPatch.ts",
+        "desktop/app/src/hub/i18n 文案",
+        "desktop/bridge/hub_commands.go",
+        "desktop/bridge/hub_session.go"
       ],
-      "acceptance": "基本/人格/工具权限/记忆/会话；provider/model 校验；全工具开关（含 MCP server/tool）；accent 选择器 + 头像预览；提示词预览（L1 起）；保存生效提示。",
+      "acceptance": "基本/人格/工具权限（preset + disable 列表）/记忆/版本 5 个页签；provider/model 必填校验；accent 选择器 + 头像预览；提示词预览（L1/L2/L3 环境/L4 记忆）；保存生效提示（含 effective/warning）与回执；回滚二次确认 + 「落成新版本」提示。延期（reviewNote 已登记）：第 5 个「会话」tab（运行态/usage/清空上下文/导出）→ P2-06 随任务板一起；全工具/MCP server-tool 开关与 provider/model 两级下拉 → P2 前端收尾；记忆注入索引预览/清除记忆 → P2。",
       "tests": "npm run lint && npm run test:store",
       "commit": "feat(hub-p1-09): 智能体资料页"
     },
@@ -1266,8 +1270,8 @@ const BASE = {
     "P1-10": {
       "status": "review",
       "commit": "dd3b32d test(hub-p1-10): 评测 1–3（DM 单会话/独立记忆/独立 provider）",
-      "review": "pending",
-      "reviewNote": "方案 §10.3 评测 1–3，确定性 fake provider（不联网）：Eval1 DM 单会话（24 轮只有 hub.<id>.dm 一个 sid、ws.sessions 恒 1；3000×0.5 触发自动压缩——compress_start + 摘要请求证据；压缩后记忆事实仍在 system、上下文含 SUMMARY、中间轮次被替换、消息数 < 2×轮数；首条输入是任务锚点按 S1-A 逐字保留，不作旧轮次判据）；Eval2 独立记忆（A 有 B 无 + 目录/清单分离）；Eval3 独立 provider（deepseek/openai 两模型各自 req.Model 与 llm_end session_id 归属正确）。最终 P1 Review 进行中（task-wjt2u5vs），覆盖评测 mutation、端到端自洽、Hub/工作区零串台、看板一致性、方案硬缺口。"
+      "review": "change_requested",
+      "reviewNote": "评审 change_requested（task-wjt2u5vs，对象 dd3b32d）。Blocking：B1 Eval1 用测试阈值覆盖生产装配（把 hub_session.go 阈值改 0.99 仍 PASS）、只跑 24 轮（验收 50）；B2 Eval2 只有「A 有/B 无」，缺 B 的正向控制（mutation「只给第一个 agent 注入记忆」存活）；B3 Eval3 只断言 model，provider 硬编码 deepseek 仍 PASS，无 metrics/cost 与反向归属，gpt-5.1 不在预设；B4 资料页改 provider/model/effort 后运行中的 DM 仍用旧值，但响应说 next_run；B5 关闭工具（bash）只影响新装配，运行中 DM 仍能调用，响应同样说 next_run（安全相关）；B6 Hub DM 的 switch_model 改全局 active provider 与 lastModel，波及新工作区会话；B7 P1-08 验收含 Chat|Run/压缩回执但未实现（已改为延期并写入验收）；B8 P1-09 缺会话 tab/全工具与 MCP 开关/provider-model 下拉（已改为延期并写入验收）；B9 看板状态不一致（P1-06 仍是 review/pending）—— 已在 e2365f3/753d373 前修好，本轮复核只针对 dd3b32d。处理计划：修复 B4/B5/B6（代码+回归）→ 重写 B1/B2/B3 评测并做 mutation 自证 → 更新 P1-08/09 验收与 reviewNote 后重评审。"
     },
     "P2-01": {
       "status": "review",
