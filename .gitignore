@@ -71,6 +71,9 @@ testdata/
 # 例外：agenthub 的 L1 提示词 golden 是契约文案，必须入库（否则干净检出里
 # golden 缺失 → 测试直接失败；被上面那条 testdata/ 规则误伤过一次）
 !agenthub/testdata/
+# 例外：MCP 端到端测试的 fixture server（go build 成子进程），mcp 与 desktop/bridge
+# 的 MCP 用例都靠它；同样被 testdata/ 规则误伤过（干净检出里直接 "fixture: exit status 1"）
+!mcp/testdata/
 # 真实会话回放基准的夹具（tools/bench/export_real_sessions.py 生成）：
 # 含本机 ~/.go-code/sessions 的真实会话内容（数十 MB、含用户对话与代码），
 # 绝不入库。测试在夹具缺失时 t.Skip，不伪造数字。
