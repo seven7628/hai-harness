@@ -389,10 +389,11 @@ const BASE = {
       ],
       "files": [
         "agenthub/profile.go",
-        "agenthub/group.go"
+        "agenthub/group.go",
+        "agenthub/profile_test.go"
       ],
       "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；accent 颜色校验且缺省由 avatar.bg/名字 hash 稳定派生；ToolPolicy 零值=全开，disable/allow/MCP 开关可校验；max_agents=50 / max_group_members=12；错误可读。",
-      "tests": "go test ./agenthub/ -run Profile",
+      "tests": "go test ./agenthub/ -run 'Profile|Group'",
       "commit": "feat(hub-p0-03): Profile/Group 校验与默认值"
     },
     {
@@ -1163,6 +1164,12 @@ const BASE = {
       "commit": "57d72db fix(hub-p0-02): 丢弃缺换行的尾行，避免下一次追加粘连",
       "review": "passed",
       "reviewNote": "首轮 changes_requested（B1 日志尾部坏行/中间坏行粘连；B2 >8MiB 行写得进读不出）→ d281f8f 修复（尾行截断/短写回滚/写前限长/Reader 无上限/深拷贝/事件 seq）→ 复审 pass；复审建议的“完整 JSON 缺换行尾行”在 57d72db 修复并加用例，复核 pass（go test -race ./agenthub/... 全绿，覆盖率 76%）。"
+    },
+    "P0-03": {
+      "status": "review",
+      "commit": "c0a0bd5 feat(hub-p0-03): Profile/Group 校验与默认值",
+      "review": "pending",
+      "reviewNote": "独立 Review 进行中；go test -race ./agenthub/... 全绿。"
     }
   }
 };
