@@ -854,6 +854,12 @@
       "commit": "a8f5743 test(hub-p0-01): 补 Scope/EffectiveMode/缺省 DM 用例并收尾",
       "review": "passed",
       "reviewNote": "首轮 changes_requested（B1-B6）→ e15b3b2 修复 → 复审 pass（11/11 race 测试）；残余 non-blocking 1-5 收尾于 a8f5743；零值形状留给 P0-02 fixture。"
+    },
+    "P0-02": {
+      "status": "review",
+      "commit": "2e3feae feat(hub-p0-02): Store 接口、FileStore 原子写与恢复",
+      "review": "pending",
+      "reviewNote": "独立 Review 进行中；测试 go test -race ./agenthub/... 全绿，覆盖率 72.9%。"
     }
   }
 }
