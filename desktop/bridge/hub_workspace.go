@@ -324,6 +324,11 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		o.m.hubMsgDedup[dedupKey] = sid // 先占位：并发同 id 的第二个请求直接返回
 		o.m.mu.Unlock()
 	}
+	if strings.TrimSpace(req.TaskHeader) != "" {
+		if _, err := agenthub.ParseTaskHeader(req.TaskHeader); err != nil {
+			return agenthub.DispatchResult{}, fmt.Errorf("%w: 无效的 hub_task header: %v", agenthub.ErrInvalid, err)
+		}
+	}
 	msg := hubDispatchMessage(text, req.TaskHeader)
 	// 先置 pending 再 Ask：若 runLoop 已有 wake token，Ask 后可能立刻
 	// AgentStart→AgentEnd，晚置位会把闸门永久 latch（P2-03 复审 NB-1）。

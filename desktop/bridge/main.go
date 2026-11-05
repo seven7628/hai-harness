@@ -327,6 +327,10 @@ type bridgeSession struct {
 	hubTaskIDs []agenthub.TaskID
 	// hubFinishTask 根 AgentEnd 时结算 hub_task（nil = 非项目会话/未接线）。
 	hubFinishTask func(ae *events.AgentEnd)
+	// hubFailTask 把指定 hub_task 标 failed（注入/坏 header 的静默丢任务兜底）。
+	hubFailTask func(ids []agenthub.TaskID, reason string)
+	// hubAlert 通用 hub_alert（nil = 未接线）。
+	hubAlert func(code, message string)
 	// hubNeed 审批/提问事件的 Needs you 钩子（nil = 未接线）。
 	hubNeed func(e events.Event)
 	// hubExpireNeeds 根 run 结束时收掉该会话挂起的 need。
@@ -599,10 +603,18 @@ func (bs *bridgeSession) emit(e events.Event) {
 	case *events.AgentStart:
 		bs.resetLive() // 新 run：旧 run 的残留文本不能串到这一轮
 	case *events.UserInputsConsumed:
-		// 相关性（§6.7.2）：只认 batch 开口（Injected=插话不算新任务）；
-		// hub_task 块由派发侧写在正文之前，坏 JSON/缺 id 由 finishHubTask 报失败。
-		if !ev.Injected {
-			bs.hubTaskIDs = hubTaskIDsOf(ev.UserContents)
+		// 相关性（§6.7.2）：只认 batch 开口（Injected=插话不算新任务）。
+		// 注入路径消费到的 hub_task 不能静默丢：闸门失效 → 任务 failed + 告警。
+		ids, bad := hubTaskIDsOf(ev.UserContents)
+		if bad > 0 && bs.hubAlert != nil {
+			bs.hubAlert("bad_header", fmt.Sprintf("有 %d 个 hub_task header 无法解析", bad))
+		}
+		if ev.Injected {
+			if len(ids) > 0 && bs.hubFailTask != nil {
+				bs.hubFailTask(ids, "injected_conflict: 任务消息被运行中插话消费（空闲闸门失效）")
+			}
+		} else {
+			bs.hubTaskIDs = ids
 		}
 	case *events.LLMEnd:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
@@ -833,8 +845,9 @@ const maxPreviewBytes = 1 << 20
 
 // hubTaskIDsOf 从一批用户内容块里收集 hub_task id（§6.7.2）。
 // 一个正常 batch 只应有一个；多个是闸门 bug，由结算侧按 batch_conflict 处理。
-func hubTaskIDsOf(contents [][]core.Content) []agenthub.TaskID {
+func hubTaskIDsOf(contents [][]core.Content) ([]agenthub.TaskID, int) {
 	var ids []agenthub.TaskID
+	bad := 0
 	for _, blocks := range contents {
 		for _, c := range blocks {
 			if c.Type != core.ContentTypeHubTask {
@@ -842,12 +855,13 @@ func hubTaskIDsOf(contents [][]core.Content) []agenthub.TaskID {
 			}
 			h, err := agenthub.ParseTaskHeader(c.Content)
 			if err != nil || h.TaskID == "" {
+				bad++
 				continue
 			}
 			ids = append(ids, h.TaskID)
 		}
 	}
-	return ids
+	return ids, bad
 }
 
 func (bs *bridgeSession) handler() events.EventHandler {
@@ -883,6 +897,9 @@ type manager struct {
 	hubFS *agenthub.FileStore
 	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
 	hubQueue *agenthub.Queue
+	// hubFinishMu 串行化任务结算的「检查已通知 → Finish → 回推 → MarkNotified」
+	// （P2-05 复审 B1：并发同 run 会双推）。
+	hubFinishMu sync.Mutex
 	// hubRecovered 进程内只做一次崩溃恢复（在首次 hub_open 时）。
 	hubRecovered bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
@@ -1594,6 +1611,10 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.pumpHubQueue, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
 	bs.hubNeed = func(e events.Event) { m.recordHubNeed(bs, e) }
 	bs.hubExpireNeeds = func() { m.expireSessionNeeds(bs) }
+	bs.hubFailTask = m.failHubTasksByReason
+	bs.hubAlert = func(code, message string) {
+		m.out.writeLine(map[string]any{"event_type": "hub_alert", "code": code, "kind": code, "message": message})
+	}
 	if opts.hub != nil {
 		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：
 		// rebuildLoop 据此走 buildHubLoop，而不会被当成项目会话的 code persona 重建。

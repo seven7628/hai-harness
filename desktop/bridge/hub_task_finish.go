@@ -29,6 +29,8 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	if len(ids) == 0 {
 		return
 	}
+	m.hubFinishMu.Lock()
+	defer m.hubFinishMu.Unlock()
 	st, err := m.hubStore()
 	if err != nil {
 		m.emitHubTaskAlert(ids[0], "settle_failed", err.Error())
@@ -37,8 +39,10 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	ledger := agenthub.NewLedger(st)
 	status := agenthub.TaskCompleted
 	switch {
-	case ae.ErrorKind == "canceled" || ae.ErrorKind == "aborted":
+	case ae.FinishReason == core.FinishReasonAbort || ae.ErrorKind == "canceled" || ae.ErrorKind == "aborted":
 		status = agenthub.TaskInterrupted
+	case ae.FinishReason == core.FinishReasonMaxIterations:
+		status = agenthub.TaskFailed // 轮数护栏截断：没有最终答复，不能算完成
 	case ae.FinishReason == core.FinishReasonError || ae.Error != "":
 		status = agenthub.TaskFailed
 	}
@@ -51,6 +55,10 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	}
 	ctx := context.Background()
 	first := ids[0]
+	// 重放（同 run 已回推）：静默返回，不再 Finish（delivered→completed 会报假告警）。
+	if cur, lerr := st.LoadTask(ctx, first); lerr == nil && alreadyNotified(cur, ae.RunId) {
+		return
+	}
 	// 单任务预算：成本只有在结算时才知道；超限落 blocked_budget + hub_alert（§6.9）。
 	if originTask, terr := st.LoadTask(ctx, first); terr == nil && originTask.Origin.AgentID != "" {
 		if p, _, perr := m.hubLoadAgent(string(originTask.Origin.AgentID)); perr == nil && p != nil {
@@ -135,6 +143,11 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 	}
 	if _, err := ledger.MarkNotified(context.Background(), task.ID, ae.RunId); err != nil {
 		m.emitHubTaskAlert(task.ID, "notify_failed", err.Error())
+		return
+	}
+	// delivered 是权威终态：再发一次快照，前端才能区分「已回推」与「未送达」。
+	if latest, lerr := ledger.Replay(context.Background(), task.ID); lerr == nil {
+		m.emitHubTaskUpdate(latest)
 	}
 }
 
@@ -143,9 +156,12 @@ func (m *manager) emitHubTaskUpdate(t *agenthub.Task) {
 	if m == nil || m.out == nil || t == nil {
 		return
 	}
+	// §7.2/§7.3.3 契约：以 task_id 为 key 摊平字段；保留 task 供任务板整条渲染。
 	m.out.writeLine(map[string]any{
-		"event_type": "hub_task_update",
-		"task":       t,
+		"event_type": "hub_task_update", "task_id": string(t.ID), "task": t,
+		"status": t.Status, "target_kind": t.Target.Kind,
+		"group_id": t.Target.GroupID, "agent_id": t.Origin.AgentID,
+		"title": t.Title, "error": t.Error,
 	})
 }
 
@@ -188,5 +204,42 @@ func taskUsageOf(u *core.Usage) agenthub.Usage {
 		Reasoning:  u.Reasoning,
 		CostPriced: u.Cost.Priced,
 		CostUSD:    float64(u.Cost.Total) / 1e6,
+	}
+}
+
+// failHubTasksByReason 把被注入消费/坏 header 的 hub_task 标 failed（不再静默）。
+func (m *manager) failHubTasksByReason(ids []agenthub.TaskID, reason string) {
+	if m == nil || len(ids) == 0 {
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		return
+	}
+	ledger := agenthub.NewLedger(st)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, id := range ids {
+		t, err := ledger.Replay(ctx, id)
+		if err != nil {
+			m.emitHubTaskAlert(id, "settle_failed", err.Error())
+			continue
+		}
+		if t.Status.Terminal() {
+			continue
+		}
+		if _, err := ledger.Finish(ctx, agenthub.FinishInput{
+			TaskID: id, RunID: "dispatch-conflict", Status: agenthub.TaskFailed, Error: reason,
+		}); err != nil {
+			// queued 不能直接 Finish：取消后再标失败。
+			if _, cerr := ledger.Transition(ctx, id, agenthub.TaskCanceled, agenthub.TransitionOptions{At: time.Now().UTC(), Error: reason}); cerr != nil {
+				m.emitHubTaskAlert(id, "settle_failed", err.Error())
+				continue
+			}
+		}
+		m.emitHubTaskAlert(id, "injected_conflict", reason)
+		if latest, rerr := ledger.Replay(ctx, id); rerr == nil {
+			m.emitHubTaskUpdate(latest)
+		}
 	}
 }

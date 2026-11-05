@@ -308,12 +308,25 @@ func addDetails(a, b *UsageDetails) *UsageDetails {
 // Priced/Source 是单轮口径标记：跨轮聚合后无法用单一值表达（一轮有价一轮无价），
 // 因此聚合结果恒为零值 —— 需要「这一笔有没有价」看单轮 Usage.Cost（metrics 按行统计）。
 func (c Cost) Add(v Cost) Cost {
+	empty := c.Input == 0 && c.Output == 0 && c.Reasoning == 0 && c.CacheRead == 0 &&
+		c.CacheWrite == 0 && c.Total == 0 && !c.Priced && c.Source == ""
+	if empty {
+		return v // 首次累加：保留 Priced/Source（零值 AND 会把有价抹成无价）
+	}
+	// 跨轮聚合的有价性：所有轮次都有价才是有价；来源一致才保留 Source。
+	priced := c.Priced && v.Priced
+	source := c.Source
+	if source != v.Source {
+		source = ""
+	}
 	c.Input += v.Input
 	c.Output += v.Output
 	c.Reasoning += v.Reasoning
 	c.CacheRead += v.CacheRead
 	c.CacheWrite += v.CacheWrite
 	c.Total += v.Total
+	c.Priced = priced
+	c.Source = source
 	return c
 }
 

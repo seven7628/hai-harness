@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,9 +39,19 @@ func TestHubTaskFinishCompleted(t *testing.T) {
 	m, buf := testManager(t)
 	task := newDispatchedHubTask(t, m)
 	bs := &bridgeSession{ctx: context.Background(), hubTaskIDs: []agenthub.TaskID{task.ID}}
+	// 真实路径是 Usage.Add 跨轮累加（P2-04 复审 B1）：不能手搓一个 Priced=true 的结构。
+	var usage core.Usage
+	usage = usage.Add(core.Usage{Input: 60, Cost: core.Cost{Total: 1800, Priced: true, Source: core.CostSourceBuiltin}})
+	usage = usage.Add(core.Usage{Input: 40, Output: 20, Cost: core.Cost{Total: 1200, Priced: true, Source: core.CostSourceBuiltin}})
+	if !usage.Cost.Priced {
+		t.Fatalf("aggregated usage lost Priced: %+v", usage.Cost)
+	}
 	m.finishHubTask(bs, &events.AgentEnd{
 		RunId: "run-1", Content: "对比表已发你", FinishReason: core.FinishReasonStop,
-		Usage: &core.Usage{Input: 100, Output: 20, Cost: core.Cost{Total: 3000, Priced: true}},
+		Usage: &usage,
+		Artifacts: []core.Artifact{
+			{Name: "out.md", Path: "out.md", Kind: "created", Added: 3, Size: 120, Lines: 4},
+		},
 	})
 	st, _ := m.hubStore()
 	got, err := st.LoadTask(context.Background(), task.ID)
@@ -56,6 +67,9 @@ func TestHubTaskFinishCompleted(t *testing.T) {
 	}
 	if len(bs.hubTaskIDs) != 0 {
 		t.Fatal("hubTaskIDs must be cleared after settle")
+	}
+	if len(got.Result.Artifacts) != 1 || got.Result.Artifacts[0].Name != "out.md" || got.Result.Artifacts[0].Kind != "created" {
+		t.Fatalf("artifacts = %+v", got.Result.Artifacts)
 	}
 	_ = buf
 }
@@ -227,12 +241,90 @@ func TestHubTaskFinishIdempotentPush(t *testing.T) {
 		m.finishHubTask(bs, ae)
 	}
 	n := 0
+	var seen []map[string]any
 	for _, msg := range readLines(buf) {
+		seen = append(seen, msg)
 		if msg["event_type"] == "task_result_delivered" && msg["task_id"] == string(task.ID) {
 			n++
 		}
 	}
 	if n != 1 {
 		t.Fatalf("task_result_delivered count = %d, want 1", n)
+	}
+	// 重放不能撞状态机产生假告警；delivered 必须有快照（复审 B1/B3）。
+	deliveredUpdates := 0
+	for _, msg := range seen {
+		if msg["event_type"] == "hub_alert" && msg["kind"] == "settle_failed" {
+			t.Fatalf("replay produced settle_failed: %v", msg)
+		}
+		if msg["event_type"] == "hub_task_update" && msg["status"] == string(agenthub.TaskDelivered) {
+			if msg["task_id"] != string(task.ID) {
+				t.Fatalf("hub_task_update missing flattened task_id: %v", msg)
+			}
+			deliveredUpdates++
+		}
+	}
+	if deliveredUpdates != 1 {
+		t.Fatalf("delivered hub_task_update = %d, want 1 (seen=%v)", deliveredUpdates, seen)
+	}
+}
+
+// P2-04 复审 B2：用户中断（FinishReasonAbort，ErrorKind 空）必须是 interrupted。
+func TestHubTaskFinishAbortIsInterrupted(t *testing.T) {
+	m, _ := testManager(t)
+	task := newDispatchedHubTask(t, m)
+	bs := &bridgeSession{ctx: context.Background(), hubTaskIDs: []agenthub.TaskID{task.ID}}
+	m.finishHubTask(bs, &events.AgentEnd{RunId: "r-abort", FinishReason: core.FinishReasonAbort})
+	st, _ := m.hubStore()
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != agenthub.TaskInterrupted {
+		t.Fatalf("status = %s, want interrupted", got.Status)
+	}
+}
+
+// P2-04 复审 B3：插话路径消费到的 hub_task 必须 failed + 告警，不能静默停在 dispatched。
+func TestHubInjectedHubTaskFails(t *testing.T) {
+	m, buf := testManager(t)
+	ws := t.TempDir()
+	bs, err := m.create(ws, "s-injected", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := newDispatchedHubTask(t, m)
+	task.Target.Workspace = ws
+	task.Target.SessionID = bs.id
+	header, err := agenthub.EncodeTaskHeader(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	bs.emit(&events.UserInputsConsumed{
+		Injected:     true,
+		UserContents: [][]core.Content{{{Type: core.ContentTypeHubTask, Content: header}}},
+		EventType:    events.UserInputsConsumedType, Timestamp: time.Now(),
+	})
+	st, _ := m.hubStore()
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != agenthub.TaskFailed {
+		t.Fatalf("status = %s, want failed", got.Status)
+	}
+	if !strings.Contains(buf.String(), "injected_conflict") {
+		t.Fatalf("missing alert: %s", buf.String())
+	}
+	// 坏 header：告警但不结算。
+	buf.Reset()
+	bs.emit(&events.UserInputsConsumed{
+		Injected:     false,
+		UserContents: [][]core.Content{{{Type: core.ContentTypeHubTask, Content: "{bad"}}},
+		EventType:    events.UserInputsConsumedType, Timestamp: time.Now(),
+	})
+	if !strings.Contains(buf.String(), "bad_header") {
+		t.Fatalf("missing bad_header alert: %s", buf.String())
 	}
 }
