@@ -1020,6 +1020,12 @@
       "commit": "fcbe73c feat(hub-p2-08): 崩溃恢复（queued 重入队 / 无 run 中断 / 未回推重推）",
       "review": "pending",
       "reviewNote": "实现：hub_open 首次 ensureHubRecovery（进程内一次）。queued → Queue.Restore 放回 FIFO（重复恢复不重复入队）；dispatched/running 且 Dispatch.RunID 空 → interrupted + hub_alert + Needs you(failure) + 回推；completed/failed/interrupted 未 notified → 用账本结果合成 AgentEnd 重推，MarkNotified 幂等；不自动重试（避免副作用双执行）。测试：3 条 HubRecovery（含「第二次恢复 task_result_delivered 只一次」）。边界：queued 重入队后要等下一次闸门（会话被打开/AgentEnd）；启动时不主动装配工作区（避免打开全部项目）。验证：agenthub + desktop/bridge 全量绿（41s）。"
+    },
+    "P2-09": {
+      "status": "review",
+      "commit": "31c445e test(hub-p2-09): 评测 4–6（一句话派任务/人工介入/重启可解释）",
+      "review": "pending",
+      "reviewNote": "实现评测 4–6（desktop/bridge/hub_eval_p2_test.go）：Eval4 workspace_create→session_create→session_send 全链路，目标任务真跑一轮，账本 completed→delivered、发起者收到 task_result；Eval5 排队任务被人取消后不自动执行/不自动重试；Eval6 无 run 的 dispatched 恢复为 interrupted + recovered_interrupted + Needs you(重启说明)。验证：TestEval1-6 全绿（6.3s）、desktop/bridge 全量绿（41s）。待办：P2 阶段整体 Review（P2-01..P2-08）+ 逐任务复审结论落看板后，P2-09 才能 passed。"
     }
   }
 }
