@@ -34,6 +34,10 @@ func (f *fakeWorkspaceOps) ListSessions(_ context.Context, workspace string) ([]
 	return f.sessions, nil
 }
 
+func (f *fakeWorkspaceOps) SessionStatus(context.Context, string, string) (SessionInfo, error) {
+	return SessionInfo{ID: "s1", Workspace: "/w"}, nil
+}
+
 func (f *fakeWorkspaceOps) CreateSession(_ context.Context, req CreateSessionReq) (SessionInfo, error) {
 	f.createdSes = append(f.createdSes, req)
 	return SessionInfo{ID: "s-new", Workspace: req.Workspace, Title: req.Title}, nil

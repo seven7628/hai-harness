@@ -316,8 +316,10 @@ type bridgeSession struct {
 	// hubEngine Hub 会话的工具引擎（记忆/人格变更后重建 loop 时复用：
 	// 重建引擎会丢掉正在运行的工具任务与审批等待，没必要）。
 	hubEngine *tools.Engine
-	workspace string     // 工作区根（审批 diff 读取原文件用）
-	mobile    *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// hubPumpQueue 根 run 结束时推进 Hub 派发队列（nil = 未接线）。
+	hubPumpQueue func(workspace, sessionID string)
+	workspace    string     // 工作区根（审批 diff 读取原文件用）
+	mobile       *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
 	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
 	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
 	running atomic.Bool
@@ -685,6 +687,16 @@ func (bs *bridgeSession) emit(e events.Event) {
 	if e.Type() == events.AgentEndType && bs.cronLedger != nil && bs.cronRun != "" {
 		bs.finishCronRun(bs.cronEndStatus, bs.cronEndErr, bs.cronEndContent)
 	}
+	// Hub 派发队列：项目会话的**根 run** 结束后推进一步（AgentEnd 已落盘、
+	// bs.running 已置 false，闸门看到的是真实空闲状态）。
+	if e.Type() == events.AgentEndType && bs.hubPumpQueue != nil && bs.runtime != nil &&
+		bs.runtime.kind == runtimeProject {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" {
+			// pumpHubQueue 内部先看队列长度：没有排队任务时立刻返回，不碰存储、
+			// 不阻塞 emit（会话的 run ledger 收尾在 emit 返回之后）。
+			bs.hubPumpQueue(bs.workspace, bs.id)
+		}
+	}
 }
 
 // approvalWindow 审批等待窗口（与提问窗口 events.MaxQuestionTimeout 同值：最长 30 分钟）。
@@ -764,6 +776,8 @@ type manager struct {
 	hubRuntimes map[string]*workspaceRuntime
 	// hubFS Hub 领域存储（~/.go-code/hub，懒开；见 hubStore）。
 	hubFS *agenthub.FileStore
+	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
+	hubQueue *agenthub.Queue
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
 	hubSessionLocks map[string]*sync.Mutex
 	provCfg         *providerConfig  // 全局 provider 配置（热切换；set_provider 更新）
@@ -1468,7 +1482,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub()}
+	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.pumpHubQueue}
 	if opts.hub != nil {
 		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：
 		// rebuildLoop 据此走 buildHubLoop，而不会被当成项目会话的 code persona 重建。

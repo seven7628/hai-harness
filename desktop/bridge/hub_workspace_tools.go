@@ -286,7 +286,8 @@ func (t *hubSessionSendTool) Call(ctx context.Context, _, arguments string) (str
 	}
 	return marshalHubToolResult(map[string]any{
 		"task_id": res.TaskID, "session_id": res.SessionID,
-		"accepted": res.Accepted, "message": res.Message,
+		"accepted": res.Accepted, "status": res.Status, "queued": res.Queued,
+		"message": res.Message,
 	})
 }
 

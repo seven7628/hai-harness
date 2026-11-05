@@ -33,6 +33,10 @@ func (f *toolFakeOps) ListSessions(context.Context, string) ([]agenthub.SessionI
 	return []agenthub.SessionInfo{{ID: "s1", Workspace: "/w", Title: "会话", Running: true}}, nil
 }
 
+func (f *toolFakeOps) SessionStatus(context.Context, string, string) (agenthub.SessionInfo, error) {
+	return agenthub.SessionInfo{ID: "s1", Workspace: "/w"}, nil
+}
+
 func (f *toolFakeOps) CreateSession(_ context.Context, req agenthub.CreateSessionReq) (agenthub.SessionInfo, error) {
 	f.createdSes = append(f.createdSes, req)
 	return agenthub.SessionInfo{ID: "s-new", Workspace: req.Workspace, Title: req.Title}, nil

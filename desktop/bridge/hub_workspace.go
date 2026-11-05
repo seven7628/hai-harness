@@ -162,12 +162,61 @@ func (o *hubWorkspaceOps) ListSessions(ctx context.Context, workspace string) ([
 		if v, ok := row["running"].(bool); ok {
 			info.Running = v
 		}
+		if bs := o.m.get(path, info.ID); bs != nil {
+			info.Pending = bs.s.PendingCount()
+		}
 		if v, ok := row["updated_at"].(time.Time); ok {
 			info.UpdatedAt = v
 		}
 		out = append(out, info)
 	}
 	return out, nil
+}
+
+// SessionStatus 单会话空闲闸门探针（P2-03 队列用）。
+func (o *hubWorkspaceOps) SessionStatus(ctx context.Context, workspace, sessionID string) (agenthub.SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return agenthub.SessionInfo{}, err
+	}
+	path, err := o.knownWorkspace(workspace)
+	if err != nil {
+		return agenthub.SessionInfo{}, err
+	}
+	bs := o.m.get(path, sessionID)
+	if bs == nil {
+		return agenthub.SessionInfo{}, fmt.Errorf("%w: session %q", agenthub.ErrNotFound, sessionID)
+	}
+	return agenthub.SessionInfo{
+		ID: sessionID, Workspace: path,
+		Running: bs.running.Load(), Pending: bs.s.PendingCount(),
+	}, nil
+}
+
+// hubQueueFor 懒开 Hub 派发队列（账本 + 本 manager 的 WorkspaceOps）。
+func (m *manager) hubQueueFor() (*agenthub.Queue, error) {
+	st, err := m.hubStore()
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hubQueue == nil {
+		m.hubQueue = agenthub.NewQueue(agenthub.NewLedger(st), newHubWorkspaceOps(m))
+	}
+	return m.hubQueue, nil
+}
+
+// pumpHubQueue 根 run 结束后推进队列（见 bridgeSession.emit 尾部）。
+func (m *manager) pumpHubQueue(workspace, sessionID string) {
+	m.mu.Lock()
+	q := m.hubQueue
+	m.mu.Unlock()
+	if q == nil || q.QueuedCount(workspace, sessionID) == 0 {
+		return // 没用过 Hub 派发/没有排队任务：不碰存储、不阻塞事件
+	}
+	_, _ = q.Pump(context.Background(), agenthub.TaskTarget{
+		Kind: agenthub.TargetWorkspace, Workspace: workspace, SessionID: sessionID,
+	})
 }
 
 // CreateSession 在已登记工作区里开会话（标题由首条消息生成，这里只给 id）。

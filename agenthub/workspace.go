@@ -34,10 +34,12 @@ type CreateWorkspaceReq struct {
 
 // SessionInfo 工作区里的一个会话（Hub 只关心「派给谁/在跑什么」）。
 type SessionInfo struct {
-	ID        string    `json:"id"`
-	Workspace string    `json:"workspace"`
-	Title     string    `json:"title"`
-	Running   bool      `json:"running"`
+	ID        string `json:"id"`
+	Workspace string `json:"workspace"`
+	Title     string `json:"title"`
+	Running   bool   `json:"running"`
+	// Pending = Session.inbox 积压 + 未搬进 inbox 的恢复积压（空闲闸门的数据源）。
+	Pending   int       `json:"pending"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
@@ -69,6 +71,8 @@ type WorkspaceOps interface {
 	ListWorkspaces(ctx context.Context) ([]WorkspaceInfo, error)
 	CreateWorkspace(ctx context.Context, req CreateWorkspaceReq) (WorkspaceInfo, error)
 	ListSessions(ctx context.Context, workspace string) ([]SessionInfo, error)
+	// SessionStatus 单会话空闲闸门探针（Running/Pending）；不存在 → ErrNotFound。
+	SessionStatus(ctx context.Context, workspace, sessionID string) (SessionInfo, error)
 	CreateSession(ctx context.Context, req CreateSessionReq) (SessionInfo, error)
 	Dispatch(ctx context.Context, req DispatchReq) (DispatchResult, error)
 	InterruptSession(ctx context.Context, sid string) error

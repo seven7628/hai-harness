@@ -95,7 +95,12 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 	// Hub 自己的工作区/会话工具（§6.3.1 明确替换 mesh 的同名工具，语义不同：
 	// 这里派给项目会话，不切全局 provider）。注册后再统一过 Profile 策略，
 	// 所以 readonly 预设仍能看到 list、看不到 create/send。
-	registerHubWorkspaceTools(eng, agenthub.NewWorkspaceService(newHubWorkspaceOps(m), p.ID))
+	svc := agenthub.NewWorkspaceService(newHubWorkspaceOps(m), p.ID)
+	svc.Origin = agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID}
+	if q, err := m.hubQueueFor(); err == nil {
+		svc.Queue = q // P2-03：任务落账本 + 空闲闸门；失败降级为直接派发
+	}
+	registerHubWorkspaceTools(eng, svc)
 	applyHubToolPolicy(context.Background(), eng, p.Tools)
 	return eng, effortRef
 }
