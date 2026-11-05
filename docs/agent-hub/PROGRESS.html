@@ -1199,9 +1199,9 @@ const BASE = {
     },
     "P0-08": {
       "status": "review",
-      "commit": "8092b4c refactor(hub-p0-08): createIn 与 hubRuntime",
+      "commit": "9f94391 fix(hub-p0-08): createIn/buildLoop 不再按路径重查 runtime（复审 blocking）",
       "review": "pending",
-      "reviewNote": "createOpts 变薄转发 createIn；workspaceRuntime.kind/agentID；m.hubRuntime(agentID) 只装配全局层并登记在 manager.hubRuntimes（不混进 m.workspaces）；shutdownAll 收尾。测试：全局正对照 + 项目层/智能体 home 负对照（换成项目装载器即失败）、缓存与关停语义、createOpts/createIn 等价。HOME=/tmp/emptyhome 下 bridge/session/core 全绿。"
+      "reviewNote": "首轮 changes_requested（createIn 残留 m.runtime(wsPath).skills → hub 会话按路径新造项目 runtime、污染 m.workspaces、hub 全局层成死代码；buildLoop 内部仍按路径取 plugins/mcp/subagents）→ 9f94391 修复（sk 用入参 ws；buildLoop 改吃 *workspaceRuntime；bridgeSession.runtime + rebuildLoop 复用；hub wsKey=hub-<agentID>；mesh Register 只给项目会话；closeHubRuntimes 补插件收尾）→ 待复审。新增 TestCreateInHubUsesGivenRuntime（mutation 反证：改回按路径重查即报 m.workspaces 被污染）。另：P0-08 的验收文案归位（buildHubLoop 断言→P1-02，hub_task UI 分流→P2-04）。"
     }
   }
 };
