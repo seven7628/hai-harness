@@ -88,13 +88,15 @@ func TestSnapshotExcludesRoundSummaryAndEmpty(t *testing.T) {
 		{Seq: 1, Kind: KindText, Sender: Sender{Kind: SenderHuman}, Text: "正常"},
 		{Seq: 2, Kind: KindRoundSummary, Sender: Sender{Kind: SenderSystem}, Text: "回执"},
 		{Seq: 3, Kind: KindText, Sender: Sender{Kind: SenderHuman}, Text: "   "},
+		{Seq: 4, Kind: KindApprovalStub, Sender: Sender{Kind: SenderSystem}, Text: "审批占位"},
+		{Seq: 5, Kind: KindText, Sender: Sender{Kind: SenderHuman}, Text: "私密", Visibility: VisibilityOwner},
 	}
 	snap := BuildGroupSnapshot(g, "ag_aaaaaaaa", msgs, 0, Round{}, SnapshotOptions{})
 	if len(snap.Messages) != 1 || snap.Messages[0].Seq != 1 {
 		t.Fatalf("messages = %+v", snap.Messages)
 	}
-	if strings.Contains(snap.Text, "回执") {
-		t.Fatalf("round summary leaked: %s", snap.Text)
+	if strings.Contains(snap.Text, "回执") || strings.Contains(snap.Text, "审批占位") || strings.Contains(snap.Text, "私密") {
+		t.Fatalf("receipt/approval/owner-only leaked: %s", snap.Text)
 	}
 	// 同输入同输出。
 	again := BuildGroupSnapshot(g, "ag_aaaaaaaa", msgs, 0, Round{}, SnapshotOptions{})

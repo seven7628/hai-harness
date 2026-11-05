@@ -652,6 +652,26 @@ func (s *FileStore) SaveArtifact(ctx context.Context, a *Artifact) error {
 	return writeJSONAtomic(s.artifactPath(cp.ID), &cp)
 }
 
+// ListArtifacts 扫描产物目录（FileStore 专用：Store 接口保持薄，版本计算在领域层）。
+func (s *FileStore) ListArtifacts(ctx context.Context) ([]*Artifact, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	matches, err := filepath.Glob(filepath.Join(s.root, "artifacts", "*", "artifact.json"))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Artifact, 0, len(matches))
+	for _, path := range matches {
+		var a Artifact
+		if err := readJSON(path, &a); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, nil
+}
+
 func (s *FileStore) LoadArtifact(ctx context.Context, id ArtifactID) (*Artifact, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

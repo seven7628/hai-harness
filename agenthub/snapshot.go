@@ -70,8 +70,12 @@ func BuildGroupSnapshot(g *Group, agentID AgentID, msgs []Message, cursor int64,
 		if limitSeq > 0 && m.Seq > limitSeq {
 			continue
 		}
-		if m.Kind == KindRoundSummary {
-			continue // 轮次回执不进上下文（活动流本来就不在消息日志里）
+		switch m.Kind {
+		case KindRoundSummary, KindRouting, KindApprovalStub:
+			continue // 回执/审批占位不进上下文（审批正文只进 Needs you）
+		}
+		if !m.VisibleTo(false) {
+			continue // owner-only 消息 fail-closed：智能体上下文一律不可见
 		}
 		if strings.TrimSpace(m.Text) == "" {
 			continue
