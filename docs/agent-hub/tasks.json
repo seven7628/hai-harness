@@ -932,10 +932,16 @@
       "reviewNote": "两轮评审收口（task-9r5k64yt，最终 passed）：首轮 2 blocking（子 agent 的 AgentEnd 被当成 DM 回复写进索引；hubDMSession 并发装配出多个会话——createIn 解锁装配期间无二次查表，注释与事实相反）→ f8b7d2e 修复（只认根 run：ParentRunId==\"\" && Depth==0；每智能体装配锁 lockHubAgent + 锁内复查；顺带幂等改全量扫描、Ask 成功后才落索引、isHubHomePath 拦 interrupt/delete_session、hub_open 支持 mark_read:false、预览折叠换行）→ 复审独立验：过滤的两个边界分量各自都能单独挡住子 agent，8 并发 distinct=1（-race 干净），两条 mutation（去过滤/去锁）均失败。复审后收尾（a08af34 + a35d77c）：m.get 对未装配的 hub home 直接返回 nil（否则 blocks_page/compact 会造出项目 kind 的幻影 runtime，用例去守卫即失败）、FindDirectMessageByClientID 补单测（含 150 条窗口外仍可查、坏行报 ErrCorrupt、末尾半行丢弃）、过期并发注释改成事实。遗留 non-blocking：isHubHomePath 不做大小写/软链归一；Ask 成功但索引写失败时重试会让模型看两遍；hubSessionLocks 只增不删。"
     },
     "P1-05": {
-      "status": "review",
+      "status": "done",
       "commit": "ba07d34 fix(hub-p1-05): 复核修复 —— 会话级 model/effort 优先、按文案钉住路径检查、SetLoop 行为断言",
+      "review": "passed",
+      "reviewNote": "两轮评审收口（task-xz2ecw66，最终 passed）：首轮 3 条（B1 写记忆重建 loop 用 Profile 的 model/effort 并回写 bs.* → 用户 switch 的模型/档位被静默改回、面板 high 实际 low；B2 `..` 路径分支未被测试钉住，删掉后 evalWithin 用 (symlink) 文案兜住仍全绿；行为缺口：删 SetLoop 后自带测试仍绿）→ ba07d34 修复：重建前用会话当前 provider/model/effort 覆盖 Profile 副本且不回写 bs.*；坏路径按各自文案断言并 deny (symlink) 兜底；Session.Loop() 只读访问器 + 会话侧断言（loop 记忆分区 == 注入长度）；.backups 设为保留段；hubMemoryConfig 出错不再回落项目记忆根；AgentLoop 补 Model()/ReasoningEffort()。三条 mutation 复核全部被杀；干净副本 go build + agenthub/session/bridge 全绿（-race 亦绿）。遗留 non-blocking（已排后续）：①switch_model 作用在 Hub DM 会把 hub 装配换成项目 persona（rebuildLoop 不认 persona=hub，既有缺陷，父提交同样复现）；②备份 prune 按完整文件名排序，跨前缀时会删掉刚写的那份备份（数据丢失，单文件用例覆盖不到）；③.backups 保留段大小写敏感；④Profile.Memory.Enabled 仍是死字段（只读全局偏好）。"
+    },
+    "P1-06": {
+      "status": "review",
+      "commit": "3a04d6c feat(hub-p1-06): 人格版本 / 回滚 / 提示词分层预览",
       "review": "pending",
-      "reviewNote": "首轮 changes_requested（task-fayq2axq）：B1 写记忆触发的 refreshHubLoops 用 Profile 的 model/effort 重建 loop 并回写 bs.provider/bs.model，用户在 DM 里 switch_model/switch_effort 会被一行记忆静默改回默认，且 bs.effort 不更新导致「面板 high、实际 low」；B2 路径检查的 \"..\" 分支未被测试钉住（删掉后仍全绿，evalWithin 用 (symlink) 文案兜住）；另有行为缺口：删掉 SetLoop 后自带测试仍全绿。→ ba07d34 修复：重建前用会话当前 provider/model/effort 覆盖 Profile 副本（不写回 bs.*）；坏路径按各自文案断言（并 deny (symlink) 兜底），.backups 设为保留段；Session.Loop() 只读取值 + 会话侧断言（SetLoop 被删即红，并核对 loop 的记忆分区 == 当前注入长度）；hubMemoryConfig 出错不再回落项目记忆根；AgentLoop 补 Model()/ReasoningEffort()。三条 mutation（去 clean 检查 / 去 SetLoop / 去会话覆盖）均已实测失败；agenthub+session+bridge 全绿（agents 包测试本就编译不过，与本次无关）。评审已确认扎实的部分：每智能体独立目录、A/B 不串、23 种逃逸形态全拒（含符号链接/中间目录）、写前备份+prune 只删 .bak、备份失败拒绝写、12 并发无撕裂。待复审。"
+      "reviewNote": "agenthub.RenderLayers（L1/L2/L3，RenderSystem 改为拼接、逐字节不变）+ 三个命令：hub_agent_versions（摘要列表，新的在前，不回整份 profile）、hub_agent_rollback（旧版内容落成新版本：当前版先留档、version 递增、深拷贝归档、provider/名字唯一校验、refreshHubLoops 下一个 Run 生效）、hub_agent_prompt_preview（L1–L3 + L4 记忆走装配同一个 hubMemoryInjection，L5 由内核请求期装配并写明）。用例 3 条 + 分层同源断言；三条 mutation（版本不递增 / 不留档 / 不重建 loop）实测均失败。待评审。"
     }
   }
 }
