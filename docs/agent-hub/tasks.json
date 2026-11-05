@@ -944,10 +944,22 @@
       "reviewNote": "agenthub.RenderLayers（L1/L2/L3，RenderSystem 改为拼接、逐字节不变）+ 三个命令：hub_agent_versions（摘要列表，新的在前，不回整份 profile）、hub_agent_rollback（旧版内容落成新版本：当前版先留档、version 递增、深拷贝归档、provider/名字唯一校验、refreshHubLoops 下一个 Run 生效）、hub_agent_prompt_preview（L1–L3 + L4 记忆走装配同一个 hubMemoryInjection，L5 由内核请求期装配并写明）。用例 3 条 + 分层同源断言；三条 mutation（版本不递增 / 不留档 / 不重建 loop）实测均失败。待评审。"
     },
     "P1-07": {
-      "status": "review",
+      "status": "done",
       "commit": "1364ddd feat(hub-p1-07): 每智能体压缩阈值 + loop 重建",
+      "review": "passed",
+      "reviewNote": "评审 passed（task-gdcjjk5k）：干净副本 `go build` + agenthub/bridge 全绿；三条 mutation（去 refreshHubLoops / 全局广播顺手改 hub / refreshHubLoops 丢掉会话级 model-effort）全部被杀死（第三条由 P1-05 用例杀死）。复核确认：无会话改阈值不留脏状态、部分 patch 其余字段保持、钳位矩阵命令/持久化/loop 三处一致（0.99→0.95、0.2→0.5、0→0.8、NaN/±Inf 被拒）、运行中的 run 用旧阈值收尾、hub home 不在 m.workspaces 故全局广播碰不到。遗留 non-blocking 已列入收尾：N1 用例里「全局广播」断言没走 dispatch 路径、N2 装配层 NaN 会传播（永不压缩）、N3 update 响应缺 effective、N6 本轮用例没自锁会话级 model/effort、N9 运行中 update 会把状态刷成 idle。另记录：N4 未知模型 128k 无黄标数据源、N5 Hub 压缩回执无用例（归 P1-10 验收）。"
+    },
+    "P1-08": {
+      "status": "review",
+      "commit": "a8ec18f feat(hub-p1-08): Hub surface + Hub Rail + DM 视图",
       "review": "pending",
-      "reviewNote": "阈值是 Profile 字段、装配显式传（默认 0.8）；hub_agent_update{compress_threshold} 保存后重建该智能体 loop（SetLoop，下一个 Run 生效），越界钳 [0.5,0.95]；set_compress_threshold 仍只扫 m.workspaces，不做全局广播。用例 2 条（改阈值换 loop 且取值生效/钳位；全局广播不影响 hub 但确实改工作区会话）；两条 mutation（update 不重建 loop / 全局广播顺手改 hub）均失败。待评审。"
+      "reviewNote": "新 surface（hubOpen 时整屏 HubSurface，工作区三栏/Statusbar 收起；左栏展开态与 rail 各一个入口）。Hub Rail：头像/名字/最后预览/未读/运行环，排序「未读→最近→名字」。DM 视图：头部（角色·provider·model + 运行点 + 编辑）、消息区（人右对齐、智能体不重复头像、空态用 role/description）、Composer（Enter/Shift+Enter）、content_chunk 流式 + 思考中、短内容贴底。状态独立 useHubStore（Hub session_id 与工作区会话两套语义），command id 从 5,000,000 起避免与主 store 串响应；乐观发送按 client_msg_id/seq 落定，失败撤下并显示错误。mock 实现 hub_agent_list/open/history/send（两个演示智能体 + 流式回复）。验证：tsc/eslint/vite build 全过；vite(5211)+Playwright 实测 rail 2 行、点开 DM、发送后流式到终稿、rail 预览更新、无 console error，截图确认撑满右侧与贴底。待评审。"
+    },
+    "P1-09": {
+      "status": "review",
+      "commit": "411b70d feat(hub-p1-09): 智能体资料页（5 tabs：基本/人格/工具与权限/记忆/版本）",
+      "review": "pending",
+      "reviewNote": "弹层资料页：左预览卡（头像/名字/角色/model/版本/删除），右 5 页签——基本（名字/emoji/识别色/角色/职责/provider/model/档位/阈值滑块/记忆开关）、人格（Instructions + L1–L4 说明）、工具与权限（preset + 撤下工具）、记忆（清单/读/写，回执显示备份名与生效时机）、版本（历史列表 + 回滚 + 提示词分层预览）。新建走 hub_agent_create、编辑走 patch；HubSurface 接入「＋」新建与 DM 头「编辑」。mock 补齐 editor 所需全部命令。实测修掉两个缺陷：记忆清单重复 MEMORY.md、保存回执被 loadMemory 清空（先重载再写 note）。验证：tsc/eslint/vite build 全过；Playwright 实测 5 页签、保存后版本 1→2、写记忆两次分别显示「已写入」与「已备份为 MEMORY.md.<ts>.bak · 下一个 Run 生效」、预览 2 层、无 console error。待评审。"
     }
   }
 }
