@@ -133,3 +133,38 @@ func TestPromptByteStable(t *testing.T) {
 		t.Fatalf("roster order not preserved:\n%s", first)
 	}
 }
+
+// 分层预览必须与真正下发的提示词逐字节同源（设置页不能另写一份文案）。
+func TestRenderLayersMatchesSystem(t *testing.T) {
+	alice := &AgentProfile{ID: "ag_aaaaaaaa", Name: "Researcher", Role: "竞品研究员", Instructions: "只信一手来源"}
+	g := &Group{ID: "gr_gggggggg", Name: "Research", Members: []Member{{AgentID: alice.ID, Role: RoleOwner}}}
+	spec := PromptSpec{Agent: alice, Group: g, Members: []*AgentProfile{alice}}
+
+	layers := RenderLayers(spec)
+	if len(layers) != 3 {
+		t.Fatalf("layers = %d, want 3 (protocol/roster/identity): %+v", len(layers), layers)
+	}
+	wantKeys := []string{"protocol", "roster", "identity"}
+	parts := make([]string, 0, len(layers))
+	for i, layer := range layers {
+		if layer.Key != wantKeys[i] {
+			t.Fatalf("layer[%d].key = %q, want %q", i, layer.Key, wantKeys[i])
+		}
+		if layer.Title == "" || strings.TrimSpace(layer.Text) == "" {
+			t.Fatalf("layer %q must have title and text: %+v", layer.Key, layer)
+		}
+		parts = append(parts, layer.Text)
+	}
+	if got, want := strings.Join(parts, "\n\n"), RenderSystem(spec); got != want {
+		t.Fatalf("layers joined != RenderSystem:\n--- layers ---\n%s\n--- system ---\n%s", got, want)
+	}
+
+	// 空输入：只剩 L1，且仍是同一个字节串（空层不产生空串层）。
+	bare := RenderLayers(PromptSpec{})
+	if len(bare) != 1 || bare[0].Key != "protocol" {
+		t.Fatalf("bare layers = %+v, want only protocol", bare)
+	}
+	if bare[0].Text != RenderSystem(PromptSpec{}) {
+		t.Fatal("L1-only layers text != RenderSystem")
+	}
+}

@@ -52,15 +52,36 @@ talk to them by writing @Name in a message, or assign tracked work with assign_t
   approvals.
 - If a request is outside your responsibilities, use handoff or ask the user.`
 
+// PromptLayer 系统提示词的一层（设置页「提示词预览」用）。
+//
+// 预览与真正下发的文本必须同源：这里返回的就是 RenderSystem 的拼装输入，
+// 不允许另写一份展示用文案（两份文案迟早会漂移，用户看到的就不是模型看到的）。
+type PromptLayer struct {
+	Key   string `json:"key"`   // protocol / roster / identity（L1–L3）
+	Title string `json:"title"` // 人读标题
+	Text  string `json:"text"`
+}
+
+// RenderLayers 按固定顺序返回非空层（L1 协议恒在；L2 名册/ L3 身份为空时省略）。
+// 空层不返回而不是返回空串：设置页要能显示「这一层现在没有内容」而不是一个空气泡。
+func RenderLayers(spec PromptSpec) []PromptLayer {
+	layers := []PromptLayer{{Key: "protocol", Title: "L1 · Hub 协议", Text: hubProtocolPrompt}}
+	if roster := renderRoster(spec); roster != "" {
+		layers = append(layers, PromptLayer{Key: "roster", Title: "L2 · 群名册", Text: roster})
+	}
+	if identity := renderIdentity(spec.Agent); identity != "" {
+		layers = append(layers, PromptLayer{Key: "identity", Title: "L3 · 身份与职责", Text: identity})
+	}
+	return layers
+}
+
 // RenderSystem 返回 L1 + L2；L3–L5 为空时不产生空层。结果逐字节稳定，
 // 相同输入必须完全相同（golden 测试依赖这一点）。
 func RenderSystem(spec PromptSpec) string {
-	parts := []string{hubProtocolPrompt}
-	if roster := renderRoster(spec); roster != "" {
-		parts = append(parts, roster)
-	}
-	if identity := renderIdentity(spec.Agent); identity != "" {
-		parts = append(parts, identity)
+	layers := RenderLayers(spec)
+	parts := make([]string, 0, len(layers))
+	for _, layer := range layers {
+		parts = append(parts, layer.Text)
 	}
 	return strings.Join(parts, "\n\n")
 }

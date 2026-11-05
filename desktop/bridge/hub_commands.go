@@ -50,6 +50,12 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubAgentDelete(c)
 	case CmdHubAgentRestore:
 		m.hubAgentRestore(c)
+	case CmdHubAgentVersions:
+		m.hubAgentVersions(c)
+	case CmdHubAgentRollback:
+		m.hubAgentRollback(c)
+	case CmdHubPromptPreview:
+		m.hubPromptPreview(c)
 	case CmdHubAgentMemory:
 		m.hubAgentMemory(c)
 	case CmdHubAgentMemoryWrite:
@@ -525,6 +531,168 @@ func (m *manager) hubAgentMemoryWrite(c command) {
 		data["warning"] = "重建会话 loop 失败，重启后生效: " + rebuildErr.Error()
 	}
 	m.resp(c, true, "", data)
+}
+
+// hubAgentVersions 历史版本清单 + 当前版本（设置页「人格历史」）。
+//
+// 只回摘要不回整份 profile：最多 50 版，带上 Instructions/Rules 会让响应膨胀到几百 KB，
+// 而列表只需要「第几版、什么时候、叫什么、用哪个模型」。回滚用 version 号引回快照。
+func (m *manager) hubAgentVersions(c command) {
+	ctx := context.Background()
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	id := agenthub.AgentID(str(c.Payload, "agent_id"))
+	if id == "" {
+		m.resp(c, false, "agent_id 不能为空", nil)
+		return
+	}
+	cur, err := st.LoadAgent(ctx, id)
+	if err != nil {
+		m.resp(c, false, "读取智能体失败: "+err.Error(), nil)
+		return
+	}
+	limit := intNum(c.Payload, "limit", 20)
+	versions, err := st.ListProfileVersions(ctx, id, limit)
+	if err != nil {
+		m.resp(c, false, "读取历史版本失败: "+err.Error(), nil)
+		return
+	}
+	items := make([]map[string]any, 0, len(versions))
+	for i := len(versions) - 1; i >= 0; i-- { // 新的在前：UI 从头往下看
+		v := versions[i]
+		if v.Profile == nil {
+			continue // 坏行（历史文件被手工改过）：列表跳过，不阻断
+		}
+		items = append(items, map[string]any{
+			"version":  v.Version,
+			"saved_at": v.SavedAt,
+			"name":     v.Profile.Name,
+			"role":     v.Profile.Role,
+			"provider": v.Profile.Provider,
+			"model":    v.Profile.Model,
+			"deleted":  v.Profile.Deleted,
+		})
+	}
+	m.resp(c, true, "", map[string]any{"agent_id": string(id), "current": cur.Version, "versions": items})
+}
+
+// hubAgentRollback 回到某个历史版本（§5.1「人格改坏了回滚」）。
+//
+// 语义是「把那一版的内容落成一个**新版本**」，不是把 version 号改回去：
+//   - 当前版本先留档，回滚本身也可再回滚（不会因为一次误点丢两版）；
+//   - version 单调递增，DM 记录/任务引用不受影响（它们只认 agent_id）。
+func (m *manager) hubAgentRollback(c command) {
+	ctx := context.Background()
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	id := agenthub.AgentID(str(c.Payload, "agent_id"))
+	if id == "" {
+		m.resp(c, false, "agent_id 不能为空", nil)
+		return
+	}
+	version := intNum(c.Payload, "version", 0)
+	if version <= 0 {
+		m.resp(c, false, "version 必须是正整数", nil)
+		return
+	}
+	cur, err := st.LoadAgent(ctx, id)
+	if err != nil {
+		m.resp(c, false, "读取智能体失败: "+err.Error(), nil)
+		return
+	}
+	all, err := st.ListProfileVersions(ctx, id, 0)
+	if err != nil {
+		m.resp(c, false, "读取历史版本失败: "+err.Error(), nil)
+		return
+	}
+	var snap *agenthub.ProfileVersion
+	for i := range all {
+		if all[i].Version == version {
+			snap = &all[i] // 版本号单调递增，命中即唯一
+			break
+		}
+	}
+	if snap == nil || snap.Profile == nil {
+		m.resp(c, false, fmt.Sprintf("找不到第 %d 版（可能已被裁剪，最多保留 %d 版）", version, agenthub.MaxProfileVersions), nil)
+		return
+	}
+	// 深拷贝：归档的切片不能与将保存的 profile 共享底层数组。
+	next := *agenthub.CloneAgentProfile(snap.Profile)
+	next.ID = cur.ID
+	next.CreatedAt = cur.CreatedAt
+	next.Deleted = cur.Deleted // 回滚不改回收站状态（软删恢复有自己的命令）
+	if strings.TrimSpace(next.Provider) == "" {
+		next.Provider = cur.Provider
+	}
+	if err := m.validateHubProvider(next.Provider); err != nil {
+		m.respCode(c, false, err.Error(), "provider_not_found", nil)
+		return
+	}
+	if err := next.Normalize(); err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	if !strings.EqualFold(next.Name, cur.Name) {
+		agents, aerr := st.ListAgents(ctx)
+		if aerr != nil {
+			m.resp(c, false, "读取智能体列表失败: "+aerr.Error(), nil)
+			return
+		}
+		if err := agenthub.ValidateAgentNameUnique(next.Name, liveAgents(agents), cur.ID); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+	}
+	if err := st.AppendProfileVersion(ctx, cur); err != nil {
+		m.resp(c, false, "保存历史版本失败: "+err.Error(), nil)
+		return
+	}
+	next.Version = cur.Version + 1
+	next.UpdatedAt = time.Now().UTC()
+	if err := st.SaveAgent(ctx, &next); err != nil {
+		m.resp(c, false, "保存智能体失败: "+err.Error(), nil)
+		return
+	}
+	// 人格变了 → 已装配的会话按新 profile 重建 loop（下一个 Run 生效）。
+	data := map[string]any{"agent": next, "restored_from": version}
+	if err := m.refreshHubLoops(string(next.ID)); err != nil {
+		data["warning"] = "重建会话 loop 失败，重启后生效: " + err.Error()
+	}
+	m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
+	m.resp(c, true, "", data)
+}
+
+// hubPromptPreview 系统提示词分层预览（设置页「提示词」页签）。
+//
+// 与真正下发的提示词同源：L1–L3 走 agenthub.RenderLayers，L4 记忆走装配用的同一个
+// hubMemoryInjection。L5 技能清单与工具 schema 由内核在请求期拼装，**不复制**到这里
+// （复制就会变成第二份事实源），在 note 里写明。
+func (m *manager) hubPromptPreview(c command) {
+	p, _, err := m.hubLoadAgent(str(c.Payload, "agent_id"))
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	layers := agenthub.RenderLayers(agenthub.PromptSpec{Agent: p})
+	if inj := m.hubMemoryInjection(string(p.ID), hubAgentHome(string(p.ID))); strings.TrimSpace(inj) != "" {
+		layers = append(layers, agenthub.PromptLayer{Key: "memory", Title: "L4 · 记忆索引", Text: inj})
+	}
+	total := 0
+	for _, layer := range layers {
+		total += len(layer.Text)
+	}
+	m.resp(c, true, "", map[string]any{
+		"agent_id":    string(p.ID),
+		"layers":      layers,
+		"total_chars": total,
+		"note":        "L5 技能清单与工具 schema 在请求期由内核装配，不在预览内；L0 对 Hub 已关闭（D17）。",
+	})
 }
 
 // emitHubAgentStatus 状态点事件（左栏状态点/头像动效，§7.1.5）。

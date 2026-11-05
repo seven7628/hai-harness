@@ -66,6 +66,10 @@ const (
 	CmdHubAgentList    Command = "hub_agent_list"
 	CmdHubAgentDelete  Command = "hub_agent_delete"
 	CmdHubAgentRestore Command = "hub_agent_restore" // 从回收站恢复（§5.2 软删可恢复）
+	// —— Agent Hub（P1：人格版本 / 回滚 / 提示词预览） ——
+	CmdHubAgentVersions Command = "hub_agent_versions"       // 历史版本清单
+	CmdHubAgentRollback Command = "hub_agent_rollback"       // 回滚到某一版（新版本落地，不丢当前）
+	CmdHubPromptPreview Command = "hub_agent_prompt_preview" // 系统提示词分层预览
 	// —— Agent Hub（P1：记忆面板） ——
 	CmdHubAgentMemory      Command = "hub_agent_memory"       // 列表 / 读一个文件
 	CmdHubAgentMemoryWrite Command = "hub_agent_memory_write" // 写（写前备份）
