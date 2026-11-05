@@ -900,6 +900,12 @@
       "commit": "8c9f5e7 fix(hub-p0-08): 收尾复审三条 non-blocking（hub 关停、record 维度）",
       "review": "passed",
       "reviewNote": "首轮 changes_requested（createIn 残留 m.runtime(wsPath).skills → hub 会话按路径新造项目 runtime、污染 m.workspaces、hub 全局层成死代码；buildLoop 内部仍按路径取 plugins/mcp/subagents）→ 9f94391 修复（sk 用入参 ws；buildLoop 改吃 *workspaceRuntime；bridgeSession.runtime + rebuildLoop 复用；hub wsKey=hub-<agentID>；mesh Register 只给项目会话；closeHubRuntimes 补插件收尾）→ 复审 pass（评审用 mutation 反证：把 sk 改回按路径即报 m.workspaces 被污染）；8c9f5e7 收尾三条 non-blocking（关停先 Shutdown 会话、bs.runtime 置 nil、sessionRecordKey 抽出并加 TestSessionRecordKey）。验证：干净 HOME 下 bridge 全量 49s 绿、vet 干净。遗留：hub runtime 不跑 EnsureSynced（纯 hub 首启可能缺插件组件）、按智能体的 disabled 技能集待 P1 接 settings。"
+    },
+    "P0-09": {
+      "status": "review",
+      "commit": "16234fb chore(hub-p0-09): P0 review gate",
+      "review": "pending",
+      "reviewNote": "干净检出（clone → 冷缓存）下 agenthub/session/desktop/bridge 全绿两轮；文档补 §19.3.1 P0 落地记录与 §15.4 复核项结论；TestPromoteTaskCommandSuccess 等待 3s→10s（冷编译并发下的偶发超时）。已知不在 P0 范围：agents/mcp/provider/subagent/tools 测试包仍缺未入库 helper。"
     }
   }
 }
