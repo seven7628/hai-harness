@@ -158,3 +158,27 @@ func TestMCPRestricted(t *testing.T) {
 		}
 	}
 }
+
+// 前缀只认**开头**：模式出现在名字中间不算命中。
+// 没有这条，"HasPrefix 改成 Contains" 这种 mutation 不会让任何用例失败
+//（P1-01 复审实测：原用例 browser_* 对 browserx 两种实现都为 false）。
+func TestMatchesPatternsPrefixIsAnchored(t *testing.T) {
+	p := ToolPolicy{Disable: []string{"browser*"}}
+	if p.ToolVisible("browser_navigate", false) {
+		t.Fatal("browser* must hide browser_navigate")
+	}
+	if !p.ToolVisible("xbrowser_navigate", false) {
+		t.Fatal("browser* must NOT hide xbrowser_navigate (prefix is anchored at the start)")
+	}
+	if MatchesPatterns([]string{"browser*"}, "x_browser") {
+		t.Fatal("MatchesPatterns(browser*, x_browser) must be false")
+	}
+	// 同样钉住 MCP 的 server 前缀开关。
+	mp := ToolPolicy{MCP: MCPPolicy{DisableServers: []string{"gh*"}}}
+	if mp.MCPAllowed("ghcli", "search") {
+		t.Fatal("gh* must disable ghcli")
+	}
+	if !mp.MCPAllowed("xghcli", "search") {
+		t.Fatal("gh* must not disable xghcli (prefix is anchored at the start)")
+	}
+}

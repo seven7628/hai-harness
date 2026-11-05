@@ -76,6 +76,7 @@ func NewSeatbelt(workspace string, opts ...SeatbeltOption) (*Seatbelt, error) {
 		s.OpenSubpaths = append(s.OpenSubpaths, resolveRealPath(resolveHome(s.Home, p)))
 	}
 	s.OpenSubpaths = filterExplicitDenied(s.OpenSubpaths, explicitSensitive)
+	s.explicitSensitive = explicitSensitive
 	s.Policy = s.buildPolicy()
 	if !s.noProbe {
 		if err := probePolicy(s.Policy); err != nil {
@@ -211,6 +212,15 @@ func (s *Seatbelt) buildPolicy() string {
 	for _, p := range s.OpenSubpaths {
 		fmt.Fprintf(&b, "(allow file-read* (subpath %q))\n", p)
 		fmt.Fprintf(&b, "(allow file-write* (subpath %q))\n", p)
+	}
+	// 用户**显式** deny 最后再发一次：OpenSubpaths 可能把整棵子树重开（智能体 home
+	// 就在 ~/.go-code 下），若显式敏感路径恰是它的子目录，前面那条 deny 会被后置
+	// allow 覆盖（P1-01 复核实测：deny 在 di=2009、allow 在 ai=2895 → 仍可读写）。
+	// 只重发显式路径：默认 .go-code deny 必须让位于受管 carve-out，否则 plugins/
+	// runtime/hub home 全被关掉（Browser Use 与智能体 home 都用不了）。
+	for _, p := range s.explicitSensitive {
+		fmt.Fprintf(&b, "(deny file-read* (subpath %q))\n", p)
+		fmt.Fprintf(&b, "(deny file-write* (subpath %q))\n", p)
 	}
 	return b.String()
 }

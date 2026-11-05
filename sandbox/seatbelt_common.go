@@ -104,8 +104,12 @@ type Seatbelt struct {
 
 	noProbe       bool     // WithNoProbe：跳过构造期探测（测试/CI）
 	userSensitive []string // WithSensitivePaths 注入的显式敏感路径（相对 home 或绝对；构造期归一）
-	openExtra     []string // WithOpenSubpaths 注入的额外放行子树（绝对路径；构造期归一）
-	readOnlyExtra []string // WithReadOnlyPaths 注入的只读子树（读放行、写不放行）
+	// explicitSensitive 归一化后的**显式**敏感路径（默认 .go-code 不在内）。
+	// 用途：在策略末尾（所有 allow 之后）再 deny 一次 —— 显式 deny 必须压过
+	// 任何后置的 allow（OpenSubpaths 可能整棵重开，见 buildPolicy）。
+	explicitSensitive []string
+	openExtra         []string // WithOpenSubpaths 注入的额外放行子树（绝对路径；构造期归一）
+	readOnlyExtra     []string // WithReadOnlyPaths 注入的只读子树（读放行、写不放行）
 }
 
 // SeatbeltOption 构造选项。

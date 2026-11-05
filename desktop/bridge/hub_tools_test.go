@@ -381,3 +381,39 @@ func TestHubEnginePolicyAppliesToLateRegisteredTools(t *testing.T) {
 		}
 	}
 }
+
+// 给模型看的清单（codemode 目录 / 技能能力清单）不能出现被撤下的工具：
+// 调不到但仍被描述，等于误导模型去试（P1-01 复核的 non-blocking）。
+func TestHubEngineVisibleToolsExcludeHidden(t *testing.T) {
+	m, _ := testManager(t)
+	ws := m.hubRuntime("ag_engine")
+	eng := hubEngineFor(t, m, ws, agenthub.ToolPolicy{Disable: []string{"bash"}})
+
+	inAll, inVisible := false, false
+	for _, tool := range eng.Tools() {
+		if tool.Name() == "bash" {
+			inAll = true
+		}
+	}
+	for _, tool := range eng.VisibleTools() {
+		if tool.Name() == "bash" {
+			inVisible = true
+		}
+	}
+	if !inAll {
+		t.Fatal("Tools() must still list the retired tool (诊断/编排方需要知道注册表里有什么)")
+	}
+	if inVisible {
+		t.Fatal("VisibleTools() must not expose a tool hidden by policy")
+	}
+	// 未撤下的工具照常在 VisibleTools 里。
+	foundRead := false
+	for _, tool := range eng.VisibleTools() {
+		if tool.Name() == "read_file" {
+			foundRead = true
+		}
+	}
+	if !foundRead {
+		t.Fatal("VisibleTools() dropped a tool that is not hidden")
+	}
+}

@@ -221,6 +221,8 @@ func (e *Engine) HideTool(name string) {
 }
 
 // ShowTool 恢复被 HideTool 撤下的工具（同名的下一次注册不会自动恢复，见 HideTool）。
+// 只清 hidden 名表；toolFilter 是另一层策略（按工具本身判定），仍拒绝时工具照样不可见 ——
+// 要真正放开必须同时清除 filter（SetToolFilter(nil)）。
 func (e *Engine) ShowTool(name string) {
 	e.lock.Lock()
 	defer e.lock.Unlock()
@@ -360,6 +362,30 @@ func (e *Engine) Tools() []Tool {
 	out := make([]Tool, 0, len(names))
 	for _, name := range names {
 		out = append(out, e.tools[name])
+	}
+	e.lock.RUnlock()
+	return out
+}
+
+// VisibleTools 已注册且**未被策略撤下**的工具（模型视角的注册表）。
+//
+// 与 Tools() 的差别只有一处：hidden 与 toolFilter 拒绝的工具不出现。给模型看的清单
+// （codemode 目录、技能能力清单）必须用它 —— 否则撤下的工具虽然调不到（GetTool 拦），
+// 却仍然出现在 codemode 描述里，等于告诉模型「有这个工具」，是误导（P1-01 复核）。
+func (e *Engine) VisibleTools() []Tool {
+	e.lock.RLock()
+	names := make([]string, 0, len(e.tools))
+	for name := range e.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]Tool, 0, len(names))
+	for _, name := range names {
+		t := e.tools[name]
+		if e.hiddenByPolicy(t) {
+			continue
+		}
+		out = append(out, t)
 	}
 	e.lock.RUnlock()
 	return out

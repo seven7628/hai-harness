@@ -4,6 +4,7 @@ package sandbox
 // SBPL 后规则胜，所以顺序错了等于没开 —— 这里用策略文本的顺序钉住。
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,5 +159,34 @@ func TestReadOnlyWriteDenyBeforeOpenSubpaths(t *testing.T) {
 	}
 	if wi > oi {
 		t.Fatal("read-only write deny must come BEFORE the managed open subpath allow")
+	}
+}
+
+// 显式敏感路径若是 OpenSubpaths 的**子目录**，末尾的显式 deny 必须压过后置 allow。
+// 这是 P1-01 复审的残留 blocking：OpenSubpaths 会把整棵子树重开（智能体 home 就在
+// ~/.go-code 下），而 SBPL 后规则胜 —— 只在前面 deny 一次不够。
+func TestExplicitSensitiveChildDeniedAfterOpenSubpaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	hub := filepath.Join(home, ".go-code", "hub", "homes", "ag_x")
+	secret := filepath.Join(hub, "secrets")
+	if !Available() {
+		t.Skip("seatbelt not available")
+	}
+	sb, err := NewSeatbelt(hub, WithOpenSubpaths(hub), WithSensitivePaths([]string{secret}), WithNoProbe())
+	if err != nil {
+		t.Fatalf("NewSeatbelt: %v", err)
+	}
+	policy := sb.Policy
+	lastDeny := strings.LastIndex(policy, fmt.Sprintf("(deny file-read* (subpath %q))", secret))
+	openAllow := strings.LastIndex(policy, fmt.Sprintf("(allow file-read* (subpath %q))", hub))
+	if lastDeny < 0 || openAllow < 0 {
+		t.Fatalf("missing deny/allow:\n%s", policy)
+	}
+	if lastDeny < openAllow {
+		t.Fatalf("explicit deny must come after open-subpath allow (deny=%d allow=%d):\n%s", lastDeny, openAllow, policy)
+	}
+	if !strings.Contains(policy, fmt.Sprintf("(deny file-write* (subpath %q))", secret)) {
+		t.Fatalf("explicit write deny missing:\n%s", policy)
 	}
 }
