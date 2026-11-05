@@ -1334,6 +1334,24 @@ const BASE = {
       "commit": "feat(hub-p3a-01): 群组 CRUD + 成员/角色/策略",
       "review": "pending",
       "reviewNote": "实现 hub_group_list/get/create/update/delete + member_add/remove；成员上限 12、角色校验、owner 转让成对改写、软删、默认 ask、群名唯一、删除智能体不能入群。测试 TestHubGroupCRUDAndRoles / TestHubGroupRejectsDeletedMember；agenthub -run Group 与 bridge 全量绿（59s）。"
+    },
+    "P3a-02": {
+      "status": "review",
+      "commit": "bdb3660 feat(hub-p3a-02): 群日志/活动/确定性汇总/seq 恢复",
+      "review": "pending",
+      "reviewNote": "BuildRoundSummary（乱序输入同输出）、BuildDigest（确定性/rune 截断）、AppendGroupMessage/ReadGroupLog（群存在校验+分页）、ReadGroupActivity（独立流）；hub_group_history/activity 命令。测试：seq 连续/重开重建、分页、删除群拒绝、活动不占 seq、残行容忍（残行不占 seq）、并发 seq 唯一、汇总确定、digest、回执落日志。agenthub GroupLog/Group/Build 全绿。"
+    },
+    "P3a-03": {
+      "status": "review",
+      "commit": "3f437de feat(hub-p3a-03): @ 路由 + round 快照 + 确定性回执",
+      "review": "pending",
+      "reviewNote": "Router：无 @ 不唤醒；@all 仅 owner/人类（member 拒绝不降级）；显式 @ 忽略自己；未知只警告；MaxMentions 丢弃计数；@all 目标按 JoinedAt/ID 确定性；Round 冻结 trigger_seq/targets；Receipt→Activity(routing) 落盘。测试 4 条全绿。"
+    },
+    "P3a-04": {
+      "status": "review",
+      "commit": "93eb91f feat(hub-p3a-04 部分): 群上下文快照",
+      "review": "pending",
+      "reviewNote": "BuildGroupSnapshot：delta（游标后）、冻结本轮（seq>trigger）、跳过 round_summary/空白、40 条/12000 rune 折叠、确定性文本、@命中/旁听标注。测试 3 条。**部分完成**：群智能体会话装配（每群一会话/事件流）未做，顺延 P3a-05+。"
     }
   }
 };
