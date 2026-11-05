@@ -311,14 +311,7 @@ func NewSession(id string, loop *agents.AgentLoop, store Store, opts ...Option) 
 			s.usage = rst.Usage
 			s.usage.Cost = rst.Cost // 成本以 State.Cost 为权威（兼容 Usage.Cost 未填充）
 			s.todo.Restore(rst.Todo)
-			// 积压可能超过默认缓冲（64）：构造期还没有消费者，s.inbox <- m 会永久阻塞
-			// （发生在 NewSession 返回前，调用方连 ctx 都没有）→ 按需扩容再灌。
-			if n := len(pending); n > cap(s.inbox) {
-				s.inbox = make(chan core.Message, n)
-			}
-			for _, m := range pending {
-				s.inbox <- m
-			}
+			s.enqueuePending(pending)
 		} else {
 			data, err := store.Load(context.Background(), id)
 			switch {
@@ -333,9 +326,7 @@ func NewSession(id string, loop *agents.AgentLoop, store Store, opts ...Option) 
 					s.usage = data.State.Usage
 					s.usage.Cost = data.State.Cost  // 成本以 State.Cost 为权威（兼容 Usage.Cost 未填充的旧快照）
 					s.todo.Restore(data.State.Todo) // 待办随快照精确还原（压缩不涉及）
-					for _, m := range data.State.Pending {
-						s.inbox <- m
-					}
+					s.enqueuePending(data.State.Pending)
 				}
 			case errors.Is(err, ErrNotFound):
 				// 新会话
@@ -1202,6 +1193,21 @@ func (s *Session) PendingSnapshot() []core.Message {
 		s.inbox <- m
 	}
 	return out
+}
+
+// enqueuePending 把恢复积压灌进 inbox。积压可能超过默认缓冲（64），而构造期还没有
+// 消费者 —— 直接 send 会永久阻塞（发生在 NewSession 返回前，调用方连 ctx 都没有），
+// 所以超出时先把 inbox 换成足够大的新 channel（此时没有任何读者/写者缓存旧 channel）。
+func (s *Session) enqueuePending(pending []core.Message) {
+	if len(pending) == 0 {
+		return
+	}
+	if len(pending) > cap(s.inbox) {
+		s.inbox = make(chan core.Message, len(pending))
+	}
+	for _, m := range pending {
+		s.inbox <- m
+	}
 }
 
 // PendingCount 未消费输入条数（inbox 积压 + 恢复待入队），供 Hub 的空闲闸门判断

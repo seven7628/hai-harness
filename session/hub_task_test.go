@@ -88,7 +88,37 @@ func TestPendingCountInboxAndRecovery(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("NewSession blocked on a full inbox while restoring >cap pending (构造期死锁)")
 	}
+
+	// ⑤ legacy 恢复分支（store 有数据、没有 recoveryState）走的是另一条路径，
+	// 同一个构造期死锁也要挡：>64 的 State.Pending 必须先扩容再灌。
+	legacyDone := make(chan *Session, 1)
+	legacyErr := make(chan error, 1)
+	go func() {
+		s4, err := NewSession("s_pending_legacy", nil, legacyStore{data: &SessionData{State: big}})
+		if err != nil {
+			legacyErr <- err
+			return
+		}
+		legacyDone <- s4
+	}()
+	select {
+	case s4 := <-legacyDone:
+		if got := s4.PendingCount(); got != 100 {
+			t.Fatalf("legacy pending not fully queued: got %d want 100", got)
+		}
+	case err := <-legacyErr:
+		t.Fatalf("NewSession legacy restore: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("NewSession blocked on a full inbox while restoring legacy State.Pending")
+	}
 }
+
+// legacyStore 从 SessionData.State 恢复（legacy store 路径）。
+type legacyStore struct{ data *SessionData }
+
+func (l legacyStore) Load(context.Context, string) (*SessionData, error)        { return l.data, nil }
+func (legacyStore) AppendHistory(context.Context, string, []core.Message) error { return nil }
+func (legacyStore) SaveState(context.Context, string, *State) error             { return nil }
 
 // stubStore 只满足 Store 接口：Load 返回新会话，其余 no-op。
 type stubStore struct{}
