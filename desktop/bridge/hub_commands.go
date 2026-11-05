@@ -103,6 +103,8 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubGroupHistory(c)
 	case CmdHubGroupActivity:
 		m.hubGroupActivity(c)
+	case CmdHubGroupSend:
+		m.hubGroupSend(c)
 	default:
 		return false
 	}

@@ -366,3 +366,86 @@ func (m *manager) hubGroupActivity(c command) {
 	}
 	m.resp(c, true, "", map[string]any{"activity": acts})
 }
+
+// hubGroupSend 人发群消息：落日志 → @ 路由 → 回执 → hub_message/hub_round 事件。
+// 智能体唤醒/群会话装配归 P3a-05+（本轮只保证日志、路由与回执是真的）。
+func (m *manager) hubGroupSend(c command) {
+	ctx := context.Background()
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	text := strings.TrimSpace(str(c.Payload, "text"))
+	if text == "" {
+		m.resp(c, false, "text 不能为空", nil)
+		return
+	}
+	g, err := st.LoadGroup(ctx, gid)
+	if err != nil {
+		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
+		return
+	}
+	if g.Deleted {
+		m.resp(c, false, "群组已删除", nil)
+		return
+	}
+	msg := &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderHuman}, Text: text,
+	}
+	if id := strings.TrimSpace(str(c.Payload, "client_msg_id")); id != "" {
+		msg.Refs = map[string]any{"client_msg_id": id}
+	}
+	seq, err := agenthub.AppendGroupMessage(ctx, st, msg)
+	if err != nil {
+		m.resp(c, false, "写入群日志失败: "+err.Error(), nil)
+		return
+	}
+	// 构造路由（成员 profile 用于严格 @ 解析）。
+	agents, err := st.ListAgents(ctx)
+	if err != nil {
+		m.resp(c, false, "读取智能体失败: "+err.Error(), nil)
+		return
+	}
+	byID := map[agenthub.AgentID]*agenthub.AgentProfile{}
+	profiles := make([]*agenthub.AgentProfile, 0, len(g.Members))
+	for _, a := range agents {
+		if a != nil {
+			byID[a.ID] = a
+		}
+	}
+	for _, member := range g.Members {
+		if p := byID[member.AgentID]; p != nil && !p.Deleted {
+			profiles = append(profiles, p)
+		}
+	}
+	router, err := agenthub.NewGroupRouter(g, profiles)
+	if err != nil {
+		m.resp(c, false, "构造路由失败: "+err.Error(), nil)
+		return
+	}
+	round, err := router.Route(text, "", true, seq, time.Now())
+	if err != nil {
+		m.resp(c, false, "路由失败: "+err.Error(), nil)
+		return
+	}
+	if err := agenthub.AppendRoundReceipt(ctx, st, round); err != nil {
+		m.resp(c, false, "落路由回执失败: "+err.Error(), nil)
+		return
+	}
+	m.emitHubGroupMessage(g.ID, seq, msg)
+	m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+	m.resp(c, true, "", map[string]any{"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets})
+}
+
+func (m *manager) emitHubGroupMessage(gid agenthub.GroupID, seq int64, msg *agenthub.Message) {
+	if m == nil || m.out == nil || msg == nil {
+		return
+	}
+	m.out.writeLine(map[string]any{
+		"event_type": "hub_message", "group_id": string(gid), "seq": seq,
+		"message": msg, "client_msg_id": msg.Refs["client_msg_id"],
+	})
+}

@@ -200,3 +200,65 @@ func TestHubGroupHistoryAndRoundSummary(t *testing.T) {
 		t.Fatalf("round summary text = %q", page.Messages[len(page.Messages)-1].Text)
 	}
 }
+
+func TestHubGroupSendRoutesAndReceipts(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "SendA")
+	b := createHubAgent(t, m, buf, 2, "SendB")
+	ok, errMsg, data := hubCmd(t, m, buf, 3, "hub_group_create", map[string]any{
+		"name": "发言群", "members": []map[string]any{
+			{"agent_id": string(a.ID), "role": "owner"},
+			{"agent_id": string(b.ID), "role": "member"},
+		},
+	})
+	if !ok {
+		t.Fatalf("create: %s", errMsg)
+	}
+	g := groupFromData(t, data)
+	buf.Reset()
+	ok, errMsg, data = hubCmd(t, m, buf, 4, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@SendB 看一下日志", "client_msg_id": "human-1",
+	})
+	if !ok {
+		t.Fatalf("send: %s", errMsg)
+	}
+	var sent struct {
+		Seq     int64              `json:"seq"`
+		Targets []agenthub.AgentID `json:"targets"`
+	}
+	raw, _ := json.Marshal(data)
+	_ = json.Unmarshal(raw, &sent)
+	if sent.Seq != 1 || len(sent.Targets) != 1 || sent.Targets[0] != b.ID {
+		t.Fatalf("sent = %s", raw)
+	}
+	if !strings.Contains(buf.String(), `"hub_round"`) || !strings.Contains(buf.String(), `"hub_message"`) {
+		t.Fatalf("events = %s", buf.String())
+	}
+	// 日志只有人这条；回执在活动流里且 after_seq=1。
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := agenthub.ReadGroupLog(context.Background(), st, g.ID, 0, 10)
+	if err != nil || len(msgs) != 1 || msgs[0].Sender.Kind != agenthub.SenderHuman {
+		t.Fatalf("msgs = %+v, %v", msgs, err)
+	}
+	acts, err := st.ReadActivity(context.Background(), g.ID, 0, 10)
+	if err != nil || len(acts) != 1 || acts[0].Kind != "routing" || acts[0].AfterSeq != 1 {
+		t.Fatalf("activity = %+v, %v", acts, err)
+	}
+	// 无 @：不唤醒任何人。
+	if ok, errMsg, data = hubCmd(t, m, buf, 5, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "只同步，不点名",
+	}); !ok {
+		t.Fatalf("send2: %s", errMsg)
+	}
+	var sent2 struct {
+		Targets []agenthub.AgentID `json:"targets"`
+	}
+	raw, _ = json.Marshal(data)
+	_ = json.Unmarshal(raw, &sent2)
+	if len(sent2.Targets) != 0 {
+		t.Fatalf("no-mention targets = %v", sent2.Targets)
+	}
+}
