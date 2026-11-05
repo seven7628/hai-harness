@@ -251,3 +251,29 @@ type SkipTruncateProvider interface {
 type LoadoutProvider interface {
 	PrepareLoadout(ctx context.Context, declared []core.ToolSchema) []core.ToolSchema
 }
+
+// hiddenTool 把任意工具包装成 hidden 档（同名重注册到引擎即「撤下」）。
+//
+// 嵌入 Tool 接口：Call/Name/Description/Parameters 等全部透传，只改写 Exposure，
+// 所以不会因为包装丢行为（对比「重新实现一个空壳」——那会让工具在脚本里报错）。
+type hiddenTool struct {
+	Tool
+}
+
+func (hiddenTool) Exposure() ToolExposure { return ExposureHidden }
+
+// Hide 返回 t 的 hidden 包装：模型看不到（不进 ToolParams），codemode 也调不到
+// （不可编排）—— 引擎没有 unregister，这是撤下工具的唯一手段。
+//
+// 用途：宿主按策略关工具（如 Agent Hub 的 Profile 工具开关）。注册期过滤做不到时
+// （装配函数一次性建好整套工具），就遍历 Tools() 把要关的重新注册成 hidden。
+// t == nil 返回 nil；已经是 hidden 的原样返回（避免重复包装）。
+func Hide(t Tool) Tool {
+	if t == nil {
+		return nil
+	}
+	if ToolExposureOf(t) == ExposureHidden {
+		return t
+	}
+	return hiddenTool{t}
+}

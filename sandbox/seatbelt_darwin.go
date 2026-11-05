@@ -71,6 +71,10 @@ func NewSeatbelt(workspace string, opts ...SeatbeltOption) (*Seatbelt, error) {
 	for _, p := range defaultOpenSubpaths {
 		s.OpenSubpaths = append(s.OpenSubpaths, resolveRealPath(resolveHome(s.Home, p)))
 	}
+	// 调用方额外重开的子树（如 Agent Hub 的智能体 home）：同样排在敏感 deny 之后。
+	for _, p := range s.openExtra {
+		s.OpenSubpaths = append(s.OpenSubpaths, resolveRealPath(resolveHome(s.Home, p)))
+	}
 	s.OpenSubpaths = filterExplicitDenied(s.OpenSubpaths, explicitSensitive)
 	s.Policy = s.buildPolicy()
 	if !s.noProbe {
@@ -195,6 +199,10 @@ func (s *Seatbelt) buildPolicy() string {
 	for _, p := range s.OpenSubpaths {
 		fmt.Fprintf(&b, "(allow file-read* (subpath %q))\n", p)
 		fmt.Fprintf(&b, "(allow file-write* (subpath %q))\n", p)
+	}
+	// 只读放行子树（tools.bash_roots）：只给读，写仍按 deny 处理。
+	for _, p := range s.readOnlyExtra {
+		fmt.Fprintf(&b, "(allow file-read* (subpath %q))\n", resolveRealPath(resolveHome(s.Home, p)))
 	}
 	return b.String()
 }
