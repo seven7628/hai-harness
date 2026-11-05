@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,5 +305,216 @@ func TestHubCommandsRoutedFromDispatch(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("dispatch did not answer hub_agent_list (输出:\n%s)", buf.String())
+	}
+}
+
+// create 不认客户端 id/version/deleted：这些是服务端字段（§7.1.2「生成 id」）。
+// 不带 payload 的话，删掉 create 里的 `p.Version = 1` 不会有任何测试失败（P1-03 复核）。
+func TestHubAgentCreateIgnoresClientIDVersionAndDeleted(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{
+			"id": "ag_clientchosen", "name": "Forged", "provider": "deepseek",
+			"model": "deepseek-v4-flash", "version": 7, "deleted": true,
+		},
+	})
+	if !ok {
+		t.Fatalf("create failed: %s", errMsg)
+	}
+	p := agentFromData(t, data)
+	if p.ID == "ag_clientchosen" {
+		t.Fatal("create must allocate its own id, not accept the client's")
+	}
+	if !strings.HasPrefix(string(p.ID), "ag_") {
+		t.Fatalf("id = %q, want ag_*", p.ID)
+	}
+	if p.Version != 1 || p.Deleted {
+		t.Fatalf("version/deleted = %d/%v, want 1/false", p.Version, p.Deleted)
+	}
+}
+
+// create 带一个已存在的 id：必须生成新 id，原智能体一个字节都不能变（P1-03 复核：
+// 旧实现静默覆盖，version 归 1、不归档，记忆/DM 还挂在同一 id 上）。
+func TestHubAgentCreateDoesNotOverwriteExistingID(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{
+			"name": "Original", "provider": "deepseek", "model": "deepseek-v4-flash",
+			"instructions": "keep me",
+		},
+	})
+	if !ok {
+		t.Fatalf("first create failed: %s", errMsg)
+	}
+	orig := agentFromData(t, data)
+
+	ok, errMsg, data = hubCmd(t, m, buf, 2, "hub_agent_create", map[string]any{
+		"profile": map[string]any{
+			"id": string(orig.ID), "name": "Hijack", "provider": "deepseek", "model": "deepseek-v4-flash",
+		},
+	})
+	if !ok {
+		t.Fatalf("second create failed: %s", errMsg)
+	}
+	hijack := agentFromData(t, data)
+	if hijack.ID == orig.ID {
+		t.Fatalf("second create reused the existing id %q", orig.ID)
+	}
+
+	ok, errMsg, data = hubCmd(t, m, buf, 3, "hub_agent_get", map[string]any{"agent_id": string(orig.ID)})
+	if !ok {
+		t.Fatalf("get original failed: %s", errMsg)
+	}
+	got := agentFromData(t, data)
+	if got.Name != "Original" || got.Instructions != "keep me" || got.Version != orig.Version {
+		t.Fatalf("original agent was overwritten: %+v", got)
+	}
+}
+
+// update 的 patch 不能污染归档的旧版本（切片底层数组共享的真实事故）。
+func TestHubAgentUpdateArchiveNotPollutedByPatchSlices(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{
+			"name": "Patcher", "provider": "deepseek", "model": "deepseek-v4-flash",
+			"tools": map[string]any{"disable": []string{"tool_a", "tool_b", "tool_c"}},
+		},
+	})
+	if !ok {
+		t.Fatalf("create failed: %s", errMsg)
+	}
+	created := agentFromData(t, data)
+
+	ok, errMsg, data = hubCmd(t, m, buf, 2, "hub_agent_update", map[string]any{
+		"agent_id": string(created.ID),
+		"patch":    map[string]any{"tools": map[string]any{"disable": []string{"tool_x"}}},
+	})
+	if !ok {
+		t.Fatalf("update failed: %s", errMsg)
+	}
+	updated := agentFromData(t, data)
+	if len(updated.Tools.Disable) != 1 || updated.Tools.Disable[0] != "tool_x" {
+		t.Fatalf("current disable = %v, want [tool_x]", updated.Tools.Disable)
+	}
+
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions, err := st.ListProfileVersions(t.Context(), created.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("versions = %d, want 1", len(versions))
+	}
+	old := versions[0].Profile.Tools.Disable
+	if len(old) != 3 || old[0] != "tool_a" || old[1] != "tool_b" || old[2] != "tool_c" {
+		t.Fatalf("archived old tools.disable polluted by patch: %v, want [tool_a tool_b tool_c]", old)
+	}
+}
+
+// purge 幂等：目录已经没了再删一次仍然是成功（双击/重试不该弹 not found）。
+func TestHubAgentPurgeIdempotent(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "Purgeable", "provider": "deepseek", "model": "deepseek-v4-flash"},
+	})
+	if !ok {
+		t.Fatalf("create failed: %s", errMsg)
+	}
+	p := agentFromData(t, data)
+	for i := 0; i < 2; i++ {
+		ok, errMsg, _ := hubCmd(t, m, buf, 2+i, "hub_agent_delete", map[string]any{
+			"agent_id": string(p.ID), "purge": true,
+		})
+		if !ok {
+			t.Fatalf("purge #%d failed: %s", i+1, errMsg)
+		}
+	}
+}
+
+// 软删要记一版（version++ + 归档旧版本），否则回收站里的「恢复」没有历史。
+func TestHubAgentSoftDeleteRecordsVersion(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "Archived", "provider": "deepseek", "model": "deepseek-v4-flash"},
+	})
+	if !ok {
+		t.Fatalf("create failed: %s", errMsg)
+	}
+	p := agentFromData(t, data)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_delete", map[string]any{"agent_id": string(p.ID)}); !ok {
+		t.Fatalf("soft delete failed: %s", errMsg)
+	}
+	ok, _, data = hubCmd(t, m, buf, 3, "hub_agent_get", map[string]any{"agent_id": string(p.ID)})
+	if !ok {
+		t.Fatal("get after soft delete failed")
+	}
+	deleted := agentFromData(t, data)
+	if !deleted.Deleted || deleted.Version != p.Version+1 {
+		t.Fatalf("deleted/version = %v/%d, want true/%d", deleted.Deleted, deleted.Version, p.Version+1)
+	}
+	st, _ := m.hubStore()
+	versions, err := st.ListProfileVersions(t.Context(), p.ID, 0)
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("soft delete must archive one version, got %d (%v)", len(versions), err)
+	}
+	// 重复软删不再记版本（幂等）。
+	if ok, _, _ := hubCmd(t, m, buf, 4, "hub_agent_delete", map[string]any{"agent_id": string(p.ID)}); !ok {
+		t.Fatal("second soft delete failed")
+	}
+	versions, _ = st.ListProfileVersions(t.Context(), p.ID, 0)
+	if len(versions) != 1 {
+		t.Fatalf("idempotent soft delete added a version: %d", len(versions))
+	}
+}
+
+// MaxAgents 上限只算未删的：满了拒绝，软删一个就放行。
+func TestHubAgentCountLimitFreesOnSoftDelete(t *testing.T) {
+	m, buf := testManager(t)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 直接落盘 50 个（走命令太慢，且不是本用例要测的东西）。
+	// id 必须以 ag_ + 8 位 base32 小写（不含 0/1/8/9）。
+	const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+	seedID := func(n int) agenthub.AgentID {
+		b := make([]byte, 8)
+		for k := 7; k >= 0; k-- {
+			b[k] = alphabet[n%32]
+			n /= 32
+		}
+		return agenthub.AgentID("ag_" + string(b))
+	}
+	for i := 0; i < agenthub.MaxAgents; i++ {
+		p := &agenthub.AgentProfile{
+			ID:       seedID(i),
+			Name:     fmt.Sprintf("Seed%d", i),
+			Provider: "deepseek", Model: "deepseek-v4-flash",
+		}
+		if err := p.Normalize(); err != nil {
+			t.Fatalf("normalize seed %d: %v", i, err)
+		}
+		p.Version = 1
+		if err := st.SaveAgent(t.Context(), p); err != nil {
+			t.Fatalf("save seed %d: %v", i, err)
+		}
+	}
+	ok, errMsg, _ := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "Overflow", "provider": "deepseek", "model": "deepseek-v4-flash"},
+	})
+	if ok || !strings.Contains(errMsg, "limit") {
+		t.Fatalf("create beyond MaxAgents must fail, ok=%v err=%q", ok, errMsg)
+	}
+	// 软删一个 → 名额释放。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_delete", map[string]any{"agent_id": string(seedID(0))}); !ok {
+		t.Fatalf("soft delete seed failed: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 3, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "Overflow", "provider": "deepseek", "model": "deepseek-v4-flash"},
+	}); !ok {
+		t.Fatalf("create after soft delete should succeed: %s", errMsg)
 	}
 }

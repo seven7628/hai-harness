@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -145,17 +146,16 @@ func (m *manager) hubAgentCreate(c command) {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
-	if p.ID == "" {
-		id, err := st.AllocateID(ctx, agenthub.PrefixAgent)
-		if err != nil {
-			m.resp(c, false, "分配智能体 ID 失败: "+err.Error(), nil)
-			return
-		}
-		p.ID = agenthub.AgentID(id)
-	} else if err := agenthub.ValidateAgentID(p.ID); err != nil {
-		m.resp(c, false, err.Error(), nil)
+	// create 的契约是「生成 id」（§7.1.2）：**忽略**客户端传来的 id。
+	// 否则一条带 stale id 的重复提交会静默覆盖已有智能体（version 归 1、不归档、
+	// 记忆与 DM 记录仍挂在同一 id 上）—— 实测可完整替换旧 profile（P1-03 复核）。
+	p.ID = ""
+	id, err := st.AllocateID(ctx, agenthub.PrefixAgent)
+	if err != nil {
+		m.resp(c, false, "分配智能体 ID 失败: "+err.Error(), nil)
 		return
 	}
+	p.ID = agenthub.AgentID(id)
 	if err := p.Normalize(); err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
@@ -194,8 +194,11 @@ func (m *manager) hubAgentUpdate(c command) {
 		m.resp(c, false, "读取智能体失败: "+err.Error(), nil)
 		return
 	}
-	// patch 合并：把 JSON 解进**已有对象**，未给的字段保持原值（json 零值不会覆盖）。
-	next := *cur
+	// patch 合并：把 JSON 解进**深拷贝**，未给的字段保持原值（json 零值不会覆盖）。
+	// 必须深拷贝而不是 `next := *cur`：切片字段共享底层数组，json 解复用数组写元素，
+	// 会在归档前把 cur（旧版本）一起改掉（P1-03 复核实测：patch 只给 1 个 disable 项，
+	// 归档里的旧数组变成 [新项, 旧2, 旧3]）。
+	next := *agenthub.CloneAgentProfile(cur)
 	if raw, ok := c.Payload["patch"]; ok && raw != nil {
 		if err := mergeJSONInto(raw, &next); err != nil {
 			m.resp(c, false, "patch 格式错误: "+err.Error(), nil)
@@ -203,6 +206,8 @@ func (m *manager) hubAgentUpdate(c command) {
 		}
 	}
 	next.ID = cur.ID // id 不可改（§5.1）
+	// deleted 只能经 delete 命令改：patch 里带着它要么静默软删、要么绕过回收站复活。
+	next.Deleted = cur.Deleted
 	if strings.TrimSpace(next.Provider) == "" {
 		next.Provider = cur.Provider
 	}
@@ -304,11 +309,16 @@ func (m *manager) hubAgentDelete(c command) {
 		return
 	}
 	cur, err := st.LoadAgent(ctx, id)
+	purge := c.Payload["purge"] == true
+	// purge 幂等：目录已经没了就算成功（双击/重试不该弹「not found」）。
+	if err != nil && purge && errors.Is(err, agenthub.ErrNotFound) {
+		m.resp(c, true, "", map[string]any{"agent_id": string(id), "purged": true})
+		return
+	}
 	if err != nil {
 		m.resp(c, false, "读取智能体失败: "+err.Error(), nil)
 		return
 	}
-	purge := c.Payload["purge"] == true
 	if purge {
 		if err := st.DeleteAgent(ctx, id); err != nil {
 			m.resp(c, false, "删除智能体目录失败: "+err.Error(), nil)

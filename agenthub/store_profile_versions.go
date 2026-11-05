@@ -45,8 +45,9 @@ func (s *FileStore) AppendProfileVersion(ctx context.Context, p *AgentProfile) e
 	if p == nil || !validID(string(p.ID)) {
 		return fmt.Errorf("%w: profile version", ErrInvalid)
 	}
-	snapshot := *p // 值拷贝：调用方随后会改 version/updated_at，不能跟着变
-	v := ProfileVersion{Version: snapshot.Version, SavedAt: time.Now().UTC(), Profile: &snapshot}
+	// 深拷贝（不是 `*p`）：切片的底层数组会共享，调用方随后的 patch 会写进归档。
+	snapshot := CloneAgentProfile(p)
+	v := ProfileVersion{Version: snapshot.Version, SavedAt: time.Now().UTC(), Profile: snapshot}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

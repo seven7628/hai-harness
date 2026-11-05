@@ -504,6 +504,19 @@ func cloneStrings(in []string) []string {
 	return append([]string(nil), in...)
 }
 
+// CloneAgentProfile 深拷贝一个 profile（切片字段独立）。
+//
+// 为什么必须深拷贝：`next := *cur` 只复制 struct，切片的底层数组仍共享；
+// 之后 json.Unmarshal 进 next 会**复用**已有底层数组写元素，把 cur（要归档的旧版本）
+// 一起改掉 —— 「回滚」的事实源在改工具面/白名单时就是坏的（P1-03 复核实测）。
+// 未知/新增切片字段请同步加进来（cloneStrings 保证 nil 与空切片语义一致）。
+func CloneAgentProfile(p *AgentProfile) *AgentProfile {
+	if p == nil {
+		return nil
+	}
+	return cloneAgentProfile(p)
+}
+
 func cloneAgentProfile(p *AgentProfile) *AgentProfile {
 	cp := *p
 	cp.Tools.Disable = cloneStrings(p.Tools.Disable)
