@@ -981,9 +981,9 @@
     },
     "P2-02": {
       "status": "review",
-      "commit": "e4f811d + e735626 fix(hub-p2-02): 复审修复",
-      "review": "pending",
-      "reviewNote": "首轮 change_requested（task-fz9b59jn）：B1 session_create 的 title 只回显不落盘（返回「评审标题」，session_list 显示 New Chat）；B2 client_msg_id 被描述成幂等键但 Dispatch 从不读取（同 id 连发两次 → 两条消息、两个 task_id）。非阻塞：N1 session_create 描述「跟工作区 provider/model」不实（实际取全局 active）；N2 workspace_create 必填 parent 但无工具暴露 roots（冷启动只能猜）；N3 task_id 不落账本、无 status、描述未说明；N4 updated_at 零值输出 0001-01-01、session_send 的 message 恒出现；N5 空列表归一/ValidParams/buildHubEngine 策略/「create 不改全局」均无测试（M5 存活）；N6 tasks.json 的 tests 命令 -run HubSessionTools 假绿（[no tests to run]）；N7 与 §6.3.1 工具表形状不一致；N8 RunPolicy.CanCreateWorkspace 未接线；N9 同名注册后注册者胜出（现状安全）；N10 派发消息无 hub_task 头（P2-03）。→ e735626 修复 B1（session_manual_titles.set + list 断言）、B2（Dispatch 进程内按 workspace+session+id 去重，重复返回 duplicate 不 Ask；Service 原样透传不 TrimSpace），N2 parent 可选（默认第一个 root）、N3 描述与唯一兜底、N4 *time.Time + []、N1 措辞。测试新增：title 落盘、默认 parent、去重/不同 id、空列表 JSON/零时间、CreateSession 不改全局 active。验证：go build ./...、agenthub、desktop/bridge 全量绿（39.3s）。待复审。"
+      "commit": "e735626 + 67e9cd4 fix(hub-p2-02): Queue 生产路径保留 client_msg_id",
+      "review": "re-review_pending",
+      "reviewNote": "复审 change_requested（task-pbdgj74w，对象 e735626）。Blocking：B2 生产路径仍不幂等——Hub engine 总是挂 Queue，而 WorkspaceService.Send 的 Queue 分支不带 clientMsgID、queue.go 用 task id 兜底 → 同 id 两次建两个任务。且验收用例直调 ops / 无 Queue，是桩自证。修复（67e9cd4）：Task.ClientMsgID 落账本；Queue.Submit 在 q.mu 内按 (target, client_msg_id) 查重（锁覆盖查找+建账+入队）；Dispatch 优先调用方 id；Ledger.FindByClientMsgID 跨重启查重。新增生产链路用例（engine session_send 同 id → 同 task_id、queued=1、账本 client_msg_id）。同时修 N4 UpdatedAt（int64 毫秒被 time.Time 断言吞掉恒 nil）与 B1 残留（空标题落 defaultSessionTitle、80 rune）。未处理（非阻塞）：hubMsgDedup 无上限/TTL、duplicate 直派仍返回新随机 id、key 未含 AgentID、CanCreateWorkspace 未接线、方案工具表字段与实现不一致、sessionManualTitles 测试隔离。验证：agenthub + desktop/bridge 全量绿（56s）。"
     },
     "P2-03": {
       "status": "review",
