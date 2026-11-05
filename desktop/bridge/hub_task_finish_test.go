@@ -148,3 +148,91 @@ func TestHubDispatchMessageHeaderFirst(t *testing.T) {
 		t.Fatalf("plain content = %+v", plain.Content)
 	}
 }
+
+// P2-05：终态回推发起智能体的 DM 会话（task_result 消息 + TaskResultDelivered 事件），
+// 成功后账本进入 delivered（幂等标记）。
+func TestHubTaskFinishPushesResultToOrigin(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "OriginAgent")
+	if _, err := m.hubDMSession(string(p.ID)); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := m.hubStore()
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID, AgentName: "OriginAgent"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: "/w", SessionID: "s1"},
+		Title:  "对比表任务", Instruction: "做一份对比表", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	buf.Take()
+	bs := &bridgeSession{ctx: context.Background(), hubTaskIDs: []agenthub.TaskID{task.ID}}
+	m.finishHubTask(bs, &events.AgentEnd{
+		RunId: "run-push", Content: "表格已生成", FinishReason: core.FinishReasonStop,
+		Usage: &core.Usage{Input: 10, Output: 5},
+		Artifacts: []core.Artifact{
+			{Name: "table.md", Path: "out/table.md", Kind: "created", Added: 12, Size: 345, Lines: 12},
+		},
+	})
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != agenthub.TaskDelivered {
+		t.Fatalf("status = %q, want delivered", got.Status)
+	}
+	if got.Result == nil || len(got.Result.Artifacts) != 1 || got.Result.Artifacts[0].Path != "out/table.md" {
+		t.Fatalf("artifacts = %+v", got.Result)
+	}
+	found := false
+	for _, msg := range readLines(buf) {
+		if msg["event_type"] == "task_result_delivered" && msg["task_id"] == string(task.ID) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing task_result_delivered for %s", task.ID)
+	}
+}
+
+// 同一 run 重复结算（事件重放）不重复回推。
+func TestHubTaskFinishIdempotentPush(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "IdemAgent")
+	if _, err := m.hubDMSession(string(p.ID)); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := m.hubStore()
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: "/w", SessionID: "s1"},
+		Title:  "幂等", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	buf.Take()
+	ae := &events.AgentEnd{RunId: "run-idem", Content: "done", FinishReason: core.FinishReasonStop}
+	for i := 0; i < 2; i++ {
+		bs := &bridgeSession{ctx: context.Background(), hubTaskIDs: []agenthub.TaskID{task.ID}}
+		m.finishHubTask(bs, ae)
+	}
+	n := 0
+	for _, msg := range readLines(buf) {
+		if msg["event_type"] == "task_result_delivered" && msg["task_id"] == string(task.ID) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("task_result_delivered count = %d, want 1", n)
+	}
+}
