@@ -1,0 +1,492 @@
+import { useEffect, useMemo, useState } from 'react'
+import { hubCommand } from './api'
+import type { HubAgent } from './types'
+import { useT } from '../i18n'
+
+// 智能体资料页（§8.5）：新建/编辑，5 个页签。
+//
+// 页签与数据源：
+//   基本       profile 标量（名字/头像/色/角色/职责/provider/model/档位/压缩阈值）
+//   人格       instructions 与 persona（hub 会话的人格由 Hub 装配决定，persona 只展示）
+//   工具与权限 tools.preset / disable / allow / disable_network / mcp.disable（前端只编辑
+//              最常用的三项，其余保持原值 —— 全量编辑器留到工具面板）
+//   记忆       hub_agent_memory（列表/读）+ hub_agent_memory_write（写前备份）
+//   版本       hub_agent_versions / hub_agent_rollback / hub_agent_prompt_preview
+//
+// 保存语义：create 走 hub_agent_create（服务端分配 id）；update 走 hub_agent_update 的
+// patch（只发改过的字段，避免把列表里没带的字段写成零值）。
+
+type Tab = 'basic' | 'persona' | 'tools' | 'memory' | 'versions'
+
+interface MemoryEntry {
+  name: string
+  size: number
+  modified?: string
+}
+
+interface VersionRow {
+  version: number
+  saved_at?: string
+  name?: string
+  role?: string
+  provider?: string
+  model?: string
+}
+
+interface PromptLayer {
+  key: string
+  title: string
+  text: string
+}
+
+export default function AgentEditor({
+  agent,
+  onClose,
+  onSaved,
+}: {
+  agent?: HubAgent | null
+  onClose: () => void
+  onSaved: (agentID: string) => void
+}) {
+  const t = useT()
+  const isNew = !agent
+  const [tab, setTab] = useState<Tab>('basic')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // —— 基本 ——
+  const [name, setName] = useState(agent?.name ?? '')
+  const [emoji, setEmoji] = useState(agent?.avatar?.value ?? '🟢')
+  const [accent, setAccent] = useState(agent?.accent ?? '#7bc199')
+  const [role, setRole] = useState(agent?.role ?? '')
+  const [description, setDescription] = useState(agent?.description ?? '')
+  const [provider, setProvider] = useState(agent?.provider ?? '')
+  const [model, setModel] = useState(agent?.model ?? '')
+  const [effort, setEffort] = useState(agent?.effort ?? '')
+  const [threshold, setThreshold] = useState(agent?.compress_threshold ?? 0.8)
+  const [memoryOn, setMemoryOn] = useState(agent?.memory?.enabled !== false)
+
+  // —— 人格 ——
+  const [instructions, setInstructions] = useState(agent?.instructions ?? '')
+
+  // —— 工具与权限 ——
+  const [preset, setPreset] = useState((agent as { tools?: { preset?: string } })?.tools?.preset ?? 'all')
+  const [disable, setDisable] = useState('')
+
+  // —— 记忆 ——
+  const [entries, setEntries] = useState<MemoryEntry[]>([])
+  const [memoryPath, setMemoryPath] = useState('MEMORY.md')
+  const [memoryBody, setMemoryBody] = useState('')
+  const [memoryExists, setMemoryExists] = useState(false)
+  const [memoryNote, setMemoryNote] = useState('')
+
+  // —— 版本 ——
+  const [versions, setVersions] = useState<VersionRow[]>([])
+  const [currentVersion, setCurrentVersion] = useState(agent?.version ?? 0)
+  const [layers, setLayers] = useState<PromptLayer[] | null>(null)
+  const [previewNote, setPreviewNote] = useState('')
+
+  const agentID = agent?.id ?? ''
+  const tabs = useMemo<{ key: Tab; label: string }[]>(
+    () => [
+      { key: 'basic', label: t('hub.tab.basic') },
+      { key: 'persona', label: t('hub.tab.persona') },
+      { key: 'tools', label: t('hub.tab.tools') },
+      { key: 'memory', label: t('hub.tab.memory') },
+      { key: 'versions', label: t('hub.tab.versions') },
+    ],
+    [t],
+  )
+
+  useEffect(() => {
+    if (!agentID) return
+    void loadMemory()
+    void loadVersions()
+    // 只在切智能体时拉一次；页签内的刷新是显式动作。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentID])
+
+  async function loadMemory(): Promise<void> {
+    if (!agentID) return
+    const list = await hubCommand<{ entries?: MemoryEntry[] }>('hub_agent_memory', { agent_id: agentID })
+    if (!list.ok) {
+      setError(list.error ?? null)
+      return
+    }
+    setEntries(list.data?.entries ?? [])
+    void openMemoryFile(memoryPath)
+  }
+
+  async function openMemoryFile(path: string): Promise<void> {
+    if (!agentID) return
+    setMemoryPath(path)
+    const r = await hubCommand<{ content?: string; exists?: boolean }>('hub_agent_memory', {
+      agent_id: agentID,
+      path,
+    })
+    if (!r.ok) {
+      setError(r.error ?? null)
+      return
+    }
+    setMemoryBody(r.data?.content ?? '')
+    setMemoryExists(r.data?.exists === true)
+    setMemoryNote('')
+  }
+
+  async function saveMemory(): Promise<void> {
+    if (!agentID) return
+    setBusy(true)
+    const r = await hubCommand<{ backup?: string; effective?: string }>('hub_agent_memory_write', {
+      agent_id: agentID,
+      path: memoryPath,
+      content: memoryBody,
+    })
+    setBusy(false)
+    if (!r.ok) {
+      setError(r.error ?? null)
+      return
+    }
+    const backup = r.data?.backup ? t('hub.memory.backup').replace('{name}', r.data.backup) : t('hub.memory.newFile')
+    const when = r.data?.effective === 'next_session' ? t('hub.effective.nextSession') : t('hub.effective.nextRun')
+    // 先重载清单（重载会把 note 清空），再写回执 —— 否则用户永远看不到「已备份为 xxx」。
+    await loadMemory()
+    setMemoryNote(`${backup} · ${when}`)
+  }
+
+  async function loadVersions(): Promise<void> {
+    if (!agentID) return
+    const r = await hubCommand<{ versions?: VersionRow[]; current?: number }>('hub_agent_versions', {
+      agent_id: agentID,
+      limit: 20,
+    })
+    if (!r.ok) {
+      setError(r.error ?? null)
+      return
+    }
+    setVersions(r.data?.versions ?? [])
+    setCurrentVersion(r.data?.current ?? 0)
+  }
+
+  async function rollback(version: number): Promise<void> {
+    if (!agentID) return
+    setBusy(true)
+    const r = await hubCommand<{ agent?: HubAgent; warning?: string }>('hub_agent_rollback', {
+      agent_id: agentID,
+      version,
+    })
+    setBusy(false)
+    if (!r.ok) {
+      setError(r.error ?? null)
+      return
+    }
+    setError(r.data?.warning ?? null)
+    void loadVersions()
+    onSaved(agentID)
+  }
+
+  async function previewPrompt(): Promise<void> {
+    if (!agentID) return
+    const r = await hubCommand<{ layers?: PromptLayer[]; note?: string }>('hub_agent_prompt_preview', {
+      agent_id: agentID,
+    })
+    if (!r.ok) {
+      setError(r.error ?? null)
+      return
+    }
+    setLayers(r.data?.layers ?? [])
+    setPreviewNote(r.data?.note ?? '')
+  }
+
+  async function save(): Promise<void> {
+    if (!name.trim()) {
+      setError(t('hub.err.nameRequired'))
+      return
+    }
+    if (!provider.trim() || !model.trim()) {
+      setError(t('hub.err.providerRequired'))
+      return
+    }
+    setBusy(true)
+    setError(null)
+    const tools = {
+      preset,
+      disable: disable
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    }
+    const body = {
+      name: name.trim(),
+      avatar: { kind: 'emoji', value: emoji },
+      accent,
+      role: role.trim(),
+      description: description.trim(),
+      instructions,
+      provider: provider.trim(),
+      model: model.trim(),
+      effort,
+      compress_threshold: threshold,
+      memory: { enabled: memoryOn },
+      tools,
+    }
+    if (isNew) {
+      const r = await hubCommand<{ agent?: HubAgent }>('hub_agent_create', { profile: body })
+      setBusy(false)
+      if (!r.ok || !r.data?.agent) {
+        setError(r.error ?? t('hub.err.create'))
+        return
+      }
+      onSaved(r.data.agent.id)
+      onClose()
+      return
+    }
+    const r = await hubCommand<{ agent?: HubAgent; warning?: string }>('hub_agent_update', {
+      agent_id: agentID,
+      patch: body,
+    })
+    setBusy(false)
+    if (!r.ok) {
+      setError(r.error ?? t('hub.err.save'))
+      return
+    }
+    onSaved(agentID)
+    if (r.data?.warning) setError(r.data.warning)
+    else onClose()
+  }
+
+  async function remove(): Promise<void> {
+    if (!agentID) return
+    if (!window.confirm(t('hub.confirmDelete'))) return
+    setBusy(true)
+    const r = await hubCommand('hub_agent_delete', { agent_id: agentID })
+    setBusy(false)
+    if (!r.ok) {
+      setError(r.error ?? t('hub.err.delete'))
+      return
+    }
+    onSaved('')
+    onClose()
+  }
+
+  return (
+    <div className="hub-modal-scrim" role="dialog" aria-modal="true" onClick={onClose}>
+      <div className="hub-modal" onClick={(e) => e.stopPropagation()}>
+        <header className="hub-modal-head">
+          <span className="hub-modal-title">{isNew ? t('hub.newAgent') : t('hub.editAgent')}</span>
+          <button className="hub-link" onClick={onClose}>{t('hub.close')}</button>
+        </header>
+        <div className="hub-modal-body">
+          <aside className="hub-preview-card">
+            <span
+              className="hub-avatar"
+              style={{ width: 56, height: 56, fontSize: 28, background: `${accent}22`, borderColor: accent, color: accent }}
+            >
+              {emoji || name.slice(0, 1) || '?'}
+            </span>
+            <strong>{name || t('hub.unnamed')}</strong>
+            <span className="hub-sub">{role || '—'}</span>
+            <span className="hub-sub">{[provider, model].filter(Boolean).join(' · ') || '—'}</span>
+            <span className="hub-sub">{t('hub.versionLabel').replace('{v}', String(currentVersion || 1))}</span>
+            {!isNew ? (
+              <button className="hub-danger" onClick={() => void remove()} disabled={busy}>
+                {t('hub.delete')}
+              </button>
+            ) : null}
+          </aside>
+
+          <section className="hub-tab-area">
+            <nav className="hub-tabs" role="tablist">
+              {tabs.map((x) => (
+                <button
+                  key={x.key}
+                  role="tab"
+                  aria-selected={tab === x.key}
+                  className={tab === x.key ? 'on' : ''}
+                  onClick={() => setTab(x.key)}
+                >
+                  {x.label}
+                </button>
+              ))}
+            </nav>
+
+            <div className="hub-tab-body">
+              {tab === 'basic' ? (
+                <div className="hub-form">
+                  <label>{t('hub.field.name')}
+                    <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Researcher" />
+                  </label>
+                  <label>{t('hub.field.avatar')}
+                    <input value={emoji} onChange={(e) => setEmoji(e.target.value)} maxLength={4} />
+                  </label>
+                  <label>{t('hub.field.accent')}
+                    <input type="color" value={accent} onChange={(e) => setAccent(e.target.value)} />
+                  </label>
+                  <label>{t('hub.field.role')}
+                    <input value={role} onChange={(e) => setRole(e.target.value)} placeholder={t('hub.field.role.ph')} />
+                  </label>
+                  <label className="wide">{t('hub.field.description')}
+                    <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
+                  </label>
+                  <label>{t('hub.field.provider')}
+                    <input value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="deepseek" />
+                  </label>
+                  <label>{t('hub.field.model')}
+                    <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-v4-flash" />
+                  </label>
+                  <label>{t('hub.field.effort')}
+                    <select value={effort} onChange={(e) => setEffort(e.target.value)}>
+                      <option value="">{t('hub.effort.default')}</option>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                    </select>
+                  </label>
+                  <label>{t('hub.field.threshold')}
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={0.95}
+                      step={0.01}
+                      value={threshold}
+                      onChange={(e) => setThreshold(Number(e.target.value))}
+                    />
+                    <span className="hub-sub">{threshold.toFixed(2)}</span>
+                  </label>
+                  <label className="inline">
+                    <input type="checkbox" checked={memoryOn} onChange={(e) => setMemoryOn(e.target.checked)} />
+                    {t('hub.field.memory')}
+                  </label>
+                </div>
+              ) : null}
+
+              {tab === 'persona' ? (
+                <div className="hub-form">
+                  <label className="wide">{t('hub.field.instructions')}
+                    <textarea
+                      value={instructions}
+                      onChange={(e) => setInstructions(e.target.value)}
+                      rows={10}
+                      placeholder={t('hub.field.instructions.ph')}
+                    />
+                  </label>
+                  <p className="hub-muted">{t('hub.personaNote')}</p>
+                </div>
+              ) : null}
+
+              {tab === 'tools' ? (
+                <div className="hub-form">
+                  <label>{t('hub.field.preset')}
+                    <select value={preset} onChange={(e) => setPreset(e.target.value)}>
+                      <option value="all">{t('hub.preset.all')}</option>
+                      <option value="readonly">{t('hub.preset.readonly')}</option>
+                      <option value="custom">{t('hub.preset.custom')}</option>
+                    </select>
+                  </label>
+                  <label className="wide">{t('hub.field.disable')}
+                    <textarea
+                      value={disable}
+                      onChange={(e) => setDisable(e.target.value)}
+                      rows={3}
+                      placeholder="browser_*  mcp__github__*"
+                    />
+                  </label>
+                  <p className="hub-muted">{t('hub.toolsNote')}</p>
+                </div>
+              ) : null}
+
+              {tab === 'memory' ? (
+                <div className="hub-memory">
+                  {isNew ? <p className="hub-muted">{t('hub.memory.needSave')}</p> : null}
+                  {!isNew ? (
+                    <>
+                      <div className="hub-memory-list">
+                        {entries.length === 0 ? <span className="hub-muted">{t('hub.memory.empty')}</span> : null}
+                        {entries.map((e) => (
+                          <button
+                            key={e.name}
+                            className={`hub-memory-item ${e.name === memoryPath ? 'on' : ''}`}
+                            onClick={() => void openMemoryFile(e.name)}
+                          >
+                            {e.name}
+                          </button>
+                        ))}
+                        {entries.some((e) => e.name === 'MEMORY.md') ? null : (
+                          <button className="hub-memory-item" onClick={() => void openMemoryFile('MEMORY.md')}>
+                            MEMORY.md
+                          </button>
+                        )}
+                      </div>
+                      <div className="hub-memory-editor">
+                        <div className="hub-sub">
+                          {memoryPath} {memoryExists ? '' : `· ${t('hub.memory.newTag')}`}
+                        </div>
+                        <textarea value={memoryBody} onChange={(e) => setMemoryBody(e.target.value)} rows={10} />
+                        <div className="hub-row-actions">
+                          <button className="hub-primary" onClick={() => void saveMemory()} disabled={busy}>
+                            {t('hub.memory.save')}
+                          </button>
+                          {memoryNote ? <span className="hub-sub">{memoryNote}</span> : null}
+                        </div>
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {tab === 'versions' ? (
+                <div className="hub-versions">
+                  {isNew ? <p className="hub-muted">{t('hub.versions.needSave')}</p> : null}
+                  {!isNew ? (
+                    <>
+                      <div className="hub-row-actions">
+                        <button className="hub-primary" onClick={() => void previewPrompt()}>
+                          {t('hub.versions.preview')}
+                        </button>
+                        <button className="hub-link" onClick={() => void loadVersions()}>{t('hub.refresh')}</button>
+                      </div>
+                      {layers ? (
+                        <div className="hub-layers">
+                          {layers.map((l) => (
+                            <details key={l.key} open={l.key === 'protocol'}>
+                              <summary>
+                                {l.title} <span className="hub-sub">{l.text.length} chars</span>
+                              </summary>
+                              <pre>{l.text}</pre>
+                            </details>
+                          ))}
+                          {previewNote ? <p className="hub-muted">{previewNote}</p> : null}
+                        </div>
+                      ) : null}
+                      <div className="hub-version-list">
+                        <div className="hub-sub">{t('hub.versions.current').replace('{v}', String(currentVersion))}</div>
+                        {versions.length === 0 ? <span className="hub-muted">{t('hub.versions.empty')}</span> : null}
+                        {versions.map((v) => (
+                          <div className="hub-version-row" key={v.version}>
+                            <span>v{v.version}</span>
+                            <span className="hub-sub">{v.name ?? ''} {v.model ? `· ${v.model}` : ''}</span>
+                            <button className="hub-link" disabled={busy} onClick={() => void rollback(v.version)}>
+                              {t('hub.versions.rollback')}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            {error ? <div className="hub-error" onClick={() => setError(null)}>{error}</div> : null}
+
+            <footer className="hub-modal-foot">
+              <button className="hub-link" onClick={onClose}>{t('hub.cancel')}</button>
+              <button className="hub-primary" onClick={() => void save()} disabled={busy}>
+                {busy ? t('hub.saving') : t('hub.save')}
+              </button>
+            </footer>
+          </section>
+        </div>
+      </div>
+    </div>
+  )
+}

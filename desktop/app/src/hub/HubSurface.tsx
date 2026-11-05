@@ -3,6 +3,7 @@ import { Markdown } from '../components/markdown'
 import { Bot, SendIcon } from '../components/icons'
 import { useT } from '../i18n'
 import { attachHubEvents, useHubStore } from './useHubStore'
+import AgentEditor from './AgentEditor'
 import type { HubAgent, HubMessage } from './types'
 import './hub.css'
 
@@ -32,6 +33,8 @@ export default function HubSurface() {
   const clearError = useHubStore((s) => s.clearError)
 
   const [draft, setDraft] = useState('')
+  // null = 关闭；'new' = 新建；HubAgent = 编辑该智能体。
+  const [editing, setEditing] = useState<HubAgent | 'new' | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
 
@@ -72,9 +75,12 @@ export default function HubSurface() {
       <aside className="hub-rail" aria-label={t('hub.agents')}>
         <div className="hub-rail-head">
           <span className="hub-brand"><Bot size={16} /> {t('hub.title')}</span>
-          <button className="hub-link" onClick={closeHub} title={t('hub.backToWorkspaces')}>
-            {t('hub.back')}
-          </button>
+          <span className="hub-rail-actions">
+            <button className="hub-link" onClick={() => setEditing('new')} title={t('hub.newAgent')}>＋</button>
+            <button className="hub-link" onClick={closeHub} title={t('hub.backToWorkspaces')}>
+              {t('hub.back')}
+            </button>
+          </span>
         </div>
         {agents.length === 0 && !loading ? (
           <div className="hub-rail-empty">{t('hub.noAgents')}</div>
@@ -118,6 +124,9 @@ export default function HubSurface() {
                     .join(' — ')}
                 </span>
               </div>
+              <button className="hub-link" onClick={() => setEditing(activeAgent)} title={t('hub.editAgent')}>
+                {t('hub.edit')}
+              </button>
               <span className={`hub-dot ${isRunning ? 'on' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
             </header>
 
@@ -166,6 +175,17 @@ export default function HubSurface() {
           </>
         )}
       </section>
+
+      {editing ? (
+        <AgentEditor
+          agent={editing === 'new' ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={(id) => {
+            void refresh()
+            if (id) void select(id)
+          }}
+        />
+      ) : null}
     </div>
   )
 }

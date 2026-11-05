@@ -647,6 +647,8 @@ class MockTransport implements Transport {
   private hubMessages = new Map<string, { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string }[]>()
   private hubCursor = new Map<string, number>()
   private hubSeq = new Map<string, number>()
+  private hubVersions = new Map<string, { version: number; saved_at: string; profile: Record<string, unknown> }[]>()
+  private hubMemory = new Map<string, Map<string, string>>()
 
   private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string }[] {
     let list = this.hubMessages.get(agentID)
@@ -2282,6 +2284,103 @@ class MockTransport implements Transport {
           this.emit({ event_type: 'hub_message', agent_id: agentID, seq: rseq, message: { seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text: reply, created_at: rcreated } })
           this.emit({ event_type: 'agent_end', session_id: sid })
         }, sid)
+        break
+      }
+      case 'hub_agent_get': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const agent = this.hubAgents.find((a) => a.id === id)
+        if (!agent) this.respondErr(cmd, '智能体不存在')
+        else this.respond(cmd, { agent })
+        break
+      }
+      case 'hub_agent_create': {
+        const profile = { ...((cmd.payload?.profile ?? {}) as Record<string, unknown>) }
+        const id = `ag_mock${Date.now().toString(36)}`
+        const agent = { ...profile, id, persona: 'hub', version: 1 }
+        this.hubAgents.push(agent)
+        this.respond(cmd, { agent })
+        break
+      }
+      case 'hub_agent_update': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const idx = this.hubAgents.findIndex((a) => a.id === id)
+        if (idx < 0) { this.respondErr(cmd, '智能体不存在'); break }
+        const cur = this.hubAgents[idx]
+        const patch = (cmd.payload?.patch ?? {}) as Record<string, unknown>
+        const versions = this.hubVersions.get(id) ?? []
+        versions.unshift({ version: Number(cur.version ?? 1), saved_at: new Date().toISOString(), profile: { ...cur } })
+        this.hubVersions.set(id, versions)
+        const next = { ...cur, ...patch, version: Number(cur.version ?? 1) + 1 }
+        this.hubAgents[idx] = next
+        this.respond(cmd, { agent: next })
+        break
+      }
+      case 'hub_agent_delete': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        this.hubAgents = this.hubAgents.filter((a) => a.id !== id)
+        this.respond(cmd, { agent_id: id })
+        break
+      }
+      case 'hub_agent_versions': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const agent = this.hubAgents.find((a) => a.id === id)
+        const list = (this.hubVersions.get(id) ?? []).map((v) => ({
+          version: v.version,
+          saved_at: v.saved_at,
+          name: v.profile.name,
+          role: v.profile.role,
+          provider: v.profile.provider,
+          model: v.profile.model,
+        }))
+        this.respond(cmd, { agent_id: id, current: Number(agent?.version ?? 1), versions: list })
+        break
+      }
+      case 'hub_agent_rollback': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const version = Number(cmd.payload?.version ?? 0)
+        const idx = this.hubAgents.findIndex((a) => a.id === id)
+        const versions = this.hubVersions.get(id) ?? []
+        const snap = versions.find((v) => v.version === version)
+        if (idx < 0 || !snap) { this.respondErr(cmd, `找不到第 ${version} 版`); break }
+        const cur = this.hubAgents[idx]
+        versions.unshift({ version: Number(cur.version ?? 1), saved_at: new Date().toISOString(), profile: { ...cur } })
+        const next = { ...snap.profile, id, version: Number(cur.version ?? 1) + 1 }
+        this.hubAgents[idx] = next
+        this.respond(cmd, { agent: next, restored_from: version })
+        break
+      }
+      case 'hub_agent_prompt_preview': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const agent = this.hubAgents.find((a) => a.id === id)
+        const layers = [
+          { key: 'protocol', title: 'L1 · Hub 协议', text: 'You are an agent in Agent Hub…（mock）' },
+          { key: 'identity', title: 'L3 · 身份与职责', text: `${agent?.name ?? ''} — ${agent?.role ?? ''}` },
+        ]
+        this.respond(cmd, { agent_id: id, layers, total_chars: layers.reduce((n, l) => n + l.text.length, 0), note: 'L5 技能清单与工具 schema 在请求期由内核装配，不在预览内。' })
+        break
+      }
+      case 'hub_agent_memory': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const path = String(cmd.payload?.path ?? '')
+        let files = this.hubMemory.get(id)
+        if (!files) { files = new Map(); this.hubMemory.set(id, files) }
+        if (!path) {
+          const entries = [...files.keys()].map((name) => ({ name, size: files.get(name)?.length ?? 0 }))
+          this.respond(cmd, { entries, dir: `~/.go-code/hub/agents/${id}/memory` })
+          break
+        }
+        this.respond(cmd, { path, content: files.get(path) ?? '', exists: files.has(path) })
+        break
+      }
+      case 'hub_agent_memory_write': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const path = String(cmd.payload?.path ?? '')
+        const content = String(cmd.payload?.content ?? '')
+        let files = this.hubMemory.get(id)
+        if (!files) { files = new Map(); this.hubMemory.set(id, files) }
+        const backup = files.has(path) ? `${path}.${Date.now()}.bak` : ''
+        files.set(path, content)
+        this.respond(cmd, { path, backup, bytes: content.length, effective: 'next_run' })
         break
       }
       default:
