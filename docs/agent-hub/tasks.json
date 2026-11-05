@@ -990,6 +990,18 @@
       "commit": "c1bcaf7 feat(hub-p2-03): 任务账本 + 空闲闸门 + 派发队列",
       "review": "pending",
       "reviewNote": "实现：agenthub.Queue 组合 Ledger + WorkspaceOps。Submit 创建 queued 任务后尝试 Pump；闸门 = 目标 Running 或 Pending>0（Session.PendingCount 由 P0-07 提供，bridge SessionStatus 探针）；忙则留在 Hub 层 FIFO（不写 Session.inbox，避免与人的消息并批）。Pump **每次最多派发一个**：Ask 之后状态可能还没翻转，继续循环会把下一任务塞进同一批（「一个任务 = 一次干净 Run」的关键）。派发失败 dispatched→failed 落账并出队；client_msg_id = task_id（重试幂等）。接线：WorkspaceService.Queue 非空时 Send 走账本并返回 status/queued/真 task_id；buildHubEngine 懒开 hubQueue（失败降级直派）；项目会话根 AgentEnd 后 bridgeSession.hubPumpQueue 推进队列（队列空时不碰存储，避免阻塞 emit/会话账收尾）。测试：agenthub/queue_test 6 条（idle 直派、busy 排队+pump 一次一个、pending 闸门、派发失败落 failed、校验、账本回放）；bridge 2 条（SessionStatus 探针、running 时 session_send 返回 queued 且 pump 后离队）。验证：go build ./...、agenthub、desktop/bridge 全量绿（110s）。已知边界（P2-08）：内存 FIFO 不跨重启；重启后 queued 任务需从账本恢复（P2-08 崩溃恢复）。"
+    },
+    "P2-04": {
+      "status": "review",
+      "commit": "b7548d5 feat(hub-p2-04): hub_task 相关性 + AgentEnd 结算",
+      "review": "pending",
+      "reviewNote": "实现：agenthub.TaskHeader（只带 task_id/root/origin/callback，不含 instruction）+ Encode/Parse；DispatchReq.TaskHeader → hubDispatchMessage 构造 [hub_task, text] 两块；Queue 派发自动带 header。emit 的 UserInputsConsumed 分支只认 batch 开口（Injected 不算新任务），从 UserContents 解析 hub_task → bs.hubTaskIDs。根 AgentEnd（ParentRunId==\"\" && Depth==0）在 logEventLine 之后结算：completed / failed / interrupted（canceled/aborted）；结果含摘要（4000 rune）、usage（CostPriced 区分未知与免费）、artifacts；同批多个 hub_task → 第一个结算，其余 failed(batch_conflict)+hub_alert。view_reducer 跳过 hub_task 块：用户气泡只见正文（实时与恢复同一条 reducer 路径）。测试：header 往返/坏 JSON/不泄漏 instruction；结算 completed/failed/interrupted/批冲突；hubDispatchMessage 顺序；reducer 不泄漏 header。验证：go build ./...、agenthub、desktop/bridge 全量绿（67s）。"
+    },
+    "P2-05": {
+      "status": "review",
+      "commit": "f016fd1 feat(hub-p2-05): 任务结果回推 —— task_result + hub_task_update + 幂等标记",
+      "review": "pending",
+      "reviewNote": "实现：结算后 ① 产物 core.Artifact → TaskResult.Artifacts；② emit hub_task_update；③ 回推发起智能体 DM 会话：Session.PushTaskResultUsage 入队 task_result 消息（模型续跑）+ TaskResultDelivered 事件（卡片终态收敛），usage 带 CostPriced/CostUSD；④ 成功后 Ledger.MarkNotified（status→delivered + notified_run_ids），alreadyNotified 先判保证同一 run 重复 AgentEnd/事件重放不重复回推；回推失败发 hub_alert(push_failed) 且不标 notified（P2-08 可重推）。测试：失败/中断/批冲突、回推成功（ledger delivered、artifacts、task_result_delivered 事件）、同 run 两次只推一次。延期：系统动作行（Message.kind=system + refs.action）归 P2-06 前端；群/人工来源回推归 P3。验证：go build ./...、agenthub、desktop/bridge 全量绿（56s）。"
     }
   }
 }
