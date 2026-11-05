@@ -737,10 +737,13 @@ func (bs *bridgeSession) runLoop() {
 
 // manager：进程内多 workspace 注册表（一个进程承载所有工作区的会话）
 type manager struct {
-	mu          sync.Mutex
-	workspaces  map[string]*workspaceRuntime // key = workspace 绝对路径
-	provCfg     *providerConfig              // 全局 provider 配置（热切换；set_provider 更新）
-	memPrefs    *memoryPrefStore             // Project Memory 用户开关（设置面板；下一个会话生效）
+	mu         sync.Mutex
+	workspaces map[string]*workspaceRuntime // key = workspace 绝对路径
+	// hubRuntimes Agent Hub 智能体的运行时，key = agentID（方案 §6.1.1）。
+	// 刻意不放进 workspaces：那些遍历是项目语义（workspace_list / reload / MCP 重放）。
+	hubRuntimes map[string]*workspaceRuntime
+	provCfg     *providerConfig  // 全局 provider 配置（热切换；set_provider 更新）
+	memPrefs    *memoryPrefStore // Project Memory 用户开关（设置面板；下一个会话生效）
 	out         *out
 	metrics     *FileMetricsStore // 全局指标（跨 workspace，~/.go-code/metrics.jsonl）
 	seq         int
@@ -851,7 +854,22 @@ func (m *manager) pptxPreviewer(pyRT *goruntime.Runtime) *builtin.PptxPreviewer 
 }
 
 // workspaceRuntime：单个工作区的会话集合 + 持久化目录 + 技能注册表 + 自定义 subagent 注册表 + MCP 管理器（按工作区隔离）
+// runtimeKind 运行时类型（workspaceRuntime.kind，零值 = 项目工作区）。
+//
+// Hub 智能体的虚拟工作区与项目工作区走同一套 createIn 装配，但只吃全局层：
+// 智能体不属于任何仓库，项目级技能/MCP/插件只在「任务派发到该项目、由该项目自己跑」
+// 时才有意义（方案 §6.1.1）。两者分开登记（manager.workspaces vs hubRuntimes），
+// 免得 workspace_list / reload / MCP 重放这些遍历 m.workspaces 的路径看到智能体。
+type runtimeKind int
+
+const (
+	runtimeProject  runtimeKind = iota // 现有工作区：项目上下文 + 工具面
+	runtimeHubAgent                    // Agent Hub 智能体：全局层 + 工具面，无项目上下文
+)
+
 type workspaceRuntime struct {
+	kind            runtimeKind // 零值 = runtimeProject（既有构造点不必改）
+	agentID         string      // kind=runtimeHubAgent 时非空
 	path            string
 	storeDir        string
 	eventsDir       string
@@ -1187,6 +1205,7 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	}
 	startupLog("A5.computerEnsureSynced", cuSyncStart)
 	ws := &workspaceRuntime{
+		kind:       runtimeProject,
 		path:       path,
 		storeDir:   wsSessionsDir(path), // APP 级：~/.go-code/sessions/<wsKey>（跨 workspace，工作区下只留 skills）
 		eventsDir:  wsEventsDir(path),   // APP 级：~/.go-code/events/<wsKey>
@@ -1225,16 +1244,33 @@ type sessionOpts struct {
 	noRecord  bool   // true = 不装配 checkpoint record（触发即跑、跑完归档，无需崩溃恢复）
 }
 
+// createOpts 项目路径入口：先把工作区运行态取出来（必要时装配），再交给 createIn。
+// 保持既有签名不变——调用点很多（create / cron / 手机端），行为与拆分前完全一致。
 func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*bridgeSession, error) {
+	return m.createIn(m.runtime(wsPath), id, effort, opts)
+}
+
+// createIn 会话装配主体（方案 §6.1.2）：runtime 由调用方决定 —— 项目路径传
+// m.runtime(wsPath)，Hub 智能体传 m.hubRuntime(agentID)。除了 ws 的来源与下面
+// 三处按 ws.kind 分流，其余（FileStore/record/reducer/questionWaiter/approval/
+// hooks/wake loop）与拆分前逐字一致。
+func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts sessionOpts) (*bridgeSession, error) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
-	ws := m.runtime(wsPath)
+	if ws == nil {
+		return nil, errors.New("create session: nil workspace runtime")
+	}
+	wsPath := ws.path
 	// 会话首次创建前自动恢复「上次已启用」的插件（持久化标记；本进程每工作区一次）。
 	// 未安装/启用失败仅记日志，不阻断会话创建。
 	// TEMP-STARTUP A6：插件启用（同步，头号嫌疑——Enable ≤15s + embed 2s）
+	// 项目级自动装配：Hub 智能体的运行时只吃全局层，不做「按工作区恢复已启用插件」
+	//（方案 §6.1.1 列明的跳过项之一）。
 	plgStart := time.Now()
-	m.autoEnablePlugins(ws)
+	if ws.kind == runtimeProject {
+		m.autoEnablePlugins(ws)
+	}
 	startupLog("A6.autoEnablePlugins", plgStart)
 	// 会话已在进程内（切走再切回 / 后台仍活跃）→ 复用，不重建：避免丢内存态与 goroutine 泄漏
 	ws.mu.Lock()
@@ -3570,6 +3606,8 @@ func (m *manager) shutdownAll() {
 		ws.stopMCPWatch()
 		ws.stopMCPHealth() // 探活 goroutine 收尾（Refresh 会取 Manager 锁：不得持锁调用）
 	}
+	// Hub 智能体运行时同理（不在 m.workspaces 里，单独收尾）
+	m.closeHubRuntimes()
 	// Session Mesh 远程网关关闭（mesh 常驻 manager 级，不随工作区）
 	if m.meshGW != nil {
 		m.meshGW.Stop()
@@ -5794,13 +5832,14 @@ func serve() error {
 	pc := loadProviderConfig()
 	startupLog("A2.loadProviderConfig", pcStart)
 	m := &manager{
-		workspaces: map[string]*workspaceRuntime{},
-		provCfg:    pc,
-		out:        newOut(os.Stdout),
-		metrics:    NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
-		imPlugin:   implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
-		hub:        session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
-		memPrefs:   newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
+		workspaces:  map[string]*workspaceRuntime{},
+		hubRuntimes: map[string]*workspaceRuntime{},
+		provCfg:     pc,
+		out:         newOut(os.Stdout),
+		metrics:     NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
+		imPlugin:    implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
+		hub:         session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
+		memPrefs:    newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
 	}
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
