@@ -1062,6 +1062,12 @@
       "commit": "feat(hub-p3a-07 部分): 产物版本/可见性 + 审批占位不进上下文",
       "review": "pending",
       "reviewNote": "NextArtifactVersion 按(owner,name)大小写不敏感递增；ValidateArtifactPath 拒绝绝对/..；ArtifactVisibleTo 与 FileStore.ListArtifacts；快照跳过 approval_stub/routing/round_summary 且 owner-only fail-closed。测试 4 条。**部分完成**：审批正文私有落盘 needs/<id>.json 与 30 分钟超时复用 P2-06 need（P3b 补 handoff need）。"
+    },
+    "P3a-05": {
+      "status": "review",
+      "commit": "feat(hub-p3a-05 部分): hub_group_send",
+      "review": "pending",
+      "reviewNote": "hub_group_send：人消息落群日志 + 严格 @ 路由 + Round 活动回执 + hub_message/hub_round 事件；无 @ 不唤醒；@all 人类可用。测试 TestHubGroupSendRoutesAndReceipts。**部分完成**：group_history/group_members/group_say 模型工具与群会话唤醒未做（P3b）。"
     }
   }
 }
