@@ -79,6 +79,14 @@ func newAdapterWithDefault(s *Server, t Tool, def tools.ToolExposure) tools.Tool
 
 func (a *mcpTool) Name() string { return a.tool.EngineName() }
 
+// MCPServerName / MCPToolName 暴露策略层需要的身份（Agent Hub 的 server/tool 级开关）。
+//
+// 为什么不让策略去拆 mcp__<server>__<tool>：EngineName 是裸拼接，server 或 tool 自带
+// "__" 时反解必然有歧义（P1-01 复核：含 "__" 的名字能让 Disable/AllowTools 整体失效）。
+// 引擎里的真实 MCP 工具都实现这两个访问器；拆名字只作非 MCP 来源的兜底。
+func (a *mcpTool) MCPServerName() string { return a.tool.server }
+func (a *mcpTool) MCPToolName() string   { return a.tool.name }
+
 func (a *mcpTool) Description() string {
 	if a.tool.description == "" {
 		return fmt.Sprintf("MCP 工具（服务器 %s）：%s", a.tool.server, a.tool.name)

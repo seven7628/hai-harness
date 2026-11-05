@@ -49,6 +49,11 @@ func TestToolPolicyPresets(t *testing.T) {
 	if readonly.ToolVisible("mystery_tool", false) {
 		t.Fatal("readonly preset must hide tools without a read-only declaration")
 	}
+	// readonly + Allow 是非法的（Validate 拒）；运行期也不能靠 Allow 放行可写工具。
+	roWithAllow := ToolPolicy{Preset: ToolPresetReadonly, Allow: []string{"write_file"}}
+	if roWithAllow.ToolVisible("write_file", false) {
+		t.Fatal("readonly preset must ignore Allow (otherwise a bypass of Validate becomes writable)")
+	}
 
 	custom := ToolPolicy{Preset: ToolPresetCustom, Allow: []string{"read_file", "grep", "task_*"}}
 	for _, name := range []string{"read_file", "grep", "task_status"} {
@@ -102,17 +107,54 @@ func TestSplitMCPToolName(t *testing.T) {
 	}{
 		{"mcp__gh__search", "gh", "search", true},
 		{"mcp__dev-radius__get", "dev-radius", "get", true},
-		{"mcp__gh__a__b", "", "", false},   // tool 里出现 __ → 不是本仓库命名
-		{"mcp____x", "", "", false},        // server 为空
-		{"mcp__gh__", "", "", false},       // tool 为空
-		{"search", "", "", false},          // 非 MCP
-		{"mcp_gh_search", "", "", false},   // 前缀不完整
-		{"Mcp__gh__search", "", "", false}, // 大小写敏感
+		{"mcp__gh__a__b", "gh", "a__b", true}, // 第一个 __ 切分：tool 允许再带 __
+		{"mcp____x", "", "", false},
+		{"mcp__my__server__x", "my", "server__x", true}, // 有歧义时的确定性行为（真实工具走访问器）        // server 为空
+		{"mcp__gh__", "", "", false},                    // tool 为空
+		{"search", "", "", false},                       // 非 MCP
+		{"mcp_gh_search", "", "", false},                // 前缀不完整
+		{"Mcp__gh__search", "", "", false},              // 大小写敏感
 	}
 	for _, c := range cases {
 		server, tool, ok := SplitMCPToolName(c.in)
 		if ok != c.ok || server != c.server || tool != c.tool {
 			t.Errorf("SplitMCPToolName(%q) = (%q,%q,%v), want (%q,%q,%v)", c.in, server, tool, ok, c.server, c.tool, c.ok)
+		}
+	}
+}
+
+// 名字歧义判定：server 自带 "__" 时 mcp__ 名字无法无歧义反解。
+func TestMCPNameAmbiguous(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"mcp__gh__search", false},        // 唯一边界
+		{"mcp__gh__a__b", true},           // tool 自带 "__"（也可能 server 自带）
+		{"mcp__my__server__search", true}, // server 自带 "__"
+		{"bash", false},                   // 非 MCP 名字
+	}
+	for _, c := range cases {
+		if got := MCPNameAmbiguous(c.name); got != c.want {
+			t.Errorf("MCPNameAmbiguous(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// MCPRestricted 只有真的有开关时才算限制（零值 = 全开，歧义也无所谓）。
+func TestMCPRestricted(t *testing.T) {
+	var zero ToolPolicy
+	if zero.MCPRestricted() {
+		t.Error("zero-value policy must not be restricted")
+	}
+	for name, m := range map[string]MCPPolicy{
+		"disable":         {Disable: true},
+		"disable_servers": {DisableServers: []string{"gh"}},
+		"allow_tools":     {AllowTools: []string{"gh.search"}},
+		"disable_tools":   {DisableTools: []string{"gh.write"}},
+	} {
+		if !(ToolPolicy{MCP: m}).MCPRestricted() {
+			t.Errorf("%s should count as restricted", name)
 		}
 	}
 }

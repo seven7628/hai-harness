@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"strings"
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/events"
@@ -28,6 +29,10 @@ type hubSessionSpec struct {
 	Agent agenthub.AgentProfile
 	Scope agenthub.Scope
 	Group *agenthub.Group
+	// MemoryInjection 装配期算好的记忆索引文本（空 = 不注入）。
+	// 为什么要装配期算：composeSystemPrompt 每轮重跑，解析记忆目录要跑 git 读索引，
+	// 放进去等于每轮重复一次（与项目会话同一个理由，见 memory_prefs.go）。
+	MemoryInjection string
 }
 
 // hubPersonaProfile 工具面等价于 Code（bash + 子智能体全开），但系统提示词由
@@ -40,7 +45,7 @@ func hubPersonaProfile() personaProfile {
 // **刻意不传 WithHomeWrite** —— 项目会话为了 pip/npm 放开了整个 home 写权限，
 // Hub 智能体只该写自己的 home（§6.3.1）；要改工作区文件必须派任务给工作区会话。
 // 返回 nil = 本机没开 seatbelt（与项目会话同口径：此时不做进程级隔离，靠 cwd/审批）。
-func (m *manager) hubSandbox(home string, policy agenthub.ToolPolicy) sandbox.Sandbox {
+func (m *manager) hubSandbox(home string, toolsPolicy agenthub.ToolPolicy, runPolicy agenthub.RunPolicy) sandbox.Sandbox {
 	ss := loadSandboxSettings()
 	if ss.Mode != "seatbelt" || !sandbox.Available() {
 		return nil
@@ -52,9 +57,11 @@ func (m *manager) hubSandbox(home string, policy agenthub.ToolPolicy) sandbox.Sa
 	// 智能体 home 在 ~/.go-code 之下，而 ~/.go-code 因含 settings/密钥被沙箱整段 deny：
 	// 不在 deny 之后重开这一棵子树，智能体连自己的 home 都读不了写不了（P1-01 实测）。
 	opts = append(opts, sandbox.WithOpenSubpaths(home))
-	// tools.bash_roots：额外的只读根（能看不能改 —— 要改就派任务给工作区）。
-	if len(policy.BashRoots) > 0 {
-		opts = append(opts, sandbox.WithReadOnlyPaths(policy.BashRoots...))
+	// 额外只读根：tools.bash_roots（bash 能看的目录）+ policy.workspace_roots
+	// （workspace_* 工具要操作的目录）。两者都只读 —— 智能体要改，就派任务给工作区会话
+	//（§6.3.1）。去重后一次注入。
+	if roots := readOnlyRoots(toolsPolicy.BashRoots, runPolicy.WorkspaceRoots); len(roots) > 0 {
+		opts = append(opts, sandbox.WithReadOnlyPaths(roots...))
 	}
 	sb, err := sandbox.NewSeatbelt(home, opts...)
 	if err != nil {
@@ -78,7 +85,7 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 	eng, effortRef := newSessionEngine(
 		ws.path, sid, m.cron, m.provCfg, p.Provider, p.Model, effort,
 		bgCtx, reg, qw, ws.skills, ws.subagents, ws.mcp, ws.plugins,
-		hubPersonaProfile(), m.hubSandbox(ws.path, p.Tools),
+		hubPersonaProfile(), m.hubSandbox(ws.path, p.Tools, p.Policy),
 		nil, // 不传 mesh Hub：session_send/session_list 由 Hub 自己的工具提供（§6.3.1）
 		m.pythonRuntime(), m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig(),
 	)
@@ -92,16 +99,27 @@ func applyHubToolPolicy(ctx context.Context, eng *tools.Engine, policy agenthub.
 	if eng == nil {
 		return nil
 	}
+	// 动态钩子：装配之后才注册的工具（MCP 重连、插件热装）同样要过策略。
+	// 只按当前快照 HideTool 会漏掉它们 —— 那正是 §6.3.4「调用期再判一次」的缺口。
+	eng.SetToolFilter(func(t tools.Tool) bool { return hubToolVisible(policy, t) })
 	var hidden []string
 	for _, t := range eng.Tools() {
 		name := t.Name()
 		if hubToolVisible(policy, t) {
 			continue
 		}
-		eng.RegisterTool(ctx, tools.Hide(t))
+		// 引擎级撤下（不重注册 wrapper）：工具实例与其 Optional 接口保持原样，
+		// GetTool 直接报「disabled by policy」→ 直呼与 codemode 两条路都拦。
+		eng.HideTool(name)
 		hidden = append(hidden, name)
 	}
 	return hidden
+}
+
+// mcpIdentity 真实 MCP 适配器暴露的身份（server/tool 自带 "__" 时名字反解不可靠）。
+type mcpIdentity interface {
+	MCPServerName() string
+	MCPToolName() string
 }
 
 // hubToolVisible 单个工具是否满足 Profile：先看 MCP 的 server/tool 级开关，
@@ -111,7 +129,16 @@ func hubToolVisible(policy agenthub.ToolPolicy, t tools.Tool) bool {
 	if !policy.ToolVisible(name, toolReadOnly(t)) {
 		return false
 	}
+	if id, ok := t.(mcpIdentity); ok {
+		return policy.MCPAllowed(id.MCPServerName(), id.MCPToolName())
+	}
 	if server, tool, ok := agenthub.SplitMCPToolName(name); ok {
+		// 反解只是没有访问器时的兜底：server 自带 "__" 时边界不可辨，任何 MCP 限制
+		// 都按「可能命中」拒绝（fail-closed）—— 否则 Disable/DisableServers/AllowTools
+		// 会被名字歧义静默绕过（P1-01 复核 blocking）。
+		if agenthub.MCPNameAmbiguous(name) && policy.MCPRestricted() {
+			return false
+		}
 		return policy.MCPAllowed(server, tool)
 	}
 	return true
@@ -122,4 +149,21 @@ func toolReadOnly(t tools.Tool) bool {
 		return r.ReadOnly()
 	}
 	return false
+}
+
+// readOnlyRoots 合并两组只读根（去重、保序、跳过空串）。
+func readOnlyRoots(groups ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, g := range groups {
+		for _, p := range g {
+			p = strings.TrimSpace(p)
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }

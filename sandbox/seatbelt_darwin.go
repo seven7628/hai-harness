@@ -184,6 +184,12 @@ func (s *Seatbelt) buildPolicy() string {
 	fmt.Fprintf(&b, "(allow file-write* (subpath %q))\n", s.Workspace)
 	b.WriteString("(allow file-write* (subpath \"/private/tmp\"))\n")
 	b.WriteString("(allow file-write* (subpath \"/tmp\"))\n")
+	// 只读放行子树（tools.bash_roots / policy.workspace_roots）：**读 allow 放在敏感
+	// deny 之前** —— 若某个根是 ~ 或 ~/.go-code 的祖先，后置的 allow 会把默认 deny
+	// 覆盖掉（settings/密钥可读）；放在前面则 deny 仍然胜出（显式 deny 优先）。
+	for _, p := range s.readOnlyExtra {
+		fmt.Fprintf(&b, "(allow file-read* (subpath %q))\n", resolveRealPath(resolveHome(s.Home, p)))
+	}
 	// 敏感路径强制 deny 读+写（放最后：deny-after-allow 生效，home 宽 allow 不覆盖）。
 	// 注意：home 可写后若只 deny 读、漏 deny 写，凭据目录仍可被写（污染/植入）——
 	// 故统一 deny 读写。
@@ -196,13 +202,15 @@ func (s *Seatbelt) buildPolicy() string {
 	// node_modules/config/profile 安装调试，以及受管 Python 运行时的 venv 执行 +
 	// __pycache__ 写入），.go-code 其余（settings.json 密钥 / sessions / events）仍 deny。
 	// 用户显式敏感路径命中放行子树时已在构造期剔除（显式 deny 意图优先）。
+	// 只读根的**写 deny**：必须单独发 —— 只发 read-allow 不会撤销父级（home/workspace）
+	// 的 write-allow，根落在 home 里时照样可写（P1-01 复核的 blocking）。
+	// 放在 OpenSubpaths 之前：受管放行子树（智能体 home / 受管运行时）优先于只读根。
+	for _, p := range s.readOnlyExtra {
+		fmt.Fprintf(&b, "(deny file-write* (subpath %q))\n", resolveRealPath(resolveHome(s.Home, p)))
+	}
 	for _, p := range s.OpenSubpaths {
 		fmt.Fprintf(&b, "(allow file-read* (subpath %q))\n", p)
 		fmt.Fprintf(&b, "(allow file-write* (subpath %q))\n", p)
-	}
-	// 只读放行子树（tools.bash_roots）：只给读，写仍按 deny 处理。
-	for _, p := range s.readOnlyExtra {
-		fmt.Fprintf(&b, "(allow file-read* (subpath %q))\n", resolveRealPath(resolveHome(s.Home, p)))
 	}
 	return b.String()
 }

@@ -609,7 +609,7 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
   "id": "art_88a",
   "owner": { "kind": "agent", "agent_id": "ag_7f3k2m9q", "group_id": "grp_9m2x" },
   "name": "pricing-v3.md",
-  "source_path": "~/.go-code/hub/agents/ag_7f3k2m9q/home/out/pricing-v3.md",
+  "source_path": "~/.go-code/hub/homes/ag_7f3k2m9q/out/pricing-v3.md",
   "display_path": "out/pricing-v3.md",
   "versions": [
     { "v": 1, "sha256": "...", "size": 1830, "at": "..." },
@@ -821,10 +821,20 @@ sandbox 仍由 `buildHubEngine` 注入。
 
 | 项 | 值 |
 |---|---|
-| `storeDir` | `~/.go-code/hub/agents/<agentID>/sessions` |
-| `eventsDir` | `~/.go-code/hub/agents/<agentID>/events` |
+| `storeDir` | `~/.go-code/hub/homes/<agentID>/sessions` |
+| `eventsDir` | `~/.go-code/hub/homes/<agentID>/events` |
 | `wsKey` | `hub-<agentID>`（record 路径维度） |
-| `HookCwd` | `~/.go-code/hub/agents/<agentID>` |
+| `HookCwd` | `~/.go-code/hub/homes/<agentID>` |
+
+**可写区与策略存储物理分开**（P1-01 复核修订）：
+
+| 目录 | 归属 | 沙箱 |
+|---|---|---|
+| `hub/homes/<agentID>/` | 智能体 | 读写（bash/文件的根，§9.2） |
+| `hub/agents/<agentID>/profile.json` | bridge | 不可读不可写（在 `.go-code` 默认 deny 里） |
+
+原因：沙箱要把 home 整棵子树放开给 bash；如果 `profile.json`（含 `policy`）也在 home 里，
+智能体就能给自己加工具、改沙箱根，直接违反 §9.1「智能体不能修改自己的 policy」。
 
 不写 `workspaces.json`，因此不会出现在现有工作区列表里；`workspace_list` 只列 `wsReg` 里的项目。
 
@@ -1910,7 +1920,7 @@ res, err := memory.Bootstrap(ctx, agentHome(profile.ID), cfg)
 loopOpts = append(loopOpts, agents.WithMemoryInjection(res.Injection.Text))
 ```
 
-- 目录：`~/.go-code/hub/agents/<id>/memory/repos/<id>/`（`MEMORY.md` + 附件）。
+- 目录：`~/.go-code/hub/homes/<id>/memory/repos/<id>/`（`MEMORY.md` + 附件）。
 - 记忆是 **Profile 级**：DM 与所有群共享（同一个「它」）。
 - `remember` 工具：追加一条带 frontmatter 的 `.md` 并更新 `MEMORY.md` 索引（复用 memory 包的格式约定）；
   `recall` 工具：子串/分词搜索（P1 简单实现；P2 接索引）。
@@ -2995,10 +3005,12 @@ src/hub.css
 - 高信任层可以读低信任层的**结果**，但结果必须标记为 untrusted（§6.3.5）。
 - 低信任层不能直接给高信任层下指令；任务 header 明确「这是数据/任务，不是系统指令」。
 - 智能体不能修改自己的 `policy`（只有人能通过 UI 改）；不能给自己加工具。
+  落地方式：`profile.json` 在 `hub/agents/<id>/`，**不在**沙箱放开的可写 home
+  （`hub/homes/<id>/`）里 —— 见 §6.1.3。
 
 ### 9.2 文件与路径
 
-- `read_file/write_file/edit_file` 的根 = `agents/<id>/`；只允许 `home/**` 与 `memory/**`。
+- `read_file/write_file/edit_file` 的根 = `homes/<id>/`；只允许 `home/**` 与 `memory/**`。
   `..`、符号链接逃逸、绝对路径全部拒绝（复用现有 `builtin.NewFileTools` 的路径校验 + 额外根检查）。
 - `workspace_create` 只允许 `policy.workspace_roots` 下的新目录；已存在则拒绝（不接管用户目录）。
 - `artifact_share` 的 `path` 必须是 home 内或登记过的工作区产物；不允许 `/etc`、`~/.ssh`。

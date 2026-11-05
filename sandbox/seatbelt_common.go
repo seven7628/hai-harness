@@ -170,6 +170,14 @@ func WithNoProbe() SeatbeltOption {
 
 // resolveHome 解析为绝对路径：相对路径按 home 展开。
 func resolveHome(home, p string) string {
+	// "~" / "~/x" 按 home 展开：配置里写 "~/data" 是常见写法，旧实现会拼成
+	// "$HOME/~/data" 静默失效（P1-01 复核发现）。
+	if p == "~" {
+		return filepath.Clean(home)
+	}
+	if strings.HasPrefix(p, "~/") {
+		return filepath.Join(home, p[2:])
+	}
 	if filepath.IsAbs(p) {
 		return filepath.Clean(p)
 	}

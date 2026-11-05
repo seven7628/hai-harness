@@ -2,7 +2,7 @@ package main
 
 // Agent Hub 智能体运行时（方案 §6.1.1 / §6.1.3）。
 //
-// 智能体不是某个仓库：它有自己的 home（~/.go-code/hub/agents/<agentID>），
+// 智能体不是某个仓库：它有自己的 home（~/.go-code/hub/homes/<agentID>），
 // 只吃**全局层**的技能 / 子代理 / MCP / 插件。项目级的三层（{ws}/.agents/skills、
 // {ws}/.mcp.json、{ws}/.go-code/settings.json）一律不读 —— 需要项目专属能力时，
 // 把任务派发到那个工作区，由工作区自己的运行时执行，而不是把项目配置复制进 Hub。
@@ -38,8 +38,21 @@ func sessionRecordKey(ws *workspaceRuntime, wsPath string, opts sessionOpts) str
 }
 
 // hubAgentHome 智能体的虚拟工作区目录（方案 §6.1.3）：
-// ~/.go-code/hub/agents/<agentID>（会话/事件/记忆/产物的共同根）。
+// ~/.go-code/hub/homes/<agentID>（会话/事件/产物/工作文件的共同根，沙箱里这棵子树
+// 可读可写）。
+//
+// 为什么不再用 hub/agents/<id>：那里放的是 profile.json（含 policy），而沙箱必须把
+// home 整棵子树放开给 bash —— 同一个目录就等于让智能体**改自己的 policy 与工具开关**，
+// 违反 §9.1「智能体不能修改自己的 policy」。可写区与策略存储因此物理分开：
+// homes/<id>（智能体可写） vs agents/<id>（bridge 独占写）。
 func hubAgentHome(agentID string) string {
+	return filepath.Join(appDataDir(), "hub", "homes", agentID)
+}
+
+// hubAgentStoreDir 智能体的策略/档案目录（FileStore 的 agents/<id>）：
+// ~/.go-code/hub/agents/<agentID>（profile.json / groups 引用）。
+// 刻意**不**进沙箱的 writable 区（见 hubAgentHome）。
+func hubAgentStoreDir(agentID string) string {
 	return filepath.Join(appDataDir(), "hub", "agents", agentID)
 }
 

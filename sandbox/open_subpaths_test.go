@@ -23,11 +23,11 @@ func openSubpathsPolicy(t *testing.T, hub string, deny []string) (policy string)
 }
 
 func TestOpenSubpathsReopensAfterSensitiveDeny(t *testing.T) {
-	// 模拟真实布局：智能体 home 在 $HOME/.go-code/hub/agents/<id>，而 $HOME/.go-code
+	// 模拟真实布局：智能体 home 在 $HOME/.go-code/hub/homes/<id>，而 $HOME/.go-code
 	// 是**默认**敏感路径（含 settings/密钥）—— 默认 deny 不应剔除显式的重开。
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	hub := filepath.Join(home, ".go-code", "hub", "agents", "ag_x")
+	hub := filepath.Join(home, ".go-code", "hub", "homes", "ag_x")
 	if err := os.MkdirAll(hub, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestOpenSubpathsReopensAfterSensitiveDeny(t *testing.T) {
 func TestOpenSubpathsExplicitDenyWins(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	hub := filepath.Join(home, ".go-code", "hub", "agents", "ag_x")
+	hub := filepath.Join(home, ".go-code", "hub", "homes", "ag_x")
 	if err := os.MkdirAll(hub, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestReadOnlyPathsAllowReadNotWrite(t *testing.T) {
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	hub := filepath.Join(home, ".go-code", "hub", "agents", "ag_x")
+	hub := filepath.Join(home, ".go-code", "hub", "homes", "ag_x")
 	ro := filepath.Join(home, "hai-workspaces")
 	if err := os.MkdirAll(hub, 0o755); err != nil {
 		t.Fatal(err)
@@ -96,5 +96,67 @@ func TestReadOnlyPathsAllowReadNotWrite(t *testing.T) {
 	}
 	if strings.Contains(sb.Policy, `(allow file-write* (subpath "`+roReal+`"))`) {
 		t.Fatalf("read-only root %s must not get write access", roReal)
+	}
+	// 只发 read-allow 不够：根落在 home/workspace 里时父级 write-allow 仍然生效，
+	// 必须显式 write-deny。
+	if !strings.Contains(sb.Policy, `(deny file-write* (subpath "`+roReal+`"))`) {
+		t.Fatalf("read-only root %s must get an explicit write deny", roReal)
+	}
+}
+
+// 只读根是敏感 deny 的祖先（如 bash_roots=["~"]）：读 allow 必须排在 deny **之前**，
+// 否则后置 allow 会把 ~/.go-code（settings/密钥）重新打开。
+func TestReadOnlyRootCannotExposeSensitivePaths(t *testing.T) {
+	if !Available() {
+		t.Skip("seatbelt not available")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	hub := filepath.Join(home, ".go-code", "hub", "homes", "ag_x")
+	if err := os.MkdirAll(hub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := NewSeatbelt(hub, WithOpenSubpaths(hub), WithReadOnlyPaths("~"), WithNoProbe())
+	if err != nil {
+		t.Fatalf("NewSeatbelt: %v", err)
+	}
+	homeReal := resolveRealPath(home)
+	sensitive := resolveRealPath(filepath.Join(home, ".go-code"))
+	readAllow := `(allow file-read* (subpath "` + homeReal + `"))`
+	denyRead := `(deny file-read* (subpath "` + sensitive + `"))`
+	ai := strings.Index(sb.Policy, readAllow)
+	di := strings.Index(sb.Policy, denyRead)
+	if ai < 0 || di < 0 {
+		t.Fatalf("policy missing allow(ai=%d) or deny(di=%d)", ai, di)
+	}
+	if ai > di {
+		t.Fatal("read-only root allow must come BEFORE the sensitive deny (deny wins)")
+	}
+}
+
+// 只读根的写 deny 必须排在受管放行子树（智能体 home）之前，否则 home 也一起变只读。
+func TestReadOnlyWriteDenyBeforeOpenSubpaths(t *testing.T) {
+	if !Available() {
+		t.Skip("seatbelt not available")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	hub := filepath.Join(home, ".go-code", "hub", "homes", "ag_x")
+	if err := os.MkdirAll(hub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := NewSeatbelt(hub, WithOpenSubpaths(hub), WithReadOnlyPaths("~"), WithNoProbe())
+	if err != nil {
+		t.Fatalf("NewSeatbelt: %v", err)
+	}
+	homeReal := resolveRealPath(home)
+	hubReal := resolveRealPath(hub)
+	wi := strings.Index(sb.Policy, `(deny file-write* (subpath "`+homeReal+`"))`)
+	oi := strings.LastIndex(sb.Policy, `(allow file-write* (subpath "`+hubReal+`"))`)
+	if wi < 0 || oi < 0 {
+		t.Fatalf("policy missing write-deny(wi=%d) or hub reopen(oi=%d)", wi, oi)
+	}
+	if wi > oi {
+		t.Fatal("read-only write deny must come BEFORE the managed open subpath allow")
 	}
 }

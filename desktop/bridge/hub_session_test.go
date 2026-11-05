@@ -10,6 +10,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -247,5 +248,21 @@ func TestCreateInHubUsesGivenRuntime(t *testing.T) {
 	// 会话拿到的是 hub 的全局层技能表，不是按路径重查出来的项目表。
 	if _, err := hub.skills.Skill("agent-home-only"); err == nil {
 		t.Fatal("hub runtime skills must stay global-only")
+	}
+}
+
+// 智能体的可写 home 与策略存储必须物理分开（§9.1「智能体不能修改自己的 policy」）：
+// 沙箱把 home 整棵子树放开给 bash，若 profile.json 也在里面，智能体能给自己加工具。
+func TestHubAgentHomeSeparatedFromPolicyStore(t *testing.T) {
+	home := hubAgentHome("ag_sep")
+	store := hubAgentStoreDir("ag_sep")
+	if home == store {
+		t.Fatalf("home and policy store must differ, both = %q", home)
+	}
+	if strings.HasPrefix(store, home+string(filepath.Separator)) {
+		t.Fatalf("policy store %q must not live inside writable home %q", store, home)
+	}
+	if !strings.HasSuffix(filepath.Join(store, "profile.json"), "profile.json") || filepath.Dir(filepath.Join(store, "profile.json")) != store {
+		t.Fatalf("unexpected store layout: %q", store)
 	}
 }
