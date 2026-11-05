@@ -83,7 +83,7 @@
         "agenthub/profile.go",
         "agenthub/group.go"
       ],
-      "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；accent 颜色校验且缺省由 avatar.bg/名字 hash 稳定派生；角色/成员数上限；错误可读。",
+      "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；accent 颜色校验且缺省由 avatar.bg/名字 hash 稳定派生；ToolPolicy 零值=全开，disable/allow/MCP 开关可校验；角色/成员数上限；错误可读。",
       "tests": "go test ./agenthub/ -run Profile",
       "commit": "feat(hub-p0-03): Profile/Group 校验与默认值"
     },
@@ -129,7 +129,7 @@
         "agenthub/prompt.go",
         "agenthub/prompt_test.go"
       ],
-      "acceptance": "L1 协议含 @/assign_task/workspace 规则；名册/职责渲染；空层不追加；golden 逐字节稳定。",
+      "acceptance": "系统提示词从 L1 起（无 L0）；L1 含工具使用/安全/@/assign_task/workspace 契约；名册/职责渲染；空层不追加；golden 逐字节稳定。",
       "tests": "go test ./agenthub/ -run Prompt",
       "commit": "feat(hub-p0-06): 系统提示词与名册模板"
     },
@@ -188,7 +188,7 @@
     {
       "id": "P1-01",
       "phase": "P1",
-      "title": "buildHubEngine：文件/bash/python/hub 工具 + 策略",
+      "title": "buildHubEngine：全工具面 + 策略",
       "deps": [
         "P0-08"
       ],
@@ -196,7 +196,7 @@
         "desktop/bridge/hub_tools.go",
         "agenthub/policy.go"
       ],
-      "acceptance": "文件根限 home/memory；bash/run_python 沙箱；工具白名单/deny/路径检查；ask_user 绑定同一 qw。",
+      "acceptance": "按 Profile 注册全部工具（文件/bash/run_python/web/browser/computer/agent_spawn/subagent/codemode/cron/MCP/技能/插件）；零值=全开；MCP server/tool 开关；子智能体继承同一 Engine；codemode 嵌套调用过 Policy；ask_user 绑定同一 qw。",
       "tests": "go test ./desktop/bridge/ -run HubEngine",
       "commit": "feat(hub-p1-01): Hub 工具引擎与策略"
     },
@@ -211,7 +211,7 @@
         "desktop/bridge/hub_session.go",
         "desktop/bridge/providers.go"
       ],
-      "acceptance": "显式 provider 不改全局 active；samplingDefaultsFor；memory 注入；compress 阈值；人格空层稳定。",
+      "acceptance": "WithBaseSystemPrompt(\"\") 去掉 L0；RenderSystem 只产 L1+L2；显式 provider 不改全局 active；samplingDefaultsFor；memory 注入；compress 阈值；人格空层稳定。",
       "tests": "go test ./desktop/bridge/ -run HubLoop",
       "commit": "feat(hub-p1-02): Hub AgentLoop 装配"
     },
@@ -322,7 +322,7 @@
       "files": [
         "desktop/app/src/components/hub/AgentProfilePage.tsx"
       ],
-      "acceptance": "基本/人格/工具权限/记忆/会话；provider/model 校验；bash 开关；accent 选择器 + 头像预览；提示词预览；保存生效提示。",
+      "acceptance": "基本/人格/工具权限/记忆/会话；provider/model 校验；全工具开关（含 MCP server/tool）；accent 选择器 + 头像预览；提示词预览（L1 起）；保存生效提示。",
       "tests": "npm run lint && npm run test:store",
       "commit": "feat(hub-p1-09): 智能体资料页"
     },

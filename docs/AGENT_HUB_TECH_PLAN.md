@@ -173,7 +173,7 @@ Enter send · @ route · Shift + Enter newline          Track as work item · �
 | G6 | 压缩阈值是全局热更新，不是 per-session | `set_compress_threshold` 遍历所有会话（`main.go:5101`） | 每智能体建 loop 时传 `WithCompressThreshold`；改阈值重建 loop；不做全局广播（§6.11） |
 | G7 | Provider 的 `active` 是进程全局 | `providerConfig.active`（`providers.go:383`）；`new_session` 带 provider 会改全局（`main.go:1812`） | Hub 装配用显式 `prov` 参数 + `newProvider(name)`；**绝不**改全局 active（§6.2） |
 | G8 | 子智能体不是一等会话 | `subagent.Spec`（`subagent/subagent.go:26`）没有 inbox/Ask/寻址 | 不复用 subagent 作为「智能体」；智能体 = 独立 `session.Session`（§3.2） |
-| G9 | `workspaceRuntime` 装配很重（技能/MCP/插件/浏览器） | `main.go:1096-1207` | Hub 智能体用轻量 runtime（`kind=agent`），跳过项目子系统（§6.1） |
+| G9 | `workspaceRuntime` 把「项目上下文」和「工具面」绑在一起（`main.go:1096-1207`） | Hub 需要完整工具面，但不需要项目扫描/项目技能/项目 MCP 层 | 拆出 `hubRuntime`：装配**全部工具**（文件/bash/run_python/agent_spawn/subagent/codemode/browser/computer/cron/MCP/技能/插件），但不加载项目上下文（§6.1） |
 
 ### 2.3 为什么不能直接把「子智能体」当智能体
 
@@ -184,7 +184,7 @@ Enter send · @ route · Shift + Enter newline          Track as work item · �
 - 生命周期绑在父 run 上：父 run 结束/中断，子任务的语义就变成「后台任务」。
 
 而本需求的智能体是**长期存在、可被群组 @、可主动派活、有独立记忆**的对象。结论：
-**智能体 = 独立 `session.Session` + `AgentProfile` + 一个轻量 runtime**，不是 subagent。
+**智能体 = 独立 `session.Session` + `AgentProfile` + 一个独立 hub runtime**（工具面完整，不加载项目上下文），不是 subagent。
 
 ---
 
@@ -274,7 +274,7 @@ type EventSink interface { Publish(ev any) } // hub_* 事件 → stdout
 |---|---|
 | `hub_service.go` | 构造 `agenthub.HubService`、注入 runner/ops/sink、启动恢复 |
 | `hub_commands.go` | 全部 `hub_*` 命令的 dispatch 分支（只做参数解析与响应） |
-| `hub_session.go` | `createHubSession` / `buildHubLoop` / 轻量 runtime |
+| `hub_session.go` | `createHubSession` / `buildHubLoop` / 独立 hub runtime |
 | `hub_tools.go` | 注册给智能体的工具（workspace/session/task/group/artifact） |
 | `hub_events.go` | 事件投影（`hub_message` / `hub_activity` / `hub_task_update` / `hub_needs_you`） |
 | `hub_recovery.go` | 启动恢复：非终态任务、孤儿 run、未读游标 |
@@ -691,8 +691,10 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
 
 ### 6.1 Hub 智能体的 Session 装配
 
-**结论**：智能体复用 `session.Session` + `bridgeSession` 的持久化/事件/暖恢复，但使用**轻量 runtime**，
-不加载项目级的 MCP / 插件 / 浏览器 / 沙箱 / git。
+**结论**：智能体复用 `session.Session` + `bridgeSession` 的持久化/事件/暖恢复，但使用**独立 runtime**
+（`kind=hubAgent`）。独立性体现在「不加载项目上下文」（不扫描项目技能、不叠加项目 MCP 层、不自动启用
+项目插件、不检测 git），**不是**阉割工具面：文件、bash、run_python、web、browser、computer、
+agent_spawn/subagent、codemode、cron、MCP、技能、插件全部可用，由 `AgentProfile.tools` 显式开关（D18）。
 
 #### 6.1.1 runtime kind
 
@@ -713,12 +715,14 @@ type workspaceRuntime struct {
 ```
 
 **不改 `m.runtime(path)` 的语义**（项目路径永远走现有重装配）。新增 `m.hubRuntime(agentPath)`：
-按 `kind=hubAgent` 构造轻量 runtime，**不要**执行 `buildSkillsRegistry` / `mcp.NewManager` /
-`buildPlugins` / 浏览器同步（`main.go:1096-1207` 那段）。两个入口分开，避免「靠路径字符串猜类型」
-这种脆弱判断（用户完全可能有个项目恰好叫 `hub`）。
+按 `kind=hubAgent` 构造 runtime，**不要**执行项目级扫描（`buildSkillsRegistry` 的项目层、
+`projectMCPLayers`、`autoEnablePlugins`、git 状态检测，`main.go:1096-1207` 那段）。
+两个入口分开，避免「靠路径字符串猜类型」这种脆弱判断（用户完全可能有个项目恰好叫 `hub`）。
 
-`hubRuntime` 的字段：`kind/agentID/storeDir/eventsDir/sessions/skills=nil/mcp=nil/plugins=nil`。
-智能体需要技能时，单独用 `skills.NewRegistry` 只扫全局层（可选，P2）。
+`hubRuntime` 的字段：`kind/agentID/storeDir/eventsDir/sessions` + **全局工具装配**
+（`skills` 只扫全局层、`mcp` 用全局 MCP 配置构造、`plugins` 只加载已启用的全局插件、
+`cron`/`codemode`/`browser`/`computer` 按设置与 Profile 开关装配）。项目级插件/项目级 MCP
+不进入 Hub runtime；需要项目专属工具时，派任务到该工作区，而不是把项目配置复制进 Hub。
 
 #### 6.1.2 会话创建
 
@@ -767,8 +771,10 @@ type hubSessionSpec struct {
    （`HubService` 内），P4 若要做「工作区反问智能体」，再引入带 `kind` 过滤的 `RegisterEx`。
 
 其余（FileStore、record/checkpoint、reducer、questionWaiter、approval、hooks、wake loop）原样复用。
-项目专属步骤（`autoEnablePlugins`、技能/MCP/插件装配、sandbox gate、`WithSkills`）在 `opts.hub != nil`
-时跳过；Hub 的引擎在 `createIn` 里由 `buildHubEngine(ws, id, spec, reg, qw)` 现场构造，不再二次装配。
+项目级自动装配（`autoEnablePlugins`、项目技能层、项目 MCP 层、git 检测）在 `opts.hub != nil` 时跳过；
+但**工具面不跳过**：Hub 的引擎在 `createIn` 里由 `buildHubEngine(ws, id, spec, reg, qw)` 现场构造，
+按 `AgentProfile.tools` 注册全部工具（含 MCP/插件/browser/computer/cron/codemode/subagent），
+sandbox 仍由 `buildHubEngine` 注入。
 
 **不要**改 `m.create`/`m.createOpts` 的签名（现有调用点很多）；`createIn` 是新增的第三层。
 
@@ -812,8 +818,8 @@ func (m *manager) buildHubLoop(ws *workspaceRuntime, sid string, spec *hubSessio
         agents.WithProviderName(p.Provider),
         agents.WithModel(p.Model),
         agents.WithToolEngine(eng),
-        agents.WithBaseSystemPrompt(prompt.DesktopCodePromptV2),
-        agents.WithSystemPrompt(agenthub.RenderSystem(spec)), // 见 6.2.2
+        agents.WithBaseSystemPrompt(""),                    // 去掉 L0（D17）；L1 由下一行提供
+        agents.WithSystemPrompt(agenthub.RenderSystem(spec)), // L1 协议 + L2 身份/职责/人格（见 6.2.2）
         agents.WithReasoningEffort(provider.ReasoningEffortLevel(p.Effort)),
         agents.WithWorkingDir(agentHome(p.ID)),
         agents.WithAgentMDDir(agentHome(p.ID)),      // 智能体自己的 AGENTS.md（可选）
@@ -830,8 +836,10 @@ func (m *manager) buildHubLoop(ws *workspaceRuntime, sid string, spec *hubSessio
         agents.WithMaxRetries(11),
         agents.WithRetryBackoff(agents.FixedBackoff(time.Second)),
     }
-    // 不传：WithSkills（除非 profile 开启）、WithMaxCost（预算在 Hub 层控）、
-    //      sandbox、MCP、插件、cron、mesh 工具。
+    // 工具面全部由 buildHubEngine 注册（不是 loop 选项）：文件/bash/run_python/web、
+    // agent_spawn/subagent、codemode、browser_*/computer_*、cron_*、MCP、技能、插件。
+    // 这里不传 WithMaxCost（预算在 Hub 层控）；mesh 的 session_send/session_list 不注册
+    // （与 Hub 同名工具语义冲突，§6.3.1），其余全部可用，按 Profile 开关。
     // 采样默认值必须按**显式 provider**取：现有 samplingDefaults() 读全局 active，
     // Hub 里 A=DeepSeek、B=Anthropic 时会串（providers.go:775）。
     // 新增 samplingDefaultsFor(prov)，语义与现有函数一致，只把 pc.providerName() 换成参数。
@@ -846,7 +854,8 @@ func (m *manager) buildHubLoop(ws *workspaceRuntime, sid string, spec *hubSessio
 - `newProvider(p.Provider)` 支持显式 provider（`providers.go:998`），但 `newProvider` 内部读 `pc.models/provider`
   的 map，**不改** `pc.active`。这是「A 用 DeepSeek、B 用 Anthropic 同时跑」的关键。
 - `WithMemoryInjection` 是一段成品文本（`agents/agent_loop.go:453`），由 `memory.Bootstrap` 在装配期算好
-  （`RenderSystem` 只负责 L1–L4/L6）；运行中不切换（与现有 Project Memory 语义一致：`memory_prefs.go` 注释）。
+  （`RenderSystem` 只负责 L1–L2；L3–L5 由内核的 AgentMD/记忆/技能选项追加）；运行中不切换
+  （与现有 Project Memory 语义一致：`memory_prefs.go` 注释）。
 - 不传 `WithMaxCost`：`Session.Config.MaxCost` 是会话级硬上限，适合「单任务预算」而不是「智能体日预算」；
   Hub 在派发前检查日预算，在 `finishHubTask` 记账。
 
@@ -855,13 +864,17 @@ func (m *manager) buildHubLoop(ws *workspaceRuntime, sid string, spec *hubSessio
 顺序 = **稳定前缀在前，易变内容在后**（保护 prompt cache；与 `agents/composeSystemPrompt` 的拼接顺序一致）：
 
 ```
-[L0] BaseSystemPrompt (DesktopCodePromptV2)      ← 1a：SDK 行为契约（英文，现有）
-[L1] Hub 控制面协议                              ← 1b：固定：你能做什么/工具怎么用/群组礼仪
+[L1] Hub 控制面协议                              ← 1b：固定：你能做什么/工具怎么用/群组礼仪（系统提示词第一层）
 [L2] 身份/职责/人格                               ← 1b：name / role / description / instructions / persona（用户可改）
 [L3] AGENTS.md / 工作记忆                        ← 1c：智能体 home 里的 AGENTS.md（可选）
 [L4] 记忆索引：MEMORY.md                         ← Project Memory 注入（AGENTS.md 之后、技能之前）
 [L5] 技能清单                                    ← 仅当 profile 开启技能
 ```
+
+**L0 已移除（D17）**：不再拼 `prompt.DesktopCodePromptV2`。桌面端以 Code 为主，Hub 的 L1 自己承担
+「工具使用/安全边界/输出契约」，不再叠加一层 SDK 行为契约。实现上必须显式
+`WithBaseSystemPrompt("")`——不传的话内核会用 `DefaultSystemPrompt` 补成 L0（`agents/agent_loop.go:702`），
+等于没去掉。
 
 **群组快照不进 system**：每轮变化的「谁说了什么」必须作为 **user 消息**注入（§6.5.2），
 不能塞进 `WithSystemPrompt`——否则每轮都要重建 loop，而且会破坏 prompt cache。
@@ -871,6 +884,12 @@ L1 模板（固定文案，i18n 跟随 `settings.lang`）：
 
 ```text
 You are an agent in Agent Hub. You have your own memory and long-lived session.
+
+## Tools
+You have the same toolset as a desktop coding session: files, bash, run_python, web, browser/computer,
+agent_spawn/subagent, codemode, cron, skills, plugins and MCP. Your profile may disable some of them;
+if a tool is not available, say so or use another path — never pretend you used it. Prefer the smallest
+tool that gets the job done, and keep long-running/expensive tools for the work that needs them.
 
 ## Who is here
 The group roster (names, roles, responsibilities) is in your system context. You can call
@@ -901,8 +920,9 @@ talk to them by writing @Name in a message, or assign tracked work with assign_t
 - If a request is outside your responsibilities, use handoff or ask the user.
 ```
 
-L2–L4 为空时的行为：不追加空层（与 `buildPersonaLoop` 的 `systemLayer != ""` 判定一致），
-保证「没填人格」的智能体提示词逐字节稳定。
+L2–L5 为空时的行为：不追加空层（与 `buildPersonaLoop` 的 `systemLayer != ""` 判定一致），
+保证「没填人格」的智能体提示词逐字节稳定。`RenderSystem` 只产出 L1+L2；L3–L5 仍由内核的
+`WithAgentMDDir`/`WithMemoryInjection`/`WithSkills` 追加，顺序不变。
 
 **人格/职责的边界**：L3 是「软约束」，同时在工具策略层做硬约束（§6.3.4）。UI 必须提示用户：
 「写在这里的规则会影响模型行为，但真正的权限在『工具与权限』页配置」。
@@ -962,10 +982,32 @@ Hub 引擎与项目引擎是**两个独立的 `tools.Engine`**，同名工具互
 | `ask_user` | `{questions[]}` | 私有提问（进 Needs you） | 所有 |
 | `bash` | `{command, timeout?}` | 在智能体 home 内执行（沙箱；`ask` 模式高风险命令审批） | `tools.bash` |
 | `run_python` | 现有签名 | 受管 Python（与 bash 同一沙箱） | `tools.python` |
-| `read_file` / `write_file` / `edit_file` / `glob` / `grep` | 现有签名 | 只在智能体 home + memory 根内 | `tools` 策略 |
+| `read_file` / `write_file` / `edit_file` / `glob` / `grep` | 现有签名 | 只在智能体 home + memory 根内 | `tools.files` |
+| `agent_spawn` / `agent_send` / `agent_interrupt` / `agent_list` / `agent_output` | 现有签名 | 子智能体：并行/后台执行，结果回父 run | `tools.subagents` |
+| `subagent_explore` | `{task}` | 只读分析子智能体（Explore） | `tools.subagents` |
+| `codemode` | 现有签名 | 脚本编排；嵌套工具调用仍走 Policy（§6.3.4） | `tools.codemode` |
+| `browser_*` | 插件签名 | Browser Use：导航/点击/截图 | `tools.browser` + 插件已启用 |
+| `computer_*` | 现有签名 | 屏幕截图/视觉操作；仅图片模型注册 | `tools.computer` + 插件已启用 |
+| `cron_*` | 现有签名 | 定时任务；`ToolBound` 绑定本智能体 workspace/sid | `tools.cron` |
+| `mcp__<server>__<tool>` | MCP schema | MCP 工具；按 server/tool 开关 | `tools.mcp` |
+| `load_skill` + 技能工具 | 现有签名 | 技能渐进披露（全局层） | `tools.skills` |
+| `todo_*` | 现有签名 | 会话级待办 | 所有 |
+| `git_worktree` | 现有签名 | 仅 bash 开启时注册（现有门控） | `tools.bash` |
 
-**不注册（默认）**：`agent_spawn`、`subagent_*`、`codemode`、`browser_*`、`computer_*`、`cron_*`、MCP 工具。
-`bash` / `run_python` **默认注册**（D7：智能体当然能用 bash），但受沙箱与审批约束（§9.2）。
+**默认全开，按 Profile 关闭（D18）**：这里没有「默认不注册」的工具。智能体的能力不该被平台
+预先阉割；安全靠 cwd/沙箱/审批/预算（§9.2），不靠「让它看不见工具」。
+
+- `AgentProfile.tools.preset` 缺省 `all`；`disable` 支持精确名与前缀（`browser_*`、`mcp__github__*`）。
+- **MCP**：除了 `tools.disable`，还有 server 级与 tool 级开关（`tools.mcp.servers/tools`）；
+  未配置/连接失败的 server 不注册，并在设置页显示状态，不静默假装可用。
+- **插件类工具**（browser/computer）：插件未安装/未启用时工具不存在；UI 给安装/启用入口，
+  不因为「Hub 模式」而拒绝加载。
+- `computer_*` 保留现有门控（仅图片输入模型）；`git_worktree` 保留现有门控（仅 bash 开启）。
+- **唯一不注册**：mesh 的 `session_send`/`session_list` 与 Hub 同名工具语义冲突（mesh 无任务账本），
+  Hub 引擎注册自己的 `session_send`/`session_list`（§6.3.3）。这是命名冲突，不是能力缺失。
+- **子智能体继承父工具面**：`agent_spawn` 共享同一个 `tools.Engine`，所以父被关闭的工具，
+  子也看不到；子不能再自行放开（避免绕过 Profile）。
+- **codemode 的嵌套调用**必须复用同一个 `Policy.BeforeCall`；只在顶层 Engine 包一层不算数。
 
 **三个动作的边界**（提示词与工具描述都要写清楚，否则模型会混）：
 
@@ -1025,14 +1067,14 @@ session_send(session_id, body, callback="agent_end")
 
 ```go
 type Policy struct {
-    Allow map[string]bool // 最终可见集合
-    Deny  map[string]bool // 永远拒绝
-    Roots []string        // 文件可写根
+    Disable map[string]bool // 显式关闭（支持前缀）；空 = 全开（D18）
+    Allow   map[string]bool // preset=custom 时的白名单；空 = 全部
+    Roots   []string        // 文件可写根
     MaxTaskCostUSD float64
 }
 
 func (p Policy) Wrap(eng *tools.Engine) *tools.Engine {
-    // 1) 注册期：不在 Allow 的工具不注册（模型看不到）
+    // 1) 注册期：默认全开，减去 Disable；custom 时只留 Allow（模型看不到被关的）
     // 2) 调用期：BeforeCall 再判一次（防模型硬调 / 工具描述漂移）
     // 3) 路径参数：read/write/edit/artifact_share 的 path 必须在 Roots 内
     // 4) 预算：session_send/workspace_create/handoff 前检查日预算
@@ -1042,8 +1084,13 @@ func (p Policy) Wrap(eng *tools.Engine) *tools.Engine {
 - 与 `agents.Mode.AllowTool`（`agents/mode.go:38`）同构，但作用在 Engine 层，且带**参数级**检查
   （Mode 只能看工具名，看不到 path/target）。
 - 拒绝时回传结构化错误（`IsError=true` + `code`），让模型能解释给用户，而不是静默消失。
-- **观察者**：`Policy.Allow` 只留只读工具（`group_history`/`artifact_read`/`read_file`/`recall`），
-  写工具全部不注册；即使模型硬调也被拒。
+- `codemode` 的嵌套工具调用、子智能体继承的 Engine、MCP 动态工具，都必须在**调用期**再过一次
+  `Policy.BeforeCall`；只在注册期过滤会被「脚本/子智能体/动态注册」绕过。
+- MCP 工具按 `server`/`tool` 两级判定；插件工具按 plugin id + tool 名判定；规则与内置工具同构，
+  不另造一套权限语言。
+- **观察者**：群内 `observer` 角色只影响「能否被派任务/能否 @all」，**不影响工具注册**；
+  需要只读智能体时，用 `tools.preset=readonly` 显式关闭写工具（UI 可见、可改），不要把角色和
+  工具能力绑死。
 
 #### 6.3.5 工具结果的注入防护
 
@@ -2830,6 +2877,15 @@ src/hub.css
 - `artifact_share` 的 `path` 必须是 home 内或登记过的工作区产物；不允许 `/etc`、`~/.ssh`。
 - 预览接口按 artifact id 读，不接受路径（§6.9.3）。
 
+**工具面原则（D18）**：默认**全开**（文件/bash/run_python/web/browser/computer/agent_spawn/subagent/
+codemode/cron/MCP/技能/插件），Profile 只做显式关闭。安全不靠「让模型看不见工具」，靠下面这些边界：
+
+- 文件/执行类：cwd + 可写根 + 沙箱 + 路径校验（本节）。
+- 高风险动作：现有 `ToolApprovalRequested` 审批；`policy.mode=ask` 时外部动作逐次确认。
+- 子智能体：继承父 Engine（同一 Policy），不能自行放开父已关闭的工具。
+- MCP/插件：按 server/plugin/tool 三级开关；凭据不进入提示词，连接失败显式报错。
+- 成本：`MaxTaskCostUSD`/日预算在 Hub 层拦截，不依赖工具自身限额。
+
 **bash 的边界（D7：默认开启，但不是无限制）**：
 
 | 维度 | 默认 | 实现 |
@@ -3079,7 +3135,7 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 |---|---|
 | `agenthub` | Profile 校验（provider 缺失/阈值越界/名字重复）；Group 角色；Mention 解析（@all/重名/未知）；Task 状态机（非法迁移拒绝）；幂等（同 run 两次）；预算；护栏；快照裁剪（token 预算/折叠）；Store 原子写/损坏恢复 |
 | `session` | `PendingCount`；`ContentTypeHubTask` 的 Validate/collect；`PushTaskResultUsage` 现有行为不回归 |
-| `desktop/bridge` | `UserInputsConsumed` 解析 hub_task；`finishHubTask` 只结算主 run；cron 分支不回归；`runtime.kind` 分支 |
+| `desktop/bridge` | `UserInputsConsumed` 解析 hub_task；`finishHubTask` 只结算主 run；cron 分支不回归；`runtime.kind` 分支；`buildHubLoop` 不出现 `DefaultSystemPrompt`（L0 关闭）；`buildHubEngine` 默认注册全部工具族（含 MCP/subagent/codemode/browser/computer/cron），`disable` 后确实消失；子智能体继承同一 Engine |
 
 ### 13.2 Go 集成（fake runner/ops）
 
@@ -3087,7 +3143,7 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 - **并发/队列**：目标忙时排队，AgentEnd 后自动 pump。
 - **人工介入**：Injected=true → human_intervened。
 - **崩溃恢复**：构造 `dispatched` 账本 + 无 run → 启动后 `interrupted` + 通知。
-- **群组路由**：@all/@A/无 @ 三种；快照冻结；observer 只读。
+- **群组路由**：@all/@A/无 @ 三种；快照冻结；observer 角色不改变工具面（与 `readonly` preset 区分）。
 - **智能体互 @**：A 正文 `@B` → B 被唤醒；`assign_task` → 任务账本；B 完成后 A 被唤醒；
   同一条消息里 3 个 mention 上限；代码块/URL 里的 `@` 不触发。
 - **对话控制器**：8 轮上限、A↔B 踢皮球检测、人类插话清队列、停止按钮、冷却。
@@ -3140,6 +3196,8 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 | D14 | 智能体能否 @all？ | A 仅 owner，且每条人类消息最多 1 次；B 所有成员；C 禁止 | **A**；防止一个智能体刷屏全场 | （建议 A，待确认） |
 | D15 | 任务完成时唤醒谁？ | A 只唤醒派发者 + 群内结果卡；B 唤醒所有成员；C 只更新卡片不唤醒 | **A**；其他成员下次被 @ 时在快照里看到结果卡 | **A（与 D6 配套）** |
 | D16 | bash 的可写范围 | A 智能体 home（推荐），工作区通过派任务修改；B 允许直接写 workspace_roots；C 只读 | **A**；需要改工作区时走有审批、有产物的任务通道 | （建议 A，待确认） |
+| D17 | 系统提示词是否保留 L0（DesktopCodePromptV2）？ | A 保留；B 去掉，系统提示词从 L1 起 | **B**；Hub 协议自己承担工具/安全/输出契约 | **B（已确认）** |
+| D18 | Hub 智能体的工具面？ | A 只给 Hub/文件/bash；B 与桌面会话一致的全工具面，按 Profile 开关 | **B**；默认全开（含 subagent/codemode/browser/computer/cron/MCP/插件），MCP 可 server/tool 级关闭 | **B（已确认）** |
 
 ### 14.2 技术风险
 
@@ -3332,14 +3390,21 @@ type MemoryPrefs struct {
     MaxIndexLines int  `json:"max_index_lines,omitempty"` // 默认 200
 }
 
+type MCPPolicy struct {
+    Disable        bool     `json:"disable,omitempty"`         // true = 全部 MCP 不注册
+    DisableServers []string `json:"disable_servers,omitempty"` // server 名
+    DisableTools   []string `json:"disable_tools,omitempty"`   // "server.tool" / glob
+    AllowTools     []string `json:"allow_tools,omitempty"`     // 非空 = 只允许这些
+}
+
 type ToolPolicy struct {
-    Preset []string `json:"preset,omitempty"` // read/write/web/hub/memory/bash/python
-    Allow  []string `json:"allow,omitempty"`
-    Deny   []string `json:"deny,omitempty"`
-    Bash   bool     `json:"bash"`
-    Python bool     `json:"python"`
-    BashRoots []string `json:"bash_roots,omitempty"` // 只读根
-    Network   bool     `json:"network"`              // bash 网络
+    // 零值 = 全开。安全靠沙箱/审批/预算，不靠默认隐藏工具。
+    Preset         string    `json:"preset,omitempty"` // all | readonly | custom；空 = all
+    Disable        []string  `json:"disable,omitempty"` // 精确名或前缀：browser_*、mcp__github__*
+    Allow          []string  `json:"allow,omitempty"`   // custom 时白名单；空 = 全部
+    BashRoots      []string  `json:"bash_roots,omitempty"` // 额外只读根
+    DisableNetwork bool      `json:"disable_network,omitempty"`
+    MCP            MCPPolicy `json:"mcp"`
 }
 
 type RunPolicy struct {
@@ -3947,7 +4012,7 @@ feat(hub-p0-01): agenthub 包骨架与领域类型
 
 | ID | 任务 |
 |---|---|
-| P1-01 | `buildHubEngine`：文件/bash/python/hub 工具 + 策略 |
+| P1-01 | `buildHubEngine`：全工具面 + 策略（含 MCP/插件/subagent） |
 | P1-02 | `buildHubLoop`：provider/model/memory/compress/persona |
 | P1-03 | 智能体 CRUD 命令 + 校验 |
 | P1-04 | 会话生命周期 + DM open/send/history |
