@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +38,9 @@ func NewQueue(ledger *Ledger, ops WorkspaceOps) *Queue {
 }
 
 func queueKey(workspace, sessionID string) string {
-	return workspace + "\x00" + sessionID
+	// 归一尾斜杠/`.`/`..`：knownWorkspace 允许尾斜杠，队列 key 不容忍会让
+	// 同一会话出现两个 key、任务永远泵不出（P2-03 复审 NB-4）。
+	return filepath.Clean(strings.TrimSpace(workspace)) + "\x00" + strings.TrimSpace(sessionID)
 }
 
 // CheckGuard 在建账前跑护栏（预算/并发/去重/链长）；nil guard = 不检查。
@@ -103,7 +106,12 @@ func (q *Queue) Submit(ctx context.Context, t *Task) (*Task, error) {
 	if dispatched != nil && dispatched.ID == created.ID {
 		return dispatched, nil
 	}
-	return created, nil // 目标忙/队首是旧任务：本任务已落账本（queued）
+	// 目标忙/队首是旧任务：本任务已落账本（queued）。并发 pump 可能在 append 后
+	// 把它派走 —— 返回前重读账本，别让 Status/queued 说谎（P2-03 复审 NB-2）。
+	if latest, rerr := q.ledger.Replay(ctx, created.ID); rerr == nil && latest != nil {
+		return latest, nil
+	}
+	return created, nil
 }
 
 // Pump 在目标空闲时派发队首任务；每次最多派发一个。
@@ -123,11 +131,14 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			// 目标会话已删除/关闭：不能让它永远占住队首（后续任务全被堵死）。
+			// 与 B3 同一不变量：Transition 成功后才出队；失败保留队首等存储恢复。
 			id := ids[0]
-			q.pending[key] = ids[1:]
-			_, _ = q.ledger.Transition(ctx, id, TaskCanceled, TransitionOptions{
+			if _, terr := q.ledger.Transition(ctx, id, TaskCanceled, TransitionOptions{
 				At: time.Now().UTC(), Error: "目标会话不存在",
-			})
+			}); terr != nil {
+				return nil, terr
+			}
+			q.pending[key] = ids[1:]
 			return nil, err
 		}
 		return nil, err

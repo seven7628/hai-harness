@@ -325,7 +325,11 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		o.m.mu.Unlock()
 	}
 	msg := hubDispatchMessage(text, req.TaskHeader)
+	// 先置 pending 再 Ask：若 runLoop 已有 wake token，Ask 后可能立刻
+	// AgentStart→AgentEnd，晚置位会把闸门永久 latch（P2-03 复审 NB-1）。
+	bs.hubDispatchPending.Store(true)
 	if err := bs.s.Ask(ctx, msg); err != nil {
+		bs.hubDispatchPending.Store(false)
 		if dedupKey != "" {
 			o.m.mu.Lock()
 			delete(o.m.hubMsgDedup, dedupKey)
@@ -333,8 +337,6 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		}
 		return agenthub.DispatchResult{}, err
 	}
-	// 已投递、等根 AgentStart/AgentEnd 清位：闸门在这段窗口里必须仍算 busy。
-	bs.hubDispatchPending.Store(true)
 	bs.lastActive.Store(time.Now().UnixMilli())
 	bs.wakeRun()
 	return agenthub.DispatchResult{SessionID: sid, Accepted: true}, nil

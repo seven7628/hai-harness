@@ -338,3 +338,37 @@ func TestHubWorkspaceCreateDefaultTitleMatchesList(t *testing.T) {
 		t.Fatalf("long title len = %d, want 80", len([]rune(long.Title)))
 	}
 }
+
+// P2-03 复审 NB-3：真实 Dispatch 必须置 hubDispatchPending（不是测试手工置位）。
+func TestHubDispatchSetsPendingBeforeAgentStart(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "PendingProbe", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-pending-probe", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	// 冻结 emit（AgentStart 处理点），隔离出 Dispatch→AgentStart 窗口。
+	bs.dispatchMu.Lock()
+	if _, err := ops.Dispatch(context.Background(), agenthub.DispatchReq{
+		AgentID: "ag_probe001", Workspace: wsPath, SessionID: bs.id, Text: "窗口里的任务",
+	}); err != nil {
+		bs.dispatchMu.Unlock()
+		t.Fatal(err)
+	}
+	if !bs.hubDispatchPending.Load() {
+		bs.dispatchMu.Unlock()
+		t.Fatal("Dispatch 未置 hubDispatchPending")
+	}
+	info, err := ops.SessionStatus(context.Background(), wsPath, bs.id)
+	if err != nil || !info.Running {
+		bs.dispatchMu.Unlock()
+		t.Fatalf("dispatch window status = %+v, %v", info, err)
+	}
+	bs.dispatchMu.Unlock()
+}

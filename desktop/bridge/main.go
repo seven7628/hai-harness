@@ -741,7 +741,7 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// bs.running 已置 false，闸门看到的是真实空闲状态）。
 	if e.Type() == events.AgentEndType && bs.hubPumpQueue != nil && bs.runtime != nil &&
 		bs.runtime.kind == runtimeProject {
-		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
 			// pumpHubQueue 内部先看队列长度：没有排队任务时立刻返回，不碰存储、
 			// 不阻塞 emit（会话的 run ledger 收尾在 emit 返回之后）。
 			bs.hubPumpQueue(bs.workspace, bs.id)
@@ -4042,7 +4042,7 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 			"title":      resolveLiveSessionTitle(wsKey, bs, id),
 			"updated_at": sessionUpdatedAt(ws, id, bs.lastActive.Load()),
 			"pinned":     sessionPins.isPinned(wsKey, id),
-			"running":    bs.running.Load(),
+			"running":    bs.running.Load() || bs.hubDispatchPending.Load(),
 		})
 	}
 	ws.mu.Unlock()
