@@ -4,6 +4,7 @@ package agenthub
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -138,5 +139,84 @@ func TestDirectMessageSeqRebuiltOnOpen(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "dms", "ag_rebuild", "log.jsonl")); err != nil {
 		t.Fatalf("dm log missing: %v", err)
+	}
+}
+
+// P1-04：client_msg_id 去重查询不设窗口（旧实现只扫最近 100 条，超出就重复入上下文）。
+func TestFindDirectMessageByClientID(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	if _, found, err := st.FindDirectMessageByClientID(ctx, "ag_dedupe", ""); err != nil || found {
+		t.Fatalf("empty client id: found=%v err=%v; want false,nil", found, err)
+	}
+	if _, found, err := st.FindDirectMessageByClientID(ctx, "ag_dedupe", "missing"); err != nil || found {
+		t.Fatalf("unknown client id: found=%v err=%v; want false,nil", found, err)
+	}
+	if _, _, err := st.FindDirectMessageByClientID(ctx, "../escape", "x"); err == nil {
+		t.Fatal("invalid agent id must fail")
+	}
+
+	first := dmMsg(KindText, SenderHuman, "old")
+	first.Refs = map[string]any{"client_msg_id": "c-old"}
+	seq, err := st.AppendDirectMessage(ctx, "ag_dedupe", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 150 条之后（远超旧的 100 条窗口）仍要能查到。
+	for i := 0; i < 150; i++ {
+		m := dmMsg(KindText, SenderAgent, "later")
+		m.Refs = map[string]any{"client_msg_id": "c-filler"}
+		if _, err := st.AppendDirectMessage(ctx, "ag_dedupe", m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, found, err := st.FindDirectMessageByClientID(ctx, "ag_dedupe", "c-old")
+	if err != nil || !found || got != seq {
+		t.Fatalf("outside window: seq=%d found=%v err=%v; want %d,true", got, found, err, seq)
+	}
+	// 重复写入同一 id 时返回最新那条（重发判定以最后落盘的为准）。
+	dup := dmMsg(KindText, SenderHuman, "old again")
+	dup.Refs = map[string]any{"client_msg_id": "c-old"}
+	dupSeq, err := st.AppendDirectMessage(ctx, "ag_dedupe", dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, found, _ := st.FindDirectMessageByClientID(ctx, "ag_dedupe", "c-old"); !found || got != dupSeq {
+		t.Fatalf("duplicate lookup = %d,%v; want %d,true", got, found, dupSeq)
+	}
+	// 末尾半行（没有换行 = 那次追加没落盘）丢掉，不影响查询。
+	path := st.dmLogPath("ag_dedupe")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"seq":151,"text":"half`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if got, found, err := st.FindDirectMessageByClientID(ctx, "ag_dedupe", "c-old"); err != nil || !found || got != dupSeq {
+		t.Fatalf("after torn tail: seq=%d found=%v err=%v", got, found, err)
+	}
+}
+
+// 完整但坏的行必须报 ErrCorrupt，而不是静默跳过 —— 静默跳过会让去重永远失效。
+func TestFindDirectMessageByClientIDCorruptLine(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	m := dmMsg(KindText, SenderHuman, "hi")
+	m.Refs = map[string]any{"client_msg_id": "c-1"}
+	if _, err := st.AppendDirectMessage(ctx, "ag_corrupt", m); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(st.dmLogPath("ag_corrupt"), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{not json}\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, _, err := st.FindDirectMessageByClientID(ctx, "ag_corrupt", "c-1"); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("err = %v, want ErrCorrupt", err)
 	}
 }

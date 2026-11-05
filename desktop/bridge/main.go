@@ -965,6 +965,12 @@ func (m *manager) get(wsPath, id string) *bridgeSession {
 		defer ws.mu.Unlock()
 		return ws.sessions[id]
 	}
+	if isHubHomePath(wsPath) {
+		// 未装配过 hub runtime：hub home 不是工作区，落到 m.runtime(wsPath) 会**造出**
+		// 一个项目 kind 的 runtime（读项目层、混进 m.workspaces）。blocks_page/compact
+		// 这类按 workspace+session_id 寻址的命令会因此留下幻影 runtime，直接判「没有会话」。
+		return nil
+	}
 	ws := m.runtime(wsPath)
 	ws.mu.Lock()
 	defer ws.mu.Unlock()

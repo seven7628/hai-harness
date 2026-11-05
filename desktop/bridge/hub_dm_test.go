@@ -536,3 +536,37 @@ func TestHubHomeNotTreatedAsWorkspace(t *testing.T) {
 		t.Fatalf("delete_session on hub home must fail, got %v", line)
 	}
 }
+
+// 未装配 hub runtime 时，按 workspace+session_id 寻址的命令（blocks_page/compact）不能
+// 因为 m.get 落到项目分支而造出幻影 runtime —— hub home 从来不是工作区（§9.1）。
+func TestHubHomeCommandDoesNotCreateProjectRuntime(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 2, "Phantom")
+	agentID := string(p.ID)
+	home := hubAgentHome(agentID)
+	if m.hubRuntimeIfExists(agentID) != nil {
+		t.Fatal("runtime assembled before the command: test needs an unassembled home")
+	}
+	buf.Reset()
+	m.dispatch(command{Id: 11, Type: CmdBlocksPage, Payload: map[string]any{
+		"workspace": home, "session_id": "hub." + agentID + ".dm",
+	}})
+	line := findFirst(buf.String(), func(mm map[string]any) bool {
+		return mm["event_type"] == "command_response" && mm["id"] == float64(11)
+	})
+	if line == nil {
+		t.Fatalf("no command_response for blocks_page: %s", buf.String())
+	}
+	if line["ok"] == true {
+		t.Fatalf("blocks_page on an unassembled hub home must fail, got %v", line)
+	}
+	m.mu.Lock()
+	_, phantom := m.workspaces[home]
+	m.mu.Unlock()
+	if phantom {
+		t.Fatal("blocks_page created a project runtime for the hub home")
+	}
+	if m.hubRuntimeIfExists(agentID) != nil {
+		t.Fatal("blocks_page must not assemble a hub runtime either")
+	}
+}
