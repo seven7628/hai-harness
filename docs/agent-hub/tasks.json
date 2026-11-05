@@ -73,7 +73,7 @@
         "agenthub/store_types.go",
         "agenthub/store_test.go"
       ],
-      "acceptance": "Store DTO（Activity/TaskEvent/TaskFilter/Need/NeedFilter/Cursor/Artifact 记录）；JSON 原子写；日志 seq 单调；启动可从 log/events 重建索引；schema_version 迁移；MemoryStore 可测。",
+      "acceptance": "Store DTO（Activity/TaskEvent/TaskFilter/Need/NeedFilter/Cursor/Artifact 记录）；JSON 原子写；日志 seq 单调；6 位 base32 ID 碰撞用 O_EXCL/存在检查+重新生成（或升级 8 位）；启动可从 log/events 重建索引；schema_version 迁移；MemoryStore 可测。",
       "tests": "go test ./agenthub/ -run Store",
       "commit": "feat(hub-p0-02): FileStore 与恢复/迁移"
     },
@@ -850,10 +850,10 @@
   ],
   "progress": {
     "P0-01": {
-      "status": "in_progress",
-      "commit": "ef55773 feat(hub-p0-01): agenthub 包骨架与领域类型",
+      "status": "review",
+      "commit": "e15b3b2 fix(hub-p0-01): 按 Review 修正 ID/时间戳/成本与类型边界",
       "review": "pending",
-      "reviewNote": ""
+      "reviewNote": "首轮 Review: changes_requested（B1-B6）；已修复，待复审。base commit ef55773。"
     }
   }
 }

@@ -249,3 +249,69 @@ func TestDispatchOmitsUnsetTimes(t *testing.T) {
 		t.Fatalf("empty Dispatch = %s, want {}", raw)
 	}
 }
+
+func TestScopeSessionID(t *testing.T) {
+	if got := (Scope{Kind: ScopeDM}).SessionID("ag_1"); got != "hub.ag_1.dm" {
+		t.Fatalf("DM session id = %q", got)
+	}
+	if got := (Scope{Kind: ScopeGroup, GroupID: "grp_1"}).SessionID("ag_1"); got != "hub.ag_1.g.grp_1" {
+		t.Fatalf("group session id = %q", got)
+	}
+	if got := (Scope{Kind: ScopeGroup}).SessionID("ag_1"); got != "" {
+		t.Fatalf("empty group must return empty id, got %q", got)
+	}
+	if got := (Scope{}).SessionID("ag_1"); got != "" {
+		t.Fatalf("empty scope must return empty id, got %q", got)
+	}
+}
+
+func TestGroupPolicyEffectiveMode(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", GroupModeAsk},
+		{GroupModeAuto, GroupModeAuto},
+		{GroupModeAsk, GroupModeAsk},
+		{GroupModeReadonly, GroupModeReadonly},
+		{"bogus", GroupModeAsk},
+	}
+	for _, c := range cases {
+		if got := (GroupPolicy{Mode: c.in}).EffectiveMode(); got != c.want {
+			t.Errorf("EffectiveMode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestMinimalDMMessageJSONShape(t *testing.T) {
+	m := &Message{
+		Seq:        1,
+		ID:         MessageID(1),
+		Sender:     Sender{Kind: SenderHuman},
+		Kind:       KindText,
+		Text:       "hello",
+		Visibility: VisibilityGroup,
+		CreatedAt:  testTime(),
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"group_id"`, `"round_id"`, `"context"`, `"mentions"`, `"mention_all"`, `"reply_to_seq"`, `"intent"`, `"task_id"`, `"turn"`, `"refs"`} {
+		if bytes.Contains(raw, []byte(key)) {
+			t.Fatalf("minimal DM message leaked %s: %s", key, raw)
+		}
+	}
+	for _, key := range []string{`"seq"`, `"id"`, `"sender"`, `"kind"`, `"text"`, `"visibility"`, `"created_at"`} {
+		if !bytes.Contains(raw, []byte(key)) {
+			t.Fatalf("minimal DM message missing %s: %s", key, raw)
+		}
+	}
+}
+
+func TestToolPolicyZeroValueIsAllOn(t *testing.T) {
+	raw, err := json.Marshal(ToolPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"mcp":{}}` {
+		t.Fatalf("ToolPolicy{} = %s, want {\"mcp\":{}}", raw)
+	}
+}

@@ -13,7 +13,7 @@ import (
 )
 
 // NeedID / ArtifactID 是账本与产物记录的稳定标识。
-// 它们不参与随机生成（Need/Artifact 的创建由 Store 分配），但类型化能避免跨实体串用。
+// 由 Store 用对应前缀（need_/art_）生成；类型化避免跨实体串用。
 type NeedID string
 type ArtifactID string
 
@@ -41,8 +41,8 @@ func MessageID(seq int64) string {
 // IDGenerator 生成“前缀_随机串”的 ID。
 //
 // Rand 可注入，测试用 bytes.Reader 得到稳定结果；零值使用 crypto/rand。
-// 注入的 Reader 必须并发安全（New 内部有 mutex，但 Reader 自身也会被复用）；
-// 默认 crypto/rand.Reader 是并发安全的。随机失败时退回时间+计数器，保证 New 不返回空串。
+// 同一个 Reader 不要跨生成器共享（每个生成器有独立 mutex）；单生成器内的读取已串行化。
+// 默认 crypto/rand.Reader 可跨生成器共享。随机失败时退回时间+计数器，保证 New 不返回空串。
 type IDGenerator struct {
 	Rand io.Reader
 	mu   sync.Mutex
