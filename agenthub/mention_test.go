@@ -69,6 +69,18 @@ func TestMentionBoundaries(t *testing.T) {
 	if got := p.Parse("@Writer, hi"); len(got.Mentions) != 1 {
 		t.Fatalf("punctuation boundary = %v", got.Mentions)
 	}
+	if got := p.Parse("请@Writer 看一下"); len(got.Mentions) != 1 {
+		t.Fatalf("CJK before boundary = %#v", got)
+	}
+	if got := p.Parse("@Writer请看一下"); len(got.Mentions) != 1 {
+		t.Fatalf("CJK after boundary = %#v", got)
+	}
+	if got := p.Parse("＠Writer"); len(got.Mentions) != 1 {
+		t.Fatalf("fullwidth @ = %#v", got)
+	}
+	if got := p.Parse("@Writer_bot"); len(got.Mentions) != 0 {
+		t.Fatalf("underscore suffix = %#v", got)
+	}
 }
 
 func TestMentionSkipsCodeURLAndEmail(t *testing.T) {
@@ -87,6 +99,7 @@ func TestMentionSkipsCodeURLAndEmail(t *testing.T) {
 		{"(https://example.com/@Writer) @Bob", agentIDs(bob.ID)},
 		{"mail a@Writer.com @Bob", agentIDs(bob.ID)},
 		{"@Writer and @Alice", agentIDs(writer.ID, alice.ID)},
+		{"价格是 5` 然后 @Alice 看", agentIDs(alice.ID)}, // 未闭合单反引号不是代码
 	}
 	for _, tc := range cases {
 		got := p.Parse(tc.text)
@@ -114,6 +127,10 @@ func TestMentionUnknownAndLimit(t *testing.T) {
 	got = p.Parse("@Alice @Alice @Bob")
 	if len(got.Mentions) != 2 {
 		t.Fatalf("dedupe = %#v", got)
+	}
+	got = p.ParseWithLimit("@Alice @Bob @Carol", 1)
+	if len(got.Mentions) != 1 || got.Dropped != 2 {
+		t.Fatalf("custom limit = %#v", got)
 	}
 }
 
@@ -184,6 +201,14 @@ func TestMentionAllPermissions(t *testing.T) {
 	if err := (MentionResult{}).ValidateMentionAll(false, RoleMember); err != nil {
 		t.Fatalf("no @all: %v", err)
 	}
+
+	p := mentionParser(t, mentionProfile(testAgentID('a'), "Alice"))
+	if res, err := p.ParseAuthorized("@all", "", false, RoleMember); !errors.Is(err, ErrMentionAllForbidden) || len(res.Mentions) != 0 || res.MentionAll {
+		t.Fatalf("ParseAuthorized member = %#v, %v", res, err)
+	}
+	if res, err := p.ParseAuthorized("@all @Alice", "", false, RoleOwner); err != nil || !res.MentionAll || len(res.Mentions) != 1 {
+		t.Fatalf("ParseAuthorized owner = %#v, %v", res, err)
+	}
 }
 
 func TestMentionVisibility(t *testing.T) {
@@ -200,5 +225,18 @@ func TestMentionVisibility(t *testing.T) {
 	}
 	if err := (Visibility("team")).Validate(); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid visibility err = %v", err)
+	}
+	for _, v := range []Visibility{"team", "OWNER", "Owner ", "owner"} {
+		msg := Message{Text: "secret", Refs: map[string]any{"approval_id": "need_7"}, Visibility: v}
+		if msg.VisibleTo(false) {
+			t.Fatalf("visibility %q must fail closed for agents", v)
+		}
+		if msg.ContextText(false) != OwnerOnlyPlaceholder {
+			t.Fatalf("visibility %q context = %q", v, msg.ContextText(false))
+		}
+		red := msg.Redacted(false)
+		if red.Text != OwnerOnlyPlaceholder || red.Refs != nil {
+			t.Fatalf("visibility %q redacted = %#v", v, red)
+		}
 	}
 }

@@ -116,15 +116,33 @@ func (v Visibility) Validate() error {
 	}
 }
 
-// VisibleTo 判断某条消息能否进入读方（人/智能体）的视图；owner-only 只对人可见。
+// VisibleTo 判断某条消息能否进入读方（人/智能体）的视图。
+// 智能体走白名单：只有空值/group 可见；owner 与任何非法值都 fail-closed。
 func (m Message) VisibleTo(isHuman bool) bool {
-	return isHuman || m.Visibility.EffectiveVisibility() != VisibilityOwner
+	if isHuman {
+		return true
+	}
+	return m.Visibility.EffectiveVisibility() == VisibilityGroup
 }
 
-// ContextText 返回该消息进入上下文时的正文：owner-only 对智能体只给占位。
+// ContextText 返回该消息进入上下文时的正文：不可见时只给占位。
 func (m Message) ContextText(isHuman bool) string {
+	return m.Redacted(isHuman).Text
+}
+
+// Redacted 返回进入某读方上下文的副本：不可见时替换正文并清空 refs/mentions/context，
+// 防止 P1-09 直接 json.Marshal(Message) 绕过 ContextText 泄露 owner-only 元数据。
+func (m Message) Redacted(isHuman bool) Message {
 	if m.VisibleTo(isHuman) {
-		return m.Text
+		return m
 	}
-	return OwnerOnlyPlaceholder
+	m.Text = OwnerOnlyPlaceholder
+	m.Refs = nil
+	m.Mentions = nil
+	m.MentionAll = false
+	m.Context = nil
+	m.TaskID = ""
+	m.ReplyToSeq = 0
+	m.Intent = ""
+	return m
 }

@@ -91,14 +91,27 @@ func NewMentionParser(profiles []*AgentProfile) (*MentionParser, error) {
 
 // Parse 解析正文；不忽略任何发送者（由调用方自行过滤 self）。
 func (p *MentionParser) Parse(text string) MentionResult {
-	return p.ParseFrom(text, "")
+	return p.ParseFromWithLimit(text, "", 0)
+}
+
+// ParseWithLimit 用自定义 cap 解析；limit<=0 使用 MaxMentionsPerMessage。
+func (p *MentionParser) ParseWithLimit(text string, limit int) MentionResult {
+	return p.ParseFromWithLimit(text, "", limit)
 }
 
 // ParseFrom 解析正文并忽略 sender 对自己的 @（自我 @ 不唤醒、不算 dropped）。
 func (p *MentionParser) ParseFrom(text string, sender AgentID) MentionResult {
+	return p.ParseFromWithLimit(text, sender, 0)
+}
+
+// ParseFromWithLimit 解析正文并应用 GroupPolicy.MaxMentions 等可配置 cap。
+func (p *MentionParser) ParseFromWithLimit(text string, sender AgentID, limit int) MentionResult {
 	res := MentionResult{}
 	if p == nil || text == "" {
 		return res
+	}
+	if limit <= 0 {
+		limit = MaxMentionsPerMessage
 	}
 	runes := []rune(text)
 	masked := maskMentionSkipped(runes)
@@ -106,7 +119,7 @@ func (p *MentionParser) ParseFrom(text string, sender AgentID) MentionResult {
 	unknownSeen := make(map[string]bool)
 
 	for i := 0; i < len(runes); {
-		if masked[i] || runes[i] != '@' {
+		if masked[i] || (runes[i] != '@' && runes[i] != '＠') {
 			i++
 			continue
 		}
@@ -142,7 +155,7 @@ func (p *MentionParser) ParseFrom(text string, sender AgentID) MentionResult {
 			matched = true
 			if c.id != sender && !seen[c.id] {
 				seen[c.id] = true
-				if len(res.Mentions) < MaxMentionsPerMessage {
+				if len(res.Mentions) < limit {
 					res.Mentions = append(res.Mentions, c.id)
 				} else {
 					res.Dropped++
@@ -185,6 +198,21 @@ func (r MentionResult) ValidateMentionAll(isHuman bool, role MemberRole) error {
 	return nil
 }
 
+// ParseAuthorized 是 P1-04 的原子入口：解析 + @all 鉴权一步完成。
+// 鉴权失败返回空结果与错误，调用方拿不到“已解析但未授权”的 mentions，避免降级。
+func (p *MentionParser) ParseAuthorized(text string, sender AgentID, isHuman bool, role MemberRole) (MentionResult, error) {
+	return p.ParseAuthorizedWithLimit(text, sender, isHuman, role, 0)
+}
+
+// ParseAuthorizedWithLimit 同 ParseAuthorized，但支持 GroupPolicy.MaxMentions。
+func (p *MentionParser) ParseAuthorizedWithLimit(text string, sender AgentID, isHuman bool, role MemberRole, limit int) (MentionResult, error) {
+	res := p.ParseFromWithLimit(text, sender, limit)
+	if err := res.ValidateMentionAll(isHuman, role); err != nil {
+		return MentionResult{}, err
+	}
+	return res, nil
+}
+
 func matchAnyRuneAlias(runes []rune, start int, aliases [][]rune) (int, bool) {
 	for _, alias := range aliases {
 		end := start + len(alias)
@@ -199,22 +227,27 @@ func equalFoldRunes(a, b []rune) bool {
 	return strings.EqualFold(string(a), string(b))
 }
 
-// mentionBoundaryBefore：前面不能是字母/数字/反斜杠/斜杠，也不能是另一个 @。
+// mentionBoundaryBefore：ASCII 字母/数字、反斜杠、斜杠、@ 前面阻断。
+// 只阻断 ASCII：中文“请@Alice”是主要输入形态，不应静默失效。
 func mentionBoundaryBefore(runes []rune, at int) bool {
 	if at == 0 {
 		return true
 	}
 	r := runes[at-1]
-	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\\' && r != '/' && r != '@'
+	return !isASCIIAlnum(r) && r != '\\' && r != '/' && r != '@'
 }
 
-// mentionBoundaryAfter：后面不能是字母/数字/连字符。
+// mentionBoundaryAfter：后面不能是 ASCII 字母/数字/连字符/下划线。
 func mentionBoundaryAfter(runes []rune, at int) bool {
 	if at >= len(runes) {
 		return true
 	}
 	r := runes[at]
-	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-'
+	return !isASCIIAlnum(r) && r != '-' && r != '_'
+}
+
+func isASCIIAlnum(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
 func readUnknownMention(runes []rune, start int) (string, int) {
@@ -246,7 +279,14 @@ func maskMentionSkipped(runes []rune) []bool {
 			n := runLength(runes, i, '`')
 			end := findFenceEnd(runes, i+n, '`', n)
 			if end < 0 {
-				end = len(runes)
+				// 未闭合的单个/双反引号不是代码，别把它后面的正文全部吞掉；
+				// 三反引号未闭合仍按 fenced code 处理（到 EOF）。
+				if n >= 3 {
+					end = len(runes)
+				} else {
+					i += n
+					continue
+				}
 			} else {
 				end += n
 			}
