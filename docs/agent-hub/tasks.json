@@ -872,9 +872,9 @@
     },
     "P0-04": {
       "status": "review",
-      "commit": "c2c2cbd feat(hub-p0-04): 严格 mention 解析与可见性",
+      "commit": "3e768da fix(hub-p0-04): 修复可见性 fail-open 并收口 mention 边界",
       "review": "pending",
-      "reviewNote": "独立 Review 进行中；go test -race ./agenthub/... 全绿。"
+      "reviewNote": "首轮 changes_requested（可见性 fail-open）→ 3e768da 修复（白名单/Redacted/可配置 cap/原子 @all/ASCII 边界）；复审进行中。"
     }
   }
 }
