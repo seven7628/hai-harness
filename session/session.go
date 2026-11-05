@@ -294,12 +294,18 @@ func NewSession(id string, loop *agents.AgentLoop, store Store, opts ...Option) 
 		// 缺失/损坏时回退 legacy store（现有路径）。二者二选一，不叠加。
 		if s.cfg.recoveryState != nil {
 			rst := s.cfg.recoveryState
+			pending := rst.Pending
+			// 积压搬进 inbox 后清掉来源：否则 PendingCount 会把同一批输入算两遍，
+			// Hub 的空闲闸门（§6.6.4）就永远「忙」。拷贝 State 再改，不动宿主持有的记录。
+			cp := *rst
+			cp.Pending = nil
+			s.cfg.recoveryState = &cp
 			s.registry.AbandonAll("session restored")
 			s.messages = rst.Messages
 			s.usage = rst.Usage
 			s.usage.Cost = rst.Cost // 成本以 State.Cost 为权威（兼容 Usage.Cost 未填充）
 			s.todo.Restore(rst.Todo)
-			for _, m := range rst.Pending {
+			for _, m := range pending {
 				s.inbox <- m
 			}
 		} else {
@@ -1185,6 +1191,18 @@ func (s *Session) PendingSnapshot() []core.Message {
 		s.inbox <- m
 	}
 	return out
+}
+
+// PendingCount 未消费输入条数（inbox 积压 + 恢复待入队），供 Hub 的空闲闸门判断
+// 「目标是否真的空了」（方案 §6.6.4：`!st.Running && st.Pending == 0`）。
+// 恢复路径在 NewSession 里已把 State.Pending 搬进 inbox 并清空来源，所以这里不会双算。
+// 是近似值（channel 长度随时变化），调用方只做 0 / 非 0 判断。
+func (s *Session) PendingCount() int {
+	n := len(s.inbox)
+	if rst := s.cfg.recoveryState; rst != nil {
+		n += len(rst.Pending)
+	}
+	return n
 }
 
 // Persist 手动触发快照保存。

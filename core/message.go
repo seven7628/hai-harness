@@ -32,6 +32,13 @@ const (
 	//（模型据此遵循该技能，与模型 load_skill 的工具结果同构），但 collectUserContents /
 	// 标题 fallback / 历史恢复渲染只认 text 块 → 不算用户输入、不污染会话标题与对话正文。
 	ContentTypeSkill = "skill"
+	// ContentTypeHubTask Agent Hub 派发任务的 header 块（assign_task / hub_task_create，
+	// 见方案 §6.6.2）：user 角色 + 非 text 块，Content 是 headerJSON（task_id/origin/
+	// callback/deadline/note）。provider 对非 image 块一律按文本送出 → 模型能看到 header；
+	// 正文另有 text 块（UI 显示、也算「用户输入」）。**只有 hub_task 块的 user 消息不算
+	// 用户输入**（collectUserContents 只认 text/image），所以纯 header 消息不会触发
+	// UserInputsConsumed、不污染会话标题。与 ContentTypeMeshFrom 同一套语义。
+	ContentTypeHubTask = "hub_task"
 	// ContentTypeMeshFrom 跨会话/远程投递消息的来源提示块（session_send / mesh 入站注入）：
 	// user 角色 + 非 text 块 —— provider 按文本翻译送 LLM（模型看到「来自哪个会话」可回信），
 	// 但 collectUserTexts / 标题 fallback / UI 只认 text 块 → 来源提示不进对话正文、
@@ -224,8 +231,9 @@ func (m *Message) Validate() error {
 		// summary：LLM 压缩器生成的摘要消息类型（provider 翻译时按文本发送）；
 		// command：内部指令消息（命令框架，仅 Session.Command 注入，不持久化）；
 		// task_result：后台任务完成消息（仅 Session.PushTaskResult 注入，非用户输入）；
-		// skill：用户主动加载的技能指令（命令框架，仅 agents 注入，非用户输入）
-		if c.Type != "" && c.Type != ContentTypeText && c.Type != ContentTypeImage && c.Type != ContentTypeSummary && c.Type != ContentTypeCommand && c.Type != ContentTypeTaskResult && c.Type != ContentTypeMeshFrom && c.Type != ContentTypeSkill {
+		// skill：用户主动加载的技能指令（命令框架，仅 agents 注入，非用户输入）；
+		// hub_task：Agent Hub 派发的任务 header（正文另起 text 块，header 不算用户输入）
+		if c.Type != "" && c.Type != ContentTypeText && c.Type != ContentTypeImage && c.Type != ContentTypeSummary && c.Type != ContentTypeCommand && c.Type != ContentTypeTaskResult && c.Type != ContentTypeMeshFrom && c.Type != ContentTypeSkill && c.Type != ContentTypeHubTask {
 			return fmt.Errorf("content[%d] has invalid type %q", i, c.Type)
 		}
 	}
