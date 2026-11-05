@@ -385,7 +385,7 @@ const BASE = {
         "agenthub/profile.go",
         "agenthub/group.go"
       ],
-      "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；角色/成员数上限；错误可读。",
+      "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；accent 颜色校验且缺省由 avatar.bg/名字 hash 稳定派生；角色/成员数上限；错误可读。",
       "tests": "go test ./agenthub/ -run Profile",
       "commit": "feat(hub-p0-03): Profile/Group 校验与默认值"
     },
@@ -603,9 +603,12 @@ const BASE = {
       "files": [
         "desktop/app/src/App.tsx",
         "desktop/app/src/components/hub/HubRail.tsx",
+        "desktop/app/src/components/hub/HubRow.tsx",
+        "desktop/app/src/components/hub/HubHeader.tsx",
+        "desktop/app/src/components/hub/ViewToggle.tsx",
         "desktop/app/src/store/useHubStore.ts"
       ],
-      "acceptance": "工作区↔Hub 切换；左栏智能体/群组/Needs you；DM 复用 Narrative；未读/状态点；主题三套。",
+      "acceptance": "工作区↔Hub 切换；左栏单列混排智能体/群组（群组叠图）、两行行解剖、last_outcome 预览、Needs you；DM 默认 Chat + Run 切换（复用 Narrative）；系统动作行；未读/状态点；三主题。",
       "tests": "npm run lint && npm run test:agent-tree",
       "commit": "feat(hub-p1-08): Hub Rail 与 DM 视图"
     },
@@ -621,7 +624,7 @@ const BASE = {
       "files": [
         "desktop/app/src/components/hub/AgentProfilePage.tsx"
       ],
-      "acceptance": "基本/人格/工具权限/记忆/会话；provider/model 校验；bash 开关；提示词预览；保存生效提示。",
+      "acceptance": "基本/人格/工具权限/记忆/会话；provider/model 校验；bash 开关；accent 选择器 + 头像预览；提示词预览；保存生效提示。",
       "tests": "npm run lint && npm run test:store",
       "commit": "feat(hub-p1-09): 智能体资料页"
     },
@@ -714,7 +717,7 @@ const BASE = {
         "desktop/bridge/hub_service.go",
         "agenthub/service.go"
       ],
-      "acceptance": "账本终态；产物登记；PushTaskResultUsage；幂等；回推失败可重试；成本归因。",
+      "acceptance": "账本终态；产物登记；PushTaskResultUsage；幂等；回推失败可重试；成本归因；系统动作行（创建任务/工作区/会话）走 Message.kind=system + refs.action。",
       "tests": "go test ./agenthub/ -run FinishTask",
       "commit": "feat(hub-p2-05): 任务结算与回推"
     },
@@ -899,7 +902,7 @@ const BASE = {
         "RoundGroup.tsx",
         "RoundActivityDigest.tsx"
       ],
-      "acceptance": "群头/时间线/回执/审批占位；同轮合并；动作清单；分开显示；Inspector；三主题。",
+      "acceptance": "群头/时间线/回执/审批占位；群组叠图；同轮合并（A、B 的回复）；动作清单；分开显示；Chat/Run 双视图；Inspector；三主题。",
       "tests": "npm run lint && npm run test:store:scoping",
       "commit": "feat(hub-p3a-08): 群组视图与轮次摘要"
     },
@@ -1024,9 +1027,10 @@ const BASE = {
         "MentionPicker.tsx",
         "ConversationBar.tsx",
         "TaskResultCard.tsx",
-        "TypingIndicator.tsx"
+        "TypingIndicator.tsx",
+        "TurnContextLine.tsx"
       ],
-      "acceptance": "@ chip 反规范化；对话/派任务两态；轮次条；结果卡；typing；键盘/主题/空态。",
+      "acceptance": "@ chip 反规范化（名字用 accent 着色）；对话/派任务两态；逐轮条；结果卡；context 行（≥2 触发者才显示，chip 可跳转）；typing；键盘/主题/空态。",
       "tests": "npm run lint && npm run test:agent-session",
       "commit": "feat(hub-p3b-07): 互 @ 与任务结果 UI"
     },

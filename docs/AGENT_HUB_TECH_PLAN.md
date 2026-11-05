@@ -1923,7 +1923,7 @@ loopOpts = append(loopOpts, agents.WithMemoryInjection(res.Injection.Text))
 
 | 事件 | 字段 | 触发 |
 |---|---|---|
-| `hub_message` | `group_id?, agent_id?, seq, client_msg_id?, message{..., sender_display, mentions_display}` | 群/DM 有新消息（人/智能体/系统）；回显 `client_msg_id` 用于替换乐观气泡 |
+| `hub_message` | `group_id?, agent_id?, seq, client_msg_id?, message{..., sender_display, mentions_display, context{trigger_seqs, senders}}` | 群/DM 有新消息（人/智能体/系统）；回显 `client_msg_id` 用于替换乐观气泡；`context` 驱动 TurnContextLine |
 | `hub_message_delta` | `group_id?, agent_id?, round_id, text` | （P2）群内流式草稿；默认关闭 |
 | `hub_message_status` | `client_msg_id, status:"sending" / "sent" / "failed", error?, retryable?` | 发送状态机（乐观 UI）；失败可重试 |
 | `hub_activity` | `group_id?, agent_id, run_id, kind:"tool" / "compress" / "status", name?, status?, ms?, summary?` | 群内工具行/压缩回执 |
@@ -2237,6 +2237,32 @@ bridge 校验（成员/mention/权限/预算）
 > 这张表是「后端必须给前端足够事件」的验收清单：任何一行没有对应事件/回包，
 > 前端就只能猜状态，属于设计缺口。
 
+#### 7.5.11 参考产品会话细节 → 我们的落地
+
+> 来源：2026-11 用户提供的其他产品会话截图（Sales Outbound / Offsite crew）。
+> 只借「读法」，不照抄视觉；每条都落成组件 + 数据字段 + 归属任务，避免「看着像但做不出来」。
+
+| 观察到的细节 | 我们的落地 | 数据/组件 | 任务 |
+|---|---|---|---|
+| 左栏单列混排智能体与群组，群组用成员叠图 | 单列按「置顶→活跃」排序；群组 3 个叠图 + `+N` | `HubRow`、`GroupAvatarStack` | P1-08 / P3a-08 |
+| 行内两行：名字+相对时间 / 最后结果预览 | 首选 `last_outcome`，回退最后消息；单行省略 | `last_outcome`（已有）、`formatRelative` | P1-08 |
+| 头部只有「头像+名字」，右侧浮窗图标 | 角色/provider 收进 hover/资料页；`[Chat|Run]` + `[⤢]` | `HubHeader`、`ViewToggle` | P1-08 / P1-09 |
+| 居中细字「Messages from A and B」（红线） | **TurnContextLine**：回复的触发上下文，不是作者署名 | `Message.context{trigger_seqs, senders}`、`TurnContextLine` | P3b-07（DM 在 P1-08 先留位） |
+| 正文里的「🟣 Account Manager」彩色名字 | `AgentMentionChip`：头像 + 名字用 `accent` 着色；普通引用与唤醒 @ 两种样式 | `AgentProfile.accent`、`AgentMentionChip` | P1-09 / P3b-07 |
+| ✓ 行「Salesforce → list pulled · 52 accounts」 | `RoundActivityDigest`：确定性汇总，4 行折叠；不花 LLM | `hub_round_summary.items` | P2-05 / P3a-08 |
+| 居中「Created routine ⊙ Overnight outbound」 | `SystemActionLine`：图标 + 文案 + 一个动作 chip；先支持 created task/workspace/session | `Message.kind=system`、`refs.action` | P2-05 |
+| 人气泡右对齐白色、智能体气泡深色无头像 | 时间线最大宽 760；智能体不重复头像；人右对齐；短确认单行 | `HubMessage` + 设计令牌 | P1-08 |
+| 「Done.」这种一句话回执 | 单行气泡，不套卡、不补空摘要 | `HubMessage` | P1-08 |
+| 「Offsite crew」这类多人团队名 | 群组名 + 成员叠图 + 角色统计；群组也可置顶 | `Group`、`GroupAvatarStack` | P3a-08 |
+| 深色低对比、信息密度高 | 复用现有三主题令牌；新增 `hub.css` 只加布局，不新造色板 | 设计令牌 | P1-08 |
+
+**明确不抄的**：
+
+- 不把「Messages from」当成消息作者（它只是上下文）；作者永远只有一个，避免审计歧义。
+- 不做「智能体在 DM 里旁听其他智能体私聊」；DM 只出现任务结果卡 + 上下文行。
+- 不引入「routine」新概念：P4 映射到现有 cron，先不做。
+- 不为了像截图而隐藏工具细节：Chat 折叠，Run 可查，两者一键切换。
+
 ---
 
 ## 8. 前端设计
@@ -2278,17 +2304,27 @@ closeHub(): void
 │ [ + New agent ]      [ 👥 ]  │
 │ [ 🔍 Search agents/groups ]  │
 │ Needs you                1 ● │  ← 打开 Needs you 抽屉
-│ Pinned                       │
-│  🟢 Researcher     09:42     │
-│     pricing-notes.md         │
-│  🔴 Inbox Manager  08:56     │
-│ Groups               + New   │
-│  🟢🟢🟢 竞品研究    10:08 ●   │
-│     一个外部发送动作在等你批准…│
-│  🟡🟡 周报小组      09:20     │
+│ ──────────────────────────── │
+│  🟢 Chief            Yesterday│
+│     booked the venue…        │
+│  🟠 Sales Outbound      7:37 │
+│     Done.                    │
+│  🟣 Account Manager     2:36 │
+│     invite's out to vicky…   │
+│  🟢🟣🔵 Offsite crew    1:36 │  ← 群组：成员叠图
+│     that leaves the pipeline…│
+│ ──────────────────────────── │
 │ Plugins 3 / Settings / 🌙    │
 └──────────────────────────────┘
 ```
+
+- **单列混排**：智能体与群组按「置顶 → 最后活跃」排在同一列，群组用叠图区分；
+  不再固定分「Agents / Groups」两段（群组超过 8 个时才加分组头）。
+- **行解剖**：高 52px；头像 32px（群组叠图 3 个 24px + `+N`）；第一行名字 13px/600+
+  相对时间 11px；第二行预览 12px 单行省略；选中行整行填充，未读点 6px 在右侧。
+- **预览内容**：优先 `last_outcome`（任务完成/失败/待审批），否则最后一条消息；
+  这样左栏能看出「做完了什么」，而不是只看到半句话。
+- **群组叠图**：按成员 `accent` 排序取前 3，每个头像带 2px 状态环；hover 显示成员名。
 
 组件：
 
@@ -2322,7 +2358,9 @@ closeHub(): void
 #### 8.3.1 消息渲染
 
 - 复用 `Markdown`（`components/markdown.tsx`）渲染正文；流式可选 `streaming`。
-- 智能体消息左侧头像 + 名字 + 「回复 @…」标签（触发它的 mention 列表）。
+- 智能体消息默认**不重复**头像/名字（头部与成员面板已表明身份）；只有 `RoundGroup`
+  子块、被 @ 的「回复 @…」标签、TurnContextLine 里才显示头像 + 名字，避免每条消息刷一列头像。
+  触发它的 mention 列表用一行小字「回复 @Writer」表示。
 - 人消息右对齐，头像「你」，`pre-wrap`（与现有用户块一致）。
 - `routing_receipt`：居中的灰色小字 + 分隔线（参考 `Narrative` 的系统行样式）。
 - `activity`：折叠的工具行（复用 runtime 的 `BatchGroup`/`ToolNestedCalls` 视觉），默认折叠成一行；
@@ -2373,12 +2411,6 @@ closeHub(): void
 - 没有 mention 时，发送按钮旁提示「仅记录，不触发回复」（避免用户以为智能体会回答）。
 - 发送后 optimistic 气泡立即出现（§7.5.1）；`@` chip 立即按 `mentions_display` 渲染，
   不等服务端回包。
-- `Track as work item`：把当前消息转成任务（`hub_task_create` / `hub_group_assign`）：
-  - 选择目标工作区 + 会话（或「新建会话」）/ 选择群内智能体；
-  - origin=`human`，不需要智能体同意；后续智能体也能通过 `task_status` 看到；
-  - 结果作为 `task_result` 卡进群/DM；
-  - 这是需求 5「人也能在群组里直接分配任务」的入口。
-- `它看到了什么`：打开 Inspector 的 Context 面板（§8.7）。
 - `Track as work item`：把当前消息转成任务（`hub_task_create`）：
   - 选择目标工作区 + 会话（或「新建会话」）；
   - origin=`human`，不需要智能体同意；后续智能体也能通过 `task_status` 看到；
@@ -2411,7 +2443,10 @@ closeHub(): void
 | `MessageStatus` | 乐观发送状态 | sending/sent/failed；失败重试；不丢输入 |
 | `AgentRosterSheet` | 成员面板 | 职责/状态/成本/@/派任务 |
 | `ConversationStopButton` | 停止自动对话 | 二次确认（P3 可省）；调 `hub_conversation_stop` |
-| `RoundGroup` | 同一轮多智能体回复合并 | 头部「Messages from A and B」；可分开；单人不合并 |
+| `RoundGroup` | 同一轮多智能体回复合并 | 头部「A、B 的回复」；可分开；单人不合并 |
+| `TurnContextLine` | 回复的触发上下文 | 「来自 A 和 B 的消息」；≥2 个触发者才显示；chip 可点跳转 |
+| `SystemActionLine` | 系统动作行 | 「创建了任务/工作区/会话」+ 动作 chip；不写成假消息 |
+| `ViewToggle` | Chat / Run 切换 | 按 target 记忆；默认 Chat；Run 复用现有 Narrative |
 | `RoundActivityDigest` | 动作清单 | 4 行折叠；展开看工具；确定性生成，不花 LLM |
 | `AgentRefChip` | 正文里的普通 agent 引用 | 与 mention 区分；hover/点击同 chip |
 | `RoutineCard` | 定时任务回执（P4） | 「Created routine · …」；点击打开 cron |
@@ -2423,23 +2458,78 @@ closeHub(): void
 
 第二张图表达了三种「多人协作」的读法，方案都要支持：
 
-**① 一轮多回复：RoundGroup（默认）**
+**① 一轮多回复：RoundGroup（群组默认）**
 
 ```
-┌ Messages from [🟣 Account Manager] and [🟢 Chief] ─────────────┐
+┌ A、B 的回复 ────────────────────────────────────────────────────┐
 │ 🟣 Account Manager  sent over the Acme + Globex threads…        │
 │ 🟢 Chief            flagged the priority accounts…              │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-- 同一 `round_id` 的 agent 消息**默认合并成一个组**，头部显示「Messages from A and B」；
+- 同一 `round_id` 有 ≥2 个 agent 回复时**默认合并成一个组**，组头是「A、B 的回复」；
   每个 agent 是组内一个子块（头像 + 名字 + 正文）。
 - 组头可点「分开显示」→ 回到独立气泡；用户偏好记在 localStorage。
 - 合并只影响展示，不改变 `log.jsonl`（每条消息仍然独立，可搜索/引用）。
 - 只有 1 个 agent 回复时不合并（避免过度包装）。
 - 人消息不与 agent 合并；任务结果卡不合并。
 
-**② 动作清单：RoundActivityDigest**
+**② 单条回复的上下文行：TurnContextLine（图中红线强调的那个）**
+
+```
+        Messages from [🟣 Account Manager] and [🟢 Chief]
+┌────────────────────────────────────────────────────────────────┐
+│ Account Manager sent over the Acme + Globex threads and Chief   │
+│ flagged the priority accounts. Both are folded into tonight's…  │
+└────────────────────────────────────────────────────────────────┘
+```
+
+这条线**不是作者署名，而是「这条回复是基于谁的消息产生的」**。它解决的是：
+一个智能体（尤其是 DM 里的编排者）在一轮里消费了多个其他智能体的消息，
+用户需要知道「它为什么会说这些」。规则：
+
+- 数据来源：路由时记录本轮 `trigger_seqs`（唤醒它的消息）与 `trigger_senders`；
+  结算时把这些字段**反规范化**写进回复消息的 `context`（§17.2 `TurnContext`），
+  刷新/多端一致，不靠前端猜。
+- 只在以下情况显示：`trigger_senders` 去重后 ≥2；或唯一触发消息不在可视区（分页/折叠）；
+  或回复与触发消息之间隔了 ≥3 条（工具行/其他人插话）。单人对单人的紧邻回复**不显示**。
+- chip 可点：跳到触发消息（若在可视区高亮 600ms）；hover 显示该 agent 职责/状态。
+- 文案：中文「来自 A 和 B 的消息」；英文「Messages from A and B」。
+- 与 RoundGroup 的区别：RoundGroup 是「这一轮有 A、B 两条回复」；TurnContextLine 是
+  「这一条回复引用了 A、B 两条消息」。两者可同时出现（B 回复时引用了 A 和 C）。
+- 群组与 DM 都适用；DM 里尤其重要，因为其他 agent 的消息不会以气泡形式出现在 DM 里，
+  只以这条上下文行 + 正文 chip 出现。
+
+**②.5 消息气泡与系统行的视觉解剖**
+
+| 元素 | 规格 | 规则 |
+|---|---|---|
+| 时间线最大宽 | 760px，居中 | 宽屏不拉满，保持可读行长 |
+| 智能体气泡 | `surface-2`、圆角 16、内边距 12/14 | 不显示头像（头部已有身份）；同一发送者连续消息间距 4px |
+| 人气泡 | `surface-1`/白、右对齐、圆角 16 | 不显示名字；发送后保持焦点 |
+| 系统行 | 12px、居中、muted、前置图标 | 「Created routine · …」「已邀请 X」等；可带一个动作 chip |
+| 内联 agent chip | 高 20px、头像 14px、名字用 `accent` 着色 | 名字颜色 = agent 主题色；背景透明，hover 才加底色 |
+| 动作清单卡 | 圆角 12、行高 26px、✓ 绿色 | 工具名 12/600，`→` muted，结果/数量常规色 |
+| 短确认（"Done."） | 单行气泡、不折叠 | 不套卡片、不显示「已完成 0 个任务」这类空摘要 |
+| 时间戳 | 只在左栏/日期分隔线 | 气泡不逐条显示时间，减少噪音 |
+
+配色规则：`accent` 是 agent 的**唯一识别色**（头像底、名字、chip 圆点、状态环高亮），
+其余 UI 一律中性色；不要给每个气泡整块染色。`accent` 存 `AgentProfile.accent`，
+缺省由 `avatar.bg` 或名字 hash 生成，创建后稳定不变。
+
+**②.6 Chat / Run 双视图**
+
+同一个会话有两种读法，用头部右上角的切换器：
+
+- **Chat（默认）**：人消息、智能体最终回复、TurnContextLine、RoundActivityDigest、
+  任务卡、产物卡、审批占位、系统动作行。工具细节折叠进摘要卡。
+- **Run**：现有 `Narrative` 的完整运行视图（工具调用、块、耗时），用于排障/审计；
+  DM 直接复用同一个 `session_id` 的现有组件，群组用当前 agent 的 run 过滤。
+
+切换状态按 target 记在 localStorage；默认 Chat。这样既保留「像 IM 一样干净」，
+又不丢「到底跑了什么」的可解释性。
+
+**③ 动作清单：RoundActivityDigest**
 
 ```
 ✓ Salesforce → list pulled · 52 accounts
@@ -2454,7 +2544,7 @@ closeHub(): void
 - 纯确定性生成（不花 LLM）：从 `tool_run_end` 的 name/status/summary 提取；不编造结果。
 - 如果一轮没有工具动作（纯聊天），不显示这个卡。
 
-**③ 行内智能体引用**
+**④ 行内智能体引用**
 
 - 正文里提到另一个 agent（不一定是要唤醒的 @）也渲染成 chip：
   `[🟣 Account Manager]`，hover 显示职责/状态，点击开 DM。
@@ -2462,7 +2552,7 @@ closeHub(): void
 - 后端在 `mentions_display` 之外，可返回 `agent_refs_display`（正文里识别到的成员名）；
   P3b 先做 `mentions`，P4 再做正文引用（避免误识别）。
 
-**④ 头像与列表细节（图里的视觉语言）**
+**⑤ 头像与列表细节（图里的视觉语言）**
 
 - 头像三种：emoji（默认）、图片、**渐变首字母**（如 `AO`），都支持状态环。
 - 左栏智能体行：名字 + **最后结果/动作**（不是只有最后一句）+ 时间 + 未读点；
@@ -2471,7 +2561,7 @@ closeHub(): void
 - 头部状态：group running（橙色脉冲）/ idle（灰）/ needs-you（橙点）；tooltip 说明。
 - 「Done.」这类短消息不占一整屏：单行气泡，右对齐/左对齐按现有规则。
 
-**⑤ Routine 卡（P4，复用 cron）**
+**⑥ Routine 卡（P4，复用 cron）**
 
 - 任务结果卡增加「保存为定时任务」→ 打开 cron 编辑器，预填 prompt（任务 instruction）。
 - 群内出现 `routine_card`：「Created routine · Overnight outbound」+ 🕘 图标 + 点击查看。
@@ -2479,13 +2569,48 @@ closeHub(): void
 
 ### 8.4 DM 视图
 
-- 头部：头像 + 名字 + 角色 + provider/model chip（点击打开资料页）+ 状态点。
-- 正文：**复用现有 `Narrative` + `SessionView`**（`agentSession` 的拓扑），因为 DM 就是一个普通 session。
-  - 需要把 `session_id` 映射到 `hub.<agent>.dm`，事件按 `session_id` 路由；
-  - 用户气泡/工具行/审批卡/产物卡全部复用，开发量最小。
-- 输入框：复用 `Composer`；发送走 `hub_send`（维护 dm 索引），底层仍是 `ask`。
-- 压缩回执：在时间线里插入一条系统行「上下文已压缩 12.3k → 3.1k」。
-- 没有「新会话」；提供「清空上下文」（`/clear`）与「编辑人格」。
+**定位**：DM 是「和这个智能体的一个长期会话」，不是运行日志。所以默认是 Chat 视图，
+Run 视图是同一 `session_id` 的完整 `Narrative`，一键切换（§8.3.6 ②.6）。
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 🟠 Sales Outbound        deepseek · v4      [Chat|Run] [⤢]  │
+├──────────────────────────────────────────────────────────────┤
+│ ✓ Salesforce → list pulled · 52 accounts                     │
+│ ✓ Hex → 3 lookalike segments pulled                          │
+│ ✓ Sequencer → 36 drafts queued · 0 sent                      │
+│                                                              │
+│        Messages from [🟣 Account Manager] and [🟢 Chief]      │
+│ ┌──────────────────────────────────────────────────────────┐ │
+│ │ Account Manager sent over the Acme + Globex threads and  │ │
+│ │ Chief flagged the priority accounts…                     │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                    [The top 10 look good…] ←人 │
+│                     Created task · Overnight outbound         │
+│ ┌ Done. ┐                                                     │
+├──────────────────────────────────────────────────────────────┤
+│ [📎] [@] Message Sales Outbound…                    [🎤] [↑]  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+- **头部**：头像 + 名字（角色/provider 收进 hover 或资料页，保持一行）；
+  右侧 `[Chat|Run]` 切换 + `[⤢]` 浮窗；状态用头像环表达。
+- **消息**：智能体回复不重复头像/名字（头部已表明身份）；人的消息右对齐。
+  正文里的 `@Name`/`Name` 用 `AgentMentionChip`（§7.5.2）。
+- **上下文行**：当这一轮由 ≥2 个其他智能体的任务结果/消息触发时，显示
+  `Messages from A and B`（§8.3.6 ②）；点击跳到对应任务卡/消息。
+- **其他智能体的消息**在 DM 里只有两种出现方式：
+  1. 任务结果回推 → `TaskResultCard`（不是普通气泡）；
+  2. 本轮触发了上下文 → `TurnContextLine` + 正文 chip。
+  不做「智能体之间的私聊旁听」，避免 DM 变成第二个群。
+- **压缩回执**：系统行「上下文已压缩 12.3k → 3.1k」；点击打开 Context 面板。
+- **输入框**：复用 `Composer` 的视觉，但发送走 `hub_send`（维护 dm 索引/未读），底层仍是 `ask`；
+  `@` 在 DM 里只用于引用其他智能体（不触发群路由），选中后插入 chip + 作为 `agent_refs` 发送。
+- **没有「新会话」**；提供「清空上下文」（`/clear`）与「编辑人格」。
+- **空态**：一句该智能体的自我介绍（来自 role/description）+ 3 个建议动作；
+  不要空白，也不要用假消息填充。
+- **Run 视图**：直接渲染该 `session_id` 的现有 `Narrative`/`SessionView`；
+  Chat 里的工具摘要卡可「在 Run 中查看」定位到对应 run。
 
 ### 8.5 智能体资料页（新建/编辑）
 
@@ -2659,8 +2784,12 @@ src/components/hub/
   TaskProgressCard.tsx  运行中任务卡
   TypingIndicator.tsx   「B 正在输入」
   AgentStatusDot.tsx    状态环/点
+  GroupAvatarStack.tsx  群组成员叠图 +N
   AgentRosterSheet.tsx  成员面板
   RoundGroup.tsx        同一轮多回复合并
+  TurnContextLine.tsx   回复的触发上下文（Messages from A and B）
+  SystemActionLine.tsx  系统动作行（Created task/workspace）
+  ViewToggle.tsx        Chat / Run 切换
   RoundActivityDigest.tsx 动作清单
   RoutineCard.tsx       定时任务回执（P4）
   HandoffCard.tsx       交接卡
@@ -3228,6 +3357,7 @@ type AgentProfile struct {
     ID                AgentID     `json:"id"`
     Name              string      `json:"name"`
     Avatar            Avatar      `json:"avatar"`
+    Accent            string      `json:"accent"` // #rrggbb；名字/chip/状态环的唯一识别色
     Role              string      `json:"role"`
     Description       string      `json:"description"`
     Instructions      string      `json:"instructions"`
@@ -3311,11 +3441,18 @@ const (
     KindSystem        MessageKind = "system"
 )
 
+type TurnContext struct {
+    TriggerSeqs []int64  `json:"trigger_seqs"` // 触发本轮的消息 seq
+    Senders     []Sender `json:"senders"`      // 去重后的触发者（含显示信息）
+    Reason      string   `json:"reason,omitempty"` // multi_agent | paginated | interleaved
+}
+
 type Message struct {
     Seq        int64       `json:"seq"`
     ID         string      `json:"id"`
     GroupID    GroupID     `json:"group_id"`
     RoundID    string      `json:"round_id,omitempty"`
+    Context    *TurnContext `json:"context,omitempty"` // 仅回复消息；驱动 TurnContextLine
     Sender     Sender      `json:"sender"`
     Kind       MessageKind `json:"kind"`
     Text       string      `json:"text,omitempty"`
