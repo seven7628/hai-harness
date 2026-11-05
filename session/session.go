@@ -394,6 +394,14 @@ func (s *Session) SetLoop(loop *agents.AgentLoop) {
 	s.mu.Unlock()
 }
 
+// Loop 当前运行时（只读像素：宿主在 SetLoop 后自检「下一次 Run 用哪个 loop」）。
+// 运行中的 Run 可能仍持旧 loop —— 快照语义见 SetLoop。
+func (s *Session) Loop() *agents.AgentLoop {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loop
+}
+
 // SetHooks 热替换本会话的 hooks 聚合（配置面板保存 hooks 后由宿主推入）。
 //
 // 快照语义（与 SetLoop/SetMode 一致，见契约 §7）：**下一次 Run（及下一次 Ask）生效**——

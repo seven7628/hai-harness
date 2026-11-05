@@ -3,12 +3,15 @@ package main
 // P1-05：记忆隔离 + 浏览/编辑（记忆面板命令）。
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/agents"
+	"github.com/seven7628/hai-harness/provider"
 )
 
 func hubMemoryCmd(t *testing.T, m *manager, buf *syncBuf, id int, typ string, payload map[string]any) (bool, string, map[string]any) {
@@ -169,8 +172,61 @@ func TestHubMemoryWriteRebuildsLoop(t *testing.T) {
 	if bs.loop == before {
 		t.Fatal("memory write must rebuild the agent's loop (下一个 Run 生效)")
 	}
+	// 只比 bs.loop 指针挡不住「重建了但没 SetLoop」（评审 mutation C：删掉 SetLoop
+	// 后 5 个 HubMemory 测试仍全绿）。会话才是「下一次 Run」的事实源。
+	if got := bs.s.Loop(); got != bs.loop {
+		t.Fatal("session still runs the OLD loop: 下一个 Run 看不到新记忆")
+	}
 	// 记忆真的进了注入文本（装配期算一次）；空记忆时同一函数返回空。
-	if inj := m.hubMemoryInjection(agentID, m.hubRuntime(agentID).path); !strings.Contains(inj, "小王") {
+	inj := m.hubMemoryInjection(agentID, m.hubRuntime(agentID).path)
+	if !strings.Contains(inj, "小王") {
 		t.Fatalf("memory injection missing new content: %q", inj)
+	}
+	// 且会话将要用的那个 loop 里量的就是这段注入（内容一路到「下一次请求」）。
+	bd := bs.s.Loop().ContextBreakdown(context.Background(), nil, nil)
+	var memChars int64 = -1
+	for _, part := range bd.Parts {
+		if part.Key == agents.ContextPartMemory {
+			memChars = part.Chars
+		}
+	}
+	if memChars != int64(len(inj)) {
+		t.Fatalf("next Run's memory part = %d chars, want injection length %d", memChars, len(inj))
+	}
+}
+
+// 会话级 model/effort 优先于 Profile：写记忆触发的 loop 重建不能把人刚切的
+// switch_model/switch_effort 静默改回默认值（P1-05 复核 B1）。
+func TestHubMemoryWriteKeepsSessionModelAndEffort(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "Switch")
+	agentID := string(p.ID)
+	bs, err := m.hubDMSession(agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Model == "" || p.Effort != "" {
+		t.Fatalf("test profile expectation changed: model=%q effort=%q", p.Model, p.Effort)
+	}
+	if got := bs.loop.Model(); got != p.Model {
+		t.Fatalf("assembled loop model = %q, want profile %q", got, p.Model)
+	}
+	// 模拟 switch_model / switch_effort：只改会话状态（与命令做的事相同）。
+	bs.model, bs.provider, bs.effort = "deepseek-v4-pro", "deepseek", "high"
+
+	if ok, errMsg, _ := hubMemoryCmd(t, m, buf, 2, "hub_agent_memory_write", map[string]any{
+		"agent_id": agentID, "path": "MEMORY.md", "content": "- 偏好：短句\n",
+	}); !ok {
+		t.Fatalf("write failed: %s", errMsg)
+	}
+	if got := bs.loop.Model(); got != "deepseek-v4-pro" {
+		t.Fatalf("rebuilt loop model = %q, want session model deepseek-v4-pro (profile 不得覆盖会话选择)", got)
+	}
+	if got := bs.loop.ReasoningEffort(); got != provider.ReasoningEffortLevelHigh {
+		t.Fatalf("rebuilt loop effort = %q, want high", got)
+	}
+	// 重建不得回写会话状态（否则面板与实际行为分叉）。
+	if bs.model != "deepseek-v4-pro" || bs.provider != "deepseek" || bs.effort != "high" {
+		t.Fatalf("session fields drifted: model=%q provider=%q effort=%q", bs.model, bs.provider, bs.effort)
 	}
 }

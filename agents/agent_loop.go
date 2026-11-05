@@ -728,6 +728,12 @@ func (a *AgentLoop) currentEffort() provider.ReasoningEffortLevel {
 	return a.effort
 }
 
+// Model 当前模型名（会话面板/重建后自检用；与 SetModel 同一把锁）。
+func (a *AgentLoop) Model() string { return a.currentModel() }
+
+// ReasoningEffort 当前推理档位（同上）。
+func (a *AgentLoop) ReasoningEffort() provider.ReasoningEffortLevel { return a.currentEffort() }
+
 // SetModel 会话期间切换模型：下一次 LLM 请求生效，不重建 loop/会话
 // （与 effort 同为运行边界配置；事件 Model 字段读 currentModel 保持同步）。
 func (a *AgentLoop) SetModel(m string) {

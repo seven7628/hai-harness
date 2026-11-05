@@ -296,10 +296,16 @@ func hubSessionID(agentID string, scope agenthub.Scope) string {
 // ProjectDirName 固定为 agentID（memory.Config 支持把它当身份）。
 func (m *manager) hubMemoryConfig(agentID string) memory.Config {
 	cfg := m.memoryConfig()
-	if root, err := agenthub.MemoryRootFor(filepath.Join(appDataDir(), "hub"), agenthub.AgentID(agentID)); err == nil {
-		cfg.Directory = root
-		cfg.ProjectDirName = agentID
+	root, err := agenthub.MemoryRootFor(filepath.Join(appDataDir(), "hub"), agenthub.AgentID(agentID))
+	if err != nil {
+		// 回落 = 用项目记忆根（`~/.go-code/memory/repos/<git id>`）：会把**别人的/项目的**
+		// 记忆注入这个智能体。错的方向，宁可不注入（Enabled=false 是显式关闭）。
+		fmt.Fprintf(os.Stderr, "[hub] memory root for %s: %v（本次不注入记忆）\n", agentID, err)
+		off := false
+		return memory.Config{Enabled: &off}
 	}
+	cfg.Directory = root
+	cfg.ProjectDirName = agentID
 	return cfg
 }
 
@@ -477,11 +483,23 @@ func (m *manager) refreshHubLoops(agentID string) error {
 		if strings.Contains(bs.id, ".g.") {
 			scope = agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: agenthub.GroupID(hubGroupIDFromSID(bs.id))}
 		}
-		spec := m.hubSpecFor(p, scope, ws.path)
+		// 会话级选择优先：switch_model/switch_effort 改的是 bs.*，Profile 只是默认值。
+		// 直接用 Profile 重建会把人刚切的模型/档位静默改回去，而且 bs.effort 不跟着换
+		// → 面板显示 high、实际跑 low（P1-05 复核 B1）。这里只覆盖 loop 的入参，
+		// **不**回写 bs.*（那是会话状态，不是重建的副作用）。
+		cur := *p
+		if bs.provider != "" {
+			cur.Provider = bs.provider
+		}
+		if bs.model != "" {
+			cur.Model = bs.model
+		}
+		if bs.effort != "" {
+			cur.Effort = bs.effort
+		}
+		spec := m.hubSpecFor(&cur, scope, ws.path)
 		bs.loop = m.buildHubLoop(ws, bs.id, spec, bs.hubEngine)
 		bs.s.SetLoop(bs.loop)
-		bs.provider = p.Provider
-		bs.model = p.Model
 	}
 	return nil
 }

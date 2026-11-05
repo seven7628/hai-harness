@@ -61,12 +61,34 @@ func TestResolveMemoryPathRejectsEscapes(t *testing.T) {
 		t.Fatalf("nested md should be allowed, got %q err=%v", got, err)
 	}
 
-	for _, bad := range []string{
-		"", "../escape.md", "..", "../../etc/passwd.md", "/etc/passwd.md",
-		`..\escape.md`, "notes.txt", "MEMORY.md.bak",
+	// 每条坏路径都要**按自己的理由**被拒：只要断言「有错」，删掉 `..` 那条检查时
+	// evalWithin 会用 (symlink) 文案兜住，测试仍然全绿（评审 B2 的 mutation b）。
+	for _, tc := range []struct {
+		path string
+		want string
+		deny string
+	}{
+		{"", "empty path", ""},
+		{"../escape.md", "path escapes memory dir", "(symlink)"},
+		{"..", "path escapes memory dir", "(symlink)"},
+		{"../../etc/passwd.md", "path escapes memory dir", "(symlink)"},
+		{"/etc/passwd.md", "path must be relative", ""},
+		{`..\escape.md`, "must not contain backslashes", ""},
+		{"notes.txt", "only .md files are allowed", ""},
+		{"MEMORY.md.bak", "only .md files are allowed", ""},
+		{".backups/x.md", "is reserved for backups", ""},
+		{"topics/.backups/x.md", "is reserved for backups", ""},
 	} {
-		if _, err := ResolveMemoryPath(root, "ag_aaaaaaa1", bad); err == nil {
-			t.Errorf("path %q must be rejected", bad)
+		_, err := ResolveMemoryPath(root, "ag_aaaaaaa1", tc.path)
+		if err == nil {
+			t.Errorf("path %q must be rejected", tc.path)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("path %q: err = %v, want %q", tc.path, err, tc.want)
+		}
+		if tc.deny != "" && strings.Contains(err.Error(), tc.deny) {
+			t.Errorf("path %q rejected by %s instead of its own branch: %v", tc.path, tc.deny, err)
 		}
 	}
 }
@@ -226,8 +248,9 @@ func TestWriteMemoryFilePrunesBackups(t *testing.T) {
 // 写入路径同样受 ResolveMemoryPath 约束（面板不能借写接口逃逸）。
 func TestWriteMemoryFileRejectsEscape(t *testing.T) {
 	root := t.TempDir()
-	if _, err := WriteMemoryFile(root, "ag_aaaaaaa1", "../evil.md", "x"); err == nil {
-		t.Fatal("escape path must be rejected")
+	if _, err := WriteMemoryFile(root, "ag_aaaaaaa1", "../evil.md", "x"); err == nil ||
+		!strings.Contains(err.Error(), "path escapes memory dir") || strings.Contains(err.Error(), "(symlink)") {
+		t.Fatalf("escape path must be rejected by the clean-path branch, err = %v", err)
 	}
 	if _, err := WriteMemoryFile(root, "ag_aaaaaaa1", "MEMORY.txt", "x"); err == nil {
 		t.Fatal("non-md must be rejected")

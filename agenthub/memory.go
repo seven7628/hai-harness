@@ -65,6 +65,11 @@ func ResolveMemoryPath(hubRoot string, id AgentID, rel string) (string, error) {
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("%w: path escapes memory dir", ErrInvalid)
 	}
+	if hasMemoryBackupSegment(clean) {
+		// .backups 只由 WriteMemoryFile 自己维护（备份 + prune 只认 .bak）。面板往这里
+		// 写 .md 会让「备份目录只含备份」的前提失效，也让 prune 的假设变模糊。
+		return "", fmt.Errorf("%w: %s is reserved for backups", ErrInvalid, memoryBackupDir)
+	}
 	if !strings.HasSuffix(strings.ToLower(clean), ".md") {
 		return "", fmt.Errorf("%w: only .md files are allowed", ErrInvalid)
 	}
@@ -76,6 +81,19 @@ func ResolveMemoryPath(hubRoot string, id AgentID, rel string) (string, error) {
 		return "", err
 	}
 	return checked, nil
+}
+
+// memoryBackupDir 记忆备份目录（相对记忆目录；不参与注入，面板不可写）。
+const memoryBackupDir = ".backups"
+
+// hasMemoryBackupSegment 判断路径里是否出现保留段 .backups（任意层级）。
+func hasMemoryBackupSegment(clean string) bool {
+	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
+		if seg == memoryBackupDir {
+			return true
+		}
+	}
+	return false
 }
 
 // evalWithin 解析符号链接后仍要求落在 dir 内。
@@ -225,7 +243,7 @@ func backupMemoryFile(hubRoot string, id AgentID, rel string, body []byte) (stri
 	if err != nil {
 		return "", err
 	}
-	bdir := filepath.Join(dir, ".backups")
+	bdir := filepath.Join(dir, memoryBackupDir)
 	if err := os.MkdirAll(bdir, 0o700); err != nil {
 		return "", err
 	}
