@@ -380,11 +380,13 @@
         "P2-01"
       ],
       "files": [
+        "desktop/bridge/hub_workspace_tools.go",
+        "agenthub/service.go",
         "desktop/bridge/hub_tools.go",
-        "agenthub/service.go"
+        "desktop/bridge/hub_workspace.go"
       ],
       "acceptance": "工具描述明确「先 list 再 send」；create 不切全局 provider；send 返回 task_id；目标必须项目会话。",
-      "tests": "go test ./desktop/bridge/ -run HubSessionTools",
+      "tests": "go test ./desktop/bridge/ -run 'TestHubWorkspaceTools|TestHubEngine' && go test ./agenthub/ -run TestWorkspaceService",
       "commit": "feat(hub-p2-02): session 工具面"
     },
     {
@@ -979,9 +981,15 @@
     },
     "P2-02": {
       "status": "review",
-      "commit": "e4f811d feat(hub-p2-02): workspace/session 五件套工具",
+      "commit": "e4f811d + e735626 fix(hub-p2-02): 复审修复",
       "review": "pending",
-      "reviewNote": "实现：agenthub.WorkspaceService 是工具层唯一能力面（组合 WorkspaceOps + AgentID）：CreateWorkspace 校验 parent/name，ListSessions/CreateSession 校验 workspace，Send 校验 workspace/session/text 并透传 client_msg_id；send 返回 task_id（默认 task_<8字节hex>，可注入 NewTaskID；P2-03 改由账本分配）。bridge 新增 5 个工具：workspace_list（只读、可并行）、workspace_create、session_list（只读、可并行）、session_create、session_send；描述明确「先 list 再 send」且 session_send 写明目标必须是 registered project workspace 的会话、只派发不读写工作区文件、create 不切全局 provider。注册在 buildHubEngine 内、applyHubToolPolicy 之前，所以 readonly 预设保留 list、撤下 create/send。测试：agenthub/service_test（send 透传/默认 task_id 唯一/7 条校验/nil ops/错误上抛）、bridge/hub_workspace_tools_test（五个工具的 JSON 输出、参数校验、Dispatch 透传、ops 错误上抛、readonly/disable 可见性）、hub_tools_test 更新为「session_send 是 Hub 自己的工具」。验证：go build ./... 绿；agenthub + desktop/bridge 全量绿（37.8s）。"
+      "reviewNote": "首轮 change_requested（task-fz9b59jn）：B1 session_create 的 title 只回显不落盘（返回「评审标题」，session_list 显示 New Chat）；B2 client_msg_id 被描述成幂等键但 Dispatch 从不读取（同 id 连发两次 → 两条消息、两个 task_id）。非阻塞：N1 session_create 描述「跟工作区 provider/model」不实（实际取全局 active）；N2 workspace_create 必填 parent 但无工具暴露 roots（冷启动只能猜）；N3 task_id 不落账本、无 status、描述未说明；N4 updated_at 零值输出 0001-01-01、session_send 的 message 恒出现；N5 空列表归一/ValidParams/buildHubEngine 策略/「create 不改全局」均无测试（M5 存活）；N6 tasks.json 的 tests 命令 -run HubSessionTools 假绿（[no tests to run]）；N7 与 §6.3.1 工具表形状不一致；N8 RunPolicy.CanCreateWorkspace 未接线；N9 同名注册后注册者胜出（现状安全）；N10 派发消息无 hub_task 头（P2-03）。→ e735626 修复 B1（session_manual_titles.set + list 断言）、B2（Dispatch 进程内按 workspace+session+id 去重，重复返回 duplicate 不 Ask；Service 原样透传不 TrimSpace），N2 parent 可选（默认第一个 root）、N3 描述与唯一兜底、N4 *time.Time + []、N1 措辞。测试新增：title 落盘、默认 parent、去重/不同 id、空列表 JSON/零时间、CreateSession 不改全局 active。验证：go build ./...、agenthub、desktop/bridge 全量绿（39.3s）。待复审。"
+    },
+    "P2-03": {
+      "status": "review",
+      "commit": "c1bcaf7 feat(hub-p2-03): 任务账本 + 空闲闸门 + 派发队列",
+      "review": "pending",
+      "reviewNote": "实现：agenthub.Queue 组合 Ledger + WorkspaceOps。Submit 创建 queued 任务后尝试 Pump；闸门 = 目标 Running 或 Pending>0（Session.PendingCount 由 P0-07 提供，bridge SessionStatus 探针）；忙则留在 Hub 层 FIFO（不写 Session.inbox，避免与人的消息并批）。Pump **每次最多派发一个**：Ask 之后状态可能还没翻转，继续循环会把下一任务塞进同一批（「一个任务 = 一次干净 Run」的关键）。派发失败 dispatched→failed 落账并出队；client_msg_id = task_id（重试幂等）。接线：WorkspaceService.Queue 非空时 Send 走账本并返回 status/queued/真 task_id；buildHubEngine 懒开 hubQueue（失败降级直派）；项目会话根 AgentEnd 后 bridgeSession.hubPumpQueue 推进队列（队列空时不碰存储，避免阻塞 emit/会话账收尾）。测试：agenthub/queue_test 6 条（idle 直派、busy 排队+pump 一次一个、pending 闸门、派发失败落 failed、校验、账本回放）；bridge 2 条（SessionStatus 探针、running 时 session_send 返回 queued 且 pump 后离队）。验证：go build ./...、agenthub、desktop/bridge 全量绿（110s）。已知边界（P2-08）：内存 FIFO 不跨重启；重启后 queued 任务需从账本恢复（P2-08 崩溃恢复）。"
     }
   }
 }
