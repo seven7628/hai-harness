@@ -969,9 +969,9 @@
     },
     "P1-10": {
       "status": "review",
-      "commit": "dd3b32d + bc3e103 + cd04b56 + 9985730",
+      "commit": "dd3b32d + ... + 196c508",
       "review": "re-review_pending",
-      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。"
+      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。 第四轮复审（task-fehavvps）：provider-only 已修但 model-only 仍可写无效组合。已修（196c508）：判据改为 provider 或 model 变化 + 精确比较；model-only 跨 provider 模型 → unknown_model。"
     },
     "P2-01": {
       "status": "done",
@@ -993,15 +993,15 @@
     },
     "P2-04": {
       "status": "review",
-      "commit": "b7548d5 feat(hub-p2-04): hub_task 相关性 + AgentEnd 结算",
-      "review": "pending",
-      "reviewNote": "实现：agenthub.TaskHeader（只带 task_id/root/origin/callback，不含 instruction）+ Encode/Parse；DispatchReq.TaskHeader → hubDispatchMessage 构造 [hub_task, text] 两块；Queue 派发自动带 header。emit 的 UserInputsConsumed 分支只认 batch 开口（Injected 不算新任务），从 UserContents 解析 hub_task → bs.hubTaskIDs。根 AgentEnd（ParentRunId==\"\" && Depth==0）在 logEventLine 之后结算：completed / failed / interrupted（canceled/aborted）；结果含摘要（4000 rune）、usage（CostPriced 区分未知与免费）、artifacts；同批多个 hub_task → 第一个结算，其余 failed(batch_conflict)+hub_alert。view_reducer 跳过 hub_task 块：用户气泡只见正文（实时与恢复同一条 reducer 路径）。测试：header 往返/坏 JSON/不泄漏 instruction；结算 completed/failed/interrupted/批冲突；hubDispatchMessage 顺序；reducer 不泄漏 header。验证：go build ./...、agenthub、desktop/bridge 全量绿（67s）。"
+      "commit": "b7548d5 + 2f1578d",
+      "review": "re-review_pending",
+      "reviewNote": "实现：agenthub.TaskHeader（只带 task_id/root/origin/callback，不含 instruction）+ Encode/Parse；DispatchReq.TaskHeader → hubDispatchMessage 构造 [hub_task, text] 两块；Queue 派发自动带 header。emit 的 UserInputsConsumed 分支只认 batch 开口（Injected 不算新任务），从 UserContents 解析 hub_task → bs.hubTaskIDs。根 AgentEnd（ParentRunId==\"\" && Depth==0）在 logEventLine 之后结算：completed / failed / interrupted（canceled/aborted）；结果含摘要（4000 rune）、usage（CostPriced 区分未知与免费）、artifacts；同批多个 hub_task → 第一个结算，其余 failed(batch_conflict)+hub_alert。view_reducer 跳过 hub_task 块：用户气泡只见正文（实时与恢复同一条 reducer 路径）。测试：header 往返/坏 JSON/不泄漏 instruction；结算 completed/failed/interrupted/批冲突；hubDispatchMessage 顺序；reducer 不泄漏 header。验证：go build ./...、agenthub、desktop/bridge 全量绿（67s）。 复审（task-bpcx9uh7）：4 blocking —— CostPriced 恒 false（Cost.Add 丢 Priced）、abort→completed、Injected/bad header 静默丢任务、artifacts 未映射（后由 f016fd1 补上）。已修（2f1578d）：Cost.Add 保留有价性、FinishReasonAbort→interrupted/MaxIterations→failed、注入→failed+告警、坏 header 告警、Dispatch 校验 header；补 abort/注入/artifacts/Usage.Add 测试。"
     },
     "P2-05": {
       "status": "review",
-      "commit": "f016fd1 feat(hub-p2-05): 任务结果回推 —— task_result + hub_task_update + 幂等标记",
-      "review": "pending",
-      "reviewNote": "实现：结算后 ① 产物 core.Artifact → TaskResult.Artifacts；② emit hub_task_update；③ 回推发起智能体 DM 会话：Session.PushTaskResultUsage 入队 task_result 消息（模型续跑）+ TaskResultDelivered 事件（卡片终态收敛），usage 带 CostPriced/CostUSD；④ 成功后 Ledger.MarkNotified（status→delivered + notified_run_ids），alreadyNotified 先判保证同一 run 重复 AgentEnd/事件重放不重复回推；回推失败发 hub_alert(push_failed) 且不标 notified（P2-08 可重推）。测试：失败/中断/批冲突、回推成功（ledger delivered、artifacts、task_result_delivered 事件）、同 run 两次只推一次。延期：系统动作行（Message.kind=system + refs.action）归 P2-06 前端；群/人工来源回推归 P3。验证：go build ./...、agenthub、desktop/bridge 全量绿（56s）。"
+      "commit": "f016fd1 + 2f1578d",
+      "review": "re-review_pending",
+      "reviewNote": "实现：结算后 ① 产物 core.Artifact → TaskResult.Artifacts；② emit hub_task_update；③ 回推发起智能体 DM 会话：Session.PushTaskResultUsage 入队 task_result 消息（模型续跑）+ TaskResultDelivered 事件（卡片终态收敛），usage 带 CostPriced/CostUSD；④ 成功后 Ledger.MarkNotified（status→delivered + notified_run_ids），alreadyNotified 先判保证同一 run 重复 AgentEnd/事件重放不重复回推；回推失败发 hub_alert(push_failed) 且不标 notified（P2-08 可重推）。测试：失败/中断/批冲突、回推成功（ledger delivered、artifacts、task_result_delivered 事件）、同 run 两次只推一次。延期：系统动作行（Message.kind=system + refs.action）归 P2-06 前端；群/人工来源回推归 P3。验证：go build ./...、agenthub、desktop/bridge 全量绿（56s）。 复审（task-jcrsq6ks）：B1 幂等非原子（并发双推/重放撞状态机假告警）、B2 真实中断被 completed、B3 delivered 快照缺失、B4 事件线形状不符。已修（2f1578d）：hubFinishMu 串行 + 已通知同 run 静默返回；abort 映射；MarkNotified 后重发 delivered 快照；hub_task_update 摊平 task_id/status 等。"
     },
     "P2-06": {
       "status": "review",
