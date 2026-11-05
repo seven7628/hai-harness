@@ -2908,7 +2908,7 @@ Needs you (3)
 
 ### 8.8 状态管理与事件归约
 
-**新 store：`store/useHubStore.ts`**（不要把 10k 行的 `useAppStore` 再撑大）。
+**新 store：`src/hub/useHubStore.ts`**（不要把 10k 行的 `useAppStore` 再撑大）。
 
 ```ts
 interface HubState {
@@ -2988,8 +2988,14 @@ interface RoundView {
 
 ### 8.10 新增文件清单（前端）
 
+> **实现落点（2026-11，P1 收口）**：实际代码在 `desktop/app/src/hub/`
+> （HubSurface.tsx = Rail + DM + Composer、AgentEditor.tsx = 5 页签、useHubStore.ts、
+> api.ts、types.ts、agentPatch.ts、hub.css），`App.tsx` 用 `display:none` 隐藏工作区树
+> 以保留草稿。下面清单保留为目标形态：Timeline 拆分、群组件、Task*/Inspector 等
+> 属 P2/P3（Chat|Run、Needs you、任务板已在 tasks.json 的 reviewNote 登记为延期）。
+
 ```
-src/components/hub/
+src/hub/
   AgentHubPage.tsx      顶层布局（Rail + Timeline + Inspector）
   HubRail.tsx           左栏
   HubRow.tsx            列表行
@@ -3022,7 +3028,7 @@ src/components/hub/
   AgentMemoryPanel.tsx
   HubInspector.tsx      右栏（任务/产物/成员/Context）
   HubOnboarding.tsx     空态 + 模板
-src/store/useHubStore.ts
+src/hub/useHubStore.ts
 src/lib/hubModel.ts     纯函数（未读合并、mention 解析、排序）+ 单测
 src/hub.css
 ```
