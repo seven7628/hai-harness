@@ -966,6 +966,12 @@
       "commit": "dd3b32d test(hub-p1-10): 评测 1–3（DM 单会话/独立记忆/独立 provider）",
       "review": "pending",
       "reviewNote": "方案 §10.3 评测 1–3，确定性 fake provider（不联网）：Eval1 DM 单会话（24 轮只有 hub.<id>.dm 一个 sid、ws.sessions 恒 1；3000×0.5 触发自动压缩——compress_start + 摘要请求证据；压缩后记忆事实仍在 system、上下文含 SUMMARY、中间轮次被替换、消息数 < 2×轮数；首条输入是任务锚点按 S1-A 逐字保留，不作旧轮次判据）；Eval2 独立记忆（A 有 B 无 + 目录/清单分离）；Eval3 独立 provider（deepseek/openai 两模型各自 req.Model 与 llm_end session_id 归属正确）。最终 P1 Review 进行中（task-wjt2u5vs），覆盖评测 mutation、端到端自洽、Hub/工作区零串台、看板一致性、方案硬缺口。"
+    },
+    "P2-01": {
+      "status": "review",
+      "commit": "7b243a7 feat(hub-p2-01): WorkspaceOps 落地 —— workspaces.json 登记 + 路径白名单/敏感目录/符号链接",
+      "review": "pending",
+      "reviewNote": "实现：agenthub 只定义 WorkspaceOps/SessionRunner 窄接口 + ErrForbidden（领域包不碰路径），bridge 侧 hubWorkspaceOps 是唯一入口。CreateWorkspace 在 roots 白名单内 mkdir，成功后写 workspaces.json（失败回滚空目录），不顺手装配 runtime；ListWorkspaces = workspaces.json ∪ m.workspaces 去重（重启后未打开的工作区也能列出）；knownWorkspace 认「已登记但未装配」的目录，未登记/敏感目录/Hub home 一律 ErrNotFound 且不装配；Dispatch 对未装配工作区先 runtime() 再找 session（不自动建会话）；InterruptSession 跨工作区按 sid 找。路径安全：单段名（分隔符/./../NUL/超 64 rune）、父目录必须 EvalSymlinks 后落在 roots 内（符号链接逃逸被拒）、已存在 → ErrConflict（不接管）、敏感目录（~/.ssh/.aws/.gnupg/.netrc/.kube、~/.go-code 除 plugins/runtime）双向 EvalSymlinks 判定。测试：TestHubWorkspaceCreatePath（矩阵）、TestHubWorkspaceOpsCreateAndList（registry 落盘/重载、不装配、新目录可开会话）、TestHubWorkspaceOpsRejectsUnknownWorkspace（拒绝且不装配）、TestHubWorkspaceOpsDispatch（Ask 入队/空文本/未知会话）。验证：go build ./... 绿；agenthub 全绿；desktop/bridge 全量绿（干净 HOME）；`go test -run HubWorkspace` 4/4 绿。注：agenthub/workspace.go 与 ErrForbidden 的骨架因与 P1-08/09 同批落盘已在 bf05e53 中，本提交是其 bridge 实现与测试收尾。"
     }
   }
 }
