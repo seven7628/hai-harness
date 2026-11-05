@@ -473,3 +473,111 @@ func TestHubWorkspaceDispatchDedupClientMsgID(t *testing.T) {
 		t.Fatalf("dedup entries after distinct id = %d, want 2", seen)
 	}
 }
+
+// 大小写敏感 FS 上也能跑的折叠兜底断言（不依赖 inode）。
+func TestHubSensitivePathCaseFoldFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// .kube 不存在 → hubPathWithin 走折叠比较；旧实现（大小写敏感前缀）会返回 false。
+	if !hubSensitivePath(filepath.Join(home, ".KUBE")) {
+		t.Fatal("hubSensitivePath must fold case when the protected dir does not exist")
+	}
+	if hubSensitivePath(filepath.Join(home, ".kube2")) {
+		t.Fatal("sibling prefix must not be treated as sensitive")
+	}
+}
+
+// 登记的敏感目录不能出现在 workspace_list（与 knownWorkspace 口径一致）。
+func TestHubWorkspaceListFiltersSensitive(t *testing.T) {
+	m, buf := testManager(t)
+	home := os.Getenv("HOME")
+	ssh := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(ssh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(ssh); err != nil {
+		t.Fatal(err)
+	}
+	p := createWorkspaceAgent(t, m, buf, 1, "FilterSensitive", []string{home})
+	ops := newHubWorkspaceOps(m)
+	list, err := ops.ListWorkspaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWorkspacePath(list, ssh) {
+		t.Fatalf("ListWorkspaces leaked sensitive path %q", ssh)
+	}
+	_ = p
+}
+
+// 尾斜杠命中的 runtime 必须按原键寻址：不能另装配一个（runtimes 数量不变且派发成功）。
+func TestHubWorkspaceTrailingSlashUsesSameRuntime(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "SlashKey", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	// 用带尾斜杠的原键装配 runtime（模拟 UI 传参）。
+	key := wsPath + string(filepath.Separator)
+	if _, err := m.create(key, "s-slash", ""); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	before := len(m.workspaces)
+	m.mu.Unlock()
+	ops := newHubWorkspaceOps(m)
+	res, err := ops.Dispatch(context.Background(), agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-slash", Text: "hi",
+	})
+	if err != nil || !res.Accepted {
+		t.Fatalf("dispatch through trailing-slash key = %+v, %v", res, err)
+	}
+	m.mu.Lock()
+	after := len(m.workspaces)
+	m.mu.Unlock()
+	if after != before {
+		t.Fatalf("knownWorkspace assembled a duplicate runtime: %d -> %d", before, after)
+	}
+}
+
+// CreateWorkspace 在登记失败时必须删掉刚建的空目录。
+func TestHubWorkspaceCreateRollsBackOnRegistryFailure(t *testing.T) {
+	m, buf := testManager(t)
+	root := t.TempDir()
+	// registry 的 path 是目录 → save 必失败。
+	bad := filepath.Join(t.TempDir(), "is-a-dir")
+	if err := os.MkdirAll(bad, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.wsReg = newWorkspaceRegistry(bad)
+	p := createWorkspaceAgent(t, m, buf, 1, "RegFail", []string{root})
+	ops := newHubWorkspaceOps(m)
+	if _, err := ops.CreateWorkspace(context.Background(), agenthub.CreateWorkspaceReq{
+		AgentID: p.ID, Parent: root, Name: "proj",
+	}); err == nil {
+		t.Fatal("registry save failure must surface")
+	}
+	if _, err := os.Stat(filepath.Join(root, "proj")); !os.IsNotExist(err) {
+		t.Fatalf("created dir left behind: %v", err)
+	}
+}
+
+// 父路径是普通文件（ENOTDIR）→ ErrInvalid，而不是裸 err。
+func TestHubWorkspaceParentNotDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "root")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hubCreateWorkspacePath(file, "proj", []string{root}); !errors.Is(err, agenthub.ErrInvalid) {
+		t.Fatalf("ENOTDIR = %v, want ErrInvalid", err)
+	}
+}

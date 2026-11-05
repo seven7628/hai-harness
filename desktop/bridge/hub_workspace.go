@@ -44,7 +44,7 @@ func (o *hubWorkspaceOps) ListWorkspaces(ctx context.Context) ([]agenthub.Worksp
 	byPath := map[string]agenthub.WorkspaceInfo{}
 	if o.m.wsReg != nil {
 		for _, e := range o.m.wsReg.list() {
-			if e.Path == "" || isHubHomePath(e.Path) {
+			if e.Path == "" || isHubHomePath(e.Path) || hubSensitivePath(e.Path) {
 				continue
 			}
 			name := e.Title
@@ -56,7 +56,7 @@ func (o *hubWorkspaceOps) ListWorkspaces(ctx context.Context) ([]agenthub.Worksp
 	}
 	o.m.mu.Lock()
 	for path, ws := range o.m.workspaces {
-		if ws == nil || ws.kind == runtimeHubAgent || isHubHomePath(path) {
+		if ws == nil || ws.kind == runtimeHubAgent || isHubHomePath(path) || hubSensitivePath(path) {
 			continue
 		}
 		if _, ok := byPath[path]; !ok {
@@ -351,19 +351,22 @@ func (o *hubWorkspaceOps) knownWorkspace(path string) (string, error) {
 	}
 	o.m.mu.Lock()
 	ws := o.m.workspaces[clean]
+	matchedKey := clean
 	if ws == nil {
 		// m.workspaces 的 key 是调用方原样字符串（可能带尾斜杠/..）：再按归一比较一次，
-		// 否则「用 ./proj/ 打开过的 runtime」永远匹配不上（P2-01 复审 N6）。
+		// 否则「用 ./proj/ 打开过的 runtime」永远匹配不上。命中时必须返回**原键**，
+		// 下游 m.get 才能找到同一个 runtime（返回 clean 会另装配一个，P2-01 复审 N6）。
 		for key, cand := range o.m.workspaces {
 			if filepath.Clean(key) == clean {
 				ws = cand
+				matchedKey = key
 				break
 			}
 		}
 	}
 	o.m.mu.Unlock()
 	if ws != nil && ws.kind != runtimeHubAgent {
-		return clean, nil
+		return matchedKey, nil
 	}
 	// 已登记但还没装配 runtime（刚建好 / 重启后未打开）：允许，但目录必须在。
 	if o.m.wsReg != nil {

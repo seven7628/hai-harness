@@ -133,6 +133,7 @@ func (r *workspaceRegistry) update(path string, title *string, pinned *bool) (wo
 		if e.Path != p {
 			continue
 		}
+		prev := e
 		if title != nil {
 			t := strings.TrimSpace(*title)
 			if len([]rune(t)) > 60 {
@@ -146,7 +147,10 @@ func (r *workspaceRegistry) update(path string, title *string, pinned *bool) (wo
 		if pinned != nil {
 			r.entries[i].Pinned = *pinned
 		}
-		_ = r.saveLocked()
+		if err := r.saveLocked(); err != nil {
+			r.entries[i] = prev // 落盘失败回滚：内存不能比磁盘多一条已改条目
+			return workspaceEntry{}, false
+		}
 		return r.entries[i], true
 	}
 	return workspaceEntry{}, false
@@ -158,8 +162,15 @@ func (r *workspaceRegistry) remove(path string) bool {
 	defer r.mu.Unlock()
 	for i, e := range r.entries {
 		if e.Path == p {
+			removed := r.entries[i]
 			r.entries = append(r.entries[:i], r.entries[i+1:]...)
-			_ = r.saveLocked()
+			if err := r.saveLocked(); err != nil {
+				// 按原位置插回（顺序也是可观察状态：排序前的 listLocked 会用它）
+				r.entries = append(r.entries, workspaceEntry{})
+				copy(r.entries[i+1:], r.entries[i:])
+				r.entries[i] = removed
+				return false
+			}
 			return true
 		}
 	}
@@ -177,6 +188,7 @@ func (r *workspaceRegistry) sync(paths []string) []workspaceEntry {
 	for _, e := range r.entries {
 		have[e.Path] = true
 	}
+	baseLen := len(r.entries)
 	changed := false
 	for _, raw := range paths {
 		p := normalizeWorkspacePath(raw)
@@ -188,7 +200,9 @@ func (r *workspaceRegistry) sync(paths []string) []workspaceEntry {
 		changed = true
 	}
 	if changed {
-		_ = r.saveLocked()
+		if err := r.saveLocked(); err != nil {
+			r.entries = r.entries[:baseLen] // 落盘失败回滚本次新增
+		}
 	}
 	return r.listLocked()
 }
