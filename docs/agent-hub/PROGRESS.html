@@ -1310,6 +1310,18 @@ const BASE = {
       "commit": "2a755f9 feat(hub-p2-06): 任务板 + Needs you + Chat|Run + 会话信息",
       "review": "pending",
       "reviewNote": "实现：hub_task_list/get/cancel/retry、hub_need_list/resolve、hub_clear；审批/提问事件落 need（锚=调用 id/批次 id），根 run 结束异步 expired；前端 HubInspector（任务板筛选/详情/取消/重试/空态、Needs you 批准/拒绝/回答/已读、会话 tab 运行态/用量/导出/清空）、Chat|Run 切换（Run 收 tool_run_*/compress_*）、系统动作行（refs.action + 压缩回执）、左栏徽标。测试边界：Go 侧 TestHubTaskBoardLifecycle（列表/详情/取消/重试链/hub_clear）与 TestHubNeedFromEventsAndResolve（事件→need→幂等→过期→resolve 幂等）；前端 tsc/eslint(src)/vite build 通过。未完成/延期：① 全工具+MCP 开关与 provider→model 两级下拉（P1-09 延期项）未做；② 记忆注入预览/清除已有 P1-09 记忆面板，未在本轮加预览；③ 浏览器实测未做（无 bridge 的 mock 不覆盖 hub_*；留 P2-09 真机）；④ 仓库级 npm run lint 在干净检出有既有错误（lab/test-runtime-turns.ts 不在 tsconfig），npm run test:todos-scope 的 e2e/ 被 .gitignore 忽略 —— 均非本提交引入。"
+    },
+    "P2-07": {
+      "status": "review",
+      "commit": "ad43330 feat(hub-p2-07): 预算/并发/去重/链长护栏 + 熔断可见",
+      "review": "pending",
+      "reviewNote": "实现：agenthub.Guard 建账前校验①链长>6 ②同(origin,target,instruction) 10 分钟重复 ③同发起者在途≥3 ④智能体/群/全局日预算（UTC 日、只累加 CostPriced=true）。Queue.CheckGuard + WorkspaceService.Guard 接入 buildHubEngine（profile.policy）。拒绝时 session_send 发 hub_alert（blocked_budget/concurrency_limit/duplicate_task/chain_too_deep）。单任务预算结算时判：超限落 blocked_budget（新增 Running→blocked_budget 迁移 + Finish 允许）并告警；CostPriced=false 不判。测试：TestGuard* 5 条 + 生产链路 hub_alert + 结算 blocked_budget。未接线：群/全局预算来自 hub.json defaults（P3 群组装配时接）。验证：agenthub + desktop/bridge 全量绿（41s）。"
+    },
+    "P2-08": {
+      "status": "review",
+      "commit": "fcbe73c feat(hub-p2-08): 崩溃恢复（queued 重入队 / 无 run 中断 / 未回推重推）",
+      "review": "pending",
+      "reviewNote": "实现：hub_open 首次 ensureHubRecovery（进程内一次）。queued → Queue.Restore 放回 FIFO（重复恢复不重复入队）；dispatched/running 且 Dispatch.RunID 空 → interrupted + hub_alert + Needs you(failure) + 回推；completed/failed/interrupted 未 notified → 用账本结果合成 AgentEnd 重推，MarkNotified 幂等；不自动重试（避免副作用双执行）。测试：3 条 HubRecovery（含「第二次恢复 task_result_delivered 只一次」）。边界：queued 重入队后要等下一次闸门（会话被打开/AgentEnd）；启动时不主动装配工作区（避免打开全部项目）。验证：agenthub + desktop/bridge 全量绿（41s）。"
     }
   }
 };
