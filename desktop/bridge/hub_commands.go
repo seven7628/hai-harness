@@ -268,6 +268,18 @@ func (m *manager) hubAgentUpdate(c command) {
 	// 不重建的话，「关闭记忆」这类改动要等到重启或下一次写记忆才生效 —— 面板说关了、
 	// 模型照旧看得到（§6.11.2）。
 	data := map[string]any{"agent": next, "effective": "next_run"}
+	// 资料页改 provider/model/effort：已装配会话的 bs.* 是会话创建时固定的，
+	// 不同步的话 applyHubSessionLoop 会继续用旧值（P1-10 评审 B4）。
+	m.syncHubSessionProfile(string(next.ID), cur, &next)
+	// 工具开关（preset/disable/allow/MCP）是 engine 级可见性，必须重新应用；
+	// bash_roots / policy 进了装配期沙箱，只能等下次会话（如实返回 next_session）。
+	if hubEngineNeedsRebuild(cur, &next) {
+		data["effective"] = "next_session"
+		data["warning"] = "bash_roots / policy 变更需要重建会话后生效"
+	} else if err := m.refreshHubEngines(string(next.ID), &next); err != nil {
+		data["effective"] = "next_session"
+		data["warning"] = "重新应用工具策略失败，重建会话后生效: " + err.Error()
+	}
 	if err := m.refreshHubLoops(string(next.ID)); err != nil {
 		data["effective"] = "next_session"
 		data["warning"] = "重建会话 loop 失败，重启后生效: " + err.Error()
@@ -687,6 +699,15 @@ func (m *manager) hubAgentRollback(c command) {
 	}
 	// 人格变了 → 已装配的会话按新 profile 重建 loop（下一个 Run 生效）。
 	data := map[string]any{"agent": next, "restored_from": version, "effective": "next_run"}
+	// 回滚同样可能改 provider/model/effort 与工具策略：与 update 走同一套同步。
+	m.syncHubSessionProfile(string(next.ID), cur, &next)
+	if hubEngineNeedsRebuild(cur, &next) {
+		data["effective"] = "next_session"
+		data["warning"] = "bash_roots / policy 变更需要重建会话后生效"
+	} else if err := m.refreshHubEngines(string(next.ID), &next); err != nil {
+		data["effective"] = "next_session"
+		data["warning"] = "重新应用工具策略失败，重建会话后生效: " + err.Error()
+	}
 	if err := m.refreshHubLoops(string(next.ID)); err != nil {
 		data["effective"] = "next_session"
 		data["warning"] = "重建会话 loop 失败，重启后生效: " + err.Error()

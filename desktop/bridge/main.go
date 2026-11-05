@@ -2488,27 +2488,34 @@ func (m *manager) dispatch(c command) {
 			m.respCode(c, false, "unknown model: "+name, "unknown_model", nil)
 			return
 		}
-		// 目标 Provider ≠ 当前活跃 → 自动把活跃 Provider 切到该模型所属 Provider
-		//（模型窗口/输出上限/压缩器都按它解析），无需依赖前端 set_provider 时序。
-		if prov != m.provCfg.providerName() {
+		// Hub 会话（persona=hub）用**显式 provider** 装配 loop：`applyHubSessionLoop`
+		// 用 bs.provider/model，window/maxTokens 也接受显式 provider。切 Hub 模型
+		// 绝不能改全局 active / lastModel —— 那会让「新建工作区会话」跟着换 provider
+		//（P1-10 评审 B6 实测：Hub 切 gpt-5 后新项目会话变成 openai）。
+		isHub := bs.persona == "hub" || bs.hubEngine != nil
+		if !isHub {
+			// 目标 Provider ≠ 当前活跃 → 自动把活跃 Provider 切到该模型所属 Provider
+			//（模型窗口/输出上限/压缩器都按它解析），无需依赖前端 set_provider 时序。
+			if prov != m.provCfg.providerName() {
+				m.provCfg.setActive(prov)
+			}
+			// model/provider/max_tokens/contextWindow 一起切：窗口与输出上限按目标模型重解析
+			// （Provider 设置已持久化；重载 settings.json 拿最新值）。
+			m.provCfg.loadSettings()
+			// settings.json 的 active 可能仍是旧值（客户端 provider:save 异步落盘，与
+			// 命令到达存在竞态）—— 重载后无条件把活跃 Provider 固定回本会话模型所属
+			// Provider，避免会话 loop 用错 Provider 表/地址（跨 Provider 切模型时）。
 			m.provCfg.setActive(prov)
+			// 记录全局"最近一次模型选择"：IM 发起的新会话用它（而非 defaultModel）
+			m.mu.Lock()
+			m.lastModel = name
+			m.mu.Unlock()
 		}
-		// model/provider/max_tokens/contextWindow 一起切：窗口与输出上限按目标模型重解析
-		// （Provider 设置已持久化；重载 settings.json 拿最新值）。
-		m.provCfg.loadSettings()
-		// settings.json 的 active 可能仍是旧值（客户端 provider:save 异步落盘，与
-		// 命令到达存在竞态）—— 重载后无条件把活跃 Provider 固定回本会话模型所属
-		// Provider，避免会话 loop 用错 Provider 表/地址（跨 Provider 切模型时）。
-		m.provCfg.setActive(prov)
 		bs.model = name
 		bs.provider = prov // 价表打标：本会话按所属 Provider 记账（不随全局活跃漂移）
 		if str(c.Payload, "provider") != "" && bs.provider == prov {
 			bs.providerExplicit = true // 用户显式选定 Provider → 后续 rebuildAll 保留归属
 		}
-		// 记录全局"最近一次模型选择"：IM 发起的新会话用它（而非 defaultModel）
-		m.mu.Lock()
-		m.lastModel = name
-		m.mu.Unlock()
 		// 下一轮 LLM 生效：当前 loop 就地切 model/max_tokens/contextWindow ——
 		// 运行中的 Run 下一轮 LLM 立即读到新值（streamOnce/maybeCompact 按 current 取）。
 		// 窗口/输出上限按目标 Provider 显式解析（问题六：不依赖 active 漂移）

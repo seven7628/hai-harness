@@ -17,6 +17,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -500,6 +501,93 @@ func (m *manager) refreshHubLoops(agentID string) error {
 		m.applyHubSessionLoop(bs, p, ws)
 	}
 	return nil
+}
+
+// syncHubSessionProfile 把资料页新改的 provider/model/effort 落到已装配会话。
+//
+// 只同步**真的变了**的字段：改人格/记忆时不能动用户用 switch_model 临时选的模型
+// （那会把会话级选择静默改回 profile 默认，P1-05 复核的老问题）。
+//
+// 为什么必须有这一步：bs.provider/model/effort 在会话创建时固定，applyHubSessionLoop
+// 又优先用它们覆盖 profile —— 不同步的话资料页改模型会返回 effective=next_run，
+// 但下一个 Run 仍用旧值（P1-10 评审 B4）。
+func (m *manager) syncHubSessionProfile(agentID string, prev, next *agenthub.AgentProfile) bool {
+	if prev == nil || next == nil || prev.ID != next.ID {
+		return false
+	}
+	ws := m.hubRuntimeIfExists(agentID)
+	if ws == nil {
+		return false
+	}
+	ws.mu.Lock()
+	items := make([]*bridgeSession, 0, len(ws.sessions))
+	for _, bs := range ws.sessions {
+		items = append(items, bs)
+	}
+	ws.mu.Unlock()
+
+	changed := false
+	for _, bs := range items {
+		if bs == nil || bs.ctx.Err() != nil {
+			continue
+		}
+		if prev.Provider != next.Provider {
+			bs.provider = next.Provider
+			changed = true
+		}
+		if prev.Model != next.Model {
+			bs.model = next.Model
+			changed = true
+		}
+		if prev.Effort != next.Effort {
+			bs.effort = string(next.Effort)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// refreshHubEngines 把新的工具策略重新应用到已装配的 engine（P1-10 评审 B5）。
+//
+// 为什么不能只重建 loop：工具可见性是 engine 级的（HideTool + toolFilter），
+// 资料页关掉 bash 后如果只换 loop，当前 DM 的模型仍然调得到 bash，而响应还写着
+// effective=next_run —— 那是安全相关的假承诺。
+//
+// ShowTool 逐个恢复再按新策略撤下：旧策略的 hidden 是粘性的，不清掉的话
+// 「先禁 bash 再放开」会永远回不来。
+func (m *manager) refreshHubEngines(agentID string, p *agenthub.AgentProfile) error {
+	if p == nil {
+		return nil
+	}
+	ws := m.hubRuntimeIfExists(agentID)
+	if ws == nil {
+		return nil
+	}
+	ws.mu.Lock()
+	items := make([]*bridgeSession, 0, len(ws.sessions))
+	for _, bs := range ws.sessions {
+		items = append(items, bs)
+	}
+	ws.mu.Unlock()
+	for _, bs := range items {
+		if bs == nil || bs.ctx.Err() != nil || bs.hubEngine == nil {
+			continue
+		}
+		reapplyHubToolPolicy(bs.hubEngine, p.Tools)
+	}
+	return nil
+}
+
+// hubEngineNeedsRebuild 这些字段在装配期进了沙箱（只读根/工作区根），
+// 运行期无法安全地热改：改了就得重建会话，响应必须如实说 next_session。
+func hubEngineNeedsRebuild(prev, next *agenthub.AgentProfile) bool {
+	if prev == nil || next == nil {
+		return false
+	}
+	if strings.Join(prev.Tools.BashRoots, "\x00") != strings.Join(next.Tools.BashRoots, "\x00") {
+		return true
+	}
+	return !reflect.DeepEqual(prev.Policy, next.Policy)
 }
 
 // applyHubSessionLoop 按 Profile + **会话当前选择**重建一个 Hub 会话的 loop。
