@@ -119,10 +119,11 @@
       ],
       "files": [
         "agenthub/task.go",
-        "agenthub/ledger.go"
+        "agenthub/ledger.go",
+        "agenthub/ledger_test.go"
       ],
       "acceptance": "TaskStatus.Valid/Terminal；合法迁移表；终态不可回退；同 (task_id,run_id) 只回推一次；事件重放恢复快照。",
-      "tests": "go test ./agenthub/ -run Task",
+      "tests": "go test ./agenthub/ -run 'Task|Ledger'",
       "commit": "feat(hub-p0-05): 任务状态机与账本"
     },
     {

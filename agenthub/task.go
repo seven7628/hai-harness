@@ -1,6 +1,10 @@
 package agenthub
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // TaskID 是任务账本的稳定标识。重试会新建 Task，parent 指向旧任务。
 type TaskID string
@@ -126,3 +130,115 @@ const (
 	CallbackAgentEnd = "agent_end"
 	CallbackNone     = "none"
 )
+
+// P0-05：任务状态机。终态 = 不再进入工作态；completed/failed/interrupted
+// 仍允许一条特殊迁移到 delivered（结果已回推）。
+func (s TaskStatus) Valid() bool {
+	switch s {
+	case TaskQueued, TaskDispatched, TaskRunning, TaskCompleted, TaskFailed,
+		TaskInterrupted, TaskDelivered, TaskCanceled, TaskBlockedBudget, TaskDeclined:
+		return true
+	default:
+		return false
+	}
+}
+
+// Terminal 表示不会再进入工作态。completed/failed/interrupted 仍是结果终态，
+// 但允许 delivered 这一步；其余终态没有出边。
+func (s TaskStatus) Terminal() bool {
+	switch s {
+	case TaskCompleted, TaskFailed, TaskInterrupted, TaskDelivered,
+		TaskCanceled, TaskBlockedBudget, TaskDeclined:
+		return true
+	default:
+		return false
+	}
+}
+
+// CanTransition 是状态机的唯一迁移表；同状态视为幂等重放。
+func (s TaskStatus) CanTransition(to TaskStatus) bool {
+	if !s.Valid() || !to.Valid() {
+		return false
+	}
+	if s == to {
+		return true
+	}
+	switch s {
+	case TaskQueued:
+		return to == TaskDispatched || to == TaskCanceled || to == TaskBlockedBudget || to == TaskDeclined
+	case TaskDispatched:
+		// completed/failed 也允许：某些 AgentEnd 可能早于 AgentStart 观测。
+		return to == TaskRunning || to == TaskCompleted || to == TaskFailed ||
+			to == TaskInterrupted || to == TaskCanceled || to == TaskBlockedBudget
+	case TaskRunning:
+		return to == TaskCompleted || to == TaskFailed || to == TaskInterrupted
+	case TaskCompleted, TaskFailed, TaskInterrupted:
+		return to == TaskDelivered
+	default:
+		return false // delivered/canceled/blocked_budget/declined 无出边
+	}
+}
+
+// Transition 校验并应用状态迁移；非法迁移返回 ErrInvalid，终态不可回退。
+func (t *Task) Transition(to TaskStatus, at time.Time) error {
+	if t == nil {
+		return fmt.Errorf("%w: task is nil", ErrInvalid)
+	}
+	if !t.Status.CanTransition(to) {
+		return fmt.Errorf("%w: task %s cannot transition %q -> %q", ErrInvalid, t.ID, t.Status, to)
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	t.Status = to
+	t.UpdatedAt = at
+	return nil
+}
+
+// Validate 校验账本条目的一致性；ID 采用前缀校验，完整形状由创建路径保证。
+func (t *Task) Validate() error {
+	if t == nil {
+		return fmt.Errorf("%w: task is nil", ErrInvalid)
+	}
+	if t.ID == "" || !strings.HasPrefix(string(t.ID), PrefixTask+"_") {
+		return fmt.Errorf("%w: task.id must start with %q", ErrInvalid, PrefixTask+"_")
+	}
+	if t.RootTaskID == "" || !strings.HasPrefix(string(t.RootTaskID), PrefixTask+"_") {
+		return fmt.Errorf("%w: task.root_task_id must start with %q", ErrInvalid, PrefixTask+"_")
+	}
+	if t.ParentTaskID != "" && !strings.HasPrefix(string(t.ParentTaskID), PrefixTask+"_") {
+		return fmt.Errorf("%w: task.parent_task_id must start with %q", ErrInvalid, PrefixTask+"_")
+	}
+	if len(t.Chain) == 0 {
+		return fmt.Errorf("%w: task.chain is required", ErrInvalid)
+	}
+	hasID := false
+	hasRoot := false
+	for _, id := range t.Chain {
+		if id == t.ID {
+			hasID = true
+		}
+		if id == t.RootTaskID {
+			hasRoot = true
+		}
+	}
+	if !hasID || !hasRoot {
+		return fmt.Errorf("%w: task.chain must contain id and root_task_id", ErrInvalid)
+	}
+	if !t.Status.Valid() {
+		return fmt.Errorf("%w: task.status %q is invalid", ErrInvalid, t.Status)
+	}
+	if t.Origin.Kind != OriginDM && t.Origin.Kind != OriginGroup && t.Origin.Kind != OriginHuman {
+		return fmt.Errorf("%w: task.origin.kind %q is invalid", ErrInvalid, t.Origin.Kind)
+	}
+	if t.Target.Kind != TargetWorkspace && t.Target.Kind != TargetAgent {
+		return fmt.Errorf("%w: task.target.kind %q is invalid", ErrInvalid, t.Target.Kind)
+	}
+	if t.Title == "" {
+		return fmt.Errorf("%w: task.title is required", ErrInvalid)
+	}
+	if t.Attempt < 0 {
+		return fmt.Errorf("%w: task.attempt must be >= 0", ErrInvalid)
+	}
+	return nil
+}
