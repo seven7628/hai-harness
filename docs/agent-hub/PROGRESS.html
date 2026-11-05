@@ -1235,15 +1235,21 @@ const BASE = {
     },
     "P1-05": {
       "status": "done",
-      "commit": "ba07d34 fix(hub-p1-05): 复核修复 —— 会话级 model/effort 优先、按文案钉住路径检查、SetLoop 行为断言",
+      "commit": "70f1fa4 fix(hub-p1-05): 记忆开关接线（Profile.Memory 不再是死字段）+ update 后重建 loop",
       "review": "passed",
-      "reviewNote": "两轮评审收口（task-xz2ecw66，最终 passed）：首轮 3 条（B1 写记忆重建 loop 用 Profile 的 model/effort 并回写 bs.* → 用户 switch 的模型/档位被静默改回、面板 high 实际 low；B2 `..` 路径分支未被测试钉住，删掉后 evalWithin 用 (symlink) 文案兜住仍全绿；行为缺口：删 SetLoop 后自带测试仍绿）→ ba07d34 修复：重建前用会话当前 provider/model/effort 覆盖 Profile 副本且不回写 bs.*；坏路径按各自文案断言并 deny (symlink) 兜底；Session.Loop() 只读访问器 + 会话侧断言（loop 记忆分区 == 注入长度）；.backups 设为保留段；hubMemoryConfig 出错不再回落项目记忆根；AgentLoop 补 Model()/ReasoningEffort()。三条 mutation 复核全部被杀；干净副本 go build + agenthub/session/bridge 全绿（-race 亦绿）。遗留 non-blocking（已排后续）：①switch_model 作用在 Hub DM 会把 hub 装配换成项目 persona（rebuildLoop 不认 persona=hub，既有缺陷，父提交同样复现）；②备份 prune 按完整文件名排序，跨前缀时会删掉刚写的那份备份（数据丢失，单文件用例覆盖不到）；③.backups 保留段大小写敏感；④Profile.Memory.Enabled 仍是死字段（只读全局偏好）。"
+      "reviewNote": "两轮评审收口（task-xz2ecw66，最终 passed）：首轮 3 条（B1 写记忆重建 loop 用 Profile 的 model/effort 并回写 bs.* → 用户 switch 的模型/档位被静默改回、面板 high 实际 low；B2 `..` 路径分支未被测试钉住，删掉后 evalWithin 用 (symlink) 文案兜住仍全绿；行为缺口：删 SetLoop 后自带测试仍绿）→ ba07d34 修复：重建前用会话当前 provider/model/effort 覆盖 Profile 副本且不回写 bs.*；坏路径按各自文案断言并 deny (symlink) 兜底；Session.Loop() 只读访问器 + 会话侧断言（loop 记忆分区 == 注入长度）；.backups 设为保留段；hubMemoryConfig 出错不再回落项目记忆根；AgentLoop 补 Model()/ReasoningEffort()。三条 mutation 复核全部被杀；干净副本 go build + agenthub/session/bridge 全绿（-race 亦绿）。复审后收尾（已全部落地）：①switch_model 作用在 Hub DM 会把 hub 装配换成项目 persona（rebuildLoop 不认 persona=hub，既有缺陷，父提交同样复现）；②备份 prune 按完整文件名排序，跨前缀时会删掉刚写的那份备份（数据丢失，单文件用例覆盖不到）；③.backups 保留段大小写敏感；④Profile.Memory.Enabled 仍是死字段（只读全局偏好）。 收尾提交：e79ce9c（备份 prune 改「按被编辑文件分组 + 定长时间戳排序」，跨前缀不再删掉刚写的备份；.backups 保留段 EqualFold）、70f1fa4（MemoryPrefs.Enabled 改 *bool 三态并接线：显式关闭即不注入、预览无 L4，重新打开注入回来；hub_agent_update 保存后重建 loop，阈值/模型/记忆开关都走「下一个 Run 生效」）。仍留记录：硬链接残余风险、seatbelt 关闭时记忆目录不设防、bs.model/provider 无锁（手机端不可达）。"
     },
     "P1-06": {
       "status": "review",
       "commit": "3a04d6c feat(hub-p1-06): 人格版本 / 回滚 / 提示词分层预览",
       "review": "pending",
       "reviewNote": "agenthub.RenderLayers（L1/L2/L3，RenderSystem 改为拼接、逐字节不变）+ 三个命令：hub_agent_versions（摘要列表，新的在前，不回整份 profile）、hub_agent_rollback（旧版内容落成新版本：当前版先留档、version 递增、深拷贝归档、provider/名字唯一校验、refreshHubLoops 下一个 Run 生效）、hub_agent_prompt_preview（L1–L3 + L4 记忆走装配同一个 hubMemoryInjection，L5 由内核请求期装配并写明）。用例 3 条 + 分层同源断言；三条 mutation（版本不递增 / 不留档 / 不重建 loop）实测均失败。待评审。"
+    },
+    "P1-07": {
+      "status": "review",
+      "commit": "1364ddd feat(hub-p1-07): 每智能体压缩阈值 + loop 重建",
+      "review": "pending",
+      "reviewNote": "阈值是 Profile 字段、装配显式传（默认 0.8）；hub_agent_update{compress_threshold} 保存后重建该智能体 loop（SetLoop，下一个 Run 生效），越界钳 [0.5,0.95]；set_compress_threshold 仍只扫 m.workspaces，不做全局广播。用例 2 条（改阈值换 loop 且取值生效/钳位；全局广播不影响 hub 但确实改工作区会话）；两条 mutation（update 不重建 loop / 全局广播顺手改 hub）均失败。待评审。"
     }
   }
 };
