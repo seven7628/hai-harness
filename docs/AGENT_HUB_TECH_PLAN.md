@@ -3862,7 +3862,7 @@ type Store interface {
 
 - 每个实体的 JSON 原子写（tmp+rename+fsync 可选）；
 - 日志追加带 `O_APPEND`，写前分配 seq（per-group mutex）；短写/fsync 失败截回写入前偏移；
-- 启动时只容忍日志尾部“最后一行不完整”并截断到最后完整行；中间坏行仍返回 `ErrCorrupt`；
+- 启动时只容忍日志尾部最后一条未完整落盘的记录（半行，或完整 JSON 但缺结尾换行）并截断到最后一个完整行；中间坏行仍返回 `ErrCorrupt`；
 - 单行 JSONL 超过 `maxJSONLLineBytes`（8 MiB）在写入前拒绝，避免“写得进、读不出”；
 - 启动时 `RebuildIndex()`：扫 `log.jsonl` 尾部、`tasks/events.jsonl`，修正内存索引；
 - 所有路径用 `filepath.Join(root, safePath)`，拒绝 `..`；目录 0700，文件 0600；

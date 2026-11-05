@@ -888,20 +888,23 @@ func readJSONLTolerantTail[T any](path string) ([]T, error) {
 		chunk, readErr := reader.ReadBytes('\n')
 		if len(chunk) > 0 {
 			line++
+			// 正常写入一定以换行结尾；EOF 处缺换行的末行说明那次追加没有完整落盘
+			// （哪怕 JSON 恰好能解析），保留它会让下一次 O_APPEND 直接粘在它后面。
+			// 这条记录未被 ack，丢弃是安全的；截断到本行起点。
+			missingNewline := readErr == io.EOF && !bytes.HasSuffix(chunk, []byte{'\n'})
 			raw := bytes.TrimSpace(chunk)
-			if len(raw) > 0 {
+			if len(raw) > 0 && !missingNewline {
 				var v T
 				if err := json.Unmarshal(raw, &v); err != nil {
-					partialTail := readErr == io.EOF && !bytes.HasSuffix(chunk, []byte{'\n'})
-					if !partialTail {
-						return nil, fmt.Errorf("%w: %s:%d: %v", ErrCorrupt, path, line, err)
-					}
-					if err := truncateFile(path, offset); err != nil {
-						return nil, err
-					}
-					return out, nil
+					return nil, fmt.Errorf("%w: %s:%d: %v", ErrCorrupt, path, line, err)
 				}
 				out = append(out, v)
+			}
+			if missingNewline {
+				if err := truncateFile(path, offset); err != nil {
+					return nil, err
+				}
+				return out, nil
 			}
 			offset += int64(len(chunk))
 		}

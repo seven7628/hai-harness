@@ -785,3 +785,42 @@ func TestStoreConcurrentAllocateID(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+func TestFileStoreDropsTrailingLineWithoutNewline(t *testing.T) {
+	root := t.TempDir()
+	fs, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if _, err := fs.AppendMessage(ctx, testStoreMessage("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(root, "groups", "grp_test", "log.jsonl")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟单次 write 只丢了最后一个换行：末行本身是完整 JSON，但未能作为完整记录 ack。
+	if err := os.WriteFile(logPath, []byte(strings.TrimSuffix(string(data), "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fs2, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatalf("OpenFileStore after lost newline: %v", err)
+	}
+	msgs, err := fs2.ReadMessages(ctx, "grp_test", 0, 10)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("ReadMessages after lost newline = %v, %v; want 1 (drop unacked tail)", msgs, err)
+	}
+	seq, err := fs2.AppendMessage(ctx, testStoreMessage("after lost newline"))
+	if err != nil || seq != 2 {
+		t.Fatalf("append after lost newline = %d, %v; want 2", seq, err)
+	}
+	all, err := fs2.ReadMessages(ctx, "grp_test", 0, 10)
+	if err != nil || len(all) != 2 || all[1].Text != "after lost newline" {
+		t.Fatalf("messages after lost newline append = %v, %v", all, err)
+	}
+}
