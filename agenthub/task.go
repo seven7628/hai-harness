@@ -51,12 +51,14 @@ const (
 )
 
 // Dispatch 记录一次派发的时间线，用于恢复与成本归因。
+// 时间戳用指针：零值 time.Time 不会被 omitempty 省略，会序列化成 0001-01-01。
+// nil = 还没发生/未知。
 type Dispatch struct {
-	DispatchedAt time.Time `json:"dispatched_at"`
-	AcceptedAt   time.Time `json:"accepted_at"`
-	RunID        string    `json:"run_id,omitempty"`
-	AgentStartAt time.Time `json:"agent_start_at,omitempty"`
-	AgentEndAt   time.Time `json:"agent_end_at,omitempty"`
+	DispatchedAt *time.Time `json:"dispatched_at,omitempty"`
+	AcceptedAt   *time.Time `json:"accepted_at,omitempty"`
+	RunID        string     `json:"run_id,omitempty"`
+	AgentStartAt *time.Time `json:"agent_start_at,omitempty"`
+	AgentEndAt   *time.Time `json:"agent_end_at,omitempty"`
 }
 
 // Usage 是任务卡展示用的用量快照。
@@ -64,32 +66,38 @@ type Dispatch struct {
 // 刻意不复用 core.Usage：core 的字段没有 JSON 小写标签，直接放进账本会污染协议。
 // bridge 在结算时把 core.Usage 映射成这个 DTO。
 type Usage struct {
-	Input        int64   `json:"input"`
-	Output       int64   `json:"output"`
-	CacheRead    int64   `json:"cache_read"`
-	CacheWrite   int64   `json:"cache_write"`
-	CacheWrite1h int64   `json:"cache_write_1h"`
-	Reasoning    int64   `json:"reasoning"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
+	Input        int64 `json:"input"`
+	Output       int64 `json:"output"`
+	CacheRead    int64 `json:"cache_read"`
+	CacheWrite   int64 `json:"cache_write"`
+	CacheWrite1h int64 `json:"cache_write_1h"`
+	Reasoning    int64 `json:"reasoning"`
+	// CostPriced=false 表示“不知道花了多少”，不是免费（core.Cost.Priced 的语义）。
+	// 预算逻辑只能累加 CostPriced=true 的 CostUSD，否则会把无价模型当成 0 成本。
+	CostPriced bool    `json:"cost_priced"`
+	CostUSD    float64 `json:"cost_usd,omitempty"`
 }
 
-// Artifact 是任务产物清单项。全文按 artifact id/路径读取，账本只存摘要。
-type Artifact struct {
+// TaskArtifact 是任务产物清单项。全文按 artifact id/路径读取，账本只存摘要。
+// 它与 Store 里的 Artifact 记录（带 id/版本/可见性）是两回事：这里是任务结果快照。
+type TaskArtifact struct {
 	Name    string `json:"name"`
 	Path    string `json:"path"`
 	Kind    string `json:"kind"` // created | modified
 	Added   int    `json:"added,omitempty"`
 	Removed int    `json:"removed,omitempty"`
 	Size    int64  `json:"size,omitempty"`
+	Lines   int64  `json:"lines,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
 }
 
 // TaskResult 是任务终态的权威结果。
 type TaskResult struct {
-	FinishReason string     `json:"finish_reason,omitempty"`
-	Summary      string     `json:"summary,omitempty"`
-	Artifacts    []Artifact `json:"artifacts,omitempty"`
-	Usage        Usage      `json:"usage"`
-	Error        string     `json:"error,omitempty"`
+	FinishReason string         `json:"finish_reason,omitempty"`
+	Summary      string         `json:"summary,omitempty"`
+	Artifacts    []TaskArtifact `json:"artifacts,omitempty"`
+	Usage        Usage          `json:"usage"`
+	Error        string         `json:"error,omitempty"`
 }
 
 // Task 是 Hub 的任务账本条目。一条链的根是 RootTaskID，护栏按链聚合。

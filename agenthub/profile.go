@@ -7,10 +7,10 @@ type AgentID string
 
 // Avatar 是智能体头像。图片头像存 agents/<id>/avatar.png，不把二进制塞进 profile.json。
 type Avatar struct {
-	Kind  string `json:"kind"`            // emoji | image
-	Value string `json:"value,omitempty"` // emoji
-	BG    string `json:"bg,omitempty"`    // emoji 背景色（#rrggbb）
-	Path  string `json:"path,omitempty"`  // image: agents/<id>/avatar.png
+	Kind  string `json:"kind"`           // emoji | image
+	Value string `json:"value"`          // emoji
+	BG    string `json:"bg,omitempty"`   // emoji 背景色（#rrggbb）
+	Path  string `json:"path,omitempty"` // image: agents/<id>/avatar.png
 }
 
 // MemoryPrefs 是智能体自己的记忆偏好。记忆正文在 agents/<id>/memory，不进 profile。

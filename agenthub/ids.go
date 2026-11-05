@@ -5,17 +5,24 @@ import (
 	"encoding/base32"
 	"encoding/binary"
 	"io"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
+// NeedID / ArtifactID 是账本与产物记录的稳定标识。
+// 它们不参与随机生成（Need/Artifact 的创建由 Store 分配），但类型化能避免跨实体串用。
+type NeedID string
+type ArtifactID string
+
 // ID 前缀。日志、事件、mesh 寻址都靠前缀判断实体类型。
+// Message 不在此列：消息 ID 是确定性的 msg_<seq>，见 MessageID。
 const (
 	PrefixAgent    = "ag"
 	PrefixGroup    = "grp"
 	PrefixTask     = "task"
-	PrefixMessage  = "msg"
 	PrefixRound    = "rnd"
 	PrefixNeed     = "need"
 	PrefixArtifact = "art"
@@ -23,12 +30,22 @@ const (
 
 var idEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
+// MessageID 返回 msg_<seq>。
+//
+// 消息 ID 刻意不是随机串：seq 是群内单调游标，msg_<seq> 让日志/事件/前端 key 天然一致；
+// 跨群不唯一是已知且可接受的（Message 总带 group_id/DM 归属）。
+func MessageID(seq int64) string {
+	return "msg_" + strconv.FormatInt(seq, 10)
+}
+
 // IDGenerator 生成“前缀_随机串”的 ID。
 //
 // Rand 可注入，测试用 bytes.Reader 得到稳定结果；零值使用 crypto/rand。
-// 随机失败时退回时间+计数器，保证 New 不返回空串（调用方不需要处理 error）。
+// 注入的 Reader 必须并发安全（New 内部有 mutex，但 Reader 自身也会被复用）；
+// 默认 crypto/rand.Reader 是并发安全的。随机失败时退回时间+计数器，保证 New 不返回空串。
 type IDGenerator struct {
 	Rand io.Reader
+	mu   sync.Mutex
 	seq  atomic.Uint64
 }
 
@@ -46,20 +63,50 @@ func NewID(prefix string) string {
 
 // New 生成一个 ID。prefix 会转小写并去掉首尾下划线；空 prefix 用 "id"。
 func (g *IDGenerator) New(prefix string) string {
-	prefix = strings.Trim(strings.ToLower(prefix), "_")
-	if prefix == "" {
-		prefix = "id"
+	if g == nil {
+		g = defaultGenerator
 	}
+	prefix = normalizePrefix(prefix)
+	n := idBytes(prefix)
 
 	var buf [8]byte
+	g.mu.Lock()
 	r := g.Rand
 	if r == nil {
 		r = rand.Reader
 	}
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
-		// 只影响 ID 的不可预测性，不影响唯一性：时间 + 进程内计数器。
-		binary.BigEndian.PutUint64(buf[:], uint64(time.Now().UnixNano())+g.seq.Add(1))
+	_, err := io.ReadFull(r, buf[:n])
+	g.mu.Unlock()
+	if err != nil {
+		// 只影响 ID 的不可预测性，不影响唯一性：时间 + 进程内计数器混合。
+		v := uint64(time.Now().UnixNano()) + g.seq.Add(1)*0x9E3779B97F4A7C15
+		binary.BigEndian.PutUint64(buf[:], v)
 	}
 
-	return prefix + "_" + strings.ToLower(idEncoding.EncodeToString(buf[:]))
+	suffix := strings.ToLower(idEncoding.EncodeToString(buf[:n]))
+	return prefix + "_" + suffix[:idChars(prefix)]
+}
+
+// idBytes 是随机源读取字节数：agent 5 字节（8 位 base32），其余 4 字节（截到 6 位）。
+func idBytes(prefix string) int {
+	if prefix == PrefixAgent {
+		return 5
+	}
+	return 4
+}
+
+// idChars 是 §5.8 的展示长度：agent 8 位，其余 6 位。
+func idChars(prefix string) int {
+	if prefix == PrefixAgent {
+		return 8
+	}
+	return 6
+}
+
+func normalizePrefix(prefix string) string {
+	prefix = strings.Trim(strings.ToLower(prefix), "_")
+	if prefix == "" {
+		return "id"
+	}
+	return prefix
 }

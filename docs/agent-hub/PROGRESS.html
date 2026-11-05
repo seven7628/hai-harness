@@ -359,7 +359,7 @@ const BASE = {
         "agenthub/types_test.go",
         "agenthub/ids_test.go"
       ],
-      "acceptance": "Profile/Group/Message/Task 类型可编译；JSON 往返稳定；ID 可注入随机源；包不 import desktop。",
+      "acceptance": "Profile/Group/Message/Task 类型可编译（含 NeedID/ArtifactID/TaskArtifact）；JSON 往返稳定且零值/缺省字段形状正确；ID 格式符合 §5.8（agent 8 位、其余 6 位、msg_<seq>）；ID 生成可注入且并发安全；包不 import desktop/bridge/agents/session。",
       "tests": "go test ./agenthub/...",
       "commit": "feat(hub-p0-01): agenthub 包骨架与领域类型"
     },
@@ -372,9 +372,10 @@ const BASE = {
       ],
       "files": [
         "agenthub/store.go",
+        "agenthub/store_types.go",
         "agenthub/store_test.go"
       ],
-      "acceptance": "JSON 原子写；日志 seq 单调；启动可从 log/events 重建索引；schema_version 迁移；MemoryStore 可测。",
+      "acceptance": "Store DTO（Activity/TaskEvent/TaskFilter/Need/NeedFilter/Cursor/Artifact 记录）；JSON 原子写；日志 seq 单调；启动可从 log/events 重建索引；schema_version 迁移；MemoryStore 可测。",
       "tests": "go test ./agenthub/ -run Store",
       "commit": "feat(hub-p0-02): FileStore 与恢复/迁移"
     },
@@ -419,7 +420,7 @@ const BASE = {
         "agenthub/task.go",
         "agenthub/ledger.go"
       ],
-      "acceptance": "合法迁移表；终态不可回退；同 (task_id,run_id) 只回推一次；事件重放恢复快照。",
+      "acceptance": "TaskStatus.Valid/Terminal；合法迁移表；终态不可回退；同 (task_id,run_id) 只回推一次；事件重放恢复快照。",
       "tests": "go test ./agenthub/ -run Task",
       "commit": "feat(hub-p0-05): 任务状态机与账本"
     },
@@ -1148,7 +1149,15 @@ const BASE = {
       "tests": "npm test && go test ./...",
       "commit": "chore(hub-p4-05): final review + retro"
     }
-  ]
+  ],
+  "progress": {
+    "P0-01": {
+      "status": "in_progress",
+      "commit": "ef55773 feat(hub-p0-01): agenthub 包骨架与领域类型",
+      "review": "pending",
+      "reviewNote": ""
+    }
+  }
 };
 const STORE_KEY = 'hai-agent-hub-progress-v1';
 const $ = (s, r=document) => r.querySelector(s);
@@ -1169,7 +1178,8 @@ const REVIEW_PENDING = 'pending';
 
 function stateDefault(){
   const s = {version:1, tasks:{}, filter:{phase:'all', status:'all', q:''}};
-  for(const t of TASKS) s.tasks[t.id] = {status:'todo', commit:'', review:'pending', reviewNote:'', notes:''};
+  const seed = BASE.progress || {};
+  for(const t of TASKS) s.tasks[t.id] = {status:'todo', commit:'', review:'pending', reviewNote:'', notes:'', ...(seed[t.id]||{})};
   return s;
 }
 function load(){
@@ -1182,6 +1192,12 @@ function load(){
       if(s.tasks[id]) s.tasks[id] = {...s.tasks[id], ...v};
     }
     if(saved && saved.filter) s.filter = {...s.filter, ...saved.filter};
+    // 仓库里的 progress 只填充“用户还没动过”的任务；已改过的状态优先，避免覆盖手工记录。
+    const seed = BASE.progress || {};
+    for(const [id, v] of Object.entries(seed)){
+      const cur = s.tasks[id];
+      if(cur && cur.status === 'todo' && !cur.commit) s.tasks[id] = {...cur, ...v};
+    }
     return s;
   }catch(e){ console.warn(e); return stateDefault(); }
 }

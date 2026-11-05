@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 )
 
 func TestIDGeneratorDeterministic(t *testing.T) {
-	// 16 字节 = 两个 8 字节 ID，保证两次 New 都能读到数据。
+	// 16 字节足够两次 New：agent 读 5 字节，group 读 4 字节。
 	g := NewIDGenerator(bytes.NewReader([]byte{
 		0, 1, 2, 3, 4, 5, 6, 7,
 		8, 9, 10, 11, 12, 13, 14, 15,
@@ -17,20 +18,23 @@ func TestIDGeneratorDeterministic(t *testing.T) {
 	first := g.New("AG")
 	second := g.New("grp")
 
-	if !strings.HasPrefix(first, "ag_") {
-		t.Fatalf("first = %q, want ag_ prefix", first)
+	if first != "ag_aaaqeaye" {
+		t.Fatalf("agent ID = %q, want ag_aaaqeaye (8 chars, bytes 0..4)", first)
 	}
-	if !strings.HasPrefix(second, "grp_") {
-		t.Fatalf("second = %q, want grp_ prefix", second)
+	if second != "grp_audaoc" {
+		t.Fatalf("group ID = %q, want grp_audaoc (6 chars, bytes 5..8)", second)
 	}
-	if suffix := strings.TrimPrefix(first, "ag_"); len(suffix) != 13 {
-		t.Fatalf("suffix %q length = %d, want 13 (8 bytes base32)", suffix, len(suffix))
+	if strings.Contains(first, "=") || strings.Contains(strings.TrimPrefix(first, "ag_"), "_") {
+		t.Fatalf("ID %q must not contain padding or extra underscore", first)
 	}
-	if suffix := strings.TrimPrefix(first, "ag_"); strings.Contains(suffix, "=") || strings.Contains(suffix, "_") {
-		t.Fatalf("ID suffix %q must not contain padding or underscore", suffix)
+}
+
+func TestMessageIDIsDeterministic(t *testing.T) {
+	if got, want := MessageID(42), "msg_42"; got != want {
+		t.Fatalf("MessageID(42) = %q, want %q", got, want)
 	}
-	if first == second {
-		t.Fatalf("two different random inputs produced the same ID %q", first)
+	if got, want := MessageID(0), "msg_0"; got != want {
+		t.Fatalf("MessageID(0) = %q, want %q", got, want)
 	}
 }
 
@@ -46,9 +50,31 @@ func TestIDGeneratorFallsBackOnRandError(t *testing.T) {
 	if !strings.HasPrefix(a, "task_") || !strings.HasPrefix(b, "task_") {
 		t.Fatalf("fallback IDs lost prefix: %q, %q", a, b)
 	}
+	if len(strings.TrimPrefix(a, "task_")) != 6 {
+		t.Fatalf("fallback task ID %q has wrong suffix length", a)
+	}
 	if a == b {
 		t.Fatalf("fallback IDs must still differ: %q", a)
 	}
+}
+
+func TestIDGeneratorConcurrentInjectedReader(t *testing.T) {
+	// 共享的 bytes.Reader 不是并发安全的；IDGenerator 的 mutex 必须把它串行化。
+	g := NewIDGenerator(bytes.NewReader(make([]byte, 5*8*200)))
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if id := g.New(PrefixAgent); !strings.HasPrefix(id, "ag_") {
+					t.Errorf("bad ID %q", id)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestNewIDDefaults(t *testing.T) {
@@ -57,6 +83,9 @@ func TestNewIDDefaults(t *testing.T) {
 		id := NewID(PrefixAgent)
 		if !strings.HasPrefix(id, PrefixAgent+"_") {
 			t.Fatalf("NewID = %q, want %s_ prefix", id, PrefixAgent)
+		}
+		if len(strings.TrimPrefix(id, PrefixAgent+"_")) != 8 {
+			t.Fatalf("NewID = %q, want 8-char suffix", id)
 		}
 		if seen[id] {
 			t.Fatalf("duplicate ID %q", id)

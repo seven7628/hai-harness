@@ -397,7 +397,8 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
   },
   "created_at": "2026-11-04T10:00:00Z",
   "updated_at": "2026-11-04T10:00:00Z",
-  "version": 3
+  "version": 3,
+  "deleted": false
 }
 ```
 
@@ -428,6 +429,7 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
   ],
   "policy": { "mode": "ask", "max_parallel_runs": 3, "max_handoff_depth": 3 },
   "pinned": true,
+  "deleted": false,
   "created_at": "...",
   "updated_at": "..."
 }
@@ -529,7 +531,7 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
     "finish_reason": "stop",
     "summary": "……",                 // AgentEnd.Content 截断到 4k（全文在 session transcript）
     "artifacts": [{ "name": "pricing-v3.md", "path": "out/pricing-v3.md", "kind": "created", "size": 2140 }],
-    "usage": { "input": 12000, "output": 3000, "cost_usd": 0.03 }
+    "usage": { "input": 12000, "output": 3000, "cost_priced": true, "cost_usd": 0.03 }
   },
   "error": null,
   "notified_run_ids": ["run_abc"],    // 幂等：同一次 run 不重复回推
@@ -699,7 +701,19 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
 
 - 读到时版本 > 当前 → 拒绝启动 Hub（提示升级），避免半懂写入。
 - 版本 < 当前 → 按迁移函数逐级升级（v1→v2…），迁移前整目录快照到 `hub.backup.<ts>/`。
-- 所有新字段必须有零值语义（缺失 = 默认），不做「必须迁移才能读」。
+- 所有新字段必须有零值语义（缺失 = 默认），不做「必须迁移才能读」。零值约定：
+
+| 字段 | 零值含义 |
+|---|---|
+| `ToolPolicy{}` | 全开（D18） |
+| `GroupPolicy.Mode == ""` | `ask`（`EffectiveMode()`） |
+| `RunPolicy.MaxAutoTurns == 0` | 6 |
+| `GroupPolicy.MaxParallelRuns/MaxHandoffDepth == 0` | 3 / 3 |
+| `GroupPolicy.MaxTurnsPerHuman/MaxMentions == 0` | 8 / 3 |
+| `MaxTaskCostUSD/DailyBudgetUSD == 0` | 不限额（仍受全局预算护栏） |
+| `Task.Callback == ""` | 无回调（等同 `none`） |
+| `Task.Attempt == 0` | 尚未派发；首次派发写 1 |
+| `Message.Visibility == ""` | 非法；构造器必须显式填 `group`/`owner` |
 
 ---
 
@@ -3588,6 +3602,7 @@ type AgentProfile struct {
     Tools             ToolPolicy  `json:"tools"`
     Policy            RunPolicy   `json:"policy"`
     Version           int         `json:"version"`
+    Deleted           bool        `json:"deleted,omitempty"` // 软删：记录/记忆保留
     CreatedAt         time.Time   `json:"created_at"`
     UpdatedAt         time.Time   `json:"updated_at"`
 }
@@ -3621,6 +3636,7 @@ type Group struct {
     Members      []Member    `json:"members"`
     Policy       GroupPolicy `json:"policy"`
     Pinned       bool        `json:"pinned"`
+    Deleted      bool        `json:"deleted,omitempty"`
     CreatedAt    time.Time   `json:"created_at"`
     UpdatedAt    time.Time   `json:"updated_at"`
 }
@@ -3660,6 +3676,13 @@ const (
     KindSystem        MessageKind = "system"
 )
 
+type Visibility string
+
+const (
+    VisibilityGroup Visibility = "group"
+    VisibilityOwner Visibility = "owner"
+)
+
 type AgentRef struct {
     AgentID AgentID `json:"agent_id"`
     Name    string  `json:"name"`
@@ -3688,7 +3711,7 @@ type Message struct {
     Intent     Intent      `json:"intent,omitempty"`
     TaskID     TaskID      `json:"task_id,omitempty"`
     Turn       int         `json:"turn,omitempty"`
-    Visibility string      `json:"visibility"` // group | owner
+    Visibility Visibility  `json:"visibility"` // group | owner
     Refs       map[string]any `json:"refs,omitempty"`
     CreatedAt  time.Time   `json:"created_at"`
 }
@@ -3724,12 +3747,14 @@ type TaskOrigin struct {
 }
 
 type Dispatch struct {
-    DispatchedAt time.Time `json:"dispatched_at"`
-    AcceptedAt   time.Time `json:"accepted_at"`
-    RunID        string    `json:"run_id,omitempty"`
-    AgentStartAt time.Time `json:"agent_start_at,omitempty"`
-    AgentEndAt   time.Time `json:"agent_end_at,omitempty"`
+    DispatchedAt *time.Time `json:"dispatched_at,omitempty"`
+    AcceptedAt   *time.Time `json:"accepted_at,omitempty"`
+    RunID        string     `json:"run_id,omitempty"`
+    AgentStartAt *time.Time `json:"agent_start_at,omitempty"`
+    AgentEndAt   *time.Time `json:"agent_end_at,omitempty"`
 }
+
+> `Dispatch` 的时间戳是 `*time.Time`；前端镜像为 `string | null`，不要把 `0001-01-01` 当业务时间。
 
 type Usage struct {
     Input        int64   `json:"input"`
@@ -3738,22 +3763,25 @@ type Usage struct {
     CacheWrite   int64   `json:"cache_write"`
     CacheWrite1h int64   `json:"cache_write_1h"`
     Reasoning    int64   `json:"reasoning"`
+    CostPriced   bool    `json:"cost_priced"` // false = 不知道花了多少，不是免费
     CostUSD      float64 `json:"cost_usd,omitempty"`
 }
 
-type Artifact struct {
+type TaskArtifact struct {
     Name    string `json:"name"`
     Path    string `json:"path"`
     Kind    string `json:"kind"`
     Added   int    `json:"added,omitempty"`
     Removed int    `json:"removed,omitempty"`
     Size    int64  `json:"size,omitempty"`
+    Lines   int64  `json:"lines,omitempty"`
+    SHA256  string `json:"sha256,omitempty"`
 }
 
 type TaskResult struct {
     FinishReason string     `json:"finish_reason,omitempty"`
     Summary      string     `json:"summary,omitempty"`
-    Artifacts    []Artifact `json:"artifacts,omitempty"`
+    Artifacts    []TaskArtifact `json:"artifacts,omitempty"`
     Usage        Usage      `json:"usage"`
     Error        string     `json:"error,omitempty"`
 }
@@ -3818,6 +3846,10 @@ type Store interface {
     LoadCursor(ctx context.Context, groupID GroupID, agentID AgentID) (int64, error)
 }
 ```
+
+> Store 的配套 DTO（`Activity` / `TaskEvent` / `TaskFilter` / `Need` / `NeedFilter` /
+> `Cursor` / `Artifact` 产物记录）由 **P0-02** 在 `agenthub/store_types.go` 定义。
+> `TaskArtifact` 只是任务结果摘要，不是可版本化的产物记录；两者不要混用。
 
 **FileStore 实现要点**：
 

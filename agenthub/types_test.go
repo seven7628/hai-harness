@@ -17,6 +17,8 @@ func testTime() time.Time {
 	return time.Date(2026, 11, 4, 10, 6, 0, 0, time.UTC)
 }
 
+func testTimePtr(t time.Time) *time.Time { return &t }
+
 // assertJSONStable 序列化 → 反序列化回同一类型 → 再序列化，逐字节比较。
 // 这样既验证字段可往返，也验证 JSON tag/omitempty 不漂移。
 func assertJSONStable(t *testing.T, v any) {
@@ -167,17 +169,17 @@ func TestTaskJSONStable(t *testing.T) {
 		Status:       TaskDelivered,
 		Attempt:      1,
 		Dispatch: Dispatch{
-			DispatchedAt: testTime(),
-			AcceptedAt:   testTime().Add(time.Second),
+			DispatchedAt: testTimePtr(testTime()),
+			AcceptedAt:   testTimePtr(testTime().Add(time.Second)),
 			RunID:        "run_abc",
-			AgentStartAt: testTime().Add(2 * time.Second),
-			AgentEndAt:   testTime().Add(2 * time.Minute),
+			AgentStartAt: testTimePtr(testTime().Add(2 * time.Second)),
+			AgentEndAt:   testTimePtr(testTime().Add(2 * time.Minute)),
 		},
 		Result: &TaskResult{
 			FinishReason: "stop",
 			Summary:      "2 页简报已产出",
-			Artifacts:    []Artifact{{Name: "pricing-v3.md", Path: "out/pricing-v3.md", Kind: "created", Size: 2140}},
-			Usage:        Usage{Input: 12000, Output: 3000, CacheRead: 8000, CostUSD: 0.03},
+			Artifacts:    []TaskArtifact{{Name: "pricing-v3.md", Path: "out/pricing-v3.md", Kind: "created", Size: 2140, Lines: 88, SHA256: "abc123"}},
+			Usage:        Usage{Input: 12000, Output: 3000, CacheRead: 8000, CostPriced: true, CostUSD: 0.03},
 		},
 		NotifiedRuns:    []string{"run_abc"},
 		HumanIntervened: false,
@@ -187,14 +189,15 @@ func TestTaskJSONStable(t *testing.T) {
 	assertJSONStable(t, task)
 
 	raw, _ := json.Marshal(task)
-	for _, key := range []string{`"root_task_id"`, `"parent_task_id"`, `"notified_run_ids"`, `"human_intervened"`, `"cost_usd"`, `"finish_reason"`} {
+	for _, key := range []string{`"root_task_id"`, `"parent_task_id"`, `"notified_run_ids"`, `"human_intervened"`, `"cost_priced"`, `"cost_usd"`, `"sha256"`, `"finish_reason"`} {
 		if !bytes.Contains(raw, []byte(key)) {
 			t.Fatalf("task JSON missing %s: %s", key, raw)
 		}
 	}
 }
 
-// TestNoDesktopImports 锁住领域层边界：agenthub 不能被 bridge/desktop 反向依赖。
+// TestNoDesktopImports 锁住领域层边界：agenthub 不能被 bridge/desktop/agents/session 反向依赖。
+// core 是允许的（P0-08 会用到 core.Message），所以不做“仅 stdlib”的过强断言。
 func TestNoDesktopImports(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
@@ -203,17 +206,46 @@ func TestNoDesktopImports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse package: %v", err)
 	}
+	files := 0
 	for _, pkg := range pkgs {
+		files += len(pkg.Files)
 		for name, file := range pkg.Files {
 			for _, imp := range file.Imports {
 				path, err := strconv.Unquote(imp.Path.Value)
 				if err != nil {
 					t.Fatalf("%s: bad import %q: %v", name, imp.Path.Value, err)
 				}
-				if strings.Contains(path, "/desktop") {
-					t.Errorf("%s imports %q; agenthub must stay independent of desktop", name, path)
+				if forbiddenImport(path) {
+					t.Errorf("%s imports %q; agenthub must stay independent of desktop/bridge/agents/session", name, path)
 				}
 			}
 		}
+	}
+	if files == 0 {
+		t.Fatal("parsed no Go files; boundary check would pass vacuously")
+	}
+}
+
+func forbiddenImport(path string) bool {
+	for _, seg := range []string{"desktop", "bridge", "agents", "session"} {
+		if path == seg || strings.HasSuffix(path, "/"+seg) || strings.Contains(path, "/"+seg+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDispatchOmitsUnsetTimes(t *testing.T) {
+	raw, err := json.Marshal(Dispatch{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"dispatched_at"`, `"accepted_at"`, `"agent_start_at"`, `"agent_end_at"`} {
+		if bytes.Contains(raw, []byte(key)) {
+			t.Fatalf("empty Dispatch leaked %s: %s", key, raw)
+		}
+	}
+	if string(raw) != `{}` {
+		t.Fatalf("empty Dispatch = %s, want {}", raw)
 	}
 }

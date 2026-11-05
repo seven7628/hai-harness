@@ -39,6 +39,17 @@ const (
 	GroupModeReadonly = "readonly"
 )
 
+// EffectiveMode 把零值（""）归一到默认 ask，避免未初始化的 Group 落盘成非法模式。
+// 其他数值默认（并发 3、轮次 8、mention 3）由 P0-03 的默认值/校验统一处理。
+func (p GroupPolicy) EffectiveMode() string {
+	switch p.Mode {
+	case GroupModeAuto, GroupModeAsk, GroupModeReadonly:
+		return p.Mode
+	default:
+		return GroupModeAsk
+	}
+}
+
 // Group 是群组元数据。群头像不落盘：由成员 accent/avatar 派生。
 type Group struct {
 	ID           GroupID     `json:"id"`
@@ -63,3 +74,19 @@ const (
 	ScopeDM    = "dm"
 	ScopeGroup = "group"
 )
+
+// SessionID 返回该作用域下的稳定 session_id（§6.1.4）。
+// 非法/空 group 作用域返回空串，由调用方拒绝，而不是拼出一个看似合法的 id。
+func (s Scope) SessionID(agentID AgentID) string {
+	switch s.Kind {
+	case ScopeDM:
+		return "hub." + string(agentID) + ".dm"
+	case ScopeGroup:
+		if s.GroupID == "" {
+			return ""
+		}
+		return "hub." + string(agentID) + ".g." + string(s.GroupID)
+	default:
+		return ""
+	}
+}
