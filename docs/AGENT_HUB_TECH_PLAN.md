@@ -4243,6 +4243,15 @@ feat(hub-p0-01): agenthub 包骨架与领域类型
 
 规则：`done` 之前必须经过 `review`；不允许 `todo → done` 跳步。
 
+**门禁命令必须能命中**（P0-09 评审踩到过）：`tasks[].tests` 里的 `-run` 正则必须真的选中
+用例，否则输出 `no tests to run` 也是 PASS —— 等于没跑。收尾每个任务时先确认：
+
+```bash
+go test <pkg> -list '<tasks[].tests 里的 -run 正则>'   # 必须至少列出一个 Test*
+```
+
+测试函数名要包含该任务在 `tasks.json` 里约定的 token（如 P1-01 的 `HubEngine`）。
+
 ### 19.3 任务拆分总表
 
 > 详细字段（文件、验收、测试、commit、review）以 `docs/agent-hub/tasks.json` 为准，
