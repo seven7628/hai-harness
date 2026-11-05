@@ -771,9 +771,17 @@ const (
 	deepseekDefaultTopP        = 0.95
 )
 
-// samplingDefaults 当前活跃 provider 的采样默认（temperature/topP；nil = 厂商默认）。
+// samplingDefaults 当前活跃 provider 的采样默认（历史入口，等价 samplingDefaultsFor(providerName())）。
 func (pc *providerConfig) samplingDefaults() (temperature, topP *float64) {
-	if pc.providerName() != "deepseek" {
+	return pc.samplingDefaultsFor(pc.providerName())
+}
+
+// samplingDefaultsFor 指定 provider 的采样默认（temperature/topP；nil = 厂商默认）。
+//
+// Hub 必须用这个而不是 samplingDefaults()：后者读全局 active，A=DeepSeek、B=Anthropic
+// 同时跑时会把 A 的采样参数发给 B（方案 §6.2.1 的采样默认必须按**显式 provider**取）。
+func (pc *providerConfig) samplingDefaultsFor(provider string) (temperature, topP *float64) {
+	if provider != "deepseek" {
 		return nil, nil
 	}
 	t, p := deepseekDefaultTemperature, deepseekDefaultTopP

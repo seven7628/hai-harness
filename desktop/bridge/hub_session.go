@@ -18,9 +18,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/mcp"
+	"github.com/seven7628/hai-harness/provider"
 	"github.com/seven7628/hai-harness/skills"
 	"github.com/seven7628/hai-harness/subagent"
+	"github.com/seven7628/hai-harness/tools"
 )
 
 // sessionRecordKey 会话 record 的维度键（§6.1.3）：默认是工作区路径哈希；
@@ -178,4 +182,66 @@ func buildGlobalSubagentRegistry() *subagent.DefinitionRegistry {
 		return reg
 	}
 	return reg
+}
+
+// hubLoopOptions 智能体 loop 的装配选项（方案 §6.2.1）。
+//
+// 关键点：
+//   - WithBaseSystemPrompt("")：必须**显式**传。不传的话内核会用 DefaultSystemPrompt
+//     补成 L0（agents/agent_loop.go 的默认值），等于 D17 没落地。
+//   - WithSystemPrompt：只有 L1 协议 + L2 身份（agenthub.RenderSystem）；L3–L5 由内核
+//     （AgentMD/记忆/技能）追加，顺序不变。
+//   - provider/model 全部显式：不读全局 active，A=DeepSeek、B=Anthropic 同时跑不串。
+//   - 采样默认走 samplingDefaultsFor(显式 provider)，不用读 active 的 samplingDefaults()。
+//
+// 抽成 options 而不是直接建 loop：测试要注入 mock provider 才能看到最终发出去的
+// system 字节（这一层没有可读的导出 getter）。
+func (m *manager) hubLoopOptions(ws *workspaceRuntime, sid string, spec *hubSessionSpec, eng *tools.Engine) []agents.Option {
+	p := spec.Agent
+	effort := string(p.Effort)
+	if effort == "" {
+		effort = string(provider.ReasoningEffortLevelLow)
+	}
+	threshold := p.CompressThreshold
+	if threshold == 0 {
+		threshold = agenthub.DefaultCompressThreshold
+	}
+	systemPrompt := agenthub.RenderSystem(agenthub.PromptSpec{Agent: &spec.Agent, Group: spec.Group})
+	sameProvider := m.provCfg.newProvider(p.Provider)
+	opts := []agents.Option{
+		agents.WithProvider(sameProvider),
+		agents.WithProviderName(p.Provider),
+		agents.WithModel(p.Model),
+		agents.WithToolEngine(eng),
+		agents.WithBaseSystemPrompt(""), // L0 关闭（D17）：显式空串，否则内核补 DefaultSystemPrompt
+		agents.WithSystemPrompt(systemPrompt),
+		agents.WithReasoningEffort(provider.ReasoningEffortLevel(effort)),
+		agents.WithWorkingDir(ws.path),
+		agents.WithAgentMDDir(ws.path), // L3：智能体 home 里的 AGENTS.md（可选）
+		agents.WithContextWindow(m.provCfg.windowForIn(p.Provider, p.Model)),
+		agents.WithMaxTokens(m.provCfg.maxTokensForIn(p.Provider, p.Model)),
+		agents.WithCompressThreshold(threshold),
+		agents.WithCompressor(agents.NewLLMCompressor(sameProvider, p.Model,
+			compressTorOptions(p.Provider, p.Model, sid, m.provCfg)...)),
+		agents.WithSessionID(sid),
+		agents.WithLLMTimeout(0), // 不限整轮总时限（首字/停滞预算仍由内核默认兜底）
+		agents.WithMaxRetries(11),
+		agents.WithRetryBackoff(agents.FixedBackoff(time.Second)),
+		agents.WithCompactBackoff(3 * time.Minute),
+		agents.WithSkills(ws.skills), // L5：全局层技能清单
+		agents.WithSkillCapabilities(skillCapabilitiesFor(m.provCfg, p.Provider, p.Model, eng)),
+		agents.WithSubagents(ws.subagents),
+	}
+	if spec.MemoryInjection != "" {
+		opts = append(opts, agents.WithMemoryInjection(spec.MemoryInjection)) // L4：记忆索引
+	}
+	if temperature, topP := m.provCfg.samplingDefaultsFor(p.Provider); temperature != nil {
+		opts = append(opts, agents.WithTemperature(*temperature), agents.WithTopP(*topP))
+	}
+	return opts
+}
+
+// buildHubLoop 按 Profile 装配智能体的 AgentLoop。
+func (m *manager) buildHubLoop(ws *workspaceRuntime, sid string, spec *hubSessionSpec, eng *tools.Engine) *agents.AgentLoop {
+	return agents.NewAgentLoop(m.hubLoopOptions(ws, sid, spec, eng)...)
 }
