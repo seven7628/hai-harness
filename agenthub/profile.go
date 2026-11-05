@@ -115,13 +115,18 @@ const (
 	DefaultMaxAutoTurns      = 6
 )
 
-// Normalize 应用默认值并校验；成功时原地更新。失败时调用方应丢弃该对象。
+// Normalize 应用默认值并校验；只有全部通过才原地更新，失败时对象保持原样。
 func (p *AgentProfile) Normalize() error {
 	if p == nil {
 		return fmt.Errorf("%w: profile is nil", ErrInvalid)
 	}
-	p.ApplyDefaults()
-	return p.Validate()
+	cp := *p
+	cp.ApplyDefaults()
+	if err := cp.Validate(); err != nil {
+		return err
+	}
+	*p = cp
+	return nil
 }
 
 // ApplyDefaults 填充零值默认值，并做无语义损失的规范化（trim、颜色小写、去重）。
@@ -189,31 +194,36 @@ func (p *AgentProfile) Validate() error {
 	if p == nil {
 		return fmt.Errorf("%w: profile is nil", ErrInvalid)
 	}
-	if p.ID != "" && !strings.HasPrefix(string(p.ID), PrefixAgent+"_") {
-		return fmt.Errorf("%w: profile.id must start with %q", ErrInvalid, PrefixAgent+"_")
+	if p.ID != "" {
+		if err := ValidateAgentID(p.ID); err != nil {
+			return err
+		}
 	}
 	if err := validateProfileName(p.Name); err != nil {
 		return err
 	}
-	switch p.Avatar.Kind {
-	case AvatarKindEmoji:
-		if strings.TrimSpace(p.Avatar.Value) == "" {
-			return fmt.Errorf("%w: profile.avatar.value is required for emoji", ErrInvalid)
+	// 零值代表“用默认值”（Normalize 会补），这里只拒绝显式给出的非法值。
+	if p.Avatar.Kind != "" {
+		switch p.Avatar.Kind {
+		case AvatarKindEmoji:
+			// 空 value 由 ApplyDefaults 补默认 emoji。
+		case AvatarKindImage:
+			if strings.TrimSpace(p.Avatar.Path) == "" {
+				return fmt.Errorf("%w: profile.avatar.path is required for image", ErrInvalid)
+			}
+		default:
+			return fmt.Errorf("%w: profile.avatar.kind must be %q or %q", ErrInvalid, AvatarKindEmoji, AvatarKindImage)
 		}
-	case AvatarKindImage:
-		if strings.TrimSpace(p.Avatar.Path) == "" {
-			return fmt.Errorf("%w: profile.avatar.path is required for image", ErrInvalid)
-		}
-	default:
-		return fmt.Errorf("%w: profile.avatar.kind must be %q or %q", ErrInvalid, AvatarKindEmoji, AvatarKindImage)
 	}
 	if p.Avatar.BG != "" {
 		if _, ok := normalizeHexColor(p.Avatar.BG); !ok {
 			return fmt.Errorf("%w: profile.avatar.bg must be #rrggbb", ErrInvalid)
 		}
 	}
-	if _, ok := normalizeHexColor(p.Accent); !ok {
-		return fmt.Errorf("%w: profile.accent must be #rrggbb", ErrInvalid)
+	if p.Accent != "" {
+		if _, ok := normalizeHexColor(p.Accent); !ok {
+			return fmt.Errorf("%w: profile.accent must be #rrggbb", ErrInvalid)
+		}
 	}
 	if err := validateProviderName(p.Provider); err != nil {
 		return err
@@ -221,8 +231,9 @@ func (p *AgentProfile) Validate() error {
 	if p.Model == "" || len(p.Model) > 256 || strings.ContainsAny(p.Model, "\r\n\t") {
 		return fmt.Errorf("%w: profile.model must be a non-empty single-line string (<=256)", ErrInvalid)
 	}
-	if math.IsNaN(p.CompressThreshold) || math.IsInf(p.CompressThreshold, 0) ||
-		p.CompressThreshold < 0.5 || p.CompressThreshold > 0.95 {
+	if p.CompressThreshold != 0 &&
+		(math.IsNaN(p.CompressThreshold) || math.IsInf(p.CompressThreshold, 0) ||
+			p.CompressThreshold < 0.5 || p.CompressThreshold > 0.95) {
 		return fmt.Errorf("%w: profile.compress_threshold must be within [0.5, 0.95]", ErrInvalid)
 	}
 	if p.Memory.MaxIndexLines < 0 {
@@ -263,6 +274,9 @@ func (t ToolPolicy) Validate() error {
 	if t.Preset != ToolPresetCustom && len(t.Allow) > 0 {
 		return fmt.Errorf("%w: tools.allow is only valid with preset=custom", ErrInvalid)
 	}
+	if t.Preset == ToolPresetCustom && len(t.Allow) == 0 {
+		return fmt.Errorf("%w: tools.allow must be non-empty with preset=custom", ErrInvalid)
+	}
 	for _, v := range append(append([]string{}, t.Disable...), t.Allow...) {
 		if strings.TrimSpace(v) == "" {
 			return fmt.Errorf("%w: tools disable/allow entries must be non-empty", ErrInvalid)
@@ -273,6 +287,13 @@ func (t ToolPolicy) Validate() error {
 		for _, a := range t.Allow {
 			if d == a {
 				return fmt.Errorf("%w: tools.disable %q cannot be re-enabled by tools.allow", ErrInvalid, d)
+			}
+		}
+	}
+	for _, d := range t.MCP.DisableTools {
+		for _, a := range t.MCP.AllowTools {
+			if d == a {
+				return fmt.Errorf("%w: mcp.disable_tools %q cannot be re-enabled by mcp.allow_tools", ErrInvalid, d)
 			}
 		}
 	}
@@ -325,19 +346,22 @@ func ValidateAgentNameUnique(name string, existing []*AgentProfile, except Agent
 		if p == nil || p.ID == except || p.Deleted {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(p.Name), want) {
+		if strings.ToLower(strings.TrimSpace(p.Name)) == strings.ToLower(want) {
 			return fmt.Errorf("%w: agent name %q already used by %s", ErrInvalid, want, p.ID)
 		}
 	}
 	return nil
 }
 
-// ValidateAgentCount 检查还能否新增智能体（existing 为当前总数）。
-func ValidateAgentCount(existing int) error {
-	if existing < 0 {
-		return fmt.Errorf("%w: agent count must be >= 0", ErrInvalid)
+// ValidateAgentCount 检查还能否新增智能体；软删（Deleted）不占名额。
+func ValidateAgentCount(existing []*AgentProfile) error {
+	count := 0
+	for _, p := range existing {
+		if p != nil && !p.Deleted {
+			count++
+		}
 	}
-	if existing >= MaxAgents {
+	if count >= MaxAgents {
 		return fmt.Errorf("%w: agent limit %d reached", ErrInvalid, MaxAgents)
 	}
 	return nil
@@ -365,8 +389,8 @@ func validateProfileName(name string) error {
 		return fmt.Errorf("%w: profile.name must not contain '@'", ErrInvalid)
 	}
 	for _, r := range name {
-		if unicode.IsControl(r) {
-			return fmt.Errorf("%w: profile.name must not contain control characters", ErrInvalid)
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return fmt.Errorf("%w: profile.name must not contain control/format characters", ErrInvalid)
 		}
 	}
 	return nil

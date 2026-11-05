@@ -44,7 +44,7 @@ func assertJSONStable(t *testing.T, v any) {
 
 func fullProfile() *AgentProfile {
 	return &AgentProfile{
-		ID:                "ag_7f3k2m9q",
+		ID:                "ag_7f3k2m7q",
 		Name:              "Researcher",
 		Avatar:            Avatar{Kind: "emoji", Value: "🟢", BG: "#2f6f5e"},
 		Accent:            "#2f6f5e",
@@ -93,9 +93,9 @@ func TestGroupJSONStable(t *testing.T) {
 	g := &Group{
 		ID:           "grp_9m2x",
 		Name:         "竞品研究",
-		OwnerAgentID: "ag_7f3k2m9q",
+		OwnerAgentID: "ag_7f3k2m7q",
 		Members: []Member{
-			{AgentID: "ag_7f3k2m9q", Role: RoleOwner, JoinedAt: testTime()},
+			{AgentID: "ag_7f3k2m7q", Role: RoleOwner, JoinedAt: testTime()},
 			{AgentID: "ag_2p8v", Role: RoleObserver, JoinedAt: testTime()},
 		},
 		Policy: GroupPolicy{
@@ -131,7 +131,7 @@ func TestMessageJSONStable(t *testing.T) {
 			},
 			Reason: "multi_agent",
 		},
-		Sender:     Sender{Kind: SenderAgent, AgentID: "ag_7f3k2m9q"},
+		Sender:     Sender{Kind: SenderAgent, AgentID: "ag_7f3k2m7q"},
 		Kind:       KindText,
 		Text:       "三家价格表出来了。",
 		Mentions:   []AgentID{"ag_5d1c"},
@@ -161,7 +161,7 @@ func TestTaskJSONStable(t *testing.T) {
 		RootTaskID:   "task_31",
 		ParentTaskID: "task_30",
 		Chain:        []TaskID{"task_30", "task_31"},
-		Origin:       TaskOrigin{Kind: OriginGroup, GroupID: "grp_9m2x", AgentID: "ag_7f3k2m9q", AgentName: "Researcher", MessageSeq: 42},
+		Origin:       TaskOrigin{Kind: OriginGroup, GroupID: "grp_9m2x", AgentID: "ag_7f3k2m7q", AgentName: "Researcher", MessageSeq: 42},
 		Target:       TaskTarget{Kind: TargetWorkspace, Workspace: "/Users/me/hai-workspaces/pricing", SessionID: "8f2c1a"},
 		Title:        "把三家价格表写成 2 页简报",
 		Instruction:  "……",

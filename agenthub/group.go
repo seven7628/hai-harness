@@ -106,13 +106,19 @@ const (
 	DefaultGroupMaxMentions      = 3
 )
 
-// Normalize 应用群组默认值并校验；失败时调用方应丢弃该对象。
+// Normalize 应用群组默认值并校验；只有全部通过才原地更新，失败时对象保持原样。
 func (g *Group) Normalize() error {
 	if g == nil {
 		return fmt.Errorf("%w: group is nil", ErrInvalid)
 	}
-	g.ApplyDefaults()
-	return g.Validate()
+	cp := *g
+	cp.Members = append([]Member(nil), g.Members...)
+	cp.ApplyDefaults()
+	if err := cp.Validate(); err != nil {
+		return err
+	}
+	*g = cp
+	return nil
 }
 
 // ApplyDefaults 填零值并规范化成员；不吞掉非法 role/mode，留给 Validate。
@@ -171,8 +177,10 @@ func (g *Group) Validate() error {
 	if g == nil {
 		return fmt.Errorf("%w: group is nil", ErrInvalid)
 	}
-	if g.ID != "" && !strings.HasPrefix(string(g.ID), PrefixGroup+"_") {
-		return fmt.Errorf("%w: group.id must start with %q", ErrInvalid, PrefixGroup+"_")
+	if g.ID != "" {
+		if err := ValidateGroupID(g.ID); err != nil {
+			return err
+		}
 	}
 	if err := validateGroupName(g.Name); err != nil {
 		return err
@@ -189,15 +197,18 @@ func (g *Group) Validate() error {
 	if g.OwnerAgentID == "" {
 		return fmt.Errorf("%w: group.owner_agent_id is required", ErrInvalid)
 	}
-	if !strings.HasPrefix(string(g.OwnerAgentID), PrefixAgent+"_") {
-		return fmt.Errorf("%w: group.owner_agent_id must start with %q", ErrInvalid, PrefixAgent+"_")
+	if err := ValidateAgentID(g.OwnerAgentID); err != nil {
+		return fmt.Errorf("%w: group.owner_agent_id: %v", ErrInvalid, err)
 	}
 
 	seen := make(map[AgentID]struct{}, len(g.Members))
 	owners := 0
 	for _, m := range g.Members {
-		if m.AgentID == "" || !strings.HasPrefix(string(m.AgentID), PrefixAgent+"_") {
-			return fmt.Errorf("%w: group member %q must be an agent id", ErrInvalid, m.AgentID)
+		if m.AgentID == "" {
+			return fmt.Errorf("%w: group member agent_id is required", ErrInvalid)
+		}
+		if err := ValidateAgentID(m.AgentID); err != nil {
+			return fmt.Errorf("%w: group member %s: %v", ErrInvalid, m.AgentID, err)
 		}
 		if _, dup := seen[m.AgentID]; dup {
 			return fmt.Errorf("%w: duplicate group member %s", ErrInvalid, m.AgentID)
@@ -270,7 +281,7 @@ func ValidateGroupNameUnique(name string, existing []*Group, except GroupID) err
 		if g == nil || g.ID == except || g.Deleted {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(g.Name), want) {
+		if strings.ToLower(strings.TrimSpace(g.Name)) == strings.ToLower(want) {
 			return fmt.Errorf("%w: group name %q already used by %s", ErrInvalid, want, g.ID)
 		}
 	}
@@ -311,8 +322,8 @@ func validateGroupName(name string) error {
 		return fmt.Errorf("%w: group.name must be 1-32 characters", ErrInvalid)
 	}
 	for _, r := range name {
-		if unicode.IsControl(r) {
-			return fmt.Errorf("%w: group.name must not contain control characters", ErrInvalid)
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return fmt.Errorf("%w: group.name must not contain control/format characters", ErrInvalid)
 		}
 	}
 	return nil

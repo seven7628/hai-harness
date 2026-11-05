@@ -9,7 +9,7 @@ import (
 
 func validProfile() *AgentProfile {
 	return &AgentProfile{
-		ID:                "ag_7f3k2m9q",
+		ID:                "ag_7f3k2m7q",
 		Name:              "Researcher",
 		Avatar:            Avatar{Kind: AvatarKindEmoji, Value: "🟢", BG: "#2f6f5e"},
 		Accent:            "#2f6f5e",
@@ -133,6 +133,14 @@ func TestProfileValidation(t *testing.T) {
 		{"disable reenabled", func(p *AgentProfile) {
 			p.Tools = ToolPolicy{Preset: ToolPresetCustom, Disable: []string{"bash"}, Allow: []string{"bash"}}
 		}},
+		{"custom without allow", func(p *AgentProfile) {
+			p.Tools = ToolPolicy{Preset: ToolPresetCustom}
+		}},
+		{"mcp disable reenabled", func(p *AgentProfile) {
+			p.Tools = ToolPolicy{Preset: ToolPresetCustom, Allow: []string{"x"},
+				MCP: MCPPolicy{DisableTools: []string{"s.t"}, AllowTools: []string{"s.t"}}}
+		}},
+		{"zero width name", func(p *AgentProfile) { p.Name = "Researcher\u200b" }},
 		{"workspace without roots", func(p *AgentProfile) {
 			p.Policy.CanCreateWorkspace = true
 			p.Policy.WorkspaceRoots = nil
@@ -154,6 +162,49 @@ func TestProfileValidation(t *testing.T) {
 	p := fullProfile()
 	if err := p.Normalize(); err != nil {
 		t.Fatalf("fullProfile Normalize: %v", err)
+	}
+}
+
+func TestProfileValidateToleratesZeroDefaults(t *testing.T) {
+	p := &AgentProfile{Name: "R", Provider: "deepseek", Model: "m"}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("Validate(zero defaults): %v", err)
+	}
+	p.Accent = "#12345"
+	if err := p.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("explicit bad accent err = %v", err)
+	}
+	p.Accent = ""
+	p.Avatar.Kind = "gif"
+	if err := p.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("explicit bad avatar kind err = %v", err)
+	}
+	p.Avatar.Kind = ""
+	p.CompressThreshold = 0.2
+	if err := p.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("explicit bad threshold err = %v", err)
+	}
+}
+
+func TestProfileNormalizeDoesNotMutateOnFailure(t *testing.T) {
+	p := validProfile()
+	p.Name = "   "
+	p.Accent = "#12345"
+	before := *p
+	before.Tools.Disable = append([]string(nil), p.Tools.Disable...)
+	if err := p.Normalize(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Normalize err = %v", err)
+	}
+	if p.Name != before.Name || p.Accent != before.Accent || p.Version != before.Version {
+		t.Fatalf("Normalize mutated on failure:\n got %#v\nwant %#v", p, before)
+	}
+}
+
+func TestProfileNameBoundary32(t *testing.T) {
+	p := validProfile()
+	p.Name = strings.Repeat("界", 32)
+	if err := p.Normalize(); err != nil {
+		t.Fatalf("32-rune name: %v", err)
 	}
 }
 
@@ -190,22 +241,34 @@ func TestProfileIDAndLimit(t *testing.T) {
 	if err := ValidateGroupID(GroupID(NewID(PrefixGroup))); err != nil {
 		t.Fatalf("generated group id invalid: %v", err)
 	}
-	if err := ValidateAgentCount(MaxAgents - 1); err != nil {
+	agents := make([]*AgentProfile, MaxAgents)
+	for i := range agents {
+		agents[i] = &AgentProfile{ID: AgentID(NewID(PrefixAgent)), Name: "a"}
+	}
+	if err := ValidateAgentCount(agents[:MaxAgents-1]); err != nil {
 		t.Fatalf("limit-1: %v", err)
 	}
-	if err := ValidateAgentCount(MaxAgents); !errors.Is(err, ErrInvalid) {
+	if err := ValidateAgentCount(agents); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("limit err = %v", err)
 	}
+	agents[0].Deleted = true
+	if err := ValidateAgentCount(agents); err != nil {
+		t.Fatalf("deleted should not count: %v", err)
+	}
+}
+
+func testAgentID(letter byte) AgentID {
+	return AgentID("ag_" + strings.Repeat(string(letter), 8))
 }
 
 func validGroup() *Group {
 	return &Group{
 		Name:         "竞品研究",
-		OwnerAgentID: "ag_owner",
+		OwnerAgentID: testAgentID('a'),
 		Members: []Member{
-			{AgentID: "ag_owner", Role: RoleOwner},
-			{AgentID: "ag_member", Role: RoleMember},
-			{AgentID: "ag_observer", Role: RoleObserver},
+			{AgentID: testAgentID('a'), Role: RoleOwner},
+			{AgentID: testAgentID('b'), Role: RoleMember},
+			{AgentID: testAgentID('c'), Role: RoleObserver},
 		},
 	}
 }
@@ -217,7 +280,7 @@ func TestGroupNormalizeDefaults(t *testing.T) {
 	if err := g.Normalize(); err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
-	if g.OwnerAgentID != "ag_owner" {
+	if g.OwnerAgentID != testAgentID('a') {
 		t.Fatalf("owner = %q", g.OwnerAgentID)
 	}
 	if g.Members[1].Role != RoleMember {
@@ -234,9 +297,9 @@ func TestGroupNormalizeDefaults(t *testing.T) {
 
 func TestGroupValidation(t *testing.T) {
 	many := make([]Member, 0, MaxGroupMembers+1)
-	many = append(many, Member{AgentID: "ag_owner", Role: RoleOwner})
+	many = append(many, Member{AgentID: testAgentID('a'), Role: RoleOwner})
 	for i := 0; i < MaxGroupMembers; i++ {
-		many = append(many, Member{AgentID: AgentID("ag_m" + string(rune('a'+i))), Role: RoleMember})
+		many = append(many, Member{AgentID: testAgentID(byte('b' + i)), Role: RoleMember})
 	}
 	tests := []struct {
 		name   string
@@ -246,16 +309,16 @@ func TestGroupValidation(t *testing.T) {
 		{"long name", func(g *Group) { g.Name = strings.Repeat("界", 33) }},
 		{"no members", func(g *Group) { g.Members = nil }},
 		{"too many members", func(g *Group) { g.Members = many }},
-		{"duplicate member", func(g *Group) { g.Members = append(g.Members, Member{AgentID: "ag_member", Role: RoleMember}) }},
+		{"duplicate member", func(g *Group) { g.Members = append(g.Members, Member{AgentID: testAgentID('b'), Role: RoleMember}) }},
 		{"no owner", func(g *Group) {
-			g.Members = []Member{{AgentID: "ag_owner", Role: RoleMember}}
+			g.Members = []Member{{AgentID: testAgentID('a'), Role: RoleMember}}
 			g.OwnerAgentID = ""
 		}},
 		{"owner role mismatch", func(g *Group) {
 			g.Members[0].Role = RoleMember
 		}},
 		{"invalid role", func(g *Group) { g.Members[1].Role = "admin" }},
-		{"owner not member", func(g *Group) { g.OwnerAgentID = "ag_missing" }},
+		{"owner not member", func(g *Group) { g.OwnerAgentID = testAgentID('d') }},
 		{"bad mode", func(g *Group) { g.Policy.Mode = "sometimes" }},
 		{"negative parallel", func(g *Group) { g.Policy.MaxParallelRuns = -1 }},
 		{"bad member id", func(g *Group) { g.Members[1].AgentID = "bad" }},
@@ -274,6 +337,41 @@ func TestGroupValidation(t *testing.T) {
 	if err := g.Normalize(); err != nil {
 		t.Fatalf("valid group: %v", err)
 	}
+
+	// 恰好 12 人通过。
+	atLimit := validGroup()
+	atLimit.Members = atLimit.Members[:1]
+	for i := 0; i < MaxGroupMembers-1; i++ {
+		atLimit.Members = append(atLimit.Members, Member{AgentID: testAgentID(byte('b' + i)), Role: RoleMember})
+	}
+	if err := atLimit.Normalize(); err != nil {
+		t.Fatalf("12-member group: %v", err)
+	}
+}
+
+func TestGroupNormalizeDoesNotMutateOnFailure(t *testing.T) {
+	g := validGroup()
+	g.Name = " "
+	g.Members[1].AgentID = "bad"
+	before := *g
+	before.Members = append([]Member(nil), g.Members...)
+	if err := g.Normalize(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Normalize err = %v", err)
+	}
+	if g.Name != before.Name || g.Members[1].AgentID != before.Members[1].AgentID {
+		t.Fatalf("Normalize mutated on failure: %#v", g)
+	}
+}
+
+func TestGroupRejectsMalformedID(t *testing.T) {
+	for _, id := range []AgentID{"ag_bad", "ag_../x", "ag_XYZ12345", "ag_00000000"} {
+		g := validGroup()
+		g.OwnerAgentID = id
+		g.Members[0].AgentID = id
+		if err := g.Normalize(); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("owner id %q err = %v, want ErrInvalid", id, err)
+		}
+	}
 }
 
 func TestGroupNameAndMemberNamesUnique(t *testing.T) {
@@ -290,18 +388,18 @@ func TestGroupNameAndMemberNamesUnique(t *testing.T) {
 
 	g := validGroup()
 	profiles := map[AgentID]*AgentProfile{
-		"ag_owner":    {ID: "ag_owner", Name: "Researcher"},
-		"ag_member":   {ID: "ag_member", Name: "researcher"},
-		"ag_observer": {ID: "ag_observer", Name: "Observer"},
+		testAgentID('a'): {ID: testAgentID('a'), Name: "Researcher"},
+		testAgentID('b'): {ID: testAgentID('b'), Name: "researcher"},
+		testAgentID('c'): {ID: testAgentID('c'), Name: "Observer"},
 	}
 	if err := ValidateGroupMemberNames(g, profiles); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("member name collision err = %v", err)
 	}
-	profiles["ag_member"].Name = "Writer"
+	profiles[testAgentID('b')].Name = "Writer"
 	if err := ValidateGroupMemberNames(g, profiles); err != nil {
 		t.Fatalf("unique member names: %v", err)
 	}
-	delete(profiles, "ag_observer")
+	delete(profiles, testAgentID('c'))
 	if err := ValidateGroupMemberNames(g, profiles); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing profile err = %v", err)
 	}
