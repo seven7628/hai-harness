@@ -85,6 +85,14 @@ const (
 	CmdHubNeedList    Command = "hub_need_list"
 	CmdHubNeedResolve Command = "hub_need_resolve"
 	CmdHubClear       Command = "hub_clear" // 清空 DM 上下文（保留 system，§6.4）
+	// —— Agent Hub（P3a：群组基础） ——
+	CmdHubGroupList         Command = "hub_group_list"
+	CmdHubGroupGet          Command = "hub_group_get"
+	CmdHubGroupCreate       Command = "hub_group_create"
+	CmdHubGroupUpdate       Command = "hub_group_update"
+	CmdHubGroupDelete       Command = "hub_group_delete"
+	CmdHubGroupMemberAdd    Command = "hub_group_member_add"
+	CmdHubGroupMemberRemove Command = "hub_group_member_remove"
 
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"

@@ -85,6 +85,20 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubNeedResolve(c)
 	case CmdHubClear:
 		m.hubClear(c)
+	case CmdHubGroupList:
+		m.hubGroupList(c)
+	case CmdHubGroupGet:
+		m.hubGroupGet(c)
+	case CmdHubGroupCreate:
+		m.hubGroupCreate(c)
+	case CmdHubGroupUpdate:
+		m.hubGroupUpdate(c)
+	case CmdHubGroupDelete:
+		m.hubGroupDelete(c)
+	case CmdHubGroupMemberAdd:
+		m.hubGroupMemberAdd(c)
+	case CmdHubGroupMemberRemove:
+		m.hubGroupMemberRemove(c)
 	default:
 		return false
 	}
