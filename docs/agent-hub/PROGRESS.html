@@ -1328,6 +1328,12 @@ const BASE = {
       "commit": "31c445e test(hub-p2-09): 评测 4–6（一句话派任务/人工介入/重启可解释）",
       "review": "pending",
       "reviewNote": "实现评测 4–6（desktop/bridge/hub_eval_p2_test.go）：Eval4 workspace_create→session_create→session_send 全链路，目标任务真跑一轮，账本 completed→delivered、发起者收到 task_result；Eval5 排队任务被人取消后不自动执行/不自动重试；Eval6 无 run 的 dispatched 恢复为 interrupted + recovered_interrupted + Needs you(重启说明)。验证：TestEval1-6 全绿（6.3s）、desktop/bridge 全量绿（41s）。待办：P2 阶段整体 Review（P2-01..P2-08）+ 逐任务复审结论落看板后，P2-09 才能 passed。"
+    },
+    "P3a-01": {
+      "status": "review",
+      "commit": "feat(hub-p3a-01): 群组 CRUD + 成员/角色/策略",
+      "review": "pending",
+      "reviewNote": "实现 hub_group_list/get/create/update/delete + member_add/remove；成员上限 12、角色校验、owner 转让成对改写、软删、默认 ask、群名唯一、删除智能体不能入群。测试 TestHubGroupCRUDAndRoles / TestHubGroupRejectsDeletedMember；agenthub -run Group 与 bridge 全量绿（59s）。"
     }
   }
 };
