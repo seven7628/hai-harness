@@ -878,10 +878,10 @@
       "reviewNote": "首轮 changes_requested（VisibleTo fail-open：非法/大小写 visibility 把 owner-only 正文泄露给智能体）→ 3e768da 修复（白名单 fail-closed/Redacted 清 refs/可配置 cap/ParseAuthorized 原子鉴权/ASCII-CJK 边界）；复审 pass（go test -race ./agenthub/... 全绿，覆盖率 80.8%）。"
     },
     "P0-05": {
-      "status": "review",
+      "status": "done",
       "commit": "369517d fix(hub-p0-05): 收口账本幂等、run 绑定与重放一致性",
-      "review": "pending",
-      "reviewNote": "首轮 changes_requested（notify 先于 finish 占键/run_id 未校验/事件快照分叉/时间线丢失/跨 Ledger 锁）→ 369517d 修复；复审进行中。"
+      "review": "passed",
+      "reviewNote": "首轮 changes_requested（notify 先于 finish 占键；Finish 不校验 run_id；事件快照分叉；Replay 丢 Dispatch 时间线；跨 Ledger 实例锁）→ 369517d 修复（settled 门禁/superseded_run_ids/每事件完整快照+Replay 取较新/per-task 全局锁/append 回滚）→ 复审 pass（go test -race ./agenthub/... 全绿，覆盖率 79.8%）。跨进程 CAS 与锁回收留 Store 后续。"
     }
   }
 }
