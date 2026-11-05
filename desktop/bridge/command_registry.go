@@ -77,6 +77,14 @@ const (
 	CmdHubOpen    Command = "hub_open"
 	CmdHubSend    Command = "hub_send"
 	CmdHubHistory Command = "hub_history"
+	// —— Agent Hub（P2：任务板 + Needs you） ——
+	CmdHubTaskList    Command = "hub_task_list"
+	CmdHubTaskGet     Command = "hub_task_get"
+	CmdHubTaskCancel  Command = "hub_task_cancel"
+	CmdHubTaskRetry   Command = "hub_task_retry"
+	CmdHubNeedList    Command = "hub_need_list"
+	CmdHubNeedResolve Command = "hub_need_resolve"
+	CmdHubClear       Command = "hub_clear" // 清空 DM 上下文（保留 system，§6.4）
 
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"

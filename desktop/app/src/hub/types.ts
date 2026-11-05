@@ -71,3 +71,73 @@ export interface HubHistoryPage {
   messages?: HubMessage[]
   has_more?: boolean
 }
+
+/** 任务账本条目（hub_task_list/get；字段与 agenthub.Task 对齐，只列 UI 用的）。 */
+export interface HubTaskUsage {
+  input?: number
+  output?: number
+  cache_read?: number
+  cache_write?: number
+  reasoning?: number
+  cost_priced?: boolean
+  cost_usd?: number
+}
+
+export interface HubTaskArtifact {
+  name?: string
+  path?: string
+  kind?: string
+  size?: number
+  lines?: number
+}
+
+export interface HubTaskResult {
+  summary?: string
+  error?: string
+  finish_reason?: string
+  usage?: HubTaskUsage
+  artifacts?: HubTaskArtifact[]
+}
+
+export interface HubTask {
+  id: string
+  root_task_id?: string
+  parent_task_id?: string
+  title?: string
+  instruction?: string
+  status?: string
+  attempt?: number
+  error?: string
+  origin?: { kind?: string; agent_id?: string; agent_name?: string }
+  target?: { kind?: string; workspace?: string; session_id?: string }
+  result?: HubTaskResult
+  created_at?: string
+  updated_at?: string
+}
+
+/** Needs you（审批/提问/失败/交接/预算）。 */
+export interface HubNeed {
+  id: string
+  kind?: string
+  status?: string
+  agent_id?: string
+  task_id?: string
+  session_id?: string
+  workspace?: string
+  anchor?: string
+  title?: string
+  body?: string
+  created_at?: string
+  resolved_at?: string
+}
+
+/** Run 视图的一行（工具起止 / 压缩 / 状态）；来自 agent_* 与会话事件。 */
+export interface HubRunEntry {
+  id: string
+  kind: 'tool' | 'status' | 'compress'
+  name?: string
+  status?: string
+  summary?: string
+  ms?: number
+  at: number
+}

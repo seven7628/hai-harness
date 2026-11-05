@@ -4,7 +4,8 @@ import { Bot, SendIcon } from '../components/icons'
 import { useT } from '../i18n'
 import { attachHubEvents, useHubStore } from './useHubStore'
 import AgentEditor from './AgentEditor'
-import type { HubAgent, HubMessage } from './types'
+import HubInspector from './HubInspector'
+import type { HubAgent, HubMessage, HubRunEntry } from './types'
 import './hub.css'
 
 // Hub surface：左栏 = 智能体 rail（§8.2），右栏 = DM 视图（§8.4）。
@@ -39,6 +40,15 @@ export default function HubSurface() {
   const notice = useHubStore((s) => s.notice)
   const clearNotice = useHubStore((s) => s.clearNotice)
   const draft = activeId ? (drafts[activeId] ?? '') : ''
+  const inspector = useHubStore((s) => s.inspector)
+  const setInspector = useHubStore((s) => s.setInspector)
+  const view = useHubStore((s) => s.view)
+  const setView = useHubStore((s) => s.setView)
+  const runLog = useHubStore((s) => s.runLog)
+  const actions = useHubStore((s) => s.actions)
+  const tasks = useHubStore((s) => s.tasks)
+  const needs = useHubStore((s) => s.needs)
+  const activeTasks = tasks.filter((t) => !['completed', 'failed', 'interrupted', 'delivered', 'canceled', 'blocked_budget', 'declined'].includes(t.status ?? '')).length
 
   // null = 关闭；'new' = 新建；HubAgent = 编辑该智能体。
   const [editing, setEditing] = useState<HubAgent | 'new' | null>(null)
@@ -90,6 +100,20 @@ export default function HubSurface() {
         <div className="hub-rail-head">
           <span className="hub-brand"><Bot size={16} /> {t('hub.title')}</span>
           <span className="hub-rail-actions">
+            <button
+              className={`hub-link ${inspector === 'tasks' ? 'on' : ''}`}
+              onClick={() => setInspector(inspector === 'tasks' ? null : 'tasks')}
+              title="任务板"
+            >
+              任务{activeTasks > 0 ? <span className="hub-badge">{activeTasks}</span> : null}
+            </button>
+            <button
+              className={`hub-link ${inspector === 'needs' ? 'on' : ''}`}
+              onClick={() => setInspector(inspector === 'needs' ? null : 'needs')}
+              title="Needs you"
+            >
+              Needs{needs.length > 0 ? <span className="hub-badge alert">{needs.length}</span> : null}
+            </button>
             <button className="hub-link" onClick={() => setEditing('new')} title={t('hub.newAgent')}>＋</button>
             <button className="hub-link" onClick={closeHub} title={t('hub.backToWorkspaces')}>
               {t('hub.back')}
@@ -150,13 +174,22 @@ export default function HubSurface() {
                     .join(' — ')}
                 </span>
               </div>
+              <span className="hub-view-toggle" role="tablist" aria-label="Chat or Run">
+                <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>Chat</button>
+                <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>
+              </span>
+              <button className="hub-link" onClick={() => setInspector(inspector === 'session' ? null : 'session')} title="会话信息">会话</button>
               <button className="hub-link" onClick={() => setEditing(activeAgent)} title={t('hub.editAgent')}>
                 {t('hub.edit')}
               </button>
               <span className={`hub-dot ${isRunning ? 'on' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
             </header>
 
-            <div className="hub-list" ref={listRef} onScroll={onScroll}>
+            <div className={`hub-list ${view === 'run' ? 'run' : ''}`} ref={listRef} onScroll={onScroll}>
+              {view === 'run' ? (
+                <RunView entries={runLog} running={isRunning} />
+              ) : (
+              <>
               {loading ? <div className="hub-muted">{t('hub.loading')}</div> : null}
               {!loading && messages.length === 0 && !live ? (
                 <div className="hub-intro">
@@ -170,6 +203,9 @@ export default function HubSurface() {
                 {messages.map((m) => (
                   <HubBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} />
                 ))}
+                {actions.map((m) => (
+                  <HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} />
+                ))}
                 {live ? (
                   <div className="hub-msg agent">
                     <div className="hub-body">
@@ -179,9 +215,11 @@ export default function HubSurface() {
                 ) : null}
                 {isRunning && !live ? <div className="hub-muted">{t('hub.thinking')}</div> : null}
               </div>
+              </>
+              )}
             </div>
 
-            <div className="hub-composer">
+            {view === 'chat' ? <div className="hub-composer">
               <textarea
                 value={draft}
                 placeholder={t('hub.placeholder')}
@@ -203,10 +241,12 @@ export default function HubSurface() {
               >
                 <SendIcon />
               </button>
-            </div>
+            </div> : null}
           </>
         )}
       </section>
+
+      <HubInspector />
 
       {editing ? (
         <AgentEditor
@@ -266,6 +306,16 @@ function HubAvatar({ agent, size, ring }: { agent: HubAgent; size: number; ring?
 function HubBubble({ msg }: { msg: HubMessage }) {
   const kind = msg.sender?.kind ?? 'system'
   if (kind === 'system') {
+    // 系统动作行：refs.action 存在时按「动作 × 文本」渲染，与普通系统提示区分开。
+    const action = typeof msg.refs?.action === 'string' ? msg.refs.action : ''
+    if (action) {
+      return (
+        <div className={`hub-action ${action}`} role="status">
+          <span className="hub-action-kind">{actionLabel(action)}</span>
+          <span>{msg.text}</span>
+        </div>
+      )
+    }
     return <div className="hub-msg system">{msg.text}</div>
   }
   return (
@@ -275,4 +325,36 @@ function HubBubble({ msg }: { msg: HubMessage }) {
       </div>
     </div>
   )
+}
+
+
+/** Run 视图：同一会话的工具/压缩运行日志（Chat 之外的运行态落地）。 */
+function RunView({ entries, running }: { entries: HubRunEntry[]; running: boolean }) {
+  if (entries.length === 0) {
+    return (
+      <div className="hub-empty">
+        <p>{running ? '正在运行…' : '还没有运行记录'}</p>
+        <span className="hub-muted">工具调用与上下文压缩会显示在这里</span>
+      </div>
+    )
+  }
+  return (
+    <div className="hub-run">
+      {entries.map((e) => (
+        <div key={e.id} className={`hub-run-row ${e.status ?? ''}`}>
+          <span className="hub-chip">{e.kind === 'compress' ? '压缩' : '工具'}</span>
+          <span className="hub-run-name">{e.name || e.kind}</span>
+          {e.summary ? <span className="hub-muted">{e.summary}</span> : null}
+          <span className="hub-muted">{e.status === 'running' ? '运行中' : e.status === 'error' ? '失败' : e.ms ? `${(e.ms / 1000).toFixed(1)}s` : '完成'}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function actionLabel(action: string): string {
+  const map: Record<string, string> = {
+    compress: '压缩', clear: '清空', retry: '重试', interrupt: '中断', task: '任务',
+  }
+  return map[action] ?? action
 }

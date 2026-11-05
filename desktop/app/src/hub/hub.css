@@ -14,7 +14,7 @@
 
 .hub {
   display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
+  grid-template-columns: 264px minmax(0, 1fr) auto;
   /* .main 是 flex 容器：不显式撑开就只按内容宽度（DM 会缩成半屏、右边一片空） */
   flex: 1;
   width: 100%;
@@ -419,4 +419,114 @@
   font-size: 11.5px;
   line-height: 1.5;
   color: var(--text-2);
+}
+
+
+/* —— P2-06：任务板 / Needs you / 会话信息 / Run 视图 —— */
+.hub-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; margin-left: 4px; padding: 0 4px;
+  border-radius: 8px; background: color-mix(in srgb, var(--ink) 12%, transparent);
+  font-size: 10px; line-height: 1;
+}
+.hub-badge.alert { background: #c2703a; color: #fff; }
+.hub-view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.hub-view-toggle button {
+  border: 0; background: transparent; color: var(--text-2); font-size: 11.5px;
+  padding: 3px 8px; cursor: pointer;
+}
+.hub-view-toggle button.on { background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--ink); }
+.hub-list.run { padding: 10px 14px; }
+.hub-run { display: flex; flex-direction: column; gap: 4px; }
+.hub-run-row {
+  display: flex; align-items: center; gap: 8px; min-height: 26px;
+  padding: 3px 6px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  font-size: 12.5px;
+}
+.hub-run-row .hub-run-name { font-weight: 550; }
+.hub-run-row.error .hub-chip { color: #b23a2e; }
+.hub-run-row.running .hub-chip { color: #b8772a; }
+
+.hub-inspector {
+  width: 330px; min-width: 280px; max-width: 40vw;
+  display: flex; flex-direction: column; min-height: 0;
+  border-left: 1px solid var(--border); background: var(--paper-2);
+}
+.hub-inspector-tabs {
+  display: flex; align-items: center; gap: 2px; padding: 6px 8px;
+  border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+.hub-inspector-tabs button[role='tab'] {
+  border: 0; background: transparent; color: var(--text-2); font-size: 12px;
+  padding: 4px 8px; border-radius: 6px; cursor: pointer;
+}
+.hub-inspector-tabs button[role='tab'].on { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
+.hub-inspector-close { margin-left: auto; }
+.hub-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.hub-panel-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+.hub-panel-head select {
+  margin-left: auto; font-size: 11.5px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--paper); color: var(--ink); padding: 2px 4px;
+}
+.hub-pad { padding: 10px 12px; }
+.hub-panel-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 8px 16px; }
+.hub-task, .hub-need {
+  border: 1px solid var(--border); border-radius: 8px; margin: 6px 2px;
+  background: var(--paper); overflow: hidden;
+}
+.hub-task-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  border: 0; background: transparent; color: var(--ink); padding: 8px 10px; cursor: pointer;
+  font-size: 12.5px;
+}
+.hub-task-head strong { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-task-meta { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 10px 8px; font-size: 11px; }
+.hub-task-detail { border-top: 1px solid var(--border); padding: 8px 10px; }
+.hub-task-summary-text { white-space: pre-wrap; font-size: 12px; margin: 0 0 6px; }
+.hub-error-text { color: #b23a2e; font-size: 12px; }
+.hub-artifacts { list-style: none; margin: 6px 0; padding: 0; font-size: 11.5px; }
+.hub-artifacts li { padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-artifacts span { color: var(--text-2); margin-right: 4px; }
+.hub-chip {
+  display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 6px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent); font-size: 10.5px;
+  color: var(--text-2); white-space: nowrap;
+}
+.hub-chip.task-failed, .hub-chip.task-interrupted { color: #b23a2e; background: color-mix(in srgb, #b23a2e 10%, transparent); }
+.hub-chip.task-completed, .hub-chip.task-delivered { color: #2f7a4f; background: color-mix(in srgb, #2f7a4f 10%, transparent); }
+.hub-chip.task-running, .hub-chip.task-dispatched { color: #b8772a; background: color-mix(in srgb, #b8772a 10%, transparent); }
+.hub-need-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px 4px; font-size: 12.5px; }
+.hub-need-body {
+  margin: 4px 10px; padding: 6px 8px; max-height: 180px; overflow: auto;
+  background: color-mix(in srgb, var(--ink) 4%, transparent); border-radius: 6px;
+  font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+.hub-need-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; }
+.hub-need-questions { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.hub-need-questions label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; }
+.hub-need-questions input {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--paper);
+  color: var(--ink); font-size: 12px; padding: 4px 6px;
+}
+.hub-btn {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--paper);
+  color: var(--ink); font-size: 11.5px; padding: 3px 9px; cursor: pointer;
+}
+.hub-btn.primary { background: color-mix(in srgb, var(--ink) 88%, transparent); color: var(--paper); border-color: transparent; }
+.hub-btn:disabled { opacity: 0.5; cursor: default; }
+.hub-session-info { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 6px 10px; padding: 12px; font-size: 12px; margin: 0; }
+.hub-session-info dt { color: var(--text-2); }
+.hub-session-info dd { margin: 0; overflow-wrap: anywhere; }
+.hub-action {
+  display: flex; align-items: center; gap: 8px; margin: 4px 0; padding: 3px 8px;
+  border-left: 2px solid color-mix(in srgb, var(--ink) 25%, transparent);
+  color: var(--text-2); font-size: 11.5px;
+}
+.hub-action-kind { color: var(--ink); font-weight: 550; }
+@media (max-width: 900px) {
+  .hub { grid-template-columns: 220px minmax(0, 1fr); }
+  .hub-inspector { position: absolute; right: 0; top: 0; bottom: 0; width: 330px; z-index: 5; box-shadow: -8px 0 24px rgba(0,0,0,0.12); }
 }

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
-import type { HubAgent, HubDMInfo, HubHistoryPage, HubMessage, HubPage } from './types'
+import type { HubAgent, HubDMInfo, HubHistoryPage, HubMessage, HubNeed, HubPage, HubRunEntry, HubTask } from './types'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -40,6 +40,18 @@ interface HubState {
   drafts: Record<string, string>
   /** 上一次发送失败的原文（供重试；失败气泡同时保留在列表里）。 */
   failedText: string | null
+  /** 任务板/Needs you/会话信息抽屉。 */
+  inspector: 'tasks' | 'needs' | 'session' | null
+  tasks: HubTask[]
+  tasksLoading: boolean
+  needs: HubNeed[]
+  needsLoading: boolean
+  /** DM 右栏视图：Chat = 对话，Run = 工具/压缩运行日志。 */
+  view: 'chat' | 'run'
+  /** 当前 DM 的 Run 日志（只收该 session 的根/子工具事件）。 */
+  runLog: HubRunEntry[]
+  /** 系统动作行（压缩回执/清空等），与用户气泡同列显示。 */
+  actions: HubMessage[]
 
   openHub(): void
   closeHub(): void
@@ -52,6 +64,14 @@ interface HubState {
   setDraft(agentID: string, text: string): void
   clearError(): void
   clearNotice(): void
+  setInspector(panel: 'tasks' | 'needs' | 'session' | null): void
+  setView(view: 'chat' | 'run'): void
+  loadTasks(): Promise<void>
+  loadNeeds(): Promise<void>
+  cancelTask(taskID: string): Promise<void>
+  retryTask(taskID: string): Promise<void>
+  resolveNeed(needID: string, resolution: string, answers?: Record<string, string>): Promise<void>
+  clearContext(): Promise<void>
   handleEvent(line: string): void
 }
 
@@ -76,10 +96,20 @@ export const useHubStore = create<HubState>((set, get) => ({
   running: {},
   drafts: {},
   failedText: null,
+  inspector: null,
+  tasks: [],
+  tasksLoading: false,
+  needs: [],
+  needsLoading: false,
+  view: 'chat',
+  runLog: [],
+  actions: [],
 
   openHub() {
     set({ open: true })
     void get().refresh()
+    void get().loadTasks()
+    void get().loadNeeds()
   },
 
   closeHub() {
@@ -116,6 +146,8 @@ export const useHubStore = create<HubState>((set, get) => ({
       hasMore: false,
       live: '',
       rootRunId: null,
+      runLog: [],
+      actions: [],
       error: null,
       loading: true,
       // 离开期间的事件没人接：重开会话先假设空闲，运行中的话下面的 chunk 会把它点亮。
@@ -240,6 +272,85 @@ export const useHubStore = create<HubState>((set, get) => ({
     set({ notice: null })
   },
 
+  setInspector(panel) {
+    set({ inspector: panel })
+    if (panel === 'tasks') void get().loadTasks()
+    if (panel === 'needs') void get().loadNeeds()
+  },
+
+  setView(view) {
+    set({ view })
+  },
+
+  async loadTasks() {
+    set({ tasksLoading: true })
+    const r = await hubCommand<{ tasks?: HubTask[] }>('hub_task_list', { limit: 100 })
+    if (!r.ok) {
+      set({ tasksLoading: false, error: r.error || '读取任务失败' })
+      return
+    }
+    set({ tasksLoading: false, tasks: r.data?.tasks ?? [] })
+  },
+
+  async loadNeeds() {
+    set({ needsLoading: true })
+    const r = await hubCommand<{ needs?: HubNeed[] }>('hub_need_list', { status: 'pending' })
+    if (!r.ok) {
+      set({ needsLoading: false, error: r.error || '读取 Needs you 失败' })
+      return
+    }
+    set({ needsLoading: false, needs: r.data?.needs ?? [] })
+  },
+
+  async cancelTask(taskID) {
+    const r = await hubCommand<{ task?: HubTask }>('hub_task_cancel', { task_id: taskID })
+    if (!r.ok) {
+      set({ error: r.error || '取消失败' })
+      return
+    }
+    if (r.data?.task) {
+      set((s) => ({ tasks: s.tasks.map((t) => (t.id === taskID ? (r.data!.task as HubTask) : t)) }))
+    }
+    void get().loadTasks()
+    set({ notice: '已请求取消任务' })
+  },
+
+  async retryTask(taskID) {
+    const r = await hubCommand<{ task?: HubTask }>('hub_task_retry', { task_id: taskID })
+    if (!r.ok) {
+      set({ error: r.error || '重试失败' })
+      return
+    }
+    set({ notice: '已创建重试任务' })
+    void get().loadTasks()
+  },
+
+  async resolveNeed(needID, resolution, answers) {
+    const r = await hubCommand<{ need?: HubNeed }>('hub_need_resolve', { need_id: needID, resolution, answers })
+    if (!r.ok) {
+      set({ error: r.error || '处理失败' })
+      return
+    }
+    if (r.data?.need) {
+      const resolved = r.data.need
+      set((s) => ({ needs: s.needs.filter((n) => n.id !== needID), tasks: s.tasks }))
+      if (resolved.status === 'resolved') set({ notice: '已处理' })
+    }
+    void get().loadNeeds()
+  },
+
+  async clearContext() {
+    const id = get().activeId
+    if (!id) return
+    const r = await hubCommand<{ session_id?: string }>('hub_clear', { target: { kind: 'dm', agent_id: id } })
+    if (!r.ok) {
+      set({ error: r.error || '清空上下文失败' })
+      return
+    }
+    set({ live: '', rootRunId: null, runLog: [], actions: [], notice: '上下文已清空' })
+    if (id) void get().select(id)
+  },
+
   handleEvent(line) {
     let ev: {
       event_type?: string
@@ -254,6 +365,17 @@ export const useHubStore = create<HubState>((set, get) => ({
       content?: string
       text?: string
       status?: string
+      task?: HubTask
+      need?: HubNeed
+      id?: string
+      name?: string
+      is_error?: boolean
+      arguments?: string
+      timestamp?: string
+      ms?: number
+      before?: number
+      after?: number
+      reason?: string
     }
     try {
       ev = JSON.parse(line) as typeof ev
@@ -325,6 +447,70 @@ export const useHubStore = create<HubState>((set, get) => ({
           running: { ...s.running, [activeId]: false },
           live: '', // 纯工具轮/中断没有最终回复：半截流式气泡不能留着
           rootRunId: null,
+        }))
+        return
+      }
+      case 'hub_task_update': {
+        const task = ev.task
+        if (!task?.id) return
+        set((s) => {
+          const rest = s.tasks.filter((t) => t.id !== task.id)
+          return { tasks: [task, ...rest] }
+        })
+        return
+      }
+      case 'hub_need': {
+        const need = ev.need
+        if (!need?.id) return
+        set((s) => {
+          const rest = s.needs.filter((n) => n.id !== need.id)
+          // 已处理/过期的不留在 pending 列表里（但保留事件通知能力由上层决定）。
+          if (need.status && need.status !== 'pending') return { needs: rest }
+          return { needs: [need, ...rest] }
+        })
+        return
+      }
+      case 'tool_run_start':
+      case 'tool_run_end': {
+        if (!sid || (ev.session_id && ev.session_id !== sid)) return
+        const key = ev.id || `${ev.name ?? 'tool'}-${ev.timestamp ?? Date.now()}`
+        const started = ev.event_type === 'tool_run_start'
+        set((s) => {
+          if (started) {
+            if (s.runLog.some((e) => e.id === key)) return {}
+            return {
+              runLog: [...s.runLog, { id: key, kind: 'tool' as const, name: ev.name, status: 'running', at: Date.now() }],
+            }
+          }
+          const next = s.runLog.map((e) =>
+            e.id === key ? { ...e, status: ev.is_error ? 'error' : 'done', ms: e.at ? Date.now() - e.at : undefined } : e,
+          )
+          if (!next.some((e) => e.id === key)) {
+            next.push({ id: key, kind: 'tool', name: ev.name, status: ev.is_error ? 'error' : 'done', at: Date.now() })
+          }
+          return { runLog: next }
+        })
+        return
+      }
+      case 'compress_start': {
+        if (!sid || (ev.session_id && ev.session_id !== sid)) return
+        set((s) => ({
+          runLog: [...s.runLog, { id: `compress-${Date.now()}`, kind: 'compress' as const, name: 'compress', status: 'running', at: Date.now() }],
+        }))
+        return
+      }
+      case 'compress_end': {
+        if (!sid || (ev.session_id && ev.session_id !== sid)) return
+        set((s) => ({
+          runLog: [...s.runLog, {
+            id: `compress-${Date.now()}`, kind: 'compress' as const, name: 'compress', status: 'done',
+            summary: `${ev.before ?? '?'} → ${ev.after ?? '?'}`, at: Date.now(),
+          }],
+          actions: [...s.actions, {
+            seq: -(s.actions.length + 1), sender: { kind: 'system' },
+            text: `上下文已压缩：${ev.before ?? '?'} → ${ev.after ?? '?'} 条`,
+            refs: { action: 'compress' }, created_at: new Date().toISOString(),
+          }],
         }))
         return
       }

@@ -175,3 +175,54 @@ func dispatchClientMsgID(t *Task) string {
 	}
 	return string(t.ID)
 }
+
+// CancelQueued 取消一条仍在 Hub 队列里的任务：先从内存队列摘除，再落 canceled。
+// 非 queued（已派发/已结束）返回 ErrInvalid，由调用方走 interrupt 或幂等返回。
+func (q *Queue) CancelQueued(ctx context.Context, id TaskID) (*Task, error) {
+	if q == nil || q.ledger == nil {
+		return nil, fmt.Errorf("%w: queue 未初始化", ErrInvalid)
+	}
+	id = TaskID(strings.TrimSpace(string(id)))
+	if id == "" {
+		return nil, fmt.Errorf("%w: task_id 不能为空", ErrInvalid)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	t, err := q.ledger.Replay(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status != TaskQueued {
+		return nil, fmt.Errorf("%w: task %s 状态 %q，不能按未开始取消", ErrInvalid, id, t.Status)
+	}
+	key := queueKey(t.Target.Workspace, t.Target.SessionID)
+	q.mu.Lock()
+	ids := q.pending[key]
+	idx := -1
+	for i, v := range ids {
+		if v == id {
+			idx = i
+			break
+		}
+	}
+	q.mu.Unlock()
+	canceled, err := q.ledger.Transition(ctx, id, TaskCanceled, TransitionOptions{
+		At: time.Now().UTC(), Error: "用户取消（未开始）",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if idx >= 0 {
+		q.mu.Lock()
+		// 重新查一次：Transition 期间队首可能已被 Pump 派走（那时 idx 已失效）。
+		cur := q.pending[key]
+		for i, v := range cur {
+			if v == id {
+				q.pending[key] = append(append([]TaskID(nil), cur[:i]...), cur[i+1:]...)
+				break
+			}
+		}
+		q.mu.Unlock()
+	}
+	return canceled, nil
+}

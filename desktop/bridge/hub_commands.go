@@ -68,6 +68,20 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubSend(c)
 	case CmdHubHistory:
 		m.hubHistory(c)
+	case CmdHubTaskList:
+		m.hubTaskList(c)
+	case CmdHubTaskGet:
+		m.hubTaskGet(c)
+	case CmdHubTaskCancel:
+		m.hubTaskCancel(c)
+	case CmdHubTaskRetry:
+		m.hubTaskRetry(c)
+	case CmdHubNeedList:
+		m.hubNeedList(c)
+	case CmdHubNeedResolve:
+		m.hubNeedResolve(c)
+	case CmdHubClear:
+		m.hubClear(c)
 	default:
 		return false
 	}

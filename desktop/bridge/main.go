@@ -327,8 +327,12 @@ type bridgeSession struct {
 	hubTaskIDs []agenthub.TaskID
 	// hubFinishTask 根 AgentEnd 时结算 hub_task（nil = 非项目会话/未接线）。
 	hubFinishTask func(ae *events.AgentEnd)
-	workspace     string     // 工作区根（审批 diff 读取原文件用）
-	mobile        *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// hubNeed 审批/提问事件的 Needs you 钩子（nil = 未接线）。
+	hubNeed func(e events.Event)
+	// hubExpireNeeds 根 run 结束时收掉该会话挂起的 need。
+	hubExpireNeeds func()
+	workspace      string     // 工作区根（审批 diff 读取原文件用）
+	mobile         *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
 	// running 主 run 是否在跑（**根** agent_start → true / 根 agent_end → false）。
 	// 子 agent 的 agent_end 也走同一个 emit，过滤 ParentRunId/Depth，否则根 run 还在跑
 	// 就被标成空闲，Hub 闸门会把任务直派进正在跑的会话（P2-03 复审 B1）。
@@ -697,6 +701,10 @@ func (bs *bridgeSession) emit(e events.Event) {
 		}
 	}
 
+	// Needs you：Hub 智能体/正在执行 hub_task 的会话，审批与提问落成 need（§6.10）。
+	if bs.hubNeed != nil {
+		bs.hubNeed(e)
+	}
 	// 写 stdout 与事件日志用同一行（事件自包含，含注入的 session_id/workspace/run_id/diff/todos）
 	bs.out.writeRaw(injected)
 	// 手机端扇出：复用同一行字节（非阻塞；订阅者慢只丢 chunk，见 mobile_hub.go）
@@ -718,6 +726,15 @@ func (bs *bridgeSession) emit(e events.Event) {
 		bs.runtime.kind == runtimeProject {
 		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
 			bs.hubFinishTask(ae)
+		}
+	}
+	// 根 run 结束：挂起的审批/提问已失效（等待窗口随 run 结束），
+	// 从 Needs you 里收掉，避免永久 pending（Hub DM 与项目会话都要收）。
+	if e.Type() == events.AgentEndType && bs.hubExpireNeeds != nil {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" {
+			// 异步：emit 返回前要交还 run goroutine 记账（session_closed 的 consumed
+			// 在 handler 返回后才 +1），同步扫 need 磁盘会把 shutdown 的快照拖到前面。
+			go bs.hubExpireNeeds()
 		}
 	}
 	// Hub 派发队列：项目会话的**根 run** 结束后推进一步（AgentEnd 已落盘、
@@ -1573,6 +1590,8 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
 	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.pumpHubQueue, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
+	bs.hubNeed = func(e events.Event) { m.recordHubNeed(bs, e) }
+	bs.hubExpireNeeds = func() { m.expireSessionNeeds(bs) }
 	if opts.hub != nil {
 		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：
 		// rebuildLoop 据此走 buildHubLoop，而不会被当成项目会话的 code persona 重建。

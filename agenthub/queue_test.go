@@ -333,3 +333,31 @@ func TestQueueSubmitClientMsgIDIdempotent(t *testing.T) {
 		t.Fatalf("dispatched text = %q, want first submission", ops.dispatched[0].Text)
 	}
 }
+
+// P2-06：取消队列里的任务（未开始）→ canceled 且离开内存队列。
+func TestQueueCancelQueued(t *testing.T) {
+	ops := &queueFakeOps{running: true}
+	q, st := newTestQueue(t, ops)
+	created, err := q.Submit(context.Background(), queueTask("待取消"))
+	if err != nil || created.Status != TaskQueued {
+		t.Fatalf("submit = %+v, %v", created, err)
+	}
+	got, err := q.CancelQueued(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != TaskCanceled {
+		t.Fatalf("status = %s, want canceled", got.Status)
+	}
+	if n := q.QueuedCount("/w", "s1"); n != 0 {
+		t.Fatalf("queued = %d, want 0", n)
+	}
+	led, err := NewLedger(st).Replay(context.Background(), created.ID)
+	if err != nil || led.Status != TaskCanceled {
+		t.Fatalf("ledger = %+v, %v", led, err)
+	}
+	// 已结束/不存在的任务不能再按 queued 取消。
+	if _, err := q.CancelQueued(context.Background(), created.ID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("second cancel err = %v, want ErrInvalid", err)
+	}
+}

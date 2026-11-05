@@ -36,13 +36,16 @@ type TaskFilter struct {
 
 // Need 是 Needs you 的一条待处理项：审批/提问/交接/失败/预算。
 type Need struct {
-	ID         NeedID     `json:"id"`
-	Kind       string     `json:"kind"`   // approval | question | handoff | failure | budget
-	Status     string     `json:"status"` // pending | resolved | expired
-	AgentID    AgentID    `json:"agent_id,omitempty"`
-	GroupID    GroupID    `json:"group_id,omitempty"`
-	TaskID     TaskID     `json:"task_id,omitempty"`
-	SessionID  string     `json:"session_id,omitempty"`
+	ID        NeedID  `json:"id"`
+	Kind      string  `json:"kind"`   // approval | question | handoff | failure | budget
+	Status    string  `json:"status"` // pending | resolved | expired
+	AgentID   AgentID `json:"agent_id,omitempty"`
+	GroupID   GroupID `json:"group_id,omitempty"`
+	TaskID    TaskID  `json:"task_id,omitempty"`
+	SessionID string  `json:"session_id,omitempty"`
+	Workspace string  `json:"workspace,omitempty"`
+	// Anchor 是决策锚：approval 的调用 id / question 的批次 id（hub_need_resolve 用）。
+	Anchor     string     `json:"anchor,omitempty"`
 	Title      string     `json:"title"`
 	Body       string     `json:"body,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
