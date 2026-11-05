@@ -920,10 +920,16 @@
       "reviewNote": "评审 passed（task-cugpdvx2）：L0 关闭、显式 provider 不读全局 active、记忆注入位置、compress 默认值、人格稳定性都经请求字节与 mutation 验证（去 WithBaseSystemPrompt → L0 泄漏；采样改回全局 active → openai 沾上 temperature=1）。评审提的 non-blocking 本轮闭合 3 条：名册缺 Members（会退化成 unknown member）、compress 阈值没行为级断言（改用 AgentLoop.CompressThreshold()，并在装配层再钳 [0.5,0.95]）、PersonaEmptyIsStable 近乎恒真（补「不得出现 ## Identity/空层」断言）。文档写明 D17 只到 Hub 主 loop，派生出的子智能体仍用项目口径（DesktopCodePromptV2/ExploreV2）。遗留（P1-05）：未接 codeAgentTuningFor（postToolNudge/contextSlim/asyncPromoteAfter/first_chunk_timeout）。"
     },
     "P1-03": {
+      "status": "done",
+      "commit": "fbd1435 fix(hub-p1-03): 复核跟进 —— 恢复命令、providerExists 语义、Clone 切片单测",
+      "review": "passed",
+      "reviewNote": "两轮评审收口（task-znddb7bg，最终 passed）：首轮 3 blocking（update 的浅拷贝让归档旧版本被 patch 污染；create 接受客户端 id 并静默覆盖已有智能体；删掉 `p.Version = 1` 无测试失败）→ 227bb93 修复（导出 CloneAgentProfile 深拷贝、create 无条件 AllocateID、create 用例带 version/deleted）→ 复审确认三条全闭合，两个 mutation 均可证伪。复审后跟进（fbd1435）：补 hub_agent_restore（§5.2「可恢复」此前无命令路径）、providerConfigured→providerExists（只判存在不判 key，语义写在注释）、CloneAgentProfile 切片隔离单测。遗留 non-blocking：patch 不拒绝未知字段、hub_agent_list 仍返回完整 profile。"
+    },
+    "P1-04": {
       "status": "review",
-      "commit": "227bb93 fix(hub-p1-03): 复核修复 —— 深拷贝归档、create 不认客户端 id、补齐 mutation 门禁",
+      "commit": "0f29ac6 feat(hub-p1-04): DM 会话生命周期（懒创建/唯一）+ hub_open/send/history + DM 索引",
       "review": "pending",
-      "reviewNote": "首轮 changes_requested（3 blocking：update 的浅拷贝让归档旧版本被 patch 污染（切片底层数组共享）；create 接受客户端 id 并静默覆盖已有智能体；删掉 `p.Version = 1` 无测试失败）→ 227bb93 修复：导出 agenthub.CloneAgentProfile（深拷贝切片）供 update 与版本快照共用；create 无条件忽略客户端 id 走 AllocateID；create 用例带 version/deleted 断言落盘 1/false；顺带 purge 幂等、patch 不能改 deleted、补 MaxAgents 与软删记一版用例。三条 mutation 现在都能失败（去 Version=1 → 7；回退浅拷贝 → 归档数组被污染；去归档 → versions=0）。遗留 non-blocking：providerConfigured 只判存在不判 has_key、patch 不拒绝未知字段、list 返回完整 profile。"
+      "reviewNote": "DM 只有一条会话 hub.<agentID>.dm，懒创建（hub_open 不建会话）、确定性 ID 冷恢复；createIn 新增 sessionOpts.hub 分流（buildHubEngine + buildHubLoop，provider/model 取 Profile，persona=hub）；回复落 DM 索引的钩子挂在 bs.emit（agent_* 事件不走 Session 的 WithEventHandler，实测踩过）；新增 dms/<id>/log.jsonl + cursor.json（seq 重启从磁盘重建、游标只前进）；hub_open/send/history + client_msg_id 幂等 + has_more 多读一条；list 增加 dm 预览/未读（字符截断 80）。顺带修真 bug：manager.get 对 hub home 会造项目 runtime 且 /clear 等命令一律 session not found，新增 hubRuntimeByPath 只查不建。测试：bridge -run HubDM 7 条、agenthub DM 索引 4 条；干净 HOME 下 bridge/agenthub/sandbox 全绿。群组作用域归 P3。"
     }
   }
 }
