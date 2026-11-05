@@ -5144,6 +5144,11 @@ func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort strin
 // loop 构建期捕获 provider + 模型窗口 + 输出上限（按 bs.provider 显式解析，问题六：
 // 跨 Provider 会话不随全局活跃漂移），重建即应用新配置（热切换不重启 bridge）。
 func (m *manager) rebuildLoop(bs *bridgeSession) {
+	// Hub 会话（persona=hub）不在 profiles 表里：必须走 Hub 装配，否则拿到零值
+	// personaProfile —— L1/L2 丢失、工具面按项目重装（P1-05 复审实测）。
+	if bs.persona == "hub" && bs.hubEngine != nil && m.rebuildHubLoop(bs) {
+		return
+	}
 	profile := profiles[bs.persona]
 	ws := bs.runtime
 	if ws == nil {

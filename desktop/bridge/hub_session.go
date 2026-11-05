@@ -479,29 +479,94 @@ func (m *manager) refreshHubLoops(agentID string) error {
 		if bs == nil || bs.ctx.Err() != nil || bs.hubEngine == nil {
 			continue
 		}
-		scope := agenthub.Scope{Kind: agenthub.ScopeDM}
-		if strings.Contains(bs.id, ".g.") {
-			scope = agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: agenthub.GroupID(hubGroupIDFromSID(bs.id))}
-		}
-		// 会话级选择优先：switch_model/switch_effort 改的是 bs.*，Profile 只是默认值。
-		// 直接用 Profile 重建会把人刚切的模型/档位静默改回去，而且 bs.effort 不跟着换
-		// → 面板显示 high、实际跑 low（P1-05 复核 B1）。这里只覆盖 loop 的入参，
-		// **不**回写 bs.*（那是会话状态，不是重建的副作用）。
-		cur := *p
-		if bs.provider != "" {
-			cur.Provider = bs.provider
-		}
-		if bs.model != "" {
-			cur.Model = bs.model
-		}
-		if bs.effort != "" {
-			cur.Effort = bs.effort
-		}
-		spec := m.hubSpecFor(&cur, scope, ws.path)
-		bs.loop = m.buildHubLoop(ws, bs.id, spec, bs.hubEngine)
-		bs.s.SetLoop(bs.loop)
+		m.applyHubSessionLoop(bs, p, ws)
 	}
 	return nil
+}
+
+// applyHubSessionLoop 按 Profile + **会话当前选择**重建一个 Hub 会话的 loop。
+//
+// 会话级选择优先：switch_model/switch_effort 改的是 bs.*，Profile 只是默认值。
+// 直接用 Profile 重建会把人刚切的模型/档位静默改回去，而且 bs.effort 不跟着换
+// → 面板显示 high、实际跑 low（P1-05 复核 B1）。这里只覆盖 loop 的入参，
+// **不**回写 bs.*（那是会话状态，不是重建的副作用）。
+func (m *manager) applyHubSessionLoop(bs *bridgeSession, p *agenthub.AgentProfile, ws *workspaceRuntime) {
+	if bs == nil || p == nil || ws == nil || bs.hubEngine == nil {
+		return
+	}
+	cur := *p
+	if bs.provider != "" {
+		cur.Provider = bs.provider
+	}
+	if bs.model != "" {
+		cur.Model = bs.model
+	}
+	if bs.effort != "" {
+		cur.Effort = bs.effort
+	}
+	spec := m.hubSpecFor(&cur, hubScopeFromSID(bs.id), ws.path)
+	bs.loop = m.buildHubLoop(ws, bs.id, spec, bs.hubEngine)
+	bs.s.SetLoop(bs.loop)
+}
+
+// hubScopeFromSID 从会话 ID 还原作用域（DM / 群）。群会话在 P3 才会创建：
+// 这里只保证重建时不会把群会话错当成 DM。
+func hubScopeFromSID(sid string) agenthub.Scope {
+	if gid := hubGroupIDFromSID(sid); gid != "" {
+		return agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: agenthub.GroupID(gid)}
+	}
+	return agenthub.Scope{Kind: agenthub.ScopeDM}
+}
+
+// hubAgentIDFromSID 从 `hub.<agentID>.dm` / `hub.<agentID>.g.<groupID>` 取 agentID。
+// 取不到返回空串（调用方据此放弃 Hub 路径，而不是瞎猜一个智能体）。
+func hubAgentIDFromSID(sid string) string {
+	const prefix = "hub."
+	if !strings.HasPrefix(sid, prefix) {
+		return ""
+	}
+	rest := sid[len(prefix):]
+	if i := strings.Index(rest, ".g."); i >= 0 {
+		rest = rest[:i]
+	}
+	rest = strings.TrimSuffix(rest, ".dm")
+	if rest == "" || rest == sid {
+		return ""
+	}
+	return rest
+}
+
+// rebuildHubLoop 在 switch_model / switch_effort / set_provider 等重建路径上
+// 把 Hub 会话拉回 Hub 装配（见 rebuildLoop 的同名分支）。
+//
+// 为什么必须单独一条路：`profiles` 表里只有 code/work，Hub 会话的 persona 是 "hub"
+// （main.go 装配时设的）。落到项目分支会取到零值 personaProfile —— L1/L2 提示词丢失、
+// base 回落 DefaultSystemPrompt、工具面按项目重装（P1-05 复审实测：system 2337→3224、
+// tools 30914→14370）。
+func (m *manager) rebuildHubLoop(bs *bridgeSession) bool {
+	if bs == nil || bs.hubEngine == nil {
+		return false
+	}
+	agentID := hubAgentIDFromSID(bs.id)
+	if agentID == "" {
+		return false
+	}
+	p, _, err := m.hubLoadAgent(agentID)
+	if err != nil {
+		// 读不到 profile（软删/文件坏了）：保持现有 loop，绝不回落到项目装配。
+		fmt.Fprintf(os.Stderr, "[hub] rebuild loop for %s: %v\n", agentID, err)
+		return true
+	}
+	ws := bs.runtime
+	if ws == nil {
+		ws = m.hubRuntimeIfExists(agentID)
+	}
+	if ws == nil {
+		fmt.Fprintf(os.Stderr, "[hub] rebuild loop for %s: runtime not assembled\n", agentID)
+		return true
+	}
+	m.applyHubSessionLoop(bs, p, ws)
+	return true
 }
 
 // hubGroupIDFromSID 从 hub.<agent>.g.<groupID> 取群 ID（群会话在 P3 才会创建；
