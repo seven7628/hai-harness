@@ -927,9 +927,15 @@
     },
     "P1-04": {
       "status": "review",
-      "commit": "0f29ac6 feat(hub-p1-04): DM 会话生命周期（懒创建/唯一）+ hub_open/send/history + DM 索引",
+      "commit": "f8b7d2e fix(hub-p1-04): 复核修复 —— 子 agent 事件过滤、DM 装配单例锁、幂等全量、寻址兜底",
       "review": "pending",
-      "reviewNote": "DM 只有一条会话 hub.<agentID>.dm，懒创建（hub_open 不建会话）、确定性 ID 冷恢复；createIn 新增 sessionOpts.hub 分流（buildHubEngine + buildHubLoop，provider/model 取 Profile，persona=hub）；回复落 DM 索引的钩子挂在 bs.emit（agent_* 事件不走 Session 的 WithEventHandler，实测踩过）；新增 dms/<id>/log.jsonl + cursor.json（seq 重启从磁盘重建、游标只前进）；hub_open/send/history + client_msg_id 幂等 + has_more 多读一条；list 增加 dm 预览/未读（字符截断 80）。顺带修真 bug：manager.get 对 hub home 会造项目 runtime 且 /clear 等命令一律 session not found，新增 hubRuntimeByPath 只查不建。测试：bridge -run HubDM 7 条、agenthub DM 索引 4 条；干净 HOME 下 bridge/agenthub/sandbox 全绿。群组作用域归 P3。"
+      "reviewNote": "DM 只有一条会话 hub.<agentID>.dm，懒创建、确定性 ID、回复落独立 DM 索引（dms/<id>/log.jsonl + cursor，seq 重启重建、游标只前进）；hub_open/send/history + client_msg_id 幂等 + has_more 多读一条；list 增加 dm 预览/未读。首轮 review changes_requested：（1）子 agent 的 AgentEnd 也被当成 DM 回复写进索引；（2）hubDMSession 并发会装配出多个会话（createIn 解锁装配期间无二次查表，注释写错）→ f8b7d2e 修复：只认根 run（ParentRunId/Depth）、每智能体装配锁 lockHubAgent；顺带幂等改全量扫描、Ask 成功后才落索引、isHubHomePath 拦 interrupt/delete_session、hub_open 支持 mark_read:false、预览折叠换行。两条 mutation（去过滤/去锁）均能失败。待复审。"
+    },
+    "P1-05": {
+      "status": "review",
+      "commit": "73a9469 feat(hub-p1-05): 记忆隔离 + 面板浏览/编辑（写前备份、下一个 Run 生效）",
+      "review": "pending",
+      "reviewNote": "记忆根 = <hub>/agents/<id>/memory/repos/<id>（不在可写 home 里，防 bash 自删；身份固定 agentID 而非 git —— 智能体 home 不是仓库，走默认解析永远不注入）。路径只允许目录内 .md，绝对路径/../反斜杠/符号链接逃逸全拒（realpathLoose 处理中间目录不存在）。写入先备份到 .backups/（保留 20 份）再 tmp+rename 原子写；命令 hub_agent_memory（清单/读，不存在返回 exists=false）与 hub_agent_memory_write（写→refreshHubLoops 只重建 loop，返回 effective:next_run）；测试 agenthub 6 条 + bridge 6 条（含 A/B 隔离与写后注入文本）。"
     }
   }
 }
