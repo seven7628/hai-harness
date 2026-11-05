@@ -187,6 +187,23 @@ func dispatchClientMsgID(t *Task) string {
 	return string(t.ID)
 }
 
+// Restore 把账本里 queued 的任务放回内存队列（进程重启恢复；不立即派发）。
+// 重复调用幂等：同一 id 只入队一次。
+func (q *Queue) Restore(t *Task) {
+	if q == nil || t == nil || t.Status != TaskQueued {
+		return
+	}
+	key := queueKey(t.Target.Workspace, t.Target.SessionID)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, id := range q.pending[key] {
+		if id == t.ID {
+			return
+		}
+	}
+	q.pending[key] = append(q.pending[key], t.ID)
+}
+
 // CancelQueued 取消一条仍在 Hub 队列里的任务：先从内存队列摘除，再落 canceled。
 // 非 queued（已派发/已结束）返回 ErrInvalid，由调用方走 interrupt 或幂等返回。
 func (q *Queue) CancelQueued(ctx context.Context, id TaskID) (*Task, error) {

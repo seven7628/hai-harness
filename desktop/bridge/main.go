@@ -883,6 +883,8 @@ type manager struct {
 	hubFS *agenthub.FileStore
 	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
 	hubQueue *agenthub.Queue
+	// hubRecovered 进程内只做一次崩溃恢复（在首次 hub_open 时）。
+	hubRecovered bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
 	hubMsgDedup map[string]string
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。

@@ -39,6 +39,9 @@ const (
 
 // dispatchHub 处理 hub_* 命令；不是 hub 命令时返回 false（调用方继续走既有 switch）。
 func (m *manager) dispatchHub(c command) bool {
+	if c.Type == CmdHubOpen {
+		m.ensureHubRecovery()
+	}
 	switch c.Type {
 	case CmdHubAgentCreate:
 		m.hubAgentCreate(c)
