@@ -749,7 +749,7 @@ const BASE = {
         "desktop/app/src/components/hub/HubInspector.tsx",
         "NeedsYouPanel.tsx"
       ],
-      "acceptance": "任务列表/详情/取消/重试；审批与提问路由；失败可见；空态；键盘可达。",
+      "acceptance": "任务列表/详情/取消/重试；审批与提问路由；失败可见；空态；键盘可达。；并把 P1 延期项纳入：DM Chat|Run 切换（复用 Narrative）、系统动作行/压缩回执、第 5 个「会话」tab（运行态/usage/清空上下文/导出）",
       "tests": "npm run lint && npm run test:todos-scope",
       "commit": "feat(hub-p2-06): 任务板与 Needs you"
     },
@@ -1246,10 +1246,10 @@ const BASE = {
       "reviewNote": "两轮评审收口（task-xz2ecw66，最终 passed）：首轮 3 条（B1 写记忆重建 loop 用 Profile 的 model/effort 并回写 bs.* → 用户 switch 的模型/档位被静默改回、面板 high 实际 low；B2 `..` 路径分支未被测试钉住，删掉后 evalWithin 用 (symlink) 文案兜住仍全绿；行为缺口：删 SetLoop 后自带测试仍绿）→ ba07d34 修复：重建前用会话当前 provider/model/effort 覆盖 Profile 副本且不回写 bs.*；坏路径按各自文案断言并 deny (symlink) 兜底；Session.Loop() 只读访问器 + 会话侧断言（loop 记忆分区 == 注入长度）；.backups 设为保留段；hubMemoryConfig 出错不再回落项目记忆根；AgentLoop 补 Model()/ReasoningEffort()。三条 mutation 复核全部被杀；干净副本 go build + agenthub/session/bridge 全绿（-race 亦绿）。复审后收尾（已全部落地）：①switch_model 作用在 Hub DM 会把 hub 装配换成项目 persona（rebuildLoop 不认 persona=hub，既有缺陷，父提交同样复现）；②备份 prune 按完整文件名排序，跨前缀时会删掉刚写的那份备份（数据丢失，单文件用例覆盖不到）；③.backups 保留段大小写敏感；④Profile.Memory.Enabled 仍是死字段（只读全局偏好）。 收尾提交：e79ce9c（备份 prune 改「按被编辑文件分组 + 定长时间戳排序」，跨前缀不再删掉刚写的备份；.backups 保留段 EqualFold）、70f1fa4（MemoryPrefs.Enabled 改 *bool 三态并接线：显式关闭即不注入、预览无 L4，重新打开注入回来；hub_agent_update 保存后重建 loop，阈值/模型/记忆开关都走「下一个 Run 生效」）。仍留记录：硬链接残余风险、seatbelt 关闭时记忆目录不设防、bs.model/provider 无锁（手机端不可达）。"
     },
     "P1-06": {
-      "status": "review",
-      "commit": "3a04d6c feat(hub-p1-06): 人格版本 / 回滚 / 提示词分层预览",
-      "review": "pending",
-      "reviewNote": "agenthub.RenderLayers（L1/L2/L3，RenderSystem 改为拼接、逐字节不变）+ 三个命令：hub_agent_versions（摘要列表，新的在前，不回整份 profile）、hub_agent_rollback（旧版内容落成新版本：当前版先留档、version 递增、深拷贝归档、provider/名字唯一校验、refreshHubLoops 下一个 Run 生效）、hub_agent_prompt_preview（L1–L3 + L4 记忆走装配同一个 hubMemoryInjection，L5 由内核请求期装配并写明）。用例 3 条 + 分层同源断言；三条 mutation（版本不递增 / 不留档 / 不重建 loop）实测均失败。待评审。"
+      "status": "done",
+      "commit": "3a04d6c + ef43657 fix(hub-p1-06/07): 复审收尾",
+      "review": "passed",
+      "reviewNote": "两轮评审收口（task-mrknvfjj 首轮 + ef43657 复审收尾）：提示词预览补齐内核追加的 environment 层（Current Workspace + AGENTS.md）并与 AgentLoop.SystemPromptText() 逐字节同源；total_chars→total_bytes；层号统一 L2 身份；回滚到当前版本 / 非整数 version / 软删回滚边界拒绝；AppendProfileVersion 同版本幂等；预览走 agenthub.RenderLayers，L5 技能清单与工具 schema 明确不复制（内核请求期拼装）。"
     },
     "P1-07": {
       "status": "done",
@@ -1261,25 +1261,25 @@ const BASE = {
       "status": "done",
       "commit": "bf05e53 fix(hub-p1-08/09): 复核修复 —— 草稿/失败/重开、子 agent 过滤、patch 只发改动、回执与回滚提示",
       "review": "passed",
-      "reviewNote": "复审 passed（task-cj3pq6d3，对象 bf05e53）：上一轮 5 条 blocking 全部复验通过 —— 工作区/Hub 草稿跨切换保留、失败保留原文+重试不重复、中途离开回来无 stale live 且终稿齐全、乱序 hub_open 不覆盖、子 agent chunk/agent_end 不串流不熄根点（并做了两条 mutation 证明行为被用例锁住）。非阻塞遗留（已记入 P2 收尾清单）：N1 loadOlder 早退未清 loadingOlder（该 DM 翻历史卡死）；N2 失败气泡无 .failed 样式且下一条消息到达后跳到列表首位；N3 切走后重试入口随 error 消失（原文仍在输入框）；N4 display:none 导致回工作区焦点落 body；N5 非当前 agent 的根 agent_end 被丢弃 → rail 运行环常亮（切回或靠 hub_agent_status）；N6 主 store 仍为 hub.<id>.dm 造幽灵 view（wire 只拦 hub_* 前缀）；N7 HubPage.cursor 类型写成 number（真协议是对象）；N8 .main-surface 布局 CSS 放在 hub.css；N9 同 agent A→B→A 无 token 兜底；N10 e2e/ 未跟踪，B1–B5 无仓库内回归。"
+      "reviewNote": "复审 passed（task-cj3pq6d3，对象 bf05e53）：上一轮 5 条 blocking 全部复验通过 —— 工作区/Hub 草稿跨切换保留、失败保留原文+重试不重复、中途离开回来无 stale live 且终稿齐全、乱序 hub_open 不覆盖、子 agent chunk/agent_end 不串流不熄根点（并做了两条 mutation 证明行为被用例锁住）。非阻塞遗留（已记入 P2 收尾清单）：N1 loadOlder 早退未清 loadingOlder（该 DM 翻历史卡死）；N2 失败气泡无 .failed 样式且下一条消息到达后跳到列表首位；N3 切走后重试入口随 error 消失（原文仍在输入框）；N4 display:none 导致回工作区焦点落 body；N5 非当前 agent 的根 agent_end 被丢弃 → rail 运行环常亮（切回或靠 hub_agent_status）；N6 主 store 仍为 hub.<id>.dm 造幽灵 view（wire 只拦 hub_* 前缀）；N7 HubPage.cursor 类型写成 number（真协议是对象）；N8 .main-surface 布局 CSS 放在 hub.css；N9 同 agent A→B→A 无 token 兜底；N10 e2e/ 未跟踪，B1–B5 无仓库内回归。 延期项（本轮验收已同步收敛）：群组叠图/Needs you → P3a-08；DM Chat|Run 切换（复用 Narrative）与系统动作行 → P2-06；lastTarget 恢复/相对时间/6px 未读点 → P2 前端收尾。"
     },
     "P1-09": {
       "status": "done",
       "commit": "bf05e53 fix(hub-p1-08/09): 复核修复 —— 草稿/失败/重开、子 agent 过滤、patch 只发改动、回执与回滚提示",
       "review": "passed",
-      "reviewNote": "复审 passed（task-syfh4zht，对象 bf05e53）：上一轮 3 条 blocking 全部复验通过，并做了三组 mutation 证明修复有效 —— ①buildAgentPatch 改回整份 profile / 无条件带 tools / 改名顺带 disable:[] 三种都能打红（含浏览器实测 tools.disable 被清空）；②loadMemory 去掉 await 后 120ms 延迟下回执只剩 3/30 次采样可见（原版 ≥1.6s 存活）；③删 rollback confirm 后 `npm run test:hub-patch` 仍全绿 —— 证实回滚确认无回归锁（记 N2）。浏览器实测：改名出站 payload 无 tools、重开工具页 disable 仍在；回执 1.6s 仍在；回滚 confirm+notice「已回滚到第 1 版，当前为第 3 版」；删除后无幽灵行/DM 空态；新建三项校验零请求；busy 时 Esc 不关。非阻塞遗留：N1 test:hub-patch 未挂进 npm test（B1 的唯一自动化锁默认不跑）；N2 回执/回滚/删除清选择三个界面行为零自动化；N3 test-agent-patch.mjs 打印「8/8」硬编码（实际 16 条 assert）；N4 same() 用 JSON.stringify（NaN→null 会静默无效，当前 range 输入不可达）；N5 preset 空串判等；N6 回滚/带 warning 保存后弹层表单仍旧值；N7 custom preset 无 allow 编辑器且切不回 all；N8 busy 时遮罩点击仍可关；N9 写记忆期间 textarea 未禁用（~150ms 窗口丢字）；N10 onSaved→select() 会清正在流式的正文；N11 编辑器 notice 切页签不重置。"
+      "reviewNote": "复审 passed（task-syfh4zht，对象 bf05e53）：上一轮 3 条 blocking 全部复验通过，并做了三组 mutation 证明修复有效 —— ①buildAgentPatch 改回整份 profile / 无条件带 tools / 改名顺带 disable:[] 三种都能打红（含浏览器实测 tools.disable 被清空）；②loadMemory 去掉 await 后 120ms 延迟下回执只剩 3/30 次采样可见（原版 ≥1.6s 存活）；③删 rollback confirm 后 `npm run test:hub-patch` 仍全绿 —— 证实回滚确认无回归锁（记 N2）。浏览器实测：改名出站 payload 无 tools、重开工具页 disable 仍在；回执 1.6s 仍在；回滚 confirm+notice「已回滚到第 1 版，当前为第 3 版」；删除后无幽灵行/DM 空态；新建三项校验零请求；busy 时 Esc 不关。非阻塞遗留：N1 test:hub-patch 未挂进 npm test（B1 的唯一自动化锁默认不跑）；N2 回执/回滚/删除清选择三个界面行为零自动化；N3 test-agent-patch.mjs 打印「8/8」硬编码（实际 16 条 assert）；N4 same() 用 JSON.stringify（NaN→null 会静默无效，当前 range 输入不可达）；N5 preset 空串判等；N6 回滚/带 warning 保存后弹层表单仍旧值；N7 custom preset 无 allow 编辑器且切不回 all；N8 busy 时遮罩点击仍可关；N9 写记忆期间 textarea 未禁用（~150ms 窗口丢字）；N10 onSaved→select() 会清正在流式的正文；N11 编辑器 notice 切页签不重置。 延期项（本轮验收已同步收敛）：第 5 个「会话」tab（运行态/usage/清空上下文/导出）→ P2-06；全工具/MCP server-tool 开关与 provider/model 两级下拉 → P2 前端收尾；记忆注入索引预览/清除记忆 → P2。"
     },
     "P1-10": {
       "status": "review",
-      "commit": "dd3b32d + bc3e103 fix(hub-p1-10): 复审修复",
-      "review": "pending",
-      "reviewNote": "评审 change_requested（task-wjt2u5vs，对象 dd3b32d）。Blocking：B1 Eval1 用测试阈值覆盖生产装配（把 hub_session.go 阈值改 0.99 仍 PASS）、只跑 24 轮（验收 50）；B2 Eval2 只有「A 有/B 无」，缺 B 的正向控制（mutation「只给第一个 agent 注入记忆」存活）；B3 Eval3 只断言 model，provider 硬编码 deepseek 仍 PASS，无 metrics/cost 与反向归属，gpt-5.1 不在预设；B4 资料页改 provider/model/effort 后运行中的 DM 仍用旧值，但响应说 next_run；B5 关闭工具（bash）只影响新装配，运行中 DM 仍能调用，响应同样说 next_run（安全相关）；B6 Hub DM 的 switch_model 改全局 active provider 与 lastModel，波及新工作区会话；B7 P1-08 验收含 Chat|Run/压缩回执但未实现（已改为延期并写入验收）；B8 P1-09 缺会话 tab/全工具与 MCP 开关/provider-model 下拉（已改为延期并写入验收）；B9 看板状态不一致（P1-06 仍是 review/pending）—— 已在 e2365f3/753d373 前修好，本轮复核只针对 dd3b32d。处理计划：修复 B4/B5/B6（代码+回归）→ 重写 B1/B2/B3 评测并做 mutation 自证 → 更新 P1-08/09 验收与 reviewNote 后重评审。 → bc3e103 修复 B4/B5/B6：syncHubSessionProfile（只同步变了的 provider/model/effort，人格-only 保留会话级选择）、refreshHubEngines+reapplyHubToolPolicy（禁用 bash 对运行中 engine 立即生效、放开能恢复；bash_roots/policy 返回 next_session）、Hub switch_model 不再改全局 active/lastModel。B1/B2/B3 重写：Eval1 用 profile 阈值 0.5 并断言 loop 阈值、50 轮、单例指针；Eval2 A/B 各写不同事实双向断言；Eval3 断言 req.Provider、llm_end 条数与反向归属、metrics provider/model/usage。mutation 验证：生产阈值改 0.99 / 只给 A 注入记忆 / provider 硬编码 deepseek / 去掉三处代码修复 —— 全部打红。验证：go build ./... 绿；agenthub + desktop/bridge 全量绿（37.8s）。待复审。"
+      "commit": "dd3b32d + bc3e103 + cd04b56 fix(hub-p1-10): 复审 B-1/B-2",
+      "review": "change_requested",
+      "reviewNote": "评审 change_requested（task-wjt2u5vs，对象 dd3b32d）。Blocking：B1 Eval1 用测试阈值覆盖生产装配（把 hub_session.go 阈值改 0.99 仍 PASS）、只跑 24 轮（验收 50）；B2 Eval2 只有「A 有/B 无」，缺 B 的正向控制（mutation「只给第一个 agent 注入记忆」存活）；B3 Eval3 只断言 model，provider 硬编码 deepseek 仍 PASS，无 metrics/cost 与反向归属，gpt-5.1 不在预设；B4 资料页改 provider/model/effort 后运行中的 DM 仍用旧值，但响应说 next_run；B5 关闭工具（bash）只影响新装配，运行中 DM 仍能调用，响应同样说 next_run（安全相关）；B6 Hub DM 的 switch_model 改全局 active provider 与 lastModel，波及新工作区会话；B7 P1-08 验收含 Chat|Run/压缩回执但未实现（已改为延期并写入验收）；B8 P1-09 缺会话 tab/全工具与 MCP 开关/provider-model 下拉（已改为延期并写入验收）；B9 看板状态不一致（P1-06 仍是 review/pending）—— 已在 e2365f3/753d373 前修好，本轮复核只针对 dd3b32d。处理计划：修复 B4/B5/B6（代码+回归）→ 重写 B1/B2/B3 评测并做 mutation 自证 → 更新 P1-08/09 验收与 reviewNote 后重评审。 → bc3e103 修复 B4/B5/B6：syncHubSessionProfile（只同步变了的 provider/model/effort，人格-only 保留会话级选择）、refreshHubEngines+reapplyHubToolPolicy（禁用 bash 对运行中 engine 立即生效、放开能恢复；bash_roots/policy 返回 next_session）、Hub switch_model 不再改全局 active/lastModel。B1/B2/B3 重写：Eval1 用 profile 阈值 0.5 并断言 loop 阈值、50 轮、单例指针；Eval2 A/B 各写不同事实双向断言；Eval3 断言 req.Provider、llm_end 条数与反向归属、metrics provider/model/usage。mutation 验证：生产阈值改 0.99 / 只给 A 注入记忆 / provider 硬编码 deepseek / 去掉三处代码修复 —— 全部打红。验证：go build ./... 绿；agenthub + desktop/bridge 全量绿（37.8s）。待复审。 → 再复审（task-zb76hzrv）change_requested：B-1 syncHubSessionProfile 按字段独立同步，跨 provider 切模型后只改 model 会留下 openai/deepseek-v4-pro 这类不存在的组合（反向只改 provider 同理）；B-2 bs.provider/model/effort 被 dispatch goroutine 写、run goroutine 每条事件读 → -race 稳定复现 data race；B-3 看板 P1-06 仍 review/pending（此前 e2365f3/753d373 只改了 P1-08/09），\"已修好\"的陈述不成立。非阻塞：混合 patch（bash_roots + disable）会跳过 refreshHubEngines；effort 变更未同步 subagentEffort；skillCaps 能力面未随 model 换代；subagent_explore 的 bash 绕过 Profile 策略（P1-01 既有）；next_session 对 Hub DM 实际等于重启 bridge；P1-08/09 延期项在 reviewNote/任务验收里没有落点；Eval3 是串行不是并发；B6 用例的「新建项目会话」是静态代理。→ cd04b56 修复 B-1（provider/model 成对更新，人格-only 仍不动会话选择；只改 model/只改 provider 双向用例）与 B-2（cfgMu RWMutex + cfgSnapshot/modelCfg/editModelCfg，替换 40 处裸访问；-race 11.8s 全绿），effort 同步 subagentEffort；B-3 本轮看板已把 P1-06 标 done/passed。待复审。"
     },
     "P2-01": {
       "status": "done",
-      "commit": "7b243a7 + 09df959 fix(hub-p2-01): 复审修复",
+      "commit": "7b243a7 + 09df959 + 3e47fc4 fix(hub-p2-01): 复审非阻塞收尾",
       "review": "passed",
-      "reviewNote": "复审 passed（task-34y2nbmp，对象 09df959）：B1 在真实 APFS 上闭合（~/.ssh ≡ ~/.SSH ≡ ~/.Ssh same inode，末段/多段/子路径变体全命中，.ssh2 不误判）；6 条 mutation（旧前缀判敏感/去长度上限/去落盘回滚/去 Hub home 守卫/去敏感目录守卫/去 ~ 展开）全部被现有用例杀死，N7 断言证明 load-bearing；~ 展开后白名单仍生效（~/spaces/../spaces 正确放行，~/SPACE 只会过严不会放过）；N8 的 ENOTDIR → ErrInvalid 实测通过。非阻塞遗留（记入 P2 收尾）：N6 兜底命中后返回 clean 而非命中 key → Dispatch 仍 session not found 且多装配一个 runtime；N2 ListWorkspaces 仍列出 registry 里的敏感目录（knownWorkspace 已拒，列表口径不一致）；N4 只给 add 补了落盘失败回滚，sync/update/remove 仍留幽灵条目；N5 测试缺口：大小写变体在大小写敏感 FS 上 skip（应补与 FS 无关的折叠兜底断言）、N8 无用例、CreateWorkspace 删目录无用例；N1 残留文案（root 配了但目录不存在仍报「未配置」）；N6 agents/Electron 的敏感目录实现仍大小写敏感（既有，与本提交无关）。"
+      "reviewNote": "复审 passed（task-34y2nbmp，对象 09df959）：B1 在真实 APFS 上闭合（~/.ssh ≡ ~/.SSH ≡ ~/.Ssh same inode，末段/多段/子路径变体全命中，.ssh2 不误判）；6 条 mutation（旧前缀判敏感/去长度上限/去落盘回滚/去 Hub home 守卫/去敏感目录守卫/去 ~ 展开）全部被现有用例杀死，N7 断言证明 load-bearing；~ 展开后白名单仍生效（~/spaces/../spaces 正确放行，~/SPACE 只会过严不会放过）；N8 的 ENOTDIR → ErrInvalid 实测通过。非阻塞遗留（记入 P2 收尾）：N6 兜底命中后返回 clean 而非命中 key → Dispatch 仍 session not found 且多装配一个 runtime；N2 ListWorkspaces 仍列出 registry 里的敏感目录（knownWorkspace 已拒，列表口径不一致）；N4 只给 add 补了落盘失败回滚，sync/update/remove 仍留幽灵条目；N5 测试缺口：大小写变体在大小写敏感 FS 上 skip（应补与 FS 无关的折叠兜底断言）、N8 无用例、CreateWorkspace 删目录无用例；N1 残留文案（root 配了但目录不存在仍报「未配置」）；N6 agents/Electron 的敏感目录实现仍大小写敏感（既有，与本提交无关）。 → 3e47fc4 收尾复审非阻塞：knownWorkspace 兜底命中返回原键（不再多装配 runtime）、ListWorkspaces 过滤敏感目录、registry sync/update/remove 落盘失败也回滚、补 ENOTDIR/登记失败删目录/与 FS 无关的大小写折叠断言；验证 agenthub + bridge 全量绿。"
     },
     "P2-02": {
       "status": "review",
