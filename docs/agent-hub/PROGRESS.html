@@ -749,7 +749,7 @@ const BASE = {
         "desktop/app/src/components/hub/HubInspector.tsx",
         "NeedsYouPanel.tsx"
       ],
-      "acceptance": "任务列表/详情/取消/重试；审批与提问路由；失败可见；空态；键盘可达。；并把 P1 延期项纳入：DM Chat|Run 切换（复用 Narrative）、系统动作行/压缩回执、第 5 个「会话」tab（运行态/usage/清空上下文/导出）",
+      "acceptance": "任务列表/详情/取消/重试；审批与提问路由；失败可见；空态；键盘可达。纳入 P1 延期项：① DM Chat|Run 切换（复用 Narrative）+ lastTarget 恢复 + 相对时间 + 6px 未读点；② 系统动作行/压缩回执；③ 第 5 个「会话」tab（运行态/usage/清空上下文/导出）；④ 智能体全工具+MCP 开关与 provider→model 两级下拉；⑤ 记忆注入预览/清除。",
       "tests": "npm run lint && npm run test:todos-scope",
       "commit": "feat(hub-p2-06): 任务板与 Needs you"
     },
@@ -1271,9 +1271,9 @@ const BASE = {
     },
     "P1-10": {
       "status": "review",
-      "commit": "dd3b32d + bc3e103 + cd04b56 fix(hub-p1-10): 复审 B-1/B-2",
-      "review": "change_requested",
-      "reviewNote": "评审 change_requested（task-wjt2u5vs，对象 dd3b32d）。Blocking：B1 Eval1 用测试阈值覆盖生产装配（把 hub_session.go 阈值改 0.99 仍 PASS）、只跑 24 轮（验收 50）；B2 Eval2 只有「A 有/B 无」，缺 B 的正向控制（mutation「只给第一个 agent 注入记忆」存活）；B3 Eval3 只断言 model，provider 硬编码 deepseek 仍 PASS，无 metrics/cost 与反向归属，gpt-5.1 不在预设；B4 资料页改 provider/model/effort 后运行中的 DM 仍用旧值，但响应说 next_run；B5 关闭工具（bash）只影响新装配，运行中 DM 仍能调用，响应同样说 next_run（安全相关）；B6 Hub DM 的 switch_model 改全局 active provider 与 lastModel，波及新工作区会话；B7 P1-08 验收含 Chat|Run/压缩回执但未实现（已改为延期并写入验收）；B8 P1-09 缺会话 tab/全工具与 MCP 开关/provider-model 下拉（已改为延期并写入验收）；B9 看板状态不一致（P1-06 仍是 review/pending）—— 已在 e2365f3/753d373 前修好，本轮复核只针对 dd3b32d。处理计划：修复 B4/B5/B6（代码+回归）→ 重写 B1/B2/B3 评测并做 mutation 自证 → 更新 P1-08/09 验收与 reviewNote 后重评审。 → bc3e103 修复 B4/B5/B6：syncHubSessionProfile（只同步变了的 provider/model/effort，人格-only 保留会话级选择）、refreshHubEngines+reapplyHubToolPolicy（禁用 bash 对运行中 engine 立即生效、放开能恢复；bash_roots/policy 返回 next_session）、Hub switch_model 不再改全局 active/lastModel。B1/B2/B3 重写：Eval1 用 profile 阈值 0.5 并断言 loop 阈值、50 轮、单例指针；Eval2 A/B 各写不同事实双向断言；Eval3 断言 req.Provider、llm_end 条数与反向归属、metrics provider/model/usage。mutation 验证：生产阈值改 0.99 / 只给 A 注入记忆 / provider 硬编码 deepseek / 去掉三处代码修复 —— 全部打红。验证：go build ./... 绿；agenthub + desktop/bridge 全量绿（37.8s）。待复审。 → 再复审（task-zb76hzrv）change_requested：B-1 syncHubSessionProfile 按字段独立同步，跨 provider 切模型后只改 model 会留下 openai/deepseek-v4-pro 这类不存在的组合（反向只改 provider 同理）；B-2 bs.provider/model/effort 被 dispatch goroutine 写、run goroutine 每条事件读 → -race 稳定复现 data race；B-3 看板 P1-06 仍 review/pending（此前 e2365f3/753d373 只改了 P1-08/09），\"已修好\"的陈述不成立。非阻塞：混合 patch（bash_roots + disable）会跳过 refreshHubEngines；effort 变更未同步 subagentEffort；skillCaps 能力面未随 model 换代；subagent_explore 的 bash 绕过 Profile 策略（P1-01 既有）；next_session 对 Hub DM 实际等于重启 bridge；P1-08/09 延期项在 reviewNote/任务验收里没有落点；Eval3 是串行不是并发；B6 用例的「新建项目会话」是静态代理。→ cd04b56 修复 B-1（provider/model 成对更新，人格-only 仍不动会话选择；只改 model/只改 provider 双向用例）与 B-2（cfgMu RWMutex + cfgSnapshot/modelCfg/editModelCfg，替换 40 处裸访问；-race 11.8s 全绿），effort 同步 subagentEffort；B-3 本轮看板已把 P1-06 标 done/passed。待复审。"
+      "commit": "dd3b32d + bc3e103 + cd04b56 + 9985730",
+      "review": "re-review_pending",
+      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。"
     },
     "P2-01": {
       "status": "done",
@@ -1289,9 +1289,9 @@ const BASE = {
     },
     "P2-03": {
       "status": "review",
-      "commit": "c1bcaf7 feat(hub-p2-03): 任务账本 + 空闲闸门 + 派发队列",
-      "review": "pending",
-      "reviewNote": "实现：agenthub.Queue 组合 Ledger + WorkspaceOps。Submit 创建 queued 任务后尝试 Pump；闸门 = 目标 Running 或 Pending>0（Session.PendingCount 由 P0-07 提供，bridge SessionStatus 探针）；忙则留在 Hub 层 FIFO（不写 Session.inbox，避免与人的消息并批）。Pump **每次最多派发一个**：Ask 之后状态可能还没翻转，继续循环会把下一任务塞进同一批（「一个任务 = 一次干净 Run」的关键）。派发失败 dispatched→failed 落账并出队；client_msg_id = task_id（重试幂等）。接线：WorkspaceService.Queue 非空时 Send 走账本并返回 status/queued/真 task_id；buildHubEngine 懒开 hubQueue（失败降级直派）；项目会话根 AgentEnd 后 bridgeSession.hubPumpQueue 推进队列（队列空时不碰存储，避免阻塞 emit/会话账收尾）。测试：agenthub/queue_test 6 条（idle 直派、busy 排队+pump 一次一个、pending 闸门、派发失败落 failed、校验、账本回放）；bridge 2 条（SessionStatus 探针、running 时 session_send 返回 queued 且 pump 后离队）。验证：go build ./...、agenthub、desktop/bridge 全量绿（110s）。已知边界（P2-08）：内存 FIFO 不跨重启；重启后 queued 任务需从账本恢复（P2-08 崩溃恢复）。"
+      "commit": "c1bcaf7 + 0d6ec02 fix(hub-p2-03): 复审三项 blocking —— 闸门数据源/Submit 归属/Transition 顺序",
+      "review": "re-review_pending",
+      "reviewNote": "初审 change_requested（task-q77rzcjp，对象 c1bcaf7）。B1 闸门读 UI 状态点 bs.running：子 agent AgentEnd 清零 → 根 run 在跑却判空闲；takeBatch→AgentStart 窗口同样误判。B2 积压时 Submit 返回队首（别人的账本条目）→ session_send 把错 task_id 交给模型。B3 Pump 先出队再 Transition：失败丢任务、账本仍 queued、永不派发。修复（0d6ec02）：running 只由根 AgentStart/End 翻转 + hubDispatchPending 覆盖派发窗口；Submit 只认自己的 id；Transition 成功后才出队；N1 目标 ErrNotFound → 队首 canceled；N6 队列不可用发 hub_alert；N7 queued 语义写进工具描述。回归：B1 两条、B2、B3、M5（AgentEnd→pump 接线）、N1 各一条。未处理（非阻塞）：Queue 模式丢弃模型给的 client_msg_id（N3）、emit 内同步 pump 代价（N5）、ctx/超时（N8）、重启 queued 可视化归 P2-08。验证：agenthub + desktop/bridge 全量绿（40s）。"
     },
     "P2-04": {
       "status": "review",
