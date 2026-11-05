@@ -3731,12 +3731,31 @@ type Dispatch struct {
     AgentEndAt   time.Time `json:"agent_end_at,omitempty"`
 }
 
+type Usage struct {
+    Input        int64   `json:"input"`
+    Output       int64   `json:"output"`
+    CacheRead    int64   `json:"cache_read"`
+    CacheWrite   int64   `json:"cache_write"`
+    CacheWrite1h int64   `json:"cache_write_1h"`
+    Reasoning    int64   `json:"reasoning"`
+    CostUSD      float64 `json:"cost_usd,omitempty"`
+}
+
+type Artifact struct {
+    Name    string `json:"name"`
+    Path    string `json:"path"`
+    Kind    string `json:"kind"`
+    Added   int    `json:"added,omitempty"`
+    Removed int    `json:"removed,omitempty"`
+    Size    int64  `json:"size,omitempty"`
+}
+
 type TaskResult struct {
-    FinishReason string           `json:"finish_reason,omitempty"`
-    Summary      string           `json:"summary,omitempty"`
-    Artifacts    []core.Artifact  `json:"artifacts,omitempty"`
-    Usage        core.Usage       `json:"usage,omitempty"`
-    Error        string           `json:"error,omitempty"`
+    FinishReason string     `json:"finish_reason,omitempty"`
+    Summary      string     `json:"summary,omitempty"`
+    Artifacts    []Artifact `json:"artifacts,omitempty"`
+    Usage        Usage      `json:"usage"`
+    Error        string     `json:"error,omitempty"`
 }
 
 type Task struct {
@@ -3761,7 +3780,9 @@ type Task struct {
 }
 ```
 
-> 说明：JSON tag 是协议的一部分，前端 `transport/types.ts` 镜像这些字段；改名必须同步。
+> `Usage`/`Artifact` 是 agenthub 自己的 JSON DTO；bridge 结算时从 `core.Usage`/`core.Artifact`
+> 映射，避免把 core 的无 tag 字段直接写进账本。JSON tag 是协议的一部分，前端
+> `transport/types.ts` 镜像这些字段；改名必须同步。
 
 ### 17.3 存储接口（计划）
 

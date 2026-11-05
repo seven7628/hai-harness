@@ -350,10 +350,14 @@ const BASE = {
       "title": "agenthub 包骨架与领域类型",
       "deps": [],
       "files": [
+        "agenthub/doc.go",
         "agenthub/profile.go",
         "agenthub/group.go",
         "agenthub/message.go",
-        "agenthub/ids.go"
+        "agenthub/task.go",
+        "agenthub/ids.go",
+        "agenthub/types_test.go",
+        "agenthub/ids_test.go"
       ],
       "acceptance": "Profile/Group/Message/Task 类型可编译；JSON 往返稳定；ID 可注入随机源；包不 import desktop。",
       "tests": "go test ./agenthub/...",
