@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -57,10 +58,11 @@ func TestTaskStatusTable(t *testing.T) {
 		{TaskQueued, TaskQueued, true},
 		{TaskQueued, TaskRunning, false},
 		{TaskDispatched, TaskRunning, true},
+		{TaskDispatched, TaskDeclined, true},
 		{TaskDispatched, TaskCompleted, true},
 		{TaskDispatched, TaskDelivered, false},
 		{TaskRunning, TaskCompleted, true},
-		{TaskRunning, TaskCanceled, false},
+		{TaskRunning, TaskCanceled, true},
 		{TaskCompleted, TaskDelivered, true},
 		{TaskCompleted, TaskRunning, false},
 		{TaskDelivered, TaskCompleted, false},
@@ -284,5 +286,169 @@ func TestLedgerReplayWithoutSnapshot(t *testing.T) {
 
 	if _, err := ledger.Replay(ctx, "task_missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Replay missing err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLedgerMarkNotifiedRequiresSettled(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	ledger := NewLedger(store)
+	task, err := ledger.Create(ctx, ledgerTask("task_dddddd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(ctx, task.ID, TaskDispatched, TransitionOptions{RunID: "run_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(ctx, task.ID, TaskRunning, TransitionOptions{RunID: "run_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.MarkNotified(ctx, task.ID, "run_1"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("mark before finish err = %v, want ErrConflict", err)
+	}
+	if _, err := ledger.Finish(ctx, FinishInput{TaskID: task.ID, RunID: "run_1", Status: TaskCompleted}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := ledger.MarkNotified(ctx, task.ID, "run_1")
+	if err != nil || !ok {
+		t.Fatalf("mark after finish = %v, %v", ok, err)
+	}
+}
+
+func TestLedgerFinishRunIDAndReplayEquality(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	ledger := NewLedger(store)
+	task, err := ledger.Create(ctx, ledgerTask("task_eeeeee"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(ctx, task.ID, TaskDispatched, TransitionOptions{RunID: "run_old"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(ctx, task.ID, TaskRunning, TransitionOptions{RunID: "run_old"}); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := ledger.Finish(ctx, FinishInput{
+		TaskID: task.ID, RunID: "run_new", Status: TaskCompleted,
+		Result: &TaskResult{Summary: "authoritative"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Dispatch.RunID != "run_new" || len(finished.SupersededRuns) != 1 || finished.SupersededRuns[0] != "run_old" {
+		t.Fatalf("superseded = %#v, dispatch = %#v", finished.SupersededRuns, finished.Dispatch)
+	}
+	loaded, err := store.LoadTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := ledger.Replay(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded, replayed) {
+		t.Fatalf("Replay != LoadTask:\n loaded: %#v\nreplay: %#v", loaded, replayed)
+	}
+	if _, err := ledger.Finish(ctx, FinishInput{TaskID: task.ID, RunID: "", Status: TaskCompleted}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty run finish err = %v", err)
+	}
+}
+
+func TestLedgerTwoInstancesMarkNotifiedOnce(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	l1 := NewLedger(store)
+	l2 := NewLedger(store)
+	task, err := l1.Create(ctx, ledgerTask("task_ffffff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l1.Transition(ctx, task.ID, TaskDispatched, TransitionOptions{RunID: "run_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l1.Transition(ctx, task.ID, TaskRunning, TransitionOptions{RunID: "run_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l1.Finish(ctx, FinishInput{TaskID: task.ID, RunID: "run_1", Status: TaskCompleted}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	first := 0
+	for i := 0; i < 16; i++ {
+		l := l1
+		if i%2 == 1 {
+			l = l2
+		}
+		wg.Add(1)
+		go func(l *Ledger) {
+			defer wg.Done()
+			ok, err := l.MarkNotified(ctx, task.ID, "run_1")
+			if err != nil {
+				t.Errorf("MarkNotified: %v", err)
+				return
+			}
+			if ok {
+				mu.Lock()
+				first++
+				mu.Unlock()
+			}
+		}(l)
+	}
+	wg.Wait()
+	if first != 1 {
+		t.Fatalf("cross-ledger first notifications = %d, want 1", first)
+	}
+}
+
+type failingAppendStore struct {
+	Store
+	fail bool
+}
+
+func (s *failingAppendStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) (int64, error) {
+	if s.fail {
+		return 0, errors.New("injected append failure")
+	}
+	return s.Store.AppendTaskEvent(ctx, id, ev)
+}
+
+func TestLedgerAppendFailureRollsBack(t *testing.T) {
+	ctx := context.Background()
+	store := &failingAppendStore{Store: NewMemoryStore()}
+	ledger := NewLedger(store)
+	task, err := ledger.Create(ctx, ledgerTask("task_gggggg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(ctx, task.ID, TaskDispatched, TransitionOptions{RunID: "run_1"}); err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
+	if _, err := ledger.Transition(ctx, task.ID, TaskRunning, TransitionOptions{RunID: "run_1"}); err == nil {
+		t.Fatal("expected injected append failure")
+	}
+	loaded, err := store.LoadTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != TaskDispatched {
+		t.Fatalf("snapshot not rolled back: %q", loaded.Status)
+	}
+	store.fail = false
+	if _, err := ledger.Transition(ctx, task.ID, TaskRunning, TransitionOptions{RunID: "run_1"}); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := ledger.Replay(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = store.LoadTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded, replayed) {
+		t.Fatalf("Replay after rollback != LoadTask:\n loaded: %#v\nreplay: %#v", loaded, replayed)
 	}
 }

@@ -121,6 +121,7 @@ type Task struct {
 	Result          *TaskResult `json:"result,omitempty"`
 	Error           string      `json:"error,omitempty"`
 	NotifiedRuns    []string    `json:"notified_run_ids,omitempty"`
+	SupersededRuns  []string    `json:"superseded_run_ids,omitempty"`
 	HumanIntervened bool        `json:"human_intervened"`
 	CreatedAt       time.Time   `json:"created_at"`
 	UpdatedAt       time.Time   `json:"updated_at"`
@@ -168,10 +169,12 @@ func (s TaskStatus) CanTransition(to TaskStatus) bool {
 		return to == TaskDispatched || to == TaskCanceled || to == TaskBlockedBudget || to == TaskDeclined
 	case TaskDispatched:
 		// completed/failed 也允许：某些 AgentEnd 可能早于 AgentStart 观测。
+		// declined 对应 Ask 已投递后目标拒绝。
 		return to == TaskRunning || to == TaskCompleted || to == TaskFailed ||
-			to == TaskInterrupted || to == TaskCanceled || to == TaskBlockedBudget
+			to == TaskInterrupted || to == TaskCanceled || to == TaskBlockedBudget || to == TaskDeclined
 	case TaskRunning:
-		return to == TaskCompleted || to == TaskFailed || to == TaskInterrupted
+		// canceled 保留给显式 task_cancel；人工 interrupt 仍应走 interrupted。
+		return to == TaskCompleted || to == TaskFailed || to == TaskInterrupted || to == TaskCanceled
 	case TaskCompleted, TaskFailed, TaskInterrupted:
 		return to == TaskDelivered
 	default:
@@ -224,6 +227,20 @@ func (t *Task) Validate() error {
 	}
 	if !hasID || !hasRoot {
 		return fmt.Errorf("%w: task.chain must contain id and root_task_id", ErrInvalid)
+	}
+	if t.Chain[0] != t.RootTaskID {
+		return fmt.Errorf("%w: task.chain[0] must be root_task_id", ErrInvalid)
+	}
+	if t.ParentTaskID != "" {
+		parentInChain := false
+		for _, id := range t.Chain {
+			if id == t.ParentTaskID {
+				parentInChain = true
+			}
+		}
+		if !parentInChain {
+			return fmt.Errorf("%w: task.parent_task_id must be in chain", ErrInvalid)
+		}
 	}
 	if !t.Status.Valid() {
 		return fmt.Errorf("%w: task.status %q is invalid", ErrInvalid, t.Status)

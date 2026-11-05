@@ -555,6 +555,7 @@ func cloneTask(t *Task) *Task {
 	cp := *t
 	cp.Chain = append([]TaskID(nil), t.Chain...)
 	cp.NotifiedRuns = cloneStrings(t.NotifiedRuns)
+	cp.SupersededRuns = cloneStrings(t.SupersededRuns)
 	cp.Dispatch = cloneDispatch(t.Dispatch)
 	if t.Result != nil {
 		result := *t.Result

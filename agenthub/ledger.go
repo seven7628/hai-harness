@@ -35,16 +35,24 @@ type FinishInput struct {
 	At              time.Time
 }
 
-// Ledger 是任务账本的读写入口：快照 + events.jsonl，进程内串行化。
+// Ledger 是任务账本的读写入口。锁按 task_id 全局共享，
+// 保证同一进程内多个 Ledger（hub/bridge）不会重复回推同一个 run。
 type Ledger struct {
 	store Store
-	mu    sync.Mutex
 }
 
 // NewLedger 绑定一个 Store。
 func NewLedger(store Store) *Ledger { return &Ledger{store: store} }
 
+var ledgerTaskLocks sync.Map // map[TaskID]*sync.Mutex
+
+func ledgerTaskLock(id TaskID) *sync.Mutex {
+	v, _ := ledgerTaskLocks.LoadOrStore(id, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 // Create 创建任务快照与 created 事件；ID 为空时由 Store 分配。
+// 事件先写：即使快照写失败，created 事件里的完整快照仍可被 Replay 恢复。
 func (l *Ledger) Create(ctx context.Context, t *Task) (*Task, error) {
 	if l == nil || l.store == nil {
 		return nil, fmt.Errorf("%w: ledger has no store", ErrInvalid)
@@ -52,9 +60,6 @@ func (l *Ledger) Create(ctx context.Context, t *Task) (*Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	if t == nil {
 		return nil, fmt.Errorf("%w: task is nil", ErrInvalid)
 	}
@@ -65,10 +70,16 @@ func (l *Ledger) Create(ctx context.Context, t *Task) (*Task, error) {
 		}
 		t.ID = TaskID(id)
 	}
-	now := time.Now().UTC()
-	if t.Status == "" {
-		t.Status = TaskQueued
+	if t.Status != "" && t.Status != TaskQueued {
+		return nil, fmt.Errorf("%w: new task must start queued, got %q", ErrInvalid, t.Status)
 	}
+
+	lock := ledgerTaskLock(t.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	now := time.Now().UTC()
+	t.Status = TaskQueued
 	if t.RootTaskID == "" {
 		t.RootTaskID = t.ID
 	}
@@ -93,12 +104,17 @@ func (l *Ledger) Create(ctx context.Context, t *Task) (*Task, error) {
 	}
 	if _, err := l.store.LoadTask(ctx, t.ID); err == nil {
 		return nil, fmt.Errorf("%w: task %s already exists", ErrConflict, t.ID)
-	} else if !errorsIsNotFound(err) {
+	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	if err := l.store.SaveTask(ctx, t); err != nil {
+	events, err := l.store.ReadTaskEvents(ctx, t.ID)
+	if err != nil {
 		return nil, err
 	}
+	if len(events) > 0 {
+		return nil, fmt.Errorf("%w: task %s already has events", ErrConflict, t.ID)
+	}
+
 	ev := TaskEvent{
 		TaskID: t.ID,
 		Type:   TaskEventCreated,
@@ -108,10 +124,13 @@ func (l *Ledger) Create(ctx context.Context, t *Task) (*Task, error) {
 	if _, err := l.store.AppendTaskEvent(ctx, t.ID, ev); err != nil {
 		return nil, err
 	}
+	if err := l.store.SaveTask(ctx, t); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
-// Transition 校验并落盘一次状态迁移；同状态重放是 no-op（不追加事件）。
+// Transition 校验并落盘一次状态迁移；同状态重放不追加事件（除非显式补 RunID/结果）。
 func (l *Ledger) Transition(ctx context.Context, id TaskID, to TaskStatus, opts TransitionOptions) (*Task, error) {
 	if l == nil || l.store == nil {
 		return nil, fmt.Errorf("%w: ledger has no store", ErrInvalid)
@@ -119,44 +138,53 @@ func (l *Ledger) Transition(ctx context.Context, id TaskID, to TaskStatus, opts 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	lock := ledgerTaskLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 
 	t, err := l.store.LoadTask(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if t.Status == to {
-		return t, nil
-	}
 	at := opts.At
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
+	if t.Status == to {
+		if opts.RunID == "" && opts.Result == nil && opts.Error == "" && opts.HumanIntervened == nil {
+			return t, nil
+		}
+		if opts.RunID != "" && t.Dispatch.RunID == opts.RunID && opts.Result == nil && opts.Error == "" && opts.HumanIntervened == nil {
+			return t, nil
+		}
+		prev := cloneTask(t)
+		applyTransitionFields(t, to, opts, at)
+		t.UpdatedAt = at
+		if err := l.saveAndAppend(ctx, prev, t, string(to), opts.RunID, opts.Result, opts.Error, opts.HumanIntervened, at); err != nil {
+			return nil, err
+		}
+		return t, nil
+	}
+
+	prev := cloneTask(t)
 	if err := t.Transition(to, at); err != nil {
 		return nil, err
 	}
 	applyTransitionFields(t, to, opts, at)
-	if err := l.store.SaveTask(ctx, t); err != nil {
-		return nil, err
-	}
-	ev := TaskEvent{
-		TaskID: t.ID,
-		Type:   string(to),
-		At:     at,
-		Data:   taskEventData(nil, to, opts.RunID, opts.Result, opts.Error, opts.HumanIntervened),
-	}
-	if _, err := l.store.AppendTaskEvent(ctx, t.ID, ev); err != nil {
+	if err := l.saveAndAppend(ctx, prev, t, string(to), opts.RunID, opts.Result, opts.Error, opts.HumanIntervened, at); err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
 // Finish 把 AgentEnd 结算进账本；不负责回推，回推后再调 MarkNotified。
-// 同一状态重复 Finish 幂等，不追加事件。
+// 同一状态重复 Finish 幂等；若携带新的 Result/Error，则更新快照。
 func (l *Ledger) Finish(ctx context.Context, in FinishInput) (*Task, error) {
 	if in.Status != TaskCompleted && in.Status != TaskFailed && in.Status != TaskInterrupted {
 		return nil, fmt.Errorf("%w: finish status %q must be completed/failed/interrupted", ErrInvalid, in.Status)
+	}
+	if in.RunID == "" {
+		return nil, fmt.Errorf("%w: finish run_id is required", ErrInvalid)
 	}
 	if l == nil || l.store == nil {
 		return nil, fmt.Errorf("%w: ledger has no store", ErrInvalid)
@@ -164,22 +192,53 @@ func (l *Ledger) Finish(ctx context.Context, in FinishInput) (*Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	lock := ledgerTaskLock(in.TaskID)
+	lock.Lock()
+	defer lock.Unlock()
 
 	t, err := l.store.LoadTask(ctx, in.TaskID)
 	if err != nil {
 		return nil, err
 	}
-	if t.Status == in.Status {
-		return t, nil
-	}
-	if err := t.Transition(in.Status, in.At); err != nil {
-		return nil, err
-	}
 	now := in.At
 	if now.IsZero() {
 		now = time.Now().UTC()
+	}
+	prev := cloneTask(t)
+	if t.Status == in.Status {
+		changed := false
+		if in.Result != nil {
+			t.Result = in.Result
+			changed = true
+		}
+		if in.Error != "" && t.Error != in.Error {
+			t.Error = in.Error
+			changed = true
+		}
+		if t.HumanIntervened != in.HumanIntervened {
+			t.HumanIntervened = in.HumanIntervened
+			changed = true
+		}
+		if t.Dispatch.AgentEndAt == nil {
+			t.Dispatch.AgentEndAt = &now
+			changed = true
+		}
+		if t.Dispatch.RunID != "" && t.Dispatch.RunID != in.RunID {
+			t.SupersededRuns = appendUniqueString(t.SupersededRuns, t.Dispatch.RunID)
+			t.Dispatch.RunID = in.RunID
+			changed = true
+		}
+		if !changed {
+			return t, nil
+		}
+		t.UpdatedAt = now
+		if err := l.saveAndAppend(ctx, prev, t, string(in.Status), in.RunID, in.Result, in.Error, &in.HumanIntervened, now); err != nil {
+			return nil, err
+		}
+		return t, nil
+	}
+	if err := t.Transition(in.Status, now); err != nil {
+		return nil, err
 	}
 	t.Result = in.Result
 	t.Error = in.Error
@@ -187,27 +246,19 @@ func (l *Ledger) Finish(ctx context.Context, in FinishInput) (*Task, error) {
 	if t.Dispatch.AgentEndAt == nil {
 		t.Dispatch.AgentEndAt = &now
 	}
-	if in.RunID != "" {
-		t.Dispatch.RunID = in.RunID
+	if t.Dispatch.RunID != "" && t.Dispatch.RunID != in.RunID {
+		t.SupersededRuns = appendUniqueString(t.SupersededRuns, t.Dispatch.RunID)
 	}
-	if err := l.store.SaveTask(ctx, t); err != nil {
-		return nil, err
-	}
-	human := in.HumanIntervened
-	ev := TaskEvent{
-		TaskID: t.ID,
-		Type:   string(in.Status),
-		At:     now,
-		Data:   taskEventData(nil, in.Status, in.RunID, in.Result, in.Error, &human),
-	}
-	if _, err := l.store.AppendTaskEvent(ctx, t.ID, ev); err != nil {
+	t.Dispatch.RunID = in.RunID
+	if err := l.saveAndAppend(ctx, prev, t, string(in.Status), in.RunID, in.Result, in.Error, &in.HumanIntervened, now); err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
 // MarkNotified 原子记录 (task_id, run_id)；返回 true 表示第一次标记、可以回推。
-// 已标记过的 run 返回 false，调用方不得重复 PushTaskResult。
+// 只有已结算（completed/failed/interrupted/delivered）的任务才能占幂等键；
+// 先 notify 后 finish 会留下永远无法回推的键，必须拒绝。
 func (l *Ledger) MarkNotified(ctx context.Context, id TaskID, runID string) (bool, error) {
 	if runID == "" {
 		return false, fmt.Errorf("%w: notified run_id is empty", ErrInvalid)
@@ -218,18 +269,25 @@ func (l *Ledger) MarkNotified(ctx context.Context, id TaskID, runID string) (boo
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	lock := ledgerTaskLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 
 	t, err := l.store.LoadTask(ctx, id)
 	if err != nil {
 		return false, err
+	}
+	switch t.Status {
+	case TaskCompleted, TaskFailed, TaskInterrupted, TaskDelivered:
+	default:
+		return false, fmt.Errorf("%w: task %s status %q is not settled", ErrConflict, id, t.Status)
 	}
 	for _, r := range t.NotifiedRuns {
 		if r == runID {
 			return false, nil
 		}
 	}
+	prev := cloneTask(t)
 	now := time.Now().UTC()
 	t.NotifiedRuns = append(t.NotifiedRuns, runID)
 	if t.Status == TaskCompleted || t.Status == TaskFailed || t.Status == TaskInterrupted {
@@ -238,23 +296,14 @@ func (l *Ledger) MarkNotified(ctx context.Context, id TaskID, runID string) (boo
 		}
 	}
 	t.UpdatedAt = now
-	if err := l.store.SaveTask(ctx, t); err != nil {
-		return false, err
-	}
-	ev := TaskEvent{
-		TaskID: t.ID,
-		Type:   TaskEventNotified,
-		At:     now,
-		Data:   taskEventData(nil, t.Status, runID, nil, "", nil),
-	}
-	if _, err := l.store.AppendTaskEvent(ctx, t.ID, ev); err != nil {
+	if err := l.saveAndAppend(ctx, prev, t, TaskEventNotified, runID, nil, "", nil, now); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// Replay 从 events.jsonl 重放任务快照；created 事件带初始快照，后续事件是增量。
-// 快照缺失/损坏时，只要 events 完整仍可恢复；没有任何事件时回落到 LoadTask。
+// Replay 从 events.jsonl 重放任务快照。每个事件都带完整 Task 快照；
+// 若快照文件比事件更新（上次 append 失败），取 UpdatedAt 较新的那份，避免静默分叉。
 func (l *Ledger) Replay(ctx context.Context, id TaskID) (*Task, error) {
 	if l == nil || l.store == nil {
 		return nil, fmt.Errorf("%w: ledger has no store", ErrInvalid)
@@ -262,17 +311,30 @@ func (l *Ledger) Replay(ctx context.Context, id TaskID) (*Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	lock := ledgerTaskLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 
+	snap, snapErr := l.store.LoadTask(ctx, id)
+	if snapErr != nil && !errors.Is(snapErr, ErrNotFound) {
+		return nil, snapErr
+	}
 	events, err := l.store.ReadTaskEvents(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	var t *Task
 	if len(events) == 0 {
-		return l.store.LoadTask(ctx, id)
+		if snapErr != nil {
+			return nil, snapErr
+		}
+		return snap, nil
 	}
+
+	var t *Task
+	if snapErr == nil {
+		t = cloneTask(snap)
+	}
+	hasCreated := false
 	for _, ev := range events {
 		var p taskEventPayload
 		if len(ev.Data) > 0 {
@@ -284,18 +346,20 @@ func (l *Ledger) Replay(ctx context.Context, id TaskID) (*Task, error) {
 				return nil, fmt.Errorf("%w: task event %s: %v", ErrCorrupt, id, err)
 			}
 		}
-		if p.Task != nil {
-			t = p.Task
-		}
-		if t == nil {
-			t = &Task{ID: id}
-		}
 		if ev.Type == TaskEventCreated {
 			if p.Task == nil {
 				return nil, fmt.Errorf("%w: created event %s has no snapshot", ErrCorrupt, id)
 			}
+			hasCreated = true
+			t = p.Task
 			t.ID = id
-		} else {
+		} else if p.Task != nil {
+			t = p.Task
+		}
+		if t == nil {
+			return nil, fmt.Errorf("%w: task event %s has no base snapshot", ErrCorrupt, id)
+		}
+		if ev.Type != TaskEventCreated {
 			if p.Status != "" {
 				t.Status = p.Status
 			}
@@ -321,6 +385,12 @@ func (l *Ledger) Replay(ctx context.Context, id TaskID) (*Task, error) {
 	}
 	if t == nil {
 		return nil, ErrNotFound
+	}
+	if !hasCreated && snapErr != nil {
+		return nil, fmt.Errorf("%w: task %s events have no created snapshot", ErrCorrupt, id)
+	}
+	if snapErr == nil && snap.UpdatedAt.After(t.UpdatedAt) {
+		return snap, nil
 	}
 	return t, nil
 }
@@ -389,6 +459,27 @@ func applyTransitionFields(t *Task, to TaskStatus, opts TransitionOptions, at ti
 	}
 }
 
+// saveAndAppend 先原子写快照，再追加事件；append 失败时回滚快照，避免半状态。
+func (l *Ledger) saveAndAppend(ctx context.Context, prev, t *Task, evType string, runID string, result *TaskResult, errMsg string, human *bool, at time.Time) error {
+	if err := l.store.SaveTask(ctx, t); err != nil {
+		return err
+	}
+	ev := TaskEvent{
+		TaskID: t.ID,
+		Type:   evType,
+		At:     at,
+		Data:   taskEventData(t, t.Status, runID, result, errMsg, human),
+	}
+	if _, err := l.store.AppendTaskEvent(ctx, t.ID, ev); err != nil {
+		// best effort：事件是审计源，不能让快照永久领先。
+		if prev != nil {
+			_ = l.store.SaveTask(ctx, prev)
+		}
+		return err
+	}
+	return nil
+}
+
 func appendUniqueString(in []string, s string) []string {
 	if s == "" {
 		return in
@@ -399,8 +490,4 @@ func appendUniqueString(in []string, s string) []string {
 		}
 	}
 	return append(in, s)
-}
-
-func errorsIsNotFound(err error) bool {
-	return errors.Is(err, ErrNotFound)
 }

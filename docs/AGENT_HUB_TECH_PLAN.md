@@ -1701,7 +1701,7 @@ func (bs *bridgeSession) finishHubTask(ae *events.AgentEnd) {
 
 - `notified_run_ids` 记录已回推的 run；同一 run 的 AgentEnd 重放（事件日志恢复/暖恢复）不会二次投递。
 - `BindRun` 记录 `run_id`；如果 AgentEnd 的 `RunId` 与绑定不一致（Session 内部重跑），
-  仍结算，但把旧 run 标记 `superseded`（不重复回推）。
+  仍结算，但把旧 run 记入 `superseded_run_ids`（不重复回推）。
 - 任务账本是快照 + 事件流；`events.jsonl` 是审计源，快照损坏时重放恢复。
 
 #### 6.7.5 人工介入
@@ -3804,6 +3804,7 @@ type Task struct {
     Result       *TaskResult `json:"result,omitempty"`
     Error        string     `json:"error,omitempty"`
     NotifiedRuns []string   `json:"notified_run_ids,omitempty"`
+    SupersededRuns []string `json:"superseded_run_ids,omitempty"` // AgentEnd RunId 与绑定不一致
     HumanIntervened bool    `json:"human_intervened"`
     CreatedAt    time.Time  `json:"created_at"`
     UpdatedAt    time.Time  `json:"updated_at"`
