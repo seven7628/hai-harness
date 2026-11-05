@@ -1253,15 +1253,15 @@ const BASE = {
     },
     "P1-08": {
       "status": "review",
-      "commit": "a8ec18f feat(hub-p1-08): Hub surface + Hub Rail + DM 视图",
+      "commit": "bf05e53 fix(hub-p1-08/09): 复核修复 —— 草稿/失败/重开、子 agent 过滤、patch 只发改动、回执与回滚提示",
       "review": "pending",
-      "reviewNote": "新 surface（hubOpen 时整屏 HubSurface，工作区三栏/Statusbar 收起；左栏展开态与 rail 各一个入口）。Hub Rail：头像/名字/最后预览/未读/运行环，排序「未读→最近→名字」。DM 视图：头部（角色·provider·model + 运行点 + 编辑）、消息区（人右对齐、智能体不重复头像、空态用 role/description）、Composer（Enter/Shift+Enter）、content_chunk 流式 + 思考中、短内容贴底。状态独立 useHubStore（Hub session_id 与工作区会话两套语义），command id 从 5,000,000 起避免与主 store 串响应；乐观发送按 client_msg_id/seq 落定，失败撤下并显示错误。mock 实现 hub_agent_list/open/history/send（两个演示智能体 + 流式回复）。验证：tsc/eslint/vite build 全过；vite(5211)+Playwright 实测 rail 2 行、点开 DM、发送后流式到终稿、rail 预览更新、无 console error，截图确认撑满右侧与贴底。待评审。"
+      "reviewNote": "首轮 changes_requested（task-9se5fqef）5 条 blocking：B1 切 surface 卸载工作区树导致 composer 草稿丢失；B2 发送失败气泡与输入框同时清空；B3 中途离开再回来留半截流式/运行点常亮/最新回复缺失；B4 快速切 agent 的 hub_open 竞态（A 的迟到响应覆盖 B 的 sid/messages）；B5 子 agent 事件串进 DM 流式并提前熄运行点。→ bf05e53 修复：工作区树隐藏不卸载（`main-surface`）+ Hub 草稿进 store；send 失败保留原文/失败气泡/重试；挂载时重开 DM、根 agent_end 清 live、chunk 自愈运行点；select/loadOlder 校验 activeId；只认根 run（parent_run_id/depth + rootRunId）过滤子 agent；主 store wire() 过滤 hub_*；mock 保真化（cursor 对象/事件顺序/content+run_id/深合并/软删+restore/注入失败）。浏览器实测：工作区与 Hub 草稿都跨切换保留、失败后原文与重试在、中途离开回来终稿齐全且运行点熄灭。待复审。"
     },
     "P1-09": {
       "status": "review",
-      "commit": "411b70d feat(hub-p1-09): 智能体资料页（5 tabs：基本/人格/工具与权限/记忆/版本）",
+      "commit": "bf05e53 fix(hub-p1-08/09): 复核修复 —— 草稿/失败/重开、子 agent 过滤、patch 只发改动、回执与回滚提示",
       "review": "pending",
-      "reviewNote": "弹层资料页：左预览卡（头像/名字/角色/model/版本/删除），右 5 页签——基本（名字/emoji/识别色/角色/职责/provider/model/档位/阈值滑块/记忆开关）、人格（Instructions + L1–L4 说明）、工具与权限（preset + 撤下工具）、记忆（清单/读/写，回执显示备份名与生效时机）、版本（历史列表 + 回滚 + 提示词分层预览）。新建走 hub_agent_create、编辑走 patch；HubSurface 接入「＋」新建与 DM 头「编辑」。mock 补齐 editor 所需全部命令。实测修掉两个缺陷：记忆清单重复 MEMORY.md、保存回执被 loadMemory 清空（先重载再写 note）。验证：tsc/eslint/vite build 全过；Playwright 实测 5 页签、保存后版本 1→2、写记忆两次分别显示「已写入」与「已备份为 MEMORY.md.<ts>.bak · 下一个 Run 生效」、预览 2 层、无 console error。待评审。"
+      "reviewNote": "首轮 changes_requested（task-vywf6kva）3 条 blocking：B1 保存用整份 profile 当 patch，`tools.disable`（撤下的工具）被静默清空；B2 记忆回执在真 IPC 上被迟到的读响应清掉（mock 同步响应掩盖）；B3 回滚无确认也无「落成新版本」提示。→ bf05e53 修复：patch 抽成纯函数 agentPatch.ts（只发改动字段、tools 仅在 preset/disable 变化时发且带原对象、disable 初值来自 profile），新增 scripts/test-agent-patch.mjs 8 条断言；loadMemory await 读完再写回执并带 warning；回滚二次确认 + 已回滚提示；删除后清空选择；Esc 关闭。浏览器实测（mock 读延迟 120ms）：改名保存后 disable 仍在、回执 1.2s 后仍在、回滚弹确认并提示第 1→4 版。待复审。"
     },
     "P1-10": {
       "status": "review",
