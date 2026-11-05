@@ -385,7 +385,7 @@ const BASE = {
         "agenthub/profile.go",
         "agenthub/group.go"
       ],
-      "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；accent 颜色校验且缺省由 avatar.bg/名字 hash 稳定派生；ToolPolicy 零值=全开，disable/allow/MCP 开关可校验；角色/成员数上限；错误可读。",
+      "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；accent 颜色校验且缺省由 avatar.bg/名字 hash 稳定派生；ToolPolicy 零值=全开，disable/allow/MCP 开关可校验；max_agents=50 / max_group_members=12；错误可读。",
       "tests": "go test ./agenthub/ -run Profile",
       "commit": "feat(hub-p0-03): Profile/Group 校验与默认值"
     },
@@ -483,7 +483,7 @@ const BASE = {
       "files": [
         "docs/AGENT_HUB_TECH_PLAN.md"
       ],
-      "acceptance": "全部 P0 测试绿；现有 session/bridge 回归；Review 结论 passed；看板更新。",
+      "acceptance": "P0 全部测试绿；bridge 测试包可编译（补齐缺失 helper）；`go test ./agenthub/... ./session/... ./desktop/bridge/...` 通过；Review passed。",
       "tests": "go test ./agenthub/... ./session/... ./desktop/bridge/...",
       "commit": "chore(hub-p0-09): P0 review gate"
     },
@@ -492,13 +492,14 @@ const BASE = {
       "phase": "P1",
       "title": "buildHubEngine：全工具面 + 策略",
       "deps": [
-        "P0-08"
+        "P0-08",
+        "P0-09"
       ],
       "files": [
         "desktop/bridge/hub_tools.go",
         "agenthub/policy.go"
       ],
-      "acceptance": "按 Profile 注册全部工具（文件/bash/run_python/web/browser/computer/agent_spawn/subagent/codemode/cron/MCP/技能/插件）；零值=全开；MCP server/tool 开关；子智能体继承同一 Engine；codemode 嵌套调用过 Policy；ask_user 绑定同一 qw。",
+      "acceptance": "按 Profile 注册全部工具（文件/bash/run_python/web/browser/computer/agent_spawn/subagent/codemode/cron/MCP/技能/插件）；零值=全开；MCP server/tool 开关；bash 只写 home，workspace_roots/bash_roots 只读；子智能体继承同一 Engine；codemode 嵌套调用过 Policy；ask_user 绑定同一 qw。",
       "tests": "go test ./desktop/bridge/ -run HubEngine",
       "commit": "feat(hub-p1-01): Hub 工具引擎与策略"
     },
@@ -542,7 +543,7 @@ const BASE = {
         "desktop/bridge/hub_session.go",
         "agenthub/service.go"
       ],
-      "acceptance": "DM 懒创建且只有一个；hub_open/send/history；断线重连；未读/预览更新。",
+      "acceptance": "DM 懒创建且只有一个（无新建/归档重开）；hub_open/send/history；/clear 保留记忆；断线重连；未读/预览更新。",
       "tests": "go test ./desktop/bridge/ -run HubDM",
       "commit": "feat(hub-p1-04): DM 会话链路"
     },
@@ -608,7 +609,7 @@ const BASE = {
         "desktop/app/src/components/hub/ViewToggle.tsx",
         "desktop/app/src/store/useHubStore.ts"
       ],
-      "acceptance": "工作区↔Hub 切换；左栏单列混排智能体/群组（群组叠图）、两行行解剖、last_outcome 预览、Needs you；DM 默认 Chat + Run 切换（复用 Narrative）；系统动作行；未读/状态点；三主题。",
+      "acceptance": "工作区↔Hub 切换；默认开启（显式 false 才关，默认值不回写 settings.json）；左栏单列混排智能体/群组（群组叠图）、两行行解剖、last_outcome 预览、Needs you；DM 默认 Chat + Run 切换（复用 Narrative）；系统动作行；未读/状态点；三主题。",
       "tests": "npm run lint && npm run test:agent-tree",
       "commit": "feat(hub-p1-08): Hub Rail 与 DM 视图"
     },
@@ -649,7 +650,8 @@ const BASE = {
       "phase": "P2",
       "title": "WorkspaceOps 适配 + 路径安全",
       "deps": [
-        "P1-02"
+        "P1-02",
+        "P1-10"
       ],
       "files": [
         "desktop/bridge/hub_service.go",
@@ -786,13 +788,14 @@ const BASE = {
       "phase": "P3a",
       "title": "群组 CRUD + 成员/角色/策略",
       "deps": [
-        "P2-05"
+        "P2-05",
+        "P2-09"
       ],
       "files": [
         "agenthub/group.go",
         "desktop/bridge/hub_commands.go"
       ],
-      "acceptance": "创建/更新/删除；成员上限 12；角色权限；owner 转让；群策略 auto/ask/readonly。",
+      "acceptance": "创建/更新/删除；成员上限 12；角色权限；owner 转让；群策略 auto/ask/readonly，默认 ask。",
       "tests": "go test ./agenthub/ -run Group",
       "commit": "feat(hub-p3a-01): 群组与成员"
     },
@@ -825,7 +828,7 @@ const BASE = {
         "agenthub/router.go",
         "agenthub/conversation.go"
       ],
-      "acceptance": "无 @ 不唤醒；@all/@A 正确；round 快照；回执落盘；@all 权限/频率。",
+      "acceptance": "无 @ 不唤醒；@all/@A 正确；@all 仅 owner、不限次数（member 拒绝）；round 快照；回执落盘。",
       "tests": "go test ./agenthub/ -run Router",
       "commit": "feat(hub-p3a-03): 群组 @ 路由"
     },
@@ -841,7 +844,7 @@ const BASE = {
         "agenthub/snapshot.go",
         "desktop/bridge/hub_session.go"
       ],
-      "acceptance": "每群一会话；delta 快照；40 条/12k 预算；折叠；冻结本轮；活动/回执不进快照。",
+      "acceptance": "每群一会话；未 @ 消息进入下次快照；delta 快照；40 条/12k 预算；折叠；冻结本轮；活动/回执不进快照。",
       "tests": "go test ./agenthub/ -run Snapshot",
       "commit": "feat(hub-p3a-04): 群会话与快照"
     },
@@ -895,7 +898,8 @@ const BASE = {
       "title": "前端群组视图 + RoundGroup + 动作清单 + Inspector",
       "deps": [
         "P3a-05",
-        "P3a-07"
+        "P3a-07",
+        "P1-08"
       ],
       "files": [
         "desktop/app/src/components/hub/HubTimeline.tsx",
@@ -909,17 +913,34 @@ const BASE = {
     {
       "id": "P3a-09",
       "phase": "P3a",
-      "title": "P3a Review + 评测 7",
+      "title": "群内流式：hub_message_delta + 节流",
       "deps": [
         "P3a-08"
+      ],
+      "files": [
+        "desktop/bridge/hub_events.go",
+        "desktop/bridge/main.go",
+        "desktop/app/src/store/useHubStore.ts",
+        "desktop/app/src/components/hub/StreamingMessage.tsx"
+      ],
+      "acceptance": "AgentStart 分配 message_id；ContentChunk→80ms 合并 delta；index 单调；final hub_message 同 id 覆盖；deltas 不落盘/不进快照；并行 agent 各自草稿；迟到/乱序丢弃；旧 bridge 兼容。",
+      "tests": "go test ./desktop/bridge/ -run HubDelta && npm run test:store",
+      "commit": "feat(hub-p3a-09): 群内流式 hub_message_delta"
+    },
+    {
+      "id": "P3a-10",
+      "phase": "P3a",
+      "title": "P3a Review + 评测 7",
+      "deps": [
+        "P3a-09"
       ],
       "files": [
         "docs/AGENT_HUB_TECH_PLAN.md",
         "evals/"
       ],
-      "acceptance": "@all/@A 正确；未 @ 不发言；历史可检索；私有内容不泄漏；Review passed。",
+      "acceptance": "@all/@A 正确；未 @ 不发言；历史可检索；私有内容不泄漏；流式草稿/final 一致、迟到 delta 丢弃；Review passed。",
       "tests": "go test ./agenthub/... ./desktop/bridge/...",
-      "commit": "chore(hub-p3a-09): P3a review + eval"
+      "commit": "chore(hub-p3a-10): P3a review + eval"
     },
     {
       "id": "P3b-01",
@@ -927,7 +948,8 @@ const BASE = {
       "title": "名册/职责/能力注入 + 提示词",
       "deps": [
         "P3a-04",
-        "P0-06"
+        "P0-06",
+        "P3a-10"
       ],
       "files": [
         "agenthub/prompt.go",
@@ -1052,14 +1074,14 @@ const BASE = {
     {
       "id": "P4-01",
       "phase": "P4",
-      "title": "群内流式/typing 打磨、性能",
+      "title": "流式/typing 弱网与长会话打磨、性能",
       "deps": [
         "P3b-08"
       ],
       "files": [
         "desktop/app/src/components/hub/HubTimeline.tsx"
       ],
-      "acceptance": "节流流式；虚拟列表；200+ 消息不卡；reduced-motion。",
+      "acceptance": "弱网/长会话：delta 只丢草稿不丢 final；虚拟列表 200+ 消息不卡；reduced-motion；流式期间不抖动。",
       "tests": "npm run test:scroll-follow && npm run e2e:usage-stats",
       "commit": "feat(hub-p4-01): 流式与性能打磨"
     },

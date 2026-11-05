@@ -54,7 +54,7 @@
 - **UX/契约**：§7.5 前后端交互与 UX 状态机（乐观 UI、@ 徽章、typing、轮次条、任务卡、错误码、重连）；
   §8.3.6 多智能体消息分组/动作清单（参考第二张图）。
 - **代码方案**：§17 文件/类型/接口/接线/测试夹具；§18 每个任务一个 commit + 一次 Review；
-  §19 50 个任务的拆分与 `PROGRESS.html` 看板。
+  §19 51 个任务的拆分与 `PROGRESS.html` 看板。
 
 ---
 
@@ -319,14 +319,15 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
 
 | 角色 | 能回复 | 能 @ 其他智能体 | 能 @all | 能派任务 | 能建工作区 | 能交接 | 能看私有审批 |
 |---|---|---|---|---|---|---|---|
-| `owner`（群主智能体） | 被 @ 时 | 是 | 是（每条人类消息最多 1 次） | 是 | 是（需策略） | 是 | 否 |
+| `owner`（群主智能体） | 被 @ 时 | 是 | 是（仅 owner，不限次数） | 是 | 是（需策略） | 是 | 否 |
 | `member` | 被 @ 时 | 是 | 否（需 owner/人批准） | 是（需策略） | 否（默认） | 是 | 否 |
 | `observer` | 被 @ 时 | 仅对话，不派任务 | 否 | 否 | 否 | 否 | 否 |
 | `human`（人） | 是 | 是 | 是 | 是 | 是 | 是 | 是 |
 
 - 群主默认为创建群时选的第一个智能体；人可以转让。
 - `Auto` / `Ask` 是群级策略（见 §4.4），成员可以有自己的更严格策略，取**最严格**。
-- 观察者（observer）是「只读参谋」：可以看全部群组历史、被 @ 时给意见，但不能改世界。
+- 观察者（observer）是「旁听参谋」：可以看全部群组历史、被 @ 时给意见，但不能派任务/建工作区/@all。
+  工具面由 `AgentProfile.tools` 决定，不由角色强制只读（D18）；要只读请显式设 `preset=readonly`。
 
 ### 4.4 审批策略
 
@@ -334,10 +335,13 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
 |---|---|---|
 | `auto` | 智能体可自主派任务/建工作区/交接，在预算与护栏内 | 信任的群、个人单聊 |
 | `ask` | 每个「外部动作」都要人批准：建工作区、首次派任务、跨智能体交接、外部发送 | 默认；演示图的「PRIVATE APPROVAL」 |
-| `readonly` | 只能回复，不能产生任何副作用 | 观察者、演示/审计 |
+| `readonly` | 只能回复，不能产生任何副作用 | 审计/演示群（显式选择） |
 
 **外部动作**的定义（可扩展）：`workspace_create`、`session_create`、`session_send`（首次给某工作区派活）、
 `handoff`、`artifact_share` 到群、任何带 `network=true` 的工具。
+
+> `policy.mode=readonly` 是**群策略**；工具面的只读是 `tools.preset=readonly`，两者独立，
+> 不要因为一个是 readonly 就以为另一个自动生效。
 
 ### 4.5 运行并发模型
 
@@ -358,6 +362,7 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
   "id": "ag_7f3k2m9q",
   "name": "Researcher",
   "avatar": { "kind": "emoji", "value": "🟢", "bg": "#2f6f5e" }, // 或 {"kind":"image","path":"avatar.png"}
+  "accent": "#2f6f5e",                    // 名字/chip/状态环的唯一识别色
   "role": "竞品研究员",                    // 一句话职责（群组卡片/成员列表显示）
   "description": "负责收集竞品价格、功能与公开情报，产出结构化对比。",
   "instructions": "1. 只使用公开来源…\n2. 每个结论附来源链接…", // 职责约束（进 system prompt，同时也是工具策略的人类可读说明）
@@ -368,9 +373,17 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
   "compress_threshold": 0.8,              // (0.5, 0.95]，默认 0.8
   "memory": { "enabled": true, "max_index_lines": 200 },
   "tools": {
-    "preset": ["read", "write", "web", "hub"], // 预置包
-    "allow": ["web_fetch", "web_search"],       // 追加
-    "deny": ["bash"]                            // 最终拒绝（优先级最高）
+    "preset": "all",                            // all | readonly | custom；零值 = all
+    "disable": [],                              // 精确名或前缀：browser_*、mcp__github__*
+    "allow": [],                                // custom 时白名单；空 = 全部
+    "bash_roots": [],                           // 额外只读根
+    "disable_network": false,                   // 默认允许网络
+    "mcp": {
+      "disable": false,
+      "disable_servers": [],
+      "disable_tools": [],
+      "allow_tools": []
+    }
   },
   "policy": {
     "can_create_workspace": false,
@@ -394,7 +407,8 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
 - `provider` 必须存在于 `settings.json` 的 `provider` 段且未被 `deleted`；否则拒绝保存并给出「去设置」入口。
 - `model` 允许自定义字符串；窗口未知时按 128k 计，UI 标黄提示。
 - `compress_threshold` 钳到 `[0.5, 0.95]`（与 `agents.SetCompressThreshold` 的 `(0,1]` 不同：太低的阈值会让每轮都压缩，成本爆炸）。
-- `tools.deny` 永远大于 `allow`；`policy` 不允许把 `can_create_workspace` 打开但不给 `workspace_roots`。
+- `tools.disable` 永远大于 `tools.allow`（custom 白名单也不能把 disable 的工具放回来）；
+  `policy` 不允许把 `can_create_workspace` 打开但不给 `workspace_roots`。
 
 **版本**：每次保存 `version++`，把旧版本追加到 `agents/<id>/profile_versions.jsonl`（保留最近 50 版），
 用于「人格改坏了回滚」。群组与任务只引用 `agent_id`，不引用版本。
@@ -405,7 +419,7 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
 {
   "id": "grp_9m2x",
   "name": "竞品研究",
-  "avatar": { "kind": "stack", "members": ["ag_7f3k2m9q", "ag_2p8v", "ag_5d1c"] },
+  // 群头像不落盘：由成员的 accent/avatar 派生（最多 3 个叠图 + N）
   "owner_agent_id": "ag_7f3k2m9q",
   "members": [
     { "agent_id": "ag_7f3k2m9q", "role": "owner",   "joined_at": "..." },
@@ -420,6 +434,7 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
 ```
 
 - 群成员上限 12（超出的场景应该拆群；UI 提示）。
+- 群头像由成员派生，不单独存字段；成员变化时前端按 `accent` 重新排序取前 3。
 - 群的「3 Agents · Auto · 1 owner + 2 observers」由 `members[].role` 与 `policy.mode` 直接渲染。
 - 群不存「当前正在跑什么」——那是任务账本与运行态，避免两个事实源。
 
@@ -439,8 +454,9 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
   "id": "msg_42",
   "group_id": "grp_9m2x",
   "round_id": "rnd_17",              // 同一批 @ 唤醒属于同一轮；系统消息可为空
+  "context": null,                   // 仅回复消息：{trigger_seqs, senders[]}；驱动 TurnContextLine
   "sender": { "kind": "agent", "agent_id": "ag_7f3k2m9q" },
-  "kind": "text",                    // text | task_result | artifact | handoff | approval_stub | routing_receipt | task_update | system
+  "kind": "text",                    // text | task_result | artifact | handoff | approval_stub | routing_receipt | task_update | round_summary | routine_card | system
   "text": "三家价格表出来了。A 家年付折扣需要确认；我先起草 handoff。",
   "mentions": ["ag_5d1c"],           // 结构化 @（不是从正文解析的）
   "mention_all": false,
@@ -994,11 +1010,16 @@ Hub 引擎与项目引擎是**两个独立的 `tools.Engine`**，同名工具互
 | `todo_*` | 现有签名 | 会话级待办 | 所有 |
 | `git_worktree` | 现有签名 | 仅 bash 开启时注册（现有门控） | `tools.bash` |
 
+> 表中的 `tools.bash` / `tools.files` 等是**设置页的逻辑开关名**；落盘时统一收进
+> `AgentProfile.tools.disable`（精确名或前缀），MCP 收进 `tools.mcp`，不额外存十个 bool。
+> 这样新增工具默认可见，不会因为忘记加字段而被静默关闭。
+
 **默认全开，按 Profile 关闭（D18）**：这里没有「默认不注册」的工具。智能体的能力不该被平台
 预先阉割；安全靠 cwd/沙箱/审批/预算（§9.2），不靠「让它看不见工具」。
 
 - `AgentProfile.tools.preset` 缺省 `all`；`disable` 支持精确名与前缀（`browser_*`、`mcp__github__*`）。
-- **MCP**：除了 `tools.disable`，还有 server 级与 tool 级开关（`tools.mcp.servers/tools`）；
+- **MCP**：除了 `tools.disable`，还有 server 级与 tool 级开关
+  （`tools.mcp.disable_servers` / `disable_tools` / `allow_tools`）；
   未配置/连接失败的 server 不注册，并在设置页显示状态，不静默假装可用。
 - **插件类工具**（browser/computer）：插件未安装/未启用时工具不存在；UI 给安装/启用入口，
   不因为「Hub 模式」而拒绝加载。
@@ -1007,6 +1028,8 @@ Hub 引擎与项目引擎是**两个独立的 `tools.Engine`**，同名工具互
   Hub 引擎注册自己的 `session_send`/`session_list`（§6.3.3）。这是命名冲突，不是能力缺失。
 - **子智能体继承父工具面**：`agent_spawn` 共享同一个 `tools.Engine`，所以父被关闭的工具，
   子也看不到；子不能再自行放开（避免绕过 Profile）。
+- **`agent_spawn` ≠ 群成员**：它创建的是 run-scoped 子智能体（没有 Hub 身份/记忆/群席位）；
+  要把事交给群里的另一个智能体，用 `@Name` 或 `assign_task`（有账本/回调/结果卡）。
 - **codemode 的嵌套调用**必须复用同一个 `Policy.BeforeCall`；只在顶层 Engine 包一层不算数。
 
 **三个动作的边界**（提示词与工具描述都要写清楚，否则模型会混）：
@@ -1020,7 +1043,7 @@ Hub 引擎与项目引擎是**两个独立的 `tools.Engine`**，同名工具互
 **一个刻意的边界**：Hub 智能体的文件工具与 bash 默认只覆盖自己的 `home/**` 与 `memory/**`，
 **不能直接改工作区文件**。它要改工作区，只能派任务给工作区会话（那是有审批、有沙箱、有产物登记的路径）。
 这既符合「控制面不直接执行」的分层，也避免高信任智能体绕过工作区的权限模型。
-bash 在 `home/` 内可以自由执行（编译、跑脚本、处理文件）；`policy.bash_roots` 可显式放开额外的只读根。
+bash 在 `home/` 内可以自由执行（编译、跑脚本、处理文件）；`tools.bash_roots` 可显式放开额外的**只读**根。
 代价是：工作区会话执行中如果需要澄清，不能中途反问 Hub 智能体（见 §14.2 的已知限制）。
 
 #### 6.3.2 `workspace_create` 的路径安全
@@ -1113,13 +1136,13 @@ func (p Policy) Wrap(eng *tools.Engine) *tools.Engine {
           ├─ 3. 推进 human_read_seq（人读到哪里；只影响未读点，不影响智能体上下文）
           ├─ 4. Ask(sid, user text) + wakeRun
           └─ 5. 事件：hub_message(kind=text, sender=human) 立即回显
-                    agent_start/…/agent_end 走现有事件流 → DM 视图直接渲染（复用 Narrative）
+                    agent_start/…/agent_end 走现有事件流 → DM 的 Run 视图复用 Narrative；
+                    Chat 视图用现有 content_chunk 流式 + final hub_message 收尾（§8.4）
           AgentEnd 后：append hub_message(kind=text, sender=agent) 到 dm 索引（预览/搜索用）
 ```
 
-**只有一个 Session**：DM 没有「新会话」按钮；只有「清空上下文」（= 现有 `/clear` 命令，保留记忆）和
-「归档并重开」（P3，生成新的 dm 会话并把旧会话归档——这会违反「只有一个 Session」的字面要求，
-所以默认不做，只提供 `/clear`）。
+**只有一个 Session**：DM 没有「新会话」按钮；只有「清空上下文」（= 现有 `/clear` 命令，保留记忆）
+与导出。**不做「归档重开」**（D9 已确认）——那会违反「DM 只有一个 Session」的字面承诺。
 
 **自动压缩**：`compress_threshold` 到线触发 `LLMCompressor`，发 `CompressStart/CompressEnd`；
 DM 视图显示一条压缩回执（「上下文已压缩 12.3k → 3.1k」），不打断对话。
@@ -1152,8 +1175,9 @@ type Inbound struct {
    轮次记录单独写 `rounds/<rid>.json`，用 `trigger_seq` 引用它。
 4. **路由**：
    - 无 @ 且非 `@all`：只写日志，不唤醒任何智能体。返回 `{woken: [], reason:"no_mention"}`。
-   - `@all`：`targets = 所有成员`（包括 observer——被 @all 也应该能发言；但 observer 的工具仍是只读）。
-   - `@A @B`：`targets = [A, B]`，按成员顺序。
+   - `@all`：`targets = 所有成员 - 发送者`（包括 observer——@all 就是所有人都该看到并能发言；
+     observer 只是不能派任务/@all，工具面仍按自己的 Profile；发送者不唤醒自己）。
+   - `@A @B`：`targets = [A, B] - 发送者`，按成员顺序。
 5. **创建 Round**：`{id, group_id, trigger_seq, targets, snapshot_seq, status:"running", started_at}`。
 6. **调度**：为每个 target 入队一个 `GroupWake`（受 §4.5 并发限制）。
 7. **回执**：写一条 `routing_receipt` 系统消息：「A、B 正在处理；C、D 已记录上下文（观察）」。
@@ -1224,8 +1248,12 @@ agentSession.Ask(msg); wakeRun()
   不产生空气泡。
 - **多段回复**：模型可以在 Run 中多次 `group_say`（每条都会进日志），最终 `Content` 作为收尾；
   如果 `Content` 与最后一条 `group_say` 重复（编辑距离/前缀），丢弃 `Content` 防重复。
+  `group_say` 是完整消息、不流式；只有 final `Content` 走 `hub_message_delta`，避免同一段文字
+  出现「草稿 + 完整消息」两条。
 - **@ 别人**：`Content` 里的 `@B` 不自动触发 B；只有结构化 `handoff` 或显式 `mentions` 才触发。
   防止模型在正文里写 @ 就造成连锁。
+- **流式（D10）**：Run 中的正文增量由 bridge 节流成 `hub_message_delta`；最终仍以本节
+  `finishHubRound` 写的 `hub_message` 为准。草稿不落盘、不进快照。详见 §6.5.8。
 
 #### 6.5.4 群组历史检索
 
@@ -1279,7 +1307,7 @@ agentSession.Ask(msg); wakeRun()
 You are Researcher (owner). Responsibilities: 竞品价格/功能/公开情报。
 Members:
 - Researcher (owner) — 竞品研究员。擅长 web_fetch、结构化对比。
-- Critic (observer) — 反例与风险审查。只读，不给结论。
+- Critic (observer) — 反例与风险审查。只审阅，不给结论。
 - Writer (member) — 长文写作与编辑。擅长把素材写成 2 页简报。
 You can talk to them with @Name, or assign tracked work with assign_task(Name, instruction).
 ```
@@ -1327,7 +1355,7 @@ type Conversation struct {
 1. **人类消息开启新对话**：`TurnsUsed=0`、`Queue` 清空、`Status=running`。
 2. **首轮**：被 @ 的成员可以并行（受 `max_parallel_runs`），每个回复带 `turn=1`。
 3. **后续轮**：智能体回复里 @ 了别人 → 入队；**串行执行**（一次一个），带 `turn++`。
-4. **预算**：`TurnsUsed >= TurnBudget`（默认 8）或 `Depth >= 4` 或 `PairCount[a→b] > 2` →
+4. **预算**：`TurnsUsed >= TurnBudget`（默认 8）或 `Depth >= 4` 或 `PairCount[a→b] >= 2` →
    停止入队，写系统消息「本轮自动对话已达上限，等待人类继续」，`Status=exhausted`。
 5. **人类优先**：对话进行中人来消息 → 当前 run 跑完（不腰斩工具），清空队列，开新对话；
    可选「打断并发送」= 先 `Interrupt` 当前 run 再发。
@@ -1337,8 +1365,9 @@ type Conversation struct {
    避免 A/B 秒回互刷；UI 上表现为「B 正在输入…」。
 8. **同内容检测**：对每条 agent 消息取归一化指纹（去空白/标点，取前 200 字）；
    同一对话里指纹重复 + 同一对 agent → 判定为循环，立即停止。
-9. **@all**：仅 owner，且每条人类消息最多 1 次（D14）；超过 → 降级为「@被点名的成员」，
-   并写系统提示。member 的 `@all` 直接拒绝（返回结构化错误，模型可解释）。
+9. **@all**：仅 owner，**不限次数**（D14）；owner 的 `@all` 不另设次数上限，但仍受轮次预算、
+   并发上限、成本护栏约束。非 owner（member/observer）的 `@all` 直接拒绝
+   （返回结构化错误，模型可解释），不降级成「@被点名成员」——避免模型以为自己的广播生效了。
 10. **自我 @**：忽略；**@ 人类**：允许（`@你`/`@user` 特殊标记），但不会唤醒模型，只给人一个高亮。
 
 **重启语义**：对话队列是进程内的（不持久化）。bridge 重启后，当前 run 结束即止，队列丢弃，
@@ -1399,6 +1428,51 @@ Use handoff when you are transferring ownership. Do not use @Name for work you e
 - **智能体任务**（target=agent）：结果卡同上；`result.summary` 是执行智能体的最终回复；
   「打开工作区会话」按钮换成「打开该智能体会话」。
 - **左栏预览**：群组行显示「任务完成：pricing-v3.md」+ 未读点；这是人「在群外也知道」的入口。
+
+#### 6.5.8 群内流式（D10）
+
+**事件**
+
+```jsonc
+{
+  "event_type": "hub_message_delta",
+  "group_id": "grp_9m2x",
+  "agent_id": "ag_7f3k2m9q",
+  "round_id": "rnd_01J...",
+  "message_id": "msg_01J...",
+  "index": 14,
+  "delta": "…下一段正文…"
+}
+```
+
+- `message_id` 在 `AgentStart` 时生成，final `hub_message.message.id` **必须**相同；前端按 id upsert。
+- `index` 从 0 单调递增，同一 `message_id` 内有序；用于丢弃迟到/乱序 delta。
+- `delta` 只含正文增量；不含工具参数、思考过程、系统提示、记忆内容。
+
+**生命周期**
+
+1. `AgentStart`：分配 `message_id`，前端可先显示 `hub_typing`。
+2. `ContentChunk`：bridge 按 `message_id` 合并 80ms 内的 chunk（单条上限 4KB），发一条 delta。
+3. 工具调用/审批等待：暂停该 message 的 delta，改发 `hub_activity`；正文恢复后继续。
+4. `AgentEnd`：`finishHubRound` 写 final `hub_message`（同 `message_id`、完整正文）；前端用 final
+   替换草稿并清空 draft。
+5. 空回复：不发 final，删除草稿，只写 `routing_receipt`（「已处理，未发言」）。
+
+**规则**
+
+- **不落盘**：delta 不写 `log.jsonl`、不写 checkpoint；刷新/重连只看到 final（丢草稿是可接受语义）。
+- **顺序**：final 前 flush 最后一个 delta；前端维护 `finalizedMessageIds`，final 之后到达的 delta 直接丢弃。
+- **并发**：并行回复的多个 agent 各有 `message_id`，可以同时出现多个草稿；不要合并成一条。
+- **节流**：bridge 80ms 合并；前端用 rAF/80ms 批量 setState；流式期间用轻量 Markdown（纯文本+换行），
+  final 到达后一次性完整渲染，避免每个 token 重排。
+- **安全**：partial 不进入群快照、不进入其他智能体上下文、不写记忆、不解析 `@`（只有 final 才路由）；
+  防止「说到一半的 @B」提前唤醒别人。
+- **内存上限**：单条草稿最多保留 256KB（超出丢弃后续 delta，final 仍会补齐）；前端的
+  `finalized` 只保留最近 200 个 `message_id`（LRU），避免长会话无限增长。
+- **兼容**：旧前端忽略未知 `hub_*`；旧 bridge 不发 delta，新前端仍能收 final 正常工作。
+
+**为什么在 bridge 节流，而不是把 `content_chunk` 直接给前端**：群组视图只订阅 Hub 白名单事件，
+不订阅 SDK 的高频 chunk；桥层合并后 stdout 的 JSON 行数、序列化成本和多端差异都可控。
 
 ### 6.6 工作区任务派发
 
@@ -1512,11 +1586,11 @@ func (s *Service) canDispatch(sid string) bool {
 if e.Type() == events.AgentEndType {
     if ae, ok := e.(*events.AgentEnd); ok && ae.TaskId == "" && ae.ParentRunId == "" {
         switch {
-        case bs.hubTaskID != "" && bs.hubScope == "":
+        case bs.hubTaskID != "" && bs.hubScope == nil:
             bs.finishHubTask(ae)    // 工作区目标会话：任务结算 + 回推
-        case bs.hubTaskID != "" && bs.hubScope != "":
+        case bs.hubTaskID != "" && bs.hubScope != nil:
             bs.finishAgentTask(ae)  // 智能体目标任务：结算 + 群内结果卡 + 回推派发者
-        case bs.hubScope != "":
+        case bs.hubScope != nil:
             bs.finishHubRound(ae)   // 群聊/DM：提交本轮回复
         }
     }
@@ -1526,10 +1600,10 @@ if e.Type() == events.AgentEndType {
 - `TaskId/ParentRunId` 为空 = 主 run；子 agent 的 AgentEnd 也有 `TaskId`，不能拿来结算 Hub 任务。
 - `logEventLine` 之后再结算：`ExtractMessages`/transcript 已完整（cron 的同一教训）。
 - `finishHubTask` 必须幂等：`hubService.FinishTask` 内部检查 `notified_run_ids`。
-- `bs.hubTaskID` 与 `bs.hubScope` 的组合决定结算路径：
-  - 只有 `hubTaskID` = 工作区目标任务；
+- `bs.hubTaskID` 与 `bs.hubScope`（`*agenthub.Scope`，nil = 工作区目标/非 Hub）的组合决定结算路径：
+  - 只有 `hubTaskID != ""` 且 `hubScope == nil` = 工作区目标任务；
   - 两者都有 = 群内智能体目标任务（`assign_task`）；
-  - 只有 `hubScope` = 被 @ 的普通对话。
+  - 只有 `hubScope != nil` = 被 @ 的普通对话（DM/群）。
   这样「智能体的回复」不会被误当成「工作区任务结果」，反之亦然。
 - 一个智能体目标任务结算后**不再走** `finishHubRound`：结果卡就是它在群里的产出；
   如果它还想说话，用 `group_say` 显式发（避免一条回复出现两次）。
@@ -1874,12 +1948,11 @@ loopOpts = append(loopOpts, agents.WithMemoryInjection(res.Injection.Text))
 | 单群每小时自动派发数 | 30 | 暂停，Needs you |
 | 同一对 agent 10 分钟 handoff 次数 | 2 | 拒绝，Needs you |
 | 智能体自动对话轮次/人类消息 | 8 | 停止入队，系统消息「等你继续」 |
-| 连续无人类的智能体轮次 | 6 | 同上 |
 | mention 链深度 | 4 | 超出不再唤醒，写系统提示 |
 | 单条消息 mention 数（非 @all） | 3 | 超出丢弃并提示 |
 | 同一条对话里 A→B 重复次数 | 2 | 判定踢皮球，停止 |
 | agent→agent 唤醒冷却 | 1500ms | 排队延迟，不丢弃 |
-| 智能体 @all | 仅 owner，1 次/人类消息 | 其余降级/拒绝 |
+| 智能体 @all | 仅 owner，不限次数 | 非 owner 拒绝；owner 仍受轮次/并发/预算护栏 |
 
 **根任务链**：每次派发带 `root_task_id` 与 `chain`。护栏按根聚合，不按单个任务——
 否则 A→B→A→B 每条链都「很浅」，但整体是无限循环。
@@ -1970,8 +2043,8 @@ loopOpts = append(loopOpts, agents.WithMemoryInjection(res.Injection.Text))
 
 | 事件 | 字段 | 触发 |
 |---|---|---|
-| `hub_message` | `group_id?, agent_id?, seq, client_msg_id?, message{..., sender_display, mentions_display, context{trigger_seqs, senders}}` | 群/DM 有新消息（人/智能体/系统）；回显 `client_msg_id` 用于替换乐观气泡；`context` 驱动 TurnContextLine |
-| `hub_message_delta` | `group_id?, agent_id?, round_id, text` | （P2）群内流式草稿；默认关闭 |
+| `hub_message` | `group_id?, agent_id?, seq, client_msg_id?, message{id, ..., sender_display, mentions_display, context{trigger_seqs, senders}}` | 群/DM 有新消息（人/智能体/系统）；回显 `client_msg_id` 用于替换乐观气泡；`context` 驱动 TurnContextLine |
+| `hub_message_delta` | `group_id, agent_id, round_id, message_id, index, delta` | 群内流式草稿（D10）；bridge 80ms 合并；临时不落盘；final `hub_message` 按 `message_id` 替换 |
 | `hub_message_status` | `client_msg_id, status:"sending" / "sent" / "failed", error?, retryable?` | 发送状态机（乐观 UI）；失败可重试 |
 | `hub_activity` | `group_id?, agent_id, run_id, kind:"tool" / "compress" / "status", name?, status?, ms?, summary?` | 群内工具行/压缩回执 |
 | `hub_typing` | `group_id, agent_id, round_id, expires_at` | 「B 正在输入…」；前端到期自动消失 |
@@ -2136,7 +2209,7 @@ bridge 校验（成员/mention/权限/预算）
   "mentions": ["ag_5d1c"],
   "mentions_display": [
     { "agent_id":"ag_5d1c", "name":"Writer", "avatar":{"kind":"emoji","value":"🔵","bg":"#3b5bdb"},
-      "role":"member", "role_label":"长文写作", "status":"running", "deleted":false }
+      "accent":"#3b5bdb", "role":"member", "role_label":"长文写作", "status":"running", "deleted":false }
   ]
 }
 ```
@@ -2144,7 +2217,7 @@ bridge 校验（成员/mention/权限/预算）
 渲染规则：
 
 - 正文里的 `@Writer` 不是纯文本：前端按 `mentions_display` 替换成 **AgentMentionChip**：
-  `[🔵 Writer]` + 角色色点 + hover 卡片（职责/状态/最近一条消息）。
+  `[🔵 Writer]` + 角色色点 + hover 卡片（职责/状态/最近一条消息）；名字用 `accent` 着色。
 - chip 点击：打开该智能体的 DM（或资料页，按 Shift）；键盘可达（Tab + Enter）。
 - 人：`[@你]` 用 accent 色；`@all` 用群组图标 + 「所有人」。
 - 已删除成员：灰色 chip + `（已移除）`，不可点击。
@@ -2217,11 +2290,15 @@ bridge 校验（成员/mention/权限/预算）
 
 #### 7.5.7 重连、多端与顺序
 
-- 事件按 `seq` 单调；前端用 `seq` 去重，发现缺口时调 `hub_open(before_seq)` 补齐。
+- 有 `seq` 的事件（`hub_message`/任务等）按 `seq` 单调；前端用 `seq` 去重，发现缺口时调
+  `hub_open(before_seq)` 补齐。`hub_message_delta` 没有全局 `seq`，只在同一 `message_id` 内按
+  `index` 排序，不能拿它推进 `human_read_seq`/`agent_context_seq`。
 - `hub_open` 返回 `{messages, activity, conversation, cursor, server_time}`，一次把「消息 + 运行态 + 对话状态」对齐。
 - `hub_snapshot_invalidated`（多端改名/加成员）→ 前端重拉 `hub_snapshot` + 当前 target。
 - 读游标 `human_read_seq` 是**群级共享**的：一端读了，另一端也变已读；用 `hub_mark_read` 同步。
 - 乐观消息在重连后若 `client_msg_id` 不在服务端 → 标记失败，给「重试」。
+- 群内流式草稿（`hub_message_delta`）是**临时态**：重连/刷新后不恢复；以 final `hub_message` 为准。
+  同一 `message_id` 的 final 到达后，清掉草稿与所有迟到的 delta。
 
 #### 7.5.8 UX 细节清单（验收时逐条过）
 
@@ -2244,7 +2321,8 @@ bridge 校验（成员/mention/权限/预算）
 
 | 事件 | 何时发 | 保证 |
 |---|---|---|
-| `hub_message` | 日志写成功后 | 有 seq，客户端可按 seq 排序 |
+| `hub_message` | 日志写成功后 | 有 seq，客户端可按 seq 排序；`message.id` 与 delta 的 `message_id` 相同，覆盖草稿 |
+| `hub_message_delta` | 80ms 合并 flush | 临时；`message_id`+`index` 单调；final 前 flush；final 后到达的丢弃 |
 | `hub_task_update` | 账本写成功后 | task_id 幂等，重复事件可忽略 |
 | `hub_conversation` | 队列变更后 | 带 revision，旧 revision 丢弃 |
 | `hub_typing` | 唤醒时/工具活动 | 临时，不落盘，可丢 |
@@ -2267,6 +2345,7 @@ bridge 校验（成员/mention/权限/预算）
 | 工具执行 | — | `hub_activity` | 折叠行 |
 | 一轮动作汇总 | — | `hub_round_summary` | 4 行清单 |
 | 智能体回复 | — | `hub_message{seq,...}` | RoundGroup 合并 |
+| 群内流式 | — | `hub_message_delta{message_id,index}` → `hub_message`（final） | 草稿不落盘；final 覆盖 |
 | 智能体互 @ | — | `hub_conversation` + `hub_round` | 轮次条 |
 | 到达轮次上限 | — | `hub_conversation{exhausted}` + `hub_message(system)` | 等人类继续 |
 | 任务派发 | `hub_group_assign` / 智能体工具 | `hub_task_update{queued/dispatched}` | 任务卡 |
@@ -2293,7 +2372,7 @@ bridge 校验（成员/mention/权限/预算）
 |---|---|---|---|
 | 左栏单列混排智能体与群组，群组用成员叠图 | 单列按「置顶→活跃」排序；群组 3 个叠图 + `+N` | `HubRow`、`GroupAvatarStack` | P1-08 / P3a-08 |
 | 行内两行：名字+相对时间 / 最后结果预览 | 首选 `last_outcome`，回退最后消息；单行省略 | `last_outcome`（已有）、`formatRelative` | P1-08 |
-| 头部只有「头像+名字」，右侧浮窗图标 | 角色/provider 收进 hover/资料页；`[Chat|Run]` + `[⤢]` | `HubHeader`、`ViewToggle` | P1-08 / P1-09 |
+| 头部只有「头像+名字」，右侧浮窗图标 | 角色/provider 收进 hover/资料页；`[Chat / Run]` + `[⤢]` | `HubHeader`、`ViewToggle` | P1-08 / P1-09 |
 | 居中细字「Messages from A and B」（红线） | **TurnContextLine**：回复的触发上下文，不是作者署名 | `Message.context{trigger_seqs, senders}`、`TurnContextLine` | P3b-07（DM 在 P1-08 先留位） |
 | 正文里的「🟣 Account Manager」彩色名字 | `AgentMentionChip`：头像 + 名字用 `accent` 着色；普通引用与唤醒 @ 两种样式 | `AgentProfile.accent`、`AgentMentionChip` | P1-09 / P3b-07 |
 | ✓ 行「Salesforce → list pulled · 52 accounts」 | `RoundActivityDigest`：确定性汇总，4 行折叠；不花 LLM | `hub_round_summary.items` | P2-05 / P3a-08 |
@@ -2404,7 +2483,8 @@ closeHub(): void
 
 #### 8.3.1 消息渲染
 
-- 复用 `Markdown`（`components/markdown.tsx`）渲染正文；流式可选 `streaming`。
+- 复用 `Markdown`（`components/markdown.tsx`）渲染正文；流式态用 `StreamingMessage`（纯文本+增量），
+  final 到达后切完整 Markdown，避免每个 delta 重排整段。
 - 智能体消息默认**不重复**头像/名字（头部与成员面板已表明身份）；只有 `RoundGroup`
   子块、被 @ 的「回复 @…」标签、TurnContextLine 里才显示头像 + 名字，避免每条消息刷一列头像。
   触发它的 mention 列表用一行小字「回复 @Writer」表示。
@@ -2428,7 +2508,7 @@ closeHub(): void
 
 - 被 @ 的 → 「正在处理」→ 完成后变「已回复」；
 - 未 @ 的 → 「已记录上下文（观察） · 保持待命」；
-- observer 被 @all 时 → 「观察者 · 已读」。
+- observer 被 @all 时同样「正在处理」；它只是不能派任务/@all，不是不能说话。
 - 智能体之间 @ 时，回执行显示「Researcher → Writer（第 2/8 轮）」；
   到上限显示「自动对话已暂停，等你继续」。
 
@@ -2443,7 +2523,7 @@ closeHub(): void
 │ [所有人]                         仅 owner 可用      │
 │ 🟢 Researcher   owner · 竞品研究员   running        │
 │ 🔵 Writer       member · 长文写作    idle           │
-│ 🟡 Critic       observer · 反例审查  idle（只读）   │
+│ 🟡 Critic       observer · 反例审查  idle（observer）│
 │ ───────────────────────────────────────────────── │
 │ Tab 切换「对话 / 派任务」；Enter 确认；Esc 关闭     │
 └───────────────────────────────────────────────────┘
@@ -2453,8 +2533,9 @@ closeHub(): void
 - 选择器底部有「对话 / 派任务」两态：
   - 对话：只 @，对方回一条；
   - 派任务：调用 `hub_group_assign`，生成任务卡，走账本/回调。
-- `@all` 置顶，仅 owner 人类可用；member 智能体尝试 @all 会被后端拒绝并给出原因。
-- observer 标记「只读」：可以 @ 它问意见，但它不能接派任务。
+- `@all` 置顶；人类与 owner 智能体可用；member 智能体尝试 @all 会被后端拒绝并给出原因。
+- observer 标记「observer」：可以 @ 它问意见，但它不能接派任务；工具面按 Profile，
+  若显式设了 `readonly` 预设，UI 会同时显示「只读」标签。
 - 没有 mention 时，发送按钮旁提示「仅记录，不触发回复」（避免用户以为智能体会回答）。
 - 发送后 optimistic 气泡立即出现（§7.5.1）；`@` chip 立即按 `mentions_display` 渲染，
   不等服务端回包。
@@ -2488,6 +2569,7 @@ closeHub(): void
 | `TypingIndicator` | 「B 正在输入」 | 头像脉冲；最多 2 个 +N；到期自动清 |
 | `AgentStatusDot` | 状态点 | idle/running/waiting/error；tooltip；reduced-motion 兼容 |
 | `MessageStatus` | 乐观发送状态 | sending/sent/failed；失败重试；不丢输入 |
+| `StreamingMessage` | 群内流式草稿 | 按 `message_id` 追加；final 后切完整 Markdown；不解析 @、不进快照 |
 | `AgentRosterSheet` | 成员面板 | 职责/状态/成本/@/派任务 |
 | `ConversationStopButton` | 停止自动对话 | 二次确认（P3 可省）；调 `hub_conversation_stop` |
 | `RoundGroup` | 同一轮多智能体回复合并 | 头部「A、B 的回复」；可分开；单人不合并 |
@@ -2535,7 +2617,7 @@ closeHub(): void
 一个智能体（尤其是 DM 里的编排者）在一轮里消费了多个其他智能体的消息，
 用户需要知道「它为什么会说这些」。规则：
 
-- 数据来源：路由时记录本轮 `trigger_seqs`（唤醒它的消息）与 `trigger_senders`；
+- 数据来源：路由时记录本轮 `trigger_seqs`（唤醒它的消息）与触发者 `senders`；
   结算时把这些字段**反规范化**写进回复消息的 `context`（§17.2 `TurnContext`），
   刷新/多端一致，不靠前端猜。
 - 只在以下情况显示：`trigger_senders` 去重后 ≥2；或唯一触发消息不在可视区（分页/折叠）；
@@ -2644,6 +2726,8 @@ Run 视图是同一 `session_id` 的完整 `Narrative`，一键切换（§8.3.6 
   右侧 `[Chat|Run]` 切换 + `[⤢]` 浮窗；状态用头像环表达。
 - **消息**：智能体回复不重复头像/名字（头部已表明身份）；人的消息右对齐。
   正文里的 `@Name`/`Name` 用 `AgentMentionChip`（§7.5.2）。
+- **流式**：DM Chat 复用现有 `content_chunk`（与工作区会话一致），final `hub_message` 收尾；
+  群组才用 `hub_message_delta`（§6.5.8）。
 - **上下文行**：当这一轮由 ≥2 个其他智能体的任务结果/消息触发时，显示
   `Messages from A and B`（§8.3.6 ②）；点击跳到对应任务卡/消息。
 - **其他智能体的消息**在 DM 里只有两种出现方式：
@@ -2685,6 +2769,7 @@ Run 视图是同一 `session_id` 的完整 `Narrative`，一键切换（§8.3.6 
 **Tab 1 · 基本**
 
 - 头像：emoji 选择器（内置 24 个）+ 背景色；或上传图片（存 `agents/<id>/avatar.png`，≤256KB）。
+- 主题色 `accent`：默认取头像背景色；用于名字 chip、状态环、@ 圆点（D18 的视觉识别，不整块染色）。
 - 名字（必填）、角色一句话、职责描述（多行）。
 - Provider / Model：两级下拉（数据源 `list_providers` / `list_models`）；显示上下文窗口、输入价/输出价；
   未知模型黄标。Provider 缺失时禁用保存并给「去设置」。
@@ -2701,8 +2786,13 @@ Run 视图是同一 `session_id` 的完整 `Narrative`，一键切换（§8.3.6 
 
 **Tab 3 · 工具与权限**
 
-- 工具预设勾选（read/write/web/hub/memory/bash/python），高级 allow/deny 列表。
-- **bash**：开关（默认开）、`bash_roots`（只读根）、网络开关（默认随 bash）、高风险命令审批策略。
+- 工具开关（默认全开）：文件、bash、run_python、web、browser、computer、agent_spawn/subagent、
+  codemode、cron、技能、插件；每项可单独关，新增工具默认可见（D18）。
+- MCP 单独一节：总开关、server 级、tool 级（`tools.mcp.disable/disable_servers/disable_tools/allow_tools`），
+  显示连接状态与失败原因。
+- 高级：`tools.disable`（精确名/前缀）与 custom 白名单（`tools.allow`）；不要让用户手写一个看不懂的正则。
+- **bash**：开关（默认开）、`tools.bash_roots`（只读根）、`tools.disable_network`（默认允许网络）、
+  高风险命令审批策略。
   文案必须说明「bash 在智能体 home 内执行；工作区文件通过派任务修改」。
 - 路径根（`workspace_roots`）、能否建工作区、能否派发、能否交接、能否分享产物。
 - 预算：单任务/日预算；并发上限。
@@ -2766,7 +2856,18 @@ interface HubState {
   rounds: Record<string, RoundView>         // round_id → 消息组/动作清单/折叠态
   displayMode: 'grouped'|'flat'             // 同一轮多回复：合并/分开（localStorage）
   drafts: Record<string, string>            // 输入框草稿（按 target）
+  streaming: Record<string, StreamDraft>    // message_id → 群内流式草稿（临时）
+  finalized: Set<string>                    // 已收到 final 的 message_id（丢弃迟到 delta）
   inspector: 'tasks'|'artifacts'|'members'|'context'|null
+}
+
+interface StreamDraft {
+  messageId: string
+  agentId: string
+  roundId: string
+  text: string
+  lastIndex: number
+  updatedAt: number
 }
 
 interface RoundView {
@@ -2784,12 +2885,14 @@ interface RoundView {
 - 两个 store 都要接收 transport 事件：在 `useAppStore` 的 wire 入口（`useAppStore.ts:8153`）加一句
   `if (ev.event_type.startsWith('hub_')) { useHubStore.getState().apply(ev); return }`。
   或者把 transport 订阅抽到一个 `wire.ts`，两个 store 都注册（更干净，但要小心顺序）。
-- 流式：DM 直接复用现有 `content_chunk` 归约；群组默认不订阅 `content_chunk`（只订阅白名单），
-  避免高频率重渲染。P2 若要群内流式，加 `hub_message_delta` + 100ms 节流。
+- 流式：DM 直接复用现有 `content_chunk` 归约；群组**只消费 `hub_message_delta`**（bridge 已做
+  80ms 合并），不直接订阅 SDK 的 `content_chunk`。`apply` 里按 `message_id` 累加 text、校验
+  `index > lastIndex`；`hub_message` 到达时写入 `finalized` 并删除草稿。
 - **群组消息只看 `hub_message`，不看 `agent_end`**：`agent_end` 是会话事件（DM 用），
   群组正文由 bridge 在 `finishHubRound` 里统一落 `hub_message`。否则同一段回复会渲染两次。
-- 群组白名单事件：`hub_message` / `hub_activity` / `hub_round` / `hub_task_update` / `hub_need` /
-  `hub_agent_status`；其余（`content_chunk`/`llm_end`/`tool_run_*`）只在 Inspector 的「运行详情」里按需拉。
+- 群组白名单事件：`hub_message` / `hub_message_delta` / `hub_activity` / `hub_round` /
+  `hub_task_update` / `hub_need` / `hub_agent_status`；其余（`content_chunk`/`llm_end`/`tool_run_*`）
+  只在 Inspector 的「运行详情」里按需拉。
 - 快照：`hub_snapshot` 在进入 surface / 重连 / `hub_snapshot_invalidated` 时拉取；
   消息按 `seq` 去重合并（断线重连可能收到重复）。
 
@@ -2797,7 +2900,8 @@ interface RoundView {
 
 - 左栏只订阅 `agents/groups/needs/unread` 的浅层字段；消息列表单独 selector。
 - 群组消息超过 200 条时启用虚拟列表（现有 `Narrative` 是否已虚拟化？未确认；P2 评估）。
-- 工具行/活动状态用 ref + 局部订阅，避免每个 chunk 重渲整个群。
+- 工具行/活动状态用 ref + 局部订阅，避免每个 delta 重渲整个群；`streaming` 只订阅当前
+  target 的 message_id，左栏预览在 final 后才更新。
 
 ### 8.9 样式与复用
 
@@ -2808,8 +2912,9 @@ interface RoundView {
 - 复用组件：
   - `ArtifactCard`（产物）、`ApprovalCard`（审批）、`AskUserQuestionPanel`（提问）、
     `Markdown`（正文）、`TaskCard`（任务详情/右栏）、`UsageChip`（成本）、`icons.tsx`（新增 3 个图标）。
-  - `Narrative` 用于 DM；群组时间线**不要**直接复用 `Narrative`（它的数据模型是 session blocks，
-    不是群组消息）；写一个轻量 `HubTimeline`，内部复用 Markdown/卡片。
+  - `Narrative` 用于 DM 的 **Run 视图**（Chat 用 HubTimeline）；群组时间线**不要**直接复用
+    `Narrative`（它的数据模型是 session blocks，不是群组消息）；写一个轻量 `HubTimeline`，
+    内部复用 Markdown/卡片。
 - 响应式：左栏可折叠成图标条（复用 `leftExpanded` 逻辑）；窄屏（<900px）Inspector 变抽屉。
 - 可访问性：头像有 `aria-label`（名字+角色）；未读点不只靠颜色（加数字）；@ 选择器键盘可达。
 
@@ -2838,6 +2943,7 @@ src/components/hub/
   SystemActionLine.tsx  系统动作行（Created task/workspace）
   ViewToggle.tsx        Chat / Run 切换
   RoundActivityDigest.tsx 动作清单
+  StreamingMessage.tsx  群内流式草稿（final 后切 Markdown）
   RoutineCard.tsx       定时任务回执（P4）
   HandoffCard.tsx       交接卡
   ApprovalStubCard.tsx  私有审批占位
@@ -2891,19 +2997,20 @@ codemode/cron/MCP/技能/插件），Profile 只做显式关闭。安全不靠�
 | 维度 | 默认 | 实现 |
 |---|---|---|
 | cwd | `agents/<id>/home` | `builtin.NewFileTools(hubRoot)` + `BashTool` 的 cwd |
-| 可写 | 智能体 home + 显式 `policy.bash_roots` | `sandbox.NewSeatbelt(home)`；`WithSensitivePaths` 继续 deny `~/.ssh` 等 |
-| 可读 | home + workspace_roots（只读） | 路径策略 + 沙箱；越界返回结构化错误 |
-| 网络 | 默认允许（与现有 bash 一致），`policy.bash_network=false` 可关 | 沙箱/命令策略；外部抓取优先 `web_fetch` |
+| 可写 | **仅**智能体 home | `sandbox.NewSeatbelt(home)`；`WithSensitivePaths` 继续 deny `~/.ssh` 等 |
+| 可读 | home + workspace_roots + `tools.bash_roots`（均只读） | 路径策略 + 沙箱；越界返回结构化错误 |
+| 网络 | 默认允许（与现有 bash 一致），`tools.disable_network=true` 可关 | 沙箱/命令策略；外部抓取优先 `web_fetch` |
 | 高风险命令 | `rm -rf`、`sudo`、`git push`、`curl\|sh` 等 | 现有 bash 静态拦截 + `ask` 模式审批（`ToolApprovalRequested`） |
 | 输出 | 截断 + spill | 复用 `toolSpillDir(sid)`，不把大输出塞进上下文 |
 | 超时 | 默认 120s（可配） | 现有 bash 超时/取消 |
 
-- **工作区写入不走 bash**：默认 `workspace_roots` 只读；要改工作区，派任务（§6.6）。
-  这是「能跑 bash」与「不绕过工作区审批」的折中；需要直接写工作区的「工程师」智能体在 P3 显式开
-  `policy.bash_roots` 并接受更严格的审批。
+- **工作区写入不走 bash**（D16 已确认）：`workspace_roots` 只读；要改工作区，派任务（§6.6）。
+  `tools.bash_roots` 只用于额外的**只读**根（例如共享数据目录），不提供写权限，也不存在
+  「开一个开关直接写工作区」的旁路。
 - bash 的沙箱后端复用 `m.execSandbox(hubRoot, sid, profile, gate, pyRT)`（`main.go:998`）；
   `profile.withBash=true`，`gate` 绑定到该智能体的审批通道。
-- `run_python` 与 bash 共用同一沙箱；`tools.python` 默认开（办公/数据处理是智能体的常见职责）。
+- `run_python` 与 bash 共用同一沙箱；默认开（办公/数据处理是智能体的常见职责），
+  除非 `tools.disable` 显式包含 `run_python`。
 
 ### 9.3 Prompt injection
 
@@ -2967,7 +3074,7 @@ codemode/cron/MCP/技能/插件），Profile 只做显式关闭。安全不靠�
 4. **工作区派发**：一句话 → 建工作区 → 建 session → 派任务 → 完成 → 回推；任务账本状态正确。
 5. **回调幂等**：重放 AgentEnd 两次，只回推一次。
 6. **人工介入**：任务运行中人插话 → 结果标记 `human_intervened`，智能体不自动续跑。
-7. **群组 @**：@all 唤醒全部；@A 只唤醒 A；未 @ 不产生消息；群历史可检索到早期消息。
+7. **群组 @**：@all 唤醒全部其他成员；@A 只唤醒 A；未 @ 不产生消息；群历史可检索到早期消息。
 8. **护栏**：A↔B 互踢 6 轮后停止并进 Needs you；预算超限停止。
 
 评测方式：`evals/` 下加 `hub_eval.py` 或 Go 集成测试 + 真实 provider（小模型/低成本）。
@@ -2988,25 +3095,29 @@ codemode/cron/MCP/技能/插件），Profile 只做显式关闭。安全不靠�
 | 现有事件 | 不增删字段；新增 `hub_*` | 零（未知事件忽略） |
 | hooks | 不改 | 零 |
 | 手机端 | 不开放 hub 命令 | 零 |
-| 设置 | 新增 `hub` 段（默认关闭/空），不改现有键 | 零 |
+| 设置 | 新增 `hub` 段（默认开启；缺失按 true），不改现有键 | 零 |
 
 **开关**：`settings.json` 增加 `hub` 段（只影响 UI 与自动派发，不删数据）：
 
 ```jsonc
 {
   "hub": {
-    "enabled": false,              // 开发期默认关；上线默认开
+    "enabled": true,                // 默认开；显式 false 才关
     "default_policy": "ask",        // 新群的默认策略：auto | ask | readonly
-    "workspace_root": "~/hai-workspaces",
-    "max_parallel_runs": 6,
+    "workspace_roots": ["~/hai-workspaces"],
+    "max_parallel_hub_runs": 6,     // 全局并发（群内默认 3 见 GroupPolicy）
     "max_agents": 50,
     "max_group_members": 12
   }
 }
 ```
 
-P1 开发期用环境变量 `HAI_HUB=1` 强制开启。关闭 Hub 只隐藏 surface、停止自动派发，
-不删除 agent/group/task；重新开启后一切恢复。
+默认开启；排障时用环境变量 `HAI_HUB=0` 强制关闭。默认开启**只表示入口可见**，不会自动创建
+智能体、不会自动跑任务、不会自动派活。关闭 Hub 只隐藏 surface、停止自动派发，不删除
+agent/group/task；重新开启后一切恢复。
+
+> 默认值只在读取层合并，**不要把 `true` 回写 settings.json**：否则「用户没设过」会被固化成
+> 「用户设了 true」，以后改默认值不生效（本仓已有同类教训）。只有用户显式切换开关才落盘。
 
 ### 11.2 数据迁移
 
@@ -3016,9 +3127,9 @@ P1 开发期用环境变量 `HAI_HUB=1` 强制开启。关闭 Hub 只隐藏 surf
 
 ### 11.3 灰度
 
-1. 内部 flag 开启，只对本机开发者；
+1. 默认开启，但保持空 Hub（不预置智能体/群）；内部先用 `HAI_HUB=0` 验证关闭路径；
 2. 小范围用户（3–5 人）试用，收集「循环/成本/群组误触发」问题；
-3. 默认开启，但保留「关闭 Hub」与「只读模式」；
+3. 发布默认开启，保留「关闭 Hub」与「只读模式」；
 4. 全量后观察一周的 `hub_guardrail_hit` / `hub_task_total`。
 
 ---
@@ -3068,7 +3179,7 @@ P1 开发期用环境变量 `HAI_HUB=1` 强制开启。关闭 Hub 只隐藏 surf
 **验收**：一句话建工作区并派任务；完成后智能体收到结果并给出下一步；人工介入不自动续跑；
 重启后任务可解释；预算/循环护栏生效。
 
-### P3a · 群组基础（8–10 天）
+### P3a · 群组基础（9–11 天）
 
 **交付**
 
@@ -3076,10 +3187,12 @@ P1 开发期用环境变量 `HAI_HUB=1` 强制开启。关闭 Hub 只隐藏 surf
 - 群组日志、@ 路由、轮次快照、routing receipt、`group_history` / `group_members` / `group_say`。
 - 群组 agent 会话（`hub.<id>.g.<gid>`）、并发与顺序、冻结快照。
 - 交接 `handoff` / `handoff_ack`、产物版本与预览、私有审批占位。
-- 前端：群组视图、@ 选择器（先只做对话）、交接卡、审批占位、Inspector、Needs you 完整。
+- 群内流式：`hub_message_delta` + 80ms 合并 + final 按 `message_id` 替换。
+- 前端：群组视图、@ 选择器（先只做对话）、流式草稿、交接卡、审批占位、Inspector、Needs you 完整。
 - 评测 7。
 
-**验收**：@all/@A 行为正确；未 @ 不产生消息；群历史可检索；私有审批不进群上下文；并发不串台。
+**验收**：@all/@A 行为正确；未 @ 不产生消息；群历史可检索；私有审批不进群上下文；并发不串台；
+多 agent 并行时有多个草稿、final 不重复、断线只丢草稿。
 
 ### P3b · 智能体互相感知与对话（6–8 天）
 
@@ -3098,7 +3211,7 @@ P1 开发期用环境变量 `HAI_HUB=1` 强制开启。关闭 Hub 只隐藏 surf
 
 ### P4 · 打磨与扩展（按需）
 
-- 群组内流式草稿（节流）、「它看到了什么」的完整 Context 面板。
+- 流式/typing 的弱网与长会话打磨、「它看到了什么」的完整 Context 面板。
 - 手机端/IM 接入、跨机群组（Session Mesh）。
 - 智能体模板市场、导入导出、团队共享。
 - 外部 hooks 的 AgentEnd 事件（可选）。
@@ -3144,6 +3257,8 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 - **人工介入**：Injected=true → human_intervened。
 - **崩溃恢复**：构造 `dispatched` 账本 + 无 run → 启动后 `interrupted` + 通知。
 - **群组路由**：@all/@A/无 @ 三种；快照冻结；observer 角色不改变工具面（与 `readonly` preset 区分）。
+- **群内流式**：同一 `message_id` 的 delta 按 index 合并；final 覆盖草稿；迟到 delta 丢弃；
+  delta 不落盘/不进快照；并行 agent 各自草稿不串。
 - **智能体互 @**：A 正文 `@B` → B 被唤醒；`assign_task` → 任务账本；B 完成后 A 被唤醒；
   同一条消息里 3 个 mention 上限；代码块/URL 里的 `@` 不触发。
 - **对话控制器**：8 轮上限、A↔B 踢皮球检测、人类插话清队列、停止按钮、冷却。
@@ -3171,6 +3286,9 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 - `metrics.jsonl` 的字段兼容（新增字段 omitempty）。
 - 事件顺序：Hub 事件不能插在现有 `command_response` 保序逻辑中间（`electron/main.ts:876`）。
 - 不改变 `new_session` 的语义（Hub 用自己的创建函数）。
+- Hub 的 `buildHubLoop` 不出现 `DefaultSystemPrompt`（L0 已移除），且非 Hub 路径的提示词字节不变。
+- `settings.json` 无 `hub` 段时按默认开启处理但**不回写**；显式 `false` 才关闭；旧客户端忽略 `hub_*`。
+- `observer` 不改变工具注册；`tools.preset=readonly` 才只读（D18）。
 
 ---
 
@@ -3178,24 +3296,24 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 
 ### 14.1 需要你拍板（建议按顺序回答）
 
-| # | 问题 | 选项 | 我的建议 | 决定（待你填） |
+| # | 问题 | 选项 | 我的建议 | 决定（已确认） |
 |---|---|---|---|---|
 | D1 | 群组里每个智能体是「每个群一个会话」还是「所有群共用一个会话」？ | A 每群一个（隔离，推荐）；B 共用一个（上下文更连贯但会串群） | **A**；记忆共享，上下文隔离 | **A（已确认）** |
-| D2 | 智能体能否自主续跑？几轮？ | A 默认 3 轮；B 6 轮；C 不自动续跑 | **B（6）**，到限进 Needs you | （待定） |
+| D2 | 智能体能否自主续跑？几轮？ | A 默认 3 轮；B 6 轮；C 不自动续跑 | **B（6）**，到限进 Needs you | **B（6，已确认）** |
 | D3 | 建工作区的权限 | A 默认不允许，需人开；B 允许在 `~/hai-workspaces` 下自动建；C 每次审批 | **B + ask 模式默认审批** | **B + ask 审批（已确认）** |
-| D4 | 群组默认策略 | A `ask`（每个外部动作审批）；B `auto`（信任智能体） | **A**；用户可切 `auto` | （待定） |
-| D5 | 群组未 @ 的消息，是否进入该智能体下次唤醒的快照？ | A 进入（下次 @ 时补齐，符合「知道所有历史」）；B 不进入（只给 @ 之后的消息） | **A**；用 40 条/12k 预算 + 折叠控制成本 | （待定） |
+| D4 | 群组默认策略 | A `ask`（每个外部动作审批）；B `auto`（信任智能体） | **A**；用户可切 `auto` | **A（ask，已确认）** |
+| D5 | 群组未 @ 的消息，是否进入该智能体下次唤醒的快照？ | A 进入（下次 @ 时补齐，符合「知道所有历史」）；B 不进入（只给 @ 之后的消息） | **A**；用 40 条/12k 预算 + 折叠控制成本 | **A（进入，已确认）** |
 | D6 | 任务完成后群内如何感知？ | A 群内任务结果卡（结构化，派发者被唤醒，其他成员下次唤醒可见）；B 自动发一条智能体对话消息；C 只更新侧栏 | **A**（既有感知，又不破坏「只有 @ 才回复」） | **A（已确认：群内必须有感知）** |
 | D7 | 智能体能否使用 bash/执行代码？ | A 默认开启 bash（沙箱 + 审批）；B 默认关闭；C 只允许 run_python | **A**；bash 在智能体 home 内执行 | **A（已确认：当然能用 bash）** |
 | D8 | 记忆是否跨群共享？ | A 共享（一个「它」）；B 每群独立记忆 | **A**；群特有事实用群历史/产物 | **A（已确认）** |
-| D9 | DM 是否允许「新建会话」？ | A 不允许（只有一个，推荐）；B 允许归档重开 | **A**；提供 `/clear` 与导出 | （待定） |
-| D10 | 群组消息是否流式显示？ | A 先不做（完成后整条）；B 做（节流） | **A**；P4 再加 | （待定） |
-| D11 | 智能体数量/群规模上限 | A 50 agents / 12 members；B 不限 | **A**；超限提示拆群 | （待定） |
-| D12 | Hub 是否默认开启？ | A 默认开；B 默认关（flag） | **B 开发期，上线 A** | （待定） |
-| D13 | 智能体之间自动对话最多几轮（每条人类消息之后）？ | A 8 轮；B 4 轮；C 不限 | **A（8）**；到限写系统消息并停，等人类继续 | （建议 A，待确认） |
-| D14 | 智能体能否 @all？ | A 仅 owner，且每条人类消息最多 1 次；B 所有成员；C 禁止 | **A**；防止一个智能体刷屏全场 | （建议 A，待确认） |
+| D9 | DM 是否允许「新建会话」？ | A 不允许（只有一个，推荐）；B 允许归档重开 | **A**；提供 `/clear` 与导出 | **A（不允许，已确认）** |
+| D10 | 群组消息是否流式显示？ | A 先不做（完成后整条）；B 做（节流） | **B**；`hub_message_delta` + bridge 80ms 合并 + 前端 rAF 节流 | **B（要流式，已确认）** |
+| D11 | 智能体数量/群规模上限 | A 50 agents / 12 members；B 不限 | **A**；超限提示拆群 | **A（50/12，已确认）** |
+| D12 | Hub 是否默认开启？ | A 默认开；B 默认关（flag） | **A**；显式 `enabled:false` 才关，保留只读模式 | **A（默认开启，已确认）** |
+| D13 | 智能体之间自动对话最多几轮（每条人类消息之后）？ | A 8 轮；B 4 轮；C 不限 | **A（8）**；到限写系统消息并停，等人类继续 | **A（8，已确认）** |
+| D14 | 智能体能否 @all？ | A 仅 owner，不限次数；B 所有成员；C 禁止 | **A**；只给 owner，但不另设次数上限 | **A（仅 owner，不限次数，已确认）** |
 | D15 | 任务完成时唤醒谁？ | A 只唤醒派发者 + 群内结果卡；B 唤醒所有成员；C 只更新卡片不唤醒 | **A**；其他成员下次被 @ 时在快照里看到结果卡 | **A（与 D6 配套）** |
-| D16 | bash 的可写范围 | A 智能体 home（推荐），工作区通过派任务修改；B 允许直接写 workspace_roots；C 只读 | **A**；需要改工作区时走有审批、有产物的任务通道 | （建议 A，待确认） |
+| D16 | bash 的可写范围 | A 智能体 home（推荐），工作区通过派任务修改；B 允许直接写 workspace_roots；C 只读 | **A**；需要改工作区时走有审批、有产物的任务通道 | **A（home，已确认）** |
 | D17 | 系统提示词是否保留 L0（DesktopCodePromptV2）？ | A 保留；B 去掉，系统提示词从 L1 起 | **B**；Hub 协议自己承担工具/安全/输出契约 | **B（已确认）** |
 | D18 | Hub 智能体的工具面？ | A 只给 Hub/文件/bash；B 与桌面会话一致的全工具面，按 Profile 开关 | **B**；默认全开（含 subagent/codemode/browser/computer/cron/MCP/插件），MCP 可 server/tool 级关闭 | **B（已确认）** |
 
@@ -3220,8 +3338,30 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 
 - **群组噪音**：多个智能体同时回复会刷屏。缓解：轮次归组、routing receipt、默认不自动进群。
 - **信任**：用户不知道智能体在干什么。缓解：任务行、产物、Context 面板、Needs you。
-- **成本**：群组 @all 一次唤醒 5 个模型。缓解：预算、并发、观察者只读、默认模型选择便宜档。
+- **成本**：群组 @all 一次唤醒 5 个模型。缓解：预算、并发、观察者不派任务/@all、默认模型选择便宜档。
 - **人格漂移**：用户改了人格，行为突变。缓解：版本历史、预览、A/B（P4）。
+
+### 14.4 决策一致性复核（2026-11）
+
+复核范围：D1–D18 对照正文（§4–§13）、类型/协议（§17）、任务表与看板（§19）。
+本轮发现并修正的冲突（均已落到文档与 `tasks.json`）：
+
+| 冲突 | 修正 |
+|---|---|
+| D10 仍写「P4 再加 / 默认关闭」 | 改为 P3a 实现 `hub_message_delta`；新增任务 P3a-09，Review 顺延 P3a-10 |
+| D12 仍写「开发期默认关」 | `settings.hub.enabled` 默认 `true`；缺失按 true；默认值不回写 |
+| D14 仍写「每条人类消息最多 1 次」 | 改为仅 owner、不限次数；非 owner 拒绝；仍受轮次/并发/预算护栏 |
+| D18 仍列「默认不注册」工具 | 改为全量注册 + `disable`；§5.1 JSON 的旧 `preset[]/deny` 同步成 `preset/disable` |
+| D17 残留 L0 | 明确 `WithBaseSystemPrompt("")`，L1 起；L3–L5 仍由内核追加 |
+| observer 被写成只读 | 角色只管群权限；只读用 `tools.preset=readonly`，且 UI 明示 |
+| D16 bash 仍写「可写 bash_roots」 | 改为只写 home；`workspace_roots`/`bash_roots` 均只读 |
+| 任务数 50 / P3a-09 冲突 | 51 个任务（9+10+9+10+8+5）；P3a-09 流式、P3a-10 Review |
+| 类型/命名不一致 | `TaskOrigin.kind` 改 string；`TurnContext.senders` 用 `AgentRef`；补 `Scope`/`TaskDelivered`/`IntentHandoff`；`hubScope` 改 `*agenthub.Scope`；`workspace_root(s)`、`max_parallel_hub_runs` 统一 |
+| 表格/协议字段 | `[Chat\|Run]` 转义；`message.id` 与 delta `message_id` 对齐；delta 无全局 seq |
+| 测试门禁 | P0-09 增加「bridge 测试包可编译」，避免 `go test ./desktop/bridge/` 长期不可用 |
+
+**结论**：D1–D18 在正文、协议、任务表、看板四处一致，无待定项；剩余的是 §15.4 的实现前复核项，
+不是决策冲突。
 
 ---
 
@@ -3270,7 +3410,7 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 | DM | 人与单个智能体的会话；只有一个 Session |
 | Group / 群组 | 人与多个智能体的共享时间线；@ 路由 |
 | Round / 轮次 | 一次 @ 唤醒产生的一批运行；快照冻结 |
-| Routing receipt | 「谁被唤醒/谁只读/谁待命」的系统行 |
+| Routing receipt | 「谁被唤醒/谁待命/谁不能派任务」的系统行 |
 | HubTask / 工作项 | 智能体派给工作区会话的一次带回调的任务 |
 | AgentEnd callback | 工作区 run 结束后把结果回推给派发者的链路 |
 | Needs you | 审批/提问/交接/失败的人工收件箱 |
@@ -3286,13 +3426,16 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 4. 前端 `Narrative` 是否已虚拟化（群组长列表性能）。
 5. `metrics.jsonl` 的 schema 是否允许新增 `agent_id/group_id`（现有 `MetricsEntry` 的兼容性）。
 6. 手机端命令白名单的具体位置（P4 开放 Hub 时要改）。
+7. `desktop/bridge` 测试包当前可能缺 helper（`testManager`/`syncBuf`/`findFirst`/`cmd` 等），
+   任何提交下 `go test ./desktop/bridge/` 都可能编译失败。P0-09 必须先把测试包补到可编译，
+   否则 P1/P2 的「测试绿」门禁形同虚设（不要用 `go build` 代替测试门禁）。
 
 ---
 
 ## 16. 下一步（评审通过后）
 
-1. 你对 §14.1 剩余决策（D2/D4/D5/D9–D14/D16）给出选择，或直接说「按建议」。
-2. 我按 §19 的任务拆分开始 P0：每个任务一个 commit，commit 后做一次 Review，再进下一个。
+1. §14.1 的决策已全部确认（D1–D18 无待定项），方案评审通过。
+2. 按 §19 的任务拆分从 P0-01 开始：每个任务一个 commit，commit 后做一次 Review，再进下一个。
 3. 先做 P0 + P1 的最小纵切：一个智能体、一个 DM、独立记忆、独立 provider、bash；
    跑通后再接工作区派发。
 4. 每期结束给你一个可运行的构建 + 一段 3 分钟演示（DM / 派发 / 群组 / 智能体互聊）。
@@ -3377,6 +3520,16 @@ type GroupID string
 type TaskID string
 type NeedID string
 type ArtifactID string
+
+type Scope struct {
+    Kind    string  `json:"kind"` // dm | group
+    GroupID GroupID `json:"group_id,omitempty"`
+}
+
+const (
+    ScopeDM    = "dm"
+    ScopeGroup = "group"
+)
 
 type Avatar struct {
     Kind  string `json:"kind"`  // emoji | image
@@ -3488,8 +3641,9 @@ type Intent string
 const (
     IntentChat   Intent = "chat"
     IntentAssign Intent = "assign"
-    IntentReport Intent = "report"
-    IntentAsk    Intent = "ask"
+    IntentReport  Intent = "report"
+    IntentAsk     Intent = "ask"
+    IntentHandoff Intent = "handoff"
 )
 
 type MessageKind string
@@ -3506,16 +3660,23 @@ const (
     KindSystem        MessageKind = "system"
 )
 
+type AgentRef struct {
+    AgentID AgentID `json:"agent_id"`
+    Name    string  `json:"name"`
+    Avatar  Avatar  `json:"avatar"`
+    Accent  string  `json:"accent"`
+}
+
 type TurnContext struct {
-    TriggerSeqs []int64  `json:"trigger_seqs"` // 触发本轮的消息 seq
-    Senders     []Sender `json:"senders"`      // 去重后的触发者（含显示信息）
-    Reason      string   `json:"reason,omitempty"` // multi_agent | paginated | interleaved
+    TriggerSeqs []int64    `json:"trigger_seqs"` // 触发本轮的消息 seq
+    Senders     []AgentRef `json:"senders"`      // 去重后的触发者（含显示信息）
+    Reason      string     `json:"reason,omitempty"` // multi_agent | paginated | interleaved
 }
 
 type Message struct {
     Seq        int64       `json:"seq"`
     ID         string      `json:"id"`
-    GroupID    GroupID     `json:"group_id"`
+    GroupID    GroupID     `json:"group_id,omitempty"` // DM 为空
     RoundID    string      `json:"round_id,omitempty"`
     Context    *TurnContext `json:"context,omitempty"` // 仅回复消息；驱动 TurnContextLine
     Sender     Sender      `json:"sender"`
@@ -3540,6 +3701,7 @@ const (
     TaskCompleted     TaskStatus = "completed"
     TaskFailed        TaskStatus = "failed"
     TaskInterrupted   TaskStatus = "interrupted"
+    TaskDelivered     TaskStatus = "delivered" // 结果已回推（completed/failed/interrupted 之后）
     TaskCanceled      TaskStatus = "canceled"
     TaskBlockedBudget TaskStatus = "blocked_budget"
     TaskDeclined      TaskStatus = "declined"
@@ -3554,10 +3716,11 @@ type TaskTarget struct {
 }
 
 type TaskOrigin struct {
-    Kind       SenderKind `json:"kind"` // dm | group | human
-    GroupID    GroupID    `json:"group_id,omitempty"`
-    AgentID    AgentID    `json:"agent_id,omitempty"`
-    MessageSeq int64      `json:"message_seq,omitempty"`
+    Kind       string  `json:"kind"` // dm | group | human（不是 SenderKind）
+    GroupID    GroupID `json:"group_id,omitempty"`
+    AgentID    AgentID `json:"agent_id,omitempty"`
+    AgentName  string  `json:"agent_name,omitempty"` // 冗余显示名，避免跨端查
+    MessageSeq int64   `json:"message_seq,omitempty"`
 }
 
 type Dispatch struct {
@@ -3715,7 +3878,8 @@ if err := hubSvc.Recover(context.Background()); err != nil { log... }
 
 - `newHubService` 打开 `~/.go-code/hub`（不存在则创建），加载 agents/groups/tasks，
   构造 `hubSessionRunner{m}`、`hubWorkspaceOps{m}`、`hubEmitter{m.out}`。
-- 默认关闭时（`settings.hub.enabled=false`）仍可加载（只读面板），但 `SendGroup` 返回 `hub_disabled`。
+- 显式 `enabled=false` 时仍可加载（只读面板），但 `SendGroup` 返回 `hub_disabled`；
+  缺失时按开启处理（用 `*bool` 或默认合并，不能依赖 Go bool 零值）。
 
 #### 17.5.2 会话创建
 
@@ -3731,7 +3895,8 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
     }
     // ... NewSession / bs 字段
     if opts.hub != nil {
-        bs.hubScope = opts.hub.Scope
+        sc := opts.hub.Scope
+        bs.hubScope = &sc // *agenthub.Scope；nil = 工作区目标
         bs.hubAgentID = opts.hub.Agent.ID
         bs.hubGroupID = opts.hub.Scope.GroupID
         bs.provider = opts.hub.Agent.Provider
@@ -3748,11 +3913,11 @@ if e.Type() == events.AgentEndType {
     ae, _ := e.(*events.AgentEnd)
     if ae != nil && ae.TaskId == "" && ae.ParentRunId == "" {
         switch {
-        case bs.hubTaskID != "" && bs.hubScope == "":
+        case bs.hubTaskID != "" && bs.hubScope == nil:
             _ = m.hubSvc.FinishWorkspaceTask(ctx, bs.finishInput(ae))
-        case bs.hubTaskID != "" && bs.hubScope != "":
+        case bs.hubTaskID != "" && bs.hubScope != nil:
             _ = m.hubSvc.FinishAgentTask(ctx, bs.finishInput(ae))
-        case bs.hubScope != "":
+        case bs.hubScope != nil:
             _ = m.hubSvc.FinishTurn(ctx, bs.finishTurnInput(ae))
         }
         bs.hubTaskID = ""
@@ -3764,15 +3929,20 @@ if e.Type() == events.AgentEndType {
 
 ```go
 case *events.ToolRunStart:
-    if bs.hubScope != "" {
+    if bs.hubScope != nil {
         m.hubSvc.EmitActivity(HubActivity{Kind:"tool", Name:ev.Name, Status:"running", ...})
     }
 case *events.ToolRunEnd:
     // 同上，status=ok/error，summary 截断
+case *events.ContentChunk:
+    if bs.hubScope != nil && bs.hubScope.Kind == ScopeGroup {
+        m.hubDelta.Push(bs.hubAgentID, bs.hubRoundID, ev.Text) // 80ms 合并后发 hub_message_delta
+    }
 ```
 
-- 高频事件（`content_chunk`/`llm_end`）**不投影**；只投影 tool/compress/agent status。
-- 投影失败不能影响主事件流（recover + 记日志）。
+- 高频事件**不原样投影**：DM 继续走现有 `content_chunk`；群组只在 bridge 合并成
+  `hub_message_delta`（D10）；`llm_end`/工具参数不投影。
+- 投影失败不能影响主事件流（recover + 记日志）；delta 的 flush 失败只丢草稿，final 仍会补。
 
 #### 17.5.5 命令 dispatch
 
@@ -3804,6 +3974,7 @@ interface HubState {
   groups: Record<string, GroupView>
   dms: Record<string, DMView>
   optimistic: Record<string, HubMessage> // key=client_msg_id
+  streaming: Record<string, StreamDraft>  // key=message_id；D10
   conversations: Record<string, ConversationView>
   tasks: Record<string, TaskView>
   needs: Need[]
@@ -3816,12 +3987,14 @@ interface HubState {
 
 - `apply(ev)` 按 `event_type` 分派，纯函数 `reduceHubEvent(state, ev)` 便于单测；
 - `hub_message` 先按 `client_msg_id` 替换 optimistic，再按 `seq` 去重插入；
+- `hub_message_delta` 按 `message_id` 累加、`index` 去重；`hub_message` 到达时 final 覆盖并清草稿；
 - `hub_conversation` 更新状态条；`hub_task_update` 原地更新任务卡；
 - `hub_typing` 设置定时器自动清除；
 - 错误 `command_response` 按 `code` 映射文案（§7.5.6）。
 
 组件树见 §8.10。开发顺序：`HubRail` → `HubTimeline`（text/system）→ `Composer` →
-`AgentMentionChip`/`MentionPicker` → `TaskResultCard` → `ConversationBar` → `TypingIndicator`。
+`AgentMentionChip`/`MentionPicker` → `StreamingMessage` → `TaskResultCard` → `ConversationBar` →
+`TypingIndicator`。
 
 ### 17.7 实现顺序（与任务 ID 对应）
 
@@ -3837,19 +4010,20 @@ interface HubState {
 | 8 | P2-01/02/03 | P1-02 | workspace ops、session 工具、队列 |
 | 9 | P2-04/05 | P2-03 | 相关性、结算、回推 |
 | 10 | P2-06/07/08 | P2-05 | 任务板、护栏、恢复 |
-| 11 | P3a-01..09 | P2-05 | 群组基础 |
+| 11 | P3a-01..10 | P2-05 | 群组基础（含流式） |
 | 12 | P3b-01..08 | P3a-03/05 | 互感知、互 @、任务卡 |
 | 13 | P4-01..05 | 全部 | 打磨 |
 
 ### 17.8 兼容与回归红线（实现时逐条检查）
 
 - `m.createOpts` 的现有调用点行为不变（cron、工作区、手机端）。
-- `bridgeSession.emit` 对非 Hub 会话零额外分配（`hubScope==""` 直接跳过）。
+- `bridgeSession.emit` 对非 Hub 会话零额外分配（`hubScope==nil` 直接跳过）。
 - 事件顺序：`command_response` 保序逻辑不受影响；Hub 事件不插队。
 - 现有 `session_send`/`session_list`（mesh）不被 Hub 同名工具影响（不同 Engine）。
 - `metrics.jsonl` 新字段 omitempty；旧报表不炸。
 - `workspaces.json` 不写 Hub 虚拟目录。
-- `settings.json` 新 `hub` 段缺失时默认关闭/默认值，不阻断启动。
+- `settings.json` 新 `hub` 段缺失时按默认开启处理（指针/默认合并，不能依赖 Go bool 零值），
+  显式 `false` 才关闭；配置损坏不阻断启动。
 - 手机端不收到 `hub_*` 事件（除非显式开放），旧客户端忽略未知事件。
 
 ### 17.9 测试夹具（建议）
@@ -4037,7 +4211,7 @@ feat(hub-p0-01): agenthub 包骨架与领域类型
 | P2-08 | 崩溃恢复 |
 | P2-09 | P2 Review + 评测 4–6 |
 
-**P3a · 群组基础（9）**
+**P3a · 群组基础（10）**
 
 | ID | 任务 |
 |---|---|
@@ -4049,7 +4223,8 @@ feat(hub-p0-01): agenthub 包骨架与领域类型
 | P3a-06 | `handoff` / ack / 护栏 |
 | P3a-07 | 产物版本 + 私有审批/Needs you |
 | P3a-08 | 前端群组视图 + RoundGroup + 动作清单 + Inspector |
-| P3a-09 | P3a Review + 评测 7 |
+| P3a-09 | 群内流式：`hub_message_delta` + 节流 |
+| P3a-10 | P3a Review + 评测 7 |
 
 **P3b · 智能体互感知/互 @（8）**
 
@@ -4068,13 +4243,13 @@ feat(hub-p0-01): agenthub 包骨架与领域类型
 
 | ID | 任务 |
 |---|---|
-| P4-01 | 群内流式/typing 打磨、性能 |
+| P4-01 | 流式/typing 弱网与长会话打磨、性能 |
 | P4-02 | Context 面板 + 深链 + 导出 |
 | P4-03 | 手机/IM 接入（spike） |
 | P4-04 | 外部 AgentEnd hook + FTS/归档 |
 | P4-05 | 最终 Review + 复盘 |
 
-合计 **50** 个任务（9+10+9+9+8+5）。每个任务 = 一个 commit + 一次 Review。
+合计 **51** 个任务（9+10+9+10+8+5）。每个任务 = 一个 commit + 一次 Review。
 
 ### 19.4 看板怎么用
 
