@@ -1235,9 +1235,9 @@ const BASE = {
     },
     "P1-05": {
       "status": "review",
-      "commit": "73a9469 feat(hub-p1-05): 记忆隔离 + 面板浏览/编辑（写前备份、下一个 Run 生效）",
-      "review": "changes_requested",
-      "reviewNote": "首轮 review changes_requested（task-fayq2axq）：B1 写记忆触发的 refreshHubLoops 用 Profile 的 model/effort 重建 loop 并回写 bs.provider/bs.model —— 用户在 DM 里 switch_model/switch_effort 的选择会被一行记忆静默改回默认值，且 bs.effort 不更新导致「面板显示 high、实际跑 low」；B2 路径检查里 `..` 那条 branch 未被测试钉住（删掉后 memory 测试仍全绿，因为 evalWithin 兜住并给出 (symlink) 文案）——不是逃逸，是测试没锁住。另有一条 behavior 级缺口：删掉 SetLoop 后自带测试仍全绿（只比指针，没证明下一个 Run 真的换了 prompt）。已确认扎实的部分：每智能体独立目录、A/B 不串、23 种逃逸形态全拒（含符号链接/中间目录）、写前备份+prune 只删 .bak、备份失败拒绝写、12 并发无撕裂。待修复：会话级 model/effort 优先、按文案钉住 `..` 检查、用 ContextBreakdown 断言下一个 Run 生效、`.backups` 设为保留段、hubMemoryConfig 出错不回落项目记忆根。"
+      "commit": "ba07d34 fix(hub-p1-05): 复核修复 —— 会话级 model/effort 优先、按文案钉住路径检查、SetLoop 行为断言",
+      "review": "pending",
+      "reviewNote": "首轮 changes_requested（task-fayq2axq）：B1 写记忆触发的 refreshHubLoops 用 Profile 的 model/effort 重建 loop 并回写 bs.provider/bs.model，用户在 DM 里 switch_model/switch_effort 会被一行记忆静默改回默认，且 bs.effort 不更新导致「面板 high、实际 low」；B2 路径检查的 \"..\" 分支未被测试钉住（删掉后仍全绿，evalWithin 用 (symlink) 文案兜住）；另有行为缺口：删掉 SetLoop 后自带测试仍全绿。→ ba07d34 修复：重建前用会话当前 provider/model/effort 覆盖 Profile 副本（不写回 bs.*）；坏路径按各自文案断言（并 deny (symlink) 兜底），.backups 设为保留段；Session.Loop() 只读取值 + 会话侧断言（SetLoop 被删即红，并核对 loop 的记忆分区 == 当前注入长度）；hubMemoryConfig 出错不再回落项目记忆根；AgentLoop 补 Model()/ReasoningEffort()。三条 mutation（去 clean 检查 / 去 SetLoop / 去会话覆盖）均已实测失败；agenthub+session+bridge 全绿（agents 包测试本就编译不过，与本次无关）。评审已确认扎实的部分：每智能体独立目录、A/B 不串、23 种逃逸形态全拒（含符号链接/中间目录）、写前备份+prune 只删 .bak、备份失败拒绝写、12 并发无撕裂。待复审。"
     }
   }
 };
