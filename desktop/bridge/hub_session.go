@@ -325,9 +325,8 @@ func (m *manager) hubSpecFor(p *agenthub.AgentProfile, scope agenthub.Scope, hom
 //
 // 懒创建：第一次发消息/打开 DM 才装配。进程内已有 → 直接复用（不重建 loop、不丢内存态）；
 // 进程重启后按确定性 sid 冷恢复（createIn 的 record 恢复路径）。
-// 并发：同一 agent 的两个 hub_open 可能同时进来，用 ws.sessions 的既有幂等兜底
-// （createIn 内部 ws.mu 下二次查表，后到者复用先到的实例）。
-// lockHubAgent 按智能体串行化「装配会话」这一段（返回解锁函数）。
+// 并发：同一 agent 的两个 hub_open/hub_send 可能同时进来，靠 lockHubAgent 串行化
+// 「查表 → 装配 → 写入」整段（见下），锁内二次查表后到者复用先到的实例。
 //
 // 为什么需要：createIn 是「锁内查表 → 解锁装配 → 再锁写入」，中间没有二次查表；
 // 并发 hub_send（桌面端靠 dispatchMu 串行，手机端是另一个 mutex）会各自装配出
