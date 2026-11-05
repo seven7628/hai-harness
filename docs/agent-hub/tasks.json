@@ -865,9 +865,9 @@
     },
     "P0-03": {
       "status": "review",
-      "commit": "c0a0bd5 feat(hub-p0-03): Profile/Group 校验与默认值",
+      "commit": "8ca9a16 fix(hub-p0-03): 收口 Validate 零值语义与 ID 形状",
       "review": "pending",
-      "reviewNote": "独立 Review 进行中；go test -race ./agenthub/... 全绿。"
+      "reviewNote": "首轮 changes_requested（Validate 零值契约/ID 只查前缀）→ 8ca9a16 修复；复审进行中。"
     }
   }
 }
