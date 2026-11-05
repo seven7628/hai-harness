@@ -169,7 +169,7 @@
         "desktop/bridge/main.go",
         "desktop/bridge/hub_session.go"
       ],
-      "acceptance": "createOpts 转发 createIn；项目路径行为逐字节不变；hubRuntime 不加载 MCP/插件/技能；cron/工作区测试全绿；buildHubLoop 断言 base system prompt 为空（L0 关闭，对应 P0-06 复审遗留项 5）。",
+      "acceptance": "createOpts 转发 createIn；项目路径行为逐字节不变；hubRuntime 不加载 MCP/插件/技能；cron/工作区测试全绿；buildHubLoop 断言 base system prompt 为空（L0 关闭，对应 P0-06 复审遗留项 5）；UI 侧 hub_task header 不进用户气泡（渲染 chip 且恢复路径保留该块，承接 P0-07 复审遗留项 2）。",
       "tests": "go test ./desktop/bridge/...",
       "commit": "refactor(hub-p0-08): createIn 与 hubRuntime"
     },
@@ -890,10 +890,10 @@
       "reviewNote": "首轮 changes_requested（TestPromptL1Only 拿 hubProtocolPrompt 常量与自身比较，golden 等于没钉——写错 task_status/删一条 Safety/改坏 @mentioned 都能全绿）→ 1eb129f 修复（testdata/l1.golden 2196B 逐字节比对；恒真的“不含 L0 常量”断言降级为注释并注明由 P0-08 断言；CJK 双标点/空群名尾随空格/缺 profile 裸 ID 一并收口；.gitignore 的 testdata/ 规则曾把 golden 吞掉，加 !agenthub/testdata/ 例外）→ 复审 pass，评审用两次真实 mutate（改 task_status、删 Safety 两行）验证测试会失败（go test -race ./agenthub/... 全绿，覆盖率 80.5%）。遗留 non-blocking：unknown member 与 (member) 括号叠字且仍诱导 @、Group 双空兜底出「## Group: Group」、TrimRight 只削整串尾部导致 Role 自带句号时中英标点混排、golden 无行尾换行需注释提醒、名册缺成员 id/能力摘要（P3b-01）。"
     },
     "P0-07": {
-      "status": "review",
-      "commit": "4d0f84c feat(hub-p0-07): 内核支持 hub_task 与 PendingCount",
-      "review": "pending",
-      "reviewNote": "ContentTypeHubTask 进 Validate allowlist（纯 header 不算用户输入，header+正文照常上报并保留 header 块）；Session.PendingCount = inbox + 未搬进 inbox 的恢复积压，恢复后在 State 副本上清空 Pending 防双算。前置修复 11a521e（session/store_record_test.go 从未入库 → 干净检出编译不过）。go test ./core/... ./session/... 全绿；新增用例 -race 全绿。已知无关缺陷：-race 下 TestAgentResumeEndToEnd 报 subagent.Registry 竞争，stash 本提交后同样失败。"
+      "status": "done",
+      "commit": "6e7a0e3 fix(hub-p0-07): legacy 恢复分支的同一死锁也一并挡掉",
+      "review": "passed",
+      "reviewNote": "独立 Review pass（0 blocking，评审用 mutation 反证 Validate allowlist 与 Pending 清空都被测试钉住；另核 provider 三条翻译路径都会把非 image 块按文本送出、标题 fallback 三处只认 text）。收尾两笔：940e01e 按 non-blocking #1/#5 把「store==nil + WithRecoveryState」改为构造期报错、恢复积压超过 inbox 缓冲时先扩容（goroutine+10s 超时把死锁变成可读失败）；6e7a0e3 把同一预扩容补到 legacy 恢复分支。前置修复：11a521e 补回 session/store_record_test.go（从未入库 → 干净检出编译不过）。go test ./core/... ./session/... 全绿。遗留 non-blocking 转后续：UI 侧 headerJSON 会当正文渲染（并入 P0-08）、provider 翻译缺「非 image → 文本」回归断言、压缩路径 messageText 白名单不含 hub_task（P2 派发中途压缩会丢 header 提示）、已知无关 -race 断言失败 TestAgentResumeEndToEnd（subagent.Registry 竞争，父提交同红）。"
     }
   }
 }
