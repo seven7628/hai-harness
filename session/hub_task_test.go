@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/seven7628/hai-harness/core"
 )
@@ -36,14 +37,11 @@ func TestCollectUserContentsHubTask(t *testing.T) {
 func TestPendingCountInboxAndRecovery(t *testing.T) {
 	header := core.Content{Type: core.ContentTypeHubTask, Content: `{"task_id":"task_31"}`}
 
-	// ① 无 store：恢复积压搬不进 inbox，PendingCount 必须把它算上。
+	// ① 无 store + 恢复源 = 半恢复（上下文没恢复、积压却留在 State 里，
+	// PendingCount 恒 >0 → 闸门恒忙）。必须在构造期就拒绝，而不是留个永远派不出任务的会话。
 	state := &State{Pending: []core.Message{core.NewUserMessage(header), core.NewUserMessage(header)}}
-	s, err := NewSession("s_pending_nostore", nil, nil, WithRecoveryState(state))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	if got := s.PendingCount(); got != 2 {
-		t.Fatalf("recovery pending not counted: got %d want 2", got)
+	if _, err := NewSession("s_pending_nostore", nil, nil, WithRecoveryState(state)); err == nil {
+		t.Fatal("recovery state without a store must be rejected")
 	}
 
 	// ② 有 store：积压已进 inbox，仍只能是 2（不是 4），且不篡改宿主持有的 State。
@@ -62,6 +60,33 @@ func TestPendingCountInboxAndRecovery(t *testing.T) {
 	s2.inbox <- core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: "在吗"})
 	if got := s2.PendingCount(); got != 3 {
 		t.Fatalf("inbox depth not counted: got %d want 3", got)
+	}
+
+	// ④ 积压超过 inbox 默认缓冲（64）：构造期没有消费者，不扩容就是永久阻塞。
+	// 用 goroutine + 超时把「挂死」变成一条可读的失败，而不是让整个测试套件卡住。
+	big := &State{Pending: make([]core.Message, 100)}
+	for i := range big.Pending {
+		big.Pending[i] = core.NewUserMessage(header)
+	}
+	done := make(chan *Session, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		s3, err := NewSession("s_pending_big", nil, stubStore{}, WithRecoveryState(big))
+		if err != nil {
+			errCh <- err
+			return
+		}
+		done <- s3
+	}()
+	select {
+	case s3 := <-done:
+		if got := s3.PendingCount(); got != 100 {
+			t.Fatalf("large recovery pending not fully queued: got %d want 100", got)
+		}
+	case err := <-errCh:
+		t.Fatalf("NewSession with large pending: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("NewSession blocked on a full inbox while restoring >cap pending (构造期死锁)")
 	}
 }
 

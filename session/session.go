@@ -289,6 +289,12 @@ func NewSession(id string, loop *agents.AgentLoop, store Store, opts ...Option) 
 		s.questions = events.NewQuestionWaiter(0) // 默认窗口 30 分钟（超时告知模型「用户未作答」）
 	}
 
+	if s.cfg.recoveryState != nil && store == nil {
+		// 恢复源只在能完整恢复上下文时才成立（下面的 restore 分支挂在 store != nil 上）。
+		// 允许这个组合会产生半恢复会话：上下文没恢复，积压却留在 recoveryState 里，
+		// PendingCount 恒 >0 → Hub 的空闲闸门（§6.6.4）永远「忙」，任务永远排不出去。
+		return nil, errors.New("session: WithRecoveryState requires a store")
+	}
 	if store != nil {
 		// checkpoint-first：宿主注入的 recoveryState（SessionRecord.sdk_state）优先；
 		// 缺失/损坏时回退 legacy store（现有路径）。二者二选一，不叠加。
@@ -305,6 +311,11 @@ func NewSession(id string, loop *agents.AgentLoop, store Store, opts ...Option) 
 			s.usage = rst.Usage
 			s.usage.Cost = rst.Cost // 成本以 State.Cost 为权威（兼容 Usage.Cost 未填充）
 			s.todo.Restore(rst.Todo)
+			// 积压可能超过默认缓冲（64）：构造期还没有消费者，s.inbox <- m 会永久阻塞
+			// （发生在 NewSession 返回前，调用方连 ctx 都没有）→ 按需扩容再灌。
+			if n := len(pending); n > cap(s.inbox) {
+				s.inbox = make(chan core.Message, n)
+			}
 			for _, m := range pending {
 				s.inbox <- m
 			}
