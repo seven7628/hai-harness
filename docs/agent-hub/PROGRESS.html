@@ -1166,10 +1166,10 @@ const BASE = {
       "reviewNote": "首轮 changes_requested（B1 日志尾部坏行/中间坏行粘连；B2 >8MiB 行写得进读不出）→ d281f8f 修复（尾行截断/短写回滚/写前限长/Reader 无上限/深拷贝/事件 seq）→ 复审 pass；复审建议的“完整 JSON 缺换行尾行”在 57d72db 修复并加用例，复核 pass（go test -race ./agenthub/... 全绿，覆盖率 76%）。"
     },
     "P0-03": {
-      "status": "review",
+      "status": "done",
       "commit": "8ca9a16 fix(hub-p0-03): 收口 Validate 零值语义与 ID 形状",
-      "review": "pending",
-      "reviewNote": "首轮 changes_requested（Validate 零值契约/ID 只查前缀）→ 8ca9a16 修复；复审进行中。"
+      "review": "passed",
+      "reviewNote": "首轮 changes_requested（Validate 零值契约与实现相反；Profile/Group 的 ID 只查前缀）→ 8ca9a16 修复（零值放行/严格 ID/副本 Normalize/custom 必须有 allow/Cf/软删计数）→ 复审 pass（go test -race ./agenthub/... 全绿，覆盖率 79.1%）。非 blocking 的 accent 色桶碰撞、JoinedAt 由 service 赋值留后续任务。"
     }
   }
 };
