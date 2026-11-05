@@ -634,6 +634,33 @@ class MockTransport implements Transport {
   private ctxTokens = new Map<string, number>()
   private ctxEstimated = new Map<string, boolean>()
   private sessions = new Map<string, MockSess[]>() // workspace path → 该项目的会话列表
+  // Hub（Agent Hub P1）：两个演示智能体 + 各自 DM 历史，供浏览器里验 rail/DM/流式。
+  // 与真 bridge 同形：seq 单调、hub_message 带 message、command_response 带 data。
+  private hubAgents: Record<string, unknown>[] = [
+    { id: 'ag_mockres1', name: 'Researcher', accent: '#7bc199', avatar: { kind: 'emoji', value: '🟢' },
+      role: '竞品研究员', description: '负责竞品价格、功能与公开情报；产出对比表与结论。',
+      provider: 'deepseek', model: 'deepseek-v4-flash', persona: 'hub', version: 1 },
+    { id: 'ag_mockwri2', name: 'Writer', accent: '#9daed2', avatar: { kind: 'emoji', value: '🔵' },
+      role: '写作', description: '把研究结论整理成可发布的文字，保持克制、可核查。',
+      provider: 'deepseek', model: 'deepseek-v4-pro', persona: 'hub', version: 1 },
+  ]
+  private hubMessages = new Map<string, { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string }[]>()
+  private hubCursor = new Map<string, number>()
+  private hubSeq = new Map<string, number>()
+
+  private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string }[] {
+    let list = this.hubMessages.get(agentID)
+    if (!list) {
+      list = [
+        { seq: 1, sender: { kind: 'human' }, text: '先列一下三家竞品的价格。', created_at: new Date(Date.now() - 86_400_000).toISOString() },
+        { seq: 2, sender: { kind: 'agent', agent_id: agentID }, text: '三家公开价：A $49/席、B $39/席（年付 $32）、C 未公开。\n\n需要我补功能对比吗？', created_at: new Date(Date.now() - 86_000_000).toISOString() },
+      ]
+      this.hubMessages.set(agentID, list)
+      this.hubCursor.set(agentID, 2)
+      this.hubSeq.set(agentID, 2)
+    }
+    return list
+  }
   private pickIdx = 0
   private titleIdx = 0
 
@@ -2176,6 +2203,85 @@ class MockTransport implements Transport {
       case 'trace': {
         const p = cmd.payload as Record<string, unknown> | undefined
         this.mockTraceData(cmd, String(p?.run_id || ''), p?.latest === 1 || p?.latest === true)
+        break
+      }
+      case 'hub_agent_list': {
+        const dm: Record<string, unknown> = {}
+        for (const a of this.hubAgents) {
+          const id = String(a.id)
+          const log = this.hubLog(id)
+          const last = log[log.length - 1]
+          const cursor = this.hubCursor.get(id) ?? 0
+          dm[id] = {
+            unread: log.filter((m) => m.seq > cursor && m.sender.kind === 'agent').length,
+            last_seq: last?.seq,
+            last_text: last?.text.replace(/\s+/g, ' ').slice(0, 80),
+            last_sender: last?.sender.kind,
+            last_at: last?.created_at,
+          }
+        }
+        this.respond(cmd, { agents: this.hubAgents, dm })
+        break
+      }
+      case 'hub_open': {
+        const target = (cmd.payload?.target ?? {}) as Record<string, unknown>
+        const agentID = String(target.agent_id ?? '')
+        const agent = this.hubAgents.find((a) => a.id === agentID)
+        if (!agent) { this.respondErr(cmd, '智能体不存在'); break }
+        const log = this.hubLog(agentID)
+        const limit = Number(cmd.payload?.limit ?? 50)
+        const before = Number(cmd.payload?.before_seq ?? 0)
+        const upto = before > 0 ? log.filter((m) => m.seq < before) : log
+        const page = upto.slice(-limit)
+        this.hubCursor.set(agentID, log[log.length - 1]?.seq ?? 0)
+        this.respond(cmd, {
+          target: { kind: 'dm', agent_id: agentID },
+          agent,
+          session_id: `hub.${agentID}.dm`,
+          messages: page,
+          has_more: upto.length > page.length,
+          cursor: this.hubCursor.get(agentID),
+          exists: true,
+        })
+        break
+      }
+      case 'hub_history': {
+        const agentID = String(cmd.payload?.agent_id ?? '')
+        const before = Number(cmd.payload?.before_seq ?? 0)
+        const limit = Number(cmd.payload?.limit ?? 50)
+        const log = this.hubLog(agentID).filter((m) => m.seq < before)
+        const page = log.slice(-limit)
+        this.respond(cmd, { messages: page, has_more: log.length > page.length })
+        break
+      }
+      case 'hub_send': {
+        const target = (cmd.payload?.target ?? {}) as Record<string, unknown>
+        const agentID = String(target.agent_id ?? '')
+        const text = String(cmd.payload?.text ?? '').trim()
+        if (!agentID || !text) { this.respondErr(cmd, 'text 不能为空'); break }
+        const log = this.hubLog(agentID)
+        const seq = (this.hubSeq.get(agentID) ?? 0) + 1
+        this.hubSeq.set(agentID, seq)
+        const created = new Date().toISOString()
+        log.push({ seq, sender: { kind: 'human' }, text, created_at: created })
+        this.hubCursor.set(agentID, seq)
+        this.respond(cmd, { seq, session_id: `hub.${agentID}.dm` })
+        this.emit({ event_type: 'hub_message', agent_id: agentID, seq, message: { seq, sender: { kind: 'human' }, text, created_at: created }, client_msg_id: String(cmd.payload?.client_msg_id ?? '') })
+        // 模拟一轮回复：agent_start → content_chunk 流 → hub_message → agent_end
+        const sid = `hub.${agentID}.dm`
+        this.after(350, () => this.emit({ event_type: 'agent_start', session_id: sid }), sid)
+        const reply = '收到。我按「价格 / 功能 / 公开情报」三栏整理一版，先把对比表发你。'
+        reply.split('').forEach((ch, i) => {
+          this.after(450 + i * 18, () => this.emit({ event_type: 'content_chunk', session_id: sid, text: ch }), sid)
+        })
+        this.after(450 + reply.length * 18 + 120, () => {
+          const rseq = (this.hubSeq.get(agentID) ?? 0) + 1
+          this.hubSeq.set(agentID, rseq)
+          const rcreated = new Date().toISOString()
+          this.hubLog(agentID).push({ seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text: reply, created_at: rcreated })
+          this.emit({ event_type: 'hub_message', agent_id: agentID, seq: rseq, message: { seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text: reply, created_at: rcreated } })
+          this.emit({ event_type: 'agent_end', session_id: sid })
+        }, sid)
         break
       }
       default:

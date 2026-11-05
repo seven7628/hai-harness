@@ -14,6 +14,8 @@ import NewWorkspaceModal from './components/NewWorkspaceModal'
 import SettingsModal from './components/SettingsModal'
 import ToastView from './components/ToastView'
 import BootScreen from './components/BootScreen'
+import HubSurface from './hub/HubSurface'
+import { useHubStore } from './hub/useHubStore'
 import { useAppStore } from './store/useAppStore'
 import { applyTheme } from './lib/theme'
 import { applyNarrativeDensity, applyNarrativeSkin } from './lib/narrativeSkin'
@@ -134,10 +136,14 @@ export default function App() {
     h.resize(rightSize)
   }, [rightSize, rightRef[0]])
 
+  const hubOpen = useHubStore((s) => s.open)
   return (
     <div className={`app-root ${inSkills ? 'in-skills' : ''}${inCron ? 'in-cron' : ''}${leaving ? ' leaving' : ''}`}>
       {mainReady && (
         <main className="main">
+          {hubOpen ? (
+            <HubSurface />
+          ) : (
           <Group
             orientation="horizontal"
             className="main-group"
@@ -199,6 +205,7 @@ export default function App() {
               <RightPanel />
             </Panel>
           </Group>
+          )}
         </main>
       )}
       {splash && (
@@ -212,7 +219,7 @@ export default function App() {
       )}
       <SkillsPage />
       {inCron && (cronDetailOpen ? <CronRunDetailPage /> : cronRunsJob ? <CronRunsPage /> : <CronPage />)}
-      <Statusbar />
+      {!hubOpen && <Statusbar />}
       <SandboxReleaseModal />
       <NewWorkspaceModal />
       <IMBindConfirmModal />

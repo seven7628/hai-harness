@@ -1,0 +1,256 @@
+/* Agent Hub surface（§8.2 Hub Rail + §8.4 DM 视图）。
+ *
+ * 只加布局与少量尺寸：颜色一律走既有主题令牌（--paper/--surface/--ink/--border），
+ * 不新造色板——三套主题（深/浅/跟随）都要照常可读。 */
+
+.hub {
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+  /* .main 是 flex 容器：不显式撑开就只按内容宽度（DM 会缩成半屏、右边一片空） */
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+/* —— 左栏 rail —— */
+.hub-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--paper-2);
+}
+.hub-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.hub-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+.hub-link {
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.hub-link:hover { color: var(--ink); }
+.hub-rail-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hub-rail-empty,
+.hub-muted {
+  padding: 14px 12px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+.hub-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.hub-row.on { background: color-mix(in srgb, var(--ink) 9%, transparent); }
+.hub-row-text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.hub-row-top { display: flex; align-items: center; gap: 6px; }
+.hub-name { font-size: 13px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-preview {
+  font-size: 11.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-unread {
+  margin-left: auto;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent-solid);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 17px;
+  text-align: center;
+}
+.hub-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1.5px solid transparent;
+  flex: none;
+  font-weight: 600;
+  user-select: none;
+}
+.hub-avatar.ring { box-shadow: 0 0 0 2px color-mix(in srgb, var(--indigo) 55%, transparent); }
+.hub-error {
+  margin: 6px;
+  padding: 7px 9px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--crimson) 14%, transparent);
+  color: var(--crimson);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* —— DM 视图 —— */
+.hub-dm {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.hub-dm-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.hub-dm-title { display: flex; flex-direction: column; min-width: 0; }
+.hub-dm-title strong { font-size: 13.5px; }
+.hub-sub {
+  font-size: 11.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+  opacity: 0.45;
+}
+.hub-dot.on { background: var(--indigo); opacity: 1; }
+.hub-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+}
+/* 内容短时贴底（聊天习惯），长时正常从顶部滚动 —— margin-top:auto 只吃剩余空间。 */
+.hub-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: auto;
+}
+.hub-intro {
+  margin-top: 8vh;
+  text-align: center;
+  color: var(--text-2);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hub-msg { display: flex; flex-direction: column; }
+.hub-msg .hub-body {
+  max-width: 100%;
+  font-size: 13.5px;
+  line-height: 1.6;
+  border-radius: 12px;
+  padding: 9px 12px;
+  background: var(--surface);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hub-msg.human { align-items: flex-end; }
+.hub-msg.human .hub-body {
+  max-width: 82%;
+  background: var(--accent-weak);
+  border: 1px solid var(--accent-border);
+}
+.hub-msg.agent { align-items: flex-start; }
+.hub-msg.agent .hub-body { max-width: 92%; }
+.hub-msg.system {
+  align-items: center;
+  color: var(--text-3);
+  font-size: 11.5px;
+  text-align: center;
+}
+.hub-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+.hub-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 18px 14px;
+  border-top: 1px solid var(--border);
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+}
+.hub-composer textarea {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  outline: none;
+}
+.hub-composer textarea:focus { border-color: var(--accent-border); }
+.hub-send {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent-border);
+  border-radius: 50%;
+  background: var(--accent-solid);
+  color: #fff;
+  cursor: pointer;
+}
+.hub-send:disabled { opacity: 0.4; cursor: default; }

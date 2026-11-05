@@ -6,6 +6,8 @@ import HaiLogo from './HaiLogo'
 import { ChevronDown, Plus, FolderPlus, FolderIcon, FolderOpenIcon, SessionPlus, PinIcon, Sparkles, Gear, SessionIcon, PanelLeft, Clock, MoreIcon } from './icons'
 import { useT } from '../i18n'
 import { AgentTree } from './AgentTree'
+import { Bot } from './icons'
+import { useHubStore } from '../hub/useHubStore'
 
 // 工作区行内操作（查看文件/置顶/新建/删除）需要的最小面板宽度：低于它就收成一个「⋯」溢出菜单。
 // 算法：行左右 margin 12 + padding 10 + 预留 81 + chevron 11 + 图标 15 + 两处 gap 14 + 计数 ~10
@@ -48,6 +50,7 @@ export default function LeftPanel() {
   const deleteSession = useAppStore((s) => s.deleteSession)
   const deleteWorkspace = useAppStore((s) => s.deleteWorkspace)
   const openSkills = useAppStore((s) => s.openSkills)
+  const openHub = useHubStore((s) => s.openHub)
   const openCron = useAppStore((s) => s.openCron)
   const openSettings = useAppStore((s) => s.openSettings)
   const setActiveWorkspace = useAppStore((s) => s.setActiveWorkspace)
@@ -514,6 +517,7 @@ export default function LeftPanel() {
 
           <div className="left-spacer" />
           <div className="left-bottom">
+            <button className="nav-item" onClick={() => openHub()}><Bot /> {t('hub.title')}</button>
             <button className="nav-item" onClick={openSkills}><Sparkles /> {t('left.skills')}</button>
             <button className="nav-item" onClick={openCron}><Clock /> {t('left.cron')}</button>
             <button className="nav-item" onClick={openSettings}><Gear /> {t('left.settings')}</button>
@@ -563,6 +567,7 @@ export default function LeftPanel() {
           <button className="rbtn on" data-tip={t('left.workspaces')} onClick={toggleLeft} aria-label={t('left.workspaces')}><SessionIcon /></button>
           <div className="rail-spacer" />
           <div className="rail-bottom">
+            <button className="rbtn" data-tip={t('hub.title')} onClick={() => openHub()} aria-label={t('hub.title')}><Bot /></button>
             <button className="rbtn" data-tip={t('left.skills')} onClick={() => { toggleLeft(); openSkills() }} aria-label={t('left.skills')}><Sparkles /></button>
             <button className="rbtn" data-tip={t('left.cron')} onClick={() => { toggleLeft(); openCron() }} aria-label={t('left.cron')}><Clock /></button>
             <button className="rbtn" data-tip={t('left.settings')} onClick={openSettings} aria-label={t('left.settings')}><Gear /></button>
