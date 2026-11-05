@@ -1056,6 +1056,12 @@
       "commit": "feat(hub-p3a-06 部分): handoff 护栏 + ack 状态机",
       "review": "pending",
       "reviewNote": "CheckHandoff：深度>=3 拒绝、同对 10 分钟>=2 拒绝、observer 禁止、self 禁止；Handoff.Ack pending_ack→accepted/declined 幂等。测试 3 条全绿。**部分完成**：交接卡/Needs you 落盘、事件与 UI 路由未做（P3a-08/P3b）。"
+    },
+    "P3a-07": {
+      "status": "review",
+      "commit": "feat(hub-p3a-07 部分): 产物版本/可见性 + 审批占位不进上下文",
+      "review": "pending",
+      "reviewNote": "NextArtifactVersion 按(owner,name)大小写不敏感递增；ValidateArtifactPath 拒绝绝对/..；ArtifactVisibleTo 与 FileStore.ListArtifacts；快照跳过 approval_stub/routing/round_summary 且 owner-only fail-closed。测试 4 条。**部分完成**：审批正文私有落盘 needs/<id>.json 与 30 分钟超时复用 P2-06 need（P3b 补 handoff need）。"
     }
   }
 }
