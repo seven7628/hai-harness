@@ -313,7 +313,7 @@ func (m *manager) hubAgentList(c command) {
 		item := map[string]any{"unread": unread}
 		if last != nil {
 			item["last_seq"] = last.Seq
-			item["last_text"] = truncateRunes(strings.TrimSpace(last.Text), hubPreviewRunes)
+			item["last_text"] = truncateRunes(strings.Join(strings.Fields(last.Text), " "), hubPreviewRunes)
 			item["last_sender"] = last.Sender.Kind
 			item["last_at"] = last.CreatedAt
 		}
@@ -523,7 +523,12 @@ func (m *manager) hubOpen(c command) {
 		return
 	}
 	// 打开 = 人看到这一页 → 推进已读到最后一条（只前进）。
-	if len(msgs) > 0 {
+	// mark_read=false 供后台预热/预取用（§7.1.1 的 hub_mark_read 语义）。
+	markRead := true
+	if v, ok := c.Payload["mark_read"].(bool); ok {
+		markRead = v
+	}
+	if markRead && len(msgs) > 0 {
 		if err := st.SaveDMCursor(ctx, agenthub.AgentID(agentID), msgs[len(msgs)-1].Seq); err != nil {
 			m.resp(c, false, "保存已读位置失败: "+err.Error(), nil)
 			return
@@ -620,7 +625,7 @@ func (m *manager) hubSend(c command) {
 		m.resp(c, false, err.Error(), nil)
 		return
 	} else if clientMsgID != "" {
-		if seq, dup := hubFindClientMsg(ctx, st, agenthub.AgentID(agentID), clientMsgID); dup {
+		if seq, dup, _ := st.FindDirectMessageByClientID(ctx, agenthub.AgentID(agentID), clientMsgID); dup {
 			m.resp(c, true, "", map[string]any{"seq": seq, "deduplicated": true,
 				"session_id": hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})})
 			return
@@ -639,6 +644,13 @@ func (m *manager) hubSend(c command) {
 	if clientMsgID != "" {
 		msg.Refs = map[string]any{"client_msg_id": clientMsgID}
 	}
+	// 先把消息交给会话（Ask 只入队，失败会立刻返回），成功后才落索引：
+	// 反过来的话 Ask 失败会留下「索引里有、上下文里没有」的消息，重试又被
+	// client_msg_id 幂等挡掉 —— 用户看到已发送，模型永远收不到（P1-04 复核）。
+	if err := bs.s.Ask(ctx, core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})); err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
 	seq, err := m.hubStoreSeq(func(st *agenthub.FileStore) (int64, error) {
 		return st.AppendDirectMessage(ctx, agenthub.AgentID(agentID), msg)
 	})
@@ -649,11 +661,6 @@ func (m *manager) hubSend(c command) {
 	// 人发出去的消息 = 人已经看到这里。
 	_ = m.hubStoreCursor(agentID, seq)
 	m.emitHubMessage(agentID, seq, msg, clientMsgID)
-
-	if err := bs.s.Ask(ctx, core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})); err != nil {
-		m.resp(c, false, err.Error(), nil)
-		return
-	}
 	bs.lastActive.Store(time.Now().UnixMilli())
 	bs.wakeRun()
 	m.resp(c, true, "", map[string]any{"seq": seq, "session_id": bs.id})
@@ -674,21 +681,6 @@ func (m *manager) hubStoreCursor(agentID string, seq int64) error {
 		return err
 	}
 	return st.SaveDMCursor(context.Background(), agenthub.AgentID(agentID), seq)
-}
-
-// hubFindClientMsg 幂等检查：最近一页里找同 client_msg_id 的消息。
-// 只看最近 hubDMPageSize*2 条 —— 重发窗口远小于这个量级，全量扫没意义。
-func hubFindClientMsg(ctx context.Context, st *agenthub.FileStore, agentID agenthub.AgentID, clientMsgID string) (int64, bool) {
-	msgs, err := st.ReadDirectMessages(ctx, agentID, 0, hubDMPageSize*2)
-	if err != nil {
-		return 0, false
-	}
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if id, _ := msgs[i].Refs["client_msg_id"].(string); id == clientMsgID {
-			return msgs[i].Seq, true
-		}
-	}
-	return 0, false
 }
 
 // hubDMPageSize DM 默认每页条数。

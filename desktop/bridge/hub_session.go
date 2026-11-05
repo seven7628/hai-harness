@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -310,6 +311,41 @@ func (m *manager) hubSpecFor(p *agenthub.AgentProfile, scope agenthub.Scope, hom
 // 进程重启后按确定性 sid 冷恢复（createIn 的 record 恢复路径）。
 // 并发：同一 agent 的两个 hub_open 可能同时进来，用 ws.sessions 的既有幂等兜底
 // （createIn 内部 ws.mu 下二次查表，后到者复用先到的实例）。
+// lockHubAgent 按智能体串行化「装配会话」这一段（返回解锁函数）。
+//
+// 为什么需要：createIn 是「锁内查表 → 解锁装配 → 再锁写入」，中间没有二次查表；
+// 并发 hub_send（桌面端靠 dispatchMu 串行，手机端是另一个 mutex）会各自装配出
+// 一个 Session，共用同一个 hub.<id>.dm.jsonl —— 上下文交错，且多余实例的
+// runLoop goroutine 只挂在自己的 ctx 上，ws.sessions 查不到 → 关不掉。
+func (m *manager) lockHubAgent(agentID string) func() {
+	m.mu.Lock()
+	if m.hubSessionLocks == nil {
+		m.hubSessionLocks = map[string]*sync.Mutex{}
+	}
+	l := m.hubSessionLocks[agentID]
+	if l == nil {
+		l = &sync.Mutex{}
+		m.hubSessionLocks[agentID] = l
+	}
+	m.mu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
+// isHubHomePath 该路径是否是智能体 home（<appData>/hub/homes/<id>，含其子路径）。
+// 用途：拦住在「不是工作区」的路径上造项目 runtime / 删会话。
+func isHubHomePath(p string) bool {
+	if strings.TrimSpace(p) == "" {
+		return false
+	}
+	root := filepath.Join(appDataDir(), "hub", "homes")
+	rel, err := filepath.Rel(root, filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func (m *manager) hubDMSession(agentID string) (*bridgeSession, error) {
 	st, err := m.hubStore()
 	if err != nil {
@@ -324,6 +360,15 @@ func (m *manager) hubDMSession(agentID string) (*bridgeSession, error) {
 	}
 	ws := m.hubRuntime(agentID)
 	sid := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})
+	// 同一 agent 的装配必须串行：先拿锁，再在锁内复查是否已被别人建好。
+	unlock := m.lockHubAgent(agentID)
+	defer unlock()
+	ws.mu.Lock()
+	existing := ws.sessions[sid]
+	ws.mu.Unlock()
+	if existing != nil {
+		return existing, nil
+	}
 	effort := string(p.Effort)
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)

@@ -156,3 +156,31 @@ func (s *FileStore) DMUnread(ctx context.Context, agentID AgentID) (unread int, 
 	lastMsg := msgs[len(msgs)-1]
 	return unread, &lastMsg, nil
 }
+
+// FindDirectMessageByClientID 在**整份** DM 索引里找 client_msg_id（幂等重发用）。
+//
+// 为什么全量而不是最近 N 条：固定窗口外的重发会让模型看到两条相同消息，而窗口大小
+// 没有任何语义依据；日志本身已经整份读盘，扫全量不多一次 I/O（P1-04 复核）。
+func (s *FileStore) FindDirectMessageByClientID(ctx context.Context, agentID AgentID, clientMsgID string) (int64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if !validID(string(agentID)) {
+		return 0, false, fmt.Errorf("%w: agent id %q", ErrInvalid, agentID)
+	}
+	if clientMsgID == "" {
+		return 0, false, nil
+	}
+	s.mu.Lock()
+	msgs, err := readJSONLTolerantTail[Message](s.dmLogPath(agentID))
+	s.mu.Unlock()
+	if err != nil {
+		return 0, false, err
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if id, _ := msgs[i].Refs["client_msg_id"].(string); id == clientMsgID {
+			return msgs[i].Seq, true, nil
+		}
+	}
+	return 0, false, nil
+}

@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/core"
+	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/provider"
 )
 
@@ -387,5 +389,150 @@ func TestHubAgentListCarriesDMPreviewAndUnread(t *testing.T) {
 	}
 	if n := len([]rune(preview)); n > 81 { // 80 + 省略号
 		t.Fatalf("preview too long: %d runes", n)
+	}
+}
+
+// 子 agent 的 AgentEnd 不能进 DM 索引（P1-04 复核 blocking 1）。
+func TestHubDMSubagentAgentEndNotIndexed(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "Parent")
+	agentID := string(p.ID)
+	bs, err := m.hubDMSession(agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := bs.handler()
+	h(context.Background(), &events.AgentEnd{Content: "sub internal answer", ParentRunId: "run-child", Depth: 1})
+	st, _ := m.hubStore()
+	msgs, err := st.ReadDirectMessages(context.Background(), p.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("subagent AgentEnd leaked into DM index: %+v", msgs)
+	}
+	// 根 run 的收尾照常落索引（别把过滤写成「全都不落」）。
+	h(context.Background(), &events.AgentEnd{Content: "root answer"})
+	msgs, _ = st.ReadDirectMessages(context.Background(), p.ID, 0, 10)
+	if len(msgs) != 1 || msgs[0].Text != "root answer" {
+		t.Fatalf("root AgentEnd must be indexed: %+v", msgs)
+	}
+}
+
+// 并发装配只能产出**一个** DM 会话（P1-04 复核 blocking 2）。
+func TestHubDMConcurrentAssemblySingleSession(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "Concurrent")
+	agentID := string(p.ID)
+
+	const n = 8
+	results := make([]*bridgeSession, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = m.hubDMSession(agentID)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("hubDMSession #%d: %v", i, err)
+		}
+	}
+	first := results[0]
+	if first == nil {
+		t.Fatal("nil session")
+	}
+	for i, bs := range results {
+		if bs != first {
+			t.Fatalf("session #%d differs: assembled %d instances (want 1)", i, distinctSessions(results))
+		}
+	}
+	ws := m.hubRuntime(agentID)
+	ws.mu.Lock()
+	count := len(ws.sessions)
+	ws.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("ws.sessions entries = %d, want 1", count)
+	}
+}
+
+func distinctSessions(list []*bridgeSession) int {
+	seen := map[*bridgeSession]struct{}{}
+	for _, bs := range list {
+		if bs != nil {
+			seen[bs] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// client_msg_id 幂等不受「最近 N 条」窗口限制（P1-04 复核 non-blocking 1）。
+func TestHubDMDedupeOutsideWindow(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "Window")
+	agentID := string(p.ID)
+	bs, err := m.hubDMSession(agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock := &bridgeMockProvider{rounds: []func(*provider.StreamRequest, func(provider.StreamEvent) error) error{
+		func(_ *provider.StreamRequest, handler func(provider.StreamEvent) error) error {
+			return handler(provider.LLMEndEvent{FinishReason: core.FinishReasonStop, Content: "ok"})
+		},
+	}}
+	bs.s.SetLoop(agents.NewAgentLoop(agents.WithProvider(mock)))
+
+	payload := map[string]any{
+		"target": map[string]any{"kind": "dm", "agent_id": agentID}, "text": "old", "client_msg_id": "c-old",
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_send", payload); !ok {
+		t.Fatalf("first send failed: %s", errMsg)
+	}
+	st, _ := m.hubStore()
+	for i := 0; i < 150; i++ {
+		msg := &agenthub.Message{Kind: agenthub.KindText, Sender: agenthub.Sender{Kind: agenthub.SenderHuman}, Text: "filler"}
+		if _, err := st.AppendDirectMessage(context.Background(), p.ID, msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ok, errMsg, data := hubCmd(t, m, buf, 3, "hub_send", payload)
+	if !ok {
+		t.Fatalf("second send failed: %s", errMsg)
+	}
+	if data["deduplicated"] != true {
+		t.Fatalf("dedupe must not be window-limited, got %v", data)
+	}
+}
+
+// hub home 不是工作区：interrupt 兜底 / delete_session 都不能造项目 runtime 或删 DM。
+func TestHubHomeNotTreatedAsWorkspace(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "Home")
+	agentID := string(p.ID)
+	home := m.hubRuntime(agentID).path
+	if !isHubHomePath(home) {
+		t.Fatalf("isHubHomePath(%q) = false", home)
+	}
+	if n := m.interruptAllIn(home); n != 0 {
+		t.Fatalf("interruptAllIn = %d, want 0", n)
+	}
+	m.mu.Lock()
+	_, phantom := m.workspaces[home]
+	m.mu.Unlock()
+	if phantom {
+		t.Fatal("interruptAllIn created a project runtime for hub home")
+	}
+	buf.Reset()
+	m.dispatch(command{Id: 9, Type: CmdDeleteSession, Payload: map[string]any{
+		"workspace": home, "session_id": "hub." + agentID + ".dm",
+	}})
+	if line := findFirst(buf.String(), func(mm map[string]any) bool {
+		return mm["event_type"] == "command_response" && mm["id"] == float64(9)
+	}); line == nil || line["ok"] == true {
+		t.Fatalf("delete_session on hub home must fail, got %v", line)
 	}
 }

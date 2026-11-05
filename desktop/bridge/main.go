@@ -513,7 +513,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 
 	// Hub DM：本轮最终回复进 DM 索引（左栏预览/搜索/未读）。上下文仍以 session jsonl
 	// 为准 —— 两份数据分工见 §6.1.3。空回复（纯工具轮/中断）由 appendHubReply 跳过。
-	if ae, ok := e.(*events.AgentEnd); ok && bs.hubOnAgentEnd != nil {
+	// 只认**根 run** 的收尾：子 agent 的事件走同一个 handler（subagent 直接把
+	// tc.Handler 交给子 loop），不过滤就会把子 agent 的内部答复写进 DM 索引
+	//（左栏预览/历史里冒出「智能体说的话」）。
+	if ae, ok := e.(*events.AgentEnd); ok && bs.hubOnAgentEnd != nil &&
+		ae.ParentRunId == "" && ae.Depth == 0 {
 		bs.hubOnAgentEnd(ae.Content)
 	}
 
@@ -756,17 +760,19 @@ type manager struct {
 	// 刻意不放进 workspaces：那些遍历是项目语义（workspace_list / reload / MCP 重放）。
 	hubRuntimes map[string]*workspaceRuntime
 	// hubFS Hub 领域存储（~/.go-code/hub，懒开；见 hubStore）。
-	hubFS       *agenthub.FileStore
-	provCfg     *providerConfig  // 全局 provider 配置（热切换；set_provider 更新）
-	memPrefs    *memoryPrefStore // Project Memory 用户开关（设置面板；下一个会话生效）
-	out         *out
-	metrics     *FileMetricsStore // 全局指标（跨 workspace，~/.go-code/metrics.jsonl）
-	seq         int
-	embed       embedBridge // M2：嵌入式浏览器 CDP 转发器（跨工作区共享单个内嵌视图）
-	cron        *cron.Store // 全局定时任务库（跨会话；~/.go-code/cron.json + 运行账本）
-	cronCtx     context.Context
-	cronCancel  context.CancelFunc
-	oauthWaiter oauthPromptWaiter // OAuth 登录 manual 输入等待表（oauth_prompt_answer 命令回填）
+	hubFS *agenthub.FileStore
+	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
+	hubSessionLocks map[string]*sync.Mutex
+	provCfg         *providerConfig  // 全局 provider 配置（热切换；set_provider 更新）
+	memPrefs        *memoryPrefStore // Project Memory 用户开关（设置面板；下一个会话生效）
+	out             *out
+	metrics         *FileMetricsStore // 全局指标（跨 workspace，~/.go-code/metrics.jsonl）
+	seq             int
+	embed           embedBridge // M2：嵌入式浏览器 CDP 转发器（跨工作区共享单个内嵌视图）
+	cron            *cron.Store // 全局定时任务库（跨会话；~/.go-code/cron.json + 运行账本）
+	cronCtx         context.Context
+	cronCancel      context.CancelFunc
+	oauthWaiter     oauthPromptWaiter // OAuth 登录 manual 输入等待表（oauth_prompt_answer 命令回填）
 	// imPlugin 全局 IM 集成插件（单例：连接/路由/安全跨 workspace 唯一；
 	// 每个 workspace 的 registry 共享同一实例，plugin_list 均可见）。
 	imPlugin *implugin.Plugin
@@ -966,6 +972,12 @@ func (m *manager) get(wsPath, id string) *bridgeSession {
 // 返回「当前确有运行中 run」的会话数（无运行 = 0，前端据此判断是否为纯兜底命中）。
 // 用途：interrupt 命令路由失配（session_id/workspace 对不上）时的兜底，杜绝静默 no-op。
 func (m *manager) interruptAllIn(wsPath string) int {
+	if isHubHomePath(wsPath) {
+		// 智能体 home 不是工作区：这里 m.runtime(wsPath) 会造出项目 kind 的 runtime
+		//（读项目层、混进 m.workspaces）。hub 会话按 m.get 的 hubRuntimeByPath 寻址，
+		// 走到这个兜底分支说明本来就没有会话，直接 no-op。
+		return 0
+	}
 	ws := m.runtime(wsPath)
 	ws.mu.Lock()
 	sessions := make([]*bridgeSession, 0, len(ws.sessions))
@@ -3531,6 +3543,12 @@ func (m *manager) dispatch(c command) {
 	case CmdDeleteSession: // 删除单个会话：停进程内会话 + 删磁盘 sessions/events 日志
 		if ws == "" || sid == "" {
 			m.resp(c, false, "workspace/session_id 为空", nil)
+			return
+		}
+		if isHubHomePath(ws) {
+			// DM 只有一个会话（§6.4）：删掉它等于把「它」的上下文抹了，
+			// 恢复语义不存在；要清空上下文用 /clear（保留记忆与索引）。
+			m.resp(c, false, "智能体 DM 会话不可删除，请用 /clear 清空上下文", nil)
 			return
 		}
 		m.deleteSession(ws, sid)
