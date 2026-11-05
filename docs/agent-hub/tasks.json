@@ -858,9 +858,9 @@
     },
     "P0-02": {
       "status": "review",
-      "commit": "2e3feae feat(hub-p0-02): Store 接口、FileStore 原子写与恢复",
+      "commit": "d281f8f fix(hub-p0-02): 修复日志尾部坏行与超长行恢复",
       "review": "pending",
-      "reviewNote": "独立 Review 进行中；测试 go test -race ./agenthub/... 全绿，覆盖率 72.9%。"
+      "reviewNote": "首轮 changes_requested（B1 尾部坏行/B2 超长行）→ d281f8f 修复；复审进行中。"
     }
   }
 }
