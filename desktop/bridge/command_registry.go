@@ -93,6 +93,8 @@ const (
 	CmdHubGroupDelete       Command = "hub_group_delete"
 	CmdHubGroupMemberAdd    Command = "hub_group_member_add"
 	CmdHubGroupMemberRemove Command = "hub_group_member_remove"
+	CmdHubGroupHistory      Command = "hub_group_history"
+	CmdHubGroupActivity     Command = "hub_group_activity"
 
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"

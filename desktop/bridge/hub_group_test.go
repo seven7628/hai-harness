@@ -3,9 +3,12 @@ package main
 // P3a-01：群组 CRUD + 成员/角色/策略。
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
 )
@@ -146,5 +149,54 @@ func TestHubGroupRejectsDeletedMember(t *testing.T) {
 	})
 	if ok || errMsg == "" {
 		t.Fatal("deleted agent must not join a group")
+	}
+}
+
+func TestHubGroupHistoryAndRoundSummary(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "HistA")
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_group_create", map[string]any{
+		"name": "历史群", "members": []map[string]any{{"agent_id": string(a.ID), "role": "owner"}},
+	})
+	if !ok {
+		t.Fatalf("create: %s", errMsg)
+	}
+	g := groupFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := agenthub.AppendGroupMessage(ctx, st, &agenthub.Message{
+			GroupID: g.ID, Sender: agenthub.Sender{Kind: agenthub.SenderHuman}, Text: "历史",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary := agenthub.BuildRoundSummary(g.ID, "rnd_1", []agenthub.RoundItem{
+		{AgentID: a.ID, Tool: "bash", Status: "done", Summary: "ok"},
+	}, time.Now())
+	if _, err := agenthub.AppendGroupMessage(ctx, st, &summary); err != nil {
+		t.Fatal(err)
+	}
+	ok, errMsg, data = hubCmd(t, m, buf, 3, "hub_group_history", map[string]any{"group_id": string(g.ID), "limit": 2})
+	if !ok {
+		t.Fatalf("history: %s", errMsg)
+	}
+	var page struct {
+		Messages []agenthub.Message `json:"messages"`
+		HasMore  bool               `json:"has_more"`
+	}
+	raw, _ := json.Marshal(data)
+	_ = json.Unmarshal(raw, &page)
+	if len(page.Messages) != 2 || !page.HasMore {
+		t.Fatalf("page = %s", raw)
+	}
+	if page.Messages[len(page.Messages)-1].Kind != agenthub.KindRoundSummary {
+		t.Fatalf("latest message kind = %s, want round_summary", page.Messages[len(page.Messages)-1].Kind)
+	}
+	if !strings.Contains(page.Messages[len(page.Messages)-1].Text, "bash") {
+		t.Fatalf("round summary text = %q", page.Messages[len(page.Messages)-1].Text)
 	}
 }

@@ -334,3 +334,35 @@ func decodeGroupPayload(v any, out any) error {
 	}
 	return json.Unmarshal(raw, out)
 }
+
+// hubGroupHistory 群日志分页（before_seq=0 最新页）。
+func (m *manager) hubGroupHistory(c command) {
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	msgs, err := agenthub.ReadGroupLog(context.Background(), st, gid, numOr(c.Payload, "before_seq", 0), int(numOr(c.Payload, "limit", 50)))
+	if err != nil {
+		m.resp(c, false, "读取群日志失败: "+err.Error(), nil)
+		return
+	}
+	m.resp(c, true, "", map[string]any{"messages": msgs, "has_more": len(msgs) >= int(numOr(c.Payload, "limit", 50))})
+}
+
+// hubGroupActivity 群活动分页（独立流，不进快照）。
+func (m *manager) hubGroupActivity(c command) {
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	acts, err := agenthub.ReadGroupActivity(context.Background(), st, gid, numOr(c.Payload, "after_seq", 0), int(numOr(c.Payload, "limit", 100)))
+	if err != nil {
+		m.resp(c, false, "读取群活动失败: "+err.Error(), nil)
+		return
+	}
+	m.resp(c, true, "", map[string]any{"activity": acts})
+}
