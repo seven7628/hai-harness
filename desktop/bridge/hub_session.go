@@ -12,9 +12,11 @@ package main
 // 混进去会被当成「一个项目」，属跨层泄漏。
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/seven7628/hai-harness/mcp"
 	"github.com/seven7628/hai-harness/skills"
@@ -76,7 +78,10 @@ func (m *manager) hubRuntime(agentID string) *workspaceRuntime {
 }
 
 // closeHubRuntimes 关闭全部智能体运行时（进程退出 / 测试清理）。
-// 停 MCP 连接与探活 goroutine；插件注册表与项目路径共享全局组件，不在这里 Close。
+// 与 shutdownWorkspace 同口径：停 MCP 监听/探活、关 MCP 连接、**关插件注册表**
+// （buildPlugins 每次返回新 registry，不关会漏 Browser Use 子进程；
+//
+//	P0 阶段 hub 插件还没被 Enable，先按同口径收尾，免得 P1 打开插件后泄漏）。
 func (m *manager) closeHubRuntimes() {
 	m.mu.Lock()
 	wss := make([]*workspaceRuntime, 0, len(m.hubRuntimes))
@@ -95,6 +100,11 @@ func (m *manager) closeHubRuntimes() {
 		ws.mu.Unlock()
 		if ws.mcp != nil {
 			ws.mcp.Close()
+		}
+		if ws.plugins != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ws.plugins.Close(ctx)
+			cancel()
 		}
 	}
 }

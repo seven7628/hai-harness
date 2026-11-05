@@ -281,10 +281,13 @@ func (o *out) flushTick() {
 
 // bridgeSession：一个会话 + 常驻 run goroutine（消费队列，队列空即返回）
 type bridgeSession struct {
-	id     string
-	s      *session.Session
-	loop   *agents.AgentLoop // per-session loop（model/effort 运行时可切；persona 切换重建）
-	effort string
+	id string
+	// runtime 本会话所属的工作区运行态（rebuildLoop 用它取技能/插件/MCP/子代理）。
+	// nil = 旧会话（按 bs.workspace 兜底 re-resolve）。
+	runtime *workspaceRuntime
+	s       *session.Session
+	loop    *agents.AgentLoop // per-session loop（model/effort 运行时可切；persona 切换重建）
+	effort  string
 	// subagentEffort 子 agent 档位持有者（spawn/explore/文件化人设 loop）：switch_effort
 	// 时与主 loop 同步 —— 子 agent 追随主 loop（2026-09 决策）。rebuildLoop 换代。
 	subagentEffort *subagentEffortRef
@@ -1309,6 +1312,11 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	// 定时任务派生会话（opts.noRecord）跳过装配：触发即跑、跑完归档，无需崩溃恢复。
 	recStart := time.Now()
 	wsKey := workspaceKey(wsPath)
+	if ws.kind == runtimeHubAgent && ws.agentID != "" {
+		// 方案 §6.1.3：Hub 会话的 record 维度是 hub-<agentID>，不跟 home 路径走
+		//（否则智能体目录改名/迁移后历史会话全部「丢失」）。
+		wsKey = "hub-" + ws.agentID
+	}
 	if opts.wsKey != "" {
 		wsKey = opts.wsKey
 	}
@@ -1362,9 +1370,10 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	qw := events.NewQuestionWaiter(events.MaxQuestionTimeout)
 	var bs *bridgeSession // WithEventHandler 闭包引用（emit 依赖 bs.s，Run 期间已赋值）
 	var s *session.Session
-	sk := m.runtime(wsPath).skills // 工作区技能注册表（WithSkills + load_skill 共享）
+	sk := ws.skills // 本 runtime 的技能注册表（WithSkills + load_skill 共享）——不能按路径重查：
+	// hub 的 path 是智能体 home，按路径重查会造出一个项目 kind 的 runtime（读项目层）。
 	loopStart := time.Now()
-	loop, effortRef, skillCaps := m.buildLoop(wsPath, id, m.provCfg.providerName(), m.preferredModel(), effort,
+	loop, effortRef, skillCaps := m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort,
 		func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
 	startupLog("A6.buildLoop", loopStart)
 	nsStart := time.Now()
@@ -1408,7 +1417,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub()}
+	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub()}
 	if opts.cronEvDir != "" {
 		bs.cronEvDir = opts.cronEvDir
 	}
@@ -1472,7 +1481,10 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	ws.sessions[id] = bs
 	ws.mu.Unlock()
 	// Session Mesh 注册（本机会话入 Hub 注册表；重复注册幂等忽略——进程内复用路径已挡）
-	if m.hub != nil {
+	// Hub 智能体会话**不注册**（方案 §6.1.2 第 3 点）：一旦进 mesh，工作区主会话的
+	// session_list 就会列出智能体，等于默认打开一条跨层投递通道。P4 要「工作区反问
+	// 智能体」时再引入带 kind 过滤的 RegisterEx。
+	if m.hub != nil && ws.kind == runtimeProject {
 		if err := m.hub.Register(s); err != nil {
 			// M3：跨工作区同 sid 碰撞（极罕见：genID 纳秒+序号进程内唯一，但磁盘
 			// 冷恢复可能复用旧 sid）。不静默——记录诊断，避免 session_send 寻址歧义难查。
@@ -4886,10 +4898,14 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 // 模型窗口（WithContextWindow）与输出上限（WithMaxTokens）按 prov 显式解析（问题六：
 // 不随全局活跃 Provider 漂移——跨 Provider 会话重建时窗口/端点/价表保持本会话归属）。
 // Provider 面板标记 1M / 配置 max_tokens 的模型 → 真 1M 上下文 + 对应单次输出上限。
-func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities) {
+// buildLoop 用**调用方给的 runtime** 装配 loop（方案 §6.1.2）：技能/插件/MCP/子代理
+// 全部取 ws 上的实例，绝不按路径再查一次 —— m.runtime(ws.path) 在 Hub 智能体的 home
+// 上会造出一个「项目 kind」的运行时，把项目层重新读进来（P0-08 复审的设计要点）。
+func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
+	workspace := ws.path
 	// 受管 Python 运行时（run_python 的解释器来源；manager 级单例，见 pythonRuntime 注释）。
 	// 在此就地取而不加 newSessionEngine 参数：buildLoop 是唯一的会话装配入口。
 	pyRT := m.pythonRuntime()
@@ -4898,7 +4914,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// 目标」；清单让模型用授权时记录的准确显示名唤起/激活（而非用户口语简称猜名）。
 	// 模型自由决策时易固执重试失败调用/蔓延 bash（真机 LLM E2E 教训 2026-09）。
 	sysPrompt := profile.systemPrompt
-	if plg := m.runtime(workspace).plugins; plg != nil {
+	if plg := ws.plugins; plg != nil {
 		if cap, ok := plg.Get(computerplugin.ID); ok {
 			if ec, ok2 := cap.(interface{ IsEnabled() bool }); ok2 && ec.IsEnabled() {
 				sysPrompt = sysPrompt + computerPromptGuide + computerAppsGuide()
@@ -4912,7 +4928,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// 就够、不要链式调用"——丢掉它，第三方工具的会用率会明显下降。
 	// 装配期取一次（会触发服务器惰性首连）；2s 预算内没连上的服务器本轮不贡献该层，
 	// 下次 loop 重建时补上（其工具本来也尚不可用）。
-	if mm := m.runtime(workspace).mcp; mm != nil {
+	if mm := ws.mcp; mm != nil {
 		ictx, icancel := context.WithTimeout(context.Background(), mcpInstructionsTimeout)
 		if txt := mcp.InstructionsText(mm.Instructions(ictx)); txt != "" {
 			sysPrompt = sysPrompt + "\n\n## MCP servers\n" + txt
@@ -4925,7 +4941,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
-	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
+	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, ws.subagents, ws.mcp, ws.plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()
@@ -4974,12 +4990,12 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// 保证「面板显示可用的」== 「loop 实际注入清单的」。
 	skillCaps := skillCapabilitiesFor(m.provCfg, prov, model, eng)
 	opts = append(opts,
-		agents.WithSkills(sk),                                // 技能发现清单注入 system（渐进披露）+ /skills 命令
-		agents.WithSkillCapabilities(skillCaps),              // 清单/命令/load_skill 三处同源过滤（按选中模型）
-		agents.WithSubagents(m.runtime(workspace).subagents), // 自定义 subagent 清单注入 system（渐进披露）+ spawn_agent
-		agents.WithAgentMDDir(workspace),                     // 工作区 AGENTS.md/CLAUDE.md 递归发现（工作记忆层）
-		agents.WithUserAgentMDDir(globalAgentMDDir()),        // 用户级 ~/.agents/AGENTS.md（跨工作区，优先级最低）
-		agents.WithWorkingDir(workspace),                     // Current Workspace 环境层：声明本会话文件操作根目录
+		agents.WithSkills(sk),                         // 技能发现清单注入 system（渐进披露）+ /skills 命令
+		agents.WithSkillCapabilities(skillCaps),       // 清单/命令/load_skill 三处同源过滤（按选中模型）
+		agents.WithSubagents(ws.subagents),            // 自定义 subagent 清单注入 system（渐进披露）+ spawn_agent
+		agents.WithAgentMDDir(workspace),              // 工作区 AGENTS.md/CLAUDE.md 递归发现（工作记忆层）
+		agents.WithUserAgentMDDir(globalAgentMDDir()), // 用户级 ~/.agents/AGENTS.md（跨工作区，优先级最低）
+		agents.WithWorkingDir(workspace),              // Current Workspace 环境层：声明本会话文件操作根目录
 		// @引用 PDF 文本抽取（2026-09）：PDF 结构层是纯 ASCII，agents 侧的二进制判定
 		// 读不出正文（压缩流 → 报「二进制不读内容」；未压缩 → 把 PDF 源码当正文注入）。
 		// 抽取要 pypdf + 受管运行时 + 沙箱，属宿主能力面 → 经钩子注入（agents 包不
@@ -5058,8 +5074,12 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 // 跨 Provider 会话不随全局活跃漂移），重建即应用新配置（热切换不重启 bridge）。
 func (m *manager) rebuildLoop(bs *bridgeSession) {
 	profile := profiles[bs.persona]
-	loop, effortRef, caps := m.buildLoop(bs.workspace, bs.id, bs.provider, bs.model, bs.effort,
-		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, m.runtime(bs.workspace).skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
+	ws := bs.runtime
+	if ws == nil {
+		ws = m.runtime(bs.workspace) // 兜底：本提交之前创建的会话没有 runtime 快照
+	}
+	loop, effortRef, caps := m.buildLoop(ws, bs.id, bs.provider, bs.model, bs.effort,
+		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, ws.skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
 	bs.s.SetLoop(loop)
 	bs.loop = loop
 	bs.subagentEffort = effortRef // 子 agent 档位持有者随新引擎换代（旧引擎的 loop 已废弃）

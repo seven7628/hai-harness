@@ -143,34 +143,85 @@ func TestHubRuntimeRegistryIsolation(t *testing.T) {
 	m.closeHubRuntimes()
 }
 
-// TestCreateOptsForwardsToCreateIn createOpts = m.runtime(wsPath) + createIn；
-// 传同一个 runtime 时两次调用命中同一个会话（复用语义不因拆分改变）。
+// TestCreateOptsForwardsToCreateIn createOpts = m.runtime(wsPath) + createIn。
+// 不能只看「同 sid 复用」——那在预建会话后是缓存命中，分不清「转发 m.runtime」与
+// 「自己又 m.runtime 一次」。这里从空表开始，断言会话落在**表里那个** runtime 上、
+// 且全局只有一份（多出来就是重复装配）。
 func TestCreateOptsForwardsToCreateIn(t *testing.T) {
 	m, _ := testManager(t)
 	wsDir := t.TempDir()
 
-	ws := m.runtime(wsDir)
-	if ws.kind != runtimeProject {
-		t.Fatalf("runtime kind = %v, want runtimeProject", ws.kind)
-	}
-	bs, err := m.createIn(ws, "s1", "", sessionOpts{})
-	if err != nil {
-		t.Fatalf("createIn: %v", err)
-	}
-	if bs.workspace != wsDir {
-		t.Fatalf("session workspace = %q, want %q", bs.workspace, wsDir)
-	}
-	if ws.sessions["s1"] != bs {
-		t.Fatal("createIn did not register the session on the given runtime")
-	}
-	again, err := m.createOpts(wsDir, "s1", "", sessionOpts{})
+	bs, err := m.createOpts(wsDir, "s2", "", sessionOpts{})
 	if err != nil {
 		t.Fatalf("createOpts: %v", err)
 	}
-	if again != bs {
-		t.Fatal("createOpts should reuse the session created via createIn on the same runtime")
+	ws := m.workspaces[wsDir]
+	if ws == nil {
+		t.Fatal("createOpts did not register a runtime for the workspace path")
 	}
-	if _, err := m.createIn(nil, "s2", "", sessionOpts{}); err == nil {
+	if ws.kind != runtimeProject {
+		t.Fatalf("runtime kind = %v, want runtimeProject", ws.kind)
+	}
+	if ws.sessions["s2"] != bs {
+		t.Fatal("session not registered on the workspace runtime that createOpts resolved")
+	}
+	if bs.runtime != ws {
+		t.Fatal("session must remember the runtime it was built on")
+	}
+	if len(m.workspaces) != 1 {
+		t.Fatalf("unexpected runtime count: %d", len(m.workspaces))
+	}
+	// 同一 runtime 上再按 sid 取 → 复用同一个会话（拆分不改变既有语义）。
+	if again, err := m.createIn(ws, "s2", "", sessionOpts{}); err != nil || again != bs {
+		t.Fatalf("createIn reuse = %v, %v", again, err)
+	}
+	if _, err := m.createIn(nil, "s3", "", sessionOpts{}); err == nil {
 		t.Fatal("createIn must reject a nil runtime")
+	}
+}
+
+// TestCreateInHubUsesGivenRuntime：createIn 必须只用入参 runtime。
+// 复审 blocking 1 的原形是这里残留了一行 `m.runtime(wsPath).skills` —— 对智能体
+// home 按路径重查会在 m.workspaces 里造一个项目 kind 的 runtime，把项目层技能/MCP
+// 读回会话，hubRuntime 的全局层装配变成死代码。
+func TestCreateInHubUsesGivenRuntime(t *testing.T) {
+	m, _ := testManager(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestSkill(t, filepath.Join(home, ".agents", "skills"), "global-only")
+
+	hub := m.hubRuntime("ag_given")
+	// 智能体 home 里的「项目形状」技能：按路径重查会把这条读进会话。
+	writeTestSkill(t, filepath.Join(hub.path, ".agents", "skills"), "agent-home-only")
+
+	bs, err := m.createIn(hub, "s-hub", "", sessionOpts{})
+	if err != nil {
+		t.Fatalf("createIn(hub): %v", err)
+	}
+	t.Cleanup(func() {
+		stopSession(bs)
+		m.closeHubRuntimes()
+	})
+	if hub.sessions["s-hub"] != bs {
+		t.Fatal("hub session not registered on the hub runtime")
+	}
+	if bs.runtime != hub {
+		t.Fatal("hub session must remember the hub runtime")
+	}
+	if len(m.workspaces) != 0 {
+		keys := make([]string, 0, len(m.workspaces))
+		for k := range m.workspaces {
+			keys = append(keys, k)
+		}
+		t.Fatalf("createIn polluted m.workspaces with project runtimes: %v", keys)
+	}
+	if len(m.hubRuntimes) != 1 || m.hubRuntimes["ag_given"] != hub {
+		t.Fatalf("hub runtime registry = %v", m.hubRuntimes)
+	}
+	// 会话拿到的是 hub 的全局层技能表，不是按路径重查出来的项目表。
+	if _, err := hub.skills.Skill("agent-home-only"); err == nil {
+		t.Fatal("hub runtime skills must stay global-only")
 	}
 }
