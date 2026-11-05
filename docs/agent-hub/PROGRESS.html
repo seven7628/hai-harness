@@ -1258,10 +1258,10 @@ const BASE = {
       "reviewNote": "复审 passed（task-cj3pq6d3，对象 bf05e53）：上一轮 5 条 blocking 全部复验通过 —— 工作区/Hub 草稿跨切换保留、失败保留原文+重试不重复、中途离开回来无 stale live 且终稿齐全、乱序 hub_open 不覆盖、子 agent chunk/agent_end 不串流不熄根点（并做了两条 mutation 证明行为被用例锁住）。非阻塞遗留（已记入 P2 收尾清单）：N1 loadOlder 早退未清 loadingOlder（该 DM 翻历史卡死）；N2 失败气泡无 .failed 样式且下一条消息到达后跳到列表首位；N3 切走后重试入口随 error 消失（原文仍在输入框）；N4 display:none 导致回工作区焦点落 body；N5 非当前 agent 的根 agent_end 被丢弃 → rail 运行环常亮（切回或靠 hub_agent_status）；N6 主 store 仍为 hub.<id>.dm 造幽灵 view（wire 只拦 hub_* 前缀）；N7 HubPage.cursor 类型写成 number（真协议是对象）；N8 .main-surface 布局 CSS 放在 hub.css；N9 同 agent A→B→A 无 token 兜底；N10 e2e/ 未跟踪，B1–B5 无仓库内回归。"
     },
     "P1-09": {
-      "status": "review",
+      "status": "done",
       "commit": "bf05e53 fix(hub-p1-08/09): 复核修复 —— 草稿/失败/重开、子 agent 过滤、patch 只发改动、回执与回滚提示",
-      "review": "pending",
-      "reviewNote": "首轮 changes_requested（task-vywf6kva）3 条 blocking：B1 保存用整份 profile 当 patch，`tools.disable`（撤下的工具）被静默清空；B2 记忆回执在真 IPC 上被迟到的读响应清掉（mock 同步响应掩盖）；B3 回滚无确认也无「落成新版本」提示。→ bf05e53 修复：patch 抽成纯函数 agentPatch.ts（只发改动字段、tools 仅在 preset/disable 变化时发且带原对象、disable 初值来自 profile），新增 scripts/test-agent-patch.mjs 8 条断言；loadMemory await 读完再写回执并带 warning；回滚二次确认 + 已回滚提示；删除后清空选择；Esc 关闭。浏览器实测（mock 读延迟 120ms）：改名保存后 disable 仍在、回执 1.2s 后仍在、回滚弹确认并提示第 1→4 版。待复审。"
+      "review": "passed",
+      "reviewNote": "复审 passed（task-syfh4zht，对象 bf05e53）：上一轮 3 条 blocking 全部复验通过，并做了三组 mutation 证明修复有效 —— ①buildAgentPatch 改回整份 profile / 无条件带 tools / 改名顺带 disable:[] 三种都能打红（含浏览器实测 tools.disable 被清空）；②loadMemory 去掉 await 后 120ms 延迟下回执只剩 3/30 次采样可见（原版 ≥1.6s 存活）；③删 rollback confirm 后 `npm run test:hub-patch` 仍全绿 —— 证实回滚确认无回归锁（记 N2）。浏览器实测：改名出站 payload 无 tools、重开工具页 disable 仍在；回执 1.6s 仍在；回滚 confirm+notice「已回滚到第 1 版，当前为第 3 版」；删除后无幽灵行/DM 空态；新建三项校验零请求；busy 时 Esc 不关。非阻塞遗留：N1 test:hub-patch 未挂进 npm test（B1 的唯一自动化锁默认不跑）；N2 回执/回滚/删除清选择三个界面行为零自动化；N3 test-agent-patch.mjs 打印「8/8」硬编码（实际 16 条 assert）；N4 same() 用 JSON.stringify（NaN→null 会静默无效，当前 range 输入不可达）；N5 preset 空串判等；N6 回滚/带 warning 保存后弹层表单仍旧值；N7 custom preset 无 allow 编辑器且切不回 all；N8 busy 时遮罩点击仍可关；N9 写记忆期间 textarea 未禁用（~150ms 窗口丢字）；N10 onSaved→select() 会清正在流式的正文；N11 编辑器 notice 切页签不重置。"
     },
     "P1-10": {
       "status": "review",
