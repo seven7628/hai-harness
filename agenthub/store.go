@@ -104,6 +104,7 @@ type FileStore struct {
 
 	mu       sync.Mutex // 保护 seq / events 索引 / ID 预留与日志读写的可见性
 	seq      map[GroupID]int64
+	dmSeq    map[AgentID]int64 // DM 索引的 per-agent 游标（§6.1.3）
 	taskSeq  map[TaskID]int64
 	reserved map[string]struct{}
 	idGen    func(prefix string) string
@@ -151,6 +152,7 @@ func OpenFileStore(root string) (*FileStore, error) {
 	fs := &FileStore{
 		root:     abs,
 		seq:      make(map[GroupID]int64),
+		dmSeq:    make(map[AgentID]int64),
 		taskSeq:  make(map[TaskID]int64),
 		reserved: make(map[string]struct{}),
 		idGen:    NewID,
@@ -195,6 +197,25 @@ func (s *FileStore) rebuildIndex() error {
 			}
 		}
 		s.seq[gid] = max
+	}
+
+	dmMatches, err := filepath.Glob(filepath.Join(s.root, "dms", "*", "log.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, path := range dmMatches {
+		aid := AgentID(filepath.Base(filepath.Dir(path)))
+		msgs, err := readJSONLTolerantTail[Message](path)
+		if err != nil {
+			return err
+		}
+		var max int64
+		for _, m := range msgs {
+			if m.Seq > max {
+				max = m.Seq
+			}
+		}
+		s.dmSeq[aid] = max
 	}
 
 	eventMatches, err := filepath.Glob(filepath.Join(s.root, "tasks", "*", "events.jsonl"))

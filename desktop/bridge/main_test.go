@@ -93,6 +93,9 @@ func testManager(t *testing.T) (*manager, *syncBuf) {
 	// injectBrowserWS 等 fake 插件）。后台 run goroutine（401 重试等）在 TempDir
 	// cleanup 时仍可能 emit → syncMode 同步写盘 → directory not empty flaky。
 	t.Cleanup(func() {
+		// Hub 智能体运行态不在 m.workspaces 里（刻意分开登记），单独收尾：
+		// 否则 DM 会话的 run goroutine 会在 TempDir 清理后继续写盘（directory not empty）。
+		m.closeHubRuntimes()
 		m.mu.Lock()
 		paths := make([]string, 0, len(m.workspaces))
 		for wsPath := range m.workspaces {

@@ -17,6 +17,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -107,6 +108,31 @@ func (m *manager) hubRuntime(agentID string) *workspaceRuntime {
 	m.startMCPHealth(ws)
 	m.hubRuntimes[agentID] = ws
 	return ws
+}
+
+// hubRuntimeIfExists 按 agentID 查**已装配**的运行时，没有就返回 nil（不创建）。
+// 用途：hub_open 只是读索引/看历史，不该为了一个 exists 字段去扫技能、连 MCP。
+func (m *manager) hubRuntimeIfExists(agentID string) *workspaceRuntime {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hubRuntimes[agentID]
+}
+
+// hubRuntimeByPath 按 home 路径查已装配的智能体运行时（nil = 不是 hub home）。
+// 只查不建：调用方（如 m.get）在未命中时必须走项目路径的既有语义。
+func (m *manager) hubRuntimeByPath(path string) *workspaceRuntime {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	clean := filepath.Clean(path)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ws := range m.hubRuntimes {
+		if ws != nil && filepath.Clean(ws.path) == clean {
+			return ws
+		}
+	}
+	return nil
 }
 
 // closeHubRuntimes 关闭全部智能体运行时（进程退出 / 测试清理）。
@@ -249,4 +275,110 @@ func (m *manager) hubLoopOptions(ws *workspaceRuntime, sid string, spec *hubSess
 // buildHubLoop 按 Profile 装配智能体的 AgentLoop。
 func (m *manager) buildHubLoop(ws *workspaceRuntime, sid string, spec *hubSessionSpec, eng *tools.Engine) *agents.AgentLoop {
 	return agents.NewAgentLoop(m.hubLoopOptions(ws, sid, spec, eng)...)
+}
+
+// hubSessionID 确定性会话 ID（方案 §6.1.4）：重启后直接按同一个 ID 冷恢复，
+// 不需要映射表；带 agentID 前缀保证 mesh/日志/指标不会串。
+func hubSessionID(agentID string, scope agenthub.Scope) string {
+	if scope.Kind == agenthub.ScopeDM || scope.Kind == "" {
+		return "hub." + agentID + ".dm"
+	}
+	return "hub." + agentID + ".g." + string(scope.GroupID)
+}
+
+// hubMemoryInjection 装配期算一次记忆索引（空 = 无记忆/未开启）。
+// 与项目会话同一条通道（newMemoryHost），只是工作区换成智能体 home ——
+// 记忆是 Profile 级（DM 与所有群共享，§6.9）。
+func (m *manager) hubMemoryInjection(home string) string {
+	mctx, cancel := context.WithTimeout(context.Background(), memoryResolveTimeout)
+	defer cancel()
+	return newMemoryHost(m.memoryConfig()).injection(mctx, home)
+}
+
+// hubSpecFor 组装一次 Hub 会话的装配输入（Profile + scope + 记忆索引）。
+func (m *manager) hubSpecFor(p *agenthub.AgentProfile, scope agenthub.Scope, home string) *hubSessionSpec {
+	return &hubSessionSpec{
+		Agent:           *p,
+		Scope:           scope,
+		MemoryInjection: m.hubMemoryInjection(home),
+	}
+}
+
+// hubDMSession 取或首次创建该智能体的 DM 会话（§6.4「只有一个 Session」）。
+//
+// 懒创建：第一次发消息/打开 DM 才装配。进程内已有 → 直接复用（不重建 loop、不丢内存态）；
+// 进程重启后按确定性 sid 冷恢复（createIn 的 record 恢复路径）。
+// 并发：同一 agent 的两个 hub_open 可能同时进来，用 ws.sessions 的既有幂等兜底
+// （createIn 内部 ws.mu 下二次查表，后到者复用先到的实例）。
+func (m *manager) hubDMSession(agentID string) (*bridgeSession, error) {
+	st, err := m.hubStore()
+	if err != nil {
+		return nil, err
+	}
+	p, err := st.LoadAgent(context.Background(), agenthub.AgentID(agentID))
+	if err != nil {
+		return nil, fmt.Errorf("读取智能体失败: %w", err)
+	}
+	if p.Deleted {
+		return nil, fmt.Errorf("智能体已删除")
+	}
+	ws := m.hubRuntime(agentID)
+	sid := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})
+	effort := string(p.Effort)
+	if effort == "" {
+		effort = string(provider.ReasoningEffortLevelLow)
+	}
+	spec := m.hubSpecFor(p, agenthub.Scope{Kind: agenthub.ScopeDM}, ws.path)
+	bs, err := m.createIn(ws, sid, effort, sessionOpts{hub: spec})
+	if err != nil {
+		return nil, err
+	}
+	return bs, nil
+}
+
+// appendHubReply 把本轮最终回复追加进 DM 索引并发 hub_message（§6.4 第 5 步）。
+//
+// 只处理 DM 作用域：群组消息由群路由统一落账（P3），这里不能抢。
+// 空回复（纯工具轮/中断）不落索引 —— 左栏预览不该出现空气泡。
+func (m *manager) appendHubReply(spec *hubSessionSpec, content string) {
+	if spec == nil || spec.Scope.Kind != agenthub.ScopeDM {
+		return
+	}
+	text := strings.TrimSpace(content)
+	if text == "" {
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		return
+	}
+	agentID := spec.Agent.ID
+	msg := &agenthub.Message{
+		Kind:   agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: agentID},
+		Text:   text,
+	}
+	seq, err := st.AppendDirectMessage(context.Background(), agentID, msg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hub] append dm reply %s: %v\n", agentID, err)
+		return
+	}
+	m.emitHubMessage(string(agentID), seq, msg, "")
+}
+
+// emitHubMessage DM 索引新增一条消息（前端据此回显/替换乐观气泡）。
+func (m *manager) emitHubMessage(agentID string, seq int64, msg *agenthub.Message, clientMsgID string) {
+	if m.out == nil {
+		return
+	}
+	line := map[string]any{
+		"event_type": "hub_message",
+		"agent_id":   agentID,
+		"seq":        seq,
+		"message":    msg,
+	}
+	if clientMsgID != "" {
+		line["client_msg_id"] = clientMsgID
+	}
+	m.out.writeLine(line)
 }

@@ -310,8 +310,11 @@ type bridgeSession struct {
 	wake             chan struct{}
 	out              *out
 
-	workspace string     // 工作区根（审批 diff 读取原文件用）
-	mobile    *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// hubOnAgentEnd Hub DM 的本轮收尾钩子（nil = 项目会话）。RunStream 层事件只经
+	// bs.emit 发出（Session 的 WithEventHandler 收不到 agent_*），所以钩子必须挂在 emit。
+	hubOnAgentEnd func(content string)
+	workspace     string     // 工作区根（审批 diff 读取原文件用）
+	mobile        *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
 	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
 	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
 	running atomic.Bool
@@ -507,6 +510,12 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// 必须按同一序列执行（并发子 agent / 任务结果事件不得与主 run 交错）。
 	bs.dispatchMu.Lock()
 	defer bs.dispatchMu.Unlock()
+
+	// Hub DM：本轮最终回复进 DM 索引（左栏预览/搜索/未读）。上下文仍以 session jsonl
+	// 为准 —— 两份数据分工见 §6.1.3。空回复（纯工具轮/中断）由 appendHubReply 跳过。
+	if ae, ok := e.(*events.AgentEnd); ok && bs.hubOnAgentEnd != nil {
+		bs.hubOnAgentEnd(ae.Content)
+	}
 
 	// IM 镜像推送：会话事件 → Renderer → 飞书（有镜像关联的会话）。
 	// 必须在 dispatchMu 内：与 stdout/日志同序（IM 消息不早于对应 UI 事件）。
@@ -938,6 +947,15 @@ func (bs *bridgeSession) liveSnapshot() (text, think string) {
 }
 
 func (m *manager) get(wsPath, id string) *bridgeSession {
+	// Hub 智能体的 home 不是工作区：直接走 m.runtime(wsPath) 会**造出**一个项目 kind 的
+	// runtime（读项目层、并混进 m.workspaces）。按 home 命中已有 hub runtime 时先查它，
+	// 让 interrupt/compact/blocks_page//clear 这些按 workspace+session_id 寻址的命令
+	// 对 DM 会话同样成立。
+	if ws := m.hubRuntimeByPath(wsPath); ws != nil {
+		ws.mu.Lock()
+		defer ws.mu.Unlock()
+		return ws.sessions[id]
+	}
 	ws := m.runtime(wsPath)
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -1248,6 +1266,10 @@ type sessionOpts struct {
 	cronEvDir string // 同 eventsDir（cron 语义别名，供快照归档用）
 	wsKey     string // workspaceKey（快照路径维度）
 	noRecord  bool   // true = 不装配 checkpoint record（触发即跑、跑完归档，无需崩溃恢复）
+	// hub 非 nil = 本次装配的是 Agent Hub 智能体会话（§6.1.2）：
+	// loop 走 buildHubLoop（L1/L2 提示词、显式 provider），事件回写 DM 索引。
+	// 项目会话保持 nil，装配路径逐字不变。
+	hub *hubSessionSpec
 }
 
 // createOpts 项目路径入口：先把工作区运行态取出来（必要时装配），再交给 createIn。
@@ -1368,8 +1390,19 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	sk := ws.skills // 本 runtime 的技能注册表（WithSkills + load_skill 共享）——不能按路径重查：
 	// hub 的 path 是智能体 home，按路径重查会造出一个项目 kind 的 runtime（读项目层）。
 	loopStart := time.Now()
-	loop, effortRef, skillCaps := m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort,
-		func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
+	var loop *agents.AgentLoop
+	var effortRef *subagentEffortRef
+	var skillCaps *skills.Capabilities
+	if opts.hub != nil {
+		// Hub 智能体：工具面 + 提示词都按 Profile 装配（§6.2），与项目会话共用内核。
+		eng, eRef := m.buildHubEngine(ws, id, opts.hub, reg, qw, func() context.Context { return s.Context() })
+		loop = m.buildHubLoop(ws, id, opts.hub, eng)
+		effortRef = eRef
+		skillCaps = skillCapabilitiesFor(m.provCfg, opts.hub.Agent.Provider, opts.hub.Agent.Model, eng)
+	} else {
+		loop, effortRef, skillCaps = m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort,
+			func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
+	}
 	startupLog("A6.buildLoop", loopStart)
 	nsStart := time.Now()
 	// AI 标题恢复：冷启动从会话 jsonl meta 尾扫（进程内 titles store 未命中时兜底；
@@ -1413,6 +1446,15 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
 	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub()}
+	if opts.hub != nil {
+		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：
+		// rebuildLoop 据此走 buildHubLoop，而不会被当成项目会话的 code persona 重建。
+		bs.provider = opts.hub.Agent.Provider
+		bs.model = opts.hub.Agent.Model
+		bs.persona = "hub"
+		hubSpec := opts.hub
+		bs.hubOnAgentEnd = func(content string) { m.appendHubReply(hubSpec, content) }
+	}
 	if opts.cronEvDir != "" {
 		bs.cronEvDir = opts.cronEvDir
 	}

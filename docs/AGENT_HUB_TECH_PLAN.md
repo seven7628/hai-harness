@@ -1200,7 +1200,14 @@ func (p Policy) Wrap(eng *tools.Engine) *tools.Engine {
 DM 视图显示一条压缩回执（「上下文已压缩 12.3k → 3.1k」），不打断对话。
 
 **未读与预览**：左栏 DM 行显示「最后一条消息的摘要 + 时间」；`last_message` 由 DM 索引维护，
-不读整个 transcript。
+不读整个 transcript。落地：`hub_agent_list` 额外返回 `dm: {<agent_id>: {unread, last_seq,
+last_text, last_sender, last_at}}`，预览按**字符**截断 80 字。
+
+**按 workspace 寻址的命令要认得 hub home**：`/clear`、`interrupt`、`compact`、`blocks_page`
+都是 `(workspace, session_id)` 寻址；智能体 home 不是工作区，直接 `m.runtime(wsPath)` 会
+**造出**一个项目 kind 的 runtime 并混进 `m.workspaces`（P0-08 同类问题）。`manager.get`
+因此先按 home 命中已装配的 hub runtime（`hubRuntimeByPath`，只查不建），再由 `createIn`
+的 `ws.kind` 分流。
 
 ### 6.5 群组：@ 路由
 

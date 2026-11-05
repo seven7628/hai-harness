@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/core"
 )
 
 // hubAgentStatus 智能体状态点（§7.1.5 hub_agent_status）。CRUD 只发 idle/deleted，
@@ -49,6 +50,12 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubAgentDelete(c)
 	case CmdHubAgentRestore:
 		m.hubAgentRestore(c)
+	case CmdHubOpen:
+		m.hubOpen(c)
+	case CmdHubSend:
+		m.hubSend(c)
+	case CmdHubHistory:
+		m.hubHistory(c)
 	default:
 		return false
 	}
@@ -96,7 +103,8 @@ func decodeHubProfile(v any) (agenthub.AgentProfile, error) {
 	return p, nil
 }
 
-// validateHubProvider provider 必须已配置且未删除（§5.1）。
+// validateHubProvider provider 必须存在且未删除（§5.1；不要求已填 key ——
+// 无 key 的 profile 允许保存，派发/运行时由 §6.2.4 报「配置失效，去设置」）。
 // 空值单独说：那是「没填」，不是「填错了」。
 func (m *manager) validateHubProvider(provider string) error {
 	provider = strings.TrimSpace(provider)
@@ -294,7 +302,39 @@ func (m *manager) hubAgentList(c command) {
 		}
 		out = append(out, p)
 	}
-	m.resp(c, true, "", map[string]any{"agents": out})
+	// 左栏预览/未读（§6.4）：DM 索引维护 last_message，不读整个 transcript。
+	// 与 agents 并列返回（不塞进 profile —— profile 是配置，预览是投影）。
+	dm := map[string]map[string]any{}
+	for _, p := range out {
+		unread, last, derr := st.DMUnread(ctx, p.ID)
+		if derr != nil {
+			continue
+		}
+		item := map[string]any{"unread": unread}
+		if last != nil {
+			item["last_seq"] = last.Seq
+			item["last_text"] = truncateRunes(strings.TrimSpace(last.Text), hubPreviewRunes)
+			item["last_sender"] = last.Sender.Kind
+			item["last_at"] = last.CreatedAt
+		}
+		dm[string(p.ID)] = item
+	}
+	m.resp(c, true, "", map[string]any{"agents": out, "dm": dm})
+}
+
+// hubPreviewRunes 左栏预览的最大字数（一条摘要，不整段塞给列表）。
+const hubPreviewRunes = 80
+
+// truncateRunes 按**字符**截断（不是字节）：中文预览不能切半个字。
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // hubAgentDelete 删除：默认软删（DM/群记录与记忆保留），purge=true 才物理删目录。
@@ -418,4 +458,252 @@ func mergeJSONInto(v any, dst any) error {
 		return err
 	}
 	return json.Unmarshal(raw, dst)
+}
+
+// hubTarget 解析 DM 目标（§7.1.1 的 target 形状 + 兼容顶层 agent_id）。
+// 群组是 P3，这里只认 dm；其它 kind 明确报错而不是静默当成 DM。
+func hubTarget(payload map[string]any) (kind string, agentID string, err error) {
+	kind = "dm"
+	target, _ := payload["target"].(map[string]any)
+	if target != nil {
+		if k, _ := target["kind"].(string); k != "" {
+			kind = k
+		}
+		agentID, _ = target["agent_id"].(string)
+	}
+	if agentID == "" {
+		agentID, _ = payload["agent_id"].(string)
+	}
+	if kind != "dm" {
+		return kind, "", fmt.Errorf("暂只支持 kind=dm（群组在 P3）")
+	}
+	if strings.TrimSpace(agentID) == "" {
+		return kind, "", fmt.Errorf("agent_id 不能为空")
+	}
+	return kind, agentID, nil
+}
+
+// hubLoadAgent 读 profile 并拒绝已软删的（UI 上删除的智能体不能再聊）。
+func (m *manager) hubLoadAgent(agentID string) (*agenthub.AgentProfile, *agenthub.FileStore, error) {
+	st, err := m.hubStore()
+	if err != nil {
+		return nil, nil, err
+	}
+	p, err := st.LoadAgent(context.Background(), agenthub.AgentID(agentID))
+	if err != nil {
+		return nil, nil, fmt.Errorf("读取智能体失败: %w", err)
+	}
+	if p.Deleted {
+		return nil, nil, fmt.Errorf("智能体已删除")
+	}
+	return p, st, nil
+}
+
+// hubOpen 打开 DM：返回最近一页 + 会话 ID + 游标，并推进未读。
+//
+// **不**在这里创建会话（§6.4：第一次发消息才懒创建）：只是打开看历史时不该起 loop、
+// 不该读 provider key。session_id 是确定性 ID，前端可以先拿到它。
+func (m *manager) hubOpen(c command) {
+	ctx := context.Background()
+	_, agentID, err := hubTarget(c.Payload)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	p, st, err := m.hubLoadAgent(agentID)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	beforeSeq := int64(numOr(c.Payload, "before_seq", 0))
+	limit := int(numOr(c.Payload, "limit", hubDMPageSize))
+	msgs, hasMore, err := m.hubDMPage(ctx, st, agenthub.AgentID(agentID), beforeSeq, limit)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	// 打开 = 人看到这一页 → 推进已读到最后一条（只前进）。
+	if len(msgs) > 0 {
+		if err := st.SaveDMCursor(ctx, agenthub.AgentID(agentID), msgs[len(msgs)-1].Seq); err != nil {
+			m.resp(c, false, "保存已读位置失败: "+err.Error(), nil)
+			return
+		}
+	}
+	cur, err := st.LoadDMCursor(ctx, agenthub.AgentID(agentID))
+	if err != nil {
+		m.resp(c, false, "读取已读位置失败: "+err.Error(), nil)
+		return
+	}
+	// 只读路径：不建运行时（没有就说明还没聊过，exists=false）。
+	var exists bool
+	if ws := m.hubRuntimeIfExists(agentID); ws != nil {
+		ws.mu.Lock()
+		exists = ws.sessions[hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})] != nil
+		ws.mu.Unlock()
+	}
+	sid := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})
+	m.resp(c, true, "", map[string]any{
+		"target":     map[string]any{"kind": "dm", "agent_id": agentID},
+		"agent":      p,
+		"session_id": sid,
+		"messages":   msgs,
+		"has_more":   hasMore,
+		"cursor":     cur,
+		"exists":     exists,
+	})
+}
+
+// hubHistory 向上翻页（seq 游标，不用 offset）。不推进已读 —— 翻历史不等于「已看到最新」。
+func (m *manager) hubHistory(c command) {
+	ctx := context.Background()
+	agentID := str(c.Payload, "agent_id")
+	if agentID == "" {
+		_, agentID, _ = hubTarget(c.Payload)
+	}
+	if agentID == "" {
+		m.resp(c, false, "agent_id 不能为空", nil)
+		return
+	}
+	if _, _, err := m.hubLoadAgent(agentID); err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	beforeSeq := int64(numOr(c.Payload, "before_seq", 0))
+	limit := int(numOr(c.Payload, "limit", hubDMPageSize))
+	msgs, hasMore, err := m.hubDMPage(ctx, st, agenthub.AgentID(agentID), beforeSeq, limit)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	m.resp(c, true, "", map[string]any{"agent_id": agentID, "messages": msgs, "has_more": hasMore})
+}
+
+// hubDMPage 取一页并算出 has_more（多读一条判断，不额外全量扫描）。
+func (m *manager) hubDMPage(ctx context.Context, st *agenthub.FileStore, agentID agenthub.AgentID, beforeSeq int64, limit int) ([]agenthub.Message, bool, error) {
+	if limit <= 0 {
+		limit = hubDMPageSize
+	}
+	msgs, err := st.ReadDirectMessages(ctx, agentID, beforeSeq, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("读取 DM 失败: %w", err)
+	}
+	hasMore := len(msgs) > limit
+	if hasMore {
+		msgs = msgs[len(msgs)-limit:]
+	}
+	return msgs, hasMore, nil
+}
+
+// hubSend 人发一条 DM：索引落账 → 确保会话 → Ask + wake。
+//
+// client_msg_id 幂等（§7.1.3）：断线重连重发同一条不会重复入模型上下文，
+// 直接回原来的 seq。
+func (m *manager) hubSend(c command) {
+	ctx := context.Background()
+	_, agentID, err := hubTarget(c.Payload)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	text := strings.TrimSpace(str(c.Payload, "text"))
+	clientMsgID := str(c.Payload, "client_msg_id")
+	if text == "" {
+		m.resp(c, false, "text 不能为空", nil)
+		return
+	}
+	if _, st, err := m.hubLoadAgent(agentID); err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	} else if clientMsgID != "" {
+		if seq, dup := hubFindClientMsg(ctx, st, agenthub.AgentID(agentID), clientMsgID); dup {
+			m.resp(c, true, "", map[string]any{"seq": seq, "deduplicated": true,
+				"session_id": hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})})
+			return
+		}
+	}
+	bs, err := m.hubDMSession(agentID)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	msg := &agenthub.Message{
+		Kind:   agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderHuman},
+		Text:   text,
+	}
+	if clientMsgID != "" {
+		msg.Refs = map[string]any{"client_msg_id": clientMsgID}
+	}
+	seq, err := m.hubStoreSeq(func(st *agenthub.FileStore) (int64, error) {
+		return st.AppendDirectMessage(ctx, agenthub.AgentID(agentID), msg)
+	})
+	if err != nil {
+		m.resp(c, false, "保存消息失败: "+err.Error(), nil)
+		return
+	}
+	// 人发出去的消息 = 人已经看到这里。
+	_ = m.hubStoreCursor(agentID, seq)
+	m.emitHubMessage(agentID, seq, msg, clientMsgID)
+
+	if err := bs.s.Ask(ctx, core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})); err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	bs.lastActive.Store(time.Now().UnixMilli())
+	bs.wakeRun()
+	m.resp(c, true, "", map[string]any{"seq": seq, "session_id": bs.id})
+}
+
+// hubStoreSeq 在 hubStore 上执行一次写（避免每个调用点重复 if 展开）。
+func (m *manager) hubStoreSeq(fn func(*agenthub.FileStore) (int64, error)) (int64, error) {
+	st, err := m.hubStore()
+	if err != nil {
+		return 0, err
+	}
+	return fn(st)
+}
+
+func (m *manager) hubStoreCursor(agentID string, seq int64) error {
+	st, err := m.hubStore()
+	if err != nil {
+		return err
+	}
+	return st.SaveDMCursor(context.Background(), agenthub.AgentID(agentID), seq)
+}
+
+// hubFindClientMsg 幂等检查：最近一页里找同 client_msg_id 的消息。
+// 只看最近 hubDMPageSize*2 条 —— 重发窗口远小于这个量级，全量扫没意义。
+func hubFindClientMsg(ctx context.Context, st *agenthub.FileStore, agentID agenthub.AgentID, clientMsgID string) (int64, bool) {
+	msgs, err := st.ReadDirectMessages(ctx, agentID, 0, hubDMPageSize*2)
+	if err != nil {
+		return 0, false
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if id, _ := msgs[i].Refs["client_msg_id"].(string); id == clientMsgID {
+			return msgs[i].Seq, true
+		}
+	}
+	return 0, false
+}
+
+// hubDMPageSize DM 默认每页条数。
+const hubDMPageSize = 50
+
+// numOr 读数字字段（JSON 解出来是 float64；调用方也可能直接给 int）。
+func numOr(payload map[string]any, key string, def int64) int64 {
+	switch v := payload[key].(type) {
+	case float64:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	default:
+		return def
+	}
 }

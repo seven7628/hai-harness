@@ -161,7 +161,7 @@ func TestMCPRestricted(t *testing.T) {
 
 // 前缀只认**开头**：模式出现在名字中间不算命中。
 // 没有这条，"HasPrefix 改成 Contains" 这种 mutation 不会让任何用例失败
-//（P1-01 复审实测：原用例 browser_* 对 browserx 两种实现都为 false）。
+// （P1-01 复审实测：原用例 browser_* 对 browserx 两种实现都为 false）。
 func TestMatchesPatternsPrefixIsAnchored(t *testing.T) {
 	p := ToolPolicy{Disable: []string{"browser*"}}
 	if p.ToolVisible("browser_navigate", false) {

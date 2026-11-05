@@ -66,6 +66,10 @@ const (
 	CmdHubAgentList    Command = "hub_agent_list"
 	CmdHubAgentDelete  Command = "hub_agent_delete"
 	CmdHubAgentRestore Command = "hub_agent_restore" // 从回收站恢复（§5.2 软删可恢复）
+	// —— Agent Hub（P1：DM 会话） ——
+	CmdHubOpen    Command = "hub_open"
+	CmdHubSend    Command = "hub_send"
+	CmdHubHistory Command = "hub_history"
 
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"
