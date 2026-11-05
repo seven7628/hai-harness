@@ -882,6 +882,12 @@
       "commit": "369517d fix(hub-p0-05): 收口账本幂等、run 绑定与重放一致性",
       "review": "passed",
       "reviewNote": "首轮 changes_requested（notify 先于 finish 占键；Finish 不校验 run_id；事件快照分叉；Replay 丢 Dispatch 时间线；跨 Ledger 实例锁）→ 369517d 修复（settled 门禁/superseded_run_ids/每事件完整快照+Replay 取较新/per-task 全局锁/append 回滚）→ 复审 pass（go test -race ./agenthub/... 全绿，覆盖率 79.8%）。跨进程 CAS 与锁回收留 Store 后续。"
+    },
+    "P0-06": {
+      "status": "review",
+      "commit": "3b5c9ea feat(hub-p0-06): 系统提示词与名册模板",
+      "review": "pending",
+      "reviewNote": "独立 Review 进行中；go test -race ./agenthub/... 全绿。"
     }
   }
 }
