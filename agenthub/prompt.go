@@ -7,6 +7,7 @@ import (
 
 // PromptSpec 是 L1/L2 的渲染输入。L3–L5 由内核的 AgentMD/记忆/技能选项追加，
 // 这里刻意不接收，也不读取任何运行态（成员状态进 user 消息，不进 system）。
+// 能力摘要/成员 id 的完整名册信息留给 P3b-01；DM 的 L1 变体由装配层按 Scope 处理。
 type PromptSpec struct {
 	Agent   *AgentProfile
 	Group   *Group
@@ -74,8 +75,15 @@ func renderRoster(spec PromptSpec) string {
 			byID[p.ID] = p
 		}
 	}
+	groupName := strings.TrimSpace(spec.Group.Name)
+	if groupName == "" {
+		groupName = strings.TrimSpace(string(spec.Group.ID))
+	}
+	if groupName == "" {
+		groupName = "Group"
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Group: %s\n", strings.TrimSpace(spec.Group.Name))
+	fmt.Fprintf(&b, "## Group: %s\n", groupName)
 	if spec.Agent != nil {
 		role := memberRoleOf(spec.Group, spec.Agent.ID)
 		fmt.Fprintf(&b, "You are %s", strings.TrimSpace(spec.Agent.Name))
@@ -84,14 +92,14 @@ func renderRoster(spec PromptSpec) string {
 		}
 		b.WriteString(".")
 		if resp := responsibilities(spec.Agent); resp != "" {
-			fmt.Fprintf(&b, " Responsibilities: %s.", strings.TrimSuffix(resp, "."))
+			fmt.Fprintf(&b, " Responsibilities: %s.", strings.TrimRight(resp, ".。"))
 		}
 		b.WriteByte('\n')
 	}
 	b.WriteString("Members:\n")
 	for _, m := range spec.Group.Members {
 		p := byID[m.AgentID]
-		name := string(m.AgentID)
+		name := "unknown member (" + string(m.AgentID) + ")"
 		if p != nil && strings.TrimSpace(p.Name) != "" {
 			name = strings.TrimSpace(p.Name)
 		}
@@ -104,7 +112,7 @@ func renderRoster(spec PromptSpec) string {
 		}
 		fmt.Fprintf(&b, "- %s (%s)", name, role)
 		if resp := responsibilities(p); resp != "" {
-			fmt.Fprintf(&b, " — %s", strings.TrimSuffix(resp, "."))
+			fmt.Fprintf(&b, " — %s", strings.TrimRight(resp, ".。"))
 		}
 		b.WriteByte('\n')
 	}
