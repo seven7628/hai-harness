@@ -169,7 +169,7 @@
         "desktop/bridge/main.go",
         "desktop/bridge/hub_session.go"
       ],
-      "acceptance": "createOpts 转发 createIn；项目路径行为逐字节不变；hubRuntime 不加载 MCP/插件/技能；cron/工作区测试全绿。",
+      "acceptance": "createOpts 转发 createIn；项目路径行为逐字节不变；hubRuntime 不加载 MCP/插件/技能；cron/工作区测试全绿；buildHubLoop 断言 base system prompt 为空（L0 关闭，对应 P0-06 复审遗留项 5）。",
       "tests": "go test ./desktop/bridge/...",
       "commit": "refactor(hub-p0-08): createIn 与 hubRuntime"
     },
@@ -884,10 +884,10 @@
       "reviewNote": "首轮 changes_requested（notify 先于 finish 占键；Finish 不校验 run_id；事件快照分叉；Replay 丢 Dispatch 时间线；跨 Ledger 实例锁）→ 369517d 修复（settled 门禁/superseded_run_ids/每事件完整快照+Replay 取较新/per-task 全局锁/append 回滚）→ 复审 pass（go test -race ./agenthub/... 全绿，覆盖率 79.8%）。跨进程 CAS 与锁回收留 Store 后续。"
     },
     "P0-06": {
-      "status": "review",
-      "commit": "3b5c9ea feat(hub-p0-06): 系统提示词与名册模板",
-      "review": "pending",
-      "reviewNote": "独立 Review 进行中；go test -race ./agenthub/... 全绿。"
+      "status": "done",
+      "commit": "1eb129f fix(hub-p0-06): L1 用字面 golden 钉住，名册 CJK/回退不再出脏输出",
+      "review": "passed",
+      "reviewNote": "首轮 changes_requested（TestPromptL1Only 拿 hubProtocolPrompt 常量与自身比较，golden 等于没钉——写错 task_status/删一条 Safety/改坏 @mentioned 都能全绿）→ 1eb129f 修复（testdata/l1.golden 2196B 逐字节比对；恒真的“不含 L0 常量”断言降级为注释并注明由 P0-08 断言；CJK 双标点/空群名尾随空格/缺 profile 裸 ID 一并收口；.gitignore 的 testdata/ 规则曾把 golden 吞掉，加 !agenthub/testdata/ 例外）→ 复审 pass，评审用两次真实 mutate（改 task_status、删 Safety 两行）验证测试会失败（go test -race ./agenthub/... 全绿，覆盖率 80.5%）。遗留 non-blocking：unknown member 与 (member) 括号叠字且仍诱导 @、Group 双空兜底出「## Group: Group」、TrimRight 只削整串尾部导致 Role 自带句号时中英标点混排、golden 无行尾换行需注释提醒、名册缺成员 id/能力摘要（P3b-01）。"
     }
   }
 }
