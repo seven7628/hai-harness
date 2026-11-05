@@ -1,0 +1,820 @@
+{
+  "version": 1,
+  "project": "Agent Hub",
+  "subtitle": "多智能体工作台 · 统一任务跟进看板",
+  "updated": "2026-11-04",
+  "phases": [
+    {
+      "id": "P0",
+      "name": "P0 · 地基",
+      "goal": "领域包、存储、提示词、内核小改、runtime 拆分",
+      "days": "3–5 天"
+    },
+    {
+      "id": "P1",
+      "name": "P1 · 单智能体 DM",
+      "goal": "独立 Provider/人格/记忆/压缩 + bash + DM UI",
+      "days": "5–7 天"
+    },
+    {
+      "id": "P2",
+      "name": "P2 · 工作区派发 + 回调",
+      "goal": "session 工具、任务账本、AgentEnd 回推、护栏",
+      "days": "7–10 天"
+    },
+    {
+      "id": "P3a",
+      "name": "P3a · 群组基础",
+      "goal": "群组、@ 路由、快照、交接、产物、审批",
+      "days": "8–10 天"
+    },
+    {
+      "id": "P3b",
+      "name": "P3b · 智能体互感知/互 @",
+      "goal": "名册、@ 对话、assign_task、轮次护栏、结果卡",
+      "days": "6–8 天"
+    },
+    {
+      "id": "P4",
+      "name": "P4 · 打磨与扩展",
+      "goal": "流式、Context 面板、手机/IM、外部 hook、复盘",
+      "days": "按需"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "P0-01",
+      "phase": "P0",
+      "title": "agenthub 包骨架与领域类型",
+      "deps": [],
+      "files": [
+        "agenthub/profile.go",
+        "agenthub/group.go",
+        "agenthub/message.go",
+        "agenthub/ids.go"
+      ],
+      "acceptance": "Profile/Group/Message/Task 类型可编译；JSON 往返稳定；ID 可注入随机源；包不 import desktop。",
+      "tests": "go test ./agenthub/...",
+      "commit": "feat(hub-p0-01): agenthub 包骨架与领域类型"
+    },
+    {
+      "id": "P0-02",
+      "phase": "P0",
+      "title": "Store 接口 + FileStore（原子写/恢复/迁移）",
+      "deps": [
+        "P0-01"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "agenthub/store_test.go"
+      ],
+      "acceptance": "JSON 原子写；日志 seq 单调；启动可从 log/events 重建索引；schema_version 迁移；MemoryStore 可测。",
+      "tests": "go test ./agenthub/ -run Store",
+      "commit": "feat(hub-p0-02): FileStore 与恢复/迁移"
+    },
+    {
+      "id": "P0-03",
+      "phase": "P0",
+      "title": "Profile/Group 校验、默认值、ID",
+      "deps": [
+        "P0-01"
+      ],
+      "files": [
+        "agenthub/profile.go",
+        "agenthub/group.go"
+      ],
+      "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；角色/成员数上限；错误可读。",
+      "tests": "go test ./agenthub/ -run Profile",
+      "commit": "feat(hub-p0-03): Profile/Group 校验与默认值"
+    },
+    {
+      "id": "P0-04",
+      "phase": "P0",
+      "title": "严格 @Name 解析器 + 可见性",
+      "deps": [
+        "P0-01"
+      ],
+      "files": [
+        "agenthub/mention.go",
+        "agenthub/message.go"
+      ],
+      "acceptance": "跳过 code/URL/email；最长匹配；未知名不触发；单条最多 3 个；@all 规则；重名拒绝。",
+      "tests": "go test ./agenthub/ -run Mention",
+      "commit": "feat(hub-p0-04): 严格 mention 解析"
+    },
+    {
+      "id": "P0-05",
+      "phase": "P0",
+      "title": "任务状态机 + 账本（幂等/迁移）",
+      "deps": [
+        "P0-02"
+      ],
+      "files": [
+        "agenthub/task.go",
+        "agenthub/ledger.go"
+      ],
+      "acceptance": "合法迁移表；终态不可回退；同 (task_id,run_id) 只回推一次；事件重放恢复快照。",
+      "tests": "go test ./agenthub/ -run Task",
+      "commit": "feat(hub-p0-05): 任务状态机与账本"
+    },
+    {
+      "id": "P0-06",
+      "phase": "P0",
+      "title": "系统提示词分层 + 名册模板",
+      "deps": [
+        "P0-01",
+        "P0-03"
+      ],
+      "files": [
+        "agenthub/prompt.go",
+        "agenthub/prompt_test.go"
+      ],
+      "acceptance": "L1 协议含 @/assign_task/workspace 规则；名册/职责渲染；空层不追加；golden 逐字节稳定。",
+      "tests": "go test ./agenthub/ -run Prompt",
+      "commit": "feat(hub-p0-06): 系统提示词与名册模板"
+    },
+    {
+      "id": "P0-07",
+      "phase": "P0",
+      "title": "内核小改：ContentTypeHubTask、PendingCount",
+      "deps": [
+        "P0-01"
+      ],
+      "files": [
+        "core/message.go",
+        "session/session.go"
+      ],
+      "acceptance": "新内容块通过 Validate；collectUserContents 保留；PendingCount 返回 inbox+pending；现有测试不回归。",
+      "tests": "go test ./core/... ./session/...",
+      "commit": "feat(hub-p0-07): 内核支持 hub_task 与 PendingCount"
+    },
+    {
+      "id": "P0-08",
+      "phase": "P0",
+      "title": "bridge runtime 拆分：createIn/hubRuntime",
+      "deps": [
+        "P0-02",
+        "P0-07"
+      ],
+      "files": [
+        "desktop/bridge/main.go",
+        "desktop/bridge/hub_session.go"
+      ],
+      "acceptance": "createOpts 转发 createIn；项目路径行为逐字节不变；hubRuntime 不加载 MCP/插件/技能；cron/工作区测试全绿。",
+      "tests": "go test ./desktop/bridge/...",
+      "commit": "refactor(hub-p0-08): createIn 与 hubRuntime"
+    },
+    {
+      "id": "P0-09",
+      "phase": "P0",
+      "title": "P0 Review + 回归",
+      "deps": [
+        "P0-01",
+        "P0-02",
+        "P0-03",
+        "P0-04",
+        "P0-05",
+        "P0-06",
+        "P0-07",
+        "P0-08"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md"
+      ],
+      "acceptance": "全部 P0 测试绿；现有 session/bridge 回归；Review 结论 passed；看板更新。",
+      "tests": "go test ./agenthub/... ./session/... ./desktop/bridge/...",
+      "commit": "chore(hub-p0-09): P0 review gate"
+    },
+    {
+      "id": "P1-01",
+      "phase": "P1",
+      "title": "buildHubEngine：文件/bash/python/hub 工具 + 策略",
+      "deps": [
+        "P0-08"
+      ],
+      "files": [
+        "desktop/bridge/hub_tools.go",
+        "agenthub/policy.go"
+      ],
+      "acceptance": "文件根限 home/memory；bash/run_python 沙箱；工具白名单/deny/路径检查；ask_user 绑定同一 qw。",
+      "tests": "go test ./desktop/bridge/ -run HubEngine",
+      "commit": "feat(hub-p1-01): Hub 工具引擎与策略"
+    },
+    {
+      "id": "P1-02",
+      "phase": "P1",
+      "title": "buildHubLoop：provider/model/memory/compress/persona",
+      "deps": [
+        "P1-01"
+      ],
+      "files": [
+        "desktop/bridge/hub_session.go",
+        "desktop/bridge/providers.go"
+      ],
+      "acceptance": "显式 provider 不改全局 active；samplingDefaultsFor；memory 注入；compress 阈值；人格空层稳定。",
+      "tests": "go test ./desktop/bridge/ -run HubLoop",
+      "commit": "feat(hub-p1-02): Hub AgentLoop 装配"
+    },
+    {
+      "id": "P1-03",
+      "phase": "P1",
+      "title": "智能体 CRUD 命令 + 校验",
+      "deps": [
+        "P1-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "create/update/get/list/delete；保存即版本；provider 缺失拒绝；事件 hub_agent_status。",
+      "tests": "go test ./desktop/bridge/ -run HubAgent",
+      "commit": "feat(hub-p1-03): 智能体 CRUD"
+    },
+    {
+      "id": "P1-04",
+      "phase": "P1",
+      "title": "会话生命周期 + DM open/send/history",
+      "deps": [
+        "P1-03"
+      ],
+      "files": [
+        "desktop/bridge/hub_session.go",
+        "agenthub/service.go"
+      ],
+      "acceptance": "DM 懒创建且只有一个；hub_open/send/history；断线重连；未读/预览更新。",
+      "tests": "go test ./desktop/bridge/ -run HubDM",
+      "commit": "feat(hub-p1-04): DM 会话链路"
+    },
+    {
+      "id": "P1-05",
+      "phase": "P1",
+      "title": "记忆隔离 + 浏览/编辑",
+      "deps": [
+        "P1-04"
+      ],
+      "files": [
+        "agenthub/memory.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "每智能体独立目录；browse/read/write；写入备份；生效时机提示；A/B 不串。",
+      "tests": "go test ./agenthub/ -run Memory",
+      "commit": "feat(hub-p1-05): 智能体记忆隔离"
+    },
+    {
+      "id": "P1-06",
+      "phase": "P1",
+      "title": "人格版本/回滚/提示词预览",
+      "deps": [
+        "P1-04",
+        "P0-06"
+      ],
+      "files": [
+        "agenthub/profile.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "每次保存追加旧版；保留 50 版；回滚写回；预览 L1–L5；下一个 Run 生效。",
+      "tests": "go test ./agenthub/ -run Version",
+      "commit": "feat(hub-p1-06): 人格版本与回滚"
+    },
+    {
+      "id": "P1-07",
+      "phase": "P1",
+      "title": "每智能体压缩阈值 + loop 重建",
+      "deps": [
+        "P1-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_session.go",
+        "agenthub/profile.go"
+      ],
+      "acceptance": "阈值 0.5–0.95；改阈值只影响该智能体；运行中 Run 用旧 loop 收尾。",
+      "tests": "go test ./desktop/bridge/ -run HubCompress",
+      "commit": "feat(hub-p1-07): 每智能体压缩阈值"
+    },
+    {
+      "id": "P1-08",
+      "phase": "P1",
+      "title": "前端 surface + Hub Rail + DM 视图",
+      "deps": [
+        "P1-03",
+        "P1-04"
+      ],
+      "files": [
+        "desktop/app/src/App.tsx",
+        "desktop/app/src/components/hub/HubRail.tsx",
+        "desktop/app/src/store/useHubStore.ts"
+      ],
+      "acceptance": "工作区↔Hub 切换；左栏智能体/群组/Needs you；DM 复用 Narrative；未读/状态点；主题三套。",
+      "tests": "npm run lint && npm run test:agent-tree",
+      "commit": "feat(hub-p1-08): Hub Rail 与 DM 视图"
+    },
+    {
+      "id": "P1-09",
+      "phase": "P1",
+      "title": "智能体资料页（5 tabs）",
+      "deps": [
+        "P1-08",
+        "P1-05",
+        "P1-06"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/AgentProfilePage.tsx"
+      ],
+      "acceptance": "基本/人格/工具权限/记忆/会话；provider/model 校验；bash 开关；提示词预览；保存生效提示。",
+      "tests": "npm run lint && npm run test:store",
+      "commit": "feat(hub-p1-09): 智能体资料页"
+    },
+    {
+      "id": "P1-10",
+      "phase": "P1",
+      "title": "P1 Review + 评测 1–3",
+      "deps": [
+        "P1-08",
+        "P1-09"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md",
+        "evals/"
+      ],
+      "acceptance": "DM 50 轮不新建；记忆不串；不同 provider 同跑；压缩可见；Review passed。",
+      "tests": "go test ./agenthub/... ./desktop/bridge/... && npm run lint",
+      "commit": "chore(hub-p1-10): P1 review + evals"
+    },
+    {
+      "id": "P2-01",
+      "phase": "P2",
+      "title": "WorkspaceOps 适配 + 路径安全",
+      "deps": [
+        "P1-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_service.go",
+        "agenthub/policy.go"
+      ],
+      "acceptance": "workspace_list/create；根目录白名单；slug 防穿越；写 workspaces.json；不切 UI 焦点。",
+      "tests": "go test ./desktop/bridge/ -run HubWorkspace",
+      "commit": "feat(hub-p2-01): WorkspaceOps 与路径安全"
+    },
+    {
+      "id": "P2-02",
+      "phase": "P2",
+      "title": "session_list/create/send 工具",
+      "deps": [
+        "P2-01"
+      ],
+      "files": [
+        "desktop/bridge/hub_tools.go",
+        "agenthub/service.go"
+      ],
+      "acceptance": "工具描述明确「先 list 再 send」；create 不切全局 provider；send 返回 task_id；目标必须项目会话。",
+      "tests": "go test ./desktop/bridge/ -run HubSessionTools",
+      "commit": "feat(hub-p2-02): session 工具面"
+    },
+    {
+      "id": "P2-03",
+      "phase": "P2",
+      "title": "任务账本 + 空闲闸门 + 队列",
+      "deps": [
+        "P2-02",
+        "P0-05"
+      ],
+      "files": [
+        "agenthub/service.go",
+        "agenthub/task.go"
+      ],
+      "acceptance": "目标 idle 且 pending=0 才派发；忙则 queued；AgentEnd 后 pump；一个任务=一次干净 Run。",
+      "tests": "go test ./agenthub/ -run Queue",
+      "commit": "feat(hub-p2-03): 任务队列与空闲闸门"
+    },
+    {
+      "id": "P2-04",
+      "phase": "P2",
+      "title": "UserInputsConsumed 相关性 + finishHubTask",
+      "deps": [
+        "P2-03",
+        "P0-07"
+      ],
+      "files": [
+        "desktop/bridge/main.go",
+        "desktop/bridge/hub_projection.go"
+      ],
+      "acceptance": "解析 hub_task 块绑定 task/run；只结算主 run；EventLine 之后结算；多任务同批失败告警。",
+      "tests": "go test ./desktop/bridge/ -run HubBind",
+      "commit": "feat(hub-p2-04): AgentEnd 任务相关性"
+    },
+    {
+      "id": "P2-05",
+      "phase": "P2",
+      "title": "结果回推 + task_result 事件",
+      "deps": [
+        "P2-04"
+      ],
+      "files": [
+        "desktop/bridge/hub_service.go",
+        "agenthub/service.go"
+      ],
+      "acceptance": "账本终态；产物登记；PushTaskResultUsage；幂等；回推失败可重试；成本归因。",
+      "tests": "go test ./agenthub/ -run FinishTask",
+      "commit": "feat(hub-p2-05): 任务结算与回推"
+    },
+    {
+      "id": "P2-06",
+      "phase": "P2",
+      "title": "任务板 + Needs you（审批/失败）",
+      "deps": [
+        "P2-05"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/HubInspector.tsx",
+        "NeedsYouPanel.tsx"
+      ],
+      "acceptance": "任务列表/详情/取消/重试；审批与提问路由；失败可见；空态；键盘可达。",
+      "tests": "npm run lint && npm run test:todos-scope",
+      "commit": "feat(hub-p2-06): 任务板与 Needs you"
+    },
+    {
+      "id": "P2-07",
+      "phase": "P2",
+      "title": "预算/并发/去重/护栏",
+      "deps": [
+        "P2-05"
+      ],
+      "files": [
+        "agenthub/policy.go",
+        "agenthub/task.go"
+      ],
+      "acceptance": "单任务/日/群/全局预算；并发上限；10 分钟去重；根链 6 轮；熔断写 hub_alert。",
+      "tests": "go test ./agenthub/ -run Guard",
+      "commit": "feat(hub-p2-07): 预算与循环护栏"
+    },
+    {
+      "id": "P2-08",
+      "phase": "P2",
+      "title": "崩溃恢复",
+      "deps": [
+        "P2-05"
+      ],
+      "files": [
+        "desktop/bridge/hub_recovery.go"
+      ],
+      "acceptance": "queued 重派；dispatched/running 无 run → interrupted + 通知；completed 未 delivered 重推；不自动重试副作用。",
+      "tests": "go test ./desktop/bridge/ -run HubRecovery",
+      "commit": "feat(hub-p2-08): 任务崩溃恢复"
+    },
+    {
+      "id": "P2-09",
+      "phase": "P2",
+      "title": "P2 Review + 评测 4–6",
+      "deps": [
+        "P2-07",
+        "P2-08"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md",
+        "evals/"
+      ],
+      "acceptance": "一句话建工作区派任务；完成后回推；人工介入不续跑；重启可解释；Review passed。",
+      "tests": "go test ./agenthub/... ./desktop/bridge/...",
+      "commit": "chore(hub-p2-09): P2 review + evals"
+    },
+    {
+      "id": "P3a-01",
+      "phase": "P3a",
+      "title": "群组 CRUD + 成员/角色/策略",
+      "deps": [
+        "P2-05"
+      ],
+      "files": [
+        "agenthub/group.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "创建/更新/删除；成员上限 12；角色权限；owner 转让；群策略 auto/ask/readonly。",
+      "tests": "go test ./agenthub/ -run Group",
+      "commit": "feat(hub-p3a-01): 群组与成员"
+    },
+    {
+      "id": "P3a-02",
+      "phase": "P3a",
+      "title": "群日志/活动/digest/seq/恢复",
+      "deps": [
+        "P3a-01",
+        "P0-02"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "agenthub/message.go",
+        "agenthub/digest.go"
+      ],
+      "acceptance": "log.jsonl 追加；activity.jsonl 独立；RoundSummary 确定性汇总；per-group seq；崩溃重扫补索引；分页。",
+      "tests": "go test ./agenthub/ -run GroupLog",
+      "commit": "feat(hub-p3a-02): 群日志与活动"
+    },
+    {
+      "id": "P3a-03",
+      "phase": "P3a",
+      "title": "@ 路由 + round + routing receipt",
+      "deps": [
+        "P3a-02",
+        "P0-04"
+      ],
+      "files": [
+        "agenthub/router.go",
+        "agenthub/conversation.go"
+      ],
+      "acceptance": "无 @ 不唤醒；@all/@A 正确；round 快照；回执落盘；@all 权限/频率。",
+      "tests": "go test ./agenthub/ -run Router",
+      "commit": "feat(hub-p3a-03): 群组 @ 路由"
+    },
+    {
+      "id": "P3a-04",
+      "phase": "P3a",
+      "title": "群智能体会话 + 快照构建",
+      "deps": [
+        "P3a-03",
+        "P1-02"
+      ],
+      "files": [
+        "agenthub/snapshot.go",
+        "desktop/bridge/hub_session.go"
+      ],
+      "acceptance": "每群一会话；delta 快照；40 条/12k 预算；折叠；冻结本轮；活动/回执不进快照。",
+      "tests": "go test ./agenthub/ -run Snapshot",
+      "commit": "feat(hub-p3a-04): 群会话与快照"
+    },
+    {
+      "id": "P3a-05",
+      "phase": "P3a",
+      "title": "group_history/group_members/group_say",
+      "deps": [
+        "P3a-04"
+      ],
+      "files": [
+        "desktop/bridge/hub_tools.go"
+      ],
+      "acceptance": "recent/search 分页；可见性过滤；成员状态；group_say 受轮次限制。",
+      "tests": "go test ./desktop/bridge/ -run HubGroupTools",
+      "commit": "feat(hub-p3a-05): 群组工具"
+    },
+    {
+      "id": "P3a-06",
+      "phase": "P3a",
+      "title": "handoff / ack / 护栏",
+      "deps": [
+        "P3a-03"
+      ],
+      "files": [
+        "agenthub/task.go",
+        "desktop/bridge/hub_tools.go"
+      ],
+      "acceptance": "交接卡；pending_ack/accepted/declined；深度 3；同对 10 分钟 2 次；observer 禁止。",
+      "tests": "go test ./agenthub/ -run Handoff",
+      "commit": "feat(hub-p3a-06): 交接与 ack"
+    },
+    {
+      "id": "P3a-07",
+      "phase": "P3a",
+      "title": "产物版本 + 私有审批/Needs you",
+      "deps": [
+        "P3a-04"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "产物按 owner/name 版本化；预览按 id；approval_stub 不进群上下文；need 聚合/超时。",
+      "tests": "go test ./agenthub/ -run Artifact",
+      "commit": "feat(hub-p3a-07): 产物与私有审批"
+    },
+    {
+      "id": "P3a-08",
+      "phase": "P3a",
+      "title": "前端群组视图 + RoundGroup + 动作清单 + Inspector",
+      "deps": [
+        "P3a-05",
+        "P3a-07"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/HubTimeline.tsx",
+        "RoundGroup.tsx",
+        "RoundActivityDigest.tsx"
+      ],
+      "acceptance": "群头/时间线/回执/审批占位；同轮合并；动作清单；分开显示；Inspector；三主题。",
+      "tests": "npm run lint && npm run test:store:scoping",
+      "commit": "feat(hub-p3a-08): 群组视图与轮次摘要"
+    },
+    {
+      "id": "P3a-09",
+      "phase": "P3a",
+      "title": "P3a Review + 评测 7",
+      "deps": [
+        "P3a-08"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md",
+        "evals/"
+      ],
+      "acceptance": "@all/@A 正确；未 @ 不发言；历史可检索；私有内容不泄漏；Review passed。",
+      "tests": "go test ./agenthub/... ./desktop/bridge/...",
+      "commit": "chore(hub-p3a-09): P3a review + eval"
+    },
+    {
+      "id": "P3b-01",
+      "phase": "P3b",
+      "title": "名册/职责/能力注入 + 提示词",
+      "deps": [
+        "P3a-04",
+        "P0-06"
+      ],
+      "files": [
+        "agenthub/prompt.go",
+        "agenthub/group.go"
+      ],
+      "acceptance": "名册稳定层；状态走工具；L1 教 @/assign_task；群成员变化重建 loop；golden 测试。",
+      "tests": "go test ./agenthub/ -run Roster",
+      "commit": "feat(hub-p3b-01): 智能体名册与提示词"
+    },
+    {
+      "id": "P3b-02",
+      "phase": "P3b",
+      "title": "智能体正文 @ 解析 + group_say(mentions)",
+      "deps": [
+        "P3b-01",
+        "P0-04"
+      ],
+      "files": [
+        "agenthub/mention.go",
+        "desktop/bridge/hub_service.go"
+      ],
+      "acceptance": "agent 正文 @ 严格解析；代码/URL 不触发；3 个上限；group_say 结构化 mention；@all 权限。",
+      "tests": "go test ./agenthub/ -run AgentMention",
+      "commit": "feat(hub-p3b-02): 智能体互相 @"
+    },
+    {
+      "id": "P3b-03",
+      "phase": "P3b",
+      "title": "assign_task + agent target 账本",
+      "deps": [
+        "P3b-02",
+        "P2-05"
+      ],
+      "files": [
+        "agenthub/task.go",
+        "desktop/bridge/hub_tools.go"
+      ],
+      "acceptance": "创建 agent 任务；不能派自己；同对在途 ≤2；目标成员校验；消息 intent=assign。",
+      "tests": "go test ./agenthub/ -run Assign",
+      "commit": "feat(hub-p3b-03): assign_task 智能体任务"
+    },
+    {
+      "id": "P3b-04",
+      "phase": "P3b",
+      "title": "对话控制器 + 轮次/冷却/踢皮球检测",
+      "deps": [
+        "P3b-02",
+        "P3a-03"
+      ],
+      "files": [
+        "agenthub/conversation.go"
+      ],
+      "acceptance": "8 轮预算；深度 4；冷却 1.5s；同对 2 次；人类插话清队列；停止；指纹循环检测。",
+      "tests": "go test ./agenthub/ -run Conversation",
+      "commit": "feat(hub-p3b-04): 对话轮次与护栏"
+    },
+    {
+      "id": "P3b-05",
+      "phase": "P3b",
+      "title": "finishAgentTask + 群内结果卡",
+      "deps": [
+        "P3b-03"
+      ],
+      "files": [
+        "desktop/bridge/hub_service.go",
+        "agenthub/service.go"
+      ],
+      "acceptance": "目标 AgentEnd 结算；结果卡；派发者唤醒；不再重复发群消息；declined/canceled 路径。",
+      "tests": "go test ./desktop/bridge/ -run FinishAgentTask",
+      "commit": "feat(hub-p3b-05): 智能体任务结算"
+    },
+    {
+      "id": "P3b-06",
+      "phase": "P3b",
+      "title": "任务完成三层感知（事件/快照/未读）",
+      "deps": [
+        "P3b-05",
+        "P3a-04"
+      ],
+      "files": [
+        "agenthub/snapshot.go",
+        "desktop/bridge/hub_projection.go"
+      ],
+      "acceptance": "task_result 入 log；其他成员快照可见；只唤醒派发者；左栏预览/未读更新；失败卡。",
+      "tests": "go test ./agenthub/ -run Perception",
+      "commit": "feat(hub-p3b-06): 任务完成群内感知"
+    },
+    {
+      "id": "P3b-07",
+      "phase": "P3b",
+      "title": "前端 AgentMentionChip/MentionPicker/ConversationBar/TaskResultCard/Typing",
+      "deps": [
+        "P3b-06"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/AgentMentionChip.tsx",
+        "MentionPicker.tsx",
+        "ConversationBar.tsx",
+        "TaskResultCard.tsx",
+        "TypingIndicator.tsx"
+      ],
+      "acceptance": "@ chip 反规范化；对话/派任务两态；轮次条；结果卡；typing；键盘/主题/空态。",
+      "tests": "npm run lint && npm run test:agent-session",
+      "commit": "feat(hub-p3b-07): 互 @ 与任务结果 UI"
+    },
+    {
+      "id": "P3b-08",
+      "phase": "P3b",
+      "title": "P3b Review + 评测 8–9",
+      "deps": [
+        "P3b-07"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md",
+        "evals/"
+      ],
+      "acceptance": "A@B 可协作；B 完成 A 被唤醒；不无限互踢；人插话/停止生效；Review passed。",
+      "tests": "go test ./agenthub/... ./desktop/bridge/...",
+      "commit": "chore(hub-p3b-08): P3b review + evals"
+    },
+    {
+      "id": "P4-01",
+      "phase": "P4",
+      "title": "群内流式/typing 打磨、性能",
+      "deps": [
+        "P3b-08"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/HubTimeline.tsx"
+      ],
+      "acceptance": "节流流式；虚拟列表；200+ 消息不卡；reduced-motion。",
+      "tests": "npm run test:scroll-follow && npm run e2e:usage-stats",
+      "commit": "feat(hub-p4-01): 流式与性能打磨"
+    },
+    {
+      "id": "P4-02",
+      "phase": "P4",
+      "title": "Context 面板 + 深链 + 导出",
+      "deps": [
+        "P3b-08"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/HubInspector.tsx"
+      ],
+      "acceptance": "「它看到了什么」只读面板；hub:// 深链；群/任务导出 Markdown。",
+      "tests": "npm run lint && npm run test:session-scope",
+      "commit": "feat(hub-p4-02): Context 面板与深链"
+    },
+    {
+      "id": "P4-03",
+      "phase": "P4",
+      "title": "手机/IM 接入（spike）",
+      "deps": [
+        "P4-01"
+      ],
+      "files": [
+        "desktop/bridge/mobile_server.go",
+        "im_bridge.go"
+      ],
+      "acceptance": "命令白名单评估；群消息只读/审批；不破坏桌面端；输出 spike 文档。",
+      "tests": "go test ./desktop/bridge/ -run Mobile",
+      "commit": "feat(hub-p4-03): 手机/IM 接入 spike"
+    },
+    {
+      "id": "P4-04",
+      "phase": "P4",
+      "title": "外部 AgentEnd hook + FTS/归档",
+      "deps": [
+        "P3b-08"
+      ],
+      "files": [
+        "hooks/event.go",
+        "agenthub/store.go"
+      ],
+      "acceptance": "可选 AgentEnd hook（默认关）；SQLite FTS 或倒排；日志归档；不影响核心回推。",
+      "tests": "go test ./hooks/... ./agenthub/...",
+      "commit": "feat(hub-p4-04): 外部 hook 与搜索归档"
+    },
+    {
+      "id": "P4-05",
+      "phase": "P4",
+      "title": "最终 Review + 复盘",
+      "deps": [
+        "P4-02",
+        "P4-04"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md"
+      ],
+      "acceptance": "全量回归；性能/成本数据；已知限制清单；复盘文档；看板收尾。",
+      "tests": "npm test && go test ./...",
+      "commit": "chore(hub-p4-05): final review + retro"
+    }
+  ]
+}

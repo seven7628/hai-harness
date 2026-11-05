@@ -1,0 +1,1394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Hub · 任务进度看板</title>
+<style>
+:root{
+  --bg:#0d0f13; --bg2:#12151b; --card:#171b23; --card2:#1c212b;
+  --line:#2a3140; --line2:#353d4e; --text:#e7e9ee; --muted:#9aa3b5; --dim:#6b7486;
+  --accent:#e08a3c; --accent2:#f0a85c; --green:#4ade80; --amber:#fbbf24; --red:#f87171;
+  --blue:#60a5fa; --purple:#a78bfa; --cyan:#22d3ee;
+  --todo:#6b7486; --prog:#60a5fa; --review:#fbbf24; --changes:#fb923c; --done:#4ade80; --blocked:#f87171;
+  --radius:14px; --radius2:10px;
+  --shadow:0 18px 50px rgba(0,0,0,.45);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:
+    radial-gradient(1200px 600px at 85% -10%, rgba(224,138,60,.10), transparent 60%),
+    radial-gradient(900px 500px at 0% 0%, rgba(96,165,250,.06), transparent 55%),
+    var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  font-size:14px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent2);text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px;
+}
+.app{max-width:1520px;margin:0 auto;padding:24px 24px 80px}
+header.top{display:flex;align-items:flex-start;gap:20px;justify-content:space-between;flex-wrap:wrap}
+.brand{display:flex;gap:14px;align-items:center}
+.logo{
+  width:46px;height:46px;border-radius:14px;flex:0 0 auto;
+  background:linear-gradient(145deg, #e08a3c, #b4552a);
+  display:grid;place-items:center;font-weight:800;font-size:18px;color:#1a1008;
+  box-shadow:0 8px 24px rgba(224,138,60,.28);
+}
+h1{font-size:22px;margin:0;letter-spacing:.2px}
+.sub{color:var(--muted);font-size:13px;margin-top:3px}
+.top-actions{display:flex;gap:8px;flex-wrap:wrap}
+.btn{
+  border:1px solid var(--line); background:var(--card); color:var(--text);
+  padding:8px 12px;border-radius:10px;font-size:13px;display:inline-flex;gap:7px;align-items:center;
+  transition:background .15s,border-color .15s,transform .1s;
+}
+.btn:hover{background:var(--card2);border-color:var(--line2)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:linear-gradient(145deg,#e08a3c,#c96f2c);border-color:#e08a3c;color:#1c1208;font-weight:650}
+.btn.ghost{background:transparent}
+.btn.danger{color:#ffb4b4;border-color:#4a2a2a}
+.btn.sm{padding:5px 9px;font-size:12px;border-radius:8px}
+
+.overview{
+  display:grid;grid-template-columns:1.25fr 2fr;gap:16px;margin-top:22px;
+}
+.card{background:linear-gradient(180deg,rgba(255,255,255,.02),transparent),var(--card);border:1px solid var(--line);border-radius:var(--radius)}
+.overview .card{padding:18px 18px 16px}
+.big{display:flex;align-items:baseline;gap:10px}
+.big .num{font-size:44px;font-weight:800;letter-spacing:-1px;line-height:1}
+.big .den{color:var(--dim);font-size:16px}
+.big .lbl{color:var(--muted);font-size:13px;margin-left:6px}
+.bar{height:9px;border-radius:999px;background:#242a36;overflow:hidden;margin-top:14px}
+.bar > i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#e08a3c,#f0b25c);transition:width .35s ease}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:16px}
+.stat{padding:10px 11px;border-radius:10px;background:var(--bg2);border:1px solid #232a36}
+.stat .k{color:var(--muted);font-size:11px;letter-spacing:.3px}
+.stat .v{font-size:20px;font-weight:750;margin-top:2px}
+.stat.done .v{color:var(--green)} .stat.prog .v{color:var(--blue)} .stat.review .v{color:var(--amber)}
+.stat.blocked .v{color:var(--red)} .stat.todo .v{color:var(--muted)}
+
+.phases{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+.phase{
+  padding:12px 12px 10px;border-radius:12px;background:var(--bg2);border:1px solid #232a36;
+  cursor:pointer;transition:border-color .15s,background .15s;text-align:left;
+}
+.phase:hover{border-color:var(--line2);background:#161b24}
+.phase.active{border-color:var(--accent);box-shadow:0 0 0 1px rgba(224,138,60,.25) inset}
+.phase .ph{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.phase .name{font-weight:700;font-size:13px}
+.phase .pct{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.phase .goal{color:var(--dim);font-size:11px;margin-top:3px;min-height:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.phase .bar{height:5px;margin-top:9px}
+.phase .bar > i{background:linear-gradient(90deg,#5b7cfa,#8bd3ff)}
+
+.toolbar{
+  position:sticky;top:0;z-index:20;margin:22px 0 12px;padding:10px;border:1px solid var(--line);
+  border-radius:12px;background:rgba(18,21,27,.86);backdrop-filter:blur(14px);
+  display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+}
+.search{flex:1 1 260px;display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid #232a36;border-radius:10px;padding:8px 11px}
+.search input{flex:1;background:none;border:0;outline:0;color:var(--text);font-size:13px}
+.search svg{opacity:.55}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{
+  border:1px solid var(--line);background:var(--bg2);color:var(--muted);
+  padding:6px 10px;border-radius:999px;font-size:12px;transition:all .15s;white-space:nowrap;
+}
+.chip:hover{color:var(--text);border-color:var(--line2)}
+.chip.active{background:rgba(224,138,60,.14);border-color:rgba(224,138,60,.55);color:var(--accent2)}
+.chip .n{opacity:.7;margin-left:4px;font-variant-numeric:tabular-nums}
+.legend{color:var(--dim);font-size:11px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.legend i{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:4px}
+
+.flow{
+  display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0 0;color:var(--dim);font-size:12px;
+  padding:10px 12px;border:1px dashed #2a3140;border-radius:10px;background:rgba(255,255,255,.012)
+}
+.flow b{color:var(--text);font-weight:600}
+.flow .sep{opacity:.4}
+.flow .warn{color:var(--amber)}
+
+.list{margin-top:10px;display:flex;flex-direction:column;gap:18px}
+.group{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:rgba(23,27,35,.6)}
+.group-head{display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--bg2);border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+.group-head .gname{font-weight:700;font-size:14px}
+.group-head .ggoal{color:var(--dim);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.group-head .gbar{width:130px;height:5px;background:#242a36;border-radius:99px;overflow:hidden}
+.group-head .gbar > i{display:block;height:100%;background:linear-gradient(90deg,#e08a3c,#f0b25c)}
+.group-head .gcount{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;min-width:44px;text-align:right}
+.rows{display:flex;flex-direction:column}
+.row{
+  display:grid;grid-template-columns:26px 86px minmax(220px,1.6fr) minmax(140px,1fr) 120px 92px;
+  gap:10px;align-items:center;padding:11px 14px;border-top:1px solid #202632;
+  cursor:pointer;transition:background .12s;
+}
+.row:first-child{border-top:0}
+.row:hover{background:rgba(255,255,255,.025)}
+.row .dot{width:9px;height:9px;border-radius:50%;justify-self:center}
+.row .id{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.2px}
+.row .title{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .deps{font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .commit{font-family:var(--mono);font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .review{font-size:11px;justify-self:end}
+.badge{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:3px 8px;font-size:11px;border:1px solid transparent;white-space:nowrap}
+.badge.todo{color:#aeb6c6;border-color:#333b4a;background:#1b202a}
+.badge.in_progress{color:#93c5fd;border-color:#2e4a6e;background:rgba(96,165,250,.10)}
+.badge.review{color:#fcd34d;border-color:#5a4a1f;background:rgba(251,191,36,.10)}
+.badge.changes_requested{color:#fdba74;border-color:#5e3a1e;background:rgba(251,146,60,.10)}
+.badge.done{color:#86efac;border-color:#2f5b3c;background:rgba(74,222,128,.10)}
+.badge.blocked{color:#fca5a5;border-color:#5b2f2f;background:rgba(248,113,113,.10)}
+.badge.pending{color:#8f98aa;border-color:#333b4a;background:#1b202a}
+.badge.passed{color:#86efac;border-color:#2f5b3c;background:rgba(74,222,128,.10)}
+.badge.failed{color:#fca5a5;border-color:#5b2f2f;background:rgba(248,113,113,.10)}
+.row.warn{box-shadow:inset 3px 0 0 var(--red)}
+.row.empty{padding:26px;text-align:center;color:var(--dim);grid-template-columns:1fr}
+
+/* drawer */
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:opacity .18s;z-index:40}
+.scrim.open{opacity:1;pointer-events:auto}
+.drawer{
+  position:fixed;top:0;right:0;height:100%;width:min(560px,100vw);z-index:50;
+  background:linear-gradient(180deg,#151a22,#11151b);border-left:1px solid var(--line);
+  box-shadow:var(--shadow);transform:translateX(102%);transition:transform .22s ease;
+  display:flex;flex-direction:column;
+}
+.drawer.open{transform:none}
+.drawer .dhead{padding:18px 18px 14px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:flex-start}
+.drawer .dhead .grow{flex:1;min-width:0}
+.drawer .dtitle{font-size:17px;font-weight:750;margin:4px 0 6px;line-height:1.35}
+.drawer .dmeta{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:12px}
+.drawer .body{padding:16px 18px 24px;overflow:auto;flex:1}
+.drawer .foot{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end;background:#11151b}
+.field{margin:0 0 15px}
+.field label{display:block;color:var(--muted);font-size:11px;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px}
+.field .val{font-size:13px;line-height:1.6;color:#d7dbe4}
+.field code{font-family:var(--mono);font-size:12px;background:#0f1319;border:1px solid #232a36;padding:2px 6px;border-radius:6px;color:#cfd5e2}
+.field ul{margin:0;padding-left:18px}
+.field li{margin:3px 0}
+.input, select.input, textarea.input{
+  width:100%;background:#0f1319;border:1px solid #2a3140;border-radius:9px;color:var(--text);
+  padding:9px 10px;font:inherit;font-size:13px;outline:0;
+}
+textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size:12px;line-height:1.55}
+.input:focus{border-color:var(--accent)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.status-btns{display:flex;gap:6px;flex-wrap:wrap}
+.status-btns .btn{border-color:#2f3848}
+.status-btns .btn.on{background:rgba(224,138,60,.16);border-color:rgba(224,138,60,.55);color:var(--accent2)}
+.hint{color:var(--dim);font-size:11px;margin-top:6px}
+.warnbox{border:1px solid #5b2f2f;background:rgba(248,113,113,.08);color:#ffc9c9;border-radius:10px;padding:9px 11px;font-size:12px;margin:0 0 14px}
+.okbox{border:1px solid #2f5b3c;background:rgba(74,222,128,.08);color:#bbf7d0;border-radius:10px;padding:9px 11px;font-size:12px;margin:0 0 14px}
+.kbd{font-family:var(--mono);font-size:11px;border:1px solid #333b4a;border-bottom-width:2px;border-radius:5px;padding:1px 5px;color:var(--muted);background:#171b23}
+.toast{
+  position:fixed;left:50%;bottom:26px;transform:translate(-50%,20px);opacity:0;pointer-events:none;
+  background:#1d2430;border:1px solid #384255;border-radius:10px;padding:9px 14px;font-size:13px;
+  box-shadow:var(--shadow);transition:all .2s;z-index:80;
+}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.footer-note{color:var(--dim);font-size:11px;margin-top:26px;line-height:1.7}
+.footer-note code{font-family:var(--mono);color:var(--muted)}
+@media (max-width:1100px){
+  .overview{grid-template-columns:1fr}
+  .stats{grid-template-columns:repeat(5,1fr)}
+  .phases{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:760px){
+  .app{padding:16px 12px 60px}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .phases{grid-template-columns:1fr}
+  .row{grid-template-columns:22px 76px 1fr 80px;gap:8px}
+  .row .deps,.row .commit{display:none}
+  .row .review{justify-self:end}
+  .row .title{white-space:normal}
+  .legend{display:none}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <div class="logo">AH</div>
+      <div>
+        <h1>Agent Hub · 任务进度看板</h1>
+        <div class="sub">多智能体工作台 · 统一任务跟进看板 · 更新于 2026-11-04 · 每个任务 = 一个 commit + 一次 Review</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="btn ghost" id="btn-import" title="导入备份 JSON">导入</button>
+      <button class="btn ghost" id="btn-export" title="导出当前进度 JSON">导出</button>
+      <button class="btn ghost danger" id="btn-reset" title="清空本地进度（不影响任务定义）">重置</button>
+    </div>
+  </header>
+
+  <section class="overview">
+    <div class="card">
+      <div class="big"><span class="num" id="ov-done">0</span><span class="den">/ <span id="ov-total">0</span></span><span class="lbl">任务完成</span></div>
+      <div class="bar"><i id="ov-bar" style="width:0%"></i></div>
+      <div class="stats">
+        <div class="stat todo"><div class="k">待开始</div><div class="v" id="st-todo">0</div></div>
+        <div class="stat prog"><div class="k">进行中</div><div class="v" id="st-prog">0</div></div>
+        <div class="stat review"><div class="k">待 Review</div><div class="v" id="st-review">0</div></div>
+        <div class="stat blocked"><div class="k">阻塞/改动</div><div class="v" id="st-blocked">0</div></div>
+        <div class="stat done"><div class="k">已完成</div><div class="v" id="st-done">0</div></div>
+      </div>
+    </div>
+    <div class="card" style="padding:16px 16px 14px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-weight:700;font-size:13px">各阶段进度</div>
+        <div class="legend">
+          <span><i style="background:var(--done)"></i>done</span>
+          <span><i style="background:var(--review)"></i>review</span>
+          <span><i style="background:var(--prog)"></i>in progress</span>
+        </div>
+      </div>
+      <div class="phases" id="phases"></div>
+    </div>
+  </section>
+
+  <div class="toolbar">
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+      <input id="q" placeholder="搜索任务 ID / 标题 / 文件 / commit（按 / 聚焦）">
+      <span class="kbd">/</span>
+    </div>
+    <div class="chips" id="status-chips"></div>
+  </div>
+
+  <div class="flow">
+    <b>工作流</b><span class="sep">›</span>
+    <span>todo</span><span class="sep">→</span>
+    <span>in_progress</span><span class="sep">→</span>
+    <span class="warn">review（必须已有 commit）</span><span class="sep">→</span>
+    <span style="color:var(--green)">done（review passed）</span>
+    <span class="sep">·</span>
+    <span>看板不会阻止你点，但会在 <b>done</b> 缺 commit / Review 时标红</span>
+  </div>
+
+  <div class="list" id="list"></div>
+
+  <div class="footer-note">
+    <div>进度保存在本机浏览器 <code>localStorage</code>；换机/清缓存前用「导出」备份，换机后「导入」恢复。任务定义在 <code>docs/agent-hub/tasks.json</code>。</div>
+    <div>设计/验收标准：<code>docs/AGENT_HUB_TECH_PLAN.md</code> · 任务流程：§18 · 任务拆分：§19。</div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="dhead">
+    <div class="grow">
+      <div class="dmeta"><span id="d-phase" class="badge todo"></span><span id="d-id" style="font-family:var(--mono)"></span></div>
+      <div class="dtitle" id="d-title"></div>
+      <div class="dmeta" id="d-meta"></div>
+    </div>
+    <button class="btn sm ghost" id="d-close" aria-label="关闭">✕</button>
+  </div>
+  <div class="body" id="d-body"></div>
+  <div class="foot">
+    <button class="btn ghost" id="d-save">保存</button>
+    <button class="btn primary" id="d-done">保存并关闭</button>
+  </div>
+</aside>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const BASE = {
+  "version": 1,
+  "project": "Agent Hub",
+  "subtitle": "多智能体工作台 · 统一任务跟进看板",
+  "updated": "2026-11-04",
+  "phases": [
+    {
+      "id": "P0",
+      "name": "P0 · 地基",
+      "goal": "领域包、存储、提示词、内核小改、runtime 拆分",
+      "days": "3–5 天"
+    },
+    {
+      "id": "P1",
+      "name": "P1 · 单智能体 DM",
+      "goal": "独立 Provider/人格/记忆/压缩 + bash + DM UI",
+      "days": "5–7 天"
+    },
+    {
+      "id": "P2",
+      "name": "P2 · 工作区派发 + 回调",
+      "goal": "session 工具、任务账本、AgentEnd 回推、护栏",
+      "days": "7–10 天"
+    },
+    {
+      "id": "P3a",
+      "name": "P3a · 群组基础",
+      "goal": "群组、@ 路由、快照、交接、产物、审批",
+      "days": "8–10 天"
+    },
+    {
+      "id": "P3b",
+      "name": "P3b · 智能体互感知/互 @",
+      "goal": "名册、@ 对话、assign_task、轮次护栏、结果卡",
+      "days": "6–8 天"
+    },
+    {
+      "id": "P4",
+      "name": "P4 · 打磨与扩展",
+      "goal": "流式、Context 面板、手机/IM、外部 hook、复盘",
+      "days": "按需"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "P0-01",
+      "phase": "P0",
+      "title": "agenthub 包骨架与领域类型",
+      "deps": [],
+      "files": [
+        "agenthub/profile.go",
+        "agenthub/group.go",
+        "agenthub/message.go",
+        "agenthub/ids.go"
+      ],
+      "acceptance": "Profile/Group/Message/Task 类型可编译；JSON 往返稳定；ID 可注入随机源；包不 import desktop。",
+      "tests": "go test ./agenthub/...",
+      "commit": "feat(hub-p0-01): agenthub 包骨架与领域类型"
+    },
+    {
+      "id": "P0-02",
+      "phase": "P0",
+      "title": "Store 接口 + FileStore（原子写/恢复/迁移）",
+      "deps": [
+        "P0-01"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "agenthub/store_test.go"
+      ],
+      "acceptance": "JSON 原子写；日志 seq 单调；启动可从 log/events 重建索引；schema_version 迁移；MemoryStore 可测。",
+      "tests": "go test ./agenthub/ -run Store",
+      "commit": "feat(hub-p0-02): FileStore 与恢复/迁移"
+    },
+    {
+      "id": "P0-03",
+      "phase": "P0",
+      "title": "Profile/Group 校验、默认值、ID",
+      "deps": [
+        "P0-01"
+      ],
+      "files": [
+        "agenthub/profile.go",
+        "agenthub/group.go"
+      ],
+      "acceptance": "名字 1–32、群内唯一；provider/model 形状校验；阈值钳到 [0.5,0.95]；角色/成员数上限；错误可读。",
+      "tests": "go test ./agenthub/ -run Profile",
+      "commit": "feat(hub-p0-03): Profile/Group 校验与默认值"
+    },
+    {
+      "id": "P0-04",
+      "phase": "P0",
+      "title": "严格 @Name 解析器 + 可见性",
+      "deps": [
+        "P0-01"
+      ],
+      "files": [
+        "agenthub/mention.go",
+        "agenthub/message.go"
+      ],
+      "acceptance": "跳过 code/URL/email；最长匹配；未知名不触发；单条最多 3 个；@all 规则；重名拒绝。",
+      "tests": "go test ./agenthub/ -run Mention",
+      "commit": "feat(hub-p0-04): 严格 mention 解析"
+    },
+    {
+      "id": "P0-05",
+      "phase": "P0",
+      "title": "任务状态机 + 账本（幂等/迁移）",
+      "deps": [
+        "P0-02"
+      ],
+      "files": [
+        "agenthub/task.go",
+        "agenthub/ledger.go"
+      ],
+      "acceptance": "合法迁移表；终态不可回退；同 (task_id,run_id) 只回推一次；事件重放恢复快照。",
+      "tests": "go test ./agenthub/ -run Task",
+      "commit": "feat(hub-p0-05): 任务状态机与账本"
+    },
+    {
+      "id": "P0-06",
+      "phase": "P0",
+      "title": "系统提示词分层 + 名册模板",
+      "deps": [
+        "P0-01",
+        "P0-03"
+      ],
+      "files": [
+        "agenthub/prompt.go",
+        "agenthub/prompt_test.go"
+      ],
+      "acceptance": "L1 协议含 @/assign_task/workspace 规则；名册/职责渲染；空层不追加；golden 逐字节稳定。",
+      "tests": "go test ./agenthub/ -run Prompt",
+      "commit": "feat(hub-p0-06): 系统提示词与名册模板"
+    },
+    {
+      "id": "P0-07",
+      "phase": "P0",
+      "title": "内核小改：ContentTypeHubTask、PendingCount",
+      "deps": [
+        "P0-01"
+      ],
+      "files": [
+        "core/message.go",
+        "session/session.go"
+      ],
+      "acceptance": "新内容块通过 Validate；collectUserContents 保留；PendingCount 返回 inbox+pending；现有测试不回归。",
+      "tests": "go test ./core/... ./session/...",
+      "commit": "feat(hub-p0-07): 内核支持 hub_task 与 PendingCount"
+    },
+    {
+      "id": "P0-08",
+      "phase": "P0",
+      "title": "bridge runtime 拆分：createIn/hubRuntime",
+      "deps": [
+        "P0-02",
+        "P0-07"
+      ],
+      "files": [
+        "desktop/bridge/main.go",
+        "desktop/bridge/hub_session.go"
+      ],
+      "acceptance": "createOpts 转发 createIn；项目路径行为逐字节不变；hubRuntime 不加载 MCP/插件/技能；cron/工作区测试全绿。",
+      "tests": "go test ./desktop/bridge/...",
+      "commit": "refactor(hub-p0-08): createIn 与 hubRuntime"
+    },
+    {
+      "id": "P0-09",
+      "phase": "P0",
+      "title": "P0 Review + 回归",
+      "deps": [
+        "P0-01",
+        "P0-02",
+        "P0-03",
+        "P0-04",
+        "P0-05",
+        "P0-06",
+        "P0-07",
+        "P0-08"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md"
+      ],
+      "acceptance": "全部 P0 测试绿；现有 session/bridge 回归；Review 结论 passed；看板更新。",
+      "tests": "go test ./agenthub/... ./session/... ./desktop/bridge/...",
+      "commit": "chore(hub-p0-09): P0 review gate"
+    },
+    {
+      "id": "P1-01",
+      "phase": "P1",
+      "title": "buildHubEngine：文件/bash/python/hub 工具 + 策略",
+      "deps": [
+        "P0-08"
+      ],
+      "files": [
+        "desktop/bridge/hub_tools.go",
+        "agenthub/policy.go"
+      ],
+      "acceptance": "文件根限 home/memory；bash/run_python 沙箱；工具白名单/deny/路径检查；ask_user 绑定同一 qw。",
+      "tests": "go test ./desktop/bridge/ -run HubEngine",
+      "commit": "feat(hub-p1-01): Hub 工具引擎与策略"
+    },
+    {
+      "id": "P1-02",
+      "phase": "P1",
+      "title": "buildHubLoop：provider/model/memory/compress/persona",
+      "deps": [
+        "P1-01"
+      ],
+      "files": [
+        "desktop/bridge/hub_session.go",
+        "desktop/bridge/providers.go"
+      ],
+      "acceptance": "显式 provider 不改全局 active；samplingDefaultsFor；memory 注入；compress 阈值；人格空层稳定。",
+      "tests": "go test ./desktop/bridge/ -run HubLoop",
+      "commit": "feat(hub-p1-02): Hub AgentLoop 装配"
+    },
+    {
+      "id": "P1-03",
+      "phase": "P1",
+      "title": "智能体 CRUD 命令 + 校验",
+      "deps": [
+        "P1-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "create/update/get/list/delete；保存即版本；provider 缺失拒绝；事件 hub_agent_status。",
+      "tests": "go test ./desktop/bridge/ -run HubAgent",
+      "commit": "feat(hub-p1-03): 智能体 CRUD"
+    },
+    {
+      "id": "P1-04",
+      "phase": "P1",
+      "title": "会话生命周期 + DM open/send/history",
+      "deps": [
+        "P1-03"
+      ],
+      "files": [
+        "desktop/bridge/hub_session.go",
+        "agenthub/service.go"
+      ],
+      "acceptance": "DM 懒创建且只有一个；hub_open/send/history；断线重连；未读/预览更新。",
+      "tests": "go test ./desktop/bridge/ -run HubDM",
+      "commit": "feat(hub-p1-04): DM 会话链路"
+    },
+    {
+      "id": "P1-05",
+      "phase": "P1",
+      "title": "记忆隔离 + 浏览/编辑",
+      "deps": [
+        "P1-04"
+      ],
+      "files": [
+        "agenthub/memory.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "每智能体独立目录；browse/read/write；写入备份；生效时机提示；A/B 不串。",
+      "tests": "go test ./agenthub/ -run Memory",
+      "commit": "feat(hub-p1-05): 智能体记忆隔离"
+    },
+    {
+      "id": "P1-06",
+      "phase": "P1",
+      "title": "人格版本/回滚/提示词预览",
+      "deps": [
+        "P1-04",
+        "P0-06"
+      ],
+      "files": [
+        "agenthub/profile.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "每次保存追加旧版；保留 50 版；回滚写回；预览 L1–L5；下一个 Run 生效。",
+      "tests": "go test ./agenthub/ -run Version",
+      "commit": "feat(hub-p1-06): 人格版本与回滚"
+    },
+    {
+      "id": "P1-07",
+      "phase": "P1",
+      "title": "每智能体压缩阈值 + loop 重建",
+      "deps": [
+        "P1-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_session.go",
+        "agenthub/profile.go"
+      ],
+      "acceptance": "阈值 0.5–0.95；改阈值只影响该智能体；运行中 Run 用旧 loop 收尾。",
+      "tests": "go test ./desktop/bridge/ -run HubCompress",
+      "commit": "feat(hub-p1-07): 每智能体压缩阈值"
+    },
+    {
+      "id": "P1-08",
+      "phase": "P1",
+      "title": "前端 surface + Hub Rail + DM 视图",
+      "deps": [
+        "P1-03",
+        "P1-04"
+      ],
+      "files": [
+        "desktop/app/src/App.tsx",
+        "desktop/app/src/components/hub/HubRail.tsx",
+        "desktop/app/src/store/useHubStore.ts"
+      ],
+      "acceptance": "工作区↔Hub 切换；左栏智能体/群组/Needs you；DM 复用 Narrative；未读/状态点；主题三套。",
+      "tests": "npm run lint && npm run test:agent-tree",
+      "commit": "feat(hub-p1-08): Hub Rail 与 DM 视图"
+    },
+    {
+      "id": "P1-09",
+      "phase": "P1",
+      "title": "智能体资料页（5 tabs）",
+      "deps": [
+        "P1-08",
+        "P1-05",
+        "P1-06"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/AgentProfilePage.tsx"
+      ],
+      "acceptance": "基本/人格/工具权限/记忆/会话；provider/model 校验；bash 开关；提示词预览；保存生效提示。",
+      "tests": "npm run lint && npm run test:store",
+      "commit": "feat(hub-p1-09): 智能体资料页"
+    },
+    {
+      "id": "P1-10",
+      "phase": "P1",
+      "title": "P1 Review + 评测 1–3",
+      "deps": [
+        "P1-08",
+        "P1-09"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md",
+        "evals/"
+      ],
+      "acceptance": "DM 50 轮不新建；记忆不串；不同 provider 同跑；压缩可见；Review passed。",
+      "tests": "go test ./agenthub/... ./desktop/bridge/... && npm run lint",
+      "commit": "chore(hub-p1-10): P1 review + evals"
+    },
+    {
+      "id": "P2-01",
+      "phase": "P2",
+      "title": "WorkspaceOps 适配 + 路径安全",
+      "deps": [
+        "P1-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_service.go",
+        "agenthub/policy.go"
+      ],
+      "acceptance": "workspace_list/create；根目录白名单；slug 防穿越；写 workspaces.json；不切 UI 焦点。",
+      "tests": "go test ./desktop/bridge/ -run HubWorkspace",
+      "commit": "feat(hub-p2-01): WorkspaceOps 与路径安全"
+    },
+    {
+      "id": "P2-02",
+      "phase": "P2",
+      "title": "session_list/create/send 工具",
+      "deps": [
+        "P2-01"
+      ],
+      "files": [
+        "desktop/bridge/hub_tools.go",
+        "agenthub/service.go"
+      ],
+      "acceptance": "工具描述明确「先 list 再 send」；create 不切全局 provider；send 返回 task_id；目标必须项目会话。",
+      "tests": "go test ./desktop/bridge/ -run HubSessionTools",
+      "commit": "feat(hub-p2-02): session 工具面"
+    },
+    {
+      "id": "P2-03",
+      "phase": "P2",
+      "title": "任务账本 + 空闲闸门 + 队列",
+      "deps": [
+        "P2-02",
+        "P0-05"
+      ],
+      "files": [
+        "agenthub/service.go",
+        "agenthub/task.go"
+      ],
+      "acceptance": "目标 idle 且 pending=0 才派发；忙则 queued；AgentEnd 后 pump；一个任务=一次干净 Run。",
+      "tests": "go test ./agenthub/ -run Queue",
+      "commit": "feat(hub-p2-03): 任务队列与空闲闸门"
+    },
+    {
+      "id": "P2-04",
+      "phase": "P2",
+      "title": "UserInputsConsumed 相关性 + finishHubTask",
+      "deps": [
+        "P2-03",
+        "P0-07"
+      ],
+      "files": [
+        "desktop/bridge/main.go",
+        "desktop/bridge/hub_projection.go"
+      ],
+      "acceptance": "解析 hub_task 块绑定 task/run；只结算主 run；EventLine 之后结算；多任务同批失败告警。",
+      "tests": "go test ./desktop/bridge/ -run HubBind",
+      "commit": "feat(hub-p2-04): AgentEnd 任务相关性"
+    },
+    {
+      "id": "P2-05",
+      "phase": "P2",
+      "title": "结果回推 + task_result 事件",
+      "deps": [
+        "P2-04"
+      ],
+      "files": [
+        "desktop/bridge/hub_service.go",
+        "agenthub/service.go"
+      ],
+      "acceptance": "账本终态；产物登记；PushTaskResultUsage；幂等；回推失败可重试；成本归因。",
+      "tests": "go test ./agenthub/ -run FinishTask",
+      "commit": "feat(hub-p2-05): 任务结算与回推"
+    },
+    {
+      "id": "P2-06",
+      "phase": "P2",
+      "title": "任务板 + Needs you（审批/失败）",
+      "deps": [
+        "P2-05"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/HubInspector.tsx",
+        "NeedsYouPanel.tsx"
+      ],
+      "acceptance": "任务列表/详情/取消/重试；审批与提问路由；失败可见；空态；键盘可达。",
+      "tests": "npm run lint && npm run test:todos-scope",
+      "commit": "feat(hub-p2-06): 任务板与 Needs you"
+    },
+    {
+      "id": "P2-07",
+      "phase": "P2",
+      "title": "预算/并发/去重/护栏",
+      "deps": [
+        "P2-05"
+      ],
+      "files": [
+        "agenthub/policy.go",
+        "agenthub/task.go"
+      ],
+      "acceptance": "单任务/日/群/全局预算；并发上限；10 分钟去重；根链 6 轮；熔断写 hub_alert。",
+      "tests": "go test ./agenthub/ -run Guard",
+      "commit": "feat(hub-p2-07): 预算与循环护栏"
+    },
+    {
+      "id": "P2-08",
+      "phase": "P2",
+      "title": "崩溃恢复",
+      "deps": [
+        "P2-05"
+      ],
+      "files": [
+        "desktop/bridge/hub_recovery.go"
+      ],
+      "acceptance": "queued 重派；dispatched/running 无 run → interrupted + 通知；completed 未 delivered 重推；不自动重试副作用。",
+      "tests": "go test ./desktop/bridge/ -run HubRecovery",
+      "commit": "feat(hub-p2-08): 任务崩溃恢复"
+    },
+    {
+      "id": "P2-09",
+      "phase": "P2",
+      "title": "P2 Review + 评测 4–6",
+      "deps": [
+        "P2-07",
+        "P2-08"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md",
+        "evals/"
+      ],
+      "acceptance": "一句话建工作区派任务；完成后回推；人工介入不续跑；重启可解释；Review passed。",
+      "tests": "go test ./agenthub/... ./desktop/bridge/...",
+      "commit": "chore(hub-p2-09): P2 review + evals"
+    },
+    {
+      "id": "P3a-01",
+      "phase": "P3a",
+      "title": "群组 CRUD + 成员/角色/策略",
+      "deps": [
+        "P2-05"
+      ],
+      "files": [
+        "agenthub/group.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "创建/更新/删除；成员上限 12；角色权限；owner 转让；群策略 auto/ask/readonly。",
+      "tests": "go test ./agenthub/ -run Group",
+      "commit": "feat(hub-p3a-01): 群组与成员"
+    },
+    {
+      "id": "P3a-02",
+      "phase": "P3a",
+      "title": "群日志/活动/digest/seq/恢复",
+      "deps": [
+        "P3a-01",
+        "P0-02"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "agenthub/message.go",
+        "agenthub/digest.go"
+      ],
+      "acceptance": "log.jsonl 追加；activity.jsonl 独立；RoundSummary 确定性汇总；per-group seq；崩溃重扫补索引；分页。",
+      "tests": "go test ./agenthub/ -run GroupLog",
+      "commit": "feat(hub-p3a-02): 群日志与活动"
+    },
+    {
+      "id": "P3a-03",
+      "phase": "P3a",
+      "title": "@ 路由 + round + routing receipt",
+      "deps": [
+        "P3a-02",
+        "P0-04"
+      ],
+      "files": [
+        "agenthub/router.go",
+        "agenthub/conversation.go"
+      ],
+      "acceptance": "无 @ 不唤醒；@all/@A 正确；round 快照；回执落盘；@all 权限/频率。",
+      "tests": "go test ./agenthub/ -run Router",
+      "commit": "feat(hub-p3a-03): 群组 @ 路由"
+    },
+    {
+      "id": "P3a-04",
+      "phase": "P3a",
+      "title": "群智能体会话 + 快照构建",
+      "deps": [
+        "P3a-03",
+        "P1-02"
+      ],
+      "files": [
+        "agenthub/snapshot.go",
+        "desktop/bridge/hub_session.go"
+      ],
+      "acceptance": "每群一会话；delta 快照；40 条/12k 预算；折叠；冻结本轮；活动/回执不进快照。",
+      "tests": "go test ./agenthub/ -run Snapshot",
+      "commit": "feat(hub-p3a-04): 群会话与快照"
+    },
+    {
+      "id": "P3a-05",
+      "phase": "P3a",
+      "title": "group_history/group_members/group_say",
+      "deps": [
+        "P3a-04"
+      ],
+      "files": [
+        "desktop/bridge/hub_tools.go"
+      ],
+      "acceptance": "recent/search 分页；可见性过滤；成员状态；group_say 受轮次限制。",
+      "tests": "go test ./desktop/bridge/ -run HubGroupTools",
+      "commit": "feat(hub-p3a-05): 群组工具"
+    },
+    {
+      "id": "P3a-06",
+      "phase": "P3a",
+      "title": "handoff / ack / 护栏",
+      "deps": [
+        "P3a-03"
+      ],
+      "files": [
+        "agenthub/task.go",
+        "desktop/bridge/hub_tools.go"
+      ],
+      "acceptance": "交接卡；pending_ack/accepted/declined；深度 3；同对 10 分钟 2 次；observer 禁止。",
+      "tests": "go test ./agenthub/ -run Handoff",
+      "commit": "feat(hub-p3a-06): 交接与 ack"
+    },
+    {
+      "id": "P3a-07",
+      "phase": "P3a",
+      "title": "产物版本 + 私有审批/Needs you",
+      "deps": [
+        "P3a-04"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "产物按 owner/name 版本化；预览按 id；approval_stub 不进群上下文；need 聚合/超时。",
+      "tests": "go test ./agenthub/ -run Artifact",
+      "commit": "feat(hub-p3a-07): 产物与私有审批"
+    },
+    {
+      "id": "P3a-08",
+      "phase": "P3a",
+      "title": "前端群组视图 + RoundGroup + 动作清单 + Inspector",
+      "deps": [
+        "P3a-05",
+        "P3a-07"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/HubTimeline.tsx",
+        "RoundGroup.tsx",
+        "RoundActivityDigest.tsx"
+      ],
+      "acceptance": "群头/时间线/回执/审批占位；同轮合并；动作清单；分开显示；Inspector；三主题。",
+      "tests": "npm run lint && npm run test:store:scoping",
+      "commit": "feat(hub-p3a-08): 群组视图与轮次摘要"
+    },
+    {
+      "id": "P3a-09",
+      "phase": "P3a",
+      "title": "P3a Review + 评测 7",
+      "deps": [
+        "P3a-08"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md",
+        "evals/"
+      ],
+      "acceptance": "@all/@A 正确；未 @ 不发言；历史可检索；私有内容不泄漏；Review passed。",
+      "tests": "go test ./agenthub/... ./desktop/bridge/...",
+      "commit": "chore(hub-p3a-09): P3a review + eval"
+    },
+    {
+      "id": "P3b-01",
+      "phase": "P3b",
+      "title": "名册/职责/能力注入 + 提示词",
+      "deps": [
+        "P3a-04",
+        "P0-06"
+      ],
+      "files": [
+        "agenthub/prompt.go",
+        "agenthub/group.go"
+      ],
+      "acceptance": "名册稳定层；状态走工具；L1 教 @/assign_task；群成员变化重建 loop；golden 测试。",
+      "tests": "go test ./agenthub/ -run Roster",
+      "commit": "feat(hub-p3b-01): 智能体名册与提示词"
+    },
+    {
+      "id": "P3b-02",
+      "phase": "P3b",
+      "title": "智能体正文 @ 解析 + group_say(mentions)",
+      "deps": [
+        "P3b-01",
+        "P0-04"
+      ],
+      "files": [
+        "agenthub/mention.go",
+        "desktop/bridge/hub_service.go"
+      ],
+      "acceptance": "agent 正文 @ 严格解析；代码/URL 不触发；3 个上限；group_say 结构化 mention；@all 权限。",
+      "tests": "go test ./agenthub/ -run AgentMention",
+      "commit": "feat(hub-p3b-02): 智能体互相 @"
+    },
+    {
+      "id": "P3b-03",
+      "phase": "P3b",
+      "title": "assign_task + agent target 账本",
+      "deps": [
+        "P3b-02",
+        "P2-05"
+      ],
+      "files": [
+        "agenthub/task.go",
+        "desktop/bridge/hub_tools.go"
+      ],
+      "acceptance": "创建 agent 任务；不能派自己；同对在途 ≤2；目标成员校验；消息 intent=assign。",
+      "tests": "go test ./agenthub/ -run Assign",
+      "commit": "feat(hub-p3b-03): assign_task 智能体任务"
+    },
+    {
+      "id": "P3b-04",
+      "phase": "P3b",
+      "title": "对话控制器 + 轮次/冷却/踢皮球检测",
+      "deps": [
+        "P3b-02",
+        "P3a-03"
+      ],
+      "files": [
+        "agenthub/conversation.go"
+      ],
+      "acceptance": "8 轮预算；深度 4；冷却 1.5s；同对 2 次；人类插话清队列；停止；指纹循环检测。",
+      "tests": "go test ./agenthub/ -run Conversation",
+      "commit": "feat(hub-p3b-04): 对话轮次与护栏"
+    },
+    {
+      "id": "P3b-05",
+      "phase": "P3b",
+      "title": "finishAgentTask + 群内结果卡",
+      "deps": [
+        "P3b-03"
+      ],
+      "files": [
+        "desktop/bridge/hub_service.go",
+        "agenthub/service.go"
+      ],
+      "acceptance": "目标 AgentEnd 结算；结果卡；派发者唤醒；不再重复发群消息；declined/canceled 路径。",
+      "tests": "go test ./desktop/bridge/ -run FinishAgentTask",
+      "commit": "feat(hub-p3b-05): 智能体任务结算"
+    },
+    {
+      "id": "P3b-06",
+      "phase": "P3b",
+      "title": "任务完成三层感知（事件/快照/未读）",
+      "deps": [
+        "P3b-05",
+        "P3a-04"
+      ],
+      "files": [
+        "agenthub/snapshot.go",
+        "desktop/bridge/hub_projection.go"
+      ],
+      "acceptance": "task_result 入 log；其他成员快照可见；只唤醒派发者；左栏预览/未读更新；失败卡。",
+      "tests": "go test ./agenthub/ -run Perception",
+      "commit": "feat(hub-p3b-06): 任务完成群内感知"
+    },
+    {
+      "id": "P3b-07",
+      "phase": "P3b",
+      "title": "前端 AgentMentionChip/MentionPicker/ConversationBar/TaskResultCard/Typing",
+      "deps": [
+        "P3b-06"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/AgentMentionChip.tsx",
+        "MentionPicker.tsx",
+        "ConversationBar.tsx",
+        "TaskResultCard.tsx",
+        "TypingIndicator.tsx"
+      ],
+      "acceptance": "@ chip 反规范化；对话/派任务两态；轮次条；结果卡；typing；键盘/主题/空态。",
+      "tests": "npm run lint && npm run test:agent-session",
+      "commit": "feat(hub-p3b-07): 互 @ 与任务结果 UI"
+    },
+    {
+      "id": "P3b-08",
+      "phase": "P3b",
+      "title": "P3b Review + 评测 8–9",
+      "deps": [
+        "P3b-07"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md",
+        "evals/"
+      ],
+      "acceptance": "A@B 可协作；B 完成 A 被唤醒；不无限互踢；人插话/停止生效；Review passed。",
+      "tests": "go test ./agenthub/... ./desktop/bridge/...",
+      "commit": "chore(hub-p3b-08): P3b review + evals"
+    },
+    {
+      "id": "P4-01",
+      "phase": "P4",
+      "title": "群内流式/typing 打磨、性能",
+      "deps": [
+        "P3b-08"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/HubTimeline.tsx"
+      ],
+      "acceptance": "节流流式；虚拟列表；200+ 消息不卡；reduced-motion。",
+      "tests": "npm run test:scroll-follow && npm run e2e:usage-stats",
+      "commit": "feat(hub-p4-01): 流式与性能打磨"
+    },
+    {
+      "id": "P4-02",
+      "phase": "P4",
+      "title": "Context 面板 + 深链 + 导出",
+      "deps": [
+        "P3b-08"
+      ],
+      "files": [
+        "desktop/app/src/components/hub/HubInspector.tsx"
+      ],
+      "acceptance": "「它看到了什么」只读面板；hub:// 深链；群/任务导出 Markdown。",
+      "tests": "npm run lint && npm run test:session-scope",
+      "commit": "feat(hub-p4-02): Context 面板与深链"
+    },
+    {
+      "id": "P4-03",
+      "phase": "P4",
+      "title": "手机/IM 接入（spike）",
+      "deps": [
+        "P4-01"
+      ],
+      "files": [
+        "desktop/bridge/mobile_server.go",
+        "im_bridge.go"
+      ],
+      "acceptance": "命令白名单评估；群消息只读/审批；不破坏桌面端；输出 spike 文档。",
+      "tests": "go test ./desktop/bridge/ -run Mobile",
+      "commit": "feat(hub-p4-03): 手机/IM 接入 spike"
+    },
+    {
+      "id": "P4-04",
+      "phase": "P4",
+      "title": "外部 AgentEnd hook + FTS/归档",
+      "deps": [
+        "P3b-08"
+      ],
+      "files": [
+        "hooks/event.go",
+        "agenthub/store.go"
+      ],
+      "acceptance": "可选 AgentEnd hook（默认关）；SQLite FTS 或倒排；日志归档；不影响核心回推。",
+      "tests": "go test ./hooks/... ./agenthub/...",
+      "commit": "feat(hub-p4-04): 外部 hook 与搜索归档"
+    },
+    {
+      "id": "P4-05",
+      "phase": "P4",
+      "title": "最终 Review + 复盘",
+      "deps": [
+        "P4-02",
+        "P4-04"
+      ],
+      "files": [
+        "docs/AGENT_HUB_TECH_PLAN.md"
+      ],
+      "acceptance": "全量回归；性能/成本数据；已知限制清单；复盘文档；看板收尾。",
+      "tests": "npm test && go test ./...",
+      "commit": "chore(hub-p4-05): final review + retro"
+    }
+  ]
+};
+const STORE_KEY = 'hai-agent-hub-progress-v1';
+const $ = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => [...r.querySelectorAll(s)];
+
+const PHASES = BASE.phases;
+const TASKS = BASE.tasks.map(t => ({...t, deps: t.deps || [], files: t.files || []}));
+const STATUS = {
+  todo: {label:'待开始', color:'var(--todo)'},
+  in_progress: {label:'进行中', color:'var(--prog)'},
+  review: {label:'待 Review', color:'var(--review)'},
+  changes_requested: {label:'需修改', color:'var(--changes)'},
+  done: {label:'已完成', color:'var(--done)'},
+  blocked: {label:'阻塞', color:'var(--blocked)'},
+};
+const REVIEW = {pending:{label:'未 Review'}, passed:{label:'通过'}, failed:{label:'不通过'}};
+const REVIEW_PENDING = 'pending';
+
+function stateDefault(){
+  const s = {version:1, tasks:{}, filter:{phase:'all', status:'all', q:''}};
+  for(const t of TASKS) s.tasks[t.id] = {status:'todo', commit:'', review:'pending', reviewNote:'', notes:''};
+  return s;
+}
+function load(){
+  try{
+    const raw = localStorage.getItem(STORE_KEY);
+    if(!raw) return stateDefault();
+    const saved = JSON.parse(raw);
+    const s = stateDefault();
+    if(saved && saved.tasks) for(const [id, v] of Object.entries(saved.tasks)){
+      if(s.tasks[id]) s.tasks[id] = {...s.tasks[id], ...v};
+    }
+    if(saved && saved.filter) s.filter = {...s.filter, ...saved.filter};
+    return s;
+  }catch(e){ console.warn(e); return stateDefault(); }
+}
+let STATE = load();
+function save(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(STATE)); }catch(e){ toast('保存失败：'+e.message); } }
+function task(id){ return TASKS.find(t=>t.id===id); }
+function st(id){ return STATE.tasks[id] || {status:'todo',commit:'',review:'pending',reviewNote:'',notes:''}; }
+function isDone(id){ return st(id).status === 'done'; }
+function depsBlocked(t){ return (t.deps||[]).filter(d=>!isDone(d)); }
+function needsFix(id){ const s=st(id); return s.status==='done' && (!s.commit.trim() || s.review!=='passed'); }
+function commitTagged(id, c){ return !!c && c.toLowerCase().includes('hub-'+id.toLowerCase()); }
+function pct(n,d){ return d ? Math.round(n*100/d) : 0; }
+
+function toast(msg){
+  const el=$('#toast'); el.textContent=msg; el.classList.add('show');
+  clearTimeout(toast._t); toast._t=setTimeout(()=>el.classList.remove('show'),1900);
+}
+
+function renderStats(){
+  const total=TASKS.length;
+  const count = k => TASKS.filter(t=>st(t.id).status===k).length;
+  const done=count('done'), prog=count('in_progress'), rev=count('review'),
+        chg=count('changes_requested'), blk=count('blocked'), todo=count('todo');
+  $('#ov-total').textContent=total;
+  $('#ov-done').textContent=done;
+  $('#ov-bar').style.width=pct(done,total)+'%';
+  $('#st-todo').textContent=todo;
+  $('#st-prog').textContent=prog;
+  $('#st-review').textContent=rev;
+  $('#st-blocked').textContent=chg+blk;
+  $('#st-done').textContent=done;
+}
+
+function renderPhases(){
+  const wrap=$('#phases'); wrap.innerHTML='';
+  for(const p of PHASES){
+    const ts=TASKS.filter(t=>t.phase===p.id);
+    const done=ts.filter(t=>isDone(t.id)).length;
+    const b=document.createElement('button');
+    b.className='phase'+(STATE.filter.phase===p.id?' active':'');
+    b.innerHTML=`<div class="ph"><span class="name">${p.name}</span><span class="pct">${done}/${ts.length}</span></div>
+      <div class="goal">${p.goal}</div><div class="bar"><i style="width:${pct(done,ts.length)}%"></i></div>`;
+    b.onclick=()=>{ STATE.filter.phase = STATE.filter.phase===p.id?'all':p.id; save(); renderAll(); };
+    wrap.appendChild(b);
+  }
+}
+
+function renderStatusChips(){
+  const wrap=$('#status-chips'); wrap.innerHTML='';
+  const items=[['all','全部'],...Object.entries(STATUS).map(([k,v])=>[k,v.label])];
+  for(const [k,label] of items){
+    const n = k==='all'?TASKS.length:TASKS.filter(t=>st(t.id).status===k).length;
+    const b=document.createElement('button');
+    b.className='chip'+(STATE.filter.status===k?' active':'');
+    b.innerHTML=`${label}<span class="n">${n}</span>`;
+    b.onclick=()=>{ STATE.filter.status=k; save(); renderAll(); };
+    wrap.appendChild(b);
+  }
+}
+
+function match(t){
+  const f=STATE.filter;
+  if(f.phase!=='all' && t.phase!==f.phase) return false;
+  if(f.status!=='all' && st(t.id).status!==f.status) return false;
+  const q=(f.q||'').trim().toLowerCase();
+  if(!q) return true;
+  const hay=[t.id,t.title,t.acceptance,t.tests,t.commit,st(t.id).commit,st(t.id).notes,...(t.files||[])].join(' ').toLowerCase();
+  return hay.includes(q);
+}
+
+function renderList(){
+  const list=$('#list'); list.innerHTML='';
+  let any=false;
+  for(const p of PHASES){
+    const ts=TASKS.filter(t=>t.phase===p.id && match(t));
+    if(!ts.length) continue;
+    any=true;
+    const done=ts.filter(t=>isDone(t.id)).length;
+    const g=document.createElement('section'); g.className='group';
+    const head=document.createElement('div'); head.className='group-head';
+    head.innerHTML=`<span class="gname">${p.name}</span><span class="ggoal">${p.goal}</span>
+      <span class="gbar"><i style="width:${pct(done,ts.length)}%"></i></span>
+      <span class="gcount">${done}/${ts.length}</span>`;
+    const rows=document.createElement('div'); rows.className='rows';
+    for(const t of ts) rows.appendChild(renderRow(t));
+    g.appendChild(head); g.appendChild(rows); list.appendChild(g);
+  }
+  if(!any){
+    const d=document.createElement('div'); d.className='group';
+    d.innerHTML='<div class="row empty">没有匹配的任务。清空搜索或切换筛选。</div>';
+    list.appendChild(d);
+  }
+}
+
+function renderRow(t){
+  const s=st(t.id), status=STATUS[s.status]||STATUS.todo;
+  const row=document.createElement('div');
+  row.className='row'+(needsFix(t.id)?' warn':'');
+  row.tabIndex=0; row.setAttribute('role','button');
+  row.setAttribute('aria-label',`${t.id} ${t.title}，${status.label}`);
+  const blocked=depsBlocked(t);
+  const deps = s.status==='todo'
+    ? (t.deps.length?`→ ${t.deps.join(', ')}`:'—')
+    : (blocked.length ? `blocked by ${blocked.join(', ')}` : (t.deps.length?`deps ${t.deps.join(', ')}`:'—'));
+  const review = REVIEW[s.review]||REVIEW.pending;
+  const reviewCls = s.review==='passed'?'passed':(s.review==='failed'?'failed':'pending');
+  row.innerHTML=`<span class="dot" style="background:${status.color}"></span>
+    <span class="id">${t.id}</span>
+    <span class="title">${esc(t.title)}${needsFix(t.id)?' <span style="color:var(--red);font-size:11px">缺 commit/Review</span>':(s.commit&&!commitTagged(t.id,s.commit)?' <span style="color:var(--amber);font-size:11px">commit 未带任务 ID</span>':'')}</span>
+    <span class="deps" title="${esc(deps)}">${esc(deps)}</span>
+    <span class="commit" title="${esc(s.commit)}">${s.commit?esc(s.commit):'—'}</span>
+    <span class="review"><span class="badge ${reviewCls}">${review.label}</span></span>`;
+  row.onclick=()=>openDrawer(t.id);
+  row.onkeydown=(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openDrawer(t.id); } };
+  return row;
+}
+
+function esc(s){ return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function renderAll(){ renderStats(); renderPhases(); renderStatusChips(); renderList(); }
+
+let current=null;
+function openDrawer(id){
+  current=id;
+  const t=task(id), s=st(id);
+  $('#d-phase').textContent=(PHASES.find(p=>p.id===t.phase)||{}).name||t.phase;
+  $('#d-phase').className='badge '+s.status;
+  $('#d-id').textContent=t.id;
+  $('#d-title').textContent=t.title;
+  const blocked=depsBlocked(t);
+  $('#d-meta').innerHTML=`<span class="badge ${s.status}">${(STATUS[s.status]||STATUS.todo).label}</span>
+    <span>${t.phase}</span>${blocked.length?`<span style="color:var(--amber)">依赖未完成：${esc(blocked.join(', '))}</span>`:''}`;
+  const body=$('#d-body');
+  const fix=needsFix(id);
+  body.innerHTML=`
+    ${fix?`<div class="warnbox">这个任务已标 done，但缺 commit 或 Review 未通过。看板要求：每个任务必须有 commit，且 Review passed 后才能 done。</div>`:''}
+    <div class="field"><label>验收标准</label><div class="val">${esc(t.acceptance)}</div></div>
+    <div class="field"><label>涉及文件</label><div class="val">${(t.files||[]).map(f=>`<code>${esc(f)}</code>`).join(' ')||'—'}</div></div>
+    <div class="field"><label>测试命令</label><div class="val"><code>${esc(t.tests||'—')}</code></div></div>
+    <div class="field"><label>依赖</label><div class="val">${(t.deps||[]).map(d=>`<code>${esc(d)}</code>`).join(' ')||'—'}</div></div>
+    <div class="field"><label>状态</label>
+      <div class="status-btns" id="d-status"></div>
+      <div class="hint">todo → in_progress → review（必须已有 commit）→ done（Review passed）。</div>
+    </div>
+    <div class="field"><label>Commit（hash / subject）</label>
+      <input class="input" id="d-commit" placeholder="例如 6eb9f62 或 feat(hub-p0-01): ..." value="${esc(s.commit)}">
+      <div class="hint">建议填 hash；commit message 应包含任务 ID <code>hub-${t.id.toLowerCase()}</code>。任务建议：<code>${esc(t.commit||'')}</code></div>
+    </div>
+    <div class="field"><label>Review</label>
+      <select class="input" id="d-review">
+        <option value="pending"${s.review==='pending'?' selected':''}>未 Review</option>
+        <option value="passed"${s.review==='passed'?' selected':''}>通过（passed）</option>
+        <option value="failed"${s.review==='failed'?' selected':''}>不通过（changes requested）</option>
+      </select>
+      <div class="hint">Review 结论必须写进 notes；不通过时追加 fix commit，不要 amend。</div>
+    </div>
+    <div class="field"><label>Review 结论 / 备注</label>
+      <textarea class="input" id="d-notes" placeholder="blocking / non-blocking / follow-up；坑；后续任务 ID">${esc(s.notes)}</textarea>
+    </div>
+    <div class="field"><label>快速填写</label>
+      <div class="chips">
+        <button class="chip" data-fill="review">标记为待 Review</button>
+        <button class="chip" data-fill="done">Review 通过并完成</button>
+        <button class="chip" data-fill="changes">Review 不通过</button>
+      </div>
+    </div>`;
+  const stBtns=$('#d-status');
+  for(const [k,v] of Object.entries(STATUS)){
+    const b=document.createElement('button');
+    b.className='btn sm'+(s.status===k?' on':'');
+    b.textContent=v.label;
+    b.onclick=()=>{ setStatus(k); openDrawer(id); };
+    stBtns.appendChild(b);
+  }
+  $('#d-commit').oninput=(e)=>{ st(id).commit=e.target.value; save(); renderStatsOnly(); };
+  $('#d-review').onchange=(e)=>{ st(id).review=e.target.value; save(); renderStatsOnly(); };
+  $('#d-notes').oninput=(e)=>{ st(id).notes=e.target.value; save(); };
+  $$('[data-fill]').forEach(b=>b.onclick=()=>{
+    st(id).commit = st(id).commit || '';
+    if(b.dataset.fill==='review'){ st(id).status='review'; if(st(id).review==='pending') st(id).review='pending'; }
+    if(b.dataset.fill==='done'){ st(id).status='done'; st(id).review='passed'; }
+    if(b.dataset.fill==='changes'){ st(id).status='changes_requested'; st(id).review='failed'; }
+    save(); openDrawer(id); renderAll();
+  });
+  $('#d-phase').className='badge '+st(id).status;
+  $('#scrim').classList.add('open'); $('#drawer').classList.add('open'); $('#drawer').setAttribute('aria-hidden','false');
+  setTimeout(()=>$('#d-commit').focus(),120);
+}
+function setStatus(k){
+  const s=st(current);
+  if(k==='done' && (!s.commit.trim() || s.review!=='passed')){
+    toast('不能直接 done：先填 commit，并把 Review 设为 passed');
+    s.status='review'; save(); renderAll(); return;
+  }
+  if(k==='review' && !s.commit.trim()){
+    toast('先填 commit（review 需要可追溯的提交）');
+  }
+  s.status=k; save(); renderAll();
+}
+function renderStatsOnly(){ renderStats(); renderPhases(); renderStatusChips(); }
+function closeDrawer(){ current=null; $('#scrim').classList.remove('open'); $('#drawer').classList.remove('open'); $('#drawer').setAttribute('aria-hidden','true'); }
+
+$('#d-close').onclick=closeDrawer;
+$('#scrim').onclick=closeDrawer;
+$('#d-save').onclick=()=>{ save(); toast('已保存'); renderAll(); };
+$('#d-done').onclick=()=>{ if(current) setStatus('done'); save(); toast('已保存'); closeDrawer(); renderAll(); };
+document.addEventListener('keydown',(e)=>{
+  if(e.key==='Escape') closeDrawer();
+  if(e.key==='/' && document.activeElement.tagName!=='INPUT' && document.activeElement.tagName!=='TEXTAREA'){ e.preventDefault(); $('#q').focus(); }
+});
+$('#q').oninput=(e)=>{ STATE.filter.q=e.target.value; save(); renderList(); };
+
+$('#btn-export').onclick=()=>{
+  const blob=new Blob([JSON.stringify({...BASE, state:STATE},null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='agent-hub-progress-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000); toast('已导出');
+};
+$('#btn-import').onclick=()=>{
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json,application/json';
+  inp.onchange=async()=>{
+    try{
+      const txt=await inp.files[0].text(); const data=JSON.parse(txt);
+      const src=data.state||data;
+      if(!src.tasks) throw new Error('缺少 tasks');
+      for(const [id,v] of Object.entries(src.tasks)) if(STATE.tasks[id]) STATE.tasks[id]={...STATE.tasks[id],...v};
+      save(); renderAll(); toast('已导入');
+    }catch(err){ toast('导入失败：'+err.message); }
+  };
+  inp.click();
+};
+$('#btn-reset').onclick=()=>{
+  if(!confirm('清空本机进度（任务定义不变）？建议先导出备份。')) return;
+  localStorage.removeItem(STORE_KEY); STATE=stateDefault(); renderAll(); toast('已重置');
+};
+
+renderAll();
+</script>
+</body>
+</html>
