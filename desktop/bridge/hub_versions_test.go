@@ -166,7 +166,11 @@ func TestHubPromptPreviewLayers(t *testing.T) {
 		t.Fatalf("memory layer missing content: %q", str(last, "text"))
 	}
 	// 与装配同源：长度必须等于当前注入（两份文案漂移会在这一步暴露）。
-	inj := m.hubMemoryInjection(agentID, m.hubRuntime(agentID).path)
+	loaded, _, lerr := m.hubLoadAgent(agentID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	inj := m.hubMemoryInjection(loaded, m.hubRuntime(agentID).path)
 	if str(last, "text") != inj {
 		t.Fatalf("preview memory != injected memory (len %d vs %d)", len(str(last, "text")), len(inj))
 	}

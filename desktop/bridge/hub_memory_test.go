@@ -178,7 +178,11 @@ func TestHubMemoryWriteRebuildsLoop(t *testing.T) {
 		t.Fatal("session still runs the OLD loop: 下一个 Run 看不到新记忆")
 	}
 	// 记忆真的进了注入文本（装配期算一次）；空记忆时同一函数返回空。
-	inj := m.hubMemoryInjection(agentID, m.hubRuntime(agentID).path)
+	loaded, _, lerr := m.hubLoadAgent(agentID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	inj := m.hubMemoryInjection(loaded, m.hubRuntime(agentID).path)
 	if !strings.Contains(inj, "小王") {
 		t.Fatalf("memory injection missing new content: %q", inj)
 	}
@@ -228,5 +232,81 @@ func TestHubMemoryWriteKeepsSessionModelAndEffort(t *testing.T) {
 	// 重建不得回写会话状态（否则面板与实际行为分叉）。
 	if bs.model != "deepseek-v4-pro" || bs.provider != "deepseek" || bs.effort != "high" {
 		t.Fatalf("session fields drifted: model=%q provider=%q effort=%q", bs.model, bs.provider, bs.effort)
+	}
+}
+
+// Profile 的记忆开关必须真的生效（此前是死字段：关掉照常注入）。
+func TestHubMemoryPrefsDisableInjection(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "Toggle")
+	agentID := string(p.ID)
+	if !p.Memory.IsEnabled() {
+		t.Fatal("new agent should default to memory enabled")
+	}
+	if ok, errMsg, _ := hubMemoryCmd(t, m, buf, 2, "hub_agent_memory_write", map[string]any{
+		"agent_id": agentID, "path": "MEMORY.md", "content": "- 这条在关闭后不该出现\n",
+	}); !ok {
+		t.Fatalf("write failed: %s", errMsg)
+	}
+	bs, err := m.hubDMSession(agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memChars := func() int64 {
+		for _, part := range bs.s.ContextBreakdown(context.Background()).Parts {
+			if part.Key == agents.ContextPartMemory {
+				return part.Chars
+			}
+		}
+		return -1
+	}
+	if memChars() <= 0 {
+		t.Fatalf("enabled agent should inject memory, got %d", memChars())
+	}
+
+	// 面板关掉：profile.memory.enabled=false → 不注入（即使环境变量想打开）。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 3, "hub_agent_update", map[string]any{
+		"agent_id": agentID, "patch": map[string]any{"memory": map[string]any{"enabled": false}},
+	}); !ok {
+		t.Fatalf("disable failed: %s", errMsg)
+	}
+	off, _, lerr := m.hubLoadAgent(agentID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if off.Memory.IsEnabled() {
+		t.Fatal("patch must persist memory.enabled=false")
+	}
+	if inj := m.hubMemoryInjection(off, m.hubRuntime(agentID).path); inj != "" {
+		t.Fatalf("disabled agent must have no injection, got %q", inj)
+	}
+	if ok, _, data := hubCmd(t, m, buf, 4, "hub_agent_memory_write", map[string]any{
+		"agent_id": agentID, "path": "MEMORY.md", "content": "- 关闭态写入\n",
+	}); !ok {
+		t.Fatal("write while disabled failed")
+	} else if data["effective"] != "next_run" && data["effective"] != "next_session" {
+		t.Fatalf("write result = %v", data)
+	}
+	if got := memChars(); got != 0 {
+		t.Fatalf("disabled agent's next Run memory part = %d, want 0", got)
+	}
+	// 预览里也不能出现记忆内容。
+	if ok, _, data := hubCmd(t, m, buf, 5, "hub_agent_prompt_preview", map[string]any{"agent_id": agentID}); !ok {
+		t.Fatal("preview failed")
+	} else if layers, _ := data["layers"].([]any); len(layers) != 0 {
+		last, _ := layers[len(layers)-1].(map[string]any)
+		if str(last, "key") == "memory" {
+			t.Fatalf("disabled agent preview must not include memory layer: %v", last)
+		}
+	}
+
+	// 重新打开 → 注入回来（同一个开关，双向生效）。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 6, "hub_agent_update", map[string]any{
+		"agent_id": agentID, "patch": map[string]any{"memory": map[string]any{"enabled": true}},
+	}); !ok {
+		t.Fatalf("enable failed: %s", errMsg)
+	}
+	if got := memChars(); got <= 0 {
+		t.Fatalf("re-enabled agent memory part = %d, want > 0", got)
 	}
 }

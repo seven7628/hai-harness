@@ -7,6 +7,9 @@ import (
 	"testing"
 )
 
+// boolPtr 测试用：Profile.Memory.Enabled 是三态指针。
+func boolPtr(b bool) *bool { return &b }
+
 func validProfile() *AgentProfile {
 	return &AgentProfile{
 		ID:                "ag_7f3k2m7q",
@@ -16,7 +19,7 @@ func validProfile() *AgentProfile {
 		Provider:          "deepseek",
 		Model:             "deepseek-v4-flash",
 		CompressThreshold: 0.8,
-		Memory:            MemoryPrefs{Enabled: true, MaxIndexLines: 200},
+		Memory:            MemoryPrefs{Enabled: boolPtr(true), MaxIndexLines: 200},
 		Tools:             ToolPolicy{Preset: ToolPresetAll},
 		Policy:            RunPolicy{MaxAutoTurns: 6},
 		Version:           1,
@@ -402,5 +405,25 @@ func TestGroupNameAndMemberNamesUnique(t *testing.T) {
 	delete(profiles, testAgentID('c'))
 	if err := ValidateGroupMemberNames(g, profiles); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing profile err = %v", err)
+	}
+}
+
+// 记忆开关三态：没设置过 = 开；显式 false 必须保留（否则面板的「关」永远显示成「开」）。
+func TestMemoryPrefsEnabledTriState(t *testing.T) {
+	var zero MemoryPrefs
+	if !zero.IsEnabled() {
+		t.Fatal("unset memory prefs must default to enabled")
+	}
+	p := validProfile()
+	p.Memory.Enabled = nil
+	p.Normalize()
+	if p.Memory.Enabled == nil || !*p.Memory.Enabled {
+		t.Fatalf("Normalize must default enabled to true, got %v", p.Memory.Enabled)
+	}
+	off := false
+	p.Memory.Enabled = &off
+	p.Normalize()
+	if p.Memory.IsEnabled() {
+		t.Fatal("explicit false must survive Normalize")
 	}
 }

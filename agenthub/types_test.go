@@ -56,7 +56,7 @@ func fullProfile() *AgentProfile {
 		Model:             "deepseek-v4-flash",
 		Effort:            "low",
 		CompressThreshold: 0.8,
-		Memory:            MemoryPrefs{Enabled: true, MaxIndexLines: 200},
+		Memory:            MemoryPrefs{Enabled: boolPtr(true), MaxIndexLines: 200},
 		Tools: ToolPolicy{
 			Preset:         ToolPresetCustom,
 			Disable:        []string{"browser_*"},

@@ -23,9 +23,15 @@ type Avatar struct {
 
 // MemoryPrefs 是智能体自己的记忆偏好。记忆正文在 agents/<id>/memory，不进 profile。
 type MemoryPrefs struct {
-	Enabled       bool `json:"enabled"`
-	MaxIndexLines int  `json:"max_index_lines,omitempty"` // 默认 200
+	// Enabled 指针三态：nil = 没设置过（Normalize 置为 true），false = 用户显式关闭。
+	// 用 bool 会在「从没设置过」与「用户关掉」之间丢失信息 —— 面板的关闭开关就再也
+	// 分不清该显示什么（P1-05 复核：这个字段此前全仓无人读取，等于死字段）。
+	Enabled       *bool `json:"enabled,omitempty"`
+	MaxIndexLines int   `json:"max_index_lines,omitempty"` // 默认 200
 }
+
+// IsEnabled 记忆是否开启（nil = 默认开）。
+func (m MemoryPrefs) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
 
 // MCPPolicy 是 MCP 的 server/tool 级开关。零值 = 全开。
 //
@@ -183,6 +189,10 @@ func (p *AgentProfile) ApplyDefaults() {
 	}
 	if p.Memory.MaxIndexLines == 0 {
 		p.Memory.MaxIndexLines = DefaultMemoryIndexLines
+	}
+	if p.Memory.Enabled == nil {
+		on := true
+		p.Memory.Enabled = &on
 	}
 
 	p.Tools.ApplyDefaults()

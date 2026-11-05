@@ -294,9 +294,17 @@ func hubSessionID(agentID string, scope agenthub.Scope) string {
 // 走默认解析永远拿不到身份 → 记忆不注入（等于没开）。§6.9.1 定的是
 // `agents/<id>/memory/repos/<id>`：Directory 指向 agents/<id>/memory，
 // ProjectDirName 固定为 agentID（memory.Config 支持把它当身份）。
-func (m *manager) hubMemoryConfig(agentID string) memory.Config {
+func (m *manager) hubMemoryConfig(p *agenthub.AgentProfile) memory.Config {
+	if p == nil {
+		off := false
+		return memory.Config{Enabled: &off}
+	}
 	cfg := m.memoryConfig()
-	root, err := agenthub.MemoryRootFor(filepath.Join(appDataDir(), "hub"), agenthub.AgentID(agentID))
+	// Profile 的记忆开关是**显式**的（Normalize 之后 nil 不会再出现）：面板关掉某个
+	// 智能体的记忆，就必须真的不注入，而不是看全局偏好。
+	cfg.Enabled = p.Memory.Enabled
+	agentID := string(p.ID)
+	root, err := agenthub.MemoryRootFor(filepath.Join(appDataDir(), "hub"), p.ID)
 	if err != nil {
 		// 回落 = 用项目记忆根（`~/.go-code/memory/repos/<git id>`）：会把**别人的/项目的**
 		// 记忆注入这个智能体。错的方向，宁可不注入（Enabled=false 是显式关闭）。
@@ -312,10 +320,14 @@ func (m *manager) hubMemoryConfig(agentID string) memory.Config {
 // hubMemoryInjection 装配期算一次记忆索引（空 = 无记忆/未开启）。
 // 与项目会话同一条通道（newMemoryHost），换的是目录与身份 ——
 // 记忆是 Profile 级（DM 与所有群共享，§6.9）。
-func (m *manager) hubMemoryInjection(agentID, home string) string {
+func (m *manager) hubMemoryInjection(p *agenthub.AgentProfile, home string) string {
+	if p == nil || !p.Memory.IsEnabled() {
+		// 环境变量 autoMemoryEnabled 只该影响「没设置过」的会话；Profile 显式关掉就是关掉。
+		return ""
+	}
 	mctx, cancel := context.WithTimeout(context.Background(), memoryResolveTimeout)
 	defer cancel()
-	return newMemoryHost(m.hubMemoryConfig(agentID)).injection(mctx, home)
+	return newMemoryHost(m.hubMemoryConfig(p)).injection(mctx, home)
 }
 
 // hubSpecFor 组装一次 Hub 会话的装配输入（Profile + scope + 记忆索引）。
@@ -323,7 +335,7 @@ func (m *manager) hubSpecFor(p *agenthub.AgentProfile, scope agenthub.Scope, hom
 	return &hubSessionSpec{
 		Agent:           *p,
 		Scope:           scope,
-		MemoryInjection: m.hubMemoryInjection(string(p.ID), home),
+		MemoryInjection: m.hubMemoryInjection(p, home),
 	}
 }
 

@@ -262,9 +262,15 @@ func (m *manager) hubAgentUpdate(c command) {
 		m.resp(c, false, "保存智能体失败: "+err.Error(), nil)
 		return
 	}
-	// loop 重建属于会话生命周期（P1-04）：此刻没有在跑的 loop，改了就是「下一个 Run 生效」。
+	// 人格/记忆开关/阈值都进 loop：改完就把已装配会话的 loop 换掉（下一个 Run 生效）。
+	// 不重建的话，「关闭记忆」这类改动要等到重启或下一次写记忆才生效 —— 面板说关了、
+	// 模型照旧看得到（§6.11.2）。
+	data := map[string]any{"agent": next}
+	if err := m.refreshHubLoops(string(next.ID)); err != nil {
+		data["warning"] = "重建会话 loop 失败，重启后生效: " + err.Error()
+	}
 	m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
-	m.resp(c, true, "", map[string]any{"agent": next})
+	m.resp(c, true, "", data)
 }
 
 // hubAgentGet 返回完整 profile（运行态/今日用量是 P1-04+ 的字段，这里不编造）。
@@ -680,7 +686,7 @@ func (m *manager) hubPromptPreview(c command) {
 		return
 	}
 	layers := agenthub.RenderLayers(agenthub.PromptSpec{Agent: p})
-	if inj := m.hubMemoryInjection(string(p.ID), hubAgentHome(string(p.ID))); strings.TrimSpace(inj) != "" {
+	if inj := m.hubMemoryInjection(p, hubAgentHome(string(p.ID))); strings.TrimSpace(inj) != "" {
 		layers = append(layers, agenthub.PromptLayer{Key: "memory", Title: "L4 · 记忆索引", Text: inj})
 	}
 	total := 0
