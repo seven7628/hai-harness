@@ -973,9 +973,9 @@
     },
     "P2-01": {
       "status": "review",
-      "commit": "7b243a7 feat(hub-p2-01): WorkspaceOps 落地 —— workspaces.json 登记 + 路径白名单/敏感目录/符号链接",
+      "commit": "7b243a7 + 09df959 fix(hub-p2-01): 复审修复",
       "review": "pending",
-      "reviewNote": "实现：agenthub 只定义 WorkspaceOps/SessionRunner 窄接口 + ErrForbidden（领域包不碰路径），bridge 侧 hubWorkspaceOps 是唯一入口。CreateWorkspace 在 roots 白名单内 mkdir，成功后写 workspaces.json（失败回滚空目录），不顺手装配 runtime；ListWorkspaces = workspaces.json ∪ m.workspaces 去重（重启后未打开的工作区也能列出）；knownWorkspace 认「已登记但未装配」的目录，未登记/敏感目录/Hub home 一律 ErrNotFound 且不装配；Dispatch 对未装配工作区先 runtime() 再找 session（不自动建会话）；InterruptSession 跨工作区按 sid 找。路径安全：单段名（分隔符/./../NUL/超 64 rune）、父目录必须 EvalSymlinks 后落在 roots 内（符号链接逃逸被拒）、已存在 → ErrConflict（不接管）、敏感目录（~/.ssh/.aws/.gnupg/.netrc/.kube、~/.go-code 除 plugins/runtime）双向 EvalSymlinks 判定。测试：TestHubWorkspaceCreatePath（矩阵）、TestHubWorkspaceOpsCreateAndList（registry 落盘/重载、不装配、新目录可开会话）、TestHubWorkspaceOpsRejectsUnknownWorkspace（拒绝且不装配）、TestHubWorkspaceOpsDispatch（Ask 入队/空文本/未知会话）。验证：go build ./... 绿；agenthub 全绿；desktop/bridge 全量绿（干净 HOME）；`go test -run HubWorkspace` 4/4 绿。注：agenthub/workspace.go 与 ErrForbidden 的骨架因与 P1-08/09 同批落盘已在 bf05e53 中，本提交是其 bridge 实现与测试收尾。"
+      "reviewNote": "首轮评审 change_requested（task-tbaektp9）：B1 敏感目录检查被大小写变体绕过（macOS APFS 上 ~/.SSH 与 ~/.ssh 同一 inode，字符串前缀比较漏判；可据此在 ~/.ssh 里创建并登记工作区，连 Dispatch 都会派进去）。非阻塞：N1 ~ 形式的 workspace_roots 静默失效并误报「未配置」；N2 Dispatch 的「重启后装配一次」是死代码且不解决盘上会话；N3 wsReg=nil 时 CreateWorkspace 静默成功不落盘；N4 registry 落盘失败只回滚目录（内存留幽灵条目）；N5 knownWorkspace 不查 registry 路径的敏感目录；N6 尾斜杠/.. 打开的 runtime 匹配不上；N7 缺接口断言；N8 Lstat 错误未分类；测试缺口：超长名字、写盘失败、大小写变体、Hub home 注入、Dispatch 错误文案均无断言（M6/M7/M9/M10 mutation 存活）。→ 09df959 修复：hubSensitivePath 改逐级祖先 os.SameFile（一并覆盖符号链接/firmlink，base 不存在时折叠比较）；~ 展开；wsReg=nil fail-closed；registry add 落盘失败回滚内存；knownWorkspace 对敏感目录/Hub home 返回 ErrForbidden、m.workspaces 按 Clean 兜底、Lstat 错误包 ErrInvalid；删除 Dispatch 死代码；补编译期接口断言。新增 8 条用例并做 4 组 mutation（旧前缀判敏感/去长度上限/去落盘回滚/去 Hub home 守卫）全部打红；go build ./...、agenthub、desktop/bridge 全量（37.8s）绿。待复审。"
     }
   }
 }
