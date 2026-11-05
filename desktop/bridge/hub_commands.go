@@ -286,7 +286,9 @@ func (m *manager) hubAgentUpdate(c command) {
 	// provider/model 是原子对（P1-10 B-1）：只改 provider 时旧 model 可能不存在于
 	// 新 provider（openai/deepseek-v4-pro 这种组合会让 loop 装配出无效模型）。
 	// 不静默改写调用方给的 model，明确报错让其重新选择。
-	if !strings.EqualFold(next.Provider, cur.Provider) && !m.provCfg.hasModelIn(next.Provider, next.Model) {
+	// 判据是「结果组合是否存在」，不是「哪个字段变了」：只改 model（资料页模型输入框）
+	// 同样能把另一个 provider 的模型写进运行中会话（P1-10 复审 B-1）。
+	if (next.Provider != cur.Provider || next.Model != cur.Model) && !m.provCfg.hasModelIn(next.Provider, next.Model) {
 		m.respCode(c, false, fmt.Sprintf("模型 %q 不属于 provider %q，请重新选择", next.Model, next.Provider), "unknown_model", nil)
 		return
 	}

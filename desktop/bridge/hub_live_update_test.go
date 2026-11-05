@@ -280,6 +280,16 @@ func TestHubAgentUpdateKeepsProviderModelPaired(t *testing.T) {
 	if got := bs2.loop.Model(); got != "deepseek-v4-pro" {
 		t.Fatalf("p2 loop model = %q, want deepseek-v4-pro", got)
 	}
+	// 只改 model 到别的 provider 的模型：同样必须被拒（P1-10 复审 B-1 另一扇门）。
+	if ok, _, _ := hubCmd(t, m, buf, 16, "hub_agent_update", map[string]any{
+		"agent_id": string(p2.ID), "patch": map[string]any{"model": "gpt-5"},
+	}); ok {
+		t.Fatal("model-only foreign model must be rejected")
+	}
+	prov3, model3, _ := bs2.modelCfg()
+	if prov3 != "deepseek" || model3 != "deepseek-v4-pro" {
+		t.Fatalf("rejected model-only changed session pair = %s/%s", prov3, model3)
+	}
 
 	// 只改人格仍然不能动会话级选择（这里与 profile 相同，改成人格后仍是 deepseek）。
 	switchTo(16, "gpt-5", "openai")
