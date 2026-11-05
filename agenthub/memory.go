@@ -89,7 +89,7 @@ const memoryBackupDir = ".backups"
 // hasMemoryBackupSegment 判断路径里是否出现保留段 .backups（任意层级）。
 func hasMemoryBackupSegment(clean string) bool {
 	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
-		if seg == memoryBackupDir {
+		if strings.EqualFold(seg, memoryBackupDir) {
 			return true
 		}
 	}
@@ -256,25 +256,79 @@ func backupMemoryFile(hubRoot string, id AgentID, rel string, body []byte) (stri
 	return name, nil
 }
 
-// pruneMemoryBackups 只留最近 MaxMemoryBackups 个（按文件名即时间戳排序）。
+// pruneMemoryBackups 每个被编辑的文件各留最近 MaxMemoryBackups 份。
+//
+// 两个坑（P1-05 复核实测）：
+//   - 备份名是 `<rel 前缀>.<时间戳>.bak`，**前缀先于时间戳**参与排序。按完整文件名
+//     排序时，先写 21 次 topics/x.md（前缀 topics__ 排最后），再写两次 MEMORY.md，
+//     刚写的 MEMORY 备份会排在前面被当成「最旧」删掉 —— 旧内容已被覆盖，不可逆。
+//   - 因此必须按「前缀分组 + 时间戳排序」，而不是全局按名字排。分组也让一个文件的
+//     频繁编辑挤不掉另一个文件的历史。
 func pruneMemoryBackups(dir string) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	names := make([]string, 0, len(ents))
+	groups := map[string][]string{}
 	for _, e := range ents {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".bak") {
-			names = append(names, e.Name())
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".bak") {
+			continue
+		}
+		if _, _, ok := splitBackupName(name); !ok {
+			continue // 不是我们写的备份（手工放入）：不动
+		}
+		groups[backupPrefix(name)] = append(groups[backupPrefix(name)], name)
+	}
+	for _, names := range groups {
+		if len(names) <= MaxMemoryBackups {
+			continue
+		}
+		sort.Slice(names, func(i, j int) bool {
+			ti, tj := backupTimeKey(names[i]), backupTimeKey(names[j])
+			if ti != tj {
+				return ti < tj // 定长时间戳，字典序即时间序
+			}
+			return names[i] < names[j]
+		})
+		for _, name := range names[:len(names)-MaxMemoryBackups] {
+			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
-	if len(names) <= MaxMemoryBackups {
-		return
+}
+
+// backupTimeLayout 备份文件名里的时间戳格式（**含一个 `.`**：秒与纳秒之间）。
+// 因此不能「按最后一个 `.` 切分」——切出来的是纳秒段，排序与分组都会错。
+const backupTimeLayout = "20060102T150405.000000000"
+
+// splitBackupName 把 `<prefix>.<时间戳>.bak` 拆成前缀与时间戳。
+// 时间戳定长且以 `.` 结尾与后缀相连；不匹配（手工放进来的文件）返回 ok=false，
+// 这类文件不参与 prune（不动用户手放的东西）。
+func splitBackupName(name string) (prefix, ts string, ok bool) {
+	base := strings.TrimSuffix(name, ".bak")
+	if len(base) < len(backupTimeLayout)+1 {
+		return "", "", false
 	}
-	sort.Strings(names)
-	for _, name := range names[:len(names)-MaxMemoryBackups] {
-		_ = os.Remove(filepath.Join(dir, name))
+	cut := len(base) - len(backupTimeLayout)
+	if base[cut-1] != '.' {
+		return "", "", false
 	}
+	return base[:cut-1], base[cut:], true
+}
+
+// backupTimeKey 取时间戳（用于排序）。
+func backupTimeKey(name string) string {
+	_, ts, _ := splitBackupName(name)
+	return ts
+}
+
+// backupPrefix 取时间戳之前的前缀（同一被编辑文件的备份共享前缀）。
+func backupPrefix(name string) string {
+	prefix, _, ok := splitBackupName(name)
+	if !ok {
+		return name
+	}
+	return prefix
 }
 
 // writeFileAtomic0600 tmp+rename（同目录，保证 rename 原子）；目录 0700、文件 0600。

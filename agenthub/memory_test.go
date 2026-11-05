@@ -260,3 +260,80 @@ func TestWriteMemoryFileRejectsEscape(t *testing.T) {
 func errorsIs(err, target error) bool {
 	return err != nil && (err == target || strings.Contains(err.Error(), target.Error()))
 }
+
+// 跨前缀 prune 不能删掉刚写的那份备份（P1-05 复核：按完整文件名排序时前缀先于
+// 时间戳参与排序，写别的文件会把 MEMORY.md 的新备份当「最旧」删掉，旧内容已覆盖 → 不可逆）。
+func TestWriteMemoryFilePruneKeepsNewestAcrossFiles(t *testing.T) {
+	root := t.TempDir()
+	id := AgentID("ag_aaaaaaa1")
+	// 先把 topics/x.md 写满一轮备份（前缀 topics__ 在字典序里靠后）。
+	for i := 0; i < MaxMemoryBackups+3; i++ {
+		if _, err := WriteMemoryFile(root, id, "topics/x.md", strings.Repeat("t", i+1)); err != nil {
+			t.Fatalf("topics write %d: %v", i, err)
+		}
+	}
+	// 再写两次 MEMORY.md：第二次的备份必须真的还在盘上。
+	if _, err := WriteMemoryFile(root, id, "MEMORY.md", "v1\n"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := WriteMemoryFile(root, id, "MEMORY.md", "v2\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Backup == "" {
+		t.Fatal("overwrite must report a backup")
+	}
+	dir, _ := MemoryAgentDir(root, id)
+	data, err := os.ReadFile(filepath.Join(dir, memoryBackupDir, res.Backup))
+	if err != nil {
+		t.Fatalf("reported backup %q was pruned away: %v", res.Backup, err)
+	}
+	if string(data) != "v1\n" {
+		t.Fatalf("backup content = %q, want v1", data)
+	}
+	// 每个文件各自 20 份：topics 不挤掉 MEMORY，反之亦然。
+	ents, err := os.ReadDir(filepath.Join(dir, memoryBackupDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	perPrefix := map[string]int{}
+	for _, e := range ents {
+		perPrefix[backupPrefix(e.Name())]++
+	}
+	if got := perPrefix["MEMORY.md"]; got != 1 {
+		t.Fatalf("MEMORY.md backups = %d, want 1: %v", got, perPrefix)
+	}
+	if got := perPrefix["topics__x.md"]; got != MaxMemoryBackups {
+		t.Fatalf("topics backups = %d, want %d", got, MaxMemoryBackups)
+	}
+}
+
+// macOS 默认大小写不敏感：.BACKUPS / .Backups 与 .backups 是同一个目录，保留段必须
+// 大小写不敏感地拒绝（否则面板能往备份目录写 .md）。
+func TestResolveMemoryPathRejectsBackupDirAnyCase(t *testing.T) {
+	root := t.TempDir()
+	dir, err := MemoryAgentDir(root, "ag_aaaaaaa1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, memoryBackupDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{
+		".BACKUPS/x.md", ".Backups/x.md", "topics/.BACKUPS/y.md", "TOPICS/.backups/y.md",
+	} {
+		if _, err := ResolveMemoryPath(root, "ag_aaaaaaa1", bad); err == nil ||
+			!strings.Contains(err.Error(), "is reserved for backups") {
+			t.Errorf("path %q must be rejected as reserved, err = %v", bad, err)
+		}
+		if _, err := WriteMemoryFile(root, "ag_aaaaaaa1", bad, "x"); err == nil {
+			t.Errorf("write %q must be rejected", bad)
+		}
+	}
+	// 合法路径不受影响（.backups.md 不是保留段；topics/backups 也不是）。
+	for _, ok := range []string{".backups.md", "topics/backups/x.md"} {
+		if _, err := ResolveMemoryPath(root, "ag_aaaaaaa1", ok); err != nil {
+			t.Errorf("path %q should be allowed: %v", ok, err)
+		}
+	}
+}
