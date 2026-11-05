@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -126,6 +129,9 @@ func testStoreContract(t *testing.T, s Store) {
 	if err != nil || len(agents) != 1 || agents[0].ID != agent.ID {
 		t.Fatalf("ListAgents = %v, %v", agents, err)
 	}
+	if _, err := s.LoadAgent(ctx, "ag_missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LoadAgent(missing) err = %v, want ErrNotFound", err)
+	}
 
 	// Group
 	group := testGroup()
@@ -135,6 +141,10 @@ func testStoreContract(t *testing.T, s Store) {
 	gotGroup, err := s.LoadGroup(ctx, group.ID)
 	if err != nil || !reflect.DeepEqual(gotGroup, group) {
 		t.Fatalf("group round-trip: %#v, %v", gotGroup, err)
+	}
+	groups, err := s.ListGroups(ctx)
+	if err != nil || len(groups) != 1 || groups[0].ID != group.ID {
+		t.Fatalf("ListGroups = %v, %v", groups, err)
 	}
 
 	// Messages / seq / pagination / search
@@ -190,8 +200,15 @@ func testStoreContract(t *testing.T, s Store) {
 	if err := s.SaveTask(ctx, task); err != nil {
 		t.Fatalf("SaveTask: %v", err)
 	}
-	if err := s.AppendTaskEvent(ctx, task.ID, TaskEvent{Type: "completed", Data: map[string]any{"status": "completed"}}); err != nil {
-		t.Fatalf("AppendTaskEvent: %v", err)
+	gotTask, err := s.LoadTask(ctx, task.ID)
+	if err != nil || !reflect.DeepEqual(gotTask, task) {
+		t.Fatalf("task round-trip: %#v, %v", gotTask, err)
+	}
+	if _, err := s.LoadTask(ctx, "task_missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LoadTask(missing) err = %v, want ErrNotFound", err)
+	}
+	if seq, err := s.AppendTaskEvent(ctx, task.ID, TaskEvent{Type: "completed", Data: map[string]any{"status": "completed"}}); err != nil || seq != 1 {
+		t.Fatalf("AppendTaskEvent = %d, %v", seq, err)
 	}
 	events, err := s.ReadTaskEvents(ctx, task.ID)
 	if err != nil || len(events) != 1 || events[0].Seq != 1 || events[0].Type != "completed" {
@@ -203,6 +220,9 @@ func testStoreContract(t *testing.T, s Store) {
 	}
 	if tasks, err := s.ListTasks(ctx, TaskFilter{Status: TaskFailed}); err != nil || len(tasks) != 0 {
 		t.Fatalf("ListTasks(failed) = %v, %v", tasks, err)
+	}
+	if tasks, err := s.ListTasks(ctx, TaskFilter{AgentID: "ag_test", RootTaskID: "task_test"}); err != nil || len(tasks) != 1 {
+		t.Fatalf("ListTasks(agent/root) = %v, %v", tasks, err)
 	}
 
 	// Need / artifact
@@ -362,7 +382,7 @@ func TestFileStoreTaskEventsAppend(t *testing.T) {
 	if err := fs.SaveTask(ctx, testTask()); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.AppendTaskEvent(ctx, "task_test", TaskEvent{Type: "running"}); err != nil {
+	if _, err := fs.AppendTaskEvent(ctx, "task_test", TaskEvent{Type: "running"}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(root, "tasks", "task_test", "events.jsonl"))
@@ -459,7 +479,7 @@ func TestFileStoreTaskEventSeqRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if err := fs.AppendTaskEvent(ctx, "task_test", TaskEvent{Type: "running"}); err != nil {
+		if _, err := fs.AppendTaskEvent(ctx, "task_test", TaskEvent{Type: "running"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -468,7 +488,7 @@ func TestFileStoreTaskEventSeqRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fs2.AppendTaskEvent(ctx, "task_test", TaskEvent{Type: "completed"}); err != nil {
+	if _, err := fs2.AppendTaskEvent(ctx, "task_test", TaskEvent{Type: "completed"}); err != nil {
 		t.Fatal(err)
 	}
 	events, err := fs2.ReadTaskEvents(ctx, "task_test")
@@ -515,6 +535,8 @@ func TestMemoryStoreDeepCopy(t *testing.T) {
 
 	task := testTask()
 	task.Result = &TaskResult{Artifacts: []TaskArtifact{{Name: "a.md"}}}
+	now := testTime()
+	task.Dispatch.DispatchedAt = &now
 	if err := s.SaveTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
@@ -522,5 +544,244 @@ func TestMemoryStoreDeepCopy(t *testing.T) {
 	gotTask, _ := s.LoadTask(ctx, task.ID)
 	if gotTask.Result.Artifacts[0].Name != "a.md" {
 		t.Fatalf("task mutated through result artifacts: %#v", gotTask.Result)
+	}
+	*gotTask.Dispatch.DispatchedAt = gotTask.Dispatch.DispatchedAt.Add(time.Hour)
+	gotTask, _ = s.LoadTask(ctx, task.ID)
+	if !gotTask.Dispatch.DispatchedAt.Equal(now) {
+		t.Fatalf("task mutated through dispatch pointer: %v", gotTask.Dispatch.DispatchedAt)
+	}
+
+	need := testNeed()
+	need.ResolvedAt = &now
+	if err := s.SaveNeed(ctx, need); err != nil {
+		t.Fatal(err)
+	}
+	need.ResolvedAt = nil
+	gotNeed, _ := s.LoadNeed(ctx, need.ID)
+	if gotNeed.ResolvedAt == nil || !gotNeed.ResolvedAt.Equal(now) {
+		t.Fatalf("need mutated through resolved_at: %#v", gotNeed.ResolvedAt)
+	}
+	*gotNeed.ResolvedAt = gotNeed.ResolvedAt.Add(time.Hour)
+	gotNeed, _ = s.LoadNeed(ctx, need.ID)
+	if !gotNeed.ResolvedAt.Equal(now) {
+		t.Fatalf("need mutated through loaded resolved_at: %v", gotNeed.ResolvedAt)
+	}
+
+	if _, err := s.AppendTaskEvent(ctx, task.ID, TaskEvent{Type: "running", Data: map[string]any{
+		"nested": map[string]any{"x": "original"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := s.ReadTaskEvents(ctx, task.ID)
+	events[0].Data["nested"].(map[string]any)["x"] = "mutated"
+	events, _ = s.ReadTaskEvents(ctx, task.ID)
+	if got := events[0].Data["nested"].(map[string]any)["x"]; got != "original" {
+		t.Fatalf("event mutated through nested data: %v", got)
+	}
+
+	msg := testStoreMessage("refs")
+	msg.Refs = map[string]any{"nested": map[string]any{"x": "original"}}
+	if _, err := s.AppendMessage(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := s.ReadMessages(ctx, "grp_test", 0, 1)
+	msgs[0].Refs["nested"].(map[string]any)["x"] = "mutated"
+	msgs, _ = s.ReadMessages(ctx, "grp_test", 0, 1)
+	if got := msgs[0].Refs["nested"].(map[string]any)["x"]; got != "original" {
+		t.Fatalf("message mutated through nested refs: %v", got)
+	}
+}
+
+func TestFileStoreToleratesTruncatedLogTail(t *testing.T) {
+	root := t.TempDir()
+	fs, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if _, err := fs.AppendMessage(ctx, testStoreMessage("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(root, "groups", "grp_test", "log.jsonl")
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"seq":3,"group_id":"grp_test"`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// 半行是断电最可能留下的形状：启动必须截断它，而不是让整个 store 打不开。
+	fs2, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatalf("OpenFileStore with truncated tail: %v", err)
+	}
+	msgs, err := fs2.ReadMessages(ctx, "grp_test", 0, 10)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("ReadMessages after tail recovery = %v, %v", msgs, err)
+	}
+	seq, err := fs2.AppendMessage(ctx, testStoreMessage("after recovery"))
+	if err != nil || seq != 3 {
+		t.Fatalf("append after tail recovery = %d, %v; want 3", seq, err)
+	}
+	all, err := fs2.ReadMessages(ctx, "grp_test", 0, 10)
+	if err != nil || len(all) != 3 || all[2].Text != "after recovery" {
+		t.Fatalf("messages after recovery append = %v, %v", all, err)
+	}
+}
+
+func TestFileStoreRejectsInteriorCorruptLine(t *testing.T) {
+	root := t.TempDir()
+	fs, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := fs.AppendMessage(ctx, testStoreMessage("first")); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "groups", "grp_test", "log.jsonl")
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{bad}\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := fs.AppendMessage(ctx, testStoreMessage("third")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenFileStore(root); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("OpenFileStore(interior corrupt) err = %v, want ErrCorrupt", err)
+	}
+}
+
+func TestFileStoreTaskEventTailRecovery(t *testing.T) {
+	root := t.TempDir()
+	fs, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := fs.SaveTask(ctx, testTask()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.AppendTaskEvent(ctx, "task_test", TaskEvent{Type: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join(root, "tasks", "task_test", "events.jsonl")
+	f, err := os.OpenFile(eventPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"seq":2,"task_id":"task_test"`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	fs2, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatalf("OpenFileStore with truncated event tail: %v", err)
+	}
+	events, err := fs2.ReadTaskEvents(ctx, "task_test")
+	if err != nil || len(events) != 1 {
+		t.Fatalf("ReadTaskEvents after recovery = %v, %v", events, err)
+	}
+	if _, err := fs2.AppendTaskEvent(ctx, "task_test", TaskEvent{Type: "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err = fs2.ReadTaskEvents(ctx, "task_test")
+	if err != nil || len(events) != 2 || events[1].Seq != 2 {
+		t.Fatalf("events after recovery append = %v, %v", events, err)
+	}
+}
+
+func TestFileStoreRejectsOversizedLine(t *testing.T) {
+	fs, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := testStoreMessage(strings.Repeat("x", maxJSONLLineBytes))
+	if _, err := fs.AppendMessage(context.Background(), msg); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("AppendMessage oversized err = %v, want ErrTooLarge", err)
+	}
+	if _, err := os.Stat(fs.messagesPath("grp_test")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized message created log: %v", err)
+	}
+}
+
+func TestFileStoreConcurrentAppend(t *testing.T) {
+	fs, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 64
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	seqs := make([]int64, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			seq, err := fs.AppendMessage(ctx, testStoreMessage(fmt.Sprintf("m-%d", i)))
+			if err != nil {
+				t.Errorf("append %d: %v", i, err)
+				return
+			}
+			seqs[i] = seq
+		}(i)
+	}
+	wg.Wait()
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	for i, seq := range seqs {
+		if seq != int64(i+1) {
+			t.Fatalf("seqs[%d] = %d, want %d (all=%v)", i, seq, i+1, seqs)
+		}
+	}
+	msgs, err := fs.ReadMessages(ctx, "grp_test", 0, n)
+	if err != nil || len(msgs) != n {
+		t.Fatalf("ReadMessages after concurrent append = %d, %v", len(msgs), err)
+	}
+}
+
+func TestStoreConcurrentAllocateID(t *testing.T) {
+	fs, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var counter int64
+	var mu sync.Mutex
+	fs.idGen = func(string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		counter++
+		return fmt.Sprintf("ag_%06d", counter)
+	}
+	const n = 64
+	var wg sync.WaitGroup
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id, err := fs.AllocateID(context.Background(), PrefixAgent)
+			if err != nil {
+				t.Errorf("allocate %d: %v", i, err)
+				return
+			}
+			ids[i] = id
+		}(i)
+	}
+	wg.Wait()
+	seen := make(map[string]bool, n)
+	for _, id := range ids {
+		if seen[id] {
+			t.Fatalf("duplicate allocated id %q in %v", id, ids)
+		}
+		seen[id] = true
 	}
 }

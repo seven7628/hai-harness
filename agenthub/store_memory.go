@@ -303,12 +303,12 @@ func (s *MemoryStore) SaveTask(ctx context.Context, t *Task) error {
 	return nil
 }
 
-func (s *MemoryStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) error {
+func (s *MemoryStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) (int64, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	if !validID(string(id)) {
-		return ErrInvalid
+		return 0, ErrInvalid
 	}
 	if ev.At.IsZero() {
 		ev.At = nowUTC()
@@ -319,7 +319,7 @@ func (s *MemoryStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEve
 	ev.TaskID = id
 	s.taskEvent[id] = append(s.taskEvent[id], cloneTaskEvent(ev))
 	s.taskSeq[id] = ev.Seq
-	return nil
+	return ev.Seq, nil
 }
 
 func (s *MemoryStore) ReadTaskEvents(ctx context.Context, id TaskID) ([]TaskEvent, error) {
@@ -351,7 +351,12 @@ func (s *MemoryStore) ListTasks(ctx context.Context, filter TaskFilter) ([]*Task
 		}
 		out = append(out, cloneTask(t))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
 	return out, nil
 }
 
@@ -368,8 +373,7 @@ func (s *MemoryStore) LoadNeed(ctx context.Context, id NeedID) (*Need, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
-	cp := *n
-	return &cp, nil
+	return cloneNeed(n), nil
 }
 
 func (s *MemoryStore) SaveNeed(ctx context.Context, n *Need) error {
@@ -379,13 +383,13 @@ func (s *MemoryStore) SaveNeed(ctx context.Context, n *Need) error {
 	if n == nil || !validID(string(n.ID)) {
 		return ErrInvalid
 	}
-	cp := *n
-	if cp.CreatedAt.IsZero() {
-		cp.CreatedAt = nowUTC()
+	n = cloneNeed(n)
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = nowUTC()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.needs[cp.ID] = &cp
+	s.needs[n.ID] = n
 	return nil
 }
 
@@ -406,10 +410,14 @@ func (s *MemoryStore) ListNeeds(ctx context.Context, filter NeedFilter) ([]*Need
 		if filter.Status != "" && n.Status != filter.Status {
 			continue
 		}
-		cp := *n
-		out = append(out, &cp)
+		out = append(out, cloneNeed(n))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }
 
@@ -421,12 +429,11 @@ func (s *MemoryStore) SaveArtifact(ctx context.Context, a *Artifact) error {
 		return ErrInvalid
 	}
 	cp := *a
+	now := nowUTC()
 	if cp.CreatedAt.IsZero() {
-		cp.CreatedAt = nowUTC()
+		cp.CreatedAt = now
 	}
-	if cp.UpdatedAt.IsZero() {
-		cp.UpdatedAt = cp.CreatedAt
-	}
+	cp.UpdatedAt = now
 	if cp.Version == 0 {
 		cp.Version = 1
 	}
@@ -461,9 +468,7 @@ func (s *MemoryStore) SaveCursor(ctx context.Context, c *Cursor) error {
 		return ErrInvalid
 	}
 	cp := *c
-	if cp.UpdatedAt.IsZero() {
-		cp.UpdatedAt = nowUTC()
-	}
+	cp.UpdatedAt = nowUTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cursors[cursorKey(cp.GroupID, cp.AgentID)] = cp
@@ -528,7 +533,7 @@ func cloneMessage(m Message) Message {
 	if m.Refs != nil {
 		refs := make(map[string]any, len(m.Refs))
 		for k, v := range m.Refs {
-			refs[k] = v
+			refs[k] = cloneAnyValue(v)
 		}
 		m.Refs = refs
 	}
@@ -550,6 +555,7 @@ func cloneTask(t *Task) *Task {
 	cp := *t
 	cp.Chain = append([]TaskID(nil), t.Chain...)
 	cp.NotifiedRuns = cloneStrings(t.NotifiedRuns)
+	cp.Dispatch = cloneDispatch(t.Dispatch)
 	if t.Result != nil {
 		result := *t.Result
 		result.Artifacts = append([]TaskArtifact(nil), t.Result.Artifacts...)
@@ -558,13 +564,63 @@ func cloneTask(t *Task) *Task {
 	return &cp
 }
 
+func cloneDispatch(d Dispatch) Dispatch {
+	d.DispatchedAt = cloneTimePtr(d.DispatchedAt)
+	d.AcceptedAt = cloneTimePtr(d.AcceptedAt)
+	d.AgentStartAt = cloneTimePtr(d.AgentStartAt)
+	d.AgentEndAt = cloneTimePtr(d.AgentEndAt)
+	return d
+}
+
+func cloneTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := *t
+	return &v
+}
+
+func cloneNeed(n *Need) *Need {
+	cp := *n
+	cp.ResolvedAt = cloneTimePtr(n.ResolvedAt)
+	return &cp
+}
+
 func cloneTaskEvent(ev TaskEvent) TaskEvent {
 	if ev.Data != nil {
 		data := make(map[string]any, len(ev.Data))
 		for k, v := range ev.Data {
-			data[k] = v
+			data[k] = cloneAnyValue(v)
 		}
 		ev.Data = data
 	}
 	return ev
+}
+
+// cloneAnyValue 递归复制 JSON 形状的 map/切片；标量不可变，直接返回。
+func cloneAnyValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, v := range x {
+			out[k] = cloneAnyValue(v)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, v := range x {
+			out[i] = cloneAnyValue(v)
+		}
+		return out
+	case []string:
+		return append([]string(nil), x...)
+	case map[string]string:
+		out := make(map[string]string, len(x))
+		for k, v := range x {
+			out[k] = v
+		}
+		return out
+	default:
+		return v
+	}
 }

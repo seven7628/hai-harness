@@ -652,14 +652,16 @@ Run（一次 AgentLoop 运行：AgentStart → AgentEnd）
       handoffs/<handoffID>.json
       rounds/<roundID>.json    # 轮次快照（谁被 @、看到哪些 seq）
   tasks/
-    <taskID>.json              # 当前快照
-    events.jsonl               # 追加式状态迁移（审计/恢复）
+    <taskID>/
+      task.json                # 当前快照
+      events.jsonl             # 追加式状态迁移（审计/恢复；每任务独立 seq）
   needs/
     <needID>.json
   inbox/
     <agentID>.jsonl            # 待投递的唤醒（重启恢复）
   artifacts/
-    <artifactID>.json
+    <artifactID>/
+      artifact.json            # 产物登记记录（版本/可见性）
   hub.json                     # schema 版本、默认策略、迁移标记
 ```
 
@@ -1749,7 +1751,7 @@ func (bs *bridgeSession) finishHubTask(ae *events.AgentEnd) {
 #### 6.7.8 成本归因
 
 - `AgentEnd.Usage` 是**本次 run** 的用量；任务成本 = 该任务所有 run 的累加（含后续续跑）。
-- 记账写 `tasks/<id>.json` 的 `result.usage` + 全局 `metrics.jsonl`（现有 `MetricsEntry` 带
+- 记账写 `tasks/<id>/task.json` 的 `result.usage` + 全局 `metrics.jsonl`（现有 `MetricsEntry` 带
   `Workspace/SessionID/Provider/Model`）。
 - 智能体维度的日预算：按 `origin.agent_id` 聚合当天 `tasks` 的 cost；不依赖虚拟 workspace 名。
 - 群组维度：按 `origin.group_id` 聚合；UI 的「本群今日 $X」直接读账本，不扫 metrics。
@@ -3075,7 +3077,7 @@ codemode/cron/MCP/技能/插件），Profile 只做显式关闭。安全不靠�
 
 ### 10.2 日志与追踪
 
-- 每次 Hub 任务在 `tasks/events.jsonl` 留完整状态迁移（时间、reason、run_id）。
+- 每次 Hub 任务在 `tasks/<id>/events.jsonl` 留完整状态迁移（时间、reason、run_id）。
 - 每次群组路由在 `rounds/<rid>.json` 留 `targets/snapshot_seq/skipped`，用于「它看到了什么」。
 - `trace` 命令（现有）对 Hub 会话同样可用（session_id 是 `hub.*`）。
 - 错误信息必须可行动：provider 401 → 「去设置检查 key」，而不是「运行失败」。
@@ -3834,8 +3836,8 @@ type Store interface {
     // 任务账本
     LoadTask(ctx context.Context, id TaskID) (*Task, error)
     SaveTask(ctx context.Context, t *Task) error
-    AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) error
-    ReadTaskEvents(ctx context.Context, id TaskID) ([]TaskEvent, error) // 事件 seq 由 Store 分配
+    AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) (int64, error) // 返回分配的每任务 seq
+    ReadTaskEvents(ctx context.Context, id TaskID) ([]TaskEvent, error)
     ListTasks(ctx context.Context, filter TaskFilter) ([]*Task, error)
 
     // Needs you / artifacts / 游标
@@ -3853,12 +3855,15 @@ type Store interface {
 > `Cursor` / `Artifact` 产物记录）由 **P0-02** 在 `agenthub/store_types.go` 定义。
 > `TaskEvent.Seq` 是每任务单调序号（Store 分配），恢复时从 `events.jsonl` 重建；
 > `LoadCursor` 返回完整 `*Cursor`，不能只取 `human_read_seq` 而丢掉 `agent_context_seq`。
+> `SaveCursor` 是整行替换；两个游标字段由不同调用方更新时必须串行，或由 Service 提供字段级推进。
 > `TaskArtifact` 只是任务结果摘要，不是可版本化的产物记录；两者不要混用。
 
 **FileStore 实现要点**：
 
 - 每个实体的 JSON 原子写（tmp+rename+fsync 可选）；
-- 日志追加带 `O_APPEND`，写前分配 seq（per-group mutex）；
+- 日志追加带 `O_APPEND`，写前分配 seq（per-group mutex）；短写/fsync 失败截回写入前偏移；
+- 启动时只容忍日志尾部“最后一行不完整”并截断到最后完整行；中间坏行仍返回 `ErrCorrupt`；
+- 单行 JSONL 超过 `maxJSONLLineBytes`（8 MiB）在写入前拒绝，避免“写得进、读不出”；
 - 启动时 `RebuildIndex()`：扫 `log.jsonl` 尾部、`tasks/events.jsonl`，修正内存索引；
 - 所有路径用 `filepath.Join(root, safePath)`，拒绝 `..`；目录 0700，文件 0600；
 - 测试用 `MemoryStore`（同接口），不碰真实 home。

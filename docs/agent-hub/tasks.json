@@ -71,9 +71,10 @@
       "files": [
         "agenthub/store.go",
         "agenthub/store_types.go",
-        "agenthub/store_test.go"
+        "agenthub/store_test.go",
+        "agenthub/store_memory.go"
       ],
-      "acceptance": "Store DTO（Activity/TaskEvent/TaskFilter/Need/NeedFilter/Cursor/Artifact 记录）；JSON 原子写；日志 seq 单调；6 位 base32 ID 碰撞用 O_EXCL/存在检查+重新生成（或升级 8 位）；启动可从 log/events 重建索引；schema_version 迁移；MemoryStore 可测。",
+      "acceptance": "Store DTO（Activity/TaskEvent/TaskFilter/Need/NeedFilter/Cursor/Artifact 记录）；JSON 原子写；日志 seq 单调；6 位 base32 ID 碰撞用 O_EXCL/存在检查+重新生成（或升级 8 位）；启动可从 log/events 重建索引，日志尾部半行截断恢复（中间坏行仍 ErrCorrupt）；单行 >8MiB 写前拒绝；schema_version 迁移；MemoryStore 可测。",
       "tests": "go test ./agenthub/ -run Store",
       "commit": "feat(hub-p0-02): FileStore 与恢复/迁移"
     },

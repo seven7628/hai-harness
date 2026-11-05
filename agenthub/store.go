@@ -2,10 +2,12 @@ package agenthub
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,7 +16,7 @@ import (
 	"time"
 )
 
-// ErrNotFound / ErrInvalid / ErrConflict / ErrCorrupt / ErrUnsupportedSchema
+// ErrNotFound / ErrInvalid / ErrConflict / ErrCorrupt / ErrUnsupportedSchema / ErrTooLarge
 // 是 Store 层对调用方的稳定错误分类；上层用 errors.Is 判断，不解析字符串。
 var (
 	ErrNotFound          = errors.New("agenthub: not found")
@@ -22,9 +24,17 @@ var (
 	ErrConflict          = errors.New("agenthub: conflict")
 	ErrCorrupt           = errors.New("agenthub: corrupt")
 	ErrUnsupportedSchema = errors.New("agenthub: unsupported schema")
+	ErrTooLarge          = errors.New("agenthub: too large")
 )
 
 // Store 是 Hub 的持久化接口。领域规则不依赖具体实现；FileStore 落盘，MemoryStore 供测试/评测。
+//
+// 契约：
+//   - 实体缺失（LoadAgent/LoadTask/...）返回 ErrNotFound；
+//   - 集合缺失（List*/ReadMessages/ReadActivity/ReadTaskEvents）返回空 slice，不返回错误；
+//   - 游标缺失返回零值 *Cursor（GroupID/AgentID 已填），不返回 ErrNotFound；
+//   - Store 是哑持久化层：名字/角色/状态迁移等领域不变量由 Service 校验；
+//   - AppendMessage 只接收群日志（GroupID 非空）；DM 走 agent session 存储。
 type Store interface {
 	// ID 分配：6 位 base32 有碰撞概率，必须检查目标文件/索引后重试。
 	AllocateID(ctx context.Context, prefix string) (string, error)
@@ -46,7 +56,7 @@ type Store interface {
 
 	LoadTask(ctx context.Context, id TaskID) (*Task, error)
 	SaveTask(ctx context.Context, t *Task) error
-	AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) error
+	AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) (int64, error)
 	ReadTaskEvents(ctx context.Context, id TaskID) ([]TaskEvent, error)
 	ListTasks(ctx context.Context, filter TaskFilter) ([]*Task, error)
 
@@ -88,6 +98,7 @@ type hubMeta struct {
 //	cursors/<gid>/<agent>.json
 //
 // 实体用 tmp+rename 原子写；日志用 O_APPEND 单行追加并 fsync。
+// FileStore 假定同一 root 只有一个写者进程（bridge）；不做跨进程 flock，多开会得到未定义结果。
 type FileStore struct {
 	root string
 
@@ -173,7 +184,7 @@ func (s *FileStore) rebuildIndex() error {
 	}
 	for _, path := range matches {
 		gid := GroupID(filepath.Base(filepath.Dir(path)))
-		msgs, err := readJSONL[Message](path)
+		msgs, err := readJSONLTolerantTail[Message](path)
 		if err != nil {
 			return err
 		}
@@ -192,7 +203,7 @@ func (s *FileStore) rebuildIndex() error {
 	}
 	for _, path := range eventMatches {
 		tid := TaskID(filepath.Base(filepath.Dir(path)))
-		events, err := readJSONL[TaskEvent](path)
+		events, err := readJSONLTolerantTail[TaskEvent](path)
 		if err != nil {
 			return err
 		}
@@ -211,6 +222,7 @@ func (s *FileStore) AllocateID(ctx context.Context, prefix string) (string, erro
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	// Round ID 由上层按轮次生成，不进 Store；reserved 只在进程生命周期内增长，不回收。
 	if !knownPrefix(prefix) || prefix == PrefixRound {
 		return "", fmt.Errorf("%w: prefix %q", ErrInvalid, prefix)
 	}
@@ -337,16 +349,19 @@ func (s *FileStore) AppendMessage(ctx context.Context, m *Message) (int64, error
 	defer s.mu.Unlock()
 
 	seq := s.seq[m.GroupID] + 1
-	m.Seq = seq
+	// 成功落盘后才改调用方对象；失败时不能让它带着一个没写进 log 的 seq。
+	stored := *m
+	stored.Seq = seq
 	// 消息 ID 是 seq 的确定函数；忽略调用方传入值，避免写出不符合协议的 ID。
-	m.ID = MessageID(seq)
-	if m.CreatedAt.IsZero() {
-		m.CreatedAt = time.Now().UTC()
+	stored.ID = MessageID(seq)
+	if stored.CreatedAt.IsZero() {
+		stored.CreatedAt = time.Now().UTC()
 	}
-	if err := appendJSONL(s.messagesPath(m.GroupID), m); err != nil {
+	if err := appendJSONL(s.messagesPath(m.GroupID), &stored); err != nil {
 		return 0, err
 	}
 	s.seq[m.GroupID] = seq
+	*m = stored
 	return seq, nil
 }
 
@@ -403,10 +418,17 @@ func (s *FileStore) AppendActivity(ctx context.Context, a *Activity) error {
 	if a == nil || !validID(string(a.GroupID)) {
 		return fmt.Errorf("%w: activity group", ErrInvalid)
 	}
-	if a.At.IsZero() {
-		a.At = time.Now().UTC()
+	cp := *a
+	if cp.At.IsZero() {
+		cp.At = time.Now().UTC()
 	}
-	return appendJSONL(s.activityPath(a.GroupID), a)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := appendJSONL(s.activityPath(cp.GroupID), &cp); err != nil {
+		return err
+	}
+	*a = cp
+	return nil
 }
 
 func (s *FileStore) ReadActivity(ctx context.Context, gid GroupID, afterSeq int64, limit int) ([]Activity, error) {
@@ -417,7 +439,9 @@ func (s *FileStore) ReadActivity(ctx context.Context, gid GroupID, afterSeq int6
 		return nil, fmt.Errorf("%w: group id %q", ErrInvalid, gid)
 	}
 	limit = normalizeLimit(limit)
+	s.mu.Lock()
 	items, err := readJSONL[Activity](s.activityPath(gid))
+	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -458,12 +482,12 @@ func (s *FileStore) SaveTask(ctx context.Context, t *Task) error {
 	return writeJSONAtomic(s.taskPath(t.ID), t)
 }
 
-func (s *FileStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) error {
+func (s *FileStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) (int64, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	if !validID(string(id)) {
-		return fmt.Errorf("%w: task id %q", ErrInvalid, id)
+		return 0, fmt.Errorf("%w: task id %q", ErrInvalid, id)
 	}
 	if ev.At.IsZero() {
 		ev.At = time.Now().UTC()
@@ -473,10 +497,10 @@ func (s *FileStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent
 	ev.Seq = s.taskSeq[id] + 1
 	ev.TaskID = id
 	if err := appendJSONL(s.taskEventsPath(id), &ev); err != nil {
-		return err
+		return 0, err
 	}
 	s.taskSeq[id] = ev.Seq
-	return nil
+	return ev.Seq, nil
 }
 
 func (s *FileStore) ReadTaskEvents(ctx context.Context, id TaskID) ([]TaskEvent, error) {
@@ -515,6 +539,9 @@ func (s *FileStore) ListTasks(ctx context.Context, filter TaskFilter) ([]*Task, 
 		out = append(out, &t)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].ID < out[j].ID
+		}
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
 	return out, nil
@@ -573,7 +600,12 @@ func (s *FileStore) ListNeeds(ctx context.Context, filter NeedFilter) ([]*Need, 
 		}
 		out = append(out, &n)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }
 
@@ -585,12 +617,11 @@ func (s *FileStore) SaveArtifact(ctx context.Context, a *Artifact) error {
 		return fmt.Errorf("%w: artifact", ErrInvalid)
 	}
 	cp := *a
+	now := time.Now().UTC()
 	if cp.CreatedAt.IsZero() {
-		cp.CreatedAt = time.Now().UTC()
+		cp.CreatedAt = now
 	}
-	if cp.UpdatedAt.IsZero() {
-		cp.UpdatedAt = cp.CreatedAt
-	}
+	cp.UpdatedAt = now
 	if cp.Version == 0 {
 		cp.Version = 1
 	}
@@ -619,9 +650,7 @@ func (s *FileStore) SaveCursor(ctx context.Context, c *Cursor) error {
 		return fmt.Errorf("%w: cursor", ErrInvalid)
 	}
 	cp := *c
-	if cp.UpdatedAt.IsZero() {
-		cp.UpdatedAt = time.Now().UTC()
-	}
+	cp.UpdatedAt = time.Now().UTC()
 	return writeJSONAtomic(s.cursorPath(cp.GroupID, cp.AgentID), &cp)
 }
 
@@ -735,6 +764,11 @@ func writeJSONAtomic(path string, v any) error {
 		os.Remove(tmpName)
 		return err
 	}
+	// rename 的可见性已原子；再 fsync 父目录，降低掉电后目录项丢失的概率。
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
 
@@ -758,6 +792,9 @@ func appendJSONL(path string, v any) error {
 		return fmt.Errorf("marshal %s: %w", path, err)
 	}
 	data = append(data, '\n')
+	if len(data) > maxJSONLLineBytes {
+		return fmt.Errorf("%w: %s line %d > %d", ErrTooLarge, path, len(data), maxJSONLLineBytes)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -765,17 +802,36 @@ func appendJSONL(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
+	before, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
+	rollback := func() {
+		// 短写/fsync 失败时把文件截回写入前，避免残片与下一行粘连成永久坏行。
+		_ = f.Truncate(before)
+		_ = f.Sync()
+		_ = f.Close()
+	}
+	n, err := f.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if err != nil {
+		rollback()
 		return err
 	}
-	return f.Close()
+	// Sync 已成功；Close 的迟到错误不改变“数据已持久化”的事实，
+	// 不能让调用方以为没写而复用同一个 seq。
+	_ = f.Close()
+	return nil
 }
 
+// readJSONL 读取 JSONL；不限制单行长度（写入侧由 appendJSONL 的 maxJSONLLineBytes 兜底）。
+// 中间行损坏返回 ErrCorrupt；最后一行不完整由 readJSONLTolerantTail 在启动时截断。
 func readJSONL[T any](path string) ([]T, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -786,26 +842,92 @@ func readJSONL[T any](path string) ([]T, error) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxJSONLLineBytes)
+	reader := bufio.NewReader(f)
 	var out []T
 	line := 0
-	for scanner.Scan() {
-		line++
-		raw := strings.TrimSpace(scanner.Text())
-		if raw == "" {
-			continue
+	for {
+		chunk, readErr := reader.ReadBytes('\n')
+		if len(chunk) > 0 {
+			line++
+			raw := bytes.TrimSpace(chunk)
+			if len(raw) > 0 {
+				var v T
+				if err := json.Unmarshal(raw, &v); err != nil {
+					return nil, fmt.Errorf("%w: %s:%d: %v", ErrCorrupt, path, line, err)
+				}
+				out = append(out, v)
+			}
 		}
-		var v T
-		if err := json.Unmarshal([]byte(raw), &v); err != nil {
-			return nil, fmt.Errorf("%w: %s:%d: %v", ErrCorrupt, path, line, err)
+		if readErr == io.EOF {
+			return out, nil
 		}
-		out = append(out, v)
+		if readErr != nil {
+			return nil, readErr
+		}
 	}
-	if err := scanner.Err(); err != nil {
+}
+
+// readJSONLTolerantTail 与 readJSONL 相同，但只容忍“最后一行没有换行且 JSON 不完整”——
+// 崩溃/断电最可能留下的就是这种半行。它把文件截断到最后一个完整行并 fsync；
+// 中间行损坏仍然返回 ErrCorrupt，不能静默跳过。
+func readJSONLTolerantTail[T any](path string) ([]T, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	defer f.Close()
+
+	reader := bufio.NewReader(f)
+	var out []T
+	var offset int64
+	line := 0
+	for {
+		chunk, readErr := reader.ReadBytes('\n')
+		if len(chunk) > 0 {
+			line++
+			raw := bytes.TrimSpace(chunk)
+			if len(raw) > 0 {
+				var v T
+				if err := json.Unmarshal(raw, &v); err != nil {
+					partialTail := readErr == io.EOF && !bytes.HasSuffix(chunk, []byte{'\n'})
+					if !partialTail {
+						return nil, fmt.Errorf("%w: %s:%d: %v", ErrCorrupt, path, line, err)
+					}
+					if err := truncateFile(path, offset); err != nil {
+						return nil, err
+					}
+					return out, nil
+				}
+				out = append(out, v)
+			}
+			offset += int64(len(chunk))
+		}
+		if readErr == io.EOF {
+			return out, nil
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+}
+
+func truncateFile(path string, size int64) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func normalizeLimit(limit int) int {
