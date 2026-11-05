@@ -751,6 +751,11 @@ type workspaceRuntime struct {
 `projectMCPLayers`、`autoEnablePlugins`、git 状态检测，`main.go:1096-1207` 那段）。
 两个入口分开，避免「靠路径字符串猜类型」这种脆弱判断（用户完全可能有个项目恰好叫 `hub`）。
 
+**登记位置（P0-08）**：智能体运行时登记在 `manager.hubRuntimes`（key = agentID），
+**不放进** `m.workspaces` —— 后者的所有遍历都是项目语义（`workspace_list` / `reload_settings` /
+MCP 配置重放 / cron 归档），混进去等于把智能体当成一个项目。`shutdownAll` 一并收尾
+（停监听/探活 + 关 MCP 连接）。
+
 `hubRuntime` 的字段：`kind/agentID/storeDir/eventsDir/sessions` + **全局工具装配**
 （`skills` 只扫全局层、`mcp` 用全局 MCP 配置构造、`plugins` 只加载已启用的全局插件、
 `cron`/`codemode`/`browser`/`computer` 按设置与 Profile 开关装配）。项目级插件/项目级 MCP
@@ -3436,15 +3441,28 @@ P0 ──► P1 ──► P2 ──► P3a ──► P3b ──► P4
 
 ### 15.4 待确认的现状细节（实现前要复核）
 
-1. `Session` 是否已有 `PendingCount` 等价的公开方法（当前未看到；计划新增）。
+1. ~~`Session` 是否已有 `PendingCount` 等价的公开方法~~ —— **已新增（P0-07）**：
+   `PendingCount() = len(inbox) + 未搬进 inbox 的恢复积压`；恢复时在 State 副本上
+   清空 Pending（防双算），超过 inbox 缓冲先扩容（构造期没有消费者，直接 send 会死锁），
+   `store == nil` + `WithRecoveryState` 在构造期直接报错（半恢复会话会让闸门恒忙）。
 2. `UserInputsConsumed` 在 `Injected=true` 时的绑定行为（§6.7.5 依赖它）。
-3. `skills.Registry` 是否有「只扫全局层」的构造方式（P2 智能体技能）。
+3. ~~`skills.Registry` 是否有「只扫全局层」的构造方式~~ —— **已复核（P0-08）**：
+   `skills.NewLayeredRegistry` 是变参，传 `agentSkillsDir()`/`globalSkillsDir()` 两层即可；
+   `subagent.NewLayeredDefinitionRegistry` 同理。hubRuntime 已按此实现。
 4. 前端 `Narrative` 是否已虚拟化（群组长列表性能）。
 5. `metrics.jsonl` 的 schema 是否允许新增 `agent_id/group_id`（现有 `MetricsEntry` 的兼容性）。
 6. 手机端命令白名单的具体位置（P4 开放 Hub 时要改）。
-7. `desktop/bridge` 测试包当前可能缺 helper（`testManager`/`syncBuf`/`findFirst`/`cmd` 等），
-   任何提交下 `go test ./desktop/bridge/` 都可能编译失败。P0-09 必须先把测试包补到可编译，
-   否则 P1/P2 的「测试绿」门禁形同虚设（不要用 `go build` 代替测试门禁）。
+7. ~~`desktop/bridge` 测试包当前可能缺 helper~~ —— **已在 P0-08 前置修复**（`06231fa`）：
+   根因是 `.git/info/exclude`（本机专属）藏了 262 个 `_test.go`，定义 helper 的那些从未入库，
+   所以本机全绿、干净检出连编译都不过。已补回 bridge 的 7 个测试文件 + `mcp/testdata/server`
+   fixture（后者被 `.gitignore` 的 `testdata/` 规则误伤，与 `agenthub/testdata/l1.golden` 同类）。
+   **仍然断**（各自任务处理，不在 P0 范围）：`agents` / `mcp` / `provider` / `subagent` / `tools`。
+   判据只有一个——干净检出：
+   ```bash
+   git clone --no-hardlinks -b agent-hub . /tmp/x && cd /tmp/x
+   go test ./desktop/bridge/ ./session/ -run=ZZZNONE   # 只编译
+   ```
+   本机 `go test` 绿不构成证据（macOS 大小写不敏感文件系统 + 本机 excludes 会掩盖问题）。
 
 ---
 
@@ -4244,6 +4262,31 @@ feat(hub-p0-01): agenthub 包骨架与领域类型
 | P0-07 | 内核小改：`ContentTypeHubTask`、`PendingCount` |
 | P0-08 | bridge runtime 拆分：`createIn`/`hubRuntime` |
 | P0-09 | P0 Review + 回归 |
+
+#### 19.3.1 P0 落地记录（2026-11）
+
+| ID | 结论 | 关键 commit |
+|---|---|---|
+| P0-01 | 领域类型 + 校验骨架；可见性/Scope 的零值语义在 P0-04 收紧 | `e15b3b2` `a8f5743` |
+| P0-02 | FileStore：尾行截断恢复、写前限长、短写回滚、事件 seq、内存/文件双实现深拷贝一致 | `d281f8f` `57d72db` |
+| P0-03 | `Validate` 零值放行、严格 `ValidateAgentID/ValidateGroupID`（防 `ag_../x`）、副本 Normalize | `8ca9a16` |
+| P0-04 | `VisibleTo` 改**白名单 fail-closed**（智能体只见空值/`group`）、`Redacted`、`ParseAuthorized` 原子鉴权 | `3e768da` |
+| P0-05 | 状态机 + 账本：`MarkNotified` 仅 settled、`Finish` 校验 run_id、每事件完整快照、per-task 进程级锁 | `369517d` |
+| P0-06 | L1 协议文案 + 名册；**逐字节 golden**（`agenthub/testdata/l1.golden`），文案漂移必须在 diff 里显式改 golden | `3b5c9ea` `1eb129f` |
+| P0-07 | `core.ContentTypeHubTask`（provider 按文本送出、不算用户输入）、`Session.PendingCount()` | `4d0f84c` `940e01e` `6e7a0e3` |
+| P0-08 | `createOpts → createIn(ws)`；`hubRuntime` 只吃全局层、登记在 `manager.hubRuntimes`；`buildLoop` 改吃 runtime | `8092b4c` `9f94391` `8c9f5e7` |
+| P0-09 | 回归门禁：干净检出下 `agenthub`/`session`/`desktop/bridge` 全绿（见 §15.4 第 7 条） | 本篇 |
+
+**P0 期间暴露的三类系统性问题**（都按「先修地基再加功能」处理）：
+
+1. **`.git/info/exclude` 藏了测试文件**：本机全绿、干净检出连编译都不过（`session` 缺
+   `testSessionRecord`、`desktop/bridge` 缺 7 个 helper 文件）。已补回并能干净复现；
+   `agents`/`mcp`/`provider`/`subagent`/`tools` 仍断，各自任务处理。
+2. **`.gitignore` 的 `testdata/` 吞掉测试夹具**：`agenthub/testdata/l1.golden`（契约文案）、
+   `mcp/testdata/server`（e2e fixture）都曾进不了库 → 加显式例外。
+3. **「注释说容忍、代码不容忍」的契约反转**：P0-03 的 `Validate` 零值、P0-04 的可见性
+   都是这种情况（注释/文档写的是 fail-open，实现却是 fail-closed 或反之）。规矩：
+   这类契约一律用**白名单 + 测试反证**（mutation 能让测试失败）固定下来。
 
 **P1 · 单智能体 DM（10）**
 

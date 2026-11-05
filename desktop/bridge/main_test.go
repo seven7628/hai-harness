@@ -2605,6 +2605,9 @@ func TestPromoteTaskCommandErrors(t *testing.T) {
 // TestPromoteTaskCommandSuccess 端到端：运行中长工具 → promote_task → 主 loop 拿占位继续 →
 // release → 结果自动回传（task_result_delivered）→ wake 唤醒 run loop → 模型续跑收到结果。
 func TestPromoteTaskCommandSuccess(t *testing.T) {
+	// 等待预算 10s（原 3s）：干净 clone 首次全量跑时，其它包的编译与测试并行抢 CPU，
+	// 3s 会让「promote → 占位 → task_result 回传」这种多段唤醒链偶发超时
+	// （P0-09 的干净检出 gate 上实际踩到过一次）。断言内容不变，只放宽等待。
 	ws := t.TempDir()
 	m, buf := testManager(t)
 	sid := newSessionID(t, m, buf, ws)
@@ -2656,7 +2659,7 @@ func TestPromoteTaskCommandSuccess(t *testing.T) {
 			taskID = str(ev, "task_id")
 		}
 		return ev != nil
-	}, 3*time.Second)
+	}, 10*time.Second)
 
 	// promote_task → ok:true
 	buf.Reset()
@@ -2666,16 +2669,16 @@ func TestPromoteTaskCommandSuccess(t *testing.T) {
 	}
 
 	// 主 run 拿到占位 → 下轮 stop → 第一次 agent_end
-	waitBridgeString(t, buf, func(s string) bool { return countAgentEnd(s) >= 1 }, 3*time.Second)
+	waitBridgeString(t, buf, func(s string) bool { return countAgentEnd(s) >= 1 }, 10*time.Second)
 
 	// release → 后台完成 → task_result_delivered 自动回传 + wake 唤醒 run loop
 	block.Release()
 	waitBridgeString(t, buf, func(s string) bool {
 		return findFirst(s, func(mm map[string]any) bool { return mm["event_type"] == "task_result_delivered" }) != nil
-	}, 3*time.Second)
+	}, 10*time.Second)
 
 	// wake 生效：run loop 再次运行，round3 模型收到 task_result 续跑（第二次 agent_end）
-	waitBridgeString(t, buf, func(s string) bool { return countAgentEnd(s) >= 2 }, 3*time.Second)
+	waitBridgeString(t, buf, func(s string) bool { return countAgentEnd(s) >= 2 }, 10*time.Second)
 	mu.Lock()
 	gotResult := p.round3TaskResult
 	mu.Unlock()
