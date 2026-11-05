@@ -61,12 +61,26 @@ func (q *Queue) Submit(ctx context.Context, t *Task) (*Task, error) {
 	if strings.TrimSpace(t.Instruction) == "" {
 		return nil, fmt.Errorf("%w: instruction 不能为空", ErrInvalid)
 	}
+	// 幂等：同一 (target, client_msg_id) 已存在就直接返回原任务，不再建账/入队。
+	// 锁覆盖「查找 + 建账 + 入队」：并发同 id 不能双建（P2-02 复审 B2）。
+	q.mu.Lock()
+	if t.ClientMsgID != "" {
+		existing, ferr := q.ledger.FindByClientMsgID(ctx, t.Target, t.ClientMsgID)
+		if ferr != nil {
+			q.mu.Unlock()
+			return nil, ferr
+		}
+		if existing != nil {
+			q.mu.Unlock()
+			return existing, nil
+		}
+	}
 	created, err := q.ledger.Create(ctx, t)
 	if err != nil {
+		q.mu.Unlock()
 		return nil, err
 	}
 	key := queueKey(created.Target.Workspace, created.Target.SessionID)
-	q.mu.Lock()
 	q.pending[key] = append(q.pending[key], created.ID)
 	q.mu.Unlock()
 	dispatched, err := q.Pump(ctx, created.Target)
@@ -121,12 +135,13 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	q.pending[key] = ids[1:]
 	header, _ := EncodeTaskHeader(dispatched)
 	res, err := q.ops.Dispatch(ctx, DispatchReq{
-		AgentID:     dispatched.Origin.AgentID,
-		Workspace:   dispatched.Target.Workspace,
-		SessionID:   dispatched.Target.SessionID,
-		Text:        dispatched.Instruction,
-		ClientMsgID: string(dispatched.ID), // 重试沿用同一 id，目标侧幂等
-		TaskHeader:  header,                // 目标会话据此绑定 task（§6.7.2）
+		AgentID:   dispatched.Origin.AgentID,
+		Workspace: dispatched.Target.Workspace,
+		SessionID: dispatched.Target.SessionID,
+		Text:      dispatched.Instruction,
+		// 有调用方幂等键就用它（目标侧去重表按此判重）；没有才回落到账本 id。
+		ClientMsgID: dispatchClientMsgID(dispatched),
+		TaskHeader:  header, // 目标会话据此绑定 task（§6.7.2）
 	})
 	if err != nil {
 		// 已 dispatched 再落 failed：状态机有序，账本里有失败原因可查。
@@ -148,4 +163,15 @@ func (q *Queue) QueuedCount(workspace, sessionID string) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.pending[queueKey(workspace, sessionID)])
+}
+
+// dispatchClientMsgID 派发时使用的幂等键：优先调用方给的 client_msg_id。
+func dispatchClientMsgID(t *Task) string {
+	if t == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(t.ClientMsgID); id != "" {
+		return id
+	}
+	return string(t.ID)
 }

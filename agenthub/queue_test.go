@@ -298,3 +298,38 @@ func TestQueueTargetGoneCancelsHead(t *testing.T) {
 		t.Fatalf("ledger status = %s, want canceled", got.Status)
 	}
 }
+
+// P2-02 复审 B2：Queue 模式必须保留调用方 client_msg_id，同 id 重试返回同一台账本任务。
+func TestQueueSubmitClientMsgIDIdempotent(t *testing.T) {
+	ops := &queueFakeOps{running: true}
+	q, _ := newTestQueue(t, ops)
+	mk := func(text string) *Task {
+		t := queueTask(text)
+		t.ClientMsgID = "client-key-1"
+		return t
+	}
+	a, err := q.Submit(context.Background(), mk("第一次"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := q.Submit(context.Background(), mk("第二次（重试）"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != b.ID {
+		t.Fatalf("same client id created two tasks: %s vs %s", a.ID, b.ID)
+	}
+	if got := q.QueuedCount("/w", "s1"); got != 1 {
+		t.Fatalf("queued = %d, want 1", got)
+	}
+	ops.running = false
+	if _, err := q.Pump(context.Background(), a.Target); err != nil {
+		t.Fatal(err)
+	}
+	if len(ops.dispatched) != 1 || ops.dispatched[0].ClientMsgID != "client-key-1" {
+		t.Fatalf("dispatch client id = %+v", ops.dispatched)
+	}
+	if ops.dispatched[0].Text != "第一次" {
+		t.Fatalf("dispatched text = %q, want first submission", ops.dispatched[0].Text)
+	}
+}

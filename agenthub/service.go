@@ -131,6 +131,7 @@ func (s *WorkspaceService) Send(ctx context.Context, workspace, sessionID, text,
 			Title:       firstLine(text),
 			Instruction: text,
 			Callback:    CallbackAgentEnd,
+			ClientMsgID: clientMsgID, // 原样透传：同一 id 重试返回同一账本任务
 		}
 		created, err := s.Queue.Submit(ctx, t)
 		if err != nil {

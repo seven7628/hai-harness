@@ -171,8 +171,14 @@ func (o *hubWorkspaceOps) ListSessions(ctx context.Context, workspace string) ([
 		if bs := o.m.get(path, info.ID); bs != nil {
 			info.Pending = bs.s.PendingCount()
 		}
-		if v, ok := row["updated_at"].(time.Time); ok {
+		switch v := row["updated_at"].(type) {
+		case time.Time:
 			info.UpdatedAt = &v
+		case int64: // listSessions 的 updated_at 是毫秒时间戳（不是 time.Time）
+			if v > 0 {
+				t := time.UnixMilli(v).UTC()
+				info.UpdatedAt = &t
+			}
 		}
 		out = append(out, info)
 	}
@@ -253,19 +259,23 @@ func (o *hubWorkspaceOps) CreateSession(ctx context.Context, req agenthub.Create
 		return agenthub.SessionInfo{}, err
 	}
 	now := time.Now().UTC()
-	info := agenthub.SessionInfo{ID: id, Workspace: path, Title: req.Title, UpdatedAt: &now}
-	if info.Title == "" {
-		info.Title = "新会话"
-	}
+	info := agenthub.SessionInfo{ID: id, Workspace: path, UpdatedAt: &now}
 	if bs != nil {
 		info.Running = bs.running.Load()
 	}
-	if title := strings.TrimSpace(req.Title); title != "" {
-		// 标题必须走现有 session_manual_titles（titles.json）机制：只回显不落盘
-		// 会让 session_create 说「已建 评审标题」而 session_list 显示 New Chat（P2-02 B1）。
-		sessionManualTitles.set(workspaceKey(path), id, title)
-		info.Title = title
+	// 标题统一 trim + 80 rune（与 session_rename 一致）；空标题落 defaultSessionTitle，
+	// 否则 create 回显「新会话」而 list 显示 New Chat（P2-02 复审 B1 残留）。
+	title := []rune(strings.TrimSpace(req.Title))
+	if len(title) == 0 {
+		title = []rune(defaultSessionTitle)
 	}
+	if len(title) > 80 {
+		title = title[:80]
+	}
+	info.Title = string(title)
+	// 标题必须走现有 session_manual_titles（titles.json）机制：只回显不落盘
+	// 会让 session_create 说「已建 评审标题」而 session_list 显示 New Chat（P2-02 B1）。
+	sessionManualTitles.set(workspaceKey(path), id, info.Title)
 	return info, nil
 }
 

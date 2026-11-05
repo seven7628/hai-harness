@@ -246,7 +246,7 @@ func newHubSessionSendTool(svc *agenthub.WorkspaceService) *hubSessionSendTool {
 				"workspace":     tools.Str("Workspace path from workspace_list"),
 				"session_id":    tools.Str("Session id from session_list"),
 				"text":          tools.Str("Task text for the project session"),
-				"client_msg_id": tools.Str("Optional idempotency key: retries with the same id are de-duplicated (P2-03 also uses the task id)"),
+				"client_msg_id": tools.Str("Optional idempotency key: a retry with the same id returns the same ledger task instead of creating another"),
 			}, "workspace", "session_id", "text"),
 			CanParallel_: false,
 			ReadOnly_:    false,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -128,6 +129,34 @@ func (l *Ledger) Create(ctx context.Context, t *Task) (*Task, error) {
 		return nil, err
 	}
 	return t, nil
+}
+
+// FindByClientMsgID 按 (target, client_msg_id) 找已存在任务（派发幂等）。
+// 空 id 返回 (nil, nil)；找到返回最新的一条（账本 append-only，ID 不复用）。
+func (l *Ledger) FindByClientMsgID(ctx context.Context, target TaskTarget, clientMsgID string) (*Task, error) {
+	if l == nil || l.store == nil {
+		return nil, fmt.Errorf("%w: ledger has no store", ErrInvalid)
+	}
+	if strings.TrimSpace(clientMsgID) == "" {
+		return nil, nil
+	}
+	all, err := l.store.ListTasks(ctx, TaskFilter{})
+	if err != nil {
+		return nil, err
+	}
+	var hit *Task
+	for _, t := range all {
+		if t == nil || t.ClientMsgID != clientMsgID {
+			continue
+		}
+		if t.Target.Kind != target.Kind || t.Target.Workspace != target.Workspace || t.Target.SessionID != target.SessionID {
+			continue
+		}
+		if hit == nil || t.CreatedAt.After(hit.CreatedAt) {
+			hit = t
+		}
+	}
+	return hit, nil
 }
 
 // Transition 校验并落盘一次状态迁移；同状态重放不追加事件（除非显式补 RunID/结果）。

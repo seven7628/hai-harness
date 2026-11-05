@@ -106,15 +106,18 @@ type TaskResult struct {
 
 // Task 是 Hub 的任务账本条目。一条链的根是 RootTaskID，护栏按链聚合。
 type Task struct {
-	ID              TaskID      `json:"id"`
-	RootTaskID      TaskID      `json:"root_task_id"`
-	ParentTaskID    TaskID      `json:"parent_task_id,omitempty"`
-	Chain           []TaskID    `json:"chain"`
-	Origin          TaskOrigin  `json:"origin"`
-	Target          TaskTarget  `json:"target"`
-	Title           string      `json:"title"`
-	Instruction     string      `json:"instruction"`
-	Callback        string      `json:"callback"`
+	ID           TaskID     `json:"id"`
+	RootTaskID   TaskID     `json:"root_task_id"`
+	ParentTaskID TaskID     `json:"parent_task_id,omitempty"`
+	Chain        []TaskID   `json:"chain"`
+	Origin       TaskOrigin `json:"origin"`
+	Target       TaskTarget `json:"target"`
+	Title        string     `json:"title"`
+	Instruction  string     `json:"instruction"`
+	Callback     string     `json:"callback"`
+	// ClientMsgID 是派发方给的幂等键（session_send 原样传入）；空 = 无幂等要求。
+	// 与目标侧去重表共用同一个值，跨进程由账本按 (target, client_msg_id) 查找兜底。
+	ClientMsgID     string      `json:"client_msg_id,omitempty"`
 	Status          TaskStatus  `json:"status"`
 	Attempt         int         `json:"attempt"`
 	Dispatch        Dispatch    `json:"dispatch"`

@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -206,5 +208,133 @@ func TestHubAgentEndPumpsQueuedTask(t *testing.T) {
 	}
 	if ops == nil {
 		t.Fatal("unreachable")
+	}
+}
+
+// P2-02 复审 B2：生产链路（Hub engine 的 session_send → Service → Queue）同
+// client_msg_id 必须返回同一账本任务，不能建两条。
+func TestHubSessionSendClientMsgIDIdempotent(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "DedupAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	_, _, hubData := hubCmd(t, m, buf, 2, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "DedupHub", "provider": "deepseek", "model": "deepseek-v4-flash", "role": "派发"},
+	})
+	hubAgent := agentFromData(t, hubData)
+	hubBS, err := m.hubDMSession(string(hubAgent.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := m.create(wsPath, "s-dedup", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.running.Store(true) // 目标忙：两条都留在队列里
+	tool, err := hubBS.hubEngine.GetTool(context.Background(), "session_send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(id int, text string) (taskID string, queued bool) {
+		t.Helper()
+		out, err := tool.Call(context.Background(), "session_send", fmt.Sprintf(
+			`{"workspace":%q,"session_id":"s-dedup","text":%q,"client_msg_id":"prod-key-1"}`, wsPath, text))
+		if err != nil {
+			t.Fatalf("session_send #%d: %v", id, err)
+		}
+		var got struct {
+			TaskID string `json:"task_id"`
+			Queued bool   `json:"queued"`
+		}
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("send out = %s", out)
+		}
+		return got.TaskID, got.Queued
+	}
+	first, queued := call(1, "第一次")
+	if !queued || first == "" {
+		t.Fatalf("first = %q queued=%v", first, queued)
+	}
+	second, _ := call(2, "重试")
+	if second != first {
+		t.Fatalf("same client_msg_id returned different tasks: %s vs %s", first, second)
+	}
+	q, err := m.hubQueueFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q.QueuedCount(wsPath, "s-dedup"); got != 1 {
+		t.Fatalf("queued = %d, want 1", got)
+	}
+	if st, _ := m.hubStore(); st != nil {
+		task, err := st.LoadTask(context.Background(), agenthub.TaskID(first))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.ClientMsgID != "prod-key-1" {
+			t.Fatalf("ledger client_msg_id = %q", task.ClientMsgID)
+		}
+	}
+}
+
+// P2-02 复审 N4：session_list 的 updated_at 必须真的有值（不是恒 nil/0001）。
+func TestHubWorkspaceListSessionsUpdatedAt(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "UpdatedAtAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-updated", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs.lastActive.Store(time.Now().UnixMilli())
+	rows, err := newHubWorkspaceOps(m).ListSessions(context.Background(), wsPath)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	if rows[0].UpdatedAt == nil || rows[0].UpdatedAt.IsZero() {
+		t.Fatalf("updated_at = %v, want non-zero", rows[0].UpdatedAt)
+	}
+}
+
+// P2-02 复审 B1 残留：空标题也要落盘，create 与 list 一致（defaultSessionTitle）。
+func TestHubWorkspaceCreateDefaultTitleMatchesList(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "TitleAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	info, err := ops.CreateSession(context.Background(), agenthub.CreateSessionReq{Workspace: wsPath, Title: "   "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Title != defaultSessionTitle {
+		t.Fatalf("create title = %q, want %q", info.Title, defaultSessionTitle)
+	}
+	rows, err := ops.ListSessions(context.Background(), wsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.ID == info.ID && r.Title != info.Title {
+			t.Fatalf("list title = %q, create = %q", r.Title, info.Title)
+		}
+	}
+	// 超长标题截到 80 rune。
+	long, err := ops.CreateSession(context.Background(), agenthub.CreateSessionReq{Workspace: wsPath, Title: strings.Repeat("长", 300)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(long.Title)) != 80 {
+		t.Fatalf("long title len = %d, want 80", len([]rune(long.Title)))
 	}
 }
