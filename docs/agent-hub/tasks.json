@@ -987,9 +987,9 @@
     },
     "P2-03": {
       "status": "review",
-      "commit": "c1bcaf7 + 0d6ec02 fix(hub-p2-03): 复审三项 blocking —— 闸门数据源/Submit 归属/Transition 顺序",
+      "commit": "c1bcaf7 + 0d6ec02 + fix(hub-p2-03): 复审 B-1/B-2",
       "review": "re-review_pending",
-      "reviewNote": "初审 change_requested（task-q77rzcjp，对象 c1bcaf7）。B1 闸门读 UI 状态点 bs.running：子 agent AgentEnd 清零 → 根 run 在跑却判空闲；takeBatch→AgentStart 窗口同样误判。B2 积压时 Submit 返回队首（别人的账本条目）→ session_send 把错 task_id 交给模型。B3 Pump 先出队再 Transition：失败丢任务、账本仍 queued、永不派发。修复（0d6ec02）：running 只由根 AgentStart/End 翻转 + hubDispatchPending 覆盖派发窗口；Submit 只认自己的 id；Transition 成功后才出队；N1 目标 ErrNotFound → 队首 canceled；N6 队列不可用发 hub_alert；N7 queued 语义写进工具描述。回归：B1 两条、B2、B3、M5（AgentEnd→pump 接线）、N1 各一条。未处理（非阻塞）：Queue 模式丢弃模型给的 client_msg_id（N3）、emit 内同步 pump 代价（N5）、ctx/超时（N8）、重启 queued 可视化归 P2-08。验证：agenthub + desktop/bridge 全量绿（40s）。"
+      "reviewNote": "初审 change_requested（task-q77rzcjp，对象 c1bcaf7）。B1 闸门读 UI 状态点 bs.running：子 agent AgentEnd 清零 → 根 run 在跑却判空闲；takeBatch→AgentStart 窗口同样误判。B2 积压时 Submit 返回队首（别人的账本条目）→ session_send 把错 task_id 交给模型。B3 Pump 先出队再 Transition：失败丢任务、账本仍 queued、永不派发。修复（0d6ec02）：running 只由根 AgentStart/End 翻转 + hubDispatchPending 覆盖派发窗口；Submit 只认自己的 id；Transition 成功后才出队；N1 目标 ErrNotFound → 队首 canceled；N6 队列不可用发 hub_alert；N7 queued 语义写进工具描述。回归：B1 两条、B2、B3、M5（AgentEnd→pump 接线）、N1 各一条。未处理（非阻塞）：Queue 模式丢弃模型给的 client_msg_id（N3）、emit 内同步 pump 代价（N5）、ctx/超时（N8）、重启 queued 可视化归 P2-08。验证：agenthub + desktop/bridge 全量绿（40s）。 第二轮复审（task-qy9g79ws）：B1/B2/B3 运行时验证为真修好，但 B-1 ErrNotFound 分支又先出队后 Transition、B-2 回归用例在旧代码上也绿。已修：Transition 成功才出队、B2 用例改为闸门刚空闲时 Submit、pending 先置位再 Ask、Submit 重读 Status、queueKey 归一、展示层 OR pending、pump 补 Depth==0；新增 2 条回归。全量绿（42s）。"
     },
     "P2-04": {
       "status": "review",
