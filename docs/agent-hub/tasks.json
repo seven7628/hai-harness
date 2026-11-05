@@ -1050,6 +1050,12 @@
       "commit": "93eb91f feat(hub-p3a-04 部分): 群上下文快照",
       "review": "pending",
       "reviewNote": "BuildGroupSnapshot：delta（游标后）、冻结本轮（seq>trigger）、跳过 round_summary/空白、40 条/12000 rune 折叠、确定性文本、@命中/旁听标注。测试 3 条。**部分完成**：群智能体会话装配（每群一会话/事件流）未做，顺延 P3a-05+。"
+    },
+    "P3a-06": {
+      "status": "review",
+      "commit": "feat(hub-p3a-06 部分): handoff 护栏 + ack 状态机",
+      "review": "pending",
+      "reviewNote": "CheckHandoff：深度>=3 拒绝、同对 10 分钟>=2 拒绝、observer 禁止、self 禁止；Handoff.Ack pending_ack→accepted/declined 幂等。测试 3 条全绿。**部分完成**：交接卡/Needs you 落盘、事件与 UI 路由未做（P3a-08/P3b）。"
     }
   }
 }
