@@ -57,6 +57,9 @@ type DispatchReq struct {
 	SessionID   string  `json:"session_id"`
 	Text        string  `json:"text"`
 	ClientMsgID string  `json:"client_msg_id,omitempty"`
+	// TaskHeader 非空 = 在正文前加一个 hub_task 块（EncodeTaskHeader 的 JSON）。
+	// 目标会话的 UserInputsConsumed 据此绑定任务；正文仍是独立 text 块。
+	TaskHeader string `json:"task_header,omitempty"`
 }
 
 // DispatchResult 派发结果（P2-03 起 task 账本会引用这里的 run/session）。

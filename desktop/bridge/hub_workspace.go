@@ -179,6 +179,16 @@ func (o *hubWorkspaceOps) ListSessions(ctx context.Context, workspace string) ([
 	return out, nil
 }
 
+// hubDispatchMessage 构造派发消息：hub_task header 块在前、正文 text 块在后。
+// provider 按文本送出（模型看得到 task_id）；UI/标题只认 text 块，用户气泡里只有正文。
+func hubDispatchMessage(text, header string) core.Message {
+	msg := core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})
+	if header != "" {
+		msg.Content = append([]core.Content{{Type: core.ContentTypeHubTask, Content: header}}, msg.Content...)
+	}
+	return msg
+}
+
 // SessionStatus 单会话空闲闸门探针（P2-03 队列用）。
 func (o *hubWorkspaceOps) SessionStatus(ctx context.Context, workspace, sessionID string) (agenthub.SessionInfo, error) {
 	if err := ctx.Err(); err != nil {
@@ -301,7 +311,8 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		o.m.hubMsgDedup[dedupKey] = sid // 先占位：并发同 id 的第二个请求直接返回
 		o.m.mu.Unlock()
 	}
-	if err := bs.s.Ask(ctx, core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})); err != nil {
+	msg := hubDispatchMessage(text, req.TaskHeader)
+	if err := bs.s.Ask(ctx, msg); err != nil {
 		if dedupKey != "" {
 			o.m.mu.Lock()
 			delete(o.m.hubMsgDedup, dedupKey)

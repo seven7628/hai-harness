@@ -1402,3 +1402,26 @@ func TestReducerTaskDeliveryOrderedByTime(t *testing.T) {
 		t.Fatalf("交付通知必须排在更晚的块之前（delivery@%d, tool@%d）", deliveryIdx, toolIdx)
 	}
 }
+
+// P2-04：hub_task header 是宿主协议，不进用户气泡（正文是紧随的 text 块）。
+func TestReducerUserInputsSkipsHubTaskHeader(t *testing.T) {
+	r := NewViewReducer()
+	ts := time.Now().Add(-time.Minute)
+	header := `{"task_id":"task_x","origin":{"kind":"dm","agent_id":"ag_1"}}`
+	mustApply(t, r, evUserInputs(t, nil, [][]core.Content{{
+		{Type: core.ContentTypeHubTask, Content: header},
+		{Type: core.ContentTypeText, Content: "做一份对比表"},
+	}}, ts))
+	users := blockByKind(t, r.Snapshot(), "user")
+	if len(users) != 1 {
+		t.Fatalf("want 1 user block, got %d", len(users))
+	}
+	if users[0].Text != "做一份对比表" {
+		t.Fatalf("user text = %q (header leaked?)", users[0].Text)
+	}
+	for _, c := range users[0].Contents {
+		if strings.Contains(c.Content, "task_x") || c.Type == core.ContentTypeHubTask {
+			t.Fatalf("header content leaked into block: %+v", users[0].Contents)
+		}
+	}
+}

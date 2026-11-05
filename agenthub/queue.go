@@ -105,12 +105,14 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	header, _ := EncodeTaskHeader(dispatched)
 	res, err := q.ops.Dispatch(ctx, DispatchReq{
 		AgentID:     dispatched.Origin.AgentID,
 		Workspace:   dispatched.Target.Workspace,
 		SessionID:   dispatched.Target.SessionID,
 		Text:        dispatched.Instruction,
 		ClientMsgID: string(dispatched.ID), // 重试沿用同一 id，目标侧幂等
+		TaskHeader:  header,                // 目标会话据此绑定 task（§6.7.2）
 	})
 	if err != nil {
 		// 已 dispatched 再落 failed：状态机有序，账本里有失败原因可查。

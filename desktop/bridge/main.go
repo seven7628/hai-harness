@@ -322,8 +322,13 @@ type bridgeSession struct {
 	hubEngine *tools.Engine
 	// hubPumpQueue 根 run 结束时推进 Hub 派发队列（nil = 未接线）。
 	hubPumpQueue func(workspace, sessionID string)
-	workspace    string     // 工作区根（审批 diff 读取原文件用）
-	mobile       *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// hubTaskIDs 本批 UserInputsConsumed 里的 hub_task id（P2-04 相关性）。
+	// 只在 emit（run goroutine）读写；AgentEnd 结算后清空。
+	hubTaskIDs []agenthub.TaskID
+	// hubFinishTask 根 AgentEnd 时结算 hub_task（nil = 非项目会话/未接线）。
+	hubFinishTask func(ae *events.AgentEnd)
+	workspace     string     // 工作区根（审批 diff 读取原文件用）
+	mobile        *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
 	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
 	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
 	running atomic.Bool
@@ -584,6 +589,12 @@ func (bs *bridgeSession) emit(e events.Event) {
 		bs.appendLiveThink(ev.Content)
 	case *events.AgentStart:
 		bs.resetLive() // 新 run：旧 run 的残留文本不能串到这一轮
+	case *events.UserInputsConsumed:
+		// 相关性（§6.7.2）：只认 batch 开口（Injected=插话不算新任务）；
+		// hub_task 块由派发侧写在正文之前，坏 JSON/缺 id 由 finishHubTask 报失败。
+		if !ev.Injected {
+			bs.hubTaskIDs = hubTaskIDsOf(ev.UserContents)
+		}
 	case *events.LLMEnd:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
 		bs.setLiveText(ev.Content)                  // 与手机端一致：最终文本覆盖累计增量
@@ -691,6 +702,13 @@ func (bs *bridgeSession) emit(e events.Event) {
 	if e.Type() == events.AgentEndType && bs.cronLedger != nil && bs.cronRun != "" {
 		bs.finishCronRun(bs.cronEndStatus, bs.cronEndErr, bs.cronEndContent)
 	}
+	// Hub 任务结算：**根 run** 的 AgentEnd、且事件已落盘（transcript 完整）。
+	if e.Type() == events.AgentEndType && bs.hubFinishTask != nil && bs.runtime != nil &&
+		bs.runtime.kind == runtimeProject {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
+			bs.hubFinishTask(ae)
+		}
+	}
 	// Hub 派发队列：项目会话的**根 run** 结束后推进一步（AgentEnd 已落盘、
 	// bs.running 已置 false，闸门看到的是真实空闲状态）。
 	if e.Type() == events.AgentEndType && bs.hubPumpQueue != nil && bs.runtime != nil &&
@@ -784,6 +802,25 @@ func (bs *bridgeSession) approvalExtras(e *events.ToolApprovalRequested) map[str
 }
 
 const maxPreviewBytes = 1 << 20
+
+// hubTaskIDsOf 从一批用户内容块里收集 hub_task id（§6.7.2）。
+// 一个正常 batch 只应有一个；多个是闸门 bug，由结算侧按 batch_conflict 处理。
+func hubTaskIDsOf(contents [][]core.Content) []agenthub.TaskID {
+	var ids []agenthub.TaskID
+	for _, blocks := range contents {
+		for _, c := range blocks {
+			if c.Type != core.ContentTypeHubTask {
+				continue
+			}
+			h, err := agenthub.ParseTaskHeader(c.Content)
+			if err != nil || h.TaskID == "" {
+				continue
+			}
+			ids = append(ids, h.TaskID)
+		}
+	}
+	return ids
+}
 
 func (bs *bridgeSession) handler() events.EventHandler {
 	return func(_ context.Context, e events.Event) { bs.emit(e) }
@@ -1524,7 +1561,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.pumpHubQueue}
+	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.pumpHubQueue, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
 	if opts.hub != nil {
 		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：
 		// rebuildLoop 据此走 buildHubLoop，而不会被当成项目会话的 code persona 重建。
