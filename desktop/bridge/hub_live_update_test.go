@@ -252,17 +252,33 @@ func TestHubAgentUpdateKeepsProviderModelPaired(t *testing.T) {
 	}); !ok {
 		t.Fatalf("switch_model for p2: %s", errMsg)
 	}
+	// 只改 provider、模型不属于新 provider：必须拒绝（不能装配出 deepseek/gpt-5）。
 	if ok, errMsg, _ := hubCmd(t, m, buf, 14, "hub_agent_update", map[string]any{
 		"agent_id": string(p2.ID), "patch": map[string]any{"provider": "deepseek"},
-	}); !ok {
-		t.Fatalf("update provider: %s", errMsg)
+	}); ok {
+		t.Fatal("provider-only with foreign model must be rejected")
+	} else if !strings.Contains(errMsg, "unknown_model") && !strings.Contains(errMsg, "不属于") {
+		t.Fatalf("unexpected error: %s", errMsg)
 	}
 	prov2, model2, _ := bs2.modelCfg()
-	if prov2 != "deepseek" || model2 != "gpt-5" {
-		t.Fatalf("provider-only pair = %s/%s, want deepseek/gpt-5", prov2, model2)
+	if prov2 != "deepseek" || model2 != "deepseek-v4-flash" {
+		t.Fatalf("rejected update changed session pair = %s/%s", prov2, model2)
 	}
-	if got := bs2.loop.Model(); got != "gpt-5" {
-		t.Fatalf("p2 loop model = %q, want gpt-5", got)
+	// provider+model 一起给、且组合存在：允许，并同步进会话。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 15, "hub_agent_update", map[string]any{
+		"agent_id": string(p2.ID), "patch": map[string]any{"provider": "deepseek", "model": "deepseek-v4-pro"},
+	}); !ok {
+		t.Fatalf("update provider+model: %s", errMsg)
+	}
+	prov2, model2, _ = bs2.modelCfg()
+	if prov2 != "deepseek" || model2 != "deepseek-v4-pro" {
+		t.Fatalf("provider+model pair = %s/%s, want deepseek/deepseek-v4-pro", prov2, model2)
+	}
+	if !m.provCfg.hasModelIn(prov2, model2) {
+		t.Fatalf("session pair %s/%s does not exist", prov2, model2)
+	}
+	if got := bs2.loop.Model(); got != "deepseek-v4-pro" {
+		t.Fatalf("p2 loop model = %q, want deepseek-v4-pro", got)
 	}
 
 	// 只改人格仍然不能动会话级选择（这里与 profile 相同，改成人格后仍是 deepseek）。
@@ -273,4 +289,28 @@ func TestHubAgentUpdateKeepsProviderModelPaired(t *testing.T) {
 		t.Fatalf("update role: %s", errMsg)
 	}
 	check("openai", "gpt-5")
+}
+
+// P1-10 复审 N1：资料页改 effort 必须同时更新子 agent 档位（spawn/explore 追随）。
+func TestHubAgentUpdateSyncsSubagentEffort(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "EffortSync")
+	bs, err := m.hubDMSession(string(p.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bs.subagentEffort == nil {
+		t.Fatal("hub DM session must carry subagentEffort")
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_update", map[string]any{
+		"agent_id": string(p.ID), "patch": map[string]any{"effort": "high"},
+	}); !ok {
+		t.Fatalf("update effort: %s", errMsg)
+	}
+	if bs.effort != "high" {
+		t.Fatalf("bs.effort = %q, want high", bs.effort)
+	}
+	if got := string(bs.subagentEffort.current()); got != "high" {
+		t.Fatalf("subagentEffort = %q, want high", got)
+	}
 }

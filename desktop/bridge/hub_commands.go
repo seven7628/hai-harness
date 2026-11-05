@@ -246,6 +246,13 @@ func (m *manager) hubAgentUpdate(c command) {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
+	// provider/model 是原子对（P1-10 B-1）：只改 provider 时旧 model 可能不存在于
+	// 新 provider（openai/deepseek-v4-pro 这种组合会让 loop 装配出无效模型）。
+	// 不静默改写调用方给的 model，明确报错让其重新选择。
+	if !strings.EqualFold(next.Provider, cur.Provider) && !m.provCfg.hasModelIn(next.Provider, next.Model) {
+		m.respCode(c, false, fmt.Sprintf("模型 %q 不属于 provider %q，请重新选择", next.Model, next.Provider), "unknown_model", nil)
+		return
+	}
 	if !strings.EqualFold(next.Name, cur.Name) {
 		if err := agenthub.ValidateAgentNameUnique(next.Name, liveAgents(all), cur.ID); err != nil {
 			m.resp(c, false, err.Error(), nil)
