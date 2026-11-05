@@ -23,6 +23,20 @@ import (
 	"github.com/seven7628/hai-harness/subagent"
 )
 
+// sessionRecordKey 会话 record 的维度键（§6.1.3）：默认是工作区路径哈希；
+// Hub 智能体固定 hub-<agentID>（不跟 home 路径走 —— 目录改名/迁移后历史会话会「丢失」）；
+// sessionOpts.wsKey 最后生效（cron 派生会话用它隔离自己的存储目录）。
+func sessionRecordKey(ws *workspaceRuntime, wsPath string, opts sessionOpts) string {
+	key := workspaceKey(wsPath)
+	if ws != nil && ws.kind == runtimeHubAgent && ws.agentID != "" {
+		key = "hub-" + ws.agentID
+	}
+	if opts.wsKey != "" {
+		key = opts.wsKey
+	}
+	return key
+}
+
 // hubAgentHome 智能体的虚拟工作区目录（方案 §6.1.3）：
 // ~/.go-code/hub/agents/<agentID>（会话/事件/记忆/产物的共同根）。
 func hubAgentHome(agentID string) string {
@@ -91,13 +105,32 @@ func (m *manager) closeHubRuntimes() {
 	m.hubRuntimes = map[string]*workspaceRuntime{}
 	m.mu.Unlock()
 	for _, ws := range wss {
-		// 与项目工作区同一套收尾顺序（先停监听/探活，再关连接）：Refresh 会取 Manager 锁，
-		// 这里不持 m.mu。
-		ws.stopMCPWatch()
-		ws.stopMCPHealth()
+		// 与 shutdownWorkspace 同口径：**先逐个 Shutdown 会话**（落 checkpoint/事件、
+		// 停 run goroutine），再停监听/探活，最后关连接。直接清空 map 会丢未落盘状态。
+		// Refresh 会取 Manager 锁：这段不持 m.mu。
 		ws.mu.Lock()
+		items := make([]*bridgeSession, 0, len(ws.sessions))
+		for _, bs := range ws.sessions {
+			items = append(items, bs)
+		}
 		ws.sessions = map[string]*bridgeSession{}
 		ws.mu.Unlock()
+		for _, bs := range items {
+			if bs.ctx != nil && bs.ctx.Err() != nil {
+				continue // 已关闭，避免重复 SessionClosed
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if bs.s != nil {
+				_ = bs.s.Shutdown(ctx)
+			}
+			cancel()
+			if bs.cancel != nil {
+				bs.cancel()
+			}
+			bs.runtime = nil // 不再指向已 Close 的 runtime（rebuildLoop 会按路径兜底）
+		}
+		ws.stopMCPWatch()
+		ws.stopMCPHealth()
 		if ws.mcp != nil {
 			ws.mcp.Close()
 		}

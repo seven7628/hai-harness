@@ -1311,15 +1311,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	// 无 record = 新会话/旧数据 → 空 reducer + legacy store 恢复。
 	// 定时任务派生会话（opts.noRecord）跳过装配：触发即跑、跑完归档，无需崩溃恢复。
 	recStart := time.Now()
-	wsKey := workspaceKey(wsPath)
-	if ws.kind == runtimeHubAgent && ws.agentID != "" {
-		// 方案 §6.1.3：Hub 会话的 record 维度是 hub-<agentID>，不跟 home 路径走
-		//（否则智能体目录改名/迁移后历史会话全部「丢失」）。
-		wsKey = "hub-" + ws.agentID
-	}
-	if opts.wsKey != "" {
-		wsKey = opts.wsKey
-	}
+	wsKey := sessionRecordKey(ws, wsPath, opts)
 	reducer := NewViewReducer()
 	var recoveryState *session.State // 冷恢复时从 record.sdk_state 注入 SDK 恢复源
 	var recordStore *session.FileStorage

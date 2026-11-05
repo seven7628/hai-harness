@@ -143,6 +143,30 @@ func TestHubRuntimeRegistryIsolation(t *testing.T) {
 	m.closeHubRuntimes()
 }
 
+// TestSessionRecordKey 会话 record 维度（§6.1.3）：hub-<agentID> 固定，
+// 项目走路径哈希，opts.wsKey 最后覆盖（cron 派生会话）。
+func TestSessionRecordKey(t *testing.T) {
+	m, _ := testManager(t)
+	proj := t.TempDir()
+	projWS := m.runtime(proj)
+	hubWS := m.hubRuntime("ag_key")
+
+	if got, want := sessionRecordKey(projWS, proj, sessionOpts{}), workspaceKey(proj); got != want {
+		t.Fatalf("project record key = %q, want %q", got, want)
+	}
+	if got := sessionRecordKey(hubWS, hubWS.path, sessionOpts{}); got != "hub-ag_key" {
+		t.Fatalf("hub record key = %q, want hub-ag_key", got)
+	}
+	// 即便有人拿 hub runtime 配上别的路径，维度也跟 agentID 走。
+	if got := sessionRecordKey(hubWS, proj, sessionOpts{}); got != "hub-ag_key" {
+		t.Fatalf("hub record key must follow agentID, got %q", got)
+	}
+	if got := sessionRecordKey(hubWS, proj, sessionOpts{wsKey: "cron-ws"}); got != "cron-ws" {
+		t.Fatalf("opts.wsKey must win, got %q", got)
+	}
+	m.closeHubRuntimes()
+}
+
 // TestCreateOptsForwardsToCreateIn createOpts = m.runtime(wsPath) + createIn。
 // 不能只看「同 sid 复用」——那在预建会话后是缓存命中，分不清「转发 m.runtime」与
 // 「自己又 m.runtime 一次」。这里从空表开始，断言会话落在**表里那个** runtime 上、
