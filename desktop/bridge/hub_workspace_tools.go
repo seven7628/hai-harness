@@ -85,12 +85,12 @@ func newHubWorkspaceCreateTool(svc *agenthub.WorkspaceService) *hubWorkspaceCrea
 		BaseTool: tools.BaseTool{
 			Name_: "workspace_create",
 			Description_: "Create a new project workspace directory under this agent's policy.workspace_roots, then register it in workspaces.json. " +
-				"parent must be an allowed root (or a subdirectory of one) that already exists; name is a single directory name (no separators or '..'); " +
-				"an existing directory is rejected instead of being taken over.",
+				"parent is optional (defaults to the first policy.workspace_roots entry) and must be an existing allowed root or a subdirectory of one; " +
+				"name is a single directory name (no separators or '..'); an existing directory is rejected instead of being taken over.",
 			Params_: tools.Obj(map[string]any{
-				"parent": tools.Str("Existing parent directory inside policy.workspace_roots"),
+				"parent": tools.Str("Optional existing parent directory inside policy.workspace_roots (default: first allowed root)"),
 				"name":   tools.Str("New directory name (single path segment, max 64 chars)"),
-			}, "parent", "name"),
+			}, "name"),
 			CanParallel_: false,
 			ReadOnly_:    false,
 		},
@@ -108,8 +108,8 @@ func (t *hubWorkspaceCreateTool) ValidParams(_ context.Context, _, arguments str
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return err
 	}
-	if a.Parent == "" || a.Name == "" {
-		return fmt.Errorf("workspace_create: parent 与 name 不能为空")
+	if a.Name == "" {
+		return fmt.Errorf("workspace_create: name 不能为空")
 	}
 	return nil
 }
@@ -187,8 +187,8 @@ func newHubSessionCreateTool(svc *agenthub.WorkspaceService) *hubSessionCreateTo
 	return &hubSessionCreateTool{
 		BaseTool: tools.BaseTool{
 			Name_: "session_create",
-			Description_: "Create a new session in a project workspace. The session keeps the workspace's own provider/model settings; " +
-				"this never changes the global provider configuration. Call workspace_list first for a valid workspace path.",
+			Description_: "Create a new session in a project workspace. The session uses the current global active provider/model, " +
+				"but this tool never changes the global provider configuration. Call workspace_list first for a valid workspace path.",
 			Params_: tools.Obj(map[string]any{
 				"workspace": tools.Str("Workspace path from workspace_list"),
 				"title":     tools.Str("Optional session title"),
@@ -239,13 +239,13 @@ func newHubSessionSendTool(svc *agenthub.WorkspaceService) *hubSessionSendTool {
 			Name_: "session_send",
 			Description_: "Send a task message to an existing project session. First call workspace_list and session_list to find the target; " +
 				"the target must be a session inside a registered project workspace (never this agent's own home). " +
-				"Returns task_id and session_id; the project session runs the task asynchronously. " +
+				"Returns task_id (stable ledger id in P2-03; queryable once task_status lands) and session_id; the project session runs the task asynchronously. " +
 				"This only dispatches — it does not read or write workspace files directly.",
 			Params_: tools.Obj(map[string]any{
 				"workspace":     tools.Str("Workspace path from workspace_list"),
 				"session_id":    tools.Str("Session id from session_list"),
 				"text":          tools.Str("Task text for the project session"),
-				"client_msg_id": tools.Str("Optional idempotency key (retry with the same id to avoid duplicates)"),
+				"client_msg_id": tools.Str("Optional idempotency key: retries with the same id are de-duplicated (P2-03 also uses the task id)"),
 			}, "workspace", "session_id", "text"),
 			CanParallel_: false,
 			ReadOnly_:    false,

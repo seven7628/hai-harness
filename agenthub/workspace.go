@@ -17,9 +17,9 @@ import (
 
 // WorkspaceInfo 一个可派发的工作区（工作区 = 用户已有的项目目录）。
 type WorkspaceInfo struct {
-	Path      string    `json:"path"`
-	Name      string    `json:"name"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Path      string     `json:"path"`
+	Name      string     `json:"name"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"` // nil = 未知（避免 0001-01-01 出现在工具输出里）
 }
 
 // CreateWorkspaceReq 新建工作区目录。
@@ -39,8 +39,8 @@ type SessionInfo struct {
 	Title     string `json:"title"`
 	Running   bool   `json:"running"`
 	// Pending = Session.inbox 积压 + 未搬进 inbox 的恢复积压（空闲闸门的数据源）。
-	Pending   int       `json:"pending"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Pending   int        `json:"pending"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
 
 // CreateSessionReq 在工作区里开会话（工作区主会话，不是 Hub 会话）。

@@ -14,6 +14,7 @@ import (
 )
 
 type toolFakeOps struct {
+	emptyLists  bool
 	dispatchErr error
 	dispatched  []agenthub.DispatchReq
 	created     []agenthub.CreateWorkspaceReq
@@ -21,6 +22,9 @@ type toolFakeOps struct {
 }
 
 func (f *toolFakeOps) ListWorkspaces(context.Context) ([]agenthub.WorkspaceInfo, error) {
+	if f.emptyLists {
+		return nil, nil
+	}
 	return []agenthub.WorkspaceInfo{{Path: "/w", Name: "w"}}, nil
 }
 
@@ -96,8 +100,13 @@ func TestHubWorkspaceTools(t *testing.T) {
 		ops.created[0].AgentID != "ag_tools" {
 		t.Fatalf("create req = %+v", ops.created)
 	}
-	if _, err := callHubTool(t, eng, "workspace_create", `{"parent":"","name":"x"}`); err == nil {
-		t.Fatal("workspace_create empty parent must be rejected")
+	// parent 可省略（默认第一个 root）：工具层接受、ops 决定最终父目录。
+	if _, err := callHubTool(t, eng, "workspace_create", `{"name":"auto"}`); err != nil {
+		t.Fatalf("workspace_create without parent: %v", err)
+	}
+	pub, _ := eng.GetTool(context.Background(), "workspace_create")
+	if err := pub.ValidParams(context.Background(), "workspace_create", `{"name":""}`); err == nil {
+		t.Fatal("workspace_create must require name")
 	}
 
 	out, err = callHubTool(t, eng, "session_list", `{"workspace":"/w"}`)
@@ -133,7 +142,7 @@ func TestHubWorkspaceTools(t *testing.T) {
 	if json.Unmarshal([]byte(out), &sent) != nil || sent.TaskID != "task_fixed" || sent.SessionID != "s1" || !sent.Accepted {
 		t.Fatalf("session_send out = %s", out)
 	}
-	if len(ops.dispatched) != 1 || ops.dispatched[0].Text != "做对比表" || ops.dispatched[0].ClientMsgID != "cm1" {
+	if len(ops.dispatched) != 1 || ops.dispatched[0].Text != "做对比表" || ops.dispatched[0].ClientMsgID != " cm1 " {
 		t.Fatalf("dispatch req = %+v", ops.dispatched)
 	}
 	if _, err := callHubTool(t, eng, "session_send", `{"workspace":"/w","session_id":"s1","text":"  "}`); err == nil {
@@ -167,5 +176,28 @@ func TestHubWorkspaceToolsPolicy(t *testing.T) {
 	applyHubToolPolicy(context.Background(), eng2, agenthub.ToolPolicy{Disable: []string{"workspace_list"}})
 	if _, err := eng2.GetTool(context.Background(), "workspace_list"); err == nil || !strings.Contains(err.Error(), "disabled by policy") {
 		t.Fatalf("disable=workspace_list must hide it: %v", err)
+	}
+}
+
+// 空列表必须是 []（不是 null），时间字段不能冒出 0001-01-01。
+func TestHubWorkspaceToolsEmptyLists(t *testing.T) {
+	eng, _ := hubWorkspaceToolEngine(t, &toolFakeOps{emptyLists: true})
+	out, err := callHubTool(t, eng, "workspace_list", `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != `{"workspaces":[]}` {
+		t.Fatalf("workspace_list empty = %s", out)
+	}
+	if strings.Contains(out, "0001-01-01") {
+		t.Fatalf("zero updated_at leaked: %s", out)
+	}
+	sl, _ := eng.GetTool(context.Background(), "session_list")
+	out, err = sl.Call(context.Background(), "session_list", `{"workspace":"/w"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "0001-01-01") {
+		t.Fatalf("zero updated_at leaked: %s", out)
 	}
 }

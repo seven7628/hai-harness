@@ -111,7 +111,12 @@ func (o *hubWorkspaceOps) CreateWorkspace(ctx context.Context, req agenthub.Crea
 	if err != nil {
 		return agenthub.WorkspaceInfo{}, err
 	}
-	path, err := hubCreateWorkspacePath(req.Parent, req.Name, roots)
+	parent := strings.TrimSpace(req.Parent)
+	if parent == "" {
+		// parent 省略 = 用第一个白名单根（模型只需知道 name；roots 不出现在工具输出里）。
+		parent = roots[0]
+	}
+	path, err := hubCreateWorkspacePath(parent, req.Name, roots)
 	if err != nil {
 		return agenthub.WorkspaceInfo{}, err
 	}
@@ -137,7 +142,8 @@ func (o *hubWorkspaceOps) CreateWorkspace(ctx context.Context, req agenthub.Crea
 	if e.Title != "" {
 		name = e.Title
 	}
-	return agenthub.WorkspaceInfo{Path: path, Name: name, UpdatedAt: time.Now().UTC()}, nil
+	now := time.Now().UTC()
+	return agenthub.WorkspaceInfo{Path: path, Name: name, UpdatedAt: &now}, nil
 }
 
 // ListSessions 只允许已登记的工作区（不存在/未登记 → ErrNotFound，顺带阻止 m.runtime 造目录）。
@@ -166,7 +172,7 @@ func (o *hubWorkspaceOps) ListSessions(ctx context.Context, workspace string) ([
 			info.Pending = bs.s.PendingCount()
 		}
 		if v, ok := row["updated_at"].(time.Time); ok {
-			info.UpdatedAt = v
+			info.UpdatedAt = &v
 		}
 		out = append(out, info)
 	}
@@ -233,12 +239,19 @@ func (o *hubWorkspaceOps) CreateSession(ctx context.Context, req agenthub.Create
 	if err != nil {
 		return agenthub.SessionInfo{}, err
 	}
-	info := agenthub.SessionInfo{ID: id, Workspace: path, Title: req.Title, UpdatedAt: time.Now().UTC()}
+	now := time.Now().UTC()
+	info := agenthub.SessionInfo{ID: id, Workspace: path, Title: req.Title, UpdatedAt: &now}
 	if info.Title == "" {
 		info.Title = "新会话"
 	}
 	if bs != nil {
 		info.Running = bs.running.Load()
+	}
+	if title := strings.TrimSpace(req.Title); title != "" {
+		// 标题必须走现有 session_manual_titles（titles.json）机制：只回显不落盘
+		// 会让 session_create 说「已建 评审标题」而 session_list 显示 New Chat（P2-02 B1）。
+		sessionManualTitles.set(workspaceKey(path), id, title)
+		info.Title = title
 	}
 	return info, nil
 }
@@ -271,7 +284,29 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 	if bs == nil {
 		return agenthub.DispatchResult{}, fmt.Errorf("%w: session %q", agenthub.ErrNotFound, sid)
 	}
+	// client_msg_id 幂等（进程内）：同一 (workspace, session, id) 只投递一次。
+	// 跨重启的幂等由 P2-03 账本/目标侧去重负责；这里先保证「超时用同一个 id 重试」
+	// 不会把同一任务执行两遍（P2-02 评审 B2）。
+	dedupKey := ""
+	if req.ClientMsgID != "" {
+		dedupKey = path + "\x00" + sid + "\x00" + req.ClientMsgID
+		o.m.mu.Lock()
+		if _, seen := o.m.hubMsgDedup[dedupKey]; seen {
+			o.m.mu.Unlock()
+			return agenthub.DispatchResult{SessionID: sid, Accepted: true, Message: "duplicate"}, nil
+		}
+		if o.m.hubMsgDedup == nil {
+			o.m.hubMsgDedup = map[string]string{}
+		}
+		o.m.hubMsgDedup[dedupKey] = sid // 先占位：并发同 id 的第二个请求直接返回
+		o.m.mu.Unlock()
+	}
 	if err := bs.s.Ask(ctx, core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})); err != nil {
+		if dedupKey != "" {
+			o.m.mu.Lock()
+			delete(o.m.hubMsgDedup, dedupKey)
+			o.m.mu.Unlock()
+		}
 		return agenthub.DispatchResult{}, err
 	}
 	bs.lastActive.Store(time.Now().UnixMilli())

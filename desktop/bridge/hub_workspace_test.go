@@ -149,11 +149,20 @@ func TestHubWorkspaceOpsCreateAndList(t *testing.T) {
 	if _, ok := m.workspaces[info.Path]; ok {
 		t.Fatal("CreateWorkspace 不应顺手装配 runtime（装配留给首次使用）")
 	}
+	activeBefore := m.provCfg.providerName()
 	sessInfo, err := ops.CreateSession(context.Background(), agenthub.CreateSessionReq{
 		AgentID: p.ID, Workspace: info.Path, Title: "首个会话",
 	})
 	if err != nil || sessInfo.ID == "" {
 		t.Fatalf("CreateSession in fresh workspace = %+v, %v", sessInfo, err)
+	}
+	// 标题必须真落盘（session_manual_titles）：只回显会让 list 显示 New Chat。
+	rows, err := ops.ListSessions(context.Background(), info.Path)
+	if err != nil || len(rows) != 1 || rows[0].Title != "首个会话" {
+		t.Fatalf("session title not persisted: %+v, %v", rows, err)
+	}
+	if got := m.provCfg.providerName(); got != activeBefore {
+		t.Fatalf("CreateSession changed global active provider: %q -> %q", activeBefore, got)
 	}
 	// ListWorkspaces 不含 Hub home。
 	if _, err := m.hubDMSession(string(p.ID)); err != nil {
@@ -396,5 +405,71 @@ func TestHubWorkspaceExpandsHomeRoot(t *testing.T) {
 	}
 	if want := filepath.Join(realRoot, "proj"); info.Path != want {
 		t.Fatalf("path = %q, want %q", info.Path, want)
+	}
+}
+
+// parent 省略 = 第一个 workspace root（工具 schema 只要求 name）。
+func TestHubWorkspaceCreateDefaultsParent(t *testing.T) {
+	m, buf := testManager(t)
+	root := t.TempDir()
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	p := createWorkspaceAgent(t, m, buf, 1, "DefaultParent", []string{root})
+	ops := newHubWorkspaceOps(m)
+	info, err := ops.CreateWorkspace(context.Background(), agenthub.CreateWorkspaceReq{
+		AgentID: p.ID, Name: "auto",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	realRoot, _ := filepath.EvalSymlinks(root)
+	if want := filepath.Join(realRoot, "auto"); info.Path != want {
+		t.Fatalf("path = %q, want %q", info.Path, want)
+	}
+}
+
+// client_msg_id 进程内幂等：同一个 id 只投递一次，且不会因重试改 task 归属。
+func TestHubWorkspaceDispatchDedupClientMsgID(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "DedupAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.create(wsPath, "s-dedup", ""); err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	req := agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-dedup",
+		Text: "只该执行一次", ClientMsgID: "cm-1",
+	}
+	if _, err := ops.Dispatch(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ops.Dispatch(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Message != "duplicate" {
+		t.Fatalf("second dispatch = %+v, want duplicate", second)
+	}
+	m.mu.Lock()
+	seen := len(m.hubMsgDedup)
+	m.mu.Unlock()
+	if seen != 1 {
+		t.Fatalf("dedup entries = %d, want 1", seen)
+	}
+	// 不同 id 正常投递。
+	req.ClientMsgID = "cm-2"
+	res, err := ops.Dispatch(context.Background(), req)
+	if err != nil || res.Message == "duplicate" {
+		t.Fatalf("different client id = %+v, %v", res, err)
+	}
+	m.mu.Lock()
+	seen = len(m.hubMsgDedup)
+	m.mu.Unlock()
+	if seen != 2 {
+		t.Fatalf("dedup entries after distinct id = %d, want 2", seen)
 	}
 }

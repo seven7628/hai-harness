@@ -70,7 +70,7 @@ func TestWorkspaceServiceSend(t *testing.T) {
 	}
 	got := ops.dispatched[0]
 	if got.AgentID != "ag_1" || got.Workspace != "/w" || got.SessionID != "s1" ||
-		got.Text != "做一份对比表" || got.ClientMsgID != "cm1" {
+		got.Text != "做一份对比表" || got.ClientMsgID != " cm1 " { // 幂等键原样透传，不 TrimSpace
 		t.Fatalf("dispatch req = %+v", got)
 	}
 	// 默认 id：非空、前缀、两次不同（一次性 id）。
@@ -93,7 +93,6 @@ func TestWorkspaceServiceValidation(t *testing.T) {
 		{"send empty workspace", func() error { _, err := svc.Send(context.Background(), "  ", "s1", "x", ""); return err }},
 		{"send empty session", func() error { _, err := svc.Send(context.Background(), "/w", " ", "x", ""); return err }},
 		{"send empty text", func() error { _, err := svc.Send(context.Background(), "/w", "s1", "  ", ""); return err }},
-		{"create empty parent", func() error { _, err := svc.CreateWorkspace(context.Background(), "", "x"); return err }},
 		{"create empty name", func() error { _, err := svc.CreateWorkspace(context.Background(), "/w", " "); return err }},
 		{"list empty workspace", func() error { _, err := svc.ListSessions(context.Background(), " "); return err }},
 		{"create session empty workspace", func() error { _, err := svc.CreateSession(context.Background(), "", "t"); return err }},

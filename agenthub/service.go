@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // SendResult session_send 的返回：task_id 供后续 task_status/task_result 引用。
@@ -64,9 +65,6 @@ func (s *WorkspaceService) CreateWorkspace(ctx context.Context, parent, name str
 	}
 	parent = strings.TrimSpace(parent)
 	name = strings.TrimSpace(name)
-	if parent == "" {
-		return WorkspaceInfo{}, fmt.Errorf("%w: parent 不能为空（必须是 policy.workspace_roots 下的目录）", ErrInvalid)
-	}
 	if name == "" {
 		return WorkspaceInfo{}, fmt.Errorf("%w: name 不能为空", ErrInvalid)
 	}
@@ -148,7 +146,7 @@ func (s *WorkspaceService) Send(ctx context.Context, workspace, sessionID, text,
 	}
 	res, err := ops.Dispatch(ctx, DispatchReq{
 		AgentID: s.AgentID, Workspace: workspace, SessionID: sessionID,
-		Text: text, ClientMsgID: strings.TrimSpace(clientMsgID),
+		Text: text, ClientMsgID: clientMsgID, // 原样透传：幂等键的空白也是键的一部分
 	})
 	if err != nil {
 		return SendResult{}, err
@@ -181,7 +179,8 @@ func firstLine(text string) string {
 func defaultTaskID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return "task_unknown"
+		// 常量 fallback 会让两次派发拿到同一个 task_id；用纳秒兜底保持唯一。
+		return fmt.Sprintf("task_%d", time.Now().UnixNano())
 	}
 	return "task_" + hex.EncodeToString(b[:])
 }

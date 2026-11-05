@@ -778,6 +778,8 @@ type manager struct {
 	hubFS *agenthub.FileStore
 	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
 	hubQueue *agenthub.Queue
+	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
+	hubMsgDedup map[string]string
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
 	hubSessionLocks map[string]*sync.Mutex
 	provCfg         *providerConfig  // 全局 provider 配置（热切换；set_provider 更新）
@@ -5951,6 +5953,7 @@ func serve() error {
 	m := &manager{
 		workspaces:  map[string]*workspaceRuntime{},
 		hubRuntimes: map[string]*workspaceRuntime{},
+		hubMsgDedup: map[string]string{},
 		provCfg:     pc,
 		out:         newOut(os.Stdout),
 		metrics:     NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
