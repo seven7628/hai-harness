@@ -509,7 +509,7 @@ const BASE = {
         "agenthub/policy.go"
       ],
       "acceptance": "按 Profile 注册全部工具（文件/bash/run_python/web/browser/computer/agent_spawn/subagent/codemode/cron/MCP/技能/插件）；零值=全开；MCP server/tool 开关；bash 只写 home，workspace_roots/bash_roots 只读；子智能体继承同一 Engine；codemode 嵌套调用过 Policy；ask_user 绑定同一 qw。",
-      "tests": "go test ./desktop/bridge/ -run HubEngine",
+      "tests": "go test ./agenthub/ -run 'ToolPolicy|SplitMCP' && go test ./sandbox/ -run 'OpenSubpaths|ReadOnlyPaths' && go test ./desktop/bridge/ -run HubEngine",
       "commit": "feat(hub-p1-01): Hub 工具引擎与策略"
     },
     {
@@ -1208,6 +1208,12 @@ const BASE = {
       "commit": "16234fb chore(hub-p0-09): P0 review gate",
       "review": "passed",
       "reviewNote": "阶段门禁评审 pass（0 blocking）。评审自跑干净检出：clone→冷缓存全量 go test ./agenthub/... ./session/... ./desktop/bridge/... 全绿（53s bridge）；三次 mutation 反证（VisibleTo fail-open / L1 golden / MarkNotified settled 门禁）均能让测试失败；§19.3.1 的 4 个 commit hash 与看板、PROGRESS.html 内嵌 BASE 逐条一致（done=8/review=1）；无 TODO/桩/hub_ 命令残留。评审提醒：门禁命令必须用 -list 确认命中（-run 正则打错会静默 0 用例 PASS，已写进 §19.2）、hubRuntime 全程持 m.mu（P1 接 createHubSession 前改成锁内查表/锁外装配）、ledgerTaskLocks 无回收、delivered 后不能重复 Finish（P2 重投递按 NotifiedRuns 去重）、全局层装配失败只打 stderr（P1 要挂 UI 状态）。"
+    },
+    "P1-01": {
+      "status": "review",
+      "commit": "2b26d8f feat(hub-p1-01): Hub 工具引擎与策略",
+      "review": "pending",
+      "reviewNote": "buildHubEngine 复用 newSessionEngine（同一份工具面），按 Profile 用 hidden 档撤下工具（模型不可见 + codemode 不可编排）；不传 mesh Hub，session_send/list 不注册。沙箱 root=智能体 home、不传 WithHomeWrite；bash_roots 只读。为 ~/.go-code 下的 home 新增 sandbox.WithOpenSubpaths（敏感 deny 之后重开）+ WithReadOnlyPaths，并用策略文本顺序与显式 deny 优先两条测试钉住。测试：agenthub 策略 6 组、bridge TestHubEngine* 4 条、sandbox 3 条；go build ./... 通过；相关包全绿。"
     }
   }
 };
