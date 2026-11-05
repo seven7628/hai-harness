@@ -553,7 +553,7 @@ const BASE = {
         "agenthub/service.go"
       ],
       "acceptance": "DM 懒创建且只有一个（无新建/归档重开）；hub_open/send/history；/clear 保留记忆；断线重连；未读/预览更新。",
-      "tests": "go test ./desktop/bridge/ -run HubDM",
+      "tests": "go test ./desktop/bridge/ -run 'HubDM|HubHomeNotTreatedAsWorkspace|HubHomeCommandDoesNotCreateProjectRuntime'",
       "commit": "feat(hub-p1-04): DM 会话链路"
     },
     {
@@ -1228,16 +1228,16 @@ const BASE = {
       "reviewNote": "两轮评审收口（task-znddb7bg，最终 passed）：首轮 3 blocking（update 的浅拷贝让归档旧版本被 patch 污染；create 接受客户端 id 并静默覆盖已有智能体；删掉 `p.Version = 1` 无测试失败）→ 227bb93 修复（导出 CloneAgentProfile 深拷贝、create 无条件 AllocateID、create 用例带 version/deleted）→ 复审确认三条全闭合，两个 mutation 均可证伪。复审后跟进（fbd1435）：补 hub_agent_restore（§5.2「可恢复」此前无命令路径）、providerConfigured→providerExists（只判存在不判 key，语义写在注释）、CloneAgentProfile 切片隔离单测。遗留 non-blocking：patch 不拒绝未知字段、hub_agent_list 仍返回完整 profile。"
     },
     "P1-04": {
-      "status": "review",
-      "commit": "f8b7d2e fix(hub-p1-04): 复核修复 —— 子 agent 事件过滤、DM 装配单例锁、幂等全量、寻址兜底",
-      "review": "pending",
-      "reviewNote": "DM 只有一条会话 hub.<agentID>.dm，懒创建、确定性 ID、回复落独立 DM 索引（dms/<id>/log.jsonl + cursor，seq 重启重建、游标只前进）；hub_open/send/history + client_msg_id 幂等 + has_more 多读一条；list 增加 dm 预览/未读。首轮 review changes_requested：（1）子 agent 的 AgentEnd 也被当成 DM 回复写进索引；（2）hubDMSession 并发会装配出多个会话（createIn 解锁装配期间无二次查表，注释写错）→ f8b7d2e 修复：只认根 run（ParentRunId/Depth）、每智能体装配锁 lockHubAgent；顺带幂等改全量扫描、Ask 成功后才落索引、isHubHomePath 拦 interrupt/delete_session、hub_open 支持 mark_read:false、预览折叠换行。两条 mutation（去过滤/去锁）均能失败。待复审。"
+      "status": "done",
+      "commit": "a08af34 fix(hub-p1-04): 复审收尾 —— hub home 不再落项目 runtime、去重查询补单测",
+      "review": "passed",
+      "reviewNote": "两轮评审收口（task-9r5k64yt，最终 passed）：首轮 2 blocking（子 agent 的 AgentEnd 被当成 DM 回复写进索引；hubDMSession 并发装配出多个会话——createIn 解锁装配期间无二次查表，注释与事实相反）→ f8b7d2e 修复（只认根 run：ParentRunId==\"\" && Depth==0；每智能体装配锁 lockHubAgent + 锁内复查；顺带幂等改全量扫描、Ask 成功后才落索引、isHubHomePath 拦 interrupt/delete_session、hub_open 支持 mark_read:false、预览折叠换行）→ 复审独立验：过滤的两个边界分量各自都能单独挡住子 agent，8 并发 distinct=1（-race 干净），两条 mutation（去过滤/去锁）均失败。复审后收尾（a08af34 + a35d77c）：m.get 对未装配的 hub home 直接返回 nil（否则 blocks_page/compact 会造出项目 kind 的幻影 runtime，用例去守卫即失败）、FindDirectMessageByClientID 补单测（含 150 条窗口外仍可查、坏行报 ErrCorrupt、末尾半行丢弃）、过期并发注释改成事实。遗留 non-blocking：isHubHomePath 不做大小写/软链归一；Ask 成功但索引写失败时重试会让模型看两遍；hubSessionLocks 只增不删。"
     },
     "P1-05": {
       "status": "review",
       "commit": "73a9469 feat(hub-p1-05): 记忆隔离 + 面板浏览/编辑（写前备份、下一个 Run 生效）",
-      "review": "pending",
-      "reviewNote": "记忆根 = <hub>/agents/<id>/memory/repos/<id>（不在可写 home 里，防 bash 自删；身份固定 agentID 而非 git —— 智能体 home 不是仓库，走默认解析永远不注入）。路径只允许目录内 .md，绝对路径/../反斜杠/符号链接逃逸全拒（realpathLoose 处理中间目录不存在）。写入先备份到 .backups/（保留 20 份）再 tmp+rename 原子写；命令 hub_agent_memory（清单/读，不存在返回 exists=false）与 hub_agent_memory_write（写→refreshHubLoops 只重建 loop，返回 effective:next_run）；测试 agenthub 6 条 + bridge 6 条（含 A/B 隔离与写后注入文本）。"
+      "review": "changes_requested",
+      "reviewNote": "首轮 review changes_requested（task-fayq2axq）：B1 写记忆触发的 refreshHubLoops 用 Profile 的 model/effort 重建 loop 并回写 bs.provider/bs.model —— 用户在 DM 里 switch_model/switch_effort 的选择会被一行记忆静默改回默认值，且 bs.effort 不更新导致「面板显示 high、实际跑 low」；B2 路径检查里 `..` 那条 branch 未被测试钉住（删掉后 memory 测试仍全绿，因为 evalWithin 兜住并给出 (symlink) 文案）——不是逃逸，是测试没锁住。另有一条 behavior 级缺口：删掉 SetLoop 后自带测试仍全绿（只比指针，没证明下一个 Run 真的换了 prompt）。已确认扎实的部分：每智能体独立目录、A/B 不串、23 种逃逸形态全拒（含符号链接/中间目录）、写前备份+prune 只删 .bak、备份失败拒绝写、12 并发无撕裂。待修复：会话级 model/effort 优先、按文案钉住 `..` 检查、用 ContextBreakdown 断言下一个 Run 生效、`.backups` 设为保留段、hubMemoryConfig 出错不回落项目记忆根。"
     }
   }
 };
