@@ -103,10 +103,11 @@
       ],
       "files": [
         "agenthub/mention.go",
-        "agenthub/message.go"
+        "agenthub/message.go",
+        "agenthub/mention_test.go"
       ],
       "acceptance": "跳过 code/URL/email；最长匹配；未知名不触发；单条最多 3 个；@all 规则；重名拒绝。",
-      "tests": "go test ./agenthub/ -run Mention",
+      "tests": "go test ./agenthub/ -run 'Mention|Visibility'",
       "commit": "feat(hub-p0-04): 严格 mention 解析"
     },
     {

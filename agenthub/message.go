@@ -1,6 +1,9 @@
 package agenthub
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // SenderKind 是消息发送者的类型。
 type SenderKind string
@@ -90,4 +93,38 @@ type Message struct {
 	Visibility Visibility     `json:"visibility"`
 	Refs       map[string]any `json:"refs,omitempty"`
 	CreatedAt  time.Time      `json:"created_at"`
+}
+
+// OwnerOnlyPlaceholder 是 owner-only 消息进入其他智能体上下文时的替身，绝不泄露正文。
+const OwnerOnlyPlaceholder = "[仅群主可见的一条记录]"
+
+// EffectiveVisibility 把空值归一到 group（§5.9：缺失 = 默认）。
+func (v Visibility) EffectiveVisibility() Visibility {
+	if v == "" {
+		return VisibilityGroup
+	}
+	return v
+}
+
+// Validate 校验可见性枚举；空值按默认 group 处理。
+func (v Visibility) Validate() error {
+	switch v.EffectiveVisibility() {
+	case VisibilityGroup, VisibilityOwner:
+		return nil
+	default:
+		return fmt.Errorf("%w: visibility must be group or owner", ErrInvalid)
+	}
+}
+
+// VisibleTo 判断某条消息能否进入读方（人/智能体）的视图；owner-only 只对人可见。
+func (m Message) VisibleTo(isHuman bool) bool {
+	return isHuman || m.Visibility.EffectiveVisibility() != VisibilityOwner
+}
+
+// ContextText 返回该消息进入上下文时的正文：owner-only 对智能体只给占位。
+func (m Message) ContextText(isHuman bool) string {
+	if m.VisibleTo(isHuman) {
+		return m.Text
+	}
+	return OwnerOnlyPlaceholder
 }
