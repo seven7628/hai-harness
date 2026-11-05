@@ -921,9 +921,9 @@
     },
     "P1-03": {
       "status": "review",
-      "commit": "4152e2f feat(hub-p1-03): 智能体 CRUD 命令 + 校验 + 版本留档",
+      "commit": "227bb93 fix(hub-p1-03): 复核修复 —— 深拷贝归档、create 不认客户端 id、补齐 mutation 门禁",
       "review": "pending",
-      "reviewNote": "dispatchHub 接五个 hub_agent_* 命令（常量表 + dispatch 顶部转交）；FileStore 懒开；provider 必须已配置且未删（providerConfigured 以 baseURL 为事实源）、名字大小写唯一且软删不占名额、总数上限只算未删；create=version 1，update 先归档旧 profile 再 version++（归档失败不改当前版本），删除默认软删（幂等、可恢复），purge 才物理删目录；事件 hub_agent_status(idle/deleted)。agenthub 新增 AppendProfileVersion/ListProfileVersions（值拷贝快照、裁剪 50、坏行跳过）/DeleteAgent。测试：bridge -run HubAgent 7 条、agenthub -run 'ProfileVersion|DeleteAgent' 4 条。已知：update 后重建 loop 属于 P1-04。评审进行中。"
+      "reviewNote": "首轮 changes_requested（3 blocking：update 的浅拷贝让归档旧版本被 patch 污染（切片底层数组共享）；create 接受客户端 id 并静默覆盖已有智能体；删掉 `p.Version = 1` 无测试失败）→ 227bb93 修复：导出 agenthub.CloneAgentProfile（深拷贝切片）供 update 与版本快照共用；create 无条件忽略客户端 id 走 AllocateID；create 用例带 version/deleted 断言落盘 1/false；顺带 purge 幂等、patch 不能改 deleted、补 MaxAgents 与软删记一版用例。三条 mutation 现在都能失败（去 Version=1 → 7；回退浅拷贝 → 归档数组被污染；去归档 → versions=0）。遗留 non-blocking：providerConfigured 只判存在不判 has_key、patch 不拒绝未知字段、list 返回完整 profile。"
     }
   }
 }
