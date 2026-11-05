@@ -1367,9 +1367,9 @@ const BASE = {
     },
     "P3a-05": {
       "status": "review",
-      "commit": "feat(hub-p3a-05 部分): hub_group_send",
+      "commit": "feat(hub-p3a-05): group_history/group_members/group_say 工具",
       "review": "pending",
-      "reviewNote": "hub_group_send：人消息落群日志 + 严格 @ 路由 + Round 活动回执 + hub_message/hub_round 事件；无 @ 不唤醒；@all 人类可用。测试 TestHubGroupSendRoutesAndReceipts。**部分完成**：group_history/group_members/group_say 模型工具与群会话唤醒未做（P3b）。"
+      "reviewNote": "group_history（分页/搜索/owner-only redacted/成员校验）、group_members（角色/存在性）、group_say（observer 禁止、落日志、严格 @ 路由、回执、事件）。测试 TestHubGroupTools。**未完成**：群会话唤醒与轮次预算（P3b）。"
     },
     "P3a-08": {
       "status": "review",
