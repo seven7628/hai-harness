@@ -950,10 +950,10 @@
       "reviewNote": "评审 passed（task-gdcjjk5k）：干净副本 `go build` + agenthub/bridge 全绿；三条 mutation（去 refreshHubLoops / 全局广播顺手改 hub / refreshHubLoops 丢掉会话级 model-effort）全部被杀死（第三条由 P1-05 用例杀死）。复核确认：无会话改阈值不留脏状态、部分 patch 其余字段保持、钳位矩阵命令/持久化/loop 三处一致（0.99→0.95、0.2→0.5、0→0.8、NaN/±Inf 被拒）、运行中的 run 用旧阈值收尾、hub home 不在 m.workspaces 故全局广播碰不到。遗留 non-blocking 已列入收尾：N1 用例里「全局广播」断言没走 dispatch 路径、N2 装配层 NaN 会传播（永不压缩）、N3 update 响应缺 effective、N6 本轮用例没自锁会话级 model/effort、N9 运行中 update 会把状态刷成 idle。另记录：N4 未知模型 128k 无黄标数据源、N5 Hub 压缩回执无用例（归 P1-10 验收）。"
     },
     "P1-08": {
-      "status": "review",
+      "status": "done",
       "commit": "bf05e53 fix(hub-p1-08/09): 复核修复 —— 草稿/失败/重开、子 agent 过滤、patch 只发改动、回执与回滚提示",
-      "review": "pending",
-      "reviewNote": "首轮 changes_requested（task-9se5fqef）5 条 blocking：B1 切 surface 卸载工作区树导致 composer 草稿丢失；B2 发送失败气泡与输入框同时清空；B3 中途离开再回来留半截流式/运行点常亮/最新回复缺失；B4 快速切 agent 的 hub_open 竞态（A 的迟到响应覆盖 B 的 sid/messages）；B5 子 agent 事件串进 DM 流式并提前熄运行点。→ bf05e53 修复：工作区树隐藏不卸载（`main-surface`）+ Hub 草稿进 store；send 失败保留原文/失败气泡/重试；挂载时重开 DM、根 agent_end 清 live、chunk 自愈运行点；select/loadOlder 校验 activeId；只认根 run（parent_run_id/depth + rootRunId）过滤子 agent；主 store wire() 过滤 hub_*；mock 保真化（cursor 对象/事件顺序/content+run_id/深合并/软删+restore/注入失败）。浏览器实测：工作区与 Hub 草稿都跨切换保留、失败后原文与重试在、中途离开回来终稿齐全且运行点熄灭。待复审。"
+      "review": "passed",
+      "reviewNote": "复审 passed（task-cj3pq6d3，对象 bf05e53）：上一轮 5 条 blocking 全部复验通过 —— 工作区/Hub 草稿跨切换保留、失败保留原文+重试不重复、中途离开回来无 stale live 且终稿齐全、乱序 hub_open 不覆盖、子 agent chunk/agent_end 不串流不熄根点（并做了两条 mutation 证明行为被用例锁住）。非阻塞遗留（已记入 P2 收尾清单）：N1 loadOlder 早退未清 loadingOlder（该 DM 翻历史卡死）；N2 失败气泡无 .failed 样式且下一条消息到达后跳到列表首位；N3 切走后重试入口随 error 消失（原文仍在输入框）；N4 display:none 导致回工作区焦点落 body；N5 非当前 agent 的根 agent_end 被丢弃 → rail 运行环常亮（切回或靠 hub_agent_status）；N6 主 store 仍为 hub.<id>.dm 造幽灵 view（wire 只拦 hub_* 前缀）；N7 HubPage.cursor 类型写成 number（真协议是对象）；N8 .main-surface 布局 CSS 放在 hub.css；N9 同 agent A→B→A 无 token 兜底；N10 e2e/ 未跟踪，B1–B5 无仓库内回归。"
     },
     "P1-09": {
       "status": "review",
