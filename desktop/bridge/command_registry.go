@@ -60,11 +60,12 @@ const (
 
 	// —— Agent Hub（P1：智能体 CRUD） ——
 	// 命令面按 docs/AGENT_HUB_TECH_PLAN.md §7.1.2 命名；hub_* 一律由 dispatchHub 分派。
-	CmdHubAgentCreate Command = "hub_agent_create"
-	CmdHubAgentUpdate Command = "hub_agent_update"
-	CmdHubAgentGet    Command = "hub_agent_get"
-	CmdHubAgentList   Command = "hub_agent_list"
-	CmdHubAgentDelete Command = "hub_agent_delete"
+	CmdHubAgentCreate  Command = "hub_agent_create"
+	CmdHubAgentUpdate  Command = "hub_agent_update"
+	CmdHubAgentGet     Command = "hub_agent_get"
+	CmdHubAgentList    Command = "hub_agent_list"
+	CmdHubAgentDelete  Command = "hub_agent_delete"
+	CmdHubAgentRestore Command = "hub_agent_restore" // 从回收站恢复（§5.2 软删可恢复）
 
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"

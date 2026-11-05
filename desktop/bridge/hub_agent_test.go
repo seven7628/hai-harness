@@ -518,3 +518,68 @@ func TestHubAgentCountLimitFreesOnSoftDelete(t *testing.T) {
 		t.Fatalf("create after soft delete should succeed: %s", errMsg)
 	}
 }
+
+// 软删可从设置恢复（§5.2）：恢复后回到列表、version++、归档一版；重名/重复恢复都有确定行为。
+func TestHubAgentRestore(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "Revivable", "provider": "deepseek", "model": "deepseek-v4-flash"},
+	})
+	if !ok {
+		t.Fatalf("create failed: %s", errMsg)
+	}
+	p := agentFromData(t, data)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_delete", map[string]any{"agent_id": string(p.ID)}); !ok {
+		t.Fatalf("soft delete failed: %s", errMsg)
+	}
+	ok, errMsg, data = hubCmd(t, m, buf, 3, "hub_agent_restore", map[string]any{"agent_id": string(p.ID)})
+	if !ok {
+		t.Fatalf("restore failed: %s", errMsg)
+	}
+	restored := agentFromData(t, data)
+	if restored.Deleted {
+		t.Fatal("restored agent still marked deleted")
+	}
+	if restored.Version != p.Version+2 { // create=1，软删=2，恢复=3
+		t.Fatalf("version = %d, want %d", restored.Version, p.Version+2)
+	}
+	ok, _, data = hubCmd(t, m, buf, 4, "hub_agent_list", map[string]any{})
+	if !ok {
+		t.Fatal("list failed")
+	}
+	if agents, _ := data["agents"].([]any); len(agents) != 1 {
+		t.Fatalf("restored agent not back in list: %v", agents)
+	}
+	// 幂等：重复恢复不报错、不再加版本。
+	ok, errMsg, data = hubCmd(t, m, buf, 5, "hub_agent_restore", map[string]any{"agent_id": string(p.ID)})
+	if !ok {
+		t.Fatalf("second restore failed: %s", errMsg)
+	}
+	if again := agentFromData(t, data); again.Version != restored.Version {
+		t.Fatalf("idempotent restore bumped version: %d -> %d", restored.Version, again.Version)
+	}
+}
+
+// 软删后同名重建 → 恢复必须报冲突（否则两个同名的「它」同时在列表里）。
+func TestHubAgentRestoreNameConflict(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "Twin", "provider": "deepseek", "model": "deepseek-v4-flash"},
+	})
+	if !ok {
+		t.Fatalf("create failed: %s", errMsg)
+	}
+	p := agentFromData(t, data)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_delete", map[string]any{"agent_id": string(p.ID)}); !ok {
+		t.Fatalf("soft delete failed: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 3, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "Twin", "provider": "deepseek", "model": "deepseek-v4-flash"},
+	}); !ok {
+		t.Fatalf("recreate after soft delete failed: %s", errMsg)
+	}
+	ok, errMsg, _ = hubCmd(t, m, buf, 4, "hub_agent_restore", map[string]any{"agent_id": string(p.ID)})
+	if ok || !strings.Contains(errMsg, "already used") {
+		t.Fatalf("restore with name conflict must fail, ok=%v err=%q", ok, errMsg)
+	}
+}

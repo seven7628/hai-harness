@@ -679,12 +679,13 @@ func (pc *providerConfig) loadSettings() {
 	}
 }
 
-// providerConfigured 该 provider 是否已配置且未被删除（Hub 保存 profile 的校验，§5.1）。
+// providerExists 该 provider 条目是否存在且未被删除（Hub 保存 profile 的校验，§5.1）。
 //
-// 事实源是 baseURL：内置五家预置在构造期就填好，loadSettings 对 deleted 的 provider
-// 会把 baseURL/apiKey/... 全删掉，自定义 provider 则是 settings 里根本没有这一项 ——
-// 所以「baseURL 里有键」= 用户当前可用。
-func (pc *providerConfig) providerConfigured(name string) bool {
+// **只判存在，不判有没有 key**：内置五家的 baseURL 在构造期恒预置，deleted 的条目在
+// loadSettings 里被整段移除，自定义 provider 则是 settings 里根本没有 —— 所以
+// 「baseURL 里有键」= 这个 provider 还没被删。无 key 也算存在（§5.1 字面要求），
+// 「有没有 key」是 UI 该标黄的运行时信息（§6.2.4 的 Exists && HasKey 在派发前判）。
+func (pc *providerConfig) providerExists(name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return false

@@ -138,3 +138,46 @@ func TestDeleteAgentPurgesDirectory(t *testing.T) {
 		t.Fatal("invalid id must be rejected")
 	}
 }
+
+// CloneAgentProfile 必须隔离切片：调用方随后改自己的切片，快照不能跟着变
+//（P1-03 复核：浅拷贝让「回滚」的旧版本被 patch 污染）。
+func TestCloneAgentProfileIsolatesSlices(t *testing.T) {
+	src := &AgentProfile{
+		ID: "ag_clone", Name: "Clone", Provider: "deepseek", Model: "m",
+		Tools: ToolPolicy{
+			Disable: []string{"a", "b"}, Allow: []string{"c"}, BashRoots: []string{"~/x"},
+			MCP: MCPPolicy{DisableServers: []string{"s1"}, DisableTools: []string{"t1"}, AllowTools: []string{"t2"}},
+		},
+		Policy: RunPolicy{WorkspaceRoots: []string{"~/ws"}},
+	}
+	cp := CloneAgentProfile(src)
+	if cp == nil {
+		t.Fatal("nil clone")
+	}
+	// 改调用方的每个切片元素：快照必须还是旧值。
+	src.Tools.Disable[0] = "z"
+	src.Tools.Allow[0] = "z"
+	src.Tools.BashRoots[0] = "z"
+	src.Tools.MCP.DisableServers[0] = "z"
+	src.Tools.MCP.DisableTools[0] = "z"
+	src.Tools.MCP.AllowTools[0] = "z"
+	src.Policy.WorkspaceRoots[0] = "z"
+	for name, got := range map[string]string{
+		"disable":        cp.Tools.Disable[0],
+		"allow":          cp.Tools.Allow[0],
+		"bash_roots":     cp.Tools.BashRoots[0],
+		"mcp_servers":    cp.Tools.MCP.DisableServers[0],
+		"mcp_tools":      cp.Tools.MCP.DisableTools[0],
+		"mcp_allow":      cp.Tools.MCP.AllowTools[0],
+		"workspace_root": cp.Policy.WorkspaceRoots[0],
+	} {
+		if got == "z" {
+			t.Errorf("clone shares slice with caller: %s was mutated", name)
+		}
+	}
+	// nil 语义保持（nil ≠ 空切片，下游会区分「没设置」与「显式清空」）。
+	empty := CloneAgentProfile(&AgentProfile{ID: "ag_nil", Name: "N", Provider: "deepseek", Model: "m"})
+	if empty.Tools.Disable != nil {
+		t.Errorf("nil slice became non-nil: %#v", empty.Tools.Disable)
+	}
+}

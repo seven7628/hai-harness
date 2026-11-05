@@ -7,7 +7,7 @@ package main
 //「磁盘上的 profile 是什么」。存储根 `<appData>/hub`（= ~/.go-code/hub）。
 //
 // 校验口径（§5.1，全部同步返回错误、不静默）：
-//   - provider 必须已配置且未删除（settings.json provider 段，见 providerConfigured）；
+//   - provider 必须已配置且未删除（settings.json provider 段，见 providerExists）；
 //   - name 1–32 字符且不区分大小写唯一（ValidateAgentNameUnique）；
 //   - compress_threshold 等字段由 AgentProfile.Normalize 钳位/补默认；
 //   - 总数上限 MaxAgents（软删的不占名额）。
@@ -47,6 +47,8 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubAgentList(c)
 	case CmdHubAgentDelete:
 		m.hubAgentDelete(c)
+	case CmdHubAgentRestore:
+		m.hubAgentRestore(c)
 	default:
 		return false
 	}
@@ -101,7 +103,7 @@ func (m *manager) validateHubProvider(provider string) error {
 	if provider == "" {
 		return fmt.Errorf("provider 不能为空")
 	}
-	if !m.provCfg.providerConfigured(provider) {
+	if !m.provCfg.providerExists(provider) {
 		return fmt.Errorf("provider %q 未配置或已删除，请先在设置里配置", provider)
 	}
 	return nil
@@ -343,6 +345,58 @@ func (m *manager) hubAgentDelete(c command) {
 	}
 	m.emitHubAgentStatus(string(id), hubStatusDeleted)
 	m.resp(c, true, "", map[string]any{"agent_id": string(id), "purged": purge})
+}
+
+// hubAgentRestore 从回收站恢复（§5.2：软删保留记录，可从设置里恢复）。
+//
+// 为什么必须单独一条命令：update 的 patch 被禁止改 deleted（否则能绕过 delete 静默
+// 软删/复活），于是「恢复」需要明确入口 —— 否则 §5.2 的「可恢复」只在数据层成立。
+func (m *manager) hubAgentRestore(c command) {
+	ctx := context.Background()
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	id := agenthub.AgentID(str(c.Payload, "agent_id"))
+	if id == "" {
+		m.resp(c, false, "agent_id 不能为空", nil)
+		return
+	}
+	cur, err := st.LoadAgent(ctx, id)
+	if err != nil {
+		m.resp(c, false, "读取智能体失败: "+err.Error(), nil)
+		return
+	}
+	// 幂等：没删过就是成功（UI 连点不该报错）。
+	if !cur.Deleted {
+		m.resp(c, true, "", map[string]any{"agent": cur})
+		return
+	}
+	// 同名冲突：回收站里的名字可能已被新智能体占用（软删不占名额）。
+	all, err := st.ListAgents(ctx)
+	if err != nil {
+		m.resp(c, false, "读取智能体列表失败: "+err.Error(), nil)
+		return
+	}
+	if err := agenthub.ValidateAgentNameUnique(cur.Name, liveAgents(all), cur.ID); err != nil {
+		m.resp(c, false, "名字已被占用，先改名再恢复: "+err.Error(), nil)
+		return
+	}
+	if err := st.AppendProfileVersion(ctx, cur); err != nil {
+		m.resp(c, false, "保存历史版本失败: "+err.Error(), nil)
+		return
+	}
+	next := *agenthub.CloneAgentProfile(cur)
+	next.Deleted = false
+	next.Version = cur.Version + 1
+	next.UpdatedAt = time.Now().UTC()
+	if err := st.SaveAgent(ctx, &next); err != nil {
+		m.resp(c, false, "保存智能体失败: "+err.Error(), nil)
+		return
+	}
+	m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
+	m.resp(c, true, "", map[string]any{"agent": next})
 }
 
 // emitHubAgentStatus 状态点事件（左栏状态点/头像动效，§7.1.5）。
