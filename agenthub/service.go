@@ -31,6 +31,8 @@ type WorkspaceService struct {
 	AgentID AgentID
 	// Queue 非空 = 任务走账本/空闲闸门（P2-03）；nil = 直接派发（P2-02 兼容）。
 	Queue *Queue
+	// Guard 非空 = 建账前校验预算/并发/去重/链长（P2-07）。
+	Guard *Guard
 	// Origin 任务来源（DM / 群）；零值按 DM + AgentID 处理。
 	Origin TaskOrigin
 	// NewTaskID 可注入（无 Queue 时的一次性 id）；nil = 进程内随机 task_<hex>。
@@ -132,6 +134,9 @@ func (s *WorkspaceService) Send(ctx context.Context, workspace, sessionID, text,
 			Instruction: text,
 			Callback:    CallbackAgentEnd,
 			ClientMsgID: clientMsgID, // 原样透传：同一 id 重试返回同一账本任务
+		}
+		if err := s.Queue.CheckGuard(ctx, t, s.Guard); err != nil {
+			return SendResult{}, err
 		}
 		created, err := s.Queue.Submit(ctx, t)
 		if err != nil {

@@ -51,6 +51,17 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	}
 	ctx := context.Background()
 	first := ids[0]
+	// 单任务预算：成本只有在结算时才知道；超限落 blocked_budget + hub_alert（§6.9）。
+	if originTask, terr := st.LoadTask(ctx, first); terr == nil && originTask.Origin.AgentID != "" {
+		if p, _, perr := m.hubLoadAgent(string(originTask.Origin.AgentID)); perr == nil && p != nil {
+			limits := agenthub.GuardLimits{MaxTaskCostUSD: p.Policy.MaxTaskCostUSD}
+			if over, msg := limits.OverTaskBudget(res.Usage); over {
+				status = agenthub.TaskBlockedBudget
+				res.Error = msg
+				m.emitHubTaskAlert(first, "blocked_budget", msg)
+			}
+		}
+	}
 	settled, err := ledger.Finish(ctx, agenthub.FinishInput{
 		TaskID: first, RunID: ae.RunId, Status: status, Result: res, Error: ae.Error,
 		At: time.Now().UTC(),

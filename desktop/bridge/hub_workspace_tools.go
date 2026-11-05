@@ -15,22 +15,25 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/tools"
 )
 
-func registerHubWorkspaceTools(eng *tools.Engine, svc *agenthub.WorkspaceService) {
+func registerHubWorkspaceTools(eng *tools.Engine, svc *agenthub.WorkspaceService, alert func(code, message string)) {
 	if eng == nil || svc == nil {
 		return
 	}
+	send := newHubSessionSendTool(svc)
+	send.alert = alert
 	for _, tl := range []tools.Tool{
 		newHubWorkspaceListTool(svc),
 		newHubWorkspaceCreateTool(svc),
 		newHubSessionListTool(svc),
 		newHubSessionCreateTool(svc),
-		newHubSessionSendTool(svc),
+		send,
 	} {
 		eng.RegisterTool(context.Background(), tl)
 	}
@@ -231,6 +234,8 @@ func (t *hubSessionCreateTool) Call(ctx context.Context, _, arguments string) (s
 type hubSessionSendTool struct {
 	tools.BaseTool
 	svc *agenthub.WorkspaceService
+	// alert 护栏拒绝时发 hub_alert（熔断要可见，不能只回给模型）。
+	alert func(code, message string)
 }
 
 func newHubSessionSendTool(svc *agenthub.WorkspaceService) *hubSessionSendTool {
@@ -283,6 +288,20 @@ func (t *hubSessionSendTool) Call(ctx context.Context, _, arguments string) (str
 	}
 	res, err := t.svc.Send(ctx, a.Workspace, a.SessionID, a.Text, a.ClientMsgID)
 	if err != nil {
+		if t.alert != nil {
+			code := "dispatch_denied"
+			switch {
+			case errors.Is(err, agenthub.ErrBudgetExceeded):
+				code = "blocked_budget"
+			case errors.Is(err, agenthub.ErrTooConcurrent):
+				code = "concurrency_limit"
+			case errors.Is(err, agenthub.ErrDuplicateTask):
+				code = "duplicate_task"
+			case errors.Is(err, agenthub.ErrChainTooDeep):
+				code = "chain_too_deep"
+			}
+			t.alert(code, err.Error())
+		}
 		return "", err
 	}
 	return marshalHubToolResult(map[string]any{

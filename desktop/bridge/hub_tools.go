@@ -99,6 +99,10 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 	svc.Origin = agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID}
 	if q, err := m.hubQueueFor(); err == nil {
 		svc.Queue = q // P2-03：任务落账本 + 空闲闸门
+		// P2-07：预算/并发/去重/链长护栏（profile 预算；群/全局预算归 P3 群组装配）。
+		svc.Guard = &agenthub.Guard{Limits: agenthub.GuardLimits{
+			MaxTaskCostUSD: p.Policy.MaxTaskCostUSD, DailyBudgetUSD: p.Policy.DailyBudgetUSD,
+		}}
 	} else {
 		// 降级直派是 fail-open：至少留一条诊断，别让闸门静默失效。
 		m.out.writeLine(map[string]any{
@@ -106,7 +110,9 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 			"message": "Hub 队列初始化失败，session_send 降级为直接派发: " + err.Error(),
 		})
 	}
-	registerHubWorkspaceTools(eng, svc)
+	registerHubWorkspaceTools(eng, svc, func(code, message string) {
+		m.out.writeLine(map[string]any{"event_type": "hub_alert", "kind": code, "agent_id": string(p.ID), "message": message})
+	})
 	applyHubToolPolicy(context.Background(), eng, p.Tools)
 	return eng, effortRef
 }

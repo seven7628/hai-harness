@@ -177,7 +177,8 @@ func (s TaskStatus) CanTransition(to TaskStatus) bool {
 			to == TaskInterrupted || to == TaskCanceled || to == TaskBlockedBudget || to == TaskDeclined
 	case TaskRunning:
 		// canceled 保留给显式 task_cancel；人工 interrupt 仍应走 interrupted。
-		return to == TaskCompleted || to == TaskFailed || to == TaskInterrupted || to == TaskCanceled
+		// blocked_budget = 结算时发现单任务成本超限（P2-07）。
+		return to == TaskCompleted || to == TaskFailed || to == TaskInterrupted || to == TaskCanceled || to == TaskBlockedBudget
 	case TaskCompleted, TaskFailed, TaskInterrupted:
 		return to == TaskDelivered
 	default:

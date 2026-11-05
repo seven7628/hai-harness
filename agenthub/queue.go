@@ -40,6 +40,17 @@ func queueKey(workspace, sessionID string) string {
 	return workspace + "\x00" + sessionID
 }
 
+// CheckGuard 在建账前跑护栏（预算/并发/去重/链长）；nil guard = 不检查。
+func (q *Queue) CheckGuard(ctx context.Context, t *Task, g *Guard) error {
+	if g == nil {
+		return nil
+	}
+	if q == nil || q.ledger == nil {
+		return fmt.Errorf("%w: queue 未初始化", ErrInvalid)
+	}
+	return g.Check(ctx, q.ledger.store, t)
+}
+
 // Submit 创建任务并尝试派发。返回值是**账本条目**：Status=dispatched 表示已投递，
 // queued 表示目标忙、留在队列里（结果回推在 P2-05）。
 func (q *Queue) Submit(ctx context.Context, t *Task) (*Task, error) {

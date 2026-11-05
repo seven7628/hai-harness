@@ -209,8 +209,8 @@ func (l *Ledger) Transition(ctx context.Context, id TaskID, to TaskStatus, opts 
 // Finish 把 AgentEnd 结算进账本；不负责回推，回推后再调 MarkNotified。
 // 同一状态重复 Finish 幂等；若携带新的 Result/Error，则更新快照。
 func (l *Ledger) Finish(ctx context.Context, in FinishInput) (*Task, error) {
-	if in.Status != TaskCompleted && in.Status != TaskFailed && in.Status != TaskInterrupted {
-		return nil, fmt.Errorf("%w: finish status %q must be completed/failed/interrupted", ErrInvalid, in.Status)
+	if in.Status != TaskCompleted && in.Status != TaskFailed && in.Status != TaskInterrupted && in.Status != TaskBlockedBudget {
+		return nil, fmt.Errorf("%w: finish status %q must be completed/failed/interrupted/blocked_budget", ErrInvalid, in.Status)
 	}
 	if in.RunID == "" {
 		return nil, fmt.Errorf("%w: finish run_id is required", ErrInvalid)

@@ -61,7 +61,7 @@ func hubWorkspaceToolEngine(t *testing.T, ops agenthub.WorkspaceOps) (*tools.Eng
 	svc := agenthub.NewWorkspaceService(ops, "ag_tools")
 	svc.NewTaskID = func() string { return "task_fixed" }
 	eng := tools.NewToolEngine()
-	registerHubWorkspaceTools(eng, svc)
+	registerHubWorkspaceTools(eng, svc, nil)
 	return eng, svc
 }
 

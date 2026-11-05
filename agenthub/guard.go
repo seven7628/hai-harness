@@ -1,0 +1,137 @@
+package agenthub
+
+// guard.go：预算/并发/去重/链长护栏（§6.9，P2-07）。
+//
+// 口径：
+//   - 零值预算 = 不限额（profile 文档约定），但并发/去重/链长有安全默认值；
+//   - 只累加 CostPriced=true 的成本（未知成本不能被当成 0 花掉）；
+//   - 日预算按 UTC 日、任务 UpdatedAt 归日；群预算按 Origin.GroupID；
+//   - 去重窗口内同 (origin agent, target, instruction) 视为重复派发；
+//   - 根链步数 = Chain 长度，默认 6（防止 A→B→C 无限接力）。
+//
+// 这些检查在**建账前**跑（Queue.Submit → Check），失败不落任务；单任务成本只有在
+// 结算时才知道，由 bridge 在 AgentEnd 结算处判（超限落 blocked_budget + hub_alert）。
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+var (
+	ErrBudgetExceeded = errors.New("hub guard: budget exceeded")
+	ErrTooConcurrent  = errors.New("hub guard: too many concurrent tasks")
+	ErrDuplicateTask  = errors.New("hub guard: duplicate task within window")
+	ErrChainTooDeep   = errors.New("hub guard: task chain too deep")
+)
+
+// GuardLimits 一次派发的护栏配置（来自 profile.policy / group.policy / hub.json defaults）。
+type GuardLimits struct {
+	MaxTaskCostUSD       float64
+	DailyBudgetUSD       float64
+	GroupDailyBudgetUSD  float64
+	GlobalDailyBudgetUSD float64
+	// MaxConcurrent 同一发起智能体的在途任务上限；0 = 默认 3。
+	MaxConcurrent int
+	// DuplicateWindow 同指令去重窗口；0 = 默认 10 分钟。
+	DuplicateWindow time.Duration
+	// MaxChainSteps 根任务链最大步数；0 = 默认 6。
+	MaxChainSteps int
+}
+
+func (l GuardLimits) withDefaults() GuardLimits {
+	if l.MaxConcurrent <= 0 {
+		l.MaxConcurrent = 3
+	}
+	if l.DuplicateWindow <= 0 {
+		l.DuplicateWindow = 10 * time.Minute
+	}
+	if l.MaxChainSteps <= 0 {
+		l.MaxChainSteps = 6
+	}
+	return l
+}
+
+// Guard 是无状态护栏；Now 可注入（测试）。
+type Guard struct {
+	Limits GuardLimits
+	Now    func() time.Time
+}
+
+// Check 在建账前判定；返回包装后的哨兵错误，调用方用 errors.Is 分类。
+func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if store == nil || t == nil {
+		return fmt.Errorf("%w: guard 参数为空", ErrInvalid)
+	}
+	lim := g.Limits.withDefaults()
+	now := time.Now().UTC()
+	if g.Now != nil {
+		now = g.Now().UTC()
+	}
+	if len(t.Chain) > lim.MaxChainSteps {
+		return fmt.Errorf("%w: 链长 %d > %d（需要你决定是否继续）", ErrChainTooDeep, len(t.Chain), lim.MaxChainSteps)
+	}
+	all, err := store.ListTasks(ctx, TaskFilter{})
+	if err != nil {
+		return err
+	}
+	active := 0
+	var agentDay, groupDay, globalDay float64
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	for _, old := range all {
+		if old == nil {
+			continue
+		}
+		if !old.Status.Terminal() {
+			if old.Origin.AgentID == t.Origin.AgentID {
+				active++
+			}
+		}
+		if old.Result != nil && old.Result.Usage.CostPriced && !old.UpdatedAt.Before(startOfDay) {
+			cost := old.Result.Usage.CostUSD
+			globalDay += cost
+			if old.Origin.AgentID == t.Origin.AgentID {
+				agentDay += cost
+			}
+			if t.Origin.GroupID != "" && old.Origin.GroupID == t.Origin.GroupID {
+				groupDay += cost
+			}
+		}
+		if old.Origin.AgentID == t.Origin.AgentID && sameTarget(old.Target, t.Target) &&
+			old.Instruction == t.Instruction && !old.CreatedAt.Before(now.Add(-lim.DuplicateWindow)) {
+			return fmt.Errorf("%w: 同一任务在 %s 内已派发（task %s）", ErrDuplicateTask, lim.DuplicateWindow, old.ID)
+		}
+	}
+	if active >= lim.MaxConcurrent {
+		return fmt.Errorf("%w: 发起者已有 %d 个在途任务（上限 %d）", ErrTooConcurrent, active, lim.MaxConcurrent)
+	}
+	if lim.GlobalDailyBudgetUSD > 0 && globalDay >= lim.GlobalDailyBudgetUSD {
+		return fmt.Errorf("%w: 全局日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.GlobalDailyBudgetUSD, globalDay)
+	}
+	if lim.GroupDailyBudgetUSD > 0 && t.Origin.GroupID != "" && groupDay >= lim.GroupDailyBudgetUSD {
+		return fmt.Errorf("%w: 群日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.GroupDailyBudgetUSD, groupDay)
+	}
+	if lim.DailyBudgetUSD > 0 && agentDay >= lim.DailyBudgetUSD {
+		return fmt.Errorf("%w: 智能体日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.DailyBudgetUSD, agentDay)
+	}
+	return nil
+}
+
+func sameTarget(a, b TaskTarget) bool {
+	return a.Kind == b.Kind && a.Workspace == b.Workspace && a.SessionID == b.SessionID && a.AgentID == b.AgentID && a.GroupID == b.GroupID
+}
+
+// OverTaskBudget 结算时判定单任务成本是否超限（CostPriced=false 不判：未知不等于 0）。
+func (l GuardLimits) OverTaskBudget(u Usage) (bool, string) {
+	if l.MaxTaskCostUSD <= 0 || !u.CostPriced {
+		return false, ""
+	}
+	if u.CostUSD > l.MaxTaskCostUSD {
+		return true, fmt.Sprintf("单任务成本 $%.4f 超过上限 $%.2f", u.CostUSD, l.MaxTaskCostUSD)
+	}
+	return false, ""
+}
