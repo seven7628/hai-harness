@@ -1210,22 +1210,22 @@ const BASE = {
       "reviewNote": "阶段门禁评审 pass（0 blocking）。评审自跑干净检出：clone→冷缓存全量 go test ./agenthub/... ./session/... ./desktop/bridge/... 全绿（53s bridge）；三次 mutation 反证（VisibleTo fail-open / L1 golden / MarkNotified settled 门禁）均能让测试失败；§19.3.1 的 4 个 commit hash 与看板、PROGRESS.html 内嵌 BASE 逐条一致（done=8/review=1）；无 TODO/桩/hub_ 命令残留。评审提醒：门禁命令必须用 -list 确认命中（-run 正则打错会静默 0 用例 PASS，已写进 §19.2）、hubRuntime 全程持 m.mu（P1 接 createHubSession 前改成锁内查表/锁外装配）、ledgerTaskLocks 无回收、delivered 后不能重复 Finish（P2 重投递按 NotifiedRuns 去重）、全局层装配失败只打 stderr（P1 要挂 UI 状态）。"
     },
     "P1-01": {
-      "status": "review",
+      "status": "done",
       "commit": "503adc2 fix(hub-p1-01): 复核二轮 —— 显式敏感子路径、前缀门禁、模型可见清单",
-      "review": "pending",
-      "reviewNote": "首轮 changes_requested（6 blocking）→ 3448554 修复（引擎级 hidden 表替代 wrapper、GetTool 调用期硬约束、MCP 身份访问器 + 歧义 fail-closed、workspace_roots 接线、沙箱只读根顺序与 write deny、SetToolFilter 覆盖动态工具、home 与 policy 存储分离）→ 二轮复审确认 B1–B5 闭合，留 2 条：显式敏感子路径仍被后置 OpenSubpaths allow 覆盖、MatchesPatterns 的 mutation 门禁不成立 → 503adc2 修复（策略末尾重发显式 deny；新增 TestMatchesPatternsPrefixIsAnchored 并实测 Contains mutation 失败），顺带 VisibleTools() 让 codemode 目录/技能能力清单不再列出撤下的工具。验证：干净 HOME 下 agenthub/sandbox/bridge/session/core 全绿（bridge 40s+），四条 mutation 均能失败（WithOpenSubpaths / SetToolFilter / HasPrefix→Contains / 末尾显式 deny）；遗留（P1-05）：Hub 沙箱未复用 execSandbox 的 ReleaseGate、disable_network 未接线。"
+      "review": "passed",
+      "reviewNote": "三轮评审收口（task-qv2k6uyx，最终 passed）：首轮 6 blocking（基线不可构建、hiddenTool 丢 Optional 接口、hidden 不是调用期硬约束、MCP 名字含 __ 绕过开关、workspace_roots 没接线、WithReadOnlyPaths 破坏敏感 deny 且不是真只读）→ 3448554 逐条修复（引擎级 hidden 名字表替代 wrapper、GetTool 报 disabled by policy、MCP 身份访问器 + 歧义 fail-closed、只读根 read-allow 前移 + write deny、SetToolFilter 覆盖动态工具、可写 home 与 policy 存储分离）→ 二轮确认 B1–B5 闭合，留 2 条（显式敏感子路径仍被后置 OpenSubpaths allow 覆盖、MatchesPatterns 的 mutation 门禁不成立）→ 503adc2 修复并复验：策略末尾重发显式 deny、补 TestMatchesPatternsPrefixIsAnchored；评审自跑干净 worktree：go build ./... + sandbox/bridge 全绿，4 条 mutation 均能失败。附带 VisibleTools() 让 codemode 目录/技能能力清单不再列出撤下的工具。遗留（P1-05）：Hub 沙箱未复用 execSandbox 的 ReleaseGate、disable_network 未接线。"
     },
     "P1-02": {
-      "status": "review",
-      "commit": "090a7c6 feat(hub-p1-02): Hub AgentLoop 装配（L0 关闭 / 显式 provider 采样 / 记忆注入）",
-      "review": "pending",
-      "reviewNote": "hubLoopOptions/buildHubLoop：WithBaseSystemPrompt(\"\") 显式关 L0（P0-06 复审遗留项 5）、WithSystemPrompt 只产 L1+L2（L3/L4/L5 仍由内核按序追加）、显式 provider/model + samplingDefaultsFor（旧 samplingDefaults 等价于按 active 取）、memory 注入、compress 阈值、子代理与技能能力清单。测试 go test ./desktop/bridge/ -run HubLoop 4 条全绿；mutation：去掉 WithBaseSystemPrompt → L0 泄漏断言失败；采样改回全局 active → openai 沾上 1.0 失败。遗留：compress 阈值无行为级断言（内核无 getter）。"
+      "status": "done",
+      "commit": "c3316bf fix(hub-p1-02): 复核跟进 —— 名册 Members、阈值钳位、行为级断言",
+      "review": "passed",
+      "reviewNote": "评审 passed（task-cugpdvx2）：L0 关闭、显式 provider 不读全局 active、记忆注入位置、compress 默认值、人格稳定性都经请求字节与 mutation 验证（去 WithBaseSystemPrompt → L0 泄漏；采样改回全局 active → openai 沾上 temperature=1）。评审提的 non-blocking 本轮闭合 3 条：名册缺 Members（会退化成 unknown member）、compress 阈值没行为级断言（改用 AgentLoop.CompressThreshold()，并在装配层再钳 [0.5,0.95]）、PersonaEmptyIsStable 近乎恒真（补「不得出现 ## Identity/空层」断言）。文档写明 D17 只到 Hub 主 loop，派生出的子智能体仍用项目口径（DesktopCodePromptV2/ExploreV2）。遗留（P1-05）：未接 codeAgentTuningFor（postToolNudge/contextSlim/asyncPromoteAfter/first_chunk_timeout）。"
     },
     "P1-03": {
       "status": "review",
       "commit": "4152e2f feat(hub-p1-03): 智能体 CRUD 命令 + 校验 + 版本留档",
       "review": "pending",
-      "reviewNote": "dispatchHub 接五个 hub_agent_* 命令（常量表 + dispatch 顶部转交）；FileStore 懒开；provider 必须已配置且未删（providerConfigured 以 baseURL 为事实源）、名字大小写唯一且软删不占名额、总数上限只算未删；create=version 1，update 先归档旧 profile 再 version++（归档失败不改当前版本），删除默认软删（幂等、可恢复），purge 才物理删目录；事件 hub_agent_status(idle/deleted)。agenthub 新增 AppendProfileVersion/ListProfileVersions（值拷贝快照、裁剪 50、坏行跳过）/DeleteAgent。测试：bridge -run HubAgent 7 条、agenthub -run 'ProfileVersion|DeleteAgent' 4 条。已知：update 后重建 loop 属于 P1-04。"
+      "reviewNote": "dispatchHub 接五个 hub_agent_* 命令（常量表 + dispatch 顶部转交）；FileStore 懒开；provider 必须已配置且未删（providerConfigured 以 baseURL 为事实源）、名字大小写唯一且软删不占名额、总数上限只算未删；create=version 1，update 先归档旧 profile 再 version++（归档失败不改当前版本），删除默认软删（幂等、可恢复），purge 才物理删目录；事件 hub_agent_status(idle/deleted)。agenthub 新增 AppendProfileVersion/ListProfileVersions（值拷贝快照、裁剪 50、坏行跳过）/DeleteAgent。测试：bridge -run HubAgent 7 条、agenthub -run 'ProfileVersion|DeleteAgent' 4 条。已知：update 后重建 loop 属于 P1-04。评审进行中。"
     }
   }
 };
