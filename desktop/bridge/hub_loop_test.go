@@ -147,6 +147,28 @@ func TestHubLoopMemoryAndCompress(t *testing.T) {
 	if !strings.Contains(systemTextOf(req), "用户叫小王") {
 		t.Fatalf("memory injection missing from system: %q", systemTextOf(req))
 	}
+	// compress_threshold 是行为级可观测的（AgentLoop.CompressThreshold），
+	// 不能只靠「选项构造时传了」——那和没测一样（P1-02 复核）。
+	eng, _ := m.buildHubEngine(ws, "s-hub-loop", spec, subagent.NewRegistry(),
+		events.NewQuestionWaiter(0), func() context.Context { return context.Background() })
+	if got := m.buildHubLoop(ws, "s-hub-loop", spec, eng).CompressThreshold(); got != 0.7 {
+		t.Fatalf("compress threshold = %v, want 0.7", got)
+	}
+	// 零值 → 默认；越界 → 钳到 [0.5, 0.95]（装配层再钳一次，防手工 spec 绕过 Normalize）。
+	for _, tc := range []struct{ in, want float64 }{
+		{0, agenthub.DefaultCompressThreshold},
+		{0.97, agenthub.MaxCompressThreshold},
+		{0.1, agenthub.MinCompressThreshold},
+	} {
+		spec := &hubSessionSpec{Agent: agenthub.AgentProfile{
+			ID: "ag_th", Provider: "deepseek", Model: "deepseek-v4-flash", CompressThreshold: tc.in,
+		}}
+		eng, _ := m.buildHubEngine(ws, "s-hub-loop", spec, subagent.NewRegistry(),
+			events.NewQuestionWaiter(0), func() context.Context { return context.Background() })
+		if got := m.buildHubLoop(ws, "s-hub-loop", spec, eng).CompressThreshold(); got != tc.want {
+			t.Fatalf("compress threshold(%v) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
 }
 
 // 零值 Profile 的 L2 层必须稳定（不追加空层）：两次装配的 system 字节一致。
@@ -160,5 +182,42 @@ func TestHubLoopPersonaEmptyIsStable(t *testing.T) {
 	b := systemTextOf(hubLoopFor(t, m, ws, spec))
 	if a != b {
 		t.Fatalf("hub system prompt is not byte-stable with empty persona:\n--- a ---\n%s\n--- b ---\n%s", a, b)
+	}
+	// 「空层稳定」= 不追加空的身份层，而不只是两次结果相同（P1-02 复核：后者恒真）。
+	// 无条件写一行 "## Identity" 也会让字节稳定，但那是错的。
+	if strings.Contains(a, "## Identity") {
+		t.Fatalf("empty persona must not emit an Identity layer:\n%s", a)
+	}
+	if strings.Contains(a, "\n\n\n") {
+		t.Fatalf("empty persona must not leave a blank layer (triple newline):\n%s", a)
+	}
+}
+
+// 群名册层必须用 Members 渲染出真名/职责，而不是退化成 "unknown member (ag_…)"。
+// Hub 会话一旦挂 Group（P3a），缺 Members 会静默产出错名册（P1-02 复核）。
+func TestHubLoopRosterUsesMembers(t *testing.T) {
+	m, _ := testManager(t)
+	ws := m.hubRuntime("ag_loop")
+	owner := &agenthub.AgentProfile{ID: "ag_owner", Name: "Writer", Role: "长文写作"}
+	member := &agenthub.AgentProfile{ID: "ag_member", Name: "Reviewer", Role: "代码评审"}
+	spec := &hubSessionSpec{
+		Agent: agenthub.AgentProfile{ID: "ag_owner", Name: "Writer", Provider: "deepseek", Model: "deepseek-v4-flash"},
+		Group: &agenthub.Group{
+			ID: "grp_x", Name: "写作组",
+			Members: []agenthub.Member{
+				{AgentID: "ag_owner", Role: agenthub.RoleOwner},
+				{AgentID: "ag_member", Role: agenthub.RoleMember},
+			},
+		},
+		Members: []*agenthub.AgentProfile{owner, member},
+	}
+	system := systemTextOf(hubLoopFor(t, m, ws, spec))
+	for _, want := range []string{"Writer", "Reviewer", "长文写作", "代码评审"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("roster missing %q:\n%s", want, system)
+		}
+	}
+	if strings.Contains(system, "unknown member") {
+		t.Fatalf("roster degraded to unknown member:\n%s", system)
 	}
 }

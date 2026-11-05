@@ -836,6 +836,17 @@ sandbox 仍由 `buildHubEngine` 注入。
 原因：沙箱要把 home 整棵子树放开给 bash；如果 `profile.json`（含 `policy`）也在 home 里，
 智能体就能给自己加工具、改沙箱根，直接违反 §9.1「智能体不能修改自己的 policy」。
 
+**DM 索引与上下文分离**（P1-04 定稿）：
+
+| 文件 | 内容 | 用途 |
+|---|---|---|
+| `dms/<agentID>/log.jsonl` | 人/智能体消息（`seq` 游标，摘要 + 正文） | 左栏预览、未读、搜索；**不是**上下文源 |
+| `dms/<agentID>/cursor.json` | `human_read_seq` | 未读点/「未读」分隔线 |
+| `homes/<id>/sessions/<sid>.jsonl` | 会话上下文（含压缩后的摘要） | 模型真正看到的上下文 |
+
+为什么分开：会话 jsonl 是「模型看到什么」的权威（压缩会改写它），DM 索引是「人看到什么」的
+投影（只追加、不被压缩影响）。两者混用会让「压缩后左栏预览消失」或「删除预览丢上下文」。
+
 不写 `workspaces.json`，因此不会出现在现有工作区列表里；`workspace_list` 只列 `wsReg` 里的项目。
 
 #### 6.1.4 会话 ID 与 scope
@@ -922,6 +933,16 @@ func (m *manager) buildHubLoop(ws *workspaceRuntime, sid string, spec *hubSessio
 「工具使用/安全边界/输出契约」，不再叠加一层 SDK 行为契约。实现上必须显式
 `WithBaseSystemPrompt("")`——不传的话内核会用 `DefaultSystemPrompt` 补成 L0（`agents/agent_loop.go:702`），
 等于没去掉。
+
+**名册层（L2 旁）必须带 Members**：`RenderSystem` 的 `PromptSpec.Members` 缺失时名册会退化成
+`unknown member (ag_…)`（丢名字/职责）。装配层（`hubLoopOptions`）负责把成员档案一并传进去；
+`hubSessionSpec.Group` 单独存在不算数。
+
+**D17 的边界只到 Hub 主 loop（明确决定）**：智能体经 `agent_spawn`/`subagent_explore` 派生的
+子智能体，其 loop 仍走项目会话口径（`DesktopCodePromptV2` / `DesktopExploreV2`）。
+理由：子智能体是**执行者**，不是群成员——它们不参与 @/群礼仪，不需要 Hub 协议层；
+而且共享项目子代理实现能保证「派出去的活儿」与用户在项目里直接干的活儿行为一致。
+要改这条决定，必须同时改 `buildPersonaLoop`/`buildExploreLoop` 的两个宿主，不能只改 Hub。
 
 **群组快照不进 system**：每轮变化的「谁说了什么」必须作为 **user 消息**注入（§6.5.2），
 不能塞进 `WithSystemPrompt`——否则每轮都要重建 loop，而且会破坏 prompt cache。

@@ -29,6 +29,9 @@ type hubSessionSpec struct {
 	Agent agenthub.AgentProfile
 	Scope agenthub.Scope
 	Group *agenthub.Group
+	// Members 群成员档案（§6.2.2 名册层）。Group 只带 member_ids/role，
+	// 渲染名册还需要名字/职责 —— 缺了会退化成 "unknown member (ag_…)"（P1-02 复核）。
+	Members []*agenthub.AgentProfile
 	// MemoryInjection 装配期算好的记忆索引文本（空 = 不注入）。
 	// 为什么要装配期算：composeSystemPrompt 每轮重跑，解析记忆目录要跑 git 读索引，
 	// 放进去等于每轮重复一次（与项目会话同一个理由，见 memory_prefs.go）。

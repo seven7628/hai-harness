@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -206,7 +207,11 @@ func (m *manager) hubLoopOptions(ws *workspaceRuntime, sid string, spec *hubSess
 	if threshold == 0 {
 		threshold = agenthub.DefaultCompressThreshold
 	}
-	systemPrompt := agenthub.RenderSystem(agenthub.PromptSpec{Agent: &spec.Agent, Group: spec.Group})
+	// 装配层再钳一次 [0.5, 0.95]（与 agenthub.AgentProfile.Normalize 同口径）：
+	// 走 Store/CRUD 的路径已经 Normalize 过，但手工 spec（测试/恢复快照）能绕过那层，
+	// 0.97 这种值会让每轮都压缩（成本爆炸），0.1 会把上下文压穿（P1-02 复核）。
+	threshold = math.Min(agenthub.MaxCompressThreshold, math.Max(agenthub.MinCompressThreshold, threshold))
+	systemPrompt := agenthub.RenderSystem(agenthub.PromptSpec{Agent: &spec.Agent, Group: spec.Group, Members: spec.Members})
 	sameProvider := m.provCfg.newProvider(p.Provider)
 	opts := []agents.Option{
 		agents.WithProvider(sameProvider),
@@ -235,7 +240,7 @@ func (m *manager) hubLoopOptions(ws *workspaceRuntime, sid string, spec *hubSess
 	if spec.MemoryInjection != "" {
 		opts = append(opts, agents.WithMemoryInjection(spec.MemoryInjection)) // L4：记忆索引
 	}
-	if temperature, topP := m.provCfg.samplingDefaultsFor(p.Provider); temperature != nil {
+	if temperature, topP := m.provCfg.samplingDefaultsFor(p.Provider); temperature != nil && topP != nil {
 		opts = append(opts, agents.WithTemperature(*temperature), agents.WithTopP(*topP))
 	}
 	return opts

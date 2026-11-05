@@ -111,8 +111,12 @@ const (
 	AvatarKindImage = "image"
 
 	DefaultCompressThreshold = 0.8
-	DefaultMemoryIndexLines  = 200
-	DefaultMaxAutoTurns      = 6
+	// MinCompressThreshold / MaxCompressThreshold 是 compress_threshold 的钳位区间（§5.1）。
+	// 太低会让每轮都压缩（成本爆炸），太高等于不压缩（上下文溢出）。
+	MinCompressThreshold    = 0.5
+	MaxCompressThreshold    = 0.95
+	DefaultMemoryIndexLines = 200
+	DefaultMaxAutoTurns     = 6
 )
 
 // Normalize 应用默认值并校验；只有全部通过才原地更新，失败时对象保持原样。
@@ -175,7 +179,7 @@ func (p *AgentProfile) ApplyDefaults() {
 	if p.CompressThreshold == 0 {
 		p.CompressThreshold = DefaultCompressThreshold
 	} else if !math.IsNaN(p.CompressThreshold) && !math.IsInf(p.CompressThreshold, 0) {
-		p.CompressThreshold = math.Min(0.95, math.Max(0.5, p.CompressThreshold))
+		p.CompressThreshold = math.Min(MaxCompressThreshold, math.Max(MinCompressThreshold, p.CompressThreshold))
 	}
 	if p.Memory.MaxIndexLines == 0 {
 		p.Memory.MaxIndexLines = DefaultMemoryIndexLines
@@ -233,7 +237,7 @@ func (p *AgentProfile) Validate() error {
 	}
 	if p.CompressThreshold != 0 &&
 		(math.IsNaN(p.CompressThreshold) || math.IsInf(p.CompressThreshold, 0) ||
-			p.CompressThreshold < 0.5 || p.CompressThreshold > 0.95) {
+			p.CompressThreshold < MinCompressThreshold || p.CompressThreshold > MaxCompressThreshold) {
 		return fmt.Errorf("%w: profile.compress_threshold must be within [0.5, 0.95]", ErrInvalid)
 	}
 	if p.Memory.MaxIndexLines < 0 {
