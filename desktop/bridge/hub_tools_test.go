@@ -58,9 +58,20 @@ func TestHubEngineZeroValueKeepsFullToolset(t *testing.T) {
 			t.Errorf("hub engine hid %q under zero-value policy", name)
 		}
 	}
-	// 不传 mesh Hub → mesh 的 session_send/session_list 不注册（§6.3.1 的唯一例外）。
-	if exists, _ := toolVisible(t, eng, "session_send"); exists {
-		t.Error("mesh session_send must not be registered in the hub engine")
+	// 不传 mesh Hub → mesh 的 session_send/session_list 不注册；但在同一名字上是
+	// Hub 自己的工作区工具（§6.3.1 的唯一例外），所以必须存在且描述指向项目会话。
+	sendTool, err := eng.GetTool(context.Background(), "session_send")
+	if err != nil {
+		t.Fatalf("hub engine must register its own session_send: %v", err)
+	}
+	if !strings.Contains(sendTool.Description(), "project session") {
+		t.Fatalf("session_send is not the hub workspace tool: %q", sendTool.Description())
+	}
+	// P2-02：工作区/会话五件套齐全。
+	for _, name := range []string{"workspace_list", "workspace_create", "session_list", "session_create", "session_send"} {
+		if exists, visible := toolVisible(t, eng, name); !exists || !visible {
+			t.Errorf("hub engine missing workspace tool %q (exists=%v visible=%v)", name, exists, visible)
+		}
 	}
 }
 

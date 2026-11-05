@@ -92,6 +92,10 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 		nil, // 不传 mesh Hub：session_send/session_list 由 Hub 自己的工具提供（§6.3.1）
 		m.pythonRuntime(), m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig(),
 	)
+	// Hub 自己的工作区/会话工具（§6.3.1 明确替换 mesh 的同名工具，语义不同：
+	// 这里派给项目会话，不切全局 provider）。注册后再统一过 Profile 策略，
+	// 所以 readonly 预设仍能看到 list、看不到 create/send。
+	registerHubWorkspaceTools(eng, agenthub.NewWorkspaceService(newHubWorkspaceOps(m), p.ID))
 	applyHubToolPolicy(context.Background(), eng, p.Tools)
 	return eng, effortRef
 }
@@ -117,6 +121,21 @@ func applyHubToolPolicy(ctx context.Context, eng *tools.Engine, policy agenthub.
 		hidden = append(hidden, name)
 	}
 	return hidden
+}
+
+// reapplyHubToolPolicy 运行期替换策略：先恢复全部 hidden，再按新策略撤下。
+//
+// HideTool 是粘性的（MCP 重连/插件热更新都不会自动恢复），所以「禁 → 放开」
+// 必须显式 ShowTool；否则资料页把 bash 打开后，当前会话永远回不来（P1-10 B5）。
+func reapplyHubToolPolicy(eng *tools.Engine, policy agenthub.ToolPolicy) []string {
+	if eng == nil {
+		return nil
+	}
+	for _, t := range eng.Tools() {
+		eng.ShowTool(t.Name())
+	}
+	eng.SetToolFilter(nil)
+	return applyHubToolPolicy(context.Background(), eng, policy)
 }
 
 // mcpIdentity 真实 MCP 适配器暴露的身份（server/tool 自带 "__" 时名字反解不可靠）。
