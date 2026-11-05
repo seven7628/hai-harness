@@ -50,6 +50,10 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubAgentDelete(c)
 	case CmdHubAgentRestore:
 		m.hubAgentRestore(c)
+	case CmdHubAgentMemory:
+		m.hubAgentMemory(c)
+	case CmdHubAgentMemoryWrite:
+		m.hubAgentMemoryWrite(c)
 	case CmdHubOpen:
 		m.hubOpen(c)
 	case CmdHubSend:
@@ -437,6 +441,90 @@ func (m *manager) hubAgentRestore(c command) {
 	}
 	m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
 	m.resp(c, true, "", map[string]any{"agent": next})
+}
+
+// hubAgentMemory 记忆面板：不带 path = 列清单，带 path = 读内容（不存在时 exists=false）。
+//
+// 记忆放在 agents/<id>/memory（不在沙箱放开的 home 里，§9.2）：面板读写走这条命令，
+// 智能体的文件工具碰不到自己的记忆文件，只有注入进系统提示词的索引/正文可见。
+func (m *manager) hubAgentMemory(c command) {
+	agentID := str(c.Payload, "agent_id")
+	if agentID == "" {
+		m.resp(c, false, "agent_id 不能为空", nil)
+		return
+	}
+	p, _, err := m.hubLoadAgent(agentID)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	root := filepath.Join(appDataDir(), "hub")
+	rel := strings.TrimSpace(str(c.Payload, "path"))
+	if rel == "" {
+		entries, err := agenthub.ListMemory(root, p.ID)
+		if err != nil {
+			m.resp(c, false, "读取记忆目录失败: "+err.Error(), nil)
+			return
+		}
+		dir, _ := agenthub.MemoryAgentDir(root, p.ID)
+		m.resp(c, true, "", map[string]any{"entries": entries, "dir": dir})
+		return
+	}
+	content, err := agenthub.ReadMemoryFile(root, p.ID, rel)
+	if errors.Is(err, agenthub.ErrNotFound) {
+		// 新文件：ok=true + exists=false（面板据此进「新建」而不是报错）。
+		m.resp(c, true, "", map[string]any{"path": rel, "content": "", "exists": false})
+		return
+	}
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	m.resp(c, true, "", map[string]any{"path": rel, "content": content, "exists": true})
+}
+
+// hubAgentMemoryWrite 写记忆文件：写前备份 → 原子落盘 → 重建该智能体的 loop。
+//
+// 生效时机（§6.9 / 验收项）：记忆索引是在**装配 loop 时**注入 system prompt 的，
+// 所以写完必须重建 loop；已经在跑的 Run 用旧 loop 收尾（不打断中间状态）。
+func (m *manager) hubAgentMemoryWrite(c command) {
+	agentID := str(c.Payload, "agent_id")
+	if agentID == "" {
+		m.resp(c, false, "agent_id 不能为空", nil)
+		return
+	}
+	rel := strings.TrimSpace(str(c.Payload, "path"))
+	if rel == "" {
+		m.resp(c, false, "path 不能为空", nil)
+		return
+	}
+	content, ok := c.Payload["content"].(string)
+	if !ok {
+		m.resp(c, false, "content 必须是字符串", nil)
+		return
+	}
+	p, _, err := m.hubLoadAgent(agentID)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	root := filepath.Join(appDataDir(), "hub")
+	res, err := agenthub.WriteMemoryFile(root, p.ID, rel, content)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	// 重建失败不回滚写入（文件已经落盘）：把错误带回去让面板提示「重启后生效」。
+	rebuildErr := m.refreshHubLoops(agentID)
+	data := map[string]any{
+		"path": res.Path, "backup": res.Backup, "bytes": res.Bytes,
+		"effective": "next_run", // 已有的 Run 用旧 loop 收尾
+	}
+	if rebuildErr != nil {
+		data["effective"] = "next_session"
+		data["warning"] = "重建会话 loop 失败，重启后生效: " + rebuildErr.Error()
+	}
+	m.resp(c, true, "", data)
 }
 
 // emitHubAgentStatus 状态点事件（左栏状态点/头像动效，§7.1.5）。

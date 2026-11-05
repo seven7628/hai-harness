@@ -66,6 +66,9 @@ const (
 	CmdHubAgentList    Command = "hub_agent_list"
 	CmdHubAgentDelete  Command = "hub_agent_delete"
 	CmdHubAgentRestore Command = "hub_agent_restore" // 从回收站恢复（§5.2 软删可恢复）
+	// —— Agent Hub（P1：记忆面板） ——
+	CmdHubAgentMemory      Command = "hub_agent_memory"       // 列表 / 读一个文件
+	CmdHubAgentMemoryWrite Command = "hub_agent_memory_write" // 写（写前备份）
 	// —— Agent Hub（P1：DM 会话） ——
 	CmdHubOpen    Command = "hub_open"
 	CmdHubSend    Command = "hub_send"

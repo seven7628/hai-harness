@@ -24,6 +24,7 @@ import (
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/mcp"
+	"github.com/seven7628/hai-harness/memory"
 	"github.com/seven7628/hai-harness/provider"
 	"github.com/seven7628/hai-harness/skills"
 	"github.com/seven7628/hai-harness/subagent"
@@ -287,13 +288,28 @@ func hubSessionID(agentID string, scope agenthub.Scope) string {
 	return "hub." + agentID + ".g." + string(scope.GroupID)
 }
 
+// hubMemoryConfig 智能体的记忆配置：目录与身份都**固定**，不跑 git。
+//
+// 项目会话的记忆身份来自 <workdir> 的 git 仓库；智能体 home 不是 git 仓库，
+// 走默认解析永远拿不到身份 → 记忆不注入（等于没开）。§6.9.1 定的是
+// `agents/<id>/memory/repos/<id>`：Directory 指向 agents/<id>/memory，
+// ProjectDirName 固定为 agentID（memory.Config 支持把它当身份）。
+func (m *manager) hubMemoryConfig(agentID string) memory.Config {
+	cfg := m.memoryConfig()
+	if root, err := agenthub.MemoryRootFor(filepath.Join(appDataDir(), "hub"), agenthub.AgentID(agentID)); err == nil {
+		cfg.Directory = root
+		cfg.ProjectDirName = agentID
+	}
+	return cfg
+}
+
 // hubMemoryInjection 装配期算一次记忆索引（空 = 无记忆/未开启）。
-// 与项目会话同一条通道（newMemoryHost），只是工作区换成智能体 home ——
+// 与项目会话同一条通道（newMemoryHost），换的是目录与身份 ——
 // 记忆是 Profile 级（DM 与所有群共享，§6.9）。
-func (m *manager) hubMemoryInjection(home string) string {
+func (m *manager) hubMemoryInjection(agentID, home string) string {
 	mctx, cancel := context.WithTimeout(context.Background(), memoryResolveTimeout)
 	defer cancel()
-	return newMemoryHost(m.memoryConfig()).injection(mctx, home)
+	return newMemoryHost(m.hubMemoryConfig(agentID)).injection(mctx, home)
 }
 
 // hubSpecFor 组装一次 Hub 会话的装配输入（Profile + scope + 记忆索引）。
@@ -301,7 +317,7 @@ func (m *manager) hubSpecFor(p *agenthub.AgentProfile, scope agenthub.Scope, hom
 	return &hubSessionSpec{
 		Agent:           *p,
 		Scope:           scope,
-		MemoryInjection: m.hubMemoryInjection(home),
+		MemoryInjection: m.hubMemoryInjection(string(p.ID), home),
 	}
 }
 
@@ -315,7 +331,7 @@ func (m *manager) hubSpecFor(p *agenthub.AgentProfile, scope agenthub.Scope, hom
 //
 // 为什么需要：createIn 是「锁内查表 → 解锁装配 → 再锁写入」，中间没有二次查表；
 // 并发 hub_send（桌面端靠 dispatchMu 串行，手机端是另一个 mutex）会各自装配出
-// 一个 Session，共用同一个 hub.<id>.dm.jsonl —— 上下文交错，且多余实例的
+// 一个 Session，共用同一个 hub.<id>.dm.jsonl —— 上下文交错，且 7 个实例的
 // runLoop goroutine 只挂在自己的 ctx 上，ws.sessions 查不到 → 关不掉。
 func (m *manager) lockHubAgent(agentID string) func() {
 	m.mu.Lock()
@@ -339,7 +355,8 @@ func isHubHomePath(p string) bool {
 		return false
 	}
 	root := filepath.Join(appDataDir(), "hub", "homes")
-	rel, err := filepath.Rel(root, filepath.Clean(p))
+	clean := filepath.Clean(p)
+	rel, err := filepath.Rel(root, clean)
 	if err != nil {
 		return false
 	}
@@ -360,7 +377,7 @@ func (m *manager) hubDMSession(agentID string) (*bridgeSession, error) {
 	}
 	ws := m.hubRuntime(agentID)
 	sid := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})
-	// 同一 agent 的装配必须串行：先拿锁，再在锁内复查是否已被别人建好。
+	// 同一 agent 的装配必须串行：先拿锁，再在锁内复查看是否已被别人建好。
 	unlock := m.lockHubAgent(agentID)
 	defer unlock()
 	ws.mu.Lock()
@@ -426,4 +443,56 @@ func (m *manager) emitHubMessage(agentID string, seq int64, msg *agenthub.Messag
 		line["client_msg_id"] = clientMsgID
 	}
 	m.out.writeLine(line)
+}
+
+// refreshHubLoops 重建某智能体所有会话的 loop（记忆/人格/阈值变更后调用）。
+//
+// 只重建 loop，不重建引擎：引擎持有工具实例/审批等待/后台任务，重建会丢掉正在跑的
+// 东西；而 loop 只承载「模型看到什么」（system prompt 的 L4 记忆、压缩阈值、采样）。
+// 采集期间会话可能被关掉（bs.ctx 已取消）→ 跳过，不复活。
+func (m *manager) refreshHubLoops(agentID string) error {
+	st, err := m.hubStore()
+	if err != nil {
+		return err
+	}
+	p, err := st.LoadAgent(context.Background(), agenthub.AgentID(agentID))
+	if err != nil {
+		return fmt.Errorf("读取智能体失败: %w", err)
+	}
+	ws := m.hubRuntimeIfExists(agentID)
+	if ws == nil {
+		return nil // 还没装配过任何会话：下一次 hubDMSession 会带上新内容
+	}
+	ws.mu.Lock()
+	items := make([]*bridgeSession, 0, len(ws.sessions))
+	for _, bs := range ws.sessions {
+		items = append(items, bs)
+	}
+	ws.mu.Unlock()
+
+	for _, bs := range items {
+		if bs == nil || bs.ctx.Err() != nil || bs.hubEngine == nil {
+			continue
+		}
+		scope := agenthub.Scope{Kind: agenthub.ScopeDM}
+		if strings.Contains(bs.id, ".g.") {
+			scope = agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: agenthub.GroupID(hubGroupIDFromSID(bs.id))}
+		}
+		spec := m.hubSpecFor(p, scope, ws.path)
+		bs.loop = m.buildHubLoop(ws, bs.id, spec, bs.hubEngine)
+		bs.s.SetLoop(bs.loop)
+		bs.provider = p.Provider
+		bs.model = p.Model
+	}
+	return nil
+}
+
+// hubGroupIDFromSID 从 hub.<agent>.g.<groupID> 取群 ID（群会话在 P3 才会创建；
+// 这里只保证重建时不会把群会话错当成 DM）。
+func hubGroupIDFromSID(sid string) string {
+	const marker = ".g."
+	if i := strings.Index(sid, marker); i >= 0 {
+		return sid[i+len(marker):]
+	}
+	return ""
 }

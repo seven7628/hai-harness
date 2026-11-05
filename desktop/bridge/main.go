@@ -313,8 +313,11 @@ type bridgeSession struct {
 	// hubOnAgentEnd Hub DM 的本轮收尾钩子（nil = 项目会话）。RunStream 层事件只经
 	// bs.emit 发出（Session 的 WithEventHandler 收不到 agent_*），所以钩子必须挂在 emit。
 	hubOnAgentEnd func(content string)
-	workspace     string     // 工作区根（审批 diff 读取原文件用）
-	mobile        *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// hubEngine Hub 会话的工具引擎（记忆/人格变更后重建 loop 时复用：
+	// 重建引擎会丢掉正在运行的工具任务与审批等待，没必要）。
+	hubEngine *tools.Engine
+	workspace string     // 工作区根（审批 diff 读取原文件用）
+	mobile    *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
 	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
 	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
 	running atomic.Bool
@@ -974,7 +977,7 @@ func (m *manager) get(wsPath, id string) *bridgeSession {
 func (m *manager) interruptAllIn(wsPath string) int {
 	if isHubHomePath(wsPath) {
 		// 智能体 home 不是工作区：这里 m.runtime(wsPath) 会造出项目 kind 的 runtime
-		//（读项目层、混进 m.workspaces）。hub 会话按 m.get 的 hubRuntimeByPath 寻址，
+		// （读项目层、混进 m.workspaces）。hub 会话按 m.get 的 hubRuntimeByPath 寻址，
 		// 走到这个兜底分支说明本来就没有会话，直接 no-op。
 		return 0
 	}
@@ -1405,12 +1408,14 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	var loop *agents.AgentLoop
 	var effortRef *subagentEffortRef
 	var skillCaps *skills.Capabilities
+	var hubEng *tools.Engine
 	if opts.hub != nil {
 		// Hub 智能体：工具面 + 提示词都按 Profile 装配（§6.2），与项目会话共用内核。
 		eng, eRef := m.buildHubEngine(ws, id, opts.hub, reg, qw, func() context.Context { return s.Context() })
 		loop = m.buildHubLoop(ws, id, opts.hub, eng)
 		effortRef = eRef
 		skillCaps = skillCapabilitiesFor(m.provCfg, opts.hub.Agent.Provider, opts.hub.Agent.Model, eng)
+		hubEng = eng
 	} else {
 		loop, effortRef, skillCaps = m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort,
 			func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
@@ -1466,6 +1471,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		bs.persona = "hub"
 		hubSpec := opts.hub
 		bs.hubOnAgentEnd = func(content string) { m.appendHubReply(hubSpec, content) }
+		bs.hubEngine = hubEng
 	}
 	if opts.cronEvDir != "" {
 		bs.cronEvDir = opts.cronEvDir

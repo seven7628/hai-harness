@@ -1940,22 +1940,31 @@ func (s *Service) ResolveNeed(ctx, needID, resolution) error {
 ```go
 cfg := memory.Config{
     Enabled:        boolPtr(profile.Memory.Enabled),
-    Directory:      filepath.Join(agentDir(profile.ID), "memory"), // 根
-    ProjectDirName: profile.ID,                                    // <root>/repos/<agentID>
+    Directory:      filepath.Join(agentStoreDir(profile.ID), "memory"), // 根
+    ProjectDirName: profile.ID,                                        // <root>/repos/<agentID>
     // ReadFile/WriteFile 等留空 = 真实 I/O
 }
 res, err := memory.Bootstrap(ctx, agentHome(profile.ID), cfg)
 loopOpts = append(loopOpts, agents.WithMemoryInjection(res.Injection.Text))
 ```
 
-- 目录：`~/.go-code/hub/homes/<id>/memory/repos/<id>/`（`MEMORY.md` + 附件）。
+- 目录：`~/.go-code/hub/agents/<id>/memory/repos/<id>/`（`MEMORY.md` + 附件）。
+  **不在可写 home 里**（P1-05 修订）：记忆是 Profile 级财产，不该被 `bash rm` 一条命令带走；
+  面板读写走 bridge 命令（写前备份、原子写），智能体只通过注入看到索引/正文。
+  身份固定为 agentID（`ProjectDirName`）—— home 不是 git 仓库，走默认解析永远拿不到身份，
+  等于记忆从未生效（P1-05 实测）。
 - 记忆是 **Profile 级**：DM 与所有群共享（同一个「它」）。
 - `remember` 工具：追加一条带 frontmatter 的 `.md` 并更新 `MEMORY.md` 索引（复用 memory 包的格式约定）；
   `recall` 工具：子串/分词搜索（P1 简单实现；P2 接索引）。
-- 记忆浏览：`hub_memory_browse` 命令（复用 `memory.Config.List`，`memory/list.go:57`）。
+- 记忆浏览/编辑：`hub_agent_memory {agent_id, path?}`（不带 path = 清单，带 path = 读；
+  不存在返回 ok + `exists:false`）、`hub_agent_memory_write {agent_id, path, content}`
+  （只允许记忆目录内的 `.md`，绝对路径/`..`/反斜杠/符号链接逃逸一律拒绝）。
+  写入前把旧内容备份到 `<memory dir>/.backups/`（保留最近 20 份，不进注入清单）。
 - **生效时机**：记忆注入是装配期算好的 system 片段（与现有 Project Memory 一致）。用户在面板里改记忆后，
-  下一个 **loop 重建**（改人格/provider、重启应用）才生效；正在跑的会话不变。UI 必须明确提示，
-  否则用户会以为「我改了它就该立刻记得」。
+  由 `refreshHubLoops` 只重建该智能体的 **loop**（复用同一个工具引擎 —— 重建引擎会丢掉正在跑的
+  工具任务与审批等待），所以**下一个 Run** 生效；正在跑的 Run 用旧 loop 收尾。响应带
+  `effective: next_run`（重建失败则 `next_session` + warning），UI 必须显示，否则用户会以为
+  「我改了它就该立刻记得」。
 - **不把群组日志写进记忆**：群组历史是共享事实，不是个人记忆；智能体要引用时用 `group_history`。
 
 #### 6.11.2 自动压缩
