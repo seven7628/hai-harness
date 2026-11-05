@@ -879,9 +879,9 @@
     },
     "P0-05": {
       "status": "review",
-      "commit": "2d163d5 feat(hub-p0-05): 任务状态机与账本",
+      "commit": "369517d fix(hub-p0-05): 收口账本幂等、run 绑定与重放一致性",
       "review": "pending",
-      "reviewNote": "独立 Review 进行中；go test -race ./agenthub/... 全绿。"
+      "reviewNote": "首轮 changes_requested（notify 先于 finish 占键/run_id 未校验/事件快照分叉/时间线丢失/跨 Ledger 锁）→ 369517d 修复；复审进行中。"
     }
   }
 }
