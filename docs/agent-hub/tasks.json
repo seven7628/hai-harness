@@ -960,6 +960,12 @@
       "commit": "411b70d feat(hub-p1-09): 智能体资料页（5 tabs：基本/人格/工具与权限/记忆/版本）",
       "review": "pending",
       "reviewNote": "弹层资料页：左预览卡（头像/名字/角色/model/版本/删除），右 5 页签——基本（名字/emoji/识别色/角色/职责/provider/model/档位/阈值滑块/记忆开关）、人格（Instructions + L1–L4 说明）、工具与权限（preset + 撤下工具）、记忆（清单/读/写，回执显示备份名与生效时机）、版本（历史列表 + 回滚 + 提示词分层预览）。新建走 hub_agent_create、编辑走 patch；HubSurface 接入「＋」新建与 DM 头「编辑」。mock 补齐 editor 所需全部命令。实测修掉两个缺陷：记忆清单重复 MEMORY.md、保存回执被 loadMemory 清空（先重载再写 note）。验证：tsc/eslint/vite build 全过；Playwright 实测 5 页签、保存后版本 1→2、写记忆两次分别显示「已写入」与「已备份为 MEMORY.md.<ts>.bak · 下一个 Run 生效」、预览 2 层、无 console error。待评审。"
+    },
+    "P1-10": {
+      "status": "review",
+      "commit": "dd3b32d test(hub-p1-10): 评测 1–3（DM 单会话/独立记忆/独立 provider）",
+      "review": "pending",
+      "reviewNote": "方案 §10.3 评测 1–3，确定性 fake provider（不联网）：Eval1 DM 单会话（24 轮只有 hub.<id>.dm 一个 sid、ws.sessions 恒 1；3000×0.5 触发自动压缩——compress_start + 摘要请求证据；压缩后记忆事实仍在 system、上下文含 SUMMARY、中间轮次被替换、消息数 < 2×轮数；首条输入是任务锚点按 S1-A 逐字保留，不作旧轮次判据）；Eval2 独立记忆（A 有 B 无 + 目录/清单分离）；Eval3 独立 provider（deepseek/openai 两模型各自 req.Model 与 llm_end session_id 归属正确）。最终 P1 Review 进行中（task-wjt2u5vs），覆盖评测 mutation、端到端自洽、Hub/工作区零串台、看板一致性、方案硬缺口。"
     }
   }
 }
