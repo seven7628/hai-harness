@@ -13,6 +13,7 @@ type queueFakeOps struct {
 	pending     int
 	dispatched  []DispatchReq
 	dispatchErr error
+	statusErr   error
 }
 
 func (f *queueFakeOps) ListWorkspaces(context.Context) ([]WorkspaceInfo, error) { return nil, nil }
@@ -24,6 +25,9 @@ func (f *queueFakeOps) CreateWorkspace(context.Context, CreateWorkspaceReq) (Wor
 func (f *queueFakeOps) ListSessions(context.Context, string) ([]SessionInfo, error) { return nil, nil }
 
 func (f *queueFakeOps) SessionStatus(context.Context, string, string) (SessionInfo, error) {
+	if f.statusErr != nil {
+		return SessionInfo{}, f.statusErr
+	}
 	return SessionInfo{ID: "s1", Workspace: "/w", Running: f.running, Pending: f.pending}, nil
 }
 
@@ -176,5 +180,121 @@ func TestQueueValidation(t *testing.T) {
 		if _, err := q.Submit(context.Background(), task); !errors.Is(err, ErrInvalid) {
 			t.Errorf("case %d = %v, want ErrInvalid", i, err)
 		}
+	}
+}
+
+// failSaveStore 包一层 Store：第 failAt+1 次 SaveTask 起报错（模拟磁盘满/权限）。
+type failSaveStore struct {
+	Store
+	failAt int
+	saves  int
+}
+
+func (s *failSaveStore) SaveTask(ctx context.Context, t *Task) error {
+	s.saves++
+	if s.saves > s.failAt {
+		return errors.New("save task: no space left on device")
+	}
+	return s.Store.SaveTask(ctx, t)
+}
+
+// P2-03 B2：有积压时 Submit 必须返回**自己**那条，而不是 Pump 泵走的队首。
+func TestQueueSubmitWithBacklogReturnsOwnTask(t *testing.T) {
+	ops := &queueFakeOps{running: true}
+	q, _ := newTestQueue(t, ops)
+	a, err := q.Submit(context.Background(), queueTask("任务A"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := q.Submit(context.Background(), queueTask("任务B"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID == b.ID || a.Status != TaskQueued || b.Status != TaskQueued {
+		t.Fatalf("a=%s/%s b=%s/%s", a.ID, a.Status, b.ID, b.Status)
+	}
+	c, err := q.Submit(context.Background(), queueTask("任务C"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ID == a.ID || c.ID == b.ID || c.Instruction != "任务C" || c.Status != TaskQueued {
+		t.Fatalf("C 拿到别人的账本条目: id=%s text=%q status=%s", c.ID, c.Instruction, c.Status)
+	}
+	if got := q.QueuedCount("/w", "s1"); got != 3 {
+		t.Fatalf("queued = %d, want 3", got)
+	}
+	// 空闲后泵走的是队首 A（不是 C）。
+	ops.running = false
+	first, err := q.Pump(context.Background(), queueTask("").Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || first.ID != a.ID {
+		t.Fatalf("pump first = %+v, want %s", first, a.ID)
+	}
+	if got := q.QueuedCount("/w", "s1"); got != 2 {
+		t.Fatalf("after pump queued = %d, want 2", got)
+	}
+}
+
+// P2-03 B3：Transition 失败时任务必须留在队列里（账本 queued 与内存一致）。
+func TestQueueTransitionFailureKeepsQueued(t *testing.T) {
+	ops := &queueFakeOps{running: true}
+	base, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Submit 会 SaveTask 一次；让下一次（Pump 的 queued→dispatched）失败。
+	store := &failSaveStore{Store: base, failAt: 1}
+	q := NewQueue(NewLedger(store), ops)
+	created, err := q.Submit(context.Background(), queueTask("落盘失败的任务"))
+	if err != nil || created.Status != TaskQueued {
+		t.Fatalf("submit = %+v, %v", created, err)
+	}
+	ops.running = false
+	if _, err := q.Pump(context.Background(), created.Target); err == nil {
+		t.Fatal("Transition 应失败")
+	}
+	if got := q.QueuedCount("/w", "s1"); got != 1 {
+		t.Fatalf("Transition 失败后 queued = %d, want 1（不能先出队）", got)
+	}
+	got, err := NewLedger(base).Replay(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if got.Status != TaskQueued {
+		t.Fatalf("ledger status = %s, want queued", got.Status)
+	}
+	// 存储恢复后同一条任务仍能派出去（不是永久卡死）。
+	store.failAt = 1 << 30
+	if _, err := q.Pump(context.Background(), created.Target); err != nil {
+		t.Fatal(err)
+	}
+	if len(ops.dispatched) != 1 || ops.dispatched[0].ClientMsgID != string(created.ID) {
+		t.Fatalf("dispatched = %+v", ops.dispatched)
+	}
+}
+
+// P2-03 N1：目标会话已不存在时队首转 canceled，不能永久堵住队列。
+func TestQueueTargetGoneCancelsHead(t *testing.T) {
+	ops := &queueFakeOps{running: true}
+	q, st := newTestQueue(t, ops)
+	created, err := q.Submit(context.Background(), queueTask("目标已删除"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops.statusErr = ErrNotFound
+	if _, err := q.Pump(context.Background(), created.Target); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("pump err = %v, want not found", err)
+	}
+	if got := q.QueuedCount("/w", "s1"); got != 0 {
+		t.Fatalf("queued = %d, want 0", got)
+	}
+	got, err := NewLedger(st).Replay(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != TaskCanceled {
+		t.Fatalf("ledger status = %s, want canceled", got.Status)
 	}
 }

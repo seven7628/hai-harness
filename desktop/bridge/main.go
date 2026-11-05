@@ -329,9 +329,14 @@ type bridgeSession struct {
 	hubFinishTask func(ae *events.AgentEnd)
 	workspace     string     // 工作区根（审批 diff 读取原文件用）
 	mobile        *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
-	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
-	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
+	// running 主 run 是否在跑（**根** agent_start → true / 根 agent_end → false）。
+	// 子 agent 的 agent_end 也走同一个 emit，过滤 ParentRunId/Depth，否则根 run 还在跑
+	// 就被标成空闲，Hub 闸门会把任务直派进正在跑的会话（P2-03 复审 B1）。
+	// 只供会话列表显示状态点 + Hub 空闲闸门；进程重启后为 false，等下一次事件纠正。
 	running atomic.Bool
+	// hubDispatchPending 已 Ask 但该任务的根 run 还没开始（takeBatch→AgentStart 窗口）。
+	// 闸门据此仍算 busy，避免「检查时空闲、Ask 前 run 已经起来」的并批（P2-03 B1）。
+	hubDispatchPending atomic.Bool
 	// liveText/liveThink 当前 run 已产出的正文与思考（手机端流式快照）。
 	// 流式 chunk 不落盘、hub 也只丢不补：手机弱网丢帧或 WS 重连后，屏幕上
 	// 「正在流的那一段」只能靠这份内存快照补回来（见 mobile_server.liveFrame）。
@@ -681,9 +686,15 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// 运行态（会话列表状态点；重启后由下一次事件纠正）
 	switch e.Type() {
 	case events.AgentStartType:
-		bs.running.Store(true)
+		if as, ok := e.(*events.AgentStart); !ok || (as.ParentRunId == "" && as.Depth == 0) {
+			bs.running.Store(true)
+			bs.hubDispatchPending.Store(false) // 根 run 已启动：交给 running 表达忙
+		}
 	case events.AgentEndType:
-		bs.running.Store(false)
+		if ae, ok := e.(*events.AgentEnd); !ok || (ae.ParentRunId == "" && ae.Depth == 0) {
+			bs.running.Store(false)
+			bs.hubDispatchPending.Store(false)
+		}
 	}
 
 	// 写 stdout 与事件日志用同一行（事件自包含，含注入的 session_id/workspace/run_id/diff/todos）

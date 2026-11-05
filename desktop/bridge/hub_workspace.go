@@ -204,7 +204,10 @@ func (o *hubWorkspaceOps) SessionStatus(ctx context.Context, workspace, sessionI
 	}
 	return agenthub.SessionInfo{
 		ID: sessionID, Workspace: path,
-		Running: bs.running.Load(), Pending: bs.s.PendingCount(),
+		// hubDispatchPending 覆盖 takeBatch→AgentStart 的窗口：已 Ask 但根 run 未起，
+		// 此时 running 还是 false、Pending 已清空，只看两者会误判空闲（P2-03 B1）。
+		Running: bs.running.Load() || bs.hubDispatchPending.Load(),
+		Pending: bs.s.PendingCount(),
 	}, nil
 }
 
@@ -320,6 +323,8 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		}
 		return agenthub.DispatchResult{}, err
 	}
+	// 已投递、等根 AgentStart/AgentEnd 清位：闸门在这段窗口里必须仍算 busy。
+	bs.hubDispatchPending.Store(true)
 	bs.lastActive.Store(time.Now().UnixMilli())
 	bs.wakeRun()
 	return agenthub.DispatchResult{SessionID: sid, Accepted: true}, nil

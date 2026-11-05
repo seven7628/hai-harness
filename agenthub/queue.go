@@ -16,6 +16,7 @@ package agenthub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -70,12 +71,14 @@ func (q *Queue) Submit(ctx context.Context, t *Task) (*Task, error) {
 	q.mu.Unlock()
 	dispatched, err := q.Pump(ctx, created.Target)
 	if err != nil {
-		return created, err // 任务已落账本（failed）：调用方仍拿得到 task_id
+		return created, err // 任务已落账本（failed/canceled）：调用方仍拿得到 task_id
 	}
-	if dispatched != nil {
+	// 只有「刚提交的这个」被派出去时才返回它；Pump 可能泵的是队首的旧任务，
+	// 把别人的账本条目返回给调用方会让 session_send 把错 task_id 交给模型（P2-03 B2）。
+	if dispatched != nil && dispatched.ID == created.ID {
 		return dispatched, nil
 	}
-	return created, nil // 目标忙：任务已落账本（queued），等 AgentEnd 后泵出
+	return created, nil // 目标忙/队首是旧任务：本任务已落账本（queued）
 }
 
 // Pump 在目标空闲时派发队首任务；每次最多派发一个。
@@ -93,18 +96,29 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	}
 	st, err := q.ops.SessionStatus(ctx, target.Workspace, target.SessionID)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			// 目标会话已删除/关闭：不能让它永远占住队首（后续任务全被堵死）。
+			id := ids[0]
+			q.pending[key] = ids[1:]
+			_, _ = q.ledger.Transition(ctx, id, TaskCanceled, TransitionOptions{
+				At: time.Now().UTC(), Error: "目标会话不存在",
+			})
+			return nil, err
+		}
 		return nil, err
 	}
 	if st.Running || st.Pending > 0 {
 		return nil, nil // 闸门：忙就等下一次 AgentEnd
 	}
 	id := ids[0]
-	q.pending[key] = ids[1:]
 	now := time.Now().UTC()
 	dispatched, err := q.ledger.Transition(ctx, id, TaskDispatched, TransitionOptions{At: now})
 	if err != nil {
+		// Transition 失败时**不能先出队**：否则账本说 queued、内存队列说没有，
+		// 任务永远泵不出去（P2-03 B3）。
 		return nil, err
 	}
+	q.pending[key] = ids[1:]
 	header, _ := EncodeTaskHeader(dispatched)
 	res, err := q.ops.Dispatch(ctx, DispatchReq{
 		AgentID:     dispatched.Origin.AgentID,

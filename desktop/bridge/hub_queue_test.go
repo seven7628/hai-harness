@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/events"
 )
 
 func TestHubWorkspaceSessionStatus(t *testing.T) {
@@ -98,4 +100,111 @@ func TestHubSessionSendQueuesWhileTargetRunning(t *testing.T) {
 		t.Fatalf("after pump queued = %d, want 0", got)
 	}
 	_ = p
+}
+
+// P2-03 B1：状态点 only 由根 run 翻转 —— 子 agent AgentEnd 不能让闸门误判空闲。
+func TestHubSessionStatusSubagentEndKeepsBusy(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "StatusSubagent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-sub", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	bs.emit(&events.AgentStart{RunId: "root", Timestamp: time.Now(), EventType: events.AgentStartType})
+	if info, _ := ops.SessionStatus(context.Background(), wsPath, "s-sub"); !info.Running {
+		t.Fatal("根 run 启动后应为 busy")
+	}
+	// 子 agent 结束（ParentRunId 非空）：根 run 仍在跑，闸门必须仍 busy。
+	bs.emit(&events.AgentEnd{RunId: "root", ParentRunId: "root", Depth: 1,
+		Timestamp: time.Now(), EventType: events.AgentEndType})
+	if !bs.running.Load() {
+		t.Fatal("子 agent AgentEnd 把状态点清零了")
+	}
+	if info, _ := ops.SessionStatus(context.Background(), wsPath, "s-sub"); !info.Running {
+		t.Fatal("子 agent AgentEnd 后闸门误判空闲")
+	}
+	// 根 AgentEnd 才清零。
+	bs.emit(&events.AgentEnd{RunId: "root", Timestamp: time.Now(), EventType: events.AgentEndType})
+	if info, _ := ops.SessionStatus(context.Background(), wsPath, "s-sub"); info.Running {
+		t.Fatal("根 AgentEnd 后应为空闲")
+	}
+}
+
+// P2-03 B1：已 Ask、根 AgentStart 未到的窗口（takeBatch→AgentStart）必须算 busy。
+func TestHubDispatchPendingGatesDispatch(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "StatusPending", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-pend", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	bs.hubDispatchPending.Store(true)
+	if info, _ := ops.SessionStatus(context.Background(), wsPath, "s-pend"); !info.Running {
+		t.Fatal("hubDispatchPending 必须让闸门读成 busy")
+	}
+	bs.emit(&events.AgentStart{RunId: "root", Timestamp: time.Now(), EventType: events.AgentStartType})
+	if bs.hubDispatchPending.Load() || !bs.running.Load() {
+		t.Fatal("根 AgentStart 后应由 running 表达忙")
+	}
+	bs.emit(&events.AgentEnd{RunId: "root", Timestamp: time.Now(), EventType: events.AgentEndType})
+	if info, _ := ops.SessionStatus(context.Background(), wsPath, "s-pend"); info.Running {
+		t.Fatal("根 AgentEnd 后应为空闲")
+	}
+}
+
+// P2-03 M5：emit 接线必须真的在根 AgentEnd 后泵队列（不是只有测试直接调 pump）。
+func TestHubAgentEndPumpsQueuedTask(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "PumpWiring", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-pump", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := m.hubQueueFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	bs.running.Store(true) // 目标忙 → 任务入队
+	if _, err := q.Submit(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_pump"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: wsPath, SessionID: "s-pump"},
+		Title:  "队列任务", Instruction: "做一件事", Callback: agenthub.CallbackAgentEnd,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := q.QueuedCount(wsPath, "s-pump"); got != 1 {
+		t.Fatalf("queued = %d, want 1", got)
+	}
+	// 只结束子 agent：不应泵（根 run 还在跑，闸门也仍 busy）。
+	bs.emit(&events.AgentEnd{RunId: "root", ParentRunId: "root", Depth: 1,
+		Timestamp: time.Now(), EventType: events.AgentEndType})
+	if got := q.QueuedCount(wsPath, "s-pump"); got != 1 {
+		t.Fatalf("子 agent AgentEnd 泵了队列: queued = %d", got)
+	}
+	// 根 AgentEnd：emit 内部泵走队首（闸门空闲）。
+	bs.emit(&events.AgentEnd{RunId: "root", Timestamp: time.Now(), EventType: events.AgentEndType})
+	if got := q.QueuedCount(wsPath, "s-pump"); got != 0 {
+		t.Fatalf("根 AgentEnd 后 queued = %d, want 0", got)
+	}
+	if ops == nil {
+		t.Fatal("unreachable")
+	}
 }

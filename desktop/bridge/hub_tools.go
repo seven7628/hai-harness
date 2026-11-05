@@ -98,7 +98,13 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 	svc := agenthub.NewWorkspaceService(newHubWorkspaceOps(m), p.ID)
 	svc.Origin = agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID}
 	if q, err := m.hubQueueFor(); err == nil {
-		svc.Queue = q // P2-03：任务落账本 + 空闲闸门；失败降级为直接派发
+		svc.Queue = q // P2-03：任务落账本 + 空闲闸门
+	} else {
+		// 降级直派是 fail-open：至少留一条诊断，别让闸门静默失效。
+		m.out.writeLine(map[string]any{
+			"event_type": "hub_alert", "kind": "queue_unavailable",
+			"message": "Hub 队列初始化失败，session_send 降级为直接派发: " + err.Error(),
+		})
 	}
 	registerHubWorkspaceTools(eng, svc)
 	applyHubToolPolicy(context.Background(), eng, p.Tools)
