@@ -27,6 +27,18 @@ func TestCostAddPreservesPriced(t *testing.T) {
 	if !w.Cost.Priced || w.Cost.Source != CostSourceBuiltin || w.Cost.Total != 100 || w.Input != 10 {
 		t.Fatalf("empty round erased priced/source: %+v", w)
 	}
+	// 有 token、无价、无 Source（嵌套调用只记 token / 来源冲突被清空）也不许当空轮。
+	var x Usage
+	x = x.Add(Usage{Input: 1})
+	if x.Cost.Priced {
+		t.Fatalf("tokens without price must be unpriced: %+v", x.Cost)
+	}
+	// 单轮口径标记不参与聚合（首轮也不能整份复制）。
+	var y Usage
+	y = y.Add(Usage{Input: 1, InputSemantics: UsageSemanticsProtocolAnthropic, ReasoningSummarized: true})
+	if y.InputSemantics != "" || y.ReasoningSummarized {
+		t.Fatalf("single-round semantics leaked into aggregate: %+v", y)
+	}
 	// 有 token 但无价仍须 AND 成 false（空轮短路不能把未知当 0）。
 	w = w.Add(Usage{Input: 1, Cost: Cost{Total: 0, Priced: false, Source: CostSourceNone}})
 	if w.Cost.Priced || w.Cost.Source != "" {

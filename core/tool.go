@@ -278,9 +278,6 @@ func (u Usage) Add(v Usage) Usage {
 	if v.emptyRound() {
 		return u
 	}
-	if u.emptyRound() {
-		return v // 首轮：整份保留（含 Priced/Source）
-	}
 	u.Input += v.Input
 	u.Output += v.Output
 	u.CacheRead += v.CacheRead
