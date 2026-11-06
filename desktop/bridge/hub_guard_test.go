@@ -136,5 +136,27 @@ func TestHubFinishBlocksOverTaskBudget(t *testing.T) {
 	if !strings.Contains(buf.String(), `"task_result_delivered"`) {
 		t.Fatalf("blocked_budget result not pushed: %s", buf.String())
 	}
+	if strings.Contains(buf.String(), `"notify_failed"`) {
+		t.Fatalf("blocked_budget pushed but notify_failed: %s", buf.String())
+	}
+	var taskResult string
+	for _, msg := range hubBS.s.History() {
+		for _, c := range msg.Content {
+			if c.Type == core.ContentTypeTaskResult && strings.Contains(c.Content, string(task.ID)) {
+				taskResult = c.Content
+			}
+		}
+	}
+	if taskResult == "" {
+		t.Fatalf("blocked_budget task_result not in origin history: %s", buf.String())
+	}
+	for _, want := range []string{"预算阻断", "不要自动重试", "超过上限"} {
+		if !strings.Contains(taskResult, want) {
+			t.Fatalf("blocked_budget task_result missing %q: %s", want, taskResult)
+		}
+	}
+	if strings.Contains(taskResult, "据此继续当前工作") {
+		t.Fatalf("blocked_budget must not tell model to continue: %s", taskResult)
+	}
 	_ = json.Marshal
 }

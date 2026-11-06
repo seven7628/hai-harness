@@ -183,6 +183,8 @@ func NewTaskResultMessageWithStatus(taskID, name, result, status string, err err
 		label = "失败"
 	case "abandoned":
 		label = "已弃置"
+	case "blocked_budget":
+		label = "预算阻断"
 	}
 	fmt.Fprintf(&b, "〔后台任务 %s %s〕", taskID, label)
 	if name != "" {
@@ -201,6 +203,8 @@ func NewTaskResultMessageWithStatus(taskID, name, result, status string, err err
 	}
 	if status == "interrupted" {
 		b.WriteString("\n\n—— 该任务未完成，不要将其视为成功结果；按当前用户意图继续。")
+	} else if status == "blocked_budget" {
+		b.WriteString("\n\n—— 该任务因预算被拦下，结果可能不完整；不要自动重试，等用户决定是否提高预算。")
 	} else {
 		b.WriteString("\n\n—— 后台任务结果，据此继续当前工作。")
 	}

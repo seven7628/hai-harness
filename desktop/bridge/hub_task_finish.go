@@ -160,6 +160,21 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 	if task.Result != nil {
 		summary = task.Result.Summary
 	}
+	// 预算阻断不是失败：正文仍是任务产出，但必须把「为什么停」带给模型。
+	// 不能塞 pushErr（那会用错误文本整段替换摘要），也不能只说「完成」——
+	// 模型会被指示继续，而重试又绕过 Guard（P2-07 复审 N1）。
+	if task.Status == agenthub.TaskBlockedBudget {
+		reason := task.Error
+		if reason == "" && task.Result != nil {
+			reason = task.Result.Error
+		}
+		if reason != "" {
+			if summary != "" {
+				summary += "\n\n"
+			}
+			summary += "已阻断：" + reason
+		}
+	}
 	if err := origin.s.PushTaskResultUsage(string(task.ID), task.Title, summary,
 		string(task.Status), usage, pushErr); err != nil {
 		m.emitHubTaskAlert(task.ID, "push_failed", err.Error())
@@ -169,7 +184,9 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 		m.emitHubTaskAlert(task.ID, "notify_failed", err.Error())
 		return
 	}
-	// delivered 是权威终态：再发一次快照，前端才能区分「已回推」与「未送达」。
+	// delivered 是 completed/failed/interrupted 的权威终态：再发一次快照，前端才能
+	// 区分「已回推」与「未送达」。blocked_budget 保留自己的状态（状态机无出边），
+	// 已回推与否看 notified_run_ids（P2-07 复审 N2）。
 	if latest, lerr := ledger.Replay(context.Background(), task.ID); lerr == nil {
 		m.emitHubTaskUpdate(latest)
 	}

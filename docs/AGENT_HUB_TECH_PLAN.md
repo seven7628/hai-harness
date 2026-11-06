@@ -1726,6 +1726,7 @@ func (bs *bridgeSession) finishHubTask(ae *events.AgentEnd) {
    - 这会在智能体会话里插入一条 `task_result` 消息并 `wakeRun`（`session/session.go:525`）；
    - `TaskResultDelivered` 事件让 UI 看到「任务结果已入上下文」；
    - 如果回推失败（智能体会话忙/预算超），结果留在账本，UI 显示「未送达」，人可手动重试。
+   - 「已回推」的权威标记分两种：completed/failed/interrupted 成功后转 `delivered`；blocked_budget 保留状态（不能再进 delivered），以 `notified_run_ids` 非空表示已回推。UI 不要用单一 `delivered` 布尔判断 blocked_budget。
 
 结果文本建议（P1 复用现有构造函数，P2 加 origin 参数）：
 

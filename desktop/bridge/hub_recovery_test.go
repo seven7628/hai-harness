@@ -219,4 +219,14 @@ func TestHubRecoveryBlockedBudgetRedelivered(t *testing.T) {
 	if !strings.Contains(buf.String(), `"task_result_delivered"`) {
 		t.Fatalf("blocked_budget 结果未回推: %s", buf.String())
 	}
+	if strings.Contains(buf.String(), `"notify_failed"`) {
+		t.Fatalf("blocked_budget 已回推却报 notify_failed: %s", buf.String())
+	}
+	// 二次恢复：已 notified 的任务不得再进入 push（M5 类回归）。仓库此前没有
+	// 这条断言，绕过 alreadyNotified 只会多发一条 hub_task_update。
+	buf.Reset()
+	m.recoverHubTasks()
+	if strings.Contains(buf.String(), `"task_result_delivered"`) || strings.Contains(buf.String(), `"hub_task_update"`) {
+		t.Fatalf("二次恢复重复处理了已通知任务: %s", buf.String())
+	}
 }
