@@ -1341,9 +1341,9 @@ const BASE = {
     },
     "P3a-01": {
       "status": "review",
-      "commit": "feat(hub-p3a-01): 群组 CRUD + 成员/角色/策略",
-      "review": "pending",
-      "reviewNote": "实现 hub_group_list/get/create/update/delete + member_add/remove；成员上限 12、角色校验、owner 转让成对改写、软删、默认 ask、群名唯一、删除智能体不能入群。测试 TestHubGroupCRUDAndRoles / TestHubGroupRejectsDeletedMember；agenthub -run Group 与 bridge 全量绿（59s）。",
+      "commit": "feat(hub-p3a-01): 群组 CRUD + 成员/角色/策略 + f00af83",
+      "review": "re-review_pending",
+      "reviewNote": "实现 hub_group_list/get/create/update/delete + member_add/remove；成员上限 12、角色校验、owner 转让成对改写、软删、默认 ask、群名唯一、删除智能体不能入群。测试 TestHubGroupCRUDAndRoles / TestHubGroupRejectsDeletedMember；agenthub -run Group 与 bridge 全量绿（59s）。 首轮复审 change_requested（task-3ddvwx9e，对象 31b8800）：主链/12 上限/默认 ask/删除智能体拒绝均有测试，去上限/去默认 ask/软删列表过滤/owner 成对改写变异均被杀。B1 软删群仍可 get/update/member_add/remove；B2 policy patch 整对象覆盖，改 mode 会重置预算/并发；B3 删除 owner 后群成孤儿（转让/移除/改名全失败）；B4 create 只收 members[]，不接受 §7.1.3 member_ids/默认首成员 owner。修复（f00af83）：B1 四个入口拒绝已删群、delete 幂等；B2 policy 逐字段覆盖；B3 validateGroupAgents 允许已有软删成员保留，新成员/新 owner 必须存活，转让 trim+空值报错；B4 create 支持 member_ids 简写与默认第一成员 owner，显式 owner 自动补角色。回归覆盖四条；B1/B3/B4 变异验证均红。待第二轮复审（对象 f00af83）。非阻塞：删除仅软删不改运行/归档、无 hub_group_update 事件、store Load+Save 非原子（当前 dispatchMu 串行）、软删群名可复用、空 ID 错误不一致、命令面无 actor 鉴权。",
       "reviewBatch": "F"
     },
     "P3a-02": {
