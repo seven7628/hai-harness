@@ -1569,7 +1569,7 @@ const BASE = {
     },
     "P2.5-07": {
       "status": "done",
-      "commit": "8535c66 fix(hub-p2.5-07): 修正顺序测试 fixture + accepted/status 语义 + 失败文案脱敏",
+      "commit": "5518b8d fix(hub-p2.5-07): interrupted 同 key 重投 + accepted allow-list + 描述纠偏",
       "reviewNote": "复审 passed（task-kjm4h7te，对象 8535c66）：新 fixture 下 saves 断言真能杀死「Create 先于 Guard」变异；accepted/status 主路径语义闭合；变异 M1/M2/M5/M6/M7 均被杀死。后续 5518b8d 已修 interrupted 同 key 重投、accepted 改 allow-list、client_msg_id 描述纠偏；剩余两套 retry 收敛与空快照契约记入后续小债。",
       "review": "passed"
     },
