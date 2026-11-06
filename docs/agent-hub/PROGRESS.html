@@ -1545,8 +1545,8 @@ const BASE = {
     },
     "P2.5-03": {
       "status": "review",
-      "commit": "433c1d4 perf(hub-p2.5-03): 队列按目标分锁，去掉全局派发锁",
-      "reviewNote": "已提交（433c1d4），独立复审中。实现：Queue 新增按 (workspace,session) 的引用计数目标锁；q.mu 只保护 pending map 短临界区；Pump/Submit/CancelQueued/CancelDispatchedIfIdle/Restore 全部持目标锁做查重/状态/Transition/入队，不同目标互不阻塞；新增并发用例（不同目标不互阻、同目标严格串行、同 client_msg_id 并发只建一账、Dispatch 期间不持 q.mu）与 race 全绿。"
+      "commit": "57c8cb0 fix(hub-p2.5-03): 去掉挂钟断言 + Submit 锁粒度/回收测试与多目标基准",
+      "reviewNote": "首轮 changes_requested（task-sqvdp2gj）：B1 TestQueueSameTargetSerializesDispatch 用 1s 挂钟等派发，-race 负载下误报；B2 Restore 陈旧快照（已由 92e01f9 修）；N1/N2 缺 Submit 锁粒度与 keyedLocks 回收测试、N3 缺多目标基准。57c8cb0：改等 secondDone 确定性信号 + callCount；新增阻塞 SaveTask 的 Submit 锁粒度用例、keyedLocks 回收 stress、BenchmarkQueueMultiTargetSubmit；注释明确不可重入。re-review 中（task-c6uczxpv）。"
     },
     "P2.5-04": {
       "status": "review",
@@ -1560,9 +1560,8 @@ const BASE = {
     },
     "P2.5-06": {
       "status": "review",
-      "commit": "7af7b4f fix(hub-p2.5-06): 补有界等待/取消收尾/重开与 checkpoint drain（复审 B1/N1/N2/N4/N5）",
-      "reviewNote": "首轮 changes_requested（task-kbxf8qxd，对象 b32e89e）：B1 生命周期测试不能证伪 stop 不 Wait；N1 出队后取消留 dispatched；N2 hubBgClosing 永久闩；N4 waiter 累积；N5 closeHubRuntimes 未 drain coordinator。修复 7af7b4f：后台任务延迟退出+超时/重开测试；Queue 出队后收尾用 WithoutCancel；resetHubBackgroundIfClosed；done channel 每代一个 waiter；closeHubRuntimes 复用 stopSession。re-review 中（task-f8efd6s6）。",
-      "review": "changes_requested"
+      "commit": "a087af3 fix(hub-p2.5-06): 关停闩禁止迟到重建 + WaitGroup 按代隔离 + teardown flake",
+      "reviewNote": "首轮 changes_requested（task-f8efd6s6，对象 7af7b4f）：B1 closeHubRuntimes 后迟到结算重建 hub runtime/DM 会话，TempDir cleanup 稳定复现；B2 共享 WaitGroup + 旧 waiter 在 stop 超时→reset→spawn 时 panic；B3 ledger 回滚 ctx（a732647 已修）。a087af3：新增 hubShutdown 闩 + shutdownHubRuntimes，hubRuntime/hubDMSession/createIn(hub)/spawn/reset/finishHubTask 全检查；生产与 testManager cleanup 改走 shutdown；hubBgWG 改 generation 私有指针；新增关停重建与 WaitGroup 隔离测试。TestHub -count=3 已绿。re-review 中（task-3mfnn6j6）。"
     },
     "P2.5-07": {
       "status": "done",
