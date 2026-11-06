@@ -77,6 +77,18 @@ func (m *manager) hubGroupCreate(c command) {
 		m.resp(c, false, "参数格式错误: "+err.Error(), nil)
 		return
 	}
+	if len(req.Members) > 0 && len(req.MemberIDs) > 0 {
+		m.resp(c, false, "members 与 member_ids 只能给一个", nil)
+		return
+	}
+	req.OwnerAgentID = agenthub.AgentID(strings.TrimSpace(string(req.OwnerAgentID)))
+	for i := range req.MemberIDs {
+		req.MemberIDs[i] = agenthub.AgentID(strings.TrimSpace(string(req.MemberIDs[i])))
+		if req.MemberIDs[i] == "" {
+			m.resp(c, false, "member_ids 不能包含空 id", nil)
+			return
+		}
+	}
 	// §7.1.3：兼容 member_ids 简写（角色默认 member），owner 缺省取第一个成员。
 	// 显式 owner_agent_id 时把对应成员的角色升为 owner。
 	members := req.Members
@@ -406,6 +418,10 @@ func (m *manager) validateGroupAgents(ctx context.Context, g *agenthub.Group, al
 	for _, member := range g.Members {
 		p, ok := profiles[member.AgentID]
 		if !ok || p == nil {
+			// purge 会物理删 profile；已在群的旧成员不能因此把群变成孤儿。
+			if _, keep := allowDeleted[member.AgentID]; keep {
+				continue
+			}
 			return fmt.Errorf("%w: group member %s has no profile", agenthub.ErrInvalid, member.AgentID)
 		}
 		if p.Deleted {

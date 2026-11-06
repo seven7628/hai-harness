@@ -429,3 +429,51 @@ func TestHubGroupPatchDeleteAndCreateContracts(t *testing.T) {
 		t.Fatalf("second delete must be idempotent: %s", errMsg)
 	}
 }
+
+// P3a-01 复审后续：purge 物理删 owner 后群不能变孤儿；create 输入互斥/空 id。
+func TestGroupPurgedOwnerDoesNotOrphanGroup(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "PurgeA")
+	b := createHubAgent(t, m, buf, 2, "PurgeB")
+	ok, errMsg, data := hubCmd(t, m, buf, 3, "hub_group_create", map[string]any{
+		"name": "purge群",
+		"members": []map[string]any{
+			{"agent_id": string(a.ID), "role": "owner"},
+			{"agent_id": string(b.ID), "role": "member"},
+		},
+	})
+	if !ok {
+		t.Fatalf("create: %s", errMsg)
+	}
+	g := groupFromData(t, data)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 4, "hub_agent_delete", map[string]any{"agent_id": string(a.ID), "purge": true}); !ok {
+		t.Fatalf("purge owner: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 5, "hub_group_update", map[string]any{
+		"group_id": string(g.ID), "patch": map[string]any{"name": "purge改名"},
+	}); !ok {
+		t.Fatalf("rename after purge owner: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 6, "hub_group_update", map[string]any{
+		"group_id": string(g.ID), "patch": map[string]any{"owner_agent_id": string(b.ID)},
+	}); !ok {
+		t.Fatalf("transfer after purge owner: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 7, "hub_group_member_remove", map[string]any{
+		"group_id": string(g.ID), "agent_id": string(a.ID),
+	}); !ok {
+		t.Fatalf("remove purged owner: %s", errMsg)
+	}
+	// 互斥输入 / 空 member id 必须显式拒绝。
+	if ok, _, _ := hubCmd(t, m, buf, 8, "hub_group_create", map[string]any{
+		"name": "双输入", "member_ids": []string{string(a.ID)},
+		"members": []map[string]any{{"agent_id": string(b.ID), "role": "owner"}},
+	}); ok {
+		t.Fatal("members + member_ids must be rejected")
+	}
+	if ok, _, _ := hubCmd(t, m, buf, 9, "hub_group_create", map[string]any{
+		"name": "空id", "member_ids": []string{"  "},
+	}); ok {
+		t.Fatal("blank member_id must be rejected")
+	}
+}
