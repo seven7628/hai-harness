@@ -1559,8 +1559,9 @@ const BASE = {
       "reviewNote": "独立复审中（task-kbxf8qxd）。实现：manager hubBgCtx/Cancel/WG；scheduleHubPump/scheduleHubExpire 登记后派生；pump/expire ctx 检查；closeHubRuntimes 先有界 stop 再关会话。验证：TestHub 两轮绿；-race 生命周期用例绿。"
     },
     "P2.5-07": {
-      "status": "todo",
-      "reviewNote": "依赖 01 的干净检出基线。"
+      "status": "review",
+      "commit": "2b4b79c chore(hub-p2.5-07): 清理基础设施小债（深拷贝/顺序回归/duplicate 原因）",
+      "reviewNote": "独立复审中（task-ux7q5kc7）。实现：snapshot Messages 深拷贝 + 防别名测试；SubmitGuarded 查重→Guard→Create 两个变异回归；queue 分支失败/取消回传 created.Error；P2-01 ENOTDIR/登记失败删目录/大小写折叠测试经核对已存在。两套 retry 实现合并未做（仍 deferred）。验证：agenthub 绿；TestHub 一次绿（一次既有 TempDir cleanup 偶发）。"
     },
     "P2.5-08": {
       "status": "todo",
