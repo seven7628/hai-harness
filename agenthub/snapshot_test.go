@@ -104,3 +104,32 @@ func TestSnapshotExcludesRoundSummaryAndEmpty(t *testing.T) {
 		t.Fatal("snapshot not deterministic")
 	}
 }
+
+// P3a-04 复审 B1：单条消息本身超预算时也必须截断，12k 是硬上限。
+func TestSnapshotSingleOversizeMessageIsHardCapped(t *testing.T) {
+	g := snapGroup()
+	msgs := []Message{{
+		Seq: 1, GroupID: g.ID, Kind: KindText,
+		Sender: Sender{Kind: SenderHuman}, Text: strings.Repeat("巨", 20000),
+	}}
+	snap := BuildGroupSnapshot(g, "ag_aaaaaaaa", msgs, 0, Round{}, SnapshotOptions{})
+	if !snap.Truncated {
+		t.Fatal("oversize single message must set Truncated")
+	}
+	if got := len([]rune(snap.Text)); got > DefaultSnapshotRunes {
+		t.Fatalf("snapshot text = %d runes, want <= %d", got, DefaultSnapshotRunes)
+	}
+	if len(snap.Messages) != 1 || !strings.HasSuffix(snap.Messages[0].Text, "…") {
+		t.Fatalf("message not truncated: %+v", snap.Messages)
+	}
+	// 多条的估算也必须按真实行头计，最终文本不得超预算。
+	many := make([]Message, 0, 10)
+	for i := 0; i < 10; i++ {
+		many = append(many, Message{Seq: int64(i + 1), GroupID: g.ID, Kind: KindText,
+			Sender: Sender{Kind: SenderAgent, AgentID: "ag_bbbbbbbb"}, Text: strings.Repeat("边", 1192)})
+	}
+	snap = BuildGroupSnapshot(g, "ag_aaaaaaaa", many, 0, Round{}, SnapshotOptions{})
+	if got := len([]rune(snap.Text)); got > DefaultSnapshotRunes {
+		t.Fatalf("boundary snapshot text = %d runes, want <= %d", got, DefaultSnapshotRunes)
+	}
+}

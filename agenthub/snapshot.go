@@ -45,6 +45,7 @@ type GroupSnapshot struct {
 	FromSeq    int64     `json:"from_seq"`
 	Messages   []Message `json:"messages"`
 	Folded     int       `json:"folded,omitempty"`
+	Truncated  bool      `json:"truncated,omitempty"`
 	Text       string    `json:"text"`
 }
 
@@ -92,8 +93,25 @@ func BuildGroupSnapshot(g *Group, agentID AgentID, msgs []Message, cursor int64,
 		kept = kept[1:]
 		out.Folded++
 	}
+	out.Text = renderGroupSnapshot(g, agentID, round, kept, out.Folded)
+	// 单条消息可能本身就超过预算：从最旧一条正文尾部截断，保证最终 Text
+	// 不超过 MaxRunes，并用 Truncated 明确告诉调用方（P3a-04 复审 B1）。
+	if len([]rune(out.Text)) > opt.MaxRunes && len(kept) > 0 {
+		over := len([]rune(out.Text)) - opt.MaxRunes + 1
+		r := []rune(strings.TrimSpace(kept[0].Text))
+		if over > 0 && over <= len(r) {
+			kept[0].Text = string(r[:len(r)-over]) + "…"
+			out.Truncated = true
+			out.Text = renderGroupSnapshot(g, agentID, round, kept, out.Folded)
+		}
+	}
 	out.Messages = append([]Message(nil), kept...)
 
+	return out
+}
+
+// renderGroupSnapshot 渲染最终进提示词的文本；预算校验以它的输出为准。
+func renderGroupSnapshot(g *Group, agentID AgentID, round Round, kept []Message, folded int) string {
 	var b strings.Builder
 	if g != nil {
 		b.WriteString(fmt.Sprintf("群：%s（%d 名成员）\n", g.Name, len(g.Members)))
@@ -118,30 +136,39 @@ func BuildGroupSnapshot(g *Group, agentID AgentID, msgs []Message, cursor int64,
 			}
 		}
 	}
-	if out.Folded > 0 {
-		b.WriteString(fmt.Sprintf("[已折叠 %d 条较早消息]\n", out.Folded))
+	if folded > 0 {
+		b.WriteString(fmt.Sprintf("[已折叠 %d 条较早消息]\n", folded))
 	}
 	for _, m := range kept {
-		who := string(m.Sender.AgentID)
-		switch m.Sender.Kind {
-		case SenderHuman:
-			who = "人"
-		case SenderSystem:
-			who = "系统"
-		}
-		if who == "" {
-			who = "未知"
-		}
-		b.WriteString(fmt.Sprintf("#%d %s: %s\n", m.Seq, who, strings.TrimSpace(m.Text)))
+		b.WriteString(fmt.Sprintf("#%d %s: %s\n", m.Seq, snapshotWho(m), strings.TrimSpace(m.Text)))
 	}
-	out.Text = strings.TrimRight(b.String(), "\n")
-	return out
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// snapshotWho 与渲染行使用同一发送者口径，预算估算不能另算一套。
+func snapshotWho(m Message) string {
+	who := string(m.Sender.AgentID)
+	switch m.Sender.Kind {
+	case SenderHuman:
+		who = "人"
+	case SenderSystem:
+		who = "系统"
+	}
+	if who == "" {
+		who = "未知"
+	}
+	return who
+}
+
+func snapshotLineRunes(m Message) int {
+	prefix := fmt.Sprintf("#%d %s: ", m.Seq, snapshotWho(m))
+	return len([]rune(prefix)) + len([]rune(strings.TrimSpace(m.Text))) + 1
 }
 
 func snapshotRunes(msgs []Message) int {
 	n := 0
 	for _, m := range msgs {
-		n += len([]rune(m.Text)) + 8 // 行头（seq/发送者）粗估
+		n += snapshotLineRunes(m)
 	}
 	return n
 }
