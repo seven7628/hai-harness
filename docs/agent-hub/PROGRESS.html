@@ -1544,9 +1544,10 @@ const BASE = {
       "review": "passed"
     },
     "P2.5-03": {
-      "status": "review",
+      "status": "done",
       "commit": "57c8cb0 fix(hub-p2.5-03): 去掉挂钟断言 + Submit 锁粒度/回收测试与多目标基准",
-      "reviewNote": "首轮 changes_requested（task-sqvdp2gj）：B1 TestQueueSameTargetSerializesDispatch 用 1s 挂钟等派发，-race 负载下误报；B2 Restore 陈旧快照（已由 92e01f9 修）；N1/N2 缺 Submit 锁粒度与 keyedLocks 回收测试、N3 缺多目标基准。57c8cb0：改等 secondDone 确定性信号 + callCount；新增阻塞 SaveTask 的 Submit 锁粒度用例、keyedLocks 回收 stress、BenchmarkQueueMultiTargetSubmit；注释明确不可重入。re-review 中（task-c6uczxpv）。"
+      "reviewNote": "复审 passed（task-c6uczxpv，对象 57c8cb0）：B1 挂钟断言已改确定性 secondDone，-race/GOMAXPROCS=1/负载下 60 次全绿；B2 Restore 重读已由 92e01f9 闭合且用真实旧实现验证测试会红；N1/N2 新用例能杀死真实全局锁/不回收实现；锁序单一无死锁。后续 36fad60 补首锚点超时兜底、keyedLocks 回收互斥断言与注释同步。",
+      "review": "passed"
     },
     "P2.5-04": {
       "status": "review",
@@ -1559,9 +1560,10 @@ const BASE = {
       "commit": "92e01f9 fix(hub-p2.5-05): Restore 锁内重读 + hub_alert 单一出口 + 全局告警中心/任务内联"
     },
     "P2.5-06": {
-      "status": "review",
+      "status": "done",
       "commit": "a087af3 fix(hub-p2.5-06): 关停闩禁止迟到重建 + WaitGroup 按代隔离 + teardown flake",
-      "reviewNote": "首轮 changes_requested（task-f8efd6s6，对象 7af7b4f）：B1 closeHubRuntimes 后迟到结算重建 hub runtime/DM 会话，TempDir cleanup 稳定复现；B2 共享 WaitGroup + 旧 waiter 在 stop 超时→reset→spawn 时 panic；B3 ledger 回滚 ctx（a732647 已修）。a087af3：新增 hubShutdown 闩 + shutdownHubRuntimes，hubRuntime/hubDMSession/createIn(hub)/spawn/reset/finishHubTask 全检查；生产与 testManager cleanup 改走 shutdown；hubBgWG 改 generation 私有指针；新增关停重建与 WaitGroup 隔离测试。TestHub -count=3 已绿。re-review 中（task-3mfnn6j6）。"
+      "reviewNote": "复审 passed（task-3mfnn6j6，对象 a087af3 + 95371c4）：B1 关停闩逐层拦截迟到结算（删 finishHubTask 早退会写账本、再删 hubRuntime 闩会精确复现 TempDir 重建）；B2 WG 按 generation 私有后 stop 超时→reset→spawn 不再 panic；B3 ledger 回滚 WithoutCancel 已验证。TestHub -count=3 绿、-race 绿、close 后可重开语义未误伤。后续 6c66377 补恢复 no-op 覆盖、收窄 WG 测试时序与注释归位。",
+      "review": "passed"
     },
     "P2.5-07": {
       "status": "done",
