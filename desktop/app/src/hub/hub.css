@@ -573,11 +573,13 @@ button.hub-budget-chip { border: 1px solid transparent; cursor: pointer; font: i
 button.hub-budget-chip:hover { border-color: currentColor; }
 
 /* P2.5-05：Hub 告警中心（恢复失败/预算/推送失败等）。 */
-.hub-alert-stack { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.hub-alert-stack { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); max-height: 42vh; overflow-y: auto; }
 .hub-alert-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); min-width: 0; }
 .hub-alert-dot { width: 6px; height: 6px; border-radius: 50%; background: #b8772a; flex: 0 0 auto; }
 .hub-alert-row.error .hub-alert-dot { background: #b23a2e; }
 .hub-alert-row.info .hub-alert-dot { background: #2f7a4f; }
+.hub-alert-dot.error { background: #b23a2e; }
+.hub-alert-dot.info { background: #2f7a4f; }
 .hub-alert-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* P2.5-05：全局告警入口（Hub 页关闭时仍可见，点击进入告警中心）。 */
@@ -605,10 +607,6 @@ button.hub-budget-chip:hover { border-color: currentColor; }
   text-overflow: ellipsis;
   white-space: nowrap;
   opacity: 0.78;
-}
-.hub-alert-stack {
-  max-height: 42vh;
-  overflow-y: auto;
 }
 .hub-task-alerts {
   display: flex;
