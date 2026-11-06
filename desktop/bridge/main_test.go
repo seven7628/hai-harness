@@ -3286,3 +3286,24 @@ func TestAskBatchWorkspaceRouting(t *testing.T) {
 		t.Fatal("错位 workspace 的 ask_batch 不应 ok:true（必须让客户端回滚）")
 	}
 }
+
+// P1-10 N3：显式 provider 的模型表为空（本地 vLLM/Ollama 未拉列表）时允许指定模型；
+// 表非空仍严格拒绝未知模型，provider 本身未配置也拒绝。
+func TestAllowUnlistedModelOnlyForKnownEmptyProvider(t *testing.T) {
+	pc := &providerConfig{
+		baseURL:   map[string]string{"local": "http://127.0.0.1:8000/v1"},
+		apiKey:    map[string]string{"local": "x"},
+		models:    map[string]map[string]int64{"local": {}},
+		maxTokens: map[string]map[string]int64{},
+	}
+	if !pc.allowUnlistedModel("local") {
+		t.Fatal("known provider with empty model table must fail-open")
+	}
+	pc.models["local"]["known"] = 4096
+	if pc.allowUnlistedModel("local") {
+		t.Fatal("non-empty model table must be strict")
+	}
+	if pc.allowUnlistedModel("missing") {
+		t.Fatal("unknown provider must not fail-open")
+	}
+}

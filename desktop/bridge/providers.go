@@ -1402,6 +1402,26 @@ func (pc *providerConfig) hasModelIn(prov, name string) bool {
 	return ok
 }
 
+// providerKnown 该 provider 是否已配置（base URL / key 任一存在）。
+func (pc *providerConfig) providerKnown(prov string) bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.baseURL[prov] != "" || pc.apiKey[prov] != ""
+}
+
+// providerHasModels 该 provider 是否配置了模型表。空表 = 本地 vLLM 等
+// 尚未拉取模型列表的端点：switch_model 应 fail-open，允许用户显式指定模型。
+func (pc *providerConfig) providerHasModels(prov string) bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return len(pc.models[prov]) > 0
+}
+
+// allowUnlistedModel 显式 provider 的空模型表是否允许指定任意模型（本地 vLLM/Ollama）。
+func (pc *providerConfig) allowUnlistedModel(prov string) bool {
+	return pc.providerKnown(prov) && !pc.providerHasModels(prov)
+}
+
 // providerForModel 在所有已配置 Provider 的模型表里查找该模型所属的 Provider；找不到返回空串。
 // 用于让「对话窗口切模型」不受「活跃 Provider」限制：模型来自哪个 Provider 就以它为准（并自动切活跃）。
 // 有多个 Provider 配置同名模型时返回第一个（排序稳定）。

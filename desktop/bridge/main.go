@@ -2662,10 +2662,14 @@ func (m *manager) dispatch(c command) {
 			m.provCfg.loadSettings()
 			m.provCfg.syncRegistry()
 			if !m.provCfg.hasModelIn(prov, name) {
-				// 仍查不到 → 显式报错，绝不静默回退按名全局解析（字母序会把 zhipu 的
+				// 本地 vLLM/Ollama 等端点可能还没拉模型表：只要 provider 有 base URL/key
+				// 且模型表为空，就允许显式指定模型（否则「能建 provider 不能用」）。
+				// 表非空仍严格拒绝，绝不静默回退按名全局解析（字母序会把 zhipu 的
 				// glm-5.3-flash 猜成 opencode → 请求打到错误 Provider 401/429，2026-09）。
-				m.respCode(c, false, "provider "+prov+" has no model "+name, "unknown_model", nil)
-				return
+				if !m.provCfg.allowUnlistedModel(prov) {
+					m.respCode(c, false, "provider "+prov+" has no model "+name, "unknown_model", nil)
+					return
+				}
 			}
 		}
 		// 显式 provider（前端跨 Provider 分组选中模型连带切）→ 会话归属以用户选择为准，
