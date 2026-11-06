@@ -139,12 +139,18 @@ func (s *WorkspaceService) Send(ctx context.Context, workspace, sessionID, text,
 		if err != nil {
 			return SendResult{}, err
 		}
+		message := ""
+		switch created.Status {
+		case TaskCanceled, TaskFailed, TaskBlockedBudget, TaskDeclined:
+			message = created.Error
+		}
 		return SendResult{
 			TaskID:    string(created.ID),
 			SessionID: created.Target.SessionID,
 			Accepted:  true,
 			Status:    string(created.Status),
 			Queued:    created.Status == TaskQueued,
+			Message:   message,
 		}, nil
 	}
 	res, err := ops.Dispatch(ctx, DispatchReq{

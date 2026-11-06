@@ -105,6 +105,34 @@ func TestSnapshotExcludesRoundSummaryAndEmpty(t *testing.T) {
 	}
 }
 
+// P3a-04 非阻塞：快照返回的 Messages 必须是深拷贝，调用方改动不能污染群日志。
+func TestSnapshotMessagesAreDeepCopied(t *testing.T) {
+	g := snapGroup()
+	msg := Message{
+		Seq: 1, GroupID: g.ID, Kind: KindText, Sender: Sender{Kind: SenderHuman}, Text: "hi",
+		Mentions: []AgentID{"ag_bbbbbbbb"},
+		Context: &TurnContext{
+			TriggerSeqs: []int64{1},
+			Senders:     []AgentRef{{AgentID: "ag_bbbbbbbb", Name: "b"}},
+			Reason:      "multi_agent",
+		},
+		Refs: map[string]any{"k": "v"},
+	}
+	snap := BuildGroupSnapshot(g, "ag_aaaaaaaa", []Message{msg}, 0, Round{}, SnapshotOptions{})
+	if len(snap.Messages) != 1 {
+		t.Fatalf("messages = %+v", snap.Messages)
+	}
+	snap.Messages[0].Mentions[0] = "ag_mutated"
+	snap.Messages[0].Context.TriggerSeqs[0] = 99
+	snap.Messages[0].Context.Senders[0].Name = "mutated"
+	snap.Messages[0].Refs["k"] = "mutated"
+
+	if msg.Mentions[0] != "ag_bbbbbbbb" || msg.Context.TriggerSeqs[0] != 1 ||
+		msg.Context.Senders[0].Name != "b" || msg.Refs["k"] != "v" {
+		t.Fatalf("snapshot aliased source message: %+v", msg)
+	}
+}
+
 // P3a-04 复审 B1：单条消息本身超预算时也必须截断，12k 是硬上限。
 func TestSnapshotSingleOversizeMessageIsHardCapped(t *testing.T) {
 	g := snapGroup()

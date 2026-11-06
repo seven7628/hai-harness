@@ -652,3 +652,63 @@ func TestQueueRetryDoesNotConsumeChainDepth(t *testing.T) {
 		t.Fatalf("chain steps = %d, want 1", cur.ChainSteps())
 	}
 }
+
+// saveCountingStore 统计真正落账的次数：验证 SubmitGuarded 的顺序是
+// 查重 → Guard → Create，Guard 失败时不能先建账。
+type saveCountingStore struct {
+	*MemoryStore
+	saves int
+}
+
+func (s *saveCountingStore) SaveTask(ctx context.Context, t *Task) error {
+	s.saves++
+	return s.MemoryStore.SaveTask(ctx, t)
+}
+
+// P2.5-07：SubmitGuarded 的顺序回归。guard 拒绝时账本不能先写。
+func TestSubmitGuardedChecksGuardBeforeCreate(t *testing.T) {
+	ops := &queueFakeOps{}
+	st := &saveCountingStore{MemoryStore: NewMemoryStore()}
+	q := NewQueue(NewLedger(st), ops)
+	task := queueTask("会被链长拒绝")
+	task.Chain = []TaskID{"task_a", "task_b"}
+	guard := &Guard{Limits: GuardLimits{MaxChainSteps: 1, MaxConcurrent: 10}}
+
+	if _, err := q.SubmitGuarded(context.Background(), task, guard); !errors.Is(err, ErrChainTooDeep) {
+		t.Fatalf("SubmitGuarded err = %v, want ErrChainTooDeep", err)
+	}
+	if st.saves != 0 {
+		t.Fatalf("guard rejected but SaveTask called %d times", st.saves)
+	}
+	if len(ops.dispatched) != 0 {
+		t.Fatalf("guard rejected but dispatched %d", len(ops.dispatched))
+	}
+}
+
+// P2.5-07：同 client_msg_id 命中已有任务时，查重必须排在 Guard 之前。
+func TestSubmitGuardedReturnsExistingBeforeGuard(t *testing.T) {
+	ops := &queueFakeOps{}
+	st := &saveCountingStore{MemoryStore: NewMemoryStore()}
+	q := NewQueue(NewLedger(st), ops)
+	first := queueTask("原有任务")
+	first.ClientMsgID = "same-key"
+	created, err := q.Submit(context.Background(), first)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	before := st.saves
+	guard := &Guard{Limits: GuardLimits{MaxChainSteps: 1, MaxConcurrent: 10}}
+	second := queueTask("重复投递")
+	second.ClientMsgID = "same-key"
+	second.Chain = []TaskID{"task_a", "task_b"} // 如果 Guard 先跑，这里会 ErrChainTooDeep
+	got, err := q.SubmitGuarded(context.Background(), second, guard)
+	if err != nil {
+		t.Fatalf("duplicate submit should return existing, got %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("duplicate returned %s, want %s", got.ID, created.ID)
+	}
+	if st.saves != before {
+		t.Fatalf("duplicate submit wrote ledger: saves %d -> %d", before, st.saves)
+	}
+}

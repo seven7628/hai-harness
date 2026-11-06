@@ -16,6 +16,7 @@ type fakeWorkspaceOps struct {
 	createdSes  []CreateSessionReq
 	dispatched  []DispatchReq
 	dispatchErr error
+	duplicate   bool
 	workspaces  []WorkspaceInfo
 }
 
@@ -48,7 +49,11 @@ func (f *fakeWorkspaceOps) Dispatch(_ context.Context, req DispatchReq) (Dispatc
 		return DispatchResult{}, f.dispatchErr
 	}
 	f.dispatched = append(f.dispatched, req)
-	return DispatchResult{SessionID: req.SessionID, Accepted: true}, nil
+	msg := ""
+	if f.duplicate {
+		msg = DispatchDuplicateMessage
+	}
+	return DispatchResult{SessionID: req.SessionID, Accepted: true, Message: msg}, nil
 }
 
 func (f *fakeWorkspaceOps) InterruptSession(context.Context, string) error { return nil }
@@ -79,6 +84,25 @@ func TestWorkspaceServiceSend(t *testing.T) {
 	b, _ := svc.Send(context.Background(), "/w", "s1", "x", "")
 	if !strings.HasPrefix(a.TaskID, "task_") || a.TaskID == "" || a.TaskID == b.TaskID {
 		t.Fatalf("default task ids = %q / %q", a.TaskID, b.TaskID)
+	}
+}
+
+func TestWorkspaceServiceSendQueueDuplicateReason(t *testing.T) {
+	ctx := context.Background()
+	ops := &fakeWorkspaceOps{duplicate: true}
+	st := NewMemoryStore()
+	q := NewQueue(NewLedger(st), ops)
+	svc := &WorkspaceService{Ops: ops, AgentID: "ag_1", Queue: q}
+
+	res, err := svc.Send(ctx, "/w", "s1", "做一份对比表", "c-dup")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if res.Status != string(TaskCanceled) || res.Message == "" {
+		t.Fatalf("duplicate result = %+v; want canceled with reason", res)
+	}
+	if !strings.Contains(res.Message, "去重") {
+		t.Fatalf("duplicate reason = %q, want 去重", res.Message)
 	}
 }
 

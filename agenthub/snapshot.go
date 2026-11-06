@@ -121,7 +121,7 @@ func BuildGroupSnapshot(g *Group, agentID AgentID, msgs []Message, cursor int64,
 		}
 		out.Truncated = true
 	}
-	out.Messages = append([]Message(nil), kept...)
+	out.Messages = cloneMessages(kept)
 
 	return out
 }
