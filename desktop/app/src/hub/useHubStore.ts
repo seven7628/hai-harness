@@ -434,8 +434,10 @@ export const useHubStore = create<HubState>((set, get) => ({
   async loadGroupActivity(groupID) {
     const gid = groupID ?? get().activeGroupId
     if (!gid) return
+    const gen = groupSelectGen
     const a = await hubCommand<{ activity?: HubGroupActivity[] }>('hub_group_activity', { group_id: gid })
-    if (get().activeGroupId !== gid) return
+    // 同一群 A→B→A 也要用代际拒绝旧包，否则新读会被旧快照覆盖。
+    if (get().activeGroupId !== gid || groupSelectGen !== gen) return
     if (a.ok) set({ groupActivity: a.data?.activity ?? [] })
   },
 
