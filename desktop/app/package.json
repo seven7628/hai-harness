@@ -58,6 +58,8 @@
     "bench:concurrent": "node lab/bench-concurrent.mjs",
     "probe:idle-raf": "node lab/probe-idle-raf.mjs",
     "probe:concurrent-bleed": "node lab/probe-concurrent-bleed.mjs",
+    "probe:dom-fingerprint": "node lab/probe-dom-fingerprint.mjs",
+    "probe:turn-cache": "node lab/probe-turn-cache.mjs",
     "test:usage-stats": "node scripts/test-usage-stats.mjs",
     "test:usage-incl": "node scripts/test-usage-incl.mjs",
     "test:price-refresh": "node scripts/test-price-refresh.mjs",

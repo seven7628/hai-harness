@@ -66,6 +66,15 @@ const metrics = async () => {
   return map
 }
 const dScript = (a, z) => +(((z.ScriptDuration ?? 0) - (a.ScriptDuration ?? 0))).toFixed(4)
+// 分段成本：script（React/JS）、style（选择器匹配与重算）、layout —— 3 倍到底花在哪一段
+const dAll = (a, z) => ({
+  script: +(((z.ScriptDuration ?? 0) - (a.ScriptDuration ?? 0))).toFixed(4),
+  style: +(((z.RecalcStyleDuration ?? 0) - (a.RecalcStyleDuration ?? 0))).toFixed(4),
+  layout: +(((z.LayoutDuration ?? 0) - (a.LayoutDuration ?? 0))).toFixed(4),
+  task: +(((z.TaskDuration ?? 0) - (a.TaskDuration ?? 0))).toFixed(4),
+  styles: +(((z.RecalcStyleCount ?? 0) - (a.RecalcStyleCount ?? 0))),
+  layouts: +(((z.LayoutCount ?? 0) - (a.LayoutCount ?? 0))),
+})
 
 const FOREGROUND = 'fg-1'
 const BG = ['bg-1', 'bg-2', 'bg-3']
@@ -113,7 +122,7 @@ const runStreams = async ({ fgChunks, bgChunks, bgCount, gapMs, runTag }) => {
     return { muts: c.muts, added: c.added, rafMs: Math.round(c.rafMs), rafN: c.rafN }
   }, { fg: fgChunks, bg: bgChunks, bgCount, gap: gapMs, fgSid: FOREGROUND, bgSids: BG })
   const m1 = await metrics()
-  return { ...r, script: dScript(m0, m1) }
+  return { ...r, script: dScript(m0, m1), all: dAll(m0, m1) }
 }
 
 const skin = process.env.SKIN || 'runtime'
@@ -125,6 +134,8 @@ for (const sid of BG) await hydrateBg(sid, base.blocks, skin, density)
 await activate(FOREGROUND, base.blocks)
 await wait(800)
 
+const skipAB = process.env.ONLY === 'C'
+if (!skipAB) {
 // ---- A) 只有后台在流
 const A = await runStreams({ fgChunks: 0, bgChunks: 40, bgCount: 3, gapMs: 40 })
 console.log(`A 只有后台流（3×40 chunk）: 前台 DOM 变更 ${A.muts} / +${A.added}  script ${A.script}s  raf ${A.rafMs}ms/${A.rafN}`)
@@ -146,6 +157,8 @@ console.log(`B2 前台+3 后台同时流:        DOM 变更 ${B2.muts} / +${B2.a
 console.log(`   → 后台带来的额外 script ${(B2.script - B1.script).toFixed(3)}s（含 3×60 个 chunk 的处理）`)
 await wait(600)
 
+}
+
 // ---- C) 每次 chunk 的成本 vs 转录长度（只看前台，单会话）
 const perChunk = []
 for (const mult of [0, 1, 3]) {
@@ -154,14 +167,18 @@ for (const mult of [0, 1, 3]) {
   await wait(700)
   const r = await runStreams({ fgChunks: 60, bgChunks: 0, bgCount: 0, gapMs: 20 })
   const msPerChunk = (r.script * 1000) / 60
-  perChunk.push({ blocks: blocks.length, script: r.script, msPerChunk: +msPerChunk.toFixed(2), muts: r.muts })
-  console.log(`C 转录 ${String(blocks.length).padStart(3)} 块: 60 chunk 的 script ${r.script}s（${msPerChunk.toFixed(2)}ms/chunk）  DOM 变更 ${r.muts}`)
+  perChunk.push({ blocks: blocks.length, script: r.script, msPerChunk: +msPerChunk.toFixed(2), muts: r.muts, all: r.all })
+  const a = r.all
+  console.log(`C 转录 ${String(blocks.length).padStart(3)} 块: 60 chunk 的 script ${r.script}s（${msPerChunk.toFixed(2)}ms/chunk）  `
+    + `style ${a.style}s/${a.styles}×  layout ${a.layout}s/${a.layouts}×  DOM 变更 ${r.muts}`)
 }
 const [p0, p1, p3] = perChunk
 console.log(`\n结论`)
 console.log(`  分块成本随转录增长：0 块 ${p0.msPerChunk}ms/chunk → ${p1.blocks} 块 ${p1.msPerChunk}ms/chunk → ${p3.blocks} 块 ${p3.msPerChunk}ms/chunk`)
 console.log(`  斜率 ≈ ${((p3.msPerChunk - p0.msPerChunk) / Math.max(p3.blocks, 1) * 1000).toFixed(2)}µs / 块 / chunk`
   + ` ⇒ ${p3.blocks} 块时每 chunk 有 ${(p3.msPerChunk - p0.msPerChunk).toFixed(2)}ms 花在「与流式无关的已有内容」上`)
-console.log(`  后台并发：前台 DOM 变更 ${A.muts}（0 = 后台事件没有让前台重渲染），`
-  + `3 个后台各 60 chunk 额外花 ${(B2.script - B1.script).toFixed(3)}s script`)
+if (!skipAB) {
+  console.log(`  后台并发：前台 DOM 变更 ${A.muts}（0 = 后台事件没有让前台重渲染），`
+    + `3 个后台各 60 chunk 额外花 ${(B2.script - B1.script).toFixed(3)}s script`)
+}
 await b.close?.()

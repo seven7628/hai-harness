@@ -37,7 +37,7 @@ import { useSkin } from '../lib/useSkin'
 import { ArtifactCard, absArtifactPath } from './ArtifactCard'
 import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
 import { UsageActivityMini } from './UsageStats'
-import { useT } from '../i18n'
+import { useLang, useT } from '../i18n'
 
 
 /* 后台任务落地：两种块（回执 / 完整结果）用同一个 note 渲染 —— 它们说的是同一句
@@ -189,6 +189,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   sourceKey?: string
 } = {}) {
   const t = useT()
+  // 语言作为**值**参与元素复用的依赖（useT 每次渲染返回新闭包，身份不能当依赖）
+  const lang = useLang()
   // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话。
   // source 优先（子会话）：hooks 必须无条件调用，所以先取 store 再覆盖。
   const storeBlocks = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocks ?? [] : s.blocks))
@@ -235,6 +237,13 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const workspace = useAppStore((s) => s.workspace)
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
+  /* 已结算的轮：**元素复用**缓存。
+     流式时每个 chunk 都会重渲染整条转录，而历史轮的输入一个都没变 —— 重算的还是同一棵树。
+     实测（lab/bench-concurrent.mjs 的 C 段）：423 块时每 chunk 9.5ms 里有 7.4ms 花在
+     「与流式无关的已有内容」上；把非末轮整体跳过（临时实验）后斜率直接归零。
+     判据必须是**引用相等**（块对象不可变，内容一变就是新对象），加上本组件里所有
+     store 选择器的值与本地状态；少一项就会出现「点开不展开 / 账不更新」这类陈旧 UI。 */
+  const turnCacheRef = useRef(new Map<string, { items: readonly unknown[]; globals: readonly unknown[]; state: readonly unknown[]; els: (ReactElement | null)[] }>())
   // settledAtRef：这一轮**上一次结算时**有多少块（turn.items.length）。
   //
   // 用途只有一个：块上没有主 run id 时（冷恢复 / 旧快照 / 事件缺 run_id），turnRuns
@@ -967,6 +976,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     stickRef.current = true
     autoscrollRef.current = true // 点「回到底部」= 明确要恢复跟随
     awayHardRef.current = false
+    /* 手势意图也要一起清掉（2026-11，元素复用提速后暴露出来的真 bug）：
+       `settle()` 判断是否停止跟随时**先看意图**（decideFollow：dir==='up' 一律不跟），
+       而用户上滑留下的 intentRef='up' 不会自己过期。于是一个排队中的 scroll 事件
+       （上滑那一下的、或本函数自己写 scrollTop 产生的）在点了「回到底部」之后才被处理，
+       就会拿旧意图把刚刚恢复的跟随再关掉 —— 表现：已经贴在底部了，按钮还在。
+       之前没暴露只是因为渲染慢、事件恰好先到；提速 40% 之后顺序反过来了。 */
+    intentRef.current = null
+    userGestureRef.current = false
+    lastGestureAtRef.current = 0
     setAway(false)
     setFresh(false)
     expectedTopRef.current = -1
@@ -1223,8 +1241,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
      答案在它外面。所以简洁档收起时渲染的是「非工作块」，展开才回到原顺序。 */
   const turns = selectTurns(visibleBlocks)
   const items: (ReactElement | null)[] = []
+  /* 复用判据里的「全局输入」：本组件读到的每个 store 值与本地状态（storeBlocks 除外 ——
+     它每个 chunk 都会变，逐轮比块引用就够了）。 */
+  const turnGlobals: readonly unknown[] = [
+    lang, skin, density, runEnded, waiting, persona, workspace, openFile,
+    turnMetrics, openTurns, animOn, runStartedAt, mainStartedAt, mainRunId, mainEnded, transcriptKey,
+  ]
+  const sameList = (a: readonly unknown[], b: readonly unknown[]) => a.length === b.length && a.every((v, i) => v === b[i])
+  const turnCache = turnCacheRef.current
   for (const [ti, turn] of turns.entries()) {
-    if (turn.user) items.push(renderBlock(turn.user))
     const stats = turnStats(turn)
     const usage = turnUsage(turn, turnMetrics)
     const head = turnHead(turn)
@@ -1300,6 +1325,19 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     }
     const runs = concise && skin === 'runtime' ? turnRuns(turn, settleAt) : []
     const multiRun = runs.length > 1
+    /* 输入全都没变 → 直接交回上一次的那几个元素（React 看到同一个元素对象、props 同一个，
+       整棵子树 bailout，连 beginWork 都不进）。 */
+    const turnState: readonly unknown[] = [open, live, multiRun, ti, turns.length]
+    const hit = turnCache.get(turn.key)
+    if (hit && sameList(hit.items, turn.items) && sameList(hit.globals, turnGlobals) && sameList(hit.state, turnState)) {
+      items.push(...hit.els)
+      continue
+    }
+    const startIdx = items.length
+    const remember = () => {
+      turnCache.set(turn.key, { items: turn.items, globals: turnGlobals, state: turnState, els: items.slice(startIdx) })
+    }
+    if (turn.user) items.push(renderBlock(turn.user))
     /* 用户 2026-10：轮尾账排在产出卡**上方** —— 先结算这一轮，再看这一轮的产出。
        产出卡仍是轮尾最后一块（它是「记录」，不属于工作过程）。只在运行时皮肤、且账
        真的会渲染时把产出卡拆出来；运行中/无用量归属的轮保持原序（账本来就不出现）。 */
@@ -1417,7 +1455,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       </div>
     )
     const hasArtifacts = turn.items.some((b) => b.kind === 'artifacts')
-    if (!body.length && !artBlocks.length && !workItems.length && !work) continue
+    if (!body.length && !artBlocks.length && !workItems.length && !work) { remember(); continue }
     items.push(
       <div
         className="rt-turn"
@@ -1559,6 +1597,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         })}
       </div>,
     )
+    remember()
   }
 
   return (
