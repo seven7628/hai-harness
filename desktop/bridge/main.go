@@ -776,6 +776,8 @@ func (bs *bridgeSession) emit(e events.Event) {
 	}
 	// Hub 派发队列：项目会话的**根 run** 结束后推进一步（AgentEnd 已落盘、
 	// bs.running 已置 false，闸门看到的是真实空闲状态）。
+	// 注意顺序：上面的 hubSettling 必须已清除，否则泵会看到忙而漏掉这次派发，
+	// 且没有补泵（P2-06 复审）。此泵是结算后的唯一推进点，不要把它提前。
 	if e.Type() == events.AgentEndType && bs.hubPumpQueue != nil && bs.runtime != nil &&
 		bs.runtime.kind == runtimeProject {
 		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
