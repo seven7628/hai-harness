@@ -404,11 +404,15 @@ func TestLedgerTwoInstancesMarkNotifiedOnce(t *testing.T) {
 
 type failingAppendStore struct {
 	Store
-	fail bool
+	fail   bool
+	onFail func()
 }
 
 func (s *failingAppendStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) (int64, error) {
 	if s.fail {
+		if s.onFail != nil {
+			s.onFail()
+		}
 		return 0, errors.New("injected append failure")
 	}
 	return s.Store.AppendTaskEvent(ctx, id, ev)
@@ -450,5 +454,34 @@ func TestLedgerAppendFailureRollsBack(t *testing.T) {
 	}
 	if !reflect.DeepEqual(loaded, replayed) {
 		t.Fatalf("Replay after rollback != LoadTask:\n loaded: %#v\nreplay: %#v", loaded, replayed)
+	}
+}
+
+// P2.5-02 N-f：append 失败伴随 ctx 取消时，回滚仍必须落盘。
+// 旧实现复用调用方 ctx，SaveTask 直接返回 context.Canceled，快照永久停在
+// dispatched（既没派发、也没事件）。
+func TestLedgerAppendFailureRollsBackAfterContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &failingAppendStore{Store: NewMemoryStore()}
+	ledger := NewLedger(store)
+	task, err := ledger.Create(ctx, ledgerTask("task_cccccc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(ctx, task.ID, TaskDispatched, TransitionOptions{RunID: "run_1"}); err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
+	store.onFail = cancel
+	if _, err := ledger.Transition(ctx, task.ID, TaskRunning, TransitionOptions{RunID: "run_1"}); err == nil {
+		t.Fatal("expected injected append failure")
+	}
+	store.fail = false
+	loaded, err := store.LoadTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != TaskDispatched {
+		t.Fatalf("rollback lost after ctx cancel: %q", loaded.Status)
 	}
 }

@@ -290,3 +290,109 @@ func TestZeroValueStoreTaskIndexNotReady(t *testing.T) {
 		t.Fatal("zero-value MemoryStore must not claim TaskIndex")
 	}
 }
+
+// P2.5-02 N-a：实现 TaskIndex 但 Ready=false 的包装 store 必须回退 ListTasks，
+// 不能把空索引当成「没有重复」。M5/M6 变异（删掉 && TaskIndexReady()）会挂。
+type notReadyIndexStore struct{ *MemoryStore }
+
+func (s *notReadyIndexStore) TaskIndexReady() bool { return false }
+
+func TestGuardAndLedgerFallBackWhenTaskIndexNotReady(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemoryStore()
+	led := NewLedger(mem)
+	now := time.Now().UTC()
+	created, err := led.Create(ctx, indexTestTask("ag_fallback_ready", "same", "c-ready"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &notReadyIndexStore{MemoryStore: mem}
+	got, err := NewLedger(st).FindByClientMsgID(ctx, TaskTarget{Kind: TargetWorkspace, Workspace: "/tmp/idx", SessionID: "s1"}, "c-ready")
+	if err != nil || got == nil || got.ID != created.ID {
+		t.Fatalf("ledger fallback = %v, %v; want %s", got, err, created.ID)
+	}
+	probe := indexTestTask("ag_fallback_ready", "same", "c-other")
+	probe.CreatedAt, probe.UpdatedAt = now, now
+	guard := &Guard{Now: func() time.Time { return now }, Limits: GuardLimits{MaxConcurrent: 10}}
+	if err := guard.Check(ctx, st, probe); !errors.Is(err, ErrDuplicateTask) {
+		t.Fatalf("guard fallback err = %v, want ErrDuplicateTask", err)
+	}
+}
+
+// P2.5-02 N-b：holder 改 target（不只是清空 client id）也要只摘旧 key 的单条。
+func TestTaskIndexHolderTargetMoveKeepsSiblings(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryStore()
+	led := NewLedger(st)
+	a, err := led.Create(ctx, indexTestTask("ag_move_t", "first", "c-move-t"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := led.Create(ctx, indexTestTask("ag_move_t", "second", "c-move-t"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := cloneTask(b)
+	moved.Target.Workspace = "/tmp/idx2"
+	moved.Target.SessionID = "s2"
+	if err := st.SaveTask(ctx, moved); err != nil {
+		t.Fatal(err)
+	}
+	oldTarget := TaskTarget{Kind: TargetWorkspace, Workspace: "/tmp/idx", SessionID: "s1"}
+	got, ok := st.FindByClientMsgID(oldTarget, "c-move-t")
+	if !ok || got == nil || got.ID != a.ID {
+		t.Fatalf("old key after target move = %v/%v, want %s", got, ok, a.ID)
+	}
+	newTarget := TaskTarget{Kind: TargetWorkspace, Workspace: "/tmp/idx2", SessionID: "s2"}
+	got, ok = st.FindByClientMsgID(newTarget, "c-move-t")
+	if !ok || got == nil || got.ID != b.ID {
+		t.Fatalf("new key after target move = %v/%v, want %s", got, ok, b.ID)
+	}
+}
+
+// P2.5-02 N-c：delivered 在 removeLocked 里也算终态（先 running 再 delivered）。
+func TestTaskIndexDeliveredRemovalDecrementsActive(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryStore()
+	task := &Task{
+		ID: "task_del_remove", Status: TaskRunning,
+		Origin:    TaskOrigin{Kind: OriginDM, AgentID: "ag_del_rm"},
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if n := st.ActiveCount("ag_del_rm"); n != 1 {
+		t.Fatalf("running active = %d, want 1", n)
+	}
+	task.Status = TaskDelivered
+	if err := st.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if n := st.ActiveCount("ag_del_rm"); n != 0 {
+		t.Fatalf("delivered active after re-save = %d, want 0", n)
+	}
+}
+
+// P2.5-02 N-d：同一 client key 重复 Save 不能在列表里堆积重复 ID。
+func TestTaskIndexRepeatedSaveDoesNotDuplicateClientEntry(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryStore()
+	task := indexTestTask("ag_dup_save", "x", "c-dup-save")
+	task.ID = "task_dup_save"
+	for i := 0; i < 5; i++ {
+		task.Status = TaskQueued
+		if err := st.SaveTask(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st.taskIdx.mu.RLock()
+	n := 0
+	for _, ids := range st.taskIdx.byClient {
+		n += len(ids)
+	}
+	st.taskIdx.mu.RUnlock()
+	if n != 1 {
+		t.Fatalf("byClient entries = %d, want 1", n)
+	}
+}

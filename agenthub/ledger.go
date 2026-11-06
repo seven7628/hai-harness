@@ -514,8 +514,12 @@ func (l *Ledger) saveAndAppend(ctx context.Context, prev, t *Task, evType string
 	}
 	if _, err := l.store.AppendTaskEvent(ctx, t.ID, ev); err != nil {
 		// best effort：事件是审计源，不能让快照永久领先。
+		// 回滚不能用调用方 ctx —— append 失败常伴随 ctx 取消/超时，复用会让
+		// SaveTask 在写盘前直接 return ctx.Err()，快照永久领先事件（P2.5-02 N-f）。
 		if prev != nil {
-			_ = l.store.SaveTask(ctx, prev)
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_ = l.store.SaveTask(rollbackCtx, prev)
+			cancel()
 		}
 		return err
 	}
