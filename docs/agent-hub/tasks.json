@@ -1010,10 +1010,10 @@
     },
     "P2-06": {
       "status": "review",
-      "commit": "2a755f9 feat(hub-p2-06): 任务板 + Needs you + Chat|Run + 会话信息",
-      "review": "pending",
-      "reviewNote": "实现：hub_task_list/get/cancel/retry、hub_need_list/resolve、hub_clear；审批/提问事件落 need（锚=调用 id/批次 id），根 run 结束异步 expired；前端 HubInspector（任务板筛选/详情/取消/重试/空态、Needs you 批准/拒绝/回答/已读、会话 tab 运行态/用量/导出/清空）、Chat|Run 切换（Run 收 tool_run_*/compress_*）、系统动作行（refs.action + 压缩回执）、左栏徽标。测试边界：Go 侧 TestHubTaskBoardLifecycle（列表/详情/取消/重试链/hub_clear）与 TestHubNeedFromEventsAndResolve（事件→need→幂等→过期→resolve 幂等）；前端 tsc/eslint(src)/vite build 通过。未完成/延期：① 全工具+MCP 开关与 provider→model 两级下拉（P1-09 延期项）未做；② 记忆注入预览/清除已有 P1-09 记忆面板，未在本轮加预览；③ 浏览器实测未做（无 bridge 的 mock 不覆盖 hub_*；留 P2-09 真机）；④ 仓库级 npm run lint 在干净检出有既有错误（lab/test-runtime-turns.ts 不在 tsconfig），npm run test:todos-scope 的 e2e/ 被 .gitignore 忽略 —— 均非本提交引入。",
-      "reviewBatch": "C"
+      "commit": "2a755f9 + 6858694",
+      "review": "re-review_pending",
+      "reviewNote": "实现：hub_task_list/get/cancel/retry、hub_need_list/resolve、hub_clear；审批/提问事件落 need（锚=调用 id/批次 id），根 run 结束异步 expired；前端 HubInspector（任务板筛选/详情/取消/重试/空态、Needs you 批准/拒绝/回答/已读、会话 tab 运行态/用量/导出/清空）、Chat|Run 切换（Run 收 tool_run_*/compress_*）、系统动作行（refs.action + 压缩回执）、左栏徽标。测试边界：Go 侧 TestHubTaskBoardLifecycle（列表/详情/取消/重试链/hub_clear）与 TestHubNeedFromEventsAndResolve（事件→need→幂等→过期→resolve 幂等）；前端 tsc/eslint(src)/vite build 通过。未完成/延期：① 全工具+MCP 开关与 provider→model 两级下拉（P1-09 延期项）未做；② 记忆注入预览/清除已有 P1-09 记忆面板，未在本轮加预览；③ 浏览器实测未做（无 bridge 的 mock 不覆盖 hub_*；留 P2-09 真机）；④ 仓库级 npm run lint 在干净检出有既有错误（lab/test-runtime-turns.ts 不在 tsconfig），npm run test:todos-scope 的 e2e/ 被 .gitignore 忽略 —— 均非本提交引入。 首轮复审 change_requested（task-6s97ckyz，对象 2a755f9）：B1 Hub DM 会话 need 永远无法 resolve（sessionByID 不扫 hubRuntimes）；B2 会话存在但空闲时取消 dispatched/running 是 no-op、任务永不终态；B3 resolve 与异步 expire 读改写竞态 74/80 丢失更新。修复（6858694）：sessionByID 补扫 hubRuntimes；Interrupt 后 running/dispatchPending 双空 → canceled 兜底；hubNeedMu 串行化 resolve/expire，expire 锁内重读 pending。回归：Hub DM 审批 resolve、空闲会话取消终态、resolve×expire 12 轮（race×5）无丢失。待第二轮复审（对象 6858694）。非阻塞：hub_clear 入队即 ok、会话用量是全账本聚合、compress_start/end 不配对、limit>500 回落 100、need_list 无 all/agent、决策先于落盘、过期无系统消息、handoff 静默、retry 无幂等、UI lastTarget/相对时间/6px 点、④⑤ 延期项、浏览器未实测。",
+      "reviewBatch": "C-rereview"
     },
     "P2-07": {
       "status": "review",
@@ -1100,8 +1100,8 @@
       "in_review": 14,
       "not_started": 15,
       "in_review_breakdown": {
-        "re_review_pending": 2,
-        "initial_pending": 12
+        "re_review_pending": 3,
+        "initial_pending": 11
       }
     },
     "batches": [
