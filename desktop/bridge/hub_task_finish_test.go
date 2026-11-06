@@ -328,3 +328,32 @@ func TestHubInjectedHubTaskFails(t *testing.T) {
 		t.Fatalf("missing bad_header alert: %s", buf.String())
 	}
 }
+
+// P2-04 复审 B1：普通工具结果恒为空 Usage，累加后不能抹掉本 run 的有价性；
+// taskUsageOf 必须给预算判定一个 CostPriced=true。
+func TestTaskUsageOfPreservesPricedAcrossEmptyToolRounds(t *testing.T) {
+	var u core.Usage
+	u = u.Add(core.Usage{Input: 10, Cost: core.Cost{Total: 100, Priced: true, Source: core.CostSourceBuiltin}})
+	u = u.Add(core.Usage{}) // 普通工具（bash/read/...）的 Usage 恒零值
+	u = u.Add(core.Usage{Input: 5, Cost: core.Cost{Total: 50, Priced: true, Source: core.CostSourceBuiltin}})
+	got := taskUsageOf(&u)
+	if !got.CostPriced || got.CostUSD != 0.00015 || got.Input != 15 {
+		t.Fatalf("taskUsageOf = %+v, want priced $0.00015 input=15", got)
+	}
+}
+
+// P2-04 复审 NB-4：轮数护栏截断没有最终答复，必须 failed，不能 completed。
+func TestHubTaskFinishMaxIterationsIsFailed(t *testing.T) {
+	m, _ := testManager(t)
+	task := newDispatchedHubTask(t, m)
+	bs := &bridgeSession{ctx: context.Background(), hubTaskIDs: []agenthub.TaskID{task.ID}}
+	m.finishHubTask(bs, &events.AgentEnd{RunId: "r-maxiter", FinishReason: core.FinishReasonMaxIterations})
+	st, _ := m.hubStore()
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != agenthub.TaskFailed {
+		t.Fatalf("status = %s, want failed", got.Status)
+	}
+}

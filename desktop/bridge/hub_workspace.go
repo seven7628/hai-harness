@@ -307,6 +307,13 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 	if bs == nil {
 		return agenthub.DispatchResult{}, fmt.Errorf("%w: session %q", agenthub.ErrNotFound, sid)
 	}
+	// header 校验必须在去重占位之前：坏 header 返回 ErrInvalid 时不能留下
+	// client_msg_id 占位，否则同 id 的合法重试会被误判 duplicate（P2-04 复审 NB-1）。
+	if strings.TrimSpace(req.TaskHeader) != "" {
+		if _, err := agenthub.ParseTaskHeader(req.TaskHeader); err != nil {
+			return agenthub.DispatchResult{}, fmt.Errorf("%w: 无效的 hub_task header: %v", agenthub.ErrInvalid, err)
+		}
+	}
 	// client_msg_id 幂等（进程内）：同一 (workspace, session, id) 只投递一次。
 	// 跨重启的幂等由 P2-03 账本/目标侧去重负责；这里先保证「超时用同一个 id 重试」
 	// 不会把同一任务执行两遍（P2-02 评审 B2）。
@@ -323,11 +330,6 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		}
 		o.m.hubMsgDedup[dedupKey] = sid // 先占位：并发同 id 的第二个请求直接返回
 		o.m.mu.Unlock()
-	}
-	if strings.TrimSpace(req.TaskHeader) != "" {
-		if _, err := agenthub.ParseTaskHeader(req.TaskHeader); err != nil {
-			return agenthub.DispatchResult{}, fmt.Errorf("%w: 无效的 hub_task header: %v", agenthub.ErrInvalid, err)
-		}
 	}
 	msg := hubDispatchMessage(text, req.TaskHeader)
 	// 先置 pending 再 Ask：若 runLoop 已有 wake token，Ask 后可能立刻

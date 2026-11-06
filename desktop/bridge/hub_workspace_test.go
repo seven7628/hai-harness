@@ -581,3 +581,44 @@ func TestHubWorkspaceParentNotDir(t *testing.T) {
 		t.Fatalf("ENOTDIR = %v, want ErrInvalid", err)
 	}
 }
+
+// P2-04 复审 NB-1：坏 header 必须在 client_msg_id 占位之前拒绝；否则同 id
+// 的合法重试会命中残留占位，被误报 duplicate（从未投递）。
+func TestHubDispatchBadHeaderDoesNotPoisonDedup(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "BadHeaderAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.create(wsPath, "s-badheader", ""); err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	base := agenthub.DispatchReq{
+		Workspace: wsPath, SessionID: "s-badheader", Text: "做一件事", ClientMsgID: "bad-header-key",
+	}
+	bad := base
+	bad.TaskHeader = "{not-json"
+	if _, err := ops.Dispatch(context.Background(), bad); err == nil {
+		t.Fatal("bad header must be rejected")
+	}
+	good := base
+	header, err := agenthub.EncodeTaskHeader(&agenthub.Task{
+		ID: "task_probe_badheader", RootTaskID: "task_probe_badheader",
+		Origin:   agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_probe"},
+		Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	good.TaskHeader = header
+	res, err := ops.Dispatch(context.Background(), good)
+	if err != nil {
+		t.Fatalf("legal retry after bad header: %v", err)
+	}
+	if res.Message == agenthub.DispatchDuplicateMessage {
+		t.Fatal("bad header poisoned client_msg_id dedup: legal retry saw duplicate")
+	}
+}
