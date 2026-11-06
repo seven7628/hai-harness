@@ -1549,8 +1549,8 @@ const BASE = {
     },
     "P2.5-04": {
       "status": "review",
-      "commit": "30ac3f1 feat(hub-p2.5-04): 预算默认/群全局接线/无价告警/运行中硬停/预算 UI",
-      "reviewNote": "独立复审中（task-rxanr89b）。D1 B+硬停已实现；无价告警计数断言已修（5a5e2ab）。"
+      "commit": "1985e21 fix(hub-p2.5-04): 初始派发按群现读预算 + 真实 LLMEnd 硬停链路覆盖（复审 B1/B2）",
+      "reviewNote": "首审 changes_requested（task-rxanr89b，对象 30ac3f1）：B1 群日预算只在 retry/运行中硬停生效，初始派发 Guard 缺 GroupDailyBudgetUSD；B2 运行中硬停 LLMEnd 链路零自动化覆盖（删 Interrupt/接线变异全存活）。修复（1985e21）：Guard 新增 GroupDailyBudget 钩子，初始派发按任务 Origin.GroupID 现读 Group.Policy（读失败 fail-closed）；bridge 统一 hubWorkspaceGuard，DM 引擎也带钩子；新增真实 LLMEnd→预算检查→Interrupt 链路、累计/停止闩/新 batch 归零、群预算初始派发与钩子 fail-closed 用例。无价告警计数断言已修（5a5e2ab）。re-review 中。"
     },
     "P2.5-05": {
       "status": "review",
