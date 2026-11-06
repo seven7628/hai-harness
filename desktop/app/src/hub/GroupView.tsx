@@ -1,17 +1,14 @@
 import { useMemo, useState } from 'react'
 import { SendIcon } from '../components/icons'
 import { useHubStore } from './useHubStore'
-import { GroupBubble, parseRoutingText } from './MessageBubble'
-import { RoundGroup, roundKey } from './RoundGroup'
+import { GroupBubble } from './MessageBubble'
+import { RoundGroup } from './RoundGroup'
 import { RoundActivityDigest } from './RoundActivityDigest'
-import type { HubGroup, HubGroupMember, HubMessage, HubRound } from './types'
+import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './groupThread'
+import type { HubGroup, HubGroupMember, HubMessage } from './types'
 
 // 群组视图（P3a-08）：群头（成员叠图）/ 时间线 / 路由动作 / Chat|Run / 发言。
 // 同轮回复按 round_id（或同一组 trigger_seqs）合并；「分开」保留平铺。
-type ThreadItem =
-  | { kind: 'message'; msg: HubMessage }
-  | { kind: 'round'; round: HubRound }
-
 export default function GroupView({ group }: { group: HubGroup }) {
   const t = useT()
   const messages = useHubStore((s) => s.groupMessages)
@@ -125,20 +122,6 @@ export default function GroupView({ group }: { group: HubGroup }) {
   )
 }
 
-function buildThreadItems(messages: HubMessage[], rounds: HubRound[]): ThreadItem[] {
-  const items: ThreadItem[] = []
-  const bySeq = new Map<number, HubRound[]>()
-  for (const r of rounds) {
-    const seq = r.trigger_seq ?? 0
-    if (!seq) continue
-    bySeq.set(seq, [...(bySeq.get(seq) ?? []), r])
-  }
-  for (const msg of messages) {
-    items.push({ kind: 'message', msg })
-    for (const r of bySeq.get(msg.seq) ?? []) items.push({ kind: 'round', round: r })
-  }
-  return items
-}
 
 function renderThread(items: ThreadItem[], names: Record<string, string>, grouped: boolean) {
   const nodes: React.ReactNode[] = []
@@ -183,12 +166,6 @@ function renderThread(items: ThreadItem[], names: Record<string, string>, groupe
   return nodes
 }
 
-function routingSummary(text: string, names: Record<string, string>): string {
-  const parsed = parseRoutingText(text)
-  if (!parsed) return text
-  const targets = parsed.targets.map((id) => names[id] ?? id)
-  return `${parsed.all ? '@all ' : ''}${targets.length ? `唤醒 ${targets.join('、')}` : '无人被唤醒'}${parsed.dropped ? `（丢弃 ${parsed.dropped} 个）` : ''}`
-}
 
 function MemberStack({ members, names }: { members: HubGroupMember[]; names: Record<string, string> }) {
   return (

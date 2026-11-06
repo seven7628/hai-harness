@@ -90,6 +90,9 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 			m.emitHubTaskAlert(settled.ID, "artifact_register_failed", err.Error())
 		}
 		m.emitHubTaskUpdate(settled)
+		if settled.Status == agenthub.TaskBlockedBudget {
+			m.recordBudgetNeed(settled, res.Error)
+		}
 		if !alreadyNotified(settled, ae.RunId) {
 			m.pushHubTaskResult(ledger, settled, ae)
 		}
@@ -106,6 +109,31 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 			m.emitHubTaskUpdate(t)
 		}
 		m.emitHubTaskAlert(extra, "batch_conflict", "同一批出现多个 hub_task（空闲闸门 bug）")
+	}
+}
+
+// recordBudgetNeed 把预算阻断放进 Needs you（P2-07 N5）。同一 task 幂等。
+func (m *manager) recordBudgetNeed(t *agenthub.Task, reason string) {
+	if m == nil || t == nil {
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		return
+	}
+	id := agenthub.NeedID("need_budget_" + string(t.ID))
+	ctx := context.Background()
+	if existing, err := st.LoadNeed(ctx, id); err == nil && existing != nil {
+		return
+	}
+	n := &agenthub.Need{
+		ID: id, Kind: "budget", Status: "pending",
+		AgentID: t.Origin.AgentID, GroupID: t.Origin.GroupID, TaskID: t.ID,
+		Title: "任务预算阻断", Body: truncateRunes(reason, 2000),
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := st.SaveNeed(ctx, n); err == nil {
+		m.emitHubNeed(n)
 	}
 }
 
@@ -255,12 +283,22 @@ func (m *manager) emitHubTaskAlert(id agenthub.TaskID, kind, msg string) {
 	if m == nil || m.out == nil {
 		return
 	}
-	m.out.writeLine(map[string]any{
+	ev := map[string]any{
 		"event_type": "hub_alert",
 		"task_id":    string(id),
 		"kind":       kind,
 		"message":    msg,
-	})
+		"at":         time.Now().UTC(),
+	}
+	if id != "" {
+		if st, err := m.hubStore(); err == nil {
+			if t, err := st.LoadTask(context.Background(), id); err == nil && t != nil {
+				ev["agent_id"] = string(t.Origin.AgentID)
+				ev["group_id"] = string(t.Origin.GroupID)
+			}
+		}
+	}
+	m.out.writeLine(ev)
 }
 
 // taskUsageOf core.Usage → 账本 DTO（CostPriced 区分「不知道」与「免费」）。

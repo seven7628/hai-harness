@@ -161,5 +161,13 @@ func ReadGroupActivity(ctx context.Context, st Store, gid GroupID, afterSeq int6
 	if st == nil {
 		return nil, fmt.Errorf("%w: store 为空", ErrInvalid)
 	}
+	// 与 ReadGroupLog 一致：已删除群不返回历史，避免软删后活动仍可被读取。
+	g, err := st.LoadGroup(ctx, gid)
+	if err != nil {
+		return nil, err
+	}
+	if g == nil || g.Deleted {
+		return nil, fmt.Errorf("%w: group %s 已删除", ErrNotFound, gid)
+	}
 	return st.ReadActivity(ctx, gid, afterSeq, limit)
 }

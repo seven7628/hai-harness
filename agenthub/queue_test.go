@@ -620,3 +620,35 @@ func TestQueueCancelDispatchedIfIdleRespectsBusy(t *testing.T) {
 		t.Fatalf("idle cancel = %+v did=%v err=%v; want canceled/true", got, did, err)
 	}
 }
+
+// P2-02 N2：同一任务连续重试到第 8 次，不能因为 Chain 追加 attempt 而触发
+// ErrChainTooDeep 永久锁死。
+func TestQueueRetryDoesNotConsumeChainDepth(t *testing.T) {
+	ops := &queueFakeOps{}
+	q, _ := newTestQueue(t, ops)
+	guard := &Guard{Limits: GuardLimits{MaxChainSteps: 6, MaxConcurrent: 20}}
+	ctx := context.Background()
+	first := queueTask("第一次")
+	first.ClientMsgID = "retry-deep"
+	cur, err := q.SubmitGuarded(ctx, first, guard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		if _, err := q.ledger.Transition(ctx, cur.ID, TaskFailed, TransitionOptions{Error: "模拟失败"}); err != nil {
+			t.Fatal(err)
+		}
+		next := queueTask("重试")
+		next.ClientMsgID = "retry-deep"
+		cur, err = q.SubmitGuarded(ctx, next, guard)
+		if err != nil {
+			t.Fatalf("retry %d blocked: %v", i+1, err)
+		}
+	}
+	if cur.Attempt != 9 {
+		t.Fatalf("attempt = %d, want 9", cur.Attempt)
+	}
+	if cur.ChainSteps() != 1 {
+		t.Fatalf("chain steps = %d, want 1", cur.ChainSteps())
+	}
+}

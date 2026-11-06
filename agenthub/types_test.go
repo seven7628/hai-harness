@@ -265,6 +265,15 @@ func TestScopeSessionID(t *testing.T) {
 	}
 }
 
+func TestGroupPolicyTurnsUpperBound(t *testing.T) {
+	if err := (GroupPolicy{MaxTurnsPerHuman: MaxGroupPolicyTurnsPerHuman + 1}).Validate(); err == nil {
+		t.Fatal("max_turns_per_human above read window must be rejected")
+	}
+	if err := (GroupPolicy{MaxTurnsPerHuman: MaxGroupPolicyTurnsPerHuman}).Validate(); err != nil {
+		t.Fatalf("upper bound must be accepted: %v", err)
+	}
+}
+
 func TestGroupPolicyEffectiveMode(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", GroupModeAsk},

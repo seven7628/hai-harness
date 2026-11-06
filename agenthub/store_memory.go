@@ -641,6 +641,21 @@ func (s *MemoryStore) LoadArtifact(ctx context.Context, id ArtifactID) (*Artifac
 	return &cp, nil
 }
 
+func (s *MemoryStore) ListArtifacts(ctx context.Context) ([]*Artifact, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Artifact, 0, len(s.artifacts))
+	for _, a := range s.artifacts {
+		cp := *a
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
 func (s *MemoryStore) SaveCursor(ctx context.Context, c *Cursor) error {
 	if err := ctx.Err(); err != nil {
 		return err

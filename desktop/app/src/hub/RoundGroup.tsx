@@ -33,12 +33,6 @@ export function RoundGroup({
   )
 }
 
-export function roundKey(msg: HubMessage): string {
-  if (msg.round_id) return `r:${msg.round_id}`
-  const triggers = msg.context?.trigger_seqs ?? []
-  if (triggers.length > 0) return `t:${triggers.join(',')}`
-  return ''
-}
 
 function uniqueAuthors(messages: HubMessage[], names: Record<string, string>): string[] {
   const seen: string[] = []

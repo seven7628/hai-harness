@@ -178,3 +178,20 @@ func TestRegisterArtifactMissingSourceNoMetadata(t *testing.T) {
 		t.Fatalf("metadata left behind: %+v", list)
 	}
 }
+
+// P3a-07 非阻塞：MemoryStore 也应支持 RegisterArtifact（不复制文件副本）。
+func TestRegisterArtifactMemoryStore(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryStore()
+	a := &Artifact{OwnerAgentID: "ag_aaaaaaaa", Name: "m.md", Path: "m.md"}
+	if err := RegisterArtifact(ctx, st, a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Version != 1 || a.ID == "" {
+		t.Fatalf("artifact = %+v", a)
+	}
+	got, err := st.LoadArtifact(ctx, a.ID)
+	if err != nil || got.Version != 1 {
+		t.Fatalf("load = %+v, %v", got, err)
+	}
+}

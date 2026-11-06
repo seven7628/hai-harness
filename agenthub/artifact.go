@@ -17,6 +17,9 @@ import (
 	"time"
 )
 
+// MaxArtifactSnapshotBytes 是版本副本的大小上限；超过只登记元数据。
+const MaxArtifactSnapshotBytes = 16 << 20
+
 // artifactVersionMu 串行化「扫描现有版本 → 分配 → 落盘」；FileStore 的
 // SaveArtifact 本身不查重，调用方必须经 RegisterArtifact 才能拿到唯一版本。
 var artifactVersionMu sync.Mutex
@@ -77,6 +80,11 @@ func snapshotArtifactSource(st Store, a *Artifact) error {
 	}
 	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("%w: 产物源不是普通文件", ErrInvalid)
+	}
+	if fi.Size() > MaxArtifactSnapshotBytes {
+		// 复制会让 bridge 在大文件上长时间持全局锁；超限只保留元数据，
+		// 预览仍走 2MB 截断，不阻塞结算。
+		return nil
 	}
 	destDir := filepath.Join(rooter.Root(), "artifacts", string(a.ID))
 	if err := os.MkdirAll(destDir, 0o700); err != nil {

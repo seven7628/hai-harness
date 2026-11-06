@@ -160,6 +160,11 @@ func TestHubHandoffGuardsDepthRateAndDeletedTarget(t *testing.T) {
 		_ = json.Unmarshal([]byte(out), &r)
 		return r.Handoff, err
 	}
+	// 不存在的 artifact_id 不能进交接卡。
+	if _, err := callHubToolForAgent(t, m, a.ID, "handoff",
+		`{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(b.ID)+`","instruction":"x","artifact_ids":["art_missing"]}`); err == nil {
+		t.Fatal("unknown artifact id must be rejected")
+	}
 	// A→B→C→D 后 D→E 是第 4 跳（depth=3），必须拒绝并给出可判定错误。
 	for _, pair := range [][2]agenthub.AgentID{{a.ID, b.ID}, {b.ID, c.ID}, {c.ID, d.ID}} {
 		if _, err := handoff(pair[0], pair[1]); err != nil {

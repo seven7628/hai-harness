@@ -147,6 +147,23 @@ func (s TaskStatus) Valid() bool {
 	}
 }
 
+// ChainSteps 返回逻辑链长：重试 attempt 会把新 task id 追加进 Chain，
+// 但这些是同一跳的重投，不应消耗链深额度（P2-02 N2）。
+func (t *Task) ChainSteps() int {
+	if t == nil {
+		return 0
+	}
+	attempt := t.Attempt
+	if attempt <= 0 {
+		attempt = 1
+	}
+	steps := len(t.Chain) - (attempt - 1)
+	if steps < 1 {
+		steps = 1
+	}
+	return steps
+}
+
 // Terminal 表示不会再进入工作态。completed/failed/interrupted 仍是结果终态，
 // 但允许 delivered 这一步；其余终态没有出边。
 func (s TaskStatus) Terminal() bool {

@@ -34,13 +34,20 @@ func (m *manager) ensureHubRecovery() {
 	}
 	m.hubRecovering = true
 	m.mu.Unlock()
-	err := m.recoverHubTasks()
-	m.mu.Lock()
-	m.hubRecovering = false
-	if err == nil {
-		m.hubRecovered = true
-	}
-	m.mu.Unlock()
+	var err error
+	func() {
+		// defer：recoverHubTasks panic 时也必须放开 hubRecovering，否则本进程
+		// 后续 hub_open 全部 no-op（P2-08 非阻塞）。
+		defer func() {
+			m.mu.Lock()
+			m.hubRecovering = false
+			if err == nil {
+				m.hubRecovered = true
+			}
+			m.mu.Unlock()
+		}()
+		err = m.recoverHubTasks()
+	}()
 	if err != nil {
 		m.emitHubTaskAlert("", "recovery_failed", err.Error())
 	}

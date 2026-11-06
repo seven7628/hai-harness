@@ -164,6 +164,25 @@ func (m *manager) cancelHubTask(ctx context.Context, id agenthub.TaskID) (*agent
 	return canceled, "已请求中断，等待运行结束", nil
 }
 
+// hubGuardForTask 用任务发起者的 Profile 与群策略构造重试护栏。
+func (m *manager) hubGuardForTask(old *agenthub.Task) *agenthub.Guard {
+	limits := agenthub.GuardLimits{}
+	if old != nil && old.Origin.AgentID != "" {
+		if p, _, err := m.hubLoadAgent(string(old.Origin.AgentID)); err == nil && p != nil {
+			limits.MaxTaskCostUSD = p.Policy.MaxTaskCostUSD
+			limits.DailyBudgetUSD = p.Policy.DailyBudgetUSD
+		}
+	}
+	if old != nil && old.Origin.GroupID != "" {
+		if st, err := m.hubStore(); err == nil {
+			if g, err := st.LoadGroup(context.Background(), old.Origin.GroupID); err == nil && g != nil {
+				limits.GroupDailyBudgetUSD = g.Policy.DailyBudgetUSD
+			}
+		}
+	}
+	return &agenthub.Guard{Limits: limits}
+}
+
 func (m *manager) hubTaskRetry(c command) {
 	ctx := context.Background()
 	id := agenthub.TaskID(strings.TrimSpace(str(c.Payload, "task_id")))
@@ -212,7 +231,8 @@ func (m *manager) hubTaskRetry(c command) {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
-	created, err := q.Submit(ctx, next)
+	// 重试也是派发：必须走同一套护栏（预算/链长/并发），不能开旁路。
+	created, err := q.SubmitGuarded(ctx, next, m.hubGuardForTask(old))
 	if err != nil {
 		m.resp(c, false, "重试失败: "+err.Error(), nil)
 		return

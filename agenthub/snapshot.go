@@ -6,6 +6,7 @@ package agenthub
 //   - 每 (群, 智能体) 一个会话；快照只包含**上次游标之后**的消息（delta）；
 //   - 冻结本轮：seq > round.TriggerSeq 的消息不进本次快照（@ 之后的回复属于下一轮）；
 //   - 预算：最多 40 条 / 12000 rune；超了从最旧折叠，Folded 计数；
+//     块头也计入预算，因此“最新一条正文完整”只在剩余预算足够时成立；
 //   - 系统/轮次回执（round_summary）与活动流不进快照；
 //   - 输出文本确定性（消息按 seq 升序，成员按 JoinedAt/ID），重放同输入同输出。
 
@@ -96,18 +97,28 @@ func BuildGroupSnapshot(g *Group, agentID AgentID, msgs []Message, cursor int64,
 		if len(kept) == 0 {
 			break
 		}
-		r := []rune(strings.TrimSpace(kept[0].Text))
+		// 不 TrimSpace 原正文：截断只丢尾部字符，保留作者原有的前导/换行格式。
+		r := []rune(kept[0].Text)
 		if over >= len(r) {
 			kept = kept[1:]
 			out.Folded++
 		} else {
-			kept[0].Text = string(r[:len(r)-over-1]) + "…"
+			cut := len(r) - over - 1
+			if cut < 0 {
+				cut = 0
+			}
+			kept[0].Text = string(r[:cut]) + "…"
 			out.Truncated = true
 		}
 		out.Text = renderGroupSnapshot(g, agentID, round, kept, out.Folded)
 	}
 	if lines := []rune(out.Text); len(lines) > opt.MaxRunes {
-		out.Text = string(lines[:opt.MaxRunes])
+		// 块头本身超预算：按 rune 边界硬切，并保住一个省略号，避免看起来是完整行。
+		if opt.MaxRunes > 1 {
+			out.Text = string(lines[:opt.MaxRunes-1]) + "…"
+		} else {
+			out.Text = string(lines[:opt.MaxRunes])
+		}
 		out.Truncated = true
 	}
 	out.Messages = append([]Message(nil), kept...)

@@ -72,8 +72,8 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 	if g.Now != nil {
 		now = g.Now().UTC()
 	}
-	if len(t.Chain) > lim.MaxChainSteps {
-		return fmt.Errorf("%w: 链长 %d > %d（需要你决定是否继续）", ErrChainTooDeep, len(t.Chain), lim.MaxChainSteps)
+	if steps := t.ChainSteps(); steps > lim.MaxChainSteps {
+		return fmt.Errorf("%w: 链长 %d > %d（需要你决定是否继续）", ErrChainTooDeep, steps, lim.MaxChainSteps)
 	}
 	all, err := store.ListTasks(ctx, TaskFilter{})
 	if err != nil {

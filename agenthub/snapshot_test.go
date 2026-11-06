@@ -167,4 +167,7 @@ func TestSnapshotSingleOversizeMessageIsHardCapped(t *testing.T) {
 	if got := len([]rune(tiny.Text)); got > 20 {
 		t.Fatalf("tiny budget text = %d, want <= 20", got)
 	}
+	if !strings.HasSuffix(tiny.Text, "…") {
+		t.Fatalf("tiny hard cut must keep ellipsis: %q", tiny.Text)
+	}
 }

@@ -213,6 +213,20 @@ func TestHubGroupHistoryAndRoundSummary(t *testing.T) {
 	if len(page.Messages) == 0 || page.HasMore {
 		t.Fatalf("limit=0 page = %s, want non-empty and has_more=false", raw)
 	}
+	// 请求超过 store 上限（500）不能被误判成「还有更早页」。
+	ok, errMsg, data = hubCmd(t, m, buf, 5, "hub_group_history", map[string]any{"group_id": string(g.ID), "limit": 1000})
+	if !ok {
+		t.Fatalf("history limit=1000: %s", errMsg)
+	}
+	raw, _ = json.Marshal(data)
+	page = struct {
+		Messages []agenthub.Message `json:"messages"`
+		HasMore  bool               `json:"has_more"`
+	}{}
+	_ = json.Unmarshal(raw, &page)
+	if len(page.Messages) != 4 || page.HasMore {
+		t.Fatalf("limit=1000 page = %s, want 4 and has_more=false", raw)
+	}
 }
 
 func TestGroupHistoryHasMoreUsesEffectivePage(t *testing.T) {

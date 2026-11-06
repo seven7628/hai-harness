@@ -153,6 +153,11 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 				t.Chain = append(append([]TaskID{}, existing.Chain...), t.ID)
 			default:
 				q.mu.Unlock()
+				// 命中可能是「账本说 queued、实际已被 pump 派走」的旧快照：
+				// 返回前重读，别让调用方拿到过期状态（P2-02 N4）。
+				if latest, rerr := q.ledger.Replay(ctx, existing.ID); rerr == nil && latest != nil {
+					return latest, nil
+				}
 				return existing, nil
 			}
 		}

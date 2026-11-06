@@ -233,4 +233,28 @@ func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
 	}); ok {
 		t.Fatal("reserved profile name must be rejected")
 	}
+	// 默认 8 轮：策略留 0 时不显式设置，第 8 条放行、第 9 条拒绝。
+	ok, errMsg, data = hubCmd(t, m, buf, 13, "hub_group_create", map[string]any{
+		"name": "默认限流群", "members": []map[string]any{
+			{"agent_id": string(a.ID), "role": "owner"},
+			{"agent_id": string(b.ID), "role": "member"},
+		},
+	})
+	if !ok {
+		t.Fatalf("default group: %s", errMsg)
+	}
+	defaultGroup := groupFromData(t, data)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 14, "hub_group_send", map[string]any{
+		"group_id": string(defaultGroup.ID), "text": "开始",
+	}); !ok {
+		t.Fatalf("default seed: %s", errMsg)
+	}
+	for i := 0; i < 8; i++ {
+		if _, err := call("group_say", fmt.Sprintf(`{"group_id":%q,"text":"第 %d 轮"}`, string(defaultGroup.ID), i+1)); err != nil {
+			t.Fatalf("turn %d must pass: %v", i+1, err)
+		}
+	}
+	if _, err := call("group_say", fmt.Sprintf(`{"group_id":%q,"text":"第 9 轮"}`, string(defaultGroup.ID))); err == nil {
+		t.Fatal("default max_turns_per_human=8 must reject the 9th turn")
+	}
 }

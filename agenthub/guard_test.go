@@ -65,6 +65,16 @@ func TestGuardChainTooDeep(t *testing.T) {
 	if err := g.Check(context.Background(), st, task); err != nil {
 		t.Fatalf("6 steps should pass: %v", err)
 	}
+	// 重试 attempt 的追加 id 不消耗链深：第 9 次 attempt 仍应按 1 跳计。
+	retry := guardTask("接力")
+	retry.Chain = []TaskID{"task_root", "task_a1", "task_a2", "task_a3", "task_a4", "task_a5", "task_a6", "task_a7", "task_a8"}
+	retry.Attempt = 9
+	if got := retry.ChainSteps(); got != 1 {
+		t.Fatalf("retry chain steps = %d, want 1", got)
+	}
+	if err := g.Check(context.Background(), st, retry); err != nil {
+		t.Fatalf("retry attempt must not hit chain limit: %v", err)
+	}
 }
 
 func TestGuardDuplicateWindow(t *testing.T) {

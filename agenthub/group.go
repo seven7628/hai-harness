@@ -103,7 +103,10 @@ const (
 	DefaultGroupMaxParallelRuns  = 3
 	DefaultGroupMaxHandoffDepth  = 3
 	DefaultGroupMaxTurnsPerHuman = 8
-	DefaultGroupMaxMentions      = 3
+	// MaxGroupPolicyTurnsPerHuman 是 ReadMessages 单页窗口的上界；超过它会把
+	// 限流静默退化成 500，故策略层直接拒绝而不是悄悄截断。
+	MaxGroupPolicyTurnsPerHuman = 500
+	DefaultGroupMaxMentions     = 3
 )
 
 // Normalize 应用群组默认值并校验；只有全部通过才原地更新，失败时对象保持原样。
@@ -267,8 +270,8 @@ func (p GroupPolicy) Validate() error {
 	if p.MaxHandoffDepth < 0 {
 		return fmt.Errorf("%w: group.policy.max_handoff_depth must be >= 0", ErrInvalid)
 	}
-	if p.MaxTurnsPerHuman < 0 {
-		return fmt.Errorf("%w: group.policy.max_turns_per_human must be >= 0", ErrInvalid)
+	if p.MaxTurnsPerHuman < 0 || p.MaxTurnsPerHuman > MaxGroupPolicyTurnsPerHuman {
+		return fmt.Errorf("%w: group.policy.max_turns_per_human must be 0..%d", ErrInvalid, MaxGroupPolicyTurnsPerHuman)
 	}
 	if p.MaxMentions < 0 {
 		return fmt.Errorf("%w: group.policy.max_mentions_per_message must be >= 0", ErrInvalid)

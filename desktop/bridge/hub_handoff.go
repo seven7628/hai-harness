@@ -87,6 +87,23 @@ func (t *hubHandoffTool) Call(ctx context.Context, _, arguments string) (string,
 	if profile.Deleted {
 		return "", fmt.Errorf("%w: 接收方已删除", agenthub.ErrInvalid)
 	}
+	// artifact_ids 只能挂已登记且自己可见的本群产物，避免任意 id 进交接卡。
+	for _, raw := range args.ArtifactIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return "", fmt.Errorf("%w: artifact_id 不能为空", agenthub.ErrInvalid)
+		}
+		art, err := st.LoadArtifact(ctx, agenthub.ArtifactID(id))
+		if err != nil {
+			return "", fmt.Errorf("%w: 产物 %s 不存在", agenthub.ErrInvalid, id)
+		}
+		if art.GroupID != "" && art.GroupID != g.ID {
+			return "", fmt.Errorf("%w: 产物 %s 不属于本群", agenthub.ErrInvalid, id)
+		}
+		if !agenthub.ArtifactVisibleTo(art, t.agentID, false) {
+			return "", fmt.Errorf("%w: 无权引用产物 %s", agenthub.ErrInvalid, id)
+		}
+	}
 
 	// 护栏检查与落盘必须在同一临界区：并发 handoff 不能同时绕过同对频率上限。
 	t.m.hubGroupSendMu.Lock()

@@ -1,5 +1,6 @@
 import { Markdown } from '../components/markdown'
 import type { HubMessage } from './types'
+import { parseRoutingText } from './groupThread'
 
 // 群消息气泡：handoff 卡、审批占位、路由回执都只在人类 UI 出现；
 // routing_receipt 的落盘文本是 targets=ag_x，需要按名册还原成可读动作行。
@@ -61,12 +62,3 @@ export function RoutingAction({ text, names }: { text: string; names: Record<str
   )
 }
 
-export function parseRoutingText(text: string): { all: boolean; targets: string[]; dropped: number } | null {
-  const m = /^(@all\s+)?targets=([^ ]*)(?:\s+dropped=(\d+))?$/.exec(text.trim())
-  if (!m) return null
-  return {
-    all: !!m[1],
-    targets: m[2] ? m[2].split(',').filter(Boolean) : [],
-    dropped: Number(m[3] ?? 0),
-  }
-}

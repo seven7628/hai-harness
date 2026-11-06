@@ -67,8 +67,8 @@ func newHubTaskStatusTool(m *manager, agentID agenthub.AgentID) *hubTaskStatusTo
 	return &hubTaskStatusTool{
 		BaseTool: tools.BaseTool{
 			Name_: "task_status",
-			Description_: "Check one task you dispatched: current status, dispatch run_id, result/error, and its event log. " +
-				"Use this after session_send (task_id returned) or when deciding whether to retry/cancel. " +
+			Description_: "Check one task you dispatched: current status, dispatch run_id, result/error, and its recent event log. " +
+				"Do not poll: session_send pushes the result back automatically; use this only when you need the current state. " +
 				"Only tasks originated by this agent are visible.",
 			Params_: tools.Obj(map[string]any{
 				"task_id": tools.Str("Task id returned by session_send"),
@@ -104,6 +104,11 @@ func (t *hubTaskStatusTool) Call(ctx context.Context, _, arguments string) (stri
 	}
 	if events == nil {
 		events = []agenthub.TaskEvent{}
+	}
+	// 事件日志只回最近 20 条：task_status 不该把整条审计链塞进模型上下文。
+	const maxTaskStatusEvents = 20
+	if len(events) > maxTaskStatusEvents {
+		events = events[len(events)-maxTaskStatusEvents:]
 	}
 	return marshalHubToolResult(map[string]any{"task": task, "events": events})
 }
