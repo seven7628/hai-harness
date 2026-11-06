@@ -94,16 +94,26 @@ func BuildGroupSnapshot(g *Group, agentID AgentID, msgs []Message, cursor int64,
 		out.Folded++
 	}
 	out.Text = renderGroupSnapshot(g, agentID, round, kept, out.Folded)
-	// 单条消息可能本身就超过预算：从最旧一条正文尾部截断，保证最终 Text
-	// 不超过 MaxRunes，并用 Truncated 明确告诉调用方（P3a-04 复审 B1）。
-	if len([]rune(out.Text)) > opt.MaxRunes && len(kept) > 0 {
-		over := len([]rune(out.Text)) - opt.MaxRunes + 1
-		r := []rune(strings.TrimSpace(kept[0].Text))
-		if over > 0 && over <= len(r) {
-			kept[0].Text = string(r[:len(r)-over]) + "…"
-			out.Truncated = true
-			out.Text = renderGroupSnapshot(g, agentID, round, kept, out.Folded)
+	// 12k 是硬上限：块头（群/成员/@行）与折叠行也计入最终 Text。
+	// 先丢最旧整条；只剩一条时截断正文；块头本身超预算时硬切兜底。
+	for len([]rune(out.Text)) > opt.MaxRunes {
+		over := len([]rune(out.Text)) - opt.MaxRunes
+		if len(kept) == 0 {
+			break
 		}
+		r := []rune(strings.TrimSpace(kept[0].Text))
+		if over >= len(r) {
+			kept = kept[1:]
+			out.Folded++
+		} else {
+			kept[0].Text = string(r[:len(r)-over-1]) + "…"
+			out.Truncated = true
+		}
+		out.Text = renderGroupSnapshot(g, agentID, round, kept, out.Folded)
+	}
+	if lines := []rune(out.Text); len(lines) > opt.MaxRunes {
+		out.Text = string(lines[:opt.MaxRunes])
+		out.Truncated = true
 	}
 	out.Messages = append([]Message(nil), kept...)
 

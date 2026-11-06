@@ -132,4 +132,22 @@ func TestSnapshotSingleOversizeMessageIsHardCapped(t *testing.T) {
 	if got := len([]rune(snap.Text)); got > DefaultSnapshotRunes {
 		t.Fatalf("boundary snapshot text = %d runes, want <= %d", got, DefaultSnapshotRunes)
 	}
+	// 块头（群/成员行）也计入预算：超额大于最旧正文时不能整段跳过截断。
+	header := []Message{
+		{Seq: 1, GroupID: g.ID, Kind: KindText, Sender: Sender{Kind: SenderHuman}, Text: "同意"},
+		{Seq: 2, GroupID: g.ID, Kind: KindText, Sender: Sender{Kind: SenderAgent, AgentID: "ag_bbbbbbbb"},
+			Text: strings.Repeat("长", 11940)},
+	}
+	snap = BuildGroupSnapshot(g, "ag_aaaaaaaa", header, 0, Round{}, SnapshotOptions{})
+	if got := len([]rune(snap.Text)); got > DefaultSnapshotRunes {
+		t.Fatalf("header overflow text = %d runes, want <= %d", got, DefaultSnapshotRunes)
+	}
+	if len(snap.Messages) == 0 || snap.Messages[len(snap.Messages)-1].Seq != 2 {
+		t.Fatalf("latest message lost: %+v", snap.Messages)
+	}
+	// 极小预算连块头都放不下：仍必须硬切到上限。
+	tiny := BuildGroupSnapshot(g, "ag_aaaaaaaa", header, 0, Round{}, SnapshotOptions{MaxRunes: 20})
+	if got := len([]rune(tiny.Text)); got > 20 {
+		t.Fatalf("tiny budget text = %d, want <= 20", got)
+	}
 }
