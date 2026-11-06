@@ -143,12 +143,6 @@ func (m *manager) hubRuntimeByPath(path string) *workspaceRuntime {
 	return nil
 }
 
-// closeHubRuntimes 关闭全部智能体运行时（进程退出 / 测试清理）。
-// 与 shutdownWorkspace 同口径：停 MCP 监听/探活、关 MCP 连接、**关插件注册表**
-// （buildPlugins 每次返回新 registry，不关会漏 Browser Use 子进程；
-//
-//	P0 阶段 hub 插件还没被 Enable，先按同口径收尾，免得 P1 打开插件后泄漏）。
-//
 // shutdownHubRuntimes 进程/测试彻底关停：先闩住重建，再走正常的 close。
 // 与 closeHubRuntimes 分开：后者是「关闭当前实例、允许同进程重开」（测试依赖）。
 func (m *manager) shutdownHubRuntimes() {
@@ -159,6 +153,11 @@ func (m *manager) shutdownHubRuntimes() {
 	m.closeHubRuntimes()
 }
 
+// closeHubRuntimes 关闭全部智能体运行时（进程退出 / 测试清理）。
+// 与 shutdownWorkspace 同口径：停 MCP 监听/探活、关 MCP 连接、**关插件注册表**
+// （buildPlugins 每次返回新 registry，不关会漏 Browser Use 子进程；
+//
+//	P0 阶段 hub 插件还没被 Enable，先按同口径收尾，免得 P1 打开插件后泄漏）。
 func (m *manager) closeHubRuntimes() {
 	// P2.5-06：先取消并等待 Hub 后台泵/过期任务，再关会话；否则旧泵可能在
 	// 会话 Shutdown 后仍写账本/Ask。超时有界，不无限拖住退出。

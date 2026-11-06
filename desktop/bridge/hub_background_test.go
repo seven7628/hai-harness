@@ -9,6 +9,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/seven7628/hai-harness/agenthub"
 )
 
 func TestHubBackgroundStopCancelsAndWaits(t *testing.T) {
@@ -96,6 +98,9 @@ func TestHubBackgroundResetAfterTimeoutIsGenerationLocal(t *testing.T) {
 	if m.stopHubBackground(20 * time.Millisecond) {
 		t.Fatal("stop must time out while task ignores cancellation")
 	}
+	// 先释放旧任务，让旧 waiter 进入“Wait 即将返回”的窗口，再 reset+spawn；
+	// 这样共享 WG 的旧实现才会触发 reuse panic（P2.5-06 N1）。
+	close(release)
 	m.resetHubBackgroundIfClosed()
 	ran := make(chan struct{}, 1)
 	m.spawnHubBackground(func(context.Context) { ran <- struct{}{} })
@@ -104,7 +109,6 @@ func TestHubBackgroundResetAfterTimeoutIsGenerationLocal(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("new generation did not run")
 	}
-	close(release)
 	if !m.stopHubBackground(time.Second) {
 		t.Fatal("stop after release timed out")
 	}
@@ -131,5 +135,34 @@ func TestHubShutdownBlocksLateRuntimeRebuild(t *testing.T) {
 	case <-ran:
 		t.Fatal("spawnHubBackground must be no-op after shutdown")
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// P2.5-06 N5：关停后恢复扫描必须 no-op（不重建 runtime/不写账本）。
+func TestHubRecoveryNoopAfterShutdown(t *testing.T) {
+	m, _ := testManager(t)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_off"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: "/w", SessionID: "s1"},
+		Title:  "关停后恢复", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.shutdownHubRuntimes()
+	if err := m.recoverHubTasks(); err != nil {
+		t.Fatalf("recover after shutdown = %v", err)
+	}
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil || got == nil || got.Status != agenthub.TaskQueued {
+		t.Fatalf("shutdown recovery wrote task: %+v, %v", got, err)
+	}
+	if ws := m.hubRuntime("ag_off"); ws != nil {
+		t.Fatal("shutdown recovery rebuilt hub runtime")
 	}
 }
