@@ -262,3 +262,144 @@ func TestHubGroupSendRoutesAndReceipts(t *testing.T) {
 		t.Fatalf("no-mention targets = %v", sent2.Targets)
 	}
 }
+
+// P3a-01 复审 B1–B4：软删群写保护、policy 字段级 patch、删除 owner 后可转让、
+// create 的 member_ids/默认 owner 契约。
+func TestHubGroupPatchDeleteAndCreateContracts(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "ContractA")
+	b := createHubAgent(t, m, buf, 2, "ContractB")
+	c := createHubAgent(t, m, buf, 3, "ContractC")
+	d := createHubAgent(t, m, buf, 4, "ContractD")
+
+	// B4：member_ids 简写 + 默认第一个成员为 owner。
+	ok, errMsg, data := hubCmd(t, m, buf, 10, "hub_group_create", map[string]any{
+		"name": "契约群", "member_ids": []string{string(a.ID), string(b.ID)},
+	})
+	if !ok {
+		t.Fatalf("member_ids create: %s", errMsg)
+	}
+	g := groupFromData(t, data)
+	if g.OwnerAgentID != a.ID || len(g.Members) != 2 {
+		t.Fatalf("member_ids group = %+v", g)
+	}
+	for _, member := range g.Members {
+		if member.AgentID == a.ID && member.Role != agenthub.RoleOwner {
+			t.Fatalf("first member must become owner: %+v", g.Members)
+		}
+	}
+	// 显式 owner + 无 role 的 members：owner 角色要自动补齐。
+	ok, errMsg, data = hubCmd(t, m, buf, 11, "hub_group_create", map[string]any{
+		"name": "显式owner群", "owner_agent_id": string(b.ID),
+		"members": []map[string]any{{"agent_id": string(a.ID)}, {"agent_id": string(b.ID)}},
+	})
+	if !ok {
+		t.Fatalf("explicit owner create: %s", errMsg)
+	}
+	if got := groupFromData(t, data); got.OwnerAgentID != b.ID {
+		t.Fatalf("explicit owner = %+v", got)
+	}
+
+	// B2：policy 字段级 patch，未传字段不得重置。
+	ok, errMsg, data = hubCmd(t, m, buf, 12, "hub_group_create", map[string]any{
+		"name": "策略群",
+		"members": []map[string]any{
+			{"agent_id": string(a.ID), "role": "owner"},
+			{"agent_id": string(b.ID), "role": "member"},
+		},
+		"policy": map[string]any{"mode": "ask", "max_parallel_runs": 5, "max_turns_per_human": 6, "daily_budget_usd": 10},
+	})
+	if !ok {
+		t.Fatalf("policy group create: %s", errMsg)
+	}
+	policyGroup := groupFromData(t, data)
+	ok, errMsg, data = hubCmd(t, m, buf, 13, "hub_group_update", map[string]any{
+		"group_id": string(policyGroup.ID), "patch": map[string]any{"policy": map[string]any{"mode": "auto"}},
+	})
+	if !ok {
+		t.Fatalf("policy patch: %s", errMsg)
+	}
+	gp := groupFromData(t, data)
+	if gp.Policy.Mode != agenthub.GroupModeAuto || gp.Policy.MaxParallelRuns != 5 ||
+		gp.Policy.MaxTurnsPerHuman != 6 || gp.Policy.DailyBudgetUSD != 10 {
+		t.Fatalf("policy patch reset fields: %+v", gp.Policy)
+	}
+
+	// B3：删除 owner 后仍能改名/加成员/转让，转让后再移除旧 owner。
+	ok, errMsg, data = hubCmd(t, m, buf, 14, "hub_group_create", map[string]any{
+		"name": "孤儿群",
+		"members": []map[string]any{
+			{"agent_id": string(a.ID), "role": "owner"},
+			{"agent_id": string(b.ID), "role": "member"},
+		},
+	})
+	if !ok {
+		t.Fatalf("orphan group create: %s", errMsg)
+	}
+	orphan := groupFromData(t, data)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 15, "hub_agent_delete", map[string]any{"agent_id": string(a.ID)}); !ok {
+		t.Fatalf("delete owner: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 16, "hub_group_update", map[string]any{
+		"group_id": string(orphan.ID), "patch": map[string]any{"name": "改名群"},
+	}); !ok {
+		t.Fatalf("rename with deleted owner: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 17, "hub_group_member_add", map[string]any{
+		"group_id": string(orphan.ID), "agent_id": string(c.ID), "role": "observer",
+	}); !ok {
+		t.Fatalf("add member with deleted owner: %s", errMsg)
+	}
+	ok, errMsg, data = hubCmd(t, m, buf, 18, "hub_group_update", map[string]any{
+		"group_id": string(orphan.ID), "patch": map[string]any{"owner_agent_id": string(b.ID)},
+	})
+	if !ok {
+		t.Fatalf("transfer from deleted owner: %s", errMsg)
+	}
+	transferred := groupFromData(t, data)
+	if transferred.OwnerAgentID != b.ID {
+		t.Fatalf("owner after transfer = %+v", transferred)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 19, "hub_group_member_remove", map[string]any{
+		"group_id": string(orphan.ID), "agent_id": string(a.ID),
+	}); !ok {
+		t.Fatalf("remove old deleted owner: %s", errMsg)
+	}
+
+	// B1：软删群只能读列表/幂等删除，get/update/member_add/remove 全部拒绝。
+	ok, errMsg, data = hubCmd(t, m, buf, 20, "hub_group_create", map[string]any{
+		"name": "待删群",
+		"members": []map[string]any{
+			{"agent_id": string(d.ID), "role": "owner"},
+			{"agent_id": string(b.ID), "role": "member"},
+		},
+	})
+	if !ok {
+		t.Fatalf("delete group create: %s", errMsg)
+	}
+	dead := groupFromData(t, data)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 21, "hub_group_delete", map[string]any{"group_id": string(dead.ID)}); !ok {
+		t.Fatalf("delete group: %s", errMsg)
+	}
+	if ok, _, _ := hubCmd(t, m, buf, 22, "hub_group_get", map[string]any{"group_id": string(dead.ID)}); ok {
+		t.Fatal("get deleted group must fail")
+	}
+	if ok, _, _ := hubCmd(t, m, buf, 23, "hub_group_update", map[string]any{
+		"group_id": string(dead.ID), "patch": map[string]any{"name": "复活群"},
+	}); ok {
+		t.Fatal("update deleted group must fail")
+	}
+	if ok, _, _ := hubCmd(t, m, buf, 24, "hub_group_member_add", map[string]any{
+		"group_id": string(dead.ID), "agent_id": string(c.ID),
+	}); ok {
+		t.Fatal("member_add on deleted group must fail")
+	}
+	if ok, _, _ := hubCmd(t, m, buf, 25, "hub_group_member_remove", map[string]any{
+		"group_id": string(dead.ID), "agent_id": string(b.ID),
+	}); ok {
+		t.Fatal("member_remove on deleted group must fail")
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 26, "hub_group_delete", map[string]any{"group_id": string(dead.ID)}); !ok {
+		t.Fatalf("second delete must be idempotent: %s", errMsg)
+	}
+}

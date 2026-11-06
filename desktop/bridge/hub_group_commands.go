@@ -51,6 +51,10 @@ func (m *manager) hubGroupGet(c command) {
 		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
 		return
 	}
+	if g.Deleted {
+		m.resp(c, false, "群组已删除", nil)
+		return
+	}
 	m.resp(c, true, "", map[string]any{"group": g})
 }
 
@@ -64,6 +68,7 @@ func (m *manager) hubGroupCreate(c command) {
 	var req struct {
 		Name         string               `json:"name"`
 		OwnerAgentID agenthub.AgentID     `json:"owner_agent_id"`
+		MemberIDs    []agenthub.AgentID   `json:"member_ids"`
 		Members      []agenthub.Member    `json:"members"`
 		Policy       agenthub.GroupPolicy `json:"policy"`
 		Pinned       bool                 `json:"pinned"`
@@ -72,12 +77,32 @@ func (m *manager) hubGroupCreate(c command) {
 		m.resp(c, false, "参数格式错误: "+err.Error(), nil)
 		return
 	}
-	g := &agenthub.Group{Name: req.Name, OwnerAgentID: req.OwnerAgentID, Members: req.Members, Policy: req.Policy, Pinned: req.Pinned}
+	// §7.1.3：兼容 member_ids 简写（角色默认 member），owner 缺省取第一个成员。
+	// 显式 owner_agent_id 时把对应成员的角色升为 owner。
+	members := req.Members
+	if len(members) == 0 && len(req.MemberIDs) > 0 {
+		members = make([]agenthub.Member, 0, len(req.MemberIDs))
+		for _, id := range req.MemberIDs {
+			members = append(members, agenthub.Member{AgentID: id, Role: agenthub.RoleMember})
+		}
+	}
+	owner := req.OwnerAgentID
+	if owner == "" && len(req.Members) == 0 && len(members) > 0 {
+		owner = members[0].AgentID
+	}
+	if owner != "" {
+		for i := range members {
+			if members[i].AgentID == owner {
+				members[i].Role = agenthub.RoleOwner
+			}
+		}
+	}
+	g := &agenthub.Group{Name: req.Name, OwnerAgentID: owner, Members: members, Policy: req.Policy, Pinned: req.Pinned}
 	now := time.Now().UTC()
 	for i := range g.Members {
 		g.Members[i].JoinedAt = now
 	}
-	if err := m.validateGroupAgents(ctx, g); err != nil {
+	if err := m.validateGroupAgents(ctx, g, nil); err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
@@ -125,11 +150,22 @@ func (m *manager) hubGroupUpdate(c command) {
 		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
 		return
 	}
+	if g.Deleted {
+		m.resp(c, false, "群组已删除", nil)
+		return
+	}
 	var patch struct {
-		Name         *string               `json:"name"`
-		OwnerAgentID *agenthub.AgentID     `json:"owner_agent_id"`
-		Policy       *agenthub.GroupPolicy `json:"policy"`
-		Pinned       *bool                 `json:"pinned"`
+		Name         *string           `json:"name"`
+		OwnerAgentID *agenthub.AgentID `json:"owner_agent_id"`
+		Policy       *struct {
+			Mode             *string  `json:"mode"`
+			MaxParallelRuns  *int     `json:"max_parallel_runs"`
+			MaxHandoffDepth  *int     `json:"max_handoff_depth"`
+			MaxTurnsPerHuman *int     `json:"max_turns_per_human"`
+			MaxMentions      *int     `json:"max_mentions_per_message"`
+			DailyBudgetUSD   *float64 `json:"daily_budget_usd"`
+		} `json:"policy"`
+		Pinned *bool `json:"pinned"`
 	}
 	if err := decodeGroupPayload(c.Payload["patch"], &patch); err != nil {
 		m.resp(c, false, "patch 格式错误: "+err.Error(), nil)
@@ -141,27 +177,58 @@ func (m *manager) hubGroupUpdate(c command) {
 		next.Name = *patch.Name
 	}
 	if patch.Policy != nil {
-		next.Policy = *patch.Policy
+		// 字段级 patch：未传的字段保留原值，避免改 mode 时把预算/并发静默重置。
+		pp := patch.Policy
+		if pp.Mode != nil {
+			next.Policy.Mode = *pp.Mode
+		}
+		if pp.MaxParallelRuns != nil {
+			next.Policy.MaxParallelRuns = *pp.MaxParallelRuns
+		}
+		if pp.MaxHandoffDepth != nil {
+			next.Policy.MaxHandoffDepth = *pp.MaxHandoffDepth
+		}
+		if pp.MaxTurnsPerHuman != nil {
+			next.Policy.MaxTurnsPerHuman = *pp.MaxTurnsPerHuman
+		}
+		if pp.MaxMentions != nil {
+			next.Policy.MaxMentions = *pp.MaxMentions
+		}
+		if pp.DailyBudgetUSD != nil {
+			next.Policy.DailyBudgetUSD = *pp.DailyBudgetUSD
+		}
 	}
 	if patch.Pinned != nil {
 		next.Pinned = *patch.Pinned
 	}
-	if patch.OwnerAgentID != nil && *patch.OwnerAgentID != "" && *patch.OwnerAgentID != g.OwnerAgentID {
-		next.OwnerAgentID = *patch.OwnerAgentID
-		// owner 转让是成对改写：旧 owner 降 member、新 owner 升 owner。
-		found := false
-		for i := range next.Members {
-			if next.Members[i].AgentID == g.OwnerAgentID {
-				next.Members[i].Role = agenthub.RoleMember
-			}
-			if next.Members[i].AgentID == next.OwnerAgentID {
-				next.Members[i].Role = agenthub.RoleOwner
-				found = true
-			}
-		}
-		if !found {
-			m.resp(c, false, "新 owner 必须是群成员", nil)
+	if patch.OwnerAgentID != nil {
+		want := agenthub.AgentID(strings.TrimSpace(string(*patch.OwnerAgentID)))
+		if want == "" {
+			m.resp(c, false, "owner_agent_id 不能为空", nil)
 			return
+		}
+		if want != g.OwnerAgentID {
+			// 新 owner 必须存活；旧 owner 可以是已删除成员（群记录保留）。
+			if err := m.validateHubAgentActive(ctx, want); err != nil {
+				m.resp(c, false, err.Error(), nil)
+				return
+			}
+			next.OwnerAgentID = want
+			// owner 转让是成对改写：旧 owner 降 member、新 owner 升 owner。
+			found := false
+			for i := range next.Members {
+				if next.Members[i].AgentID == g.OwnerAgentID {
+					next.Members[i].Role = agenthub.RoleMember
+				}
+				if next.Members[i].AgentID == want {
+					next.Members[i].Role = agenthub.RoleOwner
+					found = true
+				}
+			}
+			if !found {
+				m.resp(c, false, "新 owner 必须是群成员", nil)
+				return
+			}
 		}
 	}
 	if !strings.EqualFold(next.Name, g.Name) {
@@ -175,7 +242,7 @@ func (m *manager) hubGroupUpdate(c command) {
 			return
 		}
 	}
-	if err := m.validateGroupAgents(ctx, &next); err != nil {
+	if err := m.validateGroupAgents(ctx, &next, groupMemberSet(g)); err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
@@ -205,6 +272,10 @@ func (m *manager) hubGroupDelete(c command) {
 		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
 		return
 	}
+	if g.Deleted {
+		m.resp(c, true, "", map[string]any{"group": g})
+		return
+	}
 	g.Deleted = true
 	g.UpdatedAt = time.Now().UTC()
 	if err := st.SaveGroup(ctx, g); err != nil {
@@ -232,6 +303,10 @@ func (m *manager) hubGroupMemberAdd(c command) {
 		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
 		return
 	}
+	if g.Deleted {
+		m.resp(c, false, "群组已删除", nil)
+		return
+	}
 	for _, member := range g.Members {
 		if member.AgentID == agentID {
 			m.resp(c, false, "该智能体已在群里", nil)
@@ -242,7 +317,7 @@ func (m *manager) hubGroupMemberAdd(c command) {
 	next.Members = append(append([]agenthub.Member(nil), g.Members...), agenthub.Member{
 		AgentID: agentID, Role: role, JoinedAt: time.Now().UTC(),
 	})
-	if err := m.validateGroupAgents(ctx, &next); err != nil {
+	if err := m.validateGroupAgents(ctx, &next, groupMemberSet(g)); err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
@@ -270,6 +345,10 @@ func (m *manager) hubGroupMemberRemove(c command) {
 	g, err := st.LoadGroup(ctx, id)
 	if err != nil {
 		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
+		return
+	}
+	if g.Deleted {
+		m.resp(c, false, "群组已删除", nil)
 		return
 	}
 	if agentID == g.OwnerAgentID {
@@ -302,8 +381,9 @@ func (m *manager) hubGroupMemberRemove(c command) {
 	m.resp(c, true, "", map[string]any{"group": &next})
 }
 
-// validateGroupAgents 成员必须是非删除的 Hub 智能体，且显示名不重复（§5.9）。
-func (m *manager) validateGroupAgents(ctx context.Context, g *agenthub.Group) error {
+// validateGroupAgents 成员必须存在；新成员/新 owner 必须存活，已在群里的
+// 软删成员可以保留（否则删除 owner 后群会变成无法转让/改名/加人的孤儿）。
+func (m *manager) validateGroupAgents(ctx context.Context, g *agenthub.Group, allowDeleted map[agenthub.AgentID]struct{}) error {
 	st, err := m.hubStore()
 	if err != nil {
 		return err
@@ -321,7 +401,47 @@ func (m *manager) validateGroupAgents(ctx context.Context, g *agenthub.Group) er
 	if err := g.Normalize(); err != nil {
 		return err
 	}
-	return agenthub.ValidateGroupMemberNames(g, profiles)
+	active := *g
+	active.Members = make([]agenthub.Member, 0, len(g.Members))
+	for _, member := range g.Members {
+		p, ok := profiles[member.AgentID]
+		if !ok || p == nil {
+			return fmt.Errorf("%w: group member %s has no profile", agenthub.ErrInvalid, member.AgentID)
+		}
+		if p.Deleted {
+			if _, keep := allowDeleted[member.AgentID]; keep {
+				continue
+			}
+			return fmt.Errorf("%w: group member %s is deleted", agenthub.ErrInvalid, member.AgentID)
+		}
+		active.Members = append(active.Members, member)
+	}
+	return agenthub.ValidateGroupMemberNames(&active, profiles)
+}
+
+func groupMemberSet(g *agenthub.Group) map[agenthub.AgentID]struct{} {
+	if g == nil {
+		return nil
+	}
+	out := make(map[agenthub.AgentID]struct{}, len(g.Members))
+	for _, m := range g.Members {
+		out[m.AgentID] = struct{}{}
+	}
+	return out
+}
+
+func (m *manager) validateHubAgentActive(ctx context.Context, id agenthub.AgentID) error {
+	p, _, err := m.hubLoadAgent(string(id))
+	if err != nil {
+		return fmt.Errorf("读取智能体失败: %w", err)
+	}
+	if p == nil {
+		return fmt.Errorf("%w: agent %s not found", agenthub.ErrNotFound, id)
+	}
+	if p.Deleted {
+		return fmt.Errorf("%w: agent %s is deleted", agenthub.ErrInvalid, id)
+	}
+	return nil
 }
 
 func decodeGroupPayload(v any, out any) error {
