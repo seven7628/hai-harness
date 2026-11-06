@@ -1261,7 +1261,7 @@
     },
     "P2.5-06": {
       "status": "done",
-      "commit": "a087af3 fix(hub-p2.5-06): 关停闩禁止迟到重建 + WaitGroup 按代隔离 + teardown flake",
+      "commit": "6c66377 test(hub-p2.5-06): 关停恢复 no-op 覆盖 + WaitGroup 测试收窄时序 + 注释归位",
       "reviewNote": "复审 passed（task-3mfnn6j6，对象 a087af3 + 95371c4）：B1 关停闩逐层拦截迟到结算（删 finishHubTask 早退会写账本、再删 hubRuntime 闩会精确复现 TempDir 重建）；B2 WG 按 generation 私有后 stop 超时→reset→spawn 不再 panic；B3 ledger 回滚 WithoutCancel 已验证。TestHub -count=3 绿、-race 绿、close 后可重开语义未误伤。后续 6c66377 补恢复 no-op 覆盖、收窄 WG 测试时序与注释归位。",
       "review": "passed"
     },
