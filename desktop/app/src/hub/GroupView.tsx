@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { SendIcon } from '../components/icons'
 import { useHubStore } from './useHubStore'
+import { hubCommand } from './api'
 import { GroupBubble } from './MessageBubble'
 import { RoundGroup } from './RoundGroup'
 import { RoundActivityDigest } from './RoundActivityDigest'
@@ -46,6 +47,19 @@ export default function GroupView({ group }: { group: HubGroup }) {
     if (typeof localStorage !== 'undefined') localStorage.setItem('hub.groupDisplay', next)
   }
 
+  async function editBudget(): Promise<void> {
+    const current = group.policy?.daily_budget_usd ?? 0
+    const raw = window.prompt('群日预算 USD（0 = 不限额）', String(current))
+    if (raw === null) return
+    const next = Number(raw)
+    if (!Number.isFinite(next) || next < 0) return
+    const r = await hubCommand('hub_group_update', {
+      group_id: group.id,
+      patch: { policy: { daily_budget_usd: next } },
+    })
+    if (r.ok) await useHubStore.getState().loadGroups()
+  }
+
   const items = useMemo(() => buildThreadItems(messages, rounds), [messages, rounds])
 
   return (
@@ -61,6 +75,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
         </div>
         {group.deleted ? <span className="hub-chip danger">已删除</span> : null}
         <span className={`hub-chip group-mode-${group.policy?.mode ?? 'ask'}`}>{group.policy?.mode ?? 'ask'}</span>
+        <button className="hub-chip hub-budget-chip" onClick={() => void editBudget()} title="点击修改群日预算">
+          预算 ${(group.policy?.daily_budget_usd ?? 0).toFixed(0)}/日
+        </button>
         <span className="hub-view-toggle" role="tablist" aria-label="Chat or Run">
           <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>Chat</button>
           <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>

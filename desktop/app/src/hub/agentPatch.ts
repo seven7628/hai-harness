@@ -17,6 +17,8 @@ export interface AgentForm {
   model: string
   effort: string
   threshold: number
+  dailyBudget: number
+  taskBudget: number
   memoryOn: boolean
   preset: string
   disable: string
@@ -49,6 +51,7 @@ export function buildAgentProfile(form: AgentForm): Record<string, unknown> {
     model: form.model.trim(),
     effort: form.effort,
     compress_threshold: form.threshold,
+    policy: { daily_budget_usd: form.dailyBudget, max_task_cost_usd: form.taskBudget },
     memory: { enabled: form.memoryOn },
     tools: { preset: form.preset, disable: normalizeDisable(form.disable) },
   }
@@ -72,6 +75,17 @@ export function buildAgentPatch(form: AgentForm, agent?: HubAgent | null): Recor
   setIfChanged('model', form.model.trim(), agent.model ?? '')
   setIfChanged('effort', form.effort, agent.effort ?? '')
   setIfChanged('compress_threshold', form.threshold, agent.compress_threshold ?? 0.8)
+  // policy 是深合并：只发改动字段，max_auto_turns/workspace_roots 原样保留。
+  const prevPolicy = agent.policy ?? {}
+  const nextPolicy = {
+    ...prevPolicy,
+    daily_budget_usd: form.dailyBudget,
+    max_task_cost_usd: form.taskBudget,
+  }
+  if (form.dailyBudget !== (prevPolicy.daily_budget_usd ?? 0) ||
+      form.taskBudget !== (prevPolicy.max_task_cost_usd ?? 0)) {
+    patch.policy = nextPolicy
+  }
   setIfChanged('memory', { enabled: form.memoryOn }, { enabled: agent.memory?.enabled !== false })
   // 图片头像没有上传 UI：不碰 kind=image 的智能体，避免保存把头像降级成 emoji（N7）。
   if (agent.avatar?.kind !== 'image') {

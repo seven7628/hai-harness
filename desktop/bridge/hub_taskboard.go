@@ -166,7 +166,7 @@ func (m *manager) cancelHubTask(ctx context.Context, id agenthub.TaskID) (*agent
 
 // hubGuardForTask 用任务发起者的 Profile 与群策略构造重试护栏。
 func (m *manager) hubGuardForTask(old *agenthub.Task) *agenthub.Guard {
-	limits := agenthub.GuardLimits{}
+	limits := agenthub.GuardLimits{GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD}
 	if old != nil && old.Origin.AgentID != "" {
 		if p, _, err := m.hubLoadAgent(string(old.Origin.AgentID)); err == nil && p != nil {
 			limits.MaxTaskCostUSD = p.Policy.MaxTaskCostUSD

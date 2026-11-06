@@ -43,6 +43,9 @@ func TestHubGroupCRUDAndRoles(t *testing.T) {
 	if g.Policy.Mode != agenthub.GroupModeAsk {
 		t.Fatalf("default mode = %q, want ask", g.Policy.Mode)
 	}
+	if g.Policy.DailyBudgetUSD != agenthub.DefaultGroupDailyBudgetUSD {
+		t.Fatalf("default daily_budget_usd = %v, want %v", g.Policy.DailyBudgetUSD, agenthub.DefaultGroupDailyBudgetUSD)
+	}
 	if len(g.Members) != 2 || g.OwnerAgentID != a.ID {
 		t.Fatalf("group = %+v", g)
 	}

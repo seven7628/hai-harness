@@ -93,6 +93,9 @@ func TestHubAgentCreateListGet(t *testing.T) {
 	if p.CompressThreshold != agenthub.DefaultCompressThreshold {
 		t.Fatalf("compress_threshold = %v, want default %v", p.CompressThreshold, agenthub.DefaultCompressThreshold)
 	}
+	if p.Policy.DailyBudgetUSD != agenthub.DefaultAgentDailyBudgetUSD {
+		t.Fatalf("daily_budget_usd = %v, want default %v", p.Policy.DailyBudgetUSD, agenthub.DefaultAgentDailyBudgetUSD)
+	}
 	if p.Accent == "" || p.CreatedAt.IsZero() || p.UpdatedAt.IsZero() {
 		t.Fatalf("defaults not applied: %+v", p)
 	}

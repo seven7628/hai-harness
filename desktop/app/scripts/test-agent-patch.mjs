@@ -23,6 +23,7 @@ const base = {
   id: 'ag_aaaaaaaa', name: 'Researcher', accent: '#7bc199', role: '竞品研究员',
   description: '负责竞品', instructions: '只信一手来源',
   provider: 'deepseek', model: 'deepseek-v4-flash', effort: 'low', compress_threshold: 0.8,
+  policy: { daily_budget_usd: 20, max_task_cost_usd: 0, max_auto_turns: 6 },
   memory: { enabled: true },
   tools: { preset: 'all', disable: ['browser_*', 'mcp__github__*'], allow: ['read_file'], bash_roots: ['/data'], mcp: { disable: false } },
   avatar: { kind: 'emoji', value: '🟢' },
@@ -34,6 +35,7 @@ function form(over = {}) {
     description: base.description, instructions: base.instructions,
     provider: base.provider, model: base.model, effort: base.effort,
     threshold: base.compress_threshold, memoryOn: true,
+    dailyBudget: base.policy.daily_budget_usd, taskBudget: base.policy.max_task_cost_usd,
     preset: base.tools.preset, disable: base.tools.disable.join(' '),
     ...over,
   }
@@ -41,6 +43,11 @@ function form(over = {}) {
 
 // 1) 什么都没改 → 空 patch（连 tools 都不出现）
 assert.deepEqual(buildAgentPatch(form(), base), {}, 'unchanged form must produce an empty patch')
+
+// 1b) 只改日预算 → policy 深合并，别的 policy 字段不能丢
+const budgeted = buildAgentPatch(form({ dailyBudget: 30 }), base)
+assert.deepEqual(budgeted.policy, { daily_budget_usd: 30, max_task_cost_usd: 0, max_auto_turns: 6 })
+assert.equal(budgeted.policy.max_auto_turns, 6)
 
 // 2) 只改人格 → patch 只有 instructions
 assert.deepEqual(buildAgentPatch(form({ instructions: '新口径' }), base), { instructions: '新口径' })
@@ -74,6 +81,7 @@ assert.deepEqual(normalizeDisable(' a, b  a\nc '), ['a', 'b', 'c'])
 const created = buildAgentProfile(form({ name: '  New  ' }))
 assert.equal(created.name, 'New')
 assert.equal(created.avatar.value, '🟢')
+assert.deepEqual(created.policy, { daily_budget_usd: 20, max_task_cost_usd: 0 })
 assert.deepEqual(created.tools, { preset: 'all', disable: ['browser_*', 'mcp__github__*'] })
 
 console.log('agent patch: 8/8 assertions passed')

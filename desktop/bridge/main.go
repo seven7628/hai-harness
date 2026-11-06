@@ -325,8 +325,15 @@ type bridgeSession struct {
 	// hubTaskIDs 本批 UserInputsConsumed 里的 hub_task id（P2-04 相关性）。
 	// 只在 emit（run goroutine）读写；AgentEnd 结算后清空。
 	hubTaskIDs []agenthub.TaskID
+	// P2.5-04：目标会话运行中的预算硬停。LLMEnd 累计本任务花费，超限时
+	// Interrupt 当前 run；finishHubTask 据此把终态落 blocked_budget。
+	hubTaskSpentMicro atomic.Int64
+	hubBudgetStop     atomic.Bool
+	hubBudgetReason   atomic.Value // string
 	// hubFinishTask 根 AgentEnd 时结算 hub_task（nil = 非项目会话/未接线）。
 	hubFinishTask func(ae *events.AgentEnd)
+	// hubBudgetCheck 目标会话 LLMEnd 的预算检查；true = 立即中断本 run。
+	hubBudgetCheck func(taskID agenthub.TaskID, spentUSD float64) (bool, string)
 	// hubFailTask 把指定 hub_task 标 failed（注入/坏 header 的静默丢任务兜底）。
 	hubFailTask func(ids []agenthub.TaskID, reason string)
 	// hubAlert 通用 hub_alert（nil = 未接线）。
@@ -641,6 +648,9 @@ func (bs *bridgeSession) emit(e events.Event) {
 			}
 		} else {
 			bs.hubTaskIDs = ids
+			bs.hubTaskSpentMicro.Store(0)
+			bs.hubBudgetStop.Store(false)
+			bs.hubBudgetReason.Store("")
 			bs.hubHumanIntervened.Store(false) // 新 batch 开口：上一轮介入不外溢
 		}
 	case *events.LLMEnd:
@@ -651,6 +661,18 @@ func (bs *bridgeSession) emit(e events.Event) {
 			// 折算，见 provider.ApplyUsageCost）并随 MetricsEntry 持久化；
 			// cost_usd 浮点字段仅供前端展示（USD）。
 			costUSD := costUsd(prov, ev.Model, *ev.Usage)
+			// P2.5-04：日预算/单任务预算的运行中硬停。只对当前 hub_task 生效；
+			// 花费累计用 LLMEnd 的每次调用来近似（最终以 AgentEnd 结算为准）。
+			if bs.hubBudgetCheck != nil && len(bs.hubTaskIDs) > 0 {
+				spent := float64(bs.hubTaskSpentMicro.Add(int64(costUSD*1e6))) / 1e6
+				if !bs.hubBudgetStop.Load() {
+					if stop, reason := bs.hubBudgetCheck(bs.hubTaskIDs[0], spent); stop {
+						bs.hubBudgetStop.Store(true)
+						bs.hubBudgetReason.Store(reason)
+						bs.s.Interrupt()
+					}
+				}
+			}
 			if bs.metrics != nil {
 				_ = bs.metrics.Record(MetricsEntry{
 					Timestamp: ev.Timestamp, Workspace: bs.workspace,
@@ -956,6 +978,8 @@ type manager struct {
 	hubBgClosing bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
 	hubMsgDedup map[string]string
+	// hubUnpricedWarned 每个智能体只告警一次「用量无价，预算无法计入」（P2.5-04）。
+	hubUnpricedWarned map[agenthub.AgentID]bool
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
 	hubSessionLocks map[string]*sync.Mutex
 	provCfg         *providerConfig  // 全局 provider 配置（热切换；set_provider 更新）
@@ -1660,7 +1684,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
+	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubBudgetCheck: m.hubBudgetCheck, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
 	bs.hubNeed = func(e events.Event) { m.recordHubNeed(bs, e) }
 	bs.hubExpireNeeds = func() { m.scheduleHubExpire(bs) }
 	bs.hubFailTask = m.failHubTasksByReason

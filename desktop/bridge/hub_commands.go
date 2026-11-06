@@ -234,6 +234,11 @@ func (m *manager) hubAgentCreate(c command) {
 		return
 	}
 	p.ID = agenthub.AgentID(id)
+	// P2.5-04/D1：新智能体默认日预算 $20（0 = 显式不限额，只能在创建后通过
+	// update 设置；创建入口把未填的零值补成安全默认）。
+	if p.Policy.DailyBudgetUSD == 0 {
+		p.Policy.DailyBudgetUSD = agenthub.DefaultAgentDailyBudgetUSD
+	}
 	if err := p.Normalize(); err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return

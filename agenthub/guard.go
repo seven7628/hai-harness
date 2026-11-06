@@ -26,6 +26,14 @@ var (
 	ErrChainTooDeep   = errors.New("hub guard: task chain too deep")
 )
 
+// P2.5-04 产品口径（D1）：新智能体/新群默认日预算与全局日预算。
+// 0 仍表示显式不限额；创建入口只在未填时补默认值，已有 profile 不强制迁移。
+const (
+	DefaultAgentDailyBudgetUSD  = 20
+	DefaultGroupDailyBudgetUSD  = 50
+	DefaultGlobalDailyBudgetUSD = 200
+)
+
 // GuardLimits 一次派发的护栏配置（来自 profile.policy / group.policy / hub.json defaults）。
 type GuardLimits struct {
 	MaxTaskCostUSD       float64

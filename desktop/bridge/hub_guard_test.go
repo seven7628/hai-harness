@@ -160,3 +160,137 @@ func TestHubFinishBlocksOverTaskBudget(t *testing.T) {
 	}
 	_ = json.Marshal
 }
+
+// P2.5-04：初始/重试护栏必须同时带群预算与全局预算，不能只在 retry 路径带群。
+func TestHubGuardForTaskIncludesGroupAndGlobalBudget(t *testing.T) {
+	m, buf := testManager(t)
+	agent := createHubAgent(t, m, buf, 1, "BudgetOwner")
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_group_create", map[string]any{
+		"name": "预算法群",
+		"members": []map[string]any{
+			{"agent_id": string(agent.ID), "role": "owner"},
+		},
+		"policy": map[string]any{"daily_budget_usd": 50},
+	})
+	if !ok {
+		t.Fatalf("group create: %s", errMsg)
+	}
+	g := groupFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := agenthub.NewLedger(st).Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: g.ID, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s1"},
+		Title:  "群任务", Instruction: "群任务", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := m.hubGuardForTask(old)
+	if guard.Limits.GroupDailyBudgetUSD != 50 {
+		t.Fatalf("group budget = %v, want 50", guard.Limits.GroupDailyBudgetUSD)
+	}
+	if guard.Limits.GlobalDailyBudgetUSD != agenthub.DefaultGlobalDailyBudgetUSD {
+		t.Fatalf("global budget = %v, want %v", guard.Limits.GlobalDailyBudgetUSD, agenthub.DefaultGlobalDailyBudgetUSD)
+	}
+	if guard.Limits.DailyBudgetUSD != agenthub.DefaultAgentDailyBudgetUSD {
+		t.Fatalf("agent budget = %v, want %v", guard.Limits.DailyBudgetUSD, agenthub.DefaultAgentDailyBudgetUSD)
+	}
+}
+
+// P2.5-04：无价用量按智能体只告警一次，避免每个任务刷屏。
+func TestHubUnpricedUsageWarnsOncePerAgent(t *testing.T) {
+	m, buf := testManager(t)
+	agent := createHubAgent(t, m, buf, 1, "UnpricedOwner")
+	buf.Reset()
+	m.warnUnpricedUsageOnce("task_a", agent.ID)
+	m.warnUnpricedUsageOnce("task_b", agent.ID)
+	if got := strings.Count(buf.String(), `"usage_unpriced"`); got != 1 {
+		t.Fatalf("usage_unpriced count = %d, want 1; out=%s", got, buf.String())
+	}
+	if !usageHasTokens(agenthub.Usage{Input: 1}) || usageHasTokens(agenthub.Usage{}) {
+		t.Fatal("usageHasTokens 口径错误")
+	}
+}
+
+// P2.5-04：日预算/单任务上限的运行中硬停判定（已结算成本 + 本任务已花）。
+func TestHubBudgetCheckHardStop(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{
+			"name": "HardStop", "provider": "deepseek", "model": "deepseek-v4-flash", "role": "预算",
+			"policy": map[string]any{"daily_budget_usd": 20, "max_task_cost_usd": 1},
+		},
+	})
+	if !ok {
+		t.Fatalf("create: %s", errMsg)
+	}
+	agent := agentFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := agenthub.NewLedger(st).Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginHuman, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s1"},
+		Title:  "预算任务", Instruction: "预算任务", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stop, msg := m.hubBudgetCheck(task.ID, 1.01); !stop || !strings.Contains(msg, "单任务") {
+		t.Fatalf("single-task stop = %v %q, want true 单任务", stop, msg)
+	}
+	if stop, _ := m.hubBudgetCheck(task.ID, 0.5); stop {
+		t.Fatal("under budget should not stop")
+	}
+	if err := st.SaveTask(context.Background(), func() *agenthub.Task {
+		tk := *task
+		tk.Status = agenthub.TaskRunning
+		tk.UpdatedAt = time.Now().UTC()
+		tk.Result = &agenthub.TaskResult{Usage: agenthub.Usage{CostPriced: true, CostUSD: 20}}
+		return &tk
+	}()); err != nil {
+		t.Fatal(err)
+	}
+	if stop, msg := m.hubBudgetCheck(task.ID, 0.01); !stop || !strings.Contains(msg, "日预算") {
+		t.Fatalf("daily stop = %v %q, want true 日预算", stop, msg)
+	}
+}
+
+// P2.5-04：AgentEnd 收到 aborted 时，硬停标记必须把终态改回 blocked_budget。
+func TestHubFinishBudgetStopOverridesAborted(t *testing.T) {
+	m, buf := testManager(t)
+	agent := createHubAgent(t, m, buf, 1, "StopOwner")
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginHuman, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s1"},
+		Title:  "会被停", Instruction: "会被停", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	bs := &bridgeSession{hubTaskIDs: []agenthub.TaskID{task.ID}}
+	bs.hubBudgetStop.Store(true)
+	bs.hubBudgetReason.Store("智能体日预算 $20.00 已用满，运行已中止")
+	m.finishHubTask(bs, &events.AgentEnd{
+		RunId: "run-stop", FinishReason: core.FinishReasonAbort, Content: "部分产出",
+	})
+	got, err := ledger.Replay(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != agenthub.TaskBlockedBudget || !strings.Contains(got.Error, "日预算") {
+		t.Fatalf("settled = %s / %q, want blocked_budget with 日预算", got.Status, got.Error)
+	}
+}

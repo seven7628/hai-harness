@@ -567,3 +567,7 @@
 .hub-chip.owner-only { margin-left: 6px; font-size: 10px; }
 .hub-msg.pending { opacity: .72; }
 .hub-msg.failed { border-color: var(--danger, #c0392b); }
+
+/* 群日预算：与 mode chip 同形，但可点击编辑（P2.5-04）。 */
+button.hub-budget-chip { border: 1px solid transparent; cursor: pointer; font: inherit; }
+button.hub-budget-chip:hover { border-color: currentColor; }

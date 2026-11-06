@@ -23,6 +23,7 @@ export interface HubAgent {
   model?: string
   effort?: string
   compress_threshold?: number
+  policy?: { daily_budget_usd?: number; max_task_cost_usd?: number }
   memory?: { enabled?: boolean; max_index_lines?: number }
   tools?: { preset?: string; disable?: string[]; allow?: string[]; bash_roots?: string[]; disable_network?: boolean }
   version?: number

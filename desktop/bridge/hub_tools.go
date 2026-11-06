@@ -102,6 +102,7 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 		// P2-07：预算/并发/去重/链长护栏（profile 预算；群/全局预算归 P3 群组装配）。
 		svc.Guard = &agenthub.Guard{Limits: agenthub.GuardLimits{
 			MaxTaskCostUSD: p.Policy.MaxTaskCostUSD, DailyBudgetUSD: p.Policy.DailyBudgetUSD,
+			GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
 		}}
 	} else {
 		// 降级直派是 fail-open：至少留一条诊断，别让闸门静默失效。

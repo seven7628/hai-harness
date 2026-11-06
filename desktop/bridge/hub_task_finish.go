@@ -39,6 +39,8 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		return
 	}
 	ledger := agenthub.NewLedger(st)
+	ctx := context.Background()
+	first := ids[0]
 	status := agenthub.TaskCompleted
 	switch {
 	case ae.FinishReason == core.FinishReasonAbort || ae.ErrorKind == "canceled" || ae.ErrorKind == "aborted":
@@ -55,25 +57,44 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		Error:        ae.Error,
 		Artifacts:    taskArtifactsOf(ae.Artifacts),
 	}
-	ctx := context.Background()
-	first := ids[0]
+	finishErr := ae.Error
+	// 运行中预算硬停：LLMEnd 已 Interrupt，AgentEnd 会以 aborted 收尾；这里把
+	// 终态改回 blocked_budget，保留人/模型能看懂的原因。
+	if bs.hubBudgetStop.Swap(false) {
+		reason, _ := bs.hubBudgetReason.Load().(string)
+		if reason == "" {
+			reason = "日预算或单任务预算超限，运行已中止"
+		}
+		status = agenthub.TaskBlockedBudget
+		res.Error = reason
+		finishErr = reason
+		m.emitHubTaskAlert(first, "blocked_budget", reason)
+	}
+	bs.hubTaskSpentMicro.Store(0)
+	bs.hubBudgetReason.Store("")
 	// 重放（同 run 已回推）：静默返回，不再 Finish（delivered→completed 会报假告警）。
 	if cur, lerr := st.LoadTask(ctx, first); lerr == nil && alreadyNotified(cur, ae.RunId) {
 		return
 	}
+	originTask, _ := st.LoadTask(ctx, first)
 	// 单任务预算：成本只有在结算时才知道；超限落 blocked_budget + hub_alert（§6.9）。
-	if originTask, terr := st.LoadTask(ctx, first); terr == nil && originTask.Origin.AgentID != "" {
+	if originTask != nil && originTask.Origin.AgentID != "" {
 		if p, _, perr := m.hubLoadAgent(string(originTask.Origin.AgentID)); perr == nil && p != nil {
 			limits := agenthub.GuardLimits{MaxTaskCostUSD: p.Policy.MaxTaskCostUSD}
 			if over, msg := limits.OverTaskBudget(res.Usage); over {
 				status = agenthub.TaskBlockedBudget
 				res.Error = msg
+				finishErr = msg
 				m.emitHubTaskAlert(first, "blocked_budget", msg)
 			}
 		}
 	}
+	// 无价用量：预算无法计入，必须在第一次见到时提醒（之后按智能体去重，避免刷屏）。
+	if originTask != nil && !res.Usage.CostPriced && usageHasTokens(res.Usage) {
+		m.warnUnpricedUsageOnce(first, originTask.Origin.AgentID)
+	}
 	settled, err := ledger.Finish(ctx, agenthub.FinishInput{
-		TaskID: first, RunID: ae.RunId, Status: status, Result: res, Error: ae.Error,
+		TaskID: first, RunID: ae.RunId, Status: status, Result: res, Error: finishErr,
 		HumanIntervened: humanIntervened,
 		At:              time.Now().UTC(),
 	})
@@ -135,6 +156,74 @@ func (m *manager) recordBudgetNeed(t *agenthub.Task, reason string) {
 	if err := st.SaveNeed(ctx, n); err == nil {
 		m.emitHubNeed(n)
 	}
+}
+
+// warnUnpricedUsageOnce 每个智能体只发一次「无价用量」告警。
+func (m *manager) warnUnpricedUsageOnce(taskID agenthub.TaskID, agentID agenthub.AgentID) {
+	if m == nil || agentID == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.hubUnpricedWarned == nil {
+		m.hubUnpricedWarned = map[agenthub.AgentID]bool{}
+	}
+	seen := m.hubUnpricedWarned[agentID]
+	m.hubUnpricedWarned[agentID] = true
+	m.mu.Unlock()
+	if seen {
+		return
+	}
+	m.emitHubTaskAlert(taskID, "usage_unpriced",
+		"该智能体的用量没有价格（provider 未上报且价表无此模型），预算无法计入；请补价表或改用有价模型")
+}
+
+func usageHasTokens(u agenthub.Usage) bool {
+	return u.Input > 0 || u.Output > 0 || u.CacheRead > 0 || u.CacheWrite > 0 || u.Reasoning > 0
+}
+
+// hubBudgetCheck 是目标会话 LLMEnd 的硬停判定：已结算日成本 + 本任务已花
+// 是否越过智能体/群/全局日预算或单任务上限。只对当前 hub_task 生效。
+func (m *manager) hubBudgetCheck(taskID agenthub.TaskID, spentUSD float64) (bool, string) {
+	if m == nil || taskID == "" {
+		return false, ""
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		return false, ""
+	}
+	ctx := context.Background()
+	t, err := st.LoadTask(ctx, taskID)
+	if err != nil || t == nil || t.Origin.AgentID == "" {
+		return false, ""
+	}
+	p, _, err := m.hubLoadAgent(string(t.Origin.AgentID))
+	if err != nil || p == nil {
+		return false, ""
+	}
+	limits := agenthub.GuardLimits{
+		MaxTaskCostUSD:       p.Policy.MaxTaskCostUSD,
+		DailyBudgetUSD:       p.Policy.DailyBudgetUSD,
+		GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
+	}
+	if t.Origin.GroupID != "" {
+		if g, gerr := st.LoadGroup(ctx, t.Origin.GroupID); gerr == nil && g != nil {
+			limits.GroupDailyBudgetUSD = g.Policy.DailyBudgetUSD
+		}
+	}
+	if over, msg := limits.OverTaskBudget(agenthub.Usage{CostPriced: true, CostUSD: spentUSD}); over {
+		return true, msg
+	}
+	agentDay, groupDay, globalDay := st.DailyCost(t.Origin.AgentID, t.Origin.GroupID, time.Now().UTC())
+	if limits.GlobalDailyBudgetUSD > 0 && globalDay+spentUSD >= limits.GlobalDailyBudgetUSD {
+		return true, fmt.Sprintf("全局日预算 $%.2f 已用满，运行已中止", limits.GlobalDailyBudgetUSD)
+	}
+	if limits.GroupDailyBudgetUSD > 0 && t.Origin.GroupID != "" && groupDay+spentUSD >= limits.GroupDailyBudgetUSD {
+		return true, fmt.Sprintf("群日预算 $%.2f 已用满，运行已中止", limits.GroupDailyBudgetUSD)
+	}
+	if limits.DailyBudgetUSD > 0 && agentDay+spentUSD >= limits.DailyBudgetUSD {
+		return true, fmt.Sprintf("智能体日预算 $%.2f 已用满，运行已中止", limits.DailyBudgetUSD)
+	}
+	return false, ""
 }
 
 // alreadyNotified 同一 run 已回推过（幂等：重复 AgentEnd/事件重放不重复推）。

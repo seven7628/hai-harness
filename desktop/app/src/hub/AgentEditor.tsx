@@ -65,6 +65,8 @@ export default function AgentEditor({
   const [model, setModel] = useState(agent?.model ?? '')
   const [effort, setEffort] = useState(agent?.effort ?? '')
   const [threshold, setThreshold] = useState(agent?.compress_threshold ?? 0.8)
+  const [dailyBudget, setDailyBudget] = useState(agent?.policy?.daily_budget_usd ?? 20)
+  const [taskBudget, setTaskBudget] = useState(agent?.policy?.max_task_cost_usd ?? 0)
   const [memoryOn, setMemoryOn] = useState(agent?.memory?.enabled !== false)
 
   // —— 人格 ——
@@ -229,6 +231,7 @@ export default function AgentEditor({
     const form: AgentForm = {
       name, emoji, accent, role, description, instructions, provider, model, effort,
       threshold, memoryOn, preset, disable,
+      dailyBudget, taskBudget,
     }
     const patch = buildAgentPatch(form, agent)
     if (isNew) {
@@ -359,6 +362,25 @@ export default function AgentEditor({
                     />
                     <span className="hub-sub">{threshold.toFixed(2)}</span>
                   </label>
+                  <label>{t('hub.field.dailyBudget')}
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={dailyBudget}
+                      onChange={(e) => setDailyBudget(Math.max(0, Number(e.target.value) || 0))}
+                    />
+                  </label>
+                  <label>{t('hub.field.taskBudget')}
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      value={taskBudget}
+                      onChange={(e) => setTaskBudget(Math.max(0, Number(e.target.value) || 0))}
+                    />
+                  </label>
+                  <p className="hub-muted wide">{t('hub.budgetHint')}</p>
                   <label className="inline">
                     <input type="checkbox" checked={memoryOn} onChange={(e) => setMemoryOn(e.target.checked)} />
                     {t('hub.field.memory')}
