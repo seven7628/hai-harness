@@ -675,6 +675,32 @@ type saveCountingStore struct {
 	saves int
 }
 
+// P2.5-07 N1：进程重启留下的 interrupted 任务，同 client_msg_id 重投
+// 必须新建 attempt，不能永远返回同一 interrupted 快照。
+func TestQueueInterruptedRetryStartsNewAttempt(t *testing.T) {
+	ops := &queueFakeOps{}
+	q, _ := newTestQueue(t, ops)
+	ctx := context.Background()
+	first := queueTask("重启后重投")
+	first.ClientMsgID = "interrupted-retry"
+	created, err := q.Submit(ctx, first)
+	if err != nil || created.Status != TaskDispatched {
+		t.Fatalf("first submit = %+v, %v", created, err)
+	}
+	if _, err := q.ledger.Transition(ctx, created.ID, TaskInterrupted, TransitionOptions{Error: "进程重启：没有运行记录"}); err != nil {
+		t.Fatal(err)
+	}
+	again := queueTask("重启后重投")
+	again.ClientMsgID = "interrupted-retry"
+	retried, err := q.Submit(ctx, again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.ID == created.ID || retried.Attempt != 2 || retried.Status != TaskDispatched {
+		t.Fatalf("interrupted retry = %+v; want new task attempt 2 dispatched", retried)
+	}
+}
+
 func (s *saveCountingStore) SaveTask(ctx context.Context, t *Task) error {
 	s.saves++
 	return s.MemoryStore.SaveTask(ctx, t)

@@ -91,7 +91,9 @@ func queueKey(workspace, sessionID string) string {
 // 送达/跑过，返回旧条目会让调用方以为重试成功（P2-02 复审 B1）。
 func taskRetryable(st TaskStatus) bool {
 	switch st {
-	case TaskFailed, TaskCanceled, TaskDeclined, TaskBlockedBudget:
+	case TaskFailed, TaskCanceled, TaskDeclined, TaskBlockedBudget, TaskInterrupted:
+		// interrupted（进程重启时没有运行记录）也可以同 client_msg_id 重投；
+		// 否则重启后的任务会永远返回同一 interrupted 快照（P2.5-07 N1）。
 		return true
 	}
 	return false

@@ -195,11 +195,13 @@ func sendResultAccepted(t *Task) bool {
 	if t == nil {
 		return false
 	}
+	// 显式 allow-list：新增终态/未知状态默认「未投递」，避免重演
+	// 「accepted=true + status=canceled」把模型带偏（P2.5-07 N5）。
 	switch t.Status {
-	case TaskFailed, TaskCanceled, TaskInterrupted, TaskBlockedBudget, TaskDeclined:
-		return false
+	case TaskQueued, TaskDispatched, TaskRunning, TaskCompleted, TaskDelivered:
+		return true
 	}
-	return true
+	return false
 }
 
 // sendResultMessage 回传模型可读的原因；failed 可能含 OS/路径细节，只给指向
@@ -213,6 +215,10 @@ func sendResultMessage(t *Task) string {
 		return t.Error
 	case TaskFailed:
 		return "派发失败，详见 task_status"
+	case TaskCompleted:
+		return "该 client_msg_id 的任务此前已完成，不会重跑；结果见 task_status"
+	case TaskDelivered:
+		return "该 client_msg_id 的任务此前已回推结果，不会重跑；结果见 task_status"
 	}
 	return ""
 }

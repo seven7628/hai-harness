@@ -178,20 +178,31 @@ func TestSendResultSemantics(t *testing.T) {
 	}{
 		{TaskDispatched, "", true, ""},
 		{TaskQueued, "", true, ""},
-		{TaskCompleted, "", true, ""},
+		{TaskRunning, "", true, ""},
+		{TaskCompleted, "", true, "此前已完成"},
+		{TaskDelivered, "", true, "此前已回推"},
+		{TaskStatus("some_new_status"), "URL /secret", false, ""},
 		{TaskCanceled, "目标侧去重命中", false, "目标侧去重命中"},
 		{TaskInterrupted, "进程重启：没有运行记录", false, "进程重启：没有运行记录"},
 		{TaskBlockedBudget, "预算超限", false, "预算超限"},
 		{TaskDeclined, "目标拒绝", false, "目标拒绝"},
 		{TaskFailed, "/secret/path: permission denied", false, "派发失败，详见 task_status"},
 	}
+	if sendResultAccepted(nil) {
+		t.Fatal("nil task must not be accepted")
+	}
 	for _, c := range cases {
 		task := &Task{Status: c.status, Error: c.error}
 		if got := sendResultAccepted(task); got != c.accepted {
 			t.Errorf("%s accepted = %v, want %v", c.status, got, c.accepted)
 		}
-		if got := sendResultMessage(task); got != c.message {
-			t.Errorf("%s message = %q, want %q", c.status, got, c.message)
+		gotMsg := sendResultMessage(task)
+		if c.message != "" {
+			if !strings.Contains(gotMsg, c.message) {
+				t.Errorf("%s message = %q, want contains %q", c.status, gotMsg, c.message)
+			}
+		} else if gotMsg != "" {
+			t.Errorf("%s message = %q, want empty", c.status, gotMsg)
 		}
 	}
 }
