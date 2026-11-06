@@ -968,10 +968,10 @@
       "reviewNote": "复审 passed（task-syfh4zht，对象 bf05e53）：上一轮 3 条 blocking 全部复验通过，并做了三组 mutation 证明修复有效 —— ①buildAgentPatch 改回整份 profile / 无条件带 tools / 改名顺带 disable:[] 三种都能打红（含浏览器实测 tools.disable 被清空）；②loadMemory 去掉 await 后 120ms 延迟下回执只剩 3/30 次采样可见（原版 ≥1.6s 存活）；③删 rollback confirm 后 `npm run test:hub-patch` 仍全绿 —— 证实回滚确认无回归锁（记 N2）。浏览器实测：改名出站 payload 无 tools、重开工具页 disable 仍在；回执 1.6s 仍在；回滚 confirm+notice「已回滚到第 1 版，当前为第 3 版」；删除后无幽灵行/DM 空态；新建三项校验零请求；busy 时 Esc 不关。非阻塞遗留：N1 test:hub-patch 未挂进 npm test（B1 的唯一自动化锁默认不跑）；N2 回执/回滚/删除清选择三个界面行为零自动化；N3 test-agent-patch.mjs 打印「8/8」硬编码（实际 16 条 assert）；N4 same() 用 JSON.stringify（NaN→null 会静默无效，当前 range 输入不可达）；N5 preset 空串判等；N6 回滚/带 warning 保存后弹层表单仍旧值；N7 custom preset 无 allow 编辑器且切不回 all；N8 busy 时遮罩点击仍可关；N9 写记忆期间 textarea 未禁用（~150ms 窗口丢字）；N10 onSaved→select() 会清正在流式的正文；N11 编辑器 notice 切页签不重置。 延期项（本轮验收已同步收敛）：第 5 个「会话」tab（运行态/usage/清空上下文/导出）→ P2-06；全工具/MCP server-tool 开关与 provider/model 两级下拉 → P2 前端收尾；记忆注入索引预览/清除记忆 → P2。"
     },
     "P1-10": {
-      "status": "review",
+      "status": "done",
       "commit": "dd3b32d + ... + 196c508 + b25b18c",
-      "review": "re-review_pending",
-      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。 第四轮复审（task-fehavvps）：provider-only 已修但 model-only 仍可写无效组合。已修（196c508）：判据改为 provider 或 model 变化 + 精确比较；model-only 跨 provider 模型 → unknown_model。 复审通过后的 delta（b25b18c）：N1 抽 validateHubModelPair 供 create/update/rollback 共用（模型表为空 fail-open）；N2 create 也校验；N3 model-only 大小写变体精确拒绝。回归新增 create 外来模型拒绝/合法组合可用、update 大小写变体拒绝且会话组合不变；目标测试绿。待 delta 复审（对象 b25b18c）。",
+      "review": "passed",
+      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。 第四轮复审（task-fehavvps）：provider-only 已修但 model-only 仍可写无效组合。已修（196c508）：判据改为 provider 或 model 变化 + 精确比较；model-only 跨 provider 模型 → unknown_model。 复审通过后的 delta（b25b18c）：N1 抽 validateHubModelPair 供 create/update/rollback 共用（模型表为空 fail-open）；N2 create 也校验；N3 model-only 大小写变体精确拒绝。回归新增 create 外来模型拒绝/合法组合可用、update 大小写变体拒绝且会话组合不变；目标测试绿。待 delta 复审（对象 b25b18c）。 delta 复审 passed（task-tb6ksbaj，对象 b25b18c）：helper 三路校验成立、空表 fail-open、表非空精确匹配、create/update/rollback 拒绝路径零副作用（磁盘 profile/version/归档数/bs.modelCfg/loop.Model 全等）；5 个变异全杀。非阻塞（记录，不在 P1-10 扩范围）：N1 空表 fail-open 与 rollback 校验在提交内零覆盖（M2/M4/M5 仅独立探针可杀，建议补 3 条用例）；N2 提交信息/注释把 model 大小写修复误归因给本 delta（实际 196c508 已修），TestHubAgentUpdateRejectsModelCaseVariant 在父提交也绿；N3 switch_model 对空模型表仍严格拒绝，本地 vLLM「能建不能用」；N4 仅堵新写入不治存量；N5 create 的 Normalize 顺序可提前；N6 预设模型表无逃生口。",
       "reviewBatch": "A-delta"
     },
     "P2-01": {
@@ -1096,11 +1096,11 @@
   "reviewGate": {
     "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。",
     "audit": {
-      "done_passed": 19,
-      "in_review": 17,
+      "done_passed": 20,
+      "in_review": 16,
       "not_started": 15,
       "in_review_breakdown": {
-        "re_review_pending": 5,
+        "re_review_pending": 4,
         "initial_pending": 12
       }
     },
