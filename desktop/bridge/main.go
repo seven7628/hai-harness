@@ -334,6 +334,8 @@ type bridgeSession struct {
 	hubFinishTask func(ae *events.AgentEnd)
 	// hubBudgetCheck 目标会话 LLMEnd 的预算检查；true = 立即中断本 run。
 	hubBudgetCheck func(taskID agenthub.TaskID, spentUSD float64) (bool, string)
+	// hubInterrupt 预算硬停时中断当前 run（默认 bs.s.Interrupt；测试可注入计数）。
+	hubInterrupt func()
 	// hubFailTask 把指定 hub_task 标 failed（注入/坏 header 的静默丢任务兜底）。
 	hubFailTask func(ids []agenthub.TaskID, reason string)
 	// hubAlert 通用 hub_alert（nil = 未接线）。
@@ -669,7 +671,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 					if stop, reason := bs.hubBudgetCheck(bs.hubTaskIDs[0], spent); stop {
 						bs.hubBudgetStop.Store(true)
 						bs.hubBudgetReason.Store(reason)
-						bs.s.Interrupt()
+						if bs.hubInterrupt != nil {
+							bs.hubInterrupt()
+						} else {
+							bs.s.Interrupt()
+						}
 					}
 				}
 			}
@@ -1686,11 +1692,12 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
 	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubBudgetCheck: m.hubBudgetCheck, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
+	bs.hubInterrupt = func() { bs.s.Interrupt() }
 	bs.hubNeed = func(e events.Event) { m.recordHubNeed(bs, e) }
 	bs.hubExpireNeeds = func() { m.scheduleHubExpire(bs) }
 	bs.hubFailTask = m.failHubTasksByReason
 	bs.hubAlert = func(code, message string) {
-		m.out.writeLine(map[string]any{"event_type": "hub_alert", "code": code, "kind": code, "message": message})
+		m.emitHubAlert(hubAlertEvent{Code: code, Message: message})
 	}
 	if opts.hub != nil {
 		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：

@@ -255,7 +255,23 @@ func TestHubEmitLLMEndHardStopsAtTaskBudget(t *testing.T) {
 	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{At: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	bs.hubTaskIDs = []agenthub.TaskID{task.ID}
+	// 真实绑定：UserInputsConsumed 的 hub_task header 决定 hubTaskIDs。
+	header, err := agenthub.EncodeTaskHeader(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs.emit(&events.UserInputsConsumed{
+		UserTexts: []string{"运行中预算"},
+		UserContents: [][]core.Content{{
+			{Type: core.ContentTypeHubTask, Content: header},
+		}},
+		Timestamp: time.Now(), EventType: events.UserInputsConsumedType,
+	})
+	if len(bs.hubTaskIDs) != 1 || bs.hubTaskIDs[0] != task.ID {
+		t.Fatalf("hubTaskIDs = %v, want [%s]", bs.hubTaskIDs, task.ID)
+	}
+	interrupts := 0
+	bs.hubInterrupt = func() { interrupts++ }
 	bs.hubTaskSpentMicro.Store(0)
 	bs.hubBudgetStop.Store(false)
 
@@ -277,6 +293,22 @@ func TestHubEmitLLMEndHardStopsAtTaskBudget(t *testing.T) {
 	}
 	if got := bs.hubTaskSpentMicro.Load(); got < 50000 {
 		t.Fatalf("spent micro = %d, want >= 50000", got)
+	}
+	if interrupts != 1 {
+		t.Fatalf("interrupt calls = %d, want 1 (LLMEnd 硬停必须中断当前 run)", interrupts)
+	}
+	// 停止闩生效后继续 LLMEnd：花费累计但不再 Interrupt。
+	bs.emit(&events.LLMEnd{
+		RunId: "r-budget", RequestId: "q-budget-2", Model: "deepseek-v4-flash",
+		Usage: &core.Usage{
+			Input: 10, Output: 5, TotalTokens: 15,
+			Cost: core.Cost{Source: core.CostSourceUpstream, Total: 50000, Priced: true},
+		},
+		FinishReason: core.FinishReasonStop,
+		Timestamp:    time.Now(), EventType: events.LLMEndType,
+	})
+	if interrupts != 1 {
+		t.Fatalf("interrupt calls after latch = %d, want 1", interrupts)
 	}
 }
 
@@ -478,5 +510,153 @@ func TestHubFinishBudgetStopOverridesAborted(t *testing.T) {
 	}
 	if got.Status != agenthub.TaskBlockedBudget || !strings.Contains(got.Error, "日预算") {
 		t.Fatalf("settled = %s / %q, want blocked_budget with 日预算", got.Status, got.Error)
+	}
+}
+
+// P2.5-04 B1（复审二轮）：群日预算必须在**真实群会话的 initial session_send**
+// 路径生效 —— 不是拿 Task 字面量直接调 Guard。群 Origin 由 buildHubEngine 从
+// spec.Scope 装配，Guard 再按 Origin.GroupID 现读 Group.Policy。
+func TestHubGroupSessionSendBlockedByGroupBudget(t *testing.T) {
+	m, buf := testManager(t)
+	agent := createHubAgent(t, m, buf, 1, "GroupSessionOwner")
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_group_create", map[string]any{
+		"name":    "真实派发预算群",
+		"members": []map[string]any{{"agent_id": string(agent.ID), "role": "owner"}},
+		"policy":  map[string]any{"daily_budget_usd": 50},
+	})
+	if !ok {
+		t.Fatalf("group create: %s", errMsg)
+	}
+	group := groupFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	old, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: group.ID, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s-old"},
+		Title:  "已花群预算", Instruction: "已花群预算", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), old.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Finish(context.Background(), agenthub.FinishInput{
+		TaskID: old.ID, RunID: "r-old", Status: agenthub.TaskCompleted,
+		Result: &agenthub.TaskResult{Usage: agenthub.Usage{CostPriced: true, CostUSD: 55}},
+		At:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	wsPath := t.TempDir()
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	hubWS := m.hubRuntime(string(agent.ID))
+	spec := m.hubSpecFor(&agent, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: group.ID}, hubWS.path)
+	bs, err := m.createIn(hubWS, hubSessionID(string(agent.ID), spec.Scope), "", sessionOpts{hub: spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := bs.hubEngine.GetTool(context.Background(), "session_send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := tool.(*hubSessionSendTool); ok {
+		t.Logf("session_send origin = %+v", st.svc.Origin)
+	}
+	buf.Reset()
+	_, callErr := tool.Call(context.Background(), "session_send",
+		`{"workspace":`+jsonString(wsPath)+`,"session_id":"s-target","text":"群任务"}`)
+	if callErr == nil || !strings.Contains(callErr.Error(), "群日预算") {
+		t.Fatalf("group session_send err = %v, want 群日预算", callErr)
+	}
+	all, err := st.ListTasks(context.Background(), agenthub.TaskFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("group budget rejection wrote ledger: %d tasks", len(all))
+	}
+}
+
+// P2.5-04 B2（复审二轮）：hubBudgetCheck 的群/全局分支必须被真实任务走到。
+func TestHubBudgetCheckGroupAndGlobalBranches(t *testing.T) {
+	m, buf := testManager(t)
+	agent := createHubAgent(t, m, buf, 1, "BranchBudgetAgent")
+	ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_update", map[string]any{
+		"agent_id": string(agent.ID),
+		"patch":    map[string]any{"policy": map[string]any{"daily_budget_usd": 0, "max_task_cost_usd": 0}},
+	})
+	if !ok {
+		t.Fatalf("agent update: %s", errMsg)
+	}
+	ok, errMsg, data := hubCmd(t, m, buf, 3, "hub_group_create", map[string]any{
+		"name":    "分支预算群",
+		"members": []map[string]any{{"agent_id": string(agent.ID), "role": "owner"}},
+		"policy":  map[string]any{"daily_budget_usd": 50},
+	})
+	if !ok {
+		t.Fatalf("group create: %s", errMsg)
+	}
+	group := groupFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	seed := func(origin agenthub.TaskOrigin, cost float64) *agenthub.Task {
+		task, err := ledger.Create(context.Background(), &agenthub.Task{
+			Origin: origin,
+			Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s-seed"},
+			Title:  "seed", Instruction: "seed", Callback: agenthub.CallbackAgentEnd,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{At: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ledger.Finish(context.Background(), agenthub.FinishInput{
+			TaskID: task.ID, RunID: "r-seed", Status: agenthub.TaskCompleted,
+			Result: &agenthub.TaskResult{Usage: agenthub.Usage{CostPriced: true, CostUSD: cost}},
+			At:     time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	seed(agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: group.ID, AgentID: agent.ID}, 45)
+	groupTask, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: group.ID, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s-group"},
+		Title:  "群任务", Instruction: "群任务", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop, reason := m.hubBudgetCheck(groupTask.ID, 6)
+	if !stop || !strings.Contains(reason, "群日预算") {
+		t.Fatalf("group check = %v %q, want 群日预算", stop, reason)
+	}
+
+	// 全局：先落一条别的智能体的 $195 已结算成本，当前任务再花 $6。
+	seed(agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_other"}, 195)
+	globalTask, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s-global"},
+		Title:  "全局任务", Instruction: "全局任务", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop, reason = m.hubBudgetCheck(globalTask.ID, 6)
+	if !stop || !strings.Contains(reason, "全局日预算") {
+		t.Fatalf("global check = %v %q, want 全局日预算", stop, reason)
 	}
 }

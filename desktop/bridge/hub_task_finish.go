@@ -367,43 +367,90 @@ func taskArtifactsOf(in []core.Artifact) []agenthub.TaskArtifact {
 	return out
 }
 
-// emitHubTaskAlert 任务结算异常（前端 Needs you / 任务板用；P2-06 接）。
-// P2.5-05：统一 envelope —— scope/code/severity/task_id?/agent_id?/group_id?/at。
-func (m *manager) emitHubTaskAlert(id agenthub.TaskID, kind, msg string) {
+// hubAlertEvent 是 hub_alert 的唯一构造参数（P2.5-05 D3-A：统一 envelope）。
+// 所有生产点必须走 emitHubAlert，避免同一 code 在结算路径/护栏路径出现
+// 不同的 severity 或缺 scope（P2.5-05 复审 B2）。
+type hubAlertEvent struct {
+	Scope    string // hub | task（空 = 按 TaskID 推导）
+	Code     string
+	Severity string // info | warning | error（空 = 按 Code 映射）
+	TaskID   agenthub.TaskID
+	AgentID  agenthub.AgentID
+	GroupID  agenthub.GroupID
+	Message  string
+	At       time.Time
+}
+
+// hubAlertSeverity 显式映射；未知 code 默认 warning，但新 code 应在这里登记。
+func hubAlertSeverity(code string) string {
+	switch code {
+	case "recovery_failed", "blocked_budget", "push_failed", "settle_failed",
+		"artifact_register_failed", "batch_conflict", "notify_failed", "injected_conflict":
+		return "error"
+	case "usage_unpriced", "recovered_interrupted", "queue_unavailable",
+		"dispatch_denied", "concurrency_limit", "duplicate_task", "chain_too_deep",
+		"hub_background_timeout":
+		return "warning"
+	}
+	return "warning"
+}
+
+// emitHubAlert 是 hub_alert 的唯一出口。
+func (m *manager) emitHubAlert(a hubAlertEvent) {
 	if m == nil || m.out == nil {
 		return
 	}
-	scope := "hub"
-	severity := "warning"
-	if id != "" {
-		scope = "task"
+	if a.Code == "" {
+		a.Code = "hub_alert"
 	}
-	switch {
-	case kind == "recovery_failed", kind == "blocked_budget", kind == "push_failed",
-		kind == "settle_failed", kind == "artifact_register_failed":
-		severity = "error"
-	case kind == "usage_unpriced", kind == "recovered_interrupted":
-		severity = "warning"
+	scope := a.Scope
+	if scope == "" {
+		scope = "hub"
+		if a.TaskID != "" {
+			scope = "task"
+		}
+	}
+	severity := a.Severity
+	if severity == "" {
+		severity = hubAlertSeverity(a.Code)
+	}
+	at := a.At
+	if at.IsZero() {
+		at = time.Now().UTC()
 	}
 	ev := map[string]any{
 		"event_type": "hub_alert",
 		"scope":      scope,
-		"code":       kind,
-		"kind":       kind, // 兼容旧消费者
+		"code":       a.Code,
+		"kind":       a.Code, // 兼容旧消费者
 		"severity":   severity,
-		"task_id":    string(id),
-		"message":    msg,
-		"at":         time.Now().UTC(),
+		"message":    a.Message,
+		"at":         at,
 	}
+	if a.TaskID != "" {
+		ev["task_id"] = string(a.TaskID)
+	}
+	if a.AgentID != "" {
+		ev["agent_id"] = string(a.AgentID)
+	}
+	if a.GroupID != "" {
+		ev["group_id"] = string(a.GroupID)
+	}
+	m.out.writeLine(ev)
+}
+
+// emitHubTaskAlert 任务级告警的便捷入口：补 agent/group（旧调用方保持兼容）。
+func (m *manager) emitHubTaskAlert(id agenthub.TaskID, kind, msg string) {
+	a := hubAlertEvent{TaskID: id, Code: kind, Message: msg}
 	if id != "" {
 		if st, err := m.hubStore(); err == nil {
 			if t, err := st.LoadTask(context.Background(), id); err == nil && t != nil {
-				ev["agent_id"] = string(t.Origin.AgentID)
-				ev["group_id"] = string(t.Origin.GroupID)
+				a.AgentID = t.Origin.AgentID
+				a.GroupID = t.Origin.GroupID
 			}
 		}
 	}
-	m.out.writeLine(ev)
+	m.emitHubAlert(a)
 }
 
 // taskUsageOf core.Usage → 账本 DTO（CostPriced 区分「不知道」与「免费」）。
