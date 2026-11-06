@@ -22,7 +22,10 @@ import (
 
 // finishHubTask 把本批 hub_task 结算进账本。
 func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
-	if m == nil || bs == nil || ae == nil {
+	if m == nil || m.hubShutdown.Load() {
+		return // 关停后的迟到结算不能复活 hub runtime/写 TempDir
+	}
+	if bs == nil || ae == nil {
 		return
 	}
 	ids := bs.hubTaskIDs

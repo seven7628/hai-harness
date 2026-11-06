@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -34,7 +35,7 @@ func (m *manager) hubBackgroundContext() (context.Context, bool) {
 // resetHubBackgroundIfClosed 供 closeHubRuntimes 之后新建 hub runtime 时调用：
 // 关闭只应结束旧一代后台任务，不应让同一进程永久失去泵/过期能力（P2.5-06 复审 N2）。
 func (m *manager) resetHubBackgroundIfClosed() {
-	if m == nil {
+	if m == nil || m.hubShutdown.Load() {
 		return
 	}
 	m.hubBgMu.Lock()
@@ -44,7 +45,8 @@ func (m *manager) resetHubBackgroundIfClosed() {
 	}
 	m.hubBgClosing = false
 	m.hubBgCtx, m.hubBgCancel = context.WithCancel(context.Background())
-	m.hubBgDone = nil // 新 generations 新建 waiter；旧 waiter 只等旧任务
+	m.hubBgWG = &sync.WaitGroup{} // 新 generation 独立 WG；旧 waiter 仍等旧 WG
+	m.hubBgDone = nil
 }
 
 func (m *manager) spawnHubBackground(fn func(context.Context)) {
@@ -52,19 +54,23 @@ func (m *manager) spawnHubBackground(fn func(context.Context)) {
 		return
 	}
 	m.hubBgMu.Lock()
-	if m.hubBgClosing {
+	if m.hubBgClosing || m.hubShutdown.Load() {
 		m.hubBgMu.Unlock()
 		return
 	}
 	if m.hubBgCtx == nil {
 		m.hubBgCtx, m.hubBgCancel = context.WithCancel(context.Background())
 	}
+	if m.hubBgWG == nil {
+		m.hubBgWG = &sync.WaitGroup{}
+	}
 	ctx := m.hubBgCtx
-	m.hubBgWG.Add(1)
+	wg := m.hubBgWG
+	wg.Add(1)
 	m.hubBgMu.Unlock()
 
 	go func() {
-		defer m.hubBgWG.Done()
+		defer wg.Done()
 		fn(ctx)
 	}()
 }
@@ -87,13 +93,17 @@ func (m *manager) stopHubBackground(timeout time.Duration) bool {
 	}
 	// 每个 generation 只建一个 waiter：重复 stop 不累积 goroutine（P2.5-06 复审 N4）。
 	m.hubBgMu.Lock()
+	if m.hubBgWG == nil {
+		m.hubBgWG = &sync.WaitGroup{}
+	}
+	wg := m.hubBgWG
 	if m.hubBgDone == nil {
 		m.hubBgDone = make(chan struct{})
 		done := m.hubBgDone
-		go func() {
-			m.hubBgWG.Wait()
+		go func(wg *sync.WaitGroup) {
+			wg.Wait()
 			close(done)
-		}()
+		}(wg)
 	}
 	done := m.hubBgDone
 	m.hubBgMu.Unlock()

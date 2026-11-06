@@ -980,9 +980,12 @@ type manager struct {
 	hubBgMu      sync.Mutex
 	hubBgCtx     context.Context
 	hubBgCancel  context.CancelFunc
-	hubBgWG      sync.WaitGroup
+	hubBgWG      *sync.WaitGroup // generation 私有：reset 时换新，旧 waiter 只等旧 WG
 	hubBgDone    chan struct{}
 	hubBgClosing bool
+	// hubShutdown 进程/测试彻底关停：此后禁止重建 hub runtime/DM 会话/后台任务。
+	// 与 hubBgClosing（单代后台闸门）分开，避免迟到结算把已关闭的 runtime 复活。
+	hubShutdown atomic.Bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
 	hubMsgDedup map[string]string
 	// hubUnpricedWarned 每个智能体只告警一次「用量无价，预算无法计入」（P2.5-04）。
@@ -1532,6 +1535,9 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	}
 	if ws == nil {
 		return nil, errors.New("create session: nil workspace runtime")
+	}
+	if opts.hub != nil && m.hubShutdown.Load() {
+		return nil, errors.New("create hub session: manager is shutting down")
 	}
 	wsPath := ws.path
 	// 会话首次创建前自动恢复「上次已启用」的插件（持久化标记；本进程每工作区一次）。
@@ -3929,7 +3935,7 @@ func (m *manager) shutdownAll() {
 		ws.stopMCPHealth() // 探活 goroutine 收尾（Refresh 会取 Manager 锁：不得持锁调用）
 	}
 	// Hub 智能体运行时同理（不在 m.workspaces 里，单独收尾）
-	m.closeHubRuntimes()
+	m.shutdownHubRuntimes()
 	// Session Mesh 远程网关关闭（mesh 常驻 manager 级，不随工作区）
 	if m.meshGW != nil {
 		m.meshGW.Stop()

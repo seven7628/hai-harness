@@ -71,6 +71,9 @@ func hubAgentStoreDir(agentID string) string {
 // 配置（~/.go-code/settings.json）、全局插件注册表；目录为本智能体自己的
 // sessions/events。**不做**：项目技能层、项目 MCP 层、插件自动启用、git 检测。
 func (m *manager) hubRuntime(agentID string) *workspaceRuntime {
+	if m == nil || m.hubShutdown.Load() {
+		return nil
+	}
 	// 关闭后重建 hub runtime：重新开放后台泵/过期（N2）。
 	m.resetHubBackgroundIfClosed()
 	m.mu.Lock()
@@ -145,6 +148,17 @@ func (m *manager) hubRuntimeByPath(path string) *workspaceRuntime {
 // （buildPlugins 每次返回新 registry，不关会漏 Browser Use 子进程；
 //
 //	P0 阶段 hub 插件还没被 Enable，先按同口径收尾，免得 P1 打开插件后泄漏）。
+//
+// shutdownHubRuntimes 进程/测试彻底关停：先闩住重建，再走正常的 close。
+// 与 closeHubRuntimes 分开：后者是「关闭当前实例、允许同进程重开」（测试依赖）。
+func (m *manager) shutdownHubRuntimes() {
+	if m == nil {
+		return
+	}
+	m.hubShutdown.Store(true)
+	m.closeHubRuntimes()
+}
+
 func (m *manager) closeHubRuntimes() {
 	// P2.5-06：先取消并等待 Hub 后台泵/过期任务，再关会话；否则旧泵可能在
 	// 会话 Shutdown 后仍写账本/Ask。超时有界，不无限拖住退出。
@@ -403,6 +417,9 @@ func (m *manager) hubDMSession(agentID string) (*bridgeSession, error) {
 		return nil, fmt.Errorf("智能体已删除")
 	}
 	ws := m.hubRuntime(agentID)
+	if ws == nil {
+		return nil, fmt.Errorf("Hub 正在关停，不能新建 DM 会话")
+	}
 	sid := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})
 	// 同一 agent 的装配必须串行：先拿锁，再在锁内复查看是否已被别人建好。
 	unlock := m.lockHubAgent(agentID)

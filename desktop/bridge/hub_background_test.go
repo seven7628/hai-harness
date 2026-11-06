@@ -85,3 +85,51 @@ func TestHubBackgroundReopensAfterRuntimeRecreate(t *testing.T) {
 		t.Fatal("second stop timed out")
 	}
 }
+
+// P2.5-06 复审 B2：stop 超时后 reset 再 spawn，不能触发
+// "sync: WaitGroup is reused before previous Wait has returned"。
+// 旧实现共享 m.hubBgWG，旧 waiter 还在 Wait 时新 generation 就 Add。
+func TestHubBackgroundResetAfterTimeoutIsGenerationLocal(t *testing.T) {
+	m, _ := testManager(t)
+	release := make(chan struct{})
+	m.spawnHubBackground(func(context.Context) { <-release }) // 故意忽略 cancel
+	if m.stopHubBackground(20 * time.Millisecond) {
+		t.Fatal("stop must time out while task ignores cancellation")
+	}
+	m.resetHubBackgroundIfClosed()
+	ran := make(chan struct{}, 1)
+	m.spawnHubBackground(func(context.Context) { ran <- struct{}{} })
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
+		t.Fatal("new generation did not run")
+	}
+	close(release)
+	if !m.stopHubBackground(time.Second) {
+		t.Fatal("stop after release timed out")
+	}
+}
+
+// P2.5-06 复审 B1：彻底关停后禁止重建 runtime/DM 会话/后台任务，
+// 否则迟到结算会把已关闭的运行时复活并写 TempDir。
+func TestHubShutdownBlocksLateRuntimeRebuild(t *testing.T) {
+	m, _ := testManager(t)
+	ws := m.hubRuntime("ag_shutdown")
+	if ws == nil {
+		t.Fatal("hub runtime not created")
+	}
+	m.shutdownHubRuntimes()
+	if again := m.hubRuntime("ag_shutdown"); again != nil {
+		t.Fatal("hubRuntime must refuse rebuild after shutdown")
+	}
+	if _, err := m.hubDMSession("ag_shutdown"); err == nil {
+		t.Fatal("hubDMSession must fail after shutdown")
+	}
+	ran := make(chan struct{}, 1)
+	m.spawnHubBackground(func(context.Context) { ran <- struct{}{} })
+	select {
+	case <-ran:
+		t.Fatal("spawnHubBackground must be no-op after shutdown")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
