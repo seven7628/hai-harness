@@ -162,3 +162,19 @@ func TestRegisterArtifactConcurrentVersions(t *testing.T) {
 		}
 	}
 }
+
+// P3a-07 三轮非阻塞：复制失败（源不存在）不能留下元数据。
+func TestRegisterArtifactMissingSourceNoMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &Artifact{OwnerAgentID: "ag_aaaaaaaa", Name: "missing.md", Path: "missing.md", SourcePath: t.TempDir() + "/nope.md"}
+	if err := RegisterArtifact(ctx, st, a); err == nil {
+		t.Fatal("missing source must fail")
+	}
+	if list, _ := st.ListArtifacts(ctx); len(list) != 0 {
+		t.Fatalf("metadata left behind: %+v", list)
+	}
+}

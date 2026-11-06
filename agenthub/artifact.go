@@ -35,7 +35,12 @@ func RegisterArtifact(ctx context.Context, st Store, a *Artifact) error {
 	}
 	artifactVersionMu.Lock()
 	defer artifactVersionMu.Unlock()
-	if strings.TrimSpace(string(a.ID)) == "" {
+	if id := strings.TrimSpace(string(a.ID)); id != "" {
+		// 调用方自带的 ID 必须先验，再进入复制步骤；否则 "../" 会在校验前落文件。
+		if !validID(id) || !strings.HasPrefix(id, PrefixArtifact+"_") {
+			return fmt.Errorf("%w: artifact id %q", ErrInvalid, id)
+		}
+	} else {
 		id, err := st.AllocateID(ctx, PrefixArtifact)
 		if err != nil {
 			return err
