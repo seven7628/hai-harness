@@ -1,6 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import remarkFrontmatter from 'remark-frontmatter'
@@ -22,6 +21,7 @@ import { markTableNumbers } from '../lib/tableNumbers'
 import { useSkin } from '../lib/useSkin'
 import { t as tStatic, useLang, useT } from '../i18n'
 import { splitStreamingMarkdown } from '../lib/mdSplit'
+import { hastToElements, makeKey, parseMarkdown } from '../lib/mdPipeline'
 
 // 沙箱 UI 回复协议的校验常量 —— 与 vendor/visual-skills/visual-ui/references/reply-protocol.md
 // 的「Receiving」一节逐条对应。改这里必须同步改协议文档，反之亦然：
@@ -1143,11 +1143,16 @@ const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming }: { 
     () => [[rehypeRawHtml, { dark }], rehypeHeadingIds, rehypeTableNumbers, rehypeKatex] as const,
     [dark],
   )
+  /* 解析走自建管线（见 lib/mdPipeline.ts）：非流式时 hast 树按「语言 + 主题 + 文本」缓存，
+     切会话/刷新回来只重建元素、不重新解析；流式不缓存（文本每 chunk 都在变）。 */
+  const tree = parseMarkdown(text, {
+    key: streaming ? null : makeKey([lang, dark], text),
+    remarkPlugins,
+    rehypePlugins,
+  })
   return (
-    <ReactMarkdown
-        remarkPlugins={remarkPlugins as never}
-        rehypePlugins={rehypePlugins as never}
-        components={{
+    <>
+      {hastToElements(tree, {
           code({ className, children, node }) {
             // 原始 HTML 的 <code>（sanitize 后打了标记）：不是 markdown 围栏，不套高亮/复制/行号
             // ——它通常嵌在原始 <pre> 里，那块 <pre> 才是版式主体（见下面的 pre 覆盖）。
@@ -1228,10 +1233,8 @@ const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming }: { 
               <table {...props}>{children}</table>
             </div>
           ),
-        }}
-      >
-      {text}
-    </ReactMarkdown>
+      })}
+    </>
   )
 })
 

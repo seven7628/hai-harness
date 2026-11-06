@@ -99,6 +99,6 @@ for (const variant of ['plain', 'rich']) {
 console.log('\n=== 结论 ===')
 const share = (1 - rows.plain.first.script / rows.rich.first.script) * 100
 console.log(`同字数对照：plain 挂载 ${rows.plain.first.script}s → rich 挂载 ${rows.rich.first.script}s（结构化多花 ${(rows.rich.first.script - rows.plain.first.script).toFixed(3)}s，占 rich 的 ${share.toFixed(0)}%）`)
-console.log(`切走再回来：rich ${rows.rich.first.script}s → ${rows.rich.again.script}s（没有跨挂载复用 → 每次都重新解析）`)
+console.log(`切走再回来：rich ${rows.rich.first.script}s → ${rows.rich.again.script}s（缓存命中的话第二次应当明显更便宜）`)
 console.log(`一条 6k 字 rich 回答的挂载成本 ≈ ${((rows.rich.first.script * 1000 - rows.plain.first.script * 1000) / MSGS).toFixed(1)}ms`)
 await b.close?.()
