@@ -1366,7 +1366,7 @@
           "P2.5-06",
           "P2.5-07"
         ],
-        "note": "P2.5 基础设施前置；口径已拍板：D1 B+硬停、D2 C、D3 A、D4 AgentEnd 一次、D5 B→A、D6 FIFO。02/03/06/07 可直接推进。"
+        "note": "P2.5 基础设施前置 gate 已闭合：01–07 全部 done + 独立 Review passed；可开 P3b-01。口径：D1 B+硬停、D2 C、D3 A、D4 AgentEnd 一次、D5 B→A、D6 FIFO。P2.5-08 视觉验收可与 P3b 并行。"
       }
     ],
     "rules": [
