@@ -1017,10 +1017,10 @@
     },
     "P2-07": {
       "status": "review",
-      "commit": "ad43330 feat(hub-p2-07): 预算/并发/去重/链长护栏 + 熔断可见",
-      "review": "pending",
-      "reviewNote": "实现：agenthub.Guard 建账前校验①链长>6 ②同(origin,target,instruction) 10 分钟重复 ③同发起者在途≥3 ④智能体/群/全局日预算（UTC 日、只累加 CostPriced=true）。Queue.CheckGuard + WorkspaceService.Guard 接入 buildHubEngine（profile.policy）。拒绝时 session_send 发 hub_alert（blocked_budget/concurrency_limit/duplicate_task/chain_too_deep）。单任务预算结算时判：超限落 blocked_budget（新增 Running→blocked_budget 迁移 + Finish 允许）并告警；CostPriced=false 不判。测试：TestGuard* 5 条 + 生产链路 hub_alert + 结算 blocked_budget。未接线：群/全局预算来自 hub.json defaults（P3 群组装配时接）。验证：agenthub + desktop/bridge 全量绿（41s）。",
-      "reviewBatch": "C"
+      "commit": "ad43330 + 1d25da7 + 8f27f50",
+      "review": "re-review_pending",
+      "reviewNote": "实现：agenthub.Guard 建账前校验①链长>6 ②同(origin,target,instruction) 10 分钟重复 ③同发起者在途≥3 ④智能体/群/全局日预算（UTC 日、只累加 CostPriced=true）。Queue.CheckGuard + WorkspaceService.Guard 接入 buildHubEngine（profile.policy）。拒绝时 session_send 发 hub_alert（blocked_budget/concurrency_limit/duplicate_task/chain_too_deep）。单任务预算结算时判：超限落 blocked_budget（新增 Running→blocked_budget 迁移 + Finish 允许）并告警；CostPriced=false 不判。测试：TestGuard* 5 条 + 生产链路 hub_alert + 结算 blocked_budget。未接线：群/全局预算来自 hub.json defaults（P3 群组装配时接）。验证：agenthub + desktop/bridge 全量绿（41s）。 首轮复审 change_requested（task-9kbfkb54，对象 253ea59）：Guard 本体（链长/去重/并发/预算）集成后全绿、7 变异全杀；B1 blocked_budget 未接入回推——MarkNotified 拒绝，每次熔断多一条 notify_failed 假告警；恢复不扫该状态，首次回推失败结果永久丢失。修复（1d25da7 + 8f27f50）：MarkNotified 允许 blocked_budget 并占 NotifiedRuns（状态保留 blocked_budget，不转 delivered）；recoverHubTasks 终态补 blocked_budget；回归超限结算与恢复重推。待第二轮复审（对象 8f27f50）。非阻塞：N1 预算默认 0=不限额需产品口径；N2 hub_alert 缺 code/level；N3 无 budget Need；N4 按 UpdatedAt 归日；N5 q.mu 内全账本扫描；N6 hub_task_retry 绕过 Guard；N7 重试 chain 第 7 次锁死；N12 护栏顺序/同 ClientMsgID 无仓库回归。",
+      "reviewBatch": "C-rereview"
     },
     "P2-08": {
       "status": "review",
@@ -1100,8 +1100,8 @@
       "in_review": 13,
       "not_started": 15,
       "in_review_breakdown": {
-        "re_review_pending": 2,
-        "initial_pending": 11
+        "re_review_pending": 3,
+        "initial_pending": 10
       }
     },
     "batches": [
