@@ -65,6 +65,10 @@ func (l GuardLimits) withDefaults() GuardLimits {
 type Guard struct {
 	Limits GuardLimits
 	Now    func() time.Time
+	// GroupDailyBudget 按群取日预算：初始派发时 GuardLimits 里没有群上下文，
+	// 由调用方注入从 Store 读 Group.Policy 的钩子。限制已显式设置时不调用。
+	// 读取失败必须返回错误（不能把「读不到预算」当成「不限额」）。
+	GroupDailyBudget func(context.Context, GroupID) (float64, error)
 }
 
 // Check 在建账前判定；返回包装后的哨兵错误，调用方用 errors.Is 分类。
@@ -76,6 +80,13 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 		return fmt.Errorf("%w: guard 参数为空", ErrInvalid)
 	}
 	lim := g.Limits.withDefaults()
+	if t.Origin.GroupID != "" && lim.GroupDailyBudgetUSD == 0 && g.GroupDailyBudget != nil {
+		groupLimit, err := g.GroupDailyBudget(ctx, t.Origin.GroupID)
+		if err != nil {
+			return fmt.Errorf("hub guard: 读取群 %s 日预算失败: %w", t.Origin.GroupID, err)
+		}
+		lim.GroupDailyBudgetUSD = groupLimit
+	}
 	now := time.Now().UTC()
 	if g.Now != nil {
 		now = g.Now().UTC()

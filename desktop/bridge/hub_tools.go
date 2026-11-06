@@ -77,6 +77,30 @@ func (m *manager) hubSandbox(home string, toolsPolicy agenthub.ToolPolicy, runPo
 	return sb
 }
 
+// hubWorkspaceGuard 构造 session_send 的预算/并发护栏。群日预算不在这里固化：
+// 任务 Origin.GroupID 只有 Send 时才知道，Guard 通过钩子按群现读（P2.5-04 B1）。
+func (m *manager) hubWorkspaceGuard(p agenthub.AgentProfile) *agenthub.Guard {
+	limits := agenthub.GuardLimits{
+		MaxTaskCostUSD:       p.Policy.MaxTaskCostUSD,
+		DailyBudgetUSD:       p.Policy.DailyBudgetUSD,
+		GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
+	}
+	return &agenthub.Guard{
+		Limits: limits,
+		GroupDailyBudget: func(ctx context.Context, gid agenthub.GroupID) (float64, error) {
+			st, err := m.hubStore()
+			if err != nil {
+				return 0, err
+			}
+			g, err := st.LoadGroup(ctx, gid)
+			if err != nil {
+				return 0, err
+			}
+			return g.Policy.DailyBudgetUSD, nil
+		},
+	}
+}
+
 // buildHubEngine 装配智能体的工具引擎，并按 Profile 应用工具开关。
 // 返回的 effortRef 与主 loop 共享（切档时子智能体同档）。
 func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSessionSpec, reg *subagent.Registry, qw *events.QuestionWaiter, bgCtx func() context.Context) (*tools.Engine, *subagentEffortRef) {
@@ -99,11 +123,9 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 	svc.Origin = agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID}
 	if q, err := m.hubQueueFor(); err == nil {
 		svc.Queue = q // P2-03：任务落账本 + 空闲闸门
-		// P2-07：预算/并发/去重/链长护栏（profile 预算；群/全局预算归 P3 群组装配）。
-		svc.Guard = &agenthub.Guard{Limits: agenthub.GuardLimits{
-			MaxTaskCostUSD: p.Policy.MaxTaskCostUSD, DailyBudgetUSD: p.Policy.DailyBudgetUSD,
-			GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
-		}}
+		// P2-07：预算/并发/去重/链长护栏。群日预算在初始派发时按任务
+		// Origin.GroupID 现读 Group.Policy（DM 引擎自己不知道群上下文）。
+		svc.Guard = m.hubWorkspaceGuard(p)
 	} else {
 		// 降级直派是 fail-open：至少留一条诊断，别让闸门静默失效。
 		m.out.writeLine(map[string]any{

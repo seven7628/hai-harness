@@ -136,6 +136,84 @@ func TestGuardBudgets(t *testing.T) {
 	}
 }
 
+func TestGuardGroupBudgetHookResolvesInitialDispatch(t *testing.T) {
+	st, l := newGuardStore(t)
+	ctx := context.Background()
+	const gid = GroupID("grp_budget")
+	if err := st.SaveGroup(ctx, &Group{
+		ID: gid, Name: "预算群", Policy: GroupPolicy{DailyBudgetUSD: 4},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	spent := guardTask("已花群预算")
+	spent.Origin.Kind = OriginGroup
+	spent.Origin.GroupID = gid
+	created, err := l.Create(ctx, spent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Transition(ctx, created.ID, TaskDispatched, TransitionOptions{At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Finish(ctx, FinishInput{
+		TaskID: created.ID, RunID: "r-group", Status: TaskCompleted,
+		Result: &TaskResult{Usage: Usage{CostPriced: true, CostUSD: 5}},
+		At:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lookups := 0
+	g := &Guard{
+		Limits: GuardLimits{MaxConcurrent: 10},
+		GroupDailyBudget: func(_ context.Context, got GroupID) (float64, error) {
+			lookups++
+			if got != gid {
+				t.Fatalf("group lookup id = %q, want %q", got, gid)
+			}
+			grp, err := st.LoadGroup(ctx, got)
+			if err != nil {
+				return 0, err
+			}
+			return grp.Policy.DailyBudgetUSD, nil
+		},
+	}
+	task := guardTask("群任务")
+	task.Origin.Kind = OriginGroup
+	task.Origin.GroupID = gid
+	if err := g.Check(ctx, st, task); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("initial dispatch err = %v, want group budget exceeded", err)
+	}
+	if lookups != 1 {
+		t.Fatalf("group lookups = %d, want 1", lookups)
+	}
+
+	// 显式设置限额时不再调用钩子（retry 路径已带群预算）。
+	g.Limits.GroupDailyBudgetUSD = 10
+	if err := g.Check(ctx, st, task); err != nil {
+		t.Fatalf("explicit group limit: %v", err)
+	}
+	if lookups != 1 {
+		t.Fatalf("explicit limit must not re-read group, lookups = %d", lookups)
+	}
+}
+
+func TestGuardGroupBudgetHookFailsClosed(t *testing.T) {
+	st, _ := newGuardStore(t)
+	g := &Guard{
+		Limits: GuardLimits{MaxConcurrent: 10},
+		GroupDailyBudget: func(context.Context, GroupID) (float64, error) {
+			return 0, ErrNotFound
+		},
+	}
+	task := guardTask("群任务")
+	task.Origin.GroupID = "grp_missing"
+	if err := g.Check(context.Background(), st, task); err == nil || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("guard err = %v, want ErrNotFound (fail closed)", err)
+	}
+}
+
 func TestGuardOverTaskBudget(t *testing.T) {
 	l := GuardLimits{MaxTaskCostUSD: 2}
 	if over, _ := l.OverTaskBudget(Usage{CostPriced: true, CostUSD: 2.5}); !over {

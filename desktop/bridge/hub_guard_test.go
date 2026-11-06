@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -162,6 +163,191 @@ func TestHubFinishBlocksOverTaskBudget(t *testing.T) {
 }
 
 // P2.5-04：初始/重试护栏必须同时带群预算与全局预算，不能只在 retry 路径带群。
+// P2.5-04 B1：初始派发（session_send）不再依赖 GuardLimits 里预置群预算，
+// 而是按任务 Origin.GroupID 现读 Group.Policy —— 群预算在第一次派发就生效。
+func TestHubWorkspaceGuardResolvesGroupBudgetAtDispatch(t *testing.T) {
+	m, buf := testManager(t)
+	agent := createHubAgent(t, m, buf, 1, "GroupGuardOwner")
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_group_create", map[string]any{
+		"name":    "初始派发预算群",
+		"members": []map[string]any{{"agent_id": string(agent.ID), "role": "owner"}},
+		"policy":  map[string]any{"daily_budget_usd": 50},
+	})
+	if !ok {
+		t.Fatalf("group create: %s", errMsg)
+	}
+	group := groupFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	old, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: group.ID, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s-old"},
+		Title:  "已花群预算", Instruction: "已花群预算", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), old.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Finish(context.Background(), agenthub.FinishInput{
+		TaskID: old.ID, RunID: "r-old", Status: agenthub.TaskCompleted,
+		Result: &agenthub.TaskResult{Usage: agenthub.Usage{CostPriced: true, CostUSD: 55}},
+		At:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	guard := m.hubWorkspaceGuard(agent)
+	if guard.Limits.GroupDailyBudgetUSD != 0 {
+		t.Fatalf("initial guard must not hardcode group budget, got %v", guard.Limits.GroupDailyBudgetUSD)
+	}
+	fresh := &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: group.ID, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s-new"},
+		Title:  "新群任务", Instruction: "新群任务", Callback: agenthub.CallbackAgentEnd,
+	}
+	err = guard.Check(context.Background(), st, fresh)
+	if !errors.Is(err, agenthub.ErrBudgetExceeded) {
+		t.Fatalf("initial dispatch err = %v, want group budget exceeded", err)
+	}
+	if !strings.Contains(err.Error(), "群日预算") {
+		t.Fatalf("err = %v, want group budget reason", err)
+	}
+}
+
+// P2.5-04 B2：真实 LLMEnd → 预算检查 → Interrupt 链路。
+// 只测孤立 hubBudgetCheck 无法证明 createIn 的接线与累计/停止门。
+func TestHubEmitLLMEndHardStopsAtTaskBudget(t *testing.T) {
+	m, buf := testManager(t)
+	agent := createHubAgent(t, m, buf, 1, "EmitBudgetAgent")
+	ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_update", map[string]any{
+		"agent_id": string(agent.ID),
+		"patch":    map[string]any{"policy": map[string]any{"max_task_cost_usd": 0.01}},
+	})
+	if !ok {
+		t.Fatalf("update: %s", errMsg)
+	}
+	wsPath := t.TempDir()
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-emit-budget", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: agent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: wsPath, SessionID: bs.id},
+		Title:  "运行中预算", Instruction: "运行中预算", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	bs.hubTaskIDs = []agenthub.TaskID{task.ID}
+	bs.hubTaskSpentMicro.Store(0)
+	bs.hubBudgetStop.Store(false)
+
+	// 上游自报 $0.05：不依赖价表，确保支出可判定且超过 $0.01 上限。
+	bs.emit(&events.LLMEnd{
+		RunId: "r-budget", RequestId: "q-budget", Model: "deepseek-v4-flash",
+		Usage: &core.Usage{
+			Input: 100, Output: 10, TotalTokens: 110,
+			Cost: core.Cost{Source: core.CostSourceUpstream, Total: 50000, Priced: true},
+		},
+		FinishReason: core.FinishReasonStop,
+		Timestamp:    time.Now(), EventType: events.LLMEndType,
+	})
+	if !bs.hubBudgetStop.Load() {
+		t.Fatal("LLMEnd 超单任务预算后 hubBudgetStop 未置位（预算接线断了）")
+	}
+	if reason, _ := bs.hubBudgetReason.Load().(string); !strings.Contains(reason, "单任务") {
+		t.Fatalf("budget reason = %q, want 单任务", reason)
+	}
+	if got := bs.hubTaskSpentMicro.Load(); got < 50000 {
+		t.Fatalf("spent micro = %d, want >= 50000", got)
+	}
+}
+
+func TestHubEmitLLMEndAccumulatesAndResetsPerBatch(t *testing.T) {
+	m, _ := testManager(t)
+	wsPath := t.TempDir()
+	bs, err := m.create(wsPath, "s-emit-acc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs.hubTaskIDs = []agenthub.TaskID{"task_budget_acc"}
+	bs.hubTaskSpentMicro.Store(0)
+	bs.hubBudgetStop.Store(false)
+	bs.hubBudgetReason.Store("")
+
+	var calls int
+	var seen []float64
+	bs.hubBudgetCheck = func(_ agenthub.TaskID, spent float64) (bool, string) {
+		calls++
+		seen = append(seen, spent)
+		if calls == 2 {
+			return true, "预算到顶"
+		}
+		return false, ""
+	}
+	emit := func(totalMicro int64) {
+		bs.emit(&events.LLMEnd{
+			RunId: "r-acc", Model: "deepseek-v4-flash",
+			Usage: &core.Usage{
+				Input: 10, Output: 5, TotalTokens: 15,
+				Cost: core.Cost{Source: core.CostSourceUpstream, Total: totalMicro, Priced: true},
+			},
+			FinishReason: core.FinishReasonStop,
+			Timestamp:    time.Now(), EventType: events.LLMEndType,
+		})
+	}
+	emit(10000)
+	emit(20000)
+	if calls != 2 || len(seen) != 2 {
+		t.Fatalf("budget checks = %d, seen = %v; want 2 calls", calls, seen)
+	}
+	if seen[0] < 0.01 || seen[1] < 0.03 {
+		t.Fatalf("spent not accumulated: %v", seen)
+	}
+	if !bs.hubBudgetStop.Load() {
+		t.Fatal("stop not latched after budget check returned true")
+	}
+	// 已停后继续到 LLMEnd：花费仍累计，但不能再次触发检查/Interrupt。
+	emit(30000)
+	if calls != 2 {
+		t.Fatalf("budget check called after stop: calls = %d", calls)
+	}
+	if got := bs.hubTaskSpentMicro.Load(); got < 60000 {
+		t.Fatalf("spent after stop = %d, want >= 60000", got)
+	}
+	// 新 batch 开口：花费/停止位归零，检查恢复。
+	bs.emit(&events.UserInputsConsumed{
+		UserTexts: []string{"继续"}, Timestamp: time.Now(),
+		EventType: events.UserInputsConsumedType,
+	})
+	if bs.hubBudgetStop.Load() || bs.hubTaskSpentMicro.Load() != 0 {
+		t.Fatalf("new batch did not reset: stop=%v spent=%d", bs.hubBudgetStop.Load(), bs.hubTaskSpentMicro.Load())
+	}
+	// 生产上新 batch 由 hub_task header 重新绑定任务；这里直接恢复绑定位。
+	bs.hubTaskIDs = []agenthub.TaskID{"task_budget_acc"}
+	emit(10000)
+	if calls != 3 || len(seen) != 3 || seen[2] < 0.01 || seen[2] > 0.02 {
+		t.Fatalf("first check after reset: calls=%d seen=%v", calls, seen)
+	}
+}
+
 func TestHubGuardForTaskIncludesGroupAndGlobalBudget(t *testing.T) {
 	m, buf := testManager(t)
 	agent := createHubAgent(t, m, buf, 1, "BudgetOwner")
