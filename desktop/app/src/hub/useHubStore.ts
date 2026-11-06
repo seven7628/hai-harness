@@ -57,7 +57,7 @@ interface HubState {
   groupsLoading: boolean
   activeGroupId: string | null
   groupMessages: HubMessage[]
-  groupRound: HubRound | null
+  groupRounds: HubRound[]
   groupActivity: HubGroupActivity[]
   groupSending: boolean
 
@@ -76,6 +76,7 @@ interface HubState {
   setView(view: 'chat' | 'run'): void
   loadGroups(): Promise<void>
   selectGroup(groupID: string): Promise<void>
+  loadGroupActivity(groupID?: string): Promise<void>
   clearGroup(): void
   sendGroup(text: string): Promise<boolean>
   loadTasks(): Promise<void>
@@ -89,6 +90,19 @@ interface HubState {
 
 let optimisticSeq = 0 // 负数临时 seq，避免与真实 seq（正数）混淆
 let groupSendGen = 0 // 群发送代际：切群/新一轮发送后，旧响应不得改状态
+let groupSelectGen = 0 // 选群代际：A→B→A 时旧响应不得覆盖新状态
+
+function roundHasAction(r: HubRound | null | undefined): boolean {
+  return !!r && (!!r.mention_all || (r.targets ?? []).length > 0 || (r.dropped ?? 0) > 0)
+}
+
+function upsertRound(list: HubRound[], round: HubRound | null | undefined): HubRound[] {
+  if (!roundHasAction(round) || !round) return list
+  const next = list.filter((r) => r.id !== round.id)
+  next.push(round)
+  next.sort((a, b) => (a.trigger_seq ?? 0) - (b.trigger_seq ?? 0))
+  return next
+}
 
 export const useHubStore = create<HubState>((set, get) => ({
   open: false,
@@ -121,7 +135,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   groupsLoading: false,
   activeGroupId: null,
   groupMessages: [],
-  groupRound: null,
+  groupRounds: [],
   groupActivity: [],
   groupSending: false,
 
@@ -162,12 +176,13 @@ export const useHubStore = create<HubState>((set, get) => ({
   async select(agentID) {
     if (!agentID) return
     groupSendGen++
+    groupSelectGen++
     set((s) => ({
       activeId: agentID,
       activeGroupId: null,
       groupMessages: [],
       groupActivity: [],
-      groupRound: null,
+      groupRounds: [],
       groupSending: false,
       messages: [],
       hasMore: false,
@@ -391,22 +406,23 @@ export const useHubStore = create<HubState>((set, get) => ({
   async selectGroup(groupID) {
     if (!groupID) return
     groupSendGen++
+    const gen = ++groupSelectGen
     set({
       activeGroupId: groupID, activeId: null, profile: null, sid: null,
-      groupMessages: [], groupActivity: [], groupRound: null, groupSending: false,
+      groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false,
       messages: [], live: '', rootRunId: null,
       error: null, loading: true,
     })
     const r = await hubCommand<{ group?: HubGroup }>('hub_group_get', { group_id: groupID })
-    if (get().activeGroupId !== groupID) return
+    if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     if (!r.ok) {
       set({ loading: false, error: r.error || '打开群组失败' })
       return
     }
     const h = await hubCommand<{ messages?: HubMessage[] }>('hub_group_history', { group_id: groupID, limit: 50 })
-    if (get().activeGroupId !== groupID) return
+    if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     const a = await hubCommand<{ activity?: HubGroupActivity[] }>('hub_group_activity', { group_id: groupID })
-    if (get().activeGroupId !== groupID) return
+    if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     set({
       loading: false,
       groupMessages: h.ok ? (h.data?.messages ?? []) : [],
@@ -415,9 +431,17 @@ export const useHubStore = create<HubState>((set, get) => ({
     })
   },
 
+  async loadGroupActivity(groupID) {
+    const gid = groupID ?? get().activeGroupId
+    if (!gid) return
+    const a = await hubCommand<{ activity?: HubGroupActivity[] }>('hub_group_activity', { group_id: gid })
+    if (get().activeGroupId !== gid) return
+    if (a.ok) set({ groupActivity: a.data?.activity ?? [] })
+  },
+
   clearGroup() {
     groupSendGen++
-    set({ activeGroupId: null, groupMessages: [], groupActivity: [], groupRound: null, groupSending: false })
+    set({ activeGroupId: null, groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false })
   },
 
   async sendGroup(text) {
@@ -444,9 +468,10 @@ export const useHubStore = create<HubState>((set, get) => ({
     }
     set((s) => ({
       groupSending: false,
-      groupRound: r.data?.round ?? s.groupRound,
+      groupRounds: upsertRound(s.groupRounds, r.data?.round),
       groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId && r.data?.seq ? { ...m, seq: r.data.seq, pending: false } : m)),
     }))
+    void get().loadGroupActivity(activeGroupId)
     return true
   },
 
@@ -630,7 +655,8 @@ export const useHubStore = create<HubState>((set, get) => ({
       }
       case 'hub_round': {
         if (!ev.group_id || ev.group_id !== get().activeGroupId) return
-        set({ groupRound: ev.round ?? null })
+        set((s) => ({ groupRounds: upsertRound(s.groupRounds, ev.round) }))
+        void get().loadGroupActivity(ev.group_id)
         return
       }
       case 'hub_agent_status': {

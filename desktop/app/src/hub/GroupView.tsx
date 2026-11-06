@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { SendIcon } from '../components/icons'
 import { useHubStore } from './useHubStore'
-import { GroupBubble } from './MessageBubble'
+import { GroupBubble, parseRoutingText } from './MessageBubble'
 import { RoundGroup, roundKey } from './RoundGroup'
 import { RoundActivityDigest } from './RoundActivityDigest'
 import type { HubGroup, HubGroupMember, HubMessage, HubRound } from './types'
@@ -16,7 +16,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const t = useT()
   const messages = useHubStore((s) => s.groupMessages)
   const activity = useHubStore((s) => s.groupActivity)
-  const round = useHubStore((s) => s.groupRound)
+  const rounds = useHubStore((s) => s.groupRounds)
   const sending = useHubStore((s) => s.groupSending)
   const send = useHubStore((s) => s.sendGroup)
   const agents = useHubStore((s) => s.agents)
@@ -49,7 +49,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
     if (typeof localStorage !== 'undefined') localStorage.setItem('hub.groupDisplay', next)
   }
 
-  const items = useMemo(() => buildThreadItems(messages, round), [messages, round])
+  const items = useMemo(() => buildThreadItems(messages, rounds), [messages, rounds])
 
   return (
     <section className="hub-dm hub-group-view">
@@ -86,7 +86,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
               <div key={`${a.after_seq}-${i}`} className={`hub-run-row ${a.status ?? ''}`}>
                 <span className="hub-chip">{a.kind === 'routing' ? '路由' : '工具'}</span>
                 <span className="hub-run-name">{a.name || a.kind}</span>
-                <span className="hub-muted">{a.summary}</span>
+                <span className="hub-muted">{a.kind === 'routing' ? routingSummary(a.summary ?? '', agentNames) : a.summary}</span>
                 <span className="hub-muted">#{a.after_seq}</span>
               </div>
             ))}
@@ -125,14 +125,18 @@ export default function GroupView({ group }: { group: HubGroup }) {
   )
 }
 
-function buildThreadItems(messages: HubMessage[], round: HubRound | null): ThreadItem[] {
-  const showRound = !!round && (round.mention_all || (round.targets ?? []).length > 0 || (round.dropped ?? 0) > 0)
+function buildThreadItems(messages: HubMessage[], rounds: HubRound[]): ThreadItem[] {
   const items: ThreadItem[] = []
+  const bySeq = new Map<number, HubRound[]>()
+  for (const r of rounds) {
+    const seq = r.trigger_seq ?? 0
+    if (!seq) continue
+    bySeq.set(seq, [...(bySeq.get(seq) ?? []), r])
+  }
   for (const msg of messages) {
     items.push({ kind: 'message', msg })
-    if (showRound && round && msg.seq === round.trigger_seq) items.push({ kind: 'round', round })
+    for (const r of bySeq.get(msg.seq) ?? []) items.push({ kind: 'round', round: r })
   }
-  // 历史回执消息本身就是动作行；若直播 round 没有对应消息（正常情况），不会重复。
   return items
 }
 
@@ -177,6 +181,13 @@ function renderThread(items: ThreadItem[], names: Record<string, string>, groupe
   }
   flush()
   return nodes
+}
+
+function routingSummary(text: string, names: Record<string, string>): string {
+  const parsed = parseRoutingText(text)
+  if (!parsed) return text
+  const targets = parsed.targets.map((id) => names[id] ?? id)
+  return `${parsed.all ? '@all ' : ''}${targets.length ? `唤醒 ${targets.join('、')}` : '无人被唤醒'}${parsed.dropped ? `（丢弃 ${parsed.dropped} 个）` : ''}`
 }
 
 function MemberStack({ members, names }: { members: HubGroupMember[]; names: Record<string, string> }) {
