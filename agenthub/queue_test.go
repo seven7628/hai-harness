@@ -5,6 +5,7 @@ package agenthub
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -17,6 +18,9 @@ type queueFakeOps struct {
 	statusErr    error
 	duplicate    bool
 	dispatchWait bool
+	// dispatchStarted 在 Dispatch 入口非阻塞发信号（缓冲 1），用于把
+	// 「已出队、正在投递」的窗口做成确定性的测试锚点。
+	dispatchStarted chan struct{}
 }
 
 func (f *queueFakeOps) ListWorkspaces(context.Context) ([]WorkspaceInfo, error) { return nil, nil }
@@ -39,6 +43,12 @@ func (f *queueFakeOps) CreateSession(context.Context, CreateSessionReq) (Session
 }
 
 func (f *queueFakeOps) Dispatch(ctx context.Context, req DispatchReq) (DispatchResult, error) {
+	if f.dispatchStarted != nil {
+		select {
+		case f.dispatchStarted <- struct{}{}:
+		default:
+		}
+	}
 	if f.dispatchWait {
 		<-ctx.Done()
 		return DispatchResult{}, ctx.Err()
@@ -538,8 +548,8 @@ func TestQueuePumpDuplicateIsNotSilentSuccess(t *testing.T) {
 	}
 }
 
-// P2-06 复审 B-3（REG-3）：cancel 的 busy 判定必须在 q.mu 内求值。
-// 测试直接占住 q.mu 模拟 Pump 持锁派发：旧实现会立刻调用 busy 返回；修复后
+// P2-06 复审 B-3（REG-3）：cancel 的 busy 判定必须在目标锁内求值。
+// 测试直接占住目标锁模拟 Pump 持锁派发：旧实现会立刻调用 busy 返回；修复后
 // 必须等锁释放，才能与 Transition(queued→dispatched)→Dispatch 串行。
 func TestQueueCancelDispatchedSerializedWithDispatch(t *testing.T) {
 	ops := &queueFakeOps{}
@@ -548,7 +558,7 @@ func TestQueueCancelDispatchedSerializedWithDispatch(t *testing.T) {
 	if err != nil || created.Status != TaskDispatched {
 		t.Fatalf("submit = %+v, %v", created, err)
 	}
-	q.mu.Lock()
+	unlockTarget := q.targets.lock(queueKey("/w", "s1"))
 	busyCalled := make(chan struct{})
 	done := make(chan struct{})
 	var got *Task
@@ -563,20 +573,20 @@ func TestQueueCancelDispatchedSerializedWithDispatch(t *testing.T) {
 	}()
 	select {
 	case <-busyCalled:
-		q.mu.Unlock()
+		unlockTarget()
 		<-done
-		t.Fatal("busy 在 q.mu 外求值：取消可与 Pump 的 Transition→Dispatch 交错")
+		t.Fatal("busy 在目标锁外求值：取消可与 Pump 的 Transition→Dispatch 交错")
 	case <-time.After(200 * time.Millisecond):
 	}
-	q.mu.Unlock()
+	unlockTarget()
 	<-done
 	if cancelErr != nil || !did || got == nil || got.Status != TaskCanceled {
 		t.Fatalf("cancel = %+v did=%v err=%v; want canceled/true", got, did, cancelErr)
 	}
 }
 
-// P2-06 复审测试债：CancelQueued 的 Replay/判状态/Transition 必须全程持 q.mu。
-// 占住 q.mu 模拟 Pump 派发窗口；旧实现会在锁外直接返回 canceled。
+// P2-06 复审测试债：CancelQueued 的 Replay/判状态/Transition 必须全程持目标锁。
+// 占住目标锁模拟 Pump 派发窗口；旧实现会在锁外直接返回 canceled。
 func TestQueueCancelQueuedSerializedWithPump(t *testing.T) {
 	ops := &queueFakeOps{running: true}
 	q, _ := newTestQueue(t, ops)
@@ -584,7 +594,7 @@ func TestQueueCancelQueuedSerializedWithPump(t *testing.T) {
 	if err != nil || created.Status != TaskQueued {
 		t.Fatalf("submit = %+v, %v", created, err)
 	}
-	q.mu.Lock()
+	unlockTarget := q.targets.lock(queueKey("/w", "s1"))
 	done := make(chan struct{})
 	var got *Task
 	var cancelErr error
@@ -594,11 +604,11 @@ func TestQueueCancelQueuedSerializedWithPump(t *testing.T) {
 	}()
 	select {
 	case <-done:
-		q.mu.Unlock()
-		t.Fatal("CancelQueued 在 q.mu 外返回：Pump 可在窗口内派发")
+		unlockTarget()
+		t.Fatal("CancelQueued 在目标锁外返回：Pump 可在窗口内派发")
 	case <-time.After(200 * time.Millisecond):
 	}
-	q.mu.Unlock()
+	unlockTarget()
 	<-done
 	if cancelErr != nil || got == nil || got.Status != TaskCanceled {
 		t.Fatalf("cancel = %+v, %v; want canceled", got, cancelErr)
@@ -725,7 +735,7 @@ func TestSubmitGuardedReturnsExistingBeforeGuard(t *testing.T) {
 // P2.5-06 复审 N1：出队后 Dispatch 被 ctx 取消，收尾仍必须落 failed，
 // 不能把任务永久留在 dispatched（只有重启恢复才能收）。
 func TestQueueCancelAfterDequeueSettlesFailed(t *testing.T) {
-	ops := &queueFakeOps{dispatchWait: true}
+	ops := &queueFakeOps{dispatchWait: true, dispatchStarted: make(chan struct{}, 1)}
 	q, _ := newTestQueue(t, ops)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -733,7 +743,11 @@ func TestQueueCancelAfterDequeueSettlesFailed(t *testing.T) {
 	task.ClientMsgID = "cancel-after-dequeue"
 	done := make(chan error, 1)
 	go func() { _, err := q.Submit(ctx, task); done <- err }()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-ops.dispatchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Submit 未在 2s 内进入 Dispatch")
+	}
 	cancel()
 	select {
 	case <-done:
@@ -746,5 +760,202 @@ func TestQueueCancelAfterDequeueSettlesFailed(t *testing.T) {
 	}
 	if got.Status != TaskFailed {
 		t.Fatalf("status after cancel = %s, want failed", got.Status)
+	}
+}
+
+// concurrentQueueOps：SessionStatus 恒空闲，Dispatch 可按 session 阻塞，
+// 用来证明不同目标互不阻塞、同一目标严格串行（P2.5-03）。
+type concurrentQueueOps struct {
+	started  chan string
+	mu       sync.Mutex
+	releases map[string]chan struct{}
+	calls    map[string]int
+}
+
+func (o *concurrentQueueOps) ListWorkspaces(context.Context) ([]WorkspaceInfo, error) {
+	return nil, nil
+}
+func (o *concurrentQueueOps) CreateWorkspace(context.Context, CreateWorkspaceReq) (WorkspaceInfo, error) {
+	return WorkspaceInfo{}, nil
+}
+func (o *concurrentQueueOps) ListSessions(context.Context, string) ([]SessionInfo, error) {
+	return nil, nil
+}
+func (o *concurrentQueueOps) SessionStatus(_ context.Context, ws, sid string) (SessionInfo, error) {
+	return SessionInfo{ID: sid, Workspace: ws}, nil
+}
+func (o *concurrentQueueOps) CreateSession(context.Context, CreateSessionReq) (SessionInfo, error) {
+	return SessionInfo{}, nil
+}
+func (o *concurrentQueueOps) Dispatch(ctx context.Context, req DispatchReq) (DispatchResult, error) {
+	o.started <- req.SessionID
+	if ch := o.releases[req.SessionID]; ch != nil {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return DispatchResult{}, ctx.Err()
+		}
+	}
+	o.mu.Lock()
+	o.calls[req.SessionID]++
+	o.mu.Unlock()
+	return DispatchResult{SessionID: req.SessionID, Accepted: true}, nil
+}
+func (o *concurrentQueueOps) InterruptSession(context.Context, string) error { return nil }
+
+func (o *concurrentQueueOps) callCount(sid string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.calls[sid]
+}
+
+func TestQueueDifferentTargetsDoNotBlockEachOther(t *testing.T) {
+	ops := &concurrentQueueOps{
+		started:  make(chan string, 8),
+		releases: map[string]chan struct{}{"s1": make(chan struct{})},
+		calls:    map[string]int{},
+	}
+	q, _ := newTestQueue(t, ops)
+	first := queueTask("慢会话")
+	firstDone := make(chan error, 1)
+	go func() { _, err := q.Submit(context.Background(), first); firstDone <- err }()
+	select {
+	case sid := <-ops.started:
+		if sid != "s1" {
+			t.Fatalf("first dispatch sid = %q", sid)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first target never dispatched")
+	}
+
+	other := queueTask("另一个会话")
+	other.Target.SessionID = "s2"
+	otherDone := make(chan error, 1)
+	go func() { _, err := q.Submit(context.Background(), other); otherDone <- err }()
+	select {
+	case sid := <-ops.started:
+		if sid != "s2" {
+			t.Fatalf("second dispatch sid = %q, want s2", sid)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("s1 的 Dispatch 阻塞了 s2：目标锁仍互相影响")
+	}
+	close(ops.releases["s1"])
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-otherDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueueSameTargetSerializesDispatch(t *testing.T) {
+	ops := &concurrentQueueOps{
+		started:  make(chan string, 8),
+		releases: map[string]chan struct{}{"s1": make(chan struct{})},
+		calls:    map[string]int{},
+	}
+	q, _ := newTestQueue(t, ops)
+	firstDone := make(chan error, 1)
+	go func() { _, err := q.Submit(context.Background(), queueTask("一")); firstDone <- err }()
+	<-ops.started // 第一个 Dispatch 已进入并阻塞
+	secondDone := make(chan error, 1)
+	go func() { _, err := q.Submit(context.Background(), queueTask("二")); secondDone <- err }()
+	select {
+	case sid := <-ops.started:
+		t.Fatalf("同目标第二个 Dispatch 在第一个完成前开始（sid=%s）", sid)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(ops.releases["s1"])
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ops.started:
+	case <-time.After(time.Second):
+		t.Fatal("第一个完成后第二个没有派发")
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueueConcurrentSameClientMsgIDCreatesOneTask(t *testing.T) {
+	ops := &concurrentQueueOps{started: make(chan string, 16), calls: map[string]int{}}
+	q, st := newTestQueue(t, ops)
+	const n = 8
+	ids := make([]TaskID, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			task := queueTask("同 id 并发")
+			task.ClientMsgID = "same-concurrent"
+			created, err := q.Submit(context.Background(), task)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			ids[i] = created.ID
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("submit %d: %v", i, err)
+		}
+	}
+	for i := 1; i < n; i++ {
+		if ids[i] != ids[0] {
+			t.Fatalf("concurrent same client_msg_id created %s vs %s", ids[0], ids[i])
+		}
+	}
+	all, err := st.ListTasks(context.Background(), TaskFilter{})
+	if err != nil || len(all) != 1 {
+		t.Fatalf("ledger tasks = %d, %v; want 1", len(all), err)
+	}
+	if got := ops.callCount("s1"); got != 1 {
+		t.Fatalf("dispatch calls = %d, want 1", got)
+	}
+}
+
+// P2.5-03 核心断言：Pump 在 Dispatch 期间只持目标锁，不持索引锁 q.mu。
+// 旧实现全程 q.mu，其他会话的入队/计数会被一个慢投递拖住。
+func TestQueuePumpDoesNotHoldIndexLockDuringDispatch(t *testing.T) {
+	ops := &concurrentQueueOps{
+		started:  make(chan string, 4),
+		releases: map[string]chan struct{}{"s1": make(chan struct{})},
+		calls:    map[string]int{},
+	}
+	q, _ := newTestQueue(t, ops)
+	task := queueTask("慢派发")
+	created, err := q.ledger.Create(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.Restore(created)
+	pumpDone := make(chan error, 1)
+	go func() { _, err := q.Pump(context.Background(), task.Target); pumpDone <- err }()
+	select {
+	case <-ops.started:
+	case <-time.After(time.Second):
+		t.Fatal("Pump 未进入 Dispatch")
+	}
+	locked := make(chan struct{})
+	go func() {
+		q.mu.Lock()
+		q.mu.Unlock()
+		close(locked)
+	}()
+	select {
+	case <-locked:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Dispatch 期间仍持有 q.mu：慢会话会阻塞其他目标的入队/计数")
+	}
+	close(ops.releases["s1"])
+	if err := <-pumpDone; err != nil {
+		t.Fatal(err)
 	}
 }

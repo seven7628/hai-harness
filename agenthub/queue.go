@@ -29,8 +29,52 @@ type Queue struct {
 	ledger *Ledger
 	ops    WorkspaceOps
 
+	// mu 只保护 pending 的短临界区（索引），不得在持锁时做账本/会话 I/O。
 	mu      sync.Mutex
 	pending map[string][]TaskID // key = workspace + "\x00" + session_id
+
+	// targets 是每个 (workspace, session) 一把可重入外的互斥锁：
+	// Pump/Dispatch/Submit 的查重+建账+Cancel 只在同一目标内串行，
+	// 不再让一个忙碌会话阻塞其他会话（P2.5-03）。
+	targets keyedLocks
+}
+
+// keyedLocks 是带引用计数的按 key 互斥锁表：lock 返回时该 key 已加锁，
+// 调用方必须执行返回的 unlock。refs 归零即回收，避免 client_msg_id 之类
+// 一次性 key 无限增长。
+type keyedLocks struct {
+	mu sync.Mutex
+	m  map[string]*keyedLock
+}
+
+type keyedLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (k *keyedLocks) lock(key string) func() {
+	k.mu.Lock()
+	if k.m == nil {
+		k.m = map[string]*keyedLock{}
+	}
+	l := k.m[key]
+	if l == nil {
+		l = &keyedLock{}
+		k.m[key] = l
+	}
+	l.refs++
+	k.mu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		k.mu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(k.m, key)
+		}
+		k.mu.Unlock()
+	}
 }
 
 func NewQueue(ledger *Ledger, ops WorkspaceOps) *Queue {
@@ -60,6 +104,44 @@ func queueContains(ids []TaskID, id TaskID) bool {
 		}
 	}
 	return false
+}
+
+// pendingIDs 返回队列切片头（只读）。调用方必须持有该 key 的目标锁，
+// 否则 append/切片替换会让读到的 id 与实际队列分叉。
+func (q *Queue) pendingIDs(key string) []TaskID {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.pending[key]
+}
+
+// hasPendingLocked 在持有目标锁时判断 id 是否已入队（q.mu 仅短临界区）。
+func (q *Queue) hasPendingLocked(key string, id TaskID) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return queueContains(q.pending[key], id)
+}
+
+// enqueueLocked 追加到内存队列并去重；调用方必须持有目标锁。
+func (q *Queue) enqueueLocked(key string, id TaskID) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if queueContains(q.pending[key], id) {
+		return
+	}
+	q.pending[key] = append(q.pending[key], id)
+}
+
+// dequeueLocked 从内存队列摘除 id；调用方必须持有目标锁。
+func (q *Queue) dequeueLocked(key string, id TaskID) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	cur := q.pending[key]
+	for i, got := range cur {
+		if got == id {
+			q.pending[key] = append(append([]TaskID(nil), cur[:i]...), cur[i+1:]...)
+			return
+		}
+	}
 }
 
 // CheckGuard 在建账前跑护栏（预算/并发/去重/链长）；nil guard = 不检查。
@@ -110,27 +192,31 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	// 第二条被静默丢弃（P2-02 复审 N1）。
 	t.Target.Workspace = filepath.Clean(strings.TrimSpace(t.Target.Workspace))
 	t.Target.SessionID = strings.TrimSpace(t.Target.SessionID)
-	// 幂等：同一 (target, client_msg_id) 已存在就按状态分流：
-	//   - queued 且不在内存队列（重启孤儿）→ 重新入队并泵一次（B2）；
-	//   - 失败/取消/拒绝/预算阻断 → 允许同 id 重试，挂到原链上开新 attempt（B1）；
-	//   - 其余状态 → 返回原任务，不重复建账/入队。
-	// 锁覆盖「查找 + 建账 + 入队」：并发同 id 不能双建（P2-02 复审 B2）。
-	// 查找走 Store 的 TaskIndex（P2.5-02），不再读 tasks/*/task.json 全盘。
-	q.mu.Lock()
+	// 同一目标的所有「查重 + 建账 + 入队」由目标锁串行：不同会话互不阻塞，
+	// 同 client_msg_id 并发提交仍只会建一账（P2.5-03）。
+	key := queueKey(t.Target.Workspace, t.Target.SessionID)
+	unlockTarget := q.targets.lock(key)
+	locked := true
+	release := func() {
+		if locked {
+			unlockTarget()
+			locked = false
+		}
+	}
+	defer release()
+
 	if t.ClientMsgID != "" {
 		existing, ferr := q.ledger.FindByClientMsgID(ctx, t.Target, t.ClientMsgID)
 		if ferr != nil {
-			q.mu.Unlock()
 			return nil, ferr
 		}
 		if existing != nil {
-			key := queueKey(existing.Target.Workspace, existing.Target.SessionID)
 			switch {
-			case existing.Status == TaskQueued && !queueContains(q.pending[key], existing.ID):
+			case existing.Status == TaskQueued && !q.hasPendingLocked(key, existing.ID):
 				// 进程重启后内存队列为空，但账本里任务仍是 queued。只返回不
 				// 入队会让 session_send 说「已排队」、实际永远没人泵（B2）。
-				q.pending[key] = append(q.pending[key], existing.ID)
-				q.mu.Unlock()
+				q.enqueueLocked(key, existing.ID)
+				release()
 				if _, perr := q.Pump(ctx, existing.Target); perr != nil {
 					return existing, perr
 				}
@@ -143,7 +229,6 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 				// 先分配 ID 才能把新任务接进原链（parent 必须在 chain 里）。
 				id, ierr := q.ledger.store.AllocateID(ctx, PrefixTask)
 				if ierr != nil {
-					q.mu.Unlock()
 					return nil, ierr
 				}
 				t.ID = TaskID(id)
@@ -152,7 +237,7 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 				t.Attempt = existing.Attempt + 1
 				t.Chain = append(append([]TaskID{}, existing.Chain...), t.ID)
 			default:
-				q.mu.Unlock()
+				release()
 				// 命中可能是「账本说 queued、实际已被 pump 派走」的旧快照：
 				// 返回前重读，别让调用方拿到过期状态（P2-02 N4）。
 				if latest, rerr := q.ledger.Replay(ctx, existing.ID); rerr == nil && latest != nil {
@@ -164,18 +249,15 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	}
 	if g != nil {
 		if gerr := g.Check(ctx, q.ledger.store, t); gerr != nil {
-			q.mu.Unlock()
 			return nil, gerr
 		}
 	}
 	created, err := q.ledger.Create(ctx, t)
 	if err != nil {
-		q.mu.Unlock()
 		return nil, err
 	}
-	key := queueKey(created.Target.Workspace, created.Target.SessionID)
-	q.pending[key] = append(q.pending[key], created.ID)
-	q.mu.Unlock()
+	q.enqueueLocked(key, created.ID)
+	release()
 	dispatched, err := q.Pump(ctx, created.Target)
 	if err != nil {
 		return created, err // 任务已落账本（failed/canceled）：调用方仍拿得到 task_id
@@ -200,9 +282,9 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 		return nil, fmt.Errorf("%w: queue 未初始化", ErrInvalid)
 	}
 	key := queueKey(target.Workspace, target.SessionID)
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	ids := q.pending[key]
+	unlockTarget := q.targets.lock(key)
+	defer unlockTarget()
+	ids := q.pendingIDs(key)
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -220,7 +302,7 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 			if terr != nil {
 				return nil, terr
 			}
-			q.pending[key] = ids[1:]
+			q.dequeueLocked(key, id)
 			return nil, err
 		}
 		return nil, err
@@ -236,7 +318,7 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 		// 任务永远泵不出去（P2-03 B3）。
 		return nil, err
 	}
-	q.pending[key] = ids[1:]
+	q.dequeueLocked(key, id)
 	header, _ := EncodeTaskHeader(dispatched)
 	res, err := q.ops.Dispatch(ctx, DispatchReq{
 		AgentID:   dispatched.Origin.AgentID,
@@ -310,20 +392,15 @@ func (q *Queue) Restore(t *Task) {
 		return
 	}
 	key := queueKey(t.Target.Workspace, t.Target.SessionID)
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for _, id := range q.pending[key] {
-		if id == t.ID {
-			return
-		}
-	}
-	q.pending[key] = append(q.pending[key], t.ID)
+	unlockTarget := q.targets.lock(key)
+	defer unlockTarget()
+	q.enqueueLocked(key, t.ID)
 }
 
-// CancelDispatchedIfIdle 在 q.mu 内重读任务并取消「已派发但会话不忙」的任务。
-// busy 在锁内求值：Pump 的 Transition(dispatched)→Dispatch 全程持 q.mu，
+// CancelDispatchedIfIdle 在目标锁内重读任务并取消「已派发但会话不忙」的任务。
+// busy 在锁内求值：Pump 的 Transition(dispatched)→Dispatch 全程持目标锁，
 // 因此这里看到的 busy/latch 一定是 Dispatch 完成后的状态，不会把「已经 Ask
-// 进会话」的任务误判为空闲取消（P2-06 复审 B-2）。
+// 进会话」的任务误判为空闲取消（P2-06 复审 B-2）。不同目标互不阻塞。
 // 返回 (任务, 是否本次取消, err)；已终态返回最新快照 + canceled=false。
 func (q *Queue) CancelDispatchedIfIdle(ctx context.Context, id TaskID, reason string, busy func() bool) (*Task, bool, error) {
 	if q == nil || q.ledger == nil {
@@ -331,8 +408,13 @@ func (q *Queue) CancelDispatchedIfIdle(ctx context.Context, id TaskID, reason st
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	// 先无锁读出目标（目标字段不可变），再只锁该目标重读；锁内不碰其他会话。
+	pre, err := q.ledger.Replay(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	unlockTarget := q.targets.lock(queueKey(pre.Target.Workspace, pre.Target.SessionID))
+	defer unlockTarget()
 	t, err := q.ledger.Replay(ctx, id)
 	if err != nil {
 		return nil, false, err
@@ -370,10 +452,15 @@ func (q *Queue) CancelQueued(ctx context.Context, id TaskID) (*Task, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	// 全程持 q.mu：Pump 的「出队 → Transition(dispatched) → Dispatch」也是
-	// 在这把锁内，先查找再 Transition 会让 cancel 与派发交错（P2-06 复审）。
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	// 先无锁读出目标，再只锁该目标：Pump 的「出队 → Transition(dispatched)
+	// → Dispatch」也持同一目标锁，cancel 与派发不会交错（P2-06 复审）。
+	pre, err := q.ledger.Replay(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	key := queueKey(pre.Target.Workspace, pre.Target.SessionID)
+	unlockTarget := q.targets.lock(key)
+	defer unlockTarget()
 	t, err := q.ledger.Replay(ctx, id)
 	if err != nil {
 		return nil, err
@@ -387,13 +474,6 @@ func (q *Queue) CancelQueued(ctx context.Context, id TaskID) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := queueKey(t.Target.Workspace, t.Target.SessionID)
-	cur := q.pending[key]
-	for i, v := range cur {
-		if v == id {
-			q.pending[key] = append(append([]TaskID(nil), cur[:i]...), cur[i+1:]...)
-			break
-		}
-	}
+	q.dequeueLocked(key, id)
 	return canceled, nil
 }
