@@ -176,3 +176,47 @@ func TestHubRecoveryConcurrentSinglePush(t *testing.T) {
 		t.Fatalf("concurrent recovery pushed %d times, want 1", n)
 	}
 }
+
+// P2-07 B1：blocked_budget 也必须走「回推 → MarkNotified → 恢复重推」，
+// 否则预算阻断的结果首次推送失败就永久丢失。
+func TestHubRecoveryBlockedBudgetRedelivered(t *testing.T) {
+	m, buf := testManager(t)
+	hubAgent := createHubAgent(t, m, buf, 1, "RecoverBudget")
+	if _, err := m.hubDMSession(string(hubAgent.ID)); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := m.hubStore()
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: hubAgent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s-budget"},
+		Title:  "预算阻断", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Finish(context.Background(), agenthub.FinishInput{
+		TaskID: task.ID, RunID: "run-budget", Status: agenthub.TaskBlockedBudget,
+		Result: &agenthub.TaskResult{Summary: "太贵", Error: "单任务成本超限"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	m.recoverHubTasks()
+	got, err := ledger.Replay(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != agenthub.TaskBlockedBudget {
+		t.Fatalf("status = %s, want blocked_budget", got.Status)
+	}
+	if len(got.NotifiedRuns) != 1 || got.NotifiedRuns[0] != "run-budget" {
+		t.Fatalf("notified_runs = %v, want [run-budget]", got.NotifiedRuns)
+	}
+	if !strings.Contains(buf.String(), `"task_result_delivered"`) {
+		t.Fatalf("blocked_budget 结果未回推: %s", buf.String())
+	}
+}

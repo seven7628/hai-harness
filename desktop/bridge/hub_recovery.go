@@ -81,7 +81,7 @@ func (m *manager) recoverHubTasks() {
 			if !alreadyNotified(updated, "recovery") {
 				m.pushHubTaskResult(ledger, updated, recoveryAgentEnd(updated))
 			}
-		case agenthub.TaskCompleted, agenthub.TaskFailed, agenthub.TaskInterrupted:
+		case agenthub.TaskCompleted, agenthub.TaskFailed, agenthub.TaskInterrupted, agenthub.TaskBlockedBudget:
 			runID := t.Dispatch.RunID
 			if runID == "" {
 				runID = "recovery"
