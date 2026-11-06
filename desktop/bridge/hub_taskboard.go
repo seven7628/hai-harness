@@ -162,7 +162,13 @@ func (m *manager) hubTaskCancel(c command) {
 		respTask(canceled, "任务已结束，无需取消")
 		return
 	}
-	bs.s.Interrupt() // 已 Ask 进会话（running 或结算中）：中断幂等，终态由 AgentEnd 结算
+	if bs.hubSettling.Load() {
+		// 根 AgentEnd 已到、finishHubTask 未完成：Interrupt 对已结束的 run 是 no-op，
+		// 回「已请求中断」会让人以为取消生效，实际任务会按 completed 结算。
+		respTask(canceled, "任务正在结算，结果保留")
+		return
+	}
+	bs.s.Interrupt() // 已 Ask 进会话（running）：中断幂等，终态由 AgentEnd 结算
 	respTask(canceled, "已请求中断，等待运行结束")
 }
 

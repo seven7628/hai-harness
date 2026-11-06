@@ -39,6 +39,13 @@ func TestHubWorkspaceSessionStatus(t *testing.T) {
 		t.Fatalf("running status = %+v, %v", info, err)
 	}
 	bs.running.Store(false)
+	// P2-06 复审：结算窗口必须算忙，否则队列会在 finishHubTask 之前派下一条。
+	bs.hubSettling.Store(true)
+	info, err = ops.SessionStatus(context.Background(), wsPath, "s-status")
+	if err != nil || !info.Running {
+		t.Fatalf("settling status = %+v, %v; want running", info, err)
+	}
+	bs.hubSettling.Store(false)
 	if _, err := ops.SessionStatus(context.Background(), wsPath, "nope"); err == nil {
 		t.Fatal("unknown session must be ErrNotFound")
 	}

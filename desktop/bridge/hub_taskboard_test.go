@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -424,9 +425,9 @@ func TestHubTaskCancelDuringSettlementDoesNotStealResult(t *testing.T) {
 		t.Fatalf("cancel: %s", errMsg)
 	}
 	note := fmt.Sprint(data["note"])
-	if note == "" || note == "会话空闲，已取消" {
+	if !strings.Contains(note, "正在结算") {
 		m.hubFinishMu.Unlock()
-		t.Fatalf("cancel during settlement note = %q; want interrupt/wait", note)
+		t.Fatalf("cancel during settlement note = %q; want 结果保留提示", note)
 	}
 	mid, _ := st.LoadTask(context.Background(), task.ID)
 	if mid.Status == agenthub.TaskCanceled {

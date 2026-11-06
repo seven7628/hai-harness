@@ -570,6 +570,39 @@ func TestQueueCancelDispatchedSerializedWithDispatch(t *testing.T) {
 	}
 }
 
+// P2-06 复审测试债：CancelQueued 的 Replay/判状态/Transition 必须全程持 q.mu。
+// 占住 q.mu 模拟 Pump 派发窗口；旧实现会在锁外直接返回 canceled。
+func TestQueueCancelQueuedSerializedWithPump(t *testing.T) {
+	ops := &queueFakeOps{running: true}
+	q, _ := newTestQueue(t, ops)
+	created, err := q.Submit(context.Background(), queueTask("排队中取消"))
+	if err != nil || created.Status != TaskQueued {
+		t.Fatalf("submit = %+v, %v", created, err)
+	}
+	q.mu.Lock()
+	done := make(chan struct{})
+	var got *Task
+	var cancelErr error
+	go func() {
+		got, cancelErr = q.CancelQueued(context.Background(), created.ID)
+		close(done)
+	}()
+	select {
+	case <-done:
+		q.mu.Unlock()
+		t.Fatal("CancelQueued 在 q.mu 外返回：Pump 可在窗口内派发")
+	case <-time.After(200 * time.Millisecond):
+	}
+	q.mu.Unlock()
+	<-done
+	if cancelErr != nil || got == nil || got.Status != TaskCanceled {
+		t.Fatalf("cancel = %+v, %v; want canceled", got, cancelErr)
+	}
+	if n := q.QueuedCount("/w", "s1"); n != 0 {
+		t.Fatalf("queued = %d, want 0", n)
+	}
+}
+
 // P2-06 复审 B-2：取消已派发任务时 busy 在 q.mu 内求值；busy=true 不得 canceled。
 func TestQueueCancelDispatchedIfIdleRespectsBusy(t *testing.T) {
 	ops := &queueFakeOps{}
