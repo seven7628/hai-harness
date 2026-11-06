@@ -1251,8 +1251,9 @@
       "reviewNote": "D3 已拍板：A。统一 hub_alert envelope + 前端告警中心；全局恢复失败无 task_id，任务级内联。"
     },
     "P2.5-06": {
-      "status": "todo",
-      "reviewNote": "无产品依赖；P3b 群会话频繁开关前必须完成。"
+      "status": "review",
+      "commit": "b32e89e fix(hub-p2.5-06): Hub 后台泵/过期任务可取消可等待",
+      "reviewNote": "独立复审中（task-kbxf8qxd）。实现：manager hubBgCtx/Cancel/WG；scheduleHubPump/scheduleHubExpire 登记后派生；pump/expire ctx 检查；closeHubRuntimes 先有界 stop 再关会话。验证：TestHub 两轮绿；-race 生命周期用例绿。"
     },
     "P2.5-07": {
       "status": "todo",
