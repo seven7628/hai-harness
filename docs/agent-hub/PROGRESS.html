@@ -860,7 +860,7 @@ const BASE = {
         "agenthub/snapshot.go",
         "desktop/bridge/hub_session.go"
       ],
-      "acceptance": "每群一会话；未 @ 消息进入下次快照；delta 快照；40 条/12k 预算；折叠；冻结本轮；活动/回执不进快照。",
+      "acceptance": "本任务只交付 BuildGroupSnapshot 构建器（未 @ 消息可进快照、delta、40 条/12k 硬预算、折叠、冻结本轮、活动/回执不进快照，确定性）。每群 (group,agent) 会话懒装配 + AgentContextSeq 持久化推进明确归 P3b-01（承接项已写入其 acceptance/files）。",
       "tests": "go test ./agenthub/ -run Snapshot",
       "commit": "feat(hub-p3a-04): 群会话与快照"
     },
@@ -969,9 +969,10 @@ const BASE = {
       ],
       "files": [
         "agenthub/prompt.go",
-        "agenthub/group.go"
+        "agenthub/group.go",
+        "desktop/bridge/hub_session.go"
       ],
-      "acceptance": "名册稳定层；状态走工具；L1 教 @/assign_task；群成员变化重建 loop；golden 测试。",
+      "acceptance": "名册稳定层；状态走工具；L1 教 @/assign_task；群成员变化重建 loop；golden 测试。承接 P3a-04：每群 (group,agent) 会话懒装配（hubSessionID group 分支 + loop 复用/重建），以及 AgentContextSeq 的持久化推进（finishHubRound 成功后推进，重启可恢复）。",
       "tests": "go test ./agenthub/ -run Roster",
       "commit": "feat(hub-p3b-01): 智能体名册与提示词"
     },
@@ -1362,9 +1363,9 @@ const BASE = {
     },
     "P3a-04": {
       "status": "review",
-      "commit": "93eb91f feat(hub-p3a-04 部分): 群上下文快照",
-      "review": "pending",
-      "reviewNote": "BuildGroupSnapshot：delta（游标后）、冻结本轮（seq>trigger）、跳过 round_summary/空白、40 条/12000 rune 折叠、确定性文本、@命中/旁听标注。测试 3 条。**部分完成**：群智能体会话装配（每群一会话/事件流）未做，顺延 P3a-05+。",
+      "commit": "93eb91f feat(hub-p3a-04 部分): 群上下文快照 + 60535fd",
+      "review": "re-review_pending",
+      "reviewNote": "BuildGroupSnapshot：delta（游标后）、冻结本轮（seq>trigger）、跳过 round_summary/空白、40 条/12000 rune 折叠、确定性文本、@命中/旁听标注。测试 3 条。**部分完成**：群智能体会话装配（每群一会话/事件流）未做，顺延 P3a-05+。 首轮复审 change_requested（task-phsh6ns4，对象 bac5349）：delta/冻结/40 条/回执/owner-only/确定性有测试，7 类变异红，8 路 race 绿。B1 12k 非硬上限：单条 2 万 rune 全留（Text 20044）；B2 每群一会话零实现，reviewNote 的「顺延 P3a-05+」已失效（P3a-05 已 done 推 P3b，无人认领）。修复（60535fd）：B1 预算按真实行头计算，单条超限截断最旧正文并置 Truncated，保证 Text<=MaxRunes；回归单条 20k 与 10x1192 边界，去截断变异红。B2 按复审二选一选择「明确移交给 P3b-01」：P3b-01 acceptance/files 已写入每群会话懒装配 + AgentContextSeq 持久化推进，P3a-04 acceptance 改为只交付构建器。待第二轮复审（对象 60535fd）。非阻塞：task_update/system/routine_card 未过滤、跨群/软删群/非成员无 fail-closed、折叠留最旧与去排序变异存活、折叠行缺 seq 区间、rune 估算未复用 ContextBreakdown、快照角色/职责/产物标题化未做、Messages 浅拷贝、零 bridge 接线。",
       "reviewBatch": "G-after-scope"
     },
     "P3a-06": {
