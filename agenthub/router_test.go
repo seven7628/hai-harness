@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -361,4 +362,52 @@ func anyKind(msgs []Message, kind MessageKind) bool {
 		}
 	}
 	return false
+}
+
+// P3a-03 复审 NB-1：heal 分支二次失败不能留下没有 activity 的孤儿回执。
+func TestAppendMessageWithRoundHealRollback(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	st, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, _ := routerFixture(t)
+	if err := st.SaveGroup(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{
+		GroupID: g.ID, Kind: KindText, Sender: Sender{Kind: SenderHuman}, Text: "@Bob hi",
+		Refs: map[string]any{"client_msg_id": "heal-rollback"},
+	}
+	if _, err := st.AppendMessage(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	// 让 activity.jsonl 变成目录：回执消息能写、activity 必失败。
+	activityPath := st.activityPath(g.ID)
+	if err := os.MkdirAll(activityPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	round := Round{ID: "rnd_heal_fail", GroupID: g.ID, Targets: []AgentID{"ag_bbbbbbbb"}}
+	if _, _, err := AppendGroupMessageRouted(ctx, st, msg, &round); err == nil {
+		t.Fatal("heal must fail when activity is unwritable")
+	}
+	msgs, err := st.ReadMessages(ctx, g.ID, 0, 10)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("orphan receipt left behind: %+v, %v", msgs, err)
+	}
+	if err := os.Remove(activityPath); err != nil {
+		t.Fatal(err)
+	}
+	seq, deduped, err := AppendGroupMessageRouted(ctx, st, msg, &round)
+	if err != nil || seq != 1 || !deduped {
+		t.Fatalf("retry heal = %d/%v/%v", seq, deduped, err)
+	}
+	msgs, _ = st.ReadMessages(ctx, g.ID, 0, 10)
+	if len(msgs) != 2 || msgs[1].Kind != KindRouting {
+		t.Fatalf("healed log = %+v", msgs)
+	}
+	if acts, _ := st.ReadActivity(ctx, g.ID, 0, 10); len(acts) != 1 {
+		t.Fatalf("healed activity = %+v", acts)
+	}
 }

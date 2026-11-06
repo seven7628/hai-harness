@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -186,6 +188,30 @@ func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
 	}
 	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"重置后第一轮"}`); err != nil {
 		t.Fatalf("human message must reset turn counter: %v", err)
+	}
+	// 并发 group_say 也必须串行过「检查→落盘」：6 个同时发，limit=1 只能过 1 个。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 12, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "并发重置",
+	}); !ok {
+		t.Fatalf("human reset for concurrent: %s", errMsg)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	passed := 0
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := call("group_say", fmt.Sprintf(`{"group_id":%q,"text":"并发 %d"}`, string(g.ID), i)); err == nil {
+				mu.Lock()
+				passed++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if passed != 1 {
+		t.Fatalf("concurrent group_say passed = %d, want 1", passed)
 	}
 	if ok, _, _ := hubCmd(t, m, buf, 4, "hub_agent_create", map[string]any{
 		"profile": map[string]any{"name": "user", "provider": "deepseek", "model": "deepseek-v4-flash", "role": "x"},

@@ -428,11 +428,12 @@ func (s *FileStore) AppendMessageWithRound(ctx context.Context, m *Message, roun
 	defer s.mu.Unlock()
 
 	logPath := s.messagesPath(m.GroupID)
-	msgs, err := readJSONLTolerantTail[Message](logPath)
-	if err != nil {
-		return 0, false, err
-	}
 	if cid := messageClientMsgID(*m); cid != "" {
+		// 只有带幂等键才需要回看日志；普通发送不付全量重读的成本（P3a-03 复审 NB-4）。
+		msgs, err := readJSONLTolerantTail[Message](logPath)
+		if err != nil {
+			return 0, false, err
+		}
 		for i := len(msgs) - 1; i >= 0; i-- {
 			if messageClientMsgID(msgs[i]) != cid {
 				continue
@@ -440,7 +441,15 @@ func (s *FileStore) AppendMessageWithRound(ctx context.Context, m *Message, roun
 			existing := msgs[i]
 			// 上次可能已写消息但回执失败；重试时补齐回执，仍返回原 seq。
 			if round != nil && !hasRoundReceipt(msgs, existing.Seq) {
+				beforeSize, err := regularFileSize(logPath)
+				if err != nil {
+					return 0, false, err
+				}
 				if err := s.appendRoundLocked(existing.GroupID, existing.Seq, round); err != nil {
+					// 二次失败也不能留下没有 activity 的孤儿回执（复审 NB-1）。
+					if truncErr := os.Truncate(logPath, beforeSize); truncErr != nil {
+						return 0, false, fmt.Errorf("heal receipt: %v; rollback: %w", err, truncErr)
+					}
 					return 0, false, err
 				}
 			}
@@ -467,7 +476,10 @@ func (s *FileStore) AppendMessageWithRound(ctx context.Context, m *Message, roun
 	if round != nil {
 		if err := s.appendRoundLocked(m.GroupID, seq, round); err != nil {
 			// 回执失败：整条触发消息回滚，调用方重试不会留下半条。
-			_ = os.Truncate(logPath, beforeSize)
+			// 截断失败时保留 seq（消息仍在日志里），否则下一条会复用同一 seq（复审 NB-6）。
+			if truncErr := os.Truncate(logPath, beforeSize); truncErr != nil {
+				return 0, false, fmt.Errorf("round receipt: %v; rollback: %w", err, truncErr)
+			}
 			s.seq[m.GroupID] = seq - 1
 			return 0, false, err
 		}

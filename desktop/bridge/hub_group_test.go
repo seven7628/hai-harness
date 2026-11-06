@@ -288,14 +288,17 @@ func TestHubGroupSendRoutesAndReceipts(t *testing.T) {
 		t.Fatalf("dedupe resend: %s", errMsg)
 	}
 	var again struct {
-		Seq          int64              `json:"seq"`
-		Deduplicated bool               `json:"deduplicated"`
-		Targets      []agenthub.AgentID `json:"targets"`
+		Seq          int64 `json:"seq"`
+		Deduplicated bool  `json:"deduplicated"`
 	}
 	raw, _ = json.Marshal(data)
 	_ = json.Unmarshal(raw, &again)
-	if again.Seq != 1 || !again.Deduplicated || len(again.Targets) != 1 || again.Targets[0] != b.ID {
+	if again.Seq != 1 || !again.Deduplicated {
 		t.Fatalf("dedupe response = %s", raw)
+	}
+	// 重试不能返回本次新 Route 的 round：落盘回执属于首次请求（P3a-03 复审 NB-2）。
+	if strings.Contains(string(raw), `"round"`) || strings.Contains(string(raw), `"targets"`) {
+		t.Fatalf("dedupe response carries fresh round: %s", raw)
 	}
 	if strings.Contains(buf.String(), `"hub_message"`) || strings.Contains(buf.String(), `"hub_round"`) {
 		t.Fatalf("dedupe emitted events: %s", buf.String())
@@ -316,6 +319,13 @@ func TestHubGroupSendRoutesAndReceipts(t *testing.T) {
 	_ = json.Unmarshal(raw, &sent2)
 	if len(sent2.Targets) != 0 {
 		t.Fatalf("no-mention targets = %v", sent2.Targets)
+	}
+	// 无 @ 只写消息，不写回执（设计 §6.6.3；bridge 判定行必须有回归）。
+	if msgs, err = agenthub.ReadGroupLog(context.Background(), st, g.ID, 0, 10); err != nil || len(msgs) != 3 {
+		t.Fatalf("no-mention log = %+v, %v", msgs, err)
+	}
+	if acts, err = st.ReadActivity(context.Background(), g.ID, 0, 10); err != nil || len(acts) != 1 {
+		t.Fatalf("no-mention wrote receipt: %+v, %v", acts, err)
 	}
 }
 

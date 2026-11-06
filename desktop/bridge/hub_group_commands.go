@@ -589,9 +589,9 @@ func (m *manager) hubGroupSend(c command) {
 	round.TriggerSeq = seq
 	if deduped {
 		// 断线重试：同 client_msg_id 不重复写日志，也不再发 hub_message/hub_round。
+		// 不返回本次新 Route 的 round：落盘回执属于首次请求，返回它会让 round.ID 对不上（复审 NB-2）。
 		m.resp(c, true, "", map[string]any{
-			"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets,
-			"deduplicated": true,
+			"seq": seq, "message_id": msg.ID, "deduplicated": true,
 		})
 		return
 	}

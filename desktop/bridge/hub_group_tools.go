@@ -248,14 +248,19 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	if round.MentionAll || len(round.Targets) > 0 {
 		routed = &round
 	}
-	seq, _, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
+	seq, deduped, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
 	if err != nil {
 		return "", err
 	}
 	round.TriggerSeq = seq
-	t.m.emitHubGroupMessage(g.ID, seq, msg)
-	t.m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
-	return marshalHubToolResult(map[string]any{"seq": seq, "message_id": msg.ID, "targets": round.Targets})
+	result := map[string]any{"seq": seq, "message_id": msg.ID, "targets": round.Targets}
+	if deduped {
+		result["deduplicated"] = true
+	} else {
+		t.m.emitHubGroupMessage(g.ID, seq, msg)
+		t.m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+	}
+	return marshalHubToolResult(result)
 }
 
 // enforceTurnLimit 限制「最后一次人类发言之后」智能体连续发言的轮次。
