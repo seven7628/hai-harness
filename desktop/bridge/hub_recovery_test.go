@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -136,4 +137,42 @@ func TestHubRecoveryCompletedRedeliveredOnce(t *testing.T) {
 		t.Fatalf("second recovery status = %s", got2.Status)
 	}
 	_ = buf
+}
+
+// P2-05 复审 B-2：恢复与正常结算共用 hubFinishMu，并发恢复也只能推一次。
+func TestHubRecoveryConcurrentSinglePush(t *testing.T) {
+	m, buf := testManager(t)
+	hubAgent := createHubAgent(t, m, buf, 1, "RecoverConcurrent")
+	if _, err := m.hubDMSession(string(hubAgent.ID)); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := m.hubStore()
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: hubAgent.ID},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: t.TempDir(), SessionID: "s-conc"},
+		Title:  "并发恢复", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Finish(context.Background(), agenthub.FinishInput{
+		TaskID: task.ID, RunID: "run-conc", Status: agenthub.TaskCompleted,
+		Result: &agenthub.TaskResult{Summary: "done"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); m.recoverHubTasks() }()
+	}
+	wg.Wait()
+	if n := strings.Count(buf.String(), `"task_result_delivered"`); n != 1 {
+		t.Fatalf("concurrent recovery pushed %d times, want 1", n)
+	}
 }

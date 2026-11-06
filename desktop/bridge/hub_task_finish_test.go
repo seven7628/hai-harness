@@ -415,3 +415,16 @@ func TestHubTaskFinishDoesNotDoublePushAfterMarkFailure(t *testing.T) {
 		t.Fatalf("replay pushed duplicate task_result: %d, want 1", got)
 	}
 }
+
+// P2-05 复审 B-1：checkpoint-first 重启只恢复 messages、不恢复 history；
+// 去重必须同时认 messages 里的 task_result。
+func TestTaskResultDedupChecksCheckpointMessages(t *testing.T) {
+	taskID := agenthub.TaskID("task_checkpoint")
+	msgs := []core.Message{core.NewTaskResultMessageWithStatus(string(taskID), "t", "done", "completed", nil)}
+	if !taskResultInHistory(msgs, taskID) {
+		t.Fatal("messages 里的 task_result 未被识别（重启后会双推）")
+	}
+	if taskResultInHistory(msgs, "task_checkpoint_2") {
+		t.Fatal("相似 task id 误命中")
+	}
+}

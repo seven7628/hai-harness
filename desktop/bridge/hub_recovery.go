@@ -39,6 +39,10 @@ func (m *manager) recoverHubTasks() {
 	if m == nil {
 		return
 	}
+	// 与正常结算共用同一把锁：恢复的「查已通知 → 回推 → MarkNotified」
+	// 不能和 finishHubTask 并发（P2-05 复审 B-2）。
+	m.hubFinishMu.Lock()
+	defer m.hubFinishMu.Unlock()
 	st, err := m.hubStore()
 	if err != nil {
 		return
