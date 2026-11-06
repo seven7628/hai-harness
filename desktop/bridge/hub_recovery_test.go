@@ -327,6 +327,11 @@ func TestHubRecoveryFailureDoesNotLatch(t *testing.T) {
 	if !strings.Contains(buf.String(), `"recovery_failed"`) {
 		t.Fatalf("恢复失败没有告警: %s", buf.String())
 	}
+	for _, want := range []string{`"scope":"hub"`, `"code":"recovery_failed"`, `"severity":"error"`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("audit envelope 缺 %s: %s", want, buf.String())
+		}
+	}
 	if err := os.WriteFile(path, good, 0o600); err != nil {
 		t.Fatal(err)
 	}

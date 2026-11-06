@@ -54,14 +54,14 @@ func (m *manager) ensureHubRecovery() {
 }
 
 // recoverHubTasks 扫描账本做一次性恢复；可重复调用（幂等）。
+//
+// P2.5-05：不再全程持 hubFinishMu —— 扫描/排队在锁外，只有「单任务重读 →
+// 判定 → 回推 → MarkNotified」这一小段持锁。恢复 1000 个任务时，正常结算
+// 不会被整轮恢复阻塞；每个任务处理前重读账本，仍与 finishHubTask 串行。
 func (m *manager) recoverHubTasks() error {
 	if m == nil {
 		return nil
 	}
-	// 与正常结算共用同一把锁：恢复的「查已通知 → 回推 → MarkNotified」
-	// 不能和 finishHubTask 并发（P2-05 复审 B-2）。
-	m.hubFinishMu.Lock()
-	defer m.hubFinishMu.Unlock()
 	st, err := m.hubStore()
 	if err != nil {
 		return fmt.Errorf("打开 Hub 账本: %w", err)
@@ -75,54 +75,76 @@ func (m *manager) recoverHubTasks() error {
 	// 按 CreatedAt 升序恢复，保持用户提交顺序（P2-08 复审 B-1）。
 	var q *agenthub.Queue
 	for _, t := range queuedInCreatedOrder(tasks) {
+		// 扫描后可能已被并发 Pump 派走：Restore 前再读一次，避免把 dispatched
+		// 任务重新塞回 pending（Queue.Restore 只认传入快照的状态）。
+		cur, lerr := st.LoadTask(ctx, t.ID)
+		if lerr != nil || cur == nil || cur.Status != agenthub.TaskQueued {
+			continue
+		}
 		if q == nil {
 			q, err = m.hubQueueFor()
 			if err != nil {
 				return fmt.Errorf("打开 Hub 队列: %w", err)
 			}
 		}
-		q.Restore(t)
+		q.Restore(cur)
 	}
 	ledger := agenthub.NewLedger(st)
-	for _, t := range tasks {
-		if t == nil {
+	for _, snap := range tasks {
+		if snap == nil || snap.Status == agenthub.TaskQueued {
+			continue // 已按顺序 Restore
+		}
+		m.hubFinishMu.Lock()
+		t, lerr := st.LoadTask(ctx, snap.ID)
+		if lerr != nil {
+			m.emitHubTaskAlert(snap.ID, "recovery_failed", lerr.Error())
+			m.hubFinishMu.Unlock()
 			continue
 		}
-		switch t.Status {
-		case agenthub.TaskQueued:
-			continue // 已按顺序 Restore
-		case agenthub.TaskDispatched, agenthub.TaskRunning:
-			if t.Dispatch.RunID != "" {
-				continue // 有真实 run：由事件流正常收尾
-			}
-			updated, terr := ledger.Transition(ctx, t.ID, agenthub.TaskInterrupted, agenthub.TransitionOptions{
-				At: time.Now().UTC(), Error: "进程重启：没有对应的运行记录",
-			})
-			if terr != nil {
-				m.emitHubTaskAlert(t.ID, "recovery_failed", terr.Error())
-				continue
-			}
-			m.emitHubTaskUpdate(updated)
-			m.emitHubTaskAlert(t.ID, "recovered_interrupted", "进程重启：任务没有对应的运行记录，已标中断")
-			m.openRecoveryNeed(updated)
-			// 结果回推发起者；已通知过则跳过。
-			if !alreadyNotified(updated, "recovery") {
-				m.pushHubTaskResult(ledger, updated, recoveryAgentEnd(updated))
-			}
-		case agenthub.TaskCompleted, agenthub.TaskFailed, agenthub.TaskInterrupted, agenthub.TaskBlockedBudget:
-			runID := t.Dispatch.RunID
-			if runID == "" {
-				runID = "recovery"
-			}
-			if alreadyNotified(t, runID) {
-				continue
-			}
-			ae := recoveryAgentEnd(t)
-			ae.RunId = runID // 用真实 run 占位，避免恢复写 "recovery" 后真实 run 迟到重放（P2-05 NB-3）
-			m.pushHubTaskResult(ledger, t, ae)
-		}
+		m.recoverOneTaskLocked(ctx, ledger, t)
+		m.hubFinishMu.Unlock()
 	}
 	return nil
+}
+
+// recoverOneTaskLocked 处理单条任务；调用方必须持有 hubFinishMu。
+func (m *manager) recoverOneTaskLocked(ctx context.Context, ledger *agenthub.Ledger, t *agenthub.Task) {
+	if t == nil {
+		return
+	}
+	switch t.Status {
+	case agenthub.TaskQueued:
+		return
+	case agenthub.TaskDispatched, agenthub.TaskRunning:
+		if t.Dispatch.RunID != "" {
+			return // 有真实 run：由事件流正常收尾
+		}
+		updated, terr := ledger.Transition(ctx, t.ID, agenthub.TaskInterrupted, agenthub.TransitionOptions{
+			At: time.Now().UTC(), Error: "进程重启：没有对应的运行记录",
+		})
+		if terr != nil {
+			m.emitHubTaskAlert(t.ID, "recovery_failed", terr.Error())
+			return
+		}
+		m.emitHubTaskUpdate(updated)
+		m.emitHubTaskAlert(t.ID, "recovered_interrupted", "进程重启：任务没有对应的运行记录，已标中断")
+		m.openRecoveryNeed(updated)
+		// 结果回推发起者；已通知过则跳过。
+		if !alreadyNotified(updated, "recovery") {
+			m.pushHubTaskResult(ledger, updated, recoveryAgentEnd(updated))
+		}
+	case agenthub.TaskCompleted, agenthub.TaskFailed, agenthub.TaskInterrupted, agenthub.TaskBlockedBudget:
+		runID := t.Dispatch.RunID
+		if runID == "" {
+			runID = "recovery"
+		}
+		if alreadyNotified(t, runID) {
+			return
+		}
+		ae := recoveryAgentEnd(t)
+		ae.RunId = runID // 用真实 run 占位，避免恢复写 "recovery" 后真实 run 迟到重放（P2-05 NB-3）
+		m.pushHubTaskResult(ledger, t, ae)
+	}
 }
 
 // queuedInCreatedOrder 恢复 queued 任务时的 FIFO 顺序。ListTasks 按 UpdatedAt

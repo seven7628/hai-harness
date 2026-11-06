@@ -368,14 +368,30 @@ func taskArtifactsOf(in []core.Artifact) []agenthub.TaskArtifact {
 }
 
 // emitHubTaskAlert 任务结算异常（前端 Needs you / 任务板用；P2-06 接）。
+// P2.5-05：统一 envelope —— scope/code/severity/task_id?/agent_id?/group_id?/at。
 func (m *manager) emitHubTaskAlert(id agenthub.TaskID, kind, msg string) {
 	if m == nil || m.out == nil {
 		return
 	}
+	scope := "hub"
+	severity := "warning"
+	if id != "" {
+		scope = "task"
+	}
+	switch {
+	case kind == "recovery_failed", kind == "blocked_budget", kind == "push_failed",
+		kind == "settle_failed", kind == "artifact_register_failed":
+		severity = "error"
+	case kind == "usage_unpriced", kind == "recovered_interrupted":
+		severity = "warning"
+	}
 	ev := map[string]any{
 		"event_type": "hub_alert",
+		"scope":      scope,
+		"code":       kind,
+		"kind":       kind, // 兼容旧消费者
+		"severity":   severity,
 		"task_id":    string(id),
-		"kind":       kind,
 		"message":    msg,
 		"at":         time.Now().UTC(),
 	}

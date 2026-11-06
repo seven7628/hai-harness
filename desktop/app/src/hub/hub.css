@@ -571,3 +571,11 @@
 /* 群日预算：与 mode chip 同形，但可点击编辑（P2.5-04）。 */
 button.hub-budget-chip { border: 1px solid transparent; cursor: pointer; font: inherit; }
 button.hub-budget-chip:hover { border-color: currentColor; }
+
+/* P2.5-05：Hub 告警中心（恢复失败/预算/推送失败等）。 */
+.hub-alert-stack { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.hub-alert-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); min-width: 0; }
+.hub-alert-dot { width: 6px; height: 6px; border-radius: 50%; background: #b8772a; flex: 0 0 auto; }
+.hub-alert-row.error .hub-alert-dot { background: #b23a2e; }
+.hub-alert-row.info .hub-alert-dot { background: #2f7a4f; }
+.hub-alert-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
-import type { HubAgent, HubDMInfo, HubGroup, HubHistoryPage, HubMessage, HubGroupActivity, HubNeed, HubPage, HubRound, HubRunEntry, HubTask } from './types'
+import type { HubAgent, HubAlert, HubDMInfo, HubGroup, HubHistoryPage, HubMessage, HubGroupActivity, HubNeed, HubPage, HubRound, HubRunEntry, HubTask } from './types'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -46,6 +46,8 @@ interface HubState {
   tasksLoading: boolean
   needs: HubNeed[]
   needsLoading: boolean
+  /** Hub 全局告警（P2.5-05）：恢复失败/预算/推送失败等，按 envelope 去重。 */
+  alerts: HubAlert[]
   /** DM 右栏视图：Chat = 对话，Run = 工具/压缩运行日志。 */
   view: 'chat' | 'run'
   /** 当前 DM 的 Run 日志（只收该 session 的根/子工具事件）。 */
@@ -72,6 +74,7 @@ interface HubState {
   setDraft(agentID: string, text: string): void
   clearError(): void
   clearNotice(): void
+  dismissAlert(id: string): void
   setInspector(panel: 'tasks' | 'needs' | 'session' | null): void
   setView(view: 'chat' | 'run'): void
   loadGroups(): Promise<void>
@@ -128,6 +131,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   tasksLoading: false,
   needs: [],
   needsLoading: false,
+  alerts: [],
   view: 'chat',
   runLog: [],
   actions: [],
@@ -314,6 +318,10 @@ export const useHubStore = create<HubState>((set, get) => ({
     set({ notice: null })
   },
 
+  dismissAlert(id) {
+    set((s) => ({ alerts: s.alerts.filter((a) => a.id !== id) }))
+  },
+
   setInspector(panel) {
     set({ inspector: panel })
     if (panel === 'tasks') void get().loadTasks()
@@ -486,7 +494,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       parent_run_id?: string
       depth?: number
       seq?: number
-      message?: HubMessage
+      message?: HubMessage | string
       client_msg_id?: string
       content?: string
       text?: string
@@ -503,6 +511,12 @@ export const useHubStore = create<HubState>((set, get) => ({
       after?: number
       reason?: string
       group_id?: string
+      scope?: string
+      code?: string
+      kind?: string
+      severity?: string
+      task_id?: string
+      at?: string
       round?: HubRound
     }
     try {
@@ -516,7 +530,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       case 'hub_message': {
         if (ev.group_id) {
           if (ev.group_id !== get().activeGroupId) return
-          const msg = ev.message
+          const msg = typeof ev.message === 'string' ? undefined : ev.message
           if (!msg) return
           set((s) => {
             const withoutPending = ev.client_msg_id
@@ -528,7 +542,7 @@ export const useHubStore = create<HubState>((set, get) => ({
           return
         }
         const agentID = ev.agent_id || ''
-        const msg = ev.message
+        const msg = typeof ev.message === 'string' ? undefined : ev.message
         if (!msg) return
         // 左栏预览/未读同步（非当前 DM 也更新，正在看的那条不算未读）。
         set((s) => {
@@ -589,6 +603,20 @@ export const useHubStore = create<HubState>((set, get) => ({
           live: '', // 纯工具轮/中断没有最终回复：半截流式气泡不能留着
           rootRunId: null,
         }))
+        return
+      }
+      case 'hub_alert': {
+        const code = ev.code || ev.kind || 'hub_alert'
+        const id = `${code}:${ev.task_id ?? ''}:${ev.at ?? ev.message ?? ''}`
+        const alert: HubAlert = {
+          id, scope: ev.scope, code, kind: ev.kind, severity: ev.severity,
+          task_id: ev.task_id, agent_id: ev.agent_id, group_id: ev.group_id,
+          message: typeof ev.message === 'string' ? ev.message : undefined, at: ev.at,
+        }
+        set((s) => {
+          if (s.alerts.some((a) => a.id === id)) return {}
+          return { alerts: [alert, ...s.alerts].slice(0, 20) }
+        })
         return
       }
       case 'hub_task_update': {

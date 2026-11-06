@@ -49,6 +49,8 @@ export default function HubSurface() {
   const actions = useHubStore((s) => s.actions)
   const tasks = useHubStore((s) => s.tasks)
   const needs = useHubStore((s) => s.needs)
+  const alerts = useHubStore((s) => s.alerts)
+  const dismissAlert = useHubStore((s) => s.dismissAlert)
   const groups = useHubStore((s) => s.groups)
   const groupsLoading = useHubStore((s) => s.groupsLoading)
   const activeGroupId = useHubStore((s) => s.activeGroupId)
@@ -127,6 +129,22 @@ export default function HubSurface() {
             </button>
           </span>
         </div>
+        {alerts.length > 0 ? (
+          <div className="hub-alert-stack" role="status" aria-label="Hub 告警">
+            {alerts.slice(0, 4).map((a) => (
+              <div key={a.id} className={`hub-alert-row ${a.severity ?? 'warning'}`}>
+                <span className="hub-alert-dot" />
+                <span className="hub-alert-text" title={a.message}>{a.message || a.code}</span>
+                {a.task_id ? <span className="hub-sub">{a.task_id}</span> : null}
+                {a.code === 'recovery_failed' && activeId ? (
+                  <button className="hub-link" onClick={() => void select(activeId)}>重试</button>
+                ) : null}
+                <button className="hub-link" onClick={() => dismissAlert(a.id)} aria-label="忽略告警">×</button>
+              </div>
+            ))}
+            {alerts.length > 4 ? <span className="hub-sub">还有 {alerts.length - 4} 条</span> : null}
+          </div>
+        ) : null}
         <div className="hub-rail-tabs" role="tablist">
           <button role="tab" aria-selected={railTab === 'agents'} className={railTab === 'agents' ? 'on' : ''} onClick={() => setRailTab('agents')}>智能体</button>
           <button role="tab" aria-selected={railTab === 'groups'} className={railTab === 'groups' ? 'on' : ''} onClick={() => setRailTab('groups')}>群组</button>

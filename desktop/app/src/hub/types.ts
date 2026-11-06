@@ -103,6 +103,19 @@ export interface HubTaskResult {
   artifacts?: HubTaskArtifact[]
 }
 
+export interface HubAlert {
+  id: string
+  scope?: string // hub | group | agent | task
+  code?: string
+  kind?: string
+  severity?: string // info | warning | error
+  task_id?: string
+  agent_id?: string
+  group_id?: string
+  message?: string
+  at?: string
+}
+
 export interface HubTask {
   id: string
   root_task_id?: string
