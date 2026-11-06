@@ -1175,3 +1175,37 @@ func BenchmarkQueueMultiTargetSubmit(b *testing.B) {
 		}
 	})
 }
+
+// P2.5-03 N-1：队首在账本里已被旁路改成终态（恢复/取消窗口）时，Pump 必须
+// 摘掉陈旧条目让后续任务继续，不能每次 Transition 失败都把目标永久堵死。
+func TestQueuePumpDropsStaleTerminalHead(t *testing.T) {
+	ops := &queueFakeOps{}
+	q, _ := newTestQueue(t, ops)
+	ctx := context.Background()
+	stale, err := q.ledger.Create(ctx, queueTask("已取消的陈旧队首"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ledger.Transition(ctx, stale.ID, TaskCanceled, TransitionOptions{At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := q.ledger.Create(ctx, queueTask("应继续派发"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := queueKey("/w", "s1")
+	unlock := q.targets.lock(key)
+	q.enqueueLocked(key, stale.ID)
+	q.enqueueLocked(key, next.ID)
+	unlock()
+	if _, err := q.Pump(ctx, queueTask("x").Target); err != nil {
+		t.Fatalf("first pump: %v", err)
+	}
+	if n := q.QueuedCount("/w", "s1"); n != 1 {
+		t.Fatalf("stale head not dropped: queued=%d", n)
+	}
+	dispatched, err := q.Pump(ctx, queueTask("x").Target)
+	if err != nil || dispatched == nil || dispatched.ID != next.ID {
+		t.Fatalf("second pump = %+v, %v; want %s", dispatched, err, next.ID)
+	}
+}

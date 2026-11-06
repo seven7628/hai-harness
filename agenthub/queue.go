@@ -318,8 +318,13 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	now := time.Now().UTC()
 	dispatched, err := q.ledger.Transition(ctx, id, TaskDispatched, TransitionOptions{At: now})
 	if err != nil {
-		// Transition 失败时**不能先出队**：否则账本说 queued、内存队列说没有，
-		// 任务永远泵不出去（P2-03 B3）。
+		// 账本状态已不是 queued（被恢复/取消等旁路改成终态）：这条队首是陈旧
+		// 内存条目，摘掉让后面的任务继续；否则每次 Pump 都死在队首，目标永久堵死。
+		if latest, rerr := q.ledger.Replay(ctx, id); rerr == nil && latest != nil && latest.Status != TaskQueued {
+			q.dequeueLocked(key, id)
+			return nil, nil
+		}
+		// 仍是 queued 说明是存储/事件错误：保留队首等恢复（P2-03 B3）。
 		return nil, err
 	}
 	q.dequeueLocked(key, id)
