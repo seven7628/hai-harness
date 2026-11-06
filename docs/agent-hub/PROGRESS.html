@@ -1292,8 +1292,8 @@ const BASE = {
     "P2-03": {
       "status": "done",
       "commit": "c1bcaf7 + 0d6ec02 + bca7a42 + 411a308",
-      "review": "re-review_pending",
-      "reviewNote": "初审 change_requested（task-q77rzcjp，对象 c1bcaf7）。B1 闸门读 UI 状态点 bs.running：子 agent AgentEnd 清零 → 根 run 在跑却判空闲；takeBatch→AgentStart 窗口同样误判。B2 积压时 Submit 返回队首（别人的账本条目）→ session_send 把错 task_id 交给模型。B3 Pump 先出队再 Transition：失败丢任务、账本仍 queued、永不派发。修复（0d6ec02）：running 只由根 AgentStart/End 翻转 + hubDispatchPending 覆盖派发窗口；Submit 只认自己的 id；Transition 成功后才出队；N1 目标 ErrNotFound → 队首 canceled；N6 队列不可用发 hub_alert；N7 queued 语义写进工具描述。回归：B1 两条、B2、B3、M5（AgentEnd→pump 接线）、N1 各一条。未处理（非阻塞）：Queue 模式丢弃模型给的 client_msg_id（N3）、emit 内同步 pump 代价（N5）、ctx/超时（N8）、重启 queued 可视化归 P2-08。验证：agenthub + desktop/bridge 全量绿（40s）。 第二轮复审（task-qy9g79ws）：B1/B2/B3 运行时验证为真修好，但 B-1 ErrNotFound 分支又先出队后 Transition、B-2 回归用例在旧代码上也绿。已修：Transition 成功才出队、B2 用例改为闸门刚空闲时 Submit、pending 先置位再 Ask、Submit 重读 Status、queueKey 归一、展示层 OR pending、pump 补 Depth==0；新增 2 条回归。全量绿（42s）。 第三轮复审 passed（task-ttxzvnck，对象 bca7a42）：①目标消失 Cancel 失败保留队首、恢复后只取消一次并出队；②积压时 Submit 返回自己的任务（M1 被杀）；③Dispatch 后 pending=true、Ask 失败回滚且撤销幂等占位；④六种 workspace 写法同一 key；⑤8 并发同 client id 只建 1 条；⑥仅 Depth==0 泵队列。新问题均先于本 commit 或属覆盖缺口，不阻断。N-1（建议单独立项，P1）：AgentEnd emit 持 dispatchMu 同步调用 hubPumpQueue → Queue.Pump 持 q.mu → Ask persist 失败 → emit 自锁，形成环，所有 Hub 队列停止；修法 `go bs.hubPumpQueue(...)`。其余非阻塞：Submit ErrNotFound 错误路径返回过期快照、取消成功仍上报错误、Replay 零覆盖、Transition→pop panic 窗口重复落账、hubDispatchPending 无 watchdog、恢复后无人泵、同 id 命中不泵、q.mu 跨 IO 过大、hubAgentRunning 不含 dispatchPending。验证：agenthub 全量 + race 绿；bridge 全量绿 121s；bridge 全量 race 仅既有 subagent registry 竞态（pristine 可复现）。 N-1 修复（411a308）：AgentEnd 的 hubPumpQueue 改为 go 异步，避免 dispatchMu→q.mu→Ask persist→recordPersistErr→emit→dispatchMu 自锁；回归用「泵永不返回时 emit 2s 内返回」，原同步泵用例改轮询。待 delta 复审（对象 411a308）。",
+      "review": "passed",
+      "reviewNote": "初审 change_requested（task-q77rzcjp，对象 c1bcaf7）。B1 闸门读 UI 状态点 bs.running：子 agent AgentEnd 清零 → 根 run 在跑却判空闲；takeBatch→AgentStart 窗口同样误判。B2 积压时 Submit 返回队首（别人的账本条目）→ session_send 把错 task_id 交给模型。B3 Pump 先出队再 Transition：失败丢任务、账本仍 queued、永不派发。修复（0d6ec02）：running 只由根 AgentStart/End 翻转 + hubDispatchPending 覆盖派发窗口；Submit 只认自己的 id；Transition 成功后才出队；N1 目标 ErrNotFound → 队首 canceled；N6 队列不可用发 hub_alert；N7 queued 语义写进工具描述。回归：B1 两条、B2、B3、M5（AgentEnd→pump 接线）、N1 各一条。未处理（非阻塞）：Queue 模式丢弃模型给的 client_msg_id（N3）、emit 内同步 pump 代价（N5）、ctx/超时（N8）、重启 queued 可视化归 P2-08。验证：agenthub + desktop/bridge 全量绿（40s）。 第二轮复审（task-qy9g79ws）：B1/B2/B3 运行时验证为真修好，但 B-1 ErrNotFound 分支又先出队后 Transition、B-2 回归用例在旧代码上也绿。已修：Transition 成功才出队、B2 用例改为闸门刚空闲时 Submit、pending 先置位再 Ask、Submit 重读 Status、queueKey 归一、展示层 OR pending、pump 补 Depth==0；新增 2 条回归。全量绿（42s）。 第三轮复审 passed（task-ttxzvnck，对象 bca7a42）：①目标消失 Cancel 失败保留队首、恢复后只取消一次并出队；②积压时 Submit 返回自己的任务（M1 被杀）；③Dispatch 后 pending=true、Ask 失败回滚且撤销幂等占位；④六种 workspace 写法同一 key；⑤8 并发同 client id 只建 1 条；⑥仅 Depth==0 泵队列。新问题均先于本 commit 或属覆盖缺口，不阻断。N-1（建议单独立项，P1）：AgentEnd emit 持 dispatchMu 同步调用 hubPumpQueue → Queue.Pump 持 q.mu → Ask persist 失败 → emit 自锁，形成环，所有 Hub 队列停止；修法 `go bs.hubPumpQueue(...)`。其余非阻塞：Submit ErrNotFound 错误路径返回过期快照、取消成功仍上报错误、Replay 零覆盖、Transition→pop panic 窗口重复落账、hubDispatchPending 无 watchdog、恢复后无人泵、同 id 命中不泵、q.mu 跨 IO 过大、hubAgentRunning 不含 dispatchPending。验证：agenthub 全量 + race 绿；bridge 全量绿 121s；bridge 全量 race 仅既有 subagent registry 竞态（pristine 可复现）。 N-1 修复（411a308）：AgentEnd 的 hubPumpQueue 改为 go 异步，避免 dispatchMu→q.mu→Ask persist→recordPersistErr→emit→dispatchMu 自锁；回归用「泵永不返回时 emit 2s 内返回」，原同步泵用例改轮询。待 delta 复审（对象 411a308）。 N-1 delta 复审 passed（task-dmj2grwt，对象 411a308）：坏 store + 排队任务 + 根 AgentEnd 的真实链路上 emit 2s 内返回、泵落定、persist_error 可观测；同步变异 M1 有完整环路栈；空队列 300 次无 goroutine 堆积；会话消失后泵落 canceled 不 panic。补真链路回归（253ea59，test-only）：TestHubAgentEndPumpWithPersistFailureDoesNotDeadlock + 子 AgentEnd 断言 300ms 窗口。非阻塞：空队列异步/非空同步变异仓库用例不杀（已由新回归覆盖）、异步 goroutine 无 WaitGroup/cancel、pump 与 run 收尾窗口推断未复现。",
       "reviewBatch": "A-delta"
     },
     "P2-04": {
@@ -1398,11 +1398,11 @@ const BASE = {
   "reviewGate": {
     "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。",
     "audit": {
-      "done_passed": 22,
-      "in_review": 14,
+      "done_passed": 23,
+      "in_review": 13,
       "not_started": 15,
       "in_review_breakdown": {
-        "re_review_pending": 3,
+        "re_review_pending": 2,
         "initial_pending": 11
       }
     },
