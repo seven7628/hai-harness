@@ -1369,10 +1369,10 @@ const BASE = {
       "reviewBatch": "G-after-scope"
     },
     "P3a-06": {
-      "status": "review",
+      "status": "done",
       "commit": "feat(hub-p3a-06 部分): handoff 护栏 + ack 状态机 + 88413da",
-      "review": "re-review_pending",
-      "reviewNote": "CheckHandoff：深度>=3 拒绝、同对 10 分钟>=2 拒绝、observer 禁止、self 禁止；Handoff.Ack pending_ack→accepted/declined 幂等。测试 3 条全绿。**部分完成**：交接卡/Needs you 落盘、事件与 UI 路由未做（P3a-08/P3b）。首审 change_requested（task-2tehuhe6，对象 95168ca/1d3b262）：深度 3、同对 10 分钟 2 次、observer/self、Ack 状态机幂等与反向迁移拒绝通过（18 变异 11 杀）。B1 handoff.go:62 不读 g.Members，role 由调用方自报且不查 Group.Deleted → 非成员/跨群/软删群/大小写 role 全 fail-open；B2 交接卡/落盘/ack 入口零实现，bridge 零引用，延期 P3a-08/P3b 无 owning task。非阻塞：零值 Handoff 不可 ack、HandoffGuardLimits 死代码、空 GroupID 跨群计数、限流方向敏感、declined 占额、并发 ack 数据竞争、窗口/默认值/nil group 无测试。 第二轮复审 change_requested（task-ywqqhwbg，对象 e960a0d）：B1 完全闭合（角色由 g.RoleOf 解析、非成员/跨群/软删群/observer 全拒、无序对限流、重启仍护栏，18 变异 11 杀）；B2 的卡/落盘/agent ack/幂等/Need 闭合。新 blocking B-01：Needs 面板 handoff 只有「标记已读」，后端非 accept 一律按 decline，一点即不可逆拒绝且消耗同对额度。修复（88413da）：后端三分支（accept/decline 白名单，acknowledged 等不动 handoff），前端 handoff 渲染接受/拒绝双键；补 acknowledged 后仍 pending、接收方仍可 accept 的回归；顺带软删接收方 ack 拒绝、未来时间不占额。待第三轮（对象 88413da）。",
+      "review": "passed",
+      "reviewNote": "CheckHandoff：深度>=3 拒绝、同对 10 分钟>=2 拒绝、observer 禁止、self 禁止；Handoff.Ack pending_ack→accepted/declined 幂等。测试 3 条全绿。**部分完成**：交接卡/Needs you 落盘、事件与 UI 路由未做（P3a-08/P3b）。首审 change_requested（task-2tehuhe6，对象 95168ca/1d3b262）：深度 3、同对 10 分钟 2 次、observer/self、Ack 状态机幂等与反向迁移拒绝通过（18 变异 11 杀）。B1 handoff.go:62 不读 g.Members，role 由调用方自报且不查 Group.Deleted → 非成员/跨群/软删群/大小写 role 全 fail-open；B2 交接卡/落盘/ack 入口零实现，bridge 零引用，延期 P3a-08/P3b 无 owning task。非阻塞：零值 Handoff 不可 ack、HandoffGuardLimits 死代码、空 GroupID 跨群计数、限流方向敏感、declined 占额、并发 ack 数据竞争、窗口/默认值/nil group 无测试。 第二轮复审 change_requested（task-ywqqhwbg，对象 e960a0d）：B1 完全闭合（角色由 g.RoleOf 解析、非成员/跨群/软删群/observer 全拒、无序对限流、重启仍护栏，18 变异 11 杀）；B2 的卡/落盘/agent ack/幂等/Need 闭合。新 blocking B-01：Needs 面板 handoff 只有「标记已读」，后端非 accept 一律按 decline，一点即不可逆拒绝且消耗同对额度。修复（88413da）：后端三分支（accept/decline 白名单，acknowledged 等不动 handoff），前端 handoff 渲染接受/拒绝双键；补 acknowledged 后仍 pending、接收方仍可 accept 的回归；顺带软删接收方 ack 拒绝、未来时间不占额。待第三轮（对象 88413da）。 第三轮复审 passed（task-hwgrkwu2，对象 88413da）：B-01 闭合——acknowledged/未知 resolution 不再改 handoff，Needs 面板交接双键；探针 accept/decline/未知/软删接收方/未来时间均正确；变异回退 acknowledged→decline 即红。build/vet/agenthub/子集/race×2、eslint、tsc 全绿；全量 bridge 仅 401 与价表噪声。非阻塞测试债：软删 ack、未来时间无回归；deny 白名单缺失。",
       "reviewBatch": "G-after-scope"
     },
     "P3a-07": {
