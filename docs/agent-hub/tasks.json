@@ -1061,9 +1061,9 @@
     },
     "P3a-04": {
       "status": "review",
-      "commit": "93eb91f feat(hub-p3a-04 部分): 群上下文快照 + 60535fd",
+      "commit": "93eb91f feat(hub-p3a-04 部分): 群上下文快照 + 60535fd + 9a61874",
       "review": "re-review_pending",
-      "reviewNote": "BuildGroupSnapshot：delta（游标后）、冻结本轮（seq>trigger）、跳过 round_summary/空白、40 条/12000 rune 折叠、确定性文本、@命中/旁听标注。测试 3 条。**部分完成**：群智能体会话装配（每群一会话/事件流）未做，顺延 P3a-05+。 首轮复审 change_requested（task-phsh6ns4，对象 bac5349）：delta/冻结/40 条/回执/owner-only/确定性有测试，7 类变异红，8 路 race 绿。B1 12k 非硬上限：单条 2 万 rune 全留（Text 20044）；B2 每群一会话零实现，reviewNote 的「顺延 P3a-05+」已失效（P3a-05 已 done 推 P3b，无人认领）。修复（60535fd）：B1 预算按真实行头计算，单条超限截断最旧正文并置 Truncated，保证 Text<=MaxRunes；回归单条 20k 与 10x1192 边界，去截断变异红。B2 按复审二选一选择「明确移交给 P3b-01」：P3b-01 acceptance/files 已写入每群会话懒装配 + AgentContextSeq 持久化推进，P3a-04 acceptance 改为只交付构建器。待第二轮复审（对象 60535fd）。非阻塞：task_update/system/routine_card 未过滤、跨群/软删群/非成员无 fail-closed、折叠留最旧与去排序变异存活、折叠行缺 seq 区间、rune 估算未复用 ContextBreakdown、快照角色/职责/产物标题化未做、Messages 浅拷贝、零 bridge 接线。",
+      "reviewNote": "BuildGroupSnapshot：delta（游标后）、冻结本轮（seq>trigger）、跳过 round_summary/空白、40 条/12000 rune 折叠、确定性文本、@命中/旁听标注。测试 3 条。**部分完成**：群智能体会话装配（每群一会话/事件流）未做，顺延 P3a-05+。 首轮复审 change_requested（task-phsh6ns4，对象 bac5349）：delta/冻结/40 条/回执/owner-only/确定性有测试，7 类变异红，8 路 race 绿。B1 12k 非硬上限：单条 2 万 rune 全留（Text 20044）；B2 每群一会话零实现，reviewNote 的「顺延 P3a-05+」已失效（P3a-05 已 done 推 P3b，无人认领）。修复（60535fd）：B1 预算按真实行头计算，单条超限截断最旧正文并置 Truncated，保证 Text<=MaxRunes；回归单条 20k 与 10x1192 边界，去截断变异红。B2 按复审二选一选择「明确移交给 P3b-01」：P3b-01 acceptance/files 已写入每群会话懒装配 + AgentContextSeq 持久化推进，P3a-04 acceptance 改为只交付构建器。待第二轮复审（对象 60535fd）。非阻塞：task_update/system/routine_card 未过滤、跨群/软删群/非成员无 fail-closed、折叠留最旧与去排序变异存活、折叠行缺 seq 区间、rune 估算未复用 ContextBreakdown、快照角色/职责/产物标题化未做、Messages 浅拷贝、零 bridge 接线。 第二轮复审 change_requested（task-f4ethq28，对象 60535fd）：B2 移交与确定性通过；B1 仍未硬——snapshot.go:102 的 over<=len(r) 在「超额>最旧正文」时整段跳过，2 人群「同意」+11940 → Text=12005/Truncated=false，12 人群 12141；块头/折叠行不计预算。修复（9a61874）：预算循环以最终 Text 为准（块头+折叠行计入），超额>=最旧正文丢整条、否则截断正文，块头自身超预算按 rune 硬切；回归补块头超额与 MaxRunes=20。待第三轮复审（对象 9a61874）。",
       "reviewBatch": "G-after-scope"
     },
     "P3a-06": {
@@ -1082,9 +1082,9 @@
     },
     "P3a-05": {
       "status": "review",
-      "commit": "feat(hub-p3a-05): group_history/group_members/group_say 工具",
-      "review": "pending",
-      "reviewNote": "group_history（分页/搜索/owner-only redacted/成员校验）、group_members（角色/存在性）、group_say（observer 禁止、落日志、严格 @ 路由、回执、事件）。测试 TestHubGroupTools。**未完成**：群会话唤醒与轮次预算（P3b）。",
+      "commit": "feat(hub-p3a-05): group_history/group_members/group_say 工具 + 473e082",
+      "review": "re-review_pending",
+      "reviewNote": "group_history（分页/搜索/owner-only redacted/成员校验）、group_members（角色/存在性）、group_say（observer 禁止、落日志、严格 @ 路由、回执、事件）。测试 TestHubGroupTools。**未完成**：群会话唤醒与轮次预算（P3b）。 首轮复审 change_requested（task-fr86akyh，对象 bac5349）：recent 分页/成员状态/跨群隔离/并发 say/参数校验通过；B1 send 先落日志后 Route，member @all/保留名成员路由失败仍入库无回执（group_say 与 hub_group_send 两处）；B1-b 保留名 user/你/所有人 可建智能体；B2 group_history 的 query 匹配 owner-only 正文且忽略 before_seq（布尔泄漏）；B3 MaxTurnsPerHuman 无执行点。修复（473e082）：两处改为 Route(trigger=0)→Append→回填 TriggerSeq→回执；validateProfileName 拒绝保留名；SearchMessages 增加 before_seq 并先 VisibleTo(false) 过滤；group_say 统计最后一条人类消息后的 agent 连续发言，达到 MaxTurnsPerHuman 拒绝。回归：member @all 不增日志、search 不泄漏、max_turns=1 第二轮拒绝、保留名拒绝；B2/B3/保留名变异红。待第二轮复审（对象 473e082）。非阻塞：回执无 client_msg_id 幂等、mentions/mention_all 静默忽略、limit>100→30、未写 Mentions/RoundID、150KB 无上限、group_members 缺职责/运行态、group_say 缺 mentions/reply_to_seq。",
       "reviewBatch": "G-after-scope"
     },
     "P3a-08": {
