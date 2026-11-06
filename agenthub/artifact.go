@@ -7,11 +7,48 @@ package agenthub
 // 索引扫描由调用方提供（FileStore.ListArtifacts）；本文件只做确定性版本计算与路径校验。
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
+
+// artifactVersionMu 串行化「扫描现有版本 → 分配 → 落盘」；FileStore 的
+// SaveArtifact 本身不查重，调用方必须经 RegisterArtifact 才能拿到唯一版本。
+var artifactVersionMu sync.Mutex
+
+// RegisterArtifact 是产物登记的唯一入口：分配 id、按 (owner,name) 递增版本并落盘。
+// 并发调用在进程内串行；返回的 a 已带最终 ID/Version/时间。
+func RegisterArtifact(ctx context.Context, st Store, a *Artifact) error {
+	if st == nil || a == nil {
+		return fmt.Errorf("%w: artifact 参数为空", ErrInvalid)
+	}
+	lister, ok := st.(interface {
+		ListArtifacts(context.Context) ([]*Artifact, error)
+	})
+	if !ok {
+		return fmt.Errorf("%w: store 不支持产物列表", ErrInvalid)
+	}
+	artifactVersionMu.Lock()
+	defer artifactVersionMu.Unlock()
+	if strings.TrimSpace(string(a.ID)) == "" {
+		id, err := st.AllocateID(ctx, PrefixArtifact)
+		if err != nil {
+			return err
+		}
+		a.ID = ArtifactID(id)
+	}
+	existing, err := lister.ListArtifacts(ctx)
+	if err != nil {
+		return err
+	}
+	if err := NewArtifactVersion(existing, a); err != nil {
+		return err
+	}
+	return st.SaveArtifact(ctx, a)
+}
 
 // NextArtifactVersion 计算 (owner,name) 的下一个版本号（现有最大 +1；无则 1）。
 func NextArtifactVersion(existing []*Artifact, owner AgentID, name string) int {

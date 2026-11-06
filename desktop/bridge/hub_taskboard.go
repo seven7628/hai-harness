@@ -233,7 +233,13 @@ func (m *manager) hubNeedList(c command) {
 	if status == "" {
 		status = "pending"
 	}
-	needs, err := st.ListNeeds(context.Background(), agenthub.NeedFilter{Status: status})
+	// 惰性过期：审批/提问超过 30 分钟未处理就从 pending 收掉（P3a-07 B4）。
+	m.expireStaleHubNeeds(context.Background(), st)
+	needs, err := st.ListNeeds(context.Background(), agenthub.NeedFilter{
+		Status:  status,
+		GroupID: agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id"))),
+		AgentID: agenthub.AgentID(strings.TrimSpace(str(c.Payload, "agent_id"))),
+	})
 	if err != nil {
 		m.resp(c, false, "读取 Needs you 失败: "+err.Error(), nil)
 		return
@@ -397,6 +403,7 @@ func (m *manager) recordHubNeed(bs *bridgeSession, e events.Event) {
 	n := &agenthub.Need{
 		ID: id, Kind: kind, Status: "pending",
 		AgentID:   agenthub.AgentID(bs.runtime.agentID),
+		GroupID:   agenthub.GroupID(hubGroupIDFromSID(bs.id)),
 		TaskID:    firstHubTaskID(bs),
 		SessionID: bs.id, Workspace: bs.workspace, Anchor: anchor,
 		Title: title, Body: body, CreatedAt: time.Now().UTC(),
@@ -412,6 +419,43 @@ func firstHubTaskID(bs *bridgeSession) agenthub.TaskID {
 		return ""
 	}
 	return bs.hubTaskIDs[0]
+}
+
+// expireStaleHubNeeds 把 30 分钟未处理的审批/提问置 expired。
+// 锁内重读，避免覆盖刚刚 resolve 的决策；只处理 approval/question，交接/失败不自动过期。
+func (m *manager) expireStaleHubNeeds(ctx context.Context, st agenthub.Store) {
+	if st == nil {
+		return
+	}
+	needs, err := st.ListNeeds(ctx, agenthub.NeedFilter{Status: "pending"})
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, cand := range needs {
+		if cand == nil || (cand.Kind != "approval" && cand.Kind != "question") {
+			continue
+		}
+		if now.Sub(cand.CreatedAt) < agenthub.DefaultNeedTTL {
+			continue
+		}
+		m.hubNeedMu.Lock()
+		n, err := st.LoadNeed(ctx, cand.ID)
+		if err != nil || n == nil || n.Status != "pending" ||
+			(n.Kind != "approval" && n.Kind != "question") ||
+			now.Sub(n.CreatedAt) < agenthub.DefaultNeedTTL {
+			m.hubNeedMu.Unlock()
+			continue
+		}
+		n.Status = "expired"
+		expiredAt := now
+		n.ResolvedAt = &expiredAt
+		saveErr := st.SaveNeed(ctx, n)
+		m.hubNeedMu.Unlock()
+		if saveErr == nil {
+			m.emitHubNeed(n)
+		}
+	}
 }
 
 func (m *manager) emitHubNeed(n *agenthub.Need) {

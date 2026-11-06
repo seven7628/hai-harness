@@ -71,8 +71,7 @@ func BuildGroupSnapshot(g *Group, agentID AgentID, msgs []Message, cursor int64,
 		if limitSeq > 0 && m.Seq > limitSeq {
 			continue
 		}
-		switch m.Kind {
-		case KindRoundSummary, KindRouting, KindApprovalStub:
+		if !m.AgentContextKind() {
 			continue // 回执/审批占位不进上下文（审批正文只进 Needs you）
 		}
 		if !m.VisibleTo(false) {

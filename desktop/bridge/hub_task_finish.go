@@ -84,6 +84,11 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		}
 		m.emitHubTaskAlert(first, "settle_failed", err.Error())
 	} else {
+		// 产物登记：AgentEnd 是 Hub 产物的唯一生产入口，版本分配由
+		// agenthub.RegisterArtifact 串行化（P3a-07 复审 B1）。
+		if err := registerTaskArtifacts(ctx, st, settled, ae.Artifacts); err != nil {
+			m.emitHubTaskAlert(settled.ID, "artifact_register_failed", err.Error())
+		}
 		m.emitHubTaskUpdate(settled)
 		if !alreadyNotified(settled, ae.RunId) {
 			m.pushHubTaskResult(ledger, settled, ae)

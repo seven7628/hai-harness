@@ -116,6 +116,9 @@ func (t *hubGroupHistoryTool) Call(ctx context.Context, _, arguments string) (st
 	}
 	out := make([]agenthub.Message, 0, len(msgs))
 	for _, m := range msgs {
+		if !m.AgentContextKind() {
+			continue // 审批占位/回执不进 agent 的工具视图（P3a-07 B3）
+		}
 		out = append(out, m.Redacted(false))
 	}
 	return marshalHubToolResult(map[string]any{"messages": out, "count": len(out)})

@@ -96,6 +96,7 @@ const (
 	CmdHubGroupHistory      Command = "hub_group_history"
 	CmdHubGroupActivity     Command = "hub_group_activity"
 	CmdHubGroupSend         Command = "hub_group_send"
+	CmdHubArtifactGet       Command = "hub_artifact_get"
 
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"

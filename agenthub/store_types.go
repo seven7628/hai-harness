@@ -34,6 +34,9 @@ type TaskFilter struct {
 	RootTaskID TaskID
 }
 
+// DefaultNeedTTL 是未处理审批/提问的惰性过期窗口（§5.5）。
+const DefaultNeedTTL = 30 * time.Minute
+
 // Need 是 Needs you 的一条待处理项：审批/提问/交接/失败/预算。
 type Need struct {
 	ID        NeedID  `json:"id"`
@@ -73,7 +76,8 @@ type Artifact struct {
 	ID           ArtifactID `json:"id"`
 	Name         string     `json:"name"`
 	Path         string     `json:"path"`
-	Kind         string     `json:"kind"` // created | modified
+	SourcePath   string     `json:"source_path,omitempty"` // 预览用真实路径（不对外展示任意路径）
+	Kind         string     `json:"kind"`                  // created | modified
 	Size         int64      `json:"size,omitempty"`
 	Lines        int64      `json:"lines,omitempty"`
 	SHA256       string     `json:"sha256,omitempty"`

@@ -336,7 +336,7 @@ func (s *MemoryStore) SearchMessages(ctx context.Context, gid GroupID, query str
 		if beforeSeq > 0 && m.Seq >= beforeSeq {
 			continue
 		}
-		if !m.VisibleTo(false) {
+		if !m.VisibleTo(false) || !m.AgentContextKind() {
 			continue
 		}
 		if strings.Contains(strings.ToLower(m.Text), query) {

@@ -5,6 +5,7 @@ package agenthub
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -80,5 +81,43 @@ func TestArtifactStoreRoundTrip(t *testing.T) {
 	// 预览按 id 取（不是路径）。
 	if !strings.HasSuffix(string(list[0].ID), "aaaaaa") {
 		t.Fatalf("id = %s", list[0].ID)
+	}
+}
+
+// P3a-07 复审 B1：登记入口必须在并发下产生唯一版本 1..N，而不是全部 v1。
+func TestRegisterArtifactConcurrentVersions(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 8
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a := &Artifact{OwnerAgentID: "ag_aaaaaaaa", Name: "report.md", Path: "out/report.md"}
+			if err := RegisterArtifact(ctx, st, a); err != nil {
+				t.Errorf("register: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	list, err := st.ListArtifacts(ctx)
+	if err != nil || len(list) != n {
+		t.Fatalf("list = %d, %v", len(list), err)
+	}
+	seen := map[int]bool{}
+	for _, a := range list {
+		if a.Version < 1 || a.Version > n || seen[a.Version] {
+			t.Fatalf("duplicate/out-of-range version: %+v", a)
+		}
+		seen[a.Version] = true
+	}
+	for v := 1; v <= n; v++ {
+		if !seen[v] {
+			t.Fatalf("missing version %d: %v", v, seen)
+		}
 	}
 }

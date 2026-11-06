@@ -137,6 +137,21 @@ func TestHubGroupTools(t *testing.T) {
 	if _, err := call(bsD, "group_history", `{"group_id":"`+string(g.ID)+`"}`); err == nil {
 		t.Fatal("non-member must not read")
 	}
+	// approval_stub 只进人类 UI：group_history/search 都不能把占位正文交给 agent（P3a-07 B3）。
+	if _, err := agenthub.AppendGroupMessage(ctx, st, &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindApprovalStub,
+		Sender: agenthub.Sender{Kind: agenthub.SenderSystem}, Text: "批准 rm -rf /tmp/secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err = call(bsA, "group_history", `{"group_id":"`+string(g.ID)+`"}`)
+	if err != nil || strings.Contains(out, "rm -rf") || strings.Contains(out, "approval_stub") {
+		t.Fatalf("history leaked approval stub: %s, %v", out, err)
+	}
+	out, err = call(bsA, "group_history", `{"group_id":"`+string(g.ID)+`","query":"rm -rf"}`)
+	if err != nil || !strings.Contains(out, `"count":0`) {
+		t.Fatalf("search leaked approval stub: %s, %v", out, err)
+	}
 	_ = time.Now
 }
 

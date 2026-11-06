@@ -116,6 +116,17 @@ func (v Visibility) Validate() error {
 	}
 }
 
+// AgentContextKind 判断消息类型是否允许进入智能体上下文/工具视图。
+// 回执、轮次摘要与审批占位只是人类 UI 的投影，正文可能含敏感信息，统一排除。
+func (m Message) AgentContextKind() bool {
+	switch m.Kind {
+	case KindRouting, KindRoundSummary, KindApprovalStub:
+		return false
+	default:
+		return true
+	}
+}
+
 // VisibleTo 判断某条消息能否进入读方（人/智能体）的视图。
 // 智能体走白名单：只有空值/group 可见；owner 与任何非法值都 fail-closed。
 func (m Message) VisibleTo(isHuman bool) bool {

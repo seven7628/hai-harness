@@ -556,3 +556,53 @@ func TestHubTaskCancelRunningSessionIsNotCanceled(t *testing.T) {
 		t.Fatalf("status = %s, want canceled after idle", got.Status)
 	}
 }
+
+// P3a-07 B4：审批/提问 need 超过 30 分钟未处理，hub_need_list 惰性置 expired；
+// 交接/失败不自动过期。
+func TestHubNeedLazyExpiry(t *testing.T) {
+	m, buf := testManager(t)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	old := &agenthub.Need{
+		ID: "need_old_approval", Kind: "approval", Status: "pending",
+		GroupID: "grp_ttl", CreatedAt: now.Add(-31 * time.Minute), Title: "旧审批",
+	}
+	fresh := &agenthub.Need{
+		ID: "need_fresh_approval", Kind: "approval", Status: "pending",
+		GroupID: "grp_ttl", CreatedAt: now.Add(-29 * time.Minute), Title: "新审批",
+	}
+	handoff := &agenthub.Need{
+		ID: "need_old_handoff", Kind: "handoff", Status: "pending",
+		GroupID: "grp_ttl", CreatedAt: now.Add(-2 * time.Hour), Title: "旧交接",
+	}
+	for _, n := range []*agenthub.Need{old, fresh, handoff} {
+		if err := st.SaveNeed(context.Background(), n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_need_list", map[string]any{"group_id": "grp_ttl"})
+	if !ok {
+		t.Fatalf("need list: %s", errMsg)
+	}
+	var out struct {
+		Needs []*agenthub.Need `json:"needs"`
+	}
+	raw, _ := json.Marshal(data)
+	_ = json.Unmarshal(raw, &out)
+	if len(out.Needs) != 2 {
+		t.Fatalf("pending = %s, want fresh+handoff", raw)
+	}
+	got, _ := st.LoadNeed(context.Background(), old.ID)
+	if got.Status != "expired" || got.ResolvedAt == nil {
+		t.Fatalf("old approval = %+v", got)
+	}
+	if got, _ := st.LoadNeed(context.Background(), fresh.ID); got.Status != "pending" {
+		t.Fatalf("fresh approval = %+v", got)
+	}
+	if got, _ := st.LoadNeed(context.Background(), handoff.ID); got.Status != "pending" {
+		t.Fatalf("handoff = %+v", got)
+	}
+}

@@ -598,8 +598,9 @@ func (s *FileStore) SearchMessages(ctx context.Context, gid GroupID, query strin
 		if beforeSeq > 0 && m.Seq >= beforeSeq {
 			continue
 		}
-		// 搜索也必须按可见性过滤：否则 agent 可用 query 布尔探测 owner-only 正文。
-		if !m.VisibleTo(false) {
+		// 搜索也必须按可见性/上下文 kind 过滤：否则 agent 可用 query 布尔探测
+		// owner-only 正文或 approval_stub 占位（P3a-07 B3）。
+		if !m.VisibleTo(false) || !m.AgentContextKind() {
 			continue
 		}
 		if strings.Contains(strings.ToLower(m.Text), query) {
