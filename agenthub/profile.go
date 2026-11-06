@@ -396,7 +396,8 @@ func validateProfileName(name string) error {
 	if n < 1 || n > 32 {
 		return fmt.Errorf("%w: profile.name must be 1-32 characters", ErrInvalid)
 	}
-	if strings.EqualFold(name, "all") {
+	switch strings.ToLower(name) {
+	case "all", "所有人", "你", "user":
 		return fmt.Errorf("%w: profile.name %q is reserved", ErrInvalid, name)
 	}
 	if strings.ContainsRune(name, '@') {

@@ -211,7 +211,7 @@ func (s *MemoryStore) ReadMessages(ctx context.Context, gid GroupID, beforeSeq i
 	return sliceMessages(msgs, beforeSeq, normalizeLimit(limit)), nil
 }
 
-func (s *MemoryStore) SearchMessages(ctx context.Context, gid GroupID, query string, limit int) ([]Message, error) {
+func (s *MemoryStore) SearchMessages(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -227,6 +227,12 @@ func (s *MemoryStore) SearchMessages(ctx context.Context, gid GroupID, query str
 	}
 	var out []Message
 	for _, m := range msgs {
+		if beforeSeq > 0 && m.Seq >= beforeSeq {
+			continue
+		}
+		if !m.VisibleTo(false) {
+			continue
+		}
 		if strings.Contains(strings.ToLower(m.Text), query) {
 			out = append(out, m)
 		}

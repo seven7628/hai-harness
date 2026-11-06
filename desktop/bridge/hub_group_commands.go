@@ -544,12 +544,8 @@ func (m *manager) hubGroupSend(c command) {
 	if id := strings.TrimSpace(str(c.Payload, "client_msg_id")); id != "" {
 		msg.Refs = map[string]any{"client_msg_id": id}
 	}
-	seq, err := agenthub.AppendGroupMessage(ctx, st, msg)
-	if err != nil {
-		m.resp(c, false, "写入群日志失败: "+err.Error(), nil)
-		return
-	}
-	// 构造路由（成员 profile 用于严格 @ 解析）。
+	// 构造路由（成员 profile 用于严格 @ 解析）。先路由后落日志：保留名/解析失败
+	// 不能留下没有回执的半条消息（P3a-05 B1）。
 	agents, err := st.ListAgents(ctx)
 	if err != nil {
 		m.resp(c, false, "读取智能体失败: "+err.Error(), nil)
@@ -572,11 +568,17 @@ func (m *manager) hubGroupSend(c command) {
 		m.resp(c, false, "构造路由失败: "+err.Error(), nil)
 		return
 	}
-	round, err := router.Route(text, "", true, seq, time.Now())
+	round, err := router.Route(text, "", true, 0, time.Now())
 	if err != nil {
 		m.resp(c, false, "路由失败: "+err.Error(), nil)
 		return
 	}
+	seq, err := agenthub.AppendGroupMessage(ctx, st, msg)
+	if err != nil {
+		m.resp(c, false, "写入群日志失败: "+err.Error(), nil)
+		return
+	}
+	round.TriggerSeq = seq
 	if err := agenthub.AppendRoundReceipt(ctx, st, round); err != nil {
 		m.resp(c, false, "落路由回执失败: "+err.Error(), nil)
 		return

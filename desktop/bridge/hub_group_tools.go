@@ -106,7 +106,7 @@ func (t *hubGroupHistoryTool) Call(ctx context.Context, _, arguments string) (st
 	}
 	var msgs []agenthub.Message
 	if strings.TrimSpace(a.Query) != "" {
-		msgs, err = st.SearchMessages(ctx, agenthub.GroupID(a.GroupID), a.Query, limit)
+		msgs, err = st.SearchMessages(ctx, agenthub.GroupID(a.GroupID), a.Query, a.BeforeSeq, limit)
 	} else {
 		msgs, err = agenthub.ReadGroupLog(ctx, st, agenthub.GroupID(a.GroupID), a.BeforeSeq, limit)
 	}
@@ -208,14 +208,7 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	if text == "" {
 		return "", fmt.Errorf("%w: text 不能为空", agenthub.ErrInvalid)
 	}
-	msg := &agenthub.Message{
-		GroupID: g.ID, Kind: agenthub.KindText,
-		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: t.agentID}, Text: text,
-	}
-	seq, err := agenthub.AppendGroupMessage(ctx, st, msg)
-	if err != nil {
-		return "", err
-	}
+	// 先路由再落日志：@all 越权/保留名等路由失败不能留下半条消息（P3a-05 B1）。
 	agents, err := st.ListAgents(ctx)
 	if err != nil {
 		return "", err
@@ -236,16 +229,54 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	if err != nil {
 		return "", err
 	}
-	round, err := router.Route(text, t.agentID, false, seq, time.Now())
+	if err := t.enforceTurnLimit(ctx, st, g); err != nil {
+		return "", err
+	}
+	round, err := router.Route(text, t.agentID, false, 0, time.Now())
 	if err != nil {
 		return "", err
 	}
+	msg := &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: t.agentID}, Text: text,
+	}
+	seq, err := agenthub.AppendGroupMessage(ctx, st, msg)
+	if err != nil {
+		return "", err
+	}
+	round.TriggerSeq = seq
 	if err := agenthub.AppendRoundReceipt(ctx, st, round); err != nil {
 		return "", err
 	}
 	t.m.emitHubGroupMessage(g.ID, seq, msg)
 	t.m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
 	return marshalHubToolResult(map[string]any{"seq": seq, "message_id": msg.ID, "targets": round.Targets})
+}
+
+// enforceTurnLimit 限制「最后一次人类发言之后」智能体连续发言的轮次。
+// 人类发新消息会重置计数（MaxTurnsPerHuman 默认 8）。
+func (t *hubGroupSayTool) enforceTurnLimit(ctx context.Context, st agenthub.Store, g *agenthub.Group) error {
+	limit := agenthub.DefaultGroupMaxTurnsPerHuman
+	if g != nil && g.Policy.MaxTurnsPerHuman > 0 {
+		limit = g.Policy.MaxTurnsPerHuman
+	}
+	msgs, err := st.ReadMessages(ctx, g.ID, 0, 500)
+	if err != nil {
+		return err
+	}
+	turns := 0
+	for _, m := range msgs { // 最新在前：遇到最后一条人类消息即停
+		if m.Sender.Kind == agenthub.SenderHuman {
+			break
+		}
+		if m.Sender.Kind == agenthub.SenderAgent {
+			turns++
+		}
+	}
+	if turns >= limit {
+		return fmt.Errorf("%w: 本轮智能体发言已达上限 %d，等人类回复后再继续", agenthub.ErrInvalid, limit)
+	}
+	return nil
 }
 
 // ValidParams 只做「JSON 可解析 + group_id 非空」；成员权限在 Call 里判。

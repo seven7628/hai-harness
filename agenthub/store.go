@@ -52,7 +52,7 @@ type Store interface {
 
 	AppendMessage(ctx context.Context, m *Message) (int64, error)
 	ReadMessages(ctx context.Context, gid GroupID, beforeSeq int64, limit int) ([]Message, error)
-	SearchMessages(ctx context.Context, gid GroupID, query string, limit int) ([]Message, error)
+	SearchMessages(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error)
 
 	AppendActivity(ctx context.Context, a *Activity) error
 	ReadActivity(ctx context.Context, gid GroupID, afterSeq int64, limit int) ([]Activity, error)
@@ -419,7 +419,7 @@ func (s *FileStore) ReadMessages(ctx context.Context, gid GroupID, beforeSeq int
 	return sliceMessages(msgs, beforeSeq, limit), nil
 }
 
-func (s *FileStore) SearchMessages(ctx context.Context, gid GroupID, query string, limit int) ([]Message, error) {
+func (s *FileStore) SearchMessages(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -440,6 +440,13 @@ func (s *FileStore) SearchMessages(ctx context.Context, gid GroupID, query strin
 	}
 	matches := make([]Message, 0)
 	for _, m := range msgs {
+		if beforeSeq > 0 && m.Seq >= beforeSeq {
+			continue
+		}
+		// 搜索也必须按可见性过滤：否则 agent 可用 query 布尔探测 owner-only 正文。
+		if !m.VisibleTo(false) {
+			continue
+		}
 		if strings.Contains(strings.ToLower(m.Text), query) {
 			matches = append(matches, m)
 		}

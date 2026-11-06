@@ -68,6 +68,14 @@ func TestHubGroupTools(t *testing.T) {
 	if strings.Contains(out, "私密指令") || !strings.Contains(out, "公开消息") || !strings.Contains(out, agenthub.OwnerOnlyPlaceholder) {
 		t.Fatalf("history leaks = %s", out)
 	}
+	// search 也必须走可见性过滤，不能拿 query 布尔探测 owner-only 正文（P3a-05 B2）。
+	out, err = call(bsA, "group_history", `{"group_id":"`+string(g.ID)+`","query":"私密"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "私密指令") || !strings.Contains(out, `"count":0`) {
+		t.Fatalf("search leaks owner-only: %s", out)
+	}
 	// group_say：@ToolB 路由 + 落日志。
 	out, err = call(bsA, "group_say", `{"group_id":"`+string(g.ID)+`","text":"@ToolB 帮我查日志"}`)
 	if err != nil {
@@ -96,9 +104,27 @@ func TestHubGroupTools(t *testing.T) {
 	if _, err := call(bsC, "group_say", `{"group_id":"`+string(g.ID)+`","text":"observer 说话"}`); err == nil {
 		t.Fatal("observer must not speak")
 	}
-	// @all 普通成员被拒绝（路由层）。
+	// @all 普通成员被拒绝（路由层），且失败不能留下半条日志（P3a-05 B1）。
 	if _, err := call(bsA, "group_say", `{"group_id":"`+string(g.ID)+`","text":"@all 开会"}`); err != nil {
 		t.Fatalf("owner @all should pass: %v", err)
+	}
+	bsB, err := m.hubDMSession(string(b.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := agenthub.ReadGroupLog(ctx, st, g.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := call(bsB, "group_say", `{"group_id":"`+string(g.ID)+`","text":"@all 越权"}`); err == nil {
+		t.Fatal("member @all must be rejected")
+	}
+	after, err := agenthub.ReadGroupLog(ctx, st, g.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("rejected @all left a log entry: before=%d after=%d", len(before), len(after))
 	}
 	// 非成员（用另一个没入群的智能体）读失败。
 	d := createHubAgent(t, m, buf, 5, "ToolD")
@@ -110,4 +136,45 @@ func TestHubGroupTools(t *testing.T) {
 		t.Fatal("non-member must not read")
 	}
 	_ = time.Now
+}
+
+// P3a-05 B3 / B1-b：轮次上限必须生效；保留名不能建成智能体。
+func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "LimitA")
+	b := createHubAgent(t, m, buf, 2, "LimitB")
+	ok, errMsg, data := hubCmd(t, m, buf, 3, "hub_group_create", map[string]any{
+		"name": "限流群",
+		"members": []map[string]any{
+			{"agent_id": string(a.ID), "role": "owner"},
+			{"agent_id": string(b.ID), "role": "member"},
+		},
+		"policy": map[string]any{"max_turns_per_human": 1},
+	})
+	if !ok {
+		t.Fatalf("create: %s", errMsg)
+	}
+	g := groupFromData(t, data)
+	bsB, err := m.hubDMSession(string(b.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(name, args string) (string, error) {
+		tool, err := bsB.hubEngine.GetTool(context.Background(), name)
+		if err != nil {
+			return "", err
+		}
+		return tool.Call(context.Background(), name, args)
+	}
+	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"第一轮"}`); err != nil {
+		t.Fatalf("first say: %v", err)
+	}
+	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"第二轮"}`); err == nil {
+		t.Fatal("second agent turn must be rejected by max_turns_per_human=1")
+	}
+	if ok, _, _ := hubCmd(t, m, buf, 4, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "user", "provider": "deepseek", "model": "deepseek-v4-flash", "role": "x"},
+	}); ok {
+		t.Fatal("reserved profile name must be rejected")
+	}
 }

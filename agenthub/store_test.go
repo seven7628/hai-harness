@@ -171,7 +171,7 @@ func testStoreContract(t *testing.T, s Store) {
 	if got, err := s.ReadMessages(ctx, "grp_test", 0, 2); err != nil || len(got) != 2 || got[0].Text != "beta" || got[1].Text != "gamma" {
 		t.Fatalf("ReadMessages(latest 2) = %v, %v", got, err)
 	}
-	if got, err := s.SearchMessages(ctx, "grp_test", "BETA", 10); err != nil || len(got) != 1 || got[0].Text != "beta" {
+	if got, err := s.SearchMessages(ctx, "grp_test", "BETA", 0, 10); err != nil || len(got) != 1 || got[0].Text != "beta" {
 		t.Fatalf("SearchMessages = %v, %v", got, err)
 	}
 
