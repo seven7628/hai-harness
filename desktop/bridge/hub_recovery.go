@@ -59,7 +59,7 @@ func (m *manager) ensureHubRecovery() {
 // 判定 → 回推 → MarkNotified」这一小段持锁。恢复 1000 个任务时，正常结算
 // 不会被整轮恢复阻塞；每个任务处理前重读账本，仍与 finishHubTask 串行。
 func (m *manager) recoverHubTasks() error {
-	if m == nil {
+	if m == nil || m.hubShutdown.Load() {
 		return nil
 	}
 	st, err := m.hubStore()
