@@ -81,6 +81,12 @@ func TestHubTaskToolsStatusAndCancel(t *testing.T) {
 	if _, err := status.Call(context.Background(), "", `{"task_id":"`+string(foreign.ID)+`"}`); err == nil {
 		t.Fatal("task_status must hide other agents' tasks")
 	}
+	if _, err := cancel.Call(context.Background(), "", `{"task_id":"`+string(foreign.ID)+`"}`); err == nil {
+		t.Fatal("task_cancel must hide other agents' tasks")
+	}
+	if got, err := ledger.Replay(context.Background(), foreign.ID); err != nil || got.Status != agenthub.TaskQueued {
+		t.Fatalf("foreign task was modified: %+v, %v", got, err)
+	}
 }
 
 func TestHubHumanInterventionMarksTask(t *testing.T) {
@@ -147,5 +153,15 @@ func TestHubHumanInterventionMarksTask(t *testing.T) {
 	}
 	if !strings.Contains(pushed, "人类在该任务运行中介入了") {
 		t.Fatalf("task_result missing intervention notice: %q", pushed)
+	}
+	// 新 batch 开口必须清零：上一轮的介入标记不能外溢到下一个任务。
+	target.hubHumanIntervened.Store(true)
+	target.emit(&events.UserInputsConsumed{
+		EventType: events.UserInputsConsumedType,
+		UserTexts: []string{"下一个任务"},
+		Injected:  false,
+	})
+	if target.hubHumanIntervened.Load() {
+		t.Fatal("新 batch 开口未清零 hubHumanIntervened")
 	}
 }
