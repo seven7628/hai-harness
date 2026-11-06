@@ -1107,30 +1107,31 @@
     "batches": [
       {
         "id": "A",
-        "state": "running",
+        "state": "completed",
         "tasks": [
           "P1-10",
           "P2-02",
           "P2-03"
         ],
-        "note": "对象 196c508 / 67e9cd4 / bca7a42；干净副本；含变异测试"
+        "note": "P1-10 delta passed（b25b18c）；P2-02 三轮复审 passed（4de19f5）；P2-03 三轮复审 passed（bca7a42）。N-1 自死锁与其余非阻塞已记录。"
       },
       {
         "id": "B",
-        "state": "queued",
+        "state": "running",
         "tasks": [
           "P2-04",
           "P2-05"
         ],
-        "note": "对象 2f1578d；分两个 scope（相关性/结算 vs 回推/幂等）"
+        "note": "对象 2f1578d；P2-04/P2-05 两个 scope 并行复审中。"
       },
       {
         "id": "C",
-        "state": "queued",
+        "state": "running",
         "tasks": [
           "P2-06",
           "P2-07"
-        ]
+        ],
+        "note": "对象 2a755f9 / ad43330；P2-06 已发起，P2-07 待 B 释放槽位。"
       },
       {
         "id": "D",
