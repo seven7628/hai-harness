@@ -1532,14 +1532,16 @@ const BASE = {
       "reviewBatch": "G-after-scope"
     },
     "P2.5-01": {
-      "status": "review",
+      "status": "done",
       "commit": "8571053 test(hub-p2.5-01): 恢复干净检出测试基线并加 CI 编译门",
-      "reviewNote": "独立复审中（task-uctmkgmb）。按 D5=B→A：提交最小 helper 闭包（12 个测试文件 + skills/testdata）+ push/PR 编译门；干净 worktree `go test ./... -run '^$'` 全绿，5 个包单测全绿。后续仍需逐包补全隐藏测试。"
+      "reviewNote": "独立复审 passed（task-uctmkgmb，对象 8571053）：纯净 archive 下 43 包编译全绿、5 包单测 3 轮+shuffle+race 绿；与父提交对照确认修复了 agents/mcp/provider/subagent/tools 编译失败。NB（未修，记录）：.gitignore 的 testdata 例外未含 skills/testdata；缺 test-baseline 清单；README/.gitignore 文案与现状矛盾；CI 只编译未跑测试；缺 vet；push+PR 双触发。",
+      "review": "passed"
     },
     "P2.5-02": {
       "status": "review",
-      "commit": "d67903b perf(hub-p2.5-02): 任务索引替代提交路径全盘扫描",
-      "reviewNote": "独立复审中（task-83828jp2）。实现：Store 内存索引 + SaveTask 增量；Ledger.FindByClientMsgID / Guard.Check 走 TaskIndex，未实现替身回退 ListTasks；FileStore Open 重建、MemoryStore 同步维护。验证：go test ./agenthub/ 绿、-race 25s 绿、TestHub 两次绿（一次既有 TempDir cleanup 偶发）。"
+      "commit": "a402ac0 fix(hub-p2.5-02): 修复 client 索引 holder 改键丢失并补变异/回退测试",
+      "reviewNote": "首轮 changes_requested（task-83828jp2，对象 d67903b）：B1 byClient 单槽 holder 改键丢 key + N1/N2/N4/N5 测试缺口。修复 a402ac0：byClient 改 []TaskID、holder 改键只摘单条；补 holder move/UpdatedAt 日桶/delivered 终态/dedupe 不归一化/零值索引/回退测试；TaskIndexReady 防零值 fail-open；补 OpenFileStore 损坏 task 测试。re-review 中（task-6yf6nzhh）。",
+      "review": "changes_requested"
     },
     "P2.5-03": {
       "status": "todo",
@@ -1548,21 +1550,24 @@ const BASE = {
     "P2.5-04": {
       "status": "review",
       "commit": "30ac3f1 feat(hub-p2.5-04): 预算默认/群全局接线/无价告警/运行中硬停/预算 UI",
-      "reviewNote": "独立复审中（task-rxanr89b）。按 D1 B+硬停：新 agent/群默认 $20/$50、全局 $200；update 可显式 0；无价用量按 agent 告警一次；LLMEnd 累计 + hubBudgetCheck + Interrupt，AgentEnd 改落 blocked_budget；AgentEditor 预算输入、GroupView 预算 chip。验证：agenthub 绿；预算/硬停/无价用例绿；前端 tsc/eslint/test:hub-patch/test:hub 绿；TestHub 仅既有 TempDir cleanup 偶发。"
+      "reviewNote": "独立复审中（task-rxanr89b）。D1 B+硬停已实现；无价告警计数断言已修（5a5e2ab）。"
     },
     "P2.5-05": {
-      "status": "todo",
-      "reviewNote": "D3 已拍板：A。统一 hub_alert envelope + 前端告警中心；全局恢复失败无 task_id，任务级内联。"
+      "status": "review",
+      "reviewNote": "独立复审中（task-xncczkx6）。实现：emitHubTaskAlert envelope（scope/code/severity）；恢复扫描锁外、单任务重读锁内；前端 alerts store/rail 告警栈/dismiss/recovery 重试；alerts.ts 纯函数。",
+      "commit": "8d8c4f7 feat(hub-p2.5-05): hub_alert 统一 envelope + 前端告警中心 + 恢复锁拆分"
     },
     "P2.5-06": {
       "status": "review",
-      "commit": "b32e89e fix(hub-p2.5-06): Hub 后台泵/过期任务可取消可等待",
-      "reviewNote": "独立复审中（task-kbxf8qxd）。实现：manager hubBgCtx/Cancel/WG；scheduleHubPump/scheduleHubExpire 登记后派生；pump/expire ctx 检查；closeHubRuntimes 先有界 stop 再关会话。验证：TestHub 两轮绿；-race 生命周期用例绿。"
+      "commit": "7af7b4f fix(hub-p2.5-06): 补有界等待/取消收尾/重开与 checkpoint drain（复审 B1/N1/N2/N4/N5）",
+      "reviewNote": "首轮 changes_requested（task-kbxf8qxd，对象 b32e89e）：B1 生命周期测试不能证伪 stop 不 Wait；N1 出队后取消留 dispatched；N2 hubBgClosing 永久闩；N4 waiter 累积；N5 closeHubRuntimes 未 drain coordinator。修复 7af7b4f：后台任务延迟退出+超时/重开测试；Queue 出队后收尾用 WithoutCancel；resetHubBackgroundIfClosed；done channel 每代一个 waiter；closeHubRuntimes 复用 stopSession。re-review 中（task-f8efd6s6）。",
+      "review": "changes_requested"
     },
     "P2.5-07": {
       "status": "review",
-      "commit": "2b4b79c chore(hub-p2.5-07): 清理基础设施小债（深拷贝/顺序回归/duplicate 原因）",
-      "reviewNote": "独立复审中（task-ux7q5kc7）。实现：snapshot Messages 深拷贝 + 防别名测试；SubmitGuarded 查重→Guard→Create 两个变异回归；queue 分支失败/取消回传 created.Error；P2-01 ENOTDIR/登记失败删目录/大小写折叠测试经核对已存在。两套 retry 实现合并未做（仍 deferred）。验证：agenthub 绿；TestHub 一次绿（一次既有 TempDir cleanup 偶发）。"
+      "commit": "8535c66 fix(hub-p2.5-07): 修正顺序测试 fixture + accepted/status 语义 + 失败文案脱敏",
+      "reviewNote": "首轮 passed（task-ux7q5kc7，对象 2b4b79c）；非阻塞 N1/N2/N3/N4 已修于 8535c66：顺序测试 fixture 自洽、sendResultAccepted/Message 白名单+脱敏、session_send 描述、duplicate 文案。follow-up re-review 中（task-kjm4h7te）。",
+      "review": "passed"
     },
     "P2.5-08": {
       "status": "todo",
