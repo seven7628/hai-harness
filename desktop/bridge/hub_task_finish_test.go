@@ -357,3 +357,61 @@ func TestHubTaskFinishMaxIterationsIsFailed(t *testing.T) {
 		t.Fatalf("status = %s, want failed", got.Status)
 	}
 }
+
+// P2-05 复审 B-1：push 成功但 MarkNotified 失败后，同 run 再结算不能把
+// 第二份 task_result 再塞进发起者上下文；只补 delivered 标记。
+func TestHubTaskFinishDoesNotDoublePushAfterMarkFailure(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "OriginDedup")
+	origin, err := m.hubDMSession(string(p.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := m.hubStore()
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID, AgentName: "OriginDedup"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: "/w", SessionID: "s1"},
+		Title:  "回推幂等", Instruction: "做一件事", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		n := 0
+		prefix := "〔后台任务 " + string(task.ID) + " "
+		for _, msg := range origin.s.History() {
+			for _, c := range msg.Content {
+				if c.Type == core.ContentTypeTaskResult && strings.HasPrefix(c.Content, prefix) {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	// 模拟「第一次 push 成功，随后 MarkNotified 失败」：结果已在 history，账本未 notified。
+	if err := origin.s.PushTaskResultUsage(string(task.ID), task.Title, "done", "completed", core.Usage{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("setup task_result = %d, want 1", got)
+	}
+	bs := &bridgeSession{ctx: context.Background(), hubTaskIDs: []agenthub.TaskID{task.ID}}
+	ae := &events.AgentEnd{RunId: "run-mark-fail", Content: "done", FinishReason: core.FinishReasonStop}
+	m.finishHubTask(bs, ae)
+	if got := count(); got != 1 {
+		t.Fatalf("re-settle pushed duplicate task_result: %d, want 1", got)
+	}
+	settled, _ := st.LoadTask(context.Background(), task.ID)
+	if settled.Status != agenthub.TaskDelivered {
+		t.Fatalf("status = %s, want delivered (mark should be repaired)", settled.Status)
+	}
+	// 再重放一次同 run：仍只有一份。
+	m.finishHubTask(bs, ae)
+	if got := count(); got != 1 {
+		t.Fatalf("replay pushed duplicate task_result: %d, want 1", got)
+	}
+}

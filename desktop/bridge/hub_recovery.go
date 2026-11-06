@@ -85,7 +85,9 @@ func (m *manager) recoverHubTasks() {
 			if alreadyNotified(t, runID) {
 				continue
 			}
-			m.pushHubTaskResult(ledger, t, recoveryAgentEnd(t))
+			ae := recoveryAgentEnd(t)
+			ae.RunId = runID // 用真实 run 占位，避免恢复写 "recovery" 后真实 run 迟到重放（P2-05 NB-3）
+			m.pushHubTaskResult(ledger, t, ae)
 		}
 	}
 }

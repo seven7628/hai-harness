@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -124,6 +125,23 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 		m.emitHubTaskAlert(task.ID, "push_failed", fmt.Sprintf("无法打开发起会话: %v", err))
 		return
 	}
+	runID := ""
+	if ae != nil {
+		runID = ae.RunId
+	}
+	// 接收端幂等：若 id 已进入发起者 history（上次 push 成功但 MarkNotified
+	// 失败/进程在这两步之间崩溃），不再推第二份；只补标记并重发 delivered
+	// 快照（P2-05 复审 B-1）。
+	if taskResultInHistory(origin.s.History(), task.ID) {
+		if _, err := ledger.MarkNotified(context.Background(), task.ID, runID); err != nil {
+			m.emitHubTaskAlert(task.ID, "notify_failed", err.Error())
+			return
+		}
+		if latest, lerr := ledger.Replay(context.Background(), task.ID); lerr == nil {
+			m.emitHubTaskUpdate(latest)
+		}
+		return
+	}
 	var usage core.Usage
 	if ae != nil && ae.Usage != nil {
 		usage = *ae.Usage
@@ -141,7 +159,7 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 		m.emitHubTaskAlert(task.ID, "push_failed", err.Error())
 		return
 	}
-	if _, err := ledger.MarkNotified(context.Background(), task.ID, ae.RunId); err != nil {
+	if _, err := ledger.MarkNotified(context.Background(), task.ID, runID); err != nil {
 		m.emitHubTaskAlert(task.ID, "notify_failed", err.Error())
 		return
 	}
@@ -149,6 +167,20 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 	if latest, lerr := ledger.Replay(context.Background(), task.ID); lerr == nil {
 		m.emitHubTaskUpdate(latest)
 	}
+}
+
+// taskResultInHistory 发起者 history 是否已有该任务的 task_result。
+// task_result 只承载终态结果，任务 id 唯一，故 task_id 就是投递幂等键。
+func taskResultInHistory(msgs []core.Message, id agenthub.TaskID) bool {
+	prefix := "〔后台任务 " + string(id) + " "
+	for _, msg := range msgs {
+		for _, c := range msg.Content {
+			if c.Type == core.ContentTypeTaskResult && strings.HasPrefix(c.Content, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // emitHubTaskUpdate 任务快照变化（任务板/卡片；P2-06 接前端）。
