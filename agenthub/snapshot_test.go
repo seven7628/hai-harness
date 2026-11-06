@@ -142,8 +142,25 @@ func TestSnapshotSingleOversizeMessageIsHardCapped(t *testing.T) {
 	if got := len([]rune(snap.Text)); got > DefaultSnapshotRunes {
 		t.Fatalf("header overflow text = %d runes, want <= %d", got, DefaultSnapshotRunes)
 	}
-	if len(snap.Messages) == 0 || snap.Messages[len(snap.Messages)-1].Seq != 2 {
-		t.Fatalf("latest message lost: %+v", snap.Messages)
+	if len(snap.Messages) != 1 || snap.Messages[0].Seq != 2 || snap.Folded != 1 {
+		t.Fatalf("oldest must be folded, newest kept: msgs=%+v folded=%d truncated=%v", snap.Messages, snap.Folded, snap.Truncated)
+	}
+	// 超额小于最旧正文时截断最旧、保留最新（不能整条丢，也不能截错人）。
+	mix := []Message{
+		{Seq: 1, GroupID: g.ID, Kind: KindText, Sender: Sender{Kind: SenderAgent, AgentID: "ag_bbbbbbbb"},
+			Text: strings.Repeat("旧", 9000)},
+		{Seq: 2, GroupID: g.ID, Kind: KindText, Sender: Sender{Kind: SenderAgent, AgentID: "ag_bbbbbbbb"},
+			Text: strings.Repeat("新", 4000)},
+	}
+	snap = BuildGroupSnapshot(g, "ag_aaaaaaaa", mix, 0, Round{}, SnapshotOptions{})
+	if len(snap.Messages) != 2 || snap.Folded != 0 {
+		t.Fatalf("mix should keep both and truncate oldest: msgs=%d folded=%d", len(snap.Messages), snap.Folded)
+	}
+	if got := len([]rune(snap.Messages[1].Text)); got != 4000 {
+		t.Fatalf("newest message truncated: %d runes, want 4000", got)
+	}
+	if got := len([]rune(snap.Messages[0].Text)); got >= 9000 {
+		t.Fatalf("oldest not truncated: %d runes", got)
 	}
 	// 极小预算连块头都放不下：仍必须硬切到上限。
 	tiny := BuildGroupSnapshot(g, "ag_aaaaaaaa", header, 0, Round{}, SnapshotOptions{MaxRunes: 20})

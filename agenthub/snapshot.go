@@ -89,10 +89,6 @@ func BuildGroupSnapshot(g *Group, agentID AgentID, msgs []Message, cursor int64,
 		out.Folded = len(kept) - opt.MaxMessages
 		kept = kept[len(kept)-opt.MaxMessages:]
 	}
-	for snapshotRunes(kept) > opt.MaxRunes && len(kept) > 1 {
-		kept = kept[1:]
-		out.Folded++
-	}
 	out.Text = renderGroupSnapshot(g, agentID, round, kept, out.Folded)
 	// 12k 是硬上限：块头（群/成员/@行）与折叠行也计入最终 Text。
 	// 先丢最旧整条；只剩一条时截断正文；块头本身超预算时硬切兜底。
@@ -155,7 +151,7 @@ func renderGroupSnapshot(g *Group, agentID AgentID, round Round, kept []Message,
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// snapshotWho 与渲染行使用同一发送者口径，预算估算不能另算一套。
+// snapshotWho 与渲染行使用同一发送者口径。
 func snapshotWho(m Message) string {
 	who := string(m.Sender.AgentID)
 	switch m.Sender.Kind {
@@ -168,17 +164,4 @@ func snapshotWho(m Message) string {
 		who = "未知"
 	}
 	return who
-}
-
-func snapshotLineRunes(m Message) int {
-	prefix := fmt.Sprintf("#%d %s: ", m.Seq, snapshotWho(m))
-	return len([]rune(prefix)) + len([]rune(strings.TrimSpace(m.Text))) + 1
-}
-
-func snapshotRunes(msgs []Message) int {
-	n := 0
-	for _, m := range msgs {
-		n += snapshotLineRunes(m)
-	}
-	return n
 }
