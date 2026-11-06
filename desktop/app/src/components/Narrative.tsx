@@ -1423,6 +1423,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         className="rt-turn"
         data-density={density}
         data-open={open ? '1' : undefined}
+        /* data-live：这一轮**正在跑**（区别于「展开了」）。运行时皮肤用它把
+           content-visibility 只关在真正长高的那一段上 —— 关到所有 data-open 上等于
+           把整条转录的离屏跳过全关掉（detailed 密度下每个轮都是 open，实测 420 块
+           挂载：layout/style 160ms vs 旧皮肤 28ms）。 */
+        data-live={live ? '1' : undefined}
         data-foot={usage.matched ? '1' : undefined}
         key={turn.key}
       >
