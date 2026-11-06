@@ -144,6 +144,14 @@ func (m *manager) hubRuntimeByPath(path string) *workspaceRuntime {
 //
 //	P0 阶段 hub 插件还没被 Enable，先按同口径收尾，免得 P1 打开插件后泄漏）。
 func (m *manager) closeHubRuntimes() {
+	// P2.5-06：先取消并等待 Hub 后台泵/过期任务，再关会话；否则旧泵可能在
+	// 会话 Shutdown 后仍写账本/Ask。超时有界，不无限拖住退出。
+	if !m.stopHubBackground(5*time.Second) && m.out != nil {
+		m.out.writeLine(map[string]any{
+			"event_type": "hub_alert", "kind": "hub_background_timeout",
+			"message": "Hub 后台任务 5s 内未退出，继续关闭会话",
+		})
+	}
 	m.mu.Lock()
 	wss := make([]*workspaceRuntime, 0, len(m.hubRuntimes))
 	for _, ws := range m.hubRuntimes {

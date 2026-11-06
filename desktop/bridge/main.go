@@ -947,6 +947,13 @@ type manager struct {
 	hubRecovered bool
 	// hubRecovering 正在恢复（串行化并发 hub_open；失败后可再次进入）。
 	hubRecovering bool
+	// hubBg* 管理 Hub 的后台泵/过期 goroutine（P2.5-06）：
+	// 统一 ctx + WaitGroup，shutdown 时有界等待，关闭后不再启动新任务。
+	hubBgMu      sync.Mutex
+	hubBgCtx     context.Context
+	hubBgCancel  context.CancelFunc
+	hubBgWG      sync.WaitGroup
+	hubBgClosing bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
 	hubMsgDedup map[string]string
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
@@ -1653,9 +1660,9 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.pumpHubQueue, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
+	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
 	bs.hubNeed = func(e events.Event) { m.recordHubNeed(bs, e) }
-	bs.hubExpireNeeds = func() { m.expireSessionNeeds(bs) }
+	bs.hubExpireNeeds = func() { m.scheduleHubExpire(bs) }
 	bs.hubFailTask = m.failHubTasksByReason
 	bs.hubAlert = func(code, message string) {
 		m.out.writeLine(map[string]any{"event_type": "hub_alert", "code": code, "kind": code, "message": message})

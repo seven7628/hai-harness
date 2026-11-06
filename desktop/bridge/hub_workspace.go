@@ -232,15 +232,37 @@ func (m *manager) hubQueueFor() (*agenthub.Queue, error) {
 }
 
 // pumpHubQueue 根 run 结束后推进队列（见 bridgeSession.emit 尾部）。
+// 同步路径保留给测试/诊断；生产走 scheduleHubPump（可取消、可等待）。
 func (m *manager) pumpHubQueue(workspace, sessionID string) {
+	if m == nil {
+		return
+	}
+	ctx, ok := m.hubBackgroundContext()
+	if !ok {
+		return
+	}
+	m.pumpHubQueueCtx(ctx, workspace, sessionID)
+}
+
+func (m *manager) pumpHubQueueCtx(ctx context.Context, workspace, sessionID string) {
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
 	m.mu.Lock()
 	q := m.hubQueue
 	m.mu.Unlock()
 	if q == nil || q.QueuedCount(workspace, sessionID) == 0 {
 		return // 没用过 Hub 派发/没有排队任务：不碰存储、不阻塞事件
 	}
-	_, _ = q.Pump(context.Background(), agenthub.TaskTarget{
+	_, _ = q.Pump(ctx, agenthub.TaskTarget{
 		Kind: agenthub.TargetWorkspace, Workspace: workspace, SessionID: sessionID,
+	})
+}
+
+// scheduleHubPump 是生产入口：登记到 Hub 后台 WaitGroup 后再派发。
+func (m *manager) scheduleHubPump(workspace, sessionID string) {
+	m.spawnHubBackground(func(ctx context.Context) {
+		m.pumpHubQueueCtx(ctx, workspace, sessionID)
 	})
 }
 

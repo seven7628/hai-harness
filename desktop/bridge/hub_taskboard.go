@@ -496,21 +496,35 @@ func (m *manager) emitHubNeed(n *agenthub.Need) {
 }
 
 // expireSessionNeeds 根 run 结束时把该会话仍挂起的审批/提问标 expired。
+// 同步路径保留给测试/诊断；生产走 scheduleHubExpire（可取消、可等待）。
 func (m *manager) expireSessionNeeds(bs *bridgeSession) {
 	if m == nil || bs == nil {
+		return
+	}
+	ctx, ok := m.hubBackgroundContext()
+	if !ok {
+		return
+	}
+	m.expireSessionNeedsCtx(ctx, bs)
+}
+
+func (m *manager) expireSessionNeedsCtx(ctx context.Context, bs *bridgeSession) {
+	if m == nil || bs == nil || ctx == nil || ctx.Err() != nil {
 		return
 	}
 	st, err := m.hubStore()
 	if err != nil {
 		return
 	}
-	ctx := context.Background()
 	needs, err := st.ListNeeds(ctx, agenthub.NeedFilter{Status: "pending"})
 	if err != nil {
 		return
 	}
 	now := time.Now().UTC()
 	for _, candidate := range needs {
+		if ctx.Err() != nil {
+			return
+		}
 		if candidate.SessionID != bs.id || (candidate.Kind != "approval" && candidate.Kind != "question") {
 			continue
 		}
@@ -530,6 +544,13 @@ func (m *manager) expireSessionNeeds(bs *bridgeSession) {
 			m.hubNeedMu.Unlock()
 		}
 	}
+}
+
+// scheduleHubExpire 是生产入口：登记到 Hub 后台 WaitGroup 后再过期。
+func (m *manager) scheduleHubExpire(bs *bridgeSession) {
+	m.spawnHubBackground(func(ctx context.Context) {
+		m.expireSessionNeedsCtx(ctx, bs)
+	})
 }
 
 // hubClear 清空 Hub DM 的上下文（保留 system；会话内 /clear 同一实现）。
