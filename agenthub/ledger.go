@@ -313,7 +313,7 @@ func (l *Ledger) MarkNotified(ctx context.Context, id TaskID, runID string) (boo
 		return false, err
 	}
 	switch t.Status {
-	case TaskCompleted, TaskFailed, TaskInterrupted, TaskDelivered:
+	case TaskCompleted, TaskFailed, TaskInterrupted, TaskBlockedBudget, TaskDelivered:
 	default:
 		return false, fmt.Errorf("%w: task %s status %q is not settled", ErrConflict, id, t.Status)
 	}

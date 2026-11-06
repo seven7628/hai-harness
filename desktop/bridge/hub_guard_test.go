@@ -128,5 +128,13 @@ func TestHubFinishBlocksOverTaskBudget(t *testing.T) {
 	if !strings.Contains(buf.String(), `"blocked_budget"`) {
 		t.Fatalf("missing hub_alert: %s", buf.String())
 	}
+	// blocked_budget 仍必须回推结果（预算阻断 ≠ 结果不可送达）：保留状态，
+	// 但 NotifiedRuns 要占位，发起者收到 task_result_delivered。
+	if len(got.NotifiedRuns) != 1 || got.NotifiedRuns[0] != "r1" {
+		t.Fatalf("blocked_budget notified_runs = %v, want [r1]", got.NotifiedRuns)
+	}
+	if !strings.Contains(buf.String(), `"task_result_delivered"`) {
+		t.Fatalf("blocked_budget result not pushed: %s", buf.String())
+	}
 	_ = json.Marshal
 }
