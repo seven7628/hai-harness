@@ -166,6 +166,19 @@ func (m *manager) validateHubProvider(provider string) error {
 	return nil
 }
 
+// validateHubModelPair 校验 (provider, model) 组合：模型表为空 = 自由模型名（本地
+// vLLM/llama.cpp 不上报 /models），不拒绝；表非空则模型必须存在（精确匹配）。
+func (m *manager) validateHubModelPair(provider, model string) error {
+	provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
+	if model == "" || len(m.provCfg.configuredModels(provider)) == 0 {
+		return nil
+	}
+	if !m.provCfg.hasModelIn(provider, model) {
+		return fmt.Errorf("模型 %q 不属于 provider %q，请重新选择", model, provider)
+	}
+	return nil
+}
+
 // liveAgents 非软删的智能体（总数上限与重名校验都只看它们：
 // 删掉的智能体不该永久占名额，也不该阻止同名重建）。
 func liveAgents(all []*agenthub.AgentProfile) []*agenthub.AgentProfile {
@@ -193,6 +206,10 @@ func (m *manager) hubAgentCreate(c command) {
 	}
 	if err := m.validateHubProvider(p.Provider); err != nil {
 		m.respCode(c, false, err.Error(), "provider_not_found", nil)
+		return
+	}
+	if err := m.validateHubModelPair(p.Provider, p.Model); err != nil {
+		m.respCode(c, false, err.Error(), "unknown_model", nil)
 		return
 	}
 	all, err := st.ListAgents(ctx)
@@ -288,9 +305,11 @@ func (m *manager) hubAgentUpdate(c command) {
 	// 不静默改写调用方给的 model，明确报错让其重新选择。
 	// 判据是「结果组合是否存在」，不是「哪个字段变了」：只改 model（资料页模型输入框）
 	// 同样能把另一个 provider 的模型写进运行中会话（P1-10 复审 B-1）。
-	if (next.Provider != cur.Provider || next.Model != cur.Model) && !m.provCfg.hasModelIn(next.Provider, next.Model) {
-		m.respCode(c, false, fmt.Sprintf("模型 %q 不属于 provider %q，请重新选择", next.Model, next.Provider), "unknown_model", nil)
-		return
+	if next.Provider != cur.Provider || next.Model != cur.Model {
+		if err := m.validateHubModelPair(next.Provider, next.Model); err != nil {
+			m.respCode(c, false, err.Error(), "unknown_model", nil)
+			return
+		}
 	}
 	if !strings.EqualFold(next.Name, cur.Name) {
 		if err := agenthub.ValidateAgentNameUnique(next.Name, liveAgents(all), cur.ID); err != nil {
@@ -720,6 +739,10 @@ func (m *manager) hubAgentRollback(c command) {
 	}
 	if err := next.Normalize(); err != nil {
 		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	if err := m.validateHubModelPair(next.Provider, next.Model); err != nil {
+		m.respCode(c, false, err.Error(), "unknown_model", nil)
 		return
 	}
 	if !strings.EqualFold(next.Name, cur.Name) {

@@ -324,3 +324,43 @@ func TestHubAgentUpdateSyncsSubagentEffort(t *testing.T) {
 		t.Fatalf("subagentEffort = %q, want high", got)
 	}
 }
+
+// P1-10 复审 N2/N3：create 也不能写无效组合；model-only 大小写变体必须拒绝。
+func TestHubAgentCreateRejectsForeignModel(t *testing.T) {
+	m, buf := testManager(t)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "BadPair", "provider": "openai", "model": "deepseek-v4-pro", "role": "x"},
+	}); ok {
+		t.Fatalf("create with foreign model must fail: %s", errMsg)
+	}
+	// 合法组合仍能创建。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "GoodPair", "provider": "openai", "model": "gpt-5", "role": "x"},
+	}); !ok {
+		t.Fatalf("create valid pair: %s", errMsg)
+	}
+}
+
+func TestHubAgentUpdateRejectsModelCaseVariant(t *testing.T) {
+	m, buf := testManager(t)
+	p := createHubAgent(t, m, buf, 1, "CaseAgent")
+	bs, err := m.hubDMSession(string(p.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 精确表匹配：大小写变体不能被 EqualFold 当成「没变」而放行。
+	if ok, _, _ := hubCmd(t, m, buf, 2, "hub_agent_update", map[string]any{
+		"agent_id": string(p.ID), "patch": map[string]any{"model": "DEEPSEEK-V4-FLASH"},
+	}); ok {
+		t.Fatal("case variant model must be rejected")
+	}
+	prov, model, _ := bs.modelCfg()
+	if prov != "deepseek" || model != "deepseek-v4-flash" {
+		t.Fatalf("session pair changed after rejection = %s/%s", prov, model)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 3, "hub_agent_update", map[string]any{
+		"agent_id": string(p.ID), "patch": map[string]any{"model": "deepseek-v4-pro"},
+	}); !ok {
+		t.Fatalf("valid same-provider model: %s", errMsg)
+	}
+}
