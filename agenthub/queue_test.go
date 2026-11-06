@@ -917,7 +917,11 @@ func TestQueueSameTargetSerializesDispatch(t *testing.T) {
 	q, _ := newTestQueue(t, ops)
 	firstDone := make(chan error, 1)
 	go func() { _, err := q.Submit(context.Background(), queueTask("一")); firstDone <- err }()
-	<-ops.started // 第一个 Dispatch 已进入并阻塞
+	select {
+	case <-ops.started: // 第一个 Dispatch 已进入并阻塞
+	case <-time.After(10 * time.Second):
+		t.Fatal("第一个 Submit 未进入 Dispatch")
+	}
 	secondDone := make(chan error, 1)
 	go func() { _, err := q.Submit(context.Background(), queueTask("二")); secondDone <- err }()
 	select {
@@ -1110,6 +1114,30 @@ func TestKeyedLocksReclaimAfterUnlock(t *testing.T) {
 	k.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("locks after concurrent release = %d, want 0", n)
+	}
+
+	// 回收不能破坏互斥：若 unlock 时无条件 delete，等待者会拿到已摘掉的
+	// 旧锁对象，两个 goroutine 可同时进入临界区（N-2 变异）。
+	var inside atomic.Int32
+	var violations atomic.Int32
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				unlock := k.lock("same")
+				if inside.Add(1) != 1 {
+					violations.Add(1)
+				}
+				time.Sleep(50 * time.Microsecond)
+				inside.Add(-1)
+				unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if violations.Load() != 0 {
+		t.Fatalf("mutual exclusion violations = %d", violations.Load())
 	}
 }
 

@@ -233,6 +233,8 @@ func (m *manager) hubQueueFor() (*agenthub.Queue, error) {
 
 // pumpHubQueue 根 run 结束后推进队列（见 bridgeSession.emit 尾部）。
 // 同步路径保留给测试/诊断；生产走 scheduleHubPump（可取消、可等待）。
+// pumpHubQueue 同步泵一次。只能在非 Ops 回调路径调用：Queue.Pump 会持
+// 目标锁并调 ops.Dispatch/SessionStatus，回调内反向调用同目标会自锁。
 func (m *manager) pumpHubQueue(workspace, sessionID string) {
 	if m == nil {
 		return

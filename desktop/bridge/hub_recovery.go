@@ -58,6 +58,9 @@ func (m *manager) ensureHubRecovery() {
 // P2.5-05：不再全程持 hubFinishMu —— 扫描/排队在锁外，只有「单任务重读 →
 // 判定 → 回推 → MarkNotified」这一小段持锁。恢复 1000 个任务时，正常结算
 // 不会被整轮恢复阻塞；每个任务处理前重读账本，仍与 finishHubTask 串行。
+//
+// queued 分支的 LoadTask 只是预筛：Queue.Restore 会在目标锁内再 Replay 一次，
+// 只有仍为 queued 才入队（不要在 Restore 里依赖这里的快照，P2.5-03 B2）。
 func (m *manager) recoverHubTasks() error {
 	if m == nil || m.hubShutdown.Load() {
 		return nil
