@@ -201,8 +201,12 @@ func TestHubAgentEndPumpsQueuedTask(t *testing.T) {
 	if got := q.QueuedCount(wsPath, "s-pump"); got != 1 {
 		t.Fatalf("子 agent AgentEnd 泵了队列: queued = %d", got)
 	}
-	// 根 AgentEnd：emit 内部泵走队首（闸门空闲）。
+	// 根 AgentEnd：异步泵走队首（闸门空闲）。
 	bs.emit(&events.AgentEnd{RunId: "root", Timestamp: time.Now(), EventType: events.AgentEndType})
+	deadline := time.Now().Add(3 * time.Second)
+	for q.QueuedCount(wsPath, "s-pump") != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if got := q.QueuedCount(wsPath, "s-pump"); got != 0 {
 		t.Fatalf("根 AgentEnd 后 queued = %d, want 0", got)
 	}
@@ -454,4 +458,33 @@ func TestHubSessionSendRetryAfterAskFailureRedelivers(t *testing.T) {
 	if !strings.Contains(strings.Join(delivered, "\n"), "重试必须重投") {
 		t.Fatalf("retry did not redeliver; fresh history=%q, task=%s status=%s", delivered, newID, status)
 	}
+}
+
+// P2-03 N-1：泵必须异步。emit 持有 dispatchMu，同步泵会在 Ask/persist 失败
+// 重入 emit 时自锁；这里用一个永不返回的泵证明 emit 不被它拖住。
+func TestHubAgentEndPumpDoesNotBlockEmit(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "PumpAsync", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-async", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	bs.hubPumpQueue = func(string, string) { <-block }
+	done := make(chan struct{})
+	go func() {
+		bs.emit(&events.AgentEnd{RunId: "root", Timestamp: time.Now(), EventType: events.AgentEndType})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("emit 被同步泵阻塞（N-1 自死锁回归）")
+	}
+	close(block)
 }

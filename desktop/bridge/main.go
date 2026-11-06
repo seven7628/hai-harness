@@ -754,9 +754,10 @@ func (bs *bridgeSession) emit(e events.Event) {
 	if e.Type() == events.AgentEndType && bs.hubPumpQueue != nil && bs.runtime != nil &&
 		bs.runtime.kind == runtimeProject {
 		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
-			// pumpHubQueue 内部先看队列长度：没有排队任务时立刻返回，不碰存储、
-			// 不阻塞 emit（会话的 run ledger 收尾在 emit 返回之后）。
-			bs.hubPumpQueue(bs.workspace, bs.id)
+			// 异步：emit 持有 dispatchMu，同步泵会在 Ask→persist 失败→emit
+			// 的路径上重入同一把锁（P2-03 复审 N-1 自死锁）。与上面
+			// hubExpireNeeds 同款，泵内部自己看队列长度。
+			go bs.hubPumpQueue(bs.workspace, bs.id)
 		}
 	}
 }
