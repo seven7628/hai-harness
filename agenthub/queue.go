@@ -267,7 +267,7 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 		// dispatched 当成功返回（静默丢任务，P2-02 复审 N1）；落 canceled 留痕。
 		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		canceled, cerr := q.ledger.Transition(settleCtx, id, TaskCanceled, TransitionOptions{
-			At: time.Now().UTC(), Error: "目标侧去重命中：同一 client_msg_id 已投递过",
+			At: time.Now().UTC(), Error: "目标侧去重命中：同一 client_msg_id 已投递过（本次未投递；先 task_status 确认，必要时换新 client_msg_id）",
 		})
 		cancel()
 		if cerr != nil {

@@ -245,7 +245,8 @@ func newHubSessionSendTool(svc *agenthub.WorkspaceService) *hubSessionSendTool {
 			Description_: "Send a task message to an existing project session. First call workspace_list and session_list to find the target; " +
 				"the target must be a session inside a registered project workspace (never this agent's own home). " +
 				"Returns task_id (ledger id) and session_id; queued=true means the target is busy and the task waits in the Hub queue " +
-				"(it has NOT started yet). The project session runs the task asynchronously. " +
+				"(it has NOT started yet). accepted=false + status=canceled/failed/interrupted/blocked_budget/declined means the task " +
+				"was NOT delivered; read message and call task_status before retrying. The project session runs the task asynchronously. " +
 				"This only dispatches — it does not read or write workspace files directly.",
 			Params_: tools.Obj(map[string]any{
 				"workspace":     tools.Str("Workspace path from workspace_list"),

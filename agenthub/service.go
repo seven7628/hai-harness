@@ -139,18 +139,13 @@ func (s *WorkspaceService) Send(ctx context.Context, workspace, sessionID, text,
 		if err != nil {
 			return SendResult{}, err
 		}
-		message := ""
-		switch created.Status {
-		case TaskCanceled, TaskFailed, TaskBlockedBudget, TaskDeclined:
-			message = created.Error
-		}
 		return SendResult{
 			TaskID:    string(created.ID),
 			SessionID: created.Target.SessionID,
-			Accepted:  true,
+			Accepted:  sendResultAccepted(created),
 			Status:    string(created.Status),
 			Queued:    created.Status == TaskQueued,
-			Message:   message,
+			Message:   sendResultMessage(created),
 		}, nil
 	}
 	res, err := ops.Dispatch(ctx, DispatchReq{
@@ -192,4 +187,32 @@ func defaultTaskID() string {
 		return fmt.Sprintf("task_%d", time.Now().UnixNano())
 	}
 	return "task_" + hex.EncodeToString(b[:])
+}
+
+// sendResultAccepted 只有「真的投递/仍在队列」才是 accepted；取消/失败/预算阻断/
+// 拒绝/中断都不是。避免模型把 accepted=true + status=canceled 读成已投递（P2.5-07 N3）。
+func sendResultAccepted(t *Task) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Status {
+	case TaskFailed, TaskCanceled, TaskInterrupted, TaskBlockedBudget, TaskDeclined:
+		return false
+	}
+	return true
+}
+
+// sendResultMessage 回传模型可读的原因；failed 可能含 OS/路径细节，只给指向
+// task_status 的固定文案，不把内部错误原样塞进上下文（P2.5-07 N4）。
+func sendResultMessage(t *Task) string {
+	if t == nil {
+		return ""
+	}
+	switch t.Status {
+	case TaskCanceled, TaskInterrupted, TaskBlockedBudget, TaskDeclined:
+		return t.Error
+	case TaskFailed:
+		return "派发失败，详见 task_status"
+	}
+	return ""
 }

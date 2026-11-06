@@ -676,7 +676,9 @@ func TestSubmitGuardedChecksGuardBeforeCreate(t *testing.T) {
 	st := &saveCountingStore{MemoryStore: NewMemoryStore()}
 	q := NewQueue(NewLedger(st), ops)
 	task := queueTask("会被链长拒绝")
-	task.Chain = []TaskID{"task_a", "task_b"}
+	task.ID = "task_self"
+	task.RootTaskID = "task_root"
+	task.Chain = []TaskID{"task_root", "task_self"} // 账本合法且 ChainSteps=2 > 1
 	guard := &Guard{Limits: GuardLimits{MaxChainSteps: 1, MaxConcurrent: 10}}
 
 	if _, err := q.SubmitGuarded(context.Background(), task, guard); !errors.Is(err, ErrChainTooDeep) {
@@ -705,7 +707,9 @@ func TestSubmitGuardedReturnsExistingBeforeGuard(t *testing.T) {
 	guard := &Guard{Limits: GuardLimits{MaxChainSteps: 1, MaxConcurrent: 10}}
 	second := queueTask("重复投递")
 	second.ClientMsgID = "same-key"
-	second.Chain = []TaskID{"task_a", "task_b"} // 如果 Guard 先跑，这里会 ErrChainTooDeep
+	second.ID = "task_self_dup"
+	second.RootTaskID = "task_root_dup"
+	second.Chain = []TaskID{"task_root_dup", "task_self_dup"} // 合法且 ChainSteps=2 > 1
 	got, err := q.SubmitGuarded(context.Background(), second, guard)
 	if err != nil {
 		t.Fatalf("duplicate submit should return existing, got %v", err)

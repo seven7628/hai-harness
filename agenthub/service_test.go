@@ -98,8 +98,8 @@ func TestWorkspaceServiceSendQueueDuplicateReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if res.Status != string(TaskCanceled) || res.Message == "" {
-		t.Fatalf("duplicate result = %+v; want canceled with reason", res)
+	if res.Status != string(TaskCanceled) || res.Message == "" || res.Accepted {
+		t.Fatalf("duplicate result = %+v; want canceled/non-accepted with reason", res)
 	}
 	if !strings.Contains(res.Message, "去重") {
 		t.Fatalf("duplicate reason = %q, want 去重", res.Message)
@@ -165,5 +165,33 @@ func TestWorkspaceServicePassThrough(t *testing.T) {
 	ops.dispatchErr = errors.New("工作区未登记")
 	if _, err := svc.Send(context.Background(), "/w", "s1", "x", ""); err == nil || !strings.Contains(err.Error(), "工作区未登记") {
 		t.Fatalf("dispatch error = %v", err)
+	}
+}
+
+// P2.5-07 N2/N3/N4：结果文案与 accepted 的状态白名单。
+func TestSendResultSemantics(t *testing.T) {
+	cases := []struct {
+		status   TaskStatus
+		error    string
+		accepted bool
+		message  string
+	}{
+		{TaskDispatched, "", true, ""},
+		{TaskQueued, "", true, ""},
+		{TaskCompleted, "", true, ""},
+		{TaskCanceled, "目标侧去重命中", false, "目标侧去重命中"},
+		{TaskInterrupted, "进程重启：没有运行记录", false, "进程重启：没有运行记录"},
+		{TaskBlockedBudget, "预算超限", false, "预算超限"},
+		{TaskDeclined, "目标拒绝", false, "目标拒绝"},
+		{TaskFailed, "/secret/path: permission denied", false, "派发失败，详见 task_status"},
+	}
+	for _, c := range cases {
+		task := &Task{Status: c.status, Error: c.error}
+		if got := sendResultAccepted(task); got != c.accepted {
+			t.Errorf("%s accepted = %v, want %v", c.status, got, c.accepted)
+		}
+		if got := sendResultMessage(task); got != c.message {
+			t.Errorf("%s message = %q, want %q", c.status, got, c.message)
+		}
 	}
 }
