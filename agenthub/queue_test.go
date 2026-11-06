@@ -675,6 +675,37 @@ type saveCountingStore struct {
 	saves int
 }
 
+// P2.5-05 B1：恢复扫描在锁外用旧快照，任务可能已被 session_send 派发/结算。
+// Restore 必须在目标锁内重读，只有仍 queued 才入队；否则 completed 会被塞回
+// 队首并永久堵死该目标（PROBE-B）。
+func TestQueueRestoreRechecksQueuedUnderTargetLock(t *testing.T) {
+	ops := &queueFakeOps{}
+	q, _ := newTestQueue(t, ops)
+	ctx := context.Background()
+	task := queueTask("恢复时已派发")
+	created, err := q.ledger.Create(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := *created // 调用方持有的旧快照：Status=queued
+	if _, err := q.ledger.Transition(ctx, created.ID, TaskDispatched, TransitionOptions{At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	q.Restore(&stale)
+	if n := q.QueuedCount("/w", "s1"); n != 0 {
+		t.Fatalf("dispatched task restored into pending: queued=%d", n)
+	}
+	if _, err := q.ledger.Transition(ctx, created.ID, TaskCompleted, TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	stale2 := *created
+	stale2.Status = TaskQueued
+	q.Restore(&stale2)
+	if n := q.QueuedCount("/w", "s1"); n != 0 {
+		t.Fatalf("completed task restored into pending: queued=%d", n)
+	}
+}
+
 // P2.5-07 N1：进程重启留下的 interrupted 任务，同 client_msg_id 重投
 // 必须新建 attempt，不能永远返回同一 interrupted 快照。
 func TestQueueInterruptedRetryStartsNewAttempt(t *testing.T) {

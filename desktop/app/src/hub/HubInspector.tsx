@@ -89,6 +89,8 @@ function TaskRow({
   onCancel: () => void
   onRetry: () => void
 }) {
+  const alerts = useHubStore((s) => s.alerts)
+  const taskAlerts = alerts.filter((a) => a.task_id === task.id)
   const terminal = ['completed', 'failed', 'interrupted', 'delivered', 'canceled', 'blocked_budget', 'declined'].includes(task.status ?? '')
   const usage = task.result?.usage
   const cost = usage?.cost_priced ? `$${(usage.cost_usd ?? 0).toFixed(4)}` : '成本未知'
@@ -107,6 +109,16 @@ function TaskRow({
           {task.instruction ? <pre className="hub-need-body">{task.instruction}</pre> : null}
           {task.result?.summary ? <div className="hub-task-summary"><MarkdownLite text={task.result.summary} /></div> : null}
           {task.error ? <p className="hub-error-text">{task.error}</p> : null}
+          {taskAlerts.length > 0 ? (
+            <div className="hub-task-alerts">
+              {taskAlerts.slice(0, 3).map((a) => (
+                <div key={a.id} className={`hub-alert-row ${a.severity ?? 'warning'}`}>
+                  <span className="hub-alert-dot" />
+                  <span className="hub-alert-text">{a.message || a.code}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
           {task.result?.artifacts?.length ? (
             <ul className="hub-artifacts">
               {task.result.artifacts.map((a, i) => (

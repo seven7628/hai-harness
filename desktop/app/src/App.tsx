@@ -15,7 +15,8 @@ import SettingsModal from './components/SettingsModal'
 import ToastView from './components/ToastView'
 import BootScreen from './components/BootScreen'
 import HubSurface from './hub/HubSurface'
-import { useHubStore } from './hub/useHubStore'
+import './hub/hub.css'
+import { attachHubEvents, useHubStore } from './hub/useHubStore'
 import { useAppStore } from './store/useAppStore'
 import { applyTheme } from './lib/theme'
 import { applyNarrativeDensity, applyNarrativeSkin } from './lib/narrativeSkin'
@@ -137,6 +138,10 @@ export default function App() {
   }, [rightSize, rightRef[0]])
 
   const hubOpen = useHubStore((s) => s.open)
+  const hubAlerts = useHubStore((s) => s.alerts)
+  const openHub = useHubStore((s) => s.openHub)
+  // App 级订阅：离开 Hub 页期间产生的结算/告警也要收进告警中心（P2.5-05 复审 B3）。
+  useEffect(() => attachHubEvents(), [])
   return (
     <div className={`app-root ${inSkills ? 'in-skills' : ''}${inCron ? 'in-cron' : ''}${leaving ? ' leaving' : ''}`}>
       {mainReady && (
@@ -220,6 +225,13 @@ export default function App() {
       )}
       <SkillsPage />
       {inCron && (cronDetailOpen ? <CronRunDetailPage /> : cronRunsJob ? <CronRunsPage /> : <CronPage />)}
+      {!hubOpen && hubAlerts.length > 0 ? (
+        <button className="hub-global-alert" onClick={openHub} title={hubAlerts[0].message || hubAlerts[0].code}>
+          <span className={`hub-alert-dot ${hubAlerts[0].severity ?? 'warning'}`} />
+          <span>Hub 告警 {hubAlerts.length > 1 ? `(${hubAlerts.length})` : ''}</span>
+          <span className="hub-global-alert-text">{hubAlerts[0].message || hubAlerts[0].code}</span>
+        </button>
+      ) : null}
       {!hubOpen && <Statusbar />}
       <SandboxReleaseModal />
       <NewWorkspaceModal />

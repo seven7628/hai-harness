@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type { HubAgent, HubAlert, HubDMInfo, HubGroup, HubHistoryPage, HubMessage, HubGroupActivity, HubNeed, HubPage, HubRound, HubRunEntry, HubTask } from './types'
+import { alertKey } from './alerts'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -607,11 +608,12 @@ export const useHubStore = create<HubState>((set, get) => ({
       }
       case 'hub_alert': {
         const code = ev.code || ev.kind || 'hub_alert'
-        const id = `${code}:${ev.task_id ?? ''}:${ev.at ?? ev.message ?? ''}`
+        const message = typeof ev.message === 'string' ? ev.message : undefined
+        const id = alertKey(code, ev.task_id, message)
         const alert: HubAlert = {
           id, scope: ev.scope, code, kind: ev.kind, severity: ev.severity,
           task_id: ev.task_id, agent_id: ev.agent_id, group_id: ev.group_id,
-          message: typeof ev.message === 'string' ? ev.message : undefined, at: ev.at,
+          message, at: ev.at,
         }
         set((s) => {
           if (s.alerts.some((a) => a.id === id)) return {}
@@ -702,7 +704,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 }))
 
-/** HubSurface 挂载时订阅事件；返回撤销函数。 */
+/** App 启动时订阅一次（离开 Hub 页也要收告警）；返回撤销函数。 */
 export function attachHubEvents(): () => void {
   const transport = getTransport()
   return transport.onEvent((line) => useHubStore.getState().handleEvent(line))

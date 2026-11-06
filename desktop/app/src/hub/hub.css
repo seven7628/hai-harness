@@ -579,3 +579,40 @@ button.hub-budget-chip:hover { border-color: currentColor; }
 .hub-alert-row.error .hub-alert-dot { background: #b23a2e; }
 .hub-alert-row.info .hub-alert-dot { background: #2f7a4f; }
 .hub-alert-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* P2.5-05：全局告警入口（Hub 页关闭时仍可见，点击进入告警中心）。 */
+.hub-global-alert {
+  position: fixed;
+  top: 12px;
+  right: 16px;
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 7px 11px;
+  border: 1px solid var(--line, #d8d2c6);
+  border-radius: 999px;
+  background: var(--paper, #fffdf8);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+}
+.hub-global-alert-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.78;
+}
+.hub-alert-stack {
+  max-height: 42vh;
+  overflow-y: auto;
+}
+.hub-task-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}

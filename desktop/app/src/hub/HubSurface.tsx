@@ -2,8 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Markdown } from '../components/markdown'
 import { Bot, SendIcon } from '../components/icons'
 import { useT } from '../i18n'
-import { attachHubEvents, useHubStore } from './useHubStore'
+import { useHubStore } from './useHubStore'
 import AgentEditor from './AgentEditor'
+import { alertSeverity } from './alerts'
 import HubInspector from './HubInspector'
 import GroupView from './GroupView'
 import type { HubAgent, HubMessage, HubRunEntry } from './types'
@@ -64,7 +65,6 @@ export default function HubSurface() {
   const listRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
 
-  useEffect(() => attachHubEvents(), [])
   useEffect(() => {
     void refresh()
     // 中途离开再回来：重开当前 DM —— 回复可能是在没有订阅时落定的（B3），
@@ -130,19 +130,22 @@ export default function HubSurface() {
           </span>
         </div>
         {alerts.length > 0 ? (
-          <div className="hub-alert-stack" role="status" aria-label="Hub 告警">
-            {alerts.slice(0, 4).map((a) => (
-              <div key={a.id} className={`hub-alert-row ${a.severity ?? 'warning'}`}>
-                <span className="hub-alert-dot" />
-                <span className="hub-alert-text" title={a.message}>{a.message || a.code}</span>
-                {a.task_id ? <span className="hub-sub">{a.task_id}</span> : null}
-                {a.code === 'recovery_failed' && activeId ? (
-                  <button className="hub-link" onClick={() => void select(activeId)}>重试</button>
-                ) : null}
-                <button className="hub-link" onClick={() => dismissAlert(a.id)} aria-label="忽略告警">×</button>
-              </div>
-            ))}
-            {alerts.length > 4 ? <span className="hub-sub">还有 {alerts.length - 4} 条</span> : null}
+          <div className="hub-alert-stack" role="region" aria-label="Hub 告警">
+            {alerts.map((a) => {
+              const task = tasks.find((t) => t.id === a.task_id)
+              const agentID = a.agent_id || task?.origin?.agent_id || activeId
+              return (
+                <div key={a.id} className={`hub-alert-row ${alertSeverity(a.severity)}`}>
+                  <span className="hub-alert-dot" title={a.severity ?? 'warning'} />
+                  <span className="hub-alert-text" title={a.message}>{a.message || a.code}</span>
+                  {a.task_id ? <span className="hub-sub">{a.task_id}</span> : null}
+                  {a.code === 'recovery_failed' && agentID ? (
+                    <button className="hub-link" onClick={() => void select(agentID)}>重试</button>
+                  ) : null}
+                  <button className="hub-link" onClick={() => dismissAlert(a.id)} aria-label="忽略告警">×</button>
+                </div>
+              )
+            })}
           </div>
         ) : null}
         <div className="hub-rail-tabs" role="tablist">

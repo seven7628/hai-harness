@@ -389,14 +389,23 @@ func dispatchClientMsgID(t *Task) string {
 
 // Restore 把账本里 queued 的任务放回内存队列（进程重启恢复；不立即派发）。
 // 重复调用幂等：同一 id 只入队一次。
+//
+// 传入的 t 可能已在锁外被派发/结算（恢复扫描与 session_send 并发）：目标锁内
+// 必须重读账本，只有仍为 queued 才入队。否则会把 dispatched 任务再 Ask 一次
+// （目标侧判重 → canceled，真实 run 的结果被静默丢弃），或把 completed 塞到
+// 队首让该目标永久 Transition 失败（P2.5-05 复审 B1）。
 func (q *Queue) Restore(t *Task) {
-	if q == nil || t == nil || t.Status != TaskQueued {
+	if q == nil || q.ledger == nil || t == nil || t.Status != TaskQueued {
 		return
 	}
 	key := queueKey(t.Target.Workspace, t.Target.SessionID)
 	unlockTarget := q.targets.lock(key)
 	defer unlockTarget()
-	q.enqueueLocked(key, t.ID)
+	cur, err := q.ledger.Replay(context.Background(), t.ID)
+	if err != nil || cur == nil || cur.Status != TaskQueued {
+		return
+	}
+	q.enqueueLocked(key, cur.ID)
 }
 
 // CancelDispatchedIfIdle 在目标锁内重读任务并取消「已派发但会话不忙」的任务。

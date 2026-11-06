@@ -57,6 +57,8 @@ function NeedRow({
   onResolve: (resolution: string, answers?: Record<string, string>) => void
 }) {
   const questions = useMemo(() => parseQuestions(need), [need])
+  const alerts = useHubStore((s) => s.alerts)
+  const needAlerts = need.task_id ? alerts.filter((a) => a.task_id === need.task_id) : []
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const kindLabel: Record<string, string> = {
     approval: '审批', question: '提问', failure: '失败', handoff: '交接', budget: '预算',
@@ -68,6 +70,16 @@ function NeedRow({
         <strong>{need.title || need.kind || '待处理'}</strong>
       </header>
       {need.body ? <HubNeedBody body={need.body} /> : null}
+      {needAlerts.length > 0 ? (
+        <div className="hub-task-alerts">
+          {needAlerts.slice(0, 3).map((a) => (
+            <div key={a.id} className={`hub-alert-row ${a.severity ?? 'warning'}`}>
+              <span className="hub-alert-dot" />
+              <span className="hub-alert-text">{a.message || a.code}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <footer className="hub-need-actions">
         {need.kind === 'approval' ? (
           <>

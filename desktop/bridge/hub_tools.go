@@ -120,7 +120,12 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 	// 这里派给项目会话，不切全局 provider）。注册后再统一过 Profile 策略，
 	// 所以 readonly 预设仍能看到 list、看不到 create/send。
 	svc := agenthub.NewWorkspaceService(newHubWorkspaceOps(m), p.ID)
-	svc.Origin = agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID}
+	// 初始派发的 Origin 必须带群上下文：Guard 用它现读 Group.Policy 的日预算。
+	origin := agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: p.ID}
+	if spec.Scope.Kind == agenthub.ScopeGroup && spec.Scope.GroupID != "" {
+		origin = agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: spec.Scope.GroupID, AgentID: p.ID}
+	}
+	svc.Origin = origin
 	if q, err := m.hubQueueFor(); err == nil {
 		svc.Queue = q // P2-03：任务落账本 + 空闲闸门
 		// P2-07：预算/并发/去重/链长护栏。群日预算在初始派发时按任务
@@ -128,16 +133,16 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 		svc.Guard = m.hubWorkspaceGuard(p)
 	} else {
 		// 降级直派是 fail-open：至少留一条诊断，别让闸门静默失效。
-		m.out.writeLine(map[string]any{
-			"event_type": "hub_alert", "kind": "queue_unavailable",
-			"message": "Hub 队列初始化失败，session_send 降级为直接派发: " + err.Error(),
+		m.emitHubAlert(hubAlertEvent{
+			Code: "queue_unavailable", AgentID: p.ID,
+			Message: "Hub 队列初始化失败，session_send 降级为直接派发: " + err.Error(),
 		})
 	}
 	registerHubGroupTools(eng, m, p.ID)
 	registerHubArtifactTools(eng, m, p.ID)
 	registerHubTaskTools(eng, m, p.ID)
 	registerHubWorkspaceTools(eng, svc, func(code, message string) {
-		m.out.writeLine(map[string]any{"event_type": "hub_alert", "kind": code, "agent_id": string(p.ID), "message": message})
+		m.emitHubAlert(hubAlertEvent{Code: code, AgentID: p.ID, Message: message})
 	})
 	applyHubToolPolicy(context.Background(), eng, p.Tools)
 	return eng, effortRef
