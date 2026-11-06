@@ -901,6 +901,9 @@ type manager struct {
 	// hubFinishMu 串行化任务结算的「检查已通知 → Finish → 回推 → MarkNotified」
 	// （P2-05 复审 B1：并发同 run 会双推）。
 	hubFinishMu sync.Mutex
+	// hubNeedMu 串行化 need 的「load → 决策 → save」，避免 resolve 与异步
+	// expiry 的读改写竞态互相覆盖（P2-06 B3）。
+	hubNeedMu sync.Mutex
 	// hubRecovered 进程内只做一次崩溃恢复（在首次 hub_open 时）。
 	hubRecovered bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
@@ -3832,8 +3835,13 @@ func (m *manager) shutdownAll() {
 	// MCP 配置监听停止（进程退出前显式收尾：watcher goroutine + fd）。
 	// 此处不持 m.mu（stop 会等 apply 收尾，而 apply 要取 m.mu）。
 	m.mu.Lock()
-	wss := make([]*workspaceRuntime, 0, len(m.workspaces))
+	wss := make([]*workspaceRuntime, 0, len(m.workspaces)+len(m.hubRuntimes))
 	for _, ws := range m.workspaces {
+		wss = append(wss, ws)
+	}
+	// Hub 智能体会话不在 m.workspaces（hubRuntimes 单独登记）：审批/提问
+	// 的 need.Need.SessionID 是 hub.<agent>.dm，只扫项目工作区会永远找不到（P2-06 B1）。
+	for _, ws := range m.hubRuntimes {
 		wss = append(wss, ws)
 	}
 	m.mu.Unlock()
@@ -4448,8 +4456,13 @@ func projectMCPLayers(ws string) []mcp.Layer {
 // 调用方随后 rebuildAll（工具面变更立即生效）。
 func (m *manager) applyMCPConfig(cfg map[string]mcp.ServerConfig) {
 	m.mu.Lock()
-	wss := make([]*workspaceRuntime, 0, len(m.workspaces))
+	wss := make([]*workspaceRuntime, 0, len(m.workspaces)+len(m.hubRuntimes))
 	for _, ws := range m.workspaces {
+		wss = append(wss, ws)
+	}
+	// Hub 智能体会话不在 m.workspaces（hubRuntimes 单独登记）：审批/提问
+	// 的 need.Need.SessionID 是 hub.<agent>.dm，只扫项目工作区会永远找不到（P2-06 B1）。
+	for _, ws := range m.hubRuntimes {
 		wss = append(wss, ws)
 	}
 	m.mu.Unlock()
@@ -5582,8 +5595,13 @@ func (m *manager) sessionByID(sid string) *bridgeSession {
 		return nil
 	}
 	m.mu.Lock()
-	wss := make([]*workspaceRuntime, 0, len(m.workspaces))
+	wss := make([]*workspaceRuntime, 0, len(m.workspaces)+len(m.hubRuntimes))
 	for _, ws := range m.workspaces {
+		wss = append(wss, ws)
+	}
+	// Hub 智能体会话不在 m.workspaces（hubRuntimes 单独登记）：审批/提问
+	// 的 need.Need.SessionID 是 hub.<agent>.dm，只扫项目工作区会永远找不到（P2-06 B1）。
+	for _, ws := range m.hubRuntimes {
 		wss = append(wss, ws)
 	}
 	m.mu.Unlock()

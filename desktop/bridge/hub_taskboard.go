@@ -125,6 +125,21 @@ func (m *manager) hubTaskCancel(c command) {
 		return
 	}
 	bs.s.Interrupt() // 幂等：空闲会话无操作；终态由 AgentEnd 结算
+	// 会话存在但没在跑（重启恢复的 dispatched/running、结算写盘失败）时
+	// Interrupt 是 no-op，不会再有 AgentEnd；必须直接 canceled，否则任务板
+	// 永远显示运行中且 retry 拒绝（P2-06 B2）。
+	if !bs.running.Load() && !bs.hubDispatchPending.Load() {
+		canceled, cerr := agenthub.NewLedger(st).Transition(ctx, id, agenthub.TaskCanceled, agenthub.TransitionOptions{
+			At: time.Now().UTC(), Error: "会话空闲，取消未结束的任务",
+		})
+		if cerr != nil {
+			m.resp(c, false, "取消失败: "+cerr.Error(), nil)
+			return
+		}
+		m.emitHubTaskUpdate(canceled)
+		respTask(canceled, "会话空闲，已取消")
+		return
+	}
 	respTask(t, "已请求中断，等待运行结束")
 }
 
@@ -218,6 +233,8 @@ func (m *manager) hubNeedResolve(c command) {
 		m.resp(c, false, "need_id 不能为空", nil)
 		return
 	}
+	m.hubNeedMu.Lock()
+	defer m.hubNeedMu.Unlock()
 	n, err := st.LoadNeed(ctx, id)
 	if err != nil {
 		m.resp(c, false, "读取 Need 失败: "+err.Error(), nil)
@@ -385,14 +402,24 @@ func (m *manager) expireSessionNeeds(bs *bridgeSession) {
 		return
 	}
 	now := time.Now().UTC()
-	for _, n := range needs {
-		if n.SessionID != bs.id || (n.Kind != "approval" && n.Kind != "question") {
+	for _, candidate := range needs {
+		if candidate.SessionID != bs.id || (candidate.Kind != "approval" && candidate.Kind != "question") {
+			continue
+		}
+		m.hubNeedMu.Lock()
+		// 锁内重读：resolve 可能刚刚把它改成 resolved；不能覆盖用户决策。
+		n, err := st.LoadNeed(ctx, candidate.ID)
+		if err != nil || n == nil || n.Status != "pending" || n.SessionID != bs.id {
+			m.hubNeedMu.Unlock()
 			continue
 		}
 		n.Status = "expired"
 		n.ResolvedAt = &now
 		if err := st.SaveNeed(ctx, n); err == nil {
+			m.hubNeedMu.Unlock()
 			m.emitHubNeed(n)
+		} else {
+			m.hubNeedMu.Unlock()
 		}
 	}
 }

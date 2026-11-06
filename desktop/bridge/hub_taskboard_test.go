@@ -5,10 +5,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
 )
 
@@ -231,4 +233,135 @@ func TestHubNeedFromEventsAndResolve(t *testing.T) {
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// P2-06 B1：Hub 智能体 DM 会话的审批 need 必须能 resolve（sessionByID 要扫 hubRuntimes）。
+func TestHubNeedResolveOnHubDMSession(t *testing.T) {
+	m, buf := testManager(t)
+	hubAgent := createHubAgent(t, m, buf, 1, "NeedHubDM")
+	bs, err := m.hubDMSession(string(hubAgent.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := core.ToolCall{Id: "call-hub-1", Name: "bash", Arguments: `{"command":"ls"}`}
+	if _, err := bs.s.RequestApproval(context.Background(), call); err != nil {
+		t.Fatalf("register approval: %v", err)
+	}
+	bs.emit(&events.ToolApprovalRequested{
+		RunId: "r1", Id: "call-hub-1", Name: "bash", Arguments: `{"command":"ls"}`,
+		Timestamp: time.Now(), EventType: events.ToolApprovalType,
+	})
+	st, _ := m.hubStore()
+	needs, err := st.ListNeeds(context.Background(), agenthub.NeedFilter{Status: "pending"})
+	if err != nil || len(needs) != 1 {
+		t.Fatalf("needs = %+v, %v", needs, err)
+	}
+	ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_need_resolve", map[string]any{
+		"need_id": string(needs[0].ID), "resolution": "approve",
+	})
+	if !ok {
+		t.Fatalf("resolve hub DM approval: %s", errMsg)
+	}
+	got, err := st.LoadNeed(context.Background(), needs[0].ID)
+	if err != nil || got.Status != "resolved" {
+		t.Fatalf("need = %+v, %v", got, err)
+	}
+}
+
+// P2-06 B2：会话存在但空闲时取消 dispatched/running，必须落 canceled，
+// 不能回「已请求中断」然后永远停在运行中。
+func TestHubTaskCancelIdleSessionIsTerminal(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "CancelIdleAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.create(wsPath, "s-idle", ""); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := m.hubStore()
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_idle"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: wsPath, SessionID: "s-idle"},
+		Title:  "空闲任务", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_task_cancel", map[string]any{"task_id": string(task.ID)})
+	if !ok {
+		t.Fatalf("cancel: %s", errMsg)
+	}
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil || got.Status != agenthub.TaskCanceled {
+		t.Fatalf("status = %v, err=%v; want canceled", got.Status, err)
+	}
+}
+
+// P2-06 B3：resolve 与异步 expire 并发时，不能出现「resolve 返回 ok，但
+// 最终落盘被 expired 覆盖」。按 need 串行化后：先到者赢，后到者 already/已过期。
+func TestHubNeedResolveExpireNoLostUpdate(t *testing.T) {
+	m, buf := testManager(t)
+	hubAgent := createHubAgent(t, m, buf, 1, "NeedRace")
+	bs, err := m.hubDMSession(string(hubAgent.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := m.hubStore()
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("call-race-%d", i)
+		call := core.ToolCall{Id: id, Name: "bash", Arguments: "{}"}
+		if _, err := bs.s.RequestApproval(context.Background(), call); err != nil {
+			t.Fatalf("round %d register: %v", i, err)
+		}
+		bs.emit(&events.ToolApprovalRequested{
+			RunId: "r1", Id: id, Name: "bash", Arguments: "{}",
+			Timestamp: time.Now(), EventType: events.ToolApprovalType,
+		})
+		needs, err := st.ListNeeds(context.Background(), agenthub.NeedFilter{Status: "pending"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var need *agenthub.Need
+		for _, n := range needs {
+			if n.Anchor == id {
+				need = n
+			}
+		}
+		if need == nil {
+			t.Fatalf("round %d need not found", i)
+		}
+		done := make(chan struct{})
+		go func() { m.expireSessionNeeds(bs); close(done) }()
+		ok, errMsg, data := hubCmd(t, m, buf, 100+i, "hub_need_resolve", map[string]any{
+			"need_id": string(need.ID), "resolution": "approve",
+		})
+		<-done
+		if !ok {
+			t.Fatalf("round %d resolve: %s", i, errMsg)
+		}
+		var resp struct {
+			Already bool `json:"already"`
+		}
+		raw, _ := json.Marshal(data)
+		_ = json.Unmarshal(raw, &resp)
+		got, err := st.LoadNeed(context.Background(), need.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !resp.Already && got.Status != "resolved" {
+			t.Fatalf("round %d: resolve applied but final status=%s (lost update)", i, got.Status)
+		}
+		if resp.Already && got.Status != "expired" && got.Status != "resolved" {
+			t.Fatalf("round %d: already but status=%s", i, got.Status)
+		}
+		// 若 expire 赢了，审批 waiter 仍挂着；清掉以免阻塞下一轮。
+		_ = bs.s.Approve(id, false)
+	}
 }
