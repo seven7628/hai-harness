@@ -1544,8 +1544,9 @@ const BASE = {
       "review": "changes_requested"
     },
     "P2.5-03": {
-      "status": "todo",
-      "reviewNote": "依赖 02；P3b 多智能体并发前必须完成。"
+      "status": "review",
+      "commit": "433c1d4 perf(hub-p2.5-03): 队列按目标分锁，去掉全局派发锁",
+      "reviewNote": "已提交（433c1d4），独立复审中。实现：Queue 新增按 (workspace,session) 的引用计数目标锁；q.mu 只保护 pending map 短临界区；Pump/Submit/CancelQueued/CancelDispatchedIfIdle/Restore 全部持目标锁做查重/状态/Transition/入队，不同目标互不阻塞；新增并发用例（不同目标不互阻、同目标严格串行、同 client_msg_id 并发只建一账、Dispatch 期间不持 q.mu）与 race 全绿。"
     },
     "P2.5-04": {
       "status": "review",
