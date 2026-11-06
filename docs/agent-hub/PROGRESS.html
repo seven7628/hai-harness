@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P1 收口 + P2 工作区派发/任务账本/回推 + P3a 群组基础（当前：Review Gate 期间冻结新功能）",
+  "subtitle": "P1/P2/P3a 已收口；新增 P2.5 基础设施前置（P3b 前）；P2.5-01..07 完成后再开 P3b-01",
   "updated": "2026-11-06",
   "phases": [
     {
@@ -329,6 +329,12 @@ const BASE = {
       "name": "P3a · 群组基础",
       "goal": "群组、@ 路由、快照、交接、产物、审批",
       "days": "8–10 天"
+    },
+    {
+      "id": "P2.5",
+      "name": "P2.5 · 基础设施前置",
+      "goal": "P3b 前清掉测试基线、任务索引、队列锁、预算接线、恢复告警、后台 goroutine 生命周期；P2.5-01..07 完成并 Review 后才开 P3b-01，P2.5-08 可并行",
+      "days": "9–15 天"
     },
     {
       "id": "P3b",
@@ -959,6 +965,135 @@ const BASE = {
       "commit": "chore(hub-p3a-10): P3a review + eval"
     },
     {
+      "id": "P2.5-01",
+      "phase": "P2.5",
+      "title": "测试基线：干净检出可编译 + CI 编译门",
+      "deps": [],
+      "files": [
+        ".github/workflows/test.yml",
+        "agents/",
+        "provider/",
+        "tools/",
+        "subagent/",
+        "mcp/"
+      ],
+      "acceptance": "干净检出 `go test ./... -run '^$'` 全包编译（当前 agents/mcp/provider/subagent/tools 失败）；按 D5 拍板选择全量入库或最小 helper 闭包；新增 push/PR 编译门，tag 发布前同一命令必过；记录缺失测试清单与逐包补全进度。",
+      "tests": "干净 clone/worktree 下 `go test ./... -run '^$'`；CI workflow 实跑",
+      "commit": "test(hub-p2.5-01): 恢复干净检出测试基线并加 CI 编译门"
+    },
+    {
+      "id": "P2.5-02",
+      "phase": "P2.5",
+      "title": "TaskIndex：提交路径去 O(n) 全盘扫",
+      "deps": [],
+      "files": [
+        "agenthub/task_index.go",
+        "agenthub/store.go",
+        "agenthub/store_memory.go",
+        "agenthub/ledger.go",
+        "agenthub/guard.go"
+      ],
+      "acceptance": "Store 内维护内存任务索引并在 Open/首次访问重建；Submit 的 FindByClientMsgID 与 Guard 的 active/dedupe/agent/group/global 日成本查询不再 ListTasks 全盘读文件；SaveTask 增量更新（旧值扣除/新值加入），状态/结果/UpdatedAt 变化正确；MemoryStore 同语义；索引不可用时回退 ListTasks 并告警。",
+      "tests": "agenthub 单测：并发同 client id、状态迁移后 active 计数、结算后日成本、跨 UTC 日、重建幂等、索引与 ListTasks 对账",
+      "commit": "perf(hub-p2.5-02): 任务索引替代提交路径全盘扫描"
+    },
+    {
+      "id": "P2.5-03",
+      "phase": "P2.5",
+      "title": "队列锁粒度：全局 q.mu → 每目标锁 + 索引锁",
+      "deps": [
+        "P2.5-02"
+      ],
+      "files": [
+        "agenthub/queue.go",
+        "agenthub/queue_test.go",
+        "desktop/bridge/hub_queue_test.go"
+      ],
+      "acceptance": "Pump/Submit/Cancel 只持有目标 key 的锁；账本 I/O 与 Dispatch/Ask 不再阻塞其他 session；同一目标仍严格串行（派发/取消/恢复）；同 client_msg_id 并发只建一账；q.mu 仅保护 map 短临界区；race 测试与多目标并发基准通过。",
+      "tests": "agenthub/queue race + 并发多目标；desktop/bridge TestHub 队列用例；基准对比 p99",
+      "commit": "perf(hub-p2.5-03): 队列按目标分锁，去掉全局派发锁"
+    },
+    {
+      "id": "P2.5-04",
+      "phase": "P2.5",
+      "title": "预算接线：群/全局、无价口径、UI、日预算硬停",
+      "deps": [
+        "P2.5-02"
+      ],
+      "files": [
+        "agenthub/guard.go",
+        "agenthub/profile.go",
+        "agenthub/group.go",
+        "desktop/bridge/hub_tools.go",
+        "desktop/bridge/hub_taskboard.go",
+        "session/session.go",
+        "agents/agent_loop.go"
+      ],
+      "acceptance": "按 D1 落地默认值；初始提交带 agent+group+global 预算（不再只在 retry 带群）；global 从 hub 配置读取；无价用量按拍板告警/阻断；Hub session 设 WithMaxCost（剩余日预算）且 agent loop 每轮检查，超限中止当前 run；agent/group UI 可查看/修改预算与当日已用；blocked_budget 文案/Needs you 一致。",
+      "tests": "guard_test 群/全局/无价/UTC 日；bridge 生产链路 blocked_budget；session 硬停对照组；前端 tsc/test",
+      "commit": "feat(hub-p2.5-04): 预算接线与日预算硬停"
+    },
+    {
+      "id": "P2.5-05",
+      "phase": "P2.5",
+      "title": "恢复与告警：分批锁 + hub_alert envelope + 前端告警中心",
+      "deps": [],
+      "files": [
+        "desktop/bridge/hub_recovery.go",
+        "desktop/bridge/hub_task_finish.go",
+        "desktop/app/src/hub/"
+      ],
+      "acceptance": "recoverHubTasks 不再全程持 hubFinishMu（按任务/短临界区，幂等仍成立）；hub_alert 统一 scope/code/severity/task_id?/agent_id?/group_id?/at/message；全局恢复失败无 task_id 且有顶栏 banner/重试入口；任务级告警进任务卡与 Needs you；前端消费所有 hub_alert，去重/可 dismiss；恢复 1000 任务时 finish 不被长时间阻塞。",
+      "tests": "recovery 并发/重复恢复零重复推；alert 形状表驱动；前端告警中心组件测试；性能基准",
+      "commit": "feat(hub-p2.5-05): 恢复锁拆分与统一告警中心"
+    },
+    {
+      "id": "P2.5-06",
+      "phase": "P2.5",
+      "title": "会话生命周期：pump/expire goroutine 可取消可等待",
+      "deps": [],
+      "files": [
+        "desktop/bridge/main.go",
+        "desktop/bridge/hub_workspace.go",
+        "desktop/bridge/hub_taskboard.go",
+        "desktop/bridge/hub_session.go"
+      ],
+      "acceptance": "manager 持有 hub 级 ctx；pumpHubQueue/expireSessionNeeds 从 ctx 派生并响应取消；每会话/manager WaitGroup 在 close/shutdown 时有界等待；关闭后不再启动新 goroutine；阻塞 ops 下 shutdown 不悬挂、无 race/泄漏。",
+      "tests": "blocking pump/expire + shutdown 超时；go test -race；goroutine 计数",
+      "commit": "fix(hub-p2.5-06): Hub 后台泵/过期任务可取消可等待"
+    },
+    {
+      "id": "P2.5-07",
+      "phase": "P2.5",
+      "title": "小债打包：P2-01/P3a-04/SubmitGuarded/duplicate 原因",
+      "deps": [
+        "P2.5-01"
+      ],
+      "files": [
+        "agenthub/queue.go",
+        "agenthub/queue_test.go",
+        "agenthub/message.go",
+        "desktop/bridge/"
+      ],
+      "acceptance": "补 ENOTDIR/登记失败删目录/大小写折叠测试；Messages 深拷贝或明确只读契约；SubmitGuarded 顺序回归（查重→Guard→Create）；DispatchDuplicateMessage 回传原因而非只 canceled；两套 retry 实现收敛（若时间允许）。",
+      "tests": "对应单测；干净检出",
+      "commit": "chore(hub-p2.5-07): 清理基础设施小债"
+    },
+    {
+      "id": "P2.5-08",
+      "phase": "P2.5",
+      "title": "三主题视觉验收（P3a-08 尾项）",
+      "deps": [
+        "P3a-08"
+      ],
+      "files": [
+        "docs/agent-hub/visual/"
+      ],
+      "acceptance": "light/dark/高对比三主题真机截图；Hub Rail/DM/群线程/Inspector/Needs you 无溢出/对比度/焦点态问题；截图归档并在看板链接。",
+      "tests": "Playwright/真机截图人工核对",
+      "commit": "docs(hub-p2.5-08): 三主题视觉验收"
+    },
+    {
       "id": "P3b-01",
       "phase": "P3b",
       "title": "名册/职责/能力注入 + 提示词",
@@ -1395,75 +1530,109 @@ const BASE = {
       "review": "passed",
       "reviewNote": "Rail 智能体/群组 tab；GroupView 群头成员叠图、群日志时间线、路由回执动作行、审批占位、Chat|Run（活动流）、hub_group_send 发言；store 接线 group 事件。tsc/eslint(src)/vite build 通过。**部分完成**：智能体群回复与同轮合并依赖 P3b 群会话，三主题/群态 Inspector 未做。 首审 change_requested（task-73hdxsmh，对象 780e4d4）：已闭群组 tab/群头骨架/时间线/handoff 与审批占位渲染/Chat|Run/群发言；四条 blocking：①RoundGroup 同轮合并与分开显示、RoundActivityDigest、群态 Inspector 未实现且无 owning task；②群态隐藏全局 Inspector，任务/Needs 成死键；③发送中切群 groupSending 永久 true；④路由动作行恒贴底、无 @ 误报「无人被唤醒」、reload 后回执裸 targets=ag_…。修复（dc1eb23）：新增 MessageBubble/RoundGroup/RoundActivityDigest，按 round_id 或 context.trigger_seqs 合并（≥2 才合并，grouped/flat+localStorage），动作清单从 activity 压缩；动作行仅在 mention_all/targets/dropped 时插到 trigger_seq 之后，routing_receipt 按名册还原；群态渲染 Inspector；切群清 groupSending/activity 且用 groupSendGen 防旧响应覆盖；无 @ 不再发 hub_round；群头补 owner/删除态与草稿隔离。tsc/eslint(src/hub)/vite build/test:store:scoping 12/12 通过。未做：真实多智能体回复依赖 P3b，后端未 emit hub_round_summary（Digest 直接消费 activity），三主题截图未做。待第二轮（对象 dc1eb23）。 第二轮复审 change_requested（task-3kxfpw6w，对象 dc1eb23）：B2/B3 通过（群态 Inspector、切群复位/代际），B4 三小项通过。残留：①activity 仅 selectGroup 拉一次，发 @ 后 Digest/Run 不更新、Run 仍裸 targets=；②单一 groupRound 被下一轮/纯聊天覆盖，直播动作行消失、reload 才回来。修复（b334c7f）：新增 loadGroupActivity，sendGroup 成功与 hub_round 事件后回拉；groupRound 改 groupRounds[] 按 id upsert，空 round 不入，GroupView 按 trigger_seq 插入所有轮次；Run routing 行用名册还原；selectGroup 加代际防 A→B→A 旧响应。tsc/eslint(src:hub)/vite build/test:store:scoping 通过。待第三轮（对象 b334c7f）。 第三轮复审 passed（task-vb54w3vq，对象 b334c7f）：B-1 闭合——selectGroup 三连拉，sendGroup 成功与 hub_round 各回拉一次（1→2→3 次，新行 after_seq=10 落到 UI），Run routing 4 行全部按名册还原、无 targets=ag_；B-2 闭合——groupRounds 按 id 去重/按 trigger_seq 排序/跳过空 round，连发两轮直播两行都在，纯聊天不清空，reload 历史回执行 3=3；同轮合并机制用合成 A/B 回复验过。tsc/eslint(src:hub)/vite build/test:store:scoping + 定向 Go 全绿。非阻塞：同群旧 activity 覆盖（已修 ebd3730：loadGroupActivity 加 groupSelectGen）；真实 A/B 回复 round_id 归 P3b-01/04；hub_round_summary 与三主题截图归 P3a-08 视觉收尾；前端无 hub 专项测试脚本。 非阻塞清算（f54aaa3）：新增 groupThread.ts 纯函数与 test:hub（11 项）、loadGroupActivity 加 groupSelectGen、两处 react-refresh warning 清零。仍 deferred：真实 A/B 回复 round_id/trigger_seqs 归 P3b-01/04；hub_round_summary 为可选增强；三主题截图需真机视觉回归，记为视觉验收尾项。",
       "reviewBatch": "G-after-scope"
+    },
+    "P2.5-01": {
+      "status": "todo",
+      "reviewNote": "待 D5 拍板：B→A 最小 helper + CI 编译门（推荐）或 A 全量入库。"
+    },
+    "P2.5-02": {
+      "status": "todo",
+      "reviewNote": "无产品依赖，可先开工；为 03/04 提供索引。"
+    },
+    "P2.5-03": {
+      "status": "todo",
+      "reviewNote": "依赖 02；P3b 多智能体并发前必须完成。"
+    },
+    "P2.5-04": {
+      "status": "todo",
+      "reviewNote": "待 D1 拍板默认值/硬停/无价口径；依赖 02 的统计索引。"
+    },
+    "P2.5-05": {
+      "status": "todo",
+      "reviewNote": "待 D3 拍板告警中心；恢复锁拆分可先做。"
+    },
+    "P2.5-06": {
+      "status": "todo",
+      "reviewNote": "无产品依赖；P3b 群会话频繁开关前必须完成。"
+    },
+    "P2.5-07": {
+      "status": "todo",
+      "reviewNote": "依赖 01 的干净检出基线。"
+    },
+    "P2.5-08": {
+      "status": "todo",
+      "reviewNote": "可与 P3b 并行，不阻塞 P3b-01。"
     }
   },
   "reviewGate": {
-    "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。",
+    "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。P2.5 基础设施前置：P2.5-01..07 完成并 Review 后才开 P3b-01；P2.5-08 可与 P3b 并行。",
     "audit": {
-      "done_passed": 23,
-      "in_review": 13,
-      "not_started": 15,
+      "done_passed": 36,
+      "in_review": 0,
+      "not_started": 23,
       "in_review_breakdown": {
-        "re_review_pending": 3,
-        "initial_pending": 10
+        "re_review_pending": 0,
+        "initial_pending": 0
       }
     },
     "batches": [
       {
         "id": "A",
-        "state": "running",
+        "state": "done",
         "tasks": [
           "P1-10",
           "P2-02",
           "P2-03"
         ],
-        "note": "P1-10 delta passed；P2-02 三轮 passed（4de19f5）；P2-03 三轮 passed（bca7a42），但 N-1 修复 411a308 待 delta 复审。"
+        "note": "已收口；最终结论见各任务 reviewNote。"
       },
       {
         "id": "B",
-        "state": "running",
+        "state": "done",
         "tasks": [
           "P2-04",
           "P2-05"
         ],
-        "note": "对象 2f1578d；P2-04/P2-05 两个 scope 并行复审中。"
+        "note": "已收口；最终结论见各任务 reviewNote。"
       },
       {
         "id": "C",
-        "state": "running",
+        "state": "done",
         "tasks": [
           "P2-06",
           "P2-07"
         ],
-        "note": "对象 2a755f9 / ad43330；P2-06 已发起，P2-07 待 B 释放槽位。"
+        "note": "已收口；最终结论见各任务 reviewNote。"
       },
       {
         "id": "D",
-        "state": "queued",
+        "state": "done",
         "tasks": [
           "P2-08"
-        ]
+        ],
+        "note": "已收口；最终结论见各任务 reviewNote。"
       },
       {
         "id": "E",
-        "state": "blocked",
+        "state": "done",
         "tasks": [
           "P2-09"
         ],
-        "note": "依赖 P2-01..P2-08 全部 passed"
+        "note": "已收口；最终结论见各任务 reviewNote。"
       },
       {
         "id": "F",
-        "state": "queued",
+        "state": "done",
         "tasks": [
           "P3a-01",
           "P3a-02",
           "P3a-03"
-        ]
+        ],
+        "note": "已收口；最终结论见各任务 reviewNote。"
       },
       {
         "id": "G",
-        "state": "blocked",
+        "state": "done",
         "tasks": [
           "P3a-04",
           "P3a-05",
@@ -1471,7 +1640,21 @@ const BASE = {
           "P3a-07",
           "P3a-08"
         ],
-        "note": "当前为部分实现；必须先补完验收项或显式拆出后续任务，再评审。"
+        "note": "已收口；最终结论见各任务 reviewNote。"
+      },
+      {
+        "id": "H",
+        "state": "queued",
+        "tasks": [
+          "P2.5-01",
+          "P2.5-02",
+          "P2.5-03",
+          "P2.5-04",
+          "P2.5-05",
+          "P2.5-06",
+          "P2.5-07"
+        ],
+        "note": "P2.5 基础设施前置；01/04/05 待 D5/D1/D3 拍板，02/03/06/07 可直接推进。P2.5-08 并行。"
       }
     ],
     "rules": [
