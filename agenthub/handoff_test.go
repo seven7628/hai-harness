@@ -63,6 +63,14 @@ func TestHandoffPairRateLimit(t *testing.T) {
 	if err := CheckHandoff(g, "ag_aaaaaaaa", "ag_bbbbbbbb", 0, old, now); err != nil {
 		t.Fatalf("old history: %v", err)
 	}
+	// 未来时间（时钟漂移/伪造）不占额，避免永久锁死同一对。
+	future := []Handoff{
+		{GroupID: g.ID, FromAgentID: "ag_aaaaaaaa", ToAgentID: "ag_bbbbbbbb", CreatedAt: now.Add(5 * time.Minute)},
+		{GroupID: g.ID, FromAgentID: "ag_aaaaaaaa", ToAgentID: "ag_bbbbbbbb", CreatedAt: now.Add(time.Hour)},
+	}
+	if err := CheckHandoff(g, "ag_aaaaaaaa", "ag_bbbbbbbb", 0, future, now); err != nil {
+		t.Fatalf("future history: %v", err)
+	}
 }
 
 // P3a-06 B1：角色从 g.Members 解析；非成员/跨群/软删群一律 fail-closed。

@@ -91,6 +91,12 @@ func TestHubHandoffCardAckAndNeed(t *testing.T) {
 	if err != nil || need.Kind != "handoff" || need.Status != "pending" || need.Anchor != h.ID || need.AgentID != b.ID {
 		t.Fatalf("need = %+v, %v", need, err)
 	}
+	// 拼写错误的 resolution 必须 fail-closed，不能既不改状态又把 need 消费掉。
+	if ok, _, _ := hubCmd(t, m, buf, 61, "hub_need_resolve", map[string]any{
+		"need_id": created.NeedID, "resolution": "acceptt",
+	}); ok {
+		t.Fatal("unknown handoff resolution must fail")
+	}
 	// 人类点「标记已读」（acknowledged）不得把 pending_ack 判成 declined；
 	// 接收方之后仍必须能 accept（P3a-06 复审 B-01）。
 	if ok, errMsg, _ := hubCmd(t, m, buf, 60, "hub_need_resolve", map[string]any{
@@ -176,6 +182,40 @@ func TestHubHandoffGuardsDepthRateAndDeletedTarget(t *testing.T) {
 	}
 	if _, err := handoff(c.ID, e.ID); err == nil {
 		t.Fatal("deleted target must fail")
+	}
+	_ = buf
+}
+
+// P3a-06 三轮非阻塞：接收方在握手后被软删，ack 必须 fail-closed。
+func TestHubHandoffAckRejectsDeletedRecipient(t *testing.T) {
+	m, buf, agents, g := handoffGroupFixture(t, []handoffMember{
+		{"DelA", "owner"}, {"DelB", "member"},
+	})
+	a, b := agents[0], agents[1]
+	st, _ := m.hubStore()
+	ctx := context.Background()
+	bsB, err := m.hubDMSession(string(b.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := callHubToolForAgent(t, m, a.ID, "handoff",
+		`{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(b.ID)+`","instruction":"x"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Handoff agenthub.Handoff `json:"handoff"`
+	}
+	_ = json.Unmarshal([]byte(out), &r)
+	if err := st.SaveAgent(ctx, &agenthub.AgentProfile{ID: b.ID, Name: "DelB", Deleted: true}); err != nil {
+		t.Fatal(err)
+	}
+	tool, err := bsB.hubEngine.GetTool(ctx, "handoff_ack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Call(ctx, "handoff_ack", `{"handoff_id":"`+r.Handoff.ID+`","accept":true}`); err == nil {
+		t.Fatal("deleted recipient must not ack")
 	}
 	_ = buf
 }
