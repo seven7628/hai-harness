@@ -528,6 +528,9 @@ func (m *manager) hubGroupSend(c command) {
 		m.resp(c, false, "text 不能为空", nil)
 		return
 	}
+	// 与 group_say 串行：限流检查、client_msg_id 去重、消息+回执写入必须是一个临界区。
+	m.hubGroupSendMu.Lock()
+	defer m.hubGroupSendMu.Unlock()
 	g, err := st.LoadGroup(ctx, gid)
 	if err != nil {
 		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
@@ -573,14 +576,23 @@ func (m *manager) hubGroupSend(c command) {
 		m.resp(c, false, "路由失败: "+err.Error(), nil)
 		return
 	}
-	seq, err := agenthub.AppendGroupMessage(ctx, st, msg)
+	// 无 @ 只写日志，不产生回执（设计 §6.6.3）；有 @ 则消息与回执在同一事务内。
+	var routed *agenthub.Round
+	if round.MentionAll || len(round.Targets) > 0 {
+		routed = &round
+	}
+	seq, deduped, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
 	if err != nil {
 		m.resp(c, false, "写入群日志失败: "+err.Error(), nil)
 		return
 	}
 	round.TriggerSeq = seq
-	if err := agenthub.AppendRoundReceipt(ctx, st, round); err != nil {
-		m.resp(c, false, "落路由回执失败: "+err.Error(), nil)
+	if deduped {
+		// 断线重试：同 client_msg_id 不重复写日志，也不再发 hub_message/hub_round。
+		m.resp(c, true, "", map[string]any{
+			"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets,
+			"deduplicated": true,
+		})
 		return
 	}
 	m.emitHubGroupMessage(g.ID, seq, msg)

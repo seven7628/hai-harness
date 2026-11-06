@@ -198,6 +198,87 @@ func (s *MemoryStore) AppendMessage(ctx context.Context, m *Message) (int64, err
 	return seq, nil
 }
 
+// AppendMessageWithRound 与 FileStore 同契约：消息、回执消息、routing activity
+// 在同一把锁内完成；client_msg_id 命中返回原 seq（P3a-03 B-2/B-4）。
+func (s *MemoryStore) AppendMessageWithRound(ctx context.Context, m *Message, round *Round) (int64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if m == nil || !validID(string(m.GroupID)) {
+		return 0, false, ErrInvalid
+	}
+	if round != nil && round.GroupID != "" && round.GroupID != m.GroupID {
+		return 0, false, ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cid := messageClientMsgID(*m); cid != "" {
+		for i := len(s.messages[m.GroupID]) - 1; i >= 0; i-- {
+			existing := s.messages[m.GroupID][i]
+			if messageClientMsgID(existing) != cid {
+				continue
+			}
+			if round != nil && !hasRoundReceipt(s.messages[m.GroupID], existing.Seq) {
+				if err := s.appendRoundLocked(existing.GroupID, existing.Seq, round); err != nil {
+					return 0, false, err
+				}
+			}
+			*m = cloneMessage(existing)
+			return existing.Seq, true, nil
+		}
+	}
+	seq := int64(len(s.messages[m.GroupID]) + 1)
+	stored := cloneMessage(*m)
+	stored.Seq = seq
+	stored.ID = MessageID(seq)
+	if stored.CreatedAt.IsZero() {
+		stored.CreatedAt = nowUTC()
+	}
+	s.messages[m.GroupID] = append(s.messages[m.GroupID], stored)
+	if round != nil {
+		if err := s.appendRoundLocked(m.GroupID, seq, round); err != nil {
+			s.messages[m.GroupID] = s.messages[m.GroupID][:len(s.messages[m.GroupID])-1]
+			return 0, false, err
+		}
+	}
+	*m = cloneMessage(stored)
+	if round != nil {
+		round.TriggerSeq = seq
+	}
+	return seq, false, nil
+}
+
+func (s *MemoryStore) appendRoundLocked(gid GroupID, triggerSeq int64, round *Round) error {
+	r := *round
+	r.GroupID = gid
+	if r.TriggerSeq == 0 {
+		r.TriggerSeq = triggerSeq
+	}
+	if r.ID == "" {
+		r.ID = NewID(PrefixRound)
+	}
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = nowUTC()
+	}
+	receiptSeq := int64(len(s.messages[gid]) + 1)
+	if receiptSeq <= triggerSeq {
+		receiptSeq = triggerSeq + 1
+	}
+	receipt := Message{
+		Seq: receiptSeq, ID: MessageID(receiptSeq), GroupID: gid,
+		Kind: KindRouting, Sender: Sender{Kind: SenderSystem},
+		Text: r.Receipt().Summary, RoundID: r.ID, CreatedAt: r.CreatedAt,
+		Refs: map[string]any{"trigger_seq": triggerSeq},
+	}
+	s.messages[gid] = append(s.messages[gid], receipt)
+	a := r.Receipt()
+	a.AfterSeq = receiptSeq
+	a.RunID = r.ID
+	s.activity[gid] = append(s.activity[gid], a)
+	*round = r
+	return nil
+}
+
 func (s *MemoryStore) ReadMessages(ctx context.Context, gid GroupID, beforeSeq int64, limit int) ([]Message, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -209,6 +290,29 @@ func (s *MemoryStore) ReadMessages(ctx context.Context, gid GroupID, beforeSeq i
 	msgs := cloneMessages(s.messages[gid])
 	s.mu.Unlock()
 	return sliceMessages(msgs, beforeSeq, normalizeLimit(limit)), nil
+}
+
+func (s *MemoryStore) FindGroupMessageByClientID(ctx context.Context, gid GroupID, clientMsgID string) (*Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !validID(string(gid)) {
+		return nil, ErrInvalid
+	}
+	clientMsgID = strings.TrimSpace(clientMsgID)
+	if clientMsgID == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	msgs := cloneMessages(s.messages[gid])
+	s.mu.Unlock()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if id, ok := msgs[i].Refs["client_msg_id"].(string); ok && strings.TrimSpace(id) == clientMsgID {
+			m := msgs[i]
+			return &m, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *MemoryStore) SearchMessages(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error) {

@@ -204,6 +204,9 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	if role == agenthub.RoleObserver {
 		return "", fmt.Errorf("%w: observer 不能在群里发言", agenthub.ErrInvalid)
 	}
+	// 与人类发送共用一个临界区：限流检查到消息+回执落盘不能被并发工具调用插队。
+	t.m.hubGroupSendMu.Lock()
+	defer t.m.hubGroupSendMu.Unlock()
 	text := strings.TrimSpace(args.Text)
 	if text == "" {
 		return "", fmt.Errorf("%w: text 不能为空", agenthub.ErrInvalid)
@@ -240,14 +243,15 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		GroupID: g.ID, Kind: agenthub.KindText,
 		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: t.agentID}, Text: text,
 	}
-	seq, err := agenthub.AppendGroupMessage(ctx, st, msg)
+	var routed *agenthub.Round
+	if round.MentionAll || len(round.Targets) > 0 {
+		routed = &round
+	}
+	seq, _, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
 	if err != nil {
 		return "", err
 	}
 	round.TriggerSeq = seq
-	if err := agenthub.AppendRoundReceipt(ctx, st, round); err != nil {
-		return "", err
-	}
 	t.m.emitHubGroupMessage(g.ID, seq, msg)
 	t.m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
 	return marshalHubToolResult(map[string]any{"seq": seq, "message_id": msg.ID, "targets": round.Targets})

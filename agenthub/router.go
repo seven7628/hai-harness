@@ -32,28 +32,51 @@ type Round struct {
 }
 
 // Router 绑定一个群的成员与策略；成员变化后重新构造（parser 缓存名字）。
+// members 是构造时的快照：只包含「本群成员 ∩ 未删除 profile」，@all 不再读实时
+// Group.Members，软删/purge/跨群 profile 都不会被唤醒（P3a-03 B-3）。
 type Router struct {
-	group  *Group
-	parser *MentionParser
-	byID   map[AgentID]Member
+	group   *Group
+	parser  *MentionParser
+	byID    map[AgentID]Member
+	members []Member
 }
 
 func NewGroupRouter(g *Group, profiles []*AgentProfile) (*Router, error) {
 	if g == nil {
 		return nil, fmt.Errorf("%w: group is nil", ErrInvalid)
 	}
+	if g.Deleted {
+		return nil, fmt.Errorf("%w: group %s 已删除", ErrNotFound, g.ID)
+	}
 	if len(g.Members) == 0 {
 		return nil, fmt.Errorf("%w: group has no members", ErrInvalid)
 	}
-	parser, err := NewMentionParser(profiles)
+	byProfile := make(map[AgentID]*AgentProfile, len(profiles))
+	for _, p := range profiles {
+		if p != nil && !p.Deleted {
+			byProfile[p.ID] = p
+		}
+	}
+	eligible := make([]*AgentProfile, 0, len(g.Members))
+	members := make([]Member, 0, len(g.Members))
+	for _, m := range g.Members {
+		if p := byProfile[m.AgentID]; p != nil {
+			eligible = append(eligible, p)
+			members = append(members, m)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil, fmt.Errorf("%w: group has no active members", ErrInvalid)
+	}
+	parser, err := NewMentionParser(eligible)
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[AgentID]Member, len(g.Members))
-	for _, m := range g.Members {
+	byID := make(map[AgentID]Member, len(members))
+	for _, m := range members {
 		byID[m.AgentID] = m
 	}
-	return &Router{group: g, parser: parser, byID: byID}, nil
+	return &Router{group: g, parser: parser, byID: byID, members: members}, nil
 }
 
 // Route 解析并冻结一轮目标。sender 的群角色用于 @all 鉴权；isHuman 可直接 @all。
@@ -91,7 +114,7 @@ func (r *Router) Route(text string, sender AgentID, isHuman bool, triggerSeq int
 }
 
 func (r *Router) sortedMembers() []Member {
-	members := append([]Member(nil), r.group.Members...)
+	members := append([]Member(nil), r.members...)
 	sort.SliceStable(members, func(i, j int) bool {
 		if members[i].JoinedAt.Equal(members[j].JoinedAt) {
 			return members[i].AgentID < members[j].AgentID
@@ -120,13 +143,20 @@ func (r Round) Receipt() Activity {
 	}
 }
 
-// AppendRoundReceipt 落盘回执；round 本身不写消息日志（活动流独立）。
+// AppendRoundReceipt 落盘回执：消息日志写一条 KindRouting 系统消息（快照会过滤），
+// activity 流保留路由摘要供 Run 视图使用（P3a-03 B-1）。
 func AppendRoundReceipt(ctx context.Context, st Store, round Round) error {
 	if st == nil {
 		return fmt.Errorf("%w: store 为空", ErrInvalid)
 	}
 	a := round.Receipt()
 	a.RunID = round.ID
+	if _, err := AppendGroupMessage(ctx, st, &Message{
+		GroupID: round.GroupID, Kind: KindRouting, Sender: Sender{Kind: SenderSystem},
+		Text: a.Summary, RoundID: round.ID, CreatedAt: a.At,
+	}); err != nil {
+		return err
+	}
 	return st.AppendActivity(ctx, &a)
 }
 

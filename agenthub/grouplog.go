@@ -125,6 +125,22 @@ func AppendGroupMessage(ctx context.Context, st Store, m *Message) (int64, error
 	return st.AppendMessage(ctx, m)
 }
 
+// AppendGroupMessageRouted 校验群存活后原子追加消息与路由回执。
+// round=nil 表示没有 @（只写消息，不写回执）；client_msg_id 命中时返回 deduped。
+func AppendGroupMessageRouted(ctx context.Context, st Store, m *Message, round *Round) (int64, bool, error) {
+	if st == nil || m == nil {
+		return 0, false, fmt.Errorf("%w: group log 参数为空", ErrInvalid)
+	}
+	g, err := st.LoadGroup(ctx, m.GroupID)
+	if err != nil {
+		return 0, false, err
+	}
+	if g == nil || g.Deleted {
+		return 0, false, fmt.Errorf("%w: group %s 已删除", ErrNotFound, m.GroupID)
+	}
+	return st.AppendMessageWithRound(ctx, m, round)
+}
+
 // ReadGroupLog 分页读群日志（beforeSeq=0 表示最新一页）。
 func ReadGroupLog(ctx context.Context, st Store, gid GroupID, beforeSeq int64, limit int) ([]Message, error) {
 	if st == nil {

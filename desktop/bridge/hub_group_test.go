@@ -251,6 +251,7 @@ func TestHubGroupSendRoutesAndReceipts(t *testing.T) {
 	var sent struct {
 		Seq     int64              `json:"seq"`
 		Targets []agenthub.AgentID `json:"targets"`
+		Round   agenthub.Round     `json:"round"`
 	}
 	raw, _ := json.Marshal(data)
 	_ = json.Unmarshal(raw, &sent)
@@ -260,18 +261,47 @@ func TestHubGroupSendRoutesAndReceipts(t *testing.T) {
 	if !strings.Contains(buf.String(), `"hub_round"`) || !strings.Contains(buf.String(), `"hub_message"`) {
 		t.Fatalf("events = %s", buf.String())
 	}
-	// 日志只有人这条；回执在活动流里且 after_seq=1。
+	// 日志 = 人这条 + 一条 routing_receipt 系统消息（P3a-03 B-1）。
 	st, err := m.hubStore()
 	if err != nil {
 		t.Fatal(err)
 	}
 	msgs, err := agenthub.ReadGroupLog(context.Background(), st, g.ID, 0, 10)
-	if err != nil || len(msgs) != 1 || msgs[0].Sender.Kind != agenthub.SenderHuman {
+	if err != nil || len(msgs) != 2 || msgs[0].Sender.Kind != agenthub.SenderHuman ||
+		msgs[1].Kind != agenthub.KindRouting || msgs[1].RoundID != sent.Round.ID {
 		t.Fatalf("msgs = %+v, %v", msgs, err)
 	}
 	acts, err := st.ReadActivity(context.Background(), g.ID, 0, 10)
-	if err != nil || len(acts) != 1 || acts[0].Kind != "routing" || acts[0].AfterSeq != 1 {
+	if err != nil || len(acts) != 1 || acts[0].Kind != "routing" || acts[0].AfterSeq != 2 {
 		t.Fatalf("activity = %+v, %v", acts, err)
+	}
+	// 用「最新消息 seq」当活动游标：回执 activity 不能被跳过（B-4 的游标语义）。
+	if page, err := st.ReadActivity(context.Background(), g.ID, msgs[len(msgs)-1].Seq, 10); err != nil || len(page) != 0 {
+		t.Fatalf("activity after latest = %+v, %v", page, err)
+	}
+	// 同 client_msg_id 重试：不双写、不再发事件（B-2）。
+	buf.Reset()
+	ok, errMsg, data = hubCmd(t, m, buf, 41, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@SendB 看一下日志", "client_msg_id": "human-1",
+	})
+	if !ok {
+		t.Fatalf("dedupe resend: %s", errMsg)
+	}
+	var again struct {
+		Seq          int64              `json:"seq"`
+		Deduplicated bool               `json:"deduplicated"`
+		Targets      []agenthub.AgentID `json:"targets"`
+	}
+	raw, _ = json.Marshal(data)
+	_ = json.Unmarshal(raw, &again)
+	if again.Seq != 1 || !again.Deduplicated || len(again.Targets) != 1 || again.Targets[0] != b.ID {
+		t.Fatalf("dedupe response = %s", raw)
+	}
+	if strings.Contains(buf.String(), `"hub_message"`) || strings.Contains(buf.String(), `"hub_round"`) {
+		t.Fatalf("dedupe emitted events: %s", buf.String())
+	}
+	if msgs, err = agenthub.ReadGroupLog(context.Background(), st, g.ID, 0, 10); err != nil || len(msgs) != 2 {
+		t.Fatalf("dedupe wrote log: %+v, %v", msgs, err)
 	}
 	// 无 @：不唤醒任何人。
 	if ok, errMsg, data = hubCmd(t, m, buf, 5, "hub_group_send", map[string]any{

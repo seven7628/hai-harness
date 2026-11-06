@@ -51,7 +51,11 @@ type Store interface {
 	ListGroups(ctx context.Context) ([]*Group, error)
 
 	AppendMessage(ctx context.Context, m *Message) (int64, error)
+	// AppendMessageWithRound 在同一个临界区内追加触发消息、routing_receipt 消息与
+	// routing activity；client_msg_id 命中时返回原 seq 并置 deduped（P3a-03 B-2/B-4）。
+	AppendMessageWithRound(ctx context.Context, m *Message, round *Round) (seq int64, deduped bool, err error)
 	ReadMessages(ctx context.Context, gid GroupID, beforeSeq int64, limit int) ([]Message, error)
+	FindGroupMessageByClientID(ctx context.Context, gid GroupID, clientMsgID string) (*Message, error)
 	SearchMessages(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error)
 
 	AppendActivity(ctx context.Context, a *Activity) error
@@ -401,6 +405,115 @@ func (s *FileStore) AppendMessage(ctx context.Context, m *Message) (int64, error
 	return seq, nil
 }
 
+// AppendMessageWithRound 原子追加一条群消息及其路由回执。
+//
+// 三件事必须在同一把 s.mu 下完成，否则并发 group_say 会让 activity 的 after_seq
+// 乱序（P3a-03 B-4）；client_msg_id 去重也必须在锁内，否则同 id 重试双写（B-2）。
+// 回执写失败时把 log.jsonl 截回写入前，避免留下没有回执的半条消息。
+func (s *FileStore) AppendMessageWithRound(ctx context.Context, m *Message, round *Round) (int64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if m == nil || !validID(string(m.GroupID)) {
+		return 0, false, fmt.Errorf("%w: message group", ErrInvalid)
+	}
+	if round != nil && round.GroupID != "" && round.GroupID != m.GroupID {
+		return 0, false, fmt.Errorf("%w: round group %q != message group %q", ErrInvalid, round.GroupID, m.GroupID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	logPath := s.messagesPath(m.GroupID)
+	msgs, err := readJSONLTolerantTail[Message](logPath)
+	if err != nil {
+		return 0, false, err
+	}
+	if cid := messageClientMsgID(*m); cid != "" {
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if messageClientMsgID(msgs[i]) != cid {
+				continue
+			}
+			existing := msgs[i]
+			// 上次可能已写消息但回执失败；重试时补齐回执，仍返回原 seq。
+			if round != nil && !hasRoundReceipt(msgs, existing.Seq) {
+				if err := s.appendRoundLocked(existing.GroupID, existing.Seq, round); err != nil {
+					return 0, false, err
+				}
+			}
+			*m = existing
+			return existing.Seq, true, nil
+		}
+	}
+
+	beforeSize, err := regularFileSize(logPath)
+	if err != nil {
+		return 0, false, err
+	}
+	seq := s.seq[m.GroupID] + 1
+	stored := *m
+	stored.Seq = seq
+	stored.ID = MessageID(seq)
+	if stored.CreatedAt.IsZero() {
+		stored.CreatedAt = time.Now().UTC()
+	}
+	if err := appendJSONL(logPath, &stored); err != nil {
+		return 0, false, err
+	}
+	s.seq[m.GroupID] = seq
+	if round != nil {
+		if err := s.appendRoundLocked(m.GroupID, seq, round); err != nil {
+			// 回执失败：整条触发消息回滚，调用方重试不会留下半条。
+			_ = os.Truncate(logPath, beforeSize)
+			s.seq[m.GroupID] = seq - 1
+			return 0, false, err
+		}
+	}
+	*m = stored
+	if round != nil {
+		round.TriggerSeq = seq
+	}
+	return seq, false, nil
+}
+
+// appendRoundLocked 写入 KindRouting 消息 + routing activity（调用方持 s.mu）。
+// activity.AfterSeq 用回执消息的 seq，保证读方用「最新消息 seq」当游标时不会漏。
+func (s *FileStore) appendRoundLocked(gid GroupID, triggerSeq int64, round *Round) error {
+	r := *round
+	r.GroupID = gid
+	if r.TriggerSeq == 0 {
+		r.TriggerSeq = triggerSeq
+	}
+	if r.ID == "" {
+		r.ID = NewID(PrefixRound)
+	}
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = time.Now().UTC()
+	}
+	receiptSeq := s.seq[gid] + 1
+	if receiptSeq <= triggerSeq {
+		receiptSeq = triggerSeq + 1
+	}
+	receipt := Message{
+		Seq: receiptSeq, ID: MessageID(receiptSeq), GroupID: gid,
+		Kind: KindRouting, Sender: Sender{Kind: SenderSystem},
+		Text: r.Receipt().Summary, RoundID: r.ID, CreatedAt: r.CreatedAt,
+		Refs: map[string]any{"trigger_seq": triggerSeq},
+	}
+	if err := appendJSONL(s.messagesPath(gid), &receipt); err != nil {
+		return err
+	}
+	a := r.Receipt()
+	a.AfterSeq = receiptSeq
+	a.RunID = r.ID
+	if err := s.appendActivityLocked(&a); err != nil {
+		// 回执消息由调用方负责截断 log；activity 自己不会留下半行。
+		return err
+	}
+	s.seq[gid] = receiptSeq
+	*round = r
+	return nil
+}
+
 func (s *FileStore) ReadMessages(ctx context.Context, gid GroupID, beforeSeq int64, limit int) ([]Message, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -417,6 +530,32 @@ func (s *FileStore) ReadMessages(ctx context.Context, gid GroupID, beforeSeq int
 		return nil, err
 	}
 	return sliceMessages(msgs, beforeSeq, limit), nil
+}
+
+func (s *FileStore) FindGroupMessageByClientID(ctx context.Context, gid GroupID, clientMsgID string) (*Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !validID(string(gid)) {
+		return nil, fmt.Errorf("%w: group id %q", ErrInvalid, gid)
+	}
+	clientMsgID = strings.TrimSpace(clientMsgID)
+	if clientMsgID == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	msgs, err := readJSONL[Message](s.messagesPath(gid))
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if id, ok := msgs[i].Refs["client_msg_id"].(string); ok && strings.TrimSpace(id) == clientMsgID {
+			m := msgs[i]
+			return &m, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *FileStore) SearchMessages(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error) {
@@ -467,11 +606,16 @@ func (s *FileStore) AppendActivity(ctx context.Context, a *Activity) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := appendJSONL(s.activityPath(cp.GroupID), &cp); err != nil {
+	if err := s.appendActivityLocked(&cp); err != nil {
 		return err
 	}
 	*a = cp
 	return nil
+}
+
+// appendActivityLocked 追加活动行（调用方持 s.mu）。
+func (s *FileStore) appendActivityLocked(a *Activity) error {
+	return appendJSONL(s.activityPath(a.GroupID), a)
 }
 
 func (s *FileStore) ReadActivity(ctx context.Context, gid GroupID, afterSeq int64, limit int) ([]Activity, error) {
@@ -849,6 +993,48 @@ func readJSON(path string, v any) error {
 		return fmt.Errorf("%w: %s: %v", ErrCorrupt, path, err)
 	}
 	return nil
+}
+
+func messageClientMsgID(m Message) string {
+	if m.Refs == nil {
+		return ""
+	}
+	id, _ := m.Refs["client_msg_id"].(string)
+	return strings.TrimSpace(id)
+}
+
+func hasRoundReceipt(msgs []Message, triggerSeq int64) bool {
+	for _, m := range msgs {
+		if m.Kind != KindRouting || m.Refs == nil {
+			continue
+		}
+		switch seq := m.Refs["trigger_seq"].(type) {
+		case float64:
+			if int64(seq) == triggerSeq {
+				return true
+			}
+		case int64:
+			if seq == triggerSeq {
+				return true
+			}
+		case int:
+			if int64(seq) == triggerSeq {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func regularFileSize(path string) (int64, error) {
+	fi, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
 }
 
 func appendJSONL(path string, v any) error {

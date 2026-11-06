@@ -936,6 +936,9 @@ type manager struct {
 	// hubFinishMu 串行化任务结算的「检查已通知 → Finish → 回推 → MarkNotified」
 	// （P2-05 复审 B1：并发同 run 会双推）。
 	hubFinishMu sync.Mutex
+	// hubGroupSendMu 串行化群发送的「限流检查 → 消息 + 回执写入」。
+	// bridge 的 agent 工具并发调用不会经过 dispatchMu（P3a-03 B-4）。
+	hubGroupSendMu sync.Mutex
 	// hubNeedMu 串行化 need 的「load → 决策 → save」，避免 resolve 与异步
 	// expiry 的读改写竞态互相覆盖（P2-06 B3）。
 	hubNeedMu sync.Mutex

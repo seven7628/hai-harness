@@ -89,11 +89,11 @@ func TestHubGroupTools(t *testing.T) {
 		t.Fatalf("say = %s", out)
 	}
 	msgs, err := agenthub.ReadGroupLog(ctx, st, g.ID, 0, 10)
-	if err != nil || len(msgs) != 3 || msgs[2].Sender.AgentID != a.ID {
+	if err != nil || len(msgs) != 4 || msgs[2].Sender.AgentID != a.ID || msgs[3].Kind != agenthub.KindRouting {
 		t.Fatalf("msgs = %+v, %v", msgs, err)
 	}
 	acts, _ := st.ReadActivity(ctx, g.ID, 0, 10)
-	if len(acts) != 1 || acts[0].AfterSeq != 3 {
+	if len(acts) != 1 || acts[0].AfterSeq != 4 {
 		t.Fatalf("receipt = %+v", acts)
 	}
 	// observer 不能发言；非成员不能读。
