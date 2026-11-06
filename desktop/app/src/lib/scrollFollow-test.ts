@@ -10,7 +10,7 @@
 // 下面的断言就是这三条的可执行规格。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller, FOLLOW_THRESHOLD } from './scrollFollow'
+import { REVEAL_PER_FRAME, decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, stepReveal, wheelConsumedByScroller, FOLLOW_THRESHOLD } from './scrollFollow'
 
 // 便捷构造：容器高 500、内容高 3000 → max = 2500
 const MAX = 2500
@@ -74,6 +74,12 @@ test('③ 没有基准（-1）时不得判定为外部移动', () => {
 
 test('③ tick 自己往底部推（top 增大）不算外部移动', () => {
   assert.equal(isExternalMoveUp({ top: 2500, expectedTop: 2100, max: MAX, prevMax: MAX }), false)
+})
+
+test('③ 贴底时的「变小」是高度估算的结果，不能判成外部位移', () => {
+  // 切会话铺开期间每帧重排：scrollTop 被钳到新的 max，而 expectedTop 还是上一帧的值。
+  // 不排除这一种就会「按钮闪一下又消失」（用户 2026-10 / 2026-11 两次报障）。
+  assert.equal(isExternalMoveUp({ top: 2100, expectedTop: 2500, max: 2100, prevMax: 2000 }), false)
 })
 
 test('③ 亚像素误差不该关闭跟随', () => {
@@ -185,4 +191,49 @@ test('⑥ 往前翻：内层还没到底 → 消费；到底了 → 不消费', 
     wheelConsumedByScroller({ deltaY: 100, scrollTop: 700, scrollHeight: 1000, clientHeight: 300 }),
     false,
   )
+})
+
+
+// ── 历史铺开的起始窗口（2026-11 切会话抖动）────────────────────────────────
+//
+// 用户报障：切会话时页面「先上滑再下滑」、最新位置定位不准。根因是起始窗口
+// 由 effect 决定 —— 先把整段挂上 DOM，再砍到尾部 25 条：scrollHeight 从整段
+// 高度塌到一屏，浏览器钳 scrollTop，随后每帧补一批、每帧重新钉底。
+// 下面的规格钉住三件事：不先全挂、不跨会话串、不因无关的全局进入而重启。
+
+test('铺开：新的转录在第一帧就只挂尾部窗口（不是先全挂再砍）', () => {
+  const w = revealWindow({ key: '', start: 0 }, 'A', 200, true)
+  assert.equal(w.start, 200 - REVEAL_PER_FRAME, '第一帧就是尾部 25 条，没有全挂的中间态')
+  assert.equal(w.key, 'A')
+})
+
+test('铺开：短会话（≤25 条）不铺，全部显示', () => {
+  assert.equal(revealWindow({ key: '', start: 0 }, 'A', 12, true).start, 0)
+})
+
+test('铺开：同一段转录只决定一次（流式增长不重启铺开）', () => {
+  const first = revealWindow({ key: '', start: 0 }, 'A', 200, true)
+  const stepped = { ...first, start: stepReveal(first.start) } // 175 → 150，铺到一半
+  assert.deepEqual(revealWindow(stepped, 'A', 260, true), stepped, '新块到达不把进度打回起点')
+})
+
+test('铺开：换转录 → 重新决定，且**不会**沿用上一段的下标', () => {
+  // 上一段（200 块）铺到 start=100，此时切到只有 30 块的 B：
+  // 沿用旧下标 = blocks.slice(100) 为空 = 白屏一帧。
+  const midA = { key: 'A', start: 100 }
+  assert.equal(revealWindow(midA, 'B', 30, true).start, 30 - REVEAL_PER_FRAME)
+  // 切到只有 10 块的 C：全部显示（不能用 100 去切）
+  assert.equal(revealWindow(midA, 'C', 10, true).start, 0)
+})
+
+test('铺开：冷加载（转录已切换、块还没到）→ 数据到了再决定', () => {
+  const empty = revealWindow({ key: '', start: 0 }, 'A', 0, true)
+  assert.equal(empty.start, -1, '-1 = 等数据，别把「还没到」当成「全部显示」')
+  assert.equal(revealWindow(empty, 'A', 200, true).start, 200 - REVEAL_PER_FRAME)
+})
+
+test('铺开：铺开推进单调朝 0，不会后移', () => {
+  assert.equal(stepReveal(60, 25), 35)
+  assert.equal(stepReveal(10, 25), 0)
+  assert.equal(stepReveal(0, 25), 0)
 })

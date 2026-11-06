@@ -4,7 +4,8 @@ import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf, mainRunEnded } from '../store/useAppStore'
 import { resolveRunState, turnLive } from '../lib/turnSettle'
 import { signalText } from '../lib/signalFacts'
-import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
+import type { RevealWindow } from '../lib/scrollFollow'
+import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, stepReveal, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
@@ -336,7 +337,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 200 块 ≈ 8 批 ≈ 200ms 铺完；而一屏可见约 8~12 块，首批就把屏幕填满了，
   // 后续补的是上方离屏内容（被 content-visibility 跳过布局，几乎无成本）。
   // 这样「铺开动画」与「可交互」几乎同时发生，不会让人觉得在等。
-  const REVEAL_PER_FRAME = 25
+  // 常量与决策规则都在 lib/scrollFollow（纯函数，不变量由单测钉住）。
   // revealStart：已铺开的**起始下标**（不是「个数」）。
   //
   // ## 为什么必须用绝对下标（2026-10-21 修 bug）
@@ -346,43 +347,55 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // **前面已渲染的块被丢弃** → DOM 高度骤减 → 浏览器把 scrollTop 夹到底部。
   // 这正是「一有流式输出就被顶回贴底」的主因之一。
   //
-  // 改用绝对下标后，铺开只做一件事：setRevealStart(n - REVEAL_PER_FRAME)，
+  // 改用绝对下标后，铺开只做一件事：把 start 每帧减一批，
   // 起点单调减小（朝向 0），**永远不会因为尾部增长而后移**。
-  // Infinity 表示「全部显示」，与起点语义统一为 0。
-  const [revealStart, setRevealStart] = useState<number>(0)
+  // 0 表示「全部显示」，与起点语义统一。
+  //
+  // ## 起始窗口在**渲染期**决定，不走 effect（2026-11 修切换时的上下窜动）
+  //
+  // 上一版用 effect 决定起始窗口：先按上一段转录的 revealStart 把**全部**块挂上
+  // DOM，等 enterAnimAt 的 effect 跑起来再砍到尾部 25 条。这一砍把 scrollHeight
+  // 从「整段高度」缩到一屏 —— 浏览器立刻把 scrollTop 钳到 0，随后铺开循环每帧
+  // 补 25 条、每帧重新钉底。长会话（200 条 / 几万像素）里，用户看到的就是切换
+  // 瞬间「先窜到上面、再滑回底部」，而 content-visibility 的估算高度让落点一次
+  // 比一次偏（「最新位置定位没有更新」）。渲染期就决定窗口，就**没有**那次
+  // 「先全挂、再砍掉」的中间态。
+  //
+  // 另外：revealStart 以前是组件级 state，**跨转录存活**。上一段铺到一半切走
+  //（start=100）、新会话只有 30 条 → blocks.slice(100) 为空 → 白屏一帧。
+  // 现在 key 一变就重新决定，不会串。
+  //
+  // 身份用**转录**（transcriptKey），不用 enterAnimAt：enterAnimAt 是全局的
+  // 进入序号，后台会话的 new_session 响应也会把它 ++（store 的 markEnterAnim）。
+  // 把它算进身份的话，这类与本段转录无关的进入会让铺开重新开始 —— 相当于
+  // 在用户眼前把整段内容砍到尾部 25 条再长回来（一次几万像素的高度塌缩），
+  // 表现就是「有子智能体/后台任务在跑的时候，主会话页面自己上下抖」。同一次
+  // 进入只铺一遍；换会话（key 变）才重新决定。
+  const enterKey = transcriptKey
+  const [reveal, setReveal] = useState<RevealWindow>({ key: '', start: 0 })
+  // 渲染期派生（同组件内 setState：React 会立刻重渲染，中间那一帧不会提交）：
+  const decided = revealWindow(reveal, enterKey, blocks.length, Boolean(enterAnimAt))
+  if (decided !== reveal) setReveal(decided)
+  // 只渲染 blocks.slice(revealStart)；0 = 全部显示。铺开进度单调朝 0 走，
+  // 流式追加新块不会让它后移（绝对下标语义，见上）。
+  const revealStart = reveal.start > 0 ? reveal.start : 0
+  const revealStartRef = useRef(revealStart)
+  revealStartRef.current = revealStart
+  const revealing = reveal.start > 0
   useEffect(() => {
-    // 只在「会话刚进入」时铺开：正常追加（流式/新消息）不限制。
-    //
-    // 触发源只用 enterAnimAt，**不能**用 crossFade —— 后者是
-    // skeleton.phase === 'exit' | 'visible'，骨架屏退场完成后 phase 变 idle，
-    // crossFade 随之变 false → effect 重跑 → revealCount 被重置为 Infinity
-    // → 铺开中途突然全部显示（正是要避免的）。enterAnimAt 是单调的时间戳，
-    // 一次会话进入只变一次，天然稳定。
-    if (!enterAnimAt) {
-      setRevealStart(0) // 全部显示
-      return
-    }
-    const total = blocks.length
-    let start = Math.max(0, total - REVEAL_PER_FRAME)
-    if (start === 0) {
-      setRevealStart(0)
-      return
-    }
-    setRevealStart(start)
+    if (!revealing) return
     let raf = 0
     const step = () => {
-      start = Math.max(0, start - REVEAL_PER_FRAME)
-      setRevealStart(start)
-      if (start > 0) raf = requestAnimationFrame(step)
+      const next = stepReveal(revealStartRef.current)
+      revealStartRef.current = next
+      setReveal((r) => (r.key === reveal.key ? { ...r, start: next } : r))
+      if (next > 0) raf = requestAnimationFrame(step)
     }
     raf = requestAnimationFrame(step)
     return () => {
       if (raf) cancelAnimationFrame(raf)
     }
-    // 依赖 enterAnimAt：每次会话进入重新铺一遍；blocks.length 变化不重启
-    // （否则流式新块会把铺开进度打回起点）。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enterAnimAt])
+  }, [reveal.key, revealing])
   const storeLoadOlder = useAppStore((s) => s.loadOlderBlocks)
   const sourceLoadOlder = source?.onLoadOlder
   const onLoadOlder = useCallback(() => {
@@ -570,6 +583,49 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const awayHardRef = useRef(false)
   // 贴底/方向判定统一走 lib/scrollFollow（纯函数，不变量由 scrollFollow-test 钉住）
   const BOTTOM_THRESHOLD = 120 // px：视为「贴底」的容差（content-visibility 高度为估算值）
+  // —— 换转录：**渲染期**把「用户意图」清零（2026-11 修切换后回不到最新位置）——
+  //
+  // 为什么必须在渲染期、而不是 effect：
+  //
+  //  ① 新节点是 key 变化新建的，scrollTop 从 0 起。绘制前那次钉底（下方
+  //     useLayoutEffect）判的是 stickRef —— 用户在上一段上滑过（stickRef=false）
+  //     的话这一帧就不钉，第一帧画在「尾部窗口的顶部」，要等下一个 effect 才
+  //     回到底部。渲染期置回 true，layout effect 同一帧就能钉到底。
+  //  ② 手势标记是**上一段转录的**。实测（npm run probe:switch-scroll）：在 A 里
+  //     上滑 → 点 B；B 的第一次 scroll（切换自己钉底产生的那一次）被当成用户
+  //     手势，settle(dir='up') → stopFollow(hard) → awayHard 置位。此后视图明明
+  //     贴在底部，「↓ 回到最新」却挂住 1.6s 以上、跟随一直是死的 —— 因为
+  //     shouldResumeFollow 对「用户亲手翻上去」的正确做法是不自动翻案（见
+  //     scrollFollow.ts 的注释）。错的是那个手势的来源，不是那条规则。
+  //  ③ 基准（expectedTop / lastMax / lastTop / scrollMax）全按上一段内容的高度
+  //     建立，不换掉的话第一帧会把「换了一段内容」判成外部位移或用户上滑。
+  //
+  // nodeFreshRef：新节点的「第一次 scroll」只校准基准，不判方向。
+  //
+  // 换 key 时浏览器的 scroll 事件是**异步**派发的：它可能晚于渲染、早于
+  // transcriptKey 那个 effect。那一次事件的 prevTop / prevMax 还是上一段转录的
+  // 坐标系，判出来必然是「用户上滑」→ hard stop → 按钮挂一下。第一次只对齐
+  // 基准，把它当成「我的位置变了」，不当成「用户动了」。
+  const nodeFreshRef = useRef(false)
+  // 用 ref 记住「上一次渲染的转录身份」：同一段转录的后续渲染什么都不做。
+  const switchRef = useRef(transcriptKey)
+  if (switchRef.current !== transcriptKey) {
+    switchRef.current = transcriptKey
+    stickRef.current = true
+    autoscrollRef.current = true
+    awayHardRef.current = false
+    expectedTopRef.current = -1
+    lastMaxRef.current = -1
+    lastTopRef.current = 0
+    scrollMaxRef.current = -1
+    userGestureRef.current = false
+    intentRef.current = null
+    lastGestureAtRef.current = 0
+    touchYRef.current = 0
+    nodeFreshRef.current = true
+    setAway(false)
+    setFresh(false)
+  }
   // 程序滚动的**唯一入口**。
   //
   // ## 单写口径（2026-10-21）
@@ -609,6 +665,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     // 停止跟随：唯一的状态转移，所有手势/外部改动都收敛到这里。
     // `hard` = 这次停止是不是**用户亲手**翻上去的（见 awayHardRef 的注释）。
     const stopFollow = (hard = false) => {
+      // 已脱离文档的旧节点不在讨论范围：切会话换 key 之后，浏览器仍可能把
+      // 旧节点上排队的 scroll 事件派发过来 —— 那种事件读到的是上一段的高度与
+      // 位置，据此停跟随只会让新会话的「↓ 回到最新」闪一下（实测 1 帧）。
+      if (!el.isConnected) return
       autoscrollRef.current = false
       if (hard) awayHardRef.current = true
       if (stickRef.current) {
@@ -690,6 +750,16 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       if (dir === 'up') stopFollow(true)
     }
     const onScroll = () => {
+      if (!el.isConnected) return
+      if (nodeFreshRef.current) {
+        // 新节点的第一次 scroll：只对齐基准（见 nodeFreshRef 的注释）
+        nodeFreshRef.current = false
+        lastTopRef.current = el.scrollTop
+        scrollMaxRef.current = el.scrollHeight - el.clientHeight
+        userGestureRef.current = false
+        intentRef.current = null
+        return
+      }
       const top = el.scrollTop
       const prevTop = lastTopRef.current
       lastTopRef.current = top
@@ -870,10 +940,14 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     // 内容整体换掉 → 旧基准无意义（否则首帧会把切会话的自动滚动误判成用户上滑）
     expectedTopRef.current = -1
     lastMaxRef.current = -1
+    scrollMaxRef.current = -1
     if (el) {
       setScrollTop(el, el.scrollHeight - el.clientHeight)
       lastTopRef.current = el.scrollTop
       expectedTopRef.current = el.scrollTop
+      // scrollMaxRef 也必须归位：onScroll 用它区分「用户上滑」与「内容塌缩造成的
+      // 钳制」，留着上一段的 max 会让新会话的第一次滚动直接判成用户上滑。
+      scrollMaxRef.current = el.scrollHeight - el.clientHeight
     }
     // 依赖是「哪一段转录」而不是「哪个会话」：子会话页没有自己的 session id，
     // 用 sourceKey（子 agent 的 run_id）—— 否则 A→B 切换不重置贴底与滚动位置。
