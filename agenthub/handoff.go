@@ -8,7 +8,7 @@ package agenthub
 //   - observer 不能发起/接收交接（只读旁听）；
 //   - 交接必须 ack：pending_ack → accepted/declined；同一 need 只能处理一次（幂等）。
 //
-// 本文件只做纯判定 + 状态迁移，落盘/事件由 bridge 负责。
+// 本文件做纯判定 + 状态迁移；落盘/交接卡/ack 工具在 bridge（hub_handoff.go）。
 
 import (
 	"errors"
@@ -30,6 +30,8 @@ const (
 	HandoffPendingAck HandoffStatus = "pending_ack"
 	HandoffAccepted   HandoffStatus = "accepted"
 	HandoffDeclined   HandoffStatus = "declined"
+	HandoffCompleted  HandoffStatus = "completed"
+	HandoffExpired    HandoffStatus = "expired"
 )
 
 // Handoff 一次交接（群内 A→B）。
@@ -40,17 +42,12 @@ type Handoff struct {
 	ToAgentID   AgentID       `json:"to_agent_id"`
 	TaskID      TaskID        `json:"task_id,omitempty"`
 	Instruction string        `json:"instruction"`
+	ArtifactIDs []string      `json:"artifact_ids,omitempty"`
 	Status      HandoffStatus `json:"status"`
 	ChainDepth  int           `json:"chain_depth"`
+	Reason      string        `json:"reason,omitempty"`
 	CreatedAt   time.Time     `json:"created_at"`
-	AckedAt     *time.Time    `json:"acked_at,omitempty"`
-}
-
-// HandoffGuardLimits 覆盖群默认值（零值用 GroupPolicy 的默认/显式值）。
-type HandoffGuardLimits struct {
-	MaxDepth   int
-	PairWindow time.Duration
-	PairLimit  int
+	AckedAt     *time.Time    `json:"ack_at,omitempty"`
 }
 
 const (
@@ -58,16 +55,31 @@ const (
 	DefaultHandoffPairLimit  = 2
 )
 
-// CheckHandoff 判定是否允许一次 A→B 交接。history 可传全量，内部只数同对且在窗口内的。
-func CheckHandoff(g *Group, from, to AgentID, fromRole, toRole MemberRole, depth int, history []Handoff, now time.Time) error {
+// CheckHandoff 判定是否允许一次 A→B 交接。角色从 g.Members 解析，调用方不能自报；
+// 非成员/已删群 fail-closed。history 可传全量，内部只数同群、同无序对且在窗口内的。
+func CheckHandoff(g *Group, from, to AgentID, depth int, history []Handoff, now time.Time) error {
 	if g == nil {
 		return fmt.Errorf("%w: group is nil", ErrInvalid)
 	}
-	if fromRole == RoleObserver || toRole == RoleObserver {
-		return fmt.Errorf("%w: observer（%s → %s）", ErrHandoffObserver, fromRole, toRole)
+	if g.Deleted {
+		return fmt.Errorf("%w: group %s 已删除", ErrNotFound, g.ID)
 	}
 	if from == "" || to == "" || from == to {
 		return fmt.Errorf("%w: handoff 需要两个不同的智能体", ErrInvalid)
+	}
+	fromRole, ok := g.RoleOf(from)
+	if !ok {
+		return fmt.Errorf("%w: %s 不是群成员", ErrInvalid, from)
+	}
+	toRole, ok := g.RoleOf(to)
+	if !ok {
+		return fmt.Errorf("%w: %s 不是群成员", ErrInvalid, to)
+	}
+	if fromRole == RoleObserver || toRole == RoleObserver {
+		return fmt.Errorf("%w: observer（%s → %s）", ErrHandoffObserver, from, to)
+	}
+	if depth < 0 {
+		return fmt.Errorf("%w: depth %d", ErrInvalid, depth)
 	}
 	maxDepth := g.Policy.MaxHandoffDepth
 	if maxDepth <= 0 {
@@ -82,21 +94,37 @@ func CheckHandoff(g *Group, from, to AgentID, fromRole, toRole MemberRole, depth
 	window := DefaultHandoffPairWindow
 	count := 0
 	for _, h := range history {
-		if h.GroupID != "" && h.GroupID != g.ID {
+		if h.GroupID != g.ID {
+			continue // 空 GroupID 也不计入，避免跨群污染
+		}
+		samePair := (h.FromAgentID == from && h.ToAgentID == to) ||
+			(h.FromAgentID == to && h.ToAgentID == from)
+		if !samePair {
 			continue
 		}
-		if h.FromAgentID != from || h.ToAgentID != to {
-			continue
-		}
-		if h.CreatedAt.Before(now.Add(-window)) {
-			continue
+		if h.CreatedAt.Before(now.Add(-window)) || h.CreatedAt.After(now.Add(window)) {
+			continue // 窗口外/未来时间都不占额
 		}
 		count++
 	}
 	if count >= DefaultHandoffPairLimit {
-		return fmt.Errorf("%w: %s → %s 在 %s 内已有 %d 次", ErrHandoffRateLimited, from, to, window, count)
+		return fmt.Errorf("%w: %s ↔ %s 在 %s 内已有 %d 次", ErrHandoffRateLimited, from, to, window, count)
 	}
 	return nil
+}
+
+// NextHandoffDepth 从历史推导本次交接的链深度：0 = 首跳，A→B→C→D 后 depth=3。
+func NextHandoffDepth(history []Handoff, from AgentID) int {
+	depth := 0
+	for _, h := range history {
+		if h.ToAgentID != from || h.Status == HandoffDeclined || h.Status == HandoffExpired {
+			continue
+		}
+		if h.ChainDepth+1 > depth {
+			depth = h.ChainDepth + 1
+		}
+	}
+	return depth
 }
 
 // CanTransitionHandoff pending_ack → accepted/declined；其它迁移非法（重复决策幂等返回原状）。
@@ -121,6 +149,10 @@ func (h *Handoff) Ack(accept bool, at time.Time) error {
 	}
 	if h.Status == to {
 		return nil
+	}
+	// 零值反序列化/构造函数遗漏按 pending_ack 处理，避免「已存在但永远不能 ack」。
+	if h.Status == "" && (to == HandoffAccepted || to == HandoffDeclined) {
+		h.Status = HandoffPendingAck
 	}
 	if !h.CanTransitionHandoff(to) {
 		return fmt.Errorf("%w: %s -> %s", ErrHandoffNotPending, h.Status, to)

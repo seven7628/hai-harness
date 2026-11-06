@@ -173,6 +173,19 @@ func (p *GroupPolicy) ApplyDefaults() {
 }
 
 // Validate 校验群名、成员、角色与策略。
+// RoleOf 返回成员角色；非成员/软删群 fail-closed。
+func (g *Group) RoleOf(id AgentID) (MemberRole, bool) {
+	if g == nil || g.Deleted {
+		return "", false
+	}
+	for _, m := range g.Members {
+		if m.AgentID == id {
+			return m.Role, true
+		}
+	}
+	return "", false
+}
+
 func (g *Group) Validate() error {
 	if g == nil {
 		return fmt.Errorf("%w: group is nil", ErrInvalid)

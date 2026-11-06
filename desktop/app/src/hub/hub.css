@@ -550,6 +550,10 @@
 .hub-member-dot.more { font-size: 9px; color: var(--text-2); }
 .hub-group-author { font-size: 10.5px; color: var(--text-2); margin-bottom: 2px; }
 .hub-approval-stub { display: flex; align-items: center; gap: 8px; }
+.hub-handoff-card { display: flex; align-items: center; gap: 8px; }
+.hub-handoff-text { flex: 1; min-width: 0; }
+.hub-handoff-status { font-size: 11px; opacity: .72; white-space: nowrap; }
+.hub-handoff-status.accepted { opacity: 1; }
 .hub-chip.group-mode-auto { color: #2f7a4f; }
 .hub-chip.group-mode-ask { color: #b8772a; }
 .hub-chip.group-mode-readonly { color: var(--text-2); }

@@ -71,6 +71,10 @@ type Store interface {
 	SaveNeed(ctx context.Context, n *Need) error
 	ListNeeds(ctx context.Context, filter NeedFilter) ([]*Need, error)
 
+	LoadHandoff(ctx context.Context, id string) (*Handoff, error)
+	SaveHandoff(ctx context.Context, h *Handoff) error
+	ListHandoffs(ctx context.Context, gid GroupID) ([]*Handoff, error)
+
 	SaveArtifact(ctx context.Context, a *Artifact) error
 	LoadArtifact(ctx context.Context, id ArtifactID) (*Artifact, error)
 
@@ -798,6 +802,62 @@ func (s *FileStore) ListNeeds(ctx context.Context, filter NeedFilter) ([]*Need, 
 	return out, nil
 }
 
+func (s *FileStore) LoadHandoff(ctx context.Context, id string) (*Handoff, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !validID(id) || !strings.HasPrefix(id, PrefixHandoff+"_") {
+		return nil, fmt.Errorf("%w: handoff id %q", ErrInvalid, id)
+	}
+	var h Handoff
+	if err := readJSON(s.handoffPath(id), &h); err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+func (s *FileStore) SaveHandoff(ctx context.Context, h *Handoff) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if h == nil || !validID(h.ID) || !strings.HasPrefix(h.ID, PrefixHandoff+"_") {
+		return fmt.Errorf("%w: handoff", ErrInvalid)
+	}
+	cp := *h
+	if cp.CreatedAt.IsZero() {
+		cp.CreatedAt = time.Now().UTC()
+	}
+	return writeJSONAtomic(s.handoffPath(cp.ID), &cp)
+}
+
+func (s *FileStore) ListHandoffs(ctx context.Context, gid GroupID) ([]*Handoff, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	matches, err := filepath.Glob(filepath.Join(s.root, "handoffs", "*.json"))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Handoff, 0, len(matches))
+	for _, path := range matches {
+		var h Handoff
+		if err := readJSON(path, &h); err != nil {
+			return nil, err
+		}
+		if gid != "" && h.GroupID != gid {
+			continue
+		}
+		out = append(out, &h)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
 func (s *FileStore) SaveArtifact(ctx context.Context, a *Artifact) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -891,6 +951,8 @@ func (s *FileStore) idExists(prefix, id string) (bool, error) {
 		path = filepath.Dir(s.taskPath(TaskID(id)))
 	case PrefixNeed:
 		path = s.needPath(NeedID(id))
+	case PrefixHandoff:
+		path = s.handoffPath(id)
 	case PrefixArtifact:
 		path = filepath.Dir(s.artifactPath(ArtifactID(id)))
 	default:
@@ -926,6 +988,9 @@ func (s *FileStore) taskEventsPath(id TaskID) string {
 }
 func (s *FileStore) needPath(id NeedID) string {
 	return filepath.Join(s.root, "needs", string(id)+".json")
+}
+func (s *FileStore) handoffPath(id string) string {
+	return filepath.Join(s.root, "handoffs", id+".json")
 }
 func (s *FileStore) artifactPath(id ArtifactID) string {
 	return filepath.Join(s.root, "artifacts", string(id), "artifact.json")
@@ -1256,7 +1321,7 @@ func validID(s string) bool {
 
 func knownPrefix(prefix string) bool {
 	switch prefix {
-	case PrefixAgent, PrefixGroup, PrefixTask, PrefixRound, PrefixNeed, PrefixArtifact:
+	case PrefixAgent, PrefixGroup, PrefixTask, PrefixRound, PrefixNeed, PrefixArtifact, PrefixHandoff:
 		return true
 	default:
 		return false

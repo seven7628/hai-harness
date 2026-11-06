@@ -123,6 +123,17 @@ function GroupBubble({ msg, names }: { msg: HubMessage; names: Record<string, st
   if (msg.kind === 'routing_receipt' || msg.sender?.kind === 'system') {
     return <div className="hub-msg system">{msg.text}</div>
   }
+  if (msg.kind === 'handoff') {
+    const status = String(msg.refs?.status ?? '')
+    const label = status === 'pending_ack' ? '等待确认' : status === 'accepted' ? '已接受' : status === 'declined' ? '已拒绝' : '交接'
+    return (
+      <div className="hub-msg system hub-handoff-card" role="status">
+        <span className="hub-chip">交接</span>
+        <span className="hub-handoff-text">{msg.text}</span>
+        <span className={`hub-handoff-status ${status || 'pending_ack'}`}>{label}</span>
+      </div>
+    )
+  }
   const kind = msg.sender?.kind ?? 'system'
   const who = kind === 'human' ? '你' : (names[msg.sender?.agent_id ?? ''] ?? msg.sender?.agent_id ?? '智能体')
   return (

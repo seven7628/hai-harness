@@ -19,6 +19,7 @@ type MemoryStore struct {
 	taskEvent map[TaskID][]TaskEvent
 	taskSeq   map[TaskID]int64
 	needs     map[NeedID]*Need
+	handoffs  map[string]*Handoff
 	artifacts map[ArtifactID]*Artifact
 	cursors   map[string]Cursor
 	reserved  map[string]struct{}
@@ -41,6 +42,7 @@ func NewMemoryStore() *MemoryStore {
 		taskEvent: make(map[TaskID][]TaskEvent),
 		taskSeq:   make(map[TaskID]int64),
 		needs:     make(map[NeedID]*Need),
+		handoffs:  make(map[string]*Handoff),
 		artifacts: make(map[ArtifactID]*Artifact),
 		cursors:   make(map[string]Cursor),
 		reserved:  make(map[string]struct{}),
@@ -527,6 +529,75 @@ func (s *MemoryStore) ListNeeds(ctx context.Context, filter NeedFilter) ([]*Need
 			return out[i].ID < out[j].ID
 		}
 		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) LoadHandoff(ctx context.Context, id string) (*Handoff, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !validID(id) || !strings.HasPrefix(id, PrefixHandoff+"_") {
+		return nil, ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h, ok := s.handoffs[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *h
+	if h.AckedAt != nil {
+		t := *h.AckedAt
+		cp.AckedAt = &t
+	}
+	return &cp, nil
+}
+
+func (s *MemoryStore) SaveHandoff(ctx context.Context, h *Handoff) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if h == nil || !validID(h.ID) || !strings.HasPrefix(h.ID, PrefixHandoff+"_") {
+		return ErrInvalid
+	}
+	cp := *h
+	if cp.CreatedAt.IsZero() {
+		cp.CreatedAt = nowUTC()
+	}
+	if h.AckedAt != nil {
+		t := *h.AckedAt
+		cp.AckedAt = &t
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handoffs[cp.ID] = &cp
+	return nil
+}
+
+func (s *MemoryStore) ListHandoffs(ctx context.Context, gid GroupID) ([]*Handoff, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Handoff, 0, len(s.handoffs))
+	for _, h := range s.handoffs {
+		if gid != "" && h.GroupID != gid {
+			continue
+		}
+		cp := *h
+		if h.AckedAt != nil {
+			t := *h.AckedAt
+			cp.AckedAt = &t
+		}
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
 	})
 	return out, nil
 }

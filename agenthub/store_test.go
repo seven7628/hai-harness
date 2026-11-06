@@ -240,6 +240,26 @@ func testStoreContract(t *testing.T, s Store) {
 	if err != nil || len(needs) != 1 || needs[0].ID != need.ID {
 		t.Fatalf("ListNeeds = %v, %v", needs, err)
 	}
+	// Handoff 记录（P3a-06）：文件/内存实现同契约。
+	h := &Handoff{
+		ID: "ho_test01", GroupID: "grp_test", FromAgentID: "ag_agent1", ToAgentID: "ag_agent2",
+		Instruction: "写简报", Status: HandoffPendingAck, ChainDepth: 0,
+	}
+	if err := s.SaveHandoff(ctx, h); err != nil {
+		t.Fatalf("SaveHandoff: %v", err)
+	}
+	if got, err := s.LoadHandoff(ctx, h.ID); err != nil || got.Instruction != h.Instruction || got.Status != HandoffPendingAck {
+		t.Fatalf("LoadHandoff = %#v, %v", got, err)
+	}
+	if _, err := s.LoadHandoff(ctx, "ho_missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LoadHandoff(missing) err = %v, want ErrNotFound", err)
+	}
+	if hs, err := s.ListHandoffs(ctx, "grp_test"); err != nil || len(hs) != 1 || hs[0].ID != h.ID {
+		t.Fatalf("ListHandoffs = %v, %v", hs, err)
+	}
+	if hs, err := s.ListHandoffs(ctx, "grp_other"); err != nil || len(hs) != 0 {
+		t.Fatalf("ListHandoffs(other) = %v, %v", hs, err)
+	}
 	artifact := testArtifact()
 	if err := s.SaveArtifact(ctx, artifact); err != nil {
 		t.Fatalf("SaveArtifact: %v", err)

@@ -295,8 +295,15 @@ func (m *manager) hubNeedResolve(c command) {
 			m.resp(c, false, "回答失败: "+err.Error(), nil)
 			return
 		}
-	case "failure", "budget", "handoff":
-		// failure/budget 只标记已读；handoff 的接受/拒绝归 P3 群组。
+	case "handoff":
+		accept := resolution == "accept" || resolution == "accepted" ||
+			resolution == "approve" || resolution == "approved" || resolution == "true"
+		if _, err := m.ackHubHandoff(ctx, n.Anchor, accept, str(c.Payload, "reason"), "", true); err != nil {
+			m.resp(c, false, "交接处理失败: "+err.Error(), nil)
+			return
+		}
+	case "failure", "budget":
+		// failure/budget 只标记已读。
 	default:
 		m.resp(c, false, "未知的 Need 类型: "+n.Kind, nil)
 		return

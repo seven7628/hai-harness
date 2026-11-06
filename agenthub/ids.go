@@ -26,6 +26,7 @@ const (
 	PrefixRound    = "rnd"
 	PrefixNeed     = "need"
 	PrefixArtifact = "art"
+	PrefixHandoff  = "ho"
 )
 
 var idEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)

@@ -37,6 +37,7 @@ func registerHubGroupTools(eng *tools.Engine, m *manager, agentID agenthub.Agent
 	} {
 		eng.RegisterTool(context.Background(), tl)
 	}
+	registerHubHandoffTools(eng, m, agentID)
 }
 
 // groupAccess 读群 + 校验成员；返回成员角色。
