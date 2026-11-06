@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 type queueFakeOps struct {
@@ -529,6 +530,43 @@ func TestQueuePumpDuplicateIsNotSilentSuccess(t *testing.T) {
 	}
 	if created.Error == "" {
 		t.Fatalf("duplicate dispatch must leave an error, got %+v", created)
+	}
+}
+
+// P2-06 复审 B-3（REG-3）：cancel 的 busy 判定必须在 q.mu 内求值。
+// 测试直接占住 q.mu 模拟 Pump 持锁派发：旧实现会立刻调用 busy 返回；修复后
+// 必须等锁释放，才能与 Transition(queued→dispatched)→Dispatch 串行。
+func TestQueueCancelDispatchedSerializedWithDispatch(t *testing.T) {
+	ops := &queueFakeOps{}
+	q, _ := newTestQueue(t, ops)
+	created, err := q.Submit(context.Background(), queueTask("串行取消"))
+	if err != nil || created.Status != TaskDispatched {
+		t.Fatalf("submit = %+v, %v", created, err)
+	}
+	q.mu.Lock()
+	busyCalled := make(chan struct{})
+	done := make(chan struct{})
+	var got *Task
+	var did bool
+	var cancelErr error
+	go func() {
+		got, did, cancelErr = q.CancelDispatchedIfIdle(context.Background(), created.ID, "竞态取消", func() bool {
+			close(busyCalled)
+			return false
+		})
+		close(done)
+	}()
+	select {
+	case <-busyCalled:
+		q.mu.Unlock()
+		<-done
+		t.Fatal("busy 在 q.mu 外求值：取消可与 Pump 的 Transition→Dispatch 交错")
+	case <-time.After(200 * time.Millisecond):
+	}
+	q.mu.Unlock()
+	<-done
+	if cancelErr != nil || !did || got == nil || got.Status != TaskCanceled {
+		t.Fatalf("cancel = %+v did=%v err=%v; want canceled/true", got, did, cancelErr)
 	}
 }
 

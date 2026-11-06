@@ -366,6 +366,146 @@ func TestHubNeedResolveExpireNoLostUpdate(t *testing.T) {
 	}
 }
 
+// P2-06 复审 B-2：根 AgentEnd 已到、结算未完成时，取消不能把已完成任务抢成
+// canceled（否则迟到结算只能静默丢结果）。用真实 emit 链路 + 占住 hubFinishMu
+// 放大结算窗口；读取 running=false 后取消，期望「已请求中断」且任务最终 completed。
+func TestHubTaskCancelDuringSettlementDoesNotStealResult(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "SettleAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-settle", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_settle"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: wsPath, SessionID: "s-settle"},
+		Title:  "结算窗口", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	bs.hubTaskIDs = []agenthub.TaskID{task.ID}
+	bs.running.Store(true)
+
+	// 占住结算锁：emit 会先清 running（暴露结算窗口），再在 finishHubTask 处等待。
+	m.hubFinishMu.Lock()
+	emitDone := make(chan struct{})
+	go func() {
+		bs.emit(&events.AgentEnd{
+			EventType: events.AgentEndType, RunId: "r-settle", Content: "完成",
+		})
+		close(emitDone)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for bs.running.Load() {
+		if time.Now().After(deadline) {
+			m.hubFinishMu.Unlock()
+			t.Fatal("emit 未在 3s 内清掉 running")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_task_cancel", map[string]any{"task_id": string(task.ID)})
+	if !ok {
+		m.hubFinishMu.Unlock()
+		t.Fatalf("cancel: %s", errMsg)
+	}
+	note := fmt.Sprint(data["note"])
+	if note == "" || note == "会话空闲，已取消" {
+		m.hubFinishMu.Unlock()
+		t.Fatalf("cancel during settlement note = %q; want interrupt/wait", note)
+	}
+	mid, _ := st.LoadTask(context.Background(), task.ID)
+	if mid.Status == agenthub.TaskCanceled {
+		m.hubFinishMu.Unlock()
+		t.Fatal("结算窗口内已完成的任务被 cancel 抢成 canceled")
+	}
+
+	m.hubFinishMu.Unlock()
+	select {
+	case <-emitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("emit 结算未在 5s 内完成")
+	}
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != agenthub.TaskCompleted {
+		t.Fatalf("status = %s, want completed (结算不能被迟到 cancel 改写)", got.Status)
+	}
+	for _, ev := range readLines(buf) {
+		if ev["event_type"] == "hub_alert" && ev["kind"] == "settle_failed" {
+			t.Fatalf("settlement produced settle_failed: %v", ev)
+		}
+	}
+}
+
+// P2-06 复审 B-3（REG-4）：cancel 之后迟到的 AgentEnd 不得再结算、不得发
+// settle_failed 假告警（人已取消，迟到结算是预期内的）。
+func TestHubTaskLateAgentEndAfterCancelIsQuiet(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "LateAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-late", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_late"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: wsPath, SessionID: "s-late"},
+		Title:  "已取消", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskCanceled, agenthub.TransitionOptions{Error: "用户取消"}); err != nil {
+		t.Fatal(err)
+	}
+	bs.hubTaskIDs = []agenthub.TaskID{task.ID}
+	m.finishHubTask(bs, &events.AgentEnd{
+		EventType: events.AgentEndType, RunId: "r-late",
+		FinishReason: core.FinishReasonAbort, ErrorKind: "canceled",
+	})
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != agenthub.TaskCanceled {
+		t.Fatalf("status = %s, want canceled", got.Status)
+	}
+	for _, ev := range readLines(buf) {
+		if ev["event_type"] == "hub_alert" && ev["kind"] == "settle_failed" {
+			t.Fatalf("late AgentEnd produced settle_failed: %v", ev)
+		}
+	}
+}
+
 // P2-06 复审 B-2：真正在跑的会话不能被「空闲兜底」直接取消。
 func TestHubTaskCancelRunningSessionIsNotCanceled(t *testing.T) {
 	m, buf := testManager(t)

@@ -11,6 +11,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -101,16 +102,30 @@ func (m *manager) hubTaskCancel(c command) {
 			return
 		}
 		canceled, err := q.CancelQueued(ctx, id)
-		if err != nil {
+		if err == nil {
+			m.emitHubTaskUpdate(canceled)
+			respTask(canceled, "已取消（未开始）")
+			return
+		}
+		// 读到 queued 之后 Pump 可能已在 q.mu 内把它派走（Retry/并发取消也会改状态）。
+		// 这不是失败：重读后落回下面的 dispatched/running 分支，走中断而不是报错。
+		if !errors.Is(err, agenthub.ErrInvalid) {
 			m.resp(c, false, "取消失败: "+err.Error(), nil)
 			return
 		}
-		m.emitHubTaskUpdate(canceled)
-		respTask(canceled, "已取消（未开始）")
-		return
+		t, err = st.LoadTask(ctx, id)
+		if err != nil {
+			m.resp(c, false, "读取任务失败: "+err.Error(), nil)
+			return
+		}
+		if t.Status.Terminal() {
+			respTask(t, "任务已结束，无需取消")
+			return
+		}
 	}
-	// dispatched/running：先中断会话；空闲兜底与 Pump 的派发窗口在 q.mu 内
-	// 串行判定，避免「已回已取消、Dispatch 仍把指令 Ask 进会话」（P2-06 复审 B-2）。
+	// dispatched/running：先做空闲兜底判定（与 Pump 的派发窗口在 q.mu 内串行），
+	// 没抢到空闲再中断会话 —— Interrupt 放在判定之后，避免在「Ask 未发生」的窗口
+	// 空转后仍回「已请求中断」却让 run 跑到完成（P2-06 复审 N-1）。
 	q, err := m.hubQueueFor()
 	if err != nil {
 		m.resp(c, false, err.Error(), nil)
@@ -131,9 +146,8 @@ func (m *manager) hubTaskCancel(c command) {
 		respTask(canceled, "任务已结束，无需取消")
 		return
 	}
-	bs.s.Interrupt() // 幂等：空闲会话无操作；终态由 AgentEnd 结算
 	canceled, did, cerr := q.CancelDispatchedIfIdle(ctx, id, "会话空闲，取消未结束的任务", func() bool {
-		return bs.running.Load() || bs.hubDispatchPending.Load()
+		return bs.running.Load() || bs.hubDispatchPending.Load() || bs.hubSettling.Load()
 	})
 	if cerr != nil {
 		m.resp(c, false, "取消失败: "+cerr.Error(), nil)
@@ -148,6 +162,7 @@ func (m *manager) hubTaskCancel(c command) {
 		respTask(canceled, "任务已结束，无需取消")
 		return
 	}
+	bs.s.Interrupt() // 已 Ask 进会话（running 或结算中）：中断幂等，终态由 AgentEnd 结算
 	respTask(canceled, "已请求中断，等待运行结束")
 }
 

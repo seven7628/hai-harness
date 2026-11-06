@@ -212,7 +212,7 @@ func (o *hubWorkspaceOps) SessionStatus(ctx context.Context, workspace, sessionI
 		ID: sessionID, Workspace: path,
 		// hubDispatchPending 覆盖 takeBatch→AgentStart 的窗口：已 Ask 但根 run 未起，
 		// 此时 running 还是 false、Pending 已清空，只看两者会误判空闲（P2-03 B1）。
-		Running: bs.running.Load() || bs.hubDispatchPending.Load(),
+		Running: bs.running.Load() || bs.hubDispatchPending.Load() || bs.hubSettling.Load(),
 		Pending: bs.s.PendingCount(),
 	}, nil
 }

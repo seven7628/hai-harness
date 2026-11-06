@@ -342,6 +342,11 @@ type bridgeSession struct {
 	// 就被标成空闲，Hub 闸门会把任务直派进正在跑的会话（P2-03 复审 B1）。
 	// 只供会话列表显示状态点 + Hub 空闲闸门；进程重启后为 false，等下一次事件纠正。
 	running atomic.Bool
+	// hubSettling 根 AgentEnd 已到、结算尚未完成。emit 会先清 running（main.go 的
+	// 运行态分支），再落盘并调 finishHubTask；若 cancel 在这个窗口看到「空闲」，
+	// 会把已完成的任务抢成 canceled，而迟到的结算只能静默丢弃（P2-06 复审 B-2）。
+	// 覆盖整个 emit，闸门与取消在结算期间都仍算 busy。
+	hubSettling atomic.Bool
 	// hubDispatchPending 已 Ask 但该任务的根 run 还没开始（takeBatch→AgentStart 窗口）。
 	// 闸门据此仍算 busy，避免「检查时空闲、Ask 前 run 已经起来」的并批（P2-03 B1）。
 	hubDispatchPending atomic.Bool
@@ -537,6 +542,13 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// 必须按同一序列执行（并发子 agent / 任务结果事件不得与主 run 交错）。
 	bs.dispatchMu.Lock()
 	defer bs.dispatchMu.Unlock()
+	// 结算窗口：从根 AgentEnd 进入 emit（下面会清 running）到 finishHubTask 完成，
+	// 取消/队列闸门都必须仍看到 busy。defer 覆盖全部提前 return。
+	if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 &&
+		bs.runtime != nil && bs.runtime.kind == runtimeProject {
+		bs.hubSettling.Store(true)
+		defer bs.hubSettling.Store(false)
+	}
 	prov, _, _, _ := bs.cfgSnapshot() // 价表/指标打标（run goroutine 与资料页写并发）
 
 	// Hub DM：本轮最终回复进 DM 索引（左栏预览/搜索/未读）。上下文仍以 session jsonl
