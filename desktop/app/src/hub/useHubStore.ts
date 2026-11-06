@@ -88,6 +88,7 @@ interface HubState {
 }
 
 let optimisticSeq = 0 // 负数临时 seq，避免与真实 seq（正数）混淆
+let groupSendGen = 0 // 群发送代际：切群/新一轮发送后，旧响应不得改状态
 
 export const useHubStore = create<HubState>((set, get) => ({
   open: false,
@@ -160,11 +161,14 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   async select(agentID) {
     if (!agentID) return
+    groupSendGen++
     set((s) => ({
       activeId: agentID,
       activeGroupId: null,
       groupMessages: [],
+      groupActivity: [],
       groupRound: null,
+      groupSending: false,
       messages: [],
       hasMore: false,
       live: '',
@@ -386,9 +390,11 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   async selectGroup(groupID) {
     if (!groupID) return
+    groupSendGen++
     set({
       activeGroupId: groupID, activeId: null, profile: null, sid: null,
-      groupMessages: [], groupRound: null, messages: [], live: '', rootRunId: null,
+      groupMessages: [], groupActivity: [], groupRound: null, groupSending: false,
+      messages: [], live: '', rootRunId: null,
       error: null, loading: true,
     })
     const r = await hubCommand<{ group?: HubGroup }>('hub_group_get', { group_id: groupID })
@@ -410,13 +416,15 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 
   clearGroup() {
-    set({ activeGroupId: null, groupMessages: [], groupRound: null })
+    groupSendGen++
+    set({ activeGroupId: null, groupMessages: [], groupActivity: [], groupRound: null, groupSending: false })
   },
 
   async sendGroup(text) {
     const { activeGroupId, groupSending } = get()
     const body = text.trim()
     if (!activeGroupId || !body || groupSending) return false
+    const gen = ++groupSendGen
     const clientMsgId = `g-${Date.now()}-${++optimisticSeq}`
     set((s) => ({
       groupSending: true,
@@ -425,7 +433,8 @@ export const useHubStore = create<HubState>((set, get) => ({
     const r = await hubCommand<{ seq?: number; round?: HubRound }>('hub_group_send', {
       group_id: activeGroupId, text: body, client_msg_id: clientMsgId,
     })
-    if (get().activeGroupId !== activeGroupId) return false
+    // 切群/下一轮发送已发生：旧响应只负责自己的乐观气泡，不得复位新一轮的 groupSending。
+    if (groupSendGen !== gen || get().activeGroupId !== activeGroupId) return false
     if (!r.ok) {
       set((s) => ({
         groupSending: false, error: r.error || '发送失败',

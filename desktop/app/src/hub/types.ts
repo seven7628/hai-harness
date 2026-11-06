@@ -50,6 +50,9 @@ export interface HubMessage {
   sender?: HubSender
   text?: string
   created_at?: string
+  round_id?: string
+  context?: { trigger_seqs?: number[]; senders?: Array<{ agent_id?: string; name?: string }>; reason?: string }
+  visibility?: string
   refs?: Record<string, unknown>
   /** 前端乐观消息：等待 hub_message 回执（含 client_msg_id）后替换/移除。 */
   pending?: boolean

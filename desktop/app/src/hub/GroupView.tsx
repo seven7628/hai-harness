@@ -1,13 +1,17 @@
 import { useMemo, useState } from 'react'
-import { Markdown } from '../components/markdown'
 import { SendIcon } from '../components/icons'
 import { useHubStore } from './useHubStore'
-import type { HubGroup, HubGroupMember, HubMessage } from './types'
+import { GroupBubble } from './MessageBubble'
+import { RoundGroup, roundKey } from './RoundGroup'
+import { RoundActivityDigest } from './RoundActivityDigest'
+import type { HubGroup, HubGroupMember, HubMessage, HubRound } from './types'
 
-// 群组视图（P3a-08）：群头（成员叠图）/ 时间线 / 路由回执 / Chat|Run / 发言。
-//
-// 本轮智能体回复由 P3b 的群会话接入；这里先保证人发消息、@ 路由回执、
-// 审批占位与活动流是真实数据（都来自 bridge 的群日志/活动命令）。
+// 群组视图（P3a-08）：群头（成员叠图）/ 时间线 / 路由动作 / Chat|Run / 发言。
+// 同轮回复按 round_id（或同一组 trigger_seqs）合并；「分开」保留平铺。
+type ThreadItem =
+  | { kind: 'message'; msg: HubMessage }
+  | { kind: 'round'; round: HubRound }
+
 export default function GroupView({ group }: { group: HubGroup }) {
   const t = useT()
   const messages = useHubStore((s) => s.groupMessages)
@@ -18,6 +22,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const agents = useHubStore((s) => s.agents)
   const [draft, setDraft] = useState('')
   const [view, setView] = useState<'chat' | 'run'>('chat')
+  const [displayMode, setDisplayMode] = useState<'grouped' | 'flat'>(() =>
+    typeof localStorage !== 'undefined' && localStorage.getItem('hub.groupDisplay') === 'flat' ? 'flat' : 'grouped',
+  )
 
   const members = group.members ?? []
   const agentNames = useMemo(() => {
@@ -29,6 +36,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
     .map((m) => agentNames[m.agent_id] ?? m.agent_id)
     .filter(Boolean)
     .join('、')
+  const owner = members.find((m) => m.agent_id === group.owner_agent_id)
 
   async function submit(): Promise<void> {
     if (!draft.trim() || sending) return
@@ -36,24 +44,42 @@ export default function GroupView({ group }: { group: HubGroup }) {
     if (ok) setDraft('')
   }
 
+  function setDisplay(next: 'grouped' | 'flat'): void {
+    setDisplayMode(next)
+    if (typeof localStorage !== 'undefined') localStorage.setItem('hub.groupDisplay', next)
+  }
+
+  const items = useMemo(() => buildThreadItems(messages, round), [messages, round])
+
   return (
     <section className="hub-dm hub-group-view">
       <header className="hub-dm-head">
         <MemberStack members={members} names={agentNames} />
         <div className="hub-dm-title">
           <strong>{group.name}</strong>
-          <span className="hub-sub">{members.length} 名成员{title ? ` · ${title}` : ''}</span>
+          <span className="hub-sub">
+            {members.length} 名成员{title ? ` · ${title}` : ''}
+            {owner ? ` · 群主 ${agentNames[owner.agent_id] ?? owner.agent_id}` : ''}
+          </span>
         </div>
+        {group.deleted ? <span className="hub-chip danger">已删除</span> : null}
         <span className={`hub-chip group-mode-${group.policy?.mode ?? 'ask'}`}>{group.policy?.mode ?? 'ask'}</span>
         <span className="hub-view-toggle" role="tablist" aria-label="Chat or Run">
           <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>Chat</button>
           <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>
         </span>
+        {view === 'chat' ? (
+          <span className="hub-view-toggle" role="tablist" aria-label="合并或分开显示">
+            <button role="tab" aria-selected={displayMode === 'grouped'} className={displayMode === 'grouped' ? 'on' : ''} onClick={() => setDisplay('grouped')}>合并</button>
+            <button role="tab" aria-selected={displayMode === 'flat'} className={displayMode === 'flat' ? 'on' : ''} onClick={() => setDisplay('flat')}>分开</button>
+          </span>
+        ) : null}
       </header>
 
       <div className="hub-list">
         {view === 'run' ? (
           <div className="hub-run">
+            <RoundActivityDigest activity={activity} names={agentNames} />
             {activity.length === 0 ? (
               <div className="hub-empty"><p>还没有群活动</p><span className="hub-muted">@ 路由与工具活动会出现在这里</span></div>
             ) : activity.map((a, i) => (
@@ -73,19 +99,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
                 <span className="hub-muted">{t('hub.groupHint')}</span>
               </div>
             ) : null}
-            {messages.map((m) => (
-              <GroupBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} names={agentNames} />
-            ))}
-            {round ? (
-              <div className="hub-action routing" role="status">
-                <span className="hub-action-kind">路由</span>
-                <span>
-                  {round.mention_all ? '@all ' : ''}
-                  {(round.targets ?? []).length === 0 ? '无人被唤醒' : `唤醒 ${(round.targets ?? []).map((id) => agentNames[id] ?? id).join('、')}`}
-                  {round.dropped ? `（丢弃 ${round.dropped} 个）` : ''}
-                </span>
-              </div>
-            ) : null}
+            {renderThread(items, agentNames, displayMode === 'grouped')}
           </div>
         )}
       </div>
@@ -111,46 +125,65 @@ export default function GroupView({ group }: { group: HubGroup }) {
   )
 }
 
-function GroupBubble({ msg, names }: { msg: HubMessage; names: Record<string, string> }) {
-  if (msg.kind === 'approval_stub') {
-    return (
-      <div className="hub-msg system hub-approval-stub" role="status">
-        <span className="hub-chip">审批占位</span>
-        <span>{msg.text || '有人发起审批，详情在 Needs you'}</span>
-      </div>
+function buildThreadItems(messages: HubMessage[], round: HubRound | null): ThreadItem[] {
+  const showRound = !!round && (round.mention_all || (round.targets ?? []).length > 0 || (round.dropped ?? 0) > 0)
+  const items: ThreadItem[] = []
+  for (const msg of messages) {
+    items.push({ kind: 'message', msg })
+    if (showRound && round && msg.seq === round.trigger_seq) items.push({ kind: 'round', round })
+  }
+  // 历史回执消息本身就是动作行；若直播 round 没有对应消息（正常情况），不会重复。
+  return items
+}
+
+function renderThread(items: ThreadItem[], names: Record<string, string>, grouped: boolean) {
+  const nodes: React.ReactNode[] = []
+  let batch: HubMessage[] = []
+  let batchKey = ''
+  const flush = (): void => {
+    if (batch.length === 0) return
+    nodes.push(
+      <RoundGroup key={`g-${batch[0].seq}-${batch[batch.length - 1].seq}`} messages={batch} names={names} grouped={grouped && !!batchKey} />,
     )
+    batch = []
+    batchKey = ''
   }
-  if (msg.kind === 'routing_receipt' || msg.sender?.kind === 'system') {
-    return <div className="hub-msg system">{msg.text}</div>
+  for (const item of items) {
+    if (item.kind === 'round') {
+      flush()
+      const r = item.round
+      const targets = (r.targets ?? []).map((id) => names[id] ?? id)
+      nodes.push(
+        <div key={`round-${r.id}`} className="hub-action routing" role="status">
+          <span className="hub-action-kind">路由</span>
+          <span>
+            {r.mention_all ? '@all ' : ''}
+            {targets.length === 0 ? '无人被唤醒' : `唤醒 ${targets.join('、')}`}
+            {r.dropped ? `（丢弃 ${r.dropped} 个）` : ''}
+          </span>
+        </div>,
+      )
+      continue
+    }
+    if (item.msg.kind === 'routing_receipt') {
+      flush()
+      nodes.push(<GroupBubble key={`m-${item.msg.seq}`} msg={item.msg} names={names} />)
+      continue
+    }
+    const key = roundKey(item.msg)
+    if (batch.length > 0 && (key === '' || key !== batchKey)) flush()
+    if (batch.length === 0) batchKey = key
+    batch.push(item.msg)
   }
-  if (msg.kind === 'handoff') {
-    const status = String(msg.refs?.status ?? '')
-    const label = status === 'pending_ack' ? '等待确认' : status === 'accepted' ? '已接受' : status === 'declined' ? '已拒绝' : '交接'
-    return (
-      <div className="hub-msg system hub-handoff-card" role="status">
-        <span className="hub-chip">交接</span>
-        <span className="hub-handoff-text">{msg.text}</span>
-        <span className={`hub-handoff-status ${status || 'pending_ack'}`}>{label}</span>
-      </div>
-    )
-  }
-  const kind = msg.sender?.kind ?? 'system'
-  const who = kind === 'human' ? '你' : (names[msg.sender?.agent_id ?? ''] ?? msg.sender?.agent_id ?? '智能体')
-  return (
-    <div className={`hub-msg ${kind === 'human' ? 'human' : 'agent'}`}>
-      <div className="hub-group-author">{who}</div>
-      <div className="hub-body">
-        <Markdown text={msg.text ?? ''} />
-      </div>
-    </div>
-  )
+  flush()
+  return nodes
 }
 
 function MemberStack({ members, names }: { members: HubGroupMember[]; names: Record<string, string> }) {
   return (
     <span className="hub-member-stack" aria-label={`${members.length} 名成员`}>
       {members.slice(0, 4).map((m, i) => (
-        <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 4 - i }} title={names[m.agent_id] ?? m.agent_id}>
+        <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 4 - i }} title={`${names[m.agent_id] ?? m.agent_id}${m.role ? ` · ${m.role}` : ''}`}>
           {(names[m.agent_id] ?? m.agent_id).slice(0, 1)}
         </span>
       ))}

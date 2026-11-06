@@ -557,3 +557,13 @@
 .hub-chip.group-mode-auto { color: #2f7a4f; }
 .hub-chip.group-mode-ask { color: #b8772a; }
 .hub-chip.group-mode-readonly { color: var(--text-2); }
+
+/* P3a-08：同轮合并 / 动作清单 / 群态标记 */
+.hub-round-group { border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; margin: 6px 0; }
+.hub-round-group-head { display: flex; align-items: center; gap: 6px; font-size: 11px; opacity: .78; margin-bottom: 4px; }
+.hub-round-group-body .hub-msg { margin: 4px 0; }
+.hub-digest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px; margin-bottom: 6px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.hub-chip.danger { color: var(--danger, #c0392b); border-color: currentColor; }
+.hub-chip.owner-only { margin-left: 6px; font-size: 10px; }
+.hub-msg.pending { opacity: .72; }
+.hub-msg.failed { border-color: var(--danger, #c0392b); }

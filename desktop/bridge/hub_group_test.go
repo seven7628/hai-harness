@@ -306,7 +306,8 @@ func TestHubGroupSendRoutesAndReceipts(t *testing.T) {
 	if msgs, err = agenthub.ReadGroupLog(context.Background(), st, g.ID, 0, 10); err != nil || len(msgs) != 2 {
 		t.Fatalf("dedupe wrote log: %+v, %v", msgs, err)
 	}
-	// 无 @：不唤醒任何人。
+	// 无 @：不唤醒任何人，也不发 hub_round（否则前端误报「无人被唤醒」）。
+	buf.Reset()
 	if ok, errMsg, data = hubCmd(t, m, buf, 5, "hub_group_send", map[string]any{
 		"group_id": string(g.ID), "text": "只同步，不点名",
 	}); !ok {
@@ -319,6 +320,9 @@ func TestHubGroupSendRoutesAndReceipts(t *testing.T) {
 	_ = json.Unmarshal(raw, &sent2)
 	if len(sent2.Targets) != 0 {
 		t.Fatalf("no-mention targets = %v", sent2.Targets)
+	}
+	if strings.Contains(buf.String(), `"hub_round"`) {
+		t.Fatalf("no-mention emitted hub_round: %s", buf.String())
 	}
 	// 无 @ 只写消息，不写回执（设计 §6.6.3；bridge 判定行必须有回归）。
 	if msgs, err = agenthub.ReadGroupLog(context.Background(), st, g.ID, 0, 10); err != nil || len(msgs) != 3 {

@@ -261,7 +261,9 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		result["deduplicated"] = true
 	} else {
 		t.m.emitHubGroupMessage(g.ID, seq, msg)
-		t.m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+		if routed != nil {
+			t.m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+		}
 	}
 	return marshalHubToolResult(result)
 }

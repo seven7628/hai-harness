@@ -596,7 +596,10 @@ func (m *manager) hubGroupSend(c command) {
 		return
 	}
 	m.emitHubGroupMessage(g.ID, seq, msg)
-	m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+	// 无 @ 只写日志（N-1）：不产生 hub_round，否则前端会误报「无人被唤醒」。
+	if routed != nil {
+		m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+	}
 	m.resp(c, true, "", map[string]any{"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets})
 }
 

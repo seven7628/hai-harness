@@ -189,7 +189,7 @@ export default function HubSurface() {
       </aside>
 
       {activeGroup ? (
-        <GroupView group={activeGroup} />
+        <GroupView key={activeGroup.id} group={activeGroup} />
       ) : (
       <section className="hub-dm">
         {!activeAgent ? (
@@ -282,7 +282,7 @@ export default function HubSurface() {
       </section>
       )}
 
-      {activeGroup ? null : <HubInspector />}
+      <HubInspector />
 
       {editing ? (
         <AgentEditor
