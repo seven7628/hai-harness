@@ -1532,8 +1532,9 @@ const BASE = {
       "reviewBatch": "G-after-scope"
     },
     "P2.5-01": {
-      "status": "todo",
-      "reviewNote": "D5 已拍板：B→A。先提交最小 helper 闭包 + CI push/PR 编译门，再按 agents/provider/tools/subagent/mcp 逐包补全。"
+      "status": "review",
+      "commit": "8571053 test(hub-p2.5-01): 恢复干净检出测试基线并加 CI 编译门",
+      "reviewNote": "独立复审中（task-uctmkgmb）。按 D5=B→A：提交最小 helper 闭包（12 个测试文件 + skills/testdata）+ push/PR 编译门；干净 worktree `go test ./... -run '^$'` 全绿，5 个包单测全绿。后续仍需逐包补全隐藏测试。"
     },
     "P2.5-02": {
       "status": "review",
