@@ -21,6 +21,7 @@ import { displayPath, isLocalAssetSrc, resolveLocalAssetPath, useLocalAsset } fr
 import { markTableNumbers } from '../lib/tableNumbers'
 import { useSkin } from '../lib/useSkin'
 import { t as tStatic, useLang, useT } from '../i18n'
+import { splitStreamingMarkdown } from '../lib/mdSplit'
 
 // 沙箱 UI 回复协议的校验常量 —— 与 vendor/visual-skills/visual-ui/references/reply-protocol.md
 // 的「Receiving」一节逐条对应。改这里必须同步改协议文档，反之亦然：
@@ -1099,7 +1100,10 @@ function MarkdownImage({ src, alt, baseDir, workspace, ...rest }: {
 // 流式中也实时渲染（未闭合围栏暂时按行内处理，闭合后升级为代码块）。
 // memo（问题3）：流的合并渲染下，只有「正在增长的那一条」assistant 块 text 变化才重 parse。
 // baseDir：引用本文的**文件所在目录**（「最终文件」预览传；对话区不传 → 本地图锚到工作区根）。
-export const Markdown = memo(function Markdown({ text, baseDir, streaming }: { text: string; baseDir?: string; streaming?: boolean }) {
+/* 正文的**渲染体**：不含 .md 外层（分段渲染时多个片段共用一个 .md 包装，
+   这样 DOM 结构与整段渲染完全一致）。memo 是分段的收益来源：已完成的片段
+   text 不变 → 连渲染都不进，只有尾部还在长的那一块重新解析。 */
+const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming }: { text: string; baseDir?: string; streaming?: boolean }) {
   const lang = useLang()
   const resolved = useResolvedTheme()
   // 工作区是本地相对图的兜底锚点（对话区没有文件可锚）；它也是主进程侧的合法性判定依据。
@@ -1140,8 +1144,7 @@ export const Markdown = memo(function Markdown({ text, baseDir, streaming }: { t
     [dark],
   )
   return (
-    <div className="md">
-      <ReactMarkdown
+    <ReactMarkdown
         remarkPlugins={remarkPlugins as never}
         rehypePlugins={rehypePlugins as never}
         components={{
@@ -1227,8 +1230,31 @@ export const Markdown = memo(function Markdown({ text, baseDir, streaming }: { t
           ),
         }}
       >
-        {text}
-      </ReactMarkdown>
+      {text}
+    </ReactMarkdown>
+  )
+})
+
+/* 流式切分（2026-11）：结构化长回答每个 chunk 都要重解析整段（8.2k 字时单次 24ms，
+   占一次渲染的 93%，整段流式因此是 O(n²)）。把正文切成「已完成的整块」+「尾部还在
+   长的一块」，已完成的块各自 memo，只有尾部重新解析。
+   只在 streaming 且够长时走这条路；**落定后仍由原来的整段渲染**，所以最终 DOM
+   与改动前逐字节相同（切分器保证拼回去逐字等于原文，见 lib/mdSplit-test.ts）。 */
+export const Markdown = memo(function Markdown({ text, baseDir, streaming }: { text: string; baseDir?: string; streaming?: boolean }) {
+  const split = streaming ? splitStreamingMarkdown(text) : null
+  if (!split) {
+    return (
+      <div className="md">
+        <MarkdownBody text={text} baseDir={baseDir} streaming={streaming} />
+      </div>
+    )
+  }
+  return (
+    <div className="md">
+      {split.head.map((t, i) => (
+        <MarkdownBody key={i} text={t} baseDir={baseDir} />
+      ))}
+      <MarkdownBody key={split.head.length} text={split.tail} baseDir={baseDir} streaming />
     </div>
   )
 })
