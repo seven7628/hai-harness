@@ -102,7 +102,7 @@ func CheckHandoff(g *Group, from, to AgentID, depth int, history []Handoff, now 
 		if !samePair {
 			continue
 		}
-		if h.CreatedAt.Before(now.Add(-window)) || h.CreatedAt.After(now.Add(window)) {
+		if h.CreatedAt.Before(now.Add(-window)) || h.CreatedAt.After(now) {
 			continue // 窗口外/未来时间都不占额
 		}
 		count++

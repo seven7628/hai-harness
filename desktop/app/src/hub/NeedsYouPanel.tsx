@@ -102,7 +102,12 @@ function NeedRow({
             </button>
           )
         ) : null}
-        {need.kind !== 'approval' && need.kind !== 'question' ? (
+        {need.kind === 'handoff' ? (
+          <>
+            <button className="hub-btn primary" disabled={busy} onClick={() => onResolve('accept')}>接受</button>
+            <button className="hub-btn" disabled={busy} onClick={() => onResolve('decline')}>拒绝</button>
+          </>
+        ) : need.kind !== 'approval' && need.kind !== 'question' ? (
           <button className="hub-btn" disabled={busy} onClick={() => onResolve('acknowledged')}>标记已读</button>
         ) : null}
         {need.task_id ? <span className="hub-muted">任务 {need.task_id}</span> : null}

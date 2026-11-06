@@ -50,7 +50,7 @@ func callHubToolForAgent(t *testing.T, m *manager, agentID agenthub.AgentID, nam
 }
 
 func TestHubHandoffCardAckAndNeed(t *testing.T) {
-	m, _, agents, g := handoffGroupFixture(t, []handoffMember{
+	m, buf, agents, g := handoffGroupFixture(t, []handoffMember{
 		{"HandA", "owner"}, {"HandB", "member"}, {"HandC", "observer"},
 	})
 	a, b, c := agents[0], agents[1], agents[2]
@@ -90,6 +90,16 @@ func TestHubHandoffCardAckAndNeed(t *testing.T) {
 	need, err := st.LoadNeed(ctx, agenthub.NeedID(created.NeedID))
 	if err != nil || need.Kind != "handoff" || need.Status != "pending" || need.Anchor != h.ID || need.AgentID != b.ID {
 		t.Fatalf("need = %+v, %v", need, err)
+	}
+	// 人类点「标记已读」（acknowledged）不得把 pending_ack 判成 declined；
+	// 接收方之后仍必须能 accept（P3a-06 复审 B-01）。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 60, "hub_need_resolve", map[string]any{
+		"need_id": created.NeedID, "resolution": "acknowledged",
+	}); !ok {
+		t.Fatalf("mark read: %s", errMsg)
+	}
+	if got, err := st.LoadHandoff(ctx, h.ID); err != nil || got.Status != agenthub.HandoffPendingAck {
+		t.Fatalf("mark read changed handoff: %+v, %v", got, err)
 	}
 	// observer 不能发起；非接收方不能 ack。
 	if _, err := callHubToolForAgent(t, m, c.ID, "handoff", `{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(b.ID)+`","instruction":"x"}`); err == nil {

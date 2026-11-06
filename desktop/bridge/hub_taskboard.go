@@ -296,11 +296,17 @@ func (m *manager) hubNeedResolve(c command) {
 			return
 		}
 	case "handoff":
+		// 只有明确的接受/拒绝才改交接状态；「标记已读」等其它 resolution 不能
+		// 把 pending_ack 不可逆地判成 declined（P3a-06 复审 B-01）。
 		accept := resolution == "accept" || resolution == "accepted" ||
 			resolution == "approve" || resolution == "approved" || resolution == "true"
-		if _, err := m.ackHubHandoff(ctx, n.Anchor, accept, str(c.Payload, "reason"), "", true); err != nil {
-			m.resp(c, false, "交接处理失败: "+err.Error(), nil)
-			return
+		decline := resolution == "decline" || resolution == "declined" ||
+			resolution == "reject" || resolution == "rejected" || resolution == "false"
+		if accept || decline {
+			if _, err := m.ackHubHandoff(ctx, n.Anchor, accept, str(c.Payload, "reason"), "", true); err != nil {
+				m.resp(c, false, "交接处理失败: "+err.Error(), nil)
+				return
+			}
 		}
 	case "failure", "budget":
 		// failure/budget 只标记已读。

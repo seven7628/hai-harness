@@ -218,6 +218,9 @@ func (m *manager) ackHubHandoff(ctx context.Context, handoffID string, accept bo
 		if _, ok := g.RoleOf(actor); !ok {
 			return nil, fmt.Errorf("%w: 接收方不是群成员", agenthub.ErrInvalid)
 		}
+		if p, err := st.LoadAgent(ctx, actor); err != nil || p == nil || p.Deleted {
+			return nil, fmt.Errorf("%w: 接收方已删除", agenthub.ErrInvalid)
+		}
 	}
 	before := h.Status
 	if err := h.Ack(accept, time.Now().UTC()); err != nil {
