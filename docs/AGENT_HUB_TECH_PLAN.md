@@ -1993,12 +1993,15 @@ loopOpts = append(loopOpts, agents.WithMemoryInjection(res.Injection.Text))
 
 | 层级 | 字段 | 默认 | 超限行为 |
 |---|---|---|---|
-| 单任务 | `profile.policy.max_task_cost_usd` | $2 | 任务 `blocked_budget`，Needs you |
-| 单智能体/日 | `profile.policy.daily_budget_usd` | $20 | 拒绝新派发，DM/群提示 |
-| 单群/日 | `group.policy.daily_budget_usd` | $50 | 群内所有派发暂停 |
-| 全局/日 | `hub.json.defaults.global_daily_budget_usd` | $200 | 全局暂停自动派发（人仍可手动） |
+| 单任务 | `profile.policy.max_task_cost_usd` | 不限（0） | 结算时 `blocked_budget`；运行中按 LLMEnd 累计硬停 |
+| 单智能体/日 | `profile.policy.daily_budget_usd` | $20 | 拒绝新派发；运行中累计到顶即 Interrupt |
+| 单群/日 | `group.policy.daily_budget_usd` | $50 | 初始派发/重试/运行中均暂停；按任务 `Origin.GroupID` 现读群策略 |
+| 全局/日 | `agenthub.DefaultGlobalDailyBudgetUSD`（常量） | $200 | 全局暂停自动派发（人仍可手动） |
 
 预算检查在 `session_send`/`workspace_create`/`handoff` 前，用**当日账本聚合**，不靠模型自报。
+运行中硬停只对 `CostPriced=true` 的 LLMEnd 成本生效：上游/价表无价时按 0 计、
+不会触发硬停，只发一次 `usage_unpriced` 告警（未知成本不能当成 0 花，也不能当
+成「没花」而静默放行）。显式 `0` = 不限额；创建时只有「未填该键」才补默认值。
 
 #### 6.12.2 并发
 

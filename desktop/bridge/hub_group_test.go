@@ -25,6 +25,23 @@ func groupFromData(t *testing.T, data map[string]any) *agenthub.Group {
 	return got.Group
 }
 
+// P2.5-04 复审 N3：群创建显式 daily_budget_usd=0 也必须保留为不限额。
+func TestHubGroupCreateExplicitZeroBudget(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "ZeroGroupOwner")
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_group_create", map[string]any{
+		"name":    "零预算群",
+		"members": []map[string]any{{"agent_id": string(a.ID), "role": "owner"}},
+		"policy":  map[string]any{"daily_budget_usd": 0},
+	})
+	if !ok {
+		t.Fatalf("create: %s", errMsg)
+	}
+	if got := groupFromData(t, data); got.Policy.DailyBudgetUSD != 0 {
+		t.Fatalf("daily_budget_usd = %v, want explicit 0", got.Policy.DailyBudgetUSD)
+	}
+}
+
 func TestHubGroupCRUDAndRoles(t *testing.T) {
 	m, buf := testManager(t)
 	a := createHubAgent(t, m, buf, 1, "GroupA")

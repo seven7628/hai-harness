@@ -5,6 +5,7 @@ package agenthub
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -224,5 +225,8 @@ func TestGuardOverTaskBudget(t *testing.T) {
 	}
 	if over, _ := l.OverTaskBudget(Usage{CostPriced: true, CostUSD: 1.9}); over {
 		t.Fatal("1.9 < 2 should pass")
+	}
+	if over, msg := l.OverTaskBudget(Usage{CostPriced: true, CostUSD: 2}); !over || !strings.Contains(msg, "达到或超过") {
+		t.Fatalf("exact budget must stop at limit, got over=%v msg=%q", over, msg)
 	}
 }

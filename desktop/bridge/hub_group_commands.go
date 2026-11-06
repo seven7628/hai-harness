@@ -134,8 +134,10 @@ func (m *manager) hubGroupCreate(c command) {
 	}
 	g.ID = agenthub.GroupID(id)
 	g.CreatedAt, g.UpdatedAt = now, now
-	// P2.5-04/D1：新群默认日预算 $50；0 = 显式不限额（创建后 update 设置）。
-	if g.Policy.DailyBudgetUSD == 0 {
+	// P2.5-04/D1：新群默认日预算 $50；显式 0 = 不限额（与 UI 文案一致）。
+	if policy, ok := c.Payload["policy"].(map[string]any); !ok {
+		g.Policy.DailyBudgetUSD = agenthub.DefaultGroupDailyBudgetUSD
+	} else if _, ok := policy["daily_budget_usd"]; !ok {
 		g.Policy.DailyBudgetUSD = agenthub.DefaultGroupDailyBudgetUSD
 	}
 	if err := g.Normalize(); err != nil {

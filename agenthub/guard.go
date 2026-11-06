@@ -174,12 +174,13 @@ func sameTarget(a, b TaskTarget) bool {
 }
 
 // OverTaskBudget 结算时判定单任务成本是否超限（CostPriced=false 不判：未知不等于 0）。
+// 与日预算/Guard.Check 一致用 >=：预算用尽即到顶，不留下「刚好等于上限还能再跑」的缝。
 func (l GuardLimits) OverTaskBudget(u Usage) (bool, string) {
 	if l.MaxTaskCostUSD <= 0 || !u.CostPriced {
 		return false, ""
 	}
-	if u.CostUSD > l.MaxTaskCostUSD {
-		return true, fmt.Sprintf("单任务成本 $%.4f 超过上限 $%.2f", u.CostUSD, l.MaxTaskCostUSD)
+	if u.CostUSD >= l.MaxTaskCostUSD {
+		return true, fmt.Sprintf("单任务成本 $%.4f 达到或超过上限 $%.2f", u.CostUSD, l.MaxTaskCostUSD)
 	}
 	return false, ""
 }

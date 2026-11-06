@@ -75,6 +75,26 @@ func agentFromData(t *testing.T, data map[string]any) agenthub.AgentProfile {
 }
 
 // 创建 → 默认值/ID/版本/事件 → 列表 → 单查。
+// P2.5-04 复审 N3：显式 daily_budget_usd=0 必须保留为「不限额」，
+// 不能和「未填」一样被补成默认 $20（UI 文案承诺 0=不限额）。
+func TestHubAgentCreateExplicitZeroBudget(t *testing.T) {
+	m, buf := testManager(t)
+	for i, profile := range []map[string]any{
+		{"name": "ZeroExplicit", "provider": "deepseek", "model": "deepseek-v4-flash",
+			"policy": map[string]any{"daily_budget_usd": 0}},
+		{"name": "ZeroFloat", "provider": "deepseek", "model": "deepseek-v4-flash",
+			"policy": map[string]any{"daily_budget_usd": float64(0)}},
+	} {
+		ok, errMsg, data := hubCmd(t, m, buf, i+1, "hub_agent_create", map[string]any{"profile": profile})
+		if !ok {
+			t.Fatalf("create %d: %s", i, errMsg)
+		}
+		if got := agentFromData(t, data); got.Policy.DailyBudgetUSD != 0 {
+			t.Fatalf("create %d: daily_budget_usd = %v, want explicit 0", i, got.Policy.DailyBudgetUSD)
+		}
+	}
+}
+
 func TestHubAgentCreateListGet(t *testing.T) {
 	m, buf := testManager(t)
 	ok, errMsg, data := hubCmd(t, m, buf, 1, "hub_agent_create", map[string]any{

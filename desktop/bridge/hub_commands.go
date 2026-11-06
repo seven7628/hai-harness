@@ -139,6 +139,21 @@ func (m *manager) hubStore() (*agenthub.FileStore, error) {
 }
 
 // decodeHubProfile 把命令 payload 的 JSON 对象解成 AgentProfile（含 patch 的部分字段）。
+// profilePolicyKeyPresent 判断 create 请求的 profile.policy 是否显式带了某个键。
+// 只用于区分「未填」与「显式 0」；类型不对交给 decodeHubProfile 报错。
+func profilePolicyKeyPresent(profile any, key string) bool {
+	m, ok := profile.(map[string]any)
+	if !ok {
+		return false
+	}
+	policy, ok := m["policy"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = policy[key]
+	return ok
+}
+
 func decodeHubProfile(v any) (agenthub.AgentProfile, error) {
 	var p agenthub.AgentProfile
 	if v == nil {
@@ -234,9 +249,9 @@ func (m *manager) hubAgentCreate(c command) {
 		return
 	}
 	p.ID = agenthub.AgentID(id)
-	// P2.5-04/D1：新智能体默认日预算 $20（0 = 显式不限额，只能在创建后通过
-	// update 设置；创建入口把未填的零值补成安全默认）。
-	if p.Policy.DailyBudgetUSD == 0 {
+	// P2.5-04/D1：新智能体默认日预算 $20；显式传 0 = 不限额（与 UI 文案一致）。
+	// 只有「policy 里没有 daily_budget_usd 键」才补默认，不能把显式 0 当未填。
+	if !profilePolicyKeyPresent(c.Payload["profile"], "daily_budget_usd") {
 		p.Policy.DailyBudgetUSD = agenthub.DefaultAgentDailyBudgetUSD
 	}
 	if err := p.Normalize(); err != nil {
