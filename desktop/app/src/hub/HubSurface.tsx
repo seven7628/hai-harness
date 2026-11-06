@@ -133,7 +133,9 @@ export default function HubSurface() {
           <div className="hub-alert-stack" role="region" aria-label="Hub 告警">
             {alerts.map((a) => {
               const task = tasks.find((t) => t.id === a.task_id)
-              const agentID = a.agent_id || task?.origin?.agent_id || activeId
+              // 全局恢复失败没有 task/agent：退回当前 DM 或任务板上任一发起者，
+              // 让 hub_open 再触发一次恢复（不是空动作，P2.5-05 复审 B3）。
+              const agentID = a.agent_id || task?.origin?.agent_id || activeId || tasks[0]?.origin?.agent_id
               return (
                 <div key={a.id} className={`hub-alert-row ${alertSeverity(a.severity)}`}>
                   <span className="hub-alert-dot" title={a.severity ?? 'warning'} />
