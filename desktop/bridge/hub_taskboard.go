@@ -78,49 +78,49 @@ func (m *manager) hubTaskCancel(c command) {
 		m.resp(c, false, "task_id 不能为空", nil)
 		return
 	}
-	st, err := m.hubStore()
+	t, note, err := m.cancelHubTask(ctx, id)
 	if err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
+	m.resp(c, true, "", map[string]any{"task": t, "note": note})
+}
+
+// cancelHubTask 是任务板命令与 task_cancel 模型工具的共同取消入口。
+// 返回最新快照与给用户的说明；取消成功时已发 hub_task_update。
+func (m *manager) cancelHubTask(ctx context.Context, id agenthub.TaskID) (*agenthub.Task, string, error) {
+	st, err := m.hubStore()
+	if err != nil {
+		return nil, "", err
+	}
 	t, err := st.LoadTask(ctx, id)
 	if err != nil {
-		m.resp(c, false, "读取任务失败: "+err.Error(), nil)
-		return
-	}
-	respTask := func(t *agenthub.Task, note string) {
-		m.resp(c, true, "", map[string]any{"task": t, "note": note})
+		return nil, "", fmt.Errorf("读取任务失败: %w", err)
 	}
 	if t.Status.Terminal() {
-		respTask(t, "任务已结束，无需取消")
-		return
+		return t, "任务已结束，无需取消", nil
 	}
 	if t.Status == agenthub.TaskQueued {
 		q, err := m.hubQueueFor()
 		if err != nil {
-			m.resp(c, false, err.Error(), nil)
-			return
+			return nil, "", err
 		}
 		canceled, err := q.CancelQueued(ctx, id)
 		if err == nil {
 			m.emitHubTaskUpdate(canceled)
-			respTask(canceled, "已取消（未开始）")
-			return
+			return canceled, "已取消（未开始）", nil
 		}
 		// 读到 queued 之后 Pump 可能已在 q.mu 内把它派走（Retry/并发取消也会改状态）。
 		// 这不是失败：重读后落回下面的 dispatched/running 分支，走中断而不是报错。
 		if !errors.Is(err, agenthub.ErrInvalid) {
-			m.resp(c, false, "取消失败: "+err.Error(), nil)
-			return
+			return nil, "", fmt.Errorf("取消失败: %w", err)
 		}
 		t, err = st.LoadTask(ctx, id)
 		if err != nil {
-			m.resp(c, false, "读取任务失败: "+err.Error(), nil)
-			return
+			return nil, "", fmt.Errorf("读取任务失败: %w", err)
 		}
 		if t.Status.Terminal() {
-			respTask(t, "任务已结束，无需取消")
-			return
+			return t, "任务已结束，无需取消", nil
 		}
 	}
 	// dispatched/running：先做空闲兜底判定（与 Pump 的派发窗口在 q.mu 内串行），
@@ -128,48 +128,40 @@ func (m *manager) hubTaskCancel(c command) {
 	// 空转后仍回「已请求中断」却让 run 跑到完成（P2-06 复审 N-1）。
 	q, err := m.hubQueueFor()
 	if err != nil {
-		m.resp(c, false, err.Error(), nil)
-		return
+		return nil, "", err
 	}
 	bs := m.sessionByID(t.Target.SessionID)
 	if bs == nil {
 		canceled, did, cerr := q.CancelDispatchedIfIdle(ctx, id, "目标会话不存在，取消任务", nil)
 		if cerr != nil {
-			m.resp(c, false, "取消失败: "+cerr.Error(), nil)
-			return
+			return nil, "", fmt.Errorf("取消失败: %w", cerr)
 		}
 		if did {
 			m.emitHubTaskUpdate(canceled)
-			respTask(canceled, "目标会话不存在，已取消")
-			return
+			return canceled, "目标会话不存在，已取消", nil
 		}
-		respTask(canceled, "任务已结束，无需取消")
-		return
+		return canceled, "任务已结束，无需取消", nil
 	}
 	canceled, did, cerr := q.CancelDispatchedIfIdle(ctx, id, "会话空闲，取消未结束的任务", func() bool {
 		return bs.running.Load() || bs.hubDispatchPending.Load() || bs.hubSettling.Load()
 	})
 	if cerr != nil {
-		m.resp(c, false, "取消失败: "+cerr.Error(), nil)
-		return
+		return nil, "", fmt.Errorf("取消失败: %w", cerr)
 	}
 	if did {
 		m.emitHubTaskUpdate(canceled)
-		respTask(canceled, "会话空闲，已取消")
-		return
+		return canceled, "会话空闲，已取消", nil
 	}
 	if canceled.Status.Terminal() {
-		respTask(canceled, "任务已结束，无需取消")
-		return
+		return canceled, "任务已结束，无需取消", nil
 	}
 	if bs.hubSettling.Load() {
 		// 根 AgentEnd 已到、finishHubTask 未完成：Interrupt 对已结束的 run 是 no-op，
 		// 回「已请求中断」会让人以为取消生效，实际任务会按 completed 结算。
-		respTask(canceled, "任务正在结算，结果保留")
-		return
+		return canceled, "任务正在结算，结果保留", nil
 	}
 	bs.s.Interrupt() // 已 Ask 进会话（running）：中断幂等，终态由 AgentEnd 结算
-	respTask(canceled, "已请求中断，等待运行结束")
+	return canceled, "已请求中断，等待运行结束", nil
 }
 
 func (m *manager) hubTaskRetry(c command) {

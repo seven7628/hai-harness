@@ -30,6 +30,7 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	if len(ids) == 0 {
 		return
 	}
+	humanIntervened := bs.hubHumanIntervened.Swap(false)
 	m.hubFinishMu.Lock()
 	defer m.hubFinishMu.Unlock()
 	st, err := m.hubStore()
@@ -73,7 +74,8 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	}
 	settled, err := ledger.Finish(ctx, agenthub.FinishInput{
 		TaskID: first, RunID: ae.RunId, Status: status, Result: res, Error: ae.Error,
-		At: time.Now().UTC(),
+		HumanIntervened: humanIntervened,
+		At:              time.Now().UTC(),
 	})
 	if err != nil {
 		// 人已取消：AgentEnd 迟到不能再结算，也不要制造 settle_failed 假告警。
@@ -174,6 +176,14 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 			}
 			summary += "已阻断：" + reason
 		}
+	}
+	// §6.7.5：人在任务运行中介入过，回推必须让模型先对齐人的最新意图，
+	// 而不是按原计划自动继续。
+	if task.HumanIntervened {
+		if summary != "" {
+			summary += "\n\n"
+		}
+		summary += "—— 人类在该任务运行中介入了。先确认用户的最新意图，不要自动继续原计划。"
 	}
 	if err := origin.s.PushTaskResultUsage(string(task.ID), task.Title, summary,
 		string(task.Status), usage, pushErr); err != nil {

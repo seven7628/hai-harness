@@ -347,6 +347,10 @@ type bridgeSession struct {
 	// 会把已完成的任务抢成 canceled，而迟到的结算只能静默丢弃（P2-06 复审 B-2）。
 	// 覆盖整个 emit，闸门与取消在结算期间都仍算 busy。
 	hubSettling atomic.Bool
+	// hubHumanIntervened 本轮 hub_task 运行期间被用户插话（P2-09 阶段验收
+	// §6.7.5）。只在当前 batch 内有效：新 batch 开口清零，结算时写入账本并
+	// 在回推文本里提醒模型先确认人的最新意图。
+	hubHumanIntervened atomic.Bool
 	// hubDispatchPending 已 Ask 但该任务的根 run 还没开始（takeBatch→AgentStart 窗口）。
 	// 闸门据此仍算 busy，避免「检查时空闲、Ask 前 run 已经起来」的并批（P2-03 B1）。
 	hubDispatchPending atomic.Bool
@@ -629,11 +633,15 @@ func (bs *bridgeSession) emit(e events.Event) {
 			bs.hubAlert("bad_header", fmt.Sprintf("有 %d 个 hub_task header 无法解析", bad))
 		}
 		if ev.Injected {
+			if len(bs.hubTaskIDs) > 0 {
+				bs.hubHumanIntervened.Store(true)
+			}
 			if len(ids) > 0 && bs.hubFailTask != nil {
 				bs.hubFailTask(ids, "injected_conflict: 任务消息被运行中插话消费（空闲闸门失效）")
 			}
 		} else {
 			bs.hubTaskIDs = ids
+			bs.hubHumanIntervened.Store(false) // 新 batch 开口：上一轮介入不外溢
 		}
 	case *events.LLMEnd:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃

@@ -83,6 +83,11 @@ func TestEval4OneShotWorkspaceTask(t *testing.T) {
 	if json.Unmarshal([]byte(out), &sent) != nil || sent.TaskID == "" {
 		t.Fatalf("session_send = %s", out)
 	}
+	// 模型侧工具面：派完必须能用 task_status 查（§6.3.1）。
+	out = call("task_status", map[string]any{"task_id": sent.TaskID})
+	if !strings.Contains(out, sent.TaskID) || !strings.Contains(out, `"status"`) {
+		t.Fatalf("task_status = %s", out)
+	}
 	st, err := m.hubStore()
 	if err != nil {
 		t.Fatal(err)

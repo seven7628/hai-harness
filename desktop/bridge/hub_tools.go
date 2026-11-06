@@ -111,6 +111,7 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 		})
 	}
 	registerHubGroupTools(eng, m, p.ID)
+	registerHubTaskTools(eng, m, p.ID)
 	registerHubWorkspaceTools(eng, svc, func(code, message string) {
 		m.out.writeLine(map[string]any{"event_type": "hub_alert", "kind": code, "agent_id": string(p.ID), "message": message})
 	})
