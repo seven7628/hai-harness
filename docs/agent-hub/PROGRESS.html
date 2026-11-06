@@ -1297,18 +1297,18 @@ const BASE = {
       "reviewBatch": "A-delta"
     },
     "P2-04": {
-      "status": "review",
-      "commit": "b7548d5 + 2f1578d + abee0ea",
-      "review": "re-review_pending",
-      "reviewNote": "实现：agenthub.TaskHeader（只带 task_id/root/origin/callback，不含 instruction）+ Encode/Parse；DispatchReq.TaskHeader → hubDispatchMessage 构造 [hub_task, text] 两块；Queue 派发自动带 header。emit 的 UserInputsConsumed 分支只认 batch 开口（Injected 不算新任务），从 UserContents 解析 hub_task → bs.hubTaskIDs。根 AgentEnd（ParentRunId==\"\" && Depth==0）在 logEventLine 之后结算：completed / failed / interrupted（canceled/aborted）；结果含摘要（4000 rune）、usage（CostPriced 区分未知与免费）、artifacts；同批多个 hub_task → 第一个结算，其余 failed(batch_conflict)+hub_alert。view_reducer 跳过 hub_task 块：用户气泡只见正文（实时与恢复同一条 reducer 路径）。测试：header 往返/坏 JSON/不泄漏 instruction；结算 completed/failed/interrupted/批冲突；hubDispatchMessage 顺序；reducer 不泄漏 header。验证：go build ./...、agenthub、desktop/bridge 全量绿（67s）。 复审（task-bpcx9uh7）：4 blocking —— CostPriced 恒 false（Cost.Add 丢 Priced）、abort→completed、Injected/bad header 静默丢任务、artifacts 未映射（后由 f016fd1 补上）。已修（2f1578d）：Cost.Add 保留有价性、FinishReasonAbort→interrupted/MaxIterations→failed、注入→failed+告警、坏 header 告警、Dispatch 校验 header；补 abort/注入/artifacts/Usage.Add 测试。 第二轮复审 change_requested（task-mp3aectg，对象 2f1578d）：B2 Abort→interrupted、B3 注入/坏 header 兜底、B4 artifacts 均关闭；B1 残留——普通工具结果恒零值 Usage，Usage.Add 无条件累加把有价性 AND 成 false，调用过工具的 run CostPriced 仍恒 false。修复（abee0ea）：空轮短路提前到 Usage.Add（有 token 无价仍参与 AND）；NB-1 坏 header 校验移到 client_msg_id 占位前，同 id 合法重试不再误报 duplicate；补 NB-4 MaxIterations 用例。回归：Usage.Add(有价)+空轮、taskUsageOf 生产口径、坏 header 后重投、MaxIterations→failed。待第三轮复审（对象 abee0ea）。其余非阻塞：batch 坏 header 告警无 task_id、finishHubTask 根 run 防线只在调用点、ArtifactsTruncated、agents 测试编译失败、content_filter 状态、TempDir/价格表 flake。",
+      "status": "done",
+      "commit": "b7548d5 + 2f1578d + abee0ea + cf277f3",
+      "review": "passed",
+      "reviewNote": "实现：agenthub.TaskHeader（只带 task_id/root/origin/callback，不含 instruction）+ Encode/Parse；DispatchReq.TaskHeader → hubDispatchMessage 构造 [hub_task, text] 两块；Queue 派发自动带 header。emit 的 UserInputsConsumed 分支只认 batch 开口（Injected 不算新任务），从 UserContents 解析 hub_task → bs.hubTaskIDs。根 AgentEnd（ParentRunId==\"\" && Depth==0）在 logEventLine 之后结算：completed / failed / interrupted（canceled/aborted）；结果含摘要（4000 rune）、usage（CostPriced 区分未知与免费）、artifacts；同批多个 hub_task → 第一个结算，其余 failed(batch_conflict)+hub_alert。view_reducer 跳过 hub_task 块：用户气泡只见正文（实时与恢复同一条 reducer 路径）。测试：header 往返/坏 JSON/不泄漏 instruction；结算 completed/failed/interrupted/批冲突；hubDispatchMessage 顺序；reducer 不泄漏 header。验证：go build ./...、agenthub、desktop/bridge 全量绿（67s）。 复审（task-bpcx9uh7）：4 blocking —— CostPriced 恒 false（Cost.Add 丢 Priced）、abort→completed、Injected/bad header 静默丢任务、artifacts 未映射（后由 f016fd1 补上）。已修（2f1578d）：Cost.Add 保留有价性、FinishReasonAbort→interrupted/MaxIterations→failed、注入→failed+告警、坏 header 告警、Dispatch 校验 header；补 abort/注入/artifacts/Usage.Add 测试。 第二轮复审 change_requested（task-mp3aectg，对象 2f1578d）：B2 Abort→interrupted、B3 注入/坏 header 兜底、B4 artifacts 均关闭；B1 残留——普通工具结果恒零值 Usage，Usage.Add 无条件累加把有价性 AND 成 false，调用过工具的 run CostPriced 仍恒 false。修复（abee0ea）：空轮短路提前到 Usage.Add（有 token 无价仍参与 AND）；NB-1 坏 header 校验移到 client_msg_id 占位前，同 id 合法重试不再误报 duplicate；补 NB-4 MaxIterations 用例。回归：Usage.Add(有价)+空轮、taskUsageOf 生产口径、坏 header 后重投、MaxIterations→failed。待第三轮复审（对象 abee0ea）。其余非阻塞：batch 坏 header 告警无 task_id、finishHubTask 根 run 防线只在调用点、ArtifactsTruncated、agents 测试编译失败、content_filter 状态、TempDir/价格表 flake。 第三轮复审 passed（task-ty3h5mkx，对象 abee0ea）：Usage.Add 空轮短路在真实累加链成立（有价+空工具轮+有价 → CostPriced=true/USD=0.00015），端到端 blocked_budget 生效；NB-1 坏 header 不污染占位（并发好坏混合每轮 accepted=1/placeholder=1/inbox=1）；MaxIterations→failed 用例有效；5 个变异全杀。非阻塞清理（cf277f3，随 P2-05 复审覆盖）：删除首轮整份复制，避免 InputSemantics/ReasoningSummarized 泄漏与 Details 指针共享；补「有 token 无价无 Source」必须 unpriced。其余记录：Cost.Add 接收者单边判空（Session.Cost 与 Usage 三态不一致）、Details-only 零 token 轮会抹 Priced（低可达）、agents/tools/provider/subagent 测试编译失败。",
       "reviewBatch": "B-rereview"
     },
     "P2-05": {
       "status": "review",
-      "commit": "f016fd1 + 2f1578d",
+      "commit": "f016fd1 + 2f1578d + bb0355d",
       "review": "re-review_pending",
-      "reviewNote": "实现：结算后 ① 产物 core.Artifact → TaskResult.Artifacts；② emit hub_task_update；③ 回推发起智能体 DM 会话：Session.PushTaskResultUsage 入队 task_result 消息（模型续跑）+ TaskResultDelivered 事件（卡片终态收敛），usage 带 CostPriced/CostUSD；④ 成功后 Ledger.MarkNotified（status→delivered + notified_run_ids），alreadyNotified 先判保证同一 run 重复 AgentEnd/事件重放不重复回推；回推失败发 hub_alert(push_failed) 且不标 notified（P2-08 可重推）。测试：失败/中断/批冲突、回推成功（ledger delivered、artifacts、task_result_delivered 事件）、同 run 两次只推一次。延期：系统动作行（Message.kind=system + refs.action）归 P2-06 前端；群/人工来源回推归 P3。验证：go build ./...、agenthub、desktop/bridge 全量绿（56s）。 复审（task-jcrsq6ks）：B1 幂等非原子（并发双推/重放撞状态机假告警）、B2 真实中断被 completed、B3 delivered 快照缺失、B4 事件线形状不符。已修（2f1578d）：hubFinishMu 串行 + 已通知同 run 静默返回；abort 映射；MarkNotified 后重发 delivered 快照；hub_task_update 摊平 task_id/status 等。",
-      "reviewBatch": "B"
+      "reviewNote": "实现：结算后 ① 产物 core.Artifact → TaskResult.Artifacts；② emit hub_task_update；③ 回推发起智能体 DM 会话：Session.PushTaskResultUsage 入队 task_result 消息（模型续跑）+ TaskResultDelivered 事件（卡片终态收敛），usage 带 CostPriced/CostUSD；④ 成功后 Ledger.MarkNotified（status→delivered + notified_run_ids），alreadyNotified 先判保证同一 run 重复 AgentEnd/事件重放不重复回推；回推失败发 hub_alert(push_failed) 且不标 notified（P2-08 可重推）。测试：失败/中断/批冲突、回推成功（ledger delivered、artifacts、task_result_delivered 事件）、同 run 两次只推一次。延期：系统动作行（Message.kind=system + refs.action）归 P2-06 前端；群/人工来源回推归 P3。验证：go build ./...、agenthub、desktop/bridge 全量绿（56s）。 复审（task-jcrsq6ks）：B1 幂等非原子（并发双推/重放撞状态机假告警）、B2 真实中断被 completed、B3 delivered 快照缺失、B4 事件线形状不符。已修（2f1578d）：hubFinishMu 串行 + 已通知同 run 静默返回；abort 映射；MarkNotified 后重发 delivered 快照；hub_task_update 摊平 task_id/status 等。 第二轮复审 change_requested（task-zy4ndatq，对象 2f1578d）：并发双推/重放假告警/B2/B3 成功侧/B4 均修好；唯一 B-1——MarkNotified 返回值仍未被消费，push 成功但 mark 失败后同 run 会再推一份（探针 2 次）。修复（bb0355d）：push 前按发起者 history 的任务 id 幂等，已入上下文只补 MarkNotified + delivered 快照；recovery 用真实 Dispatch.RunID 占位。回归：模拟 push 成功+mark 失败后重结算，history 只 1 份且账本 delivered。待第三轮复审（对象 bb0355d）。非阻塞：失败仍发 task_result_delivered 但前端不消费、并发/失败路径用例缺口、blocked_budget 文案“完成”、hub_alert 形状、group_id/agent_id 语义。",
+      "reviewBatch": "B-rereview"
     },
     "P2-06": {
       "status": "review",
@@ -1398,11 +1398,11 @@ const BASE = {
   "reviewGate": {
     "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。",
     "audit": {
-      "done_passed": 21,
-      "in_review": 15,
+      "done_passed": 22,
+      "in_review": 14,
       "not_started": 15,
       "in_review_breakdown": {
-        "re_review_pending": 3,
+        "re_review_pending": 2,
         "initial_pending": 12
       }
     },
