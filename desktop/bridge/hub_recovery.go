@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -19,25 +20,36 @@ import (
 	"github.com/seven7628/hai-harness/events"
 )
 
-// ensureHubRecovery 首次 hub_open 做一次恢复（进程内只跑一次）。
+// ensureHubRecovery 首次 hub_open 做一次恢复（进程内只在成功后闩住）。
+// 失败不能闩：一个半写 task.json 就让整轮恢复中止，如果不重试，本进程后续
+// hub_open 全部 no-op，queued 永不派发、未回推终态永不重推（P2-08 复审 B-2）。
 func (m *manager) ensureHubRecovery() {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
-	if m.hubRecovered {
+	if m.hubRecovered || m.hubRecovering {
 		m.mu.Unlock()
 		return
 	}
-	m.hubRecovered = true
+	m.hubRecovering = true
 	m.mu.Unlock()
-	m.recoverHubTasks()
+	err := m.recoverHubTasks()
+	m.mu.Lock()
+	m.hubRecovering = false
+	if err == nil {
+		m.hubRecovered = true
+	}
+	m.mu.Unlock()
+	if err != nil {
+		m.emitHubTaskAlert("", "recovery_failed", err.Error())
+	}
 }
 
 // recoverHubTasks 扫描账本做一次性恢复；可重复调用（幂等）。
-func (m *manager) recoverHubTasks() {
+func (m *manager) recoverHubTasks() error {
 	if m == nil {
-		return
+		return nil
 	}
 	// 与正常结算共用同一把锁：恢复的「查已通知 → 回推 → MarkNotified」
 	// 不能和 finishHubTask 并发（P2-05 复审 B-2）。
@@ -45,13 +57,24 @@ func (m *manager) recoverHubTasks() {
 	defer m.hubFinishMu.Unlock()
 	st, err := m.hubStore()
 	if err != nil {
-		return
+		return fmt.Errorf("打开 Hub 账本: %w", err)
 	}
-	q, qerr := m.hubQueueFor()
 	ctx := context.Background()
 	tasks, err := st.ListTasks(ctx, agenthub.TaskFilter{})
 	if err != nil {
-		return
+		return fmt.Errorf("扫描任务账本: %w", err)
+	}
+	// ListTasks 按 UpdatedAt 降序；直接 Restore 会让重启后的排队变 LIFO。
+	// 按 CreatedAt 升序恢复，保持用户提交顺序（P2-08 复审 B-1）。
+	var q *agenthub.Queue
+	for _, t := range queuedInCreatedOrder(tasks) {
+		if q == nil {
+			q, err = m.hubQueueFor()
+			if err != nil {
+				return fmt.Errorf("打开 Hub 队列: %w", err)
+			}
+		}
+		q.Restore(t)
 	}
 	ledger := agenthub.NewLedger(st)
 	for _, t := range tasks {
@@ -60,9 +83,7 @@ func (m *manager) recoverHubTasks() {
 		}
 		switch t.Status {
 		case agenthub.TaskQueued:
-			if qerr == nil && q != nil {
-				q.Restore(t)
-			}
+			continue // 已按顺序 Restore
 		case agenthub.TaskDispatched, agenthub.TaskRunning:
 			if t.Dispatch.RunID != "" {
 				continue // 有真实 run：由事件流正常收尾
@@ -94,6 +115,25 @@ func (m *manager) recoverHubTasks() {
 			m.pushHubTaskResult(ledger, t, ae)
 		}
 	}
+	return nil
+}
+
+// queuedInCreatedOrder 恢复 queued 任务时的 FIFO 顺序。ListTasks 按 UpdatedAt
+// 降序返回，不能直接拿来做 Restore；CreatedAt 相同（旧数据/同毫秒）用 ID 兜底。
+func queuedInCreatedOrder(tasks []*agenthub.Task) []*agenthub.Task {
+	out := make([]*agenthub.Task, 0, len(tasks))
+	for _, t := range tasks {
+		if t != nil && t.Status == agenthub.TaskQueued {
+			out = append(out, t)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out
 }
 
 // recoveryAgentEnd 用账本里已有的结果合成 AgentEnd（只用于回推 usage/摘要）。

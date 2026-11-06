@@ -932,7 +932,10 @@ type manager struct {
 	// expiry 的读改写竞态互相覆盖（P2-06 B3）。
 	hubNeedMu sync.Mutex
 	// hubRecovered 进程内只做一次崩溃恢复（在首次 hub_open 时）。
+	// 只有恢复成功才置位；失败保持 false，下一次 hub_open 重试（P2-08 复审 B-2）。
 	hubRecovered bool
+	// hubRecovering 正在恢复（串行化并发 hub_open；失败后可再次进入）。
+	hubRecovering bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
 	hubMsgDedup map[string]string
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。

@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -228,5 +230,108 @@ func TestHubRecoveryBlockedBudgetRedelivered(t *testing.T) {
 	m.recoverHubTasks()
 	if strings.Contains(buf.String(), `"task_result_delivered"`) || strings.Contains(buf.String(), `"hub_task_update"`) {
 		t.Fatalf("二次恢复重复处理了已通知任务: %s", buf.String())
+	}
+}
+
+// P2-08 复审 B-1：ListTasks 按 UpdatedAt 降序，Restore 不能照单全收。
+// A/B/C 三条排队任务恢复后必须按创建顺序派发，而不是 C/B/A。
+func TestHubRecoveryQueuedKeepsCreatedOrder(t *testing.T) {
+	m, buf := testManager(t)
+	_ = buf
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := agenthub.NewLedger(st)
+	base := time.Now().UTC().Add(-time.Hour)
+	for i, title := range []string{"A", "B", "C"} {
+		at := base.Add(time.Duration(i) * time.Second)
+		if _, err := ledger.Create(context.Background(), &agenthub.Task{
+			Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_order"},
+			Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: "/w", SessionID: "s1"},
+			Title:  title, Instruction: title, Callback: agenthub.CallbackAgentEnd,
+			CreatedAt: at, UpdatedAt: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ops := &recoveryOrderOps{}
+	m.hubQueue = agenthub.NewQueue(ledger, ops)
+	if err := m.recoverHubTasks(); err != nil {
+		t.Fatal(err)
+	}
+	target := agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: "/w", SessionID: "s1"}
+	for i := 0; i < 3; i++ {
+		if _, err := m.hubQueue.Pump(context.Background(), target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Join(ops.dispatched, ","); got != "A,B,C" {
+		t.Fatalf("恢复后派发顺序 = %s, want A,B,C", got)
+	}
+}
+
+type recoveryOrderOps struct {
+	dispatched []string
+}
+
+func (o *recoveryOrderOps) ListWorkspaces(context.Context) ([]agenthub.WorkspaceInfo, error) {
+	return nil, nil
+}
+func (o *recoveryOrderOps) CreateWorkspace(context.Context, agenthub.CreateWorkspaceReq) (agenthub.WorkspaceInfo, error) {
+	return agenthub.WorkspaceInfo{}, nil
+}
+func (o *recoveryOrderOps) ListSessions(context.Context, string) ([]agenthub.SessionInfo, error) {
+	return nil, nil
+}
+func (o *recoveryOrderOps) SessionStatus(context.Context, string, string) (agenthub.SessionInfo, error) {
+	return agenthub.SessionInfo{ID: "s1", Workspace: "/w"}, nil
+}
+func (o *recoveryOrderOps) CreateSession(context.Context, agenthub.CreateSessionReq) (agenthub.SessionInfo, error) {
+	return agenthub.SessionInfo{}, nil
+}
+func (o *recoveryOrderOps) Dispatch(_ context.Context, req agenthub.DispatchReq) (agenthub.DispatchResult, error) {
+	o.dispatched = append(o.dispatched, req.Text)
+	return agenthub.DispatchResult{SessionID: req.SessionID, Accepted: true}, nil
+}
+func (o *recoveryOrderOps) InterruptSession(context.Context, string) error { return nil }
+
+// P2-08 复审 B-2：恢复失败不能先闩。半写 task.json → 首次 hub_open 告警且不置
+// hubRecovered；修好后同一进程再次 hub_open 必须真正重试。
+func TestHubRecoveryFailureDoesNotLatch(t *testing.T) {
+	m, buf := testManager(t)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := agenthub.NewLedger(st).Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_latch"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: "/w", SessionID: "s1"},
+		Title:  "半写", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(appDataDir(), "hub", "tasks", string(task.ID), "task.json")
+	good, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.ensureHubRecovery()
+	if m.hubRecovered {
+		t.Fatal("恢复失败后 hubRecovered 不应置位")
+	}
+	if !strings.Contains(buf.String(), `"recovery_failed"`) {
+		t.Fatalf("恢复失败没有告警: %s", buf.String())
+	}
+	if err := os.WriteFile(path, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.ensureHubRecovery()
+	if !m.hubRecovered {
+		t.Fatal("存储修好后第二次 hub_open 必须重试并成功")
 	}
 }
