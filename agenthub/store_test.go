@@ -240,6 +240,17 @@ func testStoreContract(t *testing.T, s Store) {
 	if err != nil || len(needs) != 1 || needs[0].ID != need.ID {
 		t.Fatalf("ListNeeds = %v, %v", needs, err)
 	}
+	// approval_stub 不进 agent 搜索（P3a-07 B3 存储层直测，不只靠工具层兜底）。
+	if _, err := s.AppendMessage(ctx, &Message{
+		GroupID: "grp_test", Kind: KindApprovalStub,
+		Sender: Sender{Kind: SenderSystem}, Text: "SECRET-STUB-BODY",
+	}); err != nil {
+		t.Fatalf("append stub: %v", err)
+	}
+	if hits, err := s.SearchMessages(ctx, "grp_test", "SECRET-STUB-BODY", 0, 10); err != nil || len(hits) != 0 {
+		t.Fatalf("stub search leaked: %+v, %v", hits, err)
+	}
+
 	// Handoff 记录（P3a-06）：文件/内存实现同契约。
 	h := &Handoff{
 		ID: "ho_test01", GroupID: "grp_test", FromAgentID: "ag_agent1", ToAgentID: "ag_agent2",

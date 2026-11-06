@@ -160,7 +160,8 @@ func TestHubTaskFinishRegistersArtifacts(t *testing.T) {
 	}
 	task, err := ledger.Create(context.Background(), &agenthub.Task{
 		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: a.ID},
-		Target: agenthub.TaskTarget{Kind: agenthub.TargetAgent, AgentID: a.ID, Workspace: workspace, SessionID: "s1"},
+		// 生产唯一建任务路径是 TargetWorkspace + Origin.AgentID（P3a-07 复审 B1-a）。
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: workspace, SessionID: "s1"},
 		Title:  "登记产物", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
 	})
 	if err != nil {
@@ -179,7 +180,10 @@ func TestHubTaskFinishRegistersArtifacts(t *testing.T) {
 		t.Fatalf("artifacts = %+v, %v", list, err)
 	}
 	got := list[0]
-	if got.OwnerAgentID != a.ID || got.Version != 1 || !strings.HasSuffix(got.SourcePath, filepath.Join("out", "r.md")) {
+	if got.OwnerAgentID != a.ID || got.Version != 1 || !strings.Contains(got.SourcePath, filepath.Join("artifacts", string(got.ID), "v1")) {
 		t.Fatalf("artifact = %+v", got)
+	}
+	if b, err := os.ReadFile(got.SourcePath); err != nil || string(b) != "# r" {
+		t.Fatalf("snapshot content = %q, %v", b, err)
 	}
 }

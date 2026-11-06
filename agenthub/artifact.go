@@ -9,6 +9,8 @@ package agenthub
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -47,7 +49,57 @@ func RegisterArtifact(ctx context.Context, st Store, a *Artifact) error {
 	if err := NewArtifactVersion(existing, a); err != nil {
 		return err
 	}
+	// 版本号必须对应不可变内容：把源文件复制到 artifacts/<id>/v<N>，
+	// 预览读副本，后续覆盖源文件不会改写历史版本（P3a-07 复审 B1-b）。
+	if err := snapshotArtifactSource(st, a); err != nil {
+		return err
+	}
 	return st.SaveArtifact(ctx, a)
+}
+
+func snapshotArtifactSource(st Store, a *Artifact) error {
+	src := strings.TrimSpace(a.SourcePath)
+	if src == "" {
+		return nil
+	}
+	rooter, ok := st.(interface{ Root() string })
+	if !ok {
+		return nil // MemoryStore 不落文件副本
+	}
+	fi, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%w: 产物源不是普通文件", ErrInvalid)
+	}
+	destDir := filepath.Join(rooter.Root(), "artifacts", string(a.ID))
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return err
+	}
+	dest := filepath.Join(destDir, fmt.Sprintf("v%d%s", a.Version, filepath.Ext(src)))
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	a.SourcePath = dest
+	return nil
 }
 
 // NextArtifactVersion 计算 (owner,name) 的下一个版本号（现有最大 +1；无则 1）。

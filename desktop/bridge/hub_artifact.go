@@ -38,9 +38,14 @@ func registerTaskArtifacts(ctx context.Context, st agenthub.Store, task *agenthu
 	if task == nil || len(arts) == 0 {
 		return nil
 	}
+	// 生产任务目前全是 TargetWorkspace（service.go），owner 回退到派发者；
+	// agent-target 任务（P3b-03）仍优先用执行者。
 	owner := task.Target.AgentID
 	if owner == "" {
-		return nil
+		owner = task.Origin.AgentID
+	}
+	if owner == "" {
+		return nil // 人类直发、无 agent 归属
 	}
 	gid := task.Target.GroupID
 	if gid == "" {
@@ -53,8 +58,13 @@ func registerTaskArtifacts(ctx context.Context, st agenthub.Store, task *agenthu
 		if source != "" && !filepath.IsAbs(source) && strings.TrimSpace(task.Target.Workspace) != "" {
 			source = filepath.Join(task.Target.Workspace, source)
 		}
+		displayPath := path
+		if filepath.IsAbs(displayPath) {
+			// core.Artifact 允许工作区外绝对路径；登记只存基名，真实文件进版本副本。
+			displayPath = filepath.Base(displayPath)
+		}
 		rec := &agenthub.Artifact{
-			Name: a.Name, Path: path, SourcePath: source, Kind: a.Kind,
+			Name: a.Name, Path: displayPath, SourcePath: source, Kind: a.Kind,
 			Size: a.Size, Lines: a.Lines, SHA256: a.SHA256,
 			OwnerAgentID: owner, GroupID: gid, Visibility: agenthub.VisibilityGroup,
 		}

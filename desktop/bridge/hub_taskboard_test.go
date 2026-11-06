@@ -605,4 +605,19 @@ func TestHubNeedLazyExpiry(t *testing.T) {
 	if got, _ := st.LoadNeed(context.Background(), handoff.ID); got.Status != "pending" {
 		t.Fatalf("handoff = %+v", got)
 	}
+	// 决策入口也做 TTL：列表没打开时也不能批准已过期审批。
+	ok, _, data = hubCmd(t, m, buf, 2, "hub_need_resolve", map[string]any{
+		"need_id": string(old.ID), "resolution": "approve",
+	})
+	if !ok {
+		t.Fatalf("resolve expired: %s", errMsg)
+	}
+	var already struct {
+		Already bool `json:"already"`
+	}
+	raw, _ = json.Marshal(data)
+	_ = json.Unmarshal(raw, &already)
+	if !already.Already {
+		t.Fatalf("expired need was approved: %s", raw)
+	}
 }

@@ -260,6 +260,8 @@ func (m *manager) hubNeedResolve(c command) {
 		m.resp(c, false, "need_id 不能为空", nil)
 		return
 	}
+	// 决策前也扫一次 TTL：列表没打开时也不能批准已过期的审批。
+	m.expireStaleHubNeeds(ctx, st)
 	m.hubNeedMu.Lock()
 	defer m.hubNeedMu.Unlock()
 	n, err := st.LoadNeed(ctx, id)

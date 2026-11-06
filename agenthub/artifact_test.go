@@ -4,6 +4,7 @@ package agenthub
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -54,6 +55,46 @@ func TestArtifactVisibility(t *testing.T) {
 	group := &Artifact{OwnerAgentID: "ag_aaaaaaaa"}
 	if !ArtifactVisibleTo(group, "ag_bbbbbbbb", false) {
 		t.Fatal("group artifact should be visible")
+	}
+}
+
+// P3a-07 复审 B1-b：版本号对应不可变内容副本，源文件覆盖后 v1 仍读旧内容。
+func TestRegisterArtifactSnapshotsContent(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir() + "/report.md"
+	if err := os.WriteFile(src, []byte("CONTENT-V1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v1 := &Artifact{OwnerAgentID: "ag_aaaaaaaa", Name: "report.md", Path: "report.md", SourcePath: src}
+	if err := RegisterArtifact(ctx, st, v1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("CONTENT-V2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v2 := &Artifact{OwnerAgentID: "ag_aaaaaaaa", Name: "report.md", Path: "report.md", SourcePath: src}
+	if err := RegisterArtifact(ctx, st, v2); err != nil {
+		t.Fatal(err)
+	}
+	got1, err := st.LoadArtifact(ctx, v1.ID)
+	if err != nil || got1.Version != 1 {
+		t.Fatalf("v1 = %+v, %v", got1, err)
+	}
+	got2, _ := st.LoadArtifact(ctx, v2.ID)
+	if got2.Version != 2 {
+		t.Fatalf("v2 = %+v", got2)
+	}
+	b1, err := os.ReadFile(got1.SourcePath)
+	if err != nil || string(b1) != "CONTENT-V1" {
+		t.Fatalf("v1 content = %q, %v", b1, err)
+	}
+	b2, _ := os.ReadFile(got2.SourcePath)
+	if string(b2) != "CONTENT-V2" {
+		t.Fatalf("v2 content = %q", b2)
 	}
 }
 
