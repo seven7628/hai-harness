@@ -543,11 +543,18 @@ func (bs *bridgeSession) emit(e events.Event) {
 	bs.dispatchMu.Lock()
 	defer bs.dispatchMu.Unlock()
 	// 结算窗口：从根 AgentEnd 进入 emit（下面会清 running）到 finishHubTask 完成，
-	// 取消/队列闸门都必须仍看到 busy。defer 覆盖全部提前 return。
+	// 取消/队列闸门都必须仍看到 busy。defer 兜底所有提前 return；正常路径在结算
+	// 完成后、触发下一次泵之前显式清除（否则泵可能趁 latch 未清看到忙而漏派发）。
+	settling := false
 	if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 &&
 		bs.runtime != nil && bs.runtime.kind == runtimeProject {
+		settling = true
 		bs.hubSettling.Store(true)
-		defer bs.hubSettling.Store(false)
+		defer func() {
+			if settling {
+				bs.hubSettling.Store(false)
+			}
+		}()
 	}
 	prov, _, _, _ := bs.cfgSnapshot() // 价表/指标打标（run goroutine 与资料页写并发）
 
@@ -751,6 +758,12 @@ func (bs *bridgeSession) emit(e events.Event) {
 		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
 			bs.hubFinishTask(ae)
 		}
+	}
+	// 结算已完成：先解除 busy，再触发下面的泵（泵看到的是真实空闲）。defer 只兜底
+	// 提前 return 的路径，避免 latch 泄漏让队列永久卡住。
+	if settling {
+		bs.hubSettling.Store(false)
+		settling = false
 	}
 	// 根 run 结束：挂起的审批/提问已失效（等待窗口随 run 结束），
 	// 从 Needs you 里收掉，避免永久 pending（Hub DM 与项目会话都要收）。
