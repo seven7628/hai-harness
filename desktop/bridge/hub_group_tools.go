@@ -265,7 +265,9 @@ func (t *hubGroupSayTool) enforceTurnLimit(ctx context.Context, st agenthub.Stor
 		return err
 	}
 	turns := 0
-	for _, m := range msgs { // 最新在前：遇到最后一条人类消息即停
+	// ReadMessages 按 seq 升序返回（最新在末尾）：必须倒序扫到最近一条人类消息。
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
 		if m.Sender.Kind == agenthub.SenderHuman {
 			break
 		}

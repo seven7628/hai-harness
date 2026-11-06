@@ -159,6 +159,12 @@ func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 正常群一定有人类种子消息：必须从最近一条人类消息开始数 agent 轮次。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 10, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "开始",
+	}); !ok {
+		t.Fatalf("human seed: %s", errMsg)
+	}
 	call := func(name, args string) (string, error) {
 		tool, err := bsB.hubEngine.GetTool(context.Background(), name)
 		if err != nil {
@@ -171,6 +177,15 @@ func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
 	}
 	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"第二轮"}`); err == nil {
 		t.Fatal("second agent turn must be rejected by max_turns_per_human=1")
+	}
+	// 人类再发言重置计数：之后第一条 agent 回复应放行。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "继续说",
+	}); !ok {
+		t.Fatalf("human reset: %s", errMsg)
+	}
+	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"重置后第一轮"}`); err != nil {
+		t.Fatalf("human message must reset turn counter: %v", err)
 	}
 	if ok, _, _ := hubCmd(t, m, buf, 4, "hub_agent_create", map[string]any{
 		"profile": map[string]any{"name": "user", "provider": "deepseek", "model": "deepseek-v4-flash", "role": "x"},
