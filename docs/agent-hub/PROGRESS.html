@@ -303,8 +303,8 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "多智能体工作台 · 统一任务跟进看板",
-  "updated": "2026-11-05",
+  "subtitle": "P1 收口 + P2 工作区派发/任务账本/回推 + P3a 群组基础（当前：Review Gate 期间冻结新功能）",
+  "updated": "2026-11-05 18:12",
   "phases": [
     {
       "id": "P0",
@@ -1273,7 +1273,8 @@ const BASE = {
       "status": "review",
       "commit": "dd3b32d + ... + 196c508",
       "review": "re-review_pending",
-      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。 第四轮复审（task-fehavvps）：provider-only 已修但 model-only 仍可写无效组合。已修（196c508）：判据改为 provider 或 model 变化 + 精确比较；model-only 跨 provider 模型 → unknown_model。"
+      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。 第四轮复审（task-fehavvps）：provider-only 已修但 model-only 仍可写无效组合。已修（196c508）：判据改为 provider 或 model 变化 + 精确比较；model-only 跨 provider 模型 → unknown_model。",
+      "reviewBatch": "A-running"
     },
     "P2-01": {
       "status": "done",
@@ -1285,98 +1286,197 @@ const BASE = {
       "status": "review",
       "commit": "e735626 + 67e9cd4 fix(hub-p2-02): Queue 生产路径保留 client_msg_id",
       "review": "re-review_pending",
-      "reviewNote": "复审 change_requested（task-pbdgj74w，对象 e735626）。Blocking：B2 生产路径仍不幂等——Hub engine 总是挂 Queue，而 WorkspaceService.Send 的 Queue 分支不带 clientMsgID、queue.go 用 task id 兜底 → 同 id 两次建两个任务。且验收用例直调 ops / 无 Queue，是桩自证。修复（67e9cd4）：Task.ClientMsgID 落账本；Queue.Submit 在 q.mu 内按 (target, client_msg_id) 查重（锁覆盖查找+建账+入队）；Dispatch 优先调用方 id；Ledger.FindByClientMsgID 跨重启查重。新增生产链路用例（engine session_send 同 id → 同 task_id、queued=1、账本 client_msg_id）。同时修 N4 UpdatedAt（int64 毫秒被 time.Time 断言吞掉恒 nil）与 B1 残留（空标题落 defaultSessionTitle、80 rune）。未处理（非阻塞）：hubMsgDedup 无上限/TTL、duplicate 直派仍返回新随机 id、key 未含 AgentID、CanCreateWorkspace 未接线、方案工具表字段与实现不一致、sessionManualTitles 测试隔离。验证：agenthub + desktop/bridge 全量绿（56s）。"
+      "reviewNote": "复审 change_requested（task-pbdgj74w，对象 e735626）。Blocking：B2 生产路径仍不幂等——Hub engine 总是挂 Queue，而 WorkspaceService.Send 的 Queue 分支不带 clientMsgID、queue.go 用 task id 兜底 → 同 id 两次建两个任务。且验收用例直调 ops / 无 Queue，是桩自证。修复（67e9cd4）：Task.ClientMsgID 落账本；Queue.Submit 在 q.mu 内按 (target, client_msg_id) 查重（锁覆盖查找+建账+入队）；Dispatch 优先调用方 id；Ledger.FindByClientMsgID 跨重启查重。新增生产链路用例（engine session_send 同 id → 同 task_id、queued=1、账本 client_msg_id）。同时修 N4 UpdatedAt（int64 毫秒被 time.Time 断言吞掉恒 nil）与 B1 残留（空标题落 defaultSessionTitle、80 rune）。未处理（非阻塞）：hubMsgDedup 无上限/TTL、duplicate 直派仍返回新随机 id、key 未含 AgentID、CanCreateWorkspace 未接线、方案工具表字段与实现不一致、sessionManualTitles 测试隔离。验证：agenthub + desktop/bridge 全量绿（56s）。",
+      "reviewBatch": "A-running"
     },
     "P2-03": {
       "status": "review",
       "commit": "c1bcaf7 + 0d6ec02 + fix(hub-p2-03): 复审 B-1/B-2",
       "review": "re-review_pending",
-      "reviewNote": "初审 change_requested（task-q77rzcjp，对象 c1bcaf7）。B1 闸门读 UI 状态点 bs.running：子 agent AgentEnd 清零 → 根 run 在跑却判空闲；takeBatch→AgentStart 窗口同样误判。B2 积压时 Submit 返回队首（别人的账本条目）→ session_send 把错 task_id 交给模型。B3 Pump 先出队再 Transition：失败丢任务、账本仍 queued、永不派发。修复（0d6ec02）：running 只由根 AgentStart/End 翻转 + hubDispatchPending 覆盖派发窗口；Submit 只认自己的 id；Transition 成功后才出队；N1 目标 ErrNotFound → 队首 canceled；N6 队列不可用发 hub_alert；N7 queued 语义写进工具描述。回归：B1 两条、B2、B3、M5（AgentEnd→pump 接线）、N1 各一条。未处理（非阻塞）：Queue 模式丢弃模型给的 client_msg_id（N3）、emit 内同步 pump 代价（N5）、ctx/超时（N8）、重启 queued 可视化归 P2-08。验证：agenthub + desktop/bridge 全量绿（40s）。 第二轮复审（task-qy9g79ws）：B1/B2/B3 运行时验证为真修好，但 B-1 ErrNotFound 分支又先出队后 Transition、B-2 回归用例在旧代码上也绿。已修：Transition 成功才出队、B2 用例改为闸门刚空闲时 Submit、pending 先置位再 Ask、Submit 重读 Status、queueKey 归一、展示层 OR pending、pump 补 Depth==0；新增 2 条回归。全量绿（42s）。"
+      "reviewNote": "初审 change_requested（task-q77rzcjp，对象 c1bcaf7）。B1 闸门读 UI 状态点 bs.running：子 agent AgentEnd 清零 → 根 run 在跑却判空闲；takeBatch→AgentStart 窗口同样误判。B2 积压时 Submit 返回队首（别人的账本条目）→ session_send 把错 task_id 交给模型。B3 Pump 先出队再 Transition：失败丢任务、账本仍 queued、永不派发。修复（0d6ec02）：running 只由根 AgentStart/End 翻转 + hubDispatchPending 覆盖派发窗口；Submit 只认自己的 id；Transition 成功后才出队；N1 目标 ErrNotFound → 队首 canceled；N6 队列不可用发 hub_alert；N7 queued 语义写进工具描述。回归：B1 两条、B2、B3、M5（AgentEnd→pump 接线）、N1 各一条。未处理（非阻塞）：Queue 模式丢弃模型给的 client_msg_id（N3）、emit 内同步 pump 代价（N5）、ctx/超时（N8）、重启 queued 可视化归 P2-08。验证：agenthub + desktop/bridge 全量绿（40s）。 第二轮复审（task-qy9g79ws）：B1/B2/B3 运行时验证为真修好，但 B-1 ErrNotFound 分支又先出队后 Transition、B-2 回归用例在旧代码上也绿。已修：Transition 成功才出队、B2 用例改为闸门刚空闲时 Submit、pending 先置位再 Ask、Submit 重读 Status、queueKey 归一、展示层 OR pending、pump 补 Depth==0；新增 2 条回归。全量绿（42s）。",
+      "reviewBatch": "A-running"
     },
     "P2-04": {
       "status": "review",
       "commit": "b7548d5 + 2f1578d",
       "review": "re-review_pending",
-      "reviewNote": "实现：agenthub.TaskHeader（只带 task_id/root/origin/callback，不含 instruction）+ Encode/Parse；DispatchReq.TaskHeader → hubDispatchMessage 构造 [hub_task, text] 两块；Queue 派发自动带 header。emit 的 UserInputsConsumed 分支只认 batch 开口（Injected 不算新任务），从 UserContents 解析 hub_task → bs.hubTaskIDs。根 AgentEnd（ParentRunId==\"\" && Depth==0）在 logEventLine 之后结算：completed / failed / interrupted（canceled/aborted）；结果含摘要（4000 rune）、usage（CostPriced 区分未知与免费）、artifacts；同批多个 hub_task → 第一个结算，其余 failed(batch_conflict)+hub_alert。view_reducer 跳过 hub_task 块：用户气泡只见正文（实时与恢复同一条 reducer 路径）。测试：header 往返/坏 JSON/不泄漏 instruction；结算 completed/failed/interrupted/批冲突；hubDispatchMessage 顺序；reducer 不泄漏 header。验证：go build ./...、agenthub、desktop/bridge 全量绿（67s）。 复审（task-bpcx9uh7）：4 blocking —— CostPriced 恒 false（Cost.Add 丢 Priced）、abort→completed、Injected/bad header 静默丢任务、artifacts 未映射（后由 f016fd1 补上）。已修（2f1578d）：Cost.Add 保留有价性、FinishReasonAbort→interrupted/MaxIterations→failed、注入→failed+告警、坏 header 告警、Dispatch 校验 header；补 abort/注入/artifacts/Usage.Add 测试。"
+      "reviewNote": "实现：agenthub.TaskHeader（只带 task_id/root/origin/callback，不含 instruction）+ Encode/Parse；DispatchReq.TaskHeader → hubDispatchMessage 构造 [hub_task, text] 两块；Queue 派发自动带 header。emit 的 UserInputsConsumed 分支只认 batch 开口（Injected 不算新任务），从 UserContents 解析 hub_task → bs.hubTaskIDs。根 AgentEnd（ParentRunId==\"\" && Depth==0）在 logEventLine 之后结算：completed / failed / interrupted（canceled/aborted）；结果含摘要（4000 rune）、usage（CostPriced 区分未知与免费）、artifacts；同批多个 hub_task → 第一个结算，其余 failed(batch_conflict)+hub_alert。view_reducer 跳过 hub_task 块：用户气泡只见正文（实时与恢复同一条 reducer 路径）。测试：header 往返/坏 JSON/不泄漏 instruction；结算 completed/failed/interrupted/批冲突；hubDispatchMessage 顺序；reducer 不泄漏 header。验证：go build ./...、agenthub、desktop/bridge 全量绿（67s）。 复审（task-bpcx9uh7）：4 blocking —— CostPriced 恒 false（Cost.Add 丢 Priced）、abort→completed、Injected/bad header 静默丢任务、artifacts 未映射（后由 f016fd1 补上）。已修（2f1578d）：Cost.Add 保留有价性、FinishReasonAbort→interrupted/MaxIterations→failed、注入→failed+告警、坏 header 告警、Dispatch 校验 header；补 abort/注入/artifacts/Usage.Add 测试。",
+      "reviewBatch": "B"
     },
     "P2-05": {
       "status": "review",
       "commit": "f016fd1 + 2f1578d",
       "review": "re-review_pending",
-      "reviewNote": "实现：结算后 ① 产物 core.Artifact → TaskResult.Artifacts；② emit hub_task_update；③ 回推发起智能体 DM 会话：Session.PushTaskResultUsage 入队 task_result 消息（模型续跑）+ TaskResultDelivered 事件（卡片终态收敛），usage 带 CostPriced/CostUSD；④ 成功后 Ledger.MarkNotified（status→delivered + notified_run_ids），alreadyNotified 先判保证同一 run 重复 AgentEnd/事件重放不重复回推；回推失败发 hub_alert(push_failed) 且不标 notified（P2-08 可重推）。测试：失败/中断/批冲突、回推成功（ledger delivered、artifacts、task_result_delivered 事件）、同 run 两次只推一次。延期：系统动作行（Message.kind=system + refs.action）归 P2-06 前端；群/人工来源回推归 P3。验证：go build ./...、agenthub、desktop/bridge 全量绿（56s）。 复审（task-jcrsq6ks）：B1 幂等非原子（并发双推/重放撞状态机假告警）、B2 真实中断被 completed、B3 delivered 快照缺失、B4 事件线形状不符。已修（2f1578d）：hubFinishMu 串行 + 已通知同 run 静默返回；abort 映射；MarkNotified 后重发 delivered 快照；hub_task_update 摊平 task_id/status 等。"
+      "reviewNote": "实现：结算后 ① 产物 core.Artifact → TaskResult.Artifacts；② emit hub_task_update；③ 回推发起智能体 DM 会话：Session.PushTaskResultUsage 入队 task_result 消息（模型续跑）+ TaskResultDelivered 事件（卡片终态收敛），usage 带 CostPriced/CostUSD；④ 成功后 Ledger.MarkNotified（status→delivered + notified_run_ids），alreadyNotified 先判保证同一 run 重复 AgentEnd/事件重放不重复回推；回推失败发 hub_alert(push_failed) 且不标 notified（P2-08 可重推）。测试：失败/中断/批冲突、回推成功（ledger delivered、artifacts、task_result_delivered 事件）、同 run 两次只推一次。延期：系统动作行（Message.kind=system + refs.action）归 P2-06 前端；群/人工来源回推归 P3。验证：go build ./...、agenthub、desktop/bridge 全量绿（56s）。 复审（task-jcrsq6ks）：B1 幂等非原子（并发双推/重放撞状态机假告警）、B2 真实中断被 completed、B3 delivered 快照缺失、B4 事件线形状不符。已修（2f1578d）：hubFinishMu 串行 + 已通知同 run 静默返回；abort 映射；MarkNotified 后重发 delivered 快照；hub_task_update 摊平 task_id/status 等。",
+      "reviewBatch": "B"
     },
     "P2-06": {
       "status": "review",
       "commit": "2a755f9 feat(hub-p2-06): 任务板 + Needs you + Chat|Run + 会话信息",
       "review": "pending",
-      "reviewNote": "实现：hub_task_list/get/cancel/retry、hub_need_list/resolve、hub_clear；审批/提问事件落 need（锚=调用 id/批次 id），根 run 结束异步 expired；前端 HubInspector（任务板筛选/详情/取消/重试/空态、Needs you 批准/拒绝/回答/已读、会话 tab 运行态/用量/导出/清空）、Chat|Run 切换（Run 收 tool_run_*/compress_*）、系统动作行（refs.action + 压缩回执）、左栏徽标。测试边界：Go 侧 TestHubTaskBoardLifecycle（列表/详情/取消/重试链/hub_clear）与 TestHubNeedFromEventsAndResolve（事件→need→幂等→过期→resolve 幂等）；前端 tsc/eslint(src)/vite build 通过。未完成/延期：① 全工具+MCP 开关与 provider→model 两级下拉（P1-09 延期项）未做；② 记忆注入预览/清除已有 P1-09 记忆面板，未在本轮加预览；③ 浏览器实测未做（无 bridge 的 mock 不覆盖 hub_*；留 P2-09 真机）；④ 仓库级 npm run lint 在干净检出有既有错误（lab/test-runtime-turns.ts 不在 tsconfig），npm run test:todos-scope 的 e2e/ 被 .gitignore 忽略 —— 均非本提交引入。"
+      "reviewNote": "实现：hub_task_list/get/cancel/retry、hub_need_list/resolve、hub_clear；审批/提问事件落 need（锚=调用 id/批次 id），根 run 结束异步 expired；前端 HubInspector（任务板筛选/详情/取消/重试/空态、Needs you 批准/拒绝/回答/已读、会话 tab 运行态/用量/导出/清空）、Chat|Run 切换（Run 收 tool_run_*/compress_*）、系统动作行（refs.action + 压缩回执）、左栏徽标。测试边界：Go 侧 TestHubTaskBoardLifecycle（列表/详情/取消/重试链/hub_clear）与 TestHubNeedFromEventsAndResolve（事件→need→幂等→过期→resolve 幂等）；前端 tsc/eslint(src)/vite build 通过。未完成/延期：① 全工具+MCP 开关与 provider→model 两级下拉（P1-09 延期项）未做；② 记忆注入预览/清除已有 P1-09 记忆面板，未在本轮加预览；③ 浏览器实测未做（无 bridge 的 mock 不覆盖 hub_*；留 P2-09 真机）；④ 仓库级 npm run lint 在干净检出有既有错误（lab/test-runtime-turns.ts 不在 tsconfig），npm run test:todos-scope 的 e2e/ 被 .gitignore 忽略 —— 均非本提交引入。",
+      "reviewBatch": "C"
     },
     "P2-07": {
       "status": "review",
       "commit": "ad43330 feat(hub-p2-07): 预算/并发/去重/链长护栏 + 熔断可见",
       "review": "pending",
-      "reviewNote": "实现：agenthub.Guard 建账前校验①链长>6 ②同(origin,target,instruction) 10 分钟重复 ③同发起者在途≥3 ④智能体/群/全局日预算（UTC 日、只累加 CostPriced=true）。Queue.CheckGuard + WorkspaceService.Guard 接入 buildHubEngine（profile.policy）。拒绝时 session_send 发 hub_alert（blocked_budget/concurrency_limit/duplicate_task/chain_too_deep）。单任务预算结算时判：超限落 blocked_budget（新增 Running→blocked_budget 迁移 + Finish 允许）并告警；CostPriced=false 不判。测试：TestGuard* 5 条 + 生产链路 hub_alert + 结算 blocked_budget。未接线：群/全局预算来自 hub.json defaults（P3 群组装配时接）。验证：agenthub + desktop/bridge 全量绿（41s）。"
+      "reviewNote": "实现：agenthub.Guard 建账前校验①链长>6 ②同(origin,target,instruction) 10 分钟重复 ③同发起者在途≥3 ④智能体/群/全局日预算（UTC 日、只累加 CostPriced=true）。Queue.CheckGuard + WorkspaceService.Guard 接入 buildHubEngine（profile.policy）。拒绝时 session_send 发 hub_alert（blocked_budget/concurrency_limit/duplicate_task/chain_too_deep）。单任务预算结算时判：超限落 blocked_budget（新增 Running→blocked_budget 迁移 + Finish 允许）并告警；CostPriced=false 不判。测试：TestGuard* 5 条 + 生产链路 hub_alert + 结算 blocked_budget。未接线：群/全局预算来自 hub.json defaults（P3 群组装配时接）。验证：agenthub + desktop/bridge 全量绿（41s）。",
+      "reviewBatch": "C"
     },
     "P2-08": {
       "status": "review",
       "commit": "fcbe73c feat(hub-p2-08): 崩溃恢复（queued 重入队 / 无 run 中断 / 未回推重推）",
       "review": "pending",
-      "reviewNote": "实现：hub_open 首次 ensureHubRecovery（进程内一次）。queued → Queue.Restore 放回 FIFO（重复恢复不重复入队）；dispatched/running 且 Dispatch.RunID 空 → interrupted + hub_alert + Needs you(failure) + 回推；completed/failed/interrupted 未 notified → 用账本结果合成 AgentEnd 重推，MarkNotified 幂等；不自动重试（避免副作用双执行）。测试：3 条 HubRecovery（含「第二次恢复 task_result_delivered 只一次」）。边界：queued 重入队后要等下一次闸门（会话被打开/AgentEnd）；启动时不主动装配工作区（避免打开全部项目）。验证：agenthub + desktop/bridge 全量绿（41s）。"
+      "reviewNote": "实现：hub_open 首次 ensureHubRecovery（进程内一次）。queued → Queue.Restore 放回 FIFO（重复恢复不重复入队）；dispatched/running 且 Dispatch.RunID 空 → interrupted + hub_alert + Needs you(failure) + 回推；completed/failed/interrupted 未 notified → 用账本结果合成 AgentEnd 重推，MarkNotified 幂等；不自动重试（避免副作用双执行）。测试：3 条 HubRecovery（含「第二次恢复 task_result_delivered 只一次」）。边界：queued 重入队后要等下一次闸门（会话被打开/AgentEnd）；启动时不主动装配工作区（避免打开全部项目）。验证：agenthub + desktop/bridge 全量绿（41s）。",
+      "reviewBatch": "D"
     },
     "P2-09": {
       "status": "review",
       "commit": "31c445e test(hub-p2-09): 评测 4–6（一句话派任务/人工介入/重启可解释）",
       "review": "pending",
-      "reviewNote": "实现评测 4–6（desktop/bridge/hub_eval_p2_test.go）：Eval4 workspace_create→session_create→session_send 全链路，目标任务真跑一轮，账本 completed→delivered、发起者收到 task_result；Eval5 排队任务被人取消后不自动执行/不自动重试；Eval6 无 run 的 dispatched 恢复为 interrupted + recovered_interrupted + Needs you(重启说明)。验证：TestEval1-6 全绿（6.3s）、desktop/bridge 全量绿（41s）。待办：P2 阶段整体 Review（P2-01..P2-08）+ 逐任务复审结论落看板后，P2-09 才能 passed。"
+      "reviewNote": "实现评测 4–6（desktop/bridge/hub_eval_p2_test.go）：Eval4 workspace_create→session_create→session_send 全链路，目标任务真跑一轮，账本 completed→delivered、发起者收到 task_result；Eval5 排队任务被人取消后不自动执行/不自动重试；Eval6 无 run 的 dispatched 恢复为 interrupted + recovered_interrupted + Needs you(重启说明)。验证：TestEval1-6 全绿（6.3s）、desktop/bridge 全量绿（41s）。待办：P2 阶段整体 Review（P2-01..P2-08）+ 逐任务复审结论落看板后，P2-09 才能 passed。",
+      "reviewBatch": "E-last"
     },
     "P3a-01": {
       "status": "review",
       "commit": "feat(hub-p3a-01): 群组 CRUD + 成员/角色/策略",
       "review": "pending",
-      "reviewNote": "实现 hub_group_list/get/create/update/delete + member_add/remove；成员上限 12、角色校验、owner 转让成对改写、软删、默认 ask、群名唯一、删除智能体不能入群。测试 TestHubGroupCRUDAndRoles / TestHubGroupRejectsDeletedMember；agenthub -run Group 与 bridge 全量绿（59s）。"
+      "reviewNote": "实现 hub_group_list/get/create/update/delete + member_add/remove；成员上限 12、角色校验、owner 转让成对改写、软删、默认 ask、群名唯一、删除智能体不能入群。测试 TestHubGroupCRUDAndRoles / TestHubGroupRejectsDeletedMember；agenthub -run Group 与 bridge 全量绿（59s）。",
+      "reviewBatch": "F"
     },
     "P3a-02": {
       "status": "review",
       "commit": "bdb3660 feat(hub-p3a-02): 群日志/活动/确定性汇总/seq 恢复",
       "review": "pending",
-      "reviewNote": "BuildRoundSummary（乱序输入同输出）、BuildDigest（确定性/rune 截断）、AppendGroupMessage/ReadGroupLog（群存在校验+分页）、ReadGroupActivity（独立流）；hub_group_history/activity 命令。测试：seq 连续/重开重建、分页、删除群拒绝、活动不占 seq、残行容忍（残行不占 seq）、并发 seq 唯一、汇总确定、digest、回执落日志。agenthub GroupLog/Group/Build 全绿。"
+      "reviewNote": "BuildRoundSummary（乱序输入同输出）、BuildDigest（确定性/rune 截断）、AppendGroupMessage/ReadGroupLog（群存在校验+分页）、ReadGroupActivity（独立流）；hub_group_history/activity 命令。测试：seq 连续/重开重建、分页、删除群拒绝、活动不占 seq、残行容忍（残行不占 seq）、并发 seq 唯一、汇总确定、digest、回执落日志。agenthub GroupLog/Group/Build 全绿。",
+      "reviewBatch": "F"
     },
     "P3a-03": {
       "status": "review",
       "commit": "3f437de feat(hub-p3a-03): @ 路由 + round 快照 + 确定性回执",
       "review": "pending",
-      "reviewNote": "Router：无 @ 不唤醒；@all 仅 owner/人类（member 拒绝不降级）；显式 @ 忽略自己；未知只警告；MaxMentions 丢弃计数；@all 目标按 JoinedAt/ID 确定性；Round 冻结 trigger_seq/targets；Receipt→Activity(routing) 落盘。测试 4 条全绿。"
+      "reviewNote": "Router：无 @ 不唤醒；@all 仅 owner/人类（member 拒绝不降级）；显式 @ 忽略自己；未知只警告；MaxMentions 丢弃计数；@all 目标按 JoinedAt/ID 确定性；Round 冻结 trigger_seq/targets；Receipt→Activity(routing) 落盘。测试 4 条全绿。",
+      "reviewBatch": "F"
     },
     "P3a-04": {
       "status": "review",
       "commit": "93eb91f feat(hub-p3a-04 部分): 群上下文快照",
       "review": "pending",
-      "reviewNote": "BuildGroupSnapshot：delta（游标后）、冻结本轮（seq>trigger）、跳过 round_summary/空白、40 条/12000 rune 折叠、确定性文本、@命中/旁听标注。测试 3 条。**部分完成**：群智能体会话装配（每群一会话/事件流）未做，顺延 P3a-05+。"
+      "reviewNote": "BuildGroupSnapshot：delta（游标后）、冻结本轮（seq>trigger）、跳过 round_summary/空白、40 条/12000 rune 折叠、确定性文本、@命中/旁听标注。测试 3 条。**部分完成**：群智能体会话装配（每群一会话/事件流）未做，顺延 P3a-05+。",
+      "reviewBatch": "G-after-scope"
     },
     "P3a-06": {
       "status": "review",
       "commit": "feat(hub-p3a-06 部分): handoff 护栏 + ack 状态机",
       "review": "pending",
-      "reviewNote": "CheckHandoff：深度>=3 拒绝、同对 10 分钟>=2 拒绝、observer 禁止、self 禁止；Handoff.Ack pending_ack→accepted/declined 幂等。测试 3 条全绿。**部分完成**：交接卡/Needs you 落盘、事件与 UI 路由未做（P3a-08/P3b）。"
+      "reviewNote": "CheckHandoff：深度>=3 拒绝、同对 10 分钟>=2 拒绝、observer 禁止、self 禁止；Handoff.Ack pending_ack→accepted/declined 幂等。测试 3 条全绿。**部分完成**：交接卡/Needs you 落盘、事件与 UI 路由未做（P3a-08/P3b）。",
+      "reviewBatch": "G-after-scope"
     },
     "P3a-07": {
       "status": "review",
       "commit": "feat(hub-p3a-07 部分): 产物版本/可见性 + 审批占位不进上下文",
       "review": "pending",
-      "reviewNote": "NextArtifactVersion 按(owner,name)大小写不敏感递增；ValidateArtifactPath 拒绝绝对/..；ArtifactVisibleTo 与 FileStore.ListArtifacts；快照跳过 approval_stub/routing/round_summary 且 owner-only fail-closed。测试 4 条。**部分完成**：审批正文私有落盘 needs/<id>.json 与 30 分钟超时复用 P2-06 need（P3b 补 handoff need）。"
+      "reviewNote": "NextArtifactVersion 按(owner,name)大小写不敏感递增；ValidateArtifactPath 拒绝绝对/..；ArtifactVisibleTo 与 FileStore.ListArtifacts；快照跳过 approval_stub/routing/round_summary 且 owner-only fail-closed。测试 4 条。**部分完成**：审批正文私有落盘 needs/<id>.json 与 30 分钟超时复用 P2-06 need（P3b 补 handoff need）。",
+      "reviewBatch": "G-after-scope"
     },
     "P3a-05": {
       "status": "review",
       "commit": "feat(hub-p3a-05): group_history/group_members/group_say 工具",
       "review": "pending",
-      "reviewNote": "group_history（分页/搜索/owner-only redacted/成员校验）、group_members（角色/存在性）、group_say（observer 禁止、落日志、严格 @ 路由、回执、事件）。测试 TestHubGroupTools。**未完成**：群会话唤醒与轮次预算（P3b）。"
+      "reviewNote": "group_history（分页/搜索/owner-only redacted/成员校验）、group_members（角色/存在性）、group_say（observer 禁止、落日志、严格 @ 路由、回执、事件）。测试 TestHubGroupTools。**未完成**：群会话唤醒与轮次预算（P3b）。",
+      "reviewBatch": "G-after-scope"
     },
     "P3a-08": {
       "status": "review",
       "commit": "feat(hub-p3a-08 部分): 群组视图",
       "review": "pending",
-      "reviewNote": "Rail 智能体/群组 tab；GroupView 群头成员叠图、群日志时间线、路由回执动作行、审批占位、Chat|Run（活动流）、hub_group_send 发言；store 接线 group 事件。tsc/eslint(src)/vite build 通过。**部分完成**：智能体群回复与同轮合并依赖 P3b 群会话，三主题/群态 Inspector 未做。"
+      "reviewNote": "Rail 智能体/群组 tab；GroupView 群头成员叠图、群日志时间线、路由回执动作行、审批占位、Chat|Run（活动流）、hub_group_send 发言；store 接线 group 事件。tsc/eslint(src)/vite build 通过。**部分完成**：智能体群回复与同轮合并依赖 P3b 群会话，三主题/群态 Inspector 未做。",
+      "reviewBatch": "G-after-scope"
     }
+  },
+  "reviewGate": {
+    "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。",
+    "audit": {
+      "done_passed": 19,
+      "in_review": 17,
+      "not_started": 15,
+      "in_review_breakdown": {
+        "re_review_pending": 5,
+        "initial_pending": 12
+      }
+    },
+    "batches": [
+      {
+        "id": "A",
+        "state": "running",
+        "tasks": [
+          "P1-10",
+          "P2-02",
+          "P2-03"
+        ],
+        "note": "对象 196c508 / 67e9cd4 / bca7a42；干净副本；含变异测试"
+      },
+      {
+        "id": "B",
+        "state": "queued",
+        "tasks": [
+          "P2-04",
+          "P2-05"
+        ],
+        "note": "对象 2f1578d；分两个 scope（相关性/结算 vs 回推/幂等）"
+      },
+      {
+        "id": "C",
+        "state": "queued",
+        "tasks": [
+          "P2-06",
+          "P2-07"
+        ]
+      },
+      {
+        "id": "D",
+        "state": "queued",
+        "tasks": [
+          "P2-08"
+        ]
+      },
+      {
+        "id": "E",
+        "state": "blocked",
+        "tasks": [
+          "P2-09"
+        ],
+        "note": "依赖 P2-01..P2-08 全部 passed"
+      },
+      {
+        "id": "F",
+        "state": "queued",
+        "tasks": [
+          "P3a-01",
+          "P3a-02",
+          "P3a-03"
+        ]
+      },
+      {
+        "id": "G",
+        "state": "blocked",
+        "tasks": [
+          "P3a-04",
+          "P3a-05",
+          "P3a-06",
+          "P3a-07",
+          "P3a-08"
+        ],
+        "note": "当前为部分实现；必须先补完验收项或显式拆出后续任务，再评审。"
+      }
+    ],
+    "rules": [
+      "A→B→C→D→E 串行分批，每批最多 2–3 个并行，避免上游 429。",
+      "任何 Review 返回 change_requested：只修 blocking，修完定向复审，不加新功能。",
+      "每次结论到达立即写 tasks.json progress（review/reviewNote/reviewBatch）+ sync_progress.py + commit。",
+      "P3a-04..08 的剩余 scope 在 G 批之前落成显式任务，不允许用“部分完成”冒充 passed。"
+    ]
   }
 };
 const STORE_KEY = 'hai-agent-hub-progress-v1';
