@@ -388,7 +388,8 @@ type hubAlertEvent struct {
 func hubAlertSeverity(code string) string {
 	switch code {
 	case "recovery_failed", "blocked_budget", "push_failed", "settle_failed",
-		"artifact_register_failed", "batch_conflict", "notify_failed", "injected_conflict":
+		"artifact_register_failed", "batch_conflict", "notify_failed", "injected_conflict",
+		"bad_header":
 		return "error"
 	case "usage_unpriced", "recovered_interrupted", "queue_unavailable",
 		"dispatch_denied", "concurrency_limit", "duplicate_task", "chain_too_deep",

@@ -8,6 +8,37 @@ export function alertKey(code: string, taskID?: string, message?: string): strin
   return `${code}:${taskID ?? ''}:${message ?? ''}`
 }
 
+/** hub_alert 事件的最小形状（store 只消费这些字段）。 */
+export interface HubAlertEventLike {
+  scope?: string
+  code?: string
+  kind?: string
+  severity?: string
+  task_id?: string
+  agent_id?: string
+  group_id?: string
+  message?: unknown
+  at?: string
+}
+
+/** 事件 → 告警对象；id 刻意不含 at，保证重放/重复告警可合并。 */
+export function alertFromEvent(ev: HubAlertEventLike): HubAlert {
+  const code = ev.code || ev.kind || 'hub_alert'
+  const message = typeof ev.message === 'string' ? ev.message : undefined
+  return {
+    id: alertKey(code, ev.task_id, message),
+    scope: ev.scope,
+    code,
+    kind: ev.kind,
+    severity: ev.severity,
+    task_id: ev.task_id,
+    agent_id: ev.agent_id,
+    group_id: ev.group_id,
+    message,
+    at: ev.at,
+  }
+}
+
 export function addHubAlert(list: HubAlert[], alert: HubAlert, max = 20): HubAlert[] {
   if (list.some((a) => a.id === alert.id)) return list
   return [alert, ...list].slice(0, max)

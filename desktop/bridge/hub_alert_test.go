@@ -2,7 +2,12 @@ package main
 
 // P2.5-05 复审 B2：hub_alert 单一出口的 envelope 完整性。
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestHubAlertEnvelopeUnified(t *testing.T) {
 	m, buf := testManager(t)
@@ -45,12 +50,34 @@ func TestHubAlertEnvelopeUnified(t *testing.T) {
 func TestHubAlertSeverityMapping(t *testing.T) {
 	cases := map[string]string{
 		"recovery_failed": "error", "blocked_budget": "error", "settle_failed": "error",
-		"batch_conflict": "error", "usage_unpriced": "warning", "recovered_interrupted": "warning",
+		"batch_conflict": "error", "bad_header": "error",
+		"usage_unpriced": "warning", "recovered_interrupted": "warning",
 		"hub_background_timeout": "warning", "never_seen": "warning",
 	}
 	for code, want := range cases {
 		if got := hubAlertSeverity(code); got != want {
 			t.Errorf("severity(%s) = %s, want %s", code, got, want)
+		}
+	}
+}
+
+// P2.5-05 B2 静态守卫：hub_alert 字面量只允许出现在 emitHubAlert 一个出口。
+// 否则新增生产点很容易裸写 writeLine，丢掉 scope/severity（变异 M2 存活）。
+func TestHubAlertLiteralHasSingleWriter(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), `"event_type": "hub_alert"`) && name != "hub_task_finish.go" {
+			t.Fatalf("hub_alert envelope written outside emitHubAlert: %s", name)
 		}
 	}
 }

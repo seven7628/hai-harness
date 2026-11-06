@@ -52,6 +52,7 @@ export default function HubSurface() {
   const needs = useHubStore((s) => s.needs)
   const alerts = useHubStore((s) => s.alerts)
   const dismissAlert = useHubStore((s) => s.dismissAlert)
+  const retryTask = useHubStore((s) => s.retryTask)
   const groups = useHubStore((s) => s.groups)
   const groupsLoading = useHubStore((s) => s.groupsLoading)
   const activeGroupId = useHubStore((s) => s.activeGroupId)
@@ -141,8 +142,12 @@ export default function HubSurface() {
                   <span className="hub-alert-dot" title={a.severity ?? 'warning'} />
                   <span className="hub-alert-text" title={a.message}>{a.message || a.code}</span>
                   {a.task_id ? <span className="hub-sub">{a.task_id}</span> : null}
-                  {a.code === 'recovery_failed' && agentID ? (
-                    <button className="hub-link" onClick={() => void select(agentID)}>重试</button>
+                  {a.code === 'recovery_failed' ? (
+                    a.task_id ? (
+                      <button className="hub-link" onClick={() => void retryTask(a.task_id!)}>重试</button>
+                    ) : agentID ? (
+                      <button className="hub-link" onClick={() => void select(agentID)}>重试</button>
+                    ) : null
                   ) : null}
                   <button className="hub-link" onClick={() => dismissAlert(a.id)} aria-label="忽略告警">×</button>
                 </div>

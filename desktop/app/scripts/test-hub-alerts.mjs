@@ -20,6 +20,12 @@ const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
 const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); ok(m) }
 
 assert(mod.alertKey('blocked_budget', 'task_a', '预算到顶') === mod.alertKey('blocked_budget', 'task_a', '预算到顶'), '同 code/task/message 幂等')
+await new Promise((r) => setTimeout(r, 5))
+assert(mod.alertKey('blocked_budget', 'task_a', '预算到顶') === mod.alertKey('blocked_budget', 'task_a', '预算到顶'), '跨毫秒仍幂等（key 不含时钟）')
+const evA = { code: 'notify_failed', task_id: 'task_a', message: 'x', at: '2026-01-01T00:00:00Z' }
+const evB = { ...evA, at: '2026-01-01T00:00:05Z' }
+assert(mod.alertFromEvent(evA).id === mod.alertFromEvent(evB).id, '事件重放（只有 at 不同）仍合并')
+assert(mod.alertFromEvent(evA).id !== mod.alertFromEvent({ ...evA, message: 'y' }).id, 'message 不同不合并')
 assert(mod.alertKey('blocked_budget', 'task_a', 'x') !== mod.alertKey('blocked_budget', 'task_b', 'x'), '不同 task 不合并')
 assert(mod.alertKey('notify_failed', 'task_a', 'x') === mod.alertKey('notify_failed', 'task_a', 'x'), '重复 notify_failed 合并')
 assert(mod.alertSeverity('error') === 'error' && mod.alertSeverity('info') === 'info', '已知 severity 原样')
