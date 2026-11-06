@@ -144,6 +144,13 @@ func (l *Ledger) FindByClientMsgID(ctx context.Context, target TaskTarget, clien
 	}
 	target.Workspace = filepath.Clean(strings.TrimSpace(target.Workspace))
 	target.SessionID = strings.TrimSpace(target.SessionID)
+	// P2.5-02：Store 有内存索引时走索引；未实现的替身仍回退全盘扫描。
+	if idx, ok := l.store.(TaskIndex); ok {
+		if t, found := idx.FindByClientMsgID(target, clientMsgID); found {
+			return t, nil
+		}
+		return nil, nil
+	}
 	all, err := l.store.ListTasks(ctx, TaskFilter{})
 	if err != nil {
 		return nil, err

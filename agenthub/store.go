@@ -119,6 +119,7 @@ type FileStore struct {
 	taskSeq  map[TaskID]int64
 	reserved map[string]struct{}
 	idGen    func(prefix string) string
+	taskIdx  *taskIndex
 }
 
 // OpenFileStore 打开/创建 root，校验 schema，并从日志重建 seq。
@@ -167,6 +168,7 @@ func OpenFileStore(root string) (*FileStore, error) {
 		taskSeq:  make(map[TaskID]int64),
 		reserved: make(map[string]struct{}),
 		idGen:    NewID,
+		taskIdx:  newTaskIndex(),
 	}
 	if err := fs.rebuildIndex(); err != nil {
 		return nil, err
@@ -259,6 +261,24 @@ func (s *FileStore) rebuildIndex() error {
 		}
 		s.taskSeq[tid] = max
 	}
+
+	// P2.5-02：任务快照进内存索引。启动时只读一次，之后 SaveTask 增量维护。
+	taskMatches, err := filepath.Glob(filepath.Join(s.root, "tasks", "*", "task.json"))
+	if err != nil {
+		return err
+	}
+	tasks := make([]*Task, 0, len(taskMatches))
+	for _, path := range taskMatches {
+		var t Task
+		if err := readJSON(path, &t); err != nil {
+			return err
+		}
+		tasks = append(tasks, &t)
+	}
+	if s.taskIdx == nil {
+		s.taskIdx = newTaskIndex()
+	}
+	s.taskIdx.reset(tasks)
 	return nil
 }
 
@@ -685,7 +705,13 @@ func (s *FileStore) SaveTask(ctx context.Context, t *Task) error {
 	if t == nil || !validID(string(t.ID)) {
 		return fmt.Errorf("%w: task", ErrInvalid)
 	}
-	return writeJSONAtomic(s.taskPath(t.ID), t)
+	if err := writeJSONAtomic(s.taskPath(t.ID), t); err != nil {
+		return err
+	}
+	if s.taskIdx != nil {
+		s.taskIdx.put(t)
+	}
+	return nil
 }
 
 func (s *FileStore) AppendTaskEvent(ctx context.Context, id TaskID, ev TaskEvent) (int64, error) {
@@ -751,6 +777,35 @@ func (s *FileStore) ListTasks(ctx context.Context, filter TaskFilter) ([]*Task, 
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
 	return out, nil
+}
+
+// TaskIndex 接口实现：全部走内存索引，不读磁盘（P2.5-02）。
+func (s *FileStore) FindByClientMsgID(target TaskTarget, clientMsgID string) (*Task, bool) {
+	if s == nil || s.taskIdx == nil {
+		return nil, false
+	}
+	return s.taskIdx.FindByClientMsgID(target, clientMsgID)
+}
+
+func (s *FileStore) ActiveCount(agent AgentID) int {
+	if s == nil || s.taskIdx == nil {
+		return 0
+	}
+	return s.taskIdx.ActiveCount(agent)
+}
+
+func (s *FileStore) DailyCost(agent AgentID, group GroupID, day time.Time) (agentCost, groupCost, globalCost float64) {
+	if s == nil || s.taskIdx == nil {
+		return 0, 0, 0
+	}
+	return s.taskIdx.DailyCost(agent, group, day)
+}
+
+func (s *FileStore) FindDuplicate(t *Task, since time.Time) (TaskID, bool) {
+	if s == nil || s.taskIdx == nil {
+		return "", false
+	}
+	return s.taskIdx.FindDuplicate(t, since)
 }
 
 func (s *FileStore) LoadNeed(ctx context.Context, id NeedID) (*Need, error) {

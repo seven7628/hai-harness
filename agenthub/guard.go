@@ -75,6 +75,10 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 	if steps := t.ChainSteps(); steps > lim.MaxChainSteps {
 		return fmt.Errorf("%w: 链长 %d > %d（需要你决定是否继续）", ErrChainTooDeep, steps, lim.MaxChainSteps)
 	}
+	// P2.5-02：Store 有内存索引时不读全盘；没有索引的替身继续走 ListTasks。
+	if idx, ok := store.(TaskIndex); ok {
+		return g.checkIndexed(idx, t, lim, now)
+	}
 	all, err := store.ListTasks(ctx, TaskFilter{})
 	if err != nil {
 		return err
@@ -113,6 +117,27 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 	if active >= lim.MaxConcurrent {
 		return fmt.Errorf("%w: 发起者已有 %d 个在途任务（上限 %d）", ErrTooConcurrent, active, lim.MaxConcurrent)
 	}
+	if lim.GlobalDailyBudgetUSD > 0 && globalDay >= lim.GlobalDailyBudgetUSD {
+		return fmt.Errorf("%w: 全局日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.GlobalDailyBudgetUSD, globalDay)
+	}
+	if lim.GroupDailyBudgetUSD > 0 && t.Origin.GroupID != "" && groupDay >= lim.GroupDailyBudgetUSD {
+		return fmt.Errorf("%w: 群日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.GroupDailyBudgetUSD, groupDay)
+	}
+	if lim.DailyBudgetUSD > 0 && agentDay >= lim.DailyBudgetUSD {
+		return fmt.Errorf("%w: 智能体日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.DailyBudgetUSD, agentDay)
+	}
+	return nil
+}
+
+// checkIndexed 是 Check 的索引快路径；错误口径与全盘扫描分支保持一致。
+func (g *Guard) checkIndexed(idx TaskIndex, t *Task, lim GuardLimits, now time.Time) error {
+	if id, ok := idx.FindDuplicate(t, now.Add(-lim.DuplicateWindow)); ok {
+		return fmt.Errorf("%w: 同一任务在 %s 内已派发（task %s）", ErrDuplicateTask, lim.DuplicateWindow, id)
+	}
+	if active := idx.ActiveCount(t.Origin.AgentID); active >= lim.MaxConcurrent {
+		return fmt.Errorf("%w: 发起者已有 %d 个在途任务（上限 %d）", ErrTooConcurrent, active, lim.MaxConcurrent)
+	}
+	agentDay, groupDay, globalDay := idx.DailyCost(t.Origin.AgentID, t.Origin.GroupID, now)
 	if lim.GlobalDailyBudgetUSD > 0 && globalDay >= lim.GlobalDailyBudgetUSD {
 		return fmt.Errorf("%w: 全局日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.GlobalDailyBudgetUSD, globalDay)
 	}

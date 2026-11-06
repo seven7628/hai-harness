@@ -24,11 +24,14 @@ type MemoryStore struct {
 	cursors   map[string]Cursor
 	reserved  map[string]struct{}
 	idGen     func(prefix string) string
+	taskIdx   *taskIndex
 }
 
 var (
-	_ Store = (*FileStore)(nil)
-	_ Store = (*MemoryStore)(nil)
+	_ Store     = (*FileStore)(nil)
+	_ Store     = (*MemoryStore)(nil)
+	_ TaskIndex = (*FileStore)(nil)
+	_ TaskIndex = (*MemoryStore)(nil)
 )
 
 // NewMemoryStore 创建空的内存 Store。
@@ -47,6 +50,7 @@ func NewMemoryStore() *MemoryStore {
 		cursors:   make(map[string]Cursor),
 		reserved:  make(map[string]struct{}),
 		idGen:     NewID,
+		taskIdx:   newTaskIndex(),
 	}
 }
 
@@ -412,6 +416,9 @@ func (s *MemoryStore) SaveTask(ctx context.Context, t *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tasks[t.ID] = cloneTask(t)
+	if s.taskIdx != nil {
+		s.taskIdx.put(t)
+	}
 	return nil
 }
 
@@ -470,6 +477,35 @@ func (s *MemoryStore) ListTasks(ctx context.Context, filter TaskFilter) ([]*Task
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
 	return out, nil
+}
+
+// TaskIndex 接口实现：MemoryStore 与 FileStore 同语义（P2.5-02）。
+func (s *MemoryStore) FindByClientMsgID(target TaskTarget, clientMsgID string) (*Task, bool) {
+	if s == nil || s.taskIdx == nil {
+		return nil, false
+	}
+	return s.taskIdx.FindByClientMsgID(target, clientMsgID)
+}
+
+func (s *MemoryStore) ActiveCount(agent AgentID) int {
+	if s == nil || s.taskIdx == nil {
+		return 0
+	}
+	return s.taskIdx.ActiveCount(agent)
+}
+
+func (s *MemoryStore) DailyCost(agent AgentID, group GroupID, day time.Time) (agentCost, groupCost, globalCost float64) {
+	if s == nil || s.taskIdx == nil {
+		return 0, 0, 0
+	}
+	return s.taskIdx.DailyCost(agent, group, day)
+}
+
+func (s *MemoryStore) FindDuplicate(t *Task, since time.Time) (TaskID, bool) {
+	if s == nil || s.taskIdx == nil {
+		return "", false
+	}
+	return s.taskIdx.FindDuplicate(t, since)
 }
 
 func (s *MemoryStore) LoadNeed(ctx context.Context, id NeedID) (*Need, error) {
