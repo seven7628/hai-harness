@@ -25,6 +25,9 @@ import (
 
 // TaskIndex 是 Store 可选实现的内存查询接口。查询必须是无 IO 的。
 type TaskIndex interface {
+	// TaskIndexReady 为 false 时调用方必须回退 ListTasks（零值 Store 没有索引，
+	// 不能把“查不到”当成“没有”，否则护栏会静默 fail-open）。
+	TaskIndexReady() bool
 	FindByClientMsgID(target TaskTarget, clientMsgID string) (*Task, bool)
 	ActiveCount(agent AgentID) int
 	DailyCost(agent AgentID, group GroupID, day time.Time) (agentCost, groupCost, globalCost float64)
@@ -61,7 +64,7 @@ type groupDayKey struct {
 type taskIndex struct {
 	mu       sync.RWMutex
 	byID     map[TaskID]*Task
-	byClient map[clientTaskKey]TaskID
+	byClient map[clientTaskKey][]TaskID
 	active   map[AgentID]int
 
 	agentDay  map[agentDayKey]float64
@@ -85,7 +88,7 @@ func (x *taskIndex) reset(tasks []*Task) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.byID = map[TaskID]*Task{}
-	x.byClient = map[clientTaskKey]TaskID{}
+	x.byClient = map[clientTaskKey][]TaskID{}
 	x.active = map[AgentID]int{}
 	x.agentDay = map[agentDayKey]float64{}
 	x.groupDay = map[groupDayKey]float64{}
@@ -166,22 +169,23 @@ func (x *taskIndex) updateClientLocked(old, cur *Task) {
 	oldKey, oldOK := clientKeyOf(old)
 	newKey, newOK := clientKeyOf(cur)
 	if oldOK && (!newOK || oldKey != newKey) {
-		if x.byClient[oldKey] == old.ID {
+		// 只摘掉这一条；同一 client key 可能还有别的 attempt（合法重试）。
+		// 不能因为 holder 改键就整条删除 —— 否则 FindByClientMsgID 会对整条
+		// key 失忆，退化成双派发（P2.5-02 复审 B1）。
+		ids := removeTaskID(x.byClient[oldKey], old.ID)
+		if len(ids) == 0 {
 			delete(x.byClient, oldKey)
+		} else {
+			x.byClient[oldKey] = ids
 		}
 	}
 	if !newOK {
 		return
 	}
-	if curID, ok := x.byClient[newKey]; ok {
-		if curID == cur.ID {
-			return
-		}
-		if existing := x.byID[curID]; existing != nil && !newerTask(cur, existing) {
-			return
-		}
+	ids := x.byClient[newKey]
+	if !containsTaskID(ids, cur.ID) {
+		x.byClient[newKey] = append(ids, cur.ID)
 	}
-	x.byClient[newKey] = cur.ID
 }
 
 func (x *taskIndex) updateDedupeLocked(old, cur *Task) {
@@ -213,13 +217,22 @@ func (x *taskIndex) FindByClientMsgID(target TaskTarget, clientMsgID string) (*T
 		ClientMsgID: clientMsgID,
 	}
 	x.mu.RLock()
-	id, ok := x.byClient[key]
-	t := x.byID[id]
+	ids := x.byClient[key]
+	var best *Task
+	for _, id := range ids {
+		t := x.byID[id]
+		if t == nil {
+			continue
+		}
+		if best == nil || newerTask(t, best) {
+			best = t
+		}
+	}
 	x.mu.RUnlock()
-	if !ok || t == nil {
+	if best == nil {
 		return nil, false
 	}
-	return cloneTask(t), true
+	return cloneTask(best), true
 }
 
 func (x *taskIndex) ActiveCount(agent AgentID) int {

@@ -84,7 +84,7 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 		return fmt.Errorf("%w: 链长 %d > %d（需要你决定是否继续）", ErrChainTooDeep, steps, lim.MaxChainSteps)
 	}
 	// P2.5-02：Store 有内存索引时不读全盘；没有索引的替身继续走 ListTasks。
-	if idx, ok := store.(TaskIndex); ok {
+	if idx, ok := store.(TaskIndex); ok && idx.TaskIndexReady() {
 		return g.checkIndexed(idx, t, lim, now)
 	}
 	all, err := store.ListTasks(ctx, TaskFilter{})

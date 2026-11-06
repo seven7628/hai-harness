@@ -480,6 +480,8 @@ func (s *MemoryStore) ListTasks(ctx context.Context, filter TaskFilter) ([]*Task
 }
 
 // TaskIndex 接口实现：MemoryStore 与 FileStore 同语义（P2.5-02）。
+func (s *MemoryStore) TaskIndexReady() bool { return s != nil && s.taskIdx != nil }
+
 func (s *MemoryStore) FindByClientMsgID(target TaskTarget, clientMsgID string) (*Task, bool) {
 	if s == nil || s.taskIdx == nil {
 		return nil, false

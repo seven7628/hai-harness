@@ -855,3 +855,21 @@ func TestFileStoreDropsTrailingLineWithoutNewline(t *testing.T) {
 		t.Fatalf("messages after lost newline append = %v, %v", all, err)
 	}
 }
+
+// P2.5-02 复审 N2：任务快照损坏必须让 OpenFileStore fail-fast（索引重建读全量）。
+func TestOpenFileStoreRejectsCorruptTaskSnapshot(t *testing.T) {
+	root := t.TempDir()
+	if _, err := OpenFileStore(root); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "tasks", "task_badidx")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.json"), []byte(`{"id":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenFileStore(root); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("OpenFileStore(corrupt task) = %v, want ErrCorrupt", err)
+	}
+}

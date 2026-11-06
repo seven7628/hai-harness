@@ -122,7 +122,8 @@ type FileStore struct {
 	taskIdx  *taskIndex
 }
 
-// OpenFileStore 打开/创建 root，校验 schema，并从日志重建 seq。
+// OpenFileStore 打开/创建 root，校验 schema，从日志重建 seq，并重建任务快照索引。
+// 快照损坏会直接返回 ErrCorrupt（fail-fast，不带着半索引运行）。
 func OpenFileStore(root string) (*FileStore, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("%w: empty root", ErrInvalid)
@@ -780,6 +781,8 @@ func (s *FileStore) ListTasks(ctx context.Context, filter TaskFilter) ([]*Task, 
 }
 
 // TaskIndex 接口实现：全部走内存索引，不读磁盘（P2.5-02）。
+func (s *FileStore) TaskIndexReady() bool { return s != nil && s.taskIdx != nil }
+
 func (s *FileStore) FindByClientMsgID(target TaskTarget, clientMsgID string) (*Task, bool) {
 	if s == nil || s.taskIdx == nil {
 		return nil, false

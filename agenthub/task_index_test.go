@@ -163,3 +163,130 @@ func TestGuardUsesTaskIndexWithoutListTasks(t *testing.T) {
 		t.Fatalf("Guard.Check called ListTasks %d times; index fast path not used", st.listCalls)
 	}
 }
+
+// P2.5-02 复审 B1：同一 client key 有多条 attempt，holder 改键后不能整条丢失。
+func TestTaskIndexClientKeySurvivesHolderMove(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryStore()
+	led := NewLedger(st)
+	a, err := led.Create(ctx, indexTestTask("ag_move", "first", "c-move"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := led.Create(ctx, indexTestTask("ag_move", "second", "c-move"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := cloneTask(b)
+	moved.ClientMsgID = ""
+	if err := st.SaveTask(ctx, moved); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := st.FindByClientMsgID(TaskTarget{Kind: TargetWorkspace, Workspace: "/tmp/idx", SessionID: "s1"}, "c-move")
+	if !ok || got == nil || got.ID != a.ID {
+		t.Fatalf("after holder move = %v/%v, want %s", got, ok, a.ID)
+	}
+}
+
+// P2.5-02 复审 N5：成本按 UpdatedAt 的 UTC 日归日，不是按“现在”。
+func TestTaskIndexDailyCostUsesUpdatedAt(t *testing.T) {
+	st := NewMemoryStore()
+	now := time.Now().UTC()
+	old := &Task{
+		ID: "task_oldcost", Status: TaskCompleted,
+		Origin:    TaskOrigin{Kind: OriginDM, AgentID: "ag_day"},
+		UpdatedAt: now.Add(-24 * time.Hour),
+		Result:    &TaskResult{Usage: Usage{CostPriced: true, CostUSD: 5}},
+	}
+	today := &Task{
+		ID: "task_todaycost", Status: TaskCompleted,
+		Origin:    TaskOrigin{Kind: OriginDM, AgentID: "ag_day"},
+		UpdatedAt: now,
+		Result:    &TaskResult{Usage: Usage{CostPriced: true, CostUSD: 7}},
+	}
+	if err := st.SaveTask(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveTask(context.Background(), today); err != nil {
+		t.Fatal(err)
+	}
+	if agent, _, _ := st.DailyCost("ag_day", "", now); agent != 7 {
+		t.Fatalf("today cost = %v, want 7 (old day must not count)", agent)
+	}
+}
+
+// P2.5-02 复审 N5：delivered 是终态，不能继续算在途；成本仍保留。
+func TestTaskIndexDeliveredIsTerminal(t *testing.T) {
+	st := NewMemoryStore()
+	ctx := context.Background()
+	task := &Task{
+		ID: "task_delivered", Status: TaskDelivered,
+		Origin:    TaskOrigin{Kind: OriginDM, AgentID: "ag_del"},
+		UpdatedAt: time.Now().UTC(),
+		Result:    &TaskResult{Usage: Usage{CostPriced: true, CostUSD: 3}},
+	}
+	if err := st.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if n := st.ActiveCount("ag_del"); n != 0 {
+		t.Fatalf("delivered active = %d, want 0", n)
+	}
+	if cost, _, _ := st.DailyCost("ag_del", "", time.Now().UTC()); cost != 3 {
+		t.Fatalf("delivered cost = %v, want 3", cost)
+	}
+}
+
+// P2.5-02 复审 N5：dedupe 的 workspace/session 按原样比较（与旧 sameTarget 一致）。
+func TestTaskIndexDedupeDoesNotNormalizeTarget(t *testing.T) {
+	st := NewMemoryStore()
+	now := time.Now().UTC()
+	base := indexTestTask("ag_dedupe", "same", "c-a")
+	base.ID = "task_dedupe_a"
+	base.Target.Workspace = "/w"
+	base.CreatedAt = now
+	base.UpdatedAt = now
+	if err := st.SaveTask(context.Background(), base); err != nil {
+		t.Fatal(err)
+	}
+	probe := indexTestTask("ag_dedupe", "same", "c-b")
+	probe.Target.Workspace = "/w/"
+	if _, ok := st.FindDuplicate(probe, now.Add(-time.Minute)); ok {
+		t.Fatal("/w and /w/ must not be treated as the same dedupe target")
+	}
+}
+
+// P2.5-02 复审 N4：只实现 Store（不实现 TaskIndex）的替身必须回退全盘扫描。
+type fallbackStore struct{ Store }
+
+func TestLedgerAndGuardFallbackWithoutTaskIndex(t *testing.T) {
+	ctx := context.Background()
+	base := NewMemoryStore()
+	fs := &fallbackStore{Store: base}
+	led := NewLedger(fs)
+	created, err := led.Create(ctx, indexTestTask("ag_fallback", "same", "c-fallback"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := led.FindByClientMsgID(ctx, TaskTarget{Kind: TargetWorkspace, Workspace: "/tmp/idx", SessionID: "s1"}, "c-fallback")
+	if err != nil || got == nil || got.ID != created.ID {
+		t.Fatalf("fallback FindByClientMsgID = %v, %v; want %s", got, err, created.ID)
+	}
+	probe := indexTestTask("ag_fallback", "same", "c-other")
+	probe.CreatedAt = time.Now().UTC()
+	guard := &Guard{Now: func() time.Time { return time.Now().UTC() }, Limits: GuardLimits{MaxConcurrent: 10}}
+	if err := guard.Check(ctx, fs, probe); !errors.Is(err, ErrDuplicateTask) {
+		t.Fatalf("fallback Guard err = %v, want ErrDuplicateTask", err)
+	}
+}
+
+// P2.5-02 复审 N3：零值 Store 不能声称自己有空索引（否则 Guard 会静默 fail-open）。
+func TestZeroValueStoreTaskIndexNotReady(t *testing.T) {
+	var fs FileStore
+	var ms MemoryStore
+	if fs.TaskIndexReady() {
+		t.Fatal("zero-value FileStore must not claim TaskIndex")
+	}
+	if ms.TaskIndexReady() {
+		t.Fatal("zero-value MemoryStore must not claim TaskIndex")
+	}
+}
