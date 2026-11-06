@@ -1565,16 +1565,25 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       {items}
       {footer}
       <div className="narrative-anchor" ref={anchorRef} aria-hidden="true" />
+      {/* 「↓ 回到最新」不能占**流内高度**（2026-11 修「底部内容原地上下颤」）。
+          这个按钮原来直接放在流里（position: sticky 并不脱离文档流）：它出现/消失会把
+          scrollHeight 改掉 30px（实测 13056 → 13086）。贴底态下 tick 每帧把 scrollTop
+          钉到 max —— 于是「跟随」一旦在某一帧被误判成 false、下一帧又被恢复，整段内容
+          就会跟着 ±30px 上下弹，而滚动位置一直没变（正是用户描述的那个形态）。
+          外层是零高 sticky 容器（视觉落点与原来一致），按钮 translateY(-100%) 抬到
+          容器上方：出现与否都不再影响内容高度。 */}
       {(away || fresh) && (
-        <button
-          className="narrative-jump"
-          onClick={jumpToBottom}
-          aria-label={t('narrative.backToLatest')}
-          title={fresh ? t('narrative.newArrived') : t('narrative.backToLatest')}
-        >
-          {fresh && <span className="narrative-jump-dot" aria-hidden="true" />}
-          ↓ {fresh ? t('narrative.newOutput') : t('narrative.jumpLatest')}
-        </button>
+        <div className="narrative-jump-wrap">
+          <button
+            className="narrative-jump"
+            onClick={jumpToBottom}
+            aria-label={t('narrative.backToLatest')}
+            title={fresh ? t('narrative.newArrived') : t('narrative.backToLatest')}
+          >
+            {fresh && <span className="narrative-jump-dot" aria-hidden="true" />}
+            ↓ {fresh ? t('narrative.newOutput') : t('narrative.jumpLatest')}
+          </button>
+        </div>
       )}
     </div>
   )

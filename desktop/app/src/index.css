@@ -1655,14 +1655,33 @@ body.is-electron .left.collapsed .rail .rbtn {
   scrollbar-gutter: stable;
 }
 /* 「回到底部」按钮：用户上滑看历史时 sticky 在叙述区底部（离开底部才显示；
-   不影响贴底状态下的布局）。fresh 圆点 = 离开期间有新内容到达。 */
-.narrative-jump {
+   不影响贴底状态下的布局）。fresh 圆点 = 离开期间有新内容到达。
+
+   容器是**零高** sticky：按钮原来直接在流里，出现/消失会改掉 scrollHeight 30px
+   （实测 13056 → 13086）。贴底时 tick 每帧把 scrollTop 钉到 max，于是「跟随」哪怕
+   只有一帧被误判/恢复，整段内容就会 ±30px 上下弹而滚动位置不变（用户 2026-11：
+   「底部内容原地上下颤，滚动位置没变，是高度在变」）。零高容器 + translateY(-100%)
+   保持原来的视觉落点，但不再参与内容高度。 */
+.narrative-jump-wrap {
   position: sticky;
   bottom: 14px;
+  height: 0;
+  display: flex;
+  /* 零高容器里绝不能让子项 stretch（那样按钮被压成 0 高，只剩边框+内边距），
+     也不能用 flex-end（那样它先被抬到容器上方，再被 translateY(-100%) 抬一次，
+     视觉位置偏高 31px）。flex-start + translateY(-100%) = 与改动前同一落点。 */
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 5;
+  pointer-events: none;
+}
+.narrative-jump {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 4px auto 0;
+  margin: 0;
+  transform: translateY(-100%);
+  pointer-events: auto;
   padding: 5px 14px;
   border: 1px solid var(--border-strong);
   border-radius: 999px;

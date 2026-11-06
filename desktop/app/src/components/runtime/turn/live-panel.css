@@ -135,6 +135,11 @@ html[data-skin='runtime'] .cy-live .rt-work-body,
 html[data-skin='runtime'] .rt-workbox .rt-work-body {
   max-height: min(46vh, 520px);
   overflow-y: auto;
+  /* 与 .narrative 同一条：JS 锚定滚动的容器必须关掉浏览器原生 scroll anchoring，
+     否则它在内容变化时自己调 scrollTop，与我们的钉底互相抢跑（表现为底部内容
+     上下抖）。scrollbar-gutter 预留轨道：跨过 46vh 上限那一刻不横向位移 + 重排。 */
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
   /* 不要 contain（用户 2026-10：运行中完全上不去看历史）。
      盒子占了大半屏，滚到它自己顶部之后，wheel 必须能**继续传给**叙述区 ——
      否则用户在这个高度上限里撞墙：外层一动不动、也不出现「↓ 回到最新」。
