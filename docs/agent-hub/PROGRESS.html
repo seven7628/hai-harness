@@ -1536,8 +1536,9 @@ const BASE = {
       "reviewNote": "D5 已拍板：B→A。先提交最小 helper 闭包 + CI push/PR 编译门，再按 agents/provider/tools/subagent/mcp 逐包补全。"
     },
     "P2.5-02": {
-      "status": "todo",
-      "reviewNote": "无产品依赖，可先开工；为 03/04 提供索引。"
+      "status": "review",
+      "commit": "d67903b perf(hub-p2.5-02): 任务索引替代提交路径全盘扫描",
+      "reviewNote": "独立复审中（task-83828jp2）。实现：Store 内存索引 + SaveTask 增量；Ledger.FindByClientMsgID / Guard.Check 走 TaskIndex，未实现替身回退 ListTasks；FileStore Open 重建、MemoryStore 同步维护。验证：go test ./agenthub/ 绿、-race 25s 绿、TestHub 两次绿（一次既有 TempDir cleanup 偶发）。"
     },
     "P2.5-03": {
       "status": "todo",
