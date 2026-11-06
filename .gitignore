@@ -46,7 +46,7 @@ desktop/app/persist-check.js
 brand/boot-preview*
 
 # —— 测试与端到端：前端/E2E 不入版本库 ——
-# Go 测试【已恢复入库，2026-10-02】：此规则来自 918c0ee「初始发布快照」的副产物，
+# Go 测试【部分恢复入库，2026-10-12 起】：此规则来自 918c0ee「初始发布快照」的副产物，
 # 并非评审过的决策 —— 已有 28 个 Go 测试用 git add -f 绕过它入库，项目实际行为早已
 # 否定这条规则。代价是每个新 clone / worktree 都**静默丢失全部 Go 回归网**
 # （实测：codemode worktree 上 `go build` 通过但一个测试都没有）。
@@ -74,6 +74,9 @@ testdata/
 # 例外：MCP 端到端测试的 fixture server（go build 成子进程），mcp 与 desktop/bridge
 # 的 MCP 用例都靠它；同样被 testdata/ 规则误伤过（干净检出里直接 "fixture: exit status 1"）
 !mcp/testdata/
+# 例外：skills 包的合法/损坏 fixture（skill_test.go 与 agents/skills_integration_test.go
+# 依赖；被 testdata/ 规则误伤会让干净检出在真跑时炸）
+!skills/testdata/
 # 真实会话回放基准的夹具（tools/bench/export_real_sessions.py 生成）：
 # 含本机 ~/.go-code/sessions 的真实会话内容（数十 MB、含用户对话与代码），
 # 绝不入库。测试在夹具缺失时 t.Skip，不伪造数字。
