@@ -115,7 +115,7 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	//   - 失败/取消/拒绝/预算阻断 → 允许同 id 重试，挂到原链上开新 attempt（B1）；
 	//   - 其余状态 → 返回原任务，不重复建账/入队。
 	// 锁覆盖「查找 + 建账 + 入队」：并发同 id 不能双建（P2-02 复审 B2）。
-	// 注：账本查找是文件 I/O，放在全局锁内会拖慢所有会话（复审 N5，后续做索引）。
+	// 查找走 Store 的 TaskIndex（P2.5-02），不再读 tasks/*/task.json 全盘。
 	q.mu.Lock()
 	if t.ClientMsgID != "" {
 		existing, ferr := q.ledger.FindByClientMsgID(ctx, t.Target, t.ClientMsgID)
@@ -212,9 +212,12 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 			// 目标会话已删除/关闭：不能让它永远占住队首（后续任务全被堵死）。
 			// 与 B3 同一不变量：Transition 成功后才出队；失败保留队首等存储恢复。
 			id := ids[0]
-			if _, terr := q.ledger.Transition(ctx, id, TaskCanceled, TransitionOptions{
+			settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			_, terr := q.ledger.Transition(settleCtx, id, TaskCanceled, TransitionOptions{
 				At: time.Now().UTC(), Error: "目标会话不存在",
-			}); terr != nil {
+			})
+			cancel()
+			if terr != nil {
 				return nil, terr
 			}
 			q.pending[key] = ids[1:]
@@ -247,9 +250,14 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	})
 	if err != nil {
 		// 已 dispatched 再落 failed：状态机有序，账本里有失败原因可查。
-		if _, ferr := q.ledger.Transition(ctx, id, TaskFailed, TransitionOptions{
+		// 一旦出队，收尾不能被调用方 ctx 取消（否则任务永久停在 dispatched，
+		// 只有下次重启恢复才会被标 interrupted，P2.5-06 复审 N1）。
+		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		_, ferr := q.ledger.Transition(settleCtx, id, TaskFailed, TransitionOptions{
 			At: time.Now().UTC(), Error: "派发失败: " + err.Error(),
-		}); ferr != nil {
+		})
+		cancel()
+		if ferr != nil {
 			return nil, fmt.Errorf("派发失败且无法落账: %v（原错误: %w）", ferr, err)
 		}
 		return nil, err
@@ -257,9 +265,11 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	if res.Message == DispatchDuplicateMessage {
 		// 目标侧按相同 client_msg_id 判重：说明这条没有真正 Ask。不能把
 		// dispatched 当成功返回（静默丢任务，P2-02 复审 N1）；落 canceled 留痕。
-		canceled, cerr := q.ledger.Transition(ctx, id, TaskCanceled, TransitionOptions{
+		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		canceled, cerr := q.ledger.Transition(settleCtx, id, TaskCanceled, TransitionOptions{
 			At: time.Now().UTC(), Error: "目标侧去重命中：同一 client_msg_id 已投递过",
 		})
+		cancel()
 		if cerr != nil {
 			return nil, cerr
 		}

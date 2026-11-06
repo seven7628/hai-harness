@@ -975,6 +975,7 @@ type manager struct {
 	hubBgCtx     context.Context
 	hubBgCancel  context.CancelFunc
 	hubBgWG      sync.WaitGroup
+	hubBgDone    chan struct{}
 	hubBgClosing bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
 	hubMsgDedup map[string]string

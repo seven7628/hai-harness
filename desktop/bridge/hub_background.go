@@ -31,6 +31,22 @@ func (m *manager) hubBackgroundContext() (context.Context, bool) {
 	return m.hubBgCtx, true
 }
 
+// resetHubBackgroundIfClosed 供 closeHubRuntimes 之后新建 hub runtime 时调用：
+// 关闭只应结束旧一代后台任务，不应让同一进程永久失去泵/过期能力（P2.5-06 复审 N2）。
+func (m *manager) resetHubBackgroundIfClosed() {
+	if m == nil {
+		return
+	}
+	m.hubBgMu.Lock()
+	defer m.hubBgMu.Unlock()
+	if !m.hubBgClosing {
+		return
+	}
+	m.hubBgClosing = false
+	m.hubBgCtx, m.hubBgCancel = context.WithCancel(context.Background())
+	m.hubBgDone = nil // 新 generations 新建 waiter；旧 waiter 只等旧任务
+}
+
 func (m *manager) spawnHubBackground(fn func(context.Context)) {
 	if m == nil || fn == nil {
 		return
@@ -69,15 +85,25 @@ func (m *manager) stopHubBackground(timeout time.Duration) bool {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	done := make(chan struct{})
-	go func() {
-		m.hubBgWG.Wait()
-		close(done)
-	}()
+	// 每个 generation 只建一个 waiter：重复 stop 不累积 goroutine（P2.5-06 复审 N4）。
+	m.hubBgMu.Lock()
+	if m.hubBgDone == nil {
+		m.hubBgDone = make(chan struct{})
+		done := m.hubBgDone
+		go func() {
+			m.hubBgWG.Wait()
+			close(done)
+		}()
+	}
+	done := m.hubBgDone
+	m.hubBgMu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-done:
 		return true
-	case <-time.After(timeout):
+	case <-timer.C:
 		return false
 	}
 }

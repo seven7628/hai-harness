@@ -71,6 +71,8 @@ func hubAgentStoreDir(agentID string) string {
 // 配置（~/.go-code/settings.json）、全局插件注册表；目录为本智能体自己的
 // sessions/events。**不做**：项目技能层、项目 MCP 层、插件自动启用、git 检测。
 func (m *manager) hubRuntime(agentID string) *workspaceRuntime {
+	// 关闭后重建 hub runtime：重新开放后台泵/过期（N2）。
+	m.resetHubBackgroundIfClosed()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.hubRuntimes == nil {
@@ -171,17 +173,10 @@ func (m *manager) closeHubRuntimes() {
 		ws.sessions = map[string]*bridgeSession{}
 		ws.mu.Unlock()
 		for _, bs := range items {
-			if bs.ctx != nil && bs.ctx.Err() != nil {
-				continue // 已关闭，避免重复 SessionClosed
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if bs.s != nil {
-				_ = bs.s.Shutdown(ctx)
-			}
-			cancel()
-			if bs.cancel != nil {
-				bs.cancel()
-			}
+			// 复用 stopSession：Shutdown + cancel + drain checkpoint coordinator +
+			// 关事件句柄。只做 Shutdown/cancel 会让异步 commit 在 TempDir 删除后
+			// 又把 record 写回（P2.5-06 复审 N5，TestHub 的 teardown flake）。
+			stopSession(bs)
 			bs.runtime = nil // 不再指向已 Close 的 runtime（rebuildLoop 会按路径兜底）
 		}
 		ws.stopMCPWatch()

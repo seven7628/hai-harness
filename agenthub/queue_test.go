@@ -10,12 +10,13 @@ import (
 )
 
 type queueFakeOps struct {
-	running     bool
-	pending     int
-	dispatched  []DispatchReq
-	dispatchErr error
-	statusErr   error
-	duplicate   bool
+	running      bool
+	pending      int
+	dispatched   []DispatchReq
+	dispatchErr  error
+	statusErr    error
+	duplicate    bool
+	dispatchWait bool
 }
 
 func (f *queueFakeOps) ListWorkspaces(context.Context) ([]WorkspaceInfo, error) { return nil, nil }
@@ -37,7 +38,11 @@ func (f *queueFakeOps) CreateSession(context.Context, CreateSessionReq) (Session
 	return SessionInfo{}, nil
 }
 
-func (f *queueFakeOps) Dispatch(_ context.Context, req DispatchReq) (DispatchResult, error) {
+func (f *queueFakeOps) Dispatch(ctx context.Context, req DispatchReq) (DispatchResult, error) {
+	if f.dispatchWait {
+		<-ctx.Done()
+		return DispatchResult{}, ctx.Err()
+	}
 	if f.dispatchErr != nil {
 		return DispatchResult{}, f.dispatchErr
 	}
@@ -710,5 +715,32 @@ func TestSubmitGuardedReturnsExistingBeforeGuard(t *testing.T) {
 	}
 	if st.saves != before {
 		t.Fatalf("duplicate submit wrote ledger: saves %d -> %d", before, st.saves)
+	}
+}
+
+// P2.5-06 复审 N1：出队后 Dispatch 被 ctx 取消，收尾仍必须落 failed，
+// 不能把任务永久留在 dispatched（只有重启恢复才能收）。
+func TestQueueCancelAfterDequeueSettlesFailed(t *testing.T) {
+	ops := &queueFakeOps{dispatchWait: true}
+	q, _ := newTestQueue(t, ops)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	task := queueTask("会被取消")
+	task.ClientMsgID = "cancel-after-dequeue"
+	done := make(chan error, 1)
+	go func() { _, err := q.Submit(ctx, task); done <- err }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Submit did not return after cancel")
+	}
+	got, err := NewLedger(q.ledger.store).FindByClientMsgID(context.Background(), task.Target, task.ClientMsgID)
+	if err != nil || got == nil {
+		t.Fatalf("find task = %v, %v", got, err)
+	}
+	if got.Status != TaskFailed {
+		t.Fatalf("status after cancel = %s, want failed", got.Status)
 	}
 }
