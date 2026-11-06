@@ -304,7 +304,7 @@ const BASE = {
   "version": 1,
   "project": "Agent Hub",
   "subtitle": "P1 收口 + P2 工作区派发/任务账本/回推 + P3a 群组基础（当前：Review Gate 期间冻结新功能）",
-  "updated": "2026-11-05 18:12",
+  "updated": "2026-11-06",
   "phases": [
     {
       "id": "P0",
@@ -1271,10 +1271,10 @@ const BASE = {
     },
     "P1-10": {
       "status": "review",
-      "commit": "dd3b32d + ... + 196c508",
+      "commit": "dd3b32d + ... + 196c508 + b25b18c",
       "review": "re-review_pending",
-      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。 第四轮复审（task-fehavvps）：provider-only 已修但 model-only 仍可写无效组合。已修（196c508）：判据改为 provider 或 model 变化 + 精确比较；model-only 跨 provider 模型 → unknown_model。",
-      "reviewBatch": "A-running"
+      "reviewNote": "第三轮复审 change_requested（task-m6sbp7ks，对象 cd04b56）。B-1 反向半修：只改 provider 时旧 model 不在新 provider 表（openai/deepseek-v4-pro），且被配对逻辑主动写进运行中会话；原用例把无效组合当期望值。修复（9985730）：provider 变化后 hasModelIn 校验，不存在 → 400 unknown_model；用例改为 provider-only 必须被拒且会话不变、provider+model 成对才生效并断言组合真实存在。N1 补 effort→subagentEffort 回归用例。未处理（非阻塞，P2 收尾）：cfgMu 并发探针未入库（M2 仍存活）、skillCaps 换代、混合 patch 跳过 reapply、subagent_explore bash 旁路、DM next_session=重启、Eval3 串行、B6 用例尾段静态代理。B-3 看板内容已在 a69f19d 落盘（P1-06 done/passed）。验证：desktop/bridge 全量绿（40s）。 第四轮复审（task-fehavvps）：provider-only 已修但 model-only 仍可写无效组合。已修（196c508）：判据改为 provider 或 model 变化 + 精确比较；model-only 跨 provider 模型 → unknown_model。 复审通过后的 delta（b25b18c）：N1 抽 validateHubModelPair 供 create/update/rollback 共用（模型表为空 fail-open）；N2 create 也校验；N3 model-only 大小写变体精确拒绝。回归新增 create 外来模型拒绝/合法组合可用、update 大小写变体拒绝且会话组合不变；目标测试绿。待 delta 复审（对象 b25b18c）。",
+      "reviewBatch": "A-delta"
     },
     "P2-01": {
       "status": "done",
@@ -1284,10 +1284,10 @@ const BASE = {
     },
     "P2-02": {
       "status": "review",
-      "commit": "e735626 + 67e9cd4 fix(hub-p2-02): Queue 生产路径保留 client_msg_id",
+      "commit": "e735626 + 67e9cd4 + 4de19f5",
       "review": "re-review_pending",
-      "reviewNote": "复审 change_requested（task-pbdgj74w，对象 e735626）。Blocking：B2 生产路径仍不幂等——Hub engine 总是挂 Queue，而 WorkspaceService.Send 的 Queue 分支不带 clientMsgID、queue.go 用 task id 兜底 → 同 id 两次建两个任务。且验收用例直调 ops / 无 Queue，是桩自证。修复（67e9cd4）：Task.ClientMsgID 落账本；Queue.Submit 在 q.mu 内按 (target, client_msg_id) 查重（锁覆盖查找+建账+入队）；Dispatch 优先调用方 id；Ledger.FindByClientMsgID 跨重启查重。新增生产链路用例（engine session_send 同 id → 同 task_id、queued=1、账本 client_msg_id）。同时修 N4 UpdatedAt（int64 毫秒被 time.Time 断言吞掉恒 nil）与 B1 残留（空标题落 defaultSessionTitle、80 rune）。未处理（非阻塞）：hubMsgDedup 无上限/TTL、duplicate 直派仍返回新随机 id、key 未含 AgentID、CanCreateWorkspace 未接线、方案工具表字段与实现不一致、sessionManualTitles 测试隔离。验证：agenthub + desktop/bridge 全量绿（56s）。",
-      "reviewBatch": "A-running"
+      "reviewNote": "复审 change_requested（task-pbdgj74w，对象 e735626）。Blocking：B2 生产路径仍不幂等——Hub engine 总是挂 Queue，而 WorkspaceService.Send 的 Queue 分支不带 clientMsgID、queue.go 用 task id 兜底 → 同 id 两次建两个任务。且验收用例直调 ops / 无 Queue，是桩自证。修复（67e9cd4）：Task.ClientMsgID 落账本；Queue.Submit 在 q.mu 内按 (target, client_msg_id) 查重（锁覆盖查找+建账+入队）；Dispatch 优先调用方 id；Ledger.FindByClientMsgID 跨重启查重。新增生产链路用例（engine session_send 同 id → 同 task_id、queued=1、账本 client_msg_id）。同时修 N4 UpdatedAt（int64 毫秒被 time.Time 断言吞掉恒 nil）与 B1 残留（空标题落 defaultSessionTitle、80 rune）。未处理（非阻塞）：hubMsgDedup 无上限/TTL、duplicate 直派仍返回新随机 id、key 未含 AgentID、CanCreateWorkspace 未接线、方案工具表字段与实现不一致、sessionManualTitles 测试隔离。验证：agenthub + desktop/bridge 全量绿（56s）。 第二轮复审 change_requested（task-t8sqhsw8，对象 67e9cd4）：上轮生产链路 client_msg_id 已通（忙时同 id 同 task、8 并发 1 条、跨重启账本可命中）；新 blocking B1 命中 failed/canceled/declined/blocked_budget 仍返回旧终态、accepted=true 且不重投；B2 跨重启命中 queued 只返回不入队 → 永久孤儿；N1 三处键口径不一致（workspace 尾斜杠/空白 id）会建两条任务但目标只收一条，且 Pump 吞掉 duplicate。修复（4de19f5）：B1 同 id 新建 attempt 挂原链（root/parent/attempt/chain），重试用新 task id 作目标去重键；B2 queued 且不在内存队列时重新入队并 Pump 后 Replay；Submit 归一 workspace/session_id，FindByClientMsgID 同口径比较、空白 id 原样为键；Pump 遇 duplicate 落 canceled 留痕；护栏从 Service 移到 Submit 查重之后（SubmitGuarded），合法重试不再被「重复任务」误杀。新增回归：失败重试新 attempt、跨重启 queued 重入队、尾斜杠同键、duplicate 不静默、生产链路 Ask 失败后同 id 重投。验证：agenthub 全绿；bridge 目标用例含生产链路重投绿；全量 bridge 仅既有 TestReducerLLMEndDedupAndUsage 价格表波动一次（单跑绿）。",
+      "reviewBatch": "A-rereview"
     },
     "P2-03": {
       "status": "review",
