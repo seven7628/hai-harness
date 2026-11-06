@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type { HubAgent, HubAlert, HubDMInfo, HubGroup, HubHistoryPage, HubMessage, HubGroupActivity, HubNeed, HubPage, HubRound, HubRunEntry, HubTask } from './types'
-import { alertKey } from './alerts'
+import { addHubAlert, alertKey } from './alerts'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -615,10 +615,7 @@ export const useHubStore = create<HubState>((set, get) => ({
           task_id: ev.task_id, agent_id: ev.agent_id, group_id: ev.group_id,
           message, at: ev.at,
         }
-        set((s) => {
-          if (s.alerts.some((a) => a.id === id)) return {}
-          return { alerts: [alert, ...s.alerts].slice(0, 20) }
-        })
+        set((s) => ({ alerts: addHubAlert(s.alerts, alert) }))
         return
       }
       case 'hub_task_update': {

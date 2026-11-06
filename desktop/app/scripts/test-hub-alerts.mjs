@@ -24,5 +24,14 @@ assert(mod.alertKey('blocked_budget', 'task_a', 'x') !== mod.alertKey('blocked_b
 assert(mod.alertKey('notify_failed', 'task_a', 'x') === mod.alertKey('notify_failed', 'task_a', 'x'), '重复 notify_failed 合并')
 assert(mod.alertSeverity('error') === 'error' && mod.alertSeverity('info') === 'info', '已知 severity 原样')
 assert(mod.alertSeverity('') === 'warning' && mod.alertSeverity(undefined) === 'warning', '空/未知 severity 归一为 warning')
+const one = { id: mod.alertKey('settle_failed', 'task_a', 'x'), code: 'settle_failed' }
+const two = { id: mod.alertKey('recovery_failed', 'task_b', 'y'), code: 'recovery_failed' }
+let list = mod.addHubAlert([], one)
+list = mod.addHubAlert(list, one)
+assert(list.length === 1, '同 id 去重')
+list = mod.addHubAlert(list, two)
+assert(list[0].id === two.id && list.length === 2, '新告警置顶')
+for (let i = 0; i < 30; i++) list = mod.addHubAlert(list, { id: `x:${i}`, code: 'x' })
+assert(list.length === 20, '告警栈封顶 20')
 assert(mod.alertSeverity('critical') === 'warning', '未知 severity 不产生无样式圆点')
 console.log(`\n${pass} 项通过`)
