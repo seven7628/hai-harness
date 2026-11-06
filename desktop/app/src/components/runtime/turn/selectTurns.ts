@@ -409,7 +409,7 @@ const owningRunId = (b: MsgBlock): string | undefined => {
   }
 }
 
-export function turnRuns(turn: Turn): TurnRun[] {
+export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
   const runs: TurnRun[] = []
   let curId: string | undefined
   let start = 0
@@ -428,7 +428,27 @@ export function turnRuns(turn: Turn): TurnRun[] {
     if (rid) curId = rid
   })
   seal(turn.items.length)
-  return runs.filter((r) => r.end > r.start)
+  const kept = runs.filter((r) => r.end > r.start)
+  /* 块上没有主 run id 时（冷恢复 / 旧快照 / 事件缺 run_id），上面一刀也切不出来 ——
+     整轮于是只有一个段，`live` 一翻就把**已经结算的那一段**重新展开成 Working（答案
+     从轮尾被挪进盒子里，几百像素一进一出）。用户 2026-11 的「主 run 已 AgentEnd、后台
+     还在动时页面上下抖 2~4s」就是它。
+     所以再给一条**观测量**的边界：这一轮上一次结算时它有多少块（settleAt）。只在
+     「按 run id 切不出段」时使用它 —— 有 run id 的情况由上面那条更权威的判据负责，
+     不掺进来（否则同一个边界会被切两次，多出一个空盒子）。 */
+  if (
+    kept.length === 1 &&
+    settleAt != null &&
+    settleAt > kept[0].start &&
+    settleAt < kept[0].end
+  ) {
+    const [only] = kept
+    return [
+      { ...only, key: `${turn.key}#0`, end: settleAt, items: turn.items.slice(only.start, settleAt) },
+      { ...only, key: `${turn.key}#1`, start: settleAt, items: turn.items.slice(settleAt, only.end) },
+    ]
+  }
+  return kept
 }
 
 /** 一次运行的**结算**（账 / 产出卡）该落在哪个下标之后：它自己最后一块要跳过

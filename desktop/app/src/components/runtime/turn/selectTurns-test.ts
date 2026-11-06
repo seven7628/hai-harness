@@ -296,6 +296,37 @@ test('case 2 分段：子 agent 卡片（runId 是子 run）不切段，工具�
   assert.deepEqual(runs[0].items.map((b) => b.id), [2, 3, 4])
 })
 
+test('缺 run id + 结算边界：按「上一次结算时的块数」切出后台 run 自己的段', () => {
+  // 冷恢复 / 旧快照 / 事件缺 run_id 的形态：块上没有任何主 run id，按 run id 一刀切不出来。
+  // 用户 2026-11：主 run 已 AgentEnd、后台 run 起跑 → 整轮只有一个段 → live 一翻就把
+  // 已结算的那段重新展开成 Working（答案从轮尾被挪进盒子，几百像素一进一出）。
+  const blocks: MsgBlock[] = [user(1), assistant(2, '结论'), assistant(3, '后台新活')]
+  const turn = selectTurns(blocks)[0]
+  assert.equal(turnRuns(turn).length, 1, '不给结算边界时行为不变（老路径一行不动）')
+  // settleAt = 结算那一刻的 items.length（= 边界下标）：结算时只有 assistant(2) → 1
+  const runs = turnRuns(turn, 1)
+  assert.equal(runs.length, 2, '结算边界之后新到的块切出第二段')
+  assert.deepEqual(runs.map((r) => r.items.map((b) => b.id)), [[2], [3]])
+})
+
+test('缺 run id：结算边界在两端时不分段（没有「新到的块」可切）', () => {
+  const blocks: MsgBlock[] = [user(1), assistant(2, '结论')]
+  const turn = selectTurns(blocks)[0]
+  assert.equal(turnRuns(turn, 0).length, 1)
+  assert.equal(turnRuns(turn, turn.items.length).length, 1, '结算之后什么都没来 → 还是一段')
+})
+
+test('有 run id 时结算边界不掺和（不许把一个边界切两次）', () => {
+  const blocks: MsgBlock[] = [
+    user(1),
+    asstOf(2, 'A', '第一段'),
+    toolOf(3, 'A'),
+    asstOf(4, 'B', '第二段'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  assert.deepEqual(turnRuns(turn, 2).map((r) => r.runId), ['A', 'B'], '仍是按 run id 切的两段')
+})
+
 test('case 1 不分段：单 run 仍然是一段（老路径一行不变）', () => {
   const blocks: MsgBlock[] = [user(1), tool(2), signal(3), assistant(4, '答'), delivery(5)]
   const runs = turnRuns(selectTurns(blocks)[0])

@@ -235,6 +235,16 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const workspace = useAppStore((s) => s.workspace)
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
+  // settledAtRef：这一轮**上一次结算时**有多少块（turn.items.length）。
+  //
+  // 用途只有一个：块上没有主 run id 时（冷恢复 / 旧快照 / 事件缺 run_id），turnRuns
+  // 一刀也切不出来，整轮就只有一个段，`live` 一翻就把已经结算的那一段重新展开成
+  // Working（答案从轮尾挪进盒子）。有了这个「观测量」，结算之后新到的东西就能切出
+  // 自己的段，上半段保持折叠 —— 用户 2026-11 的「上下抖 2~4s」正是缺这条边界。
+  // 记的是「结算时有多少块 + 那一段最后一块的 id」——id 用来在轮的内容被整体替换
+  //（同一轮 key 被复用：分页/重放/测试夹具重灌块）时把过期的边界作废，否则会把新内容
+  // 从中间切开（实测 test:transcript 的场景 C：插话被切到第一段、盒子只剩后半段）。
+  const settledAtRef = useRef<Map<string, { at: number; lastId?: number }>>(new Map())
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   /* 这段转录的身份：滚动容器（滚动位置 / 贴底意图 / 手势监听）都挂在它上面。
      viewSid = 独立 view（cron / 恢复页）；sourceKey = 子会话页（子 agent 的 run_id）；
@@ -623,6 +633,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     lastGestureAtRef.current = 0
     touchYRef.current = 0
     nodeFreshRef.current = true
+    settledAtRef.current.clear()
     setAway(false)
     setFresh(false)
   }
@@ -1225,7 +1236,23 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* sameRun：这一轮的 run 与正在跑的那次运行是不是同一个。没有 runId 的旧数据
        （块上缺 run_id）按「同一轮」处理 —— 宁可沿用老行为，也不要凭空把在跑的轮判死。 */
     const sameRun = !turn.run || !activeRunId ? true : turn.run === activeRunId
-    const live = turnLive({ isLast: ti === turns.length - 1, turnRunning: sameRun && turn.running, runEnded, sameRun })
+    /* 结算边界（观测量）：这一轮上一次「真的静下来」时有多少块。边界只有在
+       「下标还在、且那一段最后一块仍是同一块」时才算数 —— 轮的内容被整体替换
+       （分页 / 重放 / 测试夹具重灌块，同一个 turn key 被复用）就作废。 */
+    const settleRec = settledAtRef.current.get(turn.key)
+    const settleAt = settleRec && settleRec.at > 0 && settleRec.at <= turn.items.length && turn.items[settleRec.at - 1]?.id === settleRec.lastId
+      ? settleRec.at
+      : undefined
+    if (settleRec && settleAt == null) settledAtRef.current.delete(turn.key)
+    const rawLive = turnLive({ isLast: ti === turns.length - 1, turnRunning: sameRun && turn.running, runEnded, sameRun })
+    /* 结算过、且**没有新块**时，`live` 再被点亮也不认（渲染层面）。
+       专治「主 run 已 AgentEnd、后台 run 起跑（没有用户输入、块上也没有 run id）」把已经
+       收起的一段重新展开：探针 lab/probe-settled-fold-relight 里同一批内容会从「Worked
+       行 + 答案在时间线上」变成「一个 Working 盒子（答案被挪进去）」—— 用户 2026-11
+       看到的上下抖就是这个。有新块时**不锁**：它由 turnRuns 的结算边界切出自己的段
+       （见下方 runs），上半段仍然保持折叠 —— 既有口径「同一个 turn 里第二个 run 起新
+       盒子」不受影响。 */
+    const live = rawLive && !(settleAt != null && settleAt === turn.items.length)
     // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
     // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
     const open = !concise || (openTurns[turn.key] ?? live)
@@ -1259,7 +1286,19 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const bodySource = concise && live ? runningBody(turn, !work) : concise ? foldedBody(turn) : turn.items
     /* 一轮可能跨**多次运行**（后台任务回推后续跑）：盒子按 run 切段（见 selectTurns.turnRuns）。
        声明提到这里，是因为下面的「结论 / 账 / 卡」闸门都要按**段**判，而不只按整轮判。 */
-    const runs = concise && skin === 'runtime' ? turnRuns(turn) : []
+    // 记结算边界：只有在「真的静下来了」才记 —— 视图说这次运行已结算（AgentEnd），
+    // 且这一轮里没有还在流式 / 在跑的块。下标取当前块数：之后再到的块由 turnRuns
+    // 切出自己的段，上半段保持折叠。
+    //
+    // 为什么不用「runEnded 由假变真」：事件可能成批到达（一次渲染里 start+end 都在），
+    // 那次转换根本观测不到。为什么不用 `!live && answer`：块比 agent_start 先到或根本
+    // 缺 agent_start 时，`live` 会在运行中途读成 false，把「跑了一半」记成「结算过」，
+    // 随后插话 / 续跑的块被切到第二段、整轮凭空多一个盒子（实测 test:transcript 场景 C）。
+    if (runEnded && ti === turns.length - 1 && turn.answer && !turn.answer.streaming && !turn.running) {
+      const at = turn.items.length
+      settledAtRef.current.set(turn.key, { at, lastId: turn.items[at - 1]?.id })
+    }
+    const runs = concise && skin === 'runtime' ? turnRuns(turn, settleAt) : []
     const multiRun = runs.length > 1
     /* 用户 2026-10：轮尾账排在产出卡**上方** —— 先结算这一轮，再看这一轮的产出。
        产出卡仍是轮尾最后一块（它是「记录」，不属于工作过程）。只在运行时皮肤、且账

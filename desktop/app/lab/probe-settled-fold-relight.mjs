@@ -60,6 +60,23 @@ await page.eval((sid) => window.__dispatch({ event_type: 'agent_end', session_id
 await wait(900)
 console.log(JSON.stringify(await snap('settled-again')))
 console.log(relit.open === settled.open && Math.abs(relit.h - settled.h) <= 6 ? 'OK 后台 run 不把已结算的轮重新展开' : '!! 被重新展开了')
+// 变体：后台 run **带新块**（缺 run id）→ 应该切出新段，上半段保持折叠
+await page.eval((sid) => {
+  const d = window.__dispatch, ts = () => new Date().toISOString()
+  d({ event_type: 'agent_start', session_id: sid, run_id: 'R4', index: 0, content: 'bg with blocks', timestamp: ts() })
+  d({ event_type: 'tool_run_start', session_id: sid, id: 't4', name: 'bash', arguments: '{"command":"echo hi"}', timestamp: ts() })
+  d({ event_type: 'content_chunk', session_id: sid, request_id: 'q4', content: '后台任务自己的输出。\n\n' })
+}, sid)
+await wait(900)
+const bgBlocks = await page.eval(() => {
+  const el = document.querySelector('.narrative')
+  const turns = [...document.querySelectorAll('.rt-turn')]
+  const last = turns.at(-1)
+  const kids = last ? [...last.children].map((c) => `${c.className.split(' ')[0]}${c.className.includes('cy-live') ? '(live)' : ''}:${Math.round(c.getBoundingClientRect().height)}`) : []
+  return { h: Math.round(el.scrollHeight), kids }
+})
+console.log(JSON.stringify(bgBlocks))
+console.log(bgBlocks.kids[0]?.startsWith('rt-head') && bgBlocks.kids.some((k) => k.startsWith('rt-act')) ? 'OK 上半段仍折叠（Worked 行还在），后台新活另起一段' : '!! 上半段被重展开了')
 // 正例：用户真的发一条 → 新 run 必须点亮 Working（回归防线：别把正常路径一起关掉）
 await page.eval((sid) => {
   const d = window.__dispatch, ts = () => new Date().toISOString()
