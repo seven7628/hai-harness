@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -137,9 +138,12 @@ func (l *Ledger) FindByClientMsgID(ctx context.Context, target TaskTarget, clien
 	if l == nil || l.store == nil {
 		return nil, fmt.Errorf("%w: ledger has no store", ErrInvalid)
 	}
-	if strings.TrimSpace(clientMsgID) == "" {
+	// 键原样比较：空白也是键的一部分，与 Submit/Dispatch 口径一致（P2-02 N3）。
+	if clientMsgID == "" {
 		return nil, nil
 	}
+	target.Workspace = filepath.Clean(strings.TrimSpace(target.Workspace))
+	target.SessionID = strings.TrimSpace(target.SessionID)
 	all, err := l.store.ListTasks(ctx, TaskFilter{})
 	if err != nil {
 		return nil, err
@@ -149,7 +153,9 @@ func (l *Ledger) FindByClientMsgID(ctx context.Context, target TaskTarget, clien
 		if t == nil || t.ClientMsgID != clientMsgID {
 			continue
 		}
-		if t.Target.Kind != target.Kind || t.Target.Workspace != target.Workspace || t.Target.SessionID != target.SessionID {
+		if t.Target.Kind != target.Kind ||
+			filepath.Clean(strings.TrimSpace(t.Target.Workspace)) != target.Workspace ||
+			strings.TrimSpace(t.Target.SessionID) != target.SessionID {
 			continue
 		}
 		if hit == nil || t.CreatedAt.After(hit.CreatedAt) {

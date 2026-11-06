@@ -316,7 +316,7 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		o.m.mu.Lock()
 		if _, seen := o.m.hubMsgDedup[dedupKey]; seen {
 			o.m.mu.Unlock()
-			return agenthub.DispatchResult{SessionID: sid, Accepted: true, Message: "duplicate"}, nil
+			return agenthub.DispatchResult{SessionID: sid, Accepted: true, Message: agenthub.DispatchDuplicateMessage}, nil
 		}
 		if o.m.hubMsgDedup == nil {
 			o.m.hubMsgDedup = map[string]string{}

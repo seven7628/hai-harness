@@ -372,3 +372,86 @@ func TestHubDispatchSetsPendingBeforeAgentStart(t *testing.T) {
 	}
 	bs.dispatchMu.Unlock()
 }
+
+// P2-02 复审 B1（生产链路）：Ask 失败后同 client_msg_id 重试必须真的重投到
+// 重建的目标会话，而不是返回旧 failed 任务并 accepted=true。
+func TestHubSessionSendRetryAfterAskFailureRedelivers(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "RetryAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	_, _, hubData := hubCmd(t, m, buf, 2, "hub_agent_create", map[string]any{
+		"profile": map[string]any{"name": "RetryHub", "provider": "deepseek", "model": "deepseek-v4-flash", "role": "派发"},
+	})
+	hubAgent := agentFromData(t, hubData)
+	hubBS, err := m.hubDMSession(string(hubAgent.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := m.create(wsPath, "s-retry", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := hubBS.hubEngine.GetTool(context.Background(), "session_send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(text string) (string, string, error) {
+		out, err := tool.Call(context.Background(), "session_send", fmt.Sprintf(
+			`{"workspace":%q,"session_id":"s-retry","text":%q,"client_msg_id":"b1-prod-key"}`, wsPath, text))
+		if err != nil {
+			return "", "", err
+		}
+		var got struct {
+			TaskID string `json:"task_id"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			return "", "", err
+		}
+		return got.TaskID, got.Status, nil
+	}
+
+	// 目标关掉 → 第一次 Ask 失败，账本落 failed。
+	if err := target.s.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	oldID, _, err := send("重试必须重投")
+	if err == nil {
+		t.Fatal("send to closed target should fail")
+	}
+	// 重建同名会话（目标恢复健康）。
+	ws := m.runtime(wsPath)
+	ws.mu.Lock()
+	delete(ws.sessions, "s-retry")
+	ws.mu.Unlock()
+	fresh, err := m.create(wsPath, "s-retry", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newID, status, err := send("重试必须重投")
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if newID == oldID {
+		t.Fatalf("retry returned old failed task %s (status=%s)", newID, status)
+	}
+	var delivered []string
+	for _, msg := range fresh.s.History() {
+		if msg.Role != "user" {
+			continue
+		}
+		for _, c := range msg.Content {
+			if c.Type == "text" {
+				delivered = append(delivered, c.Content)
+			}
+		}
+	}
+	if !strings.Contains(strings.Join(delivered, "\n"), "重试必须重投") {
+		t.Fatalf("retry did not redeliver; fresh history=%q, task=%s status=%s", delivered, newID, status)
+	}
+}

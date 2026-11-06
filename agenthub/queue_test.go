@@ -14,6 +14,7 @@ type queueFakeOps struct {
 	dispatched  []DispatchReq
 	dispatchErr error
 	statusErr   error
+	duplicate   bool
 }
 
 func (f *queueFakeOps) ListWorkspaces(context.Context) ([]WorkspaceInfo, error) { return nil, nil }
@@ -40,7 +41,11 @@ func (f *queueFakeOps) Dispatch(_ context.Context, req DispatchReq) (DispatchRes
 		return DispatchResult{}, f.dispatchErr
 	}
 	f.dispatched = append(f.dispatched, req)
-	return DispatchResult{SessionID: req.SessionID, Accepted: true}, nil
+	msg := ""
+	if f.duplicate {
+		msg = DispatchDuplicateMessage
+	}
+	return DispatchResult{SessionID: req.SessionID, Accepted: true, Message: msg}, nil
 }
 
 func (f *queueFakeOps) InterruptSession(context.Context, string) error { return nil }
@@ -393,5 +398,136 @@ func TestQueueTargetGoneCancelFailureKeepsHead(t *testing.T) {
 	led, _ = NewLedger(base).Replay(context.Background(), created.ID)
 	if led.Status != TaskCanceled {
 		t.Fatalf("ledger status = %s, want canceled", led.Status)
+	}
+}
+
+// P2-02 复审 B1：命中失败终态时同 client_msg_id 必须是新 attempt，而不是
+// 静默返回旧 failed 任务（否则用户重试永远不重投）。
+func TestQueueSubmitRetryAfterFailedStartsNewAttempt(t *testing.T) {
+	ops := &queueFakeOps{}
+	q, st := newTestQueue(t, ops)
+	first := queueTask("第一次")
+	first.ClientMsgID = "retry-key"
+	a, err := q.Submit(context.Background(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ledger.Transition(context.Background(), a.ID, TaskFailed, TransitionOptions{Error: "模拟失败"}); err != nil {
+		t.Fatal(err)
+	}
+	retry := queueTask("第二次（重试）")
+	retry.ClientMsgID = "retry-key"
+	b, err := q.Submit(context.Background(), retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.ID == a.ID {
+		t.Fatalf("retry returned old failed task %s", a.ID)
+	}
+	if b.Status != TaskDispatched || b.Attempt != 2 || b.ParentTaskID != a.ID || b.RootTaskID != a.RootTaskID {
+		t.Fatalf("retry task = id=%s status=%s attempt=%d parent=%s root=%s", b.ID, b.Status, b.Attempt, b.ParentTaskID, b.RootTaskID)
+	}
+	if len(ops.dispatched) != 2 || ops.dispatched[1].Text != "第二次（重试）" {
+		t.Fatalf("retry not delivered: %+v", ops.dispatched)
+	}
+	// 新 attempt 用新 task id 作为目标侧去重键，避免被上次投递记录挡住。
+	if got := ops.dispatched[1].ClientMsgID; got != string(b.ID) {
+		t.Fatalf("retry dispatch client id = %q, want %q", got, b.ID)
+	}
+	all, err := st.ListTasks(context.Background(), TaskFilter{})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("ledger tasks = %d, %v; want 2 (old + retry)", len(all), err)
+	}
+}
+
+// P2-02 复审 B2：跨重启命中 queued 任务必须重新入队，否则返回 queued=true
+// 但内存队列里没有它，永远不会被泵出去。
+func TestQueueSubmitQueuedHitAfterRestartReenqueues(t *testing.T) {
+	dir := t.TempDir()
+	st1, err := OpenFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy := &queueFakeOps{running: true}
+	q1 := NewQueue(NewLedger(st1), busy)
+	task := queueTask("重启前排的队")
+	task.ClientMsgID = "restart-key"
+	first, err := q1.Submit(context.Background(), task)
+	if err != nil || first.Status != TaskQueued {
+		t.Fatalf("first submit = %+v, %v", first, err)
+	}
+
+	// 模拟重启：新 Store/Queue，内存 pending 为空。
+	st2, err := OpenFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle := &queueFakeOps{}
+	q2 := NewQueue(NewLedger(st2), idle)
+	again := queueTask("重启后重发")
+	again.ClientMsgID = "restart-key"
+	got, err := q2.Submit(context.Background(), again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != first.ID {
+		t.Fatalf("restart hit created a new task: %s vs %s", got.ID, first.ID)
+	}
+	if got.Status != TaskDispatched {
+		t.Fatalf("queued hit status = %s, want dispatched (re-enqueued + pumped)", got.Status)
+	}
+	if len(idle.dispatched) != 1 {
+		t.Fatalf("queued hit not re-enqueued/pumped: dispatches=%d", len(idle.dispatched))
+	}
+	if q2.QueuedCount("/w", "s1") != 0 {
+		t.Fatalf("queue not empty after re-enqueue pump")
+	}
+}
+
+// P2-02 复审 N1：workspace 尾斜杠必须归一到同一查重键，不能建两条任务
+// 而目标侧只投递一条。
+func TestQueueSubmitNormalizesWorkspaceForDedup(t *testing.T) {
+	ops := &queueFakeOps{running: true}
+	q, st := newTestQueue(t, ops)
+	mk := func(ws string) *Task {
+		t := queueTask("同一会话")
+		t.Target.Workspace = ws
+		t.ClientMsgID = "same-key"
+		return t
+	}
+	a, err := q.Submit(context.Background(), mk("/w/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := q.Submit(context.Background(), mk("/w"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != b.ID {
+		t.Fatalf("workspace spelling created two tasks: %s vs %s", a.ID, b.ID)
+	}
+	if got := q.QueuedCount("/w", "s1"); got != 1 {
+		t.Fatalf("queued = %d, want 1", got)
+	}
+	all, err := st.ListTasks(context.Background(), TaskFilter{})
+	if err != nil || len(all) != 1 {
+		t.Fatalf("ledger tasks = %d, %v; want 1", len(all), err)
+	}
+}
+
+// P2-02 复审 N1：目标侧返回 duplicate 时不能把任务当 dispatched（从未 Ask）。
+func TestQueuePumpDuplicateIsNotSilentSuccess(t *testing.T) {
+	ops := &queueFakeOps{dispatchErr: nil}
+	ops.duplicate = true
+	q, _ := newTestQueue(t, ops)
+	created, err := q.Submit(context.Background(), queueTask("被判重"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != TaskCanceled {
+		t.Fatalf("duplicate dispatch status = %s, want canceled", created.Status)
+	}
+	if created.Error == "" {
+		t.Fatalf("duplicate dispatch must leave an error, got %+v", created)
 	}
 }

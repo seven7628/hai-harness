@@ -43,6 +43,25 @@ func queueKey(workspace, sessionID string) string {
 	return filepath.Clean(strings.TrimSpace(workspace)) + "\x00" + strings.TrimSpace(sessionID)
 }
 
+// taskRetryable 表示该终态允许用同一个 client_msg_id 重投：任务没有真正
+// 送达/跑过，返回旧条目会让调用方以为重试成功（P2-02 复审 B1）。
+func taskRetryable(st TaskStatus) bool {
+	switch st {
+	case TaskFailed, TaskCanceled, TaskDeclined, TaskBlockedBudget:
+		return true
+	}
+	return false
+}
+
+func queueContains(ids []TaskID, id TaskID) bool {
+	for _, got := range ids {
+		if got == id {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckGuard 在建账前跑护栏（预算/并发/去重/链长）；nil guard = 不检查。
 func (q *Queue) CheckGuard(ctx context.Context, t *Task, g *Guard) error {
 	if g == nil {
@@ -57,6 +76,17 @@ func (q *Queue) CheckGuard(ctx context.Context, t *Task, g *Guard) error {
 // Submit 创建任务并尝试派发。返回值是**账本条目**：Status=dispatched 表示已投递，
 // queued 表示目标忙、留在队列里（结果回推在 P2-05）。
 func (q *Queue) Submit(ctx context.Context, t *Task) (*Task, error) {
+	return q.submit(ctx, t, nil)
+}
+
+// SubmitGuarded 是带护栏的 Submit：查重命中直接返回/重投，只有真正要建新任务时
+// 才跑 Guard.Check。护栏放在查重之后，合法同 client_msg_id 重试才不会被
+// 「重复任务」误杀（P2-02 复审 §5）。
+func (q *Queue) SubmitGuarded(ctx context.Context, t *Task, g *Guard) (*Task, error) {
+	return q.submit(ctx, t, g)
+}
+
+func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	if q == nil || q.ledger == nil || q.ops == nil {
 		return nil, fmt.Errorf("%w: queue 未初始化", ErrInvalid)
 	}
@@ -75,8 +105,17 @@ func (q *Queue) Submit(ctx context.Context, t *Task) (*Task, error) {
 	if strings.TrimSpace(t.Instruction) == "" {
 		return nil, fmt.Errorf("%w: instruction 不能为空", ErrInvalid)
 	}
-	// 幂等：同一 (target, client_msg_id) 已存在就直接返回原任务，不再建账/入队。
+	// 键口径统一：workspace 归一到 knownWorkspace 的形态，session_id 去首尾空白。
+	// 否则 "/w/" 与 "/w" 会各自查重、建出两条任务，目标侧却按归一路径判重，
+	// 第二条被静默丢弃（P2-02 复审 N1）。
+	t.Target.Workspace = filepath.Clean(strings.TrimSpace(t.Target.Workspace))
+	t.Target.SessionID = strings.TrimSpace(t.Target.SessionID)
+	// 幂等：同一 (target, client_msg_id) 已存在就按状态分流：
+	//   - queued 且不在内存队列（重启孤儿）→ 重新入队并泵一次（B2）；
+	//   - 失败/取消/拒绝/预算阻断 → 允许同 id 重试，挂到原链上开新 attempt（B1）；
+	//   - 其余状态 → 返回原任务，不重复建账/入队。
 	// 锁覆盖「查找 + 建账 + 入队」：并发同 id 不能双建（P2-02 复审 B2）。
+	// 注：账本查找是文件 I/O，放在全局锁内会拖慢所有会话（复审 N5，后续做索引）。
 	q.mu.Lock()
 	if t.ClientMsgID != "" {
 		existing, ferr := q.ledger.FindByClientMsgID(ctx, t.Target, t.ClientMsgID)
@@ -85,8 +124,43 @@ func (q *Queue) Submit(ctx context.Context, t *Task) (*Task, error) {
 			return nil, ferr
 		}
 		if existing != nil {
+			key := queueKey(existing.Target.Workspace, existing.Target.SessionID)
+			switch {
+			case existing.Status == TaskQueued && !queueContains(q.pending[key], existing.ID):
+				// 进程重启后内存队列为空，但账本里任务仍是 queued。只返回不
+				// 入队会让 session_send 说「已排队」、实际永远没人泵（B2）。
+				q.pending[key] = append(q.pending[key], existing.ID)
+				q.mu.Unlock()
+				if _, perr := q.Pump(ctx, existing.Target); perr != nil {
+					return existing, perr
+				}
+				if latest, rerr := q.ledger.Replay(ctx, existing.ID); rerr == nil && latest != nil {
+					return latest, nil
+				}
+				return existing, nil
+			case taskRetryable(existing.Status):
+				// 上一次没送达/没跑完：同 id 重试是新 attempt，不能返回旧终态。
+				// 先分配 ID 才能把新任务接进原链（parent 必须在 chain 里）。
+				id, ierr := q.ledger.store.AllocateID(ctx, PrefixTask)
+				if ierr != nil {
+					q.mu.Unlock()
+					return nil, ierr
+				}
+				t.ID = TaskID(id)
+				t.RootTaskID = existing.RootTaskID
+				t.ParentTaskID = existing.ID
+				t.Attempt = existing.Attempt + 1
+				t.Chain = append(append([]TaskID{}, existing.Chain...), t.ID)
+			default:
+				q.mu.Unlock()
+				return existing, nil
+			}
+		}
+	}
+	if g != nil {
+		if gerr := g.Check(ctx, q.ledger.store, t); gerr != nil {
 			q.mu.Unlock()
-			return existing, nil
+			return nil, gerr
 		}
 	}
 	created, err := q.ledger.Create(ctx, t)
@@ -161,7 +235,8 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 		Workspace: dispatched.Target.Workspace,
 		SessionID: dispatched.Target.SessionID,
 		Text:      dispatched.Instruction,
-		// 有调用方幂等键就用它（目标侧去重表按此判重）；没有才回落到账本 id。
+		// 有调用方幂等键就用它（目标侧去重表按此判重）；重试 attempt 用
+		// 新 task id 作为键，避免被上一次投递的去重记录挡住（P2-02 B1）。
 		ClientMsgID: dispatchClientMsgID(dispatched),
 		TaskHeader:  header, // 目标会话据此绑定 task（§6.7.2）
 	})
@@ -174,7 +249,17 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 		}
 		return nil, err
 	}
-	_ = res
+	if res.Message == DispatchDuplicateMessage {
+		// 目标侧按相同 client_msg_id 判重：说明这条没有真正 Ask。不能把
+		// dispatched 当成功返回（静默丢任务，P2-02 复审 N1）；落 canceled 留痕。
+		canceled, cerr := q.ledger.Transition(ctx, id, TaskCanceled, TransitionOptions{
+			At: time.Now().UTC(), Error: "目标侧去重命中：同一 client_msg_id 已投递过",
+		})
+		if cerr != nil {
+			return nil, cerr
+		}
+		return canceled, nil
+	}
 	// 派完就停：Ask 之后目标状态可能还没翻转，继续循环会把下一个任务
 	// 塞进同一批（违反「一个任务 = 一次干净 Run」）。
 	return dispatched, nil
@@ -192,8 +277,13 @@ func dispatchClientMsgID(t *Task) string {
 	if t == nil {
 		return ""
 	}
-	if id := strings.TrimSpace(t.ClientMsgID); id != "" {
-		return id
+	if t.Attempt > 1 {
+		// 同 client_msg_id 的重试是新的投递意图；目标侧去重表还留着上一次的键，
+		// 复用它会让重试静默命中 duplicate。新 attempt 用新 task id。
+		return string(t.ID)
+	}
+	if t.ClientMsgID != "" {
+		return t.ClientMsgID
 	}
 	return string(t.ID)
 }

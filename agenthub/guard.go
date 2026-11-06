@@ -101,6 +101,10 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 				groupDay += cost
 			}
 		}
+		// 同一 client_msg_id 的重试是显式重投（已由 Queue 查重分流），不算重复派发。
+		if t.ClientMsgID != "" && old.ClientMsgID == t.ClientMsgID {
+			continue
+		}
 		if old.Origin.AgentID == t.Origin.AgentID && sameTarget(old.Target, t.Target) &&
 			old.Instruction == t.Instruction && !old.CreatedAt.Before(now.Add(-lim.DuplicateWindow)) {
 			return fmt.Errorf("%w: 同一任务在 %s 内已派发（task %s）", ErrDuplicateTask, lim.DuplicateWindow, old.ID)

@@ -62,6 +62,9 @@ type DispatchReq struct {
 	TaskHeader string `json:"task_header,omitempty"`
 }
 
+// DispatchDuplicateMessage 是目标侧去重命中时的 Message（同一幂等键已投递过）。
+const DispatchDuplicateMessage = "duplicate"
+
 // DispatchResult 派发结果（P2-03 起 task 账本会引用这里的 run/session）。
 type DispatchResult struct {
 	SessionID string `json:"session_id"`
