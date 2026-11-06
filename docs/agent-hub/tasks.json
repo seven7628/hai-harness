@@ -981,10 +981,10 @@
       "reviewNote": "复审 passed（task-34y2nbmp，对象 09df959）：B1 在真实 APFS 上闭合（~/.ssh ≡ ~/.SSH ≡ ~/.Ssh same inode，末段/多段/子路径变体全命中，.ssh2 不误判）；6 条 mutation（旧前缀判敏感/去长度上限/去落盘回滚/去 Hub home 守卫/去敏感目录守卫/去 ~ 展开）全部被现有用例杀死，N7 断言证明 load-bearing；~ 展开后白名单仍生效（~/spaces/../spaces 正确放行，~/SPACE 只会过严不会放过）；N8 的 ENOTDIR → ErrInvalid 实测通过。非阻塞遗留（记入 P2 收尾）：N6 兜底命中后返回 clean 而非命中 key → Dispatch 仍 session not found 且多装配一个 runtime；N2 ListWorkspaces 仍列出 registry 里的敏感目录（knownWorkspace 已拒，列表口径不一致）；N4 只给 add 补了落盘失败回滚，sync/update/remove 仍留幽灵条目；N5 测试缺口：大小写变体在大小写敏感 FS 上 skip（应补与 FS 无关的折叠兜底断言）、N8 无用例、CreateWorkspace 删目录无用例；N1 残留文案（root 配了但目录不存在仍报「未配置」）；N6 agents/Electron 的敏感目录实现仍大小写敏感（既有，与本提交无关）。 → 3e47fc4 收尾复审非阻塞：knownWorkspace 兜底命中返回原键（不再多装配 runtime）、ListWorkspaces 过滤敏感目录、registry sync/update/remove 落盘失败也回滚、补 ENOTDIR/登记失败删目录/与 FS 无关的大小写折叠断言；验证 agenthub + bridge 全量绿。"
     },
     "P2-02": {
-      "status": "review",
+      "status": "done",
       "commit": "e735626 + 67e9cd4 + 4de19f5",
-      "review": "re-review_pending",
-      "reviewNote": "复审 change_requested（task-pbdgj74w，对象 e735626）。Blocking：B2 生产路径仍不幂等——Hub engine 总是挂 Queue，而 WorkspaceService.Send 的 Queue 分支不带 clientMsgID、queue.go 用 task id 兜底 → 同 id 两次建两个任务。且验收用例直调 ops / 无 Queue，是桩自证。修复（67e9cd4）：Task.ClientMsgID 落账本；Queue.Submit 在 q.mu 内按 (target, client_msg_id) 查重（锁覆盖查找+建账+入队）；Dispatch 优先调用方 id；Ledger.FindByClientMsgID 跨重启查重。新增生产链路用例（engine session_send 同 id → 同 task_id、queued=1、账本 client_msg_id）。同时修 N4 UpdatedAt（int64 毫秒被 time.Time 断言吞掉恒 nil）与 B1 残留（空标题落 defaultSessionTitle、80 rune）。未处理（非阻塞）：hubMsgDedup 无上限/TTL、duplicate 直派仍返回新随机 id、key 未含 AgentID、CanCreateWorkspace 未接线、方案工具表字段与实现不一致、sessionManualTitles 测试隔离。验证：agenthub + desktop/bridge 全量绿（56s）。 第二轮复审 change_requested（task-t8sqhsw8，对象 67e9cd4）：上轮生产链路 client_msg_id 已通（忙时同 id 同 task、8 并发 1 条、跨重启账本可命中）；新 blocking B1 命中 failed/canceled/declined/blocked_budget 仍返回旧终态、accepted=true 且不重投；B2 跨重启命中 queued 只返回不入队 → 永久孤儿；N1 三处键口径不一致（workspace 尾斜杠/空白 id）会建两条任务但目标只收一条，且 Pump 吞掉 duplicate。修复（4de19f5）：B1 同 id 新建 attempt 挂原链（root/parent/attempt/chain），重试用新 task id 作目标去重键；B2 queued 且不在内存队列时重新入队并 Pump 后 Replay；Submit 归一 workspace/session_id，FindByClientMsgID 同口径比较、空白 id 原样为键；Pump 遇 duplicate 落 canceled 留痕；护栏从 Service 移到 Submit 查重之后（SubmitGuarded），合法重试不再被「重复任务」误杀。新增回归：失败重试新 attempt、跨重启 queued 重入队、尾斜杠同键、duplicate 不静默、生产链路 Ask 失败后同 id 重投。验证：agenthub 全绿；bridge 目标用例含生产链路重投绿；全量 bridge 仅既有 TestReducerLLMEndDedupAndUsage 价格表波动一次（单跑绿）。",
+      "review": "passed",
+      "reviewNote": "复审 change_requested（task-pbdgj74w，对象 e735626）。Blocking：B2 生产路径仍不幂等——Hub engine 总是挂 Queue，而 WorkspaceService.Send 的 Queue 分支不带 clientMsgID、queue.go 用 task id 兜底 → 同 id 两次建两个任务。且验收用例直调 ops / 无 Queue，是桩自证。修复（67e9cd4）：Task.ClientMsgID 落账本；Queue.Submit 在 q.mu 内按 (target, client_msg_id) 查重（锁覆盖查找+建账+入队）；Dispatch 优先调用方 id；Ledger.FindByClientMsgID 跨重启查重。新增生产链路用例（engine session_send 同 id → 同 task_id、queued=1、账本 client_msg_id）。同时修 N4 UpdatedAt（int64 毫秒被 time.Time 断言吞掉恒 nil）与 B1 残留（空标题落 defaultSessionTitle、80 rune）。未处理（非阻塞）：hubMsgDedup 无上限/TTL、duplicate 直派仍返回新随机 id、key 未含 AgentID、CanCreateWorkspace 未接线、方案工具表字段与实现不一致、sessionManualTitles 测试隔离。验证：agenthub + desktop/bridge 全量绿（56s）。 第二轮复审 change_requested（task-t8sqhsw8，对象 67e9cd4）：上轮生产链路 client_msg_id 已通（忙时同 id 同 task、8 并发 1 条、跨重启账本可命中）；新 blocking B1 命中 failed/canceled/declined/blocked_budget 仍返回旧终态、accepted=true 且不重投；B2 跨重启命中 queued 只返回不入队 → 永久孤儿；N1 三处键口径不一致（workspace 尾斜杠/空白 id）会建两条任务但目标只收一条，且 Pump 吞掉 duplicate。修复（4de19f5）：B1 同 id 新建 attempt 挂原链（root/parent/attempt/chain），重试用新 task id 作目标去重键；B2 queued 且不在内存队列时重新入队并 Pump 后 Replay；Submit 归一 workspace/session_id，FindByClientMsgID 同口径比较、空白 id 原样为键；Pump 遇 duplicate 落 canceled 留痕；护栏从 Service 移到 Submit 查重之后（SubmitGuarded），合法重试不再被「重复任务」误杀。新增回归：失败重试新 attempt、跨重启 queued 重入队、尾斜杠同键、duplicate 不静默、生产链路 Ask 失败后同 id 重投。验证：agenthub 全绿；bridge 目标用例含生产链路重投绿；全量 bridge 仅既有 TestReducerLLMEndDedupAndUsage 价格表波动一次（单跑绿）。 第三轮复审 passed（task-9wm9uhvp，对象 4de19f5）：B1 失败后同 id 重投、新 task_id/attempt=2/parent/root/chain、账本 2 条；B2 跨重启 queued 真重新入队并派发、返回 Replay 后 dispatched；并发 8 同 id 1 条/1 投；尾斜杠同键、padded/空白 id 两侧口径一致；duplicate 落 canceled+Error；护栏在查重后，同 id 重放不被 Duplicate/TooConcurrent 误杀，不同 id 同指令仍拦。7 个非阻塞（跟进）：N1′ 队列分支不回传 Message（duplicate 原因模型看不到）；N2 重试 chain 每次 +1，第 7 次被 ErrChainTooDeep 永久锁死（chain 与 attempt 应分开）；N3 重启后换新 id 不回收旧 queued 孤儿且新任务插队；N4 queued 命中不回读账本；N5 q.mu 内两次全量 ListTasks + 跨 Ask；N6 护栏顺序无仓库用例（M5 仅外部探针杀）；N7 hub_taskboard.hubTaskRetry 与 Queue 新建 attempt 两份实现；N8 预置 id 被覆盖浪费。验证：agenthub 全量 + race 绿；bridge 子集绿；全量 bridge 的 MCP/guidance/reducer/TempDir 均为两提交共有噪声。",
       "reviewBatch": "A-rereview"
     },
     "P2-03": {
@@ -1096,11 +1096,11 @@
   "reviewGate": {
     "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。",
     "audit": {
-      "done_passed": 21,
-      "in_review": 15,
+      "done_passed": 22,
+      "in_review": 14,
       "not_started": 15,
       "in_review_breakdown": {
-        "re_review_pending": 3,
+        "re_review_pending": 2,
         "initial_pending": 12
       }
     },
