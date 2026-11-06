@@ -334,4 +334,11 @@ func TestHubRecoveryFailureDoesNotLatch(t *testing.T) {
 	if !m.hubRecovered {
 		t.Fatal("存储修好后第二次 hub_open 必须重试并成功")
 	}
+	q, err := m.hubQueueFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := q.QueuedCount("/w", "s1"); n != 1 {
+		t.Fatalf("第二次恢复 queued = %d, want 1", n)
+	}
 }

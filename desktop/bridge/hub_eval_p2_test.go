@@ -200,7 +200,9 @@ func TestEval6RestartIsExplainable(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf.Reset()
-	m.recoverHubTasks()
+	if err := m.recoverHubTasks(); err != nil {
+		t.Fatal(err)
+	}
 	got, err := ledger.Replay(context.Background(), orphan.ID)
 	if err != nil {
 		t.Fatal(err)

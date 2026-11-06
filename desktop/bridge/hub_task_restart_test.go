@@ -149,7 +149,9 @@ func TestHubTaskResultSurvivesMarkNotifiedFailureRestart(t *testing.T) {
 	if _, err := m2.hubDMSession(agentID); err != nil {
 		t.Fatal(err)
 	}
-	m2.recoverHubTasks()
+	if err := m2.recoverHubTasks(); err != nil {
+		t.Fatal(err)
+	}
 	origin2, err := m2.hubDMSession(agentID)
 	if err != nil {
 		t.Fatal(err)
