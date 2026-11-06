@@ -264,3 +264,37 @@ func TestGroupActivityToleratesTruncatedTail(t *testing.T) {
 		t.Fatalf("append after repair = %+v, %v", got, err)
 	}
 }
+
+// P3a-02 复审 N-1 残留：重启后未读先写也要先截断半行（rebuildIndex 扫 activity）。
+func TestGroupActivityRepairsTailBeforeFirstAppend(t *testing.T) {
+	dir := t.TempDir()
+	st, err := OpenFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	gid := GroupID("grp_bbbbbb")
+	if err := st.AppendActivity(ctx, &Activity{GroupID: gid, Kind: "tool", Name: "bash"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(st.activityPath(gid), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"group_id":"grp_bbbbbb","kind":"tool"`); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	// 模拟崩溃重启：OpenFileStore 的 rebuildIndex 必须先修好半行。
+	reopened, err := OpenFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.AppendActivity(ctx, &Activity{GroupID: gid, Kind: "tool", Name: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reopened.ReadActivity(ctx, gid, 0, 10)
+	if err != nil || len(got) != 2 || got[1].Name != "read" {
+		t.Fatalf("append-before-read after restart = %+v, %v", got, err)
+	}
+}

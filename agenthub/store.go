@@ -202,6 +202,18 @@ func (s *FileStore) rebuildIndex() error {
 		s.seq[gid] = max
 	}
 
+	// activity.jsonl 也要在启动时截断半行：否则重启后「未读先写」会把新记录
+	// 粘在半行后面，读侧再 tolerant 也救不回（P3a-02 复审 N-1 残留）。
+	activityMatches, err := filepath.Glob(filepath.Join(s.root, "groups", "*", "activity.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, path := range activityMatches {
+		if _, err := readJSONLTolerantTail[Activity](path); err != nil {
+			return err
+		}
+	}
+
 	dmMatches, err := filepath.Glob(filepath.Join(s.root, "dms", "*", "log.jsonl"))
 	if err != nil {
 		return err
