@@ -5,7 +5,9 @@ package agenthub
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -927,13 +929,18 @@ func TestQueueSameTargetSerializesDispatch(t *testing.T) {
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
 	}
+	// Submit 返回时 Pump 已走完：等 secondDone 是确定性信号，不用挂钟阈值
+	// （fsync/负载下 1s 会把正确实现误判为失败，P2.5-03 复审 B1）。
 	select {
-	case <-ops.started:
-	case <-time.After(time.Second):
-		t.Fatal("第一个完成后第二个没有派发")
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("第二个 Submit 10s 内未返回")
 	}
-	if err := <-secondDone; err != nil {
-		t.Fatal(err)
+	if n := ops.callCount("s1"); n != 2 {
+		t.Fatalf("dispatch calls = %d, want 2", n)
 	}
 }
 
@@ -1015,4 +1022,128 @@ func TestQueuePumpDoesNotHoldIndexLockDuringDispatch(t *testing.T) {
 	if err := <-pumpDone; err != nil {
 		t.Fatal(err)
 	}
+}
+
+// P2.5-03 N1：Submit 在账本 I/O 期间只能持目标锁，不能持 q.mu。
+// 用一个在 SaveTask 里阻塞的 store 做锚点：旧实现（全程 q.mu）下这里取 q.mu 会超时。
+type blockingCreateStore struct {
+	*MemoryStore
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingCreateStore) SaveTask(ctx context.Context, t *Task) error {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.MemoryStore.SaveTask(ctx, t)
+}
+
+func TestQueueSubmitDoesNotHoldIndexLockDuringLedgerIO(t *testing.T) {
+	store := &blockingCreateStore{
+		MemoryStore: NewMemoryStore(),
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	ops := &queueFakeOps{}
+	q := NewQueue(NewLedger(store), ops)
+	done := make(chan error, 1)
+	go func() { _, err := q.Submit(context.Background(), queueTask("账本阻塞")); done <- err }()
+	select {
+	case <-store.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Submit 未进入 SaveTask")
+	}
+	locked := make(chan struct{})
+	go func() {
+		q.mu.Lock()
+		q.mu.Unlock()
+		close(locked)
+	}()
+	select {
+	case <-locked:
+	case <-time.After(500 * time.Millisecond):
+		close(store.release)
+		<-done
+		t.Fatal("Submit 在账本 I/O 期间持有 q.mu")
+	}
+	close(store.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// P2.5-03 N2：keyedLocks 的引用计数归零后必须回收，避免一次性 key 无限增长。
+func TestKeyedLocksReclaimAfterUnlock(t *testing.T) {
+	var k keyedLocks
+	u := k.lock("a")
+	k.mu.Lock()
+	n := len(k.m)
+	k.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("locks while held = %d, want 1", n)
+	}
+	u()
+	k.mu.Lock()
+	n = len(k.m)
+	k.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("locks after release = %d, want 0", n)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				unlock := k.lock(string(rune('a' + (i+j)%4)))
+				unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	k.mu.Lock()
+	n = len(k.m)
+	k.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("locks after concurrent release = %d, want 0", n)
+	}
+}
+
+// P2.5-03 验收：多目标并发提交的基准（-bench 看吞吐；不参与普通单测）。
+type benchQueueOps struct{}
+
+func (benchQueueOps) ListWorkspaces(context.Context) ([]WorkspaceInfo, error) { return nil, nil }
+func (benchQueueOps) CreateWorkspace(context.Context, CreateWorkspaceReq) (WorkspaceInfo, error) {
+	return WorkspaceInfo{}, nil
+}
+func (benchQueueOps) ListSessions(context.Context, string) ([]SessionInfo, error) { return nil, nil }
+func (benchQueueOps) SessionStatus(_ context.Context, ws, sid string) (SessionInfo, error) {
+	return SessionInfo{ID: sid, Workspace: ws}, nil
+}
+func (benchQueueOps) CreateSession(context.Context, CreateSessionReq) (SessionInfo, error) {
+	return SessionInfo{}, nil
+}
+func (benchQueueOps) Dispatch(_ context.Context, req DispatchReq) (DispatchResult, error) {
+	return DispatchResult{SessionID: req.SessionID, Accepted: true}, nil
+}
+func (benchQueueOps) InterruptSession(context.Context, string) error { return nil }
+
+func BenchmarkQueueMultiTargetSubmit(b *testing.B) {
+	q := NewQueue(NewLedger(NewMemoryStore()), benchQueueOps{})
+	var seq atomic.Int64
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			n := seq.Add(1)
+			task := queueTask("bench")
+			task.Target.Workspace = "/w"
+			task.Target.SessionID = "s" + strconv.FormatInt(n%8, 10)
+			if _, err := q.Submit(context.Background(), task); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

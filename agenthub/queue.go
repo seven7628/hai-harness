@@ -33,9 +33,11 @@ type Queue struct {
 	mu      sync.Mutex
 	pending map[string][]TaskID // key = workspace + "\x00" + session_id
 
-	// targets 是每个 (workspace, session) 一把可重入外的互斥锁：
+	// targets 是每个 (workspace, session) 一把**不可重入**的互斥锁：
 	// Pump/Dispatch/Submit 的查重+建账+Cancel 只在同一目标内串行，
 	// 不再让一个忙碌会话阻塞其他会话（P2.5-03）。
+	// 契约：ops.Dispatch / SessionStatus / busy 回调不得同步反向调用本 Queue
+	// 的同目标方法（Dispatch 在持锁时调用，重入会自锁）。
 	targets keyedLocks
 }
 
