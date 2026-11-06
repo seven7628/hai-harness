@@ -305,6 +305,44 @@ func (q *Queue) Restore(t *Task) {
 	q.pending[key] = append(q.pending[key], t.ID)
 }
 
+// CancelDispatchedIfIdle 在 q.mu 内重读任务并取消「已派发但会话不忙」的任务。
+// busy 在锁内求值：Pump 的 Transition(dispatched)→Dispatch 全程持 q.mu，
+// 因此这里看到的 busy/latch 一定是 Dispatch 完成后的状态，不会把「已经 Ask
+// 进会话」的任务误判为空闲取消（P2-06 复审 B-2）。
+// 返回 (任务, 是否本次取消, err)；已终态返回最新快照 + canceled=false。
+func (q *Queue) CancelDispatchedIfIdle(ctx context.Context, id TaskID, reason string, busy func() bool) (*Task, bool, error) {
+	if q == nil || q.ledger == nil {
+		return nil, false, fmt.Errorf("%w: queue 未初始化", ErrInvalid)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	t, err := q.ledger.Replay(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	if t.Status.Terminal() {
+		return t, false, nil
+	}
+	if t.Status != TaskDispatched && t.Status != TaskRunning {
+		return t, false, fmt.Errorf("%w: task %s 状态 %q，不能按已派发取消", ErrInvalid, id, t.Status)
+	}
+	if busy != nil && busy() {
+		return t, false, nil
+	}
+	canceled, terr := q.ledger.Transition(ctx, id, TaskCanceled, TransitionOptions{
+		At: time.Now().UTC(), Error: reason,
+	})
+	if terr != nil {
+		if latest, rerr := q.ledger.Replay(ctx, id); rerr == nil && latest.Status.Terminal() {
+			return latest, false, nil
+		}
+		return nil, false, terr
+	}
+	return canceled, true, nil
+}
+
 // CancelQueued 取消一条仍在 Hub 队列里的任务：先从内存队列摘除，再落 canceled。
 // 非 queued（已派发/已结束）返回 ErrInvalid，由调用方走 interrupt 或幂等返回。
 func (q *Queue) CancelQueued(ctx context.Context, id TaskID) (*Task, error) {

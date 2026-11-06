@@ -531,3 +531,21 @@ func TestQueuePumpDuplicateIsNotSilentSuccess(t *testing.T) {
 		t.Fatalf("duplicate dispatch must leave an error, got %+v", created)
 	}
 }
+
+// P2-06 复审 B-2：取消已派发任务时 busy 在 q.mu 内求值；busy=true 不得 canceled。
+func TestQueueCancelDispatchedIfIdleRespectsBusy(t *testing.T) {
+	ops := &queueFakeOps{}
+	q, _ := newTestQueue(t, ops)
+	created, err := q.Submit(context.Background(), queueTask("已派发"))
+	if err != nil || created.Status != TaskDispatched {
+		t.Fatalf("submit = %+v, %v", created, err)
+	}
+	got, did, err := q.CancelDispatchedIfIdle(context.Background(), created.ID, "空闲误判", func() bool { return true })
+	if err != nil || did || got.Status != TaskDispatched {
+		t.Fatalf("busy cancel = status=%s did=%v err=%v; want dispatched/false", got.Status, did, err)
+	}
+	got, did, err = q.CancelDispatchedIfIdle(context.Background(), created.ID, "确认空闲", func() bool { return false })
+	if err != nil || !did || got.Status != TaskCanceled {
+		t.Fatalf("idle cancel = %+v did=%v err=%v; want canceled/true", got, did, err)
+	}
+}

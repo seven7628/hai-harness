@@ -109,38 +109,46 @@ func (m *manager) hubTaskCancel(c command) {
 		respTask(canceled, "已取消（未开始）")
 		return
 	}
-	// dispatched/running：中断会话，终态由根 AgentEnd 结算为 interrupted。
+	// dispatched/running：先中断会话；空闲兜底与 Pump 的派发窗口在 q.mu 内
+	// 串行判定，避免「已回已取消、Dispatch 仍把指令 Ask 进会话」（P2-06 复审 B-2）。
+	q, err := m.hubQueueFor()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
 	bs := m.sessionByID(t.Target.SessionID)
 	if bs == nil {
-		// 会话已经不在了 → 直接 canceled（否则任务永远停在 dispatched）。
-		canceled, cerr := agenthub.NewLedger(st).Transition(ctx, id, agenthub.TaskCanceled, agenthub.TransitionOptions{
-			At: time.Now().UTC(), Error: "目标会话不存在，取消任务",
-		})
+		canceled, did, cerr := q.CancelDispatchedIfIdle(ctx, id, "目标会话不存在，取消任务", nil)
 		if cerr != nil {
 			m.resp(c, false, "取消失败: "+cerr.Error(), nil)
 			return
 		}
-		m.emitHubTaskUpdate(canceled)
-		respTask(canceled, "目标会话不存在，已取消")
+		if did {
+			m.emitHubTaskUpdate(canceled)
+			respTask(canceled, "目标会话不存在，已取消")
+			return
+		}
+		respTask(canceled, "任务已结束，无需取消")
 		return
 	}
 	bs.s.Interrupt() // 幂等：空闲会话无操作；终态由 AgentEnd 结算
-	// 会话存在但没在跑（重启恢复的 dispatched/running、结算写盘失败）时
-	// Interrupt 是 no-op，不会再有 AgentEnd；必须直接 canceled，否则任务板
-	// 永远显示运行中且 retry 拒绝（P2-06 B2）。
-	if !bs.running.Load() && !bs.hubDispatchPending.Load() {
-		canceled, cerr := agenthub.NewLedger(st).Transition(ctx, id, agenthub.TaskCanceled, agenthub.TransitionOptions{
-			At: time.Now().UTC(), Error: "会话空闲，取消未结束的任务",
-		})
-		if cerr != nil {
-			m.resp(c, false, "取消失败: "+cerr.Error(), nil)
-			return
-		}
+	canceled, did, cerr := q.CancelDispatchedIfIdle(ctx, id, "会话空闲，取消未结束的任务", func() bool {
+		return bs.running.Load() || bs.hubDispatchPending.Load()
+	})
+	if cerr != nil {
+		m.resp(c, false, "取消失败: "+cerr.Error(), nil)
+		return
+	}
+	if did {
 		m.emitHubTaskUpdate(canceled)
 		respTask(canceled, "会话空闲，已取消")
 		return
 	}
-	respTask(t, "已请求中断，等待运行结束")
+	if canceled.Status.Terminal() {
+		respTask(canceled, "任务已结束，无需取消")
+		return
+	}
+	respTask(canceled, "已请求中断，等待运行结束")
 }
 
 func (m *manager) hubTaskRetry(c command) {

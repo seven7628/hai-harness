@@ -76,6 +76,10 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		At: time.Now().UTC(),
 	})
 	if err != nil {
+		// 人已取消：AgentEnd 迟到不能再结算，也不要制造 settle_failed 假告警。
+		if cur, lerr := st.LoadTask(ctx, first); lerr == nil && cur.Status == agenthub.TaskCanceled {
+			return
+		}
 		m.emitHubTaskAlert(first, "settle_failed", err.Error())
 	} else {
 		m.emitHubTaskUpdate(settled)

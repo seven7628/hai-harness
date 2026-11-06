@@ -365,3 +365,53 @@ func TestHubNeedResolveExpireNoLostUpdate(t *testing.T) {
 		_ = bs.s.Approve(id, false)
 	}
 }
+
+// P2-06 复审 B-2：真正在跑的会话不能被「空闲兜底」直接取消。
+func TestHubTaskCancelRunningSessionIsNotCanceled(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "CancelRunningAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-run", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs.running.Store(true)
+	st, _ := m.hubStore()
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_run"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: wsPath, SessionID: "s-run"},
+		Title:  "运行中", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_task_cancel", map[string]any{"task_id": string(task.ID)})
+	if !ok {
+		t.Fatalf("cancel: %s", errMsg)
+	}
+	got, _ := st.LoadTask(context.Background(), task.ID)
+	if got.Status == agenthub.TaskCanceled {
+		t.Fatal("running session was wrongly canceled by idle fallback")
+	}
+	if got.Status != agenthub.TaskDispatched {
+		t.Fatalf("status = %s, want dispatched (interrupt requested)", got.Status)
+	}
+	bs.running.Store(false)
+	bs.hubDispatchPending.Store(false)
+	ok, errMsg, _ = hubCmd(t, m, buf, 3, "hub_task_cancel", map[string]any{"task_id": string(task.ID)})
+	if !ok {
+		t.Fatalf("cancel idle: %s", errMsg)
+	}
+	got, _ = st.LoadTask(context.Background(), task.ID)
+	if got.Status != agenthub.TaskCanceled {
+		t.Fatalf("status = %s, want canceled after idle", got.Status)
+	}
+}
