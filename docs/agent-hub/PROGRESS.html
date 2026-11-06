@@ -1538,10 +1538,10 @@ const BASE = {
       "review": "passed"
     },
     "P2.5-02": {
-      "status": "review",
-      "commit": "a402ac0 fix(hub-p2.5-02): 修复 client 索引 holder 改键丢失并补变异/回退测试",
-      "reviewNote": "首轮 changes_requested（task-83828jp2，对象 d67903b）：B1 byClient 单槽 holder 改键丢 key + N1/N2/N4/N5 测试缺口。修复 a402ac0：byClient 改 []TaskID、holder 改键只摘单条；补 holder move/UpdatedAt 日桶/delivered 终态/dedupe 不归一化/零值索引/回退测试；TaskIndexReady 防零值 fail-open；补 OpenFileStore 损坏 task 测试。re-review 中（task-6yf6nzhh）。",
-      "review": "changes_requested"
+      "status": "done",
+      "commit": "a732647 fix(hub-p2.5-02): 回滚用 WithoutCancel + 补 Ready 回退/改键/终态/去重断言",
+      "reviewNote": "复审 passed（task-6yf6nzhh，对象 a402ac0）：B1 真修复，多 attempt 列表/只摘单条/取最新；20×24 步索引与全量重建差分对账零偏差；-race 绿。后续 a732647 处理 N-f（append 失败回滚复用已取消 ctx → 快照永久领先）并补 N-a~N-d 四条测试有效性断言。",
+      "review": "passed"
     },
     "P2.5-03": {
       "status": "review",
@@ -1550,13 +1550,13 @@ const BASE = {
     },
     "P2.5-04": {
       "status": "review",
-      "commit": "1985e21 fix(hub-p2.5-04): 初始派发按群现读预算 + 真实 LLMEnd 硬停链路覆盖（复审 B1/B2）",
-      "reviewNote": "首审 changes_requested（task-rxanr89b，对象 30ac3f1）：B1 群日预算只在 retry/运行中硬停生效，初始派发 Guard 缺 GroupDailyBudgetUSD；B2 运行中硬停 LLMEnd 链路零自动化覆盖（删 Interrupt/接线变异全存活）。修复（1985e21）：Guard 新增 GroupDailyBudget 钩子，初始派发按任务 Origin.GroupID 现读 Group.Policy（读失败 fail-closed）；bridge 统一 hubWorkspaceGuard，DM 引擎也带钩子；新增真实 LLMEnd→预算检查→Interrupt 链路、累计/停止闩/新 batch 归零、群预算初始派发与钩子 fail-closed 用例。无价告警计数断言已修（5a5e2ab）。re-review 中。"
+      "commit": "44a70f3 fix(hub-p2.5-04): 群会话初始派发带 Origin.GroupID + 硬停 Interrupt/群全局分支覆盖",
+      "reviewNote": "首审 changes_requested（task-rxanr89b）：B1 群预算未进初始派发；B2 LLMEnd 硬停链路零覆盖。修复 1985e21/a1bf24d 后二轮复审（task-hntq9azr）又指出：群 Origin 仍不可达、Interrupt/绑定/群/全局 4 类变异存活。44a70f3 修复：buildHubEngine 按 spec.Scope 装配 OriginGroup；hubInterrupt 可注入并断言调用；真实 UserInputsConsumed header 绑定；群会话真实 session_send 群预算拒绝；群/全局 hubBudgetCheck 分支用例。re-review 中（task-cg2mpmmy）。"
     },
     "P2.5-05": {
       "status": "review",
-      "reviewNote": "独立复审中（task-xncczkx6）。实现：emitHubTaskAlert envelope（scope/code/severity）；恢复扫描锁外、单任务重读锁内；前端 alerts store/rail 告警栈/dismiss/recovery 重试；alerts.ts 纯函数。",
-      "commit": "8d8c4f7 feat(hub-p2.5-05): hub_alert 统一 envelope + 前端告警中心 + 恢复锁拆分"
+      "reviewNote": "首审 changes_requested（task-xncczkx6，对象 8d8c4f7）：B1 Restore 锁外重读可把已终态任务塞回 pending；B2 5 个 hub_alert 生产点 4 个未统一 envelope；B3 告警中心离开 Hub 页即丢、重试是假入口、任务级告警未内联。修复 92e01f9：Restore 目标锁内 Replay 重读；emitHubAlert 单一出口并统一 key/severity/空 task_id；App 级订阅 + 全局 banner + 真实 recovery 重试 + 任务卡/Needs you 内联 + alertKey 去重（不含 at）；test:hub-alerts 6 项。re-review 中（task-rs7t3s2h）。",
+      "commit": "92e01f9 fix(hub-p2.5-05): Restore 锁内重读 + hub_alert 单一出口 + 全局告警中心/任务内联"
     },
     "P2.5-06": {
       "status": "review",
