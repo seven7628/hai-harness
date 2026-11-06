@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -198,6 +200,8 @@ func TestHubAgentEndPumpsQueuedTask(t *testing.T) {
 	// 只结束子 agent：不应泵（根 run 还在跑，闸门也仍 busy）。
 	bs.emit(&events.AgentEnd{RunId: "root", ParentRunId: "root", Depth: 1,
 		Timestamp: time.Now(), EventType: events.AgentEndType})
+	// 泵是异步的：给可能被错误启动的 goroutine 一个调度窗口，避免「瞬间读」漏检。
+	time.Sleep(300 * time.Millisecond)
 	if got := q.QueuedCount(wsPath, "s-pump"); got != 1 {
 		t.Fatalf("子 agent AgentEnd 泵了队列: queued = %d", got)
 	}
@@ -487,4 +491,58 @@ func TestHubAgentEndPumpDoesNotBlockEmit(t *testing.T) {
 		t.Fatal("emit 被同步泵阻塞（N-1 自死锁回归）")
 	}
 	close(block)
+}
+
+// P2-03 N-1 回归：根 AgentEnd 泵时 Ask 持久化失败会 emit persist_error；
+// 同步泵会在 dispatchMu 上自锁。必须 2s 内返回，且排队任务落定。
+func TestHubAgentEndPumpWithPersistFailureDoesNotDeadlock(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	createWorkspaceAgent(t, m, buf, 1, "PumpPersistFail", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-lock", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := m.hubQueueFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs.running.Store(true)
+	if _, err := q.Submit(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_lock"},
+		Target: agenthub.TaskTarget{Kind: agenthub.TargetWorkspace, Workspace: wsPath, SessionID: "s-lock"},
+		Title:  "锁", Instruction: "x", Callback: agenthub.CallbackAgentEnd,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bs.running.Store(false)
+	// 让下一次 Ask 的 session persist 必失败：把 jsonl 换成同名目录。
+	statePath := filepath.Join(bs.runtime.storeDir, bs.id+".jsonl")
+	if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		bs.emit(&events.AgentEnd{RunId: "root", Timestamp: time.Now(), EventType: events.AgentEndType})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("根 AgentEnd 被同步泵自锁（N-1 回归）")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for q.QueuedCount(wsPath, "s-lock") != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := q.QueuedCount(wsPath, "s-lock"); got != 0 {
+		t.Fatalf("queued = %d, want 0 after pump failure", got)
+	}
 }
