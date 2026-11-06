@@ -1546,8 +1546,9 @@ const BASE = {
       "reviewNote": "依赖 02；P3b 多智能体并发前必须完成。"
     },
     "P2.5-04": {
-      "status": "todo",
-      "reviewNote": "D1 已拍板：B+硬停。agent $20/日、群 $50/日、全局 $200/日；单任务默认不限；无价告警；日预算运行中硬停（Session MaxCost + agent loop 每轮检查）。"
+      "status": "review",
+      "commit": "30ac3f1 feat(hub-p2.5-04): 预算默认/群全局接线/无价告警/运行中硬停/预算 UI",
+      "reviewNote": "独立复审中（task-rxanr89b）。按 D1 B+硬停：新 agent/群默认 $20/$50、全局 $200；update 可显式 0；无价用量按 agent 告警一次；LLMEnd 累计 + hubBudgetCheck + Interrupt，AgentEnd 改落 blocked_budget；AgentEditor 预算输入、GroupView 预算 chip。验证：agenthub 绿；预算/硬停/无价用例绿；前端 tsc/eslint/test:hub-patch/test:hub 绿；TestHub 仅既有 TempDir cleanup 偶发。"
     },
     "P2.5-05": {
       "status": "todo",
