@@ -207,7 +207,7 @@ func TestHubUnpricedUsageWarnsOncePerAgent(t *testing.T) {
 	buf.Reset()
 	m.warnUnpricedUsageOnce("task_a", agent.ID)
 	m.warnUnpricedUsageOnce("task_b", agent.ID)
-	if got := strings.Count(buf.String(), `"usage_unpriced"`); got != 1 {
+	if got := strings.Count(buf.String(), `"code":"usage_unpriced"`); got != 1 {
 		t.Fatalf("usage_unpriced count = %d, want 1; out=%s", got, buf.String())
 	}
 	if !usageHasTokens(agenthub.Usage{Input: 1}) || usageHasTokens(agenthub.Usage{}) {
