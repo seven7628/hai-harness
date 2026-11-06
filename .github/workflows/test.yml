@@ -1,0 +1,34 @@
+name: test
+
+# P2.5-01：干净检出编译门。仓库历史上大量 *_test.go 只存在于本机
+# .git/info/exclude，CI 又只在 tag 时跑 go test ./... —— 结果是 push/PR
+# 全绿、干净检出/发版时才炸。这里先加最小门：所有包必须能编译。
+#
+# 注意：这是编译门，不是完整测试门。逐包补全测试文件后再把 run 改成
+# `go test ./...`（见 docs/agent-hub/tasks.json P2.5-01）。
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-test-compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go test compile
+        run: go test ./... -run '^$'
