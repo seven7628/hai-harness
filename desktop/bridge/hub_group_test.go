@@ -199,6 +199,32 @@ func TestHubGroupHistoryAndRoundSummary(t *testing.T) {
 	if !strings.Contains(page.Messages[len(page.Messages)-1].Text, "bash") {
 		t.Fatalf("round summary text = %q", page.Messages[len(page.Messages)-1].Text)
 	}
+	// limit=0 会被 store 钳成默认值；has_more 只能用生效分页判断，不能拿 0 比较。
+	ok, errMsg, data = hubCmd(t, m, buf, 4, "hub_group_history", map[string]any{"group_id": string(g.ID), "limit": 0})
+	if !ok {
+		t.Fatalf("history limit=0: %s", errMsg)
+	}
+	raw, _ = json.Marshal(data)
+	page = struct {
+		Messages []agenthub.Message `json:"messages"`
+		HasMore  bool               `json:"has_more"`
+	}{}
+	_ = json.Unmarshal(raw, &page)
+	if len(page.Messages) == 0 || page.HasMore {
+		t.Fatalf("limit=0 page = %s, want non-empty and has_more=false", raw)
+	}
+}
+
+func TestGroupHistoryHasMoreUsesEffectivePage(t *testing.T) {
+	if groupHistoryHasMore(nil) {
+		t.Fatal("empty page must not claim more")
+	}
+	if groupHistoryHasMore([]agenthub.Message{{Seq: 1}, {Seq: 2}}) {
+		t.Fatal("page starting at seq 1 has no older page")
+	}
+	if !groupHistoryHasMore([]agenthub.Message{{Seq: 501}, {Seq: 502}}) {
+		t.Fatal("page starting after seq 1 must report older pages")
+	}
 }
 
 func TestHubGroupSendRoutesAndReceipts(t *testing.T) {

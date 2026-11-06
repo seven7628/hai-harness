@@ -40,7 +40,10 @@ func BuildRoundSummary(group GroupID, roundID string, items []RoundItem, at time
 		if a.Status != b.Status {
 			return a.Status < b.Status
 		}
-		return a.Summary < b.Summary
+		if a.Summary != b.Summary {
+			return a.Summary < b.Summary
+		}
+		return a.Ms < b.Ms
 	})
 	var b strings.Builder
 	for _, it := range sorted {

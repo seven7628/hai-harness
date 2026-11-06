@@ -455,6 +455,12 @@ func decodeGroupPayload(v any, out any) error {
 	return json.Unmarshal(raw, out)
 }
 
+// groupHistoryHasMore 用生效分页的第一条 seq 判断是否还有更早消息。
+// 不能拿请求 limit 与返回条数比较：store 会把 limit 钳到 1..500。
+func groupHistoryHasMore(msgs []agenthub.Message) bool {
+	return len(msgs) > 0 && msgs[0].Seq > 1
+}
+
 // hubGroupHistory 群日志分页（before_seq=0 最新页）。
 func (m *manager) hubGroupHistory(c command) {
 	st, err := m.hubStore()
@@ -463,12 +469,16 @@ func (m *manager) hubGroupHistory(c command) {
 		return
 	}
 	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
-	msgs, err := agenthub.ReadGroupLog(context.Background(), st, gid, numOr(c.Payload, "before_seq", 0), int(numOr(c.Payload, "limit", 50)))
+	limit := int(numOr(c.Payload, "limit", 50))
+	msgs, err := agenthub.ReadGroupLog(context.Background(), st, gid, numOr(c.Payload, "before_seq", 0), limit)
 	if err != nil {
 		m.resp(c, false, "读取群日志失败: "+err.Error(), nil)
 		return
 	}
-	m.resp(c, true, "", map[string]any{"messages": msgs, "has_more": len(msgs) >= int(numOr(c.Payload, "limit", 50))})
+	if msgs == nil {
+		msgs = []agenthub.Message{} // 空页必须是 []，前端直接 map
+	}
+	m.resp(c, true, "", map[string]any{"messages": msgs, "has_more": groupHistoryHasMore(msgs)})
 }
 
 // hubGroupActivity 群活动分页（独立流，不进快照）。

@@ -170,6 +170,14 @@ func TestBuildRoundSummaryDeterministic(t *testing.T) {
 	if len(lines) != 3 || !strings.HasPrefix(lines[0], "ag_a · bash") || !strings.HasPrefix(lines[2], "ag_b · list") {
 		t.Fatalf("lines = %#v", lines)
 	}
+	// 同 (agent,tool,status,summary) 只有 Ms 不同：排序必须稳定，不能跟输入顺序。
+	sameA := RoundItem{AgentID: "ag_a", Tool: "bash", Status: "done", Summary: "ok", Ms: 30}
+	sameB := RoundItem{AgentID: "ag_a", Tool: "bash", Status: "done", Summary: "ok", Ms: 45}
+	x := BuildRoundSummary("grp_aaaaaa", "rnd_2", []RoundItem{sameA, sameB}, at)
+	y := BuildRoundSummary("grp_aaaaaa", "rnd_2", []RoundItem{sameB, sameA}, at)
+	if x.Text != y.Text {
+		t.Fatalf("summary with same tuple must sort by Ms:\n%s\n---\n%s", x.Text, y.Text)
+	}
 }
 
 func TestBuildDigestDeterministic(t *testing.T) {
@@ -221,5 +229,38 @@ func TestGroupLogConcurrentAppend(t *testing.T) {
 			t.Fatalf("bad seq: %v", seqs)
 		}
 		seen[s] = true
+	}
+}
+
+// P3a-02 复审 N-1：activity.jsonl 的半行也要像 log.jsonl 一样在读取时截断，
+// 否则后续追加会粘在半行后面，整条活动流永久损坏。
+func TestGroupActivityToleratesTruncatedTail(t *testing.T) {
+	st, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	gid := GroupID("grp_aaaaaa")
+	if err := st.AppendActivity(ctx, &Activity{GroupID: gid, Kind: "tool", Name: "bash"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(st.activityPath(gid), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"group_id":"grp_aaaaaa","kind":"tool"`); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	got, err := st.ReadActivity(ctx, gid, 0, 10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("read after partial tail = %d, %v", len(got), err)
+	}
+	if err := st.AppendActivity(ctx, &Activity{GroupID: gid, Kind: "tool", Name: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = st.ReadActivity(ctx, gid, 0, 10)
+	if err != nil || len(got) != 2 || got[1].Name != "read" {
+		t.Fatalf("append after repair = %+v, %v", got, err)
 	}
 }

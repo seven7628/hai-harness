@@ -464,7 +464,9 @@ func (s *FileStore) ReadActivity(ctx context.Context, gid GroupID, afterSeq int6
 	}
 	limit = normalizeLimit(limit)
 	s.mu.Lock()
-	items, err := readJSONL[Activity](s.activityPath(gid))
+	// 与 log.jsonl 同口径：崩溃留下的半行在读取时截断，否则后续追加会粘在
+	// 半行后面，整条活动流永久 ErrCorrupt（P3a-02 复审 N-1）。
+	items, err := readJSONLTolerantTail[Activity](s.activityPath(gid))
 	s.mu.Unlock()
 	if err != nil {
 		return nil, err
