@@ -490,7 +490,8 @@
       ],
       "files": [
         "docs/AGENT_HUB_TECH_PLAN.md",
-        "evals/"
+        "desktop/bridge/hub_eval_p2_test.go",
+        "desktop/bridge/hub_task_tools.go"
       ],
       "acceptance": "一句话建工作区派任务；完成后回推；人工介入不续跑；重启可解释；Review passed。",
       "tests": "go test ./agenthub/... ./desktop/bridge/...",
@@ -1031,9 +1032,9 @@
     },
     "P2-09": {
       "status": "review",
-      "commit": "31c445e test(hub-p2-09): 评测 4–6（一句话派任务/人工介入/重启可解释）",
-      "review": "pending",
-      "reviewNote": "实现评测 4–6（desktop/bridge/hub_eval_p2_test.go）：Eval4 workspace_create→session_create→session_send 全链路，目标任务真跑一轮，账本 completed→delivered、发起者收到 task_result；Eval5 排队任务被人取消后不自动执行/不自动重试；Eval6 无 run 的 dispatched 恢复为 interrupted + recovered_interrupted + Needs you(重启说明)。验证：TestEval1-6 全绿（6.3s）、desktop/bridge 全量绿（41s）。待办：P2 阶段整体 Review（P2-01..P2-08）+ 逐任务复审结论落看板后，P2-09 才能 passed。",
+      "commit": "31c445e test(hub-p2-09): 评测 4–6（一句话派任务/人工介入/重启可解释） + 31b8800",
+      "review": "re-review_pending",
+      "reviewNote": "实现评测 4–6（desktop/bridge/hub_eval_p2_test.go）：Eval4 workspace_create→session_create→session_send 全链路，目标任务真跑一轮，账本 completed→delivered、发起者收到 task_result；Eval5 排队任务被人取消后不自动执行/不自动重试；Eval6 无 run 的 dispatched 恢复为 interrupted + recovered_interrupted + Needs you(重启说明)。验证：TestEval1-6 全绿（6.3s）、desktop/bridge 全量绿（41s）。待办：P2 阶段整体 Review（P2-01..P2-08）+ 逐任务复审结论落看板后，P2-09 才能 passed。 阶段 Review change_requested（task-rgax3wfq，对象 bb5f72a）：核心链路与 Eval4–6 真断言（9 变异全杀），但两项 P2 交付缺失：B1 task_status/task_cancel 模型工具不存在（Hub 引擎 27 工具无此名，L1 提示词却要求 task_status()）；B2 §6.7.5 人工介入未实现（运行中插话后 human_intervened 恒 false、回推无提示，Eval5 实为取消）。修复（31b8800）：新增 hub_task_tools.go 注册 task_status（只允许本智能体任务）与 task_cancel（复用 cancelHubTask）；Injected 且当前有 hub_task 时置 hubHumanIntervened，新 batch 清零，结算写入 HumanIntervened，回推追加「人类介入，先确认最新意图，不要自动继续」；Eval4 派发后实际调 task_status；补工具/介入回归与变异验证。非阻塞：评测编号与 §10.3 漂移、Eval6 直调恢复非真重启、Eval4 只验送达、前端仅构建级。待第二轮阶段复审（对象 31b8800）。",
       "reviewBatch": "E-last"
     },
     "P3a-01": {
