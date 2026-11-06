@@ -1243,8 +1243,8 @@
     },
     "P2.5-03": {
       "status": "done",
-      "commit": "57c8cb0 fix(hub-p2.5-03): 去掉挂钟断言 + Submit 锁粒度/回收测试与多目标基准",
-      "reviewNote": "复审 passed（task-c6uczxpv，对象 57c8cb0）：B1 挂钟断言已改确定性 secondDone，-race/GOMAXPROCS=1/负载下 60 次全绿；B2 Restore 重读已由 92e01f9 闭合且用真实旧实现验证测试会红；N1/N2 新用例能杀死真实全局锁/不回收实现；锁序单一无死锁。后续 36fad60 补首锚点超时兜底、keyedLocks 回收互斥断言与注释同步。",
+      "commit": "3cd9ea8 fix(hub-p2.5-03): Pump 有界越过全部陈旧队首，避免静默停队",
+      "reviewNote": "复审 passed（task-c6uczxpv，对象 57c8cb0 + c127b82 + 3cd9ea8）：B1 挂钟断言改确定性 secondDone；B2 Restore 锁内重读；N1/N2 测试能杀死真实全局锁/不回收实现；Pump 对陈旧队首改为目标锁内有界循环，一次越过全部 stale 并派发真实任务（测试用两条 stale + 空队断言）。锁序单一、-race/负载稳定。剩余非阻塞：存储错误保留队首分支无直测、多目标基准受 MemoryStore 单锁限制。",
       "review": "passed"
     },
     "P2.5-04": {
