@@ -1435,6 +1435,54 @@ func (s *Session) RunningSnapshot() []core.Message {
 	return append([]core.Message{}, s.runningSnapshot...)
 }
 
+// HasTaskResult 会话的任一投递通道（history / messages / runningSnapshot /
+// pending inbox）是否已有该任务的 task_result。用于宿主侧回推幂等：只读，
+// 不排空、不改变顺序；checkpoint-first 重启后 history 可能为空，必须查
+// messages/runningSnapshot/pending 三路（P2-05 复审）。
+func (s *Session) HasTaskResult(taskID string) bool {
+	if s == nil || taskID == "" {
+		return false
+	}
+	prefix := "〔后台任务 " + taskID + " "
+	match := func(m core.Message) bool {
+		for _, c := range m.Content {
+			if c.Type == core.ContentTypeTaskResult && strings.HasPrefix(c.Content, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, list := range [][]core.Message{s.history, s.messages, s.runningSnapshot} {
+		for _, m := range list {
+			if match(m) {
+				return true
+			}
+		}
+	}
+	// inbox 不能直接遍历：drain→refill；Ask 入队同持 s.mu，故期间不会有新生产者。
+	var pending []core.Message
+	for {
+		select {
+		case m := <-s.inbox:
+			pending = append(pending, m)
+		default:
+			goto refill
+		}
+	}
+refill:
+	for _, m := range pending {
+		s.inbox <- m
+	}
+	for _, m := range pending {
+		if match(m) {
+			return true
+		}
+	}
+	return false
+}
+
 // absorb 吸收一次运行的结果：整段替换有效上下文，本轮产出并入完整历史（检查点
 // 已并入的部分跳过，防重复），累计用量与成本。
 func (s *Session) absorb(ac *agents.AgentContext) {

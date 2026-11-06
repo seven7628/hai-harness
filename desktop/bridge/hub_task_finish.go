@@ -138,7 +138,7 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 	// 快照（P2-05 复审 B-1）。
 	// checkpoint-first 重启只恢复 messages、不恢复 history（session.go 的 record
 	// 分支），所以两处都要查；否则崩溃窗口会在模型上下文里出现第二份结果。
-	if taskResultInHistory(origin.s.History(), task.ID) || taskResultInHistory(origin.s.Messages(), task.ID) {
+	if origin.s.HasTaskResult(string(task.ID)) {
 		if _, err := ledger.MarkNotified(context.Background(), task.ID, runID); err != nil {
 			m.emitHubTaskAlert(task.ID, "notify_failed", err.Error())
 			return
