@@ -1189,6 +1189,13 @@ func TestQueuePumpDropsStaleTerminalHead(t *testing.T) {
 	if _, err := q.ledger.Transition(ctx, stale.ID, TaskCanceled, TransitionOptions{At: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
+	stale2, err := q.ledger.Create(ctx, queueTask("另一个陈旧队首"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ledger.Transition(ctx, stale2.ID, TaskCanceled, TransitionOptions{At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	next, err := q.ledger.Create(ctx, queueTask("应继续派发"))
 	if err != nil {
 		t.Fatal(err)
@@ -1196,16 +1203,16 @@ func TestQueuePumpDropsStaleTerminalHead(t *testing.T) {
 	key := queueKey("/w", "s1")
 	unlock := q.targets.lock(key)
 	q.enqueueLocked(key, stale.ID)
+	q.enqueueLocked(key, stale2.ID)
 	q.enqueueLocked(key, next.ID)
 	unlock()
-	if _, err := q.Pump(ctx, queueTask("x").Target); err != nil {
-		t.Fatalf("first pump: %v", err)
-	}
-	if n := q.QueuedCount("/w", "s1"); n != 1 {
-		t.Fatalf("stale head not dropped: queued=%d", n)
-	}
+	// 同一次 Pump 应越过陈旧队首并派发后面的真实任务，而不是把新任务
+	// 留成「已排队」等下一次触发（P2.5-03 N）。
 	dispatched, err := q.Pump(ctx, queueTask("x").Target)
 	if err != nil || dispatched == nil || dispatched.ID != next.ID {
-		t.Fatalf("second pump = %+v, %v; want %s", dispatched, err, next.ID)
+		t.Fatalf("pump = %+v, %v; want %s", dispatched, err, next.ID)
+	}
+	if n := q.QueuedCount("/w", "s1"); n != 0 {
+		t.Fatalf("queued after pump = %d, want 0", n)
 	}
 }
