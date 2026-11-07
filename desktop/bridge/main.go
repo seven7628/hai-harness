@@ -323,6 +323,8 @@ type bridgeSession struct {
 	// hubGroupBusy 该群会话已投递但尚未 AgentEnd 的唤醒。忙时不投第二个快照，
 	// 避免两个 round 共用一次 AgentEnd。
 	hubGroupBusy atomic.Bool
+	// hubDelta 群内流式草稿的生产侧（nil = DM/项目会话）。只在 emit 的 run goroutine 写。
+	hubDelta *hubDeltaSink
 	// hubGroupSeq 单调发号（永不回 0）；hubGroupOwner 是当前 busy 轮的代号
 	// （0 = idle）；hubGroupRunSeq 是正在跑的 run 绑定的代号。runLoop 在
 	// 「没有 AgentEnd」的终止路径上也要清闩，但旧 run 不能清掉新轮次的闩。
@@ -642,12 +644,22 @@ func (bs *bridgeSession) emit(e events.Event) {
 	switch ev := e.(type) {
 	case *events.ContentChunk:
 		bs.appendLiveText(ev.Content)
+		if bs.hubDelta != nil {
+			bs.hubDelta.feed(ev.RunId, ev.Content)
+		}
 	case *events.ReasoningChunk:
 		bs.appendLiveThink(ev.Content)
 	case *events.AgentStart:
 		if ev.ParentRunId == "" && ev.Depth == 0 && bs.hubGroupWake != nil {
 			// 记住这一轮群 run 的 busy 代号：runLoop 的兜底清理只能清自己那一代。
 			bs.hubGroupRunSeq.Store(bs.hubGroupOwner.Load())
+			if bs.hubDelta != nil {
+				wake := bs.hubGroupWake
+				if wake.MessageID == "" {
+					wake.MessageID = agenthub.NewID(agenthub.PrefixMessage)
+				}
+				bs.hubDelta.start(string(wake.GroupID), string(wake.AgentID), wake.RoundID, wake.MessageID, ev.RunId)
+			}
 		}
 		bs.resetLive() // 新 run：旧 run 的残留文本不能串到这一轮
 	case *events.UserInputsConsumed:
@@ -730,6 +742,10 @@ func (bs *bridgeSession) emit(e events.Event) {
 		}
 		if bs.metrics != nil {
 			_ = bs.metrics.Record(entry)
+		}
+	case *events.ToolStart:
+		if bs.hubDelta != nil {
+			bs.hubDelta.flush()
 		}
 	case *events.ToolResponse:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
@@ -1788,6 +1804,9 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		hubSpec := opts.hub
 		bs.hubOnAgentEnd = func(content string) { m.finishHubReply(bs, hubSpec, content) }
 		bs.hubEngine = hubEng
+		if hubSpec.Scope.Kind == agenthub.ScopeGroup {
+			bs.hubDelta = newHubDeltaSink(m.out)
+		}
 	}
 	if opts.cronEvDir != "" {
 		bs.cronEvDir = opts.cronEvDir
@@ -4196,6 +4215,9 @@ func stopSession(bs *bridgeSession) {
 	bs.hubGroupBusy.Store(false)
 	bs.hubGroupOwner.Store(0)
 	bs.hubGroupRunSeq.Store(0)
+	if bs.hubDelta != nil {
+		bs.hubDelta.close()
+	}
 	if bs.ctx.Err() == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = bs.s.Shutdown(ctx)

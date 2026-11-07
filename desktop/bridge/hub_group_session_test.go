@@ -10,6 +10,7 @@ import (
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/agents"
+	"github.com/seven7628/hai-harness/provider"
 )
 
 func groupWithMembers(t *testing.T, m *manager, buf *syncBuf, cmdID int, name string, agents ...struct {
@@ -30,7 +31,7 @@ func groupWithMembers(t *testing.T, m *manager, buf *syncBuf, cmdID int, name st
 	return groupFromData(t, data)
 }
 
-func setGroupFakeLoop(t *testing.T, m *manager, bs *bridgeSession, g *agenthub.Group, agentID string, fake *evalProvider) {
+func setGroupFakeLoop(t *testing.T, m *manager, bs *bridgeSession, g *agenthub.Group, agentID string, fake provider.Provider) {
 	t.Helper()
 	loaded, _, err := m.hubLoadAgent(agentID)
 	if err != nil {

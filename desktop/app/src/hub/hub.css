@@ -614,3 +614,24 @@ button.hub-budget-chip:hover { border-color: currentColor; }
   gap: 4px;
   margin: 6px 0;
 }
+
+/* P3a-09 群内流式草稿：轻量文本 + 光标；final 到达后整条替换为 Markdown 气泡。 */
+.hub-msg.streaming .hub-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.hub-stream-text { white-space: pre-wrap; word-break: break-word; }
+.hub-stream-caret {
+  display: inline-block;
+  width: 6px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: currentColor;
+  animation: hub-caret 1s steps(1) infinite;
+}
+.streaming-chip { opacity: .72; }
+@keyframes hub-caret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .hub-stream-caret { animation: none; }
+}

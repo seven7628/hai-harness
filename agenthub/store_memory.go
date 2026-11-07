@@ -196,7 +196,7 @@ func (s *MemoryStore) AppendMessage(ctx context.Context, m *Message) (int64, err
 	defer s.mu.Unlock()
 	seq := int64(len(s.messages[m.GroupID]) + 1)
 	m.Seq = seq
-	m.ID = MessageID(seq)
+	m.ID = messageIDFor(m, seq)
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = nowUTC()
 	}
@@ -236,7 +236,7 @@ func (s *MemoryStore) AppendMessageWithRound(ctx context.Context, m *Message, ro
 	seq := int64(len(s.messages[m.GroupID]) + 1)
 	stored := cloneMessage(*m)
 	stored.Seq = seq
-	stored.ID = MessageID(seq)
+	stored.ID = messageIDFor(&stored, seq)
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = nowUTC()
 	}

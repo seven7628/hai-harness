@@ -109,6 +109,7 @@
     "test:short-path": "esbuild src/lib/shortPath-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/short-path.test.cjs && node --test /tmp/short-path.test.cjs",
     "test:hub-patch": "node scripts/test-agent-patch.mjs",
     "test:hub": "node scripts/test-hub-thread.mjs",
+    "test:hub-stream": "node scripts/test-hub-stream.mjs",
     "test:hub-alerts": "node scripts/test-hub-alerts.mjs"
   },
   "build": {

@@ -421,7 +421,7 @@ func (s *FileStore) AppendMessage(ctx context.Context, m *Message) (int64, error
 	stored := *m
 	stored.Seq = seq
 	// 消息 ID 是 seq 的确定函数；忽略调用方传入值，避免写出不符合协议的 ID。
-	stored.ID = MessageID(seq)
+	stored.ID = messageIDFor(&stored, seq)
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = time.Now().UTC()
 	}
@@ -489,7 +489,7 @@ func (s *FileStore) AppendMessageWithRound(ctx context.Context, m *Message, roun
 	seq := s.seq[m.GroupID] + 1
 	stored := *m
 	stored.Seq = seq
-	stored.ID = MessageID(seq)
+	stored.ID = messageIDFor(&stored, seq)
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = time.Now().UTC()
 	}

@@ -222,7 +222,7 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		t.m.hubGroupSendMu.Unlock()
 		return "", fmt.Errorf("%w: 群组已删除", agenthub.ErrNotFound)
 	}
-	msg, routed, limitHit, routeErr, err := t.m.appendAgentGroupMessageLocked(ctx, st, g, t.agentID, text, "", true)
+	msg, routed, limitHit, routeErr, err := t.m.appendAgentGroupMessageLocked(ctx, st, g, t.agentID, text, "", "", true)
 	t.m.hubGroupSendMu.Unlock()
 	if limitHit {
 		return "", fmt.Errorf("%w: 本轮智能体发言已达上限 %d，等人类回复后再继续", agenthub.ErrInvalid, groupTurnLimit(g))

@@ -18,8 +18,10 @@ type NeedID string
 type ArtifactID string
 
 // ID 前缀。日志、事件、mesh 寻址都靠前缀判断实体类型。
-// Message 不在此列：消息 ID 是确定性的 msg_<seq>，见 MessageID。
+// Message 默认是确定性的 msg_<seq>（见 MessageID）；带流式草稿的消息在 AgentStart
+// 先分配一个 msg_<random>，final 落账时由 store 保留同一个 ID。
 const (
+	PrefixMessage  = "msg"
 	PrefixAgent    = "ag"
 	PrefixGroup    = "grp"
 	PrefixTask     = "task"
@@ -31,12 +33,19 @@ const (
 
 var idEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
-// MessageID 返回 msg_<seq>。
-//
-// 消息 ID 刻意不是随机串：seq 是群内单调游标，msg_<seq> 让日志/事件/前端 key 天然一致；
-// 跨群不唯一是已知且可接受的（Message 总带 group_id/DM 归属）。
+// MessageID 返回 msg_<seq>（默认 ID；没有预分配流式 ID 的消息走这里）。
+// 带流式草稿的消息在 AgentStart 用 NewID(PrefixMessage) 预分配，final 必须复用同一个 ID。
 func MessageID(seq int64) string {
 	return "msg_" + strconv.FormatInt(seq, 10)
+}
+
+// messageIDFor 保留调用方预分配的流式 ID（AgentStart → final 同一 message_id）；
+// 其余消息仍用确定性的 msg_<seq>。只接受 msg_ 前缀，避免任意字符串写进日志。
+func messageIDFor(m *Message, seq int64) string {
+	if m != nil && strings.HasPrefix(m.ID, PrefixMessage+"_") && validID(m.ID) {
+		return m.ID
+	}
+	return MessageID(seq)
 }
 
 // IDGenerator 生成“前缀_随机串”的 ID。

@@ -5,6 +5,7 @@ import { hubCommand } from './api'
 import { GroupBubble } from './MessageBubble'
 import { RoundGroup } from './RoundGroup'
 import { RoundActivityDigest } from './RoundActivityDigest'
+import { StreamingMessage } from './StreamingMessage'
 import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './groupThread'
 import type { HubGroup, HubGroupMember, HubMessage } from './types'
 
@@ -15,6 +16,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const messages = useHubStore((s) => s.groupMessages)
   const activity = useHubStore((s) => s.groupActivity)
   const rounds = useHubStore((s) => s.groupRounds)
+  const drafts = useHubStore((s) => s.groupDrafts)
   const sending = useHubStore((s) => s.groupSending)
   const send = useHubStore((s) => s.sendGroup)
   const agents = useHubStore((s) => s.agents)
@@ -107,13 +109,18 @@ export default function GroupView({ group }: { group: HubGroup }) {
           </div>
         ) : (
           <div className="hub-thread">
-            {messages.length === 0 ? (
+            {messages.length === 0 && drafts.length === 0 ? (
               <div className="hub-intro">
                 <p>{t('hub.groupIntro')}</p>
                 <span className="hub-muted">{t('hub.groupHint')}</span>
               </div>
             ) : null}
             {renderThread(items, agentNames, displayMode === 'grouped')}
+            {drafts
+              .filter((d) => d.groupId === group.id)
+              .map((d) => (
+                <StreamingMessage key={d.messageId} draft={d} name={agentNames[d.agentId] ?? d.agentId} />
+              ))}
           </div>
         )}
       </div>

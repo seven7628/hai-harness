@@ -3,6 +3,7 @@ import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type { HubAgent, HubAlert, HubDMInfo, HubGroup, HubHistoryPage, HubMessage, HubGroupActivity, HubNeed, HubPage, HubRound, HubRunEntry, HubTask } from './types'
 import { addHubAlert, alertFromEvent } from './alerts'
+import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, type HubMessageDelta, type HubStreamDraft } from './groupStream'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -63,6 +64,10 @@ interface HubState {
   groupRounds: HubRound[]
   groupActivity: HubGroupActivity[]
   groupSending: boolean
+  /** 群内流式草稿（P3a-09）：按 message_id 并行，final 后删除。 */
+  groupDrafts: HubStreamDraft[]
+  /** final 过的 message_id 最近 200 个；迟到 delta 据此丢弃。 */
+  finalizedMessageIds: string[]
 
   openHub(): void
   closeHub(): void
@@ -143,6 +148,8 @@ export const useHubStore = create<HubState>((set, get) => ({
   groupRounds: [],
   groupActivity: [],
   groupSending: false,
+  groupDrafts: [],
+  finalizedMessageIds: [],
 
   openHub() {
     set({ open: true })
@@ -189,6 +196,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       groupActivity: [],
       groupRounds: [],
       groupSending: false,
+      groupDrafts: [],
       messages: [],
       hasMore: false,
       live: '',
@@ -418,7 +426,7 @@ export const useHubStore = create<HubState>((set, get) => ({
     const gen = ++groupSelectGen
     set({
       activeGroupId: groupID, activeId: null, profile: null, sid: null,
-      groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false,
+      groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false, groupDrafts: [],
       messages: [], live: '', rootRunId: null,
       error: null, loading: true,
     })
@@ -452,7 +460,7 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   clearGroup() {
     groupSendGen++
-    set({ activeGroupId: null, groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false })
+    set({ activeGroupId: null, groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false, groupDrafts: [] })
   },
 
   async sendGroup(text) {
@@ -519,6 +527,9 @@ export const useHubStore = create<HubState>((set, get) => ({
       task_id?: string
       at?: string
       round?: HubRound
+      message_id?: string
+      index?: number
+      delta?: string
     }
     try {
       ev = JSON.parse(line) as typeof ev
@@ -530,9 +541,13 @@ export const useHubStore = create<HubState>((set, get) => ({
     switch (ev.event_type) {
       case 'hub_message': {
         if (ev.group_id) {
-          if (ev.group_id !== get().activeGroupId) return
           const msg = typeof ev.message === 'string' ? undefined : ev.message
           if (!msg) return
+          // final 覆盖草稿：即使消息属于别的群，也要把该 message_id 记入 finalized，
+          // 否则切回该群时迟到的 delta 会重新长出草稿。
+          const fin = finalizeHubDraft(get().groupDrafts, get().finalizedMessageIds, msg.id)
+          set({ groupDrafts: fin.drafts, finalizedMessageIds: fin.finalized })
+          if (ev.group_id !== get().activeGroupId) return
           set((s) => {
             const withoutPending = ev.client_msg_id
               ? s.groupMessages.filter((m) => m.clientMsgId !== ev.client_msg_id)
@@ -571,6 +586,13 @@ export const useHubStore = create<HubState>((set, get) => ({
         })
         return
       }
+      case 'hub_message_delta': {
+        if (!ev.group_id || ev.group_id !== get().activeGroupId) return
+        set((s) => ({
+          groupDrafts: applyHubDelta(s.groupDrafts, ev as HubMessageDelta, s.finalizedMessageIds),
+        }))
+        return
+      }
       case 'content_chunk': {
         // 只收：① 当前会话 ② 根 run（子 agent 的 chunk 也带同一 session_id，run_id 不同）。
         if (!sid || (ev.session_id && ev.session_id !== sid)) return
@@ -598,6 +620,11 @@ export const useHubStore = create<HubState>((set, get) => ({
       }
       case 'agent_end': {
         if (!isRoot) return // 子 agent 结束不能熄根 run 的运行点
+        // 群内空回复/中断没有 final hub_message：按群会话 id 清掉该 agent 的草稿。
+        const groupScope = groupScopeFromSession(ev.session_id)
+        if (groupScope && groupScope.groupId === get().activeGroupId) {
+          set((s) => ({ groupDrafts: dropDraftsForAgent(s.groupDrafts, groupScope.agentId) }))
+        }
         if (!activeId || !sid || (ev.session_id && ev.session_id !== sid)) return
         set((s) => ({
           running: { ...s.running, [activeId]: false },

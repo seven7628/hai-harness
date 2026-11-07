@@ -39,7 +39,7 @@ func (s *FileStore) AppendDirectMessage(ctx context.Context, agentID AgentID, m 
 	seq := s.dmSeq[agentID] + 1
 	stored := *m
 	stored.Seq = seq
-	stored.ID = MessageID(seq)
+	stored.ID = messageIDFor(&stored, seq)
 	stored.GroupID = ""
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = time.Now().UTC()

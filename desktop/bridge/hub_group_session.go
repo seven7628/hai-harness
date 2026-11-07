@@ -224,6 +224,11 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, conten
 		m.appendHubReply(spec, content)
 		return
 	}
+	if bs.hubDelta != nil {
+		// final hub_message 之前同步 flush 最后一段 delta（80ms 窗口不能把尾巴
+		// 留到 final 之后）。空回复也会走这里，随后由 agent_end 清草稿。
+		bs.hubDelta.finish()
+	}
 	wake := bs.hubGroupWake
 	bs.hubGroupWake = nil
 	runSeq := bs.hubGroupRunSeq.Load()
@@ -292,7 +297,7 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		}
 		return
 	}
-	msg, routed, limitHit, routeErr, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, text, wake.RoundID, false)
+	msg, routed, limitHit, routeErr, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, text, wake.RoundID, wake.MessageID, false)
 	m.hubGroupSendMu.Unlock()
 	if limitHit {
 		// 轮次上限：不写消息、不唤醒；写一条 activity 让 UI 能看到「被限流」，
@@ -363,7 +368,7 @@ func enforceGroupTurnLimit(ctx context.Context, st agenthub.Store, g *agenthub.G
 // 调用方必须持有 hubGroupSendMu；wake 由调用方在解锁后做（会话装配可能很慢）。
 // routeFatal=true：@ 解析失败就不落消息（group_say 的工具语义）；false：正文照发、
 // 只把 routeErr 交回调用方告警（final 的语义）。
-func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, text, roundID string, routeFatal bool) (msg *agenthub.Message, routed *agenthub.Round, limitHit bool, routeErr error, err error) {
+func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, text, roundID, messageID string, routeFatal bool) (msg *agenthub.Message, routed *agenthub.Round, limitHit bool, routeErr error, err error) {
 	if limitHit, err = enforceGroupTurnLimit(ctx, st, g); err != nil {
 		return nil, nil, false, nil, err
 	}
@@ -378,7 +383,7 @@ func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub
 		r = nil
 	}
 	msg = &agenthub.Message{
-		GroupID: g.ID, Kind: agenthub.KindText,
+		GroupID: g.ID, Kind: agenthub.KindText, ID: messageID,
 		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: sender},
 		Text:   text, RoundID: roundID,
 	}
