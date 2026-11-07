@@ -876,7 +876,10 @@
       ],
       "acceptance": "创建 agent 任务；不能派自己；同对在途 ≤2；目标成员校验；消息 intent=assign。",
       "tests": "go test ./agenthub/ -run Assign",
-      "commit": "feat(hub-p3b-03): assign_task 智能体任务"
+      "commit": "df4fde4",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "复审（task-24d7ps75）PASS。R1 结构化路由三成员测试（C 零唤醒/零事件）；R2 hubAssignMessageHook + 回滚失败告警；R3 CancelDispatchedIfIdle 按 queueKeyFor 加锁 + hubGroupBusy 统一忙判据（真实 hub_task_cancel 闩窗口用例）。N1 PairActiveCount（File/Memory，无 ListTasks 全表扫）、N2 permanent 错误取消出队、N4 agent retry 显式拒绝、N5 C→B 作用域、N6 单一忙判据/Ask 失败归还闩。变异 M5/M6/R3a/R3b/N5 均 RED；定向 -count=5 -race、go vet 绿；全量仅两处已知环境性失败；工作区路径未变。"
     },
     {
       "id": "P3b-04",
@@ -1117,7 +1120,9 @@
       "id": "D-agent-task-pump",
       "source": "P3b-03",
       "title": "assign_task 目标忙时任务留 queued；当前没有对话控制器在目标回合结束后泵",
-      "depends_on": ["P3b-04"],
+      "depends_on": [
+        "P3b-04"
+      ],
       "return_when": "P3b-04 实现时调用 Queue.Pump(agent target) 并在目标回合结束/冷却后泵",
       "status": "deferred"
     },
@@ -1125,7 +1130,9 @@
       "id": "D-finish-agent-task",
       "source": "P3b-03",
       "title": "agent target 的 AgentEnd 未结算：无 finishAgentTask/任务结果卡/回推发起者/declined",
-      "depends_on": ["P3b-05"],
+      "depends_on": [
+        "P3b-05"
+      ],
       "return_when": "P3b-05 实现时接 hub_task header 绑定与结果卡",
       "status": "deferred"
     },
@@ -1133,7 +1140,9 @@
       "id": "D-human-group-assign",
       "source": "P3b-03",
       "title": "人类 hub_group_assign 命令未实现（当前只有智能体 assign_task）",
-      "depends_on": ["P3b-07 前端任务卡/派发 UI"],
+      "depends_on": [
+        "P3b-07 前端任务卡/派发 UI"
+      ],
       "return_when": "P3b-07 或人机派发 UI 落地时",
       "status": "deferred"
     }

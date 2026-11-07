@@ -1178,7 +1178,10 @@ const BASE = {
       ],
       "acceptance": "创建 agent 任务；不能派自己；同对在途 ≤2；目标成员校验；消息 intent=assign。",
       "tests": "go test ./agenthub/ -run Assign",
-      "commit": "feat(hub-p3b-03): assign_task 智能体任务"
+      "commit": "df4fde4",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "复审（task-24d7ps75）PASS。R1 结构化路由三成员测试（C 零唤醒/零事件）；R2 hubAssignMessageHook + 回滚失败告警；R3 CancelDispatchedIfIdle 按 queueKeyFor 加锁 + hubGroupBusy 统一忙判据（真实 hub_task_cancel 闩窗口用例）。N1 PairActiveCount（File/Memory，无 ListTasks 全表扫）、N2 permanent 错误取消出队、N4 agent retry 显式拒绝、N5 C→B 作用域、N6 单一忙判据/Ask 失败归还闩。变异 M5/M6/R3a/R3b/N5 均 RED；定向 -count=5 -race、go vet 绿；全量仅两处已知环境性失败；工作区路径未变。"
     },
     {
       "id": "P3b-04",
