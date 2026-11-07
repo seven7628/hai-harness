@@ -913,7 +913,9 @@
       ],
       "acceptance": "目标 AgentEnd 结算；结果卡；派发者唤醒；不再重复发群消息；declined/canceled 路径。",
       "tests": "go test ./desktop/bridge/ -run FinishAgentTask",
-      "commit": "feat(hub-p3b-05): 智能体任务结算"
+      "commit": "feat(hub-p3b-05): 智能体任务结算",
+      "status": "in_progress",
+      "note": "实现中（finishAgentTask/结果卡/派发者唤醒/declined+canceled）"
     },
     {
       "id": "P3b-06",
