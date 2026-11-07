@@ -801,6 +801,15 @@ func (s *FileStore) ActiveCount(agent AgentID) int {
 	return s.taskIdx.ActiveCount(agent)
 }
 
+// PairActiveCount 实现 PairActiveIndex：assign_task 的同对在途上限走内存索引，
+// 与 Guard/Ledger 的其余查询同口径（回退 ListTasks 会在群会话高频提交时全表扫描）。
+func (s *FileStore) PairActiveCount(group GroupID, from, to AgentID) int {
+	if s == nil || s.taskIdx == nil {
+		return 0
+	}
+	return s.taskIdx.PairActiveCount(group, from, to)
+}
+
 func (s *FileStore) DailyCost(agent AgentID, group GroupID, day time.Time) (agentCost, groupCost, globalCost float64) {
 	if s == nil || s.taskIdx == nil {
 		return 0, 0, 0

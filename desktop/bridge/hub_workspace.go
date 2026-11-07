@@ -210,9 +210,10 @@ func (o *hubWorkspaceOps) SessionStatus(ctx context.Context, workspace, sessionI
 	}
 	return agenthub.SessionInfo{
 		ID: sessionID, Workspace: path,
-		// hubDispatchPending 覆盖 takeBatch→AgentStart 的窗口：已 Ask 但根 run 未起，
-		// 此时 running 还是 false、Pending 已清空，只看两者会误判空闲（P2-03 B1）。
-		Running: bs.running.Load() || bs.hubDispatchPending.Load() || bs.hubSettling.Load(),
+		// 统一忙判据（含 hubDispatchPending 覆盖的 takeBatch→AgentStart 窗口：已 Ask
+		// 但根 run 未起，此时 running 还是 false、Pending 已清空，只看两者会误判空闲，
+		// P2-03 B1）与群轮闩（hubGroupBusy：群任务已投但 AgentEnd 未到，P3b-03 R3）。
+		Running: hubSessionBusy(bs),
 		Pending: bs.s.PendingCount(),
 	}, nil
 }
@@ -440,8 +441,8 @@ func (o *hubWorkspaceOps) AgentDispatch(ctx context.Context, req agenthub.AgentD
 		}
 	}()
 	// 占闩后二次确认：running/pending 还说明有未收尾的回合（闩和运行态短暂不一致时
-	// 也不能把第二个 hub_task 塞进同一批）。
-	if bs.running.Load() || bs.s.PendingCount() > 0 || bs.hubSettling.Load() {
+	// 也不能把第二个 hub_task 塞进同一批）。闩本身已经被本次占住，用去掉闩的判据。
+	if hubSessionRoundInFlight(bs) || bs.s.PendingCount() > 0 {
 		return agenthub.AgentDispatchResult{SessionID: bs.id, Accepted: false}, nil
 	}
 	// 进程内幂等（同一 (会话, client_msg_id) 只投一次）；跨重启靠账本状态。
@@ -464,7 +465,12 @@ func (o *hubWorkspaceOps) AgentDispatch(ctx context.Context, req agenthub.AgentD
 		}
 	}
 	msg := hubDispatchMessage(text, req.TaskHeader)
+	// 与工作区派发同口径：Ask 成功到根 AgentStart 之间的窗口用 hubDispatchPending
+	// 表达忙（AgentStart/AgentEnd 会清）——这段 running 还是 false，只看运行态会把
+	// 「已投递、未开跑」读成空闲（P2-03 B1 / P3b-03 R3）。
+	bs.hubDispatchPending.Store(true)
 	if err := bs.s.Ask(ctx, msg); err != nil {
+		bs.hubDispatchPending.Store(false)
 		if dedupKey != "" {
 			o.m.mu.Lock()
 			delete(o.m.hubMsgDedup, dedupKey)

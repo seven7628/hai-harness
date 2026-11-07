@@ -496,6 +496,14 @@ func (s *MemoryStore) ActiveCount(agent AgentID) int {
 	return s.taskIdx.ActiveCount(agent)
 }
 
+// PairActiveCount 实现 PairActiveIndex（与 FileStore 同语义，P3b-03 N1）。
+func (s *MemoryStore) PairActiveCount(group GroupID, from, to AgentID) int {
+	if s == nil || s.taskIdx == nil {
+		return 0
+	}
+	return s.taskIdx.PairActiveCount(group, from, to)
+}
+
 func (s *MemoryStore) DailyCost(agent AgentID, group GroupID, day time.Time) (agentCost, groupCost, globalCost float64) {
 	if s == nil || s.taskIdx == nil {
 		return 0, 0, 0

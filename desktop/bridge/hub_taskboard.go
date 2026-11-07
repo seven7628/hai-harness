@@ -143,7 +143,9 @@ func (m *manager) cancelHubTask(ctx context.Context, id agenthub.TaskID) (*agent
 		return canceled, "任务已结束，无需取消", nil
 	}
 	canceled, did, cerr := q.CancelDispatchedIfIdle(ctx, id, "会话空闲，取消未结束的任务", func() bool {
-		return bs.running.Load() || bs.hubDispatchPending.Load() || bs.hubSettling.Load()
+		// 统一忙判据（P3b-03 N6）：只认 running/dispatchPending/settling 会把
+		// 「群任务已投、AgentEnd 未到」（hubGroupBusy）误判空闲并直接取消。
+		return hubSessionBusy(bs)
 	})
 	if cerr != nil {
 		return nil, "", fmt.Errorf("取消失败: %w", cerr)
@@ -202,6 +204,13 @@ func (m *manager) hubTaskRetry(c command) {
 	}
 	if !old.Status.Terminal() {
 		m.resp(c, false, "任务还在进行中，先取消再重试", nil)
+		return
+	}
+	if old.Target.Kind == agenthub.TargetAgent {
+		// agent 目标的重试要走 assign 路径（群消息 + 目标校验 + 同对上限 + 派发），
+		// 这里直接 SubmitGuarded 会让任务静默排队到永远（没有对话控制器泵它）。
+		// 接线归 P3b-04/05：在那之前显式拒绝，而不是假装成功。
+		m.resp(c, false, "智能体目标任务暂不支持重试（重试接线在 P3b-04/05）：请用 assign_task 重新指派，或取消后重派", nil)
 		return
 	}
 	instruction := strings.TrimSpace(str(c.Payload, "instruction"))

@@ -720,14 +720,25 @@ const (
 	hubToolStatusRunning = "running"
 )
 
-// hubSessionBusy 该会话是否有未收尾的回合：正在跑 / 已派发未开跑 / AgentEnd 未结算 /
-// 群轮已投递未回复。与 hub_taskboard 的忙判据同口径，另外加上群轮闩。
+// hubSessionBusy 该会话是否有未收尾的回合：正在跑 / 已 Ask 未开跑 / AgentEnd 未结算 /
+// 群轮已投递未回复。这是**唯一**的忙判据：状态词、队列闸门（SessionStatus）、
+// 任务板取消（空闲兜底）必须共用它，否则同一时刻会有两种「空闲」（P3b-03 N6）。
 func hubSessionBusy(bs *bridgeSession) bool {
 	if bs == nil {
 		return false
 	}
 	return bs.running.Load() || bs.hubDispatchPending.Load() || bs.hubSettling.Load() ||
 		bs.hubGroupBusy.Load()
+}
+
+// hubSessionRoundInFlight 是 hubSessionBusy 去掉「群轮闩」的那部分：
+// AgentDispatch 已经 CAS 占住闩（占闩之后再看闩恒真），它要确认的是闩之外
+// 还有没有未收尾的回合。
+func hubSessionRoundInFlight(bs *bridgeSession) bool {
+	if bs == nil {
+		return false
+	}
+	return bs.running.Load() || bs.hubDispatchPending.Load() || bs.hubSettling.Load()
 }
 
 // hubAgentLiveStatus 返回某智能体**真实**的忙闲（只读运行态，绝不装配会话：

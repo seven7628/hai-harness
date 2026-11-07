@@ -24,6 +24,19 @@ import (
 	"github.com/seven7628/hai-harness/tools"
 )
 
+// hubAssignMessageHook 仅测试用：写指派消息之前的确定性屏障（生产恒为 nil）。
+// 返回错误时 assign 走「消息没写成 → 取消已建任务」的回滚路径（P3b-03 R2）；
+// 钩子拿到 task id 也能模拟「写消息窗口里任务被别的路径结算」。
+var hubAssignMessageHook func(taskID agenthub.TaskID) error
+
+// hubAssignMessageBarrier 读钩子时取一次快照（同 hubGroupAssembleBarrier 惯例）。
+func hubAssignMessageBarrier(taskID agenthub.TaskID) error {
+	if hook := hubAssignMessageHook; hook != nil {
+		return hook(taskID)
+	}
+	return nil
+}
+
 func registerHubAssignTaskTool(eng *tools.Engine, m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) {
 	if eng == nil || m == nil || agentID == "" || groupID == "" {
 		return
@@ -217,8 +230,14 @@ func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*age
 	if err != nil {
 		// 消息没写成：任务还没派发，取消它 —— 不能留一条「有任务、无消息」的指派。
 		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		_, _ = q.CancelQueued(cancelCtx, created.ID)
+		_, cerr := q.CancelQueued(cancelCtx, created.ID)
 		cancel()
+		if cerr != nil {
+			// 回滚失败不能静默：任务可能已经被别的路径派发/结算，调用方却只看到
+			// 「写消息失败」。留一条任务级告警给任务板（P3b-03 N3）。
+			m.emitHubTaskAlert(created.ID, "assign_rollback_failed",
+				"写指派消息失败后取消任务也失败（任务可能已被派发）: "+cerr.Error())
+		}
 		return nil, 0, false, fmt.Errorf("写指派消息失败: %w", err)
 	}
 	if seq > 0 && created.Origin.MessageSeq != seq {
@@ -262,6 +281,11 @@ func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*age
 func (m *manager) appendAssignMessage(ctx context.Context, st agenthub.Store, g *agenthub.Group, from agenthub.AgentID, task *agenthub.Task, instruction string) (int64, bool, error) {
 	if g == nil || task == nil {
 		return 0, false, fmt.Errorf("%w: assign 消息参数为空", agenthub.ErrInvalid)
+	}
+	// 写消息前的确定性屏障（测试注入；生产恒为 nil）：用来复现「任务已建、消息没写成」
+	// 的回滚路径，而不是靠 sleep/关磁盘（P3b-03 R2）。
+	if err := hubAssignMessageBarrier(task.ID); err != nil {
+		return 0, false, err
 	}
 	routed, err := m.routeAgentGroupMentions(ctx, st, g, from, agenthub.MentionRequest{
 		Mentions: []agenthub.AgentID{task.Target.AgentID},

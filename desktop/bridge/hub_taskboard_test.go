@@ -621,3 +621,103 @@ func TestHubNeedLazyExpiry(t *testing.T) {
 		t.Fatalf("expired need was approved: %s", raw)
 	}
 }
+
+// P3b-03 R3：Ask→AgentStart 窗口里 hubGroupBusy 已被占、running 仍是 false。
+// 取消不能把这种任务当成「会话空闲」直接 canceled（那是已经 Ask 进会话、正在跑的
+// 回合）；必须走中断并如实回「已请求中断」。变异：忙判据漏掉群轮闩 → 本测试红。
+func TestHubTaskCancelAgentTargetInGroupLatchWindowIsNotIdle(t *testing.T) {
+	m, buf := testManager(t)
+	a := createDispatchAgent(t, m, buf, 1, "LatchCancelA", true)
+	b := createDispatchAgent(t, m, buf, 2, "LatchCancelB", true)
+	g := assignGroup(t, m, buf, 3, "取消闸群", map[agenthub.AgentID]string{a.ID: "owner", b.ID: "member"})
+	bsB, err := m.hubGroupSession(string(b.ID), string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bsB.hubGroupBusy.Store(true) // AgentDispatch 已 Ask、根 run 还没起
+
+	st := mustHubStore(t, m)
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: g.ID, AgentID: a.ID},
+		Target: agenthub.TaskTarget{
+			Kind: agenthub.TargetAgent, AgentID: b.ID, GroupID: g.ID, SessionID: bsB.id,
+		},
+		Title: "窗口里的指派", Instruction: "查价格", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, errMsg, data := hubCmd(t, m, buf, 4, "hub_task_cancel", map[string]any{"task_id": string(task.ID)})
+	if !ok {
+		t.Fatalf("cancel: %s", errMsg)
+	}
+	var canceled struct {
+		Task *agenthub.Task `json:"task"`
+		Note string         `json:"note"`
+	}
+	raw, _ := json.Marshal(data)
+	if err := json.Unmarshal(raw, &canceled); err != nil {
+		t.Fatalf("cancel payload = %s (%v)", raw, err)
+	}
+	got, err := st.LoadTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == agenthub.TaskCanceled {
+		t.Fatalf("Ask→AgentStart 窗口里的任务被当成空闲取消（note=%q）", canceled.Note)
+	}
+	if got.Status != agenthub.TaskDispatched {
+		t.Fatalf("status = %s, want dispatched（已请求中断）", got.Status)
+	}
+	if !strings.Contains(canceled.Note, "中断") {
+		t.Fatalf("note = %q, want 「已请求中断…」", canceled.Note)
+	}
+
+	// 闩归还（AgentEnd 之后）再取消：这次是真的空闲，取消必须生效。
+	bsB.hubGroupBusy.Store(false)
+	if ok, errMsg, _ = hubCmd(t, m, buf, 5, "hub_task_cancel", map[string]any{"task_id": string(task.ID)}); !ok {
+		t.Fatalf("cancel idle: %s", errMsg)
+	}
+	if got, err = st.LoadTask(context.Background(), task.ID); err != nil || got.Status != agenthub.TaskCanceled {
+		t.Fatalf("闩归还后 status = %v, %v; want canceled", got, err)
+	}
+}
+
+// P3b-03 N4：agent 目标的重试还没接线（P3b-04/05）——必须显式拒绝，
+// 不能 SubmitGuarded 之后静默排队到永远（没有对话控制器泵它）。
+func TestHubTaskRetryRejectsAgentTarget(t *testing.T) {
+	m, buf := testManager(t)
+	st := mustHubStore(t, m)
+	ledger := agenthub.NewLedger(st)
+	task, err := ledger.Create(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: "grp_retry", AgentID: "ag_retry_a"},
+		Target: agenthub.TaskTarget{
+			Kind: agenthub.TargetAgent, AgentID: "ag_retry_b", GroupID: "grp_retry",
+			SessionID: "hub.ag_retry_b.g.grp_retry",
+		},
+		Title: "指派", Instruction: "查价格", Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskCanceled,
+		agenthub.TransitionOptions{At: time.Now().UTC(), Error: "先取消"}); err != nil {
+		t.Fatal(err)
+	}
+	ok, errMsg, _ := hubCmd(t, m, buf, 1, "hub_task_retry", map[string]any{"task_id": string(task.ID)})
+	if ok {
+		t.Fatal("agent 目标任务的重试必须显式拒绝")
+	}
+	if !strings.Contains(errMsg, "P3b-04") {
+		t.Fatalf("errMsg = %q, 应说明重试接线在 P3b-04/05", errMsg)
+	}
+	tasks, err := st.ListTasks(context.Background(), agenthub.TaskFilter{})
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks = %d, %v; want 1（拒绝时不能建新任务）", len(tasks), err)
+	}
+}

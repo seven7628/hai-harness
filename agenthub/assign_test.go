@@ -319,3 +319,174 @@ func TestTaskValidateAgentTarget(t *testing.T) {
 		t.Fatalf("missing group_id = %v", err)
 	}
 }
+
+// P3b-03 R3：CancelDispatchedIfIdle 必须与 pumpAgent 锁**同一个** key（queueKeyFor）。
+// 旧实现用 queueKey(workspace, sessionID)：agent 目标的 workspace 为空，key 与泵的
+// (group, agent) 不同 —— 取消不与「Transition(dispatched) → AgentDispatch」串行，
+// 会在 Ask 之后的窗口里把任务当空闲取消（变异：改回 workspace+sid key → 本测试红）。
+func TestQueueCancelDispatchedAgentSerializedWithPump(t *testing.T) {
+	q, _, _ := newAssignQueue(t)
+	ctx := context.Background()
+	created, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_b", "派发窗口取消"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped, err := q.Pump(ctx, created.Target); err != nil || pumped == nil || pumped.Status != TaskDispatched {
+		t.Fatalf("pump = %+v, %v; want dispatched", pumped, err)
+	}
+	// 占住 pumpAgent 用的那把键，模拟「泵正在 Transition→AgentDispatch 之间」。
+	unlockTarget := q.targets.lock(queueKeyFor(created.Target))
+	busyCalled := make(chan struct{})
+	done := make(chan struct{})
+	var (
+		got       *Task
+		did       bool
+		cancelErr error
+	)
+	go func() {
+		got, did, cancelErr = q.CancelDispatchedIfIdle(ctx, created.ID, "竞态取消", func() bool {
+			close(busyCalled)
+			return false
+		})
+		close(done)
+	}()
+	select {
+	case <-busyCalled:
+		unlockTarget()
+		<-done
+		t.Fatal("busy 在 agent 目标锁外求值：取消可与 pumpAgent 的 Ask→Transition 交错")
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlockTarget()
+	<-done
+	if cancelErr != nil || !did || got == nil || got.Status != TaskCanceled {
+		t.Fatalf("cancel = %+v did=%v err=%v; want canceled/true", got, did, cancelErr)
+	}
+}
+
+// P3b-03 N1：FileStore/MemoryStore 都必须实现 PairActiveIndex；同对在途上限走内存
+// 索引（回退 ListTasks 会让每次 assign 全表扫一遍任务目录）。
+func TestQueueAssignPairLimitUsesIndex(t *testing.T) {
+	st := &countingListStore{MemoryStore: NewMemoryStore()}
+	var idx PairActiveIndex = st
+	if !idx.TaskIndexReady() {
+		t.Fatal("MemoryStore 未实现 PairActiveIndex（Queue 会回退 ListTasks 全表扫描）")
+	}
+	ops := newAssignOps()
+	ops.agentBusy = true // 都不派发，稳定留在非终态
+	q := NewQueue(NewLedger(st), ops)
+	ctx := context.Background()
+	for _, text := range []string{"第一件", "第二件"} {
+		if _, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_b", text), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_c", "另一对"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := idx.PairActiveCount("grp_assign", "ag_a", "ag_b"); n != 2 {
+		t.Fatalf("A→B pair count = %d, want 2", n)
+	}
+	if n := idx.PairActiveCount("grp_assign", "ag_a", "ag_c"); n != 1 {
+		t.Fatalf("A→C pair count = %d, want 1", n)
+	}
+	// from:to 口径：同目标、不同发起者不算同一对。
+	if n := idx.PairActiveCount("grp_assign", "ag_c", "ag_b"); n != 0 {
+		t.Fatalf("C→B pair count = %d, want 0", n)
+	}
+	if _, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_b", "第三件"), nil); !errors.Is(err, ErrTooConcurrent) {
+		t.Fatalf("第三件 = %v, want ErrTooConcurrent", err)
+	}
+	if st.listCalls != 0 {
+		t.Fatalf("同对上限走了 ListTasks 全表扫描 %d 次（应走 TaskIndex）", st.listCalls)
+	}
+}
+
+// FileStore 同口径：增量维护 + 重启重建索引后计数一致（否则上限会在重启后失效）。
+func TestFileStorePairActiveCount(t *testing.T) {
+	root := t.TempDir()
+	st, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx PairActiveIndex = st
+	if !idx.TaskIndexReady() {
+		t.Fatal("FileStore 未实现 PairActiveIndex")
+	}
+	ops := newAssignOps()
+	ops.agentBusy = true
+	q := NewQueue(NewLedger(st), ops)
+	ctx := context.Background()
+	for _, text := range []string{"一", "二"} {
+		if _, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_b", text), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := st.PairActiveCount("grp_assign", "ag_a", "ag_b"); n != 2 {
+		t.Fatalf("pair count = %d, want 2", n)
+	}
+	reopened, err := OpenFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := reopened.PairActiveCount("grp_assign", "ag_a", "ag_b"); n != 2 {
+		t.Fatalf("重建索引后 pair count = %d, want 2", n)
+	}
+}
+
+// P3b-03 N2：永久性派发失败（目标群/成员已不存在）必须落 canceled 并出队，
+// 不能留一条永远不会成功的队首把该目标的后续任务全堵死。
+func TestQueueAssignPermanentDispatchErrorCancelsHead(t *testing.T) {
+	q, st, ops := newAssignQueue(t)
+	ctx := context.Background()
+	ops.agentErr = fmt.Errorf("%w: 群组 grp_assign 不存在", ErrNotFound)
+	first, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_b", "目标已删"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.Pump(ctx, first.Target)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("pump err = %v, want ErrNotFound（失败要如实回给调用方）", err)
+	}
+	if got == nil || got.Status != TaskCanceled {
+		t.Fatalf("pump = %+v, want canceled", got)
+	}
+	if q.QueuedCountFor(first.Target) != 0 {
+		t.Fatalf("永久失败的队首没有出队：queued = %d", q.QueuedCountFor(first.Target))
+	}
+	// 后续任务不被堵死：错误消失后同目标照常派发。
+	ops.agentErr = nil
+	second, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_b", "补一件"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped, err := q.Pump(ctx, second.Target); err != nil || pumped == nil || pumped.Status != TaskDispatched {
+		t.Fatalf("后续派发 = %+v, %v; want dispatched", pumped, err)
+	}
+
+	// ErrInvalid（已不是成员 / 发起者被移出群）同样是永久失败。
+	ops.agentErr = fmt.Errorf("%w: 不是群成员", ErrInvalid)
+	third, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_b", "目标不合法"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err = q.Pump(ctx, third.Target); !errors.Is(err, ErrInvalid) || got == nil || got.Status != TaskCanceled {
+		t.Fatalf("ErrInvalid pump = %+v, %v; want canceled", got, err)
+	}
+
+	// 瞬时错误仍然留队（不能把临时故障当永久失败取消）。
+	ops.agentErr = errors.New("磁盘忙")
+	fourth, err := q.SubmitAgent(ctx, assignTask("ag_a", "ag_b", "暂时失败"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err = q.Pump(ctx, fourth.Target); err == nil || got != nil {
+		t.Fatalf("瞬时失败 = %+v, %v; want (nil, err)", got, err)
+	}
+	if replayed, err := NewLedger(st).Replay(ctx, fourth.ID); err != nil || replayed.Status != TaskQueued {
+		t.Fatalf("瞬时失败后 = %+v, %v; want queued", replayed, err)
+	}
+	if q.QueuedCountFor(fourth.Target) != 1 {
+		t.Fatalf("瞬时失败必须留队：queued = %d", q.QueuedCountFor(fourth.Target))
+	}
+}

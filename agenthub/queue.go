@@ -482,6 +482,13 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	return dispatched, nil
 }
 
+// agentDispatchPermanent 判断一次 agent 派发失败是不是**不可重试**的：
+// 目标群已删除 / 目标已不是成员 / 目标档案不可用都会一直返回同样的错误。
+// 这类失败留在队首会把该目标的后续任务全堵死（P3b-03 N2）。
+func agentDispatchPermanent(err error) bool {
+	return errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalid)
+}
+
 // pumpAgent 派发队首的智能体任务。
 //
 // 与工作区路径的唯一结构差异：判忙与投递是**一次** ops 调用（AgentDispatch），
@@ -526,6 +533,21 @@ func (q *Queue) pumpAgent(ctx context.Context, target TaskTarget) (*Task, error)
 			TaskHeader:  header,
 		})
 		if derr != nil {
+			if agentDispatchPermanent(derr) {
+				// 目标群/成员已不存在或不再合法（ErrNotFound/ErrInvalid）：重试永远是
+				// 同一个结果。留在队首会让该目标永久堵死，后续任务一条都派不出去
+				// （P3b-03 N2），所以落 canceled 并出队。
+				settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				canceled, cerr := q.ledger.Transition(settleCtx, id, TaskCanceled, TransitionOptions{
+					At: time.Now().UTC(), Error: "目标不可派发: " + derr.Error(),
+				})
+				cancel()
+				if cerr != nil {
+					return nil, cerr
+				}
+				q.dequeueLocked(key, id)
+				return canceled, derr
+			}
 			return nil, derr // 没投出去：任务仍是 queued，下一次 Pump 再试
 		}
 		if res.Message == DispatchDuplicateMessage {
@@ -629,7 +651,10 @@ func (q *Queue) CancelDispatchedIfIdle(ctx context.Context, id TaskID, reason st
 	if err != nil {
 		return nil, false, err
 	}
-	unlockTarget := q.targets.lock(queueKey(pre.Target.Workspace, pre.Target.SessionID))
+	// key 必须与 pumpAgent 同口径（queueKeyFor）：agent 目标用 workspace+sid 拼出的
+	// key 与泵的 (group, agent) key 不同，cancel 就不与「Transition(dispatched) →
+	// AgentDispatch」串行，会在 Ask 之后的窗口里把任务当空闲取消（P3b-03 R3）。
+	unlockTarget := q.targets.lock(queueKeyFor(pre.Target))
 	defer unlockTarget()
 	t, err := q.ledger.Replay(ctx, id)
 	if err != nil {

@@ -72,8 +72,11 @@ func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, erro
 	if existing != nil {
 		if existing.ctx.Err() != nil {
 			// 已关闭的会话不能再接新一轮：顺手清闩，避免它把智能体永久标忙。
+			// hubDispatchPending 同口径：Ask 成功后会话关掉（AgentStart 不会再来）
+			// 会让忙判据永久为真（P3b-03 N6）。
 			existing.hubGroupBusy.Store(false)
 			existing.hubGroupOwner.Store(0)
+			existing.hubDispatchPending.Store(false)
 			return nil, fmt.Errorf("%w: 群会话 %s 已关闭", agenthub.ErrInvalid, sid)
 		}
 		return existing, nil
