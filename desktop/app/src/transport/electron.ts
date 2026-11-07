@@ -10,6 +10,20 @@ export function electronTransport(): Transport {
     createWorkspaceFolder: (parent, name) => d.createWorkspaceFolder(parent, name),
     settingsGet: () => d.settingsGet(),
     settingsSet: (patch) => d.settingsSet(patch),
+    // 兼容「renderer 已更新、主进程还是旧版」：preload 没这些方法时返回 unsupported，
+    // 渲染层继续用 localStorage 镜像，绝不因为历史能力缺失炸掉主流程。
+    inputHistoryGet: (scope) =>
+      typeof d.inputHistoryGet === 'function'
+        ? d.inputHistoryGet({ scope })
+        : Promise.resolve({ ok: false, error: 'unsupported' }),
+    inputHistorySet: (scope, items) =>
+      typeof d.inputHistorySet === 'function'
+        ? d.inputHistorySet({ scope, items })
+        : Promise.resolve({ ok: false, error: 'unsupported' }),
+    inputHistoryForget: (prefix, subtree) =>
+      typeof d.inputHistoryForget === 'function'
+        ? d.inputHistoryForget({ prefix, subtree })
+        : Promise.resolve({ ok: false, error: 'unsupported' }),
     externalSkillsStatus: async (): Promise<ExternalSkillsStatus> => {
       const result = await d.externalSkillsStatus()
       if (!result.ok || !result.status) throw new Error(result.error ?? '检测外部 Skills 失败')

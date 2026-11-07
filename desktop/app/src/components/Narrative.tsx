@@ -1388,6 +1388,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             answer: segAnswer,
             answerAt: segAnswerAt,
             offset: r.start,
+            // 邻居兜底按整轮看（段首记录的前一次运行在上一段里），见 selectTurns.recordAfterRun
+            all: turn.items,
           })
           const segUsage = turnUsage(turn, turnMetrics, r.runId ? new Set([r.runId]) : undefined)
           return { run: r, items: its, stats: statsOfItems(r.items), live: segLive, answer: segAnswer, usage: segUsage }

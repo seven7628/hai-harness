@@ -281,13 +281,45 @@ export const ALWAYS_SHOWN = new Set<MsgBlock['kind']>([
 const isRecord = (b: MsgBlock): b is M<'signal'> | M<'task_delivery'> =>
   b.kind === 'signal' || b.kind === 'task_delivery'
 
-/* 这条记录是不是 AgentEnd **之后**才到的。afterRun 位优先（store 的 afterRunNow 在落块
-   那一刻盖戳，之后还可能被 insertAtTurnEnd 挪位置，位置本身已经不是证据）；旧快照没有
-   这一位时按位置判：轮内最后一段正文（turn.answer）之后到达的即交卷后。 */
-const recordAfterRun = (b: MsgBlock, i: number, answerAt: number): boolean => {
+const owningRunId = (b: MsgBlock): string | undefined => {
+  switch (b.kind) {
+    case 'assistant': return b.runId
+    case 'compression': return b.runId
+    case 'tool': return b.parentRunId ?? b.runId
+    case 'agent': return b.parentRunId
+    case 'async_task': return b.parentRunId
+    default: return undefined
+  }
+}
+
+/* 这条记录是不是 AgentEnd **之后**才到的。afterRun 位优先（bridge / store 在落块那一刻
+   按「主 run 还在不在跑」盖章 —— 位置本身不是证据，checkpoint 恢复后位置只说明它插在哪）。
+   旧快照没有这一位（`after_run` 当年是 omitempty，false 会被吃掉）时按**邻居**判：
+
+   · 前后最近的、带主 run id 的块是**同一次运行** → 记录夹在这次运行中间 → 运行中到达；
+   · 前面那次运行之后再没有它的块（下一步是另一次运行 / 用户 / 结束）→ 交卷后到达。
+
+   为什么不能只看「排在轮内最后一段正文之后」（旧判据）：一次运行中间本来就会有正文
+   （narration），后面还接着十几分钟的工具行 —— 那些记录明明是在跑的时候到的，却被判成
+   交卷后，于是一律甩到盒子外面（用户 2026-11 截图：Task completed 永远排在 Working 下方，
+   盒子里只剩思考与 toolcall）。 */
+const recordAfterRun = (b: MsgBlock, i: number, items: MsgBlock[], answerAt: number): boolean => {
   if (!isRecord(b)) return false
   if (b.afterRun != null) return b.afterRun
-  return answerAt >= 0 && i > answerAt
+  const prev = runIdAround(items, i, -1)
+  // 前面没有任何运行块（窗口从运行中间开始 / 纯记录轮）：只能退回位置判据
+  if (!prev) return answerAt >= 0 && i > answerAt
+  // 后面还有同一次运行的块 → 它落在这次运行中间，不是在交卷之后
+  return runIdAround(items, i, +1) !== prev
+}
+
+/* 从 i 开始向 dir 方向找最近的「带主 run id」的块。记录 / 插话 / 用户块没有 run id，跳过。 */
+const runIdAround = (items: MsgBlock[], i: number, dir: 1 | -1): string | undefined => {
+  for (let j = i + dir; j >= 0 && j < items.length; j += dir) {
+    const rid = owningRunId(items[j])
+    if (rid) return rid
+  }
+  return undefined
 }
 
 /* 位置兜底的分界点 = 这一轮的结论（最后一段正文）。正在流式输出的那一段还不是结论：
@@ -300,7 +332,7 @@ export const answerIndex = (turn: Turn): number => {
 /** 盒子外面（时间线上）的块：结构性/结论性块 + 交卷后到达的记录。 */
 export function outsideOf(turn: Turn): (b: MsgBlock, i: number) => boolean {
   const answerAt = answerIndex(turn)
-  return (b, i) => ALWAYS_SHOWN.has(b.kind) || recordAfterRun(b, i, answerAt)
+  return (b, i) => ALWAYS_SHOWN.has(b.kind) || recordAfterRun(b, i, turn.items, answerAt)
 }
 
 export function foldedBody(turn: Turn): MsgBlock[] {
@@ -345,7 +377,7 @@ export function workBody(turn: Turn): MsgBlock[] {
       // 运行中插话：属于这次运行的过程（它不在外面 —— 外面是时间线，盒子已经收起了）。
       || (b.kind === 'user' && b.injected)
       // 运行中到达的记录：这一次运行的过程说明，按事件顺序夹在工作行之间。
-      || (isRecord(b) && !recordAfterRun(b, i, answerAt))
+      || (isRecord(b) && !recordAfterRun(b, i, turn.items, answerAt))
       || ((b.kind === 'assistant' || b.kind === 'compression') && b !== turn.answer),
   )
 }
@@ -398,17 +430,6 @@ export interface TurnRun {
   items: MsgBlock[]
 }
 
-const owningRunId = (b: MsgBlock): string | undefined => {
-  switch (b.kind) {
-    case 'assistant': return b.runId
-    case 'compression': return b.runId
-    case 'tool': return b.parentRunId ?? b.runId
-    case 'agent': return b.parentRunId
-    case 'async_task': return b.parentRunId
-    default: return undefined
-  }
-}
-
 export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
   const runs: TurnRun[] = []
   let curId: string | undefined
@@ -454,15 +475,13 @@ export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
 /** 一次运行的**结算**（账 / 产出卡）该落在哪个下标之后：它自己最后一块要跳过
     「结算之后才到达」的记录（signal / task_delivery 的 afterRun 位）与产出卡本身 ——
     否则「Task … completed」会排到账和卡上面，读起来像回执先于结算。
-    旧快照没有 afterRun 位时按位置兜底：排在这次运行的结论之后即交卷后到达。 */
+    旧快照没有 afterRun 位时按邻居兜底（见 recordAfterRun）：夹在这次运行中间的记录不算。 */
 export function settleIndexOf(turn: Turn, run: TurnRun, answer: MsgBlock | undefined): number {
   const ansAt = answer ? turn.items.indexOf(answer) : -1
   let k = run.end - 1
   while (k > run.start) {
     const b = turn.items[k]
-    const stamped = b.kind === 'signal' || b.kind === 'task_delivery'
-      ? ('afterRun' in b ? (b as { afterRun?: boolean }).afterRun !== false : ansAt >= 0 && k > ansAt)
-      : false
+    const stamped = recordAfterRun(b, k, turn.items, ansAt)
     if (b.kind !== 'artifacts' && !stamped) break
     k--
   }
@@ -473,16 +492,19 @@ export function settleIndexOf(turn: Turn, run: TurnRun, answer: MsgBlock | undef
    answer 传**整轮**的结论（中间那次运行的正文属于过程，跟着自己的盒子走，
    否则两次运行各吐一段正文，时间线上会凭空多出两段"结论"）。
    offset = 这一段在 turn.items 里的起点：位置兜底（旧快照没有 afterRun 位）用的还是
-   全局下标，否则每一段都会把自己的记录判成"交卷后到达"。 */
+   全局下标，否则每一段都会把自己的记录判成"交卷后到达"。
+   all = 整轮的 items（缺省 = 这一段自己）：邻居判据的单位是**整轮**，段首那条记录的前一次
+   运行在上一段里 —— 只看这一段会把它当成「前面没有运行块」。 */
 export function runWorkBody(
   items: MsgBlock[],
-  opts: { answer?: MsgBlock; answerAt: number; offset: number },
+  opts: { answer?: MsgBlock; answerAt: number; offset: number; all?: MsgBlock[] },
 ): MsgBlock[] {
+  const all = opts.all ?? items
   return items.filter(
     (b, i) =>
       FOLDED_KINDS.has(b.kind)
       || (b.kind === 'user' && b.injected)
-      || (isRecord(b) && !recordAfterRun(b, i + opts.offset, opts.answerAt))
+      || (isRecord(b) && !recordAfterRun(b, i + opts.offset, all, opts.answerAt))
       || ((b.kind === 'assistant' || b.kind === 'compression') && b !== opts.answer),
   )
 }

@@ -364,6 +364,18 @@ export interface FsOpReply {
   code?: string
 }
 
+// —— 输入框历史（本地文件持久化）——
+// 与 electron/input-history.ts、src/lib/inputHistory.ts 同构；图片只存指纹。
+export interface InputHistoryRef { path: string; name: string; size: number }
+export interface InputHistoryImage { mime: string; len: number; hash: string }
+export interface InputHistoryItem {
+  text: string
+  at?: number
+  refs?: InputHistoryRef[]
+  images?: InputHistoryImage[]
+}
+export interface InputHistoryReply { ok: boolean; items?: InputHistoryItem[]; error?: string }
+
 export interface FsListResult {
   ok: boolean
   path: string // 请求浏览的目录（绝对路径）
@@ -391,6 +403,11 @@ export interface Transport {
   createWorkspaceFolder(parent: string, name: string): Promise<{ ok: boolean; path?: string; error?: string }>
   settingsGet(): Promise<AppSettings>
   settingsSet(patch: Partial<AppSettings>): Promise<{ ok: boolean; error?: string; settings?: AppSettings }>
+  // 输入历史：主进程本地文件（~/.go-code/input-history.json）。浏览器 mock 返回空/成功，
+  // 渲染层仍以 localStorage 镜像为准；Electron 下启动/切会话时用文件结果对齐本地镜像。
+  inputHistoryGet(scope: string): Promise<InputHistoryReply>
+  inputHistorySet(scope: string, items: InputHistoryItem[]): Promise<InputHistoryReply>
+  inputHistoryForget(prefix: string, subtree?: boolean): Promise<{ ok: boolean; error?: string }>
   externalSkillsStatus(): Promise<ExternalSkillsStatus>
   importExternalSkills(): Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
   pickApp(): Promise<{ name: string; bundleId?: string } | null> // 系统「选择应用程序」（osascript choose application）；取消 → null

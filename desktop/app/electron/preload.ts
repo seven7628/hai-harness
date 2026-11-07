@@ -78,6 +78,14 @@ export interface ExternalSkillsImportResult {
 // code 是给渲染层分流用的（EXISTS 同名冲突 / DENIED 越界或受保护 / INVALID_NAME …）。
 export type FsOpReply = { ok: boolean; path?: string; error?: string; code?: string }
 
+// 输入历史本地文件的 wire 形状（与 src/transport/types.ts / electron/input-history.ts 同构）
+export interface InputHistoryWireItem {
+  text: string
+  at?: number
+  refs?: { path: string; name: string; size: number }[]
+  images?: { mime: string; len: number; hash: string }[]
+}
+
 contextBridge.exposeInMainWorld('desktop', {
   startupMark: (phase: string) => ipcRenderer.invoke('startup-mark', phase),
   pickWorkspace: () => ipcRenderer.invoke('pick-workspace'),
@@ -88,6 +96,10 @@ contextBridge.exposeInMainWorld('desktop', {
   stopBridge: () => ipcRenderer.invoke('bridge:stop'),
   settingsGet: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   settingsSet: (patch: Partial<AppSettings>) => ipcRenderer.invoke('settings:set', patch) as Promise<{ ok: boolean; error?: string; settings?: AppSettings }>,
+  // 输入历史：主进程写 ~/.go-code/input-history.json（跨重启/可备份；不再只靠 localStorage）
+  inputHistoryGet: (p: { scope: string }) => ipcRenderer.invoke('input-history:get', p) as Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>,
+  inputHistorySet: (p: { scope: string; items: InputHistoryWireItem[] }) => ipcRenderer.invoke('input-history:set', p) as Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>,
+  inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => ipcRenderer.invoke('input-history:forget', p) as Promise<{ ok: boolean; error?: string }>,
   sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => ipcRenderer.invoke('stt:transcribe', p) as Promise<{ ok: boolean; text?: string; error?: string }>,
   externalSkillsStatus: () => ipcRenderer.invoke('external-skills:status') as Promise<ExternalSkillsStatusResult>,
   importExternalSkills: () => ipcRenderer.invoke('external-skills:import') as Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>,
@@ -211,6 +223,9 @@ declare global {
       stopBridge: () => Promise<{ ok: boolean }>
       settingsGet: () => Promise<AppSettings>
       settingsSet: (patch: Partial<AppSettings>) => Promise<AppSettings>
+      inputHistoryGet: (p: { scope: string }) => Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>
+      inputHistorySet: (p: { scope: string; items: InputHistoryWireItem[] }) => Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>
+      inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => Promise<{ ok: boolean; error?: string }>
       sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => Promise<{ ok: boolean; text?: string; error?: string }>
       externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
       importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>

@@ -1,4 +1,4 @@
-import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus } from './types'
+import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply } from './types'
 import type { BridgeCommand } from '../store/events'
 import type { MCPProjectInfo, MCPProjectServer, HookSectionView } from '../store/useAppStore'
 import currentProjectReadmeZh from '../../../../README.zh-CN.md?raw'
@@ -965,6 +965,50 @@ class MockTransport implements Transport {
 
   async settingsGet(): Promise<AppSettings> {
     return this.settings()
+  }
+
+  // —— 输入历史「本地文件」的浏览器替身 ——
+  // 真 Electron 写 ~/.go-code/input-history.json；mock 用独立 localStorage 键模拟，
+  // 让「远端 + 本地镜像合并」这条路径在浏览器探针里也能走到。
+  private mockHistoryFile(): Record<string, { t: number; items: InputHistoryItem[] }> {
+    try {
+      const raw = localStorage.getItem('go-code.inputHistory.remote')
+      const data = raw ? (JSON.parse(raw) as Record<string, { t: number; items: InputHistoryItem[] }>) : {}
+      return data && typeof data === 'object' ? data : {}
+    } catch {
+      return {}
+    }
+  }
+
+  async inputHistoryGet(scope: string): Promise<InputHistoryReply> {
+    if (typeof localStorage === 'undefined') return { ok: true, items: [] }
+    return { ok: true, items: this.mockHistoryFile()[scope]?.items ?? [] }
+  }
+
+  async inputHistorySet(scope: string, items: InputHistoryItem[]): Promise<InputHistoryReply> {
+    if (typeof localStorage === 'undefined') return { ok: true, items }
+    try {
+      const data = this.mockHistoryFile()
+      data[scope] = { t: Date.now(), items }
+      localStorage.setItem('go-code.inputHistory.remote', JSON.stringify(data))
+      return { ok: true, items }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
+  }
+
+  async inputHistoryForget(prefix: string, subtree = false): Promise<{ ok: boolean; error?: string }> {
+    if (typeof localStorage === 'undefined') return { ok: true }
+    try {
+      const data = this.mockHistoryFile()
+      for (const key of Object.keys(data)) {
+        if (key === prefix || key.startsWith(`${prefix}\u0000`) || (subtree && key.startsWith(prefix))) delete data[key]
+      }
+      localStorage.setItem('go-code.inputHistory.remote', JSON.stringify(data))
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
   }
 
   async externalSkillsStatus(): Promise<ExternalSkillsStatus> {

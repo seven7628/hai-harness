@@ -12,8 +12,12 @@ import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 const user = (id: number, text = 'go'): MsgBlock => ({ kind: 'user', id, text })
 const interjected = (id: number, text = '插一句'): MsgBlock => ({ kind: 'user', id, text, injected: true })
-const assistant = (id: number, text: string, streaming = false): MsgBlock => ({ kind: 'assistant', id, text, streaming, thinking: '' })
-const tool = (id: number, status: 'running' | 'done' = 'done'): MsgBlock => ({ kind: 'tool', id, toolId: 't' + id, name: 'bash', status })
+const assistant = (id: number, text: string, streaming = false, runId?: string): MsgBlock => ({
+  kind: 'assistant', id, text, streaming, thinking: '', ...(runId ? { runId } : {}),
+})
+const tool = (id: number, status: 'running' | 'done' = 'done', runId?: string): MsgBlock => ({
+  kind: 'tool', id, toolId: 't' + id, name: 'bash', status, ...(runId ? { parentRunId: runId } : {}),
+})
 // afterRun 传 undefined = 旧快照（没有这一位，走位置兜底）；true/false = store 显式盖的戳。
 const delivery = (id: number, taskId = 'task-1', afterRun?: boolean): MsgBlock => ({
   kind: 'task_delivery', id, taskId, status: 'completed', result: 'done', ...(afterRun != null ? { afterRun } : {}),
@@ -69,6 +73,38 @@ test('恢复后的视图：运行中到达（afterRun:false）的记录仍在盒
   const turn = selectTurns(blocks)[0]
   assert.deepEqual(workBody(turn).map((b) => b.id), [3, 4], '运行中到达的记录必须还在盒子里')
   assert.deepEqual(foldedBody(turn).map((b) => b.id), [2], '正文是这一轮的结论，留在外面')
+})
+
+test('旧快照（没有 afterRun 位）：夹在同一次运行中间的记录留在盒内 —— 哪怕轮内更早有正文', () => {
+  // 用户 2026-11 截图：19 分钟的运行里 05:57 已经交付过一段正文（narration），06:05 到达的
+  // `Task … completed` 被位置判据（i > answerAt）判成「交卷后」，于是全被甩到盒子外面、
+  // 永远排在 Working 下方。位置兜底必须看**邻居运行块**：后面还有同一个 run 的块 = 运行中到达。
+  const blocks: MsgBlock[] = [
+    user(1),
+    assistant(2, 'D2 方案完成，先交代一下结论', false, 'r1'),
+    tool(3, 'done', 'r1'),
+    delivery(4), // 旧 record：没有 after_run 位
+    tool(5, 'done', 'r1'),
+    assistant(6, '', false, 'r1'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  assert.deepEqual(workBody(turn).map((b) => b.id), [3, 4, 5, 6], '运行中到达的回执必须还在盒子里')
+  assert.deepEqual(foldedBody(turn).map((b) => b.id), [2], '正文仍是这一轮的结论；记录不重复渲染')
+})
+
+test('旧快照：两次运行之间的回执留在时间线上（后面不再有同一个 run 的块）', () => {
+  // 情况二：run1 交卷 → 后台任务回执到达 → run2 起新盒子。前后邻居是**两次不同**的运行，
+  // 说明这条回执排在前一次运行之后 → 盒外。
+  const blocks: MsgBlock[] = [
+    user(1),
+    tool(2, 'done', 'r1'),
+    delivery(3),
+    assistant(4, '续跑结论', false, 'r2'),
+    tool(5, 'done', 'r2'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  assert.deepEqual(workBody(turn).map((b) => b.id), [2, 5])
+  assert.deepEqual(foldedBody(turn).map((b) => b.id), [3, 4])
 })
 
 test('同一批块不会既在盒子里又在外面（无重复渲染）', () => {

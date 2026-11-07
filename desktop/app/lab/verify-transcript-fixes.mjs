@@ -299,6 +299,40 @@ check('F 冷恢复：交卷之后到达的 signal 排在账/产出卡之后（�
 check('F 冷恢复：交卷之后到达的 signal 落在盒外的时间线上',
   cold1.outsideSig.some((t) => /上下文压缩完成/.test(t)), JSON.stringify({ inside: cold1.insideSig.slice(0, 2), outside: cold1.outsideSig.slice(0, 2) }))
 
+// ------------------------------------------------- F2 长运行中段到达的回执
+// 用户 2026-11 截图：19 分钟的运行里 05:57 已经交付过一段正文（narration），之后 06:05
+// 到达的 `Task … completed` 全被判成「交卷后抵达」，堆在 Working 盒子外面（永远在最下方），
+// 盒子里只剩思考与 toolcall。破坏点：恢复出来的 record 没有 after_run 位（omitempty 会把
+// false 吃掉），位置兜底又只看「轮内最后一段正文」——运行中段到达的记录必须按**邻居运行块**判。
+const nowF2 = Date.now()
+const cpNarr = [
+  { kind: 'user', id: 1, text: '这一轮的问题', ts: nowF2 - 20000 },
+  { kind: 'assistant', id: 2, text: 'D2 方案完成，先交代结论', run_id: 'rh', ts: nowF2 - 15000 },
+  { kind: 'tool', id: 3, name: 'bash', args: '{"command":"x"}', status: 'done', run_id: 'rh', tool_id: 'n1', ts: nowF2 - 14000 },
+  { kind: 'task_delivery', id: 4, task_id: 'tk-narr', status: 'completed', result: 'done', ts: nowF2 - 10000 },
+  { kind: 'tool', id: 5, name: 'bash', args: '{"command":"y"}', status: 'done', run_id: 'rh', tool_id: 'n2', ts: nowF2 - 5000 },
+  { kind: 'assistant', id: 6, text: '', thinking: '还在跑', run_id: 'rh', ts: nowF2 - 2000 },
+]
+await hydrate(true, cpNarr)
+await poll('!!document.querySelector(".cy-live")')
+const narr = await heads()
+const narrOrder = await page.eval(() => {
+  const box = document.querySelector('.cy-live')
+  if (!box) return { ok: false, why: 'no box' }
+  const sig = box.querySelector('.sig')
+  const batches = [...box.querySelectorAll('.rt-batch')]
+  if (!sig || batches.length < 2) return { ok: false, why: `sig=${!!sig} batches=${batches.length}` }
+  const at = sig.getBoundingClientRect().top
+  const a = batches[0].getBoundingClientRect().top
+  const c = batches[1].getBoundingClientRect().top
+  return { ok: a < at && at < c, a, at, c }
+})
+check('F2 旧 record（没有 after_run 位）：运行中段到达的回执收缩在 Working 盒子内部',
+  narr.insideSig.some((t) => /Task tk-narr/.test(t)) && !narr.outsideSig.some((t) => /Task tk-narr/.test(t)),
+  JSON.stringify({ inside: narr.insideSig, outside: narr.outsideSig }))
+check('F2 回执留在**事件顺序**里（两条工具行之间，不是堆到盒子末尾）', narrOrder.ok === true, JSON.stringify(narrOrder))
+await hydrate(true, cpBlocks) // 复原，后面的用例沿用 F 的夹具
+
 // ------------------------------------------------- G 产出卡 / 轮尾账的归属交叉矩阵
 // 用户 2026-11 追问三件事：
 //   ① 一轮里出现**两张**「本轮产出」卡（截图）——一个 AgentEnd 应该只有一张；

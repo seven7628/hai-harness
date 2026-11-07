@@ -98,7 +98,13 @@ type Block struct {
 	// 为什么由 bridge 落盘而不是只在前端算（用户 2026-11 报障）：前端恢复时只拿得到块的位置，
 	// 而正在写的那段正文在 checkpoint 里已经不算 streaming 了 —— 位置判据会把它当成
 	// 「这一轮的结论」，之后到达的记录就全被甩出盒子。运行态只有 bridge 知道，所以在这里盖章。
-	AfterRun bool `json:"after_run,omitempty"`
+	//
+	// **指针是刻意的（三态）**：nil = 这条记录来自还没有这一位的旧 record，UI 只能按位置兜底；
+	// false / true = bridge 明确盖过章。用 bool + omitempty 会把 false 序列化成「字段不存在」，
+	// 于是一次 checkpoint 恢复就把「运行中到达」的证据吃掉了 —— 复现是：长运行里中间说过一段
+	// 正文（narration），之后十八分钟的工具行、回执全被判成「交卷后」，Task completed 永远
+	// 排在 Working 盒子下面（用户 2026-11 的截图）。
+	AfterRun *bool `json:"after_run,omitempty"`
 	// Images 工具结果携带的图片内容块（read_file 读图 / 截图 / MCP image）：
 	// 随 tool_run_end 事件到达，checkpoint 落盘 → 恢复时 UI 仍能展示「模型看过的图」
 	//（data URL 直显；不参与 LLM 上下文——那是 AgentLoop 侧的 ToolResult.Blocks）。
@@ -2792,8 +2798,9 @@ func (r *ViewReducer) applyTaskEndLocked(e *events.TaskEnd) {
 	}
 }
 
-// applyTaskResultDeliveredLocked 回填任务结果（agent/async_task/promoted tool；
-// 找不到任务时保留独立结果块；taskId 幂等）。
+// afterRunFlag 记录类块的 AfterRun 盖章值（false 也要写出去，见 Block.AfterRun 的注释）。
+func afterRunFlag(v bool) *bool { return &v }
+
 // runLiveLocked 顶层 run（kind=run 且无 parent）是否还在跑 —— 与前端 runEnded 同一事实源。
 // 记录类块的 AfterRun 由它盖章（见 Block.AfterRun 的注释）。
 func (r *ViewReducer) runLiveLocked() bool {
@@ -2807,6 +2814,8 @@ func (r *ViewReducer) runLiveLocked() bool {
 	return false
 }
 
+// applyTaskResultDeliveredLocked 回填任务结果（agent/async_task/promoted tool；
+// 找不到任务时保留独立结果块；taskId 幂等）。
 func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDelivered) {
 	r.flushChunkLocked()
 	key := taskLifecycleKey("task_result", e.TaskId, e.Timestamp)
@@ -2842,7 +2851,7 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		// 落位同前端：按事件时刻插到它发生的位置，不一律堆到最底部。
 		at := r.insertAtAfterTsLocked(-1, millis(ts))
 		r.insertBlockAtLocked(at, Block{Kind: blockKindTaskResult, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId, Result: e.Result, Error: e.Error, Ts: millis(ts)})
-		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts), AfterRun: !r.runLiveLocked()})
+		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts), AfterRun: afterRunFlag(!r.runLiveLocked())})
 		return
 	}
 	b := r.blocks[idx]
@@ -2882,7 +2891,7 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		r.insertBlockAtLocked(at, Block{
 			Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId,
 			Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts),
-			AfterRun: !r.runLiveLocked(),
+			AfterRun: afterRunFlag(!r.runLiveLocked()),
 		})
 	}
 }

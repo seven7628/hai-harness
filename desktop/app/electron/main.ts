@@ -18,6 +18,8 @@ import { isSensitiveFsPath } from './fs-guard'
 import { readImageAsDataUrl } from './read-image'
 // 文件树写操作（重命名/移动/新建/复制副本）：守卫与实现同源，见 fs-ops.ts
 import { copyEntry, createDir, createFile, duplicateEntry, guardTrash, importEntry, moveEntry, renameEntry } from './fs-ops'
+// 输入框历史本地文件（~/.go-code/input-history.json；与 renderer 的 localStorage 镜像配合）
+import { ipcInputHistoryForget, ipcInputHistoryGet, ipcInputHistorySet, inputHistoryFilePath } from './input-history'
 
 let mainWindow: BrowserWindow | null = null
 let bridge: ChildProcessWithoutNullStreams | null = null
@@ -1217,6 +1219,24 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   })
   // —— 全局设置 ——
   ipcMain.handle('settings:get', () => readSettings())
+  // 输入框历史：本地文件持久化（scope = workspace + session + 可选 agent task）。
+  // 渲染层同步读写 localStorage 镜像；这里只负责把镜像对齐到可备份的文件。
+  ipcMain.handle('input-history:get', (_e, p: { scope?: unknown } = {}) => {
+    const scope = typeof p?.scope === 'string' ? p.scope : ''
+    if (!scope || scope.length > 4096) return { ok: false, error: 'invalid scope' }
+    return ipcInputHistoryGet(inputHistoryFilePath(cfgDir()), scope)
+  })
+  ipcMain.handle('input-history:set', (_e, p: { scope?: unknown; items?: unknown } = {}) => {
+    const scope = typeof p?.scope === 'string' ? p.scope : ''
+    if (!scope || scope.length > 4096) return { ok: false, error: 'invalid scope' }
+    if (!Array.isArray(p?.items)) return { ok: false, error: 'invalid items' }
+    return ipcInputHistorySet(inputHistoryFilePath(cfgDir()), scope, p.items)
+  })
+  ipcMain.handle('input-history:forget', (_e, p: { prefix?: unknown; subtree?: unknown } = {}) => {
+    const prefix = typeof p?.prefix === 'string' ? p.prefix : ''
+    if (!prefix || prefix.length > 4096) return { ok: false, error: 'invalid prefix' }
+    return ipcInputHistoryForget(inputHistoryFilePath(cfgDir()), prefix, p?.subtree === true)
+  })
   // 语音转写：renderer 录音（ArrayBuffer）→ 主进程转发 OpenAI 兼容端点（net.fetch 无 CORS）
   ipcMain.handle('stt:transcribe', (_e, p: { audio: ArrayBuffer; mimeType: string }) => {
     if (!p || !p.audio) return { ok: false, error: '无音频数据' }

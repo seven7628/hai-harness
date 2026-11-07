@@ -13,6 +13,7 @@ import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAtt
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
+import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
@@ -7418,10 +7419,13 @@ export function dispatchEvent(raw: AnyEvent): void {
           }
           return setView(s, sid, {
             ...v,
-            // 按**事件时刻**落位（见 insertRecordAt）：任务结果推回会话后主 run 会自动
-            // 续跑，那一刻「轮尾」已经在新的 Working 之后 —— 通知会被排到它下面。
+            // 归属（2026-11 修订）：**运行中到达的回执属于当前这一轮**（它是一次运行的过程
+            // 行），不能按卡片所在轮落位 —— 后台子 agent 的卡片常常在几轮之前，按卡片落位
+            // 会把回执插回旧轮（用户看到的正是「回执跟自己的工作行分家」）。只有**交卷后**
+            // 到达的回执才回到卡片所在轮：那时它是「上一轮的结果通知」，末尾追加会算进下一轮。
+            // 落位仍按**事件时刻**（见 insertRecordAt）。
             blocks: applyTaskUsage(
-              insertRecordAt(blocks, taskIndex, [delivery], { evTime: evTs(raw), run: currentRun(v) }),
+              insertRecordAt(blocks, afterRun ? taskIndex : -1, [delivery], { evTime: evTs(raw), run: currentRun(v) }),
               taskId,
               usage,
             ),
@@ -8684,6 +8688,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 标签集随会话一起回收（否则重开同名会话会捡到旧标签；也防 tabsByScope 无界增长）
     const tabsByScope = { ...s.tabsByScope }
     delete tabsByScope[sid]
+    // 输入历史随会话回收（含它的子智能体作用域）；localStorage 镜像 + 本地文件都要清
+    const historyScope = inputHistoryScope(path, sid)
+    forgetInputHistory(historyScope)
+    void getTransport().inputHistoryForget(historyScope).catch(() => { /* 旧主进程/文件不可用 */ })
     const recentSessions = s.recentSessions.filter((r) => !(r.path === path && r.id === sid))
     saveJSON(LS_TITLES, overrides)
     const projects = s.projects.map((p) => (p.path === path ? { ...p, sessions: p.sessions.filter((x) => x.id !== sid) } : p))
@@ -8726,6 +8734,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const tabsByScope = { ...s.tabsByScope }
     for (const sid of wsSids) delete tabsByScope[sid]
     delete tabsByScope[path]
+    forgetInputHistoryWorkspace(path)
+    void getTransport().inputHistoryForget(inputHistoryScope(path), true).catch(() => { /* 旧主进程/文件不可用 */ })
     // 顶部快捷栏（recentSessions）同工作区会话一并移除
     const recentSessions = s.recentSessions.filter((r) => r.path !== path)
     const projects = s.projects.filter((p) => p.path !== path)
