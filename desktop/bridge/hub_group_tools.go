@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -408,12 +409,22 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		if routed.Dropped > 0 {
 			result["dropped"] = routed.Dropped
 		}
-		// wake 在解锁后做：会话装配可能很慢，不能把群发送锁带进装配。
-		if errs := t.m.wakeGroupRound(g, *routed, msg); len(errs) > 0 {
-			result["wake_errors"] = errs
-			for _, we := range errs {
-				t.m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
+		// 智能体之间的 @ 走对话控制器（P3b-04）：预算/深度/踢皮球/同内容护栏 +
+		// 串行队列。首条立即尝试（新对话的第一条永远立即可跑）；后续条等本轮 run
+		// 结束、冷却到期后由泵放行。
+		depth := t.m.hubGroupNextDepth(string(t.agentID), g)
+		wakes, oerr := t.m.offerGroupWakes(g, *routed, msg, t.agentID, depth)
+		if oerr != nil {
+			if errors.Is(oerr, agenthub.ErrConversationExhausted) {
+				// 护栏命中：控制器已把状态推到 exhausted，系统消息/事件已由
+				// notifyHubConversation 写一条。把视图交给模型，它能解释「为什么没人被叫醒」。
+				result["conversation"] = t.m.hubConversationView(g.ID)
+			} else {
+				t.m.hubAlertf("group_conversation_offer_failed", "群 %s 对话入队失败：%v", g.ID, oerr)
+				result["wake_errors"] = []string{oerr.Error()}
 			}
+		} else if len(wakes) > 0 {
+			t.m.pumpHubConversation(g.ID)
 		}
 	}
 	return marshalHubToolResult(result)

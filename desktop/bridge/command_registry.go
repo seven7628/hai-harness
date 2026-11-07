@@ -96,7 +96,9 @@ const (
 	CmdHubGroupHistory      Command = "hub_group_history"
 	CmdHubGroupActivity     Command = "hub_group_activity"
 	CmdHubGroupSend         Command = "hub_group_send"
-	CmdHubArtifactGet       Command = "hub_artifact_get"
+	// CmdHubConversationStop 人类「停止自动对话」：中断当前群 run + 清队列 + stopped（§6.5.6 规则 6）。
+	CmdHubConversationStop Command = "hub_conversation_stop"
+	CmdHubArtifactGet      Command = "hub_artifact_get"
 
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"

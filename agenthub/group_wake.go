@@ -23,6 +23,11 @@ type GroupWakeHeader struct {
 	RoundID    string  `json:"round_id"`
 	TriggerSeq int64   `json:"trigger_seq"`
 	MessageID  string  `json:"message_id,omitempty"`
+	// Depth/Turn 是对话控制器（P3b-04）的记账字段：本唤醒是第几跳 @（人类=0，首轮
+	// 智能体=1）、本轮对话的第几轮。omitempty + 缺省 0：P3b-04 之前落在 transcript
+	// 里的旧块必须继续能解析（「没有字段」= 深度/轮次未知，按 0 处理）。
+	Depth int `json:"depth,omitempty"`
+	Turn  int `json:"turn,omitempty"`
 }
 
 // EncodeGroupWake 编码 hidden 块内容：首行 header JSON，空行后快照。

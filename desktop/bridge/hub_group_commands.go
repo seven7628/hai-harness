@@ -633,12 +633,16 @@ func (m *manager) hubGroupSend(c command) {
 		return
 	}
 	m.emitHubGroupMessage(g.ID, seq, msg)
+	// 人类消息**总是**开启新对话（清队列/计数），即使这条消息没有 @ 任何人 ——
+	// 「先停一下」这类插话必须能打断自动接龙（§6.5.6 规则 1/5）。
+	_, turn := m.beginHubConversation(g, seq, len(round.Targets))
 	// 无 @ 只写日志（N-1）：不产生 hub_round，否则前端会误报「无人被唤醒」。
 	var wakeErrors []string
 	if routed != nil {
 		m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+		// 首轮目标仍然**并行**唤醒：人叫醒几个人不该排队（§6.5.6 规则 2）。
 		// 先落日志/回执，再唤醒；唤醒失败不能把已写入的群消息回滚（人已经看到了）。
-		wakeErrors = m.wakeGroupRound(g, round, msg)
+		wakeErrors = m.wakeGroupRound(g, round, msg, 1, turn)
 		for _, we := range wakeErrors {
 			m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
 		}

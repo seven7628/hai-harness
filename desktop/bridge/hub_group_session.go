@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -257,13 +258,16 @@ func (m *manager) refreshHubAgentRosters(agentID string) error {
 	return firstErr
 }
 
-// wakeGroupRound 把人/智能体的 @ 消息投递给每个 target 的群会话。
+// wakeGroupRound 把**人类** @ 消息并行投递给每个 target 的群会话（首轮）。
 // 返回每个 target 的错误（不阻断其他 target；调用方决定告警/回执文案）。
+//
+// 智能体之间的 @ 不在这里：那条路径要串行 + 冷却 + 护栏（hub_conversation.go）。
+// 人类消息是「首轮」，可以并行 —— 人发一句话就应当同时叫醒被点名的几个人。
 //
 // 忙目标**不排队**：群会话一次只处理一轮，硬塞第二个快照会让两个 round 共用一次
 // AgentEnd（final 归属错轮）。目标仍在群里，下一次被 @ 时游标未推进会重新看到这条
-// 消息；P3b 的群调度器再补真正的排队。
-func (m *manager) wakeGroupRound(g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message) []string {
+// 消息；智能体之间的排队由对话控制器负责（P3b-04）。
+func (m *manager) wakeGroupRound(g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message, depth, turn int) []string {
 	if m == nil || g == nil || trigger == nil {
 		return nil
 	}
@@ -277,21 +281,32 @@ func (m *manager) wakeGroupRound(g *agenthub.Group, round agenthub.Round, trigge
 		if target == "" || target == trigger.Sender.AgentID {
 			continue
 		}
-		if err := m.wakeGroupAgent(ctx, st, g, round, trigger, target); err != nil {
+		w := agenthub.Wake{
+			GroupID: g.ID, Sender: trigger.Sender.AgentID, Human: trigger.Sender.Kind == agenthub.SenderHuman,
+			Target: target, Text: trigger.Text, Depth: depth, Turn: turn,
+			TriggerSeq: trigger.Seq, RoundID: round.ID, EnqueuedAt: time.Now(),
+		}
+		if err := m.wakeGroupAgent(ctx, st, g, w); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", target, err))
 		}
 	}
 	return errs
 }
 
-func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message, target agenthub.AgentID) error {
+// wakeGroupAgent 把一条唤醒投给 target 的群会话（hidden 快照 + 触发消息正文）。
+// 忙 → errHubGroupTargetBusy（可 errors.Is）；调用方据此决定「留队重试」还是「报错」。
+func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agenthub.Group, w agenthub.Wake) error {
+	target := w.Target
+	if target == "" {
+		return fmt.Errorf("%w: 群唤醒缺 target", agenthub.ErrInvalid)
+	}
 	bs, err := m.hubGroupSession(string(target), string(g.ID))
 	if err != nil {
 		return err
 	}
 	// 忙：不投递第二快照。CAS 防止两个发送路径同时看到空闲。
 	if !bs.hubGroupBusy.CompareAndSwap(false, true) {
-		return fmt.Errorf("%w: 该智能体上一轮群回复尚未结束", agenthub.ErrInvalid)
+		return fmt.Errorf("%w: %w: 该智能体上一轮群回复尚未结束", agenthub.ErrInvalid, errHubGroupTargetBusy)
 	}
 	seq := bs.hubGroupSeq.Add(1)
 	bs.hubGroupOwner.Store(seq)
@@ -310,15 +325,19 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	if err != nil {
 		return err
 	}
+	// 快照只用到 round 的 id/trigger_seq：从 wake 复原一个最小 round，
+	// 这样对话队列只需保存协议字段，不必把 Round/Message 指针一直攥着。
+	round := agenthub.Round{GroupID: g.ID, ID: w.RoundID, TriggerSeq: w.TriggerSeq, Targets: []agenthub.AgentID{target}}
 	snap := agenthub.BuildGroupSnapshot(g, target, msgs, cursor.AgentContextSeq, round, agenthub.SnapshotOptions{})
 	header := &agenthub.GroupWakeHeader{
-		GroupID: g.ID, AgentID: target, RoundID: round.ID, TriggerSeq: trigger.Seq,
+		GroupID: g.ID, AgentID: target, RoundID: w.RoundID, TriggerSeq: w.TriggerSeq,
+		Depth: w.Depth, Turn: w.Turn,
 	}
 	hidden, err := agenthub.EncodeGroupWake(header, snap.Text)
 	if err != nil {
 		return err
 	}
-	text := strings.TrimSpace(trigger.Text)
+	text := strings.TrimSpace(w.Text)
 	if text == "" {
 		text = "（群消息）"
 	}
@@ -350,12 +369,14 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, conten
 		bs.hubDelta.finish()
 	}
 	wake := bs.hubGroupWake
-	bs.hubGroupWake = nil
+	bs.setHubGroupWake(nil)
 	runSeq := bs.hubGroupRunSeq.Load()
 	if runSeq == 0 {
 		runSeq = bs.hubGroupOwner.Load()
 	}
 	// 先完成 final 落账/路由，再放下一轮进来；无论是否有 AgentEnd 绑定都要清闩。
+	// 注意：这里只清闩。自动对话的下一条 / 忙目标任务泵挂在 emit 的 hubOnRunEnd
+	// （running 也放开之后）—— 这个时点 running 还是 true，泵会被判成「目标忙」。
 	defer func() {
 		bs.hubGroupRunSeq.Store(0)
 		bs.clearHubGroupBusy(runSeq)
@@ -447,8 +468,12 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
 	}
 	if routed != nil && msg != nil {
-		for _, we := range m.wakeGroupRound(g, *routed, msg) {
-			m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
+		// 智能体之间的 @ 走对话控制器：入队（串行 + 冷却 + 护栏）。投递由本轮 run
+		// 真正收尾后的 hubOnRunEnd（running 与群轮闩都已放开）触发。
+		depth := wake.Depth + 1
+		if _, oerr := m.offerGroupWakes(g, *routed, msg, spec.Agent.ID, depth); oerr != nil &&
+			!errors.Is(oerr, agenthub.ErrConversationExhausted) {
+			m.hubAlertf("group_conversation_offer_failed", "群 %s 对话入队失败：%v", g.ID, oerr)
 		}
 	}
 }

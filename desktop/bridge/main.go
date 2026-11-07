@@ -317,9 +317,16 @@ type bridgeSession struct {
 	// hubOnAgentEnd Hub 会话的本轮收尾钩子（nil = 项目会话）。RunStream 层事件只经
 	// bs.emit 发出（Session 的 WithEventHandler 收不到 agent_*），所以钩子必须挂在 emit。
 	hubOnAgentEnd func(content string)
+	// hubOnRunEnd 群会话根 run **真正**收尾（running/闩都已放开）之后的推进钩子
+	// （P3b-04：自动对话串行泵 + 忙目标任务泵）。nil = 非群会话。
+	hubOnRunEnd func()
 	// hubGroupWake 当前群 run 绑定的轮次（UserInputsConsumed 从 hidden 块解析）。
 	// 只在 emit（dispatchMu 内）读写；finishHubRound 用完后清空。
 	hubGroupWake *agenthub.GroupWakeHeader
+	// hubWakeDepth/hubWakeTurn 是 hubGroupWake.Depth/Turn 的原子镜像（P3b-04）：
+	// group_say 在工具 goroutine 里要算「下一跳深度」，不能直接读 emit 独占的指针。
+	hubWakeDepth atomic.Int64
+	hubWakeTurn  atomic.Int64
 	// hubGroupBusy 该群会话已投递但尚未 AgentEnd 的唤醒。忙时不投第二个快照，
 	// 避免两个 round 共用一次 AgentEnd。
 	hubGroupBusy atomic.Bool
@@ -687,12 +694,12 @@ func (bs *bridgeSession) emit(e events.Event) {
 			bs.hubBudgetStop.Store(false)
 			bs.hubBudgetReason.Store("")
 			bs.hubHumanIntervened.Store(false) // 新 batch 开口：上一轮介入不外溢
-			bs.hubGroupWake = nil
+			bs.setHubGroupWake(nil)
 			if len(wakes) > 0 {
 				if len(wakes) > 1 && bs.hubAlert != nil {
 					bs.hubAlert("bad_header", fmt.Sprintf("一批用户输入里有 %d 个群唤醒，取最后一个", len(wakes)))
 				}
-				bs.hubGroupWake = wakes[len(wakes)-1]
+				bs.setHubGroupWake(wakes[len(wakes)-1])
 			}
 		}
 	case *events.LLMEnd:
@@ -811,7 +818,6 @@ func (bs *bridgeSession) emit(e events.Event) {
 			bs.hubDispatchPending.Store(false)
 		}
 	}
-
 	// Needs you：Hub 智能体/正在执行 hub_task 的会话，审批与提问落成 need（§6.10）。
 	if bs.hubNeed != nil {
 		bs.hubNeed(e)
@@ -865,6 +871,16 @@ func (bs *bridgeSession) emit(e events.Event) {
 			// 的路径上重入同一把锁（P2-03 复审 N-1 自死锁）。与上面
 			// hubExpireNeeds 同款，泵内部自己看队列长度。
 			go bs.hubPumpQueue(bs.workspace, bs.id)
+		}
+	}
+	// 群会话根 run 真正收尾（AgentEnd 已落盘、running 与群轮闩都已放开、hubSettling
+	// 已清）：推进自动对话的串行泵与忙目标任务泵。放在 emit 末尾而不是
+	// finishHubReply 的 defer —— 那个时点 running 还是 true，AgentDispatch 的闸门会把
+	// 派发判成「忙」，队列永远不动（P3b-04 / D-agent-task-pump）。两个泵都异步
+	// （emit 持有 dispatchMu），且内部自己看队列长度。
+	if e.Type() == events.AgentEndType && bs.hubOnRunEnd != nil {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
+			bs.hubOnRunEnd()
 		}
 	}
 }
@@ -1041,6 +1057,23 @@ func (bs *bridgeSession) clearHubGroupBusy(seq uint64) {
 	}
 }
 
+// setHubGroupWake 记住本轮绑定的群唤醒，并把 Depth/Turn 镜像到原子字段
+// （P3b-04：group_say 要在工具 goroutine 里读下一跳深度）。只在 emit 的
+// dispatchMu 内调用。
+func (bs *bridgeSession) setHubGroupWake(h *agenthub.GroupWakeHeader) {
+	if bs == nil {
+		return
+	}
+	bs.hubGroupWake = h
+	if h == nil {
+		bs.hubWakeDepth.Store(0)
+		bs.hubWakeTurn.Store(0)
+		return
+	}
+	bs.hubWakeDepth.Store(int64(h.Depth))
+	bs.hubWakeTurn.Store(int64(h.Turn))
+}
+
 // manager：进程内多 workspace 注册表（一个进程承载所有工作区的会话）
 type manager struct {
 	mu         sync.Mutex
@@ -1079,6 +1112,15 @@ type manager struct {
 	hubShutdown atomic.Bool
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
 	hubMsgDedup map[string]string
+	// —— 对话控制器（P3b-04，见 hub_conversation.go） ——
+	// hubConv 每群自动对话状态机（懒开）；hubConvLimits 供测试注入限额（生产 nil）。
+	hubConv       *agenthub.ConversationController
+	hubConvLimits *agenthub.ConversationLimits
+	// hubConvMu 保护下面三张表：换代（人类消息作废旧冷却定时器）、定时器、终态通知去重。
+	hubConvMu       sync.Mutex
+	hubConvGen      map[agenthub.GroupID]uint64
+	hubConvTimer    map[agenthub.GroupID]*time.Timer
+	hubConvNotified map[agenthub.GroupID]string
 	// hubUnpricedWarned 每个智能体只告警一次「用量无价，预算无法计入」（P2.5-04）。
 	hubUnpricedWarned map[agenthub.AgentID]bool
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
@@ -1806,6 +1848,11 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		bs.hubEngine = hubEng
 		if hubSpec.Scope.Kind == agenthub.ScopeGroup {
 			bs.hubDelta = newHubDeltaSink(m.out)
+			gid, aid := hubSpec.Scope.GroupID, hubSpec.Agent.ID
+			bs.hubOnRunEnd = func() {
+				m.scheduleAgentTaskPump(gid, aid)
+				m.scheduleHubConversationPump(gid)
+			}
 		}
 	}
 	if opts.cronEvDir != "" {

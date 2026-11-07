@@ -27,6 +27,49 @@ func TestGroupWakeHeaderRoundTrip(t *testing.T) {
 	}
 }
 
+// TestGroupWakeHeaderOldBlockCompat 锁住兼容：P3b-04 之前落在 transcript 里的
+// hub_group_wake 块没有 depth/turn，必须继续能解析（按 0 处理），不能当成坏块。
+func TestGroupWakeHeaderOldBlockCompat(t *testing.T) {
+	old := `{"group_id":"grp_abc123","agent_id":"ag_abc123","round_id":"rnd_01J","trigger_seq":7}` +
+		"\n\n群：复盘群\n#7 人: 开始"
+	h, snap, err := ParseGroupWake(old)
+	if err != nil {
+		t.Fatalf("旧块必须可解析: %v", err)
+	}
+	if h.Depth != 0 || h.Turn != 0 {
+		t.Fatalf("旧块 depth/turn 应为 0，得到 %+v", h)
+	}
+	if !strings.Contains(snap, "#7 人: 开始") {
+		t.Fatalf("snapshot = %q", snap)
+	}
+	// 新块带 depth/turn：编码后能读回，且 0 值不会污染旧格式（omitempty）。
+	withDepth := &GroupWakeHeader{
+		GroupID: "grp_abc123", AgentID: "ag_abc123", RoundID: "rnd_01J", TriggerSeq: 7,
+		Depth: 2, Turn: 3,
+	}
+	encoded, err := EncodeGroupWake(withDepth, "snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := ParseGroupWake(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Depth != 2 || got.Turn != 3 {
+		t.Fatalf("depth/turn 往返失败: %+v", got)
+	}
+	zero, err := EncodeGroupWake(&GroupWakeHeader{
+		GroupID: "grp_abc123", AgentID: "ag_abc123", RoundID: "rnd_01J", TriggerSeq: 7,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstLine, _, _ := strings.Cut(zero, "\n")
+	if strings.Contains(firstLine, "depth") || strings.Contains(firstLine, "turn") {
+		t.Fatalf("0 值不该出现在 header JSON 里（omitempty）：%s", firstLine)
+	}
+}
+
 func TestGroupWakeHeaderRejectsBadFields(t *testing.T) {
 	good := func() *GroupWakeHeader {
 		return &GroupWakeHeader{GroupID: "grp_abc123", AgentID: "ag_abc123", RoundID: "rnd_01J", TriggerSeq: 1}
