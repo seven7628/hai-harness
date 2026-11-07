@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P2.5 基础设施前置与 P3b-01a 群会话前置已完成；P3a-09 群内流式进行中",
+  "subtitle": "P3b-01a 群会话前置与 P3a-09 群内流式已完成；P3a-10 Review + 评测 7 进行中",
   "updated": "2026-11-06",
   "phases": [
     {
@@ -1292,9 +1292,9 @@
       "review": "passed"
     },
     "P3a-09": {
-      "status": "review",
-      "commit": "98aef6a + 456dfad feat/fix(hub-p3a-09): 群内流式 hub_message_delta",
-      "reviewNote": "bridge：新增 hubDeltaSink（80ms 合并、单条 4KB UTF-8 切片、单草稿 256KB 上限、根 RunId 过滤、ToolStart/final 前 flush、late 丢弃）；AgentStart 预分配 msg_<random> 并写入 GroupWakeHeader.MessageID，final 由 store 保留同 ID。前端：groupStream.ts 纯归约（index 单调/并行草稿/finalized LRU 200/256KB），store 草稿归约 + final 覆盖 + agent_end 清空，StreamingMessage 轻量正文。首轮 Review changes_requested（task-kbggz665，对象 98aef6a）：唯一 blocking 是 finalized 守卫测试假绿（index 9 先被 index 单调挡掉，删 guard 仍绿）；另有 final-flush 顺序、256KB 尾块截断、flush 孤儿 timer、start 重复 index、GroupView 过滤等非阻塞。修复（456dfad）：新增 index 0 幽灵草稿断言（删 guard 必红）、stdout 字节偏移顺序断言（finish 放 final 后必红）、尾块截断单测、flush 先 Stop、同 messageID start 保留 index/sent/pending、GroupView 统一过滤、store 注释。test:hub-stream 14 项；待二轮复审。"
+      "status": "done",
+      "commit": "0cff0c0 (98aef6a + 456dfad + 0cff0c0) feat/fix/test(hub-p3a-09): 群内流式 hub_message_delta",
+      "reviewNote": "复审 passed（task-c77zpunf，对象 0cff0c0；前两轮对象 98aef6a/456dfad）。交付：bridge hubDeltaSink（80ms 合并、单条 4KB UTF-8 切片、单草稿 256KB 上限、根 RunId 过滤、ToolStart/final 前 flush、late 丢弃）；AgentStart 预分配 msg_<random>，final 由 store 保留同 ID；前端 groupStream 纯归约（index 单调/并行草稿/finalized LRU 200/256KB）、store final 覆盖 + agent_end 清草稿、StreamingMessage。复审修复：index 0 幽灵草稿必红、stdout 偏移顺序断言（interval=1h 只允许 finish flush）10/10 杀死 finish-after-final、尾块截断单测、flush timer.Stop、同 messageID start 保持 index/closed、GroupView 统一过滤。非阻塞：N2 测试 white-box 读 closed/index 未加锁（interval 1h 下安全）；group_say 重复气泡仍靠 agent_end 清草稿（transient duplicate，deferred）；无群 activity 工具事件（§6.5.8 非必需）。"
     },
     "P3b-01a": {
       "status": "done",
