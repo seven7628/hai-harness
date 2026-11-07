@@ -1032,6 +1032,72 @@
       "commit": "chore(hub-p4-05): final review + retro"
     }
   ],
+  "deferred": [
+    {
+      "id": "D-390-mobile",
+      "source": "P2.5-08",
+      "title": "390px 群线程/Inspector/Needs you 横向溢出（body 452 vs 390，5 个头部控件被裁切）",
+      "depends_on": ["P4 移动端布局"],
+      "return_when": "P4 移动端任务开始时",
+      "status": "deferred"
+    },
+    {
+      "id": "D-native-high-contrast",
+      "source": "P2.5-08",
+      "title": "产品原生高对比主题（当前只有 prefers-contrast: more / forced-colors 媒体查询，无 data-theme）",
+      "depends_on": ["产品主题决策"],
+      "return_when": "发布前主题评审或 P4 UI 定稿时",
+      "status": "deferred"
+    },
+    {
+      "id": "D-approval-stub-producer",
+      "source": "P3a-07/P3a-10",
+      "title": "approval_stub 只有定义/过滤/渲染，没有生产者；群时间线看不到审批占位",
+      "depends_on": ["P3b-03 任务账本/审批接线"],
+      "return_when": "P3b-03 完成时一并接生产者",
+      "status": "deferred"
+    },
+    {
+      "id": "D-group-history-ui",
+      "source": "P3a-08/P3a-10",
+      "title": "群 UI 无「加载更早」/搜索（后端 hub_group_history 分页与 group_history query 已可用）",
+      "depends_on": ["P3b-07 前端群组件"],
+      "return_when": "P3b-07 完成时",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mentions-payload",
+      "source": "P3a-10/P3b-02",
+      "title": "hub_group_send 忽略结构化 mentions/mention_all；当前只解析文本 @",
+      "depends_on": ["P3b-02"],
+      "return_when": "P3b-02 实现时一并接线并补测试",
+      "status": "deferred"
+    },
+    {
+      "id": "D-refresh-loops-lock",
+      "source": "P3b-01b review",
+      "title": "refreshHubLoops（非名册 profile 变更）未持 lockHubAgent，首次装配并发可能用旧 profile",
+      "depends_on": ["P3b-04 并发更新/调度"],
+      "return_when": "P3b-04 前或触碰 profile 并发路径时",
+      "status": "deferred"
+    },
+    {
+      "id": "D-hub-group-send-lock",
+      "source": "P3b-01b review",
+      "title": "hubGroupSendMu 仍跨 wakeGroupRound/装配持有；无环但拉长临界区",
+      "depends_on": ["P3b-04 群调度器"],
+      "return_when": "P3b-04 实现时改为解锁后 wake",
+      "status": "deferred"
+    },
+    {
+      "id": "D-event-payload-assert",
+      "source": "P3a-10 review",
+      "title": "eval7 final 事件 envelope.group_id 与 human hub_message 正文未做 payload 断言（现有测试兜底）",
+      "depends_on": [],
+      "return_when": "下一次修改 hub_eval_p3_test.go 时顺手补齐",
+      "status": "deferred"
+    }
+  ],
   "progress": {
     "P0-01": {
       "status": "done",
