@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 已收口；P3b-01 名册/提示词复审 passed（N1–N6 记债）；P2.5-08 视觉修复与复验进行中",
+  "subtitle": "P3a 已收口；P3b-01/P3b-01b 名册与状态一致性复审 passed；P2.5-08 视觉复验收尾中",
   "updated": "2026-11-06",
   "phases": [
     {
@@ -1626,8 +1626,9 @@ const BASE = {
       "reviewNote": "复审 passed（task-v6qvngfh，对象 e4b8b8b）。交付：名册稳定层（群名/我是谁/成员按 Group.Members 顺序，名字+角色+稳定 id+职责+能力摘要；owner 以 Group.OwnerAgentID 为准；缺档/软删成员显式 fallback）；L1 字节不变；group_members 增 status/where/description/missing，新增 agent_status（群成员/共享群校验，不泄漏非共同群与记忆/DM）；成员增删、群改名、owner 转让、智能体改名/职责/能力/软删/恢复均重建受影响群会话 loop，只换 loop 不腰斩在飞回合，重建失败追加 warning。验证：L1 SHA 与父提交一致；roster golden 675B；go test ./agenthub/ -run 'Roster|Prompt|Group' 绿；bridge 定向 -count=5 -race 绿；6 项变异（去掉重建、map 顺序、system 加 live status、绕过成员校验、status 恒 idle 等）均 RED；全量仅既有 TestP0 探活与 TestReducer 价表污染。非阻塞/记债：N1 refreshHubGroupRoster 查表+apply 未持 lockHubAgent，与并发装配存在窄 TOCTOU（可能短暂旧名册，建议 P3b-02 前修）；N2 applyHubSessionLoop 吞 store/enrich 错误，重建失败不会回 warning；N3 agent_status 的 your_role 未套 owner override；N4 无 group 作用域时 where=other_group 措辞误导（状态本身真实）；N5 order 测试单次对 map 迭代有约 4% 假绿（golden 是确定守卫）、settling/other_group/missing/deleted/group-delete-no-rebuild/warning 保留缺覆盖；N6 inlineText 未剥 C0 控制符、Description 无长度上限（仅本地 owner 可写 profile，非跨智能体信任边界）。"
     },
     "P3b-01b": {
-      "status": "todo",
-      "reviewNote": "P3b-01 复审 N1–N4：N1 重建 TOCTOU（建议 P3b-02 前修）、N2 重建错误静默、N3 your_role owner override、N4 where 措辞；附 N5 测试缺口。"
+      "status": "done",
+      "commit": "3725ece fix(hub-p3b-01b): 名册重建与状态一致性",
+      "reviewNote": "复审 passed（task-r98d2ers，对象 3725ece）。交付：N1 refreshHubGroupMemberLoop 按 m.mu→agent→ws.mu 锁序，锁内二次查表后 apply，与 hubGroupSession 装配串行；N2 applyHubSessionLoop 返回 error，refreshHubLoops/refreshHubGroupRoster 聚合首个错误，命令层 addHubWarning（不覆盖旧 warning），rebuildHubLoop 记录错误但仍不中断 run；N3 effectiveGroupRole 统一 owner override，hubMemberRowOf 与 agent_status.your_role 同源；N4 无群作用域时 where=group，仅指定别的群才 other_group。新增 hub_roster_consistency_test.go 7 项（装配在飞并发、重建失败 warning、warning 追加、legacy owner、where/dm/other_group、missing/deleted、group-delete-no-rebuild）+ settling/dispatch where + 32× order + L1 缺失 token 消息。验证：定向 -count=5 -race 145.5s 绿；agenthub 全绿；vet/build/gofmt 干净；四项变异（去锁、吞错、raw role、空 scope→other_group）均 RED；全量仅既有 TestP0 与 TestReducer。非阻塞：①refreshHubLoops（非名册资料变更）仍未持 lockHubAgent，首次装配并发可能用旧 profile（既有问题，候选 follow-up）；②N1 变异检测依赖 300ms 探针（绿路径确定，极端调度下变异可能假绿；可用 refresh-entered hook 精确化）；③hub_commands.go:662 直接写 warning 未走 addHubWarning（当前无前序 warning，无害）；④hubGroupSendMu 仍跨 wakeGroupRound/装配持有（既有延迟风险，无环）。"
     },
     "P3b-01a": {
       "status": "done",
