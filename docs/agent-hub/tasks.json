@@ -894,7 +894,9 @@
       ],
       "acceptance": "8 轮预算；深度 4；冷却 1.5s；同对 2 次；人类插话清队列；停止；指纹循环检测。",
       "tests": "go test ./agenthub/ -run Conversation",
-      "commit": "feat(hub-p3b-04): 对话轮次与护栏"
+      "commit": "feat(hub-p3b-04): 对话轮次与护栏",
+      "status": "in_progress",
+      "note": "对话控制器 + 忙任务泵；实现中（task-smekypsj）"
     },
     {
       "id": "P3b-05",
