@@ -63,6 +63,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
   }
 
   const items = useMemo(() => buildThreadItems(messages, rounds), [messages, rounds])
+  // 草稿按当前群过滤一次：空态判断和渲染必须用同一份，否则别的群的草稿会让
+  // 本群「还没有消息」的引导语消失，却渲染出零个气泡（空面板）。
+  const groupDrafts = useMemo(() => drafts.filter((d) => d.groupId === group.id), [drafts, group.id])
 
   return (
     <section className="hub-dm hub-group-view">
@@ -109,18 +112,16 @@ export default function GroupView({ group }: { group: HubGroup }) {
           </div>
         ) : (
           <div className="hub-thread">
-            {messages.length === 0 && drafts.length === 0 ? (
+            {messages.length === 0 && groupDrafts.length === 0 ? (
               <div className="hub-intro">
                 <p>{t('hub.groupIntro')}</p>
                 <span className="hub-muted">{t('hub.groupHint')}</span>
               </div>
             ) : null}
             {renderThread(items, agentNames, displayMode === 'grouped')}
-            {drafts
-              .filter((d) => d.groupId === group.id)
-              .map((d) => (
-                <StreamingMessage key={d.messageId} draft={d} name={agentNames[d.agentId] ?? d.agentId} />
-              ))}
+            {groupDrafts.map((d) => (
+              <StreamingMessage key={d.messageId} draft={d} name={agentNames[d.agentId] ?? d.agentId} />
+            ))}
           </div>
         )}
       </div>

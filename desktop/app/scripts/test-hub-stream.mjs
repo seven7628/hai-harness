@@ -44,6 +44,9 @@ assert(two.length === 2 && two.map((d) => d.agentId).join(',') === 'ag_a,ag_b', 
 let fin = mod.finalizeHubDraft(two, [], 'a1')
 assert(fin.drafts.length === 1 && fin.finalized[0] === 'a1', 'final 删除对应草稿')
 assert(mod.applyHubDelta(fin.drafts, delta('a1', 9, '迟到的'), fin.finalized).length === 1, 'final 后迟到 delta 丢弃')
+// finalized 守卫必须自己拦住「index 0 打进空草稿列表」：这里没有 index 单调可挡，
+// 删掉 applyHubDelta 里的 finalized 判断就会凭空重建一条草稿（UI 幽灵气泡）。
+assert(mod.applyHubDelta([], delta('a1', 0, 'ghost'), fin.finalized).length === 0, 'final 后 index 0 迟到 delta 不重建草稿')
 
 // 5) finalized LRU 200。
 let finalized = []

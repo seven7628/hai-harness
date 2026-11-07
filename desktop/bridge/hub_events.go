@@ -46,7 +46,11 @@ func newHubDeltaSink(o *out) *hubDeltaSink {
 	return &hubDeltaSink{out: o, interval: hubDeltaInterval}
 }
 
-// start 绑定本轮流式消息；上一轮残留的 pending 直接丢弃（不会串到新消息）。
+// start 绑定本轮流式消息。
+//
+// 同一 messageID 的重复 AgentStart（续跑/重试）只刷新绑定，不重置 index/sent/pending：
+// index 归零会让前端把后续 delta 当迟到丢弃（草稿冻死），pending.Reset 会吞掉窗口内正文。
+// 只有 messageID 变化（新消息）才丢弃上一轮残留，避免串到新消息。
 func (s *hubDeltaSink) start(groupID, agentID, roundID, messageID, runID string) {
 	if s == nil {
 		return
@@ -60,8 +64,12 @@ func (s *hubDeltaSink) start(groupID, agentID, roundID, messageID, runID string)
 	s.groupID = groupID
 	s.agentID = agentID
 	s.roundID = roundID
-	s.messageID = messageID
 	s.rootRunID = runID
+	if messageID != "" && messageID == s.messageID {
+		// 同一条消息：保持 index/sent/pending（以及 closed，已 final 的消息不再续流）。
+		return
+	}
+	s.messageID = messageID
 	s.index = 0
 	s.sent = 0
 	s.pending.Reset()
@@ -101,7 +109,12 @@ func (s *hubDeltaSink) flush() {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.timer = nil
+	if s.timer != nil {
+		// 工具边界主动 flush：先停表，否则已经排队的回调会在后续窗口里多 flush 一次，
+		// 把「80ms 合并」的节奏打乱（孤儿定时器）。
+		s.timer.Stop()
+		s.timer = nil
+	}
 	s.flushLocked()
 }
 

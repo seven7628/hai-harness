@@ -25,7 +25,8 @@ func (s *FileStore) dmCursorPath(id AgentID) string {
 }
 
 // AppendDirectMessage 追加一条 DM 索引消息并分配 seq/ID。
-// 消息体里的 GroupID 会被清空（DM 没有群），ID 由 seq 决定（忽略调用方传入值）。
+// 消息体里的 GroupID 会被清空（DM 没有群），ID 默认由 seq 推导
+// （调用方预分配的 msg_ 流式 ID 会被保留，见 messageIDFor）。
 func (s *FileStore) AppendDirectMessage(ctx context.Context, agentID AgentID, m *Message) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err

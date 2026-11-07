@@ -420,7 +420,8 @@ func (s *FileStore) AppendMessage(ctx context.Context, m *Message) (int64, error
 	// 成功落盘后才改调用方对象；失败时不能让它带着一个没写进 log 的 seq。
 	stored := *m
 	stored.Seq = seq
-	// 消息 ID 是 seq 的确定函数；忽略调用方传入值，避免写出不符合协议的 ID。
+	// 消息 ID 默认由 seq 推导（msg_<seq>），但保留调用方预分配的 msg_ 流式 ID：
+	// AgentStart 预分配 → final hub_message 复用同一个 message_id（见 messageIDFor）。
 	stored.ID = messageIDFor(&stored, seq)
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = time.Now().UTC()
