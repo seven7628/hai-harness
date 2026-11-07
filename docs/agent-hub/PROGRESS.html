@@ -1414,6 +1414,36 @@ const BASE = {
       "depends_on": [],
       "return_when": "下一次修改 hub_eval_p3_test.go 时顺手补齐",
       "status": "deferred"
+    },
+    {
+      "id": "D-agent-task-pump",
+      "source": "P3b-03",
+      "title": "assign_task 目标忙时任务留 queued；当前没有对话控制器在目标回合结束后泵",
+      "depends_on": [
+        "P3b-04"
+      ],
+      "return_when": "P3b-04 实现时调用 Queue.Pump(agent target) 并在目标回合结束/冷却后泵",
+      "status": "deferred"
+    },
+    {
+      "id": "D-finish-agent-task",
+      "source": "P3b-03",
+      "title": "agent target 的 AgentEnd 未结算：无 finishAgentTask/任务结果卡/回推发起者/declined",
+      "depends_on": [
+        "P3b-05"
+      ],
+      "return_when": "P3b-05 实现时接 hub_task header 绑定与结果卡",
+      "status": "deferred"
+    },
+    {
+      "id": "D-human-group-assign",
+      "source": "P3b-03",
+      "title": "人类 hub_group_assign 命令未实现（当前只有智能体 assign_task）",
+      "depends_on": [
+        "P3b-07 前端任务卡/派发 UI"
+      ],
+      "return_when": "P3b-07 或人机派发 UI 落地时",
+      "status": "deferred"
     }
   ],
   "progress": {
