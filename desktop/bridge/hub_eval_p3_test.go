@@ -2,14 +2,17 @@ package main
 
 // P3a-10：评测 7（方案 §10.3）——群组 @、历史、私有上下文、流式一致性。
 //
-//  1. @all 唤醒除发送者外的全部成员，每个被唤醒的成员各写一条 final；
-//  2. @A 只唤醒 A：B/C 在有界窗口内没有 agent 消息，游标也不动；
-//  3. 无 @：只写日志，不写路由回执、不发 hub_round、不唤醒；
+//  1. @all 唤醒除发送者外的全部成员，每个被唤醒的成员各写一条 final；hub_round 事件的
+//     payload（round.id/trigger_seq/targets）与响应一致；
+//  2. @A 只唤醒 A：B/C 没有 agent 消息（群唤醒发号仍为 0），游标也不动；hub_round 事件 targets 只有 A；
+//  3. 无 @：只写日志，不写路由回执、不发 hub_round、不唤醒（响应里的 round 仍存在，targets 为空）；
 //  4. 群历史能翻到早期消息（命令分页 + group_history 工具的 before_seq/search）；
 //  5. owner-only 与 approval_stub 不进非 owner 的快照，也不进真实唤醒请求；
 //  6. 两个成员同时流式：草稿各自一个 message_id，final 与 delta 同 ID、正文一致，
-//     每条 final 只发一次事件。P3a-09 的 80ms 合并/顺序/迟到 delta 由
-//     hub_events_test.go 与 scripts/test-hub-stream.mjs 覆盖，这里只补评测级断言。
+//     每条 final 只发一次事件，且事件 payload 与落库 final 逐字段一致（id/text/seq/
+//     round_id/group_id/sender），最后一段 delta 必须先于 final 事件。P3a-09 的 80ms
+//     合并/顺序/迟到 delta 由 hub_events_test.go 与 scripts/test-hub-stream.mjs 覆盖，
+//     这里只补评测级断言。
 //
 // 全部走确定性 fake provider（不碰网络）。
 
@@ -124,6 +127,107 @@ func eval7HasText(msgs []agenthub.Message, text string) bool {
 	return false
 }
 
+// eval7EventMessage 取出 hub_message 事件的 message 对象（必须存在且非 null）。
+// 前端直接消费 ev.message：payload 缺失时不该被当成「没有这条事件」静默跳过。
+func eval7EventMessage(t *testing.T, ev map[string]any) map[string]any {
+	t.Helper()
+	msg, ok := ev["message"].(map[string]any)
+	if !ok || msg == nil {
+		t.Fatalf("hub_message 事件缺 message 对象: %+v", ev)
+	}
+	return msg
+}
+
+// eval7FinalEvent 断言某个 final 恰好一条 hub_message 事件，并把 payload 与落库的
+// final 逐字段对齐（id/text/seq/round_id/group_id/sender）。
+//
+// 为什么不能只数条数：前端 useHubStore 用 ev.message 把草稿转成最终消息、并按 seq
+// 排序展示，事件正文或序号被改坏时「事件数 == 1」仍然是绿的，用户却看到错正文/乱序。
+func eval7FinalEvent(t *testing.T, buf *syncBuf, gid agenthub.GroupID, roundID string, agentID agenthub.AgentID, final *agenthub.Message) {
+	t.Helper()
+	var found map[string]any
+	var envelope map[string]any
+	events := 0
+	for _, ev := range hubEvents(t, buf, "hub_message") {
+		msg := eval7EventMessage(t, ev)
+		if msg["id"] != final.ID {
+			continue
+		}
+		events++
+		envelope, found = ev, msg
+	}
+	if events != 1 {
+		t.Fatalf("%s final %s 的 hub_message 事件 = %d，want 1（前端按 id 替换草稿，重复会插两条）", agentID, final.ID, events)
+	}
+	// 事件信封的 seq 与 message.seq 都要是落库序号：前端按 message.seq 排序展示，
+	// 事件信封的 seq 是同一份数据的另一处出口，任何一处归零都说明 payload 没对齐。
+	if got := numOr(envelope, "seq", -1); got != final.Seq {
+		t.Fatalf("%s final 事件 seq = %v，落库 = %d", agentID, envelope["seq"], final.Seq)
+	}
+	if found["text"] != final.Text {
+		t.Fatalf("%s final 事件 text = %v，落库 = %q", agentID, found["text"], final.Text)
+	}
+	if got := numOr(found, "seq", -1); got != final.Seq {
+		t.Fatalf("%s final 事件 message.seq = %v，落库 = %d", agentID, found["seq"], final.Seq)
+	}
+	if final.RoundID != roundID {
+		t.Fatalf("%s 落库 final round_id = %q，want %q", agentID, final.RoundID, roundID)
+	}
+	if found["round_id"] != roundID {
+		t.Fatalf("%s final 事件 round_id = %v，want %q", agentID, found["round_id"], roundID)
+	}
+	if found["group_id"] != string(gid) {
+		t.Fatalf("%s final 事件 group_id = %v，want %s", agentID, found["group_id"], gid)
+	}
+	sender, ok := found["sender"].(map[string]any)
+	if !ok || sender == nil {
+		t.Fatalf("%s final 事件 sender 不是对象: %v", agentID, found["sender"])
+	}
+	// 字面量 "agent"：这是 stdout 上的 wire 形状，前端按它分支，不能随内部常量漂移。
+	if sender["kind"] != "agent" || sender["agent_id"] != string(agentID) {
+		t.Fatalf("%s final 事件 sender = %+v，want kind=agent agent_id=%s", agentID, sender, agentID)
+	}
+}
+
+// eval7RoundEvent 断言 hub_round 事件恰好一条，并核对 group/round/trigger 归属。
+// 前端看事件里的 round（targets 为空就不提示「谁被唤醒」），事件与响应是两套 payload。
+func eval7RoundEvent(t *testing.T, buf *syncBuf, gid agenthub.GroupID, roundID string, triggerSeq int64) agenthub.Round {
+	t.Helper()
+	evs := hubEvents(t, buf, "hub_round")
+	if len(evs) != 1 {
+		t.Fatalf("hub_round 事件 = %d 条，want 1: %+v", len(evs), evs)
+	}
+	if evs[0]["group_id"] != string(gid) {
+		t.Fatalf("hub_round group_id = %v，want %s", evs[0]["group_id"], gid)
+	}
+	raw, err := json.Marshal(evs[0]["round"])
+	if err != nil {
+		t.Fatalf("hub_round.round 不可序列化: %v", err)
+	}
+	var round agenthub.Round
+	if err := json.Unmarshal(raw, &round); err != nil {
+		t.Fatalf("hub_round.round = %s: %v", raw, err)
+	}
+	if round.ID != roundID || round.GroupID != gid || round.TriggerSeq != triggerSeq {
+		t.Fatalf("hub_round payload = %+v，want id %s group %s trigger %d", round, roundID, gid, triggerSeq)
+	}
+	return round
+}
+
+// eval7ToolHistory 解 group_history 工具的 JSON 输出（{"messages":[...],"count":N}）。
+// 用 count 字段断言条数：字符串匹配 "count":1 会让 count:10 也满足。
+func eval7ToolHistory(t *testing.T, out string) ([]agenthub.Message, int) {
+	t.Helper()
+	var page struct {
+		Messages []agenthub.Message `json:"messages"`
+		Count    int                `json:"count"`
+	}
+	if err := json.Unmarshal([]byte(out), &page); err != nil {
+		t.Fatalf("group_history 输出不是 JSON: %v\n%s", err, out)
+	}
+	return page.Messages, page.Count
+}
+
 // 评测 7-1：@all 唤醒全部其他成员；每个成员一条 final；人只有触发消息。
 func TestEval7MentionAllWakesEveryOtherMember(t *testing.T) {
 	m, buf := testManager(t)
@@ -208,9 +312,24 @@ func TestEval7MentionAllWakesEveryOtherMember(t *testing.T) {
 			t.Fatalf("%s 游标 = %+v (%v)，want trigger %d（唤醒归属串台）", a.ID, cur, err, triggerSeq)
 		}
 	}
+	// hub_round 事件 payload 也要对：前端展示「谁被唤醒」读的是事件里的 round，
+	// 只对响应对不上事件就是两套事实（曾漏过只改事件的变异）。
+	evRound := eval7RoundEvent(t, buf, g.ID, roundID, triggerSeq)
+	if !evRound.MentionAll {
+		t.Fatalf("hub_round 事件 mention_all = false，want true: %+v", evRound)
+	}
+	// 事件与响应的 targets 必须是同一份（条数相等 + 无响应之外的成员 = 集合相等）。
+	if len(evRound.Targets) != len(targets) {
+		t.Fatalf("hub_round 事件 targets = %v，响应 = %v（两套 payload 必须一致）", evRound.Targets, targets)
+	}
+	for _, id := range evRound.Targets {
+		if !hit[id] {
+			t.Fatalf("hub_round 事件 targets = %v，含响应之外的 %s", evRound.Targets, id)
+		}
+	}
 }
 
-// 评测 7-2：@A 只唤醒 A；其余成员有界窗口内没有 agent 消息、游标不动。
+// 评测 7-2：@A 只唤醒 A；其余成员没有 agent 消息（唤醒发号仍为 0）、游标不动。
 func TestEval7MentionOneWakesOnlyThatMember(t *testing.T) {
 	m, buf := testManager(t)
 	agents, g := eval7GroupFixture(t, m, buf, 1, "评测7单点", "Eval7OneA", "Eval7OneB", "Eval7OneC")
@@ -230,15 +349,25 @@ func TestEval7MentionOneWakesOnlyThatMember(t *testing.T) {
 	if mentionAll || len(targets) != 1 || targets[0] != agents[1].ID {
 		t.Fatalf("targets = %v (mention_all=%v)，want 只有 %s", targets, mentionAll, agents[1].ID)
 	}
+	triggerSeq := numOr(data, "seq", 0)
+	if triggerSeq == 0 {
+		t.Fatal("send response 缺 seq")
+	}
 
 	msgs := waitGroupMessages(t, m, g.ID, func(msgs []agenthub.Message) bool {
 		return eval7HasText(eval7AgentMessages(msgs, agents[1].ID), "冒泡-1")
 	})
-	// 有界静默窗口：误唤醒的 run 用的是立即返回的 fake provider，300ms 足够走完一轮。
-	time.Sleep(300 * time.Millisecond)
+	// 等 target 的 run 收口（闩清零 = final 已落库）：用它替代固定 300ms 静默窗口，
+	// 既确定又不拖慢。未 @ 成员根本没有 run，下面的断言不需要窗口。
+	waitHubGroupIdle(t, sessions[1])
 	msgs = eval7ReadGroup(t, m, g.ID)
 	for _, i := range []int{0, 2} {
 		a := agents[i]
+		// 确定性证据：wakeGroupAgent 在 send 返回前同步发号（永不回 0），
+		// 所以 hubGroupSeq==0 就是「从未被唤醒」——不靠静默窗口猜。
+		if got := sessions[i].hubGroupSeq.Load(); got != 0 {
+			t.Fatalf("%s 未被 @，唤醒发号却 = %d（说明被唤醒过）", a.ID, got)
+		}
 		if got := eval7AgentMessages(msgs, a.ID); len(got) != 0 {
 			t.Fatalf("%s 未被 @，却写了 agent 消息: %+v", a.ID, got)
 		}
@@ -252,6 +381,9 @@ func TestEval7MentionOneWakesOnlyThatMember(t *testing.T) {
 		if sessions[i].hubGroupBusy.Load() {
 			t.Fatalf("%s 未被 @，群会话却处于 busy", a.ID)
 		}
+	}
+	if got := sessions[1].hubGroupSeq.Load(); got != 1 {
+		t.Fatalf("target 唤醒发号 = %d，want 恰好 1 次", got)
 	}
 	own := eval7AgentMessages(msgs, agents[1].ID)
 	if len(own) != 1 || own[0].Text != "冒泡-1" || own[0].RoundID != roundID {
@@ -271,6 +403,11 @@ func TestEval7MentionOneWakesOnlyThatMember(t *testing.T) {
 	if strings.Contains(acts[0].Summary, string(agents[0].ID)) || strings.Contains(acts[0].Summary, string(agents[2].ID)) {
 		t.Fatalf("routing 回执把未 @ 的成员写进了 targets: %s", acts[0].Summary)
 	}
+	// 事件 payload 同样只能有 B：前端按 hub_round 里的 targets 提示唤醒对象。
+	evRound := eval7RoundEvent(t, buf, g.ID, roundID, triggerSeq)
+	if evRound.MentionAll || len(evRound.Targets) != 1 || evRound.Targets[0] != agents[1].ID {
+		t.Fatalf("hub_round 事件 targets = %v (mention_all=%v)，want 只有 %s", evRound.Targets, evRound.MentionAll, agents[1].ID)
+	}
 }
 
 // 评测 7-3：无 @ 只写日志，不产生回执/hub_round/唤醒，也没有 agent 消息。
@@ -288,11 +425,15 @@ func TestEval7NoMentionDoesNotWake(t *testing.T) {
 	if !ok {
 		t.Fatalf("group send: %s", errMsg)
 	}
-	// 响应为了兼容前端仍带 round 字段（前端 roundHasAction 会过滤空 targets），
+	// 响应为了兼容前端仍带 round 字段（前端 roundHasAction 会过滤空 targets）：
+	// 断言它**存在且非 null**，否则 eval7RoundOf 的零值会让「字段被删掉」也撞对。
+	if rawRound, has := data["round"]; !has || rawRound == nil {
+		t.Fatalf("无 @ 响应缺 round 字段（前端兼容依赖它）: %+v", data)
+	}
 	// 但本轮不该落回执、不该发 hub_round 事件、不该唤醒。
 	roundID, mentionAll, targets := eval7RoundOf(t, data)
-	if mentionAll || len(targets) != 0 {
-		t.Fatalf("无 @ 竟然路由出了 targets=%v (round %q, mention_all=%v)", targets, roundID, mentionAll)
+	if roundID == "" || mentionAll || len(targets) != 0 {
+		t.Fatalf("无 @ round = %q (mention_all=%v targets=%v)，want 兼容用的空中继", roundID, mentionAll, targets)
 	}
 	if _, hasWakeErrors := data["wake_errors"]; hasWakeErrors {
 		t.Fatalf("无 @ 不该尝试唤醒，response 却带 wake_errors: %+v", data["wake_errors"])
@@ -300,7 +441,6 @@ func TestEval7NoMentionDoesNotWake(t *testing.T) {
 	if evs := hubEvents(t, buf, "hub_round"); len(evs) != 0 {
 		t.Fatalf("无 @ 产生了 hub_round 事件: %+v", evs)
 	}
-	time.Sleep(300 * time.Millisecond)
 	msgs := eval7ReadGroup(t, m, g.ID)
 	if len(msgs) != 1 || msgs[0].Sender.Kind != agenthub.SenderHuman || msgs[0].Text != "只记录，不点名" {
 		t.Fatalf("群日志 = %+v，want 只有人的那一条（无路由回执）", msgs)
@@ -313,6 +453,11 @@ func TestEval7NoMentionDoesNotWake(t *testing.T) {
 		t.Fatalf("无 @ 写了 routing activity: %+v", acts)
 	}
 	for i, a := range agents {
+		// 确定性证据：任何唤醒都会在 send 返回前把 hubGroupSeq +1（永不回 0），
+		// 0 即「没被唤醒过」——不再用 300ms 静默窗口兜底。
+		if got := sessions[i].hubGroupSeq.Load(); got != 0 {
+			t.Fatalf("%s 无 @ 却被唤醒（hubGroupSeq = %d）", a.ID, got)
+		}
 		if got := eval7AgentMessages(msgs, a.ID); len(got) != 0 {
 			t.Fatalf("%s 无 @ 却发言: %+v", a.ID, got)
 		}
@@ -406,8 +551,9 @@ func TestEval7HistoryReachesEarlyMessages(t *testing.T) {
 		t.Fatalf("group_history before_seq 没翻到早期消息: %s", out)
 	}
 	out = call(`{"group_id":"` + string(g.ID) + `","query":"early-marker"}`)
-	if !strings.Contains(out, early) || !strings.Contains(out, `"count":1`) {
-		t.Fatalf("group_history query 没检索到早期消息: %s", out)
+	hitMsgs, count := eval7ToolHistory(t, out)
+	if count != 1 || len(hitMsgs) != 1 || !strings.Contains(hitMsgs[0].Text, early) {
+		t.Fatalf("group_history query: count=%d messages=%+v，want 只有第 1 条早期消息: %s", count, hitMsgs, out)
 	}
 }
 
@@ -504,18 +650,26 @@ func TestEval7PrivateContentStaysOutOfGroupContext(t *testing.T) {
 	}
 }
 
+// eval7WaitTimeout 是「两个 provider 必须同时开流 / 群会话必须收口」的判定窗口，超时即失败。
+const eval7WaitTimeout = 5 * time.Second
+
 // eval7Barrier 让两个并发 provider 在开流前互等：如果发送路径是「跑完 A 再跑 B」，
-// 「并行草稿」断言就退化成两条互不相干的单流；超时兜底避免唤醒 bug 变成挂死。
+// 「并行草稿」断言就退化成两条互不相干的单流。
+// 超时必须被记成失败而不是静默放行：串行唤醒只会让先到的 provider 空等，
+// 若等满 5s 就照旧往下跑，测试就永远绿——那正是要被抓住的变异。
 type eval7Barrier struct {
-	mu      sync.Mutex
-	waiting int
-	ch      chan struct{}
+	mu       sync.Mutex
+	waiting  int
+	timedOut bool
+	ch       chan struct{}
 }
 
 func newEval7Barrier(n int) *eval7Barrier {
 	return &eval7Barrier{waiting: n, ch: make(chan struct{})}
 }
 
+// wait 阻塞到所有 provider 到齐；超时记下 timedOut 后放行（不在这里报错：先让两条
+// 流都跑完，失败信息由 await 指出「唤醒串行」，而不是退化成「缺 final」）。
 func (b *eval7Barrier) wait() {
 	b.mu.Lock()
 	b.waiting--
@@ -526,7 +680,40 @@ func (b *eval7Barrier) wait() {
 	b.mu.Unlock()
 	select {
 	case <-b.ch:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eval7WaitTimeout):
+		b.mu.Lock()
+		b.timedOut = true
+		b.mu.Unlock()
+	}
+}
+
+// await 在测试侧有界等待全部 provider 到齐，并拒绝「靠超时兜底才凑齐」的情形。
+// 先到的 provider 超时放行 = 另一条流当时根本没在跑，并行断言已经退化。
+func (b *eval7Barrier) await(t *testing.T) {
+	t.Helper()
+	select {
+	case <-b.ch:
+		b.mu.Lock()
+		timedOut := b.timedOut
+		b.mu.Unlock()
+		if timedOut {
+			t.Fatalf("有 provider 在 %s 内没等到另一条流：群唤醒是串行的（并行草稿断言已退化）", eval7WaitTimeout)
+		}
+	case <-time.After(eval7WaitTimeout):
+		t.Fatalf("两个 provider 没有在 %s 内同时开流：群唤醒是串行的（并行草稿断言已退化）", eval7WaitTimeout)
+	}
+}
+
+// waitHubGroupIdle 有界等群会话回到空闲。闩清零发生在 Run 返回之后（final 已落库），
+// 所以它同时是「这一轮跑完了」的确定性信号，可以替代固定 300ms 静默窗口。
+func waitHubGroupIdle(t *testing.T, bs *bridgeSession) {
+	t.Helper()
+	deadline := time.Now().Add(eval7WaitTimeout)
+	for bs.hubGroupBusy.Load() {
+		if time.Now().After(deadline) {
+			t.Fatalf("群会话 %s 在 %s 后仍 busy（run 没有收口）", bs.id, eval7WaitTimeout)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -577,6 +764,9 @@ func TestEval7ConcurrentStreamsKeepDraftAndFinalConsistent(t *testing.T) {
 	if len(targets) != 2 {
 		t.Fatalf("targets = %v，want 两个并行成员", targets)
 	}
+	// 两个 provider 必须真的同时开流：串行唤醒时先到的那个会等满超时，
+	// 这里直接判失败（否则后续断言只能证明「两条流先后存在」）。
+	barrier.await(t)
 	msgs := waitGroupMessages(t, m, g.ID, func(msgs []agenthub.Message) bool {
 		for _, want := range replies {
 			found := false
@@ -591,10 +781,9 @@ func TestEval7ConcurrentStreamsKeepDraftAndFinalConsistent(t *testing.T) {
 		}
 		return true
 	})
-	deadline := time.Now().Add(5 * time.Second)
-	for (sessions[0].hubGroupBusy.Load() || sessions[1].hubGroupBusy.Load()) && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
+	// 闩清零 = run 已收口（final 落库 + 事件已写），再断言事件流不是「还差一条」。
+	waitHubGroupIdle(t, sessions[0])
+	waitHubGroupIdle(t, sessions[1])
 	msgs = eval7ReadGroup(t, m, g.ID)
 
 	// final 不重复：每个成员恰好一条，且都挂在本轮。
@@ -631,7 +820,6 @@ func TestEval7ConcurrentStreamsKeepDraftAndFinalConsistent(t *testing.T) {
 	if len(deltas) != len(agents) {
 		t.Fatalf("草稿流 = %d，want %d（并行 agent 各自一条草稿）: %v", len(deltas), len(agents), deltas)
 	}
-	hubMessages := hubEvents(t, buf, "hub_message")
 	for _, a := range agents {
 		final := finals[a.ID]
 		evs := deltas[final.ID]
@@ -654,16 +842,22 @@ func TestEval7ConcurrentStreamsKeepDraftAndFinalConsistent(t *testing.T) {
 		if text.String() != final.Text {
 			t.Fatalf("%s delta 拼接 = %q，final = %q", a.ID, text.String(), final.Text)
 		}
-		// final 事件恰好一次：前端按 message_id 替换草稿，重复事件会插两条。
-		var events int
-		for _, ev := range hubMessages {
-			msg, _ := ev["message"].(map[string]any)
-			if msg != nil && msg["id"] == final.ID {
-				events++
-			}
-		}
-		if events != 1 {
-			t.Fatalf("%s final %s 的 hub_message 事件 = %d，want 1", a.ID, final.ID, events)
+		// final 事件恰好一次，且 payload 与落库 final 逐字段一致：前端直接消费
+		// ev.message（替换草稿 + 按 seq 排序），只数事件条数会让正文/序号被改坏时全绿。
+		eval7FinalEvent(t, buf, g.ID, roundID, a.ID, final)
+		// 顺序：该 ID 的最后一段 delta 必须先于 final 事件写出（final 之后到达的 delta
+		// 会被前端丢弃，尾部内容就永远看不到）。
+		deltaAt, finalAt := waitEventOffsets(t, buf,
+			func(ev map[string]any) bool {
+				return ev["event_type"] == "hub_message_delta" && ev["message_id"] == final.ID
+			},
+			func(ev map[string]any) bool {
+				msg, _ := ev["message"].(map[string]any)
+				return ev["event_type"] == "hub_message" && msg != nil && msg["id"] == final.ID
+			},
+		)
+		if finalAt < deltaAt {
+			t.Fatalf("%s 顺序反了：final 事件偏移 %d 早于最后一段 delta 偏移 %d（delta 必须先写）", a.ID, finalAt, deltaAt)
 		}
 	}
 }
