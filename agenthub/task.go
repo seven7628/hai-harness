@@ -114,7 +114,10 @@ type Task struct {
 	Target       TaskTarget `json:"target"`
 	Title        string     `json:"title"`
 	Instruction  string     `json:"instruction"`
-	Callback     string     `json:"callback"`
+	// ArtifactIDs 是派发时显式引用的本群产物（assign_task 的可选入参）。
+	// 与 Result.Artifacts（执行产出的快照）是两回事：这里是「给对方看的输入」。
+	ArtifactIDs []string `json:"artifact_ids,omitempty"`
+	Callback    string   `json:"callback"`
 	// ClientMsgID 是派发方给的幂等键（session_send 原样传入）；空 = 无幂等要求。
 	// 与目标侧去重表共用同一个值，跨进程由账本按 (target, client_msg_id) 查找兜底。
 	ClientMsgID     string      `json:"client_msg_id,omitempty"`
@@ -271,6 +274,13 @@ func (t *Task) Validate() error {
 	}
 	if t.Target.Kind != TargetWorkspace && t.Target.Kind != TargetAgent {
 		return fmt.Errorf("%w: task.target.kind %q is invalid", ErrInvalid, t.Target.Kind)
+	}
+	if t.Target.Kind == TargetAgent {
+		// 群内智能体目标任务必须有明确的目标与群：缺了就落到「无人接收」的账本条目。
+		// session_id 不在这里强制（历史/测试快照可能省略），由 Queue.SubmitAgent 校验。
+		if t.Target.AgentID == "" || t.Target.GroupID == "" {
+			return fmt.Errorf("%w: agent target requires agent_id and group_id", ErrInvalid)
+		}
 	}
 	if t.Title == "" {
 		return fmt.Errorf("%w: task.title is required", ErrInvalid)

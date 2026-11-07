@@ -72,6 +72,34 @@ type DispatchResult struct {
 	Message   string `json:"message,omitempty"`
 }
 
+// AgentDispatchReq 把一条任务派进智能体的群会话（target.kind=agent，P3b-03）。
+// 与 DispatchReq 同形：header 在前、正文在后，客户端幂等键原样透传。
+type AgentDispatchReq struct {
+	OriginAgent AgentID    `json:"origin_agent"`
+	Target      TaskTarget `json:"target"`
+	Text        string     `json:"text"`
+	ClientMsgID string     `json:"client_msg_id,omitempty"`
+	TaskHeader  string     `json:"task_header,omitempty"`
+}
+
+// AgentDispatchResult 是群会话派发结果。Accepted=false 表示目标忙：调用方必须把
+// 任务留在队列里（不投第二份快照），等空闲后再泵。
+type AgentDispatchResult struct {
+	SessionID string `json:"session_id"`
+	Accepted  bool   `json:"accepted"`
+	Message   string `json:"message,omitempty"`
+}
+
+// AgentDispatchOps 是 WorkspaceOps 的**可选**扩展：kind=agent 目标的派发。
+//
+// 为什么不用 SessionStatus + Dispatch 两段：群会话的「空闲」由 hubGroupBusy 闩
+// 表达，探测与投递分成两次调用会在中间被一次普通群唤醒插队。这里把「判忙 +
+// 占闩 + Ask」收在一次调用里，Accepted=false 时什么都没投。
+// 未实现该接口的 WorkspaceOps（测试替身/工作区专用实现）仍按原样工作。
+type AgentDispatchOps interface {
+	AgentDispatch(ctx context.Context, req AgentDispatchReq) (AgentDispatchResult, error)
+}
+
 // WorkspaceOps 是 Hub 对工作区的全部能力面（bridge 实现）。
 type WorkspaceOps interface {
 	ListWorkspaces(ctx context.Context) ([]WorkspaceInfo, error)

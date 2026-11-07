@@ -373,6 +373,111 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 	return agenthub.DispatchResult{SessionID: sid, Accepted: true}, nil
 }
 
+// AgentDispatch 把智能体目标任务投进目标的群会话（P3b-03，target.kind=agent）。
+//
+// 判忙与投递必须在**一次**调用里完成：探测（SessionStatus 式）与 Ask 分成两次，
+// 中间可能被一次普通群唤醒插队 —— 那一轮的 hub_task 就被顶到下一批，空闲闸门失效。
+// 忙（hubGroupBusy 闩已被占 / 会话在跑 / 有积压）→ Accepted=false，什么都没投，
+// 任务由 Queue 留在队列里（P3b-04 在目标回合结束后泵）。
+func (o *hubWorkspaceOps) AgentDispatch(ctx context.Context, req agenthub.AgentDispatchReq) (agenthub.AgentDispatchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return agenthub.AgentDispatchResult{}, err
+	}
+	target := req.Target
+	if target.Kind != agenthub.TargetAgent {
+		return agenthub.AgentDispatchResult{}, fmt.Errorf("%w: AgentDispatch 只接受 agent 目标，得到 %q", agenthub.ErrInvalid, target.Kind)
+	}
+	gid, to := target.GroupID, target.AgentID
+	if gid == "" || to == "" {
+		return agenthub.AgentDispatchResult{}, fmt.Errorf("%w: agent 目标需要 group_id/agent_id", agenthub.ErrInvalid)
+	}
+	text := strings.TrimSpace(req.Text)
+	if text == "" {
+		return agenthub.AgentDispatchResult{}, fmt.Errorf("%w: text 不能为空", agenthub.ErrInvalid)
+	}
+	// header 先校验：坏 header 不能以「已投递」的形式进入会话（P2-04 NB-1 同口径）。
+	if strings.TrimSpace(req.TaskHeader) != "" {
+		if _, err := agenthub.ParseTaskHeader(req.TaskHeader); err != nil {
+			return agenthub.AgentDispatchResult{}, fmt.Errorf("%w: 无效的 hub_task header: %v", agenthub.ErrInvalid, err)
+		}
+	}
+	st, err := o.m.hubStore()
+	if err != nil {
+		return agenthub.AgentDispatchResult{}, err
+	}
+	g, err := st.LoadGroup(ctx, gid)
+	if err != nil {
+		return agenthub.AgentDispatchResult{}, err
+	}
+	if g == nil || g.Deleted {
+		return agenthub.AgentDispatchResult{}, fmt.Errorf("%w: 群组 %s 不存在", agenthub.ErrNotFound, gid)
+	}
+	if !groupHasMember(g, to) {
+		return agenthub.AgentDispatchResult{}, fmt.Errorf("%w: %s 不是群 %s 的成员", agenthub.ErrInvalid, to, gid)
+	}
+	if req.OriginAgent != "" && !groupHasMember(g, req.OriginAgent) {
+		// 派发瞬间发起者已被移出群：任务不能再落地（成员校验在工具层也做，这里是二道闸）。
+		return agenthub.AgentDispatchResult{}, fmt.Errorf("%w: 发起者 %s 已不在群 %s", agenthub.ErrInvalid, req.OriginAgent, gid)
+	}
+	if p, _, perr := o.m.hubLoadAgent(string(to)); perr != nil || p == nil {
+		return agenthub.AgentDispatchResult{}, fmt.Errorf("%w: 目标智能体 %s 不可用", agenthub.ErrNotFound, to)
+	}
+	// 懒装配群会话：同一个 (group, agent) 只有一个会话，与 @ 唤醒/group_say 共用。
+	bs, err := o.m.hubGroupSession(string(to), string(gid))
+	if err != nil {
+		return agenthub.AgentDispatchResult{}, err
+	}
+	// 判忙 + 占闩：CAS 失败 = 已有群轮/任务在跑，什么都不投。
+	if !bs.hubGroupBusy.CompareAndSwap(false, true) {
+		return agenthub.AgentDispatchResult{SessionID: bs.id, Accepted: false}, nil
+	}
+	seq := bs.hubGroupSeq.Add(1)
+	bs.hubGroupOwner.Store(seq)
+	ok := false
+	defer func() {
+		if !ok {
+			bs.clearHubGroupBusy(seq) // 没投出去：立即还闩，别把这个智能体永久标忙
+		}
+	}()
+	// 占闩后二次确认：running/pending 还说明有未收尾的回合（闩和运行态短暂不一致时
+	// 也不能把第二个 hub_task 塞进同一批）。
+	if bs.running.Load() || bs.s.PendingCount() > 0 || bs.hubSettling.Load() {
+		return agenthub.AgentDispatchResult{SessionID: bs.id, Accepted: false}, nil
+	}
+	// 进程内幂等（同一 (会话, client_msg_id) 只投一次）；跨重启靠账本状态。
+	dedupKey := ""
+	if req.ClientMsgID != "" {
+		dedupKey = "agent\x00" + bs.id + "\x00" + req.ClientMsgID
+		o.m.mu.Lock()
+		_, seen := o.m.hubMsgDedup[dedupKey]
+		if !seen {
+			if o.m.hubMsgDedup == nil {
+				o.m.hubMsgDedup = map[string]string{}
+			}
+			o.m.hubMsgDedup[dedupKey] = bs.id
+		}
+		o.m.mu.Unlock()
+		if seen {
+			return agenthub.AgentDispatchResult{
+				SessionID: bs.id, Accepted: true, Message: agenthub.DispatchDuplicateMessage,
+			}, nil
+		}
+	}
+	msg := hubDispatchMessage(text, req.TaskHeader)
+	if err := bs.s.Ask(ctx, msg); err != nil {
+		if dedupKey != "" {
+			o.m.mu.Lock()
+			delete(o.m.hubMsgDedup, dedupKey)
+			o.m.mu.Unlock()
+		}
+		return agenthub.AgentDispatchResult{}, err
+	}
+	ok = true
+	bs.lastActive.Store(time.Now().UnixMilli())
+	bs.wakeRun()
+	return agenthub.AgentDispatchResult{SessionID: bs.id, Accepted: true}, nil
+}
+
 // InterruptSession 中断某个工作区会话的当前 run（跨工作区按 sid 查）。
 func (o *hubWorkspaceOps) InterruptSession(ctx context.Context, sid string) error {
 	if err := ctx.Err(); err != nil {

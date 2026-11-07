@@ -15,6 +15,8 @@ import (
 const (
 	TaskEventCreated  = "created"
 	TaskEventNotified = "notified"
+	// TaskEventAssigned：建账后补写触发消息 seq（assign_task 的消息 seq 只有落盘后才知道）。
+	TaskEventAssigned = "assigned"
 )
 
 // TransitionOptions 是状态迁移同时要落账的字段。
@@ -214,6 +216,45 @@ func (l *Ledger) Transition(ctx context.Context, id TaskID, to TaskStatus, opts 
 	}
 	applyTransitionFields(t, to, opts, at)
 	if err := l.saveAndAppend(ctx, prev, t, string(to), opts.RunID, opts.Result, opts.Error, opts.HumanIntervened, at); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// BindOriginMessageSeq 把触发消息 seq 写进任务（建账时 seq 还不存在）。
+//
+// assign_task 的落盘顺序是「建账 → 写群消息 → 绑定 seq」：先建账才能把 task_id
+// 写进消息，先写消息才能拿到 seq。绑定只改 Origin.MessageSeq（幂等），并追加一条
+// assigned 事件，让 Replay 从事件流也能看到 seq，而不是只依赖快照文件。
+func (l *Ledger) BindOriginMessageSeq(ctx context.Context, id TaskID, seq int64) (*Task, error) {
+	if l == nil || l.store == nil {
+		return nil, fmt.Errorf("%w: ledger has no store", ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if seq <= 0 {
+		return nil, fmt.Errorf("%w: message seq must be positive", ErrInvalid)
+	}
+	lock := ledgerTaskLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	t, err := l.store.LoadTask(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if t.Origin.MessageSeq == seq {
+		return t, nil
+	}
+	if t.Status.Terminal() {
+		return nil, fmt.Errorf("%w: task %s 已终态 %q，不能绑定消息", ErrConflict, id, t.Status)
+	}
+	prev := cloneTask(t)
+	now := time.Now().UTC()
+	t.Origin.MessageSeq = seq
+	t.UpdatedAt = now
+	if err := l.saveAndAppend(ctx, prev, t, TaskEventAssigned, "", nil, "", nil, now); err != nil {
 		return nil, err
 	}
 	return t, nil

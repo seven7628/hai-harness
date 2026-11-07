@@ -827,6 +827,7 @@ func cloneMessages(in []Message) []Message {
 func cloneTask(t *Task) *Task {
 	cp := *t
 	cp.Chain = append([]TaskID(nil), t.Chain...)
+	cp.ArtifactIDs = append([]string(nil), t.ArtifactIDs...)
 	cp.NotifiedRuns = cloneStrings(t.NotifiedRuns)
 	cp.SupersededRuns = cloneStrings(t.SupersededRuns)
 	cp.Dispatch = cloneDispatch(t.Dispatch)

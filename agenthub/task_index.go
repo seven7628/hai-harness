@@ -13,6 +13,7 @@ package agenthub
 // 口径必须与 Ledger/Guard 原实现一致：
 //   - client_msg_id 只在同一 (kind, clean(workspace), trim(session)) 内命中；
 //   - active = 非终态任务数，按 Origin.AgentID；
+//   - pair = 非终态 target=agent 任务数，按 (Origin.GroupID, Origin.AgentID, Target.AgentID)；
 //   - 日成本只累加 Result.Usage.CostPriced=true，按 UpdatedAt 的 UTC 日归日；
 //   - 去重窗口内同 (origin, target, instruction) 命中；同 client_msg_id 的重试跳过。
 
@@ -34,6 +35,16 @@ type TaskIndex interface {
 	FindDuplicate(t *Task, since time.Time) (TaskID, bool)
 }
 
+// PairActiveIndex 是 TaskIndex 的可选扩展：按「起始群 + 起始智能体 → 目标智能体」
+// 统计非终态任务数（assign_task 的同对并发上限）。
+//
+// 刻意不并进 TaskIndex：第三方测试替身只实现 TaskIndex 也能继续编译；未实现本接口
+// 时 Queue 回退 ListTasks（与 Guard 的兼容策略一致）。
+type PairActiveIndex interface {
+	TaskIndexReady() bool
+	PairActiveCount(group GroupID, from, to AgentID) int
+}
+
 type clientTaskKey struct {
 	Kind        string
 	Workspace   string
@@ -51,6 +62,14 @@ type dedupeTaskKey struct {
 	Instruction string
 }
 
+// pairActiveKey 是「同一起始群 + 起始智能体 → 同一目标智能体」的在途计数键
+// （assign_task 的同对并发上限，见 Queue.SubmitAgent）。
+type pairActiveKey struct {
+	Group GroupID
+	From  AgentID
+	To    AgentID
+}
+
 type agentDayKey struct {
 	Day   string
 	Agent AgentID
@@ -66,6 +85,7 @@ type taskIndex struct {
 	byID     map[TaskID]*Task
 	byClient map[clientTaskKey][]TaskID
 	active   map[AgentID]int
+	pair     map[pairActiveKey]int
 
 	agentDay  map[agentDayKey]float64
 	groupDay  map[groupDayKey]float64
@@ -90,6 +110,7 @@ func (x *taskIndex) reset(tasks []*Task) {
 	x.byID = map[TaskID]*Task{}
 	x.byClient = map[clientTaskKey][]TaskID{}
 	x.active = map[AgentID]int{}
+	x.pair = map[pairActiveKey]int{}
 	x.agentDay = map[agentDayKey]float64{}
 	x.groupDay = map[groupDayKey]float64{}
 	x.globalDay = map[string]float64{}
@@ -129,12 +150,7 @@ func (x *taskIndex) removeLocked(t *Task) {
 		return
 	}
 	if !t.Status.Terminal() {
-		n := x.active[t.Origin.AgentID] - 1
-		if n <= 0 {
-			delete(x.active, t.Origin.AgentID)
-		} else {
-			x.active[t.Origin.AgentID] = n
-		}
+		x.decActiveLocked(t)
 	}
 	x.addCostLocked(t, -1)
 }
@@ -145,8 +161,31 @@ func (x *taskIndex) addLocked(t *Task) {
 	}
 	if !t.Status.Terminal() {
 		x.active[t.Origin.AgentID]++
+		if key, ok := pairActiveKeyOf(t); ok {
+			x.pair[key]++
+		}
 	}
 	x.addCostLocked(t, 1)
+}
+
+// decActiveLocked 与 addLocked 严格对称：active 与 pair 的加减必须同一分支，
+// 否则同对并发上限会随快照更新（put → remove+add）缓慢漂移。
+func (x *taskIndex) decActiveLocked(t *Task) {
+	n := x.active[t.Origin.AgentID] - 1
+	if n <= 0 {
+		delete(x.active, t.Origin.AgentID)
+	} else {
+		x.active[t.Origin.AgentID] = n
+	}
+	key, ok := pairActiveKeyOf(t)
+	if !ok {
+		return
+	}
+	if n := x.pair[key] - 1; n <= 0 {
+		delete(x.pair, key)
+	} else {
+		x.pair[key] = n
+	}
 }
 
 func (x *taskIndex) addCostLocked(t *Task, sign float64) {
@@ -243,6 +282,24 @@ func (x *taskIndex) ActiveCount(agent AgentID) int {
 	n := x.active[agent]
 	x.mu.RUnlock()
 	return n
+}
+
+// PairActiveCount 返回 (origin group, origin agent → target agent) 的非终态任务数。
+func (x *taskIndex) PairActiveCount(group GroupID, from, to AgentID) int {
+	if x == nil {
+		return 0
+	}
+	x.mu.RLock()
+	n := x.pair[pairActiveKey{Group: group, From: from, To: to}]
+	x.mu.RUnlock()
+	return n
+}
+
+func pairActiveKeyOf(t *Task) (pairActiveKey, bool) {
+	if t == nil || t.Target.Kind != TargetAgent || t.Target.AgentID == "" {
+		return pairActiveKey{}, false
+	}
+	return pairActiveKey{Group: t.Origin.GroupID, From: t.Origin.AgentID, To: t.Target.AgentID}, true
 }
 
 func (x *taskIndex) DailyCost(agent AgentID, group GroupID, day time.Time) (agentCost, groupCost, globalCost float64) {

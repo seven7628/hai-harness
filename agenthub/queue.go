@@ -182,8 +182,12 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	if t.Target.Kind == "" {
 		t.Target.Kind = TargetWorkspace
 	}
+	if t.Target.Kind == TargetAgent {
+		// 群内智能体目标：不要求在 workspace 里，闸门是目标群会话的忙闲。
+		return q.SubmitAgent(ctx, t, g)
+	}
 	if t.Target.Kind != TargetWorkspace {
-		return nil, fmt.Errorf("%w: P2 只支持工作区目标，得到 %q", ErrInvalid, t.Target.Kind)
+		return nil, fmt.Errorf("%w: 未知目标类型 %q", ErrInvalid, t.Target.Kind)
 	}
 	if strings.TrimSpace(t.Target.Workspace) == "" || strings.TrimSpace(t.Target.SessionID) == "" {
 		return nil, fmt.Errorf("%w: 目标 workspace/session_id 不能为空", ErrInvalid)
@@ -196,9 +200,18 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	// 第二条被静默丢弃（P2-02 复审 N1）。
 	t.Target.Workspace = filepath.Clean(strings.TrimSpace(t.Target.Workspace))
 	t.Target.SessionID = strings.TrimSpace(t.Target.SessionID)
+	return q.submitTarget(ctx, t, g, queueKey(t.Target.Workspace, t.Target.SessionID), true, nil)
+}
+
+// submitTarget 是工作区/智能体两条路径共用的「查重 →（护栏）→ 建账 → 入队 →
+// （可选）派发」。key 决定串行粒度；prepare 在目标锁内、建账前执行（同对并发上限）。
+//
+// 工作区路径保持原有语义不变：pumpNow=true，建账后立刻 Pump 一次。
+// 智能体路径 pumpNow=false：调用方先落群消息并绑定 seq，再自己 Pump —— 这样
+// 「消息写失败」时任务还能按未派发的 queued 回滚，不会出现有任务没消息的半状态。
+func (q *Queue) submitTarget(ctx context.Context, t *Task, g *Guard, key string, pumpNow bool, prepare func() error) (*Task, error) {
 	// 同一目标的所有「查重 + 建账 + 入队」由目标锁串行：不同会话互不阻塞，
 	// 同 client_msg_id 并发提交仍只会建一账（P2.5-03）。
-	key := queueKey(t.Target.Workspace, t.Target.SessionID)
 	unlockTarget := q.targets.lock(key)
 	locked := true
 	release := func() {
@@ -251,6 +264,11 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 			}
 		}
 	}
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			return nil, err
+		}
+	}
 	if g != nil {
 		if gerr := g.Check(ctx, q.ledger.store, t); gerr != nil {
 			return nil, gerr
@@ -262,6 +280,9 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	}
 	q.enqueueLocked(key, created.ID)
 	release()
+	if !pumpNow {
+		return created, nil
+	}
 	dispatched, err := q.Pump(ctx, created.Target)
 	if err != nil {
 		return created, err // 任务已落账本（failed/canceled）：调用方仍拿得到 task_id
@@ -279,11 +300,85 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	return created, nil
 }
 
+// MaxAgentPairInFlight 是同一对智能体（A→B）同时可存在的非终态任务上限（§6.7.9）。
+const MaxAgentPairInFlight = 2
+
+// SubmitAgent 建一条 kind=agent 的任务（queued）。它**不派发**：调用方先把消息
+// 写进群日志、绑定 message_seq，再自己 Pump —— 消息没落盘就不该投给目标会话。
+//
+// 同对并发上限在目标锁内、建账前判（prepare）：同一对 (group, 目标) 的提交共享
+// 同一个目标锁，check-then-create 不会被并发工具调用穿透。
+func (q *Queue) SubmitAgent(ctx context.Context, t *Task, g *Guard) (*Task, error) {
+	if t.Target.AgentID == "" || t.Target.GroupID == "" || strings.TrimSpace(t.Target.SessionID) == "" {
+		return nil, fmt.Errorf("%w: agent 目标需要 agent_id/group_id/session_id", ErrInvalid)
+	}
+	if t.Origin.Kind != OriginGroup || t.Origin.GroupID == "" || t.Origin.AgentID == "" {
+		return nil, fmt.Errorf("%w: agent 目标任务必须来自群内智能体", ErrInvalid)
+	}
+	if t.Origin.GroupID != t.Target.GroupID {
+		return nil, fmt.Errorf("%w: 不能跨群派任务（origin %s → target %s）", ErrInvalid, t.Origin.GroupID, t.Target.GroupID)
+	}
+	if t.Origin.AgentID == t.Target.AgentID {
+		return nil, fmt.Errorf("%w: 不能把任务派给自己", ErrInvalid)
+	}
+	if strings.TrimSpace(t.Instruction) == "" {
+		return nil, fmt.Errorf("%w: instruction 不能为空", ErrInvalid)
+	}
+	t.Target.SessionID = strings.TrimSpace(t.Target.SessionID)
+	key := queueKeyFor(t.Target)
+	return q.submitTarget(ctx, t, g, key, false, func() error {
+		n, err := q.agentPairInFlight(ctx, t)
+		if err != nil {
+			return err
+		}
+		if n >= MaxAgentPairInFlight {
+			return fmt.Errorf("%w: %s→%s 已有 %d 个在途任务（上限 %d）；等对方完成，或先 task_cancel 其中一个",
+				ErrTooConcurrent, t.Origin.AgentID, t.Target.AgentID, n, MaxAgentPairInFlight)
+		}
+		return nil
+	})
+}
+
+// agentPairInFlight 读同对在途数：有内存索引走索引（无 IO），否则回退 ListTasks。
+func (q *Queue) agentPairInFlight(ctx context.Context, t *Task) (int, error) {
+	if idx, ok := q.ledger.store.(PairActiveIndex); ok && idx.TaskIndexReady() {
+		return idx.PairActiveCount(t.Origin.GroupID, t.Origin.AgentID, t.Target.AgentID), nil
+	}
+	all, err := q.ledger.store.ListTasks(ctx, TaskFilter{})
+	if err != nil {
+		return 0, err
+	}
+	want := pairActiveKey{Group: t.Origin.GroupID, From: t.Origin.AgentID, To: t.Target.AgentID}
+	n := 0
+	for _, old := range all {
+		if old == nil || old.Status.Terminal() {
+			continue
+		}
+		if key, ok := pairActiveKeyOf(old); ok && key == want {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// queueKeyFor 是「目标 → 队列/目标锁 key」的唯一口径。
+// 工作区保持 queueKey 原样；智能体按 (group, target agent) 合并 —— 目标会话 ID
+// 是确定性的，但 group+agent 让 Restore/CancelQueued 在快照缺 session 时仍一致。
+func queueKeyFor(t TaskTarget) string {
+	if t.Kind == TargetAgent {
+		return "agent\x00" + strings.TrimSpace(string(t.GroupID)) + "\x00" + strings.TrimSpace(string(t.AgentID))
+	}
+	return queueKey(t.Workspace, t.SessionID)
+}
+
 // Pump 在目标空闲时派发队首任务；每次最多派发一个。
 // 目标忙 / 队列空时返回 (nil, nil)。
 func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	if q == nil || q.ledger == nil || q.ops == nil {
 		return nil, fmt.Errorf("%w: queue 未初始化", ErrInvalid)
+	}
+	if target.Kind == TargetAgent {
+		return q.pumpAgent(ctx, target)
 	}
 	key := queueKey(target.Workspace, target.SessionID)
 	unlockTarget := q.targets.lock(key)
@@ -387,11 +482,98 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 	return dispatched, nil
 }
 
+// pumpAgent 派发队首的智能体任务。
+//
+// 与工作区路径的唯一结构差异：判忙与投递是**一次** ops 调用（AgentDispatch），
+// Accepted=false 时任务原样留在队列里 —— 不 Transition、不投第二份快照。
+// Transition(dispatched) 放在 Ask 成功**之后**：反过来先置 dispatched 再发现目标
+// 忙，状态机没有 dispatched→queued 的回边，任务会卡在「dispatched 但没人跑」。
+func (q *Queue) pumpAgent(ctx context.Context, target TaskTarget) (*Task, error) {
+	ops, ok := q.ops.(AgentDispatchOps)
+	if !ok {
+		return nil, fmt.Errorf("%w: 当前 Ops 不支持 agent 目标派发", ErrInvalid)
+	}
+	if target.GroupID == "" || target.AgentID == "" {
+		return nil, fmt.Errorf("%w: agent 目标需要 group_id/agent_id", ErrInvalid)
+	}
+	key := queueKeyFor(target)
+	unlockTarget := q.targets.lock(key)
+	defer unlockTarget()
+	// 有界循环：摘掉账本已非 queued 的陈旧队首，直到遇到真实任务或空队列。
+	for i := len(q.pendingIDs(key)); i > 0; i-- {
+		cur := q.pendingIDs(key)
+		if len(cur) == 0 {
+			return nil, nil
+		}
+		id := cur[0]
+		t, err := q.ledger.Replay(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if t.Status != TaskQueued {
+			q.dequeueLocked(key, id)
+			continue
+		}
+		header, err := EncodeTaskHeader(t)
+		if err != nil {
+			return nil, err
+		}
+		res, derr := ops.AgentDispatch(ctx, AgentDispatchReq{
+			OriginAgent: t.Origin.AgentID,
+			Target:      t.Target,
+			Text:        t.Instruction,
+			ClientMsgID: dispatchClientMsgID(t),
+			TaskHeader:  header,
+		})
+		if derr != nil {
+			return nil, derr // 没投出去：任务仍是 queued，下一次 Pump 再试
+		}
+		if res.Message == DispatchDuplicateMessage {
+			// 目标侧幂等命中：本次没有真正投递，不能当 dispatched（同工作区口径）。
+			settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			canceled, cerr := q.ledger.Transition(settleCtx, id, TaskCanceled, TransitionOptions{
+				At: time.Now().UTC(), Error: "目标侧去重命中：同一 client_msg_id 已投递过（本次未投递）",
+			})
+			cancel()
+			if cerr != nil {
+				return nil, cerr
+			}
+			q.dequeueLocked(key, id)
+			return canceled, nil
+		}
+		if !res.Accepted {
+			return t, nil // 目标忙：留队，不投第二份快照
+		}
+		dispatched, terr := q.ledger.Transition(ctx, id, TaskDispatched, TransitionOptions{At: time.Now().UTC()})
+		q.dequeueLocked(key, id)
+		if terr != nil {
+			// 消息已经进会话：留队会在下一次 Pump 重复投递。落 failed 留痕更诚实，
+			// 也让同对在途计数不把一个「其实在跑」的任务长期算作 queued。
+			settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			_, ferr := q.ledger.Transition(settleCtx, id, TaskFailed, TransitionOptions{
+				At: time.Now().UTC(), Error: "已投递但无法落账: " + terr.Error(),
+			})
+			cancel()
+			if ferr != nil {
+				return nil, fmt.Errorf("派发后落账失败且无法标记失败: %v（原错误: %w）", ferr, terr)
+			}
+			return nil, terr
+		}
+		return dispatched, nil
+	}
+	return nil, nil
+}
+
 // QueuedCount 目标的排队长度（UI/诊断用）。
 func (q *Queue) QueuedCount(workspace, sessionID string) int {
+	return q.QueuedCountFor(TaskTarget{Kind: TargetWorkspace, Workspace: workspace, SessionID: sessionID})
+}
+
+// QueuedCountFor 按目标类型取排队长度（工作区/智能体共用同一份 pending 索引）。
+func (q *Queue) QueuedCountFor(target TaskTarget) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.pending[queueKey(workspace, sessionID)])
+	return len(q.pending[queueKeyFor(target)])
 }
 
 // dispatchClientMsgID 派发时使用的幂等键：优先调用方给的 client_msg_id。
@@ -421,7 +603,7 @@ func (q *Queue) Restore(t *Task) {
 	if q == nil || q.ledger == nil || t == nil || t.Status != TaskQueued {
 		return
 	}
-	key := queueKey(t.Target.Workspace, t.Target.SessionID)
+	key := queueKeyFor(t.Target)
 	unlockTarget := q.targets.lock(key)
 	defer unlockTarget()
 	cur, err := q.ledger.Replay(context.Background(), t.ID)
@@ -492,7 +674,7 @@ func (q *Queue) CancelQueued(ctx context.Context, id TaskID) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := queueKey(pre.Target.Workspace, pre.Target.SessionID)
+	key := queueKeyFor(pre.Target)
 	unlockTarget := q.targets.lock(key)
 	defer unlockTarget()
 	t, err := q.ledger.Replay(ctx, id)
