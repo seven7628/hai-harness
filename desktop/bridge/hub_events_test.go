@@ -236,6 +236,71 @@ func TestHubDeltaSinkIgnoresSubagentRun(t *testing.T) {
 	}
 }
 
+// flush() 停在排的定时器：只把 timer 置 nil 而不 Stop()，回调稍后仍会补一次 flush，
+// 「80ms 合并」的节奏被打乱（孤儿定时器），工具边界之后的窗口里会冒出多余 delta。
+//
+// 判定手法：time.Timer.Stop 对「已经停过/已触发」的表返回 false，对还活着的返回 true。
+// 所以 flush 之后再 Stop 一次得到 false 才说明它真的停了表；只置 nil 的话这里会返回 true。
+func TestHubDeltaSinkFlushStopsTimer(t *testing.T) {
+	buf := &syncBuf{}
+	sink := newHubDeltaSink(newOut(buf))
+	sink.interval = time.Hour // 这个窗口内只有显式 flush 会发事件
+	sink.start("grp_x", "ag_x", "rnd_x", "msg_x", "run_1")
+	sink.feed("run_1", "工具前正文")
+
+	sink.mu.Lock()
+	timer := sink.timer
+	sink.mu.Unlock()
+	if timer == nil {
+		t.Fatal("feed 没有排定时器")
+	}
+
+	sink.flush()
+	// flush 自己要立即把正文发出去（工具边界不能等窗口）。
+	evs := deltaEvents(t, buf)
+	if len(evs) != 1 || evs[0]["delta"] != "工具前正文" || int(evs[0]["index"].(float64)) != 0 {
+		t.Fatalf("flush 没有立即发出正文: %+v", evs)
+	}
+	if timer.Stop() {
+		t.Fatal("flush 只把 timer 置 nil 没有 Stop()：已排队的回调还会再 flush 一次")
+	}
+	sink.mu.Lock()
+	left := sink.timer
+	sink.mu.Unlock()
+	if left != nil {
+		t.Fatalf("flush 后 timer = %v, want nil", left)
+	}
+}
+
+// 已 final 的 message 不续流：同一 messageID 在 finish() 之后再 start()（续跑/重试）
+// 只刷新绑定，closed 保持 true。否则续跑正文会接着旧的 index 继续发 delta，
+// 而这条消息在前端已经定稿，迟到 delta 只会被丢弃（并可能让草稿状态错乱）。
+func TestHubDeltaSinkStartSameMessageIDAfterFinishStaysClosed(t *testing.T) {
+	buf := &syncBuf{}
+	sink := newHubDeltaSink(newOut(buf))
+	sink.interval = time.Hour
+	sink.start("grp_x", "ag_x", "rnd_x", "msg_x", "run_1")
+	sink.feed("run_1", "第一段")
+	sink.finish()
+	if evs := deltaEvents(t, buf); len(evs) != 1 || evs[0]["delta"] != "第一段" {
+		t.Fatalf("finish 没有 flush 第一段: %+v", evs)
+	}
+
+	sink.start("grp_x", "ag_x", "rnd_x", "msg_x", "run_2")
+	if !sink.closed {
+		t.Fatal("同 messageID 的 start 把 closed 复位了：已 final 的消息不能续流")
+	}
+	sink.feed("run_2", "续跑正文")
+	sink.finish()
+	evs := deltaEvents(t, buf)
+	if len(evs) != 1 {
+		t.Fatalf("续跑后又冒出了 delta（共 %d 条）: %+v", len(evs), evs)
+	}
+	if sink.index != 1 {
+		t.Fatalf("index = %d, want 1（续跑正文不应推进 index）", sink.index)
+	}
+}
+
 func TestHubGroupStreamDeltaFinalSameMessageID(t *testing.T) {
 	m, buf := testManager(t)
 	a := createHubAgent(t, m, buf, 1, "StreamOwner")
@@ -254,6 +319,13 @@ func TestHubGroupStreamDeltaFinalSameMessageID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if bs.hubDelta == nil {
+		t.Fatal("群会话没有 hubDelta sink")
+	}
+	// 只让 finish() 能 flush 尾巴：默认 80ms 定时器可能在 AgentEnd 之前就把 pending 发出去，
+	// 那样即使 finish() 被挪到 final 之后（顺序 bug），delta 也早已先落账，测试会误判通过
+	// （实测变异体 10 次里过 3 次）。窗口拉到 1 小时，尾部的先后就只由 finish() 的位置决定。
+	bs.hubDelta.interval = time.Hour
 	setGroupFakeLoop(t, m, bs, g, string(b.ID), &streamProvider{
 		chunks: []string{"B 正在", "回复"},
 		reply:  "B 正在回复",
