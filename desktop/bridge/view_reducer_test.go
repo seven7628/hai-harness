@@ -1425,3 +1425,26 @@ func TestReducerUserInputsSkipsHubTaskHeader(t *testing.T) {
 		}
 	}
 }
+
+// P3b-01a：hub_group_wake hidden 块（header JSON + 群快照）不能进用户气泡。
+func TestReducerUserInputsSkipsHubGroupWake(t *testing.T) {
+	r := NewViewReducer()
+	ts := time.Now().Add(-time.Minute)
+	hidden := `{"group_id":"grp_x","agent_id":"ag_x","round_id":"rnd_x","trigger_seq":7}` + "\n\n群：测试群\n#7 人: @你 看一下"
+	mustApply(t, r, evUserInputs(t, nil, [][]core.Content{{
+		{Type: core.ContentTypeHubGroupWake, Content: hidden},
+		{Type: core.ContentTypeText, Content: "@你 看一下"},
+	}}, ts))
+	users := blockByKind(t, r.Snapshot(), "user")
+	if len(users) != 1 {
+		t.Fatalf("want 1 user block, got %d", len(users))
+	}
+	if users[0].Text != "@你 看一下" {
+		t.Fatalf("user text = %q (snapshot leaked?)", users[0].Text)
+	}
+	for _, c := range users[0].Contents {
+		if strings.Contains(c.Content, "grp_x") || strings.Contains(c.Content, "群：测试群") {
+			t.Fatalf("group wake hidden content leaked: %+v", users[0].Contents)
+		}
+	}
+}

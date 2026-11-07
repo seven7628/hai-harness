@@ -323,6 +323,10 @@ type bridgeSession struct {
 	// hubGroupBusy 该群会话已投递但尚未 AgentEnd 的唤醒。忙时不投第二个快照，
 	// 避免两个 round 共用一次 AgentEnd。
 	hubGroupBusy atomic.Bool
+	// hubGroupBusySeq/hubGroupRunSeq 是 busy 的轮次代号（P3b-01a 复审 B2）：
+	// runLoop 在「没有 AgentEnd」的终止路径上也要清闩，但不能清掉新轮次的闩。
+	hubGroupBusySeq atomic.Uint64
+	hubGroupRunSeq  atomic.Uint64
 	// hubEngine Hub 会话的工具引擎（记忆/人格变更后重建 loop 时复用：
 	// 重建引擎会丢掉正在运行的工具任务与审批等待，没必要）。
 	hubEngine *tools.Engine
@@ -639,6 +643,10 @@ func (bs *bridgeSession) emit(e events.Event) {
 	case *events.ReasoningChunk:
 		bs.appendLiveThink(ev.Content)
 	case *events.AgentStart:
+		if ev.ParentRunId == "" && ev.Depth == 0 && bs.hubGroupWake != nil {
+			// 记住这一轮群 run 的 busy 代号：runLoop 的兜底清理只能清自己那一代。
+			bs.hubGroupRunSeq.Store(bs.hubGroupBusySeq.Load())
+		}
 		bs.resetLive() // 新 run：旧 run 的残留文本不能串到这一轮
 	case *events.UserInputsConsumed:
 		// 相关性（§6.7.2）：只认 batch 开口（Injected=插话不算新任务）。
@@ -973,13 +981,19 @@ func (bs *bridgeSession) handler() events.EventHandler {
 
 func (bs *bridgeSession) runLoop() {
 	go func() {
+		var lastGroupSeq uint64
+		defer func() { bs.clearHubGroupBusy(lastGroupSeq) }()
 		for {
 			select {
 			case <-bs.ctx.Done():
 				return
 			case <-bs.wake:
 			}
+			lastGroupSeq = bs.hubGroupBusySeq.Load()
 			if err := bs.s.Run(bs.ctx, bs.handler()); err != nil {
+				// 即使 Run 在 AgentStart 前失败（快照落盘/锁错误），也要清群闩；
+				// 否则这个智能体在所有群里永久静音（P3b-01a 复审 B2）。
+				bs.clearHubGroupBusy(lastGroupSeq)
 				if errors.Is(err, session.ErrSessionClosed) || bs.ctx.Err() != nil {
 					return
 				}
@@ -987,6 +1001,16 @@ func (bs *bridgeSession) runLoop() {
 			}
 		}
 	}()
+}
+
+// clearHubGroupBusy 只清自己那一代：旧 run 的兜底清理不能把新轮次的闩清掉。
+func (bs *bridgeSession) clearHubGroupBusy(seq uint64) {
+	if bs == nil || seq == 0 {
+		return
+	}
+	if bs.hubGroupBusySeq.CompareAndSwap(seq, 0) {
+		bs.hubGroupBusy.Store(false)
+	}
 }
 
 // manager：进程内多 workspace 注册表（一个进程承载所有工作区的会话）
@@ -4156,6 +4180,10 @@ func (m *manager) deleteWorkspace(wsPath string) {
 // 关闭事件日志句柄（防 fd 泄漏）+ 等待 checkpoint coordinator drain（防止删除后
 // 异步 commit 又把 record 写回）。幂等：已 cancel 的跳过 Shutdown。
 func stopSession(bs *bridgeSession) {
+	// 群闩是进程内 liveness 状态：会话关闭后必须释放，不能把智能体永久标忙。
+	bs.hubGroupBusy.Store(false)
+	bs.hubGroupBusySeq.Store(0)
+	bs.hubGroupRunSeq.Store(0)
 	if bs.ctx.Err() == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = bs.s.Shutdown(ctx)

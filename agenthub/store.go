@@ -80,6 +80,9 @@ type Store interface {
 
 	SaveCursor(ctx context.Context, c *Cursor) error
 	LoadCursor(ctx context.Context, groupID GroupID, agentID AgentID) (*Cursor, error)
+	// AdvanceAgentContextSeq 只前移 agent_context_seq，并在存储锁内保留 human_read_seq。
+	// 群会话收尾与人类已读是两个独立写者，整行 SaveCursor 会互相覆盖。
+	AdvanceAgentContextSeq(ctx context.Context, groupID GroupID, agentID AgentID, seq int64) error
 }
 
 const (
@@ -1009,6 +1012,35 @@ func (s *FileStore) LoadCursor(ctx context.Context, groupID GroupID, agentID Age
 		return nil, err
 	}
 	return &c, nil
+}
+
+// AdvanceAgentContextSeq 在 store 锁内读-改-写，只前移 agent 游标。
+func (s *FileStore) AdvanceAgentContextSeq(ctx context.Context, groupID GroupID, agentID AgentID, seq int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !validID(string(groupID)) || !validID(string(agentID)) || seq <= 0 {
+		return fmt.Errorf("%w: cursor advance", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := s.cursorPath(groupID, agentID)
+	var c Cursor
+	if err := readJSON(path, &c); err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if c.GroupID == "" {
+		c.GroupID = groupID
+	}
+	if c.AgentID == "" {
+		c.AgentID = agentID
+	}
+	if seq <= c.AgentContextSeq {
+		return nil
+	}
+	c.AgentContextSeq = seq
+	c.UpdatedAt = time.Now().UTC()
+	return writeJSONAtomic(path, &c)
 }
 
 func (s *FileStore) idExists(prefix, id string) (bool, error) {

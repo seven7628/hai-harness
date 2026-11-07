@@ -477,3 +477,101 @@ func TestHubGroupSendSkipsBusyTargetWithoutCorruptingRound(t *testing.T) {
 		t.Fatal("group message missing after wake failure")
 	}
 }
+
+func TestFinishHubRoundTurnLimitStopsAutoChain(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "LimitOwner")
+	b := createHubAgent(t, m, buf, 2, "LimitB")
+	g := groupWithMembers(t, m, buf, 3, "上限群",
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{a.ID, "owner"},
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{b.ID, "member"},
+	)
+	st := mustHubStore(t, m)
+	trigger, err := st.AppendMessage(context.Background(), &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderHuman}, Text: "@LimitB 开始",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 人类之后已有 8 条智能体发言（默认 MaxTurnsPerHuman=8）。
+	for i := 0; i < agenthub.DefaultGroupMaxTurnsPerHuman; i++ {
+		if _, err := st.AppendMessage(context.Background(), &agenthub.Message{
+			GroupID: g.ID, Kind: agenthub.KindText, RoundID: "rnd_limit",
+			Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: b.ID},
+			Text:   "第 " + string(rune('A'+i)) + " 条",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, _, err := m.hubLoadAgent(string(b.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := m.hubSpecFor(loaded, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID}, m.hubRuntime(string(b.ID)).path)
+	spec.Group = g
+	wake := &agenthub.GroupWakeHeader{GroupID: g.ID, AgentID: b.ID, RoundID: "rnd_limit", TriggerSeq: trigger}
+	m.finishHubRound(spec, wake, "再补一条")
+	msgs, err := st.ReadMessages(context.Background(), g.ID, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentMsgs := 0
+	for _, msg := range msgs {
+		if msg.Sender.AgentID == b.ID {
+			agentMsgs++
+		}
+	}
+	if agentMsgs != agenthub.DefaultGroupMaxTurnsPerHuman {
+		t.Fatalf("agent messages = %d, want %d (over-limit final must not append)", agentMsgs, agenthub.DefaultGroupMaxTurnsPerHuman)
+	}
+	cur, err := st.LoadCursor(context.Background(), g.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.AgentContextSeq != trigger {
+		t.Fatalf("agent_context_seq = %d, want %d even when limited", cur.AgentContextSeq, trigger)
+	}
+}
+
+func TestClearHubGroupBusyOnlyOwnEpoch(t *testing.T) {
+	bs := &bridgeSession{}
+	bs.hubGroupBusy.Store(true)
+	bs.hubGroupBusySeq.Store(2)
+	bs.clearHubGroupBusy(1) // 旧 run 的兜底清理
+	if !bs.hubGroupBusy.Load() {
+		t.Fatal("stale run must not clear a newer group latch")
+	}
+	bs.clearHubGroupBusy(2)
+	if bs.hubGroupBusy.Load() {
+		t.Fatal("owning run must clear the group latch")
+	}
+}
+
+func TestHubGroupSessionClosedClearsBusy(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "ClosedA")
+	g := groupWithMembers(t, m, buf, 2, "关闭群", struct {
+		id   agenthub.AgentID
+		role string
+	}{a.ID, "owner"})
+	bs, err := m.hubGroupSession(string(a.ID), string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs.hubGroupBusy.Store(true)
+	bs.hubGroupBusySeq.Store(9)
+	bs.cancel()
+	if _, err := m.hubGroupSession(string(a.ID), string(g.ID)); err == nil {
+		t.Fatal("closed group session must not accept a new wake")
+	}
+	if bs.hubGroupBusy.Load() || bs.hubGroupBusySeq.Load() != 0 {
+		t.Fatal("closed group session must release the busy latch")
+	}
+}

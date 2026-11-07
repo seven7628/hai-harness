@@ -725,6 +725,32 @@ func (s *MemoryStore) LoadCursor(ctx context.Context, groupID GroupID, agentID A
 	return &c, nil
 }
 
+// AdvanceAgentContextSeq 在 store 锁内读-改-写，只前移 agent 游标并保留人类已读。
+func (s *MemoryStore) AdvanceAgentContextSeq(ctx context.Context, groupID GroupID, agentID AgentID, seq int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !validID(string(groupID)) || !validID(string(agentID)) || seq <= 0 {
+		return ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := cursorKey(groupID, agentID)
+	c, ok := s.cursors[key]
+	if !ok {
+		c = Cursor{GroupID: groupID, AgentID: agentID}
+	}
+	if seq <= c.AgentContextSeq {
+		return nil
+	}
+	c.GroupID = groupID
+	c.AgentID = agentID
+	c.AgentContextSeq = seq
+	c.UpdatedAt = nowUTC()
+	s.cursors[key] = c
+	return nil
+}
+
 func cursorKey(g GroupID, a AgentID) string {
 	return string(g) + "\x00" + string(a)
 }

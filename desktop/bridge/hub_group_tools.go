@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/tools"
@@ -208,98 +207,44 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	if role == agenthub.RoleObserver {
 		return "", fmt.Errorf("%w: observer 不能在群里发言", agenthub.ErrInvalid)
 	}
-	// 与人类发送共用一个临界区：限流检查到消息+回执落盘不能被并发工具调用插队。
-	t.m.hubGroupSendMu.Lock()
-	defer t.m.hubGroupSendMu.Unlock()
 	text := strings.TrimSpace(args.Text)
 	if text == "" {
 		return "", fmt.Errorf("%w: text 不能为空", agenthub.ErrInvalid)
 	}
-	// 先路由再落日志：@all 越权/保留名等路由失败不能留下半条消息（P3a-05 B1）。
-	agents, err := st.ListAgents(ctx)
+	// 与人类发送 / final 共用一个临界区：限流检查到消息+回执落盘不能被并发工具调用插队。
+	t.m.hubGroupSendMu.Lock()
+	g, err = st.LoadGroup(ctx, g.ID)
+	if err != nil {
+		t.m.hubGroupSendMu.Unlock()
+		return "", err
+	}
+	if g == nil || g.Deleted {
+		t.m.hubGroupSendMu.Unlock()
+		return "", fmt.Errorf("%w: 群组已删除", agenthub.ErrNotFound)
+	}
+	msg, routed, limitHit, routeErr, err := t.m.appendAgentGroupMessageLocked(ctx, st, g, t.agentID, text, "", true)
+	t.m.hubGroupSendMu.Unlock()
+	if limitHit {
+		return "", fmt.Errorf("%w: 本轮智能体发言已达上限 %d，等人类回复后再继续", agenthub.ErrInvalid, groupTurnLimit(g))
+	}
 	if err != nil {
 		return "", err
 	}
-	profiles := make([]*agenthub.AgentProfile, 0, len(g.Members))
-	byID := map[agenthub.AgentID]*agenthub.AgentProfile{}
-	for _, p := range agents {
-		if p != nil {
-			byID[p.ID] = p
-		}
+	if routeErr != nil {
+		return "", routeErr
 	}
-	for _, member := range g.Members {
-		if p := byID[member.AgentID]; p != nil && !p.Deleted {
-			profiles = append(profiles, p)
-		}
-	}
-	router, err := agenthub.NewGroupRouter(g, profiles)
-	if err != nil {
-		return "", err
-	}
-	if err := t.enforceTurnLimit(ctx, st, g); err != nil {
-		return "", err
-	}
-	round, err := router.Route(text, t.agentID, false, 0, time.Now())
-	if err != nil {
-		return "", err
-	}
-	msg := &agenthub.Message{
-		GroupID: g.ID, Kind: agenthub.KindText,
-		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: t.agentID}, Text: text,
-	}
-	var routed *agenthub.Round
-	if round.MentionAll || len(round.Targets) > 0 {
-		routed = &round
-	}
-	seq, deduped, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
-	if err != nil {
-		return "", err
-	}
-	round.TriggerSeq = seq
-	result := map[string]any{"seq": seq, "message_id": msg.ID, "targets": round.Targets}
-	if deduped {
-		result["deduplicated"] = true
-	} else {
-		t.m.emitHubGroupMessage(g.ID, seq, msg)
-		if routed != nil {
-			t.m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
-			if errs := t.m.wakeGroupRound(g, round, msg); len(errs) > 0 {
-				result["wake_errors"] = errs
-				for _, we := range errs {
-					t.m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
-				}
+	result := map[string]any{"seq": msg.Seq, "message_id": msg.ID, "targets": []agenthub.AgentID{}}
+	if routed != nil {
+		result["targets"] = routed.Targets
+		// wake 在解锁后做：会话装配可能很慢，不能把群发送锁带进装配。
+		if errs := t.m.wakeGroupRound(g, *routed, msg); len(errs) > 0 {
+			result["wake_errors"] = errs
+			for _, we := range errs {
+				t.m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
 			}
 		}
 	}
 	return marshalHubToolResult(result)
-}
-
-// enforceTurnLimit 限制「最后一次人类发言之后」智能体连续发言的轮次。
-// 人类发新消息会重置计数（MaxTurnsPerHuman 默认 8）。
-func (t *hubGroupSayTool) enforceTurnLimit(ctx context.Context, st agenthub.Store, g *agenthub.Group) error {
-	limit := agenthub.DefaultGroupMaxTurnsPerHuman
-	if g != nil && g.Policy.MaxTurnsPerHuman > 0 {
-		limit = g.Policy.MaxTurnsPerHuman
-	}
-	msgs, err := st.ReadMessages(ctx, g.ID, 0, 500)
-	if err != nil {
-		return err
-	}
-	turns := 0
-	// ReadMessages 按 seq 升序返回（最新在末尾）：必须倒序扫到最近一条人类消息。
-	for i := len(msgs) - 1; i >= 0; i-- {
-		m := msgs[i]
-		if m.Sender.Kind == agenthub.SenderHuman {
-			break
-		}
-		if m.Sender.Kind == agenthub.SenderAgent {
-			turns++
-		}
-	}
-	if turns >= limit {
-		return fmt.Errorf("%w: 本轮智能体发言已达上限 %d，等人类回复后再继续", agenthub.ErrInvalid, limit)
-	}
-	return nil
 }
 
 // ValidParams 只做「JSON 可解析 + group_id 非空」；成员权限在 Call 里判。

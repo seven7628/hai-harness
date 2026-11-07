@@ -6569,11 +6569,14 @@ export function dispatchEvent(raw: AnyEvent): void {
         // 服务端已确认消费 → 清除推送失败提示（问题十）
         const ts = evTs(raw) ?? Date.now() // 用户消息时间戳（回显）
         const normGroup = (g: { type?: string; content?: string; mime_type?: string }[]): QueuedContent[] =>
-          g.map((c) => ({
-            type: c.type === 'image' ? ('image' as const) : ('text' as const),
-            content: String(c.content ?? ''),
-            ...(c.mime_type ? { mimeType: c.mime_type } : {}),
-          }))
+          // 宿主协议块（hub_task / hub_group_wake）只给模型看，不能进用户气泡；
+          // 正文是同批的 text 块。漏过滤会把 header JSON + 群快照整段渲染出来。
+          g.filter((c) => c.type !== 'hub_task' && c.type !== 'hub_group_wake')
+            .map((c) => ({
+              type: c.type === 'image' ? ('image' as const) : ('text' as const),
+              content: String(c.content ?? ''),
+              ...(c.mime_type ? { mimeType: c.mime_type } : {}),
+            }))
         const groupText = (g: QueuedContent[] | undefined): string =>
           g ? g.filter((c) => c.type === 'text').map((c) => c.content).join('\n').trim() : ''
         // 把待发送中对应消息（FIFO 取最旧的 N 条）移入对话页：优先事件内容块

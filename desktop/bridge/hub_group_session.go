@@ -59,6 +59,12 @@ func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, erro
 	existing := ws.sessions[sid]
 	ws.mu.Unlock()
 	if existing != nil {
+		if existing.ctx.Err() != nil {
+			// 已关闭的会话不能再接新一轮：顺手清闩，避免它把智能体永久标忙。
+			existing.hubGroupBusy.Store(false)
+			existing.hubGroupBusySeq.Store(0)
+			return nil, fmt.Errorf("%w: 群会话 %s 已关闭", agenthub.ErrInvalid, sid)
+		}
 		return existing, nil
 	}
 
@@ -167,10 +173,11 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	if !bs.hubGroupBusy.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: 该智能体上一轮群回复尚未结束", agenthub.ErrInvalid)
 	}
+	seq := bs.hubGroupBusySeq.Add(1)
 	ok := false
 	defer func() {
 		if !ok {
-			bs.hubGroupBusy.Store(false)
+			bs.clearHubGroupBusy(seq)
 		}
 	}()
 
@@ -218,7 +225,15 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, conten
 	}
 	wake := bs.hubGroupWake
 	bs.hubGroupWake = nil
-	bs.hubGroupBusy.Store(false)
+	runSeq := bs.hubGroupRunSeq.Load()
+	if runSeq == 0 {
+		runSeq = bs.hubGroupBusySeq.Load()
+	}
+	// 先完成 final 落账/路由，再放下一轮进来；无论是否有 AgentEnd 绑定都要清闩。
+	defer func() {
+		bs.hubGroupRunSeq.Store(0)
+		bs.clearHubGroupBusy(runSeq)
+	}()
 	if wake == nil {
 		// 没有绑定到轮次（例如进程内其它消息触发的 run）：不往群里写空气泡。
 		return
@@ -244,77 +259,146 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		return
 	}
 	ctx := context.Background()
-	g := spec.Group
-	if g == nil {
-		// 冷恢复/旧构造路径可能没有带 Group 指针：按 header 重新取。
-		g, err = st.LoadGroup(ctx, wake.GroupID)
-		if err != nil || g == nil || g.Deleted {
-			m.hubAlertf("group_reply_failed", "群回复落账失败：群 %s 不存在", wake.GroupID)
-			return
-		}
-		spec.Group = g
-	}
-	gid := g.ID
 	text := strings.TrimSpace(content)
-	advanced := false
-	if text != "" {
-		msgs, err := st.ReadMessages(ctx, gid, 0, 500)
-		if err != nil {
-			m.hubAlertf("group_reply_failed", "读取群日志失败：%v", err)
-			return
-		}
-		if last := lastAgentReplyInRound(msgs, spec.Agent.ID, wake.TriggerSeq); last != nil && sameGroupReply(last.Text, text) {
-			// 模型先 group_say 做了完整汇报，AgentEnd 的 Content 是同一段收尾，
-			// 不能再写一条重复气泡。
-			advanced = true
-		} else {
-			msg := &agenthub.Message{
-				GroupID: gid,
-				Kind:    agenthub.KindText,
-				Sender:  agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: spec.Agent.ID},
-				Text:    text,
-				RoundID: wake.RoundID,
-			}
-			routed, routeErr := m.routeGroupFinal(ctx, st, g, spec.Agent.ID, text)
-			if routeErr != nil {
-				// @ 解析失败（越权 @all/保留名等）不能吞掉正文：正文照发，只是不唤醒。
-				m.hubAlertf("group_route_failed", "群回复 @ 路由失败：%v", routeErr)
-			}
-			seq, _, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
-			if err != nil {
-				m.hubAlertf("group_reply_failed", "群回复落账失败：%v", err)
-				return
-			}
-			m.emitHubGroupMessage(gid, seq, msg)
-			advanced = true
-			if routed != nil {
-				routed.TriggerSeq = seq
-				m.emitHubGroupRound(gid, *routed)
-				for _, we := range m.wakeGroupRound(g, *routed, msg) {
-					m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", gid, we)
-				}
-			}
-		}
-	} else {
-		advanced = true
-	}
-	if advanced {
-		if err := m.advanceGroupAgentCursor(ctx, st, gid, spec.Agent.ID, wake.TriggerSeq); err != nil {
+	if text == "" {
+		// 纯工具轮/空回复：不写气泡，但这一轮已经处理过，推进游标。
+		if err := m.advanceGroupAgentCursor(ctx, st, wake.GroupID, spec.Agent.ID, wake.TriggerSeq); err != nil {
 			m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
 		}
-	}
-}
-
-func (m *manager) emitHubGroupRound(gid agenthub.GroupID, round agenthub.Round) {
-	if m == nil || m.out == nil {
 		return
 	}
-	m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(gid), "round": round})
+
+	// 与 group_say / 人类发送共用同一临界区：查重、轮次上限、路由、落盘不能被插队。
+	m.hubGroupSendMu.Lock()
+	g, err := st.LoadGroup(ctx, wake.GroupID)
+	if err != nil || g == nil || g.Deleted {
+		m.hubGroupSendMu.Unlock()
+		m.hubAlertf("group_reply_failed", "群回复落账失败：群 %s 不存在", wake.GroupID)
+		return
+	}
+	msgs, err := st.ReadMessages(ctx, g.ID, 0, 500)
+	if err != nil {
+		m.hubGroupSendMu.Unlock()
+		m.hubAlertf("group_reply_failed", "读取群日志失败：%v", err)
+		return
+	}
+	if last := lastAgentReplyInRound(msgs, spec.Agent.ID, wake.TriggerSeq); last != nil && sameGroupReply(last.Text, text) {
+		// 模型先 group_say 做了完整汇报，AgentEnd 的 Content 是同一段收尾，
+		// 不能再写一条重复气泡；本轮已处理，推进游标。
+		m.hubGroupSendMu.Unlock()
+		if err := m.advanceGroupAgentCursor(ctx, st, g.ID, spec.Agent.ID, wake.TriggerSeq); err != nil {
+			m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
+		}
+		return
+	}
+	msg, routed, limitHit, routeErr, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, text, wake.RoundID, false)
+	m.hubGroupSendMu.Unlock()
+	if limitHit {
+		// 轮次上限：不写消息、不唤醒；写一条 activity 让 UI 能看到「被限流」，
+		// 同时推进游标（这一轮确实处理了，只是拒绝发言）。
+		_ = st.AppendActivity(ctx, &agenthub.Activity{
+			GroupID: g.ID, AfterSeq: wake.TriggerSeq, Kind: "status", Status: "blocked",
+			Name: "round", Summary: fmt.Sprintf("本轮智能体发言已达上限 %d，已停止自动接龙", groupTurnLimit(g)),
+			At: time.Now().UTC(),
+		})
+		m.hubAlertf("group_turn_limit", "群 %s 智能体发言达上限，已停止自动接龙", g.ID)
+		if err := m.advanceGroupAgentCursor(ctx, st, g.ID, spec.Agent.ID, wake.TriggerSeq); err != nil {
+			m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
+		}
+		return
+	}
+	if err != nil {
+		m.hubAlertf("group_reply_failed", "群回复落账失败：%v", err)
+		return
+	}
+	if routeErr != nil {
+		// @ 解析失败（越权 @all/保留名等）不能吞掉正文：正文已照发，只是不唤醒。
+		m.hubAlertf("group_route_failed", "群回复 @ 路由失败：%v", routeErr)
+	}
+	if err := m.advanceGroupAgentCursor(ctx, st, g.ID, spec.Agent.ID, wake.TriggerSeq); err != nil {
+		m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
+	}
+	if routed != nil && msg != nil {
+		for _, we := range m.wakeGroupRound(g, *routed, msg) {
+			m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
+		}
+	}
 }
 
-// routeGroupFinal 只对 final 正文做 @ 路由（流式 partial 绝不路由）。
-// 失败（越权 @all/保留名/成员已删）返回错误，调用方仍把正文落账。
-func (m *manager) routeGroupFinal(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, text string) (*agenthub.Round, error) {
+func groupTurnLimit(g *agenthub.Group) int {
+	limit := agenthub.DefaultGroupMaxTurnsPerHuman
+	if g != nil && g.Policy.MaxTurnsPerHuman > 0 {
+		limit = g.Policy.MaxTurnsPerHuman
+	}
+	return limit
+}
+
+// enforceGroupTurnLimit 限制「最后一次人类发言之后」智能体连续发言的轮次。
+// 人类发新消息会重置计数（MaxTurnsPerHuman 默认 8）。返回 true = 已达上限。
+func enforceGroupTurnLimit(ctx context.Context, st agenthub.Store, g *agenthub.Group) (bool, error) {
+	if g == nil {
+		return false, fmt.Errorf("%w: group is nil", agenthub.ErrInvalid)
+	}
+	limit := groupTurnLimit(g)
+	msgs, err := st.ReadMessages(ctx, g.ID, 0, 500)
+	if err != nil {
+		return false, err
+	}
+	turns := 0
+	// ReadMessages 按 seq 升序返回（最新在末尾）：必须倒序扫到最近一条人类消息。
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Sender.Kind == agenthub.SenderHuman {
+			break
+		}
+		if m.Sender.Kind == agenthub.SenderAgent {
+			turns++
+		}
+	}
+	return turns >= limit, nil
+}
+
+// appendAgentGroupMessageLocked 是 group_say / final 共用的「限流 + 路由 + 落账」路径。
+// 调用方必须持有 hubGroupSendMu；wake 由调用方在解锁后做（会话装配可能很慢）。
+// routeFatal=true：@ 解析失败就不落消息（group_say 的工具语义）；false：正文照发、
+// 只把 routeErr 交回调用方告警（final 的语义）。
+func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, text, roundID string, routeFatal bool) (msg *agenthub.Message, routed *agenthub.Round, limitHit bool, routeErr error, err error) {
+	if limitHit, err = enforceGroupTurnLimit(ctx, st, g); err != nil {
+		return nil, nil, false, nil, err
+	}
+	if limitHit {
+		return nil, nil, true, nil, nil
+	}
+	r, routeErr := m.routeAgentGroupText(ctx, st, g, sender, text)
+	if routeErr != nil {
+		if routeFatal {
+			return nil, nil, false, routeErr, nil
+		}
+		r = nil
+	}
+	msg = &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: sender},
+		Text:   text, RoundID: roundID,
+	}
+	if r != nil {
+		routed = r
+	}
+	seq, _, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
+	if err != nil {
+		return nil, nil, false, routeErr, err
+	}
+	if routed != nil {
+		routed.TriggerSeq = seq
+		m.emitHubGroupRound(g.ID, *routed)
+	}
+	m.emitHubGroupMessage(g.ID, seq, msg)
+	return msg, routed, false, routeErr, nil
+}
+
+// routeAgentGroupText 只对完整 agent 正文做 @ 路由（streaming partial 绝不路由）。
+// 失败（越权 @all/保留名/成员已删）返回错误，调用方决定是否仍落正文。
+func (m *manager) routeAgentGroupText(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, text string) (*agenthub.Round, error) {
 	if g == nil || strings.TrimSpace(text) == "" {
 		return nil, nil
 	}
@@ -346,6 +430,13 @@ func (m *manager) routeGroupFinal(ctx context.Context, st agenthub.Store, g *age
 		return nil, nil
 	}
 	return &round, nil
+}
+
+func (m *manager) emitHubGroupRound(gid agenthub.GroupID, round agenthub.Round) {
+	if m == nil || m.out == nil {
+		return
+	}
+	m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(gid), "round": round})
 }
 
 func lastAgentReplyInRound(msgs []agenthub.Message, agentID agenthub.AgentID, triggerSeq int64) *agenthub.Message {
@@ -384,18 +475,8 @@ func sameGroupReply(a, b string) bool {
 }
 
 func (m *manager) advanceGroupAgentCursor(ctx context.Context, st agenthub.Store, gid agenthub.GroupID, agentID agenthub.AgentID, seq int64) error {
-	cur, err := st.LoadCursor(ctx, gid, agentID)
-	if err != nil {
-		return err
-	}
-	if cur == nil {
-		cur = &agenthub.Cursor{GroupID: gid, AgentID: agentID}
-	}
-	if seq <= cur.AgentContextSeq {
-		return nil
-	}
-	cur.AgentContextSeq = seq
-	return st.SaveCursor(ctx, cur)
+	// 必须走字段级原子推进：整行 SaveCursor 会覆盖人类已读游标（两个独立写者）。
+	return st.AdvanceAgentContextSeq(ctx, gid, agentID, seq)
 }
 
 // hubAlertf 是 bridge 内需要格式化时的薄封装；保持 hub_alert 单一出口不变。
