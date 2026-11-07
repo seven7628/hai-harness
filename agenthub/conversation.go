@@ -332,6 +332,11 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// 没有目标 = 这条消息不产生任何唤醒：**不能**顺手建对话、换 id 或改状态
+	// （一条无 @ 的 group_say 不该让 /hub/conversation 多出一段「新对话」）。
+	if len(targets) == 0 {
+		return nil, nil
+	}
 	conv := c.ensureLocked(group, now)
 	if conv.status == ConversationStopped {
 		return nil, nil
@@ -346,9 +351,6 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 		conv.status = ConversationRunning
 		conv.startedAt = now
 	}
-	if len(targets) == 0 {
-		return nil, nil
-	}
 	limits := c.limits
 	// 人类优先：预算与深度是「自动接龙」的护栏，人类发送不受它们约束（§6.5.6
 	// 规则 1/5）。bridge 的人类路径本来就是并行唤醒、不进队列；这里保留同一口径，
@@ -360,8 +362,16 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	depth := req.Depth
 	if req.Human {
 		depth = 1 // 人类唤醒的永远是第一跳（人类自身深度 0）
-	} else if depth <= 0 {
-		depth = conv.depth + 1
+	} else {
+		if depth <= 0 {
+			depth = conv.depth + 1
+		}
+		// 深度只能从**当前对话**的深度推进：人类插话会开新对话并把 depth 归零，
+		// 而旧链路上还在跑的那一轮手里还攥着旧 header（比如 depth=4）。不夹紧的话，
+		// 它回来 @ 一句就把新对话直接顶到 5 → 新对话一开局就判「深度耗尽」。
+		if next := conv.depth + 1; depth > next {
+			depth = next
+		}
 	}
 	if !req.Human && depth > limits.MaxDepth {
 		return nil, c.exhaustLocked(conv, now,

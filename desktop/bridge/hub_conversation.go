@@ -111,7 +111,14 @@ func (m *manager) hubGroupNextDepth(agentID string, g *agenthub.Group) int {
 //   - 冷却定时器（scheduleHubConversationTimer）。
 //
 // 投递失败（目标忙）时**不动队列**：wake 还在队首，下一次群 run 结束再取。
-// 串行语义：一次调用最多投一条 —— 下一条必须等这一条的 run 结束。
+//
+// 串行语义（§6.5.6 规则 3）：本群只要还有**任何**群会话在跑就不放行（groupRunInFlight）。
+// group_say 就在发送者自己的 run 里泵，冷却计时器也可能落在别人的 run 中间 —— 没有
+// 这道闸，A 还没说完 B 就被叫起来了（"一次一个"名不副实）。被挡住时 wake 留队，
+// 由下一次 hubOnRunEnd / 冷却计时器再来一泵。
+//
+// 一次调用最多投一条：这一条投出去之后如果还有别的会话在跑（并行首轮的另一条），
+// 继续等它们结束 —— 排一个延迟泵，避免只靠「那一条 run 自己收尾」的偶然性。
 //
 // 两段式（NextDue → 投递 → BeginTurn）之间可能被人类消息/停止插队：BeginTurn 会
 // 返回 false，那一轮就不记账（会话里多收到一份快照是良性的，最多多一次空转）。
@@ -127,6 +134,9 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 	}
 	if view.Status != agenthub.ConversationRunning {
 		return
+	}
+	if m.groupRunInFlight(gid, "") {
+		return // 串行：本群还有会话在跑，下一条等它收尾（hubOnRunEnd 会再来）
 	}
 	wake, ok := ctrl.NextDue(gid, time.Time{})
 	if !ok {
@@ -158,6 +168,11 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 		return
 	}
 	m.emitHubConversation(gid, ctrl.View(gid))
+	// 串行：刚放行的那一条之外还有会话在跑（并行首轮的另一条），下一条必须等它们
+	// 全部结束。排一个延迟泵兜底；真正放行时闸门会再判一次。
+	if m.groupRunInFlight(gid, wake.Target) {
+		m.scheduleHubConversationPump(gid)
+	}
 }
 
 // dispatchConversationWake 把一条 wake 投给目标智能体的群会话（hidden 快照 + 正文）。
@@ -288,26 +303,80 @@ func (m *manager) notifyHubConversation(gid agenthub.GroupID, view agenthub.Conv
 	m.emitHubConversation(gid, view)
 }
 
-// groupActiveSessions 该群里「已装配且仍在跑」的群会话（停止按钮用）。
-// 只查不建：点一次停止不能为全体成员装配会话。
+// groupSessions 返回该群**已装配**的群会话（只查不建）。
+//
+// 不读群文件：群会话的 sid 是 hub.<agent>.g.<group> 的确定形态，遍历 hub 运行时逐个
+// 拼出来即可 —— O(智能体数) 且不会因为群被删/存储抖动而失败，也不给全体成员装配会话。
+func (m *manager) groupSessions(gid agenthub.GroupID) []*bridgeSession {
+	if m == nil || gid == "" {
+		return nil
+	}
+	m.mu.Lock()
+	runtimes := make([]*workspaceRuntime, 0, len(m.hubRuntimes))
+	for _, ws := range m.hubRuntimes {
+		if ws != nil {
+			runtimes = append(runtimes, ws)
+		}
+	}
+	m.mu.Unlock()
+	out := make([]*bridgeSession, 0, len(runtimes))
+	for _, ws := range runtimes {
+		sid := hubSessionID(ws.agentID, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: gid})
+		ws.mu.Lock()
+		bs := ws.sessions[sid]
+		ws.mu.Unlock()
+		if bs != nil {
+			out = append(out, bs)
+		}
+	}
+	return out
+}
+
+// hubAgentID 该会话所属的 Hub 智能体（非 hub 运行时 / 未装配返回空）。
+func (bs *bridgeSession) hubAgentID() agenthub.AgentID {
+	if bs == nil || bs.runtime == nil || bs.runtime.kind != runtimeHubAgent {
+		return ""
+	}
+	return agenthub.AgentID(bs.runtime.agentID)
+}
+
+// groupSessionActive 该群会话是否「还在跑」：与 hubSessionBusy 同口径
+// （running / 群轮闩 / 已投未开跑 / 有积压输入）。
+func groupSessionActive(bs *bridgeSession) bool {
+	if bs == nil {
+		return false
+	}
+	return bs.running.Load() || bs.hubGroupBusy.Load() || bs.hubDispatchPending.Load() ||
+		bs.s.PendingCount() > 0
+}
+
+// groupRunInFlight 该群是否还有群会话在跑；except 非空时跳过该智能体
+// （刚放行的那一条不该把自己算成「还在跑」）。
+// 串行泵与停止按钮共用这一个判据。
+func (m *manager) groupRunInFlight(gid agenthub.GroupID, except agenthub.AgentID) bool {
+	if m == nil {
+		return false
+	}
+	for _, bs := range m.groupSessions(gid) {
+		if except != "" && bs.hubAgentID() == except {
+			continue
+		}
+		if groupSessionActive(bs) {
+			return true
+		}
+	}
+	return false
+}
+
+// groupActiveSessions 该群里仍在跑的群会话（停止按钮用）。
 func (m *manager) groupActiveSessions(g *agenthub.Group) []*bridgeSession {
 	if m == nil || g == nil {
 		return nil
 	}
-	var out []*bridgeSession
-	for _, mem := range g.Members {
-		ws := m.hubRuntimeIfExists(string(mem.AgentID))
-		if ws == nil {
-			continue
-		}
-		sid := hubSessionID(string(mem.AgentID), agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID})
-		ws.mu.Lock()
-		bs := ws.sessions[sid]
-		ws.mu.Unlock()
-		if bs == nil {
-			continue
-		}
-		if bs.hubGroupBusy.Load() || bs.hubDispatchPending.Load() || bs.running.Load() || bs.s.PendingCount() > 0 {
+	sessions := m.groupSessions(g.ID)
+	out := make([]*bridgeSession, 0, len(sessions))
+	for _, bs := range sessions {
+		if groupSessionActive(bs) {
 			out = append(out, bs)
 		}
 	}
@@ -344,6 +413,14 @@ func (m *manager) scheduleAgentTaskPump(gid agenthub.GroupID, agentID agenthub.A
 // hubConversationStop 人类「停止自动对话」：中断当前群 run、清队列、stopped + 一条系统消息。
 // 幂等：重复点击只返回当前视图（不再写消息/事件）。
 func (m *manager) hubConversationStop(c command) {
+	if m == nil {
+		return
+	}
+	// 关停之后不再写群日志/系统消息：迟到的 UI 点击不该在正在拆除的存储上留痕（N6）。
+	if m.hubShutdown.Load() {
+		m.resp(c, false, "Hub 正在关停，已忽略停止自动对话的请求", nil)
+		return
+	}
 	ctx := context.Background()
 	st, err := m.hubStore()
 	if err != nil {

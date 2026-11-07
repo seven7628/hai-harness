@@ -360,6 +360,78 @@ func TestConversationOfferNoPartialEnqueue(t *testing.T) {
 	}
 }
 
+// TestConversationOfferClampsStaleDepth 锁住人类插话后的 stale depth（复审 B1）：
+// 人类消息开新对话（depth 归 0）之后，旧链路上还在跑的那一轮手里还是 depth=4 的
+// header —— 它回来 @ 一句必须是新对话的第 1 跳，而不是把新对话顶到 5 → exhausted。
+func TestConversationOfferClampsStaleDepth(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{Cooldown: -1})
+	c.BeginHuman("group_1", 1, clk.Now())
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_old", Targets: convIDs("agent_e"),
+		Text: "旧链路回来接着说", Depth: 5,
+	})
+	if err != nil {
+		t.Fatalf("人类插话后的旧深度不该被当成越界: %v", err)
+	}
+	if len(wakes) != 1 || wakes[0].Depth != 1 {
+		t.Fatalf("wake = %+v, want 唯一一条 depth=1", wakes)
+	}
+	if v := c.View("group_1"); v.Status != ConversationRunning || v.QueueLen != 1 {
+		t.Fatalf("对话 = %+v, want running + 1 条排队（不该 exhausted）", v)
+	}
+	if w, ok := c.NextDue("group_1", clk.Now()); !ok || w.Depth != 1 {
+		t.Fatalf("NextDue = %+v %v, want depth 1", w, ok)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin turn")
+	}
+	if v := c.View("group_1"); v.Depth != 1 || v.TurnsUsed != 1 {
+		t.Fatalf("记账后 depth/turns = %d/%d, want 1/1", v.Depth, v.TurnsUsed)
+	}
+	// 夹紧只削「跳级」，正常生长照旧：conv.depth=1 → 下一跳 2。
+	wakes, err = c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_e", Targets: convIDs("agent_f"),
+		Text: "正常下一跳", Depth: 2,
+	})
+	if err != nil || len(wakes) != 1 || wakes[0].Depth != 2 {
+		t.Fatalf("正常一跳 = %+v, %v", wakes, err)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin turn 2")
+	}
+	// 手搓一个更深的 Depth=4：夹到 conv.depth+1 = 3，而不是照单全收。
+	wakes, err = c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_f", Targets: convIDs("agent_g"),
+		Text: "跳级的一条", Depth: 4,
+	})
+	if err != nil || len(wakes) != 1 || wakes[0].Depth != 3 {
+		t.Fatalf("跳级 depth 应夹到 3，得到 %+v, %v", wakes, err)
+	}
+}
+
+// TestConversationEmptyOfferKeepsIdle 锁住 N3：没有 @ 的 Offer 不能建对话/换 id。
+func TestConversationEmptyOfferKeepsIdle(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{Cooldown: -1})
+	if wakes, err := c.Offer(ConversationOffer{GroupID: "group_1", Sender: "agent_a"}); err != nil || len(wakes) != 0 {
+		t.Fatalf("空 offer = %v, %v", wakes, err)
+	}
+	if v := c.View("group_1"); v.Status != ConversationIdle || v.ID != "" || v.TurnsUsed != 0 {
+		t.Fatalf("空 offer 造出了对话: %+v", v)
+	}
+	// 已有对话：空 offer 不改 id/状态/轮次/队列。
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	before := c.View("group_1")
+	if _, err := c.Offer(ConversationOffer{GroupID: "group_1", Sender: "agent_a", Text: "没有 @"}); err != nil {
+		t.Fatalf("空 offer: %v", err)
+	}
+	after := c.View("group_1")
+	if after.ID != before.ID || after.Status != before.Status ||
+		after.TurnsUsed != before.TurnsUsed || after.QueueLen != before.QueueLen {
+		t.Fatalf("空 offer 改了对话：前 %+v / 后 %+v", before, after)
+	}
+}
+
 func TestConversationSelfMentionExcluded(t *testing.T) {
 	c, clk := newTestController(t, ConversationLimits{Cooldown: -1})
 	c.BeginHuman("group_1", 1, clk.Now())

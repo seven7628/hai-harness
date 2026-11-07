@@ -466,6 +466,207 @@ func TestHubConversationFingerprintLoopStops(t *testing.T) {
 	}
 }
 
+// TestHubConversationStaleDepthAfterHumanInterjection 锁住复审 B1：四跳旧链还在跑
+// （header depth=4）时人类插话开新对话，旧链路回来 group_say @E 必须是新对话的第 1 跳，
+// 不能把新对话一开局就顶成「深度耗尽」。
+func TestHubConversationStaleDepthAfterHumanInterjection(t *testing.T) {
+	m, buf := testManager(t)
+	convLimits(m, agenthub.ConversationLimits{Cooldown: -1}) // MaxDepth=4 默认
+
+	a := createHubAgent(t, m, buf, 1, "旧链A")
+	b := createHubAgent(t, m, buf, 2, "旧链B")
+	c := createHubAgent(t, m, buf, 3, "旧链C")
+	d := createHubAgent(t, m, buf, 4, "旧链D")
+	e := createHubAgent(t, m, buf, 5, "旧链E")
+	g := convGroupWith(t, m, buf, 10, "旧链群", map[string]any{"max_turns_per_human": 100}, a, b, c, d, e)
+	p3bWireFake(t, m, g, string(a.ID), "@旧链B 一")
+	p3bWireFake(t, m, g, string(b.ID), "@旧链C 二")
+	p3bWireFake(t, m, g, string(c.ID), "@旧链D 三")
+	fd := newConvProvider("D 看完了不收尾 @") // 不带 @：四跳停在 D
+	releaseD := fd.gated()
+	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(d.ID), string(g.ID)), g, string(d.ID), fd)
+	fe := newConvProvider("E 收到")
+	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(e.ID), string(g.ID)), g, string(e.ID), fe)
+
+	// 人类 → A(1) → B(2) → C(3) → D(4)：D 卡在门闩上，header 里攥着 depth=4。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@旧链A 走四跳看看",
+	}); !ok {
+		t.Fatalf("human send: %s", errMsg)
+	}
+	fd.waitStarted(t)
+	bsD := mustGroupSession(t, m, string(d.ID), string(g.ID))
+	convWait(t, "D 的唤醒 header 深度到 4", func() bool { return bsD.hubWakeDepth.Load() == 4 })
+
+	// 人类插话（无 @）：开新对话，depth 归 0。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 12, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "先别说了，我看一下",
+	}); !ok {
+		t.Fatalf("human interject: %s", errMsg)
+	}
+	if v := convView(m, g.ID); v.Depth != 0 {
+		t.Fatalf("人类插话后对话深度 = %d, want 0", v.Depth)
+	}
+
+	// 旧链的 D 还没跑完就回来说话：深度 5 必须夹到新对话的第 1 跳。
+	res, err := p3bGroupSay(t, m, string(d.ID), map[string]any{
+		"group_id": string(g.ID), "text": "@旧链E 你也看一眼",
+		"mentions": []string{string(e.ID)},
+	})
+	if err != nil {
+		t.Fatalf("旧链路的 group_say: %v", err)
+	}
+	if _, bad := res["conversation"]; bad {
+		t.Fatalf("旧链路的 stale depth 把新对话顶爆了: %+v", res)
+	}
+	if v := convView(m, g.ID); v.Terminal() {
+		t.Fatalf("新对话被 stale depth 结束: %+v", v)
+	}
+	close(releaseD) // D 收尾 → 串行泵放行 E
+	fe.waitStarted(t)
+	headers := convWakeHeaders(fe.lastRequest())
+	if len(headers) != 1 {
+		t.Fatalf("E 的唤醒 header = %d, want 1", len(headers))
+	}
+	if headers[0].Depth != 1 || headers[0].Turn != 1 {
+		t.Fatalf("E 的 depth/turn = %d/%d, want 1/1（新对话第一跳）", headers[0].Depth, headers[0].Turn)
+	}
+	if v := convView(m, g.ID); v.Terminal() || v.TurnsUsed != 1 || v.Depth != 1 {
+		t.Fatalf("对话 = %+v, want running + 1 轮 depth 1", v)
+	}
+}
+
+// TestHubConversationSerialWaitsForRunEnd 锁住复审 N1：本群还有会话在跑时，
+// group_say / 计时器都不能把下一条 wake 插进来（规则 3「串行」）。
+func TestHubConversationSerialWaitsForRunEnd(t *testing.T) {
+	m, buf := testManager(t)
+	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
+
+	a := createHubAgent(t, m, buf, 1, "串行A")
+	b := createHubAgent(t, m, buf, 2, "串行B")
+	c := createHubAgent(t, m, buf, 3, "串行C")
+	g := convGroupWith(t, m, buf, 10, "串行群", map[string]any{"max_turns_per_human": 100}, a, b, c)
+	fa := newConvProvider("A 说完了")
+	releaseA := fa.gated()
+	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(a.ID), string(g.ID)), g, string(a.ID), fa)
+	fb := newConvProvider("B 说完了")
+	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(b.ID), string(g.ID)), g, string(b.ID), fb)
+	p3bWireFake(t, m, g, string(c.ID), "C 说完了")
+
+	// 人类 @A：A 卡在门闩上（这一轮在飞）。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@串行A 你先跑",
+	}); !ok {
+		t.Fatalf("human send: %s", errMsg)
+	}
+	fa.waitStarted(t)
+
+	// C 空闲，直接 group_say @B：B 必须排队等 A 跑完，不能中途被叫起来。
+	if _, err := p3bGroupSay(t, m, string(c.ID), map[string]any{
+		"group_id": string(g.ID), "text": "@串行B 你等 A 说完", "mentions": []string{string(b.ID)},
+	}); err != nil {
+		t.Fatalf("C 的 group_say: %v", err)
+	}
+	if n := fb.callCount(); n != 0 {
+		t.Fatalf("A 还在跑，B 就被叫起来了（%d 次）—— 串行闸门失效", n)
+	}
+	if v := convView(m, g.ID); v.QueueLen != 1 || v.TurnsUsed != 1 {
+		t.Fatalf("对话 = %+v, want 1 条排队 + 1 轮（人类首轮）", v)
+	}
+	m.pumpHubConversation(g.ID) // 显式再泵一次（等价于冷却计时器/别的 run 收尾）
+	if n := fb.callCount(); n != 0 {
+		t.Fatalf("显式泵把 B 插进了 A 的 run：%d 次", n)
+	}
+
+	close(releaseA)
+	convWait(t, "A 收尾后放行 B", func() bool { return fb.callCount() >= 1 })
+	if v := convView(m, g.ID); v.TurnsUsed != 2 || v.QueueLen != 0 {
+		t.Fatalf("B 放行后对话 = %+v, want 2 轮、队列空", v)
+	}
+}
+
+// TestHubConversationSerialWaitsForAllFirstRoundRuns 锁住 N1 的并行首轮口径：
+// 人类同时叫醒 A/B（首轮允许并行），下一轮必须等**两条**都跑完才放行。
+func TestHubConversationSerialWaitsForAllFirstRoundRuns(t *testing.T) {
+	m, buf := testManager(t)
+	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
+
+	a := createHubAgent(t, m, buf, 1, "首轮A")
+	b := createHubAgent(t, m, buf, 2, "首轮B")
+	c := createHubAgent(t, m, buf, 3, "首轮C")
+	d := createHubAgent(t, m, buf, 4, "首轮D")
+	g := convGroupWith(t, m, buf, 10, "首轮群", map[string]any{"max_turns_per_human": 100}, a, b, c, d)
+	fa := newConvProvider("A 看完了")
+	releaseA := fa.gated()
+	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(a.ID), string(g.ID)), g, string(a.ID), fa)
+	fb := newConvProvider("B 看完了")
+	releaseB := fb.gated()
+	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(b.ID), string(g.ID)), g, string(b.ID), fb)
+	p3bWireFake(t, m, g, string(c.ID), "C 说完了")
+	fd := newConvProvider("D 最后说")
+	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(d.ID), string(g.ID)), g, string(d.ID), fd)
+
+	// 人类同时 @A @B：首轮并行（§6.5.6 规则 2）。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@首轮A @首轮B 你们一起看",
+	}); !ok {
+		t.Fatalf("human send: %s", errMsg)
+	}
+	fa.waitStarted(t)
+	fb.waitStarted(t)
+
+	// C 空闲，直接 group_say @D：D 的唤醒必须等 A/B 都跑完。
+	if _, err := p3bGroupSay(t, m, string(c.ID), map[string]any{
+		"group_id": string(g.ID), "text": "@首轮D 你最后说", "mentions": []string{string(d.ID)},
+	}); err != nil {
+		t.Fatalf("C 的 group_say: %v", err)
+	}
+	if n := fd.callCount(); n != 0 {
+		t.Fatalf("首轮还在跑，D 就被叫起来了（%d 次）", n)
+	}
+
+	// A 先结束：B 还在跑，D 仍然不能开始。
+	close(releaseA)
+	convWait(t, "A 的 run 收尾", func() bool {
+		bs, err := m.hubGroupSession(string(a.ID), string(g.ID))
+		return err == nil && !bs.hubGroupBusy.Load() && !bs.running.Load()
+	})
+	m.pumpHubConversation(g.ID)
+	if n := fd.callCount(); n != 0 {
+		t.Fatalf("B 还在跑，D 就被叫起来了（%d 次）", n)
+	}
+
+	// B 也结束：这才放行 D。
+	close(releaseB)
+	convWait(t, "两条首轮都结束后放行 D", func() bool { return fd.callCount() >= 1 })
+	if v := convView(m, g.ID); v.TurnsUsed != 2 {
+		t.Fatalf("turns used = %d, want 2（人类首轮 + D）", v.TurnsUsed)
+	}
+}
+
+// TestHubConversationStopRejectedAfterShutdown 锁住 N6：关停之后停止按钮不能写群日志。
+func TestHubConversationStopRejectedAfterShutdown(t *testing.T) {
+	m, buf := testManager(t)
+	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
+	a := createHubAgent(t, m, buf, 1, "关停A")
+	g := convGroupWith(t, m, buf, 10, "关停群", nil, a)
+	before := len(convSystemMessages(convGroupMessages(t, m, g.ID)))
+
+	m.hubShutdown.Store(true)
+	ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_conversation_stop", map[string]any{
+		"group_id": string(g.ID),
+	})
+	if ok {
+		t.Fatal("关停之后 hub_conversation_stop 必须拒绝")
+	}
+	if !strings.Contains(errMsg, "关停") {
+		t.Fatalf("错误文案 = %q, want 提到关停", errMsg)
+	}
+	if got := len(convSystemMessages(convGroupMessages(t, m, g.ID))); got != before {
+		t.Fatalf("关停后仍写了系统消息：%d → %d", before, got)
+	}
+}
+
 // TestHubConversationCooldownGatesNextWake：连续两次智能体唤醒之间至少间隔冷却。
 //
 // A 的一条回复同时 @B/@C：B 立即跑（串行队列的第一条），C 排在队首等冷却。断言两件事：
