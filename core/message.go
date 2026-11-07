@@ -39,6 +39,11 @@ const (
 	// 用户输入**（collectUserContents 只认 text/image），所以纯 header 消息不会触发
 	// UserInputsConsumed、不污染会话标题。与 ContentTypeMeshFrom 同一套语义。
 	ContentTypeHubTask = "hub_task"
+	// ContentTypeHubGroupWake Agent Hub 群 @ 唤醒的隐藏块（P3b-01a）：
+	// user 角色 + 非 text 块，Content 首行是 GroupWakeHeader JSON、其后是本轮群快照。
+	// provider 按文本送出（模型看到快照），UI 只渲染紧随的 text 块（触发消息原文），
+	// 因此快照不进用户气泡；与 hub_task 同属宿主协议块，不算普通用户输入。
+	ContentTypeHubGroupWake = "hub_group_wake"
 	// ContentTypeMeshFrom 跨会话/远程投递消息的来源提示块（session_send / mesh 入站注入）：
 	// user 角色 + 非 text 块 —— provider 按文本翻译送 LLM（模型看到「来自哪个会话」可回信），
 	// 但 collectUserTexts / 标题 fallback / UI 只认 text 块 → 来源提示不进对话正文、
@@ -237,7 +242,8 @@ func (m *Message) Validate() error {
 		// task_result：后台任务完成消息（仅 Session.PushTaskResult 注入，非用户输入）；
 		// skill：用户主动加载的技能指令（命令框架，仅 agents 注入，非用户输入）；
 		// hub_task：Agent Hub 派发的任务 header（正文另起 text 块，header 不算用户输入）
-		if c.Type != "" && c.Type != ContentTypeText && c.Type != ContentTypeImage && c.Type != ContentTypeSummary && c.Type != ContentTypeCommand && c.Type != ContentTypeTaskResult && c.Type != ContentTypeMeshFrom && c.Type != ContentTypeSkill && c.Type != ContentTypeHubTask {
+		// hub_group_wake：Agent Hub 群 @ 唤醒 header + 快照（正文另起 text 块）
+		if c.Type != "" && c.Type != ContentTypeText && c.Type != ContentTypeImage && c.Type != ContentTypeSummary && c.Type != ContentTypeCommand && c.Type != ContentTypeTaskResult && c.Type != ContentTypeMeshFrom && c.Type != ContentTypeSkill && c.Type != ContentTypeHubTask && c.Type != ContentTypeHubGroupWake {
 			return fmt.Errorf("content[%d] has invalid type %q", i, c.Type)
 		}
 	}

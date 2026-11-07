@@ -635,7 +635,17 @@ func (m *manager) applyHubSessionLoop(bs *bridgeSession, p *agenthub.AgentProfil
 	if effort != "" {
 		cur.Effort = effort
 	}
-	spec := m.hubSpecFor(&cur, hubScopeFromSID(bs.id), ws.path)
+	scope := hubScopeFromSID(bs.id)
+	spec := m.hubSpecFor(&cur, scope, ws.path)
+	if scope.Kind == agenthub.ScopeGroup {
+		st, err := m.hubStore()
+		if err != nil {
+			return
+		}
+		if err := m.enrichHubGroupSpec(context.Background(), st, spec, scope.GroupID); err != nil {
+			return // 群读不到/已删：保留旧 loop，不能把群上下文静默换成 DM
+		}
+	}
 	bs.loop = m.buildHubLoop(ws, bs.id, spec, bs.hubEngine)
 	bs.s.SetLoop(bs.loop)
 }

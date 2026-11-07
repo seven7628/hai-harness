@@ -603,10 +603,20 @@ func (m *manager) hubGroupSend(c command) {
 	}
 	m.emitHubGroupMessage(g.ID, seq, msg)
 	// 无 @ 只写日志（N-1）：不产生 hub_round，否则前端会误报「无人被唤醒」。
+	var wakeErrors []string
 	if routed != nil {
 		m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+		// 先落日志/回执，再唤醒；唤醒失败不能把已写入的群消息回滚（人已经看到了）。
+		wakeErrors = m.wakeGroupRound(g, round, msg)
+		for _, we := range wakeErrors {
+			m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
+		}
 	}
-	m.resp(c, true, "", map[string]any{"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets})
+	respData := map[string]any{"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets}
+	if len(wakeErrors) > 0 {
+		respData["wake_errors"] = wakeErrors
+	}
+	m.resp(c, true, "", respData)
 }
 
 func (m *manager) emitHubGroupMessage(gid agenthub.GroupID, seq int64, msg *agenthub.Message) {

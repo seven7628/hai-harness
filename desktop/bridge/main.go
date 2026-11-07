@@ -314,9 +314,15 @@ type bridgeSession struct {
 	wake             chan struct{}
 	out              *out
 
-	// hubOnAgentEnd Hub DM 的本轮收尾钩子（nil = 项目会话）。RunStream 层事件只经
+	// hubOnAgentEnd Hub 会话的本轮收尾钩子（nil = 项目会话）。RunStream 层事件只经
 	// bs.emit 发出（Session 的 WithEventHandler 收不到 agent_*），所以钩子必须挂在 emit。
 	hubOnAgentEnd func(content string)
+	// hubGroupWake 当前群 run 绑定的轮次（UserInputsConsumed 从 hidden 块解析）。
+	// 只在 emit（dispatchMu 内）读写；finishHubRound 用完后清空。
+	hubGroupWake *agenthub.GroupWakeHeader
+	// hubGroupBusy 该群会话已投递但尚未 AgentEnd 的唤醒。忙时不投第二个快照，
+	// 避免两个 round 共用一次 AgentEnd。
+	hubGroupBusy atomic.Bool
 	// hubEngine Hub 会话的工具引擎（记忆/人格变更后重建 loop 时复用：
 	// 重建引擎会丢掉正在运行的工具任务与审批等待，没必要）。
 	hubEngine *tools.Engine
@@ -641,6 +647,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 		if bad > 0 && bs.hubAlert != nil {
 			bs.hubAlert("bad_header", fmt.Sprintf("有 %d 个 hub_task header 无法解析", bad))
 		}
+		// 群唤醒绑定（P3b-01a）：同一批里的 hidden 块决定 AgentEnd 归哪一轮。
+		wakes, badWakes := hubGroupWakesOf(ev.UserContents)
+		if badWakes > 0 && bs.hubAlert != nil {
+			bs.hubAlert("bad_header", fmt.Sprintf("有 %d 个 hub_group_wake header 无法解析", badWakes))
+		}
 		if ev.Injected {
 			if len(bs.hubTaskIDs) > 0 {
 				bs.hubHumanIntervened.Store(true)
@@ -654,6 +665,13 @@ func (bs *bridgeSession) emit(e events.Event) {
 			bs.hubBudgetStop.Store(false)
 			bs.hubBudgetReason.Store("")
 			bs.hubHumanIntervened.Store(false) // 新 batch 开口：上一轮介入不外溢
+			bs.hubGroupWake = nil
+			if len(wakes) > 0 {
+				if len(wakes) > 1 && bs.hubAlert != nil {
+					bs.hubAlert("bad_header", fmt.Sprintf("一批用户输入里有 %d 个群唤醒，取最后一个", len(wakes)))
+				}
+				bs.hubGroupWake = wakes[len(wakes)-1]
+			}
 		}
 	case *events.LLMEnd:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
@@ -926,6 +944,27 @@ func hubTaskIDsOf(contents [][]core.Content) ([]agenthub.TaskID, int) {
 		}
 	}
 	return ids, bad
+}
+
+// hubGroupWakesOf 从一批用户内容块里收集群唤醒 header（P3b-01a）。
+// 正常一次唤醒只有一个；多个说明群忙闸门失效，由调用方告警并取最后一个。
+func hubGroupWakesOf(contents [][]core.Content) ([]*agenthub.GroupWakeHeader, int) {
+	var out []*agenthub.GroupWakeHeader
+	bad := 0
+	for _, blocks := range contents {
+		for _, c := range blocks {
+			if c.Type != core.ContentTypeHubGroupWake {
+				continue
+			}
+			h, _, err := agenthub.ParseGroupWake(c.Content)
+			if err != nil || h == nil {
+				bad++
+				continue
+			}
+			out = append(out, h)
+		}
+	}
+	return out, bad
 }
 
 func (bs *bridgeSession) handler() events.EventHandler {
@@ -1711,7 +1750,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		bs.editModelCfg(opts.hub.Agent.Provider, opts.hub.Agent.Model, "")
 		bs.persona = "hub"
 		hubSpec := opts.hub
-		bs.hubOnAgentEnd = func(content string) { m.appendHubReply(hubSpec, content) }
+		bs.hubOnAgentEnd = func(content string) { m.finishHubReply(bs, hubSpec, content) }
 		bs.hubEngine = hubEng
 	}
 	if opts.cronEvDir != "" {

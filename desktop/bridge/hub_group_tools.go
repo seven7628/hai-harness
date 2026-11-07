@@ -263,6 +263,12 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		t.m.emitHubGroupMessage(g.ID, seq, msg)
 		if routed != nil {
 			t.m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
+			if errs := t.m.wakeGroupRound(g, round, msg); len(errs) > 0 {
+				result["wake_errors"] = errs
+				for _, we := range errs {
+					t.m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
+				}
+			}
 		}
 	}
 	return marshalHubToolResult(result)

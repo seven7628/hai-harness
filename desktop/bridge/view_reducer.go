@@ -3102,8 +3102,8 @@ func (r *ViewReducer) applyUserInputsConsumedLocked(e *events.UserInputsConsumed
 		var contents []Content
 		if i < len(e.UserContents) && len(e.UserContents[i]) > 0 {
 			for _, c := range e.UserContents[i] {
-				if c.Type == core.ContentTypeHubTask {
-					continue // header 是宿主协议，不进用户气泡（正文是紧随的 text 块）
+				if c.Type == core.ContentTypeHubTask || c.Type == core.ContentTypeHubGroupWake {
+					continue // header/快照是宿主协议，不进用户气泡（正文是紧随的 text 块）
 				}
 				ct := Content{Type: c.Type, Content: c.Content, MimeType: c.MimeType}
 				if c.Type == core.ContentTypeImage {
