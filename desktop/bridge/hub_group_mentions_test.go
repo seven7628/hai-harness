@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
 )
@@ -422,6 +423,38 @@ func TestHubGroupSendStructuredMentions(t *testing.T) {
 		t.Fatalf("human mention_all message = %+v", allMsg)
 	}
 
+	// @all + 显式 mentions：targets 扩成全体，但 mentions 只记显式点名的人。
+	// 落盘/事件写成 round.Targets 就会把「全体」当成「点名」（M2）。
+	ok, errMsg, data = hubCmd(t, m, buf, 16, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "全体开会，HumanB 重点看", "mention_all": true,
+		"mentions": []any{string(b.ID)}, "client_msg_id": "p3b-human-all-2",
+	})
+	if !ok {
+		t.Fatalf("human mention_all + mentions: %s", errMsg)
+	}
+	if !p3bSameSet(toStringIDs(data["targets"]), string(a.ID), string(b.ID)) {
+		t.Fatalf("mention_all+mentions targets = %v (A=%s B=%s)", data["targets"], a.ID, b.ID)
+	}
+	allID := data["message_id"].(string)
+	bothMsg := p3bFindMessage(mustReadLog(t, m, g.ID), allID)
+	if bothMsg == nil || !bothMsg.MentionAll || !p3bSameIDs(bothMsg.Mentions, string(b.ID)) {
+		t.Fatalf("mention_all+mentions message = %+v, want mentions [%s] / mention_all", bothMsg, b.ID)
+	}
+	bothEvents := 0
+	for _, ev := range hubEvents(t, buf, "hub_message") {
+		raw, _ := ev["message"].(map[string]any)
+		if raw == nil || raw["id"] != allID {
+			continue
+		}
+		bothEvents++
+		if !p3bSameIDs(toStringIDs(raw["mentions"]), string(b.ID)) || raw["mention_all"] != true {
+			t.Fatalf("mention_all+mentions event = %v/%v, want [%s]/true", raw["mentions"], raw["mention_all"], b.ID)
+		}
+	}
+	if bothEvents != 1 {
+		t.Fatalf("hub_message events for %s = %d, want 1", allID, bothEvents)
+	}
+
 	// 非成员/未知 id：失败且不落消息。
 	beforeCount = len(mustReadLog(t, m, g.ID))
 	ok, _, _ = hubCmd(t, m, buf, 13, "hub_group_send", map[string]any{
@@ -556,4 +589,91 @@ func TestHubGroupFinalMessageMentions(t *testing.T) {
 			t.Fatalf("delta message_id %v 不属于任何 final", ev["message_id"])
 		}
 	}
+}
+
+// p3bWaitAgentCursor 有界等某成员的 agent 游标推进到 seq：finishHubRound 在 Run 收口后
+// 才推进游标，所以它是「那一轮群唤醒已经处理完」的确定性信号（替代固定静默窗口）。
+func p3bWaitAgentCursor(t *testing.T, m *manager, gid agenthub.GroupID, agentID agenthub.AgentID, seq int64) {
+	t.Helper()
+	st := mustHubStore(t, m)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := st.LoadCursor(context.Background(), gid, agentID); err == nil && c.AgentContextSeq >= seq {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("agent %s 的群游标没推进到 seq %d", agentID, seq)
+}
+
+// P3b-02 M2（final 路径）：owner 的 final 正文 @all 时 targets 是全体，
+// 落盘 mentions 只含正文里显式点名的人 —— 不能把 Targets 当成 Mentions。
+func TestHubGroupFinalMentionAllKeepsExplicitMentions(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "AllFinalA")
+	b := createHubAgent(t, m, buf, 2, "AllFinalB")
+	c := createHubAgent(t, m, buf, 3, "AllFinalC")
+	g := p3bGroup(t, m, buf, 4, "final @all 群", nil,
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{a.ID, "owner"},
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{b.ID, "member"},
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{c.ID, "member"},
+	)
+	// A 是 owner：final 正文里的 @all 合法。B/C 空回复，只验 A 的 final 落盘。
+	const reply = "@AllFinalB @all 都看一下"
+	p3bWireFake(t, m, g, string(a.ID), reply)
+	p3bWireFake(t, m, g, string(b.ID), "")
+	p3bWireFake(t, m, g, string(c.ID), "")
+
+	if ok, errMsg, _ := hubCmd(t, m, buf, 10, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@AllFinalA 请处理",
+	}); !ok {
+		t.Fatalf("human send: %s", errMsg)
+	}
+	msgs := waitGroupMessages(t, m, g.ID, func(msgs []agenthub.Message) bool {
+		for i := range msgs {
+			if msgs[i].Sender.AgentID == a.ID && msgs[i].Text == reply {
+				return true
+			}
+		}
+		return false
+	})
+	var final *agenthub.Message
+	for i := range msgs {
+		if msgs[i].Sender.AgentID == a.ID && msgs[i].Text == reply {
+			final = &msgs[i]
+		}
+	}
+	if final == nil || final.RoundID == "" {
+		t.Fatalf("owner final missing: %+v", msgs)
+	}
+	// @all 让 targets 变成 [B C]，但 mentions 只有正文点名的 B。
+	if !final.MentionAll || !p3bSameIDs(final.Mentions, string(b.ID)) {
+		t.Fatalf("final mention_all message = %v/%v, want [%s]/true", final.Mentions, final.MentionAll, b.ID)
+	}
+	found := 0
+	for _, ev := range hubEvents(t, buf, "hub_message") {
+		raw, _ := ev["message"].(map[string]any)
+		if raw == nil || raw["id"] != string(final.ID) {
+			continue
+		}
+		found++
+		if !p3bSameIDs(toStringIDs(raw["mentions"]), string(b.ID)) || raw["mention_all"] != true {
+			t.Fatalf("final mention_all event = %v/%v, want [%s]/true", raw["mentions"], raw["mention_all"], b.ID)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("hub_message events for %s = %d, want 1", final.ID, found)
+	}
+	// A 的 @all 唤醒了 B/C：等它们收口，免得测试结束时后台 run 还在写盘。
+	p3bWaitAgentCursor(t, m, g.ID, b.ID, final.Seq)
+	p3bWaitAgentCursor(t, m, g.ID, c.ID, final.Seq)
 }

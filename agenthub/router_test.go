@@ -571,6 +571,17 @@ func TestRouterMentionAllStructured(t *testing.T) {
 			t.Fatalf("%s structured @all = %+v, %v: want forbidden", sender, round, err)
 		}
 	}
+	// 越权 @all + 未知/非成员 id：鉴权必须先于成员校验，否则 member 能靠错误码
+	// 探出「这个 id 是不是本群成员」（M4：先解析结构化 id 会把这里变成 ErrInvalid）。
+	for _, sender := range []AgentID{"ag_bbbbbbbb", "ag_eeeeeeee"} {
+		round, err := r.RouteMentions(MentionRequest{Mentions: []AgentID{"ag_zzzzzzzz"}, MentionAll: true}, sender, false, 17, time.Now())
+		if !errors.Is(err, ErrMentionAllForbidden) {
+			t.Fatalf("%s unknown-id @all err = %v, want ErrMentionAllForbidden", sender, err)
+		}
+		if round.ID != "" || round.MentionAll || len(round.Targets) != 0 || len(round.Mentions) != 0 {
+			t.Fatalf("%s unknown-id @all leaked a round: %+v", sender, round)
+		}
+	}
 	// 正文 @all + 结构化 mentions：仍按 @all 处理，mentions 记录显式目标。
 	round, err = r.RouteMentions(MentionRequest{Text: "@all 开会", Mentions: []AgentID{"ag_cccccccc"}}, "ag_aaaaaaaa", false, 18, time.Now())
 	if err != nil || !round.MentionAll || len(round.Targets) != 4 || !reflect.DeepEqual(round.Mentions, []AgentID{"ag_cccccccc"}) {
