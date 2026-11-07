@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P1/P2/P3a 已收口；新增 P2.5 基础设施前置（P3b 前）；P2.5-01..07 完成后再开 P3b-01",
+  "subtitle": "P2.5 基础设施前置与 P3b-01a 群会话前置已完成；P3a-09 群内流式进行中",
   "updated": "2026-11-06",
   "phases": [
     {
@@ -635,7 +635,8 @@
       "phase": "P3a",
       "title": "群内流式：hub_message_delta + 节流",
       "deps": [
-        "P3a-08"
+        "P3a-08",
+        "P3b-01a"
       ],
       "files": [
         "desktop/bridge/hub_events.go",
@@ -792,12 +793,31 @@
       "commit": "docs(hub-p2.5-08): 三主题视觉验收"
     },
     {
+      "id": "P3b-01a",
+      "phase": "P3b",
+      "title": "群会话前置切片：懒装配 + round 绑定 + finishHubRound + 游标推进",
+      "deps": [
+        "P3a-04",
+        "P0-06"
+      ],
+      "files": [
+        "agenthub/group_wake.go",
+        "core/message.go",
+        "desktop/bridge/hub_group_session.go",
+        "desktop/bridge/hub_group_commands.go",
+        "desktop/bridge/hub_group_tools.go",
+        "desktop/bridge/main.go"
+      ],
+      "acceptance": "每 (group,agent) 确定性会话懒装配；hub_group_wake hidden 块携带 group/round/trigger 并绑定 UserInputsConsumed；AgentEnd 经 finishHubRound 写 final hub_message（同轮 round_id、空回复不写、group_say 重复去重、final @ 路由下一轮）；agent_context_seq 推进到 trigger_seq 且重启可恢复；忙目标不投第二快照。",
+      "tests": "go test ./agenthub/ -run GroupWake && go test ./desktop/bridge/ -run 'TestHubGroup|TestFinishHubRound|TestEnrich'",
+      "commit": "feat(hub-p3b-01a): 群会话唤醒与 final 落账"
+    },
+    {
       "id": "P3b-01",
       "phase": "P3b",
       "title": "名册/职责/能力注入 + 提示词",
       "deps": [
-        "P3a-04",
-        "P0-06",
+        "P3b-01a",
         "P3a-10"
       ],
       "files": [
@@ -805,7 +825,7 @@
         "agenthub/group.go",
         "desktop/bridge/hub_session.go"
       ],
-      "acceptance": "名册稳定层；状态走工具；L1 教 @/assign_task；群成员变化重建 loop；golden 测试。承接 P3a-04：每群 (group,agent) 会话懒装配（hubSessionID group 分支 + loop 复用/重建），以及 AgentContextSeq 的持久化推进（finishHubRound 成功后推进，重启可恢复）。",
+      "acceptance": "名册稳定层；状态走工具；L1 教 @/assign_task；群成员变化重建 loop；golden 测试。群会话懒装配/round 绑定/finishHubRound/AgentContextSeq 已由 P3b-01a 交付，本任务只补名册、职责、能力与提示词。",
       "tests": "go test ./agenthub/ -run Roster",
       "commit": "feat(hub-p3b-01): 智能体名册与提示词"
     },
@@ -1270,6 +1290,11 @@
       "commit": "5518b8d fix(hub-p2.5-07): interrupted 同 key 重投 + accepted allow-list + 描述纠偏",
       "reviewNote": "复审 passed（task-kjm4h7te，对象 8535c66）：新 fixture 下 saves 断言真能杀死「Create 先于 Guard」变异；accepted/status 主路径语义闭合；变异 M1/M2/M5/M6/M7 均被杀死。后续 5518b8d 已修 interrupted 同 key 重投、accepted 改 allow-list、client_msg_id 描述纠偏；剩余两套 retry 收敛与空快照契约记入后续小债。",
       "review": "passed"
+    },
+    "P3b-01a": {
+      "status": "done",
+      "commit": "bdb22c3 (71d2511 + 49b9ccf + bdb22c3) feat/fix(hub-p3b-01a): 群会话唤醒与 final 落账",
+      "reviewNote": "复审 passed（二轮 task-fur3ymjh，对象 49b9ccf；后续 bdb22c3 已处理其 N1/N2）。交付：每 (group,agent) 确定性会话懒装配；hub_group_wake hidden 块 + UserInputsConsumed round 绑定；finishHubRound final 落账/空回复/group_say 去重/final @ 路由；final 与 group_say 共用 appendAgentGroupMessageLocked（hubGroupSendMu 内限流+路由+落账，解锁后 wake）；忙代号单调 owner + runLoop 失败/PendingCount 兜底/关会话清理；agent_context_seq 字段级原子推进且保留 human_read_seq；finishHubRound 每次重读 group；app/reducer hidden 块过滤。首轮 B1（final→@ 绕过上限）/B2（busy 永久闩死）均已闭合并有变异验证。非阻塞记债：人类 hubGroupSend 仍在锁内 wake；两处手动 Unlock（panic 会卡住 manager 级锁）；SaveCursor 整行写未加 s.mu（当前无群 human_read 写者）；hub_round/message 顺序已改回 message 先。测试：GroupWake/群单例/唤醒 final/空回复游标/去重/final @ 下一轮/忙目标/loop 名册/轮次上限/关闭清理/ABA/原子游标/reducer hidden。"
     },
     "P2.5-08": {
       "status": "todo",
