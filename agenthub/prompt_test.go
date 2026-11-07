@@ -34,7 +34,7 @@ func TestPromptL1Only(t *testing.T) {
 	}
 	for _, want := range []string{"## Tools", "@Name", "assign_task", "## Workspaces", "## Safety"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("L1 missing %q", got)
+			t.Fatalf("L1 missing %q:\n%s", want, got)
 		}
 	}
 	for _, unwanted := range []string{"## Group:", "## Identity"} {
@@ -133,6 +133,7 @@ func TestPromptRosterHasNoLiveStatus(t *testing.T) {
 }
 
 // 成员顺序 = Group.Members 的落盘顺序，与 Members（profile 切片）的传入顺序无关。
+// 重复多轮：名册不能依赖 map 迭代顺序（单次通过可能是巧合）。
 func TestPromptRosterOrderIsGroupOrder(t *testing.T) {
 	spec := rosterGoldenSpec()
 	// 反转 profile 切片：名册仍然按群成员表输出，不能靠 map 迭代或切片顺序。
@@ -142,8 +143,11 @@ func TestPromptRosterOrderIsGroupOrder(t *testing.T) {
 	}
 	shuffled := spec
 	shuffled.Members = rev
-	if got, want := RenderSystem(shuffled), RenderSystem(spec); got != want {
-		t.Fatalf("roster depends on profile slice order:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	want := RenderSystem(spec)
+	for i := 0; i < 32; i++ {
+		if got := RenderSystem(shuffled); got != want {
+			t.Fatalf("round %d: roster depends on profile slice order:\n--- got ---\n%s\n--- want ---\n%s", i, got, want)
+		}
 	}
 }
 

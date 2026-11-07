@@ -513,13 +513,18 @@ func (m *manager) refreshHubLoops(agentID string) error {
 	}
 	ws.mu.Unlock()
 
+	var firstErr error
 	for _, bs := range items {
 		if bs == nil || bs.ctx.Err() != nil || bs.hubEngine == nil {
 			continue
 		}
-		m.applyHubSessionLoop(bs, p, ws)
+		// 单个会话失败不阻断其余会话（各会话的上下文互相独立），但必须把失败
+		// 带回调用方：命令层据此告警「重启后生效」，不能静默说已生效（P3b-01b N2）。
+		if err := m.applyHubSessionLoop(bs, p, ws); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("会话 %s: %w", bs.id, err)
+		}
 	}
-	return nil
+	return firstErr
 }
 
 // syncHubSessionProfile 把资料页新改的 provider/model/effort 落到已装配会话。
@@ -649,9 +654,12 @@ func sameStringSlice(a, b []string) bool {
 // 直接用 Profile 重建会把人刚切的模型/档位静默改回去，而且 bs.effort 不跟着换
 // → 面板显示 high、实际跑 low（P1-05 复核 B1）。这里只覆盖 loop 的入参，
 // **不**回写 bs.*（那是会话状态，不是重建的副作用）。
-func (m *manager) applyHubSessionLoop(bs *bridgeSession, p *agenthub.AgentProfile, ws *workspaceRuntime) {
+//
+// 返回 nil = 已重建或按设计跳过；返回错误 = 根本没换成新 loop（群读不到/存储坏了）。
+// 不能吞错：调用方要据此告警「下一次 Run 仍是旧的」（P3b-01b N2）。
+func (m *manager) applyHubSessionLoop(bs *bridgeSession, p *agenthub.AgentProfile, ws *workspaceRuntime) error {
 	if bs == nil || p == nil || ws == nil || bs.hubEngine == nil {
-		return
+		return nil
 	}
 	cur := *p
 	prov, model, effort := bs.modelCfg()
@@ -669,14 +677,15 @@ func (m *manager) applyHubSessionLoop(bs *bridgeSession, p *agenthub.AgentProfil
 	if scope.Kind == agenthub.ScopeGroup {
 		st, err := m.hubStore()
 		if err != nil {
-			return
+			return err
 		}
 		if err := m.enrichHubGroupSpec(context.Background(), st, spec, scope.GroupID); err != nil {
-			return // 群读不到/已删：保留旧 loop，不能把群上下文静默换成 DM
+			return err // 群读不到/已删：保留旧 loop，不能把群上下文静默换成 DM
 		}
 	}
 	bs.loop = m.buildHubLoop(ws, bs.id, spec, bs.hubEngine)
 	bs.s.SetLoop(bs.loop)
+	return nil
 }
 
 // hubScopeFromSID 从会话 ID 还原作用域（DM / 群）。群会话在 P3 才会创建：
@@ -724,9 +733,10 @@ func hubSessionBusy(bs *bridgeSession) bool {
 // hubAgentLiveStatus 返回某智能体**真实**的忙闲（只读运行态，绝不装配会话：
 // 没装配过 = 没在跑 = idle）。
 //
-// where 说明忙在哪儿（不泄漏内容）："group" = 就是参数这个群；"dm" = 私聊；
-// "other_group" = 别的群（不给群 id，避免泄漏非共同群）。同一个智能体可能有多个
-// 会话同时忙，按 本群 > 私聊 > 别的群 取一个确定的答案（map 迭代顺序不影响结果）。
+// where 说明忙在哪儿（不泄漏内容）："group" = 群会话（没给 groupID 时也用它，
+// 不把无作用域查询说成「在别的群」）；"dm" = 私聊；"other_group" = 指定了别的群，
+// 但忙在另一个群（不给那个群 id，避免泄漏非共同群）。同一个智能体可能有多个
+// 会话同时忙，按 本群（或任意群）> 私聊 > 别的群 取一个确定的答案（map 迭代顺序不影响结果）。
 func (m *manager) hubAgentLiveStatus(agentID string, groupID agenthub.GroupID) (status, where string) {
 	ws := m.hubRuntimeIfExists(agentID)
 	if ws == nil {
@@ -741,7 +751,9 @@ func (m *manager) hubAgentLiveStatus(agentID string, groupID agenthub.GroupID) (
 		}
 		scope := hubScopeFromSID(bs.id)
 		switch {
-		case groupID != "" && scope.Kind == agenthub.ScopeGroup && scope.GroupID == groupID:
+		case scope.Kind == agenthub.ScopeGroup && (groupID == "" || scope.GroupID == groupID):
+			// 没指定群作用域（agent_status 不带 group_id）时，群会话忙就是 "group"：
+			// 说成 other_group 等于对着自己所在的群说「在别的群忙」（P3b-01b N4）。
 			return hubToolStatusRunning, "group"
 		case scope.Kind == agenthub.ScopeDM:
 			other = "dm"
@@ -802,7 +814,11 @@ func (m *manager) rebuildHubLoop(bs *bridgeSession) bool {
 		fmt.Fprintf(os.Stderr, "[hub] rebuild loop for %s: runtime not assembled\n", agentID)
 		return true
 	}
-	m.applyHubSessionLoop(bs, p, ws)
+	if err := m.applyHubSessionLoop(bs, p, ws); err != nil {
+		// 保持既有语义：切换失败也不回落到项目装配、不中断本次 run；但必须如实记录，
+		// 不能把「没换成新 loop」当成功（P3b-01b N2）。true 仍表示「已按 Hub 语义处理」。
+		fmt.Fprintf(os.Stderr, "[hub] rebuild loop for %s: %v\n", agentID, err)
+	}
 	return true
 }
 

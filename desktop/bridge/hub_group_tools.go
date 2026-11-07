@@ -137,19 +137,26 @@ type hubMemberRow struct {
 	Role        string `json:"role,omitempty"` // 群内角色：owner/member/observer
 	Description string `json:"description,omitempty"`
 	Status      string `json:"status"`          // idle | running
-	Where       string `json:"where,omitempty"` // running 时：group（本群）/ dm / other_group
+	Where       string `json:"where,omitempty"` // running 时：group（本群/未指定群作用域）/ dm / other_group
 	Deleted     bool   `json:"deleted,omitempty"`
 	Missing     bool   `json:"missing,omitempty"` // 档案缺失（软删/purge）：名册里是显式 fallback
 }
 
-func (m *manager) hubMemberRowOf(g *agenthub.Group, member agenthub.Member, p *agenthub.AgentProfile) hubMemberRow {
-	role := string(member.Role)
+// effectiveGroupRole 群内**有效**角色：owner 以 Group.OwnerAgentID 为准（转让 owner 时
+// 老数据可能只改了 owner 字段没改 Member.Role），其次 Member.Role，最后缺省 member。
+// 名册行与 agent_status 的 your_role 都走这里，两处不能各判一套（P3b-01b N3）。
+func effectiveGroupRole(g *agenthub.Group, member agenthub.Member) agenthub.MemberRole {
 	if g != nil && member.AgentID != "" && member.AgentID == g.OwnerAgentID {
-		role = string(agenthub.RoleOwner)
+		return agenthub.RoleOwner
 	}
-	if role == "" {
-		role = string(agenthub.RoleMember)
+	if member.Role != "" {
+		return member.Role
 	}
+	return agenthub.RoleMember
+}
+
+func (m *manager) hubMemberRowOf(g *agenthub.Group, member agenthub.Member, p *agenthub.AgentProfile) hubMemberRow {
+	role := string(effectiveGroupRole(g, member))
 	var groupID agenthub.GroupID
 	if g != nil {
 		groupID = g.ID
@@ -267,7 +274,7 @@ func (t *hubAgentStatusTool) Call(ctx context.Context, _, arguments string) (str
 	if gid := strings.TrimSpace(a.GroupID); gid != "" {
 		// 群作用域：调用者必须是成员（groupAccess），目标也必须是成员。
 		// 目标不是成员时明确拒绝，不泄露「这个 id 是否存在」。
-		_, g, callerRole, err := t.groupAccess(ctx, gid)
+		_, g, _, err := t.groupAccess(ctx, gid)
 		if err != nil {
 			return "", err
 		}
@@ -275,9 +282,15 @@ func (t *hubAgentStatusTool) Call(ctx context.Context, _, arguments string) (str
 		if !ok {
 			return "", fmt.Errorf("%w: %s 不是该群成员，无法查看状态", agenthub.ErrInvalid, target)
 		}
+		// your_role 用**有效**角色（owner 转让后的老数据里 Member.Role 可能还是 member），
+		// 与 hubMemberRowOf 输出的角色行必须一致（P3b-01b N3）。
+		caller, ok := groupMemberOf(g, t.agentID)
+		if !ok { // groupAccess 已校验过；防御性兜底，不给一个编造的角色
+			return "", fmt.Errorf("%w: 智能体不是该群成员", agenthub.ErrInvalid)
+		}
 		return marshalHubToolResult(map[string]any{
 			"group_id":  string(g.ID),
-			"your_role": string(callerRole),
+			"your_role": string(effectiveGroupRole(g, caller)),
 			"agent":     t.m.hubMemberRowOf(g, member, byID[target]),
 		})
 	}

@@ -137,10 +137,19 @@ func TestHubGroupMembersLiveStatus(t *testing.T) {
 	// 已投递但根 run 未开始（hubDispatchPending）同样是 running。
 	bsB.hubDispatchPending.Store(true)
 	row = memberRowByID(t, memberRows(t, mustSessionTool(t, bsA, "group_members", membersArg)), b.ID)
-	if row.Status != hubToolStatusRunning {
-		t.Fatalf("dispatch-pending row = %+v, want running", row)
+	if row.Status != hubToolStatusRunning || row.Where != "group" {
+		t.Fatalf("dispatch-pending row = %+v, want running/group", row)
 	}
 	bsB.hubDispatchPending.Store(false)
+
+	// 根 AgentEnd 已到、结算尚未完成（hubSettling）也必须算 running：
+	// 否则名册会在 final 落账之前把这个人显示成空闲。
+	bsB.hubSettling.Store(true)
+	row = memberRowByID(t, memberRows(t, mustSessionTool(t, bsA, "group_members", membersArg)), b.ID)
+	if row.Status != hubToolStatusRunning || row.Where != "group" {
+		t.Fatalf("settling row = %+v, want running/group", row)
+	}
+	bsB.hubSettling.Store(false)
 
 	// A 在私聊里忙：本群视角必须显示 running + dm（不用别的群 id 泄漏作用域）。
 	bsADM, err := m.hubDMSession(string(a.ID))

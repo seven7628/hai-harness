@@ -18,6 +18,17 @@ import (
 	"github.com/seven7628/hai-harness/core"
 )
 
+// hubGroupAssembleHook 仅测试用：群会话装配在**持有 agent 锁**、createIn 之前的确定性
+// 屏障（生产恒为 nil）。用来复现「名册重建与装配并发」的 TOCTOU（P3b-01b N1）。
+var hubGroupAssembleHook func(agentID string)
+
+// hubGroupAssembleBarrier 在读钩子时取一次快照：调用方可能并发清空钩子。
+func hubGroupAssembleBarrier(agentID string) {
+	if hook := hubGroupAssembleHook; hook != nil {
+		hook(agentID)
+	}
+}
+
 // hubGroupSession 取或首次装配某智能体在群里的会话。
 // 与 hubDMSession 同一条懒创建路径，只是 sid/spec 带群作用域。
 func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, error) {
@@ -72,6 +83,8 @@ func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, erro
 	if err := m.enrichHubGroupSpec(ctx, st, spec, g.ID); err != nil {
 		return nil, err
 	}
+	// 名册快照已取、会话尚未发布：这里是「装配在飞」的窗口（测试屏障，生产空操作）。
+	hubGroupAssembleBarrier(agentID)
 	bs, err := m.createIn(ws, sid, p.Effort, sessionOpts{hub: spec})
 	if err != nil {
 		return nil, err
@@ -169,23 +182,48 @@ func (m *manager) refreshHubGroupRoster(groupID agenthub.GroupID) error {
 			byID[p.ID] = p
 		}
 	}
+	var firstErr error
 	for _, member := range g.Members {
 		p := byID[member.AgentID]
 		if p == nil {
 			continue // 档案缺失/软删：名册里是显式 fallback，没有 loop 可重建
 		}
-		ws := m.hubRuntimeIfExists(string(member.AgentID))
-		if ws == nil {
-			continue
+		if err := m.refreshHubGroupMemberLoop(g, p); err != nil && firstErr == nil {
+			firstErr = err
 		}
-		sid := hubSessionID(string(member.AgentID), agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID})
-		ws.mu.Lock()
-		bs := ws.sessions[sid]
-		ws.mu.Unlock()
-		if bs == nil || bs.ctx.Err() != nil || bs.hubEngine == nil {
-			continue
-		}
-		m.applyHubSessionLoop(bs, p, ws)
+	}
+	return firstErr
+}
+
+// refreshHubGroupMemberLoop 重建单个成员的群会话 loop（名册变化路径）。
+//
+// 锁序与 hubGroupSession 完全一致：先取 runtime（m.mu），再拿 agent 装配锁，最后 ws.mu。
+// 「查表 → 重建」必须在 agent 锁内：装配在 lockHubAgent 里完成「取名册快照 → createIn
+// 发布」，不持锁的话名册重建会在会话还没发布时读到空表而跳过，随后装配用**变化前**的
+// 快照发布，旧名册静默胜出（P3b-01b N1 TOCTOU）。锁内必须二次查表。
+//
+// 不能持 agent 锁再调 hubRuntimeIfExists：那会变成 agent 锁 → m.mu，与 lockHubAgent 的
+// m.mu → agent 锁反向。所以先取 ws，再上锁。
+func (m *manager) refreshHubGroupMemberLoop(g *agenthub.Group, p *agenthub.AgentProfile) error {
+	if g == nil || p == nil || p.ID == "" {
+		return nil
+	}
+	agentID := string(p.ID)
+	ws := m.hubRuntimeIfExists(agentID)
+	if ws == nil {
+		return nil // 没装配过：零副作用（下一次 wake 按当前群渲染）
+	}
+	sid := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID})
+	unlock := m.lockHubAgent(agentID)
+	defer unlock()
+	ws.mu.Lock()
+	bs := ws.sessions[sid]
+	ws.mu.Unlock()
+	if bs == nil || bs.ctx.Err() != nil || bs.hubEngine == nil {
+		return nil
+	}
+	if err := m.applyHubSessionLoop(bs, p, ws); err != nil {
+		return fmt.Errorf("会话 %s: %w", sid, err)
 	}
 	return nil
 }
