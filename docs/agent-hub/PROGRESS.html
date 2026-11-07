@@ -1593,6 +1593,11 @@ const BASE = {
       "reviewNote": "复审 passed（task-kjm4h7te，对象 8535c66）：新 fixture 下 saves 断言真能杀死「Create 先于 Guard」变异；accepted/status 主路径语义闭合；变异 M1/M2/M5/M6/M7 均被杀死。后续 5518b8d 已修 interrupted 同 key 重投、accepted 改 allow-list、client_msg_id 描述纠偏；剩余两套 retry 收敛与空快照契约记入后续小债。",
       "review": "passed"
     },
+    "P3a-09": {
+      "status": "review",
+      "commit": "98aef6a feat(hub-p3a-09): 群内流式 hub_message_delta",
+      "reviewNote": "bridge：新增 hubDeltaSink（80ms 合并、单条 4KB UTF-8 切片、单草稿 256KB 上限、根 RunId 过滤、ToolStart/final 前 flush、late 丢弃）；AgentStart 预分配 msg_<random> 并写入 GroupWakeHeader.MessageID，final 由 store 保留同 ID。前端：groupStream.ts 纯归约（index 单调/并行草稿/finalized LRU 200/256KB），store 草稿归约 + final 覆盖 + agent_end 清空，StreamingMessage 轻量正文，test:hub-stream 13 项。待独立 Review。"
+    },
     "P3b-01a": {
       "status": "done",
       "commit": "bdb22c3 (71d2511 + 49b9ccf + bdb22c3) feat/fix(hub-p3b-01a): 群会话唤醒与 final 落账",
