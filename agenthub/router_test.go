@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -409,5 +410,175 @@ func TestAppendMessageWithRoundHealRollback(t *testing.T) {
 	}
 	if acts, _ := st.ReadActivity(ctx, g.ID, 0, 10); len(acts) != 1 {
 		t.Fatalf("healed activity = %+v", acts)
+	}
+}
+
+// P3b-02：结构化 mentions 与正文 @ 的并集 / 去重 / self 过滤。
+func TestRouterStructuredMentionsUnion(t *testing.T) {
+	_, r := routerFixture(t)
+	cases := []struct {
+		name string
+		in   MentionRequest
+		want []AgentID
+	}{
+		{
+			// 正文没有 @B，但模型显式点名：结构化 mention 必须唤醒。
+			name: "structured only",
+			in:   MentionRequest{Text: "看一下日志", Mentions: []AgentID{"ag_bbbbbbbb"}},
+			want: []AgentID{"ag_bbbbbbbb"},
+		},
+		{
+			name: "text plus structured",
+			in:   MentionRequest{Text: "@Bob 看下，Cara 复核", Mentions: []AgentID{"ag_cccccccc"}},
+			want: []AgentID{"ag_bbbbbbbb", "ag_cccccccc"},
+		},
+		{
+			// 并集顺序：正文出现顺序在前，结构化顺序在后。
+			name: "text first then structured order",
+			in:   MentionRequest{Text: "@Cara 先看", Mentions: []AgentID{"ag_dddddddd", "ag_bbbbbbbb"}},
+			want: []AgentID{"ag_cccccccc", "ag_dddddddd", "ag_bbbbbbbb"},
+		},
+		{
+			// 同一人既在正文又在结构化里：只出现一次，不算 dropped。
+			name: "dedupe text and structured",
+			in:   MentionRequest{Text: "@Bob 看下", Mentions: []AgentID{"ag_bbbbbbbb", "ag_cccccccc"}},
+			want: []AgentID{"ag_bbbbbbbb", "ag_cccccccc"},
+		},
+		{
+			// self 过滤：正文/结构化都不唤醒自己，也不计 dropped。
+			name: "self filtered",
+			in:   MentionRequest{Text: "@Alice 我自己", Mentions: []AgentID{"ag_aaaaaaaa", "ag_bbbbbbbb"}},
+			want: []AgentID{"ag_bbbbbbbb"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			round, err := r.RouteMentions(tc.in, "ag_aaaaaaaa", false, 11, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(round.Targets, tc.want) || !reflect.DeepEqual(round.Mentions, tc.want) {
+				t.Fatalf("targets/mentions = %v / %v, want %v", round.Targets, round.Mentions, tc.want)
+			}
+			if round.MentionAll || round.Dropped != 0 {
+				t.Fatalf("round = %+v, want no @all / no dropped", round)
+			}
+		})
+	}
+	// 结构化 self-only：没有目标（不是错误）。
+	round, err := r.RouteMentions(MentionRequest{Text: "自言自语", Mentions: []AgentID{"ag_aaaaaaaa"}}, "ag_aaaaaaaa", false, 12, time.Now())
+	if err != nil || len(round.Targets) != 0 || len(round.Mentions) != 0 {
+		t.Fatalf("self-only structured = %+v, %v", round, err)
+	}
+}
+
+// P3b-02：结构化 id 必须是活跃成员；未知/非成员/已删除/空 id 都直接失败。
+func TestRouterStructuredMentionsValidation(t *testing.T) {
+	g, r := routerFixture(t)
+	outsider := mentionProfile("ag_ffffffff", "Outsider")
+	deleted := mentionProfile("ag_bbbbbbbb", "Bob")
+	deleted.Deleted = true
+
+	// 只把已删除的 Bob 换成 deleted profile：其它成员保持活跃。
+	g2 := &Group{ID: "grp_bbbbbb", Name: "删除校验群", OwnerAgentID: "ag_aaaaaaaa", Members: g.Members}
+	profiles := []*AgentProfile{
+		mentionProfile("ag_aaaaaaaa", "Alice"), outsider, deleted,
+		mentionProfile("ag_cccccccc", "Cara"),
+	}
+	r2, err := NewGroupRouter(g2, profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		router  *Router
+		id      AgentID
+		wantErr bool
+	}{
+		{name: "member ok", router: r, id: "ag_bbbbbbbb"},
+		{name: "unknown id", router: r, id: "ag_zzzzzzzz", wantErr: true},
+		{name: "non member", router: r, id: outsider.ID, wantErr: true},
+		{name: "deleted member", router: r2, id: "ag_bbbbbbbb", wantErr: true},
+		{name: "empty id", router: r, id: "", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			round, err := tc.router.RouteMentions(MentionRequest{Text: "看下", Mentions: []AgentID{tc.id}}, "ag_aaaaaaaa", false, 13, time.Now())
+			if tc.wantErr {
+				if !errors.Is(err, ErrInvalid) {
+					t.Fatalf("err = %v, want ErrInvalid", err)
+				}
+				if round.ID != "" || len(round.Targets) != 0 || len(round.Mentions) != 0 {
+					t.Fatalf("failed route leaked a round: %+v", round)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(round.Targets, []AgentID{tc.id}) {
+				t.Fatalf("round = %+v, %v", round, err)
+			}
+		})
+	}
+}
+
+// P3b-02：正文与结构化共用同一条上限；dropped 只数唯一且超上限的成员。
+func TestRouterMentionCapAcrossTextAndStructured(t *testing.T) {
+	g, r := routerFixture(t)
+	g.Policy.MaxMentions = 2
+	if err := g.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	// 正文 3 人 + 结构化 1 人：整体只保留前 2 个，后面 2 个各算一次 dropped（不是 3+2）。
+	round, err := r.RouteMentions(MentionRequest{
+		Text:     "@Bob @Cara @Dan 都来，Eve 也来",
+		Mentions: []AgentID{"ag_eeeeeeee"},
+	}, "ag_aaaaaaaa", false, 14, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(round.Mentions, []AgentID{"ag_bbbbbbbb", "ag_cccccccc"}) ||
+		!reflect.DeepEqual(round.Targets, round.Mentions) || round.Dropped != 2 {
+		t.Fatalf("cap round = %+v, want B,C / dropped 2", round)
+	}
+	// 重复点同一人不重复计数：@Bob x2 + 结构化 [B,C,Dan] → [B,C] + dropped 1。
+	round, err = r.RouteMentions(MentionRequest{
+		Text:     "@Bob @Bob",
+		Mentions: []AgentID{"ag_bbbbbbbb", "ag_cccccccc", "ag_dddddddd"},
+	}, "ag_aaaaaaaa", false, 15, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(round.Mentions, []AgentID{"ag_bbbbbbbb", "ag_cccccccc"}) || round.Dropped != 1 {
+		t.Fatalf("dedupe cap round = %+v, want B,C / dropped 1", round)
+	}
+}
+
+// P3b-02：结构化 mention_all 与正文 @all 走同一条鉴权，不降级。
+func TestRouterMentionAllStructured(t *testing.T) {
+	_, r := routerFixture(t)
+	// owner：结构化 mention_all + 显式 mentions → 目标是全体（除自己），mentions 仍记录显式点名。
+	round, err := r.RouteMentions(MentionRequest{Text: "开会", Mentions: []AgentID{"ag_bbbbbbbb"}, MentionAll: true}, "ag_aaaaaaaa", false, 16, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !round.MentionAll || len(round.Targets) != 4 || !reflect.DeepEqual(round.Mentions, []AgentID{"ag_bbbbbbbb"}) {
+		t.Fatalf("owner structured @all = %+v", round)
+	}
+	// member/observer：拒绝且不降级（不留下只有 mentions 的 round）。
+	for _, sender := range []AgentID{"ag_bbbbbbbb", "ag_eeeeeeee"} {
+		round, err := r.RouteMentions(MentionRequest{Text: "@Cara 看下", Mentions: []AgentID{"ag_cccccccc"}, MentionAll: true}, sender, false, 17, time.Now())
+		if !errors.Is(err, ErrMentionAllForbidden) || round.ID != "" || len(round.Targets) != 0 {
+			t.Fatalf("%s structured @all = %+v, %v: want forbidden", sender, round, err)
+		}
+	}
+	// 正文 @all + 结构化 mentions：仍按 @all 处理，mentions 记录显式目标。
+	round, err = r.RouteMentions(MentionRequest{Text: "@all 开会", Mentions: []AgentID{"ag_cccccccc"}}, "ag_aaaaaaaa", false, 18, time.Now())
+	if err != nil || !round.MentionAll || len(round.Targets) != 4 || !reflect.DeepEqual(round.Mentions, []AgentID{"ag_cccccccc"}) {
+		t.Fatalf("text @all + structured = %+v, %v", round, err)
+	}
+	// 人类 mention_all：允许，目标是全体成员。
+	round, err = r.RouteMentions(MentionRequest{Text: "开会", MentionAll: true}, "", true, 19, time.Now())
+	if err != nil || !round.MentionAll || len(round.Targets) != 5 || len(round.Mentions) != 0 {
+		t.Fatalf("human structured @all = %+v, %v", round, err)
 	}
 }

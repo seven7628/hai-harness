@@ -1,15 +1,19 @@
 package agenthub
 
-// router.go：群内 @ 路由 + round + 回执（P3a-03，§6.6.3）。
+// router.go：群内 @ 路由 + round + 回执（P3a-03，§6.6.3；结构化 mentions 见 P3b-02）。
 //
 // 规则（严格解析器，不降级）：
-//   - 无 @ → 不唤醒任何智能体；
-//   - @all → 仅 owner 或人类可用（member/observer 直接拒绝，不降级成普通 @）；
-//     targets = 除发送者外的全部成员（按 JoinedAt、AgentID 排序，确定性）；
-//   - @Name → 命中成员；超过策略上限（默认 3）的记 Dropped；
-//   - 未知 @ 只进 Unknown 警告，不唤醒。
+//   - 正文无 @ 且无结构化 mentions → 不唤醒任何智能体；
+//   - @all（正文或 mention_all）→ 仅 owner 或人类可用（member/observer 直接拒绝，
+//     不降级成普通 @）；targets = 除发送者外的全部成员（按 JoinedAt、AgentID 排序）；
+//   - @Name / 结构化 agent id → 取并集：正文出现顺序在前，结构化 id 顺序在后，
+//     去重并过滤 self，再按 GroupPolicy.MaxMentions（默认 3）统一截断；
+//   - 超上限的唯一成员记 Dropped（正文与结构化共用一条上限，不是 3+3）；
+//   - 未知 @ 只进 Unknown 警告，不唤醒；结构化 id 必须是当前活跃成员，否则报错
+//     （调用方显式点名，静默丢会让它误以为目标已被唤醒）。
 //
-// round 快照记录 trigger seq 与 targets；回执作为活动流落盘（独立于消息日志）。
+// round 快照记录 trigger seq、显式 mentions 与 targets；回执作为活动流落盘
+// （独立于消息日志）。
 
 import (
 	"context"
@@ -19,12 +23,24 @@ import (
 	"time"
 )
 
+// MentionRequest 是一条群消息的 @ 输入：正文里的 @Name 与结构化 agent id 是
+// 两个独立信号（模型/人类可能只给其中一种），Router 负责并集、去重与上限。
+type MentionRequest struct {
+	Text       string
+	Mentions   []AgentID // 稳定 agent id；调用方顺序 = 并集顺序
+	MentionAll bool
+}
+
 // Round 是一次 @ 路由的快照（冻结本轮目标，后续成员变更不影响）。
+//
+// Mentions 是解析后真正生效的显式成员（去重、过滤 self、已按上限截断）；
+// @all 时 Targets 是全体成员而 Mentions 只含被点名的成员，两者不要混用。
 type Round struct {
 	ID         string    `json:"id"`
 	GroupID    GroupID   `json:"group_id"`
 	TriggerSeq int64     `json:"trigger_seq"`
 	Targets    []AgentID `json:"targets"`
+	Mentions   []AgentID `json:"mentions,omitempty"`
 	MentionAll bool      `json:"mention_all,omitempty"`
 	Unknown    []string  `json:"unknown,omitempty"`
 	Dropped    int       `json:"dropped,omitempty"`
@@ -79,8 +95,17 @@ func NewGroupRouter(g *Group, profiles []*AgentProfile) (*Router, error) {
 	return &Router{group: g, parser: parser, byID: byID, members: members}, nil
 }
 
-// Route 解析并冻结一轮目标。sender 的群角色用于 @all 鉴权；isHuman 可直接 @all。
+// Route 解析正文并冻结一轮目标。sender 的群角色用于 @all 鉴权；isHuman 可直接 @all。
+// 保留原签名：只做正文解析，等价于 RouteMentions(MentionRequest{Text: text})。
 func (r *Router) Route(text string, sender AgentID, isHuman bool, triggerSeq int64, now time.Time) (Round, error) {
+	return r.RouteMentions(MentionRequest{Text: text}, sender, isHuman, triggerSeq, now)
+}
+
+// RouteMentions 解析「正文 @ + 结构化 mentions」并冻结一轮目标（P3b-02）。
+//
+// 先做 @all 鉴权（正文与 mention_all 任一命中即需 owner/人类），再做结构化 id 校验，
+// 两者失败都返回空 Round 与错误 —— 调用方不得降级成「只发消息」或「只唤醒部分人」。
+func (r *Router) RouteMentions(in MentionRequest, sender AgentID, isHuman bool, triggerSeq int64, now time.Time) (Round, error) {
 	if r == nil || r.parser == nil || r.group == nil {
 		return Round{}, fmt.Errorf("%w: router 未初始化", ErrInvalid)
 	}
@@ -88,29 +113,87 @@ func (r *Router) Route(text string, sender AgentID, isHuman bool, triggerSeq int
 	if m, ok := r.byID[sender]; ok {
 		role = m.Role
 	}
-	limit := r.group.Policy.MaxMentions
-	res, err := r.parser.ParseAuthorizedWithLimit(text, sender, isHuman, role, limit)
+	// 正文先全量解析：结构化 id 还要参与同一条上限，这里截断会算错 Dropped。
+	text, err := r.parser.parseAuthorized(in.Text, sender, isHuman, role, -1)
 	if err != nil {
 		return Round{}, err
 	}
-	targets := make([]AgentID, 0, len(res.Mentions))
-	if res.MentionAll {
+	mentionAll := text.MentionAll || in.MentionAll
+	// @all 鉴权先于成员校验：越权者拿不到「这个 id 是不是成员」的探测结果。
+	if err := (MentionResult{MentionAll: mentionAll}).ValidateMentionAll(isHuman, role); err != nil {
+		return Round{}, err
+	}
+	structured, err := r.resolveStructured(in.Mentions)
+	if err != nil {
+		return Round{}, err
+	}
+	mentions, dropped := capMentions(append(text.Mentions, structured...), sender, r.mentionLimit())
+	targets := mentions
+	if mentionAll {
+		targets = make([]AgentID, 0, len(r.members))
 		for _, m := range r.sortedMembers() {
 			if m.AgentID != sender {
 				targets = append(targets, m.AgentID)
 			}
 		}
-	} else {
-		targets = append(targets, res.Mentions...)
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	return Round{
 		ID: NewID(PrefixRound), GroupID: r.group.ID, TriggerSeq: triggerSeq,
-		Targets: targets, MentionAll: res.MentionAll, Unknown: res.Unknown,
-		Dropped: res.Dropped, CreatedAt: now,
+		Targets: targets, Mentions: mentions, MentionAll: mentionAll,
+		Unknown: text.Unknown, Dropped: dropped, CreatedAt: now,
 	}, nil
+}
+
+// mentionLimit 是 GroupPolicy.MaxMentions 的有效值；未 Normalize 的群按默认 3 处理。
+func (r *Router) mentionLimit() int {
+	if r == nil || r.group == nil || r.group.Policy.MaxMentions <= 0 {
+		return DefaultGroupMaxMentions
+	}
+	return r.group.Policy.MaxMentions
+}
+
+// resolveStructured 校验显式点名的 id：必须是本 Router 快照里的活跃成员。
+// 未知/已删除/非本群一律报错而不是静默丢弃 —— 结构化 id 是调用方明确给出的目标，
+// 悄悄忽略会让模型以为对方已被唤醒。self 不报错，由 capMentions 过滤（与正文同口径）。
+func (r *Router) resolveStructured(ids []AgentID) ([]AgentID, error) {
+	out := make([]AgentID, 0, len(ids))
+	for _, raw := range ids {
+		id := AgentID(strings.TrimSpace(string(raw)))
+		if id == "" {
+			return nil, fmt.Errorf("%w: mention id 不能为空", ErrInvalid)
+		}
+		if _, ok := r.byID[id]; !ok {
+			return nil, fmt.Errorf("%w: mention %s 不是本群活跃成员", ErrInvalid, id)
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// capMentions 按顺序去重、过滤 self，并截到 limit；dropped 只数唯一且超上限的成员
+// （重复/self 不计，与正文解析同口径）。
+func capMentions(ids []AgentID, sender AgentID, limit int) ([]AgentID, int) {
+	if limit <= 0 {
+		limit = DefaultGroupMaxMentions
+	}
+	out := make([]AgentID, 0, limit)
+	seen := make(map[AgentID]bool, len(ids))
+	dropped := 0
+	for _, id := range ids {
+		if id == "" || id == sender || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if len(out) < limit {
+			out = append(out, id)
+		} else {
+			dropped++
+		}
+	}
+	return out, dropped
 }
 
 func (r *Router) sortedMembers() []Member {

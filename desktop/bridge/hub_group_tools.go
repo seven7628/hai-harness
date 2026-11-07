@@ -338,25 +338,28 @@ func newHubGroupSayTool(m *manager, agentID agenthub.AgentID) *hubGroupSayTool {
 	return &hubGroupSayTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "group_say",
 		Description_: "Say something in a Hub group (appends to the group log and routes @mentions). " +
-			"Observers cannot speak. @all is only allowed for the group owner; mention at most the policy limit.",
+			"Observers cannot speak. @Name in text and the structured mentions list are unioned, deduped and capped by the group policy. " +
+			"mention_all is only allowed for the group owner (humans sending from the app are always allowed).",
 		Params_: tools.Obj(map[string]any{
-			"group_id": tools.Str("Group id"),
-			"text":     tools.Str("Message text (use @Name to wake members)"),
+			"group_id":    tools.Str("Group id"),
+			"text":        tools.Str("Message text (use @Name to wake members)"),
+			"mentions":    tools.ArrayStr("Optional agent ids to wake explicitly; unioned with @Name in text"),
+			"mention_all": tools.Bool("Wake every group member (owner agents only; a rejected mention_all fails the call)"),
 		}, "group_id", "text"),
 		CanParallel_: false, ReadOnly_: false,
 	}, m: m, agentID: agentID}}
 }
 
 func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string, error) {
-	var a hubGroupHistoryArgs
 	var args struct {
-		GroupID string `json:"group_id"`
-		Text    string `json:"text"`
+		GroupID    string   `json:"group_id"`
+		Text       string   `json:"text"`
+		Mentions   []string `json:"mentions"`
+		MentionAll bool     `json:"mention_all"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", err
 	}
-	a.GroupID = args.GroupID
 	st, g, role, err := t.groupAccess(ctx, args.GroupID)
 	if err != nil {
 		return "", err
@@ -367,6 +370,10 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	text := strings.TrimSpace(args.Text)
 	if text == "" {
 		return "", fmt.Errorf("%w: text 不能为空", agenthub.ErrInvalid)
+	}
+	mentions := make([]agenthub.AgentID, 0, len(args.Mentions))
+	for _, id := range args.Mentions {
+		mentions = append(mentions, agenthub.AgentID(strings.TrimSpace(id)))
 	}
 	// 与人类发送 / final 共用一个临界区：限流检查到消息+回执落盘不能被并发工具调用插队。
 	t.m.hubGroupSendMu.Lock()
@@ -379,7 +386,9 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		t.m.hubGroupSendMu.Unlock()
 		return "", fmt.Errorf("%w: 群组已删除", agenthub.ErrNotFound)
 	}
-	msg, routed, limitHit, routeErr, err := t.m.appendAgentGroupMessageLocked(ctx, st, g, t.agentID, text, "", "", true)
+	msg, routed, limitHit, routeErr, err := t.m.appendAgentGroupMessageLocked(ctx, st, g, t.agentID, agentGroupWrite{
+		Text: text, Mentions: mentions, MentionAll: args.MentionAll, RouteFatal: true,
+	})
 	t.m.hubGroupSendMu.Unlock()
 	if limitHit {
 		return "", fmt.Errorf("%w: 本轮智能体发言已达上限 %d，等人类回复后再继续", agenthub.ErrInvalid, groupTurnLimit(g))
@@ -388,11 +397,17 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		return "", err
 	}
 	if routeErr != nil {
+		// 结构化 id 非法/非成员、越权 @all：整条消息不落盘（routeFatal）。
 		return "", routeErr
 	}
 	result := map[string]any{"seq": msg.Seq, "message_id": msg.ID, "targets": []agenthub.AgentID{}}
 	if routed != nil {
 		result["targets"] = routed.Targets
+		result["mentions"] = routed.Mentions
+		result["mention_all"] = routed.MentionAll
+		if routed.Dropped > 0 {
+			result["dropped"] = routed.Dropped
+		}
 		// wake 在解锁后做：会话装配可能很慢，不能把群发送锁带进装配。
 		if errs := t.m.wakeGroupRound(g, *routed, msg); len(errs) > 0 {
 			result["wake_errors"] = errs
@@ -429,8 +444,10 @@ func (t *hubGroupMembersTool) ValidParams(_ context.Context, _, arguments string
 
 func (t *hubGroupSayTool) ValidParams(_ context.Context, _, arguments string) error {
 	var a struct {
-		GroupID string `json:"group_id"`
-		Text    string `json:"text"`
+		GroupID    string   `json:"group_id"`
+		Text       string   `json:"text"`
+		Mentions   []string `json:"mentions"`    // 只为校验数组元素类型；目标校验在 Router
+		MentionAll bool     `json:"mention_all"` // 同上：鉴权在 Call/Router
 	}
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return err

@@ -540,7 +540,8 @@ func (m *manager) hubGroupActivity(c command) {
 }
 
 // hubGroupSend 人发群消息：落日志 → @ 路由 → 回执 → hub_message/hub_round 事件。
-// 智能体唤醒/群会话装配归 P3a-05+（本轮只保证日志、路由与回执是真的）。
+// payload 可带结构化 mentions / mention_all（P3b-02），与正文 @Name 取并集；
+// 非法目标/越权 @all 直接失败，不写日志（与 group_say 的 routeFatal 同语义）。
 func (m *manager) hubGroupSend(c command) {
 	ctx := context.Background()
 	st, err := m.hubStore()
@@ -554,6 +555,12 @@ func (m *manager) hubGroupSend(c command) {
 		m.resp(c, false, "text 不能为空", nil)
 		return
 	}
+	mentions, err := groupMentionsFromPayload(c.Payload)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	mentionAll := boolVal(c.Payload["mention_all"])
 	// 与 group_say 串行：限流检查、client_msg_id 去重、消息+回执写入必须是一个临界区。
 	m.hubGroupSendMu.Lock()
 	defer m.hubGroupSendMu.Unlock()
@@ -597,7 +604,9 @@ func (m *manager) hubGroupSend(c command) {
 		m.resp(c, false, "构造路由失败: "+err.Error(), nil)
 		return
 	}
-	round, err := router.Route(text, "", true, 0, time.Now())
+	round, err := router.RouteMentions(agenthub.MentionRequest{
+		Text: text, Mentions: mentions, MentionAll: mentionAll,
+	}, "", true, 0, time.Now())
 	if err != nil {
 		m.resp(c, false, "路由失败: "+err.Error(), nil)
 		return
@@ -606,6 +615,8 @@ func (m *manager) hubGroupSend(c command) {
 	var routed *agenthub.Round
 	if round.MentionAll || len(round.Targets) > 0 {
 		routed = &round
+		msg.Mentions = append([]agenthub.AgentID(nil), round.Mentions...)
+		msg.MentionAll = round.MentionAll
 	}
 	seq, deduped, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
 	if err != nil {
@@ -647,4 +658,35 @@ func (m *manager) emitHubGroupMessage(gid agenthub.GroupID, seq int64, msg *agen
 		"event_type": "hub_message", "group_id": string(gid), "seq": seq,
 		"message": msg, "client_msg_id": msg.Refs["client_msg_id"],
 	})
+}
+
+// groupMentionsFromPayload 解析人类发送 payload 里的结构化 mentions（P3b-02）。
+// 只接受 agent id 字符串数组；类型不符直接报错 —— 人显式点名的目标不能被静默丢掉。
+// 空字符串留给 Router 报错（与工具参数同一口径）。
+func groupMentionsFromPayload(payload map[string]any) ([]agenthub.AgentID, error) {
+	raw, ok := payload["mentions"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	var items []string
+	switch v := raw.(type) {
+	case []any:
+		items = make([]string, 0, len(v))
+		for _, x := range v {
+			s, ok := x.(string)
+			if !ok {
+				return nil, fmt.Errorf("%w: mentions 必须是 agent id 数组", agenthub.ErrInvalid)
+			}
+			items = append(items, s)
+		}
+	case []string:
+		items = v
+	default:
+		return nil, fmt.Errorf("%w: mentions 必须是 agent id 数组", agenthub.ErrInvalid)
+	}
+	out := make([]agenthub.AgentID, 0, len(items))
+	for _, s := range items {
+		out = append(out, agenthub.AgentID(strings.TrimSpace(s)))
+	}
+	return out, nil
 }

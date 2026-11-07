@@ -414,7 +414,9 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		}
 		return
 	}
-	msg, routed, limitHit, routeErr, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, text, wake.RoundID, wake.MessageID, false)
+	msg, routed, limitHit, routeErr, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, agentGroupWrite{
+		Text: text, RoundID: wake.RoundID, MessageID: wake.MessageID,
+	})
 	m.hubGroupSendMu.Unlock()
 	if limitHit {
 		// 轮次上限：不写消息、不唤醒；写一条 activity 让 UI 能看到「被限流」，
@@ -481,31 +483,48 @@ func enforceGroupTurnLimit(ctx context.Context, st agenthub.Store, g *agenthub.G
 	return turns >= limit, nil
 }
 
+// agentGroupWrite 是一次「智能体群消息」的落账请求。group_say 可以带结构化
+// mentions/mention_all（P3b-02）；final 回复只用正文，正文里的 @Name 仍由 Router 解析。
+type agentGroupWrite struct {
+	Text       string
+	RoundID    string
+	MessageID  string
+	Mentions   []agenthub.AgentID
+	MentionAll bool
+	RouteFatal bool // true：@ 解析失败就不落消息（group_say）；false：正文照发（final）
+}
+
 // appendAgentGroupMessageLocked 是 group_say / final 共用的「限流 + 路由 + 落账」路径。
 // 调用方必须持有 hubGroupSendMu；wake 由调用方在解锁后做（会话装配可能很慢）。
 // routeFatal=true：@ 解析失败就不落消息（group_say 的工具语义）；false：正文照发、
 // 只把 routeErr 交回调用方告警（final 的语义）。
-func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, text, roundID, messageID string, routeFatal bool) (msg *agenthub.Message, routed *agenthub.Round, limitHit bool, routeErr error, err error) {
+func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, w agentGroupWrite) (msg *agenthub.Message, routed *agenthub.Round, limitHit bool, routeErr error, err error) {
 	if limitHit, err = enforceGroupTurnLimit(ctx, st, g); err != nil {
 		return nil, nil, false, nil, err
 	}
 	if limitHit {
 		return nil, nil, true, nil, nil
 	}
-	r, routeErr := m.routeAgentGroupText(ctx, st, g, sender, text)
+	r, routeErr := m.routeAgentGroupMentions(ctx, st, g, sender, agenthub.MentionRequest{
+		Text: w.Text, Mentions: w.Mentions, MentionAll: w.MentionAll,
+	})
 	if routeErr != nil {
-		if routeFatal {
+		if w.RouteFatal {
 			return nil, nil, false, routeErr, nil
 		}
 		r = nil
 	}
 	msg = &agenthub.Message{
-		GroupID: g.ID, Kind: agenthub.KindText, ID: messageID,
+		GroupID: g.ID, Kind: agenthub.KindText, ID: w.MessageID,
 		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: sender},
-		Text:   text, RoundID: roundID,
+		Text:   w.Text, RoundID: w.RoundID,
 	}
 	if r != nil {
 		routed = r
+		// 持久化生效的 mentions（正文 @ 与结构化 id 的并集，已截断/去重）；
+		// @all 时 Targets 是全体，不能拿它当 Mentions（P3b-02）。
+		msg.Mentions = append([]agenthub.AgentID(nil), r.Mentions...)
+		msg.MentionAll = r.MentionAll
 	}
 	seq, _, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
 	if err != nil {
@@ -519,10 +538,11 @@ func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub
 	return msg, routed, false, routeErr, nil
 }
 
-// routeAgentGroupText 只对完整 agent 正文做 @ 路由（streaming partial 绝不路由）。
-// 失败（越权 @all/保留名/成员已删）返回错误，调用方决定是否仍落正文。
-func (m *manager) routeAgentGroupText(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, text string) (*agenthub.Round, error) {
-	if g == nil || strings.TrimSpace(text) == "" {
+// routeAgentGroupMentions 只对完整 agent 正文做 @ 路由（streaming partial 绝不路由），
+// 并把结构化 mentions 一起交给 Router（@all 鉴权、成员校验、上限都在 agenthub 里）。
+// 失败（越权 @all/保留名/成员已删/非成员 id）返回错误，调用方决定是否仍落正文。
+func (m *manager) routeAgentGroupMentions(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, in agenthub.MentionRequest) (*agenthub.Round, error) {
+	if g == nil || (strings.TrimSpace(in.Text) == "" && len(in.Mentions) == 0 && !in.MentionAll) {
 		return nil, nil
 	}
 	agents, err := st.ListAgents(ctx)
@@ -545,7 +565,7 @@ func (m *manager) routeAgentGroupText(ctx context.Context, st agenthub.Store, g 
 	if err != nil {
 		return nil, err
 	}
-	round, err := router.Route(text, sender, false, 0, time.Now())
+	round, err := router.RouteMentions(in, sender, false, 0, time.Now())
 	if err != nil {
 		return nil, err
 	}

@@ -240,3 +240,30 @@ func TestMentionVisibility(t *testing.T) {
 		}
 	}
 }
+
+// P3b-02：代码/URL/email 里的 @all、@你 也不能触发（不只是成员名）。
+func TestMentionSkipsCodeURLAllAndHuman(t *testing.T) {
+	bob := mentionProfile(testAgentID('b'), "Bob")
+	p := mentionParser(t, bob)
+	for _, text := range []string{
+		"`@all` 和 `@你` 只是示例，@Bob 看下",
+		"```\n@all\n@所有人\n@user\n```\n@Bob 看下",
+		"https://example.com/@all/@你 @Bob 看下",
+		"mail ops@all.dev 后 @Bob 看下",
+	} {
+		got := p.Parse(text)
+		if got.MentionAll || got.HumanMention {
+			t.Fatalf("Parse(%q) = %#v: code/URL/email must not trigger @all/@human", text, got)
+		}
+		if !reflect.DeepEqual(got.Mentions, agentIDs(bob.ID)) {
+			t.Fatalf("Parse(%q).Mentions = %v, want %v", text, got.Mentions, agentIDs(bob.ID))
+		}
+	}
+	// 词边界：@alll / @all_bot 不是 @all，只当未知 @。
+	for _, text := range []string{"@alll 开会", "@all_bot 开会"} {
+		got := p.Parse(text)
+		if got.MentionAll || len(got.Unknown) != 1 {
+			t.Fatalf("Parse(%q) = %#v, want unknown token without @all", text, got)
+		}
+	}
+}

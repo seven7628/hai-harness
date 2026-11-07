@@ -106,12 +106,18 @@ func (p *MentionParser) ParseFrom(text string, sender AgentID) MentionResult {
 
 // ParseFromWithLimit 解析正文并应用 GroupPolicy.MaxMentions 等可配置 cap。
 func (p *MentionParser) ParseFromWithLimit(text string, sender AgentID, limit int) MentionResult {
+	if limit <= 0 {
+		limit = MaxMentionsPerMessage
+	}
+	return p.parseFrom(text, sender, limit)
+}
+
+// parseFrom 是唯一实现；limit < 0 表示不截断。Router 的「正文 @ + 结构化 mentions」
+// 共用同一条上限，所以必须先拿到正文的全部命中再做并集，不能在这里各自截断。
+func (p *MentionParser) parseFrom(text string, sender AgentID, limit int) MentionResult {
 	res := MentionResult{}
 	if p == nil || text == "" {
 		return res
-	}
-	if limit <= 0 {
-		limit = MaxMentionsPerMessage
 	}
 	runes := []rune(text)
 	masked := maskMentionSkipped(runes)
@@ -155,7 +161,7 @@ func (p *MentionParser) ParseFromWithLimit(text string, sender AgentID, limit in
 			matched = true
 			if c.id != sender && !seen[c.id] {
 				seen[c.id] = true
-				if len(res.Mentions) < limit {
+				if limit < 0 || len(res.Mentions) < limit {
 					res.Mentions = append(res.Mentions, c.id)
 				} else {
 					res.Dropped++
@@ -206,7 +212,15 @@ func (p *MentionParser) ParseAuthorized(text string, sender AgentID, isHuman boo
 
 // ParseAuthorizedWithLimit 同 ParseAuthorized，但支持 GroupPolicy.MaxMentions。
 func (p *MentionParser) ParseAuthorizedWithLimit(text string, sender AgentID, isHuman bool, role MemberRole, limit int) (MentionResult, error) {
-	res := p.ParseFromWithLimit(text, sender, limit)
+	if limit <= 0 {
+		limit = MaxMentionsPerMessage
+	}
+	return p.parseAuthorized(text, sender, isHuman, role, limit)
+}
+
+// parseAuthorized 同 ParseAuthorizedWithLimit，但 limit < 0 表示不截断（Router 并集用）。
+func (p *MentionParser) parseAuthorized(text string, sender AgentID, isHuman bool, role MemberRole, limit int) (MentionResult, error) {
+	res := p.parseFrom(text, sender, limit)
 	if err := res.ValidateMentionAll(isHuman, role); err != nil {
 		return MentionResult{}, err
 	}
