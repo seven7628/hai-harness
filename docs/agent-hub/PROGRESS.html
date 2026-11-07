@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P3b-01/01b 名册与状态一致性 passed；P2.5-08 三主题视觉验收复验 passed；P3b-02 实现中",
+  "subtitle": "P3a 全部 passed；P3b-01/01b 名册与状态一致性 passed；P2.5-08 视觉验收 passed；P3b-02 结构化 mentions passed；P3b-03 启动中",
   "updated": "2026-11-06",
   "phases": [
     {
@@ -1383,7 +1383,9 @@ const BASE = {
         "P3b-02"
       ],
       "return_when": "P3b-02 实现时一并接线并补测试",
-      "status": "deferred"
+      "status": "resolved",
+      "resolved_by": "P3b-02 8610862 + 80e2a3a",
+      "resolved_at": "2026-11-07"
     },
     {
       "id": "D-refresh-loops-lock",
@@ -1707,6 +1709,12 @@ const BASE = {
       "commit": "e4b8b8b feat(hub-p3b-01): 智能体名册与提示词",
       "review": "passed",
       "reviewNote": "复审 passed（task-v6qvngfh，对象 e4b8b8b）。交付：名册稳定层（群名/我是谁/成员按 Group.Members 顺序，名字+角色+稳定 id+职责+能力摘要；owner 以 Group.OwnerAgentID 为准；缺档/软删成员显式 fallback）；L1 字节不变；group_members 增 status/where/description/missing，新增 agent_status（群成员/共享群校验，不泄漏非共同群与记忆/DM）；成员增删、群改名、owner 转让、智能体改名/职责/能力/软删/恢复均重建受影响群会话 loop，只换 loop 不腰斩在飞回合，重建失败追加 warning。验证：L1 SHA 与父提交一致；roster golden 675B；go test ./agenthub/ -run 'Roster|Prompt|Group' 绿；bridge 定向 -count=5 -race 绿；6 项变异（去掉重建、map 顺序、system 加 live status、绕过成员校验、status 恒 idle 等）均 RED；全量仅既有 TestP0 探活与 TestReducer 价表污染。非阻塞/记债：N1 refreshHubGroupRoster 查表+apply 未持 lockHubAgent，与并发装配存在窄 TOCTOU（可能短暂旧名册，建议 P3b-02 前修）；N2 applyHubSessionLoop 吞 store/enrich 错误，重建失败不会回 warning；N3 agent_status 的 your_role 未套 owner override；N4 无 group 作用域时 where=other_group 措辞误导（状态本身真实）；N5 order 测试单次对 map 迭代有约 4% 假绿（golden 是确定守卫）、settling/other_group/missing/deleted/group-delete-no-rebuild/warning 保留缺覆盖；N6 inlineText 未剥 C0 控制符、Description 无长度上限（仅本地 owner 可写 profile，非跨智能体信任边界）。"
+    },
+    "P3b-02": {
+      "status": "done",
+      "commit": "8610862 + 80e2a3a feat/test(hub-p3b-02): 智能体互相 @",
+      "review": "passed",
+      "reviewNote": "复审 passed（task-rhypzt8p；对象 80e2a3a，父 8610862）。交付：MentionRequest/RouteMentions（正文 @ 与结构化 agent id 并集，正文顺序在前、结构化在后，去重/过滤 self/共享 MaxMentions、Dropped 只数唯一超限；@all 鉴权先于成员校验，越权不降级且不泄露成员探测）；group_say 新增 mentions/mention_all（routeFatal，非法 id 不落消息/回执）；人类 hub_group_send 接 mentions/mention_all；Message.Mentions/MentionAll 从 Round.Mentions 落盘（@all 不写全体 Targets），final hub_message 同预分配 ID 携带；Route 保留为正文-only 薄封装。测试：router/mention 回归 + bridge 7 个顶层用例；M2a（human 用 Targets）/M2b（final 用 Targets）/M4（鉴权后移）均 RED。验证：agenthub 0.96s、bridge 定向 -count=5 -race 180s、vet/gofmt 干净；全量仅既有 TestP0/TestReducer。非阻塞/deferred：前端 mentions_display/AgentMentionChip/@你 高亮归 P3b-07；final 的结构化 mention 输入未加（仍只解析正文 @Name）；human hubGroupSend 仍持锁 wake（既有 F3，已记 D-hub-group-send-lock）。D-mentions-payload 已闭合。"
     },
     "P3b-01b": {
       "status": "done",
