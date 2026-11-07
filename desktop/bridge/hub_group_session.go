@@ -137,6 +137,85 @@ func (m *manager) enrichHubGroupSpec(ctx context.Context, st agenthub.Store, spe
 	return nil
 }
 
+// refreshHubGroupRoster 名册变化（加入/移除成员、角色/owner 转让、群改名）后，重建该群
+// 每个**已装配**群会话的 loop —— 名册在 system prompt L2 里，不换 loop 的话下一次唤醒
+// 看到的还是旧名册。
+//
+// 只换 loop（SetLoop 的快照语义：正在跑的 Run 继续用旧 loop 收尾，下一次 Run 用新的），
+// 不重建引擎、不打断在飞的回合，也不动没装配过的成员（首次 wake 时按当前群渲染）。
+func (m *manager) refreshHubGroupRoster(groupID agenthub.GroupID) error {
+	if m == nil || groupID == "" {
+		return nil
+	}
+	ctx := context.Background()
+	st, err := m.hubStore()
+	if err != nil {
+		return err
+	}
+	g, err := st.LoadGroup(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	if g == nil || g.Deleted {
+		return nil // 已删除的群不会再被唤醒，没有可重建的名册
+	}
+	members, err := m.hubGroupMemberProfiles(ctx, st, g)
+	if err != nil {
+		return err
+	}
+	byID := make(map[agenthub.AgentID]*agenthub.AgentProfile, len(members))
+	for _, p := range members {
+		if p != nil {
+			byID[p.ID] = p
+		}
+	}
+	for _, member := range g.Members {
+		p := byID[member.AgentID]
+		if p == nil {
+			continue // 档案缺失/软删：名册里是显式 fallback，没有 loop 可重建
+		}
+		ws := m.hubRuntimeIfExists(string(member.AgentID))
+		if ws == nil {
+			continue
+		}
+		sid := hubSessionID(string(member.AgentID), agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID})
+		ws.mu.Lock()
+		bs := ws.sessions[sid]
+		ws.mu.Unlock()
+		if bs == nil || bs.ctx.Err() != nil || bs.hubEngine == nil {
+			continue
+		}
+		m.applyHubSessionLoop(bs, p, ws)
+	}
+	return nil
+}
+
+// refreshHubAgentRosters 智能体资料变化（改名/职责/能力/软删/恢复）后，重建它所在
+// **每个群**的所有成员会话 loop：名册行是给别人看的，改名影响的是别人的 system prompt。
+func (m *manager) refreshHubAgentRosters(agentID string) error {
+	if m == nil || strings.TrimSpace(agentID) == "" {
+		return nil
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		return err
+	}
+	groups, err := st.ListGroups(context.Background())
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, g := range groups {
+		if g == nil || g.Deleted || !groupHasMember(g, agenthub.AgentID(agentID)) {
+			continue
+		}
+		if err := m.refreshHubGroupRoster(g.ID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // wakeGroupRound 把人/智能体的 @ 消息投递给每个 target 的群会话。
 // 返回每个 target 的错误（不阻断其他 target；调用方决定告警/回执文案）。
 //

@@ -3,11 +3,15 @@ package agenthub
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // PromptSpec 是 L1/L2 的渲染输入。L3–L5 由内核的 AgentMD/记忆/技能选项追加，
-// 这里刻意不接收，也不读取任何运行态（成员状态进 user 消息，不进 system）。
-// 能力摘要/成员 id 的完整名册信息留给 P3b-01；DM 的 L1 变体由装配层按 Scope 处理。
+// 这里刻意不接收，也不读取任何运行态（成员状态走 group_members()/agent_status()，
+// 不进 system：状态每几秒变一次，放进来就得每轮重建 loop、prompt cache 全失效）。
+//
+// 名册（P3b-01）带成员 id 与能力摘要：id 供 assign_task/agent_status 定位，
+// 能力摘要只从 Profile 声明的工具面派生 —— 两者都稳定，不随运行态变化。
 type PromptSpec struct {
 	Agent   *AgentProfile
 	Group   *Group
@@ -87,6 +91,10 @@ func RenderSystem(spec PromptSpec) string {
 	return strings.Join(parts, "\n\n")
 }
 
+// renderRoster 是名册稳定层（§6.5.6）：群名 + 我是谁 + 每个成员的名字/角色/职责/能力摘要。
+//
+// 顺序 = Group.Members 的落盘顺序（成员变更审计顺序），不排序、不按 map 迭代：
+// 同样的群必须渲染出逐字节相同的名册，否则 loop 重建会无谓地换掉 prompt cache。
 func renderRoster(spec PromptSpec) string {
 	if spec.Group == nil || len(spec.Group.Members) == 0 {
 		return ""
@@ -105,41 +113,74 @@ func renderRoster(spec PromptSpec) string {
 		groupName = "Group"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Group: %s\n", groupName)
-	if spec.Agent != nil {
-		role := memberRoleOf(spec.Group, spec.Agent.ID)
-		fmt.Fprintf(&b, "You are %s", strings.TrimSpace(spec.Agent.Name))
-		if role != "" {
-			fmt.Fprintf(&b, " (%s)", role)
-		}
-		b.WriteString(".")
-		if resp := responsibilities(spec.Agent); resp != "" {
-			fmt.Fprintf(&b, " Responsibilities: %s.", strings.TrimRight(resp, ".。"))
-		}
-		b.WriteByte('\n')
+	fmt.Fprintf(&b, "## Group: %s\n", inlineText(groupName, 0))
+	if spec.Agent != nil && (strings.TrimSpace(spec.Agent.Name) != "" || spec.Agent.ID != "") {
+		renderSelfLine(&b, spec)
 	}
 	b.WriteString("Members:\n")
 	for _, m := range spec.Group.Members {
-		p := byID[m.AgentID]
-		name := "unknown member (" + string(m.AgentID) + ")"
-		if p != nil && strings.TrimSpace(p.Name) != "" {
-			name = strings.TrimSpace(p.Name)
-		}
-		role := string(m.Role)
-		if role == "" {
-			role = string(RoleMember)
-		}
-		if m.AgentID == spec.Group.OwnerAgentID {
-			role = string(RoleOwner)
-		}
-		fmt.Fprintf(&b, "- %s (%s)", name, role)
-		if resp := responsibilities(p); resp != "" {
-			fmt.Fprintf(&b, " — %s", strings.TrimRight(resp, ".。"))
-		}
-		b.WriteByte('\n')
+		renderMemberLine(&b, spec.Group, m, byID[m.AgentID])
 	}
 	b.WriteString("You can talk to them with @Name, or assign tracked work with assign_task(Name, instruction).")
 	return b.String()
+}
+
+// renderSelfLine 输出「我是谁」：角色来自群成员表（owner 以 Group.OwnerAgentID 为准），
+// 职责/能力摘要来自自己的 Profile。缺档案时也要说清「不在群里」，不能让旧会话
+// 假装自己还有成员身份。
+func renderSelfLine(b *strings.Builder, spec PromptSpec) {
+	p := spec.Agent
+	name := inlineText(p.Name, 64)
+	if name == "" {
+		name = "this agent"
+	}
+	id := strings.TrimSpace(string(p.ID))
+	role := memberRoleOf(spec.Group, p.ID)
+	switch {
+	case role != "" && id != "":
+		fmt.Fprintf(b, "You are %s (%s, %s).\n", name, role, id)
+	case role != "":
+		fmt.Fprintf(b, "You are %s (%s).\n", name, role)
+	case id != "":
+		fmt.Fprintf(b, "You are %s (not a member of this group, %s).\n", name, id)
+	default:
+		fmt.Fprintf(b, "You are %s (not a member of this group).\n", name)
+	}
+	if resp := responsibilities(p); resp != "" {
+		fmt.Fprintf(b, "Responsibilities: %s.\n", resp)
+	}
+	if caps := capabilitySummary(p); caps != "" {
+		fmt.Fprintf(b, "Capabilities: %s.\n", caps)
+	}
+}
+
+// renderMemberLine 输出一行成员：名字 + 角色 + 稳定 id + 职责 + 能力摘要。
+//
+// 缺档案（软删/purge/旧数据）**不能静默丢**：模型会一直按旧名册 @ 一个不存在的
+// 同事，或把活派给不可用的成员。这里给显式 fallback，并说明「别 @、别派活」。
+func renderMemberLine(b *strings.Builder, g *Group, m Member, p *AgentProfile) {
+	role := memberRole(m, g)
+	id := strings.TrimSpace(string(m.AgentID))
+	label := role
+	if id != "" {
+		label = role + ", " + id
+	}
+	if p == nil {
+		fmt.Fprintf(b, "- unknown member (%s) — profile unavailable: do not @mention or assign work\n", label)
+		return
+	}
+	name := inlineText(p.Name, 64)
+	if name == "" {
+		name = "unknown member"
+	}
+	fmt.Fprintf(b, "- %s (%s)", name, label)
+	if resp := responsibilities(p); resp != "" {
+		fmt.Fprintf(b, " — %s", resp)
+	}
+	if caps := capabilitySummary(p); caps != "" {
+		fmt.Fprintf(b, " · %s", caps)
+	}
+	b.WriteByte('\n')
 }
 
 func renderIdentity(p *AgentProfile) string {
@@ -167,30 +208,103 @@ func renderIdentity(p *AgentProfile) string {
 	return "## Identity\n" + strings.TrimRight(b.String(), "\n")
 }
 
+// responsibilities 是名册里的「职责」：role（一句话职责）+ description（做什么）。
+// 多行 description 必须压成单行 —— 列表项里出现裸换行会把后面的成员顶出列表。
 func responsibilities(p *AgentProfile) string {
 	if p == nil {
 		return ""
 	}
 	parts := make([]string, 0, 2)
-	if s := strings.TrimSpace(p.Role); s != "" {
+	if s := inlineText(p.Role, 0); s != "" {
 		parts = append(parts, s)
 	}
-	if s := strings.TrimSpace(p.Description); s != "" {
+	if s := inlineText(p.Description, 0); s != "" {
 		parts = append(parts, s)
 	}
-	return strings.Join(parts, " / ")
+	// 名册行和「Responsibilities:」都会自行收尾（句号/不句号），这里统一去掉尾部标点，
+	// 避免 CJK「。。」或中英混排「。.」。
+	return strings.TrimRight(strings.Join(parts, " / "), ".。 ")
+}
+
+// capabilitySummary 是名册里的「能力摘要」。它只读 Profile 声明（工具面/网络/MCP），
+// 不读运行态：回答「这个人能不能上网、能不能用浏览器、有没有被收走工具」，
+// 而不是「现在在跑什么」（后者走 group_members()/agent_status()）。
+//
+// 为什么不列具体工具清单：工具面由引擎按 preset/disable 动态注册（MCP/插件是否
+// 连上还是运行态），在提示词里复刻一份清单就是第二份事实源，迟早和实际注册不符。
+func capabilitySummary(p *AgentProfile) string {
+	if p == nil {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	switch strings.ToLower(strings.TrimSpace(p.Tools.Preset)) {
+	case ToolPresetReadonly:
+		parts = append(parts, "read-only tools")
+	case ToolPresetCustom:
+		if n := len(p.Tools.Allow); n > 0 {
+			parts = append(parts, fmt.Sprintf("custom tools (%d allowed)", n))
+		} else {
+			parts = append(parts, "custom tools")
+		}
+	default:
+		parts = append(parts, "all tools")
+	}
+	if p.Tools.DisableNetwork {
+		parts = append(parts, "no network")
+	}
+	if p.Tools.MCP.Disable {
+		parts = append(parts, "no MCP")
+	}
+	if len(p.Tools.Disable) > 0 {
+		shown := make([]string, 0, 3)
+		for _, name := range p.Tools.Disable {
+			if name = inlineText(name, 24); name == "" {
+				continue
+			}
+			shown = append(shown, name)
+			if len(shown) == 3 {
+				break
+			}
+		}
+		if len(shown) > 0 {
+			off := "off: " + strings.Join(shown, ", ")
+			if len(p.Tools.Disable) > len(shown) {
+				off += "…"
+			}
+			parts = append(parts, off)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// inlineText 把字段压成单行（名册是列表项）并按 rune 截断；limit<=0 不截断。
+func inlineText(s string, limit int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if limit > 0 && utf8.RuneCountInString(s) > limit {
+		s = string([]rune(s)[:limit]) + "…"
+	}
+	return s
+}
+
+// memberRole 成员的生效角色：owner 以 Group.OwnerAgentID 为准（owner 转让是成对改写，
+// 但旧数据里可能只改了 owner 字段），空角色回落 member。
+func memberRole(m Member, g *Group) string {
+	if g != nil && m.AgentID != "" && m.AgentID == g.OwnerAgentID {
+		return string(RoleOwner)
+	}
+	if m.Role != "" {
+		return string(m.Role)
+	}
+	return string(RoleMember)
 }
 
 func memberRoleOf(g *Group, id AgentID) string {
+	if g == nil || id == "" {
+		return ""
+	}
 	for _, m := range g.Members {
 		if m.AgentID == id {
-			if m.AgentID == g.OwnerAgentID {
-				return string(RoleOwner)
-			}
-			if m.Role != "" {
-				return string(m.Role)
-			}
-			return string(RoleMember)
+			return memberRole(m, g)
 		}
 	}
 	return ""

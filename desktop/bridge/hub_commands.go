@@ -362,14 +362,22 @@ func (m *manager) hubAgentUpdate(c command) {
 	// bash_roots / policy 进了装配期沙箱，只能等下次会话（如实返回 next_session）。
 	if hubEngineNeedsRebuild(cur, &next) {
 		data["effective"] = "next_session"
-		data["warning"] = "bash_roots / policy 变更需要重建会话后生效"
+		addHubWarning(data, "bash_roots / policy 变更需要重建会话后生效")
 	} else if err := m.refreshHubEngines(string(next.ID), &next); err != nil {
 		data["effective"] = "next_session"
-		data["warning"] = "重新应用工具策略失败，重建会话后生效: " + err.Error()
+		addHubWarning(data, "重新应用工具策略失败，重建会话后生效: "+err.Error())
 	}
 	if err := m.refreshHubLoops(string(next.ID)); err != nil {
 		data["effective"] = "next_session"
-		data["warning"] = "重建会话 loop 失败，重启后生效: " + err.Error()
+		addHubWarning(data, "重建会话 loop 失败，重启后生效: "+err.Error())
+	}
+	// 名册（群 system prompt L2）里是这个人的名字/职责/能力摘要：改名或改工具面，
+	// 别人会话里的那一行就过期了 —— 重建它所在每个群的成员 loop（下一个 Run 生效）。
+	if hubRosterChanged(cur, &next) {
+		if err := m.refreshHubAgentRosters(string(next.ID)); err != nil {
+			data["effective"] = "next_session"
+			addHubWarning(data, "重建群名册失败，重启后生效: "+err.Error())
+		}
 	}
 	// 有 run 正在跑时不能发 idle：前端把 hub_agent_status 映射成运行环，会把正在跑的
 	// 智能体显示成空闲（P1-07 复核 N9）。收尾由 agent_end 自己负责。
@@ -506,7 +514,13 @@ func (m *manager) hubAgentDelete(c command) {
 		}
 	}
 	m.emitHubAgentStatus(string(id), hubStatusDeleted)
-	m.resp(c, true, "", map[string]any{"agent_id": string(id), "purged": purge})
+	// 名册行随资料消失：软删/清空后别的成员会话里必须看到显式 fallback，不能一直
+	// 按旧名字去 @ 一个不可用的同事。
+	data := map[string]any{"agent_id": string(id), "purged": purge}
+	if err := m.refreshHubAgentRosters(string(id)); err != nil {
+		addHubWarning(data, "重建群名册失败，重启后生效: "+err.Error())
+	}
+	m.resp(c, true, "", data)
 }
 
 // hubAgentRestore 从回收站恢复（§5.2：软删保留记录，可从设置里恢复）。
@@ -558,7 +572,12 @@ func (m *manager) hubAgentRestore(c command) {
 		return
 	}
 	m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
-	m.resp(c, true, "", map[string]any{"agent": next})
+	// 恢复后资料重新进名册（fallback → 真名/职责）。
+	data := map[string]any{"agent": next}
+	if err := m.refreshHubAgentRosters(string(next.ID)); err != nil {
+		addHubWarning(data, "重建群名册失败，重启后生效: "+err.Error())
+	}
+	m.resp(c, true, "", data)
 }
 
 // hubAgentMemory 记忆面板：不带 path = 列清单，带 path = 读内容（不存在时 exists=false）。
@@ -794,14 +813,20 @@ func (m *manager) hubAgentRollback(c command) {
 	m.syncHubSessionProfile(string(next.ID), cur, &next)
 	if hubEngineNeedsRebuild(cur, &next) {
 		data["effective"] = "next_session"
-		data["warning"] = "bash_roots / policy 变更需要重建会话后生效"
+		addHubWarning(data, "bash_roots / policy 变更需要重建会话后生效")
 	} else if err := m.refreshHubEngines(string(next.ID), &next); err != nil {
 		data["effective"] = "next_session"
-		data["warning"] = "重新应用工具策略失败，重建会话后生效: " + err.Error()
+		addHubWarning(data, "重新应用工具策略失败，重建会话后生效: "+err.Error())
 	}
 	if err := m.refreshHubLoops(string(next.ID)); err != nil {
 		data["effective"] = "next_session"
-		data["warning"] = "重建会话 loop 失败，重启后生效: " + err.Error()
+		addHubWarning(data, "重建会话 loop 失败，重启后生效: "+err.Error())
+	}
+	if hubRosterChanged(cur, &next) {
+		if err := m.refreshHubAgentRosters(string(next.ID)); err != nil {
+			data["effective"] = "next_session"
+			addHubWarning(data, "重建群名册失败，重启后生效: "+err.Error())
+		}
 	}
 	if !m.hubAgentRunning(string(next.ID)) {
 		m.emitHubAgentStatus(string(next.ID), hubStatusIdle)
@@ -845,6 +870,18 @@ func (m *manager) hubPromptPreview(c command) {
 		"total_bytes": total,
 		"note":        "L0 对 Hub 已关闭（D17）；L5 技能清单与工具 schema 在请求期由内核装配，不在预览内。",
 	})
+}
+
+// addHubWarning 追加一条「已保存但下次生效」的提示。一次保存可能触发多个重建步骤，
+// 直接赋值会让用户只看到最后一个失败原因（前面的错误被静默吞掉）。
+func addHubWarning(data map[string]any, msg string) {
+	if data == nil || msg == "" {
+		return
+	}
+	if prev, _ := data["warning"].(string); prev != "" {
+		msg = prev + "；" + msg
+	}
+	data["warning"] = msg
 }
 
 // emitHubAgentStatus 状态点事件（左栏状态点/头像动效，§7.1.5）。

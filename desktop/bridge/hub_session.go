@@ -614,6 +614,35 @@ func hubEngineNeedsRebuild(prev, next *agenthub.AgentProfile) bool {
 	return !reflect.DeepEqual(prev.Policy, next.Policy)
 }
 
+// hubRosterChanged 这次资料变更是否影响群名册（system prompt L2）里的那一行：
+// 名字、职责（role/description）、能力摘要（工具面）。provider/model/persona/记忆
+// 不进名册 —— 改它们不需要去重建别人的群会话。
+func hubRosterChanged(prev, next *agenthub.AgentProfile) bool {
+	if prev == nil || next == nil {
+		return true
+	}
+	return prev.Name != next.Name ||
+		prev.Role != next.Role ||
+		prev.Description != next.Description ||
+		prev.Tools.Preset != next.Tools.Preset ||
+		prev.Tools.DisableNetwork != next.Tools.DisableNetwork ||
+		prev.Tools.MCP.Disable != next.Tools.MCP.Disable ||
+		!sameStringSlice(prev.Tools.Disable, next.Tools.Disable) ||
+		!sameStringSlice(prev.Tools.Allow, next.Tools.Allow)
+}
+
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // applyHubSessionLoop 按 Profile + **会话当前选择**重建一个 Hub 会话的 loop。
 //
 // 会话级选择优先：switch_model/switch_effort 改的是 bs.*，Profile 只是默认值。
@@ -673,6 +702,57 @@ func (m *manager) hubAgentRunning(agentID string) bool {
 		}
 	}
 	return false
+}
+
+// hubToolStatus* 是 group_members()/agent_status() 的实时状态词（§6.5.6）。
+// 状态**只走工具**：每几秒变一次，放进 system prompt 就得每轮重建 loop、毁掉缓存。
+const (
+	hubToolStatusIdle    = "idle"
+	hubToolStatusRunning = "running"
+)
+
+// hubSessionBusy 该会话是否有未收尾的回合：正在跑 / 已派发未开跑 / AgentEnd 未结算 /
+// 群轮已投递未回复。与 hub_taskboard 的忙判据同口径，另外加上群轮闩。
+func hubSessionBusy(bs *bridgeSession) bool {
+	if bs == nil {
+		return false
+	}
+	return bs.running.Load() || bs.hubDispatchPending.Load() || bs.hubSettling.Load() ||
+		bs.hubGroupBusy.Load()
+}
+
+// hubAgentLiveStatus 返回某智能体**真实**的忙闲（只读运行态，绝不装配会话：
+// 没装配过 = 没在跑 = idle）。
+//
+// where 说明忙在哪儿（不泄漏内容）："group" = 就是参数这个群；"dm" = 私聊；
+// "other_group" = 别的群（不给群 id，避免泄漏非共同群）。同一个智能体可能有多个
+// 会话同时忙，按 本群 > 私聊 > 别的群 取一个确定的答案（map 迭代顺序不影响结果）。
+func (m *manager) hubAgentLiveStatus(agentID string, groupID agenthub.GroupID) (status, where string) {
+	ws := m.hubRuntimeIfExists(agentID)
+	if ws == nil {
+		return hubToolStatusIdle, ""
+	}
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	other := ""
+	for _, bs := range ws.sessions {
+		if !hubSessionBusy(bs) {
+			continue
+		}
+		scope := hubScopeFromSID(bs.id)
+		switch {
+		case groupID != "" && scope.Kind == agenthub.ScopeGroup && scope.GroupID == groupID:
+			return hubToolStatusRunning, "group"
+		case scope.Kind == agenthub.ScopeDM:
+			other = "dm"
+		case other == "":
+			other = "other_group"
+		}
+	}
+	if other != "" {
+		return hubToolStatusRunning, other
+	}
+	return hubToolStatusIdle, ""
 }
 
 // hubAgentIDFromSID 从 `hub.<agentID>.dm` / `hub.<agentID>.g.<groupID>` 取 agentID。

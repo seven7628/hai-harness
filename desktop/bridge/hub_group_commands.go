@@ -274,7 +274,10 @@ func (m *manager) hubGroupUpdate(c command) {
 		m.resp(c, false, "保存群组失败: "+err.Error(), nil)
 		return
 	}
-	m.resp(c, true, "", map[string]any{"group": &next})
+	// 群名/owner（角色成对改写）进群名册（system prompt L2）：重建成员会话 loop，
+	// 下一个 Run 就能看到新名册。只换 loop，不打断在跑的回合。
+	rosterChanged := next.Name != g.Name || next.OwnerAgentID != g.OwnerAgentID
+	m.respGroupChanged(c, &next, rosterChanged)
 }
 
 func (m *manager) hubGroupDelete(c command) {
@@ -300,6 +303,8 @@ func (m *manager) hubGroupDelete(c command) {
 		m.resp(c, false, "删除群组失败: "+err.Error(), nil)
 		return
 	}
+	// 不重建成员 loop：已删除的群不会再被唤醒（发送/唤醒路径都拒绝 deleted 群），
+	// 旧会话留在内存里只为让在跑的回合正常收尾。
 	m.resp(c, true, "", map[string]any{"group": g})
 }
 
@@ -348,7 +353,8 @@ func (m *manager) hubGroupMemberAdd(c command) {
 		m.resp(c, false, "保存群组失败: "+err.Error(), nil)
 		return
 	}
-	m.resp(c, true, "", map[string]any{"group": &next})
+	// 新成员要进每个老成员的群名册（system prompt L2）：重建现有成员会话 loop。
+	m.respGroupChanged(c, &next, true)
 }
 
 func (m *manager) hubGroupMemberRemove(c command) {
@@ -396,7 +402,21 @@ func (m *manager) hubGroupMemberRemove(c command) {
 		m.resp(c, false, "保存群组失败: "+err.Error(), nil)
 		return
 	}
-	m.resp(c, true, "", map[string]any{"group": &next})
+	// 移除的成员从名册里消失：重建剩下成员的群 loop（被移除者自己不再被唤醒，
+	// 旧会话不重建也不关闭 —— 在跑的回合要能正常收尾）。
+	m.respGroupChanged(c, &next, true)
+}
+
+// respGroupChanged 群变更后的统一响应：名册变了就重建成员们的群会话 loop，
+// 失败不静默 —— 把原因带回响应，UI 能提示「重启后生效」，而不是模型一直看旧名册。
+func (m *manager) respGroupChanged(c command, g *agenthub.Group, rosterChanged bool) {
+	data := map[string]any{"group": g}
+	if rosterChanged {
+		if err := m.refreshHubGroupRoster(g.ID); err != nil {
+			addHubWarning(data, "群已保存，但重建成员会话提示词失败，下一次唤醒仍用旧名册: "+err.Error())
+		}
+	}
+	m.resp(c, true, "", data)
 }
 
 // validateGroupAgents 成员必须存在；新成员/新 owner 必须存活，已在群里的

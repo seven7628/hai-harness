@@ -32,6 +32,7 @@ func registerHubGroupTools(eng *tools.Engine, m *manager, agentID agenthub.Agent
 	for _, tl := range []tools.Tool{
 		newHubGroupHistoryTool(m, agentID),
 		newHubGroupMembersTool(m, agentID),
+		newHubAgentStatusTool(m, agentID),
 		newHubGroupSayTool(m, agentID),
 	} {
 		eng.RegisterTool(context.Background(), tl)
@@ -123,14 +124,67 @@ func (t *hubGroupHistoryTool) Call(ctx context.Context, _, arguments string) (st
 	return marshalHubToolResult(map[string]any{"messages": out, "count": len(out)})
 }
 
-// —— group_members ——
+// —— group_members / agent_status ——
+//
+// 名册（谁是谁、职责/能力）在 system prompt L2 里；**实时状态**只在这里给：
+// idle/running + 忙在哪个作用域。状态不落盘、不进 system prompt，每次调用现算。
+
+// hubMemberRow 是 group_members()/agent_status() 的共同行：稳定身份 + 实时状态。
+// 已有字段（agent_id/name/role/deleted）保持不变，新增 status/where/missing 为增量。
+type hubMemberRow struct {
+	AgentID     string `json:"agent_id"`
+	Name        string `json:"name,omitempty"`
+	Role        string `json:"role,omitempty"` // 群内角色：owner/member/observer
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status"`          // idle | running
+	Where       string `json:"where,omitempty"` // running 时：group（本群）/ dm / other_group
+	Deleted     bool   `json:"deleted,omitempty"`
+	Missing     bool   `json:"missing,omitempty"` // 档案缺失（软删/purge）：名册里是显式 fallback
+}
+
+func (m *manager) hubMemberRowOf(g *agenthub.Group, member agenthub.Member, p *agenthub.AgentProfile) hubMemberRow {
+	role := string(member.Role)
+	if g != nil && member.AgentID != "" && member.AgentID == g.OwnerAgentID {
+		role = string(agenthub.RoleOwner)
+	}
+	if role == "" {
+		role = string(agenthub.RoleMember)
+	}
+	var groupID agenthub.GroupID
+	if g != nil {
+		groupID = g.ID
+	}
+	row := hubMemberRow{AgentID: string(member.AgentID), Role: role}
+	if p != nil {
+		row.Name, row.Description, row.Deleted = p.Name, p.Description, p.Deleted
+	} else {
+		row.Missing = true
+	}
+	// 状态来自真实运行态（会话忙闲），不是 profile 里的静态字段。
+	row.Status, row.Where = m.hubAgentLiveStatus(string(member.AgentID), groupID)
+	return row
+}
+
+func groupMemberOf(g *agenthub.Group, id agenthub.AgentID) (agenthub.Member, bool) {
+	if g == nil {
+		return agenthub.Member{}, false
+	}
+	for _, member := range g.Members {
+		if member.AgentID == id {
+			return member, true
+		}
+	}
+	return agenthub.Member{}, false
+}
 
 type hubGroupMembersTool struct{ hubGroupToolBase }
 
 func newHubGroupMembersTool(m *manager, agentID agenthub.AgentID) *hubGroupMembersTool {
 	return &hubGroupMembersTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "group_members",
-		Description_: "List a Hub group's members with roles and whether their profile still exists. " +
+		Description_: "List a Hub group's members: role (owner/member/observer) and live status " +
+			"(idle/running, plus where they are busy). Roles/responsibilities are also in your system " +
+			"prompt; the status here is realtime. Missing profiles are reported explicitly. " +
 			"Only members can read.",
 		Params_:      tools.Obj(map[string]any{"group_id": tools.Str("Group id")}, "group_id"),
 		CanParallel_: true, ReadOnly_: true,
@@ -156,21 +210,111 @@ func (t *hubGroupMembersTool) Call(ctx context.Context, _, arguments string) (st
 			byID[p.ID] = p
 		}
 	}
-	type row struct {
-		AgentID string `json:"agent_id"`
-		Name    string `json:"name,omitempty"`
-		Role    string `json:"role"`
-		Deleted bool   `json:"deleted,omitempty"`
-	}
-	rows := make([]row, 0, len(g.Members))
+	rows := make([]hubMemberRow, 0, len(g.Members))
 	for _, member := range g.Members {
-		r := row{AgentID: string(member.AgentID), Role: string(member.Role)}
-		if p := byID[member.AgentID]; p != nil {
-			r.Name, r.Deleted = p.Name, p.Deleted
-		}
-		rows = append(rows, r)
+		rows = append(rows, t.m.hubMemberRowOf(g, member, byID[member.AgentID]))
 	}
 	return marshalHubToolResult(map[string]any{"group_id": string(g.ID), "name": g.Name, "mode": g.Policy.EffectiveMode(), "members": rows})
+}
+
+// —— agent_status ——
+
+type hubAgentStatusTool struct{ hubGroupToolBase }
+
+func newHubAgentStatusTool(m *manager, agentID agenthub.AgentID) *hubAgentStatusTool {
+	return &hubAgentStatusTool{hubGroupToolBase{BaseTool: tools.BaseTool{
+		Name_: "agent_status",
+		Description_: "Live status (idle/running) for you or a colleague. Pass agent_id to ask about " +
+			"someone else and group_id to check their role/status in that group (membership is " +
+			"verified: you can only see yourself or agents you share a group with). Status is " +
+			"realtime and never included in the system prompt.",
+		Params_: tools.Obj(map[string]any{
+			"group_id": tools.Str("Optional group id: verify membership and return the role in that group"),
+			"agent_id": tools.Str("Target agent id (default: you)"),
+		}),
+		CanParallel_: true, ReadOnly_: true,
+	}, m: m, agentID: agentID}}
+}
+
+type hubAgentStatusArgs struct {
+	GroupID string `json:"group_id"`
+	AgentID string `json:"agent_id"`
+}
+
+func (t *hubAgentStatusTool) Call(ctx context.Context, _, arguments string) (string, error) {
+	var a hubAgentStatusArgs
+	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
+		return "", err
+	}
+	target := agenthub.AgentID(strings.TrimSpace(a.AgentID))
+	if target == "" {
+		target = t.agentID // 缺省查自己
+	}
+	st, err := t.m.hubStore()
+	if err != nil {
+		return "", err
+	}
+	agents, err := st.ListAgents(ctx)
+	if err != nil {
+		return "", err
+	}
+	byID := map[agenthub.AgentID]*agenthub.AgentProfile{}
+	for _, p := range agents {
+		if p != nil {
+			byID[p.ID] = p
+		}
+	}
+	if gid := strings.TrimSpace(a.GroupID); gid != "" {
+		// 群作用域：调用者必须是成员（groupAccess），目标也必须是成员。
+		// 目标不是成员时明确拒绝，不泄露「这个 id 是否存在」。
+		_, g, callerRole, err := t.groupAccess(ctx, gid)
+		if err != nil {
+			return "", err
+		}
+		member, ok := groupMemberOf(g, target)
+		if !ok {
+			return "", fmt.Errorf("%w: %s 不是该群成员，无法查看状态", agenthub.ErrInvalid, target)
+		}
+		return marshalHubToolResult(map[string]any{
+			"group_id":  string(g.ID),
+			"your_role": string(callerRole),
+			"agent":     t.m.hubMemberRowOf(g, member, byID[target]),
+		})
+	}
+	// 无群作用域：查自己随便查；查别人必须至少共享一个群（不看群就不知道谁能看谁）。
+	if target != t.agentID {
+		groups, err := st.ListGroups(ctx)
+		if err != nil {
+			return "", err
+		}
+		shared := false
+		for _, g := range groups {
+			if g == nil || g.Deleted {
+				continue
+			}
+			if groupHasMember(g, t.agentID) && groupHasMember(g, target) {
+				shared = true
+				break
+			}
+		}
+		if !shared {
+			return "", fmt.Errorf("%w: 只能查看自己或同群成员", agenthub.ErrInvalid)
+		}
+	}
+	row := hubMemberRow{AgentID: string(target), Role: ""}
+	if p := byID[target]; p != nil {
+		row.Name, row.Description, row.Deleted = p.Name, p.Description, p.Deleted
+	} else {
+		row.Missing = true
+	}
+	row.Status, row.Where = t.m.hubAgentLiveStatus(string(target), "")
+	return marshalHubToolResult(map[string]any{"agent": row})
+}
+
+// ValidParams 只做 JSON 可解析；成员/共享群权限在 Call 里判（要读存储）。
+func (t *hubAgentStatusTool) ValidParams(_ context.Context, _, arguments string) error {
+	var a hubAgentStatusArgs
+	return json.Unmarshal([]byte(arguments), &a)
 }
 
 // —— group_say ——
