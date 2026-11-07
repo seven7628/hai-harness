@@ -1196,9 +1196,11 @@ const BASE = {
       ],
       "acceptance": "8 轮预算；深度 4；冷却 1.5s；同对 2 次；人类插话清队列；停止；指纹循环检测。",
       "tests": "go test ./agenthub/ -run Conversation",
-      "commit": "feat(hub-p3b-04): 对话轮次与护栏",
-      "status": "in_progress",
-      "note": "对话控制器 + 忙任务泵；实现中（task-smekypsj）"
+      "commit": "0f3c321",
+      "status": "done",
+      "note": "对话控制器 + 忙任务泵；实现 9c851d1，修复 0f3c321",
+      "review": "passed",
+      "reviewNote": "复审（task-qjcdjuud）PASS。B1 人类插话后旧链路深度污染：Offer 对非人类 depth 夹紧到 conv.depth+1（真实 4 跳链插话后 group_say 落到 depth=1，不再误耗尽）；N1 群内串行闸门：本群任一已装配会话 running/busy/dispatchPending/PendingCount>0 时不放行，wake 留队由下一次 hubOnRunEnd/冷却定时器重试（并行首轮也须全部结束）；N3 空 Offer 不建对话、N6 关停后停止命令拒绝。变异 remove clamp / remove groupRunInFlight / empty-target check / shutdown guard 均 RED；定向 -count=5 -race、go vet、go build 绿；工作区路径未进入闸门。残留非阻塞：闸门无看门狗、注释漂移。"
     },
     {
       "id": "P3b-05",
@@ -1409,8 +1411,8 @@ const BASE = {
       "depends_on": [
         "P3b-04 群调度器"
       ],
-      "return_when": "P3b-04 实现时改为解锁后 wake",
-      "status": "deferred"
+      "return_when": "P3b-04 已实现并复审通过（0f3c321）",
+      "status": "resolved"
     },
     {
       "id": "D-event-payload-assert",
@@ -1427,8 +1429,8 @@ const BASE = {
       "depends_on": [
         "P3b-04"
       ],
-      "return_when": "P3b-04 实现时调用 Queue.Pump(agent target) 并在目标回合结束/冷却后泵",
-      "status": "deferred"
+      "return_when": "P3b-04 已实现并复审通过（0f3c321）",
+      "status": "resolved"
     },
     {
       "id": "D-finish-agent-task",
@@ -1449,6 +1451,15 @@ const BASE = {
       ],
       "return_when": "P3b-07 或人机派发 UI 落地时",
       "status": "deferred"
+    },
+    {
+      "id": "D-hub-conversation-ui",
+      "depends_on": [
+        "P3b-06",
+        "P3b-07"
+      ],
+      "return_when": "P3b-07 前端群组件落地时：消费 hub_conversation 事件（第 N/8 轮时间线、停止按钮、ConversationBar/Typing）",
+      "note": "P3b-04 只产出事件与状态机；UI 渲染按实现说明归后续前端任务。"
     }
   ],
   "progress": {
