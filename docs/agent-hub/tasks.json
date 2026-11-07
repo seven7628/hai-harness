@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 已收口：P3a-09 群内流式 + P3a-10 Review/评测 7 均 passed；下一步 P3b-01 名册/职责与 P2.5-08 视觉验收",
+  "subtitle": "P3a 已收口；P3b-01 名册/提示词复审 passed（N1–N6 记债）；P2.5-08 视觉修复与复验进行中",
   "updated": "2026-11-06",
   "phases": [
     {
@@ -830,6 +830,23 @@
       "commit": "feat(hub-p3b-01): 智能体名册与提示词"
     },
     {
+      "id": "P3b-01b",
+      "phase": "P3b",
+      "title": "名册重建 TOCTOU/状态一致性收口",
+      "deps": [
+        "P3b-01"
+      ],
+      "files": [
+        "desktop/bridge/hub_group_session.go",
+        "desktop/bridge/hub_session.go",
+        "desktop/bridge/hub_group_tools.go",
+        "desktop/bridge/hub_roster_test.go"
+      ],
+      "acceptance": "refreshHubGroupRoster 查表+apply 与装配同锁（消除旧名册 TOCTOU）；applyHubSessionLoop 返回错误并回 warning；agent_status your_role 套 owner override；无 group 作用域时 where 措辞不误导；补 settling/other_group/missing/deleted/group-delete-no-rebuild/warning 保留回归。",
+      "tests": "go test ./desktop/bridge/ -run 'TestHubGroup|TestHubAgent|TestRoster' -count=5 -race",
+      "commit": "fix(hub-p3b-01b): 名册重建与状态一致性"
+    },
+    {
       "id": "P3b-02",
       "phase": "P3b",
       "title": "智能体正文 @ 解析 + group_say(mentions)",
@@ -1300,6 +1317,15 @@
       "status": "done",
       "commit": "0681766 (cab1551 + 0681766) chore/fix(hub-p3a-10): P3a review + eval 7",
       "reviewNote": "复审 passed（task-y6agfxsh，对象 0681766；首轮同任务对 cab1551 changes_requested）。交付：desktop/bridge/hub_eval_p3_test.go 新增评测 7（6 条确定性 fake provider 测试，无网络）——@all 3 成员全唤醒且各 1 条 final；@A 仅 A（B/C hubGroupSeq=0、游标 0、无 busy）；未 @ 无回执/hub_round/唤醒；40 条历史经 before_seq 翻到第 1 条 + group_history before_seq/query 命中；owner-only 与 approval_stub 不进快照及真实 wake 请求（公开消息仍在，防空断言）；双成员并发流式 final/delta 同 ID、delta 拼接=final、final 事件恰好 1 且 payload text/seq/round_id/group_id/sender 全字段对齐、final 晚于最后 delta。复审 B1：cab1551 只数 final 事件不校验 payload，WRONG-EVENT-TEXT / Seq=0 变异全绿；0681766 改为逐字段断言，并补 N1 响应 round 存在、N2 hub_round targets、history count 精确解码、barrier 超时必红、去掉 300ms 静默窗口（改用 hubGroupSeq 与 busy 收口）。变异矩阵 10 项按预期红/由既有测试兜底。P3a 验收：@all/@A、未 @ 静默、历史可检索、私有内容不泄漏、并发不串台、流式 final 一致均通过，无阻塞缺陷。非阻塞/deferred：①approval_stub 只有定义/过滤/渲染无生产者，P3a 的「私有审批占位」未端到端，需 follow-up 接线；②群 UI 无加载更早/搜索（后端 hub_group_history 分页与 group_history query 已可用）；③hub_group_send 忽略结构化 mentions/mention_all（当前前端只发文本）；④无 @ 响应形状与方案 §6.5.1 漂移（返回 round 空 targets，非 woken/reason），测试锁定了现状；⑤hub_group_search 命令未实现；⑥基础 @ 选择器未实现（P3b-07 MentionPicker）；⑦eval7FinalEvent 未校验 envelope.group_id、human hub_message 事件正文未做 payload 断言（现有 hub_group_session_test 兜底）；⑧5s barrier/idle 阈值为唯一时钟敏感点，10 次普通 + 5 次 race 重复通过。全量门仅既有 TestP0 探活 TLS 与 TestReducer 价表污染；reducer 单跑绿，父提交同样失败。"
+    },
+    "P3b-01": {
+      "status": "done",
+      "commit": "e4b8b8b feat(hub-p3b-01): 智能体名册与提示词",
+      "reviewNote": "复审 passed（task-v6qvngfh，对象 e4b8b8b）。交付：名册稳定层（群名/我是谁/成员按 Group.Members 顺序，名字+角色+稳定 id+职责+能力摘要；owner 以 Group.OwnerAgentID 为准；缺档/软删成员显式 fallback）；L1 字节不变；group_members 增 status/where/description/missing，新增 agent_status（群成员/共享群校验，不泄漏非共同群与记忆/DM）；成员增删、群改名、owner 转让、智能体改名/职责/能力/软删/恢复均重建受影响群会话 loop，只换 loop 不腰斩在飞回合，重建失败追加 warning。验证：L1 SHA 与父提交一致；roster golden 675B；go test ./agenthub/ -run 'Roster|Prompt|Group' 绿；bridge 定向 -count=5 -race 绿；6 项变异（去掉重建、map 顺序、system 加 live status、绕过成员校验、status 恒 idle 等）均 RED；全量仅既有 TestP0 探活与 TestReducer 价表污染。非阻塞/记债：N1 refreshHubGroupRoster 查表+apply 未持 lockHubAgent，与并发装配存在窄 TOCTOU（可能短暂旧名册，建议 P3b-02 前修）；N2 applyHubSessionLoop 吞 store/enrich 错误，重建失败不会回 warning；N3 agent_status 的 your_role 未套 owner override；N4 无 group 作用域时 where=other_group 措辞误导（状态本身真实）；N5 order 测试单次对 map 迭代有约 4% 假绿（golden 是确定守卫）、settling/other_group/missing/deleted/group-delete-no-rebuild/warning 保留缺覆盖；N6 inlineText 未剥 C0 控制符、Description 无长度上限（仅本地 owner 可写 profile，非跨智能体信任边界）。"
+    },
+    "P3b-01b": {
+      "status": "todo",
+      "reviewNote": "P3b-01 复审 N1–N4：N1 重建 TOCTOU（建议 P3b-02 前修）、N2 重建错误静默、N3 your_role owner override、N4 where 措辞；附 N5 测试缺口。"
     },
     "P3b-01a": {
       "status": "done",
