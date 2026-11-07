@@ -62,7 +62,7 @@ func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, erro
 		if existing.ctx.Err() != nil {
 			// 已关闭的会话不能再接新一轮：顺手清闩，避免它把智能体永久标忙。
 			existing.hubGroupBusy.Store(false)
-			existing.hubGroupBusySeq.Store(0)
+			existing.hubGroupOwner.Store(0)
 			return nil, fmt.Errorf("%w: 群会话 %s 已关闭", agenthub.ErrInvalid, sid)
 		}
 		return existing, nil
@@ -173,7 +173,8 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	if !bs.hubGroupBusy.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: 该智能体上一轮群回复尚未结束", agenthub.ErrInvalid)
 	}
-	seq := bs.hubGroupBusySeq.Add(1)
+	seq := bs.hubGroupSeq.Add(1)
+	bs.hubGroupOwner.Store(seq)
 	ok := false
 	defer func() {
 		if !ok {
@@ -227,7 +228,7 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, conten
 	bs.hubGroupWake = nil
 	runSeq := bs.hubGroupRunSeq.Load()
 	if runSeq == 0 {
-		runSeq = bs.hubGroupBusySeq.Load()
+		runSeq = bs.hubGroupOwner.Load()
 	}
 	// 先完成 final 落账/路由，再放下一轮进来；无论是否有 AgentEnd 绑定都要清闩。
 	defer func() {
@@ -388,11 +389,11 @@ func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub
 	if err != nil {
 		return nil, nil, false, routeErr, err
 	}
+	m.emitHubGroupMessage(g.ID, seq, msg)
 	if routed != nil {
 		routed.TriggerSeq = seq
 		m.emitHubGroupRound(g.ID, *routed)
 	}
-	m.emitHubGroupMessage(g.ID, seq, msg)
 	return msg, routed, false, routeErr, nil
 }
 

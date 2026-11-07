@@ -543,10 +543,17 @@ func TestFinishHubRoundTurnLimitStopsAutoChain(t *testing.T) {
 func TestClearHubGroupBusyOnlyOwnEpoch(t *testing.T) {
 	bs := &bridgeSession{}
 	bs.hubGroupBusy.Store(true)
-	bs.hubGroupBusySeq.Store(2)
-	bs.clearHubGroupBusy(1) // 旧 run 的兜底清理
+	bs.hubGroupOwner.Store(1)
+	bs.clearHubGroupBusy(1)
+	if bs.hubGroupBusy.Load() {
+		t.Fatal("owning run must clear the group latch")
+	}
+	// 代号单调递增：下一轮是 2，旧 run 手里的 1 不能清它（ABA）。
+	bs.hubGroupBusy.Store(true)
+	bs.hubGroupOwner.Store(2)
+	bs.clearHubGroupBusy(1)
 	if !bs.hubGroupBusy.Load() {
-		t.Fatal("stale run must not clear a newer group latch")
+		t.Fatal("stale run must not clear a newer group latch (ABA)")
 	}
 	bs.clearHubGroupBusy(2)
 	if bs.hubGroupBusy.Load() {
@@ -566,12 +573,26 @@ func TestHubGroupSessionClosedClearsBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	bs.hubGroupBusy.Store(true)
-	bs.hubGroupBusySeq.Store(9)
+	bs.hubGroupOwner.Store(9)
 	bs.cancel()
 	if _, err := m.hubGroupSession(string(a.ID), string(g.ID)); err == nil {
 		t.Fatal("closed group session must not accept a new wake")
 	}
-	if bs.hubGroupBusy.Load() || bs.hubGroupBusySeq.Load() != 0 {
+	if bs.hubGroupBusy.Load() || bs.hubGroupOwner.Load() != 0 {
 		t.Fatal("closed group session must release the busy latch")
+	}
+}
+
+func TestClearHubGroupBusyAfterRunKeepsPendingRound(t *testing.T) {
+	bs := &bridgeSession{}
+	bs.hubGroupBusy.Store(true)
+	bs.hubGroupOwner.Store(3)
+	bs.clearHubGroupBusyAfterRun(1)
+	if !bs.hubGroupBusy.Load() {
+		t.Fatal("pending input must keep the group latch")
+	}
+	bs.clearHubGroupBusyAfterRun(0)
+	if bs.hubGroupBusy.Load() {
+		t.Fatal("empty inbox must release the group latch")
 	}
 }
