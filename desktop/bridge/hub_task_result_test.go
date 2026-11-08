@@ -251,6 +251,12 @@ func TestFinishAgentTaskCompleted(t *testing.T) {
 	if p3bRefFloat(t, card.Refs, "duration_ms") != 4321 {
 		t.Fatalf("refs duration_ms = %v", card.Refs["duration_ms"])
 	}
+	// B5：派发者快照必须在卡里，UI 不能拿 sender（=执行者）猜发起人。
+	if p3bRefString(t, card.Refs, "origin_kind") != task.Origin.Kind ||
+		p3bRefString(t, card.Refs, "origin_agent_id") != string(task.Origin.AgentID) ||
+		p3bRefString(t, card.Refs, "origin_agent_name") != task.Origin.AgentName {
+		t.Fatalf("refs origin = %+v, want %+v", card.Refs, task.Origin)
+	}
 	usageRef, ok := card.Refs["usage"].(map[string]any)
 	if !ok {
 		t.Fatalf("refs usage = %T", card.Refs["usage"])

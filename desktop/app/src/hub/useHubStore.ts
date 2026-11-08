@@ -7,7 +7,9 @@ import type {
 } from './types'
 import { addHubAlert, alertFromEvent } from './alerts'
 import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, type HubMessageDelta, type HubStreamDraft } from './groupStream'
-import { parseTaskResult, taskOutcomeLine } from './taskCard'
+import {
+  isHubTargetActive, projectGroupMessage, projectGroupRead, projectTaskUpdate, shouldApplyGroupProgress,
+} from './groupProjection'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -74,8 +76,10 @@ interface HubState {
   finalizedMessageIds: string[]
   /** 左栏群组投影（hub_group_list.progress + hub_message 增量）。 */
   groupInfo: Record<string, HubGroupProgress>
-  /** 每群自动对话视图（hub_conversation 事件）。 */
+  /** 每群自动对话视图（hub_conversation 事件 + hub_group_get 水合）。 */
   groupConversations: Record<string, HubConversation>
+  /** 每群人类已读游标（hub_group_get.cursor / hub_read；多端共享）。 */
+  groupReadSeq: Record<string, number>
   /** 派任务进行中 / 上一次派发的说明（queued 或已终止原因）。 */
   groupAssigning: boolean
   groupAssignNote: string | null
@@ -117,6 +121,13 @@ let groupSendGen = 0 // 群发送代际：切群/新一轮发送后，旧响应�
 let groupSelectGen = 0 // 选群代际：A→B→A 时旧响应不得覆盖新状态
 // 已请求过的群已读游标：同一 seq 不重复发 hub_mark_read（活跃群每条新消息一次，够用且不刷屏）。
 const groupReadRequested = new Map<string, number>()
+// 每个群本地投影最近一次更新时间：loadGroups 响应用它挡「事件先到、响应后到」的旧快照。
+const groupInfoUpdatedAt = new Map<string, number>()
+
+/** 本地投影变了：记一笔时间，供 loadGroups 的竞态守卫判断谁更新。 */
+function touchGroupInfo(gid: string): void {
+  groupInfoUpdatedAt.set(gid, Date.now())
+}
 
 function roundHasAction(r: HubRound | null | undefined): boolean {
   return !!r && (!!r.mention_all || (r.targets ?? []).length > 0 || (r.dropped ?? 0) > 0)
@@ -181,6 +192,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   finalizedMessageIds: [],
   groupInfo: {},
   groupConversations: {},
+  groupReadSeq: {},
   groupAssigning: false,
   groupAssignNote: null,
   groupConvStopping: false,
@@ -259,7 +271,9 @@ export const useHubStore = create<HubState>((set, get) => ({
       messages: r.data?.messages ?? [],
       hasMore: r.data?.has_more === true,
     })
-    // 打开过 = 已读：左栏未读点立即消掉（bridge 已推进游标，这里同步本地投影）。
+    // 打开过 = 已读，但前提是 Hub 仍然开着：关闭 Hub 后才落地的响应
+    // 不能把「关闭期间新到的消息」标成已读（B4）。
+    if (!get().open) return
     set((s) => {
       const dm = { ...s.dm }
       const info = { ...(dm[agentID] ?? {}) }
@@ -446,19 +460,24 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   async loadGroups() {
     set({ groupsLoading: true })
+    const startedAt = Date.now()
     const r = await hubCommand<{ groups?: HubGroup[]; progress?: Record<string, HubGroupProgress> }>('hub_group_list', {})
     if (!r.ok) {
       set({ groupsLoading: false, error: r.error || '读取群组失败' })
       return
     }
     // progress 是左栏预览/未读的唯一权威投影。但事件可能比响应先到（§7.5.7）：
-    // 只接受「不比本地旧」的行，否则会把刚到的未读/预览覆盖回旧快照。
+    // 快照没有 revision，用「请求开始时间 vs 本地最近更新时间」挡住旧覆盖（N10），
+    // 不只是比 last_seq（同 seq 的任务结论/状态也会被旧响应写回）。
     const progress = r.data?.progress ?? {}
+    const completedAt = Date.now()
     set((s) => {
       const merged = { ...s.groupInfo }
       for (const [gid, p] of Object.entries(progress)) {
-        const local = s.groupInfo[gid]
-        if (!local || (p.last_seq ?? 0) >= (local.last_seq ?? 0)) merged[gid] = p
+        if (shouldApplyGroupProgress(s.groupInfo[gid], p, groupInfoUpdatedAt.get(gid) ?? 0, startedAt)) {
+          merged[gid] = p
+          groupInfoUpdatedAt.set(gid, completedAt)
+        }
       }
       return { groupsLoading: false, groups: r.data?.groups ?? [], groupInfo: merged }
     })
@@ -468,27 +487,51 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (!groupID) return
     groupSendGen++
     const gen = ++groupSelectGen
+    const wasOpen = get().open
     set((s) => ({
       activeGroupId: groupID, activeId: null, profile: null, sid: null,
       groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false, groupDrafts: [],
       groupAssigning: false, groupAssignNote: null, groupConvStopping: false,
       // 打开即已读：先清本地未读点（游标在历史加载完之后再推进）。
-      groupInfo: { ...s.groupInfo, [groupID]: { ...(s.groupInfo[groupID] ?? {}), unread: 0 } },
+      // Hub 已关闭时不在这里清 —— 事件/关闭期间的新消息必须留着未读（B4）。
+      groupInfo: wasOpen
+        ? { ...s.groupInfo, [groupID]: { ...(s.groupInfo[groupID] ?? {}), unread: 0 } }
+        : s.groupInfo,
+      groupReadSeq: { ...s.groupReadSeq },
       messages: [], live: '', rootRunId: null,
       error: null, loading: true,
     }))
-    const r = await hubCommand<{ group?: HubGroup }>('hub_group_get', { group_id: groupID })
+    const r = await hubCommand<{
+      group?: HubGroup
+      conversation?: HubConversation
+      cursor?: { human_read_seq?: number }
+    }>('hub_group_get', { group_id: groupID })
     if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     if (!r.ok) {
       set({ loading: false, error: r.error || '打开群组失败' })
       return
     }
+    const serverRead = Number(r.data?.cursor?.human_read_seq ?? 0)
+    if (r.data?.conversation) {
+      const conversation = r.data.conversation
+      set((s) => ({ groupConversations: { ...s.groupConversations, [groupID]: conversation } }))
+    }
+    if (serverRead > 0) {
+      set((s) => ({
+        groupReadSeq: { ...s.groupReadSeq, [groupID]: Math.max(serverRead, s.groupReadSeq[groupID] ?? 0) },
+      }))
+    }
+    touchGroupInfo(groupID)
     const h = await hubCommand<{ messages?: HubMessage[] }>('hub_group_history', { group_id: groupID, limit: 50 })
     if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     const a = await hubCommand<{ activity?: HubGroupActivity[] }>('hub_group_activity', { group_id: groupID })
     if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     const history = h.ok ? (h.data?.messages ?? []) : []
-    const latest = history.reduce((max, m) => Math.max(max, m.seq), get().groupInfo[groupID]?.last_seq ?? 0)
+    // 已读游标不能只看历史最大 seq：打开期间可能已有新消息/服务端游标更靠前。
+    const latest = history.reduce(
+      (max, m) => Math.max(max, m.seq),
+      Math.max(get().groupInfo[groupID]?.last_seq ?? 0, get().groupReadSeq[groupID] ?? 0),
+    )
     set((s) => {
       // 历史请求期间 hub_message 可能已经先到（§7.5.7 顺序）：按 seq 合并，
       // 不拿快照覆盖新消息；乐观/失败气泡（seq<=0）也保留。
@@ -502,7 +545,15 @@ export const useHubStore = create<HubState>((set, get) => ({
       }
     })
     // 打开群 = 已读（§7.5.7 群级共享游标）：历史加载完再推进，避免用旧 seq 覆盖新消息。
-    if (latest > 0) void markGroupRead(groupID, latest)
+    // 只有 Hub 仍然打开才清未读/推进游标 —— 关闭后才落地的历史不能吃掉未读（B4）。
+    if (latest > 0 && get().open) {
+      set((s) => ({
+        groupReadSeq: { ...s.groupReadSeq, [groupID]: Math.max(latest, s.groupReadSeq[groupID] ?? 0) },
+        groupInfo: { ...s.groupInfo, [groupID]: { ...(s.groupInfo[groupID] ?? {}), unread: 0 } },
+      }))
+      touchGroupInfo(groupID)
+      void markGroupRead(groupID, latest)
+    }
   },
 
   async loadGroupActivity(groupID) {
@@ -664,34 +715,20 @@ export const useHubStore = create<HubState>((set, get) => ({
           const msg = typeof ev.message === 'string' ? undefined : ev.message
           if (!msg) return
           const gid = ev.group_id
-          const active = gid === get().activeGroupId
+          // Hub 关闭时 activeGroupId 可能还留着：只有「打开 + 当前群」才算正在看（B4）。
+          const active = isHubTargetActive(get().open, get().activeGroupId, gid)
           // final 覆盖草稿：即使消息属于别的群，也要把该 message_id 记入 finalized，
           // 否则切回该群时迟到的 delta 会重新长出草稿。
           const fin = finalizeHubDraft(get().groupDrafts, get().finalizedMessageIds, msg.id)
-          const card = msg.kind === 'task_result' ? parseTaskResult(msg) : null
-          const preview = (msg.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
-          const fresh = msg.seq > (get().groupInfo[gid]?.last_seq ?? 0)
           set((s) => {
+            const prev = s.groupInfo[gid] ?? {}
+            const info = projectGroupMessage(prev, msg, active)
             const next: Partial<HubState> = { groupDrafts: fin.drafts, finalizedMessageIds: fin.finalized }
-            if (fresh) {
-              const info = { ...(s.groupInfo[gid] ?? {}) }
-              info.last_seq = msg.seq
-              info.last_sender = msg.sender?.kind
-              info.last_at = msg.created_at ?? new Date().toISOString()
-              info.last_text = preview
-              // 与 Go GroupPerception 同口径：只有「最新可用消息就是任务卡」才给结论，
-              // 普通消息要清掉旧结论，让预览回退到 last_text。
-              info.last_outcome = card ? taskOutcomeLine(card.status, card.summary, card.error) : ''
-              if (card) {
-                info.last_task_id = card.taskId || info.last_task_id
-                info.last_task_status = card.status
-                info.last_task_summary = card.summary || card.title
-              }
-              // 未读只数「别人发来的可用消息」（人自己的话不算），与后端投影一致。
-              if (!active && msg.sender?.kind !== 'human' && preview) {
-                info.unread = (info.unread ?? 0) + 1
-              }
+            if (info !== prev) {
               next.groupInfo = { ...s.groupInfo, [gid]: info }
+              if (active && msg.seq > 0) {
+                next.groupReadSeq = { ...s.groupReadSeq, [gid]: Math.max(msg.seq, s.groupReadSeq[gid] ?? 0) }
+              }
             }
             if (!active) return next
             const withoutPending = ev.client_msg_id
@@ -701,13 +738,17 @@ export const useHubStore = create<HubState>((set, get) => ({
             return { ...next, groupMessages: [...withoutPending, msg].sort((a, b) => a.seq - b.seq) }
           })
           // 正在看的群：新消息到即已读（best-effort，不阻塞渲染、不逐条刷事件）。
-          if (active && msg.seq > 0) void markGroupRead(gid, msg.seq)
+          if (active && msg.seq > 0) {
+            touchGroupInfo(gid)
+            void markGroupRead(gid, msg.seq)
+          }
           return
         }
         const agentID = ev.agent_id || ''
         const msg = typeof ev.message === 'string' ? undefined : ev.message
         if (!msg) return
-        // 左栏预览/未读同步（非当前 DM 也更新，正在看的那条不算未读）。
+        // 左栏预览/未读同步：只有 Hub 打开且当前就是这个 DM 才不算未读。
+        const dmActive = isHubTargetActive(get().open, activeId, agentID)
         set((s) => {
           const dm = { ...s.dm }
           const info = { ...(dm[agentID] ?? {}) }
@@ -715,13 +756,12 @@ export const useHubStore = create<HubState>((set, get) => ({
           info.last_text = (msg.text ?? '').replace(/\s+/g, ' ').slice(0, 80)
           info.last_sender = msg.sender?.kind
           info.last_at = msg.created_at ?? new Date().toISOString()
-          if (agentID !== activeId && msg.sender?.kind === 'agent') {
-            info.unread = (info.unread ?? 0) + 1
-          }
+          if (dmActive) info.unread = 0
+          else if (msg.sender?.kind === 'agent') info.unread = (info.unread ?? 0) + 1
           dm[agentID] = info
           return { dm }
         })
-        if (agentID !== activeId) return
+        if (!dmActive) return
         set((s) => {
           // 乐观消息 → 真实消息：按 client_msg_id（人发的）或 seq（智能体回复）去重。
           const withoutPending = ev.client_msg_id
@@ -734,7 +774,7 @@ export const useHubStore = create<HubState>((set, get) => ({
         return
       }
       case 'hub_message_delta': {
-        if (!ev.group_id || ev.group_id !== get().activeGroupId) return
+        if (!ev.group_id || !get().open || ev.group_id !== get().activeGroupId) return
         set((s) => ({
           groupDrafts: applyHubDelta(s.groupDrafts, ev as HubMessageDelta, s.finalizedMessageIds),
         }))
@@ -769,7 +809,7 @@ export const useHubStore = create<HubState>((set, get) => ({
         if (!isRoot) return // 子 agent 结束不能熄根 run 的运行点
         // 群内空回复/中断没有 final hub_message：按群会话 id 清掉该 agent 的草稿。
         const groupScope = groupScopeFromSession(ev.session_id)
-        if (groupScope && groupScope.groupId === get().activeGroupId) {
+        if (get().open && groupScope && groupScope.groupId === get().activeGroupId) {
           set((s) => ({ groupDrafts: dropDraftsForAgent(s.groupDrafts, groupScope.agentId) }))
         }
         if (!activeId || !sid || (ev.session_id && ev.session_id !== sid)) return
@@ -795,19 +835,15 @@ export const useHubStore = create<HubState>((set, get) => ({
             return { tasks: [task, ...rest] }
           })
         }
-        // 左栏结论行：事件比刷新快一步，任务完成/失败后预览立刻变成「任务完成：…」。
+        // 左栏任务态：只更新「最近一张任务卡」的 status/summary；迟到的 update
+        // 不能把被新消息清掉的 last_outcome 复活（N2，见 projectTaskUpdate）。
         const gid = ev.group_id || task?.target?.group_id || task?.origin?.group_id || ''
         if (!gid) return
-        const status = evt.status || task?.status || ''
-        const summary = task?.result?.summary ?? ''
-        const error = evt.error || task?.error || task?.result?.error || ''
         set((s) => {
-          const info = { ...(s.groupInfo[gid] ?? {}) }
-          const outcome = taskOutcomeLine(status, summary, error)
-          if (outcome) info.last_outcome = outcome
-          if (taskID) info.last_task_id = taskID
-          if (status) info.last_task_status = status
-          if (summary) info.last_task_summary = summary
+          const prev = s.groupInfo[gid] ?? {}
+          const info = projectTaskUpdate(prev, { ...evt, task_id: taskID || evt.task_id })
+          if (info === prev) return {}
+          touchGroupInfo(gid)
           return { groupInfo: { ...s.groupInfo, [gid]: info } }
         })
         return
@@ -821,13 +857,20 @@ export const useHubStore = create<HubState>((set, get) => ({
       }
       case 'hub_read': {
         // 目前 bridge 不主动发；为多端/手机端保留同一条归约路径：读到哪就清到哪。
+        // seq<=0 一律忽略（恶意/空事件不能把未读清零，N10）。
         if (!ev.group_id) return
         const gid = ev.group_id
         const seq = Number(ev.seq ?? 0)
         set((s) => {
-          const info = { ...(s.groupInfo[gid] ?? {}) }
-          if (seq <= 0 || seq >= (info.last_seq ?? 0)) info.unread = 0
-          return { groupInfo: { ...s.groupInfo, [gid]: info } }
+          const prev = s.groupInfo[gid] ?? {}
+          const info = projectGroupRead(prev, seq)
+          const next: Partial<HubState> = {}
+          if (info !== prev) {
+            next.groupInfo = { ...s.groupInfo, [gid]: info }
+            touchGroupInfo(gid)
+          }
+          if (seq > 0) next.groupReadSeq = { ...s.groupReadSeq, [gid]: Math.max(seq, s.groupReadSeq[gid] ?? 0) }
+          return next
         })
         return
       }

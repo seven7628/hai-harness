@@ -437,6 +437,13 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		m.hubAlertf("group_reply_failed", "读取群日志失败：%v", err)
 		return
 	}
+	// 本轮回复的触发上下文（P3b-07 B6）：只算「该智能体上次读到 → 本次唤醒触发消息」
+	// 之间的群消息，senders 只收智能体（人类没有 AgentRef）。没有多智能体来源 = nil，
+	// 前端不会画 TurnContextLine。
+	var turnCtx *agenthub.TurnContext
+	if cur, cerr := st.LoadCursor(ctx, g.ID, spec.Agent.ID); cerr == nil {
+		turnCtx = agenthub.BuildTurnContext(spec.Agent.ID, msgs, cur.AgentContextSeq, wake.TriggerSeq)
+	}
 	if last := lastAgentReplyInRound(msgs, spec.Agent.ID, wake.TriggerSeq); last != nil && sameGroupReply(last.Text, text) {
 		// 模型先 group_say 做了完整汇报，AgentEnd 的 Content 是同一段收尾，
 		// 不能再写一条重复气泡；本轮已处理，推进游标。
@@ -447,7 +454,7 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		return
 	}
 	msg, routed, limitHit, routeErr, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, agentGroupWrite{
-		Text: text, RoundID: wake.RoundID, MessageID: wake.MessageID,
+		Text: text, RoundID: wake.RoundID, MessageID: wake.MessageID, Context: turnCtx,
 	})
 	m.hubGroupSendMu.Unlock()
 	if limitHit {
@@ -527,7 +534,10 @@ type agentGroupWrite struct {
 	MessageID  string
 	Mentions   []agenthub.AgentID
 	MentionAll bool
-	RouteFatal bool // true：@ 解析失败就不落消息（group_say）；false：正文照发（final）
+	RouteFatal bool
+	// Context 是本轮回复的触发上下文（final 由 finishHubRound 从游标窗口算；
+	// group_say 暂不填）。只进 UI，不参与路由/唤醒。
+	Context *agenthub.TurnContext
 }
 
 // appendAgentGroupMessageLocked 是 group_say / final 共用的「限流 + 路由 + 落账」路径。
@@ -553,7 +563,7 @@ func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub
 	msg = &agenthub.Message{
 		GroupID: g.ID, Kind: agenthub.KindText, ID: w.MessageID,
 		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: sender},
-		Text:   w.Text, RoundID: w.RoundID,
+		Text:   w.Text, RoundID: w.RoundID, Context: w.Context,
 	}
 	if r != nil {
 		routed = r

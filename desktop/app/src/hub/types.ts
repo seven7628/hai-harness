@@ -244,6 +244,12 @@ export interface HubGroupProgress {
   last_task_id?: string
   last_task_status?: string
   last_task_summary?: string
+  /**
+   * 前端投影：任务卡所在消息的 seq。0 = 最新可用消息不是任务卡；
+   * 缺省 = 尚未从事件里标记（刷新得到的 progress 只有 last_outcome 可判）。
+   * 用来挡住迟到的 hub_task_update 把旧结论写回 last_outcome（N2）。
+   */
+  last_task_seq?: number
 }
 
 /** hub_conversation 事件/回执里的对话视图（Go agenthub.ConversationView）。 */

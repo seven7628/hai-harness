@@ -44,12 +44,25 @@ const items = mod.buildThreadItems(
 assert(items.map((i) => i.kind).join(',') === 'message,round,message,message,round', '动作行插到各自 trigger_seq 之后')
 assert(items.filter((i) => i.kind === 'round').length === 2, '空 round 不产生动作行')
 
-// 3) roundKey：round_id 优先于 context.trigger_seqs；都没有为空。
+// 3) N3：同一轮有路由动作行时，紧跟的 routing_receipt 不重复渲染。
+const deduped = mod.buildThreadItems(
+  [msg(10), { ...msg(11), kind: 'routing_receipt', text: 'targets=ag_a' }, msg(12)],
+  [round('r1', 10)],
+)
+assert(deduped.filter((i) => i.kind === 'round').length === 1, '路由动作行只出现一次')
+assert(deduped.filter((i) => i.kind === 'message' && i.msg.kind === 'routing_receipt').length === 0, '对应轮次的 receipt 不再渲染')
+const standalone = mod.buildThreadItems(
+  [{ ...msg(20), kind: 'routing_receipt', text: 'targets=ag_a' }],
+  [],
+)
+assert(standalone.length === 1 && standalone[0].msg.kind === 'routing_receipt', '没有 round 时 receipt 仍保留')
+
+// 4) roundKey：round_id 优先于 context.trigger_seqs；都没有为空。
 assert(mod.roundKey(msg(1, { round_id: 'r9', context: { trigger_seqs: [3] } })) === 'r:r9', 'round_id 优先')
 assert(mod.roundKey(msg(1, { context: { trigger_seqs: [3, 4] } })) === 't:3,4', '退化为 trigger_seqs')
 assert(mod.roundKey(msg(1)) === '', '普通消息无轮次键')
 
-// 4) routingSummary：按名册还原，不出现 ag_/targets=。
+// 5) routingSummary：按名册还原，不出现 ag_/targets=。
 const names = { ag_a: 'Alice', ag_b: 'Bob' }
 assert(mod.routingSummary('targets=ag_a,ag_b', names) === '唤醒 Alice、Bob', '路由回执按名还原')
 assert(mod.routingSummary('@all targets=ag_a dropped=2', names) === '@all 唤醒 Alice（丢弃 2 个）', '@all + dropped')

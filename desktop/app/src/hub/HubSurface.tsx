@@ -7,6 +7,7 @@ import AgentEditor from './AgentEditor'
 import { alertSeverity } from './alerts'
 import HubInspector from './HubInspector'
 import GroupView from './GroupView'
+import { isImeComposing } from './mentions'
 import { formatRelativeTime, groupPreview, unreadBadge } from './conversation'
 import type { HubAgent, HubMessage, HubRunEntry } from './types'
 import './hub.css'
@@ -70,11 +71,13 @@ export default function HubSurface() {
 
   useEffect(() => {
     void refresh()
-    // 中途离开再回来：重开当前 DM —— 回复可能是在没有订阅时落定的（B3），
-    // 只 refresh() 会留下半截流式气泡与常亮运行点。
-    const id = useHubStore.getState().activeId
-    if (id) void select(id)
-    // 只在挂载时跑一次（select/refresh 自身的引用变化不需要重开）。
+    // 中途离开再回来：重开当前 target —— 回复可能是在没有订阅时落定的（B3），
+    // 只 refresh() 会留下半截流式气泡与常亮运行点；群还要重新水合 conversation/
+    // 已读游标（B7）。Hub 关闭期间 activeGroupId 仍保留，但事件按「未打开」计未读。
+    const state = useHubStore.getState()
+    if (state.activeGroupId) void selectGroup(state.activeGroupId)
+    else if (state.activeId) void select(state.activeId)
+    // 只在挂载时跑一次（select/selectGroup/refresh 自身的引用变化不需要重开）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -307,6 +310,8 @@ export default function HubSurface() {
                 placeholder={t('hub.placeholder')}
                 onChange={(e) => activeId && setDraft(activeId, e.target.value)}
                 onKeyDown={(e) => {
+                  // DM 与群 composer 同口径：IME 合成中的 Enter 属于输入法（B2）。
+                  if (isImeComposing(e.nativeEvent, e.keyCode)) return
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
                     submit()

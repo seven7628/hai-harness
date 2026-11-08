@@ -10,7 +10,7 @@ import {
 
 // 自动对话状态条（P3b-07，方案 §7.5.4 / §8.3.5）。
 // 事件驱动：hub_conversation 每次轮次/队列/终态变化都会来一条；这里只做展示。
-// 停止按钮的门禁在 conversationCanStop：running/exhausted 且有队列/在跑才可点。
+// 停止按钮的门禁在 conversationCanStop：有 run/队列/任务在跑才可点（active 优先）。
 
 export default function ConversationBar({
   conversation,
@@ -26,19 +26,22 @@ export default function ConversationBar({
   stopping?: boolean
   onStop?: () => void
 }) {
-  if (!conversation || !conversation.status || conversation.status === 'idle') return null
-  const tone = conversationTone(conversation.status)
+  // 人派的长任务可能没有自动对话视图：只要还有 run/任务在跑，也要给停止入口（B7）。
+  const status = conversation?.status ?? ''
+  const synthetic = !status || status === 'idle'
+  if (synthetic && !active) return null
+  const tone = synthetic ? 'running' : conversationTone(status)
   const canStop = conversationCanStop(conversation, active)
-  const pair = conversationPairText(conversation, pairNames)
-  const terminal = conversationTerminalText(conversation)
+  const pair = synthetic ? '' : conversationPairText(conversation, pairNames)
+  const terminal = synthetic ? '' : conversationTerminalText(conversation)
   return (
     <div className={`hub-conv-bar ${tone}`} role="group" aria-label="自动对话状态">
       <span className="hub-conv-status">
         <span className="hub-conv-dot" aria-hidden="true" />
-        {conversationStatusLabel(conversation.status)}
+        {synthetic ? '任务运行中' : conversationStatusLabel(status)}
       </span>
       <span className="hub-conv-turns" role="status" aria-live="polite">
-        {conversationTurnText(conversation)}
+        {synthetic ? '当前有 run 在跑，可随时停止' : conversationTurnText(conversation)}
       </span>
       {pair ? <span className="hub-conv-pair" title="同一对智能体的往返次数（防踢皮球）">{pair}</span> : null}
       {terminal ? <span className="hub-conv-terminal">{terminal}</span> : null}

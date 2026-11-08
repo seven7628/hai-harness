@@ -597,3 +597,132 @@ func TestClearHubGroupBusyAfterRunKeepsPendingRound(t *testing.T) {
 		t.Fatal("empty inbox must release the group latch")
 	}
 }
+
+// P3b-07 B6：final 群回复把「游标窗口里的智能体发送者」写进 Message.Context。
+func TestHubGroupFinalCarriesTurnContext(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "CtxA")
+	b := createHubAgent(t, m, buf, 2, "CtxB")
+	c := createHubAgent(t, m, buf, 3, "CtxC")
+	g := groupWithMembers(t, m, buf, 4, "上下文群",
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{a.ID, "owner"},
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{b.ID, "member"},
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{c.ID, "member"},
+	)
+	st := mustHubStore(t, m)
+	ctx := context.Background()
+	if _, err := st.AppendMessage(ctx, &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderHuman}, Text: "@CtxB 看一下",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendMessage(ctx, &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: c.ID}, Text: "C 的背景",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	triggerSeq, err := st.AppendMessage(ctx, &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: a.ID}, Text: "@CtxB 复核一下",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := st.ReadMessages(ctx, g.ID, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnCtx := agenthub.BuildTurnContext(b.ID, msgs, 0, triggerSeq)
+	if turnCtx == nil || len(turnCtx.Senders) != 2 {
+		t.Fatalf("precondition context = %+v, want A+C", turnCtx)
+	}
+	loaded, _, err := m.hubLoadAgent(string(b.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := m.hubSpecFor(loaded, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID}, m.hubRuntime(string(b.ID)).path)
+	spec.Group = g
+	wake := &agenthub.GroupWakeHeader{
+		GroupID: g.ID, AgentID: b.ID, RoundID: "rnd_ctx", TriggerSeq: triggerSeq,
+	}
+	// finishHubRound 自己从游标窗口重算 Context；这里不依赖 wake.Context。
+	m.finishHubRound(spec, wake, "B 的最终回复")
+
+	msgs, err = st.ReadMessages(ctx, g.ID, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply *agenthub.Message
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Sender.Kind == agenthub.SenderAgent && msgs[i].Sender.AgentID == b.ID {
+			reply = &msgs[i]
+			break
+		}
+	}
+	if reply == nil {
+		t.Fatal("B 的 final 回复未落账")
+	}
+	if reply.Context == nil {
+		t.Fatal("final 回复缺 Context")
+	}
+	got := map[agenthub.AgentID]bool{}
+	for _, s := range reply.Context.Senders {
+		got[s.AgentID] = true
+	}
+	if !got[a.ID] || !got[c.ID] || got[b.ID] {
+		t.Fatalf("Context.Senders = %+v, want A+C (not self)", reply.Context.Senders)
+	}
+	if len(reply.Context.TriggerSeqs) != 2 {
+		t.Fatalf("TriggerSeqs = %v, want 2 entries", reply.Context.TriggerSeqs)
+	}
+}
+
+// P3b-07 B7：hub_group_get 一次返回 conversation + 人类已读游标。
+func TestHubGroupGetHydratesConversationAndCursor(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "HydA")
+	g := convGroupWith(t, m, buf, 2, "水合群", nil, a)
+	p3bWireFake(t, m, g, string(a.ID), "收到")
+	ok, errMsg, data := hubCmd(t, m, buf, 3, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@HydA 看一下",
+	})
+	if !ok {
+		t.Fatalf("send: %s", errMsg)
+	}
+	seq := int64(0)
+	if v, ok := data["seq"].(float64); ok {
+		seq = int64(v)
+	}
+	if seq <= 0 {
+		t.Fatalf("send seq = %v", data["seq"])
+	}
+	ok, errMsg, data = hubCmd(t, m, buf, 4, "hub_group_get", map[string]any{"group_id": string(g.ID)})
+	if !ok {
+		t.Fatalf("group_get: %s", errMsg)
+	}
+	conv, _ := data["conversation"].(map[string]any)
+	if conv == nil {
+		t.Fatalf("group_get missing conversation: %+v", data)
+	}
+	if conv["status"] != string(agenthub.ConversationRunning) {
+		t.Fatalf("conversation.status = %v, want running", conv["status"])
+	}
+	if conv["turn_budget"] != float64(8) || conv["max_depth"] != float64(4) {
+		t.Fatalf("conversation limits = %+v", conv)
+	}
+	cursor, _ := data["cursor"].(map[string]any)
+	if cursor == nil || int64(cursor["human_read_seq"].(float64)) != seq {
+		t.Fatalf("cursor = %+v, want human_read_seq=%d", cursor, seq)
+	}
+}

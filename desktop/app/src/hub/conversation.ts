@@ -82,14 +82,18 @@ export function conversationTerminalText(conv?: HubConversation | null): string 
 }
 
 /**
- * 停止按钮是否可用：只有 running/exhausted 且**确实有东西可停**
- * （队列里有 wake，或当前有 run 在跑）才允许。终态/空闲一律禁用，
- * 避免点一下只写一条「你停止了自动对话」的系统消息。
+ * 停止按钮是否可用：**确实有东西可停**才允许。
+ * - active（流式草稿/成员在跑/已派发或运行中的群任务）优先：工具型长任务
+ *   可能没有草稿、也没有 running 的对话视图，任务状态是唯一信号（B7）；
+ * - 否则只有 running/exhausted 且队列里还有 wake 才可停；
+ * - stopped 一律禁用；idle 没有 active 时也禁用。
  */
 export function conversationCanStop(conv: HubConversation | null | undefined, active: boolean): boolean {
+  if (conv?.status === 'stopped') return false
+  if (active === true) return true
   if (!conv) return false
   if (conv.status !== 'running' && conv.status !== 'exhausted') return false
-  return (conv.queue_len ?? 0) > 0 || active === true
+  return (conv.queue_len ?? 0) > 0
 }
 
 /** 左栏预览：任务结论优先，其次最后一条可用消息（与 Go GroupPerception 同口径）。 */

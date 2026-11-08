@@ -1,36 +1,23 @@
 import type { CSSProperties } from 'react'
 import type { HubMessage } from './types'
 import type { MentionAgent } from './mentions'
+import { uniqueContextSenders } from './groupProjection'
 
 // 回复的触发上下文（P3b-07，方案 §8.3.5 TurnContextLine）。
 // 只有 ≥2 个**不同**触发者时才显示——单人回复没什么可解释的，多出来一行噪音。
-// trigger_seqs 放进 title/tooltip：可追溯到触发消息，不在正文里塞 #42。
-
-export interface ContextSender {
-  agent_id?: string
-  name?: string
-}
-
-function uniqueContextSenders(senders?: ContextSender[] | null): ContextSender[] {
-  const seen = new Set<string>()
-  const out: ContextSender[] = []
-  for (const s of senders ?? []) {
-    const key = s.agent_id || s.name || ''
-    if (!key || seen.has(key)) continue
-    seen.add(key)
-    out.push(s)
-  }
-  return out
-}
+// trigger_seqs 放进 title/tooltip；chip 点击只跳到触发消息并高亮（B6），不打开 DM。
 
 export default function TurnContextLine({
   msg,
   roster,
-  onSelectAgent,
+  triggerSeqBySender,
+  onJumpToSeq,
 }: {
   msg: HubMessage
   roster?: MentionAgent[]
-  onSelectAgent?: (agentID: string) => void
+  /** agent_id → 触发消息 seq（由已加载消息 + context.trigger_seqs 反推）。 */
+  triggerSeqBySender?: Record<string, number>
+  onJumpToSeq?: (seq: number) => void
 }) {
   const senders = uniqueContextSenders(msg.context?.senders)
   if (senders.length < 2) return null
@@ -45,20 +32,22 @@ export default function TurnContextLine({
         const name = s.name || agent?.name || s.agent_id || '成员'
         const accent = agent?.accent || 'var(--text-3)'
         const style = { '--context-accent': accent } as CSSProperties
+        const seq = (s.agent_id ? triggerSeqBySender?.[s.agent_id] : 0) || seqs[0] || 0
         const content = (
           <>
             <span className="hub-context-dot" aria-hidden="true" />
             {name}
           </>
         )
-        return s.agent_id && onSelectAgent && !agent?.deleted ? (
+        return onJumpToSeq && seq > 0 ? (
           <button
-            key={s.agent_id}
+            key={s.agent_id || name}
             type="button"
             className="hub-context-chip"
             style={style}
-            title={tip}
-            onClick={() => onSelectAgent(s.agent_id!)}
+            title={`${tip} · 点击定位`}
+            aria-label={`跳到 ${name} 的触发消息 #${seq}`}
+            onClick={() => onJumpToSeq(seq)}
           >
             {content}
           </button>

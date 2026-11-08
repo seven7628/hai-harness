@@ -10,18 +10,33 @@ export function RoundGroup({
   grouped,
   roster,
   onSelectAgent,
+  triggerSeqBySender,
+  onJumpToSeq,
+  highlightSeq,
 }: {
   messages: HubMessage[]
   names: Record<string, string>
   grouped: boolean
   roster?: MentionAgent[]
   onSelectAgent?: (agentID: string) => void
+  triggerSeqBySender?: Record<string, number>
+  onJumpToSeq?: (seq: number) => void
+  highlightSeq?: number | null
 }) {
   if (!grouped || messages.length < 2) {
     return (
       <>
         {messages.map((m) => (
-          <GroupBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} names={names} roster={roster} onSelectAgent={onSelectAgent} />
+          <GroupBubble
+            key={`${m.seq}-${m.clientMsgId ?? ''}`}
+            msg={m}
+            names={names}
+            roster={roster}
+            onSelectAgent={onSelectAgent}
+            triggerSeqBySender={triggerSeqBySender}
+            onJumpToSeq={onJumpToSeq}
+            highlightSeq={highlightSeq}
+          />
         ))}
       </>
     )
@@ -35,7 +50,16 @@ export function RoundGroup({
       </header>
       <div className="hub-round-group-body">
         {messages.map((m) => (
-          <GroupBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} names={names} roster={roster} onSelectAgent={onSelectAgent} />
+          <GroupBubble
+            key={`${m.seq}-${m.clientMsgId ?? ''}`}
+            msg={m}
+            names={names}
+            roster={roster}
+            onSelectAgent={onSelectAgent}
+            triggerSeqBySender={triggerSeqBySender}
+            onJumpToSeq={onJumpToSeq}
+            highlightSeq={highlightSeq}
+          />
         ))}
       </div>
     </section>

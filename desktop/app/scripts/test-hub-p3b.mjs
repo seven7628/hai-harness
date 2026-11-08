@@ -2,21 +2,25 @@
 // P3b-07 前端 hub 纯逻辑验收（Node 直跑，无需浏览器）：
 //   mentions：最长名字优先、fenced/inline code/URL/email 跳过、光标插入、选择器过滤；
 //   conversation：轮次/深度/队列文案、终态文案、停止按钮门禁、左栏预览回退、相对时间；
-//   taskCard：task_result 卡的 completed/failed/中断/拒绝文案、产物/耗时/成本、左栏结论行。
-// 这三块是「@ 路由 / 自动对话 / 任务卡」在 UI 侧的唯一分叉点，值得独立回归。
+//   taskCard：task_result 卡的 completed/failed/中断/拒绝文案、产物/耗时/成本、左栏结论行；
+//   groupProjection：未读/预览/任务更新/已读/竞态守卫；
+//   store：Hub 关闭时未读、打开时已读、hub_read seq<=0、迟到任务更新不复活结论。
+// 这些是「@ 路由 / 自动对话 / 任务卡 / 左栏未读」在 UI 侧的唯一分叉点，值得独立回归。
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const hubDir = join(__dirname, '..', 'src', 'hub')
-// 一个虚拟入口同时导出三个模块：esbuild 只跑一次，导入一个 data URL 即可。
+// 一个虚拟入口同时导出五个模块：esbuild 只跑一次，导入一个 data URL 即可。
 const result = await build({
   stdin: {
     contents: [
       "export * as mentions from './mentions.ts'",
       "export * as conversation from './conversation.ts'",
       "export * as taskCard from './taskCard.ts'",
+      "export * as groupProjection from './groupProjection.ts'",
+      "export * as store from './useHubStore.ts'",
     ].join('\n'),
     resolveDir: hubDir,
     sourcefile: 'hub-p3b-entry.ts',
@@ -27,10 +31,19 @@ const result = await build({
   format: 'esm',
   write: false,
   logLevel: 'silent',
+  // useHubStore 会把 mock transport 一起拉进来；Vite 的 ?raw/?url/?no-inline 在
+  // esbuild 里没有对应 loader，给它们一个空模块（本测试不渲染品牌图）。
+  plugins: [{
+    name: 'stub-vite-assets',
+    setup(build) {
+      build.onResolve({ filter: /\?(raw|url|no-inline)$/ }, (args) => ({ path: args.path, namespace: 'vite-asset' }))
+      build.onLoad({ filter: /.*/, namespace: 'vite-asset' }, () => ({ contents: 'export default ""', loader: 'js' }))
+    },
+  }],
 })
 const source = result.outputFiles[0].text
 const mod = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
-const { mentions, conversation, taskCard } = mod
+const { mentions, conversation, taskCard, groupProjection, store } = mod
 
 let pass = 0
 const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
@@ -101,6 +114,29 @@ const roster = [
   assert(!assignable.includes('ag_critic'), 'observer 不进派任务成员列表')
 }
 
+// —— 3b) mentions：IME / 空候选 Enter / 句读关闭 / Markdown 链接标签（B2/B3/N4）——
+{
+  assert(mentions.isImeComposing({ isComposing: true }, 0), 'IME 合成中（isComposing）')
+  assert(mentions.isImeComposing(null, 229), 'IME 合成中（keyCode 229）')
+  assert(!mentions.isImeComposing({ isComposing: false }, 13), '普通 Enter 不是 IME')
+  eq(mentions.mentionKeyAction('Enter', false), 'none', '空候选 Enter 不拦截（走发送）')
+  eq(mentions.mentionKeyAction('Tab', false), 'none', '空候选 Tab 不拦截（走焦点移动）')
+  eq(mentions.mentionKeyAction('Enter', true), 'pick', '有候选 Enter 确认')
+  eq(mentions.mentionKeyAction('Escape', false), 'dismiss', '空候选 Esc 仍关闭选择器')
+
+  assert(mentions.activeMentionQuery('@Writer，', 8) === null, '中文逗号结束 @ 查询（@Writer，）')
+  assert(mentions.activeMentionQuery('@Writer。', 8) === null, '中文句号结束 @ 查询')
+  assert(mentions.activeMentionQuery('@Writer,', 8) === null, 'ASCII 逗号结束 @ 查询')
+
+  const label = '[问 @Writer](https://example.com/x)'
+  eq(mentions.linkifyMentions(label, roster), label, 'Markdown 链接标签里的 @ 不改写（N4）')
+  eq(mentions.mentionIds(label, roster).length, 0, '链接标签里的 @ 不算结构化 mention')
+  const mixed = `${label} 和 @Alice`
+  const linkedMixed = mentions.linkifyMentions(mixed, roster)
+  eq((linkedMixed.match(/#mention=/g) ?? []).length, 1, '链接外的那一个 @ 仍 linkify')
+  eq(mentions.linkifyMentions('![@Writer](a.png)', roster), '![@Writer](a.png)', '图片 alt 里的 @ 也不改写')
+}
+
 // —— 4) mentions：@all 与群名册 ——
 {
   assert(mentions.hasMentionAll('@all 一起来'), '@all 识别')
@@ -167,8 +203,12 @@ const roster = [
   assert(conversation.conversationCanStop({ status: 'exhausted' }, true) === true, 'exhausted 且 run 在跑可停')
   assert(conversation.conversationCanStop({ status: 'exhausted' }, false) === false, 'exhausted 无 run 时禁用停止')
   assert(conversation.conversationCanStop({ status: 'stopped', queue_len: 5 }, true) === false, 'stopped 永远禁用停止')
-  assert(conversation.conversationCanStop({ status: 'idle', queue_len: 5 }, true) === false, 'idle 永远禁用停止')
-  assert(conversation.conversationCanStop(null, true) === false, '没有对话时禁用停止')
+  // B7：人派的长任务可能没有对话视图/队列，只有 active（任务 dispatched/running）。
+  assert(conversation.conversationCanStop({ status: 'idle', queue_len: 5 }, true) === true, 'idle 但任务/run 在跑时可停')
+  assert(conversation.conversationCanStop({ status: 'idle', queue_len: 5 }, false) === false, 'idle 且无事可做时禁用停止')
+  assert(conversation.conversationCanStop(null, true) === true, '没有对话但任务在跑时可停')
+  assert(conversation.conversationCanStop(null, false) === false, '没有对话也没有 run 时禁用停止')
+  assert(conversation.conversationCanStop({ status: 'waiting_human' }, true) === true, '队列排空但任务仍在跑时可停')
 }
 
 // —— 7) conversation：左栏预览回退 + 相对时间 + 99+ ——
@@ -201,8 +241,15 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
       { name: '', path: '' },
     ],
     error: '',
-  }, '三家价格表整理好了，含结论与风险。', { kind: 'agent', agent_id: 'ag_researcher' })
-  const view = taskCard.parseTaskResult(msg)
+  }, '三家价格表整理好了，含结论与风险。', { kind: 'agent', agent_id: 'ag_writer' })
+  // 真实形状：结果卡 sender 就是执行者；派发者只在账本 origin 里（B5）。
+  const task = {
+    id: 'task_31', title: '把三家价格表写成两页简报', status: 'completed',
+    origin: { kind: 'group', group_id: 'g1', agent_id: 'ag_researcher', agent_name: 'Researcher' },
+    target: { kind: 'agent', agent_id: 'ag_writer', group_id: 'g1' },
+    result: { summary: '三家价格表整理好了，含结论与风险。' },
+  }
+  const view = taskCard.parseTaskResult(msg, task)
   assert(view, 'task_result 解析出视图模型')
   eq(view.taskId, 'task_31', 'task_id')
   eq(view.status, 'completed', 'status')
@@ -212,8 +259,10 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
   eq(view.title, '把三家价格表写成两页简报', 'title 取 refs')
   eq(view.summary, '三家价格表整理好了，含结论与风险。', 'summary 取卡片正文')
   eq(view.error, '', 'completed 无错误')
-  eq(view.agentId, 'ag_writer', '执行者取 agent_id')
-  eq(view.initiatorAgentId, 'ag_researcher', '派发者取 sender')
+  eq(view.agentId, 'ag_writer', '执行者取 agent_id（sender）')
+  eq(view.originKind, 'group', '派发者取账本 origin.kind')
+  eq(view.initiatorAgentId, 'ag_researcher', '派发者取 origin.agent_id，不取 sender')
+  eq(view.initiatorName, 'Researcher', '派发者名取 origin.agent_name')
   eq(view.artifacts.length, 1, '空产物被丢弃')
   eq(view.artifacts[0].name, 'pricing-v3.md', '产物名字')
   eq(taskCard.taskDurationText(view.durationMs), '18.4s', '耗时文案')
@@ -248,6 +297,49 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
   eq(taskCard.taskOutcomeLine('completed', ''), '任务完成', '空摘要只留标题')
 }
 
+// —— 9b) taskCard：origin human / refs 快照 / 缺状态（B5/N10）——
+{
+  const humanMsg = card(
+    { task_id: 'task_h', status: 'completed', agent_id: 'ag_writer', title: '人派的任务' },
+    '好了', { kind: 'agent', agent_id: 'ag_writer' },
+  )
+  const human = taskCard.parseTaskResult(humanMsg, {
+    id: 'task_h', origin: { kind: 'human', group_id: 'g1' }, target: { kind: 'agent', agent_id: 'ag_writer' },
+  })
+  eq(human.originKind, 'human', '人派任务 origin.kind=human')
+  eq(human.initiatorAgentId, '', '人派任务没有发起 agent')
+  eq(human.initiatorName, '', '人派任务没有发起 agent 名')
+
+  // 任务未加载（重启/历史）：结果卡 refs 自带 origin 快照，仍能画「Researcher → Writer」。
+  const snapshotMsg = card(
+    {
+      task_id: 'task_s', status: 'completed', agent_id: 'ag_writer',
+      origin_kind: 'group', origin_agent_id: 'ag_researcher', origin_agent_name: 'Researcher',
+    },
+    '好了', { kind: 'agent', agent_id: 'ag_writer' },
+  )
+  const snapshot = taskCard.parseTaskResult(snapshotMsg)
+  eq(snapshot.originKind, 'group', '任务未加载时 origin_kind 取 refs 快照')
+  eq(snapshot.initiatorAgentId, 'ag_researcher', '任务未加载时 origin_agent_id 取 refs 快照')
+  eq(snapshot.initiatorName, 'Researcher', '任务未加载时 origin_agent_name 取 refs 快照')
+  eq(snapshot.agentId, 'ag_writer', '快照场景执行者仍是 sender')
+
+  const noOrigin = taskCard.parseTaskResult(card(
+    { task_id: 'task_n', status: 'completed', agent_id: 'ag_writer' },
+    '好了', { kind: 'agent', agent_id: 'ag_writer' },
+  ))
+  eq(noOrigin.initiatorAgentId, '', '账本与 refs 都没有 origin 时退回只显示执行者')
+  eq(noOrigin.originKind, '', '缺 origin 时不猜 human')
+
+  const unknown = taskCard.parseTaskResult(card(
+    { task_id: 'task_u', agent_id: 'ag_writer' }, '结果不明',
+  ))
+  eq(unknown.status, 'unknown', '缺 status → unknown（不能默认 completed）')
+  eq(unknown.statusLabel, '未知状态', 'unknown 文案')
+  eq(unknown.tone, 'muted', 'unknown 不是成功绿')
+  assert(unknown.terminal === false, 'unknown 不是终态')
+}
+
 // —— 10) taskCard：target_agent_id 优先 + 未计价 + 缺字段兜底 ——
 {
   const view = taskCard.parseTaskResult(card(
@@ -264,6 +356,153 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
   eq(taskCard.taskDurationText(0), '', '0ms 不显示耗时')
   eq(taskCard.taskDurationText(125_000), '2 分 05 秒', '分钟级耗时')
   assert(view.tone === 'warn' && view.terminal, 'interrupted 是 warn 终态')
+}
+
+// —— 11) groupProjection：正在看 / 可用消息 / 预览 / 未读 / 任务更新 / 已读 / 竞态 ——
+{
+  assert(groupProjection.isHubTargetActive(false, 'g1', 'g1') === false, 'Hub 关闭时 activeGroupId 仍留着也不算正在看')
+  assert(groupProjection.isHubTargetActive(true, 'g1', 'g1') === true, 'Hub 打开且当前群才算正在看')
+  assert(groupProjection.isHubTargetActive(true, 'g1', 'g2') === false, '别的群不算正在看')
+  assert(groupProjection.isUsableGroupMessage({ kind: 'routing_receipt', text: 'targets=ag_a' }) === false, '路由回执不进预览/未读')
+  assert(groupProjection.isUsableGroupMessage({ kind: 'round_summary', text: '总结' }) === false, '轮次总结不进预览/未读')
+  assert(groupProjection.isUsableGroupMessage({ kind: 'approval_stub', text: '审批' }) === false, '审批占位不进预览/未读')
+  assert(groupProjection.isUsableGroupMessage({ kind: 'text', text: '   ' }) === false, '空正文不算')
+  assert(groupProjection.isUsableGroupMessage({ kind: 'text', text: '好' }) === true, '普通正文算')
+
+  const base = {
+    unread: 2, last_seq: 4, last_text: '旧', last_task_id: 'task_0',
+    last_task_status: 'completed', last_task_summary: '旧任务', last_task_seq: 4, last_outcome: '任务完成：旧任务',
+  }
+  const m = (seq, sender, text, extra = {}) => ({
+    seq, kind: 'text', sender, text, created_at: '2026-03-10T12:00:00Z', ...extra,
+  })
+  const agent = { kind: 'agent', agent_id: 'ag_a' }
+  const human = { kind: 'human' }
+  let info = groupProjection.projectGroupMessage(base, m(5, agent, '新消息'), false)
+  eq(info.last_text, '新消息', '预览取最后一条可用消息')
+  eq(info.unread, 3, '关闭时 agent 消息累加未读')
+  info = groupProjection.projectGroupMessage(info, m(6, human, '人自己说的'), false)
+  eq(info.unread, 3, '人自己发的消息不累加未读')
+  const uiOnly = groupProjection.projectGroupMessage(info, m(7, { kind: 'system' }, 'targets=ag_a', { kind: 'routing_receipt' }), false)
+  assert(uiOnly === info, 'UI-only 消息不改投影（引用相等）')
+  const seen = groupProjection.projectGroupMessage(info, m(8, agent, '正在看'), true)
+  eq(seen.unread, 0, '正在看时未读保持 0')
+
+  const cardMsg = m(9, agent, '三家价格表好了', {
+    kind: 'task_result',
+    refs: { task_id: 'task_9', status: 'completed', agent_id: 'ag_a', title: '简报' },
+  })
+  const withCard = groupProjection.projectGroupMessage(base, cardMsg, false)
+  eq(withCard.last_outcome, '任务完成：三家价格表好了', '任务卡给出左栏结论')
+  eq(withCard.last_task_seq, 9, '记住任务卡 seq')
+  eq(withCard.last_task_id, 'task_9', '记住任务 id')
+  const after = groupProjection.projectGroupMessage(withCard, m(10, agent, '后续普通消息'), false)
+  eq(after.last_outcome, '', '后续普通消息清掉结论')
+  eq(after.last_task_seq, 0, '任务卡不再是最新可用消息')
+  eq(after.last_task_id, 'task_9', 'last_task_* 仍跟随最近一张卡')
+
+  // N2：迟到更新不能把已经被普通消息清掉的结论复活。
+  const late = groupProjection.projectTaskUpdate(after, {
+    task_id: 'task_9', status: 'completed', task: { id: 'task_9', result: { summary: '迟到的总结' } },
+  })
+  eq(late.last_outcome, '', '迟到的 hub_task_update 不复活 last_outcome')
+  const latest = groupProjection.projectTaskUpdate(
+    { ...withCard, last_seq: 9 },
+    { task_id: 'task_9', status: 'completed', task: { id: 'task_9', result: { summary: '更新的总结' } } },
+  )
+  eq(latest.last_outcome, '任务完成：更新的总结', '任务卡仍是最新时更新结论')
+  eq(groupProjection.projectTaskUpdate(withCard, { task_id: 'other', status: 'failed' }), withCard, '别的任务更新不动本群投影')
+
+  assert(groupProjection.projectGroupRead({ ...withCard, unread: 3 }, 0).unread === 3, 'hub_read seq=0 不清未读')
+  assert(groupProjection.projectGroupRead({ ...withCard, unread: 3, last_seq: 9 }, 8).unread === 3, '读到旧 seq 不清更新的未读')
+  assert(groupProjection.projectGroupRead({ ...withCard, unread: 3, last_seq: 9 }, 9).unread === 0, '读到最新 seq 清未读')
+
+  assert(groupProjection.shouldApplyGroupProgress(undefined, { last_seq: 1 }, 0, 0) === true, '无本地投影时采纳快照')
+  assert(groupProjection.shouldApplyGroupProgress({ last_seq: 5 }, { last_seq: 6 }, 0, 100) === true, '快照 seq 更新时采纳')
+  assert(groupProjection.shouldApplyGroupProgress({ last_seq: 5 }, { last_seq: 4 }, 0, 100) === false, '快照 seq 更旧时丢弃')
+  assert(groupProjection.shouldApplyGroupProgress({ last_seq: 5 }, { last_seq: 5 }, 200, 100) === false, '同 seq 但请求开始后本地更新过 → 丢弃')
+  assert(groupProjection.shouldApplyGroupProgress({ last_seq: 5 }, { last_seq: 5 }, 100, 200) === true, '同 seq 且本地没再更新 → 采纳')
+
+  const ctxMsgs = [
+    m(1, human, '@A @B 看一下'),
+    m(2, { kind: 'agent', agent_id: 'ag_a' }, 'A 的背景', { context: { trigger_seqs: [1, 2] } }),
+    m(3, { kind: 'agent', agent_id: 'ag_b' }, 'B 的背景'),
+    m(4, { kind: 'agent', agent_id: 'ag_a' }, 'A 补充', { context: { trigger_seqs: [2, 3] } }),
+  ]
+  const map = groupProjection.triggerSeqBySender(ctxMsgs)
+  eq(map.ag_a, 2, 'A 的触发消息 seq 精确到 2')
+  eq(map.ag_b, 3, 'B 的触发消息 seq 精确到 3')
+  const senders = groupProjection.uniqueContextSenders([
+    { agent_id: 'ag_a', name: 'A' }, { agent_id: 'ag_a', name: 'A' }, { name: 'B' }, {},
+  ])
+  eq(senders.length, 2, 'context senders 去重并丢掉幽灵项')
+  eq(groupProjection.uniqueContextSenders([{ agent_id: 'ag_a' }]).length, 1, '单发送者由组件隐藏')
+}
+
+// —— 12) store：Hub 关闭未读 / 打开已读 / hub_read seq<=0 / 迟到任务更新（B4/N2/N10）——
+{
+  const H = store.useHubStore
+  const reset = (patch = {}) => H.setState({
+    open: false, activeId: null, activeGroupId: null, groupInfo: {}, groupMessages: [],
+    groupDrafts: [], groupReadSeq: {}, dm: {}, messages: [], tasks: [], groupConversations: {},
+    ...patch,
+  })
+  const ev = (x) => H.getState().handleEvent(JSON.stringify(x))
+  const groupMsg = (seq, text, sender = { kind: 'agent', agent_id: 'ag_a' }) => ev({
+    event_type: 'hub_message', group_id: 'g1', seq,
+    message: { seq, kind: 'text', sender, text, created_at: '2026-03-10T12:00:00Z' },
+  })
+
+  reset({ activeGroupId: 'g1', groupInfo: { g1: { unread: 0, last_seq: 10, last_text: '旧' } } })
+  groupMsg(11, '关闭期间来的')
+  const closed = H.getState().groupInfo.g1
+  eq(closed.unread, 1, 'Hub 关闭时新消息累加未读（activeGroupId 还在）')
+  eq(closed.last_seq, 11, '关闭时预览仍前移')
+  eq(H.getState().groupMessages.length, 0, '关闭时不把消息塞进时间线')
+
+  H.setState({ open: true })
+  groupMsg(12, '打开后到的')
+  const opened = H.getState().groupInfo.g1
+  eq(opened.unread, 0, 'Hub 打开且当前群时新消息直接已读')
+  eq(H.getState().groupMessages.length, 1, '打开时消息进时间线')
+
+  reset({ open: true, activeGroupId: 'g1', groupInfo: { g1: { unread: 4, last_seq: 12 } } })
+  ev({ event_type: 'hub_read', group_id: 'g1', seq: 0 })
+  eq(H.getState().groupInfo.g1.unread, 4, 'hub_read seq=0 不清未读')
+  ev({ event_type: 'hub_read', group_id: 'g1', seq: 12 })
+  eq(H.getState().groupInfo.g1.unread, 0, 'hub_read 读到最新 seq 清未读')
+
+  reset({
+    activeId: 'ag_a', dm: { ag_a: { unread: 0, last_seq: 0 } },
+  })
+  ev({
+    event_type: 'hub_message', agent_id: 'ag_a', seq: 1,
+    message: { seq: 1, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_a' }, text: 'DM 关闭时来的' },
+  })
+  eq(H.getState().dm.ag_a.unread, 1, 'DM 在 Hub 关闭时累加未读')
+  eq(H.getState().messages.length, 0, 'DM 关闭时不进时间线')
+  H.setState({ open: true })
+  ev({
+    event_type: 'hub_message', agent_id: 'ag_a', seq: 2,
+    message: { seq: 2, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_a' }, text: 'DM 打开后' },
+  })
+  eq(H.getState().dm.ag_a.unread, 0, 'DM 打开后已读')
+  eq(H.getState().messages.length, 1, 'DM 打开后进时间线')
+
+  reset({
+    activeGroupId: 'g1',
+    groupInfo: {
+      g1: {
+        unread: 0, last_seq: 10, last_text: '后续普通消息', last_task_id: 'task_9',
+        last_task_seq: 0, last_outcome: '', last_task_status: 'completed',
+      },
+    },
+  })
+  ev({
+    event_type: 'hub_task_update', group_id: 'g1', task_id: 'task_9', status: 'completed',
+    task: { id: 'task_9', target: { group_id: 'g1' }, result: { summary: '迟到的总结' } },
+  })
+  eq(H.getState().groupInfo.g1.last_outcome, '', 'store 层：迟到任务更新不复活结论')
 }
 
 console.log(`\n✅ hub P3b-07 纯逻辑：${pass} 项全部通过`)

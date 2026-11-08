@@ -13,14 +13,18 @@ export default function TaskResultCard({
 }: {
   view: TaskCardView
   executor?: MentionAgent | null
-  /** 派发者（智能体派的任务）；人派的任务传 null → 文案「你 → 执行者」。 */
+  /** 派发者（账本 origin 解析出的智能体）；人派任务 originKind=human → 文案「你 → 执行者」。 */
   initiator?: MentionAgent | null
   onOpenAgent?: () => void
 }) {
   const usage = taskUsageText(view.usage)
   const duration = taskDurationText(view.durationMs)
   const execName = executor?.name || view.agentId
-  const fromName = initiator?.name || view.initiatorAgentId || (view.initiatorAgentId ? '' : '你')
+  // 派发者只认账本 origin（B5）：human → 你；智能体 → 名册/origin 快照/ID；
+  // 未知（任务未加载且无 refs 快照）→ 只显示执行者。
+  const fromName = view.originKind === 'human'
+    ? '你'
+    : (initiator?.name || view.initiatorName || view.initiatorAgentId || '')
   return (
     <article className={`hub-task-card tone-${view.tone}`} aria-label={`任务卡：${view.title}（${view.statusLabel}）`}>
       <header className="hub-task-card-head">

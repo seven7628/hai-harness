@@ -674,6 +674,8 @@ button.hub-budget-chip:hover { border-color: currentColor; }
   border: 1px solid color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 38%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 13%, transparent);
+  /* 文本用 accent 与 --ink 的混合色：accent 只留给圆点/头像（B8，paper ≥4.5:1）。 */
+  --mention-text: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 30%, var(--ink));
   color: var(--ink);
   font: inherit;
   font-size: 0.94em;
@@ -691,7 +693,7 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   background: var(--mention-accent, var(--accent-solid));
   flex: none;
 }
-.hub-mention-name { color: var(--mention-accent, var(--accent-solid)); font-weight: 550; }
+.hub-mention-name { color: var(--mention-text); font-weight: 550; }
 .hub-mention-avatar { font-size: 0.9em; line-height: 1; }
 .hub-mention-gone { color: var(--text-3); font-size: 0.86em; }
 .hub-mention.gone { opacity: 0.55; filter: grayscale(1); }
@@ -943,9 +945,10 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   gap: 4px;
   margin: 2px 0 -2px;
   font-size: 10.5px;
-  color: var(--text-3);
+  /* 小字标签也要过 4.5:1：--text-3 单独在 paper 只有 3.3，压向 --ink。 */
+  color: color-mix(in srgb, var(--text-3) 55%, var(--ink));
 }
-.hub-context-label { color: var(--text-3); }
+.hub-context-label { color: inherit; }
 .hub-context-chip {
   display: inline-flex;
   align-items: center;
@@ -954,7 +957,8 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   border: 0;
   border-radius: 4px;
   background: none;
-  color: var(--context-accent, var(--text-2));
+  /* 同 B8：chip 文字压暗到与 --ink 混合，accent 只保留给圆点。 */
+  color: color-mix(in srgb, var(--context-accent, var(--text-2)) 30%, var(--ink));
   font: inherit;
   font-size: 10.5px;
 }

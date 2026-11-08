@@ -685,6 +685,8 @@ class MockTransport implements Transport {
   private hubGroupTasks = new Map<string, Record<string, unknown>>()
   private hubGroupAssigns = new Map<string, Record<string, unknown>>() // client_msg_id → 响应（幂等）
   private hubGroupTaskNo = 0
+  // 每群脚本代际：hub_conversation_stop 换代后，未到点的任务卡/流式回调全部作废（N9）。
+  private hubGroupGen = new Map<string, number>()
 
   private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string }[] {
     let list = this.hubMessages.get(agentID)
@@ -735,6 +737,7 @@ class MockTransport implements Transport {
         {
           seq: 4, id: 'gm_mock4', kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
           text: '已润色成两页，结论放在开头。@Researcher 风险那节你再看一眼。', round_id: 'rnd_mock1',
+          // fixture：真实 bridge 由 finishHubRound 从游标窗口写 TurnContext（B6）。
           context: {
             trigger_seqs: [1, 3],
             senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }, { agent_id: 'ag_mockwri2', name: 'Writer' }],
@@ -746,6 +749,8 @@ class MockTransport implements Transport {
           text: '已生成两页简报，含价格对比、结论与风险。', created_at: at(45 * 60_000),
           refs: {
             task_id: 'task_mock1', status: 'completed', agent_id: 'ag_mockwri2', target_agent_id: 'ag_mockwri2',
+            // fixture：B5 的 origin 快照（真实 bridge 写卡时也落这三个字段）。
+            origin_kind: 'human',
             title: '把三家价格表写成两页简报', duration_ms: 18_400,
             usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
             artifacts: [{ name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140 }],
@@ -758,6 +763,15 @@ class MockTransport implements Transport {
       // 最后两张卡未读：左栏演示「未读点 + 任务完成结论」。
       this.hubGroupRead.set(gid, 3)
       this.hubGroupConversations.set(gid, this.mockConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 }))
+      // 预置账本条目：历史任务卡的「派发者」只能从 origin 来（B5），没有它卡片只显示执行者。
+      this.hubGroupTasks.set('task_mock1', {
+        id: 'task_mock1', root_task_id: 'task_mock1', title: '把三家价格表写成两页简报',
+        instruction: '把三家价格表写成两页简报', status: 'completed', attempt: 1,
+        origin: { kind: 'human', group_id: gid },
+        target: { kind: 'agent', agent_id: 'ag_mockwri2', group_id: gid, session_id: `hub.ag_mockwri2.g.${gid}` },
+        result: { summary: '已生成两页简报，含价格对比、结论与风险。', finish_reason: 'stop' },
+        created_at: at(3 * 3_600_000), updated_at: at(45 * 60_000),
+      })
     }
     return list
   }
@@ -861,8 +875,8 @@ class MockTransport implements Transport {
     })
   }
 
-  /** 从正文 + 结构化 mentions 解析目标（mock 只做名字包含，真实解析在 Go）。 */
-  private hubGroupTargets(gid: string, text: string, mentions: unknown): string[] {
+  /** 从正文 + 结构化 mentions/mention_all 解析目标（mock 只做名字包含，真实解析在 Go）。 */
+  private hubGroupTargets(gid: string, text: string, mentions: unknown, mentionAll = false): string[] {
     const members = this.hubGroupMemberIDs(gid)
     const out: string[] = []
     if (Array.isArray(mentions)) {
@@ -878,7 +892,7 @@ class MockTransport implements Transport {
     for (const a of named) {
       if (lowered.includes(`@${String(a.name).toLowerCase()}`) && !out.includes(String(a.id))) out.push(String(a.id))
     }
-    if (/@all\b/i.test(text) || text.includes('＠all') || text.includes('@所有人') || text.includes('＠所有人')) {
+    if (mentionAll || /@all\b/i.test(text) || text.includes('＠all') || text.includes('@所有人') || text.includes('＠所有人')) {
       for (const id of members) if (!out.includes(id)) out.push(id)
     }
     return out
@@ -905,6 +919,7 @@ class MockTransport implements Transport {
     const sessionID = `hub.${first}.g.${gid}`
     const runID = `run_mock_${triggerSeq}_${first}`
     const start = opts.startMs ?? 400
+    const gen = this.hubGroupGen.get(gid) ?? 0
     this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'running' })
     this.emit({ event_type: 'agent_start', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
     const runes = Array.from(reply)
@@ -913,6 +928,7 @@ class MockTransport implements Transport {
     for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
     chunks.forEach((chunk, i) => {
       this.afterBg(start + i * 90, () => {
+        if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
         this.emit({
           event_type: 'hub_message_delta', group_id: gid, agent_id: first, round_id: roundID,
           message_id: messageID, index: i, delta: chunk,
@@ -920,6 +936,7 @@ class MockTransport implements Transport {
       })
     })
     this.afterBg(start + chunks.length * 90 + 90, () => {
+      if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
       const msg = this.hubGroupAppend(gid, {
         kind: 'text', sender: { kind: 'agent', agent_id: first }, text: reply, round_id: roundID,
         context: {
@@ -2578,12 +2595,12 @@ class MockTransport implements Transport {
         const gid = String(cmd.payload?.group_id ?? '')
         const group = this.hubGroup(gid)
         if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
-        // 打开群先对齐对话状态（真 bridge 在 begin/轮次推进时广播；mock 没有后台控制器，
-        // 就在这里补一条，否则状态条在首次发送前永远不出现）。
+        // 打开群一次水合：对话状态 + 人类已读游标（B7）。不再靠一条假事件——
+        // 真 bridge 的 hub_group_get 直接返回 conversation/cursor。
         this.hubGroupLog(gid)
-        const conv = this.hubGroupConversations.get(gid)
-        if (conv) this.emit({ event_type: 'hub_conversation', group_id: gid, conversation: conv })
-        this.respond(cmd, { group })
+        const conversation = this.hubGroupConversations.get(gid) ?? this.mockConversation(gid, 'idle')
+        const humanReadSeq = this.hubGroupRead.get(gid) ?? 0
+        this.respond(cmd, { group, conversation, cursor: { human_read_seq: humanReadSeq } })
         break
       }
       case 'hub_group_history': {
@@ -2614,7 +2631,8 @@ class MockTransport implements Transport {
           this.respond(cmd, { seq: existing.seq, message_id: existing.id, deduplicated: true })
           break
         }
-        const targets = this.hubGroupTargets(gid, text, cmd.payload?.mentions)
+        const mentionAll = cmd.payload?.mention_all === true
+        const targets = this.hubGroupTargets(gid, text, cmd.payload?.mentions, mentionAll)
         const msg = this.hubGroupAppend(gid, {
           kind: 'text', sender: { kind: 'human' }, text,
           ...(clientID ? { refs: { client_msg_id: clientID } } : {}),
@@ -2626,7 +2644,7 @@ class MockTransport implements Transport {
         const round = targets.length > 0
           ? {
             id: `rnd_mock_${msg.seq}`, group_id: gid, trigger_seq: msg.seq, targets,
-            mention_all: /@all\b/i.test(text), dropped: 0,
+            mention_all: mentionAll || /@all\b/i.test(text), dropped: 0,
           }
           : null
         if (round) {
@@ -2651,6 +2669,11 @@ class MockTransport implements Transport {
         if (!target) { this.respondErr(cmd, 'to_agent 不能为空（也接受 agent_id）'); break }
         if (!instruction) { this.respondErr(cmd, 'instruction 不能为空'); break }
         if (!this.hubGroupMemberIDs(gid).includes(target)) { this.respondErr(cmd, '目标不是该群成员'); break }
+        const membersRaw = (group.members as Array<{ agent_id?: string; role?: string }> | undefined) ?? []
+        if (membersRaw.find((m) => String(m.agent_id) === target)?.role === 'observer') {
+          this.respondErr(cmd, 'observer 只旁听，不能接派任务')
+          break
+        }
         const cacheKey = `${gid}:${clientID}`
         const cached = clientID ? this.hubGroupAssigns.get(cacheKey) : undefined
         if (cached) { this.respond(cmd, cached); break }
@@ -2681,8 +2704,11 @@ class MockTransport implements Transport {
         if (clientID) this.hubGroupAssigns.set(cacheKey, response)
         this.hubGroupSetConversation(gid, 'running', { turns: 1, depth: 1, queue: 1 })
         this.respond(cmd, response)
+        const gen = this.hubGroupGen.get(gid) ?? 0
         // 脚本化任务生命周期：queued → dispatched → running → completed（任务卡回群）。
+        // 停止（hub_conversation_stop）会换代，下面所有未到点的回调直接作废（N9）。
         this.afterBg(1_200, () => {
+          if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
           task.status = 'dispatched'
           task.updated_at = new Date().toISOString()
           this.hubGroupTaskUpdate(task, gid)
@@ -2694,11 +2720,14 @@ class MockTransport implements Transport {
           reply: '先核对三家价格，再生成两页简报，结论放开头。',
         })
         this.afterBg(2_400, () => {
+          if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
           const summary = '已生成两页简报：价格对比、结论与风险都在里面。'
           const cardMsg = this.hubGroupAppend(gid, {
             kind: 'task_result', sender: { kind: 'agent', agent_id: target }, text: summary,
             refs: {
               task_id: taskID, status: 'completed', agent_id: target, target_agent_id: target,
+              // 人派的：卡片自带 origin 快照，任务列表没加载也能显示「你 → Writer」。
+              origin_kind: 'human',
               title: String(task.title ?? ''), duration_ms: 18_400,
               usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
               artifacts: [{ name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140 }],
@@ -2750,6 +2779,7 @@ class MockTransport implements Transport {
       case 'hub_conversation_stop': {
         const gid = String(cmd.payload?.group_id ?? '')
         if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在'); break }
+        this.hubGroupGen.set(gid, (this.hubGroupGen.get(gid) ?? 0) + 1)
         const prev = this.hubGroupConversations.get(gid) ?? {}
         const notice = this.hubGroupAppend(gid, {
           kind: 'system', sender: { kind: 'system' }, text: '人类停止了自动对话，等你继续',

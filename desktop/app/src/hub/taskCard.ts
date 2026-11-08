@@ -1,4 +1,4 @@
-import type { HubMessage, HubTaskArtifact, HubTaskUsage } from './types'
+import type { HubMessage, HubTask, HubTaskArtifact, HubTaskUsage } from './types'
 
 // 群内任务结果卡（P3b-07，方案 §7.5.5 / §8.3.5）。
 //
@@ -23,8 +23,15 @@ export interface TaskCardView {
   error: string
   /** 执行者（target_agent_id 优先；task_result 的 agent_id 就是执行者）。 */
   agentId: string
-  /** 派发者（任务卡发送者；人派的任务为空）。 */
+  /**
+   * 派发者：来自账本 `task.origin`（缺失时回退 refs 快照），**不是**
+   * task_result 的 sender（bridge 写的 sender 就是执行者本人）。
+   */
   initiatorAgentId: string
+  /** 派发者显示名（账本 origin.agent_name 或 refs 快照）；任务未加载时可为空。 */
+  initiatorName: string
+  /** human | group | dm | agent | ''（未知/账本未加载）。 */
+  originKind: string
   durationMs: number
   usage: HubTaskUsage | null
   artifacts: HubTaskArtifact[]
@@ -48,6 +55,7 @@ const STATUS_VIEW: Record<string, TaskStatusView> = {
   canceled: { label: '已取消', tone: 'muted', terminal: true },
   declined: { label: '已被拒绝', tone: 'warn', terminal: true },
   blocked_budget: { label: '预算/护栏阻断', tone: 'warn', terminal: true },
+  unknown: { label: '未知状态', tone: 'muted', terminal: false },
 }
 
 export function taskStatusView(status?: string): TaskStatusView {
@@ -114,26 +122,39 @@ function firstLine(text: string): string {
 /**
  * kind=task_result → 稳定视图模型；其他消息返回 null（系统/普通气泡走原路径）。
  * 卡片正文是执行者摘要（没有摘要的终态是原因兜底），refs 里才是权威字段。
+ *
+ * task 是账本条目（hub_task_update/task_list）：派发者只看 origin，绝不从
+ * msg.sender 推 —— bridge 写结果卡时 sender = 执行者。任务未加载时回退到
+ * refs 里的 origin 快照（bridge 写卡时一并落账）；两者都没有才只显示执行者。
  */
-export function parseTaskResult(msg: HubMessage): TaskCardView | null {
+export function parseTaskResult(msg: HubMessage, task?: HubTask | null): TaskCardView | null {
   if (!msg || msg.kind !== 'task_result') return null
   const refs = (msg.refs ?? {}) as Record<string, unknown>
   const body = (msg.text ?? '').trim()
-  const status = str(refs.status) || 'completed'
+  // 缺状态 = 未知，不能默认 completed（否则失败卡会被画成绿色成功）。
+  const status = str(refs.status) || 'unknown'
   const statusView = taskStatusView(status)
-  const error = str(refs.error)
-  const summary = str(refs.summary) || (error && body === error ? '' : body)
-  const title = str(refs.title) || firstLine(summary || body) || '任务结果'
-  const agentId = str(refs.target_agent_id) || str(refs.agent_id)
-  const initiator = msg.sender?.kind === 'agent' ? (msg.sender?.agent_id ?? '') : ''
+  const error = str(refs.error) || str(task?.error) || str(task?.result?.error)
+  const summary = str(refs.summary) || str(task?.result?.summary) || (error && body === error ? '' : body)
+  const title = str(refs.title) || str(task?.title) || firstLine(summary || body) || '任务结果'
+  const agentId = str(refs.target_agent_id) || str(refs.agent_id) || str(task?.target?.agent_id)
+  // 账本 origin.kind 是 human/group/dm（不是 sender kind）；结果卡 refs 自带一份
+  // origin 快照，任务未加载（历史/重启后还没拉 task_list）也能画出「谁 → 执行者」。
+  const originKind = str(task?.origin?.kind) || str(refs.origin_kind)
+  const originAgentId = str(task?.origin?.agent_id) || str(refs.origin_agent_id)
+  const originAgentName = str(task?.origin?.agent_name) || str(refs.origin_agent_name)
+  const initiatorAgentId = originKind && originKind !== 'human' ? originAgentId : ''
+  const initiatorName = originKind && originKind !== 'human' ? originAgentName : ''
   return {
-    taskId: str(refs.task_id),
+    taskId: str(refs.task_id) || str(task?.id),
     status,
     title,
     summary,
     error,
     agentId,
-    initiatorAgentId: initiator,
+    initiatorAgentId,
+    initiatorName,
+    originKind,
     durationMs: Math.max(0, num(refs.duration_ms)),
     usage: asUsage(refs.usage),
     artifacts: asArtifacts(refs.artifacts),

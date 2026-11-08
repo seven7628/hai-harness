@@ -26,7 +26,15 @@ export function buildThreadItems(messages: HubMessage[], rounds: HubRound[]): Th
     if (!seq) continue
     bySeq.set(seq, [...(bySeq.get(seq) ?? []), r])
   }
+  // N3：同一轮已经有「路由」动作行时，紧跟其后的 routing_receipt 不再单独渲染，
+  // 否则群里会出现两条「唤醒 Writer」。receipt 由 AppendGroupMessageRouted 紧跟在
+  // 触发消息后面写（seq = trigger+1），历史数据也守这个不变式。
+  const actionSeqs = new Set<number>()
+  for (const r of rounds) {
+    if (roundHasAction(r) && (r.trigger_seq ?? 0) > 0) actionSeqs.add(r.trigger_seq as number)
+  }
   for (const msg of messages) {
+    if (msg.kind === 'routing_receipt' && actionSeqs.has(msg.seq - 1)) continue
     items.push({ kind: 'message', msg })
     for (const r of bySeq.get(msg.seq) ?? []) items.push({ kind: 'round', round: r })
   }

@@ -10,6 +10,7 @@ import ConversationBar from './ConversationBar'
 import MentionPicker from './MentionPicker'
 import TypingIndicator from './TypingIndicator'
 import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './groupThread'
+import { triggerSeqBySender } from './groupProjection'
 import {
   ALL_MENTION_ID,
   activeMentionQuery,
@@ -18,7 +19,9 @@ import {
   filterMentionCandidates,
   groupRoster,
   hasMentionAll,
+  isImeComposing,
   mentionIds,
+  mentionKeyAction,
   type MentionAgent,
 } from './mentions'
 import type { HubGroup, HubGroupMember, HubMessage } from './types'
@@ -30,6 +33,10 @@ import type { HubGroup, HubGroupMember, HubMessage } from './types'
 //   对话：@ 弹成员选择器（结构化 mentions 随 hub_group_send 一起发）；
 //   派任务：选成员 + 指令 + 可选标题 → hub_group_assign（plan §7.1.3 的 agent_id 键）。
 // 同轮回复按 round_id（或同一组 trigger_seqs）合并；「分开」保留平铺。
+//
+// 滚动（B1）：与 DM 同一条规则「用户本来在底部才跟随」；发送/派任务/打开群时
+// 强制贴底。任务卡是异步长出来的，消息长度/派任务说明/对话状态/输入中都会触发。
+// 上下文 chip（B6）：跳到触发消息并高亮 data-seq，不打开 DM。
 
 const MENTION_LISTBOX_ID = 'hub-mention-listbox'
 
@@ -45,6 +52,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const convStopping = useHubStore((s) => s.groupConvStopping)
   const conversation = useHubStore((s) => s.groupConversations[group.id] ?? null)
   const running = useHubStore((s) => s.running)
+  const tasks = useHubStore((s) => s.tasks)
   const send = useHubStore((s) => s.sendGroup)
   const sendAssign = useHubStore((s) => s.sendGroupAssign)
   const stopConversation = useHubStore((s) => s.stopGroupConversation)
@@ -53,11 +61,10 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const [draft, setDraft] = useState('')
   const [composerMode, setComposerMode] = useState<'chat' | 'assign'>('chat')
   const [view, setView] = useState<'chat' | 'run'>('chat')
-  const [displayMode, setDisplayMode] = useState<'grouped' | 'flat'>(() =>
-    typeof localStorage !== 'undefined' && localStorage.getItem('hub.groupDisplay') === 'flat' ? 'flat' : 'grouped',
-  )
+  const [displayMode, setDisplayMode] = useState<'grouped' | 'flat'>(readGroupDisplay)
   // @ 选择器：焦点始终在 textarea，选择器只做 listbox/aria-activedescendant。
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const assignTextareaRef = useRef<HTMLTextAreaElement>(null)
   const [caret, setCaret] = useState(0)
   const [mentionIndex, setMentionIndex] = useState(0)
   const [dismissedMentionStart, setDismissedMentionStart] = useState(-1)
@@ -65,6 +72,12 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const [assignTarget, setAssignTarget] = useState('')
   const [assignTitle, setAssignTitle] = useState('')
   const [assignInstruction, setAssignInstruction] = useState('')
+  // 时间线滚动 + 触发消息高亮（B1/B6）
+  const listRef = useRef<HTMLDivElement>(null)
+  const threadRef = useRef<HTMLDivElement>(null)
+  const stickBottom = useRef(true)
+  const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const members = group.members ?? []
   const roster = useMemo(() => groupRoster(group, agents), [group, agents])
@@ -110,19 +123,86 @@ export default function GroupView({ group }: { group: HubGroup }) {
     setAssignTarget(assignable[0]?.id ?? '')
   }, [assignable, assignTarget])
 
+  const items = useMemo(() => buildThreadItems(messages, rounds), [messages, rounds])
+  // 草稿按当前群过滤一次：空态判断和渲染必须用同一份，否则别的群的草稿会让
+  // 本群「还没有消息」的引导语消失，却渲染出零个气泡（空面板）。
+  const groupDrafts = useMemo(() => drafts.filter((d) => d.groupId === group.id), [drafts, group.id])
+  const typingNames = useMemo(
+    () => groupDrafts.map((d) => agentNames[d.agentId] ?? d.agentId),
+    [groupDrafts, agentNames],
+  )
+  // 停止按钮的 active 条件：流式草稿 / 群成员在跑 / 群任务已派发或在跑。
+  // 工具型长任务可能没有草稿也没有流式正文，任务状态是唯一可靠信号（B7）。
+  const activeGroupTasks = tasks.filter((task) => {
+    const gid = task.target?.group_id || task.origin?.group_id
+    return gid === group.id && (task.status === 'dispatched' || task.status === 'running')
+  }).length
+  const convActive = groupDrafts.length > 0 || members.some((m) => running[m.agent_id] === true) || activeGroupTasks > 0
+  // 身份必须稳定：它经 GroupBubble → Markdown(renderMention) 传下去，每次渲染换新函数
+  // 会让 memo 失效 —— 输入框每敲一个字都重 parse 整条时间线。
+  const openAgent = useCallback((id: string): void => {
+    void select(id)
+  }, [select])
+
+  // 触发消息 seq → 发送者（纯函数在 groupProjection.ts，Node 直测）。
+  const triggerSeqBySenderMap = useMemo(() => triggerSeqBySender(messages), [messages])
+
+  // 贴底跟随：只有用户本来就在底部时才自动滚动（翻历史/跳转后不抢视图）。
+  useEffect(() => {
+    if (view !== 'chat' || !stickBottom.current) return
+    const el = listRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [
+    messages.length,
+    groupDrafts.length,
+    composerMode,
+    assignNote,
+    conversation?.status,
+    typingNames.length,
+    activeGroupTasks,
+    view,
+  ])
+
+  // 打开/切群：新时间线永远从底部开始（B1）。
+  useEffect(() => {
+    stickBottom.current = true
+    const el = listRef.current
+    if (el && view === 'chat') el.scrollTop = el.scrollHeight
+  }, [group.id, view])
+
+  // 任务卡/流式气泡/输入区高度都是异步长出来的：内容或可视区尺寸一变，
+  // 只要用户仍在底部就跟到底（B1；审查实测任务卡从 0% 可见变 100%）。
+  useEffect(() => {
+    const el = listRef.current
+    if (view !== 'chat' || !el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      if (stickBottom.current) el.scrollTop = el.scrollHeight
+    })
+    ro.observe(el)
+    if (threadRef.current) ro.observe(threadRef.current)
+    return () => ro.disconnect()
+  }, [view])
+
+  useEffect(() => () => {
+    if (highlightTimer.current) clearTimeout(highlightTimer.current)
+  }, [])
+
   async function submit(): Promise<void> {
     if (!draft.trim() || sending) return
+    stickBottom.current = true
     // 结构化 mentions：正文里仍保留 @Name（后端也解析），但显式带上 agent_id，
     // 让「点选过谁」不依赖后端对名字的二次解析（§8.3.3）。
     const ok = await send(draft, mentionIds(draft, roster), hasMentionAll(draft))
     if (ok) {
       setDraft('')
       setCaret(0)
+      requestAnimationFrame(() => textareaRef.current?.focus())
     }
   }
 
   async function submitAssign(): Promise<void> {
     if (!assignTarget || !assignInstruction.trim() || assigning) return
+    stickBottom.current = true
     const ok = await sendAssign(group.id, {
       agent_id: assignTarget,
       instruction: assignInstruction,
@@ -131,6 +211,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
     if (ok) {
       setAssignInstruction('')
       setAssignTitle('')
+      requestAnimationFrame(() => assignTextareaRef.current?.focus())
     }
   }
 
@@ -151,31 +232,51 @@ export default function GroupView({ group }: { group: HubGroup }) {
 
   function mentionKey(e: React.KeyboardEvent<HTMLTextAreaElement>): boolean {
     if (!pickerOpen || !mentionQuery) return false
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    const action = mentionKeyAction(e.key, candidates.length > 0)
+    if (action === 'up' || action === 'down') {
       e.preventDefault()
-      if (candidates.length === 0) return true
-      const step = e.key === 'ArrowDown' ? 1 : -1
+      const step = action === 'down' ? 1 : -1
       setMentionIndex((activeMentionIndex + step + candidates.length) % candidates.length)
       return true
     }
-    if (e.key === 'Enter' || e.key === 'Tab') {
+    if (action === 'pick') {
       e.preventDefault()
-      if (candidates.length > 0) pickMention(candidates[activeMentionIndex])
-      else setDismissedMentionStart(mentionQuery.start)
+      pickMention(candidates[activeMentionIndex])
       return true
     }
-    if (e.key === 'Escape') {
+    if (action === 'dismiss') {
       e.preventDefault()
       setDismissedMentionStart(mentionQuery.start)
       return true
     }
+    // 空候选：Enter/Tab 不拦截 —— Enter 发送，Tab 正常移焦（B3）。
     return false
   }
 
   function setDisplay(next: 'grouped' | 'flat'): void {
     setDisplayMode(next)
-    if (typeof localStorage !== 'undefined') localStorage.setItem('hub.groupDisplay', next)
+    writeGroupDisplay(next)
   }
+
+  function onScroll(): void {
+    const el = listRef.current
+    if (!el) return
+    stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }
+
+  // 上下文 chip：滚到触发消息并短暂高亮；不打开 DM（B6）。
+  const jumpToSeq = useCallback((seq: number) => {
+    if (!(seq > 0)) return
+    stickBottom.current = false
+    setHighlightSeq(seq)
+    const el = listRef.current?.querySelector(`[data-seq="${seq}"]`)
+    if (el && typeof (el as HTMLElement).scrollIntoView === 'function') {
+      const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ;(el as HTMLElement).scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
+    }
+    if (highlightTimer.current) clearTimeout(highlightTimer.current)
+    highlightTimer.current = setTimeout(() => setHighlightSeq(null), 1800)
+  }, [])
 
   async function editBudget(): Promise<void> {
     const current = group.policy?.daily_budget_usd ?? 0
@@ -189,22 +290,6 @@ export default function GroupView({ group }: { group: HubGroup }) {
     })
     if (r.ok) await useHubStore.getState().loadGroups()
   }
-
-  const items = useMemo(() => buildThreadItems(messages, rounds), [messages, rounds])
-  // 草稿按当前群过滤一次：空态判断和渲染必须用同一份，否则别的群的草稿会让
-  // 本群「还没有消息」的引导语消失，却渲染出零个气泡（空面板）。
-  const groupDrafts = useMemo(() => drafts.filter((d) => d.groupId === group.id), [drafts, group.id])
-  const typingNames = useMemo(
-    () => groupDrafts.map((d) => agentNames[d.agentId] ?? d.agentId),
-    [groupDrafts, agentNames],
-  )
-  // 停止按钮的 active 条件：有流式草稿，或群里有成员正在跑。
-  const convActive = groupDrafts.length > 0 || members.some((m) => running[m.agent_id] === true)
-  // 身份必须稳定：它经 GroupBubble → Markdown(renderMention) 传下去，每次渲染换新函数
-  // 会让 memo 失效 —— 输入框每敲一个字都重 parse 整条时间线。
-  const openAgent = useCallback((id: string): void => {
-    void select(id)
-  }, [select])
 
   return (
     <section className="hub-dm hub-group-view">
@@ -242,7 +327,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
         onStop={() => void stopConversation(group.id)}
       />
 
-      <div className="hub-list">
+      <div className="hub-list" ref={listRef} onScroll={onScroll}>
         {view === 'run' ? (
           <div className="hub-run">
             <RoundActivityDigest activity={activity} names={agentNames} />
@@ -258,14 +343,23 @@ export default function GroupView({ group }: { group: HubGroup }) {
             ))}
           </div>
         ) : (
-          <div className="hub-thread">
+          <div className="hub-thread" ref={threadRef}>
             {messages.length === 0 && groupDrafts.length === 0 ? (
               <div className="hub-intro">
                 <p>{t('hub.groupIntro')}</p>
                 <span className="hub-muted">{t('hub.groupHint')}</span>
               </div>
             ) : null}
-            {renderThread(items, agentNames, displayMode === 'grouped', roster, openAgent)}
+            {renderThread(
+              items,
+              agentNames,
+              displayMode === 'grouped',
+              roster,
+              openAgent,
+              triggerSeqBySenderMap,
+              jumpToSeq,
+              highlightSeq,
+            )}
             {groupDrafts.map((d) => (
               <StreamingMessage key={d.messageId} draft={d} name={agentNames[d.agentId] ?? d.agentId} />
             ))}
@@ -274,7 +368,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
       </div>
 
       <div className="hub-composer-wrap">
-        {typingNames.length > 0 ? <TypingIndicator names={typingNames} /> : null}
+        {/* 常驻 live region：内容出现前容器已在 DOM 里，读屏才会播报（N8）。 */}
+        <TypingIndicator names={typingNames} />
         <div className="hub-composer">
           {pickerOpen ? (
             <MentionPicker
@@ -300,6 +395,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
                 onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
                 onClick={(e) => setCaret(e.currentTarget.selectionStart)}
                 onKeyDown={(e) => {
+                  // IME 合成中的 Enter/Esc 属于输入法，不能发送/关闭（B2）。
+                  if (isImeComposing(e.nativeEvent, e.keyCode)) return
                   if (mentionKey(e)) return
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
@@ -308,8 +405,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
                 }}
                 rows={2}
                 aria-autocomplete="list"
-                aria-controls={pickerOpen ? MENTION_LISTBOX_ID : undefined}
-                aria-expanded={pickerOpen}
+                aria-controls={pickerOpen && candidates.length > 0 ? MENTION_LISTBOX_ID : undefined}
+                aria-expanded={pickerOpen && candidates.length > 0}
                 aria-activedescendant={
                   pickerOpen && candidates.length > 0 ? `${MENTION_LISTBOX_ID}-opt-${activeMentionIndex}` : undefined
                 }
@@ -354,12 +451,14 @@ export default function GroupView({ group }: { group: HubGroup }) {
                 aria-label="任务标题（可选）"
               />
               <textarea
+                ref={assignTextareaRef}
                 value={assignInstruction}
                 onChange={(e) => setAssignInstruction(e.target.value)}
                 placeholder="要对方交付什么？（Enter 派发，Shift+Enter 换行）"
                 aria-label="任务指令"
                 rows={2}
                 onKeyDown={(e) => {
+                  if (isImeComposing(e.nativeEvent, e.keyCode)) return
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
                     void submitAssign()
@@ -411,6 +510,9 @@ function renderThread(
   grouped: boolean,
   roster: MentionAgent[],
   onSelectAgent: (id: string) => void,
+  triggerSeqBySender: Record<string, number>,
+  onJumpToSeq: (seq: number) => void,
+  highlightSeq: number | null,
 ) {
   const nodes: React.ReactNode[] = []
   let batch: HubMessage[] = []
@@ -425,6 +527,9 @@ function renderThread(
         grouped={grouped && !!batchKey}
         roster={roster}
         onSelectAgent={onSelectAgent}
+        triggerSeqBySender={triggerSeqBySender}
+        onJumpToSeq={onJumpToSeq}
+        highlightSeq={highlightSeq}
       />,
     )
     batch = []
@@ -449,7 +554,18 @@ function renderThread(
     }
     if (item.msg.kind === 'routing_receipt') {
       flush()
-      nodes.push(<GroupBubble key={`m-${item.msg.seq}`} msg={item.msg} names={names} roster={roster} onSelectAgent={onSelectAgent} />)
+      nodes.push(
+        <GroupBubble
+          key={`m-${item.msg.seq}`}
+          msg={item.msg}
+          names={names}
+          roster={roster}
+          onSelectAgent={onSelectAgent}
+          triggerSeqBySender={triggerSeqBySender}
+          onJumpToSeq={onJumpToSeq}
+          highlightSeq={highlightSeq}
+        />,
+      )
       continue
     }
     const key = roundKey(item.msg)
@@ -473,6 +589,24 @@ function MemberStack({ members, names }: { members: HubGroupMember[]; names: Rec
       {members.length > 4 ? <span className="hub-member-dot more">+{members.length - 4}</span> : null}
     </span>
   )
+}
+
+// localStorage 在沙箱/隐私模式下可能连访问都抛 SecurityError：读写都必须兜底（N10）。
+function readGroupDisplay(): 'grouped' | 'flat' {
+  try {
+    if (typeof localStorage === 'undefined') return 'grouped'
+    return localStorage.getItem('hub.groupDisplay') === 'flat' ? 'flat' : 'grouped'
+  } catch {
+    return 'grouped'
+  }
+}
+
+function writeGroupDisplay(next: 'grouped' | 'flat'): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem('hub.groupDisplay', next)
+  } catch {
+    // 隐私模式/配额满：只是记不住偏好，不影响当前视图。
+  }
 }
 
 // 避免把 i18n hook 放到组件外：这里只做轻量包装（GroupView 内部已用 useHubStore）。

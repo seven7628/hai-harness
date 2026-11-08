@@ -29,6 +29,8 @@ export type MentionToken =
 export const ALL_MENTION_ID = '__all__'
 
 const FOLD_ASCII = /[A-Za-z0-9]/
+// 触发词结束符：@Wri，/@Wri. 之后就当普通正文，选择器必须立刻收起。
+const MENTION_QUERY_STOP = /[\s，。！？、；：,.!?;:]/
 
 function isAsciiAlnum(r: string): boolean {
   return FOLD_ASCII.test(r)
@@ -75,6 +77,65 @@ function isEmailToken(token: string[]): boolean {
   return token.slice(at + 1).includes('.')
 }
 
+/**
+ * 标出 Markdown 链接/图片整段（`[label](dest)`、`![alt](src)`、`[label][ref]`）：
+ * @ 不能改写链接标签，否则会生成嵌套链接（`[@Writer](#mention=…)` 套在已有
+ * `[问 @Writer](url)` 里），渲染器会把整段链接拆坏（N4）。
+ * 只做结构扫描，不解析 Markdown 语义；扫描失败（未闭合）就不遮，交给原有逻辑。
+ */
+function maskMarkdownLinks(runes: string[], masked: boolean[]): void {
+  for (let i = 0; i < runes.length; i++) {
+    if (masked[i]) continue
+    const image = runes[i] === '!' && runes[i + 1] === '['
+    const bracket = image ? i + 1 : i
+    if (runes[bracket] !== '[') continue
+    // label：支持一层嵌套 []（常见的 [a [b]] 也够用）；转义括号跳过。
+    let depth = 1
+    let end = bracket + 1
+    for (; end < runes.length; end++) {
+      if (runes[end] === '\\') {
+        end++
+        continue
+      }
+      if (runes[end] === '[') depth++
+      else if (runes[end] === ']') {
+        depth--
+        if (depth === 0) break
+      }
+    }
+    if (depth !== 0) continue
+    const tail = end + 1
+    let destEnd = -1
+    if (runes[tail] === '(') {
+      let pd = 1
+      for (let k = tail + 1; k < runes.length; k++) {
+        if (runes[k] === '\\') {
+          k++
+          continue
+        }
+        if (runes[k] === '(') pd++
+        else if (runes[k] === ')') {
+          pd--
+          if (pd === 0) {
+            destEnd = k
+            break
+          }
+        }
+      }
+    } else if (runes[tail] === '[') {
+      for (let k = tail + 1; k < runes.length; k++) {
+        if (runes[k] === ']') {
+          destEnd = k
+          break
+        }
+      }
+    }
+    if (destEnd < 0) continue
+    for (let k = i; k <= destEnd; k++) masked[k] = true
+    i = destEnd
+  }
+}
+
 /** 标出不参与 mention 解析的区间：fenced/inline code、URL、email（与 Go maskMentionSkipped 同口径）。 */
 export function maskMentionSkipped(text: string): boolean[] {
   const runes = Array.from(text)
@@ -117,6 +178,7 @@ export function maskMentionSkipped(text: string): boolean[] {
     }
     i++
   }
+  maskMarkdownLinks(runes, masked)
   // email：按空白切 token，只遮住形如 a@b.c 的整段（避免把「(@Writer)」当邮箱）。
   let i = 0
   while (i < runes.length) {
@@ -296,7 +358,8 @@ export function activeMentionQuery(text: string, caret: number): { query: string
     if (ch === '@' || ch === '＠') {
       if (i > 0 && (isAsciiAlnumChar(text[i - 1]) || ['\\', '/', '@'].includes(text[i - 1]))) return null
       const query = text.slice(i + 1, at)
-      if (/[\s]/.test(query)) return null
+      // 句读/空白出现 = 这个词已经结束，选择器必须关闭（@Writer， 不能再弹）。
+      if (MENTION_QUERY_STOP.test(query)) return null
       return { query, start: i }
     }
     if (/\s/.test(ch)) return null
@@ -322,6 +385,31 @@ export function applyMention(text: string, caret: number, name: string): { text:
     text: text.slice(0, start) + insert + text.slice(at),
     caret: start + 1 + name.length + 1,
   }
+}
+
+/**
+ * IME 合成中：Enter/Esc 属于输入法（确认候选/取消），绝不能当发送/关闭处理。
+ * 兼容 React 的 nativeEvent.isComposing 与旧浏览器的 keyCode 229（Safari/WebKit）。
+ */
+export function isImeComposing(
+  nativeEvent: { isComposing?: boolean } | null | undefined,
+  keyCode?: number,
+): boolean {
+  return nativeEvent?.isComposing === true || keyCode === 229
+}
+
+export type MentionKeyAction = 'up' | 'down' | 'pick' | 'dismiss' | 'none'
+
+/**
+ * 选择器键盘语义（textarea 与 listbox 共用）：
+ * 空候选时 Enter/Tab **不拦截**（Enter 走发送，Tab 走焦点移动）；Esc 永远关闭。
+ */
+export function mentionKeyAction(key: string, hasCandidates: boolean): MentionKeyAction {
+  if (key === 'ArrowUp') return hasCandidates ? 'up' : 'none'
+  if (key === 'ArrowDown') return hasCandidates ? 'down' : 'none'
+  if (key === 'Enter' || key === 'Tab') return hasCandidates ? 'pick' : 'none'
+  if (key === 'Escape') return 'dismiss'
+  return 'none'
 }
 
 /** 正文里命中的成员 id（去重、保持出现顺序；已删除成员不发送）。 */

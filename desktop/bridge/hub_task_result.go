@@ -93,6 +93,11 @@ func (m *manager) appendAgentTaskResultCard(task *agenthub.Task) (*agenthub.Mess
 			"usage":         taskResultUsageSnapshot(task),
 			"artifacts":     taskResultArtifacts(task),
 			"error":         taskResultError(task),
+			// 派发者快照：sender 是执行者，UI 不能从 sender 推发起人（B5）。
+			// 账本还没加载时（重启/历史）前端靠这三项画「你/Researcher → Writer」。
+			"origin_kind":       task.Origin.Kind,
+			"origin_agent_id":   string(task.Origin.AgentID),
+			"origin_agent_name": task.Origin.AgentName,
 		},
 		CreatedAt: time.Now().UTC(),
 	}

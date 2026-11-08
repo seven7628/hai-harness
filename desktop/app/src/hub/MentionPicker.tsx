@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from 'react'
+import { useEffect, useRef, type KeyboardEvent } from 'react'
 import type { MentionAgent } from './mentions'
 
 // @ 成员选择器（P3b-07，方案 §8.3.3 / §8.3.5）。
@@ -31,6 +31,15 @@ export default function MentionPicker({
 }: MentionPickerProps) {
   const active = candidates[Math.max(0, Math.min(activeIndex, candidates.length - 1))]
   const activeId = active ? optionId(id, candidates.indexOf(active)) : undefined
+  const listRef = useRef<HTMLUListElement>(null)
+
+  // 键盘移动时把当前项滚进可视区（长名单/矮弹层，N8）。
+  useEffect(() => {
+    const el = listRef.current?.querySelector('[aria-selected="true"]')
+    if (el && typeof (el as HTMLElement).scrollIntoView === 'function') {
+      ;(el as HTMLElement).scrollIntoView({ block: 'nearest' })
+    }
+  }, [activeId])
 
   function onKeyDown(e: KeyboardEvent<HTMLUListElement>): void {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -63,6 +72,7 @@ export default function MentionPicker({
         <div className="hub-mention-empty" role="status">没有匹配的成员</div>
       ) : (
         <ul
+          ref={listRef}
           id={id}
           className="hub-mention-list"
           role="listbox"

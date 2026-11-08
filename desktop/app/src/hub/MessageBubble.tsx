@@ -7,23 +7,37 @@ import TaskResultCard from './TaskResultCard'
 import TurnContextLine from './TurnContextLine'
 import { ALL_MENTION_ID, linkifyMentions, type MentionAgent } from './mentions'
 import { parseTaskResult } from './taskCard'
+import { useHubStore } from './useHubStore'
 
 // 群消息气泡：handoff 卡、审批占位、路由回执都只在人类 UI 出现；
 // routing_receipt 的落盘文本是 targets=ag_x，需要按名册还原成可读动作行。
-// P3b-07 起：task_result → TaskResultCard；正文里的 @Name → AgentMentionChip；
-// context.senders ≥2 → TurnContextLine（系统/交接/回执路径保持原样）。
+// P3b-07 起：task_result → TaskResultCard（派发者取账本 origin，不拿 sender 猜）；
+// 正文里的 @Name → AgentMentionChip；context.senders ≥2 → TurnContextLine
+// （点击跳到触发消息并高亮；系统/交接/回执路径保持原样）。
+
+export interface GroupBubbleProps {
+  msg: HubMessage
+  names: Record<string, string>
+  roster?: MentionAgent[]
+  onSelectAgent?: (agentID: string) => void
+  triggerSeqBySender?: Record<string, number>
+  onJumpToSeq?: (seq: number) => void
+  highlightSeq?: number | null
+}
 
 export function GroupBubble({
   msg,
   names,
   roster = [],
   onSelectAgent,
-}: {
-  msg: HubMessage
-  names: Record<string, string>
-  roster?: MentionAgent[]
-  onSelectAgent?: (agentID: string) => void
-}) {
+  triggerSeqBySender,
+  onJumpToSeq,
+  highlightSeq,
+}: GroupBubbleProps) {
+  const taskId = msg.kind === 'task_result' ? String(msg.refs?.task_id ?? '') : ''
+  // 任务卡派发者必须来自账本（origin.kind/agent_id）：bridge 写的结果卡 sender
+  // 就是执行者本人，按 sender 推会得到「Writer → Writer」（B5）。
+  const task = useHubStore((s) => (taskId ? s.tasks.find((t) => t.id === taskId) : undefined))
   const renderMention = useCallback(
     (id: string) => {
       if (id === ALL_MENTION_ID) {
@@ -48,9 +62,20 @@ export function GroupBubble({
     [msg.text, roster],
   )
 
+  const seq = msg.seq > 0 ? String(msg.seq) : undefined
+  const hl = highlightSeq && msg.seq === highlightSeq ? ' hub-msg-highlight' : ''
+  const context = (
+    <TurnContextLine
+      msg={msg}
+      roster={roster}
+      triggerSeqBySender={triggerSeqBySender}
+      onJumpToSeq={onJumpToSeq}
+    />
+  )
+
   if (msg.kind === 'approval_stub') {
     return (
-      <div className="hub-msg system hub-approval-stub" role="status">
+      <div className={`hub-msg system hub-approval-stub${hl}`} data-seq={seq} role="status">
         <span className="hub-chip">审批占位</span>
         <span>{msg.text || '有人发起审批，详情在 Needs you'}</span>
         <span className="hub-muted">仅你可看</span>
@@ -58,16 +83,16 @@ export function GroupBubble({
     )
   }
   if (msg.kind === 'routing_receipt') {
-    return <RoutingAction text={msg.text ?? ''} names={names} />
+    return <RoutingAction text={msg.text ?? ''} names={names} seq={seq} highlight={!!hl} />
   }
   if (msg.sender?.kind === 'system') {
-    return <div className="hub-msg system">{msg.text}</div>
+    return <div className={`hub-msg system${hl}`} data-seq={seq}>{msg.text}</div>
   }
   if (msg.kind === 'handoff') {
     const status = String(msg.refs?.status ?? '')
     const label = status === 'pending_ack' ? '等待确认' : status === 'accepted' ? '已接受' : status === 'declined' ? '已拒绝' : '交接'
     return (
-      <div className="hub-msg system hub-handoff-card" role="status">
+      <div className={`hub-msg system hub-handoff-card${hl}`} data-seq={seq} role="status">
         <span className="hub-chip">交接</span>
         <span className="hub-handoff-text">{msg.text}</span>
         <span className={`hub-handoff-status ${status || 'pending_ack'}`}>{label}</span>
@@ -76,8 +101,7 @@ export function GroupBubble({
   }
   const kind = msg.sender?.kind ?? 'system'
   const who = kind === 'human' ? '你' : (names[msg.sender?.agent_id ?? ''] ?? msg.sender?.agent_id ?? '智能体')
-  const card = parseTaskResult(msg)
-  const context = <TurnContextLine msg={msg} roster={roster} onSelectAgent={onSelectAgent} />
+  const card = parseTaskResult(msg, task)
 
   if (card) {
     const executor = card.agentId ? roster.find((a) => a.id === card.agentId) : undefined
@@ -85,7 +109,7 @@ export function GroupBubble({
     return (
       <>
         {context}
-        <div className={`hub-msg task ${msg.pending ? 'pending' : ''}`}>
+        <div className={`hub-msg task${hl} ${msg.pending ? 'pending' : ''}`} data-seq={seq}>
           <TaskResultCard
             view={card}
             executor={executor}
@@ -100,7 +124,7 @@ export function GroupBubble({
   return (
     <>
       {context}
-      <div className={`hub-msg ${kind === 'human' ? 'human' : 'agent'} ${msg.pending ? 'pending' : ''} ${msg.failed ? 'failed' : ''}`}>
+      <div className={`hub-msg ${kind === 'human' ? 'human' : 'agent'}${hl} ${msg.pending ? 'pending' : ''} ${msg.failed ? 'failed' : ''}`} data-seq={seq}>
         <div className="hub-group-author">
           {who}
           {msg.visibility === 'owner' ? <span className="hub-chip owner-only">仅你可看</span> : null}
@@ -116,12 +140,22 @@ export function GroupBubble({
   )
 }
 
-export function RoutingAction({ text, names }: { text: string; names: Record<string, string> }) {
+export function RoutingAction({
+  text,
+  names,
+  seq,
+  highlight,
+}: {
+  text: string
+  names: Record<string, string>
+  seq?: string
+  highlight?: boolean
+}) {
   const parsed = parseRoutingText(text)
-  if (!parsed) return <div className="hub-msg system">{text}</div>
+  if (!parsed) return <div className="hub-msg system" data-seq={seq}>{text}</div>
   const targets = parsed.targets.map((id) => names[id] ?? id)
   return (
-    <div className="hub-action routing" role="status">
+    <div className={`hub-action routing${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">
       <span className="hub-action-kind">路由</span>
       <span>
         {parsed.all ? '@all ' : ''}

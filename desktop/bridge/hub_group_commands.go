@@ -61,7 +61,13 @@ func (m *manager) hubGroupGet(c command) {
 		m.resp(c, false, "群组已删除", nil)
 		return
 	}
-	m.resp(c, true, "", map[string]any{"group": g})
+	// P3b-07 B7：一次水合对话状态 + 人类已读游标（§7.5.7）。前端打开群时
+	// 不能等一条 hub_conversation 事件——对话可能是在别的页面推进的。
+	m.resp(c, true, "", map[string]any{
+		"group":        g,
+		"conversation": m.hubConversationView(g.ID),
+		"cursor":       map[string]any{"human_read_seq": g.HumanReadSeq},
+	})
 }
 
 func (m *manager) hubGroupCreate(c command) {
