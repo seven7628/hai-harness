@@ -268,8 +268,10 @@ func TestLoadRecordMetadataCanceled(t *testing.T) {
 // record 存在但不可用时，LoadRecordMetadata 必须返回**非 not-found** 的错误。
 //
 // 调用方（open_session）用它区分两种情况：
-//   ErrRecordNotFound → 真没 record → 允许懒迁移（重放 events 并覆盖写）
-//   其它错误          → record 存在但坏了 → 不迁移、不覆盖，回退 legacy 快照
+//
+//	ErrRecordNotFound → 真没 record → 允许懒迁移（重放 events 并覆盖写）
+//	其它错误          → record 存在但坏了 → 不迁移、不覆盖，回退 legacy 快照
+//
 // 这条边界是 V2 P1-PERSIST-03 的红线：搞混会把损坏但可抢救的 record 覆盖掉。
 func TestLoadRecordMetadataCorruptIsNotNotFound(t *testing.T) {
 	s := newStore(t)

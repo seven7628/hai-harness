@@ -46,17 +46,26 @@ func TestCheckpointSerdeLab(t *testing.T) {
 	ctx := context.Background()
 
 	// 统一的前置：读回 record（各阶段的公共成本，单独报告）。
-	t0 := time.Now()
-	rec, err := store.LoadRecord(ctx, wsKey, sid)
-	if err != nil {
-		t.Fatal(err)
+	// view 阶段量的是生产路径本身，跳过这份前置（否则会把慢路径算进结果）。
+	var rec *session.SessionRecord
+	var view []byte
+	var t0 time.Time
+	loadDur := time.Duration(0)
+	if phase != "view" {
+		t0 = time.Now()
+		rec, err = store.LoadRecord(ctx, wsKey, sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loadDur = time.Since(t0)
+		view = rec.ViewCheckpoint
 	}
-	loadDur := time.Since(t0)
-	view := rec.ViewCheckpoint
-	t.Logf("[%s] 前置 LoadRecord=%s view=%.1fMB spans=%d body=%.1fMB ref=%v", phase,
-		loadDur.Round(time.Millisecond), float64(len(view))/1e6,
-		len(rec.LoadedBlockSpans), float64(len(rec.BodyView))/1e6,
-		bytes.Contains(rec.BodyView, []byte("$blocks_ref")))
+	if rec != nil {
+		t.Logf("[%s] 前置 LoadRecord=%s view=%.1fMB spans=%d body=%.1fMB ref=%v", phase,
+			loadDur.Round(time.Millisecond), float64(len(view))/1e6,
+			len(rec.LoadedBlockSpans), float64(len(rec.BodyView))/1e6,
+			bytes.Contains(rec.BodyView, []byte("$blocks_ref")))
+	}
 
 	switch phase {
 	case "load":
@@ -75,6 +84,76 @@ func TestCheckpointSerdeLab(t *testing.T) {
 			float64(len(view))/1e6, parseDur.Round(time.Millisecond), len(cp.Blocks))
 		cp = nil
 		debug.FreeOSMemory()
+		return
+
+	case "ab":
+		// 同进程 A/B：拼装出来的 spans（堆上连续）vs mmap 窗口（按页），
+		// 以及「解码时校验摘要」的增量成本。三者在同一份数据上交替跑，
+		// 抵消机器抖动（本机 swap 曾让同一项差 200 倍）。
+		rec2, lerr := store.LoadRecordForView(ctx, wsKey, sid)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		defer rec2.ReleaseView()
+		spansA := rec.LoadedBlockSpans
+		spansB := rec2.LoadedBlockSpans
+		hashesB := rec2.LoadedBlockHashes
+		t.Logf("A(拼装)=%d spans B(mmap)=%d spans", len(spansA), len(spansB))
+		for round := 0; round < 3; round++ {
+			outA := make([]Block, len(spansA))
+			t0 = time.Now()
+			if err := decodeBlocksParallel(spansA, nil, outA); err != nil {
+				t.Fatal(err)
+			}
+			dA := time.Since(t0)
+			outA = nil
+
+			outB := make([]Block, len(spansB))
+			t0 = time.Now()
+			if err := decodeBlocksParallel(spansB, nil, outB); err != nil {
+				t.Fatal(err)
+			}
+			dB := time.Since(t0)
+			outB = nil
+
+			outC := make([]Block, len(spansB))
+			t0 = time.Now()
+			if err := decodeBlocksParallel(spansB, hashesB, outC); err != nil {
+				t.Fatal(err)
+			}
+			dC := time.Since(t0)
+			outC = nil
+			debug.FreeOSMemory()
+			t.Logf("round %d: 拼装=%s mmap=%s mmap+校验=%s", round,
+				dA.Round(time.Millisecond), dB.Round(time.Millisecond), dC.Round(time.Millisecond))
+		}
+		return
+
+	case "view":
+		// 生产路径（S2）：LoadRecordForView（不拼装 blocks）+ 骨架/并行解码 + 释放映射。
+		t0 = time.Now()
+		rec2, lerr := store.LoadRecordForView(ctx, wsKey, sid)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		loadFast := time.Since(t0)
+		t0 = time.Now()
+		cp2, perr2 := parseCheckpointFromRecord(rec2)
+		if perr2 != nil {
+			t.Fatal(perr2)
+		}
+		decode := time.Since(t0)
+		rec2.ReleaseView()
+		debug.FreeOSMemory()
+		t0 = time.Now()
+		r2 := NewViewReducer()
+		if err := r2.Restore(cp2); err != nil {
+			t.Fatal(err)
+		}
+		restore := time.Since(t0)
+		t.Logf("打开路径：LoadRecordForView=%s 解码=%s blocks=%d Restore=%s 合计=%s",
+			loadFast.Round(time.Millisecond), decode.Round(time.Millisecond), len(cp2.Blocks),
+			restore.Round(time.Millisecond), (loadFast + decode + restore).Round(time.Millisecond))
 		return
 
 	case "restore":

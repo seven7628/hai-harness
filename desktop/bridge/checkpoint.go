@@ -749,12 +749,19 @@ func parseCheckpoint(raw session.ViewCheckpoint) (*Checkpoint, error) {
 // 两条路径必须产出一致的 *Checkpoint：骨架与 spans 来自同一次
 // readRecordCandidate，spans 与展开后的 blocks 数组元素一一对应（顺序相同）。
 func parseCheckpointFromRecord(rec *session.SessionRecord) (*Checkpoint, error) {
-	if rec == nil || len(rec.ViewCheckpoint) == 0 {
+	if rec == nil {
 		return nil, os.ErrNotExist
 	}
 	spans := rec.LoadedBlockSpans
 	if len(spans) == 0 {
+		if len(rec.ViewCheckpoint) == 0 {
+			return nil, os.ErrNotExist
+		}
 		return parseCheckpoint(rec.ViewCheckpoint) // 旧格式：blocks 内嵌在 view 里
+	}
+	if len(rec.BodyView) == 0 {
+		// 有 spans 但没骨架（不该发生）：退回整份 view，正确性优先。
+		return parseCheckpoint(rec.ViewCheckpoint)
 	}
 	skel, err := rec.SkeletonView()
 	if err != nil {
@@ -768,7 +775,11 @@ func parseCheckpointFromRecord(rec *session.SessionRecord) (*Checkpoint, error) 
 		return nil, os.ErrInvalid
 	}
 	blocks := make([]Block, len(spans))
-	if err := decodeBlocksParallel(spans, blocks); err != nil {
+	var hashes [][8]byte
+	if len(rec.LoadedBlockHashes) == len(spans) {
+		hashes = rec.LoadedBlockHashes // 映射路径：完整性校验在解码时逐块做
+	}
+	if err := decodeBlocksParallel(spans, hashes, blocks); err != nil {
 		return nil, err
 	}
 	cp.Blocks = blocks
@@ -779,9 +790,21 @@ func parseCheckpointFromRecord(rec *session.SessionRecord) (*Checkpoint, error) 
 //
 // 用原子取号而不是静态分片：块大小差异极大（一行文本 vs 整段工具输出），
 // 静态切分会让某个 worker 拖尾。实测 30.8k 块：1 worker 850ms、8 worker 234ms。
-func decodeBlocksParallel(spans [][]byte, out []Block) error {
+func decodeBlocksParallel(spans [][]byte, hashes [][8]byte, out []Block) error {
 	if len(spans) != len(out) {
 		return fmt.Errorf("block spans %d != out %d", len(spans), len(out))
+	}
+	if hashes != nil && len(hashes) != len(spans) {
+		return fmt.Errorf("block hashes %d != spans %d", len(hashes), len(spans))
+	}
+	verify := func(i int) error {
+		if hashes == nil {
+			return nil
+		}
+		if d := session.PayloadDigest(spans[i]); d != hashes[i] {
+			return fmt.Errorf("block %d: payload checksum mismatch", i)
+		}
+		return nil
 	}
 	workers := runtime.GOMAXPROCS(0)
 	if workers > 8 {
@@ -789,6 +812,9 @@ func decodeBlocksParallel(spans [][]byte, out []Block) error {
 	}
 	if workers <= 1 || len(spans) < 64 {
 		for i := range spans {
+			if err := verify(i); err != nil {
+				return err
+			}
 			if err := json.Unmarshal(spans[i], &out[i]); err != nil {
 				return fmt.Errorf("block %d: %w", i, err)
 			}
@@ -806,6 +832,14 @@ func decodeBlocksParallel(spans [][]byte, out []Block) error {
 			for {
 				i := int(next.Add(1)) - 1
 				if i >= len(spans) {
+					return
+				}
+				if err := verify(i); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
 					return
 				}
 				if err := json.Unmarshal(spans[i], &out[i]); err != nil {

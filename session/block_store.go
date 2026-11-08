@@ -459,6 +459,10 @@ func readBlockRecord(r *bufio.Reader) (kind byte, id string, payload []byte, err
 	return k, string(idb), payload, nil
 }
 
+// PayloadDigest 是单个块 payload 的内容摘要（与索引里记录的值同口径）。
+// 导出给恢复路径：映射模式下打开时不再逐块读 payload，改由解码时并行校验。
+func PayloadDigest(p []byte) [8]byte { return payloadDigest(p) }
+
 func payloadDigest(p []byte) [8]byte {
 	s := sha256.Sum256(p)
 	var out [8]byte
@@ -1271,6 +1275,12 @@ func topLevelKey(b []byte, pos int) bool {
 // 代价：O(引用块数) 的哈希（21759 块 ≈ 700KB 输入），实测 < 5ms。
 // 相比「打开时扫 1378MB」便宜三个数量级。
 func blocksSetSum(bs *blockStore, ids []string) (string, error) {
+	return indexSetSum(bs.index, ids)
+}
+
+// indexSetSum 是 blocksSetSum 的索引级实现：只读 index，不碰 payload，
+// 因此映射路径（没有 *blockStore）也能做同一口径的集合校验。
+func indexSetSum(index map[string]blockRef, ids []string) (string, error) {
 	h := sha256.New()
 	sorted := make([]uint64, 0, len(ids))
 	byNum := make(map[uint64]string, len(ids))
@@ -1285,7 +1295,7 @@ func blocksSetSum(bs *blockStore, ids []string) (string, error) {
 	sortUint64s(sorted)
 	var n8 [8]byte
 	for _, v := range sorted {
-		ref, ok := bs.index[byNum[v]]
+		ref, ok := index[byNum[v]]
 		if !ok {
 			return "", fmt.Errorf("block %d missing from store", v)
 		}
@@ -1761,12 +1771,12 @@ func (bs *blockStore) actualSetSum(ids []string) (string, error) {
 	sortUint64s(sorted)
 	var n8 [8]byte
 	for _, v := range sorted {
-		ref, ok := bs.index[byNum[v]]
+		bref, ok := bs.index[byNum[v]]
 		if !ok {
 			return "", fmt.Errorf("block %d missing from store", v)
 		}
-		buf := make([]byte, ref.n)
-		if _, err := bs.f.ReadAt(buf, ref.off); err != nil {
+		buf := make([]byte, bref.n)
+		if _, err := bs.f.ReadAt(buf, bref.off); err != nil {
 			return "", fmt.Errorf("block %d unreadable: %w", v, err)
 		}
 		binary.BigEndian.PutUint64(n8[:], v)

@@ -13,6 +13,7 @@ import (
 // inode —— 因此必须证明：
 //  1. .bak 内容始终等于「上一次成功提交」的内容（不被新内容污染）；
 //  2. .bak 不等于当前 formal（否则备份形同虚设）。
+//
 // 后续 rename 会把 path 换成新 inode，旧 inode 只剩 .bak 一个名字。
 //
 // 原注释：
@@ -50,4 +51,9 @@ func TestHardlinkBackupIsolation(t *testing.T) {
 	}
 }
 
-func min2(a, b int) int { if a < b { return a }; return b }
+func min2(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

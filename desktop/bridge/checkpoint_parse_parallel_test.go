@@ -140,7 +140,7 @@ func TestDecodeBlocksParallelRejectsCorrupt(t *testing.T) {
 		spans[i] = []byte(fmt.Sprintf(`{"kind":"assistant","id":%d,"text":"x"}`, i+1))
 	}
 	spans[77] = []byte(`{"kind":`)
-	if err := decodeBlocksParallel(spans, out); err == nil {
+	if err := decodeBlocksParallel(spans, nil, out); err == nil {
 		t.Fatal("坏块应报错")
 	} else if !strings.Contains(err.Error(), "block 77") {
 		t.Fatalf("错误信息应带块下标，得 %v", err)
@@ -165,4 +165,25 @@ func parallelTestBlocks(n int) []Block {
 		}
 	}
 	return blocks
+}
+
+// TestDecodeBlocksParallelVerifiesDigest 映射路径不在打开时校验 payload，
+// 校验必须发生在解码阶段 —— 否则坏块会被当作正常内容渲染出来。
+func TestDecodeBlocksParallelVerifiesDigest(t *testing.T) {
+	spans := make([][]byte, 128)
+	hashes := make([][8]byte, 128)
+	out := make([]Block, 128)
+	for i := range spans {
+		spans[i] = []byte(fmt.Sprintf(`{"kind":"assistant","id":%d,"text":"x"}`, i+1))
+		hashes[i] = session.PayloadDigest(spans[i])
+	}
+	// 篡改一个块的字节，摘要保持不变 → 必须被抓到
+	spans[42] = []byte(`{"kind":"assistant","id":43,"text":"tampered"}`)
+	err := decodeBlocksParallel(spans, hashes, out)
+	if err == nil {
+		t.Fatal("摘要不匹配应报错")
+	}
+	if !strings.Contains(err.Error(), "block 42") {
+		t.Fatalf("错误信息应带块下标，得 %v", err)
+	}
 }

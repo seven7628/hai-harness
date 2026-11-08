@@ -109,6 +109,23 @@ type SessionRecord struct {
 	// BodyView 是解析前的原始 view：blocks 仍是 sidecar 引用（未展开成数组）。
 	// 恢复路径用它做「骨架解码 + 并行块解码」，不必扫描展开后的 210MB。
 	BodyView ViewCheckpoint `json:"-"`
+
+	// LoadedBlockHashes 与 LoadedBlockSpans 一一对应：索引里记录的块摘要。
+	// 映射路径不在打开时逐块读 payload 校验，改由解码时（并行）比对。
+	LoadedBlockHashes [][8]byte `json:"-"`
+
+	// releaseView 释放块映射；nil 表示无资源可放（拼装路径）。
+	releaseView func()
+}
+
+// ReleaseView 释放块映射（幂等）。映射路径下 LoadedBlockSpans 指向 mmap，
+// 调用方必须在解码完成后调用；拼装路径下是空操作。
+func (r *SessionRecord) ReleaseView() {
+	if r == nil || r.releaseView == nil {
+		return
+	}
+	r.releaseView()
+	r.releaseView = nil
 }
 
 // SkeletonView 返回把 blocks 字段替换成空数组后的 view（骨架）。
@@ -720,14 +737,38 @@ func (s *FileStorage) DeleteSessionRecord(ctx context.Context, workspaceKey, ses
 
 // loadRecordLocked reads formal then backup. The caller must hold s.mu.
 func (s *FileStorage) loadRecordLocked(ctx context.Context, path, workspaceKey, sessionID string) (*SessionRecord, error) {
+	return s.loadRecordLockedMode(ctx, path, workspaceKey, sessionID, readResolve)
+}
+
+// LoadRecordForView 读回 record 但**不拼装 blocks**：BodyView 保持引用形态，
+// LoadedBlockSpans 指向 sidecar 的只读映射（零拷贝）。调用方解码完必须
+// 调用 ReleaseView。
+//
+// 为什么单独一个入口：拼装路径要 ReadAt(209MB) + sha256 + 拼 buffer +
+// replaceJSONField 再复制一遍（实测 347ms，占 LoadRecord 的 70%），而这些
+// 字节唯一的用途就是「喂给 JSON 解码器读一遍」。
+func (s *FileStorage) LoadRecordForView(ctx context.Context, workspaceKey, sessionID string) (*SessionRecord, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
-	formal, _, formalErr := readRecordCandidate(path, workspaceKey, sessionID)
+	path, err := s.RecordPath(workspaceKey, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	unlock := lockRecord(path)
+	defer unlock()
+	return s.loadRecordLockedMode(ctx, path, workspaceKey, sessionID, readMap)
+}
+
+func (s *FileStorage) loadRecordLockedMode(ctx context.Context, path, workspaceKey, sessionID string, mode readMode) (*SessionRecord, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	formal, _, formalErr := readRecordCandidateMode(path, workspaceKey, sessionID, mode)
 	if formalErr == nil {
 		return formal, nil
 	}
-	backup, _, backupErr := readRecordCandidate(path+".bak", workspaceKey, sessionID)
+	backup, _, backupErr := readRecordCandidateMode(path+".bak", workspaceKey, sessionID, mode)
 	if backupErr == nil {
 		return backup, nil
 	}
@@ -1356,7 +1397,23 @@ func parseRecordHeadScalars(data []byte, workspaceKey, sessionID string) (*Sessi
 	return nil, fmt.Errorf("view_checkpoint missing")
 }
 
+// readMode 决定读回时如何处理 sidecar 引用形态的 blocks。
+type readMode int
+
+const (
+	// readResolve 拼装完整 blocks 数组（ViewCheckpoint 与旧格式逐字节等价）。
+	// 提交基线、测试、需要整份 view 的调用方用它。
+	readResolve readMode = iota
+	// readMap 不拼装：BodyView 保持引用形态，spans 指向 sidecar 的只读映射。
+	// 恢复路径用它（省掉 209MB 里 4 次搬运中的 3 次）。
+	readMap
+)
+
 func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, []byte, error) {
+	return readRecordCandidateMode(path, workspaceKey, sessionID, readResolve)
+}
+
+func readRecordCandidateMode(path, workspaceKey, sessionID string, mode readMode) (*SessionRecord, []byte, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, ErrRecordNotFound
@@ -1367,9 +1424,11 @@ func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, 
 	var record SessionRecord
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
+	_dbg0 := time.Now()
 	if err := dec.Decode(&record); err != nil {
 		return nil, nil, fmt.Errorf("%w: decode %s: %w", ErrRecordCorrupt, path, err)
 	}
+	_dbgDecode := time.Since(_dbg0)
 	if err := ensureJSONEOF(dec); err != nil {
 		return nil, nil, fmt.Errorf("%w: decode %s: %w", ErrRecordCorrupt, path, err)
 	}
@@ -1401,13 +1460,23 @@ func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, 
 	//
 	// 还原失败必须报错而不是返回空 blocks：那会让长会话「打开后历史全空」，
 	// 比打不开更糟（用户以为数据丢了）。调用方据此回退 .bak。
+	_dbg1 := time.Now()
 	body := record.ViewCheckpoint
-	if resolved, spans, rerr := resolveBlocksRefSpans(record.ViewCheckpoint, path); rerr != nil {
+	if mode == readMap {
+		if merr := attachMappedSpans(&record, body, path); merr != nil {
+			return nil, nil, fmt.Errorf("%w: %s: %w", ErrRecordCorrupt, path, merr)
+		}
+	} else if resolved, spans, rerr := resolveBlocksRefSpans(record.ViewCheckpoint, path); rerr != nil {
 		return nil, nil, fmt.Errorf("%w: %s: %w", ErrRecordCorrupt, path, rerr)
 	} else {
 		record.ViewCheckpoint = resolved
 		record.LoadedBlockSpans = spans
 		record.BodyView = body
+	}
+	if os.Getenv("HAI_RECORD_TIMING") != "" && mode == readResolve {
+		fmt.Fprintf(os.Stderr, "[record] read=%dB decode=%s checksum+validate=%s assemble+replace=%s\n",
+			len(data), _dbgDecode.Round(time.Millisecond),
+			_dbg1.Sub(_dbg0).Round(time.Millisecond), time.Since(_dbg1).Round(time.Millisecond))
 	}
 	return &record, append([]byte(nil), data...), nil
 }

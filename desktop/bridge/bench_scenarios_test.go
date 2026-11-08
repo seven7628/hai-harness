@@ -18,11 +18,11 @@ package main
 
 import (
 	"context"
-	"sync"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,11 +34,11 @@ import (
 // benchScenarioTurns 是本矩阵的语料轮数。与 benchTurns（2000）分开：
 // 2000 轮的 record 只有几 MB，撑不出线上那种 90MB 的病理规模。
 const (
-	benchScenarioTurns  = 900
-	benchScenarioChunks = 6
-	benchAgentBlocks    = 90
-	benchAgentItems     = 420 // 每 block 的 items 数（线上均值 210、最大 586）
-	benchItemResultLen  = 3200 // 每条 item 的 result 字节数（线上 tool result 截到 ~20KB）
+	benchScenarioTurns   = 900
+	benchScenarioChunks  = 6
+	benchAgentBlocks     = 90
+	benchAgentItems      = 420  // 每 block 的 items 数（线上均值 210、最大 586）
+	benchItemResultLen   = 3200 // 每条 item 的 result 字节数（线上 tool result 截到 ~20KB）
 	scenarioWorkspaceKey = "ws-key-scenario"
 )
 
@@ -107,8 +107,8 @@ func scenarioEvents() []events.Event {
 		}
 		evs = append(evs, &events.LLMEnd{
 			RunId: "root-1", RequestId: req, Model: "deepseek-v4-flash",
-			Content: "最终回复",
-			Usage:   &core.Usage{Input: 1500, Output: 200, CacheRead: 800, Reasoning: 100},
+			Content:      "最终回复",
+			Usage:        &core.Usage{Input: 1500, Output: 200, CacheRead: 800, Reasoning: 100},
 			FinishReason: core.FinishReasonStop,
 			Timestamp:    t.Add(250 * time.Millisecond), EventType: events.LLMEndType,
 		})
@@ -422,5 +422,3 @@ func BenchmarkScenarioSaveParts(b *testing.B) {
 		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/1e6, "ms/op")
 	})
 }
-
-
