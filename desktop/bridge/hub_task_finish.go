@@ -28,8 +28,7 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	if bs == nil || ae == nil {
 		return
 	}
-	ids := bs.hubTaskIDs
-	bs.hubTaskIDs = nil
+	ids := bs.takeHubTasks()
 	if len(ids) == 0 {
 		return
 	}
@@ -57,6 +56,7 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		FinishReason: string(ae.FinishReason),
 		Summary:      truncateRunes(ae.Content, 4000),
 		Usage:        taskUsageOf(ae.Usage),
+		DurationMS:   ae.DurationMS,
 		Error:        ae.Error,
 		Artifacts:    taskArtifactsOf(ae.Artifacts),
 	}
@@ -80,6 +80,13 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		return
 	}
 	originTask, _ := st.LoadTask(ctx, first)
+	// 已取消/已拒绝的任务没有回到工作态的边：迟到的 AgentEnd 不能把它改回
+	// completed/failed（那会把终态覆盖成假结果），也不再写第二张卡/第二次回推。
+	// 与下面 Finish 失败的 canceled 兜底同口径，只是提前判定、更安静。
+	if originTask != nil &&
+		(originTask.Status == agenthub.TaskCanceled || originTask.Status == agenthub.TaskDeclined) {
+		return
+	}
 	// 单任务预算：成本只有在结算时才知道；超限落 blocked_budget + hub_alert（§6.9）。
 	if originTask != nil && originTask.Origin.AgentID != "" {
 		if p, _, perr := m.hubLoadAgent(string(originTask.Origin.AgentID)); perr == nil && p != nil {
@@ -102,8 +109,9 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		At:              time.Now().UTC(),
 	})
 	if err != nil {
-		// 人已取消：AgentEnd 迟到不能再结算，也不要制造 settle_failed 假告警。
-		if cur, lerr := st.LoadTask(ctx, first); lerr == nil && cur.Status == agenthub.TaskCanceled {
+		// 人已取消/目标已拒绝：AgentEnd 迟到不能再结算，也不要制造 settle_failed 假告警。
+		if cur, lerr := st.LoadTask(ctx, first); lerr == nil &&
+			(cur.Status == agenthub.TaskCanceled || cur.Status == agenthub.TaskDeclined) {
 			return
 		}
 		m.emitHubTaskAlert(first, "settle_failed", err.Error())
@@ -117,8 +125,14 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		if settled.Status == agenthub.TaskBlockedBudget {
 			m.recordBudgetNeed(settled, res.Error)
 		}
-		if !alreadyNotified(settled, ae.RunId) {
-			m.pushHubTaskResult(ledger, settled, ae)
+		switch settled.Target.Kind {
+		case agenthub.TargetAgent:
+			// 智能体任务：结果卡进群（持久感知）+ 只唤醒派发者（§6.5.7/§6.7.9）。
+			m.notifyAgentTaskResult(ledger, settled)
+		default:
+			if !alreadyNotified(settled, ae.RunId) {
+				m.pushHubTaskResult(ledger, settled, ae)
+			}
 		}
 	}
 	// 一个 batch 出现多个 hub_task = 空闲闸门失效（§6.7.2 防御）：
@@ -389,7 +403,7 @@ func hubAlertSeverity(code string) string {
 	switch code {
 	case "recovery_failed", "blocked_budget", "push_failed", "settle_failed",
 		"artifact_register_failed", "batch_conflict", "notify_failed", "injected_conflict",
-		"bad_header":
+		"task_result_card_failed", "bad_header":
 		return "error"
 	case "usage_unpriced", "recovered_interrupted", "queue_unavailable",
 		"dispatch_denied", "concurrency_limit", "duplicate_task", "chain_too_deep",

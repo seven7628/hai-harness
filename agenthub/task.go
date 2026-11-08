@@ -101,7 +101,10 @@ type TaskResult struct {
 	Summary      string         `json:"summary,omitempty"`
 	Artifacts    []TaskArtifact `json:"artifacts,omitempty"`
 	Usage        Usage          `json:"usage"`
-	Error        string         `json:"error,omitempty"`
+	// DurationMS 是 AgentStart → AgentEnd 的服务端耗时（与事件同源），
+	// 结果卡/任务板展示用；0 = 未知（旧任务/恢复合成）。
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Task 是 Hub 的任务账本条目。一条链的根是 RootTaskID，护栏按链聚合。

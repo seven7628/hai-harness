@@ -391,6 +391,14 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, conten
 			wake.GroupID, wake.AgentID, spec.Scope.GroupID, spec.Agent.ID)
 		return
 	}
+	// 智能体任务批次（hub_task 绑定）：结果由群内 task_result 卡承载（§6.7.1/§6.7.9），
+	// 最终正文不再写第二条普通气泡，否则「结果卡 + AgentEnd 正文」＝同一条回复出现两次。
+	// 运行中显式 group_say 已单独落账，不受影响。游标仍要推进，避免这条触发消息
+	// 下次被重复快照（任务批次正常不带 group_wake，这里只是防御混合批）。
+	if bs.currentHubTaskID() != "" {
+		m.advanceHubGroupCursor(wake.GroupID, spec.Agent.ID, wake.TriggerSeq)
+		return
+	}
 	m.finishHubRound(spec, wake, content)
 }
 
@@ -648,6 +656,21 @@ func sameGroupReply(a, b string) bool {
 func (m *manager) advanceGroupAgentCursor(ctx context.Context, st agenthub.Store, gid agenthub.GroupID, agentID agenthub.AgentID, seq int64) error {
 	// 必须走字段级原子推进：整行 SaveCursor 会覆盖人类已读游标（两个独立写者）。
 	return st.AdvanceAgentContextSeq(ctx, gid, agentID, seq)
+}
+
+// advanceHubGroupCursor 只推进「已看过」的游标（没有会话侧 store 句柄时用）。
+func (m *manager) advanceHubGroupCursor(gid agenthub.GroupID, agentID agenthub.AgentID, seq int64) {
+	if m == nil || gid == "" || agentID == "" {
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
+		return
+	}
+	if err := m.advanceGroupAgentCursor(context.Background(), st, gid, agentID, seq); err != nil {
+		m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
+	}
 }
 
 // hubAlertf 是 bridge 内需要格式化时的薄封装；保持 hub_alert 单一出口不变。

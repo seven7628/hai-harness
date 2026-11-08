@@ -108,6 +108,7 @@ func (m *manager) cancelHubTask(ctx context.Context, id agenthub.TaskID) (*agent
 		canceled, err := q.CancelQueued(ctx, id)
 		if err == nil {
 			m.emitHubTaskUpdate(canceled)
+			m.notifyCanceledAgentTask(canceled)
 			return canceled, "已取消（未开始）", nil
 		}
 		// 读到 queued 之后 Pump 可能已在 q.mu 内把它派走（Retry/并发取消也会改状态）。
@@ -138,6 +139,7 @@ func (m *manager) cancelHubTask(ctx context.Context, id agenthub.TaskID) (*agent
 		}
 		if did {
 			m.emitHubTaskUpdate(canceled)
+			m.notifyCanceledAgentTask(canceled)
 			return canceled, "目标会话不存在，已取消", nil
 		}
 		return canceled, "任务已结束，无需取消", nil
@@ -152,6 +154,7 @@ func (m *manager) cancelHubTask(ctx context.Context, id agenthub.TaskID) (*agent
 	}
 	if did {
 		m.emitHubTaskUpdate(canceled)
+		m.notifyCanceledAgentTask(canceled)
 		return canceled, "会话空闲，已取消", nil
 	}
 	if canceled.Status.Terminal() {
@@ -407,7 +410,7 @@ func (m *manager) recordHubNeed(bs *bridgeSession, e events.Event) {
 		return
 	}
 	isHub := bs.runtime.kind == runtimeHubAgent
-	isTask := len(bs.hubTaskIDs) > 0
+	isTask := bs.hubTaskCount() > 0
 	if !isHub && !isTask {
 		return
 	}
@@ -454,10 +457,10 @@ func (m *manager) recordHubNeed(bs *bridgeSession, e events.Event) {
 }
 
 func firstHubTaskID(bs *bridgeSession) agenthub.TaskID {
-	if bs == nil || len(bs.hubTaskIDs) == 0 {
+	if bs == nil {
 		return ""
 	}
-	return bs.hubTaskIDs[0]
+	return bs.currentHubTaskID()
 }
 
 // expireStaleHubNeeds 把 30 分钟未处理的审批/提问置 expired。

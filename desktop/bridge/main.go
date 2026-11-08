@@ -344,8 +344,10 @@ type bridgeSession struct {
 	// hubPumpQueue 根 run 结束时推进 Hub 派发队列（nil = 未接线）。
 	hubPumpQueue func(workspace, sessionID string)
 	// hubTaskIDs 本批 UserInputsConsumed 里的 hub_task id（P2-04 相关性）。
-	// 只在 emit（run goroutine）读写；AgentEnd 结算后清空。
+	// 只在 emit（run goroutine）读写；AgentEnd 结算后清空。跨 goroutine 读
+	//（task_ack 工具）必须走 hubTaskMu 保护的访问器，否则 -race 会报数据竞争。
 	hubTaskIDs []agenthub.TaskID
+	hubTaskMu  sync.Mutex
 	// P2.5-04：目标会话运行中的预算硬停。LLMEnd 累计本任务花费，超限时
 	// Interrupt 当前 run；finishHubTask 据此把终态落 blocked_budget。
 	hubTaskSpentMicro atomic.Int64
@@ -579,9 +581,12 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// 结算窗口：从根 AgentEnd 进入 emit（下面会清 running）到 finishHubTask 完成，
 	// 取消/队列闸门都必须仍看到 busy。defer 兜底所有提前 return；正常路径在结算
 	// 完成后、触发下一次泵之前显式清除（否则泵可能趁 latch 未清看到忙而漏派发）。
+	// 项目会话与 Hub 智能体会话（群内 agent 目标任务，P3b-05）同口径：群轮闩在
+	// finishHubReply 里已经放开，没有这把 latch 的话，结算窗口里的取消会把
+	// 「已经跑完、正在回推」的任务抢成 canceled。
 	settling := false
 	if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 &&
-		bs.runtime != nil && bs.runtime.kind == runtimeProject {
+		bs.runtime != nil {
 		settling = true
 		bs.hubSettling.Store(true)
 		defer func() {
@@ -682,14 +687,14 @@ func (bs *bridgeSession) emit(e events.Event) {
 			bs.hubAlert("bad_header", fmt.Sprintf("有 %d 个 hub_group_wake header 无法解析", badWakes))
 		}
 		if ev.Injected {
-			if len(bs.hubTaskIDs) > 0 {
+			if bs.hubTaskCount() > 0 {
 				bs.hubHumanIntervened.Store(true)
 			}
 			if len(ids) > 0 && bs.hubFailTask != nil {
 				bs.hubFailTask(ids, "injected_conflict: 任务消息被运行中插话消费（空闲闸门失效）")
 			}
 		} else {
-			bs.hubTaskIDs = ids
+			bs.bindHubTasks(ids)
 			bs.hubTaskSpentMicro.Store(0)
 			bs.hubBudgetStop.Store(false)
 			bs.hubBudgetReason.Store("")
@@ -712,10 +717,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 			costUSD := costUsd(prov, ev.Model, *ev.Usage)
 			// P2.5-04：日预算/单任务预算的运行中硬停。只对当前 hub_task 生效；
 			// 花费累计用 LLMEnd 的每次调用来近似（最终以 AgentEnd 结算为准）。
-			if bs.hubBudgetCheck != nil && len(bs.hubTaskIDs) > 0 {
+			curTaskID := bs.currentHubTaskID()
+			if bs.hubBudgetCheck != nil && curTaskID != "" {
 				spent := float64(bs.hubTaskSpentMicro.Add(int64(costUSD*1e6))) / 1e6
 				if !bs.hubBudgetStop.Load() {
-					if stop, reason := bs.hubBudgetCheck(bs.hubTaskIDs[0], spent); stop {
+					if stop, reason := bs.hubBudgetCheck(curTaskID, spent); stop {
 						bs.hubBudgetStop.Store(true)
 						bs.hubBudgetReason.Store(reason)
 						if bs.hubInterrupt != nil {
@@ -839,8 +845,9 @@ func (bs *bridgeSession) emit(e events.Event) {
 		bs.finishCronRun(bs.cronEndStatus, bs.cronEndErr, bs.cronEndContent)
 	}
 	// Hub 任务结算：**根 run** 的 AgentEnd、且事件已落盘（transcript 完整）。
-	if e.Type() == events.AgentEndType && bs.hubFinishTask != nil && bs.runtime != nil &&
-		bs.runtime.kind == runtimeProject {
+	// 项目会话（工作区目标）与 Hub 智能体会话（群内 agent 目标，P3b-05）共用
+	// 同一结算入口：hubTaskIDs 为空时 finishHubTask 立即返回，不改既有路径。
+	if e.Type() == events.AgentEndType && bs.hubFinishTask != nil && bs.runtime != nil {
 		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
 			bs.hubFinishTask(ae)
 		}
@@ -1072,6 +1079,52 @@ func (bs *bridgeSession) setHubGroupWake(h *agenthub.GroupWakeHeader) {
 	}
 	bs.hubWakeDepth.Store(int64(h.Depth))
 	bs.hubWakeTurn.Store(int64(h.Turn))
+}
+
+// hubTaskIDs 的跨 goroutine 访问器（P3b-05）：结算/绑定发生在 emit（dispatchMu
+// 内），而 task_ack 工具在工具 goroutine 里读「我这一轮绑定的任务」，必须走同一把
+// hubTaskMu。锁只包住 slice 赋值/拷贝，绝不在持锁时做 I/O。
+func (bs *bridgeSession) bindHubTasks(ids []agenthub.TaskID) {
+	if bs == nil {
+		return
+	}
+	bs.hubTaskMu.Lock()
+	bs.hubTaskIDs = ids
+	bs.hubTaskMu.Unlock()
+}
+
+// takeHubTasks 取走并清空本批任务绑定（AgentEnd 结算入口）。
+func (bs *bridgeSession) takeHubTasks() []agenthub.TaskID {
+	if bs == nil {
+		return nil
+	}
+	bs.hubTaskMu.Lock()
+	ids := bs.hubTaskIDs
+	bs.hubTaskIDs = nil
+	bs.hubTaskMu.Unlock()
+	return ids
+}
+
+// currentHubTaskID 本批绑定的第一个任务（无绑定返回空）。只读。
+func (bs *bridgeSession) currentHubTaskID() agenthub.TaskID {
+	if bs == nil {
+		return ""
+	}
+	bs.hubTaskMu.Lock()
+	defer bs.hubTaskMu.Unlock()
+	if len(bs.hubTaskIDs) == 0 {
+		return ""
+	}
+	return bs.hubTaskIDs[0]
+}
+
+func (bs *bridgeSession) hubTaskCount() int {
+	if bs == nil {
+		return 0
+	}
+	bs.hubTaskMu.Lock()
+	defer bs.hubTaskMu.Unlock()
+	return len(bs.hubTaskIDs)
 }
 
 // manager：进程内多 workspace 注册表（一个进程承载所有工作区的会话）

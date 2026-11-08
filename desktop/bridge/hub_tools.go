@@ -141,10 +141,11 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 	registerHubGroupTools(eng, m, p.ID)
 	registerHubArtifactTools(eng, m, p.ID)
 	registerHubTaskTools(eng, m, p.ID)
-	// assign_task 只存在于群作用域会话：群 id 来自装配时的 scope，模型无从指定
-	// 别的群（P3b-03）。DM 里没有可指派的群成员。
+	// assign_task / task_ack 只存在于群作用域会话：群 id 来自装配时的 scope，模型
+	// 无从指定别的群（P3b-03）。DM 里没有可指派的群成员，也没有可拒绝的指派。
 	if spec.Scope.Kind == agenthub.ScopeGroup && spec.Scope.GroupID != "" {
 		registerHubAssignTaskTool(eng, m, p.ID, spec.Scope.GroupID)
+		registerHubTaskAckTool(eng, m, p.ID, spec.Scope.GroupID, sid)
 	}
 	registerHubWorkspaceTools(eng, svc, func(code, message string) {
 		m.emitHubAlert(hubAlertEvent{Code: code, AgentID: p.ID, Message: message})
