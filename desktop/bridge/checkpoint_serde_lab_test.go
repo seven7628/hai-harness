@@ -537,6 +537,15 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		if cerr != nil {
 			t.Fatal(cerr)
 		}
+		if rawRec, rerr := os.ReadFile(recPath); rerr == nil {
+			if i := bytes.Index(rawRec, []byte(`"blocks":`)); i >= 0 {
+				end := i + 200
+				if end > len(rawRec) {
+					end = len(rawRec)
+				}
+				t.Logf("落盘 blocks 字段: %s", string(rawRec[i:end]))
+			}
+		}
 		fi, _ := os.Stat(recPath)
 		t.Logf("提交: total=%s encode=%s temp=%s record=%.2fMB",
 			ct2.Total.Round(time.Millisecond), ct2.Encode.Round(time.Millisecond),
