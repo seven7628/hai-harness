@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05 passed；P3b-06 任务完成三层感知实现中",
+  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05/06 passed；P3b-07 前端互 @/结果卡启动",
   "updated": "2026-11-07",
   "phases": [
     {
@@ -1235,9 +1235,11 @@ const BASE = {
       ],
       "acceptance": "task_result 入 log；其他成员快照可见；只唤醒派发者；左栏预览/未读更新；失败卡。",
       "tests": "go test ./agenthub/ -run Perception",
-      "commit": "feat(hub-p3b-06): 任务完成群内感知",
-      "status": "in_progress",
-      "note": "实现中：群感知投影（last_outcome/未读/human_read_seq）+ 快照可见性"
+      "commit": "5b5fb01",
+      "status": "done",
+      "note": "实现 5b5fb01；复审 passed",
+      "review": "passed",
+      "reviewNote": "复审（task-hwkprcsu）PASS。Group.HumanReadSeq 向后兼容；MarkGroupRead 在 File/Memory 都持锁单调、并发不倒退，SaveGroup 保留磁盘更大值；perception 未读排除人类、task_result 优先渲染 completed/failed/interrupted/canceled/declined/blocked_budget；hub_group_list 新增 progress（保留 groups 数组），分页可数 >500 且终止；hub_mark_read 群/DM 双路；task_result 对非派发者快照可见且不唤醒。变异 readSeq/优先级/游标后退/SaveGroup 合并/分页 beforeSeq 全 RED。非阻塞：overshoot、DM 回退生效值/删除群/部分失败无测试、mark_read 无广播事件、无界扫描、warning 含绝对路径、Store 编译断言。"
     },
     {
       "id": "P3b-07",
@@ -1499,6 +1501,36 @@ const BASE = {
       ],
       "return_when": "更新群提示词/发现性时：写入 task_ack、结果卡不唤醒他人、收到 task_result 后需用 group_say 汇报",
       "note": "P3b-05 复审 N-6/N-7：A 的默认回复不会进群，task_ack 不在提示词里。"
+    },
+    {
+      "id": "D-group-read-overshoot",
+      "depends_on": [
+        "P3b-07"
+      ],
+      "return_when": "P3b-07 群已读接线时：mark_read 超过末尾 seq 要钳到 lastSeq 或拒绝，避免永久吞未读；DM 同口径",
+      "note": "P3b-06 复审 finding 4。"
+    },
+    {
+      "id": "D-group-read-event",
+      "depends_on": [
+        "P3b-07"
+      ],
+      "return_when": "多窗口/多端同步时：mark_read 广播 hub_read 事件，或群 open 返回 cursor 让其他窗口收敛",
+      "note": "P3b-06 复审 finding 8。"
+    },
+    {
+      "id": "D-group-list-cost",
+      "depends_on": [
+        "P3b-06"
+      ],
+      "return_when": "左栏刷新成本成问题时：store 层 CountMessagesSince/tail reader 或 unread_capped 上限",
+      "note": "P3b-06 复审 finding 6：长日志每页全量重读。"
+    },
+    {
+      "id": "D-mark-read-test-gaps",
+      "depends_on": [],
+      "return_when": "下一次改 hub_mark_read/群列表时：补删除群、DM 回退生效值、部分失败 warning 三条测试",
+      "note": "P3b-06 复审 findings 1-3。"
     }
   ],
   "progress": {
@@ -1838,10 +1870,10 @@ const BASE = {
       "reviewNote": "复审（task-3ccfwxwf）PASS。结算/结果卡/只唤醒派发者/不重复发群消息/task_ack/canceled 均成立；B-1 泵终态丢失已在 c35ec2d 修复：pumpAgentTask 统一投影 canceled/failed（hub_task_update + 卡 + 回推，去重幂等），assign note 按最终状态派生，queue 的落账失败分支返回 failed 快照；N-10 重启复制容错。变异 remove terminal projection / unconditional queued note / raw q.Pump 均 RED；两处真实 B-1 复现已转为 card+push+update。定向 -count=5 -race、vet/build 绿；全量仅两处既有环境失败。残留非阻塞：N-1 agent-origin recovery、N-2 running 不可达、N-5 卡片纯文本、N-6/N-7 prompt、N-12 覆盖缺口。"
     },
     "P3b-06": {
-      "status": "in_progress",
-      "commit": "",
-      "review": "pending",
-      "reviewNote": "实现中"
+      "status": "done",
+      "commit": "5b5fb01 feat(hub-p3b-06): 任务完成三层感知",
+      "review": "passed",
+      "reviewNote": "复审（task-hwkprcsu）PASS。Group.HumanReadSeq 向后兼容；MarkGroupRead 在 File/Memory 都持锁单调、并发不倒退，SaveGroup 保留磁盘更大值；perception 未读排除人类、task_result 优先渲染 completed/failed/interrupted/canceled/declined/blocked_budget；hub_group_list 新增 progress（保留 groups 数组），分页可数 >500 且终止；hub_mark_read 群/DM 双路；task_result 对非派发者快照可见且不唤醒。变异 readSeq/优先级/游标后退/SaveGroup 合并/分页 beforeSeq 全 RED。非阻塞：overshoot、DM 回退生效值/删除群/部分失败无测试、mark_read 无广播事件、无界扫描、warning 含绝对路径、Store 编译断言。"
     }
   },
   "reviewGate": {
