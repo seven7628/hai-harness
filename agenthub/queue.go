@@ -306,19 +306,34 @@ const MaxAgentPairInFlight = 2
 // SubmitAgent 建一条 kind=agent 的任务（queued）。它**不派发**：调用方先把消息
 // 写进群日志、绑定 message_seq，再自己 Pump —— 消息没落盘就不该投给目标会话。
 //
-// 同对并发上限在目标锁内、建账前判（prepare）：同一对 (group, 目标) 的提交共享
-// 同一个目标锁，check-then-create 不会被并发工具调用穿透。
+// 来源有两种（P3b-07a）：
+//   - OriginGroup + AgentID：群内智能体互派。同对并发上限在目标锁内、建账前判
+//     （prepare）：同一对 (group, 目标) 的提交共享同一个目标锁，check-then-create
+//     不会被并发工具调用穿透。
+//   - OriginHuman + GroupID（没有 AgentID）：人在群 UI 里派任务。人没有 agent id，
+//     所以「同对在途上限」「不能派给自己」两条不适用；其余守卫（群/目标/指令）照旧。
 func (q *Queue) SubmitAgent(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	if t.Target.AgentID == "" || t.Target.GroupID == "" || strings.TrimSpace(t.Target.SessionID) == "" {
 		return nil, fmt.Errorf("%w: agent 目标需要 agent_id/group_id/session_id", ErrInvalid)
 	}
-	if t.Origin.Kind != OriginGroup || t.Origin.GroupID == "" || t.Origin.AgentID == "" {
-		return nil, fmt.Errorf("%w: agent 目标任务必须来自群内智能体", ErrInvalid)
+	human := t.Origin.Kind == OriginHuman
+	switch {
+	case human:
+		if t.Origin.GroupID == "" {
+			return nil, fmt.Errorf("%w: 人类派任务需要群 group_id", ErrInvalid)
+		}
+		if t.Origin.AgentID != "" {
+			return nil, fmt.Errorf("%w: 人类来源不能带发起智能体 agent_id", ErrInvalid)
+		}
+	case t.Origin.Kind == OriginGroup && t.Origin.GroupID != "" && t.Origin.AgentID != "":
+		// 群内智能体来源：字段齐全。
+	default:
+		return nil, fmt.Errorf("%w: agent 目标任务必须来自群内智能体或群内人类", ErrInvalid)
 	}
 	if t.Origin.GroupID != t.Target.GroupID {
 		return nil, fmt.Errorf("%w: 不能跨群派任务（origin %s → target %s）", ErrInvalid, t.Origin.GroupID, t.Target.GroupID)
 	}
-	if t.Origin.AgentID == t.Target.AgentID {
+	if t.Origin.AgentID != "" && t.Origin.AgentID == t.Target.AgentID {
 		return nil, fmt.Errorf("%w: 不能把任务派给自己", ErrInvalid)
 	}
 	if strings.TrimSpace(t.Instruction) == "" {
@@ -326,6 +341,10 @@ func (q *Queue) SubmitAgent(ctx context.Context, t *Task, g *Guard) (*Task, erro
 	}
 	t.Target.SessionID = strings.TrimSpace(t.Target.SessionID)
 	key := queueKeyFor(t.Target)
+	if human {
+		// 没有发起智能体：同对在途上限无从判起（也不该把所有人的任务算成一个桶）。
+		return q.submitTarget(ctx, t, g, key, false, nil)
+	}
 	return q.submitTarget(ctx, t, g, key, false, func() error {
 		n, err := q.agentPairInFlight(ctx, t)
 		if err != nil {

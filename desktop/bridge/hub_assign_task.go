@@ -115,6 +115,12 @@ func (t *hubAssignTaskTool) Call(ctx context.Context, _, arguments string) (stri
 	if err != nil {
 		return "", err
 	}
+	return marshalHubToolResult(hubAssignResult(task, seq, dispatched))
+}
+
+// hubAssignResult 是 assign_task 工具与 hub_group_assign 命令共用的响应体
+// （P3b-07a）：同一条业务路径必须给同一个形状，否则模型与前端各猜一套字段。
+func hubAssignResult(task *agenthub.Task, seq int64, dispatched bool) map[string]any {
 	out := map[string]any{
 		"task": task, "task_id": string(task.ID), "status": task.Status,
 		"to_agent": string(task.Target.AgentID), "seq": seq, "dispatched": dispatched,
@@ -125,7 +131,20 @@ func (t *hubAssignTaskTool) Call(ctx context.Context, _, arguments string) (stri
 	if note := assignTaskNote(task); note != "" {
 		out["note"] = note
 	}
-	return marshalHubToolResult(out)
+	return out
+}
+
+// hubHumanAssignGuard 是「人在群 UI 里派任务」的护栏（P3b-07a）：没有发起智能体，
+// 所以按 agent 的并发/去重/智能体日预算三项都不适用（SkipAgentScope）；
+// 全局/群日预算与链长仍然生效。
+func (m *manager) hubHumanAssignGuard() *agenthub.Guard {
+	return &agenthub.Guard{
+		Limits: agenthub.GuardLimits{
+			GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
+			SkipAgentScope:       true,
+		},
+		GroupDailyBudget: m.hubGroupDailyBudgetHook(),
+	}
 }
 
 // assignTaskNote 是 assign_task 给模型的补充说明（空 = 不需要说明）。
@@ -154,8 +173,12 @@ func assignTaskNote(task *agenthub.Task) string {
 
 // hubAssignRequest 是 manager 层的指派输入（工具只做 JSON 解析，权限/账本都在这里）。
 type hubAssignRequest struct {
-	GroupID     agenthub.GroupID
-	From        agenthub.AgentID
+	GroupID agenthub.GroupID
+	// From 是发起智能体；FromHuman=true 时必须为空（人没有 agent id）。
+	From agenthub.AgentID
+	// FromHuman 人类从群 UI 派任务（P3b-07a）：Origin=human、群消息 Sender=human，
+	// 跳过「发起者成员/派发权限/同对在途上限」三条按智能体的检查。
+	FromHuman   bool
 	To          string
 	Instruction string
 	Title       string
@@ -163,11 +186,20 @@ type hubAssignRequest struct {
 	ClientMsgID string
 }
 
-// assignHubTask 是 assign_task 的完整业务路径：校验 → 建账 → 写群消息 → 绑定
-// message seq → 派发（目标空闲时）。任何校验失败都在**写之前**返回，不留任务/消息。
+// assignHubTask 是 assign_task / hub_group_assign 的完整业务路径：校验 → 建账 →
+// 写群消息 → 绑定 message seq → 派发（目标空闲时）。任何校验失败都在**写之前**返回，
+// 不留任务/消息。人类来源与智能体来源共用这条路径，只有 Origin、群消息发送者与
+// 「按发起智能体」的护栏不同（P3b-07a）。
 func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*agenthub.Task, int64, bool, error) {
-	if req.GroupID == "" || req.From == "" {
-		return nil, 0, false, fmt.Errorf("%w: assign 需要群与发起者", agenthub.ErrInvalid)
+	if req.GroupID == "" {
+		return nil, 0, false, fmt.Errorf("%w: assign 需要群", agenthub.ErrInvalid)
+	}
+	if req.FromHuman {
+		if req.From != "" {
+			return nil, 0, false, fmt.Errorf("%w: 人类来源不能带发起智能体", agenthub.ErrInvalid)
+		}
+	} else if req.From == "" {
+		return nil, 0, false, fmt.Errorf("%w: assign 需要发起者", agenthub.ErrInvalid)
 	}
 	instruction := strings.TrimSpace(req.Instruction)
 	if instruction == "" {
@@ -185,15 +217,20 @@ func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*age
 		return nil, 0, false, fmt.Errorf("%w: 群组 %s 不存在", agenthub.ErrNotFound, req.GroupID)
 	}
 	// 鉴权顺序：先确认发起者是成员，再看权限，最后才解析目标（不向非成员泄漏成员名）。
-	if _, member := groupMemberOf(g, req.From); !member {
-		return nil, 0, false, fmt.Errorf("%w: 智能体不是该群成员", agenthub.ErrInvalid)
-	}
-	from, _, err := m.hubLoadAgent(string(req.From))
-	if err != nil || from == nil {
-		return nil, 0, false, fmt.Errorf("%w: 发起者智能体不可用", agenthub.ErrNotFound)
-	}
-	if !from.Policy.CanDispatch {
-		return nil, 0, false, fmt.Errorf("%w: 没有派发权限（policy.can_dispatch=false）", agenthub.ErrForbidden)
+	// 人类来源没有发起智能体：这两步不适用（人就是群的所有者/使用者），
+	// 但目标校验（成员/存活/非自己）照旧。
+	var from *agenthub.AgentProfile
+	if !req.FromHuman {
+		if _, member := groupMemberOf(g, req.From); !member {
+			return nil, 0, false, fmt.Errorf("%w: 智能体不是该群成员", agenthub.ErrInvalid)
+		}
+		from, _, err = m.hubLoadAgent(string(req.From))
+		if err != nil || from == nil {
+			return nil, 0, false, fmt.Errorf("%w: 发起者智能体不可用", agenthub.ErrNotFound)
+		}
+		if !from.Policy.CanDispatch {
+			return nil, 0, false, fmt.Errorf("%w: 没有派发权限（policy.can_dispatch=false）", agenthub.ErrForbidden)
+		}
 	}
 	to, err := resolveAssignTarget(ctx, st, g, req.From, req.To)
 	if err != nil {
@@ -212,7 +249,7 @@ func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*age
 		if art.GroupID != "" && art.GroupID != g.ID {
 			return nil, 0, false, fmt.Errorf("%w: 产物 %s 不属于本群", agenthub.ErrInvalid, id)
 		}
-		if !agenthub.ArtifactVisibleTo(art, req.From, false) {
+		if !agenthub.ArtifactVisibleTo(art, req.From, req.FromHuman) {
 			return nil, 0, false, fmt.Errorf("%w: 无权引用产物 %s", agenthub.ErrInvalid, id)
 		}
 	}
@@ -237,23 +274,34 @@ func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*age
 	if err != nil {
 		return nil, 0, false, err
 	}
-	created, err := q.SubmitAgent(ctx, &agenthub.Task{
-		Origin: agenthub.TaskOrigin{
+	var origin agenthub.TaskOrigin
+	var guard *agenthub.Guard
+	if req.FromHuman {
+		// 人没有 agent id：Origin 只带群。护栏也只有全局/群日预算与链长
+		// （并发/去重/智能体日预算按发起智能体算，人没有这一层）。
+		origin = agenthub.TaskOrigin{Kind: agenthub.OriginHuman, GroupID: g.ID}
+		guard = m.hubHumanAssignGuard()
+	} else {
+		origin = agenthub.TaskOrigin{
 			Kind: agenthub.OriginGroup, GroupID: g.ID, AgentID: req.From, AgentName: from.Name,
-		},
+		}
+		guard = m.hubWorkspaceGuard(*from)
+	}
+	created, err := q.SubmitAgent(ctx, &agenthub.Task{
+		Origin:      origin,
 		Target:      target,
 		Title:       title,
 		Instruction: instruction,
 		ArtifactIDs: append([]string(nil), req.ArtifactIDs...),
 		Callback:    agenthub.CallbackAgentEnd,
 		ClientMsgID: clientID,
-	}, m.hubWorkspaceGuard(*from))
+	}, guard)
 	if err != nil {
 		return nil, 0, false, err
 	}
 	// 群消息：kind=text + intent=assign + task_id + mentions=[B]（结构化，不是正文 @）。
 	// 只用结构化 mentions 路由：instruction 里的 @ 是给 B 的正文，不该把 C 也拉进来。
-	seq, deduped, err := m.appendAssignMessage(ctx, st, g, req.From, created, instruction)
+	seq, deduped, err := m.appendAssignMessage(ctx, st, g, created, instruction)
 	if err != nil {
 		// 消息没写成：任务还没派发，取消它 —— 不能留一条「有任务、无消息」的指派。
 		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -303,27 +351,44 @@ func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*age
 // appendAssignMessage 落一条 intent=assign 的群消息 + 路由回执。
 // 返回的 seq 是触发消息自己的 seq（回执在其后）。
 //
+// 发送者从任务 Origin 推导（不另收参数）：智能体来源 = SenderAgent + agent id，
+// 人类来源 = SenderHuman（P3b-07a）—— 两者必须始终与账本里的 Origin 一致，
+// 否则群日志会出现「人派的任务署了某智能体的名」。
+//
 // 刻意不持 hubGroupSendMu：那把锁保护的是「轮次上限检查 → 消息+回执」的原子性，
 // 而指派不参与接龙限流（P3b-04 负责循环/预算）；消息+回执的原子性由
 // AppendMessageWithRound 的存储锁保证，锁范围不必扩大到会话装配。
-func (m *manager) appendAssignMessage(ctx context.Context, st agenthub.Store, g *agenthub.Group, from agenthub.AgentID, task *agenthub.Task, instruction string) (int64, bool, error) {
+func (m *manager) appendAssignMessage(ctx context.Context, st agenthub.Store, g *agenthub.Group, task *agenthub.Task, instruction string) (int64, bool, error) {
 	if g == nil || task == nil {
 		return 0, false, fmt.Errorf("%w: assign 消息参数为空", agenthub.ErrInvalid)
+	}
+	human := task.Origin.Kind == agenthub.OriginHuman
+	if !human && task.Origin.Kind != agenthub.OriginGroup {
+		return 0, false, fmt.Errorf("%w: 指派消息来源只有群内智能体/群内人类（得到 %q）", agenthub.ErrInvalid, task.Origin.Kind)
+	}
+	from := task.Origin.AgentID
+	if !human && from == "" {
+		return 0, false, fmt.Errorf("%w: 指派消息缺少发起智能体", agenthub.ErrInvalid)
 	}
 	// 写消息前的确定性屏障（测试注入；生产恒为 nil）：用来复现「任务已建、消息没写成」
 	// 的回滚路径，而不是靠 sleep/关磁盘（P3b-03 R2）。
 	if err := hubAssignMessageBarrier(task.ID); err != nil {
 		return 0, false, err
 	}
-	routed, err := m.routeAgentGroupMentions(ctx, st, g, from, agenthub.MentionRequest{
+	// 正文是 instruction（给 B 的内容），不参与 @ 路由：只传结构化 mentions。
+	routed, err := m.routeGroupMentions(ctx, st, g, from, human, agenthub.MentionRequest{
 		Mentions: []agenthub.AgentID{task.Target.AgentID},
 	})
 	if err != nil {
 		return 0, false, err
 	}
+	sender := agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: from}
+	if human {
+		sender = agenthub.Sender{Kind: agenthub.SenderHuman}
+	}
 	msg := &agenthub.Message{
 		GroupID: g.ID, Kind: agenthub.KindText,
-		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: from},
+		Sender: sender,
 		Text:   instruction, Intent: agenthub.IntentAssign, TaskID: task.ID,
 		Visibility: agenthub.VisibilityGroup,
 	}
@@ -405,12 +470,18 @@ func resolveAssignTarget(ctx context.Context, st agenthub.Store, g *agenthub.Gro
 
 // assignClientMsgID 把幂等键限制在同一 (发起者, 目标) 内：两个智能体各自用
 // "retry-1" 给同一个目标派任务时不能互相命中（与账本/消息两条去重键一致）。
+// 人类来源没有 agent id，用固定前缀 "human" 占位 —— 与任何 ag_* 发起者的键空间
+// 不相交，同时保持「同一客户端键 + 同一目标 = 同一条任务」的幂等语义（P3b-07a）。
 func assignClientMsgID(from, to agenthub.AgentID, raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
-	return string(from) + ":" + string(to) + ":" + raw
+	scope := string(from)
+	if scope == "" {
+		scope = "human"
+	}
+	return scope + ":" + string(to) + ":" + raw
 }
 
 // assignTaskTitle 缺省标题取 instruction 首行（任务板需要非空标题）。

@@ -8,7 +8,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -661,6 +663,67 @@ func (m *manager) hubGroupSend(c command) {
 		respData["wake_errors"] = wakeErrors
 	}
 	m.resp(c, true, "", respData)
+}
+
+// hubGroupAssign 人从群 UI 派任务给成员（P3b-07a，§6.7.9/§7.1.3）。
+//
+// 与智能体工具 assign_task 是**同一条业务路径**（assignHubTask：建账 → 指派消息 →
+// 绑定 seq → 同步泵），差别只在来源：
+//   - 任务 Origin = human（没有 agent id），阶段 3 的结果卡照常回群；
+//   - 指派消息 Sender = human、mentions=[B]，只唤醒 B；
+//   - 不需要发起者成员/派发权限，也不受「同一对 2 个在途」上限约束
+//     （人没有 agent id，这条额度无从判起）。
+//
+// payload：{group_id, to_agent, instruction, title?, client_msg_id?}
+// 响应与 assign_task 同形（hubAssignResult）：任务忙时留 queued，由目标回合结束后
+// 的任务泵派发；终态（canceled/failed）带 note 说明原因。
+func (m *manager) hubGroupAssign(c command) {
+	ctx := context.Background()
+	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	if gid == "" {
+		m.resp(c, false, "group_id 不能为空", nil)
+		return
+	}
+	to := strings.TrimSpace(str(c.Payload, "to_agent"))
+	if to == "" {
+		m.resp(c, false, "to_agent 不能为空", nil)
+		return
+	}
+	instruction := strings.TrimSpace(str(c.Payload, "instruction"))
+	if instruction == "" {
+		m.resp(c, false, "instruction 不能为空", nil)
+		return
+	}
+	// 群校验放在命令层做一次：UI 需要「群不存在/已删除」这类可读错误，而不是
+	// 从账本/队列的 ErrNotFound 里猜（assignHubTask 里还会再读一次，口径一致）。
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	g, err := st.LoadGroup(ctx, gid)
+	if err != nil {
+		// 「不存在」不是存储故障：UI 需要可读的「群没了」，而不是带绝对路径的 IO 错误。
+		if os.IsNotExist(err) || errors.Is(err, agenthub.ErrNotFound) {
+			m.resp(c, false, "群组不存在或已删除", nil)
+			return
+		}
+		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
+		return
+	}
+	if g == nil || g.Deleted {
+		m.resp(c, false, "群组不存在或已删除", nil)
+		return
+	}
+	task, seq, dispatched, err := m.assignHubTask(ctx, hubAssignRequest{
+		GroupID: gid, FromHuman: true, To: to, Instruction: instruction,
+		Title: strings.TrimSpace(str(c.Payload, "title")), ClientMsgID: str(c.Payload, "client_msg_id"),
+	})
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	m.resp(c, true, "", hubAssignResult(task, seq, dispatched))
 }
 
 func (m *manager) emitHubGroupMessage(gid agenthub.GroupID, seq int64, msg *agenthub.Message) {

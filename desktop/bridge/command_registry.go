@@ -99,6 +99,9 @@ const (
 	CmdHubGroupHistory      Command = "hub_group_history"
 	CmdHubGroupActivity     Command = "hub_group_activity"
 	CmdHubGroupSend         Command = "hub_group_send"
+	// CmdHubGroupAssign 人从群 UI 把一条可追踪任务派给成员（P3b-07a，§6.7.9）：
+	// 与智能体 assign_task 同一条路径，但 Origin=human、指派消息 Sender=human。
+	CmdHubGroupAssign Command = "hub_group_assign"
 	// CmdHubConversationStop 人类「停止自动对话」：中断当前群 run + 清队列 + stopped（§6.5.6 规则 6）。
 	CmdHubConversationStop Command = "hub_conversation_stop"
 	CmdHubArtifactGet      Command = "hub_artifact_get"

@@ -210,17 +210,20 @@ func (m *manager) hubBudgetCheck(taskID agenthub.TaskID, spentUSD float64) (bool
 	}
 	ctx := context.Background()
 	t, err := st.LoadTask(ctx, taskID)
-	if err != nil || t == nil || t.Origin.AgentID == "" {
+	if err != nil || t == nil {
 		return false, ""
 	}
-	p, _, err := m.hubLoadAgent(string(t.Origin.AgentID))
-	if err != nil || p == nil {
-		return false, ""
-	}
-	limits := agenthub.GuardLimits{
-		MaxTaskCostUSD:       p.Policy.MaxTaskCostUSD,
-		DailyBudgetUSD:       p.Policy.DailyBudgetUSD,
-		GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
+	// 人类来源没有发起智能体：单任务/智能体日预算不适用（与 hubHumanAssignGuard 的
+	// 建账口径一致），但全局/群日预算仍然要能硬停 —— 否则人派的长任务可以无视群预算
+	// 一直烧下去（P3b-07a）。
+	limits := agenthub.GuardLimits{GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD}
+	if t.Origin.AgentID != "" {
+		p, _, perr := m.hubLoadAgent(string(t.Origin.AgentID))
+		if perr != nil || p == nil {
+			return false, ""
+		}
+		limits.MaxTaskCostUSD = p.Policy.MaxTaskCostUSD
+		limits.DailyBudgetUSD = p.Policy.DailyBudgetUSD
 	}
 	if t.Origin.GroupID != "" {
 		if g, gerr := st.LoadGroup(ctx, t.Origin.GroupID); gerr == nil && g != nil {

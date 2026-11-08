@@ -7,7 +7,9 @@ package agenthub
 //   - 只累加 CostPriced=true 的成本（未知成本不能被当成 0 花掉）；
 //   - 日预算按 UTC 日、任务 UpdatedAt 归日；群预算按 Origin.GroupID；
 //   - 去重窗口内同 (origin agent, target, instruction) 视为重复派发；
-//   - 根链步数 = Chain 长度，默认 6（防止 A→B→C 无限接力）。
+//   - 根链步数 = Chain 长度，默认 6（防止 A→B→C 无限接力）；
+//   - 人类来源（Origin.Kind=human）没有发起智能体：GuardLimits.SkipAgentScope 跳过
+//     并发/去重/智能体日预算三项，全局/群日预算与链长仍然生效。
 //
 // 这些检查在**建账前**跑（Queue.Submit → Check），失败不落任务；单任务成本只有在
 // 结算时才知道，由 bridge 在 AgentEnd 结算处判（超限落 blocked_budget + hub_alert）。
@@ -46,6 +48,10 @@ type GuardLimits struct {
 	DuplicateWindow time.Duration
 	// MaxChainSteps 根任务链最大步数；0 = 默认 6。
 	MaxChainSteps int
+	// SkipAgentScope 跳过「按发起智能体」的三项额度（并发上限/去重窗口/智能体日预算）。
+	// 人类来源（Origin.Kind=human）没有发起智能体，这三项无意义；链长与全局/群日预算
+	// 仍然生效（P3b-07a）。
+	SkipAgentScope bool
 }
 
 func (l GuardLimits) withDefaults() GuardLimits {
@@ -102,6 +108,8 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 	if err != nil {
 		return err
 	}
+	// 人类来源没有发起智能体：按 agent 的三项检查（并发/去重/智能体日预算）全部跳过。
+	agentScoped := !lim.SkipAgentScope
 	active := 0
 	var agentDay, groupDay, globalDay float64
 	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
@@ -110,14 +118,14 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 			continue
 		}
 		if !old.Status.Terminal() {
-			if old.Origin.AgentID == t.Origin.AgentID {
+			if agentScoped && old.Origin.AgentID == t.Origin.AgentID {
 				active++
 			}
 		}
 		if old.Result != nil && old.Result.Usage.CostPriced && !old.UpdatedAt.Before(startOfDay) {
 			cost := old.Result.Usage.CostUSD
 			globalDay += cost
-			if old.Origin.AgentID == t.Origin.AgentID {
+			if agentScoped && old.Origin.AgentID == t.Origin.AgentID {
 				agentDay += cost
 			}
 			if t.Origin.GroupID != "" && old.Origin.GroupID == t.Origin.GroupID {
@@ -128,12 +136,12 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 		if t.ClientMsgID != "" && old.ClientMsgID == t.ClientMsgID {
 			continue
 		}
-		if old.Origin.AgentID == t.Origin.AgentID && sameTarget(old.Target, t.Target) &&
+		if agentScoped && old.Origin.AgentID == t.Origin.AgentID && sameTarget(old.Target, t.Target) &&
 			old.Instruction == t.Instruction && !old.CreatedAt.Before(now.Add(-lim.DuplicateWindow)) {
 			return fmt.Errorf("%w: 同一任务在 %s 内已派发（task %s）", ErrDuplicateTask, lim.DuplicateWindow, old.ID)
 		}
 	}
-	if active >= lim.MaxConcurrent {
+	if agentScoped && active >= lim.MaxConcurrent {
 		return fmt.Errorf("%w: 发起者已有 %d 个在途任务（上限 %d）", ErrTooConcurrent, active, lim.MaxConcurrent)
 	}
 	if lim.GlobalDailyBudgetUSD > 0 && globalDay >= lim.GlobalDailyBudgetUSD {
@@ -142,7 +150,7 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 	if lim.GroupDailyBudgetUSD > 0 && t.Origin.GroupID != "" && groupDay >= lim.GroupDailyBudgetUSD {
 		return fmt.Errorf("%w: 群日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.GroupDailyBudgetUSD, groupDay)
 	}
-	if lim.DailyBudgetUSD > 0 && agentDay >= lim.DailyBudgetUSD {
+	if agentScoped && lim.DailyBudgetUSD > 0 && agentDay >= lim.DailyBudgetUSD {
 		return fmt.Errorf("%w: 智能体日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.DailyBudgetUSD, agentDay)
 	}
 	return nil
@@ -150,11 +158,14 @@ func (g *Guard) Check(ctx context.Context, store Store, t *Task) error {
 
 // checkIndexed 是 Check 的索引快路径；错误口径与全盘扫描分支保持一致。
 func (g *Guard) checkIndexed(idx TaskIndex, t *Task, lim GuardLimits, now time.Time) error {
-	if id, ok := idx.FindDuplicate(t, now.Add(-lim.DuplicateWindow)); ok {
-		return fmt.Errorf("%w: 同一任务在 %s 内已派发（task %s）", ErrDuplicateTask, lim.DuplicateWindow, id)
-	}
-	if active := idx.ActiveCount(t.Origin.AgentID); active >= lim.MaxConcurrent {
-		return fmt.Errorf("%w: 发起者已有 %d 个在途任务（上限 %d）", ErrTooConcurrent, active, lim.MaxConcurrent)
+	agentScoped := !lim.SkipAgentScope
+	if agentScoped {
+		if id, ok := idx.FindDuplicate(t, now.Add(-lim.DuplicateWindow)); ok {
+			return fmt.Errorf("%w: 同一任务在 %s 内已派发（task %s）", ErrDuplicateTask, lim.DuplicateWindow, id)
+		}
+		if active := idx.ActiveCount(t.Origin.AgentID); active >= lim.MaxConcurrent {
+			return fmt.Errorf("%w: 发起者已有 %d 个在途任务（上限 %d）", ErrTooConcurrent, active, lim.MaxConcurrent)
+		}
 	}
 	agentDay, groupDay, globalDay := idx.DailyCost(t.Origin.AgentID, t.Origin.GroupID, now)
 	if lim.GlobalDailyBudgetUSD > 0 && globalDay >= lim.GlobalDailyBudgetUSD {
@@ -163,7 +174,7 @@ func (g *Guard) checkIndexed(idx TaskIndex, t *Task, lim GuardLimits, now time.T
 	if lim.GroupDailyBudgetUSD > 0 && t.Origin.GroupID != "" && groupDay >= lim.GroupDailyBudgetUSD {
 		return fmt.Errorf("%w: 群日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.GroupDailyBudgetUSD, groupDay)
 	}
-	if lim.DailyBudgetUSD > 0 && agentDay >= lim.DailyBudgetUSD {
+	if agentScoped && lim.DailyBudgetUSD > 0 && agentDay >= lim.DailyBudgetUSD {
 		return fmt.Errorf("%w: 智能体日预算 %.2f 已用 %.2f", ErrBudgetExceeded, lim.DailyBudgetUSD, agentDay)
 	}
 	return nil

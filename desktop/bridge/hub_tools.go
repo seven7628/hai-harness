@@ -86,18 +86,25 @@ func (m *manager) hubWorkspaceGuard(p agenthub.AgentProfile) *agenthub.Guard {
 		GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
 	}
 	return &agenthub.Guard{
-		Limits: limits,
-		GroupDailyBudget: func(ctx context.Context, gid agenthub.GroupID) (float64, error) {
-			st, err := m.hubStore()
-			if err != nil {
-				return 0, err
-			}
-			g, err := st.LoadGroup(ctx, gid)
-			if err != nil {
-				return 0, err
-			}
-			return g.Policy.DailyBudgetUSD, nil
-		},
+		Limits:           limits,
+		GroupDailyBudget: m.hubGroupDailyBudgetHook(),
+	}
+}
+
+// hubGroupDailyBudgetHook 按任务 Origin.GroupID 现读 Group.Policy.DailyBudgetUSD。
+// 建账前的 Guard 没有群上下文，只能由调用方注入这个读取钩子；读不到就报错
+// （fail closed，不能把「读不到预算」当成「不限额」）。
+func (m *manager) hubGroupDailyBudgetHook() func(context.Context, agenthub.GroupID) (float64, error) {
+	return func(ctx context.Context, gid agenthub.GroupID) (float64, error) {
+		st, err := m.hubStore()
+		if err != nil {
+			return 0, err
+		}
+		g, err := st.LoadGroup(ctx, gid)
+		if err != nil {
+			return 0, err
+		}
+		return g.Policy.DailyBudgetUSD, nil
 	}
 }
 

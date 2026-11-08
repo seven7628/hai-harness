@@ -541,7 +541,7 @@ func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub
 	if limitHit {
 		return nil, nil, true, nil, nil
 	}
-	r, routeErr := m.routeAgentGroupMentions(ctx, st, g, sender, agenthub.MentionRequest{
+	r, routeErr := m.routeGroupMentions(ctx, st, g, sender, false, agenthub.MentionRequest{
 		Text: w.Text, Mentions: w.Mentions, MentionAll: w.MentionAll,
 	})
 	if routeErr != nil {
@@ -574,10 +574,11 @@ func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub
 	return msg, routed, false, routeErr, nil
 }
 
-// routeAgentGroupMentions 只对完整 agent 正文做 @ 路由（streaming partial 绝不路由），
-// 并把结构化 mentions 一起交给 Router（@all 鉴权、成员校验、上限都在 agenthub 里）。
+// routeGroupMentions 只对完整正文做 @ 路由（streaming partial 绝不路由），并把结构化
+// mentions 一起交给 Router（@all 鉴权、成员校验、上限都在 agenthub 里）。
+// 智能体正文/群内指派传 isHuman=false，人派任务的指派消息传 true（P3b-07a）。
 // 失败（越权 @all/保留名/成员已删/非成员 id）返回错误，调用方决定是否仍落正文。
-func (m *manager) routeAgentGroupMentions(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, in agenthub.MentionRequest) (*agenthub.Round, error) {
+func (m *manager) routeGroupMentions(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, isHuman bool, in agenthub.MentionRequest) (*agenthub.Round, error) {
 	if g == nil || (strings.TrimSpace(in.Text) == "" && len(in.Mentions) == 0 && !in.MentionAll) {
 		return nil, nil
 	}
@@ -601,7 +602,7 @@ func (m *manager) routeAgentGroupMentions(ctx context.Context, st agenthub.Store
 	if err != nil {
 		return nil, err
 	}
-	round, err := router.RouteMentions(in, sender, false, 0, time.Now())
+	round, err := router.RouteMentions(in, sender, isHuman, 0, time.Now())
 	if err != nil {
 		return nil, err
 	}
