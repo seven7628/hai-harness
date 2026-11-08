@@ -9,7 +9,6 @@
       "path": "/user/balance",
       "auth": "bearer",
       "balance": "balance_infos[0].total_balance",
-      "granted": "balance_infos[0].granted_balance",
       "currency": "balance_infos[0].currency",
       "currency_default": "CNY",
       "verified_by": "live"

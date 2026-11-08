@@ -52,12 +52,10 @@ type Preset struct {
 
 	// —— 字段路径（balance / report 形状）——
 	Balance         string `json:"balance,omitempty"` // 剩余
-	Granted         string `json:"granted,omitempty"` // 赠送额度（DeepSeek）
 	Limit           string `json:"limit,omitempty"`
 	Used            string `json:"used,omitempty"`
 	Currency        string `json:"currency,omitempty"`         // 币种字段路径；`$CNY` 前缀表示字面量
 	CurrencyDefault string `json:"currency_default,omitempty"` // 响应无币种时的默认值（默认 USD）
-	PlanLabel       string `json:"plan_label,omitempty"`
 
 	Windows *WindowSpec `json:"windows,omitempty"`
 }

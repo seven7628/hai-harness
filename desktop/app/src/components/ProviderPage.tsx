@@ -594,8 +594,9 @@ export default function ProviderPage() {
             <span className="pvp-grow" />
             {(() => {
               const m = meterOf(billing[pid])
+              // 不把 m.hint（内部标记/错误码）放进 title：那是排障用的，不该出现在悬停提示里
               return (
-                <span className={`pvp-meter ${m.text ? 'has' : ''}`} title={m.hint || undefined}>
+                <span className={`pvp-meter ${m.text ? 'has' : ''}`}>
                   {typeof m.percent === 'number' && (
                     <span className={`pvp-bar ${m.tone}`}><i style={{ width: `${m.percent > 0 ? Math.max(2, Math.min(100, m.percent)) : 0}%` }} /></span>
                   )}
@@ -741,7 +742,7 @@ export default function ProviderPage() {
             </span>
           )}
           {ago && <span className="pvp-bill-at">{ago}</span>}
-          <button className="btn pvp-mini" onClick={() => fetchBilling(pid, true)} disabled={!snap && false}>
+          <button className="btn pvp-mini" onClick={() => fetchBilling(pid, true)}>
             {t('provider.meter.refresh')}
           </button>
         </div>
