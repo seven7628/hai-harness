@@ -1704,7 +1704,7 @@
   "reviewGate": {
     "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。P2.5 基础设施前置：P2.5-01..07 完成并 Review 后才开 P3b-01；P2.5-08 可与 P3b 并行。",
     "audit": {
-      "done_passed": 56,
+      "done_passed": 57,
       "in_review": 0,
       "not_started": 5,
       "in_review_breakdown": {
