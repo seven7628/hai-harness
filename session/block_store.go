@@ -997,7 +997,7 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 // 安全性完全依赖调用方保证 spans 与 view 一致（同一次 Marshal 产出）；
 // 数量对不上就回退全量路径。
 func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, int, error) {
-	return refBlocksFromSpansDirty(bs, view, spans, nil, nil)
+	return refBlocksFromSpansDirty(bs, view, spans, nil, nil, nil)
 }
 
 // refBlocksFromSpansDirty 是 refBlocksFromSpans 的脏块快路径版本。
@@ -1005,7 +1005,12 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 //	dirty == nil → 逐块全量哈希（兼容旧调用方与周期性校验）
 //	ids   != nil 且与 spans 等长 → 直接用 id，不再逐个 block 解析 JSON
 //	                                （30,787 块实测省 200~400ms）
-func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty map[uint64]struct{}, ids []uint64) ([]byte, int, error) {
+//
+// spanIDs 与 spans 一一对应（升序）；allIDs 是 record 要引用的**全部**块 id。
+// 窗口恢复时 spans 只覆盖「窗口 + 卡片块」，allIDs 仍是全集 —— 引用必须按全集写，
+// 否则 pruneTo 会把窗口外的历史从 sidecar 里删掉（不可逆的数据丢失）。
+// allIDs 为 nil 时按 spans 自身构造（旧行为）。
+func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty map[uint64]struct{}, spanIDs []uint64, allIDs []uint64) ([]byte, int, error) {
 	if len(spans) == 0 {
 		// 空 blocks：仍要写引用，避免下次被当作旧格式。
 		// 同时把索引里残留的块清掉 —— 否则 ref.Count=0 与 store.Len()>0 对不上，
@@ -1023,12 +1028,12 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 		return out, 0, nil
 	}
 
-	useIDs := len(ids) == len(spans)
+	useIDs := len(spanIDs) == len(spans)
 	wrote := 0
 	for i, elem := range spans {
 		var id string
 		if useIDs {
-			id = strconv.FormatUint(ids[i], 10)
+			id = strconv.FormatUint(spanIDs[i], 10)
 		} else {
 			var ok bool
 			id, ok = blockID(elem)
@@ -1071,18 +1076,29 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 		}
 		wrote++
 	}
+	// 引用集合：窗口恢复下以 allIDs 为准（全集），否则按 spans 自身。
 	refIDs2 := make([]string, 0, len(spans))
 	keep2 := make(map[string]struct{}, len(spans))
-	for i, e := range spans {
-		if useIDs {
-			id := strconv.FormatUint(ids[i], 10)
+	if len(allIDs) > 0 {
+		refIDs2 = make([]string, 0, len(allIDs))
+		keep2 = make(map[string]struct{}, len(allIDs))
+		for _, v := range allIDs {
+			id := strconv.FormatUint(v, 10)
 			refIDs2 = append(refIDs2, id)
 			keep2[id] = struct{}{}
-			continue
 		}
-		if id, ok := blockID(e); ok {
-			refIDs2 = append(refIDs2, id)
-			keep2[id] = struct{}{}
+	} else {
+		for i, e := range spans {
+			if useIDs {
+				id := strconv.FormatUint(spanIDs[i], 10)
+				refIDs2 = append(refIDs2, id)
+				keep2[id] = struct{}{}
+				continue
+			}
+			if id, ok := blockID(e); ok {
+				refIDs2 = append(refIDs2, id)
+				keep2[id] = struct{}{}
+			}
 		}
 	}
 	if err := bs.pruneTo(keep2); err != nil {
@@ -1096,7 +1112,7 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 	if ierr2 != nil {
 		return nil, 0, ierr2
 	}
-	ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: setSum2, Count: len(spans), Schema: 1, IDs: ids2}
+	ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: setSum2, Count: len(refIDs2), Schema: 1, IDs: ids2}
 	refJSON, err := json.Marshal(map[string]blocksRefDoc{blocksRefKey: ref})
 	if err != nil {
 		return nil, 0, err

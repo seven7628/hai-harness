@@ -90,6 +90,11 @@ type SessionRecord struct {
 	// 不持久化、不校验：仅当长度与 view 内 blocks 一致时才被采用。
 	BlockSpans [][]byte `json:"-"`
 
+	// AllBlockIDs 是 record 要引用的全部块 id（升序）；窗口恢复时 BlockSpans
+	// 只覆盖窗口与卡片块，而引用必须按全集写（否则窗口外的历史被 prune 掉）。
+	// 为空表示「BlockSpans 就是全集」。
+	AllBlockIDs []uint64 `json:"-"`
+
 	// BlockIDs 与 BlockSpans 一一对应（view 里 blocks 的顺序）。带上它，存储层
 	// 不必再逐个 block 解析 JSON 取 id（30,787 块实测 200~400ms）。不持久化。
 	BlockIDs []uint64 `json:"-"`
@@ -510,7 +515,7 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 		wrote := 0
 		hashedBefore := bs.hashedBytes
 		if len(record.BlockSpans) > 0 {
-			newView, wrote, rerr = refBlocksFromSpansDirty(bs, working.ViewCheckpoint, record.BlockSpans, record.DirtyBlocks, record.BlockIDs)
+			newView, wrote, rerr = refBlocksFromSpansDirty(bs, working.ViewCheckpoint, record.BlockSpans, record.DirtyBlocks, record.BlockIDs, record.AllBlockIDs)
 		} else {
 			newView, wrote, rerr = refBlocks(bs, working.ViewCheckpoint)
 		}
