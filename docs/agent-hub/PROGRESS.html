@@ -303,8 +303,8 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01…07a/07 passed；P3b-08 总验收与评测 8–9 实现中",
-  "updated": "2026-11-07",
+  "subtitle": "P3a/P2.5/P3b 全部 passed（P3b-01a/01/01b/02/03/04/05/06/07a/07/08）",
+  "updated": "2026-11-08",
   "phases": [
     {
       "id": "P0",
@@ -1112,7 +1112,9 @@ const BASE = {
       ],
       "acceptance": "每 (group,agent) 确定性会话懒装配；hub_group_wake hidden 块携带 group/round/trigger 并绑定 UserInputsConsumed；AgentEnd 经 finishHubRound 写 final hub_message（同轮 round_id、空回复不写、group_say 重复去重、final @ 路由下一轮）；agent_context_seq 推进到 trigger_seq 且重启可恢复；忙目标不投第二快照。",
       "tests": "go test ./agenthub/ -run GroupWake && go test ./desktop/bridge/ -run 'TestHubGroup|TestFinishHubRound|TestEnrich'",
-      "commit": "feat(hub-p3b-01a): 群会话唤醒与 final 落账"
+      "commit": "71d2511 + 49b9ccf + bdb22c3",
+      "status": "done",
+      "review": "passed"
     },
     {
       "id": "P3b-01",
@@ -1129,7 +1131,9 @@ const BASE = {
       ],
       "acceptance": "名册稳定层；状态走工具；L1 教 @/assign_task；群成员变化重建 loop；golden 测试。群会话懒装配/round 绑定/finishHubRound/AgentContextSeq 已由 P3b-01a 交付，本任务只补名册、职责、能力与提示词。",
       "tests": "go test ./agenthub/ -run Roster",
-      "commit": "feat(hub-p3b-01): 智能体名册与提示词"
+      "commit": "e4b8b8b",
+      "status": "done",
+      "review": "passed"
     },
     {
       "id": "P3b-01b",
@@ -1146,7 +1150,9 @@ const BASE = {
       ],
       "acceptance": "refreshHubGroupRoster 查表+apply 与装配同锁（消除旧名册 TOCTOU）；applyHubSessionLoop 返回错误并回 warning；agent_status your_role 套 owner override；无 group 作用域时 where 措辞不误导；补 settling/other_group/missing/deleted/group-delete-no-rebuild/warning 保留回归。",
       "tests": "go test ./desktop/bridge/ -run 'TestHubGroup|TestHubAgent|TestRoster' -count=5 -race",
-      "commit": "fix(hub-p3b-01b): 名册重建与状态一致性"
+      "commit": "3725ece",
+      "status": "done",
+      "review": "passed"
     },
     {
       "id": "P3b-02",
@@ -1162,7 +1168,9 @@ const BASE = {
       ],
       "acceptance": "agent 正文 @ 严格解析；代码/URL 不触发；3 个上限；group_say 结构化 mention；@all 权限。",
       "tests": "go test ./agenthub/ -run AgentMention",
-      "commit": "feat(hub-p3b-02): 智能体互相 @"
+      "commit": "8610862 + 80e2a3a",
+      "status": "done",
+      "review": "passed"
     },
     {
       "id": "P3b-03",
@@ -1258,7 +1266,7 @@ const BASE = {
       ],
       "acceptance": "@ chip 反规范化（名字用 accent 着色）；对话/派任务两态；逐轮条；结果卡；context 行（≥2 触发者才显示，chip 可跳转）；typing；键盘/主题/空态。",
       "tests": "npm run lint && npm run test:agent-session",
-      "commit": "def0c8b",
+      "commit": "8eadfda + def0c8b",
       "status": "done",
       "note": "实现 8eadfda，修复 def0c8b；复审 passed",
       "review": "passed",
@@ -1272,14 +1280,16 @@ const BASE = {
         "P3b-07"
       ],
       "files": [
-        "docs/AGENT_HUB_TECH_PLAN.md",
-        "evals/"
+        "desktop/bridge/hub_eval_p3b_test.go",
+        "docs/AGENT_HUB_TECH_PLAN.md"
       ],
       "acceptance": "A@B 可协作；B 完成 A 被唤醒；不无限互踢；人插话/停止生效；Review passed。",
       "tests": "go test ./agenthub/... ./desktop/bridge/...",
-      "commit": "chore(hub-p3b-08): P3b review + evals",
-      "status": "in_progress",
-      "note": "实现中：评测 8–9 + P3b 最终验收 + P3b-07 残余小修"
+      "commit": "7d3670d + 40392e2 + 1f29b8a",
+      "status": "done",
+      "note": "评测 8–9 + P3b 最终验收；docs 60e3bbb/8310be8/fced2f9",
+      "review": "passed",
+      "reviewNote": "最终独立验收（task-8v2bf75j）PASS。评测 8：人@A→A 生产 run 调 assign_task→B 完成→恰好 1 张结果卡→只唤醒 A，C 0 调用/0 唤醒，无二次派发；评测 9：C 下次被 @ 的真实快照含结果卡（failed 分支同样）；停止护栏：排队 @B 在 stop 后不启动。验收中修复：B1 结算跨会话回推异步化（per-task 串行 + HasTaskResult/MarkNotified），mutual A↔B 不再死锁；B2 每群派发闸门 + GroupWakeHeader.conversation_id，stop 先标记 stopped，fast-run 停止后不落 final（60/60）；B3 根 AgentStart dispatched→running + RunID，task_ack running 守卫可达；恢复只在终态写卡，僵尸 running→interrupted，空 RunID 用 recovery:<id> 转 delivered；P2：恢复 agent 目标补卡唤醒、task_ack 严格群校验、mark_read 夹紧、人类派活换代、batch_conflict 补卡、group_send 解锁后唤醒。变异 B1/B2/B3/恢复/停止全部 RED；go build/vet、agenthub/session、bridge 全量（仅 2 已知环境失败）、前端 206+tsc/vite 绿。非阻塞遗留：空日志 mark_read 仍可超尾、workspace live-run 恢复无专项测试、群提示词未含 task_ack/汇报、@你/生命周期占位卡/390/P4。"
     },
     {
       "id": "P4-01",
@@ -1502,16 +1512,18 @@ const BASE = {
       "depends_on": [
         "P3b-06"
       ],
-      "return_when": "P3b-06 三层感知/恢复接线时：recoverOneTaskLocked 对 OriginGroup/agent 终态任务补结果卡与回推，不能只走 DM 路径",
-      "note": "P3b-05 复审 N-1：崩溃窗口内 agent 任务 completed 但无卡/无回推/无告警。"
+      "return_when": "P3b-08 恢复分支已补终态卡/回推/僵尸 running 结算",
+      "note": "P3b-05 复审 N-1：崩溃窗口内 agent 任务 completed 但无卡/无回推/无告警。",
+      "status": "resolved"
     },
     {
       "id": "D-task-running-binding",
       "depends_on": [
         "P3b-06"
       ],
-      "return_when": "接 BindRun/AgentStart→running 时：让 task_ack 的“已开始不可拒绝”硬约束可达，并补真实分支测试",
-      "note": "P3b-05 复审 N-2：生产没有 dispatched→running 迁移。"
+      "return_when": "P3b-08 根 AgentStart 已接 dispatched→running + RunID",
+      "note": "P3b-05 复审 N-2：生产没有 dispatched→running 迁移。",
+      "status": "resolved"
     },
     {
       "id": "D-task-card-text-artifacts",
@@ -1579,24 +1591,55 @@ const BASE = {
       "depends_on": [
         "P3b-08"
       ],
-      "return_when": "P3b-08 最终视觉收口：补 .hub-msg-highlight（reduced-motion 安全）并验证上下文 chip 跳转有可见反馈",
-      "note": "P3b-07 复审非阻塞 1。"
+      "return_when": "P3b-08 已补 .hub-msg-highlight 并浏览器验证",
+      "note": "P3b-07 复审非阻塞 1。",
+      "status": "resolved"
     },
     {
       "id": "D-mock-stop-terminal",
       "depends_on": [
         "P3b-08"
       ],
-      "return_when": "P3b-08 评测/mock 收口：mock stop 对在飞任务发 interrupted/canceled task_update，避免第二次 assign 后停止按钮误启用",
-      "note": "P3b-07 复审非阻塞 2。"
+      "return_when": "P3b-08 mock stop 现在发 interrupted task_update",
+      "note": "P3b-07 复审非阻塞 2。",
+      "status": "resolved"
     },
     {
       "id": "D-dm-unread-refresh-race",
       "depends_on": [
         "P3b-08"
       ],
-      "return_when": "P3b-08 左栏收口：hub_agent_list 响应按 last_seq/请求代际合并，避免刷新覆盖期间到达的 DM 未读",
-      "note": "P3b-07 复审非阻塞 3。"
+      "return_when": "P3b-08 shouldApplyDMInfo/代际合并已修并测试",
+      "note": "P3b-07 复审非阻塞 3。",
+      "status": "resolved"
+    },
+    {
+      "id": "D-task-card-lifecycle",
+      "depends_on": [
+        "P3b-08"
+      ],
+      "return_when": "P4/UI 打磨时：为 queued/dispatched/running 做时间线占位卡与原地更新（当前只在任务板/状态条）",
+      "note": "P3b-07 复审 N5/N-B5。"
+    },
+    {
+      "id": "D-at-human-chip",
+      "depends_on": [
+        "P3b-08"
+      ],
+      "return_when": "补 §6.5.6 rule 10 时：前端 @你/@user chip 与高亮",
+      "note": "Go 有 HumanMention，前端未渲染。"
+    },
+    {
+      "id": "D-p3b-empty-read-clamp",
+      "depends_on": [],
+      "return_when": "下一次改 hub_mark_read 时：空日志也拒绝/夹紧超大 seq，避免永久盲未读",
+      "note": "P3b-08 最终复审非阻塞。"
+    },
+    {
+      "id": "D-workspace-recovery-restart-test",
+      "depends_on": [],
+      "return_when": "补 workspace 目标重启恢复专项测试（live-run 判定与路径归一）",
+      "note": "P3b-08 最终复审非阻塞。"
     }
   ],
   "progress": {
@@ -1949,23 +1992,23 @@ const BASE = {
     },
     "P3b-07": {
       "status": "done",
-      "commit": "def0c8b fix(hub-p3b-07): 群内复审修复",
+      "commit": "8eadfda + def0c8b",
       "review": "passed",
       "reviewNote": "复审（task-2mgw5eff）PASS。B1 群线程自动跟随（1440/1024 结果卡 100% 可见、上滚不被拽回）；B2 IME 守卫先于 picker；B3 空 picker 不吞 Enter、中文标点关闭、markdown 链接标签不被 linkify；B4 关闭 Hub 群未读保留、active 才推已读；B5 结果卡用 task origin 显示 你/Researcher → Writer；B6 Go 真实 BuildTurnContext + chip 跳转高亮（高亮 CSS 仍缺，非阻塞）；B7 hub_group_get 水合 conversation/cursor、dispatched/running 任务可停止；B8 paper/ink 对比度 ≥4.5；N1–N4/N8–N10 收口。变异 M5–M11/MB6/MB7 全 RED。非阻塞残余：highlight CSS、mock stop 未结算任务、DM 刷新竞态。"
     },
     "P3b-08": {
-      "status": "in_progress",
-      "commit": "",
-      "review": "pending",
-      "reviewNote": "实现中"
+      "status": "done",
+      "commit": "7d3670d + 40392e2 + 1f29b8a",
+      "review": "passed",
+      "reviewNote": "最终独立验收（task-8v2bf75j）PASS。评测 8：人@A→A 生产 run 调 assign_task→B 完成→恰好 1 张结果卡→只唤醒 A，C 0 调用/0 唤醒，无二次派发；评测 9：C 下次被 @ 的真实快照含结果卡（failed 分支同样）；停止护栏：排队 @B 在 stop 后不启动。验收中修复：B1 结算跨会话回推异步化（per-task 串行 + HasTaskResult/MarkNotified），mutual A↔B 不再死锁；B2 每群派发闸门 + GroupWakeHeader.conversation_id，stop 先标记 stopped，fast-run 停止后不落 final（60/60）；B3 根 AgentStart dispatched→running + RunID，task_ack running 守卫可达；恢复只在终态写卡，僵尸 running→interrupted，空 RunID 用 recovery:<id> 转 delivered；P2：恢复 agent 目标补卡唤醒、task_ack 严格群校验、mark_read 夹紧、人类派活换代、batch_conflict 补卡、group_send 解锁后唤醒。变异 B1/B2/B3/恢复/停止全部 RED；go build/vet、agenthub/session、bridge 全量（仅 2 已知环境失败）、前端 206+tsc/vite 绿。非阻塞遗留：空日志 mark_read 仍可超尾、workspace live-run 恢复无专项测试、群提示词未含 task_ack/汇报、@你/生命周期占位卡/390/P4。"
     }
   },
   "reviewGate": {
     "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。P2.5 基础设施前置：P2.5-01..07 完成并 Review 后才开 P3b-01；P2.5-08 可与 P3b 并行。",
     "audit": {
-      "done_passed": 36,
+      "done_passed": 56,
       "in_review": 0,
-      "not_started": 23,
+      "not_started": 5,
       "in_review_breakdown": {
         "re_review_pending": 0,
         "initial_pending": 0

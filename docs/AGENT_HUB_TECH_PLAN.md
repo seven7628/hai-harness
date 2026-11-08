@@ -4437,7 +4437,7 @@ go test <pkg> -list '<tasks[].tests 里的 -run 正则>'   # 必须至少列出�
 | 评测 8 · agent 派任务 → 结果卡 → 只唤醒派发者 | PASS | `desktop/bridge/hub_eval_p3b_test.go::TestEval8AgentAssignCompletesAndWakesDispatcher` |
 | 评测 9 · 其他成员下次被 @ 看到结果（含失败分支） | PASS | `TestEval9OtherMemberSeesResultOnNextMention`（`failed` 子测试） |
 | 停止护栏 · A 已 @B 入队、B 未启动时人停止 | PASS | `TestEval8HumanStopStopsChain` |
-| 残余 1 · 上下文 chip 跳转高亮 | 已补 `.hub-msg-highlight`：accent→ink 混色 2px 描边 + 14% accent 底。对比度基线分开记：**正文 vs tint 底** ink 9.06:1 / paper 10.08:1（≥ AA 4.5:1）；**描边 vs 页面底色**按非文本元素口径 3:1 单独校验（两种主题都过），不与正文比值混用。reduced-motion 下不播放淡入 | `desktop/app/src/hub/hub.css` + 浏览器探针 |
+| 残余 1 · 上下文 chip 跳转高亮 | 已补 `.hub-msg-highlight`：accent→ink 混色 2px 描边 + 14% accent 底。对比度基线分开记：**正文 vs tint 底** ink 12.29:1 / paper 13.86:1（≥ AA 4.5:1）；**2px 描边 vs 页面底色** ink 9.06:1 / paper 10.08:1（按非文本元素 3:1 口径单独校验）。两者不混用。reduced-motion 下不播放淡入 | `desktop/app/src/hub/hub.css` + 浏览器探针 |
 | 残余 2 · mock stop 未结算在飞任务 | 已修：停止为 queued/dispatched/running 任务发 `hub_task_update(status=interrupted)`；二次 assign 完成后停止按钮保持禁用 | `scripts/test-hub-p3b.mjs` 的 mock 用例 |
 | 残余 3 · DM 未读刷新竞态 | 已修：`shouldApplyDMInfo`（last_seq + 请求时点代际）逐 agent 合并，刷新期间到达的消息/未读不被旧响应覆盖 | `groupProjection.ts` / `useHubStore.ts` + `test-hub-p3b.mjs` |
 | B1 · 结算/恢复不得在锁内跨会话回推 | 已修：终态回推全部交给异步通知簿（`hub_notify.go`）；锁内只做账本/结果卡/事件投影。发起者会话持 dispatchMu 时结算仍立即返回 | `hub_p3b08_blockers_test.go::TestHubTaskFinishDoesNotWaitForOriginDispatchLock` |
