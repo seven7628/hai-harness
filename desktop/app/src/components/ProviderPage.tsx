@@ -7,7 +7,7 @@ import type { ProviderCfg, ProviderPreset } from '../transport/types'
 import { ChevronDown, ChevronLeft, EyeIcon, EyeOffIcon, ImageIcon, Plus, SearchIcon } from './icons'
 import { ProviderGlyph } from './ProviderGlyph'
 import { fmtMoney, localSpendOf, meterOf, resetIn, sortedWindows, type MeterTone } from '../lib/billingView'
-import { CATEGORY_ORDER, availableEntries, catalogByID, categoryCounts, hostOfURL, searchCatalog, sortConfigured, type CatalogEntry, type CatalogCategory } from '../lib/providerCatalog'
+import { CATEGORY_ORDER, assertCatalogCoverage, availableEntries, catalogByID, categoryCounts, hostOfURL, searchCatalog, sortConfigured, type CatalogEntry, type CatalogCategory } from '../lib/providerCatalog'
 
 // —— Provider：内置快捷添加（DeepSeek/OpenAI/OpenCode Go/Kimi/智谱 + P1 可选 + P2 订阅）+ 用户自定义 ——
 // 协议三选均已实现（chat-completions / responses / anthropic，2026-08）。
@@ -537,6 +537,12 @@ export default function ProviderPage() {
     }
   }
   const leaveAdd = () => { setAdding(false); setAddEntry(null); setErr(null) }
+  // 开发态一致性：后端预设里出现、目录里没有 → console.warn（用户仍能用 id 兜底显示）。
+  // 只在 DEV 跑：生产环境没有任何补救动作，告警只会变成噪声。
+  useEffect(() => {
+    if (import.meta.env.DEV && providerPresets.length > 0) assertCatalogCoverage(providerPresets.map((p) => p.id))
+  }, [providerPresets])
+
   // 进 Provider 页拉一次计量（refresh=false → bridge 侧 60s 缓存；切 tab 不重复请求）。
   useEffect(() => { fetchBilling(undefined, false) }, [fetchBilling])
 

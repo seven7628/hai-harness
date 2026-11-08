@@ -4454,6 +4454,14 @@ export function dispatchEvent(raw: AnyEvent): void {
   }
 
   switch (raw.event_type) {
+    // 余额/配额的后台补拉结果（provider_billing 先进缓存、再逐家推送）。
+    // 与命令响应同形状：只合并，不建会话视图。
+    case 'provider_billing_update': {
+      const snap = raw.snapshot as BillingSnapshot | undefined
+      if (snap?.provider) setState((s) => ({ billing: { ...s.billing, [snap.provider]: snap } }))
+      break
+    }
+
     case 'bridge_ready':
       // P0/P1（§4.4）：Go 侧启动完成后发一次，作为 embed 自举/命令的精确就绪信号
       // （替代「任意 command response 猜测」；保留 command_response 兜底）。

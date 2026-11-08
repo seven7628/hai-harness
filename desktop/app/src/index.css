@@ -12977,9 +12977,12 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .pvp-cat-n { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
 .pvp-grid {
   flex: 1; min-width: 0; display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+  /* 用列宽自适应而不是视口媒体查询：弹窗宽度是 min(78vw,1040px)，与视口不是线性关系 ——
+     按视口设断点会在「窗口不小、弹窗很窄」时仍然挤成两列。280px 是卡片内
+     「名称 + host」不被省略号截断的下限。 */
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
 }
-@media (max-width: 900px) { .pvp-grid { grid-template-columns: minmax(0, 1fr); } }
 .pvp-card {
   display: flex; align-items: center; gap: 10px; min-width: 0;
   padding: 10px; border: 1px solid var(--border-strong); border-radius: 10px;
