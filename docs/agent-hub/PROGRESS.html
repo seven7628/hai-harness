@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05 passed；P3b-06 任务完成三层感知启动",
+  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05 passed；P3b-06 任务完成三层感知实现中",
   "updated": "2026-11-07",
   "phases": [
     {
@@ -1235,7 +1235,9 @@ const BASE = {
       ],
       "acceptance": "task_result 入 log；其他成员快照可见；只唤醒派发者；左栏预览/未读更新；失败卡。",
       "tests": "go test ./agenthub/ -run Perception",
-      "commit": "feat(hub-p3b-06): 任务完成群内感知"
+      "commit": "feat(hub-p3b-06): 任务完成群内感知",
+      "status": "in_progress",
+      "note": "实现中：群感知投影（last_outcome/未读/human_read_seq）+ 快照可见性"
     },
     {
       "id": "P3b-07",
@@ -1834,6 +1836,12 @@ const BASE = {
       "commit": "c35ec2d fix(hub-p3b-05): 泵终态投影 + 重启复制容错",
       "review": "passed",
       "reviewNote": "复审（task-3ccfwxwf）PASS。结算/结果卡/只唤醒派发者/不重复发群消息/task_ack/canceled 均成立；B-1 泵终态丢失已在 c35ec2d 修复：pumpAgentTask 统一投影 canceled/failed（hub_task_update + 卡 + 回推，去重幂等），assign note 按最终状态派生，queue 的落账失败分支返回 failed 快照；N-10 重启复制容错。变异 remove terminal projection / unconditional queued note / raw q.Pump 均 RED；两处真实 B-1 复现已转为 card+push+update。定向 -count=5 -race、vet/build 绿；全量仅两处既有环境失败。残留非阻塞：N-1 agent-origin recovery、N-2 running 不可达、N-5 卡片纯文本、N-6/N-7 prompt、N-12 覆盖缺口。"
+    },
+    "P3b-06": {
+      "status": "in_progress",
+      "commit": "",
+      "review": "pending",
+      "reviewNote": "实现中"
     }
   },
   "reviewGate": {
