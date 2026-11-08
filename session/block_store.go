@@ -141,9 +141,11 @@ func (r *blocksRefDoc) maybeDenseRange() {
 	}
 	holes := span - uint64(len(r.IDs))
 	// 洞太多（超过 1% 或 64 个）就不值得用 range，直接写 ids。
-	// 判据用「占比」而不是固定个数：真实会话 31,042 的区间里有 ~161 个洞
-	//（空壳 assistant 块被丢弃），占 0.5%，写成 missing 约 1KB，仍远小于 ids 的 200KB。
-	if holes > 4096 || (span >= 100 && holes > span/10) {
+	// 判据按「序列化字节数」比较，而不是拍一个百分比：ids 每个约 6.3 字节，
+	// missing 也是每个约 6.3 字节 —— 所以只要洞比引用少，写 missing 就更小。
+	// 真实会话实测：n=30,947、hi=34,495、洞=3,548（10.3%）→ missing 约 25KB，
+	// 而 ids 是 200KB。（早先按 10% 卡，正好把这条挡在门外。）
+	if holes > uint64(len(r.IDs)) || holes > 8192 {
 		return
 	}
 	missing := make([]uint64, 0, holes)
