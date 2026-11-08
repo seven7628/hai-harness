@@ -86,6 +86,37 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		debug.FreeOSMemory()
 		return
 
+	case "turns":
+		// 单独量 turns 数组（24MB=94% body）：解码、编码各多贵。
+		var doc struct {
+			SchemaVersion int             `json:"schema_version"`
+			Turns         json.RawMessage `json:"turns"`
+		}
+		t0 = time.Now()
+		if err := json.Unmarshal(rec.BodyView, &doc); err != nil {
+			t.Fatal(err)
+		}
+		scan := time.Since(t0)
+		t.Logf("跳过式扫描 body(turns 不进对象图) = %s turns=%.1fMB",
+			scan.Round(time.Millisecond), float64(len(doc.Turns))/1e6)
+
+		var turns []Turn
+		t0 = time.Now()
+		if err := json.Unmarshal(doc.Turns, &turns); err != nil {
+			t.Fatal(err)
+		}
+		decode := time.Since(t0)
+		t.Logf("turns 解码 %d 条 = %s", len(turns), decode.Round(time.Millisecond))
+
+		t0 = time.Now()
+		out, err := json.Marshal(turns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encode := time.Since(t0)
+		t.Logf("turns 编码 = %s bytes=%.1fMB", encode.Round(time.Millisecond), float64(len(out))/1e6)
+		return
+
 	case "ab":
 		// 同进程 A/B：拼装出来的 spans（堆上连续）vs mmap 窗口（按页），
 		// 以及「解码时校验摘要」的增量成本。三者在同一份数据上交替跑，
