@@ -967,7 +967,26 @@ button.hub-context-chip:hover { text-decoration: underline; }
 button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
 .hub-context-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--context-accent, var(--text-3)); flex: none; }
 
+/* —— B6 跳转落点（P3b-08）：上下文 chip 只滚动不给反馈等于没跳 ——
+   accent 压向 --ink 再取边框：ink 主题下提亮、paper 主题下压暗，两种底色上都看得见；
+   底色只做一层淡染，不改正文对比度。动画只淡入 220ms，reduced-motion 直接跳过
+   （高亮靠静态底色 + 边框传达，不依赖动画）。 */
+.hub-msg-highlight {
+  border-radius: 12px;
+  background-color: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, var(--ink));
+  outline-offset: 2px;
+  animation: hub-msg-highlight-in 220ms var(--ease);
+}
+/* 系统行/路由回执是窄条：圆角按行高收一点，别把整行画成气泡。 */
+.hub-msg.system.hub-msg-highlight,
+.hub-action.hub-msg-highlight { border-radius: 6px; }
+@keyframes hub-msg-highlight-in {
+  from { background-color: transparent; outline-color: transparent; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hub-typing-dots i,
-  .hub-conv-bar.running .hub-conv-dot { animation: none; }
+  .hub-conv-bar.running .hub-conv-dot,
+  .hub-msg-highlight { animation: none; }
 }

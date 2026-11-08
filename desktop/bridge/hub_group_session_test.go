@@ -33,6 +33,16 @@ func groupWithMembers(t *testing.T, m *manager, buf *syncBuf, cmdID int, name st
 
 func setGroupFakeLoop(t *testing.T, m *manager, bs *bridgeSession, g *agenthub.Group, agentID string, fake provider.Provider) {
 	t.Helper()
+	setGroupFakeLoopIters(t, m, bs, g, agentID, fake, 1)
+}
+
+// setGroupFakeLoopIters 同上，但给 loop 留 maxIter 轮（工具轮 + 收尾正文需要 ≥2；
+// P3b-08 评测 8 的「A 生产 assign_task 工具调用」走这条）。
+func setGroupFakeLoopIters(t *testing.T, m *manager, bs *bridgeSession, g *agenthub.Group, agentID string, fake provider.Provider, maxIter int) {
+	t.Helper()
+	if maxIter <= 0 {
+		maxIter = 1
+	}
 	loaded, _, err := m.hubLoadAgent(agentID)
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +59,7 @@ func setGroupFakeLoop(t *testing.T, m *manager, bs *bridgeSession, g *agenthub.G
 	opts = append(opts,
 		agents.WithProvider(fake),
 		agents.WithModel("group-fake"),
-		agents.WithMaxIterations(1),
+		agents.WithMaxIterations(maxIter),
 	)
 	bs.s.SetLoop(agents.NewAgentLoop(opts...))
 	bs.loop = bs.s.Loop()

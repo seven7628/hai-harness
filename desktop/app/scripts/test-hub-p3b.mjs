@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// P3b-07 前端 hub 纯逻辑验收（Node 直跑，无需浏览器）：
+// P3b-07/08 前端 hub 纯逻辑验收（Node 直跑，无需浏览器）：
 //   mentions：最长名字优先、fenced/inline code/URL/email 跳过、光标插入、选择器过滤；
 //   conversation：轮次/深度/队列文案、终态文案、停止按钮门禁、左栏预览回退、相对时间；
 //   taskCard：task_result 卡的 completed/failed/中断/拒绝文案、产物/耗时/成本、左栏结论行；
-//   groupProjection：未读/预览/任务更新/已读/竞态守卫；
-//   store：Hub 关闭时未读、打开时已读、hub_read seq<=0、迟到任务更新不复活结论。
+//   groupProjection：未读/预览/任务更新/已读/竞态守卫（群 + DM 两套口径）；
+//   store：Hub 关闭时未读、打开时已读、hub_read seq<=0、迟到任务更新不复活结论、
+//          hub_agent_list 在飞时到达的 DM 消息不被旧快照覆盖（P3b-08）；
+//   mock：停止结算在飞任务（interrupted），二次 assign 后停止按钮不被僵尸任务点亮。
 // 这些是「@ 路由 / 自动对话 / 任务卡 / 左栏未读」在 UI 侧的唯一分叉点，值得独立回归。
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
@@ -21,6 +23,7 @@ const result = await build({
       "export * as taskCard from './taskCard.ts'",
       "export * as groupProjection from './groupProjection.ts'",
       "export * as store from './useHubStore.ts'",
+      "export * as transport from '../transport/index.ts'",
     ].join('\n'),
     resolveDir: hubDir,
     sourcefile: 'hub-p3b-entry.ts',
@@ -43,7 +46,7 @@ const result = await build({
 })
 const source = result.outputFiles[0].text
 const mod = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
-const { mentions, conversation, taskCard, groupProjection, store } = mod
+const { mentions, conversation, taskCard, groupProjection, store, transport } = mod
 
 let pass = 0
 const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
@@ -505,4 +508,134 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
   eq(H.getState().groupInfo.g1.last_outcome, '', 'store 层：迟到任务更新不复活结论')
 }
 
-console.log(`\n✅ hub P3b-07 纯逻辑：${pass} 项全部通过`)
+// —— 13) DM 未读刷新竞态（P3b-08）：请求在飞时到达的消息不被旧快照覆盖 ——
+{
+  const proj = groupProjection
+  // 纯函数口径（与 shouldApplyGroupProgress 同一把尺）
+  assert(proj.shouldApplyDMInfo(undefined, { last_seq: 1 }, 0, 0), 'DM 投影：没有本地值直接采纳')
+  assert(!proj.shouldApplyDMInfo({ last_seq: 5 }, { last_seq: 4 }, 0, 1), 'DM 投影：更旧的 last_seq 丢弃')
+  assert(proj.shouldApplyDMInfo({ last_seq: 5 }, { last_seq: 6 }, 0, 1), 'DM 投影：更新的 last_seq 采纳')
+  assert(!proj.shouldApplyDMInfo({ last_seq: 5 }, { last_seq: 5 }, 100, 50), 'DM 投影：同 seq 但请求开始后本地更新过 → 丢弃')
+  assert(proj.shouldApplyDMInfo({ last_seq: 5 }, { last_seq: 5 }, 40, 50), 'DM 投影：同 seq 且本地没再动 → 采纳')
+  assert(!proj.shouldApplyDMInfo({ last_seq: 5, unread: 0 }, { last_seq: 5, unread: 3 }, 100, 50), 'DM 投影：同 seq 的旧未读数不覆盖本地已读')
+
+  // store 层：refresh 发出后、响应落地前到来的 hub_message 必须留住
+  const H = store.useHubStore
+  const t = transport.getTransport()
+  const realSend = t.send.bind(t)
+  let pending = null
+  t.send = (cmd) => {
+    if (cmd.type === 'hub_agent_list') { pending = cmd; return Promise.resolve({ ok: true }) }
+    return realSend(cmd)
+  }
+  H.setState({
+    open: false, activeId: null, agents: [], messages: [],
+    dm: { ag_stale: { unread: 0, last_seq: 1, last_text: '旧' } },
+  })
+  try {
+    const inflight = H.getState().refresh()
+    H.getState().handleEvent(JSON.stringify({
+      event_type: 'hub_message', agent_id: 'ag_stale', seq: 5,
+      message: {
+        seq: 5, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_stale' },
+        text: '刷新期间来的', created_at: '2026-03-10T12:00:00Z',
+      },
+    }))
+    assert(!!pending, 'refresh 发出了 hub_agent_list')
+    // 手写 command_response：emit 是 transport 的私有方法，运行时照常可调（只为控制落地顺序）。
+    t.emit({
+      event_type: 'command_response', id: pending.id, ok: true, data: {
+        agents: [{ id: 'ag_stale', name: 'Stale' }],
+        dm: { ag_stale: { unread: 0, last_seq: 1, last_text: '旧' } },
+      },
+    })
+    await inflight
+  } finally {
+    t.send = realSend // 断言抛错也要还原，后面的 mock 停止用例还要用真 send
+  }
+  eq(H.getState().dm.ag_stale.last_seq, 5, '旧响应不覆盖刷新期间的新消息（last_seq）')
+  eq(H.getState().dm.ag_stale.unread, 1, '旧响应不覆盖刷新期间的未读')
+  eq(H.getState().dm.ag_stale.last_text, '刷新期间来的', '旧响应不覆盖刷新期间的预览')
+  eq(H.getState().agents.length, 1, 'agents 列表本身仍按响应更新')
+  eq(H.getState().agents[0].id, 'ag_stale', 'agents 列表内容来自响应')
+}
+
+// —— 14) mock stop 结算在飞任务（P3b-08）：二次 assign 后停止按钮不被僵尸任务点亮 ——
+{
+  const t = transport.getTransport()
+  let cmdSeq = 90_000
+  const call = (type, payload) => new Promise((resolve) => {
+    const id = ++cmdSeq
+    const off = t.onEvent((line) => {
+      let ev
+      try { ev = JSON.parse(line) } catch { return }
+      if (ev.event_type !== 'command_response' || ev.id !== id) return
+      off()
+      resolve(ev)
+    })
+    void t.send({ id, type, payload })
+  })
+  const events = []
+  const offAll = t.onEvent((line) => {
+    try { events.push(JSON.parse(line)) } catch { /* 非 JSON 行忽略 */ }
+  })
+  const waitFor = async (pred, label, timeoutMs = 8000) => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (pred()) return
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    throw new Error(`等待超时：${label}`)
+  }
+  const updatesOf = (id) => events.filter((e) => e.event_type === 'hub_task_update' && e.task_id === id)
+  const taskByID = (list, id) => list.find((x) => x.id === id)
+  const activeTasks = (list) => list.filter((x) => x.status === 'dispatched' || x.status === 'running').length
+
+  const a1 = await call('hub_group_assign', {
+    group_id: 'grp_mock1', agent_id: 'ag_mockwri2', instruction: '先整理一页价格对比', client_msg_id: 'cm_p3b_stop_1',
+  })
+  assert(a1.ok === true, 'mock 派任务成功')
+  const firstID = String(a1.data.task_id)
+  // 停止必须打在真的「在飞」上（queued 不算 active）：等 dispatched 事件。
+  await waitFor(() => updatesOf(firstID).some((e) => e.status === 'dispatched'), '第一次任务 dispatched')
+
+  const stop = await call('hub_conversation_stop', { group_id: 'grp_mock1' })
+  assert(stop.ok === true, 'mock 停止成功')
+  eq(stop.data.conversation?.status, 'stopped', '停止后对话终态 stopped')
+  assert(Number(stop.data.interrupted) >= 1, `停止结算了在飞任务（interrupted=${stop.data.interrupted}）`)
+  const terminal = updatesOf(firstID).filter((e) => e.status === 'interrupted')
+  eq(terminal.length, 1, '停止为在飞任务发了一条 interrupted task_update')
+  assert(String(terminal[0]?.error ?? '').includes('停止'), '中断事件带人话原因')
+
+  let list = (await call('hub_task_list')).data.tasks
+  eq(taskByID(list, firstID)?.status, 'interrupted', '账本里第一次任务已结算为 interrupted')
+  eq(activeTasks(list), 0, '停止后没有 dispatched/running 的任务')
+
+  // 停止之后再来一次派发：旧任务不得复活，停止按钮只在真的有事可停时可点。
+  const a2 = await call('hub_group_assign', {
+    group_id: 'grp_mock1', agent_id: 'ag_mockwri2', instruction: '再来一页', client_msg_id: 'cm_p3b_stop_2',
+  })
+  assert(a2.ok === true, '停止后第二次派任务成功')
+  const secondID = String(a2.data.task_id)
+  assert(secondID !== firstID, '第二次派发是新任务，不是复用僵尸任务')
+  list = (await call('hub_task_list')).data.tasks
+  eq(taskByID(list, firstID)?.status, 'interrupted', '二次派发不改写已中断的第一次任务')
+  await waitFor(() => updatesOf(secondID).some((e) => e.status === 'dispatched'), '第二次任务 dispatched')
+  list = (await call('hub_task_list')).data.tasks
+  eq(activeTasks(list), 1, '第二次派发期间确实有在飞任务（只有新任务）')
+  eq(taskByID(list, firstID)?.status, 'interrupted', '第二次任务在飞时第一次任务仍是 interrupted')
+  // 停止后正在跑：可停（active）。
+  let convEvents = events.filter((e) => e.event_type === 'hub_conversation' && e.group_id === 'grp_mock1')
+  assert(conversation.conversationCanStop(convEvents[convEvents.length - 1]?.conversation, true), '派发期间可停止')
+
+  await waitFor(() => updatesOf(secondID).some((e) => e.status === 'completed'), '第二次任务 completed', 10_000)
+  list = (await call('hub_task_list')).data.tasks
+  eq(taskByID(list, secondID)?.status, 'completed', '第二次任务完成')
+  eq(activeTasks(list), 0, '完成后没有在飞任务（僵尸任务未复活）')
+  convEvents = events.filter((e) => e.event_type === 'hub_conversation' && e.group_id === 'grp_mock1')
+  const tail = convEvents[convEvents.length - 1]?.conversation
+  eq(conversation.conversationCanStop(tail, activeTasks(list) > 0), false, '二次 assign 完成后停止按钮保持禁用')
+  offAll()
+}
+
+console.log(`\n✅ hub P3b 纯逻辑：${pass} 项全部通过`)

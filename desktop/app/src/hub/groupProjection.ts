@@ -1,4 +1,4 @@
-import type { HubGroupProgress, HubMessage, HubTaskUpdate } from './types'
+import type { HubDMInfo, HubGroupProgress, HubMessage, HubTaskUpdate } from './types'
 import { parseTaskResult, taskOutcomeLine } from './taskCard'
 
 // 群左栏投影 + 「当前是否正在看」的纯归约（P3b-07 B4/N1/N2/N10）。
@@ -116,6 +116,28 @@ export function projectGroupRead(info: HubGroupProgress, seq: number): HubGroupP
 export function shouldApplyGroupProgress(
   local: HubGroupProgress | undefined,
   incoming: HubGroupProgress | undefined,
+  localUpdatedAt: number,
+  requestStartedAt: number,
+): boolean {
+  if (!incoming) return false
+  if (!local) return true
+  const incomingSeq = incoming.last_seq ?? 0
+  const localSeq = local.last_seq ?? 0
+  if (incomingSeq !== localSeq) return incomingSeq > localSeq
+  return (localUpdatedAt ?? 0) <= (requestStartedAt ?? 0)
+}
+
+/**
+ * hub_agent_list 的 DM 投影竞态守卫（P3b-08，口径同 shouldApplyGroupProgress）：
+ * 刷新请求在飞时到达的 hub_message 已经把未读/最后一条推进了，旧响应不能把它覆盖回去。
+ * - 服务端 last_seq 更旧 → 丢弃；
+ * - 更新的 last_seq（别端刚发过消息）→ 采纳整条；
+ * - 相同 last_seq：只有本地在这份请求开始后没再更新过，才用服务端快照覆盖
+ *   （同 seq 也能有不同 unread：本地读过/加过未读）。
+ */
+export function shouldApplyDMInfo(
+  local: HubDMInfo | undefined,
+  incoming: HubDMInfo | undefined,
   localUpdatedAt: number,
   requestStartedAt: number,
 ): boolean {

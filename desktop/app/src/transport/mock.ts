@@ -2780,6 +2780,23 @@ class MockTransport implements Transport {
         const gid = String(cmd.payload?.group_id ?? '')
         if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在'); break }
         this.hubGroupGen.set(gid, (this.hubGroupGen.get(gid) ?? 0) + 1)
+        // 在飞任务必须结算：换代只作废回调，账本里 queued/dispatched/running 的任务
+        // 会一直挂着 —— 前端按 dispatched/running 判「有东西可停」，一次停止之后
+        // 再派一次任务，僵尸任务会把停止按钮重新点亮（P3b-07 复审残余 2）。
+        // 语义对齐真 bridge：停止中断主 run → AgentEnd 结算为 interrupted。
+        const stoppedAt = new Date().toISOString()
+        let interrupted = 0
+        for (const task of this.hubGroupTasks.values()) {
+          const taskGroup = String((task.target as { group_id?: string } | undefined)?.group_id ?? '')
+          const status = String(task.status ?? '')
+          if (taskGroup !== gid) continue
+          if (status !== 'queued' && status !== 'dispatched' && status !== 'running') continue
+          task.status = 'interrupted'
+          task.updated_at = stoppedAt
+          task.error = '人类停止了自动对话，任务已中断'
+          interrupted++
+          this.hubGroupTaskUpdate(task, gid)
+        }
         const prev = this.hubGroupConversations.get(gid) ?? {}
         const notice = this.hubGroupAppend(gid, {
           kind: 'system', sender: { kind: 'system' }, text: '人类停止了自动对话，等你继续',
@@ -2790,7 +2807,7 @@ class MockTransport implements Transport {
           reason: '人类停止了自动对话，等你继续',
         })
         for (const id of this.hubGroupMemberIDs(gid)) this.emit({ event_type: 'hub_agent_status', agent_id: id, status: 'idle' })
-        this.respond(cmd, { conversation, interrupted: 1 })
+        this.respond(cmd, { conversation, interrupted })
         break
       }
       case 'hub_task_list': {

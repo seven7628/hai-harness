@@ -8,7 +8,8 @@ import type {
 import { addHubAlert, alertFromEvent } from './alerts'
 import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, type HubMessageDelta, type HubStreamDraft } from './groupStream'
 import {
-  isHubTargetActive, projectGroupMessage, projectGroupRead, projectTaskUpdate, shouldApplyGroupProgress,
+  isHubTargetActive, projectGroupMessage, projectGroupRead, projectTaskUpdate, shouldApplyDMInfo,
+  shouldApplyGroupProgress,
 } from './groupProjection'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
@@ -123,10 +124,18 @@ let groupSelectGen = 0 // 选群代际：A→B→A 时旧响应不得覆盖新�
 const groupReadRequested = new Map<string, number>()
 // 每个群本地投影最近一次更新时间：loadGroups 响应用它挡「事件先到、响应后到」的旧快照。
 const groupInfoUpdatedAt = new Map<string, number>()
+// 每个智能体 DM 投影最近一次本地更新时间：refresh 响应用它挡刷新期间到达的消息（P3b-08）。
+const dmInfoUpdatedAt = new Map<string, number>()
 
 /** 本地投影变了：记一笔时间，供 loadGroups 的竞态守卫判断谁更新。 */
 function touchGroupInfo(gid: string): void {
   groupInfoUpdatedAt.set(gid, Date.now())
+}
+
+/** DM 投影本地变了（新消息/打开清零）：refresh 的竞态守卫按这个时点判新旧。 */
+function touchDMInfo(agentID: string): void {
+  if (!agentID) return
+  dmInfoUpdatedAt.set(agentID, Date.now())
 }
 
 function roundHasAction(r: HubRound | null | undefined): boolean {
@@ -211,6 +220,7 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   async refresh() {
     // 不碰 loading：每次发送完都刷新列表，共用 loading 会让消息区闪「加载中」。
+    const startedAt = Date.now()
     const r = await hubCommand<{ agents?: HubAgent[]; dm?: Record<string, HubDMInfo> }>('hub_agent_list', {})
     if (!r.ok) {
       set({ error: r.error || '读取智能体列表失败' })
@@ -218,17 +228,35 @@ export const useHubStore = create<HubState>((set, get) => ({
     }
     const agents = r.data?.agents ?? []
     const dm = r.data?.dm ?? {}
-    // 排序：有未读优先 → 最近有消息 → 名字（左栏是「谁在等我」，不是通讯录）。
-    const rank = (a: HubAgent): [number, number, string] => {
-      const info = dm[a.id] ?? {}
-      return [info.unread && info.unread > 0 ? 0 : 1, -(Date.parse(String(info.last_at ?? '')) || 0), a.name]
-    }
-    const sorted = [...agents].sort((a, b) => {
-      const ra = rank(a)
-      const rb = rank(b)
-      return ra[0] - rb[0] || ra[1] - rb[1] || ra[2].localeCompare(rb[2])
+    const completedAt = Date.now()
+    // 事件可能比列表响应先到（§7.5.7）：DM 未读/预览用同一套 last_seq + 请求时点守卫
+    // 逐个合并，旧快照不能把刷新期间刚落地的消息/未读覆盖回去（P3b-07 复审残余 3）。
+    const live = new Set(agents.map((a) => a.id))
+    set((s) => {
+      const merged: Record<string, HubDMInfo> = {}
+      for (const [id, info] of Object.entries(s.dm)) {
+        // 服务端已经不存在的智能体不再留投影（与整表替换时的口径一致）。
+        if (live.has(id)) merged[id] = info
+      }
+      for (const [id, info] of Object.entries(dm)) {
+        if (shouldApplyDMInfo(merged[id], info, dmInfoUpdatedAt.get(id) ?? 0, startedAt)) {
+          merged[id] = info
+          dmInfoUpdatedAt.set(id, completedAt)
+        }
+      }
+      // 排序：有未读优先 → 最近有消息 → 名字（左栏是「谁在等我」，不是通讯录）。
+      // 用合并后的投影排序：本地更新的未读/时间要参与排序，而不是服务端旧值。
+      const rank = (a: HubAgent): [number, number, string] => {
+        const info = merged[a.id] ?? {}
+        return [info.unread && info.unread > 0 ? 0 : 1, -(Date.parse(String(info.last_at ?? '')) || 0), a.name]
+      }
+      const sorted = [...agents].sort((a, b) => {
+        const ra = rank(a)
+        const rb = rank(b)
+        return ra[0] - rb[0] || ra[1] - rb[1] || ra[2].localeCompare(rb[2])
+      })
+      return { agents: sorted, dm: merged }
     })
-    set({ agents: sorted, dm })
   },
 
   async select(agentID) {
@@ -274,6 +302,7 @@ export const useHubStore = create<HubState>((set, get) => ({
     // 打开过 = 已读，但前提是 Hub 仍然开着：关闭 Hub 后才落地的响应
     // 不能把「关闭期间新到的消息」标成已读（B4）。
     if (!get().open) return
+    touchDMInfo(agentID) // 本地清零也算一次更新：刷新请求若在飞，不能被旧未读覆盖回来
     set((s) => {
       const dm = { ...s.dm }
       const info = { ...(dm[agentID] ?? {}) }
@@ -749,6 +778,7 @@ export const useHubStore = create<HubState>((set, get) => ({
         if (!msg) return
         // 左栏预览/未读同步：只有 Hub 打开且当前就是这个 DM 才不算未读。
         const dmActive = isHubTargetActive(get().open, activeId, agentID)
+        touchDMInfo(agentID) // 刷新响应的竞态守卫要看到「这条消息比请求新」
         set((s) => {
           const dm = { ...s.dm }
           const info = { ...(dm[agentID] ?? {}) }
