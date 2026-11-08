@@ -383,6 +383,41 @@ func (m *manager) groupActiveSessions(g *agenthub.Group) []*bridgeSession {
 	return out
 }
 
+// pumpAgentTask 泵一次智能体任务队列，并把泵出来的**终态**如实投影出去（P3b-05 B-1）。
+//
+// agenthub.Queue.Pump 在「目标不可派发（成员被移出/档案失效）」「目标侧去重命中」
+// 「已投递但落账失败」这几条路径上会把任务落成 canceled/failed 并返回该终态（可能
+// 同时带 error）。调用方以前只把 error 变成告警、把 task 丢掉 —— 结果卡与派发者
+// 回推永远不来，任务板也停在旧状态。这里统一补上：
+//   - 任何终态都发 hub_task_update（UI 才看得到 canceled/failed）；
+//   - target=agent 时走 notifyAgentTaskResult（幂等卡 + 只回推派发者，canceled/
+//     failed 也走同一条通知路径）。
+//
+// 非终态（dispatched/queued/busy/nil）原样返回；error 也原样返回，告警由调用方保留。
+func (m *manager) pumpAgentTask(ctx context.Context, target agenthub.TaskTarget) (*agenthub.Task, error) {
+	if m == nil {
+		return nil, fmt.Errorf("%w: manager 不可用", agenthub.ErrInvalid)
+	}
+	if target.Kind != agenthub.TargetAgent || target.GroupID == "" || target.AgentID == "" {
+		return nil, fmt.Errorf("%w: pumpAgentTask 只接受带 group/agent 的 agent 目标", agenthub.ErrInvalid)
+	}
+	q, err := m.hubQueueFor()
+	if err != nil {
+		return nil, err
+	}
+	task, perr := q.Pump(ctx, target)
+	if task == nil || !task.Status.Terminal() {
+		return task, perr
+	}
+	m.emitHubTaskUpdate(task)
+	if st, serr := m.hubStore(); serr == nil {
+		m.notifyAgentTaskResult(agenthub.NewLedger(st), task)
+	} else {
+		m.emitHubTaskAlert(task.ID, "notify_failed", serr.Error())
+	}
+	return task, perr
+}
+
 // scheduleAgentTaskPump 群会话根 run 结束后推进该智能体的任务队列（D-agent-task-pump）。
 //
 // assign_task 撞上「目标忙」时任务留在账本 queued（AgentDispatch 返回 Accepted=false）；
@@ -404,7 +439,9 @@ func (m *manager) scheduleAgentTaskPump(gid agenthub.GroupID, agentID agenthub.A
 		if q.QueuedCountFor(target) == 0 {
 			return // 没有排队的任务：不碰存储、不阻塞事件
 		}
-		if _, err := q.Pump(ctx, target); err != nil && ctx.Err() == nil {
+		// 终态（canceled/failed）由 pumpAgentTask 投影成任务卡 + 结果卡 + 回推，
+		// 不再静默丢掉（P3b-05 B-1）。
+		if _, err := m.pumpAgentTask(ctx, target); err != nil && ctx.Err() == nil {
 			m.hubAlertf("task_pump_failed", "群 %s 智能体 %s 的任务泵失败：%v", gid, agentID, err)
 		}
 	})

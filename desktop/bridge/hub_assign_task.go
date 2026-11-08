@@ -119,10 +119,37 @@ func (t *hubAssignTaskTool) Call(ctx context.Context, _, arguments string) (stri
 		"task": task, "task_id": string(task.ID), "status": task.Status,
 		"to_agent": string(task.Target.AgentID), "seq": seq, "dispatched": dispatched,
 	}
-	if !dispatched {
-		out["note"] = "目标当前正忙：任务已入队（queued），对方回合结束后由对话控制器派发；不要重复派同一件事"
+	// 说明按**最终状态**给，不能一律说「已入队」：泵可能已经把任务落成
+	// canceled/failed（目标被移出群、目标侧去重、落账失败），说成 queued 会让
+	// 模型以为对方迟早会收到（P3b-05 B-1）。
+	if note := assignTaskNote(task); note != "" {
+		out["note"] = note
 	}
 	return marshalHubToolResult(out)
+}
+
+// assignTaskNote 是 assign_task 给模型的补充说明（空 = 不需要说明）。
+// 只有 queued 才是「目标忙、等对方/控制器」；canceled/failed/declined 必须说清
+// 任务已终止且不会再派发，并带上原因。
+func assignTaskNote(task *agenthub.Task) string {
+	if task == nil {
+		return ""
+	}
+	switch task.Status {
+	case agenthub.TaskQueued:
+		return "目标当前正忙：任务已入队（queued），对方回合结束后由对话控制器派发；不要重复派同一件事"
+	case agenthub.TaskCanceled, agenthub.TaskFailed, agenthub.TaskDeclined:
+		reason := strings.TrimSpace(task.Error)
+		if reason == "" && task.Result != nil {
+			reason = strings.TrimSpace(task.Result.Error)
+		}
+		note := fmt.Sprintf("任务未能派发，已终止（%s）", task.Status)
+		if reason != "" {
+			note += "：" + reason
+		}
+		return note + "；不要重复派同一件事，先确认目标仍在群里且可用"
+	}
+	return ""
 }
 
 // hubAssignRequest 是 manager 层的指派输入（工具只做 JSON 解析，权限/账本都在这里）。
@@ -255,8 +282,9 @@ func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*age
 	if !deduped || created.Status == agenthub.TaskQueued {
 		m.emitHubTaskUpdate(created)
 	}
-	if pumped, perr := q.Pump(ctx, created.Target); perr != nil {
-		// 任务仍是 queued（没投出去）：指派本身已成立，把失败如实回给模型与任务板。
+	if pumped, perr := m.pumpAgentTask(ctx, created.Target); perr != nil {
+		// 任务仍是 queued（没投出去）或已被泵成终态：指派本身已成立，把失败如实
+		// 回给模型与任务板（终态的卡/回推由 pumpAgentTask 负责，P3b-05 B-1）。
 		m.emitHubTaskAlert(created.ID, "dispatch_failed", perr.Error())
 	} else if pumped != nil && pumped.ID == created.ID {
 		dispatchedTask = pumped

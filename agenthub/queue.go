@@ -572,14 +572,16 @@ func (q *Queue) pumpAgent(ctx context.Context, target TaskTarget) (*Task, error)
 			// 消息已经进会话：留队会在下一次 Pump 重复投递。落 failed 留痕更诚实，
 			// 也让同对在途计数不把一个「其实在跑」的任务长期算作 queued。
 			settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			_, ferr := q.ledger.Transition(settleCtx, id, TaskFailed, TransitionOptions{
+			failed, ferr := q.ledger.Transition(settleCtx, id, TaskFailed, TransitionOptions{
 				At: time.Now().UTC(), Error: "已投递但无法落账: " + terr.Error(),
 			})
 			cancel()
 			if ferr != nil {
 				return nil, fmt.Errorf("派发后落账失败且无法标记失败: %v（原错误: %w）", ferr, terr)
 			}
-			return nil, terr
+			// 返回落账后的 failed 快照：终态必须能被调用方投影（任务板/结果卡/回推），
+			// 丢掉它会让「泵出来的终态」永远不出现（P3b-05 B-1）。
+			return failed, terr
 		}
 		return dispatched, nil
 	}

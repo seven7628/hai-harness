@@ -752,3 +752,276 @@ func jsonMarshal(t *testing.T, v any) (string, error) {
 	}
 	return string(b), nil
 }
+
+// p3bQueuedAgentTask 建一条**还没派发**的 agent 目标任务（走 Queue.SubmitAgent，
+// 与 assign_task 同一建账路径，只是不写消息/不泵）。
+func p3bQueuedAgentTask(t *testing.T, m *manager, g *agenthub.Group, origin, target agenthub.AgentID,
+	title, clientMsgID string) *agenthub.Task {
+	t.Helper()
+	q, err := m.hubQueueFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := q.SubmitAgent(context.Background(), &agenthub.Task{
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginGroup, GroupID: g.ID, AgentID: origin, AgentName: string(origin)},
+		Target: agenthub.TaskTarget{
+			Kind: agenthub.TargetAgent, AgentID: target, GroupID: g.ID,
+			SessionID: hubSessionID(string(target), agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID}),
+		},
+		Title: title, Instruction: "把价格表整理成一页", Callback: agenthub.CallbackAgentEnd,
+		ClientMsgID: clientMsgID,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != agenthub.TaskQueued {
+		t.Fatalf("新任务 status = %s, want queued", task.Status)
+	}
+	return task
+}
+
+func p3bTaskTarget(g *agenthub.Group, target agenthub.AgentID) agenthub.TaskTarget {
+	return agenthub.TaskTarget{
+		Kind: agenthub.TargetAgent, AgentID: target, GroupID: g.ID,
+		SessionID: hubSessionID(string(target), agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID}),
+	}
+}
+
+// p3bHasTaskUpdate 输出里是否有一条该任务、该状态的 hub_task_update。
+func p3bHasTaskUpdate(buf *syncBuf, id agenthub.TaskID, status agenthub.TaskStatus) bool {
+	for _, ev := range readAllLines(buf) {
+		if ev["event_type"] == "hub_task_update" && ev["task_id"] == string(id) && ev["status"] == string(status) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAgentTaskPumpTerminalNotifiesOrigin（P3b-05 复审 B-1）：泵把任务落成 canceled
+// 也必须发 hub_task_update + 结果卡 + 回推派发者，且重复泵不会双写。
+func TestAgentTaskPumpTerminalNotifiesOrigin(t *testing.T) {
+	m, buf := testManager(t)
+	a := createDispatchAgent(t, m, buf, 1, "泵终态A", true)
+	b := createDispatchAgent(t, m, buf, 2, "泵终态B", false)
+	g := assignGroup(t, m, buf, 3, "泵终态群", map[agenthub.AgentID]string{
+		a.ID: "owner", b.ID: "member",
+	})
+	task := p3bQueuedAgentTask(t, m, g, a.ID, b.ID, "会被泵成 canceled", "")
+
+	// 目标被移出群：AgentDispatch 必然永久失败（ErrInvalid），泵要把任务落 canceled。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 4, "hub_group_member_remove", map[string]any{
+		"group_id": string(g.ID), "agent_id": string(b.ID),
+	}); !ok {
+		t.Fatalf("member_remove: %s", errMsg)
+	}
+	bsA := mustGroupSession(t, m, string(a.ID), string(g.ID))
+	fa := newConvProvider("收到泵终态通知")
+	setGroupFakeLoop(t, m, bsA, g, string(a.ID), fa)
+
+	buf.Take()
+	got, perr := m.pumpAgentTask(context.Background(), p3bTaskTarget(g, b.ID))
+	if perr == nil {
+		t.Fatal("成员被移出后泵必须把「不可派发」如实返回")
+	}
+	if got == nil || got.Status != agenthub.TaskCanceled {
+		t.Fatalf("pump 返回 = %+v, want canceled 快照", got)
+	}
+	latest := p3bLoadTask(t, m, task.ID)
+	if latest.Status != agenthub.TaskCanceled || !strings.Contains(latest.Error, "目标不可派发") {
+		t.Fatalf("账本 = %s error=%q", latest.Status, latest.Error)
+	}
+	// 任务板：必须有终态快照（以前被丢掉）。
+	if !p3bHasTaskUpdate(buf, task.ID, agenthub.TaskCanceled) {
+		t.Fatalf("缺 hub_task_update(canceled)：%s", buf.String())
+	}
+	// 结果卡 + 回推：都只应有 1 次。
+	cards := p3bTaskResultCards(p3bMessages(t, m, g.ID), task.ID)
+	if len(cards) != 1 || p3bRefString(t, cards[0].Refs, "status") != string(agenthub.TaskCanceled) ||
+		p3bRefString(t, cards[0].Refs, "error") != latest.Error {
+		t.Fatalf("泵终态结果卡 = %+v", cards)
+	}
+	if !bsA.s.HasTaskResult(string(task.ID)) {
+		t.Fatal("泵出来的 canceled 没有回推派发者")
+	}
+	convWait(t, "派发者收到泵终态", func() bool {
+		texts := p3bTaskResultTexts(bsA, task.ID)
+		return len(texts) == 1 && strings.Contains(texts[0], "取消")
+	})
+	if n := p3bEventCount(t, buf, string(events.TaskResultDeliveredType), task.ID); n != 1 {
+		t.Fatalf("泵终态回推 %d 次, want 1", n)
+	}
+
+	// 重复泵：队列已空，不能再写第二张卡 / 二次回推。
+	if again, aerr := m.pumpAgentTask(context.Background(), p3bTaskTarget(g, b.ID)); aerr != nil || again != nil {
+		t.Fatalf("重复泵 = %+v, %v; want nil, nil", again, aerr)
+	}
+	if n := len(p3bTaskResultCards(p3bMessages(t, m, g.ID), task.ID)); n != 1 {
+		t.Fatalf("重复泵写了 %d 张卡, want 1", n)
+	}
+	if n := p3bEventCount(t, buf, string(events.TaskResultDeliveredType), task.ID); n != 1 {
+		t.Fatalf("重复泵回推 %d 次, want 1", n)
+	}
+}
+
+// TestAgentTaskPumpDuplicateNotifiesOrigin（P3b-05 复审 B-1）：目标侧 client_msg_id
+// 去重命中 → Pump 落 canceled（无 error），结果卡/回推同样不能丢。
+func TestAgentTaskPumpDuplicateNotifiesOrigin(t *testing.T) {
+	m, buf := testManager(t)
+	a := createDispatchAgent(t, m, buf, 1, "去重A", true)
+	b := createDispatchAgent(t, m, buf, 2, "去重B", false)
+	g := assignGroup(t, m, buf, 3, "去重群", map[agenthub.AgentID]string{
+		a.ID: "owner", b.ID: "member",
+	})
+	bsB := mustGroupSession(t, m, string(b.ID), string(g.ID))
+	bsA := mustGroupSession(t, m, string(a.ID), string(g.ID))
+	fa := newConvProvider("收到去重通知")
+	setGroupFakeLoop(t, m, bsA, g, string(a.ID), fa)
+
+	// 目标侧幂等表命中：AgentDispatch 返回 duplicate（本次没投递），泵应落 canceled。
+	const cmid = "p3b05-dup-cmid"
+	m.mu.Lock()
+	if m.hubMsgDedup == nil {
+		m.hubMsgDedup = map[string]string{}
+	}
+	m.hubMsgDedup["agent\x00"+bsB.id+"\x00"+cmid] = bsB.id
+	m.mu.Unlock()
+
+	task := p3bQueuedAgentTask(t, m, g, a.ID, b.ID, "去重命中的任务", cmid)
+	buf.Take()
+	got, perr := m.pumpAgentTask(context.Background(), p3bTaskTarget(g, b.ID))
+	if perr != nil {
+		t.Fatalf("去重命中不是派发错误: %v", perr)
+	}
+	if got == nil || got.Status != agenthub.TaskCanceled || !strings.Contains(got.Error, "去重") {
+		t.Fatalf("pump 返回 = %+v, want canceled(去重)", got)
+	}
+	if !p3bHasTaskUpdate(buf, task.ID, agenthub.TaskCanceled) {
+		t.Fatalf("缺 hub_task_update(canceled)：%s", buf.String())
+	}
+	if n := len(p3bTaskResultCards(p3bMessages(t, m, g.ID), task.ID)); n != 1 {
+		t.Fatalf("去重取消写了 %d 张卡, want 1", n)
+	}
+	if !bsA.s.HasTaskResult(string(task.ID)) {
+		t.Fatal("去重取消没有回推派发者")
+	}
+	convWait(t, "派发者收到去重取消", func() bool {
+		texts := p3bTaskResultTexts(bsA, task.ID)
+		return len(texts) == 1 && strings.Contains(texts[0], "取消")
+	})
+	if again, aerr := m.pumpAgentTask(context.Background(), p3bTaskTarget(g, b.ID)); aerr != nil || again != nil {
+		t.Fatalf("重复泵 = %+v, %v; want nil, nil", again, aerr)
+	}
+	if n := len(p3bTaskResultCards(p3bMessages(t, m, g.ID), task.ID)); n != 1 {
+		t.Fatalf("重复泵写了 %d 张卡, want 1", n)
+	}
+	if n := p3bEventCount(t, buf, string(events.TaskResultDeliveredType), task.ID); n != 1 {
+		t.Fatalf("重复泵回推 %d 次, want 1", n)
+	}
+}
+
+// TestAssignTaskPumpCanceledNote（P3b-05 复审 B-1）：同步泵把任务落 canceled 时，
+// 工具响应必须说「未派发、已终止」，不能再说「已入队」。
+func TestAssignTaskPumpCanceledNote(t *testing.T) {
+	m, buf := testManager(t)
+	a := createDispatchAgent(t, m, buf, 1, "指派取消A", true)
+	b := createDispatchAgent(t, m, buf, 2, "指派取消B", false)
+	g := assignGroup(t, m, buf, 3, "指派取消群", map[agenthub.AgentID]string{
+		a.ID: "owner", b.ID: "member",
+	})
+	bsA := mustGroupSession(t, m, string(a.ID), string(g.ID))
+	fa := newConvProvider("收到指派取消")
+	setGroupFakeLoop(t, m, bsA, g, string(a.ID), fa)
+
+	// 任务已建、群消息写入之前把目标移出群：路由用的是 assignHubTask 已加载的群
+	// 快照（所以意图消息仍写得进去），而同步泵会重新读群 —— AgentDispatch 必然
+	// 永久失败（ErrInvalid: 不是群成员），任务落 canceled 而不是留队。
+	prev := hubAssignMessageHook
+	hubAssignMessageHook = func(agenthub.TaskID) error {
+		ctx := context.Background()
+		st, err := m.hubStore()
+		if err != nil {
+			return err
+		}
+		cur, err := st.LoadGroup(ctx, g.ID)
+		if err != nil {
+			return err
+		}
+		next := *cur
+		next.Members = make([]agenthub.Member, 0, len(cur.Members))
+		for _, mem := range cur.Members {
+			if mem.AgentID != b.ID {
+				next.Members = append(next.Members, mem)
+			}
+		}
+		next.UpdatedAt = time.Now().UTC()
+		if err := next.Normalize(); err != nil {
+			return err
+		}
+		return st.SaveGroup(ctx, &next)
+	}
+	t.Cleanup(func() { hubAssignMessageHook = prev })
+
+	res, err := callAssign(t, assignTool(t, m, g, a.ID), map[string]any{
+		"to_agent": string(b.ID), "instruction": "把价格表整理成一页",
+	})
+	if err != nil {
+		t.Fatalf("assign_task: %v", err)
+	}
+	task := taskOf(t, res)
+	if task.Status != agenthub.TaskCanceled {
+		t.Fatalf("status = %s, want canceled（目标已被移出群）", task.Status)
+	}
+	if dispatched, _ := res["dispatched"].(bool); dispatched {
+		t.Fatalf("canceled 任务不能报 dispatched=true: %+v", res)
+	}
+	note, _ := res["note"].(string)
+	if strings.Contains(note, "已入队") || strings.Contains(note, "queued") {
+		t.Fatalf("note = %q，不能再说「已入队」（任务已终止）", note)
+	}
+	if !strings.Contains(note, "未能派发") || !strings.Contains(note, "已终止") ||
+		!strings.Contains(note, string(agenthub.TaskCanceled)) {
+		t.Fatalf("note = %q，应说明未派发/已终止/状态", note)
+	}
+	if task.Error == "" || !strings.Contains(note, task.Error) {
+		t.Fatalf("note = %q 缺 task.Error=%q", note, task.Error)
+	}
+	cards := p3bTaskResultCards(p3bMessages(t, m, g.ID), task.ID)
+	if len(cards) != 1 || p3bRefString(t, cards[0].Refs, "status") != string(agenthub.TaskCanceled) {
+		t.Fatalf("同步泵取消没有写结果卡: %+v", cards)
+	}
+	if !bsA.s.HasTaskResult(string(task.ID)) {
+		t.Fatal("同步泵取消没有回推派发者")
+	}
+}
+
+// TestAssignTaskQueuedNote（P3b-05 复审 B-1 反向）：目标忙（queued）仍然给
+// 「已入队」说明，不能因为终态分支把正常排队也说成终止。
+func TestAssignTaskQueuedNote(t *testing.T) {
+	m, buf := testManager(t)
+	a := createDispatchAgent(t, m, buf, 1, "排队A", true)
+	b := createDispatchAgent(t, m, buf, 2, "排队B", false)
+	g := assignGroup(t, m, buf, 3, "排队群", map[agenthub.AgentID]string{
+		a.ID: "owner", b.ID: "member",
+	})
+	bsB := mustGroupSession(t, m, string(b.ID), string(g.ID))
+	bsB.hubGroupBusy.Store(true) // 目标忙：AgentDispatch 不投，任务留 queued
+	t.Cleanup(func() { bsB.hubGroupBusy.Store(false) })
+
+	res, err := callAssign(t, assignTool(t, m, g, a.ID), map[string]any{
+		"to_agent": string(b.ID), "instruction": "把价格表整理成一页",
+	})
+	if err != nil {
+		t.Fatalf("assign_task: %v", err)
+	}
+	task := taskOf(t, res)
+	if task.Status != agenthub.TaskQueued {
+		t.Fatalf("status = %s, want queued", task.Status)
+	}
+	note, _ := res["note"].(string)
+	if !strings.Contains(note, "已入队") {
+		t.Fatalf("queued note = %q，应说明已入队", note)
+	}
+	if strings.Contains(note, "未能派发") {
+		t.Fatalf("queued note = %q，不能说已终止", note)
+	}
+}

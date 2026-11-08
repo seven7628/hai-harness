@@ -177,7 +177,9 @@ func NewTaskResultMessage(taskID, name, result string, err error) Message {
 }
 
 // NewTaskResultMessageWithStatus 构造后台任务终态消息：user 角色 + task_result 内容块。
-// status 是 completed/interrupted/failed/abandoned；result 原样嵌入、不截断、不解释。
+// status 是 completed/interrupted/failed/abandoned/canceled/declined；result 原样嵌入、
+// 不截断、不解释。canceled/declined 只有 Hub 智能体任务（assign_task）会产生：
+// 任务没执行，文案不能让模型当成「完成」继续。
 func NewTaskResultMessageWithStatus(taskID, name, result, status string, err error) Message {
 	var b strings.Builder
 	label := "完成"
@@ -190,6 +192,10 @@ func NewTaskResultMessageWithStatus(taskID, name, result, status string, err err
 		label = "已弃置"
 	case "blocked_budget":
 		label = "预算阻断"
+	case "canceled":
+		label = "已取消"
+	case "declined":
+		label = "已被拒绝"
 	}
 	fmt.Fprintf(&b, "〔后台任务 %s %s〕", taskID, label)
 	if name != "" {
@@ -210,6 +216,10 @@ func NewTaskResultMessageWithStatus(taskID, name, result, status string, err err
 		b.WriteString("\n\n—— 该任务未完成，不要将其视为成功结果；按当前用户意图继续。")
 	} else if status == "blocked_budget" {
 		b.WriteString("\n\n—— 该任务因预算被拦下，结果可能不完整；不要自动重试，等用户决定是否提高预算。")
+	} else if status == "canceled" {
+		b.WriteString("\n\n—— 该任务已取消，没有执行；不要当作已完成结果，可按需改派或向用户汇报。")
+	} else if status == "declined" {
+		b.WriteString("\n\n—— 执行者拒绝了这个任务，没有执行；不要当作已完成结果，可按需改派或向用户汇报。")
 	} else {
 		b.WriteString("\n\n—— 后台任务结果，据此继续当前工作。")
 	}

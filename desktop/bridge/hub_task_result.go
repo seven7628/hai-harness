@@ -224,19 +224,19 @@ func agentTaskPushSummary(task *agenthub.Task) (string, error) {
 			summary = appendTaskNote(summary, "已阻断："+reason)
 		}
 	case agenthub.TaskCanceled:
+		// 取消/拒绝不塞 pushErr：core 的 task_result 文本在 err != nil 时只渲染
+		// 错误正文，会把「状态 + 原因」一起吞掉。原因进摘要，状态走消息标签。
 		note := "—— 任务已取消"
 		if reason != "" {
 			note += "：" + reason
 		}
 		summary = appendTaskNote(summary, note)
-		pushErr = errors.New(firstTaskNote(reason, "任务已取消"))
 	case agenthub.TaskDeclined:
 		note := "—— 任务已被执行者拒绝"
 		if reason != "" {
 			note += "：" + reason
 		}
 		summary = appendTaskNote(summary, note)
-		pushErr = errors.New(firstTaskNote(reason, "任务已被执行者拒绝"))
 	}
 	if summary == "" && pushErr != nil {
 		summary = pushErr.Error()
@@ -257,13 +257,6 @@ func appendTaskNote(summary, note string) string {
 		return note
 	}
 	return summary + "\n\n" + note
-}
-
-func firstTaskNote(v, fallback string) string {
-	if strings.TrimSpace(v) != "" {
-		return v
-	}
-	return fallback
 }
 
 func taskResultDurationMS(task *agenthub.Task) int64 {

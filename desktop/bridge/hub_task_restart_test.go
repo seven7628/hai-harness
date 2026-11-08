@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,11 +35,20 @@ func restartManager(t *testing.T) (*manager, *syncBuf) {
 	}, buf
 }
 
+// restartCopyTree 把 appData 整棵复制成崩溃快照。
+//
+// 复制时源目录仍**活着**（会话/checkpoint worker 还在写盘），所以遍历与读文件
+// 之间文件可能被 rename/删除（写临时文件 → 原子替换）。这类 fs.ErrNotExist 必须
+// 跳过而不是 fail：「崩溃时这个文件还没落盘」本来就是合法快照，把它当错误会让
+// 重启回归随机变红（P3b-05 复审 N-10）。其余错误仍然 fail，不削弱断言。
 func restartCopyTree(t *testing.T, src string) string {
 	t.Helper()
 	dst := t.TempDir()
 	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil // 目录项在遍历中消失：跳过这棵子树
+			}
 			return err
 		}
 		rel, rerr := filepath.Rel(src, p)
@@ -54,6 +64,9 @@ func restartCopyTree(t *testing.T, src string) string {
 		}
 		data, rerr := os.ReadFile(p)
 		if rerr != nil {
+			if errors.Is(rerr, fs.ErrNotExist) {
+				return nil // WalkDir 与 ReadFile 之间被 rename/删除
+			}
 			return rerr
 		}
 		return os.WriteFile(target, data, 0o600)
