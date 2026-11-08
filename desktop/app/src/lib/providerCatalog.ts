@@ -161,3 +161,29 @@ export function sortConfigured<T extends { id: string; active: boolean; hasKey: 
     return a.label.localeCompare(b.label)
   })
 }
+
+// nextFreeID 给「同一预设再加一个」找空闲 id：opencode → opencode2 → opencode3 …
+// 与用户既有习惯一致（他们本来就把同端点命名为 opencode2/opencode3），比随机后缀好认。
+// taken 应只含**未删除**的 id：被软删的条目应当能被原 id 复用（等同重新启用）。
+export function nextFreeID(base: string, taken: Iterable<string>): string {
+  const set = new Set(taken)
+  if (!set.has(base)) return base
+  for (let i = 2; i <= 999; i++) {
+    const id = `${base}${i}`
+    if (!set.has(id)) return id
+  }
+  return `${base}-${Date.now().toString(36)}`
+}
+
+// countByHost 目录卡片的「已添加 N 家」：按 base_url 的 host 归集。
+// **不能按 id 判**——用户把同一家加成 opencode2/opencode3 再改显示名后，id 与预设 id 就对不上了，
+// 按 id 会把卡片判成「没添加过」，按 host 才符合「我已经有一家这个端点」的直觉。
+export function countByHost(configured: { base_url?: string }[]): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const c of configured) {
+    const h = hostOfURL(c.base_url ?? '')
+    if (!h) continue
+    out.set(h, (out.get(h) ?? 0) + 1)
+  }
+  return out
+}

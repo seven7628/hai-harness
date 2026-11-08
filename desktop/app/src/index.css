@@ -13005,6 +13005,12 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 .pvp-card-plus, .pvp-card-added { flex: 0 0 auto; color: var(--text-3); }
 .pvp-card-added { font-size: 11px; }
+/* 「已添加」不再是死状态：同一家可以加多个（不同 key / 不同中转），卡片照样可点 */
+.pvp-card-addagain {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px;
+  font-size: 11px; color: var(--text-2); white-space: nowrap;
+}
+.pvp-card:hover .pvp-card-addagain { color: var(--text); }
 
 /* —— 详情页：卡片头已在导航栏表达，隐藏避免重复 —— */
 .pvp-detail .prov-head { display: none; }

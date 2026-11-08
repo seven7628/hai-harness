@@ -7,7 +7,7 @@ import type { ProviderCfg, ProviderPreset } from '../transport/types'
 import { ChevronDown, ChevronLeft, EyeIcon, EyeOffIcon, ImageIcon, Plus, SearchIcon } from './icons'
 import { ProviderGlyph } from './ProviderGlyph'
 import { fmtMoney, localSpendAll, meterOf, resetIn, rowMeterOf, sortedWindows, type MeterTone, type RowMeterView } from '../lib/billingView'
-import { CATEGORY_ORDER, assertCatalogCoverage, availableEntries, catalogByID, categoryCounts, hostOfURL, searchCatalog, sortConfigured, type CatalogEntry, type CatalogCategory } from '../lib/providerCatalog'
+import { CATEGORY_ORDER, assertCatalogCoverage, availableEntries, catalogByID, categoryCounts, countByHost, hostOfURL, nextFreeID, searchCatalog, sortConfigured, type CatalogEntry, type CatalogCategory } from '../lib/providerCatalog'
 
 // —— Provider：内置快捷添加（DeepSeek/OpenAI/OpenCode Go/Kimi/智谱 + P1 可选 + P2 订阅）+ 用户自定义 ——
 // 协议三选均已实现（chat-completions / responses / anthropic，2026-08）。
@@ -204,6 +204,10 @@ export default function ProviderPage() {
   // 全部 provider id（active 是保留键）：内置三卡 + 用户自定义
   // 所有 provider 卡（active 除外）；已删除标记（deleted:true，内置 5 家删除后）不显示。
   const providerIds = Object.keys(settings.provider).filter((k) => k !== 'active' && !((settings.provider[k] as ProviderCfg | undefined)?.deleted))
+  // 目录卡片判「已添加」用 **host 归集**，不用 id：同一家可以加成 opencode2/opencode3（再改名），
+  // 按 id 判会把这类卡片当成「没添加过」，按 id 判「已添加」又会把卡片禁掉 —— 两种都错。
+  const takenIDs = providerIds
+  const hostCounts = countByHost(providerIds.map((k) => ({ base_url: (settings.provider[k] as ProviderCfg | undefined)?.base_url })))
   // 所有 provider 均可删除（含内置 5 家；内置删除 = 标记 deleted 隐藏，bridge 重启不复活）
   const isBuiltin = (pid: string) => ['deepseek', 'openai', 'opencode', 'kimi', 'zhipu'].includes(pid)
   const cfgOf = (pid: string): ProviderCfg | undefined => settings.provider[pid] as ProviderCfg | undefined
@@ -379,7 +383,7 @@ export default function ProviderPage() {
 
   // 预设选择：自动填名称 + 对应默认 Base URL（模型列表留空，添加后用「拉取模型列表」导入）。
   // 同名已存在（如内置 deepseek 卡）→ 提示改名（与 submitAdd 同名校验口径一致）。
-  const onPreset = (name: string) => {
+  const onPreset = (name: string, preferredID?: string) => {
     setPreset(name)
     setTestNew(null)
     if (!name) {
@@ -388,12 +392,13 @@ export default function ProviderPage() {
       setErr(null)
       return
     }
-    setNewName(name)
+    setNewName(preferredID || name)
     setNewBaseURL(presetBaseURL(providerPresets, name))
     setNewProtocol(presetProtocol(providerPresets, name)) // 预设协议（providers.json；minimax/fireworks→anthropic，xai→responses）
     // 同名已存在（如内置 deepseek 卡）→ 提示改名；但已删除（deleted:true）允许重新添加。
-    const existing = settings.provider[name] as ProviderCfg | undefined
-    if (Object.prototype.hasOwnProperty.call(settings.provider, name) && !(existing && typeof existing === 'object' && existing.deleted)) setErr(t('provider.addErrExists'))
+    const target = preferredID || name
+    const existing = settings.provider[target] as ProviderCfg | undefined
+    if (Object.prototype.hasOwnProperty.call(settings.provider, target) && !(existing && typeof existing === 'object' && existing.deleted)) setErr(t('provider.addErrExists'))
     else setErr(null)
   }
 
@@ -569,7 +574,9 @@ export default function ProviderPage() {
       startAdd()
       setNewProtocol(entry.custom.protocol)
     } else {
-      onPreset(entry.id)
+      // 同一预设允许加多个（不同 key / 不同中转）：id 取空闲的 opencode2/opencode3 …，
+      // 显示名照样可改。这里绝不能因为「目录里已添加」就把卡片禁掉。
+      onPreset(entry.id, nextFreeID(entry.id, takenIDs))
       setAdding(true)
     }
   }
@@ -956,21 +963,19 @@ export default function ProviderPage() {
               </div>
               <div className="pvp-grid">
                 {list.map((e) => {
-                  const added = providerIds.includes(e.id)
+                  const n = hostCounts.get(e.host) ?? 0
+                  const added = n > 0 || providerIds.includes(e.id)
                   return (
-                    <button
-                      key={e.id}
-                      className={`pvp-card ${added ? 'is-added' : ''}`}
-                      disabled={added}
-                      onClick={() => openAdd(e)}
-                    >
+                    <button key={e.id} className={`pvp-card ${added ? 'is-added' : ''}`} onClick={() => openAdd(e)}>
                       <ProviderGlyph entry={e} size={32} />
                       <span className="pvp-card-main">
                         <span className="pvp-card-name">{presetNames[e.id] ?? e.name}</span>
-                        <span className="pvp-card-sub">{e.host}</span>
+                        <span className="pvp-card-sub">
+                          {e.host}{n > 0 ? ` · ${t('provider.page.addedN').replace('{n}', String(n))}` : ''}
+                        </span>
                       </span>
                       {added
-                        ? <span className="pvp-card-added">{t('provider.page.alreadyAdded')}</span>
+                        ? <span className="pvp-card-addagain"><Plus size={13} /> {t('provider.page.addAnother')}</span>
                         : e.oauth
                           ? <span className="pvp-chip-sub">{t('provider.page.sub')}</span>
                           : <span className="pvp-card-plus"><Plus size={14} /></span>}

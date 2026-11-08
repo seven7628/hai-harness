@@ -8,7 +8,7 @@
 // 运行：esbuild bundle 后 node --test（见 package.json 的 test:provider-catalog）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CATALOG, availableEntries, catalogByID, categoryCounts, hostOfURL, searchCatalog, sortConfigured, assertCatalogCoverage } from './providerCatalog'
+import { CATALOG, availableEntries, catalogByID, categoryCounts, countByHost, hostOfURL, nextFreeID, searchCatalog, sortConfigured, assertCatalogCoverage } from './providerCatalog'
 
 test('搜索：别名命中（glm → 智谱、grok → xAI、moonshot → Kimi）', () => {
   const ids = (q: string) => searchCatalog(q).map((e) => e.id)
@@ -87,4 +87,32 @@ test('catalogByID：自定义模板也能查到', () => {
   assert.equal(catalogByID('deepseek')?.category, 'vendor')
   assert.equal(catalogByID('custom:anthropic')?.custom?.protocol, 'anthropic')
   assert.equal(catalogByID('nope'), undefined)
+})
+
+// —— 「同一家可以加多个」 ——
+// 用户实际用法：opencode 加三次（opencode/opencode2/opencode3）分别配不同 key 再改名。
+// 这两条错了，第二次添加要么被目录卡片禁掉，要么撞 id 失败。
+test('nextFreeID：空闲用原名，占用则递增 opencode → opencode2 → opencode3', () => {
+  assert.equal(nextFreeID('opencode', []), 'opencode')
+  assert.equal(nextFreeID('opencode', ['opencode']), 'opencode2')
+  assert.equal(nextFreeID('opencode', ['opencode', 'opencode2']), 'opencode3')
+  // 空洞也复用（原来加的 opencode2 被删了 → 下次就用 opencode2，不无限涨）
+  assert.equal(nextFreeID('opencode', ['opencode', 'opencode3']), 'opencode2')
+  // 与既有其它 provider 不冲突
+  assert.equal(nextFreeID('deepseek', ['opencode2']), 'deepseek')
+})
+
+test('countByHost：按 host 归集「已添加几家」（改名/换 id 都还算同一家）', () => {
+  const rows = [
+    { base_url: 'https://opencode.ai/zen/go/v1' },
+    { base_url: 'https://opencode.ai/zen/v1' },      // opencode3：同 host 不同路径
+    { base_url: 'https://api.deepseek.com/v1' },
+    { base_url: '' },                                 // 解析不出 host → 不计
+    { base_url: 'not a url' },
+  ]
+  const m = countByHost(rows)
+  assert.equal(m.get('opencode.ai'), 2)
+  assert.equal(m.get('api.deepseek.com'), 1)
+  assert.equal(m.size, 2)
+  assert.equal(countByHost([]).size, 0)
 })

@@ -162,10 +162,11 @@ func Fetch(ctx context.Context, req Request) (*Snapshot, error) {
 	}
 	hasAuth := strings.TrimSpace(req.APIKey) != "" || len(req.OAuth) > 0
 
-	// 1) 声明优先：preset 存在且 host 与 base_url 一致才用（凭证只发自家 host）。
+	// 1) 声明优先：先按 id 精确命中，命不中再按 host 复用（同一家加了 opencode2/opencode3）；
+	//    两条路径都要求声明里的 host 与 base_url 一致 —— 凭证只发自家 host。
 	p := req.Override
 	if p == nil {
-		if cand, ok := presetFor(req.Provider); ok && strings.EqualFold(cand.Host, host) {
+		if cand, ok := resolvePreset(req.Provider, host); ok {
 			p = &cand
 		}
 	} else if p.Host != "" && !strings.EqualFold(p.Host, host) {

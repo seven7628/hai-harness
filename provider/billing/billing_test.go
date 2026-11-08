@@ -414,3 +414,48 @@ func TestFetchRejectsUnknownShape(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// 同一家 provider 被加多次（用户自己起 id：opencode2/opencode3）时，声明要按 **host** 复用。
+// 按 id 只有内置那几家能命中 —— 换个名字额度就查不到，用户看到的是「这家不提供查询」，
+// 而真相是「我们认得这个端点，只是不认识你起的名字」。
+func TestResolvePresetByHost(t *testing.T) {
+	// 1) 正常路径：id + host 都对
+	if p, ok := resolvePreset("deepseek", "api.deepseek.com"); !ok || p.Shape != "balance" {
+		t.Fatalf("deepseek by id = %+v, %v", p, ok)
+	}
+	// 2) 换 id：opencode2 → 复用 opencode 的声明
+	p, ok := resolvePreset("opencode2", "opencode.ai")
+	if !ok || p.Shape != "quota" || p.Host != "opencode.ai" {
+		t.Fatalf("opencode2 by host = %+v, %v", p, ok)
+	}
+	// 3) host 大小写不敏感
+	if _, ok := resolvePreset("whatever", "OPENCODE.AI"); !ok {
+		t.Fatal("host 应大小写不敏感")
+	}
+	// 4) 别的 host 不复用 —— 凭证不能因为「名字像」就发出去
+	if _, ok := resolvePreset("opencode2", "evil.example.com"); ok {
+		t.Fatal("未知 host 不该命中任何声明")
+	}
+	if _, ok := resolvePreset("opencode2", ""); ok {
+		t.Fatal("空 host 不该命中")
+	}
+	// 5) id 命中但 base_url 换到别家 host → 落到「同 host 复用」（端点语义优先于名字）
+	if p, ok := resolvePreset("deepseek", "opencode.ai"); !ok || p.Host != "opencode.ai" {
+		t.Fatalf("deepseek@opencode.ai = %+v, %v", p, ok)
+	}
+}
+
+// 同 host 多条声明：只在前缀能对上时才选中，否则放弃（宁可不支持，也不能显示别家产品的额度）。
+func TestPresetForHostAmbiguity(t *testing.T) {
+	loadPresets()
+	if presetsErr != nil {
+		t.Skipf("presets.json 解析失败: %v", presetsErr)
+	}
+	// 现有声明 host 互不重复 → 唯一命中；这里只钉「空 host 直接放弃」
+	if _, ok := PresetForHost("", "opencode2"); ok {
+		t.Fatal("空 host 不该命中")
+	}
+	if _, ok := PresetForHost("no-such-host.invalid", "opencode2"); ok {
+		t.Fatal("未知 host 不该命中")
+	}
+}

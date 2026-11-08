@@ -119,6 +119,63 @@ func Presets() map[string]Preset {
 
 func presetFor(providerID string) (Preset, bool) { return PresetFor(providerID) }
 
+// PresetForHost 按 base_url 的 host 复用声明。
+//
+// 为什么需要：同一家可以被加多次（opencode / opencode2 / opencode3，各自配不同 key、再改显示名）。
+// PresetFor 只在预设 id 与 settings 里的 provider id 恰好相等时命中，换个 id 就查不到额度 ——
+// 而「同一个 host」是唯一敢复用声明的判据：它同时就是安全规则本身（凭证只发自家 host）。
+//
+// 多条声明共用同一 host 时：优先 id 是 provider id 前缀的那条（opencode2 → opencode，取最长前缀），
+// 否则放弃 —— 猜错口径会把别家产品的额度显示成你的，比「不支持」糟得多。
+//
+// 与 provider.ProviderIDForBaseURL 是同一心智模型（那里的三道指纹是协议形状，这里只认 billing 声明），
+// 不直接调它：billing 只应认识自己的 presets.json，反向耦合会让「加一条声明」变成改两个包。
+func PresetForHost(host, providerID string) (Preset, bool) {
+	loadPresets()
+	if presetsErr != nil {
+		return Preset{}, false
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	id := strings.ToLower(strings.TrimSpace(providerID))
+	if host == "" {
+		return Preset{}, false
+	}
+	var ids []string
+	for k, p := range presetsByID {
+		if strings.EqualFold(strings.TrimSpace(p.Host), host) {
+			ids = append(ids, k)
+		}
+	}
+	switch len(ids) {
+	case 0:
+		return Preset{}, false
+	case 1:
+		return presetsByID[ids[0]], true
+	}
+	sort.Strings(ids)
+	best := ""
+	for _, k := range ids {
+		if id != "" && strings.HasPrefix(id, k) && len(k) > len(best) {
+			best = k
+		}
+	}
+	if best == "" {
+		return Preset{}, false
+	}
+	return presetsByID[best], true
+}
+
+// resolvePreset 决定这次抓取用哪条声明：
+//  1. id 精确命中且 host 一致（正常路径 —— 内置那几家）；
+//  2. 否则按 host 复用（用户把同一家加成 opencode2/opencode3 这种）；
+//  3. 都没有 → 调用方走 generic 探测。
+func resolvePreset(providerID, host string) (Preset, bool) {
+	if p, ok := presetFor(providerID); ok && strings.EqualFold(strings.TrimSpace(p.Host), host) {
+		return p, true
+	}
+	return PresetForHost(host, providerID)
+}
+
 // genericPreset 未声明 provider 的同 origin 探测（new-api / one-api 家族）。
 func genericPreset() (Preset, bool) {
 	loadPresets()
