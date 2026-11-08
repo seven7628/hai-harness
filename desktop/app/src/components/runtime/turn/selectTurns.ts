@@ -472,6 +472,22 @@ export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
   return kept
 }
 
+/**
+ * 交卷之后到达的记录（signal / task_delivery）该不该延后到**轮尾结算之后**。
+ *
+ * 一轮可以跨多次运行（后台任务回推 → 续跑），而账与产出卡只在整轮交卷时合并成一份
+ * 画在轮尾。所以「结算之后」是**分段**的：只有最后一段的记录该跟着轮尾走；前几段的
+ * 记录跟它自己那段的盒子走（两个盒子之间）。把整轮的记录一律延后，几条
+ * `Task … completed` 就会全堆在最后一个 Worked 后面（用户 2026-11 截图）。
+ *
+ * 记录块自己没有 runId —— 它在 turn.items 里的位置（插入时落在刚交卷的那段之后）
+ * 就是归属。段没切出来（单 run / 详细档不按段渲染 / 旧快照）时保持老行为：全部延后。
+ */
+export function defersToTurnEnd(runs: TurnRun[], i: number): boolean {
+  if (runs.length < 2) return true
+  return i >= runs[runs.length - 1].start
+}
+
 /** 一次运行的**结算**（账 / 产出卡）该落在哪个下标之后：它自己最后一块要跳过
     「结算之后才到达」的记录（signal / task_delivery 的 afterRun 位）与产出卡本身 ——
     否则「Task … completed」会排到账和卡上面，读起来像回执先于结算。

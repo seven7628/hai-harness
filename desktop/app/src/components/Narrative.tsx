@@ -9,7 +9,7 @@ import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPin
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, answerIndex, answerOf, foldedBody, hasWork, mergeArtifacts, outsideOf, runningBody, runWorkBody, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, outsideOf, runningBody, runWorkBody, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -1356,10 +1356,13 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const artBlocks = artRaw.length > 1 ? [mergeArtifacts(artRaw)] : artRaw
     const noArt = artBlocks.length ? bodySource.filter((b) => b.kind !== 'artifacts') : bodySource
     /* 交卷之后到达的记录（见 postRecord）一律排在**结算之后**：账与产出卡是这一轮的交付，
-       通知不属于交付序列（用户 2026-11 口径）。整轮交卷时不论几段运行都走这条；
-       还在跑的段由 plan 的分段结算负责（那里也保证记录落在账/卡之后）。 */
+       通知不属于交付序列（用户 2026-11 口径）。但「结算」是**分段**的：一轮可能跨多次运行
+       （后台任务回推 → 续跑），只有**最后一段**的记录才该延后到轮尾（合并且只有一份的账/卡）；
+       前几段的记录必须跟它自己那段的盒子走，否则四条 `Task … completed` 会全部堆在最后一个
+       Worked 后面（用户 2026-11 截图）。还在跑的段由 plan 的分段结算负责（那里也保证记录
+       落在账/卡之后）。 */
     const postBlocks = skin === 'runtime' && !live
-      ? turn.items.filter((b, i) => postRecord(b, i))
+      ? turn.items.filter((b, i) => postRecord(b, i) && defersToTurnEnd(runs, i))
       : []
     const bodyBlocks = postBlocks.length ? noArt.filter((b) => !postBlocks.includes(b)) : noArt
     const body = skin === 'runtime' ? groupRounds(bodyBlocks) : groupBlocks(bodyBlocks)
@@ -1427,7 +1430,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         const b = turn.items[i]
         // 工具行永远在工作过程里；产出卡不进时间线（轮尾合并渲染，或跟随已交卷段的结算）
         if (b.kind !== 'tool' && b.kind !== 'artifacts') {
-          // 交卷之后到达的记录：整轮交卷时统一延后到结算后面（见 postBlocks），这里跳过
+          // 交卷之后到达的记录：只有**最后一段**的统一延后到轮尾结算后面（见 postBlocks），
+          // 这里跳过；前几段的记录与自己那段的盒子一起落在两个盒子之间。
           const deferred = postBlocks.includes(b)
           // 已交卷那一段的结论：即使整轮还在跑，它也已经交出去了，必须留在时间线上
           if (deferred) { /* 见 postBlocks */ }

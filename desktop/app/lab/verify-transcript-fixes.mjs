@@ -462,15 +462,17 @@ const shape = () => page.eval(() => {
 const order2 = await shape()
 check('G3 情况二：一轮两次运行画出**两个**盒子（run1 一个、run2 一个）',
   order2.filter((x) => /^(rt-act|cy-live)/.test(x)).length === 2, JSON.stringify(order2))
-/* 整轮都交卷时：每段结论在盒外，账 + 合并卡在轮尾，**结算之后**才轮到交卷后到达的回执
-   （用户 2026-11 口径：signal 只可能在 Working 盒子里，或者在 tokens/artifacts 后面）。 */
+/* 整轮都交卷时：每段的结论在盒外，账 + 合并卡在轮尾。**段间**到达的回执跟它自己那一段
+   的 Worked 走（两个盒子之间），只有**最后一段**的记录才排在轮尾结算之后（用户 2026-11：
+   四条 Task completed 全堆在最后一个 Worked 后面 = 按整轮延后的旧实现）。 */
 const at2 = (re) => order2.findIndex((x) => re.test(x))
+const boxes2 = order2.reduce((acc, x, i) => (/^(rt-act|cy-live)/.test(x) ? [...acc, i] : acc), [])
 check('G3 情况二：两段运行的结论都在盒外（各一段，不折进 Worked 盒子）',
   order2.filter((x) => /^rt-turn-ans/.test(x)).length === 2 &&
     at2(/^rt-turn-ans/) === 1 && at2(/^rt-turn-ans/) < at2(/^rt-turn-foot/),
   JSON.stringify(order2))
-check('G3 情况二：交卷后到达的「Task … completed」在**结算之后**（顶层，不在盒里）',
-  at2(/^line:Task /) > at2(/^rt-turn-artifacts/) && at2(/^rt-turn-artifacts/) > at2(/^rt-turn-foot/) && at2(/^rt-turn-foot/) > 0,
+check('G3 情况二：段间到达的「Task … completed」跟在**它自己那一段**的 Worked 后面（两个盒子之间）',
+  boxes2.length === 2 && at2(/^line:Task /) > boxes2[0] && at2(/^line:Task /) < boxes2[1],
   JSON.stringify(order2))
 // 展开第二个盒子：段内那条 compress 信号必须在盒子里（情况二的下半段）
 await page.eval(() => {
@@ -575,6 +577,45 @@ const at6 = (re) => order6.findIndex((x) => re.test(x))
 check('G6 交卷后迟到的回执：排在账与产出卡**之后**（不在结论与账之间）',
   at6(/^rt-turn-foot/) >= 0 && at6(/^rt-turn-artifacts/) >= 0 && at6(/^line:Task /) > at6(/^rt-turn-artifacts/),
   JSON.stringify(order6))
+
+// G7 一轮**三段运行**，每段交卷后各到一条回执（用户 2026-11 截图：四条 Task completed
+// 全堆在最后一个 Worked 后面）。口径：回执跟**它自己那一段**的盒子走 —— 段间那条落在
+// 两个盒子之间；只有**最后一段**的记录才延后到轮尾结算之后（账/卡是整轮的交付）。
+await reset()
+const runOf = (id, tool, task, text, art) => [
+  ['agent_start', { run_id: id, timestamp: new Date().toISOString() }],
+  ['tool_run_start', { id: tool, name: 'bash', arguments: '{}', run_id: id }],
+  ['tool_run_end', { id: tool, name: 'bash', result: 'ok', is_error: false, run_id: id }],
+  ['task_started', { task_id: task, name: 'sub ' + task, parent_run_id: id }],
+  ['llm_start', { run_id: id, request_id: id + 'r', model: 'm' }],
+  ['content_chunk', { run_id: id, request_id: id + 'r', content: text }],
+  ['llm_end', { run_id: id, request_id: id + 'r', model: 'm', usage: { Input: 500, Output: 80, CacheRead: 300 } }],
+  ['agent_end', { run_id: id, finish_reason: 'stop', artifacts: [art] }],
+]
+await fire([
+  ['user_inputs_consumed', { user_texts: ['G7'] }],
+  ...runOf('g7a', 'g7t1', 'tg7a', '第一段结论', A1),
+  ['task_result_delivered', { task_id: 'tg7a', result: '回执一' }],
+  // 同一条通道上的 signal 也一样（postRecord 同时管 signal / task_delivery）
+  ['compress_end', { run_id: 'g7a', before: 300, after: 20 }],
+  ...runOf('g7b', 'g7t2', 'tg7b', '第二段结论', A2),
+  ['task_result_delivered', { task_id: 'tg7b', result: '回执二' }],
+  ...runOf('g7c', 'g7t3', 'tg7c', '第三段结论', { name: 'c.md', path: 'w/c.md', kind: 'created', added: 1, removed: 0 }),
+  ['task_result_delivered', { task_id: 'tg7c', result: '回执三' }],
+])
+const order7 = await shape()
+const at7 = (re, from = 0) => order7.findIndex((x, i) => i >= from && re.test(x))
+const boxes7 = order7.reduce((acc, x, i) => (/^rt-act/.test(x) ? [...acc, i] : acc), [])
+check('G7 三段运行画出三个 Worked 盒', boxes7.length === 3, JSON.stringify(order7))
+check('G7 段间回执（一）紧跟第一段的 Worked（不在最后一个盒子后面）',
+  at7(/^line:Task /) > boxes7[0] && at7(/^line:Task /) < boxes7[1], JSON.stringify(order7))
+check('G7 段间回执（二）紧跟第二段的 Worked',
+  at7(/^line:Task /, boxes7[1]) > boxes7[1] && at7(/^line:Task /, boxes7[1]) < boxes7[2], JSON.stringify(order7))
+check('G7 段间的 signal（不止回执）也跟它自己那一段的 Worked 走',
+  at7(/上下文压缩完成/) > boxes7[0] && at7(/上下文压缩完成/) < boxes7[1], JSON.stringify(order7))
+check('G7 最后一段的回执仍在轮尾账/产出卡之后（整轮的结算在最后）',
+  at7(/^rt-turn-foot/) >= 0 && at7(/^rt-turn-artifacts/) >= 0 &&
+    at7(/^line:Task /, boxes7[2]) > at7(/^rt-turn-artifacts/), JSON.stringify(order7))
 
 // ------------------------------------------------- H 待答的 ask_user 跨刷新复原
 // 用户 2026-11：ask_user 是工具调用，就该进 checkpoint —— 之前只活在前端，

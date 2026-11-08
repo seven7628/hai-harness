@@ -7,7 +7,7 @@
 //   3. 盒子存在 = workBody 非空（不是「有工具」）；没有盒子的轮（纯对话）正文回到时间线。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ALWAYS_SHOWN, FOLDED_KINDS, foldedBody, hasWork, mergeArtifacts, runningBody, runWorkBody, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
+import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, runningBody, runWorkBody, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
 import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 const user = (id: number, text = 'go'): MsgBlock => ({ kind: 'user', id, text })
@@ -367,6 +367,28 @@ test('case 1 不分段：单 run 仍然是一段（老路径一行不变）', ()
   const blocks: MsgBlock[] = [user(1), tool(2), signal(3), assistant(4, '答'), delivery(5)]
   const runs = turnRuns(selectTurns(blocks)[0])
   assert.equal(runs.length, 1)
+})
+
+test('交卷后到达的记录按段归位：只有最后一段才延后到轮尾结算之后', () => {
+  // 用户 2026-11 截图：一轮跨多次运行，几条 `Task … completed` 全堆在最后一个 Worked
+  // 后面。记录没有 runId，位置（到达时落在刚交卷那段的尾巴）就是归属：段间的记录跟
+  // 自己那一段的盒子走，只有最后一段的才配轮尾那**一份**合并的账/卡。
+  const blocks: MsgBlock[] = [
+    user(1),
+    asstOf(2, 'A', '第一段'),
+    toolOf(3, 'A'),
+    delivery(4, 'task-x', true), // A 段交卷后到达 → A 段的尾巴
+    asstOf(5, 'B', '第二段'),
+    toolOf(6, 'B'),
+    delivery(7, 'task-y', true), // B 段（最后一段）交卷后到达 → 轮尾
+  ]
+  const turn = selectTurns(blocks)[0]
+  const runs = turnRuns(turn)
+  assert.equal(runs.length, 2, '两次运行 = 两段')
+  assert.deepEqual([0, 1, 2, 3, 4, 5].map((i) => defersToTurnEnd(runs, i)),
+    [false, false, false, true, true, true], 'A 段的记录跟盒子走；B 段的记录延后到轮尾')
+  assert.equal(defersToTurnEnd([runs[0]], 0), true, '单段（老路径）保持全部延后')
+  assert.equal(defersToTurnEnd([], 0), true, '段没切出来时保持老行为')
 })
 
 // ---------------------------------------------------------------------------
