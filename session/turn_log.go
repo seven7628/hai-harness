@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 const turnLogMagic = "HAITURN1\n"
@@ -38,6 +39,11 @@ func TurnLogPath(recordPath string) string { return recordPath + ".turns" }
 func AppendTurnChunk(recordPath string, chunk []byte, count int) error {
 	if count < 0 {
 		return fmt.Errorf("turn log: negative count %d", count)
+	}
+	// 会话目录在「首次提交」时可能还不存在（record 本身也是由 CommitRecord
+	// 创建的）—— 这里必须先建目录，否则新会话的第一次提交会因日志写失败而中止。
+	if err := os.MkdirAll(filepath.Dir(TurnLogPath(recordPath)), 0o700); err != nil {
+		return err
 	}
 	f, err := os.OpenFile(TurnLogPath(recordPath), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

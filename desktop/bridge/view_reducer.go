@@ -4252,6 +4252,16 @@ func (r *ViewReducer) turnsWindowLocked() []Turn {
 	return out
 }
 
+// TurnsTotal 返回历史总条数（提交路径判断「body 窗口是否已覆盖全部轮次」用）。
+func (r *ViewReducer) TurnsTotal() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.turnsTotal > 0 {
+		return r.turnsTotal
+	}
+	return len(r.turns)
+}
+
 // TakePendingTurns 取走「尚未写进 turns 日志」的轮次（提交路径调用）。
 //
 // 只有成功追加到日志后调用方才应丢弃返回值；失败时轮次仍在 reducer 里，

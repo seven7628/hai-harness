@@ -118,20 +118,29 @@ func blocksRefTarget(view []byte, recordPath string) (ref blocksRefDoc, storePat
 	return ref, storePath, true, nil
 }
 
-// resolveBlocksRefMapped 用只读映射解析 blocks 引用：返回每个块的窗口（零拷贝
-// 指向 mmap）、期望摘要，以及 release。校验口径与 resolveBlocksRefSpans 一致。
-func resolveBlocksRefMapped(view []byte, recordPath string) (blocksRefDoc, [][]byte, [][8]byte, func(), error) {
+// mappedView 是「整份 sidecar 的只读映射 + 按 id 升序的块窗口」。
+type mappedView struct {
+	ids     []uint64
+	spans   [][]byte
+	hashes  [][8]byte
+	kinds   []uint8
+	release func()
+}
+
+// resolveBlocksRefMapped 用只读映射解析 blocks 引用：返回按 id 升序的
+// 窗口（零拷贝指向 mmap）与每块摘要/kind。校验口径与 resolveBlocksRefSpans 一致。
+func resolveBlocksRefMapped(view []byte, recordPath string) (*mappedView, error) {
 	ref, storePath, isRef, err := blocksRefTarget(view, recordPath)
 	if err != nil || !isRef {
-		return blocksRefDoc{}, nil, nil, nil, err
+		return nil, err
 	}
 	mapped, err := openMappedBlocks(storePath)
 	if err != nil {
-		return blocksRefDoc{}, nil, nil, nil, err
+		return nil, err
 	}
-	fail := func(e error) (blocksRefDoc, [][]byte, [][8]byte, func(), error) {
+	fail := func(e error) (*mappedView, error) {
 		_ = mapped.close()
-		return blocksRefDoc{}, nil, nil, nil, e
+		return nil, e
 	}
 
 	ids := make([]string, 0, len(mapped.index))
@@ -162,9 +171,24 @@ func resolveBlocksRefMapped(view []byte, recordPath string) (blocksRefDoc, [][]b
 		return fail(fmt.Errorf("block store checksum mismatch (have %s want %s)", got, ref.Sum))
 	}
 
+	// 统一按 id 数值升序：与 record 里的块顺序一致，窗口恢复才能「取尾部 N 个」。
+	nums := make([]uint64, len(ids))
+	for i, id := range ids {
+		n, perr := parseUintID(id)
+		if perr != nil {
+			return fail(fmt.Errorf("block store: non-numeric block id %q", id))
+		}
+		nums[i] = n
+	}
+	sortUint64WithIDs(nums, ids)
+
 	spans := make([][]byte, len(ids))
 	hashes := make([][8]byte, len(ids))
+	kinds := make([]uint8, len(ids))
 	for i, id := range ids {
+		if r, ok := mapped.index[id]; ok {
+			kinds[i] = r.kind
+		}
 		span, h, ok := mapped.span(id)
 		if !ok {
 			return fail(fmt.Errorf("block store missing referenced block: %s", id))
@@ -173,20 +197,22 @@ func resolveBlocksRefMapped(view []byte, recordPath string) (blocksRefDoc, [][]b
 		hashes[i] = h
 	}
 	release := func() { _ = mapped.close() }
-	return ref, spans, hashes, release, nil
+	return &mappedView{ids: nums, spans: spans, hashes: hashes, kinds: kinds, release: release}, nil
 }
 
 // attachMappedSpans 为 record 挂上映射视图；映射不可用（无索引/索引落后/
 // 平台不支持/旧格式内嵌数组）时回退到完整拼装路径，不影响正确性。
 func attachMappedSpans(record *SessionRecord, body ViewCheckpoint, path string) error {
-	_, spans, hashes, release, merr := resolveBlocksRefMapped(body, path)
+	mv, merr := resolveBlocksRefMapped(body, path)
 	switch {
-	case merr == nil && len(spans) > 0:
+	case merr == nil && mv != nil && len(mv.spans) > 0:
 		record.BodyView = body
 		record.ViewCheckpoint = nil // 不再展开：调用方用骨架 + spans
-		record.LoadedBlockSpans = spans
-		record.LoadedBlockHashes = hashes
-		record.releaseView = release
+		record.LoadedBlockSpans = mv.spans
+		record.LoadedBlockHashes = mv.hashes
+		record.LoadedBlockIDs = mv.ids
+		record.LoadedBlockKinds = mv.kinds
+		record.releaseView = mv.release
 		return nil
 	case merr == nil:
 		// 不是引用形态（旧格式内嵌数组）→ 保持整份 view。

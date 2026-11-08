@@ -368,10 +368,15 @@ func (c *checkpointCoordinator) commitOnce() {
 				return
 			}
 			if aerr := session.AppendTurnChunk(recPath, rawTurns, len(pending)); aerr != nil {
-				// 日志没写成 → 不能提交「只带窗口」的 body，否则这批轮次就丢了。
-				c.reducer.RestorePendingTurns(pending)
-				c.reportError(fmt.Errorf("checkpoint: append turns log: %w", aerr))
-				return
+				// 日志没写成时要不要中止这次提交，取决于「不写日志会不会丢轮次」：
+				//   · 总条数还在 body 窗口内 → 这批轮次本来就在 body 里，日志失败不致命；
+				//   · 超出窗口 → body 只带尾部，不中止就会永久丢一批，必须中止并重试。
+				if c.reducer.TurnsTotal() > turnsBodyWindow {
+					c.reducer.RestorePendingTurns(pending)
+					c.reportError(fmt.Errorf("checkpoint: append turns log: %w", aerr))
+					return
+				}
+				c.reportError(fmt.Errorf("checkpoint: append turns log (ignored, all turns fit in body): %w", aerr))
 			}
 		}
 	}

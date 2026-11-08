@@ -114,6 +114,15 @@ type SessionRecord struct {
 	// 映射路径不在打开时逐块读 payload 校验，改由解码时（并行）比对。
 	LoadedBlockHashes [][8]byte `json:"-"`
 
+	// LoadedBlockIDs 与 LoadedBlockSpans 一一对应（升序）。
+	// 窗口恢复只解码尾部，其余仍要能按 id 分页取到 —— 所以 id 全集必须带回来。
+	LoadedBlockIDs []uint64 `json:"-"`
+
+	// LoadedBlockKinds 与 LoadedBlockSpans 一一对应（0 = 未知）。
+	// 窗口恢复要靠它只解码「卡片类」块（agent/async_task/task_*），
+	// 否则窗口外的子智能体卡片会从首屏消失（左栏树变空）。
+	LoadedBlockKinds []uint8 `json:"-"`
+
 	// releaseView 释放块映射；nil 表示无资源可放（拼装路径）。
 	releaseView func()
 }
