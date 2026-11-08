@@ -3252,7 +3252,8 @@ interface AppState {
   pickAppFromSystem(): Promise<string | null> // 系统「选择应用程序」对话框 → 返回所选 App 显示名（取消 → null）
   providerSave(p: ProviderSaveInput): Promise<boolean> // 持久化 provider 配置 + key（热切换由调用方另发 set_provider）
   addProvider(p: { provider: string; base_url: string; protocol?: string; openai_compat?: import('../transport/types').OpenAICompatCapabilities; api_key?: string }): Promise<{ ok: boolean; error?: string }> // 新增自定义 provider（创建配置 + 存 key + 通知 bridge）
-  renameProvider(oldName: string, newName: string): Promise<{ ok: boolean; error?: string }> // 自定义 provider 改名（整卡配置迁移到新 id：base_url/key/models/…；内置 5 家不可改名）
+  renameProvider(oldName: string, newName: string): Promise<{ ok: boolean; error?: string }>
+  renameProviderDisplay(provider: string, label: string): Promise<{ ok: boolean; error?: string }> // 自定义 provider 改名（整卡配置迁移到新 id：base_url/key/models/…；内置 5 家不可改名）
   removeProvider(provider: string): Promise<{ ok: boolean; error?: string }> // 删除自定义 provider（配置 + key + 重建）
   refreshProviderKeys(): void // 各 provider 是否已设 key（仅布尔，Provider 面板「已设置 ✓」）
   fetchModels(provider: string): void // 拉取 provider 模型列表（list_models）
@@ -10530,6 +10531,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   // electron provider:remove 会自动回退 active 到内置，故改名流程：先建新 id 再删旧 id，
   // 最后把 active 指回新 id（若原先是活跃）。session 侧归属（bs.provider）不迁移——
   // 改名的自定义 provider 通常不是活跃/会话绑定方；如需要可在设置里重新「设为当前」。
+  // renameProviderDisplay 改**显示名**（label），不动 id。
+  // 为什么单独一条而不是复用 saveProvider：saveProvider 末尾会发 set_provider → bridge
+  // rebuildAll 重建全部会话 loop（运行中的生成会被打断）。改名是纯 UI 操作，不该有这个副作用。
+  // id 不变 ⇒ metrics 历史 / 用户价表 / billing 缓存 / GOCODE_KEY_* 兜底全部继续有效。
+  renameProviderDisplay: async (provider, label) => {
+    const cfg = get().settings.provider[provider]
+    if (!cfg || typeof cfg !== 'object') return { ok: false, error: 'provider 不存在' }
+    const r = await transport.providerSave({ provider, label })
+    if (!r.ok) return r
+    const s2 = await transport.settingsGet()
+    set({ settings: s2 })
+    return { ok: true }
+  },
   renameProvider: async (oldName, newName) => {
     const name = newName.trim()
     if (!name) return { ok: false, error: '名称不能为空' }
@@ -10688,6 +10702,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // setModels(payload) 执行，payload 旧值把新窗口打回）。
       const cmd: ProviderSaveInput = { provider: p.provider }
       if (p.active) cmd.active = p.active
+      if (typeof p.label === 'string') cmd.label = p.label // 显示名（纯 UI 字段；空串 = 清除）
       if (p.base_url) cmd.base_url = p.base_url
       if (p.protocol) cmd.protocol = p.protocol
       if (p.openai_compat) cmd.openai_compat = p.openai_compat

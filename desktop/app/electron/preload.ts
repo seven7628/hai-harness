@@ -107,7 +107,7 @@ contextBridge.exposeInMainWorld('desktop', {
   egoInstall: () => ipcRenderer.invoke('ego:install') as Promise<{ ok: boolean; error?: string }>,
   // 启动已安装的 ego lite（已装未运行时用；open -a，无需 TCC 授权）
   egoLaunch: () => ipcRenderer.invoke('ego:launch') as Promise<{ ok: boolean; error?: string }>,
-  providerSave: (p: { provider: string; active?: string; base_url?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) =>
+  providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) =>
     ipcRenderer.invoke('provider:save', p) as Promise<{ ok: boolean; hasKey?: boolean; error?: string }>,
   providerRemove: (provider: string) => ipcRenderer.invoke('provider:remove', provider) as Promise<{ ok: boolean; error?: string }>,
   providerKeyStatus: (provider: string) => ipcRenderer.invoke('provider:key-status', provider) as Promise<boolean>,
@@ -230,7 +230,7 @@ declare global {
       externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
       importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
       pickApp: () => Promise<{ name: string; bundleId?: string } | null>
-      providerSave: (p: { provider: string; active?: string; base_url?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
+      providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
       providerKeyStatus: (provider: string) => Promise<boolean>
       mcpSave: (servers: Record<string, MCPServerCfg>) => Promise<{ ok: boolean; error?: string }>
       fsList: (dir: string) => Promise<{ ok: boolean; path: string; entries: { name: string; path: string; isDir: boolean; size?: number }[]; error?: string }>

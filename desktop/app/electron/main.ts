@@ -264,6 +264,9 @@ interface OpenAICompatCapabilities {
 
 interface ProviderCfg {
   base_url: string
+  // 显示名（2026-11）：纯 UI 字段，不改 settings 的键（id 不可变）——历史 metrics /
+  // 用户价表 / billing 请求全按 id 索引，改 id 会把历史断成两个 provider。
+  label?: string
   openai_compat?: OpenAICompatCapabilities
   api_key?: string // API key 明文（2026-08-16 起持久化于此，替代 keys.json 加密注入）
   models: Record<string, number> // model → context window（tokens；1M=1000000）
@@ -1421,7 +1424,7 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   })
   // provider:save：持久化配置（settings.json）+ key（safeStorage 加密 keys.json）。不转发 bridge——
   // 热切换由 renderer 另发 set_provider 桥命令（key 只在命令 payload 瞬态，不入持久态）。
-  ipcMain.handle('provider:save', (_e, p: { provider: string; active?: string; base_url?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; prices?: Record<string, { input: number; cache_read: number; cache_write: number; output: number }>; input_types?: Record<string, string[]>; openai_compat?: OpenAICompatCapabilities; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => {
+  ipcMain.handle('provider:save', (_e, p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; prices?: Record<string, { input: number; cache_read: number; cache_write: number; output: number }>; input_types?: Record<string, string[]>; openai_compat?: OpenAICompatCapabilities; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => {
     if (!isValidProviderName(p.provider)) return { ok: false, error: '无效 provider 名称' }
     if (p.active && !isValidProviderName(p.active)) return { ok: false, error: '无效 provider 名称' }
     const read = settingsForWrite()
@@ -1435,6 +1438,12 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (typeof p.base_url === 'string' && p.base_url) pc.base_url = p.base_url
     if (p.openai_compat && typeof p.openai_compat === 'object') pc.openai_compat = p.openai_compat
     if (p.protocol === 'chat_completions' || p.protocol === 'responses' || p.protocol === 'anthropic') pc.protocol = p.protocol
+    // 显示名（2026-11）：空串 = 清除字段（回内置名/id）。只影响 UI，不参与运行态。
+    if (typeof p.label === 'string') {
+      const label = p.label.trim()
+      if (label) pc.label = label.slice(0, 64)
+      else delete pc.label
+    }
     if (p.models && typeof p.models === 'object') pc.models = p.models
     if (p.max_tokens && typeof p.max_tokens === 'object') pc.max_tokens = p.max_tokens
     if (p.prices && typeof p.prices === 'object') pc.prices = p.prices // 每模型价表覆盖（USD/1M tokens）

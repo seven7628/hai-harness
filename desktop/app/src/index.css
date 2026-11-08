@@ -12858,3 +12858,152 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   color: var(--text-2);
   font-size: 12px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Provider 管理页（2026-11 重绘）：列表 / 添加目录 / 详情
+ *
+ * 为什么另起 .pvp-* 而不是改 .prov-*：
+ *   `.prov-*` 的样式被三处复用（Provider 卡正文、价格编辑器、语音输入卡），
+ *   改它会牵动与本次无关的界面。新页只新增前缀，旧类原样保留。
+ *
+ * 行高与车位：列表行 = 30px 字标 + 两行文字（13.5/11.5）≈ 48px 内容 + 8×2 padding。
+ * 计量位（.pvp-meter）**恒占 168px**：billing 方案接入后往这里填窗口条/余额，
+ * 无数据时也不塌陷 —— 否则每行「设为当前」按钮会随内容左右跳。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+.pvp { display: flex; flex-direction: column; gap: 6px; }
+.pvp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.pvp-add-btn { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.pvp-sec {
+  font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-3); margin: 10px 2px 0;
+}
+.pvp-empty {
+  padding: 18px 12px; text-align: center; color: var(--text-3); font-size: 12px;
+  border: 1px dashed var(--border-strong); border-radius: 10px;
+}
+.pvp-empty-grid { grid-column: 1 / -1; }
+.pvp-browse {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; padding: 8px; margin-top: 2px;
+  border: 1px dashed var(--border-strong); border-radius: 10px;
+  background: transparent; color: var(--text-3); font-size: 12px; cursor: pointer;
+}
+.pvp-browse:hover { color: var(--text); border-color: var(--accent-border); }
+
+/* —— 行（已添加 / 可用 共用）—— */
+.pvp-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--surface); color: var(--text); cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.pvp-row:hover { border-color: var(--accent-border); }
+.pvp-row.cur { background: var(--accent-weak); border-color: var(--accent-border); }
+.pvp-row-avail { cursor: default; }
+.pvp-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pvp-row-1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pvp-row-2 {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 11.5px; color: var(--text-3);
+}
+.pvp-row-name {
+  font-size: 13.5px; font-weight: 600; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pvp-cur { font-size: 11px; color: var(--success); flex: 0 0 auto; }
+.pvp-warn { font-size: 11px; color: var(--warning); flex: 0 0 auto; }
+.pvp-grow { flex: 1 1 auto; }
+.pvp-meter { flex: 0 0 168px; } /* billing 车位（见 docs/PROVIDER_USAGE_BILLING.md §8.1） */
+.pvp-mini { padding: 2px 9px; font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
+.pvp-host {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px;
+}
+.pvp-sep { color: var(--text-3); opacity: 0.55; }
+.pvp-id { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-id-hint { font-size: 11px; color: var(--text-3); align-self: center; white-space: nowrap; }
+.pvp-chip-sub {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border-strong); color: var(--text-3); flex: 0 0 auto;
+}
+
+/* —— 字标（色相由 --pv-h 下传，深浅两套各自算明度）—— */
+.pvp-glyph {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  border-radius: 8px; font-weight: 600; letter-spacing: 0.02em; line-height: 1;
+  background: hsl(var(--pv-h, 200) 58% 52% / 0.16);
+  color: hsl(var(--pv-h, 200) 62% 66%);
+}
+[data-theme='paper'] .pvp-glyph {
+  background: hsl(var(--pv-h, 200) 62% 42% / 0.12);
+  color: hsl(var(--pv-h, 200) 58% 32%);
+}
+
+/* —— 添加页 —— */
+.pvp-nav { display: flex; align-items: center; gap: 8px; }
+.pvp-back {
+  display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px 4px 2px;
+  background: transparent; border: 0; border-radius: 6px; color: var(--text-2);
+  font-size: 12.5px; cursor: pointer;
+}
+.pvp-back:hover { color: var(--text); background: var(--surface); }
+.pvp-nav-sub { font-size: 12px; color: var(--text-3); }
+.pvp-nav-right { margin-left: auto; display: flex; gap: 6px; }
+.pvp-del { color: var(--danger); }
+.pvp-search {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--bg); color: var(--text-3);
+}
+.pvp-search input {
+  flex: 1; min-width: 0; background: transparent; border: 0; outline: none;
+  color: var(--text); font-size: 12.5px;
+}
+.pvp-count { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-catalog { display: flex; align-items: flex-start; gap: 12px; }
+.pvp-cats {
+  flex: 0 0 128px; display: flex; flex-direction: column; gap: 2px;
+  position: sticky; top: 0;
+}
+.pvp-cat {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 9px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--text-2); font-size: 12px;
+  text-align: left; cursor: pointer;
+}
+.pvp-cat:hover { background: var(--surface); }
+.pvp-cat.cur { background: var(--accent-weak); border-color: var(--accent-border); color: var(--text); }
+.pvp-cat-n { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-grid {
+  flex: 1; min-width: 0; display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+}
+@media (max-width: 900px) { .pvp-grid { grid-template-columns: minmax(0, 1fr); } }
+.pvp-card {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 10px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--surface); color: var(--text); text-align: left; cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.pvp-card:hover:not(:disabled) { border-color: var(--accent-border); }
+.pvp-card:disabled { cursor: default; opacity: 0.72; }
+.pvp-card.is-added .pvp-card-name { color: var(--text-2); }
+.pvp-card-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.pvp-card-name {
+  font-size: 12.5px; font-weight: 600; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pvp-card-sub {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pvp-card-plus, .pvp-card-added { flex: 0 0 auto; color: var(--text-3); }
+.pvp-card-added { font-size: 11px; }
+
+/* —— 详情页：卡片头已在导航栏表达，隐藏避免重复 —— */
+.pvp-detail .prov-head { display: none; }
+.pvp-detail .prov-card {
+  margin-bottom: 0; padding: 0; border: 0; background: transparent;
+}
+.pvp-detail-title { display: flex; align-items: center; gap: 10px; padding: 2px 2px 6px; }
+.pvp-detail-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }

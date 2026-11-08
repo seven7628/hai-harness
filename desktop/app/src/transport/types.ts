@@ -25,6 +25,10 @@ export interface ModelPrices {
 
 export interface ProviderCfg {
   base_url: string
+  // label 显示名（2026-11）：只影响 UI。id（settings.provider 的键）保持不可变，因为
+  // metrics 记账 / 用户价表 / billing 请求 / GOCODE_KEY_<NAME> 兜底全部按 id 索引 ——
+  // 改 id 会让历史统计断成两个 provider。空/缺省 = 用内置名或 id。
+  label?: string
   api_key?: string // API key 明文（settings.json；bridge loadSettings 读取）
   models: Record<string, number> // model → context window（tokens；1M=1000000）
   max_tokens: Record<string, number> // model → 单次输出上限（tokens；DeepSeek v4-flash 官方 384k）
@@ -280,6 +284,7 @@ export interface ProviderSaveInput {
   provider: string
   active?: string
   base_url?: string
+  label?: string // 显示名（空串 = 清除回默认显示名）
   protocol?: string // OpenAI 接入协议（chat_completions/responses；responses 暂未支持）
   openai_compat?: OpenAICompatCapabilities
   models?: Record<string, number>

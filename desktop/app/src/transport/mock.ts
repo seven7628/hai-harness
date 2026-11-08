@@ -1082,6 +1082,12 @@ class MockTransport implements Transport {
     if (p.active) cur.provider.active = p.active
     const pc = (cur.provider[p.provider] as ProviderCfg | undefined) ?? { base_url: '', models: {}, max_tokens: {}, protocol: 'chat_completions', input_types: {}, auth_type: 'api_key' }
     delete pc.deleted // 重新保存 = 重新启用（对齐 electron provider:save）
+    // 显示名（2026-11）：空串 = 清除字段（回内置名/id）——与 electron provider:save 一致
+    if (typeof p.label === 'string') {
+      const label = p.label.trim()
+      if (label) pc.label = label.slice(0, 64)
+      else delete pc.label
+    }
     if (p.base_url) pc.base_url = p.base_url
     if (p.openai_compat && typeof p.openai_compat === 'object') pc.openai_compat = p.openai_compat
     if (p.protocol === 'chat_completions' || p.protocol === 'responses' || p.protocol === 'anthropic') pc.protocol = p.protocol
