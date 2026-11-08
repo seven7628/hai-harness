@@ -4437,23 +4437,29 @@ go test <pkg> -list '<tasks[].tests 里的 -run 正则>'   # 必须至少列出�
 | 评测 8 · agent 派任务 → 结果卡 → 只唤醒派发者 | PASS | `desktop/bridge/hub_eval_p3b_test.go::TestEval8AgentAssignCompletesAndWakesDispatcher` |
 | 评测 9 · 其他成员下次被 @ 看到结果（含失败分支） | PASS | `TestEval9OtherMemberSeesResultOnNextMention`（`failed` 子测试） |
 | 停止护栏 · A 已 @B 入队、B 未启动时人停止 | PASS | `TestEval8HumanStopStopsChain` |
-| 残余 1 · 上下文 chip 跳转高亮 | 已补 `.hub-msg-highlight`：accent→ink 混色 2px 描边 + 14% accent 底；正文对底色 ink 9.06:1 / paper 10.08:1（≥ AA 4.5:1），reduced-motion 下不播放淡入 | `desktop/app/src/hub/hub.css` + 浏览器探针 |
+| 残余 1 · 上下文 chip 跳转高亮 | 已补 `.hub-msg-highlight`：accent→ink 混色 2px 描边 + 14% accent 底。对比度基线分开记：**正文 vs tint 底** ink 9.06:1 / paper 10.08:1（≥ AA 4.5:1）；**描边 vs 页面底色**按非文本元素口径 3:1 单独校验（两种主题都过），不与正文比值混用。reduced-motion 下不播放淡入 | `desktop/app/src/hub/hub.css` + 浏览器探针 |
 | 残余 2 · mock stop 未结算在飞任务 | 已修：停止为 queued/dispatched/running 任务发 `hub_task_update(status=interrupted)`；二次 assign 完成后停止按钮保持禁用 | `scripts/test-hub-p3b.mjs` 的 mock 用例 |
 | 残余 3 · DM 未读刷新竞态 | 已修：`shouldApplyDMInfo`（last_seq + 请求时点代际）逐 agent 合并，刷新期间到达的消息/未读不被旧响应覆盖 | `groupProjection.ts` / `useHubStore.ts` + `test-hub-p3b.mjs` |
 | B1 · 结算/恢复不得在锁内跨会话回推 | 已修：终态回推全部交给异步通知簿（`hub_notify.go`）；锁内只做账本/结果卡/事件投影。发起者会话持 dispatchMu 时结算仍立即返回 | `hub_p3b08_blockers_test.go::TestHubTaskFinishDoesNotWaitForOriginDispatchLock` |
-| B2 · 对话投递与停止的竞态 | 已修：按群 dispatch 闸门串行「NextDue → 投递 → BeginTurn」与停止/人类开新对话；Wake 带 conversation_id，投递前校验；BeginTurn 失败留 `group_conversation_turn_lost` 告警 | `TestHubConversationStopWaitsForInFlightDispatch` + `TestEval8HumanStopStopsChain` |
+| B2 · 对话投递与停止的竞态 | 已修：按群 dispatch 闸门串行「NextDue → 投递 → BeginTurn」与停止/人类开新对话；Wake 带 conversation_id，投递前校验；BeginTurn 失败留 `group_conversation_turn_lost` 告警（停止窗口里的 false 不告警） | `TestHubConversationStopMarksFirstAndDropsDueWake` + `TestEval8HumanStopStopsChain` |
 | B3 · dispatched→running | 已修：根 AgentStart 带 run_id 推进 running 并广播 `hub_task_update`（迟到/上一轮 run 不推进） | `TestHubTaskStartMarksRunning` |
-| P2 · 复审小项 | 恢复 agent 目标补卡+唤醒（`TestHubRecoveryAgentTargetWritesCardAndWakes`）；task_ack 群校验收紧（`TestHubTaskAckRejectsMissingGroup`）；mark_read 夹紧到日志末尾（`TestHubMarkReadClampsToLastSeq`）；人类派任务换代清队列（`TestHubGroupAssignStartsNewConversation`）；batch_conflict 额外任务写卡+回推（`TestHubTaskFinishBatchConflictExtrasGetCard`）；`hub_group_send` 解锁后再唤醒 | 同名用例 |
+| 恢复 P1 · 终态卡与非活 run | 已修：结果卡只在**终态确定后**写。dispatched/running 只有在**本进程仍有活会话**（`running` / `hubDispatchPending` / `PendingCount>0`，workspace 匹配）时保留；否则标 interrupted（说明 run 丢失）+ 终态卡 + 异步回推。空 `Dispatch.RunID` 的终态用 `recovery:<task_id>` 写 `notified_run_ids`，恢复重放幂等（此前空 run 永远停在 completed、每次重推） | `TestHubRecoveryRunningTaskInterruptedWithCard`、`TestHubRecoveryDispatchedStaleRunCardInterrupted`、`TestHubRecoveryLiveRunNotInterrupted`、`TestHubRecoveryEmptyRunTerminalDeliversOnce` |
+| 停止 P1 · 停止后的 fast run final | 已修：`GroupWakeHeader` 携带 `conversation_id`；`finishHubRound` 在群 dispatch 闸门下检查对话状态，stopped 时只推进游标、不写 final；`hubConversationStop` 先标记 stopped/清队列再抢闸门做中断（系统消息在放闸门后写）；pump 投递前复查 stopped/对话 id。人类插话开的新对话是 running，当前 run 允许正常收尾 | `TestHubConversationFastRunAfterStopWritesNoFinal`（`-race -count=20`）、`TestHubConversationHumanInterjectionAllowsCurrentFinal` |
+| P2 · 复审小项 | 恢复 agent 目标的**终态**卡+唤醒（与恢复 P1 同一路径，见上）；task_ack 群校验收紧（`TestHubTaskAckRejectsMissingGroup`）；mark_read 夹紧到日志末尾（`TestHubMarkReadClampsToLastSeq`）；人类派任务换代清队列（`TestHubGroupAssignStartsNewConversation`）；batch_conflict 额外任务写卡+回推（`TestHubTaskFinishBatchConflictExtrasGetCard`）；`hub_group_send` 解锁后再唤醒 | 同名用例 |
 
-**本轮复审落点（files）**：`desktop/bridge/hub_notify.go`（新）、`hub_task_finish.go`、
-`hub_task_result.go`、`hub_recovery.go`、`hub_conversation.go`、`hub_task_ack.go`、
-`hub_commands.go`、`hub_assign_task.go`、`hub_group_commands.go`、`hub_background.go`、
-`desktop/bridge/main.go`、`agenthub/conversation.go`（`Wake.conversation_id`）、
+**本轮复审落点（files，docs-only；看板 `files` 字段仍由主会话按 tasks.json 维护）**：
+`desktop/bridge/hub_notify.go`（新）、`hub_task_finish.go`、`hub_task_result.go`、
+`hub_recovery.go`、`hub_conversation.go`、`hub_task_ack.go`、`hub_commands.go`、
+`hub_assign_task.go`、`hub_group_commands.go`、`hub_group_session.go`、
+`hub_background.go`、`desktop/bridge/main.go`、`agenthub/conversation.go`
+（`Wake.conversation_id`）、`agenthub/group_wake.go`（header `conversation_id`）、
 `desktop/bridge/hub_p3b08_blockers_test.go`（新）。
 
-**任务 commit（P3b 全期）**：`e4b8b8b` 01 · `3725ece` 01b · `8610862` 02 · `8c44149` `df4fde4` 03 ·
-`9c851d1` `0f3c321` 04 · `25cb0e5` `c35ec2d` 05 · `5b5fb01` 06 · `8946ab7` `2d6c866` 07a ·
-`8eadfda` `def0c8b` 07 · `7d3670d` 08 · `40392e2` 08 复审阻塞项（B1/B2/B3 + P2）。
+**任务 commit（P3b 全期）**：`e4b8b8b` 01 · `71d2511` `49b9ccf` `bdb22c3` 01a ·
+`3725ece` 01b · `8610862` `80e2a3a` 02 · `8c44149` `df4fde4` 03 · `9c851d1` `0f3c321` 04 ·
+`25cb0e5` `c35ec2d` 05 · `5b5fb01` 06 · `8946ab7` `2d6c866` 07a · `8eadfda` `def0c8b` 07 ·
+`7d3670d` 08 · `40392e2` 08 复审阻塞项（B1/B2/B3 + P2）· `1f29b8a` 08 复审 P1
+（恢复终态卡/活 run、停止后抑制 fast-run final）· docs `60e3bbb` `8310be8`。
 
 **门禁**：`go test ./agenthub/...`、`go build ./...`、`go vet ./...` 绿；
 `go test ./desktop/bridge/...` 只有既有环境/顺序敏感失败（`TestP0GuidanceCausesModelToWriteMemory`
@@ -4464,7 +4470,11 @@ go test <pkg> -list '<tasks[].tests 里的 -run 正则>'   # 必须至少列出�
 只剩既有 `lab/test-runtime-turns.ts` 解析错误）。变异验证两轮均 RED：删高亮 CSS /
 去掉 mock stop 结算 / 绕过 DM 守卫 / 结果卡叫醒 C / 结果卡不进快照；以及本轮
 同步回推（B1）、拆掉对话闸门（B2）、去掉 running 推进（B3）、ack fail-open、
-mark_read 不夹紧、派活不换代、恢复丢 agent 目标、batch_conflict 不写卡。
+mark_read 不夹紧、派活不换代、恢复丢 agent 目标、batch_conflict 不写卡；
+以及本轮「恢复先写卡后判状态」、去掉 `finishHubRound` 的 stopped 检查、停止改成
+抢闸门后再标记 stopped（三条均 RED）。本轮门禁：`go test -race ./desktop/bridge
+-run 'Recovery|Stop|Eval8|Eval9|TaskStart|FinishAgentTask|Conversation' -count=5`
+绿，fast-stop `-race -count=20` 绿，`agenthub`/`session` 全绿。
 
 **已知 defer（P4/后续）**：
 
