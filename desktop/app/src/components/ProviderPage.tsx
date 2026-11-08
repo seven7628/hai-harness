@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useAppStore, KNOWN_MODEL_MAX_TOKENS, MODEL_MAX_TOKENS_DEFAULT, inputTypesForProvider } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { getTransport } from '../transport'
 import type { ProviderCfg, ProviderPreset } from '../transport/types'
 import { ChevronDown, ChevronLeft, EyeIcon, EyeOffIcon, ImageIcon, Plus, SearchIcon } from './icons'
 import { ProviderGlyph } from './ProviderGlyph'
+import { fmtMoney, localSpendOf, meterOf, resetIn, sortedWindows, type MeterTone } from '../lib/billingView'
 import { CATEGORY_ORDER, availableEntries, catalogByID, categoryCounts, hostOfURL, searchCatalog, sortConfigured, type CatalogEntry, type CatalogCategory } from '../lib/providerCatalog'
 
 // —— Provider：内置快捷添加（DeepSeek/OpenAI/OpenCode Go/Kimi/智谱 + P1 可选 + P2 订阅）+ 用户自定义 ——
@@ -32,13 +34,6 @@ function providerDisplay(t: (k: string) => string, key: string): string {
   }
   return fixed[key] ?? key
 }
-// 已规划但未实现的厂商（对应 docs/PROVIDER_OPTIMIZATION_PLAN.md P2：google/bedrock/azure/cloudflare）
-const PLANNED_PROVIDERS: { id: string; name: string }[] = [
-  { id: 'google', name: 'Google Gemini' },
-  { id: 'bedrock', name: 'Amazon Bedrock' },
-  { id: 'azure', name: 'Azure OpenAI' },
-  { id: 'cloudflare', name: 'Cloudflare' },
-]
 const PROTOCOL_OPTIONS: { value: ProtocolId; label: string }[] = [
   { value: 'chat_completions', label: 'Chat Completions' },
   { value: 'responses', label: 'Responses' },
@@ -78,19 +73,9 @@ function presetProtocol(presets: ProviderPreset[], id: string): ProtocolId {
   return (p?.protocol as ProtocolId | undefined) ?? 'chat_completions'
 }
 
-// oauthProviderIDs OAuth 订阅预设 id 集（鉴权 = 订阅登录）。
-function oauthProviderIDs(presets: ProviderPreset[]): string[] {
-  return presets.filter((p) => p.oauth).map((p) => p.id)
-}
-
 // isOAuthPreset 预设是否为 OAuth 订阅厂商（添加表单据此隐藏 API Key、提示登录方式）。
 function isOAuthPreset(presets: ProviderPreset[], name: string): boolean {
-  return oauthProviderIDs(presets).includes(name)
-}
-
-// apiKeyProviderIDs API Key 预设 id 集（鉴权 = 填 key）。
-function apiKeyProviderIDs(presets: ProviderPreset[]): string[] {
-  return presets.filter((p) => !p.oauth).map((p) => p.id)
+  return presets.some((p) => p.id === name && Boolean(p.oauth))
 }
 
 // 列表页「可用」区预览条数：2 条 ≈ 116px —— 让「已添加」区始终在首屏内（body 高 672px），
@@ -119,6 +104,12 @@ export default function ProviderPage() {
   const removeModel = useAppStore((s) => s.removeModel)
   const renameProvider = useAppStore((s) => s.renameProvider)
   const renameProviderDisplay = useAppStore((s) => s.renameProviderDisplay)
+  // 余额 / 配额（provider_billing；数据面见 provider/billing）
+  const billing = useAppStore((s) => s.billing)
+  const fetchBilling = useAppStore((s) => s.fetchBilling)
+  // 本地记账（今日/本月花费）：从已缓存的 metrics 报告派生，不在 bridge 重扫 JSONL
+  const metrics = useAppStore((s) => s.metrics)
+  const ensureMetrics = useAppStore((s) => s.ensureMetrics)
   const [labelDrafts, setLabelDrafts] = useState<Record<string, string>>({})
   // OAuth 订阅登录（2026-08 P2）
   const oauthStatus = useAppStore((s) => s.oauthStatus)
@@ -196,8 +187,6 @@ export default function ProviderPage() {
   const [showNewKey, setShowNewKey] = useState(false) // 添加表单 key 明文/掩码（默认掩码）
   const [newProtocol, setNewProtocol] = useState<ProtocolId>('chat_completions')
   const [preset, setPreset] = useState<string>('') // 添加表单当前预设（'' = 自定义）
-  const [presetOpen, setPresetOpen] = useState(false) // 自定义预设下拉弹层
-  const presetRef = useRef<HTMLDivElement>(null) // 预设下拉容器（外部点击/Esc 关闭）
   const [testingNew, setTestingNew] = useState(false) // 添加表单「测试连接」进行中
   const [testNew, setTestNew] = useState<{ ok: boolean; msg: string } | null>(null) // 添加表单测试结果
   const [testing, setTesting] = useState<Record<string, boolean>>({}) // 每卡「测试连接」进行中
@@ -234,8 +223,6 @@ export default function ProviderPage() {
       }
     }
   }
-  const oauthProviderIds = oauthProviderIDs(providerPresets)
-  const apiKeyProviderIds = apiKeyProviderIDs(providerPresets)
   // 打开设置时拉取预设 + 预设模型内置价（首次或 bridge 重启后兜底刷新）。
   // 注意：不能只看 providerPresets 判空 —— 重启后 store 全新（两者皆空），但若只缺
   // modelCosts（旧 store 数据/部分响应），也要补拉一次才能回显内置价。
@@ -256,22 +243,6 @@ export default function ProviderPage() {
   useEffect(() => {
     refreshProviderKeys()
   }, [refreshProviderKeys])
-  // 预设下拉：外部点击 / Esc 关闭
-  useEffect(() => {
-    if (!presetOpen) return
-    const close = (e: MouseEvent) => {
-      if (presetRef.current && !presetRef.current.contains(e.target as Node)) setPresetOpen(false)
-    }
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPresetOpen(false)
-    }
-    document.addEventListener('mousedown', close)
-    document.addEventListener('keydown', esc)
-    return () => {
-      document.removeEventListener('mousedown', close)
-      document.removeEventListener('keydown', esc)
-    }
-  }, [presetOpen])
   useEffect(() => {
     const b: Record<string, string> = {}
     const p: Record<string, ProtocolId> = {}
@@ -302,7 +273,9 @@ export default function ProviderPage() {
       }
       return changed ? next : m
     })
-  }, [settings]) // 依赖整个 settings：增删 provider 也触发回填
+    // 依赖整个 settings：增删 provider / 改名也触发回填。cfgOf/providerIds 是每帧新建的闭包，
+    // 放进依赖会变成「每次渲染都回填」，把用户正在输入的草稿冲掉。
+  }, [settings]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async (pid: string) => {
     const api_key = (keys[pid] ?? '').trim() || undefined
@@ -380,7 +353,11 @@ export default function ProviderPage() {
     if (!r.ok) return setErr(r.error ?? t('provider.addErr'))
     setAdding(false)
     setErr(null) // 清掉预设冲突等残留提示
-    setExpanded((m) => ({ ...m, [name]: true })) // 新增后展开该卡
+    setExpanded((m) => ({ ...m, [name]: true }))
+    // 添加成功回列表：留在目录页会让人以为「还没加成功」（卡片只是变成灰色「已添加」）。
+    setView('list')
+    setAddEntry(null)
+    fetchBilling(name, false) // 新 provider 立刻拉一次计量（无能力/无 key 会直接返回，不发请求）
     showToast(t('provider.saved'))
   }
   const del = async (pid: string) => {
@@ -530,7 +507,8 @@ export default function ProviderPage() {
     return { id: pid, name: pid, host: '', category: 'custom', aliases: [], glyph: letters, hue: h }
   }
   const counts = categoryCounts()
-  const available = availableEntries(providerIds)
+  // 自定义模板只在目录里提供（列表页的「可用」是发现入口，两个「Custom」行没有意义）
+  const available = availableEntries(providerIds).filter((e) => !e.custom)
   const rows = sortConfigured(providerIds.map((pid) => ({
     id: pid,
     active: settings.provider.active === pid,
@@ -541,7 +519,11 @@ export default function ProviderPage() {
   const presetNames: Record<string, string> = {}
   for (const p of providerPresets) presetNames[p.id] = providerDisplay(t, p.id)
 
-  const openDetail = (pid: string) => { setDetailID(pid); setView('detail'); setErr(null); setTestNew(null) }
+  const openDetail = (pid: string) => {
+    setDetailID(pid); setView('detail'); setErr(null); setTestNew(null)
+    ensureMetrics() // 本地花费来自缓存的 metrics（60s），不额外扫 JSONL
+    if (!billing[pid]) fetchBilling(pid, false)
+  }
   const openAdd = (entry: CatalogEntry) => {
     setAddEntry(entry)
     setErr(null)
@@ -553,9 +535,11 @@ export default function ProviderPage() {
       onPreset(entry.id)
       setAdding(true)
     }
-    setPresetOpen(false)
   }
   const leaveAdd = () => { setAdding(false); setAddEntry(null); setErr(null) }
+  // 进 Provider 页拉一次计量（refresh=false → bridge 侧 60s 缓存；切 tab 不重复请求）。
+  useEffect(() => { fetchBilling(undefined, false) }, [fetchBilling])
+
   // Esc 分层：添加页（表单 → 目录 → 列表）/ 详情页 → 列表。
   // 捕获阶段 + stopPropagation：SettingsModal 也在 window 上监听 Esc 关弹窗，
   // 不拦住的话「返回」会直接把整个设置关掉。
@@ -602,7 +586,17 @@ export default function ProviderPage() {
             {isActive && <span className="pvp-cur">{t('provider.page.current')}</span>}
             {!hasCred && <span className="pvp-warn">{t('provider.page.noKey')}</span>}
             <span className="pvp-grow" />
-            <span className="pvp-meter" aria-hidden="true" />
+            {(() => {
+              const m = meterOf(billing[pid])
+              return (
+                <span className={`pvp-meter ${m.text ? 'has' : ''}`} title={m.hint || undefined}>
+                  {typeof m.percent === 'number' && (
+                    <span className={`pvp-bar ${m.tone}`}><i style={{ width: `${m.percent > 0 ? Math.max(2, Math.min(100, m.percent)) : 0}%` }} /></span>
+                  )}
+                  {m.text && <span className={`pvp-meter-txt ${m.tone}`}>{m.text}</span>}
+                </span>
+              )
+            })()}
             {!isActive && (
               <button
                 className="btn pvp-mini"
@@ -645,6 +639,118 @@ export default function ProviderPage() {
     </div>
   )
 
+  // renderBilling 详情页的「用量与余额」块。
+  // 三类空态在这里必须**分开说**（用同一句话就分不清该做什么）：
+  //   未连接（去配 key / 登录） / 不提供查询（换 provider 或忍了） / 出错（重试）。
+  const renderBilling = (pid: string) => {
+    const snap = billing[pid]
+    const local = localSpendOf(metrics?.ByDayModel as { Day: string; Model: string; CostUsd: number }[] | undefined, pid)
+    const errText = (code?: string) => {
+      switch (code) {
+        case 'billing_unauthorized': return t('provider.meter.errUnauthorized')
+        case 'billing_rate_limited': return t('provider.meter.errRateLimited')
+        case 'billing_endpoint_changed': return t('provider.meter.errChanged')
+        case 'billing_network': return t('provider.meter.errNetwork')
+        case 'billing_bad_json': return t('provider.meter.errBadJson')
+        default: return t('provider.meter.errGeneric')
+      }
+    }
+    const ago = (() => {
+      const ts = snap?.fetched_at ? new Date(snap.fetched_at).getTime() : NaN
+      if (!Number.isFinite(ts)) return ''
+      const min = Math.max(0, Math.round((Date.now() - ts) / 60000))
+      if (min < 1) return t('provider.meter.justNow')
+      if (min < 60) return t('provider.meter.minutesAgo').replace('{n}', String(min))
+      return t('provider.meter.hoursAgo').replace('{n}', String(Math.floor(min / 60)))
+    })()
+
+    let body: ReactNode
+    if (!snap) {
+      body = <div className="pvp-bill-empty">{t('provider.meter.loading')}</div>
+    } else if (snap.not_connected || snap.error_code === 'billing_no_key') {
+      body = <div className="pvp-bill-empty">{t('provider.meter.notConnected')}</div>
+    } else if (snap.error_code === 'billing_unsupported') {
+      body = <div className="pvp-bill-empty">{t('provider.meter.unsupported')}</div>
+    } else if (snap.error_code && !snap.stale) {
+      body = (
+        <div className="pvp-bill-err">
+          <span>{errText(snap.error_code)}</span>
+          <button className="btn pvp-mini" onClick={() => fetchBilling(pid, true)}>{t('provider.meter.retry')}</button>
+        </div>
+      )
+    } else if (snap.kind === 'quota') {
+      body = (
+        <div className="pvp-bill-rows">
+          {sortedWindows(snap).map((w) => {
+            const pct = typeof w.percent === 'number' ? Math.max(0, Math.min(100, w.percent)) : null
+            const tone: MeterTone = pct === null ? 'muted' : meterOf({ ...snap, windows: [w] }).tone
+            const reset = resetIn(w.resets_at)
+            return (
+              <div className="pvp-bill-row" key={w.key}>
+                <span className="pvp-bill-k">{w.label ?? w.key}</span>
+                <span className={`pvp-bar wide ${tone}`}>{pct !== null && <i style={{ width: `${pct > 0 ? Math.max(2, pct) : 0}%` }} />}</span>
+                <span className={`pvp-bill-v ${tone}`}>{pct !== null ? `${Math.round(pct)}%` : t('provider.meter.noReading')}</span>
+                <span className="pvp-bill-reset">{reset ? t('provider.meter.resetsIn').replace('{t}', reset) : ''}</span>
+              </div>
+            )
+          })}
+        </div>
+      )
+    } else if (snap.kind === 'balance') {
+      body = (
+        <div className="pvp-bill-rows">
+          {snap.balance && (
+            <div className="pvp-bill-row">
+              <span className="pvp-bill-k">{t('provider.meter.balance')}</span>
+              <span className={`pvp-bill-money ${snap.balance.amount <= 0 ? 'danger' : ''}`}>{fmtMoney(snap.balance)}</span>
+            </div>
+          )}
+          {snap.used && (
+            <div className="pvp-bill-row">
+              <span className="pvp-bill-k">{t('provider.meter.used')}</span>
+              <span className="pvp-bill-money">{fmtMoney(snap.used)}</span>
+            </div>
+          )}
+          {snap.limit && (
+            <div className="pvp-bill-row">
+              <span className="pvp-bill-k">{t('provider.meter.limit')}</span>
+              <span className="pvp-bill-money">{fmtMoney(snap.limit)}</span>
+            </div>
+          )}
+        </div>
+      )
+    } else {
+      body = <div className="pvp-bill-empty">{t('provider.meter.unsupported')}</div>
+    }
+
+    return (
+      <div className="pvp-bill">
+        <div className="pvp-bill-hd">
+          <span className="pvp-bill-title">{t('provider.meter.title')}</span>
+          {snap?.experimental && <span className="pvp-chip-sub">{t('provider.meter.experimental')}</span>}
+          <span className="pvp-grow" />
+          {local.monthUsd > 0 && (
+            <span className="pvp-bill-local" title={t('provider.meter.localHint')}>
+              {t('provider.meter.month')} <span className="pvp-bill-est">≈</span>{fmtMoney({ amount: local.monthUsd, currency: 'USD' })}
+            </span>
+          )}
+          {ago && <span className="pvp-bill-at">{ago}</span>}
+          <button className="btn pvp-mini" onClick={() => fetchBilling(pid, true)} disabled={!snap && false}>
+            {t('provider.meter.refresh')}
+          </button>
+        </div>
+        {body}
+        {snap?.stale && snap.error_code && (
+          <div className="pvp-bill-err">
+            <span>{errText(snap.error_code)} · {t('provider.meter.stale')}</span>
+            <button className="btn pvp-mini" onClick={() => fetchBilling(pid, true)}>{t('provider.meter.retry')}</button>
+          </div>
+        )}
+        {snap?.source && <div className="pvp-bill-src">{t('provider.meter.source')} · {snap.source}</div>}
+      </div>
+    )
+  }
+
   // ── ① 列表页 ──────────────────────────────────────────────
   if (view === 'list') {
     return (
@@ -665,7 +771,7 @@ export default function ProviderPage() {
         {available.length > 0 && (
           <>
             <div className="pvp-sec">{t('provider.page.available').replace('{n}', String(available.length))}</div>
-            {/* 可用区只预览 3 条：全列出来会把「已添加」挤出首屏（20 条 × 59px）。
+            {/* 可用区只预览 2 条（AVAILABLE_PREVIEW）：全列出来会把「已添加」挤出首屏。
                 完整列表在添加页（搜索 + 分类），这里只做「发现入口」。 */}
             {available.slice(0, AVAILABLE_PREVIEW).map(renderAvailable)}
             {available.length > AVAILABLE_PREVIEW && (
@@ -697,130 +803,80 @@ export default function ProviderPage() {
         {adding ? (
           <>
             {err && <p className="nwf-err" role="alert">{err}</p>}
-              <div className="prov-card">
-                <div className="prov-add-hd">
-                  {/* 标题跟随来源：从目录卡片进来 = 该厂商名；从「自定义」进来 = 自定义模板名。
-                      标题写死「新增自定义 Provider」在选预设时会自相矛盾（用户明明选的是 DeepSeek）。 */}
-                  <span className="prov-name">
+          <div className="prov-card">
+            <div className="prov-add-hd">
+              {/* 标题跟随来源：从目录卡片进来 = 该厂商名；从「自定义」进来 = 自定义模板名。
+                  标题写死「新增自定义 Provider」在选预设时会自相矛盾（用户明明选的是 DeepSeek）。 */}
+              <span className="prov-name">
+                {addEntry?.custom
+                  ? t(addEntry.custom.protocol === 'anthropic' ? 'provider.page.customAnthropic' : 'provider.page.customOpenAI')
+                  : (addEntry ? (presetNames[addEntry.id] ?? addEntry.name) : t('provider.addTitle'))}
+              </span>
+              <button className="btn" onClick={() => setAdding(false)}>{t('provider.page.backToCatalog')}</button>
+            </div>
+            <div className="prov-body">
+              {/* 厂商选择已经在目录页完成（搜索/分类比 25 项下拉更可发现）。
+                  这里只回显来源 + 一个「换一个」——两套选择器并存会让「我在加哪家」变模糊。 */}
+              <div className="set-row">
+                <div className="set-label">{t('provider.page.vendor')}</div>
+                <div className="prov-keyrow">
+                  <span className="pvp-vendor">
                     {addEntry?.custom
                       ? t(addEntry.custom.protocol === 'anthropic' ? 'provider.page.customAnthropic' : 'provider.page.customOpenAI')
-                      : (addEntry ? (presetNames[addEntry.id] ?? addEntry.name) : t('provider.addTitle'))}
+                      : addEntry ? (presetNames[addEntry.id] ?? addEntry.name) : t('provider.presetCustom')}
                   </span>
-                  <button className="btn" onClick={() => setAdding(false)}>{t('provider.page.backToCatalog')}</button>
-                </div>
-                <div className="prov-body">
-                  {/* 快捷预设：自定义下拉（内置厂商分组 + 自定义）；选中自动填名称 + 默认 Base URL + 协议。
-                      不用原生 <select>：macOS 弹层是系统渲染（白底系统菜单），CSS 无法主题化；
-                      自绘弹层与应用 popup/seg 同风格，闭合态与 prov-input 同体系。 */}
-                  <div className="set-row">
-                    <div className="set-label">{t('provider.preset')}</div>
-                    <div className="prov-preset" ref={presetRef}>
-                      <button
-                        type="button"
-                        className={`prov-input prov-select ${presetOpen ? 'open' : ''}`}
-                        onClick={() => setPresetOpen((v) => !v)}
-                        aria-haspopup="listbox"
-                        aria-expanded={presetOpen}
-                      >
-                        <span className="prov-select-label">{preset ? (providerDisplay(t, preset) ?? preset) : t('provider.presetCustom')}</span>
-                        <ChevronDown size={12} className="prov-select-chev" />
-                      </button>
-                      {presetOpen && (
-                        <div className="prov-preset-popup" role="listbox">
-                          <button
-                            type="button"
-                            className={`prov-preset-opt ${preset === '' ? 'cur' : ''}`}
-                            onClick={() => { onPreset(''); setPresetOpen(false) }}
-                          >
-                            {t('provider.presetCustom')}
-                          </button>
-                          {/* API Key 提供商（鉴权 = 填 key） */}
-                          <div className="prov-preset-grp">{t('provider.presetApiKey')}</div>
-                          {apiKeyProviderIds.map((n) => (
-                            <button
-                              type="button"
-                              key={n}
-                              className={`prov-preset-opt ${preset === n ? 'cur' : ''}`}
-                              onClick={() => { onPreset(n); setPresetOpen(false) }}
-                            >
-                              <span className="prov-preset-name">{providerDisplay(t, n)}</span>
-                              <span className="prov-preset-badge">{t('provider.badgeKey')}</span>
-                            </button>
-                          ))}
-                          {/* OAuth 订阅提供商（鉴权 = 订阅登录） */}
-                          <div className="prov-preset-grp">{t('provider.presetOAuth')}</div>
-                          {oauthProviderIds.map((n) => (
-                            <button
-                              type="button"
-                              key={n}
-                              className={`prov-preset-opt ${preset === n ? 'cur' : ''}`}
-                              onClick={() => { onPreset(n); setPresetOpen(false) }}
-                            >
-                              <span className="prov-preset-name">{providerDisplay(t, n)}</span>
-                              <span className="prov-preset-badge prov-preset-badge-oauth">{t('provider.badgeOAuth')}</span>
-                            </button>
-                          ))}
-                          {/* 规划中（原生协议未实现，置灰不可选） */}
-                          <div className="prov-preset-grp">{t('provider.presetPlanned')}</div>
-                          {PLANNED_PROVIDERS.map((p) => (
-                            <button type="button" key={p.id} className="prov-preset-opt prov-preset-opt-disabled" disabled onClick={(e) => e.preventDefault()}>
-                              <span className="prov-preset-name">{p.name}</span>
-                              <span className="prov-preset-badge">{t('provider.badgePlanned')}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="set-row">
-                    <div className="set-label">{t('provider.addName')}</div>
-                    <input className="prov-input" value={newName} onChange={(e) => { setNewName(e.target.value); setErr(null) }} aria-label="provider name" placeholder="my-provider" spellCheck={false} />
-                  </div>
-                  <div className="set-row">
-                    <div className="set-label">{t('provider.baseURL')}</div>
-                    <input className="prov-input" value={newBaseURL} onChange={(e) => { setNewBaseURL(e.target.value); setErr(null) }} aria-label="provider base url" placeholder="https://api.example.com/v1" spellCheck={false} />
-                  </div>
-                  <div className="set-row">
-                    <div className="set-label">{t('provider.protocol')}</div>
-                    {renderProtocol('__new__', newProtocol, setNewProtocol)}
-                  </div>
-                  {/* OAuth 厂商：不需要 API Key —— 隐藏 key 输入与「测试连接」（key 为空测不了），
-                      提示添加后展开卡片登录；「添加」按钮保留在独立行 */}
-                  {isOAuthPreset(providerPresets, preset) ? (
-                    <div className="set-row">
-                      <div className="set-label" />
-                      <div className="prov-oauth-hint" role="status">{t('provider.addOAuthHint')}</div>
-                    </div>
-                  ) : (
-                    <div className="set-row">
-                      <div className="set-label">{t('provider.key')}</div>
-                      <div className="prov-keyrow">
-                        <div className="prov-keyinput">
-                          <input className="prov-input" type={showNewKey ? 'text' : 'password'} placeholder={t('provider.keyPh')} value={newKey} onChange={(e) => { setNewKey(e.target.value); setErr(null) }} aria-label="provider api key" autoComplete="off" spellCheck={false} />
-                          <button type="button" className={`key-eye ${showNewKey ? 'on' : ''}`} onClick={() => setShowNewKey((v) => !v)} aria-label={showNewKey ? t('provider.keyHide') : t('provider.keyShow')} title={showNewKey ? t('provider.keyHide') : t('provider.keyShow')} tabIndex={-1}>
-                            {showNewKey ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
-                          </button>
-                        </div>
-                        <button className="btn" onClick={() => void runNewTest()} disabled={testingNew || !newKey.trim()}>
-                          {testingNew ? t('provider.testing') : t('provider.test')}
-                        </button>
-                      </div>
-                      {testNew && (
-                        <div className={`prov-test ${testNew.ok ? 'ok' : 'bad'}`} role="status">
-                          {testNew.ok ? '✓ ' : '✗ '}
-                          {testNew.msg}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <div className="set-row">
-                    <div className="set-label" />
-                    <div className="prov-keyrow">
-                      <button className="btn primary" onClick={() => void submitAdd()}>{t('provider.addConfirm')}</button>
-                    </div>
-                  </div>
+                  <button className="btn" onClick={leaveAdd}>{t('provider.page.changeVendor')}</button>
                 </div>
               </div>
+              <div className="set-row">
+                <div className="set-label">{t('provider.addName')}</div>
+                <input className="prov-input" value={newName} onChange={(e) => { setNewName(e.target.value); setErr(null) }} aria-label="provider name" placeholder="my-provider" spellCheck={false} />
+              </div>
+              <div className="set-row">
+                <div className="set-label">{t('provider.baseURL')}</div>
+                <input className="prov-input" value={newBaseURL} onChange={(e) => { setNewBaseURL(e.target.value); setErr(null) }} aria-label="provider base url" placeholder="https://api.example.com/v1" spellCheck={false} />
+              </div>
+              <div className="set-row">
+                <div className="set-label">{t('provider.protocol')}</div>
+                {renderProtocol('__new__', newProtocol, setNewProtocol)}
+              </div>
+              {/* OAuth 厂商：不需要 API Key —— 隐藏 key 输入与「测试连接」（key 为空测不了），
+                  提示添加后展开卡片登录；「添加」按钮保留在独立行 */}
+              {isOAuthPreset(providerPresets, preset) ? (
+                <div className="set-row">
+                  <div className="set-label" />
+                  <div className="prov-oauth-hint" role="status">{t('provider.addOAuthHint')}</div>
+                </div>
+              ) : (
+                <div className="set-row">
+                  <div className="set-label">{t('provider.key')}</div>
+                  <div className="prov-keyrow">
+                    <div className="prov-keyinput">
+                      <input className="prov-input" type={showNewKey ? 'text' : 'password'} placeholder={t('provider.keyPh')} value={newKey} onChange={(e) => { setNewKey(e.target.value); setErr(null) }} aria-label="provider api key" autoComplete="off" spellCheck={false} />
+                      <button type="button" className={`key-eye ${showNewKey ? 'on' : ''}`} onClick={() => setShowNewKey((v) => !v)} aria-label={showNewKey ? t('provider.keyHide') : t('provider.keyShow')} title={showNewKey ? t('provider.keyHide') : t('provider.keyShow')} tabIndex={-1}>
+                        {showNewKey ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
+                      </button>
+                    </div>
+                    <button className="btn" onClick={() => void runNewTest()} disabled={testingNew || !newKey.trim()}>
+                      {testingNew ? t('provider.testing') : t('provider.test')}
+                    </button>
+                  </div>
+                  {testNew && (
+                    <div className={`prov-test ${testNew.ok ? 'ok' : 'bad'}`} role="status">
+                      {testNew.ok ? '✓ ' : '✗ '}
+                      {testNew.msg}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="set-row">
+                <div className="set-label" />
+                <div className="prov-keyrow">
+                  <button className="btn primary" onClick={() => void submitAdd()}>{t('provider.addConfirm')}</button>
+                </div>
+              </div>
+            </div>
+          </div>
           </>
         ) : (
           <>
@@ -917,6 +973,7 @@ export default function ProviderPage() {
           </div>
         </div>
       )}
+      {detailID && renderBilling(detailID)}
 
       {/* 只渲染选中的那一条：详情页是「一个 provider 的编辑器」，不是整表展开。 */}
       {providerIds.filter((pid) => pid === detailID).map((pid) => {

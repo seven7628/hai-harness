@@ -2720,6 +2720,9 @@ func (m *manager) dispatch(c command) {
 		}
 		m.resp(c, true, "", map[string]any{"provider": providerName, "base_url": baseURL, "models": models, "count": len(models)})
 
+	case CmdProviderBilling: // 余额 / 配额窗口（Provider 设置页计量区；见 billing_commands.go）
+		m.providerBilling(c)
+
 	case CmdListProviderPresets: // 内置 Provider 预设列表（前端下拉可选；用户添加后才生效）
 		// 返回全部预设（含已配置的默认 5 家 + P1 可选）；前端据此渲染「添加 Provider」下拉。
 		// 每个预设带 name/base_url/protocol/models（模型清单来自注册表内置真实数据）。

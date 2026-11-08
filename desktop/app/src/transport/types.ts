@@ -298,6 +298,39 @@ export interface ProviderSaveInput {
   api_key?: string
 }
 
+// ── Provider 余额 / 配额（provider_billing 命令响应；数据面见 provider/billing）──
+// 单位与语义都来自上游：金额带 Currency（DeepSeek 实测 CNY），窗口百分比已归一 0..100。
+// percent **可选**：上游报了窗口但没给读数时必须缺字段，而不是 0（0% 是「没用过」的确定结论）。
+export interface BillingMoney {
+  amount: number
+  currency: string
+}
+export interface BillingWindow {
+  key: string
+  label?: string
+  percent?: number
+  status?: string
+  resets_at?: string
+}
+export interface BillingSnapshot {
+  provider: string
+  fetched_at: string
+  kind: 'balance' | 'quota' | 'report' | 'none'
+  source?: string
+  currency?: string
+  balance?: BillingMoney
+  limit?: BillingMoney
+  used?: BillingMoney
+  windows?: BillingWindow[]
+  plan_label?: string
+  not_connected?: boolean // 没配 key / 没登录 —— 不是错误
+  experimental?: boolean   // 端点未实测（presets.json verified_by != live）
+  error_code?: string
+  error_status?: number
+  // 本次刷新失败但字段里是上一次成功的读数（UI：旧值变灰 + 错误一行）
+  stale?: boolean
+}
+
 // OAuth 登录状态（oauth_status 命令响应；不含 token）
 export interface OAuthStatus {
   provider: string

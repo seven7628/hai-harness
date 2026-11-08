@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
-import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
+import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
@@ -2864,6 +2864,7 @@ interface AppState {
   fetchedModels: Record<string, string[]> // provider → 拉取的模型列表（list_models 响应）
   modelCosts: Record<string, Record<string, ModelPrices>> // provider → model → 注册表内置价（list_models capabilities.cost；价格编辑器空覆盖时回显）
   providerPresets: ProviderPreset[] // 内置 Provider 预设（list_provider_presets ← providers.json 单一事实源）
+  billing: Record<string, BillingSnapshot> // provider → 最近一次余额/配额快照（provider_billing）
   mode: string // hitl(用户确认) / auto(自动执行) / full-access(完全访问)；会话中可随时切换，下一轮生效
   effort: string // none / minimal / low / medium / high / xhigh / max
   persona: 'code' | 'work' // 双 Persona（Code 工程师 / Work 办公助理；切换当前会话下一轮生效）
@@ -3261,6 +3262,8 @@ interface AppState {
   // 默认**覆盖**已有价（用户 2026-09-21 决策：补价即覆盖）；overwrite:false 才走保守路径（只补无价模型）
   refreshPrices(p: { provider: string; source?: string; overwrite?: boolean }): Promise<PriceRefreshSummary | undefined>
   fetchProviderPresets(): void // 拉取内置 Provider 预设（list_provider_presets ← providers.json）
+  // 余额/配额：refresh=false 走 60s 缓存（进设置页），true = 强制刷新（5s 冷却）
+  fetchBilling(provider?: string, refresh?: boolean): void
   testProvider(base_url: string, api_key: string): Promise<{ ok: boolean; error?: string; count?: number }> // 测试连接（test_connection；瞬态探活，不改配置）
   saveProvider(p: ProviderSaveInput): Promise<boolean> // 持久化（providerSave）+ 热切换（set_provider 命令）；返回是否成功（Toast 用）
   toggleModelWindow(provider: string, model: string, oneM: boolean): void // 标 1M → 窗口 1000000；否则回 128000
@@ -5255,6 +5258,12 @@ export function dispatchEvent(raw: AnyEvent): void {
       // list_provider_presets：内置 Provider 预设（providers.json 单一事实源）→ providerPresets；
       // models_cost（预设模型内置价，纯本地注册表读取）→ 并入 modelCosts —— 价格编辑器
       // 打开设置即回显内置价，无需先「拉取模型列表」（那依赖网络 + 用户点击）。
+      // provider_billing：余额/配额快照（单家失败也返回，错误以 error_code 落在快照上）
+      if (t === 'provider_billing') {
+        const snaps = (d.snapshots ?? {}) as Record<string, BillingSnapshot>
+        if (Object.keys(snaps).length > 0) setState((s) => ({ billing: { ...s.billing, ...snaps } }))
+        break
+      }
       if (t === 'list_provider_presets') {
         if (Array.isArray(d.presets)) {
           const costs = (d.models_cost ?? {}) as Record<string, Record<string, ModelPrices>>
@@ -8301,6 +8310,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   fetchedModels: {},
   modelCosts: {}, // 注册表内置价（list_models capabilities.cost；价格编辑器空覆盖回显）
   providerPresets: [], // 启动后经 fetchProviderPresets 拉取（providers.json 单一事实源）
+  billing: {}, // provider → 余额/配额快照（provider_billing；失败也缓存，UI 据此显示原因）
   // 用户偏好持久恢复（问题 2，2026-08-17）：mode/model/effort/persona 从
   // localStorage 全局默认恢复；会话级记录在 new_session 响应时应用（applySessionPrefs）
   mode: persistedPrefs.mode ?? 'auto', // 默认自动执行（bash/write/edit 均不弹审批；工具层静态拦截/沙箱仍生效）
@@ -10656,6 +10666,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 响应经 dispatchEvent 落 providerPresets；SettingsModal 下拉据此渲染（不再硬编码）。
   fetchProviderPresets: () => {
     send({ type: 'list_provider_presets', payload: {} })
+  },
+  // 余额/配额（provider_billing）：单家或全部。结果由 command_response 落 billing。
+  // 60s 缓存与 5s 冷却在 bridge 侧（请求不重复发），前端只负责「谁在等」的 loading 态。
+  fetchBilling: (provider, refresh) => {
+    send({ type: 'provider_billing', payload: { ...(provider ? { provider } : {}), ...(refresh ? { refresh: true } : {}) } })
   },
   // 测试连接（test_connection；GET /models 探活，带 10s 超时）。瞬态——把待保存的
   // base_url + api_key 直接发给 bridge，不落盘、不改配置。结果经 Promise 消费

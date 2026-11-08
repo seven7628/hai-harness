@@ -12922,6 +12922,7 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .pvp-sep { color: var(--text-3); opacity: 0.55; }
 .pvp-id { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
 .pvp-id-hint { font-size: 11px; color: var(--text-3); align-self: center; white-space: nowrap; }
+.pvp-vendor { font-size: 13px; font-weight: 600; color: var(--text); }
 .pvp-chip-sub {
   font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
   border: 1px solid var(--border-strong); color: var(--text-3); flex: 0 0 auto;
@@ -13007,3 +13008,44 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 .pvp-detail-title { display: flex; align-items: center; gap: 10px; padding: 2px 2px 6px; }
 .pvp-detail-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+/* —— 计量区（余额 / 配额窗口；见 provider/billing 与 docs/PROVIDER_USAGE_BILLING.md）——
+   列表行：4px 细条 + 数字，车位 168px（.pvp-meter 已有），无数据显示时整块留空但**不塌陷**。
+   详情块：每窗口一行（名称 / 条 / 百分比 / 重置时间），余额型换成金额三行。 */
+.pvp-meter { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.pvp-meter-txt { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2); white-space: nowrap; }
+.pvp-meter-txt.warn { color: var(--warning); }
+.pvp-meter-txt.danger { color: var(--danger); }
+.pvp-meter-txt.muted { color: var(--text-3); }
+.pvp-bar {
+  display: inline-flex; width: 48px; height: 4px; border-radius: 999px;
+  background: var(--border-strong); overflow: hidden; flex: 0 0 auto;
+}
+.pvp-bar.wide { width: auto; flex: 1 1 auto; height: 6px; }
+.pvp-bar i { display: block; height: 100%; border-radius: 999px; background: var(--success); }
+.pvp-bar.warn i { background: var(--warning); }
+.pvp-bar.danger i { background: var(--danger); }
+.pvp-bar.muted i { background: var(--text-3); }
+
+.pvp-bill {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--surface);
+}
+.pvp-bill-hd { display: flex; align-items: center; gap: 8px; }
+.pvp-bill-title { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.pvp-bill-at, .pvp-bill-local { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-bill-est { opacity: 0.7; margin-left: 2px; }
+.pvp-bill-rows { display: flex; flex-direction: column; gap: 5px; }
+.pvp-bill-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+.pvp-bill-k { flex: 0 0 64px; color: var(--text-3); }
+.pvp-bill-v { flex: 0 0 46px; text-align: right; font-family: var(--font-mono); color: var(--text-2); }
+.pvp-bill-v.warn { color: var(--warning); }
+.pvp-bill-v.danger { color: var(--danger); }
+.pvp-bill-v.muted { color: var(--text-3); }
+.pvp-bill-reset { flex: 0 0 96px; text-align: right; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-bill-money { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+.pvp-bill-money.danger { color: var(--danger); }
+.pvp-bill-empty { font-size: 11.5px; color: var(--text-3); }
+.pvp-bill-err { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--warning); }
+.pvp-bill-src { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); opacity: 0.8; }

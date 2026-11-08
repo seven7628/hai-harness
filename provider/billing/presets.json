@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "_doc": "余额/配额查询声明。path 一律 origin 相对（DeepSeek 的 /user/balance 就在根上，不在 /v1 下）。host 是「允许发凭证」的白名单：与 base_url 的 host 不一致时不会发送，转走同 origin 的 generic 探测。verified_by：live=本机实测 / docs=官方文档 / reference=同源参考实现（未实测，UI 标「实验」）。新增一家只需要加一条，不改 Go 代码。",
+  "presets": {
+    "deepseek": {
+      "shape": "balance",
+      "source": "deepseek.balance",
+      "host": "api.deepseek.com",
+      "path": "/user/balance",
+      "auth": "bearer",
+      "balance": "balance_infos[0].total_balance",
+      "granted": "balance_infos[0].granted_balance",
+      "currency": "balance_infos[0].currency",
+      "currency_default": "CNY",
+      "verified_by": "live"
+    },
+    "kimi": {
+      "shape": "balance",
+      "source": "moonshot.balance",
+      "host": "api.moonshot.cn",
+      "path": "/v1/users/me/balance",
+      "auth": "bearer",
+      "balance": "data.available_balance",
+      "currency": "$CNY",
+      "verified_by": "docs"
+    },
+    "openrouter": {
+      "shape": "balance",
+      "source": "openrouter.credits",
+      "host": "openrouter.ai",
+      "path": "/api/v1/credits",
+      "auth": "bearer",
+      "balance": "data.total_credits",
+      "used": "data.total_usage",
+      "currency_default": "USD",
+      "verified_by": "docs"
+    },
+    "opencode": {
+      "shape": "quota",
+      "source": "opencode.zen.usage",
+      "host": "opencode.ai",
+      "path": "/zen/go/v1/usage",
+      "auth": "bearer",
+      "windows": {
+        "path": "usage",
+        "mode": "map",
+        "percent": "percent",
+        "status": "status",
+        "reset": "resetsAt",
+        "labels": { "rolling": "5h", "weekly": "week", "monthly": "month" }
+      },
+      "verified_by": "live"
+    },
+    "zhipu": {
+      "shape": "quota",
+      "source": "zai.quota.cn",
+      "host": "open.bigmodel.cn",
+      "path": "/api/monitor/usage/quota/limit",
+      "auth": "raw",
+      "windows": {
+        "path": "data.limits|limits",
+        "mode": "list",
+        "key": "type|unit|name",
+        "percent": "percentage|percent|used_percent",
+        "reset": "nextResetTime|resetTime|reset_at"
+      },
+      "verified_by": "reference"
+    },
+    "minimax": {
+      "shape": "quota",
+      "source": "minimax.token_plan",
+      "host": "api.minimax.io",
+      "path": "/v1/token_plan/remains",
+      "auth": "bearer",
+      "windows": {
+        "path": "data|model_remains",
+        "mode": "list",
+        "key": "model_name|model|name",
+        "percent": "remaining_percent|weekly_remaining_percent|5h_remaining_percent",
+        "reset": "end_time|reset_time",
+        "invert": true
+      },
+      "verified_by": "reference"
+    },
+    "anthropic": {
+      "shape": "quota",
+      "source": "claude.oauth.usage",
+      "host": "api.anthropic.com",
+      "path": "/api/oauth/usage",
+      "auth": "oauth",
+      "windows": {
+        "path": "limits|windows",
+        "mode": "list",
+        "key": "kind|type|scope",
+        "percent": "percent|used_percent|utilization",
+        "status": "status",
+        "reset": "resets_at|resetsAt|reset_at"
+      },
+      "verified_by": "reference"
+    },
+    "openai-codex": {
+      "shape": "quota",
+      "source": "codex.wham.usage",
+      "host": "chatgpt.com",
+      "path": "/backend-api/wham/usage",
+      "auth": "oauth",
+      "windows": {
+        "path": "rate_limits|windows|usage",
+        "mode": "map",
+        "percent": "percent|used_percent",
+        "status": "status",
+        "reset": "resets_at|resetsAt|reset_at"
+      },
+      "verified_by": "reference"
+    },
+    "kimi-coding": {
+      "shape": "quota",
+      "source": "kimi.coding.usages",
+      "host": "api.kimi.com",
+      "path": "/coding/v1/usages",
+      "auth": "oauth",
+      "windows": {
+        "path": "usages|data|limits",
+        "mode": "list",
+        "key": "name|type|kind",
+        "percent": "percent|used_percent|used",
+        "status": "status",
+        "reset": "resets_at|resetsAt|reset_at|end_time"
+      },
+      "verified_by": "reference"
+    },
+    "xai": {
+      "shape": "quota",
+      "source": "grok.billing.credits",
+      "host": "cli-chat-proxy.grok.com",
+      "path": "/v1/billing?format=credits",
+      "auth": "oauth",
+      "windows": {
+        "path": "windows|credits|limits",
+        "mode": "list",
+        "key": "name|type|kind|period",
+        "percent": "creditUsagePercent|percent|used_percent",
+        "status": "status",
+        "reset": "resets_at|resetsAt|reset_at|periodEnd"
+      },
+      "verified_by": "reference"
+    }
+  },
+  "generic": [
+    {
+      "id": "newapi-dashboard",
+      "shape": "openai_dashboard",
+      "source": "newapi.dashboard",
+      "auth": "bearer",
+      "paths": ["/v1/dashboard/billing/subscription", "/v1/dashboard/billing/usage"],
+      "unit": "cents",
+      "limit_sentinel": 100000000
+    }
+  ]
+}
