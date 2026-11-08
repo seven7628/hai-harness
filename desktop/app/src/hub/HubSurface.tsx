@@ -7,6 +7,7 @@ import AgentEditor from './AgentEditor'
 import { alertSeverity } from './alerts'
 import HubInspector from './HubInspector'
 import GroupView from './GroupView'
+import { formatRelativeTime, groupPreview, unreadBadge } from './conversation'
 import type { HubAgent, HubMessage, HubRunEntry } from './types'
 import './hub.css'
 
@@ -55,6 +56,7 @@ export default function HubSurface() {
   const retryTask = useHubStore((s) => s.retryTask)
   const groups = useHubStore((s) => s.groups)
   const groupsLoading = useHubStore((s) => s.groupsLoading)
+  const groupInfo = useHubStore((s) => s.groupInfo)
   const activeGroupId = useHubStore((s) => s.activeGroupId)
   const selectGroup = useHubStore((s) => s.selectGroup)
   const activeGroup = groups.find((g) => g.id === activeGroupId) ?? null
@@ -163,21 +165,38 @@ export default function HubSurface() {
           groupsLoading ? <div className="hub-rail-empty">加载中…</div> :
           groups.length === 0 ? <div className="hub-rail-empty">还没有群组</div> : (
             <div className="hub-rail-list">
-              {groups.map((g) => (
-                <button key={g.id} className={`hub-row ${g.id === activeGroupId ? 'on' : ''}`} onClick={() => void selectGroup(g.id)}>
-                  <span className="hub-member-stack">
-                    {(g.members ?? []).slice(0, 3).map((m, i) => (
-                      <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 3 - i }}>
-                        {(agents.find((a) => a.id === m.agent_id)?.name ?? m.agent_id).slice(0, 1)}
+              {groups.map((g) => {
+                const info = groupInfo[g.id] ?? {}
+                const unread = info.unread ?? 0
+                const memberCount = (g.members ?? []).length
+                // 预览优先任务结论（「做完了什么」），否则最后一条消息；都没有才退回成员/策略。
+                const preview = groupPreview(info) || `${memberCount} 名成员 · ${g.policy?.mode ?? 'ask'}`
+                const time = formatRelativeTime(info.last_at)
+                return (
+                  <button
+                    key={g.id}
+                    className={`hub-row hub-group-row ${g.id === activeGroupId ? 'on' : ''}`}
+                    onClick={() => void selectGroup(g.id)}
+                    aria-label={`${g.name}，${memberCount} 名成员${unread > 0 ? `，${unreadBadge(unread)} 条未读` : '，没有未读'}，${preview}`}
+                  >
+                    <span className="hub-member-stack" aria-hidden="true">
+                      {(g.members ?? []).slice(0, 3).map((m, i) => (
+                        <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 3 - i }}>
+                          {(agents.find((a) => a.id === m.agent_id)?.name ?? m.agent_id).slice(0, 1)}
+                        </span>
+                      ))}
+                    </span>
+                    <span className="hub-row-text">
+                      <span className="hub-row-top">
+                        <span className="hub-name">{g.name}</span>
+                        {unread > 0 ? <span className="hub-unread">{unreadBadge(unread)}</span> : null}
                       </span>
-                    ))}
-                  </span>
-                  <span className="hub-row-text">
-                    <span className="hub-row-top"><span className="hub-name">{g.name}</span></span>
-                    <span className="hub-preview">{(g.members ?? []).length} 名成员 · {g.policy?.mode ?? 'ask'}</span>
-                  </span>
-                </button>
-              ))}
+                      <span className="hub-preview" title={preview}>{preview}</span>
+                    </span>
+                    {time ? <span className="hub-row-time">{time}</span> : null}
+                  </button>
+                )
+              })}
             </div>
           )
         ) : agents.length === 0 && !loading ? (

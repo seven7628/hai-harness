@@ -110,7 +110,8 @@
     "test:hub-patch": "node scripts/test-agent-patch.mjs",
     "test:hub": "node scripts/test-hub-thread.mjs",
     "test:hub-stream": "node scripts/test-hub-stream.mjs",
-    "test:hub-alerts": "node scripts/test-hub-alerts.mjs"
+    "test:hub-alerts": "node scripts/test-hub-alerts.mjs",
+    "test:hub-p3b": "node scripts/test-hub-p3b.mjs"
   },
   "build": {
     "appId": "ai.hai.desktop",

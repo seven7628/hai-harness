@@ -1,9 +1,13 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
-import type { HubAgent, HubAlert, HubDMInfo, HubGroup, HubHistoryPage, HubMessage, HubGroupActivity, HubNeed, HubPage, HubRound, HubRunEntry, HubTask } from './types'
+import type {
+  HubAgent, HubAlert, HubConversation, HubDMInfo, HubGroup, HubHistoryPage, HubMessage,
+  HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubRound, HubRunEntry, HubTask, HubTaskUpdate,
+} from './types'
 import { addHubAlert, alertFromEvent } from './alerts'
 import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, type HubMessageDelta, type HubStreamDraft } from './groupStream'
+import { parseTaskResult, taskOutcomeLine } from './taskCard'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -68,6 +72,15 @@ interface HubState {
   groupDrafts: HubStreamDraft[]
   /** final 过的 message_id 最近 200 个；迟到 delta 据此丢弃。 */
   finalizedMessageIds: string[]
+  /** 左栏群组投影（hub_group_list.progress + hub_message 增量）。 */
+  groupInfo: Record<string, HubGroupProgress>
+  /** 每群自动对话视图（hub_conversation 事件）。 */
+  groupConversations: Record<string, HubConversation>
+  /** 派任务进行中 / 上一次派发的说明（queued 或已终止原因）。 */
+  groupAssigning: boolean
+  groupAssignNote: string | null
+  /** hub_conversation_stop 进行中。 */
+  groupConvStopping: boolean
 
   openHub(): void
   closeHub(): void
@@ -87,7 +100,9 @@ interface HubState {
   selectGroup(groupID: string): Promise<void>
   loadGroupActivity(groupID?: string): Promise<void>
   clearGroup(): void
-  sendGroup(text: string): Promise<boolean>
+  sendGroup(text: string, mentions?: string[], mentionAll?: boolean): Promise<boolean>
+  sendGroupAssign(groupID: string, req: { agent_id: string; instruction: string; title?: string }): Promise<boolean>
+  stopGroupConversation(groupID: string): Promise<boolean>
   loadTasks(): Promise<void>
   loadNeeds(): Promise<void>
   cancelTask(taskID: string): Promise<void>
@@ -100,6 +115,8 @@ interface HubState {
 let optimisticSeq = 0 // 负数临时 seq，避免与真实 seq（正数）混淆
 let groupSendGen = 0 // 群发送代际：切群/新一轮发送后，旧响应不得改状态
 let groupSelectGen = 0 // 选群代际：A→B→A 时旧响应不得覆盖新状态
+// 已请求过的群已读游标：同一 seq 不重复发 hub_mark_read（活跃群每条新消息一次，够用且不刷屏）。
+const groupReadRequested = new Map<string, number>()
 
 function roundHasAction(r: HubRound | null | undefined): boolean {
   return !!r && (!!r.mention_all || (r.targets ?? []).length > 0 || (r.dropped ?? 0) > 0)
@@ -111,6 +128,18 @@ function upsertRound(list: HubRound[], round: HubRound | null | undefined): HubR
   next.push(round)
   next.sort((a, b) => (a.trigger_seq ?? 0) - (b.trigger_seq ?? 0))
   return next
+}
+
+/**
+ * 群已读游标 best-effort（§7.5.7）：只前进、同 seq 只发一次；失败不回滚 UI
+ * （未读点已经清掉也无妨，下次 open/select 会再对齐），但允许下一次 seq 重试。
+ */
+async function markGroupRead(groupID: string, seq: number): Promise<void> {
+  const latest = Math.max(seq, groupReadRequested.get(groupID) ?? 0)
+  if (latest <= (groupReadRequested.get(groupID) ?? 0)) return
+  groupReadRequested.set(groupID, latest)
+  const r = await hubCommand<{ seq?: number }>('hub_mark_read', { group_id: groupID, seq: latest })
+  if (!r.ok && groupReadRequested.get(groupID) === latest) groupReadRequested.delete(groupID)
 }
 
 export const useHubStore = create<HubState>((set, get) => ({
@@ -150,6 +179,11 @@ export const useHubStore = create<HubState>((set, get) => ({
   groupSending: false,
   groupDrafts: [],
   finalizedMessageIds: [],
+  groupInfo: {},
+  groupConversations: {},
+  groupAssigning: false,
+  groupAssignNote: null,
+  groupConvStopping: false,
 
   openHub() {
     set({ open: true })
@@ -412,24 +446,37 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   async loadGroups() {
     set({ groupsLoading: true })
-    const r = await hubCommand<{ groups?: HubGroup[] }>('hub_group_list', {})
+    const r = await hubCommand<{ groups?: HubGroup[]; progress?: Record<string, HubGroupProgress> }>('hub_group_list', {})
     if (!r.ok) {
       set({ groupsLoading: false, error: r.error || '读取群组失败' })
       return
     }
-    set({ groupsLoading: false, groups: r.data?.groups ?? [] })
+    // progress 是左栏预览/未读的唯一权威投影。但事件可能比响应先到（§7.5.7）：
+    // 只接受「不比本地旧」的行，否则会把刚到的未读/预览覆盖回旧快照。
+    const progress = r.data?.progress ?? {}
+    set((s) => {
+      const merged = { ...s.groupInfo }
+      for (const [gid, p] of Object.entries(progress)) {
+        const local = s.groupInfo[gid]
+        if (!local || (p.last_seq ?? 0) >= (local.last_seq ?? 0)) merged[gid] = p
+      }
+      return { groupsLoading: false, groups: r.data?.groups ?? [], groupInfo: merged }
+    })
   },
 
   async selectGroup(groupID) {
     if (!groupID) return
     groupSendGen++
     const gen = ++groupSelectGen
-    set({
+    set((s) => ({
       activeGroupId: groupID, activeId: null, profile: null, sid: null,
       groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false, groupDrafts: [],
+      groupAssigning: false, groupAssignNote: null, groupConvStopping: false,
+      // 打开即已读：先清本地未读点（游标在历史加载完之后再推进）。
+      groupInfo: { ...s.groupInfo, [groupID]: { ...(s.groupInfo[groupID] ?? {}), unread: 0 } },
       messages: [], live: '', rootRunId: null,
       error: null, loading: true,
-    })
+    }))
     const r = await hubCommand<{ group?: HubGroup }>('hub_group_get', { group_id: groupID })
     if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     if (!r.ok) {
@@ -440,12 +487,22 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     const a = await hubCommand<{ activity?: HubGroupActivity[] }>('hub_group_activity', { group_id: groupID })
     if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
-    set({
-      loading: false,
-      groupMessages: h.ok ? (h.data?.messages ?? []) : [],
-      groupActivity: a.ok ? (a.data?.activity ?? []) : [],
-      groups: get().groups.map((g) => (g.id === groupID ? (r.data?.group ?? g) : g)),
+    const history = h.ok ? (h.data?.messages ?? []) : []
+    const latest = history.reduce((max, m) => Math.max(max, m.seq), get().groupInfo[groupID]?.last_seq ?? 0)
+    set((s) => {
+      // 历史请求期间 hub_message 可能已经先到（§7.5.7 顺序）：按 seq 合并，
+      // 不拿快照覆盖新消息；乐观/失败气泡（seq<=0）也保留。
+      const pageSeqs = new Set(history.map((m) => m.seq))
+      const extra = s.groupMessages.filter((m) => !pageSeqs.has(m.seq))
+      return {
+        loading: false,
+        groupMessages: [...history, ...extra].sort((x, y) => x.seq - y.seq),
+        groupActivity: a.ok ? (a.data?.activity ?? []) : [],
+        groups: s.groups.map((g) => (g.id === groupID ? (r.data?.group ?? g) : g)),
+      }
     })
+    // 打开群 = 已读（§7.5.7 群级共享游标）：历史加载完再推进，避免用旧 seq 覆盖新消息。
+    if (latest > 0) void markGroupRead(groupID, latest)
   },
 
   async loadGroupActivity(groupID) {
@@ -460,10 +517,13 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   clearGroup() {
     groupSendGen++
-    set({ activeGroupId: null, groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false, groupDrafts: [] })
+    set({
+      activeGroupId: null, groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false,
+      groupDrafts: [], groupAssigning: false, groupAssignNote: null, groupConvStopping: false,
+    })
   },
 
-  async sendGroup(text) {
+  async sendGroup(text, mentions, mentionAll) {
     const { activeGroupId, groupSending } = get()
     const body = text.trim()
     if (!activeGroupId || !body || groupSending) return false
@@ -471,11 +531,17 @@ export const useHubStore = create<HubState>((set, get) => ({
     const clientMsgId = `g-${Date.now()}-${++optimisticSeq}`
     set((s) => ({
       groupSending: true,
+      error: null, notice: null,
       groupMessages: [...s.groupMessages, { seq: -optimisticSeq, sender: { kind: 'human' }, text: body, pending: true, clientMsgId }],
     }))
-    const r = await hubCommand<{ seq?: number; round?: HubRound }>('hub_group_send', {
+    const payload: Record<string, unknown> = {
       group_id: activeGroupId, text: body, client_msg_id: clientMsgId,
-    })
+    }
+    // 结构化 mentions 是人点选过的目标（§8.3.3）；正文里的 @ 仍由后端再解析一次，
+    // 两者取并集 —— 前端删改正文不会留下「幽灵唤醒」。
+    if (mentions && mentions.length > 0) payload.mentions = mentions
+    if (mentionAll) payload.mention_all = true
+    const r = await hubCommand<{ seq?: number; round?: HubRound }>('hub_group_send', payload)
     // 切群/下一轮发送已发生：旧响应只负责自己的乐观气泡，不得复位新一轮的 groupSending。
     if (groupSendGen !== gen || get().activeGroupId !== activeGroupId) return false
     if (!r.ok) {
@@ -491,6 +557,56 @@ export const useHubStore = create<HubState>((set, get) => ({
       groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId && r.data?.seq ? { ...m, seq: r.data.seq, pending: false } : m)),
     }))
     void get().loadGroupActivity(activeGroupId)
+    return true
+  },
+
+  async sendGroupAssign(groupID, req) {
+    const gid = (groupID || get().activeGroupId || '').trim()
+    const instruction = (req.instruction ?? '').trim()
+    if (!gid || !req.agent_id || !instruction || get().groupAssigning) return false
+    const gen = groupSelectGen
+    const clientMsgId = `assign-${Date.now()}-${++optimisticSeq}`
+    set({ groupAssigning: true, groupAssignNote: null, error: null, notice: null })
+    // §7.1.3 的键名是 agent_id（后端也兼容 to_agent）；显式带上 client_msg_id 做幂等。
+    const r = await hubCommand<{ task_id?: string; status?: string; note?: string; seq?: number }>('hub_group_assign', {
+      group_id: gid, agent_id: req.agent_id, instruction,
+      ...(req.title ? { title: req.title } : {}),
+      client_msg_id: clientMsgId,
+    })
+    if (groupSelectGen !== gen || get().activeGroupId !== gid) {
+      set({ groupAssigning: false })
+      return false
+    }
+    if (!r.ok) {
+      set({ groupAssigning: false, groupAssignNote: null, error: r.error || '派任务失败' })
+      return false
+    }
+    const status = r.data?.status || 'queued'
+    const note = r.data?.note || (status === 'queued'
+      ? '目标当前正忙：任务已入队，对方回合结束后派发。'
+      : `任务已创建（${status}）。`)
+    set({ groupAssigning: false, groupAssignNote: note })
+    // 指派消息/任务事件会先到（emit 在 resp 之前）；这里兜底刷新一次活动与群列表。
+    void get().loadGroupActivity(gid)
+    return true
+  },
+
+  async stopGroupConversation(groupID) {
+    const gid = (groupID || get().activeGroupId || '').trim()
+    if (!gid || get().groupConvStopping) return false
+    set({ groupConvStopping: true, error: null })
+    const r = await hubCommand<{ conversation?: HubConversation; interrupted?: number }>('hub_conversation_stop', {
+      group_id: gid,
+    })
+    set({ groupConvStopping: false })
+    if (!r.ok) {
+      set({ error: r.error || '停止自动对话失败' })
+      return false
+    }
+    if (r.data?.conversation) {
+      set((s) => ({ groupConversations: { ...s.groupConversations, [gid]: r.data!.conversation as HubConversation } }))
+    }
+    set({ notice: r.data?.interrupted ? `已停止自动对话（中断 ${r.data.interrupted} 个 run）` : '已停止自动对话' })
     return true
   },
 
@@ -530,6 +646,10 @@ export const useHubStore = create<HubState>((set, get) => ({
       message_id?: string
       index?: number
       delta?: string
+      conversation?: HubConversation
+      target_agent_id?: string
+      target_kind?: string
+      group?: HubGroup
     }
     try {
       ev = JSON.parse(line) as typeof ev
@@ -543,18 +663,45 @@ export const useHubStore = create<HubState>((set, get) => ({
         if (ev.group_id) {
           const msg = typeof ev.message === 'string' ? undefined : ev.message
           if (!msg) return
+          const gid = ev.group_id
+          const active = gid === get().activeGroupId
           // final 覆盖草稿：即使消息属于别的群，也要把该 message_id 记入 finalized，
           // 否则切回该群时迟到的 delta 会重新长出草稿。
           const fin = finalizeHubDraft(get().groupDrafts, get().finalizedMessageIds, msg.id)
-          set({ groupDrafts: fin.drafts, finalizedMessageIds: fin.finalized })
-          if (ev.group_id !== get().activeGroupId) return
+          const card = msg.kind === 'task_result' ? parseTaskResult(msg) : null
+          const preview = (msg.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
+          const fresh = msg.seq > (get().groupInfo[gid]?.last_seq ?? 0)
           set((s) => {
+            const next: Partial<HubState> = { groupDrafts: fin.drafts, finalizedMessageIds: fin.finalized }
+            if (fresh) {
+              const info = { ...(s.groupInfo[gid] ?? {}) }
+              info.last_seq = msg.seq
+              info.last_sender = msg.sender?.kind
+              info.last_at = msg.created_at ?? new Date().toISOString()
+              info.last_text = preview
+              // 与 Go GroupPerception 同口径：只有「最新可用消息就是任务卡」才给结论，
+              // 普通消息要清掉旧结论，让预览回退到 last_text。
+              info.last_outcome = card ? taskOutcomeLine(card.status, card.summary, card.error) : ''
+              if (card) {
+                info.last_task_id = card.taskId || info.last_task_id
+                info.last_task_status = card.status
+                info.last_task_summary = card.summary || card.title
+              }
+              // 未读只数「别人发来的可用消息」（人自己的话不算），与后端投影一致。
+              if (!active && msg.sender?.kind !== 'human' && preview) {
+                info.unread = (info.unread ?? 0) + 1
+              }
+              next.groupInfo = { ...s.groupInfo, [gid]: info }
+            }
+            if (!active) return next
             const withoutPending = ev.client_msg_id
               ? s.groupMessages.filter((m) => m.clientMsgId !== ev.client_msg_id)
               : s.groupMessages
-            if (withoutPending.some((m) => m.seq === msg.seq)) return {}
-            return { groupMessages: [...withoutPending, msg].sort((a, b) => a.seq - b.seq) }
+            if (withoutPending.some((m) => m.seq === msg.seq)) return next
+            return { ...next, groupMessages: [...withoutPending, msg].sort((a, b) => a.seq - b.seq) }
           })
+          // 正在看的群：新消息到即已读（best-effort，不阻塞渲染、不逐条刷事件）。
+          if (active && msg.seq > 0) void markGroupRead(gid, msg.seq)
           return
         }
         const agentID = ev.agent_id || ''
@@ -640,11 +787,54 @@ export const useHubStore = create<HubState>((set, get) => ({
       }
       case 'hub_task_update': {
         const task = ev.task
-        if (!task?.id) return
+        const evt = ev as HubTaskUpdate
+        const taskID = evt.task_id || task?.id || ''
+        if (task?.id) {
+          set((s) => {
+            const rest = s.tasks.filter((t) => t.id !== task.id)
+            return { tasks: [task, ...rest] }
+          })
+        }
+        // 左栏结论行：事件比刷新快一步，任务完成/失败后预览立刻变成「任务完成：…」。
+        const gid = ev.group_id || task?.target?.group_id || task?.origin?.group_id || ''
+        if (!gid) return
+        const status = evt.status || task?.status || ''
+        const summary = task?.result?.summary ?? ''
+        const error = evt.error || task?.error || task?.result?.error || ''
         set((s) => {
-          const rest = s.tasks.filter((t) => t.id !== task.id)
-          return { tasks: [task, ...rest] }
+          const info = { ...(s.groupInfo[gid] ?? {}) }
+          const outcome = taskOutcomeLine(status, summary, error)
+          if (outcome) info.last_outcome = outcome
+          if (taskID) info.last_task_id = taskID
+          if (status) info.last_task_status = status
+          if (summary) info.last_task_summary = summary
+          return { groupInfo: { ...s.groupInfo, [gid]: info } }
         })
+        return
+      }
+      case 'hub_conversation': {
+        if (!ev.group_id || !ev.conversation) return
+        const gid = ev.group_id
+        const conversation = ev.conversation
+        set((s) => ({ groupConversations: { ...s.groupConversations, [gid]: conversation } }))
+        return
+      }
+      case 'hub_read': {
+        // 目前 bridge 不主动发；为多端/手机端保留同一条归约路径：读到哪就清到哪。
+        if (!ev.group_id) return
+        const gid = ev.group_id
+        const seq = Number(ev.seq ?? 0)
+        set((s) => {
+          const info = { ...(s.groupInfo[gid] ?? {}) }
+          if (seq <= 0 || seq >= (info.last_seq ?? 0)) info.unread = 0
+          return { groupInfo: { ...s.groupInfo, [gid]: info } }
+        })
+        return
+      }
+      case 'hub_group_update': {
+        if (!ev.group?.id) return
+        const next = ev.group
+        set((s) => ({ groups: s.groups.map((g) => (g.id === next.id ? next : g)) }))
         return
       }
       case 'hub_need': {

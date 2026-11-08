@@ -125,11 +125,31 @@ export interface HubTask {
   status?: string
   attempt?: number
   error?: string
-  origin?: { kind?: string; agent_id?: string; agent_name?: string }
-  target?: { kind?: string; workspace?: string; session_id?: string }
+  origin?: { kind?: string; group_id?: string; agent_id?: string; agent_name?: string; message_seq?: number }
+  target?: {
+    kind?: string // workspace | agent
+    workspace?: string
+    session_id?: string
+    /** target.kind=agent 时的执行者（人工派任务靠它定位任务卡）。 */
+    agent_id?: string
+    group_id?: string
+  }
   result?: HubTaskResult
   created_at?: string
   updated_at?: string
+}
+
+/** hub_task_update 的扁平字段（§7.2 / §7.3.3）：agent_id = 发起者，target_agent_id = 执行者。 */
+export interface HubTaskUpdate {
+  task_id?: string
+  status?: string
+  target_kind?: string
+  group_id?: string
+  agent_id?: string
+  target_agent_id?: string
+  title?: string
+  error?: string
+  task?: HubTask
 }
 
 /** Needs you（审批/提问/失败/交接/预算）。 */
@@ -208,4 +228,42 @@ export interface HubGroupActivity {
   summary?: string
   ms?: number
   at?: string
+}
+
+/**
+ * hub_group_list 的 progress[group_id]（Go agenthub.GroupPerception 的 JSON 投影）。
+ * 左栏预览优先 last_outcome（任务完成/失败…），否则 last_text。
+ */
+export interface HubGroupProgress {
+  unread?: number
+  last_seq?: number
+  last_sender?: string
+  last_at?: string
+  last_text?: string
+  last_outcome?: string
+  last_task_id?: string
+  last_task_status?: string
+  last_task_summary?: string
+}
+
+/** hub_conversation 事件/回执里的对话视图（Go agenthub.ConversationView）。 */
+export interface HubConversation {
+  id?: string
+  group_id?: string
+  /** idle | running | waiting_human | stopped | exhausted */
+  status?: string
+  human_seq?: number
+  turns_used?: number
+  turn_budget?: number
+  depth?: number
+  max_depth?: number
+  queue_len?: number
+  pair_limit?: number
+  /** 键是 `from→to`（Go 的 ConversationPairKey）。 */
+  pair_count?: Record<string, number>
+  cooldown_ms?: number
+  last_wake_at?: string
+  stop_reason?: string
+  started_at?: string
+  updated_at?: string
 }

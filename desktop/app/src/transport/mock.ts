@@ -617,6 +617,18 @@ const MOCK_STATIC_PARTS: [string, number][] = [
   ['tools', 96], ['system_prompt', 58], ['skills', 16], ['other', 4], ['mcp', 14],
 ]
 
+type MockGroupMessage = {
+  seq: number
+  id: string
+  kind: string
+  sender: { kind: string; agent_id?: string }
+  text: string
+  created_at: string
+  refs?: Record<string, unknown>
+  round_id?: string
+  context?: { trigger_seqs?: number[]; senders?: Array<{ agent_id?: string; name?: string }> }
+}
+
 class MockTransport implements Transport {
   // 多订阅者（V2 P2-PROTOCOL-08）：onEvent 可注册多个回调，off 只移除自己的；
   // 单 cb 会被后注册覆盖、off 误伤所有订阅者（session_pin 一次性回调 + 长期订阅并存时丢事件）。
@@ -649,6 +661,30 @@ class MockTransport implements Transport {
   private hubSeq = new Map<string, number>()
   private hubVersions = new Map<string, { version: number; saved_at: string; profile: Record<string, unknown> }[]>()
   private hubMemory = new Map<string, Map<string, string>>()
+  // P3b-07：群组 fixtures（左栏 progress / 历史 / @ 选择器 / 自动对话条 / 任务卡）。
+  // 与真 bridge 同形：progress 从落盘日志算，hub_message 先 emit 再 respond。
+  private hubGroups: Record<string, unknown>[] = [
+    {
+      id: 'grp_mock1', name: '竞品研究', owner_agent_id: 'ag_mockres1',
+      members: [
+        { agent_id: 'ag_mockres1', role: 'owner' },
+        { agent_id: 'ag_mockwri2', role: 'member' },
+      ],
+      policy: {
+        mode: 'ask', max_parallel_runs: 2, max_handoff_depth: 3, max_turns_per_human: 8,
+        max_mentions_per_message: 3, daily_budget_usd: 5,
+      },
+      created_at: new Date(Date.now() - 7 * 86_400_000).toISOString(),
+      updated_at: new Date(Date.now() - 86_400_000).toISOString(),
+    },
+  ]
+  private hubGroupMessages = new Map<string, MockGroupMessage[]>()
+  private hubGroupSeq = new Map<string, number>()
+  private hubGroupRead = new Map<string, number>()
+  private hubGroupConversations = new Map<string, Record<string, unknown>>()
+  private hubGroupTasks = new Map<string, Record<string, unknown>>()
+  private hubGroupAssigns = new Map<string, Record<string, unknown>>() // client_msg_id → 响应（幂等）
+  private hubGroupTaskNo = 0
 
   private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string }[] {
     let list = this.hubMessages.get(agentID)
@@ -663,6 +699,245 @@ class MockTransport implements Transport {
     }
     return list
   }
+
+  // —— P3b-07 群组 fixtures ——
+
+  private hubGroup(gid: string): Record<string, unknown> | undefined {
+    return this.hubGroups.find((g) => g.id === gid)
+  }
+
+  private hubGroupMemberIDs(gid: string): string[] {
+    const g = this.hubGroup(gid)
+    const members = (g?.members as Array<{ agent_id?: string }> | undefined) ?? []
+    return members.map((m) => String(m.agent_id ?? '')).filter(Boolean)
+  }
+
+  private hubGroupLog(gid: string): MockGroupMessage[] {
+    let list = this.hubGroupMessages.get(gid)
+    if (!list) {
+      const now = Date.now()
+      const at = (ms: number): string => new Date(now - ms).toISOString()
+      list = [
+        {
+          seq: 1, id: 'gm_mock1', kind: 'text', sender: { kind: 'human' },
+          text: '@Researcher 把三家价格表整理成一页；@Writer 帮忙润色。', created_at: at(3 * 3_600_000),
+        },
+        {
+          seq: 2, id: 'gm_mock2', kind: 'routing_receipt', sender: { kind: 'system' },
+          text: 'targets=ag_mockres1,ag_mockwri2', created_at: at(3 * 3_600_000 - 1000),
+        },
+        {
+          seq: 3, id: 'gm_mock3', kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockres1' },
+          text: '价格表整理好了：A $49 / B $39 / C 未公开。', round_id: 'rnd_mock1',
+          context: { trigger_seqs: [1], senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }] },
+          created_at: at(2 * 3_600_000),
+        },
+        {
+          seq: 4, id: 'gm_mock4', kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
+          text: '已润色成两页，结论放在开头。@Researcher 风险那节你再看一眼。', round_id: 'rnd_mock1',
+          context: {
+            trigger_seqs: [1, 3],
+            senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }, { agent_id: 'ag_mockwri2', name: 'Writer' }],
+          },
+          created_at: at(90 * 60_000),
+        },
+        {
+          seq: 5, id: 'gm_mock5', kind: 'task_result', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
+          text: '已生成两页简报，含价格对比、结论与风险。', created_at: at(45 * 60_000),
+          refs: {
+            task_id: 'task_mock1', status: 'completed', agent_id: 'ag_mockwri2', target_agent_id: 'ag_mockwri2',
+            title: '把三家价格表写成两页简报', duration_ms: 18_400,
+            usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
+            artifacts: [{ name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140 }],
+            error: '',
+          },
+        },
+      ]
+      this.hubGroupMessages.set(gid, list)
+      this.hubGroupSeq.set(gid, 5)
+      // 最后两张卡未读：左栏演示「未读点 + 任务完成结论」。
+      this.hubGroupRead.set(gid, 3)
+      this.hubGroupConversations.set(gid, this.mockConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 }))
+    }
+    return list
+  }
+
+  private hubGroupNextSeq(gid: string): number {
+    const seq = (this.hubGroupSeq.get(gid) ?? 0) + 1
+    this.hubGroupSeq.set(gid, seq)
+    return seq
+  }
+
+  private hubGroupAppend(gid: string, msg: Omit<MockGroupMessage, 'seq' | 'id' | 'created_at'>): MockGroupMessage {
+    const seq = this.hubGroupNextSeq(gid)
+    const full: MockGroupMessage = {
+      seq, id: `gm_mock_${seq}`, created_at: new Date().toISOString(), ...msg,
+    }
+    this.hubGroupLog(gid).push(full)
+    return full
+  }
+
+  private hubGroupEmitMessage(gid: string, msg: MockGroupMessage): void {
+    this.emit({
+      event_type: 'hub_message', group_id: gid, seq: msg.seq, message: msg,
+      client_msg_id: String(msg.refs?.client_msg_id ?? ''),
+    })
+  }
+
+  private mockGroupPreview(text: string, max = 80): string {
+    const flat = text.replace(/\s+/g, ' ').trim()
+    const runes = Array.from(flat)
+    return runes.length > max ? runes.slice(0, max - 1).join('') + '…' : flat
+  }
+
+  private mockTaskOutcome(msg: MockGroupMessage): string {
+    const status = String(msg.refs?.status ?? '')
+    const reason = String(msg.refs?.error ?? '').trim()
+    const summary = this.mockGroupPreview(msg.text)
+    const first = (...values: string[]): string => values.find((v) => v.trim())?.trim() ?? ''
+    switch (status) {
+      case 'completed':
+      case 'delivered': return `任务完成：${first(summary, reason)}`.replace(/：$/, '')
+      case 'failed': return `任务失败：${first(reason, summary)}`.replace(/：$/, '')
+      case 'interrupted': return `任务已中断：${first(reason, summary)}`.replace(/：$/, '')
+      case 'canceled': return `任务已取消：${first(reason, summary)}`.replace(/：$/, '')
+      case 'declined': return `任务已被拒绝：${first(reason, summary)}`.replace(/：$/, '')
+      case 'blocked_budget': return `任务预算阻断：${first(reason, summary)}`.replace(/：$/, '')
+      default: return ''
+    }
+  }
+
+  private hubGroupProgress(gid: string): Record<string, unknown> {
+    const log = this.hubGroupLog(gid)
+    const read = this.hubGroupRead.get(gid) ?? 0
+    const usable = log.filter((m) => m.text.trim() && !['routing_receipt', 'round_summary', 'approval_stub'].includes(m.kind))
+    const last = usable[usable.length - 1]
+    const lastTask = [...usable].reverse().find((m) => m.kind === 'task_result')
+    const out: Record<string, unknown> = {}
+    if (!last) return out
+    out.unread = usable.filter((m) => m.seq > read && m.sender.kind !== 'human').length
+    out.last_seq = last.seq
+    out.last_sender = last.sender.kind
+    out.last_at = last.created_at
+    out.last_text = this.mockGroupPreview(last.text)
+    if (lastTask) {
+      out.last_task_id = String(lastTask.refs?.task_id ?? '')
+      out.last_task_status = String(lastTask.refs?.status ?? '')
+      out.last_task_summary = this.mockGroupPreview(lastTask.text)
+      if (lastTask.seq === last.seq) out.last_outcome = this.mockTaskOutcome(lastTask)
+    }
+    return out
+  }
+
+  private mockConversation(
+    gid: string,
+    status: string,
+    opts: { turns?: number; depth?: number; queue?: number; reason?: string; pair?: Record<string, number> } = {},
+  ): Record<string, unknown> {
+    return {
+      id: `conv_${gid}`, group_id: gid, status,
+      turns_used: opts.turns ?? 0, turn_budget: 8,
+      depth: opts.depth ?? 0, max_depth: 4,
+      queue_len: opts.queue ?? 0, pair_limit: 2, pair_count: opts.pair ?? {},
+      cooldown_ms: 1500,
+      ...(opts.reason ? { stop_reason: opts.reason } : {}),
+      updated_at: new Date().toISOString(),
+    }
+  }
+
+  private hubGroupSetConversation(gid: string, status: string, opts: Parameters<MockTransport['mockConversation']>[2] = {}): Record<string, unknown> {
+    const conv = this.mockConversation(gid, status, opts)
+    this.hubGroupConversations.set(gid, conv)
+    this.emit({ event_type: 'hub_conversation', group_id: gid, conversation: conv })
+    return conv
+  }
+
+  private hubGroupTaskUpdate(task: Record<string, unknown>, gid: string): void {
+    this.emit({
+      event_type: 'hub_task_update', task_id: task.id, task,
+      status: task.status, target_kind: 'agent', group_id: gid,
+      agent_id: '', target_agent_id: (task.target as Record<string, unknown> | undefined)?.agent_id,
+      title: task.title, error: task.error ?? '',
+    })
+  }
+
+  /** 从正文 + 结构化 mentions 解析目标（mock 只做名字包含，真实解析在 Go）。 */
+  private hubGroupTargets(gid: string, text: string, mentions: unknown): string[] {
+    const members = this.hubGroupMemberIDs(gid)
+    const out: string[] = []
+    if (Array.isArray(mentions)) {
+      for (const raw of mentions) {
+        const id = String(raw)
+        if (members.includes(id) && !out.includes(id)) out.push(id)
+      }
+    }
+    const lowered = text.toLowerCase()
+    const named = this.hubAgents
+      .filter((a) => members.includes(String(a.id)) && a.deleted !== true)
+      .sort((a, b) => String(b.name).length - String(a.name).length)
+    for (const a of named) {
+      if (lowered.includes(`@${String(a.name).toLowerCase()}`) && !out.includes(String(a.id))) out.push(String(a.id))
+    }
+    if (/@all\b/i.test(text) || text.includes('＠all') || text.includes('@所有人') || text.includes('＠所有人')) {
+      for (const id of members) if (!out.includes(id)) out.push(id)
+    }
+    return out
+  }
+
+  /**
+   * 脚本化一条群内智能体回复：agent_start → 逐块 hub_message_delta → final hub_message
+   * → agent_end。delta 让 TypingIndicator 与 StreamingMessage 在浏览器里真的出现；
+   * final 的 message_id 与 delta 相同，store 据此清草稿（不依赖 agent_end 兜底）。
+   */
+  private mockGroupReply(
+    gid: string,
+    triggerSeq: number,
+    targets: string[],
+    opts: { startMs?: number; reply?: string; messageId?: string } = {},
+  ): void {
+    const first = targets[0]
+    if (!first) return
+    const nameOf = (id: string): string => String(this.hubAgents.find((a) => a.id === id)?.name ?? id)
+    const second = targets[1]
+    const reply = opts.reply ?? `收到。${second ? `@${nameOf(second)} ` : ''}我先把价格对比整理出来，稍后给结论。`
+    const messageID = opts.messageId ?? `gm_mock_stream_${triggerSeq}_${first}`
+    const roundID = `rnd_mock_${triggerSeq}`
+    const sessionID = `hub.${first}.g.${gid}`
+    const runID = `run_mock_${triggerSeq}_${first}`
+    const start = opts.startMs ?? 400
+    this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'running' })
+    this.emit({ event_type: 'agent_start', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
+    const runes = Array.from(reply)
+    const size = Math.max(1, Math.ceil(runes.length / 6))
+    const chunks: string[] = []
+    for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
+    chunks.forEach((chunk, i) => {
+      this.afterBg(start + i * 90, () => {
+        this.emit({
+          event_type: 'hub_message_delta', group_id: gid, agent_id: first, round_id: roundID,
+          message_id: messageID, index: i, delta: chunk,
+        })
+      })
+    })
+    this.afterBg(start + chunks.length * 90 + 90, () => {
+      const msg = this.hubGroupAppend(gid, {
+        kind: 'text', sender: { kind: 'agent', agent_id: first }, text: reply, round_id: roundID,
+        context: {
+          trigger_seqs: [triggerSeq],
+          senders: targets.map((id) => ({ agent_id: id, name: nameOf(id) })),
+        },
+      })
+      msg.id = messageID
+      this.hubGroupEmitMessage(gid, msg)
+      this.emit({ event_type: 'agent_end', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
+      this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'idle' })
+      // 人类中途停过：不要再把状态条推回 running（停止是终态，直到新的人类消息）。
+      if (this.hubGroupConversations.get(gid)?.status !== 'stopped') {
+        this.hubGroupSetConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 })
+      }
+    })
+  }
+
   private pickIdx = 0
   private titleIdx = 0
 
@@ -2290,6 +2565,207 @@ class MockTransport implements Transport {
           this.emit({ event_type: 'hub_message', agent_id: agentID, seq: rseq, message: { seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text: reply, created_at: rcreated } })
           this.emit({ event_type: 'agent_end', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 })
         }, sid)
+        break
+      }
+      // —— P3b-07：群组 / @ / 自动对话 / 任务卡 ——
+      case 'hub_group_list': {
+        const progress: Record<string, unknown> = {}
+        for (const g of this.hubGroups) progress[String(g.id)] = this.hubGroupProgress(String(g.id))
+        this.respond(cmd, { groups: this.hubGroups, progress })
+        break
+      }
+      case 'hub_group_get': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        // 打开群先对齐对话状态（真 bridge 在 begin/轮次推进时广播；mock 没有后台控制器，
+        // 就在这里补一条，否则状态条在首次发送前永远不出现）。
+        this.hubGroupLog(gid)
+        const conv = this.hubGroupConversations.get(gid)
+        if (conv) this.emit({ event_type: 'hub_conversation', group_id: gid, conversation: conv })
+        this.respond(cmd, { group })
+        break
+      }
+      case 'hub_group_history': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        const before = Number(cmd.payload?.before_seq ?? 0)
+        const limit = Number(cmd.payload?.limit ?? 50)
+        const all = this.hubGroupLog(gid).filter((m) => (before > 0 ? m.seq < before : true))
+        const page = all.slice(-limit)
+        this.respond(cmd, { messages: page, has_more: all.length > page.length })
+        break
+      }
+      case 'hub_group_activity': {
+        this.respond(cmd, { activity: [] })
+        break
+      }
+      case 'hub_group_send': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        const text = String(cmd.payload?.text ?? '').trim()
+        if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        if (!text) { this.respondErr(cmd, 'text 不能为空'); break }
+        const clientID = String(cmd.payload?.client_msg_id ?? '')
+        const log = this.hubGroupLog(gid)
+        const existing = clientID ? log.find((m) => m.refs?.client_msg_id === clientID) : undefined
+        if (existing) {
+          // 断线重试：同 client_msg_id 不重复写日志，也不再路由/唤醒（与 bridge 同形）。
+          this.respond(cmd, { seq: existing.seq, message_id: existing.id, deduplicated: true })
+          break
+        }
+        const targets = this.hubGroupTargets(gid, text, cmd.payload?.mentions)
+        const msg = this.hubGroupAppend(gid, {
+          kind: 'text', sender: { kind: 'human' }, text,
+          ...(clientID ? { refs: { client_msg_id: clientID } } : {}),
+        })
+        this.hubGroupEmitMessage(gid, msg)
+        this.hubGroupSetConversation(gid, 'running', {
+          turns: targets.length > 0 ? 1 : 0, depth: 1, queue: Math.max(0, targets.length - 1),
+        })
+        const round = targets.length > 0
+          ? {
+            id: `rnd_mock_${msg.seq}`, group_id: gid, trigger_seq: msg.seq, targets,
+            mention_all: /@all\b/i.test(text), dropped: 0,
+          }
+          : null
+        if (round) {
+          this.emit({ event_type: 'hub_round', group_id: gid, round })
+          const receipt = this.hubGroupAppend(gid, {
+            kind: 'routing_receipt', sender: { kind: 'system' }, text: `targets=${targets.join(',')}`,
+          })
+          this.hubGroupEmitMessage(gid, receipt)
+        }
+        this.respond(cmd, { seq: msg.seq, message_id: msg.id, round, targets })
+        if (targets.length > 0) this.mockGroupReply(gid, msg.seq, targets)
+        break
+      }
+      case 'hub_group_assign': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        const target = String(cmd.payload?.agent_id ?? cmd.payload?.to_agent ?? '').trim()
+        const instruction = String(cmd.payload?.instruction ?? '').trim()
+        const title = String(cmd.payload?.title ?? '').trim()
+        const clientID = String(cmd.payload?.client_msg_id ?? '')
+        if (!target) { this.respondErr(cmd, 'to_agent 不能为空（也接受 agent_id）'); break }
+        if (!instruction) { this.respondErr(cmd, 'instruction 不能为空'); break }
+        if (!this.hubGroupMemberIDs(gid).includes(target)) { this.respondErr(cmd, '目标不是该群成员'); break }
+        const cacheKey = `${gid}:${clientID}`
+        const cached = clientID ? this.hubGroupAssigns.get(cacheKey) : undefined
+        if (cached) { this.respond(cmd, cached); break }
+        const taskID = `task_mock_${++this.hubGroupTaskNo}`
+        const agent = this.hubAgents.find((a) => a.id === target)
+        const name = String(agent?.name ?? target)
+        const task: Record<string, unknown> = {
+          id: taskID, root_task_id: taskID, parent_task_id: null, chain: [taskID],
+          origin: { kind: 'human', group_id: gid }, target: { kind: 'agent', agent_id: target, group_id: gid, session_id: `hub.${target}.g.${gid}` },
+          title: title || instruction.split('\n')[0].slice(0, 40), instruction,
+          callback: 'agent_end', status: 'queued', attempt: 1,
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }
+        this.hubGroupTasks.set(taskID, task)
+        const assignMsg = this.hubGroupAppend(gid, {
+          kind: 'text', sender: { kind: 'human' }, text: `@${name} ${instruction}`,
+          refs: { client_msg_id: clientID, task_id: taskID, intent: 'assign', mentions: [target] },
+        })
+        this.hubGroupEmitMessage(gid, assignMsg)
+        this.emit({
+          event_type: 'hub_round', group_id: gid,
+          round: { id: `rnd_mock_${assignMsg.seq}`, group_id: gid, trigger_seq: assignMsg.seq, targets: [target], dropped: 0 },
+        })
+        const response = {
+          task, task_id: taskID, status: 'queued', to_agent: target, seq: assignMsg.seq, dispatched: false,
+          note: '目标当前正忙：任务已入队（queued），对方回合结束后由对话控制器派发。',
+        }
+        if (clientID) this.hubGroupAssigns.set(cacheKey, response)
+        this.hubGroupSetConversation(gid, 'running', { turns: 1, depth: 1, queue: 1 })
+        this.respond(cmd, response)
+        // 脚本化任务生命周期：queued → dispatched → running → completed（任务卡回群）。
+        this.afterBg(1_200, () => {
+          task.status = 'dispatched'
+          task.updated_at = new Date().toISOString()
+          this.hubGroupTaskUpdate(task, gid)
+          this.hubGroupSetConversation(gid, 'running', { turns: 1, depth: 1, queue: 0 })
+          this.emit({ event_type: 'hub_agent_status', agent_id: target, status: 'running' })
+        })
+        this.mockGroupReply(gid, assignMsg.seq, [target], {
+          startMs: 700,
+          reply: '先核对三家价格，再生成两页简报，结论放开头。',
+        })
+        this.afterBg(2_400, () => {
+          const summary = '已生成两页简报：价格对比、结论与风险都在里面。'
+          const cardMsg = this.hubGroupAppend(gid, {
+            kind: 'task_result', sender: { kind: 'agent', agent_id: target }, text: summary,
+            refs: {
+              task_id: taskID, status: 'completed', agent_id: target, target_agent_id: target,
+              title: String(task.title ?? ''), duration_ms: 18_400,
+              usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
+              artifacts: [{ name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140 }],
+              error: '',
+            },
+          })
+          this.hubGroupEmitMessage(gid, cardMsg)
+          task.status = 'completed'
+          task.updated_at = new Date().toISOString()
+          task.result = {
+            finish_reason: 'stop', summary,
+            usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
+            artifacts: [{ name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140 }],
+          }
+          this.hubGroupTaskUpdate(task, gid)
+          this.emit({ event_type: 'hub_agent_status', agent_id: target, status: 'idle' })
+          if (this.hubGroupConversations.get(gid)?.status !== 'stopped') {
+            this.hubGroupSetConversation(gid, 'running', { turns: 3, depth: 1, queue: 0 })
+          }
+        })
+        break
+      }
+      case 'hub_group_update': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        if (!group) { this.respondErr(cmd, '群组不存在'); break }
+        const patch = (cmd.payload?.patch ?? {}) as Record<string, unknown>
+        if (typeof patch.name === 'string') group.name = patch.name
+        if (patch.policy && typeof patch.policy === 'object') {
+          group.policy = { ...(group.policy as Record<string, unknown>), ...(patch.policy as Record<string, unknown>) }
+        }
+        if (typeof patch.pinned === 'boolean') group.pinned = patch.pinned
+        group.updated_at = new Date().toISOString()
+        this.emit({ event_type: 'hub_group_update', group })
+        this.respond(cmd, { group })
+        break
+      }
+      case 'hub_mark_read': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const seq = Number(cmd.payload?.seq ?? 0)
+        if (!gid) { this.respondErr(cmd, 'group_id 或 agent_id 必须给一个'); break }
+        if (!(seq > 0)) { this.respondErr(cmd, 'seq 必须为正整数'); break }
+        const effective = Math.max(seq, this.hubGroupRead.get(gid) ?? 0)
+        this.hubGroupRead.set(gid, effective)
+        this.hubGroupLog(gid)
+        this.respond(cmd, { seq: effective, human_read_seq: effective })
+        break
+      }
+      case 'hub_conversation_stop': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在'); break }
+        const prev = this.hubGroupConversations.get(gid) ?? {}
+        const notice = this.hubGroupAppend(gid, {
+          kind: 'system', sender: { kind: 'system' }, text: '人类停止了自动对话，等你继续',
+        })
+        this.hubGroupEmitMessage(gid, notice)
+        const conversation = this.hubGroupSetConversation(gid, 'stopped', {
+          turns: Number(prev.turns_used ?? 0), depth: Number(prev.depth ?? 0), queue: 0,
+          reason: '人类停止了自动对话，等你继续',
+        })
+        for (const id of this.hubGroupMemberIDs(gid)) this.emit({ event_type: 'hub_agent_status', agent_id: id, status: 'idle' })
+        this.respond(cmd, { conversation, interrupted: 1 })
+        break
+      }
+      case 'hub_task_list': {
+        const tasks = [...this.hubGroupTasks.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        this.respond(cmd, { tasks })
         break
       }
       case 'hub_agent_get': {
