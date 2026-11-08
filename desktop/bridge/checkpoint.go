@@ -43,6 +43,10 @@ import (
 	"github.com/seven7628/hai-harness/todo"
 )
 
+// commitSlowLog 是「慢提交」日志阈值：超过它就把一次提交的阶段分解打到
+// stderr。失败提交无论耗时多少都会打（30s 超时必须能归因到具体阶段）。
+const commitSlowLog = 3 * time.Second
+
 // commitDebounce 是提交节流的窗口时长：边界请求到达后等待该时长，窗口内
 // 到达的请求合并为一次提交。0 = 关闭节流（立即提交，兼容旧行为/测试）。
 const commitDebounce = 800 * time.Millisecond
@@ -224,6 +228,31 @@ func (c *checkpointCoordinator) WaitDrained() {
 	}
 }
 
+// logCommit 打一行提交阶段分解（失败必打，慢提交按阈值打）。
+//
+// 一行里同时给出「谁慢」和「多大」：total 由 marshal/revision/sdk/lock/
+// sidecar/encode/baseline/temp/bak/rename 组成，不足 1ms 的段省略。
+func (c *checkpointCoordinator) logCommit(err error, rev uint64, total, marshalDur, revDur, stateDur time.Duration, ct session.CommitPhaseTiming) {
+	phase := func(name string, d time.Duration) string {
+		if d < time.Millisecond {
+			return ""
+		}
+		return fmt.Sprintf(" %s=%s", name, d.Round(time.Millisecond))
+	}
+	status := "slow"
+	if err != nil {
+		status = "failed"
+	}
+	fmt.Fprintf(os.Stderr, "[checkpoint] %s commit total=%s session=%s rev=%d view=%.1fMB record=%.1fMB blocks=%d"+
+		" phase:%s%s%s%s%s%s%s%s%s%s%s err=%v\n",
+		status, total.Round(time.Millisecond), c.sessID, rev,
+		float64(ct.ViewBytes)/1e6, float64(ct.RecordBytes)/1e6, ct.BlocksWrote,
+		phase("marshal", marshalDur), phase("revision", revDur), phase("sdk", stateDur),
+		phase("lock", ct.LockWait), phase("sidecar", ct.Sidecar), phase("compact", ct.Compact),
+		phase("encode", ct.Encode), phase("baseline", ct.Baseline), phase("temp", ct.Temp),
+		phase("bak", ct.Backup), phase("rename+dir", ct.Rename+ct.SyncDir), err)
+}
+
 // Stats 返回 (commits, skipped) 供测试观测。
 func (c *checkpointCoordinator) Stats() (uint64, uint64) {
 	if c == nil {
@@ -270,19 +299,24 @@ func (c *checkpointCoordinator) commitOnce() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// 用 MarshalWithSpans：除 view 字节外还拿到每个 block 的切片，供存储层
 	// 做 sidecar 增量（免去对 86MB 的二次扫描，实测省 106ms/次提交）。
+	marshalStart := time.Now()
 	spans, err := c.reducer.MarshalWithSpans()
+	marshalDur := time.Since(marshalStart)
 	if err != nil {
 		c.reportError(fmt.Errorf("checkpoint: marshal view: %w", err))
 		return
 	}
 	view := spans.View
 
+	revStart := time.Now()
 	rev, ok, rerr := c.nextRevisionLocked(ctx)
+	revDur := time.Since(revStart)
 	if !ok {
 		if rerr != nil {
 			c.reportError(fmt.Errorf("checkpoint: read revision: %w", rerr))
@@ -291,17 +325,24 @@ func (c *checkpointCoordinator) commitOnce() {
 		}
 		return
 	}
+	stateStart := time.Now()
 	state := sdkState(c.s)
+	stateDur := time.Since(stateStart)
 	record := session.NewSessionRecord(
 		c.wsKey, c.sessID, rev, c.reducer.LastSeq(), c.reducer.ClearGeneration(), state, view,
 	)
 	record.BlockSpans = spans.Spans
-	if err := c.store.CommitRecord(ctx, record); err != nil {
+	ct, cerr := c.store.CommitRecordTraced(ctx, record)
+	if cerr != nil {
 		// 提交失败不阻塞事件流：失效 revision 缓存，下一边界重读磁盘基线；
 		// 同时上报结构化错误（持久化失败必须可观察）。
 		c.revKnown = false
-		c.reportError(fmt.Errorf("checkpoint: commit record: %w", err))
+		c.logCommit(cerr, rev, time.Since(started), marshalDur, revDur, stateDur, ct)
+		c.reportError(fmt.Errorf("checkpoint: commit record: %w", cerr))
 		return
+	}
+	if total := time.Since(started); total > commitSlowLog {
+		c.logCommit(nil, rev, total, marshalDur, revDur, stateDur, ct)
 	}
 	c.lastRev = rev
 	c.revKnown = true

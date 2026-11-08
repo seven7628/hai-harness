@@ -311,12 +311,56 @@ func (s *FileStorage) LoadRecordMetadata(ctx context.Context, workspaceKey, sess
 	return nil, fmt.Errorf("%w: %v", ErrRecordCorrupt, err)
 }
 
+// CommitPhaseTiming 是一次 CommitRecord 的阶段耗时分解（诊断用）。
+//
+// 为什么需要它：提交失败时上层只会看到 "context deadline exceeded"，而这条
+// 错误无法区分「等全局锁 20s」「sidecar compact 20s」「fsync 卡住」——它们
+// 都只是在下一个 context 检查点暴露成同一个哨兵。真实故障（30s 超时）因此
+// 长期无法归因。有了分解，一次慢提交就能定位到具体阶段。
+type CommitPhaseTiming struct {
+	Total time.Duration // 进入 CommitRecord 到返回
+
+	LockWait time.Duration // 等 FileStorage.mu（进程内所有会话共享）
+	Sidecar  time.Duration // blocks sidecar：acquire + 追加 + flush + compact
+	Compact  time.Duration // 其中 compact 部分（sidecar 的子集）
+	Encode   time.Duration // 序列化信封 + 计算落盘 checksum
+	Baseline time.Duration // 读旧 record 基线（含 .bak 回退）
+	Temp     time.Duration // 写临时文件（含 fsync）
+	Backup   time.Duration // 硬链接 / 复制 .bak
+	Rename   time.Duration
+	SyncDir  time.Duration
+
+	ViewBytes   int64 // 待落盘 view 字节数
+	RecordBytes int64 // 落盘 record 字节数
+	BlocksWrote int   // 本次追加进 sidecar 的块数
+}
+
 // CommitRecord atomically replaces the formal record after validating identity,
 // schema, monotonic revision and canonical checksum. The previous valid formal
 // record is copied to one bounded .bak before replacement. The caller's record
 // is not used as the mutable serialization buffer; its checksum is updated only
 // after a successful durable commit.
 func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) error {
+	_, err := s.CommitRecordTraced(ctx, record)
+	return err
+}
+
+// CommitRecordTraced 与 CommitRecord 完全等价，额外返回阶段耗时分解。
+//
+// 调用方（bridge 的 checkpoint worker）据此在「慢提交 / 提交失败」时打一行
+// 结构化日志。没有它，30s 超时只能看到 "context deadline exceeded"。
+func (s *FileStorage) CommitRecordTraced(ctx context.Context, record *SessionRecord) (CommitPhaseTiming, error) {
+	started := time.Now()
+	var t CommitPhaseTiming
+	if record != nil {
+		t.ViewBytes = int64(len(record.ViewCheckpoint))
+	}
+	err := s.commitRecord(ctx, record, &t)
+	t.Total = time.Since(started)
+	return t, err
+}
+
+func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t *CommitPhaseTiming) error {
 	if err := contextError(ctx); err != nil {
 		return err
 	}
@@ -356,6 +400,7 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 	// 失败一律回退全量内嵌（正确性优先，静默）：任何 block 无 id、blocks 非数组、
 	// view 结构异常 → working.ViewCheckpoint 保持原样，走原路径落盘。
 	// 读回时有无引用都能解析（见 resolveBlocksRef），所以回退不影响可读性。
+	sidecarStart := time.Now()
 	if recPath, perr := s.RecordPath(working.WorkspaceKey, working.SessionID); perr == nil {
 		// sidecar 与 record 同目录 —— 首次提交时目录可能还不存在（record 的
 		// MkdirAll 在后面执行），必须在这里先建，否则 openBlockStore 直接失败、
@@ -365,11 +410,13 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 				// 优先用调用方给的 spans（reducer 顺带产出，零解析）；否则自行扫描。
 				var newView []byte
 				var rerr error
+				var wrote int
 				if len(record.BlockSpans) > 0 {
-					newView, _, rerr = refBlocksFromSpans(bs, working.ViewCheckpoint, record.BlockSpans)
+					newView, wrote, rerr = refBlocksFromSpans(bs, working.ViewCheckpoint, record.BlockSpans)
 				} else {
-					newView, _, rerr = refBlocks(bs, working.ViewCheckpoint)
+					newView, wrote, rerr = refBlocks(bs, working.ViewCheckpoint)
 				}
+				t.BlocksWrote = wrote
 				// 先落 sidecar 再落 record：record 里的引用必须指向已 durable 的数据。
 				if rerr == nil {
 					if ferr := bs.flush(); ferr == nil {
@@ -384,13 +431,18 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 				//
 				// 判据 O(1)（废弃计数在写入侧维护），超阈值才真正重写；
 				// 重写本身失败不影响本次提交的正确性（sidecar 保持原样，下次再试）。
+				compactStart := time.Now()
 				_ = bs.maybeCompact()
+				t.Compact = time.Since(compactStart)
 				// 不 Close：实例留在缓存里复用（Close 会 fsync 并关文件，下次提交
 				// 又要重扫 86MB 重建索引 —— 实测 78ms，吃掉增量方案的收益）。
 			}
 		}
 	}
 
+	t.Sidecar = time.Since(sidecarStart)
+
+	encodeStart := time.Now()
 	prefix, view, suffix, err := encodeRecordEnvelope(&working)
 	if err != nil {
 		return fmt.Errorf("encode session record: %w", err)
@@ -428,11 +480,14 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 		return fmt.Errorf("create session record directory: %w", err)
 	}
 
+	lockStart := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := contextError(ctx); err != nil {
-		return err
-	}
+	t.LockWait = time.Since(lockStart)
+	// 这里**不再**检查 ctx：sidecar 的追加/删除在更早的分支就已落成，
+	// 此时因 30s 到期返回会留下「sidecar 已前进、record 未换」的撕裂态，
+	// 而读路径要求两者一致 → 会话再也读不出来（真实故障）。
+	// 唯一的 ctx 检查在函数入口，即「还没写任何字节」时。
 
 	// 读基线只需要 (Revision, Checksum) 与「文件是否完好」三个事实，
 	// 不需要把 90MB payload 解成对象图。原来用 readRecordCandidate（全解码 +
@@ -443,6 +498,9 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 	//
 	// 安全性不低于原实现：结构损坏/身份不符/checksum 失配一律拒绝并回退 .bak，
 	// 只是不再 materialize payload —— 该 payload 后续也不需要（我们只写新内容）。
+	t.Encode = time.Since(encodeStart)
+	t.RecordBytes = int64(len(prefix) + len(view) + len(suffix))
+	baselineStart := time.Now()
 	current, currentRaw, currentErr := readRecordBaseline(path, working.WorkspaceKey, working.SessionID)
 	if currentErr != nil {
 		// A valid bounded backup is the only fallback baseline. This applies
@@ -476,12 +534,19 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 		}
 	}
 
-	if err := contextError(ctx); err != nil {
-		return err
-	}
+	t.Baseline = time.Since(baselineStart)
+	// 点不可返回：从这里开始**不再响应 ctx**。
+	//
+	// 到这一行为止，磁盘只被读过；但 sidecar 的追加/删除在更早的分支里
+	// 可能已经落成（refBlocksFromSpans + flush）。此时若因为 30s 到期直接
+	// 返回，盘上就留下「sidecar 已前进、record 还是旧的」的撕裂态，而读路径
+	// 要求两者一致 —— 于是**整个会话再也读不出来**（真实故障：30s 超时后
+	// 会话不可读）。规则：要么不写，要么写完整；慢提交比半提交好。
+	//
 	// 流式写出：prefix + view + `,"checksum":"<sum>"}` + "\n"。
 	// 不再先拼出完整 encoded 再写 —— 那会多一次 91MB 拷贝，且在 Checksum
 	// 已定稿后才发生，纯属浪费。writeTempFileParts 内部 fsync 后再 close。
+	tempStart := time.Now()
 	tmp, err := writeTempFileParts(dir, filepath.Base(path), []filePart{
 		{prefix, 0o600},
 		{view, 0o600},
@@ -491,7 +556,9 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 		return fmt.Errorf("write session record temporary file: %w", err)
 	}
 	defer os.Remove(tmp)
+	t.Temp = time.Since(tempStart)
 
+	bakStart := time.Now()
 	if len(currentRaw) > 0 {
 		// 备份旧 formal 到 .bak —— 用**硬链接**而不是复制整份内容。
 		//
@@ -513,15 +580,17 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 			}
 		}
 	}
-	if err := contextError(ctx); err != nil {
-		return err
-	}
+	t.Backup = time.Since(bakStart)
+	renameStart := time.Now()
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace session record: %w", err)
 	}
+	t.Rename = time.Since(renameStart)
+	syncStart := time.Now()
 	if err := syncDirectory(dir); err != nil {
 		return fmt.Errorf("sync session record directory: %w", err)
 	}
+	t.SyncDir = time.Since(syncStart)
 
 	record.Checksum = working.Checksum
 	return nil
