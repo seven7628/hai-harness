@@ -66,8 +66,12 @@ type Group struct {
 	Policy       GroupPolicy `json:"policy"`
 	Pinned       bool        `json:"pinned"`
 	Deleted      bool        `json:"deleted,omitempty"`
-	CreatedAt    time.Time   `json:"created_at"`
-	UpdatedAt    time.Time   `json:"updated_at"`
+	// HumanReadSeq 是**人**在这个群里读到的位置（每个群一个，多端共享；§6.5.2 两个游标）。
+	// 只影响左栏未读点/时间线「未读」分隔线，不影响任何智能体的上下文
+	//（那是每 (group, agent) 的 Cursor.AgentContextSeq）。旧群记录没有该字段 = 0 = 全未读。
+	HumanReadSeq int64     `json:"human_read_seq,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // Scope 是智能体会话的作用域：DM 或某个群。

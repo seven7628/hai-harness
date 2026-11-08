@@ -199,3 +199,49 @@ func TestSnapshotSingleOversizeMessageIsHardCapped(t *testing.T) {
 		t.Fatalf("tiny hard cut must keep ellipsis: %q", tiny.Text)
 	}
 }
+
+// P3b-06：B 写的 task_result 卡对旁观者 C 可见（快照从日志来，不需要任何唤醒）。
+// 路由回执/轮次摘要仍被排除 —— 它们只是人类 UI 的投影，正文可能含敏感信息。
+func TestSnapshotIncludesTaskResultForNonDispatcher(t *testing.T) {
+	g := &Group{
+		ID: "grp_snaptask", Name: "任务群", OwnerAgentID: "ag_aaaaaaaa",
+		Members: []Member{
+			{AgentID: "ag_aaaaaaaa", Role: RoleOwner, JoinedAt: testTime()},
+			{AgentID: "ag_bbbbbbbb", Role: RoleMember, JoinedAt: testTime()},
+			{AgentID: "ag_cccccccc", Role: RoleMember, JoinedAt: testTime()},
+		},
+	}
+	card := Message{
+		Seq: 3, GroupID: g.ID, Kind: KindTaskResult,
+		Sender:     Sender{Kind: SenderAgent, AgentID: "ag_bbbbbbbb"},
+		Text:       "价格表出来了：三家",
+		Visibility: VisibilityGroup, CreatedAt: testTime(),
+		TaskID: "task_1",
+		Refs:   map[string]any{"task_id": "task_1", "status": string(TaskCompleted)},
+	}
+	msgs := []Message{
+		{Seq: 1, GroupID: g.ID, Kind: KindText, Sender: Sender{Kind: SenderHuman}, Text: "开始整理价格表",
+			Visibility: VisibilityGroup, CreatedAt: testTime()},
+		{Seq: 2, GroupID: g.ID, Kind: KindRouting, Sender: Sender{Kind: SenderSystem}, Text: "回执：唤醒 B",
+			Visibility: VisibilityGroup, CreatedAt: testTime()},
+		card,
+		{Seq: 4, GroupID: g.ID, Kind: KindRoundSummary, Sender: Sender{Kind: SenderSystem}, Text: "本轮：B 完成",
+			Visibility: VisibilityGroup, CreatedAt: testTime()},
+	}
+	// C 不是本轮被 @ 的人，也没有任何唤醒：快照只按游标 delta 构建。
+	snap := BuildGroupSnapshot(g, "ag_cccccccc", msgs, 1, Round{}, SnapshotOptions{})
+	if len(snap.Messages) != 1 || snap.Messages[0].Seq != 3 {
+		t.Fatalf("snapshot messages = %+v, want only the task_result card", snap.Messages)
+	}
+	got := snap.Messages[0]
+	if got.Kind != KindTaskResult || got.TaskID != "task_1" ||
+		got.Refs["status"] != string(TaskCompleted) {
+		t.Fatalf("task_result card lost fields: %+v", got)
+	}
+	if !strings.Contains(snap.Text, "#3 ag_bbbbbbbb: 价格表出来了：三家") {
+		t.Fatalf("snapshot text = %q", snap.Text)
+	}
+	if strings.Contains(snap.Text, "回执") || strings.Contains(snap.Text, "本轮：B") {
+		t.Fatalf("UI-only messages leaked into snapshot: %q", snap.Text)
+	}
+}

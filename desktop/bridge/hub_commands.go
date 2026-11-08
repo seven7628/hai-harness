@@ -71,6 +71,8 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubSend(c)
 	case CmdHubHistory:
 		m.hubHistory(c)
+	case CmdHubMarkRead:
+		m.hubMarkRead(c)
 	case CmdHubTaskList:
 		m.hubTaskList(c)
 	case CmdHubTaskGet:
@@ -1049,6 +1051,65 @@ func (m *manager) hubDMPage(ctx context.Context, st *agenthub.FileStore, agentID
 		msgs = msgs[len(msgs)-limit:]
 	}
 	return msgs, hasMore, nil
+}
+
+// hubMarkRead 推进已读游标（§7.1.1）：群 → Group.HumanReadSeq（多端共享）；
+// agent → DM 游标（复用 SaveDMCursor）。两者都只影响未读点，不影响智能体上下文。
+//
+// 语义与 DM 一致：只前进。重复/乱序的 mark_read 返回生效值，不会把已读变未读。
+func (m *manager) hubMarkRead(c command) {
+	ctx := context.Background()
+	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	agentID := strings.TrimSpace(str(c.Payload, "agent_id"))
+	seq := numOr(c.Payload, "seq", 0)
+	switch {
+	case gid != "" && agentID != "":
+		m.resp(c, false, "group_id 与 agent_id 只能给一个", nil)
+		return
+	case gid == "" && agentID == "":
+		m.resp(c, false, "group_id 或 agent_id 必须给一个", nil)
+		return
+	case seq <= 0:
+		m.resp(c, false, "seq 必须为正整数", nil)
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	if gid != "" {
+		g, err := st.LoadGroup(ctx, gid)
+		if err != nil {
+			m.resp(c, false, "读取群组失败: "+err.Error(), nil)
+			return
+		}
+		if g.Deleted {
+			m.resp(c, false, "群组已删除", nil)
+			return
+		}
+		got, err := st.MarkGroupRead(ctx, gid, seq)
+		if err != nil {
+			m.resp(c, false, "保存已读位置失败: "+err.Error(), nil)
+			return
+		}
+		m.resp(c, true, "", map[string]any{"seq": got, "group_id": string(gid)})
+		return
+	}
+	if _, _, err := m.hubLoadAgent(agentID); err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	if err := st.SaveDMCursor(ctx, agenthub.AgentID(agentID), seq); err != nil {
+		m.resp(c, false, "保存已读位置失败: "+err.Error(), nil)
+		return
+	}
+	cur, err := st.LoadDMCursor(ctx, agenthub.AgentID(agentID))
+	if err != nil {
+		m.resp(c, false, "读取已读位置失败: "+err.Error(), nil)
+		return
+	}
+	m.resp(c, true, "", map[string]any{"seq": cur.HumanReadSeq, "agent_id": agentID})
 }
 
 // hubSend 人发一条 DM：索引落账 → 确保会话 → Ask + wake。

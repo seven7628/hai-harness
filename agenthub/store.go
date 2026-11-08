@@ -83,6 +83,13 @@ type Store interface {
 	// AdvanceAgentContextSeq 只前移 agent_context_seq，并在存储锁内保留 human_read_seq。
 	// 群会话收尾与人类已读是两个独立写者，整行 SaveCursor 会互相覆盖。
 	AdvanceAgentContextSeq(ctx context.Context, groupID GroupID, agentID AgentID, seq int64) error
+
+	// MarkGroupRead 只前移**群级**人类已读游标（Group.HumanReadSeq），返回生效后的值。
+	// 语义与 SaveDMCursor 一致：单调（0 < 已存值时不回退）、原子（存储锁内读-改-写）。
+	// 群不存在返回 ErrNotFound；seq <= 0 返回 ErrInvalid。
+	MarkGroupRead(ctx context.Context, groupID GroupID, seq int64) (int64, error)
+	// GroupReadSeq 读群级人类已读游标；群不存在返回 ErrNotFound。
+	GroupReadSeq(ctx context.Context, groupID GroupID) (int64, error)
 }
 
 const (
@@ -382,7 +389,25 @@ func (s *FileStore) SaveGroup(ctx context.Context, g *Group) error {
 	if g == nil || !validID(string(g.ID)) {
 		return fmt.Errorf("%w: group", ErrInvalid)
 	}
-	return writeJSONAtomic(s.groupPath(g.ID), g)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// 群更新是「读整份 → 改字段 → 写整份」，而 human_read_seq 有独立写者
+	//（MarkGroupRead）。写回时取磁盘上更大的游标，避免更新期间已读点倒退；
+	// 游标本身只前进，所以这个合并不会覆盖任何有意的修改。
+	saved := *g
+	var cur Group
+	err := readJSON(s.groupPath(g.ID), &cur)
+	switch {
+	case err == nil:
+		if cur.HumanReadSeq > saved.HumanReadSeq {
+			saved.HumanReadSeq = cur.HumanReadSeq
+		}
+	case errors.Is(err, ErrNotFound):
+		// 新建群：没有旧记录可合并。
+	default:
+		return err // 旧记录损坏：不覆盖（否则会静默丢掉整份群元数据）
+	}
+	return writeJSONAtomic(s.groupPath(saved.ID), &saved)
 }
 
 func (s *FileStore) ListGroups(ctx context.Context) ([]*Group, error) {

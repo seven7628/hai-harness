@@ -77,6 +77,9 @@ const (
 	CmdHubOpen    Command = "hub_open"
 	CmdHubSend    Command = "hub_send"
 	CmdHubHistory Command = "hub_history"
+	// CmdHubMarkRead 推进已读游标（左栏未读点，§7.1.1）：group_id → 群级游标；
+	// agent_id → DM 游标。两个只给一个。
+	CmdHubMarkRead Command = "hub_mark_read"
 	// —— Agent Hub（P2：任务板 + Needs you） ——
 	CmdHubTaskList    Command = "hub_task_list"
 	CmdHubTaskGet     Command = "hub_task_get"

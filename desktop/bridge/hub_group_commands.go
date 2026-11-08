@@ -16,12 +16,13 @@ import (
 )
 
 func (m *manager) hubGroupList(c command) {
+	ctx := context.Background()
 	st, err := m.hubStore()
 	if err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
-	all, err := st.ListGroups(context.Background())
+	all, err := st.ListGroups(ctx)
 	if err != nil {
 		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
 		return
@@ -32,7 +33,10 @@ func (m *manager) hubGroupList(c command) {
 			out = append(out, g)
 		}
 	}
-	m.resp(c, true, "", map[string]any{"groups": out, "count": len(out)})
+	// groups 保持原样；progress 是左栏投影（未读/预览/任务结论，P3b-06 §7.1.3）。
+	data := map[string]any{"groups": out, "count": len(out)}
+	data["progress"] = m.hubGroupProgressMap(ctx, st, out, data)
+	m.resp(c, true, "", data)
 }
 
 func (m *manager) hubGroupGet(c command) {
@@ -622,6 +626,11 @@ func (m *manager) hubGroupSend(c command) {
 	if err != nil {
 		m.resp(c, false, "写入群日志失败: "+err.Error(), nil)
 		return
+	}
+	// 人把话说出来了 = 人已经看到这里（§7.5.7 多端共享游标）：顺手前移群已读。
+	// 消息已落盘，游标失败不回滚消息、也不让发送失败，只告警（best-effort）。
+	if _, rerr := st.MarkGroupRead(ctx, g.ID, seq); rerr != nil {
+		m.hubAlertf("group_read_failed", "群 %s 已读游标推进失败：%s", g.ID, rerr)
 	}
 	round.TriggerSeq = seq
 	if deduped {

@@ -167,7 +167,12 @@ func (s *MemoryStore) SaveGroup(ctx context.Context, g *Group) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.groups[g.ID] = cloneGroup(g)
+	// 与 FileStore 同语义：群整份写回时保留更大的 human_read_seq（独立写者只前进）。
+	saved := cloneGroup(g)
+	if cur, ok := s.groups[g.ID]; ok && cur != nil && cur.HumanReadSeq > saved.HumanReadSeq {
+		saved.HumanReadSeq = cur.HumanReadSeq
+	}
+	s.groups[g.ID] = saved
 	return nil
 }
 
