@@ -22,7 +22,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -407,6 +409,82 @@ func TestCheckpointSerdeLab(t *testing.T) {
 			t.Logf("blocks 解码 worker=%d → %s", n, d.Round(time.Millisecond))
 			debug.FreeOSMemory()
 		}
+		return
+
+	case "mem":
+		// 单会话内存占用：逐个恢复并保持存活，看 HeapAlloc / RSS 增量。
+		// 这是 LRU 预算（256MB）反推会话数量的依据，不能靠估。
+		debug.FreeOSMemory()
+		var base runtime.MemStats
+		runtime.ReadMemStats(&base)
+		t.Logf("基线 HeapAlloc=%.1fMB", float64(base.HeapAlloc)/1e6)
+		var keep []*ViewReducer
+		var cps []*Checkpoint
+		prev := base.HeapAlloc
+		for i := 0; i < 20; i++ {
+			r5, lerr := store.LoadRecordForView(ctx, wsKey, sid)
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			cp5, perr := parseCheckpointFromRecordWindow(r5, 500)
+			if perr != nil {
+				t.Fatal(perr)
+			}
+			// 旧 record 的 turns 是 24MB 全量；迁移后 body 只带 512 条窗口
+			//（turns_total 记总数）。这里按迁移后的形态量，才是稳态占用。
+			if cp5.TurnsTotal == 0 && len(cp5.Turns) > turnsBodyWindow {
+				cp5.TurnsTotal = len(cp5.Turns)
+				cp5.Turns = cp5.Turns[len(cp5.Turns)-turnsBodyWindow:]
+			}
+			if i == 0 {
+				var mb runtime.MemStats
+				runtime.GC()
+				runtime.ReadMemStats(&mb)
+				t.Logf("装载后 HeapAlloc=%.1fMB（blocks=%d spans=%d 跨度字节=%d turns=%d diffs=%d）",
+					float64(mb.HeapAlloc)/1e6, len(cp5.Blocks), len(cp5.PagedBlocks.Spans),
+					func() int {
+						n := 0
+						for _, sp := range cp5.PagedBlocks.Spans {
+							n += len(sp)
+						}
+						return n
+					}(), len(cp5.Turns), len(cp5.Diffs))
+				tb := 0
+				for i := range cp5.Blocks {
+					tb += len(cp5.Blocks[i].Text) + len(cp5.Blocks[i].Thinking) + len(cp5.Blocks[i].Result)
+				}
+				t.Logf("窗口 500 块的文本字节=%d（约 %.1fKB/块）", tb, float64(tb)/500/1024)
+			}
+			rr := NewViewReducer()
+			if err := rr.Restore(cp5); err != nil {
+				t.Fatal(err)
+			}
+			clear(cp5.Turns) // 释放全量 turns，模拟迁移后不再持有
+			keep = append(keep, rr)
+			cps = append(cps, cp5)
+			if i == 0 || i == 4 || i == 19 {
+				runtime.GC()
+				var m runtime.MemStats
+				runtime.ReadMemStats(&m)
+				n := float64(i + 1)
+				t.Logf("会话数=%d HeapAlloc=%.1fMB（每会话≈%.2fMB）",
+					i+1, float64(m.HeapAlloc)/1e6, float64(m.HeapAlloc-base.HeapAlloc)/1e6/n)
+				_ = prev
+				runtimeGC()
+			}
+		}
+		if hp := os.Getenv("HAI_HEAP_PROFILE"); hp != "" {
+			f, ferr := os.Create(hp)
+			if ferr == nil {
+				runtime.GC()
+				if perr := pprof.WriteHeapProfile(f); perr != nil {
+					t.Logf("heap profile: %v", perr)
+				}
+				_ = f.Close()
+				t.Logf("heap profile → %s", hp)
+			}
+		}
+		t.Logf("keep=%d（防优化）", len(keep)+len(cps))
 		return
 
 	case "e2e":
