@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04 passed；P3b-05 智能体任务结算待 Review",
+  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05 passed；P3b-06 任务完成三层感知启动",
   "updated": "2026-11-07",
   "phases": [
     {
@@ -1215,9 +1215,11 @@ const BASE = {
       ],
       "acceptance": "目标 AgentEnd 结算；结果卡；派发者唤醒；不再重复发群消息；declined/canceled 路径。",
       "tests": "go test ./desktop/bridge/ -run FinishAgentTask",
-      "commit": "25cb0e5",
-      "status": "review",
-      "note": "实现完成，独立 Review 中（task-3ccfwxwf）"
+      "commit": "c35ec2d",
+      "status": "done",
+      "note": "实现 25cb0e5，修复 c35ec2d；复审 passed",
+      "review": "passed",
+      "reviewNote": "复审（task-3ccfwxwf）PASS。结算/结果卡/只唤醒派发者/不重复发群消息/task_ack/canceled 均成立；B-1 泵终态丢失已在 c35ec2d 修复：pumpAgentTask 统一投影 canceled/failed（hub_task_update + 卡 + 回推，去重幂等），assign note 按最终状态派生，queue 的落账失败分支返回 failed 快照；N-10 重启复制容错。变异 remove terminal projection / unconditional queued note / raw q.Pump 均 RED；两处真实 B-1 复现已转为 card+push+update。定向 -count=5 -race、vet/build 绿；全量仅两处既有环境失败。残留非阻塞：N-1 agent-origin recovery、N-2 running 不可达、N-5 卡片纯文本、N-6/N-7 prompt、N-12 覆盖缺口。"
     },
     {
       "id": "P3b-06",
@@ -1441,8 +1443,8 @@ const BASE = {
       "depends_on": [
         "P3b-05"
       ],
-      "return_when": "P3b-05 实现时接 hub_task header 绑定与结果卡",
-      "status": "deferred"
+      "return_when": "P3b-05 已实现并复审通过（c35ec2d）",
+      "status": "resolved"
     },
     {
       "id": "D-human-group-assign",
@@ -1462,6 +1464,39 @@ const BASE = {
       ],
       "return_when": "P3b-07 前端群组件落地时：消费 hub_conversation 事件（第 N/8 轮时间线、停止按钮、ConversationBar/Typing）",
       "note": "P3b-04 只产出事件与状态机；UI 渲染按实现说明归后续前端任务。"
+    },
+    {
+      "id": "D-agent-task-recovery",
+      "depends_on": [
+        "P3b-06"
+      ],
+      "return_when": "P3b-06 三层感知/恢复接线时：recoverOneTaskLocked 对 OriginGroup/agent 终态任务补结果卡与回推，不能只走 DM 路径",
+      "note": "P3b-05 复审 N-1：崩溃窗口内 agent 任务 completed 但无卡/无回推/无告警。"
+    },
+    {
+      "id": "D-task-running-binding",
+      "depends_on": [
+        "P3b-06"
+      ],
+      "return_when": "接 BindRun/AgentStart→running 时：让 task_ack 的“已开始不可拒绝”硬约束可达，并补真实分支测试",
+      "note": "P3b-05 复审 N-2：生产没有 dispatched→running 迁移。"
+    },
+    {
+      "id": "D-task-card-text-artifacts",
+      "depends_on": [
+        "P3b-07"
+      ],
+      "return_when": "P3b-07 结果卡渲染时：纯文本消费者（快照/左栏预览）需要状态/产物摘要，或由投影补全",
+      "note": "P3b-05 复审 N-5：卡正文只有 summary，结构化字段在 refs。"
+    },
+    {
+      "id": "D-task-result-prompt",
+      "depends_on": [
+        "P3b-06",
+        "P3b-07"
+      ],
+      "return_when": "更新群提示词/发现性时：写入 task_ack、结果卡不唤醒他人、收到 task_result 后需用 group_say 汇报",
+      "note": "P3b-05 复审 N-6/N-7：A 的默认回复不会进群，task_ack 不在提示词里。"
     }
   ],
   "progress": {
@@ -1795,10 +1830,10 @@ const BASE = {
       "reviewNote": "复审（task-qjcdjuud）PASS。B1 人类插话后旧链路深度污染：Offer 对非人类 depth 夹紧到 conv.depth+1（真实 4 跳链插话后 group_say 落到 depth=1，不再误耗尽）；N1 群内串行闸门：本群任一已装配会话 running/busy/dispatchPending/PendingCount>0 时不放行，wake 留队由下一次 hubOnRunEnd/冷却定时器重试（并行首轮也须全部结束）；N3 空 Offer 不建对话、N6 关停后停止命令拒绝。变异 remove clamp / remove groupRunInFlight / empty-target check / shutdown guard 均 RED；定向 -count=5 -race、go vet、go build 绿；工作区路径未进入闸门。残留非阻塞：闸门无看门狗、注释漂移。"
     },
     "P3b-05": {
-      "status": "review",
-      "commit": "25cb0e5 feat(hub-p3b-05): 智能体任务结算与结果卡",
-      "review": "pending",
-      "reviewNote": "实现完成，独立 Review 中（task-3ccfwxwf）"
+      "status": "done",
+      "commit": "c35ec2d fix(hub-p3b-05): 泵终态投影 + 重启复制容错",
+      "review": "passed",
+      "reviewNote": "复审（task-3ccfwxwf）PASS。结算/结果卡/只唤醒派发者/不重复发群消息/task_ack/canceled 均成立；B-1 泵终态丢失已在 c35ec2d 修复：pumpAgentTask 统一投影 canceled/failed（hub_task_update + 卡 + 回推，去重幂等），assign note 按最终状态派生，queue 的落账失败分支返回 failed 快照；N-10 重启复制容错。变异 remove terminal projection / unconditional queued note / raw q.Pump 均 RED；两处真实 B-1 复现已转为 card+push+update。定向 -count=5 -race、vet/build 绿；全量仅两处既有环境失败。残留非阻塞：N-1 agent-origin recovery、N-2 running 不可达、N-5 卡片纯文本、N-6/N-7 prompt、N-12 覆盖缺口。"
     }
   },
   "reviewGate": {
