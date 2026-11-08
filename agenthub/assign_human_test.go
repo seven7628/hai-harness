@@ -8,7 +8,9 @@ package agenthub
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 )
 
 // humanAssignTask 建一条「人在群里派给 B」的任务。
@@ -107,43 +109,102 @@ func TestQueueSubmitAgentRejectsInvalidHumanOrigin(t *testing.T) {
 	}
 }
 
-// TestGuardSkipAgentScope：人派任务的护栏只看全局/群预算与链长；
-// 按发起智能体的并发/去重/智能体日预算三项跳过（否则所有人类任务会共享
-// 同一个空 agent 桶，第三条就被「并发上限」挡住）。
+// TestGuardSkipAgentScope：人派任务的护栏只看全局/群预算与链长。
+//
+// 关键点：所有人类来源的 Origin.AgentID 都是空串，所以「按发起智能体」的三项
+// 额度（并发/去重/智能体日预算）会把**所有人**的任务算成同一个桶。这里用
+// OriginHuman + 空 AgentID + 同群同目标的种子把三项都做成「必然命中」：
+//   - 不开 SkipAgentScope：必须 ErrTooConcurrent / ErrDuplicateTask / ErrBudgetExceeded
+//     （证明种子是有效的，跳过不是空转）；
+//   - 开了：同样种子上必须全部放行；
+//   - 链长与全局/群日预算：即使开了也必须继续生效。
+//
+// 两个 Store 实现都要覆盖：有内存索引的快路径（checkIndexed）与没有索引的全盘
+// 扫描（ListTasks）。SkipAgentScope 在任一路径上被忽略，对应用例立刻变红。
 func TestGuardSkipAgentScope(t *testing.T) {
-	st, l := newGuardStore(t)
 	ctx := context.Background()
-	// 三条在途任务（不同发起者）+ 一条超预算的智能体日成本。
-	for _, text := range []string{"a", "b", "c"} {
-		if _, err := l.Create(ctx, guardTask(text)); err != nil {
-			t.Fatal(err)
-		}
+	now := time.Now().UTC()
+	stores := map[string]func() Store{
+		"indexed":  func() Store { return NewMemoryStore() },
+		"fallback": func() Store { return &fallbackStore{Store: NewMemoryStore()} },
 	}
-	addTask(t, l, "已花 5 元", 5, true)
+	for name, mk := range stores {
+		t.Run(name, func(t *testing.T) {
+			st := mk()
+			l := NewLedger(st)
+			// 三条在途的人派任务：并发额度与去重键（同群同目标）的种子。
+			for _, text := range []string{"在途一", "在途二", "在途三"} {
+				if _, err := l.Create(ctx, humanAssignTask("ag_b", text)); err != nil {
+					t.Fatalf("seed inflight %q: %v", text, err)
+				}
+			}
+			// 一条已完成、花费 $5 的人派任务：智能体日/群/全局预算的种子。
+			spent := humanAssignTask("ag_b", "已花钱")
+			created, err := l.Create(ctx, spent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := l.Transition(ctx, created.ID, TaskDispatched, TransitionOptions{At: now}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := l.Finish(ctx, FinishInput{
+				TaskID: created.ID, RunID: "r-scope", Status: TaskCompleted,
+				Result: &TaskResult{Summary: "done", Usage: Usage{CostPriced: true, CostUSD: 5}},
+				At:     now,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			probe := func(text string) *Task {
+				p := humanAssignTask("ag_b", text)
+				p.CreatedAt, p.UpdatedAt = now, now
+				return p
+			}
+			check := func(g *Guard, task *Task) error {
+				g.Now = func() time.Time { return now }
+				return g.Check(ctx, st, task)
+			}
 
-	human := humanAssignTask("ag_b", "a") // 与在途任务同指令：去重窗口也不该命中
-	human.Target.AgentID = "ag_q"
-	g := &Guard{Limits: GuardLimits{MaxConcurrent: 3, DailyBudgetUSD: 1, SkipAgentScope: true}}
-	if err := g.Check(ctx, st, human); err != nil {
-		t.Fatalf("SkipAgentScope 应跳过并发/去重/智能体日预算: %v", err)
-	}
+			// —— 不开 SkipAgentScope：三项按 agent 的额度都必须命中 ——
+			if err := check(&Guard{Limits: GuardLimits{MaxConcurrent: 10, DuplicateWindow: 10 * time.Minute}}, probe("在途一")); !errors.Is(err, ErrDuplicateTask) {
+				t.Fatalf("去重窗口 err = %v, want ErrDuplicateTask", err)
+			}
+			if err := check(&Guard{Limits: GuardLimits{MaxConcurrent: 3}}, probe("新任务")); !errors.Is(err, ErrTooConcurrent) {
+				t.Fatalf("并发上限 err = %v, want ErrTooConcurrent", err)
+			}
+			if err := check(&Guard{Limits: GuardLimits{MaxConcurrent: 10, DailyBudgetUSD: 1}}, probe("新任务")); !errors.Is(err, ErrBudgetExceeded) ||
+				!strings.Contains(err.Error(), "智能体日预算") {
+				t.Fatalf("智能体日预算 err = %v, want ErrBudgetExceeded（智能体日预算）", err)
+			}
 
-	// 全局/群预算仍然生效。
-	g.Limits.GlobalDailyBudgetUSD = 4
-	if err := g.Check(ctx, st, human); !errors.Is(err, ErrBudgetExceeded) {
-		t.Fatalf("全局预算 err = %v, want budget exceeded", err)
-	}
-	g.Limits.GlobalDailyBudgetUSD = 0
-	g.Limits.GroupDailyBudgetUSD = 4
-	if err := g.Check(ctx, st, human); err != nil {
-		t.Fatalf("群预算在没有群成本时不应命中: %v", err)
-	}
+			// —— 开 SkipAgentScope：同样的种子上三项全部放行 ——
+			if err := check(&Guard{Limits: GuardLimits{MaxConcurrent: 10, DuplicateWindow: 10 * time.Minute, SkipAgentScope: true}}, probe("在途一")); err != nil {
+				t.Fatalf("SkipAgentScope 应跳过去重窗口: %v", err)
+			}
+			if err := check(&Guard{Limits: GuardLimits{MaxConcurrent: 3, SkipAgentScope: true}}, probe("新任务")); err != nil {
+				t.Fatalf("SkipAgentScope 应跳过并发上限: %v", err)
+			}
+			if err := check(&Guard{Limits: GuardLimits{MaxConcurrent: 10, DailyBudgetUSD: 1, SkipAgentScope: true}}, probe("新任务")); err != nil {
+				t.Fatalf("SkipAgentScope 应跳过智能体日预算: %v", err)
+			}
 
-	// 对照组：同样的任务在 agent 作用域下会被并发/去重挡住（证明上面不是空转）。
-	agentTask := assignTask("ag_q", "ag_b", "a")
-	agentTask.Origin.AgentID = "ag_q"
-	g = &Guard{Limits: GuardLimits{MaxConcurrent: 3, DailyBudgetUSD: 1}}
-	if err := g.Check(ctx, st, agentTask); !errors.Is(err, ErrTooConcurrent) {
-		t.Fatalf("agent 作用域 err = %v, want too concurrent", err)
+			// —— 链长仍然生效（与是否跳过 agent 额度无关）——
+			deep := probe("接力")
+			for i := 0; i < 7; i++ {
+				deep.Chain = append(deep.Chain, TaskID("task_scope"+string(rune('a'+i))))
+			}
+			if err := check(&Guard{Limits: GuardLimits{MaxChainSteps: 6, SkipAgentScope: true}}, deep); !errors.Is(err, ErrChainTooDeep) {
+				t.Fatalf("链长 err = %v, want ErrChainTooDeep", err)
+			}
+
+			// —— 全局/群日预算仍然生效（种子 $5）——
+			if err := check(&Guard{Limits: GuardLimits{GroupDailyBudgetUSD: 4, SkipAgentScope: true}}, probe("新任务")); !errors.Is(err, ErrBudgetExceeded) ||
+				!strings.Contains(err.Error(), "群日预算") {
+				t.Fatalf("群日预算 err = %v, want ErrBudgetExceeded（群日预算）", err)
+			}
+			if err := check(&Guard{Limits: GuardLimits{GlobalDailyBudgetUSD: 4, SkipAgentScope: true}}, probe("新任务")); !errors.Is(err, ErrBudgetExceeded) ||
+				!strings.Contains(err.Error(), "全局日预算") {
+				t.Fatalf("全局日预算 err = %v, want ErrBudgetExceeded（全局日预算）", err)
+			}
+		})
 	}
 }

@@ -42,6 +42,10 @@ func parseHubTaskToolArgs(arguments string) (agenthub.TaskID, error) {
 
 // hubTaskForAgent 读任务并校验归属；不属于本智能体的 id 一律 ErrNotFound，
 // 不向外泄露「存在但不是你的」。
+//
+// 已知限制（P3b-07a N-06，延后）：人派任务的 Origin.AgentID 为空，执行者自己也
+// 读不到它。放开「执行者可读被派任务」要同时定案 task_cancel 的权限，先不在这里
+// 顺手放宽归属边界。
 func (m *manager) hubTaskForAgent(ctx context.Context, id agenthub.TaskID, agentID agenthub.AgentID) (*agenthub.Task, error) {
 	st, err := m.hubStore()
 	if err != nil {

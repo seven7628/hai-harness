@@ -13,6 +13,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/core"
@@ -27,15 +28,36 @@ func humanAssign(t *testing.T, m *manager, buf *syncBuf, id int, payload map[str
 
 // humanTaskUpdate 取某条 hub_task_update 事件（找不到 = nil）。
 func humanTaskUpdate(buf *syncBuf, id agenthub.TaskID, status agenthub.TaskStatus) map[string]any {
-	for _, ev := range readAllLines(buf) {
+	events := readAllLines(buf)
+	if i := humanTaskUpdateIndex(events, id, status); i >= 0 {
+		return events[i]
+	}
+	return nil
+}
+
+// humanTaskUpdateIndex 是 hub_task_update 在事件流里的位置（-1 = 没有）。
+// 事件顺序断言必须用下标，不能只看「都存在」—— 顺序错了 UI 会先看到终态再看到 queued。
+func humanTaskUpdateIndex(events []map[string]any, id agenthub.TaskID, status agenthub.TaskStatus) int {
+	for i, ev := range events {
 		if ev["event_type"] != "hub_task_update" || ev["task_id"] != string(id) {
 			continue
 		}
 		if status == "" || ev["status"] == string(status) {
-			return ev
+			return i
 		}
 	}
-	return nil
+	return -1
+}
+
+// humanTaskUpdateCount 统计某任务某状态的 hub_task_update 条数（幂等断言）。
+func humanTaskUpdateCount(buf *syncBuf, id agenthub.TaskID, status agenthub.TaskStatus) int {
+	n := 0
+	for _, ev := range readAllLines(buf) {
+		if ev["event_type"] == "hub_task_update" && ev["task_id"] == string(id) && ev["status"] == string(status) {
+			n++
+		}
+	}
+	return n
 }
 
 // humanTaskUpdateOriginKind 从 hub_task_update 的整条 task 里取 origin.kind。
@@ -126,10 +148,16 @@ func TestHumanGroupAssign(t *testing.T) {
 	if err != nil || len(acts) != 1 || acts[0].AfterSeq != msg.Seq+1 {
 		t.Fatalf("activity = %+v, %v", acts, err)
 	}
+	// 人把指派发出来 = 人已看到这里：群已读游标前移到指派消息（P3b-07a N-01）。
+	if grp, gerr := st.LoadGroup(context.Background(), g.ID); gerr != nil || grp == nil {
+		t.Fatalf("load group: %v", gerr)
+	} else if grp.HumanReadSeq != msg.Seq {
+		t.Fatalf("HumanReadSeq = %d, want 指派消息 seq = %d", grp.HumanReadSeq, msg.Seq)
+	}
 
-	// 任务板事件：hub_message（人发的 assign）→ queued → dispatched，且 origin=human。
-	evMsg := -1
+	// 任务板事件顺序：hub_message（人发的 assign）→ queued → dispatched，且 origin=human。
 	eventsList := readEvents(t, buf)
+	evMsg := -1
 	for i, ev := range eventsList {
 		if ev["event_type"] != "hub_message" {
 			continue
@@ -146,16 +174,30 @@ func TestHumanGroupAssign(t *testing.T) {
 	if evMsg < 0 {
 		t.Fatalf("缺 hub_message(intent=assign)：\n%s", buf.String())
 	}
-	queued := humanTaskUpdate(buf, task.ID, agenthub.TaskQueued)
-	dispatched := humanTaskUpdate(buf, task.ID, agenthub.TaskDispatched)
-	if queued == nil || dispatched == nil {
+	iQueued := humanTaskUpdateIndex(eventsList, task.ID, agenthub.TaskQueued)
+	iDispatched := humanTaskUpdateIndex(eventsList, task.ID, agenthub.TaskDispatched)
+	if iQueued < 0 || iDispatched < 0 {
 		t.Fatalf("缺 hub_task_update(queued/dispatched)：\n%s", buf.String())
 	}
+	if !(evMsg < iQueued && iQueued < iDispatched) {
+		t.Fatalf("事件顺序错：message=%d queued=%d dispatched=%d", evMsg, iQueued, iDispatched)
+	}
+	dispatched := eventsList[iDispatched]
 	if got := humanTaskUpdateOriginKind(dispatched); got != string(agenthub.OriginHuman) {
 		t.Fatalf("hub_task_update origin.kind = %q, want human", got)
 	}
 	if dispatched["group_id"] != string(g.ID) || dispatched["target_kind"] != string(agenthub.TargetAgent) {
 		t.Fatalf("hub_task_update = %+v", dispatched)
+	}
+	// 扁平执行者字段：人派任务 agent_id（发起者）为空，UI 靠 target_agent_id 定位任务卡。
+	if dispatched["agent_id"] != "" || dispatched["target_agent_id"] != string(b.ID) {
+		t.Fatalf("hub_task_update agent_id/target_agent_id = %v/%v, want \"\"/%s",
+			dispatched["agent_id"], dispatched["target_agent_id"], b.ID)
+	}
+	if evTask, _ := dispatched["task"].(map[string]any); evTask != nil {
+		if target, _ := evTask["target"].(map[string]any); target == nil || target["agent_id"] != string(b.ID) {
+			t.Fatalf("hub_task_update task.target.agent_id = %v, want %s", evTask["target"], b.ID)
+		}
 	}
 
 	// B 被唤醒：请求里有 hub_task header，且 header 的 origin=human。
@@ -262,8 +304,35 @@ func TestHumanGroupAssignBusyQueuesAndPumps(t *testing.T) {
 	if done.Status != agenthub.TaskCompleted {
 		t.Fatalf("task status = %s, want completed", done.Status)
 	}
-	if !p3bHasTaskUpdate(buf, task.ID, agenthub.TaskCompleted) {
-		t.Fatalf("缺 hub_task_update(completed)：\n%s", buf.String())
+	// 任务板事件必须走完 queued → dispatched → completed：忙路径的派发以前被
+	// scheduleAgentTaskPump 丢掉，UI 会一直停在 queued（P3b-07a N-02）。
+	eventsList := readAllLines(buf)
+	iQueued := humanTaskUpdateIndex(eventsList, task.ID, agenthub.TaskQueued)
+	iDispatched := humanTaskUpdateIndex(eventsList, task.ID, agenthub.TaskDispatched)
+	iCompleted := humanTaskUpdateIndex(eventsList, task.ID, agenthub.TaskCompleted)
+	if iQueued < 0 || iDispatched < 0 || iCompleted < 0 {
+		t.Fatalf("缺 queued/dispatched/completed 事件：%d/%d/%d\n%s", iQueued, iDispatched, iCompleted, buf.String())
+	}
+	if !(iQueued < iDispatched && iDispatched < iCompleted) {
+		t.Fatalf("事件顺序错：queued=%d dispatched=%d completed=%d", iQueued, iDispatched, iCompleted)
+	}
+	if ev := eventsList[iDispatched]; ev["target_agent_id"] != string(b.ID) || ev["status"] != string(agenthub.TaskDispatched) {
+		t.Fatalf("hub_task_update(dispatched) = %+v, want target_agent_id=%s", ev, b.ID)
+	}
+	// 幂等：任务自己的 run-end 已经再触发过一次任务泵（队列已空），dispatched 只有一条。
+	// 再手动来一次 run-end 也不能重发。
+	if n := humanTaskUpdateCount(buf, task.ID, agenthub.TaskDispatched); n != 1 {
+		t.Fatalf("hub_task_update(dispatched) = %d, want 1（幂等）", n)
+	}
+	bsB.hubOnRunEnd()
+	if !m.stopHubBackground(2 * time.Second) {
+		t.Fatal("等待 hub 后台任务超时")
+	}
+	if n := humanTaskUpdateCount(buf, task.ID, agenthub.TaskDispatched); n != 1 {
+		t.Fatalf("重复 run-end 后 hub_task_update(dispatched) = %d, want 1", n)
+	}
+	if n := humanTaskUpdateCount(buf, task.ID, agenthub.TaskCompleted); n != 1 {
+		t.Fatalf("hub_task_update(completed) = %d, want 1", n)
 	}
 	// 人不需要唤醒：没有 task_result_delivered，也没有 push 失败告警。
 	if n := p3bEventCount(t, buf, string(events.TaskResultDeliveredType), task.ID); n != 0 {
@@ -458,5 +527,68 @@ func TestHumanGroupAssignBudgetHardStop(t *testing.T) {
 	stop, msg := m.hubBudgetCheck(task.ID, agenthub.DefaultGlobalDailyBudgetUSD+1)
 	if !stop || !strings.Contains(msg, "全局日预算") {
 		t.Fatalf("hubBudgetCheck = %v/%q, want 全局预算硬停", stop, msg)
+	}
+
+	// 群预算同样要能硬停：Group.Policy.DailyBudgetUSD=4、本任务已花 5。
+	ctx := context.Background()
+	st := mustHubStore(t, m)
+	cur, err := st.LoadGroup(ctx, g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.Policy.DailyBudgetUSD = 4
+	if err := st.SaveGroup(ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	if stop, _ := m.hubBudgetCheck(task.ID, 0); stop {
+		t.Fatal("没花到群预算时不应硬停")
+	}
+	if stop, msg := m.hubBudgetCheck(task.ID, 5); !stop || !strings.Contains(msg, "群日预算") {
+		t.Fatalf("hubBudgetCheck = %v/%q, want 群预算硬停（$4 上限、已花 $5）", stop, msg)
+	}
+}
+
+// TestHumanGroupAssignAcceptsPlanAgentIDKey（P3b-07a 复审 B-01）：方案 §7.1.3 的
+// payload 写的是 agent_id；只认 to_agent 会让按方案接线的 UI 直接失败。
+func TestHumanGroupAssignAcceptsPlanAgentIDKey(t *testing.T) {
+	m, buf := testManager(t)
+	b := createDispatchAgent(t, m, buf, 1, "方案键B", false)
+	c := createDispatchAgent(t, m, buf, 2, "方案键C", false)
+	g := assignGroup(t, m, buf, 3, "方案键群", map[agenthub.AgentID]string{
+		b.ID: "owner", c.ID: "member",
+	})
+	// 两个目标都忙：任务留 queued，本测试只看目标解析（不依赖 run 时序）。
+	for _, id := range []agenthub.AgentID{b.ID, c.ID} {
+		bs := mustGroupSession(t, m, string(id), string(g.ID))
+		bs.hubGroupBusy.Store(true)
+		t.Cleanup(func() { bs.hubGroupBusy.Store(false) })
+	}
+
+	// 方案 payload：{group_id, agent_id, instruction}（没有 to_agent）。
+	ok, errMsg, data := humanAssign(t, m, buf, 10, map[string]any{
+		"group_id": string(g.ID), "agent_id": string(b.ID), "instruction": "按方案键名派活",
+	})
+	if !ok {
+		t.Fatalf("plan payload（agent_id）: %s", errMsg)
+	}
+	task := taskOf(t, data)
+	if task.Target.AgentID != b.ID || data["to_agent"] != string(b.ID) || data["task_id"] != string(task.ID) {
+		t.Fatalf("agent_id 未生效: target=%s resp=%+v", task.Target.AgentID, data)
+	}
+
+	// 两个键都给：to_agent 优先（agent_id 是回落）。
+	ok, errMsg, data = humanAssign(t, m, buf, 11, map[string]any{
+		"group_id": string(g.ID), "to_agent": string(c.ID), "agent_id": string(b.ID),
+		"instruction": "两个键都给",
+	})
+	if !ok {
+		t.Fatalf("both keys: %s", errMsg)
+	}
+	if task := taskOf(t, data); task.Target.AgentID != c.ID {
+		t.Fatalf("to_agent 应优先，target = %s, want %s", task.Target.AgentID, c.ID)
+	}
+	// 两次都真的写了 assign 消息（键名解析不绕过消息/锚定）。
+	if total, _ := countAssignMessages(t, m, g.ID); total != 2 {
+		t.Fatalf("指派消息 = %d, want 2", total)
 	}
 }

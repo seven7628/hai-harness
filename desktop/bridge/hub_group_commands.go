@@ -674,7 +674,9 @@ func (m *manager) hubGroupSend(c command) {
 //   - 不需要发起者成员/派发权限，也不受「同一对 2 个在途」上限约束
 //     （人没有 agent id，这条额度无从判起）。
 //
-// payload：{group_id, to_agent, instruction, title?, client_msg_id?}
+// payload：{group_id, agent_id | to_agent, instruction, title?, client_msg_id?}
+// 目标键两个都收（§7.1.3 写的是 agent_id，智能体工具/前端习惯 to_agent）：
+// to_agent 优先，缺省回落到 agent_id —— 只认一个会让按方案接线的 UI 直接失败。
 // 响应与 assign_task 同形（hubAssignResult）：任务忙时留 queued，由目标回合结束后
 // 的任务泵派发；终态（canceled/failed）带 note 说明原因。
 func (m *manager) hubGroupAssign(c command) {
@@ -686,7 +688,10 @@ func (m *manager) hubGroupAssign(c command) {
 	}
 	to := strings.TrimSpace(str(c.Payload, "to_agent"))
 	if to == "" {
-		m.resp(c, false, "to_agent 不能为空", nil)
+		to = strings.TrimSpace(str(c.Payload, "agent_id")) // §7.1.3 的键名
+	}
+	if to == "" {
+		m.resp(c, false, "to_agent 不能为空（也接受 agent_id）", nil)
 		return
 	}
 	instruction := strings.TrimSpace(str(c.Payload, "instruction"))
@@ -722,6 +727,14 @@ func (m *manager) hubGroupAssign(c command) {
 	if err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
+	}
+	// 人把指派发出来了 = 人已经看到这里（§7.5.7 多端共享游标）：与 hub_group_send
+	// 同口径顺手前移群已读。消息已落盘、任务已建，游标失败不回滚、也不让指派失败，
+	// 只告警（best-effort）—— 否则重试会建第二条任务。
+	if seq > 0 {
+		if _, rerr := st.MarkGroupRead(ctx, g.ID, seq); rerr != nil {
+			m.hubAlertf("group_read_failed", "群 %s 已读游标推进失败：%s", g.ID, rerr)
+		}
 	}
 	m.resp(c, true, "", hubAssignResult(task, seq, dispatched))
 }

@@ -364,11 +364,14 @@ func (m *manager) emitHubTaskUpdate(t *agenthub.Task) {
 		return
 	}
 	// §7.2/§7.3.3 契约：以 task_id 为 key 摊平字段；保留 task 供任务板整条渲染。
+	// agent_id = 发起智能体（人派任务没有 → 空）；target_agent_id = 执行者，
+	// 给 P3b-07 UI 一个稳定的扁平字段（不用再钻 task.target，P3b-07a N-05）。
 	m.out.writeLine(map[string]any{
 		"event_type": "hub_task_update", "task_id": string(t.ID), "task": t,
 		"status": t.Status, "target_kind": t.Target.Kind,
 		"group_id": t.Target.GroupID, "agent_id": t.Origin.AgentID,
-		"title": t.Title, "error": t.Error,
+		"target_agent_id": t.Target.AgentID,
+		"title":           t.Title, "error": t.Error,
 	})
 }
 

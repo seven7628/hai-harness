@@ -440,10 +440,27 @@ func (m *manager) scheduleAgentTaskPump(gid agenthub.GroupID, agentID agenthub.A
 			return // 没有排队的任务：不碰存储、不阻塞事件
 		}
 		// 终态（canceled/failed）由 pumpAgentTask 投影成任务卡 + 结果卡 + 回推，
-		// 不再静默丢掉（P3b-05 B-1）。
-		if _, err := m.pumpAgentTask(ctx, target); err != nil && ctx.Err() == nil {
-			m.hubAlertf("task_pump_failed", "群 %s 智能体 %s 的任务泵失败：%v", gid, agentID, err)
+		// 不再静默丢掉（P3b-05 B-1）。非终态（dispatched/running）以前被直接丢弃：
+		// 忙路径的任务板就永远停在 queued，直到完成才有下一条事件（P3b-07a N-02）。
+		pumped, perr := m.pumpAgentTask(ctx, target)
+		if perr != nil && ctx.Err() == nil {
+			m.hubAlertf("task_pump_failed", "群 %s 智能体 %s 的任务泵失败：%v", gid, agentID, perr)
 		}
+		if pumped == nil || pumped.Status.Terminal() {
+			return
+		}
+		// 幂等：Pump 只有把队首 queued→dispatched 才算派发，同一个任务只会从这里
+		// 成功返回一次；重复的 run-end 看到队列已空直接返回，不会重发。
+		latest := pumped
+		if st, serr := m.hubStore(); serr == nil {
+			if cur, rerr := st.LoadTask(ctx, pumped.ID); rerr == nil && cur != nil {
+				latest = cur // 投递到发事件的窗口里可能已经 AgentStart：如实报 running
+			}
+		}
+		if latest.Status.Terminal() {
+			return // 结算路径（finishHubTask）已经/即将投影终态，别抢发旧快照
+		}
+		m.emitHubTaskUpdate(latest)
 	})
 }
 
