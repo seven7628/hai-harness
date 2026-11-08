@@ -282,7 +282,8 @@ func (m *manager) wakeGroupRound(g *agenthub.Group, round agenthub.Round, trigge
 			continue
 		}
 		w := agenthub.Wake{
-			GroupID: g.ID, Sender: trigger.Sender.AgentID, Human: trigger.Sender.Kind == agenthub.SenderHuman,
+			GroupID: g.ID, ConversationID: m.hubConversationView(g.ID).ID,
+			Sender: trigger.Sender.AgentID, Human: trigger.Sender.Kind == agenthub.SenderHuman,
 			Target: target, Text: trigger.Text, Depth: depth, Turn: turn,
 			TriggerSeq: trigger.Seq, RoundID: round.ID, EnqueuedAt: time.Now(),
 		}
@@ -331,7 +332,7 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	snap := agenthub.BuildGroupSnapshot(g, target, msgs, cursor.AgentContextSeq, round, agenthub.SnapshotOptions{})
 	header := &agenthub.GroupWakeHeader{
 		GroupID: g.ID, AgentID: target, RoundID: w.RoundID, TriggerSeq: w.TriggerSeq,
-		Depth: w.Depth, Turn: w.Turn,
+		Depth: w.Depth, Turn: w.Turn, ConversationID: w.ConversationID,
 	}
 	hidden, err := agenthub.EncodeGroupWake(header, snap.Text)
 	if err != nil {
@@ -404,8 +405,40 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, conten
 
 // finishHubRound 把群会话最终正文写入群日志，并推进 agent_context_seq。
 // 空回复/与最后一条 group_say 重复：不写 final，只推进游标（方案 §6.5.7）。
+// hubFinishRoundHook 仅测试用：final 落账入口的确定性停点（生产恒 nil）。
+// 用来证明「停止标记已落地时，正在收尾的 fast run 一定在闸门前被拦下」。
+var hubFinishRoundHook func(gid agenthub.GroupID)
+
+// hubFinishRoundBarrier 读钩子时取一次快照（同其它 barrier 惯例）。
+func hubFinishRoundBarrier(gid agenthub.GroupID) {
+	if hook := hubFinishRoundHook; hook != nil {
+		hook(gid)
+	}
+}
+
 func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeHeader, content string) {
 	if spec == nil || wake == nil {
+		return
+	}
+	hubFinishRoundBarrier(wake.GroupID)
+	// Stop P1：人类已停止自动对话时，停止窗口里跑完的 fast run 不能再把 final
+	// 写进群（先是「停止」系统消息、后面又冒出一条智能体发言）。
+	//
+	// 状态检查 + 落账都持群 dispatch 闸门，而 hubConversationStop 是**先标记
+	// stopped、再抢闸门**：所以这里读到的 stopped 一定是权威顺序 —— 要么 final
+	// 在停止之前已经写完（闸门先到），要么被这里抑制（标记先到）。人类插话开的
+	// 新对话是 running（不是 stopped），旧 run 允许正常收尾。
+	unlock := m.hubConvDispatch.lock(wake.GroupID)
+	defer unlock()
+	if m.hubConversationView(wake.GroupID).Status == agenthub.ConversationStopped {
+		st, serr := m.hubStore()
+		if serr != nil {
+			m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", serr)
+			return
+		}
+		if err := m.advanceGroupAgentCursor(context.Background(), st, wake.GroupID, spec.Agent.ID, wake.TriggerSeq); err != nil {
+			m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
+		}
 		return
 	}
 	st, err := m.hubStore()

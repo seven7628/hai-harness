@@ -212,8 +212,12 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 		return
 	}
 	hubConvDispatchBarrier("due", gid)
-	// 投递前验一次对话身份：停止/人类消息会换 conv.id 并清队列，旧 wake 属于旧对话。
-	if wake.ConversationID != "" && wake.ConversationID != view.ID {
+	// 投递前再验一次（Stop P1）：停止是**先标记 stopped、再抢闸门**，所以它可能刚好
+	// 落在 NextDue 之后。已停止 → 这条 wake 作废（不告警，人就是要它停）；人类插话
+	// 开的对话会换 id → 旧 wake 丢弃并告警。
+	if cur := ctrl.View(gid); cur.Status == agenthub.ConversationStopped {
+		return
+	} else if wake.ConversationID != "" && wake.ConversationID != cur.ID {
 		m.hubAlertf("group_conversation_stale_wake", "群 %s 唤醒 %s 属于已结束的对话，已丢弃", gid, wake.Target)
 		return
 	}
@@ -231,6 +235,11 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 	hubConvDispatchBarrier("delivered", gid)
 	begun, ok := ctrl.BeginTurn(gid, time.Time{})
 	if !ok {
+		if v := ctrl.View(gid); v.Status == agenthub.ConversationStopped {
+			// 停止在投递窗口里落地：这一轮随停止作废（finishHubRound 会抑制 final，
+			// 停止系统消息由 stop 自己写）。不算异常，不告警。
+			return
+		}
 		// 投递已经发生（目标会话真会跑一轮），却记不上账：不能再静默当成良性竞态，
 		// 否则这一轮完全绕过预算/深度护栏。留告警 + 终态视图，由人类重开对话。
 		m.hubAlertf("group_conversation_turn_lost", "群 %s 唤醒 %s 已投递但对话状态已变化，本轮未记账", gid, wake.Target)
@@ -565,13 +574,12 @@ func (m *manager) hubConversationStop(c command) {
 		return
 	}
 	ctrl := m.hubConversation()
-	// 停止必须与「取/投/记账」互斥：否则 NextDue 之后、投递之前的 wake 会在
-	// 停止之后照跑（B2）。锁只包住状态切换；中断会话放到锁外（hubInterrupt 可能
-	// 同步走收尾路径，不能再进这把锁）。
-	unlock := m.hubConvDispatch.lock(g.ID)
+	// Stop P1：**先**标记 stopped / 清队列（不持闸门），再去抢闸门做中断。
+	// 这样停止窗口里收尾的 fast run 在 finishHubRound 里读到的一定是 stopped，
+	// final 会被抑制；而闸门保证「正在投递的 wake」先落地/记账，不会被中途撕开。
 	view := ctrl.Stop(g.ID, "人类停止了自动对话，等你继续", time.Time{})
 	m.bumpHubConversationGen(g.ID) // 冷却定时器作废：停止之后不许再自己接龙
-	unlock()
+	unlock := m.hubConvDispatch.lock(g.ID)
 	interrupted := 0
 	for _, bs := range m.groupActiveSessions(g) {
 		if bs.hubInterrupt != nil {
@@ -581,6 +589,9 @@ func (m *manager) hubConversationStop(c command) {
 		}
 		interrupted++
 	}
+	unlock()
+	// 系统消息在放闸门之后写：任何已经在收尾的 final 要么排在它前面（闸门先到，
+	// 状态还是 running），要么已经被抑制 —— 不会出现「停止」之后又冒一条 final。
 	m.notifyHubConversation(g.ID, view)
 	m.resp(c, true, "", map[string]any{"conversation": view, "interrupted": interrupted})
 }

@@ -120,16 +120,15 @@ func (m *manager) deliverTaskResult(ctx context.Context, id agenthub.TaskID) {
 	}
 	// 同一次结算可能排了多条通知（第二次 AgentEnd/恢复与首推并发）：
 	// 已回推过的直接退出，别再用 delivered 快照刷一遍 UI。
-	runID := task.Dispatch.RunID
-	if runID == "" {
-		runID = "recovery" // 没有真实 run（恢复合成）：MarkNotified 的占位键
-	}
+	// 没有真实 run（恢复合成）用确定性 per-task 标记，恢复重放才能写进
+	// notified_run_ids（否则空 run 永远 MarkNotified 不成功，状态停在 completed）。
+	runID := recoveryRunID(task)
 	if alreadyNotified(task, runID) {
 		return
 	}
 	ledger := agenthub.NewLedger(st)
 	if task.Target.Kind == agenthub.TargetAgent {
-		m.pushAgentTaskResult(ledger, task)
+		m.pushAgentTaskResult(ledger, task, runID)
 		return
 	}
 	m.pushHubTaskResult(ledger, task, runID)

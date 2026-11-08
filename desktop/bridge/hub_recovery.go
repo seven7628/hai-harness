@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -113,48 +114,87 @@ func (m *manager) recoverHubTasks() error {
 	return nil
 }
 
+// recoveryRunID 恢复期的确定性 run 占位：没有真实 run 时用 per-task 标记写进
+// notified_run_ids，恢复重放才能幂等（P2；此前空 run 永远写不进账本，任务卡在
+// completed 而不是 delivered）。真实 run 仍优先：避免真实 AgentEnd 迟到时重放
+// （P2-05 NB-3）。deliverTaskResult 与这里必须用同一个推导。
+func recoveryRunID(t *agenthub.Task) string {
+	if t == nil {
+		return ""
+	}
+	if t.Dispatch.RunID != "" {
+		return t.Dispatch.RunID
+	}
+	return "recovery:" + string(t.ID)
+}
+
+// hubTaskSessionLive 报告任务的执行会话是否**仍在本进程里**跑着。
+// 覆盖三种「还在路上」的形态：根 run 已启动（running）、已 Ask 但 root AgentStart
+// 还没到（hubDispatchPending）、任务消息还在 inbox 里没被消费（PendingCount>0）。
+// 只看消费端状态不够：恢复发生在启动早期，没装配的会话一律视为没有活 run。
+func (m *manager) hubTaskSessionLive(t *agenthub.Task) bool {
+	if m == nil || t == nil || t.Target.SessionID == "" {
+		return false
+	}
+	bs := m.sessionByID(t.Target.SessionID)
+	if bs == nil {
+		return false
+	}
+	// 工作区会话的 sid 可能在不同工作区重复：必须连 workspace 一起对。
+	if ws := strings.TrimSpace(t.Target.Workspace); ws != "" && bs.workspace != ws {
+		return false
+	}
+	return bs.running.Load() || bs.hubDispatchPending.Load() || bs.s.PendingCount() > 0
+}
+
 // recoverOneTaskLocked 处理单条任务；调用方必须持有 hubFinishMu。
 // 返回需要异步回推的任务 id（空 = 不需要）。
+//
+// 结果卡只在**终态确定之后**写（P1）：以前在 switch 之前就写，dispatched/running
+// 的任务会先落一张非终态卡；卡的 client_msg_id 是确定性的（task_result:<id>），
+// 之后真正的终态卡被去重，群里永远停在 dispatched/running。
 func (m *manager) recoverOneTaskLocked(ctx context.Context, ledger *agenthub.Ledger, t *agenthub.Task) agenthub.TaskID {
 	if t == nil {
 		return ""
 	}
-	// 智能体任务的群内结果卡是持久层（store-only，锁内安全）：崩溃前若没写成，
-	// 这里补上，否则恢复出来的终态在群里「看不见」（P3b-08 P2）。
-	m.ensureAgentTaskResultCard(t)
 	switch t.Status {
 	case agenthub.TaskQueued:
 		return ""
 	case agenthub.TaskDispatched, agenthub.TaskRunning:
+		// 本进程里还有活 run：交给事件流正常收尾（不能误标中断）。
+		if m.hubTaskSessionLive(t) {
+			return ""
+		}
+		reason := "进程重启：没有对应的运行记录"
 		if t.Dispatch.RunID != "" {
-			return "" // 有真实 run：由事件流正常收尾
+			reason = "进程重启：运行记录已丢失（run " + t.Dispatch.RunID + "）"
 		}
 		updated, terr := ledger.Transition(ctx, t.ID, agenthub.TaskInterrupted, agenthub.TransitionOptions{
-			At: time.Now().UTC(), Error: "进程重启：没有对应的运行记录",
+			At: time.Now().UTC(), Error: reason,
 		})
 		if terr != nil {
 			m.emitHubTaskAlert(t.ID, "recovery_failed", terr.Error())
 			return ""
 		}
 		m.emitHubTaskUpdate(updated)
-		m.emitHubTaskAlert(t.ID, "recovered_interrupted", "进程重启：任务没有对应的运行记录，已标中断")
+		m.emitHubTaskAlert(t.ID, "recovered_interrupted", reason)
 		m.openRecoveryNeed(updated)
-		// 结果回推发起者；已通知过则跳过。
-		if alreadyNotified(updated, "recovery") {
+		// 终态已确定：补一张 interrupted 结果卡（此前从此不写卡 → 群里停在旧状态）。
+		m.ensureAgentTaskResultCard(updated)
+		if alreadyNotified(updated, recoveryRunID(updated)) {
 			return ""
 		}
 		return updated.ID
 	case agenthub.TaskCompleted, agenthub.TaskFailed, agenthub.TaskInterrupted, agenthub.TaskBlockedBudget:
-		runID := t.Dispatch.RunID
-		if runID == "" {
-			runID = "recovery"
-		}
-		if alreadyNotified(t, runID) {
+		m.ensureAgentTaskResultCard(t)
+		if alreadyNotified(t, recoveryRunID(t)) {
 			return ""
 		}
-		// 用真实 run 占位，避免恢复写 "recovery" 后真实 run 迟到重放（P2-05 NB-3）：
-		// deliverTaskResult 读的就是 Dispatch.RunID。
 		return t.ID
+	default:
+		// canceled/declined 等终态：卡可以补（幂等），但没有 delivered 出边，
+		// 不重推（否则每次重启都唤醒一次派发者）。
+		m.ensureAgentTaskResultCard(t)
 	}
 	return ""
 }

@@ -28,6 +28,10 @@ type GroupWakeHeader struct {
 	// 里的旧块必须继续能解析（「没有字段」= 深度/轮次未知，按 0 处理）。
 	Depth int `json:"depth,omitempty"`
 	Turn  int `json:"turn,omitempty"`
+	// ConversationID 是这条唤醒所属的自动对话 id（P3b-08 Stop P1）：收尾时用它
+	// 判断这一轮是不是已经被人类停止/换代，停止之后不再往群里写 final。
+	// omitempty：P3b-04 之前落盘的旧 header 没有该字段，解码为 ""。
+	ConversationID string `json:"conversation_id,omitempty"`
 }
 
 // EncodeGroupWake 编码 hidden 块内容：首行 header JSON，空行后快照。

@@ -121,7 +121,7 @@ func (m *manager) appendAgentTaskResultCard(task *agenthub.Task) (*agenthub.Mess
 // pushAgentTaskResult 只回推派发者（origin=group + agent_id），DM/人工来源不回推。
 // 成功才 MarkNotified（completed/failed/interrupted/blocked_budget 允许；
 // canceled/declined 没有 delivered 出边，靠接收端 HasTaskResult 保持恰好一次）。
-func (m *manager) pushAgentTaskResult(ledger *agenthub.Ledger, task *agenthub.Task) {
+func (m *manager) pushAgentTaskResult(ledger *agenthub.Ledger, task *agenthub.Task, runID string) {
 	if m == nil || task == nil {
 		return
 	}
@@ -144,7 +144,7 @@ func (m *manager) pushAgentTaskResult(ledger *agenthub.Ledger, task *agenthub.Ta
 	// 接收端幂等：结果已在发起者上下文（上次 push 成功但 MarkNotified 失败/崩溃）
 	// 就不再推第二份，只补标记与终态快照（前端「已回推」收敛）。
 	if origin.s.HasTaskResult(string(task.ID)) {
-		m.markAgentTaskNotified(ledger, task)
+		m.markAgentTaskNotified(ledger, task, runID)
 		if latest, lerr := ledger.Replay(context.Background(), task.ID); lerr == nil && latest != nil {
 			m.emitHubTaskUpdate(latest)
 		}
@@ -156,18 +156,21 @@ func (m *manager) pushAgentTaskResult(ledger *agenthub.Ledger, task *agenthub.Ta
 		m.emitHubTaskAlert(task.ID, "push_failed", err.Error())
 		return
 	}
-	m.markAgentTaskNotified(ledger, task)
+	m.markAgentTaskNotified(ledger, task, runID)
 	if latest, lerr := ledger.Replay(context.Background(), task.ID); lerr == nil && latest != nil {
 		m.emitHubTaskUpdate(latest)
 	}
 }
 
 // markAgentTaskNotified 记录「已回推」。状态机没有出边时（canceled/declined）跳过。
-func (m *manager) markAgentTaskNotified(ledger *agenthub.Ledger, task *agenthub.Task) {
+// runID 由调用方给（真实 run 或 recovery:<task_id> 占位）。
+func (m *manager) markAgentTaskNotified(ledger *agenthub.Ledger, task *agenthub.Task, runID string) {
 	if m == nil || ledger == nil || task == nil {
 		return
 	}
-	runID := task.Dispatch.RunID
+	if runID == "" {
+		runID = task.Dispatch.RunID
+	}
 	switch task.Status {
 	case agenthub.TaskCompleted, agenthub.TaskFailed, agenthub.TaskInterrupted,
 		agenthub.TaskBlockedBudget, agenthub.TaskDelivered:
@@ -175,8 +178,7 @@ func (m *manager) markAgentTaskNotified(ledger *agenthub.Ledger, task *agenthub.
 		return // canceled/declined/queued/... 没有 delivered 出边
 	}
 	if runID == "" {
-		// 没有真实 run（例如恢复合成）：MarkNotified 的幂等键就是 run_id，
-		// 空串不能写进 notified_run_ids（会把后续真实 run 全挡掉）。
+		// 空 run 不能写进 notified_run_ids（会把后续真实 run 全挡掉）。
 		return
 	}
 	if _, err := ledger.MarkNotified(context.Background(), task.ID, runID); err != nil {
