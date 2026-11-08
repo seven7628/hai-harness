@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05/06/07a/07 passed；P3b-08 总验收启动",
+  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01…07a/07 passed；P3b-08 总验收与评测 8–9 实现中",
   "updated": "2026-11-07",
   "phases": [
     {
@@ -975,7 +975,9 @@
       ],
       "acceptance": "A@B 可协作；B 完成 A 被唤醒；不无限互踢；人插话/停止生效；Review passed。",
       "tests": "go test ./agenthub/... ./desktop/bridge/...",
-      "commit": "chore(hub-p3b-08): P3b review + evals"
+      "commit": "chore(hub-p3b-08): P3b review + evals",
+      "status": "in_progress",
+      "note": "实现中：评测 8–9 + P3b 最终验收 + P3b-07 残余小修"
     },
     {
       "id": "P4-01",
@@ -1648,6 +1650,12 @@
       "commit": "def0c8b fix(hub-p3b-07): 群内复审修复",
       "review": "passed",
       "reviewNote": "复审（task-2mgw5eff）PASS。B1 群线程自动跟随（1440/1024 结果卡 100% 可见、上滚不被拽回）；B2 IME 守卫先于 picker；B3 空 picker 不吞 Enter、中文标点关闭、markdown 链接标签不被 linkify；B4 关闭 Hub 群未读保留、active 才推已读；B5 结果卡用 task origin 显示 你/Researcher → Writer；B6 Go 真实 BuildTurnContext + chip 跳转高亮（高亮 CSS 仍缺，非阻塞）；B7 hub_group_get 水合 conversation/cursor、dispatched/running 任务可停止；B8 paper/ink 对比度 ≥4.5；N1–N4/N8–N10 收口。变异 M5–M11/MB6/MB7 全 RED。非阻塞残余：highlight CSS、mock stop 未结算任务、DM 刷新竞态。"
+    },
+    "P3b-08": {
+      "status": "in_progress",
+      "commit": "",
+      "review": "pending",
+      "reviewNote": "实现中"
     }
   },
   "reviewGate": {
