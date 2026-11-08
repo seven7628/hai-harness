@@ -4425,6 +4425,44 @@ go test <pkg> -list '<tasks[].tests 里的 -run 正则>'   # 必须至少列出�
 
 合计 **51** 个任务（9+10+9+10+8+5）。每个任务 = 一个 commit + 一次 Review。
 
+#### 19.3.2 P3b 验收记录（2026-11，P3b-08）
+
+§12 的 P3b 验收口径逐条成立：A 能 @B 并把事派给 B（P3b-02/03）；B 完成后群内出现
+结果卡、A 被唤醒（P3b-05/06 + 评测 8）；A↔B 不会无限互踢（P3b-04 轮次/深度/踢皮球 +
+结果卡不路由，评测 8）；人插话/停止立即生效（P3b-04 + 停止护栏）；其他成员下次被 @
+时快照里能看到结果卡（P3b-06 + 评测 9）。
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| 评测 8 · agent 派任务 → 结果卡 → 只唤醒派发者 | PASS | `desktop/bridge/hub_eval_p3b_test.go::TestEval8AgentAssignCompletesAndWakesDispatcher` |
+| 评测 9 · 其他成员下次被 @ 看到结果（含失败分支） | PASS | `TestEval9OtherMemberSeesResultOnNextMention`（`failed` 子测试） |
+| 停止护栏 · A 已 @B 入队、B 未启动时人停止 | PASS | `TestEval8HumanStopStopsChain` |
+| 残余 1 · 上下文 chip 跳转高亮 | 已补 `.hub-msg-highlight`：ink/paper 描边对底色 9.0–10.1:1，reduced-motion 不播放淡入 | `desktop/app/src/hub/hub.css` + 浏览器探针 |
+| 残余 2 · mock stop 未结算在飞任务 | 已修：停止为 queued/dispatched/running 任务发 `hub_task_update(status=interrupted)`；二次 assign 完成后停止按钮保持禁用 | `scripts/test-hub-p3b.mjs` 的 mock 用例 |
+| 残余 3 · DM 未读刷新竞态 | 已修：`shouldApplyDMInfo`（last_seq + 请求时点代际）逐 agent 合并，刷新期间到达的消息/未读不被旧响应覆盖 | `groupProjection.ts` / `useHubStore.ts` + `test-hub-p3b.mjs` |
+
+**任务 commit（P3b 全期）**：`e4b8b8b` 01 · `3725ece` 01b · `8610862` 02 · `8c44149` `df4fde4` 03 ·
+`9c851d1` `0f3c321` 04 · `25cb0e5` `c35ec2d` 05 · `5b5fb01` 06 · `8946ab7` `2d6c866` 07a ·
+`8eadfda` `def0c8b` 07 · `7d3670d` 08。
+
+**门禁**：`go test ./agenthub/...`、`go build ./...`、`go vet ./...` 绿；
+`go test ./desktop/bridge/...` 只有既有环境/顺序敏感失败（`TestP0GuidanceCausesModelToWriteMemory`
+真实 provider 探活、`TestReducerLLMEndDedupAndUsage` 这类共享价表的用例，单独跑绿）；
+前端 `tsc --noEmit`、`test:hub`(14)、`test:hub-stream`(14)、`test:hub-alerts`(12)、
+`test:hub-p3b`(206)、`vite build` 绿；定向 eslint 0 error（全量 lint 只剩既有
+`lab/test-runtime-turns.ts` 解析错误）。变异验证（删高亮 CSS / 去掉 mock stop 结算 /
+绕过 DM 守卫 / 结果卡叫醒 C / 结果卡不进快照）均能让对应探针或用例 RED。
+
+**已知 defer（P4/后续）**：
+
+1. N5：结果卡正文只有摘要，状态/产物在 `refs`（纯文本消费者看不到状态）；
+2. N6/N7：`task_ack` 与「收到 task_result 后用 group_say 汇报」不在群提示词里；
+3. 前端 `@你`/`@user` 高亮未做（当前按普通文本渲染，不唤醒模型）；
+4. §7.5.5 任务卡生命周期：时间线只为**终态**结果卡建卡，queued/dispatched/running
+   没有占位卡（进行中状态在任务板/自动对话状态条上）；
+5. 390px 移动端横向溢出（D-390-mobile，随 P4 移动端布局）；
+6. P4：流式/typing 弱网与长会话打磨、Context 面板/深链、手机端/IM、外部 hooks、FTS。
+
 ### 19.4 看板怎么用
 
 1. 双击 `docs/agent-hub/PROGRESS.html`（无需服务器；自包含）。
