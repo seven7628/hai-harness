@@ -538,7 +538,7 @@ func TestCheckpointSerdeLab(t *testing.T) {
 			t.Fatal(cerr)
 		}
 		fi, _ := os.Stat(recPath)
-		t.Logf("提交: total=%s encode=%s temp=%s record=%.1fMB",
+		t.Logf("提交: total=%s encode=%s temp=%s record=%.2fMB",
 			ct2.Total.Round(time.Millisecond), ct2.Encode.Round(time.Millisecond),
 			ct2.Temp.Round(time.Millisecond), float64(fi.Size())/1e6)
 
@@ -615,7 +615,7 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		}
 		dec3 := time.Since(t0)
 		rec3.ReleaseView()
-		t.Logf("提交后重开：LoadRecordForView=%s 解码=%s blocks=%d record=%.1fMB",
+		t.Logf("提交后重开：LoadRecordForView=%s 解码=%s blocks=%d record=%.2fMB",
 			load3.Round(time.Millisecond), dec3.Round(time.Millisecond), len(cp3.Blocks),
 			func() float64 {
 				if fi, e := os.Stat(filepath.Join(root, wsKey, sid+".record.json")); e == nil {

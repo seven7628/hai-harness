@@ -144,11 +144,11 @@ func resolveBlocksRefMapped(view []byte, recordPath string) (*mappedView, error)
 	}
 
 	ids := make([]string, 0, len(mapped.index))
-	if len(ref.IDs) > 0 {
-		if ref.Count != len(ref.IDs) {
-			return fail(fmt.Errorf("block ref malformed: count=%d ids=%d", ref.Count, len(ref.IDs)))
+	if refNums := ref.refIDs(); len(refNums) > 0 {
+		if ref.Count != len(refNums) {
+			return fail(fmt.Errorf("block ref malformed: count=%d ids=%d", ref.Count, len(refNums)))
 		}
-		for _, v := range ref.IDs {
+		for _, v := range refNums {
 			ids = append(ids, uintToString(v))
 		}
 	} else {

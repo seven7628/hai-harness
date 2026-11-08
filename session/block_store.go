@@ -87,6 +87,86 @@ type blocksRefDoc struct {
 	// 有了 ids，读取只校验「我引用的这些块」是否存在且内容一致，
 	// sidecar 里多出来的块（后续提交/废弃版本）不再影响可读性。
 	IDs []uint64 `json:"ids,omitempty"`
+
+	// Range 是「id 连续」时的紧凑写法（min..max），此时省略 IDs。
+	//
+	// 为什么需要：块 id 由 reducer 单调分配，正常情况下是一个连续的 1..N 集合，
+	// 30k 块写成 IDs 数组是约 210KB/次提交的 JSON（真实会话 30,885 块）；
+	// 用 range 只需 30 字节。稀疏集合（发生过裁剪/清空后的洞）仍写 IDs。
+	Range *idRange `json:"range,omitempty"`
+
+	// Missing 是 Range 里的「洞」（被裁剪/清空后不再引用的 id，通常个位数）。
+	// 真实会话实测：31,040 个引用、max=31,042 —— 3 个洞，写成 missing 只有 20 字节。
+	Missing []uint64 `json:"missing,omitempty"`
+}
+
+// idRange 是闭区间 [Min, Max]。
+type idRange struct {
+	Min uint64 `json:"min"`
+	Max uint64 `json:"max"`
+}
+
+// refIDs 展开引用里的 id 集合（IDs 优先；否则按 Range 连续展开）。
+func (r blocksRefDoc) refIDs() []uint64 {
+	if len(r.IDs) > 0 {
+		return r.IDs
+	}
+	if r.Range != nil && r.Range.Max >= r.Range.Min {
+		hole := make(map[uint64]struct{}, len(r.Missing))
+		for _, v := range r.Missing {
+			hole[v] = struct{}{}
+		}
+		out := make([]uint64, 0, r.Range.Max-r.Range.Min+1)
+		for v := r.Range.Min; v <= r.Range.Max; v++ {
+			if _, ok := hole[v]; ok {
+				continue
+			}
+			out = append(out, v)
+		}
+		return out
+	}
+	return nil
+}
+
+// maybeDenseRange 在 id 连续时把 IDs 换成 Range，省掉 30k 个数字
+// （真实会话约 210KB/次提交的 JSON）。
+func (r *blocksRefDoc) maybeDenseRange() {
+	if len(r.IDs) < 2 {
+		return
+	}
+	lo, hi := r.IDs[0], r.IDs[len(r.IDs)-1]
+	span := hi - lo + 1
+	if span < uint64(len(r.IDs)) {
+		return
+	}
+	holes := span - uint64(len(r.IDs))
+	// 洞太多（超过 1% 或 64 个）就不值得用 range，直接写 ids。
+	if holes > 64 || (len(r.IDs) >= 1000 && holes > uint64(len(r.IDs))/100) {
+		return
+	}
+	missing := make([]uint64, 0, holes)
+	next := lo
+	for _, v := range r.IDs {
+		for next < v {
+			missing = append(missing, next)
+			next++
+		}
+		next = v + 1
+	}
+	r.Range = &idRange{Min: lo, Max: hi}
+	r.Missing = missing
+	r.IDs = nil
+}
+
+// refCount 返回引用集合的块数（Range 形态下 count 仍是权威值）。
+func (r blocksRefDoc) refCount() int {
+	if len(r.IDs) > 0 {
+		return len(r.IDs)
+	}
+	if r.Range != nil && r.Count > 0 {
+		return r.Count
+	}
+	return r.Count
 }
 
 // sortedIDNums 把 id 字符串转成升序的数值列表（写引用时用）。
@@ -978,6 +1058,7 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 		return nil, 0, ierr
 	}
 	ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: setSum, Count: len(elems), Schema: 1, IDs: ids}
+	ref.maybeDenseRange()
 	refJSON, err := json.Marshal(map[string]blocksRefDoc{blocksRefKey: ref})
 	if err != nil {
 		return nil, 0, err
@@ -1113,6 +1194,7 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 		return nil, 0, ierr2
 	}
 	ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: setSum2, Count: len(refIDs2), Schema: 1, IDs: ids2}
+	ref.maybeDenseRange()
 	refJSON, err := json.Marshal(map[string]blocksRefDoc{blocksRefKey: ref})
 	if err != nil {
 		return nil, 0, err
@@ -1423,14 +1505,14 @@ func resolveBlocksRefSpans(view []byte, recordPath string) ([]byte, [][]byte, er
 	}
 	defer bs.Close()
 
-	if len(ref.IDs) > 0 {
-		// 新口径（带 ids）：只校验「我引用的块」。sidecar 里多出来的块属于
-		// 后续提交或废弃版本，不该影响这一版 record 的可读性。
-		if ref.Count != len(ref.IDs) {
-			return nil, nil, fmt.Errorf("block ref malformed: count=%d ids=%d", ref.Count, len(ref.IDs))
+	if refNums := ref.refIDs(); len(refNums) > 0 {
+		// 新口径（带 ids 或 range）：只校验「我引用的块」。sidecar 里多出来的块
+		// 属于后续提交或废弃版本，不该影响这一版 record 的可读性。
+		if ref.Count != len(refNums) {
+			return nil, nil, fmt.Errorf("block ref malformed: count=%d ids=%d", ref.Count, len(refNums))
 		}
-		ids := make([]string, len(ref.IDs))
-		for i, v := range ref.IDs {
+		ids := make([]string, len(refNums))
+		for i, v := range refNums {
 			ids[i] = strconv.FormatUint(v, 10)
 		}
 		got, serr := blocksSetSum(bs, ids)

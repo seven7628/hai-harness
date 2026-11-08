@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,6 +109,77 @@ func TestCommitWindowSpansRejectsMissingBlock(t *testing.T) {
 		}
 		if b.ID == 99 {
 			t.Fatal("record 引用了不存在的块 99")
+		}
+	}
+}
+
+// TestDenseBlockRefUsesRange 密集 id 集合写成 range（省 210KB/次提交），
+// 读回必须能展开成同一集合；稀疏集合仍走 ids。
+func TestDenseBlockRefUsesRange(t *testing.T) {
+	store, err := NewFileStorage(filepath.Join(t.TempDir(), "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsKey, sid := "ws", "s-range"
+	blocks := make([]string, 8)
+	for i := range blocks {
+		blocks[i] = fmt.Sprintf(`{"kind":"assistant","id":%d,"text":"m"}`, i+1)
+	}
+	raw := []byte(fmt.Sprintf(`{"schema_version":1,"blocks":[%s],"run_nodes":[],"turns":[],"usage":{},"todos":[]}`, joinStrings(blocks)))
+	if err := store.CommitRecord(context.Background(), NewSessionRecord(wsKey, sid, 1, 1, 0, State{}, raw)); err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.RecordPath(wsKey, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"range"`) {
+		t.Fatal("密集集合应写成 range")
+	}
+	if strings.Contains(string(data), `"ids"`) {
+		t.Fatal("range 形态不应同时写 ids")
+	}
+	back, err := store.LoadRecord(context.Background(), wsKey, sid)
+	if err != nil {
+		t.Fatalf("range 形态读回失败: %v", err)
+	}
+	var probe struct {
+		Blocks []json.RawMessage `json:"blocks"`
+	}
+	if err := json.Unmarshal(back.ViewCheckpoint, &probe); err != nil {
+		t.Fatal(err)
+	}
+	if len(probe.Blocks) != 8 {
+		t.Fatalf("range 展开应有 8 块，得 %d", len(probe.Blocks))
+	}
+}
+
+// TestSparseRefUsesRangeWithMissing 真实会话的 id 集合不是严格连续（裁剪/清空后
+// 有洞，实测 31,040 个引用、max=31,042）：少量洞也要能写成 range+missing。
+func TestSparseRefUsesRangeWithMissing(t *testing.T) {
+	var ids []uint64
+	for _, v := range []uint64{1, 2, 4, 5, 6} { // 洞 = 3
+		ids = append(ids, v)
+	}
+	ref := blocksRefDoc{Count: len(ids), IDs: ids}
+	ref.maybeDenseRange()
+	if ref.Range == nil || len(ref.IDs) != 0 {
+		t.Fatalf("少量洞应写成 range，得 range=%v ids=%d", ref.Range, len(ref.IDs))
+	}
+	if len(ref.Missing) != 1 || ref.Missing[0] != 3 {
+		t.Fatalf("missing 应为 [3]，得 %v", ref.Missing)
+	}
+	got := ref.refIDs()
+	if len(got) != len(ids) {
+		t.Fatalf("展开条数 want %d got %d", len(ids), len(got))
+	}
+	for i := range ids {
+		if got[i] != ids[i] {
+			t.Fatalf("展开结果错位: want %v got %v", ids, got)
 		}
 	}
 }
