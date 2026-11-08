@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05/06/07a passed；P3b-07 前端互 @/结果卡实现中",
+  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05/06/07a/07 passed；P3b-08 总验收启动",
   "updated": "2026-11-07",
   "phases": [
     {
@@ -956,9 +956,11 @@
       ],
       "acceptance": "@ chip 反规范化（名字用 accent 着色）；对话/派任务两态；逐轮条；结果卡；context 行（≥2 触发者才显示，chip 可跳转）；typing；键盘/主题/空态。",
       "tests": "npm run lint && npm run test:agent-session",
-      "commit": "feat(hub-p3b-07): 互 @ 与任务结果 UI",
-      "status": "in_progress",
-      "note": "实现中：mention chip/picker、ConversationBar、TaskResultCard、Typing、context 行、群已读接线"
+      "commit": "def0c8b",
+      "status": "done",
+      "note": "实现 8eadfda，修复 def0c8b；复审 passed",
+      "review": "passed",
+      "reviewNote": "复审（task-2mgw5eff）PASS。B1 群线程自动跟随（1440/1024 结果卡 100% 可见、上滚不被拽回）；B2 IME 守卫先于 picker；B3 空 picker 不吞 Enter、中文标点关闭、markdown 链接标签不被 linkify；B4 关闭 Hub 群未读保留、active 才推已读；B5 结果卡用 task origin 显示 你/Researcher → Writer；B6 Go 真实 BuildTurnContext + chip 跳转高亮（高亮 CSS 仍缺，非阻塞）；B7 hub_group_get 水合 conversation/cursor、dispatched/running 任务可停止；B8 paper/ink 对比度 ≥4.5；N1–N4/N8–N10 收口。变异 M5–M11/MB6/MB7 全 RED。非阻塞残余：highlight CSS、mock stop 未结算任务、DM 刷新竞态。"
     },
     {
       "id": "P3b-08",
@@ -1187,8 +1189,9 @@
         "P3b-06",
         "P3b-07"
       ],
-      "return_when": "P3b-07 前端群组件落地时：消费 hub_conversation 事件（第 N/8 轮时间线、停止按钮、ConversationBar/Typing）",
-      "note": "P3b-04 只产出事件与状态机；UI 渲染按实现说明归后续前端任务。"
+      "return_when": "P3b-07 已实现并复审通过（def0c8b）",
+      "note": "P3b-04 只产出事件与状态机；UI 渲染按实现说明归后续前端任务。",
+      "status": "resolved"
     },
     {
       "id": "D-agent-task-recovery",
@@ -1266,6 +1269,30 @@
       "depends_on": [],
       "return_when": "下一次改 hub_group_assign 时：补非法 agent_id 零副作用、MarkGroupRead 失败告警/不回滚两条测试",
       "note": "P3b-07a 复审 N-2/N-3。"
+    },
+    {
+      "id": "D-msg-highlight-css",
+      "depends_on": [
+        "P3b-08"
+      ],
+      "return_when": "P3b-08 最终视觉收口：补 .hub-msg-highlight（reduced-motion 安全）并验证上下文 chip 跳转有可见反馈",
+      "note": "P3b-07 复审非阻塞 1。"
+    },
+    {
+      "id": "D-mock-stop-terminal",
+      "depends_on": [
+        "P3b-08"
+      ],
+      "return_when": "P3b-08 评测/mock 收口：mock stop 对在飞任务发 interrupted/canceled task_update，避免第二次 assign 后停止按钮误启用",
+      "note": "P3b-07 复审非阻塞 2。"
+    },
+    {
+      "id": "D-dm-unread-refresh-race",
+      "depends_on": [
+        "P3b-08"
+      ],
+      "return_when": "P3b-08 左栏收口：hub_agent_list 响应按 last_seq/请求代际合并，避免刷新覆盖期间到达的 DM 未读",
+      "note": "P3b-07 复审非阻塞 3。"
     }
   ],
   "progress": {
@@ -1617,10 +1644,10 @@
       "reviewNote": "复审（task-6gq667m8）PASS。B-01 已修：hub_group_assign 优先 to_agent、回退计划字段 agent_id，两者并存 to_agent 胜；human origin 校验/Guard SkipAgentScope（indexed+fallback 测试已可杀变异）/assign 消息 sender=human+mentions=[B]/structured 路由/结算结果卡+不唤醒人类/群日预算硬停；N-01 人类已读游标、N-02 忙碌泵 queued→dispatched→completed、N-05 target_agent_id、事件顺序均已补。非阻塞：N-1 仍忙时重复 queued 更新、N-2/N-3 两个测试缺口、N-06 B 不能查询/取消人类任务（记债）。"
     },
     "P3b-07": {
-      "status": "in_progress",
-      "commit": "",
-      "review": "pending",
-      "reviewNote": "实现中"
+      "status": "done",
+      "commit": "def0c8b fix(hub-p3b-07): 群内复审修复",
+      "review": "passed",
+      "reviewNote": "复审（task-2mgw5eff）PASS。B1 群线程自动跟随（1440/1024 结果卡 100% 可见、上滚不被拽回）；B2 IME 守卫先于 picker；B3 空 picker 不吞 Enter、中文标点关闭、markdown 链接标签不被 linkify；B4 关闭 Hub 群未读保留、active 才推已读；B5 结果卡用 task origin 显示 你/Researcher → Writer；B6 Go 真实 BuildTurnContext + chip 跳转高亮（高亮 CSS 仍缺，非阻塞）；B7 hub_group_get 水合 conversation/cursor、dispatched/running 任务可停止；B8 paper/ink 对比度 ≥4.5；N1–N4/N8–N10 收口。变异 M5–M11/MB6/MB7 全 RED。非阻塞残余：highlight CSS、mock stop 未结算任务、DM 刷新竞态。"
     }
   },
   "reviewGate": {
