@@ -223,7 +223,9 @@ func usageOrNil(u core.Usage) *core.Usage {
 //  2. 子调用自动汇入 ctx 上的 core.NestedRecorder（记录 + 用量）；
 //  3. **不发射工具事件**（ToolStart/ToolResponse）：带 ParentCallId 的嵌套事件流是
 //     Phase 2 的事。但**审批事件必须透出** —— 请求不到 UI，一次 manual 模式的嵌套
-//     调用会白等满审批窗口并占住会话审批队列（设计文档 §16.2）。
+//     调用会白等满审批窗口并占住会话审批队列（设计文档 §16.2）。会话级事实因此由
+//     **外层响应代发**：文件 diff 随结果走（ToolDiffProvider），待办快照由 recorder 的
+//     todoWrites 触发（见 engine.finish）—— 侧副作用不会因为「不显示成一行」而消失。
 //
 // # 已知降级（Phase 0，负向测试钉住）
 //

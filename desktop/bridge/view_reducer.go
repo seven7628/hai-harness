@@ -160,7 +160,9 @@ type Block struct {
 	Promoted   bool   `json:"promoted,omitempty"`
 	TaskStatus string `json:"task_status,omitempty"`
 	// Todos 待办清单快照，按 kind 解释（同名字段、两种宿主）：
-	//   · tool 块 → 该次 todo_* 调用完成时刻的**会话**清单（历史计划卡定格）
+	//   · tool 块 → 该次调用完成时刻的**会话**清单（历史计划卡定格）。带快照的调用有两类：
+	//     直呼的 todo_*，以及改动过清单的编排调用（codemode —— 脚本里的 todo_* 是嵌套
+	//     调用、不发事件，快照由外层响应代发，见 tools/engine.go 的 todoWrites）
 	//   · agent 块 → 该子 agent **自己的**清单（与顶层 Checkpoint.Todos 分开存：
 	//     子 agent 有独立 TODO，两者不得串味）
 	Todos []TodoItem `json:"todos,omitempty"`
@@ -294,8 +296,9 @@ type AgentItem struct {
 	// 与 NestedCalls 的区别：保留操作不是工具调用，纯检索脚本的 NestedCalls 恒为空 ——
 	// 宿主只能靠这里的计数把工具行标成「Codemode Search」（见 core.HostOps）。
 	HostOps *core.HostOps `json:"host_ops,omitempty"`
-	// Todos todo_* 工具项那一刻**该子 agent 自己**的清单快照（与块级 Todos 同源，
-	// 后者是「最近一次」的滚动值；这里定格本次调用，历史计划卡才显示当时状态）。
+	// Todos todo_* 工具项（或改动过清单的编排调用，其外层响应代发）那一刻**该子 agent
+	// 自己**的清单快照（与块级 Todos 同源，后者是「最近一次」的滚动值；这里定格本次调用，
+	// 历史计划卡才显示当时状态）。
 	Todos []TodoItem `json:"todos,omitempty"`
 
 	// —— 一轮的指标（text/thinking item 上）——

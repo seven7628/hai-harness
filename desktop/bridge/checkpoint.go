@@ -431,6 +431,20 @@ func todoItems(in []todo.Item) []TodoItem {
 	return out
 }
 
+// todoResponseCarriesSnapshot 这条工具响应是否携带待办快照（extras 注入与 reducer
+// meta 共用的**唯一**判据）。
+//
+// 判据是「事件带快照」，不是「工具名以 todo_ 开头」：编排型工具（codemode）的响应
+// 同样会带快照 —— 脚本里的 todo_* 是嵌套调用、按契约不发射工具事件，快照只能由外层
+// 响应代发（见 tools/engine.go finish 的 todoWrites）。只认名字的话，脚本改过的清单
+// 永远到不了宿主：待办面板停在脚本执行之前（用户 2026-11 报障）。
+//
+// 名字判据保留给**没有** Todos 字段的旧事件日志（重放）：那时仍回退读会话 store，
+// 与从前行为一致（见 todosOf）。
+func todoResponseCarriesSnapshot(ev *events.ToolResponse) bool {
+	return ev.Todos != nil || strings.HasPrefix(ev.Name, "todo_")
+}
+
 // todosOf 取一条事件携带的待办快照（**属主 = 发出该事件的运行**）。
 //
 // 事件自带快照时以它为准：子 agent 的 todo_* 带的是它自己那份独立清单，而
@@ -470,7 +484,7 @@ func (bs *bridgeSession) observe(e events.Event) {
 			meta.CostUSD = costUsd(bs.provider, ev.Model, *ev.Usage)
 		}
 	case *events.ToolResponse:
-		if strings.HasPrefix(ev.Name, "todo_") {
+		if todoResponseCarriesSnapshot(ev) {
 			meta.Todos = todosOf(bs, ev.Todos)
 		}
 	case *events.CompressEnd:

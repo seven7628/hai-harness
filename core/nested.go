@@ -87,12 +87,13 @@ func (h HostOps) IsZero() bool { return h.Search == 0 && h.Describe == 0 }
 //
 // 并发安全：脚本内可用 Promise.all 并发发起多个嵌套调用。
 type NestedRecorder struct {
-	mu       sync.Mutex
-	calls    []NestedCallRecord
-	argBytes int
-	dropped  int       // 因超限被丢弃的记录数（可观测：非零说明脚本调用量超过限额）
-	hostOps  HostOps   // 保留操作计数（搜索/描述；不占 NestedMaxCalls 限额）
-	usageBox *usageBox // 共享：嵌套派生出的子记录器与其父共用同一个用量累加器
+	mu         sync.Mutex
+	calls      []NestedCallRecord
+	argBytes   int
+	dropped    int       // 因超限被丢弃的记录数（可观测：非零说明脚本调用量超过限额）
+	hostOps    HostOps   // 保留操作计数（搜索/描述；不占 NestedMaxCalls 限额）
+	todoWrites int       // 嵌套 todo_* 调用次数（脚本改过清单的判据，不占限额）
+	usageBox   *usageBox // 共享：嵌套派生出的子记录器与其父共用同一个用量累加器
 }
 
 // usageBox 共享用量累加器。单独成结构是为了让 Clone 出来的子记录器
@@ -245,6 +246,36 @@ func (r *NestedRecorder) TakeHostOps() HostOps {
 	h := r.hostOps
 	r.hostOps = HostOps{}
 	return h
+}
+
+// MarkTodoWrite 记一次**嵌套** todo_* 调用（引擎在 Depth>0 的 todo_* 收尾时调用）。
+//
+// 为什么要一个独立计数、而不是从 calls 里找 todo_* 记录：嵌套记录受 NestedMaxCalls /
+// 参数总量限额丢弃（见 Add），脚本里第 300 次调用的 todo_update 照样真实改了清单 ——
+// 判据不能跟着采样一起丢。与 HostOps 同一个动机。
+//
+// 消费者是最外层调用的待办快照：嵌套调用按契约不发射工具事件（见 tools/nested.go），
+// 于是脚本改过的清单只能由外层编排工具（codemode）的 ToolResponse 代发，否则宿主
+// 的待办面板停在脚本执行之前（用户 2026-11 报障）。
+func (r *NestedRecorder) MarkTodoWrite() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.todoWrites++
+}
+
+// TakeTodoWrites 返回并清零嵌套 todo_* 调用次数（最外层调用收尾时取一次）。
+func (r *NestedRecorder) TakeTodoWrites() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.todoWrites
+	r.todoWrites = 0
+	return n
 }
 
 // Stats 返回被丢弃的记录数（可观测性：非零说明脚本调用量超过限额）。

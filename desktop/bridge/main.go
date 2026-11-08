@@ -592,9 +592,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 		}
 	case *events.ToolResponse:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
-		if strings.HasPrefix(ev.Name, "todo_") {
+		if todoResponseCarriesSnapshot(ev) {
 			// 快照属主 = 发出本次调用的运行（事件携带；见 events.ToolResponse.Todos）：
 			// 子 agent 的 todo_* 带它自己那份清单，主会话清单不得被顶掉。
+			// 判据同时覆盖**编排型工具**（codemode）：脚本里的 todo_* 是嵌套调用、不发
+			// 事件，快照由外层响应代发（见 todoResponseCarriesSnapshot）。
 			extras = map[string]any{"todos": todosOf(bs, ev.Todos)}
 		}
 		if strings.HasPrefix(ev.Name, "Cron") {
