@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05/06 passed；P3b-07 前端互 @/结果卡启动",
+  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05/06 passed；P3b-07a 人类派任务实现中",
   "updated": "2026-11-07",
   "phases": [
     {
@@ -1246,7 +1246,7 @@ const BASE = {
       "phase": "P3b",
       "title": "前端 AgentMentionChip/MentionPicker/ConversationBar/TaskResultCard/Typing",
       "deps": [
-        "P3b-06"
+        "P3b-07a"
       ],
       "files": [
         "desktop/app/src/components/hub/AgentMentionChip.tsx",
@@ -1258,7 +1258,9 @@ const BASE = {
       ],
       "acceptance": "@ chip 反规范化（名字用 accent 着色）；对话/派任务两态；逐轮条；结果卡；context 行（≥2 触发者才显示，chip 可跳转）；typing；键盘/主题/空态。",
       "tests": "npm run lint && npm run test:agent-session",
-      "commit": "feat(hub-p3b-07): 互 @ 与任务结果 UI"
+      "commit": "feat(hub-p3b-07): 互 @ 与任务结果 UI",
+      "status": "todo",
+      "note": "依赖 P3b-07a 的人类派任务命令"
     },
     {
       "id": "P3b-08",
@@ -1347,6 +1349,25 @@ const BASE = {
       "acceptance": "全量回归；性能/成本数据；已知限制清单；复盘文档；看板收尾。",
       "tests": "npm test && go test ./...",
       "commit": "chore(hub-p4-05): final review + retro"
+    },
+    {
+      "id": "P3b-07a",
+      "phase": "P3b",
+      "title": "人类 hub_group_assign（派任务命令 + human origin 结算）",
+      "deps": [
+        "P3b-05",
+        "P3b-06"
+      ],
+      "files": [
+        "desktop/bridge/hub_group_commands.go",
+        "desktop/bridge/hub_assign_task.go",
+        "agenthub/queue.go"
+      ],
+      "acceptance": "人类从群 UI 派任务给成员；任务 origin=human、assign 消息 sender=human/mentions=[B]、目标被唤醒；忙则留 queued；结果卡不唤醒人类；非法成员/自派拒绝。",
+      "tests": "go test ./desktop/bridge/ -run 'HumanAssign|GroupAssign'",
+      "commit": "feat(hub-p3b-07a): 人类群内派任务",
+      "status": "in_progress",
+      "note": "实现中"
     }
   ],
   "deferred": [
@@ -1874,6 +1895,12 @@ const BASE = {
       "commit": "5b5fb01 feat(hub-p3b-06): 任务完成三层感知",
       "review": "passed",
       "reviewNote": "复审（task-hwkprcsu）PASS。Group.HumanReadSeq 向后兼容；MarkGroupRead 在 File/Memory 都持锁单调、并发不倒退，SaveGroup 保留磁盘更大值；perception 未读排除人类、task_result 优先渲染 completed/failed/interrupted/canceled/declined/blocked_budget；hub_group_list 新增 progress（保留 groups 数组），分页可数 >500 且终止；hub_mark_read 群/DM 双路；task_result 对非派发者快照可见且不唤醒。变异 readSeq/优先级/游标后退/SaveGroup 合并/分页 beforeSeq 全 RED。非阻塞：overshoot、DM 回退生效值/删除群/部分失败无测试、mark_read 无广播事件、无界扫描、warning 含绝对路径、Store 编译断言。"
+    },
+    "P3b-07a": {
+      "status": "in_progress",
+      "commit": "",
+      "review": "pending",
+      "reviewNote": "实现中"
     }
   },
   "reviewGate": {
