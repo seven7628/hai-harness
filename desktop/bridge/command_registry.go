@@ -62,6 +62,10 @@ const (
 	CmdListModels          Command = "list_models"
 	CmdTestConnection      Command = "test_connection"
 	CmdListProviderPresets Command = "list_provider_presets"
+	// CmdProviderBilling 查余额 / 配额窗口（Provider 设置页的计量区）。
+	// 数据面见 provider/billing；payload {provider?, refresh?}；结果以 Snapshot 返回，
+	// 单家失败以 error_code 落在各自快照上（命令本身 ok=true）。
+	CmdProviderBilling Command = "provider_billing"
 
 	// —— OAuth ——
 	CmdOAuthLogin        Command = "oauth_login"

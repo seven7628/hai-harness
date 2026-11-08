@@ -12858,3 +12858,197 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   color: var(--text-2);
   font-size: 12px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Provider 管理页（2026-11 重绘）：列表 / 添加目录 / 详情
+ *
+ * 为什么另起 .pvp-* 而不是改 .prov-*：
+ *   `.prov-*` 的样式被三处复用（Provider 卡正文、价格编辑器、语音输入卡），
+ *   改它会牵动与本次无关的界面。新页只新增前缀，旧类原样保留。
+ *
+ * 行高与车位：列表行 = 30px 字标 + 两行文字（13.5/11.5）≈ 48px 内容 + 8×2 padding。
+ * 计量位（.pvp-meter）**恒占 168px**：billing 方案接入后往这里填窗口条/余额，
+ * 无数据时也不塌陷 —— 否则每行「设为当前」按钮会随内容左右跳。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+.pvp { display: flex; flex-direction: column; gap: 6px; }
+.pvp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.pvp-add-btn { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.pvp-sec {
+  font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-3); margin: 10px 2px 0;
+}
+.pvp-empty {
+  padding: 18px 12px; text-align: center; color: var(--text-3); font-size: 12px;
+  border: 1px dashed var(--border-strong); border-radius: 10px;
+}
+.pvp-empty-grid { grid-column: 1 / -1; }
+.pvp-browse {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; padding: 8px; margin-top: 2px;
+  border: 1px dashed var(--border-strong); border-radius: 10px;
+  background: transparent; color: var(--text-3); font-size: 12px; cursor: pointer;
+}
+.pvp-browse:hover { color: var(--text); border-color: var(--accent-border); }
+
+/* —— 行（已添加 / 可用 共用）—— */
+.pvp-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--surface); color: var(--text); cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.pvp-row:hover { border-color: var(--accent-border); }
+.pvp-row.cur { background: var(--accent-weak); border-color: var(--accent-border); }
+.pvp-row-avail { cursor: default; }
+.pvp-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pvp-row-1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pvp-row-2 {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 11.5px; color: var(--text-3);
+}
+.pvp-row-name {
+  font-size: 13.5px; font-weight: 600; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pvp-cur { font-size: 11px; color: var(--success); flex: 0 0 auto; }
+.pvp-warn { font-size: 11px; color: var(--warning); flex: 0 0 auto; }
+.pvp-grow { flex: 1 1 auto; }
+.pvp-meter { flex: 0 0 168px; } /* billing 车位（见 docs/PROVIDER_USAGE_BILLING.md §8.1） */
+.pvp-mini { padding: 2px 9px; font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
+.pvp-host {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px;
+}
+.pvp-sep { color: var(--text-3); opacity: 0.55; }
+.pvp-id { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-id-hint { font-size: 11px; color: var(--text-3); align-self: center; white-space: nowrap; }
+.pvp-vendor { font-size: 13px; font-weight: 600; color: var(--text); }
+.pvp-chip-sub {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border-strong); color: var(--text-3); flex: 0 0 auto;
+}
+
+/* —— 字标（色相由 --pv-h 下传，深浅两套各自算明度）—— */
+.pvp-glyph {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  border-radius: 8px; font-weight: 600; letter-spacing: 0.02em; line-height: 1;
+  background: hsl(var(--pv-h, 200) 58% 52% / 0.16);
+  color: hsl(var(--pv-h, 200) 62% 66%);
+}
+[data-theme='paper'] .pvp-glyph {
+  background: hsl(var(--pv-h, 200) 62% 42% / 0.12);
+  color: hsl(var(--pv-h, 200) 58% 32%);
+}
+
+/* —— 添加页 —— */
+.pvp-nav { display: flex; align-items: center; gap: 8px; }
+.pvp-back {
+  display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px 4px 2px;
+  background: transparent; border: 0; border-radius: 6px; color: var(--text-2);
+  font-size: 12.5px; cursor: pointer;
+}
+.pvp-back:hover { color: var(--text); background: var(--surface); }
+.pvp-nav-sub { font-size: 12px; color: var(--text-3); }
+.pvp-nav-right { margin-left: auto; display: flex; gap: 6px; }
+.pvp-del { color: var(--danger); }
+.pvp-search {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--bg); color: var(--text-3);
+}
+.pvp-search input {
+  flex: 1; min-width: 0; background: transparent; border: 0; outline: none;
+  color: var(--text); font-size: 12.5px;
+}
+.pvp-count { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-catalog { display: flex; align-items: flex-start; gap: 12px; }
+.pvp-cats {
+  flex: 0 0 128px; display: flex; flex-direction: column; gap: 2px;
+  position: sticky; top: 0;
+}
+.pvp-cat {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 9px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--text-2); font-size: 12px;
+  text-align: left; cursor: pointer;
+}
+.pvp-cat:hover { background: var(--surface); }
+.pvp-cat.cur { background: var(--accent-weak); border-color: var(--accent-border); color: var(--text); }
+.pvp-cat-n { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-grid {
+  flex: 1; min-width: 0; display: grid;
+  /* 用列宽自适应而不是视口媒体查询：弹窗宽度是 min(78vw,1040px)，与视口不是线性关系 ——
+     按视口设断点会在「窗口不小、弹窗很窄」时仍然挤成两列。280px 是卡片内
+     「名称 + host」不被省略号截断的下限。 */
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.pvp-card {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 10px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--surface); color: var(--text); text-align: left; cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.pvp-card:hover:not(:disabled) { border-color: var(--accent-border); }
+.pvp-card:disabled { cursor: default; opacity: 0.72; }
+.pvp-card.is-added .pvp-card-name { color: var(--text-2); }
+.pvp-card-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.pvp-card-name {
+  font-size: 12.5px; font-weight: 600; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pvp-card-sub {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pvp-card-plus, .pvp-card-added { flex: 0 0 auto; color: var(--text-3); }
+.pvp-card-added { font-size: 11px; }
+
+/* —— 详情页：卡片头已在导航栏表达，隐藏避免重复 —— */
+.pvp-detail .prov-head { display: none; }
+.pvp-detail .prov-card {
+  margin-bottom: 0; padding: 0; border: 0; background: transparent;
+}
+.pvp-detail-title { display: flex; align-items: center; gap: 10px; padding: 2px 2px 6px; }
+.pvp-detail-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+/* —— 计量区（余额 / 配额窗口；见 provider/billing 与 docs/PROVIDER_USAGE_BILLING.md）——
+   列表行：4px 细条 + 数字，车位 168px（.pvp-meter 已有），无数据显示时整块留空但**不塌陷**。
+   详情块：每窗口一行（名称 / 条 / 百分比 / 重置时间），余额型换成金额三行。 */
+.pvp-meter { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.pvp-meter-txt { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2); white-space: nowrap; }
+.pvp-meter-txt.warn { color: var(--warning); }
+.pvp-meter-txt.danger { color: var(--danger); }
+.pvp-meter-txt.muted { color: var(--text-3); }
+.pvp-bar {
+  display: inline-flex; width: 48px; height: 4px; border-radius: 999px;
+  background: var(--border-strong); overflow: hidden; flex: 0 0 auto;
+}
+.pvp-bar.wide { width: auto; flex: 1 1 auto; height: 6px; }
+.pvp-bar i { display: block; height: 100%; border-radius: 999px; background: var(--success); }
+.pvp-bar.warn i { background: var(--warning); }
+.pvp-bar.danger i { background: var(--danger); }
+.pvp-bar.muted i { background: var(--text-3); }
+
+.pvp-bill {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--surface);
+}
+.pvp-bill-hd { display: flex; align-items: center; gap: 8px; }
+.pvp-bill-title { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.pvp-bill-at, .pvp-bill-local { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-bill-est { opacity: 0.7; margin-left: 2px; }
+.pvp-bill-rows { display: flex; flex-direction: column; gap: 5px; }
+.pvp-bill-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+.pvp-bill-k { flex: 0 0 64px; color: var(--text-3); }
+.pvp-bill-v { flex: 0 0 46px; text-align: right; font-family: var(--font-mono); color: var(--text-2); }
+.pvp-bill-v.warn { color: var(--warning); }
+.pvp-bill-v.danger { color: var(--danger); }
+.pvp-bill-v.muted { color: var(--text-3); }
+.pvp-bill-reset { flex: 0 0 96px; text-align: right; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.pvp-bill-money { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+.pvp-bill-money.danger { color: var(--danger); }
+.pvp-bill-empty { font-size: 11.5px; color: var(--text-3); }
+.pvp-bill-err { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--warning); }
+.pvp-bill-src { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); opacity: 0.8; }

@@ -1082,6 +1082,12 @@ class MockTransport implements Transport {
     if (p.active) cur.provider.active = p.active
     const pc = (cur.provider[p.provider] as ProviderCfg | undefined) ?? { base_url: '', models: {}, max_tokens: {}, protocol: 'chat_completions', input_types: {}, auth_type: 'api_key' }
     delete pc.deleted // 重新保存 = 重新启用（对齐 electron provider:save）
+    // 显示名（2026-11）：空串 = 清除字段（回内置名/id）——与 electron provider:save 一致
+    if (typeof p.label === 'string') {
+      const label = p.label.trim()
+      if (label) pc.label = label.slice(0, 64)
+      else delete pc.label
+    }
     if (p.base_url) pc.base_url = p.base_url
     if (p.openai_compat && typeof p.openai_compat === 'object') pc.openai_compat = p.openai_compat
     if (p.protocol === 'chat_completions' || p.protocol === 'responses' || p.protocol === 'anthropic') pc.protocol = p.protocol
@@ -1575,6 +1581,36 @@ class MockTransport implements Transport {
         this.respond(cmd, { provider: prov, models: fake, capabilities: caps })
         break
       }
+      case 'provider_billing': {
+        // 余额 / 配额（对齐真 bridge provider_billing 的响应形状）。
+        // mock 只造两家有数据的（DeepSeek 余额 / OpenCode 三窗口），其余给 unsupported ——
+        // 「没有」也是要演示的正常状态，不该在 mock 里假装人人都有。
+        const want = String((cmd.payload?.provider as string) || '')
+        const ids = want ? [want] : Object.keys(this.settings().provider).filter((k) => k !== 'active')
+        const snapshots: Record<string, unknown> = {}
+        const now = new Date().toISOString()
+        for (const id of ids) {
+          if (id === 'deepseek') {
+            snapshots[id] = {
+              provider: id, fetched_at: now, kind: 'balance', source: 'deepseek.balance',
+              currency: 'CNY', balance: { amount: -0.02, currency: 'CNY' },
+            }
+          } else if (id.startsWith('opencode')) {
+            snapshots[id] = {
+              provider: id, fetched_at: now, kind: 'quota', source: 'opencode.zen.usage',
+              windows: [
+                { key: 'rolling', label: '5h', percent: 0, status: 'ok', resets_at: new Date(Date.now() + 4 * 3600e3).toISOString() },
+                { key: 'weekly', label: 'week', percent: 48, status: 'ok', resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
+                { key: 'monthly', label: 'month', percent: 24, status: 'ok', resets_at: new Date(Date.now() + 10 * 86400e3).toISOString() },
+              ],
+            }
+          } else {
+            snapshots[id] = { provider: id, fetched_at: now, kind: 'none', error_code: 'billing_unsupported' }
+          }
+        }
+        this.emit({ event_type: 'command_response', id: cmd.id, ok: true, error: '', data: { snapshots, fetched_at: now } })
+        break
+      }
       case 'list_provider_presets': {
         // 内置 Provider 预设（对齐真 bridge ← providers.json；mock 派生自 DEF 内置 5 家 + 常用预设）
         const DEF = this.settings()
@@ -1593,6 +1629,17 @@ class MockTransport implements Transport {
           { name: 'GitHub Copilot', id: 'github-copilot', base_url: 'https://api.individual.githubcopilot.com', protocol: 'anthropic', models: [], oauth: { name: 'GitHub Copilot', flow: 'github-copilot', is_subscription: true } },
           { name: 'Kimi Coding', id: 'kimi-coding', base_url: 'https://api.kimi.com/coding', protocol: 'anthropic', models: [], oauth: { name: 'Kimi Code (subscription)', flow: 'kimi-coding', is_subscription: true, login_label: 'Sign in with Kimi Code' } },
           { name: 'OpenDesign', id: 'opendesign', base_url: 'https://amr-link.open-design.ai/v1', protocol: 'chat_completions', models: [] },
+          // 以下 9 家与 provider/providers.json 对齐：目录里能选到的都必须在预设里，
+          // 否则「从目录卡片进表单」会拿到空 base_url（mock 与真 bridge 的形状差异会在浏览器验证时暴露）。
+          { name: 'Qwen', id: 'qwen', base_url: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', protocol: 'chat_completions', models: [] },
+          { name: 'MiMo', id: 'xiaomi', base_url: 'https://api.xiaomimimo.com/v1', protocol: 'chat_completions', models: [] },
+          { name: 'Mistral', id: 'mistral', base_url: 'https://api.mistral.ai', protocol: 'chat_completions', models: [] },
+          { name: 'Groq', id: 'groq', base_url: 'https://api.groq.com/openai/v1', protocol: 'chat_completions', models: [] },
+          { name: 'Together', id: 'together', base_url: 'https://api.together.ai/v1', protocol: 'chat_completions', models: [] },
+          { name: 'Cerebras', id: 'cerebras', base_url: 'https://api.cerebras.ai/v1', protocol: 'chat_completions', models: [] },
+          { name: 'Baseten', id: 'baseten', base_url: 'https://inference.baseten.co/v1', protocol: 'chat_completions', models: [] },
+          { name: 'NVIDIA NIM', id: 'nvidia', base_url: 'https://integrate.api.nvidia.com/v1', protocol: 'chat_completions', models: [] },
+          { name: 'Hugging Face', id: 'huggingface', base_url: 'https://router.huggingface.co/v1', protocol: 'chat_completions', models: [] },
         ]
         this.respond(cmd, { presets, models_cost: this.builtinModelsCost(presets) })
         break

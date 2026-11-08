@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
-import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
+import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
@@ -2864,6 +2864,7 @@ interface AppState {
   fetchedModels: Record<string, string[]> // provider → 拉取的模型列表（list_models 响应）
   modelCosts: Record<string, Record<string, ModelPrices>> // provider → model → 注册表内置价（list_models capabilities.cost；价格编辑器空覆盖时回显）
   providerPresets: ProviderPreset[] // 内置 Provider 预设（list_provider_presets ← providers.json 单一事实源）
+  billing: Record<string, BillingSnapshot> // provider → 最近一次余额/配额快照（provider_billing）
   mode: string // hitl(用户确认) / auto(自动执行) / full-access(完全访问)；会话中可随时切换，下一轮生效
   effort: string // none / minimal / low / medium / high / xhigh / max
   persona: 'code' | 'work' // 双 Persona（Code 工程师 / Work 办公助理；切换当前会话下一轮生效）
@@ -3252,7 +3253,8 @@ interface AppState {
   pickAppFromSystem(): Promise<string | null> // 系统「选择应用程序」对话框 → 返回所选 App 显示名（取消 → null）
   providerSave(p: ProviderSaveInput): Promise<boolean> // 持久化 provider 配置 + key（热切换由调用方另发 set_provider）
   addProvider(p: { provider: string; base_url: string; protocol?: string; openai_compat?: import('../transport/types').OpenAICompatCapabilities; api_key?: string }): Promise<{ ok: boolean; error?: string }> // 新增自定义 provider（创建配置 + 存 key + 通知 bridge）
-  renameProvider(oldName: string, newName: string): Promise<{ ok: boolean; error?: string }> // 自定义 provider 改名（整卡配置迁移到新 id：base_url/key/models/…；内置 5 家不可改名）
+  renameProvider(oldName: string, newName: string): Promise<{ ok: boolean; error?: string }>
+  renameProviderDisplay(provider: string, label: string): Promise<{ ok: boolean; error?: string }> // 自定义 provider 改名（整卡配置迁移到新 id：base_url/key/models/…；内置 5 家不可改名）
   removeProvider(provider: string): Promise<{ ok: boolean; error?: string }> // 删除自定义 provider（配置 + key + 重建）
   refreshProviderKeys(): void // 各 provider 是否已设 key（仅布尔，Provider 面板「已设置 ✓」）
   fetchModels(provider: string): void // 拉取 provider 模型列表（list_models）
@@ -3260,6 +3262,8 @@ interface AppState {
   // 默认**覆盖**已有价（用户 2026-09-21 决策：补价即覆盖）；overwrite:false 才走保守路径（只补无价模型）
   refreshPrices(p: { provider: string; source?: string; overwrite?: boolean }): Promise<PriceRefreshSummary | undefined>
   fetchProviderPresets(): void // 拉取内置 Provider 预设（list_provider_presets ← providers.json）
+  // 余额/配额：refresh=false 走 60s 缓存（进设置页），true = 强制刷新（5s 冷却）
+  fetchBilling(provider?: string, refresh?: boolean): void
   testProvider(base_url: string, api_key: string): Promise<{ ok: boolean; error?: string; count?: number }> // 测试连接（test_connection；瞬态探活，不改配置）
   saveProvider(p: ProviderSaveInput): Promise<boolean> // 持久化（providerSave）+ 热切换（set_provider 命令）；返回是否成功（Toast 用）
   toggleModelWindow(provider: string, model: string, oneM: boolean): void // 标 1M → 窗口 1000000；否则回 128000
@@ -4450,6 +4454,14 @@ export function dispatchEvent(raw: AnyEvent): void {
   }
 
   switch (raw.event_type) {
+    // 余额/配额的后台补拉结果（provider_billing 先进缓存、再逐家推送）。
+    // 与命令响应同形状：只合并，不建会话视图。
+    case 'provider_billing_update': {
+      const snap = raw.snapshot as BillingSnapshot | undefined
+      if (snap?.provider) setState((s) => ({ billing: { ...s.billing, [snap.provider]: snap } }))
+      break
+    }
+
     case 'bridge_ready':
       // P0/P1（§4.4）：Go 侧启动完成后发一次，作为 embed 自举/命令的精确就绪信号
       // （替代「任意 command response 猜测」；保留 command_response 兜底）。
@@ -5254,6 +5266,12 @@ export function dispatchEvent(raw: AnyEvent): void {
       // list_provider_presets：内置 Provider 预设（providers.json 单一事实源）→ providerPresets；
       // models_cost（预设模型内置价，纯本地注册表读取）→ 并入 modelCosts —— 价格编辑器
       // 打开设置即回显内置价，无需先「拉取模型列表」（那依赖网络 + 用户点击）。
+      // provider_billing：余额/配额快照（单家失败也返回，错误以 error_code 落在快照上）
+      if (t === 'provider_billing') {
+        const snaps = (d.snapshots ?? {}) as Record<string, BillingSnapshot>
+        if (Object.keys(snaps).length > 0) setState((s) => ({ billing: { ...s.billing, ...snaps } }))
+        break
+      }
       if (t === 'list_provider_presets') {
         if (Array.isArray(d.presets)) {
           const costs = (d.models_cost ?? {}) as Record<string, Record<string, ModelPrices>>
@@ -8300,6 +8318,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   fetchedModels: {},
   modelCosts: {}, // 注册表内置价（list_models capabilities.cost；价格编辑器空覆盖回显）
   providerPresets: [], // 启动后经 fetchProviderPresets 拉取（providers.json 单一事实源）
+  billing: {}, // provider → 余额/配额快照（provider_billing；失败也缓存，UI 据此显示原因）
   // 用户偏好持久恢复（问题 2，2026-08-17）：mode/model/effort/persona 从
   // localStorage 全局默认恢复；会话级记录在 new_session 响应时应用（applySessionPrefs）
   mode: persistedPrefs.mode ?? 'auto', // 默认自动执行（bash/write/edit 均不弹审批；工具层静态拦截/沙箱仍生效）
@@ -10530,6 +10549,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   // electron provider:remove 会自动回退 active 到内置，故改名流程：先建新 id 再删旧 id，
   // 最后把 active 指回新 id（若原先是活跃）。session 侧归属（bs.provider）不迁移——
   // 改名的自定义 provider 通常不是活跃/会话绑定方；如需要可在设置里重新「设为当前」。
+  // renameProviderDisplay 改**显示名**（label），不动 id。
+  // 为什么单独一条而不是复用 saveProvider：saveProvider 末尾会发 set_provider → bridge
+  // rebuildAll 重建全部会话 loop（运行中的生成会被打断）。改名是纯 UI 操作，不该有这个副作用。
+  // id 不变 ⇒ metrics 历史 / 用户价表 / billing 缓存 / GOCODE_KEY_* 兜底全部继续有效。
+  renameProviderDisplay: async (provider, label) => {
+    const cfg = get().settings.provider[provider]
+    if (!cfg || typeof cfg !== 'object') return { ok: false, error: 'provider 不存在' }
+    const r = await transport.providerSave({ provider, label })
+    if (!r.ok) return r
+    const s2 = await transport.settingsGet()
+    set({ settings: s2 })
+    return { ok: true }
+  },
   renameProvider: async (oldName, newName) => {
     const name = newName.trim()
     if (!name) return { ok: false, error: '名称不能为空' }
@@ -10643,6 +10675,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   fetchProviderPresets: () => {
     send({ type: 'list_provider_presets', payload: {} })
   },
+  // 余额/配额（provider_billing）：单家或全部。结果由 command_response 落 billing。
+  // 60s 缓存与 5s 冷却在 bridge 侧（请求不重复发），前端只负责「谁在等」的 loading 态。
+  fetchBilling: (provider, refresh) => {
+    send({ type: 'provider_billing', payload: { ...(provider ? { provider } : {}), ...(refresh ? { refresh: true } : {}) } })
+  },
   // 测试连接（test_connection；GET /models 探活，带 10s 超时）。瞬态——把待保存的
   // base_url + api_key 直接发给 bridge，不落盘、不改配置。结果经 Promise 消费
   //（dispatchEvent 对 test_connection 直接 return，失败不外溢到 bridgeError）。
@@ -10688,6 +10725,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // setModels(payload) 执行，payload 旧值把新窗口打回）。
       const cmd: ProviderSaveInput = { provider: p.provider }
       if (p.active) cmd.active = p.active
+      if (typeof p.label === 'string') cmd.label = p.label // 显示名（纯 UI 字段；空串 = 清除）
       if (p.base_url) cmd.base_url = p.base_url
       if (p.protocol) cmd.protocol = p.protocol
       if (p.openai_compat) cmd.openai_compat = p.openai_compat
