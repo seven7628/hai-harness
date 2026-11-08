@@ -654,6 +654,17 @@ export const TaskResultInline = memo(function TaskResultInline({ delivered, resu
   )
 })
 
+// 任务级错误：结果已经就是转录最后一条 assistant 正文，不再重复渲染「任务结果」卡；
+// 但 taskError（AgentEnd/TaskEnd 的失败原因）没有别的展示位，单独留一行。
+export const TaskErrorInline = memo(function TaskErrorInline({ error }: { error?: string }) {
+  if (!error) return null
+  return (
+    <div className="task-result-inline task-error-inline">
+      <div className="task-result-err">{error}</div>
+    </div>
+  )
+})
+
 // 上下文压缩块：主对话（本 run 的自动/手动压缩）与子 agent 转录（子 agent 自己的压缩）
 // 共用同一张卡。active = 压缩正在进行（子 agent 侧会带这个态；主 run 的进行中压缩只进
 // 右栏任务区，所以主对话看不到 active 卡）。

@@ -4,7 +4,7 @@ import type { AgentFocus, MsgBlock } from '../store/useAppStore'
 import { agentTreeFromView, pathOfNode } from '../lib/agentTree'
 import type { AgentTreeNode } from '../lib/agentTree'
 import { agentItemsToBlocks } from '../lib/agentSession'
-import { TaskResultInline } from './NarrativeBlocks'
+import { TaskErrorInline } from './NarrativeBlocks'
 import Narrative from './Narrative'
 import type { NarrativeSource } from './Narrative'
 import { ElapsedTimer } from './ElapsedTimer'
@@ -119,13 +119,22 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   const mergedItems = useMemo(() => cards.flatMap((c) => c.items), [cards])
   const subBlocks = useMemo(() => {
     if (!card) return toolBlock ? [toolBlock] : []
-    const blocks = agentItemsToBlocks(mergedItems)
-    // 产出 / 任务结果：走**主会话的同一批渲染块**（Narrative 的 artifacts / task_result 分支），
-    // 而不是卡片内的 .ac-artifacts / TaskResultInline。
+    // 按卡转换，而不是先把 items 摊平：每张卡 = 一次运行（agent_resume 每轮一张），
+    // 卡自己的 runId 作为旧 record 的兜底 —— 合并后 turnRuns 才能按 run 切 Worked 盒。
+    const blocks: MsgBlock[] = []
+    let nextId = -1
+    for (const c of cards) {
+      blocks.push(...agentItemsToBlocks(c.items, { fallbackRunId: c.runId, nextId: () => nextId-- }))
+    }
+    // 产出：走**主会话的同一批渲染块**（Narrative 的 artifacts 分支），而不是卡片内的
+    // .ac-artifacts。
     //
     // 后者是「卡片内附件」的形态：带 border-top 与卡片内的边距，放进叙述区会明显矮一截、
     // 贴不住正文 —— 用户 2026-10 报障「子智能体里没有 artifacts」，除了数据没挂上卡片，
     // 另一层就是它长得不像主会话那张产出卡。
+    //
+    // 任务结果不再做成页脚卡：它已经就是转录最后一条 assistant 正文；主会话的交付行
+    // 负责「Task … completed」通知。
     //
     // id 用远离 agentItemsToBlocks 的负数区间（那边从 -1 递减），避免 React key 撞车。
     if (card.artifacts && card.artifacts.length > 0) {
@@ -135,7 +144,7 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
       })
     }
     return blocks
-  }, [card, mergedItems, toolBlock])
+  }, [card, cards, toolBlock])
 
   if (!node) return <div className="empty">{t('agentTree.gone')}</div>
   // 时长口径收在一处（lib/agentDuration.ts）：卡片结算 → 节点结算 → 该 run 末条 item 的整轮耗时；
@@ -237,11 +246,8 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     </div>
   )
 
-  // 末行：任务结果。用卡片内同一个 TaskResultInline —— 它是 Markdown 正文（.md），
-  // 与主会话里那张卡的结果区完全同一份实现；产出走上方的 artifacts 块（叙述区形态）。
-  const footer = card && (card.taskResult || card.taskError) ? (
-    <TaskResultInline delivered={card.deliveredToMain} result={card.taskResult} error={card.taskError} />
-  ) : undefined
+  // 任务级错误仍要可见；结果不再重复（它已经是转录最后一条 assistant 正文）。
+  const errorFooter = card?.taskError ? <TaskErrorInline error={card.taskError} /> : undefined
 
   // 运行态是**这个子 agent 自己的**（node.status / startedAt）：主 agent 可能早就交卷了，
   // 拿主会话的 runEnded 判它，子会话第一屏就会是 Worked for（用户 2026-10 报障）。
@@ -249,7 +255,7 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     <Narrative
       source={source}
       header={header}
-      footer={footer}
+      footer={errorFooter}
       runState={{ live: running, startedAt: node.startedAt, ...(node.runId ? { runId: node.runId } : {}) }}
       /* 转录身份：子 agent 的 run_id（后台任务节点退化为 task_id）。滚动容器按它重建 ——
          从 A 切到 B 是新的一段转录，不是同一段滚到别处。 */

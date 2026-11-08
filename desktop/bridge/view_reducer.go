@@ -263,7 +263,11 @@ type ArtifactRef struct {
 
 // AgentItem 是子 agent 卡片内的活动记录项。
 type AgentItem struct {
-	Kind       string `json:"kind"` // text|thinking|tool|compression|user（user = 进入子运行上下文的 user 消息）
+	Kind string `json:"kind"` // text|thinking|tool|compression|user（user = 进入子运行上下文的 user 消息）
+	// RunID 这条项属于哪一次子运行（agent_resume 复用 task_id，但每次运行是新 run）。
+	// 卡片以 run 为单位，项上带 run_id 后前端才能像主会话一样按 run 切段
+	// （turnRuns / statsOfItems.wallMs / turnLive.sameRun）。
+	RunID      string `json:"run_id,omitempty"`
 	Text       string `json:"text,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"` // text item: LLM 失败提示
 	ThinkStart int64  `json:"think_start,omitempty"`
@@ -1686,10 +1690,14 @@ func (r *ViewReducer) appendAgentStreamLocked(runID, kind, content string, ts ti
 	b := r.blocks[idx]
 	items := b.Items
 	last := len(items) - 1
-	if last >= 0 && items[last].Kind == kind && items[last].Text != "" && !items[last].IsError {
+	if last >= 0 && items[last].Kind == kind && items[last].Text != "" && !items[last].IsError &&
+		(items[last].RunID == "" || items[last].RunID == runID) {
 		items[last].Text += content
+		if items[last].RunID == "" {
+			items[last].RunID = runID // 旧 record 没有这一位：续写时补上
+		}
 	} else {
-		item := AgentItem{Kind: kind, Text: content, Ts: millis(ts)}
+		item := AgentItem{Kind: kind, Text: content, Ts: millis(ts), RunID: runID}
 		if kind == "thinking" {
 			item.ThinkStart = millis(ts)
 		}
@@ -1861,6 +1869,9 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 					continue
 				}
 				items[i].Model = e.Model
+				if items[i].RunID == "" {
+					items[i].RunID = e.RunId // 旧 record：结算时补归属
+				}
 				if durMs > 0 {
 					items[i].DurMs = durMs
 				}
@@ -1983,7 +1994,7 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 		bid := r.agentBlockID[e.RunId]
 		if idx := r.findBlockLocked(bid); idx >= 0 && r.blocks[idx].Kind == blockKindAgent {
 			b := r.blocks[idx]
-			b.Items = upsertAgentErrorItem(b.Items, text)
+			b.Items = upsertAgentErrorItem(b.Items, text, e.RunId)
 			// 子 agent 卡片也累加 tokens（成本原本就累加）：终态 TaskEnd 的权威值会覆盖，
 			// 运行中这张卡读的就是这些增量。
 			b.Usage.Input += agg.Input
@@ -2077,7 +2088,7 @@ func (r *ViewReducer) applyToolStartLocked(e *events.ToolStart) {
 			if !hasAgentToolItem(b.Items, e.Id) {
 				item := AgentItem{
 					Kind: agentItemTool, ToolID: e.Id, Name: e.Name, Args: e.Arguments,
-					Status: statusRunning, StartedAt: millis(ts), TaskID: e.TaskId,
+					Status: statusRunning, StartedAt: millis(ts), TaskID: e.TaskId, RunID: e.RunId,
 				}
 				b.Items = append(b.Items, item)
 				r.blocks[idx] = b
@@ -2182,6 +2193,9 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 						status = statusError
 					}
 					it.Status = status
+					if it.RunID == "" {
+						it.RunID = e.RunId // 旧 record：工具项补归属
+					}
 					it.Result = e.Result
 					it.ErrorInfo = info
 					it.DurMs = durMs
@@ -2317,9 +2331,14 @@ func (r *ViewReducer) applyTaskPromotedLocked(e *events.TaskPromoted) {
 // applyAgentStartLocked 建立主/子 run 节点与子 agent 卡片。
 // applyAgentUserMessageLocked 把一条投向子运行上下文的 user 消息记进它自己的转录。
 //
-// 归属锚 **TaskId 优先、RunId 兜底**：后台子运行有任务 id（与 AgentStart.TaskId 同键）；
-// 同步子智能体（in-loop）没有 task id，只有 run id —— 只认 TaskId 的话，子运行开始时
-// 补发的初始 Prompt（AgentUserMessage{Source:prompt}）永远挂不上卡片。
+// 归属锚 **RunId 优先、TaskId 最新卡兜底**：
+//
+//	· 后台子运行有任务 id，且 `agent_resume` 复用同一个 task_id、每次运行新建一张卡 ——
+//	  只按 TaskId 取第一张会把续跑的 prompt 写进上一轮的卡（实测：旧卡末尾出现
+//	  「Fix review findings…」，新卡开头没有 user 项）。
+//	· 同步子智能体（in-loop）没有 task id，只有 run id。
+//	· Poll 里的 inbox 消息（用户 agent_send / 孙任务结果）没有 run id，退回该 task 的
+//	  **最新**一张卡 —— 那正是当前运行的那张。
 //
 // 找不到卡片（start 还没到 / 卡片已收敛）时**静默丢弃**：这条消息在子运行的上下文里
 // 仍然有效（它已经进了 LLM 请求），只是没有卡片可挂。为它凭空建一张卡片会让左栏树
@@ -2329,39 +2348,51 @@ func (r *ViewReducer) applyAgentUserMessageLocked(e *events.AgentUserMessage) {
 	if e.TaskId == "" && e.RunId == "" {
 		return
 	}
-	for i := range r.blocks {
-		b := &r.blocks[i]
-		if b.Kind != blockKindAgent {
-			continue
-		}
-		if e.TaskId != "" {
-			if b.TaskID != e.TaskId {
-				continue
-			}
-		} else if b.RunID != e.RunId {
-			continue
-		}
-		text := strings.TrimSpace(e.Text)
-		if text == "" {
-			return
-		}
-		ts := e.Timestamp
-		if ts.IsZero() {
-			ts = time.Now()
-		}
-		b.Items = append(b.Items, AgentItem{
-			Kind:      agentItemUser,
-			Text:      text,
-			StartedAt: millis(ts),
-			// Source 不进 AgentItem 的展示字段（主会话的 user 块也没有"谁说的"），
-			// 仅用于日志/诊断时区分投递来源。
-		})
-		// 与被裁到上限的其它 item 一样：超出部分只在 journal 里（见 agentItemsLimit）。
-		if n := len(b.Items); n > agentItemsLimit {
-			b.Items = append([]AgentItem(nil), b.Items[n-agentItemsLimit:]...)
-			b.ItemsTrimmed += n - agentItemsLimit
-		}
+	text := strings.TrimSpace(e.Text)
+	if text == "" {
 		return
+	}
+	idx := -1
+	if e.RunId != "" {
+		for i := range r.blocks {
+			if r.blocks[i].Kind == blockKindAgent && r.blocks[i].RunID == e.RunId {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 && e.TaskId != "" {
+		for i := len(r.blocks) - 1; i >= 0; i-- {
+			if r.blocks[i].Kind == blockKindAgent && r.blocks[i].TaskID == e.TaskId {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	ts := e.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	b := &r.blocks[idx]
+	runID := e.RunId
+	if runID == "" {
+		runID = b.RunID
+	}
+	b.Items = append(b.Items, AgentItem{
+		Kind:      agentItemUser,
+		Text:      text,
+		StartedAt: millis(ts),
+		RunID:     runID,
+		// Source 不进 AgentItem 的展示字段（主会话的 user 块也没有"谁说的"），
+		// 仅用于日志/诊断时区分投递来源。
+	})
+	// 与被裁到上限的其它 item 一样：超出部分只在 journal 里（见 agentItemsLimit）。
+	if n := len(b.Items); n > agentItemsLimit {
+		b.Items = append([]AgentItem(nil), b.Items[n-agentItemsLimit:]...)
+		b.ItemsTrimmed += n - agentItemsLimit
 	}
 }
 
@@ -2552,6 +2583,9 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 				for i := len(items) - 1; i >= 0; i-- {
 					if items[i].Kind == agentItemText || items[i].Kind == agentItemThinking {
 						items[i].AgentDurMs = b.DurMs
+						if items[i].RunID == "" {
+							items[i].RunID = e.RunId // 旧 record：结算时补归属
+						}
 						break
 					}
 				}
@@ -2719,7 +2753,9 @@ func (r *ViewReducer) applyTaskStartedLocked(e *events.TaskStarted) {
 	if ts.IsZero() {
 		ts = time.Now()
 	}
-	for i := range r.blocks {
+	// 从后往前：agent_resume 复用同一 task_id、每次运行一张卡 —— 只认**最新**那张。
+	// 已终止的旧卡不翻回 running（新运行的 agent_start 会自己建新卡）。
+	for i := len(r.blocks) - 1; i >= 0; i-- {
 		b := r.blocks[i]
 		if (b.Kind == blockKindAsyncTask || b.Kind == blockKindAgent) && b.TaskID == e.TaskId {
 			if b.Status == statusRunning || b.Status == "interrupting" {
@@ -2744,6 +2780,29 @@ func (r *ViewReducer) applyTaskStartedLocked(e *events.TaskStarted) {
 }
 
 // applyTaskEndLocked 收敛任务终态（agent / async_task / promoted tool 卡）。
+// latestTaskCardLocked 返回同 task_id 的**最新**一张卡（agent / async_task / promoted tool）。
+//
+// agent_resume 复用同一个 task_id、每次运行新建一张卡；task 级事件（task_end /
+// task_result_delivered）必须落最新那张 —— 否则结果、时长、交付标记会改写上一轮
+// 已经结算的卡，live 与 checkpoint 也会不一致（旧实现 findIndex 取的是第一张）。
+func (r *ViewReducer) latestTaskCardLocked(taskID string, includeAnyTool bool) int {
+	for i := len(r.blocks) - 1; i >= 0; i-- {
+		b := r.blocks[i]
+		if b.TaskID != taskID {
+			continue
+		}
+		switch b.Kind {
+		case blockKindAgent, blockKindAsyncTask:
+			return i
+		case blockKindTool:
+			if b.Promoted || includeAnyTool {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 func (r *ViewReducer) applyTaskEndLocked(e *events.TaskEnd) {
 	r.flushChunkLocked()
 	key := taskLifecycleKey("task_end", e.TaskId, e.Timestamp)
@@ -2766,36 +2825,35 @@ func (r *ViewReducer) applyTaskEndLocked(e *events.TaskEnd) {
 			status = statusCompleted
 		}
 	}
-	for i := range r.blocks {
-		b := r.blocks[i]
-		switch b.Kind {
-		case blockKindAgent, blockKindAsyncTask:
-			if b.TaskID == e.TaskId {
-				b.Status = status
-				if b.Kind == blockKindAsyncTask {
-					b.EndedAt = millis(ts)
-				} else if b.DurMs == 0 && b.SpawnedAt > 0 {
-					b.DurMs = millis(ts) - b.SpawnedAt
-				}
-				if e.Usage != nil {
-					b.Usage = taskUsageFromCore(*e.Usage) // 权威全量（含压缩轮）+ 成本
-				}
-				r.blocks[i] = b
-			}
-		case blockKindTool:
-			if b.TaskID == e.TaskId && b.Promoted {
-				b.Status = statusDone
-				b.TaskStatus = status
-				if b.DurMs == 0 && b.StartedAt > 0 {
-					b.DurMs = millis(ts) - b.StartedAt
-				}
-				if e.Usage != nil {
-					b.Usage = taskUsageFromCore(*e.Usage)
-				}
-				r.blocks[i] = b
-			}
+	// 只结算**最新**一张卡：旧 run 的卡已经由它自己的 AgentEnd 结算过，
+	// 不能被下一轮的 TaskEnd 改写（时长/用量/结果都属于各自的运行）。
+	idx := r.latestTaskCardLocked(e.TaskId, false)
+	if idx < 0 {
+		return
+	}
+	b := r.blocks[idx]
+	switch b.Kind {
+	case blockKindAgent, blockKindAsyncTask:
+		b.Status = status
+		if b.Kind == blockKindAsyncTask {
+			b.EndedAt = millis(ts)
+		} else if b.DurMs == 0 && b.SpawnedAt > 0 {
+			b.DurMs = millis(ts) - b.SpawnedAt
+		}
+		if e.Usage != nil {
+			b.Usage = taskUsageFromCore(*e.Usage) // 权威全量（含压缩轮）+ 成本
+		}
+	case blockKindTool:
+		b.Status = statusDone
+		b.TaskStatus = status
+		if b.DurMs == 0 && b.StartedAt > 0 {
+			b.DurMs = millis(ts) - b.StartedAt
+		}
+		if e.Usage != nil {
+			b.Usage = taskUsageFromCore(*e.Usage)
 		}
 	}
+	r.blocks[idx] = b
 }
 
 // afterRunFlag 记录类块的 AfterRun 盖章值（false 也要写出去，见 Block.AfterRun 的注释）。
@@ -2838,14 +2896,8 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 			status = statusCompleted
 		}
 	}
-	idx := -1
-	for i := range r.blocks {
-		b := r.blocks[i]
-		if (b.Kind == blockKindAgent || b.Kind == blockKindAsyncTask || b.Kind == blockKindTool) && b.TaskID == e.TaskId {
-			idx = i
-			break
-		}
-	}
+	// 最新一张卡：agent_resume 的上一轮已经结算过，结果/已交付标记不能回写到旧卡。
+	idx := r.latestTaskCardLocked(e.TaskId, true)
 	if idx < 0 {
 		// 旧日志/异常顺序找不到任务：保留结果块避免丢失（去重后仅一次）。
 		// 落位同前端：按事件时刻插到它发生的位置，不一律堆到最底部。
@@ -2907,7 +2959,7 @@ func (r *ViewReducer) applyCompressStartLocked(e *events.CompressStart) {
 			b := r.blocks[idx]
 			b.Items = append(b.Items, AgentItem{
 				Kind: agentItemCompression, Before: e.Before, After: e.Before,
-				Reason: e.Reason, Active: true, StartedAt: millis(started),
+				Reason: e.Reason, Active: true, StartedAt: millis(started), RunID: e.RunId,
 			})
 			r.blocks[idx] = b
 			r.markBlockDirty(b.ID)
@@ -2956,7 +3008,7 @@ func (r *ViewReducer) applyCompressEndLocked(e *events.CompressEnd, meta EventMe
 				Kind: agentItemCompression, Before: e.Before, After: e.After,
 				CtxTokens: e.CtxTokens, CtxTokensBefore: e.CtxTokensBefore, Reason: e.Reason, Model: e.Model,
 				Summary: e.Summary, Usage: taskUsagePtr(e.Usage), Error: e.Error,
-				Aborted: aborted, Active: false, DurMs: durMs, Analysis: e.Analysis,
+				Aborted: aborted, Active: false, DurMs: durMs, Analysis: e.Analysis, RunID: e.RunId,
 			})
 			r.blocks[idx] = b
 			r.markBlockDirty(b.ID)
@@ -3479,13 +3531,16 @@ func taskUsagePtr(u *core.Usage) *Usage {
 	return &agg
 }
 
-func upsertAgentErrorItem(items []AgentItem, text string) []AgentItem {
+func upsertAgentErrorItem(items []AgentItem, text, runID string) []AgentItem {
 	out := append([]AgentItem{}, items...)
 	if n := len(out); n > 0 && out[n-1].Kind == agentItemText && out[n-1].IsError {
 		out[n-1].Text = text
+		if out[n-1].RunID == "" {
+			out[n-1].RunID = runID
+		}
 		return out
 	}
-	item := AgentItem{Kind: agentItemText, Text: text, IsError: true}
+	item := AgentItem{Kind: agentItemText, Text: text, IsError: true, RunID: runID}
 	return append(out, item)
 }
 

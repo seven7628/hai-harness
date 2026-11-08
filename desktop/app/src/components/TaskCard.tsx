@@ -20,7 +20,7 @@ import { Bot } from './icons'
 import { fmtDuration, fmtUsd, UsageChip } from './ui'
 import { ElapsedTimer } from './ElapsedTimer'
 import Narrative from './Narrative'
-import { TaskResultInline } from './NarrativeBlocks'
+import { TaskErrorInline } from './NarrativeBlocks'
 import { ArtifactCard, absArtifactPath } from './ArtifactCard'
 import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
 import { useSkin } from '../lib/useSkin'
@@ -186,7 +186,7 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
           source={{
             // 与 AgentSessionView 同一个转换器：AgentItem → 会话块（缺了它，
             // 卡片里的子会话就是另一套数据形状，Narrative 渲染不出来）
-            blocks: agentItemsToBlocks(b.items),
+            blocks: agentItemsToBlocks(b.items, { fallbackRunId: b.runId }),
             total: b.items.length + (b.itemsTrimmed ?? 0),
             hasMore: Boolean(b.itemsTrimmed) || Boolean(b.historyHasMore),
             loading: Boolean(b.historyLoading),
@@ -219,7 +219,7 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
           )}
         </div>
       )}
-      <TaskResultInline delivered={b.deliveredToMain} result={b.taskResult} error={b.taskError} />
+      <TaskErrorInline error={b.taskError} />
     </TaskCard>
   )
 })
