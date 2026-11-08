@@ -347,6 +347,7 @@ func (c *checkpointCoordinator) commitOnce() {
 	)
 	record.BlockSpans = spans.Spans
 	record.BlockIDs = spans.IDs
+	record.AllBlockIDs = spans.AllIDs
 	// 脏块快路径：只重写本轮真正变化的块。周期性（及失败后第一次）退回全量比对。
 	c.commitsSinceVerify++
 	record.DirtyBlocks = spans.Dirty

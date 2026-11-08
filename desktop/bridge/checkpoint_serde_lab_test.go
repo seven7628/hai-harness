@@ -466,6 +466,32 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		}
 		t.Logf("窗口解析(limit=%d)：解码=%d 分页=%d 合计=%d 全集=%d ✓",
 			win, len(cpw.Blocks), len(cpw.PagedBlocks.IDs), len(union), len(full.Blocks))
+
+		// 生产序列（窗口版）：LoadRecordForView → 窗口解析 → Restore
+		debug.FreeOSMemory()
+		t0 = time.Now()
+		rec5, lerr5 := store.LoadRecordForView(ctx, wsKey, sid)
+		if lerr5 != nil {
+			t.Fatal(lerr5)
+		}
+		cp5, perr5 := parseCheckpointFromRecordWindow(rec5, win)
+		if perr5 != nil {
+			t.Fatal(perr5)
+		}
+		r5 := NewViewReducer()
+		if err := r5.Restore(cp5); err != nil {
+			t.Fatal(err)
+		}
+		openDur := time.Since(t0)
+		// 旧 UI 路径（无 limit）：必须物化出完整历史
+		if _, merr := r5.Marshal(); merr != nil {
+			t.Fatal(merr)
+		}
+		if got := len(r5.blocks); got != len(full.Blocks) {
+			t.Fatalf("无 limit 的 Marshal 应物化全部块: got %d want %d", got, len(full.Blocks))
+		}
+		t.Logf("窗口打开：LoadRecordForView+窗口解析+Restore=%s（blocks=%d，Marshal 全量物化后 %d）",
+			openDur.Round(time.Millisecond), len(cp5.Blocks), len(r5.blocks))
 		rec2.ReleaseView()
 		return
 
@@ -524,14 +550,19 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		}
 		load4 := time.Since(t0)
 		t0 = time.Now()
-		cp4, perr4 := parseCheckpointFromRecord(rec4)
+		cp4, perr4 := parseCheckpointFromRecordWindow(rec4, 500)
 		if perr4 != nil {
 			t.Fatal(perr4)
 		}
 		dec4 := time.Since(t0)
-		rec4.ReleaseView()
-		t.Logf("新格式重开：LoadRecordForView=%s 解码=%s blocks=%d turns_total=%d",
-			load4.Round(time.Millisecond), dec4.Round(time.Millisecond), len(cp4.Blocks), cp4.TurnsTotal)
+		r4 := NewViewReducer()
+		if err := r4.Restore(cp4); err != nil {
+			t.Fatal(err)
+		}
+		res4 := time.Since(t0) - dec4
+		t.Logf("新格式+窗口重开：LoadRecordForView=%s 窗口解析=%s Restore=%s 合计=%s blocks=%d turns_total=%d",
+			load4.Round(time.Millisecond), dec4.Round(time.Millisecond), res4.Round(time.Millisecond),
+			(load4 + dec4 + res4).Round(time.Millisecond), len(cp4.Blocks), cp4.TurnsTotal)
 		return
 
 	case "commit":

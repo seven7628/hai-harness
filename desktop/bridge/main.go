@@ -1095,6 +1095,12 @@ func (m *manager) readOnlyConvertSandbox(workspace, scope string) sandbox.Sandbo
 }
 
 // runtime 取（或懒创建）workspace 运行态：storeDir 与会话均按工作区隔离
+// restoreWindowBlocks 是冷恢复默认解码的尾部块数。
+//
+// 500 块 ≈ 3.5MB，解码 ~5ms；其余留在 sidecar 按页取（ReadBlockPage）。
+// 不能更小：首屏一次要渲染的块（含正在跑的工具输出）基本都在这个范围内。
+const restoreWindowBlocks = 500
+
 func (m *manager) runtime(path string) *workspaceRuntime {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1294,8 +1300,12 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 			if rec, lerr := recordStore.LoadRecordForView(context.Background(), wsKey, id); lerr == nil {
 				// 快路径：sidecar 引用形态走「骨架 + 并行块解码」（210MB 单线程
 				// 1.1~2.2s → 实测 ~250ms）；旧格式内嵌 blocks 自动回退整份解析。
-				cp, perr := parseCheckpointFromRecord(rec)
-				rec.ReleaseView() // 解码完即可释放映射
+				// 窗口恢复：只解尾部 + 卡片块，其余按需分页（Marshal 无 limit 时
+				// 会自动物化全量，旧 UI 的「历史消息看不到」红线不受影响）。
+				cp, perr := parseCheckpointFromRecordWindow(rec, restoreWindowBlocks)
+				if cp == nil || cp.PagedBlocks == nil {
+					rec.ReleaseView() // 没有分页句柄 → 解码完即可释放映射
+				}
 				if perr == nil {
 					if err := reducer.Restore(cp); err == nil {
 						reducer.NormalizeForRestore() // 重启后 running → 终态（done/abandoned）

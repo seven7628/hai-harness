@@ -615,6 +615,11 @@ type ViewReducer struct {
 	// 尚未写进 <record>.turns 日志的轮次（提交时 drain）。
 	turnsTotal   int
 	turnsPending []Turn
+
+	// paged 是窗口恢复时未解码的块（指向 sidecar 映射）；blocksTotal 是历史块总数。
+	// paged == nil 表示全量在内存里，行为与旧路径完全一致。
+	paged       *PagedBlocks
+	blocksTotal int
 	// cachedSpans 与 marshalCache 同代：每个 block 的字节（与 view 中片段逐字节相同）
 	cachedSpans [][]byte
 
@@ -1008,7 +1013,40 @@ func normalizeDanglingState(cp *Checkpoint) {
 func (r *ViewReducer) Marshal() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// 无 limit 的调用方（旧 UI）要的是**完整历史**：先把窗口外的块解出来。
+	// 守住「历史消息不能看不到」这条红线，代价只在真的请求全量时付一次。
+	if err := r.ensureFullBlocksLocked(); err != nil {
+		return nil, err
+	}
 	return r.marshalLocked()
+}
+
+// ensureFullBlocksLocked 把 PagedBlocks 解码并合入 r.blocks（按 id 升序）。
+// 幂等；paged == nil 时是空操作。
+func (r *ViewReducer) ensureFullBlocksLocked() error {
+	if r.paged == nil || len(r.paged.IDs) == 0 {
+		return nil
+	}
+	blocks := make([]Block, len(r.paged.IDs))
+	var hashes [][8]byte
+	if len(r.paged.Hashes) == len(r.paged.IDs) {
+		hashes = r.paged.Hashes
+	}
+	if err := decodeBlocksParallel(r.paged.Spans, hashes, blocks); err != nil {
+		return err
+	}
+	out := make([]Block, 0, len(blocks)+len(r.blocks))
+	out = append(out, blocks...)
+	out = append(out, r.blocks...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if r.paged.Release != nil {
+		r.paged.Release()
+	}
+	r.paged = nil
+	r.blocks = out
+	r.blockIdxDirty = true
+	r.invalidateMarshalCache()
+	return nil
 }
 
 // marshalLocked 是 Marshal 的持锁实现（供已持锁的调用方复用）。
@@ -1312,6 +1350,9 @@ type BodySpans struct {
 	Spans [][]byte
 	IDs   []uint64
 	Dirty map[uint64]struct{}
+	// AllIDs 是 record 要引用的**全部**块 id（窗口恢复下 IDs 只是窗口 + 卡片块）。
+	// 为空表示 IDs 即全集。
+	AllIDs []uint64
 }
 
 // MarshalBodyWithSpans 返回「不含 blocks 的骨架 + 每个 block 的字节」。
@@ -1322,19 +1363,29 @@ type BodySpans struct {
 func (r *ViewReducer) MarshalBodyWithSpans() (*BodySpans, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.bodyCacheOK && r.bodyCacheSeq == r.seq && r.bodyCacheGen == r.clearGeneration {
+	if r.bodyCacheOK && r.bodyCacheSeq == r.seq && r.bodyCacheGen == r.clearGeneration && r.paged == nil {
 		// 缓存命中：没有新事件，也就没有新脏块（退回全量比对更安全）。
+		// paged 非 nil 时不走缓存：body 里只有窗口，必须与全集 id 一起下发。
 		r.lastDirtyBlocks = nil
 		return &BodySpans{Body: r.bodyCache, Spans: r.bodyCacheSpans, IDs: r.bodyCacheIDs}, nil
+		// 注：body 缓存只在全量路径下产生（paged 非 nil 时不会命中缓存），
+		// 所以这里不需要 AllIDs。
 	}
 	var out bytes.Buffer
 	body, parts, ids, err := r.encodeLockedMode(&out, true)
 	if err != nil {
 		return nil, err
 	}
+	allIDs := ids
+	if r.paged != nil && len(r.paged.IDs) > 0 {
+		allIDs = make([]uint64, 0, len(r.paged.IDs)+len(ids))
+		allIDs = append(allIDs, r.paged.IDs...)
+		allIDs = append(allIDs, ids...)
+		sort.Slice(allIDs, func(i, j int) bool { return allIDs[i] < allIDs[j] })
+	}
 	r.bodyCache, r.bodyCacheSpans, r.bodyCacheIDs = body, parts, ids
 	r.bodyCacheSeq, r.bodyCacheGen, r.bodyCacheOK = r.seq, r.clearGeneration, true
-	return &BodySpans{Body: body, Spans: parts, IDs: ids, Dirty: r.lastDirtyBlocks}, nil
+	return &BodySpans{Body: body, Spans: parts, IDs: ids, Dirty: r.lastDirtyBlocks, AllIDs: allIDs}, nil
 }
 
 // MarshalWithSpans 返回 view 字节 + 每个 block 的字节切片。
@@ -1396,6 +1447,14 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 	defer r.mu.Unlock()
 	if cp == nil {
 		return nil
+	}
+	if r.paged != nil && r.paged.Release != nil {
+		r.paged.Release()
+	}
+	r.paged = cp.PagedBlocks
+	r.blocksTotal = cp.BlocksTotal
+	if r.blocksTotal < len(cp.Blocks) {
+		r.blocksTotal = len(cp.Blocks)
 	}
 	r.blocks = cloneBlocks(cp.Blocks)
 	r.blockIdxDirty = true // 索引随新 blocks 惰性重建
@@ -3404,6 +3463,11 @@ func (r *ViewReducer) clearLocked() {
 	r.blocks = []Block{{Kind: blockKindDivider, ID: r.nextBlockID(), DividerReason: "clear", Ts: nowMillis()}}
 	r.runNodes = []RunNode{}
 	r.pendingQuestions = nil
+	// 清空上下文：窗口外的块不再需要，释放映射（否则每次 clear 漏一个 mmap）。
+	if r.paged != nil && r.paged.Release != nil {
+		r.paged.Release()
+	}
+	r.paged = nil
 	r.turns = []Turn{}
 	r.turnsTotal = 0
 	// 清空 = 新一代：历史轮次仍留在日志里（只追加），但当前 record 的
@@ -4028,8 +4092,11 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	// 正确做法：以快照为唯一事实来源，total/tail/骨架全部来自同一份 cp.Blocks。
 	cp := r.snapshotLocked()
 	blocks := cp.Blocks
-	total := len(blocks)
-	if limit <= 0 || limit >= total {
+	total := r.blocksTotal
+	if total < len(blocks) {
+		total = len(blocks)
+	}
+	if limit <= 0 || limit >= len(blocks) {
 		// 不截断：走全量编码（带逐块字节缓存）。**不能**在这里自己拼 JSON ——
 		// 那会绕过 blockBytes 缓存，让每个会话每次打开都重新序列化全部块（小会话也变慢）。
 		view, _, _, err := r.marshalLockedSpans()
@@ -4192,9 +4259,16 @@ func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.R
 	// 代价：每页复制一次 blocks 切片（浅拷贝切片头 + 结构体数组）。21890 个 Block
 	// 结构体的拷贝是 ~10MB memcpy（实测数 ms），相对「返回错误数据」完全可接受。
 	// 只有真的翻页才走这里，打开热路径（MarshalTail）不受影响。
+	// 窗口恢复：请求的游标早于内存里最早的块 → 直接从 sidecar 映射解一页。
+	if r.paged != nil && beforeID > 0 && len(r.paged.IDs) > 0 && (len(r.blocks) == 0 || beforeID <= r.blocks[0].ID) {
+		return r.readPagedPageLocked(beforeID, limit)
+	}
 	snap := r.snapshotLocked()
 	view := snap.Blocks
-	total = len(view)
+	total = len(view) // 归一化后的真实条数（空壳 assistant 块已丢弃）
+	if r.paged != nil && r.blocksTotal > total {
+		total = r.blocksTotal // 窗口恢复：总数含未加载进内存的历史块
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -4299,4 +4373,44 @@ func (r *ViewReducer) RestorePendingTurns(turns []Turn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.turnsPending = append(turns, r.turnsPending...)
+}
+
+// readPagedPageLocked 从 PagedBlocks（sidecar 映射）里解一页。
+//
+// 只在「窗口恢复 + 游标早于内存窗口」时走这里：翻历史时按页付解码成本，
+// 而不是打开时把 209MB 全解一遍。
+func (r *ViewReducer) readPagedPageLocked(beforeID uint64, limit int) (blocks []json.RawMessage, nextCursor uint64, hasMore bool, total int, err error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	total = r.blocksTotal
+	ids := r.paged.IDs
+	end := sort.Search(len(ids), func(i int) bool { return ids[i] >= beforeID })
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	if end <= 0 {
+		return nil, 0, false, total, nil
+	}
+	spans := r.paged.Spans[start:end]
+	var hashes [][8]byte
+	if len(r.paged.Hashes) == len(ids) {
+		hashes = r.paged.Hashes[start:end]
+	}
+	decoded := make([]Block, len(spans))
+	if err := decodeBlocksParallel(spans, hashes, decoded); err != nil {
+		return nil, 0, false, total, err
+	}
+	blocks = make([]json.RawMessage, 0, len(decoded))
+	for i := range decoded {
+		b, merr := json.Marshal(&decoded[i])
+		if merr != nil {
+			return nil, 0, false, total, merr
+		}
+		blocks = append(blocks, b)
+	}
+	nextCursor = decoded[0].ID
+	hasMore = start > 0
+	return blocks, nextCursor, hasMore, total, nil
 }
