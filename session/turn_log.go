@@ -151,3 +151,73 @@ func ReadTurnChunks(recordPath string) ([][]byte, error) {
 		}
 	}
 }
+
+// ReadTurnChunksTail 返回日志尾部的若干块（JSON 数组），保证覆盖最后 n 条、
+// 但按**块边界**返回（可能多给，不会少给）——调用方按数组元素自行裁剪。
+// 按块返回而不是切到刚好 n 条，是为了不用解析 JSON 就能定位。
+//
+// 为什么要它：turns 分块后 body 只带 512 条窗口，历史在日志里。UI 目前只用
+// 「总条数 + 最后两条」，但「翻旧轮次」是迟早要的 —— 这个入口让调用方不必
+// 自己解析文件格式，也避免以后再加一套格式。
+//
+// 实现：先扫长度头拿到每块的 (off,len,count)（不解 JSON），再从尾部往前取，
+// 只读需要的那几块。30 万条的会话也只会读最后几块。
+func ReadTurnChunksTail(recordPath string, n int) ([][]byte, int, error) {
+	if n <= 0 {
+		return nil, 0, nil
+	}
+	f, err := os.Open(TurnLogPath(recordPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+	magic := make([]byte, len(turnLogMagic))
+	if _, err := io.ReadFull(f, magic); err != nil {
+		return nil, 0, fmt.Errorf("turn log: short magic: %w", err)
+	}
+	if string(magic) != turnLogMagic {
+		return nil, 0, fmt.Errorf("turn log: bad magic")
+	}
+
+	type chunkMeta struct {
+		off   int64
+		size  int
+		count int
+	}
+	var metas []chunkMeta
+	total := 0
+	pos := int64(len(turnLogMagic))
+	var hdr [8]byte
+	for {
+		if _, err := f.ReadAt(hdr[:], pos); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, total, fmt.Errorf("turn log: truncated header: %w", err)
+		}
+		size := int(binary.LittleEndian.Uint32(hdr[0:4]))
+		count := int(binary.LittleEndian.Uint32(hdr[4:8]))
+		body := pos + 8
+		total += count
+		metas = append(metas, chunkMeta{off: body, size: size, count: count})
+		pos = body + int64(size)
+	}
+
+	var out [][]byte
+	remain := n
+	for i := len(metas) - 1; i >= 0 && remain > 0; i-- {
+		m := metas[i]
+		if m.count == 0 || m.size == 0 {
+			continue // 清空标记/空块
+		}
+		buf := make([]byte, m.size)
+		if _, err := f.ReadAt(buf, m.off); err != nil {
+			return out, total, fmt.Errorf("turn log: truncated chunk: %w", err)
+		}
+		out = append([][]byte{buf}, out...)
+		remain -= m.count
+	}
+	return out, total, nil
+}
