@@ -4106,7 +4106,15 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 		return &PartialView{View: view, Total: total, Returned: total}, nil
 	}
 
-	start := total - limit
+	// 尾部只能从「实际拿到的块」里切，不能按 total 切：
+	// 窗口恢复（paged）时 total 是**历史总块数**，而 cp.Blocks 只装了解码过的窗口尾部，
+	// 两者可以差很远（实测 10294 vs 496）——按 total 切会越界 panic
+	// （slice bounds out of range [10294:496]，2026-11-08 实测命中）。
+	// 非窗口模式下 total == len(blocks)，下面的算法与旧写法等价。
+	start := len(blocks) - limit
+	if start < 0 {
+		start = 0
+	}
 	tail := blocks[start:]
 	cursor := tail[0].ID
 
@@ -4277,7 +4285,18 @@ func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.R
 	if beforeID > 0 {
 		// 用二分：blocks 按 id 严格递增（blockSeq 单调分配），
 		// 线性扫描在长会话里是 21890 次比较/页，没有必要。
-		end = sort.Search(total, func(i int) bool { return view[i].ID >= beforeID })
+		//
+		// 二分的范围必须是**实际拿到的块**，不是 total：窗口恢复（paged）时 total 是
+		// 历史总块数（实测 10294），view 只装窗口内的块（496）——按 total 二分会
+		// 让谓词索引到 view 之外，index out of range 直接崩掉 bridge
+		// （2026-11-08 实测崩于 view_reducer.go:4288，症状是「新建会话/发消息
+		// 全部无反应」——bridge 死了，命令无人应答）。
+		// 非窗口模式下 total == len(view)，范围与旧写法一致。
+		n := len(view)
+		if n > total {
+			n = total
+		}
+		end = sort.Search(n, func(i int) bool { return view[i].ID >= beforeID })
 	}
 	start := end - limit
 	if start < 0 {
