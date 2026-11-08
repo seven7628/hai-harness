@@ -107,9 +107,12 @@ func TestCompactDoesNotDropConcurrentWrites(t *testing.T) {
 // 记录必须完整可读（不能出现「回收把提交吃掉」）。
 func TestCompactBackgroundUnderLoad(t *testing.T) {
 	t.Cleanup(func() { WaitBackgroundCompacts(30 * time.Second) })
-	oldMin := compactMinBytes
-	compactMinBytes = 1 << 20
-	defer func() { compactMinBytes = oldMin }()
+	oldMin := compactMinBytes.Load()
+	compactMinBytes.Store(1 << 20)
+	defer func() {
+		WaitBackgroundCompacts(30 * time.Second) // 等回收跑完再恢复全局门槛（否则是竞态）
+		compactMinBytes.Store(oldMin)
+	}()
 
 	root := t.TempDir()
 	store, err := NewSessionRecordStorage(root)

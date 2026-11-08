@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -1811,7 +1812,12 @@ func lowerBound(a []uint64, v uint64) int {
 const compactThreshold = 0.20
 
 // compactMinBytes 是 compact 的最小体积门槛：太小的文件重写不划算。
-var compactMinBytes int64 = 32 << 20
+//
+// 用 atomic 而不是普通变量：后台回收 goroutine 会读它，而测试会临时调小它
+// （`-race` 下普通变量会直接报 data race）。
+var compactMinBytes atomic.Int64
+
+func init() { compactMinBytes.Store(32 << 20) }
 
 // staleByteRatio 报告废弃字节占比（O(1)）。
 func (bs *blockStore) staleByteRatio() float64 {
@@ -1827,7 +1833,7 @@ func (bs *blockStore) staleByteRatio() float64 {
 }
 
 // needsCompact 报告是否应当回收（O(1)）。
-func (bs *blockStore) needsCompact() bool { return bs.needsCompactAt(compactMinBytes) }
+func (bs *blockStore) needsCompact() bool { return bs.needsCompactAt(compactMinBytes.Load()) }
 
 func (bs *blockStore) needsCompactAt(minBytes int64) bool {
 	if bs.nBytes-int64(len(blockStoreMagic)) < minBytes {

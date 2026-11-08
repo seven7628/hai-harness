@@ -118,9 +118,12 @@ func TestRecordLockSerializesSameRecord(t *testing.T) {
 // 关掉开关则回到同步回收（灰度/回退路径）。
 func TestCompactRunsInBackground(t *testing.T) {
 	t.Cleanup(func() { WaitBackgroundCompacts(30 * time.Second) })
-	oldMin := compactMinBytes
-	compactMinBytes = 1 << 20
-	defer func() { compactMinBytes = oldMin }()
+	oldMin := compactMinBytes.Load()
+	compactMinBytes.Store(1 << 20)
+	defer func() {
+		WaitBackgroundCompacts(30 * time.Second) // 等回收跑完再恢复全局门槛（否则是竞态）
+		compactMinBytes.Store(oldMin)
+	}()
 
 	root := t.TempDir()
 	store, err := NewSessionRecordStorage(root)
@@ -184,9 +187,12 @@ func TestCompactRunsInBackground(t *testing.T) {
 
 // 关掉开关：回收在提交内同步完成。
 func TestCompactSynchronousWhenBackgroundDisabled(t *testing.T) {
-	oldMin := compactMinBytes
-	compactMinBytes = 1 << 20
-	defer func() { compactMinBytes = oldMin }()
+	oldMin := compactMinBytes.Load()
+	compactMinBytes.Store(1 << 20)
+	defer func() {
+		WaitBackgroundCompacts(30 * time.Second) // 等回收跑完再恢复全局门槛（否则是竞态）
+		compactMinBytes.Store(oldMin)
+	}()
 
 	root := t.TempDir()
 	store, err := NewSessionRecordStorage(root)
