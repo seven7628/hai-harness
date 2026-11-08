@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05/06 passed；P3b-07a 人类派任务实现中",
+  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04/05/06/07a passed；P3b-07 前端互 @/结果卡启动",
   "updated": "2026-11-07",
   "phases": [
     {
@@ -1365,9 +1365,11 @@ const BASE = {
       ],
       "acceptance": "人类从群 UI 派任务给成员；任务 origin=human、assign 消息 sender=human/mentions=[B]、目标被唤醒；忙则留 queued；结果卡不唤醒人类；非法成员/自派拒绝。",
       "tests": "go test ./desktop/bridge/ -run 'HumanAssign|GroupAssign'",
-      "commit": "feat(hub-p3b-07a): 人类群内派任务",
-      "status": "in_progress",
-      "note": "实现中"
+      "commit": "2d6c866",
+      "status": "done",
+      "note": "实现 8946ab7，修复 2d6c866；复审 passed",
+      "review": "passed",
+      "reviewNote": "复审（task-6gq667m8）PASS。B-01 已修：hub_group_assign 优先 to_agent、回退计划字段 agent_id，两者并存 to_agent 胜；human origin 校验/Guard SkipAgentScope（indexed+fallback 测试已可杀变异）/assign 消息 sender=human+mentions=[B]/structured 路由/结算结果卡+不唤醒人类/群日预算硬停；N-01 人类已读游标、N-02 忙碌泵 queued→dispatched→completed、N-05 target_agent_id、事件顺序均已补。非阻塞：N-1 仍忙时重复 queued 更新、N-2/N-3 两个测试缺口、N-06 B 不能查询/取消人类任务（记债）。"
     }
   ],
   "deferred": [
@@ -1478,8 +1480,8 @@ const BASE = {
       "depends_on": [
         "P3b-07 前端任务卡/派发 UI"
       ],
-      "return_when": "P3b-07 或人机派发 UI 落地时",
-      "status": "deferred"
+      "return_when": "P3b-07a 已实现并复审通过（2d6c866）",
+      "status": "resolved"
     },
     {
       "id": "D-hub-conversation-ui",
@@ -1552,6 +1554,20 @@ const BASE = {
       "depends_on": [],
       "return_when": "下一次改 hub_mark_read/群列表时：补删除群、DM 回退生效值、部分失败 warning 三条测试",
       "note": "P3b-06 复审 findings 1-3。"
+    },
+    {
+      "id": "D-human-assign-queued-noise",
+      "depends_on": [
+        "P3b-07"
+      ],
+      "return_when": "P3b-07 任务卡消费事件时：泵仍在忙只发 dispatched/running 更新，避免重复 queued 事件",
+      "note": "P3b-07a 复审 N-1。"
+    },
+    {
+      "id": "D-human-assign-test-gaps",
+      "depends_on": [],
+      "return_when": "下一次改 hub_group_assign 时：补非法 agent_id 零副作用、MarkGroupRead 失败告警/不回滚两条测试",
+      "note": "P3b-07a 复审 N-2/N-3。"
     }
   ],
   "progress": {
@@ -1897,10 +1913,10 @@ const BASE = {
       "reviewNote": "复审（task-hwkprcsu）PASS。Group.HumanReadSeq 向后兼容；MarkGroupRead 在 File/Memory 都持锁单调、并发不倒退，SaveGroup 保留磁盘更大值；perception 未读排除人类、task_result 优先渲染 completed/failed/interrupted/canceled/declined/blocked_budget；hub_group_list 新增 progress（保留 groups 数组），分页可数 >500 且终止；hub_mark_read 群/DM 双路；task_result 对非派发者快照可见且不唤醒。变异 readSeq/优先级/游标后退/SaveGroup 合并/分页 beforeSeq 全 RED。非阻塞：overshoot、DM 回退生效值/删除群/部分失败无测试、mark_read 无广播事件、无界扫描、warning 含绝对路径、Store 编译断言。"
     },
     "P3b-07a": {
-      "status": "in_progress",
-      "commit": "",
-      "review": "pending",
-      "reviewNote": "实现中"
+      "status": "done",
+      "commit": "2d6c866 fix(hub-p3b-07a): 复审收口",
+      "review": "passed",
+      "reviewNote": "复审（task-6gq667m8）PASS。B-01 已修：hub_group_assign 优先 to_agent、回退计划字段 agent_id，两者并存 to_agent 胜；human origin 校验/Guard SkipAgentScope（indexed+fallback 测试已可杀变异）/assign 消息 sender=human+mentions=[B]/structured 路由/结算结果卡+不唤醒人类/群日预算硬停；N-01 人类已读游标、N-02 忙碌泵 queued→dispatched→completed、N-05 target_agent_id、事件顺序均已补。非阻塞：N-1 仍忙时重复 queued 更新、N-2/N-3 两个测试缺口、N-06 B 不能查询/取消人类任务（记债）。"
     }
   },
   "reviewGate": {
