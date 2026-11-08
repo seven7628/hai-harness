@@ -16,6 +16,24 @@ TASKS = ROOT / "tasks.json"
 HTML = ROOT / "PROGRESS.html"
 
 base = json.loads(TASKS.read_text())
+
+# 看板 UI 读的是顶层 progress 覆盖层，不是 tasks[] 里的 status/review。
+# 新增/收口任务如果只改了任务卡，UI 仍会显示「未 Review」——这里把缺失的
+# progress 条目从任务卡镜像过去，避免同一事实写两遍还漏一处。
+progress = base.setdefault("progress", {})
+seeded = []
+for task in base.get("tasks", []):
+    tid = task.get("id")
+    if not tid or tid in progress:
+        continue
+    if task.get("status") not in ("in_progress", "review", "done", "blocked") and not task.get("review"):
+        continue
+    progress[tid] = {k: task[k] for k in ("status", "commit", "review", "reviewNote") if task.get(k)}
+    seeded.append(tid)
+if seeded:
+    TASKS.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n")
+    print("mirrored task-level progress: " + ", ".join(seeded))
+
 html = HTML.read_text()
 
 block = "const BASE = " + json.dumps(base, ensure_ascii=False, indent=2) + ";\nconst STORE_KEY"

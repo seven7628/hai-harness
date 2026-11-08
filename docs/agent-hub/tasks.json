@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04 passed；P3b-05 智能体任务结算 Review 中",
+  "subtitle": "P3a 全部 passed；P2.5-08 视觉 passed；P3b-01/01b/02/03/04 passed；P3b-05 智能体任务结算待 Review",
   "updated": "2026-11-07",
   "phases": [
     {
@@ -913,9 +913,9 @@
       ],
       "acceptance": "目标 AgentEnd 结算；结果卡；派发者唤醒；不再重复发群消息；declined/canceled 路径。",
       "tests": "go test ./desktop/bridge/ -run FinishAgentTask",
-      "commit": "feat(hub-p3b-05): 智能体任务结算",
-      "status": "in_progress",
-      "note": "实现中（finishAgentTask/结果卡/派发者唤醒/declined+canceled）"
+      "commit": "25cb0e5",
+      "status": "review",
+      "note": "实现完成，独立 Review 中（task-3ccfwxwf）"
     },
     {
       "id": "P3b-06",
@@ -1485,6 +1485,18 @@
       "commit": "4b46c51 + 6953f55 + d25dc20 + 1a3ba22 fix/docs(hub-p2.5-08): 三主题视觉验收（修复+复验）",
       "review": "passed",
       "reviewNote": "三轮复审 passed（task-2asz9rn4，对象 1a3ba22；前两轮对象 6953f55/1a3ba22 的前身分别 changes_requested）。交付：hub.css 局部令牌（弱文本升 --text-2、交互边界/焦点环 >=3:1、Rail 头部 264px 不换行、1024 合并/分开 nowrap+flex、prefers-contrast: more + forced-colors 高对比模式、不新增 data-theme）；harness 修正（handoff fixture sender=agent、mustExist .hub-handoff-card/status、完整 Tab cycle、outlineClipped/overflow 祖先检测、汇总 errors 覆盖 text/boundary/focus/forced-colors/overflow，390 deferred 不参与 gate）；报告/35 张截图/measurements.json 归档。验证：7 runs/35 shots/errors=[]/failures=[]；1440+1024 无横向溢出/换行/裁切；文本 min ink 5.25 / paper 4.57 / fc 8.73；边界 min 3.45/5.80/8.73；focus 12 walks cycleComplete、0 clipped、inspector 27 stops/group 15 stops；forced-colors selected sameFill/sameText=false；tsc 绿、CSS parse OK；4 项 harness 变异（去 focus 规则、forced-colors 关、文本令牌、回退 1024 nowrap）均按预期红。非阻塞：①390px 群线程/Inspector/Needs you 溢出归 P4（已入 defer D-390-mobile）；②原生高对比主题未做，仅媒体查询模式（D-native-high-contrast）；③handoff 卡在屏幕外、无 closeup；box-shadow halo 对比度未计算；④fixture 群/任务/Needs 数据非真 bridge；1024 focus 已在最终复审重跑。"
+    },
+    "P3b-04": {
+      "status": "done",
+      "commit": "0f3c321",
+      "review": "passed",
+      "reviewNote": "复审（task-qjcdjuud）PASS。B1 人类插话后旧链路深度污染：Offer 对非人类 depth 夹紧到 conv.depth+1（真实 4 跳链插话后 group_say 落到 depth=1，不再误耗尽）；N1 群内串行闸门：本群任一已装配会话 running/busy/dispatchPending/PendingCount>0 时不放行，wake 留队由下一次 hubOnRunEnd/冷却定时器重试（并行首轮也须全部结束）；N3 空 Offer 不建对话、N6 关停后停止命令拒绝。变异 remove clamp / remove groupRunInFlight / empty-target check / shutdown guard 均 RED；定向 -count=5 -race、go vet、go build 绿；工作区路径未进入闸门。残留非阻塞：闸门无看门狗、注释漂移。"
+    },
+    "P3b-05": {
+      "status": "review",
+      "commit": "25cb0e5 feat(hub-p3b-05): 智能体任务结算与结果卡",
+      "review": "pending",
+      "reviewNote": "实现完成，独立 Review 中（task-3ccfwxwf）"
     }
   },
   "reviewGate": {
