@@ -8,7 +8,7 @@
 // 运行：esbuild bundle 后 node --test（见 package.json 的 test:billing-view）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { fmtMoney, localSpendOf, meterOf, resetIn, sortedWindows, toneOfPercent, worstWindow } from './billingView'
+import { fmtMoney, localSpendAll, localSpendOf, meterOf, resetIn, rowMeterOf, sortedWindows, toneOfPercent, worstWindow } from './billingView'
 import type { BillingSnapshot } from '../transport/types'
 
 const quotaSnap = (windows: BillingSnapshot['windows']): BillingSnapshot => ({
@@ -145,4 +145,79 @@ test('刷新失败但保留旧读数（stale）：照常显示数字，色调降
   }
   assert.equal(meterOf(staleQuota).text, 'week 95%')
   assert.equal(meterOf(staleQuota).tone, 'muted') // 不因为 95% 报 danger —— 那是过期读数
+})
+
+// —— 列表行（两行制）口径 ——
+// 这条口径的失败方式很隐蔽：行内只出最紧窗口、rest 为空，用户会以为「只有一个窗口」，
+// 于是不知道该等 5h 还是等一周 —— 所以 rest 的排序与截断都要钉住。
+test('列表行：主读数=最紧窗口，rest=其余窗口（已用降序，最多 2 个）', () => {
+  const snap = quotaSnap([
+    { key: 'rolling', label: '5h', percent: 5 },
+    { key: 'weekly', label: 'week', percent: 48 },
+    { key: 'monthly', label: 'month', percent: 24 },
+    { key: 'yearly', label: 'year', percent: 12 },
+  ])
+  const m = rowMeterOf(snap)
+  assert.equal(m.kind, 'quota')
+  assert.equal(m.primary, 'week 48%')
+  assert.equal(m.percent, 48)
+  assert.equal(m.tone, 'ok')
+  assert.deepEqual(m.rest, ['month 24%', 'year 12%']) // 第 4 个窗口被截掉（行内放不下）
+  assert.equal(m.hasData, true)
+})
+
+test('列表行：0% 的窗口可以当主读数，但读数缺失的窗口既不进主读数也不进 rest', () => {
+  const onlyZero = rowMeterOf(quotaSnap([{ key: 'rolling', label: '5h', percent: 0 }]))
+  assert.equal(onlyZero.primary, '5h 0%')
+  assert.deepEqual(onlyZero.rest, [])
+  const withMissing = rowMeterOf(quotaSnap([
+    { key: 'weekly', label: 'week', percent: 91 },
+    { key: 'monthly', label: 'month' }, // 无读数
+  ]))
+  assert.equal(withMissing.primary, 'week 91%')
+  assert.deepEqual(withMissing.rest, [])   // 缺失 ≠ 0%，不进 rest
+  assert.equal(withMissing.tone, 'danger')
+})
+
+test('列表行：余额 / 仅已用 分开标（组件据此决定「余额」还是「本期已用」前缀）', () => {
+  assert.equal(rowMeterOf(balanceSnap(-0.02)).kind, 'balance')
+  assert.equal(rowMeterOf(balanceSnap(-0.02)).primary, '¥-0.02')
+  assert.equal(rowMeterOf(balanceSnap(-0.02)).tone, 'danger')
+  const usedOnly = rowMeterOf({ provider: 'x', fetched_at: '', kind: 'balance', used: { amount: 12.3, currency: 'USD' } })
+  assert.equal(usedOnly.kind, 'used')
+  assert.equal(usedOnly.primary, '$12.30')
+  assert.deepEqual(usedOnly.rest, [])
+})
+
+test('列表行：无能力 / 未连接整块留空；出错给 error；stale 降为 muted', () => {
+  const unsupported: BillingSnapshot = { provider: 'openai', fetched_at: '', kind: 'none', error_code: 'billing_unsupported' }
+  assert.deepEqual(rowMeterOf(unsupported), { kind: 'none', primary: '', tone: 'muted', rest: [], hasData: false })
+  assert.deepEqual(rowMeterOf(undefined).kind, 'none')
+  assert.equal(rowMeterOf({ ...balanceSnap(1), not_connected: true, error_code: 'billing_no_key' }).kind, 'none')
+  const err = rowMeterOf({ ...balanceSnap(1), balance: undefined, error_code: 'billing_network' })
+  assert.equal(err.kind, 'error')
+  assert.equal(err.primary, '')
+  assert.equal(err.hasData, false)
+  // 刷新失败但留着旧读数：照常显示，色调降级（不因为旧的 95% 报 danger）
+  const stale = rowMeterOf({ ...quotaSnap([{ key: 'weekly', label: 'week', percent: 95 }]), error_code: 'billing_network', stale: true })
+  assert.equal(stale.primary, 'week 95%')
+  assert.equal(stale.tone, 'muted')
+})
+
+test('本地花费一次扫完：按 provider 分组，裸模型名不计，跨月不进本月', () => {
+  const rows = [
+    { Day: '2026-10-31', Model: 'deepseek/x', CostUsd: 9 },
+    { Day: '2026-11-01', Model: 'deepseek/x', CostUsd: 1.5 },
+    { Day: '2026-11-06', Model: 'deepseek/y', CostUsd: 2.5 },
+    { Day: '2026-11-06', Model: 'opencode/z', CostUsd: 4 },
+    { Day: '2026-11-06', Model: 'bare-model', CostUsd: 7 },
+  ]
+  const now = new Date(2026, 10, 6)
+  const all = localSpendAll(rows, now)
+  assert.deepEqual(all.get('deepseek'), { todayUsd: 2.5, monthUsd: 4 })
+  assert.deepEqual(all.get('opencode'), { todayUsd: 4, monthUsd: 4 })
+  assert.equal(all.get('bare-model'), undefined)
+  assert.equal(all.size, 2)
+  // 单家口径与分组口径一致
+  assert.deepEqual(localSpendOf(rows, 'deepseek', now), all.get('deepseek'))
 })

@@ -12905,7 +12905,10 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .pvp-row-2 {
   display: flex; align-items: center; gap: 6px; min-width: 0;
   font-size: 11.5px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; /* 窄弹窗下宁可就地截断，也不能把「6 个模型」拆成三行 */
 }
+.pvp-row-2 > span { flex: 0 0 auto; }
+.pvp-row-2 > .pvp-host { flex: 0 1 auto; min-width: 96px; } /* 窄窗下先压分类，别把 host 压成「api…」 */
 .pvp-row-name {
   font-size: 13.5px; font-weight: 600; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
@@ -12913,7 +12916,6 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .pvp-cur { font-size: 11px; color: var(--success); flex: 0 0 auto; }
 .pvp-warn { font-size: 11px; color: var(--warning); flex: 0 0 auto; }
 .pvp-grow { flex: 1 1 auto; }
-.pvp-meter { flex: 0 0 168px; } /* billing 车位（见 docs/PROVIDER_USAGE_BILLING.md §8.1） */
 .pvp-mini { padding: 2px 9px; font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
 .pvp-host {
   font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
@@ -13013,9 +13015,21 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .pvp-detail-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 
 /* —— 计量区（余额 / 配额窗口；见 provider/billing 与 docs/PROVIDER_USAGE_BILLING.md）——
-   列表行：4px 细条 + 数字，车位 168px（.pvp-meter 已有），无数据显示时整块留空但**不塌陷**。
+   列表行：固定 178px 一列（glyph | 正文 | 计量 | 操作），**x 恒定**，16 行可以竖着扫；
+   两行制：第一行「最紧窗口 / 余额」，第二行其余窗口或本地本月估算；明细在悬停提示。
+   无数据时整块 visibility:hidden（占位不塌陷，按钮不跳）。
    详情块：每窗口一行（名称 / 条 / 百分比 / 重置时间），余额型换成金额三行。 */
-.pvp-meter { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.pvp-meter {
+  flex: 0 0 178px; min-width: 0;
+  display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 2px;
+}
+.pvp-meter-off { visibility: hidden; } /* 注意：不能叫 .empty —— 全局有空状态 .empty（padding 40+）会把这个格子撑高 */
+.pvp-meter-l1 { display: flex; align-items: center; gap: 6px; max-width: 100%; }
+.pvp-meter-sub {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.pvp-row-act { flex: 0 0 76px; display: flex; justify-content: flex-end; }
 .pvp-meter-txt { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2); white-space: nowrap; }
 .pvp-meter-txt.warn { color: var(--warning); }
 .pvp-meter-txt.danger { color: var(--danger); }

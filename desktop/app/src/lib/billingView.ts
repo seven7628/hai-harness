@@ -89,27 +89,100 @@ export function meterOf(snap?: BillingSnapshot): MeterView {
   return { text: '', tone: 'muted', hint: '', hasData: false }
 }
 
-// localSpendOf 本地记账（E 形状）：从已缓存的 metrics 报告派生某 provider 的今日/本月花费。
+// —— 列表行口径 ——
+//
+// 行内只放一条主读数 + 至多两个次要窗口，**全部信息**走悬停提示（title）。
+// 这样 16 家一眼能扫（同 x 同宽的一列），又不用为看「还有多少」点进详情。
+export interface RowMeterView {
+  kind: 'none' | 'quota' | 'balance' | 'used' | 'error' | 'noReading'
+  // primary 不带标签（余额由组件补「余额」）；空字符串 = 这一行不画计量
+  primary: string
+  percent?: number
+  tone: MeterTone
+  // rest 其余窗口（已用降序，最多 2 个）：'5h 40% · month 12%'
+  rest: string[]
+  hasData: boolean
+}
+
+// rowMeterOf 列表行的唯一口径。与 meterOf 的差别：
+//   · 多带 rest（第二行要显示其余窗口，光一个最紧窗口看不出「哪个窗口紧」）；
+//   · 出错 / 无能力分开：无能力整块留空（16 行里大半是这种，出现标记只会变噪声），
+//     出错给一个 muted 的「—」，原因在悬停提示里。
+export function rowMeterOf(snap?: BillingSnapshot): RowMeterView {
+  const empty: RowMeterView = { kind: 'none', primary: '', tone: 'muted', rest: [], hasData: false }
+  if (!snap || snap.not_connected || snap.error_code === 'billing_no_key') return empty
+  if (snap.error_code === 'billing_unsupported') return empty
+  const staleWithData = Boolean(snap.stale) && Boolean(snap.balance || snap.used || (snap.windows ?? []).length)
+  if (snap.error_code && !staleWithData) return { ...empty, kind: 'error' }
+
+  if (snap.kind === 'quota') {
+    const ws = sortedWindows(snap).filter((w) => typeof w.percent === 'number' && Number.isFinite(w.percent))
+    if (ws.length === 0) return { ...empty, kind: 'noReading' }
+    const w = ws[0]
+    const pct = w.percent as number
+    return {
+      kind: 'quota',
+      primary: `${w.label ?? w.key} ${Math.round(pct)}%`,
+      percent: pct,
+      tone: snap.stale ? 'muted' : toneOfPercent(pct),
+      rest: ws.slice(1, 3).map((x) => `${x.label ?? x.key} ${Math.round(x.percent as number)}%`),
+      hasData: true,
+    }
+  }
+  if (snap.kind === 'balance') {
+    if (snap.balance) {
+      return {
+        kind: 'balance',
+        primary: fmtMoney(snap.balance),
+        tone: snap.stale ? 'muted' : snap.balance.amount <= 0 ? 'danger' : 'ok',
+        rest: [],
+        hasData: true,
+      }
+    }
+    // 只有用量没有余额（new-api 哨兵额度）：金额是「已用」，组件按 kind 决定标签。
+    if (snap.used) {
+      return { kind: 'used', primary: fmtMoney(snap.used), tone: snap.stale ? 'muted' : 'ok', rest: [], hasData: true }
+    }
+  }
+  return empty
+}
+
+export interface LocalSpend {
+  todayUsd: number
+  monthUsd: number
+}
+
+// localSpendAll 本地记账（E 形状）一次扫完：ByDayModel 是「天 × 模型」的行数组，
+// 列表要按 provider 分组显示，逐家扫一遍是 N×16 的无谓开销。
 // ByDayModel[].Model = "provider/model"（无 provider 时是裸模型名 → 不计入任何 provider）。
 // 日界用本地时区的 YYYY-MM-DD —— metrics 的 Day 也是按本地日聚合的。
+export function localSpendAll(
+  byDayModel: { Day: string; Model: string; CostUsd: number }[] | undefined,
+  now: Date = new Date(),
+): Map<string, LocalSpend> {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  const monthStart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`
+  const out = new Map<string, LocalSpend>()
+  for (const row of byDayModel ?? []) {
+    const slash = row.Model.indexOf('/')
+    if (slash <= 0) continue
+    const provider = row.Model.slice(0, slash)
+    const cur = out.get(provider) ?? { todayUsd: 0, monthUsd: 0 }
+    if (row.Day >= monthStart) cur.monthUsd += row.CostUsd
+    if (row.Day === today) cur.todayUsd += row.CostUsd
+    out.set(provider, cur)
+  }
+  return out
+}
+
+// localSpendOf 单个 provider 的今日/本月花费（详情页用：只关心一家）。
 export function localSpendOf(
   byDayModel: { Day: string; Model: string; CostUsd: number }[] | undefined,
   provider: string,
   now: Date = new Date(),
-): { todayUsd: number; monthUsd: number } {
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-  const monthStart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`
-  let todayUsd = 0
-  let monthUsd = 0
-  for (const row of byDayModel ?? []) {
-    const slash = row.Model.indexOf('/')
-    if (slash <= 0) continue
-    if (row.Model.slice(0, slash) !== provider) continue
-    if (row.Day >= monthStart) monthUsd += row.CostUsd
-    if (row.Day === today) todayUsd += row.CostUsd
-  }
-  return { todayUsd, monthUsd }
+): LocalSpend {
+  return localSpendAll(byDayModel, now).get(provider) ?? { todayUsd: 0, monthUsd: 0 }
 }
 
 // sortedWindows 详情块用：已用百分比降序，读数缺失的排最后（不让它们占视觉首位）。

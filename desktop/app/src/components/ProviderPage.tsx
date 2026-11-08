@@ -6,7 +6,7 @@ import { getTransport } from '../transport'
 import type { ProviderCfg, ProviderPreset } from '../transport/types'
 import { ChevronDown, ChevronLeft, EyeIcon, EyeOffIcon, ImageIcon, Plus, SearchIcon } from './icons'
 import { ProviderGlyph } from './ProviderGlyph'
-import { fmtMoney, localSpendOf, meterOf, resetIn, sortedWindows, type MeterTone } from '../lib/billingView'
+import { fmtMoney, localSpendAll, meterOf, resetIn, rowMeterOf, sortedWindows, type MeterTone, type RowMeterView } from '../lib/billingView'
 import { CATEGORY_ORDER, assertCatalogCoverage, availableEntries, catalogByID, categoryCounts, hostOfURL, searchCatalog, sortConfigured, type CatalogEntry, type CatalogCategory } from '../lib/providerCatalog'
 
 // —— Provider：内置快捷添加（DeepSeek/OpenAI/OpenCode Go/Kimi/智谱 + P1 可选 + P2 订阅）+ 用户自定义 ——
@@ -519,6 +519,43 @@ export default function ProviderPage() {
   const presetNames: Record<string, string> = {}
   for (const p of providerPresets) presetNames[p.id] = providerDisplay(t, p.id)
 
+  // 本地花费一次扫完（每行都要显示本月估算，逐家扫是 N×16）。
+  const spendBy = localSpendAll(metrics?.ByDayModel as { Day: string; Model: string; CostUsd: number }[] | undefined)
+  const spendOf = (pid: string) => spendBy.get(pid) ?? { todayUsd: 0, monthUsd: 0 }
+  const errText = (code?: string) => {
+    switch (code) {
+      case 'billing_unauthorized': return t('provider.meter.errUnauthorized')
+      case 'billing_rate_limited': return t('provider.meter.errRateLimited')
+      case 'billing_endpoint_changed': return t('provider.meter.errChanged')
+      case 'billing_network': return t('provider.meter.errNetwork')
+      case 'billing_bad_json': return t('provider.meter.errBadJson')
+      default: return t('provider.meter.errGeneric')
+    }
+  }
+  // 行内只放得下一条读数，其余信息全放悬停提示（明细分/重置时间/本地估算）。
+  const meterTitle = (pid: string, kind: RowMeterView['kind']): string => {
+    const snap = billing[pid]
+    const lines: string[] = []
+    if (snap?.kind === 'quota') {
+      for (const w of sortedWindows(snap)) {
+        const pct = typeof w.percent === 'number' ? `${Math.round(w.percent)}%` : t('provider.meter.noReading')
+        const reset = resetIn(w.resets_at)
+        lines.push(`${w.label ?? w.key} ${pct}${reset ? ' · ' + t('provider.meter.resetsIn').replace('{t}', reset) : ''}`)
+      }
+    } else if (snap?.kind === 'balance') {
+      if (snap.balance) lines.push(`${t('provider.meter.balance')} ${fmtMoney(snap.balance)}`)
+      if (snap.used) lines.push(`${t('provider.meter.used')} ${fmtMoney(snap.used)}`)
+      if (snap.limit) lines.push(`${t('provider.meter.limit')} ${fmtMoney(snap.limit)}`)
+    }
+    const month = spendOf(pid).monthUsd
+    if (month > 0) {
+      lines.push(`${t('provider.meter.month')} ≈${fmtMoney({ amount: month, currency: 'USD' })} · ${t('provider.meter.localHint')}`)
+    }
+    if (snap?.stale) lines.push(t('provider.meter.stale'))
+    if (kind === 'error' && snap?.error_code) lines.push(errText(snap.error_code))
+    return lines.join('\n')
+  }
+
   const openDetail = (pid: string) => {
     setDetailID(pid); setView('detail'); setErr(null); setTestNew(null)
     ensureMetrics() // 本地花费来自缓存的 metrics（60s），不额外扫 JSONL
@@ -575,6 +612,17 @@ export default function ProviderPage() {
     const isActive = settings.provider.active === pid
     const hasCred = Boolean(providerKeys[pid]) || (cfg?.auth_type === 'oauth' && Boolean(oauthStatus[pid]?.logged_in))
     const modelCount = Object.keys(cfg?.models ?? {}).length
+    const rm = rowMeterOf(billing[pid])
+    const month = spendOf(pid).monthUsd
+    // 第二行：优先补其余窗口（光看最紧的那个看不出「哪个窗口快满了」），没有窗口才退回本月估算。
+    const sub = rm.rest.length > 0
+      ? rm.rest.join(' · ')
+      : rm.hasData && month > 0
+        ? `${t('provider.meter.month')} ≈${fmtMoney({ amount: month, currency: 'USD' })}`
+        : ''
+    const primary = rm.kind === 'balance' || rm.kind === 'used'
+      ? `${t(rm.kind === 'balance' ? 'provider.meter.balance' : 'provider.meter.used')} ${rm.primary}`
+      : rm.primary
     return (
       <div
         key={pid}
@@ -591,27 +639,6 @@ export default function ProviderPage() {
             <span className="pvp-row-name">{labelOf(pid)}</span>
             {isActive && <span className="pvp-cur">{t('provider.page.current')}</span>}
             {!hasCred && <span className="pvp-warn">{t('provider.page.noKey')}</span>}
-            <span className="pvp-grow" />
-            {(() => {
-              const m = meterOf(billing[pid])
-              // 不把 m.hint（内部标记/错误码）放进 title：那是排障用的，不该出现在悬停提示里
-              return (
-                <span className={`pvp-meter ${m.text ? 'has' : ''}`}>
-                  {typeof m.percent === 'number' && (
-                    <span className={`pvp-bar ${m.tone}`}><i style={{ width: `${m.percent > 0 ? Math.max(2, Math.min(100, m.percent)) : 0}%` }} /></span>
-                  )}
-                  {m.text && <span className={`pvp-meter-txt ${m.tone}`}>{m.text}</span>}
-                </span>
-              )
-            })()}
-            {!isActive && (
-              <button
-                className="btn pvp-mini"
-                onClick={(ev) => { ev.stopPropagation(); void saveProvider({ provider: pid, active: pid }) }}
-              >
-                {t('provider.page.setActive')}
-              </button>
-            )}
           </div>
           <div className="pvp-row-2">
             <span className="pvp-host">{hostOfURL(cfg?.base_url ?? '') || (cfg?.base_url ?? '—')}</span>
@@ -620,6 +647,29 @@ export default function ProviderPage() {
             <span className="pvp-sep">·</span>
             <span>{t(`provider.page.cat.${e.category}`)}</span>
           </div>
+        </div>
+        <div className={`pvp-meter ${rm.kind === 'none' ? 'pvp-meter-off' : ''}`} title={meterTitle(pid, rm.kind) || undefined}>
+          {(primary || rm.kind === 'error' || rm.kind === 'noReading') && (
+            <span className="pvp-meter-l1">
+              {typeof rm.percent === 'number' && (
+                <span className={`pvp-bar ${rm.tone}`}><i style={{ width: `${rm.percent > 0 ? Math.max(2, Math.min(100, rm.percent)) : 0}%` }} /></span>
+              )}
+              <span className={`pvp-meter-txt ${rm.kind === 'error' || rm.kind === 'noReading' ? 'muted' : rm.tone}`}>
+                {primary || '—'}
+              </span>
+            </span>
+          )}
+          {sub && <span className="pvp-meter-sub">{sub}</span>}
+        </div>
+        <div className="pvp-row-act">
+          {!isActive && (
+            <button
+              className="btn pvp-mini"
+              onClick={(ev) => { ev.stopPropagation(); void saveProvider({ provider: pid, active: pid }) }}
+            >
+              {t('provider.page.setActive')}
+            </button>
+          )}
         </div>
       </div>
     )
@@ -651,17 +701,7 @@ export default function ProviderPage() {
   //   未连接（去配 key / 登录） / 不提供查询（换 provider 或忍了） / 出错（重试）。
   const renderBilling = (pid: string) => {
     const snap = billing[pid]
-    const local = localSpendOf(metrics?.ByDayModel as { Day: string; Model: string; CostUsd: number }[] | undefined, pid)
-    const errText = (code?: string) => {
-      switch (code) {
-        case 'billing_unauthorized': return t('provider.meter.errUnauthorized')
-        case 'billing_rate_limited': return t('provider.meter.errRateLimited')
-        case 'billing_endpoint_changed': return t('provider.meter.errChanged')
-        case 'billing_network': return t('provider.meter.errNetwork')
-        case 'billing_bad_json': return t('provider.meter.errBadJson')
-        default: return t('provider.meter.errGeneric')
-      }
-    }
+    const local = spendOf(pid)
     const ago = (() => {
       const ts = snap?.fetched_at ? new Date(snap.fetched_at).getTime() : NaN
       if (!Number.isFinite(ts)) return ''
