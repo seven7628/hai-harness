@@ -99,6 +99,36 @@ type SessionRecord struct {
 	// 非 nil = 只重写这些块，其余块不再读不再哈希（30,755 块实测省 185MB sha256）。
 	// 不持久化：它是单次提交的执行提示，不是数据。
 	DirtyBlocks map[uint64]struct{} `json:"-"`
+
+	// LoadedBlockSpans 是**读回**时各个 block 的字节切片（仅 sidecar 引用形态有），
+	// 与最终 ViewCheckpoint 中 blocks 数组的元素一一对应。
+	// 用途：恢复路径并行解码（避免对 210MB 做单线程 json.Unmarshal）。
+	// 不持久化；与 BlockSpans 方向相反（那是写、这是读）。
+	LoadedBlockSpans [][]byte `json:"-"`
+
+	// BodyView 是解析前的原始 view：blocks 仍是 sidecar 引用（未展开成数组）。
+	// 恢复路径用它做「骨架解码 + 并行块解码」，不必扫描展开后的 210MB。
+	BodyView ViewCheckpoint `json:"-"`
+}
+
+// SkeletonView 返回把 blocks 字段替换成空数组后的 view（骨架）。
+//
+// 恢复路径的入口：BodyView 里 blocks 是 sidecar 引用**对象**，直接反序列化到
+// []Block 会报类型错；先把该字段换成 []（2~5MB 拷贝，实测 <10ms），骨架就能
+// 一次性 json.Unmarshal，剩下的 210MB 由调用方按 LoadedBlockSpans 分给多个
+// worker 并行解码（实测单线程 1.1~2.2s → 8 worker 234ms）。
+//
+// 仅在 LoadedBlockSpans 非空（sidecar 引用形态）时有意义；旧格式 record 的
+// BodyView 里本身就是完整数组，调用方应走原 parse 路径。
+func (r *SessionRecord) SkeletonView() ([]byte, error) {
+	if len(r.BodyView) == 0 {
+		return nil, fmt.Errorf("record has no body view")
+	}
+	out, err := replaceJSONField(r.BodyView, "blocks", []byte("[]"))
+	if err != nil {
+		return nil, fmt.Errorf("skeleton view: %w", err)
+	}
+	return out, nil
 }
 
 // SessionRecordStore is the storage boundary used by the future bridge
@@ -493,6 +523,16 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 		// 又要重扫 86MB 重建索引 —— 实测 78ms，吃掉增量方案的收益）。
 	}
 	t.Sidecar = time.Since(sidecarStart)
+	// 占位形态（"blocks":null）必须在落盘前被替换成引用或内嵌数组 ——
+	// 否则读出来是「0 块的空会话」（就是历史事故里用户看到的「全没了」）。
+	// sidecar 不可用时用 spans 拼回内嵌数组（慢，但只在异常路径发生）。
+	if working.ViewCheckpointHasNullBlocks() {
+		inline, aerr := assembleInlineBlocks(working.ViewCheckpoint, record.BlockSpans)
+		if aerr != nil {
+			return fmt.Errorf("%w: blocks placeholder not replaced: %v", ErrInvalidSessionRecord, aerr)
+		}
+		working.ViewCheckpoint = inline
+	}
 
 	encodeStart := time.Now()
 	prefix, view, suffix, err := encodeRecordEnvelope(&working)
@@ -1105,7 +1145,13 @@ func validateCheckpointForCommit(view ViewCheckpoint) error {
 	//   · 内嵌完整数组   `"blocks":[`
 	//   · sidecar 引用   `"blocks":{"$blocks_ref":...}`（长会话优化）
 	if !bytes.Contains(head, []byte(`"blocks":[`)) && !bytes.Contains(head, []byte(`"blocks":{"`+blocksRefKey)) {
-		return fmt.Errorf("%w: view_checkpoint.blocks must be an array or sidecar ref", ErrInvalidSessionRecord)
+		// 第三种形态：提交占位 `"blocks":null`。
+		// 调用方（bridge）为了不拼 210MB 整份 view，只给「骨架 + 各块字节」；
+		// 落盘前一定会在 commitRecord 里被换成 sidecar 引用或内嵌数组
+		// （见「占位必须被替换」那段），所以磁盘上不会出现 null 形态。
+		if !bytes.Contains(head, []byte(`"blocks":null`)) {
+			return fmt.Errorf("%w: view_checkpoint.blocks must be an array or sidecar ref", ErrInvalidSessionRecord)
+		}
 	}
 	return nil
 }
@@ -1355,10 +1401,13 @@ func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, 
 	//
 	// 还原失败必须报错而不是返回空 blocks：那会让长会话「打开后历史全空」，
 	// 比打不开更糟（用户以为数据丢了）。调用方据此回退 .bak。
-	if resolved, rerr := resolveBlocksRef(record.ViewCheckpoint, path); rerr != nil {
+	body := record.ViewCheckpoint
+	if resolved, spans, rerr := resolveBlocksRefSpans(record.ViewCheckpoint, path); rerr != nil {
 		return nil, nil, fmt.Errorf("%w: %s: %w", ErrRecordCorrupt, path, rerr)
 	} else {
 		record.ViewCheckpoint = resolved
+		record.LoadedBlockSpans = spans
+		record.BodyView = body
 	}
 	return &record, append([]byte(nil), data...), nil
 }
@@ -1638,4 +1687,33 @@ func contextError(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+// ViewCheckpointHasNullBlocks 报告 view 的 blocks 是否还是提交占位（null）。
+func (r *SessionRecord) ViewCheckpointHasNullBlocks() bool {
+	v := bytes.TrimSpace(r.ViewCheckpoint)
+	i := bytes.Index(v, []byte(`"blocks":`))
+	if i < 0 {
+		return false
+	}
+	rest := bytes.TrimLeft(v[i+len(`"blocks":`):], " \n\t\r")
+	return bytes.HasPrefix(rest, []byte("null"))
+}
+
+// assembleInlineBlocks 用 spans 把占位替换成内嵌 blocks 数组（异常路径兜底）。
+func assembleInlineBlocks(body ViewCheckpoint, spans [][]byte) (ViewCheckpoint, error) {
+	total := 2
+	for _, sp := range spans {
+		total += len(sp) + 1
+	}
+	arr := make([]byte, 0, total)
+	arr = append(arr, '[')
+	for i, sp := range spans {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, sp...)
+	}
+	arr = append(arr, ']')
+	return replaceJSONField(body, "blocks", arr)
 }

@@ -18,10 +18,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,7 +53,10 @@ func TestCheckpointSerdeLab(t *testing.T) {
 	}
 	loadDur := time.Since(t0)
 	view := rec.ViewCheckpoint
-	t.Logf("[%s] 前置 LoadRecord=%s view=%.1fMB", phase, loadDur.Round(time.Millisecond), float64(len(view))/1e6)
+	t.Logf("[%s] 前置 LoadRecord=%s view=%.1fMB spans=%d body=%.1fMB ref=%v", phase,
+		loadDur.Round(time.Millisecond), float64(len(view))/1e6,
+		len(rec.LoadedBlockSpans), float64(len(rec.BodyView))/1e6,
+		bytes.Contains(rec.BodyView, []byte("$blocks_ref")))
 
 	switch phase {
 	case "load":
@@ -69,6 +74,47 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		t.Logf("parseCheckpoint(反序列化 %.1fMB) = %s  blocks=%d",
 			float64(len(view))/1e6, parseDur.Round(time.Millisecond), len(cp.Blocks))
 		cp = nil
+		debug.FreeOSMemory()
+		return
+
+	case "restore":
+		// 恢复路径对照（S1④）：整份 Unmarshal vs 骨架 + 并行块解码。
+		debug.FreeOSMemory()
+		t0 = time.Now()
+		oldCP, oerr := parseCheckpoint(view)
+		if oerr != nil {
+			t.Fatal(oerr)
+		}
+		oldDur := time.Since(t0)
+		oldBlocks := len(oldCP.Blocks)
+		oldIDs := sampleIDs(oldCP.Blocks)
+		oldCP = nil
+		debug.FreeOSMemory()
+
+		t0 = time.Now()
+		newCP, nerr := parseCheckpointFromRecord(rec)
+		if nerr != nil {
+			t.Fatal(nerr)
+		}
+		newDur := time.Since(t0)
+		newBlocks := len(newCP.Blocks)
+		newIDs := sampleIDs(newCP.Blocks)
+		t.Logf("恢复解码：整份 Unmarshal=%s → 骨架+并行=%s（%.1fx）blocks %d/%d 抽样一致=%v spans=%d",
+			oldDur.Round(time.Millisecond), newDur.Round(time.Millisecond),
+			float64(oldDur)/float64(newDur), oldBlocks, newBlocks,
+			oldIDs == newIDs, len(rec.LoadedBlockSpans))
+		if newBlocks != oldBlocks || oldIDs != newIDs {
+			t.Fatalf("快慢路径结果不一致：blocks %d!=%d idsEqual=%v", newBlocks, oldBlocks, oldIDs == newIDs)
+		}
+		debug.FreeOSMemory()
+
+		r := NewViewReducer()
+		t0 = time.Now()
+		if err := r.Restore(newCP); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("Restore = %s", time.Since(t0).Round(time.Millisecond))
+		newCP = nil
 		debug.FreeOSMemory()
 		return
 
@@ -110,6 +156,32 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		t.Logf("MarshalWithSpans 冷=%s 热=%s view=%.1fMB spans=%d",
 			coldDur.Round(time.Millisecond), warmDur.Round(time.Millisecond),
 			float64(len(warm.View))/1e6, len(warm.Spans))
+
+		// S1：只取「骨架 + 各块字节」的 body 路径（不拼 210MB）
+		r.mu.Lock()
+		r.seq++
+		r.mu.Unlock()
+		t0 = time.Now()
+		bodyCold, err := r.MarshalBodyWithSpans()
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodyColdDur := time.Since(t0)
+		r.mu.Lock()
+		r.seq++
+		r.mu.Unlock()
+		t0 = time.Now()
+		bodyWarm, err := r.MarshalBodyWithSpans()
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodyWarmDur := time.Since(t0)
+		t.Logf("MarshalBodyWithSpans 冷=%s 热=%s body=%.1fMB spans=%d（S1：不拼 210MB）",
+			bodyColdDur.Round(time.Millisecond), bodyWarmDur.Round(time.Millisecond),
+			float64(len(bodyWarm.Body))/1e6, len(bodyWarm.Spans))
+		_ = bodyCold
+		bodyWarm = nil
+		debug.FreeOSMemory()
 
 		// 拆开热路径：骨架 marshal / 逐块 marshal / 纯拼接
 		var doc Checkpoint
@@ -228,11 +300,12 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		return
 
 	case "commit":
-		// 生产形态：NewSessionRecord 拷贝 + CommitRecord（脏块快路径）
+		// 生产形态（S1）：body 占位（blocks:null）+ spans + 脏块快路径
 		spans, ids := serdeSpans(t, view)
+		body := serdeBodyPlaceholder(t, view)
 		debug.FreeOSMemory()
 		t0 = time.Now()
-		r2 := session.NewSessionRecord(wsKey, sid, rec.Revision+1, rec.ReducerSeq, 0, rec.SDKState, view)
+		r2 := session.NewSessionRecord(wsKey, sid, rec.Revision+1, rec.ReducerSeq, 0, rec.SDKState, body)
 		copyDur := time.Since(t0)
 		debug.FreeOSMemory()
 
@@ -243,8 +316,19 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// 读回校验：body 形态落盘后必须能完整还原
+		back, lerr := store.LoadRecord(ctx, wsKey, sid)
+		if lerr != nil {
+			t.Fatalf("body 形态落盘后读回失败: %v", lerr)
+		}
+		backSpans, _ := serdeSpans(t, back.ViewCheckpoint)
+		if len(backSpans) != len(spans) {
+			t.Fatalf("读回块数 %d != %d", len(backSpans), len(spans))
+		}
+		t.Logf("读回校验: rev=%d blocks=%d（一致）", back.Revision, len(backSpans))
+
 		t.Logf("NewSessionRecord(拷贝 %.1fMB)=%s | CommitRecord=%s [lock=%s sidecar=%s(open=%s ref=%s flush=%s) encode=%s baseline=%s temp=%s hashed=%.1fMB blocks=%d]",
-			float64(len(view))/1e6, copyDur.Round(time.Millisecond), ct.Total.Round(time.Millisecond),
+			float64(len(body))/1e6, copyDur.Round(time.Millisecond), ct.Total.Round(time.Millisecond),
 			ct.LockWait.Round(time.Millisecond), ct.Sidecar.Round(time.Millisecond),
 			ct.SidecarOpen.Round(time.Millisecond), ct.SidecarRef.Round(time.Millisecond), ct.SidecarFlush.Round(time.Millisecond),
 			ct.Encode.Round(time.Millisecond), ct.Baseline.Round(time.Millisecond), ct.Temp.Round(time.Millisecond),
@@ -398,4 +482,40 @@ func splitArrayElems(raw []byte) ([][]byte, bool) {
 	}
 	out = append(out, bytes.TrimSpace(body[start:]))
 	return out, true
+}
+
+// serdeBodyPlaceholder 把 view 的 blocks 数组换成 null 占位（S1 提交路径的形态）。
+func serdeBodyPlaceholder(t *testing.T, view []byte) []byte {
+	t.Helper()
+	arr, ok := splitBlocksField(view)
+	if !ok {
+		t.Fatal("view 里没有 blocks 数组")
+	}
+	start := bytes.Index(view, arr)
+	if start < 0 {
+		t.Fatal("blocks 数组定位失败")
+	}
+	out := make([]byte, 0, len(view)-len(arr)+4)
+	out = append(out, view[:start]...)
+	out = append(out, 'n', 'u', 'l', 'l')
+	out = append(out, view[start+len(arr):]...)
+	return out
+}
+
+// sampleIDs 给一组块做轻量指纹（顺序 + 抽样 id/kind/文本长度）。
+//
+// 用途：对照「整份 Unmarshal」与「骨架+并行」两条解码路径是否等价。逐字段
+// DeepEqual 210MB 只会把测量变成内存带宽测试，抽样足够抓住顺序错位、
+// 截断、字段丢失这三类真实错误。
+func sampleIDs(blocks []Block) string {
+	if len(blocks) == 0 {
+		return "empty"
+	}
+	var b strings.Builder
+	for _, i := range []int{0, len(blocks) / 3, len(blocks) / 2, len(blocks) * 2 / 3, len(blocks) - 1} {
+		blk := blocks[i]
+		fmt.Fprintf(&b, "%d:%d:%s:%d:%d|", i, blk.ID, blk.Kind, len(blk.Text), len(blk.Thinking))
+	}
+	fmt.Fprintf(&b, "n=%d", len(blocks))
+	return b.String()
 }

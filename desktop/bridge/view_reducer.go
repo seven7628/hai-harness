@@ -583,6 +583,13 @@ type ViewReducer struct {
 	lastDirtyBlocks map[uint64]struct{}
 	// cachedIDs 与 cachedSpans 一一对应（view 里 blocks 的顺序）。
 	cachedIDs []uint64
+	// body 缓存：提交路径用的「骨架 + 各块字节」（不含 210MB 拼接）。
+	bodyCache      []byte
+	bodyCacheSpans [][]byte
+	bodyCacheIDs   []uint64
+	bodyCacheSeq   uint64
+	bodyCacheGen   uint64
+	bodyCacheOK    bool
 	// cachedSpans 与 marshalCache 同代：每个 block 的字节（与 view 中片段逐字节相同）
 	cachedSpans [][]byte
 
@@ -823,6 +830,64 @@ func (r *ViewReducer) Snapshot() *Checkpoint {
 }
 
 // snapshotLocked 是 Snapshot 的持锁实现（Marshal 已持锁时调用它，避免重入死锁）。
+// snapshotForEncodeLocked 是编码路径专用的快照：**不做深拷贝**。
+//
+// 为什么可以：encodeLocked 全程持有 r.mu，r.blocks/turns/... 不会并发变；
+// 而编码只读，唯一会写的是 normalizeSnapshotBlocks（只改 agent 块 Items 里的
+// Active/Aborted）与 normalizeDanglingState（只改 Block 的标量字段 + 重建切片）。
+// 因此：块切片做「浅拷贝 + 只复制 agent 块的 Items」，其余切片直接共享。
+//
+// 实测：深拷贝 30k 块 46ms（含大量小分配）→ 浅拷贝后 <3ms。
+func (r *ViewReducer) snapshotForEncodeLocked() *Checkpoint {
+	r.flushChunkLocked()
+	out := &Checkpoint{
+		SchemaVersion: checkpointSchemaVersion,
+		Blocks:        cloneBlocksForEncode(r.blocks),
+		// 下面这几组必须用与 snapshotLocked 相同的克隆函数：它们决定
+		// nil 与 [] 的**字节差异**（todos:null vs todos:[]）。实测漏掉会让
+		// 增量路径与全量对拍不一致（TestBlockCacheHonorsDirtyMarkers）。
+		// 体积都是小切片，拷贝成本可忽略；块切片才是 30k 量级的那个。
+		RunNodes:           cloneRunNodes(r.runNodes),
+		Turns:              cloneTurns(r.turns),
+		Usage:              r.usage,
+		CostUSD:            r.costUSD,
+		LifetimeUsage:      r.lifetime,
+		LifetimeCostUSD:    r.lifetimeCost,
+		Todos:              cloneTodos(r.todos),
+		PendingQuestions:   clonePendingQuestions(r.pendingQuestions),
+		CtxTokens:          r.ctxTokens,
+		CtxTokensEstimated: r.ctxTokensEst,
+		ContextWindow:      r.contextWindow,
+		Diffs:              cloneDiffs(r.diffs),
+		Degraded:           r.degraded,
+	}
+	if r.lastRun != nil {
+		lr := *r.lastRun
+		out.LastRun = &lr
+	}
+	if r.lastError != nil {
+		le := *r.lastError
+		out.LastError = &le
+	}
+	out.Diagnostics = r.diagSliceLocked()
+	normalizeSnapshotBlocks(out.Blocks)
+	normalizeDanglingState(out)
+	return out
+}
+
+// cloneBlocksForEncode 浅拷贝 block 切片：只有 normalize 会写穿的字段才复制。
+func cloneBlocksForEncode(in []Block) []Block {
+	out := make([]Block, len(in))
+	for i := range in {
+		out[i] = in[i] // 切片字段共享（编码期间只读）
+		// normalizeSnapshotBlocks 会写 Items[j].Active/Aborted → 只复制这一类。
+		if in[i].Kind == blockKindAgent && len(in[i].Items) > 0 {
+			out[i].Items = append([]AgentItem(nil), in[i].Items...)
+		}
+	}
+	return out
+}
+
 func (r *ViewReducer) snapshotLocked() *Checkpoint {
 	r.flushChunkLocked()
 
@@ -990,7 +1055,14 @@ func (r *ViewReducer) marshalLockedSpans() ([]byte, [][]byte, []uint64, error) {
 
 // encodeLocked 是真正的编码实现，返回 view 字节与 block 切片。
 func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, []uint64, error) {
-	cp := r.snapshotLocked()
+	return r.encodeLockedMode(out, false)
+}
+
+// encodeLockedMode：bodyOnly=true 时**不拼装整份 view**，直接返回骨架
+// （`...,"blocks":null,...`）+ 每块字节。提交路径只需要这两样：
+// record 里的 blocks 会被替换成引用，210MB 的拼接纯属浪费。
+func (r *ViewReducer) encodeLockedMode(out *bytes.Buffer, bodyOnly bool) ([]byte, [][]byte, []uint64, error) {
+	cp := r.snapshotForEncodeLocked()
 	blocks := cp.Blocks
 	cp.Blocks = nil
 
@@ -1047,6 +1119,11 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, []uint6
 		parts[i] = b
 		r.blockBytes[id] = b
 		total += len(b) + 1
+	}
+
+	if bodyOnly {
+		// 提交路径：不拼装 210MB，骨架 + 各块字节直接交给存储层。
+		return head, parts, ids, nil
 	}
 
 	buf := make([]byte, 0, total+2)
@@ -1200,6 +1277,37 @@ type BlockSpans struct {
 	IDs []uint64
 }
 
+// BodySpans 是提交路径需要的最小集合：骨架（blocks 为 null 占位）+ 各块字节。
+type BodySpans struct {
+	Body  []byte
+	Spans [][]byte
+	IDs   []uint64
+	Dirty map[uint64]struct{}
+}
+
+// MarshalBodyWithSpans 返回「不含 blocks 的骨架 + 每个 block 的字节」。
+//
+// 提交路径只需要这两样（record 里的 blocks 会被换成引用），因此不需要把
+// 185MB 的 blocks 数组拼进 210MB 的 view —— 那一次拼接 + 整份缓冲实测 ~100ms
+// 的内存带宽，且把峰值内存推高 210MB。
+func (r *ViewReducer) MarshalBodyWithSpans() (*BodySpans, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.bodyCacheOK && r.bodyCacheSeq == r.seq && r.bodyCacheGen == r.clearGeneration {
+		// 缓存命中：没有新事件，也就没有新脏块（退回全量比对更安全）。
+		r.lastDirtyBlocks = nil
+		return &BodySpans{Body: r.bodyCache, Spans: r.bodyCacheSpans, IDs: r.bodyCacheIDs}, nil
+	}
+	var out bytes.Buffer
+	body, parts, ids, err := r.encodeLockedMode(&out, true)
+	if err != nil {
+		return nil, err
+	}
+	r.bodyCache, r.bodyCacheSpans, r.bodyCacheIDs = body, parts, ids
+	r.bodyCacheSeq, r.bodyCacheGen, r.bodyCacheOK = r.seq, r.clearGeneration, true
+	return &BodySpans{Body: body, Spans: parts, IDs: ids, Dirty: r.lastDirtyBlocks}, nil
+}
+
 // MarshalWithSpans 返回 view 字节 + 每个 block 的字节切片。
 func (r *ViewReducer) MarshalWithSpans() (*BlockSpans, error) {
 	r.mu.Lock()
@@ -1216,6 +1324,8 @@ func (r *ViewReducer) MarshalWithSpans() (*BlockSpans, error) {
 func (r *ViewReducer) invalidateMarshalCache() {
 	r.marshalCacheOK = false
 	r.marshalCache = nil
+	r.bodyCacheOK = false
+	r.bodyCache = nil
 }
 
 // backfillOutputTokens 用 turns 回填 assistant 块的 OutputTokens/ReasoningTokens。

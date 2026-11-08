@@ -1362,30 +1362,37 @@ func (bs *blockStore) legacyChainSum() string {
 // 引用存在但 sidecar 不可用/校验不符 → 返回错误（调用方回退 .bak），
 // **绝不**返回「blocks 为空」的半份数据。
 func resolveBlocksRef(view []byte, recordPath string) ([]byte, error) {
+	out, _, err := resolveBlocksRefSpans(view, recordPath)
+	return out, err
+}
+
+// resolveBlocksRefSpans 同 resolveBlocksRef，另外返回每个 block 的字节切片
+// （仅 sidecar 引用形态有；内嵌数组形态返回 nil）。供恢复路径并行解码。
+func resolveBlocksRefSpans(view []byte, recordPath string) ([]byte, [][]byte, error) {
 	blocksRaw, ok := splitViewBlocks(view)
 	if !ok {
-		return view, nil // 无 blocks 字段：保持原样，由上层校验
+		return view, nil, nil // 无 blocks 字段：保持原样，由上层校验
 	}
 	trimmed := bytes.TrimSpace(blocksRaw)
 	if !bytes.Contains(trimmed, []byte(blocksRefKey)) {
-		return view, nil // 旧格式：内嵌完整数组
+		return view, nil, nil // 旧格式：内嵌完整数组
 	}
 	var wrapper map[string]blocksRefDoc
 	if err := json.Unmarshal(trimmed, &wrapper); err != nil {
-		return nil, fmt.Errorf("parse blocks ref: %w", err)
+		return nil, nil, fmt.Errorf("parse blocks ref: %w", err)
 	}
 	ref, ok := wrapper[blocksRefKey]
 	if !ok {
-		return nil, fmt.Errorf("parse blocks ref: missing %q", blocksRefKey)
+		return nil, nil, fmt.Errorf("parse blocks ref: missing %q", blocksRefKey)
 	}
 
 	storePath, perr := refStorePath(recordPath, ref.Store)
 	if perr != nil {
-		return nil, perr
+		return nil, nil, perr
 	}
 	bs, err := openBlockStore(storePath)
 	if err != nil {
-		return nil, fmt.Errorf("open block store: %w", err)
+		return nil, nil, fmt.Errorf("open block store: %w", err)
 	}
 	defer bs.Close()
 
@@ -1393,7 +1400,7 @@ func resolveBlocksRef(view []byte, recordPath string) ([]byte, error) {
 		// 新口径（带 ids）：只校验「我引用的块」。sidecar 里多出来的块属于
 		// 后续提交或废弃版本，不该影响这一版 record 的可读性。
 		if ref.Count != len(ref.IDs) {
-			return nil, fmt.Errorf("block ref malformed: count=%d ids=%d", ref.Count, len(ref.IDs))
+			return nil, nil, fmt.Errorf("block ref malformed: count=%d ids=%d", ref.Count, len(ref.IDs))
 		}
 		ids := make([]string, len(ref.IDs))
 		for i, v := range ref.IDs {
@@ -1401,22 +1408,23 @@ func resolveBlocksRef(view []byte, recordPath string) ([]byte, error) {
 		}
 		got, serr := blocksSetSum(bs, ids)
 		if serr != nil {
-			return nil, fmt.Errorf("block store missing referenced block: %w", serr)
+			return nil, nil, fmt.Errorf("block store missing referenced block: %w", serr)
 		}
 		if ref.Sum != "" && strings.HasPrefix(ref.Sum, setSumPrefix) && got != ref.Sum {
-			return nil, fmt.Errorf("block store checksum mismatch (have %s want %s)", got, ref.Sum)
+			return nil, nil, fmt.Errorf("block store checksum mismatch (have %s want %s)", got, ref.Sum)
 		}
-		full, aerr := bs.assembleIDs(ids)
+		full, spans, aerr := bs.assembleIDsWithSpans(ids)
 		if aerr != nil {
-			return nil, aerr
+			return nil, nil, aerr
 		}
-		return replaceJSONField(view, "blocks", full)
+		resolved, rerr := replaceJSONField(view, "blocks", full)
+		return resolved, spans, rerr
 	}
 
 	// 旧口径（无 ids）：只能要求「引用集合 == 索引集合」严格相等。
 	// 这条路径保留是为了兼容既有 record，新写入的记录一律带 ids。
 	if ref.Count != bs.Len() {
-		return nil, fmt.Errorf("block store count mismatch (have %d want %d)", bs.Len(), ref.Count)
+		return nil, nil, fmt.Errorf("block store count mismatch (have %d want %d)", bs.Len(), ref.Count)
 	}
 	// 摘要校验：**只比对索引里的摘要，不读 sidecar 字节**。
 	//
@@ -1448,20 +1456,24 @@ func resolveBlocksRef(view []byte, recordPath string) ([]byte, error) {
 		got := bs.sum()
 		if strings.HasPrefix(ref.Sum, setSumPrefix) {
 			if got != ref.Sum {
-				return nil, fmt.Errorf("block store checksum mismatch (have %s want %s)", got, ref.Sum)
+				return nil, nil, fmt.Errorf("block store checksum mismatch (have %s want %s)", got, ref.Sum)
 			}
 		}
 		// 旧口径：链值不可重建（见上），跳过；块数校验在下方照常执行。
 	}
 	if ref.Count != bs.Len() {
-		return nil, fmt.Errorf("block store count mismatch (have %d want %d)", bs.Len(), ref.Count)
+		return nil, nil, fmt.Errorf("block store count mismatch (have %d want %d)", bs.Len(), ref.Count)
 	}
 
-	full, err := bs.assemble()
+	// 旧口径：ref 里没有 ids（本机既有记录全是这种），语义是「引用集合 == 索引全集」，
+	// 所以按索引全集装配即可。仍然返回 spans —— 恢复路径的并行解码对旧记录同样生效，
+	// 不必等它被重写一次。
+	full, spans, err := bs.assembleIDsWithSpans(bs.allIDs())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return replaceJSONField(view, "blocks", full)
+	resolved, rerr := replaceJSONField(view, "blocks", full)
+	return resolved, spans, rerr
 }
 
 // assemble 按 id 顺序拼出完整 blocks 数组。
@@ -1478,11 +1490,20 @@ func (bs *blockStore) assemble() ([]byte, error) {
 // 指定集合是「旧 record 仍可读」的关键：调用方给的是**那条 record 自己**
 // 引用的块，与 sidecar 当前有多少块无关。
 func (bs *blockStore) assembleIDs(ids []string) ([]byte, error) {
+	out, _, err := bs.assembleIDsWithSpans(ids)
+	return out, err
+}
+
+// assembleIDsWithSpans 同 assembleIDs，另外返回每个 block 在结果里的切片。
+//
+// 用途：恢复路径并行解码（每个 block 独立 json.Unmarshal）——避免对 210MB
+// 做一次单线程解码（实测 1.0~2.2s）。切片指向返回的同一块内存，零额外拷贝。
+func (bs *blockStore) assembleIDsWithSpans(ids []string) ([]byte, [][]byte, error) {
 	nums := make([]uint64, len(ids))
 	for i, id := range ids {
 		n, err := strconv.ParseUint(id, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("block store: non-numeric block id %q", id)
+			return nil, nil, fmt.Errorf("block store: non-numeric block id %q", id)
 		}
 		nums[i] = n
 	}
@@ -1491,6 +1512,8 @@ func (bs *blockStore) assembleIDs(ids []string) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(1 << 20)
 	buf.WriteByte('[')
+	type seg struct{ start, end int }
+	segs := make([]seg, len(ids))
 	for i, id := range ids {
 		// 必须用 readAndVerify：assemble 是打开会话的主路径，而打开时
 		// 已不再为摘要去读整个 sidecar（见 resolveBlocksRef 注释），
@@ -1498,15 +1521,22 @@ func (bs *blockStore) assembleIDs(ids []string) ([]byte, error) {
 		// 与数据量同比，且这些字节本来就要读 —— 不额外多读一遍。
 		payload, ok := bs.readAndVerify(id)
 		if !ok {
-			return nil, fmt.Errorf("block store: payload unreadable or corrupt for id %q", id)
+			return nil, nil, fmt.Errorf("block store: payload unreadable or corrupt for id %q", id)
 		}
 		if i > 0 {
 			buf.WriteByte(',')
 		}
+		start := buf.Len()
 		buf.Write(payload)
+		segs[i] = seg{start: start, end: buf.Len()}
 	}
 	buf.WriteByte(']')
-	return buf.Bytes(), nil
+	out := buf.Bytes()
+	spans := make([][]byte, len(segs))
+	for i, sg := range segs {
+		spans[i] = out[sg.start:sg.end]
+	}
+	return out, spans, nil
 }
 
 // assembleWithChain 拼出完整 blocks 数组，**同时**算出旧口径的整文件滚动链。

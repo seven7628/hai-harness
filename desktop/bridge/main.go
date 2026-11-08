@@ -1289,7 +1289,9 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 			// settings.checkpoint.background_compact=false 可回退到同步回收。
 			recordStore.SetBackgroundCompact(loadCheckpointSettings().backgroundCompact())
 			if rec, lerr := recordStore.LoadRecord(context.Background(), wsKey, id); lerr == nil {
-				if cp, perr := parseCheckpoint(rec.ViewCheckpoint); perr == nil {
+				// 快路径：sidecar 引用形态走「骨架 + 并行块解码」（210MB 单线程
+				// 1.1~2.2s → 实测 ~250ms）；旧格式内嵌 blocks 自动回退整份解析。
+				if cp, perr := parseCheckpointFromRecord(rec); perr == nil {
 					if err := reducer.Restore(cp); err == nil {
 						reducer.NormalizeForRestore() // 重启后 running → 终态（done/abandoned）
 					}

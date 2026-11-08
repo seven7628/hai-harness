@@ -33,8 +33,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seven7628/hai-harness/core"
@@ -316,13 +318,15 @@ func (c *checkpointCoordinator) commitOnce() {
 	// 用 MarshalWithSpans：除 view 字节外还拿到每个 block 的切片，供存储层
 	// 做 sidecar 增量（免去对 86MB 的二次扫描，实测省 106ms/次提交）。
 	marshalStart := time.Now()
-	spans, err := c.reducer.MarshalWithSpans()
+	// S1：只要「骨架 + 各块字节」，不拼 210MB 整份 view（record 里的 blocks
+	// 最终会被替换成引用，拼进去纯属浪费内存带宽 + 峰值内存）。
+	spans, err := c.reducer.MarshalBodyWithSpans()
 	marshalDur := time.Since(marshalStart)
 	if err != nil {
 		c.reportError(fmt.Errorf("checkpoint: marshal view: %w", err))
 		return
 	}
-	view := spans.View
+	view := spans.Body
 
 	revStart := time.Now()
 	rev, ok, rerr := c.nextRevisionLocked(ctx)
@@ -735,4 +739,86 @@ func parseCheckpoint(raw session.ViewCheckpoint) (*Checkpoint, error) {
 		return nil, os.ErrInvalid
 	}
 	return &cp, nil
+}
+
+// parseCheckpointFromRecord 从读回的 record 还原快照（恢复路径主入口）。
+//
+// 慢路径（旧格式 / 无 spans）：整份 json.Unmarshal（210MB，实测 1.1~2.2s）。
+// 快路径（sidecar 引用形态）：骨架解码（2~5MB）+ 各块字节并行解码。
+//
+// 两条路径必须产出一致的 *Checkpoint：骨架与 spans 来自同一次
+// readRecordCandidate，spans 与展开后的 blocks 数组元素一一对应（顺序相同）。
+func parseCheckpointFromRecord(rec *session.SessionRecord) (*Checkpoint, error) {
+	if rec == nil || len(rec.ViewCheckpoint) == 0 {
+		return nil, os.ErrNotExist
+	}
+	spans := rec.LoadedBlockSpans
+	if len(spans) == 0 {
+		return parseCheckpoint(rec.ViewCheckpoint) // 旧格式：blocks 内嵌在 view 里
+	}
+	skel, err := rec.SkeletonView()
+	if err != nil {
+		return nil, err
+	}
+	var cp Checkpoint
+	if err := json.Unmarshal(skel, &cp); err != nil {
+		return nil, err
+	}
+	if cp.SchemaVersion != checkpointSchemaVersion {
+		return nil, os.ErrInvalid
+	}
+	blocks := make([]Block, len(spans))
+	if err := decodeBlocksParallel(spans, blocks); err != nil {
+		return nil, err
+	}
+	cp.Blocks = blocks
+	return &cp, nil
+}
+
+// decodeBlocksParallel 把块字节分给多个 worker 并行 json.Unmarshal。
+//
+// 用原子取号而不是静态分片：块大小差异极大（一行文本 vs 整段工具输出），
+// 静态切分会让某个 worker 拖尾。实测 30.8k 块：1 worker 850ms、8 worker 234ms。
+func decodeBlocksParallel(spans [][]byte, out []Block) error {
+	if len(spans) != len(out) {
+		return fmt.Errorf("block spans %d != out %d", len(spans), len(out))
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 8 {
+		workers = 8 // 实测 8 worker 已到拐点，再多收益递减（内存带宽受限）
+	}
+	if workers <= 1 || len(spans) < 64 {
+		for i := range spans {
+			if err := json.Unmarshal(spans[i], &out[i]); err != nil {
+				return fmt.Errorf("block %d: %w", i, err)
+			}
+		}
+		return nil
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(spans) {
+					return
+				}
+				if err := json.Unmarshal(spans[i], &out[i]); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("block %d: %w", i, err)
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
