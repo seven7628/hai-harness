@@ -41,6 +41,7 @@ package session
 // 索引是纯加速结构：删掉它只会变慢，不会丢数据。
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
@@ -52,10 +53,15 @@ import (
 
 const (
 	indexSuffix = ".idx"
-	indexMagic  = "HBIDX001"
+	// indexMagic 带版本号：HBIDX002 的每条 entry 多一个 kind 字节（见
+	// indexEntry.kind 的注释：窗口恢复要靠它把窗口外的卡片块单独捞出来）。
+	// HBIDX001（32 字节/条、无 kind）继续可读 —— 本机既有会话不必重建。
+	indexMagic   = "HBIDX002"
+	indexMagicV1 = "HBIDX001"
 
-	// indexEntrySize = id(8) + offset(8) + length(8) + payloadDigest(8)
-	indexEntrySize = 32
+	// indexEntrySize = id(8) + offset(8) + length(8) + payloadDigest(8) + kind(1)
+	indexEntrySize   = 33
+	indexEntrySizeV1 = 32
 	// indexHeadSize = magic(8) + count(4) + covered(8) + chainFull(32)
 	//               + records(8) + stale(8)
 	//
@@ -75,6 +81,12 @@ type indexEntry struct {
 	off    int64
 	n      int64
 	digest [8]byte
+	// kind 是块类型编码（0 = 未知：HBIDX001 索引或非块 payload）。
+	//
+	// 为什么要进索引：窗口恢复只解码尾部 N 块，但「窗口外的子智能体/任务卡片」
+	// 必须照常带回（否则左栏树变空）。有 kind 就能只解码那些卡片块（几十个），
+	// 不必为了找它们把 209MB 全解一遍。
+	kind uint8
 }
 
 // encodeBlockIndex 把索引序列化成磁盘格式。
@@ -109,6 +121,7 @@ func encodeBlockIndex(entries []indexEntry, covered int64, chain []byte, records
 		binary.BigEndian.PutUint64(n8[:], uint64(e.n))
 		buf = append(buf, n8[:]...)
 		buf = append(buf, e.digest[:]...)
+		buf = append(buf, e.kind)
 	}
 
 	sum := sha256.Sum256(buf[indexHeadSize:])
@@ -121,7 +134,13 @@ func decodeBlockIndex(b []byte) (entries []indexEntry, covered int64, chain []by
 	if len(b) < indexHeadSize+indexTailSize {
 		return nil, 0, nil, 0, 0, false
 	}
-	if string(b[:8]) != indexMagic {
+	magic := string(b[:8])
+	entrySize := indexEntrySize
+	switch magic {
+	case indexMagic:
+	case indexMagicV1:
+		entrySize = indexEntrySizeV1
+	default:
 		return nil, 0, nil, 0, 0, false
 	}
 	count := int(binary.BigEndian.Uint32(b[8:12]))
@@ -129,11 +148,11 @@ func decodeBlockIndex(b []byte) (entries []indexEntry, covered int64, chain []by
 	chain = append([]byte(nil), b[20:52]...)
 	records = int64(binary.BigEndian.Uint64(b[52:60]))
 	stale = int64(binary.BigEndian.Uint64(b[60:68]))
-	if count < 0 || indexHeadSize+count*indexEntrySize+indexTailSize != len(b) {
+	if count < 0 || indexHeadSize+count*entrySize+indexTailSize != len(b) {
 		return nil, 0, nil, 0, 0, false
 	}
 	// 校验 entries 的摘要（一次哈希 692KB ≈ 0.1ms，远低于逐块校验）
-	body := b[indexHeadSize : indexHeadSize+count*indexEntrySize]
+	body := b[indexHeadSize : indexHeadSize+count*entrySize]
 	sum := sha256.Sum256(body)
 	if !equalBytes(b[len(b)-indexTailSize:], sum[:indexTailSize]) {
 		return nil, 0, nil, 0, 0, false
@@ -145,7 +164,10 @@ func decodeBlockIndex(b []byte) (entries []indexEntry, covered int64, chain []by
 		entries[i].off = int64(binary.BigEndian.Uint64(p[8:16]))
 		entries[i].n = int64(binary.BigEndian.Uint64(p[16:24]))
 		copy(entries[i].digest[:], p[24:32])
-		p = p[32:]
+		if entrySize > 32 {
+			entries[i].kind = p[32]
+		}
+		p = p[entrySize:]
 	}
 	return entries, covered, chain, records, stale, true
 }
@@ -212,7 +234,7 @@ func loadBlockIndex(storePath string) (entries []indexEntry, covered int64, chai
 func indexToMap(entries []indexEntry) map[string]blockRef {
 	m := make(map[string]blockRef, len(entries))
 	for _, e := range entries {
-		m[uintToString(e.id)] = blockRef{off: e.off, n: int32(e.n), hash: e.digest}
+		m[uintToString(e.id)] = blockRef{off: e.off, n: int32(e.n), hash: e.digest, kind: e.kind}
 	}
 	return m
 }
@@ -225,7 +247,7 @@ func mapToIndex(m map[string]blockRef) []indexEntry {
 		if err != nil {
 			continue
 		}
-		out = append(out, indexEntry{id: v, off: ref.off, n: int64(ref.n), digest: ref.hash})
+		out = append(out, indexEntry{id: v, off: ref.off, n: int64(ref.n), digest: ref.hash, kind: ref.kind})
 	}
 	sortIndexEntries(out)
 	return out
@@ -276,4 +298,64 @@ func indexDigestHex(entries []indexEntry) string {
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// 块类型编码（进索引，供窗口恢复按 kind 挑选需要解码的块）。
+// 0 表示未知：HBIDX001 索引、或 payload 不是块 JSON。
+const (
+	blockKindUnknown uint8 = iota
+	blockKindCodeUser
+	blockKindCodeAssistant
+	blockKindCodeTool
+	blockKindCodeAgent
+	blockKindCodeAsyncTask
+	blockKindCodeTaskResult
+	blockKindCodeTaskDelivery
+	blockKindCodeCompression
+	blockKindCodeSystem
+	blockKindCodeError
+	blockKindCodeDivider
+)
+
+var blockKindNames = map[string]uint8{
+	"user":          blockKindCodeUser,
+	"assistant":     blockKindCodeAssistant,
+	"tool":          blockKindCodeTool,
+	"agent":         blockKindCodeAgent,
+	"async_task":    blockKindCodeAsyncTask,
+	"task_result":   blockKindCodeTaskResult,
+	"task_delivery": blockKindCodeTaskDelivery,
+	"compression":   blockKindCodeCompression,
+	"system":        blockKindCodeSystem,
+	"error":         blockKindCodeError,
+	"divider":       blockKindCodeDivider,
+}
+
+// blockKindCode 从 payload 前缀里取 kind（Block 结构体把 Kind 放在第一个字段，
+// 所以只扫前 64 字节；失败返回 0，调用方按未知处理）。
+func blockKindCode(payload []byte) uint8 {
+	const key = `"kind":"`
+	head := payload
+	if len(head) > 64 {
+		head = head[:64]
+	}
+	i := bytes.Index(head, []byte(key))
+	if i < 0 {
+		return blockKindUnknown
+	}
+	rest := head[i+len(key):]
+	j := bytes.IndexByte(rest, '"')
+	if j < 0 {
+		return blockKindUnknown
+	}
+	return blockKindNames[string(rest[:j])]
+}
+
+// hasCardKind 报告该编码是否属于「必须随首屏带回的卡片类块」。
+func hasCardKind(k uint8) bool {
+	switch k {
+	case blockKindCodeAgent, blockKindCodeAsyncTask, blockKindCodeTaskResult, blockKindCodeTaskDelivery:
+		return true
+	}
+	return false
 }

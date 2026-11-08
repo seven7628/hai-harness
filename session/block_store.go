@@ -166,6 +166,7 @@ type blockRef struct {
 	off  int64
 	n    int32
 	hash [8]byte // 该 id 当前 payload 的内容摘要
+	kind uint8   // 块类型编码（见 blockKind* 常量；0 = 未知）
 }
 
 // unchanged 报告同 id 的新内容是否与已缓存的一致。
@@ -387,7 +388,7 @@ func (bs *blockStore) rebuild() error {
 		recLen := int64(len(head) + len(payload) + 8)
 		switch kind {
 		case blockRecPut:
-			bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: payloadDigest(payload)}
+			bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: payloadDigest(payload), kind: blockKindCode(payload)}
 		case blockRecDel:
 			delete(bs.index, id)
 		}
@@ -548,7 +549,7 @@ func (bs *blockStore) put(id string, payload []byte) error {
 		bs.staleRecords++
 		bs.liveBytes -= blockRecordSize(id, int(prev.n))
 	}
-	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: d}
+	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: d, kind: blockKindCode(payload)}
 	bs.liveBytes += blockRecordSize(id, len(payload))
 	bs.recordsWritten++
 	bs.bytesWritten += int64(len(head) + len(payload) + 8)
