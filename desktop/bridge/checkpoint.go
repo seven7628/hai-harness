@@ -354,6 +354,27 @@ func (c *checkpointCoordinator) commitOnce() {
 		record.DirtyBlocks = nil
 		c.commitsSinceVerify = 0
 	}
+	// turns 分块（无损）：body 只带尾部窗口，历史按批追加到 <record>.turns。
+	//
+	// 顺序必须是「先日志、后 record」：反过来的话，一旦在这两步之间崩溃，
+	// 这批轮次既不在日志里、也随着被覆盖的 record 永久消失。先写日志的坏情况
+	// 只是日志里多出一批「record 还没引用」的轮次（下次提交照旧追加，幂等无害）。
+	if recPath, perr := c.store.RecordPath(c.wsKey, c.sessID); perr == nil {
+		if pending := c.reducer.TakePendingTurns(); len(pending) > 0 {
+			rawTurns, merr := json.Marshal(pending)
+			if merr != nil {
+				c.reducer.RestorePendingTurns(pending)
+				c.reportError(fmt.Errorf("checkpoint: marshal turns: %w", merr))
+				return
+			}
+			if aerr := session.AppendTurnChunk(recPath, rawTurns, len(pending)); aerr != nil {
+				// 日志没写成 → 不能提交「只带窗口」的 body，否则这批轮次就丢了。
+				c.reducer.RestorePendingTurns(pending)
+				c.reportError(fmt.Errorf("checkpoint: append turns log: %w", aerr))
+				return
+			}
+		}
+	}
 	ct, cerr := c.store.CommitRecordTraced(ctx, record)
 	if cerr != nil {
 		// 提交失败不阻塞事件流：失效 revision 缓存，下一边界重读磁盘基线；

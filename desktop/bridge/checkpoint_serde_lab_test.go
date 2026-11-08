@@ -409,6 +409,71 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		}
 		return
 
+	case "turnssplit":
+		// turns 分块：从旧 record 恢复 → 编码（body 只带窗口）→ 追加日志 → 提交
+		// → 按新格式重开，量真实打开路径。
+		cpOld, perr := parseCheckpointFromRecord(rec)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		rr := NewViewReducer()
+		if err := rr.Restore(cpOld); err != nil {
+			t.Fatal(err)
+		}
+		spans, serr := rr.MarshalBodyWithSpans()
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		body := spans.Body
+		var probe struct {
+			Turns      []Turn `json:"turns"`
+			TurnsTotal int    `json:"turns_total"`
+		}
+		if err := json.Unmarshal(body, &probe); err != nil {
+			t.Fatal(err)
+		}
+		recPath, _ := store.RecordPath(wsKey, sid)
+		pending := rr.TakePendingTurns()
+		rawTurns, _ := json.Marshal(pending)
+		t0 = time.Now()
+		if err := session.AppendTurnChunk(recPath, rawTurns, len(pending)); err != nil {
+			t.Fatal(err)
+		}
+		logDur := time.Since(t0)
+		t.Logf("body=%.1fMB turns窗口=%d turns_total=%d 日志追加=%s(%d 条)",
+			float64(len(body))/1e6, len(probe.Turns), probe.TurnsTotal, logDur.Round(time.Millisecond), len(pending))
+
+		r2 := session.NewSessionRecord(wsKey, sid, rec.Revision+1, rec.ReducerSeq, 0, rec.SDKState, body)
+		r2.BlockSpans = spans.Spans
+		r2.BlockIDs = spans.IDs
+		r2.DirtyBlocks = map[uint64]struct{}{}
+		ct2, cerr := store.CommitRecordTraced(ctx, r2)
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
+		fi, _ := os.Stat(recPath)
+		t.Logf("提交: total=%s encode=%s temp=%s record=%.1fMB",
+			ct2.Total.Round(time.Millisecond), ct2.Encode.Round(time.Millisecond),
+			ct2.Temp.Round(time.Millisecond), float64(fi.Size())/1e6)
+
+		debug.FreeOSMemory()
+		t0 = time.Now()
+		rec4, lerr4 := store.LoadRecordForView(ctx, wsKey, sid)
+		if lerr4 != nil {
+			t.Fatal(lerr4)
+		}
+		load4 := time.Since(t0)
+		t0 = time.Now()
+		cp4, perr4 := parseCheckpointFromRecord(rec4)
+		if perr4 != nil {
+			t.Fatal(perr4)
+		}
+		dec4 := time.Since(t0)
+		rec4.ReleaseView()
+		t.Logf("新格式重开：LoadRecordForView=%s 解码=%s blocks=%d turns_total=%d",
+			load4.Round(time.Millisecond), dec4.Round(time.Millisecond), len(cp4.Blocks), cp4.TurnsTotal)
+		return
+
 	case "commit":
 		// 生产形态（S1）：body 占位（blocks:null）+ spans + 脏块快路径
 		spans, ids := serdeSpans(t, view)
@@ -443,6 +508,30 @@ func TestCheckpointSerdeLab(t *testing.T) {
 			ct.SidecarOpen.Round(time.Millisecond), ct.SidecarRef.Round(time.Millisecond), ct.SidecarFlush.Round(time.Millisecond),
 			ct.Encode.Round(time.Millisecond), ct.Baseline.Round(time.Millisecond), ct.Temp.Round(time.Millisecond),
 			float64(ct.HashedBytes)/1e6, ct.BlocksWrote)
+
+		// 提交后按新格式（turns 只带窗口）重开，量一次真实的打开路径。
+		debug.FreeOSMemory()
+		t0 = time.Now()
+		rec3, lerr3 := store.LoadRecordForView(ctx, wsKey, sid)
+		if lerr3 != nil {
+			t.Fatal(lerr3)
+		}
+		load3 := time.Since(t0)
+		t0 = time.Now()
+		cp3, perr3 := parseCheckpointFromRecord(rec3)
+		if perr3 != nil {
+			t.Fatal(perr3)
+		}
+		dec3 := time.Since(t0)
+		rec3.ReleaseView()
+		t.Logf("提交后重开：LoadRecordForView=%s 解码=%s blocks=%d record=%.1fMB",
+			load3.Round(time.Millisecond), dec3.Round(time.Millisecond), len(cp3.Blocks),
+			func() float64 {
+				if fi, e := os.Stat(filepath.Join(root, wsKey, sid+".record.json")); e == nil {
+					return float64(fi.Size()) / 1e6
+				}
+				return 0
+			}())
 		return
 	}
 	t.Fatalf("未知阶段 %q", phase)

@@ -43,6 +43,12 @@ type Checkpoint struct {
 	Blocks   []Block   `json:"blocks"`
 	RunNodes []RunNode `json:"run_nodes"`
 	Turns    []Turn    `json:"turns"`
+	// TurnsTotal 是**历史总条数**（含未随 body 下发的旧轮次）。
+	//
+	// turns 是追加型数组，真实会话 88.7k 条 / 24.3MB（占 body 94%），打开要
+	// 解码 155ms、每次提交要编码 37ms+写 24ms，而 UI 只用「总条数 + 最后两条」。
+	// 因此 body 只带尾部窗口，总数走这个标量；旧轮次在 <record>.turns 追加日志里。
+	TurnsTotal int `json:"turns_total,omitempty"`
 
 	// usage / cost_usd 是当前 clear generation 的展示累计（clear 后归零）；
 	// lifetime_usage / lifetime_cost_usd 是跨 generation 的对账值（clear 不清）。
@@ -590,6 +596,11 @@ type ViewReducer struct {
 	bodyCacheSeq   uint64
 	bodyCacheGen   uint64
 	bodyCacheOK    bool
+
+	// turnsTotal 是历史总条数（r.turns 可能只是尾部窗口）；turnsPending 是
+	// 尚未写进 <record>.turns 日志的轮次（提交时 drain）。
+	turnsTotal   int
+	turnsPending []Turn
 	// cachedSpans 与 marshalCache 同代：每个 block 的字节（与 view 中片段逐字节相同）
 	cachedSpans [][]byte
 
@@ -847,8 +858,11 @@ func (r *ViewReducer) snapshotForEncodeLocked() *Checkpoint {
 		// nil 与 [] 的**字节差异**（todos:null vs todos:[]）。实测漏掉会让
 		// 增量路径与全量对拍不一致（TestBlockCacheHonorsDirtyMarkers）。
 		// 体积都是小切片，拷贝成本可忽略；块切片才是 30k 量级的那个。
-		RunNodes:           cloneRunNodes(r.runNodes),
-		Turns:              cloneTurns(r.turns),
+		RunNodes: cloneRunNodes(r.runNodes),
+		// turns 只带尾部窗口 + 总数：body 从 25.8MB 降到 1.6MB，打开时的
+		// record 解析从 ~150ms 降到 ~20ms（历史在 <record>.turns 追加日志里）。
+		Turns:              r.turnsWindowLocked(),
+		TurnsTotal:         r.turnsTotal,
 		Usage:              r.usage,
 		CostUSD:            r.costUSD,
 		LifetimeUsage:      r.lifetime,
@@ -896,6 +910,7 @@ func (r *ViewReducer) snapshotLocked() *Checkpoint {
 		Blocks:             cloneBlocks(r.blocks),
 		RunNodes:           cloneRunNodes(r.runNodes),
 		Turns:              cloneTurns(r.turns),
+		TurnsTotal:         r.turnsTotal,
 		Usage:              r.usage,
 		CostUSD:            r.costUSD,
 		LifetimeUsage:      r.lifetime,
@@ -1372,6 +1387,17 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 	r.blockIdxDirty = true // 索引随新 blocks 惰性重建
 	r.runNodes = cloneRunNodes(cp.RunNodes)
 	r.turns = cloneTurns(cp.Turns)
+	r.turnsTotal = cp.TurnsTotal
+	if r.turnsTotal < len(r.turns) {
+		r.turnsTotal = len(r.turns)
+	}
+	// 迁移：旧 record（没有 turns_total）里的 turns 全在 body 里，还没进日志 ——
+	// 首次提交必须把它们整份追加进日志，之后才允许 body 只带窗口。
+	if cp.TurnsTotal == 0 && len(cp.Turns) > 0 {
+		r.turnsPending = cloneTurns(cp.Turns)
+	} else {
+		r.turnsPending = nil
+	}
 	backfillOutputTokens(r.blocks, r.turns)
 	r.usage = cp.Usage
 	r.lifetime = cp.LifetimeUsage
@@ -1944,7 +1970,7 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 		RunID: e.RunId, RequestID: e.RequestId,
 		FinishReason: string(e.FinishReason),
 	}
-	r.turns = append(r.turns, turn)
+	r.appendTurnLocked(turn)
 
 	// 主 agent：最终正文/思考（chunk 缺失时由 llm_end 补全，已有 chunk 不重复拼接）
 	if !r.isSubRunLocked(e.RunId) {
@@ -2114,7 +2140,7 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 			if e.ErrorKind == "aborted" || e.ErrorKind == "canceled" {
 				finish = string(core.FinishReasonAbort)
 			}
-			r.turns = append(r.turns, Turn{
+			r.appendTurnLocked(Turn{
 				Model: e.Model, Input: agg.Input, Output: agg.Output,
 				CacheRead: agg.CacheRead, CacheWrite: agg.CacheWrite, Reasoning: agg.Reasoning,
 				DurMs: durMs, CostUSD: cost,
@@ -2783,7 +2809,7 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 		// 被 abort（上一条 LLMError 还是 will_retry=true，之后既无 llm_end 也无 final
 		// LLMError）。前面各条收尾路径都不成立，本轮在 turns 里会是空白 —— 补一条
 		// 只带时长的 Turn：token 缺省（上游没报，不编）。
-		r.turns = append(r.turns, Turn{
+		r.appendTurnLocked(Turn{
 			Model: e.Model, DurMs: elapsed,
 			RunID: e.RunId, FinishReason: string(e.FinishReason),
 		})
@@ -3365,6 +3391,10 @@ func (r *ViewReducer) clearLocked() {
 	r.runNodes = []RunNode{}
 	r.pendingQuestions = nil
 	r.turns = []Turn{}
+	r.turnsTotal = 0
+	// 清空 = 新一代：历史轮次仍留在日志里（只追加），但当前 record 的
+	// turns_total 归零，UI 不会把上一代算进来。
+	r.turnsPending = nil
 	r.diffs = []Diff{}
 	r.lastRun = nil
 	r.lastError = nil
@@ -4007,7 +4037,10 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	// 裁的是**发给 UI 的这份投影**，不影响 r.turns 本身，也不影响持久化：
 	// 提交路径走 marshalLockedSpans（全量），与这里互不影响。
 	// turns_total 让 UI 显示真实回合数，避免「加载了多少就显示多少」的错数。
-	turnsTotal := len(cp.Turns)
+	turnsTotal := r.turnsTotal
+	if turnsTotal <= 0 {
+		turnsTotal = len(cp.Turns)
+	}
 	if len(cp.Turns) > limit {
 		cp.Turns = cp.Turns[len(cp.Turns)-limit:]
 	}
@@ -4192,4 +4225,54 @@ func (r *ViewReducer) BlockCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.blocks)
+}
+
+// turnsBodyWindow 是 record body 里保留的 turns 条数。
+//
+// 为什么是 512：UI 只用「总条数 + 最后两条」（Statusbar/Composer），而
+// PartialView 打开时按 blocks_limit 裁剪 turns —— 512 足够覆盖任何合理的
+// 首屏窗口，同时让 body 的 turns 部分稳定在 ~140KB（而不是 24MB）。
+// 历史轮次不丢：它们在 <record>.turns 追加日志里。
+const turnsBodyWindow = 512
+
+// appendTurnLocked 是唯一的 turns 追加入口：同步维护总条数与待落盘队列。
+func (r *ViewReducer) appendTurnLocked(t Turn) {
+	r.turns = append(r.turns, t)
+	r.turnsTotal++
+	r.turnsPending = append(r.turnsPending, t)
+}
+
+// turnsWindowLocked 返回要写进 body 的尾部窗口（拷贝，避免与 r.turns 共享）。
+func (r *ViewReducer) turnsWindowLocked() []Turn {
+	if len(r.turns) <= turnsBodyWindow {
+		return cloneTurns(r.turns)
+	}
+	out := make([]Turn, turnsBodyWindow)
+	copy(out, r.turns[len(r.turns)-turnsBodyWindow:])
+	return out
+}
+
+// TakePendingTurns 取走「尚未写进 turns 日志」的轮次（提交路径调用）。
+//
+// 只有成功追加到日志后调用方才应丢弃返回值；失败时轮次仍在 reducer 里，
+// 下次提交重试 —— 这样「日志写失败」不会静默丢历史。
+func (r *ViewReducer) TakePendingTurns() []Turn {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.turnsPending) == 0 {
+		return nil
+	}
+	out := r.turnsPending
+	r.turnsPending = nil
+	return out
+}
+
+// RestorePendingTurns 在日志追加失败时把轮次放回队列（保持顺序）。
+func (r *ViewReducer) RestorePendingTurns(turns []Turn) {
+	if len(turns) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.turnsPending = append(turns, r.turnsPending...)
 }
