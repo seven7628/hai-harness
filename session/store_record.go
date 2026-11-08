@@ -336,7 +336,11 @@ type CommitPhaseTiming struct {
 
 	LockWait time.Duration // 等 FileStorage.mu（进程内所有会话共享）
 	Sidecar  time.Duration // blocks sidecar：acquire + 追加 + flush + compact
-	Compact  time.Duration // 其中 compact 部分（sidecar 的子集，仅同步回收时非零）
+	// sidecar 内部的再分解（定位「为什么这次提交慢」用）
+	SidecarOpen  time.Duration // acquireBlockStore：首次打开/索引增量扫描
+	SidecarRef   time.Duration // 逐块比对 + 追加（脏块快路径下只剩 id 循环与集合摘要）
+	SidecarFlush time.Duration // fsync sidecar + 重写索引
+	Compact      time.Duration // 其中 compact 部分（sidecar 的子集，仅同步回收时非零）
 	// CompactScheduled 表示本次提交把回收交给了后台（Compact 不适用）。
 	CompactScheduled bool
 	Encode           time.Duration // 序列化信封 + 计算落盘 checksum
@@ -440,7 +444,10 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 	// view 结构异常 → working.ViewCheckpoint 保持原样，走原路径落盘。
 	// 读回时有无引用都能解析（见 resolveBlocksRef），所以回退不影响可读性。
 	sidecarStart := time.Now()
+	openStart := time.Now()
 	if bs, berr := acquireBlockStore(path); berr == nil {
+		t.SidecarOpen = time.Since(openStart)
+		refStart := time.Now()
 		// 优先用调用方给的 spans（reducer 顺带产出，零解析）；否则自行扫描。
 		var newView []byte
 		var rerr error
@@ -451,13 +458,16 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 		} else {
 			newView, wrote, rerr = refBlocks(bs, working.ViewCheckpoint)
 		}
+		t.SidecarRef = time.Since(refStart)
 		t.BlocksWrote = wrote
 		t.HashedBytes = bs.hashedBytes - hashedBefore
 		// 先落 sidecar 再落 record：record 里的引用必须指向已 durable 的数据。
 		if rerr == nil {
+			flushStart := time.Now()
 			if ferr := bs.flush(); ferr == nil {
 				working.ViewCheckpoint = newView
 			}
+			t.SidecarFlush = time.Since(flushStart)
 		}
 		// sidecar 回收（append-only 的必然副作用）。
 		//
