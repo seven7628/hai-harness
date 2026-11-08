@@ -355,6 +355,8 @@ type bridgeSession struct {
 	hubBudgetReason   atomic.Value // string
 	// hubFinishTask 根 AgentEnd 时结算 hub_task（nil = 非项目会话/未接线）。
 	hubFinishTask func(ae *events.AgentEnd)
+	// hubTaskRunning 根 AgentStart：dispatched → running（P3b-08 B3；nil = 未接线）。
+	hubTaskRunning func(runID string)
 	// hubBudgetCheck 目标会话 LLMEnd 的预算检查；true = 立即中断本 run。
 	hubBudgetCheck func(taskID agenthub.TaskID, spentUSD float64) (bool, string)
 	// hubInterrupt 预算硬停时中断当前 run（默认 bs.s.Interrupt；测试可注入计数）。
@@ -817,6 +819,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 		if as, ok := e.(*events.AgentStart); !ok || (as.ParentRunId == "" && as.Depth == 0) {
 			bs.running.Store(true)
 			bs.hubDispatchPending.Store(false) // 根 run 已启动：交给 running 表达忙
+			// 任务板：dispatched → running（P3b-08 B3）。只在根 run 真正起来时推进，
+			// 且只做 store 投影（emit 正持 dispatchMu，绝不能再拿别的会话锁）。
+			if ok && as.ParentRunId == "" && as.Depth == 0 && bs.hubTaskRunning != nil {
+				bs.hubTaskRunning(as.RunId)
+			}
 		}
 	case events.AgentEndType:
 		if ae, ok := e.(*events.AgentEnd); !ok || (ae.ParentRunId == "" && ae.Depth == 0) {
@@ -1138,9 +1145,12 @@ type manager struct {
 	hubFS *agenthub.FileStore
 	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
 	hubQueue *agenthub.Queue
-	// hubFinishMu 串行化任务结算的「检查已通知 → Finish → 回推 → MarkNotified」
-	// （P2-05 复审 B1：并发同 run 会双推）。
+	// hubFinishMu 串行化任务结算的「检查已通知 → Finish → 结果卡」。
+	// **绝不**在这把锁内回推/唤醒其它会话（P3b-08 B1：emit 持 dispatchMu，
+	// 同步回推会 A↔B 互等死锁）；回推统一走 hubNotify（见 hub_notify.go）。
 	hubFinishMu sync.Mutex
+	// hubNotify 任务终态回推的 per-task 通知簿（异步 + 串行，P3b-08 B1）。
+	hubNotify hubNotifier
 	// hubGroupSendMu 串行化群发送的「限流检查 → 消息 + 回执写入」。
 	// bridge 的 agent 工具并发调用不会经过 dispatchMu（P3a-03 B-4）。
 	hubGroupSendMu sync.Mutex
@@ -1170,9 +1180,11 @@ type manager struct {
 	hubConv       *agenthub.ConversationController
 	hubConvLimits *agenthub.ConversationLimits
 	// hubConvMu 保护下面三张表：换代（人类消息作废旧冷却定时器）、定时器、终态通知去重。
-	hubConvMu       sync.Mutex
-	hubConvGen      map[agenthub.GroupID]uint64
-	hubConvTimer    map[agenthub.GroupID]*time.Timer
+	hubConvMu    sync.Mutex
+	hubConvGen   map[agenthub.GroupID]uint64
+	hubConvTimer map[agenthub.GroupID]*time.Timer
+	// hubConvDispatch 按群串行化自动对话的「取 wake → 投递 → 记账」与停止/人类插话（B2）。
+	hubConvDispatch hubConvDispatchGate
 	hubConvNotified map[agenthub.GroupID]string
 	// hubUnpricedWarned 每个智能体只告警一次「用量无价，预算无法计入」（P2.5-04）。
 	hubUnpricedWarned map[agenthub.AgentID]bool
@@ -1883,7 +1895,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubBudgetCheck: m.hubBudgetCheck, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }}
+	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubBudgetCheck: m.hubBudgetCheck, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }, hubTaskRunning: func(runID string) { m.markHubTaskRunning(bs, runID) }}
 	bs.hubInterrupt = func() { bs.s.Interrupt() }
 	bs.hubNeed = func(e events.Event) { m.recordHubNeed(bs, e) }
 	bs.hubExpireNeeds = func() { m.scheduleHubExpire(bs) }

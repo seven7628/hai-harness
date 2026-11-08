@@ -116,6 +116,7 @@ func TestHubFinishBlocksOverTaskBudget(t *testing.T) {
 		RunId: "r1", Content: "做完了", Timestamp: time.Now(),
 		EventType: events.AgentEndType, Usage: usage,
 	})
+	waitResultNotifyDrained(t, m) // 回推异步（P3b-08 B1）
 	got, err := ledger.Replay(context.Background(), task.ID)
 	if err != nil {
 		t.Fatal(err)

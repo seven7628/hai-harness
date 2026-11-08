@@ -1090,6 +1090,12 @@ func (m *manager) hubMarkRead(c command) {
 			m.resp(c, false, "群组已删除", nil)
 			return
 		}
+		// 夹紧到群日志的最后一条（P3b-08 P2）：前端传 [最后消息].seq 时，
+		// 落盘期间可能又进了一条新消息 —— 直接用旧 seq 会把新消息一起标成已读，
+		// 未读点永久消失。超过日志末尾的 seq 一律按末尾算（只认已存在的内容）。
+		if last, lerr := st.ReadMessages(ctx, gid, 0, 1); lerr == nil && len(last) > 0 && seq > last[len(last)-1].Seq {
+			seq = last[len(last)-1].Seq
+		}
 		got, err := st.MarkGroupRead(ctx, gid, seq)
 		if err != nil {
 			m.resp(c, false, "保存已读位置失败: "+err.Error(), nil)
@@ -1101,6 +1107,10 @@ func (m *manager) hubMarkRead(c command) {
 	if _, _, err := m.hubLoadAgent(agentID); err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
+	}
+	// 与群同口径：超过 DM 末尾的 seq 按末尾算（不盲信客户端快照）。
+	if last, lerr := st.ReadDirectMessages(ctx, agenthub.AgentID(agentID), 0, 1); lerr == nil && len(last) > 0 && seq > last[len(last)-1].Seq {
+		seq = last[len(last)-1].Seq
 	}
 	if err := st.SaveDMCursor(ctx, agenthub.AgentID(agentID), seq); err != nil {
 		m.resp(c, false, "保存已读位置失败: "+err.Error(), nil)

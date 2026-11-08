@@ -315,6 +315,12 @@ func (m *manager) assignHubTask(ctx context.Context, req hubAssignRequest) (*age
 		}
 		return nil, 0, false, fmt.Errorf("写指派消息失败: %w", err)
 	}
+	if req.FromHuman && !deduped && seq > 0 {
+		// 人类派任务也是一条人类消息：必须开新对话/清接龙队列（§6.5.6 规则 1/5）。
+		// 否则人在派活之后，上一段自动对话会继续接龙，目标带着旧对话的预算/深度
+		// 继续跑（P3b-08 P2）。deduped 重试不再重复占首轮预算。
+		m.beginHubConversation(g, seq, 1)
+	}
 	if seq > 0 && created.Origin.MessageSeq != seq {
 		if bound, berr := ledger.BindOriginMessageSeq(ctx, created.ID, seq); berr == nil {
 			created = bound

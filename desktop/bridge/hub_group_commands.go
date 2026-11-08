@@ -574,8 +574,15 @@ func (m *manager) hubGroupSend(c command) {
 	}
 	mentionAll := boolVal(c.Payload["mention_all"])
 	// 与 group_say 串行：限流检查、client_msg_id 去重、消息+回执写入必须是一个临界区。
+	// 唤醒不在临界区内（见下面 emit 之后的显式解锁）：wake 要装配/启动会话，慢；
+	// 拿着群发送锁去唤醒会把别人的群发言和「停止自动对话」一起堵住（P3b-08 P2）。
 	m.hubGroupSendMu.Lock()
-	defer m.hubGroupSendMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			m.hubGroupSendMu.Unlock()
+		}
+	}()
 	g, err := st.LoadGroup(ctx, gid)
 	if err != nil {
 		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
@@ -650,9 +657,13 @@ func (m *manager) hubGroupSend(c command) {
 		return
 	}
 	m.emitHubGroupMessage(g.ID, seq, msg)
+	m.hubGroupSendMu.Unlock()
+	locked = false
+	// 换代 + 首轮唤醒放在同一个群闸门里：停止/泵不能插在两者之间（B2）。
+	unlockConv := m.hubConvDispatch.lock(g.ID)
 	// 人类消息**总是**开启新对话（清队列/计数），即使这条消息没有 @ 任何人 ——
 	// 「先停一下」这类插话必须能打断自动接龙（§6.5.6 规则 1/5）。
-	_, turn := m.beginHubConversation(g, seq, len(round.Targets))
+	_, turn := m.beginHubConversationWithinGate(g, seq, len(round.Targets))
 	// 无 @ 只写日志（N-1）：不产生 hub_round，否则前端会误报「无人被唤醒」。
 	var wakeErrors []string
 	if routed != nil {
@@ -664,6 +675,7 @@ func (m *manager) hubGroupSend(c command) {
 			m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
 		}
 	}
+	unlockConv()
 	respData := map[string]any{"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets}
 	if len(wakeErrors) > 0 {
 		respData["wake_errors"] = wakeErrors

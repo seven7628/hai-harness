@@ -22,7 +22,6 @@ import (
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/core"
-	"github.com/seven7628/hai-harness/events"
 )
 
 func restartManager(t *testing.T) (*manager, *syncBuf) {
@@ -136,9 +135,7 @@ func TestHubTaskResultSurvivesMarkNotifiedFailureRestart(t *testing.T) {
 	if err := os.Chmod(tdir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	m1.pushHubTaskResult(ledger, settled, &events.AgentEnd{
-		EventType: events.AgentEndType, RunId: "run-restart", Content: "重启后只应看到一份",
-	})
+	m1.pushHubTaskResult(ledger, settled, "run-restart")
 	_ = os.Chmod(tdir, 0o755)
 
 	status, notified := restartTaskLedger(t, m1, task.ID)
@@ -165,6 +162,7 @@ func TestHubTaskResultSurvivesMarkNotifiedFailureRestart(t *testing.T) {
 	if err := m2.recoverHubTasks(); err != nil {
 		t.Fatal(err)
 	}
+	waitResultNotifyDrained(t, m2) // 恢复也只排队回推（P3b-08 B1）
 	origin2, err := m2.hubDMSession(agentID)
 	if err != nil {
 		t.Fatal(err)

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -51,6 +52,19 @@ func (m *manager) hubConversationView(gid agenthub.GroupID) agenthub.Conversatio
 // beginHubConversation 人类消息开启新对话：清队列/计数、换代、占 1 个首轮预算。
 // 返回视图与首轮 turn（0 = 没有目标，不占预算）。
 func (m *manager) beginHubConversation(g *agenthub.Group, humanSeq int64, targets int) (agenthub.ConversationView, int) {
+	if g == nil {
+		return agenthub.ConversationView{}, 0
+	}
+	// 与 pump 的「取/投/记账」互斥：人类开新对话时不能让一条旧 wake 正在投递。
+	unlock := m.hubConvDispatch.lock(g.ID)
+	defer unlock()
+	return m.beginHubConversationWithinGate(g, humanSeq, targets)
+}
+
+// beginHubConversationWithinGate 同 beginHubConversation，但**调用方已持有**
+// 该群的 dispatch 闸门。首轮唤醒要和换代放在同一个临界区里，否则停止可以插在
+// 「对话已换代」与「首轮 wake 投递」之间（B2）。
+func (m *manager) beginHubConversationWithinGate(g *agenthub.Group, humanSeq int64, targets int) (agenthub.ConversationView, int) {
 	if g == nil {
 		return agenthub.ConversationView{}, 0
 	}
@@ -103,6 +117,47 @@ func (m *manager) hubGroupNextDepth(agentID string, g *agenthub.Group) int {
 	return int(bs.hubWakeDepth.Load()) + 1
 }
 
+// hubConvDispatchHook 仅测试用：把「取到 wake、尚未投递」的窗口停住（生产恒 nil），
+// 用来证明停止/人类插话确实被群闸门挡在这个窗口之外（P3b-08 B2）。
+var hubConvDispatchHook func(phase string, gid agenthub.GroupID)
+
+// hubConvDispatchBarrier 读钩子时取一次快照（同其它 barrier 惯例）。
+func hubConvDispatchBarrier(phase string, gid agenthub.GroupID) {
+	if hook := hubConvDispatchHook; hook != nil {
+		hook(phase, gid)
+	}
+}
+
+// hubConvDispatchGate 按群串行化「取 wake → 投递 → 记账」与「停止 / 人类开新对话」。
+//
+// 两段式（NextDue 之后再投递）以前没有任何闸门：人类在两步之间点停止，wake 仍会被
+// 投进目标会话（真跑一轮，却不经过 BeginTurn 记账，等于绕过预算/深度护栏），
+// 而 BeginTurn=false 被当成良性竞态静默吞掉。现在停止/人类消息持同一把群锁，
+// 要么排在投递之后（再中断刚起来的 run），要么排在之前（投递方看到 stopped 直接退）。
+//
+// 按群分锁：一个群的停止不该把别的群的接龙堵住。锁条目按群缓存（群数量有界）。
+type hubConvDispatchGate struct {
+	mu  sync.Mutex
+	per map[agenthub.GroupID]*sync.Mutex
+}
+
+// lock 返回该群的解锁函数。不可重入：调用方不得在持锁时再次调用同类路径
+// （wake 投递是异步唤醒 run，不会同步回到 pump）。
+func (g *hubConvDispatchGate) lock(gid agenthub.GroupID) func() {
+	g.mu.Lock()
+	if g.per == nil {
+		g.per = map[agenthub.GroupID]*sync.Mutex{}
+	}
+	mu := g.per[gid]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		g.per[gid] = mu
+	}
+	g.mu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
 // pumpHubConversation 推动某个群的自动对话队列：**最多**投一条 wake 出去。
 //
 // 调用点：
@@ -126,6 +181,10 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 	if m == nil || m.hubShutdown.Load() {
 		return
 	}
+	// 取/投/记账是一个临界区：停止与人类插话不能插在 NextDue 与投递之间
+	// （否则 wake 会在停止之后真跑一轮，见 hubConvDispatchGate）。
+	unlock := m.hubConvDispatch.lock(gid)
+	defer unlock()
 	ctrl := m.hubConversation()
 	view := ctrl.View(gid)
 	if view.Terminal() {
@@ -152,6 +211,12 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 		}
 		return
 	}
+	hubConvDispatchBarrier("due", gid)
+	// 投递前验一次对话身份：停止/人类消息会换 conv.id 并清队列，旧 wake 属于旧对话。
+	if wake.ConversationID != "" && wake.ConversationID != view.ID {
+		m.hubAlertf("group_conversation_stale_wake", "群 %s 唤醒 %s 属于已结束的对话，已丢弃", gid, wake.Target)
+		return
+	}
 	if err := m.dispatchConversationWake(gid, wake); err != nil {
 		if errors.Is(err, errHubGroupTargetBusy) {
 			return // 留队：下一次群 run 结束再试，不告警（这是闸门，不是故障）
@@ -163,9 +228,17 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 		}
 		return
 	}
-	if _, begun := ctrl.BeginTurn(gid, time.Time{}); !begun {
-		// 投递与记账之间被人类消息/停止插队：这一轮已不属于当前对话，不再记账。
+	hubConvDispatchBarrier("delivered", gid)
+	begun, ok := ctrl.BeginTurn(gid, time.Time{})
+	if !ok {
+		// 投递已经发生（目标会话真会跑一轮），却记不上账：不能再静默当成良性竞态，
+		// 否则这一轮完全绕过预算/深度护栏。留告警 + 终态视图，由人类重开对话。
+		m.hubAlertf("group_conversation_turn_lost", "群 %s 唤醒 %s 已投递但对话状态已变化，本轮未记账", gid, wake.Target)
+		m.notifyHubConversation(gid, ctrl.View(gid))
 		return
+	}
+	if wake.ConversationID != "" && begun.ConversationID != wake.ConversationID {
+		m.hubAlertf("group_conversation_wake_raced", "群 %s 唤醒 %s 的对话在投递窗口内被替换，已停止本轮接龙", gid, wake.Target)
 	}
 	m.emitHubConversation(gid, ctrl.View(gid))
 	// 串行：刚放行的那一条之外还有会话在跑（并行首轮的另一条），下一条必须等它们
@@ -410,11 +483,7 @@ func (m *manager) pumpAgentTask(ctx context.Context, target agenthub.TaskTarget)
 		return task, perr
 	}
 	m.emitHubTaskUpdate(task)
-	if st, serr := m.hubStore(); serr == nil {
-		m.notifyAgentTaskResult(agenthub.NewLedger(st), task)
-	} else {
-		m.emitHubTaskAlert(task.ID, "notify_failed", serr.Error())
-	}
+	m.notifyAgentTaskResult(task)
 	return task, perr
 }
 
@@ -496,8 +565,13 @@ func (m *manager) hubConversationStop(c command) {
 		return
 	}
 	ctrl := m.hubConversation()
+	// 停止必须与「取/投/记账」互斥：否则 NextDue 之后、投递之前的 wake 会在
+	// 停止之后照跑（B2）。锁只包住状态切换；中断会话放到锁外（hubInterrupt 可能
+	// 同步走收尾路径，不能再进这把锁）。
+	unlock := m.hubConvDispatch.lock(g.ID)
 	view := ctrl.Stop(g.ID, "人类停止了自动对话，等你继续", time.Time{})
 	m.bumpHubConversationGen(g.ID) // 冷却定时器作废：停止之后不许再自己接龙
+	unlock()
 	interrupted := 0
 	for _, bs := range m.groupActiveSessions(g) {
 		if bs.hubInterrupt != nil {

@@ -112,17 +112,20 @@ func (l ConversationLimits) withDefaults() ConversationLimits {
 // Wake 是一次待跑的群唤醒：谁 @ 了谁、第几跳、带哪条触发消息。
 // Turn 在出队（BeginTurn）时才最终确定；NextDue/Peek 给出的是「如果现在跑，会是第几轮」。
 type Wake struct {
-	GroupID     GroupID   `json:"group_id"`
-	Sender      AgentID   `json:"sender,omitempty"`
-	Human       bool      `json:"human,omitempty"` // 人类发送：不计 PairCount/不算循环
-	Target      AgentID   `json:"target"`
-	Text        string    `json:"text,omitempty"`
-	Depth       int       `json:"depth"`
-	Turn        int       `json:"turn"`
-	TriggerSeq  int64     `json:"trigger_seq,omitempty"`
-	RoundID     string    `json:"round_id,omitempty"`
-	Fingerprint string    `json:"fingerprint,omitempty"`
-	EnqueuedAt  time.Time `json:"enqueued_at"`
+	GroupID GroupID `json:"group_id"`
+	// ConversationID 是入队时所处对话的 id：投递方（bridge）在真正投递前用它
+	// 确认「这条 wake 还属于当前对话」，停止/人类插话开新对话后旧 wake 立即失效。
+	ConversationID string    `json:"conversation_id,omitempty"`
+	Sender         AgentID   `json:"sender,omitempty"`
+	Human          bool      `json:"human,omitempty"` // 人类发送：不计 PairCount/不算循环
+	Target         AgentID   `json:"target"`
+	Text           string    `json:"text,omitempty"`
+	Depth          int       `json:"depth"`
+	Turn           int       `json:"turn"`
+	TriggerSeq     int64     `json:"trigger_seq,omitempty"`
+	RoundID        string    `json:"round_id,omitempty"`
+	Fingerprint    string    `json:"fingerprint,omitempty"`
+	EnqueuedAt     time.Time `json:"enqueued_at"`
 	// ReadyAt 是可跑时刻：max(入队时间, 上一次唤醒 + 冷却)。冷却只作用于
 	// **连续两次智能体唤醒之间**，所以新对话的第一个 wake 永远是「现在就绪」。
 	ReadyAt time.Time `json:"ready_at"`
@@ -403,7 +406,7 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	wakes := make([]Wake, 0, len(plans))
 	for _, p := range plans {
 		wakes = append(wakes, Wake{
-			GroupID: group, Sender: req.Sender, Human: req.Human, Target: p.target,
+			GroupID: group, ConversationID: conv.id, Sender: req.Sender, Human: req.Human, Target: p.target,
 			Text: text, Depth: depth, TriggerSeq: req.TriggerSeq, RoundID: req.RoundID,
 			Fingerprint: fp, EnqueuedAt: now,
 		})
@@ -444,6 +447,7 @@ func (c *ConversationController) NextDue(group GroupID, at time.Time) (Wake, boo
 		return Wake{}, false
 	}
 	w := conv.queue[0]
+	w.ConversationID = conv.id
 	w.Turn = conv.turns + 1
 	w.ReadyAt = c.readyAtLocked(conv, w)
 	if now.Before(w.ReadyAt) {
@@ -464,6 +468,7 @@ func (c *ConversationController) Peek(group GroupID) (Wake, bool) {
 		return Wake{}, false
 	}
 	w := conv.queue[0]
+	w.ConversationID = conv.id
 	w.Turn = conv.turns + 1
 	w.ReadyAt = c.readyAtLocked(conv, w)
 	return w, true
@@ -496,6 +501,7 @@ func (c *ConversationController) BeginTurn(group GroupID, at time.Time) (Wake, b
 	conv.depth = w.Depth
 	conv.lastWake = now
 	conv.updatedAt = now
+	w.ConversationID = conv.id
 	w.Turn = conv.turns
 	w.ReadyAt = now
 	return w, true

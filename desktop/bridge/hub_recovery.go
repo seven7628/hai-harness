@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
-	"github.com/seven7628/hai-harness/core"
-	"github.com/seven7628/hai-harness/events"
 )
 
 // ensureHubRecovery 首次 hub_open 做一次恢复（进程内只在成功后闩住）。
@@ -104,50 +102,61 @@ func (m *manager) recoverHubTasks() error {
 			m.hubFinishMu.Unlock()
 			continue
 		}
-		m.recoverOneTaskLocked(ctx, ledger, t)
+		// 锁内只结算/投影；回推排到锁外（P3b-08 B1：恢复也会与正在 emit 的
+		// 会话并发，锁内同步 PushTaskResultUsage 就是和 dispatchMu 互等）。
+		notify := m.recoverOneTaskLocked(ctx, ledger, t)
 		m.hubFinishMu.Unlock()
+		if notify != "" {
+			m.scheduleTaskResultNotification(notify)
+		}
 	}
 	return nil
 }
 
 // recoverOneTaskLocked 处理单条任务；调用方必须持有 hubFinishMu。
-func (m *manager) recoverOneTaskLocked(ctx context.Context, ledger *agenthub.Ledger, t *agenthub.Task) {
+// 返回需要异步回推的任务 id（空 = 不需要）。
+func (m *manager) recoverOneTaskLocked(ctx context.Context, ledger *agenthub.Ledger, t *agenthub.Task) agenthub.TaskID {
 	if t == nil {
-		return
+		return ""
 	}
+	// 智能体任务的群内结果卡是持久层（store-only，锁内安全）：崩溃前若没写成，
+	// 这里补上，否则恢复出来的终态在群里「看不见」（P3b-08 P2）。
+	m.ensureAgentTaskResultCard(t)
 	switch t.Status {
 	case agenthub.TaskQueued:
-		return
+		return ""
 	case agenthub.TaskDispatched, agenthub.TaskRunning:
 		if t.Dispatch.RunID != "" {
-			return // 有真实 run：由事件流正常收尾
+			return "" // 有真实 run：由事件流正常收尾
 		}
 		updated, terr := ledger.Transition(ctx, t.ID, agenthub.TaskInterrupted, agenthub.TransitionOptions{
 			At: time.Now().UTC(), Error: "进程重启：没有对应的运行记录",
 		})
 		if terr != nil {
 			m.emitHubTaskAlert(t.ID, "recovery_failed", terr.Error())
-			return
+			return ""
 		}
 		m.emitHubTaskUpdate(updated)
 		m.emitHubTaskAlert(t.ID, "recovered_interrupted", "进程重启：任务没有对应的运行记录，已标中断")
 		m.openRecoveryNeed(updated)
 		// 结果回推发起者；已通知过则跳过。
-		if !alreadyNotified(updated, "recovery") {
-			m.pushHubTaskResult(ledger, updated, recoveryAgentEnd(updated))
+		if alreadyNotified(updated, "recovery") {
+			return ""
 		}
+		return updated.ID
 	case agenthub.TaskCompleted, agenthub.TaskFailed, agenthub.TaskInterrupted, agenthub.TaskBlockedBudget:
 		runID := t.Dispatch.RunID
 		if runID == "" {
 			runID = "recovery"
 		}
 		if alreadyNotified(t, runID) {
-			return
+			return ""
 		}
-		ae := recoveryAgentEnd(t)
-		ae.RunId = runID // 用真实 run 占位，避免恢复写 "recovery" 后真实 run 迟到重放（P2-05 NB-3）
-		m.pushHubTaskResult(ledger, t, ae)
+		// 用真实 run 占位，避免恢复写 "recovery" 后真实 run 迟到重放（P2-05 NB-3）：
+		// deliverTaskResult 读的就是 Dispatch.RunID。
+		return t.ID
 	}
+	return ""
 }
 
 // queuedInCreatedOrder 恢复 queued 任务时的 FIFO 顺序。ListTasks 按 UpdatedAt
@@ -166,24 +175,6 @@ func queuedInCreatedOrder(tasks []*agenthub.Task) []*agenthub.Task {
 		return out[i].CreatedAt.Before(out[j].CreatedAt)
 	})
 	return out
-}
-
-// recoveryAgentEnd 用账本里已有的结果合成 AgentEnd（只用于回推 usage/摘要）。
-func recoveryAgentEnd(t *agenthub.Task) *events.AgentEnd {
-	ae := &events.AgentEnd{RunId: "recovery", EventType: events.AgentEndType, Timestamp: time.Now()}
-	if t == nil || t.Result == nil {
-		return ae
-	}
-	ae.Content = t.Result.Summary
-	ae.FinishReason = core.FinishReason(t.Result.FinishReason)
-	ae.Error = t.Result.Error
-	u := t.Result.Usage
-	ae.Usage = &core.Usage{
-		Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
-		CacheWrite: u.CacheWrite, CacheWrite1h: u.CacheWrite1h, Reasoning: u.Reasoning,
-		Cost: core.Cost{Priced: u.CostPriced, Total: int64(u.CostUSD * 1e6)},
-	}
-	return ae
 }
 
 // openRecoveryNeed 恢复失败进 Needs you（kind=failure，锚 = 任务 id）。

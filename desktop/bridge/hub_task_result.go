@@ -27,16 +27,18 @@ func agentTaskResultClientID(id agenthub.TaskID) string {
 	return "task_result:" + string(id)
 }
 
-// notifyAgentTaskResult = 持久层（群内结果卡）+ 唤醒层（只派发者）。
+// notifyAgentTaskResult = 持久层（群内结果卡，同步、store-only）+ 唤醒层（异步）。
+//
 // 卡写失败不阻断回推：结论在账本里，派发者必须知道结果（失败只留一条告警）。
-func (m *manager) notifyAgentTaskResult(ledger *agenthub.Ledger, task *agenthub.Task) {
+// 唤醒**不能**在这里同步做：调用方可能处在 emit（持 dispatchMu）/hubFinishMu 里
+// （结算、取消、ack 都在这些窗口），同步 PushTaskResultUsage 会跨会话拿对方的
+// dispatchMu，A↔B 互派即死锁（P3b-08 B1，见 hub_notify.go）。
+func (m *manager) notifyAgentTaskResult(task *agenthub.Task) {
 	if m == nil || task == nil || task.Target.Kind != agenthub.TargetAgent {
 		return
 	}
-	if _, err := m.appendAgentTaskResultCard(task); err != nil {
-		m.emitHubTaskAlert(task.ID, "task_result_card_failed", err.Error())
-	}
-	m.pushAgentTaskResult(ledger, task)
+	m.ensureAgentTaskResultCard(task)
+	m.scheduleTaskResultNotification(task.ID)
 }
 
 // notifyCanceledAgentTask 智能体任务**真的**转成 canceled（未开始/会话空闲兜底）时
@@ -47,12 +49,7 @@ func (m *manager) notifyCanceledAgentTask(task *agenthub.Task) {
 		task.Status != agenthub.TaskCanceled {
 		return
 	}
-	st, err := m.hubStore()
-	if err != nil {
-		m.emitHubTaskAlert(task.ID, "notify_failed", err.Error())
-		return
-	}
-	m.notifyAgentTaskResult(agenthub.NewLedger(st), task)
+	m.notifyAgentTaskResult(task)
 }
 
 // appendAgentTaskResultCard 写一张群 task_result 卡（幂等）。

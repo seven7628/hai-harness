@@ -193,6 +193,7 @@ func TestHubTaskFinishPushesResultToOrigin(t *testing.T) {
 			{Name: "table.md", Path: "out/table.md", Kind: "created", Added: 12, Size: 345, Lines: 12},
 		},
 	})
+	waitResultNotifyDrained(t, m) // 回推是异步的（P3b-08 B1）：结算返回不代表已送达
 	got, err := st.LoadTask(context.Background(), task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -240,6 +241,7 @@ func TestHubTaskFinishIdempotentPush(t *testing.T) {
 		bs := &bridgeSession{ctx: context.Background(), hubTaskIDs: []agenthub.TaskID{task.ID}}
 		m.finishHubTask(bs, ae)
 	}
+	waitResultNotifyDrained(t, m)
 	n := 0
 	var seen []map[string]any
 	for _, msg := range readLines(buf) {
@@ -402,6 +404,7 @@ func TestHubTaskFinishDoesNotDoublePushAfterMarkFailure(t *testing.T) {
 	bs := &bridgeSession{ctx: context.Background(), hubTaskIDs: []agenthub.TaskID{task.ID}}
 	ae := &events.AgentEnd{RunId: "run-mark-fail", Content: "done", FinishReason: core.FinishReasonStop}
 	m.finishHubTask(bs, ae)
+	waitResultNotifyDrained(t, m)
 	if got := count(); got != 1 {
 		t.Fatalf("re-settle pushed duplicate task_result: %d, want 1", got)
 	}
@@ -411,6 +414,7 @@ func TestHubTaskFinishDoesNotDoublePushAfterMarkFailure(t *testing.T) {
 	}
 	// 再重放一次同 run：仍只有一份。
 	m.finishHubTask(bs, ae)
+	waitResultNotifyDrained(t, m)
 	if got := count(); got != 1 {
 		t.Fatalf("replay pushed duplicate task_result: %d, want 1", got)
 	}

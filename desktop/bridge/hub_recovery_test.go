@@ -37,7 +37,7 @@ func TestHubRecoveryQueuedRequeued(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.recoverHubTasks()
+	recoverAndDrain(t, m)
 	q, err := m.hubQueueFor()
 	if err != nil {
 		t.Fatal(err)
@@ -46,11 +46,20 @@ func TestHubRecoveryQueuedRequeued(t *testing.T) {
 		t.Fatalf("queued = %d, want 1", got)
 	}
 	// 重复恢复不重复入队。
-	m.recoverHubTasks()
+	recoverAndDrain(t, m)
 	if got := q.QueuedCount(wsPath, "s-rec"); got != 1 {
 		t.Fatalf("after second recovery queued = %d, want 1", got)
 	}
 	_ = task
+}
+
+// recoverAndDrain 跑一轮恢复并等异步回推落地（P3b-08 B1：恢复不再在锁内推）。
+func recoverAndDrain(t *testing.T, m *manager) {
+	t.Helper()
+	if err := m.recoverHubTasks(); err != nil {
+		t.Fatal(err)
+	}
+	waitResultNotifyDrained(t, m)
 }
 
 func TestHubRecoveryDispatchedWithoutRunInterrupted(t *testing.T) {
@@ -72,7 +81,7 @@ func TestHubRecoveryDispatchedWithoutRunInterrupted(t *testing.T) {
 	if _, err := ledger.Transition(context.Background(), task.ID, agenthub.TaskDispatched, agenthub.TransitionOptions{At: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	m.recoverHubTasks()
+	recoverAndDrain(t, m)
 	got, err := ledger.Replay(context.Background(), task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +129,7 @@ func TestHubRecoveryCompletedRedeliveredOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf.Reset()
-	m.recoverHubTasks()
+	recoverAndDrain(t, m)
 	got, err := ledger.Replay(context.Background(), task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +138,7 @@ func TestHubRecoveryCompletedRedeliveredOnce(t *testing.T) {
 		t.Fatalf("status = %s, want delivered", got.Status)
 	}
 	// 第二次恢复不得再推一次：task_result_delivered 事件只出现一次。
-	m.recoverHubTasks()
+	recoverAndDrain(t, m)
 	line := buf.String()
 	if n := strings.Count(line, `"task_result_delivered"`); n != 1 {
 		t.Fatalf("task_result_delivered count = %d, want 1: %s", n, line)
@@ -174,6 +183,7 @@ func TestHubRecoveryConcurrentSinglePush(t *testing.T) {
 		go func() { defer wg.Done(); m.recoverHubTasks() }()
 	}
 	wg.Wait()
+	waitResultNotifyDrained(t, m)
 	if n := strings.Count(buf.String(), `"task_result_delivered"`); n != 1 {
 		t.Fatalf("concurrent recovery pushed %d times, want 1", n)
 	}
@@ -207,7 +217,7 @@ func TestHubRecoveryBlockedBudgetRedelivered(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf.Reset()
-	m.recoverHubTasks()
+	recoverAndDrain(t, m)
 	got, err := ledger.Replay(context.Background(), task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +237,7 @@ func TestHubRecoveryBlockedBudgetRedelivered(t *testing.T) {
 	// 二次恢复：已 notified 的任务不得再进入 push（M5 类回归）。仓库此前没有
 	// 这条断言，绕过 alreadyNotified 只会多发一条 hub_task_update。
 	buf.Reset()
-	m.recoverHubTasks()
+	recoverAndDrain(t, m)
 	if strings.Contains(buf.String(), `"task_result_delivered"`) || strings.Contains(buf.String(), `"hub_task_update"`) {
 		t.Fatalf("二次恢复重复处理了已通知任务: %s", buf.String())
 	}

@@ -125,7 +125,7 @@ func (t *hubTaskAckTool) Call(ctx context.Context, _, arguments string) (string,
 	}
 	t.m.emitHubTaskUpdate(declined)
 	// 与结算同一条通知路径：群内结果卡 + 只唤醒派发者（幂等，重复拒绝不会双写）。
-	t.m.notifyAgentTaskResult(ledger, declined)
+	t.m.notifyAgentTaskResult(declined)
 	return marshalHubToolResult(map[string]any{
 		"task": declined, "acknowledged": false, "status": declined.Status, "reason": reason,
 	})
@@ -154,7 +154,10 @@ func (m *manager) hubTaskAckTarget(sid string, agentID agenthub.AgentID, groupID
 	if err != nil {
 		return nil, err
 	}
-	if task.Target.AgentID != agentID || (task.Target.GroupID != "" && task.Target.GroupID != groupID) {
+	// 严格校验（P3b-08 P2）：agent 目标的 group_id 必须存在且等于调用方所在群。
+	// 以前缺 group_id 时 fail-open —— 会话装配异常/旧账本会把任务 ack 给错误的群。
+	if task.Target.Kind != agenthub.TargetAgent || task.Target.GroupID == "" ||
+		task.Target.GroupID != groupID || task.Target.AgentID != agentID {
 		return nil, fmt.Errorf("%w: 只有该任务的目标智能体可以 ack", agenthub.ErrInvalid)
 	}
 	return task, nil

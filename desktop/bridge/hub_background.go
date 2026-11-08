@@ -49,14 +49,15 @@ func (m *manager) resetHubBackgroundIfClosed() {
 	m.hubBgDone = nil
 }
 
-func (m *manager) spawnHubBackground(fn func(context.Context)) {
+// 返回值表示是否真的启动了（关停/关闭后为 false）：调用方据此释放自己的在途计数。
+func (m *manager) spawnHubBackground(fn func(context.Context)) bool {
 	if m == nil || fn == nil {
-		return
+		return false
 	}
 	m.hubBgMu.Lock()
 	if m.hubBgClosing || m.hubShutdown.Load() {
 		m.hubBgMu.Unlock()
-		return
+		return false
 	}
 	if m.hubBgCtx == nil {
 		m.hubBgCtx, m.hubBgCancel = context.WithCancel(context.Background())
@@ -73,6 +74,7 @@ func (m *manager) spawnHubBackground(fn func(context.Context)) {
 		defer wg.Done()
 		fn(ctx)
 	}()
+	return true
 }
 
 // stopHubBackground 取消并等待 Hub 后台任务；返回 false = 超时仍未退出。

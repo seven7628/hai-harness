@@ -136,6 +136,7 @@ func TestHubHumanInterventionMarksTask(t *testing.T) {
 	target.emit(&events.AgentEnd{
 		EventType: events.AgentEndType, RunId: "r-human", Content: "完成",
 	})
+	waitResultNotifyDrained(t, m) // 结果回推已改成异步（P3b-08 B1）
 	got, err := ledger.Replay(context.Background(), task.ID)
 	if err != nil {
 		t.Fatal(err)

@@ -114,6 +114,14 @@ func p3bEventCount(t *testing.T, buf *syncBuf, eventType string, id agenthub.Tas
 	return n
 }
 
+// waitResultNotifyDrained 等异步通知簿把已排队的回推全部处理完。
+// scheduleTaskResultNotification 同步 +1，所以调用后 inflight>0 是确定的，
+// 等到 0 就说明这次回推已经结束（测试不必猜延迟）。
+func waitResultNotifyDrained(t *testing.T, m *manager) {
+	t.Helper()
+	convWait(t, "任务结果回推排空", func() bool { return m.hubNotify.inflight.Load() == 0 })
+}
+
 // p3bTaskResultTexts 取发起者上下文里该任务的 task_result 正文（History 为准；
 // 运行还没吸收时退回 Messages）。
 func p3bTaskResultTexts(bs *bridgeSession, id agenthub.TaskID) []string {
@@ -205,6 +213,7 @@ func TestFinishAgentTaskCompleted(t *testing.T) {
 		RunId: "run-agent-done", Content: summary, FinishReason: core.FinishReasonStop,
 		Usage: &usage, DurationMS: 4321,
 	})
+	waitResultNotifyDrained(t, m) // 回推异步（P3b-08 B1）
 
 	if len(bsB.hubTaskIDs) != 0 {
 		t.Fatal("hubTaskIDs 结算后必须清空")
@@ -417,6 +426,7 @@ func TestAgentTaskCancelDuringSettlementKeepsResult(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("emit 没有在结算后返回")
 	}
+	waitResultNotifyDrained(t, m)
 	if got := p3bLoadTask(t, m, task.ID); got.Status != agenthub.TaskDelivered ||
 		got.Result == nil || !strings.Contains(got.Result.Summary, "结算窗口") {
 		t.Fatalf("结算结果 = %s %+v", got.Status, got.Result)
@@ -453,6 +463,7 @@ func TestFinishAgentTaskFailed(t *testing.T) {
 		FinishReason: core.FinishReasonError, Error: "上游 500",
 	}
 	m.finishHubTask(bsB, ae)
+	waitResultNotifyDrained(t, m)
 	got := p3bLoadTask(t, m, task.ID)
 	if got.Status != agenthub.TaskDelivered {
 		t.Fatalf("status = %s, want delivered（failed 已回推）", got.Status)
@@ -484,8 +495,8 @@ func TestFinishAgentTaskFailed(t *testing.T) {
 	}
 	// 回推成功但 MarkNotified 失败后的重放（账本未记录已通知）：通知入口必须靠
 	// 卡片的 client_msg_id 与接收端 HasTaskResult 保持「一张卡、一次回推」。
-	ledger := agenthub.NewLedger(mustHubStore(t, m))
-	m.notifyAgentTaskResult(ledger, p3bLoadTask(t, m, task.ID))
+	m.notifyAgentTaskResult(p3bLoadTask(t, m, task.ID))
+	waitResultNotifyDrained(t, m)
 	if n := len(p3bTaskResultCards(p3bMessages(t, m, g.ID), task.ID)); n != 1 {
 		t.Fatalf("重放通知写了 %d 张卡, want 1（client_msg_id 幂等失效）", n)
 	}
@@ -566,6 +577,7 @@ func TestAgentTaskCanceledNotifiesOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
+	waitResultNotifyDrained(t, m)
 	if canceled.Status != agenthub.TaskCanceled || !strings.Contains(note, "已取消") {
 		t.Fatalf("canceled = %s note=%q", canceled.Status, note)
 	}
@@ -695,6 +707,7 @@ func TestAgentTaskDeclinedAck(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("decline: %v", err)
 	}
+	waitResultNotifyDrained(t, m)
 	got := p3bLoadTask(t, m, origin.ID)
 	if got.Status != agenthub.TaskDeclined || !strings.Contains(got.Error, "这块我不熟") {
 		t.Fatalf("declined = %s error=%q", got.Status, got.Error)
@@ -826,6 +839,7 @@ func TestAgentTaskPumpTerminalNotifiesOrigin(t *testing.T) {
 
 	buf.Take()
 	got, perr := m.pumpAgentTask(context.Background(), p3bTaskTarget(g, b.ID))
+	waitResultNotifyDrained(t, m)
 	if perr == nil {
 		t.Fatal("成员被移出后泵必须把「不可派发」如实返回")
 	}
@@ -895,6 +909,7 @@ func TestAgentTaskPumpDuplicateNotifiesOrigin(t *testing.T) {
 	task := p3bQueuedAgentTask(t, m, g, a.ID, b.ID, "去重命中的任务", cmid)
 	buf.Take()
 	got, perr := m.pumpAgentTask(context.Background(), p3bTaskTarget(g, b.ID))
+	waitResultNotifyDrained(t, m)
 	if perr != nil {
 		t.Fatalf("去重命中不是派发错误: %v", perr)
 	}

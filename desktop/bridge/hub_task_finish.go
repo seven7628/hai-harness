@@ -21,6 +21,11 @@ import (
 )
 
 // finishHubTask 把本批 hub_task 结算进账本。
+//
+// 结算在 hubFinishMu 内完成（账本/产物/结果卡/事件投影），**回推在锁外**：
+// 本函数由 bs.emit（持 dispatchMu）调用，而 PushTaskResultUsage 会同步 emit 到
+// 发起者会话（拿对方的 dispatchMu）。A↔B 互派任务时就是 A.dispatchMu → 等
+// B.dispatchMu、B.dispatchMu → 等 hubFinishMu 的死锁（P3b-08 B1）。
 func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	if m == nil || m.hubShutdown.Load() {
 		return // 关停后的迟到结算不能复活 hub runtime/写 TempDir
@@ -33,12 +38,60 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		return
 	}
 	humanIntervened := bs.hubHumanIntervened.Swap(false)
+	pending := m.settleHubTaskBatch(bs, ae, ids, humanIntervened)
+	for _, id := range pending {
+		m.scheduleTaskResultNotification(id)
+	}
+}
+
+// markHubTaskRunning 根 AgentStart：dispatched → running（P3b-08 B3）。
+//
+// 任务板/卡片以前只有 queued/dispatched 与终态，运行中的任务看起来永远没开始。
+// 只做 store 投影（emit 持 dispatchMu）：拿账本锁是叶子锁，不涉及别的会话。
+// 迟到的 AgentStart（上一轮 run、或任务已重投给新 run）不得推进当前任务。
+func (m *manager) markHubTaskRunning(bs *bridgeSession, runID string) {
+	if m == nil || bs == nil || runID == "" {
+		return
+	}
+	id := bs.currentHubTaskID()
+	if id == "" {
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		m.emitHubTaskAlert(id, "task_running_failed", err.Error())
+		return
+	}
+	ctx := context.Background()
+	t, err := st.LoadTask(ctx, id)
+	if err != nil || t == nil || t.Status != agenthub.TaskDispatched {
+		return
+	}
+	if t.Dispatch.RunID != "" && t.Dispatch.RunID != runID {
+		return // 不是这条 run：重投/重放不会改任务状态
+	}
+	updated, err := agenthub.NewLedger(st).Transition(ctx, id, agenthub.TaskRunning, agenthub.TransitionOptions{
+		RunID: runID, At: time.Now().UTC(),
+	})
+	if err != nil {
+		m.emitHubTaskAlert(id, "task_running_failed", err.Error())
+		return
+	}
+	m.emitHubTaskUpdate(updated)
+}
+
+// settleHubTaskBatch 持 hubFinishMu 完成结算，返回需要异步回推的任务 id。
+//
+// 锁内只允许 store 读写与事件投影（emitHubTask*/appendAgentTaskResultCard）；
+// 任何「Ask 另一个会话 / PushTaskResultUsage」都必须交给调用方的异步通知簿。
+func (m *manager) settleHubTaskBatch(bs *bridgeSession, ae *events.AgentEnd, ids []agenthub.TaskID, humanIntervened bool) []agenthub.TaskID {
 	m.hubFinishMu.Lock()
 	defer m.hubFinishMu.Unlock()
+	pending := make([]agenthub.TaskID, 0, len(ids))
 	st, err := m.hubStore()
 	if err != nil {
 		m.emitHubTaskAlert(ids[0], "settle_failed", err.Error())
-		return
+		return pending
 	}
 	ledger := agenthub.NewLedger(st)
 	ctx := context.Background()
@@ -77,7 +130,7 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	bs.hubBudgetReason.Store("")
 	// 重放（同 run 已回推）：静默返回，不再 Finish（delivered→completed 会报假告警）。
 	if cur, lerr := st.LoadTask(ctx, first); lerr == nil && alreadyNotified(cur, ae.RunId) {
-		return
+		return pending
 	}
 	originTask, _ := st.LoadTask(ctx, first)
 	// 已取消/已拒绝的任务没有回到工作态的边：迟到的 AgentEnd 不能把它改回
@@ -85,7 +138,7 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 	// 与下面 Finish 失败的 canceled 兜底同口径，只是提前判定、更安静。
 	if originTask != nil &&
 		(originTask.Status == agenthub.TaskCanceled || originTask.Status == agenthub.TaskDeclined) {
-		return
+		return pending
 	}
 	// 单任务预算：成本只有在结算时才知道；超限落 blocked_budget + hub_alert（§6.9）。
 	if originTask != nil && originTask.Origin.AgentID != "" {
@@ -112,7 +165,7 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		// 人已取消/目标已拒绝：AgentEnd 迟到不能再结算，也不要制造 settle_failed 假告警。
 		if cur, lerr := st.LoadTask(ctx, first); lerr == nil &&
 			(cur.Status == agenthub.TaskCanceled || cur.Status == agenthub.TaskDeclined) {
-			return
+			return pending
 		}
 		m.emitHubTaskAlert(first, "settle_failed", err.Error())
 	} else {
@@ -121,18 +174,21 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 		if err := registerTaskArtifacts(ctx, st, settled, ae.Artifacts); err != nil {
 			m.emitHubTaskAlert(settled.ID, "artifact_register_failed", err.Error())
 		}
-		m.emitHubTaskUpdate(settled)
+		// 同一 run 的重放（回推还没落地的第二次 AgentEnd）状态没变：不再发快照。
+		// 只发快照不推进任何状态，反而让「已结算」在 UI 上出现两条（P2-05 幂等口径）。
+		if originTask == nil || originTask.Status != settled.Status {
+			m.emitHubTaskUpdate(settled)
+		}
 		if settled.Status == agenthub.TaskBlockedBudget {
 			m.recordBudgetNeed(settled, res.Error)
 		}
-		switch settled.Target.Kind {
-		case agenthub.TargetAgent:
-			// 智能体任务：结果卡进群（持久感知）+ 只唤醒派发者（§6.5.7/§6.7.9）。
-			m.notifyAgentTaskResult(ledger, settled)
-		default:
-			if !alreadyNotified(settled, ae.RunId) {
-				m.pushHubTaskResult(ledger, settled, ae)
-			}
+		// 结果卡（智能体任务）：持久层，store-only，留在结算窗口内。
+		// 回推一律交给异步通知簿 —— 见函数头注释与 hub_notify.go。
+		m.ensureAgentTaskResultCard(settled)
+		// 同一 run 已回推过就不要再排一次：DM 分支的 push 会重发 delivered 快照
+		// （旧代码的 alreadyNotified 闸门，异步化后必须留在排队这一侧）。
+		if !alreadyNotified(settled, ae.RunId) {
+			pending = append(pending, settled.ID)
 		}
 	}
 	// 一个 batch 出现多个 hub_task = 空闲闸门失效（§6.7.2 防御）：
@@ -143,11 +199,17 @@ func (m *manager) finishHubTask(bs *bridgeSession, ae *events.AgentEnd) {
 			Error: "batch_conflict: 同一批出现多个 hub_task（空闲闸门 bug）",
 			At:    time.Now().UTC(),
 		})
-		if t, lerr := st.LoadTask(ctx, extra); lerr == nil {
+		if t, lerr := st.LoadTask(ctx, extra); lerr == nil && t != nil {
 			m.emitHubTaskUpdate(t)
+			// 额外任务也要通知：以前只发告警，派发者永远等不到结果（P3b-08 P2）。
+			m.ensureAgentTaskResultCard(t)
+			if !alreadyNotified(t, ae.RunId) {
+				pending = append(pending, t.ID)
+			}
 		}
 		m.emitHubTaskAlert(extra, "batch_conflict", "同一批出现多个 hub_task（空闲闸门 bug）")
 	}
+	return pending
 }
 
 // recordBudgetNeed 把预算阻断放进 Needs you（P2-07 N5）。同一 task 幂等。
@@ -264,7 +326,11 @@ func alreadyNotified(t *agenthub.Task, runID string) bool {
 // 复用 Session.PushTaskResultUsage：入队 task_result 消息（模型续跑）+ TaskResultDelivered
 // 事件（UI 任务卡终态收敛）。回推成功才 MarkNotified（幂等：同一 run 只推一次）；
 // 失败保留未通知状态并告警，崩溃恢复（P2-08）据此重推。
-func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task, ae *events.AgentEnd) {
+//
+// **只允许从异步通知簿（deliverTaskResult）调用**：它会同步 emit 到发起者会话，
+// 在结算锁/emit 的 dispatchMu 内调用会 A↔B 互等死锁（P3b-08 B1）。
+// 用量取账本里的结果快照（结算时已由 AgentEnd 落账），不再依赖 AgentEnd 指针。
+func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task, runID string) {
 	if task == nil || task.Origin.Kind != agenthub.OriginDM || task.Origin.AgentID == "" {
 		return // 群/人工来源的回推归 P3
 	}
@@ -272,10 +338,6 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 	if err != nil || origin == nil {
 		m.emitHubTaskAlert(task.ID, "push_failed", fmt.Sprintf("无法打开发起会话: %v", err))
 		return
-	}
-	runID := ""
-	if ae != nil {
-		runID = ae.RunId
 	}
 	// 接收端幂等：若 id 已进入发起者 history（上次 push 成功但 MarkNotified
 	// 失败/进程在这两步之间崩溃），不再推第二份；只补标记并重发 delivered
@@ -292,17 +354,14 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 		}
 		return
 	}
-	var usage core.Usage
-	if ae != nil && ae.Usage != nil {
-		usage = *ae.Usage
-	}
+	usage := coreUsageOfTaskResult(task)
 	var pushErr error
 	if task.Status == agenthub.TaskFailed || task.Status == agenthub.TaskInterrupted {
 		pushErr = errors.New(task.Error)
 	}
 	summary := ""
 	if task.Result != nil {
-		summary = task.Result.Summary
+		summary = strings.TrimSpace(task.Result.Summary)
 	}
 	// 预算阻断不是失败：正文仍是任务产出，但必须把「为什么停」带给模型。
 	// 不能塞 pushErr（那会用错误文本整段替换摘要），也不能只说「完成」——
