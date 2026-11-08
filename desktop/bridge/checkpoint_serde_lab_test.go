@@ -409,6 +409,66 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		}
 		return
 
+	case "e2e":
+		// 端到端回归（真实大会话）：全量解析 vs 映射解析 vs 窗口解析，三者必须
+		// 在「块集合、顺序、turn 总数」上完全一致；窗口解析的 decoded ∪ paged
+		// 必须等于全集（一块不丢）。
+		full, ferr := parseCheckpoint(rec.ViewCheckpoint)
+		if ferr != nil {
+			t.Fatal(ferr)
+		}
+		rec2, lerr := store.LoadRecordForView(ctx, wsKey, sid)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		fast, perr := parseCheckpointFromRecord(rec2)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		if len(fast.Blocks) != len(full.Blocks) {
+			t.Fatalf("块数不一致: full=%d fast=%d", len(full.Blocks), len(fast.Blocks))
+		}
+		for _, i := range []int{0, len(full.Blocks) / 2, len(full.Blocks) - 1} {
+			if fast.Blocks[i].ID != full.Blocks[i].ID || fast.Blocks[i].Kind != full.Blocks[i].Kind {
+				t.Fatalf("块 %d 不一致: full=%d/%s fast=%d/%s", i,
+					full.Blocks[i].ID, full.Blocks[i].Kind, fast.Blocks[i].ID, fast.Blocks[i].Kind)
+			}
+		}
+		if len(fast.Turns) != len(full.Turns) || fast.TurnsTotal != full.TurnsTotal {
+			t.Fatalf("turns 不一致: full=%d/%d fast=%d/%d",
+				len(full.Turns), full.TurnsTotal, len(fast.Turns), fast.TurnsTotal)
+		}
+		t.Logf("全量 vs 映射：blocks=%d turns=%d/%d 一致", len(fast.Blocks), len(fast.Turns), fast.TurnsTotal)
+
+		// 窗口解析：decoded ∪ paged == 全集
+		const win = 500
+		cpw, werr := parseCheckpointFromRecordWindow(rec2, win)
+		if werr != nil {
+			t.Fatal(werr)
+		}
+		union := make(map[uint64]struct{}, len(cpw.Blocks)+len(cpw.PagedBlocks.IDs))
+		for _, b := range cpw.Blocks {
+			union[b.ID] = struct{}{}
+		}
+		for _, id := range cpw.PagedBlocks.IDs {
+			union[id] = struct{}{}
+		}
+		if len(union) != len(full.Blocks) {
+			t.Fatalf("窗口解析丢了块：union=%d full=%d", len(union), len(full.Blocks))
+		}
+		for _, b := range full.Blocks {
+			if _, ok := union[b.ID]; !ok {
+				t.Fatalf("窗口解析缺块 id=%d", b.ID)
+			}
+		}
+		if cpw.BlocksTotal != len(full.Blocks) {
+			t.Fatalf("BlocksTotal=%d want %d", cpw.BlocksTotal, len(full.Blocks))
+		}
+		t.Logf("窗口解析(limit=%d)：解码=%d 分页=%d 合计=%d 全集=%d ✓",
+			win, len(cpw.Blocks), len(cpw.PagedBlocks.IDs), len(union), len(full.Blocks))
+		rec2.ReleaseView()
+		return
+
 	case "turnssplit":
 		// turns 分块：从旧 record 恢复 → 编码（body 只带窗口）→ 追加日志 → 提交
 		// → 按新格式重开，量真实打开路径。

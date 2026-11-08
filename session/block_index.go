@@ -351,6 +351,10 @@ func blockKindCode(payload []byte) uint8 {
 	return blockKindNames[string(rest[:j])]
 }
 
+// HasCardKind 报告该编码是否属于「必须随首屏带回的卡片类块」。
+// 窗口恢复要靠它把窗口外的子智能体/任务卡片单独解码出来。
+func HasCardKind(k uint8) bool { return hasCardKind(k) }
+
 // hasCardKind 报告该编码是否属于「必须随首屏带回的卡片类块」。
 func hasCardKind(k uint8) bool {
 	switch k {

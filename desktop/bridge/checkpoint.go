@@ -882,3 +882,85 @@ func decodeBlocksParallel(spans [][]byte, hashes [][8]byte, out []Block) error {
 	wg.Wait()
 	return firstErr
 }
+
+// parseCheckpointFromRecordWindow 只解码尾部 limit 块 + 所有卡片类块。
+//
+// 为什么要带卡片类块：窗口外的子智能体/任务卡片必须照常出现在首屏（左栏树），
+// 而它们可能早于窗口。有了索引里的 kind，就能只解这几十个，不必全解 209MB。
+//
+// 其余块进 PagedBlocks（指向 sidecar 映射，零拷贝），由持有者决定何时 Release。
+// limit <= 0 或覆盖全部块时，退回完整解析（行为与之前一致）。
+func parseCheckpointFromRecordWindow(rec *session.SessionRecord, limit int) (*Checkpoint, error) {
+	spans := rec.LoadedBlockSpans
+	if len(spans) == 0 || limit <= 0 || limit >= len(spans) || len(rec.LoadedBlockKinds) != len(spans) {
+		return parseCheckpointFromRecord(rec)
+	}
+	skel, err := rec.SkeletonView()
+	if err != nil {
+		return nil, err
+	}
+	var cp Checkpoint
+	if err := json.Unmarshal(skel, &cp); err != nil {
+		return nil, err
+	}
+	if cp.SchemaVersion != checkpointSchemaVersion {
+		return nil, os.ErrInvalid
+	}
+
+	n := len(spans)
+	start := n - limit
+	need := make([]int, 0, limit+16)
+	decoded := make(map[int]struct{}, limit+16)
+	for i := 0; i < start; i++ {
+		if session.HasCardKind(rec.LoadedBlockKinds[i]) {
+			need = append(need, i)
+			decoded[i] = struct{}{}
+		}
+	}
+	for i := start; i < n; i++ {
+		need = append(need, i)
+		decoded[i] = struct{}{}
+	}
+
+	selSpans := make([][]byte, len(need))
+	selHashes := make([][8]byte, len(need))
+	hasHashes := len(rec.LoadedBlockHashes) == n
+	for j, i := range need {
+		selSpans[j] = spans[i]
+		if hasHashes {
+			selHashes[j] = rec.LoadedBlockHashes[i]
+		}
+	}
+	blocks := make([]Block, len(need))
+	var hsh [][8]byte
+	if hasHashes {
+		hsh = selHashes
+	}
+	if err := decodeBlocksParallel(selSpans, hsh, blocks); err != nil {
+		return nil, err
+	}
+
+	pagedIDs := make([]uint64, 0, start)
+	pagedSpans := make([][]byte, 0, start)
+	pagedHashes := make([][8]byte, 0, start)
+	for i := 0; i < start; i++ {
+		if _, ok := decoded[i]; ok {
+			continue
+		}
+		pagedIDs = append(pagedIDs, rec.LoadedBlockIDs[i])
+		pagedSpans = append(pagedSpans, spans[i])
+		if hasHashes {
+			pagedHashes = append(pagedHashes, rec.LoadedBlockHashes[i])
+		}
+	}
+
+	cp.Blocks = blocks
+	cp.BlocksTotal = n
+	cp.PagedBlocks = &PagedBlocks{
+		IDs:     pagedIDs,
+		Spans:   pagedSpans,
+		Hashes:  pagedHashes,
+		Release: rec.ReleaseView,
+	}
+	return &cp, nil
+}

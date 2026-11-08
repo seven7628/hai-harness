@@ -37,6 +37,15 @@ const checkpointSchemaVersion = session.ViewCheckpointSchemaVersion
 // 额外字段（lifetime_usage / lifetime_cost_usd / ctx_tokens / context_window /
 // diffs / diagnostics）属于兼容扩展，storage 层只要求
 // schema_version + blocks + run_nodes + turns。
+// PagedBlocks 是窗口恢复时「未解码」的那部分块：ids/spans 按 id 升序，
+// spans 指向 sidecar 只读映射，Release 由持有者调用（幂等）。
+type PagedBlocks struct {
+	IDs     []uint64
+	Spans   [][]byte
+	Hashes  [][8]byte
+	Release func()
+}
+
 type Checkpoint struct {
 	SchemaVersion int `json:"schema_version"`
 
@@ -49,6 +58,11 @@ type Checkpoint struct {
 	// 解码 155ms、每次提交要编码 37ms+写 24ms，而 UI 只用「总条数 + 最后两条」。
 	// 因此 body 只带尾部窗口，总数走这个标量；旧轮次在 <record>.turns 追加日志里。
 	TurnsTotal int `json:"turns_total,omitempty"`
+
+	// BlocksTotal 是**历史块总数**（窗口恢复时 Blocks 只是窗口 + 卡片块）。
+	// PagedBlocks 非 nil 表示还有未解码的块在 sidecar 里，按需解。
+	BlocksTotal int          `json:"blocks_total,omitempty"`
+	PagedBlocks *PagedBlocks `json:"-"`
 
 	// usage / cost_usd 是当前 clear generation 的展示累计（clear 后归零）；
 	// lifetime_usage / lifetime_cost_usd 是跨 generation 的对账值（clear 不清）。
