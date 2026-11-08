@@ -578,6 +578,11 @@ type ViewReducer struct {
 	blockBytes map[uint64][]byte
 	// dirtyBlocks 本轮内容变化的 block id（由写入方精确标记）。
 	dirtyBlocks map[uint64]struct{}
+	// lastDirtyBlocks 是最近一次 encodeLocked 消费掉的脏集合（供 MarshalWithSpans
+	// 交给提交路径；缓存命中时为 nil，走全量比对）。
+	lastDirtyBlocks map[uint64]struct{}
+	// cachedIDs 与 cachedSpans 一一对应（view 里 blocks 的顺序）。
+	cachedIDs []uint64
 	// cachedSpans 与 marshalCache 同代：每个 block 的字节（与 view 中片段逐字节相同）
 	cachedSpans [][]byte
 
@@ -955,31 +960,36 @@ func (r *ViewReducer) marshalLocked() ([]byte, error) {
 // 完整结构，再把占位符替换成拼好的 blocks 数组 —— 与 marshalRecordEnvelope
 // 同一手法（那边已证明可靠）。
 func (r *ViewReducer) encodeSnapshotLocked(out *bytes.Buffer) error {
-	_, _, err := r.encodeLocked(out)
+	_, _, _, err := r.encodeLocked(out)
 	return err
 }
 
 // marshalLockedSpans 与 marshalLocked 相同，但额外返回每个 block 的字节切片。
-func (r *ViewReducer) marshalLockedSpans() ([]byte, [][]byte, error) {
+func (r *ViewReducer) marshalLockedSpans() ([]byte, [][]byte, []uint64, error) {
 	if r.marshalCacheOK && r.marshalCacheSeq == r.seq && r.marshalCacheGen == r.clearGeneration {
-		return r.marshalCache, r.cachedSpans, nil
+		// 缓存命中 = 上一轮之后没有任何事件，也就没有新脏块可报。
+		// 这里故意返回 nil 而不是空集合：调用方会退回「全量比对」，
+		// 万一上一次提交中途失败（sidecar 只写了一部分）也不会漏块。
+		r.lastDirtyBlocks = nil
+		return r.marshalCache, r.cachedSpans, nil, nil
 	}
 	var out bytes.Buffer
 	out.Grow(len(r.marshalCache) + 1024)
-	view, spans, err := r.encodeLocked(&out)
+	view, spans, ids, err := r.encodeLocked(&out)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	r.marshalCache = view
 	r.cachedSpans = spans
 	r.marshalCacheSeq = r.seq
 	r.marshalCacheGen = r.clearGeneration
 	r.marshalCacheOK = true
-	return view, spans, nil
+	r.cachedIDs = ids
+	return view, spans, ids, nil
 }
 
 // encodeLocked 是真正的编码实现，返回 view 字节与 block 切片。
-func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) {
+func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, []uint64, error) {
 	cp := r.snapshotLocked()
 	blocks := cp.Blocks
 	cp.Blocks = nil
@@ -987,7 +997,7 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 	// 1. 序列化不含 blocks 的骨架，得到 `...,"blocks":null,...`
 	head, err := json.Marshal(cp)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	const placeholder = `"blocks":null`
 	idx := bytes.Index(head, []byte(placeholder))
@@ -996,9 +1006,9 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 		enc := json.NewEncoder(out)
 		cp.Blocks = blocks
 		if err := enc.Encode(cp); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return out.Bytes(), nil, nil
+		return out.Bytes(), nil, nil, nil
 	}
 
 	// 2. 逐 block 取字节：只有「被写入方标脏」的块才重新序列化。
@@ -1007,6 +1017,7 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 	// 与新建块）**精确给出**，而不是在 Marshal 时猜「内容变没变」——
 	// 猜的两种做法（手写字段清单、终态块复用）都已被回归测试证伪。
 	dirty := r.takeDirtyBlocks()
+	r.lastDirtyBlocks = dirty
 	if r.blockBytes == nil {
 		r.blockBytes = make(map[uint64][]byte, len(blocks))
 	}
@@ -1016,9 +1027,11 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 	}
 
 	parts := make([][]byte, len(blocks))
+	ids := make([]uint64, len(blocks))
 	total := 0
 	for i := range blocks {
 		id := blocks[i].ID
+		ids[i] = id
 		_, isDirty := dirty[id]
 		if !isDirty {
 			if b, ok := r.blockBytes[id]; ok {
@@ -1029,7 +1042,7 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 		}
 		b, err := json.Marshal(&blocks[i])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		parts[i] = b
 		r.blockBytes[id] = b
@@ -1056,7 +1069,7 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 	// parts 是各自独立的字节，拼接后散落在 view 中 —— 重新定位会退化成扫描。
 	// 因此改为「把 parts 直接返回」，由调用方按顺序使用（它们的内容与 view 中的
 	// 对应片段逐字节相同，可直接写入 sidecar）。
-	return view, parts, nil
+	return view, parts, ids, nil
 }
 
 // blockFingerprint 计算 block 的内容指纹（用于字节缓存）。
@@ -1178,17 +1191,24 @@ func (r *ViewReducer) takeDirtyBlocks() map[uint64]struct{} {
 type BlockSpans struct {
 	View  []byte
 	Spans [][]byte
+	// Dirty 是**本次 marshal 重新序列化**的 block id：提交路径据此只重写这些块，
+	// 其余块不再逐块 sha256（实测 30,755 块 / 185MB，是 sidecar 阶段的主体成本）。
+	// nil = 未知（缓存命中/无标记）→ 提交路径走全量比对。
+	Dirty map[uint64]struct{}
+	// IDs 与 Spans 一一对应（view 里 blocks 的顺序）。带上它可以让存储层
+	// 免去对每个 block 再做一次 JSON 解析取 id —— 30,787 块实测 200~400ms。
+	IDs []uint64
 }
 
 // MarshalWithSpans 返回 view 字节 + 每个 block 的字节切片。
 func (r *ViewReducer) MarshalWithSpans() (*BlockSpans, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	view, parts, err := r.marshalLockedSpans()
+	view, parts, ids, err := r.marshalLockedSpans()
 	if err != nil {
 		return nil, err
 	}
-	return &BlockSpans{View: view, Spans: parts}, nil
+	return &BlockSpans{View: view, Spans: parts, Dirty: r.lastDirtyBlocks, IDs: ids}, nil
 }
 
 // invalidateMarshalCache 让下一次 Marshal 重新序列化。
@@ -3858,7 +3878,7 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	if limit <= 0 || limit >= total {
 		// 不截断：走全量编码（带逐块字节缓存）。**不能**在这里自己拼 JSON ——
 		// 那会绕过 blockBytes 缓存，让每个会话每次打开都重新序列化全部块（小会话也变慢）。
-		view, _, err := r.marshalLockedSpans()
+		view, _, _, err := r.marshalLockedSpans()
 		if err != nil {
 			return nil, err
 		}
@@ -3897,7 +3917,7 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	idx := bytes.Index(head, []byte(placeholder))
 	if idx < 0 {
 		// 结构异常 → 退回全量（正确性优先）
-		view, _, merr := r.marshalLockedSpans()
+		view, _, _, merr := r.marshalLockedSpans()
 		if merr != nil {
 			return nil, merr
 		}

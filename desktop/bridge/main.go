@@ -1285,6 +1285,9 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	recordCorrupt := false // record 在但读不出来 → 打开时要靠事件重放自愈（见字段注释）
 	if !opts.noRecord {
 		if recordStore, recordSetupErr = newRecordStore(); recordSetupErr == nil {
+			// sidecar 回收默认放后台（见 session/compact_scheduler.go）：
+			// settings.checkpoint.background_compact=false 可回退到同步回收。
+			recordStore.SetBackgroundCompact(loadCheckpointSettings().backgroundCompact())
 			if rec, lerr := recordStore.LoadRecord(context.Background(), wsKey, id); lerr == nil {
 				if cp, perr := parseCheckpoint(rec.ViewCheckpoint); perr == nil {
 					if err := reducer.Restore(cp); err == nil {

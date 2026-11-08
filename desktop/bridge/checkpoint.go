@@ -43,6 +43,13 @@ import (
 	"github.com/seven7628/hai-harness/todo"
 )
 
+// verifyEveryCommits 是「全量比对块内容」的周期。
+//
+// 脏块快路径依赖 reducer 精确标脏；万一某条变更路径漏标，磁盘会停在旧版本
+// （用户看到永不更新的卡片）。因此每 N 次提交强制走一次全量 sha256 校验，
+// 把「漏标」的影响限制在 N 次提交以内。首次提交（revKnown=false）也强制全量。
+const verifyEveryCommits = 32
+
 // commitSlowLog 是「慢提交」日志阈值：超过它就把一次提交的阶段分解打到
 // stderr。失败提交无论耗时多少都会打（30s 超时必须能归因到具体阶段）。
 const commitSlowLog = 3 * time.Second
@@ -89,7 +96,9 @@ type checkpointCoordinator struct {
 	lastRev  uint64
 	revKnown bool
 	commits  uint64 // 成功提交计数（测试观测）
-	skipped  uint64 // 因缓冲满跳过的请求计数
+	// commitsSinceVerify 自上次全量比对以来的提交次数（脏块快路径的安全网）。
+	commitsSinceVerify int
+	skipped            uint64 // 因缓冲满跳过的请求计数
 
 	// committedMeta 缓存「最近一次成功提交」写进 record 的那三个标量。
 	// 打开会话（open_session）只需要它们来填响应，原本却要 Load 整条
@@ -243,14 +252,14 @@ func (c *checkpointCoordinator) logCommit(err error, rev uint64, total, marshalD
 	if err != nil {
 		status = "failed"
 	}
-	fmt.Fprintf(os.Stderr, "[checkpoint] %s commit total=%s session=%s rev=%d view=%.1fMB record=%.1fMB blocks=%d"+
-		" phase:%s%s%s%s%s%s%s%s%s%s%s err=%v\n",
+	fmt.Fprintf(os.Stderr, "[checkpoint] %s commit total=%s session=%s rev=%d view=%.1fMB record=%.1fMB blocks=%d hashed=%.1fMB"+
+		" phase:%s%s%s%s%s%s%s%s%s%s err=%v\n",
 		status, total.Round(time.Millisecond), c.sessID, rev,
-		float64(ct.ViewBytes)/1e6, float64(ct.RecordBytes)/1e6, ct.BlocksWrote,
+		float64(ct.ViewBytes)/1e6, float64(ct.RecordBytes)/1e6, ct.BlocksWrote, float64(ct.HashedBytes)/1e6,
 		phase("marshal", marshalDur), phase("revision", revDur), phase("sdk", stateDur),
 		phase("lock", ct.LockWait), phase("sidecar", ct.Sidecar), phase("compact", ct.Compact),
 		phase("encode", ct.Encode), phase("baseline", ct.Baseline), phase("temp", ct.Temp),
-		phase("bak", ct.Backup), phase("rename+dir", ct.Rename+ct.SyncDir), err)
+		phase("bak+rename+dir", ct.Backup+ct.Rename+ct.SyncDir), err)
 }
 
 // Stats 返回 (commits, skipped) 供测试观测。
@@ -332,6 +341,14 @@ func (c *checkpointCoordinator) commitOnce() {
 		c.wsKey, c.sessID, rev, c.reducer.LastSeq(), c.reducer.ClearGeneration(), state, view,
 	)
 	record.BlockSpans = spans.Spans
+	record.BlockIDs = spans.IDs
+	// 脏块快路径：只重写本轮真正变化的块。周期性（及失败后第一次）退回全量比对。
+	c.commitsSinceVerify++
+	record.DirtyBlocks = spans.Dirty
+	if record.DirtyBlocks != nil && (c.commitsSinceVerify >= verifyEveryCommits || !c.revKnown) {
+		record.DirtyBlocks = nil
+		c.commitsSinceVerify = 0
+	}
 	ct, cerr := c.store.CommitRecordTraced(ctx, record)
 	if cerr != nil {
 		// 提交失败不阻塞事件流：失效 revision 缓存，下一边界重读磁盘基线；

@@ -101,6 +101,8 @@ func labSpans(t *testing.T, view []byte) [][]byte {
 
 func TestCheckpointScalingLab(t *testing.T) {
 	src := labLoad(t)
+	// 后台回收会比测试体活得久；清理临时目录前必须等它结束。
+	t.Cleanup(func() { WaitBackgroundCompacts(60 * time.Second) })
 
 	t.Run("open-index-hit", func(t *testing.T) {
 		root := t.TempDir()
@@ -210,6 +212,25 @@ func TestCheckpointScalingLab(t *testing.T) {
 		hasIDs := strings.Contains(string(head), `"ids":[`)
 		t.Logf("读回校验: rev=%d blocks=%d record=%dMB 引用含 ids=%v",
 			back.Revision, len(spans), len(raw)/1e6, hasIDs)
+	})
+
+	t.Run("commit-dirty-fast-path", func(t *testing.T) {
+		// 1a：调用方给出「没有块变化」的脏集合时，提交不应再逐块哈希。
+		rev := rec.Revision + 50
+		for i := 0; i < 2; i++ {
+			rev++
+			r := NewSessionRecord(dst.wsKey, dst.sid, rev, rec.ReducerSeq+uint64(50+i), 0, rec.SDKState, view)
+			r.BlockSpans = spans
+			r.BlockIDs = spansIDs(spans)
+			r.DirtyBlocks = map[uint64]struct{}{} // 非 nil = 已知全部未变
+			ct, err := store.CommitRecordTraced(ctx, r)
+			if err != nil {
+				t.Fatalf("提交失败: %v", err)
+			}
+			t.Logf("dirty 快路径#%d total=%s sidecar=%s(compact=%s) hashed=%.1fMB blocks=%d",
+				i, ct.Total.Round(time.Millisecond), ct.Sidecar.Round(time.Millisecond),
+				ct.Compact.Round(time.Millisecond), float64(ct.HashedBytes)/1e6, ct.BlocksWrote)
+		}
 	})
 
 	t.Run("commit-growing-block-amplification", func(t *testing.T) {
@@ -538,4 +559,17 @@ func TestCheckpointHeadOfLineBlocking(t *testing.T) {
 	t.Logf("邻座 LoadRecord 期间，小会话提交: 总耗时 %s，其中等锁 %s（阻塞者全程 %s）",
 		maxDur(totals), maxDur(lockWaits), time.Since(start).Round(time.Millisecond))
 	_ = spans
+}
+
+// spansIDs 从 block 字节里取 id（等价于 reducer 顺带产出的 IDs）。
+func spansIDs(spans [][]byte) []uint64 {
+	out := make([]uint64, len(spans))
+	for i, sp := range spans {
+		if id, ok := blockID(sp); ok {
+			if v, err := parseUintID(id); err == nil {
+				out[i] = v
+			}
+		}
+	}
+	return out
 }

@@ -144,6 +144,9 @@ type blockStore struct {
 	staleRecords   int64
 	// bytesWritten 是历史累计写入字节（含废弃），用于估算放大倍数。
 	bytesWritten int64
+	// hashedBytes 是累计被哈希校验的 payload 字节数（可观测性/测试用）。
+	// 提交路径的 sha256 成本直接由它体现：脏块快路径生效时它应当为 0。
+	hashedBytes int64
 	// liveBytes 是索引里当前有效记录占用的字节数（含每条记录的头部与摘要）。
 	//
 	// 为什么需要它：compact 判据原本只看「废弃条数/总条数」。真实会话里废弃的
@@ -645,6 +648,7 @@ func (bs *blockStore) holdsSame(id string, payload []byte) bool {
 	if !ok {
 		return false
 	}
+	bs.hashedBytes += int64(len(payload))
 	return ref.unchanged(payload)
 }
 
@@ -987,6 +991,15 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 // 安全性完全依赖调用方保证 spans 与 view 一致（同一次 Marshal 产出）；
 // 数量对不上就回退全量路径。
 func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, int, error) {
+	return refBlocksFromSpansDirty(bs, view, spans, nil, nil)
+}
+
+// refBlocksFromSpansDirty 是 refBlocksFromSpans 的脏块快路径版本。
+//
+//	dirty == nil → 逐块全量哈希（兼容旧调用方与周期性校验）
+//	ids   != nil 且与 spans 等长 → 直接用 id，不再逐个 block 解析 JSON
+//	                                （30,787 块实测省 200~400ms）
+func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty map[uint64]struct{}, ids []uint64) ([]byte, int, error) {
 	if len(spans) == 0 {
 		// 空 blocks：仍要写引用，避免下次被当作旧格式。
 		// 同时把索引里残留的块清掉 —— 否则 ref.Count=0 与 store.Len()>0 对不上，
@@ -1004,13 +1017,40 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 		return out, 0, nil
 	}
 
+	useIDs := len(ids) == len(spans)
 	wrote := 0
-	for _, elem := range spans {
-		id, ok := blockID(elem)
-		if !ok {
-			return nil, 0, fmt.Errorf("block without id")
+	for i, elem := range spans {
+		var id string
+		if useIDs {
+			id = strconv.FormatUint(ids[i], 10)
+		} else {
+			var ok bool
+			id, ok = blockID(elem)
+			if !ok {
+				return nil, 0, fmt.Errorf("block without id")
+			}
 		}
 		if isLiveBlock(elem) {
+			// running 块每个事件都可能变，一律重写（不哈希）。
+			if err := bs.put(id, elem); err != nil {
+				return nil, 0, err
+			}
+			wrote++
+			continue
+		}
+		if dirty != nil {
+			// 脏块快路径：调用方（reducer）已精确标出本轮内容变化的块，
+			// 非脏块**不再逐块 sha256**（30,755 块 / 185MB 实测是提交里
+			// sidecar 阶段的主体成本）。只做 O(1) 的存在性检查。
+			//
+			// 正确性前提：dirty 必须覆盖所有内容变化的块，否则磁盘会停在
+			// 旧版本（「卡片永不更新」那个 bug）。因此调用方要周期性传 nil
+			// 走全量校验（见 bridge 的 verifyEvery）。
+			if num, err := parseUintID(id); err == nil {
+				if _, known := dirty[num]; !known && bs.has(id) {
+					continue
+				}
+			}
 			if err := bs.put(id, elem); err != nil {
 				return nil, 0, err
 			}
@@ -1027,7 +1067,13 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 	}
 	refIDs2 := make([]string, 0, len(spans))
 	keep2 := make(map[string]struct{}, len(spans))
-	for _, e := range spans {
+	for i, e := range spans {
+		if useIDs {
+			id := strconv.FormatUint(ids[i], 10)
+			refIDs2 = append(refIDs2, id)
+			keep2[id] = struct{}{}
+			continue
+		}
 		if id, ok := blockID(e); ok {
 			refIDs2 = append(refIDs2, id)
 			keep2[id] = struct{}{}
