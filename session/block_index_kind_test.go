@@ -3,6 +3,8 @@ package session
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -109,5 +111,49 @@ func TestDecodeLegacyIndexWithoutKind(t *testing.T) {
 	}
 	if got[0].kind != blockKindUnknown {
 		t.Fatalf("旧索引的 kind 应为未知(0)，得 %d", got[0].kind)
+	}
+}
+
+// TestRebuildPersistsIndex 全量扫描后必须立刻落索引：否则「索引缺失/超前」的
+// 会话每次打开都要重扫整个 sidecar（真实 1.5GB 侧车每次 ~80ms）。
+func TestRebuildPersistsIndex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.blocks")
+	bs, err := openBlockStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 5; i++ {
+		if err := bs.put(fmt.Sprintf("%d", i), []byte(fmt.Sprintf(`{"kind":"assistant","id":%d}`, i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := bs.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// 制造「索引缺失」→ 下次打开走全量扫描
+	if err := os.Remove(blockIndexPath(path)); err != nil {
+		t.Fatal(err)
+	}
+	bs2, err := openBlockStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(blockIndexPath(path)); err != nil {
+		t.Fatalf("全量扫描后应立刻写出索引: %v", err)
+	}
+	if len(bs2.index) != 5 {
+		t.Fatalf("重建后应有 5 块，得 %d", len(bs2.index))
+	}
+	_ = bs2.Close()
+
+	// 再次打开：索引覆盖整个文件 → 不再扫描（index 仍完整）
+	bs3, err := openBlockStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bs3.Close()
+	if len(bs3.index) != 5 {
+		t.Fatalf("热路径应有 5 块，得 %d", len(bs3.index))
 	}
 }

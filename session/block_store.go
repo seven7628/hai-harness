@@ -480,7 +480,15 @@ func (bs *blockStore) rebuild() error {
 	}
 	bs.nBytes = pos
 	bs.recomputeLiveBytes()
-	return bs.startWriter()
+	if err := bs.startWriter(); err != nil {
+		return err
+	}
+	// 走到这里说明刚才**全量扫过一遍** sidecar（索引缺失 / 超前 / 损坏）。
+	// 必须立刻把索引落盘，否则下次打开还会重扫 —— 真实 1.5GB 侧车每次 ~80ms，
+	// 而且这条路会被「compact 之后索引暂时超前」反复触发。
+	// 失败不影响正确性（下次再扫一遍），所以只忽略。
+	_ = bs.persistIndex()
+	return nil
 }
 
 // recomputeLiveBytes 按索引重算有效字节（打开/重建/compact 后调用，O(块数)）。
