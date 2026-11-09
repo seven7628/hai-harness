@@ -1361,8 +1361,8 @@ const BASE = {
       "acceptance": "手机可进入 Hub；群/DM 列表带未读/运行态；群时间线按 seq 排序、分页加载更早；@ 选择器全屏、结构化 mentions；任务结果卡单列、任务板/Needs 可操作；停止自动对话、已读游标、断线重连后状态一致。",
       "tests": "go test ./desktop/bridge -run Mobile && node scripts/test-mobile-hub.mjs",
       "commit": "",
-      "status": "todo",
-      "note": ""
+      "status": "in_progress",
+      "note": "实现中 task-m3dep3xs"
     },
     {
       "id": "P4-03c",
@@ -2117,6 +2117,9 @@ const BASE = {
       "commit": "195667f",
       "review": "passed",
       "reviewNote": "PASS（task-upzkha5h）：协议/鉴权/隔离/背压/锁序均验；变异 6 项 RED。非阻塞项见 deferred。"
+    },
+    "P4-03b": {
+      "status": "in_progress"
     }
   },
   "reviewGate": {
