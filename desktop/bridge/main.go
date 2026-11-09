@@ -1756,6 +1756,12 @@ type sessionOpts struct {
 // createOpts 项目路径入口：先把工作区运行态取出来（必要时装配），再交给 createIn。
 // 保持既有签名不变——调用点很多（create / cron / 手机端），行为与拆分前完全一致。
 func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*bridgeSession, error) {
+	// 防御纵深（P4-04a N7）：Hub 智能体 home 不是项目工作区。若从这里装配项目
+	// runtime，会读 {home}/.go-code/hooks.json 等"项目层"并混进 m.workspaces。
+	// 明确拒绝，让调用方改走 hubDMSession / hubGroupSession（各自有用户级装配）。
+	if isHubHomePath(wsPath) {
+		return nil, fmt.Errorf("create session: %q 是 Hub 智能体 home，不是项目工作区（Hub 会话请走 hubDMSession/hubGroupSession）", wsPath)
+	}
 	return m.createIn(m.runtime(wsPath), id, effort, opts)
 }
 
@@ -1922,11 +1928,17 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	//（等于执行该目录里的命令）。项目会话仍走原路径，逐字不变。
 	// 注意必须**二选一**地调用：先调 hooksOption 再丢弃也会读一遍项目层配置，
 	// "不读"是安全边界的一部分，不只是"不用"。
-	var hookOpt session.Option
+	// 显式默认 nil 选项：两条分支都必须覆盖（NewSession 会对每个 option 解引用，
+	// 漏赋值不是"没钩子"而是 panic），同时保证默认关路径就是 WithHooks(nil)。
+	// warnHook 用闭包而不是直接取 bs.warnHook：构造期 bs 仍是 nil，方法值会把
+	// nil 接收者固化进去，运行期 hook 告警就永远到不了事件流（只能落 stderr）。
+	// 闭包捕获变量本身，首次 Run 前 bs 已赋值，告警才能经 bs.emit 到达 UI。
+	warnHook := func(name, message string) { bs.warnHook(name, message) }
+	hookOpt := session.WithHooks(nil)
 	if ws.kind == runtimeHubAgent {
-		hookOpt = m.hooksOptionUser(wsPath, id, bs.warnHook)
+		hookOpt = m.hooksOptionUser(wsPath, id, warnHook)
 	} else {
-		hookOpt = m.hooksOption(wsPath, id, bs.warnHook)
+		hookOpt = m.hooksOption(wsPath, id, warnHook)
 	}
 	s, err = session.NewSession(id, loop, store,
 		// 启用 HITL 审批并设置等待窗口：与提问窗口同值（30 分钟上限）。

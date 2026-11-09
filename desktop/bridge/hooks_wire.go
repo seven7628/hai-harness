@@ -50,6 +50,14 @@ func hooksStatePath() string {
 // （Runner.Dispatch → TrustStore.Check 读的是实例内存里的表），若每个会话各持一份，
 // 面板里的 hooks_trust 就要重建会话才生效 —— 与契约 §5.5「信任即刻生效」矛盾。
 func (m *manager) setupHooks(wsPath string, warn func(name, message string)) *hooks.Dispatcher {
+	// 防御纵深（P4-04a N7）：Hub 智能体 home 不是项目工作区。若有人从项目路径
+	// （createOpts / reloadWorkspaceHooks / 未来的新调用点）把它传进来，这里直接
+	// 返回 nil —— 绝不读 {home}/.go-code/hooks.json 或 .claude 项目配置。
+	// 正常 Hub 装配走 setupUserHooks（只读用户级），不经过本函数。
+	if isHubHomePath(wsPath) {
+		fmt.Fprintf(os.Stderr, "· hooks: 拒绝把 Hub 智能体 home 当项目工作区加载 hooks: %s\n", wsPath)
+		return nil
+	}
 	cfg, warnings := hooks.Load(hooks.LoadOptions{WorkspaceDir: wsPath})
 	return m.dispatcherFor(cfg, warnings, warn)
 }
@@ -130,8 +138,8 @@ func (m *manager) hooksOption(wsPath, id string, warn func(name, message string)
 //
 // cwd 传 home 而不是空串：hook 进程的 GOCODE_PROJECT_DIR/CLAUDE_PROJECT_DIR 与
 // payload.cwd 需要指向一个真实存在、且属于该智能体的目录（其读写边界）。
-func (m *manager) hooksOptionUser(home, id string, warn func(name, message string)) session.Option {
-	return session.WithHooks(hooksFor(m.setupUserHooks(warn), home, id))
+func (m *manager) hooksOptionUser(cwd, id string, warn func(name, message string)) session.Option {
+	return session.WithHooks(hooksFor(m.setupUserHooks(warn), cwd, id))
 }
 
 // reloadWorkspaceHooks 重读该工作区的 hooks 配置并推给它的**全部会话**（hooks_set 后调用）。
@@ -169,19 +177,72 @@ func (m *manager) reloadWorkspaceHooks(wsPath string) int {
 	return n
 }
 
-// reloadHooksAllWorkspaces 把 hooks 变更推给**全部**已有运行态的工作区（scope=user 的写盘）。
+// reloadHubRuntimeHooks 把用户级 hooks 变更推给 Hub 智能体的全部会话（P4-04a B1）。
+//
+// 为什么必须单独一条：Hub runtime 不在 m.workspaces（刻意分开登记），项目路径的
+// reloadWorkspaceHooks 永远看不到它们。而 Hub 会话只能在创建时拿一次 dispatcher，
+// 不热替换就会出现「hooks_set 之后旧 Stop 还继续跑 / 新配置永不生效」。
+//
+// 装配链必须与创建路径**逐字同源**：setupUserHooks（空 WorkspaceDir，只读用户级）。
+// 绝不能复用 reloadWorkspaceHooks —— 它走 setupHooks({hub home})，会把 Hub home 里的
+// .go-code/hooks.json / .claude 项目层读进来（安全边界，见 setupUserHooks 注释）。
+//
+// 调用方在 m.mu 内快照 runtimes、释放后再进入本函数；本函数只取 ws.mu（锁序
+// m.mu → ws.mu，绝不反向）。
+func (m *manager) reloadHubRuntimeHooks(runtimes []*workspaceRuntime) int {
+	total := 0
+	for _, ws := range runtimes {
+		if ws == nil {
+			continue
+		}
+		ws.mu.Lock()
+		sessions := make([]*bridgeSession, 0, len(ws.sessions))
+		for _, bs := range ws.sessions {
+			sessions = append(sessions, bs)
+		}
+		ws.mu.Unlock()
+
+		n := 0
+		for _, bs := range sessions {
+			if bs == nil || bs.s == nil {
+				continue // 会话正在创建/已关闭：创建路径自己会读到新配置
+			}
+			// 每会话一个派发器（与创建路径一致）：派发器的会话级去重表属于该会话。
+			bs.s.SetHooks(hooksFor(m.setupUserHooks(bs.warnHook), ws.path, bs.id))
+			n++
+		}
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "· hooks 配置变更已应用（Hub，下一次 Run 生效）: %s（%d 个会话）\n", ws.path, n)
+		}
+		total += n
+	}
+	return total
+}
+
+// reloadHooksAllWorkspaces 把 hooks 变更推给**全部**已有运行态的会话（scope=user 的写盘）。
 // 用户级配置对所有工作区生效，但只有"已打开"的才有会话可换；其余下次打开时自然读到新配置。
+//
+// 项目会话与 Hub 会话是两条装配链：前者 setupHooks（用户 + 项目层），后者 setupUserHooks
+// （仅用户级）。这里在**同一把 m.mu** 内快照两边的 runtimes（锁序 m.mu → ws.mu），
+// 释放后分别推送 —— 不把 Hub home 混进 m.workspaces，也不让项目路径去读 Hub home。
 func (m *manager) reloadHooksAllWorkspaces() int {
 	m.mu.Lock()
 	paths := make([]string, 0, len(m.workspaces))
 	for p := range m.workspaces {
 		paths = append(paths, p)
 	}
+	hubs := make([]*workspaceRuntime, 0, len(m.hubRuntimes))
+	for _, ws := range m.hubRuntimes {
+		if ws != nil {
+			hubs = append(hubs, ws)
+		}
+	}
 	m.mu.Unlock()
 	total := 0
 	for _, p := range paths {
 		total += m.reloadWorkspaceHooks(p)
 	}
+	total += m.reloadHubRuntimeHooks(hubs)
 	return total
 }
 

@@ -26,9 +26,16 @@ const (
 	EventUserPromptSubmit Event = "UserPromptSubmit"
 	EventPreToolUse       Event = "PreToolUse"
 	EventPostToolUse      Event = "PostToolUse"
-	EventStop             Event = "Stop"
-	EventPreCompact       Event = "PreCompact"    // 复用内核已有回调
-	EventPostToolBatch    Event = "PostToolBatch" // 复用内核已有回调
+	// EventStop 是 AgentEnd 的自然结束锚点（Hub 也不例外，P4-04a）。
+	// 语义边界（契约）：
+	//   - 只在**自然结束**门控点派发；exit 2 / decision=block 表示"继续跑一轮"
+	//     （内核侧 stopHookBlocks 上限 8 次），不是终态。
+	//   - 截断（finish_reason=length 且零可见内容）、运行错误、达到 MaxIterations
+	//     的结束路径**不派发 Stop**：它们照常发 AgentEnd，但没有"可续跑"的依据，
+	//     也不该让 hook 把失败/截断改写成一次额外续跑。
+	EventStop          Event = "Stop"
+	EventPreCompact    Event = "PreCompact"    // 复用内核已有回调
+	EventPostToolBatch Event = "PostToolBatch" // 复用内核已有回调
 )
 
 // MatcherField 说明该事件的 matcher 匹配什么（写进文档，避免"写了 matcher 不生效"的坑）。

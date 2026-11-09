@@ -114,6 +114,9 @@ func (d *Dispatcher) preCompact(cwd, sessionID string) events.PreCompactHook {
 	}
 }
 
+// stop 是自然结束门控的适配：只有"自然结束"才会进到这里（见 EventStop 的契约注释）——
+// exit 2 / decision=block → Continue=true，内核续跑一轮（上限 8）；截断/错误/轮数护栏
+// 直接发 AgentEnd，不经过本钩子。
 func (d *Dispatcher) stop(cwd, sessionID string) events.StopHook {
 	return func(ctx context.Context, sc events.StopContext) events.StopResult {
 		out := d.runner.Dispatch(ctx, EventStop, Payload{
