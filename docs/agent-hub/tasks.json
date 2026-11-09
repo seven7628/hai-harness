@@ -1087,8 +1087,10 @@
       "acceptance": "主题切换 system/ink/paper 并持久化（含 meta theme-color）；Hub 页面单列、Inspector 抽屉；390px 真实浏览器无横向溢出；刘海/底部安全区；点击目标 ≥44px（修 .hub-chip/.hub-sheet-actions）；prefers-reduced-motion 下禁用脉冲/闪烁；@ 键入即时唤起选择器；发送失败保留草稿；Hub 正文走 mdLite；滚动位置决定已读游标；清理死亡 hub_group_update 分支；hub_alert 去重；颜色仍只来自桌面 token。",
       "tests": "node desktop/app/scripts/test-mobile-hub.mjs && npm run test:mobile-hub && go test ./desktop/bridge -run MobileTokens && 390px 浏览器实测",
       "commit": "b8858f6",
-      "status": "review",
-      "note": "实现完成；主会话 191/390 实测/MobileTokens 绿；Review task-bb34tpm4 进行中"
+      "status": "done",
+      "note": "b8858f6；Review passed（task-bb34tpm4）。移动端 390 已实测；桌面 Hub 390 仍见 D-390-mobile。",
+      "review": "passed",
+      "reviewNote": "独立 Review task-bb34tpm4 PASS：主题 system/ink/paper 持久化且仅 system 跟系统；44px 全站（含 chip/sheet/mention）；reduced-motion 覆盖三处无限动画；IME-aware @ 键入/键盘/插入；失败保草稿+重试防双发；Hub mdLite 全 DOM/textContent 无 XSS；贴底+可见才推进已读；N1-N10 全闭合；390×844 真实 Chromium 四屏 scrollWidth=390、按钮全 ≥44。变异 44px/motion/@/草稿/已读/innerHTML 全 RED。"
     },
     {
       "id": "P4-03d",
@@ -1099,15 +1101,17 @@
         "P4-03c"
       ],
       "files": [
-        "desktop/bridge/mobile_*_test.go",
-        "desktop/bridge/mobile_web",
+        "desktop/bridge/mobile_p4_e2e_test.go",
+        "desktop/bridge/mobile_server.go",
+        "desktop/bridge/mobile_web/app.js",
+        "desktop/app/scripts/check-mobile-390.mjs",
         "docs/AGENT_HUB_TECH_PLAN.md"
       ],
-      "acceptance": "真实配对→Hub 列表→群聊@→派活→结果卡→停止全链路；手机与桌面同源状态；断网重连/息屏恢复；iOS Safari 与 390px 真机/仿真验收；Review 通过后才进 P4-01。",
-      "tests": "go test ./desktop/bridge -run Mobile && 前端移动端脚本 + 真机/仿真截图",
+      "acceptance": "真实配对→Hub 列表→群聊@→派活→结果卡→停止全链路（走 mobile HTTP/WS 与真实 Hub 状态机，不用静态字符串断言）；断网重连/息屏恢复后游标与任务卡一致；手动重试复用 client_msg_id 不产生重复消息；验证 390 移动布局（已有真实测量）；iOS Safari 若无法真机则明确 defer，不冒充通过；独立 Review PASS 后才进 P4-01。",
+      "tests": "go test ./desktop/bridge -run 'MobileP4|Mobile' -count=1 && node desktop/app/scripts/check-mobile-390.mjs",
       "commit": "",
-      "status": "todo",
-      "note": ""
+      "status": "in_progress",
+      "note": "实现中；真实配对/Hub 命令/WS/任务/停止全链路 + 重试幂等 + Review"
     },
     {
       "id": "P4-04",
@@ -1460,6 +1464,62 @@
       "title": "isChunkEvent 已被 isDroppableEvent 取代，仅旧测试引用",
       "depends_on": [],
       "return_when": "下一次清理 mobile_hub.go 时",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mobile-390-ci",
+      "source": "P4-03c review",
+      "title": "test:mobile-390 未进 CI（--require-browser 已备好）",
+      "depends_on": [
+        "CI 增加 desktop/app 前端测试作业"
+      ],
+      "return_when": "下一次 CI 流水线调整",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mobile-retry-cid",
+      "source": "P4-03c review",
+      "title": "手机发送失败手动重试换新 client_msg_id，响应丢失时会重复消息",
+      "depends_on": [
+        "P4-03d"
+      ],
+      "return_when": "P4-03d 端到端重试验收",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mobile-ios-safari",
+      "source": "P4-03c review",
+      "title": "iOS Safari 未真机实测（@ 输入内 focus 换焦依赖浏览器策略）",
+      "depends_on": [
+        "真机/TestFlight"
+      ],
+      "return_when": "P4-03d 或发布前真机验收",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mobile-a11y-roving",
+      "source": "P4-03c review",
+      "title": "主题 radio 组无 roving tabindex；主题入口仅列表/Hub 可达",
+      "depends_on": [
+        "产品无障碍口径"
+      ],
+      "return_when": "P4-03d 可访问性评审",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mobile-css-audit",
+      "source": "P4-03c review",
+      "title": "test:css 不覆盖 mobile_web/style.css，注释闭合仅靠审计粗解析",
+      "depends_on": [],
+      "return_when": "下一次改 CSS 测试",
+      "status": "deferred"
+    },
+    {
+      "id": "D-primary-active-scale",
+      "source": "P4-03c review",
+      "title": ".primary:active 0.99 缩放未被 reduced-motion 覆盖（1% 观感）",
+      "depends_on": [],
+      "return_when": "下一次 CSS 打磨",
       "status": "deferred"
     }
   ],
@@ -1851,9 +1911,13 @@
       "status": "todo"
     },
     "P4-03c": {
-      "status": "review",
+      "status": "done",
       "commit": "b8858f6",
-      "note": "实现完成；Review 进行中"
+      "review": "passed",
+      "reviewNote": "独立 Review task-bb34tpm4 PASS：主题 system/ink/paper 持久化且仅 system 跟系统；44px 全站（含 chip/sheet/mention）；reduced-motion 覆盖三处无限动画；IME-aware @ 键入/键盘/插入；失败保草稿+重试防双发；Hub mdLite 全 DOM/textContent 无 XSS；贴底+可见才推进已读；N1-N10 全闭合；390×844 真实 Chromium 四屏 scrollWidth=390、按钮全 ≥44。变异 44px/motion/@/草稿/已读/innerHTML 全 RED。"
+    },
+    "P4-03d": {
+      "status": "in_progress"
     }
   },
   "reviewGate": {
