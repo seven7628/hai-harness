@@ -1485,10 +1485,10 @@ const BASE = {
       ],
       "acceptance": "人类可搜所有群/DM 全量历史（含未加载）；owner-only 对人类可见并标记、agent 只占位；agent 不能跨群；默认排除 routing/round/approval；scope/cursor/上限；点击命中加载 seq 附近并高亮；桌面+手机共用 hub_search；搜索不阻塞 append；1 万条消息 p95 目标 <150ms。",
       "tests": "go test ./agenthub ./desktop/bridge -run 'Search|HubSearch' && npm run test:hub-search && npm run test:p4",
-      "commit": "6d88892",
-      "status": "in_progress",
-      "note": "复审 task-peum3kmm：隐私/存储/UI/gates 均过；B1 单会话 >400 命中后 has_more=false 且漏命中。修复中",
-      "review": "CHANGES_REQUESTED（B1 all-scope 深翻页截断；N1 同刻 ID 碰撞；N2 deleted 测试）"
+      "commit": "177c273",
+      "status": "review",
+      "note": "B1/N1/N2 已修（177c273）；主会话 delta 验收绿：1000/50 全量 20 页、群+DM 600、同刻不丢、软删隔离、race、mobile390 游标 round-trip、tsc/build；原复审 agent delta 终审中",
+      "review": ""
     },
     {
       "id": "P4-05",
@@ -2452,10 +2452,9 @@ const BASE = {
       "reviewNote": "独立 Final delta review task-k7hqg4dz PASS：B1 用户级 Stop 热替换（DM/群、disableAll 后旧 hook 归零）；B2 边界测试两种 project-loader mutation 均 RED；N5 公开契约注释 token-identical 校正；Hook|Hub|Mobile + agenthub/session + race 全绿。遗留 C1 窄窗口/C2 POSIX 测试/C3 路径规范化。"
     },
     "P4-04b": {
-      "status": "in_progress",
-      "commit": "6d88892",
-      "review": "CHANGES_REQUESTED",
-      "note": "B1 all-scope 深翻页修复中；N1/N2 同轮"
+      "status": "review",
+      "commit": "177c273",
+      "note": "逐会话续页游标；原复审 agent delta 终审中"
     },
     "P4-04b-2": {
       "status": "deferred",
