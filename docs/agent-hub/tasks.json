@@ -1134,21 +1134,40 @@
       "reviewNote": "独立 Review task-v2rzhzy8 PASS：真 mgr.dispatch + /api/cmd + scope=hub WS + 真 Hub FileStore；配对/@/delta/final/assign/结果卡/task/need/read/重连/stop 全行为断言；重试复用 cid；E2E race count=3 68.4s；238 项 + 390 Chromium PASS；文档白名单 21/21 对齐。非阻塞：dedup 不发事件谓词窄、absence 300ms 时间边界、JS 合并由 Node 覆盖、need 直接种入、interrupted 记账非真中断、测试内 WS history race 分支、/api/events 无负面鉴权测试、单槽跨群边缘重复、§7.4 悬空交付记录引用。iOS Safari 显式 defer。"
     },
     {
-      "id": "P4-04",
+      "id": "P4-04a",
       "phase": "P4",
-      "title": "外部 AgentEnd hook + FTS/归档",
+      "title": "Hub 外部 AgentEnd/Stop hook 接线（默认关闭，仅用户级）",
       "deps": [
         "P4-03d"
       ],
       "files": [
-        "hooks/event.go",
-        "agenthub/store.go"
+        "desktop/bridge/hooks_wire.go",
+        "desktop/bridge/hub_session.go",
+        "desktop/bridge/hooks_hub_test.go"
       ],
-      "acceptance": "可选 AgentEnd hook（默认关）；SQLite FTS 或倒排；日志归档；不影响核心回推。",
-      "tests": "go test ./hooks/... ./agenthub/...",
-      "commit": "feat(hub-p4-04): 外部 hook 与搜索归档",
-      "status": "todo",
-      "note": "依赖 P4-03d 与外部 hooks 协议拍板：AgentEnd hook + FTS/归档。 依赖 P4-03d 已满足，待产品/协议拍板。"
+      "acceptance": "Hub 智能体会话可装配用户级外部 hooks；EventStop 自然结束触发 AgentEnd hook；无配置/未信任/disableAll 时零行为变化；hook 异常 fail-open，不阻断核心结算/回推；项目级 hooks 不因 Hub 目录被误读。",
+      "tests": "go test ./desktop/bridge -run 'Hook|Hub'",
+      "commit": "",
+      "status": "in_progress",
+      "note": "默认关闭；仅用户级 hooks；不实现搜索/归档"
+    },
+    {
+      "id": "P4-04b",
+      "phase": "P4",
+      "title": "Hub 消息搜索与日志归档",
+      "deps": [
+        "P4-04a"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "desktop/bridge/hub_commands.go",
+        "desktop/app/src/hub/HubSurface.tsx"
+      ],
+      "acceptance": "群/DM 消息搜索（复用 Store.SearchMessages）；归档策略不影响 append/read 一致性；需产品/协议对搜索范围与保留期拍板。",
+      "tests": "go test ./agenthub ./desktop/bridge -run Search",
+      "commit": "",
+      "status": "deferred",
+      "note": "搜索范围/保留期待产品拍板；Store.SearchMessages 已有读路径"
     },
     {
       "id": "P4-05",
@@ -1158,7 +1177,7 @@
         "P4-01",
         "P4-02",
         "P4-03d",
-        "P4-04"
+        "P4-04a"
       ],
       "files": [
         "docs/AGENT_HUB_TECH_PLAN.md"
@@ -1167,7 +1186,7 @@
       "tests": "npm test && go test ./...",
       "commit": "chore(hub-p4-05): final review + retro",
       "status": "todo",
-      "note": "依赖 P4-01..04 全部收口；最终 Review + 复盘。"
+      "note": "依赖 P4-01/02/03d/04a 收口；P4-04b 搜索/归档为显式 defer，不阻塞最终 Review。"
     },
     {
       "id": "P3b-07a",
@@ -2063,6 +2082,12 @@
       "commit": "9436882",
       "review": "passed",
       "reviewNote": "独立 Review task-v2rzhzy8 PASS：真 mgr.dispatch + /api/cmd + scope=hub WS + 真 Hub FileStore；配对/@/delta/final/assign/结果卡/task/need/read/重连/stop 全行为断言；重试复用 cid；E2E race count=3 68.4s；238 项 + 390 Chromium PASS；文档白名单 21/21 对齐。非阻塞：dedup 不发事件谓词窄、absence 300ms 时间边界、JS 合并由 Node 覆盖、need 直接种入、interrupted 记账非真中断、测试内 WS history race 分支、/api/events 无负面鉴权测试、单槽跨群边缘重复、§7.4 悬空交付记录引用。iOS Safari 显式 defer。"
+    },
+    "P4-04a": {
+      "status": "in_progress"
+    },
+    "P4-04b": {
+      "status": "deferred"
     }
   },
   "reviewGate": {
