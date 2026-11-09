@@ -13,7 +13,7 @@
 | P4-03a | 手机 Hub 21 命令白名单、`scope=hub` WS、全事件单点扇出、delta 可丢/控制优先 | `195667f` | `task-upzkha5h` passed |
 | P4-03b | 手机 Hub 列表/时间线/全屏 @/任务卡/任务板/Needs/已读/停止 | `46de6ae` | `task-eq9fgqy7` passed |
 | P4-03c | system/ink/paper 主题、44px、reduced-motion、390px、IME @、失败保草稿、mdLite | `b8858f6` | `task-bb34tpm4` passed |
-| P4-03d | 真实配对/HTTP/WS/FileStore E2E、任务/停止/重试幂等、390 真机 | `9436882` | `task-v2rzhzy8` passed |
+| P4-03d | 真实配对/HTTP/WS/FileStore E2E、任务/停止/重试幂等、390 Chromium | `9436882` | `task-v2rzhzy8` passed |
 | P4-04a | Hub 用户级外部 Stop/AgentEnd hook、默认关、fail-open、仅用户级来源、热替换 | `fbbf251` + `40f5527` + `4f96a3a` + `df1b1cd` | `task-k7hqg4dz` PASS（4 轮 delta） |
 | P4-04b | 消息搜索 / 归档 | — | 显式 defer（待产品拍板） |
 | P4-05 | 全期终审、全量回归、性能/成本、已知限制、复盘、看板收尾 | 本文件 + 看板 | `task-43keebnw` 终审 → 修复 B1/B2 后 delta |
@@ -33,7 +33,7 @@ P4 的代码/测试没有“只有 review note、没有实现”的任务；P4-0
 | `go test ./desktop/bridge -run 'TestMobileP4E2E' -count=3 -race` | PASS | 21.1s |
 | `go test ./desktop/bridge -run 'TestHubHooks\|TestHubSessionStopHook' -count=2 -race` | PASS | 19.3s |
 | `test:hub` | PASS | 14 项 |
-| `test:hub-p3b` | PASS | 225 项 |
+| `test:hub-p3b` | PASS | 239 项 |
 | `test:hub-stream` | PASS | 22 项 |
 | `test:hub-context` | PASS | 191 项 |
 | `test:scroll-follow` | PASS | 32 项 |
@@ -103,7 +103,7 @@ Fixture：220 条消息 / 21 轮 / 3 条并行流式草稿 / 22,946 字符。
 
 A/B 历史证据（P4-01 reviewNote，非本次 rerun）：delta p50 **0.9 → 0.3ms**，键入 **1.2 → 0.6ms**。本次只把“after”数字作为当前基线；不回填未复测的 before 数字。
 
-**回滚开关**：`localStorage.setItem('hub.perfMemo', '0')` 后刷新，GroupView 不再复用已结算时间线的 memo，回退到每次渲染重算（语义不变，仅性能回退）；删除该键或设为 `1` 恢复。实现 commit `2b44d4e`；`bench:hub-long` 的 rollback 页实测 memo-on delta p50 0.2ms / memo-off 0.8ms，两次 thread HTML hash 均为 `37edea6`（证明开关绕过 memo 且不改变输出）。
+**回滚开关**：`localStorage.setItem('hub.perfMemo', '0')` 后刷新，GroupView 不再复用已结算时间线的 memo，回退到每次渲染重算（语义不变，仅性能回退）；删除该键或设为 `1` 恢复。实现 commit `2b44d4e`；`bench:hub-long` 的 rollback 页单次实测 memo-on delta p50 0.3ms / memo-off 0.9ms（另一次 0.2/0.8，run variance），两次 thread HTML hash 均为 `37edea6`（证明开关绕过 memo 且不改变输出）。
 
 ### 3.2 手机端
 
@@ -153,7 +153,7 @@ P4-05 的验收命令 `npm test && go test ./...` 在**干净 worktree** 不能�
 - P4-03d 用真实配对/HTTP/WS/FileStore 做 E2E，抓到了纯单测抓不到的集成问题。
 - 独立 delta review 真的拦下了问题：深链所有权/StrictMode、导出转义、缺失 seq、Hub hook 热替换、Stop 与截断时序/边界测试。
 - 安全边界有行为级测试：21 命令白名单、Hub/chat WS 隔离、token gate、仅用户级 hook loader、预信任项目命令仍不执行。
-- 390×844 真机测量 + production build benchmark 比静态 CSS/DOM 断言可靠。
+- 390×844 真实 Chromium 测量 + production build benchmark 比静态 CSS/DOM 断言可靠。
 - P4-01 回滚开关补上后，性能优化不再是“只能回滚 commit”。
 
 ### 要改的
