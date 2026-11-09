@@ -345,7 +345,7 @@ const BASE = {
     {
       "id": "P4",
       "name": "P4 · 打磨与扩展",
-      "goal": "流式、Context 面板、手机/IM、外部 hook、复盘",
+      "goal": "手机连接优先：Hub 移动页面、主题/交互、弱网与长会话打磨、其余扩展",
       "days": "按需"
     }
   ],
@@ -1303,7 +1303,9 @@ const BASE = {
       ],
       "acceptance": "弱网/长会话：delta 只丢草稿不丢 final；虚拟列表 200+ 消息不卡；reduced-motion；流式期间不抖动。",
       "tests": "npm run test:scroll-follow && npm run e2e:usage-stats",
-      "commit": "feat(hub-p4-01): 流式与性能打磨"
+      "commit": "feat(hub-p4-01): 流式与性能打磨",
+      "status": "deferred",
+      "note": "依赖 P4-03d：先完成手机连接/Hub 移动页面，再统一打磨弱网/流式/长会话。"
     },
     {
       "id": "P4-02",
@@ -1317,22 +1319,86 @@ const BASE = {
       ],
       "acceptance": "「它看到了什么」只读面板；hub:// 深链；群/任务导出 Markdown。",
       "tests": "npm run lint && npm run test:session-scope",
-      "commit": "feat(hub-p4-02): Context 面板与深链"
+      "commit": "feat(hub-p4-02): Context 面板与深链",
+      "status": "deferred",
+      "note": "依赖 P4-03d 与产品拍板：Context 面板/深链/导出。"
     },
     {
-      "id": "P4-03",
+      "id": "P4-03a",
       "phase": "P4",
-      "title": "手机/IM 接入（spike）",
+      "title": "手机连接 · Hub 协议开放与全局事件扇出",
       "deps": [
-        "P4-01"
+        "P3b-08"
       ],
       "files": [
         "desktop/bridge/mobile_server.go",
-        "im_bridge.go"
+        "desktop/bridge/mobile_hub.go",
+        "desktop/bridge/mobile_server_test.go",
+        "desktop/bridge/mobile_hub_test.go",
+        "desktop/bridge/command_registry.go"
       ],
-      "acceptance": "命令白名单评估；群消息只读/审批；不破坏桌面端；输出 spike 文档。",
-      "tests": "go test ./desktop/bridge/ -run Mobile",
-      "commit": "feat(hub-p4-03): 手机/IM 接入 spike"
+      "acceptance": "手机白名单只开放 Hub 只读 + 安全写（list/open/history/send/assign/stop/task/need），agent CRUD/删除仍拒绝；新增认证的 hub 事件订阅（hub_* 与聊天流隔离，不串会话）；hub_message_delta 可丢、hub_task_update/hub_message/hub_alert/hub_need 控制事件优先；弱网 resync 不重复不丢终态。",
+      "tests": "go test ./desktop/bridge -run 'Mobile.*Hub|MobileHub|Allowlist'",
+      "commit": "",
+      "status": "in_progress",
+      "note": ""
+    },
+    {
+      "id": "P4-03b",
+      "phase": "P4",
+      "title": "手机 Hub 页面：群/DM 列表、时间线、@ 全屏、任务卡/任务板/Needs",
+      "deps": [
+        "P4-03a"
+      ],
+      "files": [
+        "desktop/bridge/mobile_web/app.js",
+        "desktop/bridge/mobile_web/index.html",
+        "desktop/bridge/mobile_web/style.css",
+        "desktop/bridge/mobile_web/hub.js"
+      ],
+      "acceptance": "手机可进入 Hub；群/DM 列表带未读/运行态；群时间线按 seq 排序、分页加载更早；@ 选择器全屏、结构化 mentions；任务结果卡单列、任务板/Needs 可操作；停止自动对话、已读游标、断线重连后状态一致。",
+      "tests": "go test ./desktop/bridge -run Mobile && node scripts/test-mobile-hub.mjs",
+      "commit": "",
+      "status": "todo",
+      "note": ""
+    },
+    {
+      "id": "P4-03c",
+      "phase": "P4",
+      "title": "手机端主题与交互打磨：ink/paper/系统、单列、抽屉、390px 安全区",
+      "deps": [
+        "P4-03b"
+      ],
+      "files": [
+        "desktop/bridge/mobile_web/tokens.css",
+        "desktop/bridge/mobile_web/style.css",
+        "desktop/bridge/mobile_web/app.js",
+        "desktop/bridge/tokens_sync_test.go"
+      ],
+      "acceptance": "主题切换 system/ink/paper 并持久化；Hub 页面单列、Inspector 抽屉；390px 无横向溢出；刘海/底部安全区；点击目标 ≥44px；prefers-reduced-motion 下无脉冲/位移动画；颜色仍只来自桌面 token。",
+      "tests": "go test ./desktop/bridge -run MobileTokens && node scripts/test-mobile-theme.mjs",
+      "commit": "",
+      "status": "todo",
+      "note": "D-390-mobile 在本任务收口"
+    },
+    {
+      "id": "P4-03d",
+      "phase": "P4",
+      "title": "手机端端到端验收 + 独立 Review",
+      "deps": [
+        "P4-03b",
+        "P4-03c"
+      ],
+      "files": [
+        "desktop/bridge/mobile_*_test.go",
+        "desktop/bridge/mobile_web",
+        "docs/AGENT_HUB_TECH_PLAN.md"
+      ],
+      "acceptance": "真实配对→Hub 列表→群聊@→派活→结果卡→停止全链路；手机与桌面同源状态；断网重连/息屏恢复；iOS Safari 与 390px 真机/仿真验收；Review 通过后才进 P4-01。",
+      "tests": "go test ./desktop/bridge -run Mobile && 前端移动端脚本 + 真机/仿真截图",
+      "commit": "",
+      "status": "todo",
+      "note": ""
     },
     {
       "id": "P4-04",
@@ -1347,7 +1413,9 @@ const BASE = {
       ],
       "acceptance": "可选 AgentEnd hook（默认关）；SQLite FTS 或倒排；日志归档；不影响核心回推。",
       "tests": "go test ./hooks/... ./agenthub/...",
-      "commit": "feat(hub-p4-04): 外部 hook 与搜索归档"
+      "commit": "feat(hub-p4-04): 外部 hook 与搜索归档",
+      "status": "deferred",
+      "note": "依赖 P4-03d 与外部 hooks 协议拍板：AgentEnd hook + FTS/归档。"
     },
     {
       "id": "P4-05",
@@ -1362,7 +1430,9 @@ const BASE = {
       ],
       "acceptance": "全量回归；性能/成本数据；已知限制清单；复盘文档；看板收尾。",
       "tests": "npm test && go test ./...",
-      "commit": "chore(hub-p4-05): final review + retro"
+      "commit": "chore(hub-p4-05): final review + retro",
+      "status": "todo",
+      "note": "依赖 P4-01..04 全部收口；最终 Review + 复盘。"
     },
     {
       "id": "P3b-07a",
@@ -2001,6 +2071,9 @@ const BASE = {
       "commit": "7d3670d + 40392e2 + 1f29b8a",
       "review": "passed",
       "reviewNote": "最终独立验收（task-8v2bf75j）PASS。评测 8：人@A→A 生产 run 调 assign_task→B 完成→恰好 1 张结果卡→只唤醒 A，C 0 调用/0 唤醒，无二次派发；评测 9：C 下次被 @ 的真实快照含结果卡（failed 分支同样）；停止护栏：排队 @B 在 stop 后不启动。验收中修复：B1 结算跨会话回推异步化（per-task 串行 + HasTaskResult/MarkNotified），mutual A↔B 不再死锁；B2 每群派发闸门 + GroupWakeHeader.conversation_id，stop 先标记 stopped，fast-run 停止后不落 final（60/60）；B3 根 AgentStart dispatched→running + RunID，task_ack running 守卫可达；恢复只在终态写卡，僵尸 running→interrupted，空 RunID 用 recovery:<id> 转 delivered；P2：恢复 agent 目标补卡唤醒、task_ack 严格群校验、mark_read 夹紧、人类派活换代、batch_conflict 补卡、group_send 解锁后唤醒。变异 B1/B2/B3/恢复/停止全部 RED；go build/vet、agenthub/session、bridge 全量（仅 2 已知环境失败）、前端 206+tsc/vite 绿。非阻塞遗留：空日志 mark_read 仍可超尾、workspace live-run 恢复无专项测试、群提示词未含 task_ack/汇报、@你/生命周期占位卡/390/P4。"
+    },
+    "P4-03a": {
+      "status": "in_progress"
     }
   },
   "reviewGate": {
