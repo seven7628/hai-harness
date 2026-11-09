@@ -1155,9 +1155,9 @@
       "acceptance": "Hub 智能体会话可装配用户级外部 hooks；EventStop 自然结束触发 AgentEnd hook；无配置/未信任/disableAll 时零行为变化；hook 异常 fail-open，不阻断核心结算/回推；项目级 hooks 不因 Hub 目录被误读。",
       "tests": "go test ./desktop/bridge -run 'Hook|Hub'",
       "commit": "fbbf251",
-      "status": "review",
-      "note": "默认关/仅用户级/Stop AgentEnd/fail-open/群DM 已实现；主会话 build/vet + Hook|Hub|Mobile + agenthub/session 绿。复审重点：用户级 hooks_set 热替换未覆盖 hubRuntimes（H1）",
-      "review": ""
+      "status": "in_progress",
+      "note": "B1 阻塞：user hooks_set 不热替换 hubRuntimes，disableAll 后旧 Stop 仍执行（实证 2 次）；修复中。N1 Windows USERPROFILE 隔离/N2 回推断言/N3 超时 fail-open/N6 项目回归/N7 createOpts 守卫也纳入本轮",
+      "review": "CHANGES_REQUESTED task-k7hqg4dz"
     },
     {
       "id": "P4-04b",
@@ -2092,9 +2092,10 @@
       "reviewNote": "独立 Review task-v2rzhzy8 PASS：真 mgr.dispatch + /api/cmd + scope=hub WS + 真 Hub FileStore；配对/@/delta/final/assign/结果卡/task/need/read/重连/stop 全行为断言；重试复用 cid；E2E race count=3 68.4s；238 项 + 390 Chromium PASS；文档白名单 21/21 对齐。非阻塞：dedup 不发事件谓词窄、absence 300ms 时间边界、JS 合并由 Node 覆盖、need 直接种入、interrupted 记账非真中断、测试内 WS history race 分支、/api/events 无负面鉴权测试、单槽跨群边缘重复、§7.4 悬空交付记录引用。iOS Safari 显式 defer。"
     },
     "P4-04a": {
-      "status": "review",
+      "status": "in_progress",
       "commit": "fbbf251",
-      "note": "实现完成；复审中（H1 热替换覆盖待判定）"
+      "review": "CHANGES_REQUESTED",
+      "note": "B1 阻塞修复中：Hub 会话用户级 hooks 热替换；附 N1/N2/N3/N6/N7"
     },
     "P4-04b": {
       "status": "deferred"
