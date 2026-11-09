@@ -9,7 +9,7 @@ import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPin
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, runningBody, runWorkBody, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, runningBody, runWorkBody, segmentUsage, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -1407,7 +1407,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             // 邻居兜底按整轮看（段首记录的前一次运行在上一段里），见 selectTurns.recordAfterRun
             all: turn.items,
           })
-          const segUsage = turnUsage(turn, turnMetrics, r.runId ? new Set([r.runId]) : undefined)
+          const segUsage = segmentUsage(turn, r, turnMetrics)
           return { run: r, items: its, stats: statsOfItems(r.items), live: segLive, answer: segAnswer, usage: segUsage }
         })
       : []

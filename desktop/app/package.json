@@ -133,7 +133,8 @@
     "test:provider-catalog": "esbuild src/lib/providerCatalog-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/provider-catalog.test.cjs && node --test /tmp/provider-catalog.test.cjs",
     "test:billing-view": "esbuild src/lib/billingView-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/billing-view.test.cjs && node --test /tmp/billing-view.test.cjs",
     "test:agent-user-dedupe": "node scripts/test-agent-user-dedupe.mjs",
-    "test:compact-notice": "node lab/verify-compact-notice.mjs"
+    "test:compact-notice": "node lab/verify-compact-notice.mjs",
+    "test:turn-runs": "node lab/verify-turn-runs.mjs"
   },
   "build": {
     "appId": "ai.hai.desktop",

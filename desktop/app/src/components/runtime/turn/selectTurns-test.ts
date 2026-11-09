@@ -7,7 +7,7 @@
 //   3. 盒子存在 = workBody 非空（不是「有工具」）；没有盒子的轮（纯对话）正文回到时间线。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, runningBody, runWorkBody, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
+import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, runningBody, runWorkBody, segmentUsage, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
 import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 const user = (id: number, text = 'go'): MsgBlock => ({ kind: 'user', id, text })
@@ -293,6 +293,8 @@ const toolOf = (id: number, runId: string, status: 'running' | 'done' = 'done'):
   ({ kind: 'tool', id, toolId: 't' + id, name: 'bash', status, parentRunId: runId })
 const asstOf = (id: number, runId: string, text: string): MsgBlock =>
   ({ kind: 'assistant', id, text, streaming: false, thinking: '', runId })
+const asstThinking = (id: number, runId: string): MsgBlock =>
+  ({ kind: 'assistant', id, text: '', thinking: '想一想', streaming: false, runId })
 
 test('case 2：run1 交卷 → 任务回执 → run2 起新段（回执在段与段之间）', () => {
   // 用户口径：一个盒子 = 一次运行；交卷后到达的回执在**顶层时间线**上，下一个盒子在它后面。
@@ -350,6 +352,64 @@ test('缺 run id：结算边界在两端时不分段（没有「新到的块」�
   const turn = selectTurns(blocks)[0]
   assert.equal(turnRuns(turn, 0).length, 1)
   assert.equal(turnRuns(turn, turn.items.length).length, 1, '结算之后什么都没来 → 还是一段')
+})
+
+test('连续两次运行都没交付（没有正文/记录/产出）→ 合成一个盒子', () => {
+  // 用户 2026-11 截图：一次用户输入底下排了 4 个 Worked，其中三个 0 calls、没有正文 ——
+  // 那些不是三次交付，只是一次运行被回执/续跑切出来的 run 边界。没有交付的段不单开盒子。
+  const blocks: MsgBlock[] = [
+    user(1),
+    asstThinking(2, 'A'),   // 只有思考
+    toolOf(3, 'A'),
+    asstThinking(4, 'B'),   // 续跑：也只有思考 + 一次工具
+    toolOf(5, 'B'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  const runs = turnRuns(turn)
+  assert.equal(runs.length, 1, '没有交付 → 一个段 = 一个 Worked')
+  assert.deepEqual(runs[0].items.map((b) => b.id), [2, 3, 4, 5])
+})
+
+test('后一段才有交付：前一段并进同一个盒子，盒子仍然只有一个', () => {
+  const blocks: MsgBlock[] = [
+    user(1),
+    asstThinking(2, 'A'),
+    toolOf(3, 'A'),
+    toolOf(4, 'B'),
+    asstOf(5, 'B', '结论'),   // 最后一段的正文 = 整轮结论，在盒子外面
+  ]
+  const runs = turnRuns(selectTurns(blocks)[0])
+  assert.equal(runs.length, 1)
+})
+
+test('上一段交付了正文 → 仍然切段（它的结论要留在两个盒子之间的时间线上）', () => {
+  const blocks: MsgBlock[] = [user(1), asstOf(2, 'A', '第一段结论'), toolOf(3, 'A'), asstThinking(4, 'B'), toolOf(5, 'B')]
+  const runs = turnRuns(selectTurns(blocks)[0])
+  assert.equal(runs.length, 2)
+  assert.deepEqual(runs.map((r) => r.runId), ['A', 'B'])
+})
+
+test('上一段只有记录（回执）→ 仍然切段（记录要落在段与段之间）', () => {
+  const blocks: MsgBlock[] = [user(1), toolOf(2, 'A'), delivery(3, 'task-x', true), toolOf(4, 'B')]
+  const runs = turnRuns(selectTurns(blocks)[0])
+  assert.equal(runs.length, 2)
+  assert.deepEqual(runs.map((r) => r.items.map((b) => b.id)), [[2, 3], [4]])
+})
+
+test('一段自己的账只认这一段里的 run（缺 runId 不再回落到整轮）', () => {
+  // 用户 2026-11 截图：0 calls 的 Worked 底下写着整轮的 11.00M tokens。
+  const metrics = [
+    { model: 'm', input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, durMs: 0, runId: 'A' },
+    { model: 'm', input: 10_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, durMs: 0, runId: 'B' },
+  ] as never
+  const blocks: MsgBlock[] = [user(1), asstOf(2, 'A', '第一段结论'), toolOf(3, 'A'), asstThinking(4, 'B'), toolOf(5, 'B')]
+  const turn = selectTurns(blocks)[0]
+  const runs = turnRuns(turn)
+  assert.equal(segmentUsage(turn, runs[0], metrics).total, 1_000_000)
+  const noRun: MsgBlock[] = [user(1), assistant(2, '没有 run id 的段')]
+  const t2 = selectTurns(noRun)[0]
+  const r2 = turnRuns(t2)
+  assert.equal(segmentUsage(t2, r2[0], metrics).matched, false, '没有自己的 run 就没有账，不拿整轮充数')
 })
 
 test('有 run id 时结算边界不掺和（不许把一个边界切两次）', () => {

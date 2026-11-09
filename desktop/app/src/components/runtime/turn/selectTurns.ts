@@ -245,6 +245,18 @@ export function turnUsage(
   return u
 }
 
+/** 一段运行自己的账。只认**这一段里出现过**的 run：缺 runId 的段以前回落到「整轮」，
+    于是「0 calls 的一段」被写成整轮的 11.00M tokens（用户 2026-11 截图里两个 0 calls
+    的 Worked 底下的那一行）。现在没有自己 run 的一段就是没账。 */
+export function segmentUsage(turn: Turn, run: TurnRun, metrics: TurnMetric[] | undefined): TurnUsage {
+  const only = new Set<string>()
+  if (run.runId) only.add(run.runId)
+  run.items.forEach((b) => {
+    if (b.kind === 'assistant' && b.runId) only.add(b.runId)
+  })
+  return turnUsage(turn, metrics, only)
+}
+
 /** 轮尾 / 折叠行的时长：口径同全仓 fmtDuration（1h30m / 1m25s / 1s666ms / 880ms）。 */
 export function durText(ms: number): string {
   if (!ms) return ''
@@ -470,6 +482,13 @@ export interface TurnRun {
   items: MsgBlock[]
 }
 
+/* 一段运行值不值得**单开一个盒子**：它交付过东西 —— 正文结论、记录（回执/信号）、产出。
+   交付过的段必须切出来：它的结论与记录要落在两个盒子之间的时间线上（见 defersToTurnEnd）。
+   没交付的连续运行（只跑了几轮思考/工具就被回执切开的续跑）合成一个盒子 —— 否则
+   「一次用户输入」会变成一排只剩时长的 Worked：用户 2026-11 的截图里一轮 4 个盒子，
+   其中三个 0 calls、没有任何正文（全是 run 边界，不是三次交付）。 */
+const delivers = (b: MsgBlock): boolean => isRecord(b) || b.kind === 'artifacts' || isText(b)
+
 export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
   const runs: TurnRun[] = []
   let curId: string | undefined
@@ -484,8 +503,10 @@ export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
   }
   turn.items.forEach((b, i) => {
     const rid = owningRunId(b)
-    // 已经在一段里，又遇到**另一个**主 run 的块 → 上一段到此为止（这就是情况二的边界）
-    if (rid && curId && rid !== curId) seal(i)
+    // 已经在一段里，又遇到**另一个**主 run 的块 → 上一段到此为止（这就是情况二的边界）。
+    // 只有上一段**交付过**才真的切：两个连着的 run 之间没有正文、没有记录、没有产出时，
+    // 它们对读者是同一段活，切开会留下一个只有「Worked for 4s · 0 calls」的空盒子。
+    if (rid && curId && rid !== curId && turn.items.slice(start, i).some(delivers)) seal(i)
     if (rid) curId = rid
   })
   seal(turn.items.length)
