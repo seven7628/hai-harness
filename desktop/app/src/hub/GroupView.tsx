@@ -278,6 +278,16 @@ export default function GroupView({ group }: { group: HubGroup }) {
     highlightTimer.current = setTimeout(() => setHighlightSeq(null), 1800)
   }, [])
 
+  // 已结算时间线的元素树按依赖记忆（P4-01 实测，220 条消息 + 3 条流式草稿）：
+  // 草稿 delta / 输入框每敲一个字都会重渲染 GroupView，但 messages/rounds 没变。
+  // 不记忆时 223 条消息每次 delta 提交 p50≈1.0ms、键入处理 p50≈1.2ms；
+  // 记忆后 React 在这 223 个 slot 上按同一 element 引用跳过，降到 0.3 / 0.5ms。
+  // 依赖里不能漏 highlightSeq：B6 跳转高亮必须能重渲染对应消息。
+  const threadNodes = useMemo(
+    () => renderThread(items, agentNames, displayMode === 'grouped', roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq),
+    [items, agentNames, displayMode, roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq],
+  )
+
   async function editBudget(): Promise<void> {
     const current = group.policy?.daily_budget_usd ?? 0
     const raw = window.prompt('群日预算 USD（0 = 不限额）', String(current))
@@ -350,16 +360,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
                 <span className="hub-muted">{t('hub.groupHint')}</span>
               </div>
             ) : null}
-            {renderThread(
-              items,
-              agentNames,
-              displayMode === 'grouped',
-              roster,
-              openAgent,
-              triggerSeqBySenderMap,
-              jumpToSeq,
-              highlightSeq,
-            )}
+            {threadNodes}
             {groupDrafts.map((d) => (
               <StreamingMessage key={d.messageId} draft={d} name={agentNames[d.agentId] ?? d.agentId} />
             ))}

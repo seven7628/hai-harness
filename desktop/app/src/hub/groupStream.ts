@@ -90,6 +90,31 @@ export function dropDraftsForAgent(drafts: HubStreamDraft[], agentId: string): H
   return next.length === drafts.length ? drafts : next
 }
 
+/**
+ * 重连/重进群后的对账（P4-01）：断线期间可能只收到 delta、错过 final（甚至错过
+ * agent_end）。重拉历史后，历史里已有的 message_id 说明这条消息已经落地 ——
+ * 对应草稿必须删掉并记入 finalized，否则迟到的 delta 还能把它复活成幽灵气泡。
+ * 只处理「历史里真的有」的 id：历史缺页时不能误杀仍在流式的草稿。
+ */
+export function reconcileDraftsWithMessages(
+  drafts: HubStreamDraft[],
+  finalized: readonly string[],
+  messageIds: readonly string[],
+): { drafts: HubStreamDraft[]; finalized: string[] } {
+  if (drafts.length === 0 || messageIds.length === 0) return { drafts, finalized: [...finalized] }
+  const landed = new Set(messageIds)
+  const stale = drafts.filter((d) => landed.has(d.messageId)).map((d) => d.messageId)
+  if (stale.length === 0) return { drafts, finalized: [...finalized] }
+  let nextDrafts = drafts
+  let nextFinalized: readonly string[] = finalized
+  for (const id of stale) {
+    const r = finalizeHubDraft(nextDrafts, nextFinalized, id)
+    nextDrafts = r.drafts
+    nextFinalized = r.finalized
+  }
+  return { drafts: nextDrafts, finalized: [...nextFinalized] }
+}
+
 /** 从 session_id 解析群作用域：hub.<agent>.g.<group>。 */
 export function groupScopeFromSession(sessionId: string | undefined): { agentId: string; groupId: string } | null {
   if (!sessionId) return null

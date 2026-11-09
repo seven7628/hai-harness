@@ -6,7 +6,7 @@ import type {
   HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubRound, HubRunEntry, HubTask, HubTaskUpdate,
 } from './types'
 import { addHubAlert, alertFromEvent } from './alerts'
-import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, type HubMessageDelta, type HubStreamDraft } from './groupStream'
+import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, reconcileDraftsWithMessages, type HubMessageDelta, type HubStreamDraft } from './groupStream'
 import {
   isHubTargetActive, projectGroupMessage, projectGroupRead, projectTaskUpdate, shouldApplyDMInfo,
   shouldApplyGroupProgress,
@@ -556,6 +556,9 @@ export const useHubStore = create<HubState>((set, get) => ({
     const a = await hubCommand<{ activity?: HubGroupActivity[] }>('hub_group_activity', { group_id: groupID })
     if (get().activeGroupId !== groupID || groupSelectGen !== gen) return
     const history = h.ok ? (h.data?.messages ?? []) : []
+    const historyIds = history
+      .map((m) => m.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
     // 已读游标不能只看历史最大 seq：打开期间可能已有新消息/服务端游标更靠前。
     const latest = history.reduce(
       (max, m) => Math.max(max, m.seq),
@@ -566,12 +569,20 @@ export const useHubStore = create<HubState>((set, get) => ({
       // 不拿快照覆盖新消息；乐观/失败气泡（seq<=0）也保留。
       const pageSeqs = new Set(history.map((m) => m.seq))
       const extra = s.groupMessages.filter((m) => !pageSeqs.has(m.seq))
-      return {
+      const rec = reconcileDraftsWithMessages(s.groupDrafts, s.finalizedMessageIds, historyIds)
+      const patch: Partial<HubState> = {
         loading: false,
         groupMessages: [...history, ...extra].sort((x, y) => x.seq - y.seq),
         groupActivity: a.ok ? (a.data?.activity ?? []) : [],
         groups: s.groups.map((g) => (g.id === groupID ? (r.data?.group ?? g) : g)),
       }
+      // 断线期间错过的 final：历史里已有该 message_id → 丢掉残留草稿并记 finalized，
+      // 防止重连后迟到的 delta 把幽灵气泡复活（P4-01）。
+      if (rec.drafts !== s.groupDrafts) {
+        patch.groupDrafts = rec.drafts
+        patch.finalizedMessageIds = rec.finalized
+      }
+      return patch
     })
     // 打开群 = 已读（§7.5.7 群级共享游标）：历史加载完再推进，避免用旧 seq 覆盖新消息。
     // 只有 Hub 仍然打开才清未读/推进游标 —— 关闭后才落地的历史不能吃掉未读（B4）。

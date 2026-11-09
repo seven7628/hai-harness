@@ -62,6 +62,7 @@
     "probe:dom-fingerprint": "node lab/probe-dom-fingerprint.mjs",
     "probe:turn-cache": "node lab/probe-turn-cache.mjs",
     "bench:markdown": "node lab/bench-markdown.mjs",
+    "bench:hub-long": "node lab/bench-hub-long.mjs",
     "probe:md-split": "node lab/probe-md-split.mjs",
     "probe:reload-md": "node lab/probe-reload-md.mjs",
     "probe:md-profile": "node lab/probe-md-profile.mjs",
