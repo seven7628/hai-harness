@@ -1033,9 +1033,9 @@
       ],
       "acceptance": "Inspector 新增 Context 只读页：消息级触发上下文（trigger_seqs/senders/reason + 触发消息跳转）与智能体提示词分层（hub_agent_prompt_preview，只读）；hub://group/<id>?seq=42 与 hub://dm/<agent>?seq=... 可复制、解析并打开对应时间线；群/任务可导出 Markdown；无新写入能力，不影响现有 Hub 操作。",
       "tests": "npm run test:hub && npm run test:hub-p3b && npx tsc --noEmit && npm run build",
-      "commit": "",
-      "status": "in_progress",
-      "note": "实现中；Context 只读面板 + hub:// 深链 + Markdown 导出"
+      "commit": "f72e8ca",
+      "status": "review",
+      "note": "实现完成；主会话 159/225/tsc/Hub 绿；Review task-uydfsps6 进行中；OS 深链未真机"
     },
     {
       "id": "P4-03a",
@@ -2038,7 +2038,9 @@
       "reviewNote": "独立 Review task-czrhx4tx PASS：production Vite + 真 GroupView/store/handleEvent，220 条/3 草稿；A/B 同机复现 delta p50 0.9→0.3ms、键入 1.2→0.6ms，DOM 3081/hash 37edea6 不变；memo 依赖 8 项完整，移除 highlightSeq 3/3 失败；弱网 gaps/duplicate/final-before-delta/agent_end/reconcile 全 RED 变异；14/22/225/32 + tsc/build 绿。挂载 O(n) 与 reconnect hook 记 defer。"
     },
     "P4-02": {
-      "status": "in_progress"
+      "status": "review",
+      "commit": "f72e8ca",
+      "note": "实现完成；Review 进行中；OS 深链未验证"
     },
     "P4-04": {
       "status": "todo",
