@@ -1340,8 +1340,10 @@ const BASE = {
       "acceptance": "手机白名单只开放 Hub 只读 + 安全写（list/open/history/send/assign/stop/task/need），agent CRUD/删除仍拒绝；新增认证的 hub 事件订阅（hub_* 与聊天流隔离，不串会话）；hub_message_delta 可丢、hub_task_update/hub_message/hub_alert/hub_need 控制事件优先；弱网 resync 不重复不丢终态。",
       "tests": "go test ./desktop/bridge -run 'Mobile.*Hub|MobileHub|Allowlist'",
       "commit": "195667f",
-      "status": "review",
-      "note": "实现完成，主会话定向回归绿；独立 Review task-upzkha5h 进行中"
+      "status": "done",
+      "note": "195667f；Review passed（task-upzkha5h）",
+      "review": "passed",
+      "reviewNote": "独立 Review task-upzkha5h PASS：21 个 Hub 命令白名单，13 只读+8 安全写；hub scope 鉴权/隔离无泄漏；12 个 Hub 生产方均走 out.writeLine 单点；delta 可丢、控制事件优先；锁序 out.mu→tapMu→hub.mu 无环。变异 M1/M1b/M2/M3/M4/M6 全 RED。非阻塞：close 不 detach tap、writeLine 去 defer、tap 单点仅合成行测试、hub resync 需由客户端自处理、mobileServer.dispatchMu 注释过期、isChunkEvent 已被 isDroppableEvent 取代。"
     },
     {
       "id": "P4-03b",
@@ -1710,6 +1712,44 @@ const BASE = {
       "depends_on": [],
       "return_when": "补 workspace 目标重启恢复专项测试（live-run 判定与路径归一）",
       "note": "P3b-08 最终复审非阻塞。"
+    },
+    {
+      "id": "D-mobile-hub-resync",
+      "source": "P4-03a review",
+      "title": "Hub scope 的 resync 帧不能被客户端复用会话 openSession 分支",
+      "depends_on": [
+        "P4-03b"
+      ],
+      "return_when": "P4-03b 实现 hub 客户端重连时",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mobile-tap-detach",
+      "source": "P4-03a review",
+      "title": "mobileServer.close 未 setLineTap(nil)，将来热重启会把 hub 事件扇出到死 hub",
+      "depends_on": [
+        "手机服务热重启需求"
+      ],
+      "return_when": "支持手机服务热重启时",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mobile-hub-write-concurrency",
+      "source": "P4-03a review",
+      "title": "mobileServer.dispatchMu 与 manager.dispatchMu 不是同一把锁；Hub 写命令手机可达后需并发 sweep",
+      "depends_on": [
+        "P4-03d"
+      ],
+      "return_when": "P4-03d 端到端并发验收",
+      "status": "deferred"
+    },
+    {
+      "id": "D-mobile-chunk-cleanup",
+      "source": "P4-03a review",
+      "title": "isChunkEvent 已被 isDroppableEvent 取代，仅旧测试引用",
+      "depends_on": [],
+      "return_when": "下一次清理 mobile_hub.go 时",
+      "status": "deferred"
     }
   ],
   "progress": {
@@ -2073,9 +2113,10 @@ const BASE = {
       "reviewNote": "最终独立验收（task-8v2bf75j）PASS。评测 8：人@A→A 生产 run 调 assign_task→B 完成→恰好 1 张结果卡→只唤醒 A，C 0 调用/0 唤醒，无二次派发；评测 9：C 下次被 @ 的真实快照含结果卡（failed 分支同样）；停止护栏：排队 @B 在 stop 后不启动。验收中修复：B1 结算跨会话回推异步化（per-task 串行 + HasTaskResult/MarkNotified），mutual A↔B 不再死锁；B2 每群派发闸门 + GroupWakeHeader.conversation_id，stop 先标记 stopped，fast-run 停止后不落 final（60/60）；B3 根 AgentStart dispatched→running + RunID，task_ack running 守卫可达；恢复只在终态写卡，僵尸 running→interrupted，空 RunID 用 recovery:<id> 转 delivered；P2：恢复 agent 目标补卡唤醒、task_ack 严格群校验、mark_read 夹紧、人类派活换代、batch_conflict 补卡、group_send 解锁后唤醒。变异 B1/B2/B3/恢复/停止全部 RED；go build/vet、agenthub/session、bridge 全量（仅 2 已知环境失败）、前端 206+tsc/vite 绿。非阻塞遗留：空日志 mark_read 仍可超尾、workspace live-run 恢复无专项测试、群提示词未含 task_ack/汇报、@你/生命周期占位卡/390/P4。"
     },
     "P4-03a": {
-      "status": "review",
+      "status": "done",
       "commit": "195667f",
-      "note": "实现完成；Review 进行中"
+      "review": "passed",
+      "reviewNote": "PASS（task-upzkha5h）：协议/鉴权/隔离/背压/锁序均验；变异 6 项 RED。非阻塞项见 deferred。"
     }
   },
   "reviewGate": {
