@@ -7,7 +7,7 @@
 //   3. 盒子存在 = workBody 非空（不是「有工具」）；没有盒子的轮（纯对话）正文回到时间线。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, runningBody, runWorkBody, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
+import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, runningBody, runWorkBody, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
 import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 const user = (id: number, text = 'go'): MsgBlock => ({ kind: 'user', id, text })
@@ -427,4 +427,73 @@ test('statsOfItems：纯工具调用轮（无正文）的 durMs 也进 workedMs'
   const st = statsOfItems([assistantWith(1, '', { runId: 'r1', durMs: 5000 }), toolWith(2, 1000, 'r1')])
   assert.equal(st.workedMs, 6000)
   assert.ok(st.workedMs >= 5000, '工具轮的空正文块必须计入工作耗时')
+})
+
+// —— 交卷之后的手动 /compact：命令会新开一次 run，里面只有压缩 + compress_end 信号 ——
+//
+// 这次 run 没有正文、没有工具，唯一的内容就是压缩。按 run 切段时它独占一段，
+// 旧口径画出来是「Worked · 1 compress」（时长为空）：读起来像「又干了一段活」，
+// 而事实是「交卷之后做了一次上下文维护」。新口径 = 整段是**通知**，两个块都走时间线。
+const compress = (id: number, runId?: string, before = 457, after = 16): MsgBlock => ({
+  kind: 'compression', id, before, after, ...(runId ? { runId } : {}),
+})
+const compressSignal = (id: number): MsgBlock => ({
+  kind: 'signal', id, fact: { sig: 'compact', etype: 'compress_end', before: 457, after: 16 }, afterRun: false,
+})
+const postCompactBlocks: MsgBlock[] = [
+  user(1),
+  tool(2, 'done', 'run-1'),
+  assistant(3, '干完了', false, 'run-1'),
+  compress(4, 'run-c'),
+  compressSignal(5), // 记录没有 runId：跟着当前段走（与 turnRuns 同一规则）
+]
+
+test('交卷后 compact：整段是通知（压缩 + compress_end 信号），不画 Worked 盒子', () => {
+  const turn = selectTurns(postCompactBlocks)[0]
+  const runs = turnRuns(turn)
+  assert.equal(runs.length, 2, '压缩是一次独立运行 = 独立一段')
+  assert.deepEqual(runs.map((r) => r.runId), ['run-1', 'run-c'])
+  const notice = noticeBlocks(turn)
+  assert.deepEqual([...notice].map((b) => b.id), [4, 5], '压缩块与它那一行信号都属于通知')
+  // 段内没有盒子内容 → Narrative 的 boxAt 不会给这一段建盒子
+  assert.deepEqual(runWorkBody(runs[1].items, {
+    answer: turn.answer, answerAt: turn.items.indexOf(turn.answer as MsgBlock), offset: runs[1].start, notice,
+  }), [])
+  // 第一段不受影响（盒子仍是它自己的工具行）
+  assert.deepEqual(runWorkBody(runs[0].items, {
+    answer: turn.answer, answerAt: turn.items.indexOf(turn.answer as MsgBlock), offset: runs[0].start, notice,
+  }).map((b) => b.id), [2])
+})
+
+test('交卷后 compact：两个通知都在时间线上，且排在结算之前（不被当成 postRecord 延后）', () => {
+  const turn = selectTurns(postCompactBlocks)[0]
+  const outside = outsideOf(turn)
+  assert.equal(outside(postCompactBlocks[3], 3), true, '压缩块在盒子外面')
+  assert.equal(outside(postCompactBlocks[4], 4), true, 'compress_end 信号在盒子外面')
+  // 顺序：结论 → 压缩 → 信号（Narrative 的 plan 按 turn.items 顺序落）
+  assert.deepEqual(foldedBody(turn).map((b) => b.id), [3, 4, 5])
+})
+
+test('交卷后 compact：不进 workBody / hasWork，但数值口径与压缩前完全一致', () => {
+  const turn = selectTurns(postCompactBlocks)[0]
+  assert.deepEqual(workBody(turn).map((b) => b.id), [2], '压缩与信号都不在盒子里')
+  const before: MsgBlock[] = postCompactBlocks.slice(0, 3)
+  const a = statsOfItems(before)
+  const b = statsOfItems(turn.items)
+  // 压缩不贡献时长（workedMs 只数 assistant/tool 的 durMs；wallMs 只认 agentDurMs），
+  // 只多一条 compressions 计数 —— 所以把盒子拿掉不会改变 Worked / turn 的任何数值。
+  assert.equal(b.workedMs, a.workedMs)
+  assert.equal(b.wallMs, a.wallMs)
+  assert.equal(b.calls, a.calls)
+  assert.equal(b.compressions, 1)
+  const pure = selectTurns([user(1), compress(2, 'run-c'), compressSignal(3)])[0]
+  assert.equal(hasWork(pure, noticeBlocks(pure)), false, '纯压缩轮没有工作内容 → 不画盒子')
+})
+
+test('运行中的自动压缩仍属于过程：留在盒子里，不算通知', () => {
+  // 同一个 run 里有工具 / 正文 → 这次压缩是「跑的时候压的」，不是交卷后的维护。
+  const blocks: MsgBlock[] = [user(1), tool(2, 'done', 'run-1'), compress(3, 'run-1'), assistant(4, '结果', false, 'run-1')]
+  const turn = selectTurns(blocks)[0]
+  assert.equal(noticeBlocks(turn).size, 0)
+  assert.deepEqual(workBody(turn).map((b) => b.id), [2, 3], '过程里的压缩留在盒子里')
 })

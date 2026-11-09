@@ -9,7 +9,7 @@ import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPin
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, outsideOf, runningBody, runWorkBody, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, runningBody, runWorkBody, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -1289,8 +1289,12 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* 盒子装什么、要不要画盒子：同一个事实源（workBody 非空 = 有东西可装）。
        之前「有没有工具」决定画不画盒子 —— async_task-only / system-only 的轮次
        workBody 有行却没有盒子，那些行就整轮消失。 */
-    const workBlocks = workBody(turn)
-    const work = hasWork(turn)
+    // 「只做了压缩的那次运行」（AgentEnd 之后手动 /compact 会新开一次 run）整段是
+    // 通知，不是过程：压缩块与 compress_end 信号走时间线，不画 Working/Worked 盒子。
+    // 口径见 selectTurns.noticeBlocks；数值口径（workedMs / wallMs / usage）不受影响。
+    const notice = noticeBlocks(turn)
+    const workBlocks = workBody(turn, notice)
+    const work = hasWork(turn, notice)
     /* 运行中的盒子内容 = 工作行 + 正在写的那一段正文（turn.answer）。
        正文在交卷前属于「工作过程」（外面只剩记录），但它不在 workBody 里（那里排除了
        answer）—— 少了这一步，工具轮的流式正文会既不在盒子里也不在外面。
@@ -1304,7 +1308,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const workItems = concise
       ? (skin === 'runtime'
         ? groupRounds(workBlocks)
-        : groupBlocks(turn.items.filter((b) => isWork(b) || (b.kind === 'assistant' && b !== turn.answer) || b.kind === 'compression')))
+        : groupBlocks(turn.items.filter((b) => !notice.has(b) && (isWork(b) || (b.kind === 'assistant' && b !== turn.answer) || b.kind === 'compression'))))
       : []
     /* 简洁档的外面 = **时间线**：记录（signal / 产出 / 错误 / 分隔线 / 后台任务回执），
        加上结论正文。工作内容（思考、旁白、工具、子 agent、压缩）无论运行中还是跑完、
@@ -1313,7 +1317,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        时间线**（纯对话轮没有工作过程可装，把它关进不存在的盒子等于整轮不显示）。
        （旧写法 `open ? items : foldedBody` 会在展开时把整轮再画一遍到外面，
        实测盒子 3 行、外面 20 行 —— 用户在截图里看到的正是这个。） */
-    const bodySource = concise && live ? runningBody(turn, !work) : concise ? foldedBody(turn) : turn.items
+    const bodySource = concise && live ? runningBody(turn, !work, notice) : concise ? foldedBody(turn, notice) : turn.items
     /* 一轮可能跨**多次运行**（后台任务回推后续跑）：盒子按 run 切段（见 selectTurns.turnRuns）。
        声明提到这里，是因为下面的「结论 / 账 / 卡」闸门都要按**段**判，而不只按整轮判。 */
     // 记结算边界：只有在「真的静下来了」才记 —— 视图说这次运行已结算（AgentEnd），
@@ -1350,9 +1354,12 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* 交卷**之后**到达的记录（signal / 后台任务回执）不属于这一轮的结论，也不许排在账上面：
        用户 2026-11 的口径 —— 这类通知只有两个合法位置，要么在 Working 盒子里（运行中到达），
        要么在 tokens/artifacts **之后**（AgentEnd 之后到达）。 */
-    const outside = outsideOf(turn)
+    const outside = outsideOf(turn, notice)
     const postRecord = (b: MsgBlock, i: number) =>
-      (b.kind === 'signal' || b.kind === 'task_delivery') && outside(b, i)
+      // 通知段（见 noticeBlocks）里的记录不算「交卷后到达」：它们跟着自己的压缩走。
+      // 一旦被当成 postRecord 就会延后到轮尾账/产出卡之后 —— 读起来是「先结算、再压缩」，
+      // 与事实相反（用户 2026-11：两个压缩通知要被拆到结算两侧）。
+      !notice.has(b) && (b.kind === 'signal' || b.kind === 'task_delivery') && outside(b, i)
     /* 一轮可能跨多次运行（后台任务回推后续跑），每 run 一个产出块 —— 卡片只画一张，
        按 path 合并（见 mergeArtifacts）。store 里仍是每 run 一块。
        闸门是 `!live`（AgentEnd 已到）而**不是** ledgerShown：产出是 AgentEnd 的事实，
@@ -1396,6 +1403,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             answer: segAnswer,
             answerAt: segAnswerAt,
             offset: r.start,
+            notice,
             // 邻居兜底按整轮看（段首记录的前一次运行在上一段里），见 selectTurns.recordAfterRun
             all: turn.items,
           })
