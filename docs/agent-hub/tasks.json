@@ -1062,8 +1062,10 @@
       "acceptance": "手机可进入 Hub；群/DM 列表带未读/运行态；群时间线按 seq 排序、分页加载更早；@ 选择器全屏、结构化 mentions；任务结果卡单列、任务板/Needs 可操作；停止自动对话、已读游标、断线重连后状态一致。",
       "tests": "node desktop/app/scripts/test-mobile-hub.mjs && go test ./desktop/bridge -run 'Mobile'",
       "commit": "46de6ae",
-      "status": "review",
-      "note": "实现完成；主会话 Node104/Mobile 定向绿；Review task-eq9fgqy7 进行中"
+      "status": "done",
+      "note": "46de6ae；Review passed（task-eq9fgqy7）",
+      "review": "passed",
+      "reviewNote": "独立 Review task-eq9fgqy7 PASS：所有手机 hub_* payload 与 dispatchHub 真实 handler 对齐；双 WS 双向隔离；无 innerHTML/HTML 拼接；seq/id 去重、delta 门控、resync 不调 openSession；变异 mentions/eventRoute/resync/seq 全 RED。非阻塞 N1-N10 并入 P4-03c/后续：测试脚本未进 npm/CI、34–36px 点击目标、无 reduced-motion、@ 键入不弹选择器、发送失败丢草稿、Hub 正文未走 mdLite、滚动即已读、390px 仅静态检查等。"
     },
     {
       "id": "P4-03c",
@@ -1076,13 +1078,17 @@
         "desktop/bridge/mobile_web/tokens.css",
         "desktop/bridge/mobile_web/style.css",
         "desktop/bridge/mobile_web/app.js",
+        "desktop/bridge/mobile_web/index.html",
+        "desktop/bridge/mobile_web/hub_model.js",
+        "desktop/app/package.json",
+        "desktop/app/scripts/test-mobile-hub.mjs",
         "desktop/bridge/tokens_sync_test.go"
       ],
-      "acceptance": "主题切换 system/ink/paper 并持久化；Hub 页面单列、Inspector 抽屉；390px 无横向溢出；刘海/底部安全区；点击目标 ≥44px；prefers-reduced-motion 下无脉冲/位移动画；颜色仍只来自桌面 token。",
-      "tests": "go test ./desktop/bridge -run MobileTokens && node scripts/test-mobile-theme.mjs",
+      "acceptance": "主题切换 system/ink/paper 并持久化（含 meta theme-color）；Hub 页面单列、Inspector 抽屉；390px 真实浏览器无横向溢出；刘海/底部安全区；点击目标 ≥44px（修 .hub-chip/.hub-sheet-actions）；prefers-reduced-motion 下禁用脉冲/闪烁；@ 键入即时唤起选择器；发送失败保留草稿；Hub 正文走 mdLite；滚动位置决定已读游标；清理死亡 hub_group_update 分支；hub_alert 去重；颜色仍只来自桌面 token。",
+      "tests": "node desktop/app/scripts/test-mobile-hub.mjs && npm run test:mobile-hub && go test ./desktop/bridge -run MobileTokens && 390px 浏览器实测",
       "commit": "",
-      "status": "todo",
-      "note": "D-390-mobile 在本任务收口"
+      "status": "in_progress",
+      "note": "并入 P4-03b Review N1-N10；D-390-mobile 在本任务收口"
     },
     {
       "id": "P4-03d",
@@ -1424,7 +1430,9 @@
         "P4-03b"
       ],
       "return_when": "P4-03b 实现 hub 客户端重连时",
-      "status": "deferred"
+      "status": "resolved",
+      "resolved_by": "P4-03b 46de6ae（hubResync 只重拉快照）",
+      "resolved_at": "2026-11-08"
     },
     {
       "id": "D-mobile-tap-detach",
@@ -1822,9 +1830,10 @@
       "reviewNote": "PASS（task-upzkha5h）：协议/鉴权/隔离/背压/锁序均验；变异 6 项 RED。非阻塞项见 deferred。"
     },
     "P4-03b": {
-      "status": "review",
+      "status": "done",
       "commit": "46de6ae",
-      "note": "实现完成；Review 进行中"
+      "review": "passed",
+      "reviewNote": "独立 Review task-eq9fgqy7 PASS：所有手机 hub_* payload 与 dispatchHub 真实 handler 对齐；双 WS 双向隔离；无 innerHTML/HTML 拼接；seq/id 去重、delta 门控、resync 不调 openSession；变异 mentions/eventRoute/resync/seq 全 RED。非阻塞 N1-N10 并入 P4-03c/后续：测试脚本未进 npm/CI、34–36px 点击目标、无 reduced-motion、@ 键入不弹选择器、发送失败丢草稿、Hub 正文未走 mdLite、滚动即已读、390px 仅静态检查等。"
     },
     "P4-01": {
       "status": "todo",
@@ -1840,6 +1849,9 @@
     },
     "P4-05": {
       "status": "todo"
+    },
+    "P4-03c": {
+      "status": "in_progress"
     }
   },
   "reviewGate": {
