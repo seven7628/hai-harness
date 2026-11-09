@@ -1309,9 +1309,9 @@ const BASE = {
       "acceptance": "弱网/长会话：delta 只丢草稿不丢 final；200+ 消息/多轮流式不抖、不重复、不阻塞输入；用户翻历史时不被抢滚动；reduced-motion 生效；无虚拟列表也不出现整页 O(n²) 重排（或给出实测窗口化方案）；性能数据与回滚开关。",
       "tests": "npm run test:hub && npm run test:hub-stream && npm run test:hub-p3b && npm run test:scroll-follow",
       "commit": "8051305",
-      "status": "done",
-      "note": "8051305；Review passed（task-czrhx4tx）",
-      "review": "passed",
+      "status": "in_progress",
+      "note": "8051305 已完成；终审发现验收项「性能数据与回滚开关」只做了数据，缺运行时开关。补 localStorage hub.perfMemo=0 回滚链及测试",
+      "review": "CHANGES_REQUESTED（P4-05 终审 B1：缺回滚开关）",
       "reviewNote": "独立 Review task-czrhx4tx PASS：production Vite + 真 GroupView/store/handleEvent，220 条/3 草稿；A/B 同机复现 delta p50 0.9→0.3ms、键入 1.2→0.6ms，DOM 3081/hash 37edea6 不变；memo 依赖 8 项完整，移除 highlightSeq 3/3 失败；弱网 gaps/duplicate/final-before-delta/agent_end/reconcile 全 RED 变异；14/22/225/32 + tsc/build 绿。挂载 O(n) 与 reconnect hook 记 defer。"
     },
     {
@@ -2364,10 +2364,10 @@ const BASE = {
       "reviewNote": "独立 Review task-eq9fgqy7 PASS：所有手机 hub_* payload 与 dispatchHub 真实 handler 对齐；双 WS 双向隔离；无 innerHTML/HTML 拼接；seq/id 去重、delta 门控、resync 不调 openSession；变异 mentions/eventRoute/resync/seq 全 RED。非阻塞 N1-N10 并入 P4-03c/后续：测试脚本未进 npm/CI、34–36px 点击目标、无 reduced-motion、@ 键入不弹选择器、发送失败丢草稿、Hub 正文未走 mdLite、滚动即已读、390px 仅静态检查等。"
     },
     "P4-01": {
-      "status": "done",
+      "status": "in_progress",
       "commit": "8051305",
-      "review": "passed",
-      "reviewNote": "独立 Review task-czrhx4tx PASS：production Vite + 真 GroupView/store/handleEvent，220 条/3 草稿；A/B 同机复现 delta p50 0.9→0.3ms、键入 1.2→0.6ms，DOM 3081/hash 37edea6 不变；memo 依赖 8 项完整，移除 highlightSeq 3/3 失败；弱网 gaps/duplicate/final-before-delta/agent_end/reconcile 全 RED 变异；14/22/225/32 + tsc/build 绿。挂载 O(n) 与 reconnect hook 记 defer。"
+      "review": "CHANGES_REQUESTED",
+      "note": "P4-05 终审 B1：补运行时回滚开关（默认开）"
     },
     "P4-02": {
       "status": "done",
