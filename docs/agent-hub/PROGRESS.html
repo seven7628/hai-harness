@@ -1339,9 +1339,9 @@ const BASE = {
       ],
       "acceptance": "手机白名单只开放 Hub 只读 + 安全写（list/open/history/send/assign/stop/task/need），agent CRUD/删除仍拒绝；新增认证的 hub 事件订阅（hub_* 与聊天流隔离，不串会话）；hub_message_delta 可丢、hub_task_update/hub_message/hub_alert/hub_need 控制事件优先；弱网 resync 不重复不丢终态。",
       "tests": "go test ./desktop/bridge -run 'Mobile.*Hub|MobileHub|Allowlist'",
-      "commit": "",
-      "status": "in_progress",
-      "note": ""
+      "commit": "195667f",
+      "status": "review",
+      "note": "实现完成，主会话定向回归绿；独立 Review task-upzkha5h 进行中"
     },
     {
       "id": "P4-03b",
@@ -2073,7 +2073,9 @@ const BASE = {
       "reviewNote": "最终独立验收（task-8v2bf75j）PASS。评测 8：人@A→A 生产 run 调 assign_task→B 完成→恰好 1 张结果卡→只唤醒 A，C 0 调用/0 唤醒，无二次派发；评测 9：C 下次被 @ 的真实快照含结果卡（failed 分支同样）；停止护栏：排队 @B 在 stop 后不启动。验收中修复：B1 结算跨会话回推异步化（per-task 串行 + HasTaskResult/MarkNotified），mutual A↔B 不再死锁；B2 每群派发闸门 + GroupWakeHeader.conversation_id，stop 先标记 stopped，fast-run 停止后不落 final（60/60）；B3 根 AgentStart dispatched→running + RunID，task_ack running 守卫可达；恢复只在终态写卡，僵尸 running→interrupted，空 RunID 用 recovery:<id> 转 delivered；P2：恢复 agent 目标补卡唤醒、task_ack 严格群校验、mark_read 夹紧、人类派活换代、batch_conflict 补卡、group_send 解锁后唤醒。变异 B1/B2/B3/恢复/停止全部 RED；go build/vet、agenthub/session、bridge 全量（仅 2 已知环境失败）、前端 206+tsc/vite 绿。非阻塞遗留：空日志 mark_read 仍可超尾、workspace live-run 恢复无专项测试、群提示词未含 task_ack/汇报、@你/生命周期占位卡/390/P4。"
     },
     "P4-03a": {
-      "status": "in_progress"
+      "status": "review",
+      "commit": "195667f",
+      "note": "实现完成；Review 进行中"
     }
   },
   "reviewGate": {
