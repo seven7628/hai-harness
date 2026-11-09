@@ -183,6 +183,17 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('embed-ai-action', listener)
     return () => ipcRenderer.removeListener('embed-ai-action', listener)
   },
+  // hub:// 深链（P4-02）：主进程把 open-url / second-instance argv 归一成字符串转发；
+  // 渲染层只拿到「hub://…」，不接触其他 argv（安全边界与 onEvent 一致）。
+  onHubDeepLink: (cb: (url: string) => void) => {
+    const listener = (_e: unknown, url: string) => {
+      if (typeof url === 'string' && url) cb(url)
+    }
+    ipcRenderer.on('hub:deep-link', listener)
+    return () => ipcRenderer.removeListener('hub:deep-link', listener)
+  },
+  // 冷启动/刷新期间排队的深链：renderer 先订阅 onHubDeepLink，再 take 一次。
+  hubTakeDeepLinks: (): Promise<string[]> => ipcRenderer.invoke('hub:take-deep-links'),
   // M6：多页面视图池（真开/切换/关闭真实 target）
   // srcPath = 预览的**源文件路径**（office 转换产物每次换临时 html_path，只有源文件认得出
   // 「同一个文件」）→ 命中已有标签时主进程刷新它而不是新建（见 embed.ts openEmbedTarget）。
@@ -269,6 +280,9 @@ declare global {
       embedNavigateTarget: (id: string, url: string) => Promise<{ ok: boolean; error?: string }>
       onEvent: (cb: (payload: string | { lines: string[] }) => void) => () => void
       onExit: (cb: (info: BridgeExitInfo) => void) => () => void
+      // hub:// 深链（P4-02）：返回取消订阅。
+      onHubDeepLink: (cb: (url: string) => void) => () => void
+      hubTakeDeepLinks: () => Promise<string[]>
     }
   }
 }

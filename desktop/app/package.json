@@ -136,6 +136,7 @@
     "test:hub-stream": "node scripts/test-hub-stream.mjs",
     "test:hub-alerts": "node scripts/test-hub-alerts.mjs",
     "test:hub-p3b": "node scripts/test-hub-p3b.mjs",
+    "test:hub-context": "node scripts/test-hub-context.mjs",
     "test:mobile-hub": "node scripts/test-mobile-hub.mjs",
     "test:mobile-390": "node scripts/check-mobile-390.mjs",
     "test:provider-catalog": "esbuild src/lib/providerCatalog-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/provider-catalog.test.cjs && node --test /tmp/provider-catalog.test.cjs",
@@ -148,6 +149,12 @@
     "directories": {
       "output": "release"
     },
+    "protocols": [
+      {
+        "name": "Agent Hub Deep Link",
+        "schemes": ["hub"]
+      }
+    ],
     "files": [
       "dist/**",
       "dist-electron/**",

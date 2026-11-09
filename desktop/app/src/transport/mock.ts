@@ -1643,6 +1643,13 @@ class MockTransport implements Transport {
   onExit(_cb: (info: BridgeExitInfo) => void): () => void {
     return () => undefined
   }
+  // hub:// 深链：浏览器 mock 没有 OS 协议处理器；返回空退订（Web 端行为与未注册一致）。
+  onHubDeepLink(): () => void {
+    return () => undefined
+  }
+  takeHubDeepLinks(): Promise<string[]> {
+    return Promise.resolve([])
+  }
 
   send(cmd: BridgeCommand): Promise<{ ok: boolean; error?: string }> {
     const ws = cmd.payload?.workspace

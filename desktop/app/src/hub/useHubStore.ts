@@ -3,7 +3,8 @@ import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type {
   HubAgent, HubAlert, HubConversation, HubDMInfo, HubGroup, HubHistoryPage, HubMessage,
-  HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubRound, HubRunEntry, HubTask, HubTaskUpdate,
+  HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubPromptLayer, HubPromptPreviewData, HubRound,
+  HubRunEntry, HubTask, HubTaskUpdate,
 } from './types'
 import { addHubAlert, alertFromEvent } from './alerts'
 import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, reconcileDraftsWithMessages, type HubMessageDelta, type HubStreamDraft } from './groupStream'
@@ -11,6 +12,12 @@ import {
   isHubTargetActive, projectGroupMessage, projectGroupRead, projectTaskUpdate, shouldApplyDMInfo,
   shouldApplyGroupProgress,
 } from './groupProjection'
+import { copyText } from '../lib/clipboard'
+import {
+  formatHubDeepLink, hubDeepLinkKey, HUB_DEEP_LINK_INVALID_ERROR, parseHubDeepLink,
+  type HubDeepLinkKind,
+} from './deeplink'
+import type { HubJumpRequest } from './seqJump'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -23,6 +30,17 @@ import {
 //   - 只认根 run 的 chunk/agent_start/agent_end（B5：子 agent 会串进流式、提前熄运行点）
 //   - 发送失败保留原文和失败气泡（B2：之前气泡与输入框一起清空）
 //   - live 在根 run 结束时清空、重进会话时重置（B3：半截气泡残留）
+
+/** Context 面板的提示词预览状态：loaded=true 时同 agent 可复用（只读缓存）。 */
+export interface HubPromptState {
+  agentId: string
+  layers: HubPromptLayer[]
+  note: string
+  totalBytes: number
+  loading: boolean
+  loaded: boolean
+  error: string | null
+}
 
 interface HubState {
   open: boolean
@@ -49,8 +67,8 @@ interface HubState {
   drafts: Record<string, string>
   /** 上一次发送失败的原文（供重试；失败气泡同时保留在列表里）。 */
   failedText: string | null
-  /** 任务板/Needs you/会话信息抽屉。 */
-  inspector: 'tasks' | 'needs' | 'session' | null
+  /** 任务板/Needs you/会话信息/上下文（只读）抽屉。 */
+  inspector: 'tasks' | 'needs' | 'session' | 'context' | null
   tasks: HubTask[]
   tasksLoading: boolean
   needs: HubNeed[]
@@ -86,6 +104,10 @@ interface HubState {
   groupAssignNote: string | null
   /** hub_conversation_stop 进行中。 */
   groupConvStopping: boolean
+  /** 待执行的跳转/高亮（深链、Context 面板的触发 seq）；消费方按 targetId 认领。 */
+  jump: HubJumpRequest | null
+  /** 当前选中智能体的系统提示词预览（只读；hub_agent_prompt_preview）。 */
+  prompt: HubPromptState | null
 
   openHub(): void
   closeHub(): void
@@ -99,8 +121,18 @@ interface HubState {
   clearError(): void
   clearNotice(): void
   dismissAlert(id: string): void
-  setInspector(panel: 'tasks' | 'needs' | 'session' | null): void
+  setInspector(panel: 'tasks' | 'needs' | 'session' | 'context' | null): void
   setView(view: 'chat' | 'run'): void
+  /** 请求当前视图跳到 seq（Context 面板/触发 chip 用；由目标视图自己消费）。 */
+  requestJump(seq: number): void
+  /** 消费方只清掉自己接的那一次（nonce 防旧请求被后来的跳转误清）。 */
+  clearJump(nonce: number): void
+  /** hub:// 深链：打开 Hub → 选中目标 → 历史就绪后定位 seq。重复调用共享同一次加载。 */
+  openDeepLink(raw: string): Promise<boolean>
+  /** 复制深链（Clipboard API + 主进程兜底，见 lib/clipboard）；结果写 notice/error。 */
+  copyDeepLink(kind: HubDeepLinkKind, id: string, seq?: number): Promise<boolean>
+  /** 只读拉取系统提示词分层（同 agent 已加载则复用；force 强制刷新）。 */
+  loadPromptPreview(agentID: string, force?: boolean): Promise<void>
   loadGroups(): Promise<void>
   selectGroup(groupID: string): Promise<void>
   loadGroupActivity(groupID?: string): Promise<void>
@@ -126,6 +158,10 @@ const groupReadRequested = new Map<string, number>()
 const groupInfoUpdatedAt = new Map<string, number>()
 // 每个智能体 DM 投影最近一次本地更新时间：refresh 响应用它挡刷新期间到达的消息（P3b-08）。
 const dmInfoUpdatedAt = new Map<string, number>()
+// 跳转请求代际：消费方按 nonce 只清自己接的那一次（切视图时的旧请求不能误清新请求）。
+let jumpNonce = 0
+// hub:// 深链在飞表：OS 重传/连点同一链接时共享同一次选择与加载（P4-02）。
+const deepLinkInflight = new Map<string, Promise<boolean>>()
 
 /** 本地投影变了：记一笔时间，供 loadGroups 的竞态守卫判断谁更新。 */
 function touchGroupInfo(gid: string): void {
@@ -205,6 +241,8 @@ export const useHubStore = create<HubState>((set, get) => ({
   groupAssigning: false,
   groupAssignNote: null,
   groupConvStopping: false,
+  jump: null,
+  prompt: null,
 
   openHub() {
     set({ open: true })
@@ -279,6 +317,8 @@ export const useHubStore = create<HubState>((set, get) => ({
       actions: [],
       error: null,
       loading: true,
+      // 手动切换目标：上一次深链/触发 chip 留下的跳转不再适用于新会话。
+      jump: null,
       // 离开期间的事件没人接：重开会话先假设空闲，运行中的话下面的 chunk 会把它点亮。
       running: { ...s.running, [agentID]: false },
     }))
@@ -313,7 +353,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 
   clearSelection() {
-    set({ activeId: null, profile: null, sid: null, messages: [], hasMore: false, live: '', rootRunId: null, failedText: null })
+    set({ activeId: null, profile: null, sid: null, messages: [], hasMore: false, live: '', rootRunId: null, failedText: null, jump: null })
   },
 
   async loadOlder() {
@@ -416,6 +456,141 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   setView(view) {
     set({ view })
+  },
+
+  requestJump(seq) {
+    const target = get().activeGroupId || get().activeId
+    const n = Math.trunc(Number(seq))
+    if (!target || !Number.isSafeInteger(n) || n <= 0) return
+    set({ jump: { seq: n, targetId: target, nonce: ++jumpNonce } })
+  },
+
+  clearJump(nonce) {
+    const current = get().jump
+    // 只清自己接的那一次：旧消费方（例如切群前的 GroupView effect）不能误清新请求。
+    if (current && current.nonce === nonce) set({ jump: null })
+  },
+
+  async openDeepLink(raw) {
+    const link = parseHubDeepLink(raw)
+    if (!link) {
+      set({ error: HUB_DEEP_LINK_INVALID_ERROR })
+      return false
+    }
+    const key = hubDeepLinkKey(link)
+    const running = deepLinkInflight.get(key)
+    // 同一深链重复触发（OS 重传 / 连点 / 主进程两次转发）共享同一次加载：
+    // 再跑一遍 select 会把已经滚好的位置重置回底部。
+    if (running) return running
+    const run = (async (): Promise<boolean> => {
+      // 深链是新动作：上一次的提示/错误不该继续挂着（避免「已复制」盖住这次的结果）。
+      set({ open: true, error: null, notice: null })
+      const hasTarget = () =>
+        link.kind === 'group'
+          ? get().groups.some((g) => g.id === link.id)
+          : get().agents.some((a) => a.id === link.id)
+      // 冷启动时列表还没拉过；已经拉过就不再为了深链再打一次全量列表。
+      if (!hasTarget()) {
+        if (link.kind === 'group') await get().loadGroups()
+        else await get().refresh()
+      }
+      if (!hasTarget()) {
+        set({ error: `深链目标不存在：${link.kind}/${link.id}` })
+        return false
+      }
+      void get().loadTasks()
+      void get().loadNeeds()
+      if (link.kind === 'group') {
+        await get().selectGroup(link.id)
+        if (get().activeGroupId !== link.id) return false
+      } else {
+        await get().select(link.id)
+        if (get().activeId !== link.id) return false
+      }
+      if (link.seq <= 0) return true
+      // DM 有分页：最多回翻 4 页找目标 seq（复用 loadOlder，不另写一条加载路径）。
+      if (link.kind === 'dm') {
+        for (let i = 0; i < 4; i++) {
+          if (get().activeId !== link.id) return false
+          if (get().messages.some((m) => Number(m.seq) === link.seq)) break
+          if (!get().hasMore) break
+          await get().loadOlder()
+        }
+      }
+      const loaded = (link.kind === 'group' ? get().groupMessages : get().messages).some(
+        (m) => Number(m.seq) === link.seq,
+      )
+      if (loaded) {
+        // 只登记请求，滚动/高亮由目标视图消费（seqJumpPlan 校验目标 + 已加载）。
+        set({ jump: { seq: link.seq, targetId: link.id, nonce: ++jumpNonce }, notice: null })
+      } else {
+        // 群历史没有分页命令：目标不在最近 50 条里时如实说明，别假装跳了。
+        set({ notice: `消息 #${link.seq} 不在已加载的历史里（会话已打开）` })
+      }
+      return true
+    })()
+    deepLinkInflight.set(key, run)
+    try {
+      return await run
+    } finally {
+      deepLinkInflight.delete(key)
+    }
+  },
+
+  async copyDeepLink(kind, id, seq) {
+    const link = formatHubDeepLink(kind, id, seq ?? 0)
+    if (!link) {
+      set({ error: '复制链接失败：缺少目标' })
+      return false
+    }
+    const ok = await copyText(link)
+    set(ok ? { notice: `已复制 ${link}`, error: null } : { error: `复制失败，请手动复制：${link}` })
+    return ok
+  },
+
+  async loadPromptPreview(agentID, force) {
+    const id = String(agentID ?? '').trim()
+    if (!id) return
+    const current = get().prompt
+    if (!force && current && current.agentId === id) {
+      if (current.loading) return // 同 agent 在飞：复用这一次
+      if (current.loaded && !current.error) return // 只读缓存：切回来不重复请求
+    }
+    const keep = current?.agentId === id ? current.layers : []
+    set({
+      prompt: {
+        agentId: id,
+        layers: force ? [] : keep,
+        note: '',
+        totalBytes: 0,
+        loading: true,
+        loaded: false,
+        error: null,
+      },
+    })
+    const r = await hubCommand<HubPromptPreviewData>('hub_agent_prompt_preview', { agent_id: id })
+    // 竞态：切到别的智能体后，旧响应不能写进新面板。
+    if (get().prompt?.agentId !== id) return
+    if (!r.ok) {
+      set({
+        prompt: {
+          agentId: id, layers: [], note: '', totalBytes: 0,
+          loading: false, loaded: false, error: r.error || '读取提示词失败',
+        },
+      })
+      return
+    }
+    set({
+      prompt: {
+        agentId: id,
+        layers: r.data?.layers ?? [],
+        note: r.data?.note ?? '',
+        totalBytes: Number(r.data?.total_bytes ?? 0) || 0,
+        loading: false,
+        loaded: true,
+        error: null,
+      },
+    })
   },
 
   async loadTasks() {
@@ -529,6 +704,8 @@ export const useHubStore = create<HubState>((set, get) => ({
       groupReadSeq: { ...s.groupReadSeq },
       messages: [], live: '', rootRunId: null,
       error: null, loading: true,
+      // 手动切群/新深链都会走到这里：旧的跳转请求作废（深链在 selectGroup 之后再登记）。
+      jump: null,
     }))
     const r = await hubCommand<{
       group?: HubGroup
@@ -611,6 +788,7 @@ export const useHubStore = create<HubState>((set, get) => ({
     set({
       activeGroupId: null, groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false,
       groupDrafts: [], groupAssigning: false, groupAssignNote: null, groupConvStopping: false,
+      jump: null,
     })
   },
 

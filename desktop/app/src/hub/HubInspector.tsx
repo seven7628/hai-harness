@@ -1,12 +1,16 @@
 import { useMemo, useState } from 'react'
 import { useHubStore } from './useHubStore'
 import NeedsYouPanel from './NeedsYouPanel'
+import ContextPanel from './ContextPanel'
 import type { HubTask } from './types'
+import { taskMarkdown } from './exportMarkdown'
+import { downloadText, safeFilename, timestampSlug } from './download'
 
-// Hub Inspector：任务板 / Needs you / 会话信息（第 5 个 tab 的落点）。
+// Hub Inspector：任务板 / Needs you / 会话信息 / Context（只读）。
 //
 // 任务板读账本（hub_task_list/get），取消/重试走 Queue 语义；会话信息只展示
-// 真实运行态与账本用量，导出是纯前端（JSON 下载），清空走 hub_clear。
+// 真实运行态与账本用量，导出是纯前端（JSON / 任务 Markdown），清空走 hub_clear。
+// Context 页签只读（P4-02）：消息触发上下文 + 系统提示词分层，不提供任何写入。
 export default function HubInspector() {
   const panel = useHubStore((s) => s.inspector)
   const setPanel = useHubStore((s) => s.setInspector)
@@ -17,11 +21,13 @@ export default function HubInspector() {
         <button role="tab" aria-selected={panel === 'tasks'} className={panel === 'tasks' ? 'on' : ''} onClick={() => setPanel('tasks')}>任务</button>
         <button role="tab" aria-selected={panel === 'needs'} className={panel === 'needs' ? 'on' : ''} onClick={() => setPanel('needs')}>Needs you</button>
         <button role="tab" aria-selected={panel === 'session'} className={panel === 'session' ? 'on' : ''} onClick={() => setPanel('session')}>会话</button>
+        <button role="tab" aria-selected={panel === 'context'} className={panel === 'context' ? 'on' : ''} onClick={() => setPanel('context')}>Context</button>
         <button className="hub-link hub-inspector-close" onClick={() => setPanel(null)} aria-label="关闭">×</button>
       </nav>
       {panel === 'tasks' ? <TaskBoard /> : null}
       {panel === 'needs' ? <NeedsYouPanel /> : null}
       {panel === 'session' ? <SessionPanel /> : null}
+      {panel === 'context' ? <ContextPanel /> : null}
     </aside>
   )
 }
@@ -90,6 +96,7 @@ function TaskRow({
   onRetry: () => void
 }) {
   const alerts = useHubStore((s) => s.alerts)
+  const agents = useHubStore((s) => s.agents)
   const taskAlerts = alerts.filter((a) => a.task_id === task.id)
   const terminal = ['completed', 'failed', 'interrupted', 'delivered', 'canceled', 'blocked_budget', 'declined'].includes(task.status ?? '')
   const usage = task.result?.usage
@@ -134,6 +141,18 @@ function TaskRow({
           <footer className="hub-need-actions">
             {!terminal ? <button className="hub-btn" onClick={onCancel}>取消</button> : null}
             {terminal ? <button className="hub-btn" onClick={onRetry}>重试</button> : null}
+            <button
+              className="hub-btn"
+              onClick={() => {
+                const names: Record<string, string> = {}
+                for (const a of agents) names[a.id] = a.name || a.id
+                const md = taskMarkdown(task, { agentNames: names, exportedAt: new Date().toISOString() })
+                downloadText(`hub-task-${safeFilename(task.id, 'task')}-${timestampSlug()}.md`, md)
+              }}
+              title="导出这个任务的 Markdown（含结果/产物/用量）"
+            >
+              导出 MD
+            </button>
           </footer>
         </div>
       ) : null}
@@ -163,13 +182,12 @@ function SessionPanel() {
   ), [tasks])
   function exportJSON(): void {
     const payload = { agent: agent?.name, agent_id: agentId, session_id: sid, exported_at: new Date().toISOString(), messages }
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `hub-${agentId ?? 'dm'}-${Date.now()}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    // 与 Markdown 导出共用同一个下载入口（Blob + 临时 a download）。
+    downloadText(
+      `hub-${safeFilename(agentId ?? 'dm', 'dm')}-${timestampSlug()}.json`,
+      JSON.stringify(payload, null, 2),
+      'application/json',
+    )
   }
   return (
     <section className="hub-panel" aria-label="会话信息">

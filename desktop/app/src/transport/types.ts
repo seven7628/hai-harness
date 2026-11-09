@@ -519,6 +519,13 @@ export interface Transport {
   send(cmd: BridgeCommand): Promise<{ ok: boolean; error?: string }>
   onEvent(cb: (line: string) => void): () => void
   onExit(cb: (info: BridgeExitInfo) => void): () => void
+  /**
+   * hub:// 深链（P4-02）：主进程收到 open-url / second-instance argv 后转发。
+   * 返回取消订阅函数。浏览器 mock 是空实现（没有 OS 协议处理器）。
+   */
+  onHubDeepLink(cb: (url: string) => void): () => void
+  /** 取冷启动/刷新期间排队的深链；取完主进程转为直发（先订阅再 take 才不漏）。 */
+  takeHubDeepLinks(): Promise<string[]>
 }
 
 // ─── IM 集成（外部 IM Gateway，docs/IM_INTEGRATION.md）───

@@ -18,6 +18,7 @@ import HubSurface from './hub/HubSurface'
 import './hub/hub.css'
 import { attachHubEvents, useHubStore } from './hub/useHubStore'
 import { useAppStore } from './store/useAppStore'
+import { getTransport } from './transport'
 import { applyTheme } from './lib/theme'
 import { applyNarrativeDensity, applyNarrativeSkin } from './lib/narrativeSkin'
 import { applyAppearance, useAppearance } from './lib/appearance'
@@ -142,6 +143,18 @@ export default function App() {
   const openHub = useHubStore((s) => s.openHub)
   // App 级订阅：离开 Hub 页期间产生的结算/告警也要收进告警中心（P2.5-05 复审 B3）。
   useEffect(() => attachHubEvents(), [])
+  // hub:// 深链（P4-02）：主进程 open-url / second-instance 转发过来 → 打开 Hub 并定位。
+  // 订阅放在 App 级：Hub 关着时点链接同样要能进去（mock/browser 下是空实现）。
+  useEffect(() => {
+    const transport = getTransport()
+    const handle = (link: string): void => void useHubStore.getState().openDeepLink(link)
+    // 先订阅再取队列：两步之间到达的链接由主进程排队，不会漏（见 electron/main.ts）。
+    const off = transport.onHubDeepLink(handle)
+    void transport.takeHubDeepLinks().then((links) => {
+      for (const link of links) handle(link)
+    })
+    return off
+  }, [])
   return (
     <div className={`app-root ${inSkills ? 'in-skills' : ''}${inCron ? 'in-cron' : ''}${leaving ? ' leaving' : ''}`}>
       {mainReady && (

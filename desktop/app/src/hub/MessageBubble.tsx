@@ -8,6 +8,7 @@ import TurnContextLine from './TurnContextLine'
 import { ALL_MENTION_ID, linkifyMentions, type MentionAgent } from './mentions'
 import { parseTaskResult } from './taskCard'
 import { useHubStore } from './useHubStore'
+import { highlightClass, seqDataAttr } from './seqJump'
 
 // 群消息气泡：handoff 卡、审批占位、路由回执都只在人类 UI 出现；
 // routing_receipt 的落盘文本是 targets=ag_x，需要按名册还原成可读动作行。
@@ -62,8 +63,9 @@ export function GroupBubble({
     [msg.text, roster],
   )
 
-  const seq = msg.seq > 0 ? String(msg.seq) : undefined
-  const hl = highlightSeq && msg.seq === highlightSeq ? ' hub-msg-highlight' : ''
+  // data-seq / 高亮 class 与 DM、深链共用同一口径（seqJump.ts），别再各写一份。
+  const seq = seqDataAttr(msg.seq)
+  const hl = highlightClass(msg.seq, highlightSeq)
   const context = (
     <TurnContextLine
       msg={msg}

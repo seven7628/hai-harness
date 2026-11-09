@@ -20,9 +20,67 @@ import { readImageAsDataUrl } from './read-image'
 import { copyEntry, createDir, createFile, duplicateEntry, guardTrash, importEntry, moveEntry, renameEntry } from './fs-ops'
 // 输入框历史本地文件（~/.go-code/input-history.json；与 renderer 的 localStorage 镜像配合）
 import { ipcInputHistoryForget, ipcInputHistoryGet, ipcInputHistorySet, inputHistoryFilePath } from './input-history'
+// hub:// 深链（P4-02）：argv 提取是纯逻辑，单独文件才能被 Node 测试
+import { HUB_PROTOCOL, extractHubDeepLinkArg } from './deeplink'
 
 let mainWindow: BrowserWindow | null = null
 let bridge: ChildProcessWithoutNullStreams | null = null
+
+// —— hub:// 深链（P4-02）——
+// 三个入口：macOS open-url、Win/Linux second-instance argv、首实例启动 argv（冷启动点链接）。
+// 冷启动/刷新时 renderer 还没订阅 IPC：先排队，等它挂载后主动 take（丢一条链接比抢跑更糟）。
+// 协议注册只在打包态做（见 registerHubProtocol）：dev 下注册会把系统里的 hub:// 指向开发目录。
+let rendererReady = false
+let pendingHubDeepLinks: string[] = []
+
+function forwardHubDeepLink(raw: string): void {
+  const link = String(raw ?? '').trim()
+  if (!link) return
+  if (!rendererReady || !mainWindow || mainWindow.webContents.isDestroyed()) {
+    // 冷启动/刷新期间 renderer 还没订阅：先排队（上限 20，点很多次也只留最近几条）。
+    pendingHubDeepLinks.push(link)
+    if (pendingHubDeepLinks.length > 20) pendingHubDeepLinks.shift()
+    return
+  }
+  mainWindow.webContents.send('hub:deep-link', link)
+}
+
+// renderer 挂载后**主动来取**队列：订阅在前、take 在后，之间到达的链接不会漏。
+// take 之后 rendererReady=true，后续深链直接 send。页面刷新（did-start-loading）会复位。
+ipcMain.handle('hub:take-deep-links', () => {
+  const queued = pendingHubDeepLinks
+  pendingHubDeepLinks = []
+  rendererReady = true
+  return queued
+})
+
+/**
+ * 注册 hub:// 协议处理器（仅打包态）。
+ * macOS 的 scheme 来自 Info.plist 的 CFBundleURLTypes（electron-builder 生成），运行时不需要
+ * setAsDefaultProtocolClient；Win/Linux 才需要写注册表/desktop 文件。
+ * 注册失败不影响启动：链接仍可经 second-instance argv 进入。
+ */
+function registerHubProtocol(): void {
+  if (!app.isPackaged || process.defaultApp) return
+  try {
+    if (process.platform === 'darwin') return
+    app.setAsDefaultProtocolClient(HUB_PROTOCOL)
+  } catch {
+    /* 注册失败：留给 argv 通路，不阻塞启动 */
+  }
+}
+
+// macOS：URL scheme 在 ready 之前就可能到达，必须尽早注册事件监听。
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  forwardHubDeepLink(url)
+})
+
+// Win/Linux 冷启动：深链就在自己的 argv 里（没有 second-instance 可等）。
+{
+  const initial = extractHubDeepLinkArg(process.argv)
+  if (initial) pendingHubDeepLinks.push(initial)
+}
 
 // —— 启动打点（TEMP-STARTUP：定位黑屏/启动慢；**已停用**，不再写 electron-startup.log）——
 function startupMark(_phase: string): void {
@@ -654,6 +712,7 @@ function devUrl(): string | undefined {
 
 function createWindow(): void {
   startupMark('createWindow')
+  rendererReady = false
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -1801,7 +1860,10 @@ const MULTI_INSTANCE = Boolean(MULTI_DATA_DIR)
 if (!MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
   app.quit()
 } else if (!MULTI_INSTANCE) {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    // Win/Linux：第二次启动是「点链接」的常态路径，深链在 argv 里。
+    const link = extractHubDeepLinkArg(argv)
+    if (link) forwardHubDeepLink(link)
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
@@ -1811,6 +1873,7 @@ if (!MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
 
 app.whenReady().then(() => {
   startupMark('whenReady')
+  registerHubProtocol()
   registerIpc()
   createWindow()
   // 屏幕录制 SCK 预热（2026-09 Computer Use 截图排障）：macOS 14+ 截屏走

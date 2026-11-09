@@ -11,6 +11,9 @@ import MentionPicker from './MentionPicker'
 import TypingIndicator from './TypingIndicator'
 import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './groupThread'
 import { triggerSeqBySender } from './groupProjection'
+import { scrollToSeq, seqJumpPlan } from './seqJump'
+import { groupTimelineMarkdown } from './exportMarkdown'
+import { downloadText, safeFilename, timestampSlug } from './download'
 import {
   ALL_MENTION_ID,
   activeMentionQuery,
@@ -58,6 +61,11 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const stopConversation = useHubStore((s) => s.stopGroupConversation)
   const select = useHubStore((s) => s.select)
   const agents = useHubStore((s) => s.agents)
+  const jump = useHubStore((s) => s.jump)
+  const clearJump = useHubStore((s) => s.clearJump)
+  const copyDeepLink = useHubStore((s) => s.copyDeepLink)
+  const inspector = useHubStore((s) => s.inspector)
+  const setInspector = useHubStore((s) => s.setInspector)
   const [draft, setDraft] = useState('')
   const [composerMode, setComposerMode] = useState<'chat' | 'assign'>('chat')
   const [view, setView] = useState<'chat' | 'run'>('chat')
@@ -150,6 +158,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
   // 贴底跟随：只有用户本来就在底部时才自动滚动（翻历史/跳转后不抢视图）。
   useEffect(() => {
     if (view !== 'chat' || !stickBottom.current) return
+    // 有待执行的深链/触发跳转时先别贴底：跳转自己会滚动，否则一帧内先到底再回中。
+    if (jump && jump.targetId === group.id) return
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [
@@ -161,6 +171,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
     typingNames.length,
     activeGroupTasks,
     view,
+    jump,
+    group.id,
   ])
 
   // 打开/切群：新时间线永远从底部开始（B1）。
@@ -265,18 +277,24 @@ export default function GroupView({ group }: { group: HubGroup }) {
   }
 
   // 上下文 chip：滚到触发消息并短暂高亮；不打开 DM（B6）。
-  const jumpToSeq = useCallback((seq: number) => {
-    if (!(seq > 0)) return
+  // 滚动落点走 seqJump.scrollToSeq（与 DM/深链同一条实现），返回是否真的找到元素。
+  const jumpToSeq = useCallback((seq: number): boolean => {
+    if (!(seq > 0)) return false
     stickBottom.current = false
+    if (!scrollToSeq(listRef.current, seq)) return false
     setHighlightSeq(seq)
-    const el = listRef.current?.querySelector(`[data-seq="${seq}"]`)
-    if (el && typeof (el as HTMLElement).scrollIntoView === 'function') {
-      const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-      ;(el as HTMLElement).scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
-    }
     if (highlightTimer.current) clearTimeout(highlightTimer.current)
     highlightTimer.current = setTimeout(() => setHighlightSeq(null), 1800)
+    return true
   }, [])
+
+  // 深链 / Context 面板的触发 seq（P4-02）：目标群且消息已加载才由本视图执行。
+  useEffect(() => {
+    const plan = seqJumpPlan(jump, { targetId: group.id, messages })
+    if (!plan) return
+    if (!jumpToSeq(plan.seq)) return
+    clearJump(plan.nonce)
+  }, [jump, group.id, messages, jumpToSeq, clearJump])
 
   // 已结算时间线的元素树按依赖记忆（P4-01 实测，220 条消息 + 3 条流式草稿）：
   // 草稿 delta / 输入框每敲一个字都会重渲染 GroupView，但 messages/rounds 没变。
@@ -287,6 +305,16 @@ export default function GroupView({ group }: { group: HubGroup }) {
     () => renderThread(items, agentNames, displayMode === 'grouped', roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq),
     [items, agentNames, displayMode, roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq],
   )
+
+  function copyLink(): void {
+    const seq = messages.reduce((max, m) => (Number(m.seq) > max ? Number(m.seq) : max), 0)
+    void copyDeepLink('group', group.id, seq)
+  }
+
+  function exportMarkdown(): void {
+    const md = groupTimelineMarkdown({ group, agents, messages, tasks, exportedAt: new Date().toISOString() })
+    downloadText(`hub-group-${safeFilename(group.name || group.id, 'group')}-${timestampSlug()}.md`, md)
+  }
 
   async function editBudget(): Promise<void> {
     const current = group.policy?.daily_budget_usd ?? 0
@@ -327,6 +355,15 @@ export default function GroupView({ group }: { group: HubGroup }) {
             <button role="tab" aria-selected={displayMode === 'flat'} className={displayMode === 'flat' ? 'on' : ''} onClick={() => setDisplay('flat')}>分开</button>
           </span>
         ) : null}
+        <button
+          className={`hub-link ${inspector === 'context' ? 'on' : ''}`}
+          onClick={() => setInspector(inspector === 'context' ? null : 'context')}
+          title="上下文（只读）：触发上下文与提示词分层"
+        >
+          Context
+        </button>
+        <button className="hub-link" onClick={copyLink} title="复制这个群的 hub:// 深链">链接</button>
+        <button className="hub-link" onClick={exportMarkdown} title="导出群时间线 Markdown">导出 MD</button>
       </header>
 
       <ConversationBar

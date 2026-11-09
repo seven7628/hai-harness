@@ -9,6 +9,7 @@ import HubInspector from './HubInspector'
 import GroupView from './GroupView'
 import { isImeComposing } from './mentions'
 import { formatRelativeTime, groupPreview, unreadBadge } from './conversation'
+import { highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubAgent, HubMessage, HubRunEntry } from './types'
 import './hub.css'
 
@@ -43,6 +44,9 @@ export default function HubSurface() {
   const clearSelection = useHubStore((s) => s.clearSelection)
   const notice = useHubStore((s) => s.notice)
   const clearNotice = useHubStore((s) => s.clearNotice)
+  const jump = useHubStore((s) => s.jump)
+  const clearJump = useHubStore((s) => s.clearJump)
+  const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const draft = activeId ? (drafts[activeId] ?? '') : ''
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
@@ -68,6 +72,8 @@ export default function HubSurface() {
   const [editing, setEditing] = useState<HubAgent | 'new' | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
+  const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
+  const highlightTimer = useRef<number | null>(null)
 
   useEffect(() => {
     void refresh()
@@ -85,14 +91,38 @@ export default function HubSurface() {
   useEffect(() => {
     const el = listRef.current
     if (!el || !stickBottom.current) return
+    // 待执行的深链跳转优先：先贴底再跳会闪一下（跳转 effect 会接管滚动）。
+    if (jump && jump.targetId === activeId) return
     el.scrollTop = el.scrollHeight
-  }, [messages.length, live])
+  }, [messages.length, live, jump, activeId])
+
+  // 深链 / Context 面板的触发 seq（P4-02）：只消费落在当前 DM 且消息已加载的请求。
+  // 群走 GroupView 的同一条路径（targetId 不匹配时这里直接跳过）。
+  useEffect(() => {
+    const plan = seqJumpPlan(jump, { targetId: activeId, messages })
+    if (!plan) return
+    stickBottom.current = false // 别让「跟随最新」把定位顶回底部
+    if (!scrollToSeq(listRef.current, plan.seq)) return
+    setHighlightSeq(plan.seq)
+    clearJump(plan.nonce)
+    if (highlightTimer.current != null) window.clearTimeout(highlightTimer.current)
+    highlightTimer.current = window.setTimeout(() => setHighlightSeq(null), 1800)
+  }, [jump, activeId, messages, clearJump])
+
+  useEffect(() => () => {
+    if (highlightTimer.current != null) window.clearTimeout(highlightTimer.current)
+  }, [])
 
   const activeAgent = useMemo(
     () => agents.find((a) => a.id === activeId) ?? profile ?? null,
     [agents, activeId, profile],
   )
   const isRunning = activeId ? running[activeId] === true : false
+  // 深链指向「最新一条」：seq 最大的已落盘消息（跳转高亮由深链的 seq 决定）。
+  const latestSeq = useMemo(
+    () => messages.reduce((max, m) => (Number(m.seq) > max ? Number(m.seq) : max), 0),
+    [messages],
+  )
 
   function onScroll(): void {
     const el = listRef.current
@@ -264,6 +294,20 @@ export default function HubSurface() {
                 <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>
               </span>
               <button className="hub-link" onClick={() => setInspector(inspector === 'session' ? null : 'session')} title="会话信息">会话</button>
+              <button
+                className={`hub-link ${inspector === 'context' ? 'on' : ''}`}
+                onClick={() => setInspector(inspector === 'context' ? null : 'context')}
+                title="上下文（只读）：触发上下文与提示词分层"
+              >
+                Context
+              </button>
+              <button
+                className="hub-link"
+                onClick={() => void copyDeepLink('dm', activeAgent.id, latestSeq)}
+                title="复制这个会话的 hub:// 深链"
+              >
+                链接
+              </button>
               <button className="hub-link" onClick={() => setEditing(activeAgent)} title={t('hub.editAgent')}>
                 {t('hub.edit')}
               </button>
@@ -286,10 +330,10 @@ export default function HubSurface() {
               ) : null}
               <div className="hub-thread">
                 {messages.map((m) => (
-                  <HubBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} />
+                  <HubBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} highlightSeq={highlightSeq} />
                 ))}
                 {actions.map((m) => (
-                  <HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} />
+                  <HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} highlightSeq={highlightSeq} />
                 ))}
                 {live ? (
                   <div className="hub-msg agent">
@@ -391,23 +435,25 @@ function HubAvatar({ agent, size, ring }: { agent: HubAgent; size: number; ring?
   )
 }
 
-function HubBubble({ msg }: { msg: HubMessage }) {
+function HubBubble({ msg, highlightSeq }: { msg: HubMessage; highlightSeq?: number | null }) {
   const kind = msg.sender?.kind ?? 'system'
+  const seq = seqDataAttr(msg.seq)
+  const hl = highlightClass(msg.seq, highlightSeq)
   if (kind === 'system') {
     // 系统动作行：refs.action 存在时按「动作 × 文本」渲染，与普通系统提示区分开。
     const action = typeof msg.refs?.action === 'string' ? msg.refs.action : ''
     if (action) {
       return (
-        <div className={`hub-action ${action}`} role="status">
+        <div className={`hub-action ${action}${hl}`} role="status" data-seq={seq}>
           <span className="hub-action-kind">{actionLabel(action)}</span>
           <span>{msg.text}</span>
         </div>
       )
     }
-    return <div className="hub-msg system">{msg.text}</div>
+    return <div className={`hub-msg system${hl}`} data-seq={seq}>{msg.text}</div>
   }
   return (
-    <div className={`hub-msg ${kind === 'human' ? 'human' : 'agent'}`}>
+    <div className={`hub-msg ${kind === 'human' ? 'human' : 'agent'}${hl}`} data-seq={seq}>
       <div className="hub-body">
         <Markdown text={msg.text ?? ''} />
       </div>

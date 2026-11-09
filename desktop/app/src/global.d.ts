@@ -102,6 +102,10 @@ declare global {
       chromeClearLogin: () => Promise<{ ok: boolean; removed: number; error?: string }>
       onEvent: (cb: (line: string) => void) => () => void
       onExit: (cb: (info: { code: number | null; err: string }) => void) => () => void
+      // hub:// 深链（open-url / second-instance argv → 主进程转发）；返回取消订阅。
+      onHubDeepLink: (cb: (url: string) => void) => () => void
+      // 冷启动/刷新期间排队的深链（先订阅再取，避免错过）。
+      hubTakeDeepLinks: () => Promise<string[]>
     }
   }
 }

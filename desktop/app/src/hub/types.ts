@@ -62,6 +62,21 @@ export interface HubMessage {
   clientMsgId?: string
 }
 
+/** hub_agent_prompt_preview 的一层系统提示词（L1–L4；L5 由内核在请求期装配）。 */
+export interface HubPromptLayer {
+  key?: string
+  title?: string
+  text?: string
+}
+
+/** hub_agent_prompt_preview 响应（Go：hubPromptPreview）。 */
+export interface HubPromptPreviewData {
+  agent_id?: string
+  layers?: HubPromptLayer[]
+  total_bytes?: number
+  note?: string
+}
+
 export interface HubPage {
   agent?: HubAgent
   session_id?: string

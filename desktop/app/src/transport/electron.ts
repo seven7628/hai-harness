@@ -91,5 +91,10 @@ export function electronTransport(): Transport {
         }
       }),
     onExit: (cb) => d.onExit(cb),
+    // 协议深链：旧主进程/preload 没有这个方法时退化成空订阅（不因能力缺失炸主流程）。
+    onHubDeepLink: (cb) =>
+      typeof d.onHubDeepLink === 'function' ? d.onHubDeepLink(cb) : () => undefined,
+    takeHubDeepLinks: () =>
+      typeof d.hubTakeDeepLinks === 'function' ? d.hubTakeDeepLinks() : Promise.resolve([]),
   }
 }

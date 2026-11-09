@@ -152,7 +152,9 @@
 .hub-dm-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap; /* 群头/Context/链接等动作增多时换行，不把标题挤没 */
   gap: 9px;
+  row-gap: 4px;
   padding: 10px 18px;
   border-bottom: 1px solid var(--border);
 }
@@ -990,3 +992,73 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-conv-bar.running .hub-conv-dot,
   .hub-msg-highlight { animation: none; }
 }
+
+/* —— Context 只读面板（P4-02）：深链 + 消息触发上下文 + 提示词分层 —— */
+.hub-context-panel { overflow: hidden; }
+.hub-deeplink {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  font-size: 11.5px;
+}
+.hub-deeplink .hub-btn { margin-left: auto; }
+/* 深链独占一行：面板只有 330px，单行截断会让用户看不到 ?seq=（复制出来才是完整的）。 */
+.hub-deeplink-url {
+  flex: 1 1 100%; order: 3; min-width: 0;
+  overflow-wrap: anywhere; white-space: normal;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px; color: var(--text-2);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  border-radius: 6px; padding: 3px 6px;
+}
+.hub-context-panel > .hub-context-section { flex: 0 0 auto; border-bottom: 1px solid var(--border); }
+.hub-context-panel > .hub-context-section:last-of-type { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.hub-section-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px 4px; font-size: 12.5px;
+}
+.hub-section-head select {
+  margin-left: auto; max-width: 55%; font-size: 11.5px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--paper); color: var(--ink); padding: 2px 4px;
+}
+.hub-context-picker {
+  display: flex; align-items: center; gap: 8px; padding: 4px 12px 8px; font-size: 11.5px;
+}
+.hub-context-picker select {
+  flex: 1 1 auto; min-width: 0; font-size: 11.5px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--paper); color: var(--ink); padding: 3px 6px;
+}
+.hub-context-meta {
+  display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 4px 10px;
+  margin: 0; padding: 0 12px 8px; font-size: 11.5px;
+}
+.hub-context-meta dt { color: var(--text-3); }
+.hub-context-meta dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.hub-context-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 0 12px 8px; font-size: 11.5px;
+}
+.hub-context-key { color: var(--text-3); }
+.hub-context-seq { padding: 1px 7px; font-size: 11px; }
+.hub-context-seq.missing { border-style: dashed; color: var(--text-3); }
+.hub-prompt-layers { display: flex; flex-direction: column; gap: 6px; padding: 0 12px 8px; }
+.hub-prompt-layer {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--paper); overflow: hidden;
+}
+.hub-prompt-layer > summary {
+  display: flex; align-items: center; gap: 8px; padding: 6px 9px; cursor: pointer;
+  font-size: 12px; list-style: none;
+}
+.hub-prompt-layer > summary::-webkit-details-marker { display: none; }
+.hub-prompt-layer > summary:focus-visible { outline: 2px solid var(--accent-border); outline-offset: -2px; }
+.hub-prompt-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-prompt-text {
+  margin: 0; padding: 8px 9px 10px; max-height: 260px; overflow: auto;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  color: var(--text-2); background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.hub-chip.layer-l1 { color: #2f6f9a; background: color-mix(in srgb, #2f6f9a 12%, transparent); }
+.hub-chip.layer-l2 { color: #2f7a4f; background: color-mix(in srgb, #2f7a4f 12%, transparent); }
+.hub-chip.layer-l3 { color: #8a6a1f; background: color-mix(in srgb, #8a6a1f 14%, transparent); }
+.hub-chip.layer-l4 { color: #7a4a8a; background: color-mix(in srgb, #7a4a8a 12%, transparent); }
+.hub-prompt-note { font-size: 11px; line-height: 1.5; margin: 0; }
