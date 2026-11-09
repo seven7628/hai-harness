@@ -427,3 +427,72 @@ func TestTruncNested(t *testing.T) {
 		t.Fatalf("truncated = %q, want an elision marker", got)
 	}
 }
+
+// —— 子调用的时限归属（2026-11 实测：codemode 里的 MCP wait_task 在 5m 被切断） ——
+//
+// 引擎默认兜底（defaultToolTimeout=5m）是给**模型直呼**的工具用的；编排脚本发起的
+// 子调用（ExecuteOne/Depth>0）墙钟 owner 是编排方（codemode 的脚本预算/ExecScope），
+// 再套一道 5 分钟会让「远端本来要等 9 分钟」永远等不到。
+
+type slowTool struct {
+	BaseTool
+	sleep time.Duration
+}
+
+func (t *slowTool) Call(ctx context.Context, _, _ string) (string, error) {
+	select {
+	case <-time.After(t.sleep):
+		return "waited", nil
+	case <-ctx.Done():
+		return ctx.Err().Error(), ctx.Err()
+	}
+}
+func (t *slowTool) ValidParams(context.Context, string, string) error { return nil }
+
+// declaredSlowTool 声明自己的时限（模拟 bash 这类「工具契约里就有 timeout」的工具）。
+type declaredSlowTool struct {
+	slowTool
+	timeout time.Duration
+}
+
+func (t *declaredSlowTool) ToolTimeout() time.Duration { return t.timeout }
+
+func TestExecuteOneNestedIgnoresEngineDefaultTimeout(t *testing.T) {
+	e := NewToolEngine(WithToolTimeout(20 * time.Millisecond))
+	e.RegisterTool(context.Background(), &slowTool{
+		BaseTool: BaseTool{Name_: "slow", Description_: "slow", Params_: map[string]any{}},
+		sleep:    120 * time.Millisecond,
+	})
+	// 子调用：没有声明时限 → 不吃引擎默认（20ms），跑满 120ms 后正常返回。
+	r := e.ExecuteOne(context.Background(), core.ToolCall{Id: "c1", Name: "slow"}, ExecuteOpts{ParentCallId: "p1", Depth: 1})
+	if r.IsError {
+		t.Fatalf("nested call must not be cut by the engine default timeout: %+v", r)
+	}
+	if r.Result != "waited" {
+		t.Fatalf("Result = %q, want waited", r.Result)
+	}
+	// 对照：同一工具、同一引擎，顶层调用（Depth=0）仍受默认兜底 —— 防「把兜底整个关掉」。
+	top := e.ExecuteOne(context.Background(), core.ToolCall{Id: "c2", Name: "slow"}, ExecuteOpts{})
+	if !top.IsError || !strings.Contains(top.Result, "deadline") {
+		t.Fatalf("top-level call must still hit the engine default timeout, got %+v", top)
+	}
+}
+
+func TestExecuteOneNestedHonorsToolDeclaredTimeout(t *testing.T) {
+	e := NewToolEngine(WithToolTimeout(time.Minute))
+	e.RegisterTool(context.Background(), &declaredSlowTool{
+		slowTool: slowTool{
+			BaseTool: BaseTool{Name_: "slow_declared", Description_: "slow", Params_: map[string]any{}},
+			sleep:    300 * time.Millisecond,
+		},
+		timeout: 30 * time.Millisecond,
+	})
+	start := time.Now()
+	r := e.ExecuteOne(context.Background(), core.ToolCall{Id: "c1", Name: "slow_declared"}, ExecuteOpts{ParentCallId: "p1", Depth: 1})
+	if !r.IsError || !strings.Contains(r.Result, "deadline") {
+		t.Fatalf("declared tool timeout must still apply to nested calls, got %+v", r)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("declared timeout should fire quickly, took %v", time.Since(start))
+	}
+}

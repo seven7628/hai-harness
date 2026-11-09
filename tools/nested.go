@@ -421,7 +421,9 @@ func (e *Engine) executeApproved(ctx context.Context, call core.ToolCall, handle
 	}
 
 	execCtx := ctx
-	if timeout := e.timeoutFor(ctx, call); timeout > 0 {
+	// 子调用（Depth>0）只吃工具自己声明的时限，不套引擎默认兜底 —— 墙钟 owner 是编排方
+	// （脚本预算 / ExecScope），见 timeoutFor 的 nested 注释。
+	if timeout := e.timeoutFor(ctx, call, call.Depth > 0); timeout > 0 {
 		lb := newLiftableTimeout(ctx, timeout)
 		defer lb.stop() // 回收时限盒（停表 + 退 watcher），防 timer 泄漏
 		execCtx = lb

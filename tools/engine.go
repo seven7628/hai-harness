@@ -126,7 +126,7 @@ func WithMaxScriptResponseSize(n int) Option {
 	return func(e *Engine) { e.maxScriptResponse = n }
 }
 
-// WithToolTimeout 设置单次工具执行的兜底超时（默认 30s，0 表示不设超时）。
+// WithToolTimeout 设置单次工具执行的兜底超时（默认 5m，0 表示不设超时）。
 // 未实现 ToolTimeoutProvider 的工具统一受此限制 —— 防单个失控工具挂死整个 agent；
 // 实现该接口的工具可覆盖（>0 用自身值，<0 显式不受限）。
 func WithToolTimeout(d time.Duration) Option {
@@ -650,7 +650,7 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 		// 参数，如 bash timeout）覆盖，落在可摘离的 liftableTimeout 上——promote 时可 Lift
 		// 解除（后台任务不限时），且解除对下层工具动态生效。
 		taskCtx := context.Context(rctx.Context())
-		if timeout := e.timeoutFor(ctx, c); timeout > 0 {
+		if timeout := e.timeoutFor(ctx, c, false); timeout > 0 {
 			t.lb = newLiftableTimeout(rctx.Context(), timeout)
 			taskCtx = t.lb
 		}
@@ -980,24 +980,39 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 // （可读本次参数，如 bash timeout）覆盖。返回 0 = 不限时。时限由 runBatch 落到
 // liftableTimeout 上（promote 可解除），execute 不再自行 WithTimeout（防双层定时器
 // 快照——lift 只对最外层生效）。
-func (e *Engine) timeoutFor(ctx context.Context, c core.ToolCall) time.Duration {
+//
+// nested = 这是**编排脚本发起**的子调用（ExecuteOne，Depth>0）。子调用不套引擎默认
+// 兜底：它的墙钟 owner 是编排方（codemode 的脚本预算 / ExecScope，超时由 clock 取消
+// runCtx 级联），引擎默认在中间再插一道 5 分钟闸会把「远端本来要等 9 分钟」永远切断
+// ——2026-11 实测：`wait_task{timeout_s:540}` 在 5m 处报 context deadline exceeded，
+// 而 codemode 自己 ToolTimeout()=-1、脚本预算 10m，两边谁都没打算在 5m 收手。
+// 工具**自己声明**的时限（bash 的 ToolTimeout/PerCallTimeout 等）对子调用照常生效 ——
+// 那是工具契约，不是引擎兜底。
+func (e *Engine) timeoutFor(ctx context.Context, c core.ToolCall, nested bool) time.Duration {
 	timeout := e.toolTimeout
+	declared := false
 	tool, err := e.GetTool(ctx, c.Name)
 	if err != nil {
+		if nested {
+			return 0 // 未知工具：调用本身会立刻失败，不必再挂一个兜底计时器
+		}
 		return timeout
 	}
 	if tp, ok := tool.(ToolTimeoutProvider); ok {
 		switch t := tp.ToolTimeout(); {
 		case t > 0:
-			timeout = t // 工具声明自身时限（信任工具作者）
+			timeout, declared = t, true // 工具声明自身时限（信任工具作者）
 		case t < 0:
-			timeout = 0 // 显式不受限（如子 agent：生命周期由 abort/ctx 级联管理）
+			timeout, declared = 0, true // 显式不受限（如子 agent：生命周期由 abort/ctx 级联管理）
 		}
 	}
 	if pt, ok := tool.(PerCallTimeout); ok {
 		if v := pt.TimeoutForArgs(c.Arguments); v != 0 {
-			timeout = v
+			timeout, declared = v, true
 		}
+	}
+	if nested && !declared {
+		return 0
 	}
 	return timeout
 }
