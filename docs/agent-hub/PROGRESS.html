@@ -1388,9 +1388,9 @@ const BASE = {
       ],
       "acceptance": "主题切换 system/ink/paper 并持久化（含 meta theme-color）；Hub 页面单列、Inspector 抽屉；390px 真实浏览器无横向溢出；刘海/底部安全区；点击目标 ≥44px（修 .hub-chip/.hub-sheet-actions）；prefers-reduced-motion 下禁用脉冲/闪烁；@ 键入即时唤起选择器；发送失败保留草稿；Hub 正文走 mdLite；滚动位置决定已读游标；清理死亡 hub_group_update 分支；hub_alert 去重；颜色仍只来自桌面 token。",
       "tests": "node desktop/app/scripts/test-mobile-hub.mjs && npm run test:mobile-hub && go test ./desktop/bridge -run MobileTokens && 390px 浏览器实测",
-      "commit": "",
-      "status": "in_progress",
-      "note": "并入 P4-03b Review N1-N10；D-390-mobile 在本任务收口"
+      "commit": "b8858f6",
+      "status": "review",
+      "note": "实现完成；主会话 191/390 实测/MobileTokens 绿；Review task-bb34tpm4 进行中"
     },
     {
       "id": "P4-03d",
@@ -2153,7 +2153,9 @@ const BASE = {
       "status": "todo"
     },
     "P4-03c": {
-      "status": "in_progress"
+      "status": "review",
+      "commit": "b8858f6",
+      "note": "实现完成；Review 进行中"
     }
   },
   "reviewGate": {
