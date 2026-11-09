@@ -94,11 +94,18 @@ export interface HubHistoryPage {
 /** hub_search 的 scope（P4-04b-1）。 */
 export type HubSearchScope = 'all' | 'group' | 'dm'
 
-/** 全局翻页游标：跨会话按 (created_at, id) 比较；seq 只用于单会话快速路径。 */
+/**
+ * 翻页游标。
+ *
+ * `conversations` 是 scope=all 的**逐会话续页游标**（key `g:<gid>` / `d:<agent_id>`
+ * → 下一次该会话的 before_seq）；必须原样回传，丢掉它就会退回第一页（B1）。
+ * `created_at`/`id`/`seq` 只用于展示与 scope=group/dm 的快速路径。
+ */
 export interface HubSearchCursor {
   created_at?: string
   id?: string
   seq?: number
+  conversations?: Record<string, number>
 }
 
 /** 一条搜索命中（hub_search.hits[i]；字段与 bridge 的 hubSearchHit 对齐）。 */

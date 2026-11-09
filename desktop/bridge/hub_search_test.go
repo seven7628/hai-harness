@@ -6,8 +6,12 @@ package main
 // 片段按 rune 截断、非法 payload、以及「智能体没有全局搜索工具」的结构性边界。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +47,51 @@ func hubSearchCmd(t *testing.T, m *manager, buf *syncBuf, id int, payload map[st
 		out.Hits = []hubSearchHit{}
 	}
 	return out
+}
+
+// writeGroupLogFixture / writeDMLogFixture 直接按存储格式写日志：
+// 深翻页 fixture 有上千条消息，逐条 AppendMessage 会 fsync 上千次（太慢），
+// 搜索只读不写，落盘成同样的 JSONL 即可。
+func writeGroupLogFixture(t *testing.T, st *agenthub.FileStore, gid agenthub.GroupID, n int, text string, base time.Time) {
+	t.Helper()
+	dir := filepath.Join(st.Root(), "groups", string(gid))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir group log: %v", err)
+	}
+	writeMessageLogFixture(t, filepath.Join(dir, "log.jsonl"), gid, n, text, base)
+}
+
+func writeDMLogFixture(t *testing.T, st *agenthub.FileStore, agentID agenthub.AgentID, n int, text string, base time.Time) {
+	t.Helper()
+	dir := filepath.Join(st.Root(), "dms", string(agentID))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir dm log: %v", err)
+	}
+	writeMessageLogFixture(t, filepath.Join(dir, "log.jsonl"), "", n, text, base)
+}
+
+func writeMessageLogFixture(t *testing.T, path string, gid agenthub.GroupID, n int, text string, base time.Time) {
+	t.Helper()
+	var buf bytes.Buffer
+	for i := 1; i <= n; i++ {
+		seq := int64(i)
+		m := agenthub.Message{
+			ID: agenthub.MessageID(seq), Seq: seq, GroupID: gid,
+			Kind: agenthub.KindText, Text: fmt.Sprintf("%s #%d", text, i),
+			Visibility: agenthub.VisibilityGroup,
+			Sender:     agenthub.Sender{Kind: agenthub.SenderHuman},
+			CreatedAt:  base.Add(time.Duration(i) * time.Second),
+		}
+		line, err := json.Marshal(&m)
+		if err != nil {
+			t.Fatalf("marshal fixture: %v", err)
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
 }
 
 func seedGroupSearch(t *testing.T, st *agenthub.FileStore, gid agenthub.GroupID, text, kind string, vis agenthub.Visibility, sender agenthub.Sender, at time.Time) agenthub.Message {
@@ -203,6 +252,20 @@ func TestHubSearchScopeGroupAndDM(t *testing.T) {
 	}
 }
 
+// hubSearchNextPayload 把响应里的 next_before 原样带回请求（含逐会话续页游标）。
+// 客户端必须 opaque 地回传 conversations，否则 scope=all 会退回第一页（B1）。
+func hubSearchNextPayload(cur *hubSearchCursor) map[string]any {
+	payload := map[string]any{
+		"created_at": cur.CreatedAt.Format(time.RFC3339Nano),
+		"id":         cur.ID,
+		"seq":        cur.Seq,
+	}
+	if len(cur.Conversations) > 0 {
+		payload["conversations"] = cur.Conversations
+	}
+	return payload
+}
+
 func TestHubSearchAllCursorPagination(t *testing.T) {
 	m, buf := testManager(t)
 	alice := createHubAgent(t, m, buf, 1, "Alice")
@@ -236,19 +299,15 @@ func TestHubSearchAllCursorPagination(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	var cursor any
-	for page := 0; page < 6; page++ {
+	var cursor map[string]any
+	pages := 0
+	for page := 0; page < 10; page++ {
 		payload := map[string]any{"query": "hit", "limit": 2}
 		if cursor != nil {
 			payload["before"] = cursor
 		}
 		resp := hubSearchCmd(t, m, buf, 10+page, payload)
-		if len(resp.Hits) == 0 {
-			if resp.HasMore {
-				t.Fatalf("空页不该宣称 has_more")
-			}
-			break
-		}
+		pages++
 		for _, h := range resp.Hits {
 			key := h.GroupID + "#" + h.MessageID
 			if seen[key] {
@@ -265,21 +324,28 @@ func TestHubSearchAllCursorPagination(t *testing.T) {
 			}
 			break
 		}
-		if resp.NextBefore == nil || resp.NextBefore.ID == "" || resp.NextBefore.CreatedAt.IsZero() {
-			t.Fatalf("has_more=true 缺 next_before: %+v", resp)
+		if resp.NextBefore == nil || len(resp.NextBefore.Conversations) == 0 {
+			t.Fatalf("has_more=true 必须带逐会话续页游标: %+v", resp.NextBefore)
 		}
 		last := resp.Hits[len(resp.Hits)-1]
 		if resp.NextBefore.ID != last.MessageID {
 			t.Fatalf("next_before 应指向本页最后一条: %+v vs %+v", resp.NextBefore, last)
 		}
-		cursor = map[string]any{
-			"created_at": resp.NextBefore.CreatedAt.Format(time.RFC3339Nano),
-			"id":         resp.NextBefore.ID,
-			"seq":        resp.NextBefore.Seq,
-		}
+		cursor = hubSearchNextPayload(resp.NextBefore)
 	}
-	if len(seen) != 6 {
-		t.Fatalf("翻页共取到 %d 条，want 6", len(seen))
+	if len(seen) != 6 || pages != 3 {
+		t.Fatalf("翻页共取到 %d 条 / %d 页，want 6 条 3 页", len(seen), pages)
+	}
+
+	// 旧格式游标（只有 created_at/id）：按设计当成第一页，不会错位丢命中。
+	legacy := hubSearchCmd(t, m, buf, 40, map[string]any{
+		"query": "hit", "limit": 2,
+		"before": map[string]any{
+			"created_at": cursor["created_at"], "id": cursor["id"], "seq": cursor["seq"],
+		},
+	})
+	if legacy.Count != 2 || legacy.NextBefore == nil || len(legacy.NextBefore.Conversations) == 0 {
+		t.Fatalf("旧游标应退回第一页（有 has_more + 新格式游标）: %+v", legacy)
 	}
 
 	// 非法游标显式报错（不能静默当成第一页）。
@@ -292,6 +358,252 @@ func TestHubSearchAllCursorPagination(t *testing.T) {
 		"query": "hit", "before": map[string]any{"created_at": time.Now().UTC().Format(time.RFC3339)},
 	}); ok || errMsg == "" {
 		t.Fatalf("缺 before.id 必须报错: %v %q", ok, errMsg)
+	}
+}
+
+// 深翻页回归（复审 B1）：单个群 1000 条命中、limit 50。旧实现每页都从 before=0
+// 重新扫、按 (created_at,id) 过滤，翻到第 9 页就 has_more=false，599 条永远拿不到。
+// 现在逐会话 before_seq 只向前走，必须正好取满 1000 条、无重复、最后 has_more=false。
+func TestHubSearchAllDeepPaginationSingleGroup(t *testing.T) {
+	m, buf := testManager(t)
+	alice := createHubAgent(t, m, buf, 1, "DeepGroup")
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_group_create", map[string]any{
+		"name":    "深翻页群",
+		"members": []map[string]any{{"agent_id": string(alice.ID), "role": "owner"}},
+	})
+	if !ok {
+		t.Fatalf("create group: %s", errMsg)
+	}
+	g := groupFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	const total = 1000
+	writeGroupLogFixture(t, st, g.ID, total, "needle 深历史", base)
+
+	const limit = 50
+	seen := map[string]bool{}
+	var cursor map[string]any
+	pages := 0
+	for page := 0; page < total/limit+5; page++ {
+		payload := map[string]any{"query": "needle", "limit": limit}
+		if cursor != nil {
+			payload["before"] = cursor
+		}
+		resp := hubSearchCmd(t, m, buf, 100+page, payload)
+		pages++
+		if resp.Count == 0 {
+			t.Fatalf("第 %d 页是空的，但 has_more=%v（不该出现空页）", pages, resp.HasMore)
+		}
+		for _, h := range resp.Hits {
+			if seen[h.MessageID] {
+				t.Fatalf("第 %d 页重复命中 %s", pages, h.MessageID)
+			}
+			seen[h.MessageID] = true
+		}
+		if !resp.HasMore {
+			if resp.NextBefore != nil {
+				t.Fatalf("has_more=false 仍给了 next_before")
+			}
+			break
+		}
+		if resp.NextBefore == nil {
+			t.Fatalf("has_more=true 但缺 next_before")
+		}
+		cursor = hubSearchNextPayload(resp.NextBefore)
+	}
+	t.Logf("单群深翻页：%d 条命中 / limit=%d → %d 页取到 %d 条（无重复）", total, limit, pages, len(seen))
+	if len(seen) != total {
+		t.Fatalf("深翻页共取到 %d 条，want %d（漏 %d 条）", len(seen), total, total-len(seen))
+	}
+	if pages != total/limit {
+		t.Fatalf("深翻页页数 = %d，want %d（不多不少）", pages, total/limit)
+	}
+	for i := 1; i <= total; i++ {
+		if !seen[agenthub.MessageID(int64(i))] {
+			t.Fatalf("漏掉 %s", agenthub.MessageID(int64(i)))
+		}
+	}
+}
+
+// 深翻页（混排 all scope）：群 300 + DM 300 交替时间戳，逐页取完必须正好 600 条，
+// 两个会话都被完整取到（群/DM 的续页游标互不干扰）。
+func TestHubSearchAllDeepPaginationMixedGroupDM(t *testing.T) {
+	m, buf := testManager(t)
+	alice := createHubAgent(t, m, buf, 1, "MixedDM")
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_group_create", map[string]any{
+		"name":    "混排群",
+		"members": []map[string]any{{"agent_id": string(alice.ID), "role": "owner"}},
+	})
+	if !ok {
+		t.Fatalf("create group: %s", errMsg)
+	}
+	g := groupFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 9, 13, 0, 0, 0, time.UTC)
+	const per = 300
+	writeGroupLogFixture(t, st, g.ID, per, "needle 群", base)
+	writeDMLogFixture(t, st, alice.ID, per, "needle 私聊", base.Add(time.Second))
+
+	const limit = 50
+	seen := map[string]bool{}
+	byScope := map[string]int{}
+	var cursor map[string]any
+	pages := 0
+	for page := 0; page < (2*per)/limit+5; page++ {
+		payload := map[string]any{"query": "needle", "limit": limit}
+		if cursor != nil {
+			payload["before"] = cursor
+		}
+		resp := hubSearchCmd(t, m, buf, 100+page, payload)
+		pages++
+		if resp.Count == 0 {
+			t.Fatalf("第 %d 页是空的（has_more=%v）", pages, resp.HasMore)
+		}
+		for _, h := range resp.Hits {
+			key := h.Scope + "#" + h.GroupID + h.AgentID + "#" + h.MessageID
+			if seen[key] {
+				t.Fatalf("第 %d 页重复命中 %s", pages, key)
+			}
+			seen[key] = true
+			byScope[h.Scope]++
+		}
+		if !resp.HasMore {
+			break
+		}
+		cursor = hubSearchNextPayload(resp.NextBefore)
+	}
+	t.Logf("混排深翻页（群 %d + DM %d，limit=%d）→ %d 页取到 %d 条，分布 %v", per, per, limit, pages, len(seen), byScope)
+	if len(seen) != 2*per {
+		t.Fatalf("混排深翻页共取到 %d 条，want %d", len(seen), 2*per)
+	}
+	if byScope["group"] != per || byScope["dm"] != per {
+		t.Fatalf("分布 = %v，want group=%d dm=%d（两个会话都要取完）", byScope, per, per)
+	}
+}
+
+// N1：msg_<seq> 只在会话内唯一。两个群各一条命中，created_at 相同、seq/id 都是
+// msg_1，limit=1。旧实现用 (created_at,id) 做游标会把另一条永久跳过。
+func TestHubSearchAllSameTimestampSameIDNoSkip(t *testing.T) {
+	m, buf := testManager(t)
+	alice := createHubAgent(t, m, buf, 1, "TieA")
+	bob := createHubAgent(t, m, buf, 2, "TieB")
+	mk := func(id int, name string) *agenthub.Group {
+		ok, errMsg, data := hubCmd(t, m, buf, id, "hub_group_create", map[string]any{
+			"name":    name,
+			"members": []map[string]any{{"agent_id": string(alice.ID), "role": "owner"}, {"agent_id": string(bob.ID), "role": "member"}},
+		})
+		if !ok {
+			t.Fatalf("create %s: %s", name, errMsg)
+		}
+		return groupFromData(t, data)
+	}
+	g1 := mk(3, "同刻甲")
+	g2 := mk(4, "同刻乙")
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	same := time.Date(2026, 11, 9, 14, 0, 0, 0, time.UTC)
+	human := agenthub.Sender{Kind: agenthub.SenderHuman}
+	seedGroupSearch(t, st, g1.ID, "tie tie", "text", agenthub.VisibilityGroup, human, same)
+	seedGroupSearch(t, st, g2.ID, "tie tie", "text", agenthub.VisibilityGroup, human, same)
+
+	seen := map[string]bool{}
+	var cursor map[string]any
+	for page := 0; page < 4; page++ {
+		payload := map[string]any{"query": "tie", "limit": 1}
+		if cursor != nil {
+			payload["before"] = cursor
+		}
+		resp := hubSearchCmd(t, m, buf, 10+page, payload)
+		for _, h := range resp.Hits {
+			if h.Seq != 1 || h.MessageID != "msg_1" {
+				t.Fatalf("fixture 应为同刻同 id：%+v", h)
+			}
+			seen[h.GroupID] = true
+		}
+		if !resp.HasMore {
+			break
+		}
+		cursor = hubSearchNextPayload(resp.NextBefore)
+	}
+	if !seen[string(g1.ID)] || !seen[string(g2.ID)] {
+		t.Fatalf("同刻同 id 两条命中必须都能取到，got=%v", seen)
+	}
+}
+
+// N2：软删的群/智能体不进 scope=all 的 fan-out（也不占 scanned）。
+func TestHubSearchAllExcludesDeletedTargets(t *testing.T) {
+	m, buf := testManager(t)
+	alice := createHubAgent(t, m, buf, 1, "AliveGroupOwner")
+	bob := createHubAgent(t, m, buf, 2, "DeadGroupOwner")
+	carol := createHubAgent(t, m, buf, 3, "AliveDM")
+	dave := createHubAgent(t, m, buf, 4, "DeadDM")
+	ok, errMsg, data := hubCmd(t, m, buf, 5, "hub_group_create", map[string]any{
+		"name":    "活着的群",
+		"members": []map[string]any{{"agent_id": string(alice.ID), "role": "owner"}},
+	})
+	if !ok {
+		t.Fatalf("create live group: %s", errMsg)
+	}
+	liveGroup := groupFromData(t, data)
+	ok, errMsg, data = hubCmd(t, m, buf, 6, "hub_group_create", map[string]any{
+		"name":    "要删的群",
+		"members": []map[string]any{{"agent_id": string(bob.ID), "role": "owner"}},
+	})
+	if !ok {
+		t.Fatalf("create dead group: %s", errMsg)
+	}
+	deadGroup := groupFromData(t, data)
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 9, 15, 0, 0, 0, time.UTC)
+	human := agenthub.Sender{Kind: agenthub.SenderHuman}
+	for i, g := range []*agenthub.Group{liveGroup, deadGroup} {
+		seedGroupSearch(t, st, g.ID, "zombie 群命中", "text", agenthub.VisibilityGroup, human, base.Add(time.Duration(i)*time.Second))
+	}
+	for i, p := range []agenthub.AgentProfile{carol, dave} {
+		seedDM(t, st, p.ID, "zombie 私聊命中", agenthub.VisibilityGroup, base.Add(time.Duration(i)*time.Second))
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 7, "hub_group_delete", map[string]any{"group_id": string(deadGroup.ID)}); !ok {
+		t.Fatalf("delete group: %s", errMsg)
+	}
+	if ok, errMsg, _ := hubCmd(t, m, buf, 8, "hub_agent_delete", map[string]any{"agent_id": string(dave.ID)}); !ok {
+		t.Fatalf("delete agent: %s", errMsg)
+	}
+
+	resp := hubSearchCmd(t, m, buf, 9, map[string]any{"query": "zombie", "limit": 50})
+	if resp.Count != 2 {
+		t.Fatalf("all scope = %d hits，want 2（软删的群/智能体必须排除）: %+v", resp.Count, resp.Hits)
+	}
+	// scanned = 活群(1) + 活着的智能体 DM(3)：alice/bob/carol 都没删，
+	// 已删群与已删智能体不进 fan-out。
+	if resp.Scanned != 4 {
+		t.Fatalf("scanned = %d，want 4（1 活群 + 3 活智能体 DM）", resp.Scanned)
+	}
+	for _, h := range resp.Hits {
+		if h.GroupID == string(deadGroup.ID) || h.AgentID == string(dave.ID) {
+			t.Fatalf("软删目标出现在结果里: %+v", h)
+		}
+	}
+	// 单会话 scope 也拒绝已删除目标。
+	if ok, _, _ := hubCmd(t, m, buf, 10, "hub_search", map[string]any{
+		"query": "zombie", "scope": "group", "group_id": string(deadGroup.ID),
+	}); ok {
+		t.Fatal("scope=group 指向已删除群必须失败")
+	}
+	if ok, _, _ := hubCmd(t, m, buf, 11, "hub_search", map[string]any{
+		"query": "zombie", "scope": "dm", "agent_id": string(dave.ID),
+	}); ok {
+		t.Fatal("scope=dm 指向已删除智能体必须失败")
 	}
 }
 

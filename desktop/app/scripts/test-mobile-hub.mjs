@@ -597,6 +597,47 @@ const roster = [
   const emptyPage = H.searchPageView({ hits: [], has_more: true, next_before: { created_at: 'x', id: 'y' } })
   eq(emptyPage.hasMore, false, '空页不宣称还有更多')
 
+  // 逐会话续页游标（B1）：必须 opaque 保留并原样回传，否则 scope=all 会退回第一页。
+  const deep = H.searchPageView({
+    hits: [
+      { scope: 'group', group_id: 'g1', seq: 5, message_id: 'msg_5' },
+      { scope: 'dm', agent_id: 'ag1', seq: 7, message_id: 'msg_7' },
+    ],
+    has_more: true,
+    next_before: {
+      created_at: '2026-11-09T10:00:00Z', id: 'msg_5', seq: 5,
+      conversations: { 'g:g1': 4, 'd:ag1': 0 },
+    },
+  })
+  assert(deep.next && deep.next.conversations, '手机端必须保留 next_before.conversations')
+  eq(deep.next.conversations['g:g1'], 4, '续页 seq 原样保留')
+  eq(deep.next.conversations['d:ag1'], 0, '0 值必须保留（本轮没发出去，下页重取）')
+  const deepPayload = H.searchPayload('q', 'all', deep.next)
+  eq(
+    JSON.stringify(deepPayload.before.conversations),
+    '{"g:g1":4,"d:ag1":0}',
+    'searchPageView → searchPayload 往返不丢 conversations',
+  )
+  const mapOnly = H.searchPageView({
+    hits: [{ scope: 'group', group_id: 'g1', seq: 2, message_id: 'msg_2' }],
+    has_more: true,
+    next_before: { conversations: { 'g:g1': 2 } },
+  })
+  assert(!!mapOnly.next, '只有 conversations 的游标也可用')
+  eq(H.searchPayload('q', 'all', mapOnly.next).before.conversations['g:g1'], 2, '只有 map 也能翻页')
+  eq(
+    JSON.stringify(H.searchConversations({ 'x:1': 2, 'g:ok': 3, 'g:neg': -1, 'd:bad': 'nope' })),
+    '{"g:ok":3}',
+    '非法 key/负值/非数字被丢弃',
+  )
+  eq(H.searchConversations({ 'x:1': 2 }), null, '只有非法 key → 没有续页信息')
+  const broken = H.searchPageView({
+    hits: [{ scope: 'group', group_id: 'g1', seq: 1, message_id: 'msg_1' }],
+    has_more: true,
+    next_before: { conversations: { 'x:1': 2 } },
+  })
+  eq(broken.hasMore, false, '没有可用游标 → has_more=false')
+
   const merged = H.mergeSearchResults(page.hits, [
     { scope: 'group', group_id: 'g1', seq: 5, message_id: 'msg_5' },
     { scope: 'group', group_id: 'g1', seq: 3, message_id: 'msg_3' },

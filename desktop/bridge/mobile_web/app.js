@@ -1128,6 +1128,25 @@
     if (box) box.hidden = true
   }
 
+  // 清空查询/结果并关闭面板（「清空」按钮与 Escape 共用）。
+  function clearHubSearch() {
+    const s = state.hub.search
+    if (s.timer) {
+      clearTimeout(s.timer)
+      s.timer = null
+    }
+    s.query = ''
+    s.hits = []
+    s.hasMore = false
+    s.next = null
+    s.error = ''
+    s.gen++
+    const input = $('hub-search-input')
+    if (input) input.value = ''
+    closeHubSearch()
+    renderHubSearchResults()
+  }
+
   function renderHubSearchScopes() {
     const s = state.hub.search
     for (const b of $('hub-search-scopes').querySelectorAll('[data-search-scope]')) {
@@ -3240,24 +3259,7 @@
     $('hub-search-btn').addEventListener('click', openHubSearch)
     $('hub-search-close').addEventListener('click', closeHubSearch)
     $('hub-search-clear').addEventListener('click', () => {
-      const s = state.hub.search
-      if (s.timer) {
-        clearTimeout(s.timer)
-        s.timer = null
-      }
-      s.query = ''
-      s.hits = []
-      s.hasMore = false
-      s.next = null
-      s.error = ''
-      s.gen++
-      $('hub-search-input').value = ''
-      renderHubSearchResults()
-      try {
-        $('hub-search-input').focus()
-      } catch {
-        /* ignore */
-      }
+      clearHubSearch()
     })
     $('hub-search-more').addEventListener('click', () => {
       const s = state.hub.search
@@ -3270,17 +3272,21 @@
       scheduleHubSearch()
     })
     $('hub-search-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault()
-        const s = state.hub.search
-        if (s.timer) {
-          clearTimeout(s.timer)
-          s.timer = null
-        }
-        void runHubSearch(false)
-      } else if (e.key === 'Escape') {
-        closeHubSearch()
+      if (e.key !== 'Enter') return
+      e.preventDefault()
+      const s = state.hub.search
+      if (s.timer) {
+        clearTimeout(s.timer)
+        s.timer = null
       }
+      void runHubSearch(false)
+    })
+    // Escape 在 document 级处理：焦点可能不在输入框（例如刚点过「更早的结果」），
+    // 但面板开着时 Escape 一律清空并关闭。stopPropagation 无所谓，面板只有一个。
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !state.hub.search.open) return
+      e.preventDefault()
+      clearHubSearch()
     })
     for (const b of $('hub-search-scopes').querySelectorAll('[data-search-scope]')) {
       b.addEventListener('click', () => {

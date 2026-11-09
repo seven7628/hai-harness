@@ -818,14 +818,36 @@
     }
   }
 
-  // 翻页游标：只有 has_more 且游标完整时才保留，否则「加载更早」会原地打转。
+  // 逐会话续页游标（scope=all 的权威翻页信息）：必须 opaque 保留并原样回传，
+  // 丢掉它 = 下一页退回第一页（P4-04b-1 复审 B1）。0 是合法值（该会话本轮没发出去）。
+  function searchConversations(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+    const out = {}
+    for (const k of Object.keys(raw)) {
+      const key = str(k)
+      if (!key || (key.indexOf('g:') !== 0 && key.indexOf('d:') !== 0)) continue
+      const n = Number(raw[k])
+      if (!Number.isFinite(n) || n < 0) continue
+      out[key] = Math.trunc(n)
+    }
+    return Object.keys(out).length ? out : null
+  }
+
+  // 翻页游标：只有 has_more 且游标可用时才保留，否则「加载更早」会原地打转。
   function searchPageView(raw) {
     const list = raw && Array.isArray(raw.hits) ? raw.hits : []
     const hits = list.map(searchResultView).filter(Boolean)
     const nb = raw && raw.next_before
+    const conversations = nb ? searchConversations(nb.conversations) : null
+    const hasTime = !!(nb && str(nb.id) && str(nb.created_at))
     const next =
-      nb && str(nb.id) && str(nb.created_at)
-        ? { created_at: str(nb.created_at), id: str(nb.id), seq: num(nb.seq) }
+      nb && (conversations || hasTime)
+        ? {
+            created_at: str(nb.created_at),
+            id: str(nb.id),
+            seq: num(nb.seq),
+            ...(conversations ? { conversations: conversations } : {}),
+          }
         : null
     return {
       hits: hits,
@@ -852,8 +874,13 @@
   function searchPayload(query, scope, cursor) {
     const sc = ['all', 'group', 'dm'].indexOf(str(scope)) >= 0 ? str(scope) : 'all'
     const payload = { query: str(query), scope: sc, limit: 50 }
-    if (cursor && str(cursor.id) && str(cursor.created_at)) {
-      payload.before = { created_at: str(cursor.created_at), id: str(cursor.id), seq: num(cursor.seq) }
+    if (cursor) {
+      const before = { seq: num(cursor.seq) }
+      if (str(cursor.id)) before.id = str(cursor.id)
+      if (str(cursor.created_at)) before.created_at = str(cursor.created_at)
+      const convs = cursor.conversations ? searchConversations(cursor.conversations) : null
+      if (convs) before.conversations = convs
+      if (convs || (before.id && before.created_at)) payload.before = before
     }
     return payload
   }
@@ -918,6 +945,7 @@
     parseNeedQuestions,
     searchResultView,
     searchPageView,
+    searchConversations,
     mergeSearchResults,
     searchPayload,
     searchAroundRequest,

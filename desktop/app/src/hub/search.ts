@@ -80,6 +80,24 @@ export function mergeSearchHits(existing: HubSearchHit[], incoming: HubSearchHit
   return out
 }
 
+/**
+ * 逐会话续页游标：**必须 opaque 地保留**。丢掉它 = scope=all 下一页退回第一页，
+ * 单会话命中数超过单页上限时永远翻不到更旧的结果（P4-04b-1 复审 B1）。
+ * 值可以是 0（该会话本轮没发出去，下一页仍从最新重取），只有负数/非数字才丢弃。
+ */
+export function readSearchConversations(raw: unknown): Record<string, number> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const k = key.trim()
+    if (!k || (!k.startsWith('g:') && !k.startsWith('d:'))) continue
+    const n = Math.trunc(Number(value))
+    if (!Number.isFinite(n) || n < 0) continue
+    out[k] = n
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 /** hub_search 响应 → 页面状态（非法条目丢掉，游标只在 has_more 时保留）。 */
 export function mapSearchPage(raw: HubSearchPage | null | undefined): {
   hits: HubSearchHit[]
@@ -91,11 +109,17 @@ export function mapSearchPage(raw: HubSearchPage | null | undefined): {
     .filter((h): h is HubSearchHit => h !== null)
   const hasMore = raw?.has_more === true && hits.length > 0
   const cursor = raw?.next_before
-  const next =
-    hasMore && cursor && typeof cursor.id === 'string' && cursor.id && typeof cursor.created_at === 'string' && cursor.created_at
-      ? { created_at: cursor.created_at, id: cursor.id, seq: Number(cursor.seq) || 0 }
-      : null
-  return { hits, hasMore: hasMore && next !== null, next }
+  if (!hasMore || !cursor) return { hits, hasMore: false, next: null }
+  const conversations = readSearchConversations(cursor.conversations)
+  const hasCreatedAt = typeof cursor.created_at === 'string' && cursor.created_at !== ''
+  const hasID = typeof cursor.id === 'string' && cursor.id !== ''
+  // 至少要有一种可用的续页信息；两个都有时全带上（scope=group/dm 用 seq/时间，all 用 map）。
+  if (!conversations && !(hasCreatedAt && hasID)) return { hits, hasMore: false, next: null }
+  const next: HubSearchCursor = { seq: Number(cursor.seq) || 0 }
+  if (hasCreatedAt) next.created_at = cursor.created_at
+  if (hasID) next.id = cursor.id
+  if (conversations) next.conversations = conversations
+  return { hits, hasMore: true, next }
 }
 
 /** hub_search payload。cursor 为 null = 第一页。 */
@@ -110,8 +134,15 @@ export function searchPagePayload(
   if (opts.agentId) payload.agent_id = opts.agentId
   payload.limit = Math.max(1, Math.min(200, Math.trunc(opts.limit ?? HUB_SEARCH_LIMIT)))
   const cursor = opts.cursor
-  if (cursor && cursor.id && cursor.created_at) {
-    payload.before = { created_at: cursor.created_at, id: cursor.id, seq: cursor.seq ?? 0 }
+  if (cursor) {
+    // conversations 必须原样回传：scope=all 的续页完全依赖它（缺失会退回第一页）。
+    const before: HubSearchCursor = { seq: cursor.seq ?? 0 }
+    if (cursor.id) before.id = cursor.id
+    if (cursor.created_at) before.created_at = cursor.created_at
+    if (cursor.conversations && Object.keys(cursor.conversations).length > 0) {
+      before.conversations = { ...cursor.conversations }
+    }
+    if (before.conversations || (before.id && before.created_at)) payload.before = before
   }
   return payload
 }

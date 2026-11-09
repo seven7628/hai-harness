@@ -125,6 +125,64 @@ eq(mod.searchScopeLabel('all'), '全部', 'scope 文案：全部')
   )
 }
 
+// —— 4b) 逐会话续页游标必须 opaque 回传（复审 B1：丢掉它就退回第一页）——
+{
+  const page = mod.mapSearchPage({
+    hits: [
+      { scope: 'group', group_id: 'g1', seq: 5, message_id: 'msg_5' },
+      { scope: 'dm', agent_id: 'ag1', seq: 7, message_id: 'msg_7' },
+    ],
+    has_more: true,
+    next_before: {
+      created_at: '2026-11-09T10:00:00Z', id: 'msg_5', seq: 5,
+      conversations: { 'g:g1': 4, 'd:ag1': 0 },
+    },
+  })
+  assert(page.next && page.next.conversations, 'next_before.conversations 必须保留（不能只留 created_at/id）')
+  eq(page.next.conversations['g:g1'], 4, '续页 seq 原样保留')
+  eq(page.next.conversations['d:ag1'], 0, '0 值必须保留（该会话本轮没发出去，下页重取）')
+  const payload = mod.searchPagePayload('q', 'all', { cursor: page.next })
+  eq(
+    JSON.stringify(payload.before.conversations),
+    '{"g:g1":4,"d:ag1":0}',
+    'mapSearchPage → searchPagePayload 往返不丢 conversations',
+  )
+  eq(payload.before.id, 'msg_5', '兼容字段 id 一起带上')
+
+  // 只有 conversations（没有 created_at/id 的）游标也必须能翻页。
+  const mapOnly = mod.mapSearchPage({
+    hits: [{ scope: 'group', group_id: 'g1', seq: 2, message_id: 'msg_2' }],
+    has_more: true,
+    next_before: { conversations: { 'g:g1': 2 } },
+  })
+  assert(!!mapOnly.next, '只有 conversations 的游标也是可用游标')
+  eq(mod.searchPagePayload('q', 'all', { cursor: mapOnly.next }).before.conversations['g:g1'], 2, '只有 map 也能翻页')
+
+  // 非法 key / 负 value 丢弃；空 map 视为没有续页信息。
+  eq(
+    JSON.stringify(mod.readSearchConversations({ 'x:1': 2, 'g:ok': 3, 'g:neg': -1, 'd:bad': 'nope' })),
+    '{"g:ok":3}',
+    '非法 key/负值/非数字被丢弃',
+  )
+  eq(mod.readSearchConversations({}), undefined, '空 map → 没有续页信息')
+  eq(mod.readSearchConversations({ 'x:1': 2 }), undefined, '只有非法 key → 没有续页信息')
+  const broken = mod.mapSearchPage({
+    hits: [{ scope: 'group', group_id: 'g1', seq: 1, message_id: 'msg_1' }],
+    has_more: true,
+    next_before: { conversations: { 'x:1': 2 } },
+  })
+  eq(broken.hasMore, false, '没有可用游标 → has_more=false（不能宣称还能翻）')
+
+  // 旧格式游标（无 conversations）仍按 created_at/id 走（scope=group/dm 快速路径）。
+  const legacy = mod.mapSearchPage({
+    hits: [{ scope: 'group', group_id: 'g1', seq: 1, message_id: 'msg_1' }],
+    has_more: true,
+    next_before: { created_at: '2026-11-09T10:00:00Z', id: 'msg_1', seq: 1 },
+  })
+  assert(!!legacy.next && !legacy.next.conversations, '旧游标不凭空造 conversations')
+  eq(mod.searchPagePayload('q', 'group', { cursor: legacy.next }).before.id, 'msg_1', '旧游标继续可用')
+}
+
 // —— 5) 点命中：加载「命中 seq 附近一页」的计划 ——
 {
   const g = mod.searchAroundPlan('group', 'grp_1', 42)

@@ -84,6 +84,8 @@ const seenCmds = []
 const seenSends = []
 // hub_group_history / hub_history 的 payload：搜索跳转要证明「真的拉了命中附近一页」。
 const seenHistory = []
+// hub_search 的 before 游标：要证明手机端把 next_before.conversations 原样回传（B1）。
+const seenSearchBefore = []
 let failSend = false
 let sendOk = 0
 
@@ -171,17 +173,32 @@ function mockCmd(cmd, payload) {
       }
       return { messages: groupMessages, has_more: false }
     }
-    case 'hub_search':
-      return {
+    case 'hub_search': {
+      const before = (payload || {}).before || {}
+      const convs = before.conversations || {}
+      const base = {
         query: String((payload || {}).query || ''),
         scope: String((payload || {}).scope || 'all'),
         limit: 50,
-        hits: SEARCH_HITS,
-        count: SEARCH_HITS.length,
-        has_more: false,
-        next_before: null,
         scanned: 2,
       }
+      // 第二页：只有客户端回传了 conversations 才会走到这里（否则后端会退回第一页）。
+      if (convs['g:grp_1'] === 40) {
+        const older = {
+          scope: 'group', group_id: 'grp_1', name: '产品评审群', seq: 30, message_id: 'msg_30',
+          snippet: '…更旧的关键词命中…', sender: 'Alice', sender_kind: 'agent', kind: 'text',
+          created_at: NOW, owner_only: false,
+        }
+        return { ...base, hits: [older], count: 1, has_more: false, next_before: null }
+      }
+      return {
+        ...base,
+        hits: SEARCH_HITS,
+        count: SEARCH_HITS.length,
+        has_more: true,
+        next_before: { created_at: NOW, id: 'msg_1', seq: 1, conversations: { 'g:grp_1': 40 } },
+      }
+    }
     case 'hub_open':
       return {
         agent: AGENT,
@@ -232,6 +249,9 @@ function startServer() {
       }
       if (cmd === 'hub_group_history' || cmd === 'hub_history') {
         seenHistory.push(body.payload || {})
+      }
+      if (cmd === 'hub_search') {
+        seenSearchBefore.push((body.payload || {}).before || {})
       }
       try {
         const data = mockCmd(cmd, body.payload || {})
@@ -567,6 +587,20 @@ async function main() {
     assert(sheetMetrics.scopes.every((h) => h >= 44), `搜索范围 chip 应 >=44px: ${JSON.stringify(sheetMetrics.scopes)}`)
     assert(sheetMetrics.ownerBadges >= 1, 'owner-only 命中必须有「仅群主可见」徽标')
     console.log(`  ✅ 搜索面板: ${sheetMetrics.rows.length} 行结果，全部 >=44px，无横向溢出`)
+
+    // 深翻页：点「更早的结果」必须把 next_before.conversations 原样回传（B1），
+    // 第二页追加而不是重画（不重复第一页的 3 条）。
+    await page.click('#hub-search-more')
+    await page.waitForFunction(() => document.querySelectorAll('#hub-search-results .hub-search-hit').length === 4)
+    assert(
+      seenSearchBefore.some((b) => b.conversations && b.conversations['g:grp_1'] === 40),
+      `第二页请求必须回传 conversations 游标，got=${JSON.stringify(seenSearchBefore)}`,
+    )
+    const paged = await page.evaluate(() =>
+      [...document.querySelectorAll('#hub-search-results .hub-search-hit')].map((r) => r.dataset.searchKey),
+    )
+    assert(new Set(paged).size === paged.length, `翻页后结果不能重复，got=${JSON.stringify(paged)}`)
+    console.log('  ✅ 搜索: 更早的结果回传 conversations 游标、追加 1 条且无重复')
 
     // Escape：关闭面板（浏览器对 type=search 的原生行为会同时清空输入，
     // 我们的 input 处理把 query 一起清掉 —— 重新打开是干净的空搜索）。
