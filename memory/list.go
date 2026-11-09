@@ -138,13 +138,27 @@ func parseIndexEntries(body string) []string {
 			continue
 		}
 		t = strings.TrimSpace(strings.TrimPrefix(t, "- "))
-		if t == "" || strings.ContainsAny(t, " \t") {
+		if t == "" {
 			continue
 		}
-		if strings.EqualFold(filepath.Base(t), IndexFileName) {
+		// 先按"带说明的索引行"取定位符，再退回"整行就是一个文件名"。
+		//
+		// 这个先后顺序是 2026-11 修的：原规则只认**不含空格**的行，而真实索引行
+		// 长这样 —— `- [x.md](x.md) — 摘要…`，全部含空格，于是 72 条真实记忆
+		// 一条都认不出来，设置面板把整个库显示成"未登记"（实测 indexed=0/72）。
+		// 退回规则保留，是为了老库那种纯文件名列表照旧能用。
+		name := ""
+		if target, _, ok := splitLocator(t); ok {
+			name = target
+		} else if !strings.ContainsAny(t, " \t") && strings.EqualFold(filepath.Ext(t), ".md") {
+			// 纯文件名行也要求 .md 后缀：否则任何一行无空格的中文都会被当成一个
+			// 记忆文件列出来（`Missing: true`），面板上凭空多出几十条"丢失的记忆"。
+			name = t
+		}
+		if name == "" || strings.EqualFold(filepath.Base(name), IndexFileName) {
 			continue
 		}
-		out = append(out, t)
+		out = append(out, name)
 	}
 	return out
 }

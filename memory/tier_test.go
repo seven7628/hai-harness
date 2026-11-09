@@ -392,3 +392,15 @@ func TestGuidanceDoesNotClaimPartialWhenNothingOmitted(t *testing.T) {
 		t.Fatalf("此时应按全量形态陈述限额：\n%s", inj.Text)
 	}
 }
+
+// 真实索引行是 `- [x.md](x.md) — 摘要…`（含空格），面板的"是否已登记"必须认得出来。
+//
+// 反例（2026-11 修掉的那个）：只认无空格的纯文件名行 → 72 条真实记忆一条都认不出，
+// 面板把整库显示成未登记。
+func TestParseIndexEntriesRecognizesLinkedLines(t *testing.T) {
+	body := "# Memory Index\n- [a.md](a.md) — 摘要一\n- `notes/b.md` — 摘要二\n- 只是散文，没有文件\n- c.md\n"
+	got := strings.Join(parseIndexEntries(body), ",")
+	if got != "a.md,notes/b.md,c.md" {
+		t.Fatalf("parseIndexEntries = %q", got)
+	}
+}
