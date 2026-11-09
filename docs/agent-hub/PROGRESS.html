@@ -1411,9 +1411,9 @@ const BASE = {
       ],
       "acceptance": "真实配对→Hub 列表→群聊@→派活→结果卡→停止全链路（走 mobile HTTP/WS 与真实 Hub 状态机，不用静态字符串断言）；断网重连/息屏恢复后游标与任务卡一致；手动重试复用 client_msg_id 不产生重复消息；验证 390 移动布局（已有真实测量）；iOS Safari 若无法真机则明确 defer，不冒充通过；独立 Review PASS 后才进 P4-01。",
       "tests": "go test ./desktop/bridge -run 'MobileP4|Mobile' -count=1 && node desktop/app/scripts/check-mobile-390.mjs",
-      "commit": "",
-      "status": "in_progress",
-      "note": "实现中；真实配对/Hub 命令/WS/任务/停止全链路 + 重试幂等 + Review"
+      "commit": "9436882",
+      "status": "review",
+      "note": "实现完成；主会话 E2E/238/390 绿；Review task-v2rzhzy8 进行中"
     },
     {
       "id": "P4-04",
@@ -2219,7 +2219,9 @@ const BASE = {
       "reviewNote": "独立 Review task-bb34tpm4 PASS：主题 system/ink/paper 持久化且仅 system 跟系统；44px 全站（含 chip/sheet/mention）；reduced-motion 覆盖三处无限动画；IME-aware @ 键入/键盘/插入；失败保草稿+重试防双发；Hub mdLite 全 DOM/textContent 无 XSS；贴底+可见才推进已读；N1-N10 全闭合；390×844 真实 Chromium 四屏 scrollWidth=390、按钮全 ≥44。变异 44px/motion/@/草稿/已读/innerHTML 全 RED。"
     },
     "P4-03d": {
-      "status": "in_progress"
+      "status": "review",
+      "commit": "9436882",
+      "note": "实现完成；Review 进行中"
     }
   },
   "reviewGate": {
