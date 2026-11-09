@@ -284,6 +284,32 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   assert(empty.includes('- 消息：0 条'), '空群消息数为 0')
 }
 
+// —— 8b) exportMarkdown：上下文发送者名字转义（复审 B2）——
+{
+  const evilName = '<img src=x onerror=alert(1)>'
+  const md = exportMarkdown.groupTimelineMarkdown({
+    group: { id: 'grp_x', name: 'X' },
+    messages: [{
+      seq: 7, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_a' }, text: '回复',
+      created_at: 'T', context: { trigger_seqs: [6], senders: [{ name: evilName }] },
+    }],
+    exportedAt: 'T',
+  })
+  assert(md.includes('&lt;img src=x onerror=alert\\(1\\)&gt;'), '上下文发送者名字被 HTML + Markdown 转义')
+  assert(!md.includes('<img'), '群时间线不含原始 <img 标签')
+  const longName = 'N'.repeat(80)
+  const capped = exportMarkdown.groupTimelineMarkdown({
+    group: { id: 'grp_x', name: 'X' },
+    messages: [{
+      seq: 8, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_a' }, text: '回复',
+      created_at: 'T', context: { senders: [{ name: longName }] },
+    }],
+    exportedAt: 'T',
+  })
+  assert(!capped.includes(longName), '过长的发送者名字被截断')
+  assert(capped.includes('N'.repeat(20) + '…'), '截断与 escapeInline 同一 cap 语义（60）')
+}
+
 // —— 9) exportMarkdown：任务 ——
 {
   const task = {
@@ -377,10 +403,10 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   assert((H.getState().notice ?? '').includes('#99'), 'seq 不在已加载历史时如实提示')
   eq(H.getState().jump, null, '没加载到目标 seq 不登记跳转')
 
-  H.getState().requestJump(4)
+  H.getState().requestJump(2)
   const req = H.getState().jump
   eq(req?.targetId ?? '', 'ag_mockres1', 'requestJump 落在当前目标')
-  eq(req?.seq ?? 0, 4, 'requestJump 记录 seq')
+  eq(req?.seq ?? 0, 2, 'requestJump 记录已加载的 seq')
   H.getState().clearJump((req?.nonce ?? 0) + 1)
   assert(H.getState().jump, '别的 nonce 不能清掉当前请求')
   H.getState().clearJump(req?.nonce ?? 0)
@@ -399,11 +425,126 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   assert((prompt?.note ?? '').includes('L5'), '预览 note 说明 L5 不在预览内')
   eq(counts.get('hub_agent_prompt_preview') ?? 0, 1, '只读预览只请求一次')
   const views = contextView.promptLayerViews(prompt?.layers)
-  eq(views.map((l) => l.label).join(','), 'L1,L3', 'mock 预览层带 L 号（real 响应同形）')
+  eq(views.map((l) => l.label).join(','), 'L1,L2', 'mock 预览层带 L 号（real 响应同形：protocol=L1、identity=L2）')
   await H.getState().loadPromptPreview('ag_mockres1')
   eq(counts.get('hub_agent_prompt_preview') ?? 0, 1, '同 agent 复用缓存（切页签不重复请求）')
   await H.getState().loadPromptPreview('ag_mockres1', true)
   eq(counts.get('hub_agent_prompt_preview') ?? 0, 2, 'force 重新读取')
+}
+
+// —— 11) 复审行为：深链所有权（B1）与缺失 seq（B3）——
+{
+  transport.resetTransport()
+  const t = transport.getTransport()
+  const counts = new Map()
+  const rawSend = t.send.bind(t)
+  t.send = (cmd) => {
+    counts.set(cmd.type, (counts.get(cmd.type) ?? 0) + 1)
+    return rawSend(cmd)
+  }
+  const H = store.useHubStore
+  const reset = (patch = {}) => H.setState({
+    open: false, activeId: null, activeGroupId: null, agents: [], groups: [],
+    messages: [], groupMessages: [], hasMore: false, dm: {}, tasks: [], needs: [],
+    error: null, notice: null, jump: null, prompt: null, loading: false,
+    deepLinkOwnedOpen: false, ...patch,
+  })
+  const waitFor = async (cond, ms = 1500) => {
+    const started = Date.now()
+    while (Date.now() - started < ms) {
+      if (cond()) return true
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    return cond()
+  }
+
+  // B1-①：Hub 曾开过（群已缓存）→ 关闭 → 深链打开；mount effect 与深链同 tick 竞争。
+  reset()
+  await H.getState().loadGroups()
+  H.setState({
+    open: false, activeGroupId: 'grp_mock1', groupMessages: [{ seq: 5, text: '陈旧快照' }],
+    jump: null, notice: null, deepLinkOwnedOpen: false,
+  })
+  counts.clear()
+  const pending = H.getState().openDeepLink('hub://group/grp_mock1?seq=3')
+  // HubSurface 挂载时调用的就是这一个 store 函数（不是测试自造的旁路）。
+  H.getState().resumeOpenTarget()
+  const ok = await pending
+  eq(ok, true, '缓存后关闭的群深链打开成功')
+  eq(H.getState().activeGroupId, 'grp_mock1', '深链选中群目标')
+  assert(H.getState().jump && H.getState().jump.seq === 3, '深链跳转没有被 mount 重开作废（B1）')
+  eq(H.getState().jump?.targetId ?? '', 'grp_mock1', '跳转归属该群')
+  eq(H.getState().notice, null, '不再误报「不在已加载历史」')
+  assert(H.getState().groupMessages.length >= 5, '群历史已加载')
+  eq(counts.get('hub_group_get') ?? 0, 1, '只打开一次群（mount 没有重复 select）')
+  eq(counts.get('hub_group_history') ?? 0, 1, '只拉一次群历史（没有重复请求/循环）')
+  eq(H.getState().deepLinkOwnedOpen, true, '深链打开期间持有本次打开的所有权')
+  // StrictMode 会双跑 mount effect：第二次 resume 仍然必须跳过（一次性 claim 会在这里翻车）。
+  H.getState().resumeOpenTarget()
+  await new Promise((r) => setTimeout(r, 30))
+  eq(counts.get('hub_group_get') ?? 0, 1, 'StrictMode 双跑 mount 也只有深链一次打开')
+  eq(counts.get('hub_group_history') ?? 0, 1, 'StrictMode 双跑 mount 不重复拉历史')
+  H.getState().closeHub()
+  eq(H.getState().deepLinkOwnedOpen, false, '关闭后所有权释放')
+
+  // B1-②：mount effect 晚于深链完成（claim 必须留到消费，不能靠「在飞」窗口）。
+  reset()
+  await H.getState().loadGroups()
+  H.setState({ open: false, activeGroupId: 'grp_mock1', groupMessages: [], jump: null, notice: null })
+  counts.clear()
+  await H.getState().openDeepLink('hub://group/grp_mock1?seq=3')
+  assert(H.getState().jump && H.getState().jump.seq === 3, '深链完成后跳转在 store 里')
+  H.getState().resumeOpenTarget()
+  await new Promise((r) => setTimeout(r, 30))
+  eq(counts.get('hub_group_get') ?? 0, 1, '迟到的 mount 被 claim 挡住（不重复打开）')
+  eq(counts.get('hub_group_history') ?? 0, 1, '迟到的 mount 不重复拉历史')
+  assert(H.getState().jump && H.getState().jump.seq === 3, '迟到的 mount 不清掉深链跳转')
+
+  // B1-③：普通重新打开（非深链）仍要 mount 水合 —— claim 不能误伤。
+  reset()
+  await H.getState().loadGroups()
+  H.setState({ open: false, activeGroupId: 'grp_mock1', groupMessages: [], jump: null })
+  counts.clear()
+  H.getState().openHub()
+  H.getState().resumeOpenTarget()
+  assert(await waitFor(() => H.getState().groupMessages.length >= 5), '普通打开时 mount 仍重新水合群历史')
+  eq(counts.get('hub_group_history') ?? 0, 1, '普通打开 mount 只拉一次历史')
+
+  // B3：缺失 seq 不能留下一条永不消费的 jump。
+  reset({ open: true, activeGroupId: 'grp_mock1' })
+  H.setState({
+    groupMessages: [
+      { seq: 1, kind: 'text', sender: { kind: 'human' }, text: 'hi', created_at: 'T' },
+      { seq: 2, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockres1' }, text: 'yo', created_at: 'T' },
+    ],
+    jump: null, notice: null,
+  })
+  H.getState().requestJump(99)
+  eq(H.getState().jump, null, '缺失 seq 不登记 jump（B3）')
+  assert((H.getState().notice ?? '').includes('#99'), '缺失 seq 给可见提示')
+  const view = { stickBottom: true, scrollTop: 0, scrollHeight: 120, clientHeight: 40 }
+  const follow = () => {
+    if (view.stickBottom && seqJump.canAutoFollow(H.getState().jump, 'grp_mock1')) view.scrollTop = view.scrollHeight
+  }
+  H.getState().handleEvent(JSON.stringify({
+    event_type: 'hub_message', group_id: 'grp_mock1', seq: 3,
+    message: { seq: 3, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockres1' }, text: '新消息', created_at: 'T' },
+  }))
+  follow()
+  eq(view.scrollTop, view.scrollHeight, '缺失跳转之后新消息仍然贴底（B3）')
+  H.getState().requestJump(1)
+  eq(H.getState().jump?.seq ?? 0, 1, '后续合法跳转仍然生效')
+  eq(seqJump.canAutoFollow(H.getState().jump, 'grp_mock1'), false, '合法跳转让贴底先让位')
+  H.getState().clearJump(H.getState().jump.nonce)
+  eq(seqJump.canAutoFollow(H.getState().jump, 'grp_mock1'), true, '跳转消费后贴底恢复')
+  // 消费方不再立刻 clear（StrictMode 双跑），必须靠 TTL 释放，否则仍会永久挡贴底。
+  H.getState().requestJump(2)
+  assert(H.getState().jump && H.getState().jump.seq === 2, '再次登记合法跳转')
+  await new Promise((r) => setTimeout(r, store.HUB_JUMP_TTL_MS + 150))
+  eq(H.getState().jump, null, '跳转 TTL 到期自动释放（B3 的兜底清路）')
+  eq(seqJump.canAutoFollow(H.getState().jump, 'grp_mock1'), true, 'TTL 过期后贴底恢复')
+  await H.getState().openDeepLink('hub://group/grp_mock1?seq=4')
+  eq(H.getState().jump?.seq ?? 0, 4, '缺失跳转之后深链跳转仍能登记')
 }
 
 console.log(`\n✅ hub Context/深链/导出：${pass} 项全部通过`)

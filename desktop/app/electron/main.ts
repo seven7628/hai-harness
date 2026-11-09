@@ -788,6 +788,9 @@ function createWindow(): void {
   })
   mainWindow.webContents.on('did-start-loading', () => {
     startupMark('did-start-loading')
+    // 刷新后新的 renderer 还没订阅/还没 take：深链必须回到队列，否则 send 给一个
+    // 没有监听器的页面 = 静默丢链接（复审：注释说了复位，代码此前漏了这一步）。
+    rendererReady = false
     // 页面刷新（reload/导航）瞬间强制隐藏内嵌浏览器视图——WebContentsView 层级
     // 恒在 DOM 之上，刷新时 renderer 重新挂载（React 状态重置）期间若视图保持
     // visible，会浮在最上层挡住主页面（2026-08-30 实测：展开右栏后刷新必现）。

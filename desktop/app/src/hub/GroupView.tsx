@@ -11,7 +11,7 @@ import MentionPicker from './MentionPicker'
 import TypingIndicator from './TypingIndicator'
 import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './groupThread'
 import { triggerSeqBySender } from './groupProjection'
-import { scrollToSeq, seqJumpPlan } from './seqJump'
+import { canAutoFollow, scrollToSeq, seqJumpPlan } from './seqJump'
 import { groupTimelineMarkdown } from './exportMarkdown'
 import { downloadText, safeFilename, timestampSlug } from './download'
 import {
@@ -62,7 +62,6 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const select = useHubStore((s) => s.select)
   const agents = useHubStore((s) => s.agents)
   const jump = useHubStore((s) => s.jump)
-  const clearJump = useHubStore((s) => s.clearJump)
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
@@ -86,6 +85,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const stickBottom = useRef(true)
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 每个实例只消费每个 nonce 一次：store 里的 jump 会保留 TTL，重复 effect
+  //（StrictMode 双跑 / 流式消息）不能重复滚动。
+  const handledJump = useRef(0)
 
   const members = group.members ?? []
   const roster = useMemo(() => groupRoster(group, agents), [group, agents])
@@ -159,7 +161,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
   useEffect(() => {
     if (view !== 'chat' || !stickBottom.current) return
     // 有待执行的深链/触发跳转时先别贴底：跳转自己会滚动，否则一帧内先到底再回中。
-    if (jump && jump.targetId === group.id) return
+    if (!canAutoFollow(jump, group.id)) return
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [
@@ -291,10 +293,12 @@ export default function GroupView({ group }: { group: HubGroup }) {
   // 深链 / Context 面板的触发 seq（P4-02）：目标群且消息已加载才由本视图执行。
   useEffect(() => {
     const plan = seqJumpPlan(jump, { targetId: group.id, messages })
-    if (!plan) return
+    if (!plan || handledJump.current === plan.nonce) return
     if (!jumpToSeq(plan.seq)) return
-    clearJump(plan.nonce)
-  }, [jump, group.id, messages, jumpToSeq, clearJump])
+    // 有意不在消费后立刻 clearJump：StrictMode 会双跑 effect，第一个实例清掉后
+    // 第二个实例就看不到跳转（高亮丢失）。jump 由 store 的 TTL（2s）回收。
+    handledJump.current = plan.nonce
+  }, [jump, group.id, messages, jumpToSeq])
 
   // 已结算时间线的元素树按依赖记忆（P4-01 实测，220 条消息 + 3 条流式草稿）：
   // 草稿 delta / 输入框每敲一个字都会重渲染 GroupView，但 messages/rounds 没变。

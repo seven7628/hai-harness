@@ -147,7 +147,7 @@ export default function ContextPanel() {
                   key={seq}
                   className={`hub-btn hub-context-seq${loadedSeqs.has(seq) ? '' : ' missing'}`}
                   onClick={() => requestJump(seq)}
-                  title={loadedSeqs.has(seq) ? `跳到 #${seq} 并高亮` : `#${seq} 不在已加载历史里，仍会尝试定位`}
+                  title={loadedSeqs.has(seq) ? `跳到 #${seq} 并高亮` : `#${seq} 不在已加载历史里，点击会提示`}
                 >
                   #{seq}
                 </button>

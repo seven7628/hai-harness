@@ -9,7 +9,7 @@ import HubInspector from './HubInspector'
 import GroupView from './GroupView'
 import { isImeComposing } from './mentions'
 import { formatRelativeTime, groupPreview, unreadBadge } from './conversation'
-import { highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
+import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubAgent, HubMessage, HubRunEntry } from './types'
 import './hub.css'
 
@@ -45,7 +45,6 @@ export default function HubSurface() {
   const notice = useHubStore((s) => s.notice)
   const clearNotice = useHubStore((s) => s.clearNotice)
   const jump = useHubStore((s) => s.jump)
-  const clearJump = useHubStore((s) => s.clearJump)
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const draft = activeId ? (drafts[activeId] ?? '') : ''
   const inspector = useHubStore((s) => s.inspector)
@@ -74,16 +73,18 @@ export default function HubSurface() {
   const stickBottom = useRef(true)
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
   const highlightTimer = useRef<number | null>(null)
+  // 每个实例只消费每个 nonce 一次（同 GroupView：store 的 jump 留 TTL 给 StrictMode 第二实例）。
+  const handledJump = useRef(0)
 
   useEffect(() => {
     void refresh()
     // 中途离开再回来：重开当前 target —— 回复可能是在没有订阅时落定的（B3），
     // 只 refresh() 会留下半截流式气泡与常亮运行点；群还要重新水合 conversation/
     // 已读游标（B7）。Hub 关闭期间 activeGroupId 仍保留，但事件按「未打开」计未读。
-    const state = useHubStore.getState()
-    if (state.activeGroupId) void selectGroup(state.activeGroupId)
-    else if (state.activeId) void select(state.activeId)
-    // 只在挂载时跑一次（select/selectGroup/refresh 自身的引用变化不需要重开）。
+    // 深链刚打开 Hub 时这次重开会与深链自己的 select 换代（复审 B1）：
+    // 是否重开由 store 的 deepLinkOwnedOpen 判定，组件不再自己看 activeGroupId/activeId。
+    useHubStore.getState().resumeOpenTarget()
+    // 只在挂载时跑一次（refresh 自身的引用变化不需要重开）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -92,7 +93,7 @@ export default function HubSurface() {
     const el = listRef.current
     if (!el || !stickBottom.current) return
     // 待执行的深链跳转优先：先贴底再跳会闪一下（跳转 effect 会接管滚动）。
-    if (jump && jump.targetId === activeId) return
+    if (!canAutoFollow(jump, activeId)) return
     el.scrollTop = el.scrollHeight
   }, [messages.length, live, jump, activeId])
 
@@ -100,14 +101,15 @@ export default function HubSurface() {
   // 群走 GroupView 的同一条路径（targetId 不匹配时这里直接跳过）。
   useEffect(() => {
     const plan = seqJumpPlan(jump, { targetId: activeId, messages })
-    if (!plan) return
+    if (!plan || handledJump.current === plan.nonce) return
     stickBottom.current = false // 别让「跟随最新」把定位顶回底部
     if (!scrollToSeq(listRef.current, plan.seq)) return
+    handledJump.current = plan.nonce
     setHighlightSeq(plan.seq)
-    clearJump(plan.nonce)
     if (highlightTimer.current != null) window.clearTimeout(highlightTimer.current)
     highlightTimer.current = window.setTimeout(() => setHighlightSeq(null), 1800)
-  }, [jump, activeId, messages, clearJump])
+    // 不在消费后立刻 clearJump：见 GroupView 同处注释（StrictMode 双跑会丢高亮）。
+  }, [jump, activeId, messages])
 
   useEffect(() => () => {
     if (highlightTimer.current != null) window.clearTimeout(highlightTimer.current)

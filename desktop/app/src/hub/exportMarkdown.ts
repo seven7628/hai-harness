@@ -86,7 +86,12 @@ function timeOf(value?: string): string {
 function messageContextLine(msg: HubMessage, names: Record<string, string>): string {
   const seqs = (msg.context?.trigger_seqs ?? []).filter((n) => Number(n) > 0)
   const senders = (msg.context?.senders ?? [])
-    .map((s) => String(s?.name ?? '').trim() || nameOf(String(s?.agent_id ?? ''), names))
+    // 显式 name 同样来自消息上下文（后端快照/模型输入），必须按单行字段转义：
+    // 原样拼进 Markdown 会变成可执行 HTML（复审 B2）。nameOf 内部已转义。
+    .map((s) => {
+      const explicit = String(s?.name ?? '').trim()
+      return explicit ? escapeInline(explicit, 60) : nameOf(String(s?.agent_id ?? ''), names)
+    })
     .filter((name) => name !== '—')
   const parts: string[] = []
   if (seqs.length > 0) parts.push(`触发：${seqs.map((n) => `#${n}`).join(', ')}`)

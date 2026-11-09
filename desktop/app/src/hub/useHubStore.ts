@@ -106,6 +106,13 @@ interface HubState {
   groupConvStopping: boolean
   /** 待执行的跳转/高亮（深链、Context 面板的触发 seq）；消费方按 targetId 认领。 */
   jump: HubJumpRequest | null
+  /**
+   * 「本次 Hub 是被深链打开的」：为 true 时 HubSurface 挂载不再自动重新水合
+   * （resumeOpenTarget 直接返回）。不能做成一次性 consume：React StrictMode 会
+   * 双跑 mount effect，第二次就会把深链自己的 selectGroup 换代 abort（复审 B1）。
+   * 生命周期 = 本次打开：closeHub / openHub 都清掉，深链自己也在打开时重置。
+   */
+  deepLinkOwnedOpen: boolean
   /** 当前选中智能体的系统提示词预览（只读；hub_agent_prompt_preview）。 */
   prompt: HubPromptState | null
 
@@ -127,6 +134,8 @@ interface HubState {
   requestJump(seq: number): void
   /** 消费方只清掉自己接的那一次（nonce 防旧请求被后来的跳转误清）。 */
   clearJump(nonce: number): void
+  /** HubSurface 挂载时调用：重新水合当前 target（深链拥有本次打开时跳过）。 */
+  resumeOpenTarget(): void
   /** hub:// 深链：打开 Hub → 选中目标 → 历史就绪后定位 seq。重复调用共享同一次加载。 */
   openDeepLink(raw: string): Promise<boolean>
   /** 复制深链（Clipboard API + 主进程兜底，见 lib/clipboard）；结果写 notice/error。 */
@@ -162,6 +171,27 @@ const dmInfoUpdatedAt = new Map<string, number>()
 let jumpNonce = 0
 // hub:// 深链在飞表：OS 重传/连点同一链接时共享同一次选择与加载（P4-02）。
 const deepLinkInflight = new Map<string, Promise<boolean>>()
+// 跳转请求的存活时间：视图消费后不立刻从 store 清除（StrictMode 会双跑 effect，
+// 第一实例清掉后第二实例就看不到跳转、高亮丢失）。2s 后自动过期，避免一条
+// 永不消费的 jump 永久挡住贴底跟随（复审 B1/B3）。
+export const HUB_JUMP_TTL_MS = 2000
+let jumpTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearJumpTimer(): void {
+  if (jumpTimer) {
+    clearTimeout(jumpTimer)
+    jumpTimer = null
+  }
+}
+
+/** 给 jump 装上过期定时器；只清仍属于这个 nonce 的那一条（期间可能已被新跳转替换）。 */
+function armJumpTimer(nonce: number, clear: () => void): void {
+  clearJumpTimer()
+  jumpTimer = setTimeout(() => {
+    jumpTimer = null
+    clear()
+  }, HUB_JUMP_TTL_MS)
+}
 
 /** 本地投影变了：记一笔时间，供 loadGroups 的竞态守卫判断谁更新。 */
 function touchGroupInfo(gid: string): void {
@@ -242,10 +272,11 @@ export const useHubStore = create<HubState>((set, get) => ({
   groupAssignNote: null,
   groupConvStopping: false,
   jump: null,
+  deepLinkOwnedOpen: false,
   prompt: null,
 
   openHub() {
-    set({ open: true })
+    set({ open: true, deepLinkOwnedOpen: false })
     void get().refresh()
     void get().loadTasks()
     void get().loadNeeds()
@@ -253,7 +284,10 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 
   closeHub() {
-    set({ open: false })
+    // 关闭即作废：深链的所有权只覆盖「这一次打开」，正常重开仍要 mount 水合；
+    // 未执行的跳转也一并丢弃（下次打开从当前时间线底部开始）。
+    clearJumpTimer()
+    set({ open: false, deepLinkOwnedOpen: false, jump: null })
   },
 
   async refresh() {
@@ -459,16 +493,35 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 
   requestJump(seq) {
-    const target = get().activeGroupId || get().activeId
+    const state = get()
+    const target = state.activeGroupId || state.activeId
     const n = Math.trunc(Number(seq))
     if (!target || !Number.isSafeInteger(n) || n <= 0) return
-    set({ jump: { seq: n, targetId: target, nonce: ++jumpNonce } })
+    const messages = state.activeGroupId ? state.groupMessages : state.messages
+    if (!messages.some((m) => Number(m.seq) === n)) {
+      // 目标消息不在已加载历史里：**不能**留下一条永远消费不掉的 jump。
+      // 视图的贴底 guard 见到「属于本目标的 jump」就让位，一条永不执行的 jump
+      // 会让新消息不再跟随（复审 B3）。这里只提示一次，并清掉旧 jump。
+      clearJumpTimer()
+      set({ notice: `消息 #${n} 不在已加载的历史里`, jump: null })
+      return
+    }
+    const nonce = ++jumpNonce
+    set({ jump: { seq: n, targetId: target, nonce } })
+    armJumpTimer(nonce, () => {
+      if (get().jump?.nonce === nonce) set({ jump: null })
+    })
   },
 
   clearJump(nonce) {
     const current = get().jump
     // 只清自己接的那一次：旧消费方（例如切群前的 GroupView effect）不能误清新请求。
-    if (current && current.nonce === nonce) set({ jump: null })
+    if (current && current.nonce === nonce) {
+      clearJumpTimer()
+      set({ jump: null })
+    } else if (!current) {
+      clearJumpTimer()
+    }
   },
 
   async openDeepLink(raw) {
@@ -482,9 +535,12 @@ export const useHubStore = create<HubState>((set, get) => ({
     // 同一深链重复触发（OS 重传 / 连点 / 主进程两次转发）共享同一次加载：
     // 再跑一遍 select 会把已经滚好的位置重置回底部。
     if (running) return running
+    const wasOpen = get().open
     const run = (async (): Promise<boolean> => {
       // 深链是新动作：上一次的提示/错误不该继续挂着（避免「已复制」盖住这次的结果）。
-      set({ open: true, error: null, notice: null })
+      // 从关闭态打开时登记所有权：本次打开期间 HubSurface 挂载不得再自动 select，
+      // 否则 selectGroup/select 换代会把下面这次选择 abort 掉，跳转就丢了（B1）。
+      set({ open: true, error: null, notice: null, ...(wasOpen ? {} : { deepLinkOwnedOpen: true }) })
       const hasTarget = () =>
         link.kind === 'group'
           ? get().groups.some((g) => g.id === link.id)
@@ -522,7 +578,13 @@ export const useHubStore = create<HubState>((set, get) => ({
       )
       if (loaded) {
         // 只登记请求，滚动/高亮由目标视图消费（seqJumpPlan 校验目标 + 已加载）。
-        set({ jump: { seq: link.seq, targetId: link.id, nonce: ++jumpNonce }, notice: null })
+        // 不在消费时立刻清：StrictMode 双跑 mount 时第一实例的清空会让第二实例
+        // 看不到跳转（高亮丢失）。交给 TTL，过期后自动释放贴底。
+        const nonce = ++jumpNonce
+        set({ jump: { seq: link.seq, targetId: link.id, nonce }, notice: null })
+        armJumpTimer(nonce, () => {
+          if (get().jump?.nonce === nonce) set({ jump: null })
+        })
       } else {
         // 群历史没有分页命令：目标不在最近 50 条里时如实说明，别假装跳了。
         set({ notice: `消息 #${link.seq} 不在已加载的历史里（会话已打开）` })
@@ -535,6 +597,18 @@ export const useHubStore = create<HubState>((set, get) => ({
     } finally {
       deepLinkInflight.delete(key)
     }
+  },
+
+  resumeOpenTarget() {
+    // 离开 Hub 再回来：重新水合当前 target —— 回复可能是在没有订阅时落定的（B3），
+    // 群还要重开 conversation/已读游标（B7）。但深链刚把 Hub 打开时，选择与跳转
+    // 归深链所有：这里再 select 一次就会换代，把深链的选择作废（复审 B1）。
+    // 注意用「本次打开」的所有权而不是一次性 claim：StrictMode 会双跑 mount effect，
+    // 一次性 claim 第二次就被消费掉，照样 abort。closeHub/openHub 负责清所有权。
+    if (get().deepLinkOwnedOpen) return
+    const state = get()
+    if (state.activeGroupId) void get().selectGroup(state.activeGroupId)
+    else if (state.activeId) void get().select(state.activeId)
   },
 
   async copyDeepLink(kind, id, seq) {

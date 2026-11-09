@@ -38,6 +38,18 @@ export function seqJumpPlan(
   return { seq, targetId: request.targetId, nonce: request.nonce }
 }
 
+/**
+ * 贴底跟随是否该执行：有待执行且属于当前目标的跳转时先让位（跳转自己滚动）。
+ * 关键是 requestJump 只在 seq 已加载时才登记 jump —— 一条永远消费不掉的 jump
+ * 会让这里一直返回 false，新消息就不再跟随（复审 B3）；两边共用这一个判据。
+ */
+export function canAutoFollow(
+  jump: HubJumpRequest | null | undefined,
+  targetId: string | null | undefined,
+): boolean {
+  return !(jump && targetId && jump.targetId === targetId)
+}
+
 /** 消息是否处于跳转高亮态（气泡/系统行共用）。 */
 export function highlightClass(seq: number | null | undefined, highlightSeq: number | null | undefined): string {
   const s = Math.trunc(Number(seq))

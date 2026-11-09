@@ -1643,9 +1643,18 @@ class MockTransport implements Transport {
   onExit(_cb: (info: BridgeExitInfo) => void): () => void {
     return () => undefined
   }
-  // hub:// 深链：浏览器 mock 没有 OS 协议处理器；返回空退订（Web 端行为与未注册一致）。
-  onHubDeepLink(): () => void {
-    return () => undefined
+  // hub:// 深链：浏览器 mock 没有 OS 协议处理器，用 `hub:deep-link` DOM 事件模拟。
+  // 调试/Playwright 可这样触发：
+  //   window.dispatchEvent(new CustomEvent('hub:deep-link', { detail: 'hub://group/<id>?seq=N' }))
+  // 这样 mount/深链的竞态（复审 B1）能在真实 React 树里复现，而不只是 store 单测。
+  onHubDeepLink(cb: (url: string) => void): () => void {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => undefined
+    const listener = (event: Event): void => {
+      const url = (event as CustomEvent<unknown>).detail
+      if (typeof url === 'string' && url) cb(url)
+    }
+    window.addEventListener('hub:deep-link', listener)
+    return () => window.removeEventListener('hub:deep-link', listener)
   }
   takeHubDeepLinks(): Promise<string[]> {
     return Promise.resolve([])
@@ -2997,7 +3006,7 @@ class MockTransport implements Transport {
         const agent = this.hubAgents.find((a) => a.id === id)
         const layers = [
           { key: 'protocol', title: 'L1 · Hub 协议', text: 'You are an agent in Agent Hub…（mock）' },
-          { key: 'identity', title: 'L3 · 身份与职责', text: `${agent?.name ?? ''} — ${agent?.role ?? ''}` },
+          { key: 'identity', title: 'L2 · 身份与职责', text: `${agent?.name ?? ''} — ${agent?.role ?? ''}` },
         ]
         this.respond(cmd, { agent_id: id, layers, total_chars: layers.reduce((n, l) => n + l.text.length, 0), note: 'L5 技能清单与工具 schema 在请求期由内核装配，不在预览内。' })
         break
