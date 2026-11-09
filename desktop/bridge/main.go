@@ -6751,7 +6751,14 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 		var oldest int64
 		now := time.Now()
 		for id, bs := range ws.sessions {
-			if id == keepID || bs.running.Load() {
+			if id == keepID {
+				continue
+			}
+			// 不只 running：Hub 任务可能已 Ask 未开跑（hubDispatchPending）、
+			// 群轮已投递未回复（hubGroupBusy）、AgentEnd 未结算（hubSettling），
+			// 或输入还在 inbox 里（PendingCount>0）。这些会话被淘汰 = 任务直接丢失，
+			// 而它们都不在 running 里 —— LRU 必须与 hubSessionBusy 同口径。
+			if hubSessionBusy(bs) || (bs.s != nil && bs.s.PendingCount() > 0) {
 				continue
 			}
 			if now.Sub(time.Unix(0, bs.lastUsed.Load())) < sessionEvictGrace {
