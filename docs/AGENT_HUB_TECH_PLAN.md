@@ -2241,8 +2241,40 @@ loopOpts = append(loopOpts, agents.WithMemoryInjection(res.Injection.Text))
 
 ### 7.4 与手机端 / IM 的关系
 
-- 手机端 `mobile_server.go` 有命令白名单；Hub 命令**默认不开放**（P3 再评估）。
-  群组消息量级和移动端交互（@ 选择、产物预览）需要单独设计，不建议 P1 顺手放开。
+- 手机端 `mobile_server.go` 是**默认拒绝**的命令白名单。Hub 命令从 P4-03a 起按
+  **精选白名单显式开放**（不是「整族放开」），只覆盖手机 Hub 屏的日常读写：
+
+  | 类别 | 命令 |
+  | --- | --- |
+  | 只读 / 打开 | `hub_agent_list`、`hub_agent_get`、`hub_group_list`、`hub_group_get`、`hub_open`、`hub_history`、`hub_group_history`、`hub_group_activity`、`hub_task_list`、`hub_task_get`、`hub_need_list`、`hub_artifact_get` |
+  | 安全写 | `hub_send`、`hub_group_send`、`hub_group_assign`、`hub_conversation_stop`、`hub_task_cancel`、`hub_task_retry`、`hub_need_resolve`、`hub_mark_read`、`hub_clear` |
+  | 仍不开放 | 智能体 CRUD / 记忆 / 提示词 / 版本 / 回滚；群组 CRUD；成员增删 |
+
+  白名单之外的 `hub_*` 一律 403（`TestMobileHubCommandAllowlist` 逐条钉住）；既有危险面
+  （改设置、装技能、切模型、放开监听、回填目录选择结果）继续拒绝。
+- 事件流：手机 Hub 屏用**独立** WebSocket `GET /api/events?scope=hub&token=…`，只收
+  `hub_*` 应用级事件（`hub_message` / `hub_message_delta` / `hub_task_update` /
+  `hub_round` / `hub_conversation` / `hub_need` / `hub_alert` / `hub_agent_status`），
+  不收任何会话事件；会话流同样永远收不到 `hub_*`（`mobile_hub.go` 两类订阅严格隔离）。
+  慢订阅者只丢可重建的流式帧（会话 chunk、`hub_message_delta`），丢过就标记并在写循环里
+  补一帧 `{"type":"resync"}`；Hub 屏收到 `hello`/`resync` 后按 `hubResync` 重拉快照
+  （`hub_group_history` / `hub_history` + 任务板 / Needs），**不复用**会话的 `openSession`。
+  Hub 流没有 replay 语义：重连只回 `hello`，历史由快照重拉并按 id/seq 合并去重。
+- 发送幂等：手机 `hub_group_send` / `hub_send` 一律带 `client_msg_id`。失败草稿的
+  「重试」**复用首次**的 `client_msg_id`（成功、或用户改了草稿/换了目标才换新），
+  否则「首次其实已落盘、只是响应丢了」的重试会把同一段正文写成两条；服务端按
+  `client_msg_id` 幂等返回首次回执（`deduplicated:true`，不写日志、不再发事件），
+  客户端已落盘的消息也不再插乐观气泡（`hasLandedClientMsg`）。
+- P4-03d 端到端证据（`desktop/bridge/mobile_p4_e2e_test.go`）：真 `mgr.dispatch` +
+  真 Hub FileStore（HOME 隔离），不注入 echo 替身。链路：`POST /api/pair` 换 token →
+  `scope=hub` 的 WS → `hub_group_list` / `hub_group_history` → 人 @A（结构化 mentions）
+  → `hub_message` + `hub_message_delta`（拼起来等于 final 正文）→ `hub_group_assign`
+  派给 B → `hub_task_update`（running→completed）→ 群里恰好一张 `task_result` 卡；
+  `hub_task_list` / `hub_need_list` / `hub_mark_read` 读写同一份存储；断线重连后重拉
+  快照不重复、终态卡仍在；`hub_conversation_stop` 之后队列里的成员不再启动、不再写
+  智能体 final（含线上事件顺序断言）。390×844 真实浏览器测量见
+  `desktop/app/scripts/check-mobile-390.mjs`（Playwright Chromium）；iOS Safari 真机
+  本轮**未**验证（显式 defer，见 P4-03d 交付记录）。
 - IM 桥（`im_bridge.go`）可以把「群组消息」映射到飞书/微信，但这是 P4；v1 只做桌面。
 - 事件协议保持「未知事件忽略」，所以新增 `hub_*` 不会破坏旧客户端。
 

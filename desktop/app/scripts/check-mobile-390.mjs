@@ -7,6 +7,8 @@
 //      用 Playwright Chromium 在 390x844 真实渲染 列表 / Hub 首页 / 群 / DM；
 //   3. 断言 documentElement.scrollWidth <= 390、顶栏按钮不被裁切、可见按钮 >=44px；
 //   4. 顺带实测主题持久化、reduced-motion、键入 @、发送失败保草稿、已读游标。
+//   5. P4-03d：发送失败后「重试」的 payload 必须沿用首次 client_msg_id（幂等键），
+//      且结构化 mentions 真的发给后端（不是只画在输入框里）。
 //
 // 浏览器不可用时不会静默跳过：打印 MODE=static + 原因，只跑静态审计；
 // 传 --require-browser 则直接失败（CI 可用来强制真实测）。
@@ -77,6 +79,9 @@ const MIME = {
 }
 
 const seenCmds = []
+// 发送类命令的 payload：P4-03d 要证明「失败后重试沿用同一个 client_msg_id」，
+// 以及结构化 mentions 真的发给了后端（不是只画在输入框里）。
+const seenSends = []
 let failSend = false
 let sendOk = 0
 
@@ -176,6 +181,9 @@ function startServer() {
       }
       const cmd = String(body.cmd || '')
       seenCmds.push(cmd)
+      if (cmd === 'hub_group_send' || cmd === 'hub_send') {
+        seenSends.push({ cmd, payload: body.payload || {} })
+      }
       try {
         const data = mockCmd(cmd)
         return json(res, 200, { ok: true, data })
@@ -461,6 +469,17 @@ async function main() {
     await page.waitForSelector('.hub-send-error', { state: 'detached' })
     assert(seenCmds.filter((c) => c === 'hub_group_send').length === 2, '重试确实重新发送了一次')
     console.log('  ✅ 重试成功后才清空草稿')
+    const sends = seenSends.filter((x) => x.cmd === 'hub_group_send')
+    const cid1 = sends[0] && sends[0].payload.client_msg_id
+    const cid2 = sends[1] && sends[1].payload.client_msg_id
+    assert(Boolean(cid1), `首次发送必须带幂等键 client_msg_id，got=${JSON.stringify(cid1)}`)
+    assert(cid1 === cid2, `失败后重试必须沿用首次 client_msg_id（got ${cid1} vs ${cid2}）`)
+    console.log('  ✅ 重试沿用同一 client_msg_id（首次其实落盘也不会写两条）')
+    assert(
+      Array.isArray(sends[1].payload.mentions) && sends[1].payload.mentions.includes('ag_alice'),
+      `发送 payload 必须带结构化 mentions，got=${JSON.stringify(sends[1].payload.mentions)}`,
+    )
+    console.log('  ✅ 发送 payload 带结构化 mentions（@Alice → ag_alice）')
 
     // —— DM ——
     await page.click('#back')

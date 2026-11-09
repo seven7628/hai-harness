@@ -7,6 +7,9 @@
 // hub resync 分支不得调用会话 openSession。
 // P4-03c 追加：键入 @、发送失败保草稿、hub_alert 去重、定稿 mdLite（安全 DOM）、
 //              贴底+可见的已读守卫、主题 system/ink/paper、44px/reduced-motion。
+// P4-03d 追加：失败草稿的「重试」必须复用首次 client_msg_id（幂等槽）：同一
+//              (正文, 目标) 复用、成功清空、改草稿/换目标换新；已落盘的消息不再
+//              插乐观气泡（否则 seq=0 会把回执盖回「发送中」）。
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -406,6 +409,153 @@ const roster = [
   const audit = auditMobileWeb()
   if (audit.errors.length) for (const e of audit.errors) console.error(`  ❌ ${e}`)
   assert(audit.errors.length === 0, `静态审计通过（${audit.checks} 条 CSS 规则）`)
+}
+
+// —— 17) P4-03d：失败草稿重试复用 client_msg_id（发送幂等） ——
+// 症状：手动「重试」如果换新 cid，而首次请求其实已经落盘（只是响应丢了），
+// 服务端会把同一段正文写成两条。槽（slot）语义：同一 (正文, 目标) 复用，
+// 成功清空，用户改草稿/换目标换新 —— 由 app.js 在执行层落实，模型层可单测。
+{
+  const gid = 'grp_1'
+  let n = 0
+  const gen = () => 'g-' + ++n
+  const noNew = () => {
+    throw new Error('复用路径不该生成新 cid')
+  }
+
+  const first = H.sendSlotID(null, '  你好 @Bob  ', gid, gen)
+  eq(first.text, '你好 @Bob', '槽正文去首尾空白')
+  eq(first.target, gid, '槽记录目标（群/DM 不串）')
+  eq(first.cid, 'g-1', '首次发送生成 cid')
+
+  const retry = H.sendSlotID(first, '你好 @Bob', gid, noNew)
+  eq(retry.cid, 'g-1', '同一失败草稿重试复用首次 client_msg_id')
+  eq(retry.text, first.text, '重试槽正文不变')
+  eq(H.sendSlotID(first, ' 你好 @Bob ', gid, noNew).cid, 'g-1', '首尾空白差异不算新草稿')
+  eq(H.sendSlotID(retry, '你好 @Bob', gid, noNew).cid, 'g-1', '重试再次失败后 cid 仍保留')
+
+  eq(H.sendSlotAfterEdit(retry, '你好 @Bob 补充'), null, '用户改了草稿 → 槽失效（换新 cid）')
+  eq(H.sendSlotAfterEdit(retry, ' 你好 @Bob '), retry, '草稿没变 → 槽保留')
+  eq(H.sendSlotAfterEdit(null, '任意'), null, '没有槽时返回 null')
+  const edited = H.sendSlotID(H.sendSlotAfterEdit(retry, '你好 @Bob 补充'), '你好 @Bob 补充', gid, gen)
+  assert(edited.cid !== 'g-1', '编辑后发送生成新 cid')
+
+  const otherGroup = H.sendSlotID(first, '你好 @Bob', 'grp_2', gen)
+  assert(otherGroup.cid !== 'g-1', '换群不复用 cid（否则被当成另一条消息的重放）')
+  const dmSlot = H.sendSlotID(null, '你好 @Bob', 'ag_alice', gen)
+  assert(dmSlot.cid !== first.cid && dmSlot.cid !== otherGroup.cid, 'DM 槽独立于群槽')
+
+  // 成功清空：调用方置 null，下一次发送必须是新 cid。
+  const afterSuccess = H.sendSlotID(null, '你好 @Bob', gid, gen)
+  assert(afterSuccess.cid !== 'g-1', '成功清空后下一次发送换新 cid')
+
+  // 端到端模型：服务端按 cid 幂等 + 客户端乐观气泡按 cid 去重。
+  const server = {
+    log: new Map(),
+    write(cid, text) {
+      if (this.log.has(cid)) {
+        const hit = this.log.get(cid)
+        return { seq: hit.seq, message_id: hit.id, deduplicated: true }
+      }
+      const msg = {
+        id: 'srv-' + (this.log.size + 1),
+        seq: this.log.size + 1,
+        client_msg_id: cid,
+        group_id: gid,
+        kind: 'text',
+        sender: { kind: 'human' },
+        text,
+      }
+      this.log.set(cid, msg)
+      return { seq: msg.seq, message_id: msg.id }
+    },
+  }
+  const sendOnce = (state, text, loseResponse) => {
+    const slot = H.sendSlotID(state.slot, text, gid, gen)
+    let messages = state.messages
+    if (!H.hasLandedClientMsg(messages, slot.cid)) {
+      messages = H.mergeMessages(
+        messages,
+        H.optimisticMessage({ text, clientMsgId: slot.cid, senderKind: 'human', groupId: gid }),
+      )
+    }
+    if (loseResponse) {
+      server.write(slot.cid, text) // 服务端写成功，响应在路上丢了
+      return {
+        slot,
+        messages: messages.filter((m) => !(m && m.pending && H.clientMsgID(m) === slot.cid)),
+      }
+    }
+    server.write(slot.cid, text)
+    messages = H.mergeMessages(messages, Object.assign({}, server.log.get(slot.cid)))
+    return { slot: null, messages }
+  }
+
+  let st = sendOnce({ slot: null, messages: [] }, '价格表结论', true)
+  eq(server.log.size, 1, '首次请求其实已经落盘')
+  eq(st.messages.length, 0, '失败时乐观气泡撤掉（草稿留在输入框）')
+  const lostCid = st.slot && st.slot.cid
+  assert(Boolean(lostCid), '失败后槽保留 cid（重试才有东西可复用）')
+
+  st = sendOnce(st, '价格表结论', false)
+  eq(st.slot, null, '成功之后槽清空')
+  eq(server.log.size, 1, '重试复用 cid → 服务端只写一条')
+  eq(st.messages.length, 1, '客户端时间线只有一条（乐观气泡按 cid 替换）')
+  eq(st.messages[0].seq, 1, '回执把乐观气泡替换成服务端消息')
+  assert(!st.messages[0].pending, '定稿后没有 pending 标记')
+  eq(H.clientMsgID(st.messages[0]), lostCid, '落盘消息带着首次的 client_msg_id')
+
+  st = sendOnce(st, '第二条', false)
+  eq(server.log.size, 2, '成功之后再发是一条新消息')
+  eq(st.messages.length, 2, '新消息正常追加')
+  assert(!H.hasLandedClientMsg([{ client_msg_id: 'x', seq: 0 }], 'x'), '未落盘（seq=0）不算 landed')
+  assert(H.hasLandedClientMsg([{ client_msg_id: 'x', seq: 3 }], 'x'), 'seq>0 视为已落盘')
+  assert(H.hasLandedClientMsg([{ refs: { client_msg_id: 'x' }, seq: 3 }], 'x'), 'refs.client_msg_id 也认')
+  assert(!H.hasLandedClientMsg([], 'x'), '空列表不 landed')
+
+  // 编辑后重试：同一条失败草稿被改了正文 → 新 cid、新消息。
+  const third = sendOnce({ slot: null, messages: st.messages }, '第三条', true)
+  const edited3 = H.sendSlotAfterEdit(third.slot, '第三条 补充')
+  eq(edited3, null, '编辑失败草稿后槽失效')
+  const fourth = sendOnce({ slot: edited3, messages: third.messages }, '第三条 补充', false)
+  eq(fourth.slot, null, '编辑后的发送成功后清空')
+  eq(server.log.size, 4, '编辑后发送是一条新消息（不是重放）')
+
+  // —— app.js 执行层接线（模型正确但如果没接上等于没修） ——
+  const gStart = appSrc.indexOf('async function sendHubGroup')
+  const gEnd = appSrc.indexOf('function appendHubGroupError', gStart)
+  const gBody = gStart >= 0 && gEnd > gStart ? appSrc.slice(gStart, gEnd) : ''
+  assert(gBody.length > 0, '找到 sendHubGroup 实现')
+  assert(/const slot = H\.sendSlotID\(state\.hub\.pendingGroupSend/.test(gBody), '群发送用 pendingGroupSend 取 cid')
+  assert(/state\.hub\.pendingGroupSend = slot/.test(gBody), '群发送把槽记回 state（失败后重试才能复用）')
+  assert(/H\.hasLandedClientMsg\(state\.hub\.groupMessages, cid\)/.test(gBody), '群发送用 hasLandedClientMsg 防乐观气泡覆盖已落盘消息')
+  const gCatchAt = gBody.indexOf('} catch (e) {')
+  const gFinallyAt = gBody.indexOf('} finally {')
+  const gCatch = gCatchAt >= 0 && gFinallyAt > gCatchAt ? gBody.slice(gCatchAt, gFinallyAt) : ''
+  assert(gCatch.length > 0, '找到 sendHubGroup 的失败分支')
+  assert(/pendingGroupSend = null/.test(gBody.slice(0, gCatchAt)), '群发送成功后清空幂等槽')
+  assert(!/pendingGroupSend = null/.test(gCatch), '失败分支不清空幂等槽（重试复用）')
+
+  const dStart = appSrc.indexOf('async function sendHubDM')
+  const dEnd = appSrc.indexOf('// ---- Hub 事件流', dStart)
+  const dBody = dStart >= 0 && dEnd > dStart ? appSrc.slice(dStart, dEnd) : ''
+  assert(dBody.length > 0, '找到 sendHubDM 实现')
+  assert(/const slot = H\.sendSlotID\(state\.hub\.pendingDMSend/.test(dBody), 'DM 发送用 pendingDMSend 取 cid')
+  assert(/state\.hub\.pendingDMSend = slot/.test(dBody), 'DM 发送把槽记回 state')
+  assert(/H\.hasLandedClientMsg\(state\.hub\.dmMessages, cid\)/.test(dBody), 'DM 发送用 hasLandedClientMsg')
+  assert(/state\.hub\.pendingDMSend = null/.test(dBody), 'DM 成功后清空幂等槽')
+  assert(
+    /state\.hub\.pendingGroupSend = H\.sendSlotAfterEdit\(state\.hub\.pendingGroupSend, t\.value\)/.test(appSrc),
+    '键入修改群草稿后清空幂等槽',
+  )
+  assert(
+    /state\.hub\.pendingDMSend = H\.sendSlotAfterEdit\(state\.hub\.pendingDMSend, t\.value\)/.test(appSrc),
+    '键入修改 DM 草稿后清空幂等槽',
+  )
+  assert(
+    /state\.hub\.pendingGroupSend = H\.sendSlotAfterEdit\(state\.hub\.pendingGroupSend, input\.value\)/.test(appSrc),
+    '插入 @ 改草稿后清空群幂等槽',
+  )
 }
 
 console.log(`\n手机 Hub 纯逻辑验收通过：${pass} 项`)

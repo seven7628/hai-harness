@@ -695,6 +695,38 @@
     return cur.trim() ? cur : String(sent || '')
   }
 
+  // ---------- 发送幂等：失败草稿的重试必须复用 client_msg_id ----------
+  // 手动「重试」是同一个失败草稿的第二次尝试，不是一条新消息：首次请求可能已经
+  // 落盘、只是响应/网络断了，换新 cid 会让服务端写成两条。所以：
+  //   - 同一 (草稿正文, 目标) 的重试沿用首次 cid；
+  //   - 成功之后清空（下一次发送是新消息）；
+  //   - 用户改了草稿或换了目标 → 内容/去向已经不同，换新 cid（见 sendSlotAfterEdit）。
+  // slot = { text, target, cid } | null。
+  function sendSlotID(slot, text, target, makeID) {
+    const key = String(text == null ? '' : text).trim()
+    const scope = str(target)
+    const cid = str(slot && slot.cid)
+    if (cid && slot.text === key && str(slot.target) === scope) {
+      return { text: key, target: scope, cid }
+    }
+    const made = typeof makeID === 'function' ? makeID() : makeID
+    return { text: key, target: scope, cid: str(made) }
+  }
+
+  // 草稿被用户改动（键入/插入 @）→ 已经不是那条失败消息：丢掉复用的 cid。
+  function sendSlotAfterEdit(slot, text) {
+    if (!slot) return null
+    return String(text == null ? '' : text).trim() === slot.text ? slot : null
+  }
+
+  // 同 cid 的消息已经落盘（首次请求其实成功了）：不要再插乐观气泡，
+  // 否则 seq=0 的本地对象会把权威回执盖成「发送中」。
+  function hasLandedClientMsg(messages, clientMsgId) {
+    const cid = str(clientMsgId)
+    if (!cid) return false
+    return (Array.isArray(messages) ? messages : []).some((m) => m && clientMsgID(m) === cid && num(m.seq) > 0)
+  }
+
   // ---------- 已读游标 ----------
   // 只有「贴底 + 页面可见」才算看到最新：往上读历史时不能把未读清掉。
   const READ_BOTTOM_PX = 48
@@ -794,6 +826,9 @@
     assignPayload,
     draftAfterSend,
     draftAfterFailure,
+    sendSlotID,
+    sendSlotAfterEdit,
+    hasLandedClientMsg,
     shouldMarkRead,
     hubAlertText,
     pushHubAlert,

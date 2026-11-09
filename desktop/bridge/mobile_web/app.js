@@ -79,6 +79,10 @@
       sheetNeeds: [],
       needsGroupId: '',
       mention: { open: false, query: '', index: 0 },
+      // 失败草稿的发送幂等槽（{text,target,cid}）：重试复用首次 client_msg_id，
+      // 成功/改动草稿才清空（见 hub_model.sendSlotID）。群与 DM 各一条。
+      pendingGroupSend: null,
+      pendingDMSend: null,
       busy: false,
     },
   }
@@ -1457,13 +1461,21 @@
     // 请求成功前不清空：失败时正文（含选中的 @ 提及）原样留在输入框里。
     closeMentionPicker()
     const roster = hubRoster()
-    const cid = nextClientMsgID('g')
+    // 同一个失败草稿「重试」沿用首次 client_msg_id：首次请求可能已经落盘，只是
+    // 响应丢了；换新 id 会写成第二条。成功或用户改了草稿才换（见 sendSlotID）。
+    const slot = H.sendSlotID(state.hub.pendingGroupSend, text, gid, () => nextClientMsgID('g'))
+    const cid = slot.cid
+    state.hub.pendingGroupSend = slot
     const optimistic = H.optimisticMessage({ text, clientMsgId: cid, senderKind: 'human', groupId: gid })
-    state.hub.groupMessages = H.mergeMessages(state.hub.groupMessages, optimistic)
-    renderHubGroupMessages({ stick: true })
+    // 首次请求其实成功、事件已经先到：不再插 seq=0 的乐观气泡（会把回执盖回「发送中」）。
+    if (!H.hasLandedClientMsg(state.hub.groupMessages, cid)) {
+      state.hub.groupMessages = H.mergeMessages(state.hub.groupMessages, optimistic)
+      renderHubGroupMessages({ stick: true })
+    }
     try {
       const data = await api('hub_group_send', H.groupSendPayload(gid, text, roster, cid))
-      // 成功才清空；发送期间用户新敲的内容保留。
+      // 成功才清空；发送期间用户新敲的内容保留。幂等槽同时失效：下一次是新消息。
+      state.hub.pendingGroupSend = null
       input.value = H.draftAfterSend(input.value, text)
       restoreComposer(input)
       if (state.hub.activeGroupId !== String(gid)) return
@@ -1479,12 +1491,13 @@
       }
       // 事件通常比 HTTP 响应先到（bridge 先 emit 再 resp）：已经落盘的消息不再
       // 用合成对象覆盖，避免把服务端 created_at/id 改回本地值。
-      const landed = state.hub.groupMessages.some((m) => m && H.clientMsgID(m) === cid && Number(m.seq) > 0)
+      const landed = H.hasLandedClientMsg(state.hub.groupMessages, cid)
       if (!landed) state.hub.groupMessages = H.mergeMessages(state.hub.groupMessages, final)
       renderHubGroupMessages({ stick: true })
       if (data.seq) void markHubGroupRead()
       scheduleHubHomeRefresh()
     } catch (e) {
+      // 失败：草稿与幂等槽都留着 —— 「重试」必须还是同一个 client_msg_id。
       state.hub.groupMessages = state.hub.groupMessages.filter((m) => !(m && m.pending && H.clientMsgID(m) === cid))
       input.value = H.draftAfterFailure(input.value, text)
       restoreComposer(input)
@@ -1670,14 +1683,20 @@
     const text = input.value.trim()
     if (!agentId || !text || state.hub.busy) return
     state.hub.busy = true
-    // 与群聊同口径：成功前不清空，失败保留草稿并给重试入口。
-    const cid = nextClientMsgID('d')
+    // 与群聊同口径：成功前不清空，失败保留草稿并给重试入口；重试复用同一个
+    // client_msg_id（首次请求可能已落盘，只是响应丢了）。
+    const slot = H.sendSlotID(state.hub.pendingDMSend, text, agentId, () => nextClientMsgID('d'))
+    const cid = slot.cid
+    state.hub.pendingDMSend = slot
     const optimistic = H.optimisticMessage({ text, clientMsgId: cid, senderKind: 'human', agentId })
-    state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, optimistic)
+    if (!H.hasLandedClientMsg(state.hub.dmMessages, cid)) {
+      state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, optimistic)
+    }
     state.hub.dmAwaiting = true
     renderHubDM({ stick: true })
     try {
       const data = await api('hub_send', H.dmSendPayload(agentId, text, cid))
+      state.hub.pendingDMSend = null
       input.value = H.draftAfterSend(input.value, text)
       restoreComposer(input)
       if (state.hub.activeAgentId !== String(agentId)) return
@@ -1691,7 +1710,7 @@
         text,
         created_at: new Date().toISOString(),
       }
-      const landed = state.hub.dmMessages.some((m) => m && H.clientMsgID(m) === cid && Number(m.seq) > 0)
+      const landed = H.hasLandedClientMsg(state.hub.dmMessages, cid)
       if (!landed) state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, final)
       renderHubDM({ stick: true })
       if (data.seq) void markHubDMRead(data.seq)
@@ -2031,6 +2050,8 @@
     const caret = typeof input.selectionStart === 'number' ? input.selectionStart : input.value.length
     const applied = H.applyMention(input.value, caret, member.name)
     input.value = applied.text
+    // 插入 @ 改动了草稿：失败草稿的幂等槽随之失效（下一次发送是新消息）。
+    state.hub.pendingGroupSend = H.sendSlotAfterEdit(state.hub.pendingGroupSend, input.value)
     input.focus()
     input.setSelectionRange(applied.caret, applied.caret)
     input.style.height = 'auto'
@@ -3040,6 +3061,12 @@
       t.addEventListener('input', (e) => {
         t.style.height = 'auto'
         t.style.height = Math.min(t.scrollHeight, 120) + 'px'
+        // 用户改了草稿：正文已不是那条失败消息，重试必须换新的 client_msg_id。
+        if (id === 'hub-group-input') {
+          state.hub.pendingGroupSend = H.sendSlotAfterEdit(state.hub.pendingGroupSend, t.value)
+        } else {
+          state.hub.pendingDMSend = H.sendSlotAfterEdit(state.hub.pendingDMSend, t.value)
+        }
         // 键入 @ 即时唤起全屏选择器；IME 组词期间不打断（＠ 上屏后再判断）。
         if (id === 'hub-group-input') mentionFromComposer(t, composing || e.isComposing === true)
       })
