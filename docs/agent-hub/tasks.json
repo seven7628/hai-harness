@@ -1163,20 +1163,30 @@
     {
       "id": "P4-04b",
       "phase": "P4",
-      "title": "Hub 消息搜索与日志归档",
+      "title": "Hub 全量消息搜索（04b-1；人类全局/agent 受限）",
       "deps": [
         "P4-04a"
       ],
       "files": [
         "agenthub/store.go",
+        "agenthub/store_memory.go",
+        "agenthub/store_dm.go",
+        "desktop/bridge/command_registry.go",
         "desktop/bridge/hub_commands.go",
-        "desktop/app/src/hub/HubSurface.tsx"
+        "desktop/bridge/mobile_server.go",
+        "desktop/app/src/hub/HubSurface.tsx",
+        "desktop/app/src/hub/useHubStore.ts",
+        "desktop/app/src/hub/types.ts",
+        "desktop/bridge/mobile_web/app.js",
+        "desktop/bridge/mobile_web/style.css",
+        "desktop/app/scripts/test-hub-search.mjs"
       ],
-      "acceptance": "群/DM 消息搜索（复用 Store.SearchMessages）；归档策略不影响 append/read 一致性；需产品/协议对搜索范围与保留期拍板。",
-      "tests": "go test ./agenthub ./desktop/bridge -run Search",
+      "acceptance": "人类可搜所有群/DM 全量历史（含未加载）；owner-only 对人类可见并标记、agent 只占位；agent 不能跨群；默认排除 routing/round/approval；scope/cursor/上限；点击命中加载 seq 附近并高亮；桌面+手机共用 hub_search；搜索不阻塞 append；1 万条消息 p95 目标 <150ms。",
+      "tests": "go test ./agenthub ./desktop/bridge -run 'Search|HubSearch' && npm run test:hub-search && npm run test:p4",
       "commit": "",
-      "status": "deferred",
-      "note": "搜索范围/保留期待产品拍板；Store.SearchMessages 已有读路径"
+      "status": "in_progress",
+      "note": "设计定稿见 docs/agent-hub/P4-04B-DESIGN.md；冷归档拆到 04b-2（默认不删除，阈值触发）",
+      "review": ""
     },
     {
       "id": "P4-05",
@@ -1219,6 +1229,40 @@
       "note": "实现 8946ab7，修复 2d6c866；复审 passed",
       "review": "passed",
       "reviewNote": "复审（task-6gq667m8）PASS。B-01 已修：hub_group_assign 优先 to_agent、回退计划字段 agent_id，两者并存 to_agent 胜；human origin 校验/Guard SkipAgentScope（indexed+fallback 测试已可杀变异）/assign 消息 sender=human+mentions=[B]/structured 路由/结算结果卡+不唤醒人类/群日预算硬停；N-01 人类已读游标、N-02 忙碌泵 queued→dispatched→completed、N-05 target_agent_id、事件顺序均已补。非阻塞：N-1 仍忙时重复 queued 更新、N-2/N-3 两个测试缺口、N-06 B 不能查询/取消人类任务（记债）。"
+    },
+    {
+      "id": "P4-04b-2",
+      "phase": "P4",
+      "title": "Hub 日志冷归档（04b-2；默认不删除）",
+      "deps": [
+        "P4-04b"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "agenthub/store_group_read.go",
+        "desktop/bridge/hub_commands.go"
+      ],
+      "acceptance": "单会话热日志 >20k 条或 >50MB 时冷归档较早 70%，热段保留最近 2k；archive 不可变段+manifest；读/搜透明合并；失败不丢消息；删除独立且默认关闭。",
+      "tests": "go test ./agenthub -run 'Archive|Search'",
+      "commit": "",
+      "status": "deferred",
+      "note": "设计见 P4-04B-DESIGN.md §2；等 04b-1 与真实规模数据触发，不先改 append-only 主路径"
+    },
+    {
+      "id": "P4-06",
+      "phase": "P4",
+      "title": "P4-04b 搜索收口 Review",
+      "deps": [
+        "P4-04b"
+      ],
+      "files": [
+        "docs/agent-hub/P4-04B-DESIGN.md"
+      ],
+      "acceptance": "04b-1 实现/测试/终端到端 Review；04b-2 保持显式 defer。",
+      "tests": "go test ./agenthub ./desktop/bridge -run 'Search|HubSearch'",
+      "commit": "",
+      "status": "todo",
+      "note": "新增搜索后单独终审；P4-05 的 04a 范围不覆盖本次增补"
     }
   ],
   "deferred": [
@@ -2106,7 +2150,16 @@
       "reviewNote": "独立 Final delta review task-k7hqg4dz PASS：B1 用户级 Stop 热替换（DM/群、disableAll 后旧 hook 归零）；B2 边界测试两种 project-loader mutation 均 RED；N5 公开契约注释 token-identical 校正；Hook|Hub|Mobile + agenthub/session + race 全绿。遗留 C1 窄窗口/C2 POSIX 测试/C3 路径规范化。"
     },
     "P4-04b": {
-      "status": "deferred"
+      "status": "in_progress",
+      "note": "04b-1 搜索实现中；设计定稿 P4-04B-DESIGN.md"
+    },
+    "P4-04b-2": {
+      "status": "deferred",
+      "note": "冷归档 v2，阈值触发；默认不删除"
+    },
+    "P4-06": {
+      "status": "todo",
+      "note": "04b-1 收口独立 Review"
     }
   },
   "reviewGate": {
