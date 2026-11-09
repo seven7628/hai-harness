@@ -221,6 +221,8 @@ func (bs *blockStore) finishCompact(snap *compactSnapshot, cw *compactWriter) er
 	bs.bytesWritten = cw.pos
 	bs.sortedDirty = true
 	bs.recomputeLiveBytes()
+	// 记下压缩后的体积：冷却判据用（见 block_store.go 的 compactCooldownFactor）。
+	bs.lastCompactBytes = cw.pos
 	if err := bs.startWriter(); err != nil {
 		return err
 	}

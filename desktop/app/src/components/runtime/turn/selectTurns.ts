@@ -245,6 +245,18 @@ export function turnUsage(
   return u
 }
 
+/** 一段运行自己的账。只认**这一段里出现过**的 run：缺 runId 的段以前回落到「整轮」，
+    于是「0 calls 的一段」被写成整轮的 11.00M tokens（用户 2026-11 截图里两个 0 calls
+    的 Worked 底下的那一行）。现在没有自己 run 的一段就是没账。 */
+export function segmentUsage(turn: Turn, run: TurnRun, metrics: TurnMetric[] | undefined): TurnUsage {
+  const only = new Set<string>()
+  if (run.runId) only.add(run.runId)
+  run.items.forEach((b) => {
+    if (b.kind === 'assistant' && b.runId) only.add(b.runId)
+  })
+  return turnUsage(turn, metrics, only)
+}
+
 /** 轮尾 / 折叠行的时长：口径同全仓 fmtDuration（1h30m / 1m25s / 1s666ms / 880ms）。 */
 export function durText(ms: number): string {
   if (!ms) return ''
@@ -292,6 +304,41 @@ const owningRunId = (b: MsgBlock): string | undefined => {
   }
 }
 
+/* 只做了压缩的那一次运行 —— 它的块属于**通知**，不属于「过程」。
+ *
+ * 典型形态（2026-11 用户报障）：AgentEnd 之后手动 `/compact`。命令经 inbox 注入，
+ * 空闲会话为了消费它会**新开一次 run**（AgentStart → CompressStart/End → AgentEnd），
+ * 这次 run 里没有正文、没有工具，唯一的内容就是压缩块 + 那行 `compress_end` 信号。
+ * 按 run 切段时它于是独占一段，画出来是一个没有时长的 `Worked · 1 compress` 盒子 ——
+ * 读起来像「又干了一段活」，而事实是「交卷之后做了一次上下文维护」。
+ *
+ * 判据只用块自己带的 run id：同一 run 里有没有**过程**（正文 / 工具 / 子 agent /
+ * 运行中插话）。没有 run id 的旧数据不算通知（保持老行为：压缩属于过程）。
+ * 记录（signal / task_delivery）没有 run id，按 turnRuns 的同一规则跟着**当前段**走。
+ */
+export function noticeBlocks(turn: Turn): Set<MsgBlock> {
+  const worked = new Set<string>()
+  const runs = new Set<string>()
+  for (const b of turn.items) {
+    const r = owningRunId(b)
+    if (!r) continue
+    runs.add(r)
+    if (
+      b.kind === 'assistant' || b.kind === 'tool' || b.kind === 'agent' ||
+      b.kind === 'async_task' || (b.kind === 'user' && b.injected)
+    ) worked.add(r)
+  }
+  const notice = new Set<MsgBlock>()
+  if (runs.size === 0) return notice
+  let cur: string | undefined
+  for (const b of turn.items) {
+    const r = owningRunId(b)
+    if (r) cur = r
+    if (cur && runs.has(cur) && !worked.has(cur)) notice.add(b)
+  }
+  return notice
+}
+
 /* 这条记录是不是 AgentEnd **之后**才到的。afterRun 位优先（bridge / store 在落块那一刻
    按「主 run 还在不在跑」盖章 —— 位置本身不是证据，checkpoint 恢复后位置只说明它插在哪）。
    旧快照没有这一位（`after_run` 当年是 omitempty，false 会被吃掉）时按**邻居**判：
@@ -329,14 +376,16 @@ export const answerIndex = (turn: Turn): number => {
   return a && !a.streaming ? turn.items.indexOf(a) : -1
 }
 
-/** 盒子外面（时间线上）的块：结构性/结论性块 + 交卷后到达的记录。 */
-export function outsideOf(turn: Turn): (b: MsgBlock, i: number) => boolean {
+/** 盒子外面（时间线上）的块：结构性/结论性块 + 交卷后到达的记录 + **只做了压缩的
+    那次运行**的全部块（见 noticeBlocks：AgentEnd 之后的手动压缩是通知，不是过程）。 */
+export function outsideOf(turn: Turn, notice?: ReadonlySet<MsgBlock>): (b: MsgBlock, i: number) => boolean {
   const answerAt = answerIndex(turn)
-  return (b, i) => ALWAYS_SHOWN.has(b.kind) || recordAfterRun(b, i, turn.items, answerAt)
+  const n = notice ?? noticeBlocks(turn)
+  return (b, i) => ALWAYS_SHOWN.has(b.kind) || n.has(b) || recordAfterRun(b, i, turn.items, answerAt)
 }
 
-export function foldedBody(turn: Turn): MsgBlock[] {
-  const outside = outsideOf(turn)
+export function foldedBody(turn: Turn, notice?: ReadonlySet<MsgBlock>): MsgBlock[] {
+  const outside = outsideOf(turn, notice)
   return turn.items.filter((b, i) => b === turn.answer || outside(b, i))
 }
 
@@ -350,8 +399,8 @@ export function foldedBody(turn: Turn): MsgBlock[] {
    includeAnswer 覆盖「这一轮根本没有 Working 盒子」的形态（纯对话轮：没有工具、
    没有子 agent，workBody 为空 ⇒ 不画盒子）。此时正文若仍被排除在外面，它就既不在
    盒子里（没有盒子）也不在外面 —— 整轮在 AgentEnd 之前一个字都渲染不出来。 */
-export function runningBody(turn: Turn, includeAnswer = false): MsgBlock[] {
-  const outside = outsideOf(turn)
+export function runningBody(turn: Turn, includeAnswer = false, notice?: ReadonlySet<MsgBlock>): MsgBlock[] {
+  const outside = outsideOf(turn, notice)
   return turn.items.filter((b, i) => outside(b, i) || (includeAnswer && b === turn.answer))
 }
 
@@ -369,16 +418,19 @@ export function runningBody(turn: Turn, includeAnswer = false): MsgBlock[] {
    The one assistant left out is the turn's answer: it is handed over to the Worked
    area at AgentEnd and must not appear twice. Compression blocks come along for the
    same reason — they are part of what happened during the run. */
-export function workBody(turn: Turn): MsgBlock[] {
+export function workBody(turn: Turn, notice?: ReadonlySet<MsgBlock>): MsgBlock[] {
   const answerAt = answerIndex(turn)
+  const n = notice ?? noticeBlocks(turn)
   return turn.items.filter(
     (b, i) =>
+      // 只做了压缩的那次运行（交卷后的手动 /compact）不进盒子：它是时间线上的通知。
+      !n.has(b) && (
       FOLDED_KINDS.has(b.kind)
       // 运行中插话：属于这次运行的过程（它不在外面 —— 外面是时间线，盒子已经收起了）。
       || (b.kind === 'user' && b.injected)
       // 运行中到达的记录：这一次运行的过程说明，按事件顺序夹在工作行之间。
       || (isRecord(b) && !recordAfterRun(b, i, turn.items, answerAt))
-      || ((b.kind === 'assistant' || b.kind === 'compression') && b !== turn.answer),
+      || ((b.kind === 'assistant' || b.kind === 'compression') && b !== turn.answer)),
   )
 }
 
@@ -430,6 +482,13 @@ export interface TurnRun {
   items: MsgBlock[]
 }
 
+/* 一段运行值不值得**单开一个盒子**：它交付过东西 —— 正文结论、记录（回执/信号）、产出。
+   交付过的段必须切出来：它的结论与记录要落在两个盒子之间的时间线上（见 defersToTurnEnd）。
+   没交付的连续运行（只跑了几轮思考/工具就被回执切开的续跑）合成一个盒子 —— 否则
+   「一次用户输入」会变成一排只剩时长的 Worked：用户 2026-11 的截图里一轮 4 个盒子，
+   其中三个 0 calls、没有任何正文（全是 run 边界，不是三次交付）。 */
+const delivers = (b: MsgBlock): boolean => isRecord(b) || b.kind === 'artifacts' || isText(b)
+
 export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
   const runs: TurnRun[] = []
   let curId: string | undefined
@@ -444,8 +503,10 @@ export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
   }
   turn.items.forEach((b, i) => {
     const rid = owningRunId(b)
-    // 已经在一段里，又遇到**另一个**主 run 的块 → 上一段到此为止（这就是情况二的边界）
-    if (rid && curId && rid !== curId) seal(i)
+    // 已经在一段里，又遇到**另一个**主 run 的块 → 上一段到此为止（这就是情况二的边界）。
+    // 只有上一段**交付过**才真的切：两个连着的 run 之间没有正文、没有记录、没有产出时，
+    // 它们对读者是同一段活，切开会留下一个只有「Worked for 4s · 0 calls」的空盒子。
+    if (rid && curId && rid !== curId && turn.items.slice(start, i).some(delivers)) seal(i)
     if (rid) curId = rid
   })
   seal(turn.items.length)
@@ -513,23 +574,25 @@ export function settleIndexOf(turn: Turn, run: TurnRun, answer: MsgBlock | undef
    运行在上一段里 —— 只看这一段会把它当成「前面没有运行块」。 */
 export function runWorkBody(
   items: MsgBlock[],
-  opts: { answer?: MsgBlock; answerAt: number; offset: number; all?: MsgBlock[] },
+  opts: { answer?: MsgBlock; answerAt: number; offset: number; all?: MsgBlock[]; notice?: ReadonlySet<MsgBlock> },
 ): MsgBlock[] {
   const all = opts.all ?? items
   return items.filter(
     (b, i) =>
+      // 只做了压缩的那次运行：段内块走时间线，盒子不画（见 noticeBlocks）。
+      !opts.notice?.has(b) && (
       FOLDED_KINDS.has(b.kind)
       || (b.kind === 'user' && b.injected)
       || (isRecord(b) && !recordAfterRun(b, i + opts.offset, all, opts.answerAt))
-      || ((b.kind === 'assistant' || b.kind === 'compression') && b !== opts.answer),
+      || ((b.kind === 'assistant' || b.kind === 'compression') && b !== opts.answer)),
   )
 }
 
 /* 这一轮有没有东西要装进 Working 盒子？盒子存在当且仅当 workBody 非空 ——
    不是「有没有工具」。按工具数判会把 async_task-only / system-only 的轮次整轮丢掉：
    workBody 里明明有行，却没有任何地方渲染它（盒子是按工具数决定画不画的）。 */
-export function hasWork(turn: Turn): boolean {
-  return workBody(turn).length > 0
+export function hasWork(turn: Turn, notice?: ReadonlySet<MsgBlock>): boolean {
+  return workBody(turn, notice).length > 0
 }
 
 /** Blocks that belong to the working phase even though they are not "a tool". */

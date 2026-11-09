@@ -247,6 +247,139 @@ var (
 	ErrTaskAbandoned = errors.New("task abandoned")
 )
 
+// mergeUsage 合并两份用量（逐项相加）。注册表回收任务时用它把用量累计到
+// accumulatedUsage（回收不丢账）。
+func mergeUsage(a, b core.Usage) core.Usage {
+	a.Input += b.Input
+	a.Output += b.Output
+	a.CacheRead += b.CacheRead
+	a.CacheWrite += b.CacheWrite
+	a.Reasoning += b.Reasoning
+	a.TotalTokens += b.TotalTokens
+	a.Cost.Input += b.Cost.Input
+	a.Cost.Output += b.Cost.Output
+	a.Cost.CacheRead += b.Cost.CacheRead
+	a.Cost.CacheWrite += b.Cost.CacheWrite
+	a.Cost.Total += b.Cost.Total
+	return a
+}
+
+// finishedTask 是已结束任务的紧凑终态摘要（几十字节，不是 Task 对象）。
+//
+// 保留哪些字段：够回答「这个任务后来怎么样了」的查询 —— 状态、身份、归属、
+// 用量、journal 路径（还原完整内容用）。**不**保留 channel/mutex/goroutine 绑定
+// 状态（那是 Task 对象的部分，也是它占内存的根源）。
+type finishedTask struct {
+	name         string
+	toolName     string
+	status       TaskStatus
+	parentTaskID string
+	resumedFrom  string
+	usage        core.Usage
+	outputFile   string
+	err          error
+	result       string
+	finishedAt   time.Time
+}
+
+// task 把摘要还原成一个**终态**Task 对象（供 get/Snapshot 的调用方使用）。
+// 注意：这个 Task 是「壳」——它的 inbox/done 是新建的空通道，没有等待者；
+// 它的作用只是承载状态字段（parentTaskID/status/usage 等）。
+func (f finishedTask) task(id string) *Task {
+	return &Task{
+		ID:               id,
+		Name:             f.name,
+		ToolName:         f.toolName,
+		Status:           f.status,
+		Result:           f.result,
+		Usage:            f.usage,
+		Err:              f.err,
+		outputFile:       f.outputFile,
+		parentTaskID:     f.parentTaskID,
+		resumedFrom:      f.resumedFrom,
+		acceptingDelivery: false,
+		done:             make(chan struct{}),
+		inbox:            make(chan core.Message, 1),
+	}
+}
+
+// finishedTaskCap / finishedTaskTTL 是终态摘要的保留上限（条数 / 时长）。
+//
+// 为什么要上限：摘要虽小，但「只增不减」的问题不能重演（见 Registry.finished 的注释）。
+// 超出时按结束顺序淘汰最旧的 —— 完整内容仍在 journal 里，按 task id 随时能还原。
+const (
+	finishedTaskCap = 20000
+	finishedTaskTTL = 24 * time.Hour
+)
+
+// SetTaskRehydrator 注入「按 task id 从 journal 还原已结束任务」的回落器。
+//
+// 用途：注册表不再保留已结束任务的对象（见 Registry.finished），但工具侧仍可能
+// 按 id 查历史任务（TaskOutput / agent_resume / TaskList）。宿主提供这个回落器：
+// 给 task id → 从 journal 读出终态（状态/结果/用量）→ 交回一个终态 Task。
+//
+// 回落器会在**注册表锁之外**被调用（它要读文件）——实现方不必自己加锁。
+func (r *Registry) SetTaskRehydrator(fn func(taskID string) (*Task, bool)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rehydrate = fn
+}
+
+// reclaimTask 任务终态后回收：终态摘要进 finished、用量累计进 accumulatedUsage、
+// 从 tasks 删除。完整内容按 task id 从 journal 还原（宿主注入的回落器）。
+//
+// 调用时机：任务终态确定、结果已投递之后（runAndFinalize 末尾）。
+func (r *Registry) reclaimTask(t *Task) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	ft := finishedTask{
+		name:         t.Name,
+		toolName:     t.ToolName,
+		status:      t.Status,
+		parentTaskID: t.parentTaskID,
+		resumedFrom:  t.resumedFrom,
+		usage:        t.Usage,
+		outputFile:   t.outputFile,
+		err:          t.Err,
+		result:       t.Result,
+		finishedAt:   time.Now(),
+	}
+	t.mu.Unlock()
+
+	r.mu.Lock()
+	if _, live := r.tasks[t.ID]; live {
+		delete(r.tasks, t.ID)
+		r.finishedOrder = append(r.finishedOrder, t.ID)
+		r.finished[t.ID] = ft
+		// 用量累计（口径与 TotalUsage 一致：弃置的任务不计）。
+		if ft.status != TaskAbandoned {
+			r.accumulatedUsage = mergeUsage(r.accumulatedUsage, ft.usage)
+		}
+		r.evictFinishedLocked()
+	}
+	r.mu.Unlock()
+}
+
+// evictFinishedLocked 按数量/时长淘汰最旧的终态摘要（调用方持 r.mu）。
+func (r *Registry) evictFinishedLocked() {
+	cutoff := time.Now().Add(-finishedTaskTTL)
+	for len(r.finishedOrder) > 0 {
+		id := r.finishedOrder[0]
+		ft, ok := r.finished[id]
+		if !ok {
+			r.finishedOrder = r.finishedOrder[1:]
+			continue
+		}
+		if len(r.finishedOrder) <= finishedTaskCap && ft.finishedAt.After(cutoff) {
+			return // 都还新鲜
+		}
+		delete(r.finished, id)
+		r.finishedOrder = r.finishedOrder[1:]
+	}
+}
+
 // Registry 后台任务注册表（并发安全）。
 // defaultAsyncTaskTimeout 后台子 agent 任务的执行上限（超时 = 终止并按「超时」上报，
 // 与逻辑失败区分）。默认 12h 是刻意的宽松值：1h 会砍掉仍在推进的长任务
@@ -257,6 +390,26 @@ const defaultAsyncTaskTimeout = 12 * time.Hour
 type Registry struct {
 	mu           sync.Mutex
 	tasks        map[string]*Task
+	// finished 是已结束任务的**紧凑终态摘要**（task id → 摘要）。
+	//
+	// 为什么不是把 Task 对象一直留着（2026-11-09 实测事故）：Task 带 channel/mutex/
+	// goroutine 绑定状态，而注册表**只增不减**（全包没有一处 delete）→ 进程长跑时
+	// 表涨到 65 万条（bridge 内存 2.5GB），且 List/TotalUsage/AbandonAll 每次都要
+	// 遍历全表（还在持有 r.mu 时遍历 → 别的路径全排队；实测有 goroutine 在 r.mu 上
+	// 等了 75 分钟，整条 dispatch 停摆 → 桌面端「所有工作区会话数都是 0」）。
+	//
+	// 现在的分工：tasks 只留「还在跑的」；已结束的进 finished（摘要，几十字节），
+	// 完整内容（结果/轮次历史/产出文件）按 task id 从 **journal 还原**
+	// （见 SetTaskRehydrator 与 agent_resume 的 journal 路径）。
+	finished map[string]finishedTask
+	// finishedOrder 是 finished 的插入序（= 结束序）：用于按时间/数量淘汰最旧的。
+	finishedOrder []string
+	// accumulatedUsage 是「已被回收的任务」的用量累计 —— 回收时不丢账
+	// （TotalUsage = accumulatedUsage + 仍在表中的任务用量）。
+	accumulatedUsage core.Usage
+	// rehydrate 是宿主注入的「按 task id 从 journal 还原已结束任务」的回落器
+	// （nil = 不注入 → 已结束任务只能靠 finished 摘要）。
+	rehydrate func(taskID string) (*Task, bool)
 	sessionCtx   context.Context                                                                   // 批超时豁免的等待 ctx（Session 注入；nil = Background）
 	onTaskDone   func(taskID, name, result string, status TaskStatus, usage core.Usage, err error) // 任务完成回调（宿主接线：自动回传主 Runtime）
 	slots        *SlotPool                                                                         // 主池：写型子 agent（agent_spawn 等）
@@ -329,6 +482,7 @@ func NewRegistry() *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Registry{
 		tasks:        make(map[string]*Task),
+		finished:     make(map[string]finishedTask),
 		slots:        NewSlotPool(DefaultConcurrency),
 		auxSlots:     NewSlotPool(DefaultConcurrency),
 		asyncCtx:     ctx,
@@ -650,6 +804,9 @@ func (r *Registry) runAndFinalize(t *Task, run func(context.Context, *Task) (str
 		// usage 同源 t.Usage（run 返回值已在上方写入）——回调里不再读 t，避免锁外读竞态
 		r.onTaskDone(t.ID, t.Name, result, status, usage, err)
 	}
+	// 终态已定、结果已投递 → 回收任务对象（终态摘要进 finished，用量累计）。
+	// 完整内容按 task id 从 journal 还原（宿主注入的回落器，见 SetTaskRehydrator）。
+	r.reclaimTask(t)
 }
 
 // ParentTaskIDOf 返回某任务发起方的后台任务 id（"" = 主 Agent 直派 / 未知）。
@@ -658,13 +815,27 @@ func (r *Registry) ParentTaskIDOf(taskID string) string {
 	if r == nil || taskID == "" {
 		return ""
 	}
-	t, err := r.get(taskID)
+	// 快路径：终态摘要里有 parentTaskID，不必走 get（更不必读 journal）。
+	// 这条路径很热 —— 宿主给每个终态事件标归属都调它。
+	r.mu.Lock()
+	t, live := r.tasks[taskID]
+	ft, done := r.finished[taskID]
+	r.mu.Unlock()
+	if live {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.parentTaskID
+	}
+	if done {
+		return ft.parentTaskID
+	}
+	tt, err := r.get(taskID)
 	if err != nil {
 		return ""
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.parentTaskID
+	tt.mu.Lock()
+	defer tt.mu.Unlock()
+	return tt.parentTaskID
 }
 
 // deliverToParent 把任务终态投回发起方子 agent 的 inbox（子→孙派发的结果通道）。
@@ -720,6 +891,18 @@ func (r *Registry) Send(id, msg string) error {
 // 用 Session 级 ctx（豁免批超时）。返回子运行最终回复与错误（abort 非失败：Err 为空）。
 // 在途 Wait 置 waiting：任务完成时跳过 OnTaskDone（结果已由 Wait 消费，不重复推送）。
 func (r *Registry) Wait(id string) (string, error) {
+	// 已结束的任务：终态摘要里就有结果/错误 —— **立即返回**。
+	// （不能走 get：被回收后 get 给的是合成壳，它的 done 通道永远是新的、不会关 → 永久阻塞。
+	//  这正是 2026-11-09 改回收后 TestBackgroundTaskContextExceededFails 挂住的原因。）
+	r.mu.Lock()
+	ft, done := r.finished[id]
+	r.mu.Unlock()
+	if done {
+		if ft.status == TaskAbandoned {
+			return "", ErrTaskAbandoned
+		}
+		return ft.result, ft.err
+	}
 	t, err := r.get(id)
 	if err != nil {
 		return "", err
@@ -779,11 +962,32 @@ func (r *Registry) Interrupt(id string) error {
 
 // List 枚举全部任务（TaskList / 压缩交接 [TaskStates]）：子 agent 注册表任务 +
 // 宿主注入的 promoted 工具任务（tooltask-*，在途已摘离）合并同榜 —— 后台任务一处可见。
+//
+// 锁纪律：**不在持有 r.mu 时拿 t.mu，也不调用宿主注入的闭包**。
+// 原来这里是「持 r.mu 遍历全部任务、逐个 t.mu.Lock()」——任务表只增不减（见
+// r.tasks 的注释），临界区是 O(任务数) 的，期间任何走 Registry.get() 的路径
+// （ParentTaskIDOf 是宿主给终态事件标注归属的必经路径）全部排队。
+// 2026-11-09 实测：bridge 跑 18h 后有 goroutine 在 r.mu 上等了 75 分钟，
+// 整条串行 dispatch 停摆 → 桌面端「所有工作区会话数都是 0、无法切会话」。
+// 现在改成：锁内只取任务指针快照，释放 r.mu 后再逐个取 t.mu。
 func (r *Registry) List() []TaskInfo {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]TaskInfo, 0, len(r.tasks))
+	tasks := make([]*Task, 0, len(r.tasks))
 	for _, t := range r.tasks {
+		tasks = append(tasks, t)
+	}
+	// 已结束任务的终态摘要（任务对象已被回收 → 摘要代替，见 Registry.finished）。
+	fin := make([]finishedTask, 0, len(r.finished))
+	finIDs := make([]string, 0, len(r.finished))
+	for id, ft := range r.finished {
+		fin = append(fin, ft)
+		finIDs = append(finIDs, id)
+	}
+	toolTasks := r.toolTasks
+	r.mu.Unlock()
+
+	out := make([]TaskInfo, 0, len(tasks)+len(fin))
+	for _, t := range tasks {
 		t.mu.Lock()
 		info := t.info()
 		if t.Err != nil {
@@ -792,8 +996,25 @@ func (r *Registry) List() []TaskInfo {
 		out = append(out, info)
 		t.mu.Unlock()
 	}
-	if r.toolTasks != nil {
-		for _, tt := range r.toolTasks() {
+	for i, ft := range fin {
+		info := TaskInfo{
+			ID:           finIDs[i],
+			Kind:         TaskKindAgent,
+			Name:         ft.name,
+			ToolName:     ft.toolName,
+			Status:       ft.status,
+			OutputFile:   ft.outputFile,
+			ParentTaskID: ft.parentTaskID,
+			ResumedFrom:  ft.resumedFrom,
+		}
+		if ft.err != nil {
+			info.Error = ft.err.Error()
+		}
+		out = append(out, info)
+	}
+	if toolTasks != nil {
+		// 宿主注入的枚举闭包：同样在锁外调用（它可能回头访问注册表）。
+		for _, tt := range toolTasks() {
 			st := TaskRunning
 			if tt.Interrupting {
 				st = TaskInterrupting
@@ -874,9 +1095,14 @@ func (r *Registry) Close(ctx context.Context) error {
 
 // 同进程共享注册表的场景下旧任务仍会跑到 done，但新 Session 经 Wait 拒绝）。
 func (r *Registry) AbandonAll(reason string) {
+	// 锁纪律同 List：锁内只取快照，逐个 t.mu 在锁外取（见 List 的注释）。
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	tasks := make([]*Task, 0, len(r.tasks))
 	for _, t := range r.tasks {
+		tasks = append(tasks, t)
+	}
+	r.mu.Unlock()
+	for _, t := range tasks {
 		t.mu.Lock()
 		if t.Status == TaskRunning {
 			t.Status = TaskAbandoned
@@ -892,10 +1118,16 @@ func (r *Registry) AbandonAll(reason string) {
 // 其已完成轮的已计费 token 仍完整反映在 Session.Usage（真实场景验证 2026-08-16：
 // 审查子 agent 3 轮 23,001 token 此前因此丢失，见 registry.go Task.addUsage）。
 func (r *Registry) TotalUsage() core.Usage {
+	// 锁纪律同 List：锁内只取快照，逐个 t.mu 在锁外取（见 List 的注释）。
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	var u core.Usage
+	tasks := make([]*Task, 0, len(r.tasks))
 	for _, t := range r.tasks {
+		tasks = append(tasks, t)
+	}
+	// 已被回收的任务的用量（回收时不丢账 —— 见 Registry.accumulatedUsage）。
+	u := r.accumulatedUsage
+	r.mu.Unlock()
+	for _, t := range tasks {
 		t.mu.Lock()
 		if t.Status == TaskRunning || t.Status == TaskInterrupting || t.Status == TaskCompleted || t.Status == TaskInterrupted || t.Status == TaskFailed {
 			u.Input += t.Usage.Input
@@ -915,13 +1147,27 @@ func (r *Registry) TotalUsage() core.Usage {
 	return u
 }
 
-// get 按 id 查任务（带锁）。
+// get 按 id 查任务（三级：还在跑 → 终态摘要 → journal 还原）。
+//
+// 锁纪律：锁只用来读表；**回落器（读文件）在锁外调用** —— 见 Registry.rehydrate。
 func (r *Registry) get(id string) (*Task, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	t, ok := r.tasks[id]
 	if !ok {
+		ft, ok2 := r.finished[id]
+		rehydrate := r.rehydrate
+		r.mu.Unlock()
+		if ok2 {
+			return ft.task(id), nil
+		}
+		// 最后回落：宿主注入的 journal 还原（跨进程 / 摘要已被淘汰）。
+		if rehydrate != nil {
+			if rt, ok3 := rehydrate(id); ok3 {
+				return rt, nil
+			}
+		}
 		return nil, fmt.Errorf("%w: %s", ErrTaskNotFound, id)
 	}
+	r.mu.Unlock()
 	return t, nil
 }

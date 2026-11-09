@@ -42,7 +42,7 @@ type ApprovalRequired interface {
 // 等）同名（Go 不允许字段与方法同名），这是设计层面的约定。
 // 语义（引擎 execute 统一 WithTimeout 包裹 Call，防工具挂死整个 agent）：
 //   - 返回 > 0 覆盖引擎默认值（信任工具作者，如 shell 的命令时限）；
-//   - 返回 0（或未实现）使用引擎默认值（WithToolTimeout，默认 30s）；
+//   - 返回 0（或未实现）使用引擎默认值（WithToolTimeout，默认 5m）；
 //   - 返回 < 0 显式不受限 —— 仅限生命周期自管理的工具（如子 agent，
 //     由 abort/ctx 级联控制，父引擎默认超时会误杀长时子运行）。
 type ToolTimeoutProvider interface {

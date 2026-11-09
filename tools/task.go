@@ -40,6 +40,27 @@ func (t *toolTask) stopTimeout() {
 	}
 }
 
+// release 释放任务的可摘离 ctx watcher。
+//
+// 为什么必须显式释放：core.Reparentable 每次创建都会起一个 watcher goroutine
+// （core/reparentable.go:39），它只在「父取消 / Cancel() / Detach()」三者之一
+// 发生时才退出。工具**正常跑完**时没有任何人调 Cancel/Detach（Detach 只在
+// promote 路径被调，Cancel 无人调）→ watcher 就永久停泊在 select 上
+//（父 ctx 在整个会话存活期内都不取消）→ **每次工具调用漏一个 goroutine**。
+//
+// 2026-11-09 实测：bridge 连续跑 18h 后 goroutine 创建计数到 65 万，dump 里
+// 大量 [select] 的停泊 watcher；goroutine 堆积同时把 registry 的 r.mu 拖成长
+// 临界区（见 subagent/registry.go 的 List 注释）。
+//
+// 用 Detach 而不是 Cancel：Detach 幂等（core.Reparentable.Detach 有 r.detached
+// 守卫，promote 路径已 Detach 过 → 重复调用无副作用），且**不会**把 ctx 的 err
+// 置成 context.Canceled——任务结束后再读 ctx 错误不会误报「被取消」。
+func (t *toolTask) release() {
+	if t.rctx != nil {
+		t.rctx.Detach()
+	}
+}
+
 // deliver 摘离任务的完成交付：onDone（Session 接线 → PushTaskResultStatus 自动回传）
 // + taskDone（map 清理 / 计数递减 / 控制器回收判定）。deliverOnce 保证只发一次：
 // 批等待循环的 done-check 补发与任务 goroutine 的完成路径并发安全。

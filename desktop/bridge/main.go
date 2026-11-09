@@ -1847,11 +1847,27 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 				// 窗口恢复：只解尾部 + 卡片块，其余按需分页（Marshal 无 limit 时
 				// 会自动物化全量，旧 UI 的「历史消息看不到」红线不受影响）。
 				cp, perr := parseCheckpointFromRecordWindow(rec, restoreWindowBlocks)
-				if cp == nil || cp.PagedBlocks == nil {
-					rec.ReleaseView() // 没有分页句柄 → 解码完即可释放映射
-				}
-				if perr == nil {
-					if err := reducer.Restore(cp); err == nil {
+				switch {
+				case perr != nil || cp == nil:
+					// 解析失败不能当空会话：metaOK 路径会直接回一份 0 块 checkpoint，
+					// 前端 hydrate 后标成「已恢复」→ 历史永远不出来且无报错。
+					// 标记 recordCorrupt，交给 new_session 的事件日志重放自愈。
+					rec.ReleaseView()
+					recordCorrupt = true
+					fmt.Fprintf(os.Stderr, "✗ checkpoint 解析失败 sid=%s: %v\n", id, perr)
+				case len(cp.Blocks) == 0 && len(rec.LoadedBlockIDs) > 0:
+					// 骨架能读、record 也引用了块，却解出 0 块：同样不能回空视图。
+					rec.ReleaseView()
+					recordCorrupt = true
+					fmt.Fprintf(os.Stderr, "✗ checkpoint 空视图 sid=%s（record 引用 %d 块）\n", id, len(rec.LoadedBlockIDs))
+				default:
+					if cp.PagedBlocks == nil {
+						rec.ReleaseView() // 没有分页句柄 → 解码完即可释放映射
+					}
+					if err := reducer.Restore(cp); err != nil {
+						recordCorrupt = true
+						fmt.Fprintf(os.Stderr, "✗ checkpoint restore 失败 sid=%s: %v\n", id, err)
+					} else {
 						reducer.NormalizeForRestore() // 重启后 running → 终态（done/abandoned）
 					}
 				}
@@ -1873,6 +1889,16 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	// 后台任务注册表 + 会话级 ctx 闭包：agent_* 工具与 Session 共享同一实例
 	// （bgCtx 闭包引用 s，NewSession 赋值前不调用——工具运行时 s 已就绪）。
 	reg := subagent.NewRegistry()
+	// 已结束任务的对象不再留在注册表里（只留终态摘要，见 subagent.Registry.reclaimTask）
+	// → 按 id 查历史任务时从 journal 还原。journal 路径只是 task id 的函数
+	// （sessions/<wsKey>/<sid>/agents/<taskId>.jsonl），跨进程同样成立。
+	reg.SetTaskRehydrator(func(taskID string) (*subagent.Task, bool) {
+		path, perr := journalPathFor(wsSessionsDir(wsPath), id, taskID)
+		if perr != nil {
+			return nil, false
+		}
+		return subagent.RehydrateTaskFromJournal(taskID, path)
+	})
 	// 并发槽上限（settings.json agent 段，缺省 subagent.DefaultConcurrency = 1000）：
 	// 主池给 agent_spawn（写型子 agent），辅池给只读的 subagent_explore（分池 = 两者互不饿死）。
 	// 2026-09-20 加固：此前硬编码 4，槽满时 agent_spawn 在工具调用栈上同步阻塞
@@ -4263,6 +4289,7 @@ func (m *manager) deleteSession(wsPath, id string) {
 	// 清理该会话的置顶标记与手动标题（防残留文件把已删会话又「复活」）
 	sessionPins.set(workspaceKey(wsPath), id, false)
 	sessionManualTitles.set(workspaceKey(wsPath), id, "")
+	diskTitles.Delete(diskTitleKey(workspaceKey(wsPath), id))
 }
 
 // subagentsBase 子任务输出 journal 根目录（D1 路径规则：sessions/<wsKey>/<sid>/agents）。
@@ -4456,6 +4483,13 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 
 	entries, err := os.ReadDir(ws.storeDir)
 	if err == nil {
+		type diskTitleJob struct {
+			idx         int
+			path        string
+			id          string
+			modNs, size int64
+		}
+		var jobs []diskTitleJob
 		for _, e := range entries {
 			name := e.Name()
 			if e.IsDir() || !strings.HasSuffix(name, ".jsonl") {
@@ -4466,12 +4500,47 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 				continue
 			}
 			seen[id] = true
+			path := filepath.Join(ws.storeDir, name)
+			// 标题缓存按文件 mtime+size 失效；Info() 对符号链接返回链接自身，
+			// 测试/迁移目录里会话文件可能是软链 → 再 Stat 一次跟随到真实 inode。
+			var modNs, size int64
+			if fi, ferr := e.Info(); ferr == nil {
+				if fi.Mode()&os.ModeSymlink != 0 {
+					if real, rerr := os.Stat(path); rerr == nil {
+						fi = real
+					}
+				}
+				modNs, size = fi.ModTime().UnixNano(), fi.Size()
+			}
 			out = append(out, map[string]any{
 				"id":         id,
-				"title":      resolveDiskSessionTitle(wsKey, filepath.Join(ws.storeDir, name), id),
+				"title":      defaultSessionTitle,         // 先占位；下方并行解析后原地填
 				"updated_at": sessionUpdatedAt(ws, id, 0), // 冷磁盘会话：lastActive 无 → 文件 mtime 回退
 				"pinned":     sessionPins.isPinned(wsKey, id),
 			})
+			jobs = append(jobs, diskTitleJob{idx: len(out) - 1, path: path, id: id, modNs: modNs, size: size})
+		}
+		// 标题解析并行做：每个无缓存会话要读 256KB 尾部；199 个会话串行在冷页缓存
+		// + checkpoint 写盘时实测 5.3s，是 new_session 响应 6–10s 的主项。
+		// 8 worker 把首次扫描压到亚秒级；之后的 list 直接命中 diskTitles（~ms）。
+		if len(jobs) > 0 {
+			workers := 8
+			if len(jobs) < workers {
+				workers = len(jobs)
+			}
+			sem := make(chan struct{}, workers)
+			var wg sync.WaitGroup
+			for _, job := range jobs {
+				job := job
+				wg.Add(1)
+				sem <- struct{}{}
+				go func() {
+					defer wg.Done()
+					defer func() { <-sem }()
+					out[job.idx]["title"] = resolveDiskSessionTitle(wsKey, job.path, job.id, job.modNs, job.size)
+				}()
+			}
+			wg.Wait()
 		}
 	}
 	// updated_at 降序；相同 → id 降序（前端只防御性再排）
@@ -4525,25 +4594,52 @@ func resolveLiveSessionTitle(wsKey string, bs *bridgeSession, id string) string 
 	return defaultSessionTitle
 }
 
+// diskTitleEntry 磁盘会话标题缓存项（mtime+size 变化即失效）。
+//
+// 为什么不写进 titles.json：titles.json 的语义是「AI 标题是否存在」，是标题生成
+// 门控（见 sessionTitles.set / 标题生成触发）；把「首条 user 文本」写进去会让生成器
+// 误以为已有 AI 标题而永久不生成。所以 fallback 标题只放进程内缓存。
+type diskTitleEntry struct {
+	modNs int64
+	size  int64
+	title string
+}
+
+var diskTitles sync.Map // key: wsKey+"\x00"+sessionID
+
+func diskTitleKey(wsKey, id string) string { return wsKey + "\x00" + id }
+
 // resolveDiskSessionTitle 冷磁盘会话标题（无进程内 Session；读 jsonl 首条 user 文本
 // 与 meta 里的 AI 标题）。优先级同 resolveLiveSessionTitle：AI 标题（缓存 → jsonl meta）
 // > 首条 user 文本截断 > "New Chat"。
-func resolveDiskSessionTitle(wsKey, path, id string) string {
+//
+// modNs/size 来自 listSessions 的 DirEntry.Info()：标题是展示用的弱一致数据，但
+// 每次 list 重读 199×256KB 尾部在 checkpoint 写盘期实测 5.3s（new_session 响应
+// 6–10s 的主项）。文件没变（mtime+size 相同）就直接用上次结果。
+func resolveDiskSessionTitle(wsKey, path, id string, modNs, size int64) string {
 	if manual := sessionManualTitles.get(wsKey, id); manual != "" {
 		return manual
 	}
 	if ai := sessionTitles.get(wsKey, id); ai != "" {
 		return ai
 	}
+	key := diskTitleKey(wsKey, id)
+	if v, ok := diskTitles.Load(key); ok {
+		if e, ok := v.(diskTitleEntry); ok && e.modNs == modNs && e.size == size {
+			return e.title
+		}
+	}
 	// jsonl meta 尾扫（AI 标题权威源；titles.json 缓存丢失/未同步时兜底）
-	if title := readMetaTitleFromFile(path); title != "" {
-		return title
+	title := ""
+	if t := readMetaTitleFromFile(path); t != "" {
+		title = t
+	} else if first := firstUserTextFromFile(path); first != "" {
+		title = truncateTitle(first)
+	} else {
+		title = defaultSessionTitle
 	}
-	first := firstUserTextFromFile(path)
-	if first != "" {
-		return truncateTitle(first)
-	}
-	return defaultSessionTitle
+	diskTitles.Store(key, diskTitleEntry{modNs: modNs, size: size, title: title})
+	return title
 }
 
 // readMetaTitleFromFile 读 jsonl meta 里的 AI 标题（session 包导出实现）。

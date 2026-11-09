@@ -17,6 +17,7 @@ import BootScreen from './components/BootScreen'
 import HubSurface from './hub/HubSurface'
 import './hub/hub.css'
 import { attachHubEvents, useHubStore } from './hub/useHubStore'
+import BridgeBanner from './components/BridgeBanner'
 import { useAppStore } from './store/useAppStore'
 import { getTransport } from './transport'
 import { applyTheme } from './lib/theme'
@@ -157,6 +158,7 @@ export default function App() {
   }, [])
   return (
     <div className={`app-root ${inSkills ? 'in-skills' : ''}${inCron ? 'in-cron' : ''}${leaving ? ' leaving' : ''}`}>
+      {mainReady && <BridgeBanner />}
       {mainReady && (
         <main className="main">
           {/* Hub 打开时**不卸载**工作区树：composer 草稿/附件在组件本地 state，
