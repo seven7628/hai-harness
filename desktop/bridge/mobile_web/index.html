@@ -33,9 +33,53 @@
       <button id="ws-manage" class="icon" title="管理工作区">⚙</button>
     </div>
     <button id="new-session" class="primary">新建会话</button>
+    <button id="open-hub" class="hub-entry">
+      <span class="hub-entry-main">Agent Hub</span>
+      <span class="hub-entry-sub">群组 · 私聊 · Needs you</span>
+    </button>
     <button id="copy-link" class="ghost" style="width:100%;margin:-4px 0 8px">复制免配对链接</button>
     <ul id="sessions"></ul>
     <p id="list-empty" class="hint" hidden>这个工作区还没有会话。</p>
+  </main>
+
+  <!-- Agent Hub 首页 -->
+  <main id="screen-hub" class="screen" hidden>
+    <div id="hub-alerts" class="hub-alerts" hidden></div>
+    <button id="hub-needs" class="hub-entry">
+      <span class="hub-entry-main">Needs you <span id="hub-needs-count" class="hub-badge" hidden></span></span>
+      <span class="hub-entry-sub">审批 · 提问 · 交接</span>
+    </button>
+    <h2 class="hub-section">群组</h2>
+    <ul id="hub-groups" class="hub-list"></ul>
+    <p id="hub-groups-empty" class="hint" hidden>还没有群组。</p>
+    <h2 class="hub-section">私聊</h2>
+    <ul id="hub-dms" class="hub-list"></ul>
+    <p id="hub-dms-empty" class="hint" hidden>还没有智能体。</p>
+    <p id="hub-error" class="error" hidden></p>
+  </main>
+
+  <!-- Agent Hub：群时间线 -->
+  <main id="screen-hub-group" class="screen hub-screen" hidden>
+    <div id="hub-group-head" class="hub-head"></div>
+    <div id="hub-group-tools" class="hub-tools"></div>
+    <div id="hub-group-messages" class="hub-messages"></div>
+    <div id="hub-group-status" class="hub-status" hidden></div>
+    <div class="hub-composer">
+      <button id="hub-group-at" class="icon hub-at" title="提及成员">@</button>
+      <textarea id="hub-group-input" rows="1" placeholder="在群里说点什么…"></textarea>
+      <button id="hub-group-send" class="primary">发送</button>
+    </div>
+  </main>
+
+  <!-- Agent Hub：DM 时间线 -->
+  <main id="screen-hub-dm" class="screen hub-screen" hidden>
+    <div id="hub-dm-head" class="hub-head"></div>
+    <div id="hub-dm-messages" class="hub-messages"></div>
+    <div id="hub-dm-status" class="hub-status" hidden></div>
+    <div class="hub-composer">
+      <textarea id="hub-dm-input" rows="1" placeholder="对智能体说点什么…"></textarea>
+      <button id="hub-dm-send" class="primary">发送</button>
+    </div>
   </main>
 
   <!-- 工作区管理 -->
@@ -104,6 +148,26 @@
     </div>
   </div>
 
+  <!-- Hub：任务板 / Needs / 派任务 抽屉 -->
+  <div id="hub-sheet" class="sheet hub-sheet" hidden>
+    <div class="sheet-head" id="hub-sheet-title"></div>
+    <div id="hub-sheet-body" class="hub-sheet-body"></div>
+    <div class="sheet-actions">
+      <button id="hub-sheet-close" class="ghost">关闭</button>
+    </div>
+  </div>
+
+  <!-- Hub：全屏 @ 选择器 -->
+  <div id="mention-picker" class="mention-picker" hidden>
+    <div class="mention-head">
+      <button id="mention-back" class="icon" title="返回">‹</button>
+      <input id="mention-filter" placeholder="筛选成员…" autocomplete="off">
+    </div>
+    <div id="mention-list" class="mention-list" role="listbox" aria-label="群成员"></div>
+    <p id="mention-empty" class="hint" hidden>没有匹配的成员。</p>
+  </div>
+
+  <script src="hub_model.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

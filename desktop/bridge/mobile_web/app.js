@@ -4,8 +4,11 @@
   'use strict'
 
   const $ = (id) => document.getElementById(id)
+  // 纯逻辑层（hub_model.js）：seq 合并/@ 分词/任务卡/事件分流都在这里。
+  const H = window.HaiMobileHubModel || null
   const LS = { token: 'hai.token', ws: 'hai.ws', sid: 'hai.sid', name: 'hai.name' }
-  const SCREENS = ['pair', 'list', 'workspaces', 'chat', 'agents', 'agent']
+  const SCREENS = ['pair', 'list', 'workspaces', 'chat', 'agents', 'agent', 'hub', 'hub-group', 'hub-dm']
+  const HUB_SCREENS = new Set(['hub', 'hub-group', 'hub-dm'])
 
   const state = {
     token: localStorage.getItem(LS.token) || '',
@@ -31,6 +34,53 @@
     agentTask: '',
     agentEntries: [],
     agentPoll: null,
+    // Agent Hub：与聊天流完全独立的连接/快照/时间线状态。
+    hub: {
+      conn: null,
+      gen: 0,
+      retry: 0,
+      retryTimer: null,
+      disposed: true,
+      hasConnected: false,
+      lastMsgAt: 0,
+      seenFrames: new Map(),
+      agents: [],
+      agentsById: new Map(),
+      groups: [],
+      progress: {},
+      dm: {},
+      running: {},
+      convStatus: {},
+      readSeq: {},
+      alerts: [],
+      needs: [],
+      homeSeq: 0,
+      homeLoading: false,
+      homePending: false,
+      homeTimer: null,
+      activeGroupId: '',
+      activeAgentId: '',
+      group: null,
+      conversation: null,
+      groupMessages: [],
+      groupHasMore: false,
+      groupLoading: false,
+      groupSeq: 0,
+      drafts: [],
+      deltaIndex: {},
+      dmAgent: null,
+      dmMessages: [],
+      dmHasMore: false,
+      dmLoading: false,
+      dmSeq: 0,
+      dmAwaiting: false,
+      sheetKind: '',
+      tasks: [],
+      sheetNeeds: [],
+      needsGroupId: '',
+      mention: { open: false, query: '', index: 0 },
+      busy: false,
+    },
   }
 
   // 无头/隐私模式的浏览器（以及部分 App 内嵌 WebView）不持久化 localStorage：
@@ -96,6 +146,12 @@
         return state.agentTask ? labelOf(state.agentTask) : '子智能体'
       case 'chat':
         return sessionTitle() || workspaceTitle() || '会话'
+      case 'hub':
+        return 'Agent Hub'
+      case 'hub-group':
+        return (state.hub.group && state.hub.group.name) || '群组'
+      case 'hub-dm':
+        return (state.hub.dmAgent && state.hub.dmAgent.name) || '私聊'
       default:
         return 'HAI'
     }
@@ -114,6 +170,7 @@
       // 不再静默删 token：一次抖动/服务端重启就把凭据清掉，等于每次都要重新扫码。
       // 留着，由用户显式重新配对覆盖（见 pair 屏提示）。
       disconnect()
+      disconnectHub()
       show('pair')
       pairError('设备凭据已失效（可能被撤销），请重新配对')
       throw new Error('设备凭据失效，请重新配对')
@@ -749,6 +806,1405 @@
     }
   }
 
+  // ---------- Agent Hub（P4-03b） ----------
+  // 与聊天流完全独立：独立 WebSocket（scope=hub）、独立快照、独立渲染。
+  // 页面只消费 hub_model.js 的纯函数结果；这里负责 DOM 与命令编排。
+
+  function isHubScreen() {
+    return HUB_SCREENS.has(state.screen)
+  }
+
+  function hubAgent(id) {
+    return state.hub.agentsById.get(String(id || '')) || null
+  }
+
+  function hubAgentName(id) {
+    const a = hubAgent(id)
+    return (a && a.name) || String(id || '智能体')
+  }
+
+  function hubTime(iso) {
+    if (!iso) return ''
+    const ms = typeof iso === 'number' ? iso : Date.parse(String(iso))
+    return ms ? fmtTime(ms) : ''
+  }
+
+  function hubAvatar(agent, name, small) {
+    const n = el('div', 'hub-avatar' + (small ? ' sm' : ''))
+    const av = agent && agent.avatar
+    // 图片头像走 bridge 的私有存储路径，手机端没有对应静态端点；回落首字，
+    // 不为了一个头像新增一条未鉴权的下载路由。
+    if (av && av.kind === 'emoji' && av.value) n.textContent = av.value
+    else n.textContent = Array.from(String(name || '?'))[0] || '?'
+    return n
+  }
+
+  function hubNameMap() {
+    const names = {}
+    for (const a of state.hub.agents) names[a.id] = a.name || a.id
+    return names
+  }
+
+  function hubRoster() {
+    return H ? H.groupRoster(state.hub.group, state.hub.agents) : []
+  }
+
+  function hubError(msg) {
+    const box = $('hub-error')
+    if (!box) return
+    box.hidden = !msg
+    box.textContent = msg || ''
+  }
+
+  function hydrateHubAgents(agents) {
+    state.hub.agents = Array.isArray(agents) ? agents.filter(Boolean) : []
+    state.hub.agentsById = new Map(state.hub.agents.map((a) => [String(a.id), a]))
+    for (const a of state.hub.agents) {
+      if (state.hub.running[a.id] === undefined) state.hub.running[a.id] = false
+    }
+  }
+
+  function groupRunning(g) {
+    if (!g) return false
+    if (state.hub.convStatus[g.id] === 'running') return true
+    const p = state.hub.progress[g.id]
+    if (p && ['queued', 'dispatched', 'running'].includes(String(p.last_task_status || ''))) return true
+    return (g.members || []).some((m) => state.hub.running[m.agent_id] === true)
+  }
+
+  function agentRunning(id) {
+    return state.hub.running[id] === true
+  }
+
+  function unreadBadge(n) {
+    const v = Math.max(0, Number(n) || 0)
+    if (!v) return null
+    return el('span', 'hub-unread', v > 99 ? '99+' : String(v))
+  }
+
+  function hubStatusDot(on) {
+    const d = el('span', 'hub-dot' + (on ? '' : ' off'))
+    d.title = on ? '运行中' : '空闲'
+    return d
+  }
+
+  // ---- Hub 首页 ----
+
+  async function loadHubHome(opts = {}) {
+    if (!H) return
+    if (!state.token) return
+    if (state.hub.homeLoading) {
+      state.hub.homePending = true
+      return
+    }
+    state.hub.homeSeq++
+    const seq = state.hub.homeSeq
+    state.hub.homeLoading = true
+    try {
+      const [al, gl, nl] = await Promise.all([
+        api('hub_agent_list'),
+        api('hub_group_list'),
+        api('hub_need_list', { status: 'pending' }).catch(() => null),
+      ])
+      if (seq !== state.hub.homeSeq) return
+      hydrateHubAgents(al.agents || [])
+      state.hub.dm = al.dm || {}
+      state.hub.groups = Array.isArray(gl.groups) ? gl.groups : []
+      state.hub.progress = gl.progress || {}
+      if (nl && Array.isArray(nl.needs)) state.hub.needs = nl.needs
+      hubError('')
+      if (state.screen === 'hub') renderHubHome()
+    } catch (e) {
+      if (seq === state.hub.homeSeq && state.screen === 'hub') hubError(e.message || '加载 Hub 失败')
+    } finally {
+      state.hub.homeLoading = false
+      if (state.hub.homePending) {
+        state.hub.homePending = false
+        loadHubHome({ silent: true })
+      }
+    }
+  }
+
+  function scheduleHubHomeRefresh(delay = 500) {
+    if (state.hub.homeTimer) return
+    state.hub.homeTimer = setTimeout(() => {
+      state.hub.homeTimer = null
+      if (isHubScreen()) loadHubHome({ silent: true })
+    }, delay)
+  }
+
+  function hubRow(avatar, title, sub, metaRight, onOpen) {
+    const row = el('button', 'hub-row')
+    row.type = 'button'
+    row.append(avatar)
+    const main = el('div', 'hub-row-main')
+    const titleRow = el('div', 'hub-row-title')
+    titleRow.append(...title)
+    main.append(titleRow)
+    if (sub) main.append(el('div', 'hub-row-sub', sub))
+    row.append(main)
+    if (metaRight && metaRight.length) {
+      const meta = el('div', 'hub-row-meta')
+      meta.append(...metaRight)
+      row.append(meta)
+    }
+    row.addEventListener('click', onOpen)
+    return row
+  }
+
+  function renderHubAlerts() {
+    const box = $('hub-alerts')
+    box.textContent = ''
+    const list = state.hub.alerts.slice(0, 3)
+    box.hidden = list.length === 0
+    for (const a of list) {
+      const cls = a.severity === 'error' ? 'hub-alert error' : a.severity === 'info' ? 'hub-alert info' : 'hub-alert'
+      box.appendChild(el('div', cls, a.text))
+    }
+  }
+
+  function renderHubHome() {
+    renderHubAlerts()
+    const needsCount = state.hub.needs.length
+    const badge = $('hub-needs-count')
+    badge.hidden = needsCount === 0
+    badge.textContent = needsCount > 99 ? '99+' : String(needsCount)
+
+    const groupUl = $('hub-groups')
+    groupUl.textContent = ''
+    const groups = state.hub.groups.slice().sort((a, b) => {
+      const pa = state.hub.progress[a.id] || {}
+      const pb = state.hub.progress[b.id] || {}
+      if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1
+      const ua = pa.unread ? 1 : 0
+      const ub = pb.unread ? 1 : 0
+      if (ua !== ub) return ub - ua
+      return (Date.parse(pb.last_at || '') || 0) - (Date.parse(pa.last_at || '') || 0)
+    })
+    $('hub-groups-empty').hidden = groups.length > 0
+    for (const g of groups) {
+      const p = state.hub.progress[g.id] || {}
+      const title = [el('span', 'hub-row-name', g.name || g.id)]
+      const unread = unreadBadge(p.unread)
+      if (unread) title.push(unread)
+      title.push(hubStatusDot(groupRunning(g)))
+      const sub = H.hubPreview(p) || ((g.members || []).length + ' 位成员')
+      const meta = [el('span', '', hubTime(p.last_at))]
+      groupUl.appendChild(hubRow(hubAvatar(null, g.name || g.id), title, sub, meta, () => openHubGroup(g.id)))
+    }
+
+    const dmUl = $('hub-dms')
+    dmUl.textContent = ''
+    const dms = state.hub.agents.slice().sort((a, b) => {
+      const pa = state.hub.dm[a.id] || {}
+      const pb = state.hub.dm[b.id] || {}
+      const ta = Date.parse(pa.last_at || '') || 0
+      const tb = Date.parse(pb.last_at || '') || 0
+      if (ta !== tb) return tb - ta
+      return String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN')
+    })
+    $('hub-dms-empty').hidden = dms.length > 0
+    for (const a of dms) {
+      const p = state.hub.dm[a.id] || {}
+      const title = [el('span', 'hub-row-name', a.name || a.id)]
+      const unread = unreadBadge(p.unread)
+      if (unread) title.push(unread)
+      title.push(hubStatusDot(agentRunning(a.id)))
+      const sub = H.hubPreview(p) || a.role || '私聊'
+      const meta = [el('span', '', hubTime(p.last_at))]
+      dmUl.appendChild(hubRow(hubAvatar(a, a.name || a.id), title, sub, meta, () => openHubDM(a.id)))
+    }
+    refreshHubTitle()
+  }
+
+  function refreshHubTitle() {
+    if (state.screen === 'hub' || state.screen === 'hub-group' || state.screen === 'hub-dm') {
+      $('title').textContent = titleFor(state.screen)
+    }
+  }
+
+  function openHub() {
+    if (!H) return
+    state.nav.push('list')
+    state.hub.activeGroupId = ''
+    state.hub.activeAgentId = ''
+    show('hub')
+    renderHubHome()
+    ensureHubSocket()
+    loadHubHome()
+  }
+
+  function leaveHub() {
+    closeMentionPicker()
+    closeHubSheet()
+    disconnectHub()
+    show('list')
+  }
+
+  // ---- 群时间线 ----
+
+  async function openHubGroup(gid) {
+    if (!H || !gid) return
+    state.nav.push('hub')
+    state.hub.activeGroupId = String(gid)
+    state.hub.activeAgentId = ''
+    state.hub.group = null
+    state.hub.conversation = null
+    state.hub.groupMessages = []
+    state.hub.drafts = []
+    state.hub.deltaIndex = {}
+    state.hub.groupHasMore = false
+    state.hub.groupLoading = true
+    show('hub-group')
+    renderHubGroupChrome()
+    renderHubGroupMessages({ stick: true })
+    ensureHubSocket()
+    await loadHubGroupSnapshot(gid, { reset: true })
+  }
+
+  async function loadHubGroupSnapshot(gid, opts = {}) {
+    if (!H || !gid) return
+    const seq = ++state.hub.groupSeq
+    state.hub.groupLoading = true
+    if (opts.reset) {
+      state.hub.groupHasMore = false
+      renderHubGroupMessages({ stick: true })
+    }
+    try {
+      const [meta, page] = await Promise.all([
+        api('hub_group_get', { group_id: gid }),
+        api('hub_group_history', { group_id: gid, limit: 50 }),
+      ])
+      if (seq !== state.hub.groupSeq || state.hub.activeGroupId !== String(gid)) return
+      state.hub.group = meta.group || null
+      state.hub.conversation = meta.conversation || null
+      state.hub.convStatus[gid] = state.hub.conversation ? state.hub.conversation.status : ''
+      const incoming = page.messages || []
+      state.hub.groupMessages = opts.reset
+        ? H.mergeMessages([], incoming)
+        : H.mergeMessages(state.hub.groupMessages, incoming)
+      // 以合并后的第一条 seq 判断是否还有更早（与 bridge groupHistoryHasMore 同口径）；
+      // 只信 page.has_more 会在「已翻到 seq=1」后仍留着按钮。
+      state.hub.groupHasMore = firstPersistedSeq(state.hub.groupMessages) > 1
+      // resync 时草稿一律作废：final 才是权威，丢失的半截正文由后续 delta 重新长出来。
+      state.hub.drafts = []
+      state.hub.deltaIndex = {}
+      state.hub.groupLoading = false
+      hubError('')
+      renderHubGroupChrome()
+      renderHubGroupMessages({ stick: !!opts.reset })
+      refreshHubTitle()
+      void markHubGroupRead()
+    } catch (e) {
+      if (seq === state.hub.groupSeq) {
+        state.hub.groupLoading = false
+        $('hub-group-messages').appendChild(el('div', 'hub-empty', '加载群失败：' + (e.message || e)))
+        renderHubGroupStatus()
+      }
+    } finally {
+      if (seq === state.hub.groupSeq) state.hub.groupLoading = false
+    }
+  }
+
+  function renderHubGroupChrome() {
+    const head = $('hub-group-head')
+    head.textContent = ''
+    const g = state.hub.group
+    const title = g ? g.name || g.id : '群组'
+    head.appendChild(el('div', 'hub-head-title', title))
+    const bits = []
+    if (g) bits.push((g.members || []).length + ' 位成员')
+    if (g && g.policy && g.policy.mode) bits.push('策略 ' + g.policy.mode)
+    const cv = state.hub.conversation
+    if (cv) bits.push(conversationLabel(cv))
+    head.appendChild(el('div', 'hub-head-sub', bits.join(' · ') || '加载中…'))
+
+    const tools = $('hub-group-tools')
+    tools.textContent = ''
+    const tasks = el('button', 'hub-chip', '任务板')
+    tasks.type = 'button'
+    tasks.addEventListener('click', () => openHubTasks())
+    const needs = el('button', 'hub-chip', 'Needs you')
+    needs.type = 'button'
+    needs.addEventListener('click', () => openHubNeeds(state.hub.activeGroupId))
+    const assign = el('button', 'hub-chip', '派任务')
+    assign.type = 'button'
+    assign.addEventListener('click', openHubAssign)
+    tools.append(tasks, needs, assign)
+    const runningNow = groupRunning(g) || (cv && cv.status === 'running') || state.hub.drafts.length > 0
+    if (runningNow) {
+      const stop = el('button', 'hub-chip danger', '停止自动对话')
+      stop.type = 'button'
+      stop.addEventListener('click', stopHubConversation)
+      tools.appendChild(stop)
+    }
+  }
+
+  function conversationLabel(cv) {
+    if (!cv) return ''
+    switch (cv.status) {
+      case 'running':
+        return '自动对话进行中（' + (cv.turns_used || 0) + '/' + (cv.turn_budget || 8) + ' 轮）'
+      case 'waiting_human':
+        return '等你继续'
+      case 'stopped':
+        return '已停止，发消息会重新开始'
+      case 'exhausted':
+        return '已到护栏上限' + (cv.stop_reason ? '：' + cv.stop_reason : '')
+      default:
+        return '空闲'
+    }
+  }
+
+  function firstPersistedSeq(messages) {
+    for (const m of messages || []) {
+      const s = Number(m && m.seq) || 0
+      if (s > 0) return s
+    }
+    return 0
+  }
+
+  function lastPersistedSeq(messages) {
+    let last = 0
+    for (const m of messages || []) last = Math.max(last, Number(m && m.seq) || 0)
+    return last
+  }
+
+  function renderHubGroupMessages(opts = {}) {
+    const box = $('hub-group-messages')
+    const stick = opts.stick || nearBottom(box)
+    box.textContent = ''
+    state.hub.draftNodes = new Map()
+
+    if (state.hub.groupHasMore) {
+      const more = el('button', 'hub-load-more', state.hub.groupLoading ? '加载中…' : '加载更早')
+      more.type = 'button'
+      more.disabled = state.hub.groupLoading
+      more.addEventListener('click', () => {
+        void loadOlderGroup()
+      })
+      box.appendChild(more)
+    }
+
+    const names = hubNameMap()
+    const roster = hubRoster()
+    for (const m of state.hub.groupMessages) {
+      const node = renderHubMessage(m, { group: true, names, roster })
+      if (node) box.appendChild(node)
+    }
+    for (const d of state.hub.drafts) {
+      const node = renderHubDraft(d)
+      box.appendChild(node)
+    }
+    if (!state.hub.groupMessages.length && !state.hub.drafts.length) {
+      box.appendChild(el('div', 'hub-empty', state.hub.groupLoading ? '加载中…' : '还没有消息。发一条 @成员 开始，或从任务板派发任务。'))
+    }
+    renderHubGroupStatus()
+    if (stick) box.scrollTop = box.scrollHeight
+  }
+
+  function appendMentionBody(body, text, roster) {
+    const tokens = H ? H.tokenizeMentions(text, roster || []) : [{ kind: 'text', text: String(text || '') }]
+    for (const t of tokens) {
+      if (t.kind === 'mention') body.appendChild(el('span', 'hub-mention', t.text))
+      else body.appendChild(document.createTextNode(t.text))
+    }
+  }
+
+  function renderHubMessage(m, ctx) {
+    if (!m) return null
+    const names = ctx.names || {}
+    if (m.kind === 'task_result') return renderHubTaskCard(m, names)
+    if (m.kind === 'routing_receipt') {
+      return el('div', 'hub-msg system', H.routingSummary(m.text || '', names))
+    }
+    if (m.kind === 'handoff') {
+      const status = String((m.refs && m.refs.status) || '')
+      const label = status === 'accepted' ? '已接受' : status === 'declined' ? '已拒绝' : '等待确认'
+      return el('div', 'hub-msg system', '交接 · ' + (m.text || '') + '（' + label + '）')
+    }
+    if (m.kind === 'approval_stub') {
+      return el('div', 'hub-msg system', '审批占位：' + (m.text || '详情在 Needs you'))
+    }
+    const sender = m.sender || {}
+    if (sender.kind === 'system' || m.kind === 'system' || m.kind === 'round_summary') {
+      return el('div', 'hub-msg system', '系统 · ' + (m.text || ''))
+    }
+    const human = sender.kind === 'human'
+    const wrap = el('div', 'hub-msg ' + (human ? 'human' : 'agent'))
+    if (!human) {
+      const who = el('div', 'who')
+      who.appendChild(el('span', 'name', sender.agent_id ? hubAgentName(sender.agent_id) : '智能体'))
+      if (m.created_at) who.appendChild(el('span', 'time', hubTime(m.created_at)))
+      wrap.appendChild(who)
+    }
+    const body = el('div', 'body')
+    appendMentionBody(body, m.text || '', ctx.group ? ctx.roster : [])
+    if (m.pending) body.appendChild(el('div', 'hint', '发送中…'))
+    wrap.appendChild(body)
+    return wrap
+  }
+
+  function renderHubTaskCard(m, names) {
+    const view = H.taskCardView(m)
+    if (!view) return null
+    const card = el('div', 'hub-card ' + (view.tone || 'muted'))
+    card.dataset.taskId = view.taskId
+    const head = el('div', 'hub-card-head')
+    head.appendChild(el('span', 'hub-status-chip hub-tone-' + (view.tone || 'muted'), view.statusLabel))
+    head.appendChild(el('span', 'hub-card-title', view.title))
+    card.appendChild(head)
+
+    const meta = el('div', 'hub-card-meta')
+    if (view.agentId) meta.appendChild(el('span', '', '执行者 ' + (names[view.agentId] || hubAgentName(view.agentId))))
+    if (view.initiatorName) meta.appendChild(el('span', '', '派发 ' + view.initiatorName))
+    else if (view.initiatorAgentId) meta.appendChild(el('span', '', '派发 ' + (names[view.initiatorAgentId] || view.initiatorAgentId)))
+    if (view.durationLabel) meta.appendChild(el('span', '', '耗时 ' + view.durationLabel))
+    if (view.usageLabel) meta.appendChild(el('span', '', view.usageLabel))
+    if (meta.childNodes.length) card.appendChild(meta)
+
+    if (view.summary) card.appendChild(el('div', 'hub-card-text', view.summary))
+    if (view.artifacts.length) {
+      const ul = el('ul', 'hub-card-list')
+      for (const a of view.artifacts) ul.appendChild(el('li', '', a.label))
+      card.appendChild(ul)
+    }
+    if (view.error) card.appendChild(el('div', 'hub-card-error', '错误：' + view.error))
+    if (view.taskId) card.appendChild(el('div', 'hub-card-meta', '任务 ' + view.taskId))
+    return card
+  }
+
+  function renderHubDraft(d) {
+    const wrap = el('div', 'hub-msg agent draft')
+    wrap.dataset.draftId = d.id
+    const who = el('div', 'who')
+    who.appendChild(el('span', 'name', hubAgentName(d.sender && d.sender.agent_id)))
+    who.appendChild(el('span', 'time', '正在输入'))
+    wrap.appendChild(who)
+    const body = el('div', 'body')
+    body.textContent = d.text || ''
+    wrap.appendChild(body)
+    state.hub.draftNodes.set(d.id, body)
+    return wrap
+  }
+
+  function renderHubGroupStatus() {
+    const box = $('hub-group-status')
+    const cv = state.hub.conversation
+    const drafts = state.hub.drafts || []
+    let text = ''
+    if (drafts.length) {
+      const ids = Array.from(new Set(drafts.map((d) => String((d.sender && d.sender.agent_id) || '')))).filter(Boolean)
+      text = (ids.map(hubAgentName).join('、') || '智能体') + ' 正在输入'
+      box.classList.add('hub-typing')
+    } else if (cv && cv.status === 'running') {
+      text = '自动对话进行中 ' + (cv.turns_used || 0) + '/' + (cv.turn_budget || 8)
+      box.classList.remove('hub-typing')
+    } else if (cv && cv.status === 'waiting_human') {
+      text = '等你继续'
+      box.classList.remove('hub-typing')
+    } else if (groupRunning(state.hub.group)) {
+      text = '成员运行中'
+      box.classList.remove('hub-typing')
+    } else {
+      box.classList.remove('hub-typing')
+    }
+    box.hidden = !text
+    box.textContent = ''
+    if (text) {
+      const span = el('span', '', text)
+      if (drafts.length) span.className = 'dots'
+      box.appendChild(span)
+    }
+  }
+
+  async function loadOlderGroup() {
+    const gid = state.hub.activeGroupId
+    if (!gid || state.hub.groupLoading || !state.hub.groupHasMore) return
+    const before = firstPersistedSeq(state.hub.groupMessages)
+    if (!before) return
+    state.hub.groupLoading = true
+    renderHubGroupMessages({ stick: false })
+    const box = $('hub-group-messages')
+    const prevHeight = box.scrollHeight
+    const prevTop = box.scrollTop
+    try {
+      const page = await api('hub_group_history', { group_id: gid, before_seq: before, limit: 50 })
+      if (state.hub.activeGroupId !== String(gid) || state.screen !== 'hub-group') return
+      const pageMessages = page.messages || []
+      state.hub.groupMessages = H.mergeMessages(state.hub.groupMessages, pageMessages)
+      // 空页 = 已经没有更早的（不要因为首条 seq 仍是 11 就无限转圈）。
+      state.hub.groupHasMore = pageMessages.length > 0 && firstPersistedSeq(state.hub.groupMessages) > 1
+      state.hub.groupLoading = false
+      renderHubGroupMessages({ stick: false })
+      box.scrollTop = box.scrollHeight - prevHeight + prevTop
+    } catch (e) {
+      state.hub.groupLoading = false
+      renderHubGroupMessages({ stick: false })
+      box.appendChild(el('div', 'hub-empty', '加载更早失败：' + (e.message || e)))
+    } finally {
+      state.hub.groupLoading = false
+    }
+  }
+
+  async function markHubGroupRead() {
+    const gid = state.hub.activeGroupId
+    const seq = lastPersistedSeq(state.hub.groupMessages)
+    if (!gid || !seq) return
+    if ((state.hub.readSeq[gid] || 0) >= seq) return
+    state.hub.readSeq[gid] = seq
+    try {
+      await api('hub_mark_read', { group_id: gid, seq })
+      if (state.hub.progress[gid]) state.hub.progress[gid] = Object.assign({}, state.hub.progress[gid], { unread: 0 })
+    } catch {
+      // 已读游标是 best-effort：失败不打断阅读，下次打开再推。
+      state.hub.readSeq[gid] = 0
+    }
+  }
+
+  function nextClientMsgID(prefix) {
+    return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
+  }
+
+  async function sendHubGroup() {
+    const input = $('hub-group-input')
+    const gid = state.hub.activeGroupId
+    const text = input.value.trim()
+    if (!gid || !text || state.hub.busy) return
+    state.hub.busy = true
+    input.value = ''
+    input.style.height = 'auto'
+    closeMentionPicker()
+    const roster = hubRoster()
+    const cid = nextClientMsgID('g')
+    const optimistic = H.optimisticMessage({ text, clientMsgId: cid, senderKind: 'human', groupId: gid })
+    state.hub.groupMessages = H.mergeMessages(state.hub.groupMessages, optimistic)
+    renderHubGroupMessages({ stick: true })
+    try {
+      const data = await api('hub_group_send', H.groupSendPayload(gid, text, roster, cid))
+      if (state.hub.activeGroupId !== String(gid)) return
+      const final = {
+        id: data.message_id || optimistic.id,
+        seq: Number(data.seq) || 0,
+        client_msg_id: cid,
+        group_id: gid,
+        kind: 'text',
+        sender: { kind: 'human' },
+        text,
+        created_at: new Date().toISOString(),
+      }
+      // 事件通常比 HTTP 响应先到（bridge 先 emit 再 resp）：已经落盘的消息不再
+      // 用合成对象覆盖，避免把服务端 created_at/id 改回本地值。
+      const landed = state.hub.groupMessages.some((m) => m && H.clientMsgID(m) === cid && Number(m.seq) > 0)
+      if (!landed) state.hub.groupMessages = H.mergeMessages(state.hub.groupMessages, final)
+      renderHubGroupMessages({ stick: true })
+      if (data.seq) void markHubGroupRead()
+      scheduleHubHomeRefresh()
+    } catch (e) {
+      state.hub.groupMessages = state.hub.groupMessages.filter((m) => !(m && m.pending && H.clientMsgID(m) === cid))
+      renderHubGroupMessages({ stick: true })
+      appendHubGroupError('发送失败：' + (e.message || e))
+    } finally {
+      state.hub.busy = false
+    }
+  }
+
+  function appendHubGroupError(text) {
+    const box = $('hub-group-messages')
+    box.appendChild(el('div', 'hub-msg system', text))
+    box.scrollTop = box.scrollHeight
+  }
+
+  async function stopHubConversation() {
+    const gid = state.hub.activeGroupId
+    if (!gid || state.hub.busy) return
+    state.hub.busy = true
+    try {
+      const data = await api('hub_conversation_stop', { group_id: gid })
+      if (state.hub.activeGroupId !== String(gid)) return
+      state.hub.conversation = data.conversation || state.hub.conversation
+      if (state.hub.conversation) state.hub.convStatus[gid] = state.hub.conversation.status
+      // 停止后服务端会抑制在跑 run 的 final：草稿不会再有终稿，必须立即清掉，
+      // 否则「正在输入」会永远停在屏幕上。
+      state.hub.drafts = []
+      state.hub.deltaIndex = {}
+      renderHubGroupMessages({ stick: nearBottom($('hub-group-messages')) })
+      renderHubGroupChrome()
+      renderHubGroupStatus()
+    } catch (e) {
+      appendHubGroupError('停止失败：' + (e.message || e))
+    } finally {
+      state.hub.busy = false
+    }
+  }
+
+  // ---- DM 时间线 ----
+
+  async function openHubDM(agentId) {
+    if (!H || !agentId) return
+    state.nav.push('hub')
+    state.hub.activeAgentId = String(agentId)
+    state.hub.activeGroupId = ''
+    state.hub.dmAgent = hubAgent(agentId)
+    state.hub.dmMessages = []
+    state.hub.dmHasMore = false
+    state.hub.dmAwaiting = false
+    state.hub.dmLoading = true
+    show('hub-dm')
+    renderHubDM()
+    ensureHubSocket()
+    await loadHubDMSnapshot(agentId, { reset: true })
+  }
+
+  async function loadHubDMSnapshot(agentId, opts = {}) {
+    if (!H || !agentId) return
+    const seq = ++state.hub.dmSeq
+    state.hub.dmLoading = true
+    try {
+      const data = await api('hub_open', {
+        target: { kind: 'dm', agent_id: String(agentId) },
+        limit: 50,
+      })
+      if (seq !== state.hub.dmSeq || state.hub.activeAgentId !== String(agentId)) return
+      state.hub.dmAgent = data.agent || state.hub.dmAgent || hubAgent(agentId)
+      state.hub.dmMessages = opts.reset
+        ? H.mergeMessages([], data.messages || [])
+        : H.mergeMessages(state.hub.dmMessages, data.messages || [])
+      state.hub.dmHasMore = firstPersistedSeq(state.hub.dmMessages) > 1
+      state.hub.dmAwaiting = false
+      // hub_open 默认推进已读：本地预览也立刻归零，返回首页不闪一下旧未读。
+      if (state.hub.dm[agentId]) state.hub.dm[agentId] = Object.assign({}, state.hub.dm[agentId], { unread: 0 })
+      state.hub.dmLoading = false
+      hubError('')
+      renderHubDM({ stick: !!opts.reset })
+      refreshHubTitle()
+    } catch (e) {
+      if (seq === state.hub.dmSeq) {
+        $('hub-dm-messages').appendChild(el('div', 'hub-empty', '打开私聊失败：' + (e.message || e)))
+        renderHubDMStatus()
+      }
+    } finally {
+      if (seq === state.hub.dmSeq) state.hub.dmLoading = false
+    }
+  }
+
+  function renderHubDM(opts = {}) {
+    const head = $('hub-dm-head')
+    head.textContent = ''
+    const a = state.hub.dmAgent
+    head.appendChild(el('div', 'hub-head-title', (a && a.name) || state.hub.activeAgentId || '私聊'))
+    const sub = []
+    if (a && a.role) sub.push(a.role)
+    if (a && a.provider && a.model) sub.push(a.provider + '/' + a.model)
+    if (agentRunning(state.hub.activeAgentId)) sub.push('运行中')
+    head.appendChild(el('div', 'hub-head-sub', sub.join(' · ') || '私聊'))
+
+    const box = $('hub-dm-messages')
+    const stick = opts.stick || nearBottom(box)
+    box.textContent = ''
+    if (state.hub.dmHasMore) {
+      const more = el('button', 'hub-load-more', state.hub.dmLoading ? '加载中…' : '加载更早')
+      more.type = 'button'
+      more.disabled = state.hub.dmLoading
+      more.addEventListener('click', () => {
+        void loadOlderDM()
+      })
+      box.appendChild(more)
+    }
+    const names = hubNameMap()
+    for (const m of state.hub.dmMessages) {
+      const node = renderHubMessage(m, { group: false, names, roster: [] })
+      if (node) box.appendChild(node)
+    }
+    if (!state.hub.dmMessages.length) {
+      box.appendChild(el('div', 'hub-empty', state.hub.dmLoading ? '加载中…' : '还没有聊过。发一条消息开始。'))
+    }
+    renderHubDMStatus()
+    if (stick) box.scrollTop = box.scrollHeight
+  }
+
+  function renderHubDMStatus() {
+    const box = $('hub-dm-status')
+    const text = state.hub.dmAwaiting ? '已发送，等待回复' : ''
+    box.hidden = !text
+    box.textContent = text
+    box.className = text ? 'hub-status hub-typing' : 'hub-status'
+  }
+
+  async function loadOlderDM() {
+    const agentId = state.hub.activeAgentId
+    if (!agentId || state.hub.dmLoading || !state.hub.dmHasMore) return
+    const before = firstPersistedSeq(state.hub.dmMessages)
+    if (!before) return
+    state.hub.dmLoading = true
+    renderHubDM()
+    const box = $('hub-dm-messages')
+    const prevHeight = box.scrollHeight
+    const prevTop = box.scrollTop
+    try {
+      const page = await api('hub_history', { agent_id: agentId, before_seq: before, limit: 50 })
+      if (state.hub.activeAgentId !== String(agentId) || state.screen !== 'hub-dm') return
+      const pageMessages = page.messages || []
+      state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, pageMessages)
+      state.hub.dmHasMore = pageMessages.length > 0 && firstPersistedSeq(state.hub.dmMessages) > 1
+      state.hub.dmLoading = false
+      renderHubDM()
+      box.scrollTop = box.scrollHeight - prevHeight + prevTop
+    } catch (e) {
+      state.hub.dmLoading = false
+      renderHubDM()
+      box.appendChild(el('div', 'hub-empty', '加载更早失败：' + (e.message || e)))
+    } finally {
+      state.hub.dmLoading = false
+    }
+  }
+
+  async function markHubDMRead(seq) {
+    const agentId = state.hub.activeAgentId
+    const v = Number(seq) || 0
+    if (!agentId || !v) return
+    if ((state.hub.readSeq['dm:' + agentId] || 0) >= v) return
+    state.hub.readSeq['dm:' + agentId] = v
+    try {
+      await api('hub_mark_read', { agent_id: agentId, seq: v })
+    } catch {
+      state.hub.readSeq['dm:' + agentId] = 0
+    }
+  }
+
+  async function sendHubDM() {
+    const input = $('hub-dm-input')
+    const agentId = state.hub.activeAgentId
+    const text = input.value.trim()
+    if (!agentId || !text || state.hub.busy) return
+    state.hub.busy = true
+    input.value = ''
+    input.style.height = 'auto'
+    const cid = nextClientMsgID('d')
+    const optimistic = H.optimisticMessage({ text, clientMsgId: cid, senderKind: 'human', agentId })
+    state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, optimistic)
+    state.hub.dmAwaiting = true
+    renderHubDM({ stick: true })
+    try {
+      const data = await api('hub_send', H.dmSendPayload(agentId, text, cid))
+      if (state.hub.activeAgentId !== String(agentId)) return
+      const final = {
+        id: optimistic.id,
+        seq: Number(data.seq) || 0,
+        client_msg_id: cid,
+        agent_id: agentId,
+        kind: 'text',
+        sender: { kind: 'human' },
+        text,
+        created_at: new Date().toISOString(),
+      }
+      const landed = state.hub.dmMessages.some((m) => m && H.clientMsgID(m) === cid && Number(m.seq) > 0)
+      if (!landed) state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, final)
+      renderHubDM({ stick: true })
+      if (data.seq) void markHubDMRead(data.seq)
+      scheduleHubHomeRefresh()
+    } catch (e) {
+      state.hub.dmMessages = state.hub.dmMessages.filter((m) => !(m && m.pending && H.clientMsgID(m) === cid))
+      state.hub.dmAwaiting = false
+      renderHubDM({ stick: true })
+      $('hub-dm-messages').appendChild(el('div', 'hub-msg system', '发送失败：' + (e.message || e)))
+      $('hub-dm-messages').scrollTop = $('hub-dm-messages').scrollHeight
+    } finally {
+      state.hub.busy = false
+    }
+  }
+
+  // ---- Hub 事件流（独立 WebSocket） ----
+
+  function hubFrameSeen(raw) {
+    const now = Date.now()
+    const prev = state.hub.seenFrames.get(raw)
+    if (prev !== undefined && now - prev < 3000) return true
+    state.hub.seenFrames.set(raw, now)
+    if (state.hub.seenFrames.size > 600) {
+      for (const [k, t] of state.hub.seenFrames) if (now - t > 3000) state.hub.seenFrames.delete(k)
+    }
+    return false
+  }
+
+  function ensureHubSocket() {
+    if (!H || !state.token || !isHubScreen()) return
+    if (state.hub.conn && state.hub.conn.readyState <= WebSocket.OPEN) return
+    // 旧连接处于 CLOSING（onclose 还没回调）：先换代，避免它的回调把新连接置空。
+    if (state.hub.conn) {
+      state.hub.gen++
+      try {
+        state.hub.conn.close()
+      } catch {
+        /* ignore */
+      }
+      state.hub.conn = null
+    }
+    state.hub.disposed = false
+    connectHub()
+  }
+
+  function disconnectHub() {
+    state.hub.disposed = true
+    state.hub.gen++
+    state.hub.hasConnected = false
+    if (state.hub.retryTimer) {
+      clearTimeout(state.hub.retryTimer)
+      state.hub.retryTimer = null
+    }
+    if (state.hub.conn) {
+      try {
+        state.hub.conn.close()
+      } catch {
+        /* ignore */
+      }
+      state.hub.conn = null
+    }
+  }
+
+  function connectHub() {
+    if (!H || !state.token) return
+    const gen = state.hub.gen
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    // 浏览器 WebSocket 不能设 Authorization 头；bridge 的 auth() 同时认
+    // query 里的 token（见 mobile_server.go），所以沿用聊天连接的 query 方式。
+    const url = `${proto}://${location.host}/api/events?scope=hub&token=${encodeURIComponent(state.token)}`
+    const conn = new WebSocket(url)
+    state.hub.conn = conn
+    conn.onopen = () => {
+      if (gen !== state.hub.gen) return
+      state.hub.retry = 0
+      state.hub.lastMsgAt = Date.now()
+    }
+    conn.onmessage = (m) => {
+      if (gen !== state.hub.gen) return
+      state.hub.lastMsgAt = Date.now()
+      if (hubFrameSeen(m.data)) return
+      let ev
+      try {
+        ev = JSON.parse(m.data)
+      } catch {
+        return
+      }
+      onHubFrame(ev)
+    }
+    conn.onclose = () => {
+      if (gen !== state.hub.gen) return
+      state.hub.conn = null
+      if (state.hub.disposed || !isHubScreen()) return
+      const delay = Math.min(1000 * 2 ** state.hub.retry, 15000)
+      state.hub.retry++
+      if (state.hub.retryTimer) clearTimeout(state.hub.retryTimer)
+      state.hub.retryTimer = setTimeout(() => {
+        state.hub.retryTimer = null
+        if (!state.hub.disposed && isHubScreen()) connectHub()
+      }, delay)
+    }
+  }
+
+  function onHubFrame(ev) {
+    if (!H || H.eventRoute(ev, 'hub') === 'ignore') return
+    if (ev.type === 'hello') {
+      const reconnected = state.hub.hasConnected
+      state.hub.hasConnected = true
+      state.hub.retry = 0
+      // 首次连接的数据由 openHubGroup/openHubDM/loadHubHome 拉；重连可能漏事件，
+      // 先重拉快照再继续增量（绝不走会话的 openSession 分支）。
+      if (reconnected) void hubResync('hello')
+      return
+    }
+    if (ev.type === 'ping') return
+    if (ev.type === 'resync') {
+      void hubResync('resync')
+      return
+    }
+    if (!H.isHubEvent(ev)) return
+    onHubEvent(ev)
+  }
+
+  async function hubResync() {
+    if (!H) return
+    const plan = H.hubResyncTargets(state.screen, {
+      groupId: state.hub.activeGroupId,
+      agentId: state.hub.activeAgentId,
+    })
+    if (!plan) return
+    if (plan.home) void loadHubHome({ silent: true })
+    if (plan.groupId && plan.groupId === state.hub.activeGroupId) {
+      await loadHubGroupSnapshot(plan.groupId, { reset: false })
+    }
+    if (plan.agentId && plan.agentId === state.hub.activeAgentId) {
+      await loadHubDMSnapshot(plan.agentId, { reset: false })
+    }
+    if (state.hub.sheetKind === 'tasks') void loadHubTasks()
+    if (state.hub.sheetKind === 'needs') void loadHubNeeds(state.hub.needsGroupId)
+  }
+
+  function onHubEvent(ev) {
+    switch (ev.event_type) {
+      case 'hub_message': {
+        const msg = H.messageFromEvent(ev)
+        if (!msg) break
+        if (msg.group_id && msg.group_id === state.hub.activeGroupId) {
+          const stick = nearBottom($('hub-group-messages'))
+          state.hub.drafts = state.hub.drafts.filter((d) => String(d.id) !== String(msg.id))
+          state.hub.groupMessages = H.mergeMessages(state.hub.groupMessages, msg)
+          renderHubGroupMessages({ stick })
+          renderHubGroupChrome()
+          void markHubGroupRead()
+        } else if (!msg.group_id && ev.agent_id && ev.agent_id === state.hub.activeAgentId) {
+          const stick = nearBottom($('hub-dm-messages'))
+          state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, msg)
+          const sender = msg.sender || {}
+          if (sender.kind === 'agent') state.hub.dmAwaiting = false
+          renderHubDM({ stick })
+          void markHubDMRead(msg.seq)
+        }
+        scheduleHubHomeRefresh()
+        break
+      }
+      case 'hub_message_delta': {
+        // 只作用于当前打开的群时间线；其它群的流式草稿不缓存（final 会补齐）。
+        if (state.screen !== 'hub-group' || ev.group_id !== state.hub.activeGroupId) break
+        const res = H.applyDelta(state.hub.drafts, ev, state.hub.deltaIndex)
+        if (!res.applied) break
+        state.hub.drafts = res.messages
+        state.hub.deltaIndex = res.indexByID
+        const box = $('hub-group-messages')
+        const stick = nearBottom(box)
+        if (!state.hub.draftNodes) state.hub.draftNodes = new Map()
+        let body = state.hub.draftNodes.get(String(ev.message_id))
+        if (!body) {
+          // 新草稿：整列重排一次（只在首块发生），之后每块只追加文本。
+          renderHubGroupMessages({ stick: true })
+          renderHubGroupChrome() // 出现「正在输入」时把停止按钮带出来
+        } else {
+          body.appendChild(document.createTextNode(ev.delta || ''))
+          if (stick) box.scrollTop = box.scrollHeight
+        }
+        renderHubGroupStatus()
+        break
+      }
+      case 'hub_task_update': {
+        const task = ev.task
+        const taskGid = task && ((task.target && task.target.group_id) || ev.group_id)
+        if (task && taskGid === state.hub.activeGroupId) {
+          const stick = nearBottom($('hub-group-messages'))
+          const next = H.applyTaskUpdate(state.hub.groupMessages, task)
+          if (next !== state.hub.groupMessages) {
+            state.hub.groupMessages = next
+            renderHubGroupMessages({ stick })
+          }
+        }
+        if (state.hub.sheetKind === 'tasks') void loadHubTasks()
+        scheduleHubHomeRefresh()
+        break
+      }
+      case 'hub_agent_status': {
+        if (!ev.agent_id) break
+        const on = ev.status !== 'idle' && ev.status !== 'deleted'
+        state.hub.running[ev.agent_id] = on
+        if (state.screen === 'hub') renderHubHome()
+        if (ev.agent_id === state.hub.activeAgentId) renderHubDM()
+        if (state.hub.group && (state.hub.group.members || []).some((m) => m.agent_id === ev.agent_id)) {
+          renderHubGroupChrome()
+          renderHubGroupStatus()
+        }
+        break
+      }
+      case 'hub_conversation': {
+        if (!ev.group_id) break
+        const cv = ev.conversation || null
+        state.hub.convStatus[ev.group_id] = cv ? cv.status : ''
+        if (ev.group_id === state.hub.activeGroupId) {
+          state.hub.conversation = cv
+          if (cv && (cv.status === 'stopped' || cv.status === 'exhausted')) {
+            state.hub.drafts = []
+            state.hub.deltaIndex = {}
+            renderHubGroupMessages({ stick: nearBottom($('hub-group-messages')) })
+          }
+          renderHubGroupChrome()
+          renderHubGroupStatus()
+        } else if (state.screen === 'hub') {
+          renderHubHome()
+        }
+        break
+      }
+      case 'hub_need': {
+        const need = ev.need
+        if (need && need.id) {
+          const rest = state.hub.needs.filter((n) => n.id !== need.id)
+          state.hub.needs = need.status && need.status !== 'pending' ? rest : [need, ...rest]
+          if (state.screen === 'hub') renderHubHome()
+        }
+        if (state.hub.sheetKind === 'needs') void loadHubNeeds(state.hub.needsGroupId)
+        break
+      }
+      case 'hub_alert': {
+        state.hub.alerts = [{
+          text: ev.message || ev.code || 'Hub 告警',
+          severity: ev.severity || 'warning',
+        }].concat(state.hub.alerts.filter((a) => a.text !== (ev.message || ev.code))).slice(0, 5)
+        if (state.screen === 'hub') renderHubAlerts()
+        if (state.hub.sheetKind === 'needs') void loadHubNeeds(state.hub.needsGroupId)
+        break
+      }
+      case 'hub_group_update': {
+        if (!ev.group || !ev.group.id) break
+        const g = ev.group
+        const at = state.hub.groups.findIndex((x) => x.id === g.id)
+        if (at >= 0) state.hub.groups[at] = g
+        else state.hub.groups.push(g)
+        if (state.hub.activeGroupId === g.id) {
+          state.hub.group = g
+          renderHubGroupChrome()
+        }
+        scheduleHubHomeRefresh()
+        break
+      }
+      case 'hub_handoff': {
+        scheduleHubHomeRefresh()
+        if (state.hub.sheetKind === 'needs') void loadHubNeeds(state.hub.needsGroupId)
+        break
+      }
+      default:
+        break
+    }
+  }
+
+  // ---- 全屏 @ 选择器 ----
+
+  function mentionCandidates() {
+    if (!H) return []
+    const q = state.hub.mention.query
+    return H.filterMentionCandidates(q, hubRoster(), { includeAll: true })
+  }
+
+  function openMentionPicker() {
+    if (!H || state.screen !== 'hub-group') return
+    state.hub.mention.open = true
+    state.hub.mention.query = ''
+    state.hub.mention.index = 0
+    $('mention-filter').value = ''
+    $('mention-picker').hidden = false
+    renderMentionPicker()
+    $('mention-filter').focus()
+  }
+
+  function closeMentionPicker() {
+    state.hub.mention.open = false
+    $('mention-picker').hidden = true
+    const input = $('hub-group-input')
+    if (document.activeElement === $('mention-filter') && input) input.focus()
+  }
+
+  function renderMentionPicker() {
+    const list = $('mention-list')
+    list.textContent = ''
+    const items = mentionCandidates()
+    $('mention-empty').hidden = items.length > 0
+    if (state.hub.mention.index >= items.length) state.hub.mention.index = Math.max(0, items.length - 1)
+    items.forEach((m, i) => {
+      const row = el('button', 'mention-item')
+      row.type = 'button'
+      row.setAttribute('role', 'option')
+      row.setAttribute('aria-selected', i === state.hub.mention.index ? 'true' : 'false')
+      row.append(hubAvatar(m, m.name, true))
+      const main = el('div', 'mention-item-main')
+      main.appendChild(el('div', 'mention-item-name', '@' + m.name))
+      const sub = [m.role, m.groupRole === 'observer' ? '旁听' : m.groupRole === 'owner' ? '群主' : '']
+        .filter(Boolean)
+        .join(' · ')
+      if (sub) main.appendChild(el('div', 'mention-item-sub', sub))
+      row.appendChild(main)
+      row.addEventListener('click', () => pickMention(m))
+      list.appendChild(row)
+    })
+  }
+
+  function pickMention(member) {
+    const input = $('hub-group-input')
+    const caret = typeof input.selectionStart === 'number' ? input.selectionStart : input.value.length
+    const applied = H.applyMention(input.value, caret, member.name)
+    input.value = applied.text
+    input.focus()
+    input.setSelectionRange(applied.caret, applied.caret)
+    input.style.height = 'auto'
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px'
+    closeMentionPicker()
+  }
+
+  // ---- Hub 抽屉：任务板 / Needs / 派任务 ----
+
+  function openHubSheet(title, kind) {
+    $('hub-sheet-title').textContent = title
+    $('hub-sheet-body').textContent = ''
+    $('hub-sheet').hidden = false
+    state.hub.sheetKind = kind
+  }
+
+  function closeHubSheet() {
+    $('hub-sheet').hidden = true
+    state.hub.sheetKind = ''
+  }
+
+  let hubTasksSeq = 0
+  let hubNeedsSeq = 0
+
+  function openHubTasks() {
+    if (!state.hub.activeGroupId) return
+    openHubSheet('任务板', 'tasks')
+    $('hub-sheet-body').appendChild(el('div', 'hint', '加载中…'))
+    void loadHubTasks()
+  }
+
+  async function loadHubTasks() {
+    const gid = state.hub.activeGroupId
+    if (!gid) return
+    const seq = ++hubTasksSeq
+    try {
+      const data = await api('hub_task_list', { group_id: gid, limit: 100 })
+      if (seq !== hubTasksSeq) return
+      state.hub.tasks = Array.isArray(data.tasks) ? data.tasks : []
+      if (state.hub.sheetKind === 'tasks') renderTasksSheet()
+    } catch (e) {
+      if (seq === hubTasksSeq && state.hub.sheetKind === 'tasks') {
+        $('hub-sheet-body').textContent = ''
+        $('hub-sheet-body').appendChild(el('div', 'hub-empty', '加载任务失败：' + (e.message || e)))
+      }
+    }
+  }
+
+  function renderTasksSheet() {
+    if (state.hub.sheetKind !== 'tasks') return
+    const body = $('hub-sheet-body')
+    body.textContent = ''
+    if (!state.hub.tasks.length) {
+      body.appendChild(el('div', 'hub-empty', '这个群还没有任务。'))
+      return
+    }
+    for (const t of state.hub.tasks) {
+      const sv = H.taskStatusView(t.status)
+      const item = el('div', 'hub-sheet-item')
+      const head = el('div', 'hub-card-head')
+      head.appendChild(el('span', 'hub-status-chip hub-tone-' + sv.tone, sv.label))
+      head.appendChild(el('span', 'hub-sheet-title', t.title || t.instruction || t.id))
+      item.appendChild(head)
+      const target = (t.target && t.target.agent_id) || ''
+      const meta = el('div', 'hub-sheet-sub')
+      meta.textContent = [target ? '执行者 ' + hubAgentName(target) : '', hubTime(t.updated_at || t.created_at), t.id]
+        .filter(Boolean)
+        .join(' · ')
+      item.appendChild(meta)
+      if (t.error) item.appendChild(el('div', 'hub-card-error', t.error))
+      const actions = el('div', 'hub-sheet-actions')
+      if (!sv.terminal) {
+        const cancel = el('button', 'danger', '取消任务')
+        cancel.type = 'button'
+        cancel.addEventListener('click', () => runTaskAction('hub_task_cancel', t.id, cancel))
+        actions.appendChild(cancel)
+      } else if (!t.target || t.target.kind !== 'agent') {
+        const retry = el('button', 'ghost', '重试')
+        retry.type = 'button'
+        retry.addEventListener('click', () => runTaskAction('hub_task_retry', t.id, retry))
+        actions.appendChild(retry)
+      }
+      if (actions.childNodes.length) item.appendChild(actions)
+      body.appendChild(item)
+    }
+  }
+
+  async function runTaskAction(cmd, taskId, btn) {
+    btn.disabled = true
+    try {
+      await api(cmd, { task_id: taskId })
+      await loadHubTasks()
+      scheduleHubHomeRefresh()
+    } catch (e) {
+      btn.disabled = false
+      $('hub-sheet-body').appendChild(el('div', 'hub-empty', '操作失败：' + (e.message || e)))
+    }
+  }
+
+  function openHubNeeds(groupId) {
+    state.hub.needsGroupId = groupId || ''
+    state.hub.sheetNeeds = []
+    openHubSheet('Needs you', 'needs')
+    $('hub-sheet-body').appendChild(el('div', 'hint', '加载中…'))
+    void loadHubNeeds(groupId)
+  }
+
+  async function loadHubNeeds(groupId) {
+    const seq = ++hubNeedsSeq
+    const payload = { status: 'pending' }
+    if (groupId) payload.group_id = groupId
+    try {
+      const data = await api('hub_need_list', payload)
+      if (seq !== hubNeedsSeq) return
+      const list = Array.isArray(data.needs) ? data.needs : []
+      // 群抽屉的列表是过滤后的，不能覆盖首页的全局计数。
+      if (groupId) state.hub.sheetNeeds = list
+      else {
+        state.hub.needs = list
+        if (state.hub.sheetKind === 'needs' && !state.hub.needsGroupId) state.hub.sheetNeeds = list
+        if (state.screen === 'hub') renderHubHome()
+      }
+      if (state.hub.sheetKind === 'needs') renderNeedsSheet()
+    } catch (e) {
+      if (seq === hubNeedsSeq && state.hub.sheetKind === 'needs') {
+        $('hub-sheet-body').textContent = ''
+        $('hub-sheet-body').appendChild(el('div', 'hub-empty', '加载 Needs 失败：' + (e.message || e)))
+      }
+    }
+  }
+
+  function renderNeedsSheet() {
+    if (state.hub.sheetKind !== 'needs') return
+    const body = $('hub-sheet-body')
+    body.textContent = ''
+    if (!state.hub.sheetNeeds.length) {
+      body.appendChild(el('div', 'hub-empty', '没有待处理项。'))
+      return
+    }
+    for (const need of state.hub.sheetNeeds) {
+      const item = el('div', 'hub-sheet-item')
+      const head = el('div', 'hub-card-head')
+      head.appendChild(el('span', 'hub-status-chip', needKindLabel(need.kind)))
+      head.appendChild(el('span', 'hub-sheet-title', need.title || need.kind || '待处理'))
+      item.appendChild(head)
+      if (need.body) {
+        let pretty = need.body
+        try {
+          pretty = JSON.stringify(JSON.parse(need.body), null, 2)
+        } catch {
+          // 正文不是 JSON：原样展示
+        }
+        item.appendChild(el('pre', 'hub-need-body', pretty.length > 1200 ? pretty.slice(0, 1200) + '…' : pretty))
+      }
+      const meta = el('div', 'hub-sheet-sub')
+      meta.textContent = [need.agent_id ? hubAgentName(need.agent_id) : '', hubTime(need.created_at), need.task_id || '']
+        .filter(Boolean)
+        .join(' · ')
+      if (meta.textContent) item.appendChild(meta)
+      const actions = el('div', 'hub-sheet-actions')
+      addNeedActions(item, actions, need)
+      if (actions.childNodes.length) item.appendChild(actions)
+      body.appendChild(item)
+    }
+  }
+
+  function needKindLabel(kind) {
+    return { approval: '审批', question: '提问', handoff: '交接', failure: '失败', budget: '预算' }[kind] || kind || '事项'
+  }
+
+  function addNeedActions(item, actions, need) {
+    const resolve = (resolution, answers) => {
+      const btn = actions.querySelector('button')
+      if (btn) btn.disabled = true
+      api('hub_need_resolve', Object.assign({ need_id: need.id, resolution }, answers ? { answers } : {}))
+        .then(() => loadHubNeeds(state.hub.needsGroupId))
+        .then(() => scheduleHubHomeRefresh())
+        .catch((e) => {
+          if (btn) btn.disabled = false
+          $('hub-sheet-body').appendChild(el('div', 'hub-empty', '处理失败：' + (e.message || e)))
+        })
+    }
+    if (need.kind === 'approval') {
+      actions.appendChild(namedButton('批准', 'primary', () => resolve('approve')))
+      actions.appendChild(namedButton('拒绝', 'ghost', () => resolve('deny')))
+      return
+    }
+    if (need.kind === 'handoff') {
+      actions.appendChild(namedButton('接受', 'primary', () => resolve('accept')))
+      actions.appendChild(namedButton('拒绝', 'ghost', () => resolve('decline')))
+      return
+    }
+    if (need.kind === 'question') {
+      const questions = H.parseNeedQuestions(need)
+      if (!questions.length) {
+        item.appendChild(el('div', 'hub-empty', '这个问题需要在电脑端会话里回答。'))
+        return
+      }
+      const answers = {}
+      for (const q of questions) {
+        const label = el('label', '', q.question)
+        const input = document.createElement('input')
+        input.placeholder = '输入回答'
+        input.addEventListener('input', () => {
+          answers[q.id] = input.value
+        })
+        label.appendChild(input)
+        item.appendChild(label)
+      }
+      actions.appendChild(namedButton('提交回答', 'primary', () => resolve('answered', answers)))
+      return
+    }
+    actions.appendChild(namedButton('标记已读', 'ghost', () => resolve('acknowledged')))
+  }
+
+  function namedButton(label, cls, fn) {
+    const b = el('button', cls, label)
+    b.type = 'button'
+    b.addEventListener('click', fn)
+    return b
+  }
+
+  function openHubAssign() {
+    const gid = state.hub.activeGroupId
+    if (!gid) return
+    const members = H.assignableMembers(hubRoster())
+    openHubSheet('派任务', 'assign')
+    const body = $('hub-sheet-body')
+    if (!members.length) {
+      body.appendChild(el('div', 'hub-empty', '没有可接任务的成员（观察者不能接任务）。'))
+      return
+    }
+    const form = el('div', 'hub-form')
+    const toLabel = el('label', '', '执行成员')
+    const select = document.createElement('select')
+    for (const m of members) {
+      const o = document.createElement('option')
+      o.value = m.id
+      o.textContent = m.name + (m.role ? ' · ' + m.role : '')
+      select.appendChild(o)
+    }
+    toLabel.appendChild(select)
+    const titleLabel = el('label', '', '标题（可空）')
+    const titleInput = document.createElement('input')
+    titleInput.placeholder = '例如：整理竞品价格'
+    titleLabel.appendChild(titleInput)
+    const insLabel = el('label', '', '任务说明')
+    const instruction = document.createElement('textarea')
+    instruction.rows = 4
+    instruction.placeholder = '说清楚目标、输入和验收标准…'
+    insLabel.appendChild(instruction)
+    const err = el('div', 'error')
+    err.hidden = true
+    const submit = el('button', 'primary', '派发')
+    submit.type = 'button'
+    submit.addEventListener('click', async () => {
+      const agentId = select.value
+      const text = instruction.value.trim()
+      if (!agentId || !text) {
+        err.hidden = false
+        err.textContent = '请选择成员并填写任务说明。'
+        return
+      }
+      submit.disabled = true
+      try {
+        await api('hub_group_assign', H.assignPayload(gid, agentId, text, titleInput.value.trim(), nextClientMsgID('a')))
+        closeHubSheet()
+        scheduleHubHomeRefresh()
+      } catch (e) {
+        submit.disabled = false
+        err.hidden = false
+        err.textContent = '派发失败：' + (e.message || e)
+      }
+    })
+    form.append(toLabel, titleLabel, insLabel, err, submit)
+    body.appendChild(form)
+  }
+
   // ---------- 事件流 ----------
 
   // 每建一条连接 generation +1，旧连接的回调一律作废。
@@ -848,6 +2304,9 @@
   ])
 
   function onEvent(ev) {
+    // 聊天连接只处理会话事件：Hub 事件即使因双连接/回调写错而到这里也直接丢弃，
+    // 绝不把 hub_message 画进聊天屏（反之由 onHubFrame 的 eventRoute 兜住）。
+    if (H && H.eventRoute(ev, 'chat') === 'ignore') return
     // emit 给每行注入了 session_id：不是当前会话的一条都不画。
     // 这是「串台」的最后一道闸 —— 双连接、hub 过滤失效、切会话竞态都挡得住。
     if (ev.session_id && state.sid && ev.session_id !== state.sid && SESSION_SCOPED.has(ev.event_type)) return
@@ -1253,8 +2712,38 @@
   // ---------- 导航 ----------
 
   function navBack() {
+    // 覆盖层优先：@ 选择器/抽屉开着时，返回键只关覆盖层。
+    if (state.hub.mention.open) {
+      closeMentionPicker()
+      return
+    }
+    if (!$('hub-sheet').hidden) {
+      closeHubSheet()
+      return
+    }
     stopAgentPoll()
     const prev = state.nav.pop()
+    if (state.screen === 'hub-group' || state.screen === 'hub-dm') {
+      state.hub.activeGroupId = ''
+      state.hub.activeAgentId = ''
+      state.hub.group = null
+      state.hub.dmAgent = null
+      state.hub.drafts = []
+      state.hub.deltaIndex = {}
+      if (prev === 'hub') {
+        show('hub')
+        renderHubHome()
+        ensureHubSocket()
+        loadHubHome({ silent: true })
+        return
+      }
+      leaveHub()
+      return
+    }
+    if (state.screen === 'hub') {
+      leaveHub()
+      return
+    }
     if (prev === 'agents') {
       renderAgentsList()
       show('agents')
@@ -1324,9 +2813,32 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return
     if (!state.conn || state.conn.readyState !== WebSocket.OPEN) reviveConn()
+    if (isHubScreen() && (!state.hub.conn || state.hub.conn.readyState !== WebSocket.OPEN)) {
+      state.hub.retry = 0
+      ensureHubSocket()
+    }
   })
   setInterval(() => {
     if (state.disposed) return
+    if (isHubScreen()) {
+      if (!state.hub.conn || state.hub.conn.readyState !== WebSocket.OPEN) {
+        ensureHubSocket()
+      } else if (Date.now() - state.hub.lastMsgAt > WATCHDOG_MS) {
+        // 半死连接（iOS 息屏常见）：主动重连，并按「重连」处理重拉 Hub 快照。
+        state.hub.retry = 0
+        state.hub.hasConnected = true
+        state.hub.gen++
+        try {
+          state.hub.conn.close()
+        } catch {
+          /* ignore */
+        }
+        state.hub.conn = null
+        state.hub.disposed = false
+        connectHub() // 新连接的 hello 会触发 hubResync
+      }
+      return
+    }
     if (state.screen !== 'chat' && state.screen !== 'agent') return
     if (Date.now() - state.lastMsgAt < WATCHDOG_MS) return
     reviveConn()
@@ -1354,6 +2866,59 @@
     $('ws-pick').addEventListener('click', pickOnDesktop)
     $('ws-manual').addEventListener('click', addWorkspaceByPath)
     $('new-session').addEventListener('click', newSession)
+    $('open-hub').addEventListener('click', openHub)
+    $('hub-needs').addEventListener('click', () => openHubNeeds(''))
+    $('hub-group-at').addEventListener('click', openMentionPicker)
+    $('hub-group-send').addEventListener('click', sendHubGroup)
+    $('hub-dm-send').addEventListener('click', sendHubDM)
+    $('mention-back').addEventListener('click', closeMentionPicker)
+    $('hub-sheet-close').addEventListener('click', closeHubSheet)
+    $('mention-filter').addEventListener('input', () => {
+      state.hub.mention.query = $('mention-filter').value
+      state.hub.mention.index = 0
+      renderMentionPicker()
+    })
+    $('mention-filter').addEventListener('keydown', (e) => {
+      const items = mentionCandidates()
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeMentionPicker()
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        if (items.length) state.hub.mention.index = (state.hub.mention.index + 1) % items.length
+        renderMentionPicker()
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        if (items.length) state.hub.mention.index = (state.hub.mention.index - 1 + items.length) % items.length
+        renderMentionPicker()
+        return
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        const pick = items[state.hub.mention.index]
+        if (pick) pickMention(pick)
+      }
+    })
+    for (const [id, fn] of [
+      ['hub-group-input', sendHubGroup],
+      ['hub-dm-input', sendHubDM],
+    ]) {
+      const t = $(id)
+      t.addEventListener('input', () => {
+        t.style.height = 'auto'
+        t.style.height = Math.min(t.scrollHeight, 120) + 'px'
+      })
+      t.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+          e.preventDefault()
+          fn()
+        }
+      })
+    }
     $('agents-bar').addEventListener('click', openAgents)
     $('send').addEventListener('click', send)
     $('copy-link').addEventListener('click', async () => {
@@ -1400,7 +2965,10 @@
       })
       void fn
     }
-    window.addEventListener('beforeunload', disconnect)
+    window.addEventListener('beforeunload', () => {
+      disconnect()
+      disconnectHub()
+    })
   }
 
   // 扫码进入：桌面端二维码把配对码放在 hash 里（#pair=123456）。
