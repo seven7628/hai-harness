@@ -26,13 +26,16 @@ const (
 	EventUserPromptSubmit Event = "UserPromptSubmit"
 	EventPreToolUse       Event = "PreToolUse"
 	EventPostToolUse      Event = "PostToolUse"
-	// EventStop 是 AgentEnd 的自然结束锚点（Hub 也不例外，P4-04a）。
-	// 语义边界（契约）：
-	//   - 只在**自然结束**门控点派发；exit 2 / decision=block 表示"继续跑一轮"
-	//     （内核侧 stopHookBlocks 上限 8 次），不是终态。
-	//   - 截断（finish_reason=length 且零可见内容）、运行错误、达到 MaxIterations
-	//     的结束路径**不派发 Stop**：它们照常发 AgentEnd，但没有"可续跑"的依据，
-	//     也不该让 hook 把失败/截断改写成一次额外续跑。
+	// EventStop 是 AgentEnd 的收尾门控锚点（Hub 也不例外，P4-04a）。
+	// 实际顺序（agents/agent_loop.go）：自然收尾门控 → 截断判定。
+	//   - 每轮自然收尾先派发 Stop；输出被截断（finish_reason=length 且零可见内容）
+	//     的轮次**也会先派发** Stop（LastAssistant 可能为空），之后才按截断报错。
+	//   - exit 2 / decision=block 表示"继续跑一轮"（内核侧 stopHookBlocks 上限 8 次），
+	//     不是终态；在截断轮上，hook 的"继续"会让本轮跳过截断报错、再跑一轮。
+	//     引擎自身不因截断自动重试，但外部 hook 可以显式要求（用户策略）。
+	//   - abort / ctx 取消 / 更早的出错路径在门控之前已退出，不派发 Stop；
+	//     hook panic → 视为不继续（坏 hook 不得卡住会话）。
+	//   - 因此不能假设每个 AgentEnd 之前都有 Stop（abort/error 收尾就没有）。
 	EventStop          Event = "Stop"
 	EventPreCompact    Event = "PreCompact"    // 复用内核已有回调
 	EventPostToolBatch Event = "PostToolBatch" // 复用内核已有回调

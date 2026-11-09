@@ -1241,12 +1241,14 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 			// 保留：Stop hook（外部显式声明「继续」，见下）与工具轮空回复续跑（模型侧空轮，
 			// 非引擎替模型判断）。子 loop 的在途孙任务门控（subagent.go，判据用
 			// InFlightDescendants 且按 running/interrupting 过滤）不动。
-			// Stop（hooks 能力扩展）：模型即将自然结束本轮前的**最后一个**门控点。
+			// Stop（hooks 能力扩展）：本轮收尾门控（在截断判定之前）。
 			// 外部 hook 可要求"再跑一轮"（社区里 Stop-hook loop 类工具的用法：让 agent
-			// 继续未完成的工作）。三重护栏缺一不可：① 只在自然结束路径生效（abort /
-			// ctx 取消 / 出错路径在上面已 break —— 那些属打断，不该再拖一轮）；
-			// ② 每 Run 次数上限 maxStopHookBlocks=8（对标 Claude Code 的连续 block 上限）；
-			// ③ hook panic → 视为"不继续"（坏 hook 不得卡住会话）。
+			// 继续未完成的工作）。三重护栏缺一不可：① 只在收尾门控生效（abort /
+			// ctx 取消 / 更早的出错路径在此前已 break —— 那些属打断，不该再拖一轮；
+			// 注意截断判定在本门控**之后**，所以截断轮也会先派发 Stop，
+			// LastAssistant 可能为空）；② 每 Run 次数上限 maxStopHookBlocks=8
+			// （对标 Claude Code 的连续 block 上限）；③ hook panic → 视为"不继续"
+			// （坏 hook 不得卡住会话）。
 			if opts != nil && opts.Stop != nil && !ac.IsAborted() && ac.ctx.Err() == nil &&
 				ac.stopHookBlocks < maxStopHookBlocks {
 				cont, panicked := callStop(opts.Stop, ac.ctx, events.StopContext{
@@ -1279,13 +1281,14 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 			// stop 收尾 → **零交付却报成功**：子 agent 状态 completed、结果为空串，主 agent
 			// 当成"已完成"继续往下走，用户看到任务莫名结束且全程无任何报错。
 			//
-			// 为什么判定放在这里（stop 检查点，且先于 Stop hooks 与静默结束事件）：
+			// 为什么判定放在这里（Stop 门控之后、静默结束事件之前）：
 			//   - 收尾轮无文本 + 无工具调用 ⇒ 本次 Run 没有任何可交付物，唯一诚实的终态是失败；
 			//   - 先于静默结束事件：截断是更强的判据（引擎已知上游为何切断），报错即可，
 			//     不必再叠加一条"静默结束"读数；
-			//   - 先于 Stop hooks：hooks 是"再跑一轮"的加码机制，而截断轮**没有可续跑的
-			//     依据**（模型没交出任何东西，多跑一轮只是再赌一次预算够不够），且引擎
-			//     不能替模型续跑（用户裁定）。
+			//   - 在 Stop 门控之后：若 Stop hook 要求继续，上面已 continue，本轮不会
+			//     走到截断报错；若 hook 不继续，截断仍如实报错。引擎自身不因截断自动
+			//     重试（重试装不下同一份答案），但外部 hook 可以显式要求继续（上限 8）
+			//     ——那是用户策略，不是引擎替模型重试。
 			//
 			// 不重试：截断是**配置与任务的匹配问题**（输出预算 < 该任务需要的答案量），
 			// 重试装不下同一份答案，只会再烧一轮 token。不判永久错误：调大 max_tokens /

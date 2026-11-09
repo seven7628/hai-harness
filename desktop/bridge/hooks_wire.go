@@ -165,7 +165,7 @@ func (m *manager) reloadWorkspaceHooks(wsPath string) int {
 	n := 0
 	for _, bs := range sessions {
 		if bs == nil || bs.s == nil {
-			continue // 会话正在创建/已关闭：创建路径自己会读到新配置
+			continue // 已关闭：跳过；创建中的会话可能已读旧配置，且晚于本次快照注册（窄窗口，下次创建/重开读新配置）
 		}
 		// 每会话一个派发器（与会话创建路径一致）：派发器的会话级去重表属于该会话。
 		bs.s.SetHooks(hooksFor(m.setupHooks(wsPath, bs.warnHook), wsPath, bs.id))
@@ -187,8 +187,12 @@ func (m *manager) reloadWorkspaceHooks(wsPath string) int {
 // 绝不能复用 reloadWorkspaceHooks —— 它走 setupHooks({hub home})，会把 Hub home 里的
 // .go-code/hooks.json / .claude 项目层读进来（安全边界，见 setupUserHooks 注释）。
 //
-// 调用方在 m.mu 内快照 runtimes、释放后再进入本函数；本函数只取 ws.mu（锁序
-// m.mu → ws.mu，绝不反向）。
+// 调用方在 m.mu 内快照 runtimes 指针、**释放 m.mu 之后**才进入本函数；本函数逐个
+// runtime 取 ws.mu 快照会话（两把锁不嵌套持有，避免反向锁序）。
+//
+// 快照窗口：runtimes/会话在快照之后才注册的不在本次推送内。会话若在创建路径已读
+// 旧配置、又在本次快照之后注册，会漏掉这次热替换（与项目路径同语义的窄窗口）；
+// 它下一次重新创建/打开时读取新配置。
 func (m *manager) reloadHubRuntimeHooks(runtimes []*workspaceRuntime) int {
 	total := 0
 	for _, ws := range runtimes {
@@ -205,7 +209,7 @@ func (m *manager) reloadHubRuntimeHooks(runtimes []*workspaceRuntime) int {
 		n := 0
 		for _, bs := range sessions {
 			if bs == nil || bs.s == nil {
-				continue // 会话正在创建/已关闭：创建路径自己会读到新配置
+				continue // 已关闭：跳过；创建中的会话可能已读旧配置，且晚于本次快照注册（窄窗口，下次创建/重开读新配置）
 			}
 			// 每会话一个派发器（与创建路径一致）：派发器的会话级去重表属于该会话。
 			bs.s.SetHooks(hooksFor(m.setupUserHooks(bs.warnHook), ws.path, bs.id))
@@ -223,8 +227,9 @@ func (m *manager) reloadHubRuntimeHooks(runtimes []*workspaceRuntime) int {
 // 用户级配置对所有工作区生效，但只有"已打开"的才有会话可换；其余下次打开时自然读到新配置。
 //
 // 项目会话与 Hub 会话是两条装配链：前者 setupHooks（用户 + 项目层），后者 setupUserHooks
-// （仅用户级）。这里在**同一把 m.mu** 内快照两边的 runtimes（锁序 m.mu → ws.mu），
-// 释放后分别推送 —— 不把 Hub home 混进 m.workspaces，也不让项目路径去读 Hub home。
+// （仅用户级）。这里在**同一把 m.mu** 内快照两边的 runtimes 指针，随即释放 m.mu；
+// 之后才逐个取 ws.mu 推送（m.mu 与 ws.mu 不嵌套持有）—— 不把 Hub home 混进
+// m.workspaces，也不让项目路径去读 Hub home。
 func (m *manager) reloadHooksAllWorkspaces() int {
 	m.mu.Lock()
 	paths := make([]string, 0, len(m.workspaces))

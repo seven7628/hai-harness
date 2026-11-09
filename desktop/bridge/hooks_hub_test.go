@@ -488,9 +488,11 @@ func TestHubGroupSessionStopHookFiresWithGroupSessionID(t *testing.T) {
 	}
 }
 
-// TestHubSessionIgnoresProjectHooksInHubHome 安全边界：Hub home 的 .go-code/hooks.json
-// 与 .claude/settings.json 都是"项目形态"，即使 allowProjectHooks=true 且命令已信任，
-// 打开智能体也不能执行它们。用户级配置是正对照（另一个测试）——这里只放项目层。
+// TestHubSessionIgnoresProjectHooksInHubHome 安全边界（创建 + 热替换两条路径）：
+// Hub home 的 .go-code/hooks.json 与 .claude/settings.json 都是"项目形态"，即使
+// allowProjectHooks=true 且命令已信任，打开智能体 / 用户级 hooks_set 热替换都不能
+// 执行它们。创建时只放项目层；随后用真实 hooks_set 加一条用户级 Stop 作为正对照，
+// 热替换必须只装用户层（装配发生，但项目层仍为空）。
 func TestHubSessionIgnoresProjectHooksInHubHome(t *testing.T) {
 	m, buf := testManager(t)
 	p := createHubAgent(t, m, buf, 1, "Boundary")
@@ -503,6 +505,7 @@ func TestHubSessionIgnoresProjectHooksInHubHome(t *testing.T) {
 	}
 	goCodeMarker := filepath.Join(t.TempDir(), "project-gocode.jsonl")
 	claudeMarker := filepath.Join(t.TempDir(), "project-claude.jsonl")
+	userMarker := filepath.Join(t.TempDir(), "user.jsonl")
 	goCodeCmd := p404aAppendCmd(goCodeMarker)
 	claudeCmd := p404aAppendCmd(claudeMarker)
 
@@ -548,9 +551,28 @@ func TestHubSessionIgnoresProjectHooksInHubHome(t *testing.T) {
 	if h := bs.s.Hooks(); h != nil {
 		t.Fatalf("hub session loaded project-level hooks from hub home: %+v", h)
 	}
+
+	// 热替换路径（B2）：创建后才写入用户级 Stop。reloadHubRuntimeHooks 必须走
+	// setupUserHooks（空 WorkspaceDir）——若改成 hooks.Load{WorkspaceDir: ws.path}
+	// 或 setupHooks(ws.path)，hub-home 项目层会在这一步被装进来。
+	p404aHooksSet(t, m, buf, 2, p404aStopSection(p404aAppendCmd(userMarker), 0))
+	if h := bs.s.Hooks(); h == nil || h.Stop == nil {
+		t.Fatalf("user hooks_set did not reload the existing hub session: %+v", h)
+	}
 	prov := &evalProvider{reply: "boundary ok"}
 	p404aSetDMLoop(t, bs, prov)
-	p404aSendDM(t, m, buf, 2, 2, p, "run without project hooks")
+	p404aSendDM(t, m, buf, 3, 2, p, "run without project hooks")
+
+	userPayloads := p404aWaitPayloads(t, userMarker, 1)
+	if len(userPayloads) != 1 {
+		t.Fatalf("user Stop hook payloads = %d, want exactly 1", len(userPayloads))
+	}
+	if userPayloads[0]["session_id"] != bs.id {
+		t.Fatalf("user payload session_id = %v, want %q", userPayloads[0]["session_id"], bs.id)
+	}
+	if userPayloads[0]["cwd"] != home {
+		t.Fatalf("user payload cwd = %v, want %q", userPayloads[0]["cwd"], home)
+	}
 
 	for _, marker := range []string{goCodeMarker, claudeMarker} {
 		if payloads := p404aReadPayloads(t, marker); len(payloads) != 0 {
