@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DependencyList } from 'react'
 import { SendIcon } from '../components/icons'
 import { useHubStore } from './useHubStore'
 import { hubCommand } from './api'
@@ -13,6 +13,7 @@ import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './g
 import { triggerSeqBySender } from './groupProjection'
 import { canAutoFollow, scrollToSeq, seqJumpPlan } from './seqJump'
 import { groupTimelineMarkdown } from './exportMarkdown'
+import { hubPerfMemoEnabled } from './perfFlags'
 import { downloadText, safeFilename, timestampSlug } from './download'
 import {
   ALL_MENTION_ID,
@@ -65,6 +66,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
+  // P4-01 性能 memo 的启动期快照：localStorage['hub.perfMemo']='0' 后重载即关闭。
+  // 只读一次（不在每次 render 访问 storage）；支持回滚不需要发版，见 perfFlags.ts。
+  const [perfMemo] = useState(() => hubPerfMemoEnabled())
   const [draft, setDraft] = useState('')
   const [composerMode, setComposerMode] = useState<'chat' | 'assign'>('chat')
   const [view, setView] = useState<'chat' | 'run'>('chat')
@@ -300,14 +304,18 @@ export default function GroupView({ group }: { group: HubGroup }) {
     handledJump.current = plan.nonce
   }, [jump, group.id, messages, jumpToSeq])
 
-  // 已结算时间线的元素树按依赖记忆（P4-01 实测，220 条消息 + 3 条流式草稿）：
-  // 草稿 delta / 输入框每敲一个字都会重渲染 GroupView，但 messages/rounds 没变。
-  // 不记忆时 223 条消息每次 delta 提交 p50≈1.0ms、键入处理 p50≈1.2ms；
-  // 记忆后 React 在这 223 个 slot 上按同一 element 引用跳过，降到 0.3 / 0.5ms。
-  // 依赖里不能漏 highlightSeq：B6 跳转高亮必须能重渲染对应消息。
-  const threadNodes = useMemo(
+  // 已结算时间线的元素树按依赖记忆（P4-01）：草稿 delta / 输入框每敲一个字都会
+  // 重渲染 GroupView，但 messages/rounds 没变；React 按同一 element 引用跳过这
+  // 223 个 slot，只更新草稿气泡。当前 bench:hub-long（production，220 条消息 +
+  // 3 条草稿）3-run median after-run：delta 提交 p50 0.3ms、强制布局 p50 0.6ms；A/B review
+  // 记录 delta 0.9→0.3ms、键入 1.2→0.6ms。依赖里不能漏 highlightSeq：B6 跳转
+  // 高亮必须能重渲染对应消息。
+  //
+  // 回滚：hub.perfMemo=0 → deps 传 undefined，useMemo 每次渲染都重算，即 P4-01
+  // 之前的路径（不新增分支组件、不改变任何输出）。默认开启。
+  const threadNodes = usePerfMemo(
     () => renderThread(items, agentNames, displayMode === 'grouped', roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq),
-    [items, agentNames, displayMode, roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq],
+    perfMemo ? [items, agentNames, displayMode, roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq] : undefined,
   )
 
   function copyLink(): void {
@@ -545,6 +553,17 @@ export default function GroupView({ group }: { group: HubGroup }) {
   )
 }
 
+
+/**
+ * 带「显式关闭」的 useMemo：deps 传 undefined 时 React 语义就是每次渲染重算，
+ * 正好是 P4-01 之前的路径（不需要两套渲染代码，也不会改变输出）。
+ * @types/react 把 deps 标成必填，运行时支持 undefined（官方文档：省略依赖 = 每次重算），
+ * 这里用一个注释清楚的窄 cast 保留该语义；调用方不得传 undefined 以外的非数组值。
+ */
+function usePerfMemo<T>(factory: () => T, deps: DependencyList | undefined): T {
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- deps 由调用方提供；undefined = 每次重算
+  return useMemo(factory, deps as DependencyList)
+}
 
 function renderThread(
   items: ThreadItem[],

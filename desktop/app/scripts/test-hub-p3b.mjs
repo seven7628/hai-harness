@@ -9,6 +9,7 @@
 //   mock：停止结算在飞任务（interrupted），二次 assign 后停止按钮不被僵尸任务点亮。
 // 这些是「@ 路由 / 自动对话 / 任务卡 / 左栏未读」在 UI 侧的唯一分叉点，值得独立回归。
 import { build } from 'esbuild'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
@@ -22,6 +23,7 @@ const result = await build({
       "export * as conversation from './conversation.ts'",
       "export * as taskCard from './taskCard.ts'",
       "export * as groupProjection from './groupProjection.ts'",
+      "export * as perfFlags from './perfFlags.ts'",
       "export * as store from './useHubStore.ts'",
       "export * as transport from '../transport/index.ts'",
     ].join('\n'),
@@ -605,6 +607,33 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
   delta('m_sync', 0, '幽灵')
   eq(H.getState().groupDrafts.length, 0, '对账后迟到 delta 不复活草稿')
   eq(H.getState().groupMessages.filter((m) => m.id === 'm_sync').length, 1, '对账：历史消息只落一条')
+}
+
+// —— 12c) P4-01 性能 memo 回滚开关（localStorage: hub.perfMemo=0）——
+{
+  const flags = mod.perfFlags
+  eq(flags.HUB_PERF_MEMO_KEY, 'hub.perfMemo', '回滚开关 key 固定（支持文档/脚本可复制）')
+  let seenKey = null
+  const read = (value) => flags.hubPerfMemoEnabled({ getItem: (key) => { seenKey = key; return value } })
+  eq(read(null), true, '默认开启（键不存在）')
+  eq(seenKey, 'hub.perfMemo', 'helper 读的就是 hub.perfMemo')
+  eq(read('0'), false, "'0' 关闭 memo")
+  eq(read('1'), true, '非 0 值保持开启')
+  eq(read('false'), true, '只认精确 0（避免误读其他写法）')
+  eq(flags.hubPerfMemoEnabled({ getItem: () => { throw new Error('SecurityError') } }), true, 'storage 读取抛错 fail-open（保持优化）')
+  eq(flags.hubPerfMemoEnabled(null), true, 'storage 不可用默认开启')
+
+  // 静态接线守卫：localStorage 关闭必须真的走 useMemo 的 undefined 分支，
+  // 否则「有开关但没效果」也能骗过 helper 单测。
+  const viewSrc = readFileSync(join(hubDir, 'GroupView.tsx'), 'utf8')
+  assert(viewSrc.includes("from './perfFlags'"), 'GroupView 引用 perfFlags helper')
+  assert(viewSrc.includes('useState(() => hubPerfMemoEnabled())'), 'GroupView 启动时读一次开关')
+  const callAt = viewSrc.indexOf('const threadNodes = usePerfMemo(')
+  assert(callAt >= 0, 'GroupView 通过 usePerfMemo 调用时间线 memo')
+  const call = viewSrc.slice(callAt, callAt + 800)
+  assert(call.includes('perfMemo ? ['), '开启时走依赖数组分支')
+  assert(call.includes('] : undefined'), '关闭时 deps 传 undefined（每次渲染重算）')
+  assert(viewSrc.includes('function usePerfMemo'), '存在带 undefined 语义的 usePerfMemo 包装')
 }
 
 // —— 13) DM 未读刷新竞态（P3b-08）：请求在飞时到达的消息不被旧快照覆盖 ——

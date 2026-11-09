@@ -7,12 +7,12 @@
 //
 // 量什么（同一条命令前后各跑一次即可对比）：
 //   ① 首屏：mount() → 双 rAF（≈ 首帧绘制），外加 DOM 节点数；
-//   ② 每次 delta：事件入队 → DOM 提交（MutationObserver），以及 CDP 的
-//      Script/Layout 时间摊到每条 delta；
-//   ③ 键入：keydown → input 后下一帧，真实 page.keyboard.type；
+//   ② 每次 delta：事件入队 → DOM 提交（MutationObserver）+ 提交后的强制布局；
+//   ③ 键入：keydown → input 事件处理完成（microtask）+ 下一帧，真实 page.keyboard.type；
 //   ④ 滚动：贴底跟随时 rAF 间隔 + 上滑时 rAF 间隔 + longtask；
 //   ⑤ DOM/内存：元素数、消息节点数、usedJSHeapSize（--expose-gc 后采样）；
-//   ⑥ 弱网不变量 + reduced-motion（跑在真实 DOM 上，失败即非零退出）。
+//   ⑥ 弱网不变量 + reduced-motion（跑在真实 DOM 上，失败即非零退出）；
+//   ⑦ hub.perfMemo=0 回滚实跑：关闭 memo 后 DOM 必须完全一致，并记录 delta 成本对照。
 //
 // 为什么先 vite build 再跑：dev 版 React 会把渲染放大约 2~3 倍，绝对数字没有参考意义；
 // production 单页构建到临时目录，静态服务器只托管这一次产物，跑完即删。
@@ -354,17 +354,46 @@ async function main() {
       }
 
       const summary = summarize(results)
+
+      // P4-01 回滚开关实跑：同一个 production 页面，localStorage['hub.perfMemo']='0'
+      // 后再挂载 → deps 传 undefined，已结算时间线每次渲染重算。这里只证明
+      // 「关闭后仍能渲染且 DOM 完全一致」，并记录 delta 成本作对照（不设噪声阈值）。
+      const rollbackPage = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 })
+      rollbackPage.on('pageerror', (e) => pageErrors.push(e.message))
+      await rollbackPage.addInitScript(() => {
+        try { localStorage.setItem('hub.perfMemo', '0') } catch { /* storage 不可用时默认开启 */ }
+      })
+      await rollbackPage.goto(`${server.url}/lab/hub-long.html`, { waitUntil: 'load' })
+      await rollbackPage.waitForFunction(() => !!window.__hubBench, null, { timeout: 30_000 })
+      await rollbackPage.evaluate(() => document.fonts.ready.then(() => true))
+      const rollback = await rollbackPage.evaluate(async () => {
+        const api = window.__hubBench
+        const mount = await api.mount()
+        const burst = await api.deltaBurst({ count: 60, gapMs: 4 })
+        return {
+          mountMs: mount.mountMs,
+          threadHtmlHash: mount.dom.threadHtmlHash,
+          deltaCommitP50: burst.commit.p50,
+          deltaCommitP95: burst.commit.p95,
+          deltaLayoutP50: burst.layout.p50,
+          committed: burst.committed,
+        }
+      })
+      await rollbackPage.close()
+      const rollbackHashOk = rollback.threadHtmlHash === summary.mountThreadHtmlHash
+      console.log(`[bench] rollback hub.perfMemo=0: deltaCommitP50=${rollback.deltaCommitP50}ms (memo-on ${summary.deltaCommitP50}ms), hash=${rollback.threadHtmlHash} (on ${summary.mountThreadHtmlHash}) ${rollbackHashOk ? 'OK' : 'MISMATCH'}`)
+
       console.log(`[bench] chromium=${browser.version()}`)
       printBrowserReport(summary, browser.version(), results.length)
 
       const info = results[0].info
-      const payload = { mode: 'browser', chromium: browser.version(), runs: results.length, viewport: VIEWPORT, fixture: info, metrics: summary }
+      const payload = { mode: 'browser', chromium: browser.version(), runs: results.length, viewport: VIEWPORT, fixture: info, metrics: summary, rollback: { ...rollback, hashOk: rollbackHashOk } }
       console.log('BENCH_JSON=' + JSON.stringify(payload))
       if (OUT) {
         await writeFile(OUT, JSON.stringify(payload, null, 2))
         console.log(`wrote ${OUT}`)
       }
-      const failed = !summary.weakPass || !summary.uiPass || !summary.motionNoPrefOk || !summary.motionReduceOk
+      const failed = !summary.weakPass || !summary.uiPass || !summary.motionNoPrefOk || !summary.motionReduceOk || !rollbackHashOk
       if (failed) {
         console.error('[bench] FAIL: weak-network or reduced-motion invariant broken')
         process.exitCode = 1
