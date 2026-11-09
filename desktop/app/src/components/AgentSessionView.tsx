@@ -165,19 +165,25 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   // 「还有更早」的判据：**有 task_id 就有 journal** —— 续跑轮的卡片 items 非空、trimmed=0，
   // 旧判据连按钮都不给，用户无路可走（问题二）。但一旦后端给了权威答案（historyHasMore），
   // 就听它的：否则翻到底之后按钮永远不消失。
-  const historyAnswered = cards.some((c) => c.historyHasMore !== undefined)
+  //
+  // 分页三态（loading/error/total/hasMore）必须读**最早那张卡** —— onLoadOlder 与
+  // 响应回写都锚在 oldestCard 上。旧实现读 `card`（最新一轮那张），于是：
+  // 请求挂在旧卡、loading 看新卡 → 永远 false → Narrative 的滚动预取/按钮完全不节流，
+  // 一次上滑就能连发多个分页请求（2026-11「3 个一样的消息」的放大器）。
+  const pager = oldestCard ?? card
+  const historyAnswered = pager?.historyHasMore !== undefined
   const hasMoreHistory = historyAnswered
-    ? cards.some((c) => c.historyHasMore === true)
+    ? pager?.historyHasMore === true
     : trimmed > 0 || Boolean(oldestCard?.taskId)
 
   const source: NarrativeSource = {
     blocks: subBlocks,
     // 分页：checkpoint 只留首屏，更早的在子任务 journal 里（agent_history 命令）。
     // 有 trimmed（被裁掉的条数）也算「还有更早」—— 否则裁剪过的历史看起来就是全部。
-    total: card?.historyTotal ?? 0,
+    total: pager?.historyTotal ?? 0,
     hasMore: hasMoreHistory,
-    loading: Boolean(card?.historyLoading),
-    error: Boolean(card?.historyError),
+    loading: Boolean(pager?.historyLoading),
+    error: Boolean(pager?.historyError),
     ...(oldestCard?.taskId ? { onLoadOlder: () => loadAgentHistory(oldestCard.id, oldestCard.taskId!) } : {}),
     empty: (
       // 点进来是想知道「它在干什么」—— 给状态而不是空白

@@ -284,8 +284,13 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 注意这两个值来自 store（由 hydrateCheckpoint 写入），不是本地 state ——
   // 会话切换时随视图一起重置，避免把上一个会话的游标带到新会话。
   const storeTotal = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksTotal ?? 0 : s.blocksTotal))
-  const moreCursor = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksCursor ?? 0 : s.blocksCursor))
+  const storeMoreCursor = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksCursor ?? 0 : s.blocksCursor))
   const storeHasMore = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksHasMore ?? false : s.blocksHasMore))
+  // 游标是**主对话 blocks** 的概念。子会话（source 模式）的分页在子任务 journal 里，
+  // 与主会话的 blocksCursor 无关 —— 旧实现读 store 的游标，于是「主会话还有更早的块」
+  // 就变成了子会话滚动预取的放行信号（子会话里一上滑就连发分页请求）。
+  // source 模式只看它自己的 hasMore。
+  const moreCursor = source ? (source.hasMore ? 1 : 0) : storeMoreCursor
   const total = source ? (source.total ?? 0) : storeTotal
   const hasMore = source ? Boolean(source.hasMore) : storeHasMore
   // 按钮用的 loading/error 走 store（不是本地 state）：响应由 store 的

@@ -927,7 +927,9 @@ export type AgentItem =
   | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; promoted?: boolean; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[]; liveTail?: string; liveSeq?: number; liveTotal?: number; runId?: string }
   // user 子运行上下文里的一条用户/模型消息（来源见 events.AgentUserMessage）。
   // 它是**转录的一部分**（子会话里能看到「我对它说了什么」），不是任务结果。
-  | { kind: 'user'; text: string; startedAt?: number; ts?: number; runId?: string }
+  // historyIndex = 它在子任务 journal 全量历史里的条目序号（agent_history 分页才有）：
+  // 分页去重的稳定键。正文可能重复（连发两次「继续」），序号不会。
+  | { kind: 'user'; text: string; startedAt?: number; ts?: number; runId?: string; historyIndex?: number }
   | { kind: 'compression'; before: number; after: number; ctxTokens?: number; ctxTokensBefore?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number; runId?: string }
   // 一行信号（Small signals）落在**它自己那次运行**里：hook 警告 / 静默收尾 / 目标提醒
   // 是子 agent 跑出来的事实，不属于主转录（用户 2026-10：subagent 的提示混进主会话的
@@ -3893,15 +3895,25 @@ function historyEntryToAgentItem(e: {
   if (e.kind === 'assistant' || e.kind === 'text') return { kind: 'text', text: e.text ?? '' }
   // user（子任务输入）：保持 user 身份 —— 降级成 text 会让「我派的活」看起来像子智能体
   // 自己说的话（历史分页里第一条通常就是派给它的 Prompt）。
-  if (e.kind === 'user') return { kind: 'user', text: e.text ?? '' }
+  // historyIndex 一并带上：同一页可能被重复请求/与事件来源的同一条消息重叠，
+  // 分页侧要靠它去重（见 appendOlderItems）。
+  if (e.kind === 'user') {
+    return { kind: 'user', text: e.text ?? '', ...(e.index != null ? { historyIndex: e.index } : {}) }
+  }
   return { kind: 'text', text: e.text ?? '' }
 }
 
 // appendOlderItems 把「更早的一页」拼到卡片现有 items **前面**。
 //
-// 去重：分页窗口按 (offset, limit) 取，若在请求在途期间卡片又收到了新条目
-// （子 agent 仍在跑），total 会变，相邻页可能重叠。用 toolId + 文本做后置去重，
-// 保证 UI 里不会出现两条一样的记录。
+// 去重：分页窗口按 (offset, limit) 取，但 offset 的口径是**卡片 items 条数**，而
+// 窗口的单位是 journal 派生条目 —— 两者不相等（thinking 不进 journal、assistant 正文
+// 合并、信号/压缩项不落 journal），所以窗口必然与卡片已有内容重叠，同一页也可能被
+// 重复请求（滚动预取、打开子会话时的首屏补拉）。
+//
+// 旧实现只按 toolId / 正文去重，**user 条目一律放行** —— 于是一条「resume 指令」
+// 会随每一页复制一遍，用户看到子会话顶部一连串一模一样的气泡（2026-11 报障）。
+// 现在 user 也去重：优先 journal 序号（historyIndex，稳定），没有序号的事件来源项
+// 按正文匹配。
 function appendOlderItems(
   b: Extract<MsgBlock, { kind: 'agent' }>,
   older: AgentItem[],
@@ -3909,16 +3921,29 @@ function appendOlderItems(
   total?: number,
   offset?: number,
 ): Extract<MsgBlock, { kind: 'agent' }> {
+  const keyOf = (it: AgentItem): string | null => {
+    if (it.kind === 'tool') return `t:${it.toolId}`
+    if (it.kind === 'text') return `x:${it.text}`
+    if (it.kind === 'user') {
+      return it.historyIndex != null ? `u:#${it.historyIndex}` : `u:x${it.text}`
+    }
+    return null
+  }
   const seen = new Set<string>()
   for (const it of b.items) {
-    if (it.kind === 'tool') seen.add(`t:${it.toolId}`)
-    else if (it.kind === 'text') seen.add(`x:${it.text}`)
+    const k = keyOf(it)
+    if (k) seen.add(k)
+    // 卡片里的 user 项多半来自**事件流**（没有 journal 序号），而分页回来的同一段
+    // 历史带着序号 —— 两个键都登记，跨来源才能命中。
+    if (it.kind === 'user') seen.add(`u:x${it.text}`)
   }
   const fresh = older.filter((it) => {
-    const key = it.kind === 'tool' ? `t:${it.toolId}` : it.kind === 'text' ? `x:${it.text}` : ''
-    if (!key) return true
-    if (seen.has(key)) return false
-    seen.add(key)
+    const k = keyOf(it)
+    if (!k) return true
+    if (seen.has(k)) return false
+    // 序号对不上（journal 上下文被压缩过，序号会漂移）时退回正文比对。
+    if (it.kind === 'user' && seen.has(`u:x${it.text}`)) return false
+    seen.add(k)
     return true
   })
   return {
@@ -4123,6 +4148,19 @@ function appendAgentUser(blocks: MsgBlock[], taskId: string, text: string, ts?: 
   if (idx < 0) return blocks
   const b = blocks[idx] as Extract<MsgBlock, { kind: 'agent' }>
   const itemRunId = runId || b.runId
+  // 幂等：同一条事件可能被**重放**两次（checkpoint hydrate 补应用 preBuf、恢复快照
+  // 与实时流在边界重叠）。user 项是纯 append，重复应用就会多一个一模一样的气泡 ——
+  // 其余事件类型都有 id 主键/幂等收敛，只有它没有。事件时间戳在重放中不变，
+  // 用它当主键：同一 (runId, text, ts) 出现第二次 = 同一条事件。
+  // 没有时间戳就不去重（宁可多一条，也不吞掉真实连发）。
+  const dup = ts != null && b.items.some(
+    (it) =>
+      it.kind === 'user' &&
+      it.text === body &&
+      it.startedAt === ts &&
+      ((runId && it.runId === runId) || (!runId && (!it.runId || it.runId === b.runId))),
+  )
+  if (dup) return blocks
   const items: AgentItem[] = [...b.items, {
     kind: 'user', text: body,
     ...(ts != null ? { startedAt: ts } : {}),
@@ -9116,17 +9154,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sid = get().activeSessionId
     if (!sid || !taskId) return
     let offset = 0
+    // 已在途 / 目标卡不在视图里 → **不发请求**。
+    // 旧实现只把 mark 变成空操作，然后照样用初始值 offset=0 发出去 —— 每次重复
+    // 触发都会多拉一页「最新一页」，而 user 条目没有去重，于是一个气泡变 N 个
+    // （2026-11 用户报障「3 个一样的消息」的直接来源之一）。
+    let sendIt = false
     set((s) => {
       const v = s.views[sid] ?? emptyView()
       let nextOffset = 0
       const mark = (b: MsgBlock) => {
         if (b.id !== blockId || b.kind !== 'agent') return b
-        // 已经是加载中/没有更多：重复点击不叠加请求（按钮本身也会禁用）。
+        // 已经是加载中：重复点击/滚动预取不叠加请求（按钮本身也会禁用）。
         if (b.historyLoading) return b
         // 首次加载从「首屏条数」开始：checkpoint 里已保留最新的 len(b.items) 条，
         // 从 0 开始必然与首屏重叠（见 appendOlderItems 的注释）。
         // 窗口外卡片是骨架（items 为空）→ 0 起算，正好取最新一页。
         nextOffset = b.historyOffset ?? b.items.length
+        sendIt = true
         return { ...b, historyLoading: true, historyError: undefined }
       }
       const blocks = v.blocks.map(mark)
@@ -9134,6 +9178,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       offset = nextOffset
       return setView(s, sid, { ...v, blocks, agentDetached })
     })
+    if (!sendIt) return
     send({
       type: 'agent_history',
       // block_id：同 task 可能有多张 agent 卡（agent_resume 原地续跑 = 同 task 新 run），
