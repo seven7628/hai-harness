@@ -1194,8 +1194,8 @@
       "acceptance": "全量回归；性能/成本数据；已知限制清单；复盘文档；看板收尾。",
       "tests": "npm test && go test ./...",
       "commit": "chore(hub-p4-05): final review + retro",
-      "status": "todo",
-      "note": "依赖 P4-01/02/03d/04a 收口；P4-04b 搜索/归档为显式 defer，不阻塞最终 Review。"
+      "status": "in_progress",
+      "note": "全期 Final Review 进行中（task-43keebnw 独立审计）；全量 go test 已跑，codemode 3 项环境失败；npm test 因 e2e/electron 测试文件被 gitignore 仅主工作树存在而无法启动"
     },
     {
       "id": "P3b-07a",
@@ -2079,7 +2079,8 @@
       "note": "依赖 P4-03d 与外部 hooks 协议拍板：AgentEnd hook + FTS/归档。"
     },
     "P4-05": {
-      "status": "todo"
+      "status": "in_progress",
+      "note": "独立终审 task-43keebnw + 主会话全量回归并行；随后写复盘并收尾"
     },
     "P4-03c": {
       "status": "done",
