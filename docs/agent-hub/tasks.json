@@ -1195,7 +1195,8 @@
       "tests": "npm test && go test ./...",
       "commit": "chore(hub-p4-05): final review + retro",
       "status": "in_progress",
-      "note": "全期 Final Review 进行中（task-43keebnw 独立审计）；全量 go test 已跑，codemode 3 项环境失败；npm test 因 e2e/electron 测试文件被 gitignore 仅主工作树存在而无法启动"
+      "note": "终审无 P4 功能回归；B1 P4-01 缺回滚开关（修复中），B2 P4-05 缺复盘/已知限制文档与全量回归 waiver（P4-RETRO.md 落地中）。干净串行 go test 的已知红项为 provider 探活/price-table 污染；npm test 因 gitignored e2e 无法启动",
+      "review": "CHANGES_REQUESTED（终审 task-43keebnw：P4-01 回滚开关 / 复盘 waiver）"
     },
     {
       "id": "P3b-07a",
@@ -2080,7 +2081,8 @@
     },
     "P4-05": {
       "status": "in_progress",
-      "note": "独立终审 task-43keebnw + 主会话全量回归并行；随后写复盘并收尾"
+      "review": "CHANGES_REQUESTED",
+      "note": "终审 no functional regression；B1/B2 收口中；P4-RETRO.md 已起草"
     },
     "P4-03c": {
       "status": "done",
