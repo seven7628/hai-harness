@@ -39,3 +39,7 @@ todo → in_progress → review（必须已有 commit）→ done（Review passed
 1. 改 `tasks.json`。
 2. 跑 `python3 docs/agent-hub/sync_progress.py`。
 3. 刷新 `PROGRESS.html`。
+
+看板加载时按 `todo < in_progress < review < done` **只前进**合并仓库 progress：
+任务从进行中推进到待 Review/已完成会自动覆盖旧的本机状态，本地 `notes` 保留。
+同阶段会同步最新 commit/review/reviewNote；若本机已手工标成更后阶段则不会被仓库回退。

@@ -1296,7 +1296,7 @@ const BASE = {
       "phase": "P4",
       "title": "流式/typing 弱网与长会话打磨、性能",
       "deps": [
-        "P3b-08"
+        "P4-03d"
       ],
       "files": [
         "desktop/app/src/components/hub/HubTimeline.tsx"
@@ -1312,7 +1312,7 @@ const BASE = {
       "phase": "P4",
       "title": "Context 面板 + 深链 + 导出",
       "deps": [
-        "P3b-08"
+        "P4-03d"
       ],
       "files": [
         "desktop/app/src/components/hub/HubInspector.tsx"
@@ -1333,8 +1333,9 @@ const BASE = {
       "files": [
         "desktop/bridge/mobile_server.go",
         "desktop/bridge/mobile_hub.go",
+        "desktop/bridge/main.go",
         "desktop/bridge/mobile_server_test.go",
-        "desktop/bridge/mobile_hub_test.go",
+        "desktop/bridge/mobile_hub_ws_test.go",
         "desktop/bridge/command_registry.go"
       ],
       "acceptance": "手机白名单只开放 Hub 只读 + 安全写（list/open/history/send/assign/stop/task/need），agent CRUD/删除仍拒绝；新增认证的 hub 事件订阅（hub_* 与聊天流隔离，不串会话）；hub_message_delta 可丢、hub_task_update/hub_message/hub_alert/hub_need 控制事件优先；弱网 resync 不重复不丢终态。",
@@ -1356,10 +1357,12 @@ const BASE = {
         "desktop/bridge/mobile_web/app.js",
         "desktop/bridge/mobile_web/index.html",
         "desktop/bridge/mobile_web/style.css",
-        "desktop/bridge/mobile_web/hub.js"
+        "desktop/bridge/mobile_web/hub_model.js",
+        "desktop/bridge/mobile_hub_web_test.go",
+        "desktop/app/scripts/test-mobile-hub.mjs"
       ],
       "acceptance": "手机可进入 Hub；群/DM 列表带未读/运行态；群时间线按 seq 排序、分页加载更早；@ 选择器全屏、结构化 mentions；任务结果卡单列、任务板/Needs 可操作；停止自动对话、已读游标、断线重连后状态一致。",
-      "tests": "go test ./desktop/bridge -run Mobile && node scripts/test-mobile-hub.mjs",
+      "tests": "node desktop/app/scripts/test-mobile-hub.mjs && go test ./desktop/bridge -run 'Mobile'",
       "commit": "46de6ae",
       "status": "review",
       "note": "实现完成；主会话 Node104/Mobile 定向绿；Review task-eq9fgqy7 进行中"
@@ -1407,7 +1410,7 @@ const BASE = {
       "phase": "P4",
       "title": "外部 AgentEnd hook + FTS/归档",
       "deps": [
-        "P3b-08"
+        "P4-03d"
       ],
       "files": [
         "hooks/event.go",
@@ -1424,7 +1427,9 @@ const BASE = {
       "phase": "P4",
       "title": "最终 Review + 复盘",
       "deps": [
+        "P4-01",
         "P4-02",
+        "P4-03d",
         "P4-04"
       ],
       "files": [
@@ -2122,6 +2127,21 @@ const BASE = {
       "status": "review",
       "commit": "46de6ae",
       "note": "实现完成；Review 进行中"
+    },
+    "P4-01": {
+      "status": "todo",
+      "note": "依赖 P4-03d：先完成手机连接/Hub 移动页面，再统一打磨弱网/流式/长会话。"
+    },
+    "P4-02": {
+      "status": "todo",
+      "note": "依赖 P4-03d 与产品拍板：Context 面板/深链/导出。"
+    },
+    "P4-04": {
+      "status": "todo",
+      "note": "依赖 P4-03d 与外部 hooks 协议拍板：AgentEnd hook + FTS/归档。"
+    },
+    "P4-05": {
+      "status": "todo"
     }
   },
   "reviewGate": {
@@ -2258,11 +2278,18 @@ function load(){
       if(s.tasks[id]) s.tasks[id] = {...s.tasks[id], ...v};
     }
     if(saved && saved.filter) s.filter = {...s.filter, ...saved.filter};
-    // 仓库里的 progress 只填充“用户还没动过”的任务；已改过的状态优先，避免覆盖手工记录。
+    // 仓库 progress 与本地状态按「阶段只能前进」合并：done > review > in_progress > todo。
+    // 以前只在本地是 todo 时才吃 seed，导致任务从 in_progress 推进到 review/done 后，
+    // 看板永远停在旧状态（用户看到「已完成 57」但新任务还是未 Review）。
+    const rank = {todo:0, in_progress:1, review:2, changes_requested:2, blocked:2, done:3};
     const seed = BASE.progress || {};
     for(const [id, v] of Object.entries(seed)){
       const cur = s.tasks[id];
-      if(cur && cur.status === 'todo' && !cur.commit) s.tasks[id] = {...cur, ...v};
+      if(!cur) continue;
+      const seedRank = rank[v.status] ?? -1;
+      const curRank = rank[cur.status] ?? 0;
+      // 只允许仓库状态不倒退；同阶段合并 commit/review/reviewNote，保留本地 notes。
+      if(seedRank >= curRank) s.tasks[id] = {...cur, ...v};
     }
     return s;
   }catch(e){ console.warn(e); return stateDefault(); }
