@@ -19,6 +19,7 @@
 | `../../AGENT_HUB_TECH_PLAN.md` | 技术方案（需求、架构、数据模型、协议、UX、代码方案、Review 流程、任务拆分） |
 | `PROGRESS.html` | 唯一进度看板（自包含，直接打开） |
 | `tasks.json` | 任务定义（看板数据源） |
+| `P4-RETRO.md` | P4 最终复盘：交付矩阵、回归/性能/成本、已知限制、waiver |
 | `sync_progress.py` | 改完 `tasks.json` 后，把数据同步进 `PROGRESS.html` |
 
 ## 工作流（每个任务）
