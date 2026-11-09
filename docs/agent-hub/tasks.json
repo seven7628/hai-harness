@@ -1035,9 +1035,16 @@
       "tests": "npm run test:hub && npm run test:hub-p3b && npx tsc --noEmit && npm run build",
       "commit": "f72e8ca + 54dd883",
       "status": "done",
-      "note": "f72e8ca + 54dd883；Review passed（task-uydfsps6）；OS 深链未真机",
-      "review": "passed",
-      "reviewNote": "独立 delta 复审 task-uydfsps6 PASS：B1 深链所有权（StrictMode 双跑/1 次 history/highlight seq/no false notice）、B2 sender 名 escapeInline + fuzz 零 raw HTML、B3 missing seq 不登记 jump + 新消息仍贴底 + TTL；191/225/32 + tsc/build + Hub 57.7s 全绿。OS 深链仍未打包真机，明确 defer。"
+      "note": "深链缓存重开/导出转义/缺失seq 三项阻塞修复；真机 Chromium 验证；191/225/32/tsc/build/Hub 全绿",
+      "review": "PASS task-uydfsps6",
+      "reviewNote": "独立 delta 复审 task-uydfsps6 PASS：B1 深链所有权（StrictMode 双跑/1 次 history/highlight seq/no false notice）、B2 sender 名 escapeInline + fuzz 零 raw HTML、B3 missing seq 不登记 jump + 新消息仍贴底 + TTL；191/225/32 + tsc/build + Hub 57.7s 全绿。OS 深链仍未打包真机，明确 defer。",
+      "defers": [
+        "OS 深链交付未验证（打包/签名与 macOS LaunchServices、Win 注册表、Linux handler）— 发布前必须真机验收",
+        "rendererReady 刷新复位无自动化覆盖（变异 GREEN），仅静态验证",
+        "Run 视图内登记的 jump 无 data-seq，TTL 后失效且切回 Chat 不重试（深链仍能打开正确会话）",
+        "DM 深链在 Hub 从未打开时不水合 groups rail（只加载 agents）",
+        "群导出仅含已加载消息，无“部分时间线”提示"
+      ]
     },
     {
       "id": "P4-03a",
@@ -2061,8 +2068,8 @@
     "P4-02": {
       "status": "done",
       "commit": "f72e8ca + 54dd883",
-      "review": "passed",
-      "reviewNote": "PASS（task-uydfsps6）：B1/B2/B3 delta 全闭；191 项。OS 深链 deferred。"
+      "review": "PASS task-uydfsps6",
+      "note": "3 阻塞闭环；真机验证；遗留 OS 深链打包验证等 defer"
     },
     "P4-04": {
       "status": "todo",
