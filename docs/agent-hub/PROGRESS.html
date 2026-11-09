@@ -1336,9 +1336,10 @@ const BASE = {
       "acceptance": "Inspector 新增 Context 只读页：消息级触发上下文（trigger_seqs/senders/reason + 触发消息跳转）与智能体提示词分层（hub_agent_prompt_preview，只读）；hub://group/<id>?seq=42 与 hub://dm/<agent>?seq=... 可复制、解析并打开对应时间线；群/任务可导出 Markdown；无新写入能力，不影响现有 Hub 操作。",
       "tests": "npm run test:hub && npm run test:hub-p3b && npx tsc --noEmit && npm run build",
       "commit": "f72e8ca + 54dd883",
-      "status": "review",
-      "note": "3 阻塞已修；主会话 191/225/tsc/Hub 绿；复审 task-uydfsps6 delta 中",
-      "review": ""
+      "status": "done",
+      "note": "f72e8ca + 54dd883；Review passed（task-uydfsps6）；OS 深链未真机",
+      "review": "passed",
+      "reviewNote": "独立 delta 复审 task-uydfsps6 PASS：B1 深链所有权（StrictMode 双跑/1 次 history/highlight seq/no false notice）、B2 sender 名 escapeInline + fuzz 零 raw HTML、B3 missing seq 不登记 jump + 新消息仍贴底 + TTL；191/225/32 + tsc/build + Hub 57.7s 全绿。OS 深链仍未打包真机，明确 defer。"
     },
     {
       "id": "P4-03a",
@@ -2341,9 +2342,10 @@ const BASE = {
       "reviewNote": "独立 Review task-czrhx4tx PASS：production Vite + 真 GroupView/store/handleEvent，220 条/3 草稿；A/B 同机复现 delta p50 0.9→0.3ms、键入 1.2→0.6ms，DOM 3081/hash 37edea6 不变；memo 依赖 8 项完整，移除 highlightSeq 3/3 失败；弱网 gaps/duplicate/final-before-delta/agent_end/reconcile 全 RED 变异；14/22/225/32 + tsc/build 绿。挂载 O(n) 与 reconnect hook 记 defer。"
     },
     "P4-02": {
-      "status": "review",
+      "status": "done",
       "commit": "f72e8ca + 54dd883",
-      "note": "3 阻塞修复完成；delta 复审中"
+      "review": "passed",
+      "reviewNote": "PASS（task-uydfsps6）：B1/B2/B3 delta 全闭；191 项。OS 深链 deferred。"
     },
     "P4-04": {
       "status": "todo",
