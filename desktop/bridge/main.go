@@ -207,6 +207,12 @@ type out struct {
 	flushTimer *time.Timer // 定时 flush（懒启动；有未 flush 数据时重置）
 	stopCh     chan struct{}
 	stopOnce   sync.Once
+
+	// lineTap 行观察钩子（手机端 hub_* 事件扇出；见 mobile_hub.go）。
+	// 在写锁内调用以保持与 stdout 相同的事件顺序；钩子只做非阻塞投递，
+	// 不得回调 out/dispatch/Ask。nil = 未接线。
+	tapMu   sync.RWMutex
+	lineTap func([]byte)
 }
 
 func newOut(w io.Writer) *out {
@@ -221,10 +227,30 @@ func (o *out) writeLine(v any) {
 		return
 	}
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	_, _ = o.w.Write(b)
 	_ = o.w.WriteByte('\n')
 	_ = o.w.Flush()
+	// 钩子在写锁内执行：Hub 事件（hub_*）与 stdout 保持同一顺序；
+	// 钩子只做非阻塞 channel 投递，不允许回调 out（见 mobile_hub.go）。
+	o.tapLine(b)
+	o.mu.Unlock()
+}
+
+// setLineTap 安装行观察钩子（nil = 关闭）。只在启动/关停时调用。
+func (o *out) setLineTap(fn func([]byte)) {
+	o.tapMu.Lock()
+	o.lineTap = fn
+	o.tapMu.Unlock()
+}
+
+// tapLine 调用行观察钩子。调用方持 o.mu，钩子必须非阻塞。
+func (o *out) tapLine(line []byte) {
+	o.tapMu.RLock()
+	fn := o.lineTap
+	o.tapMu.RUnlock()
+	if fn != nil {
+		fn(line)
+	}
 }
 
 // writeRaw 原样写一行（事件行已完整 JSON，emit 直接输出不重新 marshal/注入）。

@@ -115,6 +115,94 @@ func TestMobileCmdAllowlistRejectsDangerous(t *testing.T) {
 	}
 }
 
+// P4-03a：手机 Hub 命令白名单——只开手机 UI 需要的读/发/安全写，
+// 智能体/群组 CRUD、记忆/提示词/回滚与既有危险命令继续默认拒绝。
+func TestMobileHubCommandAllowlist(t *testing.T) {
+	s, ts := testMobileServer(t)
+	code, _ := s.pair.newCode(time.Now())
+	token, _, err := s.pair.pair(code, "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		cmd  Command
+		want int
+	}{
+		// 只读 / 打开 / 读历史
+		{"hub_agent_list", CmdHubAgentList, http.StatusOK},
+		{"hub_agent_get", CmdHubAgentGet, http.StatusOK},
+		{"hub_group_list", CmdHubGroupList, http.StatusOK},
+		{"hub_group_get", CmdHubGroupGet, http.StatusOK},
+		{"hub_open", CmdHubOpen, http.StatusOK},
+		{"hub_history", CmdHubHistory, http.StatusOK},
+		{"hub_group_history", CmdHubGroupHistory, http.StatusOK},
+		{"hub_group_activity", CmdHubGroupActivity, http.StatusOK},
+		{"hub_task_list", CmdHubTaskList, http.StatusOK},
+		{"hub_task_get", CmdHubTaskGet, http.StatusOK},
+		{"hub_need_list", CmdHubNeedList, http.StatusOK},
+		{"hub_mark_read", CmdHubMarkRead, http.StatusOK},
+		{"hub_artifact_get", CmdHubArtifactGet, http.StatusOK},
+		// 安全写
+		{"hub_send", CmdHubSend, http.StatusOK},
+		{"hub_group_send", CmdHubGroupSend, http.StatusOK},
+		{"hub_group_assign", CmdHubGroupAssign, http.StatusOK},
+		{"hub_conversation_stop", CmdHubConversationStop, http.StatusOK},
+		{"hub_task_cancel", CmdHubTaskCancel, http.StatusOK},
+		{"hub_task_retry", CmdHubTaskRetry, http.StatusOK},
+		{"hub_need_resolve", CmdHubNeedResolve, http.StatusOK},
+		{"hub_clear", CmdHubClear, http.StatusOK},
+
+		// 未开放：智能体 CRUD / 记忆 / 提示词 / 回滚
+		{"hub_agent_create", CmdHubAgentCreate, http.StatusForbidden},
+		{"hub_agent_update", CmdHubAgentUpdate, http.StatusForbidden},
+		{"hub_agent_delete", CmdHubAgentDelete, http.StatusForbidden},
+		{"hub_agent_restore", CmdHubAgentRestore, http.StatusForbidden},
+		{"hub_agent_memory", CmdHubAgentMemory, http.StatusForbidden},
+		{"hub_agent_memory_write", CmdHubAgentMemoryWrite, http.StatusForbidden},
+		{"hub_agent_prompt_preview", CmdHubPromptPreview, http.StatusForbidden},
+		{"hub_agent_versions", CmdHubAgentVersions, http.StatusForbidden},
+		{"hub_agent_rollback", CmdHubAgentRollback, http.StatusForbidden},
+		// 未开放：群组 CRUD / 成员增删
+		{"hub_group_create", CmdHubGroupCreate, http.StatusForbidden},
+		{"hub_group_update", CmdHubGroupUpdate, http.StatusForbidden},
+		{"hub_group_delete", CmdHubGroupDelete, http.StatusForbidden},
+		{"hub_group_member_add", CmdHubGroupMemberAdd, http.StatusForbidden},
+		{"hub_group_member_remove", CmdHubGroupMemberRemove, http.StatusForbidden},
+		// 既有危险面不许回退
+		{"mcp_set", CmdMCPSet, http.StatusForbidden},
+		{"skill_install", Command("skill_install"), http.StatusForbidden},
+		{"switch_model", CmdSwitchModel, http.StatusForbidden},
+		{"mobile_set_listen", CmdMobileSetListen, http.StatusForbidden},
+		{"workspace_pick_result", CmdWorkspacePickResult, http.StatusForbidden},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := postJSON(t, ts.URL+"/api/cmd", map[string]any{"cmd": tc.cmd.String()}, token)
+			defer r.Body.Close()
+			if r.StatusCode != tc.want {
+				b, _ := io.ReadAll(r.Body)
+				t.Fatalf("%s = %d，期望 %d：%s", tc.cmd, r.StatusCode, tc.want, b)
+			}
+			if tc.want != http.StatusOK {
+				return
+			}
+			var resp struct {
+				OK   bool           `json:"ok"`
+				Data map[string]any `json:"data"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
+				t.Fatal(err)
+			}
+			if !resp.OK || resp.Data["echo"] != tc.cmd.String() {
+				t.Fatalf("允许的命令未走 dispatch：%+v", resp)
+			}
+		})
+	}
+}
+
 func TestMobileWebIsServed(t *testing.T) {
 	_, ts := testMobileServer(t)
 	r, err := http.Get(ts.URL + "/m/")
