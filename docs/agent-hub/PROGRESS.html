@@ -1456,10 +1456,10 @@ const BASE = {
       ],
       "acceptance": "Hub 智能体会话可装配用户级外部 hooks；EventStop 自然结束触发 AgentEnd hook；无配置/未信任/disableAll 时零行为变化；hook 异常 fail-open，不阻断核心结算/回推；项目级 hooks 不因 Hub 目录被误读。",
       "tests": "go test ./desktop/bridge -run 'Hook|Hub'",
-      "commit": "fbbf251 + 40f5527 + 4f96a3a",
+      "commit": "fbbf251 + 40f5527 + 4f96a3a + df1b1cd",
       "status": "review",
-      "note": "B2 boundary 测试覆盖 reload 路径（真实 hooks_set + user/project marker）；N5 注释按实际 Stop→截断顺序校正；主会话 build/vet + Hook|Hub|Mobile 60.6s + agenthub/session 绿",
-      "review": "B2/N5 已修；delta3 复核中"
+      "note": "B2 两种 mutation RED；N5 events/hooks.go 等公开契约改为「截断轮也触发」；主会话 build/vet 绿，纯注释改动",
+      "review": "B2 已闭环；N5 公开注释校正；delta4 复核中"
     },
     {
       "id": "P4-04b",
@@ -2395,8 +2395,8 @@ const BASE = {
     },
     "P4-04a": {
       "status": "review",
-      "commit": "fbbf251 + 40f5527 + 4f96a3a",
-      "note": "B2/N5 修复完成；第三轮 delta 复审中"
+      "commit": "fbbf251 + 40f5527 + 4f96a3a + df1b1cd",
+      "note": "B2 闭环；N5 文档残留已修；delta4 复审中"
     },
     "P4-04b": {
       "status": "deferred"
