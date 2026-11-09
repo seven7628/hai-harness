@@ -1337,8 +1337,8 @@ const BASE = {
       "tests": "npm run test:hub && npm run test:hub-p3b && npx tsc --noEmit && npm run build",
       "commit": "f72e8ca + 54dd883",
       "status": "done",
-      "note": "深链缓存重开/导出转义/缺失seq 三项阻塞修复；真机 Chromium 验证；191/225/32/tsc/build/Hub 全绿",
-      "review": "PASS task-uydfsps6",
+      "note": "f72e8ca + 54dd883；Review passed（task-uydfsps6）；OS 深链打包验证等 defer",
+      "review": "passed",
       "reviewNote": "独立 delta 复审 task-uydfsps6 PASS：B1 深链所有权（StrictMode 双跑/1 次 history/highlight seq/no false notice）、B2 sender 名 escapeInline + fuzz 零 raw HTML、B3 missing seq 不登记 jump + 新消息仍贴底 + TTL；191/225/32 + tsc/build + Hub 57.7s 全绿。OS 深链仍未打包真机，明确 defer。",
       "defers": [
         "OS 深链交付未验证（打包/签名与 macOS LaunchServices、Win 注册表、Linux handler）— 发布前必须真机验收",
@@ -1458,8 +1458,9 @@ const BASE = {
       "tests": "go test ./desktop/bridge -run 'Hook|Hub'",
       "commit": "fbbf251 + 40f5527 + 4f96a3a + df1b1cd",
       "status": "done",
-      "note": "用户级 Stop hook 接线；默认关/未信任/disableAll fail-open；仅用户级来源；Hub DM/群热替换；B2 边界 mutation RED；N5 契约注释校正。遗留 C1 窄窗口/C2 POSIX 测试/C3 路径规范化",
-      "review": "PASS task-k7hqg4dz（4 轮 delta）"
+      "note": "fbbf251 + 40f5527 + 4f96a3a + df1b1cd；Review passed（task-k7hqg4dz，4 轮 delta）；C1/C2/C3 记 defer",
+      "review": "passed",
+      "reviewNote": "独立 Final delta review task-k7hqg4dz PASS：B1 用户级 Stop 热替换（DM/群、disableAll 后旧 hook 归零）；B2 边界测试两种 project-loader mutation 均 RED；N5 公开契约注释 token-identical 校正；Hook|Hub|Mobile + agenthub/session + race 全绿。遗留 C1 窄窗口/C2 POSIX 测试/C3 路径规范化。"
     },
     {
       "id": "P4-04b",
@@ -2371,8 +2372,9 @@ const BASE = {
     "P4-02": {
       "status": "done",
       "commit": "f72e8ca + 54dd883",
-      "review": "PASS task-uydfsps6",
-      "note": "3 阻塞闭环；真机验证；遗留 OS 深链打包验证等 defer"
+      "review": "passed",
+      "note": "3 阻塞闭环；真机验证；遗留 OS 深链打包验证等 defer",
+      "reviewNote": "独立 delta 复审 task-uydfsps6 PASS：B1 深链所有权（StrictMode 双跑/1 次 history/highlight seq/no false notice）、B2 sender 名 escapeInline + fuzz 零 raw HTML、B3 missing seq 不登记 jump + 新消息仍贴底 + TTL；191/225/32 + tsc/build + Hub 57.7s 全绿。OS 深链仍未打包真机，明确 defer。"
     },
     "P4-04": {
       "status": "todo",
@@ -2396,8 +2398,9 @@ const BASE = {
     "P4-04a": {
       "status": "done",
       "commit": "fbbf251 + 40f5527 + 4f96a3a + df1b1cd",
-      "review": "PASS task-k7hqg4dz",
-      "note": "Final delta PASS；doc-only token-identical"
+      "review": "passed",
+      "note": "Final delta PASS；doc-only token-identical",
+      "reviewNote": "独立 Final delta review task-k7hqg4dz PASS：B1 用户级 Stop 热替换（DM/群、disableAll 后旧 hook 归零）；B2 边界测试两种 project-loader mutation 均 RED；N5 公开契约注释 token-identical 校正；Hook|Hub|Mobile + agenthub/session + race 全绿。遗留 C1 窄窗口/C2 POSIX 测试/C3 路径规范化。"
     },
     "P4-04b": {
       "status": "deferred"
