@@ -21,6 +21,8 @@ import (
 //     → setupHooks 返回 nil → session.WithHooks(nil) → 内核所有新钩子为 nil，行为不变；
 //   - 配置存在但全部未信任 → 派发器仍会构造，但每次派发只产出"not trusted"告警、不执行；
 //   - 任何 hook 异常都不阻断会话（超时/panic/非法输出一律 fail-open 或按事件分档）。
+//   - Hub 智能体会话（P4-04a）只装**用户级**来源：home 是智能体数据目录，不是项目
+//     工作区，setupUserHooks 以空 WorkspaceDir 显式排除项目层（见该函数注释）。
 //
 // 三个接入点（工作区级装配一次，会话级绑定 sessionID）：
 //  1. PreToolUse / PostToolBatch / PreCompact / PostToolUse / Stop → session.WithHooks（本文件）
@@ -49,6 +51,29 @@ func hooksStatePath() string {
 // 面板里的 hooks_trust 就要重建会话才生效 —— 与契约 §5.5「信任即刻生效」矛盾。
 func (m *manager) setupHooks(wsPath string, warn func(name, message string)) *hooks.Dispatcher {
 	cfg, warnings := hooks.Load(hooks.LoadOptions{WorkspaceDir: wsPath})
+	return m.dispatcherFor(cfg, warnings, warn)
+}
+
+// setupUserHooks 装配"仅用户级来源"的 hooks 派发器（Hub 智能体会话用，P4-04a）。
+//
+// 为什么 Hub 不能复用 setupHooks(agentHome)：Hub 的 home（~/.go-code/hub/homes/<id>）
+// 是智能体自己的数据目录，**不是**用户的项目工作区。把它当 WorkspaceDir 传进去，
+// hooks.Load 会把 {home}/.go-code/hooks.json 与 {home}/.claude/settings.json 当成
+// 项目层配置读入 —— 等于"打开一个智能体"就可能执行该目录里的命令（信任闸门只能挡住
+// 未确认过的命令，挡不住用户此前确认过的同一条命令）。
+//
+// 空 WorkspaceDir 就是这条安全边界：hooks.Load 的项目级分支与项目形态的 .claude
+// 路径都由 WorkspaceDir != "" 门控，空值 = 只读用户级来源（~/.go-code/settings.json
+// 与只读兼容的 ~/.claude/settings.json）。信任库仍走进程内共享实例，与 hooks_set 同源。
+func (m *manager) setupUserHooks(warn func(name, message string)) *hooks.Dispatcher {
+	cfg, warnings := hooks.Load(hooks.LoadOptions{})
+	return m.dispatcherFor(cfg, warnings, warn)
+}
+
+// dispatcherFor 是两条装配链的公共尾部：告警落 stderr → 空配置/全关 → nil → 派发器。
+// 抽出来是为了让"用户级"与"工作区级"只在**加载范围**上不同，构造与信任判定逐字一致
+// （否则两套装配会在"改了配置之后"出现难查的偏差）。
+func (m *manager) dispatcherFor(cfg *hooks.Config, warnings []string, warn func(name, message string)) *hooks.Dispatcher {
 	for _, w := range warnings {
 		// 配置期告警发生在会话创建之前（bs.s 尚未赋值），只走 stderr，不发事件。
 		fmt.Fprintf(os.Stderr, "· hooks: %s\n", w)
@@ -94,6 +119,19 @@ func hooksFor(d *hooks.Dispatcher, workspace, sessionID string) *events.ToolHook
 // 而且只在改过一次配置之后才暴露（最难查的一类偏差）。
 func (m *manager) hooksOption(wsPath, id string, warn func(name, message string)) session.Option {
 	return session.WithHooks(hooksFor(m.setupHooks(wsPath, warn), wsPath, id))
+}
+
+// hooksOptionUser 是 Hub 智能体会话的装配入口（P4-04a）：**只装用户级来源**，
+// cwd = 智能体 home，sessionID = Hub 会话 id（DM: hub.<agent>.dm；群: hub.<agent>.g.<group>）。
+//
+// Stop 就是 Hub 的 AgentEnd 锚点：EventStop 在 agents/agent_loop.go 的自然结束门控点
+// 派发（与项目会话同一份契约），payload.hook_event_name = "Stop"、turn_id = run id。
+// 不新增公共事件字符串，也不另造第二套 AgentEnd hook —— 外部 hook 只认 Stop。
+//
+// cwd 传 home 而不是空串：hook 进程的 GOCODE_PROJECT_DIR/CLAUDE_PROJECT_DIR 与
+// payload.cwd 需要指向一个真实存在、且属于该智能体的目录（其读写边界）。
+func (m *manager) hooksOptionUser(home, id string, warn func(name, message string)) session.Option {
+	return session.WithHooks(hooksFor(m.setupUserHooks(warn), home, id))
 }
 
 // reloadWorkspaceHooks 重读该工作区的 hooks 配置并推给它的**全部会话**（hooks_set 后调用）。

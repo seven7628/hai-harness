@@ -1917,6 +1917,17 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	// （内核所有扩展钩子为 nil）。设计见 docs/graft-integration/05-hooks-能力设计规范.md。
 	// 2026-09-21：抽成 hooksOption —— 与 hooks_set 的热替换（reloadWorkspaceHooks）共用
 	// 同一条装配链，避免"新建的会话"和"改过配置的会话"拿到不同 hooks。
+	// P4-04a：Hub 智能体会话只装用户级来源。home 是智能体自己的数据目录，把它当
+	// WorkspaceDir 会让"打开智能体"读入 {home}/.go-code/hooks.json / .claude 项目配置
+	//（等于执行该目录里的命令）。项目会话仍走原路径，逐字不变。
+	// 注意必须**二选一**地调用：先调 hooksOption 再丢弃也会读一遍项目层配置，
+	// "不读"是安全边界的一部分，不只是"不用"。
+	var hookOpt session.Option
+	if ws.kind == runtimeHubAgent {
+		hookOpt = m.hooksOptionUser(wsPath, id, bs.warnHook)
+	} else {
+		hookOpt = m.hooksOption(wsPath, id, bs.warnHook)
+	}
 	s, err = session.NewSession(id, loop, store,
 		// 启用 HITL 审批并设置等待窗口：与提问窗口同值（30 分钟上限）。
 		// 2026-09-20（用户拍板）：原 60s → 30min —— 审批面板已改成停靠（用户会边翻对话历史/
@@ -1929,7 +1940,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		// 派发器为 nil 时不装配（零开销路径）。SessionStart/UserPromptSubmit 由 Session 内部
 		// 从同一 ToolHooks 取用，无需在此额外传参。
 		session.WithHookCwd(wsPath),
-		m.hooksOption(wsPath, id, bs.warnHook),
+		hookOpt,
 		session.WithAITitle(restoredTitle), // 恢复 AI 标题（空 = 未生成/新会话）
 		session.WithEventHandler(func(_ context.Context, e events.Event) {
 			bs.emit(e) // 转发会话级事件（session_closed 等）
