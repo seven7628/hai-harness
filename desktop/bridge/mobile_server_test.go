@@ -144,6 +144,7 @@ func TestMobileHubCommandAllowlist(t *testing.T) {
 		{"hub_need_list", CmdHubNeedList, http.StatusOK},
 		{"hub_mark_read", CmdHubMarkRead, http.StatusOK},
 		{"hub_artifact_get", CmdHubArtifactGet, http.StatusOK},
+		{"hub_search", CmdHubSearch, http.StatusOK},
 		// 安全写
 		{"hub_send", CmdHubSend, http.StatusOK},
 		{"hub_group_send", CmdHubGroupSend, http.StatusOK},

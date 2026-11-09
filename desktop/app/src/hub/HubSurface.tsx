@@ -10,7 +10,10 @@ import GroupView from './GroupView'
 import { isImeComposing } from './mentions'
 import { formatRelativeTime, groupPreview, unreadBadge } from './conversation'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
-import type { HubAgent, HubMessage, HubRunEntry } from './types'
+import {
+  HUB_SEARCH_DEBOUNCE_MS, normalizeSearchQuery, searchHitKey, searchScopeLabel,
+} from './search'
+import type { HubAgent, HubMessage, HubRunEntry, HubSearchScope } from './types'
 import './hub.css'
 
 // Hub surface：左栏 = 智能体 rail（§8.2），右栏 = DM 视图（§8.4）。
@@ -44,6 +47,19 @@ export default function HubSurface() {
   const clearSelection = useHubStore((s) => s.clearSelection)
   const notice = useHubStore((s) => s.notice)
   const clearNotice = useHubStore((s) => s.clearNotice)
+  // 全历史搜索（P4-04b-1）：输入框是本地 state（debounce 只认用户输入），
+  // 结果/游标在 store 里（切面板不丢，翻页要用）。
+  const runSearch = useHubStore((s) => s.search)
+  const searchMore = useHubStore((s) => s.searchMore)
+  const clearSearch = useHubStore((s) => s.clearSearch)
+  const openSearchHit = useHubStore((s) => s.openSearchHit)
+  const searchScope = useHubStore((s) => s.searchScope)
+  const setSearchScope = useHubStore((s) => s.setSearchScope)
+  const searchHits = useHubStore((s) => s.searchHits)
+  const searchHasMore = useHubStore((s) => s.searchHasMore)
+  const searchLoading = useHubStore((s) => s.searchLoading)
+  const searchError = useHubStore((s) => s.searchError)
+  const searchQuery = useHubStore((s) => s.searchQuery)
   const jump = useHubStore((s) => s.jump)
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const draft = activeId ? (drafts[activeId] ?? '') : ''
@@ -69,6 +85,28 @@ export default function HubSurface() {
 
   // null = 关闭；'new' = 新建；HubAgent = 编辑该智能体。
   const [editing, setEditing] = useState<HubAgent | 'new' | null>(null)
+  const [searchInput, setSearchInput] = useState('')
+  const [searchPanel, setSearchPanel] = useState(false)
+
+  // 250ms debounce：只在用户停止输入后发一次 hub_search；旧响应由 store 的代际丢弃。
+  useEffect(() => {
+    const q = normalizeSearchQuery(searchInput)
+    if (!q) {
+      clearSearch()
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setSearchPanel(true)
+      void runSearch(q, searchScope)
+    }, HUB_SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [searchInput, searchScope, runSearch, clearSearch])
+
+  const closeSearch = () => {
+    setSearchInput('')
+    setSearchPanel(false)
+    clearSearch()
+  }
   const listRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
@@ -192,64 +230,150 @@ export default function HubSurface() {
             })}
           </div>
         ) : null}
-        <div className="hub-rail-tabs" role="tablist">
-          <button role="tab" aria-selected={railTab === 'agents'} className={railTab === 'agents' ? 'on' : ''} onClick={() => setRailTab('agents')}>智能体</button>
-          <button role="tab" aria-selected={railTab === 'groups'} className={railTab === 'groups' ? 'on' : ''} onClick={() => setRailTab('groups')}>群组</button>
-        </div>
-        {railTab === 'groups' ? (
-          groupsLoading ? <div className="hub-rail-empty">加载中…</div> :
-          groups.length === 0 ? <div className="hub-rail-empty">还没有群组</div> : (
-            <div className="hub-rail-list">
-              {groups.map((g) => {
-                const info = groupInfo[g.id] ?? {}
-                const unread = info.unread ?? 0
-                const memberCount = (g.members ?? []).length
-                // 预览优先任务结论（「做完了什么」），否则最后一条消息；都没有才退回成员/策略。
-                const preview = groupPreview(info) || `${memberCount} 名成员 · ${g.policy?.mode ?? 'ask'}`
-                const time = formatRelativeTime(info.last_at)
-                return (
-                  <button
-                    key={g.id}
-                    className={`hub-row hub-group-row ${g.id === activeGroupId ? 'on' : ''}`}
-                    onClick={() => void selectGroup(g.id)}
-                    aria-label={`${g.name}，${memberCount} 名成员${unread > 0 ? `，${unreadBadge(unread)} 条未读` : '，没有未读'}，${preview}`}
-                  >
-                    <span className="hub-member-stack" aria-hidden="true">
-                      {(g.members ?? []).slice(0, 3).map((m, i) => (
-                        <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 3 - i }}>
-                          {(agents.find((a) => a.id === m.agent_id)?.name ?? m.agent_id).slice(0, 1)}
-                        </span>
-                      ))}
-                    </span>
-                    <span className="hub-row-text">
-                      <span className="hub-row-top">
-                        <span className="hub-name">{g.name}</span>
-                        {unread > 0 ? <span className="hub-unread">{unreadBadge(unread)}</span> : null}
-                      </span>
-                      <span className="hub-preview" title={preview}>{preview}</span>
-                    </span>
-                    {time ? <span className="hub-row-time">{time}</span> : null}
-                  </button>
-                )
-              })}
-            </div>
-          )
-        ) : agents.length === 0 && !loading ? (
-          <div className="hub-rail-empty">{t('hub.noAgents')}</div>
-        ) : (
-          <div className="hub-rail-list">
-            {agents.map((a) => (
-              <HubRow
-                key={a.id}
-                agent={a}
-                preview={dm[a.id]?.last_text}
-                unread={dm[a.id]?.unread ?? 0}
-                running={running[a.id] === true}
-                active={a.id === activeId}
-                onClick={() => void select(a.id)}
-              />
+        <div className="hub-search" role="search">
+          <div className="hub-search-box">
+            <input
+              className="hub-search-input"
+              type="search"
+              value={searchInput}
+              placeholder="搜索群聊与私聊…"
+              aria-label="搜索 Hub 消息（全部历史）"
+              onChange={(e) => {
+                setSearchInput(e.target.value)
+                setSearchPanel(true)
+              }}
+              onFocus={() => {
+                if (searchInput.trim()) setSearchPanel(true)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.stopPropagation()
+                  closeSearch()
+                }
+              }}
+            />
+            {searchInput || searchQuery ? (
+              <button className="hub-link hub-search-clear" onClick={closeSearch} aria-label="清空搜索">×</button>
+            ) : null}
+          </div>
+          <div className="hub-search-scopes" role="tablist" aria-label="搜索范围">
+            {(['all', 'group', 'dm'] as HubSearchScope[]).map((sc) => (
+              <button
+                key={sc}
+                role="tab"
+                aria-selected={searchScope === sc}
+                className={searchScope === sc ? 'on' : ''}
+                onClick={() => setSearchScope(sc)}
+              >
+                {searchScopeLabel(sc)}
+              </button>
             ))}
           </div>
+        </div>
+        {searchPanel ? (
+          <div className="hub-search-results" aria-label="搜索结果" aria-busy={searchLoading}>
+            {searchError ? (
+              <div className="hub-error" role="alert">
+                <span>{searchError}</span>
+                <button className="hub-link" onClick={() => void runSearch(searchInput, searchScope)}>重试</button>
+              </div>
+            ) : null}
+            {searchLoading && searchHits.length === 0 ? <div className="hub-rail-empty">搜索中…</div> : null}
+            {!searchLoading && !searchError && searchHits.length === 0 ? (
+              <div className="hub-rail-empty">没有匹配的消息</div>
+            ) : null}
+            {searchHits.map((hit) => (
+              <button
+                key={searchHitKey(hit)}
+                className={`hub-search-hit ${hit.owner_only ? 'owner-only' : ''}`}
+                onClick={() => {
+                  // 先收起结果面板再打开会话：跳转后要高亮的是时间线，不是结果行。
+                  setSearchPanel(false)
+                  void openSearchHit(hit)
+                }}
+                title={hit.snippet}
+              >
+                <span className="hub-search-hit-top">
+                  <span className="hub-search-hit-name">{hit.name || hit.group_id || hit.agent_id}</span>
+                  <span className={`hub-chip scope-${hit.scope}`}>{hit.scope === 'group' ? '群' : '私聊'}</span>
+                  {hit.owner_only ? <span className="hub-chip owner-only">仅群主可见</span> : null}
+                  <span className="hub-search-hit-time">{formatRelativeTime(hit.created_at)}</span>
+                </span>
+                <span className="hub-search-hit-snippet">{hit.snippet}</span>
+                <span className="hub-search-hit-meta">
+                  {hit.sender || ''}
+                  {hit.seq > 0 ? ` · #${hit.seq}` : ''}
+                </span>
+              </button>
+            ))}
+            {searchHasMore ? (
+              <button className="hub-search-more" onClick={() => void searchMore()} disabled={searchLoading}>
+                {searchLoading ? '加载中…' : '更早的结果'}
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <div className="hub-rail-tabs" role="tablist">
+              <button role="tab" aria-selected={railTab === 'agents'} className={railTab === 'agents' ? 'on' : ''} onClick={() => setRailTab('agents')}>智能体</button>
+              <button role="tab" aria-selected={railTab === 'groups'} className={railTab === 'groups' ? 'on' : ''} onClick={() => setRailTab('groups')}>群组</button>
+            </div>
+            {railTab === 'groups' ? (
+              groupsLoading ? <div className="hub-rail-empty">加载中…</div> :
+              groups.length === 0 ? <div className="hub-rail-empty">还没有群组</div> : (
+                <div className="hub-rail-list">
+                  {groups.map((g) => {
+                    const info = groupInfo[g.id] ?? {}
+                    const unread = info.unread ?? 0
+                    const memberCount = (g.members ?? []).length
+                    // 预览优先任务结论（「做完了什么」），否则最后一条消息；都没有才退回成员/策略。
+                    const preview = groupPreview(info) || `${memberCount} 名成员 · ${g.policy?.mode ?? 'ask'}`
+                    const time = formatRelativeTime(info.last_at)
+                    return (
+                      <button
+                        key={g.id}
+                        className={`hub-row hub-group-row ${g.id === activeGroupId ? 'on' : ''}`}
+                        onClick={() => void selectGroup(g.id)}
+                        aria-label={`${g.name}，${memberCount} 名成员${unread > 0 ? `，${unreadBadge(unread)} 条未读` : '，没有未读'}，${preview}`}
+                      >
+                        <span className="hub-member-stack" aria-hidden="true">
+                          {(g.members ?? []).slice(0, 3).map((m, i) => (
+                            <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 3 - i }}>
+                              {(agents.find((a) => a.id === m.agent_id)?.name ?? m.agent_id).slice(0, 1)}
+                            </span>
+                          ))}
+                        </span>
+                        <span className="hub-row-text">
+                          <span className="hub-row-top">
+                            <span className="hub-name">{g.name}</span>
+                            {unread > 0 ? <span className="hub-unread">{unreadBadge(unread)}</span> : null}
+                          </span>
+                          <span className="hub-preview" title={preview}>{preview}</span>
+                        </span>
+                        {time ? <span className="hub-row-time">{time}</span> : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              )
+            ) : agents.length === 0 && !loading ? (
+              <div className="hub-rail-empty">{t('hub.noAgents')}</div>
+            ) : (
+              <div className="hub-rail-list">
+                {agents.map((a) => (
+                  <HubRow
+                    key={a.id}
+                    agent={a}
+                    preview={dm[a.id]?.last_text}
+                    unread={dm[a.id]?.unread ?? 0}
+                    running={running[a.id] === true}
+                    active={a.id === activeId}
+                    onClick={() => void select(a.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </>
         )}
         {error ? (
           <div className="hub-error" role="alert">

@@ -91,6 +91,49 @@ export interface HubHistoryPage {
   has_more?: boolean
 }
 
+/** hub_search 的 scope（P4-04b-1）。 */
+export type HubSearchScope = 'all' | 'group' | 'dm'
+
+/** 全局翻页游标：跨会话按 (created_at, id) 比较；seq 只用于单会话快速路径。 */
+export interface HubSearchCursor {
+  created_at?: string
+  id?: string
+  seq?: number
+}
+
+/** 一条搜索命中（hub_search.hits[i]；字段与 bridge 的 hubSearchHit 对齐）。 */
+export interface HubSearchHit {
+  scope: 'group' | 'dm'
+  group_id?: string
+  agent_id?: string
+  name?: string
+  seq: number
+  message_id?: string
+  /** bridge 侧按 rune 截断、以命中词为中心的片段。 */
+  snippet?: string
+  /** 已还原的发送者显示名（我 / 智能体名 / 系统）。 */
+  sender?: string
+  sender_kind?: string
+  sender_agent_id?: string
+  kind?: string
+  created_at?: string
+  /** 仅群主可见：UI 必须打标，不能无声混在普通结果里。 */
+  owner_only?: boolean
+}
+
+/** hub_search 响应。 */
+export interface HubSearchPage {
+  query?: string
+  scope?: string
+  limit?: number
+  hits?: HubSearchHit[]
+  count?: number
+  has_more?: boolean
+  next_before?: HubSearchCursor | null
+  /** 本次 fan-out 扫了多少个会话（1 = 单会话 scope）。 */
+  scanned?: number
+}
+
 /** 任务账本条目（hub_task_list/get；字段与 agenthub.Task 对齐，只列 UI 用的）。 */
 export interface HubTaskUsage {
   input?: number

@@ -82,6 +82,8 @@ const seenCmds = []
 // 发送类命令的 payload：P4-03d 要证明「失败后重试沿用同一个 client_msg_id」，
 // 以及结构化 mentions 真的发给了后端（不是只画在输入框里）。
 const seenSends = []
+// hub_group_history / hub_history 的 payload：搜索跳转要证明「真的拉了命中附近一页」。
+const seenHistory = []
 let failSend = false
 let sendOk = 0
 
@@ -114,7 +116,27 @@ async function serveStatic(res, pathname) {
   }
 }
 
-function mockCmd(cmd) {
+// 搜索命中：一条群命中故意放在 seq=40（初始页只加载 1/2），用来验证
+// 「命中不在已加载历史里 → 拉 before_seq=seq+1 的一页 → 跳转高亮」。
+const SEARCH_HITS = [
+  {
+    scope: 'group', group_id: 'grp_1', name: '产品评审群', seq: 40, message_id: 'msg_40',
+    snippet: '…深历史里的关键词命中…', sender: 'Alice', sender_kind: 'agent', kind: 'text',
+    created_at: NOW, owner_only: false,
+  },
+  {
+    scope: 'group', group_id: 'grp_1', name: '产品评审群', seq: 2, message_id: 'msg_2',
+    snippet: '…关键词只给群主看…', sender: '我', sender_kind: 'human', kind: 'text',
+    created_at: NOW, owner_only: true,
+  },
+  {
+    scope: 'dm', agent_id: 'ag_alice', name: 'Alice', seq: 1, message_id: 'msg_1',
+    snippet: '…关键词的私聊…', sender: 'Alice', sender_kind: 'agent', kind: 'text',
+    created_at: NOW, owner_only: false,
+  },
+]
+
+function mockCmd(cmd, payload) {
   switch (cmd) {
     case 'workspace_list':
       return { workspaces: [{ path: '/Users/demo/proj', title: 'demo' }] }
@@ -134,8 +156,32 @@ function mockCmd(cmd) {
       return { needs: [] }
     case 'hub_group_get':
       return { group: GROUP, conversation: { status: 'idle', turns_used: 0, turn_budget: 8 } }
-    case 'hub_group_history':
+    case 'hub_group_history': {
+      // 搜索跳转的 around 页：以 before_seq 结尾的一页（含 seq=40 的命中）。
+      if (Number((payload || {}).before_seq) === 41) {
+        return {
+          messages: [
+            {
+              id: 'msg_40', seq: 40, group_id: 'grp_1', kind: 'text',
+              sender: { kind: 'agent', agent_id: 'ag_alice' }, text: '深历史里的关键词命中', created_at: NOW,
+            },
+          ],
+          has_more: true,
+        }
+      }
       return { messages: groupMessages, has_more: false }
+    }
+    case 'hub_search':
+      return {
+        query: String((payload || {}).query || ''),
+        scope: String((payload || {}).scope || 'all'),
+        limit: 50,
+        hits: SEARCH_HITS,
+        count: SEARCH_HITS.length,
+        has_more: false,
+        next_before: null,
+        scanned: 2,
+      }
     case 'hub_open':
       return {
         agent: AGENT,
@@ -184,8 +230,11 @@ function startServer() {
       if (cmd === 'hub_group_send' || cmd === 'hub_send') {
         seenSends.push({ cmd, payload: body.payload || {} })
       }
+      if (cmd === 'hub_group_history' || cmd === 'hub_history') {
+        seenHistory.push(body.payload || {})
+      }
       try {
-        const data = mockCmd(cmd)
+        const data = mockCmd(cmd, body.payload || {})
         return json(res, 200, { ok: true, data })
       } catch (e) {
         return json(res, 500, { ok: false, error: e.message })
@@ -497,7 +546,51 @@ async function main() {
     await waitFor(() => seenCmds.filter((c) => c === 'hub_mark_read').length > dmMarkBefore, 3000)
     console.log('  ✅ DM: 打开在底部才推进已读')
 
-    console.log('[390] PASS: 390x844 真实浏览器测量完成（列表/Hub/群/DM + 主题 + 动效 + @ + 草稿 + 已读）')
+    // —— P4-04b-1 全历史搜索：入口 → 结果行 → 点命中 → around 页 → 跳转高亮 ——
+    await page.click('#hub-search-btn')
+    await page.waitForSelector('#hub-search:not([hidden])')
+    await page.fill('#hub-search-input', '关键词')
+    await page.waitForFunction(() => document.querySelectorAll('#hub-search-results .hub-search-hit').length >= 3)
+    const sheetMetrics = await page.evaluate(() => {
+      const box = document.getElementById('hub-search')
+      return {
+        docScrollWidth: document.documentElement.scrollWidth,
+        boxScrollWidth: box.scrollWidth,
+        rows: [...box.querySelectorAll('.hub-search-hit')].map((r) => r.getBoundingClientRect().height),
+        scopes: [...box.querySelectorAll('.hub-search-scopes button')].map((b) => b.getBoundingClientRect().height),
+        ownerBadges: box.querySelectorAll('.hub-search-hit .owner-only').length,
+      }
+    })
+    assert(sheetMetrics.docScrollWidth <= VIEWPORT.width, `搜索面板: documentElement.scrollWidth=${sheetMetrics.docScrollWidth} > 390`)
+    assert(sheetMetrics.boxScrollWidth <= VIEWPORT.width, `搜索面板: scrollWidth=${sheetMetrics.boxScrollWidth} > 390`)
+    assert(sheetMetrics.rows.every((h) => h >= 44), `搜索命中行应 >=44px: ${JSON.stringify(sheetMetrics.rows)}`)
+    assert(sheetMetrics.scopes.every((h) => h >= 44), `搜索范围 chip 应 >=44px: ${JSON.stringify(sheetMetrics.scopes)}`)
+    assert(sheetMetrics.ownerBadges >= 1, 'owner-only 命中必须有「仅群主可见」徽标')
+    console.log(`  ✅ 搜索面板: ${sheetMetrics.rows.length} 行结果，全部 >=44px，无横向溢出`)
+
+    // Escape：关闭面板（浏览器对 type=search 的原生行为会同时清空输入，
+    // 我们的 input 处理把 query 一起清掉 —— 重新打开是干净的空搜索）。
+    await page.keyboard.press('Escape')
+    await page.waitForSelector('#hub-search', { state: 'hidden' })
+    assert((await page.inputValue('#hub-search-input')) === '', 'Escape 后输入框应清空')
+    console.log('  ✅ 搜索: Escape 关闭面板并清空输入')
+
+    await page.click('#hub-search-btn')
+    await page.waitForSelector('#hub-search:not([hidden])')
+    await page.fill('#hub-search-input', '关键词')
+    await page.waitForFunction(() => document.querySelectorAll('#hub-search-results .hub-search-hit').length >= 3)
+    await page.click('#hub-search-results .hub-search-hit[data-search-key="group:grp_1:msg_40"]')
+    await page.waitForSelector('#screen-hub-group:not([hidden])')
+    await page.waitForSelector('#hub-group-messages [data-seq="40"]')
+    assert(
+      seenHistory.some((p) => Number(p.before_seq) === 41 && p.group_id === 'grp_1'),
+      `点旧命中必须请求命中附近一页（before_seq=seq+1），got=${JSON.stringify(seenHistory)}`,
+    )
+    const highlighted = await page.evaluate(() => !!document.querySelector('#hub-group-messages [data-seq="40"].hub-msg-highlight'))
+    assert(highlighted, '跳转后命中消息应高亮')
+    console.log('  ✅ 搜索: 点旧命中 → 加载 seq 附近一页 → 跳转并高亮')
+
+    console.log('[390] PASS: 390x844 真实浏览器测量完成（列表/Hub/群/DM + 主题 + 动效 + @ + 草稿 + 已读 + 搜索）')
   } finally {
     if (browser) await browser.close().catch(() => {})
     await new Promise((r) => server.close(r))

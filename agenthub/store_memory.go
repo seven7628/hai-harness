@@ -10,21 +10,25 @@ import (
 
 // MemoryStore 是 Store 的内存实现，供单元测试/评测使用；不落盘、不跨进程。
 type MemoryStore struct {
-	mu        sync.Mutex
-	agents    map[AgentID]*AgentProfile
-	groups    map[GroupID]*Group
-	messages  map[GroupID][]Message
-	activity  map[GroupID][]Activity
-	tasks     map[TaskID]*Task
-	taskEvent map[TaskID][]TaskEvent
-	taskSeq   map[TaskID]int64
-	needs     map[NeedID]*Need
-	handoffs  map[string]*Handoff
-	artifacts map[ArtifactID]*Artifact
-	cursors   map[string]Cursor
-	reserved  map[string]struct{}
-	idGen     func(prefix string) string
-	taskIdx   *taskIndex
+	mu       sync.Mutex
+	agents   map[AgentID]*AgentProfile
+	groups   map[GroupID]*Group
+	messages map[GroupID][]Message
+	// dmMessages 是 DM 索引（FileStore 的 dms/<agent>/log.jsonl 对应物）。
+	// DM 不在 Store 接口里（bridge 用 *FileStore 的 DM 方法），这里只为搜索测试/
+	// 评测保留同一份能力。
+	dmMessages map[AgentID][]Message
+	activity   map[GroupID][]Activity
+	tasks      map[TaskID]*Task
+	taskEvent  map[TaskID][]TaskEvent
+	taskSeq    map[TaskID]int64
+	needs      map[NeedID]*Need
+	handoffs   map[string]*Handoff
+	artifacts  map[ArtifactID]*Artifact
+	cursors    map[string]Cursor
+	reserved   map[string]struct{}
+	idGen      func(prefix string) string
+	taskIdx    *taskIndex
 }
 
 var (
@@ -37,20 +41,21 @@ var (
 // NewMemoryStore 创建空的内存 Store。
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		agents:    make(map[AgentID]*AgentProfile),
-		groups:    make(map[GroupID]*Group),
-		messages:  make(map[GroupID][]Message),
-		activity:  make(map[GroupID][]Activity),
-		tasks:     make(map[TaskID]*Task),
-		taskEvent: make(map[TaskID][]TaskEvent),
-		taskSeq:   make(map[TaskID]int64),
-		needs:     make(map[NeedID]*Need),
-		handoffs:  make(map[string]*Handoff),
-		artifacts: make(map[ArtifactID]*Artifact),
-		cursors:   make(map[string]Cursor),
-		reserved:  make(map[string]struct{}),
-		idGen:     NewID,
-		taskIdx:   newTaskIndex(),
+		agents:     make(map[AgentID]*AgentProfile),
+		groups:     make(map[GroupID]*Group),
+		messages:   make(map[GroupID][]Message),
+		dmMessages: make(map[AgentID][]Message),
+		activity:   make(map[GroupID][]Activity),
+		tasks:      make(map[TaskID]*Task),
+		taskEvent:  make(map[TaskID][]TaskEvent),
+		taskSeq:    make(map[TaskID]int64),
+		needs:      make(map[NeedID]*Need),
+		handoffs:   make(map[string]*Handoff),
+		artifacts:  make(map[ArtifactID]*Artifact),
+		cursors:    make(map[string]Cursor),
+		reserved:   make(map[string]struct{}),
+		idGen:      NewID,
+		taskIdx:    newTaskIndex(),
 	}
 }
 

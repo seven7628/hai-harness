@@ -53,6 +53,29 @@ func (s *FileStore) AppendDirectMessage(ctx context.Context, agentID AgentID, m 
 	return seq, nil
 }
 
+// AppendDirectMessage 与 FileStore 同语义（内存实现，供搜索/评测用）。
+func (s *MemoryStore) AppendDirectMessage(ctx context.Context, agentID AgentID, m *Message) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if m == nil || !validID(string(agentID)) {
+		return 0, fmt.Errorf("%w: direct message", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seq := int64(len(s.dmMessages[agentID]) + 1)
+	stored := *m
+	stored.Seq = seq
+	stored.ID = messageIDFor(&stored, seq)
+	stored.GroupID = ""
+	if stored.CreatedAt.IsZero() {
+		stored.CreatedAt = time.Now().UTC()
+	}
+	s.dmMessages[agentID] = append(s.dmMessages[agentID], stored)
+	*m = stored
+	return seq, nil
+}
+
 // ReadDirectMessages 从新到旧取一页：seq < beforeSeq（0/负 = 从最新开始）。
 // 返回顺序为**旧→新**（与 ReadMessages 同约定），方便前端直接渲染。
 func (s *FileStore) ReadDirectMessages(ctx context.Context, agentID AgentID, beforeSeq int64, limit int) ([]Message, error) {

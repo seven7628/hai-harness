@@ -113,6 +113,8 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubConversationStop(c)
 	case CmdHubArtifactGet:
 		m.hubArtifactGet(c)
+	case CmdHubSearch:
+		m.hubSearch(c)
 	default:
 		return false
 	}

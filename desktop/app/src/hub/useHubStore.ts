@@ -4,8 +4,12 @@ import { hubCommand } from './api'
 import type {
   HubAgent, HubAlert, HubConversation, HubDMInfo, HubGroup, HubHistoryPage, HubMessage,
   HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubPromptLayer, HubPromptPreviewData, HubRound,
-  HubRunEntry, HubTask, HubTaskUpdate,
+  HubRunEntry, HubSearchCursor, HubSearchHit, HubSearchPage, HubSearchScope, HubTask, HubTaskUpdate,
 } from './types'
+import {
+  aroundHasMore, hasSeq, mapSearchHit, mapSearchPage, mergeAroundPage, mergeSearchHits,
+  normalizeSearchQuery, normalizeSearchScope, searchAroundPlan, searchPagePayload,
+} from './search'
 import { addHubAlert, alertFromEvent } from './alerts'
 import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, reconcileDraftsWithMessages, type HubMessageDelta, type HubStreamDraft } from './groupStream'
 import {
@@ -116,6 +120,17 @@ interface HubState {
   /** 当前选中智能体的系统提示词预览（只读；hub_agent_prompt_preview）。 */
   prompt: HubPromptState | null
 
+  // —— 全历史搜索（hub_search，P4-04b-1）——
+  /** 已提交的查询（输入框由 HubSurface 自己持有，避免 debounce 回环）。 */
+  searchQuery: string
+  searchScope: HubSearchScope
+  searchHits: HubSearchHit[]
+  searchHasMore: boolean
+  /** 下一页游标（(created_at,id)）；null = 没有更旧的结果。 */
+  searchNext: HubSearchCursor | null
+  searchLoading: boolean
+  searchError: string | null
+
   openHub(): void
   closeHub(): void
   refresh(): Promise<void>
@@ -127,6 +142,15 @@ interface HubState {
   setDraft(agentID: string, text: string): void
   clearError(): void
   clearNotice(): void
+  /** 人类全历史搜索（250ms debounce 在 UI 层；这里只发一次 hub_search，旧响应按代际丢弃）。 */
+  search(query: string, scope?: HubSearchScope): Promise<void>
+  /** 用 next_before 游标翻更旧的一页（结果去重合并）。 */
+  searchMore(): Promise<void>
+  /** 清空查询/结果（Escape、清空输入、关闭面板）。 */
+  clearSearch(): void
+  /** 点击命中：打开会话 → 命中 seq 不在已加载历史时加载附近一页 → 跳转+高亮。 */
+  openSearchHit(hit: HubSearchHit): Promise<void>
+  setSearchScope(scope: HubSearchScope): void
   dismissAlert(id: string): void
   setInspector(panel: 'tasks' | 'needs' | 'session' | 'context' | null): void
   setView(view: 'chat' | 'run'): void
@@ -176,6 +200,8 @@ const deepLinkInflight = new Map<string, Promise<boolean>>()
 // 永不消费的 jump 永久挡住贴底跟随（复审 B1/B3）。
 export const HUB_JUMP_TTL_MS = 2000
 let jumpTimer: ReturnType<typeof setTimeout> | null = null
+// 搜索代际：输入 debounce 里后发的查询必须能丢弃先发的迟到响应（否则结果会闪回旧词）。
+let searchGen = 0
 
 function clearJumpTimer(): void {
   if (jumpTimer) {
@@ -274,6 +300,13 @@ export const useHubStore = create<HubState>((set, get) => ({
   jump: null,
   deepLinkOwnedOpen: false,
   prompt: null,
+  searchQuery: '',
+  searchScope: 'all',
+  searchHits: [],
+  searchHasMore: false,
+  searchNext: null,
+  searchLoading: false,
+  searchError: null,
 
   openHub() {
     set({ open: true, deepLinkOwnedOpen: false })
@@ -476,6 +509,105 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   clearNotice() {
     set({ notice: null })
+  },
+
+  // —— 全历史搜索（hub_search）——
+  //
+  // 只做三件事：发命令、按代际接收、把命中映射成可渲染的领域对象。
+  // 「点了命中之后」的加载/跳转在 openSearchHit 里，必须走和深链同一套 jump 守卫。
+  async search(query, scope) {
+    const q = normalizeSearchQuery(query)
+    const sc = normalizeSearchScope(scope ?? get().searchScope)
+    const gen = ++searchGen
+    if (!q) {
+      set({
+        searchQuery: '', searchScope: sc, searchHits: [], searchHasMore: false,
+        searchNext: null, searchLoading: false, searchError: null,
+      })
+      return
+    }
+    set({ searchQuery: q, searchScope: sc, searchLoading: true, searchError: null })
+    const r = await hubCommand<HubSearchPage>('hub_search', searchPagePayload(q, sc))
+    if (searchGen !== gen) return // 已有更新的查询：丢弃迟到响应
+    if (!r.ok) {
+      set({ searchLoading: false, searchError: r.error || '搜索失败', searchHits: [], searchHasMore: false, searchNext: null })
+      return
+    }
+    const page = mapSearchPage(r.data)
+    set({ searchLoading: false, searchHits: page.hits, searchHasMore: page.hasMore, searchNext: page.next })
+  },
+
+  async searchMore() {
+    const { searchQuery, searchScope, searchNext, searchHasMore, searchLoading } = get()
+    if (!searchQuery || !searchHasMore || !searchNext || searchLoading) return
+    const gen = ++searchGen
+    set({ searchLoading: true, searchError: null })
+    const r = await hubCommand<HubSearchPage>('hub_search', searchPagePayload(searchQuery, searchScope, { cursor: searchNext }))
+    if (searchGen !== gen) return
+    if (!r.ok) {
+      set({ searchLoading: false, searchError: r.error || '加载更早结果失败' })
+      return
+    }
+    const page = mapSearchPage(r.data)
+    set((s) => ({
+      searchLoading: false,
+      searchHits: mergeSearchHits(s.searchHits, page.hits),
+      searchHasMore: page.hasMore,
+      searchNext: page.next,
+    }))
+  },
+
+  clearSearch() {
+    searchGen++ // 作废在飞的响应
+    set({
+      searchQuery: '', searchHits: [], searchHasMore: false, searchNext: null,
+      searchLoading: false, searchError: null,
+    })
+  },
+
+  setSearchScope(scope) {
+    set({ searchScope: normalizeSearchScope(scope) })
+  },
+
+  async openSearchHit(hit) {
+    const target = mapSearchHit(hit)
+    if (!target) return
+    const key = target.scope === 'group' ? (target.group_id ?? '') : (target.agent_id ?? '')
+    if (!key) return
+    searchGen++ // 选中即离开结果面板：不让在飞的翻页把结果写回来
+    if (target.scope === 'group') await get().selectGroup(key)
+    else await get().select(key)
+    // selectGroup/select 都可能被用户切走（代际在它们内部）：只认当前目标。
+    const state = get()
+    const activeKey = target.scope === 'group' ? state.activeGroupId : state.activeId
+    if (activeKey !== key) return
+    const loaded = hasSeq(target.scope === 'group' ? state.groupMessages : state.messages, target.seq)
+    if (!loaded) {
+      // 命中可能在历史深处：拉「以命中 seq 结尾」的一页（before_seq = seq+1），
+      // 与已加载时间线合并（不是替换），否则 requestJump 会因为「目标没加载」被拒绝。
+      const plan = searchAroundPlan(target.scope, key, target.seq)
+      if (plan) {
+        const r = await hubCommand<HubHistoryPage>(plan.command, plan.payload)
+        const current = get()
+        const stillActive = target.scope === 'group' ? current.activeGroupId : current.activeId
+        if (stillActive !== key) return
+        if (r.ok) {
+          const page = r.data?.messages ?? []
+          set((s) => {
+            if (target.scope === 'group') {
+              const merged = mergeAroundPage(s.groupMessages, page)
+              return { groupMessages: merged, loading: false, hasMore: s.groupMessages.length === 0 ? aroundHasMore(merged) : s.hasMore }
+            }
+            const merged = mergeAroundPage(s.messages, page)
+            return { messages: merged, loading: false, hasMore: s.messages.length === 0 ? aroundHasMore(merged) : s.hasMore }
+          })
+        } else {
+          set({ error: r.error || '加载命中附近的历史失败' })
+        }
+      }
+    }
+    // requestJump 只在 seq 已加载时登记；上面失败时它会给出「不在已加载历史里」的提示。
+    get().requestJump(target.seq)
   },
 
   dismissAlert(id) {

@@ -1062,3 +1062,100 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-chip.layer-l3 { color: #8a6a1f; background: color-mix(in srgb, #8a6a1f 14%, transparent); }
 .hub-chip.layer-l4 { color: #7a4a8a; background: color-mix(in srgb, #7a4a8a 12%, transparent); }
 .hub-prompt-note { font-size: 11px; line-height: 1.5; margin: 0; }
+
+/* —— 全历史搜索（P4-04b-1）——
+ * 结果面板占据 rail 的列表区（不叠在消息流上）：搜索是「换一种浏览方式」，
+ * 不是浮层；点命中后收起面板 → 时间线跳转+高亮。
+ * 颜色全部走主题令牌，深/浅/跟随三套都成立。 */
+.hub-search {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.hub-search-box {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--paper-3);
+}
+.hub-search-box:focus-within { border-color: var(--accent-border); }
+.hub-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 0;
+  outline: none;
+}
+.hub-search-input::placeholder { color: var(--text-3); }
+.hub-search-clear { font-size: 14px; line-height: 1; }
+.hub-search-scopes { display: flex; gap: 4px; }
+.hub-search-scopes button {
+  flex: 1;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11.5px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.hub-search-scopes button:hover { color: var(--ink); }
+.hub-search-scopes button.on {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
+  color: var(--ink);
+}
+.hub-search-results {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hub-search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-search-hit:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.hub-search-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.hub-search-hit.owner-only { border-color: color-mix(in srgb, #b8772a 35%, transparent); }
+.hub-search-hit-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hub-search-hit-name {
+  font-size: 12.5px; font-weight: 550; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hub-search-hit-time { margin-left: auto; font-size: 10.5px; color: var(--text-3); flex: none; }
+.hub-search-hit-snippet {
+  font-size: 11.5px; color: var(--text-2); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  word-break: break-word;
+}
+.hub-search-hit-meta { font-size: 10.5px; color: var(--text-3); }
+.hub-chip.scope-group { color: #2f6f9a; background: color-mix(in srgb, #2f6f9a 12%, transparent); }
+.hub-chip.scope-dm { color: #2f7a4f; background: color-mix(in srgb, #2f7a4f 12%, transparent); }
+.hub-search-more {
+  margin: 4px 0 8px; padding: 6px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--paper-3); color: var(--text-2);
+  font-size: 11.5px; cursor: pointer;
+}
+.hub-search-more:disabled { opacity: 0.6; cursor: default; }

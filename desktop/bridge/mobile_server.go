@@ -76,6 +76,7 @@ var mobileAllowedCommands = map[Command]bool{
 	CmdHubNeedList:      true, // hub_need_list
 	CmdHubMarkRead:      true, // hub_mark_read
 	CmdHubArtifactGet:   true, // hub_artifact_get
+	CmdHubSearch:        true, // hub_search（人类命令；手机端只读）
 	// 安全写：发消息 / 派任务 / 停止 / 取消 / 重试 / 解决 need / 清空 DM
 	CmdHubSend:             true, // hub_send
 	CmdHubGroupSend:        true, // hub_group_send

@@ -12,6 +12,7 @@
   <header id="bar">
     <button id="back" class="icon" hidden>‹</button>
     <div id="title">HAI</div>
+    <button id="hub-search-btn" class="icon" title="搜索" aria-label="搜索 Hub 消息" hidden>⌕</button>
     <button id="theme" class="icon" title="外观" aria-label="外观" hidden>◐</button>
     <button id="menu" class="icon" hidden>⋯</button>
   </header>
@@ -168,6 +169,26 @@
     <div id="hub-sheet-body" class="hub-sheet-body"></div>
     <div class="sheet-actions">
       <button id="hub-sheet-close" class="ghost">关闭</button>
+    </div>
+  </div>
+
+  <!-- Hub：全历史搜索（跨群 + 私聊；结果点开即跳到命中附近） -->
+  <div id="hub-search" class="sheet hub-search-sheet" hidden>
+    <div class="sheet-head">搜索</div>
+    <div class="hub-search-box">
+      <input id="hub-search-input" type="search" placeholder="搜索群聊与私聊…" autocomplete="off" enterkeyhint="search" aria-label="搜索 Hub 全部历史">
+    </div>
+    <div id="hub-search-scopes" class="hub-search-scopes" role="tablist" aria-label="搜索范围">
+      <button type="button" role="tab" data-search-scope="all" aria-selected="true">全部</button>
+      <button type="button" role="tab" data-search-scope="group" aria-selected="false">群聊</button>
+      <button type="button" role="tab" data-search-scope="dm" aria-selected="false">私聊</button>
+    </div>
+    <div id="hub-search-results" class="hub-search-results" aria-live="polite"></div>
+    <p id="hub-search-error" class="error" hidden></p>
+    <div class="sheet-actions">
+      <button id="hub-search-more" class="ghost" hidden>更早的结果</button>
+      <button id="hub-search-clear" class="ghost">清空</button>
+      <button id="hub-search-close" class="ghost">关闭</button>
     </div>
   </div>
 

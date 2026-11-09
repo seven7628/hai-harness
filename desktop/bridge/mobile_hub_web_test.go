@@ -66,6 +66,7 @@ func TestMobileHubWebAssetsEmbedded(t *testing.T) {
 		"hub_need_list",
 		"hub_need_resolve",
 		"hub_mark_read",
+		"hub_search",
 		"hub_message_delta",
 	} {
 		if !strings.Contains(app, marker) {

@@ -83,6 +83,19 @@
       // 成功/改动草稿才清空（见 hub_model.sendSlotID）。群与 DM 各一条。
       pendingGroupSend: null,
       pendingDMSend: null,
+      // 全历史搜索（hub_search）：输入 debounce 250ms，结果按 (created_at,id) 游标翻页。
+      search: {
+        open: false,
+        query: '',
+        scope: 'all',
+        hits: [],
+        hasMore: false,
+        next: null,
+        loading: false,
+        error: '',
+        gen: 0,
+        timer: null,
+      },
       busy: false,
     },
   }
@@ -181,6 +194,9 @@
     $('menu').hidden = screen !== 'chat'
     // 外观切换在列表/Hub 都可达；它是覆盖层，不占导航栈。
     $('theme').hidden = !(screen === 'list' || HUB_SCREENS.has(screen))
+    // 搜索入口只在 Hub 三屏的头部出现；离开 Hub 时顺手收起搜索面板。
+    $('hub-search-btn').hidden = !HUB_SCREENS.has(screen)
+    if (!HUB_SCREENS.has(screen)) closeHubSearch()
     $('theme-sheet').hidden = true
     $('title').textContent = titleFor(screen)
   }
@@ -1074,8 +1090,200 @@
   function leaveHub() {
     closeMentionPicker()
     closeHubSheet()
+    closeHubSearch()
     disconnectHub()
     show('list')
+  }
+
+  // ---- 全历史搜索（hub_search）----
+
+  function openHubSearch() {
+    if (!H) return
+    const s = state.hub.search
+    s.open = true
+    $('hub-search').hidden = false
+    $('hub-search-input').value = s.query
+    renderHubSearchScopes()
+    renderHubSearchResults()
+    // 等覆盖层可见再 focus：iOS 上 display:none 的输入框 focus 会被吞掉。
+    setTimeout(() => {
+      try {
+        $('hub-search-input').focus()
+      } catch {
+        /* ignore */
+      }
+    }, 30)
+  }
+
+  function closeHubSearch() {
+    const s = state.hub.search
+    if (!s) return
+    if (s.timer) {
+      clearTimeout(s.timer)
+      s.timer = null
+    }
+    s.open = false
+    s.gen++ // 作废在飞响应：关掉面板后迟到的结果不该再画
+    const box = $('hub-search')
+    if (box) box.hidden = true
+  }
+
+  function renderHubSearchScopes() {
+    const s = state.hub.search
+    for (const b of $('hub-search-scopes').querySelectorAll('[data-search-scope]')) {
+      const on = b.dataset.searchScope === s.scope
+      b.classList.toggle('on', on)
+      b.setAttribute('aria-selected', on ? 'true' : 'false')
+    }
+  }
+
+  // 输入 debounce 250ms（与桌面同一口径）：手机上每敲一个字就 fan-out 一次太贵。
+  function scheduleHubSearch() {
+    const s = state.hub.search
+    if (s.timer) clearTimeout(s.timer)
+    s.timer = setTimeout(() => {
+      s.timer = null
+      runHubSearch(false)
+    }, 250)
+  }
+
+  async function runHubSearch(more) {
+    const s = state.hub.search
+    const q = String(s.query || '').trim()
+    const gen = ++s.gen
+    if (!q) {
+      s.hits = []
+      s.hasMore = false
+      s.next = null
+      s.error = ''
+      s.loading = false
+      renderHubSearchResults()
+      return
+    }
+    s.loading = true
+    if (!more) s.error = ''
+    renderHubSearchResults()
+    try {
+      const payload = H.searchPayload(q, s.scope, more ? s.next : null)
+      const data = await api('hub_search', payload)
+      if (gen !== s.gen) return
+      const page = H.searchPageView(data)
+      s.hits = more ? H.mergeSearchResults(s.hits, page.hits) : page.hits
+      s.hasMore = page.hasMore
+      s.next = page.next
+      s.error = ''
+    } catch (e) {
+      if (gen !== s.gen) return
+      s.error = e.message || '搜索失败'
+      if (!more) {
+        s.hits = []
+        s.hasMore = false
+        s.next = null
+      }
+    } finally {
+      if (gen === s.gen) {
+        s.loading = false
+        renderHubSearchResults()
+      }
+    }
+  }
+
+  function renderHubSearchResults() {
+    const s = state.hub.search
+    const box = $('hub-search-results')
+    if (!box) return
+    box.textContent = ''
+    const err = $('hub-search-error')
+    err.hidden = !s.error
+    err.textContent = s.error || ''
+    $('hub-search-more').hidden = !s.hasMore
+    $('hub-search-more').textContent = s.loading ? '加载中…' : '更早的结果'
+    const q = String(s.query || '').trim()
+    if (!q) {
+      box.appendChild(el('p', 'hint', '搜索所有群聊与私聊的历史消息。'))
+      return
+    }
+    if (s.loading && s.hits.length === 0) {
+      box.appendChild(el('p', 'hint', '搜索中…'))
+      return
+    }
+    if (!s.hits.length && !s.error) {
+      box.appendChild(el('p', 'hint', '没有匹配的消息。'))
+      return
+    }
+    for (const hit of s.hits) {
+      const row = el('button', 'hub-search-hit' + (hit.ownerOnly ? ' owner-only' : ''))
+      row.type = 'button'
+      row.dataset.searchKey = hit.key
+      const top = el('div', 'hub-search-hit-top')
+      top.appendChild(el('span', 'hub-chip hub-search-scope', H.searchScopeLabel(hit.scope)))
+      top.appendChild(el('span', 'hub-search-hit-name', hit.name))
+      if (hit.ownerOnly) top.appendChild(el('span', 'hub-chip owner-only', '仅群主可见'))
+      top.appendChild(el('span', 'hub-search-hit-time', hubTime(hit.createdAt)))
+      row.appendChild(top)
+      row.appendChild(el('div', 'hub-search-hit-snippet', hit.snippet || ''))
+      const meta = []
+      if (hit.sender) meta.push(hit.sender)
+      if (hit.seq) meta.push('#' + hit.seq)
+      if (meta.length) row.appendChild(el('div', 'hub-search-hit-meta', meta.join(' · ')))
+      row.addEventListener('click', () => {
+        void openHubSearchHit(hit)
+      })
+      box.appendChild(row)
+    }
+  }
+
+  // 点结果：先打开会话（复用 openHubGroup/openHubDM 的加载与已读语义），
+  // 命中不在已加载的一页里再拉「以命中 seq 结尾」的一页并合并，最后滚动+高亮。
+  async function openHubSearchHit(hit) {
+    if (!H || !hit || !hit.targetId) return
+    closeHubSearch()
+    if (hit.scope === 'group') await openHubGroup(hit.targetId)
+    else await openHubDM(hit.targetId)
+    const still =
+      hit.scope === 'group'
+        ? state.hub.activeGroupId === hit.targetId
+        : state.hub.activeAgentId === hit.targetId
+    if (!still) return
+    const messages = hit.scope === 'group' ? state.hub.groupMessages : state.hub.dmMessages
+    const loaded = messages.some((m) => Number(m && m.seq) === hit.seq)
+    if (!loaded) {
+      const req = H.searchAroundRequest(hit.scope, hit.targetId, hit.seq)
+      if (!req) return
+      try {
+        const page = await api(req.cmd, req.payload)
+        if (hit.scope === 'group') {
+          if (state.hub.activeGroupId !== hit.targetId) return
+          state.hub.groupMessages = H.mergeMessages(state.hub.groupMessages, page.messages || [])
+          state.hub.groupHasMore = firstPersistedSeq(state.hub.groupMessages) > 1
+          renderHubGroupMessages()
+        } else {
+          if (state.hub.activeAgentId !== hit.targetId) return
+          state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, page.messages || [])
+          state.hub.dmHasMore = firstPersistedSeq(state.hub.dmMessages) > 1
+          renderHubDM()
+        }
+      } catch (e) {
+        hubError('加载命中附近的历史失败：' + (e.message || e))
+        return
+      }
+    }
+    jumpToHubSeq(hit.seq)
+  }
+
+  // 跳到 seq 并高亮：reduced-motion 时用 auto（滚动是功能，不该只剩动画）。
+  function jumpToHubSeq(seq) {
+    const n = Number(seq) || 0
+    if (!(n > 0)) return
+    const box = state.screen === 'hub-group' ? $('hub-group-messages') : state.screen === 'hub-dm' ? $('hub-dm-messages') : null
+    if (!box) return
+    const node = box.querySelector('[data-seq="' + n + '"]')
+    if (!node) return
+    const reduced =
+      typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    node.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
+    node.classList.add('hub-msg-highlight')
+    setTimeout(() => node.classList.remove('hub-msg-highlight'), 2000)
   }
 
   // ---- 群时间线 ----
@@ -1253,7 +1461,23 @@
     }
   }
 
+  // 每条已落盘消息都带 data-seq：搜索结果点进来要能 scrollIntoView 到命中。
+  // owner-only 必须有可见徽标（人类能看到正文，但要知道它只有群主能看到）。
+  function decorateHubMessage(node, m) {
+    if (!node || !m) return node
+    const seq = Number(m.seq) || 0
+    if (seq > 0) node.dataset.seq = String(seq)
+    if (m.visibility === 'owner' && !node.querySelector('.hub-chip.owner-only')) {
+      node.appendChild(el('span', 'hub-chip owner-only', '仅群主可见'))
+    }
+    return node
+  }
+
   function renderHubMessage(m, ctx) {
+    return decorateHubMessage(renderHubMessageInner(m, ctx), m)
+  }
+
+  function renderHubMessageInner(m, ctx) {
     if (!m) return null
     const names = ctx.names || {}
     if (m.kind === 'task_result') return renderHubTaskCard(m, names)
@@ -2837,9 +3061,13 @@
   // ---------- 导航 ----------
 
   function navBack() {
-    // 覆盖层优先：外观/ @ 选择器/抽屉开着时，返回键只关覆盖层。
+    // 覆盖层优先：外观/搜索/ @ 选择器/抽屉开着时，返回键只关覆盖层。
     if (!$('theme-sheet').hidden) {
       $('theme-sheet').hidden = true
+      return
+    }
+    if (state.hub.search.open) {
+      closeHubSearch()
       return
     }
     if (state.hub.mention.open) {
@@ -3009,6 +3237,59 @@
     $('ws-manual').addEventListener('click', addWorkspaceByPath)
     $('new-session').addEventListener('click', newSession)
     $('open-hub').addEventListener('click', openHub)
+    $('hub-search-btn').addEventListener('click', openHubSearch)
+    $('hub-search-close').addEventListener('click', closeHubSearch)
+    $('hub-search-clear').addEventListener('click', () => {
+      const s = state.hub.search
+      if (s.timer) {
+        clearTimeout(s.timer)
+        s.timer = null
+      }
+      s.query = ''
+      s.hits = []
+      s.hasMore = false
+      s.next = null
+      s.error = ''
+      s.gen++
+      $('hub-search-input').value = ''
+      renderHubSearchResults()
+      try {
+        $('hub-search-input').focus()
+      } catch {
+        /* ignore */
+      }
+    })
+    $('hub-search-more').addEventListener('click', () => {
+      const s = state.hub.search
+      if (s.loading || !s.hasMore) return
+      void runHubSearch(true)
+    })
+    $('hub-search-input').addEventListener('input', () => {
+      state.hub.search.query = $('hub-search-input').value
+      renderHubSearchResults()
+      scheduleHubSearch()
+    })
+    $('hub-search-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        const s = state.hub.search
+        if (s.timer) {
+          clearTimeout(s.timer)
+          s.timer = null
+        }
+        void runHubSearch(false)
+      } else if (e.key === 'Escape') {
+        closeHubSearch()
+      }
+    })
+    for (const b of $('hub-search-scopes').querySelectorAll('[data-search-scope]')) {
+      b.addEventListener('click', () => {
+        const s = state.hub.search
+        s.scope = b.dataset.searchScope || 'all'
+        renderHubSearchScopes()
+        if (String(s.query || '').trim()) void runHubSearch(false)
+      })
+    }
     $('hub-needs').addEventListener('click', () => openHubNeeds(''))
     $('hub-group-at').addEventListener('click', () => openMentionPicker(''))
     $('hub-group-send').addEventListener('click', sendHubGroup)

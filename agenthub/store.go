@@ -57,6 +57,11 @@ type Store interface {
 	ReadMessages(ctx context.Context, gid GroupID, beforeSeq int64, limit int) ([]Message, error)
 	FindGroupMessageByClientID(ctx context.Context, gid GroupID, clientMsgID string) (*Message, error)
 	SearchMessages(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error)
+	// SearchMessagesHuman / SearchDirectMessages 是人类搜索口径（P4-04b-1）：
+	// owner-only 正文可见（由调用方打标），routing/round_summary/approval_stub 默认排除；
+	// 空 query 返回空结果，不做「导出全量」。SearchMessages 的 agent-safe 语义保持不变。
+	SearchMessagesHuman(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error)
+	SearchDirectMessages(ctx context.Context, agentID AgentID, query string, beforeSeq int64, limit int) ([]Message, error)
 
 	AppendActivity(ctx context.Context, a *Activity) error
 	ReadActivity(ctx context.Context, gid GroupID, afterSeq int64, limit int) ([]Activity, error)

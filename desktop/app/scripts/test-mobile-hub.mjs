@@ -558,4 +558,93 @@ const roster = [
   )
 }
 
+// —— P4-04b-1：全历史搜索结果映射 / 游标 / 点命中跳转 ——
+{
+  const hit = H.searchResultView({
+    scope: 'group', group_id: 'grp_1', name: '复盘群', seq: 12, message_id: 'msg_12',
+    snippet: '…关键词…', sender: 'Alice', kind: 'text',
+    created_at: '2026-11-09T10:00:00Z', owner_only: true,
+  })
+  assert(!!hit, '群命中映射成功')
+  eq(hit.key, 'group:grp_1:msg_12', '命中键含 scope + 会话 + message_id')
+  eq(hit.targetId, 'grp_1', '群命中的目标是 group_id')
+  eq(hit.ownerOnly, true, 'owner-only 标记保留（结果行必须打标）')
+  eq(hit.sender, 'Alice', '发送者保留')
+  eq(hit.seq, 12, 'seq 保留')
+  const dmHit = H.searchResultView({ scope: 'dm', agent_id: 'ag_1', seq: 4 })
+  eq(dmHit.targetId, 'ag_1', 'DM 命中的目标是 agent_id')
+  eq(dmHit.messageId, 'msg_4', '没有 message_id 时按 seq 兜底')
+  eq(dmHit.name, 'ag_1', '没有会话名时回落到 id')
+  assert(H.searchResultView({ scope: 'group', seq: 3 }) === null, '群命中缺 group_id → 丢弃')
+  assert(H.searchResultView({ scope: 'dm', agent_id: 'ag_1', seq: 0 }) === null, 'seq<=0 → 丢弃')
+  assert(H.searchResultView(null) === null, '空条目 → 丢弃')
+
+  const page = H.searchPageView({
+    hits: [
+      { scope: 'group', group_id: 'g1', seq: 5, message_id: 'msg_5' },
+      { scope: 'dm', seq: 9 }, // 坏条目
+    ],
+    has_more: true,
+    next_before: { created_at: '2026-11-09T09:00:00Z', id: 'msg_5', seq: 5 },
+    scanned: 3,
+  })
+  eq(page.hits.length, 1, '坏条目被丢弃')
+  eq(page.hasMore, true, 'has_more 保留')
+  eq(page.next.id, 'msg_5', '游标 id 保留')
+  eq(page.scanned, 3, 'scanned 保留')
+  const noCursor = H.searchPageView({ hits: [{ scope: 'group', group_id: 'g', seq: 1 }], has_more: true })
+  eq(noCursor.hasMore, false, 'has_more=true 但没有游标 → 没有下一页（不能无限翻）')
+  const emptyPage = H.searchPageView({ hits: [], has_more: true, next_before: { created_at: 'x', id: 'y' } })
+  eq(emptyPage.hasMore, false, '空页不宣称还有更多')
+
+  const merged = H.mergeSearchResults(page.hits, [
+    { scope: 'group', group_id: 'g1', seq: 5, message_id: 'msg_5' },
+    { scope: 'group', group_id: 'g1', seq: 3, message_id: 'msg_3' },
+  ])
+  eq(merged.map((h) => h.messageId).join(','), 'msg_5,msg_3', '翻页去重且保序')
+
+  const p1 = H.searchPayload('  alpha ', 'dm', null)
+  eq(p1.query, 'alpha', 'payload 用去空白后的查询')
+  eq(p1.scope, 'dm', 'payload scope')
+  eq(p1.limit, 50, '手机端分页 50')
+  assert(!p1.before, '第一页不带游标')
+  eq(H.searchPayload('x', 'nonsense', null).scope, 'all', '非法 scope 回落 all')
+  const p2 = H.searchPayload('x', 'all', { created_at: '2026-11-09T10:00:00Z', id: 'msg_9', seq: 9 })
+  eq(p2.before.id, 'msg_9', '翻页带游标 id')
+  eq(p2.before.seq, 9, '翻页带游标 seq（单会话快速路径）')
+
+  const g = H.searchAroundRequest('group', 'grp_1', 42)
+  eq(g.cmd, 'hub_group_history', '群命中用 hub_group_history')
+  eq(g.payload.before_seq, 43, 'before_seq = seq+1（包含命中自己）')
+  eq(g.payload.limit, 50, 'around 页大小 50')
+  const d = H.searchAroundRequest('dm', 'ag_1', 7)
+  eq(d.cmd, 'hub_history', 'DM 命中用 hub_history')
+  eq(d.payload.agent_id, 'ag_1', 'DM around payload agent_id')
+  eq(d.payload.before_seq, 8, 'DM before_seq = seq+1')
+  eq(H.searchAroundRequest('group', '', 1), null, '缺目标 → 不产生请求')
+  eq(H.searchAroundRequest('group', 'g', 0), null, 'seq<=0 → 不产生请求')
+  eq(H.searchScopeLabel('group'), '群聊', 'scope 文案：群聊')
+  eq(H.searchScopeLabel('dm'), '私聊', 'scope 文案：私聊')
+  eq(H.searchScopeLabel('all'), '全部', 'scope 文案：全部')
+
+  // —— app.js 接线：删掉 around-seq 加载 → 这两条 RED ——
+  assert(/api\('hub_search'/.test(appSrc), 'app.js 真的调用 hub_search')
+  const osAt = appSrc.indexOf('async function openHubSearchHit')
+  const osEnd = appSrc.indexOf('function jumpToHubSeq', osAt)
+  const osBody = osAt >= 0 && osEnd > osAt ? appSrc.slice(osAt, osEnd) : ''
+  assert(osBody.length > 0, '找到 openHubSearchHit 实现')
+  assert(/H\.searchAroundRequest\(/.test(osBody), '点命中必须走 searchAroundRequest（加载命中附近一页）')
+  assert(/data-seq/.test(appSrc), '消息节点带 data-seq（跳转落点）')
+  assert(/function jumpToHubSeq/.test(appSrc), '跳转函数存在')
+  assert(/prefers-reduced-motion: reduce/.test(appSrc.slice(osEnd - 200, osEnd + 600)), '跳转滚动尊重 reduced-motion')
+  assert(/仅群主可见/.test(appSrc), 'owner-only 结果/消息都有徽标')
+  assert(/hub-search-input/.test(appSrc) && /250\)/.test(appSrc), '输入框 250ms debounce 接线')
+
+  // —— 静态结构：入口在 Hub 头部，面板有输入/范围/结果 ——
+  assert(/id="hub-search-btn"/.test(htmlSrc), 'Hub 头部有搜索入口')
+  assert(/id="hub-search-input"/.test(htmlSrc), '搜索面板有输入框')
+  assert(/data-search-scope="all"/.test(htmlSrc) && /data-search-scope="group"/.test(htmlSrc) && /data-search-scope="dm"/.test(htmlSrc), '搜索面板三种 scope')
+  assert(/id="hub-search-results"/.test(htmlSrc), '搜索面板有结果容器')
+}
+
 console.log(`\n手机 Hub 纯逻辑验收通过：${pass} 项`)

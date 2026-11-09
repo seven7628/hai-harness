@@ -792,6 +792,87 @@
     }
   }
 
+  // ---------- 全历史搜索（P4-04b-1） ----------
+  // hub_search 的响应是「跨会话合并后的一页」：手机端只需要把它映射成可渲染的
+  // 结果行（scope/目标 id/片段/owner-only），并保留 (created_at,id) 游标翻页。
+
+  function searchResultView(raw) {
+    if (!raw || typeof raw !== 'object') return null
+    const scope = raw.scope === 'dm' ? 'dm' : 'group'
+    const targetId = scope === 'group' ? str(raw.group_id) : str(raw.agent_id)
+    const seq = num(raw.seq)
+    if (!targetId || !(seq > 0)) return null
+    const messageId = str(raw.message_id) || 'msg_' + seq
+    return {
+      key: scope + ':' + targetId + ':' + messageId,
+      scope: scope,
+      targetId: targetId,
+      name: str(raw.name) || targetId,
+      seq: seq,
+      messageId: messageId,
+      snippet: str(raw.snippet),
+      sender: str(raw.sender),
+      kind: str(raw.kind),
+      createdAt: str(raw.created_at),
+      ownerOnly: raw.owner_only === true,
+    }
+  }
+
+  // 翻页游标：只有 has_more 且游标完整时才保留，否则「加载更早」会原地打转。
+  function searchPageView(raw) {
+    const list = raw && Array.isArray(raw.hits) ? raw.hits : []
+    const hits = list.map(searchResultView).filter(Boolean)
+    const nb = raw && raw.next_before
+    const next =
+      nb && str(nb.id) && str(nb.created_at)
+        ? { created_at: str(nb.created_at), id: str(nb.id), seq: num(nb.seq) }
+        : null
+    return {
+      hits: hits,
+      hasMore: !!(raw && raw.has_more === true && hits.length > 0 && next),
+      next: next,
+      scanned: num(raw && raw.scanned),
+    }
+  }
+
+  function mergeSearchResults(existing, incoming) {
+    const out = []
+    const seen = {}
+    const add = (hit) => {
+      const view = hit && hit.key ? hit : searchResultView(hit)
+      if (!view || seen[view.key]) return
+      seen[view.key] = true
+      out.push(view)
+    }
+    for (const h of Array.isArray(existing) ? existing : []) add(h)
+    for (const h of Array.isArray(incoming) ? incoming : []) add(h)
+    return out
+  }
+
+  function searchPayload(query, scope, cursor) {
+    const sc = ['all', 'group', 'dm'].indexOf(str(scope)) >= 0 ? str(scope) : 'all'
+    const payload = { query: str(query), scope: sc, limit: 50 }
+    if (cursor && str(cursor.id) && str(cursor.created_at)) {
+      payload.before = { created_at: str(cursor.created_at), id: str(cursor.id), seq: num(cursor.seq) }
+    }
+    return payload
+  }
+
+  // 点命中后加载「以命中 seq 结尾」的一页（before_seq = seq+1，否则会排除命中自己）。
+  function searchAroundRequest(scope, targetId, seq) {
+    const id = str(targetId)
+    const n = num(seq)
+    if (!id || !(n > 0)) return null
+    if (scope === 'dm') {
+      return { cmd: 'hub_history', payload: { agent_id: id, before_seq: n + 1, limit: 50 } }
+    }
+    return { cmd: 'hub_group_history', payload: { group_id: id, before_seq: n + 1, limit: 50 } }
+  }
+
+  function searchScopeLabel(scope) {
+    return scope === 'group' ? '群聊' : scope === 'dm' ? '私聊' : '全部'
+  }
+
   return {
     ALL_MENTION_ID,
     THEME_MODES,
@@ -835,6 +916,12 @@
     hubPreview,
     routingSummary,
     parseNeedQuestions,
+    searchResultView,
+    searchPageView,
+    mergeSearchResults,
+    searchPayload,
+    searchAroundRequest,
+    searchScopeLabel,
     durationText,
     usageText,
     artifactText,
