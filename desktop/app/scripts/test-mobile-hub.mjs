@@ -5,21 +5,28 @@
 //                 任务卡状态映射、事件分流（聊天 vs Hub）、resync 只回 Hub 快照。
 // 同时做静态约束：页面不得使用 innerHTML/insertAdjacentHTML 渲染消息；
 // hub resync 分支不得调用会话 openSession。
+// P4-03c 追加：键入 @、发送失败保草稿、hub_alert 去重、定稿 mdLite（安全 DOM）、
+//              贴底+可见的已读守卫、主题 system/ink/paper、44px/reduced-motion。
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { auditMobileWeb } from './mobile-web-audit.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const modelPath = join(__dirname, '..', '..', 'bridge', 'mobile_web', 'hub_model.js')
 const appPath = join(__dirname, '..', '..', 'bridge', 'mobile_web', 'app.js')
 const htmlPath = join(__dirname, '..', '..', 'bridge', 'mobile_web', 'index.html')
+const cssPath = join(__dirname, '..', '..', 'bridge', 'mobile_web', 'style.css')
+const tokensPath = join(__dirname, '..', '..', 'bridge', 'mobile_web', 'tokens.css')
 
 const require = createRequire(import.meta.url)
 const H = require(modelPath)
 const appSrc = readFileSync(appPath, 'utf8')
 const modelSrc = readFileSync(modelPath, 'utf8')
 const htmlSrc = readFileSync(htmlPath, 'utf8')
+const cssSrc = readFileSync(cssPath, 'utf8')
+const tokensSrc = readFileSync(tokensPath, 'utf8')
 
 let pass = 0
 const ok = (m) => {
@@ -259,6 +266,146 @@ const roster = [
   const chatSrc = appSrc.slice(chatStart, chatStart + 600)
   assert(chatSrc.includes("H.eventRoute(ev, 'chat')"), '聊天处理器先过滤 Hub 事件')
   assert((appSrc.match(/eventRoute\(/g) || []).length >= 2, '聊天与 Hub 两条路径都经过 eventRoute')
+}
+
+
+// —— 10) N4：键入 @ 即时唤起（含 IME 组词安全） ——
+{
+  const typed = H.mentionTypingQuery('请 @Al', 5, { composing: false })
+  eq(typed.query, 'Al', '键入 @ 后返回查询词')
+  eq(typed.start, 2, '返回 @ 起点，插入时可整体替换半截 token')
+  eq(H.mentionTypingQuery('请 @Al', 5, { composing: true }), null, 'IME 组词中不弹选择器')
+  eq(H.activeMentionQuery('@', 1).query, '', '只敲 @ 也触发（空查询列出全部候选）')
+  eq(H.mentionTypingQuery('邮箱 a@b', 6), null, 'email 形态不触发')
+  const applied = H.applyMention('请 @Al 明天', 5, 'Alice')
+  eq(applied.text, '请 @Alice 明天', '选中提及保留 @ 后面的正文')
+  assert(/H\.mentionTypingQuery\(/.test(appSrc), 'app.js composer input 调用 mentionTypingQuery')
+  assert(/compositionstart/.test(appSrc) && /compositionend/.test(appSrc), 'app.js 有 IME composition 安全')
+  assert(/openMentionPicker\(q\.query\)/.test(appSrc), 'app.js 用键入的 query 预填选择器')
+  assert(/function mentionFromComposer/.test(appSrc), 'app.js 把 input 事件接到选择器')
+}
+
+// —— 11) N5：发送失败不丢草稿（成功才清空） ——
+{
+  eq(H.draftAfterFailure('', '你好 @Bob'), '你好 @Bob', '失败且输入框为空时恢复整段草稿')
+  eq(H.draftAfterFailure('   ', '你好 @Bob'), '你好 @Bob', '空白输入框也恢复草稿')
+  eq(H.draftAfterFailure('发送期间新敲的', '旧草稿'), '发送期间新敲的', '失败不覆盖用户新输入')
+  eq(H.draftAfterSend('你好 @Bob', '你好 @Bob'), '', '成功才清空已发送正文')
+  eq(H.draftAfterSend('你好 @Bob，补充', '你好 @Bob'), '你好 @Bob，补充', '成功不清发送期间新输入')
+  eq(H.draftAfterSend(' 你好 ', '你好'), '', '成功比较忽略首尾空白')
+  assert(/H\.draftAfterSend\(/.test(appSrc), 'app.js 成功路径走 draftAfterSend')
+  assert(/H\.draftAfterFailure\(/.test(appSrc), 'app.js 失败路径走 draftAfterFailure')
+  assert(/appendHubSendError/.test(appSrc) && /重试/.test(appSrc), 'app.js 失败后有重试入口')
+  const gStart = appSrc.indexOf('async function sendHubGroup')
+  const gEnd = appSrc.indexOf('async function stopHubConversation', gStart)
+  const gBody = gStart >= 0 && gEnd > gStart ? appSrc.slice(gStart, gEnd) : ''
+  assert(gBody.length > 0, '找到 sendHubGroup 实现')
+  assert(!/input\.value\s*=\s*''/.test(gBody), 'sendHubGroup 不在请求前清空输入框')
+  const dStart = appSrc.indexOf('async function sendHubDM')
+  const dEnd = appSrc.indexOf('// ---- Hub 事件流', dStart)
+  const dBody = dStart >= 0 && dEnd > dStart ? appSrc.slice(dStart, dEnd) : ''
+  assert(dBody.length > 0, '找到 sendHubDM 实现')
+  assert(!/input\.value\s*=\s*''/.test(dBody), 'sendHubDM 不在请求前清空输入框')
+}
+
+// —— 12) N7：hub_alert 去重键与存储文本同源 ——
+{
+  eq(H.hubAlertText({}), 'Hub 告警', 'code/message 都为空时文本固定')
+  eq(H.hubAlertText({ message: '', code: '' }), 'Hub 告警', '空字符串与 undefined 同口径')
+  eq(H.hubAlertText({ code: 'settle_failed' }), 'settle_failed', '无 message 时用 code')
+  eq(H.hubAlertText({ message: '磁盘满', code: 'settle_failed' }), '磁盘满', '有 message 时优先 message')
+  let alerts = H.pushHubAlert([], {})
+  alerts = H.pushHubAlert(alerts, {})
+  eq(alerts.length, 1, '两条空告警只留一条')
+  eq(alerts[0].text, 'Hub 告警', '存储文本就是去重键')
+  alerts = H.pushHubAlert(alerts, {})
+  eq(alerts.length, 1, 'code-less/message-less 连续告警仍只留一条')
+  alerts = H.pushHubAlert(alerts, { message: '磁盘满', severity: 'error' })
+  eq(alerts.length, 2, '不同告警各自保留')
+  eq(alerts[0].severity, 'error', '告警保留 severity')
+  alerts = H.pushHubAlert(alerts, { message: '磁盘满' })
+  eq(alerts.length, 2, '同 message 重复告警只留一条')
+  assert(/H\.pushHubAlert\(/.test(appSrc), 'app.js 走 pushHubAlert 统一去重')
+  assert(!/case 'hub_group_update'/.test(appSrc), '死亡的 hub_group_update 分支已删除')
+}
+
+// —— 13) N9：定稿正文走安全 mdLite（DOM 计划，无 HTML 字符串） ——
+{
+  const plan = H.markdownPlan('**粗** 和 `code`\n```js\nconst x = 1\n```')
+  eq(plan.map((p) => p.kind).join(','), 'bold,text,code,text,codeblock', 'markdown 计划覆盖粗体/行内代码/围栏')
+  eq(plan.find((p) => p.kind === 'codeblock').text, 'const x = 1', '围栏丢掉语言标注')
+  const html = '<img src=x onerror=alert(1)> **粗** @Alice'
+  const parts = H.bodyParts(html, roster)
+  assert(parts.every((p) => ['text', 'mention', 'bold', 'code', 'codeblock'].includes(p.kind)), '正文只产出安全节点描述')
+  assert(parts.some((p) => p.kind === 'text' && p.text.includes('<img src=x onerror=alert(1)>')), 'HTML 原样作为文本节点')
+  assert(!JSON.stringify(parts).includes('<b>'), '计划里不出现 HTML 标签')
+  assert(parts.some((p) => p.kind === 'mention' && p.name === 'Alice'), '定稿正文仍高亮 @ 成员')
+  const inCode = H.bodyParts('`@Alice`', roster)
+  assert(!inCode.some((p) => p.kind === 'mention'), '行内代码里的 @ 不误标成员')
+  const inFence = H.bodyParts('```\n@Alice\n```', roster)
+  assert(!inFence.some((p) => p.kind === 'mention'), '围栏里的 @ 不误标成员')
+  assert(/H\.bodyParts\(/.test(appSrc), 'app.js 用 bodyParts 渲染定稿正文')
+  assert(/function appendHubBody\(/.test(appSrc), 'app.js 有 appendHubBody')
+  assert(/appendHubBody\(body, m\.text/.test(appSrc), 'renderHubMessage 接 appendHubBody')
+  const draftAt = appSrc.indexOf('function renderHubDraft')
+  const draftEnd = appSrc.indexOf('function renderHubGroupStatus', draftAt)
+  const draftSrc = draftAt >= 0 && draftEnd > draftAt ? appSrc.slice(draftAt, draftEnd) : ''
+  assert(/body\.textContent = d\.text/.test(draftSrc), '流式草稿仍是 textContent 纯文本')
+  assert(!/innerHTML|insertAdjacentHTML|document\.write/.test(draftSrc), '流式草稿不拼 HTML')
+}
+
+// —— 14) N8：已读游标只在下沉底部且页面可见时推进 ——
+{
+  const bottom = { scrollTop: 500, scrollHeight: 1000, clientHeight: 500 }
+  assert(H.shouldMarkRead(bottom, true), '贴底且可见 → 推进已读')
+  assert(H.shouldMarkRead({ scrollTop: 460, scrollHeight: 1000, clientHeight: 500 }, true), '距底 40px 内算贴底')
+  assert(!H.shouldMarkRead({ scrollTop: 450, scrollHeight: 1000, clientHeight: 500 }, true), '距底 50px 不推进（正在读历史）')
+  assert(!H.shouldMarkRead(bottom, false), '页面不可见 → 不推进')
+  assert(!H.shouldMarkRead(null, true), '没有时间线 → 不推进')
+  assert(!H.shouldMarkRead({ scrollTop: 0, scrollHeight: 0, clientHeight: 0 }, true), '空时间线 → 不推进')
+  assert(/H\.shouldMarkRead\(/.test(appSrc), 'app.js 用 shouldMarkRead 守卫')
+  assert(/if \(!atReadBottom\('hub-group-messages'\)\) return/.test(appSrc), '群已读在贴底/可见检查后才推进')
+  assert(/if \(!atReadBottom\('hub-dm-messages'\)\) return/.test(appSrc), 'DM 已读在贴底/可见检查后才推进')
+  assert(/document\.hidden/.test(appSrc), 'app.js 检查 document.hidden')
+  assert(/visibilitychange/.test(appSrc), 'app.js 在 visibilitychange 重评估')
+  assert(/addEventListener\('scroll', scheduleHubReadCheck/.test(appSrc), 'app.js 在时间线滚动时重评估')
+  assert(/mark_read:\s*false/.test(appSrc), 'hub_open 打开时不无条件推进已读')
+}
+
+// —— 15) 主题：system / ink / paper 解析与持久化 ——
+{
+  eq(H.normalizeThemeMode(undefined), 'system', '缺省主题模式 = system')
+  eq(H.normalizeThemeMode('PAPER'), 'paper', '主题模式大小写归一')
+  eq(H.normalizeThemeMode('bogus'), 'system', '未知主题模式回落 system')
+  eq(H.resolveTheme('system', false), 'ink', 'system + 深色系统 → 墨')
+  eq(H.resolveTheme('system', true), 'paper', 'system + 浅色系统 → 宣纸')
+  eq(H.resolveTheme('ink', true), 'ink', '手动墨不被浅色系统覆盖')
+  eq(H.resolveTheme('paper', false), 'paper', '手动宣纸不被深色系统覆盖')
+  eq(H.resolveTheme('bogus', true), 'paper', '未知模式按 system 解析')
+  eq(H.themeColor('ink'), '#1a1614', '墨的 theme-color 来自桌面 token')
+  eq(H.themeColor('paper'), '#fdfcfb', '宣纸的 theme-color 来自桌面 token')
+  assert(tokensSrc.toLowerCase().includes('#1a1614') && tokensSrc.toLowerCase().includes('#fdfcfb'), 'token 里存在两种底色')
+  assert(/hai\.theme/.test(appSrc), '主题持久化在 hai.theme')
+  assert(/documentElement\.dataset\.theme/.test(appSrc), '主题通过 documentElement.dataset.theme 应用')
+  assert(/prefers-color-scheme/.test(appSrc), '主题读取系统 prefers-color-scheme')
+  assert(/themeMode === 'system'/.test(appSrc), '只有 system 模式响应系统外观变化')
+  assert(/meta\[name="theme-color"\]/.test(appSrc), '主题切换更新 meta theme-color')
+  assert(/<meta name="theme-color" content="#1a1614">/.test(htmlSrc), 'index.html 初始 theme-color 来自 token')
+  for (const mode of ['system', 'ink', 'paper']) {
+    assert(htmlSrc.includes(`data-theme-mode="${mode}"`), `index.html 有 ${mode} 选项`)
+  }
+  assert(/id="theme"/.test(htmlSrc) && /id="theme-sheet"/.test(htmlSrc), '主题开关与面板都在顶栏可直达')
+}
+
+// —— 16) 静态审计：44px / reduced-motion / XSS / 390 ——
+{
+  assert(/@media \(prefers-reduced-motion: reduce\)/.test(cssSrc), 'style.css 有 reduced-motion 媒体查询')
+  assert(/\.hub-chip\s*\{[^}]*min-height:\s*44px/.test(cssSrc), 'hub-chip 触控高度 44px')
+  assert(/\.hub-sheet-actions button\s*\{[^}]*min-height:\s*44px/.test(cssSrc), 'hub-sheet-actions 触控高度 44px')
+  assert(/\.icon\s*\{[^}]*width:\s*44px[^}]*height:\s*44px/.test(cssSrc), '图标按钮 44x44')
+  const audit = auditMobileWeb()
+  if (audit.errors.length) for (const e of audit.errors) console.error(`  ❌ ${e}`)
+  assert(audit.errors.length === 0, `静态审计通过（${audit.checks} 条 CSS 规则）`)
 }
 
 console.log(`\n手机 Hub 纯逻辑验收通过：${pass} 项`)

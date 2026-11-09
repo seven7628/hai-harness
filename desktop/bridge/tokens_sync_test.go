@@ -34,10 +34,32 @@ func TestMobileTokensMatchDesktop(t *testing.T) {
 	for _, c := range hexRe.FindAllString(string(desktop), -1) {
 		desktopSet[strings.ToLower(c)] = true
 	}
-	for _, c := range hexRe.FindAllString(string(mobile), -1) {
-		if !desktopSet[strings.ToLower(c)] {
-			t.Errorf("手机端颜色 %s 在桌面端不存在（不要另起色板）", c)
+	// P4-03c：不只 token 层，主题色可能出现在 index.html 的 theme-color、
+	// app.js/hub_model.js 的主题常量里 —— 这些也必须是桌面已有的颜色。
+	for _, f := range []string{
+		"mobile_web/tokens.css",
+		"mobile_web/style.css",
+		"mobile_web/app.js",
+		"mobile_web/hub_model.js",
+		"mobile_web/index.html",
+	} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("读手机文件 %s 失败: %v", f, err)
 		}
+		for _, c := range hexRe.FindAllString(string(b), -1) {
+			if !desktopSet[strings.ToLower(c)] {
+				t.Errorf("%s 的颜色 %s 在桌面端不存在（不要另起色板）", f, c)
+			}
+		}
+	}
+
+	index, err := os.ReadFile("mobile_web/index.html")
+	if err != nil {
+		t.Fatalf("读手机 index.html 失败: %v", err)
+	}
+	if !strings.Contains(string(index), `name="theme-color"`) {
+		t.Error("手机页面缺少 meta theme-color（P4-03c 主题切换要求）")
 	}
 
 	for _, font := range []string{"IBM Plex Sans", "IBM Plex Mono"} {

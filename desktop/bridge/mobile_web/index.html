@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#111113">
+  <meta name="theme-color" content="#1a1614">
   <title>HAI 遥控器</title>
   <link rel="stylesheet" href="tokens.css">
   <link rel="stylesheet" href="style.css">
@@ -12,6 +12,7 @@
   <header id="bar">
     <button id="back" class="icon" hidden>‹</button>
     <div id="title">HAI</div>
+    <button id="theme" class="icon" title="外观" aria-label="外观" hidden>◐</button>
     <button id="menu" class="icon" hidden>⋯</button>
   </header>
 
@@ -118,6 +119,19 @@
       <button id="agent-stop" class="danger" hidden>停止</button>
     </div>
   </main>
+
+  <!-- 外观：跟随系统 / 墨 / 宣纸（持久化在 hai.theme） -->
+  <div id="theme-sheet" class="sheet" hidden>
+    <div class="sheet-head">外观</div>
+    <div id="theme-options" class="theme-options" role="radiogroup" aria-label="外观">
+      <button type="button" class="theme-option" data-theme-mode="system" role="radio" aria-checked="false">跟随系统</button>
+      <button type="button" class="theme-option" data-theme-mode="ink" role="radio" aria-checked="false">墨（深色）</button>
+      <button type="button" class="theme-option" data-theme-mode="paper" role="radio" aria-checked="false">宣纸（浅色）</button>
+    </div>
+    <div class="sheet-actions">
+      <button id="theme-close" class="ghost">关闭</button>
+    </div>
+  </div>
 
   <!-- HITL：审批 -->
   <div id="approval" class="sheet" hidden>

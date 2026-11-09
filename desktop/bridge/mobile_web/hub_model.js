@@ -32,6 +32,28 @@
     return Number.isFinite(n) ? n : 0
   }
 
+  // ---------- 主题 ----------
+  // 「跟随系统 / 墨 / 宣纸」三档。值只存模式，实际皮肤由 resolveTheme 算出来；
+  // 颜色全部来自 tokens.css（ink 的 --paper / paper 的 --paper），不新增色板。
+  const THEME_MODES = ['system', 'ink', 'paper']
+  const THEME_COLORS = { ink: '#1a1614', paper: '#fdfcfb' }
+
+  function normalizeThemeMode(v) {
+    const s = str(v).toLowerCase()
+    return THEME_MODES.indexOf(s) >= 0 ? s : 'system'
+  }
+
+  // prefersLight = matchMedia('(prefers-color-scheme: light)').matches
+  function resolveTheme(mode, prefersLight) {
+    const m = normalizeThemeMode(mode)
+    if (m === 'system') return prefersLight ? 'paper' : 'ink'
+    return m
+  }
+
+  function themeColor(theme) {
+    return THEME_COLORS[theme === 'paper' ? 'paper' : 'ink']
+  }
+
   // ---------- 事件分流 ----------
   // 会话流与 Hub 流在 bridge 侧已隔离；客户端再挡一层，防止两条连接的帧
   // 因为回调写错而互相污染（例如 hub_message 被画进聊天屏）。
@@ -501,6 +523,50 @@
     return false
   }
 
+  // ---------- 定稿正文：安全 markdown 计划 ----------
+  // 只产出「节点描述」，不产出 HTML 字符串：页面用 createElement/textContent 渲染，
+  // 因此模型正文里的 <img onerror> / <script> 永远只是文本。
+  // 规则与聊天 mdLite 保持一致：``` 围栏（首行语言标注丢掉）、`行内代码`、**粗体**。
+  function markdownPlan(text) {
+    const out = []
+    String(text == null ? '' : text)
+      .split('```')
+      .forEach((seg, i) => {
+        if (i % 2 === 1) {
+          const body = seg.replace(/^[^\n]*\n/, '').replace(/\n+$/, '')
+          out.push({ kind: 'codeblock', text: body })
+          return
+        }
+        for (const part of seg.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/)) {
+          if (!part) continue
+          if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
+            out.push({ kind: 'code', text: part.slice(1, -1) })
+          } else if (part.length > 4 && part.startsWith('**') && part.endsWith('**')) {
+            out.push({ kind: 'bold', text: part.slice(2, -2) })
+          } else {
+            out.push({ kind: 'text', text: part })
+          }
+        }
+      })
+    return out
+  }
+
+  // 定稿 Hub 正文 = markdown 计划 + @ 高亮：只在普通文本段里再切 mention，
+  // 围栏/行内代码里的 @ 保持代码原样（不误标成员）。
+  function bodyParts(text, members) {
+    const out = []
+    for (const part of markdownPlan(text)) {
+      if (part.kind !== 'text') {
+        out.push(part)
+        continue
+      }
+      for (const t of tokenizeMentions(part.text, members)) {
+        out.push(t.kind === 'mention' ? { kind: 'mention', text: t.text, agentId: t.agentId, name: t.name } : { kind: 'text', text: t.text })
+      }
+    }
+    return out
+  }
+
   const MENTION_QUERY_STOP = /[\s，。！？、；：,.!?;:]/
 
   function activeMentionQuery(text, caret) {
@@ -517,6 +583,13 @@
       if (/\s/.test(ch)) return null
     }
     return null
+  }
+
+  // 键入 @ 的触发判断。IME 组词中（isComposing/compositionstart）不弹选择器：
+  // 中文输入法把「＠」当候选上屏前，query 是半截拼音，弹了只会打断组词。
+  function mentionTypingQuery(text, caret, opts) {
+    if (opts && opts.composing) return null
+    return activeMentionQuery(text, caret)
   }
 
   // 选中成员后插入 `@Name `；光标前若是「@Ali」半截 token 就整体替换。
@@ -608,6 +681,47 @@
     return payload
   }
 
+  // ---------- 发送失败：草稿不丢 ----------
+  // 请求成功才清空；发送期间用户新敲的内容不能被回执覆盖。
+  // 失败时若输入框已被别处清空（例如系统回收），把原文恢复回来。
+  function draftAfterSend(current, sent) {
+    const cur = String(current == null ? '' : current)
+    const body = String(sent || '')
+    return cur.trim() === body.trim() ? '' : cur
+  }
+
+  function draftAfterFailure(current, sent) {
+    const cur = String(current == null ? '' : current)
+    return cur.trim() ? cur : String(sent || '')
+  }
+
+  // ---------- 已读游标 ----------
+  // 只有「贴底 + 页面可见」才算看到最新：往上读历史时不能把未读清掉。
+  const READ_BOTTOM_PX = 48
+
+  function shouldMarkRead(metrics, visible) {
+    if (!visible || !metrics) return false
+    const top = num(metrics.scrollTop)
+    const height = num(metrics.scrollHeight)
+    const client = num(metrics.clientHeight)
+    if (height <= 0 || client <= 0) return false
+    return height - top - client <= READ_BOTTOM_PX
+  }
+
+  // ---------- 告警 ----------
+  // 存储文本必须和去重键同源：code/message 都为空时统一成「Hub 告警」，
+  // 否则每来一条空告警都会重复堆在首页。
+  function hubAlertText(ev) {
+    return str(ev && ev.message) || str(ev && ev.code) || 'Hub 告警'
+  }
+
+  function pushHubAlert(alerts, ev) {
+    const text = hubAlertText(ev)
+    const severity = str(ev && ev.severity) || 'warning'
+    const rest = (Array.isArray(alerts) ? alerts : []).filter((a) => a && a.text !== text)
+    return [{ text, severity }].concat(rest).slice(0, 5)
+  }
+
   // ---------- 列表/系统行 ----------
 
   // 群左栏/私聊预览：任务结论优先，其次最后一条正文。
@@ -648,6 +762,10 @@
 
   return {
     ALL_MENTION_ID,
+    THEME_MODES,
+    normalizeThemeMode,
+    resolveTheme,
+    themeColor,
     isHubEvent,
     eventRoute,
     hubResyncTargets,
@@ -663,7 +781,10 @@
     tokenizeMentions,
     mentionIds,
     hasMentionAll,
+    markdownPlan,
+    bodyParts,
     activeMentionQuery,
+    mentionTypingQuery,
     applyMention,
     filterMentionCandidates,
     groupRoster,
@@ -671,6 +792,11 @@
     groupSendPayload,
     dmSendPayload,
     assignPayload,
+    draftAfterSend,
+    draftAfterFailure,
+    shouldMarkRead,
+    hubAlertText,
+    pushHubAlert,
     hubPreview,
     routingSummary,
     parseNeedQuestions,

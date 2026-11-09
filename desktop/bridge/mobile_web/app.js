@@ -6,7 +6,7 @@
   const $ = (id) => document.getElementById(id)
   // 纯逻辑层（hub_model.js）：seq 合并/@ 分词/任务卡/事件分流都在这里。
   const H = window.HaiMobileHubModel || null
-  const LS = { token: 'hai.token', ws: 'hai.ws', sid: 'hai.sid', name: 'hai.name' }
+  const LS = { token: 'hai.token', ws: 'hai.ws', sid: 'hai.sid', name: 'hai.name', theme: 'hai.theme' }
   const SCREENS = ['pair', 'list', 'workspaces', 'chat', 'agents', 'agent', 'hub', 'hub-group', 'hub-dm']
   const HUB_SCREENS = new Set(['hub', 'hub-group', 'hub-dm'])
 
@@ -118,13 +118,55 @@
     return `${location.origin}/m/?t=${encodeURIComponent(state.token)}`
   }
 
-  // 主题：与桌面同一套 data-theme（ink=墨 / paper=宣纸），跟随系统
+  // 主题：与桌面同一套 data-theme（ink=墨 / paper=宣纸）。
+  // 三档模式（system/ink/paper）存 localStorage；system 只在系统外观变化时跟随，
+  // 手动选了 ink/paper 后系统切换不再抢方向盘。
   const themeMQ = window.matchMedia('(prefers-color-scheme: light)')
-  function applyTheme() {
-    document.documentElement.dataset.theme = themeMQ.matches ? 'paper' : 'ink'
+  let themeMode = H ? H.normalizeThemeMode(localStorage.getItem(LS.theme)) : 'system'
+
+  function themeLabel() {
+    if (themeMode === 'system') return '跟随系统'
+    return themeMode === 'paper' ? '宣纸' : '墨'
   }
+
+  function applyTheme() {
+    const theme = H ? H.resolveTheme(themeMode, themeMQ.matches) : themeMode === 'system' ? (themeMQ.matches ? 'paper' : 'ink') : themeMode
+    document.documentElement.dataset.theme = theme
+    const meta = document.querySelector('meta[name="theme-color"]')
+    if (meta) meta.content = H ? H.themeColor(theme) : theme === 'paper' ? '#fdfcfb' : '#1a1614'
+    renderThemeOptions()
+  }
+
+  function renderThemeOptions() {
+    const root = $('theme-options')
+    if (!root) return
+    for (const b of root.querySelectorAll('[data-theme-mode]')) {
+      const on = b.dataset.themeMode === themeMode
+      b.setAttribute('aria-checked', on ? 'true' : 'false')
+      b.classList.toggle('on', on)
+    }
+    const btn = $('theme')
+    if (btn) {
+      btn.title = '外观：' + themeLabel()
+      btn.setAttribute('aria-label', '外观：' + themeLabel())
+    }
+  }
+
+  function setThemeMode(mode) {
+    themeMode = H ? H.normalizeThemeMode(mode) : mode
+    try {
+      localStorage.setItem(LS.theme, themeMode)
+    } catch {
+      /* 隐私模式：本次会话内仍生效 */
+    }
+    applyTheme()
+  }
+
   applyTheme()
-  themeMQ.addEventListener?.('change', applyTheme)
+  themeMQ.addEventListener?.('change', () => {
+    // 只有 system 模式跟随系统；手动选择是显式意图，不能被系统外观覆盖。
+    if (themeMode === 'system') applyTheme()
+  })
 
   // ---------- 基础 ----------
 
@@ -133,6 +175,9 @@
     for (const s of SCREENS) $('screen-' + s).hidden = s !== screen
     $('back').hidden = screen === 'pair' || screen === 'list'
     $('menu').hidden = screen !== 'chat'
+    // 外观切换在列表/Hub 都可达；它是覆盖层，不占导航栈。
+    $('theme').hidden = !(screen === 'list' || HUB_SCREENS.has(screen))
+    $('theme-sheet').hidden = true
     $('title').textContent = titleFor(screen)
   }
 
@@ -188,30 +233,18 @@
     return n
   }
 
-  // 轻量 markdown：``` 代码块、`行内代码`、**粗体**。
+  // 轻量 markdown：``` 代码块、`行内代码`、**粗体**。解析在 Hub 纯逻辑层，
+  // 这里只把「节点描述」落成 DOM —— 全程 createElement/textContent，不拼 HTML。
   // 只用于**定稿**消息（记录/快照）；流式过程每帧重排太贵，直接 textContent 出纯文本。
   function mdLite(text) {
     const frag = document.createDocumentFragment()
-    String(text)
-      .split('```')
-      .forEach((seg, i) => {
-        if (i % 2 === 1) {
-          // 代码块：首行若是语言标注（```js）丢掉
-          const body = seg.replace(/^[^\n]*\n/, '').replace(/\n+$/, '')
-          frag.appendChild(el('pre', '', body))
-          return
-        }
-        for (const part of seg.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/)) {
-          if (!part) continue
-          if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
-            frag.appendChild(el('code', '', part.slice(1, -1)))
-          } else if (part.length > 4 && part.startsWith('**') && part.endsWith('**')) {
-            frag.appendChild(el('b', '', part.slice(2, -2)))
-          } else {
-            frag.appendChild(document.createTextNode(part))
-          }
-        }
-      })
+    const plan = H && H.markdownPlan ? H.markdownPlan(text) : [{ kind: 'text', text: String(text == null ? '' : text) }]
+    for (const part of plan) {
+      if (part.kind === 'codeblock') frag.appendChild(el('pre', '', part.text))
+      else if (part.kind === 'code') frag.appendChild(el('code', '', part.text))
+      else if (part.kind === 'bold') frag.appendChild(el('b', '', part.text))
+      else frag.appendChild(document.createTextNode(part.text))
+    }
     return frag
   }
 
@@ -1203,11 +1236,16 @@
     if (stick) box.scrollTop = box.scrollHeight
   }
 
-  function appendMentionBody(body, text, roster) {
-    const tokens = H ? H.tokenizeMentions(text, roster || []) : [{ kind: 'text', text: String(text || '') }]
-    for (const t of tokens) {
-      if (t.kind === 'mention') body.appendChild(el('span', 'hub-mention', t.text))
-      else body.appendChild(document.createTextNode(t.text))
+  // 定稿正文：markdown（粗体/行内代码/围栏）+ @ 高亮。
+  // bodyParts 只给节点描述，这里统一 createElement/textContent；模型里的 HTML 只是文本。
+  function appendHubBody(body, text, roster) {
+    const parts = H && H.bodyParts ? H.bodyParts(text, roster || []) : [{ kind: 'text', text: String(text || '') }]
+    for (const part of parts) {
+      if (part.kind === 'mention') body.appendChild(el('span', 'hub-mention', part.text))
+      else if (part.kind === 'codeblock') body.appendChild(el('pre', '', part.text))
+      else if (part.kind === 'code') body.appendChild(el('code', '', part.text))
+      else if (part.kind === 'bold') body.appendChild(el('b', '', part.text))
+      else body.appendChild(document.createTextNode(part.text))
     }
   }
 
@@ -1239,7 +1277,7 @@
       wrap.appendChild(who)
     }
     const body = el('div', 'body')
-    appendMentionBody(body, m.text || '', ctx.group ? ctx.roster : [])
+    appendHubBody(body, m.text || '', ctx.group ? ctx.roster : [])
     if (m.pending) body.appendChild(el('div', 'hint', '发送中…'))
     wrap.appendChild(body)
     return wrap
@@ -1347,10 +1385,32 @@
     }
   }
 
+  // 已读游标：只有时间线贴底且页面可见才推进（读历史不能清未读）。
+  function atReadBottom(boxId) {
+    if (document.hidden || !H) return false
+    const box = $(boxId)
+    if (!box) return false
+    return H.shouldMarkRead(
+      { scrollTop: box.scrollTop, scrollHeight: box.scrollHeight, clientHeight: box.clientHeight },
+      true,
+    )
+  }
+
+  let readRaf = 0
+  function scheduleHubReadCheck() {
+    if (readRaf) return
+    readRaf = requestAnimationFrame(() => {
+      readRaf = 0
+      if (state.screen === 'hub-group') void markHubGroupRead()
+      else if (state.screen === 'hub-dm') void markHubDMRead(lastPersistedSeq(state.hub.dmMessages))
+    })
+  }
+
   async function markHubGroupRead() {
     const gid = state.hub.activeGroupId
     const seq = lastPersistedSeq(state.hub.groupMessages)
     if (!gid || !seq) return
+    if (!atReadBottom('hub-group-messages')) return
     if ((state.hub.readSeq[gid] || 0) >= seq) return
     state.hub.readSeq[gid] = seq
     try {
@@ -1366,14 +1426,35 @@
     return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
   }
 
+  function appendHubSendError(boxId, label, retry) {
+    const box = $(boxId)
+    const wrap = el('div', 'hub-msg system hub-send-error')
+    wrap.appendChild(el('span', '', label))
+    if (retry) {
+      const again = el('button', 'ghost hub-retry', '重试')
+      again.type = 'button'
+      again.addEventListener('click', () => {
+        wrap.remove()
+        retry()
+      })
+      wrap.appendChild(again)
+    }
+    box.appendChild(wrap)
+    box.scrollTop = box.scrollHeight
+  }
+
+  function restoreComposer(input) {
+    input.style.height = 'auto'
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px'
+  }
+
   async function sendHubGroup() {
     const input = $('hub-group-input')
     const gid = state.hub.activeGroupId
     const text = input.value.trim()
     if (!gid || !text || state.hub.busy) return
     state.hub.busy = true
-    input.value = ''
-    input.style.height = 'auto'
+    // 请求成功前不清空：失败时正文（含选中的 @ 提及）原样留在输入框里。
     closeMentionPicker()
     const roster = hubRoster()
     const cid = nextClientMsgID('g')
@@ -1382,6 +1463,9 @@
     renderHubGroupMessages({ stick: true })
     try {
       const data = await api('hub_group_send', H.groupSendPayload(gid, text, roster, cid))
+      // 成功才清空；发送期间用户新敲的内容保留。
+      input.value = H.draftAfterSend(input.value, text)
+      restoreComposer(input)
       if (state.hub.activeGroupId !== String(gid)) return
       const final = {
         id: data.message_id || optimistic.id,
@@ -1402,8 +1486,11 @@
       scheduleHubHomeRefresh()
     } catch (e) {
       state.hub.groupMessages = state.hub.groupMessages.filter((m) => !(m && m.pending && H.clientMsgID(m) === cid))
+      input.value = H.draftAfterFailure(input.value, text)
+      restoreComposer(input)
+      input.focus()
       renderHubGroupMessages({ stick: true })
-      appendHubGroupError('发送失败：' + (e.message || e))
+      appendHubSendError('hub-group-messages', '发送失败：' + (e.message || e), sendHubGroup)
     } finally {
       state.hub.busy = false
     }
@@ -1464,6 +1551,8 @@
       const data = await api('hub_open', {
         target: { kind: 'dm', agent_id: String(agentId) },
         limit: 50,
+        // 已读由「贴底 + 可见」决定：打开只读历史时不推进服务端游标。
+        mark_read: false,
       })
       if (seq !== state.hub.dmSeq || state.hub.activeAgentId !== String(agentId)) return
       state.hub.dmAgent = data.agent || state.hub.dmAgent || hubAgent(agentId)
@@ -1472,12 +1561,13 @@
         : H.mergeMessages(state.hub.dmMessages, data.messages || [])
       state.hub.dmHasMore = firstPersistedSeq(state.hub.dmMessages) > 1
       state.hub.dmAwaiting = false
-      // hub_open 默认推进已读：本地预览也立刻归零，返回首页不闪一下旧未读。
-      if (state.hub.dm[agentId]) state.hub.dm[agentId] = Object.assign({}, state.hub.dm[agentId], { unread: 0 })
       state.hub.dmLoading = false
       hubError('')
       renderHubDM({ stick: !!opts.reset })
       refreshHubTitle()
+      // 只有渲染后确实在底部（且页面可见）才推进已读；否则保留未读角标。
+      if (opts.reset) void markHubDMRead(lastPersistedSeq(state.hub.dmMessages))
+      else scheduleHubReadCheck()
     } catch (e) {
       if (seq === state.hub.dmSeq) {
         $('hub-dm-messages').appendChild(el('div', 'hub-empty', '打开私聊失败：' + (e.message || e)))
@@ -1563,10 +1653,12 @@
     const agentId = state.hub.activeAgentId
     const v = Number(seq) || 0
     if (!agentId || !v) return
+    if (!atReadBottom('hub-dm-messages')) return
     if ((state.hub.readSeq['dm:' + agentId] || 0) >= v) return
     state.hub.readSeq['dm:' + agentId] = v
     try {
       await api('hub_mark_read', { agent_id: agentId, seq: v })
+      if (state.hub.dm[agentId]) state.hub.dm[agentId] = Object.assign({}, state.hub.dm[agentId], { unread: 0 })
     } catch {
       state.hub.readSeq['dm:' + agentId] = 0
     }
@@ -1578,8 +1670,7 @@
     const text = input.value.trim()
     if (!agentId || !text || state.hub.busy) return
     state.hub.busy = true
-    input.value = ''
-    input.style.height = 'auto'
+    // 与群聊同口径：成功前不清空，失败保留草稿并给重试入口。
     const cid = nextClientMsgID('d')
     const optimistic = H.optimisticMessage({ text, clientMsgId: cid, senderKind: 'human', agentId })
     state.hub.dmMessages = H.mergeMessages(state.hub.dmMessages, optimistic)
@@ -1587,6 +1678,8 @@
     renderHubDM({ stick: true })
     try {
       const data = await api('hub_send', H.dmSendPayload(agentId, text, cid))
+      input.value = H.draftAfterSend(input.value, text)
+      restoreComposer(input)
       if (state.hub.activeAgentId !== String(agentId)) return
       const final = {
         id: optimistic.id,
@@ -1606,9 +1699,11 @@
     } catch (e) {
       state.hub.dmMessages = state.hub.dmMessages.filter((m) => !(m && m.pending && H.clientMsgID(m) === cid))
       state.hub.dmAwaiting = false
+      input.value = H.draftAfterFailure(input.value, text)
+      restoreComposer(input)
+      input.focus()
       renderHubDM({ stick: true })
-      $('hub-dm-messages').appendChild(el('div', 'hub-msg system', '发送失败：' + (e.message || e)))
-      $('hub-dm-messages').scrollTop = $('hub-dm-messages').scrollHeight
+      appendHubSendError('hub-dm-messages', '发送失败：' + (e.message || e), sendHubDM)
     } finally {
       state.hub.busy = false
     }
@@ -1841,25 +1936,10 @@
         break
       }
       case 'hub_alert': {
-        state.hub.alerts = [{
-          text: ev.message || ev.code || 'Hub 告警',
-          severity: ev.severity || 'warning',
-        }].concat(state.hub.alerts.filter((a) => a.text !== (ev.message || ev.code))).slice(0, 5)
+        // 文本与去重键同源（见 H.pushHubAlert）：code/message 都为空也只占一行。
+        state.hub.alerts = H.pushHubAlert(state.hub.alerts, ev)
         if (state.screen === 'hub') renderHubAlerts()
         if (state.hub.sheetKind === 'needs') void loadHubNeeds(state.hub.needsGroupId)
-        break
-      }
-      case 'hub_group_update': {
-        if (!ev.group || !ev.group.id) break
-        const g = ev.group
-        const at = state.hub.groups.findIndex((x) => x.id === g.id)
-        if (at >= 0) state.hub.groups[at] = g
-        else state.hub.groups.push(g)
-        if (state.hub.activeGroupId === g.id) {
-          state.hub.group = g
-          renderHubGroupChrome()
-        }
-        scheduleHubHomeRefresh()
         break
       }
       case 'hub_handoff': {
@@ -1880,15 +1960,39 @@
     return H.filterMentionCandidates(q, hubRoster(), { includeAll: true })
   }
 
-  function openMentionPicker() {
+  function openMentionPicker(initialQuery) {
     if (!H || state.screen !== 'hub-group') return
+    // 按钮调用时第一个参数是 MouseEvent；只有字符串才是「键入的初始 query」。
+    const query = typeof initialQuery === 'string' ? initialQuery : ''
     state.hub.mention.open = true
-    state.hub.mention.query = ''
+    state.hub.mention.query = query
     state.hub.mention.index = 0
-    $('mention-filter').value = ''
+    const filter = $('mention-filter')
+    filter.value = query
     $('mention-picker').hidden = false
     renderMentionPicker()
-    $('mention-filter').focus()
+    filter.focus()
+    filter.setSelectionRange(query.length, query.length)
+  }
+
+  // 键入 @ 的即时触发：input/caret → H.mentionTypingQuery（IME 组词中不弹）。
+  // 选择器已开时同步筛选词；token 被删掉就收起。
+  function mentionFromComposer(input, composing) {
+    if (!H || state.screen !== 'hub-group') return
+    const caret = typeof input.selectionStart === 'number' ? input.selectionStart : input.value.length
+    const q = H.mentionTypingQuery(input.value, caret, { composing })
+    if (!q) {
+      if (state.hub.mention.open && document.activeElement === input) closeMentionPicker()
+      return
+    }
+    if (!state.hub.mention.open) {
+      openMentionPicker(q.query)
+      return
+    }
+    state.hub.mention.query = q.query
+    state.hub.mention.index = 0
+    $('mention-filter').value = q.query
+    renderMentionPicker()
   }
 
   function closeMentionPicker() {
@@ -2712,7 +2816,11 @@
   // ---------- 导航 ----------
 
   function navBack() {
-    // 覆盖层优先：@ 选择器/抽屉开着时，返回键只关覆盖层。
+    // 覆盖层优先：外观/ @ 选择器/抽屉开着时，返回键只关覆盖层。
+    if (!$('theme-sheet').hidden) {
+      $('theme-sheet').hidden = true
+      return
+    }
     if (state.hub.mention.open) {
       closeMentionPicker()
       return
@@ -2850,6 +2958,19 @@
       if (e.key === 'Enter') doPair()
     })
     $('back').addEventListener('click', navBack)
+    $('theme').addEventListener('click', () => {
+      $('theme-sheet').hidden = false
+      renderThemeOptions()
+    })
+    $('theme-close').addEventListener('click', () => {
+      $('theme-sheet').hidden = true
+    })
+    for (const b of $('theme-options').querySelectorAll('[data-theme-mode]')) {
+      b.addEventListener('click', () => {
+        setThemeMode(b.dataset.themeMode)
+        $('theme-sheet').hidden = true
+      })
+    }
     $('menu').addEventListener('click', () => {
       const s = state.sessions.find((x) => x.id === state.sid)
       if (s) openSessionActions(s)
@@ -2868,7 +2989,7 @@
     $('new-session').addEventListener('click', newSession)
     $('open-hub').addEventListener('click', openHub)
     $('hub-needs').addEventListener('click', () => openHubNeeds(''))
-    $('hub-group-at').addEventListener('click', openMentionPicker)
+    $('hub-group-at').addEventListener('click', () => openMentionPicker(''))
     $('hub-group-send').addEventListener('click', sendHubGroup)
     $('hub-dm-send').addEventListener('click', sendHubDM)
     $('mention-back').addEventListener('click', closeMentionPicker)
@@ -2908,17 +3029,39 @@
       ['hub-dm-input', sendHubDM],
     ]) {
       const t = $(id)
-      t.addEventListener('input', () => {
+      let composing = false
+      t.addEventListener('compositionstart', () => {
+        composing = true
+      })
+      t.addEventListener('compositionend', () => {
+        composing = false
+        if (id === 'hub-group-input') mentionFromComposer(t, false)
+      })
+      t.addEventListener('input', (e) => {
         t.style.height = 'auto'
         t.style.height = Math.min(t.scrollHeight, 120) + 'px'
+        // 键入 @ 即时唤起全屏选择器；IME 组词期间不打断（＠ 上屏后再判断）。
+        if (id === 'hub-group-input') mentionFromComposer(t, composing || e.isComposing === true)
       })
       t.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && state.hub.mention.open) {
+          e.preventDefault()
+          closeMentionPicker()
+          return
+        }
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
           e.preventDefault()
           fn()
         }
       })
     }
+    // 贴底 + 可见才推进已读；往上读历史或切后台时不动游标。
+    for (const id of ['hub-group-messages', 'hub-dm-messages']) {
+      $(id).addEventListener('scroll', scheduleHubReadCheck, { passive: true })
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && isHubScreen()) scheduleHubReadCheck()
+    })
     $('agents-bar').addEventListener('click', openAgents)
     $('send').addEventListener('click', send)
     $('copy-link').addEventListener('click', async () => {

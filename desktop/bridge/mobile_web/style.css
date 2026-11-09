@@ -133,6 +133,19 @@ button {
   border-radius: var(--radius);
   padding: 10px 12px;
 }
+/* 触控目标下限 44px：手机上 36-38px 的按钮在拇指下经常点空（P4-03c N2）。 */
+button,
+input:not([type='radio']):not([type='checkbox']),
+select {
+  min-height: 44px;
+}
+textarea {
+  min-height: 44px;
+}
+input[type='radio'],
+input[type='checkbox'] {
+  min-height: 0;
+}
 input,
 select {
   width: 100%;
@@ -186,8 +199,9 @@ button[disabled] {
   background: transparent;
 }
 .icon {
-  width: 36px;
-  height: 36px;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
   padding: 0;
   display: grid;
   place-items: center;
@@ -250,8 +264,8 @@ button[disabled] {
 }
 #sessions li .more,
 #ws-list li .more {
-  width: 30px;
-  height: 30px;
+  width: 44px;
+  height: 44px;
   font-size: 15px;
 }
 .dot {
@@ -445,6 +459,7 @@ button[disabled] {
 /* 子智能体入口条 */
 .agents-bar {
   flex: 0 0 auto;
+  min-height: 44px;
   margin: 10px 14px 0;
   padding: 8px 12px;
   text-align: left;
@@ -489,6 +504,7 @@ button[disabled] {
   bottom: calc(env(safe-area-inset-bottom) + 78px);
   z-index: 5;
   width: auto;
+  min-height: 44px;
   padding: 6px 14px;
   font-size: 12.5px;
   border-radius: 999px;
@@ -540,6 +556,17 @@ button[disabled] {
   max-height: 72vh;
   overflow-y: auto;
   box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.35);
+  animation: sheet-in 0.16s var(--ease);
+}
+@keyframes sheet-in {
+  from {
+    opacity: 0.6;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .sheet-head {
   font-weight: 600;
@@ -552,6 +579,22 @@ button[disabled] {
 }
 .sheet-actions button {
   flex: 1;
+  min-height: 44px;
+}
+.theme-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.theme-option {
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+}
+.theme-option.on {
+  border-color: var(--accent-border);
+  background: var(--accent-weak);
+  color: var(--accent-strong);
 }
 .sheet pre {
   background: var(--bg);
@@ -575,6 +618,7 @@ button[disabled] {
   display: flex;
   gap: 8px;
   align-items: center;
+  min-height: 44px;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -790,7 +834,7 @@ button[disabled] {
 }
 .hub-chip {
   width: auto;
-  min-height: 34px;
+  min-height: 44px;
   padding: 5px 11px;
   border-radius: 999px;
   background: var(--surface);
@@ -822,6 +866,7 @@ button[disabled] {
 .hub-load-more {
   align-self: center;
   width: auto;
+  min-height: 44px;
   padding: 6px 14px;
   border-radius: 999px;
   color: var(--text-2);
@@ -857,6 +902,28 @@ button[disabled] {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* 定稿正文的 mdLite 结果（粗体/行内代码/围栏）沿用桌面阅读排版 */
+.hub-msg .body code {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+.hub-msg .body pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
 }
 .hub-msg.human {
   align-self: flex-end;
@@ -896,6 +963,23 @@ button[disabled] {
 .hub-typing .dots::after {
   content: '…';
   animation: blink 1.2s steps(1) infinite;
+}
+
+/* 发送失败：正文已回填输入框；这条只给「重试」入口，不再复制一遍草稿 */
+.hub-send-error {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+.hub-send-error > span {
+  flex: 1;
+  min-width: 0;
+}
+.hub-retry {
+  flex: 0 0 auto;
+  width: auto;
+  min-height: 44px;
+  padding: 6px 14px;
 }
 
 /* 任务结果卡：单列、信息自上而下（状态 → 摘要 → 用量/产物 → 错误） */
@@ -1020,6 +1104,7 @@ button[disabled] {
 }
 .hub-composer button {
   flex: 0 0 auto;
+  min-height: 44px;
   padding: 9px 15px;
   border-radius: 18px;
   white-space: nowrap;
@@ -1139,7 +1224,7 @@ button[disabled] {
 }
 .hub-sheet-actions button {
   width: auto;
-  min-height: 36px;
+  min-height: 44px;
   padding: 6px 12px;
   font-size: 12.5px;
 }
@@ -1175,4 +1260,30 @@ button[disabled] {
   padding: 8px 0;
   color: var(--text-3);
   font-size: 12.5px;
+}
+
+/* ── 减少动态效果（P4-03c N3）──
+ * 系统开启「减少动态效果」后：不做位移/缩放/闪烁，信息仍然完整可见。
+ * 流式光标改成静态实心块，输入中的省略号不再闪；抽屉直接出现，不滑入。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .cursor::after,
+  .hub-msg.draft .body::after,
+  .hub-typing .dots::after {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+  .sheet {
+    animation: none !important;
+  }
+  button:active {
+    transform: none;
+  }
 }
