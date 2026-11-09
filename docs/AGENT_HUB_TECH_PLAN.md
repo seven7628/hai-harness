@@ -168,7 +168,7 @@ Enter send · @ route · Shift + Enter newline          Track as work item · �
 | G1 | 没有 `session_create` / `workspace_create` 工具 | 全仓 grep 无；创建只能走 bridge `new_session`（`main.go:1798`）/ `manager.create`（`main.go:1215`） | 新增 Hub 工具，内部调用 bridge 的创建闭包（§6.6） |
 | G2 | `Session` 没有身份元数据（标题/provider/model/角色） | `session/session.go:187`；这些在 `bridgeSession` 与 `SessionRecord` | 新增 `AgentProfile` 作为唯一配置源；session 只存 scope |
 | G3 | 没有 EventBus，AgentEnd 只能靠 `EventHandler` 观察 | `events/event.go:59`；`bridgeSession.emit`（`main.go:501`） | 在 `emit` 漏斗加 Hub 分支（与 cron 的 `finishCronRun` 同构） |
-| G4 | hooks 没有 AgentEnd 事件 | `hooks/event.go:24` 只有 7 个事件；`Stop` 仅自然结束 | 内部用事件回调；外部 hooks 的 `AgentEnd` 留 P4（§6.7.7） |
+| G4 | hooks 没有 AgentEnd 事件 | `hooks/event.go:24` 只有 7 个事件；`Stop` 为收尾门控（截断判定之前；abort/更早出错不触发） | 内部用事件回调；外部 hooks 的 `AgentEnd` 留 P4（§6.7.7） |
 | G5 | 记忆是仓库级，不是智能体级 | `memory/memory.go:81`；`~/.go-code/memory/repos/<repo-id>/` | 用 `Config.Directory + ProjectDirName` 给每个智能体开独立根（§6.11） |
 | G6 | 压缩阈值是全局热更新，不是 per-session | `set_compress_threshold` 遍历所有会话（`main.go:5101`） | 每智能体建 loop 时传 `WithCompressThreshold`；改阈值重建 loop；不做全局广播（§6.11） |
 | G7 | Provider 的 `active` 是进程全局 | `providerConfig.active`（`providers.go:383`）；`new_session` 带 provider 会改全局（`main.go:1812`） | Hub 装配用显式 `prov` 参数 + `newProvider(name)`；**绝不**改全局 active（§6.2） |

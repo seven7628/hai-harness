@@ -903,7 +903,7 @@ type RunOptions struct {
 
 	// PostToolUse 每个工具结果落定后回调（逐工具粒度）：注入串追加到该结果文本尾部。
 	PostToolUse events.PostToolUseHook
-	// Stop 回合自然结束的门控点：可要求"再跑一轮"（带上限，见 AgentContext.stopHookBlocks）。
+	// Stop 收尾门控点（截断判定之前）：可要求"再跑一轮"（带上限，见 AgentContext.stopHookBlocks）。
 	Stop events.StopHook
 	// SystemExtra 每 Run 追加到系统提示词（**在 Mode.SystemHint 之前**）的额外内容。
 	// 用途：hooks 的 SessionStart 注入——会话内保持稳定即不破坏 provider 前缀缓存；

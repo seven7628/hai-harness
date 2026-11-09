@@ -17,7 +17,7 @@ import (
 //   - PostToolUse       agents/agent_loop.go runTools 尾部（逐工具，注入进结果文本）
 //   - PostToolBatch     agents/agent_loop.go（批级回调）
 //   - PreCompact        agents/agent_loop.go（注入压缩输入）
-//   - Stop              agents/agent_loop.go（自然结束门控，带 8 次上限）
+//   - Stop              agents/agent_loop.go（收尾门控，截断判定之前，带 8 次上限）
 //   - SessionStart      session/session.go（每会话一次 → system 层注入）
 //   - UserPromptSubmit  session/session.go Ask（注入本轮 user 消息 / 可拒绝输入）
 type Dispatcher struct {

@@ -132,8 +132,9 @@ func (m *manager) hooksOption(wsPath, id string, warn func(name, message string)
 // hooksOptionUser 是 Hub 智能体会话的装配入口（P4-04a）：**只装用户级来源**，
 // cwd = 智能体 home，sessionID = Hub 会话 id（DM: hub.<agent>.dm；群: hub.<agent>.g.<group>）。
 //
-// Stop 就是 Hub 的 AgentEnd 锚点：EventStop 在 agents/agent_loop.go 的自然结束门控点
-// 派发（与项目会话同一份契约），payload.hook_event_name = "Stop"、turn_id = run id。
+// Stop 就是 Hub 的 AgentEnd 锚点：EventStop 在 agents/agent_loop.go 的收尾门控点
+// （截断判定之前）派发（与项目会话同一份契约），payload.hook_event_name = "Stop"、
+// turn_id = run id。截断轮也会派发（LastAssistant 可能为空），abort/更早出错不派发。
 // 不新增公共事件字符串，也不另造第二套 AgentEnd hook —— 外部 hook 只认 Stop。
 //
 // cwd 传 home 而不是空串：hook 进程的 GOCODE_PROJECT_DIR/CLAUDE_PROJECT_DIR 与
@@ -165,7 +166,7 @@ func (m *manager) reloadWorkspaceHooks(wsPath string) int {
 	n := 0
 	for _, bs := range sessions {
 		if bs == nil || bs.s == nil {
-			continue // 已关闭：跳过；创建中的会话可能已读旧配置，且晚于本次快照注册（窄窗口，下次创建/重开读新配置）
+			continue // nil 会话（防御）：跳过；创建中的会话可能已读旧配置，且晚于本次快照注册（窄窗口，下次创建/重开读新配置）
 		}
 		// 每会话一个派发器（与会话创建路径一致）：派发器的会话级去重表属于该会话。
 		bs.s.SetHooks(hooksFor(m.setupHooks(wsPath, bs.warnHook), wsPath, bs.id))
@@ -209,7 +210,7 @@ func (m *manager) reloadHubRuntimeHooks(runtimes []*workspaceRuntime) int {
 		n := 0
 		for _, bs := range sessions {
 			if bs == nil || bs.s == nil {
-				continue // 已关闭：跳过；创建中的会话可能已读旧配置，且晚于本次快照注册（窄窗口，下次创建/重开读新配置）
+				continue // nil 会话（防御）：跳过；创建中的会话可能已读旧配置，且晚于本次快照注册（窄窗口，下次创建/重开读新配置）
 			}
 			// 每会话一个派发器（与创建路径一致）：派发器的会话级去重表属于该会话。
 			bs.s.SetHooks(hooksFor(m.setupUserHooks(bs.warnHook), ws.path, bs.id))
