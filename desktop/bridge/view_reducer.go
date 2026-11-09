@@ -37,12 +37,32 @@ const checkpointSchemaVersion = session.ViewCheckpointSchemaVersion
 // 额外字段（lifetime_usage / lifetime_cost_usd / ctx_tokens / context_window /
 // diffs / diagnostics）属于兼容扩展，storage 层只要求
 // schema_version + blocks + run_nodes + turns。
+// PagedBlocks 是窗口恢复时「未解码」的那部分块：ids/spans 按 id 升序，
+// spans 指向 sidecar 只读映射，Release 由持有者调用（幂等）。
+type PagedBlocks struct {
+	IDs     []uint64
+	Spans   [][]byte
+	Hashes  [][8]byte
+	Release func()
+}
+
 type Checkpoint struct {
 	SchemaVersion int `json:"schema_version"`
 
 	Blocks   []Block   `json:"blocks"`
 	RunNodes []RunNode `json:"run_nodes"`
 	Turns    []Turn    `json:"turns"`
+	// TurnsTotal 是**历史总条数**（含未随 body 下发的旧轮次）。
+	//
+	// turns 是追加型数组，真实会话 88.7k 条 / 24.3MB（占 body 94%），打开要
+	// 解码 155ms、每次提交要编码 37ms+写 24ms，而 UI 只用「总条数 + 最后两条」。
+	// 因此 body 只带尾部窗口，总数走这个标量；旧轮次在 <record>.turns 追加日志里。
+	TurnsTotal int `json:"turns_total,omitempty"`
+
+	// BlocksTotal 是**历史块总数**（窗口恢复时 Blocks 只是窗口 + 卡片块）。
+	// PagedBlocks 非 nil 表示还有未解码的块在 sidecar 里，按需解。
+	BlocksTotal int          `json:"blocks_total,omitempty"`
+	PagedBlocks *PagedBlocks `json:"-"`
 
 	// usage / cost_usd 是当前 clear generation 的展示累计（clear 后归零）；
 	// lifetime_usage / lifetime_cost_usd 是跨 generation 的对账值（clear 不清）。
@@ -98,7 +118,13 @@ type Block struct {
 	// 为什么由 bridge 落盘而不是只在前端算（用户 2026-11 报障）：前端恢复时只拿得到块的位置，
 	// 而正在写的那段正文在 checkpoint 里已经不算 streaming 了 —— 位置判据会把它当成
 	// 「这一轮的结论」，之后到达的记录就全被甩出盒子。运行态只有 bridge 知道，所以在这里盖章。
-	AfterRun bool `json:"after_run,omitempty"`
+	//
+	// **指针是刻意的（三态）**：nil = 这条记录来自还没有这一位的旧 record，UI 只能按位置兜底；
+	// false / true = bridge 明确盖过章。用 bool + omitempty 会把 false 序列化成「字段不存在」，
+	// 于是一次 checkpoint 恢复就把「运行中到达」的证据吃掉了 —— 复现是：长运行里中间说过一段
+	// 正文（narration），之后十八分钟的工具行、回执全被判成「交卷后」，Task completed 永远
+	// 排在 Working 盒子下面（用户 2026-11 的截图）。
+	AfterRun *bool `json:"after_run,omitempty"`
 	// Images 工具结果携带的图片内容块（read_file 读图 / 截图 / MCP image）：
 	// 随 tool_run_end 事件到达，checkpoint 落盘 → 恢复时 UI 仍能展示「模型看过的图」
 	//（data URL 直显；不参与 LLM 上下文——那是 AgentLoop 侧的 ToolResult.Blocks）。
@@ -154,7 +180,9 @@ type Block struct {
 	Promoted   bool   `json:"promoted,omitempty"`
 	TaskStatus string `json:"task_status,omitempty"`
 	// Todos 待办清单快照，按 kind 解释（同名字段、两种宿主）：
-	//   · tool 块 → 该次 todo_* 调用完成时刻的**会话**清单（历史计划卡定格）
+	//   · tool 块 → 该次调用完成时刻的**会话**清单（历史计划卡定格）。带快照的调用有两类：
+	//     直呼的 todo_*，以及改动过清单的编排调用（codemode —— 脚本里的 todo_* 是嵌套
+	//     调用、不发事件，快照由外层响应代发，见 tools/engine.go 的 todoWrites）
 	//   · agent 块 → 该子 agent **自己的**清单（与顶层 Checkpoint.Todos 分开存：
 	//     子 agent 有独立 TODO，两者不得串味）
 	Todos []TodoItem `json:"todos,omitempty"`
@@ -257,7 +285,11 @@ type ArtifactRef struct {
 
 // AgentItem 是子 agent 卡片内的活动记录项。
 type AgentItem struct {
-	Kind       string `json:"kind"` // text|thinking|tool|compression|user（user = 进入子运行上下文的 user 消息）
+	Kind string `json:"kind"` // text|thinking|tool|compression|user（user = 进入子运行上下文的 user 消息）
+	// RunID 这条项属于哪一次子运行（agent_resume 复用 task_id，但每次运行是新 run）。
+	// 卡片以 run 为单位，项上带 run_id 后前端才能像主会话一样按 run 切段
+	// （turnRuns / statsOfItems.wallMs / turnLive.sameRun）。
+	RunID      string `json:"run_id,omitempty"`
 	Text       string `json:"text,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"` // text item: LLM 失败提示
 	ThinkStart int64  `json:"think_start,omitempty"`
@@ -284,8 +316,9 @@ type AgentItem struct {
 	// 与 NestedCalls 的区别：保留操作不是工具调用，纯检索脚本的 NestedCalls 恒为空 ——
 	// 宿主只能靠这里的计数把工具行标成「Codemode Search」（见 core.HostOps）。
 	HostOps *core.HostOps `json:"host_ops,omitempty"`
-	// Todos todo_* 工具项那一刻**该子 agent 自己**的清单快照（与块级 Todos 同源，
-	// 后者是「最近一次」的滚动值；这里定格本次调用，历史计划卡才显示当时状态）。
+	// Todos todo_* 工具项（或改动过清单的编排调用，其外层响应代发）那一刻**该子 agent
+	// 自己**的清单快照（与块级 Todos 同源，后者是「最近一次」的滚动值；这里定格本次调用，
+	// 历史计划卡才显示当时状态）。
 	Todos []TodoItem `json:"todos,omitempty"`
 
 	// —— 一轮的指标（text/thinking item 上）——
@@ -565,6 +598,28 @@ type ViewReducer struct {
 	blockBytes map[uint64][]byte
 	// dirtyBlocks 本轮内容变化的 block id（由写入方精确标记）。
 	dirtyBlocks map[uint64]struct{}
+	// lastDirtyBlocks 是最近一次 encodeLocked 消费掉的脏集合（供 MarshalWithSpans
+	// 交给提交路径；缓存命中时为 nil，走全量比对）。
+	lastDirtyBlocks map[uint64]struct{}
+	// cachedIDs 与 cachedSpans 一一对应（view 里 blocks 的顺序）。
+	cachedIDs []uint64
+	// body 缓存：提交路径用的「骨架 + 各块字节」（不含 210MB 拼接）。
+	bodyCache      []byte
+	bodyCacheSpans [][]byte
+	bodyCacheIDs   []uint64
+	bodyCacheSeq   uint64
+	bodyCacheGen   uint64
+	bodyCacheOK    bool
+
+	// turnsTotal 是历史总条数（r.turns 可能只是尾部窗口）；turnsPending 是
+	// 尚未写进 <record>.turns 日志的轮次（提交时 drain）。
+	turnsTotal   int
+	turnsPending []Turn
+
+	// paged 是窗口恢复时未解码的块（指向 sidecar 映射）；blocksTotal 是历史块总数。
+	// paged == nil 表示全量在内存里，行为与旧路径完全一致。
+	paged       *PagedBlocks
+	blocksTotal int
 	// cachedSpans 与 marshalCache 同代：每个 block 的字节（与 view 中片段逐字节相同）
 	cachedSpans [][]byte
 
@@ -805,6 +860,67 @@ func (r *ViewReducer) Snapshot() *Checkpoint {
 }
 
 // snapshotLocked 是 Snapshot 的持锁实现（Marshal 已持锁时调用它，避免重入死锁）。
+// snapshotForEncodeLocked 是编码路径专用的快照：**不做深拷贝**。
+//
+// 为什么可以：encodeLocked 全程持有 r.mu，r.blocks/turns/... 不会并发变；
+// 而编码只读，唯一会写的是 normalizeSnapshotBlocks（只改 agent 块 Items 里的
+// Active/Aborted）与 normalizeDanglingState（只改 Block 的标量字段 + 重建切片）。
+// 因此：块切片做「浅拷贝 + 只复制 agent 块的 Items」，其余切片直接共享。
+//
+// 实测：深拷贝 30k 块 46ms（含大量小分配）→ 浅拷贝后 <3ms。
+func (r *ViewReducer) snapshotForEncodeLocked() *Checkpoint {
+	r.flushChunkLocked()
+	out := &Checkpoint{
+		SchemaVersion: checkpointSchemaVersion,
+		Blocks:        cloneBlocksForEncode(r.blocks),
+		// 下面这几组必须用与 snapshotLocked 相同的克隆函数：它们决定
+		// nil 与 [] 的**字节差异**（todos:null vs todos:[]）。实测漏掉会让
+		// 增量路径与全量对拍不一致（TestBlockCacheHonorsDirtyMarkers）。
+		// 体积都是小切片，拷贝成本可忽略；块切片才是 30k 量级的那个。
+		RunNodes: cloneRunNodes(r.runNodes),
+		// turns 只带尾部窗口 + 总数：body 从 25.8MB 降到 1.6MB，打开时的
+		// record 解析从 ~150ms 降到 ~20ms（历史在 <record>.turns 追加日志里）。
+		Turns:              r.turnsWindowLocked(),
+		TurnsTotal:         r.turnsTotal,
+		Usage:              r.usage,
+		CostUSD:            r.costUSD,
+		LifetimeUsage:      r.lifetime,
+		LifetimeCostUSD:    r.lifetimeCost,
+		Todos:              cloneTodos(r.todos),
+		PendingQuestions:   clonePendingQuestions(r.pendingQuestions),
+		CtxTokens:          r.ctxTokens,
+		CtxTokensEstimated: r.ctxTokensEst,
+		ContextWindow:      r.contextWindow,
+		Diffs:              cloneDiffs(r.diffs),
+		Degraded:           r.degraded,
+	}
+	if r.lastRun != nil {
+		lr := *r.lastRun
+		out.LastRun = &lr
+	}
+	if r.lastError != nil {
+		le := *r.lastError
+		out.LastError = &le
+	}
+	out.Diagnostics = r.diagSliceLocked()
+	normalizeSnapshotBlocks(out.Blocks)
+	normalizeDanglingState(out)
+	return out
+}
+
+// cloneBlocksForEncode 浅拷贝 block 切片：只有 normalize 会写穿的字段才复制。
+func cloneBlocksForEncode(in []Block) []Block {
+	out := make([]Block, len(in))
+	for i := range in {
+		out[i] = in[i] // 切片字段共享（编码期间只读）
+		// normalizeSnapshotBlocks 会写 Items[j].Active/Aborted → 只复制这一类。
+		if in[i].Kind == blockKindAgent && len(in[i].Items) > 0 {
+			out[i].Items = append([]AgentItem(nil), in[i].Items...)
+		}
+	}
+	return out
+}
+
 func (r *ViewReducer) snapshotLocked() *Checkpoint {
 	r.flushChunkLocked()
 
@@ -813,6 +929,7 @@ func (r *ViewReducer) snapshotLocked() *Checkpoint {
 		Blocks:             cloneBlocks(r.blocks),
 		RunNodes:           cloneRunNodes(r.runNodes),
 		Turns:              cloneTurns(r.turns),
+		TurnsTotal:         r.turnsTotal,
 		Usage:              r.usage,
 		CostUSD:            r.costUSD,
 		LifetimeUsage:      r.lifetime,
@@ -896,7 +1013,40 @@ func normalizeDanglingState(cp *Checkpoint) {
 func (r *ViewReducer) Marshal() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// 无 limit 的调用方（旧 UI）要的是**完整历史**：先把窗口外的块解出来。
+	// 守住「历史消息不能看不到」这条红线，代价只在真的请求全量时付一次。
+	if err := r.ensureFullBlocksLocked(); err != nil {
+		return nil, err
+	}
 	return r.marshalLocked()
+}
+
+// ensureFullBlocksLocked 把 PagedBlocks 解码并合入 r.blocks（按 id 升序）。
+// 幂等；paged == nil 时是空操作。
+func (r *ViewReducer) ensureFullBlocksLocked() error {
+	if r.paged == nil || len(r.paged.IDs) == 0 {
+		return nil
+	}
+	blocks := make([]Block, len(r.paged.IDs))
+	var hashes [][8]byte
+	if len(r.paged.Hashes) == len(r.paged.IDs) {
+		hashes = r.paged.Hashes
+	}
+	if err := decodeBlocksParallel(r.paged.Spans, hashes, blocks); err != nil {
+		return err
+	}
+	out := make([]Block, 0, len(blocks)+len(r.blocks))
+	out = append(out, blocks...)
+	out = append(out, r.blocks...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if r.paged.Release != nil {
+		r.paged.Release()
+	}
+	r.paged = nil
+	r.blocks = out
+	r.blockIdxDirty = true
+	r.invalidateMarshalCache()
+	return nil
 }
 
 // marshalLocked 是 Marshal 的持锁实现（供已持锁的调用方复用）。
@@ -942,39 +1092,51 @@ func (r *ViewReducer) marshalLocked() ([]byte, error) {
 // 完整结构，再把占位符替换成拼好的 blocks 数组 —— 与 marshalRecordEnvelope
 // 同一手法（那边已证明可靠）。
 func (r *ViewReducer) encodeSnapshotLocked(out *bytes.Buffer) error {
-	_, _, err := r.encodeLocked(out)
+	_, _, _, err := r.encodeLocked(out)
 	return err
 }
 
 // marshalLockedSpans 与 marshalLocked 相同，但额外返回每个 block 的字节切片。
-func (r *ViewReducer) marshalLockedSpans() ([]byte, [][]byte, error) {
+func (r *ViewReducer) marshalLockedSpans() ([]byte, [][]byte, []uint64, error) {
 	if r.marshalCacheOK && r.marshalCacheSeq == r.seq && r.marshalCacheGen == r.clearGeneration {
-		return r.marshalCache, r.cachedSpans, nil
+		// 缓存命中 = 上一轮之后没有任何事件，也就没有新脏块可报。
+		// 这里故意返回 nil 而不是空集合：调用方会退回「全量比对」，
+		// 万一上一次提交中途失败（sidecar 只写了一部分）也不会漏块。
+		r.lastDirtyBlocks = nil
+		return r.marshalCache, r.cachedSpans, nil, nil
 	}
 	var out bytes.Buffer
 	out.Grow(len(r.marshalCache) + 1024)
-	view, spans, err := r.encodeLocked(&out)
+	view, spans, ids, err := r.encodeLocked(&out)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	r.marshalCache = view
 	r.cachedSpans = spans
 	r.marshalCacheSeq = r.seq
 	r.marshalCacheGen = r.clearGeneration
 	r.marshalCacheOK = true
-	return view, spans, nil
+	r.cachedIDs = ids
+	return view, spans, ids, nil
 }
 
 // encodeLocked 是真正的编码实现，返回 view 字节与 block 切片。
-func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) {
-	cp := r.snapshotLocked()
+func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, []uint64, error) {
+	return r.encodeLockedMode(out, false)
+}
+
+// encodeLockedMode：bodyOnly=true 时**不拼装整份 view**，直接返回骨架
+// （`...,"blocks":null,...`）+ 每块字节。提交路径只需要这两样：
+// record 里的 blocks 会被替换成引用，210MB 的拼接纯属浪费。
+func (r *ViewReducer) encodeLockedMode(out *bytes.Buffer, bodyOnly bool) ([]byte, [][]byte, []uint64, error) {
+	cp := r.snapshotForEncodeLocked()
 	blocks := cp.Blocks
 	cp.Blocks = nil
 
 	// 1. 序列化不含 blocks 的骨架，得到 `...,"blocks":null,...`
 	head, err := json.Marshal(cp)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	const placeholder = `"blocks":null`
 	idx := bytes.Index(head, []byte(placeholder))
@@ -983,9 +1145,9 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 		enc := json.NewEncoder(out)
 		cp.Blocks = blocks
 		if err := enc.Encode(cp); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return out.Bytes(), nil, nil
+		return out.Bytes(), nil, nil, nil
 	}
 
 	// 2. 逐 block 取字节：只有「被写入方标脏」的块才重新序列化。
@@ -994,6 +1156,7 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 	// 与新建块）**精确给出**，而不是在 Marshal 时猜「内容变没变」——
 	// 猜的两种做法（手写字段清单、终态块复用）都已被回归测试证伪。
 	dirty := r.takeDirtyBlocks()
+	r.lastDirtyBlocks = dirty
 	if r.blockBytes == nil {
 		r.blockBytes = make(map[uint64][]byte, len(blocks))
 	}
@@ -1003,9 +1166,11 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 	}
 
 	parts := make([][]byte, len(blocks))
+	ids := make([]uint64, len(blocks))
 	total := 0
 	for i := range blocks {
 		id := blocks[i].ID
+		ids[i] = id
 		_, isDirty := dirty[id]
 		if !isDirty {
 			if b, ok := r.blockBytes[id]; ok {
@@ -1016,11 +1181,16 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 		}
 		b, err := json.Marshal(&blocks[i])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		parts[i] = b
 		r.blockBytes[id] = b
 		total += len(b) + 1
+	}
+
+	if bodyOnly {
+		// 提交路径：不拼装 210MB，骨架 + 各块字节直接交给存储层。
+		return head, parts, ids, nil
 	}
 
 	buf := make([]byte, 0, total+2)
@@ -1043,7 +1213,7 @@ func (r *ViewReducer) encodeLocked(out *bytes.Buffer) ([]byte, [][]byte, error) 
 	// parts 是各自独立的字节，拼接后散落在 view 中 —— 重新定位会退化成扫描。
 	// 因此改为「把 parts 直接返回」，由调用方按顺序使用（它们的内容与 view 中的
 	// 对应片段逐字节相同，可直接写入 sidecar）。
-	return view, parts, nil
+	return view, parts, ids, nil
 }
 
 // blockFingerprint 计算 block 的内容指纹（用于字节缓存）。
@@ -1165,17 +1335,68 @@ func (r *ViewReducer) takeDirtyBlocks() map[uint64]struct{} {
 type BlockSpans struct {
 	View  []byte
 	Spans [][]byte
+	// Dirty 是**本次 marshal 重新序列化**的 block id：提交路径据此只重写这些块，
+	// 其余块不再逐块 sha256（实测 30,755 块 / 185MB，是 sidecar 阶段的主体成本）。
+	// nil = 未知（缓存命中/无标记）→ 提交路径走全量比对。
+	Dirty map[uint64]struct{}
+	// IDs 与 Spans 一一对应（view 里 blocks 的顺序）。带上它可以让存储层
+	// 免去对每个 block 再做一次 JSON 解析取 id —— 30,787 块实测 200~400ms。
+	IDs []uint64
+}
+
+// BodySpans 是提交路径需要的最小集合：骨架（blocks 为 null 占位）+ 各块字节。
+type BodySpans struct {
+	Body  []byte
+	Spans [][]byte
+	IDs   []uint64
+	Dirty map[uint64]struct{}
+	// AllIDs 是 record 要引用的**全部**块 id（窗口恢复下 IDs 只是窗口 + 卡片块）。
+	// 为空表示 IDs 即全集。
+	AllIDs []uint64
+}
+
+// MarshalBodyWithSpans 返回「不含 blocks 的骨架 + 每个 block 的字节」。
+//
+// 提交路径只需要这两样（record 里的 blocks 会被换成引用），因此不需要把
+// 185MB 的 blocks 数组拼进 210MB 的 view —— 那一次拼接 + 整份缓冲实测 ~100ms
+// 的内存带宽，且把峰值内存推高 210MB。
+func (r *ViewReducer) MarshalBodyWithSpans() (*BodySpans, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.bodyCacheOK && r.bodyCacheSeq == r.seq && r.bodyCacheGen == r.clearGeneration && r.paged == nil {
+		// 缓存命中：没有新事件，也就没有新脏块（退回全量比对更安全）。
+		// paged 非 nil 时不走缓存：body 里只有窗口，必须与全集 id 一起下发。
+		r.lastDirtyBlocks = nil
+		return &BodySpans{Body: r.bodyCache, Spans: r.bodyCacheSpans, IDs: r.bodyCacheIDs}, nil
+		// 注：body 缓存只在全量路径下产生（paged 非 nil 时不会命中缓存），
+		// 所以这里不需要 AllIDs。
+	}
+	var out bytes.Buffer
+	body, parts, ids, err := r.encodeLockedMode(&out, true)
+	if err != nil {
+		return nil, err
+	}
+	allIDs := ids
+	if r.paged != nil && len(r.paged.IDs) > 0 {
+		allIDs = make([]uint64, 0, len(r.paged.IDs)+len(ids))
+		allIDs = append(allIDs, r.paged.IDs...)
+		allIDs = append(allIDs, ids...)
+		sort.Slice(allIDs, func(i, j int) bool { return allIDs[i] < allIDs[j] })
+	}
+	r.bodyCache, r.bodyCacheSpans, r.bodyCacheIDs = body, parts, ids
+	r.bodyCacheSeq, r.bodyCacheGen, r.bodyCacheOK = r.seq, r.clearGeneration, true
+	return &BodySpans{Body: body, Spans: parts, IDs: ids, Dirty: r.lastDirtyBlocks, AllIDs: allIDs}, nil
 }
 
 // MarshalWithSpans 返回 view 字节 + 每个 block 的字节切片。
 func (r *ViewReducer) MarshalWithSpans() (*BlockSpans, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	view, parts, err := r.marshalLockedSpans()
+	view, parts, ids, err := r.marshalLockedSpans()
 	if err != nil {
 		return nil, err
 	}
-	return &BlockSpans{View: view, Spans: parts}, nil
+	return &BlockSpans{View: view, Spans: parts, Dirty: r.lastDirtyBlocks, IDs: ids}, nil
 }
 
 // invalidateMarshalCache 让下一次 Marshal 重新序列化。
@@ -1183,6 +1404,8 @@ func (r *ViewReducer) MarshalWithSpans() (*BlockSpans, error) {
 func (r *ViewReducer) invalidateMarshalCache() {
 	r.marshalCacheOK = false
 	r.marshalCache = nil
+	r.bodyCacheOK = false
+	r.bodyCache = nil
 }
 
 // backfillOutputTokens 用 turns 回填 assistant 块的 OutputTokens/ReasoningTokens。
@@ -1225,10 +1448,29 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 	if cp == nil {
 		return nil
 	}
+	if r.paged != nil && r.paged.Release != nil {
+		r.paged.Release()
+	}
+	r.paged = cp.PagedBlocks
+	r.blocksTotal = cp.BlocksTotal
+	if r.blocksTotal < len(cp.Blocks) {
+		r.blocksTotal = len(cp.Blocks)
+	}
 	r.blocks = cloneBlocks(cp.Blocks)
 	r.blockIdxDirty = true // 索引随新 blocks 惰性重建
 	r.runNodes = cloneRunNodes(cp.RunNodes)
 	r.turns = cloneTurns(cp.Turns)
+	r.turnsTotal = cp.TurnsTotal
+	if r.turnsTotal < len(r.turns) {
+		r.turnsTotal = len(r.turns)
+	}
+	// 迁移：旧 record（没有 turns_total）里的 turns 全在 body 里，还没进日志 ——
+	// 首次提交必须把它们整份追加进日志，之后才允许 body 只带窗口。
+	if cp.TurnsTotal == 0 && len(cp.Turns) > 0 {
+		r.turnsPending = cloneTurns(cp.Turns)
+	} else {
+		r.turnsPending = nil
+	}
 	backfillOutputTokens(r.blocks, r.turns)
 	r.usage = cp.Usage
 	r.lifetime = cp.LifetimeUsage
@@ -1680,10 +1922,14 @@ func (r *ViewReducer) appendAgentStreamLocked(runID, kind, content string, ts ti
 	b := r.blocks[idx]
 	items := b.Items
 	last := len(items) - 1
-	if last >= 0 && items[last].Kind == kind && items[last].Text != "" && !items[last].IsError {
+	if last >= 0 && items[last].Kind == kind && items[last].Text != "" && !items[last].IsError &&
+		(items[last].RunID == "" || items[last].RunID == runID) {
 		items[last].Text += content
+		if items[last].RunID == "" {
+			items[last].RunID = runID // 旧 record 没有这一位：续写时补上
+		}
 	} else {
-		item := AgentItem{Kind: kind, Text: content, Ts: millis(ts)}
+		item := AgentItem{Kind: kind, Text: content, Ts: millis(ts), RunID: runID}
 		if kind == "thinking" {
 			item.ThinkStart = millis(ts)
 		}
@@ -1797,7 +2043,7 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 		RunID: e.RunId, RequestID: e.RequestId,
 		FinishReason: string(e.FinishReason),
 	}
-	r.turns = append(r.turns, turn)
+	r.appendTurnLocked(turn)
 
 	// 主 agent：最终正文/思考（chunk 缺失时由 llm_end 补全，已有 chunk 不重复拼接）
 	if !r.isSubRunLocked(e.RunId) {
@@ -1855,6 +2101,9 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 					continue
 				}
 				items[i].Model = e.Model
+				if items[i].RunID == "" {
+					items[i].RunID = e.RunId // 旧 record：结算时补归属
+				}
 				if durMs > 0 {
 					items[i].DurMs = durMs
 				}
@@ -1964,7 +2213,7 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 			if e.ErrorKind == "aborted" || e.ErrorKind == "canceled" {
 				finish = string(core.FinishReasonAbort)
 			}
-			r.turns = append(r.turns, Turn{
+			r.appendTurnLocked(Turn{
 				Model: e.Model, Input: agg.Input, Output: agg.Output,
 				CacheRead: agg.CacheRead, CacheWrite: agg.CacheWrite, Reasoning: agg.Reasoning,
 				DurMs: durMs, CostUSD: cost,
@@ -1977,7 +2226,7 @@ func (r *ViewReducer) applyLLMErrorLocked(e *events.LLMError, meta EventMeta) {
 		bid := r.agentBlockID[e.RunId]
 		if idx := r.findBlockLocked(bid); idx >= 0 && r.blocks[idx].Kind == blockKindAgent {
 			b := r.blocks[idx]
-			b.Items = upsertAgentErrorItem(b.Items, text)
+			b.Items = upsertAgentErrorItem(b.Items, text, e.RunId)
 			// 子 agent 卡片也累加 tokens（成本原本就累加）：终态 TaskEnd 的权威值会覆盖，
 			// 运行中这张卡读的就是这些增量。
 			b.Usage.Input += agg.Input
@@ -2071,7 +2320,7 @@ func (r *ViewReducer) applyToolStartLocked(e *events.ToolStart) {
 			if !hasAgentToolItem(b.Items, e.Id) {
 				item := AgentItem{
 					Kind: agentItemTool, ToolID: e.Id, Name: e.Name, Args: e.Arguments,
-					Status: statusRunning, StartedAt: millis(ts), TaskID: e.TaskId,
+					Status: statusRunning, StartedAt: millis(ts), TaskID: e.TaskId, RunID: e.RunId,
 				}
 				b.Items = append(b.Items, item)
 				r.blocks[idx] = b
@@ -2176,6 +2425,9 @@ func (r *ViewReducer) applyToolResponseLocked(e *events.ToolResponse, meta Event
 						status = statusError
 					}
 					it.Status = status
+					if it.RunID == "" {
+						it.RunID = e.RunId // 旧 record：工具项补归属
+					}
 					it.Result = e.Result
 					it.ErrorInfo = info
 					it.DurMs = durMs
@@ -2311,9 +2563,14 @@ func (r *ViewReducer) applyTaskPromotedLocked(e *events.TaskPromoted) {
 // applyAgentStartLocked 建立主/子 run 节点与子 agent 卡片。
 // applyAgentUserMessageLocked 把一条投向子运行上下文的 user 消息记进它自己的转录。
 //
-// 归属锚 **TaskId 优先、RunId 兜底**：后台子运行有任务 id（与 AgentStart.TaskId 同键）；
-// 同步子智能体（in-loop）没有 task id，只有 run id —— 只认 TaskId 的话，子运行开始时
-// 补发的初始 Prompt（AgentUserMessage{Source:prompt}）永远挂不上卡片。
+// 归属锚 **RunId 优先、TaskId 最新卡兜底**：
+//
+//	· 后台子运行有任务 id，且 `agent_resume` 复用同一个 task_id、每次运行新建一张卡 ——
+//	  只按 TaskId 取第一张会把续跑的 prompt 写进上一轮的卡（实测：旧卡末尾出现
+//	  「Fix review findings…」，新卡开头没有 user 项）。
+//	· 同步子智能体（in-loop）没有 task id，只有 run id。
+//	· Poll 里的 inbox 消息（用户 agent_send / 孙任务结果）没有 run id，退回该 task 的
+//	  **最新**一张卡 —— 那正是当前运行的那张。
 //
 // 找不到卡片（start 还没到 / 卡片已收敛）时**静默丢弃**：这条消息在子运行的上下文里
 // 仍然有效（它已经进了 LLM 请求），只是没有卡片可挂。为它凭空建一张卡片会让左栏树
@@ -2323,39 +2580,51 @@ func (r *ViewReducer) applyAgentUserMessageLocked(e *events.AgentUserMessage) {
 	if e.TaskId == "" && e.RunId == "" {
 		return
 	}
-	for i := range r.blocks {
-		b := &r.blocks[i]
-		if b.Kind != blockKindAgent {
-			continue
-		}
-		if e.TaskId != "" {
-			if b.TaskID != e.TaskId {
-				continue
-			}
-		} else if b.RunID != e.RunId {
-			continue
-		}
-		text := strings.TrimSpace(e.Text)
-		if text == "" {
-			return
-		}
-		ts := e.Timestamp
-		if ts.IsZero() {
-			ts = time.Now()
-		}
-		b.Items = append(b.Items, AgentItem{
-			Kind:      agentItemUser,
-			Text:      text,
-			StartedAt: millis(ts),
-			// Source 不进 AgentItem 的展示字段（主会话的 user 块也没有"谁说的"），
-			// 仅用于日志/诊断时区分投递来源。
-		})
-		// 与被裁到上限的其它 item 一样：超出部分只在 journal 里（见 agentItemsLimit）。
-		if n := len(b.Items); n > agentItemsLimit {
-			b.Items = append([]AgentItem(nil), b.Items[n-agentItemsLimit:]...)
-			b.ItemsTrimmed += n - agentItemsLimit
-		}
+	text := strings.TrimSpace(e.Text)
+	if text == "" {
 		return
+	}
+	idx := -1
+	if e.RunId != "" {
+		for i := range r.blocks {
+			if r.blocks[i].Kind == blockKindAgent && r.blocks[i].RunID == e.RunId {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 && e.TaskId != "" {
+		for i := len(r.blocks) - 1; i >= 0; i-- {
+			if r.blocks[i].Kind == blockKindAgent && r.blocks[i].TaskID == e.TaskId {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	ts := e.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	b := &r.blocks[idx]
+	runID := e.RunId
+	if runID == "" {
+		runID = b.RunID
+	}
+	b.Items = append(b.Items, AgentItem{
+		Kind:      agentItemUser,
+		Text:      text,
+		StartedAt: millis(ts),
+		RunID:     runID,
+		// Source 不进 AgentItem 的展示字段（主会话的 user 块也没有"谁说的"），
+		// 仅用于日志/诊断时区分投递来源。
+	})
+	// 与被裁到上限的其它 item 一样：超出部分只在 journal 里（见 agentItemsLimit）。
+	if n := len(b.Items); n > agentItemsLimit {
+		b.Items = append([]AgentItem(nil), b.Items[n-agentItemsLimit:]...)
+		b.ItemsTrimmed += n - agentItemsLimit
 	}
 }
 
@@ -2546,6 +2815,9 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 				for i := len(items) - 1; i >= 0; i-- {
 					if items[i].Kind == agentItemText || items[i].Kind == agentItemThinking {
 						items[i].AgentDurMs = b.DurMs
+						if items[i].RunID == "" {
+							items[i].RunID = e.RunId // 旧 record：结算时补归属
+						}
 						break
 					}
 				}
@@ -2610,7 +2882,7 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 		// 被 abort（上一条 LLMError 还是 will_retry=true，之后既无 llm_end 也无 final
 		// LLMError）。前面各条收尾路径都不成立，本轮在 turns 里会是空白 —— 补一条
 		// 只带时长的 Turn：token 缺省（上游没报，不编）。
-		r.turns = append(r.turns, Turn{
+		r.appendTurnLocked(Turn{
 			Model: e.Model, DurMs: elapsed,
 			RunID: e.RunId, FinishReason: string(e.FinishReason),
 		})
@@ -2713,7 +2985,9 @@ func (r *ViewReducer) applyTaskStartedLocked(e *events.TaskStarted) {
 	if ts.IsZero() {
 		ts = time.Now()
 	}
-	for i := range r.blocks {
+	// 从后往前：agent_resume 复用同一 task_id、每次运行一张卡 —— 只认**最新**那张。
+	// 已终止的旧卡不翻回 running（新运行的 agent_start 会自己建新卡）。
+	for i := len(r.blocks) - 1; i >= 0; i-- {
 		b := r.blocks[i]
 		if (b.Kind == blockKindAsyncTask || b.Kind == blockKindAgent) && b.TaskID == e.TaskId {
 			if b.Status == statusRunning || b.Status == "interrupting" {
@@ -2738,6 +3012,29 @@ func (r *ViewReducer) applyTaskStartedLocked(e *events.TaskStarted) {
 }
 
 // applyTaskEndLocked 收敛任务终态（agent / async_task / promoted tool 卡）。
+// latestTaskCardLocked 返回同 task_id 的**最新**一张卡（agent / async_task / promoted tool）。
+//
+// agent_resume 复用同一个 task_id、每次运行新建一张卡；task 级事件（task_end /
+// task_result_delivered）必须落最新那张 —— 否则结果、时长、交付标记会改写上一轮
+// 已经结算的卡，live 与 checkpoint 也会不一致（旧实现 findIndex 取的是第一张）。
+func (r *ViewReducer) latestTaskCardLocked(taskID string, includeAnyTool bool) int {
+	for i := len(r.blocks) - 1; i >= 0; i-- {
+		b := r.blocks[i]
+		if b.TaskID != taskID {
+			continue
+		}
+		switch b.Kind {
+		case blockKindAgent, blockKindAsyncTask:
+			return i
+		case blockKindTool:
+			if b.Promoted || includeAnyTool {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 func (r *ViewReducer) applyTaskEndLocked(e *events.TaskEnd) {
 	r.flushChunkLocked()
 	key := taskLifecycleKey("task_end", e.TaskId, e.Timestamp)
@@ -2760,40 +3057,40 @@ func (r *ViewReducer) applyTaskEndLocked(e *events.TaskEnd) {
 			status = statusCompleted
 		}
 	}
-	for i := range r.blocks {
-		b := r.blocks[i]
-		switch b.Kind {
-		case blockKindAgent, blockKindAsyncTask:
-			if b.TaskID == e.TaskId {
-				b.Status = status
-				if b.Kind == blockKindAsyncTask {
-					b.EndedAt = millis(ts)
-				} else if b.DurMs == 0 && b.SpawnedAt > 0 {
-					b.DurMs = millis(ts) - b.SpawnedAt
-				}
-				if e.Usage != nil {
-					b.Usage = taskUsageFromCore(*e.Usage) // 权威全量（含压缩轮）+ 成本
-				}
-				r.blocks[i] = b
-			}
-		case blockKindTool:
-			if b.TaskID == e.TaskId && b.Promoted {
-				b.Status = statusDone
-				b.TaskStatus = status
-				if b.DurMs == 0 && b.StartedAt > 0 {
-					b.DurMs = millis(ts) - b.StartedAt
-				}
-				if e.Usage != nil {
-					b.Usage = taskUsageFromCore(*e.Usage)
-				}
-				r.blocks[i] = b
-			}
+	// 只结算**最新**一张卡：旧 run 的卡已经由它自己的 AgentEnd 结算过，
+	// 不能被下一轮的 TaskEnd 改写（时长/用量/结果都属于各自的运行）。
+	idx := r.latestTaskCardLocked(e.TaskId, false)
+	if idx < 0 {
+		return
+	}
+	b := r.blocks[idx]
+	switch b.Kind {
+	case blockKindAgent, blockKindAsyncTask:
+		b.Status = status
+		if b.Kind == blockKindAsyncTask {
+			b.EndedAt = millis(ts)
+		} else if b.DurMs == 0 && b.SpawnedAt > 0 {
+			b.DurMs = millis(ts) - b.SpawnedAt
+		}
+		if e.Usage != nil {
+			b.Usage = taskUsageFromCore(*e.Usage) // 权威全量（含压缩轮）+ 成本
+		}
+	case blockKindTool:
+		b.Status = statusDone
+		b.TaskStatus = status
+		if b.DurMs == 0 && b.StartedAt > 0 {
+			b.DurMs = millis(ts) - b.StartedAt
+		}
+		if e.Usage != nil {
+			b.Usage = taskUsageFromCore(*e.Usage)
 		}
 	}
+	r.blocks[idx] = b
 }
 
-// applyTaskResultDeliveredLocked 回填任务结果（agent/async_task/promoted tool；
-// 找不到任务时保留独立结果块；taskId 幂等）。
+// afterRunFlag 记录类块的 AfterRun 盖章值（false 也要写出去，见 Block.AfterRun 的注释）。
+func afterRunFlag(v bool) *bool { return &v }
+
 // runLiveLocked 顶层 run（kind=run 且无 parent）是否还在跑 —— 与前端 runEnded 同一事实源。
 // 记录类块的 AfterRun 由它盖章（见 Block.AfterRun 的注释）。
 func (r *ViewReducer) runLiveLocked() bool {
@@ -2807,6 +3104,8 @@ func (r *ViewReducer) runLiveLocked() bool {
 	return false
 }
 
+// applyTaskResultDeliveredLocked 回填任务结果（agent/async_task/promoted tool；
+// 找不到任务时保留独立结果块；taskId 幂等）。
 func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDelivered) {
 	r.flushChunkLocked()
 	key := taskLifecycleKey("task_result", e.TaskId, e.Timestamp)
@@ -2829,20 +3128,14 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 			status = statusCompleted
 		}
 	}
-	idx := -1
-	for i := range r.blocks {
-		b := r.blocks[i]
-		if (b.Kind == blockKindAgent || b.Kind == blockKindAsyncTask || b.Kind == blockKindTool) && b.TaskID == e.TaskId {
-			idx = i
-			break
-		}
-	}
+	// 最新一张卡：agent_resume 的上一轮已经结算过，结果/已交付标记不能回写到旧卡。
+	idx := r.latestTaskCardLocked(e.TaskId, true)
 	if idx < 0 {
 		// 旧日志/异常顺序找不到任务：保留结果块避免丢失（去重后仅一次）。
 		// 落位同前端：按事件时刻插到它发生的位置，不一律堆到最底部。
 		at := r.insertAtAfterTsLocked(-1, millis(ts))
 		r.insertBlockAtLocked(at, Block{Kind: blockKindTaskResult, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId, Result: e.Result, Error: e.Error, Ts: millis(ts)})
-		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts), AfterRun: !r.runLiveLocked()})
+		r.insertBlockAtLocked(at+1, Block{Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId, Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts), AfterRun: afterRunFlag(!r.runLiveLocked())})
 		return
 	}
 	b := r.blocks[idx]
@@ -2882,7 +3175,7 @@ func (r *ViewReducer) applyTaskResultDeliveredLocked(e *events.TaskResultDeliver
 		r.insertBlockAtLocked(at, Block{
 			Kind: blockKindTaskDelivery, ID: r.nextBlockID(), TaskID: e.TaskId, ParentTaskID: e.ParentTaskId,
 			Status: status, Result: e.Result, Error: e.Error, Ts: millis(ts),
-			AfterRun: !r.runLiveLocked(),
+			AfterRun: afterRunFlag(!r.runLiveLocked()),
 		})
 	}
 }
@@ -2898,7 +3191,7 @@ func (r *ViewReducer) applyCompressStartLocked(e *events.CompressStart) {
 			b := r.blocks[idx]
 			b.Items = append(b.Items, AgentItem{
 				Kind: agentItemCompression, Before: e.Before, After: e.Before,
-				Reason: e.Reason, Active: true, StartedAt: millis(started),
+				Reason: e.Reason, Active: true, StartedAt: millis(started), RunID: e.RunId,
 			})
 			r.blocks[idx] = b
 			r.markBlockDirty(b.ID)
@@ -2947,7 +3240,7 @@ func (r *ViewReducer) applyCompressEndLocked(e *events.CompressEnd, meta EventMe
 				Kind: agentItemCompression, Before: e.Before, After: e.After,
 				CtxTokens: e.CtxTokens, CtxTokensBefore: e.CtxTokensBefore, Reason: e.Reason, Model: e.Model,
 				Summary: e.Summary, Usage: taskUsagePtr(e.Usage), Error: e.Error,
-				Aborted: aborted, Active: false, DurMs: durMs, Analysis: e.Analysis,
+				Aborted: aborted, Active: false, DurMs: durMs, Analysis: e.Analysis, RunID: e.RunId,
 			})
 			r.blocks[idx] = b
 			r.markBlockDirty(b.ID)
@@ -3173,7 +3466,16 @@ func (r *ViewReducer) clearLocked() {
 	r.blocks = []Block{{Kind: blockKindDivider, ID: r.nextBlockID(), DividerReason: "clear", Ts: nowMillis()}}
 	r.runNodes = []RunNode{}
 	r.pendingQuestions = nil
+	// 清空上下文：窗口外的块不再需要，释放映射（否则每次 clear 漏一个 mmap）。
+	if r.paged != nil && r.paged.Release != nil {
+		r.paged.Release()
+	}
+	r.paged = nil
 	r.turns = []Turn{}
+	r.turnsTotal = 0
+	// 清空 = 新一代：历史轮次仍留在日志里（只追加），但当前 record 的
+	// turns_total 归零，UI 不会把上一代算进来。
+	r.turnsPending = nil
 	r.diffs = []Diff{}
 	r.lastRun = nil
 	r.lastError = nil
@@ -3473,13 +3775,16 @@ func taskUsagePtr(u *core.Usage) *Usage {
 	return &agg
 }
 
-func upsertAgentErrorItem(items []AgentItem, text string) []AgentItem {
+func upsertAgentErrorItem(items []AgentItem, text, runID string) []AgentItem {
 	out := append([]AgentItem{}, items...)
 	if n := len(out); n > 0 && out[n-1].Kind == agentItemText && out[n-1].IsError {
 		out[n-1].Text = text
+		if out[n-1].RunID == "" {
+			out[n-1].RunID = runID
+		}
 		return out
 	}
-	item := AgentItem{Kind: agentItemText, Text: text, IsError: true}
+	item := AgentItem{Kind: agentItemText, Text: text, IsError: true, RunID: runID}
 	return append(out, item)
 }
 
@@ -3790,18 +4095,29 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	// 正确做法：以快照为唯一事实来源，total/tail/骨架全部来自同一份 cp.Blocks。
 	cp := r.snapshotLocked()
 	blocks := cp.Blocks
-	total := len(blocks)
-	if limit <= 0 || limit >= total {
+	total := r.blocksTotal
+	if total < len(blocks) {
+		total = len(blocks)
+	}
+	if limit <= 0 || limit >= len(blocks) {
 		// 不截断：走全量编码（带逐块字节缓存）。**不能**在这里自己拼 JSON ——
 		// 那会绕过 blockBytes 缓存，让每个会话每次打开都重新序列化全部块（小会话也变慢）。
-		view, _, err := r.marshalLockedSpans()
+		view, _, _, err := r.marshalLockedSpans()
 		if err != nil {
 			return nil, err
 		}
 		return &PartialView{View: view, Total: total, Returned: total}, nil
 	}
 
-	start := total - limit
+	// 尾部只能从「实际拿到的块」里切，不能按 total 切：
+	// 窗口恢复（paged）时 total 是**历史总块数**，而 cp.Blocks 只装了解码过的窗口尾部，
+	// 两者可以差很远（实测 10294 vs 496）——按 total 切会越界 panic
+	// （slice bounds out of range [10294:496]，2026-11-08 实测命中）。
+	// 非窗口模式下 total == len(blocks)，下面的算法与旧写法等价。
+	start := len(blocks) - limit
+	if start < 0 {
+		start = 0
+	}
 	tail := blocks[start:]
 	cursor := tail[0].ID
 
@@ -3813,7 +4129,10 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	// 裁的是**发给 UI 的这份投影**，不影响 r.turns 本身，也不影响持久化：
 	// 提交路径走 marshalLockedSpans（全量），与这里互不影响。
 	// turns_total 让 UI 显示真实回合数，避免「加载了多少就显示多少」的错数。
-	turnsTotal := len(cp.Turns)
+	turnsTotal := r.turnsTotal
+	if turnsTotal <= 0 {
+		turnsTotal = len(cp.Turns)
+	}
 	if len(cp.Turns) > limit {
 		cp.Turns = cp.Turns[len(cp.Turns)-limit:]
 	}
@@ -3833,7 +4152,7 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	idx := bytes.Index(head, []byte(placeholder))
 	if idx < 0 {
 		// 结构异常 → 退回全量（正确性优先）
-		view, _, merr := r.marshalLockedSpans()
+		view, _, _, merr := r.marshalLockedSpans()
 		if merr != nil {
 			return nil, merr
 		}
@@ -3951,9 +4270,16 @@ func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.R
 	// 代价：每页复制一次 blocks 切片（浅拷贝切片头 + 结构体数组）。21890 个 Block
 	// 结构体的拷贝是 ~10MB memcpy（实测数 ms），相对「返回错误数据」完全可接受。
 	// 只有真的翻页才走这里，打开热路径（MarshalTail）不受影响。
+	// 窗口恢复：请求的游标早于内存里最早的块 → 直接从 sidecar 映射解一页。
+	if r.paged != nil && beforeID > 0 && len(r.paged.IDs) > 0 && (len(r.blocks) == 0 || beforeID <= r.blocks[0].ID) {
+		return r.readPagedPageLocked(beforeID, limit)
+	}
 	snap := r.snapshotLocked()
 	view := snap.Blocks
-	total = len(view)
+	total = len(view) // 归一化后的真实条数（空壳 assistant 块已丢弃）
+	if r.paged != nil && r.blocksTotal > total {
+		total = r.blocksTotal // 窗口恢复：总数含未加载进内存的历史块
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -3962,7 +4288,18 @@ func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.R
 	if beforeID > 0 {
 		// 用二分：blocks 按 id 严格递增（blockSeq 单调分配），
 		// 线性扫描在长会话里是 21890 次比较/页，没有必要。
-		end = sort.Search(total, func(i int) bool { return view[i].ID >= beforeID })
+		//
+		// 二分的范围必须是**实际拿到的块**，不是 total：窗口恢复（paged）时 total 是
+		// 历史总块数（实测 10294），view 只装窗口内的块（496）——按 total 二分会
+		// 让谓词索引到 view 之外，index out of range 直接崩掉 bridge
+		// （2026-11-08 实测崩于 view_reducer.go:4288，症状是「新建会话/发消息
+		// 全部无反应」——bridge 死了，命令无人应答）。
+		// 非窗口模式下 total == len(view)，范围与旧写法一致。
+		n := len(view)
+		if n > total {
+			n = total
+		}
+		end = sort.Search(n, func(i int) bool { return view[i].ID >= beforeID })
 	}
 	start := end - limit
 	if start < 0 {
@@ -3998,4 +4335,104 @@ func (r *ViewReducer) BlockCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.blocks)
+}
+
+// turnsBodyWindow 是 record body 里保留的 turns 条数。
+//
+// 为什么是 512：UI 只用「总条数 + 最后两条」（Statusbar/Composer），而
+// PartialView 打开时按 blocks_limit 裁剪 turns —— 512 足够覆盖任何合理的
+// 首屏窗口，同时让 body 的 turns 部分稳定在 ~140KB（而不是 24MB）。
+// 历史轮次不丢：它们在 <record>.turns 追加日志里。
+const turnsBodyWindow = 512
+
+// appendTurnLocked 是唯一的 turns 追加入口：同步维护总条数与待落盘队列。
+func (r *ViewReducer) appendTurnLocked(t Turn) {
+	r.turns = append(r.turns, t)
+	r.turnsTotal++
+	r.turnsPending = append(r.turnsPending, t)
+}
+
+// turnsWindowLocked 返回要写进 body 的尾部窗口（拷贝，避免与 r.turns 共享）。
+func (r *ViewReducer) turnsWindowLocked() []Turn {
+	if len(r.turns) <= turnsBodyWindow {
+		return cloneTurns(r.turns)
+	}
+	out := make([]Turn, turnsBodyWindow)
+	copy(out, r.turns[len(r.turns)-turnsBodyWindow:])
+	return out
+}
+
+// TurnsTotal 返回历史总条数（提交路径判断「body 窗口是否已覆盖全部轮次」用）。
+func (r *ViewReducer) TurnsTotal() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.turnsTotal > 0 {
+		return r.turnsTotal
+	}
+	return len(r.turns)
+}
+
+// TakePendingTurns 取走「尚未写进 turns 日志」的轮次（提交路径调用）。
+//
+// 只有成功追加到日志后调用方才应丢弃返回值；失败时轮次仍在 reducer 里，
+// 下次提交重试 —— 这样「日志写失败」不会静默丢历史。
+func (r *ViewReducer) TakePendingTurns() []Turn {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.turnsPending) == 0 {
+		return nil
+	}
+	out := r.turnsPending
+	r.turnsPending = nil
+	return out
+}
+
+// RestorePendingTurns 在日志追加失败时把轮次放回队列（保持顺序）。
+func (r *ViewReducer) RestorePendingTurns(turns []Turn) {
+	if len(turns) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.turnsPending = append(turns, r.turnsPending...)
+}
+
+// readPagedPageLocked 从 PagedBlocks（sidecar 映射）里解一页。
+//
+// 只在「窗口恢复 + 游标早于内存窗口」时走这里：翻历史时按页付解码成本，
+// 而不是打开时把 209MB 全解一遍。
+func (r *ViewReducer) readPagedPageLocked(beforeID uint64, limit int) (blocks []json.RawMessage, nextCursor uint64, hasMore bool, total int, err error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	total = r.blocksTotal
+	ids := r.paged.IDs
+	end := sort.Search(len(ids), func(i int) bool { return ids[i] >= beforeID })
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	if end <= 0 {
+		return nil, 0, false, total, nil
+	}
+	spans := r.paged.Spans[start:end]
+	var hashes [][8]byte
+	if len(r.paged.Hashes) == len(ids) {
+		hashes = r.paged.Hashes[start:end]
+	}
+	decoded := make([]Block, len(spans))
+	if err := decodeBlocksParallel(spans, hashes, decoded); err != nil {
+		return nil, 0, false, total, err
+	}
+	blocks = make([]json.RawMessage, 0, len(decoded))
+	for i := range decoded {
+		b, merr := json.Marshal(&decoded[i])
+		if merr != nil {
+			return nil, 0, false, total, merr
+		}
+		blocks = append(blocks, b)
+	}
+	nextCursor = decoded[0].ID
+	hasMore = start > 0
+	return blocks, nextCursor, hasMore, total, nil
 }

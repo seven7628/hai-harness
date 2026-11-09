@@ -991,5 +991,31 @@ assert.strictEqual(signalsIn('s1').length, 1, '本会话的摘离仍要有一行
 assert.strictEqual(own.find((b) => b.kind === 'tool' && b.taskId === 'tk-own')?.promoted, true, '工具行切后台态')
 console.log('PASS 场景23：摘离信号按 session/任务归属，归属不明则丢弃（不再串台）')
 
+// ===== 场景 24：运行中到达的回执归**当前轮**，不按卡片所在轮 =====
+// 用户 2026-11 截图：后台子 agent 的卡片在几轮之前，运行中到达的 `Task … completed`
+// 按卡片落位 → 被插回旧轮（跟自己的工作行分家），而 Go reducer 按事件时刻把它放在
+// 当前运行的中间。判据：运行中到达（afterRun=false）→ 当前轮、按事件时刻；
+// 交卷后到达（afterRun=true）→ 才回卡片所在轮（避免算进下一轮）。
+setup()
+const b24 = Date.now() - 60_000
+const at24 = (ms) => new Date(b24 + ms).toISOString()
+EV('agent_start', { run_id: 'r24-a', timestamp: at24(0) })
+EV('user_inputs_consumed', { user_texts: ['第一轮的问题'], timestamp: at24(10) })
+EV('task_started', { task_id: 'tk24', run_id: 'r24-a', name: 'bg', timestamp: at24(20) })
+EV('agent_end', { run_id: 'r24-a', finish_reason: 'stop', timestamp: at24(100) })
+EV('user_inputs_consumed', { user_texts: ['第二轮的问题'], timestamp: at24(200) })
+EV('agent_start', { run_id: 'r24-b', timestamp: at24(210) })
+EV('tool_start', { id: 'x24', name: 'bash', arguments: '{"command":"x"}', run_id: 'r24-b', timestamp: at24(220) })
+// 第二轮**运行中**：后台任务（卡片在第一轮）完成
+EV('task_result_delivered', { task_id: 'tk24', status: 'completed', result: 'done', timestamp: at24(300) })
+const blocks24 = useAppStore.getState().views.s1.blocks
+const lastUser24 = blocks24.map((b) => b.kind).lastIndexOf('user')
+const d24 = blocks24.findIndex((b) => b.kind === 'task_delivery' && b.taskId === 'tk24')
+assert.ok(lastUser24 >= 0 && d24 >= 0, '第二轮的用户消息与回执都要在')
+assert.ok(d24 > lastUser24, `运行中到达的回执必须落在**当前轮**内部（回执@${d24}, user@${lastUser24}）`)
+const delivery24 = blocks24[d24]
+assert.equal(delivery24.afterRun, false, '运行中到达的回执必须显式记 afterRun:false（恢复后仍能判）')
+console.log('PASS 场景24：运行中到达的回执落在当前轮内部（不按卡片回旧轮），afterRun 显式盖章')
+
 console.log('STORE_TEST_PASS')
 process.exit(0)

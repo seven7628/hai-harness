@@ -93,9 +93,10 @@ func TestIncrementalMarshalMatchesFull(t *testing.T) {
 // 这是本优化**唯一**的正确性前提：缓存按 block id 复用序列化字节，
 // 由写入方（applyLocked 里的 r.blocks[idx]=b / 新建块）标脏来决定何时重算。
 // 曾试过两种「不依赖标脏」的替代方案，都被证明会返回陈旧字节：
-//   · 手写字段清单指纹 —— 漏了 Block.Result（被本文件的一致性测试抓到）；
-//   · 「终态块内容永不变」假设 —— 工具 running→done 后仍会被原地补内容
-//     （被 session 包的 TestSidecarRewritesLiveBlocks 抓到）。
+//
+//	· 手写字段清单指纹 —— 漏了 Block.Result（被本文件的一致性测试抓到）；
+//	· 「终态块内容永不变」假设 —— 工具 running→done 后仍会被原地补内容
+//	  （被 session 包的 TestSidecarRewritesLiveBlocks 抓到）。
 func TestBlockCacheHonorsDirtyMarkers(t *testing.T) {
 	r := NewViewReducer()
 	ts := time.Now()

@@ -371,6 +371,8 @@ type bridgeSession struct {
 	hubExpireNeeds func()
 	workspace      string     // 工作区根（审批 diff 读取原文件用）
 	mobile         *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// lastUsed 最近一次被宿主访问（open/切回）的时间，供空闲会话 LRU 淘汰。
+	lastUsed atomic.Int64 // unix nanos
 	// running 主 run 是否在跑（**根** agent_start → true / 根 agent_end → false）。
 	// 子 agent 的 agent_end 也走同一个 emit，过滤 ParentRunId/Depth，否则根 run 还在跑
 	// 就被标成空闲，Hub 闸门会把任务直派进正在跑的会话（P2-03 复审 B1）。
@@ -764,9 +766,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 		}
 	case *events.ToolResponse:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
-		if strings.HasPrefix(ev.Name, "todo_") {
+		if todoResponseCarriesSnapshot(ev) {
 			// 快照属主 = 发出本次调用的运行（事件携带；见 events.ToolResponse.Todos）：
 			// 子 agent 的 todo_* 带它自己那份清单，主会话清单不得被顶掉。
+			// 判据同时覆盖**编排型工具**（codemode）：脚本里的 todo_* 是嵌套调用、不发
+			// 事件，快照由外层响应代发（见 todoResponseCarriesSnapshot）。
 			extras = map[string]any{"todos": todosOf(bs, ev.Todos)}
 		}
 		if strings.HasPrefix(ev.Name, "Cron") {
@@ -1580,6 +1584,12 @@ func (m *manager) readOnlyConvertSandbox(workspace, scope string) sandbox.Sandbo
 }
 
 // runtime 取（或懒创建）workspace 运行态：storeDir 与会话均按工作区隔离
+// restoreWindowBlocks 是冷恢复默认解码的尾部块数。
+//
+// 500 块 ≈ 3.5MB，解码 ~5ms；其余留在 sidecar 按页取（ReadBlockPage）。
+// 不能更小：首屏一次要渲染的块（含正在跑的工具输出）基本都在这个范围内。
+const restoreWindowBlocks = 500
+
 func (m *manager) runtime(path string) *workspaceRuntime {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1751,6 +1761,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	// 会话已在进程内（切走再切回 / 后台仍活跃）→ 复用，不重建：避免丢内存态与 goroutine 泄漏
 	ws.mu.Lock()
 	if existing, ok := ws.sessions[id]; ok {
+		existing.lastUsed.Store(time.Now().UnixNano())
 		ws.mu.Unlock()
 		return existing, nil
 	}
@@ -1792,8 +1803,22 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	recordCorrupt := false // record 在但读不出来 → 打开时要靠事件重放自愈（见字段注释）
 	if !opts.noRecord {
 		if recordStore, recordSetupErr = newRecordStore(); recordSetupErr == nil {
-			if rec, lerr := recordStore.LoadRecord(context.Background(), wsKey, id); lerr == nil {
-				if cp, perr := parseCheckpoint(rec.ViewCheckpoint); perr == nil {
+			// sidecar 回收默认放后台（见 session/compact_scheduler.go）：
+			// settings.checkpoint.background_compact=false 可回退到同步回收。
+			recordStore.SetBackgroundCompact(loadCheckpointSettings().backgroundCompact())
+			// LoadRecordForView 不拼装 blocks（spans 指向 sidecar 只读映射），
+			// 省掉 ReadAt(209MB)+sha256+拼 buffer+二次复制（实测 347ms）；
+			// payload 完整性下沉到并行解码时逐块校验（见 decodeBlocksParallel）。
+			if rec, lerr := recordStore.LoadRecordForView(context.Background(), wsKey, id); lerr == nil {
+				// 快路径：sidecar 引用形态走「骨架 + 并行块解码」（210MB 单线程
+				// 1.1~2.2s → 实测 ~250ms）；旧格式内嵌 blocks 自动回退整份解析。
+				// 窗口恢复：只解尾部 + 卡片块，其余按需分页（Marshal 无 limit 时
+				// 会自动物化全量，旧 UI 的「历史消息看不到」红线不受影响）。
+				cp, perr := parseCheckpointFromRecordWindow(rec, restoreWindowBlocks)
+				if cp == nil || cp.PagedBlocks == nil {
+					rec.ReleaseView() // 没有分页句柄 → 解码完即可释放映射
+				}
+				if perr == nil {
 					if err := reducer.Restore(cp); err == nil {
 						reducer.NormalizeForRestore() // 重启后 running → 终态（done/abandoned）
 					}
@@ -1979,8 +2004,10 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		}
 		bs.wakeRun() // 空闲续跑：run loop 已回（队列空）→ 唤醒再跑取走任务结果
 	})
+	bs.lastUsed.Store(time.Now().UnixNano())
 	ws.mu.Lock()
 	ws.sessions[id] = bs
+	m.evictIdleSessionsLocked(ws, id)
 	ws.mu.Unlock()
 	// Session Mesh 注册（本机会话入 Hub 注册表；重复注册幂等忽略——进程内复用路径已挡）
 	// Hub 智能体会话**不注册**（方案 §6.1.2 第 3 点）：一旦进 mesh，工作区主会话的
@@ -3283,6 +3310,9 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		m.resp(c, true, "", map[string]any{"provider": providerName, "base_url": baseURL, "models": models, "count": len(models)})
+
+	case CmdProviderBilling: // 余额 / 配额窗口（Provider 设置页计量区；见 billing_commands.go）
+		m.providerBilling(c)
 
 	case CmdListProviderPresets: // 内置 Provider 预设列表（前端下拉可选；用户添加后才生效）
 		// 返回全部预设（含已配置的默认 5 家 + P1 可选）；前端据此渲染「添加 Provider」下拉。
@@ -6675,5 +6705,71 @@ func main() {
 	if err := serve(); err != nil {
 		fmt.Fprintln(os.Stderr, "✗", err)
 		os.Exit(1)
+	}
+}
+
+// 空闲会话 LRU。
+//
+// ## 预算怎么来的（2026-11-08 实测，不是估）
+//
+//	pprof inuse_space：20 个真实会话并存仅 5.6MB（≈0.3MB/会话）——500 块窗口的
+//	文本 0.5MB、512 条 turns、34k 个 span 头都算上。mmap 是虚拟地址 + page cache，
+//	多会话共享，不按会话倍增。
+//
+// 所以 256MB 能装 ~170 个会话，内存根本不是先触顶的那个：真正先耗尽的是
+// **打开的映射/文件句柄**。判据因此取「内存预算 ÷ 保守单会话成本」与「句柄上限」
+// 的较小者。
+const (
+	sessionMemBudgetBytes = 256 << 20
+	sessionLiveCostBytes  = 1500 << 10 // 保守：堆 0.3MB + 映射头 1.2MB
+	maxLiveSessionsHard   = 64         // 句柄/映射上限，先于内存预算触发
+	// sessionEvictGrace 是「最近被访问过就不淘汰」的窗口：新会话首提交的 debounce
+	// 是 800ms，留 10s 足够让 coordinator 把最后一次提交落盘，避免淘汰丢改动。
+	sessionEvictGrace = 10 * time.Second
+)
+
+// maxLiveSessions 是同时驻留的空闲会话上限。
+func maxLiveSessions() int {
+	n := int(sessionMemBudgetBytes / sessionLiveCostBytes)
+	if n > maxLiveSessionsHard {
+		n = maxLiveSessionsHard
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// evictIdleSessionsLocked 在新增会话后按 LRU 淘汰空闲会话（调用方持 ws.mu）。
+//
+// 绝不淘汰：刚创建的 keepID、有 run 在跑的、10s 内被访问过的。
+// 若候选都不满足（全在跑），**允许超预算** —— 不为了守预算打断运行中的 run。
+func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
+	limit := maxLiveSessions()
+	for len(ws.sessions) > limit {
+		var victim *bridgeSession
+		var oldest int64
+		now := time.Now()
+		for id, bs := range ws.sessions {
+			if id == keepID || bs.running.Load() {
+				continue
+			}
+			if now.Sub(time.Unix(0, bs.lastUsed.Load())) < sessionEvictGrace {
+				continue
+			}
+			if victim == nil || bs.lastUsed.Load() < oldest {
+				victim, oldest = bs, bs.lastUsed.Load()
+			}
+		}
+		if victim == nil {
+			startupLog("A7.evictSkip: 无空闲会话可淘汰，超过上限继续运行", now)
+			return
+		}
+		delete(ws.sessions, victim.id)
+		victim.cancel()
+		if m.hub != nil {
+			m.hub.Unregister(victim.id)
+		}
+		startupLog("A7.evict: "+victim.id, now)
 	}
 }

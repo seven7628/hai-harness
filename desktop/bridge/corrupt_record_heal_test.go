@@ -49,6 +49,30 @@ func appendStaleBlock(t *testing.T, path, id string, payload []byte) {
 	}
 }
 
+// appendBlockDelete 往 sidecar 末尾追加一条删除记录（kind=2，空 payload）。
+// 这是真正的数据缺失：被 record 引用的块被删掉。
+func appendBlockDelete(t *testing.T, path, id string) {
+	t.Helper()
+	buf := make([]byte, 0, 16+len(id))
+	buf = append(buf, 2) // blockRecDel
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(id)))
+	buf = append(buf, n[:]...)
+	buf = append(buf, id...)
+	binary.BigEndian.PutUint32(n[:], 0)
+	buf = append(buf, n[:]...)
+	sum := sha256.Sum256(nil)
+	buf = append(buf, sum[:8]...)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(buf); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCorruptRecordHealsFromEventLog(t *testing.T) {
 	ws := t.TempDir()
 	m, buf := testManager(t)
@@ -69,12 +93,24 @@ func TestCorruptRecordHealsFromEventLog(t *testing.T) {
 	if err := store.CommitRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	// ② 制造现场：sidecar 里多出一个不被引用的块（等价于「块集合变小过」）
 	path, err := store.RecordPath(wsKey, sid)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// ②a 反向契约：sidecar 里多出**不被引用**的块，不能算损坏。
+	//
+	// 这正是 checkpoint 30s 超时留下的现场（sidecar 已前进、record 未换）。
+	// 旧实现要求「引用集合 == sidecar 全集」严格相等，于是这种现场让会话
+	// 永久读不出来 —— 撕裂态被误判成损坏，而自愈又依赖事件日志。
 	appendStaleBlock(t, path+".blocks", "999", []byte(`{"id":999,"kind":"assistant","text":"陈旧"}`))
+	if _, err := store.LoadRecord(ctx, wsKey, sid); err != nil {
+		t.Fatalf("追加未被引用的块后会话不可读（撕裂态被当成损坏）: %v", err)
+	}
+
+	// ②b 制造真正的损坏：被引用的块被删掉（数据缺失）→ 必须读不出来，
+	// 才会走事件日志自愈。
+	appendBlockDelete(t, path+".blocks", "2")
 	if _, err := store.LoadRecord(ctx, wsKey, sid); err == nil {
 		t.Fatal("前置条件不成立：这份 record 应当读不出来（否则测的不是自愈路径）")
 	}

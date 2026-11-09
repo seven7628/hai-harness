@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -73,6 +74,117 @@ type blocksRefDoc struct {
 	Sum    string `json:"sum"`
 	Count  int    `json:"count"`
 	Schema int    `json:"schema"`
+	// IDs 是这条 record 引用的块 id（升序）。
+	//
+	// 为什么必须写进 record（2026-11-08）：旧引用只有 (count,sum)，读取时只能
+	// 与「sidecar 索引全集」严格比对 —— 于是任何一次后续提交（哪怕只是**追加**
+	// 一个新块）都会让上一版 record 与 .bak 同时失效：
+	//
+	//	· 超时/崩溃发生在 sidecar flush 之后 → 磁盘上 record 与 sidecar 不匹配
+	//	  → 会话再也读不出来（真实故障，30s checkpoint 超时后必现）；
+	//	· .bak 永远比当前 sidecar 旧 → 兜底路径 100% 不可用。
+	//
+	// 有了 ids，读取只校验「我引用的这些块」是否存在且内容一致，
+	// sidecar 里多出来的块（后续提交/废弃版本）不再影响可读性。
+	IDs []uint64 `json:"ids,omitempty"`
+
+	// Range 是「id 连续」时的紧凑写法（min..max），此时省略 IDs。
+	//
+	// 为什么需要：块 id 由 reducer 单调分配，正常情况下是一个连续的 1..N 集合，
+	// 30k 块写成 IDs 数组是约 210KB/次提交的 JSON（真实会话 30,885 块）；
+	// 用 range 只需 30 字节。稀疏集合（发生过裁剪/清空后的洞）仍写 IDs。
+	Range *idRange `json:"range,omitempty"`
+
+	// Missing 是 Range 里的「洞」（被裁剪/清空后不再引用的 id，通常个位数）。
+	// 真实会话实测：31,040 个引用、max=31,042 —— 3 个洞，写成 missing 只有 20 字节。
+	Missing []uint64 `json:"missing,omitempty"`
+}
+
+// idRange 是闭区间 [Min, Max]。
+type idRange struct {
+	Min uint64 `json:"min"`
+	Max uint64 `json:"max"`
+}
+
+// refIDs 展开引用里的 id 集合（IDs 优先；否则按 Range 连续展开）。
+func (r blocksRefDoc) refIDs() []uint64 {
+	if len(r.IDs) > 0 {
+		return r.IDs
+	}
+	if r.Range != nil && r.Range.Max >= r.Range.Min {
+		hole := make(map[uint64]struct{}, len(r.Missing))
+		for _, v := range r.Missing {
+			hole[v] = struct{}{}
+		}
+		out := make([]uint64, 0, r.Range.Max-r.Range.Min+1)
+		for v := r.Range.Min; v <= r.Range.Max; v++ {
+			if _, ok := hole[v]; ok {
+				continue
+			}
+			out = append(out, v)
+		}
+		return out
+	}
+	return nil
+}
+
+// maybeDenseRange 在 id 连续时把 IDs 换成 Range，省掉 30k 个数字
+// （真实会话约 210KB/次提交的 JSON）。
+func (r *blocksRefDoc) maybeDenseRange() {
+	if len(r.IDs) < 2 {
+		return
+	}
+	lo, hi := r.IDs[0], r.IDs[len(r.IDs)-1]
+	span := hi - lo + 1
+	if span < uint64(len(r.IDs)) {
+		return
+	}
+	holes := span - uint64(len(r.IDs))
+	// 洞太多（超过 1% 或 64 个）就不值得用 range，直接写 ids。
+	// 判据按「序列化字节数」比较，而不是拍一个百分比：ids 每个约 6.3 字节，
+	// missing 也是每个约 6.3 字节 —— 所以只要洞比引用少，写 missing 就更小。
+	// 真实会话实测：n=30,947、hi=34,495、洞=3,548（10.3%）→ missing 约 25KB，
+	// 而 ids 是 200KB。（早先按 10% 卡，正好把这条挡在门外。）
+	if holes > uint64(len(r.IDs)) || holes > 8192 {
+		return
+	}
+	missing := make([]uint64, 0, holes)
+	next := lo
+	for _, v := range r.IDs {
+		for next < v {
+			missing = append(missing, next)
+			next++
+		}
+		next = v + 1
+	}
+	r.Range = &idRange{Min: lo, Max: hi}
+	r.Missing = missing
+	r.IDs = nil
+}
+
+// refCount 返回引用集合的块数（Range 形态下 count 仍是权威值）。
+func (r blocksRefDoc) refCount() int {
+	if len(r.IDs) > 0 {
+		return len(r.IDs)
+	}
+	if r.Range != nil && r.Count > 0 {
+		return r.Count
+	}
+	return r.Count
+}
+
+// sortedIDNums 把 id 字符串转成升序的数值列表（写引用时用）。
+func sortedIDNums(ids []string) ([]uint64, error) {
+	nums := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		v, err := parseUintID(id)
+		if err != nil {
+			return nil, err
+		}
+		nums = append(nums, v)
+	}
+	sortUint64s(nums)
+	return nums, nil
 }
 
 // blockStore 是 append-only 的 block 序列化缓存。
@@ -117,12 +229,28 @@ type blockStore struct {
 	staleRecords   int64
 	// bytesWritten 是历史累计写入字节（含废弃），用于估算放大倍数。
 	bytesWritten int64
+	// hashedBytes 是累计被哈希校验的 payload 字节数（可观测性/测试用）。
+	// 提交路径的 sha256 成本直接由它体现：脏块快路径生效时它应当为 0。
+	hashedBytes int64
+	// liveBytes 是索引里当前有效记录占用的字节数（含每条记录的头部与摘要）。
+	//
+	// 为什么需要它：compact 判据原本只看「废弃条数/总条数」。真实会话里废弃的
+	// 恰恰是**大块**（子智能体卡片 running 期整块重写），条数占比 18% 而字节
+	// 占比 94% —— 判据看不见的前者让 3.45GB 的文件永不回收。
+	// 维护成本 O(1)：put/delete 各加减一次，重建时按索引求和。
+	liveBytes int64
+}
+
+// blockRecordSize 是一条 sidecar 记录的总字节数（头 + payload + 摘要）。
+func blockRecordSize(id string, payloadLen int) int64 {
+	return int64(1 + 4 + len(id) + 4 + payloadLen + 8)
 }
 
 type blockRef struct {
 	off  int64
 	n    int32
 	hash [8]byte // 该 id 当前 payload 的内容摘要
+	kind uint8   // 块类型编码（见 blockKind* 常量；0 = 未知）
 }
 
 // unchanged 报告同 id 的新内容是否与已缓存的一致。
@@ -301,6 +429,7 @@ func (bs *blockStore) rebuild() error {
 				bs.sortedIDs = sorted
 			}
 			bs.nBytes = size
+			bs.recomputeLiveBytes()
 			return bs.startWriter()
 		case covered > size:
 			// 索引超前（sidecar 被 compact/截断过）→ 视为不可用，全量重建。
@@ -343,14 +472,32 @@ func (bs *blockStore) rebuild() error {
 		recLen := int64(len(head) + len(payload) + 8)
 		switch kind {
 		case blockRecPut:
-			bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: payloadDigest(payload)}
+			bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: payloadDigest(payload), kind: blockKindCode(payload)}
 		case blockRecDel:
 			delete(bs.index, id)
 		}
 		pos += recLen
 	}
 	bs.nBytes = pos
-	return bs.startWriter()
+	bs.recomputeLiveBytes()
+	if err := bs.startWriter(); err != nil {
+		return err
+	}
+	// 走到这里说明刚才**全量扫过一遍** sidecar（索引缺失 / 超前 / 损坏）。
+	// 必须立刻把索引落盘，否则下次打开还会重扫 —— 真实 1.5GB 侧车每次 ~80ms，
+	// 而且这条路会被「compact 之后索引暂时超前」反复触发。
+	// 失败不影响正确性（下次再扫一遍），所以只忽略。
+	_ = bs.persistIndex()
+	return nil
+}
+
+// recomputeLiveBytes 按索引重算有效字节（打开/重建/compact 后调用，O(块数)）。
+func (bs *blockStore) recomputeLiveBytes() {
+	var live int64
+	for id, ref := range bs.index {
+		live += blockRecordSize(id, int(ref.n))
+	}
+	bs.liveBytes = live
 }
 
 func (bs *blockStore) startWriter() error {
@@ -405,6 +552,10 @@ func readBlockRecord(r *bufio.Reader) (kind byte, id string, payload []byte, err
 	return k, string(idb), payload, nil
 }
 
+// PayloadDigest 是单个块 payload 的内容摘要（与索引里记录的值同口径）。
+// 导出给恢复路径：映射模式下打开时不再逐块读 payload，改由解码时并行校验。
+func PayloadDigest(p []byte) [8]byte { return payloadDigest(p) }
+
 func payloadDigest(p []byte) [8]byte {
 	s := sha256.Sum256(p)
 	var out [8]byte
@@ -427,8 +578,9 @@ func (bs *blockStore) delete(id string) error {
 	if _, err := bs.w.Write(d[:]); err != nil {
 		return err
 	}
-	if _, existed := bs.index[id]; existed {
+	if prev, existed := bs.index[id]; existed {
 		bs.staleRecords++
+		bs.liveBytes -= blockRecordSize(id, int(prev.n))
 	}
 	delete(bs.index, id)
 	bs.recordsWritten++
@@ -485,10 +637,12 @@ func (bs *blockStore) put(id string, payload []byte) error {
 	if _, err := bs.w.Write(d[:]); err != nil {
 		return err
 	}
-	if _, existed := bs.index[id]; existed {
+	if prev, existed := bs.index[id]; existed {
 		bs.staleRecords++
+		bs.liveBytes -= blockRecordSize(id, int(prev.n))
 	}
-	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: d}
+	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: d, kind: blockKindCode(payload)}
+	bs.liveBytes += blockRecordSize(id, len(payload))
 	bs.recordsWritten++
 	bs.bytesWritten += int64(len(head) + len(payload) + 8)
 	bs.sortedDirty = true
@@ -592,6 +746,7 @@ func (bs *blockStore) holdsSame(id string, payload []byte) bool {
 	if !ok {
 		return false
 	}
+	bs.hashedBytes += int64(len(payload))
 	return ref.unchanged(payload)
 }
 
@@ -610,6 +765,28 @@ func (bs *blockStore) read(id string) ([]byte, bool) {
 func (bs *blockStore) Len() int { return len(bs.index) }
 
 func blockStorePath(recordPath string) string { return recordPath + blockStoreSuffix }
+
+// refStorePath 解析引用里记录的 sidecar 文件名。
+//
+// 旧实现无条件用 recordPath+".blocks"，等于**忽略**引用里已经写下的 store 名。
+// 后果：读 `<sid>.record.json.bak` 时去找 `<sid>.record.json.bak.blocks` ——
+// 一个 8 字节的空壳，块数 0 vs N，.bak 兜底 100% 失败（现场证据：
+// .bak.blocks 只有 magic、.bak.blocks.idx 是空索引）。
+//
+// 只接受「同目录 + 裸文件名（无分隔符）+ 以 .blocks 结尾」，避免引用把读
+// 引到任意路径上。
+func refStorePath(recordPath, store string) (string, error) {
+	if store == "" {
+		return blockStorePath(recordPath), nil
+	}
+	if store != filepath.Base(store) || strings.ContainsAny(store, `/\`) {
+		return "", fmt.Errorf("block ref store must be a bare file name, got %q", store)
+	}
+	if !strings.HasSuffix(store, blockStoreSuffix) {
+		return "", fmt.Errorf("block ref store must end with %q, got %q", blockStoreSuffix, store)
+	}
+	return filepath.Join(filepath.Dir(recordPath), store), nil
+}
 
 // ---------------------------------------------------------------------------
 // 编码侧：view_checkpoint.blocks → 引用
@@ -888,7 +1065,12 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 	if serr != nil {
 		return nil, 0, serr
 	}
-	ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: setSum, Count: len(elems), Schema: 1}
+	ids, ierr := sortedIDNums(refIDs)
+	if ierr != nil {
+		return nil, 0, ierr
+	}
+	ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: setSum, Count: len(elems), Schema: 1, IDs: ids}
+	ref.maybeDenseRange()
 	refJSON, err := json.Marshal(map[string]blocksRefDoc{blocksRefKey: ref})
 	if err != nil {
 		return nil, 0, err
@@ -908,6 +1090,20 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 // 安全性完全依赖调用方保证 spans 与 view 一致（同一次 Marshal 产出）；
 // 数量对不上就回退全量路径。
 func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, int, error) {
+	return refBlocksFromSpansDirty(bs, view, spans, nil, nil, nil)
+}
+
+// refBlocksFromSpansDirty 是 refBlocksFromSpans 的脏块快路径版本。
+//
+//	dirty == nil → 逐块全量哈希（兼容旧调用方与周期性校验）
+//	ids   != nil 且与 spans 等长 → 直接用 id，不再逐个 block 解析 JSON
+//	                                （30,787 块实测省 200~400ms）
+//
+// spanIDs 与 spans 一一对应（升序）；allIDs 是 record 要引用的**全部**块 id。
+// 窗口恢复时 spans 只覆盖「窗口 + 卡片块」，allIDs 仍是全集 —— 引用必须按全集写，
+// 否则 pruneTo 会把窗口外的历史从 sidecar 里删掉（不可逆的数据丢失）。
+// allIDs 为 nil 时按 spans 自身构造（旧行为）。
+func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty map[uint64]struct{}, spanIDs []uint64, allIDs []uint64) ([]byte, int, error) {
 	if len(spans) == 0 {
 		// 空 blocks：仍要写引用，避免下次被当作旧格式。
 		// 同时把索引里残留的块清掉 —— 否则 ref.Count=0 与 store.Len()>0 对不上，
@@ -916,7 +1112,7 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 			return nil, 0, err
 		}
 		emptySum, _ := blocksSetSum(bs, nil)
-		ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: emptySum, Count: 0, Schema: 1}
+		ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: emptySum, Count: 0, Schema: 1, IDs: []uint64{}}
 		refJSON, _ := json.Marshal(map[string]blocksRefDoc{blocksRefKey: ref})
 		out, err := replaceJSONField(view, "blocks", refJSON)
 		if err != nil {
@@ -925,13 +1121,40 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 		return out, 0, nil
 	}
 
+	useIDs := len(spanIDs) == len(spans)
 	wrote := 0
-	for _, elem := range spans {
-		id, ok := blockID(elem)
-		if !ok {
-			return nil, 0, fmt.Errorf("block without id")
+	for i, elem := range spans {
+		var id string
+		if useIDs {
+			id = strconv.FormatUint(spanIDs[i], 10)
+		} else {
+			var ok bool
+			id, ok = blockID(elem)
+			if !ok {
+				return nil, 0, fmt.Errorf("block without id")
+			}
 		}
 		if isLiveBlock(elem) {
+			// running 块每个事件都可能变，一律重写（不哈希）。
+			if err := bs.put(id, elem); err != nil {
+				return nil, 0, err
+			}
+			wrote++
+			continue
+		}
+		if dirty != nil {
+			// 脏块快路径：调用方（reducer）已精确标出本轮内容变化的块，
+			// 非脏块**不再逐块 sha256**（30,755 块 / 185MB 实测是提交里
+			// sidecar 阶段的主体成本）。只做 O(1) 的存在性检查。
+			//
+			// 正确性前提：dirty 必须覆盖所有内容变化的块，否则磁盘会停在
+			// 旧版本（「卡片永不更新」那个 bug）。因此调用方要周期性传 nil
+			// 走全量校验（见 bridge 的 verifyEvery）。
+			if num, err := parseUintID(id); err == nil {
+				if _, known := dirty[num]; !known && bs.has(id) {
+					continue
+				}
+			}
 			if err := bs.put(id, elem); err != nil {
 				return nil, 0, err
 			}
@@ -946,12 +1169,29 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 		}
 		wrote++
 	}
+	// 引用集合：窗口恢复下以 allIDs 为准（全集），否则按 spans 自身。
 	refIDs2 := make([]string, 0, len(spans))
 	keep2 := make(map[string]struct{}, len(spans))
-	for _, e := range spans {
-		if id, ok := blockID(e); ok {
+	if len(allIDs) > 0 {
+		refIDs2 = make([]string, 0, len(allIDs))
+		keep2 = make(map[string]struct{}, len(allIDs))
+		for _, v := range allIDs {
+			id := strconv.FormatUint(v, 10)
 			refIDs2 = append(refIDs2, id)
 			keep2[id] = struct{}{}
+		}
+	} else {
+		for i, e := range spans {
+			if useIDs {
+				id := strconv.FormatUint(spanIDs[i], 10)
+				refIDs2 = append(refIDs2, id)
+				keep2[id] = struct{}{}
+				continue
+			}
+			if id, ok := blockID(e); ok {
+				refIDs2 = append(refIDs2, id)
+				keep2[id] = struct{}{}
+			}
 		}
 	}
 	if err := bs.pruneTo(keep2); err != nil {
@@ -961,7 +1201,12 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 	if serr2 != nil {
 		return nil, 0, serr2
 	}
-	ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: setSum2, Count: len(spans), Schema: 1}
+	ids2, ierr2 := sortedIDNums(refIDs2)
+	if ierr2 != nil {
+		return nil, 0, ierr2
+	}
+	ref := blocksRefDoc{Store: filepath.Base(bs.path), Sum: setSum2, Count: len(refIDs2), Schema: 1, IDs: ids2}
+	ref.maybeDenseRange()
 	refJSON, err := json.Marshal(map[string]blocksRefDoc{blocksRefKey: ref})
 	if err != nil {
 		return nil, 0, err
@@ -1141,6 +1386,12 @@ func topLevelKey(b []byte, pos int) bool {
 // 代价：O(引用块数) 的哈希（21759 块 ≈ 700KB 输入），实测 < 5ms。
 // 相比「打开时扫 1378MB」便宜三个数量级。
 func blocksSetSum(bs *blockStore, ids []string) (string, error) {
+	return indexSetSum(bs.index, ids)
+}
+
+// indexSetSum 是 blocksSetSum 的索引级实现：只读 index，不碰 payload，
+// 因此映射路径（没有 *blockStore）也能做同一口径的集合校验。
+func indexSetSum(index map[string]blockRef, ids []string) (string, error) {
 	h := sha256.New()
 	sorted := make([]uint64, 0, len(ids))
 	byNum := make(map[uint64]string, len(ids))
@@ -1155,7 +1406,7 @@ func blocksSetSum(bs *blockStore, ids []string) (string, error) {
 	sortUint64s(sorted)
 	var n8 [8]byte
 	for _, v := range sorted {
-		ref, ok := bs.index[byNum[v]]
+		ref, ok := index[byNum[v]]
 		if !ok {
 			return "", fmt.Errorf("block %d missing from store", v)
 		}
@@ -1232,34 +1483,69 @@ func (bs *blockStore) legacyChainSum() string {
 // 引用存在但 sidecar 不可用/校验不符 → 返回错误（调用方回退 .bak），
 // **绝不**返回「blocks 为空」的半份数据。
 func resolveBlocksRef(view []byte, recordPath string) ([]byte, error) {
+	out, _, err := resolveBlocksRefSpans(view, recordPath)
+	return out, err
+}
+
+// resolveBlocksRefSpans 同 resolveBlocksRef，另外返回每个 block 的字节切片
+// （仅 sidecar 引用形态有；内嵌数组形态返回 nil）。供恢复路径并行解码。
+func resolveBlocksRefSpans(view []byte, recordPath string) ([]byte, [][]byte, error) {
 	blocksRaw, ok := splitViewBlocks(view)
 	if !ok {
-		return view, nil // 无 blocks 字段：保持原样，由上层校验
+		return view, nil, nil // 无 blocks 字段：保持原样，由上层校验
 	}
 	trimmed := bytes.TrimSpace(blocksRaw)
 	if !bytes.Contains(trimmed, []byte(blocksRefKey)) {
-		return view, nil // 旧格式：内嵌完整数组
+		return view, nil, nil // 旧格式：内嵌完整数组
 	}
 	var wrapper map[string]blocksRefDoc
 	if err := json.Unmarshal(trimmed, &wrapper); err != nil {
-		return nil, fmt.Errorf("parse blocks ref: %w", err)
+		return nil, nil, fmt.Errorf("parse blocks ref: %w", err)
 	}
 	ref, ok := wrapper[blocksRefKey]
 	if !ok {
-		return nil, fmt.Errorf("parse blocks ref: missing %q", blocksRefKey)
+		return nil, nil, fmt.Errorf("parse blocks ref: missing %q", blocksRefKey)
 	}
 
-	path := blockStorePath(recordPath)
-	bs, err := openBlockStore(path)
+	storePath, perr := refStorePath(recordPath, ref.Store)
+	if perr != nil {
+		return nil, nil, perr
+	}
+	bs, err := openBlockStore(storePath)
 	if err != nil {
-		return nil, fmt.Errorf("open block store: %w", err)
+		return nil, nil, fmt.Errorf("open block store: %w", err)
 	}
 	defer bs.Close()
 
-	// 计数先对账（O(1)，最便宜的强信号）：索引里的块数必须与引用一致。
-	// 这能立刻发现「sidecar 被截断/替换成另一份」的情况。
+	if refNums := ref.refIDs(); len(refNums) > 0 {
+		// 新口径（带 ids 或 range）：只校验「我引用的块」。sidecar 里多出来的块
+		// 属于后续提交或废弃版本，不该影响这一版 record 的可读性。
+		if ref.Count != len(refNums) {
+			return nil, nil, fmt.Errorf("block ref malformed: count=%d ids=%d", ref.Count, len(refNums))
+		}
+		ids := make([]string, len(refNums))
+		for i, v := range refNums {
+			ids[i] = strconv.FormatUint(v, 10)
+		}
+		got, serr := blocksSetSum(bs, ids)
+		if serr != nil {
+			return nil, nil, fmt.Errorf("block store missing referenced block: %w", serr)
+		}
+		if ref.Sum != "" && strings.HasPrefix(ref.Sum, setSumPrefix) && got != ref.Sum {
+			return nil, nil, fmt.Errorf("block store checksum mismatch (have %s want %s)", got, ref.Sum)
+		}
+		full, spans, aerr := bs.assembleIDsWithSpans(ids)
+		if aerr != nil {
+			return nil, nil, aerr
+		}
+		resolved, rerr := replaceJSONField(view, "blocks", full)
+		return resolved, spans, rerr
+	}
+
+	// 旧口径（无 ids）：只能要求「引用集合 == 索引集合」严格相等。
+	// 这条路径保留是为了兼容既有 record，新写入的记录一律带 ids。
 	if ref.Count != bs.Len() {
-		return nil, fmt.Errorf("block store count mismatch (have %d want %d)", bs.Len(), ref.Count)
+		return nil, nil, fmt.Errorf("block store count mismatch (have %d want %d)", bs.Len(), ref.Count)
 	}
 	// 摘要校验：**只比对索引里的摘要，不读 sidecar 字节**。
 	//
@@ -1291,20 +1577,24 @@ func resolveBlocksRef(view []byte, recordPath string) ([]byte, error) {
 		got := bs.sum()
 		if strings.HasPrefix(ref.Sum, setSumPrefix) {
 			if got != ref.Sum {
-				return nil, fmt.Errorf("block store checksum mismatch (have %s want %s)", got, ref.Sum)
+				return nil, nil, fmt.Errorf("block store checksum mismatch (have %s want %s)", got, ref.Sum)
 			}
 		}
 		// 旧口径：链值不可重建（见上），跳过；块数校验在下方照常执行。
 	}
 	if ref.Count != bs.Len() {
-		return nil, fmt.Errorf("block store count mismatch (have %d want %d)", bs.Len(), ref.Count)
+		return nil, nil, fmt.Errorf("block store count mismatch (have %d want %d)", bs.Len(), ref.Count)
 	}
 
-	full, err := bs.assemble()
+	// 旧口径：ref 里没有 ids（本机既有记录全是这种），语义是「引用集合 == 索引全集」，
+	// 所以按索引全集装配即可。仍然返回 spans —— 恢复路径的并行解码对旧记录同样生效，
+	// 不必等它被重写一次。
+	full, spans, err := bs.assembleIDsWithSpans(bs.allIDs())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return replaceJSONField(view, "blocks", full)
+	resolved, rerr := replaceJSONField(view, "blocks", full)
+	return resolved, spans, rerr
 }
 
 // assemble 按 id 顺序拼出完整 blocks 数组。
@@ -1313,15 +1603,28 @@ func resolveBlocksRef(view []byte, recordPath string) ([]byte, error) {
 // 但 reducer 的 block 顺序由 id 决定（nextBlockID 单调递增），而 block 在数组里
 // 的顺序就是 id 递增序 —— 两者一致。这里显式按 id 数值排序，不依赖写入顺序。
 func (bs *blockStore) assemble() ([]byte, error) {
-	ids := make([]string, 0, len(bs.index))
-	for id := range bs.index {
-		ids = append(ids, id)
-	}
+	return bs.assembleIDs(bs.allIDs())
+}
+
+// assembleIDs 按指定 id 集合拼出 blocks 数组（顺序按 id 数值升序）。
+//
+// 指定集合是「旧 record 仍可读」的关键：调用方给的是**那条 record 自己**
+// 引用的块，与 sidecar 当前有多少块无关。
+func (bs *blockStore) assembleIDs(ids []string) ([]byte, error) {
+	out, _, err := bs.assembleIDsWithSpans(ids)
+	return out, err
+}
+
+// assembleIDsWithSpans 同 assembleIDs，另外返回每个 block 在结果里的切片。
+//
+// 用途：恢复路径并行解码（每个 block 独立 json.Unmarshal）——避免对 210MB
+// 做一次单线程解码（实测 1.0~2.2s）。切片指向返回的同一块内存，零额外拷贝。
+func (bs *blockStore) assembleIDsWithSpans(ids []string) ([]byte, [][]byte, error) {
 	nums := make([]uint64, len(ids))
 	for i, id := range ids {
 		n, err := strconv.ParseUint(id, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("block store: non-numeric block id %q", id)
+			return nil, nil, fmt.Errorf("block store: non-numeric block id %q", id)
 		}
 		nums[i] = n
 	}
@@ -1330,6 +1633,8 @@ func (bs *blockStore) assemble() ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(1 << 20)
 	buf.WriteByte('[')
+	type seg struct{ start, end int }
+	segs := make([]seg, len(ids))
 	for i, id := range ids {
 		// 必须用 readAndVerify：assemble 是打开会话的主路径，而打开时
 		// 已不再为摘要去读整个 sidecar（见 resolveBlocksRef 注释），
@@ -1337,15 +1642,22 @@ func (bs *blockStore) assemble() ([]byte, error) {
 		// 与数据量同比，且这些字节本来就要读 —— 不额外多读一遍。
 		payload, ok := bs.readAndVerify(id)
 		if !ok {
-			return nil, fmt.Errorf("block store: payload unreadable or corrupt for id %q", id)
+			return nil, nil, fmt.Errorf("block store: payload unreadable or corrupt for id %q", id)
 		}
 		if i > 0 {
 			buf.WriteByte(',')
 		}
+		start := buf.Len()
 		buf.Write(payload)
+		segs[i] = seg{start: start, end: buf.Len()}
 	}
 	buf.WriteByte(']')
-	return buf.Bytes(), nil
+	out := buf.Bytes()
+	spans := make([][]byte, len(segs))
+	for i, sg := range segs {
+		spans[i] = out[sg.start:sg.end]
+	}
+	return out, spans, nil
 }
 
 // assembleWithChain 拼出完整 blocks 数组，**同时**算出旧口径的整文件滚动链。
@@ -1570,12 +1882,12 @@ func (bs *blockStore) actualSetSum(ids []string) (string, error) {
 	sortUint64s(sorted)
 	var n8 [8]byte
 	for _, v := range sorted {
-		ref, ok := bs.index[byNum[v]]
+		bref, ok := bs.index[byNum[v]]
 		if !ok {
 			return "", fmt.Errorf("block %d missing from store", v)
 		}
-		buf := make([]byte, ref.n)
-		if _, err := bs.f.ReadAt(buf, ref.off); err != nil {
+		buf := make([]byte, bref.n)
+		if _, err := bs.f.ReadAt(buf, bref.off); err != nil {
 			return "", fmt.Errorf("block %d unreadable: %w", v, err)
 		}
 		binary.BigEndian.PutUint64(n8[:], v)
@@ -1638,18 +1950,47 @@ func lowerBound(a []uint64, v uint64) int {
 // compact：回收被覆盖的废弃记录
 // ---------------------------------------------------------------------------
 
-// compactThreshold 是触发 compact 的废弃比例阈值。
+// compactThreshold 是触发 compact 的废弃**字节**比例阈值。
 //
 // 取 0.20：低于此时重写代价大于收益；高于此时文件体积明显偏离有效内容。
 // 实测真实会话（23893 条 / 21551 唯一）废弃率 93%，远超阈值。
+//
+// 为什么用字节而不是条数（2026-11-08 修正）：废弃的往往是大块 —— 子智能体
+// 卡片在 running 期每个事件整块重写，旧版本全部留在 append-only 文件里。
+// 真实会话实测：3.45GB sidecar，有效内容只有 184MB（字节废弃 94%），
+// 而废弃**条数**占比只有 18.66%（7054/37810）—— 按条数判，永远不回收，
+// 文件只能一路涨到 3.4GB，把「索引丢失后重建」「每次提交的哈希」一起拖慢。
 const compactThreshold = 0.20
 
+// compactMinBytes 是 compact 的最小体积门槛：太小的文件重写不划算。
+//
+// 用 atomic 而不是普通变量：后台回收 goroutine 会读它，而测试会临时调小它
+// （`-race` 下普通变量会直接报 data race）。
+var compactMinBytes atomic.Int64
+
+func init() { compactMinBytes.Store(32 << 20) }
+
+// staleByteRatio 报告废弃字节占比（O(1)）。
+func (bs *blockStore) staleByteRatio() float64 {
+	total := bs.nBytes - int64(len(blockStoreMagic))
+	if total <= 0 {
+		return 0
+	}
+	stale := total - bs.liveBytes
+	if stale < 0 {
+		return 0
+	}
+	return float64(stale) / float64(total)
+}
+
 // needsCompact 报告是否应当回收（O(1)）。
-func (bs *blockStore) needsCompact() bool {
-	if bs.recordsWritten == 0 {
+func (bs *blockStore) needsCompact() bool { return bs.needsCompactAt(compactMinBytes.Load()) }
+
+func (bs *blockStore) needsCompactAt(minBytes int64) bool {
+	if bs.nBytes-int64(len(blockStoreMagic)) < minBytes {
 		return false
 	}
-	return float64(bs.staleRecords)/float64(bs.recordsWritten) > compactThreshold
+	return bs.staleByteRatio() > compactThreshold
 }
 
 // maybeCompact 在废弃比例超阈值时重写 sidecar，只保留每个 id 的最新版本。
@@ -1756,6 +2097,7 @@ func (bs *blockStore) compact() error {
 	bs.recordsWritten = int64(len(newIndex))
 	bs.staleRecords = 0
 	bs.bytesWritten = pos
+	bs.recomputeLiveBytes()
 	bs.sortedDirty = true
 	if err := bs.startWriter(); err != nil {
 		return err

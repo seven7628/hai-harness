@@ -7,13 +7,17 @@
 //   3. 盒子存在 = workBody 非空（不是「有工具」）；没有盒子的轮（纯对话）正文回到时间线。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ALWAYS_SHOWN, FOLDED_KINDS, foldedBody, hasWork, mergeArtifacts, runningBody, runWorkBody, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
+import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, runningBody, runWorkBody, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
 import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 const user = (id: number, text = 'go'): MsgBlock => ({ kind: 'user', id, text })
 const interjected = (id: number, text = '插一句'): MsgBlock => ({ kind: 'user', id, text, injected: true })
-const assistant = (id: number, text: string, streaming = false): MsgBlock => ({ kind: 'assistant', id, text, streaming, thinking: '' })
-const tool = (id: number, status: 'running' | 'done' = 'done'): MsgBlock => ({ kind: 'tool', id, toolId: 't' + id, name: 'bash', status })
+const assistant = (id: number, text: string, streaming = false, runId?: string): MsgBlock => ({
+  kind: 'assistant', id, text, streaming, thinking: '', ...(runId ? { runId } : {}),
+})
+const tool = (id: number, status: 'running' | 'done' = 'done', runId?: string): MsgBlock => ({
+  kind: 'tool', id, toolId: 't' + id, name: 'bash', status, ...(runId ? { parentRunId: runId } : {}),
+})
 // afterRun 传 undefined = 旧快照（没有这一位，走位置兜底）；true/false = store 显式盖的戳。
 const delivery = (id: number, taskId = 'task-1', afterRun?: boolean): MsgBlock => ({
   kind: 'task_delivery', id, taskId, status: 'completed', result: 'done', ...(afterRun != null ? { afterRun } : {}),
@@ -69,6 +73,38 @@ test('恢复后的视图：运行中到达（afterRun:false）的记录仍在盒
   const turn = selectTurns(blocks)[0]
   assert.deepEqual(workBody(turn).map((b) => b.id), [3, 4], '运行中到达的记录必须还在盒子里')
   assert.deepEqual(foldedBody(turn).map((b) => b.id), [2], '正文是这一轮的结论，留在外面')
+})
+
+test('旧快照（没有 afterRun 位）：夹在同一次运行中间的记录留在盒内 —— 哪怕轮内更早有正文', () => {
+  // 用户 2026-11 截图：19 分钟的运行里 05:57 已经交付过一段正文（narration），06:05 到达的
+  // `Task … completed` 被位置判据（i > answerAt）判成「交卷后」，于是全被甩到盒子外面、
+  // 永远排在 Working 下方。位置兜底必须看**邻居运行块**：后面还有同一个 run 的块 = 运行中到达。
+  const blocks: MsgBlock[] = [
+    user(1),
+    assistant(2, 'D2 方案完成，先交代一下结论', false, 'r1'),
+    tool(3, 'done', 'r1'),
+    delivery(4), // 旧 record：没有 after_run 位
+    tool(5, 'done', 'r1'),
+    assistant(6, '', false, 'r1'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  assert.deepEqual(workBody(turn).map((b) => b.id), [3, 4, 5, 6], '运行中到达的回执必须还在盒子里')
+  assert.deepEqual(foldedBody(turn).map((b) => b.id), [2], '正文仍是这一轮的结论；记录不重复渲染')
+})
+
+test('旧快照：两次运行之间的回执留在时间线上（后面不再有同一个 run 的块）', () => {
+  // 情况二：run1 交卷 → 后台任务回执到达 → run2 起新盒子。前后邻居是**两次不同**的运行，
+  // 说明这条回执排在前一次运行之后 → 盒外。
+  const blocks: MsgBlock[] = [
+    user(1),
+    tool(2, 'done', 'r1'),
+    delivery(3),
+    assistant(4, '续跑结论', false, 'r2'),
+    tool(5, 'done', 'r2'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  assert.deepEqual(workBody(turn).map((b) => b.id), [2, 5])
+  assert.deepEqual(foldedBody(turn).map((b) => b.id), [3, 4])
 })
 
 test('同一批块不会既在盒子里又在外面（无重复渲染）', () => {
@@ -296,10 +332,63 @@ test('case 2 分段：子 agent 卡片（runId 是子 run）不切段，工具�
   assert.deepEqual(runs[0].items.map((b) => b.id), [2, 3, 4])
 })
 
+test('缺 run id + 结算边界：按「上一次结算时的块数」切出后台 run 自己的段', () => {
+  // 冷恢复 / 旧快照 / 事件缺 run_id 的形态：块上没有任何主 run id，按 run id 一刀切不出来。
+  // 用户 2026-11：主 run 已 AgentEnd、后台 run 起跑 → 整轮只有一个段 → live 一翻就把
+  // 已结算的那段重新展开成 Working（答案从轮尾被挪进盒子，几百像素一进一出）。
+  const blocks: MsgBlock[] = [user(1), assistant(2, '结论'), assistant(3, '后台新活')]
+  const turn = selectTurns(blocks)[0]
+  assert.equal(turnRuns(turn).length, 1, '不给结算边界时行为不变（老路径一行不动）')
+  // settleAt = 结算那一刻的 items.length（= 边界下标）：结算时只有 assistant(2) → 1
+  const runs = turnRuns(turn, 1)
+  assert.equal(runs.length, 2, '结算边界之后新到的块切出第二段')
+  assert.deepEqual(runs.map((r) => r.items.map((b) => b.id)), [[2], [3]])
+})
+
+test('缺 run id：结算边界在两端时不分段（没有「新到的块」可切）', () => {
+  const blocks: MsgBlock[] = [user(1), assistant(2, '结论')]
+  const turn = selectTurns(blocks)[0]
+  assert.equal(turnRuns(turn, 0).length, 1)
+  assert.equal(turnRuns(turn, turn.items.length).length, 1, '结算之后什么都没来 → 还是一段')
+})
+
+test('有 run id 时结算边界不掺和（不许把一个边界切两次）', () => {
+  const blocks: MsgBlock[] = [
+    user(1),
+    asstOf(2, 'A', '第一段'),
+    toolOf(3, 'A'),
+    asstOf(4, 'B', '第二段'),
+  ]
+  const turn = selectTurns(blocks)[0]
+  assert.deepEqual(turnRuns(turn, 2).map((r) => r.runId), ['A', 'B'], '仍是按 run id 切的两段')
+})
+
 test('case 1 不分段：单 run 仍然是一段（老路径一行不变）', () => {
   const blocks: MsgBlock[] = [user(1), tool(2), signal(3), assistant(4, '答'), delivery(5)]
   const runs = turnRuns(selectTurns(blocks)[0])
   assert.equal(runs.length, 1)
+})
+
+test('交卷后到达的记录按段归位：只有最后一段才延后到轮尾结算之后', () => {
+  // 用户 2026-11 截图：一轮跨多次运行，几条 `Task … completed` 全堆在最后一个 Worked
+  // 后面。记录没有 runId，位置（到达时落在刚交卷那段的尾巴）就是归属：段间的记录跟
+  // 自己那一段的盒子走，只有最后一段的才配轮尾那**一份**合并的账/卡。
+  const blocks: MsgBlock[] = [
+    user(1),
+    asstOf(2, 'A', '第一段'),
+    toolOf(3, 'A'),
+    delivery(4, 'task-x', true), // A 段交卷后到达 → A 段的尾巴
+    asstOf(5, 'B', '第二段'),
+    toolOf(6, 'B'),
+    delivery(7, 'task-y', true), // B 段（最后一段）交卷后到达 → 轮尾
+  ]
+  const turn = selectTurns(blocks)[0]
+  const runs = turnRuns(turn)
+  assert.equal(runs.length, 2, '两次运行 = 两段')
+  assert.deepEqual([0, 1, 2, 3, 4, 5].map((i) => defersToTurnEnd(runs, i)),
+    [false, false, false, true, true, true], 'A 段的记录跟盒子走；B 段的记录延后到轮尾')
+  assert.equal(defersToTurnEnd([runs[0]], 0), true, '单段（老路径）保持全部延后')
+  assert.equal(defersToTurnEnd([], 0), true, '段没切出来时保持老行为')
 })
 
 // ---------------------------------------------------------------------------

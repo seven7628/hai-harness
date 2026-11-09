@@ -1,4 +1,4 @@
-import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply } from './transport/types'
+import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply } from './transport/types'
 
 export {}
 
@@ -14,6 +14,10 @@ declare global {
       stopBridge: () => Promise<{ ok: boolean }>
       settingsGet: () => Promise<AppSettings>
       settingsSet: (patch: Partial<AppSettings>) => Promise<{ ok: boolean; error?: string; settings?: AppSettings }>
+      // 输入历史本地文件（~/.go-code/input-history.json；与 localStorage 镜像配合）
+      inputHistoryGet: (p: { scope: string }) => Promise<InputHistoryReply>
+      inputHistorySet: (p: { scope: string; items: InputHistoryItem[] }) => Promise<InputHistoryReply>
+      inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => Promise<{ ok: boolean; error?: string }>
       sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => Promise<{ ok: boolean; text?: string; error?: string }>
       externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
       importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>

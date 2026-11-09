@@ -28,6 +28,8 @@ type ToolContext struct {
 	// Todos 本运行自己的待办快照提供者（nil = 未注入）。引擎在 todo_* 工具结束时
 	// 调用它，把清单挂到 ToolResponse.Todos —— 属主是**发起本次调用的运行**：
 	// 主 run → 会话待办；子 agent run → 它自己那份独立 store。
+	// 编排脚本里的 todo_* 是嵌套调用（不发事件）：引擎把「脚本改过清单」记到外层
+	// 调用上，由外层编排工具（codemode）的响应代发同一份快照。
 	// 为什么用闭包而不是直接传 *todo.Store：events 不能 import todo（成环），
 	// 引擎也不该知道待办语义；投影成 events.TodoSnapshot 后两边都只依赖事件层。
 	Todos func() []TodoSnapshot

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
-import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
+import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
@@ -13,6 +13,7 @@ import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAtt
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
+import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
@@ -904,6 +905,8 @@ export interface PendingRelease {
 // model / ts / ttft / dur / outputTokens 渲染「模型 · 时刻 · LLM 总耗时 · tokens/s」。
 // 这些字段此前只有主 run 的 assistant 块有 —— 子 agent 的每条消息因此缺这一行（用户 2026-10 报障）。
 interface AgentTurnMeta {
+  /** 这条项属于哪一次子运行（Go AgentItem.run_id）。旧 record 为空，前端用卡片 runId 兜底。 */
+  runId?: string
   model?: string
   ts?: number
   ttftMs?: number
@@ -921,11 +924,13 @@ export type AgentItem =
   // 完整输出落盘路径（来源与语义见 lib/codemodeNested.ts；嵌套调用自身没有工具行）。
   // todos：todo_* 工具项那一刻**该子 agent 自己**的清单快照（历史计划卡定格显示，
   // 语义与主对话工具块的 todos 同源，但归属是它自己的卡片，不是会话清单）
-  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; promoted?: boolean; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[]; liveTail?: string; liveSeq?: number; liveTotal?: number }
+  | { kind: 'tool'; toolId: string; name: string; args?: string; status: 'running' | 'done' | 'error'; result?: string; errorInfo?: ToolErrorInfo; durMs?: number; startedAt?: number; taskId?: string; promoted?: boolean; diff?: Diff; images?: QueuedContent[]; usage?: UsageAgg; nestedCalls?: NestedCallView[]; spillPath?: string; hostOps?: HostOpsView; todos?: TodoItem[]; liveTail?: string; liveSeq?: number; liveTotal?: number; runId?: string }
   // user 子运行上下文里的一条用户/模型消息（来源见 events.AgentUserMessage）。
   // 它是**转录的一部分**（子会话里能看到「我对它说了什么」），不是任务结果。
-  | { kind: 'user'; text: string; startedAt?: number; ts?: number }
-  | { kind: 'compression'; before: number; after: number; ctxTokens?: number; ctxTokensBefore?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number }
+  // historyIndex = 它在子任务 journal 全量历史里的条目序号（agent_history 分页才有）：
+  // 分页去重的稳定键。正文可能重复（连发两次「继续」），序号不会。
+  | { kind: 'user'; text: string; startedAt?: number; ts?: number; runId?: string; historyIndex?: number }
+  | { kind: 'compression'; before: number; after: number; ctxTokens?: number; ctxTokensBefore?: number; reason?: string; model?: string; summary?: string; analysis?: string; usage?: UsageAgg; error?: string; aborted?: boolean; durMs?: number; active?: boolean; startedAt?: number; runId?: string }
   // 一行信号（Small signals）落在**它自己那次运行**里：hook 警告 / 静默收尾 / 目标提醒
   // 是子 agent 跑出来的事实，不属于主转录（用户 2026-10：subagent 的提示混进主会话的
   // Working 里，读起来像主 run 自己说的）。
@@ -2863,6 +2868,7 @@ interface AppState {
   fetchedModels: Record<string, string[]> // provider → 拉取的模型列表（list_models 响应）
   modelCosts: Record<string, Record<string, ModelPrices>> // provider → model → 注册表内置价（list_models capabilities.cost；价格编辑器空覆盖时回显）
   providerPresets: ProviderPreset[] // 内置 Provider 预设（list_provider_presets ← providers.json 单一事实源）
+  billing: Record<string, BillingSnapshot> // provider → 最近一次余额/配额快照（provider_billing）
   mode: string // hitl(用户确认) / auto(自动执行) / full-access(完全访问)；会话中可随时切换，下一轮生效
   effort: string // none / minimal / low / medium / high / xhigh / max
   persona: 'code' | 'work' // 双 Persona（Code 工程师 / Work 办公助理；切换当前会话下一轮生效）
@@ -3251,7 +3257,8 @@ interface AppState {
   pickAppFromSystem(): Promise<string | null> // 系统「选择应用程序」对话框 → 返回所选 App 显示名（取消 → null）
   providerSave(p: ProviderSaveInput): Promise<boolean> // 持久化 provider 配置 + key（热切换由调用方另发 set_provider）
   addProvider(p: { provider: string; base_url: string; protocol?: string; openai_compat?: import('../transport/types').OpenAICompatCapabilities; api_key?: string }): Promise<{ ok: boolean; error?: string }> // 新增自定义 provider（创建配置 + 存 key + 通知 bridge）
-  renameProvider(oldName: string, newName: string): Promise<{ ok: boolean; error?: string }> // 自定义 provider 改名（整卡配置迁移到新 id：base_url/key/models/…；内置 5 家不可改名）
+  renameProvider(oldName: string, newName: string): Promise<{ ok: boolean; error?: string }>
+  renameProviderDisplay(provider: string, label: string): Promise<{ ok: boolean; error?: string }> // 自定义 provider 改名（整卡配置迁移到新 id：base_url/key/models/…；内置 5 家不可改名）
   removeProvider(provider: string): Promise<{ ok: boolean; error?: string }> // 删除自定义 provider（配置 + key + 重建）
   refreshProviderKeys(): void // 各 provider 是否已设 key（仅布尔，Provider 面板「已设置 ✓」）
   fetchModels(provider: string): void // 拉取 provider 模型列表（list_models）
@@ -3259,6 +3266,8 @@ interface AppState {
   // 默认**覆盖**已有价（用户 2026-09-21 决策：补价即覆盖）；overwrite:false 才走保守路径（只补无价模型）
   refreshPrices(p: { provider: string; source?: string; overwrite?: boolean }): Promise<PriceRefreshSummary | undefined>
   fetchProviderPresets(): void // 拉取内置 Provider 预设（list_provider_presets ← providers.json）
+  // 余额/配额：refresh=false 走 60s 缓存（进设置页），true = 强制刷新（5s 冷却）
+  fetchBilling(provider?: string, refresh?: boolean): void
   testProvider(base_url: string, api_key: string): Promise<{ ok: boolean; error?: string; count?: number }> // 测试连接（test_connection；瞬态探活，不改配置）
   saveProvider(p: ProviderSaveInput): Promise<boolean> // 持久化（providerSave）+ 热切换（set_provider 命令）；返回是否成功（Toast 用）
   toggleModelWindow(provider: string, model: string, oneM: boolean): void // 标 1M → 窗口 1000000；否则回 128000
@@ -3824,15 +3833,17 @@ function taskUsageFromEvent(u?: RawUsage): UsageAgg | undefined {
 // 且终态值是任务全量（覆盖运行中按轮累加的近似值）。
 function applyTaskUsage(blocks: MsgBlock[], taskId: string, usage?: UsageAgg): MsgBlock[] {
   if (!taskId || !usage) return blocks
-  let hit = false
-  const out = blocks.map((b) => {
-    if ((b.kind === 'agent' || b.kind === 'async_task' || b.kind === 'tool') && b.taskId === taskId) {
-      hit = true
-      return { ...b, usage }
-    }
-    return b
-  })
-  return hit ? out : blocks
+  // 只写**最新**一张卡：agent_resume 每轮一张卡，任务累计用量属于当前那张；
+  // 上一轮的 usage 由它自己的 AgentEnd 结算，不能被下一轮的 TaskEnd 覆盖。
+  const idx = blocks.findLastIndex((b) =>
+    (b.kind === 'agent' || b.kind === 'async_task' || b.kind === 'tool') && b.taskId === taskId,
+  )
+  if (idx < 0) return blocks
+  const target = blocks[idx]
+  if (target.kind !== 'agent' && target.kind !== 'async_task' && target.kind !== 'tool') return blocks
+  const out = [...blocks]
+  out[idx] = { ...target, usage }
+  return out
 }
 
 // 运行中的异步任务数（子 agent 运行中 + 已 promote 为后台的工具任务运行中）。
@@ -3884,15 +3895,25 @@ function historyEntryToAgentItem(e: {
   if (e.kind === 'assistant' || e.kind === 'text') return { kind: 'text', text: e.text ?? '' }
   // user（子任务输入）：保持 user 身份 —— 降级成 text 会让「我派的活」看起来像子智能体
   // 自己说的话（历史分页里第一条通常就是派给它的 Prompt）。
-  if (e.kind === 'user') return { kind: 'user', text: e.text ?? '' }
+  // historyIndex 一并带上：同一页可能被重复请求/与事件来源的同一条消息重叠，
+  // 分页侧要靠它去重（见 appendOlderItems）。
+  if (e.kind === 'user') {
+    return { kind: 'user', text: e.text ?? '', ...(e.index != null ? { historyIndex: e.index } : {}) }
+  }
   return { kind: 'text', text: e.text ?? '' }
 }
 
 // appendOlderItems 把「更早的一页」拼到卡片现有 items **前面**。
 //
-// 去重：分页窗口按 (offset, limit) 取，若在请求在途期间卡片又收到了新条目
-// （子 agent 仍在跑），total 会变，相邻页可能重叠。用 toolId + 文本做后置去重，
-// 保证 UI 里不会出现两条一样的记录。
+// 去重：分页窗口按 (offset, limit) 取，但 offset 的口径是**卡片 items 条数**，而
+// 窗口的单位是 journal 派生条目 —— 两者不相等（thinking 不进 journal、assistant 正文
+// 合并、信号/压缩项不落 journal），所以窗口必然与卡片已有内容重叠，同一页也可能被
+// 重复请求（滚动预取、打开子会话时的首屏补拉）。
+//
+// 旧实现只按 toolId / 正文去重，**user 条目一律放行** —— 于是一条「resume 指令」
+// 会随每一页复制一遍，用户看到子会话顶部一连串一模一样的气泡（2026-11 报障）。
+// 现在 user 也去重：优先 journal 序号（historyIndex，稳定），没有序号的事件来源项
+// 按正文匹配。
 function appendOlderItems(
   b: Extract<MsgBlock, { kind: 'agent' }>,
   older: AgentItem[],
@@ -3900,16 +3921,29 @@ function appendOlderItems(
   total?: number,
   offset?: number,
 ): Extract<MsgBlock, { kind: 'agent' }> {
+  const keyOf = (it: AgentItem): string | null => {
+    if (it.kind === 'tool') return `t:${it.toolId}`
+    if (it.kind === 'text') return `x:${it.text}`
+    if (it.kind === 'user') {
+      return it.historyIndex != null ? `u:#${it.historyIndex}` : `u:x${it.text}`
+    }
+    return null
+  }
   const seen = new Set<string>()
   for (const it of b.items) {
-    if (it.kind === 'tool') seen.add(`t:${it.toolId}`)
-    else if (it.kind === 'text') seen.add(`x:${it.text}`)
+    const k = keyOf(it)
+    if (k) seen.add(k)
+    // 卡片里的 user 项多半来自**事件流**（没有 journal 序号），而分页回来的同一段
+    // 历史带着序号 —— 两个键都登记，跨来源才能命中。
+    if (it.kind === 'user') seen.add(`u:x${it.text}`)
   }
   const fresh = older.filter((it) => {
-    const key = it.kind === 'tool' ? `t:${it.toolId}` : it.kind === 'text' ? `x:${it.text}` : ''
-    if (!key) return true
-    if (seen.has(key)) return false
-    seen.add(key)
+    const k = keyOf(it)
+    if (!k) return true
+    if (seen.has(k)) return false
+    // 序号对不上（journal 上下文被压缩过，序号会漂移）时退回正文比对。
+    if (it.kind === 'user' && seen.has(`u:x${it.text}`)) return false
+    seen.add(k)
     return true
   })
   return {
@@ -4050,15 +4084,18 @@ function appendAgentStream(blocks: MsgBlock[], runId: string, kind: 'text' | 'th
     const items = [...b.items]
     const last = items[items.length - 1]
     // kind 是变量参数，TS 无法经 last.kind === kind 收缩 last——显式判 text 分支
-    if (last && last.kind === kind && !(kind === 'text' && last.kind === 'text' && last.error)) {
+    // 同一张卡只属于一次 run；RunID 为空的是旧 record，续写时补上当前 run。
+    if (last && last.kind === kind && !(kind === 'text' && last.kind === 'text' && last.error)
+      && (!last.runId || last.runId === runId)) {
       // 续写同一条消息：时刻/TTFT 属于**这一条的第一个 chunk**，已经有的不覆盖
       items[items.length - 1] = {
         ...last, text: last.text + c,
+        ...(last.runId == null ? { runId } : {}),
         ...(last.ts == null && meta?.ts != null ? { ts: meta.ts } : {}),
         ...(last.ttftMs == null && meta?.ttftMs != null ? { ttftMs: meta.ttftMs } : {}),
       }
-    } else if (kind === 'thinking') items.push({ kind, text: c, ...(thinkStart != null ? { thinkStart } : {}), ...(meta ?? {}) } as AgentItem)
-    else items.push({ kind, text: c, ...(meta ?? {}) } as AgentItem)
+    } else if (kind === 'thinking') items.push({ kind, text: c, ...(thinkStart != null ? { thinkStart } : {}), ...(meta ?? {}), runId } as AgentItem)
+    else items.push({ kind, text: c, ...(meta ?? {}), runId } as AgentItem)
     return { ...b, items }
   })
 }
@@ -4072,13 +4109,14 @@ function appendAgentStream(blocks: MsgBlock[], runId: string, kind: 'text' | 'th
 // 用量、**没落到项上** —— 于是子会话里整行都不出现（用户 2026-10 报障）。
 // 已存在的时刻/TTFT 不覆盖：它们属于这条消息的第一个 chunk。
 // 与 Go 侧 view_reducer.applyLLMEndLocked 子 run 分支同一口径（实时与刷新后必须一致）。
-function setAgentItemMeta(items: AgentItem[], meta: AgentTurnMeta): AgentItem[] {
+function setAgentItemMeta(items: AgentItem[], meta: AgentTurnMeta, runId?: string): AgentItem[] {
   const i = items.findLastIndex((it) => it.kind === 'text' || it.kind === 'thinking')
   if (i < 0) return items
   const cur = items[i] as Extract<AgentItem, { kind: 'text' }> | Extract<AgentItem, { kind: 'thinking' }>
   const out = [...items]
   out[i] = {
     ...cur,
+    ...(cur.runId == null && runId ? { runId } : {}),
     ...meta,
     ...(cur.ts != null && meta.ts != null ? { ts: cur.ts } : {}),
     ...(cur.ttftMs != null && meta.ttftMs != null ? { ttftMs: cur.ttftMs } : {}),
@@ -4088,21 +4126,47 @@ function setAgentItemMeta(items: AgentItem[], meta: AgentTurnMeta): AgentItem[] 
 
 // appendAgentUser 把一条投向子运行上下文的消息记进它的转录（events.AgentUserMessage）。
 //
-// 归属锚是 **taskId**（不是 runId）：事件的产生点是 subagent 的 Poll，那里只知道后台任务
-// id；卡片同时带 taskId 与 runId，所以这里按 taskId 找。找不到就静默跳过 —— 消息本身
-// 已经进了子运行的上下文，只是没有卡片可挂。
+// 归属锚 **RunId 优先、TaskId 最新卡兜底**：
+//   · agent_resume 复用同一 task_id、每次运行新建一张卡；只按 taskId 会写进第一张
+//     （旧）卡 —— 实测续跑 prompt 落在上一轮卡末尾，刷新前后布局还不一致。
+//   · Poll 里的 inbox 消息（agent_send / 孙任务结果）没有 run_id，退回该 task 的
+//     **最新**一张卡（= 当前运行那张）。
+// 只 append 一张卡；旧实现 `blocks.map` 会把同一条 prompt 写进所有同 task 卡片。
 function appendAgentUser(blocks: MsgBlock[], taskId: string, text: string, ts?: number, runId?: string): MsgBlock[] {
   const body = text.trim()
   if ((!taskId && !runId) || !body) return blocks
-  return blocks.map((b) => {
-    if (b.kind !== 'agent') return b
-    // 归属锚 TaskId 优先、RunId 兜底：后台子运行有 task id；同步子智能体（in-loop）
-    // 只有 run id —— 子运行开始时补发的初始 Prompt（source=prompt）走的就是后者。
-    const hit = taskId ? b.taskId === taskId : b.runId === runId
-    if (!hit) return b
-    const items = [...b.items, { kind: 'user' as const, text: body, ...(ts != null ? { startedAt: ts } : {}) }]
-    return { ...b, items }
-  })
+  let idx = -1
+  if (runId) idx = blocks.findIndex((b) => b.kind === 'agent' && b.runId === runId)
+  if (idx < 0 && taskId) {
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      if (blocks[i].kind === 'agent' && (blocks[i] as Extract<MsgBlock, { kind: 'agent' }>).taskId === taskId) {
+        idx = i
+        break
+      }
+    }
+  }
+  if (idx < 0) return blocks
+  const b = blocks[idx] as Extract<MsgBlock, { kind: 'agent' }>
+  const itemRunId = runId || b.runId
+  // 幂等：同一条事件可能被**重放**两次（checkpoint hydrate 补应用 preBuf、恢复快照
+  // 与实时流在边界重叠）。user 项是纯 append，重复应用就会多一个一模一样的气泡 ——
+  // 其余事件类型都有 id 主键/幂等收敛，只有它没有。事件时间戳在重放中不变，
+  // 用它当主键：同一 (runId, text, ts) 出现第二次 = 同一条事件。
+  // 没有时间戳就不去重（宁可多一条，也不吞掉真实连发）。
+  const dup = ts != null && b.items.some(
+    (it) =>
+      it.kind === 'user' &&
+      it.text === body &&
+      it.startedAt === ts &&
+      ((runId && it.runId === runId) || (!runId && (!it.runId || it.runId === b.runId))),
+  )
+  if (dup) return blocks
+  const items: AgentItem[] = [...b.items, {
+    kind: 'user', text: body,
+    ...(ts != null ? { startedAt: ts } : {}),
+    ...(itemRunId ? { runId: itemRunId } : {}),
+  }]
+  return blocks.map((x, i) => (i === idx ? { ...b, items } : x))
 }
 
 type AgentCompressionItem = Extract<AgentItem, { kind: 'compression' }>
@@ -4135,13 +4199,13 @@ function abortAgentCompression(blocks: MsgBlock[], runId: string): MsgBlock[] {
   })
 }
 
-function upsertAgentErrorItem(items: AgentItem[], text: string): AgentItem[] {
+function upsertAgentErrorItem(items: AgentItem[], text: string, runId?: string): AgentItem[] {
   const out = [...items]
   const last = out[out.length - 1]
   if (last?.kind === 'text' && last.error) {
-    out[out.length - 1] = { ...last, text }
+    out[out.length - 1] = { ...last, text, ...(last.runId == null && runId ? { runId } : {}) }
   } else {
-    out.push({ kind: 'text', text, error: true })
+    out.push({ kind: 'text', text, error: true, ...(runId ? { runId } : {}) })
   }
   return out
 }
@@ -4449,6 +4513,14 @@ export function dispatchEvent(raw: AnyEvent): void {
   }
 
   switch (raw.event_type) {
+    // 余额/配额的后台补拉结果（provider_billing 先进缓存、再逐家推送）。
+    // 与命令响应同形状：只合并，不建会话视图。
+    case 'provider_billing_update': {
+      const snap = raw.snapshot as BillingSnapshot | undefined
+      if (snap?.provider) setState((s) => ({ billing: { ...s.billing, [snap.provider]: snap } }))
+      break
+    }
+
     case 'bridge_ready':
       // P0/P1（§4.4）：Go 侧启动完成后发一次，作为 embed 自举/命令的精确就绪信号
       // （替代「任意 command response 猜测」；保留 command_response 兜底）。
@@ -5253,6 +5325,12 @@ export function dispatchEvent(raw: AnyEvent): void {
       // list_provider_presets：内置 Provider 预设（providers.json 单一事实源）→ providerPresets；
       // models_cost（预设模型内置价，纯本地注册表读取）→ 并入 modelCosts —— 价格编辑器
       // 打开设置即回显内置价，无需先「拉取模型列表」（那依赖网络 + 用户点击）。
+      // provider_billing：余额/配额快照（单家失败也返回，错误以 error_code 落在快照上）
+      if (t === 'provider_billing') {
+        const snaps = (d.snapshots ?? {}) as Record<string, BillingSnapshot>
+        if (Object.keys(snaps).length > 0) setState((s) => ({ billing: { ...s.billing, ...snaps } }))
+        break
+      }
       if (t === 'list_provider_presets') {
         if (Array.isArray(d.presets)) {
           const costs = (d.models_cost ?? {}) as Record<string, Record<string, ModelPrices>>
@@ -5721,7 +5799,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                 outputTokens: ru.Output ?? 0,
                 reasoningTokens: ru.Reasoning ?? 0,
                 ...(ru.ReasoningSummarized === true ? { thinkingSummarized: true } : {}),
-              }),
+              }, runId),
               usage: {
                 input: ag.usage.input + (ru.Input ?? 0),
                 output: ag.usage.output + (ru.Output ?? 0),
@@ -5907,7 +5985,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                   ...b,
                   retrying: willRetry && !isContextExceeded,
                   retryMessage: willRetry && !isContextExceeded ? text : undefined,
-                  items: upsertAgentErrorItem(b.items, text),
+                  items: upsertAgentErrorItem(b.items, text, runId),
                   usage: {
                     ...b.usage,
                     input: b.usage.input + (attemptUsage?.input ?? 0),
@@ -6014,7 +6092,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                 const dup = b.items.some((it) => it.kind === 'tool' && it.toolId === toolId)
                 return dup
                   ? b
-                  : { ...b, items: [...b.items, { kind: 'tool', toolId, name, args, status: 'running', startedAt: startClient, ...(tid ? { taskId: tid } : {}) } as AgentItem] }
+                  : { ...b, items: [...b.items, { kind: 'tool', toolId, name, args, status: 'running', startedAt: startClient, ...(tid ? { taskId: tid } : {}), ...(runId ? { runId } : {}) } as AgentItem] }
               })
             : dupMain
               ? v.blocks.map((b) => (b.kind === 'tool' && b.toolId === toolId ? { ...b, name, args, ...(tid ? { taskId: tid } : {}) } : b))
@@ -6113,6 +6191,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             reason: raw.reason ? String(raw.reason) : undefined,
             active: true,
             startedAt,
+            runId,
           })
           return setView(s, sid, { ...v, blocks })
         }
@@ -6173,6 +6252,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             active: false,
             ...(startedAt != null ? { startedAt } : {}),
             durMs: startedAt != null ? Math.max(0, ts - startedAt) : undefined,
+            runId,
           }
           const blocks = upsertAgentCompression(v.blocks, runId, item)
           // 压缩完成的一行 signal（用户 2026-11）：卡片里多一行「压缩完了」，
@@ -6850,7 +6930,7 @@ export function dispatchEvent(raw: AnyEvent): void {
                   // view_reducer.applyAgentEndLocked 同一口径（否则中断/旧日志那一行会整段消失）。
                   items: setAgentItemMeta(b.items, {
                     agentDurMs: typeof raw.duration_ms === 'number' ? raw.duration_ms : now - b.spawnedAt,
-                  }),
+                  }, b.runId),
                   // 2026-08-22：任务 id 兜底补挂（AgentStart/AgentEnd 现已携带；旧日志缺失时
                   // 靠 task_started/result 匹配的兜底锚）—— 有 taskId 右栏才有精确停止按钮
                   taskId: b.taskId || (raw.task_id ? String(raw.task_id) : undefined),
@@ -7161,23 +7241,17 @@ export function dispatchEvent(raw: AnyEvent): void {
       const ts = evTs(raw) ?? Date.now()
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
-        const existing = v.blocks.findIndex((b) => (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === taskId)
+        // 最新一张同 task 卡：agent_resume 每轮一张卡，task_started 不是「把旧卡翻回
+        // running」的开关 —— 新 run 的 agent_start 会建自己的卡。已终止的旧卡必须保持
+        // 结算态（时长/结果/交付都属于上一轮），否则 live 会把上一轮的 Worked 重新
+        // 点亮、刷新后又变回去（用户 2026-11：agentResume 影响 Worked）。
+        const existing = v.blocks.findLastIndex((b) => (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === taskId)
         const status = asyncTaskStatus(raw.status, raw.error, 'running')
         if (existing >= 0) {
+          const task = v.blocks[existing] as Extract<MsgBlock, { kind: 'agent' | 'async_task' }>
+          if (task.status !== 'running' && task.status !== 'interrupting') return s
           const blocks = [...v.blocks]
-          const task = blocks[existing] as Extract<MsgBlock, { kind: 'agent' | 'async_task' }>
-          // 会话级恢复：同一 task_id 再次收到 task_started = 原地续跑（子任务与主会话同档
-          // 持久化，agent_resume 复用同一 id 重跑，见 docs/…TASKOUTPUT.md §13）。卡片据同一 id
-          // 从终态**翻回 running** —— 必须清掉上一轮的终态残留（结束时刻 / 时长 / 结果 / 错误），
-          // 否则卡片显示「运行中」却仍挂着旧结论与旧时长。
-          const resumed = task.status !== 'running' && task.status !== 'interrupting'
-          if (!resumed) {
-            blocks[existing] = { ...task, status }
-          } else if (task.kind === 'async_task') {
-            blocks[existing] = { ...task, status, endedAt: undefined, taskResult: undefined, taskError: undefined }
-          } else {
-            blocks[existing] = { ...task, status, durMs: undefined, taskResult: undefined, taskError: undefined }
-          }
+          blocks[existing] = { ...task, status }
           const upd = setView(s, sid, { ...v, blocks })
           return { ...upd, busySids: busySidsFromViews(upd.views) }
         }
@@ -7215,23 +7289,37 @@ export function dispatchEvent(raw: AnyEvent): void {
               ...(endError ? { taskError: endError } : {}),
             }
           : {}
-        const upd = setView(s, sid, { ...v, blocks: applyTaskUsage(v.blocks.map((b) =>
-          (b.kind === 'async_task' || b.kind === 'agent') && b.taskId === taskId
-            ? { ...b, status, ...endPayload, ...(b.kind === 'async_task' ? { endedAt: ts } : { durMs: ts - b.spawnedAt }) }
-            // promoted 工具任务同样按 task_end 收敛（task_result_delivered 可能因
-            // 入队失败未达 —— 事件与入队已解耦，但仍保留双通道收敛，防止卡片永久停在
-            // 「执行中/中断中」，角标「N 运行中」随之归零）。durMs 缺失（tool_run_end
-            // 未达，如硬杀）时按 startedAt 兜底结算，避免终态卡片无时长可显。
-            : b.kind === 'tool' && b.promoted && b.taskId === taskId
-              ? {
-                  ...b,
-                  status: 'done' as const,
-                  interrupting: false,
-                  taskStatus: status,
-                  ...(b.durMs == null && b.startedAt != null ? { durMs: Math.max(0, ts - b.startedAt) } : {}),
-                }
-              : b,
-        ), taskId, usage) })
+        // 只结算**最新**一张卡：旧 run 的卡已由自己的 agent_end 结算过，不能被下一轮的
+        // task_end 改写（旧实现把 durMs = ts - spawnedAt 写给所有卡，旧卡会变成整个
+        // 任务寿命，刷新后又恢复成 Go 的值 —— live / checkpoint 不一致）。
+        const idx = v.blocks.findLastIndex((b) =>
+          ((b.kind === 'agent' || b.kind === 'async_task') && b.taskId === taskId)
+          || (b.kind === 'tool' && b.promoted && b.taskId === taskId),
+        )
+        if (idx < 0) return s
+        const blocks = [...v.blocks]
+        const b = blocks[idx]
+        if (b.kind === 'agent' || b.kind === 'async_task') {
+          blocks[idx] = {
+            ...b,
+            status,
+            ...endPayload,
+            ...(b.kind === 'async_task'
+              ? { endedAt: ts }
+              : { durMs: b.durMs == null || b.durMs <= 0 ? Math.max(0, ts - b.spawnedAt) : b.durMs }),
+          }
+        } else if (b.kind === 'tool') {
+          // promoted 工具任务同样按 task_end 收敛（task_result_delivered 可能因入队失败
+          // 未达）；durMs 缺失（tool_run_end 未达）时按 startedAt 兜底。
+          blocks[idx] = {
+            ...b,
+            status: 'done' as const,
+            interrupting: false,
+            taskStatus: status,
+            ...(b.durMs == null && b.startedAt != null ? { durMs: Math.max(0, ts - b.startedAt) } : {}),
+          }
+        }
+        const upd = setView(s, sid, { ...v, blocks: applyTaskUsage(blocks, taskId, usage) })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
       break
@@ -7299,8 +7387,10 @@ export function dispatchEvent(raw: AnyEvent): void {
       const usage = taskUsageFromEvent(raw.usage as RawUsage | undefined)
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
-        // 三类异步任务统一按 taskId 匹配：agent / async_task 占位 / promoted 工具
-        const taskIndex = v.blocks.findIndex((b) =>
+        // 三类异步任务统一按 taskId 匹配：agent / async_task 占位 / promoted 工具。
+        // 取**最后一张**：agent_resume 每轮一张卡，结果/已交付必须落当前那张；
+        // 取第一张会把第二轮的结果写回上一轮已结算的卡（live 与 checkpoint 分叉）。
+        const taskIndex = v.blocks.findLastIndex((b) =>
           (b.kind === 'agent' || b.kind === 'async_task' || b.kind === 'tool') && b.taskId === taskId,
         )
         const task = taskIndex >= 0 ? v.blocks[taskIndex] : undefined
@@ -7421,10 +7511,13 @@ export function dispatchEvent(raw: AnyEvent): void {
           }
           return setView(s, sid, {
             ...v,
-            // 按**事件时刻**落位（见 insertRecordAt）：任务结果推回会话后主 run 会自动
-            // 续跑，那一刻「轮尾」已经在新的 Working 之后 —— 通知会被排到它下面。
+            // 归属（2026-11 修订）：**运行中到达的回执属于当前这一轮**（它是一次运行的过程
+            // 行），不能按卡片所在轮落位 —— 后台子 agent 的卡片常常在几轮之前，按卡片落位
+            // 会把回执插回旧轮（用户看到的正是「回执跟自己的工作行分家」）。只有**交卷后**
+            // 到达的回执才回到卡片所在轮：那时它是「上一轮的结果通知」，末尾追加会算进下一轮。
+            // 落位仍按**事件时刻**（见 insertRecordAt）。
             blocks: applyTaskUsage(
-              insertRecordAt(blocks, taskIndex, [delivery], { evTime: evTs(raw), run: currentRun(v) }),
+              insertRecordAt(blocks, afterRun ? taskIndex : -1, [delivery], { evTime: evTs(raw), run: currentRun(v) }),
               taskId,
               usage,
             ),
@@ -7728,6 +7821,8 @@ function cpUsage(u?: { input?: number; output?: number; cache_read?: number; cac
 }
 function cpAgentItem(it: {
   kind: string; text?: string; is_error?: boolean; think_start?: number
+  // 这条项属于哪一次子运行（agent_resume 每次运行一张卡；旧 record 为空）
+  run_id?: string
   // 一轮的指标（见 AgentTurnMeta 注释）
   ts?: number; ttft_ms?: number; think_ms?: number
   output_tokens?: number; reasoning_tokens?: number; thinking_summarized?: boolean; agent_dur_ms?: number
@@ -7746,6 +7841,7 @@ function cpAgentItem(it: {
   // 指标逐项「有才带」：缺了就不渲染那一段（与主 run 的 assistant 块同一口径，
   // AssistantTurnMeta 也是「缺哪段省哪段」）。
   const meta = {
+    ...(it.run_id ? { runId: it.run_id } : {}),
     ...(it.model ? { model: it.model } : {}),
     ...(it.ts != null ? { ts: it.ts } : {}),
     ...(it.ttft_ms != null ? { ttftMs: it.ttft_ms } : {}),
@@ -7767,6 +7863,7 @@ function cpAgentItem(it: {
       status: it.status === 'error' ? 'error' : it.status === 'running' ? 'running' : 'done',
       result: it.result, errorInfo: cpToolError(it.error_info), durMs: it.dur_ms,
       ...(it.started_at != null ? { startedAt: it.started_at } : {}),
+      ...(it.run_id ? { runId: it.run_id } : {}),
       ...(it.task_id ? { taskId: it.task_id } : {}),
       diff: it.diff ? cpDiff(it.diff) : undefined,
       // 本次调用用量（仅子 agent 类工具非零）：恢复后卡片内工具项仍显示 tokens/成本
@@ -7787,6 +7884,7 @@ function cpAgentItem(it: {
     return {
       kind: 'user', text: it.text ?? '',
       ...(it.started_at != null ? { startedAt: it.started_at } : {}),
+      ...(it.run_id ? { runId: it.run_id } : {}),
     }
   }
   // compression
@@ -7796,6 +7894,7 @@ function cpAgentItem(it: {
     usage: it.usage ? cpUsage(it.usage) : undefined, error: it.error,
     aborted: it.aborted === true || undefined, durMs: it.dur_ms,
     active: it.active === true, ...(it.started_at != null ? { startedAt: it.started_at } : {}),
+    ...(it.run_id ? { runId: it.run_id } : {}),
     ...(it.analysis ? { analysis: it.analysis } : {}),
   }
 }
@@ -8302,6 +8401,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   fetchedModels: {},
   modelCosts: {}, // 注册表内置价（list_models capabilities.cost；价格编辑器空覆盖回显）
   providerPresets: [], // 启动后经 fetchProviderPresets 拉取（providers.json 单一事实源）
+  billing: {}, // provider → 余额/配额快照（provider_billing；失败也缓存，UI 据此显示原因）
   // 用户偏好持久恢复（问题 2，2026-08-17）：mode/model/effort/persona 从
   // localStorage 全局默认恢复；会话级记录在 new_session 响应时应用（applySessionPrefs）
   mode: persistedPrefs.mode ?? 'auto', // 默认自动执行（bash/write/edit 均不弹审批；工具层静态拦截/沙箱仍生效）
@@ -8690,6 +8790,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 标签集随会话一起回收（否则重开同名会话会捡到旧标签；也防 tabsByScope 无界增长）
     const tabsByScope = { ...s.tabsByScope }
     delete tabsByScope[sid]
+    // 输入历史随会话回收（含它的子智能体作用域）；localStorage 镜像 + 本地文件都要清
+    const historyScope = inputHistoryScope(path, sid)
+    forgetInputHistory(historyScope)
+    void getTransport().inputHistoryForget(historyScope).catch(() => { /* 旧主进程/文件不可用 */ })
     const recentSessions = s.recentSessions.filter((r) => !(r.path === path && r.id === sid))
     saveJSON(LS_TITLES, overrides)
     const projects = s.projects.map((p) => (p.path === path ? { ...p, sessions: p.sessions.filter((x) => x.id !== sid) } : p))
@@ -8732,6 +8836,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const tabsByScope = { ...s.tabsByScope }
     for (const sid of wsSids) delete tabsByScope[sid]
     delete tabsByScope[path]
+    forgetInputHistoryWorkspace(path)
+    void getTransport().inputHistoryForget(inputHistoryScope(path), true).catch(() => { /* 旧主进程/文件不可用 */ })
     // 顶部快捷栏（recentSessions）同工作区会话一并移除
     const recentSessions = s.recentSessions.filter((r) => r.path !== path)
     const projects = s.projects.filter((p) => p.path !== path)
@@ -9054,17 +9160,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sid = get().activeSessionId
     if (!sid || !taskId) return
     let offset = 0
+    // 已在途 / 目标卡不在视图里 → **不发请求**。
+    // 旧实现只把 mark 变成空操作，然后照样用初始值 offset=0 发出去 —— 每次重复
+    // 触发都会多拉一页「最新一页」，而 user 条目没有去重，于是一个气泡变 N 个
+    // （2026-11 用户报障「3 个一样的消息」的直接来源之一）。
+    let sendIt = false
     set((s) => {
       const v = s.views[sid] ?? emptyView()
       let nextOffset = 0
       const mark = (b: MsgBlock) => {
         if (b.id !== blockId || b.kind !== 'agent') return b
-        // 已经是加载中/没有更多：重复点击不叠加请求（按钮本身也会禁用）。
+        // 已经是加载中：重复点击/滚动预取不叠加请求（按钮本身也会禁用）。
         if (b.historyLoading) return b
         // 首次加载从「首屏条数」开始：checkpoint 里已保留最新的 len(b.items) 条，
         // 从 0 开始必然与首屏重叠（见 appendOlderItems 的注释）。
         // 窗口外卡片是骨架（items 为空）→ 0 起算，正好取最新一页。
         nextOffset = b.historyOffset ?? b.items.length
+        sendIt = true
         return { ...b, historyLoading: true, historyError: undefined }
       }
       const blocks = v.blocks.map(mark)
@@ -9072,6 +9184,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       offset = nextOffset
       return setView(s, sid, { ...v, blocks, agentDetached })
     })
+    if (!sendIt) return
     send({
       type: 'agent_history',
       // block_id：同 task 可能有多张 agent 卡（agent_resume 原地续跑 = 同 task 新 run），
@@ -10526,6 +10639,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   // electron provider:remove 会自动回退 active 到内置，故改名流程：先建新 id 再删旧 id，
   // 最后把 active 指回新 id（若原先是活跃）。session 侧归属（bs.provider）不迁移——
   // 改名的自定义 provider 通常不是活跃/会话绑定方；如需要可在设置里重新「设为当前」。
+  // renameProviderDisplay 改**显示名**（label），不动 id。
+  // 为什么单独一条而不是复用 saveProvider：saveProvider 末尾会发 set_provider → bridge
+  // rebuildAll 重建全部会话 loop（运行中的生成会被打断）。改名是纯 UI 操作，不该有这个副作用。
+  // id 不变 ⇒ metrics 历史 / 用户价表 / billing 缓存 / GOCODE_KEY_* 兜底全部继续有效。
+  renameProviderDisplay: async (provider, label) => {
+    const cfg = get().settings.provider[provider]
+    if (!cfg || typeof cfg !== 'object') return { ok: false, error: 'provider 不存在' }
+    const r = await transport.providerSave({ provider, label })
+    if (!r.ok) return r
+    const s2 = await transport.settingsGet()
+    set({ settings: s2 })
+    return { ok: true }
+  },
   renameProvider: async (oldName, newName) => {
     const name = newName.trim()
     if (!name) return { ok: false, error: '名称不能为空' }
@@ -10639,6 +10765,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   fetchProviderPresets: () => {
     send({ type: 'list_provider_presets', payload: {} })
   },
+  // 余额/配额（provider_billing）：单家或全部。结果由 command_response 落 billing。
+  // 60s 缓存与 5s 冷却在 bridge 侧（请求不重复发），前端只负责「谁在等」的 loading 态。
+  fetchBilling: (provider, refresh) => {
+    send({ type: 'provider_billing', payload: { ...(provider ? { provider } : {}), ...(refresh ? { refresh: true } : {}) } })
+  },
   // 测试连接（test_connection；GET /models 探活，带 10s 超时）。瞬态——把待保存的
   // base_url + api_key 直接发给 bridge，不落盘、不改配置。结果经 Promise 消费
   //（dispatchEvent 对 test_connection 直接 return，失败不外溢到 bridgeError）。
@@ -10684,6 +10815,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // setModels(payload) 执行，payload 旧值把新窗口打回）。
       const cmd: ProviderSaveInput = { provider: p.provider }
       if (p.active) cmd.active = p.active
+      if (typeof p.label === 'string') cmd.label = p.label // 显示名（纯 UI 字段；空串 = 清除）
       if (p.base_url) cmd.base_url = p.base_url
       if (p.protocol) cmd.protocol = p.protocol
       if (p.openai_compat) cmd.openai_compat = p.openai_compat

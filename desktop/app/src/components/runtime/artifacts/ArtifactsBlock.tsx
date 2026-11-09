@@ -60,6 +60,51 @@ function headlineOf(list: ArtifactItem[]): ArtifactItem {
   return best
 }
 
+/* 下面三个必须在**模块作用域**：写在组件体里会让 React 每次渲染都把它们当成新组件
+   类型，整棵子树卸载重挂。流式时每秒 60 次渲染，实测每个 chunk 新建 16 个 .ar-df +
+   32 个 .ar-btn + 16 个 .ar-dir（bench-runtime：DOM 变更量是旧皮肤的 2 倍）。 */
+function Diff({ a }: { a: ArtifactItem }) {
+  const p = num(a.added)
+  const m = num(a.removed)
+  if (!p && !m) return null
+  return (
+    <span className="ar-df">
+      {p ? <span className="p">+{p}</span> : null}
+      {m ? <span className="m">−{m}</span> : null}
+    </span>
+  )
+}
+
+function RowActions({
+  a,
+  t,
+  onPreview,
+  onReveal,
+}: {
+  a: ArtifactItem
+  t: (key: string) => string
+  onPreview?: (a: ArtifactItem) => void
+  onReveal?: (a: ArtifactItem) => void
+}) {
+  return (
+    <>
+      <button className="ar-btn" type="button" onClick={() => onPreview?.(a)}>
+        <EyeIcon size={12} />
+        {t('artifacts.preview')}
+      </button>
+      <button className="ar-btn" type="button" onClick={() => onReveal?.(a)}>
+        <FolderOpenIcon size={12} />
+        {t('artifacts.reveal')}
+      </button>
+    </>
+  )
+}
+
+function Dir({ a }: { a: ArtifactItem }) {
+  const i = a.path.lastIndexOf('/')
+  return <>{i < 0 ? '.' : a.path.slice(0, i) || '/'}</>
+}
+
 export function ArtifactsBlock({
   items,
   truncated,
@@ -94,36 +139,6 @@ export function ArtifactsBlock({
     return bytesText(a.size) ? t('artifacts.binary') : ''
   }
   const metaOf = (a: ArtifactItem) => [bytesText(a.size), linesText(a)].filter(Boolean).join(' · ')
-
-  const Diff = ({ a }: { a: ArtifactItem }) => {
-    const p = num(a.added)
-    const m = num(a.removed)
-    if (!p && !m) return null
-    return (
-      <span className="ar-df">
-        {p ? <span className="p">+{p}</span> : null}
-        {m ? <span className="m">−{m}</span> : null}
-      </span>
-    )
-  }
-
-  const Actions = ({ a }: { a: ArtifactItem }) => (
-    <>
-      <button className="ar-btn" type="button" onClick={() => onPreview?.(a)}>
-        <EyeIcon size={12} />
-        {t('artifacts.preview')}
-      </button>
-      <button className="ar-btn" type="button" onClick={() => onReveal?.(a)}>
-        <FolderOpenIcon size={12} />
-        {t('artifacts.reveal')}
-      </button>
-    </>
-  )
-
-  const Dir = ({ a }: { a: ArtifactItem }) => {
-    const i = a.path.lastIndexOf('/')
-    return <>{i < 0 ? '.' : a.path.slice(0, i) || '/'}</>
-  }
 
   const wallText = (() => {
     const v = num(wall)
@@ -170,7 +185,7 @@ export function ArtifactsBlock({
           </div>
         </div>
         <div className="ar-m-a">
-          <Actions a={head} />
+          <RowActions a={head} t={t} onPreview={onPreview} onReveal={onReveal} />
         </div>
       </div>
 
@@ -192,7 +207,7 @@ export function ArtifactsBlock({
                   <div className="ar-f-xin">
                     <div className="ar-f-xrow">
                       <span className="ar-dir" title={a.path}><Dir a={a} /></span>
-                      <span className="ar-f-a"><Actions a={a} /></span>
+                      <span className="ar-f-a"><RowActions a={a} t={t} onPreview={onPreview} onReveal={onReveal} /></span>
                     </div>
                   </div>
                 </div>

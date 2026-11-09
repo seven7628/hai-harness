@@ -33,8 +33,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seven7628/hai-harness/core"
@@ -42,6 +44,17 @@ import (
 	"github.com/seven7628/hai-harness/session"
 	"github.com/seven7628/hai-harness/todo"
 )
+
+// verifyEveryCommits 是「全量比对块内容」的周期。
+//
+// 脏块快路径依赖 reducer 精确标脏；万一某条变更路径漏标，磁盘会停在旧版本
+// （用户看到永不更新的卡片）。因此每 N 次提交强制走一次全量 sha256 校验，
+// 把「漏标」的影响限制在 N 次提交以内。首次提交（revKnown=false）也强制全量。
+const verifyEveryCommits = 32
+
+// commitSlowLog 是「慢提交」日志阈值：超过它就把一次提交的阶段分解打到
+// stderr。失败提交无论耗时多少都会打（30s 超时必须能归因到具体阶段）。
+const commitSlowLog = 3 * time.Second
 
 // commitDebounce 是提交节流的窗口时长：边界请求到达后等待该时长，窗口内
 // 到达的请求合并为一次提交。0 = 关闭节流（立即提交，兼容旧行为/测试）。
@@ -85,7 +98,9 @@ type checkpointCoordinator struct {
 	lastRev  uint64
 	revKnown bool
 	commits  uint64 // 成功提交计数（测试观测）
-	skipped  uint64 // 因缓冲满跳过的请求计数
+	// commitsSinceVerify 自上次全量比对以来的提交次数（脏块快路径的安全网）。
+	commitsSinceVerify int
+	skipped            uint64 // 因缓冲满跳过的请求计数
 
 	// committedMeta 缓存「最近一次成功提交」写进 record 的那三个标量。
 	// 打开会话（open_session）只需要它们来填响应，原本却要 Load 整条
@@ -224,6 +239,32 @@ func (c *checkpointCoordinator) WaitDrained() {
 	}
 }
 
+// logCommit 打一行提交阶段分解（失败必打，慢提交按阈值打）。
+//
+// 一行里同时给出「谁慢」和「多大」：total 由 marshal/revision/sdk/lock/
+// sidecar/encode/baseline/temp/bak/rename 组成，不足 1ms 的段省略。
+func (c *checkpointCoordinator) logCommit(err error, rev uint64, total, marshalDur, revDur, stateDur time.Duration, ct session.CommitPhaseTiming) {
+	phase := func(name string, d time.Duration) string {
+		if d < time.Millisecond {
+			return ""
+		}
+		return fmt.Sprintf(" %s=%s", name, d.Round(time.Millisecond))
+	}
+	status := "slow"
+	if err != nil {
+		status = "failed"
+	}
+	fmt.Fprintf(os.Stderr, "[checkpoint] %s commit total=%s session=%s rev=%d view=%.1fMB record=%.1fMB blocks=%d hashed=%.1fMB"+
+		" phase:%s%s%s%s%s%s%s%s%s%s%s%s%s err=%v\n",
+		status, total.Round(time.Millisecond), c.sessID, rev,
+		float64(ct.ViewBytes)/1e6, float64(ct.RecordBytes)/1e6, ct.BlocksWrote, float64(ct.HashedBytes)/1e6,
+		phase("marshal", marshalDur), phase("revision", revDur), phase("sdk", stateDur),
+		phase("lock", ct.LockWait), phase("sidecar", ct.Sidecar), phase("compact", ct.Compact),
+		phase("sc-open", ct.SidecarOpen), phase("sc-ref", ct.SidecarRef), phase("sc-flush", ct.SidecarFlush),
+		phase("encode", ct.Encode), phase("baseline", ct.Baseline), phase("temp", ct.Temp),
+		phase("bak+rename+dir", ct.Backup+ct.Rename+ct.SyncDir), err)
+}
+
 // Stats 返回 (commits, skipped) 供测试观测。
 func (c *checkpointCoordinator) Stats() (uint64, uint64) {
 	if c == nil {
@@ -270,19 +311,26 @@ func (c *checkpointCoordinator) commitOnce() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// 用 MarshalWithSpans：除 view 字节外还拿到每个 block 的切片，供存储层
 	// 做 sidecar 增量（免去对 86MB 的二次扫描，实测省 106ms/次提交）。
-	spans, err := c.reducer.MarshalWithSpans()
+	marshalStart := time.Now()
+	// S1：只要「骨架 + 各块字节」，不拼 210MB 整份 view（record 里的 blocks
+	// 最终会被替换成引用，拼进去纯属浪费内存带宽 + 峰值内存）。
+	spans, err := c.reducer.MarshalBodyWithSpans()
+	marshalDur := time.Since(marshalStart)
 	if err != nil {
 		c.reportError(fmt.Errorf("checkpoint: marshal view: %w", err))
 		return
 	}
-	view := spans.View
+	view := spans.Body
 
+	revStart := time.Now()
 	rev, ok, rerr := c.nextRevisionLocked(ctx)
+	revDur := time.Since(revStart)
 	if !ok {
 		if rerr != nil {
 			c.reportError(fmt.Errorf("checkpoint: read revision: %w", rerr))
@@ -291,17 +339,59 @@ func (c *checkpointCoordinator) commitOnce() {
 		}
 		return
 	}
+	stateStart := time.Now()
 	state := sdkState(c.s)
+	stateDur := time.Since(stateStart)
 	record := session.NewSessionRecord(
 		c.wsKey, c.sessID, rev, c.reducer.LastSeq(), c.reducer.ClearGeneration(), state, view,
 	)
 	record.BlockSpans = spans.Spans
-	if err := c.store.CommitRecord(ctx, record); err != nil {
+	record.BlockIDs = spans.IDs
+	record.AllBlockIDs = spans.AllIDs
+	// 脏块快路径：只重写本轮真正变化的块。周期性（及失败后第一次）退回全量比对。
+	c.commitsSinceVerify++
+	record.DirtyBlocks = spans.Dirty
+	if record.DirtyBlocks != nil && (c.commitsSinceVerify >= verifyEveryCommits || !c.revKnown) {
+		record.DirtyBlocks = nil
+		c.commitsSinceVerify = 0
+	}
+	// turns 分块（无损）：body 只带尾部窗口，历史按批追加到 <record>.turns。
+	//
+	// 顺序必须是「先日志、后 record」：反过来的话，一旦在这两步之间崩溃，
+	// 这批轮次既不在日志里、也随着被覆盖的 record 永久消失。先写日志的坏情况
+	// 只是日志里多出一批「record 还没引用」的轮次（下次提交照旧追加，幂等无害）。
+	if recPath, perr := c.store.RecordPath(c.wsKey, c.sessID); perr == nil {
+		if pending := c.reducer.TakePendingTurns(); len(pending) > 0 {
+			rawTurns, merr := json.Marshal(pending)
+			if merr != nil {
+				c.reducer.RestorePendingTurns(pending)
+				c.reportError(fmt.Errorf("checkpoint: marshal turns: %w", merr))
+				return
+			}
+			if aerr := session.AppendTurnChunk(recPath, rawTurns, len(pending)); aerr != nil {
+				// 日志没写成时要不要中止这次提交，取决于「不写日志会不会丢轮次」：
+				//   · 总条数还在 body 窗口内 → 这批轮次本来就在 body 里，日志失败不致命；
+				//   · 超出窗口 → body 只带尾部，不中止就会永久丢一批，必须中止并重试。
+				if c.reducer.TurnsTotal() > turnsBodyWindow {
+					c.reducer.RestorePendingTurns(pending)
+					c.reportError(fmt.Errorf("checkpoint: append turns log: %w", aerr))
+					return
+				}
+				c.reportError(fmt.Errorf("checkpoint: append turns log (ignored, all turns fit in body): %w", aerr))
+			}
+		}
+	}
+	ct, cerr := c.store.CommitRecordTraced(ctx, record)
+	if cerr != nil {
 		// 提交失败不阻塞事件流：失效 revision 缓存，下一边界重读磁盘基线；
 		// 同时上报结构化错误（持久化失败必须可观察）。
 		c.revKnown = false
-		c.reportError(fmt.Errorf("checkpoint: commit record: %w", err))
+		c.logCommit(cerr, rev, time.Since(started), marshalDur, revDur, stateDur, ct)
+		c.reportError(fmt.Errorf("checkpoint: commit record: %w", cerr))
 		return
+	}
+	if total := time.Since(started); total > commitSlowLog {
+		c.logCommit(nil, rev, total, marshalDur, revDur, stateDur, ct)
 	}
 	c.lastRev = rev
 	c.revKnown = true
@@ -431,6 +521,20 @@ func todoItems(in []todo.Item) []TodoItem {
 	return out
 }
 
+// todoResponseCarriesSnapshot 这条工具响应是否携带待办快照（extras 注入与 reducer
+// meta 共用的**唯一**判据）。
+//
+// 判据是「事件带快照」，不是「工具名以 todo_ 开头」：编排型工具（codemode）的响应
+// 同样会带快照 —— 脚本里的 todo_* 是嵌套调用、按契约不发射工具事件，快照只能由外层
+// 响应代发（见 tools/engine.go finish 的 todoWrites）。只认名字的话，脚本改过的清单
+// 永远到不了宿主：待办面板停在脚本执行之前（用户 2026-11 报障）。
+//
+// 名字判据保留给**没有** Todos 字段的旧事件日志（重放）：那时仍回退读会话 store，
+// 与从前行为一致（见 todosOf）。
+func todoResponseCarriesSnapshot(ev *events.ToolResponse) bool {
+	return ev.Todos != nil || strings.HasPrefix(ev.Name, "todo_")
+}
+
 // todosOf 取一条事件携带的待办快照（**属主 = 发出该事件的运行**）。
 //
 // 事件自带快照时以它为准：子 agent 的 todo_* 带的是它自己那份独立清单，而
@@ -471,7 +575,7 @@ func (bs *bridgeSession) observe(e events.Event) {
 			meta.CostUSD = costUsd(prov, ev.Model, *ev.Usage)
 		}
 	case *events.ToolResponse:
-		if strings.HasPrefix(ev.Name, "todo_") {
+		if todoResponseCarriesSnapshot(ev) {
 			meta.Todos = todosOf(bs, ev.Todos)
 		}
 	case *events.CompressEnd:
@@ -662,6 +766,204 @@ func parseCheckpoint(raw session.ViewCheckpoint) (*Checkpoint, error) {
 	}
 	if cp.SchemaVersion != checkpointSchemaVersion {
 		return nil, os.ErrInvalid
+	}
+	return &cp, nil
+}
+
+// parseCheckpointFromRecord 从读回的 record 还原快照（恢复路径主入口）。
+//
+// 慢路径（旧格式 / 无 spans）：整份 json.Unmarshal（210MB，实测 1.1~2.2s）。
+// 快路径（sidecar 引用形态）：骨架解码（2~5MB）+ 各块字节并行解码。
+//
+// 两条路径必须产出一致的 *Checkpoint：骨架与 spans 来自同一次
+// readRecordCandidate，spans 与展开后的 blocks 数组元素一一对应（顺序相同）。
+func parseCheckpointFromRecord(rec *session.SessionRecord) (*Checkpoint, error) {
+	if rec == nil {
+		return nil, os.ErrNotExist
+	}
+	spans := rec.LoadedBlockSpans
+	if len(spans) == 0 {
+		if len(rec.ViewCheckpoint) == 0 {
+			return nil, os.ErrNotExist
+		}
+		return parseCheckpoint(rec.ViewCheckpoint) // 旧格式：blocks 内嵌在 view 里
+	}
+	if len(rec.BodyView) == 0 {
+		// 有 spans 但没骨架（不该发生）：退回整份 view，正确性优先。
+		return parseCheckpoint(rec.ViewCheckpoint)
+	}
+	skel, err := rec.SkeletonView()
+	if err != nil {
+		return nil, err
+	}
+	var cp Checkpoint
+	if err := json.Unmarshal(skel, &cp); err != nil {
+		return nil, err
+	}
+	if cp.SchemaVersion != checkpointSchemaVersion {
+		return nil, os.ErrInvalid
+	}
+	blocks := make([]Block, len(spans))
+	var hashes [][8]byte
+	if len(rec.LoadedBlockHashes) == len(spans) {
+		hashes = rec.LoadedBlockHashes // 映射路径：完整性校验在解码时逐块做
+	}
+	if err := decodeBlocksParallel(spans, hashes, blocks); err != nil {
+		return nil, err
+	}
+	cp.Blocks = blocks
+	return &cp, nil
+}
+
+// decodeBlocksParallel 把块字节分给多个 worker 并行 json.Unmarshal。
+//
+// 用原子取号而不是静态分片：块大小差异极大（一行文本 vs 整段工具输出），
+// 静态切分会让某个 worker 拖尾。实测 30.8k 块：1 worker 850ms、8 worker 234ms。
+func decodeBlocksParallel(spans [][]byte, hashes [][8]byte, out []Block) error {
+	if len(spans) != len(out) {
+		return fmt.Errorf("block spans %d != out %d", len(spans), len(out))
+	}
+	if hashes != nil && len(hashes) != len(spans) {
+		return fmt.Errorf("block hashes %d != spans %d", len(hashes), len(spans))
+	}
+	verify := func(i int) error {
+		if hashes == nil {
+			return nil
+		}
+		if d := session.PayloadDigest(spans[i]); d != hashes[i] {
+			return fmt.Errorf("block %d: payload checksum mismatch", i)
+		}
+		return nil
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 8 {
+		workers = 8 // 实测 8 worker 已到拐点，再多收益递减（内存带宽受限）
+	}
+	if workers <= 1 || len(spans) < 64 {
+		for i := range spans {
+			if err := verify(i); err != nil {
+				return err
+			}
+			if err := json.Unmarshal(spans[i], &out[i]); err != nil {
+				return fmt.Errorf("block %d: %w", i, err)
+			}
+		}
+		return nil
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(spans) {
+					return
+				}
+				if err := verify(i); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
+				if err := json.Unmarshal(spans[i], &out[i]); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("block %d: %w", i, err)
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
+}
+
+// parseCheckpointFromRecordWindow 只解码尾部 limit 块 + 所有卡片类块。
+//
+// 为什么要带卡片类块：窗口外的子智能体/任务卡片必须照常出现在首屏（左栏树），
+// 而它们可能早于窗口。有了索引里的 kind，就能只解这几十个，不必全解 209MB。
+//
+// 其余块进 PagedBlocks（指向 sidecar 映射，零拷贝），由持有者决定何时 Release。
+// limit <= 0 或覆盖全部块时，退回完整解析（行为与之前一致）。
+func parseCheckpointFromRecordWindow(rec *session.SessionRecord, limit int) (*Checkpoint, error) {
+	spans := rec.LoadedBlockSpans
+	if len(spans) == 0 || limit <= 0 || limit >= len(spans) || len(rec.LoadedBlockKinds) != len(spans) {
+		return parseCheckpointFromRecord(rec)
+	}
+	skel, err := rec.SkeletonView()
+	if err != nil {
+		return nil, err
+	}
+	var cp Checkpoint
+	if err := json.Unmarshal(skel, &cp); err != nil {
+		return nil, err
+	}
+	if cp.SchemaVersion != checkpointSchemaVersion {
+		return nil, os.ErrInvalid
+	}
+
+	n := len(spans)
+	start := n - limit
+	need := make([]int, 0, limit+16)
+	decoded := make(map[int]struct{}, limit+16)
+	for i := 0; i < start; i++ {
+		if session.HasCardKind(rec.LoadedBlockKinds[i]) {
+			need = append(need, i)
+			decoded[i] = struct{}{}
+		}
+	}
+	for i := start; i < n; i++ {
+		need = append(need, i)
+		decoded[i] = struct{}{}
+	}
+
+	selSpans := make([][]byte, len(need))
+	selHashes := make([][8]byte, len(need))
+	hasHashes := len(rec.LoadedBlockHashes) == n
+	for j, i := range need {
+		selSpans[j] = spans[i]
+		if hasHashes {
+			selHashes[j] = rec.LoadedBlockHashes[i]
+		}
+	}
+	blocks := make([]Block, len(need))
+	var hsh [][8]byte
+	if hasHashes {
+		hsh = selHashes
+	}
+	if err := decodeBlocksParallel(selSpans, hsh, blocks); err != nil {
+		return nil, err
+	}
+
+	pagedIDs := make([]uint64, 0, start)
+	pagedSpans := make([][]byte, 0, start)
+	pagedHashes := make([][8]byte, 0, start)
+	for i := 0; i < start; i++ {
+		if _, ok := decoded[i]; ok {
+			continue
+		}
+		pagedIDs = append(pagedIDs, rec.LoadedBlockIDs[i])
+		pagedSpans = append(pagedSpans, spans[i])
+		if hasHashes {
+			pagedHashes = append(pagedHashes, rec.LoadedBlockHashes[i])
+		}
+	}
+
+	cp.Blocks = blocks
+	cp.BlocksTotal = n
+	cp.PagedBlocks = &PagedBlocks{
+		IDs:     pagedIDs,
+		Spans:   pagedSpans,
+		Hashes:  pagedHashes,
+		Release: rec.ReleaseView,
 	}
 	return &cp, nil
 }

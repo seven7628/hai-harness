@@ -73,6 +73,10 @@ export function isExternalMoveUp(a: {
 }): boolean {
   if (a.expectedTop < 0) return false
   if (a.max < a.prevMax) return false
+  // 已经贴着底部：这个「变小」只能是高度估算/取整的结果，不是用户往上移。
+  // （切会话铺开期间每帧都会重排，实测会在这里假报一次，然后在下一帧被
+  //   shouldResumeFollow 撤销 —— 用户看到的是「按钮闪一下」。）
+  if (a.top >= a.max - EPS) return false
   return a.top < a.expectedTop - EPS
 }
 
@@ -144,4 +148,53 @@ export function wheelConsumedByScroller(a: {
   if (a.deltaY < 0) return a.scrollTop > 0 // 往回翻：还有更早的内容
   if (a.deltaY > 0) return a.scrollTop < max - 1 // 往前翻：还没到底
   return false
+}
+
+// ── 历史铺开（「先出最近一屏，再往上续」）的起始窗口 ────────────────────────────
+//
+// ## 为什么这几行要抽成纯函数（2026-11）
+//
+// 铺开的实现方式就决定了两件事：**第一帧挂多少块**、**什么时候重新决定**。
+// 两者都是纯决策，却直接决定切换会话时会不会「先窜上去再滑下来」：
+//
+//   ① 起始窗口必须在**渲染期**决定。上一版用 effect 决定 —— 先按上一段转录的
+//      窗口把整段挂上 DOM，再砍到尾部 25 条。这一砍把 scrollHeight 从整段高度
+//      缩到一屏，浏览器立刻把 scrollTop 钳到 0，随后每帧补一批、每帧重新钉底。
+//      长会话里就是切换瞬间的上下窜动。
+//   ② 身份必须是**转录**，不能是全局的进入序号（enterAnimAt）。后台会话的
+//      new_session 响应也会 ++ 它；算进身份的话，与本段无关的进入会在这里重新
+//      开始铺开 —— 在用户眼前把整段砍到 25 条再长回来（「有子智能体在跑时页面
+//      自己上下抖」）。
+//
+// 用缺席的 -1 表示「还没决定」（冷加载：转录已切换、blocks 还没到）。
+export const REVEAL_PER_FRAME = 25
+
+export interface RevealWindow {
+  /** 身份：这一段转录（换会话才变）。 */
+  key: string
+  /** 只渲染 blocks.slice(start)；0 = 全部显示；-1 = 等数据到位再决定。 */
+  start: number
+}
+
+/** 渲染期决定这一帧的铺开窗口。同一个 key 只决定一次，之后只由 stepReveal 推进。 */
+export function revealWindow(
+  prev: RevealWindow,
+  key: string,
+  total: number,
+  animate: boolean,
+  perFrame = REVEAL_PER_FRAME,
+): RevealWindow {
+  const decide = (): RevealWindow => ({
+    key,
+    start: total ? (animate && total > perFrame ? total - perFrame : 0) : -1,
+  })
+  if (prev.key !== key) return decide()
+  // 同一次进入：数据刚到（冷加载）→ 现在决定窗口
+  if (prev.start < 0 && total > 0) return decide()
+  return prev
+}
+
+/** 铺开推进一批（单调朝 0，永不后移 —— 流式增长不重启）。 */
+export function stepReveal(start: number, perFrame = REVEAL_PER_FRAME): number {
+  return Math.max(0, start - perFrame)
 }

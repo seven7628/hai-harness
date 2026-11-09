@@ -37,6 +37,10 @@ if (import.meta.env.DEV) {
     // 事件分发也是验证入口：lab/ 的断言要能构造「事件顺序」这类场景
     //（例如运行中插话的 injected 位、子 agent 摘离的任务），而不是只注入最终块。
     w.__dispatch = m.dispatchEvent
+    // markdown 解析缓存（第 2 步）的观测口：切会话/刷新复用的就是它，量内存要用
+    void import('./lib/mdPipeline').then((p) => {
+      ;(w as unknown as Record<string, unknown>).__mdCache = { stats: p.mdCacheStats, clear: p.clearMdCache }
+    })
   })
 }
 

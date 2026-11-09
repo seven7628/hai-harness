@@ -78,6 +78,14 @@ export interface ExternalSkillsImportResult {
 // code 是给渲染层分流用的（EXISTS 同名冲突 / DENIED 越界或受保护 / INVALID_NAME …）。
 export type FsOpReply = { ok: boolean; path?: string; error?: string; code?: string }
 
+// 输入历史本地文件的 wire 形状（与 src/transport/types.ts / electron/input-history.ts 同构）
+export interface InputHistoryWireItem {
+  text: string
+  at?: number
+  refs?: { path: string; name: string; size: number }[]
+  images?: { mime: string; len: number; hash: string }[]
+}
+
 contextBridge.exposeInMainWorld('desktop', {
   startupMark: (phase: string) => ipcRenderer.invoke('startup-mark', phase),
   pickWorkspace: () => ipcRenderer.invoke('pick-workspace'),
@@ -88,6 +96,10 @@ contextBridge.exposeInMainWorld('desktop', {
   stopBridge: () => ipcRenderer.invoke('bridge:stop'),
   settingsGet: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   settingsSet: (patch: Partial<AppSettings>) => ipcRenderer.invoke('settings:set', patch) as Promise<{ ok: boolean; error?: string; settings?: AppSettings }>,
+  // 输入历史：主进程写 ~/.go-code/input-history.json（跨重启/可备份；不再只靠 localStorage）
+  inputHistoryGet: (p: { scope: string }) => ipcRenderer.invoke('input-history:get', p) as Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>,
+  inputHistorySet: (p: { scope: string; items: InputHistoryWireItem[] }) => ipcRenderer.invoke('input-history:set', p) as Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>,
+  inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => ipcRenderer.invoke('input-history:forget', p) as Promise<{ ok: boolean; error?: string }>,
   sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => ipcRenderer.invoke('stt:transcribe', p) as Promise<{ ok: boolean; text?: string; error?: string }>,
   externalSkillsStatus: () => ipcRenderer.invoke('external-skills:status') as Promise<ExternalSkillsStatusResult>,
   importExternalSkills: () => ipcRenderer.invoke('external-skills:import') as Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>,
@@ -95,7 +107,7 @@ contextBridge.exposeInMainWorld('desktop', {
   egoInstall: () => ipcRenderer.invoke('ego:install') as Promise<{ ok: boolean; error?: string }>,
   // 启动已安装的 ego lite（已装未运行时用；open -a，无需 TCC 授权）
   egoLaunch: () => ipcRenderer.invoke('ego:launch') as Promise<{ ok: boolean; error?: string }>,
-  providerSave: (p: { provider: string; active?: string; base_url?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) =>
+  providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) =>
     ipcRenderer.invoke('provider:save', p) as Promise<{ ok: boolean; hasKey?: boolean; error?: string }>,
   providerRemove: (provider: string) => ipcRenderer.invoke('provider:remove', provider) as Promise<{ ok: boolean; error?: string }>,
   providerKeyStatus: (provider: string) => ipcRenderer.invoke('provider:key-status', provider) as Promise<boolean>,
@@ -211,11 +223,14 @@ declare global {
       stopBridge: () => Promise<{ ok: boolean }>
       settingsGet: () => Promise<AppSettings>
       settingsSet: (patch: Partial<AppSettings>) => Promise<AppSettings>
+      inputHistoryGet: (p: { scope: string }) => Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>
+      inputHistorySet: (p: { scope: string; items: InputHistoryWireItem[] }) => Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>
+      inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => Promise<{ ok: boolean; error?: string }>
       sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => Promise<{ ok: boolean; text?: string; error?: string }>
       externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
       importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
       pickApp: () => Promise<{ name: string; bundleId?: string } | null>
-      providerSave: (p: { provider: string; active?: string; base_url?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
+      providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
       providerKeyStatus: (provider: string) => Promise<boolean>
       mcpSave: (servers: Record<string, MCPServerCfg>) => Promise<{ ok: boolean; error?: string }>
       fsList: (dir: string) => Promise<{ ok: boolean; path: string; entries: { name: string; path: string; isDir: boolean; size?: number }[]; error?: string }>

@@ -25,6 +25,10 @@ export interface ModelPrices {
 
 export interface ProviderCfg {
   base_url: string
+  // label 显示名（2026-11）：只影响 UI。id（settings.provider 的键）保持不可变，因为
+  // metrics 记账 / 用户价表 / billing 请求 / GOCODE_KEY_<NAME> 兜底全部按 id 索引 ——
+  // 改 id 会让历史统计断成两个 provider。空/缺省 = 用内置名或 id。
+  label?: string
   api_key?: string // API key 明文（settings.json；bridge loadSettings 读取）
   models: Record<string, number> // model → context window（tokens；1M=1000000）
   max_tokens: Record<string, number> // model → 单次输出上限（tokens；DeepSeek v4-flash 官方 384k）
@@ -280,6 +284,7 @@ export interface ProviderSaveInput {
   provider: string
   active?: string
   base_url?: string
+  label?: string // 显示名（空串 = 清除回默认显示名）
   protocol?: string // OpenAI 接入协议（chat_completions/responses；responses 暂未支持）
   openai_compat?: OpenAICompatCapabilities
   models?: Record<string, number>
@@ -291,6 +296,39 @@ export interface ProviderSaveInput {
   usage_input_includes_cache?: boolean | null
   cache_ttl_1h?: boolean | null // 缓存 TTL：true=1h / false=5m / null=清除回自动
   api_key?: string
+}
+
+// ── Provider 余额 / 配额（provider_billing 命令响应；数据面见 provider/billing）──
+// 单位与语义都来自上游：金额带 Currency（DeepSeek 实测 CNY），窗口百分比已归一 0..100。
+// percent **可选**：上游报了窗口但没给读数时必须缺字段，而不是 0（0% 是「没用过」的确定结论）。
+export interface BillingMoney {
+  amount: number
+  currency: string
+}
+export interface BillingWindow {
+  key: string
+  label?: string
+  percent?: number
+  status?: string
+  resets_at?: string
+}
+export interface BillingSnapshot {
+  provider: string
+  fetched_at: string
+  kind: 'balance' | 'quota' | 'report' | 'none'
+  source?: string
+  currency?: string
+  balance?: BillingMoney
+  limit?: BillingMoney
+  used?: BillingMoney
+  windows?: BillingWindow[]
+  plan_label?: string
+  not_connected?: boolean // 没配 key / 没登录 —— 不是错误
+  experimental?: boolean   // 端点未实测（presets.json verified_by != live）
+  error_code?: string
+  error_status?: number
+  // 本次刷新失败但字段里是上一次成功的读数（UI：旧值变灰 + 错误一行）
+  stale?: boolean
 }
 
 // OAuth 登录状态（oauth_status 命令响应；不含 token）
@@ -364,6 +402,18 @@ export interface FsOpReply {
   code?: string
 }
 
+// —— 输入框历史（本地文件持久化）——
+// 与 electron/input-history.ts、src/lib/inputHistory.ts 同构；图片只存指纹。
+export interface InputHistoryRef { path: string; name: string; size: number }
+export interface InputHistoryImage { mime: string; len: number; hash: string }
+export interface InputHistoryItem {
+  text: string
+  at?: number
+  refs?: InputHistoryRef[]
+  images?: InputHistoryImage[]
+}
+export interface InputHistoryReply { ok: boolean; items?: InputHistoryItem[]; error?: string }
+
 export interface FsListResult {
   ok: boolean
   path: string // 请求浏览的目录（绝对路径）
@@ -391,6 +441,11 @@ export interface Transport {
   createWorkspaceFolder(parent: string, name: string): Promise<{ ok: boolean; path?: string; error?: string }>
   settingsGet(): Promise<AppSettings>
   settingsSet(patch: Partial<AppSettings>): Promise<{ ok: boolean; error?: string; settings?: AppSettings }>
+  // 输入历史：主进程本地文件（~/.go-code/input-history.json）。浏览器 mock 返回空/成功，
+  // 渲染层仍以 localStorage 镜像为准；Electron 下启动/切会话时用文件结果对齐本地镜像。
+  inputHistoryGet(scope: string): Promise<InputHistoryReply>
+  inputHistorySet(scope: string, items: InputHistoryItem[]): Promise<InputHistoryReply>
+  inputHistoryForget(prefix: string, subtree?: boolean): Promise<{ ok: boolean; error?: string }>
   externalSkillsStatus(): Promise<ExternalSkillsStatus>
   importExternalSkills(): Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
   pickApp(): Promise<{ name: string; bundleId?: string } | null> // 系统「选择应用程序」（osascript choose application）；取消 → null

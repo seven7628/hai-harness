@@ -14,7 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,6 +89,77 @@ type SessionRecord struct {
 	// 提供它可让提交路径跳过对 view 的二次扫描（86MB 实测省 106ms）。
 	// 不持久化、不校验：仅当长度与 view 内 blocks 一致时才被采用。
 	BlockSpans [][]byte `json:"-"`
+
+	// AllBlockIDs 是 record 要引用的全部块 id（升序）；窗口恢复时 BlockSpans
+	// 只覆盖窗口与卡片块，而引用必须按全集写（否则窗口外的历史被 prune 掉）。
+	// 为空表示「BlockSpans 就是全集」。
+	AllBlockIDs []uint64 `json:"-"`
+
+	// BlockIDs 与 BlockSpans 一一对应（view 里 blocks 的顺序）。带上它，存储层
+	// 不必再逐个 block 解析 JSON 取 id（30,787 块实测 200~400ms）。不持久化。
+	BlockIDs []uint64 `json:"-"`
+
+	// DirtyBlocks 是本轮内容变化的 block id（由 reducer 精确标记）。
+	// nil = 未知 → 提交路径逐块全量哈希（兼容路径 + 周期性校验）；
+	// 非 nil = 只重写这些块，其余块不再读不再哈希（30,755 块实测省 185MB sha256）。
+	// 不持久化：它是单次提交的执行提示，不是数据。
+	DirtyBlocks map[uint64]struct{} `json:"-"`
+
+	// LoadedBlockSpans 是**读回**时各个 block 的字节切片（仅 sidecar 引用形态有），
+	// 与最终 ViewCheckpoint 中 blocks 数组的元素一一对应。
+	// 用途：恢复路径并行解码（避免对 210MB 做单线程 json.Unmarshal）。
+	// 不持久化；与 BlockSpans 方向相反（那是写、这是读）。
+	LoadedBlockSpans [][]byte `json:"-"`
+
+	// BodyView 是解析前的原始 view：blocks 仍是 sidecar 引用（未展开成数组）。
+	// 恢复路径用它做「骨架解码 + 并行块解码」，不必扫描展开后的 210MB。
+	BodyView ViewCheckpoint `json:"-"`
+
+	// LoadedBlockHashes 与 LoadedBlockSpans 一一对应：索引里记录的块摘要。
+	// 映射路径不在打开时逐块读 payload 校验，改由解码时（并行）比对。
+	LoadedBlockHashes [][8]byte `json:"-"`
+
+	// LoadedBlockIDs 与 LoadedBlockSpans 一一对应（升序）。
+	// 窗口恢复只解码尾部，其余仍要能按 id 分页取到 —— 所以 id 全集必须带回来。
+	LoadedBlockIDs []uint64 `json:"-"`
+
+	// LoadedBlockKinds 与 LoadedBlockSpans 一一对应（0 = 未知）。
+	// 窗口恢复要靠它只解码「卡片类」块（agent/async_task/task_*），
+	// 否则窗口外的子智能体卡片会从首屏消失（左栏树变空）。
+	LoadedBlockKinds []uint8 `json:"-"`
+
+	// releaseView 释放块映射；nil 表示无资源可放（拼装路径）。
+	releaseView func()
+}
+
+// ReleaseView 释放块映射（幂等）。映射路径下 LoadedBlockSpans 指向 mmap，
+// 调用方必须在解码完成后调用；拼装路径下是空操作。
+func (r *SessionRecord) ReleaseView() {
+	if r == nil || r.releaseView == nil {
+		return
+	}
+	r.releaseView()
+	r.releaseView = nil
+}
+
+// SkeletonView 返回把 blocks 字段替换成空数组后的 view（骨架）。
+//
+// 恢复路径的入口：BodyView 里 blocks 是 sidecar 引用**对象**，直接反序列化到
+// []Block 会报类型错；先把该字段换成 []（2~5MB 拷贝，实测 <10ms），骨架就能
+// 一次性 json.Unmarshal，剩下的 210MB 由调用方按 LoadedBlockSpans 分给多个
+// worker 并行解码（实测单线程 1.1~2.2s → 8 worker 234ms）。
+//
+// 仅在 LoadedBlockSpans 非空（sidecar 引用形态）时有意义；旧格式 record 的
+// BodyView 里本身就是完整数组，调用方应走原 parse 路径。
+func (r *SessionRecord) SkeletonView() ([]byte, error) {
+	if len(r.BodyView) == 0 {
+		return nil, fmt.Errorf("record has no body view")
+	}
+	out, err := replaceJSONField(r.BodyView, "blocks", []byte("[]"))
+	if err != nil {
+		return nil, fmt.Errorf("skeleton view: %w", err)
+	}
+	return out, nil
 }
 
 // SessionRecordStore is the storage boundary used by the future bridge
@@ -189,8 +260,10 @@ func (r *SessionRecord) Clone() (*SessionRecord, error) {
 // Those paths have separate owners and schemas even when the same process
 // creates all of them.
 type FileStorage struct {
-	root string
-	mu   sync.Mutex
+	root      string
+	bgCompact atomic.Bool // sidecar 回收是否放后台（默认开，见 compact_scheduler.go）
+	// 互斥按 record 路径（见 record_lock.go），不再是「一个实例一把大锁」：
+	// 一把大锁会把所有 workspace 的提交与读取串行化（实测跨会话队头阻塞 810ms）。
 }
 
 // NewFileStorage creates the atomic SessionRecord storage root. The root is
@@ -206,7 +279,9 @@ func NewFileStorage(root string) (*FileStorage, error) {
 	if err := os.MkdirAll(abs, 0o700); err != nil { // 会话记录含敏感内容，0700
 		return nil, fmt.Errorf("file storage: create root: %w", err)
 	}
-	return &FileStorage{root: filepath.Clean(abs)}, nil
+	fs := &FileStorage{root: filepath.Clean(abs)}
+	fs.bgCompact.Store(true)
+	return fs, nil
 }
 
 // NewSessionRecordStorage is an explicit alias for callers that want to make
@@ -259,8 +334,8 @@ func (s *FileStorage) LoadRecord(ctx context.Context, workspaceKey, sessionID st
 		return nil, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := lockRecord(path)
+	defer unlock()
 	return s.loadRecordLocked(ctx, path, workspaceKey, sessionID)
 }
 
@@ -296,8 +371,8 @@ func (s *FileStorage) LoadRecordMetadata(ctx context.Context, workspaceKey, sess
 		return nil, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := lockRecord(path)
+	defer unlock()
 
 	meta, err := loadMetadataCandidate(path, workspaceKey, sessionID)
 	if err == nil {
@@ -311,12 +386,63 @@ func (s *FileStorage) LoadRecordMetadata(ctx context.Context, workspaceKey, sess
 	return nil, fmt.Errorf("%w: %v", ErrRecordCorrupt, err)
 }
 
+// CommitPhaseTiming 是一次 CommitRecord 的阶段耗时分解（诊断用）。
+//
+// 为什么需要它：提交失败时上层只会看到 "context deadline exceeded"，而这条
+// 错误无法区分「等全局锁 20s」「sidecar compact 20s」「fsync 卡住」——它们
+// 都只是在下一个 context 检查点暴露成同一个哨兵。真实故障（30s 超时）因此
+// 长期无法归因。有了分解，一次慢提交就能定位到具体阶段。
+type CommitPhaseTiming struct {
+	Total time.Duration // 进入 CommitRecord 到返回
+
+	LockWait time.Duration // 等 FileStorage.mu（进程内所有会话共享）
+	Sidecar  time.Duration // blocks sidecar：acquire + 追加 + flush + compact
+	// sidecar 内部的再分解（定位「为什么这次提交慢」用）
+	SidecarOpen  time.Duration // acquireBlockStore：首次打开/索引增量扫描
+	SidecarRef   time.Duration // 逐块比对 + 追加（脏块快路径下只剩 id 循环与集合摘要）
+	SidecarFlush time.Duration // fsync sidecar + 重写索引
+	Compact      time.Duration // 其中 compact 部分（sidecar 的子集，仅同步回收时非零）
+	// CompactScheduled 表示本次提交把回收交给了后台（Compact 不适用）。
+	CompactScheduled bool
+	Encode           time.Duration // 序列化信封 + 计算落盘 checksum
+	Baseline         time.Duration // 读旧 record 基线（含 .bak 回退）
+	Temp             time.Duration // 写临时文件（含 fsync）
+	Backup           time.Duration // 硬链接 / 复制 .bak
+	Rename           time.Duration
+	SyncDir          time.Duration
+
+	ViewBytes   int64 // 待落盘 view 字节数
+	RecordBytes int64 // 落盘 record 字节数
+	BlocksWrote int   // 本次追加进 sidecar 的块数
+	HashedBytes int64 // 本次为比对内容而哈希的 payload 字节数（脏块快路径下应为 0）
+}
+
 // CommitRecord atomically replaces the formal record after validating identity,
 // schema, monotonic revision and canonical checksum. The previous valid formal
 // record is copied to one bounded .bak before replacement. The caller's record
 // is not used as the mutable serialization buffer; its checksum is updated only
 // after a successful durable commit.
 func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) error {
+	_, err := s.CommitRecordTraced(ctx, record)
+	return err
+}
+
+// CommitRecordTraced 与 CommitRecord 完全等价，额外返回阶段耗时分解。
+//
+// 调用方（bridge 的 checkpoint worker）据此在「慢提交 / 提交失败」时打一行
+// 结构化日志。没有它，30s 超时只能看到 "context deadline exceeded"。
+func (s *FileStorage) CommitRecordTraced(ctx context.Context, record *SessionRecord) (CommitPhaseTiming, error) {
+	started := time.Now()
+	var t CommitPhaseTiming
+	if record != nil {
+		t.ViewBytes = int64(len(record.ViewCheckpoint))
+	}
+	err := s.commitRecord(ctx, record, &t)
+	t.Total = time.Since(started)
+	return t, err
+}
+
+func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t *CommitPhaseTiming) error {
 	if err := contextError(ctx); err != nil {
 		return err
 	}
@@ -331,6 +457,28 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 	// 落盘内容有被并发改写撕裂的风险。
 	working := *record
 	working.ViewCheckpoint = append(ViewCheckpoint(nil), record.ViewCheckpoint...)
+
+	// 锁必须在**任何写入之前**拿到，并覆盖「sidecar 追加 → record 落盘」全程：
+	// sidecar 与 record 是同一条 record 的两半，并发提交会让它们错位。
+	path, err := s.RecordPath(working.WorkspaceKey, working.SessionID)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create session record directory: %w", err)
+	}
+
+	lockStart := time.Now()
+	unlock := lockRecord(path)
+	defer unlock()
+	t.LockWait = time.Since(lockStart)
+
+	// 唯一的 ctx 检查：此刻还没有写过任何字节。写入开始之后不再响应 ctx ——
+	// 半提交（sidecar 已前进、record 未换）会让会话永久读不出来。
+	if err := contextError(ctx); err != nil {
+		return err
+	}
 
 	// 顺序很关键：**先序列化，再按字节算 checksum**。
 	//
@@ -356,41 +504,68 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 	// 失败一律回退全量内嵌（正确性优先，静默）：任何 block 无 id、blocks 非数组、
 	// view 结构异常 → working.ViewCheckpoint 保持原样，走原路径落盘。
 	// 读回时有无引用都能解析（见 resolveBlocksRef），所以回退不影响可读性。
-	if recPath, perr := s.RecordPath(working.WorkspaceKey, working.SessionID); perr == nil {
-		// sidecar 与 record 同目录 —— 首次提交时目录可能还不存在（record 的
-		// MkdirAll 在后面执行），必须在这里先建，否则 openBlockStore 直接失败、
-		// 静默回退全量路径（实测踩到：优化完全没生效，record 仍是 90MB）。
-		if mkErr := os.MkdirAll(filepath.Dir(recPath), 0o700); mkErr == nil {
-			if bs, berr := acquireBlockStore(recPath); berr == nil {
-				// 优先用调用方给的 spans（reducer 顺带产出，零解析）；否则自行扫描。
-				var newView []byte
-				var rerr error
-				if len(record.BlockSpans) > 0 {
-					newView, _, rerr = refBlocksFromSpans(bs, working.ViewCheckpoint, record.BlockSpans)
-				} else {
-					newView, _, rerr = refBlocks(bs, working.ViewCheckpoint)
-				}
-				// 先落 sidecar 再落 record：record 里的引用必须指向已 durable 的数据。
-				if rerr == nil {
-					if ferr := bs.flush(); ferr == nil {
-						working.ViewCheckpoint = newView
-					}
-				}
-				// sidecar 回收（append-only 的必然副作用）。
-				//
-				// 子智能体卡片在 running 期每次事件都重写同一 block，同一 id 的历史
-				// 版本会无限堆积：真实会话实测 23893 条记录只有 21551 个唯一 id
-				//（93% 废弃），文件涨到 1.4GB 而有效内容仅 58MB。
-				//
-				// 判据 O(1)（废弃计数在写入侧维护），超阈值才真正重写；
-				// 重写本身失败不影响本次提交的正确性（sidecar 保持原样，下次再试）。
+	sidecarStart := time.Now()
+	openStart := time.Now()
+	if bs, berr := acquireBlockStore(path); berr == nil {
+		t.SidecarOpen = time.Since(openStart)
+		refStart := time.Now()
+		// 优先用调用方给的 spans（reducer 顺带产出，零解析）；否则自行扫描。
+		var newView []byte
+		var rerr error
+		wrote := 0
+		hashedBefore := bs.hashedBytes
+		if len(record.BlockSpans) > 0 {
+			newView, wrote, rerr = refBlocksFromSpansDirty(bs, working.ViewCheckpoint, record.BlockSpans, record.DirtyBlocks, record.BlockIDs, record.AllBlockIDs)
+		} else {
+			newView, wrote, rerr = refBlocks(bs, working.ViewCheckpoint)
+		}
+		t.SidecarRef = time.Since(refStart)
+		t.BlocksWrote = wrote
+		t.HashedBytes = bs.hashedBytes - hashedBefore
+		// 先落 sidecar 再落 record：record 里的引用必须指向已 durable 的数据。
+		if rerr == nil {
+			flushStart := time.Now()
+			if ferr := bs.flush(); ferr == nil {
+				working.ViewCheckpoint = newView
+			}
+			t.SidecarFlush = time.Since(flushStart)
+		}
+		// sidecar 回收（append-only 的必然副作用）。
+		//
+		// 子智能体卡片在 running 期每次事件都重写同一 block，同一 id 的历史
+		// 版本会无限堆积：真实会话实测 23893 条记录只有 21551 个唯一 id
+		//（93% 废弃），文件涨到 1.4GB 而有效内容仅 58MB。
+		//
+		// 判据 O(1)（废弃计数在写入侧维护），超阈值才真正重写；
+		// 重写本身失败不影响本次提交的正确性（sidecar 保持原样，下次再试）。
+		// 回收只在后台跑：提交路径只做 O(1) 的阈值判断。
+		// 关闭开关后回到同步回收（灰度/回退用）。
+		if bs.needsCompact() {
+			if s.backgroundCompactEnabled() {
+				t.CompactScheduled = true
+				scheduleCompact(path)
+			} else {
+				compactStart := time.Now()
 				_ = bs.maybeCompact()
-				// 不 Close：实例留在缓存里复用（Close 会 fsync 并关文件，下次提交
-				// 又要重扫 86MB 重建索引 —— 实测 78ms，吃掉增量方案的收益）。
+				t.Compact = time.Since(compactStart)
 			}
 		}
+		// 不 Close：实例留在缓存里复用（Close 会 fsync 并关文件，下次提交
+		// 又要重扫 86MB 重建索引 —— 实测 78ms，吃掉增量方案的收益）。
+	}
+	t.Sidecar = time.Since(sidecarStart)
+	// 占位形态（"blocks":null）必须在落盘前被替换成引用或内嵌数组 ——
+	// 否则读出来是「0 块的空会话」（就是历史事故里用户看到的「全没了」）。
+	// sidecar 不可用时用 spans 拼回内嵌数组（慢，但只在异常路径发生）。
+	if working.ViewCheckpointHasNullBlocks() {
+		inline, aerr := assembleInlineBlocks(working.ViewCheckpoint, record.BlockSpans)
+		if aerr != nil {
+			return fmt.Errorf("%w: blocks placeholder not replaced: %v", ErrInvalidSessionRecord, aerr)
+		}
+		working.ViewCheckpoint = inline
 	}
 
+	encodeStart := time.Now()
 	prefix, view, suffix, err := encodeRecordEnvelope(&working)
 	if err != nil {
 		return fmt.Errorf("encode session record: %w", err)
@@ -419,20 +594,10 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 		}
 	}
 
-	path, err := s.RecordPath(working.WorkspaceKey, working.SessionID)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create session record directory: %w", err)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := contextError(ctx); err != nil {
-		return err
-	}
+	// 这里**不再**检查 ctx：sidecar 的追加/删除在更早的分支就已落成，
+	// 此时因 30s 到期返回会留下「sidecar 已前进、record 未换」的撕裂态，
+	// 而读路径要求两者一致 → 会话再也读不出来（真实故障）。
+	// 唯一的 ctx 检查在函数入口，即「还没写任何字节」时。
 
 	// 读基线只需要 (Revision, Checksum) 与「文件是否完好」三个事实，
 	// 不需要把 90MB payload 解成对象图。原来用 readRecordCandidate（全解码 +
@@ -443,6 +608,9 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 	//
 	// 安全性不低于原实现：结构损坏/身份不符/checksum 失配一律拒绝并回退 .bak，
 	// 只是不再 materialize payload —— 该 payload 后续也不需要（我们只写新内容）。
+	t.Encode = time.Since(encodeStart)
+	t.RecordBytes = int64(len(prefix) + len(view) + len(suffix))
+	baselineStart := time.Now()
 	current, currentRaw, currentErr := readRecordBaseline(path, working.WorkspaceKey, working.SessionID)
 	if currentErr != nil {
 		// A valid bounded backup is the only fallback baseline. This applies
@@ -476,12 +644,19 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 		}
 	}
 
-	if err := contextError(ctx); err != nil {
-		return err
-	}
+	t.Baseline = time.Since(baselineStart)
+	// 点不可返回：从这里开始**不再响应 ctx**。
+	//
+	// 到这一行为止，磁盘只被读过；但 sidecar 的追加/删除在更早的分支里
+	// 可能已经落成（refBlocksFromSpans + flush）。此时若因为 30s 到期直接
+	// 返回，盘上就留下「sidecar 已前进、record 还是旧的」的撕裂态，而读路径
+	// 要求两者一致 —— 于是**整个会话再也读不出来**（真实故障：30s 超时后
+	// 会话不可读）。规则：要么不写，要么写完整；慢提交比半提交好。
+	//
 	// 流式写出：prefix + view + `,"checksum":"<sum>"}` + "\n"。
 	// 不再先拼出完整 encoded 再写 —— 那会多一次 91MB 拷贝，且在 Checksum
 	// 已定稿后才发生，纯属浪费。writeTempFileParts 内部 fsync 后再 close。
+	tempStart := time.Now()
 	tmp, err := writeTempFileParts(dir, filepath.Base(path), []filePart{
 		{prefix, 0o600},
 		{view, 0o600},
@@ -491,7 +666,9 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 		return fmt.Errorf("write session record temporary file: %w", err)
 	}
 	defer os.Remove(tmp)
+	t.Temp = time.Since(tempStart)
 
+	bakStart := time.Now()
 	if len(currentRaw) > 0 {
 		// 备份旧 formal 到 .bak —— 用**硬链接**而不是复制整份内容。
 		//
@@ -513,15 +690,17 @@ func (s *FileStorage) CommitRecord(ctx context.Context, record *SessionRecord) e
 			}
 		}
 	}
-	if err := contextError(ctx); err != nil {
-		return err
-	}
+	t.Backup = time.Since(bakStart)
+	renameStart := time.Now()
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace session record: %w", err)
 	}
+	t.Rename = time.Since(renameStart)
+	syncStart := time.Now()
 	if err := syncDirectory(dir); err != nil {
 		return fmt.Errorf("sync session record directory: %w", err)
 	}
+	t.SyncDir = time.Since(syncStart)
 
 	record.Checksum = working.Checksum
 	return nil
@@ -538,8 +717,8 @@ func (s *FileStorage) DeleteSessionRecord(ctx context.Context, workspaceKey, ses
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := lockRecord(path)
+	defer unlock()
 
 	removed := false
 	for _, p := range []string{path, path + ".bak"} {
@@ -572,14 +751,38 @@ func (s *FileStorage) DeleteSessionRecord(ctx context.Context, workspaceKey, ses
 
 // loadRecordLocked reads formal then backup. The caller must hold s.mu.
 func (s *FileStorage) loadRecordLocked(ctx context.Context, path, workspaceKey, sessionID string) (*SessionRecord, error) {
+	return s.loadRecordLockedMode(ctx, path, workspaceKey, sessionID, readResolve)
+}
+
+// LoadRecordForView 读回 record 但**不拼装 blocks**：BodyView 保持引用形态，
+// LoadedBlockSpans 指向 sidecar 的只读映射（零拷贝）。调用方解码完必须
+// 调用 ReleaseView。
+//
+// 为什么单独一个入口：拼装路径要 ReadAt(209MB) + sha256 + 拼 buffer +
+// replaceJSONField 再复制一遍（实测 347ms，占 LoadRecord 的 70%），而这些
+// 字节唯一的用途就是「喂给 JSON 解码器读一遍」。
+func (s *FileStorage) LoadRecordForView(ctx context.Context, workspaceKey, sessionID string) (*SessionRecord, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
-	formal, _, formalErr := readRecordCandidate(path, workspaceKey, sessionID)
+	path, err := s.RecordPath(workspaceKey, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	unlock := lockRecord(path)
+	defer unlock()
+	return s.loadRecordLockedMode(ctx, path, workspaceKey, sessionID, readMap)
+}
+
+func (s *FileStorage) loadRecordLockedMode(ctx context.Context, path, workspaceKey, sessionID string, mode readMode) (*SessionRecord, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	formal, _, formalErr := readRecordCandidateMode(path, workspaceKey, sessionID, mode)
 	if formalErr == nil {
 		return formal, nil
 	}
-	backup, _, backupErr := readRecordCandidate(path+".bak", workspaceKey, sessionID)
+	backup, _, backupErr := readRecordCandidateMode(path+".bak", workspaceKey, sessionID, mode)
 	if backupErr == nil {
 		return backup, nil
 	}
@@ -997,7 +1200,13 @@ func validateCheckpointForCommit(view ViewCheckpoint) error {
 	//   · 内嵌完整数组   `"blocks":[`
 	//   · sidecar 引用   `"blocks":{"$blocks_ref":...}`（长会话优化）
 	if !bytes.Contains(head, []byte(`"blocks":[`)) && !bytes.Contains(head, []byte(`"blocks":{"`+blocksRefKey)) {
-		return fmt.Errorf("%w: view_checkpoint.blocks must be an array or sidecar ref", ErrInvalidSessionRecord)
+		// 第三种形态：提交占位 `"blocks":null`。
+		// 调用方（bridge）为了不拼 210MB 整份 view，只给「骨架 + 各块字节」；
+		// 落盘前一定会在 commitRecord 里被换成 sidecar 引用或内嵌数组
+		// （见「占位必须被替换」那段），所以磁盘上不会出现 null 形态。
+		if !bytes.Contains(head, []byte(`"blocks":null`)) {
+			return fmt.Errorf("%w: view_checkpoint.blocks must be an array or sidecar ref", ErrInvalidSessionRecord)
+		}
 	}
 	return nil
 }
@@ -1202,7 +1411,23 @@ func parseRecordHeadScalars(data []byte, workspaceKey, sessionID string) (*Sessi
 	return nil, fmt.Errorf("view_checkpoint missing")
 }
 
+// readMode 决定读回时如何处理 sidecar 引用形态的 blocks。
+type readMode int
+
+const (
+	// readResolve 拼装完整 blocks 数组（ViewCheckpoint 与旧格式逐字节等价）。
+	// 提交基线、测试、需要整份 view 的调用方用它。
+	readResolve readMode = iota
+	// readMap 不拼装：BodyView 保持引用形态，spans 指向 sidecar 的只读映射。
+	// 恢复路径用它（省掉 209MB 里 4 次搬运中的 3 次）。
+	readMap
+)
+
 func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, []byte, error) {
+	return readRecordCandidateMode(path, workspaceKey, sessionID, readResolve)
+}
+
+func readRecordCandidateMode(path, workspaceKey, sessionID string, mode readMode) (*SessionRecord, []byte, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, ErrRecordNotFound
@@ -1213,9 +1438,11 @@ func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, 
 	var record SessionRecord
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
+	_dbg0 := time.Now()
 	if err := dec.Decode(&record); err != nil {
 		return nil, nil, fmt.Errorf("%w: decode %s: %w", ErrRecordCorrupt, path, err)
 	}
+	_dbgDecode := time.Since(_dbg0)
 	if err := ensureJSONEOF(dec); err != nil {
 		return nil, nil, fmt.Errorf("%w: decode %s: %w", ErrRecordCorrupt, path, err)
 	}
@@ -1247,10 +1474,23 @@ func readRecordCandidate(path, workspaceKey, sessionID string) (*SessionRecord, 
 	//
 	// 还原失败必须报错而不是返回空 blocks：那会让长会话「打开后历史全空」，
 	// 比打不开更糟（用户以为数据丢了）。调用方据此回退 .bak。
-	if resolved, rerr := resolveBlocksRef(record.ViewCheckpoint, path); rerr != nil {
+	_dbg1 := time.Now()
+	body := record.ViewCheckpoint
+	if mode == readMap {
+		if merr := attachMappedSpans(&record, body, path); merr != nil {
+			return nil, nil, fmt.Errorf("%w: %s: %w", ErrRecordCorrupt, path, merr)
+		}
+	} else if resolved, spans, rerr := resolveBlocksRefSpans(record.ViewCheckpoint, path); rerr != nil {
 		return nil, nil, fmt.Errorf("%w: %s: %w", ErrRecordCorrupt, path, rerr)
 	} else {
 		record.ViewCheckpoint = resolved
+		record.LoadedBlockSpans = spans
+		record.BodyView = body
+	}
+	if os.Getenv("HAI_RECORD_TIMING") != "" && mode == readResolve {
+		fmt.Fprintf(os.Stderr, "[record] read=%dB decode=%s checksum+validate=%s assemble+replace=%s\n",
+			len(data), _dbgDecode.Round(time.Millisecond),
+			_dbg1.Sub(_dbg0).Round(time.Millisecond), time.Since(_dbg1).Round(time.Millisecond))
 	}
 	return &record, append([]byte(nil), data...), nil
 }
@@ -1530,4 +1770,33 @@ func contextError(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+// ViewCheckpointHasNullBlocks 报告 view 的 blocks 是否还是提交占位（null）。
+func (r *SessionRecord) ViewCheckpointHasNullBlocks() bool {
+	v := bytes.TrimSpace(r.ViewCheckpoint)
+	i := bytes.Index(v, []byte(`"blocks":`))
+	if i < 0 {
+		return false
+	}
+	rest := bytes.TrimLeft(v[i+len(`"blocks":`):], " \n\t\r")
+	return bytes.HasPrefix(rest, []byte("null"))
+}
+
+// assembleInlineBlocks 用 spans 把占位替换成内嵌 blocks 数组（异常路径兜底）。
+func assembleInlineBlocks(body ViewCheckpoint, spans [][]byte) (ViewCheckpoint, error) {
+	total := 2
+	for _, sp := range spans {
+		total += len(sp) + 1
+	}
+	arr := make([]byte, 0, total)
+	arr = append(arr, '[')
+	for i, sp := range spans {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, sp...)
+	}
+	arr = append(arr, ']')
+	return replaceJSONField(body, "blocks", arr)
 }

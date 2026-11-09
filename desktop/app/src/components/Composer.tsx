@@ -16,6 +16,12 @@ import './runtime/prompt/caps.css'
 import { AgentRunningBar } from './AgentRunningBar'
 import { useT } from '../i18n'
 import { shortReason } from '../lib/shortReason'
+import {
+  adoptInputHistory, findHistoryImages, historyDirection, historyItem, imageFingerprints, imageKey,
+  inputHistoryScope, mergeInputHistories, readInputHistory, recallNewer, recallOlder,
+  recordInputHistory, replaceInputHistory,
+  type HistoryImageFingerprint, type HistoryNavigation, type InputHistoryItem,
+} from '../lib/inputHistory'
 import { getTransport } from '../transport'
 import {
   acceptImages, dataUrlBytes, fmtBytes,
@@ -43,6 +49,18 @@ const EFFORTS = [
 type DocRef = { path: string; name: string; size: number }
 /** 单条消息的文档引用数量上限（再多模型也读不完；与图片附件同样给出明确提示）。 */
 const MAX_DOC_REFS = 10
+/**
+ * ↑/↓ 历史回溯的运行期图片缓存预算（data URL 字符数）。
+ * 图片字节不写 localStorage（100 张 × 3MiB 会撑爆配额）；这里只缓存最近用过的，
+ * 超出预算按插入顺序淘汰。重启后仍可从会话转录的 user 块按指纹找回（见 resolveHistoryImages）。
+ */
+const HISTORY_IMAGE_CACHE_CHARS = 32 * 1024 * 1024
+/** 无附件时的稳定空数组：避免 `?? []` 每次渲染都产生新引用，把历史签名 effect 变成每帧跑。 */
+const NO_ATTACHMENTS: QueuedContent[] = []
+/** 进入历史前的完整草稿：正文 + 文档引用 chips + 图片原图（↓ 越过最新 / Esc 时原样恢复）。 */
+type HistoryDraft = { text: string; refs: DocRef[]; attachments: QueuedContent[] }
+/** 回填后的状态签名：用于区分「历史回填触发的渲染」与「用户真的改了输入」。 */
+type HistoryShown = { text: string; refsKey: string; imagesKey: string }
 /** 「添加文件」/拖拽目标的类型过滤（引用不复制，所以放宽到常用文档而非全类型）。 */
 const DOC_ACCEPT = 'image/*,.pdf,.docx,.xlsx,.xlsm,.xls,.pptx,.csv,.html,.htm,.txt,.md,.json'
 /** DOC_ACCEPT 的扩展名部分（原生对话框 filters 用；不带 * 与点）。 */
@@ -199,6 +217,9 @@ export default function Composer() {
   // 草稿属于 session，而不是 Composer 组件。Composer 在切换会话时不会卸载，因此用
   // session key 保存各自的文本和附件；尚未创建会话时则按 workspace 隔离。
   const draftKey = activeSessionId ? `session:${workspace}\0${activeSessionId}` : `workspace:${workspace}`
+  // 输入历史作用域：主会话按会话隔离；正在看**有独立收件箱**的子智能体时再分一份
+  //（发给子智能体的消息不该出现在主会话的 ↑ 里，反之亦然）。
+  const historyScope = inputHistoryScope(workspace, activeSessionId, focused?.taskId)
   const [draftTexts, setDraftTexts] = useState<Record<string, string>>({})
   const text = draftTexts[draftKey] ?? ''
   const setText = (next: string | ((prev: string) => string)) => {
@@ -218,7 +239,7 @@ export default function Composer() {
   const [atFilter, setAtFilter] = useState('')
   // 图片附件（模型支持图片输入时允许上传；随消息一起发送，块结构对齐 ask_batch image 块）
   const [draftAttachments, setDraftAttachments] = useState<Record<string, QueuedContent[]>>({})
-  const attachments = draftAttachments[draftKey] ?? []
+  const attachments = draftAttachments[draftKey] ?? NO_ATTACHMENTS
   // 停止态 = 主 run 运行中（且草稿为空——防误触：有草稿时按钮是「发送」，点按不中断）
   // 或压缩中：压缩时同样允许终止（用户此前只要求压缩期间禁止【输入】，并未禁止
   // 【终止】——不提供停止会把 5 分钟超时的压缩卡死）。
@@ -245,6 +266,14 @@ export default function Composer() {
   // 拖拽内容类型（提示文案按内容区分：图片 → 内联张数；文档 → @引用；混合 → 两者都可能）
   const [dragKind, setDragKind] = useState<'image' | 'doc' | 'mix'>('doc')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // ↑/↓ 历史浏览状态（null = 没在浏览）。用 ref 而不是 state：它只影响键盘判定与
+  // 当前文本，不直接渲染任何东西，避免每次 ↑ 都多一次无意义的渲染。
+  // shown = 回填后的实际状态签名。effect 只在「当前状态 ≠ 选中项」时退出历史模式 ——
+  // 比一次性的 applying 标志可靠：StrictMode 下 effect 跑两遍也不会误清导航。
+  const histNavRef = useRef<{ nav: HistoryNavigation; draft: HistoryDraft; shown: HistoryShown } | null>(null)
+  // 图片原图缓存：key = 图片指纹（见 lib/inputHistory 的 imageKey），只活在本进程。
+  const histImagesRef = useRef<Map<string, QueuedContent[]>>(new Map())
+  const histImageCharsRef = useRef(0)
   const refPanelRef = useRef<HTMLDivElement>(null)
   const chipRef = useRef<HTMLDivElement>(null)
   const cmdRef = useRef<HTMLDivElement>(null)
@@ -469,6 +498,55 @@ export default function Composer() {
     setAtOpen(false)
     setAttachmentNotice('')
   }, [draftKey])
+
+  // 历史作用域切换（切会话 / 从主会话点进子智能体）→ 立刻退出历史浏览：
+  // 否则继续按 ↑ 会把主会话的历史条目插进子智能体的输入框（作用域串台）。
+  useEffect(() => {
+    histNavRef.current = null
+  }, [historyScope])
+
+  // 无活跃会话时发出的第一条消息先记在 workspace 作用域（那时还没有 session id）——
+  // 会话建好后并进该会话，否则「新工作区的第一条消息」在 ↑ 里永远不出现。
+  useEffect(() => {
+    if (!activeSessionId) return
+    adoptInputHistory(inputHistoryScope(workspace), inputHistoryScope(workspace, activeSessionId))
+    // 并进会话后把「无会话工作区」那份也清掉（本地 adopt 已删；文件/远端同步删，防两份）
+    void getTransport().inputHistoryForget(inputHistoryScope(workspace)).catch(() => { /* 旧主进程/文件不可用 */ })
+  }, [activeSessionId, workspace])
+
+  // 本地文件对齐（Electron：~/.go-code/input-history.json；mock：独立 localStorage 键）。
+  // localStorage 只是**同步镜像**：启动/切会话时用文件结果补齐；文件落后时把合并结果推回去。
+  // 这样「清站点数据 / 换安装 / dev 与打包版 origin 不同」也不会丢历史。
+  useEffect(() => {
+    let cancelled = false
+    const tr = getTransport()
+    void tr.inputHistoryGet(historyScope)
+      .then((r) => {
+        if (cancelled || !r.ok) return
+        const remote = r.items ?? []
+        const local = readInputHistory(historyScope)
+        const merged = mergeInputHistories(remote, local)
+        const mergedJson = JSON.stringify(merged)
+        if (JSON.stringify(local) !== mergedJson) replaceInputHistory(historyScope, merged)
+        if (JSON.stringify(remote) !== mergedJson) {
+          void tr.inputHistorySet(historyScope, merged).catch(() => { /* 落盘失败仍可用本地镜像 */ })
+        }
+      })
+      .catch(() => { /* 旧版主进程/桥未运行时保持 localStorage 镜像 */ })
+    return () => { cancelled = true }
+  }, [historyScope])
+
+  // 历史浏览期间用户改了正文/引用/图片（粘贴、拖入、语音、点选删除）→ 退出历史模式，
+  // 否则下一次 ↑ 会把刚加的东西丢掉。判据是「当前状态 ≠ 回填时的状态签名」，
+  // 历史回填自身触发的渲染会命中签名，不会被误清。
+  useEffect(() => {
+    const cur = histNavRef.current
+    if (!cur) return
+    const refsKey = JSON.stringify(docRefs)
+    const imagesKey = imageKey(imageFingerprints(attachments))
+    if (text === cur.shown.text && refsKey === cur.shown.refsKey && imagesKey === cur.shown.imagesKey) return
+    histNavRef.current = null
+  }, [text, docRefs, attachments])
 
   useEffect(() => {
     if (!menu) return
@@ -709,6 +787,7 @@ export default function Composer() {
   // 采集入口即降采样压缩，避免整批 ask_batch 撞 stdin 单行上限而失败。
   const addImageFiles = async (files: File[]) => {
     if (queueFull || files.length === 0) return
+    histNavRef.current = null // 用户加/换图片 → 退出历史浏览
     if (!canImage) {
       setAttachmentNotice(t('composer.attach.noImage'))
       return
@@ -765,9 +844,77 @@ export default function Composer() {
   const docTokenOf = (abs: string): string => `@${displayPath(abs)}`
   const basenameOf = (abs: string): string => abs.split(/[\\/]/).filter(Boolean).pop() ?? abs
 
+  // —— 输入历史（↑/↓）的图片/引用回填 ——
+  // 图片只存指纹：先查本进程缓存（刚发过的原图），再回查「待发送队列 + 当前会话转录」的
+  // user 块（bridge 已持久化完整 contents，含图片）。返回 undefined = 原图确实找不到了。
+  const rememberHistoryImages = (contents: QueuedContent[]) => {
+    const images = contents.filter((c) => c.type === 'image')
+    if (!images.length) return
+    const key = imageKey(imageFingerprints(images))
+    if (!key || histImagesRef.current.has(key)) return
+    histImagesRef.current.set(key, images)
+    histImageCharsRef.current += images.reduce((n, c) => n + c.content.length, 0)
+    while (histImageCharsRef.current > HISTORY_IMAGE_CACHE_CHARS) {
+      const oldest = histImagesRef.current.keys().next()
+      if (oldest.done) break
+      const evicted = histImagesRef.current.get(oldest.value)
+      if (evicted) histImageCharsRef.current -= evicted.reduce((n, c) => n + c.content.length, 0)
+      histImagesRef.current.delete(oldest.value)
+    }
+  }
+
+  const resolveHistoryImages = (images?: HistoryImageFingerprint[]): QueuedContent[] | undefined => {
+    if (!images?.length) return undefined
+    const key = imageKey(images)
+    const cached = histImagesRef.current.get(key)
+    if (cached) return cached
+    // 不在缓存里（例如重启后）：按指纹回查已持久化的输入。pendingQueue 在前（尚未消费）。
+    const state = useAppStore.getState()
+    const candidates: QueuedContent[][] = []
+    for (let i = state.pendingQueue.length - 1; i >= 0; i--) candidates.push(state.pendingQueue[i].contents)
+    for (let i = state.blocks.length - 1; i >= 0; i--) {
+      const b = state.blocks[i]
+      if (b.kind === 'user' && b.contents?.length) candidates.push(b.contents)
+    }
+    const found = findHistoryImages(images, candidates)
+    if (found) rememberHistoryImages(found)
+    return found
+  }
+
+  const captureHistoryDraft = (): HistoryDraft => ({
+    text,
+    refs: [...docRefs],
+    attachments: [...attachments],
+  })
+
+  const restoreHistoryDraft = (draft: HistoryDraft) => {
+    setText(draft.text)
+    setDocRefs([...draft.refs])
+    setAttachments([...draft.attachments])
+    setAttachmentNotice('')
+  }
+
+  const applyHistoryItem = (item: InputHistoryItem): HistoryShown => {
+    setText(item.text)
+    // 手打的 @token 与 chips 同时存在时不要再拼一行 @引用（否则发送时重复）
+    const refs = (item.refs ?? []).filter((r) => !item.text.includes(docTokenOf(r.path)))
+    setDocRefs(refs)
+    const images = resolveHistoryImages(item.images) ?? []
+    setAttachments(images)
+    // 附件丢失必须明说：否则用户以为原图被一起重新选上了
+    setAttachmentNotice(item.images?.length && !images.length ? t('composer.history.attachLost') : '')
+    // 记录**实际回填**的状态（refs 可能被过滤、图片可能没找回），effect 据此判断是否用户改动
+    return {
+      text: item.text,
+      refsKey: JSON.stringify(refs),
+      imagesKey: imageKey(imageFingerprints(images)),
+    }
+  }
+
   // 批量加入文档引用：去重（同路径不重复引）、截断到 MAX_DOC_REFS，逐条取 size 展示。
   // 提示优先级（都不静默）：数量超限 > 已加入过（重复）> stat 失败（大小显示 —）。
   const addDocPaths = async (paths: string[]) => {
+    histNavRef.current = null // 用户加/换引用 → 退出历史浏览，避免下一次 ↑ 丢掉它
     const clean = paths.filter((p) => typeof p === 'string' && p.trim())
     if (clean.length === 0) return
     const existing = new Set(docRefs.map((d) => d.path))
@@ -942,15 +1089,43 @@ export default function Composer() {
         ...imageBlocks,
       ]
     }
+    // 输入历史：记**发送前的完整输入快照** —— 正文（含 /命令）+ 文档 chips + 图片指纹。
+    // 空输入不记；重复输入由 recordInputHistory 移到最新。发送走主会话还是子智能体都记，
+    // 但作用域不同（historyScope 已按 focused.taskId 分域）。
+    const rememberInput = () => {
+      const imageBlocks = attachments.filter((a) => a.type === 'image')
+      rememberHistoryImages(imageBlocks) // 原图进运行期缓存，↑ 时才能原样回填
+      const items = recordInputHistory(historyScope, {
+        text: raw,
+        refs: docRefs.map((d) => ({ path: d.path, name: d.name, size: d.size })),
+        images: imageFingerprints(imageBlocks),
+      })
+      // 异步落本地文件；失败不回滚本地镜像（历史不是关键路径，下一次写会重试）
+      void getTransport().inputHistorySet(historyScope, items).catch(() => { /* keep local */ })
+      histNavRef.current = null
+    }
     // —— 子会话：这条消息发给**正在看的那个子智能体**（用户 2026-10 要求）——
     //
     // 只在它有 task_id 时才能发：agent_send 的决策锚是后台任务 id（Registry 的键），
     // 同步子智能体（in-loop，没有后台任务）在协议上没有独立的收件箱 —— 那种情况仍发给
     // 主会话，由主模型转达。这个区别要在提示条里说清楚，不能静默改道。
     if (focused?.taskId) {
-      sendToAgent(focused.taskId, withDocRefs(raw))
+      // 子智能体通道（agent_send）只收文本：历史也只记**实际发出去的正文**（含 @引用）。
+      // 图片不在这个通道上，不能记进历史 —— 否则 ↑ 会回填一张从没发出去的附件。
+      const body = withDocRefs(raw)
+      if (!body) {
+        // 纯图片：agent_send 没有内容可发。不能让附件静默消失（旧实现会清空且什么都不发）。
+        if (attachments.length) setAttachmentNotice(t('composer.agent.textOnly'))
+        return
+      }
+      sendToAgent(focused.taskId, body)
+      const items = recordInputHistory(historyScope, { text: body })
+      void getTransport().inputHistorySet(historyScope, items).catch(() => { /* keep local */ })
+      histNavRef.current = null
       setText('')
       setCmdMenu(false)
+      // 文本已发出；图片不在该通道上，清掉但明确告知，而不是让它无声消失
+      if (attachments.length) setAttachmentNotice(t('composer.agent.imagesDropped'))
       setAttachments([])
       setDocRefs([])
       return
@@ -970,6 +1145,7 @@ export default function Composer() {
         ask(withDocRefs(raw), withAttachments(raw, attach))
       }
     } finally {
+      rememberInput()
       setExpanding(false)
       setText('')
       setCmdMenu(false)
@@ -1324,6 +1500,7 @@ export default function Composer() {
             onChange={(e) => {
               const v = e.target.value
               const pos = e.target.selectionStart ?? v.length
+              histNavRef.current = null // 用户开始编辑 → 退出历史浏览（当前文本成为新草稿）
               setText(v)
               if (v.trim().startsWith('/')) {
                 if (!cmdMenu) fetchSkills() // 命令列表数据源：技能清单（启用过滤；仅首开拉取）
@@ -1383,6 +1560,66 @@ export default function Composer() {
                 if (e.nativeEvent.isComposing || e.keyCode === 229) return
                 e.preventDefault()
                 completeCommand()
+                return
+              }
+              // ↑/↓ 历史回溯（用户 2026-11）：菜单/输入法/组合键时不抢键。
+              // ↑ 未进入历史时只在光标位于开头生效（多行正文里 ↑ 必须能移光标）；
+              // 进入后 ↑↓ 就是选择，Esc 退出并恢复进入前的草稿。
+              if (!cmdOpen && !atOpen && !queueFull && !compressing && !expanding && !attachmentBusy) {
+                const dir = historyDirection(
+                  e.key,
+                  e,
+                  e.nativeEvent.isComposing || e.keyCode === 229,
+                  e.currentTarget.selectionStart ?? 0,
+                  e.currentTarget.selectionEnd ?? 0,
+                  histNavRef.current != null,
+                )
+                if (dir === 'older') {
+                  const cur = histNavRef.current
+                  const history = cur ? cur.nav.items : readInputHistory(historyScope)
+                  const next = recallOlder(cur?.nav ?? null, history)
+                  if (next) {
+                    e.preventDefault()
+                    // 已到最旧：只吞掉按键，不重复回填 / 移动光标
+                    if (!cur || next.index !== cur.nav.index) {
+                      // 第一次进入历史时保存完整草稿（正文 + 引用 + 图片），↓/Esc 原样恢复
+                      const draft = cur ? cur.draft : captureHistoryDraft()
+                      const shown = applyHistoryItem(historyItem(next))
+                      histNavRef.current = { nav: next, draft, shown }
+                      requestAnimationFrame(() => {
+                        const el = textareaRef.current
+                        if (el) el.setSelectionRange(el.value.length, el.value.length)
+                      })
+                    }
+                    return
+                  }
+                } else if (dir === 'newer' && histNavRef.current) {
+                  const cur = histNavRef.current
+                  e.preventDefault()
+                  const next = recallNewer(cur.nav)
+                  if (next) {
+                    const shown = applyHistoryItem(historyItem(next))
+                    histNavRef.current = { nav: next, draft: cur.draft, shown }
+                  } else {
+                    // 越过最新：恢复进入历史前的草稿，退出历史模式
+                    histNavRef.current = null
+                    restoreHistoryDraft(cur.draft)
+                  }
+                  requestAnimationFrame(() => {
+                    const el = textareaRef.current
+                    if (el) el.setSelectionRange(el.value.length, el.value.length)
+                  })
+                  return
+                }
+              }
+              if (e.key === 'Escape' && histNavRef.current) {
+                e.preventDefault()
+                restoreHistoryDraft(histNavRef.current.draft)
+                histNavRef.current = null
+                requestAnimationFrame(() => {
+                  const el = textareaRef.current
+                  if (el) el.setSelectionRange(el.value.length, el.value.length)
+                })
                 return
               }
               if (e.key === 'Enter' && !e.shiftKey) {

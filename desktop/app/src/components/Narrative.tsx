@@ -4,11 +4,12 @@ import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf, mainRunEnded } from '../store/useAppStore'
 import { resolveRunState, turnLive } from '../lib/turnSettle'
 import { signalText } from '../lib/signalFacts'
-import { decideFollow, isExternalMoveUp, isUserScrollUp, shouldPinBottom, shouldResumeFollow, wheelConsumedByScroller } from '../lib/scrollFollow'
+import type { RevealWindow } from '../lib/scrollFollow'
+import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, stepReveal, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, answerIndex, answerOf, foldedBody, hasWork, mergeArtifacts, outsideOf, runningBody, runWorkBody, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, outsideOf, runningBody, runWorkBody, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -36,7 +37,7 @@ import { useSkin } from '../lib/useSkin'
 import { ArtifactCard, absArtifactPath } from './ArtifactCard'
 import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
 import { UsageActivityMini } from './UsageStats'
-import { useT } from '../i18n'
+import { useLang, useT } from '../i18n'
 
 
 /* 后台任务落地：两种块（回执 / 完整结果）用同一个 note 渲染 —— 它们说的是同一句
@@ -169,8 +170,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   /** 首行插槽（子会话的「返回主会话 + 身份/用量」）。放在容器**内部**：
    *  这样它与正文同宽同内边距，视觉上就是叙述区的第一行，而不是一条通栏的卡片头。 */
   header?: ReactNode
-  /** 末行插槽（子会话的任务结果）。用插槽而不是合成块：主会话里这份内容渲染在
-   *  子智能体卡内（TaskResultInline），两处必须是**同一个组件**才谈得上复用。 */
+  /** 末行插槽（宿主追加额外行：子会话的任务级错误）。结果不再用它重复渲染 ——
+   *  结果就是转录最后一条 assistant 正文。 */
   footer?: ReactNode
   /** 详细 / 简洁。详细 = 旧观感（工作块全展开、无折叠行）；简洁 = 一轮的工作
    *  收进一行，跑着的时候敞开、跑完收起，点开读全过程。缺省读设置（默认简洁 ——
@@ -188,6 +189,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   sourceKey?: string
 } = {}) {
   const t = useT()
+  // 语言作为**值**参与元素复用的依赖（useT 每次渲染返回新闭包，身份不能当依赖）
+  const lang = useLang()
   // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话。
   // source 优先（子会话）：hooks 必须无条件调用，所以先取 store 再覆盖。
   const storeBlocks = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocks ?? [] : s.blocks))
@@ -234,6 +237,23 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const workspace = useAppStore((s) => s.workspace)
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
+  /* 已结算的轮：**元素复用**缓存。
+     流式时每个 chunk 都会重渲染整条转录，而历史轮的输入一个都没变 —— 重算的还是同一棵树。
+     实测（lab/bench-concurrent.mjs 的 C 段）：423 块时每 chunk 9.5ms 里有 7.4ms 花在
+     「与流式无关的已有内容」上；把非末轮整体跳过（临时实验）后斜率直接归零。
+     判据必须是**引用相等**（块对象不可变，内容一变就是新对象），加上本组件里所有
+     store 选择器的值与本地状态；少一项就会出现「点开不展开 / 账不更新」这类陈旧 UI。 */
+  const turnCacheRef = useRef(new Map<string, { items: readonly unknown[]; globals: readonly unknown[]; state: readonly unknown[]; els: (ReactElement | null)[] }>())
+  // settledAtRef：这一轮**上一次结算时**有多少块（turn.items.length）。
+  //
+  // 用途只有一个：块上没有主 run id 时（冷恢复 / 旧快照 / 事件缺 run_id），turnRuns
+  // 一刀也切不出来，整轮就只有一个段，`live` 一翻就把已经结算的那一段重新展开成
+  // Working（答案从轮尾挪进盒子）。有了这个「观测量」，结算之后新到的东西就能切出
+  // 自己的段，上半段保持折叠 —— 用户 2026-11 的「上下抖 2~4s」正是缺这条边界。
+  // 记的是「结算时有多少块 + 那一段最后一块的 id」——id 用来在轮的内容被整体替换
+  //（同一轮 key 被复用：分页/重放/测试夹具重灌块）时把过期的边界作废，否则会把新内容
+  // 从中间切开（实测 test:transcript 的场景 C：插话被切到第一段、盒子只剩后半段）。
+  const settledAtRef = useRef<Map<string, { at: number; lastId?: number }>>(new Map())
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   /* 这段转录的身份：滚动容器（滚动位置 / 贴底意图 / 手势监听）都挂在它上面。
      viewSid = 独立 view（cron / 恢复页）；sourceKey = 子会话页（子 agent 的 run_id）；
@@ -264,8 +284,13 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 注意这两个值来自 store（由 hydrateCheckpoint 写入），不是本地 state ——
   // 会话切换时随视图一起重置，避免把上一个会话的游标带到新会话。
   const storeTotal = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksTotal ?? 0 : s.blocksTotal))
-  const moreCursor = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksCursor ?? 0 : s.blocksCursor))
+  const storeMoreCursor = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksCursor ?? 0 : s.blocksCursor))
   const storeHasMore = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocksHasMore ?? false : s.blocksHasMore))
+  // 游标是**主对话 blocks** 的概念。子会话（source 模式）的分页在子任务 journal 里，
+  // 与主会话的 blocksCursor 无关 —— 旧实现读 store 的游标，于是「主会话还有更早的块」
+  // 就变成了子会话滚动预取的放行信号（子会话里一上滑就连发分页请求）。
+  // source 模式只看它自己的 hasMore。
+  const moreCursor = source ? (source.hasMore ? 1 : 0) : storeMoreCursor
   const total = source ? (source.total ?? 0) : storeTotal
   const hasMore = source ? Boolean(source.hasMore) : storeHasMore
   // 按钮用的 loading/error 走 store（不是本地 state）：响应由 store 的
@@ -336,7 +361,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 200 块 ≈ 8 批 ≈ 200ms 铺完；而一屏可见约 8~12 块，首批就把屏幕填满了，
   // 后续补的是上方离屏内容（被 content-visibility 跳过布局，几乎无成本）。
   // 这样「铺开动画」与「可交互」几乎同时发生，不会让人觉得在等。
-  const REVEAL_PER_FRAME = 25
+  // 常量与决策规则都在 lib/scrollFollow（纯函数，不变量由单测钉住）。
   // revealStart：已铺开的**起始下标**（不是「个数」）。
   //
   // ## 为什么必须用绝对下标（2026-10-21 修 bug）
@@ -346,43 +371,55 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // **前面已渲染的块被丢弃** → DOM 高度骤减 → 浏览器把 scrollTop 夹到底部。
   // 这正是「一有流式输出就被顶回贴底」的主因之一。
   //
-  // 改用绝对下标后，铺开只做一件事：setRevealStart(n - REVEAL_PER_FRAME)，
+  // 改用绝对下标后，铺开只做一件事：把 start 每帧减一批，
   // 起点单调减小（朝向 0），**永远不会因为尾部增长而后移**。
-  // Infinity 表示「全部显示」，与起点语义统一为 0。
-  const [revealStart, setRevealStart] = useState<number>(0)
+  // 0 表示「全部显示」，与起点语义统一。
+  //
+  // ## 起始窗口在**渲染期**决定，不走 effect（2026-11 修切换时的上下窜动）
+  //
+  // 上一版用 effect 决定起始窗口：先按上一段转录的 revealStart 把**全部**块挂上
+  // DOM，等 enterAnimAt 的 effect 跑起来再砍到尾部 25 条。这一砍把 scrollHeight
+  // 从「整段高度」缩到一屏 —— 浏览器立刻把 scrollTop 钳到 0，随后铺开循环每帧
+  // 补 25 条、每帧重新钉底。长会话（200 条 / 几万像素）里，用户看到的就是切换
+  // 瞬间「先窜到上面、再滑回底部」，而 content-visibility 的估算高度让落点一次
+  // 比一次偏（「最新位置定位没有更新」）。渲染期就决定窗口，就**没有**那次
+  // 「先全挂、再砍掉」的中间态。
+  //
+  // 另外：revealStart 以前是组件级 state，**跨转录存活**。上一段铺到一半切走
+  //（start=100）、新会话只有 30 条 → blocks.slice(100) 为空 → 白屏一帧。
+  // 现在 key 一变就重新决定，不会串。
+  //
+  // 身份用**转录**（transcriptKey），不用 enterAnimAt：enterAnimAt 是全局的
+  // 进入序号，后台会话的 new_session 响应也会把它 ++（store 的 markEnterAnim）。
+  // 把它算进身份的话，这类与本段转录无关的进入会让铺开重新开始 —— 相当于
+  // 在用户眼前把整段内容砍到尾部 25 条再长回来（一次几万像素的高度塌缩），
+  // 表现就是「有子智能体/后台任务在跑的时候，主会话页面自己上下抖」。同一次
+  // 进入只铺一遍；换会话（key 变）才重新决定。
+  const enterKey = transcriptKey
+  const [reveal, setReveal] = useState<RevealWindow>({ key: '', start: 0 })
+  // 渲染期派生（同组件内 setState：React 会立刻重渲染，中间那一帧不会提交）：
+  const decided = revealWindow(reveal, enterKey, blocks.length, Boolean(enterAnimAt))
+  if (decided !== reveal) setReveal(decided)
+  // 只渲染 blocks.slice(revealStart)；0 = 全部显示。铺开进度单调朝 0 走，
+  // 流式追加新块不会让它后移（绝对下标语义，见上）。
+  const revealStart = reveal.start > 0 ? reveal.start : 0
+  const revealStartRef = useRef(revealStart)
+  revealStartRef.current = revealStart
+  const revealing = reveal.start > 0
   useEffect(() => {
-    // 只在「会话刚进入」时铺开：正常追加（流式/新消息）不限制。
-    //
-    // 触发源只用 enterAnimAt，**不能**用 crossFade —— 后者是
-    // skeleton.phase === 'exit' | 'visible'，骨架屏退场完成后 phase 变 idle，
-    // crossFade 随之变 false → effect 重跑 → revealCount 被重置为 Infinity
-    // → 铺开中途突然全部显示（正是要避免的）。enterAnimAt 是单调的时间戳，
-    // 一次会话进入只变一次，天然稳定。
-    if (!enterAnimAt) {
-      setRevealStart(0) // 全部显示
-      return
-    }
-    const total = blocks.length
-    let start = Math.max(0, total - REVEAL_PER_FRAME)
-    if (start === 0) {
-      setRevealStart(0)
-      return
-    }
-    setRevealStart(start)
+    if (!revealing) return
     let raf = 0
     const step = () => {
-      start = Math.max(0, start - REVEAL_PER_FRAME)
-      setRevealStart(start)
-      if (start > 0) raf = requestAnimationFrame(step)
+      const next = stepReveal(revealStartRef.current)
+      revealStartRef.current = next
+      setReveal((r) => (r.key === reveal.key ? { ...r, start: next } : r))
+      if (next > 0) raf = requestAnimationFrame(step)
     }
     raf = requestAnimationFrame(step)
     return () => {
       if (raf) cancelAnimationFrame(raf)
     }
-    // 依赖 enterAnimAt：每次会话进入重新铺一遍；blocks.length 变化不重启
-    // （否则流式新块会把铺开进度打回起点）。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enterAnimAt])
+  }, [reveal.key, revealing])
   const storeLoadOlder = useAppStore((s) => s.loadOlderBlocks)
   const sourceLoadOlder = source?.onLoadOlder
   const onLoadOlder = useCallback(() => {
@@ -570,6 +607,50 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const awayHardRef = useRef(false)
   // 贴底/方向判定统一走 lib/scrollFollow（纯函数，不变量由 scrollFollow-test 钉住）
   const BOTTOM_THRESHOLD = 120 // px：视为「贴底」的容差（content-visibility 高度为估算值）
+  // —— 换转录：**渲染期**把「用户意图」清零（2026-11 修切换后回不到最新位置）——
+  //
+  // 为什么必须在渲染期、而不是 effect：
+  //
+  //  ① 新节点是 key 变化新建的，scrollTop 从 0 起。绘制前那次钉底（下方
+  //     useLayoutEffect）判的是 stickRef —— 用户在上一段上滑过（stickRef=false）
+  //     的话这一帧就不钉，第一帧画在「尾部窗口的顶部」，要等下一个 effect 才
+  //     回到底部。渲染期置回 true，layout effect 同一帧就能钉到底。
+  //  ② 手势标记是**上一段转录的**。实测（npm run probe:switch-scroll）：在 A 里
+  //     上滑 → 点 B；B 的第一次 scroll（切换自己钉底产生的那一次）被当成用户
+  //     手势，settle(dir='up') → stopFollow(hard) → awayHard 置位。此后视图明明
+  //     贴在底部，「↓ 回到最新」却挂住 1.6s 以上、跟随一直是死的 —— 因为
+  //     shouldResumeFollow 对「用户亲手翻上去」的正确做法是不自动翻案（见
+  //     scrollFollow.ts 的注释）。错的是那个手势的来源，不是那条规则。
+  //  ③ 基准（expectedTop / lastMax / lastTop / scrollMax）全按上一段内容的高度
+  //     建立，不换掉的话第一帧会把「换了一段内容」判成外部位移或用户上滑。
+  //
+  // nodeFreshRef：新节点的「第一次 scroll」只校准基准，不判方向。
+  //
+  // 换 key 时浏览器的 scroll 事件是**异步**派发的：它可能晚于渲染、早于
+  // transcriptKey 那个 effect。那一次事件的 prevTop / prevMax 还是上一段转录的
+  // 坐标系，判出来必然是「用户上滑」→ hard stop → 按钮挂一下。第一次只对齐
+  // 基准，把它当成「我的位置变了」，不当成「用户动了」。
+  const nodeFreshRef = useRef(false)
+  // 用 ref 记住「上一次渲染的转录身份」：同一段转录的后续渲染什么都不做。
+  const switchRef = useRef(transcriptKey)
+  if (switchRef.current !== transcriptKey) {
+    switchRef.current = transcriptKey
+    stickRef.current = true
+    autoscrollRef.current = true
+    awayHardRef.current = false
+    expectedTopRef.current = -1
+    lastMaxRef.current = -1
+    lastTopRef.current = 0
+    scrollMaxRef.current = -1
+    userGestureRef.current = false
+    intentRef.current = null
+    lastGestureAtRef.current = 0
+    touchYRef.current = 0
+    nodeFreshRef.current = true
+    settledAtRef.current.clear()
+    setAway(false)
+    setFresh(false)
+  }
   // 程序滚动的**唯一入口**。
   //
   // ## 单写口径（2026-10-21）
@@ -609,6 +690,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     // 停止跟随：唯一的状态转移，所有手势/外部改动都收敛到这里。
     // `hard` = 这次停止是不是**用户亲手**翻上去的（见 awayHardRef 的注释）。
     const stopFollow = (hard = false) => {
+      // 已脱离文档的旧节点不在讨论范围：切会话换 key 之后，浏览器仍可能把
+      // 旧节点上排队的 scroll 事件派发过来 —— 那种事件读到的是上一段的高度与
+      // 位置，据此停跟随只会让新会话的「↓ 回到最新」闪一下（实测 1 帧）。
+      if (!el.isConnected) return
       autoscrollRef.current = false
       if (hard) awayHardRef.current = true
       if (stickRef.current) {
@@ -690,6 +775,16 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       if (dir === 'up') stopFollow(true)
     }
     const onScroll = () => {
+      if (!el.isConnected) return
+      if (nodeFreshRef.current) {
+        // 新节点的第一次 scroll：只对齐基准（见 nodeFreshRef 的注释）
+        nodeFreshRef.current = false
+        lastTopRef.current = el.scrollTop
+        scrollMaxRef.current = el.scrollHeight - el.clientHeight
+        userGestureRef.current = false
+        intentRef.current = null
+        return
+      }
       const top = el.scrollTop
       const prevTop = lastTopRef.current
       lastTopRef.current = top
@@ -870,10 +965,14 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     // 内容整体换掉 → 旧基准无意义（否则首帧会把切会话的自动滚动误判成用户上滑）
     expectedTopRef.current = -1
     lastMaxRef.current = -1
+    scrollMaxRef.current = -1
     if (el) {
       setScrollTop(el, el.scrollHeight - el.clientHeight)
       lastTopRef.current = el.scrollTop
       expectedTopRef.current = el.scrollTop
+      // scrollMaxRef 也必须归位：onScroll 用它区分「用户上滑」与「内容塌缩造成的
+      // 钳制」，留着上一段的 max 会让新会话的第一次滚动直接判成用户上滑。
+      scrollMaxRef.current = el.scrollHeight - el.clientHeight
     }
     // 依赖是「哪一段转录」而不是「哪个会话」：子会话页没有自己的 session id，
     // 用 sourceKey（子 agent 的 run_id）—— 否则 A→B 切换不重置贴底与滚动位置。
@@ -882,6 +981,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     stickRef.current = true
     autoscrollRef.current = true // 点「回到底部」= 明确要恢复跟随
     awayHardRef.current = false
+    /* 手势意图也要一起清掉（2026-11，元素复用提速后暴露出来的真 bug）：
+       `settle()` 判断是否停止跟随时**先看意图**（decideFollow：dir==='up' 一律不跟），
+       而用户上滑留下的 intentRef='up' 不会自己过期。于是一个排队中的 scroll 事件
+       （上滑那一下的、或本函数自己写 scrollTop 产生的）在点了「回到底部」之后才被处理，
+       就会拿旧意图把刚刚恢复的跟随再关掉 —— 表现：已经贴在底部了，按钮还在。
+       之前没暴露只是因为渲染慢、事件恰好先到；提速 40% 之后顺序反过来了。 */
+    intentRef.current = null
+    userGestureRef.current = false
+    lastGestureAtRef.current = 0
     setAway(false)
     setFresh(false)
     expectedTopRef.current = -1
@@ -1138,8 +1246,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
      答案在它外面。所以简洁档收起时渲染的是「非工作块」，展开才回到原顺序。 */
   const turns = selectTurns(visibleBlocks)
   const items: (ReactElement | null)[] = []
+  /* 复用判据里的「全局输入」：本组件读到的每个 store 值与本地状态（storeBlocks 除外 ——
+     它每个 chunk 都会变，逐轮比块引用就够了）。 */
+  const turnGlobals: readonly unknown[] = [
+    lang, skin, density, runEnded, waiting, persona, workspace, openFile,
+    turnMetrics, openTurns, animOn, runStartedAt, mainStartedAt, mainRunId, mainEnded, transcriptKey,
+  ]
+  const sameList = (a: readonly unknown[], b: readonly unknown[]) => a.length === b.length && a.every((v, i) => v === b[i])
+  const turnCache = turnCacheRef.current
   for (const [ti, turn] of turns.entries()) {
-    if (turn.user) items.push(renderBlock(turn.user))
     const stats = turnStats(turn)
     const usage = turnUsage(turn, turnMetrics)
     const head = turnHead(turn)
@@ -1151,7 +1266,23 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     /* sameRun：这一轮的 run 与正在跑的那次运行是不是同一个。没有 runId 的旧数据
        （块上缺 run_id）按「同一轮」处理 —— 宁可沿用老行为，也不要凭空把在跑的轮判死。 */
     const sameRun = !turn.run || !activeRunId ? true : turn.run === activeRunId
-    const live = turnLive({ isLast: ti === turns.length - 1, turnRunning: sameRun && turn.running, runEnded, sameRun })
+    /* 结算边界（观测量）：这一轮上一次「真的静下来」时有多少块。边界只有在
+       「下标还在、且那一段最后一块仍是同一块」时才算数 —— 轮的内容被整体替换
+       （分页 / 重放 / 测试夹具重灌块，同一个 turn key 被复用）就作废。 */
+    const settleRec = settledAtRef.current.get(turn.key)
+    const settleAt = settleRec && settleRec.at > 0 && settleRec.at <= turn.items.length && turn.items[settleRec.at - 1]?.id === settleRec.lastId
+      ? settleRec.at
+      : undefined
+    if (settleRec && settleAt == null) settledAtRef.current.delete(turn.key)
+    const rawLive = turnLive({ isLast: ti === turns.length - 1, turnRunning: sameRun && turn.running, runEnded, sameRun })
+    /* 结算过、且**没有新块**时，`live` 再被点亮也不认（渲染层面）。
+       专治「主 run 已 AgentEnd、后台 run 起跑（没有用户输入、块上也没有 run id）」把已经
+       收起的一段重新展开：探针 lab/probe-settled-fold-relight 里同一批内容会从「Worked
+       行 + 答案在时间线上」变成「一个 Working 盒子（答案被挪进去）」—— 用户 2026-11
+       看到的上下抖就是这个。有新块时**不锁**：它由 turnRuns 的结算边界切出自己的段
+       （见下方 runs），上半段仍然保持折叠 —— 既有口径「同一个 turn 里第二个 run 起新
+       盒子」不受影响。 */
+    const live = rawLive && !(settleAt != null && settleAt === turn.items.length)
     // 正在跑的这一轮默认敞开：折叠行的脸能说明它在动，但看不见它在做什么，
     // 用户就没法判断它卡在哪。跑完再按用户的选择收起。
     const open = !concise || (openTurns[turn.key] ?? live)
@@ -1185,8 +1316,33 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const bodySource = concise && live ? runningBody(turn, !work) : concise ? foldedBody(turn) : turn.items
     /* 一轮可能跨**多次运行**（后台任务回推后续跑）：盒子按 run 切段（见 selectTurns.turnRuns）。
        声明提到这里，是因为下面的「结论 / 账 / 卡」闸门都要按**段**判，而不只按整轮判。 */
-    const runs = concise && skin === 'runtime' ? turnRuns(turn) : []
+    // 记结算边界：只有在「真的静下来了」才记 —— 视图说这次运行已结算（AgentEnd），
+    // 且这一轮里没有还在流式 / 在跑的块。下标取当前块数：之后再到的块由 turnRuns
+    // 切出自己的段，上半段保持折叠。
+    //
+    // 为什么不用「runEnded 由假变真」：事件可能成批到达（一次渲染里 start+end 都在），
+    // 那次转换根本观测不到。为什么不用 `!live && answer`：块比 agent_start 先到或根本
+    // 缺 agent_start 时，`live` 会在运行中途读成 false，把「跑了一半」记成「结算过」，
+    // 随后插话 / 续跑的块被切到第二段、整轮凭空多一个盒子（实测 test:transcript 场景 C）。
+    if (runEnded && ti === turns.length - 1 && turn.answer && !turn.answer.streaming && !turn.running) {
+      const at = turn.items.length
+      settledAtRef.current.set(turn.key, { at, lastId: turn.items[at - 1]?.id })
+    }
+    const runs = concise && skin === 'runtime' ? turnRuns(turn, settleAt) : []
     const multiRun = runs.length > 1
+    /* 输入全都没变 → 直接交回上一次的那几个元素（React 看到同一个元素对象、props 同一个，
+       整棵子树 bailout，连 beginWork 都不进）。 */
+    const turnState: readonly unknown[] = [open, live, multiRun, ti, turns.length]
+    const hit = turnCache.get(turn.key)
+    if (hit && sameList(hit.items, turn.items) && sameList(hit.globals, turnGlobals) && sameList(hit.state, turnState)) {
+      items.push(...hit.els)
+      continue
+    }
+    const startIdx = items.length
+    const remember = () => {
+      turnCache.set(turn.key, { items: turn.items, globals: turnGlobals, state: turnState, els: items.slice(startIdx) })
+    }
+    if (turn.user) items.push(renderBlock(turn.user))
     /* 用户 2026-10：轮尾账排在产出卡**上方** —— 先结算这一轮，再看这一轮的产出。
        产出卡仍是轮尾最后一块（它是「记录」，不属于工作过程）。只在运行时皮肤、且账
        真的会渲染时把产出卡拆出来；运行中/无用量归属的轮保持原序（账本来就不出现）。 */
@@ -1205,10 +1361,13 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const artBlocks = artRaw.length > 1 ? [mergeArtifacts(artRaw)] : artRaw
     const noArt = artBlocks.length ? bodySource.filter((b) => b.kind !== 'artifacts') : bodySource
     /* 交卷之后到达的记录（见 postRecord）一律排在**结算之后**：账与产出卡是这一轮的交付，
-       通知不属于交付序列（用户 2026-11 口径）。整轮交卷时不论几段运行都走这条；
-       还在跑的段由 plan 的分段结算负责（那里也保证记录落在账/卡之后）。 */
+       通知不属于交付序列（用户 2026-11 口径）。但「结算」是**分段**的：一轮可能跨多次运行
+       （后台任务回推 → 续跑），只有**最后一段**的记录才该延后到轮尾（合并且只有一份的账/卡）；
+       前几段的记录必须跟它自己那段的盒子走，否则四条 `Task … completed` 会全部堆在最后一个
+       Worked 后面（用户 2026-11 截图）。还在跑的段由 plan 的分段结算负责（那里也保证记录
+       落在账/卡之后）。 */
     const postBlocks = skin === 'runtime' && !live
-      ? turn.items.filter((b, i) => postRecord(b, i))
+      ? turn.items.filter((b, i) => postRecord(b, i) && defersToTurnEnd(runs, i))
       : []
     const bodyBlocks = postBlocks.length ? noArt.filter((b) => !postBlocks.includes(b)) : noArt
     const body = skin === 'runtime' ? groupRounds(bodyBlocks) : groupBlocks(bodyBlocks)
@@ -1237,6 +1396,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             answer: segAnswer,
             answerAt: segAnswerAt,
             offset: r.start,
+            // 邻居兜底按整轮看（段首记录的前一次运行在上一段里），见 selectTurns.recordAfterRun
+            all: turn.items,
           })
           const segUsage = turnUsage(turn, turnMetrics, r.runId ? new Set([r.runId]) : undefined)
           return { run: r, items: its, stats: statsOfItems(r.items), live: segLive, answer: segAnswer, usage: segUsage }
@@ -1274,7 +1435,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         const b = turn.items[i]
         // 工具行永远在工作过程里；产出卡不进时间线（轮尾合并渲染，或跟随已交卷段的结算）
         if (b.kind !== 'tool' && b.kind !== 'artifacts') {
-          // 交卷之后到达的记录：整轮交卷时统一延后到结算后面（见 postBlocks），这里跳过
+          // 交卷之后到达的记录：只有**最后一段**的统一延后到轮尾结算后面（见 postBlocks），
+          // 这里跳过；前几段的记录与自己那段的盒子一起落在两个盒子之间。
           const deferred = postBlocks.includes(b)
           // 已交卷那一段的结论：即使整轮还在跑，它也已经交出去了，必须留在时间线上
           if (deferred) { /* 见 postBlocks */ }
@@ -1304,12 +1466,17 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       </div>
     )
     const hasArtifacts = turn.items.some((b) => b.kind === 'artifacts')
-    if (!body.length && !artBlocks.length && !workItems.length && !work) continue
+    if (!body.length && !artBlocks.length && !workItems.length && !work) { remember(); continue }
     items.push(
       <div
         className="rt-turn"
         data-density={density}
         data-open={open ? '1' : undefined}
+        /* data-live：这一轮**正在跑**（区别于「展开了」）。运行时皮肤用它把
+           content-visibility 只关在真正长高的那一段上 —— 关到所有 data-open 上等于
+           把整条转录的离屏跳过全关掉（detailed 密度下每个轮都是 open，实测 420 块
+           挂载：layout/style 160ms vs 旧皮肤 28ms）。 */
+        data-live={live ? '1' : undefined}
         data-foot={usage.matched ? '1' : undefined}
         key={turn.key}
       >
@@ -1441,6 +1608,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         })}
       </div>,
     )
+    remember()
   }
 
   return (
@@ -1491,16 +1659,25 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       {items}
       {footer}
       <div className="narrative-anchor" ref={anchorRef} aria-hidden="true" />
+      {/* 「↓ 回到最新」不能占**流内高度**（2026-11 修「底部内容原地上下颤」）。
+          这个按钮原来直接放在流里（position: sticky 并不脱离文档流）：它出现/消失会把
+          scrollHeight 改掉 30px（实测 13056 → 13086）。贴底态下 tick 每帧把 scrollTop
+          钉到 max —— 于是「跟随」一旦在某一帧被误判成 false、下一帧又被恢复，整段内容
+          就会跟着 ±30px 上下弹，而滚动位置一直没变（正是用户描述的那个形态）。
+          外层是零高 sticky 容器（视觉落点与原来一致），按钮 translateY(-100%) 抬到
+          容器上方：出现与否都不再影响内容高度。 */}
       {(away || fresh) && (
-        <button
-          className="narrative-jump"
-          onClick={jumpToBottom}
-          aria-label={t('narrative.backToLatest')}
-          title={fresh ? t('narrative.newArrived') : t('narrative.backToLatest')}
-        >
-          {fresh && <span className="narrative-jump-dot" aria-hidden="true" />}
-          ↓ {fresh ? t('narrative.newOutput') : t('narrative.jumpLatest')}
-        </button>
+        <div className="narrative-jump-wrap">
+          <button
+            className="narrative-jump"
+            onClick={jumpToBottom}
+            aria-label={t('narrative.backToLatest')}
+            title={fresh ? t('narrative.newArrived') : t('narrative.backToLatest')}
+          >
+            {fresh && <span className="narrative-jump-dot" aria-hidden="true" />}
+            ↓ {fresh ? t('narrative.newOutput') : t('narrative.jumpLatest')}
+          </button>
+        </div>
       )}
     </div>
   )

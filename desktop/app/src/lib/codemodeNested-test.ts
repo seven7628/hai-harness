@@ -291,6 +291,23 @@ test('store：带 parent_call_id 的 tool_response 不改工具行，但会话�
   assert.equal(view(sid).todos.length, 1, '子调用改过的待办快照照常入档')
 })
 
+test('store：codemode 的外层响应带 todos 时写入会话清单（脚本里的 todo_* 靠它生效）', () => {
+  const sid = 's-cm-todos'
+  dispatchEvent({ event_type: 'tool_start', session_id: sid, run_id: 'r1', id: 'outer4', name: 'codemode', arguments: '{"code":"…"}' })
+  // 脚本里跑过 todo_update：Go 侧引擎把本运行快照挂在**外层** codemode 响应上
+  //（嵌套子调用按契约不发射工具事件）。前端只认「响应带 todos」，没理由再判工具名。
+  dispatchEvent({
+    event_type: 'tool_response', session_id: sid, id: 'outer4', name: 'codemode', result: 'script ok',
+    todos: [{ id: 't1', title: '确认 auth.go 错误路径', done: true }],
+  })
+  const v = view(sid)
+  assert.equal(v.todos.length, 1, 'codemode 响应带的待办快照必须进会话清单')
+  assert.equal(v.todos[0].done, true, '完成态必须是脚本执行后的真实值')
+  const tools = toolBlocks(sid)
+  assert.equal(tools.length, 1, '仍然只有外层一行（快照不改工具行数）')
+  assert.equal(tools[0].toolId, 'outer4')
+})
+
 test('store：codemode 的 nested_calls 落到工具块上（纳秒 → 毫秒），spill 路径一并提取', () => {
   const sid = 's-cm-fields'
   dispatchEvent({ event_type: 'tool_start', session_id: sid, id: 'outer3', name: 'codemode', arguments: '{"code":"…"}' })

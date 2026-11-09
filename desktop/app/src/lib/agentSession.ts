@@ -28,9 +28,20 @@ import type { AgentItem, MsgBlock } from '../store/useAppStore'
  * 不会与 store 的 blockSeq（正数）撞 id —— React key 撞了会复用错节点，表现是「展开了
  * 这个工具的详情，另一个工具跟着展开」。
  */
-export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
+export function agentItemsToBlocks(
+  items: readonly AgentItem[],
+  opts?: {
+    /* 旧 record 的 item 没有 run_id 时，用卡片自己的 runId 兜底 —— 前端仍能按 run
+       切段（agent_resume 每次运行一张卡）。 */
+    fallbackRunId?: string
+    /* 多张卡合并时共享一个负数 id 分配器：每张卡都从 -1 开始会撞 React key。 */
+    nextId?: () => number
+  },
+): MsgBlock[] {
   const out: MsgBlock[] = []
-  let id = -1
+  let localId = -1
+  const nextId = opts?.nextId ?? (() => localId--)
+  const runOf = (it: { runId?: string }) => it.runId ?? opts?.fallbackRunId
   for (let i = 0; i < items.length; i++) {
     const it = items[i]
     if (it.kind === 'thinking') {
@@ -39,7 +50,8 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
       // 之前 —— 合并时要取正文那份，缺了才回落到思考那份。
       if (next?.kind === 'text') {
         out.push({
-          kind: 'assistant', id: id--, text: next.text, thinking: it.text, streaming: false,
+          kind: 'assistant', id: nextId(), text: next.text, thinking: it.text, streaming: false,
+          ...(runOf(next) || runOf(it) ? { runId: runOf(next) ?? runOf(it) } : {}),
           ...turnMeta(next),
           ...(!hasTurnMeta(next) ? turnMeta(it) : {}),
           ...(it.thinkStart != null ? { thinkStart: it.thinkStart } : {}),
@@ -48,7 +60,8 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
         continue
       }
       out.push({
-        kind: 'assistant', id: id--, text: '', thinking: it.text, streaming: false,
+        kind: 'assistant', id: nextId(), text: '', thinking: it.text, streaming: false,
+        ...(runOf(it) ? { runId: runOf(it) } : {}),
         ...turnMeta(it),
         ...(it.thinkStart != null ? { thinkStart: it.thinkStart } : {}),
       })
@@ -58,7 +71,7 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
       // 子运行上下文里的一条消息（用户 / 模型 / 孙任务结果）。映射成主会话的 **user 块** ——
       // 这样「我对它说的」和主会话里「我对主 agent 说的」长得一模一样，而不是任务结果那种卡。
       const ts = it.ts ?? it.startedAt
-      out.push({ kind: 'user', id: id--, text: it.text, ...(ts != null ? { ts } : {}) })
+      out.push({ kind: 'user', id: nextId(), text: it.text, ...(ts != null ? { ts } : {}) })
       continue
     }
     if (it.kind === 'text') {
@@ -66,15 +79,21 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
       // 映射成主会话的 **system + tone:error** 块，而不是 assistant 正文 ——
       // assistant 没有错误位，映射过去会悄悄变成普通段落，等于丢掉「这轮失败了」。
       if (it.error) {
-        out.push({ kind: 'system', id: id--, text: it.text, tone: 'error' })
+        out.push({ kind: 'system', id: nextId(), text: it.text, tone: 'error' })
         continue
       }
-      out.push({ kind: 'assistant', id: id--, text: it.text, thinking: '', streaming: false, ...turnMeta(it) })
+      out.push({
+        kind: 'assistant', id: nextId(), text: it.text, thinking: '', streaming: false,
+        ...(runOf(it) ? { runId: runOf(it) } : {}),
+        ...turnMeta(it),
+      })
       continue
     }
     if (it.kind === 'tool') {
+      const runId = runOf(it)
       out.push({
-        kind: 'tool', id: id--, toolId: it.toolId, name: it.name,
+        kind: 'tool', id: nextId(), toolId: it.toolId, name: it.name,
+        ...(runId ? { runId, parentRunId: runId } : {}),
         ...(it.args != null ? { args: it.args } : {}),
         ...(it.result != null ? { result: it.result } : {}),
         ...(it.errorInfo ? { errorInfo: it.errorInfo } : {}),
@@ -100,12 +119,14 @@ export function agentItemsToBlocks(items: readonly AgentItem[]): MsgBlock[] {
     }
     if (it.kind === 'signal') {
       // 子运行自己的一行信号：原样交给 Signal 组件渲染（同一套事实 → 文案的规则）。
-      out.push({ kind: 'signal', id: id--, fact: it.fact })
+      out.push({ kind: 'signal', id: nextId(), fact: it.fact })
       continue
     }
     if (it.kind === 'compression') {
+      const runId = runOf(it)
       out.push({
-        kind: 'compression', id: id--, before: it.before, after: it.after,
+        kind: 'compression', id: nextId(), before: it.before, after: it.after,
+        ...(runId ? { runId } : {}),
         ...(it.ctxTokens != null ? { ctxTokens: it.ctxTokens } : {}),
         ...(it.reason ? { reason: it.reason } : {}),
         ...(it.model ? { model: it.model } : {}),
@@ -144,7 +165,7 @@ export function withAgentToolBlocks(blocks: readonly MsgBlock[]): MsgBlock[] {
     // 把全部卡片的 items（最多 50×N 条）重新映射一遍。
     let tools = toolCache.get(c.items)
     if (!tools) {
-      tools = agentItemsToBlocks(c.items).filter((b) => b.kind === 'tool')
+      tools = agentItemsToBlocks(c.items, { fallbackRunId: c.runId }).filter((b) => b.kind === 'tool')
       toolCache.set(c.items, tools)
     }
     extra.push(...tools)

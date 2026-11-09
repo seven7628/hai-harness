@@ -1355,6 +1355,7 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 	// 上报一遍（那才会双计）——契约写在 tools/nested.go 的 ExecuteOne godoc 里。
 	var nested []core.NestedCallRecord
 	var hostOps *core.HostOps
+	todoWrites := 0
 	if call.Depth == 0 {
 		if rec := events.NestedRecorderFrom(ctx); rec != nil {
 			nested = rec.TakeRecord()
@@ -1365,18 +1366,31 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 			if h := rec.TakeHostOps(); !h.IsZero() {
 				hostOps = &h
 			}
+			// 脚本里的 todo_* 改过清单吗？同样是**计数**而不是翻记录（记录会被限额丢弃，
+			// 见 core.NestedRecorder.MarkTodoWrite）。
+			todoWrites = rec.TakeTodoWrites()
+		}
+	} else if strings.HasPrefix(call.Name, "todo_") {
+		// 嵌套 todo_*（编排脚本内，Depth>0）：自己不发工具事件，把「清单被改过」记到
+		// 外层 recorder 上 —— 外层编排工具（codemode）收尾时据此代发待办快照。
+		if rec := events.NestedRecorderFrom(ctx); rec != nil {
+			rec.MarkTodoWrite()
 		}
 	}
 	r := core.ToolResult{Id: call.Id, Result: in.result, IsError: in.isErr, Usage: in.usage, Blocks: buildResultBlocks(in.result, in.images), Exec: in.exec, NestedCalls: nested, Structured: in.structured}
 	if hostOps != nil {
 		r.HostOps = *hostOps
 	}
-	// 待办快照（todo_* 工具才有）：属主 = **发起本次调用的运行**（ToolContext.Todos 由
-	// AgentLoop 按 ac.Todo 注入）。取在这里而不是工具里：工具实例是共享的、且不需要知道
-	// "现在是谁在调用我"；同时宿主拿到的是与该 run 的 run_id 严格配对的清单。
-	// 只取最外层（Depth==0）：编排脚本内的 todo_* 子调用不改工具行，画面归属外层调用。
+	// 待办快照：属主 = **发起本次调用的运行**（ToolContext.Todos 由 AgentLoop 按 ac.Todo
+	// 注入）。取在这里而不是工具里：工具实例是共享的、且不需要知道"现在是谁在调用我"；
+	// 同时宿主拿到的是与该 run 的 run_id 严格配对的清单。
+	//
+	// 只取最外层（Depth==0），且有两种来源：
+	//   - 本次调用就是 todo_*（模型直呼）；
+	//   - 本次是编排调用、脚本里跑过 todo_*（todoWrites>0）—— 嵌套调用按契约不发事件，
+	//     快照若不由外层代发就整条丢失（用户 2026-11 报障：codemode 里标完成，待办面板不动）。
 	var todoSnap []events.TodoSnapshot
-	if call.Depth == 0 && strings.HasPrefix(call.Name, "todo_") {
+	if call.Depth == 0 && (todoWrites > 0 || strings.HasPrefix(call.Name, "todo_")) {
 		if tc := events.ToolContextFrom(ctx); tc != nil && tc.Todos != nil {
 			todoSnap = tc.Todos()
 		}

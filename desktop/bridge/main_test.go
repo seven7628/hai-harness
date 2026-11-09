@@ -76,9 +76,17 @@ func testPythonRuntime(t *testing.T) *goruntime.Runtime {
 	return goruntime.New(goruntime.Config{Root: filepath.Join(t.TempDir(), "python")})
 }
 
-// testManager：provCfg 默认配置构造 manager（构建 loop 不触发网络；runLoop 只在 ask/wake 后才发 LLM）
-func testManager(t *testing.T) (*manager, *syncBuf) {
+// newManagerWithAppData 构造 manager 并把 appDataDirOverride 指向调用方给的目录。
+// 必须在 newRecordStore() 之前调用：record store 的根目录在构造期就固化了。
+func newManagerWithAppData(t *testing.T, appData string) (*manager, *syncBuf) {
 	t.Helper()
+	m, buf := testManager(t)
+	appDataDirOverride = appData
+	return m, buf
+}
+
+// testManager：provCfg 默认配置构造 manager（构建 loop 不触发网络；runLoop 只在 ask/wake 后才发 LLM）
+func testManager(t *testing.T) (*manager, *syncBuf) {	t.Helper()
 	// 隔离真实用户配置、插件和 Seatbelt 相关宿主状态；bridge 单测不应读取 ~/.go-code。
 	t.Setenv("HOME", t.TempDir())
 	appDataDirOverride = t.TempDir()
