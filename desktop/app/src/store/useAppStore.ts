@@ -1093,6 +1093,13 @@ export interface SessionView {
   checkpointRevision?: number
   checkpointGeneration?: number
   degraded?: boolean
+  // hydrated 这份 view 是否经历过一次**完整**的恢复（checkpoint / snapshot / messages），
+  // 或确认是进程内新建的空会话。它和 blocks 是两件事：
+  //   · 后台会话的实时事件会先建 view（blocks>0），但只包含进程启动后的尾部；
+  //   · 陈旧 new_session 响应的 preBuf 也会 dispatch 出 blocks。
+  // 旧判据「blocks.length>0 即已恢复」会把这两种残缺 view 当成完整历史，切回去不再请求
+  // new_session（用户报障：切 Session 后历史只剩一小段，且无报错）。
+  hydrated?: boolean
 
   // enteredAt 每次「会话内容被整体重建」时自增（切会话/checkpoint hydrate）。
   //
@@ -1135,6 +1142,7 @@ export function mainRunEnded(v: SessionView | undefined): boolean {
 
 function emptyView(): SessionView {
   return {
+    hydrated: false,
     blocks: [],
     blocksTotal: 0,
     blocksCursor: 0,
@@ -2509,6 +2517,14 @@ let sessionPending = false
 const firstAsks: { text: string; contents?: QueuedContent[] }[] = []
 // 会话切换加载态定时器（issue 4）：无论有无缓存都短暂显示模糊遮罩，超时兜底关闭。
 let switchTimer: ReturnType<typeof setTimeout> | undefined
+// 新建会话的响应可能被 bridge 冷开大会话/排队拖到 10s+；骨架屏给 30s 兜底，
+// 到点只提示「还在创建/超时」，不丢弃迟到响应（响应到达仍会正常激活）。
+const NEW_SESSION_MAX_MS = 30_000
+let newSessionTimer: ReturnType<typeof setTimeout> | undefined
+function clearNewSessionTimer(): void {
+  if (newSessionTimer) clearTimeout(newSessionTimer)
+  newSessionTimer = undefined
+}
 // Compressor failures are not guaranteed to produce CompressEnd (for example
 // when the SDK's request context expires). Keep one watchdog per session/run so a
 // SubAgent compression cannot clear a different session or the main Agent state.
@@ -3042,6 +3058,7 @@ interface AppState {
 
   start(workspace?: string): Promise<void>
   autoBoot(): void // 启动：有持久项目 → 直接恢复（跳过 BootScreen）；无 → 保持 idle
+  restartBridge(): void // bridge 异常退出后：重置状态 + 重新 start（幂等；wire 有守卫）
   newSession(): void
   renameSession(path: string, sid: string, title: string): void
   setActiveSession(id: string, projectPath?: string): void
@@ -3318,6 +3335,16 @@ interface PendingCommand {
 }
 
 const pending: Record<number, PendingCommand> = {}
+// 是否还有「真新建」的 new_session 在途（无 sessionId）。用于 loading shell 的超时提示：
+// 用户可能连点新建 / 已切到别的会话，只有仍停在 shell 上且请求确实在途时才提示。
+function bareNewSessionInFlight(): boolean {
+  return Object.values(pending).some((p) => p.type === 'new_session' && !p.sessionId)
+}
+// bridge 不可用（进程退出/未启动/写 stdin 失败）→ UI 需要升级为「需要重启 bridge」，
+// 而不是普通命令失败。普通业务错误（session not found 等）不应把整个 bridge 标红。
+function looksBridgeDown(err: string | undefined): boolean {
+  return /bridge\s*(未运行|退出|进程错误|响应超时)|not running|exited|EPIPE|stdin/i.test(err || '')
+}
 // interrupt_task 在途请求（命令 id → 目标任务）：失败时按 id 回滚乐观 interrupting 态。
 const interruptPending = new Map<number, { sid: string; taskId: string }>()
 // promote_task 在途请求（命令 id → 目标任务）：乐观置位后若命令失败，按 id 回滚
@@ -3617,7 +3644,32 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
   }
   const finalPayload = ws ? { ...(payload || {}), workspace: ws } : payload
   if (onResp) onCommandResponseOnce(id, onResp)
-  void transport.send({ ...cmd, id, payload: finalPayload })
+  // transport.send 的返回值是「写没写进 bridge」。旧实现直接 void 丢掉：
+  // bridge 已退出时 Electron 返回 {ok:false,error:'bridge 未运行'}，但不发 command_response
+  // → pending 永不结算、骨架屏超时后空白、全程无报错（用户报障「没有报错但历史不出来」）。
+  // 这里把失败合成一条 command_response，走与真实响应同一条分发/清理路径。
+  void transport
+    .send({ ...cmd, id, payload: finalPayload })
+    .then((res) => {
+      if (res && res.ok === false) {
+        dispatchEvent({
+          event_type: 'command_response',
+          id,
+          ok: false,
+          error: res.error || i18nT('bridge.unavailable'),
+          ...(ws ? { workspace: ws } : {}),
+        } as AnyEvent)
+      }
+    })
+    .catch((err: unknown) => {
+      dispatchEvent({
+        event_type: 'command_response',
+        id,
+        ok: false,
+        error: err instanceof Error ? err.message : i18nT('bridge.unavailable'),
+        ...(ws ? { workspace: ws } : {}),
+      } as AnyEvent)
+    })
   return id
 }
 
@@ -4596,6 +4648,37 @@ export function dispatchEvent(raw: AnyEvent): void {
       delete pending[r.id]
       const t = meta?.type ?? ''
       embedBridgeAlive = true // 任意响应到达 ⇒ bridge 已就绪（embed 自举的放行信号）
+      // new_session 失败必须在这里收敛：bare（真新建）要撤掉 loading shell；
+      // 带 id 的恢复要释放 snapshotPending/preBuf，否则该会话后续事件会被永久积压。
+      // 旧路径落到通用 `if (!r.ok)` 只设 bridgeError —— 骨架屏/空白壳没人收，用户看到
+      // 「没有报错但历史不出来」（bridge 未运行时 Electron 只回 ok:false，不发响应）。
+      if (!r.ok && t === 'new_session') {
+        const err = r.error || i18nT('bridge.unavailable')
+        const sid = String(meta?.sessionId || '')
+        if (sid) {
+          if (snapshotPending.get(sid) === r.id) {
+            snapshotPending.delete(sid)
+            preBuf.delete(sid)
+          }
+        } else {
+          sessionPending = false
+          clearNewSessionTimer()
+          abortSkeleton()
+          if (switchTimer) {
+            clearTimeout(switchTimer)
+            switchTimer = undefined
+          }
+        }
+        const bridgeDown = looksBridgeDown(err)
+        const alreadyDown = getState().bridgeStatus === 'error'
+        setState({
+          ...(bridgeDown ? { bridgeStatus: 'error' as const } : {}),
+          bridgeError: err,
+          // 只弹一次：bridge 死时会在途/后续命令一起失败，逐个 toast 会刷屏。
+          ...(bridgeDown && !alreadyDown ? { toast: { msg: err, kind: 'error' as const, id: Date.now() } } : {}),
+        })
+        return
+      }
       // §6.2 请求代际：browser_* 响应校验「发起时的 generation」——workspace/session 切换后
       // 递增 browserGeneration，迟到响应（旧代际）不写 UI（防跨 workspace/page 串写）。
       const isBrowserResp = t === 'browser_pages' || t === 'browser_screenshot' || t === 'browser_close'
@@ -4853,7 +4936,17 @@ export function dispatchEvent(raw: AnyEvent): void {
           setState({ browserBusy: false })
           return
         }
-        setState({ bridgeError: r.error || 'command failed' })
+        const err = r.error || 'command failed'
+        const bridgeDown = looksBridgeDown(err)
+        const alreadyDown = getState().bridgeStatus === 'error'
+        setState({
+          bridgeError: err,
+          // bridge 不可用（进程死了/未启动）升级为全局错误态 + toast；普通业务错误
+          // （session not found / 参数错误）只记 bridgeError，不把整个 bridge 标红。
+          // 已处于 error 时不再重复 toast（bridge 死时多条命令会一起失败）。
+          ...(bridgeDown ? { bridgeStatus: 'error' as const } : {}),
+          ...(bridgeDown && !alreadyDown ? { toast: { msg: err, kind: 'error' as const, id: Date.now() } } : {}),
+        })
         return
       }
       // /reload_skills 成功：bridge 已重扫 .agents/skills + .go-code/skills —— 立即刷新技能清单
@@ -5501,6 +5594,9 @@ export function dispatchEvent(raw: AnyEvent): void {
           if (!Array.isArray(snapEvents) && !cpData && Array.isArray(d.messages) && d.messages.length) {
             nv = {
               ...nv,
+              // messages 降级路径也是完整文本历史（没有事件日志时才走到），算 hydrated；
+              // 否则切走再切回会再次请求，且可能因 blocks 判据旧实现误判。
+              hydrated: true,
               // 2026-08-22：messages 降级路径支持内容块（image）—— 恢复时图片附件不丢
               blocks: (d.messages as { role: string; text: string; contents?: { type?: string; content?: string; mime_type?: string }[] }[]).map((m) => {
                 const contents = Array.isArray(m.contents) && m.contents.length
@@ -7548,8 +7644,8 @@ const restoreGaveUp = new Set<string>() // 已达上限放弃的 sid（成功恢
 // 「有 blocks」或「带 checkpointRevision 元数据」都算已恢复：空视图（只有 git 字段）不算。
 function isViewHydrated(sid: string): boolean {
   const v = useAppStore.getState().views[sid]
-  if (!v) return false
-  return v.blocks.length > 0 || v.checkpointRevision != null
+  // 只认显式 hydrated：后台实时事件 / 陈旧响应的 preBuf 也会让 blocks>0，但那是残缺 view。
+  return v?.hydrated === true
 }
 
 // scheduleRestoreRetry 恢复未落地时的有限重试。
@@ -7761,7 +7857,8 @@ export function materializeSnapshot(sid: string, snapEvents: unknown[], requestI
     useAppStore.setState((st) => {
       const v = st.views[sid]
       if (!v) return {}
-      return setView(st, sid, cold ? finalizeReplayView(v) : v)
+      // 快照完整回放成功 → hydrated；缺这一步，切走再切回会命中「blocks>0」的旧判据。
+      return setView(st, sid, { ...(cold ? finalizeReplayView(v) : v), hydrated: true })
     })
     // 快照落地成功 → 清空该会话的重试账（见 scheduleRestoreRetry）
     if (isViewHydrated(sid)) clearRestoreRetry(sid)
@@ -8190,6 +8287,8 @@ export function hydrateCheckpoint(
         blocksOlderLoading: false,
         blocksOlderError: false,
         agentDetached: Array.isArray(meta?.agents) ? cpAgentsToBlocks(meta!.agents!) : [],
+        // 只有完整恢复过的 view 才算 hydrated（见 SessionView.hydrated 注释）。
+        hydrated: true,
         // 内容整体重建 → 触发一次历史渐入（见 enteredAt 注释）。
         // 用模块级计数器而不是 view 上的值自增：上面刚把 view 重置为 emptyView()，
         // 从 view 读到的永远是 0，自增后恒为 1 —— 第二次切换就不会重新播动画了。
@@ -8286,7 +8385,21 @@ function wire(): void {
     }
   })
   transport.onExit((info: BridgeExitInfo) => {
-    useAppStore.setState({ bridgeStatus: 'error', bridgeError: `bridge 退出 (${info.code})` })
+    // bridge 退出 = 所有在途命令都不会再有响应。把 UI 从「等待中」收敛到可恢复的错误态：
+    // 撤骨架屏、释放发送时创建锁、给出可见提示（主界面横幅 + toast）。
+    sessionPending = false
+    clearNewSessionTimer()
+    abortSkeleton()
+    if (switchTimer) {
+      clearTimeout(switchTimer)
+      switchTimer = undefined
+    }
+    const msg = `${i18nT('bridge.exited')} (${info.code})`
+    useAppStore.setState({
+      bridgeStatus: 'error',
+      bridgeError: msg,
+      toast: { msg, kind: 'error', id: Date.now() },
+    })
   })
 }
 
@@ -8458,6 +8571,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 用户选目录（BootScreen）：全新项目树
       set({
         bridgeStatus: 'starting',
+        bridgeError: undefined,
         workspace,
         projects: [{ path: workspace, sessions: [] }],
         sessions: [],
@@ -8470,6 +8584,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       booting = false
       return // 无持久项目 → BootScreen 引导选目录
     }
+    // 持久恢复路径也要有 starting 状态：bridge 退出后点「重启」时，UI 要立即从 error 切走。
+    set({ bridgeStatus: 'starting', bridgeError: undefined })
     persistProjects(get())
     const res = await transport.start(active)
     if (!res.ok) {
@@ -8478,7 +8594,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return
     }
     booting = false
-    set({ bridgeStatus: 'running' })
+    set({ bridgeStatus: 'running', bridgeError: undefined })
     // 工作区清单上移（手机端要看到与桌面相同的列表）：localStorage 只是缓存，
     // bridge 的 ~/.go-code/workspaces.json 才是真相源。只增不减，见 workspace_registry.go。
     syncWorkspacesToBridge(get().projects.map((p) => p.path))
@@ -8502,6 +8618,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   autoBoot: () => {
     if (booting || get().bridgeStatus !== 'idle') return
     if (!get().workspace) return
+    void get().start()
+  },
+
+  // bridge 异常退出后的手动恢复：bridgeStatus 置回 idle → start() 重新 spawn。
+  // wire() 有 wired 守卫，重复 start 不会重复注册事件监听；list 响应会重新水合/恢复会话。
+  restartBridge: () => {
+    const s = get()
+    if (s.bridgeStatus === 'starting' || s.bridgeStatus === 'running') return
+    if (!s.workspace) return
+    booting = false
+    set({ bridgeStatus: 'idle', bridgeError: undefined })
     void get().start()
   },
 
@@ -8533,6 +8660,35 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().setActiveWorkspace(path)
     }
     persistProjects(get())
+    // 用户显式点「新建」优先于启动水合的「自动恢复上次会话」：否则 list 响应可能在
+    // 新建响应之后把 lastSession 恢复出来，用户看到的是旧会话而不是新建的空会话。
+    const activeWs = get().workspace
+    if (activeWs) recoverPaths.delete(activeWs)
+    // 点击即进入 loading shell（2026-11-09）：bridge 冷开大会话 / listSessions 可能 6–15s，
+    // 旧实现期间界面原样停在旧会话 —— 用户以为「点了没反应」，且这期间输入会发到旧会话。
+    // 现在：立刻把当前顶层镜像写回 views[current]，清空顶层视图（骨架屏覆盖），
+    // 无会话状态下的输入进 firstAsks，等 new_session 响应激活后统一 flush。
+    const s = get()
+    const views = { ...s.views }
+    if (s.activeSessionId && views[s.activeSessionId]) {
+      views[s.activeSessionId] = { ...views[s.activeSessionId], ...topViewFields(s) }
+    }
+    sessionPending = true
+    disarmBrowserBusyWatchdog()
+    set({ ...resetView(), views, activeSessionId: undefined, browserBusy: false, ...clearBrowser() })
+    beginSkeleton()
+    if (switchTimer) clearTimeout(switchTimer)
+    // 不用 SKELETON_MAX_MS（8s）：新建会话的 bridge 响应可能本来就要 10s+，
+    // 8s 撤掉骨架屏只会露出空白；30s 兜底，迟到的响应仍会正常激活。
+    switchTimer = setTimeout(() => abortSkeleton(), NEW_SESSION_MAX_MS)
+    clearNewSessionTimer()
+    newSessionTimer = setTimeout(() => {
+      newSessionTimer = undefined
+      // 用户可能已经切到别的会话（bare new_session 仍在 bridge 里建）—— 不打扰。
+      if (!bareNewSessionInFlight() || get().activeSessionId !== undefined) return
+      sessionPending = false
+      set({ toast: { msg: i18nT('bridge.newTimeout'), kind: 'error', id: Date.now() } })
+    }, NEW_SESSION_MAX_MS)
     send({ type: 'new_session' }, true) // send() 注入当前 workspace → 在活跃工作区下建会话
   },
 
@@ -8645,10 +8801,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().setActiveWorkspace(path)
   },
 
-  // 在指定工作区下直接建会话（每工作区悬停 +）：非活跃先切为活跃，再建会话
+  // 在指定工作区下直接建会话（每工作区悬停 +）：非活跃先切为活跃，再建会话。
+  // 复用 newSession 的 loading shell / 超时 / firstAsks 缓冲语义（此前直接 send，
+  // 响应慢时界面停在旧工作区，且新建期间输入会发到旧会话）。
   createSessionIn: (path) => {
     if (path !== get().workspace) get().setActiveWorkspace(path)
-    send({ type: 'new_session' }, true)
+    void get().newSession()
   },
 
   // 会话切换：有缓存 view（进程内看过/后台累积）→ 直接镜像顶层，不发请求；无缓存 → 发 new_session 恢复
@@ -8704,17 +8862,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
     const nextState = { ...s, views }
-    // 缓存 view 是否「已恢复」：git_snapshot 等响应会在 new_session checkpoint 响应
-    // 回来前就创建 views[sid]（只有 git 字段、blocks 为空）。若仅按 views[id] 存在
-    // 判断缓存，快速切换时会命中「空 view」→ 不发 new_session → 历史永不加载。
-    // 判定：blocks 有内容，或带 checkpointRevision（hydrate 元数据），或有消息块。
-    const isHydrated = (sid: string): boolean => {
-      const v = views[sid]
-      if (!v) return false
-      if (v.blocks.length > 0) return true
-      if (v.checkpointRevision != null) return true
-      return false
-    }
+    // 缓存 view 是否「已恢复」：只认显式 hydrated（checkpoint / snapshot / messages 完整落地）。
+    // 后台会话的实时事件、git_snapshot 的响应、陈旧 new_session 响应的 preBuf 都会创建
+    // blocks>0 的 view，但它们只有「进程启动后的尾部」，不能当成完整历史 —— 旧判据
+    // 「blocks.length>0 || checkpointRevision != null」会让切回时不再请求 new_session
+    //（用户报障：切 Session 后历史只剩一小段，且无报错）。
+    const isHydrated = (sid: string): boolean => views[sid]?.hydrated === true
     // 切换会话 → 骨架屏（2026-10-21 数据驱动 + 延迟出现）。
     //
     // 两种情形必须分开，因为它们「数据是否到位」的事实不同：
@@ -8737,7 +8890,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     disarmBrowserBusyWatchdog()
     if (!sameProject) {
       const proj = s.projects.find((p) => p.path === path)
-      set({ ...resetView(), browserBusy: false, ...clearBrowser(), activeSessionId: undefined, workspace: path, sessions: proj ? proj.sessions : [] })
+      // 带上 views：切项目前先把当前会话的顶层镜像写回去（与同项目切换一致），
+      // 否则切回来可能读到旧历史。
+      set({ ...resetView(), views, browserBusy: false, ...clearBrowser(), activeSessionId: undefined, workspace: path, sessions: proj ? proj.sessions : [] })
     }
     if (isHydrated(id)) {
       touchView(id)
@@ -8756,7 +8911,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 缓冲消息已转入本会话暂存队列：空闲立即推送（与 ask 的即时发送语义一致）
       if (movedToSession) get().flushPending(id)
     } else {
-      set({ ...resetView(), activeSessionId: id, browserBusy: false })
+      // 未缓存会话：带上 views —— 上面刚把当前会话的顶层镜像写回 views[currentId]，
+      // 并把 firstAsks 转进目标会话的 pendingQueue；丢了它，切回去会读到旧历史，
+      // 缓冲消息也会无声消失。
+      set({ ...resetView(), activeSessionId: id, views, browserBusy: false })
       touchView(id)
       // 显式切换 = 一次新的恢复意图：清掉该会话的重试账，给这次尝试完整的重试预算
       //（此前若已放弃，不重置就永远不再自动重试 —— 见 scheduleRestoreRetry）。

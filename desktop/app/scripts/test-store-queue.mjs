@@ -299,13 +299,13 @@ useAppStore.setState({
   sessions: [{ id: 's1', title: 'A' }, { id: 's2', title: 'B' }],
   projects: [{ path: '/mock/w', sessions: [{ id: 's1', title: 'A' }, { id: 's2', title: 'B' }] }],
 })
-// 建立 A 的缓存 view（需有内容块：isHydrated 判定 blocks>0 才走缓存恢复分支），
-// 并保存一组跨 Provider 配置。
+// 建立 A 的缓存 view（需 hydrated=true 才走缓存恢复分支；blocks>0 已不再算「已恢复」——
+// 后台尾部事件/陈旧 preBuf 也会让 blocks>0）。
 EV('agent_start', { run_id: 'prefs-a' })
 EV('agent_end', { run_id: 'prefs-a', finish_reason: 'stop' })
-// 标记 s1 view 已恢复（isHydrated 判定 checkpointRevision != null 才走缓存恢复分支）
+// 标记 s1 view 已完整恢复（hydrated 是 setActiveSession 走缓存分支的唯一判据）
 useAppStore.setState((s) => ({
-  views: { ...s.views, s1: { ...s.views.s1, checkpointRevision: 1 } },
+  views: { ...s.views, s1: { ...s.views.s1, hydrated: true } },
 }))
 useAppStore.getState().switchMode('hitl')
 useAppStore.getState().switchEffort('high')

@@ -3,7 +3,6 @@ package subagent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -187,60 +186,70 @@ func (t *agentResumeTool) Call(ctx context.Context, _, arguments string) (string
 // 只有退回交接简报那条路才要求 start 记录。故 journal 缺失在这里是合法的（recs 为空），
 // 由 Call 按「能否取到 checkpoint」决定走哪条路，取不到才明确拒绝。
 func (t *agentResumeTool) resolveSource(taskID string) (resumeSource, error) {
-	info, err := t.reg.Snapshot(taskID)
-	if err == nil {
+	// —— 完全走 journal（2026-11-09 用户拍板）——
+	//
+	// 为什么：注册表不再保留已结束任务的**对象**（Registry.reclaimTask：只留终态摘要，
+	// 完整内容按 task id 从 journal 还原）→ 恢复一个已结束任务时，注册表里本来就
+	// 没有它的对象可读，状态/身份/历史全在 journal 里。journal 路径只是 task id 的
+	// 函数（宿主注入 spec.JournalPath），跨进程也一样成立。
+	//
+	// 唯一还用注册表的地方是**判活**：内存里它还在跑 → 不能恢复（那是 agent_send /
+	// agent_interrupt 的活）。内存是「还在跑」的唯一权威（journal 的终态行只有
+	// fsync 之后才有，异常退出的任务没有终态行）。
+	if info, serr := t.reg.Snapshot(taskID); serr == nil {
 		switch info.Status {
 		case TaskRunning, TaskInterrupting:
 			return resumeSource{}, fmt.Errorf("task %s is still %s — not resumable while running; use agent_send to steer it or agent_interrupt to stop it first, then resume", taskID, info.Status)
 		}
-		var recs []JournalRecord
-		if info.OutputFile != "" {
-			r, rerr := ReadAll(info.OutputFile)
-			if rerr != nil {
-				return resumeSource{}, rerr
-			}
-			recs = r
-		}
-		return resumeSource{
-			TaskID: taskID, Name: info.Name, ToolName: info.ToolName,
-			Status: info.Status, OutputFile: info.OutputFile, recs: recs,
-		}, nil
-	}
-	if !errors.Is(err, ErrTaskNotFound) {
-		return resumeSource{}, err
 	}
 
-	// 跨进程回落：解析 journal 路径。解析器缺失/失败不立即报错 —— 原地续跑可能只靠
-	// 状态文件（路径同为 taskID 的函数，由 store 适配器负责），故先返回一个「无 journal
-	// 身份」的 source，由 Call 决定是否真的无物可续。
+	// ① journal 优先：路径由宿主解析器给出（跨进程同样成立）。
 	path := ""
 	if t.spawn.spec.JournalPath != nil {
 		if p, perr := t.spawn.spec.JournalPath(taskID); perr == nil {
 			path = p
 		}
 	}
-	src := resumeSource{TaskID: taskID, OutputFile: path}
-	if path == "" {
+	if path != "" {
+		recs, rerr := ReadAll(path)
+		if rerr != nil {
+			return resumeSource{}, rerr
+		}
+		src := resumeSource{TaskID: taskID, OutputFile: path, recs: recs}
+		// 身份与终态从 journal 自己取（start 记录带名字；result 记录带终态）。
+		for _, r := range recs {
+			switch {
+			case r.Type == "start" && r.Name != "" && src.Name == "":
+				src.Name = r.Name
+			case r.Type == "result" && r.Status != "":
+				src.Status = TaskStatus(r.Status)
+			}
+		}
+		if src.Status == "" {
+			// 没有终态记录：不是「还在跑」（那已被上面的判活挡住），而是
+			// 「上一进程没写终态就没了」→ 记为 interrupted（保守但不误报「已完成」）。
+			src.Status = TaskInterrupted
+		}
 		return src, nil
 	}
-	recs, rerr := ReadAll(path)
-	if rerr != nil {
-		return resumeSource{}, rerr
+
+	// ② 没有 journal（宿主未启用落盘 / 任务刚起还没写）：退回注册表快照。
+	info, err := t.reg.Snapshot(taskID)
+	if err != nil {
+		return resumeSource{}, err
 	}
-	src.recs = recs
-	// 身份从 journal 自身取（start 记录带 Name；result 记录带终态）。
-	for _, r := range recs {
-		if r.Type == "start" && r.Name != "" {
-			src.Name = r.Name
-			break
+	var recs []JournalRecord
+	if info.OutputFile != "" {
+		r, rerr := ReadAll(info.OutputFile)
+		if rerr != nil {
+			return resumeSource{}, rerr
 		}
+		recs = r
 	}
-	for _, r := range recs {
-		if r.Type == "result" && r.Status != "" {
-			src.Status = TaskStatus(r.Status)
-		}
-	}
-	return src, nil
+	return resumeSource{
+		TaskID: taskID, Name: info.Name, ToolName: info.ToolName,
+		Status: info.Status, OutputFile: info.OutputFile, recs: recs,
+	}, nil
 }
 
 // handoffBrief 组装交接简报（续跑任务的唯一输入）。

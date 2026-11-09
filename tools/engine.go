@@ -688,6 +688,7 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 			}
 			t.result = e.execute(t.taskCtx, t.call, handler, decisions, t.taskID)
 			t.stopTimeout() // 收尾：停时限盒（防 timer/watcher 泄漏）
+			t.release()     // 收尾：释放 rctx 的 watcher goroutine（防每次工具调用漏一个 goroutine）
 			close(t.done)
 			// promote 后完成：结果自动回传（close 之后保证结果已写；未摘离则不推、走收集）。
 			// deliverOnce 与等待循环的 done-check 补发竞态安全（只交付一次）。

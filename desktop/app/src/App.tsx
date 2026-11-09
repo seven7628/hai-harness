@@ -14,6 +14,7 @@ import NewWorkspaceModal from './components/NewWorkspaceModal'
 import SettingsModal from './components/SettingsModal'
 import ToastView from './components/ToastView'
 import BootScreen from './components/BootScreen'
+import BridgeBanner from './components/BridgeBanner'
 import { useAppStore } from './store/useAppStore'
 import { applyTheme } from './lib/theme'
 import { applyNarrativeDensity, applyNarrativeSkin } from './lib/narrativeSkin'
@@ -136,6 +137,7 @@ export default function App() {
 
   return (
     <div className={`app-root ${inSkills ? 'in-skills' : ''}${inCron ? 'in-cron' : ''}${leaving ? ' leaving' : ''}`}>
+      {mainReady && <BridgeBanner />}
       {mainReady && (
         <main className="main">
           <Group

@@ -90,8 +90,8 @@ const OTHER = '/mock/other'
 const S1 = 's1'
 const S2 = 's2'
 
-// 一个「已水合」的会话 view：setActiveSession 只对 blocks.length>0 或带 checkpointRevision 的
-// 缓存走 loadViewToTop 分支（否则 resetView 回落默认）——见 setActiveSession 的 isHydrated。
+// 一个「已水合」的会话 view：显式 hydrated=true（setActiveSession 只认这个标记；
+// 旧判据 blocks.length>0 会把后台尾部事件/陈旧 preBuf 也误判成完整历史）。
 // 形状从 store 自身取（先造一个真 view 当模板）——手工列字段会在 SessionView 增删字段时静默失效
 //（evictViews → sessionBusy 会读 runNodes，缺了就直接 TypeError）。
 const TEMPLATE = (() => {
@@ -105,6 +105,7 @@ const TEMPLATE = (() => {
 })()
 const hydrated = (rightTab, rightExpanded) => ({
   ...TEMPLATE,
+  hydrated: true,
   blocks: [{ id: 1, role: 'user', text: 'x' }],
   rightTab,
   rightExpanded,

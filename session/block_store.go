@@ -227,6 +227,10 @@ type blockStore struct {
 	// 里有效内容只有 58MB。
 	recordsWritten int64
 	staleRecords   int64
+	// lastCompactBytes 是最近一次压缩后的文件体积（0 = 从未压缩过）。
+	// 冷却判据用：刚压完必须先长到 lastCompactBytes×compactCooldownFactor 才允许再压
+	//（见 compactCooldownFactor 的注释）。
+	lastCompactBytes int64
 	// bytesWritten 是历史累计写入字节（含废弃），用于估算放大倍数。
 	bytesWritten int64
 	// hashedBytes 是累计被哈希校验的 payload 字节数（可观测性/测试用）。
@@ -1034,7 +1038,18 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 			return nil, 0, fmt.Errorf("block without id")
 		}
 		if isLiveBlock(elem) {
-			// 进行中的 block 每次都覆盖写（内容会变），不复用缓存。
+			// 进行中的 block：内容**可能**变，但不一定每次都变。
+			//
+			// 原实现无条件整块重写（"内容会变"）——2026-11-09 实测这个假设对
+			// **agent 卡片**不成立：卡片在整个子任务 running 期都是 status=running，
+			// 而内容只在子任务产出新东西时才变。于是每次提交都把几十张 running 卡片
+			// （单张最大 0.8MB）整块重写一遍，一次提交追加 16.1MB → 废弃比例越过
+			// 20% 阈值 → 触发全量重写 → 无限循环（见 compactMinStaleBytes 的事故记录）。
+			//
+			// 现在与终态分支一样先判内容：没变就不写（append-only 文件里留着旧版本即可）。
+			if bs.holdsSame(id, elem) {
+				continue
+			}
 			if err := bs.put(id, elem); err != nil {
 				return nil, 0, err
 			}
@@ -1962,6 +1977,19 @@ func lowerBound(a []uint64, v uint64) int {
 // 文件只能一路涨到 3.4GB，把「索引丢失后重建」「每次提交的哈希」一起拖慢。
 const compactThreshold = 0.20
 
+// compactCooldownFactor 是压缩后的**冷却**倍率：刚压完的 record，必须先长到
+// 「压后体积 × 该倍率」才允许再压。
+//
+// 为什么需要它（2026-11-09 实测事故）：比例判据会被「单次增量刚好推过线」的情况
+// 反复触发 —— 每次提交都把「进行中」的块整块重写（agent 卡片在 running 期每个事件
+// 都重写一遍），一次提交追加 16.1MB，废弃比例 = 16.1/77.2 = 20.85%，刚过 20% 阈值
+// → 触发全量重写（回收 16.1MB 却要重写 77.2MB）→ 回到 61.1MB → 下次提交再来一遍
+// → desktop bridge 每 100ms 压一次，永远停不下来。
+//
+// 冷却把「连续压缩」在体积上摊开：压完 → 至少长 50% 才可能再压 → 单次提交的增量
+// 再大也压不动（配合「live 块内容没变就不重写」这个根因修复，增量本身也趋近于 0）。
+const compactCooldownFactor = 1.5
+
 // compactMinBytes 是 compact 的最小体积门槛：太小的文件重写不划算。
 //
 // 用 atomic 而不是普通变量：后台回收 goroutine 会读它，而测试会临时调小它
@@ -1987,7 +2015,17 @@ func (bs *blockStore) staleByteRatio() float64 {
 func (bs *blockStore) needsCompact() bool { return bs.needsCompactAt(compactMinBytes.Load()) }
 
 func (bs *blockStore) needsCompactAt(minBytes int64) bool {
-	if bs.nBytes-int64(len(blockStoreMagic)) < minBytes {
+	total := bs.nBytes - int64(len(blockStoreMagic))
+	if total < minBytes {
+		return false
+	}
+	// 冷却：刚压过必须先长够（防止「单次增量刚好推过比例线」造成的连续压缩）。
+	//
+	// 为什么是「长够 1.5 倍」而不是「废弃字节够多」：绝对字节门槛会误伤
+	// 「小文件 + 高废弃率」这种**该收**的情况（实测既有测试：小文件废弃率 66%
+	// 却因体积不足 32MB 不回收 —— 语义坏了）。比例判据保留原样（该收就收），
+	// 循环由冷却来断：压完必须先长到 1.5 倍才允许再压。
+	if bs.lastCompactBytes > 0 && total < int64(float64(bs.lastCompactBytes)*compactCooldownFactor) {
 		return false
 	}
 	return bs.staleByteRatio() > compactThreshold
