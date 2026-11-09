@@ -1033,10 +1033,10 @@
       ],
       "acceptance": "Inspector 新增 Context 只读页：消息级触发上下文（trigger_seqs/senders/reason + 触发消息跳转）与智能体提示词分层（hub_agent_prompt_preview，只读）；hub://group/<id>?seq=42 与 hub://dm/<agent>?seq=... 可复制、解析并打开对应时间线；群/任务可导出 Markdown；无新写入能力，不影响现有 Hub 操作。",
       "tests": "npm run test:hub && npm run test:hub-p3b && npx tsc --noEmit && npm run build",
-      "commit": "f72e8ca",
-      "status": "changes_requested",
-      "note": "复审 CHANGES_REQUESTED：B1 群深链跳转竞态、B2 导出 sender 名未转义、B3 缺失 seq 永久阻断跟随；修复中",
-      "review": "failed"
+      "commit": "f72e8ca + 54dd883",
+      "status": "review",
+      "note": "3 阻塞已修；主会话 191/225/tsc/Hub 绿；复审 task-uydfsps6 delta 中",
+      "review": ""
     },
     {
       "id": "P4-03a",
@@ -2039,10 +2039,9 @@
       "reviewNote": "独立 Review task-czrhx4tx PASS：production Vite + 真 GroupView/store/handleEvent，220 条/3 草稿；A/B 同机复现 delta p50 0.9→0.3ms、键入 1.2→0.6ms，DOM 3081/hash 37edea6 不变；memo 依赖 8 项完整，移除 highlightSeq 3/3 失败；弱网 gaps/duplicate/final-before-delta/agent_end/reconcile 全 RED 变异；14/22/225/32 + tsc/build 绿。挂载 O(n) 与 reconnect hook 记 defer。"
     },
     "P4-02": {
-      "status": "changes_requested",
-      "commit": "f72e8ca",
-      "review": "failed",
-      "reviewNote": "B1 openDeepLink 先 set(open) 后 selectGroup 与 HubSurface mount 二次 select 竞态，seq 不跳且误报未加载；B2 messageContextLine 显式 sender.name 未 escapeInline；B3 requestJump 缺失 seq 永久挂起，GroupView/HubSurface 跟随守卫一直 early-return。另有 reload rendererReady 未复位。"
+      "status": "review",
+      "commit": "f72e8ca + 54dd883",
+      "note": "3 阻塞修复完成；delta 复审中"
     },
     "P4-04": {
       "status": "todo",
