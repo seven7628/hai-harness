@@ -15,7 +15,7 @@
 
 ### 结果与 UI
 
-- newest-first，不做相关度排序；每会话最多 50、全局最多 200。
+- newest-first，不做相关度排序；每会话最多 `limit`（默认 50，上限 200）、全局最多 200。桌面/手机 UI 固定 `limit=50`。
 - 结果字段：`scope`、`group_id`/`agent_id`、会话名、seq、snippet、sender、kind、created_at、owner_only。
 - 点击结果：打开对应群/DM，加载命中 seq 附近一页并高亮；不能只打开最新页。
 - 桌面和手机共用 `hub_search` 命令；输入 debounce 250ms，Escape 关闭。
@@ -29,6 +29,7 @@
 - Bridge 增加 `hub_search`（人类命令，加入手机白名单）：
   - payload：`query`（必填非空）、`scope`（all|group|dm）、`group_id`/`agent_id`、`before` 游标、`limit`。
   - `all` fan-out 遍历 `ListGroups` + `ListAgents`，跳过 deleted；合并后按 `(created_at, id)` 倒序，返回 `next_before`。
+  - `scope=all` 的 `next_before.conversations` 是逐会话续页游标（`g:<gid>` / `d:<agent_id>` → `before_seq`）；map 缺失=第一页，map 存在但缺 key=该会话已取完。单会话 `group`/`dm` 仍用 `seq` 快速路径。
   - 不允许智能体调用；命令层只接受人类客户端。
 - 读取时避免长时间持全局 `s.mu`；v1 允许每会话 fan-out，但要有上限与短缓存；1 万条消息 p95 目标 <150ms。
 - 不引入 FTS/新数据库；若实测超目标再加轻量索引。
@@ -40,6 +41,12 @@
 - 点击旧命中能加载并高亮；
 - 桌面+手机可用；
 - 搜索不阻塞 append，不泄漏不可见消息。
+
+### 已知限制（04b-1 接受）
+
+- 逐会话续页游标按 `seq` 前进，假设同一会话内 `created_at` 与 `seq` 同序。正常 append 写入（`time.Now` + 单调 seq）成立；若手工导入/回填把旧时间戳塞进较大 seq，跨页可能漏命中。排序不可信时需按 `seq` 重建时间戳或建立索引，不能直接复用该游标。
+- 点击历史命中只合并「命中附近一页 + 最新一页」，中间未加载段没有 gap marker（N3）；再次点击其他命中可继续定位。
+- v1 无 FTS/索引；每次查询 fan-out 读取每个会话热日志，单次持会话锁。10k 条实测 p95 约 20ms；超过目标再加索引/缓存。冷归档必须在读取/搜索层透明合并（04b-2）。
 
 ## 2. 冷归档 v2（04b-2，暂不实现）
 

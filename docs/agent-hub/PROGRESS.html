@@ -1486,9 +1486,10 @@ const BASE = {
       "acceptance": "人类可搜所有群/DM 全量历史（含未加载）；owner-only 对人类可见并标记、agent 只占位；agent 不能跨群；默认排除 routing/round/approval；scope/cursor/上限；点击命中加载 seq 附近并高亮；桌面+手机共用 hub_search；搜索不阻塞 append；1 万条消息 p95 目标 <150ms。",
       "tests": "go test ./agenthub ./desktop/bridge -run 'Search|HubSearch' && npm run test:hub-search && npm run test:p4",
       "commit": "177c273",
-      "status": "review",
-      "note": "B1/N1/N2 已修（177c273）；主会话 delta 验收绿：1000/50 全量 20 页、群+DM 600、同刻不丢、软删隔离、race、mobile390 游标 round-trip、tsc/build；原复审 agent delta 终审中",
-      "review": ""
+      "status": "done",
+      "note": "逐会话续页游标（B1/N1/N2）；真实规模未触发 04b-2；Review passed",
+      "review": "passed",
+      "reviewNote": "独立 delta review task-peum3kmm PASS（HEAD 8e9edc7）：B1 逐会话续页游标，1000/50=20 页全量 1000/1000；群 300+DM 300=12 页 600/600；0 游标 probe 110/110；同刻同 ID 不丢；软删群/agent 隔离；race、Search|HubSearch、TestMobile|TestHub、test:hub-search 81、test:mobile-hub 296、mobile390、test:p4、tsc/build 全绿；10k p95 20.3ms。非阻塞：回填时间戳可能漏命中（正常 append 单调）、N3 中间段无 gap marker、per-conv 上限已对齐文档。"
     },
     {
       "id": "P4-05",
@@ -1548,7 +1549,7 @@ const BASE = {
       "tests": "go test ./agenthub -run 'Archive|Search'",
       "commit": "",
       "status": "deferred",
-      "note": "设计见 P4-04B-DESIGN.md §2；等 04b-1 与真实规模数据触发，不先改 append-only 主路径"
+      "note": "设计见 P4-04B-DESIGN.md §2；真实 ~/.go-code/hub 当前不存在（0 条消息），10k 合成 p95 20ms，未触发 20k 条/50MB；保持 deferred，等真实 store 跨阈值再启动"
     },
     {
       "id": "P4-06",
@@ -1562,9 +1563,11 @@ const BASE = {
       ],
       "acceptance": "04b-1 实现/测试/终端到端 Review；04b-2 保持显式 defer。",
       "tests": "go test ./agenthub ./desktop/bridge -run 'Search|HubSearch'",
-      "commit": "",
-      "status": "todo",
-      "note": "新增搜索后单独终审；P4-05 的 04a 范围不覆盖本次增补"
+      "commit": "177c273",
+      "status": "done",
+      "note": "04b-1 端到端 Review 由 task-peum3kmm delta review 覆盖；04b-2 保持 deferred",
+      "review": "passed",
+      "reviewNote": "task-peum3kmm PASS：隐私边界/owner-only/scope/cursor/桌面+手机跳转/全门禁；04b-2 未启动且 trigger 明确。"
     }
   ],
   "deferred": [
@@ -2452,17 +2455,21 @@ const BASE = {
       "reviewNote": "独立 Final delta review task-k7hqg4dz PASS：B1 用户级 Stop 热替换（DM/群、disableAll 后旧 hook 归零）；B2 边界测试两种 project-loader mutation 均 RED；N5 公开契约注释 token-identical 校正；Hook|Hub|Mobile + agenthub/session + race 全绿。遗留 C1 窄窗口/C2 POSIX 测试/C3 路径规范化。"
     },
     "P4-04b": {
-      "status": "review",
+      "status": "done",
       "commit": "177c273",
-      "note": "逐会话续页游标；原复审 agent delta 终审中"
+      "review": "passed",
+      "note": "B1 逐会话续页游标；独立 delta Review PASS；04b-2 保持 deferred"
     },
     "P4-04b-2": {
       "status": "deferred",
-      "note": "冷归档 v2，阈值触发；默认不删除"
+      "commit": "",
+      "note": "设计见 P4-04B-DESIGN.md §2；真实 ~/.go-code/hub 当前不存在（0 条消息），10k 合成 p95 20ms，未触发 20k 条/50MB；保持 deferred，等真实 store 跨阈值再启动"
     },
     "P4-06": {
-      "status": "todo",
-      "note": "04b-1 收口独立 Review"
+      "status": "done",
+      "commit": "177c273",
+      "review": "passed",
+      "note": "04b-1 端到端 Review 由 task-peum3kmm 覆盖；04b-2 deferred"
     }
   },
   "reviewGate": {
