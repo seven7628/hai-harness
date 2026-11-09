@@ -296,6 +296,14 @@ func (h *memoryHost) postRead(ctx context.Context, workspace, absPath string) (s
 	if !owner.IsTopic(absPath) {
 		return "", nil
 	}
+	// 使用计数：热点清单（B 档注入 Top-8）的唯一排序信号，见 memory/hotlist.go。
+	// 记在 emit 之前，因为它是**排序数据**而不是可观测性事件：事件发不出去只影响
+	// 日志，计数丢一条会让常读的记忆慢慢沉底。
+	//
+	// 失败只记一行 stderr：读文件本身绝不能因为统计失败而失败（统计是观测）。
+	if err := h.cfg.RecordRead(owner, absPath); err != nil {
+		fmt.Fprintf(os.Stderr, "[memory] 记录使用计数失败（%s）：%v\n", absPath, err)
+	}
 	h.emitMemoryActivity(ctx, scope, events.MemoryActionRecalled, filepath.Base(absPath))
 	return "", nil
 }

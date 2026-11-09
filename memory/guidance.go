@@ -53,7 +53,7 @@ import (
 // hasIndex 为 false 时额外加一句「当前尚无记忆」——这是本次加载的既成事实，
 // 不是引导。不加的话模型会把"说明里列了格式、清单却是空的"读成记忆丢失，
 // 而实际上只是还没写过。
-func guidance(d Dir, hasIndex bool) string {
+func guidance(d Dir, hasIndex bool, tier string, omitted int) string {
 	var b strings.Builder
 
 	b.WriteString("记忆目录：")
@@ -81,13 +81,28 @@ func guidance(d Dir, hasIndex bool) string {
 	b.WriteString("- 记忆文件以 YAML frontmatter 开头，frontmatter 的 `type` 取 ")
 	b.WriteString(strings.Join(memoryTypes(), " / "))
 	b.WriteString(" 之一。\n")
-	b.WriteString("- 启动时只加载 `")
-	b.WriteString(IndexFileName)
-	b.WriteString("` 的前 ")
-	b.WriteString(strconv.Itoa(MaxIndexLines))
-	b.WriteString(" 行 / ")
-	b.WriteString(strconv.Itoa(MaxIndexBytes))
-	b.WriteString(" 字节（取先到者）；记忆正文不自动加载，需要时用标准文件工具自行读取。")
+	// ④ 这一句必须**按档位如实陈述**，不能照抄官方那句"加载前 200 行"：
+	// 官方描述的是全量注入，而 hot 档注入的是 Top-8 子集。说错了会让模型把
+	// "注入里只有 8 条"读成"索引里只有 8 条"，进而重写索引或重记记忆——
+	// 与 truncationNotice 要防的是同一个循环，只是入口不同。
+	//
+	// 只有**真的省略了条目**时才说"8 条"：索引本来就只有 3 条时照说"挑出的 8 条"
+	// 会让模型以为还藏着 5 条，然后去找一个不存在的东西。
+	if tier == InjectionHot && omitted > 0 {
+		b.WriteString("- 启动时只加载 `")
+		b.WriteString(IndexFileName)
+		b.WriteString("` 中按使用频次挑出的 ")
+		b.WriteString(strconv.Itoa(HotListSize))
+		b.WriteString(" 条（不是全部）；完整索引与记忆正文需要时用标准文件工具自行读取。")
+	} else {
+		b.WriteString("- 启动时只加载 `")
+		b.WriteString(IndexFileName)
+		b.WriteString("` 的前 ")
+		b.WriteString(strconv.Itoa(MaxIndexLines))
+		b.WriteString(" 行 / ")
+		b.WriteString(strconv.Itoa(MaxIndexBytes))
+		b.WriteString(" 字节（取先到者）；记忆正文不自动加载，需要时用标准文件工具自行读取。")
+	}
 
 	return b.String()
 }

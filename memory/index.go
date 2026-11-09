@@ -84,6 +84,11 @@ type Injection struct {
 	Dir *Dir
 	// Load 索引加载度量（未读到索引、或索引为空时为 nil）。
 	Load *IndexLoad
+	// Tier 本次实际使用的注入形态（full / hot）。gate 降级后这里报的是降级后的值
+	// （见 Config.injectionTier），所以调用方与评估读数不会出现"以为在跑闸门"的错觉。
+	Tier string
+	// Hot 热点清单（Tier=full 时为 nil）。Total/Shown/Omitted 是 §14「注入预算」的读数来源。
+	Hot *HotList
 	// Reason 注入形态标识："disabled" / "no-identity" / "no-index" / "empty-index"，
 	// 有索引正文时为空串。仅供装配层日志与测试断言，**不参与**是否注入的判定。
 	Reason string
@@ -123,8 +128,8 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 			// 能把记忆目录告诉模型的机会（没有 MEMORY.md 就永远没有"第一条"）。
 			// 见 guidance.go 顶部的闭环分析。
 			return Injection{
-				Text:    indexHeading + "\n\n" + guidance(d, false),
-				Enabled: true, Dir: &d, Reason: "no-index",
+				Text:    indexHeading + "\n\n" + guidance(d, false, c.injectionTier(), 0),
+				Enabled: true, Dir: &d, Reason: "no-index", Tier: c.injectionTier(),
 			}, nil
 		}
 		return Injection{Enabled: true, Dir: &d}, err
@@ -135,19 +140,33 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 		// 「无索引」与「空索引」在模型看来是同一件事——都还没有记忆——所以给同一
 		// 段文本，不因为文件碰巧存在就说"你的索引是空的"（那会像是丢了东西）。
 		return Injection{
-			Text:    indexHeading + "\n\n" + guidance(d, false),
-			Enabled: true, Dir: &d, Reason: "empty-index",
+			Text:    indexHeading + "\n\n" + guidance(d, false, c.injectionTier(), 0),
+			Enabled: true, Dir: &d, Reason: "empty-index", Tier: c.injectionTier(),
 		}, nil
+	}
+	tier := c.injectionTier()
+	// ↓ 热点清单：B 档唯一的正文。**在截断提示之前**生成——提示是宿主加的话，
+	// 不是索引内容，让它进解析器只会污染条目表（见 hotlist.go 的 parseIndexEntries）。
+	var hot *HotList
+	if tier == InjectionHot {
+		hot = BuildHotList(load.Text, c.ReadUsage(d))
+		text = hot.Text
 	}
 	// ↓ 截断提示：**只陈述本次已经发生的事实**，不新增机制（见 truncationNotice）。
 	if load.TruncatedBy != "" {
 		text += truncationNotice(load.TruncatedBy)
 	}
+	omitted := 0
+	if hot != nil {
+		omitted = hot.Omitted
+	}
 	return Injection{
-		Text:    indexHeading + "\n\n" + text + "\n\n" + guidance(d, true),
+		Text:    indexHeading + "\n\n" + text + "\n\n" + guidance(d, true, tier, omitted),
 		Enabled: true,
 		Dir:     &d,
 		Load:    load,
+		Tier:    tier,
+		Hot:     hot,
 	}, nil
 }
 

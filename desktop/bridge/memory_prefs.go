@@ -32,6 +32,12 @@ import (
 // 写盘时 nil 不落字段，读回仍是 nil，语义闭合。
 type memoryPrefs struct {
 	Enabled *bool `json:"enabled,omitempty"`
+	// Injection 注入形态（memory.InjectionFull / InjectionHot / ""）。
+	//
+	// 空 = 用户没选过 = memory 包的默认（hot，热点清单 Top-8）。这一项目前**没有 UI**，
+	// 只认手工编辑 ~/.go-code/memory.json：P1 的第一版需要一条"不想省就切回去"的退路，
+	// 而面板是给多数人用的，退路是给遇到问题的那个人的——先有开关，再做界面。
+	Injection string `json:"injection,omitempty"`
 }
 
 // memoryPrefFile 偏好文件路径（~/.go-code/memory.json）。
@@ -103,7 +109,7 @@ func (p memoryPrefs) enabled() bool { return p.Enabled == nil || *p.Enabled }
 // 这样 CI 与调试脚本仍能强制固定行为。
 func (p memoryPrefs) config() memory.Config {
 	on := p.enabled()
-	return memory.Config{Enabled: &on}
+	return memory.Config{Enabled: &on, Injection: p.Injection}
 }
 
 // memoryConfig 取本次会话装配用的记忆配置。
