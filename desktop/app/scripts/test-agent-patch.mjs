@@ -17,7 +17,7 @@ await build({
   outfile: out,
   logLevel: 'silent',
 })
-const { buildAgentPatch, buildAgentProfile, normalizeDisable } = await import(out)
+const { buildAgentPatch, buildAgentProfile, initialDailyBudget, normalizeDisable } = await import(out)
 
 const base = {
   id: 'ag_aaaaaaaa', name: 'Researcher', accent: '#7bc199', role: '竞品研究员',
@@ -84,4 +84,27 @@ assert.equal(created.avatar.value, '🟢')
 assert.deepEqual(created.policy, { daily_budget_usd: 20, max_task_cost_usd: 0 })
 assert.deepEqual(created.tools, { preset: 'all', disable: ['browser_*', 'mcp__github__*'] })
 
-console.log('agent patch: 8/8 assertions passed')
+// 9) 旧智能体没有 policy（= UI 里的「不限」）：初始日预算必须是 0，不能是 20。
+//    否则只改名字保存也会写出 policy: { daily_budget_usd: 20, ... }，把「不限」变成 $20
+//    （复审 task-7rscybyy：HubInspector 显示「不限」，编辑器却显示 20）。
+const legacy = { ...base }
+delete legacy.policy
+assert.equal(initialDailyBudget(null), 20, 'new agent keeps the $20 default')
+assert.equal(initialDailyBudget(undefined), 20)
+assert.equal(initialDailyBudget(legacy), 0, 'existing agent without policy starts at 0 (unlimited)')
+assert.equal(initialDailyBudget(base), 20, 'explicit configured budget is preserved')
+assert.equal(initialDailyBudget({ ...base, policy: {} }), 0, 'policy without daily_budget_usd = unset')
+
+const legacyForm = form({ dailyBudget: 0, taskBudget: 0 })
+assert.deepEqual(
+  buildAgentPatch({ ...legacyForm, name: 'Writer2' }, legacy),
+  { name: 'Writer2' },
+  'rename on a policy-less agent must not synthesize policy',
+)
+assert.ok(!('policy' in buildAgentPatch(legacyForm, legacy)), 'unchanged legacy budgets must not send policy')
+
+// 只改旧智能体的日预算 → policy 仍然正常发出（不能为了不误写而漏写）
+const legacyBudget = buildAgentPatch({ ...legacyForm, dailyBudget: 25 }, legacy)
+assert.deepEqual(legacyBudget.policy, { daily_budget_usd: 25, max_task_cost_usd: 0 })
+
+console.log('agent patch: 27/27 assertions passed')

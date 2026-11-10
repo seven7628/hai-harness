@@ -3,7 +3,7 @@ import { hubCommand } from './api'
 import type { HubAgent } from './types'
 import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
-import { buildAgentPatch, buildAgentProfile, type AgentForm } from './agentPatch'
+import { buildAgentPatch, buildAgentProfile, initialDailyBudget, type AgentForm } from './agentPatch'
 import {
   EFFORT_VALUES, chooseModelOnProviderSwitch, effortChoices, modelsForProvider,
   newAgentDefaults, providerOptions, unlistedValue,
@@ -81,7 +81,7 @@ export default function AgentEditor({
   const [model, setModel] = useState(defaults.model)
   const [effort, setEffort] = useState(agent?.effort ?? '')
   const [threshold, setThreshold] = useState(agent?.compress_threshold ?? 0.8)
-  const [dailyBudget, setDailyBudget] = useState(agent?.policy?.daily_budget_usd ?? 20)
+  const [dailyBudget, setDailyBudget] = useState(initialDailyBudget(agent))
   const [taskBudget, setTaskBudget] = useState(agent?.policy?.max_task_cost_usd ?? 0)
   const [memoryOn, setMemoryOn] = useState(agent?.memory?.enabled !== false)
 
