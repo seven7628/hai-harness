@@ -154,7 +154,7 @@
 
 **后果**：用户只改主题，settings.json 从几行变成 200+ 行；新版本默认值对老用户永不生效；OAuth 与设置面板并发时，bridge 的快照覆盖刚保存的 key；key 还会被注入 bridge 环境，被所有 MCP/插件子进程继承。
 
-**修法**：settings 只由 Electron 写；写路径只接受白名单键的 patch（复用 `patchJSONFile` 语义）；读侧合并默认值、写侧不写默认值；key 只进 `safeStorage`/`keys.json`（0600），`bridgeEnv` 只注入当前活跃 provider 的一把 key。
+**修法**：settings 只由 Electron 写；写路径只接受白名单键的 patch（复用 `patchJSONFile` 语义）；读侧合并默认值、写侧不写默认值；**存量按 §9.3 的 v1→v2 规则迁移**；key 只进 `safeStorage`/`keys.json`（0600），`bridgeEnv` 只注入当前活跃 provider 的一把 key。
 
 ### 5.4 价表为什么有三份“真相”
 
@@ -186,9 +186,9 @@
 | GO-11 | G11 | D | P0 | desktop/bridge/providers.go:244–268 | 功能静默关闭 |
 | GO-14 | G14 | L/Q/F | P0 | desktop/bridge/main.go:401 lastUsed | 任务并发派进正在跑的会话（并批/串话） |
 | BR-01 | B1 | D/S | P0 | desktop/app/electron/main.ts:471-518; main.ts:562-575; main.ts:1446-1486 | ① 老配置被钉死在旧默认值上，新版本改默认（新模型、新 reminder_rounds、新 provider 预置）对老用户永不生效，且无法区分“用户选的 30”和“默认的 30” |
-| BR-02 | B2 | S/Q | P0 | desktop/bridge/config_patch.go:1-24; config_patch.go:36-40; desktop/bridge/oauth.go:150-181 | bridge 那份 providers 快照会覆盖 Electron 刚写入的 api_key / label / prices / usage_input_includes_cache → 界面显示“已保存”但 key 丢… |
+| BR-02 | B2 | S/Q | P0 | desktop/bridge/config_patch.go:1-24; config_patch.go:36-40; desktop/bridge/oauth.go:150-181 | bridge 那份 providers 快照会覆盖 Electron 刚写入的 api_key / label / prices / usage_input_includes_cache → 界面显示“已保存”但 key 丢失（详见 raw B2） |
 | BR-03 | B3 | I/F | P0 | desktop/bridge/jsonwire/jsonwire.go:5-10; jsonwire.go:64-141; desktop/bridge/main.go:653-680 | 跨会话串台——最严重的一类：消息/任务/用量被记到错误会话，用户看到“别人的内容出现在我的对话里” |
-| BR-04 | B4 | L/H | P0 | main.ts:806; main.ts:945; main.ts:964 | ① mainWindow 为 null 时该行触发 TypeError，抛在 readline 的 'line' 监听里 → 主进程未捕获异常（轻则丢这一行，重则崩溃，取决于 Electron 对 uncaughtException 的处… |
+| BR-04 | B4 | L/H | P0 | main.ts:806; main.ts:945; main.ts:964 | ① mainWindow 为 null 时该行触发 TypeError，抛在 readline 的 'line' 监听里 → 主进程未捕获异常（轻则丢这一行，重则崩溃，取决于 Electron 对 uncaughtException 的处置（详见 raw B4） |
 | BR-08 | B8 | H/I | P0 | main.ts:1521-1528; main.ts:263-300; main.ts:875-880 | ① 凭据随“配置文件”外泄 |
 | BR-09 | B9 | M/S | P0 | session/block_store.go:776-778; session/store_record.go:315-325; session/store_record.go:381 | 历史丢失：本应“回退到上一份可用快照”，实际得到 0 块 → 会话空白（正是用户看到的“历史不出来”） |
 | BR-21 | B21 | G/H | P0 | desktop/bridge/main.go:1294-1340; main.go:1288-1293; main.go:6573-6584 | 跨工作区越权读取/写入（沙箱根错配） |
@@ -212,7 +212,7 @@
 | GO-21 | G21 | D | P1 | mcp/manager.go:43 | 模型看不到也调不到任何 MCP 工具，且没有任何报错——注释原文："等价于把 MCP 功能对模型整体关闭（既不在 ToolParams、也没有任何东西能把它加载回来）" |
 | GO-22 | G22 | M/H | P1 | hooks/trust.go:32–39 | 用户"配了 hooks 却不生效" |
 | GO-24 | G24 | H/T | P1 | desktop/bridge/appdata.go:31 | 会话历史"丢失"（其实是分裂成两份） |
-| BR-05 | B5 | Q/I | P1 | desktop/app/src/store/useAppStore.ts:2505; useAppStore.ts:3605; useAppStore.ts:3647-3668 | pending[id] 被新页面的同号命令覆盖 → 旧命令的迟到响应会当成新命令的响应被消费（useAppStore.ts:4645-4649：const meta = pending[r.id]; delete pending[r.id… |
+| BR-05 | B5 | Q/I | P1 | desktop/app/src/store/useAppStore.ts:2505; useAppStore.ts:3605; useAppStore.ts:3647-3668 | pending[id] 被新页面的同号命令覆盖 → 旧命令的迟到响应会当成新命令的响应被消费（useAppStore.ts:4645-4649：const meta = pending[r.id]; delete pending[r.id]（详见 raw B5） |
 | BR-06 | B6 | Q/I | P1 | main.ts:105; main.ts:1007; useAppStore.ts:3605 | 主进程超时/迟到响应以负 id 落到 renderer 无主响应，污染全局 bridgeError |
 | BR-07 | B7 | Q/I | P1 | desktop/bridge/mobile_server.go:586-605; main.go:2160-2169; mobile_server.go:569-585 | 第二条响应被静默丢弃（buffer 已满时），且桌面端也收不到——属于“事件黑洞”，比串台更难查 |
 | BR-10 | B10 | Q/H | P1 | agenthub/store.go:130; main.ts:1862-1875; main.ts:121,267 | ① Hub 账本/群日志并发追加 → 交错行、seq 重复、manifest 与日志不一致 |
@@ -271,7 +271,7 @@
 | FE-28 | F28 | C/Q | P2 | store/useAppStore.ts:8416 | 图表按错误窗口归日（近一年热力图 vs 7 天视图串数据） |
 | FE-29 | F29 | L/Q | P2 | store/useAppStore.ts:2531-2560 | 压缩态最多挂 5m15s |
 | FE-31 | F31 | U/C | P2 | i18n.ts:3720-3724 | 性能退化 + 语言切换瞬间的 toast/错误文案混语言 |
-| FE-35 | F35 | U/H | P2 | lib/narrativeSkin.ts:12-27 | 皮肤切换会让组件走不同 DOM 分支，而这些分支的本地 state（GroupView 的 view/displayMode、Composer 的 menu/cmdMenu）不会重置 → 同一状态在两套皮肤下渲染成不同位置… |
+| FE-35 | F35 | U/H | P2 | lib/narrativeSkin.ts:12-27 | 皮肤切换会让组件走不同 DOM 分支，而这些分支的本地 state（GroupView 的 view/displayMode、Composer 的 menu/cmdMenu）不会重置 → 同一状态在两套皮肤下渲染成不同位置（详见 raw F35） |
 | GO-28 | G28 | Q | P3 | session/record_lock.go:33–35 | 对照项：引用计数 + 可观测 + 显式 nil 三态，风险低（用作 G3/G25 的样板） |
 
 ### 6.1 P0 处置顺序（建议）
@@ -346,6 +346,9 @@
 | 0（1–2 周） | 止血 P0 | settings 单写者+patch+key 分离 + **存量 v1→v2 迁移**；session_id 结构化注入；价表单一源；checkpoint generation 目录 + `.bak` 单测；busyState + 启动恢复；BR-21/BR-04/GO-11/FE-03；测试 HOME 守卫 | 新装/迁移后 settings diff 仅目标键；未迁移机器只保证不再恶化；事件行 `session_id` 计数=1；`.bak` 恢复块数>0；刷新不误报完成；`go test` 后用户数据 mtime 不变 |
 | 1（2–4 周） | 去结构性债 | Hub `next_seq` 落盘、queue TTL、cron running 折叠；registry/锁表引用计数 + Stats；事件 seq/origin/epoch；前端 ScopeKeyMap + 单 selector + docRefs 分槽 | 重启后同 client_msg_id 不重复执行；queued 超期自动 interrupted；registry size 有上限；切会话不串 docRefs |
 | 2（持续） | 可观测与防回归 | effective config 脱敏输出；缓存/registry/queue 指标；丢弃分支 trace；季度状态清点；ADR 固化生命周期 | 每次“历史不出来/一直转圈”都能在日志里定位到具体丢弃分支；新增全局状态有登记 |
+
+**v1→v2 迁移规则（阶段 0 的前置）**：以发布时的 `DEFAULT_SETTINGS` 快照为基线，逐键删除与默认值**完全相同**的顶层键；`provider` 段只保留显式 `api_key/label/prices/usage_input_includes_cache` 与 `deleted` 标记；未知键原样保留。迁移前写 `settings.json.bak`，失败回滚；迁移幂等，完成后写 `schema_version: 2`。无法判定“用户显式设为默认”的键（例如真的手动选了 30）按“保留”处理，不猜。
+
 
 ### 9.4 建议的验收指标
 
