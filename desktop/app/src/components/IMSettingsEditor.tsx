@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
 // 归属（owner）：IM 的启用/路由按归属隔离（连接共享）—— 页面必须显示「这些开关是给谁的」
-import { ownerLabel, sessionOwner } from '../lib/owner'
+import { ownerLabel, ownerValid } from '../lib/owner'
+import { ownerForContext } from '../lib/activeOwner'
+import { useHubStore } from '../hub/useHubStore'
 import type {
   IMConfig,
   IMGatewayCfg,
@@ -33,6 +35,21 @@ export function IMSettingsEditor() {
   const imStatuses = useAppStore((s) => s.imStatuses)
   const fetchIMConfig = useAppStore((s) => s.fetchIMConfig)
   const saveIMConfig = useAppStore((s) => s.saveIMConfig)
+  const imOwnerStatus = useAppStore((s) => s.imOwnerStatus)
+  const enablePlugin = useAppStore((s) => s.enablePlugin)
+  const disablePlugin = useAppStore((s) => s.disablePlugin)
+  // 当前归属（owner）：必须与 send() 的注入用**同一个派生**（lib/activeOwner）——
+  // 改造前这里只读 useAppStore.activeSessionId，Hub DM/群下算成 workspace:，
+  // 页面显示的归属与实际写入的归属不是一回事（B1）。
+  const hubOpen = useHubStore((s) => s.open)
+  const hubSid = useHubStore((s) => s.sid)
+  const hubGroupId = useHubStore((s) => s.activeGroupId)
+  const appSid = useAppStore((s) => s.activeSessionId)
+  const appWs = useAppStore((s) => s.workspace)
+  const imOwner = useMemo(
+    () => ownerForContext({ open: hubOpen, sid: hubSid, groupId: hubGroupId }, String(appSid ?? ''), String(appWs ?? '')),
+    [hubOpen, hubSid, hubGroupId, appSid, appWs],
+  )
 
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -73,13 +90,6 @@ export function IMSettingsEditor() {
       require_bind_confirm: imConfig?.security?.require_bind_confirm ?? true,
     },
   }
-
-  // 当前归属：Hub DM → agent:<id>，群 → group:<g>，其余 → workspace:<path>（与 bridge 同源）。
-  // 这里取的是「正在操作的会话」，用于展示与后续启停/路由命令的归属。
-  const imOwner = sessionOwner(
-    useAppStore.getState().activeSessionId ?? '',
-    useAppStore.getState().workspace ?? '',
-  )
 
   const save = async (next: IMConfig) => {
     setErr(null)
@@ -309,6 +319,22 @@ export function IMSettingsEditor() {
       <p className="set-desc" style={{ marginBottom: 8 }}>
         {t('plugin.owner.scope')}：<span className="mono">{imOwner || '—'}</span>
         {imOwner ? ` · ${ownerLabel(imOwner)}` : ''}
+        {ownerValid(imOwner) && imOwnerStatus && imOwnerStatus.owner === imOwner && (
+          <>
+            {' · '}
+            <span>{imOwnerStatus.enabled
+              ? t('settings.im.ownerOn').replace('{n}', String(imOwnerStatus.routes))
+              : t('settings.im.ownerOff')}</span>
+            <button
+              className="btn gho"
+              style={{ marginLeft: 8 }}
+              disabled={busy}
+              onClick={() => (imOwnerStatus.enabled ? disablePlugin('im') : enablePlugin('im'))}
+            >
+              {imOwnerStatus.enabled ? t('settings.im.ownerDisable') : t('settings.im.ownerEnable')}
+            </button>
+          </>
+        )}
       </p>
 
       {/* Gateway 列表 */}

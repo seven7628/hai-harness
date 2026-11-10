@@ -19,6 +19,7 @@ import HubInspector from './hub/HubInspector'
 import AgentEditor from './hub/AgentEditor'
 import './hub/hub.css'
 import { attachHubEvents, useHubStore } from './hub/useHubStore'
+import { setHubOwnerContext } from './lib/activeOwner'
 import BridgeBanner from './components/BridgeBanner'
 import { useAppStore } from './store/useAppStore'
 import { getTransport } from './transport'
@@ -143,6 +144,14 @@ export default function App() {
 
   const hubOpen = useHubStore((s) => s.open)
   const hubAlerts = useHubStore((s) => s.alerts)
+  // 归属（owner）上卷：Hub 的 DM session_id / 群 id 只在 useHubStore 里，而
+  // useAppStore.send() 是非 React 路径 —— 这里单点写入中立模块（lib/activeOwner），
+  // 让「设置页显示给谁」与「命令实际写给谁」用同一份派生（B1）。
+  const hubOwnerSid = useHubStore((s) => s.sid)
+  const hubOwnerGroup = useHubStore((s) => s.activeGroupId)
+  useEffect(() => {
+    setHubOwnerContext({ open: hubOpen, sid: hubOwnerSid, groupId: hubOwnerGroup })
+  }, [hubOpen, hubOwnerSid, hubOwnerGroup])
   const openHub = useHubStore((s) => s.openHub)
   const hubEditor = useHubStore((s) => s.editor)
   const closeEditor = useHubStore((s) => s.closeEditor)

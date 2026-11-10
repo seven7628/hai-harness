@@ -16,7 +16,10 @@ import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type N
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
 // 归属（owner）编码：信任/启用按归属隔离（FE 侧只做展示与回传，判定在 bridge）
-import { ownerValid, sessionOwner } from '../lib/owner'
+import { ownerValid } from '../lib/owner'
+// 「当前归属」派生：Hub 打开时读 Hub 的 session/群，否则按工作区会话
+// （B1：只读 activeSessionId 会把 Hub DM/群的确认写成 workspace:，服务端判 agent:/group: 查不到）
+import { resolveActiveOwner } from '../lib/activeOwner'
 import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
 
@@ -430,6 +433,15 @@ export interface HookOwnerFields {
 // 某项目的 hooks 来源（bridge hooks_list.projects 一项）。
 export interface HookProjectView extends HookSourceView {
   claude?: HookClaudeFile[]
+}
+
+/** 当前归属的 IM 启用状态（im_status 的 owner 视角；连接是共享的）。 */
+export interface IMOwnerStatus {
+  owner: string
+  label: string
+  enabled: boolean
+  routes: number
+  master: boolean
 }
 
 // hooks_list 响应（SettingsModal 钩子页数据源）。
@@ -3051,6 +3063,8 @@ interface AppState {
   imConfig?: IMConfig // IM 集成配置（im_config_get；SettingsModal IM tab）
   imSchemas: IMGatewaySchema[] // IM 网关 Schema（im_schema_list；动态表单）
   imStatuses: Record<string, string> // 网关 id → 状态（im_status）
+  // 当前归属的 IM 启用状态（im_status 的 owner 视角）：A 群关了不该显示 B 群也关。
+  imOwnerStatus: IMOwnerStatus | null
   imChats: Record<string, IMChatInfo[]> // gateway_id → 群列表（im_chat_list）
   imBindPending?: IMBindRequest // 待确认的 IM 绑定请求（im_bind_confirm_requested 事件）
   browserConfig?: BrowserCfg // 浏览器插件配置（browser_config_get；插件详情设置表单）
@@ -3672,7 +3686,7 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
     const p0 = (payload ?? {}) as Record<string, unknown>
     if (!ownerValid(String(p0.owner ?? ''))) {
       const st = useAppStore.getState()
-      const owner = sessionOwner(String(st.activeSessionId ?? ''), String(st.workspace ?? ''))
+      const owner = resolveActiveOwner(String(st.activeSessionId ?? ''), String(st.workspace ?? ''))
       if (owner) payload = { ...p0, owner }
     }
   }
@@ -5461,13 +5475,22 @@ export function dispatchEvent(raw: AnyEvent): void {
         if (Array.isArray(d.schemas)) setState({ imSchemas: d.schemas as IMGatewaySchema[] })
         break
       }
-      // im_status：网关连接状态
+      // im_status：网关连接状态 + **当前归属**的启用状态（连接共享、启用按 owner 隔离）
       if (t === 'im_status') {
         if (Array.isArray(d.gateways)) {
           const m: Record<string, string> = {}
           for (const g of d.gateways as Array<{ id: string; status: string }>) m[g.id] = g.status
           setState({ imStatuses: m })
         }
+        setState({
+          imOwnerStatus: {
+            owner: String(d.owner ?? ''),
+            label: String(d.ownerLabel ?? ''),
+            enabled: d.ownerEnabled === true,
+            routes: Number(d.ownerRoutes ?? 0) || 0,
+            master: d.enabled === true,
+          },
+        })
         break
       }
       // im_chat_list：群列表（路由绑定下拉；gateway_id 从请求登记表取）
@@ -8580,6 +8603,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   plugins: [],
   imSchemas: [],
   imStatuses: {},
+  imOwnerStatus: null, // 当前归属的 IM 启用状态（im_status 的 owner 视角）
   imChats: {},
   browserPages: [],
   unreadViews: [],
