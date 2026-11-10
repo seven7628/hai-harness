@@ -145,16 +145,29 @@ test('readline 语义：窗口在事件流中途销毁，后续行照常处理�
   assert.equal(s.stats().dropped, 4)
 })
 
-/** 源码守卫：主进程不得再有裸 webContents.send（除了通道实现本身）。 */
+/**
+ * 源码守卫：主进程不得再有裸 webContents.send（除了通道实现本身）。
+ *
+ * 按「去注释 + 去空白」后的文本匹配，而不是逐行正则：`win.webContents\n  .send(...)`
+ * 这类跨行写法与注释里的说明都不能骗过守卫（逐行版会同时误报注释、漏报跨行）。
+ * 仍抓不到的情况（已知局限）：先把 webContents 取到别名再 send
+ * （`const wc = win.webContents; wc.send(...)`）—— 静态文本分析看不到，只能靠 review；
+ * 真要覆盖需要 AST 分析，超出本守卫的收益。
+ */
 test('主进程没有绕过统一通道的 webContents.send', () => {
   for (const file of ['main.ts', 'embed.ts']) {
     const src = readFileSync(sourcePath(file), 'utf8')
+    const flat = src
+      .replace(/\/\*[\s\S]*?\*\//g, '') // 块注释
+      .replace(/(^|\n)\s*\/\/.*/g, '$1') // 行注释
+      .replace(/\s+/g, '')
+    const hits = flat.split('.webContents.send(').length - 1
+    // 失败时给出逐行定位（只为可读性；判定用上面的 flattened 文本）
     const offenders = src
       .split('\n')
       .map((line, i) => ({ line: line.trim(), no: i + 1 }))
-      .filter(({ line }) => /\.webContents\.send\s*\(/.test(line))
-      .filter(({ line }) => !line.startsWith('//') && !line.startsWith('*'))
+      .filter(({ line }) => /\.webContents\s*\.\s*$/.test(line) || /\.webContents\.send/.test(line))
       .map(({ line, no }) => `${file}:${no}: ${line}`)
-    assert.deepEqual(offenders, [], `这些调用点必须走 sendToRenderer：\n${offenders.join('\n')}`)
+    assert.equal(hits, 0, `这些调用点必须走 sendToRenderer：\n${offenders.join('\n')}`)
   }
 })
