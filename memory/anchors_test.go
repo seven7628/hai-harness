@@ -74,7 +74,8 @@ func TestCheckAnchorsUnboundIsExplicit(t *testing.T) {
 	if !rep.Unbound {
 		t.Fatal("没绑定时应报 Unbound")
 	}
-	r, _ := Config{}.Dream(d)
+	cfgDream := Config{EventsRoot: t.TempDir()} // 别扫真实事件目录（5.4GB）
+	r, _ := cfgDream.Dream(d)
 	if !strings.Contains(r.Markdown(timeZero()), "未核对") {
 		t.Fatalf("报告必须写明未核对，而不是沉默：\n%s", r.Markdown(timeZero()))
 	}
