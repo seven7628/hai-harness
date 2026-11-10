@@ -74,7 +74,7 @@ export default function TurnContextLine({
             type="button"
             className="hub-context-chip"
             style={style}
-            title={`${tip} · 点击定位`}
+            title={tip}
             aria-label={t('hub.contextJumpTo').replace('{name}', name).replace('{seq}', String(seq))}
             onClick={() => onJumpToSeq(seq)}
           >

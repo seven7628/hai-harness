@@ -142,7 +142,7 @@ export function GroupBubble({
       data-agent-id={senderId || undefined}
       style={kind === 'agent' ? style : undefined}
     >
-      <div className={`hub-msg-head${kind === 'human' ? ' human' : ''}`}>
+      <div className="hub-msg-head">
         {kind === 'human' ? (
           <>
             <span className="hub-agent-name">你</span>

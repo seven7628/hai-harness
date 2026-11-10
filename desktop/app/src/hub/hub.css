@@ -1536,7 +1536,7 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   background: color-mix(in srgb, var(--success) 14%, transparent);
 }
 .hub-artifact-kind.modified {
-  color: var(--accent-solid);
+  color: color-mix(in srgb, var(--accent-solid) 72%, var(--ink));
   background: transparent;
 }
 @container (max-width: 380px) {
