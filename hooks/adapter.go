@@ -187,14 +187,22 @@ func (d *Dispatcher) OnStop(ctx context.Context, p Payload) (continueTurn bool, 
 
 // ── 审计 ────────────────────────────────────────────────────────────────
 
-// emitRun 每次 handler 执行都回调一次；只上报"非正常结束"的跑法（正常跑法走日志）。
+// emitRun 每次 handler 执行都回调一次。
+//
+// 口径（2026-11 修）：异常一律上报；正常结束**原本一律静默**（注释说"走日志"，
+// 而日志并不存在），于是"hook 到底跑没跑"在界面与磁盘上都答不出来。现在按副作用
+// 分档：注入了上下文 / 改了工具输入 / 替换了输出的，模型看得到而用户看不到来源，
+// 必须报；纯粹跑完没说话的仍然静默（PostToolUse 每个工具一次，报了就是刷屏）。
+// 全量记录落在 Journal 里，供事后追问。
 func (d *Dispatcher) emitRun(run HookRun) {
 	if d.warn == nil {
 		return
 	}
 	switch run.Status {
 	case "ok", "ok_no_output":
-		return
+		if run.SideEffect == "" {
+			return
+		}
 	}
 	d.warn("hook:"+run.Name, run.Format())
 }
