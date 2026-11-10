@@ -572,14 +572,25 @@ export interface IMGatewayCfg {
   type: string
   enabled: boolean
   config: Record<string, unknown>
-  // 渠道级：路由（Chat → workspace）与授权名单
+  // 渠道级：路由（Chat → workspace/agent/group）与授权名单
   routes?: IMRouteCfg[]
   allow_users?: string[]
 }
 
+// IMRouteCfg 路由：Chat → 投递目标，**三选一**（与 bridge im.RouteConfig 同构）。
+//
+//	workspace 非空          → workspace:<path>，驱动该项目的会话（原有语义）
+//	agent 非空（group 空）  → agent:<id>，驱动该智能体的 DM
+//	group + agent 非空      → group:<id>，驱动该群会话（agent 是该群的执行者）
+//
+// owner 一般留空（由目标派生）；显式填写时必须与目标一致（bridge Validate 校验）。
+// 前端**不得**把 agent/group 字段丢掉再写回——那会把消息静默改投到项目会话（B2）。
 export interface IMRouteCfg {
   chat: IMChat
-  workspace: string
+  workspace?: string
+  agent?: string
+  group?: string
+  owner?: string
 }
 
 export interface IMMirrorCfg {
