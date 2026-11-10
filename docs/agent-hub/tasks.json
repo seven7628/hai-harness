@@ -1389,8 +1389,9 @@
       "acceptance": "对照用户参考图 1–3：左栏 section、中栏对话、右栏详情、per-agent 颜色与系统通知；5176 真实浏览器覆盖智能体/群组/搜索/返回工作区/编辑器下拉/三主题；独立 Review PASS 后才收口。",
       "tests": "browser review on localhost:5176 + independent review",
       "status": "in_progress",
-      "note": "UI-2 PASS，开始参考图/5176 视觉终验",
-      "review": null
+      "note": "UI-3 CHANGES_REQUESTED：900/980 右栏收起按钮裁剪、左栏 section 断行（Medium）；同轮上下文未居中、DM 重气泡/顶部空白、paper 元数据对比度（Minor）；修复中",
+      "review": null,
+      "reviewNote": "review task-sz5gnmgk：功能/门禁全过；阻断=900/980 右栏 close 被 tab overflow 挤出、左栏 900 智能体/群组 tabs 2–3 行断行；另有同轮上下文左对齐、DM agent 重气泡+底部锚定空白、paper 元数据 3.28:1。修复 commit 进行中。"
     }
   ],
   "deferred": [
@@ -2327,7 +2328,7 @@
     },
     "P4-UI-3": {
       "status": "in_progress",
-      "reviewNote": "参考图 1–3 + Effort 菜单图已从会话提取；5176 视觉/交互终验中"
+      "reviewNote": "CHANGES_REQUESTED：2 Medium 响应式 + 3 Minor 视觉；修复中"
     }
   },
   "reviewGate": {
