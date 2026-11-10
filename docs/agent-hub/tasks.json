@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P4 全部收口：04b-2 + UI 重设计（UI-1/2/3 PASS）；代码在 hub-ui 分支，待合并决策",
+  "subtitle": "P4 全部收口：04b-2 + UI-1/2/3 PASS；hub-ui 已合并到 agent-hub（714cfda）；前端全量绿，bridge 全量 3 条环境/顺序失败",
   "updated": "2026-11-09",
   "phases": [
     {
@@ -1389,9 +1389,9 @@
       "acceptance": "对照用户参考图 1–3：左栏 section、中栏对话、右栏详情、per-agent 颜色与系统通知；5176 真实浏览器覆盖智能体/群组/搜索/返回工作区/编辑器下拉/三主题；独立 Review PASS 后才收口。",
       "tests": "browser review on localhost:5176 + independent review",
       "status": "done",
-      "note": "UI-3 收口：参考图/5176 视觉终验 PASS",
+      "note": "UI-3 PASS；hub-ui 已 --no-ff 合并到 agent-hub（714cfda）；前端全量回归绿",
       "review": "passed",
-      "reviewNote": "final delta review task-sz5gnmgk PASS（HEAD 4c88a85）：1440+144px tabs 单行、900/980 单行、右栏 close 在面板内、群 context/round 居中、DM 平铺+18px 顶部、paper 元数据 6.33:1；全门禁 test:p4/css/hub-patch 27/hub-model-options 31/tsc 双配置绿。UI-1/2/3 全部 PASS。",
+      "reviewNote": "final delta review task-sz5gnmgk PASS（4c88a85）；合并 714cfda（无 Go 文件变更）。合并后：tsc 双配置/build/test:p4/css/hub-patch 27/hub-model-options 31 全绿；go build bridge + go test ./agenthub/... 绿。go test ./desktop/bridge 全量 3 条环境/顺序依赖失败（MCP hot-apply flaky、真实 provider 探活 upstream Model unavailable、cost 价表口径 flaky）；前两条单独/加 HAI_EVAL_ALLOW_PING_SKIP 可过，cost 单独跑过；无 Go 代码差异。",
       "commit": "771809f + 59aef20 + 4834c44 + b75a415 + a9844f9 + 4c88a85"
     }
   ],
@@ -2329,9 +2329,9 @@
     },
     "P4-UI-3": {
       "status": "done",
-      "commit": "4c88a85",
+      "commit": "714cfda",
       "review": "passed",
-      "reviewNote": "final delta PASS；UI-1/2/3 全部收口。"
+      "reviewNote": "final delta PASS；合并 714cfda；前端全量绿。"
     }
   },
   "reviewGate": {
