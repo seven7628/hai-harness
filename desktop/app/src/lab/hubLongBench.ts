@@ -143,7 +143,7 @@ function domSnapshot(): DomSnapshot {
     threadElements: thread ? thread.querySelectorAll('*').length : 0,
     messages: document.querySelectorAll('.hub-msg').length,
     streaming: document.querySelectorAll('.hub-msg.streaming').length,
-    roundGroups: document.querySelectorAll('.hub-round-group').length,
+    roundGroups: document.querySelectorAll('.hub-round-stack').length,
     routingRows: document.querySelectorAll('.hub-action.routing').length,
     typingText: document.querySelector('.hub-typing')?.textContent ?? '',
     threadScrollHeight: Math.round(thread?.scrollHeight ?? 0),

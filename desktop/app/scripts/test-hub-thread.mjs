@@ -4,6 +4,7 @@
 //   roundKey 的 round_id/trigger_seqs 优先级；routingSummary 按名册还原且不泄漏 targets=ag_。
 // 这些函数是直播视图与历史回执一致性的唯一分叉点，值得有独立回归。
 import { build } from 'esbuild'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
@@ -68,5 +69,15 @@ assert(mod.routingSummary('targets=ag_a,ag_b', names) === '唤醒 Alice、Bob', 
 assert(mod.routingSummary('@all targets=ag_a dropped=2', names) === '@all 唤醒 Alice（丢弃 2 个）', '@all + dropped')
 assert(mod.routingSummary('targets=', names) === '无人被唤醒', '空目标可读')
 assert(mod.routingSummary('自由文本', names) === '自由文本', '非回执文本原样返回')
+
+// 6) 群消息版式约束：同轮只收紧间距，每条消息独立；作者标识与产物组件不能被拆回去。
+const hubDir = join(__dirname, '..', 'src', 'hub')
+const roundSrc = readFileSync(join(hubDir, 'RoundGroup.tsx'), 'utf8')
+const bubbleSrc = readFileSync(join(hubDir, 'MessageBubble.tsx'), 'utf8')
+const taskSrc = readFileSync(join(hubDir, 'TaskResultCard.tsx'), 'utf8')
+assert(!roundSrc.includes('hub-round-group') && roundSrc.includes('hub-round-stack'), '同轮不再画外框/表头，只保留无边框间距栈')
+assert(bubbleSrc.includes('hub-group-msg') && bubbleSrc.includes('AgentBadge'), '每条群消息独立气泡并带作者标识')
+assert(bubbleSrc.includes('TurnContextLine') && bubbleSrc.includes('compact'), '触发上下文收进消息头，不再单独占一行')
+assert(taskSrc.includes('TaskArtifacts'), '任务卡使用统一产物组件')
 
 console.log(`\n✅ hub 线程纯逻辑：${pass} 项全部通过`)

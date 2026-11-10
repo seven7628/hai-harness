@@ -509,6 +509,105 @@
   padding: 2px 0;
   border-radius: 0;
 }
+/* P4-UI-4：群聊里的每个作者是独立消息，不再共用一个外框。
+   头像/名字用作者身份色，气泡只借身份色做细边和极浅底，正文仍是 --ink。 */
+.hub-msg.hub-group-msg { gap: 5px; }
+.hub-msg.agent.hub-group-msg { align-items: flex-start; }
+.hub-msg.human.hub-group-msg { align-items: flex-end; }
+.hub-msg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+.hub-msg.agent .hub-msg-head { max-width: min(100%, 620px); }
+.hub-msg.human .hub-msg-head { max-width: min(82%, 560px); justify-content: flex-end; }
+.hub-agent-badge {
+  --agent-accent: var(--accent-solid);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.hub-agent-badge.clickable { cursor: pointer; }
+.hub-agent-badge.clickable:hover .hub-agent-name { text-decoration: underline; }
+.hub-agent-badge.clickable:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 6px; }
+.hub-agent-avatar {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--agent-accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--agent-accent) 20%, var(--paper));
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+}
+.hub-agent-name {
+  min-width: 0;
+  color: color-mix(in srgb, var(--agent-accent) 45%, var(--ink));
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.hub-agent-role {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-msg-time {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hub-msg.human .hub-msg-time { margin-left: 0; }
+.hub-context-jump {
+  flex: none;
+  margin: 0;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.hub-context-jump:hover { color: var(--ink); text-decoration: underline; }
+.hub-context-jump:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 4px; }
+.hub-msg.agent.hub-group-msg .hub-body {
+  max-width: min(100%, 620px);
+  padding: 9px 12px;
+  white-space: normal;
+  border: 1px solid color-mix(in srgb, var(--agent-accent) 20%, var(--border));
+  border-left: 3px solid color-mix(in srgb, var(--agent-accent) 70%, var(--border));
+  border-radius: 3px 12px 12px 12px;
+  background: color-mix(in srgb, var(--surface) 94%, var(--agent-accent));
+}
+.hub-msg.human.hub-group-msg .hub-body {
+  max-width: min(82%, 560px);
+  border-radius: 12px 3px 12px 12px;
+}
+.hub-msg.human .hub-agent-name { color: var(--ink); }
+.hub-msg.hub-group-msg .hub-body > .md > :first-child { margin-top: 0; }
+.hub-msg.hub-group-msg .hub-body > .md > :last-child { margin-bottom: 0; }
 .hub-msg.system {
   align-items: center;
   color: var(--text-3);
@@ -1025,10 +1124,8 @@
 .hub-chip.group-mode-ask { color: #b8772a; }
 .hub-chip.group-mode-readonly { color: var(--text-2); }
 
-/* P3a-08：同轮合并 / 动作清单 / 群态标记 */
-.hub-round-group { border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; margin: 6px 0; }
-.hub-round-group-head { display: flex; align-items: center; justify-content: center; text-align: center; gap: 6px; font-size: 11px; opacity: .78; margin-bottom: 4px; }
-.hub-round-group-body .hub-msg { margin: 4px 0; }
+/* P4-UI-4：同轮只收紧间距；每条消息仍独立，不画外框/表头。 */
+.hub-round-stack { display: flex; flex-direction: column; gap: 7px; }
 .hub-digest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px; margin-bottom: 6px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .hub-chip.danger { color: var(--danger, #c0392b); border-color: currentColor; }
 .hub-chip.owner-only { margin-left: 6px; font-size: 10px; }
@@ -1335,6 +1432,19 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-task-card.tone-error { border-left-color: var(--danger); }
 .hub-task-card.tone-warn { border-left-color: var(--warning); }
 .hub-task-card.tone-info { border-left-color: var(--accent-solid); }
+.hub-task-card-who {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.hub-task-from {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
 .hub-task-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .hub-task-status {
   flex: none;
@@ -1354,17 +1464,83 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   min-width: 0;
   font-size: 13px;
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 .hub-task-summary { margin: 0; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .hub-task-error { margin: 0; font-size: 12px; color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; }
-.hub-task-artifacts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; }
-.hub-task-artifacts li { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.hub-task-artifact-kind { flex: none; color: var(--text-3); font-size: 10.5px; }
-.hub-task-artifact-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
-.hub-task-artifact-path { min-width: 0; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 产物区：文件图标 + 名称 + 路径 + 计量；与运行时 ArtifactsBlock 同一套信息层级。 */
+.hub-artifacts { display: flex; flex-direction: column; gap: 5px; padding-top: 2px; }
+.hub-artifacts-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.hub-artifacts-title { color: var(--text-2); font-size: 11px; }
+.hub-artifacts-title b { color: var(--ink); font-weight: 600; }
+.hub-artifacts-hint { margin-left: auto; color: var(--text-3); font-size: 10px; }
+.hub-artifacts-list { list-style: none; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; }
+.hub-artifact {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper) 88%, var(--surface));
+}
+.hub-artifact-badge {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--accent-weak);
+  color: var(--accent-solid);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.hub-artifact-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.hub-artifact-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-artifact-path {
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-artifact-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.hub-artifact-kind.created { color: var(--success); }
+.hub-artifact-kind.modified { color: var(--accent-solid); }
+@media (max-width: 560px) {
+  .hub-artifact { grid-template-columns: 28px minmax(0, 1fr); }
+  .hub-artifact-meta { grid-column: 2; flex-wrap: wrap; gap: 4px 7px; }
+}
+@media (max-width: 640px) {
+  .hub-msg-head { flex-wrap: wrap; }
+  .hub-msg.agent .hub-msg-head,
+  .hub-msg.agent.hub-group-msg .hub-body { max-width: 100%; }
+  .hub-msg.human .hub-msg-head,
+  .hub-msg.human.hub-group-msg .hub-body { max-width: 92%; }
+  .hub-agent-role { max-width: 130px; }
+  .hub-msg-time { margin-left: 0; }
+}
 .hub-task-card-foot {
   display: flex;
   flex-wrap: wrap;

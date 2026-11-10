@@ -1,10 +1,13 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useMemo, type CSSProperties } from 'react'
 import { Markdown } from '../components/markdown'
 import type { HubMessage } from './types'
 import { parseRoutingText } from './groupThread'
+import AgentBadge from './AgentBadge'
 import AgentMentionChip from './AgentMentionChip'
 import TaskResultCard from './TaskResultCard'
 import TurnContextLine from './TurnContextLine'
+import { formatRelativeTime } from './conversation'
+import { accentOfAgent } from './agentAccent'
 import { ALL_MENTION_ID, linkifyMentions, type MentionAgent } from './mentions'
 import { parseTaskResult } from './taskCard'
 import { useHubStore } from './useHubStore'
@@ -66,14 +69,6 @@ export function GroupBubble({
   // data-seq / 高亮 class 与 DM、深链共用同一口径（seqJump.ts），别再各写一份。
   const seq = seqDataAttr(msg.seq)
   const hl = highlightClass(msg.seq, highlightSeq)
-  const context = (
-    <TurnContextLine
-      msg={msg}
-      roster={roster}
-      triggerSeqBySender={triggerSeqBySender}
-      onJumpToSeq={onJumpToSeq}
-    />
-  )
 
   if (msg.kind === 'approval_stub') {
     return (
@@ -106,43 +101,71 @@ export function GroupBubble({
     )
   }
   const kind = msg.sender?.kind ?? 'system'
-  const who = kind === 'human' ? '你' : (names[msg.sender?.agent_id ?? ''] ?? msg.sender?.agent_id ?? '智能体')
+  const senderId = kind === 'agent' ? (msg.sender?.agent_id ?? '') : ''
+  const agent = senderId ? roster.find((a) => a.id === senderId) : undefined
+  const who = kind === 'human' ? '你' : ((names[senderId] ?? senderId) || '智能体')
+  const roleParts = [agent?.role, agent?.groupRole === 'owner' ? '群主' : ''].filter(Boolean)
+  const role = roleParts.join(' · ')
+  const time = formatRelativeTime(msg.created_at)
+  const accent = accentOfAgent(agent ?? { id: senderId, name: who })
+  const style = { '--agent-accent': accent } as CSSProperties
   const card = parseTaskResult(msg, task)
 
   if (card) {
     const executor = card.agentId ? roster.find((a) => a.id === card.agentId) : undefined
     const initiator = card.initiatorAgentId ? roster.find((a) => a.id === card.initiatorAgentId) : undefined
     return (
-      <>
-        {context}
-        <div className={`hub-msg task${hl} ${msg.pending ? 'pending' : ''}`} data-seq={seq}>
-          <TaskResultCard
-            view={card}
-            executor={executor}
-            initiator={initiator}
-            onOpenAgent={card.agentId && onSelectAgent ? () => onSelectAgent(card.agentId) : undefined}
-          />
-        </div>
-      </>
+      <div className={`hub-msg task${hl} ${msg.pending ? 'pending' : ''}`} data-seq={seq}>
+        <TaskResultCard
+          view={card}
+          executor={executor}
+          initiator={initiator}
+          onOpenAgent={card.agentId && onSelectAgent ? () => onSelectAgent(card.agentId) : undefined}
+        />
+      </div>
     )
   }
 
   return (
-    <>
-      {context}
-      <div className={`hub-msg ${kind === 'human' ? 'human' : 'agent'}${hl} ${msg.pending ? 'pending' : ''} ${msg.failed ? 'failed' : ''}`} data-seq={seq}>
-        <div className="hub-group-author">
-          {who}
-          {msg.visibility === 'owner' ? <span className="hub-chip owner-only">仅你可看</span> : null}
-        </div>
-        <div className="hub-body">
-          <Markdown
-            text={linkedText}
-            renderMention={roster.length > 0 ? renderMention : undefined}
-          />
-        </div>
+    <div
+      className={`hub-msg ${kind === 'human' ? 'human' : 'agent'} hub-group-msg${hl} ${msg.pending ? 'pending' : ''} ${msg.failed ? 'failed' : ''}`}
+      data-seq={seq}
+      data-agent-id={senderId || undefined}
+      style={kind === 'agent' ? style : undefined}
+    >
+      <div className={`hub-msg-head${kind === 'human' ? ' human' : ''}`}>
+        {kind === 'human' ? (
+          <>
+            {time ? <time className="hub-msg-time" dateTime={msg.created_at}>{time}</time> : null}
+            <span className="hub-agent-name">你</span>
+          </>
+        ) : (
+          <>
+            <AgentBadge
+              agent={agent}
+              name={who}
+              role={role || undefined}
+              onClick={agent && onSelectAgent && !agent.deleted ? () => onSelectAgent(agent.id) : undefined}
+            />
+            <TurnContextLine
+              compact
+              msg={msg}
+              roster={roster}
+              triggerSeqBySender={triggerSeqBySender}
+              onJumpToSeq={onJumpToSeq}
+            />
+            {msg.visibility === 'owner' ? <span className="hub-chip owner-only">仅你可看</span> : null}
+            {time ? <time className="hub-msg-time" dateTime={msg.created_at}>{time}</time> : null}
+          </>
+        )}
       </div>
-    </>
+      <div className="hub-body">
+        <Markdown
+          text={linkedText}
+          renderMention={roster.length > 0 ? renderMention : undefined}
+        />
+      </div>
+    </div>
   )
 }
 

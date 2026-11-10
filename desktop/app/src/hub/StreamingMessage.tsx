@@ -1,12 +1,14 @@
 // 群内流式草稿（P3a-09）：轻量纯文本 + 换行，不做 Markdown 重排；
 // final hub_message 到达后整条替换为完整 Markdown 气泡。
+import AgentBadge from './AgentBadge'
 import type { HubStreamDraft } from './groupStream'
+import type { MentionAgent } from './mentions'
 
-export function StreamingMessage({ draft, name }: { draft: HubStreamDraft; name: string }) {
+export function StreamingMessage({ draft, name, agent }: { draft: HubStreamDraft; name: string; agent?: MentionAgent | null }) {
   return (
-    <div className="hub-msg agent streaming" aria-live="polite">
-      <div className="hub-group-author">
-        {name}
+    <div className="hub-msg agent hub-group-msg streaming" aria-live="polite">
+      <div className="hub-msg-head">
+        <AgentBadge agent={agent} name={name} role={agent?.role} />
         <span className="hub-chip streaming-chip">正在输入</span>
       </div>
       <div className="hub-body">

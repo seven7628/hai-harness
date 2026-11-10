@@ -37,7 +37,7 @@ import type { HubGroup, HubGroupMember, HubMessage } from './types'
 // composer 两态：
 //   对话：@ 弹成员选择器（结构化 mentions 随 hub_group_send 一起发）；
 //   派任务：选成员 + 指令 + 可选标题 → hub_group_assign（plan §7.1.3 的 agent_id 键）。
-// 同轮回复按 round_id（或同一组 trigger_seqs）合并；「分开」保留平铺。
+// 同轮回复按 round_id（或同一组 trigger_seqs）收紧间距；「分开」恢复常规间距。
 //
 // 滚动（B1）：与 DM 同一条规则「用户本来在底部才跟随」；发送/派任务/打开群时
 // 强制贴底。任务卡是异步长出来的，消息长度/派任务说明/对话状态/输入中都会触发。
@@ -365,8 +365,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
           <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>
         </span>
         {view === 'chat' ? (
-          <span className="hub-view-toggle" role="tablist" aria-label="合并或分开显示">
-            <button role="tab" aria-selected={displayMode === 'grouped'} className={displayMode === 'grouped' ? 'on' : ''} onClick={() => setDisplay('grouped')}>合并</button>
+          <span className="hub-view-toggle" role="tablist" aria-label="紧凑或分开显示">
+            <button role="tab" aria-selected={displayMode === 'grouped'} className={displayMode === 'grouped' ? 'on' : ''} onClick={() => setDisplay('grouped')}>紧凑</button>
             <button role="tab" aria-selected={displayMode === 'flat'} className={displayMode === 'flat' ? 'on' : ''} onClick={() => setDisplay('flat')}>分开</button>
           </span>
         ) : null}
@@ -417,7 +417,12 @@ export default function GroupView({ group }: { group: HubGroup }) {
             ) : null}
             {threadNodes}
             {groupDrafts.map((d) => (
-              <StreamingMessage key={d.messageId} draft={d} name={agentNames[d.agentId] ?? d.agentId} />
+              <StreamingMessage
+                key={d.messageId}
+                draft={d}
+                name={agentNames[d.agentId] ?? d.agentId}
+                agent={roster.find((a) => a.id === d.agentId)}
+              />
             ))}
           </div>
         )}

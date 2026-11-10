@@ -1,4 +1,6 @@
+import AgentBadge from './AgentBadge'
 import type { MentionAgent } from './mentions'
+import TaskArtifacts from './TaskArtifacts'
 import { taskArtifactText, taskDurationText, taskUsageText, type TaskCardView } from './taskCard'
 
 // 任务结果卡（P3b-07，方案 §7.5.5 / §8.3.5）。
@@ -27,8 +29,21 @@ export default function TaskResultCard({
     : (initiator?.name || view.initiatorName || view.initiatorAgentId || '')
   return (
     <article className={`hub-task-card tone-${view.tone}`} aria-label={`任务卡：${view.title}（${view.statusLabel}）`}>
-      <header className="hub-task-card-head">
+      <div className="hub-task-card-who">
+        <AgentBadge
+          agent={executor}
+          name={execName || '执行者'}
+          role={executor?.role}
+          onClick={execName && onOpenAgent ? onOpenAgent : undefined}
+        />
         <span className={`hub-task-status ${view.tone}`}>{view.statusLabel}</span>
+        {fromName && fromName !== execName ? (
+          <span className="hub-task-from">
+            {fromName === '你' ? '你派发' : `${fromName} 派发`}
+          </span>
+        ) : null}
+      </div>
+      <header className="hub-task-card-head">
         <span className="hub-task-title" title={view.title}>{view.title}</span>
       </header>
       {view.summary ? (
@@ -37,23 +52,8 @@ export default function TaskResultCard({
       {view.error ? (
         <p className="hub-task-error" role="alert">{view.error}</p>
       ) : null}
-      {view.artifacts.length > 0 ? (
-        <ul className="hub-task-artifacts" aria-label="产物">
-          {view.artifacts.map((a, i) => (
-            <li key={`${a.path || a.name}-${i}`} title={a.path || a.name}>
-              <span className="hub-task-artifact-kind">{a.kind || 'artifact'}</span>
-              <span className="hub-task-artifact-name">{a.name || a.path}</span>
-              {a.path && a.name ? <span className="hub-task-artifact-path">{a.path}</span> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      <TaskArtifacts artifacts={view.artifacts} />
       <footer className="hub-task-card-foot">
-        {execName ? (
-          <span className="hub-task-exec" title={view.agentId ? `执行者 ${view.agentId}` : undefined}>
-            {fromName && fromName !== execName ? `${fromName} → ` : ''}{execName}
-          </span>
-        ) : null}
         {duration ? <span title="任务耗时">{duration}</span> : null}
         {usage ? <span title="用量与成本">{usage}</span> : null}
         {view.taskId ? <span className="hub-muted" title={view.taskId}>{view.taskId}</span> : null}

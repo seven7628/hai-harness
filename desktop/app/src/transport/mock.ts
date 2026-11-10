@@ -730,13 +730,30 @@ class MockTransport implements Transport {
         },
         {
           seq: 3, id: 'gm_mock3', kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockres1' },
-          text: '价格表整理好了：A $49 / B $39 / C 未公开。', round_id: 'rnd_mock1',
+          text: `价格对比先给你，**C 家没有公开单价**：
+
+| 方案 | 月付 | 年付 | 备注 |
+|---|---|---|---|
+| A | $49/席 | $490/席 | 含 SSO |
+| B | $39/席 | $32/席 | 年付折算 |
+| C | 未公开 | 未公开 | 需销售询价 |
+
+结论：A 适合 20 人以上，B 适合小团队；C 先不进短名单。
+
+- 抓取时间：今天 09:40
+- 口径：公开定价页，不含税`, round_id: 'rnd_mock1',
           context: { trigger_seqs: [1], senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }] },
           created_at: at(2 * 3_600_000),
         },
         {
           seq: 4, id: 'gm_mock4', kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
-          text: '已润色成两页，结论放在开头。@Researcher 风险那节你再看一眼。', round_id: 'rnd_mock1',
+          text: `## 两页简报已出
+
+结论放在开头：**A 与 B 的差价在 10 人团队约为每月 $100**；C 缺少公开报价，建议放到第二轮询价。
+
+> 风险：B 的年付折扣绑定 12 个月，提前解约不退款。
+
+@Researcher 风险那节你再一眼；我补了一张成本曲线。`, round_id: 'rnd_mock1',
           // fixture：真实 bridge 由 finishHubRound 从游标窗口写 TurnContext（B6）。
           context: {
             trigger_seqs: [1, 3],
@@ -746,14 +763,18 @@ class MockTransport implements Transport {
         },
         {
           seq: 5, id: 'gm_mock5', kind: 'task_result', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
-          text: '已生成两页简报，含价格对比、结论与风险。', created_at: at(45 * 60_000),
+          text: '已生成两页简报，含价格对比、结论与风险；附 Markdown、CSV 和成本曲线。', created_at: at(45 * 60_000),
           refs: {
             task_id: 'task_mock1', status: 'completed', agent_id: 'ag_mockwri2', target_agent_id: 'ag_mockwri2',
             // fixture：B5 的 origin 快照（真实 bridge 写卡时也落这三个字段）。
             origin_kind: 'human',
             title: '把三家价格表写成两页简报', duration_ms: 18_400,
             usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
-            artifacts: [{ name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140 }],
+            artifacts: [
+              { name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140, lines: 64 },
+              { name: 'pricing-v3.csv', path: 'out/pricing-v3.csv', kind: 'created', size: 812, lines: 12 },
+              { name: 'cost-curve.png', path: 'out/assets/cost-curve.png', kind: 'created', size: 184320 },
+            ],
             error: '',
           },
         },
@@ -769,7 +790,7 @@ class MockTransport implements Transport {
         instruction: '把三家价格表写成两页简报', status: 'completed', attempt: 1,
         origin: { kind: 'human', group_id: gid },
         target: { kind: 'agent', agent_id: 'ag_mockwri2', group_id: gid, session_id: `hub.ag_mockwri2.g.${gid}` },
-        result: { summary: '已生成两页简报，含价格对比、结论与风险。', finish_reason: 'stop' },
+        result: { summary: '已生成两页简报，含价格对比、结论与风险；附 Markdown、CSV 和成本曲线。', finish_reason: 'stop' },
         created_at: at(3 * 3_600_000), updated_at: at(45 * 60_000),
       })
     }

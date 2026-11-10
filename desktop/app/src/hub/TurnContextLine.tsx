@@ -4,26 +4,51 @@ import type { MentionAgent } from './mentions'
 import { uniqueContextSenders } from './groupProjection'
 
 // 回复的触发上下文（P3b-07，方案 §8.3.5 TurnContextLine）。
-// 只有 ≥2 个**不同**触发者时才显示——单人回复没什么可解释的，多出来一行噪音。
-// trigger_seqs 放进 title/tooltip；chip 点击只跳到触发消息并高亮（B6），不打开 DM。
+// 只有 ≥2 个**不同**触发者时才显示——单人回复没什么可解释的。
+// 群消息头用 compact 只画「↳ N」，不再单独占一行；trigger_seqs 放进 title/tooltip，
+// 点击只跳到触发消息并高亮（B6），不打开 DM。
 
 export default function TurnContextLine({
   msg,
   roster,
   triggerSeqBySender,
   onJumpToSeq,
+  compact = false,
 }: {
   msg: HubMessage
   roster?: MentionAgent[]
   /** agent_id → 触发消息 seq（由已加载消息 + context.trigger_seqs 反推）。 */
   triggerSeqBySender?: Record<string, number>
   onJumpToSeq?: (seq: number) => void
+  /** 群消息头里的紧凑入口：只显示「↳ N」，不占一行。 */
+  compact?: boolean
 }) {
   const senders = uniqueContextSenders(msg.context?.senders)
   if (senders.length < 2) return null
   const byID = new Map((roster ?? []).map((a) => [a.id, a]))
   const seqs = msg.context?.trigger_seqs ?? []
   const tip = seqs.length > 0 ? `触发消息 #${seqs.join(', #')}` : '由多条消息触发'
+  if (compact) {
+    const names = senders.map((s) => s.name || byID.get(s.agent_id ?? '')?.name || s.agent_id || '成员')
+    const first = senders[0]
+    const seq = (first.agent_id ? triggerSeqBySender?.[first.agent_id] : 0) || seqs[0] || 0
+    const label = `由 ${names.join('、')} 的消息触发；点击回到触发消息`
+    const body = <span aria-hidden="true">↳ {senders.length}</span>
+    if (onJumpToSeq && seq > 0) {
+      return (
+        <button
+          type="button"
+          className="hub-context-jump"
+          title={tip}
+          aria-label={label}
+          onClick={() => onJumpToSeq(seq)}
+        >
+          {body}
+        </button>
+      )
+    }
+    return <span className="hub-context-jump" title={tip} aria-label={label}>{body}</span>
+  }
   return (
     <div className="hub-context-line" title={tip} aria-label={`来自 ${senders.map((s) => s.name || byID.get(s.agent_id ?? '')?.name || s.agent_id).join('、')} 的消息`}>
       <span className="hub-context-label">来自</span>
