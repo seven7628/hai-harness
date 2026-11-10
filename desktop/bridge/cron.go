@@ -64,7 +64,7 @@ func (m *manager) cronTick(now time.Time) {
 	led := m.cron.Ledger()
 	for _, j := range cron.Due(m.cron.List(), now) {
 		wsKey := workspaceKey(j.Workspace)
-		if !cs.Enabled {
+		if !cs.enabledOn() {
 			job, _ := m.cron.Advance(j.ID, false, now)
 			if led != nil {
 				led.AppendSkipped(job, wsKey, now)
@@ -135,7 +135,7 @@ func (m *manager) cronTick(now time.Time) {
 	// 一次性兜底落盘（各 Advance 内已落盘；此处保险）
 	m.cron.Persist()
 	// 自动清理超龄派生会话文件
-	if cs.AutoClean {
+	if cs.autoCleanOn() {
 		m.cronClean(now)
 	}
 }
@@ -265,8 +265,8 @@ func (m *manager) cronListData() map[string]any {
 		}
 	}
 	return map[string]any{
-		"enabled":    cs.Enabled,
-		"auto_clean": cs.AutoClean,
+		"enabled":    cs.enabledOn(),
+		"auto_clean": cs.autoCleanOn(),
 		"jobs":       jobs,
 	}
 }

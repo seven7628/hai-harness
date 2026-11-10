@@ -5577,7 +5577,7 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	}
 	// 定时任务工具门控：设置 cron.enabled=true 才注册（CronCreate/CronList/CronUpdate/CronDelete）。
 	// 任务定义/账本在宿主级 Store；本会话绑定自己的 workspace/sid 作为触发目标。
-	if cs != nil && loadCronSettings().Enabled {
+	if cs != nil && loadCronSettings().enabledOn() {
 		for _, t := range cron.NewTools(cs, cron.ToolBound{Workspace: workspace, SessionID: sid}) {
 			eng.RegisterTool(context.Background(), t)
 		}
