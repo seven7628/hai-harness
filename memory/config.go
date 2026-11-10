@@ -135,6 +135,9 @@ type Config struct {
 	// MkdirAll 建目录出口（nil = os.MkdirAll）。usage 落在 <memory-dir>/.state/ 下，
 	// 第一次记录前要把该目录建出来；与其余出口同一理由抽出来，好让测试指向临时目录。
 	MkdirAll func(string, os.FileMode) error
+	// OpenAppend 以追加模式打开文件（nil = os.OpenFile(..., O_APPEND|O_CREATE|O_WRONLY)）。
+	// 做梦日志用它；抽成出口的理由同其余 I/O。
+	OpenAppend func(string) (*os.File, error)
 }
 
 // enabled 是开关判定本体（Config.Enabled_ 的实现，避免方法名与字段混淆）。
@@ -253,6 +256,11 @@ func (c Config) withDefaults() Config {
 	}
 	if out.MkdirAll == nil {
 		out.MkdirAll = os.MkdirAll
+	}
+	if out.OpenAppend == nil {
+		out.OpenAppend = func(p string) (*os.File, error) {
+			return os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		}
 	}
 	return out
 }

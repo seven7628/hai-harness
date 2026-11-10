@@ -13,11 +13,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/seven7628/hai-harness/memory"
@@ -25,9 +27,11 @@ import (
 
 func main() {
 	var (
-		root = flag.String("root", "", "记忆根目录（默认 ~/.go-code/memory/repos）")
-		repo = flag.String("repo", "", "只盘点这个 repo-id")
-		bind = flag.String("bind", "", "把这个工作区与它的记忆目录绑定（写 .state/repo.json），然后退出")
+		root  = flag.String("root", "", "记忆根目录（默认 ~/.go-code/memory/repos）")
+		repo  = flag.String("repo", "", "只盘点这个 repo-id")
+		bind  = flag.String("bind", "", "把这个工作区与它的记忆目录绑定（写 .state/repo.json），然后退出")
+		evid  = flag.String("evidence", "", "把每条记忆的证据导出成 JSON（交给模型裁决）")
+		apply = flag.String("apply", "", "执行模型裁决 JSON：archive / keep（带快照与日志）")
 	)
 	flag.Parse()
 
@@ -71,6 +75,51 @@ func main() {
 
 	now := time.Now()
 	cfg := memory.Config{}
+	if *evid != "" || *apply != "" {
+		ids = filterByRepo(ids, *repo)
+	}
+
+	for _, id := range ids {
+		d := memory.Dir{ID: id, Path: filepath.Join(base, id)}
+		if *apply != "" {
+			raw, err := os.ReadFile(*apply)
+			if err != nil {
+				fail("读裁决文件失败：%v", err)
+			}
+			decs, err := memory.ParseDecisions(raw)
+			if err != nil {
+				fail("解析裁决失败：%v", err)
+			}
+			res, err := cfg.ApplyDecisions(d, decs)
+			if err != nil {
+				fail("%s 应用失败：%v", id, err)
+			}
+			fmt.Printf("%s：归档 %d 条，跳过 %d 条（快照 %s）\n", id, len(res.Archived), len(res.Skipped), res.Snapshot)
+			for _, f := range res.Archived {
+				fmt.Println("  归档 " + f)
+			}
+			for _, f := range res.Skipped {
+				fmt.Println("  跳过 " + f)
+			}
+			return
+		}
+		if *evid != "" {
+			ev, err := cfg.Evidence(d)
+			if err != nil {
+				fail("%s 取证失败：%v", id, err)
+			}
+			out, _ := json.MarshalIndent(ev, "", "  ")
+			path := *evid
+			if len(ids) > 1 {
+				path = strings.TrimSuffix(*evid, ".json") + "-" + id + ".json"
+			}
+			if err := os.WriteFile(path, out, 0o600); err != nil {
+				fail("写证据文件失败：%v", err)
+			}
+			fmt.Printf("%s：证据 → %s\n", id, path)
+			continue
+		}
+	}
 	for i, id := range ids {
 		if i > 0 {
 			fmt.Println("\n---\n")
@@ -87,4 +136,17 @@ func main() {
 func fail(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(2)
+}
+
+// filterByRepo 在 --repo 指定时只保留那一个（其它路径已经由 ids 过滤过）。
+func filterByRepo(ids []string, repo string) []string {
+	if repo == "" {
+		return ids
+	}
+	for _, id := range ids {
+		if id == repo {
+			return []string{id}
+		}
+	}
+	return ids
 }

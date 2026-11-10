@@ -51,13 +51,15 @@ type DeadAnchor struct {
 
 // AnchorReport 是一个记忆库的锚点核对结果。
 type AnchorReport struct {
-	Root      string
-	Scanned   int // 参与核对的条目数
-	Refs      int // 抽到的引用总数
-	Dead      []DeadAnchor
-	ByFile    map[string]int // 每个文件有多少条死引用
-	Unbound   bool           // 没有绑定仓库路径，整段跳过
-	RepoFiles int            // 仓库里的文件数（0 且 Unbound=false 说明列不出来）
+	Root    string
+	Scanned int // 参与核对的条目数
+	Refs    int // 抽到的引用总数
+	Dead    []DeadAnchor
+	ByFile  map[string]int // 每个文件有多少条死引用
+	// RefsByFile 每个文件抽到多少条引用（用来算"存活率"，死引用数单独看不懂）。
+	RefsByFile map[string]int
+	Unbound    bool // 没有绑定仓库路径，整段跳过
+	RepoFiles  int  // 仓库里的文件数（0 且 Unbound=false 说明列不出来）
 }
 
 // repoBinding 是 `.state/repo.json` 的内容：记忆目录 ↔ 本地仓库路径。
@@ -266,7 +268,7 @@ func (c Config) binding(d Dir) (repoBinding, bool) {
 // 只读：不写任何文件，也不改绑定。
 func (c Config) CheckAnchors(d Dir) (AnchorReport, error) {
 	c = c.withDefaults()
-	rep := AnchorReport{ByFile: map[string]int{}}
+	rep := AnchorReport{ByFile: map[string]int{}, RefsByFile: map[string]int{}}
 	b, ok := c.binding(d)
 	if !ok {
 		rep.Unbound = true
@@ -305,7 +307,9 @@ func (c Config) CheckAnchors(d Dir) (AnchorReport, error) {
 			continue
 		}
 		rep.Scanned++
-		for _, ref := range extractCodeRefs(string(raw)) {
+		refs := extractCodeRefs(string(raw))
+		rep.RefsByFile[name] = len(refs)
+		for _, ref := range refs {
 			rep.Refs++
 			if resolves(ref.Path, set, bases) {
 				continue
