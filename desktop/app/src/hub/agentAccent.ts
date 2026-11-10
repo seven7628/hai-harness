@@ -13,13 +13,12 @@ const FALLBACK_PALETTE = [
   '#7a4fa8', '#1f7a7a', '#a8425f', '#5b6b2f',
 ]
 
-/** 校验 accent：只接受 CSS 能安全内联的 hex / rgb(a) / hsl(a)，其余回退。 */
+/** 校验 accent：只接受 #rgb/#rgba/#rrggbb/#rrggbbaa。
+ *  统一限制为 hex，保证 contrastText 能解析出同一个颜色（避免浅色 badge 配白字）。 */
 export function safeAccent(raw: unknown): string | null {
   const s = typeof raw === 'string' ? raw.trim() : ''
   if (!s) return null
-  if (/^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(s)) return s
-  if (/^(?:rgb|hsl)a?\([^)]*\)$/i.test(s)) return s
-  return null
+  return /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(s) ? s : null
 }
 
 function hashString(input: string): number {

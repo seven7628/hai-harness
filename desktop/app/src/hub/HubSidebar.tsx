@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Bot, ChevronLeft, Plus, SearchIcon } from '../components/icons'
 import { useT } from '../i18n'
@@ -27,6 +27,8 @@ export default function HubSidebar() {
   const groupInfo = useHubStore((s) => s.groupInfo)
   const groupConversations = useHubStore((s) => s.groupConversations)
   const activeGroupId = useHubStore((s) => s.activeGroupId)
+  const selectionNonce = useHubStore((s) => s.selectionNonce)
+  const hubOpen = useHubStore((s) => s.open)
   const openAgent = useHubStore((s) => s.openAgent)
   const openGroup = useHubStore((s) => s.openGroup)
   const closeHub = useHubStore((s) => s.closeHub)
@@ -50,6 +52,25 @@ export default function HubSidebar() {
   const [tab, setTab] = useState<'agents' | 'groups'>('agents')
   const [searchInput, setSearchInput] = useState('')
   const [searchPanel, setSearchPanel] = useState(false)
+  // 搜索命中 / 深链打开目标后，自动把左栏切到对应 scope；用户随后手动切 tab
+  // 不再被同一目标反复拉回（lastAutoTarget 只在「当前目标变了」时触发）。
+  const lastAutoTarget = useRef('')
+  const lastAutoNonce = useRef(-1)
+  useEffect(() => {
+    if (!hubOpen) {
+      lastAutoTarget.current = ''
+      lastAutoNonce.current = -1
+      return
+    }
+    const key = activeGroupId ? `group:${activeGroupId}` : activeId ? `dm:${activeId}` : ''
+    if (!key) return
+    // 同一目标被深链再次打开时 nonce 会变：必须切回对应 scope，而不是被
+    // 「target 没变」提前 return（用户在另一个 tab 上时尤其明显）。
+    if (key === lastAutoTarget.current && selectionNonce === lastAutoNonce.current) return
+    lastAutoTarget.current = key
+    lastAutoNonce.current = selectionNonce
+    setTab(activeGroupId ? 'groups' : 'agents')
+  }, [hubOpen, activeGroupId, activeId, selectionNonce])
 
   // 左栏常驻：不打开 Hub 也要有智能体/群组可选（旧实现只在 openHub 时拉列表）。
   // 只拉列表，不打开 Hub、不改未读；点击行时才由 openAgent/openGroup 进入。
@@ -87,14 +108,16 @@ export default function HubSidebar() {
           <Bot size={13} /> {t('hub.title')}
         </span>
         <span className="hub-side-actions">
-          <button
-            className="hub-side-back"
-            onClick={closeHub}
-            title={t('hub.backToWorkspaces')}
-            aria-label={t('hub.backToWorkspaces')}
-          >
-            <ChevronLeft size={11} /> {t('hub.back')}
-          </button>
+          {hubOpen ? (
+            <button
+              className="hub-side-back"
+              onClick={closeHub}
+              title={t('hub.backToWorkspaces')}
+              aria-label={t('hub.backToWorkspaces')}
+            >
+              <ChevronLeft size={11} /> {t('hub.back')}
+            </button>
+          ) : null}
           <button
             className="hub-side-add"
             onClick={() => openEditor(null)}
@@ -166,8 +189,10 @@ export default function HubSidebar() {
               className={`hub-search-hit ${hit.owner_only ? 'owner-only' : ''}`}
               onClick={() => {
                 // 先收起结果面板再打开会话：跳转后要高亮的是时间线，不是结果行。
+                // 同时把左栏 tab 切到命中的 scope（群组命中不能还停在智能体列表）。
                 setSearchPanel(false)
                 setSearchInput('')
+                setTab(hit.scope === 'group' ? 'groups' : 'agents')
                 clearSearch()
                 void openSearchHit(hit)
               }}
@@ -240,6 +265,7 @@ export default function HubSidebar() {
                       className={`hub-side-row hub-group-row ${g.id === activeGroupId ? 'on' : ''}`}
                       style={rowAccentStyle(groupAccent)}
                       onClick={() => void openGroup(g.id)}
+                      aria-current={g.id === activeGroupId ? 'true' : undefined}
                       aria-label={`${g.name}，${memberCount} 名成员${unread > 0 ? `，${unreadBadge(unread)} 条未读` : '，没有未读'}，${preview}`}
                     >
                       <span className="hub-side-avatar">

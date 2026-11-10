@@ -40,11 +40,15 @@
 .hub-empty-actions .hub-link { display: inline-flex; align-items: center; gap: 4px; }
 
 /* —— 左栏「智能体」段（P4-UI-1）—— */
+/* 整个 section 做高度预算：最多 38vh，空间不足时可 shrink；滚动发生在内部列表，
+   不能把下方工作区/会话树挤成 0（980×620 实测过 .proj-list 只剩 36px）。 */
 .hub-side {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  max-height: 38vh;
+  overflow: hidden;
   margin-bottom: 2px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
@@ -169,16 +173,20 @@
 .hub-side-tabs button.on .hub-side-count { color: var(--ink); }
 .hub-side-list {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 1px;
-  max-height: 38vh;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
   padding: 0 6px 6px;
 }
 .hub-side-results {
-  max-height: 38vh;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 4px 6px 6px;
@@ -834,6 +842,25 @@
 .hub-ov-member { display: flex; align-items: center; gap: 7px; font-size: 12px; min-width: 0; }
 .hub-ov-member-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hub-ov-run { margin-left: auto; width: 6px; height: 6px; border-radius: 50%; background: var(--bamboo); flex: none; }
+.hub-ov-tasks { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--border); padding-top: 8px; }
+.hub-ov-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-ov-task:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.hub-ov-task .hub-chip { flex: none; }
+.hub-ov-task-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
 .hub-ov-note { padding: 0; margin: 2px 0 0; font-size: 10.5px; }
 .hub-ov-foot { border-top: 1px solid var(--border); padding-top: 10px; margin-top: auto; }
 .hub-ov-foot .hub-btn { width: 100%; justify-content: center; padding: 5px 9px; }
@@ -1533,3 +1560,18 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   font-size: 11.5px; cursor: pointer;
 }
 .hub-search-more:disabled { opacity: 0.6; cursor: default; }
+
+/* 最低窗高（980×620）预算：压缩固定的头/搜索/底栏，把空间还给两个列表。
+   620 下 Hub section 仍保留 2 行左右列表，工作区树至少「标题 + 1 会话」可见。 */
+@media (max-height: 700px) {
+  .hub-side-head { padding-top: 3px; padding-bottom: 1px; }
+  .hub-side-search { gap: 2px; padding-bottom: 2px; }
+  .hub-side-search-box { padding: 3px 7px; }
+  .hub-side-scopes button { padding: 0 6px; line-height: 15px; }
+  .hub-side-tabs button { padding-top: 3px; padding-bottom: 3px; }
+  .left.expanded .left-head { padding-top: 4px; padding-bottom: 2px; }
+  .left.expanded .new-session-btn { padding-top: 5px; padding-bottom: 5px; }
+  .left.expanded .add-ws-btn { padding-top: 4px; padding-bottom: 4px; }
+  .left-bottom { padding-top: 3px; padding-bottom: 5px; }
+  .left-bottom .nav-item { padding-top: 4px; padding-bottom: 4px; }
+}

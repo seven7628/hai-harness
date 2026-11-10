@@ -51,6 +51,8 @@ interface HubState {
   agents: HubAgent[]
   dm: Record<string, HubDMInfo>
   activeId: string | null
+  /** 每次 select/selectGroup（含深链）自增：左栏据此把 tab 同步到目标 scope。 */
+  selectionNonce: number
   profile: HubAgent | null
   sid: string | null
   messages: HubMessage[]
@@ -271,6 +273,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   agents: [],
   dm: {},
   activeId: null,
+  selectionNonce: 0,
   profile: null,
   sid: null,
   messages: [],
@@ -334,7 +337,7 @@ export const useHubStore = create<HubState>((set, get) => ({
     // 未执行的跳转也一并丢弃（下次打开从当前时间线底部开始）。
     // 右栏回到默认概览、编辑器一并关闭：退出 Hub 后不该留一个悬空的弹层。
     clearJumpTimer()
-    set({ open: false, deepLinkOwnedOpen: false, jump: null, inspector: null, editor: null })
+    set({ open: false, deepLinkOwnedOpen: false, jump: null, inspector: null, editor: null, view: 'chat' })
   },
 
   async openAgent(agentID) {
@@ -404,6 +407,7 @@ export const useHubStore = create<HubState>((set, get) => ({
     groupSelectGen++
     set((s) => ({
       activeId: agentID,
+      selectionNonce: s.selectionNonce + 1,
       activeGroupId: null,
       groupMessages: [],
       groupActivity: [],
@@ -418,6 +422,8 @@ export const useHubStore = create<HubState>((set, get) => ({
       actions: [],
       error: null,
       loading: true,
+      // 每次打开/切换 DM 都回到 Chat：Run 日志是「当前会话的运行态」，不该跨会话泄漏。
+      view: 'chat',
       // 手动切换目标：上一次深链/触发 chip 留下的跳转不再适用于新会话。
       jump: null,
       // 离开期间的事件没人接：重开会话先假设空闲，运行中的话下面的 chunk 会把它点亮。
@@ -454,7 +460,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 
   clearSelection() {
-    set({ activeId: null, profile: null, sid: null, messages: [], hasMore: false, live: '', rootRunId: null, failedText: null, jump: null })
+    set({ activeId: null, profile: null, sid: null, messages: [], hasMore: false, live: '', rootRunId: null, failedText: null, jump: null, view: 'chat' })
   },
 
   async loadOlder() {
@@ -935,7 +941,9 @@ export const useHubStore = create<HubState>((set, get) => ({
     const gen = ++groupSelectGen
     const wasOpen = get().open
     set((s) => ({
-      activeGroupId: groupID, activeId: null, profile: null, sid: null,
+      activeGroupId: groupID,
+      selectionNonce: s.selectionNonce + 1,
+      activeId: null, profile: null, sid: null,
       groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false, groupDrafts: [],
       groupAssigning: false, groupAssignNote: null, groupConvStopping: false,
       // 打开即已读：先清本地未读点（游标在历史加载完之后再推进）。
@@ -946,6 +954,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       groupReadSeq: { ...s.groupReadSeq },
       messages: [], live: '', rootRunId: null,
       error: null, loading: true,
+      view: 'chat',
       // 手动切群/新深链都会走到这里：旧的跳转请求作废（深链在 selectGroup 之后再登记）。
       jump: null,
     }))

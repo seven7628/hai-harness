@@ -3,6 +3,7 @@ import { Markdown } from '../components/markdown'
 import { Bot, Plus, SendIcon } from '../components/icons'
 import { useT } from '../i18n'
 import { useHubStore } from './useHubStore'
+import { useAppStore } from '../store/useAppStore'
 import { alertSeverity } from './alerts'
 import GroupView from './GroupView'
 import HubAvatar from './HubAvatar'
@@ -45,6 +46,19 @@ export default function HubSurface() {
   const closeHub = useHubStore((s) => s.closeHub)
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
+  const setRightExpanded = useAppStore((s) => s.setRightExpanded)
+  const rightExpanded = useAppStore((s) => s.rightExpanded)
+  // 右栏折叠时，中栏的 Context / composer「+」也必须把右栏展开 —— 只改 inspector
+  // 会让内容落在 44px 图标条后面（用户看不到任何变化）。
+  // 折叠态下 Context 是「打开」而不是「关掉已选中的 Context」。
+  const toggleContext = (): void => {
+    setInspector(rightExpanded && inspector === 'context' ? null : 'context')
+    setRightExpanded(true)
+  }
+  const showContext = (): void => {
+    setInspector('context')
+    setRightExpanded(true)
+  }
   const draft = activeId ? (drafts[activeId] ?? '') : ''
   const view = useHubStore((s) => s.view)
   const setView = useHubStore((s) => s.setView)
@@ -217,7 +231,7 @@ export default function HubSurface() {
                 </button>
                 <button
                   className={`hub-link ${inspector === 'context' ? 'on' : ''}`}
-                  onClick={() => setInspector(inspector === 'context' ? null : 'context')}
+                  onClick={toggleContext}
                   title="上下文（只读）：触发上下文与提示词分层"
                 >
                   Context
@@ -265,7 +279,7 @@ export default function HubSurface() {
               {view === 'chat' ? <div className="hub-composer hub-composer-pill">
                 <button
                   className="hub-composer-plus"
-                  onClick={() => setInspector(inspector === 'context' ? null : 'context')}
+                  onClick={showContext}
                   title="上下文与提示词（暂不支持附件）"
                   aria-label="打开上下文面板"
                 >

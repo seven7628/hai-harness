@@ -158,7 +158,13 @@ export function RoutingAction({
   highlight?: boolean
 }) {
   const parsed = parseRoutingText(text)
-  if (!parsed) return <div className="hub-system-note" data-seq={seq} role="status">{text}</div>
+  if (!parsed) {
+    return (
+      <div className={`hub-system-note${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">
+        {text}
+      </div>
+    )
+  }
   const targets = parsed.targets.map((id) => names[id] ?? id)
   return (
     <div className={`hub-system-note hub-system-routing${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">

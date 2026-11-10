@@ -600,7 +600,20 @@ export default function LeftPanel() {
               </div>
             )}
           </div>
-          <button className="rbtn on" data-tip={t('left.workspaces')} onClick={toggleLeft} aria-label={t('left.workspaces')}><SessionIcon /></button>
+          <button
+            className={`rbtn ${hubOpen ? '' : 'on'}`}
+            data-tip={t('left.workspaces')}
+            aria-label={t('left.workspaces')}
+            aria-pressed={!hubOpen}
+            onClick={() => {
+              // 折叠态点「工作区」= 回到工作区并展开左栏；Hub 开着时先退出 Hub，
+              // 否则 Bot 与工作区两个入口会同时是高亮态，且中心仍停在 Hub。
+              if (hubOpen) closeHub()
+              toggleLeft()
+            }}
+          >
+            <SessionIcon />
+          </button>
           <div className="rail-spacer" />
           <div className="rail-bottom">
             <button className="rbtn" data-tip={t('left.skills')} onClick={() => { toggleLeft(); openSkills() }} aria-label={t('left.skills')}><Sparkles /></button>

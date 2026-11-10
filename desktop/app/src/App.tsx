@@ -150,11 +150,20 @@ export default function App() {
   const clearHubSelection = useHubStore((s) => s.clearSelection)
   // 进入 Hub 时确保右栏展开（概览是详情的主入口）；只在打开的那一次强制，
   // 用户随后手动收起右栏不被反复顶开（折叠态由 HubInspector 自己提供图标条）。
+  // 退出 Hub 时恢复进入前的折叠状态：Hub 是临时视图，不应改变工作区的布局偏好。
   const wasHubOpen = useRef(false)
+  const rightExpandedBeforeHub = useRef<boolean | null>(null)
   useEffect(() => {
-    if (hubOpen && !wasHubOpen.current) setRightExpanded(true)
+    if (hubOpen && !wasHubOpen.current) {
+      rightExpandedBeforeHub.current = rightExpanded
+      setRightExpanded(true)
+    } else if (!hubOpen && wasHubOpen.current) {
+      const before = rightExpandedBeforeHub.current
+      rightExpandedBeforeHub.current = null
+      if (before != null) setRightExpanded(before)
+    }
     wasHubOpen.current = hubOpen
-  }, [hubOpen, setRightExpanded])
+  }, [hubOpen, rightExpanded, setRightExpanded])
   // App 级订阅：离开 Hub 页期间产生的结算/告警也要收进告警中心（P2.5-05 复审 B3）。
   useEffect(() => attachHubEvents(), [])
   // hub:// 深链（P4-02）：主进程 open-url / second-instance 转发过来 → 打开 Hub 并定位。

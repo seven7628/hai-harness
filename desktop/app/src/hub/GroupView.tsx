@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DependencyList } from 'react'
 import { SendIcon } from '../components/icons'
 import { useHubStore } from './useHubStore'
+import { useAppStore } from '../store/useAppStore'
 import { hubCommand } from './api'
 import { GroupBubble } from './MessageBubble'
 import { RoundGroup } from './RoundGroup'
@@ -66,6 +67,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
+  const setRightExpanded = useAppStore((s) => s.setRightExpanded)
+  const rightExpanded = useAppStore((s) => s.rightExpanded)
   // P4-01 性能 memo 的启动期快照：localStorage['hub.perfMemo']='0' 后重载即关闭。
   // 只读一次（不在每次 render 访问 storage）；支持回滚不需要发版，见 perfFlags.ts。
   const [perfMemo] = useState(() => hubPerfMemoEnabled())
@@ -369,7 +372,10 @@ export default function GroupView({ group }: { group: HubGroup }) {
         ) : null}
         <button
           className={`hub-link ${inspector === 'context' ? 'on' : ''}`}
-          onClick={() => setInspector(inspector === 'context' ? null : 'context')}
+          onClick={() => {
+            setInspector(rightExpanded && inspector === 'context' ? null : 'context')
+            setRightExpanded(true)
+          }}
           title="上下文（只读）：触发上下文与提示词分层"
         >
           Context

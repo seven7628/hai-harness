@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { AlertIcon, Bot, CheckList, PanelRight, PencilIcon } from '../components/icons'
+import { AlertIcon, Bot, CheckList, LayersIcon, PanelRight, PencilIcon } from '../components/icons'
 import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
 import HubAvatar from './HubAvatar'
@@ -43,7 +43,7 @@ export default function HubInspector() {
             className={`rbtn ${panel == null ? 'on' : ''}`}
             data-tip="概览"
             aria-label="概览"
-            onClick={() => setPanel(null)}
+            onClick={() => { setPanel(null); setRightExpanded(true) }}
           >
             <Bot size={15} />
           </button>
@@ -64,6 +64,14 @@ export default function HubInspector() {
           >
             <AlertIcon size={15} />
             {needs.length > 0 ? <span className="todo-badge mono">{needs.length}</span> : null}
+          </button>
+          <button
+            className={`rbtn ${panel === 'context' ? 'on' : ''}`}
+            data-tip="上下文"
+            aria-label="上下文"
+            onClick={() => { setPanel('context'); setRightExpanded(true) }}
+          >
+            <LayersIcon size={15} />
           </button>
         </div>
       </aside>
@@ -121,6 +129,7 @@ function OverviewPanel() {
   const needs = useHubStore((s) => s.needs)
   const openEditor = useHubStore((s) => s.openEditor)
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
+  const setPanel = useHubStore((s) => s.setInspector)
 
   const group = groups.find((g) => g.id === activeGroupId) ?? null
   const agent = agents.find((a) => a.id === activeId) ?? profile
@@ -132,6 +141,10 @@ function OverviewPanel() {
     const groupRunning = conv?.status === 'running'
     const unread = groupInfo[group.id]?.unread ?? 0
     const groupAccent = accentOfGroup(group, agents)
+    const recentTasks = tasks.filter((task) =>
+      !isTerminal(task.status) &&
+      (task.origin?.group_id === group.id || task.target?.group_id === group.id),
+    ).slice(0, 3)
     return (
       <section className="hub-panel hub-overview" aria-label="群组概览">
         <div className="hub-ov-hero">
@@ -167,6 +180,7 @@ function OverviewPanel() {
             )
           })}
         </div>
+        <RecentTasks tasks={recentTasks} onOpen={() => setPanel('tasks')} />
         <footer className="hub-ov-actions">
           <button className="hub-btn" onClick={() => void copyDeepLink('group', group.id)}>复制链接</button>
         </footer>
@@ -187,6 +201,10 @@ function OverviewPanel() {
   }
 
   const isRunning = activeId ? running[activeId] === true : false
+  const recentTasks = tasks.filter((task) =>
+    !isTerminal(task.status) &&
+    (task.origin?.agent_id === agent.id || task.target?.agent_id === agent.id),
+  ).slice(0, 3)
   return (
     <section className="hub-panel hub-overview" aria-label="智能体概览">
       <div className="hub-ov-hero">
@@ -213,6 +231,7 @@ function OverviewPanel() {
         <dt>进行中任务</dt><dd>{activeTasks}</dd>
         <dt>Needs</dt><dd>{needs.length}</dd>
       </dl>
+      <RecentTasks tasks={recentTasks} onOpen={() => setPanel('tasks')} />
       <p className="hub-muted hub-ov-note">人格、工具、记忆与模型参数在「编辑」里；本页只读。</p>
       <footer className="hub-ov-actions hub-ov-foot">
         <button className="hub-btn primary" onClick={() => openEditor(agent)}>
@@ -220,6 +239,21 @@ function OverviewPanel() {
         </button>
       </footer>
     </section>
+  )
+}
+
+function RecentTasks({ tasks, onOpen }: { tasks: HubTask[]; onOpen: () => void }) {
+  if (tasks.length === 0) return null
+  return (
+    <div className="hub-ov-tasks">
+      <span className="hub-ov-label">正在做</span>
+      {tasks.map((task) => (
+        <button key={task.id} className="hub-ov-task" onClick={onOpen} title={task.title || task.instruction || task.id}>
+          <span className={`hub-chip task-${task.status ?? 'unknown'}`}>{statusLabel(task.status)}</span>
+          <span className="hub-ov-task-title">{task.title || task.instruction?.slice(0, 80) || task.id}</span>
+        </button>
+      ))}
+    </div>
   )
 }
 
