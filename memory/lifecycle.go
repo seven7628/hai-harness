@@ -375,3 +375,106 @@ func readOrEmpty(c Config, p string) []byte {
 	}
 	return raw
 }
+
+// Restore 把一个快照里的归档**原样恢复**：文件移回记忆目录、索引行插回原位。
+//
+// 这是"动作可逆"这句承诺的兑现处。没有它，四道护栏里的"只归档不删除"只是半个
+// 承诺——文件在归档区里，却没人能保证把它放回原来那一行。
+//
+// 索引行的位置：按快照里那一行**前一行**在当前索引里的位置插入；前一行也找不到
+// 就追加到末尾。顺序不是美学问题——热点清单按索引原序兜底并列项，位置变了，
+// 冷启动时哪几条先出现就变了。
+func (c Config) Restore(d Dir, snapshot string) ([]string, error) {
+	c = c.withDefaults()
+	entries, err := c.ReadDir(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	arch := c.archiveDir(d)
+
+	var snapIndex []string
+	if raw, err := c.ReadFile(joinSnapshot(snapshot)); err == nil {
+		snapIndex = strings.Split(string(raw), "\n")
+	}
+
+	var restored []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(name), ".md") ||
+			strings.EqualFold(name, IndexFileName) {
+			continue
+		}
+		dst := filepath.Join(d.Path, name)
+		if _, err := os.Stat(dst); err == nil {
+			continue // 已经在原地，不覆盖
+		}
+		src := filepath.Join(arch, name)
+		if _, err := os.Stat(src); err != nil {
+			src = filepath.Join(snapshot, name) // 归档区里没有就从快照里拿
+		}
+		if err := c.Rename(src, dst); err != nil {
+			continue
+		}
+		restored = append(restored, name)
+		c.restoreIndexLine(d, name, snapIndex)
+	}
+
+	if len(restored) > 0 {
+		logPath := filepath.Join(d.Path, stateDirName, "dream.log")
+		for _, name := range restored {
+			if f, err := c.OpenAppend(logPath); err == nil {
+				_, _ = f.WriteString(fmt.Sprintf("%s restore %s（快照 %s）\n",
+					c.Now().UTC().Format(time.RFC3339), name, filepath.Base(snapshot)))
+				_ = f.Close()
+			}
+		}
+	}
+	return restored, nil
+}
+
+// restoreIndexLine 把快照里属于该文件的那一行插回当前索引。
+func (c Config) restoreIndexLine(d Dir, name string, snapIndex []string) {
+	cur, err := c.ReadFile(joinIndex(d))
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(cur), "\n")
+	for _, l := range lines {
+		if target, _, ok := splitLocator(strings.TrimSpace(l)); ok && filepath.Base(target) == name {
+			return // 已经有了
+		}
+	}
+	// 找到快照里那一行及其前一行。
+	want, prev := "", ""
+	for _, l := range snapIndex {
+		if target, _, ok := splitLocator(strings.TrimSpace(l)); ok && filepath.Base(target) == name {
+			want = l
+			break
+		}
+		if strings.TrimSpace(l) != "" {
+			prev = l
+		}
+	}
+	if want == "" {
+		return // 快照里本来就没登记，不擅自加
+	}
+	at := -1
+	for i, l := range lines {
+		if prev != "" && l == prev {
+			at = i + 1
+			break
+		}
+	}
+	if at < 0 || at > len(lines) {
+		at = len(lines)
+	}
+	out := append([]string{}, lines[:at]...)
+	out = append(out, want)
+	out = append(out, lines[at:]...)
+	_ = c.atomicWrite(joinIndex(d), []byte(strings.Join(out, "\n")))
+}
+
+// joinSnapshot 拼快照里的索引路径。
+func joinSnapshot(snapshot string) string {
+	return filepath.Join(snapshot, IndexFileName)
+}

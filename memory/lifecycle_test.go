@@ -164,3 +164,42 @@ func TestParseDecisionsTolerant(t *testing.T) {
 		t.Fatalf("未知动作应降级为 keep：%+v", got)
 	}
 }
+
+// 恢复：文件和索引行都要回到原位，这是"只归档不删除"承诺的另一半。
+func TestRestorePutsFileAndIndexLineBack(t *testing.T) {
+	d, now := lifeFixture(t)
+	cfg := Config{Now: func() time.Time { return now }, ReadDir: os.ReadDir}
+
+	res, err := cfg.ApplyDecisions(d, []Decision{{File: "old.md", Action: ActionArchive, Reason: "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Archived) != 1 {
+		t.Fatalf("先要归档成功：%+v", res)
+	}
+
+	got, err := cfg.Restore(d, res.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "old.md" {
+		t.Fatalf("恢复结果 = %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(d.Path, "old.md")); err != nil {
+		t.Fatalf("文件应回到记忆目录：%v", err)
+	}
+	idx, _ := os.ReadFile(joinIndex(d))
+	if !strings.Contains(string(idx), "old.md") {
+		t.Fatalf("索引行应插回：\n%s", idx)
+	}
+	// 原来在 keep.md 之前，恢复后仍应在它之前。
+	si, ki := strings.Index(string(idx), "old.md"), strings.Index(string(idx), "keep.md")
+	if si < 0 || ki < 0 || si > ki {
+		t.Fatalf("索引顺序变了：\n%s", idx)
+	}
+	// 日志要记这次恢复。
+	logRaw, _ := os.ReadFile(filepath.Join(d.Path, stateDirName, "dream.log"))
+	if !strings.Contains(string(logRaw), "restore old.md") {
+		t.Fatalf("日志应记恢复：\n%s", logRaw)
+	}
+}

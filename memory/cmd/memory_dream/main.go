@@ -34,6 +34,7 @@ func main() {
 		apply = flag.String("apply", "", "执行模型裁决 JSON：archive / keep（带快照与日志）")
 		conf  = flag.String("conflicts", "", "导出待判冲突候选 JSON（交给模型判断有没有被推翻）")
 		savec = flag.String("save-conflicts", "", "保存模型给出的冲突判定 JSON")
+		rest  = flag.String("restore", "", "把一个快照里的归档原样恢复（文件 + 索引行）")
 	)
 	flag.Parse()
 
@@ -83,6 +84,17 @@ func main() {
 
 	for _, id := range ids {
 		d := memory.Dir{ID: id, Path: filepath.Join(base, id)}
+		if *rest != "" {
+			got, err := cfg.Restore(d, *rest)
+			if err != nil {
+				fail("%s 恢复失败：%v", id, err)
+			}
+			fmt.Printf("%s：恢复 %d 条\n", id, len(got))
+			for _, f := range got {
+				fmt.Println("  恢复 " + f)
+			}
+			continue
+		}
 		if *conf != "" {
 			cands, err := cfg.ConflictCandidates(d, 180*24*time.Hour)
 			if err != nil {
