@@ -107,6 +107,47 @@ func pluginSnapshot(plg *plugin.Registry, ctx context.Context) []map[string]any 
 	return caps
 }
 
+// annotateIMOwner 把 IM 条目的状态**改成当前归属的**（owner 隔离的管理面）。
+//
+// 为什么必须在快照之后覆盖：IM 能力的 State()/IsEnabled() 是连接面事实（进程级共享），
+// 直接用会把「连接的开关」当成「这个归属的开关」—— A 群启用后 B 群也显示启用，正是
+// 审计里要消除的跨 owner 假象。这里按 plugin/im.OwnerView 覆盖，并保留连接面信息
+// （sharedConnected / gateways）供设置页说明「连接由所有归属共享」。
+func (m *manager) annotateIMOwner(caps []map[string]any, ownerID string) {
+	if m.imPlugin == nil {
+		return
+	}
+	for _, cap := range caps {
+		if cap["id"] != implugin.ID {
+			continue
+		}
+		v := m.imPlugin.OwnerView(ownerID)
+		cap["owner"] = v.Owner
+		cap["ownerLabel"] = ownerScopeLabel(v.Owner)
+		cap["ownerEnabled"] = v.Enabled
+		cap["ownerRoutes"] = v.Routes
+		cap["masterEnabled"] = v.Master
+		cap["sharedConnected"] = v.Connected
+		cap["gateways"] = v.Gateways
+		cap["enabled"] = v.Enabled
+		switch {
+		case !v.Enabled:
+			// StatusReady = 组件就绪但**未启用**（与本归属的 enabled=false 一致）。
+			cap["status"] = string(plugin.StatusReady)
+			cap["reason"] = "该归属未启用（连接由其它归属共享）"
+		case v.Connected > 0:
+			cap["status"] = string(plugin.StatusEnabled)
+			cap["reason"] = fmt.Sprintf("%d 个网关已连接", v.Connected)
+		case v.Routes == 0:
+			cap["status"] = string(plugin.StatusEnabled)
+			cap["reason"] = "已启用（该归属还没有路由）"
+		default:
+			cap["status"] = string(plugin.StatusEnabled)
+			cap["reason"] = "已启用（网关连接中/未连上）"
+		}
+	}
+}
+
 // refreshComputerApprovedApps 热更新所有工作区的 Computer Use 已授权 App 集合
 // （reload_settings 后调用：授权集合变更立即生效，无需重启插件/应用）。
 func (m *manager) refreshComputerApprovedApps() {
@@ -205,10 +246,19 @@ func (m *manager) handlePluginCommand(c command) {
 	ctx := context.Background()
 	plg := m.runtime(ws).plugins
 	id := str(c.Payload, "id")
+	// 归属：plugin_list/enable/disable 的「启用状态」是**按归属**的（IM 首次落地）。
+	// 没有归属时不猜：IM 的启停会明确报错，其它插件行为不变（它们本来就是按工作区实例）。
+	ownerID, ownerErr := ownerFromPayload(c)
 
 	switch c.Type {
 	case "plugin_list":
-		m.resp(c, true, "", map[string]any{"plugins": pluginSnapshot(plg, ctx)})
+		caps := pluginSnapshot(plg, ctx)
+		m.annotateIMOwner(caps, ownerID)
+		m.resp(c, true, "", map[string]any{
+			"plugins":    caps,
+			"owner":      ownerID,
+			"ownerLabel": ownerScopeLabel(ownerID),
+		})
 
 	case "plugin_install": // 受管安装 / 一键升级（异步跑 npm，不阻塞 dispatch）
 		m.asyncPluginOp(c, ws, id, "install", func() error { return m.installPluginUpgrade(ctx, ws, id) })
@@ -222,6 +272,29 @@ func (m *manager) handlePluginCommand(c command) {
 		m.resp(c, true, "", nil)
 
 	case "plugin_enable": // 启用 → 工具注册进引擎（embedded 先确保内嵌端点，见 enablePlugin）
+		// IM：**按归属启用**（连接共享，不复制长连接）。A 群/agent 的启用与 B 无关；
+		// 没有归属就拒绝（不把启用写成全局 —— 那正是 A 群影响 B 群的来源）。
+		if id == implugin.ID {
+			if m.imPlugin == nil {
+				m.resp(c, false, "IM 插件不可用", nil)
+				return
+			}
+			if ownerErr != nil || ownerID == "" {
+				m.resp(c, false, "缺少归属（owner）：启用 IM 需要 agent:/group:/workspace: 之一", nil)
+				return
+			}
+			if err := m.imPlugin.SetOwnerEnabled(ctx, ownerID, true); err != nil {
+				m.resp(c, false, err.Error(), nil)
+				return
+			}
+			// 连接起来后必须装配事件桥（与 enablePlugin/autoEnable 同一条路径）：
+			// 否则「启用成功」但收不到消息、结果也不推回 IM。
+			m.attachIMBridge(ws)
+			m.rebuildWorkspace(ws)
+			m.emitPluginStatus(ws)
+			m.resp(c, true, "", map[string]any{"owner": ownerID, "ownerEnabled": true, "ownerLabel": ownerScopeLabel(ownerID)})
+			return
+		}
 		// Browser 引擎互斥（2026-09）：引擎=ego 时拒绝手动启用 browser（MCP）插件，
 		// 给可操作指引（切回 mcp 引擎）。ego 引擎下浏览器能力走 ego-browser skill。
 		if id == browser.ID && m.getBrowserEngine() == EngineEgo {
@@ -235,6 +308,26 @@ func (m *manager) handlePluginCommand(c command) {
 		m.resp(c, true, "", nil)
 
 	case "plugin_disable": // 禁用 → 工具从引擎摘除
+		// IM：按归属关闭。只有在**没有任何归属仍启用**时才停共享连接 ——
+		// 「关 A 群」不得把 B 智能体正在用的连接掐掉。
+		if id == implugin.ID {
+			if m.imPlugin == nil {
+				m.resp(c, false, "IM 插件不可用", nil)
+				return
+			}
+			if ownerErr != nil || ownerID == "" {
+				m.resp(c, false, "缺少归属（owner）：关闭 IM 需要 agent:/group:/workspace: 之一", nil)
+				return
+			}
+			if err := m.imPlugin.SetOwnerEnabled(ctx, ownerID, false); err != nil {
+				m.resp(c, false, err.Error(), nil)
+				return
+			}
+			m.rebuildWorkspace(ws)
+			m.emitPluginStatus(ws)
+			m.resp(c, true, "", map[string]any{"owner": ownerID, "ownerEnabled": false, "ownerLabel": ownerScopeLabel(ownerID)})
+			return
+		}
 		if err := plg.Disable(ctx, id); err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return

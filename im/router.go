@@ -23,7 +23,8 @@ type Router struct {
 	mu       sync.RWMutex
 	routes   []RouteConfig
 	mirrors  []MirrorConfig
-	byChat   map[Chat]string           // Chat → workspace（路由快照）
+	byChat   map[Chat]string           // Chat → workspace（路由快照；项目路由的便捷视图）
+	byRoute  map[Chat]RouteConfig      // Chat → 完整路由（owner/目标；投递用这个）
 	byMirror map[string][]MirrorConfig // session_id → 镜像（快照）
 }
 
@@ -46,9 +47,11 @@ func (r *Router) Update(cfg Config) {
 	r.routes = routes
 	r.mirrors = append([]MirrorConfig(nil), cfg.Mirrors...)
 	r.byChat = make(map[Chat]string, len(routes))
+	r.byRoute = make(map[Chat]RouteConfig, len(routes))
 	for _, rc := range routes {
 		if c, ok := rc.Chat.Normalize(); ok {
 			r.byChat[c] = rc.Workspace
+			r.byRoute[c] = rc
 		}
 	}
 	r.byMirror = make(map[string][]MirrorConfig, len(cfg.Mirrors))
@@ -67,6 +70,35 @@ func (r *Router) RouteFor(chat Chat) (string, bool) {
 	defer r.mu.RUnlock()
 	ws, ok := r.byChat[c]
 	return ws, ok
+}
+
+// RouteForChat 查完整路由（含投递目标与归属）。
+//
+// 为什么新增而不是改 RouteFor：RouteFor 的语义是「Chat → workspace」，被既有调用方
+// 当作「驱动哪个工作区」使用；owner 隔离后投递目标可能是 agent/group，调用方必须能拿到
+// 完整路由（否则会拿空 workspace 去建会话）。RouteFor 保留为项目路由的便捷视图。
+func (r *Router) RouteForChat(chat Chat) (RouteConfig, bool) {
+	c, ok := chat.Normalize()
+	if !ok {
+		return RouteConfig{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rc, ok := r.byRoute[c]
+	return rc, ok
+}
+
+// RoutesForOwner 某归属名下的全部路由（管理面/诊断：A 群有几条路由，不会看到 B 的）。
+func (r *Router) RoutesForOwner(ownerID string) []RouteConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]RouteConfig, 0, len(r.routes))
+	for _, rc := range r.routes {
+		if rc.EffectiveOwner() == ownerID {
+			out = append(out, rc)
+		}
+	}
+	return out
 }
 
 // MirrorsForSession 查某会话的全部镜像（可关联多个 Chat）。
