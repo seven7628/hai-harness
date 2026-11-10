@@ -42,6 +42,9 @@ type DreamReport struct {
 	MissingMeta []string
 	NeverRead   []string
 	Duplicates  [][2]string
+	// Anchors 是代码锚点核对结果（Dream v1.5）。Unbound=true 表示这个记忆库还没绑定
+	// 本地仓库路径，整段跳过——**跳过不等于没问题**，报告里会写明。
+	Anchors AnchorReport
 }
 
 // DreamIndexStats 是索引的体量与限额读数（官方 200 行 / 25KB）。
@@ -54,7 +57,7 @@ type DreamIndexStats struct {
 
 // HasIssues 判断这份报告有没有值得看的内容。
 func (r DreamReport) HasIssues() bool {
-	return len(r.NotIndexed) > 0 || len(r.Stale) > 0 || len(r.MissingType) > 0 ||
+	return len(r.Anchors.Dead) > 0 || len(r.NotIndexed) > 0 || len(r.Stale) > 0 || len(r.MissingType) > 0 ||
 		len(r.MissingMeta) > 0 || len(r.Duplicates) > 0 ||
 		r.Index.OverLine || r.Index.OverByte
 }
@@ -141,6 +144,13 @@ func (c Config) Dream(d Dir) (DreamReport, error) {
 	sort.Strings(out.MissingMeta)
 	sort.Strings(out.NeverRead)
 	sort.Slice(out.Duplicates, func(i, j int) bool { return out.Duplicates[i][0] < out.Duplicates[j][0] })
+
+	// 代码锚点核对：失败只记在报告里，不让整份盘点失败。
+	if ar, err := c.CheckAnchors(d); err == nil {
+		out.Anchors = ar
+	} else {
+		out.Anchors = AnchorReport{Root: "", Unbound: true}
+	}
 	return out, nil
 }
 
@@ -174,6 +184,33 @@ func (r DreamReport) Markdown(now time.Time) string {
 		b.WriteString("## 索引已超限\n\n")
 		b.WriteString("超出官方 200 行 / 25KB 的部分在下次加载时被丢弃——**模型看不见它们，" +
 			"但文件还在**。这是唯一一处「内容仍在、却已经不在注入里」的状态。\n\n")
+	}
+
+	// 锚点：先说"核没核"，再说"核出什么"——没核与核过没问题，是两件事。
+	if r.Anchors.Unbound {
+		b.WriteString("## 代码锚点：未核对\n\n" +
+			"这个记忆库还没有绑定本地仓库路径（`.state/repo.json`），所以没法核对" +
+			"记忆里引用的代码文件是否还在。**这不等于没问题。**\n" +
+			"绑定一次即可：`go run ./memory/cmd/memory_dream --bind <工作区路径>`。\n\n")
+	} else if len(r.Anchors.Dead) > 0 {
+		fmt.Fprintf(&b, "## 代码锚点失效（%d 条引用，涉 %d 条记忆）\n\n",
+			len(r.Anchors.Dead), len(r.Anchors.ByFile))
+		fmt.Fprintf(&b, "核对仓库 `%s`（%d 个文件）；共抽到 %d 条引用。\n\n",
+			r.Anchors.Root, r.Anchors.RepoFiles, r.Anchors.Refs)
+		b.WriteString("这些引用指向的文件在仓库里已经找不到了。可能是文件改名/删除，" +
+			"也可能这条记忆本身已经过时——**两种都要人看一眼**，所以只报不改。\n\n")
+		limit := 12
+		for i, a := range r.Anchors.Dead {
+			if i >= limit {
+				fmt.Fprintf(&b, "- …另有 %d 条\n", len(r.Anchors.Dead)-limit)
+				break
+			}
+			fmt.Fprintf(&b, "- `%s` → `%s`\n", a.File, a.Ref)
+		}
+		b.WriteString("\n")
+	} else if r.Anchors.RepoFiles > 0 {
+		fmt.Fprintf(&b, "## 代码锚点：全部可核对（%d 条引用 / 仓库 %d 个文件）\n\n"+
+			"记忆里引用的代码文件都还在。\n\n", r.Anchors.Refs, r.Anchors.RepoFiles)
 	}
 
 	section("未登记", "这些文件不在 MEMORY.md 里，启动注入不会包含它们（内容仍可被 read_file 读到）。",

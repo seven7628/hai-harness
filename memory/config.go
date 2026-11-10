@@ -124,6 +124,11 @@ type Config struct {
 	WriteFile func(string, []byte, os.FileMode) error
 	Rename    func(string, string) error
 	Remove    func(string) error
+	// RepoFiles 列举某个代码仓库里的全部文件（相对路径）。nil = git ls-files，失败时退回遍历。
+	//
+	// 做梦要用它核对"记忆里引用的代码文件还在不在"（Dream v1.5）。抽成出口的理由与
+	// 其他 I/O 一样：测试要能在临时目录上跑，不能真去 exec git。
+	RepoFiles func(root string) ([]string, error)
 	// MkdirAll 建目录出口（nil = os.MkdirAll）。usage 落在 <memory-dir>/.state/ 下，
 	// 第一次记录前要把该目录建出来；与其余出口同一理由抽出来，好让测试指向临时目录。
 	MkdirAll func(string, os.FileMode) error
@@ -239,6 +244,9 @@ func (c Config) withDefaults() Config {
 	}
 	if out.Remove == nil {
 		out.Remove = os.Remove
+	}
+	if out.RepoFiles == nil {
+		out.RepoFiles = listRepoFiles
 	}
 	if out.MkdirAll == nil {
 		out.MkdirAll = os.MkdirAll

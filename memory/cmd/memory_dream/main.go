@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -26,8 +27,20 @@ func main() {
 	var (
 		root = flag.String("root", "", "记忆根目录（默认 ~/.go-code/memory/repos）")
 		repo = flag.String("repo", "", "只盘点这个 repo-id")
+		bind = flag.String("bind", "", "把这个工作区与它的记忆目录绑定（写 .state/repo.json），然后退出")
+		ws   = flag.String("workspace", "", "配合 --bind：会话实际工作区（默认同仓库路径）")
 	)
 	flag.Parse()
+
+	// 绑定只需要解析一次身份，与盘点无关，所以先处理并直接返回。
+	if *bind != "" {
+		d, err := memory.Config{}.BindRepoAt(context.Background(), *bind, *ws)
+		if err != nil {
+			fail("绑定失败：%v", err)
+		}
+		fmt.Printf("已绑定：%s → %s\n", d.Path, *bind)
+		return
+	}
 
 	base := *root
 	if base == "" {
