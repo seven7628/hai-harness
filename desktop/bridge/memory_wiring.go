@@ -43,13 +43,18 @@ type memoryHost struct {
 
 	once sync.Once
 	dir  *memory.Dir
+
+	// dreamMu/dreaming 防止同一目录被并发触发多次盘点：会话开得越频繁，
+	// 越容易在"上次还没跑完"时又开一次。
+	dreamMu  sync.Mutex
+	dreaming map[string]bool
 }
 
 // newMemoryHost 装配期构造。**不**在这里解析身份：解析要跑 git，而装配期的
 // context 不总是可用的（会话 ctx 在 buildLoop 阶段尚未就绪，session 变量还是 nil）。
 // 身份改为惰性解析 —— 第一次真的需要目录时才跑 git。
 func newMemoryHost(cfg memory.Config) *memoryHost {
-	return &memoryHost{cfg: cfg}
+	return &memoryHost{cfg: cfg, dreaming: map[string]bool{}}
 }
 
 // resolve 取记忆目录（成功则缓存，失败则每次重试）。workdir 为空时不做任何事。
@@ -108,12 +113,51 @@ func (h *memoryHost) injectionFor(dir memory.Dir) string {
 	if h.cfg.Disabled() {
 		return ""
 	}
+	// 自动盘点（Dreaming 第一步）：过时了就在后台跑一次，**不在这条路径上等**。
+	// 实测一次完整盘点（含扫会话转录）约 8 秒——放在会话创建的关键路径上，
+	// 用户看到的就是"打开会话卡住了"。
+	h.maybeDream(dir)
 	inj, err := h.cfg.BuildInjection(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[memory] 读索引失败：%v\n", err)
 		return ""
 	}
 	return inj.Text
+}
+
+// maybeDream 在盘点过时时后台跑一次只读盘点。
+//
+// 边界：只跑 Dream（只读、写一份摘要），**不做裁决也不归档**——归档要模型给理由、
+// 宿主过护栏、事后跑回归，那一步不能自动触发。
+func (h *memoryHost) maybeDream(dir memory.Dir) {
+	if h.cfg.Disabled() || !h.cfg.DreamDue(dir) {
+		return
+	}
+	h.dreamMu.Lock()
+	if h.dreaming == nil {
+		h.dreaming = map[string]bool{}
+	}
+	if h.dreaming[dir.ID] {
+		h.dreamMu.Unlock()
+		return
+	}
+	h.dreaming[dir.ID] = true
+	h.dreamMu.Unlock()
+
+	go func() {
+		defer func() {
+			h.dreamMu.Lock()
+			delete(h.dreaming, dir.ID)
+			h.dreamMu.Unlock()
+		}()
+		n, err := h.cfg.RunDreamAndSave(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] 自动盘点失败（%s）：%v\n", dir.ID, err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[memory] 自动盘点完成（%s）：%d 条，问题 %v\n",
+			dir.ID, n.Topics, n.HasIssues())
+	}()
 }
 
 // subagentInjection 返回某个子 agent 自己的记忆目录的注入段。

@@ -92,6 +92,10 @@ type Injection struct {
 	// Reason 注入形态标识："disabled" / "no-identity" / "no-index" / "empty-index"，
 	// 有索引正文时为空串。仅供装配层日志与测试断言，**不参与**是否注入的判定。
 	Reason string
+	// Dream 本次注入末尾附带的"上次盘点"一句（空 = 没有或已过期）。
+	// 单独留一个字段是因为它**不是记忆内容**：评估时要能把"模型自己写的索引"与
+	// "宿主加的提示"分开归因（同 guidance 的边界）。
+	Dream string
 }
 
 // Empty 无注入文本。装配层据此**不改动系统提示词的任何字节**。
@@ -116,7 +120,20 @@ func (c Config) BuildInjection(d Dir) (Injection, error) {
 		// 开关前置判定发生在任何 I/O 之前：关闭时**一次读盘都不发生**。
 		return Injection{Enabled: false, Reason: "disabled"}, nil
 	}
-	return c.buildInjection(d)
+	inj, err := c.buildInjection(d)
+	if err != nil || inj.Empty() {
+		return inj, err
+	}
+	// 上次盘点的结论附在最后：它是**事实**（有几条锚点失效），不是建议。
+	// 附在 guidance 之后而不是之前，是为了让"索引正文 → 形态说明 → 盘点结论"
+	// 保持"内容先、宿主的话后"的顺序，测试也能按这个边界切分。
+	if n, ok := c.LoadDreamNote(d); ok {
+		if line := dreamNotice(n, c.Now()); line != "" {
+			inj.Text += "\n\n" + line
+			inj.Dream = line
+		}
+	}
+	return inj, nil
 }
 
 func (c Config) buildInjection(d Dir) (Injection, error) {
