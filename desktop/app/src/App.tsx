@@ -15,6 +15,8 @@ import SettingsModal from './components/SettingsModal'
 import ToastView from './components/ToastView'
 import BootScreen from './components/BootScreen'
 import HubSurface from './hub/HubSurface'
+import HubInspector from './hub/HubInspector'
+import AgentEditor from './hub/AgentEditor'
 import './hub/hub.css'
 import { attachHubEvents, useHubStore } from './hub/useHubStore'
 import BridgeBanner from './components/BridgeBanner'
@@ -142,6 +144,26 @@ export default function App() {
   const hubOpen = useHubStore((s) => s.open)
   const hubAlerts = useHubStore((s) => s.alerts)
   const openHub = useHubStore((s) => s.openHub)
+  const hubEditor = useHubStore((s) => s.editor)
+  const closeEditor = useHubStore((s) => s.closeEditor)
+  const openAgent = useHubStore((s) => s.openAgent)
+  const clearHubSelection = useHubStore((s) => s.clearSelection)
+  // 进入 Hub 时确保右栏展开（概览是详情的主入口）；只在打开的那一次强制，
+  // 用户随后手动收起右栏不被反复顶开（折叠态由 HubInspector 自己提供图标条）。
+  // 退出 Hub 时恢复进入前的折叠状态：Hub 是临时视图，不应改变工作区的布局偏好。
+  const wasHubOpen = useRef(false)
+  const rightExpandedBeforeHub = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (hubOpen && !wasHubOpen.current) {
+      rightExpandedBeforeHub.current = rightExpanded
+      setRightExpanded(true)
+    } else if (!hubOpen && wasHubOpen.current) {
+      const before = rightExpandedBeforeHub.current
+      rightExpandedBeforeHub.current = null
+      if (before != null) setRightExpanded(before)
+    }
+    wasHubOpen.current = hubOpen
+  }, [hubOpen, rightExpanded, setRightExpanded])
   // App 级订阅：离开 Hub 页期间产生的结算/告警也要收进告警中心（P2.5-05 复审 B3）。
   useEffect(() => attachHubEvents(), [])
   // hub:// 深链（P4-02）：主进程 open-url / second-instance 转发过来 → 打开 Hub 并定位。
@@ -161,9 +183,9 @@ export default function App() {
       {mainReady && <BridgeBanner />}
       {mainReady && (
         <main className="main">
-          {/* Hub 打开时**不卸载**工作区树：composer 草稿/附件在组件本地 state，
-              卸载即丢（P1-08 复核 B1）。用 display:none 隐藏，尺寸由 .main-surface 撑开。 */}
-          <div className={hubOpen ? 'main-surface hidden' : 'main-surface'}>
+          {/* Hub 打开时**不卸载**工作区中栏/右栏：composer 草稿、附件、右栏标签与
+              滚动位置都是组件本地 state，卸载即丢（P1-08 复核 B1）。
+              只把对应 host 设 display:none（见 .hub-host-stack），面板尺寸保持不变。 */}
           <Group
             orientation="horizontal"
             className="main-group"
@@ -204,7 +226,16 @@ export default function App() {
             </Panel>
             <Separator className="resize-handle" />
             <Panel minSize={300}>
-              <CenterPanel />
+              <div className={`hub-host-stack ${hubOpen ? 'hub-on' : ''}`}>
+                <div className="hub-host-cell workspace-cell">
+                  <CenterPanel />
+                </div>
+                {hubOpen ? (
+                  <div className="hub-host-cell hub-cell">
+                    <HubSurface />
+                  </div>
+                ) : null}
+              </div>
             </Panel>
             <Separator className="resize-handle" />
             <Panel
@@ -222,11 +253,18 @@ export default function App() {
                 setRightExpanded(!(rightRef[0]?.isCollapsed() ?? false))
               }}
             >
-              <RightPanel />
+              <div className={`hub-host-stack ${hubOpen ? 'hub-on' : ''}`}>
+                <div className="hub-host-cell workspace-cell">
+                  <RightPanel />
+                </div>
+                {hubOpen ? (
+                  <div className="hub-host-cell hub-cell">
+                    <HubInspector />
+                  </div>
+                ) : null}
+              </div>
             </Panel>
           </Group>
-          </div>
-          {hubOpen ? <HubSurface /> : null}
         </main>
       )}
       {splash && (
@@ -247,7 +285,21 @@ export default function App() {
           <span className="hub-global-alert-text">{hubAlerts[0].message || hubAlerts[0].code}</span>
         </button>
       ) : null}
-      {!hubOpen && <Statusbar />}
+      {/* Hub 现在是 App shell 的一部分，状态栏常驻（工作区与 Hub 共用同一条底栏）。 */}
+      <Statusbar />
+      {hubEditor ? (
+        <AgentEditor
+          agent={hubEditor === 'new' ? null : hubEditor}
+          onClose={closeEditor}
+          onSaved={(id) => {
+            closeEditor()
+            void useHubStore.getState().refresh()
+            // 新建/删除返回 id / ''：新建后直接进它的会话；删除后清空右栏概览。
+            if (id) void openAgent(id)
+            else clearHubSelection()
+          }}
+        />
+      ) : null}
       <SandboxReleaseModal />
       <NewWorkspaceModal />
       <IMBindConfirmModal />

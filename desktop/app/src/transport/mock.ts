@@ -2692,6 +2692,63 @@ class MockTransport implements Transport {
         break
       }
       // —— P3b-07：群组 / @ / 自动对话 / 任务卡 ——
+      case 'hub_search': {
+        // 浏览器 mock 的全历史搜索（bridge 同名命令的简化版）：扫 DM/群消息，
+        // 按时间倒序返回首页。只为本地 UI 联调；分页游标在 mock 里不产生。
+        const q = String(cmd.payload?.query ?? '').trim().toLowerCase()
+        const scope = String(cmd.payload?.scope ?? 'all')
+        const limit = Math.max(1, Math.min(200, Number(cmd.payload?.limit ?? 50)))
+        type Hit = Record<string, unknown>
+        const hits: Array<{ at: number; hit: Hit }> = []
+        const snippet = (text: string): string => {
+          if (!q) return text.slice(0, 120)
+          const i = text.toLowerCase().indexOf(q)
+          if (i < 0) return text.slice(0, 120)
+          return text.slice(Math.max(0, i - 40), Math.min(text.length, i + q.length + 80))
+        }
+        if (q && (scope === 'all' || scope === 'dm')) {
+          for (const a of this.hubAgents) {
+            if (a.deleted === true) continue
+            const agentID = String(a.id)
+            for (const m of this.hubLog(agentID)) {
+              if (!m.text.toLowerCase().includes(q)) continue
+              hits.push({
+                at: Date.parse(m.created_at) || 0,
+                hit: {
+                  scope: 'dm', agent_id: agentID, name: String(a.name ?? agentID),
+                  seq: m.seq, message_id: `dm_${agentID}_${m.seq}`, snippet: snippet(m.text),
+                  sender: m.sender.kind === 'human' ? '你' : String(a.name ?? agentID),
+                  sender_kind: m.sender.kind, sender_agent_id: m.sender.agent_id ?? '',
+                  kind: 'text', created_at: m.created_at,
+                },
+              })
+            }
+          }
+        }
+        if (q && (scope === 'all' || scope === 'group')) {
+          for (const g of this.hubGroups) {
+            const gid = String(g.id)
+            for (const m of this.hubGroupLog(gid)) {
+              if (!m.text.toLowerCase().includes(q)) continue
+              const member = this.hubAgents.find((a) => a.id === m.sender.agent_id)
+              hits.push({
+                at: Date.parse(m.created_at) || 0,
+                hit: {
+                  scope: 'group', group_id: gid, name: String(g.name ?? gid),
+                  seq: m.seq, message_id: m.id, snippet: snippet(m.text),
+                  sender: m.sender.kind === 'human' ? '你' : String(member?.name ?? m.sender.agent_id ?? ''),
+                  sender_kind: m.sender.kind, sender_agent_id: m.sender.agent_id ?? '',
+                  kind: m.kind, created_at: m.created_at,
+                },
+              })
+            }
+          }
+        }
+        hits.sort((x, y) => y.at - x.at)
+        const page = hits.slice(0, limit).map((x) => x.hit)
+        this.respond(cmd, { hits: page, has_more: hits.length > page.length })
+        break
+      }
       case 'hub_group_list': {
         const progress: Record<string, unknown> = {}
         for (const g of this.hubGroups) progress[String(g.id)] = this.hubGroupProgress(String(g.id))

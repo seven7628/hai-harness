@@ -24,6 +24,15 @@ export interface AgentForm {
   disable: string
 }
 
+/**
+ * 编辑器「日预算」初始值：新建默认 20；已有智能体缺 policy = 未设置（0 = 不限）。
+ * 不能沿用 20：agentPatch 会把它和 `policy?.daily_budget_usd ?? 0` 比较，
+ * 于是只改名字也会写出 policy，把「不限」悄悄变成 $20（复审 task-7rscybyy）。
+ */
+export function initialDailyBudget(agent?: HubAgent | null): number {
+  return agent ? (agent.policy?.daily_budget_usd ?? 0) : 20
+}
+
 /** 撤下工具：空格/逗号分隔，去空、去重。 */
 export function normalizeDisable(text: string): string[] {
   const seen = new Set<string>()

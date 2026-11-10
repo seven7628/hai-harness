@@ -2,7 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { hubCommand } from './api'
 import type { HubAgent } from './types'
 import { useT } from '../i18n'
-import { buildAgentPatch, buildAgentProfile, type AgentForm } from './agentPatch'
+import { useAppStore } from '../store/useAppStore'
+import { buildAgentPatch, buildAgentProfile, initialDailyBudget, type AgentForm } from './agentPatch'
+import {
+  EFFORT_VALUES, chooseModelOnProviderSwitch, effortChoices, modelsForProvider,
+  newAgentDefaults, providerOptions, unlistedValue,
+} from './agentModelOptions'
 
 // 智能体资料页（§8.5）：新建/编辑，5 个页签。
 //
@@ -51,6 +56,10 @@ export default function AgentEditor({
 }) {
   const t = useT()
   const isNew = !agent
+  // 下拉选项来自设置（Provider/Models 在设置页维护），不是手输自由文本。
+  const providerSettings = useAppStore((s) => s.settings.provider)
+  const fetchedModels = useAppStore((s) => s.fetchedModels)
+  const globalModel = useAppStore((s) => s.model)
   const [tab, setTab] = useState<Tab>('basic')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -61,11 +70,18 @@ export default function AgentEditor({
   const [accent, setAccent] = useState(agent?.accent ?? '#7bc199')
   const [role, setRole] = useState(agent?.role ?? '')
   const [description, setDescription] = useState(agent?.description ?? '')
-  const [provider, setProvider] = useState(agent?.provider ?? '')
-  const [model, setModel] = useState(agent?.model ?? '')
+  // 新智能体默认 = 设置里的 active Provider + 当前全局模型（属于该 Provider 时）；
+  // 编辑已有智能体原样保留，未知 Provider/Model 也不会被静默改写。
+  const [defaults] = useState(() => {
+    if (agent) return { provider: agent.provider ?? '', model: agent.model ?? '' }
+    const st = useAppStore.getState()
+    return newAgentDefaults(st.settings.provider, st.fetchedModels, st.model)
+  })
+  const [provider, setProvider] = useState(defaults.provider)
+  const [model, setModel] = useState(defaults.model)
   const [effort, setEffort] = useState(agent?.effort ?? '')
   const [threshold, setThreshold] = useState(agent?.compress_threshold ?? 0.8)
-  const [dailyBudget, setDailyBudget] = useState(agent?.policy?.daily_budget_usd ?? 20)
+  const [dailyBudget, setDailyBudget] = useState(initialDailyBudget(agent))
   const [taskBudget, setTaskBudget] = useState(agent?.policy?.max_task_cost_usd ?? 0)
   const [memoryOn, setMemoryOn] = useState(agent?.memory?.enabled !== false)
 
@@ -101,6 +117,36 @@ export default function AgentEditor({
     ],
     [t],
   )
+
+  // 模型/档位下拉的候选值：过滤/并集/排序都在 agentModelOptions 里（有 node 回归）。
+  const providers = useMemo(() => providerOptions(providerSettings), [providerSettings])
+  const providerIds = useMemo(() => providers.map((p) => p.id), [providers])
+  const models = useMemo(
+    () => modelsForProvider(providerSettings, fetchedModels, provider),
+    [providerSettings, fetchedModels, provider],
+  )
+  const unknownProvider = unlistedValue(provider, providerIds)
+  const unknownModel = unlistedValue(model, models)
+  const unknownEffort = unlistedValue(effort, EFFORT_VALUES)
+  const efforts = useMemo(() => effortChoices(), [])
+
+  // 冷启动直接进 Hub 时设置可能晚于编辑器挂载：新智能体仍是空 Provider → 补一次默认值。
+  useEffect(() => {
+    if (!isNew || provider) return
+    const d = newAgentDefaults(providerSettings, fetchedModels, globalModel)
+    if (!d.provider) return
+    setProvider(d.provider)
+    setModel((cur) => cur || d.model)
+  }, [isNew, provider, providerSettings, fetchedModels, globalModel])
+
+  /** 切 Provider：模型仍在新列表就留着，否则落到第一个可用模型（没有就清空）。 */
+  function changeProvider(next: string): void {
+    setProvider(next)
+    setModel((cur) => chooseModelOnProviderSwitch(
+      cur,
+      modelsForProvider(providerSettings, fetchedModels, next),
+    ))
+  }
 
   // Esc 关闭（遮罩点击已支持；键盘用户不该只能点鼠标）。
   useEffect(() => {
@@ -338,53 +384,107 @@ export default function AgentEditor({
                     <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
                   </label>
                   <label>{t('hub.field.provider')}
-                    <input value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="deepseek" />
+                    <select value={provider} onChange={(e) => changeProvider(e.target.value)}>
+                      {providers.length === 0 ? (
+                        <option value="" disabled>{t('hub.provider.empty')}</option>
+                      ) : provider === '' ? (
+                        <option value="" disabled>{t('hub.provider.choose')}</option>
+                      ) : null}
+                      {/* 当前 Provider 不在设置里（改名/已删）：保留可见，绝不静默改写。 */}
+                      {unknownProvider ? (
+                        <option value={unknownProvider} disabled>
+                          {unknownProvider} · {t('hub.option.unlisted')}
+                        </option>
+                      ) : null}
+                      {providers.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                    {providers.length === 0 && unknownProvider ? (
+                      <span className="hub-hint">{t('hub.provider.empty')}</span>
+                    ) : null}
                   </label>
                   <label>{t('hub.field.model')}
-                    <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-v4-flash" />
+                    <select value={model} onChange={(e) => setModel(e.target.value)}>
+                      {provider === '' ? (
+                        <option value="" disabled>{t('hub.provider.empty')}</option>
+                      ) : models.length === 0 ? (
+                        <option value="" disabled>{t('hub.model.empty')}</option>
+                      ) : model === '' ? (
+                        <option value="" disabled>{t('hub.model.choose')}</option>
+                      ) : null}
+                      {/* 当前 Model 不在该 Provider 的列表里：保留可见，避免保存时被顺手改掉。 */}
+                      {unknownModel ? (
+                        <option value={unknownModel} disabled>
+                          {unknownModel} · {t('hub.option.unlisted')}
+                        </option>
+                      ) : null}
+                      {models.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                    {provider !== '' && models.length === 0 && unknownModel ? (
+                      <span className="hub-hint">{t('hub.model.empty')}</span>
+                    ) : null}
                   </label>
                   <label>{t('hub.field.effort')}
                     <select value={effort} onChange={(e) => setEffort(e.target.value)}>
-                      <option value="">{t('hub.effort.default')}</option>
-                      <option value="low">low</option>
-                      <option value="medium">medium</option>
-                      <option value="high">high</option>
+                      {efforts.map((choice) => (
+                        <option key={choice.value || 'default'} value={choice.value}>
+                          {choice.value ? choice.label : t('hub.effort.default')}
+                        </option>
+                      ))}
+                      {/* 未知档位（旧数据/手写配置）原样保留，不转成任何档位。 */}
+                      {unknownEffort ? (
+                        <option value={unknownEffort} disabled>
+                          {unknownEffort} · {t('hub.option.unlisted')}
+                        </option>
+                      ) : null}
                     </select>
                   </label>
-                  <label>{t('hub.field.threshold')}
-                    <input
-                      type="range"
-                      min={0.5}
-                      max={0.95}
-                      step={0.01}
-                      value={threshold}
-                      onChange={(e) => setThreshold(Number(e.target.value))}
-                    />
-                    <span className="hub-sub">{threshold.toFixed(2)}</span>
-                  </label>
-                  <label>{t('hub.field.dailyBudget')}
-                    <input
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={dailyBudget}
-                      onChange={(e) => setDailyBudget(Math.max(0, Number(e.target.value) || 0))}
-                    />
-                  </label>
-                  <label>{t('hub.field.taskBudget')}
-                    <input
-                      type="number"
-                      min={0}
-                      step={0.5}
-                      value={taskBudget}
-                      onChange={(e) => setTaskBudget(Math.max(0, Number(e.target.value) || 0))}
-                    />
-                  </label>
-                  <p className="hub-muted wide">{t('hub.budgetHint')}</p>
-                  <label className="inline">
-                    <input type="checkbox" checked={memoryOn} onChange={(e) => setMemoryOn(e.target.checked)} />
-                    {t('hub.field.memory')}
-                  </label>
+
+                  {/* 预算/压缩/记忆收进折叠区：第一屏只留身份 + 模型。 */}
+                  <details className="hub-advanced">
+                    <summary>{t('hub.advanced')}</summary>
+                    <div className="hub-advanced-body">
+                      <div className="hub-form">
+                        <label>{t('hub.field.threshold')}
+                          <input
+                            type="range"
+                            min={0.5}
+                            max={0.95}
+                            step={0.01}
+                            value={threshold}
+                            onChange={(e) => setThreshold(Number(e.target.value))}
+                          />
+                          <span className="hub-sub">{threshold.toFixed(2)}</span>
+                        </label>
+                        <label>{t('hub.field.dailyBudget')}
+                          <input
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={dailyBudget}
+                            onChange={(e) => setDailyBudget(Math.max(0, Number(e.target.value) || 0))}
+                          />
+                        </label>
+                        <label>{t('hub.field.taskBudget')}
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.5}
+                            value={taskBudget}
+                            onChange={(e) => setTaskBudget(Math.max(0, Number(e.target.value) || 0))}
+                          />
+                        </label>
+                        <p className="hub-hint">{t('hub.budgetHint')}</p>
+                        <label className="inline">
+                          <input type="checkbox" checked={memoryOn} onChange={(e) => setMemoryOn(e.target.checked)} />
+                          {t('hub.field.memory')}
+                        </label>
+                      </div>
+                    </div>
+                  </details>
                 </div>
               ) : null}
 
