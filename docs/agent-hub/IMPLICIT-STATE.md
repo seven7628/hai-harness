@@ -188,7 +188,7 @@
 | BR-01 | B1 | D/S | P0 | desktop/app/electron/main.ts:471-518; main.ts:562-575; main.ts:1446-1486 | ① 老配置被钉死在旧默认值上，新版本改默认（新模型、新 reminder_rounds、新 provider 预置）对老用户永不生效，且无法区分“用户选的 30”和“默认的 30” |
 | BR-02 | B2 | S/Q | P0 | desktop/bridge/config_patch.go:1-24; config_patch.go:36-40; desktop/bridge/oauth.go:150-181 | bridge 那份 providers 快照会覆盖 Electron 刚写入的 api_key / label / prices / usage_input_includes_cache → 界面显示“已保存”但 key 丢失（详见 raw B2） |
 | BR-03 | B3 | I/F | P0 | desktop/bridge/jsonwire/jsonwire.go:5-10; jsonwire.go:64-141; desktop/bridge/main.go:653-680 | 跨会话串台——最严重的一类：消息/任务/用量被记到错误会话，用户看到“别人的内容出现在我的对话里” |
-| BR-04 | B4 | L/H | P0 | main.ts:806; main.ts:945; main.ts:964 | ① mainWindow 为 null 时该行触发 TypeError，抛在 readline 的 'line' 监听里 → 主进程未捕获异常（轻则丢这一行，重则崩溃，取决于 Electron 对 uncaughtException 的处置（详见 raw B4） |
+| BR-04 | B4 | L/H | P0 | main.ts:806; main.ts:945; main.ts:964 | ① mainWindow 为 null 时该行触发 TypeError，抛在 readline 的 'line' 监听里 → 主进程未捕获异常（轻则丢这一行，重则崩溃，取决于 Electron 对 uncaughtException 的处置；详见 raw B4） |
 | BR-08 | B8 | H/I | P0 | main.ts:1521-1528; main.ts:263-300; main.ts:875-880 | ① 凭据随“配置文件”外泄 |
 | BR-09 | B9 | M/S | P0 | session/block_store.go:776-778; session/store_record.go:315-325; session/store_record.go:381 | 历史丢失：本应“回退到上一份可用快照”，实际得到 0 块 → 会话空白（正是用户看到的“历史不出来”） |
 | BR-21 | B21 | G/H | P0 | desktop/bridge/main.go:1294-1340; main.go:1288-1293; main.go:6573-6584 | 跨工作区越权读取/写入（沙箱根错配） |
@@ -212,7 +212,7 @@
 | GO-21 | G21 | D | P1 | mcp/manager.go:43 | 模型看不到也调不到任何 MCP 工具，且没有任何报错——注释原文："等价于把 MCP 功能对模型整体关闭（既不在 ToolParams、也没有任何东西能把它加载回来）" |
 | GO-22 | G22 | M/H | P1 | hooks/trust.go:32–39 | 用户"配了 hooks 却不生效" |
 | GO-24 | G24 | H/T | P1 | desktop/bridge/appdata.go:31 | 会话历史"丢失"（其实是分裂成两份） |
-| BR-05 | B5 | Q/I | P1 | desktop/app/src/store/useAppStore.ts:2505; useAppStore.ts:3605; useAppStore.ts:3647-3668 | pending[id] 被新页面的同号命令覆盖 → 旧命令的迟到响应会当成新命令的响应被消费（useAppStore.ts:4645-4649：const meta = pending[r.id]; delete pending[r.id]（详见 raw B5） |
+| BR-05 | B5 | Q/I | P1 | desktop/app/src/store/useAppStore.ts:2505; useAppStore.ts:3605; useAppStore.ts:3647-3668 | pending[id] 被新页面的同号命令覆盖 → 旧命令的迟到响应会当成新命令的响应被消费（useAppStore.ts:4645-4649：const meta = pending[r.id]; delete pending[r.id]；详见 raw B5） |
 | BR-06 | B6 | Q/I | P1 | main.ts:105; main.ts:1007; useAppStore.ts:3605 | 主进程超时/迟到响应以负 id 落到 renderer 无主响应，污染全局 bridgeError |
 | BR-07 | B7 | Q/I | P1 | desktop/bridge/mobile_server.go:586-605; main.go:2160-2169; mobile_server.go:569-585 | 第二条响应被静默丢弃（buffer 已满时），且桌面端也收不到——属于“事件黑洞”，比串台更难查 |
 | BR-10 | B10 | Q/H | P1 | agenthub/store.go:130; main.ts:1862-1875; main.ts:121,267 | ① Hub 账本/群日志并发追加 → 交错行、seq 重复、manifest 与日志不一致 |
@@ -347,8 +347,7 @@
 | 1（2–4 周） | 去结构性债 | Hub `next_seq` 落盘、queue TTL、cron running 折叠；registry/锁表引用计数 + Stats；事件 seq/origin/epoch；前端 ScopeKeyMap + 单 selector + docRefs 分槽 | 重启后同 client_msg_id 不重复执行；queued 超期自动 interrupted；registry size 有上限；切会话不串 docRefs |
 | 2（持续） | 可观测与防回归 | effective config 脱敏输出；缓存/registry/queue 指标；丢弃分支 trace；季度状态清点；ADR 固化生命周期 | 每次“历史不出来/一直转圈”都能在日志里定位到具体丢弃分支；新增全局状态有登记 |
 
-**v1→v2 迁移规则（阶段 0 的前置）**：以发布时的 `DEFAULT_SETTINGS` 快照为基线，逐键删除与默认值**完全相同**的顶层键；`provider` 段只保留显式 `api_key/label/prices/usage_input_includes_cache` 与 `deleted` 标记；未知键原样保留。迁移前写 `settings.json.bak`，失败回滚；迁移幂等，完成后写 `schema_version: 2`。无法判定“用户显式设为默认”的键（例如真的手动选了 30）按“保留”处理，不猜。
-
+**v1→v2 迁移规则（阶段 0 的前置）**：以发布时的 `DEFAULT_SETTINGS` 快照为基线，逐键删除与默认值**完全相同**的顶层键（删除优先）；`provider` 段只保留显式 `api_key/label/prices/usage_input_includes_cache` 与 `deleted` 标记；未知键原样保留。值等于默认但用户曾显式选择的键无法与“被固化的默认”区分，统一按删除处理并接受其未来跟随新默认——这是 v1 不可恢复的信息；v2 起 UI 写入时落 `explicit` 标记，后续迁移不再丢失用户意图。迁移前写 `settings.json.bak`，失败回滚；迁移幂等，完成后写 `schema_version: 2`。
 
 ### 9.4 建议的验收指标
 
