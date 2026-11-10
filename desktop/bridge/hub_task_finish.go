@@ -468,7 +468,7 @@ func hubAlertSeverity(code string) string {
 	switch code {
 	case "recovery_failed", "blocked_budget", "push_failed", "settle_failed",
 		"artifact_register_failed", "batch_conflict", "notify_failed", "injected_conflict",
-		"task_result_card_failed", "bad_header":
+		"task_result_card_failed", "bad_header", "hub_archive_failed":
 		return "error"
 	case "usage_unpriced", "recovered_interrupted", "queue_unavailable",
 		"dispatch_denied", "concurrency_limit", "duplicate_task", "chain_too_deep",

@@ -128,6 +128,8 @@ func (m *manager) hubStore() (*agenthub.FileStore, error) {
 	if m.hubFS != nil {
 		st := m.hubFS
 		m.mu.Unlock()
+		// 不持 m.mu 启动后台归档：spawnHubBackground 会取 hubBgMu，归档循环也要读 m.mu。
+		m.ensureHubArchiveLoop()
 		return st, nil
 	}
 	m.mu.Unlock()
@@ -138,11 +140,15 @@ func (m *manager) hubStore() (*agenthub.FileStore, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.hubFS != nil { // 并发首次打开：用先到的那个，丢掉自己这份
-		return m.hubFS, nil
+		existing := m.hubFS
+		m.mu.Unlock()
+		m.ensureHubArchiveLoop()
+		return existing, nil
 	}
 	m.hubFS = st
+	m.mu.Unlock()
+	m.ensureHubArchiveLoop()
 	return st, nil
 }
 

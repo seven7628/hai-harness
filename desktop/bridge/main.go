@@ -1203,6 +1203,12 @@ type manager struct {
 	// hubShutdown 进程/测试彻底关停：此后禁止重建 hub runtime/DM 会话/后台任务。
 	// 与 hubBgClosing（单代后台闸门）分开，避免迟到结算把已关闭的 runtime 复活。
 	hubShutdown atomic.Bool
+	// hubArchive* 冷归档后台 ticker（P4-04b-2b）。interval 零值 = 5 分钟；
+	// lastErr 按错误字符串去重 hub_alert，避免每个 tick 刷屏。
+	hubArchiveMu       sync.Mutex
+	hubArchiveRunning  bool
+	hubArchiveLastErr  string
+	hubArchiveInterval time.Duration
 	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
 	hubMsgDedup map[string]string
 	// —— 对话控制器（P3b-04，见 hub_conversation.go） ——
