@@ -44,6 +44,8 @@ type DreamReport struct {
 	Duplicates  [][2]string
 	// Transcripts 是会话转录里的引用轨迹（Dream v2）。
 	Transcripts TranscriptReport
+	// Conflicts 是冲突判定（Dream v3）：哪些记忆被后续会话印证 / 推翻。
+	Conflicts map[string]ConflictVerdict
 	// Anchors 是代码锚点核对结果（Dream v1.5）。Unbound=true 表示这个记忆库还没绑定
 	// 本地仓库路径，整段跳过——**跳过不等于没问题**，报告里会写明。
 	Anchors AnchorReport
@@ -158,6 +160,8 @@ func (c Config) Dream(d Dir) (DreamReport, error) {
 		out.Transcripts = TranscriptReport{Unbound: true}
 	}
 
+	out.Conflicts = c.ReadConflicts(d)
+
 	// 代码锚点核对：失败只记在报告里，不让整份盘点失败。
 	if ar, err := c.CheckAnchors(d); err == nil {
 		out.Anchors = ar
@@ -224,6 +228,45 @@ func (r DreamReport) Markdown(now time.Time) string {
 			fmt.Fprintf(&b, "- %s ⟵ 最后引用 %d 天前\n", n, int(ago.Hours()/24))
 		}
 		b.WriteString("\n")
+	}
+
+	// 冲突：最重要的一条结论单独列出来，因为它是唯一会**改变记忆内容真假**的证据。
+	if len(r.Conflicts) > 0 {
+		var contra, upheld, other int
+		for _, v := range r.Conflicts {
+			switch v.Verdict {
+			case ConflictContradicted:
+				contra++
+			case ConflictUpheld:
+				upheld++
+			default:
+				other++
+			}
+		}
+		fmt.Fprintf(&b, "## 冲突核验（已判 %d 条）\n\n", len(r.Conflicts))
+		fmt.Fprintf(&b, "被后续会话印证 **%d** 条，被推翻 **%d** 条，片段无关 %d 条。\n\n", upheld, contra, other)
+		if contra > 0 {
+			b.WriteString("被推翻的条目：\n\n")
+			files := make([]string, 0, contra)
+			for f, v := range r.Conflicts {
+				if v.Verdict == ConflictContradicted {
+					files = append(files, f)
+				}
+			}
+			sort.Strings(files)
+			for i, f := range files {
+				if i >= 8 {
+					fmt.Fprintf(&b, "- …另有 %d 条\n", len(files)-8)
+					break
+				}
+				fmt.Fprintf(&b, "- `%s` — %s\n", f, r.Conflicts[f].Reason)
+			}
+			b.WriteString("\n")
+		} else {
+			b.WriteString("**没有发现被推翻的条目。** 注意这只说明「候选片段里没有反证」，" +
+				"不等于「一定没被推翻」——\n反证往往出现在不含原锚点的句子里（「那个改回去」），" +
+				"这类只能靠人读。\n\n")
+		}
 	}
 
 	// 锚点：先说"核没核"，再说"核出什么"——没核与核过没问题，是两件事。

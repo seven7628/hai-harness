@@ -279,7 +279,9 @@ type EvidenceRow struct {
 	LastReadDays int    `json:"last_read_days"` // -1 = 转录里从未出现
 	AnchorRefs   int    `json:"anchor_refs"`
 	AnchorDead   int    `json:"anchor_dead"`
-	Summary      string `json:"summary"` // 索引行摘要（模型判断"这条讲什么"用）
+	Summary      string `json:"summary"`            // 索引行摘要（模型判断"这条讲什么"用）
+	Conflict     string `json:"conflict,omitempty"` // 冲突判定：upheld/contradicted/unrelated/no_session
+	ConflictWhy  string `json:"conflict_why,omitempty"`
 }
 
 // Evidence 收集该记忆库的逐条证据。
@@ -300,6 +302,7 @@ func (c Config) Evidence(d Dir) (Evidence, error) {
 		an = a
 	}
 	summaries := c.indexSummaries(d)
+	conflicts := c.ReadConflicts(d)
 	listed := c.indexedSet(d)
 
 	now := c.Now()
@@ -313,6 +316,10 @@ func (c Config) Evidence(d Dir) (Evidence, error) {
 			AnchorRefs:   an.RefsByFile[name],
 			AnchorDead:   an.ByFile[name],
 			Summary:      summaries[name],
+		}
+		if v, ok := conflicts[name]; ok {
+			row.Conflict = v.Verdict
+			row.ConflictWhy = v.Reason
 		}
 		if ago := tr.SilencedFor(name, now); ago >= 0 {
 			row.LastReadDays = int(ago.Hours() / 24)

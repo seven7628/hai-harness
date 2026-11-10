@@ -32,6 +32,8 @@ func main() {
 		bind  = flag.String("bind", "", "把这个工作区与它的记忆目录绑定（写 .state/repo.json），然后退出")
 		evid  = flag.String("evidence", "", "把每条记忆的证据导出成 JSON（交给模型裁决）")
 		apply = flag.String("apply", "", "执行模型裁决 JSON：archive / keep（带快照与日志）")
+		conf  = flag.String("conflicts", "", "导出待判冲突候选 JSON（交给模型判断有没有被推翻）")
+		savec = flag.String("save-conflicts", "", "保存模型给出的冲突判定 JSON")
 	)
 	flag.Parse()
 
@@ -81,6 +83,36 @@ func main() {
 
 	for _, id := range ids {
 		d := memory.Dir{ID: id, Path: filepath.Join(base, id)}
+		if *conf != "" {
+			cands, err := cfg.ConflictCandidates(d, 180*24*time.Hour)
+			if err != nil {
+				fail("%s 取冲突候选失败：%v", id, err)
+			}
+			out, _ := json.MarshalIndent(map[string]any{"repo": id, "candidates": cands}, "", "  ")
+			path := strings.TrimSuffix(*conf, ".json") + "-" + id + ".json"
+			if err := os.WriteFile(path, out, 0o600); err != nil {
+				fail("写冲突候选失败：%v", err)
+			}
+			fmt.Printf("%s：候选 %d 条 → %s\n", id, len(cands), path)
+			continue
+		}
+		if *savec != "" {
+			raw, err := os.ReadFile(*savec)
+			if err != nil {
+				fail("读判定失败：%v", err)
+			}
+			var payload struct {
+				Verdicts []memory.ConflictVerdict `json:"verdicts"`
+			}
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				fail("解析判定失败：%v", err)
+			}
+			if err := cfg.SaveConflicts(d, payload.Verdicts); err != nil {
+				fail("保存判定失败：%v", err)
+			}
+			fmt.Printf("%s：已保存 %d 条判定\n", id, len(payload.Verdicts))
+			continue
+		}
 		if *apply != "" {
 			raw, err := os.ReadFile(*apply)
 			if err != nil {
