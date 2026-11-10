@@ -128,7 +128,7 @@ func TestHotListRanksByReadCount(t *testing.T) {
 	}
 }
 
-// 冷启动（没有任何 usage）时退化为索引原序，而不是"随便挑 8 条"。
+// 冷启动（没有任何 usage）时退化为索引原序，而不是"随便挑 K 条"。
 func TestHotListColdStartKeepsIndexOrder(t *testing.T) {
 	var b strings.Builder
 	for _, n := range []string{"a.md", "b.md", "c.md"} {
@@ -147,7 +147,7 @@ func TestHotListColdStartKeepsIndexOrder(t *testing.T) {
 //
 // 页脚是这一档的安全带：没有它，模型会把精简清单当成完整清单，
 // 判定"这条我没记过"并重记一遍（与 truncationNotice 同一循环）。
-func TestHotListCapsAtEightAndSaysItIsPartial(t *testing.T) {
+func TestHotListCapsAtKAndSaysItIsPartial(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 20; i++ {
 		b.WriteString("- f")
@@ -328,7 +328,8 @@ func TestHotTierInjectionUsesUsage(t *testing.T) {
 	d := memDir(t)
 	var b strings.Builder
 	b.WriteString("# Memory Index\n")
-	for i := 0; i < 12; i++ {
+	// 条目数必须**多于** K，否则"Top-K 之外不出现"这条断言恒真（K=16 之后 12 条全进）。
+	for i := 0; i < HotListSize+8; i++ {
 		b.WriteString("- f" + itoa(i) + ".md\n")
 	}
 	writeIndex(t, d, b.String())
@@ -347,8 +348,8 @@ func TestHotTierInjectionUsesUsage(t *testing.T) {
 	if !strings.Contains(inj.Text, "f10.md") {
 		t.Fatalf("被读最多的条目必须出现在注入里：\n%s", inj.Text)
 	}
-	if strings.Contains(inj.Text, "f9.md") {
-		t.Fatalf("Top-8 之外的条目不该出现：\n%s", inj.Text)
+	if strings.Contains(inj.Text, "f"+itoa(HotListSize+7)+".md") {
+		t.Fatalf("Top-K 之外的条目不该出现：\n%s", inj.Text)
 	}
 }
 
@@ -376,7 +377,7 @@ func TestHotTierRespectsDisabledSwitch(t *testing.T) {
 	}
 }
 
-// 条目装得下时说明段不能说"挑出的 8 条"：那会让模型去找 5 条不存在的东西。
+// 条目装得下时说明段不能说"挑出的 K 条"：那会让模型去找若干条不存在的东西。
 func TestGuidanceDoesNotClaimPartialWhenNothingOmitted(t *testing.T) {
 	d := memDir(t)
 	writeIndex(t, d, "# Memory Index\n- a.md\n- b.md\n")

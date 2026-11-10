@@ -61,7 +61,7 @@ const (
 // 是 5–7k token，而 57% 的请求根本不需要记忆——于是有了"档位"：
 //
 //	full  官方形态，整份索引。语义最完整，成本最高。用于评估对照与"查不到东西"时的兜底。
-//	hot   热点清单：按被读次数挑 Top-8（见 hotlist.go）。**产品默认**。
+//	hot   热点清单：按被读次数挑 Top-K（见 hotlist.go 的 HotListSize）。**产品默认**。
 //	gate  闸门：注入前逐条判断相关性。P2 才实现，当前**等价 hot**（见 injectionTier）。
 //
 // 为什么默认 hot 而不是 full：这不是省 token 的微优化。全量注入把 54 条从未被读过
@@ -74,7 +74,7 @@ const (
 const (
 	// InjectionFull 整份索引（官方形态）。
 	InjectionFull = "full"
-	// InjectionHot 热点清单 Top-8。
+	// InjectionHot 热点清单 Top-K（K 见 HotListSize）。
 	InjectionHot = "hot"
 	// InjectionGate 相关性闸门（P2，尚未实现；当前等价 hot）。
 	InjectionGate = "gate"
@@ -104,7 +104,7 @@ type Config struct {
 	//
 	// 零值不是 full：零值代表"用户没选过"，而产品的默认形态是 hot（见 Injection* 的
 	// 注释）。要全量注入必须显式写 InjectionFull——本包不给"忘了传就悄悄回到 5k token"
-	// 留后门，也不给"忘了传就悄悄砍成 8 条"留后门：两种默认都写在这里，可读可测。
+	// 留后门，也不给"忘了传就悄悄砍成 K 条"留后门：两种默认都写在这里，可读可测。
 	Injection string
 
 	// Resolve 身份解析器（nil = memory.New()，即真实 git）。

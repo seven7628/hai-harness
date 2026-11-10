@@ -82,12 +82,12 @@ func guidance(d Dir, hasIndex bool, tier string, omitted int) string {
 	b.WriteString(strings.Join(memoryTypes(), " / "))
 	b.WriteString(" 之一。\n")
 	// ④ 这一句必须**按档位如实陈述**，不能照抄官方那句"加载前 200 行"：
-	// 官方描述的是全量注入，而 hot 档注入的是 Top-8 子集。说错了会让模型把
-	// "注入里只有 8 条"读成"索引里只有 8 条"，进而重写索引或重记记忆——
+	// 官方描述的是全量注入，而 hot 档注入的是 Top-K 子集。说错了会让模型把
+	// "注入里只有 K 条"读成"索引里只有 K 条"，进而重写索引或重记记忆——
 	// 与 truncationNotice 要防的是同一个循环，只是入口不同。
 	//
-	// 只有**真的省略了条目**时才说"8 条"：索引本来就只有 3 条时照说"挑出的 8 条"
-	// 会让模型以为还藏着 5 条，然后去找一个不存在的东西。
+	// 只有**真的省略了条目**时才说"K 条"：索引本来就只有 3 条时照说"挑出的 K 条"
+	// 会让模型以为还藏着若干条，然后去找一个不存在的东西。
 	if tier == InjectionHot && omitted > 0 {
 		b.WriteString("- 启动时只加载 `")
 		b.WriteString(IndexFileName)
