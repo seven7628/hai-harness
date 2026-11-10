@@ -1729,8 +1729,8 @@ const BASE = {
       "status": "done",
       "note": "群消息样式修订：独立作者气泡、去外框/同轮表头、任务卡上下文与产物卡、mock 增富；delta review PASS",
       "review": "passed",
-      "commit": "93c1a7c + 689ab75 + 303f0e2",
-      "reviewNote": "task-uywytq78 PASS：5 条原始要求逐条达标；P1-1 owner-only human chip、P2-1 任务卡上下文、P2-2 旧产物规则、P2-3 容器查询、P2-4 i18n、P2-5 mock/测试均已修复并复验；P3 残留（modified 对比度/hardcoded title/断言语义）已在 303f0e2 收口。tsc/test:p4/css/build 全绿；5176 DOM 实测 .hub-round-group=0、3 产物行、系统行不在 .hub-msg 内。"
+      "commit": "93c1a7c + 689ab75 + 303f0e2 + 503d515",
+      "reviewNote": "task-uywytq78 PASS（两轮）：5 条原始要求达标；P1-1 owner-only human chip、P2-1 任务卡上下文、P2-2 旧产物规则、P2-3 容器查询、P2-4 i18n、P2-5 mock/测试均修复；P3 对比度/title 在 303f0e2，human 分支断言判别力在 503d515 收口（模拟只留 agent chip 会失败）；test:hub 23 项全绿。"
     },
     {
       "id": "P5-01",
@@ -1746,8 +1746,8 @@ const BASE = {
       "status": "done",
       "note": "三路只读调研（task-24z9jt7z / task-agn8vh3q / task-fa93d6sx）+ 主会话汇总；delta review PASS",
       "review": "passed",
-      "commit": "ee5b33e + 8cc8ab9",
-      "reviewNote": "task-cftz5wcy PASS：93 条/17-44-31-1、按面 5/15/7/1 + 8/15/7/0 + 4/14/17/0、主类 16/14/12/12/9/6/6/5/5/4/3/1、编号零漏零重、表格列数/排序/交叉引用全过；M1-M6 + S1-S11 已修；R1/R2（截断、v1→v2 迁移规则/回滚）已在 8cc8ab9 收口。"
+      "commit": "ee5b33e + 8cc8ab9 + 074ddfd",
+      "reviewNote": "task-cftz5wcy PASS（三轮）：93 条/17-44-31-1、按面 5/15/7/1 + 8/15/7/0 + 4/14/17/0、主类 16/14/12/12/9/6/6/5/5/4/3/1、编号零漏零重、表格列数/排序/交叉引用全过；M1-M6 + S1-S11 已修；R1 括号/截断与 R2 v1→v2 迁移规则在 8cc8ab9 + 074ddfd 收口，全表括号配对回归通过。"
     }
   ],
   "deferred": [
@@ -2690,15 +2690,15 @@ const BASE = {
     },
     "P4-UI-4": {
       "status": "done",
-      "commit": "93c1a7c + 689ab75 + 303f0e2",
+      "commit": "93c1a7c + 689ab75 + 303f0e2 + 503d515",
       "review": "passed",
-      "reviewNote": "task-uywytq78 PASS；5 条要求 + 6 项 P1/P2 修复 + P3 收口"
+      "reviewNote": "task-uywytq78 PASS（两轮）：5 条原始要求达标；P1-1 owner-only human chip、P2-1 任务卡上下文、P2-2 旧产物规则、P2-3 容器查询、P2-4 i18n、P2-5 mock/测试均修复；P3 对比度/title 在 303f0e2，human 分支断言判别力在 503d515 收口（模拟只留 agent chip 会失败）；test:hub 23 项全绿。"
     },
     "P5-01": {
       "status": "done",
-      "commit": "ee5b33e + 8cc8ab9",
+      "commit": "ee5b33e + 8cc8ab9 + 074ddfd",
       "review": "passed",
-      "reviewNote": "task-cftz5wcy PASS；93 条/17-44-31-1；M1-M6 + S1-S11 + R1/R2 收口"
+      "reviewNote": "task-cftz5wcy PASS（三轮）：93 条/17-44-31-1、按面 5/15/7/1 + 8/15/7/0 + 4/14/17/0、主类 16/14/12/12/9/6/6/5/5/4/3/1、编号零漏零重、表格列数/排序/交叉引用全过；M1-M6 + S1-S11 已修；R1 括号/截断与 R2 v1→v2 迁移规则在 8cc8ab9 + 074ddfd 收口，全表括号配对回归通过。"
     }
   },
   "reviewGate": {
