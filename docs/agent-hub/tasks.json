@@ -1369,11 +1369,11 @@
       ],
       "acceptance": "Provider/Model 从设置里的 Providers/Models 继承为真下拉；切换 Provider 时若当前 Model 不在新列表则自动选第一个；当前值不在列表时保留 disabled 当前项，不静默丢失；Effort 为 跟随模型默认 + None/Minimal/Low/Medium/High/XHigh/Max 共 8 项；预算/压缩/记忆开关折叠进高级，默认收起；保留现有页签与保存语义。",
       "tests": "npx tsc --noEmit && npm run build && npm run test:hub-patch && npm run test:hub && npm run test:css",
-      "status": "review",
-      "note": "预算默认值已修复（b75a415）；delta 复审中",
-      "review": null,
+      "status": "done",
+      "note": "UI-2 收口：Provider/Model 真下拉 + 8 档 Effort + 高级折叠；预算默认值修复后 PASS",
+      "review": "passed",
       "commit": "4834c44 + b75a415",
-      "reviewNote": "首轮 CHANGES_REQUESTED：无 policy 旧智能体 name-only 保存写 $20；修复 b75a415（initialDailyBudget，existing 缺失=0，new=20）+ 27 条回归；delta 复审进行中。"
+      "reviewNote": "delta review task-7rscybyy PASS（HEAD b75a415）：无 policy 旧智能体 name-only 保存不再写 $20；policy 缺 daily / 显式 0/20 / 新建 20 全部正确；Provider/Model/Effort/advanced/i18n/620 布局回归通过；test:hub-patch 27/27、test:hub-model-options 31/31，全门禁绿。"
     },
     {
       "id": "P4-UI-3",
@@ -1388,8 +1388,8 @@
       ],
       "acceptance": "对照用户参考图 1–3：左栏 section、中栏对话、右栏详情、per-agent 颜色与系统通知；5176 真实浏览器覆盖智能体/群组/搜索/返回工作区/编辑器下拉/三主题；独立 Review PASS 后才收口。",
       "tests": "browser review on localhost:5176 + independent review",
-      "status": "todo",
-      "note": "待 UI-2",
+      "status": "in_progress",
+      "note": "UI-2 PASS，开始参考图/5176 视觉终验",
       "review": null
     }
   ],
@@ -2320,9 +2320,14 @@
       "reviewNote": "delta review PASS（59aef20）；五条阻断/P2 全部修复，门禁全绿。"
     },
     "P4-UI-2": {
-      "status": "review",
+      "status": "done",
       "commit": "4834c44 + b75a415",
-      "reviewNote": "预算默认值修复 b75a415；delta 复审进行中"
+      "review": "passed",
+      "reviewNote": "delta review PASS（b75a415）；预算默认值修复，全门禁绿。"
+    },
+    "P4-UI-3": {
+      "status": "in_progress",
+      "reviewNote": "参考图 1–3 + Effort 菜单图已从会话提取；5176 视觉/交互终验中"
     }
   },
   "reviewGate": {
