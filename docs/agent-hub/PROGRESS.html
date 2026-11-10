@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P4 后端 04b-2 全部 passed；UI 重设计（shell + 编辑器 + 视觉验收）进行中",
+  "subtitle": "P4 全部收口：04b-2 + UI 重设计（UI-1/2/3 PASS）；代码在 hub-ui 分支，待合并决策",
   "updated": "2026-11-09",
   "phases": [
     {
@@ -1690,11 +1690,11 @@ const BASE = {
       ],
       "acceptance": "对照用户参考图 1–3：左栏 section、中栏对话、右栏详情、per-agent 颜色与系统通知；5176 真实浏览器覆盖智能体/群组/搜索/返回工作区/编辑器下拉/三主题；独立 Review PASS 后才收口。",
       "tests": "browser review on localhost:5176 + independent review",
-      "status": "review",
-      "note": "144px tabs 残留已修复（4c88a85）；最终 delta 复审中",
-      "review": null,
-      "reviewNote": "delta 4/5 PASS；残留 1440+144px tabs 换行。修复 4c88a85：tabs 默认 nowrap + min-width:max-content + 横向滚动；141px 下 66×26/55×26 单行、counts/back 可见；900/980 仍单行。最终复审进行中。",
-      "commit": "a9844f9 + 4c88a85"
+      "status": "done",
+      "note": "UI-3 收口：参考图/5176 视觉终验 PASS",
+      "review": "passed",
+      "reviewNote": "final delta review task-sz5gnmgk PASS（HEAD 4c88a85）：1440+144px tabs 单行、900/980 单行、右栏 close 在面板内、群 context/round 居中、DM 平铺+18px 顶部、paper 元数据 6.33:1；全门禁 test:p4/css/hub-patch 27/hub-model-options 31/tsc 双配置绿。UI-1/2/3 全部 PASS。",
+      "commit": "771809f + 59aef20 + 4834c44 + b75a415 + a9844f9 + 4c88a85"
     }
   ],
   "deferred": [
@@ -2630,9 +2630,10 @@ const BASE = {
       "reviewNote": "delta review PASS（b75a415）；预算默认值修复，全门禁绿。"
     },
     "P4-UI-3": {
-      "status": "review",
-      "commit": "a9844f9 + 4c88a85",
-      "reviewNote": "144px tabs 修复 4c88a85；最终复审中"
+      "status": "done",
+      "commit": "4c88a85",
+      "review": "passed",
+      "reviewNote": "final delta PASS；UI-1/2/3 全部收口。"
     }
   },
   "reviewGate": {
