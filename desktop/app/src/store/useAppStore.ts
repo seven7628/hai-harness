@@ -15,6 +15,8 @@ import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAtt
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
+// 归属（owner）编码：信任/启用按归属隔离（FE 侧只做展示与回传，判定在 bridge）
+import { ownerValid, sessionOwner } from '../lib/owner'
 import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
 
@@ -392,7 +394,7 @@ export interface HookSectionView {
 }
 
 // 一个 hooks 配置来源（用户配置 / Claude 兼容层 / 某项目的 hooks.json）。
-export interface HookSourceView {
+export interface HookSourceView extends HookOwnerFields {
   id: string
   kind: 'user' | 'claude-user' | 'project'
   title: string
@@ -416,6 +418,15 @@ export interface HookClaudeFile {
   body?: HookSectionView
 }
 
+// 归属（owner）相关的响应字段（FE/BR-21 owner 隔离）。
+// owner = workspace:<path> | agent:<id> | group:<id>；由 bridge 派生并回显，
+// UI 只负责展示与**回传**（hooks_trust / plugin_enable 等都必须带上它）。
+export interface HookOwnerFields {
+  owner?: string // 该来源的信任归属
+  ownerLabel?: string // 展示用短标签
+  trust?: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 该归属下命令 → 状态
+}
+
 // 某项目的 hooks 来源（bridge hooks_list.projects 一项）。
 export interface HookProjectView extends HookSourceView {
   claude?: HookClaudeFile[]
@@ -434,14 +445,29 @@ export interface HooksInfo {
     readClaudeSettings: boolean
     sources: string[]
   }
-  trust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 命令 → 信任状态
+  trust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 命令 → 信任状态（当前归属）
   warnings: string[]
+  // 当前归属（用户级来源的信任判定按它；hooks_trust 必须回传）。
+  owner?: string
+  ownerKind?: string
+  ownerLabel?: string
+  // 当前归属下「只靠迁移前全局条目生效」的命令（提示重新确认）。
+  legacyTrust?: string[]
+  owners?: string[] // 已登记过确认的归属清单（诊断/展示）
   at?: number // 前端回填的取回时刻（保存/刷新后递增 → 详情面板据此把本地副本重同步为磁盘态）
 }
 
 // 插件（SettingsModal 插件 tab）：bridge plugin_list 返回（能力包状态/版本）
 export interface PluginInfo {
   id: string
+  // owner 级状态（目前 IM 有：启用/路由按 agent/group/workspace 隔离，连接共享）
+  owner?: string
+  ownerLabel?: string
+  ownerEnabled?: boolean
+  ownerRoutes?: number
+  masterEnabled?: boolean
+  sharedConnected?: number
+  gateways?: Record<string, string>
   name: string
   description: string
   status: string // not-installed | installing | ready | enabled | error | update-available
@@ -3169,7 +3195,7 @@ interface AppState {
   // hooks（钩子页）：来源汇总 / 保存某来源 / 信任项目命令
   fetchHooks(workspaces: string[]): void // hooks_list
   saveHooks(scope: 'user' | 'project', workspace: string | undefined, body: HookSectionView): Promise<{ ok: boolean; error?: string }> // hooks_set
-  trustHooks(commands: string[], scope: string): Promise<{ ok: boolean; error?: string }> // hooks_trust
+  trustHooks(commands: string[], scope: string, owner?: string): Promise<{ ok: boolean; error?: string }> // hooks_trust（按归属）
   fetchPlugins(): void // 插件清单 + 状态（plugin_list；SettingsModal 插件 tab）
   installPlugin(id: string): void // 受管安装组件（plugin_install）
   uninstallPlugin(id: string): void // 移除组件（plugin_uninstall）
@@ -3608,6 +3634,20 @@ function syncWorkspacesToBridge(paths: string[]): void {
   if (list.length) send({ type: 'workspace_sync', payload: { paths: list } })
 }
 
+// OWNER_SCOPED_COMMANDS 需要「归属」的桥命令：hooks 信任 + IM 启用/路由 + 插件启停。
+// 只对这批注入 owner：其它命令的 payload 语义不该被悄悄加字段（协议表面越小越好）。
+const OWNER_SCOPED_COMMANDS = new Set<string>([
+  'hooks_list',
+  'hooks_trust',
+  'plugin_list',
+  'plugin_enable',
+  'plugin_disable',
+  'im_status',
+  'im_route_list',
+  'im_route_set',
+  'im_route_del',
+])
+
 function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void): number {
   const id = ++cmdSeq
   const ws = String(cmd.payload?.workspace || useAppStore.getState().workspace || '')
@@ -3625,6 +3665,17 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
   // 恢复协议标识（问题四）：new_session 带 restore_id + attempt；响应回显，
   // renderer 据此丢弃陈旧响应（迟到的旧请求响应不得覆盖新会话）。
   let payload = cmd.payload
+  // 归属（owner）注入：信任与 IM 启用是**按归属**的，服务端缺归属会明确拒绝
+  // （绝不写成全局）。这里把「当前会话的归属」带上；调用方显式给了 owner 就不动它
+  // （例如项目来源的信任按钮要写 workspace:<该项目>，而不是当前会话的归属）。
+  if (OWNER_SCOPED_COMMANDS.has(cmd.type)) {
+    const p0 = (payload ?? {}) as Record<string, unknown>
+    if (!ownerValid(String(p0.owner ?? ''))) {
+      const st = useAppStore.getState()
+      const owner = sessionOwner(String(st.activeSessionId ?? ''), String(st.workspace ?? ''))
+      if (owner) payload = { ...p0, owner }
+    }
+  }
   if (cmd.type === 'new_session') {
     // 新建会话（无 id = 真新建；带 id = 恢复已有会话）→ 注入当前活跃 Provider，
     // bridge 以 UI 选择的 Provider 归属会话（2026-09：多 Provider 同名模型时避免
@@ -4611,9 +4662,32 @@ export function dispatchEvent(raw: AnyEvent): void {
       case 'plugin_status': {
         const d = raw.data as { plugins?: PluginInfo[]; error?: { id: string; message: string } } | undefined
         if (d && Array.isArray(d.plugins)) {
-          const list = d.plugins.map((p) =>
-            d.error && d.error.id === p.id ? { ...p, error: d.error.message } : { ...p, error: undefined },
-          ) as PluginInfo[]
+          // 事件快照是**连接/安装面**事实（不含归属）。IM 的启用是归属级的：
+          // 事件若直接覆盖，A 群刚被关掉的 IM 会立刻显示回「已启用」（等于把 owner 隔离
+          // 在 UI 上抹掉）。故按 id 合并：保留上一次 plugin_list 带来的归属字段，
+          // 并用 ownerEnabled 决定 enabled（按钮跟着归属走，安装进度仍用事件的 status）。
+          const prev = new Map(getState().plugins.map((p) => [p.id, p]))
+          const list = d.plugins.map((p) => {
+            const merged: PluginInfo = { ...p }
+            const before = prev.get(p.id)
+            if (before && before.owner !== undefined) {
+              merged.owner = before.owner
+              merged.ownerLabel = before.ownerLabel
+              merged.ownerEnabled = before.ownerEnabled
+              merged.ownerRoutes = before.ownerRoutes
+              merged.masterEnabled = before.masterEnabled
+              merged.sharedConnected = before.sharedConnected
+              merged.gateways = before.gateways
+              if (before.ownerEnabled !== undefined) {
+                merged.enabled = before.ownerEnabled
+                if (!before.ownerEnabled) {
+                  merged.status = 'ready'
+                  merged.reason = '该归属未启用（连接由其它归属共享）'
+                }
+              }
+            }
+            return d.error && d.error.id === p.id ? { ...merged, error: d.error.message } : { ...merged, error: undefined }
+          }) as PluginInfo[]
           setState({ plugins: list })
         }
         break
@@ -9833,9 +9907,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     })
   },
-  trustHooks: (commands: string[], scope: string) => {
+  trustHooks: (commands: string[], scope: string, owner?: string) => {
+    const o = String(owner ?? '').trim()
     return new Promise<{ ok: boolean; error?: string }>((resolve) => {
-      send({ type: 'hooks_trust', payload: { commands, scope: scope || 'project', reason: '用户在设置面板确认' } }, false, (r) => {
+      // owner 必须显式给出（项目来源 → workspace:<该项目>；用户级来源 → 当前会话归属）。
+      // 不给时 send() 会注入当前会话归属；服务端两者都没有就拒绝（不写全局）。
+      send({
+        type: 'hooks_trust',
+        payload: { commands, scope: scope || 'project', reason: '用户在设置面板确认', ...(ownerValid(o) ? { owner: o } : {}) },
+      }, false, (r) => {
         send({ type: 'hooks_list', payload: { workspaces: get().projects.map((p) => p.path) } })
         resolve(r.ok ? { ok: true } : { ok: false, error: r.error ?? '信任失败' })
       })

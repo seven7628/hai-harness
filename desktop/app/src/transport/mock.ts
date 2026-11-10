@@ -1092,6 +1092,8 @@ class MockTransport implements Transport {
     events: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo claude-session-start', timeout: 5 }] }] },
   }
   // 信任库（mock）：命令 → 状态；未登记的项目命令默认 untrusted（安全默认，与真实现一致）
+  // mockTrust 按**归属**存（owner\u0000command）：与真 bridge 的 owner 隔离一致，
+  // 免得 mock 模式下「A 群信任了 → B 群也显示已信任」把真实缺陷掩盖掉。
   private mockTrust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> = {}
 
   // mockProjectMCPInfo 一个项目的项目层 MCP 视图（契约同真 bridge mcp_projects）。
@@ -1136,7 +1138,8 @@ class MockTransport implements Transport {
   }
 
   // mockHooksInfo hooks 来源汇总（契约同真 bridge hooks_list）。
-  private mockHooksInfo(paths: string[]) {
+  private mockHooksInfo(paths: string[], owner = '') {
+    const trustKey = (o: string, c: string) => `${o}\u0000${c}`
     const commands = (b?: HookSectionView): string[] => {
       const out: string[] = []
       for (const groups of Object.values(b?.events ?? {})) {
@@ -1145,17 +1148,24 @@ class MockTransport implements Transport {
       return out
     }
     const trust: Record<string, string> = {}
-    for (const c of commands(this.mockUserHooks)) trust[c] = this.mockTrust[c] ?? 'trusted' // 用户级默认可信
-    for (const c of commands(this.mockClaudeUserHooks)) trust[c] = this.mockTrust[c] ?? 'trusted'
+    // 用户级来源按**当前归属**判定（默认可信），项目来源按**该项目**的 workspace 归属判定。
+    for (const c of commands(this.mockUserHooks)) trust[c] = this.mockTrust[trustKey(owner, c)] ?? 'trusted'
+    for (const c of commands(this.mockClaudeUserHooks)) trust[c] = this.mockTrust[trustKey(owner, c)] ?? 'trusted'
     for (const p of paths) {
       const f = this.mockProjectFiles[p] ?? {}
-      for (const c of [...commands(f.hooks), ...commands(f.claudeHooks)]) trust[c] = this.mockTrust[c] ?? 'untrusted'
+      for (const c of [...commands(f.hooks), ...commands(f.claudeHooks)]) {
+        trust[c] = this.mockTrust[trustKey(`workspace:${p}`, c)] ?? 'untrusted'
+      }
     }
     const body = (b?: HookSectionView) => (b ?? {})
     return {
+      owner,
+      ownerKind: owner.split(':')[0] ?? '',
+      ownerLabel: owner,
       user: {
         id: 'user', kind: 'user', title: '用户配置', path: `${this.mockHome()}/.go-code/settings.json`,
         present: true, ok: true, editable: true, body: body(this.mockUserHooks),
+        owner, trust: Object.fromEntries(commands(this.mockUserHooks).map((c) => [c, trust[c]])),
       },
       claudeUser: {
         id: 'claude-user', kind: 'claude-user', title: 'Claude 兼容（只读）', path: `${this.mockHome()}/.claude/settings.json`,
@@ -1163,10 +1173,13 @@ class MockTransport implements Transport {
       },
       projects: paths.map((p) => {
         const f = this.mockProjectFiles[p] ?? {}
+        const pOwner = `workspace:${p}`
         return {
           id: `project:${p}`, kind: 'project', title: p.split('/').filter(Boolean).pop() ?? p,
           workspace: p, path: `${p}/.go-code/hooks.json`, exists: true,
           present: Boolean(f.hooks), ok: true, editable: true, body: body(f.hooks),
+          owner: pOwner,
+          trust: Object.fromEntries([...commands(f.hooks), ...commands(f.claudeHooks)].map((c) => [c, trust[c]])),
           claude: f.claudeHooks ? [{ path: `${p}/.claude/settings.json`, present: true, ok: true, body: f.claudeHooks }] : [],
         }
       }),
@@ -2322,7 +2335,8 @@ class MockTransport implements Transport {
       // hooks_list：hooks 配置来源汇总（钩子页数据源；契约对齐真 bridge）
       case 'hooks_list': {
         const list = (cmd.payload?.workspaces as string[] | undefined) ?? []
-        this.respond(cmd, this.mockHooksInfo(list.length ? list : [this.ws]))
+        const owner = String(cmd.payload?.owner ?? '')
+        this.respond(cmd, this.mockHooksInfo(list.length ? list : [this.ws], owner))
         break
       }
       // hooks_set：写某来源（mock：内存 + 回拉）
@@ -2350,8 +2364,14 @@ class MockTransport implements Transport {
       // hooks_trust：信任命令（mock：按命令记 trusted）
       case 'hooks_trust': {
         const commands = (cmd.payload?.commands as string[] | undefined) ?? []
-        for (const c of commands) this.mockTrust[c] = 'trusted'
-        this.respond(cmd, { trusted: commands.length })
+        // 与真 bridge 同一条纪律：没有归属就拒绝（绝不写成全局）。
+        const owner = String(cmd.payload?.owner ?? '')
+        if (!owner) {
+          this.respondErr(cmd, '缺少归属（owner）')
+          break
+        }
+        for (const c of commands) this.mockTrust[`${owner}\u0000${c}`] = 'trusted'
+        this.respond(cmd, { trusted: commands.length, owner })
         break
       }
       case 'command': {
@@ -2574,9 +2594,21 @@ class MockTransport implements Transport {
           ],
         })
         break
-      case 'im_status':
-        this.respond(cmd, { enabled: true, gateways: [{ id: 'feishu-main', type: 'feishu', enabled: true, status: 'connected' }] })
+      case 'im_status': {
+        // owner 隔离：启用/路由按归属给（连接共享）—— mock 也回 owner 字段，
+        // 免得前端在 mock 模式下以为「没有归属也行」。
+        const owner = String(cmd.payload?.owner ?? '')
+        this.respond(cmd, {
+          enabled: true,
+          gateways: [{ id: 'feishu-main', type: 'feishu', enabled: true, status: 'connected' }],
+          owner,
+          ownerLabel: owner,
+          ownerEnabled: Boolean(owner),
+          ownerRoutes: 1,
+          owners: owner ? { [owner]: true } : {},
+        })
         break
+      }
       case 'im_config_set':
         this.respond(cmd, {})
         break

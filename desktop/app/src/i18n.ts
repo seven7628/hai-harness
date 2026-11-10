@@ -882,6 +882,9 @@ const zh: Record<string, string> = {
   // —— 钩子页（全局 × 项目两级，2026-09-21）——
   'settings.hooks': '钩子',
   'hook.hint': '通过配置管理生命周期钩子：外部命令（stdin/stdout JSON）在会话关键节点执行；钩子异常不阻断会话。',
+  'hook.owner.current': '当前归属（信任按它判定）',
+  'hook.owner.scope': '确认给',
+  'hook.owner.legacy': '有 {n} 条确认只来自迁移前的全局记录：项目会话仍生效，智能体/群聊需各自重新确认。',
   'hook.loading': '读取中…',
   'hook.empty': '读取失败',
   'hook.empty2': '暂无钩子，点「添加钩子」配置',
@@ -960,6 +963,8 @@ const zh: Record<string, string> = {
   // 插件（SettingsModal 插件 tab；能力包：组件 + 默认配置 + 工具面一次安装）
   'settings.plugin': '插件',
   'plugin.hint': '插件 = 能力包：组件 + 默认配置 + 工具面。Browser Use 组件随应用内置（自动同步，无需下载安装），启用时检测 node 环境（浏览器自动化，有头可见，登录/状态跨会话保留）。',
+  'plugin.owner.scope': '作用范围（启用/路由按归属隔离，连接共享）',
+  'plugin.owner.shared': '{n} 个网关已连接（由所有归属共享）',
   'plugin.engine.title': '浏览器引擎',
   'plugin.engine.desc': '选择 Agent 做浏览器自动化时用的引擎。MCP = Browser Use（chrome-devtools-mcp，内置组件）；ego = ego lite 浏览器（更快、省 token，独立 Space，需单独安装 app）。切换引擎会互斥注册工具：ego 时不加载 Browser Use 工具。',
   'plugin.engine.mcp': 'MCP（Browser Use）',
@@ -2759,6 +2764,9 @@ const en: Record<string, string> = {
   // —— Hooks page (global × project, 2026-09-21) ——
   'settings.hooks': 'Hooks',
   'hook.hint': 'Manage lifecycle hooks: external commands (stdin/stdout JSON) run at key points of a session; a failing hook never blocks the session.',
+  'hook.owner.current': 'Current owner (trust is scoped to it)',
+  'hook.owner.scope': 'Trusted for',
+  'hook.owner.legacy': '{n} approvals come only from the pre-migration global record: project sessions still honor them, agents/groups must re-confirm.',
   'hook.loading': 'Loading…',
   'hook.empty': 'Failed to load',
   'hook.empty2': 'No hooks yet — click "Add hook" to configure',
@@ -2882,6 +2890,8 @@ const en: Record<string, string> = {
   // ===== Plugin tab (SettingsModal) =====
   'settings.plugin': 'Plugins',
   'plugin.hint': 'A plugin is a capability pack: component + default config + tool surface. Browser Use ships built-in (auto-synced, no download/install needed); node is detected when enabling (browser automation, visible head, login/state persists across sessions).',
+  'plugin.owner.scope': 'Scope (enable/routes are per owner; connections are shared)',
+  'plugin.owner.shared': '{n} gateway(s) connected (shared by all owners)',
   'plugin.engine.title': 'Browser engine',
   'plugin.engine.desc': 'Which engine the agent uses for browser automation. MCP = Browser Use (chrome-devtools-mcp, built-in); ego = ego lite browser (faster, fewer tokens, isolated Spaces; requires the standalone app). Engines are mutually exclusive: with ego, Browser Use tools are not loaded.',
   'plugin.engine.mcp': 'MCP (Browser Use)',

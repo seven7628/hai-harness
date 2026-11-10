@@ -106,6 +106,12 @@ export function HooksTab() {
         <p className="set-placeholder">{loading ? t('hook.loading') : t('hook.empty')}</p>
       ) : (
         <>
+          {/* 当前归属：用户级配置的信任按它判定；项目来源各用自己的 workspace 归属。
+             没有活跃会话时显示「未绑定」——此时写操作会被服务端拒绝，不写成全局。 */}
+          <p className="set-desc" style={{ marginBottom: 10 }}>
+            {t('hook.owner.current')}：<span className="mono">{info.owner || '—'}</span>
+            {info.ownerLabel ? ` · ${info.ownerLabel}` : ''}
+          </p>
           <div className="src-sec">{t('hook.sec.config')}</div>
           <SourceCard
             icon={<Gear size={14} />}
@@ -253,7 +259,9 @@ function HooksDetail({
     setForm(null)
   }
 
-  const trust = info.trust
+  // 信任状态按来源的归属判定（项目来源 → workspace:<该项目>；用户级 → 当前会话归属）。
+  // 没带 trust 的旧响应回退到总览（顶层 trust = 当前归属）。
+  const trust = src.trust ?? info.trust
   const untrustedCmds = commandsOf(body).filter((c) => {
     const st = trust[c] ?? 'untrusted'
     return st === 'untrusted' || st === 'modified'
@@ -277,6 +285,17 @@ function HooksDetail({
       <p className="set-desc">
         {scopeKind === 'project' ? t('hook.project.desc') : t('hook.user.desc')}
       </p>
+      {/* 归属（owner）：信任是**按归属**存的 —— A 智能体/群的确认不会让 B 免确认。
+          展示当前来源的归属，让「确认给谁」在点按钮之前就看得见。 */}
+      <p className="set-desc" style={{ marginBottom: 6 }}>
+        {t('hook.owner.scope')}：<span className="mono">{src.owner || '—'}</span>
+        {src.ownerLabel ? ` · ${src.ownerLabel}` : ''}
+      </p>
+      {!!info.legacyTrust?.length && (
+        <p className="hook-note warn">
+          {t('hook.owner.legacy').replace('{n}', String(info.legacyTrust.length))}
+        </p>
+      )}
 
       {!src.ok && <p className="nwf-err mono" role="alert">{src.error ?? t('hook.parseErr')}</p>}
       {!!src.unknownKeys?.length && (
@@ -289,7 +308,7 @@ function HooksDetail({
         <div className="hook-note">
           <span>{t('hook.trust.hint').replace('{n}', String(untrustedCmds.length))}</span>
           {editable && (
-            <button className="btn primary" onClick={() => void trustHooks(untrustedCmds, 'project')}>
+            <button className="btn primary" onClick={() => void trustHooks(untrustedCmds, 'project', src.owner)}>
               {t('hook.trust.action')}
             </button>
           )}
@@ -437,7 +456,7 @@ function HooksDetail({
                         {!st.on && st.reason && <span className="hook-badge" title={t(st.reason)}>{t(st.reason)}</span>}
                         <span className="grow" />
                         {scopeKind === 'project' && !st.on && (trust[h.command ?? ''] ?? 'untrusted') !== 'trusted' && editable && h.command && (
-                          <button className="btn" onClick={() => void trustHooks([h.command as string], 'project')}>{t('hook.trust.one')}</button>
+                          <button className="btn" onClick={() => void trustHooks([h.command as string], 'project', src.owner)}>{t('hook.trust.one')}</button>
                         )}
                         {editable && (
                           <>

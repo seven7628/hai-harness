@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
+// 归属（owner）：IM 的启用/路由按归属隔离（连接共享）—— 页面必须显示「这些开关是给谁的」
+import { ownerLabel, sessionOwner } from '../lib/owner'
 import type {
   IMConfig,
   IMGatewayCfg,
@@ -71,6 +73,13 @@ export function IMSettingsEditor() {
       require_bind_confirm: imConfig?.security?.require_bind_confirm ?? true,
     },
   }
+
+  // 当前归属：Hub DM → agent:<id>，群 → group:<g>，其余 → workspace:<path>（与 bridge 同源）。
+  // 这里取的是「正在操作的会话」，用于展示与后续启停/路由命令的归属。
+  const imOwner = sessionOwner(
+    useAppStore.getState().activeSessionId ?? '',
+    useAppStore.getState().workspace ?? '',
+  )
 
   const save = async (next: IMConfig) => {
     setErr(null)
@@ -293,6 +302,14 @@ export function IMSettingsEditor() {
           }}
         />
       </div>
+
+      {/* 归属（owner）：本页编辑的是**全局配置**（连接/网关/安全），但「启用/路由」按归属
+          隔离 —— 当前会话的归属决定了 plugin_enable/plugin_disable 与路由归属落在谁名下。
+          没有活跃会话时明确显示未绑定（服务端会拒绝无归属的启停，不会写成全局）。 */}
+      <p className="set-desc" style={{ marginBottom: 8 }}>
+        {t('plugin.owner.scope')}：<span className="mono">{imOwner || '—'}</span>
+        {imOwner ? ` · ${ownerLabel(imOwner)}` : ''}
+      </p>
 
       {/* Gateway 列表 */}
       <div className="im-sec">
