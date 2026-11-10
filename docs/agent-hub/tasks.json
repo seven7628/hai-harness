@@ -1349,8 +1349,8 @@
       "tests": "npx tsc --noEmit && npx tsc -p tsconfig.electron.json --noEmit && npm run build && npm run test:hub-search && npm run test:hub && npm run test:hub-p3b && npm run test:p4 && npm run test:css",
       "commit": "771809f",
       "status": "in_progress",
-      "note": "实现完成，独立复审中",
-      "reviewNote": "独立复审 task-7rscybyy 进行中"
+      "note": "复审 CHANGES_REQUESTED：修复 P1 工作区裁剪/Run 泄漏 + P2 右栏概览/rail 工作区/搜索 tab 同步",
+      "reviewNote": "review task-7rscybyy：核心 shell PASS，但 980×620 工作区树裁剪、Run 模式跨关闭泄漏为合并阻断；P2 右栏概览 no-op、rail 工作区不回工作区、搜索命中不同步 tab。UI-1 fix commit 进行中。"
     },
     {
       "id": "P4-UI-2",
@@ -2313,7 +2313,7 @@
     "P4-UI-1": {
       "status": "in_progress",
       "commit": "771809f",
-      "reviewNote": "独立复审 task-7rscybyy 进行中"
+      "reviewNote": "review task-7rscybyy CHANGES_REQUESTED；修复中（工作区裁剪/Run 泄漏/右栏概览/rail 工作区/搜索 tab）"
     }
   },
   "reviewGate": {
