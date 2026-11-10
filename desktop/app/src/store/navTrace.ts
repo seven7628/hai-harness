@@ -113,7 +113,6 @@ export function recordNavDiscard(r: NavDiscardRecord): void {
   try {
     discards.push(r)
     if (discards.length > NAV_DISCARD_LIMIT) discards.splice(0, discards.length - NAV_DISCARD_LIMIT)
-    // eslint-disable-next-line no-console
     console.debug(
       `[nav-trace] 丢弃${r.type}（${r.kind}）：${r.reason}` +
         ` sid=${r.sid || '-'} ws=${r.responseWorkspace || r.workspace || '-'}` +
