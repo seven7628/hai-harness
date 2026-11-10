@@ -91,4 +91,56 @@ assert(artifactsSrc.includes("t('artifacts.head')"), '产物标签走 i18n')
 assert(cssSrc.includes('container-type: inline-size') && cssSrc.includes('@container'), '产物布局靠容器查询，不跟视口断点走')
 assert(mockSrc.includes("visibility: 'owner'") && mockSrc.includes("sender: { kind: 'system' }"), 'mock 覆盖 owner-only 与系统指令两条路径')
 
+
+// 7) 头像 sigil v2：所有渲染路径都不再用 emoji/首字母；群叠放 +N；i18n 状态 key。
+const avatarSrc = readFileSync(join(hubDir, 'avatar.ts'), 'utf8')
+const sigilSrc = readFileSync(join(hubDir, 'AgentSigil.tsx'), 'utf8')
+const stackSrc = readFileSync(join(hubDir, 'AgentStack.tsx'), 'utf8')
+const badgeSrc = readFileSync(join(hubDir, 'AgentBadge.tsx'), 'utf8')
+const mentionSrc = readFileSync(join(hubDir, 'AgentMentionChip.tsx'), 'utf8')
+const editorSrc = readFileSync(join(hubDir, 'AgentEditor.tsx'), 'utf8')
+const sidebarSrc = readFileSync(join(hubDir, 'HubSidebar.tsx'), 'utf8')
+const inspectorSrc = readFileSync(join(hubDir, 'HubInspector.tsx'), 'utf8')
+const groupSrc = readFileSync(join(hubDir, 'GroupView.tsx'), 'utf8')
+const i18nSrc = readFileSync(join(hubDir, '..', 'i18n.ts'), 'utf8')
+
+const count = (haystack, needle) => haystack.split(needle).length - 1
+assert(badgeSrc.includes('AgentSigil') && !badgeSrc.includes('avatar.value') &&
+  !badgeSrc.includes('name.slice(0, 1)'), 'AgentBadge 用 sigil，不再渲染 emoji/首字母')
+assert(mentionSrc.includes('AgentSigil') && !mentionSrc.includes('hub-mention-avatar') &&
+  !mentionSrc.includes('hub-mention-dot'), '@ 徽章用 sigil，旧的 emoji 头像/圆点已移除')
+assert(editorSrc.includes('AgentSigil') && !editorSrc.includes('setEmoji') &&
+  !editorSrc.includes("className=\"hub-avatar\""), '编辑器预览用 sigil，emoji 输入已移除（表单字段保留兼容）')
+assert(groupSrc.includes('AgentStack') && !groupSrc.includes('hub-member-dot'),
+  '群头成员叠图走 AgentStack，首字母圆点已移除')
+assert(sidebarSrc.includes('AgentStack') && !sidebarSrc.includes('hub-member-dot'),
+  '侧栏群行走 AgentStack')
+assert(inspectorSrc.includes('AgentStack') && inspectorSrc.includes('AgentSigil'),
+  '详情页群概览用叠放、成员/智能体用 sigil')
+assert(!sidebarSrc.includes('HubAvatar') && !inspectorSrc.includes('HubAvatar') &&
+  !groupSrc.includes('MemberStack'), '不再有两套头像实现')
+assert(sigilSrc.includes('data-state') && sigilSrc.includes('statusLayer'),
+  '状态层由 AgentSigil 统一渲染（data-state 供 CSS 动画/主题）')
+assert(avatarSrc.includes('fnv1a(`avatar1|${id}`)') &&
+  avatarSrc.includes('fnv1a(`avatar1|${id}|${resp}`)'), '身份散列公式与 demo 逐字一致（avatar1|id / avatar1|id|resp）')
+assert(avatarSrc.includes("if (input.pending) return 'needs_attention'") &&
+  avatarSrc.includes("if (input.deleted) return 'offline'") &&
+  avatarSrc.includes("if (input.running) return 'working'"),
+  '状态映射 needs_attention > offline > working > idle')
+assert(avatarSrc.includes('input.length >= 5 ? input.slice(0, 3) : input.slice()'),
+  'Group 叠放：2–4 全显示、≥5 前 3 +N')
+assert(stackSrc.includes('planStack') && stackSrc.includes('agent-stack-more') &&
+  stackSrc.includes('plan.more > 0'), 'AgentStack 用 planStack 渲染 +N 徽标')
+assert(cssSrc.includes("[data-theme='ink'] .sigil") && cssSrc.includes("[data-theme='paper'] .sigil"),
+  'ink/paper 各自一套 sigil 主题值')
+assert(cssSrc.includes('prefers-reduced-motion') && cssSrc.includes('animation: none !important'),
+  'reduced-motion 下状态动画全部关闭')
+assert(!cssSrc.includes('.hub-avatar {') && !cssSrc.includes('.hub-avatar.ring') &&
+  !cssSrc.includes('.hub-agent-avatar') && !cssSrc.includes('.hub-member-dot'),
+  '旧 .hub-avatar/.hub-agent-avatar/.hub-member-dot 死样式已清理')
+assert(count(i18nSrc, "'hub.avatar.state.needs_attention'") === 2 &&
+  count(i18nSrc, "'hub.avatar.stack.label'") === 2 &&
+  count(i18nSrc, "'hub.avatar.stack.summary.working'") === 2,
+  '头像状态词/独立 label/叠放 label 的中英 key 齐备')
+
 console.log(`\n✅ hub 线程纯逻辑：${pass} 项全部通过`)
