@@ -1,4 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent } from 'react'
+import AgentSigil from './AgentSigil'
 import type { MentionAgent } from './mentions'
 
 // @ 成员选择器（P3b-07，方案 §8.3.3 / §8.3.5）。
@@ -103,7 +104,7 @@ export default function MentionPicker({
                   onPick(agent)
                 }}
               >
-                <span className="hub-mention-dot" style={{ background: agent.accent || 'var(--accent-solid)' }} aria-hidden="true" />
+                <AgentSigil agentId={agent.id} responsibility={agent.role} status={false} size={24} />
                 <span className="hub-mention-option-name">{agent.name}</span>
                 {roleText ? (
                   <span className="hub-mention-option-role">{roleText}</span>

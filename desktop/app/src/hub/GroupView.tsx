@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DependencyList } from 'react'
+import { useT } from '../i18n'
 import { SendIcon } from '../components/icons'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
@@ -9,6 +10,11 @@ import { RoundActivityDigest } from './RoundActivityDigest'
 import { StreamingMessage } from './StreamingMessage'
 import ConversationBar from './ConversationBar'
 import MentionPicker from './MentionPicker'
+import AgentStack from './AgentStack'
+import AgentSigil from './AgentSigil'
+import { stateResolver } from './avatar'
+import { stackAriaLabel } from './avatarLabels'
+import { usePendingAgents } from './useAgentState'
 import TypingIndicator from './TypingIndicator'
 import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './groupThread'
 import { triggerSeqBySender } from './groupProjection'
@@ -29,7 +35,7 @@ import {
   mentionKeyAction,
   type MentionAgent,
 } from './mentions'
-import type { HubGroup, HubGroupMember, HubMessage } from './types'
+import type { HubGroup, HubMessage } from './types'
 
 // 群组视图（P3a-08 → P3b-07）：群头（成员叠图）/ 自动对话状态条 / 时间线 /
 // 路由动作 / Chat|Run / 发言（@ 选择器）与派任务表单。
@@ -57,6 +63,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const convStopping = useHubStore((s) => s.groupConvStopping)
   const conversation = useHubStore((s) => s.groupConversations[group.id] ?? null)
   const running = useHubStore((s) => s.running)
+  const pendingIds = usePendingAgents()
+  const stateOf = stateResolver({ running, pending: pendingIds })
   const tasks = useHubStore((s) => s.tasks)
   const send = useHubStore((s) => s.sendGroup)
   const sendAssign = useHubStore((s) => s.sendGroupAssign)
@@ -109,6 +117,16 @@ export default function GroupView({ group }: { group: HubGroup }) {
     .filter(Boolean)
     .join('、')
   const owner = members.find((m) => m.agent_id === group.owner_agent_id)
+  // 群头叠放：成员状态逐个算（组状态取最高优先级，只在 lead 画一次）。
+  const stackMembers = members.map((m) => {
+    const member = agents.find((a) => a.id === m.agent_id)
+    return {
+      id: m.agent_id,
+      name: agentNames[m.agent_id] ?? m.agent_id,
+      responsibility: member?.role,
+      state: stateOf(m.agent_id, member?.deleted),
+    }
+  })
 
   const mentionQuery = composerMode === 'chat' ? activeMentionQuery(draft, caret) : null
   const mentionQueryText = mentionQuery?.query ?? ''
@@ -155,6 +173,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
     return gid === group.id && (task.status === 'dispatched' || task.status === 'running')
   }).length
   const convActive = groupDrafts.length > 0 || members.some((m) => running[m.agent_id] === true) || activeGroupTasks > 0
+  // 头像的组状态口径：会话在跑（或草稿/成员/任务在跑）。convActive 本身不含 status，
+  // 只看它会让「自动对话中但没有成员正在跑」的群头显示成待命。
+  const groupRunning = conversation?.status === 'running' || convActive
   // 身份必须稳定：它经 GroupBubble → Markdown(renderMention) 传下去，每次渲染换新函数
   // 会让 memo 失效 —— 输入框每敲一个字都重 parse 整条时间线。
   const openAgent = useCallback((id: string): void => {
@@ -347,7 +368,12 @@ export default function GroupView({ group }: { group: HubGroup }) {
   return (
     <section className="hub-dm hub-group-view">
       <header className="hub-dm-head">
-        <MemberStack members={members} names={agentNames} />
+        <AgentStack
+          members={stackMembers}
+          size={24}
+          groupRunning={groupRunning}
+          label={stackAriaLabel(t, stackMembers, { groupRunning })}
+        />
         <div className="hub-dm-title">
           <strong>{group.name}</strong>
           <span className="hub-sub">
@@ -498,7 +524,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
                     className={`hub-assign-member ${assignTarget === agent.id ? 'on' : ''}`}
                     onClick={() => setAssignTarget(agent.id)}
                   >
-                    <span className="hub-mention-dot" style={{ background: agent.accent || 'var(--accent-solid)' }} aria-hidden="true" />
+                    <AgentSigil agentId={agent.id} responsibility={agent.role} status={false} size={24} />
                     <span>{agent.name}</span>
                     {agent.groupRole && agent.groupRole !== 'all' ? <span className="hub-muted">{agent.groupRole}</span> : null}
                   </button>
@@ -650,19 +676,6 @@ function renderThread(
 }
 
 
-function MemberStack({ members, names }: { members: HubGroupMember[]; names: Record<string, string> }) {
-  return (
-    <span className="hub-member-stack" aria-label={`${members.length} 名成员`}>
-      {members.slice(0, 4).map((m, i) => (
-        <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 4 - i }} title={`${names[m.agent_id] ?? m.agent_id}${m.role ? ` · ${m.role}` : ''}`}>
-          {(names[m.agent_id] ?? m.agent_id).slice(0, 1)}
-        </span>
-      ))}
-      {members.length > 4 ? <span className="hub-member-dot more">+{members.length - 4}</span> : null}
-    </span>
-  )
-}
-
 // localStorage 在沙箱/隐私模式下可能连访问都抛 SecurityError：读写都必须兜底（N10）。
 function readGroupDisplay(): 'grouped' | 'flat' {
   try {
@@ -678,18 +691,5 @@ function writeGroupDisplay(next: 'grouped' | 'flat'): void {
     if (typeof localStorage !== 'undefined') localStorage.setItem('hub.groupDisplay', next)
   } catch {
     // 隐私模式/配额满：只是记不住偏好，不影响当前视图。
-  }
-}
-
-// 避免把 i18n hook 放到组件外：这里只做轻量包装（GroupView 内部已用 useHubStore）。
-function useT() {
-  return (key: string): string => {
-    const dict: Record<string, string> = {
-      'hub.groupIntro': '群内协作从这里开始。',
-      'hub.groupHint': '用 @名字 唤醒成员；@all 仅群主/人类可用。',
-      'hub.groupPlaceholder': '发消息，用 @名字 指定谁来做…',
-      'hub.send': '发送',
-    }
-    return dict[key] ?? key
   }
 }

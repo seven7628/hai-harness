@@ -6,7 +6,8 @@ import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
 import { alertSeverity } from './alerts'
 import GroupView from './GroupView'
-import HubAvatar from './HubAvatar'
+import AgentSigil from './AgentSigil'
+import { useAgentState } from './useAgentState'
 import { isImeComposing } from './mentions'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubMessage, HubRunEntry } from './types'
@@ -123,6 +124,7 @@ export default function HubSurface() {
     [agents, activeId, profile],
   )
   const isRunning = activeId ? running[activeId] === true : false
+  const activeState = useAgentState(activeId, activeAgent?.deleted)
   // 深链指向「最新一条」：seq 最大的已落盘消息（跳转高亮由深链的 seq 决定）。
   const latestSeq = useMemo(
     () => messages.reduce((max, m) => (Number(m.seq) > max ? Number(m.seq) : max), 0),
@@ -209,7 +211,12 @@ export default function HubSurface() {
           ) : (
             <>
               <header className="hub-dm-head">
-                <HubAvatar agent={activeAgent} size={26} />
+                <AgentSigil
+                  agentId={activeAgent.id}
+                  responsibility={activeAgent.role}
+                  state={activeState}
+                  size={24}
+                />
                 <div className="hub-dm-title">
                   <strong>{activeAgent.name}</strong>
                   <span className="hub-sub">

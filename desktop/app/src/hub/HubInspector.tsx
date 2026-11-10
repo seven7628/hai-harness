@@ -2,8 +2,11 @@ import { useMemo, useState } from 'react'
 import { AlertIcon, Bot, CheckList, LayersIcon, PanelRight, PencilIcon } from '../components/icons'
 import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
-import HubAvatar from './HubAvatar'
-import { accentOfGroup } from './agentAccent'
+import AgentSigil from './AgentSigil'
+import AgentStack from './AgentStack'
+import { stateResolver } from './avatar'
+import { stackAriaLabel } from './avatarLabels'
+import { usePendingAgents } from './useAgentState'
 import { effortLabel } from './agentModelOptions'
 import { useHubStore } from './useHubStore'
 import NeedsYouPanel from './NeedsYouPanel'
@@ -131,6 +134,8 @@ function OverviewPanel() {
   const messages = useHubStore((s) => s.messages)
   const tasks = useHubStore((s) => s.tasks)
   const needs = useHubStore((s) => s.needs)
+  const pendingIds = usePendingAgents()
+  const stateOf = stateResolver({ running, pending: pendingIds })
   const openEditor = useHubStore((s) => s.openEditor)
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const setPanel = useHubStore((s) => s.setInspector)
@@ -144,7 +149,15 @@ function OverviewPanel() {
     const conv = groupConversations[group.id]
     const groupRunning = conv?.status === 'running'
     const unread = groupInfo[group.id]?.unread ?? 0
-    const groupAccent = accentOfGroup(group, agents)
+    const stackMembers = members.map((m) => {
+      const member = agents.find((a) => a.id === m.agent_id)
+      return {
+        id: m.agent_id,
+        name: member?.name ?? m.agent_id,
+        responsibility: member?.role,
+        state: stateOf(m.agent_id, member?.deleted),
+      }
+    })
     const recentTasks = tasks.filter((task) =>
       !isTerminal(task.status) &&
       (task.origin?.group_id === group.id || task.target?.group_id === group.id),
@@ -152,7 +165,12 @@ function OverviewPanel() {
     return (
       <section className="hub-panel hub-overview" aria-label="群组概览">
         <div className="hub-ov-hero">
-          <HubAvatar agent={{ name: group.name }} accent={groupAccent} size={44} ring />
+          <AgentStack
+            members={stackMembers}
+            size={48}
+            groupRunning={groupRunning}
+            label={stackAriaLabel(t, stackMembers, { groupRunning })}
+          />
           <div className="hub-ov-id">
             <strong>{group.name}</strong>
             <span>{members.length} 名成员 · {group.policy?.mode ?? 'ask'}</span>
@@ -176,10 +194,14 @@ function OverviewPanel() {
             const member = agents.find((a) => a.id === m.agent_id)
             return (
               <div className="hub-ov-member" key={m.agent_id}>
-                <HubAvatar agent={member ?? { id: m.agent_id, name: m.agent_id }} size={24} ring={running[m.agent_id] === true} />
+                <AgentSigil
+                  agentId={m.agent_id}
+                  responsibility={member?.role}
+                  state={stateOf(m.agent_id, member?.deleted)}
+                  size={24}
+                />
                 <span className="hub-ov-member-name">{member?.name ?? m.agent_id}</span>
                 <span className="hub-sub">{m.role || member?.role || ''}</span>
-                {running[m.agent_id] ? <span className="hub-ov-run" title={t('hub.running')} /> : null}
               </div>
             )
           })}
@@ -212,7 +234,12 @@ function OverviewPanel() {
   return (
     <section className="hub-panel hub-overview" aria-label="智能体概览">
       <div className="hub-ov-hero">
-        <HubAvatar agent={agent} size={44} ring />
+        <AgentSigil
+          agentId={agent.id}
+          responsibility={agent.role}
+          state={stateOf(agent.id, agent.deleted)}
+          size={48}
+        />
         <div className="hub-ov-id">
           <strong>{agent.name}</strong>
           <span>{agent.role || '智能体'}</span>

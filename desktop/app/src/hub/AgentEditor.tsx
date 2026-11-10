@@ -3,6 +3,8 @@ import { hubCommand } from './api'
 import type { HubAgent } from './types'
 import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
+import AgentSigil from './AgentSigil'
+import { useAgentState } from './useAgentState'
 import { buildAgentPatch, buildAgentProfile, initialDailyBudget, type AgentForm } from './agentPatch'
 import {
   EFFORT_VALUES, chooseModelOnProviderSwitch, effortChoices, modelsForProvider,
@@ -66,7 +68,8 @@ export default function AgentEditor({
 
   // —— 基本 ——
   const [name, setName] = useState(agent?.name ?? '')
-  const [emoji, setEmoji] = useState(agent?.avatar?.value ?? '🟢')
+  // emoji 只作为旧数据兼容字段随 patch 原样带回；头像视觉由 id + role 自动生成。
+  const [emoji] = useState(agent?.avatar?.value ?? '🟢')
   const [accent, setAccent] = useState(agent?.accent ?? '#7bc199')
   const [role, setRole] = useState(agent?.role ?? '')
   const [description, setDescription] = useState(agent?.description ?? '')
@@ -107,6 +110,8 @@ export default function AgentEditor({
   const [previewNote, setPreviewNote] = useState('')
 
   const agentID = agent?.id ?? ''
+  // 预览用真实状态：编辑既有智能体时，头像与列表/消息里保持一致。
+  const avatarState = useAgentState(agentID || undefined, agent?.deleted)
   const tabs = useMemo<{ key: Tab; label: string }[]>(
     () => [
       { key: 'basic', label: t('hub.tab.basic') },
@@ -333,12 +338,12 @@ export default function AgentEditor({
         </header>
         <div className="hub-modal-body">
           <aside className="hub-preview-card">
-            <span
-              className="hub-avatar"
-              style={{ width: 56, height: 56, fontSize: 28, background: `${accent}22`, borderColor: accent, color: accent }}
-            >
-              {emoji || name.slice(0, 1) || '?'}
-            </span>
+            <AgentSigil
+              agentId={agentID || undefined}
+              responsibility={role}
+              state={avatarState}
+              size={48}
+            />
             <strong>{name || t('hub.unnamed')}</strong>
             <span className="hub-sub">{role || '—'}</span>
             <span className="hub-sub">{[provider, model].filter(Boolean).join(' · ') || '—'}</span>
@@ -371,9 +376,7 @@ export default function AgentEditor({
                   <label>{t('hub.field.name')}
                     <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Researcher" />
                   </label>
-                  <label>{t('hub.field.avatar')}
-                    <input value={emoji} onChange={(e) => setEmoji(e.target.value)} maxLength={4} />
-                  </label>
+                  <p className="hub-avatar-note">{t('hub.avatar.autoNote')}</p>
                   <label>{t('hub.field.accent')}
                     <input type="color" value={accent} onChange={(e) => setAccent(e.target.value)} />
                   </label>

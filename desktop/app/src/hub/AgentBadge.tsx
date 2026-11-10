@@ -1,10 +1,14 @@
 import type { CSSProperties } from 'react'
 import { useT } from '../i18n'
 import { accentOfAgent } from './agentAccent'
+import AgentSigil from './AgentSigil'
+import { useAgentState } from './useAgentState'
 import type { MentionAgent } from './mentions'
 
 // 群消息/任务卡的「谁说的」标识：头像 + 名字 + 职责。
-// 只负责身份，不负责气泡；颜色只给头像环与名字，正文保持 --ink 的可读性。
+// 只负责身份，不负责气泡；accent 只给名字上色，正文保持 --ink 的可读性。
+// 头像用 sigil v2（形状+色相回答「我是谁」，状态环回答「我现在怎样」），
+// 不再渲染 emoji/首字母；名字就在同一行，头像对读屏是装饰（aria-hidden）。
 export default function AgentBadge({
   agent,
   name,
@@ -18,12 +22,11 @@ export default function AgentBadge({
 }) {
   const t = useT()
   const accent = accentOfAgent(agent ?? { id: '', name })
-  const emoji = agent?.avatar?.kind === 'emoji' ? agent.avatar.value : ''
-  const avatar = emoji || name.slice(0, 1)
+  const state = useAgentState(agent?.id, agent?.deleted)
   const style = { '--agent-accent': accent } as CSSProperties
   const body = (
     <>
-      <span className="hub-agent-avatar" aria-hidden="true">{avatar}</span>
+      <AgentSigil agentId={agent?.id} responsibility={agent?.role} state={state} size={24} />
       <span className="hub-agent-name">{name}</span>
       {role ? <span className="hub-agent-role">{role}</span> : null}
     </>

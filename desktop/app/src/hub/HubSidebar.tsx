@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Bot, ChevronLeft, Plus, SearchIcon } from '../components/icons'
 import { useT } from '../i18n'
-import HubAvatar from './HubAvatar'
+import AgentSigil from './AgentSigil'
+import AgentStack from './AgentStack'
+import { planStack, stateResolver } from './avatar'
+import { agentStackSummary } from './avatarLabels'
+import { useAgentState, usePendingAgents } from './useAgentState'
 import { accentOfAgent, accentOfGroup, contrastText } from './agentAccent'
 import {
   HUB_SEARCH_DEBOUNCE_MS, normalizeSearchQuery, searchHitKey, searchScopeLabel,
@@ -22,6 +26,8 @@ export default function HubSidebar() {
   const dm = useHubStore((s) => s.dm)
   const activeId = useHubStore((s) => s.activeId)
   const running = useHubStore((s) => s.running)
+  const pendingIds = usePendingAgents()
+  const stateOf = stateResolver({ running, pending: pendingIds })
   const groups = useHubStore((s) => s.groups)
   const groupsLoading = useHubStore((s) => s.groupsLoading)
   const groupInfo = useHubStore((s) => s.groupInfo)
@@ -259,6 +265,18 @@ export default function HubSidebar() {
                     conv?.status === 'running' ||
                     ['queued', 'dispatched', 'running'].includes(info.last_task_status ?? '')
                   const groupAccent = accentOfGroup(g, agents)
+                  // 叠放用全部成员：2–4 全显示、≥5 前 3 +N 由 planStack 决定。
+                  const stackMembers = (g.members ?? []).map((m) => {
+                    const member = agents.find((a) => a.id === m.agent_id)
+                    return {
+                      id: m.agent_id,
+                      name: member?.name ?? m.agent_id,
+                      responsibility: member?.role,
+                      state: stateOf(m.agent_id, member?.deleted),
+                    }
+                  })
+                  const stackPlan = planStack(stackMembers, { groupRunning })
+                  const stackSummary = agentStackSummary(t, stackPlan.counts, stackPlan.state)
                   return (
                     <button
                       key={g.id}
@@ -266,26 +284,14 @@ export default function HubSidebar() {
                       style={rowAccentStyle(groupAccent)}
                       onClick={() => void openGroup(g.id)}
                       aria-current={g.id === activeGroupId ? 'true' : undefined}
-                      aria-label={`${g.name}，${memberCount} 名成员${unread > 0 ? `，${unreadBadge(unread)} 条未读` : '，没有未读'}，${preview}`}
+                      aria-label={`${g.name}，${memberCount} 名成员，${stackSummary}${unread > 0 ? `，${unreadBadge(unread)} 条未读` : '，没有未读'}，${preview}`}
                     >
-                      <span className="hub-side-avatar">
-                        <span className="hub-member-stack" aria-hidden="true">
-                          {(g.members ?? []).slice(0, 3).map((m, i) => {
-                            const member = agents.find((a) => a.id === m.agent_id)
-                            const memberAccent = accentOfAgent(member ?? { id: m.agent_id, name: m.agent_id })
-                            return (
-                              <span
-                                key={m.agent_id}
-                                className="hub-member-dot"
-                                style={{ zIndex: 3 - i, color: memberAccent, background: `color-mix(in srgb, ${memberAccent} 22%, var(--paper))`, borderColor: 'var(--paper)' }}
-                              >
-                                {(member?.name ?? m.agent_id).slice(0, 1)}
-                              </span>
-                            )
-                          })}
-                        </span>
-                        {groupRunning ? <span className="hub-side-run" title={t('hub.running')} /> : null}
-                      </span>
+                      <AgentStack
+                        members={stackMembers}
+                        size={24}
+                        groupRunning={groupRunning}
+                        label={null}
+                      />
                       <span className="hub-side-text">
                         <span className="hub-side-top">
                           <span className="hub-name">{g.name}</span>
@@ -352,6 +358,7 @@ function HubRow({
   onClick: () => void
 }) {
   const accent = accentOfAgent(agent)
+  const state = useAgentState(agent.id, agent.deleted)
   return (
     <button
       className={`hub-side-row ${active ? 'on' : ''} ${running ? 'running' : ''}`}
@@ -359,10 +366,12 @@ function HubRow({
       onClick={onClick}
       aria-current={active ? 'true' : undefined}
     >
-      <span className="hub-side-avatar">
-        <HubAvatar agent={agent} size={34} ring={running || active} />
-        {running ? <span className="hub-side-run" title="运行中" /> : null}
-      </span>
+      <AgentSigil
+        agentId={agent.id}
+        responsibility={agent.role}
+        state={state}
+        size={32}
+      />
       <span className="hub-side-text">
         <span className="hub-side-top">
           <span className="hub-name">{agent.name}</span>
