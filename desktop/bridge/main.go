@@ -1236,8 +1236,16 @@ type manager struct {
 	cronCtx         context.Context
 	cronCancel      context.CancelFunc
 	oauthWaiter     oauthPromptWaiter // OAuth 登录 manual 输入等待表（oauth_prompt_answer 命令回填）
-	// imPlugin 全局 IM 集成插件（单例：连接/路由/安全跨 workspace 唯一；
-	// 每个 workspace 的 registry 共享同一实例，plugin_list 均可见）。
+	// imPlugin IM 集成插件 —— **进程级单例，owner = 进程**（BR-21 显式化，非工作区槽位）。
+	//
+	// 为什么不能按工作区各造一份：IM 是「一个账号一条连接 + 一张路由表」。每个工作区各持
+	// 一份会变成同一账号多条长连接（同一条消息被多个实例收到 → 重复回复、重复派发），
+	// 而且 ~/.go-code/im-config.json 是全局配置，多份实例只会各自朝同一文件写。
+	// 现状是每个 workspace 的 registry **共享同一个实例**（buildPlugins(m.imPlugin)），
+	// plugin_list 在每个工作区都能看到它 —— 这是设计，不是遗漏。
+	//
+	// 生命周期归进程：工作区级 Close 被 implugin.Plugin.ClosePreserve 挡掉（否则删掉别的
+	// 项目 / 改一次浏览器配置就会掐断正在用的 IM 连接），进程退出走 closeIMPlugin。
 	imPlugin *implugin.Plugin
 	// imBridge IM 事件桥（插件 Enable 后装配：事件流→IM 推送；IM 消息→会话驱动）。
 	imBridge *imBridge
@@ -1276,65 +1284,30 @@ type manager struct {
 	// 不做 I/O，建 venv 是首次调用时 Ensure 的职责）。全局单例：运行时根在 home
 	// （~/.go-code/runtime/python），与工作区无关；Ensure 自身按 Root 串行 + flock 去重。
 	pyRT *goruntime.Runtime
-	// xlsxPV 工作簿预览转换器（xlsx_preview 命令；与 run_python 共用 pyRT）。
-	// 全局单例（同 pyRT 的理由：运行时不按工作区隔离），懒创建 —— 新建只是构造一个
-	// 结构体（无 I/O），真正的重活在首次 Convert 时才发生（Ensure + 跑 openpyxl）。
-	xlsxPV *builtin.XlsxPreviewer
-	// docxPV / pptxPV 文档与演示文稿预览转换器（docx_preview / pptx_preview 命令）。
-	// 单例与懒创建的理由同上；三条通路共用同一个 pyRT 与同一套沙箱工厂，只是跑不同的
-	// 固定脚本（mammoth / python-pptx）。
-	docxPV *builtin.DocxPreviewer
-	pptxPV *builtin.PptxPreviewer
-	// hookTrust 进程内共享的 hooks 信任库（~/.go-code/hooks-state.json；懒读一次，
-	// 见 hookTrustStore）。**必须共享同一实例**：信任判定发生在每次派发时，面板的
-	// hooks_trust 写的就是它 —— 否则新信任要重建会话才生效（契约 §5.5 要求即刻生效）。
+	// previewSlots 预览转换器的**工作区槽位**（BR-21）：key = 工作区绝对路径，
+	// 值里含该工作区的 xlsx/docx/pptx 三个转换器。owner 是工作区而不是进程 —— 因为三者
+	// 的 Seatbelt 读写根按工作区构造，进程级单例只能靠调用点自觉传对 workspace
+	//（错传不会报错，只会静默越权）。锁独立于 m.mu：建槽会用到 pyRT，独立锁避免与
+	// m.mu 形成锁序环；回收路径见 releasePreviewSlot / releaseAllPreviewSlots。
+	previewMu    sync.Mutex
+	previewSlots map[string]*previewSlot
+	// hookTrust hooks 信任库 —— **进程级单例，owner = 进程**（BR-21 显式化，非工作区槽位）。
+	//
+	// 为什么不能按工作区各造一份（审计 BR-21 原写法要求「按 workspace 分槽」，这里刻意
+	// 不照做，理由必须写清）：
+	//   1. 真相源是**一个全局文件** ~/.go-code/hooks-state.json（TrustStore 的 entries 与
+	//      managed 表）。按工作区分槽 = 多份内存副本写同一文件 → 后写覆盖前写，
+	//      在工作区 B 里确认过的 hook 会在 A 下一次写入时被静默抹掉（hooks 突然不跑了）。
+	//   2. 信任判定的粒度是「命令内容哈希」，不是工作区：Entry{Hash,Scope,Reason} 里没有
+	//      工作区维度，按工作区隔离需要改文件 schema + 迁移既有确认记录；不做迁移就等于
+	//      升级后所有已确认的 hook 静默回到「未信任」（与 GO-11 同一类「升级即静默关功能」）。
+	//      这是安全模型的产品决策，不属于本批止血范围（见交付报告的 blocked 项）。
+	//   3. 契约 §5.5 要求信任**即刻生效**：判定发生在每次派发时，面板的 hooks_trust 写的
+	//      就是这一个实例 —— 分槽后必需重建会话才生效，直接破坏该契约。
+	// 共享实例本身是正确设计；本批做的是把它的 owner（进程）与生命周期写进契约注释，
+	// 并用 workspace_slots_test.go 的回归钉住「同一实例 + 即刻生效」。
 	hookTrustMu sync.Mutex
 	hookTrust   *hooks.TrustStore
-}
-
-// xlsxPreviewer 取（或懒创建）工作簿预览转换器单例。
-// pyRT 为空（SDK 层未装配运行时）时仍可构造 —— Convert 会给出「运行时不可用」的明确
-// 错误（bridge 侧在调用前已判定并回错误，这里只是兜底，不 panic）。
-func (m *manager) xlsxPreviewer(pyRT *goruntime.Runtime) *builtin.XlsxPreviewer {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.xlsxPV == nil {
-		var py builtin.PythonRuntime
-		if pyRT != nil {
-			py = pyRT
-		}
-		// 沙箱按工作区构造（Seatbelt 的读写根在构造时注入，而本转换器是进程级单例）。
-		m.xlsxPV = builtin.NewXlsxPreviewer(py, m.xlsxPreviewSandbox)
-	}
-	return m.xlsxPV
-}
-
-// docxPreviewer 取（或懒创建）文档预览转换器单例（理由同 xlsxPreviewer）。
-func (m *manager) docxPreviewer(pyRT *goruntime.Runtime) *builtin.DocxPreviewer {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.docxPV == nil {
-		var py builtin.PythonRuntime
-		if pyRT != nil {
-			py = pyRT
-		}
-		m.docxPV = builtin.NewDocxPreviewer(py, m.officePreviewSandbox)
-	}
-	return m.docxPV
-}
-
-// pptxPreviewer 取（或懒创建）演示文稿预览转换器单例（理由同 xlsxPreviewer）。
-func (m *manager) pptxPreviewer(pyRT *goruntime.Runtime) *builtin.PptxPreviewer {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.pptxPV == nil {
-		var py builtin.PythonRuntime
-		if pyRT != nil {
-			py = pyRT
-		}
-		m.pptxPV = builtin.NewPptxPreviewer(py, m.officePreviewSandbox)
-	}
-	return m.pptxPV
 }
 
 // workspaceRuntime：单个工作区的会话集合 + 持久化目录 + 技能注册表 + 自定义 subagent 注册表 + MCP 管理器（按工作区隔离）
@@ -3488,8 +3461,11 @@ func (m *manager) dispatch(c command) {
 		// 转换（openpyxl 解析 + 渲染）：秒级，但**首次调用可能先 bootstrap 运行时**
 		// （建 venv + pip 装约 42MB），故放 goroutine —— 与 oauth_login 同理，不能阻塞
 		// dispatch 主循环（那会让整个桌面端在此期间无响应）。响应经 m.resp 回写（线程安全）。
+		// 槽位按**本命令的 workspace** 取：转换器里的沙箱根在建槽时固定，这里不再把 ws 传进
+		// 去「靠自觉」——三条通路共用同一个工作区根（BR-21）。
+		slot := m.previewSlotFor(ws, pyRT)
 		go func() {
-			res, cerr := m.xlsxPreviewer(pyRT).Convert(context.Background(), abs, ws)
+			res, cerr := slot.convertXLSX(context.Background(), abs)
 			if cerr != nil {
 				m.resp(c, false, cerr.Error(), nil)
 				return
@@ -3513,8 +3489,9 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "受管 Python 运行时未装配，无法预览 docx", nil)
 			return
 		}
+		slot := m.previewSlotFor(ws, pyRT)
 		go func() {
-			res, cerr := m.docxPreviewer(pyRT).Convert(context.Background(), abs, ws)
+			res, cerr := slot.convertDOCX(context.Background(), abs)
 			if cerr != nil {
 				m.resp(c, false, cerr.Error(), nil)
 				return
@@ -3535,8 +3512,9 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "受管 Python 运行时未装配，无法预览 pptx", nil)
 			return
 		}
+		slot := m.previewSlotFor(ws, pyRT)
 		go func() {
-			res, cerr := m.pptxPreviewer(pyRT).Convert(context.Background(), abs, ws)
+			res, cerr := slot.convertPPTX(context.Background(), abs)
 			if cerr != nil {
 				m.resp(c, false, cerr.Error(), nil)
 				return
@@ -4226,6 +4204,8 @@ func (m *manager) shutdownWorkspace(wsPath string) {
 	}
 	ws.mcp.Close()                         // 关闭工作区 MCP 服务器连接（子进程清理；会话复用按需重连）
 	ws.plugins.Close(context.Background()) // 关闭插件私有连接（Browser Use 子进程清理）
+	// 预览槽位随会话一起收尾（下次预览按需重建；见 workspace_slots.go）
+	m.releasePreviewSlot(wsPath)
 }
 
 // shutdownAll：stdin EOF 兜底，全部工作区优雅关闭
@@ -4253,6 +4233,10 @@ func (m *manager) shutdownAll() {
 	}
 	// Hub 智能体运行时同理（不在 m.workspaces 里，单独收尾）
 	m.shutdownHubRuntimes()
+	// 预览转换器槽位回收（进程退出：不留任何工作区登记）
+	m.releaseAllPreviewSlots()
+	// 进程级单例的显式收尾（IM 连接不随工作区关闭而停，只能在这里停一次）
+	m.closeIMPlugin()
 	// Session Mesh 远程网关关闭（mesh 常驻 manager 级，不随工作区）
 	if m.meshGW != nil {
 		m.meshGW.Stop()
@@ -4419,6 +4403,8 @@ func (m *manager) deleteWorkspace(wsPath string) {
 		ws.stopMCPWatch()                      // 停止配置监听（goroutine + fd 收尾；不得持锁调用）
 		ws.stopMCPHealth()                     // 停止 MCP 低频探活（同上）
 	}
+	// 预览槽位随工作区一起回收（BR-21 的回收路径之一：登记表不能只增不减）
+	m.releasePreviewSlot(wsPath)
 	// 只删 harness 自有元数据（工作区 .go-code 下的 skills.json），**保留**用户文件：
 	// 项目级配置 {ws}/.go-code/settings.json（手写的 MCP 等）、skills/ 项目技能、
 	// worktrees/ 都是用户数据。目录仅在清空后为空时移除（原实现 RemoveAll 整目录会把

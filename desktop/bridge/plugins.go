@@ -267,6 +267,26 @@ func (m *manager) enablePlugin(ctx context.Context, wsPath, id string) error {
 	return nil
 }
 
+// closeIMPlugin 进程级 IM 单例的收尾（bridge shutdownAll 调用一次）。
+//
+// 为什么单独一步（BR-21 的回收路径）：IM 实例登记在**每个**工作区的插件注册表里，但
+// 工作区级 Close **不再停它**（implugin.Plugin.ClosePreserve：删别的项目 / 改浏览器配置
+// 都不该掐断正在用的 IM 连接）。连接的生命周期属于进程，只能由进程退出统一关闭一次：
+// 先摘事件桥引用（停网关期间到达的回调在入口处判 nil 直接返回），再 Disable（Stop 全部
+// Gateway）。幂等：重复调用时 Runtime 已是 nil，stopAll 直接返回。
+func (m *manager) closeIMPlugin() {
+	m.imBridge = nil // 与 attachIMBridge 的赋值同一处语义：进程级引用，无独立 Stop
+	p := m.imPlugin
+	if p == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Disable(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "· im: 关闭连接失败: %v\n", err)
+	}
+}
+
 // attachIMBridge 装配全局 IM 事件桥（幂等：已装配跳过）。
 func (m *manager) attachIMBridge(wsPath string) {
 	if m.imBridge != nil {

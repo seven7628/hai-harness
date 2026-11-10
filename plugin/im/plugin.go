@@ -196,13 +196,31 @@ func (p *Plugin) Enable(ctx context.Context) ([]tools.Tool, error) {
 	return nil, nil
 }
 
-// Disable 实现 plugin.Capability：停止全部网关。
+// Disable 实现 plugin.Capability：停止全部网关（用户显式关闭插件）。
 func (p *Plugin) Disable(_ context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stopAll()
 	return nil
 }
+
+// ClosePreserve 实现 plugin.ClosePreserver：**工作区级 Close 不释放进程级连接**。
+//
+// 背景（BR-21）：bridge 把同一个 IM 插件实例登记进**每个**工作区的插件注册表
+// （buildPlugins(m.imPlugin)：IM 是跨 workspace 的一条连接 + 一张路由表，按工作区
+// 各造一份会变成同一账号多条连接、消息重复回复）。而 plugin.Registry.Close 的语义是
+// 工作区级收尾 —— 会在这些路径被调到：
+//   - shutdown_workspace / stdin EOF（main.go shutdownWorkspace/shutdownAll）
+//   - delete_workspace（删掉**别的**工作区）
+//   - applyBrowserConfig（用户改浏览器设置 → 逐工作区 prev.Close）
+//   - Hub 智能体运行时收尾（hub_session.go）
+//
+// 没有本方法时，任何一条都会走 Disable → stopAll：用户只是删了 B 项目 / 改了个浏览器
+// 配置，A 项目正在用的 IM 连接就被静默掐断（且 imBridge 仍持着已停的 Runtime）。
+//
+// 故这里显式空实现：工作区级 Close 对进程级单例没有可释放的东西。真正的收尾在进程级
+// （bridge 的 closeIMPlugin：shutdownAll 时 Disable 一次），用户显式关闭插件走 Disable。
+func (p *Plugin) ClosePreserve(_ context.Context) error { return nil }
 
 // Runtime 返回当前运行时（未启用返回 nil）。
 func (p *Plugin) Runtime() *Runtime {
