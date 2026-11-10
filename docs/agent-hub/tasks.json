@@ -1388,11 +1388,11 @@
       ],
       "acceptance": "对照用户参考图 1–3：左栏 section、中栏对话、右栏详情、per-agent 颜色与系统通知；5176 真实浏览器覆盖智能体/群组/搜索/返回工作区/编辑器下拉/三主题；独立 Review PASS 后才收口。",
       "tests": "browser review on localhost:5176 + independent review",
-      "status": "in_progress",
-      "note": "delta 复审：4/5 项 PASS；残留 1440+144px 左栏 tabs 仍换行（flex:1 压到 43px）；修复中",
+      "status": "review",
+      "note": "144px tabs 残留已修复（4c88a85）；最终 delta 复审中",
       "review": null,
-      "reviewNote": "delta review task-sz5gnmgk：右栏 close、900/980/144 左栏、群上下文居中、DM 平铺、元数据对比度均 PASS；残留=1440 窗口拖到 144px 时 tabs 仍 white-space:normal/flex:1 换行；需 nowrap+min-width:max-content+横向滚动。",
-      "commit": "a9844f9"
+      "reviewNote": "delta 4/5 PASS；残留 1440+144px tabs 换行。修复 4c88a85：tabs 默认 nowrap + min-width:max-content + 横向滚动；141px 下 66×26/55×26 单行、counts/back 可见；900/980 仍单行。最终复审进行中。",
+      "commit": "a9844f9 + 4c88a85"
     }
   ],
   "deferred": [
@@ -2328,8 +2328,9 @@
       "reviewNote": "delta review PASS（b75a415）；预算默认值修复，全门禁绿。"
     },
     "P4-UI-3": {
-      "status": "in_progress",
-      "reviewNote": "delta 4/5 PASS；残留 1440+144px tabs 换行，修复中"
+      "status": "review",
+      "commit": "a9844f9 + 4c88a85",
+      "reviewNote": "144px tabs 修复 4c88a85；最终复审中"
     }
   },
   "reviewGate": {
