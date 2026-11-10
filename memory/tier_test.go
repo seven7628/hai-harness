@@ -148,22 +148,24 @@ func TestHotListColdStartKeepsIndexOrder(t *testing.T) {
 // 页脚是这一档的安全带：没有它，模型会把精简清单当成完整清单，
 // 判定"这条我没记过"并重记一遍（与 truncationNotice 同一循环）。
 func TestHotListCapsAtKAndSaysItIsPartial(t *testing.T) {
+	// 条目数必须**多于** K：K 涨到 32 之后，写死 20 条会让这条断言变成恒真。
+	n := HotListSize + 8
 	var b strings.Builder
-	for i := 0; i < 20; i++ {
+	for i := 0; i < n; i++ {
 		b.WriteString("- f")
 		b.WriteString(itoa(i))
 		b.WriteString(".md — 说明\n")
 	}
 	hot := BuildHotList(b.String(), nil)
 
-	if hot.Total != 20 || hot.Shown != HotListSize || hot.Omitted != 20-HotListSize {
-		t.Fatalf("Total/Shown/Omitted = %d/%d/%d, want 20/%d/%d",
-			hot.Total, hot.Shown, hot.Omitted, HotListSize, 20-HotListSize)
+	if hot.Total != n || hot.Shown != HotListSize || hot.Omitted != n-HotListSize {
+		t.Fatalf("Total/Shown/Omitted = %d/%d/%d, want %d/%d/%d",
+			hot.Total, hot.Shown, hot.Omitted, n, HotListSize, n-HotListSize)
 	}
 	if n := strings.Count(hot.Text, "\n- ") + 1; n != HotListSize {
 		t.Fatalf("正文条目数 = %d, want %d\n%s", n, HotListSize, hot.Text)
 	}
-	if !strings.Contains(hot.Text, "非完整清单") || !strings.Contains(hot.Text, "共 20 条") {
+	if !strings.Contains(hot.Text, "非完整清单") || !strings.Contains(hot.Text, "共 "+itoa(n)+" 条") {
 		t.Fatalf("被省略时必须说明是子集并给出总数，得到：\n%s", hot.Text)
 	}
 }
