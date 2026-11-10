@@ -1819,9 +1819,6 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
  * 只重排现有数据：不加 demo 里的「预览 / 打开私有审批」这类没有 handler 的假按钮。 */
 .hub-msg.task { display: flex; padding-left: 42px; }
 .hub-msg.task > .hub-event { flex: 1; }
-/* 交接/审批卡直接挂在时间线上：与 agent 正文同一条左轴（32 + 10 = 42），
-   和任务卡（.hub-msg.task）一致；任务卡在自己的 wrapper 里不再叠加。 */
-.hub-thread > .hub-event { margin-left: 42px; }
 .hub-event {
   display: flex;
   gap: 9px;
@@ -2028,6 +2025,16 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 @container (max-width: 380px) {
   .hub-artifact { grid-template-columns: 26px minmax(0, 1fr); }
   .hub-artifact-meta { grid-column: 2; flex-wrap: wrap; gap: 4px 7px; }
+}
+
+/* 交接/审批卡可能被 RoundGroup 包进 .hub-round-stack（不是 .hub-thread 的直接子节点），
+   所以左轴放在卡片自己身上：与 agent 正文同一条（32 + 10 = 42）。
+   用 width: calc(100% - 42px) 而不是只加 margin —— 否则窄列时 100% + 42 会顶出滚动区。
+   任务卡已经在 .hub-msg.task 里缩进，内部不再叠加。
+   注意：必须写在 .hub-event 基样式之后（媒体查询不提升优先级）。 */
+@media (min-width: 901px) {
+  .hub-event { margin-left: 42px; width: calc(100% - 42px); }
+  .hub-msg.task .hub-event { margin-left: 0; width: 100%; }
 }
 
 /* 旧任务详情面板仍在用（HubInspector），保留这一条不动。 */
@@ -2298,7 +2305,6 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-list.run { padding: 18px 14px 8px; }
   .hub-composer-wrap { padding: 7px 12px 10px; }
   .hub-msg.task { padding-left: 0; }
-  .hub-thread > .hub-event { margin-left: 0; }
 }
 @media (max-width: 640px) {
   .hub-conv-head { padding: 9px 12px; gap: 8px; }
