@@ -1,4 +1,4 @@
-import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply } from './types'
+import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply, IMConfig } from './types'
 import type { BridgeCommand } from '../store/events'
 import type { MCPProjectInfo, MCPProjectServer, HookSectionView } from '../store/useAppStore'
 import currentProjectReadmeZh from '../../../../README.zh-CN.md?raw'
@@ -1092,6 +1092,28 @@ class MockTransport implements Transport {
     events: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo claude-session-start', timeout: 5 }] }] },
   }
   // 信任库（mock）：命令 → 状态；未登记的项目命令默认 untrusted（安全默认，与真实现一致）
+  // mockIMConfig IM 配置的 mock 真相源（im_config_set 写它、im_config_get 读它）。
+  // 三种投递目标各一条：workspace / agent DM / 群（群还需要执行者 agent）。
+  private mockIMConfig: IMConfig = {
+    enabled: true,
+    gateways: [
+      {
+        id: 'feishu-main',
+        type: 'feishu',
+        enabled: true,
+        config: { app_id: 'cli_mock', mode: 'websocket' },
+        routes: [
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_group' }, workspace: '~/workspace/go-code' },
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_dm' }, agent: 'ag_mockres1' },
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_team' }, agent: 'ag_mockres1', group: 'grp_mock1' },
+        ],
+        allow_users: ['ou_mock_user'],
+      },
+    ],
+    mirrors: [],
+    security: { require_bind_confirm: true },
+  }
+
   // mockTrust 按**归属**存（owner\u0000command）：与真 bridge 的 owner 隔离一致，
   // 免得 mock 模式下「A 群信任了 → B 群也显示已信任」把真实缺陷掩盖掉。
   private mockTrust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> = {}
@@ -2545,20 +2567,7 @@ class MockTransport implements Transport {
         break
       // IM 集成（SettingsModal IM tab 预览数据）
       case 'im_config_get':
-        this.respond(cmd, {
-          config: {
-            enabled: true,
-            gateways: [
-              {
-                id: 'feishu-main', type: 'feishu', enabled: true, config: { app_id: 'cli_mock', mode: 'websocket' },
-                routes: [{ chat: { gateway: 'feishu', chat_id: 'oc_mock_group' }, workspace: '~/workspace/go-code' }],
-                allow_users: ['ou_mock_user'],
-              },
-            ],
-            mirrors: [],
-            security: { require_bind_confirm: true },
-          },
-        })
+        this.respond(cmd, { config: JSON.parse(JSON.stringify(this.mockIMConfig)) })
         break
       case 'im_schema_list':
         this.respond(cmd, {
@@ -2609,9 +2618,14 @@ class MockTransport implements Transport {
         })
         break
       }
-      case 'im_config_set':
+      case 'im_config_set': {
+        // mock 也落盘（内存态）：静态返回会让「保存后回读」看起来没生效，
+        // 路由编辑（尤其 agent/群目标的保留）就没法在浏览器里真实验收。
+        const cfg = (cmd.payload as { config?: IMConfig } | undefined)?.config
+        if (cfg) this.mockIMConfig = JSON.parse(JSON.stringify(cfg)) as IMConfig
         this.respond(cmd, {})
         break
+      }
       case 'im_chat_list': // 群列表（路由绑定下拉）
         this.respond(cmd, {
           chats: [
@@ -3207,13 +3221,17 @@ class MockTransport implements Transport {
     this.respond(cmd, payload)
   }
 
+  // respond/respondErr 的响应走**微任务**（真 bridge 是 stdio 异步，响应永远晚于 send 返回）。
+  // 曾经同步 emit：store 里「send 之后才 onCommandResponseOnce」的流程（saveIMConfig /
+  // trustHooks / 各保存按钮）在 mock 模式下永远等不到响应 —— UI 表现为点了没反应、
+  // 按钮一直 busy。保持异步 = mock 与真 bridge 同形。
   private respond(cmd: BridgeCommand, data: Record<string, unknown>) {
-    this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data })
+    queueMicrotask(() => this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data }))
   }
 
   // respondErr：命令失败响应（真 bridge 同形：ok:false + error；store 侧透出给面板）
   private respondErr(cmd: BridgeCommand, error: string) {
-    this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error })
+    queueMicrotask(() => this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error }))
   }
 
   // emit：事件行注入 workspace + seq；session_id 由调用方显式带（按会话路由）
