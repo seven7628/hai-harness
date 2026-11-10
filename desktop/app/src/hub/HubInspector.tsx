@@ -82,16 +82,19 @@ export default function HubInspector() {
   const current = panel ?? 'overview'
   return (
     <aside className="right expanded hub-inspector hub-detail" aria-label="Hub 详情">
-      <nav className="hub-inspector-tabs hub-detail-tabs" role="tablist" aria-label="Hub 详情页签">
-        <button role="tab" aria-selected={current === 'overview'} className={current === 'overview' ? 'on' : ''} onClick={() => setPanel(null)}>概览</button>
-        <button role="tab" aria-selected={current === 'tasks'} className={current === 'tasks' ? 'on' : ''} onClick={() => setPanel('tasks')}>
-          任务{activeTasks > 0 ? <span className="hub-badge">{activeTasks}</span> : null}
-        </button>
-        <button role="tab" aria-selected={current === 'needs'} className={current === 'needs' ? 'on' : ''} onClick={() => setPanel('needs')}>
-          Needs{needs.length > 0 ? <span className="hub-badge alert">{needs.length}</span> : null}
-        </button>
-        <button role="tab" aria-selected={current === 'session'} className={current === 'session' ? 'on' : ''} onClick={() => setPanel('session')}>会话</button>
-        <button role="tab" aria-selected={current === 'context'} className={current === 'context' ? 'on' : ''} onClick={() => setPanel('context')}>Context</button>
+      {/* 页签滚动区与「收起」按钮分属两栏：关闭按钮不能跟着 nav 一起滚出可视区。 */}
+      <div className="hub-inspector-head">
+        <nav className="hub-inspector-tabs hub-detail-tabs" role="tablist" aria-label="Hub 详情页签">
+          <button role="tab" aria-selected={current === 'overview'} className={current === 'overview' ? 'on' : ''} onClick={() => setPanel(null)}>概览</button>
+          <button role="tab" aria-selected={current === 'tasks'} className={current === 'tasks' ? 'on' : ''} onClick={() => setPanel('tasks')}>
+            任务{activeTasks > 0 ? <span className="hub-badge">{activeTasks}</span> : null}
+          </button>
+          <button role="tab" aria-selected={current === 'needs'} className={current === 'needs' ? 'on' : ''} onClick={() => setPanel('needs')}>
+            Needs{needs.length > 0 ? <span className="hub-badge alert">{needs.length}</span> : null}
+          </button>
+          <button role="tab" aria-selected={current === 'session'} className={current === 'session' ? 'on' : ''} onClick={() => setPanel('session')}>会话</button>
+          <button role="tab" aria-selected={current === 'context'} className={current === 'context' ? 'on' : ''} onClick={() => setPanel('context')}>Context</button>
+        </nav>
         <button
           className="hub-link hub-inspector-close"
           onClick={() => setRightExpanded(false)}
@@ -100,7 +103,7 @@ export default function HubInspector() {
         >
           <PanelRight size={13} />
         </button>
-      </nav>
+      </div>
       {current === 'overview' ? <OverviewPanel /> : null}
       {current === 'tasks' ? <TaskBoard /> : null}
       {current === 'needs' ? <NeedsYouPanel /> : null}

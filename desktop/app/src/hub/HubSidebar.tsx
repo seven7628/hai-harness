@@ -115,7 +115,7 @@ export default function HubSidebar() {
               title={t('hub.backToWorkspaces')}
               aria-label={t('hub.backToWorkspaces')}
             >
-              <ChevronLeft size={11} /> {t('hub.back')}
+              <ChevronLeft size={11} /> <span className="hub-side-back-label">{t('hub.back')}</span>
             </button>
           ) : null}
           <button

@@ -70,6 +70,9 @@
   color: var(--text-3);
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .hub-side-actions { display: inline-flex; align-items: center; gap: 2px; flex: none; }
 .hub-side-back {
@@ -131,7 +134,7 @@
 .hub-side-scopes button {
   border: 0;
   background: transparent;
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: 10.5px;
   padding: 1px 7px;
   border-radius: 5px;
@@ -165,7 +168,7 @@
   padding: 0 4px;
   border-radius: 7px;
   background: color-mix(in srgb, var(--ink) 7%, transparent);
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: 9.5px;
   line-height: 14px;
   text-align: center;
@@ -229,7 +232,7 @@
 .hub-side-meta .hub-preview { flex: 1; min-width: 0; }
 .hub-side-time {
   flex: none;
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
@@ -358,7 +361,7 @@
 .hub-name { font-size: 13px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hub-preview {
   font-size: 11.5px;
-  color: var(--text-3);
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -454,13 +457,15 @@
   width: 100%;
   margin: 0 auto;
 }
-/* 内容短时贴底（聊天习惯），长时正常从顶部滚动 —— margin-top:auto 只吃剩余空间。 */
+/* 内容短时贴底（聊天习惯），长时正常从顶部滚动 —— margin-top:auto 只吃剩余空间。
+   DM 例外：短会话从顶部起排（编辑体；避免两句话被顶到输入框上方、上面空 500px）。 */
 .hub-thread {
   display: flex;
   flex-direction: column;
   gap: 10px;
   margin-top: auto;
 }
+.hub-list.dm .hub-thread { margin-top: 0; }
 .hub-intro {
   margin-top: 8vh;
   text-align: center;
@@ -488,7 +493,13 @@
   border: 1px solid var(--accent-border);
 }
 .hub-msg.agent { align-items: flex-start; }
-.hub-msg.agent .hub-body { max-width: 92%; }
+/* ref-1：智能体消息走「编辑体」——无卡面、无内边距，和人类气泡明确分层。 */
+.hub-msg.agent .hub-body {
+  max-width: 100%;
+  background: transparent;
+  padding: 2px 0;
+  border-radius: 0;
+}
 .hub-msg.system {
   align-items: center;
   color: var(--text-3);
@@ -835,9 +846,14 @@
   border-left: 0; background: var(--paper-2);
 }
 .hub-detail-rail { background: var(--bg); }
+.hub-inspector-head {
+  display: flex; align-items: center; gap: 4px;
+  min-width: 0; flex: 0 0 auto;
+  padding: 7px 8px; border-bottom: 1px solid var(--border);
+}
 .hub-inspector-tabs {
-  display: flex; align-items: center; gap: 1px; padding: 7px 8px;
-  border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  display: flex; align-items: center; gap: 1px;
+  flex: 1 1 auto; min-width: 0;
   overflow-x: auto; scrollbar-width: none;
 }
 .hub-inspector-tabs::-webkit-scrollbar { display: none; }
@@ -849,7 +865,7 @@
 .hub-inspector-tabs button[role='tab']:hover { color: var(--ink); }
 .hub-inspector-tabs button[role='tab'].on { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
 .hub-inspector-close {
-  margin-left: auto; flex: none; display: grid; place-items: center;
+  margin-left: 4px; flex: 0 0 auto; display: grid; place-items: center;
   width: 24px; height: 24px; padding: 0; border-radius: 6px;
 }
 .hub-inspector-close:hover { background: var(--surface); }
@@ -1002,7 +1018,7 @@
 
 /* P3a-08：同轮合并 / 动作清单 / 群态标记 */
 .hub-round-group { border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; margin: 6px 0; }
-.hub-round-group-head { display: flex; align-items: center; gap: 6px; font-size: 11px; opacity: .78; margin-bottom: 4px; }
+.hub-round-group-head { display: flex; align-items: center; justify-content: center; text-align: center; gap: 6px; font-size: 11px; opacity: .78; margin-bottom: 4px; }
 .hub-round-group-body .hub-msg { margin: 4px 0; }
 .hub-digest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px; margin-bottom: 6px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .hub-chip.danger { color: var(--danger, #c0392b); border-color: currentColor; }
@@ -1383,9 +1399,14 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-context-line {
   display: flex;
   align-items: center;
+  justify-content: center;
   flex-wrap: wrap;
   gap: 4px;
-  margin: 2px 0 -2px;
+  width: 100%;
+  max-width: 520px;
+  align-self: center;
+  margin: 2px auto -2px;
+  text-align: center;
   font-size: 10.5px;
   /* 小字标签也要过 4.5:1：--text-3 单独在 paper 只有 3.3，压向 --ink。 */
   color: color-mix(in srgb, var(--text-3) 55%, var(--ink));
@@ -1600,6 +1621,25 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   font-size: 11.5px; cursor: pointer;
 }
 .hub-search-more:disabled { opacity: 0.6; cursor: default; }
+
+/* 窄窗（≤1100）：Hub section 的头/页签必须保持单行 —— 隐藏计数与返回文案、
+   收紧间距；1440 布局不受影响，返回/新建按钮仍可用 aria-label/title 触达。 */
+@media (max-width: 1100px) {
+  .hub-side-head { gap: 4px; padding: 4px 6px 2px 10px; }
+  .hub-side-title { gap: 4px; font-size: 10.5px; letter-spacing: 0.04em; }
+  .hub-side-back { gap: 0; padding: 2px; }
+  .hub-side-back-label { display: none; }
+  .hub-side-tabs { gap: 1px; padding: 0 6px 2px; }
+  .hub-side-tabs button {
+    gap: 3px;
+    min-width: 0;
+    padding: 3px 4px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .hub-side-count { display: none; }
+  .hub-side-scopes { gap: 2px; }
+}
 
 /* 最低窗高（980×620）预算：压缩固定的头/搜索/底栏，把空间还给两个列表。
    620 下 Hub section 仍保留 2 行左右列表，工作区树至少「标题 + 1 会话」可见。 */

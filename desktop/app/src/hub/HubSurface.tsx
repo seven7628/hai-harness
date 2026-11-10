@@ -242,7 +242,7 @@ export default function HubSurface() {
                 <span className={`hub-dot ${isRunning ? 'on' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
               </header>
 
-              <div className={`hub-list ${view === 'run' ? 'run' : ''}`} ref={listRef} onScroll={onScroll}>
+              <div className={`hub-list dm ${view === 'run' ? 'run' : ''}`} ref={listRef} onScroll={onScroll}>
                 {view === 'run' ? (
                   <RunView entries={runLog} running={isRunning} />
                 ) : (
