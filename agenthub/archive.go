@@ -387,7 +387,7 @@ func (s *FileStore) pageMessages(scope, id string, hot []Message, beforeSeq int6
 }
 
 // findArchivedMessageByClientID 在冷段里从新到旧找 client_msg_id（幂等重发用）。
-// trim 与调用方热日志的匹配口径保持一致（群 trim，DM 精确匹配）。
+// trim 与调用方热日志的匹配口径保持一致（群/DM 现在都 trim）。
 func (s *FileStore) findArchivedMessageByClientID(scope, id, clientMsgID string, trim bool) (*Message, error) {
 	m, err := s.readArchiveManifest(scope, id)
 	if err != nil {
@@ -489,6 +489,19 @@ func (s *FileStore) writeArchiveSegment(scope, id string, seg ArchiveSegment, da
 		if err := os.Chmod(target, 0o400); err != nil {
 			return false, err
 		}
+		// 复用的孤儿段也要在 manifest 提交前落盘：文件内容 + 目录项都 fsync。
+		f, err := os.Open(target)
+		if err != nil {
+			return false, err
+		}
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return false, err
+		}
+		if err := f.Close(); err != nil {
+			return false, err
+		}
+		syncDir(dir)
 		return true, nil
 	case errors.Is(err, os.ErrNotExist):
 	default:
@@ -668,6 +681,22 @@ func sortMessagesBySeq(msgs []Message) {
 	sort.SliceStable(msgs, func(i, j int) bool { return msgs[i].Seq < msgs[j].Seq })
 }
 
+// validateBatchSegments 拒绝不能写入不可变段的批次：段内 seq 必须严格递增。
+// 热日志出现重复 seq 时宁可报 ErrCorrupt，也不能写出一个读取侧必然拒绝的段，
+// 否则 manifest 提交后每次读取都失败，归档会永久卡死。
+func validateBatchSegments(batch []Message) error {
+	if len(batch) == 0 {
+		return fmt.Errorf("%w: empty archive batch", ErrCorrupt)
+	}
+	for i := 1; i < len(batch); i++ {
+		if batch[i].Seq <= batch[i-1].Seq {
+			return fmt.Errorf("%w: archive batch seq not strictly increasing at index %d (%d <= %d)",
+				ErrCorrupt, i, batch[i].Seq, batch[i-1].Seq)
+		}
+	}
+	return nil
+}
+
 // ArchiveGroup 归档一个群的热日志。policy 零值 = DefaultArchivePolicy()。
 func (s *FileStore) ArchiveGroup(ctx context.Context, gid GroupID, policy ArchivePolicy) (ArchiveResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -795,6 +824,10 @@ func (s *FileStore) archiveScope(ctx context.Context, scope, id string, policy A
 	var segData []byte
 	if trigger {
 		batch = append([]Message(nil), live[:count]...)
+		if err := validateBatchSegments(batch); err != nil {
+			s.mu.Unlock()
+			return res, err
+		}
 		segData, err = encodeMessages(batch)
 		if err != nil {
 			s.mu.Unlock()
@@ -844,6 +877,10 @@ func (s *FileStore) archiveScope(ctx context.Context, scope, id string, policy A
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// 提交前再验一次：批次不能因为任何中间状态变成不可读段。
+	if err := validateBatchSegments(batch); err != nil {
+		return res, err
+	}
 	manifest, err = s.readArchiveManifest(scope, id)
 	if err != nil {
 		return res, err

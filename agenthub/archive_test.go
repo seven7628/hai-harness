@@ -204,6 +204,409 @@ func TestDefaultArchivePolicy(t *testing.T) {
 	}
 }
 
+func TestArchiveRejectsNonIncreasingBatch(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	hotPath := st.archiveHotLogPath(ArchiveScopeGroups, "grp_test")
+	// 重复 seq 5 + 空洞 3-4：归档批次的 seq 不可能严格递增。
+	for i, seq := range []int64{1, 2, 5, 5, 6, 7, 8, 9, 10, 11} {
+		m := archiveGroupMsg(fmt.Sprintf("bad-%d", i), KindText, VisibilityGroup,
+			testTime().Add(time.Duration(i)*time.Second))
+		m.Seq = seq
+		m.ID = MessageID(seq)
+		if err := appendJSONL(hotPath, &m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(hotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := ArchivePolicy{MaxMessages: 5, KeepRecent: 2, Percent: 100}
+
+	if _, err := st.ArchiveGroup(ctx, "grp_test", pol); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("ArchiveGroup duplicate-seq batch = %v, want ErrCorrupt", err)
+	}
+	if _, err := st.LoadArchiveManifest(ctx, ArchiveScopeGroups, "grp_test"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("manifest after rejected batch = %v, want ErrNotFound", err)
+	}
+	if _, err := os.Stat(st.archiveDir(ArchiveScopeGroups, "grp_test")); !os.IsNotExist(err) {
+		t.Fatalf("archive dir created for rejected batch: %v", err)
+	}
+	after, err := os.ReadFile(hotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("rejected archive must leave hot log byte-identical")
+	}
+
+	st2, err := OpenFileStore(st.Root())
+	if err != nil {
+		t.Fatalf("OpenFileStore after rejected batch: %v", err)
+	}
+	msgs, err := st2.ReadMessages(ctx, "grp_test", 0, 50)
+	if err != nil {
+		t.Fatalf("ReadMessages after rejected batch: %v", err)
+	}
+	assertArchiveSeqs(t, msgs, 1, 2, 5, 6, 7, 8, 9, 10, 11)
+
+	// 第二次重试仍应干净失败，不能因为上次失败留下半状态而卡死。
+	if _, err := st2.ArchiveGroup(ctx, "grp_test", pol); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("retry duplicate-seq batch = %v, want ErrCorrupt", err)
+	}
+	if _, err := st2.LoadArchiveManifest(ctx, ArchiveScopeGroups, "grp_test"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("manifest after retry = %v, want ErrNotFound", err)
+	}
+	afterRetry, err := os.ReadFile(hotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(afterRetry) {
+		t.Fatal("retry must leave hot log byte-identical")
+	}
+}
+
+func TestArchiveOrphanSegmentConflictLeavesHotUntouched(t *testing.T) {
+	st := newTestStore(t)
+	appendArchiveGroupN(t, st, 12, "oc")
+	dir := st.archiveDir(ArchiveScopeGroups, "grp_test")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conflict := []byte("{\"seq\":1,\"text\":\"conflict\"}\n")
+	orphan := filepath.Join(dir, "1-8.jsonl")
+	if err := os.WriteFile(orphan, conflict, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hotPath := st.archiveHotLogPath(ArchiveScopeGroups, "grp_test")
+	before, err := os.ReadFile(hotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = st.ArchiveGroup(context.Background(), "grp_test", ArchivePolicy{
+		MaxMessages: 10, KeepRecent: 4, Percent: 100,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("ArchiveGroup conflicting orphan = %v, want ErrConflict", err)
+	}
+	after, err := os.ReadFile(hotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("conflicting orphan must leave hot log untouched")
+	}
+	if _, err := st.LoadArchiveManifest(context.Background(), ArchiveScopeGroups, "grp_test"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("manifest after conflict = %v, want ErrNotFound", err)
+	}
+	got, err := os.ReadFile(orphan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(conflict) {
+		t.Fatal("conflicting orphan must not be overwritten")
+	}
+}
+
+func TestArchiveIfNeededContinuesAfterCorruptConversation(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	bad := testGroup()
+	bad.ID = "grp_bad"
+	dup := testGroup()
+	dup.ID = "grp_dup"
+	good := testGroup()
+	good.ID = "grp_good"
+	if err := st.SaveGroup(ctx, bad); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveGroup(ctx, dup); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveGroup(ctx, good); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveAgent(ctx, testAgent()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 12; i++ {
+		for _, gid := range []GroupID{"grp_bad", "grp_good"} {
+			m := archiveGroupMsg(fmt.Sprintf("%s-%02d", gid, i), KindText, VisibilityGroup,
+				testTime().Add(time.Duration(i)*time.Second))
+			m.GroupID = gid
+			appendArchiveGroupMsg(t, st, m)
+		}
+	}
+	appendArchiveDMN(t, st, "ag_test", 12, "dm")
+
+	// grp_dup：重复 seq 会让归档批次不可写，必须只影响自己。
+	dupHotPath := st.archiveHotLogPath(ArchiveScopeGroups, "grp_dup")
+	for i, seq := range []int64{1, 2, 5, 5, 6, 7, 8, 9, 10, 11} {
+		m := archiveGroupMsg(fmt.Sprintf("dup-%d", i), KindText, VisibilityGroup,
+			testTime().Add(time.Duration(i)*time.Second))
+		m.GroupID = "grp_dup"
+		m.Seq = seq
+		m.ID = MessageID(seq)
+		if err := appendJSONL(dupHotPath, &m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dupBefore, err := os.ReadFile(dupHotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 坏会话的 manifest 读不出来：它必须只污染自己的结果，不能阻断其它会话。
+	badDir := st.archiveDir(ArchiveScopeGroups, "grp_bad")
+	if err := os.MkdirAll(badDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "manifest.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badHotPath := st.archiveHotLogPath(ArchiveScopeGroups, "grp_bad")
+	badBefore, err := os.ReadFile(badHotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := st.archiveIfNeeded(ctx, ArchivePolicy{MaxMessages: 5, KeepRecent: 3, Percent: 70})
+	if err == nil || !errors.Is(err, ErrCorrupt) ||
+		!strings.Contains(err.Error(), "grp_bad") || !strings.Contains(err.Error(), "grp_dup") {
+		t.Fatalf("archiveIfNeeded error = %v, want joined ErrCorrupt for grp_bad+grp_dup", err)
+	}
+	seen := map[string]int{}
+	for _, r := range results {
+		seen[r.Scope+"/"+r.ID] = r.Archived
+	}
+	if seen[ArchiveScopeGroups+"/grp_good"] != 8 || seen[ArchiveScopeDMs+"/ag_test"] != 8 {
+		t.Fatalf("healthy conversations results = %v, want group+dm archived=8", seen)
+	}
+	if _, ok := seen[ArchiveScopeGroups+"/grp_bad"]; ok {
+		t.Fatalf("corrupt group unexpectedly in results: %v", seen)
+	}
+	if _, ok := seen[ArchiveScopeGroups+"/grp_dup"]; ok {
+		t.Fatalf("duplicate-seq group unexpectedly in results: %v", seen)
+	}
+	badAfter, err := os.ReadFile(badHotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(badBefore) != string(badAfter) {
+		t.Fatal("corrupt conversation hot log changed")
+	}
+	dupAfter, err := os.ReadFile(dupHotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(dupBefore) != string(dupAfter) {
+		t.Fatal("duplicate-seq conversation hot log changed")
+	}
+	if _, err := st.LoadArchiveManifest(ctx, ArchiveScopeGroups, "grp_dup"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("duplicate-seq group manifest = %v, want ErrNotFound", err)
+	}
+	if _, err := st.LoadArchiveManifest(ctx, ArchiveScopeGroups, "grp_good"); err != nil {
+		t.Fatalf("healthy group not archived: %v", err)
+	}
+}
+
+func TestArchiveDirectMessageClientIDWhitespace(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	first := Message{
+		Sender: Sender{Kind: SenderHuman}, Kind: KindText, Text: "dm padded",
+		Visibility: VisibilityGroup, Refs: map[string]any{"client_msg_id": " cid-dm-pad "},
+		CreatedAt: testTime(),
+	}
+	if _, err := st.AppendDirectMessage(ctx, "ag_pad", &first); err != nil {
+		t.Fatal(err)
+	}
+	appendArchiveDMN(t, st, "ag_pad", 5, "pad")
+	for _, q := range []string{"cid-dm-pad", " cid-dm-pad ", "\tcid-dm-pad\n"} {
+		if seq, ok, err := st.FindDirectMessageByClientID(ctx, "ag_pad", q); err != nil || !ok || seq != 1 {
+			t.Fatalf("FindDirectMessageByClientID(%q) = %d/%v/%v, want 1/true", q, seq, ok, err)
+		}
+	}
+	if _, ok, err := st.FindDirectMessageByClientID(ctx, "ag_pad", "   "); err != nil || ok {
+		t.Fatalf("blank client id = %v/%v, want false", ok, err)
+	}
+
+	if _, err := st.ArchiveDM(ctx, "ag_pad", ArchivePolicy{MaxMessages: 3, KeepRecent: 2, Percent: 100}); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"cid-dm-pad", " cid-dm-pad "} {
+		if seq, ok, err := st.FindDirectMessageByClientID(ctx, "ag_pad", q); err != nil || !ok || seq != 1 {
+			t.Fatalf("FindDirectMessageByClientID cold(%q) = %d/%v/%v, want 1/true", q, seq, ok, err)
+		}
+	}
+
+	hotBefore, err := os.ReadFile(st.archiveHotLogPath(ArchiveScopeDMs, "ag_pad"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// bridge 的幂等重发路径：找到就不再 AppendDirectMessage。
+	if _, ok, err := st.FindDirectMessageByClientID(ctx, "ag_pad", "cid-dm-pad"); err != nil || !ok {
+		t.Fatalf("retry lookup = %v/%v", ok, err)
+	}
+	hotAfter, err := os.ReadFile(st.archiveHotLogPath(ArchiveScopeDMs, "ag_pad"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(hotBefore) != string(hotAfter) {
+		t.Fatal("deduped DM retry must not append")
+	}
+}
+
+func TestArchiveHotPrioritySearchFindUnread(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	groupFirst := archiveGroupMsg("needle cold group", KindText, VisibilityGroup, testTime())
+	groupFirst.Refs = map[string]any{"client_msg_id": "cid-hot-group"}
+	appendArchiveGroupMsg(t, st, groupFirst)
+	for i := 2; i <= 12; i++ {
+		appendArchiveGroupMsg(t, st, archiveGroupMsg(fmt.Sprintf("g-%02d", i), KindText, VisibilityGroup,
+			testTime().Add(time.Duration(i)*time.Second)))
+	}
+	if _, err := st.ArchiveGroup(ctx, "grp_test", ArchivePolicy{MaxMessages: 10, KeepRecent: 4, Percent: 100}); err != nil {
+		t.Fatal(err)
+	}
+	groupManifest := mustArchiveManifest(t, st, ArchiveScopeGroups, "grp_test")
+	coldGroup := archiveSegmentMessages(t, st, ArchiveScopeGroups, "grp_test", groupManifest.Segments[0])
+	groupHotPath := st.archiveHotLogPath(ArchiveScopeGroups, "grp_test")
+	for _, msg := range coldGroup {
+		dup := msg
+		if dup.Seq == 1 {
+			dup.Text = "needle hot group"
+		} else {
+			dup.Text = fmt.Sprintf("dup-%d", dup.Seq)
+		}
+		if err := appendJSONL(groupHotPath, &dup); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hits, err := st.SearchMessages(ctx, "grp_test", "needle", 0, 50)
+	if err != nil || len(hits) != 1 || hits[0].Seq != 1 || hits[0].Text != "needle hot group" {
+		t.Fatalf("agent search hot priority = %+v/%v", hits, err)
+	}
+	hits, err = st.SearchMessagesHuman(ctx, "grp_test", "needle", 0, 50)
+	if err != nil || len(hits) != 1 || hits[0].Text != "needle hot group" {
+		t.Fatalf("human search hot priority = %+v/%v", hits, err)
+	}
+	if got, err := st.FindGroupMessageByClientID(ctx, "grp_test", "cid-hot-group"); err != nil || got == nil || got.Text != "needle hot group" {
+		t.Fatalf("group find hot priority = %+v/%v", got, err)
+	}
+
+	dmFirst := Message{Sender: Sender{Kind: SenderHuman}, Kind: KindText, Text: "needle cold dm",
+		Visibility: VisibilityGroup, Refs: map[string]any{"client_msg_id": "cid-hot-dm"}, CreatedAt: testTime()}
+	if _, err := st.AppendDirectMessage(ctx, "ag_hot", &dmFirst); err != nil {
+		t.Fatal(err)
+	}
+	appendArchiveDMN(t, st, "ag_hot", 7, "dm")
+	if _, err := st.ArchiveDM(ctx, "ag_hot", ArchivePolicy{MaxMessages: 3, KeepRecent: 2, Percent: 75}); err != nil {
+		t.Fatal(err)
+	}
+	dmManifest := mustArchiveManifest(t, st, ArchiveScopeDMs, "ag_hot")
+	coldDM := archiveSegmentMessages(t, st, ArchiveScopeDMs, "ag_hot", dmManifest.Segments[0])
+	dmHotPath := st.archiveHotLogPath(ArchiveScopeDMs, "ag_hot")
+	for _, msg := range coldDM {
+		dup := msg
+		if dup.Seq == 1 {
+			dup.Text = "needle hot dm"
+		} else {
+			dup.Text = fmt.Sprintf("dm-dup-%d", dup.Seq)
+		}
+		if err := appendJSONL(dmHotPath, &dup); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dmHits, err := st.SearchDirectMessages(ctx, "ag_hot", "needle", 0, 50)
+	if err != nil || len(dmHits) != 1 || dmHits[0].Seq != 1 || dmHits[0].Text != "needle hot dm" {
+		t.Fatalf("dm search hot priority = %+v/%v", dmHits, err)
+	}
+	if seq, ok, err := st.FindDirectMessageByClientID(ctx, "ag_hot", "cid-hot-dm"); err != nil || !ok || seq != 1 {
+		t.Fatalf("dm find hot priority = %d/%v/%v", seq, ok, err)
+	}
+	unread, last, err := st.DMUnread(ctx, "ag_hot")
+	if err != nil || unread != 8 || last == nil || last.Seq != 8 {
+		t.Fatalf("dm unread hot dedupe = %d/%+v/%v, want 8/seq8", unread, last, err)
+	}
+}
+
+func TestArchiveFullyColdMultiSegmentPagination(t *testing.T) {
+	ctx := context.Background()
+	pol := ArchivePolicy{MaxMessages: 10, KeepRecent: 5, Percent: 50}
+
+	t.Run("group", func(t *testing.T) {
+		st := newTestStore(t)
+		appendArchiveGroupN(t, st, 30, "fg")
+		for i := 0; i < 2; i++ {
+			if _, err := st.ArchiveGroup(ctx, "grp_test", pol); err != nil {
+				t.Fatal(err)
+			}
+		}
+		forceArchiveAll(t, st, ArchiveScopeGroups, "grp_test")
+		if hot := archiveHotMessages(t, st, ArchiveScopeGroups, "grp_test"); len(hot) != 0 {
+			t.Fatalf("hot = %d, want 0", len(hot))
+		}
+		if m := mustArchiveManifest(t, st, ArchiveScopeGroups, "grp_test"); len(m.Segments) != 3 {
+			t.Fatalf("segments = %d, want 3", len(m.Segments))
+		}
+		for _, tc := range []struct {
+			before int64
+			limit  int
+			want   []int64
+		}{
+			{0, 7, []int64{24, 25, 26, 27, 28, 29, 30}},
+			{17, 10, []int64{7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+			{23, 8, []int64{15, 16, 17, 18, 19, 20, 21, 22}},
+			{9, 5, []int64{4, 5, 6, 7, 8}},
+		} {
+			page, err := st.ReadMessages(ctx, "grp_test", tc.before, tc.limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertArchiveSeqs(t, page, tc.want...)
+		}
+	})
+
+	t.Run("dm", func(t *testing.T) {
+		st := newTestStore(t)
+		appendArchiveDMN(t, st, "ag_fg", 30, "fd")
+		for i := 0; i < 2; i++ {
+			if _, err := st.ArchiveDM(ctx, "ag_fg", pol); err != nil {
+				t.Fatal(err)
+			}
+		}
+		forceArchiveAll(t, st, ArchiveScopeDMs, "ag_fg")
+		if hot := archiveHotMessages(t, st, ArchiveScopeDMs, "ag_fg"); len(hot) != 0 {
+			t.Fatalf("hot = %d, want 0", len(hot))
+		}
+		if m := mustArchiveManifest(t, st, ArchiveScopeDMs, "ag_fg"); len(m.Segments) != 3 {
+			t.Fatalf("segments = %d, want 3", len(m.Segments))
+		}
+		for _, tc := range []struct {
+			before int64
+			limit  int
+			want   []int64
+		}{
+			{0, 7, []int64{24, 25, 26, 27, 28, 29, 30}},
+			{17, 10, []int64{7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+			{23, 8, []int64{15, 16, 17, 18, 19, 20, 21, 22}},
+			{9, 5, []int64{4, 5, 6, 7, 8}},
+		} {
+			page, err := st.ReadDirectMessages(ctx, "ag_fg", tc.before, tc.limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertArchiveSeqs(t, page, tc.want...)
+		}
+	})
+}
+
 func TestArchiveGroupThresholdAndManifest(t *testing.T) {
 	st := newTestStore(t)
 	appendArchiveGroupN(t, st, 12, "m")

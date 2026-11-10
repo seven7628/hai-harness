@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -187,6 +188,8 @@ func (s *FileStore) FindDirectMessageByClientID(ctx context.Context, agentID Age
 	if !validID(string(agentID)) {
 		return 0, false, fmt.Errorf("%w: agent id %q", ErrInvalid, agentID)
 	}
+	// 与群口径一致：查询和存储值都 trim，避免同一幂等键在归档前后匹配结果不同。
+	clientMsgID = strings.TrimSpace(clientMsgID)
 	if clientMsgID == "" {
 		return 0, false, nil
 	}
@@ -197,12 +200,12 @@ func (s *FileStore) FindDirectMessageByClientID(ctx context.Context, agentID Age
 		return 0, false, err
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if id, _ := msgs[i].Refs["client_msg_id"].(string); id == clientMsgID {
+		if id, _ := msgs[i].Refs["client_msg_id"].(string); strings.TrimSpace(id) == clientMsgID {
 			return msgs[i].Seq, true, nil
 		}
 	}
 	// 热日志找不到再搜冷段：幂等重发跨归档仍去重。
-	hit, err := s.findArchivedMessageByClientID(ArchiveScopeDMs, string(agentID), clientMsgID, false)
+	hit, err := s.findArchivedMessageByClientID(ArchiveScopeDMs, string(agentID), clientMsgID, true)
 	if err != nil {
 		return 0, false, err
 	}
