@@ -118,3 +118,42 @@ func TestGuidance_DoesNotEchoIndexEntries(t *testing.T) {
 		t.Fatalf("说明段与索引正文混在了一起：\n%q\nwant\n%q", inj.Text, want)
 	}
 }
+
+// 说明段与解析器必须对齐：文档给的那行样例，必须真的能被宿主认成一条记忆。
+//
+// 这条测试防的是一类静默失效：索引行由模型手写，注入/恢复只认"行内有定位符"的行。
+// 说明段若给出一个解析器不认的样例（或解析器日后收紧而说明段没跟上），模型就会
+// 照着写出永远不进注入的索引行——而这条路径没有任何报错，只有"怎么注入里没有它"。
+func TestGuidance_IndexExampleIsParseable(t *testing.T) {
+	line := strings.Trim(indexLineExample, "`")
+
+	target, summary, ok := splitLocator(line)
+	if !ok {
+		t.Fatalf("说明段给的索引行样例解析不出定位符：%q", line)
+	}
+	if target != "文件名.md" {
+		t.Fatalf("样例定位符 = %q，期望 文件名.md", target)
+	}
+	if summary == "" {
+		t.Fatalf("样例没有摘要部分：%q", line)
+	}
+
+	// 面板/审计走的是另一套入口，必须得到同一个文件名——否则"已登记"与
+	// "会注入"两处会各说各话。
+	names := parseIndexEntries(line)
+	if len(names) != 1 || names[0] != "文件名.md" {
+		t.Fatalf("parseIndexEntries(%q) = %v，期望 [文件名.md]", line, names)
+	}
+}
+
+// 反向：行内没有文件名时，说明段承诺"不算作一条记忆"——解析器必须真的这样行为。
+func TestGuidance_LineWithoutFilenameIsNotAMemory(t *testing.T) {
+	for _, line := range []string{
+		"- 标题 — 一句话摘要，没有文件名",
+		"- 只是分组说明文字",
+	} {
+		if _, _, ok := splitLocator(strings.TrimPrefix(line, "- ")); ok {
+			t.Fatalf("%q 不该被认成一条记忆", line)
+		}
+	}
+}
