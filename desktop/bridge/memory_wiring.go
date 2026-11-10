@@ -222,7 +222,18 @@ func (h *memoryHost) postWrite(ctx context.Context, workspace, absPath string) (
 	if ws.Err == nil && ws.Stamped != memory.StampedSkipped {
 		h.emitMemoryActivity(ctx, scope, events.MemoryActionSaved, filepath.Base(absPath))
 	}
-	return "", ws.Err
+	if ws.Err != nil {
+		return "", ws.Err
+	}
+	// 写后审计（P3）：脱敏 / 格式 / 索引登记。**不改写失败语义**——补戳已经成功，
+	// 审计只回一句提示；只有脱敏会真的改内容（见 memory/audit.go 开头的理由）。
+	ar, aerr := h.cfg.Audit(target, absPath)
+	if aerr != nil {
+		// 审计读不了不是写完的失败：记一行、继续。
+		fmt.Fprintf(os.Stderr, "[memory] 审计跳过（%s）：%v\n", absPath, aerr)
+		return "", nil
+	}
+	return ar.Notice, nil
 }
 
 // personaMemory 描述"给这个子 agent 注入哪一份记忆"。
