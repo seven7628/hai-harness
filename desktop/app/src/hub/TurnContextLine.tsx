@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react'
+import { useT } from '../i18n'
 import type { HubMessage } from './types'
 import type { MentionAgent } from './mentions'
 import { uniqueContextSenders } from './groupProjection'
@@ -23,16 +24,19 @@ export default function TurnContextLine({
   /** 群消息头里的紧凑入口：只显示「↳ N」，不占一行。 */
   compact?: boolean
 }) {
+  const t = useT()
   const senders = uniqueContextSenders(msg.context?.senders)
   if (senders.length < 2) return null
   const byID = new Map((roster ?? []).map((a) => [a.id, a]))
   const seqs = msg.context?.trigger_seqs ?? []
-  const tip = seqs.length > 0 ? `触发消息 #${seqs.join(', #')}` : '由多条消息触发'
+  const tip = seqs.length > 0
+    ? t('hub.contextTriggerSeqs').replace('{seqs}', seqs.join(', #'))
+    : t('hub.contextTriggerMulti')
   if (compact) {
     const names = senders.map((s) => s.name || byID.get(s.agent_id ?? '')?.name || s.agent_id || '成员')
     const first = senders[0]
     const seq = (first.agent_id ? triggerSeqBySender?.[first.agent_id] : 0) || seqs[0] || 0
-    const label = `由 ${names.join('、')} 的消息触发；点击回到触发消息`
+    const label = t('hub.contextJump').replace('{names}', names.join('、'))
     const body = <span aria-hidden="true">↳ {senders.length}</span>
     if (onJumpToSeq && seq > 0) {
       return (
@@ -47,11 +51,11 @@ export default function TurnContextLine({
         </button>
       )
     }
-    return <span className="hub-context-jump" title={tip} aria-label={label}>{body}</span>
+    return <span className="hub-context-jump static" title={tip} role="note" aria-label={label}>{body}</span>
   }
   return (
-    <div className="hub-context-line" title={tip} aria-label={`来自 ${senders.map((s) => s.name || byID.get(s.agent_id ?? '')?.name || s.agent_id).join('、')} 的消息`}>
-      <span className="hub-context-label">来自</span>
+    <div className="hub-context-line" title={tip} aria-label={t('hub.contextJump').replace('{names}', senders.map((s) => s.name || byID.get(s.agent_id ?? '')?.name || s.agent_id).join('、'))}>
+      <span className="hub-context-label">{t('hub.contextFrom')}</span>
       {senders.map((s) => {
         const agent = s.agent_id ? byID.get(s.agent_id) : undefined
         const name = s.name || agent?.name || s.agent_id || '成员'
@@ -71,7 +75,7 @@ export default function TurnContextLine({
             className="hub-context-chip"
             style={style}
             title={`${tip} · 点击定位`}
-            aria-label={`跳到 ${name} 的触发消息 #${seq}`}
+            aria-label={t('hub.contextJumpTo').replace('{name}', name).replace('{seq}', String(seq))}
             onClick={() => onJumpToSeq(seq)}
           >
             {content}
@@ -82,7 +86,7 @@ export default function TurnContextLine({
           </span>
         )
       })}
-      <span className="hub-context-label">的消息</span>
+      <span className="hub-context-label">{t('hub.contextOfMessage')}</span>
     </div>
   )
 }

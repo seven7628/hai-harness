@@ -475,6 +475,8 @@
   margin-top: auto;
 }
 .hub-list.dm .hub-thread { margin-top: 0; }
+.hub-group-view .hub-thread-flat { gap: 16px; }
+.hub-group-view .hub-thread-grouped { gap: 10px; }
 .hub-intro {
   margin-top: 8vh;
   text-align: center;
@@ -572,13 +574,13 @@
 }
 .hub-msg-time {
   flex: none;
-  margin-left: auto;
+  margin-left: 2px;
   color: var(--text-3);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.hub-msg.human .hub-msg-time { margin-left: 0; }
+.hub-msg.human .hub-msg-time { margin-left: 2px; }
 .hub-context-jump {
   flex: none;
   margin: 0;
@@ -591,6 +593,7 @@
   cursor: pointer;
 }
 .hub-context-jump:hover { color: var(--ink); text-decoration: underline; }
+.hub-context-jump.static { cursor: default; }
 .hub-context-jump:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 4px; }
 .hub-msg.agent.hub-group-msg .hub-body {
   max-width: min(100%, 620px);
@@ -1054,9 +1057,6 @@
 .hub-task-detail { border-top: 1px solid var(--border); padding: 8px 10px; }
 .hub-task-summary-text { white-space: pre-wrap; font-size: 12px; margin: 0 0 6px; }
 .hub-error-text { color: #b23a2e; font-size: 12px; }
-.hub-artifacts { list-style: none; margin: 6px 0; padding: 0; font-size: 11.5px; }
-.hub-artifacts li { padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hub-artifacts span { color: var(--text-2); margin-right: 4px; }
 .hub-chip {
   display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 6px;
   background: color-mix(in srgb, var(--ink) 7%, transparent); font-size: 10.5px;
@@ -1114,7 +1114,6 @@
   color: var(--ink); font-size: 11px; font-weight: 600;
 }
 .hub-member-dot.more { font-size: 9px; color: var(--text-2); }
-.hub-group-author { font-size: 10.5px; color: var(--text-2); margin-bottom: 2px; }
 .hub-approval-stub { display: flex; align-items: center; gap: 8px; }
 .hub-handoff-card { display: flex; align-items: center; gap: 8px; }
 .hub-handoff-text { flex: 1; min-width: 0; }
@@ -1470,11 +1469,10 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-task-summary { margin: 0; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .hub-task-error { margin: 0; font-size: 12px; color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 产物区：文件图标 + 名称 + 路径 + 计量；与运行时 ArtifactsBlock 同一套信息层级。 */
-.hub-artifacts { display: flex; flex-direction: column; gap: 5px; padding-top: 2px; }
+.hub-artifacts { display: flex; flex-direction: column; gap: 5px; padding-top: 2px; container-type: inline-size; }
 .hub-artifacts-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .hub-artifacts-title { color: var(--text-2); font-size: 11px; }
 .hub-artifacts-title b { color: var(--ink); font-weight: 600; }
-.hub-artifacts-hint { margin-left: auto; color: var(--text-3); font-size: 10px; }
 .hub-artifacts-list { list-style: none; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; }
 .hub-artifact {
   display: grid;
@@ -1526,9 +1524,22 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   font-size: 10px;
   white-space: nowrap;
 }
-.hub-artifact-kind.created { color: var(--success); }
-.hub-artifact-kind.modified { color: var(--accent-solid); }
-@media (max-width: 560px) {
+.hub-artifact-kind {
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 1.6;
+}
+.hub-artifact-kind.created {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+}
+.hub-artifact-kind.modified {
+  color: var(--accent-solid);
+  background: transparent;
+}
+@container (max-width: 380px) {
   .hub-artifact { grid-template-columns: 28px minmax(0, 1fr); }
   .hub-artifact-meta { grid-column: 2; flex-wrap: wrap; gap: 4px 7px; }
 }
@@ -1551,7 +1562,6 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   font-size: 11px;
   color: var(--text-3);
 }
-.hub-task-exec { color: var(--text-2); }
 .hub-task-open { margin-left: auto; }
 
 /* —— 正在输入（§7.5.3）—— */

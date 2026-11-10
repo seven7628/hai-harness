@@ -121,6 +121,15 @@ export function GroupBubble({
           executor={executor}
           initiator={initiator}
           onOpenAgent={card.agentId && onSelectAgent ? () => onSelectAgent(card.agentId) : undefined}
+          context={(
+            <TurnContextLine
+              compact
+              msg={msg}
+              roster={roster}
+              triggerSeqBySender={triggerSeqBySender}
+              onJumpToSeq={onJumpToSeq}
+            />
+          )}
         />
       </div>
     )
@@ -136,8 +145,9 @@ export function GroupBubble({
       <div className={`hub-msg-head${kind === 'human' ? ' human' : ''}`}>
         {kind === 'human' ? (
           <>
-            {time ? <time className="hub-msg-time" dateTime={msg.created_at}>{time}</time> : null}
             <span className="hub-agent-name">你</span>
+            {msg.visibility === 'owner' ? <span className="hub-chip owner-only">仅你可看</span> : null}
+            {time ? <time className="hub-msg-time" dateTime={msg.created_at}>{time}</time> : null}
           </>
         ) : (
           <>

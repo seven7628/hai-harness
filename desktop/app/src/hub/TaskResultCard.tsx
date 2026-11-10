@@ -1,7 +1,8 @@
+import type { ReactNode } from 'react'
 import AgentBadge from './AgentBadge'
 import type { MentionAgent } from './mentions'
 import TaskArtifacts from './TaskArtifacts'
-import { taskArtifactText, taskDurationText, taskUsageText, type TaskCardView } from './taskCard'
+import { taskDurationText, taskUsageText, type TaskCardView } from './taskCard'
 
 // 任务结果卡（P3b-07，方案 §7.5.5 / §8.3.5）。
 // 只渲染 task_result 消息携带的快照：不查账本、不 @ 路由、不唤醒任何人。
@@ -12,12 +13,15 @@ export default function TaskResultCard({
   executor,
   initiator,
   onOpenAgent,
+  context,
 }: {
   view: TaskCardView
   executor?: MentionAgent | null
   /** 派发者（账本 origin 解析出的智能体）；人派任务 originKind=human → 文案「你 → 执行者」。 */
   initiator?: MentionAgent | null
   onOpenAgent?: () => void
+  /** 多触发者时的「↳ N」入口；由群消息层传入，保持 B6 跳转。 */
+  context?: ReactNode
 }) {
   const usage = taskUsageText(view.usage)
   const duration = taskDurationText(view.durationMs)
@@ -37,6 +41,7 @@ export default function TaskResultCard({
           onClick={execName && onOpenAgent ? onOpenAgent : undefined}
         />
         <span className={`hub-task-status ${view.tone}`}>{view.statusLabel}</span>
+        {context}
         {fromName && fromName !== execName ? (
           <span className="hub-task-from">
             {fromName === '你' ? '你派发' : `${fromName} 派发`}
@@ -63,12 +68,6 @@ export default function TaskResultCard({
           </button>
         ) : null}
       </footer>
-      {/* 产物可读文本也放进 title：小屏/深色下不再只靠布局传达（无颜色依赖）。 */}
-      {view.artifacts.length > 0 ? (
-        <span className="hub-sr-only">
-          产物：{view.artifacts.map((a) => taskArtifactText(a)).join('；')}
-        </span>
-      ) : null}
     </article>
   )
 }

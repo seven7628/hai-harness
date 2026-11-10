@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react'
+import { useT } from '../i18n'
 import { accentOfAgent } from './agentAccent'
 import type { MentionAgent } from './mentions'
 
@@ -15,6 +16,7 @@ export default function AgentBadge({
   role?: string
   onClick?: () => void
 }) {
+  const t = useT()
   const accent = accentOfAgent(agent ?? { id: '', name })
   const emoji = agent?.avatar?.kind === 'emoji' ? agent.avatar.value : ''
   const avatar = emoji || name.slice(0, 1)
@@ -33,7 +35,7 @@ export default function AgentBadge({
         className="hub-agent-badge clickable"
         style={style}
         onClick={onClick}
-        title={`打开 ${name} 的会话`}
+        title={t('hub.openAgentSession').replace('{name}', name)}
       >
         {body}
       </button>

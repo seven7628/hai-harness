@@ -623,6 +623,7 @@ type MockGroupMessage = {
   kind: string
   sender: { kind: string; agent_id?: string }
   text: string
+  visibility?: 'owner' | 'group'
   created_at: string
   refs?: Record<string, unknown>
   round_id?: string
@@ -764,6 +765,10 @@ class MockTransport implements Transport {
         {
           seq: 5, id: 'gm_mock5', kind: 'task_result', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
           text: '已生成两页简报，含价格对比、结论与风险；附 Markdown、CSV 和成本曲线。', created_at: at(45 * 60_000),
+          context: {
+            trigger_seqs: [1, 3],
+            senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }, { agent_id: 'ag_mockwri2', name: 'Writer' }],
+          },
           refs: {
             task_id: 'task_mock1', status: 'completed', agent_id: 'ag_mockwri2', target_agent_id: 'ag_mockwri2',
             // fixture：B5 的 origin 快照（真实 bridge 写卡时也落这三个字段）。
@@ -778,11 +783,21 @@ class MockTransport implements Transport {
             error: '',
           },
         },
+        {
+          seq: 6, id: 'gm_mock6', kind: 'text', sender: { kind: 'system' },
+          text: '群策略：自动对话最多 8 轮；遇到预算/权限阻断会停下等人类。',
+          created_at: at(40 * 60_000),
+        },
+        {
+          seq: 7, id: 'gm_mock7', kind: 'text', sender: { kind: 'human' }, visibility: 'owner',
+          text: '把 C 的询价邮件单独发我，不要贴到群里。',
+          created_at: at(30 * 60_000),
+        },
       ]
       this.hubGroupMessages.set(gid, list)
-      this.hubGroupSeq.set(gid, 5)
+      this.hubGroupSeq.set(gid, 7)
       // 最后两张卡未读：左栏演示「未读点 + 任务完成结论」。
-      this.hubGroupRead.set(gid, 3)
+      this.hubGroupRead.set(gid, 5)
       this.hubGroupConversations.set(gid, this.mockConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 }))
       // 预置账本条目：历史任务卡的「派发者」只能从 origin 来（B5），没有它卡片只显示执行者。
       this.hubGroupTasks.set('task_mock1', {

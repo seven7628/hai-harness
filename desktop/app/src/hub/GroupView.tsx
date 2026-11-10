@@ -408,7 +408,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
             ))}
           </div>
         ) : (
-          <div className="hub-thread" ref={threadRef}>
+          <div className={`hub-thread hub-thread-${displayMode}`} ref={threadRef}>
             {messages.length === 0 && groupDrafts.length === 0 ? (
               <div className="hub-intro">
                 <p>{t('hub.groupIntro')}</p>
