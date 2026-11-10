@@ -1671,9 +1671,11 @@ const BASE = {
       ],
       "acceptance": "Provider/Model 从设置里的 Providers/Models 继承为真下拉；切换 Provider 时若当前 Model 不在新列表则自动选第一个；当前值不在列表时保留 disabled 当前项，不静默丢失；Effort 为 跟随模型默认 + None/Minimal/Low/Medium/High/XHigh/Max 共 8 项；预算/压缩/记忆开关折叠进高级，默认收起；保留现有页签与保存语义。",
       "tests": "npx tsc --noEmit && npm run build && npm run test:hub-patch && npm run test:hub && npm run test:css",
-      "status": "in_progress",
-      "note": "UI-1 PASS，开始实现",
-      "review": null
+      "status": "review",
+      "note": "实现完成，独立复审中",
+      "review": null,
+      "commit": "4834c44",
+      "reviewNote": "独立复审进行中；实现：Provider/Model 下拉 + 8 档 Effort + 高级折叠，31 条纯函数测试。"
     },
     {
       "id": "P4-UI-3",
@@ -2620,8 +2622,9 @@ const BASE = {
       "reviewNote": "delta review PASS（59aef20）；五条阻断/P2 全部修复，门禁全绿。"
     },
     "P4-UI-2": {
-      "status": "in_progress",
-      "reviewNote": "UI-1 已 PASS；Provider/Model 下拉 + 8 档 Effort + 高级折叠实现中"
+      "status": "review",
+      "commit": "4834c44",
+      "reviewNote": "独立复审进行中"
     }
   },
   "reviewGate": {
