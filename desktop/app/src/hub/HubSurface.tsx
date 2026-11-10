@@ -10,6 +10,7 @@ import AgentSigil from './AgentSigil'
 import { AgentMessage, DayDivider, UserMessage } from './ConversationMessage'
 import { dayKey, dayLabel } from './conversationDay'
 import { formatClockTime } from './conversation'
+import { agentSigilLabel } from './avatarLabels'
 import { useAgentState } from './useAgentState'
 import { isImeComposing, type MentionAgent } from './mentions'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
@@ -243,7 +244,8 @@ export default function HubSurface() {
                     agentId={activeAgent.id}
                     responsibility={activeAgent.role}
                     state={activeState}
-                    size={48}
+                    size={32}
+                    label={agentSigilLabel(t, activeAgent.name, activeState)}
                   />
                   <div className="hub-conv-title">
                     <span className="hub-conv-line">
@@ -284,6 +286,7 @@ export default function HubSurface() {
                   <button className="hub-action-btn" onClick={() => openEditor(activeAgent)} title={t('hub.editAgent')}>
                     {t('hub.edit')}
                   </button>
+
                 </div>
               </header>
 

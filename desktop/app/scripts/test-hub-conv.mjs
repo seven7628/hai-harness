@@ -3,7 +3,7 @@
 //
 // 纯函数：conversationDay.dayKey/dayLabel（日期分隔线）+ conversation.formatClockTime；
 // 静态契约：DM/群共用 ConversationMessage 的两种版式（右侧暖气泡 / 左侧无气泡作者头）、
-//           群头 AgentStack + 两行 subtitle、DM 头 48px sigil + 只读提示、composer meta 行、
+//           群头 AgentStack + 两行 subtitle、DM 头 32px sigil（独立 aria-label）+ 只读提示、composer meta 行、
 //           事件卡解剖、--hub-* token 两套主题都定义（且没有照抄 demo 的硬编码色）。
 //
 // 为什么静态契约也值得测：这次改的是「版式归属」——如果以后有人在群聊里另起一套气泡，
@@ -93,7 +93,8 @@ const eq = (got, want, m) => {
   assert(stream.includes('<AgentMessage') && !stream.includes('hub-msg-head'), '流式消息与最终消息同一版式')
 
   const dm = readFileSync(join(APP, 'src', 'hub', 'HubSurface.tsx'), 'utf8')
-  assert(/size=\{48\}/.test(dm) && dm.includes("t('hub.dm.locked')"), 'DM 头 48px sigil + 能力只读提示')
+  assert(/size=\{32\}/.test(dm) && dm.includes('agentSigilLabel(') && dm.includes("t('hub.dm.locked')"),
+    'DM 头 32px sigil + 独立 aria-label + 能力只读提示')
   assert(dm.includes('<AgentMessage') && dm.includes('<UserMessage'), 'DM 消息复用同一版式（作者头存在）')
   assert(dm.includes('hub-composer-meta') && dm.includes('hub.composer.enter'), 'DM composer 有 meta 行')
   assert(!dm.includes('hub-composer-plus') && !dm.includes('hub-composer-pill'), '旧 composer 结构已移除')

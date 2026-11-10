@@ -6,6 +6,8 @@
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { unlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const entry = join(__dirname, '..', 'src', 'hub', 'avatar.ts')
@@ -183,6 +185,115 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
     '叠放 label：全待命不输出 0 个工作中')
   assert(labels.agentStackLabel(t, 2, mod.countStates(['idle', 'idle']), 'working') === '2 个智能体，群会话进行中',
     '叠放 label：群会话在跑时摘要与 lead 的 working 一致')
+}
+
+
+// 10) 真实组件输出（SSR）：独立头像 role=img，叠放只有 lead 带环/点。
+{
+  const { createElement } = await import('react')
+  const { renderToStaticMarkup } = await import('react-dom/server')
+  const compBuild = await build({
+    entryPoints: [join(__dirname, '..', 'src', 'hub', 'AgentStack.tsx')],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    jsx: 'automatic',
+    external: ['react', 'react/jsx-runtime'],
+    write: false,
+    logLevel: 'silent',
+  })
+  // 写到 scripts/ 下再 import：data: URL 无法解析 react/jsx-runtime 这类裸模块名。
+  const compPath = join(__dirname, '.tmp-agentstack.mjs')
+  writeFileSync(compPath, compBuild.outputFiles[0].text)
+  const { default: AgentStack } = await import(`${compPath}?v=${Date.now()}`)
+  unlinkSync(compPath)
+  const members = [
+    { id: 'agt_a', responsibility: '研究', state: 'working' },
+    { id: 'agt_b', responsibility: '写作', state: 'idle' },
+    { id: 'agt_c', responsibility: '复核', state: 'idle' },
+    { id: 'agt_d', responsibility: '归档', state: 'idle' },
+    { id: 'agt_e', responsibility: '监控', state: 'idle' },
+    { id: 'agt_f', responsibility: '统计', state: 'idle' },
+  ]
+  const html = renderToStaticMarkup(createElement(AgentStack, {
+    members, size: 32, label: '竞品研究，6 个智能体，群会话进行中',
+  }))
+  assert(html.includes('role="img"') && html.includes('aria-label="竞品研究，6 个智能体，群会话进行中"'),
+    '叠放容器输出 role=img + 含群名/成员数/摘要的 aria-label')
+  assert((html.match(/class="ring/g) || []).length === 1, '叠放只给 lead 画一次状态环')
+  assert((html.match(/class="dot"/g) || []).length === 0, 'lead=working 时不画 attention 点')
+  assert((html.match(/class="trait/g) || []).length > 0 && (html.match(/data-state="none"/g) || []).length === 2,
+    '≥5 时只显示前 3 个成员，peer 的 data-state=none（不画状态层）')
+  assert(html.includes('agent-stack-more') && html.includes('>+3</span>'), '≥5 时输出 +N 徽标')
+
+  const sigilBuild = await build({
+    entryPoints: [join(__dirname, '..', 'src', 'hub', 'AgentSigil.tsx')],
+    bundle: true, platform: 'node', format: 'esm', jsx: 'automatic',
+    external: ['react', 'react/jsx-runtime'], write: false, logLevel: 'silent',
+  })
+  const sigilPath = join(__dirname, '.tmp-agentsigil.mjs')
+  writeFileSync(sigilPath, sigilBuild.outputFiles[0].text)
+  const { default: AgentSigil } = await import(`${sigilPath}?v=${Date.now()}`)
+  unlinkSync(sigilPath)
+  const labelled = renderToStaticMarkup(createElement(AgentSigil, {
+    agentId: 'agt_a', responsibility: '研究', state: 'working', size: 32, label: 'Researcher，工作中',
+  }))
+  const labelledTag = labelled.slice(0, labelled.indexOf('>') + 1)
+  assert(labelledTag.includes('role="img"') && labelledTag.includes('aria-label="Researcher，工作中"') &&
+    !labelledTag.includes('aria-hidden'), '独立头像 label → role=img + 状态词（不再 aria-hidden）')
+  const decorative = renderToStaticMarkup(createElement(AgentSigil, {
+    agentId: 'agt_a', responsibility: '研究', state: 'working', size: 32,
+  }))
+  const decorativeTag = decorative.slice(0, decorative.indexOf('>') + 1)
+  assert(decorativeTag.includes('aria-hidden="true"') && !decorativeTag.includes('role="img"'),
+    '与名字同行的头像仍 aria-hidden')
+}
+
+
+// 11) 手机端 avatar_model.js 与桌面 avatar.ts 同 seed 对照（防两套算法漂移）。
+{
+  const require = createRequire(import.meta.url)
+  const mobile = require(join(__dirname, '..', '..', 'bridge', 'mobile_web', 'avatar_model.js'))
+  assert(JSON.stringify(mobile.SHAPES) === JSON.stringify(mod.SHAPES), '手机/桌面 8 形状路径逐字一致')
+  assert(JSON.stringify(mobile.HUES) === JSON.stringify(mod.HUES), '手机/桌面 8 色相（dark/light）逐字一致')
+  assert(JSON.stringify(mobile.TRAITS) === JSON.stringify(mod.TRAITS), '手机/桌面 4 内侧标记逐字一致')
+  assert(JSON.stringify(mobile.SIGIL_SIZES) === JSON.stringify(mod.SIGIL_SIZES), '手机/桌面尺寸档位一致（24/32/48）')
+
+  let mismatch = 0
+  for (let i = 0; i < 300; i++) {
+    const id = i % 11 === 0 ? '' : `agt_drift_${i}`
+    const resp = `职责 ${i % 13}`
+    const a = mod.deriveSigil(id, resp)
+    const b = mobile.deriveSigil(id, resp)
+    if (a.shape !== b.shape || a.hue !== b.hue || a.trait !== b.trait ||
+      a.shapeId !== b.shapeId || a.hueId !== b.hueId || a.traitId !== b.traitId) mismatch++
+  }
+  assert(mismatch === 0, `手机/桌面 300 个 seed 推导完全一致（mismatch=${mismatch}）`)
+
+  let stackMismatch = 0
+  const pool = ['idle', 'working', 'needs_attention', 'offline']
+  for (let n = 0; n <= 6; n++) {
+    const members = Array.from({ length: n }, (_, i) => ({
+      id: `agt_stack_${i}`, responsibility: `r${i}`, state: pool[i % 4],
+    }))
+    for (const groupRunning of [false, true]) {
+      const a = mod.planStack(members, { groupRunning })
+      const b = mobile.planStack(members, { groupRunning })
+      if (a.state !== b.state || a.more !== b.more || a.total !== b.total ||
+        a.members.length !== b.members.length ||
+        a.members.some((m, i) => m.id !== b.members[i].id || m.state !== b.members[i].state ||
+          m.withStatus !== b.members[i].withStatus)) stackMismatch++
+    }
+  }
+  assert(stackMismatch === 0, `手机/桌面 planStack（0–6 成员 × 群运行）完全一致（mismatch=${stackMismatch}）`)
+
+  for (const input of [
+    {}, { running: true }, { deleted: true }, { pending: true },
+    { pending: true, deleted: true, running: true }, { deleted: true, running: true },
+  ]) {
+    assert(mobile.resolveAgentState(input) === mod.resolveAgentState(input),
+      `手机/桌面状态映射一致：${JSON.stringify(input)}`)
+  }
 }
 
 console.log(`\n✅ hub avatar 纯逻辑：${pass} 项全部通过`)

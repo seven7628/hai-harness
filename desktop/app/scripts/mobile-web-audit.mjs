@@ -71,6 +71,7 @@ export function auditMobileWeb() {
   const errors = []
   const app = read('app.js')
   const model = read('hub_model.js')
+  const avatar = read('avatar_model.js')
   const css = read('style.css')
   const html = read('index.html')
   const tokens = read('tokens.css')
@@ -108,6 +109,7 @@ export function auditMobileWeb() {
       '.cursor::after',
       '.hub-msg.draft .body::after',
       '.hub-typing .dots::after',
+      '.sigil .arc',
       '.sheet',
       'animation: none !important',
     ]) {
@@ -116,12 +118,24 @@ export function auditMobileWeb() {
   }
 
   // —— 安全渲染 / XSS ——
-  for (const [name, src] of [['app.js', app], ['hub_model.js', model]]) {
+  for (const [name, src] of [['app.js', app], ['hub_model.js', model], ['avatar_model.js', avatar]]) {
     if (/\.innerHTML\b|insertAdjacentHTML|outerHTML|document\.write\s*\(/.test(src)) {
       errors.push(`xss: ${name} 使用了 HTML 注入 API`)
     }
   }
   if (!/H\.bodyParts\(/.test(app)) errors.push('hub-md: app.js 未用 H.bodyParts 渲染定稿正文')
+  // —— 头像 sigil v2（与桌面同一套算法）——
+  if (!/HaiMobileAvatar/.test(avatar) || !/function deriveSigil/.test(avatar) || !/function planStack/.test(avatar)) {
+    errors.push('avatar: avatar_model.js 缺少 deriveSigil/planStack')
+  }
+  if (!/A\.deriveSigil\(/.test(app) || !/A\.planStack\(/.test(app)) {
+    errors.push('avatar: app.js 未接 avatar_model.js（deriveSigil/planStack）')
+  }
+  if (!html.includes('src="avatar_model.js"')) errors.push('avatar: index.html 未加载 avatar_model.js')
+  if (cleanCss.includes('.hub-avatar')) errors.push('avatar: 仍在用旧 .hub-avatar 圆头像样式')
+  if (!/\.sigil\.s24 \.trait\s*\{\s*display:\s*none/.test(cleanCss)) {
+    errors.push('avatar: 24px 未隐藏内侧 trait')
+  }
   if (!/function appendHubBody\(/.test(app)) errors.push('hub-md: 缺少 appendHubBody')
   if (!/appendHubBody\(body, m\.text/.test(app)) errors.push('hub-md: renderHubMessage 未接 appendHubBody')
   if (!/body\.textContent = d\.text/.test(app)) errors.push('hub-md: 流式草稿必须保持 textContent 纯文本')

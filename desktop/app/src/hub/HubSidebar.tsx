@@ -370,7 +370,7 @@ function HubRow({
         agentId={agent.id}
         responsibility={agent.role}
         state={state}
-        size={32}
+        size={24}
       />
       <span className="hub-side-text">
         <span className="hub-side-top">

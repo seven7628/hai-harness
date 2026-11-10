@@ -40,18 +40,29 @@ export function agentStackSummary(t: Translate, counts: StateCounts, state?: Ava
 }
 
 /** 群叠放的标签：「5 个智能体，2 个工作中，1 个需要你」。 */
-export function agentStackLabel(t: Translate, total: number, counts: StateCounts, state?: AvatarState): string {
-  return t('hub.avatar.stack.label')
+export function agentStackLabel(
+  t: Translate,
+  total: number,
+  counts: StateCounts,
+  state?: AvatarState,
+  name?: string,
+): string {
+  const summary = agentStackSummary(t, counts, state)
+  if (!name) {
+    return t('hub.avatar.stack.label').replace('{n}', String(total)).replace('{summary}', summary)
+  }
+  return t('hub.avatar.stack.labelNamed')
+    .replace('{name}', name)
     .replace('{n}', String(total))
-    .replace('{summary}', agentStackSummary(t, counts, state))
+    .replace('{summary}', summary)
 }
 
 /** 一步到位：叠放成员 → aria-label（与 AgentStack 内部的 planStack 同口径）。 */
 export function stackAriaLabel(
   t: Translate,
   members: readonly StackInputMember[],
-  opts?: { groupRunning?: boolean },
+  opts?: { groupRunning?: boolean; name?: string },
 ): string {
   const plan = planStack(members, opts)
-  return agentStackLabel(t, plan.total, plan.counts, plan.state)
+  return agentStackLabel(t, plan.total, plan.counts, plan.state, opts?.name)
 }

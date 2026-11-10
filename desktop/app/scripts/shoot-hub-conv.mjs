@@ -88,10 +88,10 @@ async function shot(width, height, theme, kind) {
   page.on('pageerror', (e) => errors.push(`${name}: pageerror ${e.message}`))
   await page.goto(URL, { waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(1500)
-  if (theme === 'paper') {
-    await page.evaluate(() => window.__store?.getState?.().setTheme?.('light'))
-  }
-  await page.waitForTimeout(250)
+  await page.evaluate((t) => {
+    window.__store?.getState?.().setTheme?.(t === 'paper' ? 'light' : 'dark')
+  }, theme)
+  await page.waitForTimeout(350)
   await openConversation(page, kind)
   await page.evaluate(() => {
     const list = document.querySelector('.hub-list')
@@ -109,8 +109,27 @@ async function shot(width, height, theme, kind) {
     const thread = rect(q('.hub-thread'))
     const bubble = rect(q('.hub-user-bubble'))
     const agent = q('.hub-msg.agent')
+    const dmSigil = q('.hub-dm-head .hub-conv-id > .sigil')
+    const groupStack = q('.hub-group-head .hub-conv-id > .agent-stack')
+    const title = q('.hub-conv-line strong')?.textContent?.trim() ?? ''
     return {
+      themeAttr: document.documentElement.dataset.theme,
       scrollWidth: document.documentElement.scrollWidth,
+      dmSigil: dmSigil
+        ? {
+            role: dmSigil.getAttribute('role'),
+            label: dmSigil.getAttribute('aria-label'),
+            width: Math.round(dmSigil.getBoundingClientRect().width),
+          }
+        : null,
+      groupStack: groupStack
+        ? {
+            role: groupStack.getAttribute('role'),
+            label: groupStack.getAttribute('aria-label'),
+            width: Math.round(groupStack.getBoundingClientRect().width),
+            title,
+          }
+        : null,
       thread,
       bubble,
       bubbleRightGap: bubble && thread ? Math.round(thread.right - bubble.right) : null,
@@ -127,6 +146,24 @@ async function shot(width, height, theme, kind) {
   if (m.agentBackground !== 'rgba(0, 0, 0, 0)') failed.push(`agent 消息有气泡底色（${m.agentBackground}）`)
   if (!m.agentAuthor) failed.push('agent 消息缺少作者头')
   if (!m.composerMeta) failed.push('composer 缺少 meta 行')
+  if (m.themeAttr !== (theme === 'paper' ? 'paper' : 'ink')) {
+    failed.push(`主题未生效（data-theme=${m.themeAttr}）`)
+  }
+  if (kind === 'dm') {
+    if (!m.dmSigil) failed.push('DM header 缺少独立 sigil')
+    else {
+      if (m.dmSigil.role !== 'img') failed.push(`DM header sigil role=${m.dmSigil.role}（应为 img）`)
+      if (!m.dmSigil.label?.includes('Researcher')) failed.push(`DM header sigil aria-label=${m.dmSigil.label}`)
+      if (m.dmSigil.width !== 32) failed.push(`DM header sigil=${m.dmSigil.width}px（应为 32）`)
+    }
+  }
+  if (kind === 'group') {
+    if (!m.groupStack) failed.push('群头缺少 AgentStack')
+    else {
+      if (m.groupStack.role !== 'img') failed.push(`群叠放 role=${m.groupStack.role}（应为 img）`)
+      if (!m.groupStack.label?.includes(m.groupStack.title)) failed.push(`群叠放 aria-label 不含群名：${m.groupStack.label}`)
+    }
+  }
   if (failed.length) errors.push(`${name}: ${failed.join('；')}`)
 
   await page.screenshot({ path: `${OUT}/${name}.png` })
@@ -150,8 +187,10 @@ for (const [width, height] of [[1440, 900], [390, 900]]) {
     page.on('pageerror', (e) => errors.push(`${name}: pageerror ${e.message}`))
     await page.goto(URL, { waitUntil: 'domcontentloaded' })
     await page.waitForTimeout(1500)
-    if (theme === 'paper') await page.evaluate(() => window.__store?.getState?.().setTheme?.('light'))
-    await page.waitForTimeout(250)
+    await page.evaluate((t) => {
+      window.__store?.getState?.().setTheme?.(t === 'paper' ? 'light' : 'dark')
+    }, theme)
+    await page.waitForTimeout(350)
     await openConversation(page, 'group')
     await page.evaluate(() => {
       document.querySelector('.hub-event--task')?.scrollIntoView({ block: 'center' })

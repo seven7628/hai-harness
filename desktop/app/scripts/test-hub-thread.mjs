@@ -100,6 +100,7 @@ const badgeSrc = readFileSync(join(hubDir, 'AgentBadge.tsx'), 'utf8')
 const mentionSrc = readFileSync(join(hubDir, 'AgentMentionChip.tsx'), 'utf8')
 const editorSrc = readFileSync(join(hubDir, 'AgentEditor.tsx'), 'utf8')
 const sidebarSrc = readFileSync(join(hubDir, 'HubSidebar.tsx'), 'utf8')
+const hubSurfaceSrc = readFileSync(join(hubDir, 'HubSurface.tsx'), 'utf8')
 const inspectorSrc = readFileSync(join(hubDir, 'HubInspector.tsx'), 'utf8')
 const groupSrc = readFileSync(join(hubDir, 'GroupView.tsx'), 'utf8')
 const i18nSrc = readFileSync(join(hubDir, '..', 'i18n.ts'), 'utf8')
@@ -138,9 +139,27 @@ assert(cssSrc.includes('prefers-reduced-motion') && cssSrc.includes('animation: 
 assert(!cssSrc.includes('.hub-avatar {') && !cssSrc.includes('.hub-avatar.ring') &&
   !cssSrc.includes('.hub-agent-avatar') && !cssSrc.includes('.hub-member-dot'),
   '旧 .hub-avatar/.hub-agent-avatar/.hub-member-dot 死样式已清理')
+assert(/\.sigil\.s24 \.trait\s*\{\s*display:\s*none/.test(cssSrc),
+  '24px 渐进披露：内侧 trait 必须隐藏（不是靠 JS 分叉）')
+assert(stackSrc.includes('status={m.withStatus}'), 'AgentStack 只给 lead 画状态层（peer status=false）')
+assert(sidebarSrc.includes('AgentStack') && sidebarSrc.includes('size={24}'),
+  '侧栏行头像用 24（不再压过 ChatHeader）')
+assert(hubSurfaceSrc.includes('size={32}') && badgeSrc.includes('size={32}'),
+  'ChatHeader 用 32、消息/任务徽章用 32（层级不再倒挂）')
+assert(cssSrc.includes('.hub-mention .sigil { margin-block: -3px; }'),
+  '@ 徽章用负 margin 抵消 24px 头像撑高的行高')
+assert(cssSrc.includes('min-width: 44px'), '可点击 badge 命中区同时满足 44x44')
+assert(hubSurfaceSrc.includes('agentSigilLabel(t, activeAgent.name, activeState)') &&
+  hubSurfaceSrc.includes('label={agentSigilLabel('),
+  'DM ChatHeader 独立头像带名字+状态 aria-label（不是 aria-hidden）')
+assert(inspectorSrc.includes('agentSigilLabel(t, agent.name, agentState)'),
+  '详情 hero 独立头像同样带名字+状态 aria-label')
+assert(groupSrc.includes('name: group.name') && inspectorSrc.includes('name: group.name'),
+  '群叠放 aria-label 含群名（GroupView / 详情 hero）')
 assert(count(i18nSrc, "'hub.avatar.state.needs_attention'") === 2 &&
   count(i18nSrc, "'hub.avatar.stack.label'") === 2 &&
-  count(i18nSrc, "'hub.avatar.stack.summary.working'") === 2,
+  count(i18nSrc, "'hub.avatar.stack.summary.working'") === 2 &&
+  count(i18nSrc, "'hub.avatar.stack.labelNamed'") === 2,
   '头像状态词/独立 label/叠放 label 的中英 key 齐备')
 
 console.log(`\n✅ hub 线程纯逻辑：${pass} 项全部通过`)

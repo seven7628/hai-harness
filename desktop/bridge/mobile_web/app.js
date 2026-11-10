@@ -6,6 +6,8 @@
   const $ = (id) => document.getElementById(id)
   // 纯逻辑层（hub_model.js）：seq 合并/@ 分词/任务卡/事件分流都在这里。
   const H = window.HaiMobileHubModel || null
+  // 头像生成器（avatar_model.js）：与桌面 avatar.ts 同算法的纯 JS 副本。
+  const A = window.HaiMobileAvatar || null
   const LS = { token: 'hai.token', ws: 'hai.ws', sid: 'hai.sid', name: 'hai.name', theme: 'hai.theme' }
   const SCREENS = ['pair', 'list', 'workspaces', 'chat', 'agents', 'agent', 'hub', 'hub-group', 'hub-dm']
   const HUB_SCREENS = new Set(['hub', 'hub-group', 'hub-dm'])
@@ -250,6 +252,15 @@
     const n = document.createElement(tag)
     if (cls) n.className = cls
     if (text != null) n.textContent = text
+    return n
+  }
+
+  const SVG_NS = 'http://www.w3.org/2000/svg'
+  function svgEl(tag, attrs) {
+    const n = document.createElementNS(SVG_NS, tag)
+    if (attrs) {
+      for (const key of Object.keys(attrs)) n.setAttribute(key, String(attrs[key]))
+    }
     return n
   }
 
@@ -882,14 +893,132 @@
     return ms ? fmtTime(ms) : ''
   }
 
-  function hubAvatar(agent, name, small) {
-    const n = el('div', 'hub-avatar' + (small ? ' sm' : ''))
-    const av = agent && agent.avatar
-    // 图片头像走 bridge 的私有存储路径，手机端没有对应静态端点；回落首字，
-    // 不为了一个头像新增一条未鉴权的下载路由。
-    if (av && av.kind === 'emoji' && av.value) n.textContent = av.value
-    else n.textContent = Array.from(String(name || '?'))[0] || '?'
-    return n
+  // ---- 头像 sigil v2（与桌面同图：id + 职责 → shape/hue/trait；状态来自 running/needs/deleted） ----
+  const AVATAR_STATE_ZH = { idle: '待命', working: '工作中', needs_attention: '需要你', offline: '离线' }
+  let pendingCache = { needs: null, ids: new Set() }
+
+  function hubPendingAgentIds() {
+    const needs = state.hub.needs || []
+    if (pendingCache.needs === needs) return pendingCache.ids
+    const ids = new Set()
+    for (const n of needs) {
+      if (n && n.status === 'pending' && n.agent_id) ids.add(String(n.agent_id))
+    }
+    pendingCache = { needs, ids }
+    return ids
+  }
+
+  function hubStateOf(agentId, deleted) {
+    const id = String(agentId || '')
+    if (!A) return 'idle'
+    return A.resolveAgentState({
+      running: !!id && state.hub.running[id] === true,
+      pending: !!id && hubPendingAgentIds().has(id),
+      deleted: deleted === true,
+    })
+  }
+
+  function hubSigilLabel(name, state) {
+    return String(name || '智能体') + '，' + (AVATAR_STATE_ZH[state] || AVATAR_STATE_ZH.idle)
+  }
+
+  function hubStackSummary(plan) {
+    const c = plan.counts
+    const parts = []
+    if (c.working) parts.push(c.working + ' 个工作中')
+    if (c.needs_attention) parts.push(c.needs_attention + ' 个需要你')
+    if (c.offline) parts.push(c.offline + ' 个离线')
+    if (!parts.length) parts.push(plan.state === 'working' ? '群会话进行中' : '全部待命')
+    return parts.join('，')
+  }
+
+  function hubStackLabel(name, plan) {
+    const prefix = name ? String(name) + '，' : ''
+    return prefix + plan.total + ' 个智能体，' + hubStackSummary(plan)
+  }
+
+  function hubSigil(opts) {
+    const o = opts || {}
+    const agent = o.agent || null
+    const id = o.id != null ? o.id : (agent && agent.id)
+    const responsibility = o.responsibility != null ? o.responsibility : (agent && agent.role)
+    const state = o.state || hubStateOf(id, agent && agent.deleted)
+    const size = o.size === 24 || o.size === 48 ? o.size : 32
+    const showStatus = o.status !== false
+    const identity = A.deriveSigil(id, responsibility)
+    const node = el('span', 'sigil s' + size)
+    node.dataset.agentId = String(id || '')
+    node.dataset.shape = identity.shapeId
+    node.dataset.hue = identity.hueId
+    node.dataset.trait = identity.traitId
+    node.dataset.state = showStatus ? state : 'none'
+    node.dataset.size = String(size)
+    if (o.label) {
+      node.setAttribute('role', 'img')
+      node.setAttribute('aria-label', o.label)
+    } else {
+      node.setAttribute('aria-hidden', 'true')
+    }
+    const root = svgEl('svg', { viewBox: '0 0 48 48', focusable: 'false', 'aria-hidden': 'true' })
+    root.appendChild(svgEl('path', { class: 'shape', d: A.SHAPES[identity.shape].d }))
+    const traits = svgEl('g', { class: 'traits' })
+    for (const mark of A.TRAITS[identity.trait].marks) {
+      if (mark.type === 'circle') traits.appendChild(svgEl('circle', { class: 'trait', cx: mark.cx, cy: mark.cy, r: mark.r }))
+      else if (mark.type === 'rect') {
+        traits.appendChild(svgEl('rect', {
+          class: 'trait', x: mark.x, y: mark.y, width: mark.width, height: mark.height, rx: mark.rx,
+        }))
+      } else {
+        traits.appendChild(svgEl('path', { class: 'trait line', d: mark.d, style: 'stroke-width:' + mark.width }))
+      }
+    }
+    root.appendChild(traits)
+    if (showStatus) {
+      const status = svgEl('g', { class: 'status' })
+      if (state === 'idle') status.appendChild(svgEl('circle', { class: 'ring', cx: 24, cy: 24, r: 22, opacity: '.55' }))
+      else if (state === 'working') status.appendChild(svgEl('circle', { class: 'ring arc', cx: 24, cy: 24, r: 22, 'stroke-width': 2 }))
+      else if (state === 'needs_attention') {
+        status.appendChild(svgEl('circle', { class: 'ring thick', cx: 24, cy: 24, r: 22 }))
+        status.appendChild(svgEl('circle', { class: 'dot', cx: 38, cy: 10, r: 5 }))
+      }
+      root.appendChild(status)
+    }
+    node.appendChild(root)
+    return node
+  }
+
+  function hubStack(group, opts) {
+    const o = opts || {}
+    const size = o.size === 24 || o.size === 48 ? o.size : 32
+    const members = ((group && group.members) || []).map((m) => {
+      const a = hubAgent(m.agent_id)
+      return { id: m.agent_id, responsibility: a && a.role, state: hubStateOf(m.agent_id, a && a.deleted) }
+    })
+    const plan = A.planStack(members, { groupRunning: o.groupRunning === true })
+    const wrap = el('span', 'agent-stack s' + size)
+    wrap.dataset.state = plan.state
+    if (o.label === false) wrap.setAttribute('aria-hidden', 'true')
+    else {
+      wrap.setAttribute('role', 'img')
+      wrap.setAttribute('aria-label', hubStackLabel(o.name || (group && group.name), plan))
+    }
+    plan.members.forEach((m, i) => {
+      const node = hubSigil({
+        id: m.id,
+        responsibility: m.responsibility,
+        state: m.state,
+        size,
+        status: m.withStatus,
+      })
+      node.style.zIndex = String(20 - i)
+      wrap.appendChild(node)
+    })
+    if (plan.more > 0) {
+      const more = el('span', 'agent-stack-more s' + size, '+' + plan.more)
+      more.setAttribute('aria-hidden', 'true')
+      wrap.appendChild(more)
+    }
+    return wrap
   }
 
   function hubNameMap() {
@@ -1043,7 +1172,8 @@
       title.push(hubStatusDot(groupRunning(g)))
       const sub = H.hubPreview(p) || ((g.members || []).length + ' 位成员')
       const meta = [el('span', '', hubTime(p.last_at))]
-      groupUl.appendChild(hubRow(hubAvatar(null, g.name || g.id), title, sub, meta, () => openHubGroup(g.id)))
+      const stack = hubStack(g, { size: 32, label: false, groupRunning: groupRunning(g) })
+      groupUl.appendChild(hubRow(stack, title, sub, meta, () => openHubGroup(g.id)))
     }
 
     const dmUl = $('hub-dms')
@@ -1065,7 +1195,7 @@
       title.push(hubStatusDot(agentRunning(a.id)))
       const sub = H.hubPreview(p) || a.role || '私聊'
       const meta = [el('span', '', hubTime(p.last_at))]
-      dmUl.appendChild(hubRow(hubAvatar(a, a.name || a.id), title, sub, meta, () => openHubDM(a.id)))
+      dmUl.appendChild(hubRow(hubSigil({ agent: a, size: 32 }), title, sub, meta, () => openHubDM(a.id)))
     }
     refreshHubTitle()
   }
@@ -1375,13 +1505,17 @@
     head.textContent = ''
     const g = state.hub.group
     const title = g ? g.name || g.id : '群组'
-    head.appendChild(el('div', 'hub-head-title', title))
     const bits = []
     if (g) bits.push((g.members || []).length + ' 位成员')
     if (g && g.policy && g.policy.mode) bits.push('策略 ' + g.policy.mode)
     const cv = state.hub.conversation
     if (cv) bits.push(conversationLabel(cv))
-    head.appendChild(el('div', 'hub-head-sub', bits.join(' · ') || '加载中…'))
+    const runningNow = groupRunning(g) || (cv && cv.status === 'running') || state.hub.drafts.length > 0
+    if (g) head.appendChild(hubStack(g, { size: 32, name: g.name || g.id, groupRunning: runningNow }))
+    const main = el('div', 'hub-head-main')
+    main.appendChild(el('div', 'hub-head-title', title))
+    main.appendChild(el('div', 'hub-head-sub', bits.join(' · ') || '加载中…'))
+    head.appendChild(main)
 
     const tools = $('hub-group-tools')
     tools.textContent = ''
@@ -1395,7 +1529,6 @@
     assign.type = 'button'
     assign.addEventListener('click', openHubAssign)
     tools.append(tasks, needs, assign)
-    const runningNow = groupRunning(g) || (cv && cv.status === 'running') || state.hub.drafts.length > 0
     if (runningNow) {
       const stop = el('button', 'hub-chip danger', '停止自动对话')
       stop.type = 'button'
@@ -1838,12 +1971,17 @@
     const head = $('hub-dm-head')
     head.textContent = ''
     const a = state.hub.dmAgent
-    head.appendChild(el('div', 'hub-head-title', (a && a.name) || state.hub.activeAgentId || '私聊'))
+    const title = (a && a.name) || state.hub.activeAgentId || '私聊'
     const sub = []
     if (a && a.role) sub.push(a.role)
     if (a && a.provider && a.model) sub.push(a.provider + '/' + a.model)
-    if (agentRunning(state.hub.activeAgentId)) sub.push('运行中')
-    head.appendChild(el('div', 'hub-head-sub', sub.join(' · ') || '私聊'))
+    const dmState = hubStateOf(state.hub.activeAgentId, a && a.deleted)
+    if (dmState === 'working') sub.push('运行中')
+    if (a) head.appendChild(hubSigil({ agent: a, size: 32, state: dmState, label: hubSigilLabel(a.name || a.id, dmState) }))
+    const main = el('div', 'hub-head-main')
+    main.appendChild(el('div', 'hub-head-title', title))
+    main.appendChild(el('div', 'hub-head-sub', sub.join(' · ') || '私聊'))
+    head.appendChild(main)
 
     const box = $('hub-dm-messages')
     const stick = opts.stick || nearBottom(box)
@@ -2275,7 +2413,7 @@
       row.type = 'button'
       row.setAttribute('role', 'option')
       row.setAttribute('aria-selected', i === state.hub.mention.index ? 'true' : 'false')
-      row.append(hubAvatar(m, m.name, true))
+      row.append(hubSigil({ agent: m, size: 24, status: false }))
       const main = el('div', 'mention-item-main')
       main.appendChild(el('div', 'mention-item-name', '@' + m.name))
       const sub = [m.role, m.groupRole === 'observer' ? '旁听' : m.groupRole === 'owner' ? '群主' : '']

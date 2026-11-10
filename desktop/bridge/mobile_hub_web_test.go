@@ -1,8 +1,8 @@
 // mobile_hub_web_test.go —— 手机 Hub 静态资源契约（P4-03b）。
 //
-// 手机页面没有构建步骤，index.html 与 app.js/hub_model.js 的加载顺序、命令名、
+// 手机页面没有构建步骤，index.html 与 app.js/hub_model.js/avatar_model.js 的加载顺序、命令名、
 // 事件分流都是「运行时接口」。这里用 embed FS + 本地 HTTP 各验一遍：
-//   - 发布包不能漏掉 hub_model.js（漏了页面直接白屏）；
+//   - 发布包不能漏掉 hub_model.js / avatar_model.js（漏了页面直接白屏）；
 //   - /m/ 必须真的把脚本以 no-store 发出去；
 //   - app.js 必须用 scope=hub 的独立连接、走 hub_* 命令，且不拼 HTML。
 package main
@@ -27,12 +27,14 @@ func TestMobileHubWebAssetsEmbedded(t *testing.T) {
 	index := readMobileWebFile(t, "index.html")
 	app := readMobileWebFile(t, "app.js")
 	model := readMobileWebFile(t, "hub_model.js")
+	avatar := readMobileWebFile(t, "avatar_model.js")
 
-	// 脚本顺序：纯逻辑层先定义 window.HaiMobileHubModel，app.js 才能消费。
+	// 脚本顺序：纯逻辑层先定义 window.HaiMobileHubModel / HaiMobileAvatar，app.js 才能消费。
 	modelAt := strings.Index(index, `<script src="hub_model.js"></script>`)
+	avatarAt := strings.Index(index, `<script src="avatar_model.js"></script>`)
 	appAt := strings.Index(index, `<script src="app.js"></script>`)
-	if modelAt < 0 || appAt < 0 || modelAt > appAt {
-		t.Fatalf("index.html 必须先加载 hub_model.js 再加载 app.js（model=%d app=%d）", modelAt, appAt)
+	if modelAt < 0 || avatarAt < 0 || appAt < 0 || modelAt > avatarAt || avatarAt > appAt {
+		t.Fatalf("index.html 必须先加载 hub_model.js / avatar_model.js 再加载 app.js（model=%d avatar=%d app=%d）", modelAt, avatarAt, appAt)
 	}
 	for _, marker := range []string{
 		"screen-hub", "screen-hub-group", "screen-hub-dm", "open-hub",
@@ -44,6 +46,9 @@ func TestMobileHubWebAssetsEmbedded(t *testing.T) {
 	}
 	if !strings.Contains(model, "HaiMobileHubModel") {
 		t.Error("hub_model.js 必须挂到 window.HaiMobileHubModel")
+	}
+	if !strings.Contains(avatar, "HaiMobileAvatar") || !strings.Contains(avatar, "deriveSigil") || !strings.Contains(avatar, "planStack") {
+		t.Error("avatar_model.js 必须挂到 window.HaiMobileAvatar 并提供 deriveSigil/planStack")
 	}
 
 	// 独立 Hub 事件流 + 命令名：P4-03a 开放的手机协议要真的被页面用上。
@@ -87,6 +92,7 @@ func TestMobileHubWebAssetsEmbedded(t *testing.T) {
 	for _, file := range []struct{ name, body string }{
 		{"app.js", app},
 		{"hub_model.js", model},
+		{"avatar_model.js", avatar},
 	} {
 		if strings.Contains(file.body, ".innerHTML") {
 			t.Errorf("%s 使用了 innerHTML，Hub 正文必须走 textContent", file.name)
@@ -107,6 +113,7 @@ func TestMobileHubWebAssetsServed(t *testing.T) {
 	}{
 		{"/m/", "screen-hub"},
 		{"/m/hub_model.js", "HaiMobileHubModel"},
+		{"/m/avatar_model.js", "HaiMobileAvatar"},
 		{"/m/app.js", "scope=hub"},
 	} {
 		r, err := http.Get(ts.URL + tc.path)

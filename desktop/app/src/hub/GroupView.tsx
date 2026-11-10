@@ -393,7 +393,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
             members={stackMembers}
             size={32}
             groupRunning={groupRunning}
-            label={stackAriaLabel(t, stackMembers, { groupRunning })}
+            label={stackAriaLabel(t, stackMembers, { groupRunning, name: group.name })}
           />
           <div className="hub-conv-title">
             <span className="hub-conv-line">
