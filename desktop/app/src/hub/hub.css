@@ -223,18 +223,6 @@
   background: color-mix(in srgb, var(--row-accent, var(--accent-solid)) 10%, transparent);
   border-left-color: var(--row-accent, var(--accent-solid));
 }
-.hub-side-avatar { position: relative; display: inline-flex; flex: none; }
-.hub-side-run {
-  position: absolute;
-  right: -1px;
-  bottom: -1px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--bamboo);
-  border: 1.5px solid var(--bg);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bamboo) 22%, transparent);
-}
 .hub-side-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .hub-side-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .hub-side-meta { display: flex; align-items: center; gap: 5px; min-width: 0; }
@@ -244,18 +232,6 @@
   color: var(--text-2);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
-}
-.hub-side-row .hub-member-stack { padding-left: 6px; }
-.hub-side-row.on .hub-member-stack {
-  border-radius: 999px;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--row-accent, var(--accent-solid)) 45%, transparent);
-}
-.hub-side-row .hub-member-dot {
-  width: 18px;
-  height: 18px;
-  margin-left: -8px;
-  border-width: 1.5px;
-  font-size: 9px;
 }
 .hub-side-empty {
   display: flex;
@@ -388,17 +364,128 @@
   line-height: 17px;
   text-align: center;
 }
-.hub-avatar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  border: 1.5px solid transparent;
-  flex: none;
-  font-weight: 600;
-  user-select: none;
+/* —— 智能体头像 sigil v2（方案 03 §3.3；渲染见 AgentSigil.tsx / AgentStack.tsx）——
+   身份 = 形状 + 色相，状态 = 环/弧/点/空心轮廓。状态层只动 stroke-dashoffset 与
+   opacity，不触发布局。主题值按 [data-theme='ink'|'paper'] 切换，base 视为 ink。 */
+.sigil {
+  --sz: 32px;
+  --fill: #8fbfae;
+  --state: #a7a196;
+  --sigil-bg: var(--paper);
+  --sigil-ink: rgba(0, 0, 0, .28);
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: var(--sz);
+  height: var(--sz);
+  line-height: 0;
+  vertical-align: middle;
 }
-.hub-avatar.ring { box-shadow: 0 0 0 2px color-mix(in srgb, var(--agent-accent, var(--indigo)) 55%, transparent); }
+.sigil > svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.sigil .shape { fill: var(--fill); }
+.sigil .trait { fill: var(--sigil-ink); stroke: var(--sigil-ink); stroke-width: 0; }
+.sigil .trait.line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.sigil .ring { fill: none; stroke: var(--state); stroke-width: 1.5; }
+.sigil .dot { fill: var(--state); stroke: var(--sigil-bg); stroke-width: 2; }
+.sigil.s24 { --sz: 24px; }
+.sigil.s32 { --sz: 32px; }
+.sigil.s48 { --sz: 48px; }
+/* 尺寸渐进披露：24px 隐藏内侧标记；1.5 单位环缩到 1px 看不见，用 2 单位。 */
+.sigil.s24 .trait { display: none; }
+.sigil.s24 .ring { stroke-width: 2; }
+/* offline：空心轮廓（实心 vs 空心不依赖颜色），无环无点、不整体降透明度。 */
+.sigil[data-state='offline'] .shape { fill: none; stroke: var(--state); stroke-width: 2.5; }
+.sigil[data-state='offline'] .trait { display: none; }
+
+/* 状态色：只用于状态层，永不参与身份填充。 */
+.sigil[data-state='idle'] { --state: #a7a196; }
+.sigil[data-state='working'] { --state: #6fc7b6; }
+.sigil[data-state='needs_attention'] { --state: #e7b86a; }
+.sigil[data-state='offline'] { --state: #756f65; }
+[data-theme='ink'] .sigil[data-state='idle'] { --state: #a7a196; }
+[data-theme='ink'] .sigil[data-state='working'] { --state: #6fc7b6; }
+[data-theme='ink'] .sigil[data-state='needs_attention'] { --state: #e7b86a; }
+[data-theme='ink'] .sigil[data-state='offline'] { --state: #756f65; }
+[data-theme='paper'] .sigil { --sigil-ink: rgba(255, 255, 255, .45); }
+[data-theme='paper'] .sigil[data-state='idle'] { --state: #6b675e; }
+[data-theme='paper'] .sigil[data-state='working'] { --state: #2e6b3f; }
+[data-theme='paper'] .sigil[data-state='needs_attention'] { --state: #8a5a00; }
+[data-theme='paper'] .sigil[data-state='offline'] { --state: #8a857a; }
+
+/* 8 组身份色：同一色相按主题取填充值（不透明混色）。base = ink。 */
+.sigil[data-hue='sage'] { --fill: #8fbfae; }
+.sigil[data-hue='clay'] { --fill: #d3927a; }
+.sigil[data-hue='sky'] { --fill: #8ab4f8; }
+.sigil[data-hue='lilac'] { --fill: #b6a4e0; }
+.sigil[data-hue='moss'] { --fill: #a9c47c; }
+.sigil[data-hue='rose'] { --fill: #d99aa6; }
+.sigil[data-hue='slate'] { --fill: #9aa8b6; }
+.sigil[data-hue='sand'] { --fill: #cbb493; }
+[data-theme='paper'] .sigil[data-hue='sage'] { --fill: #3f6b5d; }
+[data-theme='paper'] .sigil[data-hue='clay'] { --fill: #79452f; }
+[data-theme='paper'] .sigil[data-hue='sky'] { --fill: #2f5c9e; }
+[data-theme='paper'] .sigil[data-hue='lilac'] { --fill: #5a4a86; }
+[data-theme='paper'] .sigil[data-hue='moss'] { --fill: #4e6a27; }
+[data-theme='paper'] .sigil[data-hue='rose'] { --fill: #7d3d4b; }
+[data-theme='paper'] .sigil[data-hue='slate'] { --fill: #46525f; }
+[data-theme='paper'] .sigil[data-hue='sand'] { --fill: #6b5738; }
+
+/* working：270° 弧（周长 2πr，r=22 → 138.2）。旋转只改 dashoffset。 */
+.sigil .arc { stroke-dasharray: 103.7 34.5; stroke-dashoffset: -17.3; }
+.sigil[data-state='working'] .arc { animation: sigil-arc 1.6s linear infinite; }
+@keyframes sigil-arc { from { stroke-dashoffset: -17.3; } to { stroke-dashoffset: -155.5; } }
+
+/* needs_attention：加粗环 + 右上点；呼吸只动 opacity，不动布局。 */
+.sigil[data-state='needs_attention'] .ring { stroke-width: 2.6; animation: sigil-ring 2.4s ease-in-out infinite; }
+.sigil[data-state='needs_attention'] .dot { animation: sigil-dot 2.4s ease-in-out infinite; }
+@keyframes sigil-ring { 0%, 100% { opacity: .95; } 50% { opacity: .35; } }
+@keyframes sigil-dot { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+
+/* prefers-contrast / forced-colors：状态层换高对比编码，形状不变（§3.3.6 必做项）。 */
+@media (prefers-contrast: more) {
+  .sigil .ring { stroke-width: 2.5; }
+  .sigil[data-state='idle'] { --state: var(--ink-2); }
+  .sigil[data-state='offline'] { --state: var(--ink-2); }
+}
+@media (forced-colors: active) {
+  .sigil .shape { fill: CanvasText; stroke: CanvasText; }
+  .sigil[data-state='offline'] .shape { fill: none; }
+  .sigil .ring { stroke: Highlight; }
+  .sigil .dot { fill: Highlight; stroke: Canvas; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sigil .arc, .sigil .ring, .sigil .dot { animation: none !important; }
+}
+
+/* Group 叠放：重叠 25%，paper 色 drop-shadow 分隔（不额外套边框层）。 */
+.agent-stack { --sigil-bg: var(--paper); display: inline-flex; align-items: center; vertical-align: middle; }
+.agent-stack > * {
+  position: relative;
+  filter: drop-shadow(2px 0 0 var(--sigil-bg)) drop-shadow(-2px 0 0 var(--sigil-bg))
+    drop-shadow(0 2px 0 var(--sigil-bg)) drop-shadow(0 -2px 0 var(--sigil-bg));
+}
+.agent-stack > .sigil { margin-left: calc(var(--sz) * -.25); }
+.agent-stack > :first-child { margin-left: 0; }
+.agent-stack-more {
+  --sz: 24px;
+  display: inline-grid;
+  place-items: center;
+  width: var(--sz);
+  height: var(--sz);
+  margin-left: calc(var(--sz) * -.25);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 10%, var(--paper));
+  color: var(--ink-2);
+  font-size: calc(var(--sz) * .34);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -.02em;
+}
+.agent-stack-more.s24 { --sz: 24px; }
+.agent-stack-more.s32 { --sz: 32px; }
+.agent-stack-more.s48 { --sz: 48px; }
+
 .hub-notice {
   margin: 6px;
   padding: 7px 9px;
@@ -540,23 +627,15 @@
   font: inherit;
   text-align: left;
 }
-.hub-agent-badge.clickable { cursor: pointer; }
+.hub-agent-badge.clickable {
+  cursor: pointer;
+  /* 视觉不变，命中区 ≥44px（方案 §3.3.7）：padding 扩张热区，负 margin 抵消布局影响。 */
+  min-height: 44px;
+  padding: 6px 4px;
+  margin: -6px -4px;
+}
 .hub-agent-badge.clickable:hover .hub-agent-name { text-decoration: underline; }
 .hub-agent-badge.clickable:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 6px; }
-.hub-agent-avatar {
-  flex: none;
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  border: 1px solid color-mix(in srgb, var(--agent-accent) 45%, var(--border));
-  background: color-mix(in srgb, var(--agent-accent) 20%, var(--paper));
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1;
-}
 .hub-agent-name {
   min-width: 0;
   color: color-mix(in srgb, var(--agent-accent) 45%, var(--ink));
@@ -823,6 +902,13 @@
 }
 .hub-form input[type='color'] { padding: 2px; height: 30px; }
 .hub-form textarea { resize: vertical; line-height: 1.5; }
+.hub-form .hub-avatar-note {
+  grid-column: 1 / -1;
+  margin: -2px 0 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
 /* 高级设置折叠区：默认收起，第一屏只留身份 + 模型。只用现有令牌，ink/paper/system 通吃。 */
 .hub-advanced {
   grid-column: 1 / -1;
@@ -1008,7 +1094,6 @@
 .hub-ov-members { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
 .hub-ov-member { display: flex; align-items: center; gap: 7px; font-size: 12px; min-width: 0; }
 .hub-ov-member-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hub-ov-run { margin-left: auto; width: 6px; height: 6px; border-radius: 50%; background: var(--bamboo); flex: none; }
 .hub-ov-tasks { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--border); padding-top: 8px; }
 .hub-ov-task {
   display: flex;
@@ -1106,14 +1191,6 @@
   font-size: 12px; padding: 4px 6px; border-radius: 6px; cursor: pointer;
 }
 .hub-rail-tabs button.on { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
-.hub-member-stack { display: inline-flex; align-items: center; padding-left: 4px; }
-.hub-member-dot {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; margin-left: -4px; border-radius: 50%;
-  border: 2px solid var(--paper); background: color-mix(in srgb, var(--ink) 12%, var(--paper));
-  color: var(--ink); font-size: 11px; font-weight: 600;
-}
-.hub-member-dot.more { font-size: 9px; color: var(--text-2); }
 .hub-approval-stub { display: flex; align-items: center; gap: 8px; }
 .hub-handoff-card { display: flex; align-items: center; gap: 8px; }
 .hub-handoff-text { flex: 1; min-width: 0; }
@@ -1249,15 +1326,7 @@ button.hub-budget-chip:hover { border-color: currentColor; }
 button.hub-mention { cursor: pointer; }
 button.hub-mention:hover { background: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 22%, transparent); }
 button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
-.hub-mention-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--mention-accent, var(--accent-solid));
-  flex: none;
-}
 .hub-mention-name { color: var(--mention-text); font-weight: 550; }
-.hub-mention-avatar { font-size: 0.9em; line-height: 1; }
 .hub-mention-gone { color: var(--text-3); font-size: 0.86em; }
 .hub-mention.gone { opacity: 0.55; filter: grayscale(1); }
 .hub-mention.unknown { border-style: dashed; color: var(--text-2); cursor: default; }
