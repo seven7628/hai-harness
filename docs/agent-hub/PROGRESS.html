@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P3a/P2.5/P3b 全部 passed（P3b-01a/01/01b/02/03/04/05/06/07a/07/08）",
+  "subtitle": "P4 后端 04b-2 全部 passed；UI 重设计（shell + 编辑器 + 视觉验收）进行中",
   "updated": "2026-11-09",
   "phases": [
     {
@@ -1629,6 +1629,67 @@ const BASE = {
       "review": "passed",
       "note": "04b-2 端到端终审 PASS",
       "reviewNote": "独立终审 task-4zer9key PASS（HEAD 2456e1c）：2a 存储/透明读搜 + 2b ticker/bridge 全链路；20,001→14,000/hot 6,001；冷+热 1000 命中 50 页不重不漏；冷段 owner-only/噪声口径不退化；取消/关停/崩溃窗口/并发 append-read-search 均验证；bridge full 756 PASS，仅两条基线既有失败。非阻塞 F1 归档耗时日志口径、F2 空转 O(hot)、F3 冷段幂等锁内扫、F4 restartManager 测试清理、F5 dead trim、F6 彻底删除未覆盖 archive/dms。"
+    },
+    {
+      "id": "P4-UI-1",
+      "phase": "P4",
+      "title": "Hub 并入 App shell（左栏智能体/群组 + 中栏对话 + 右栏概览）",
+      "deps": [
+        "P4-04b-2c"
+      ],
+      "files": [
+        "desktop/app/src/App.tsx",
+        "desktop/app/src/components/LeftPanel.tsx",
+        "desktop/app/src/hub/HubSidebar.tsx",
+        "desktop/app/src/hub/HubSurface.tsx",
+        "desktop/app/src/hub/HubInspector.tsx",
+        "desktop/app/src/hub/HubAvatar.tsx",
+        "desktop/app/src/hub/agentAccent.ts",
+        "desktop/app/src/hub/hub.css"
+      ],
+      "acceptance": "Hub 不再是全屏覆盖页：左栏智能体/群组 section 位于工作区上方，中栏对话，右栏默认概览；工作区/会话点击可退出 Hub 且草稿不丢；active 行/头像环/未读/折叠 rail 使用 agent.accent；系统通知居中低对比并保留 data-seq 高亮；不新增重复 Hub 入口。",
+      "tests": "npx tsc --noEmit && npx tsc -p tsconfig.electron.json --noEmit && npm run build && npm run test:hub-search && npm run test:hub && npm run test:hub-p3b && npm run test:p4 && npm run test:css",
+      "commit": "771809f",
+      "status": "in_progress",
+      "note": "实现完成，独立复审中",
+      "reviewNote": "独立复审 task-7rscybyy 进行中"
+    },
+    {
+      "id": "P4-UI-2",
+      "phase": "P4",
+      "title": "Agent 编辑器收敛：Provider/Model 真下拉 + 8 档 Effort + 高级折叠",
+      "deps": [
+        "P4-UI-1"
+      ],
+      "files": [
+        "desktop/app/src/hub/AgentEditor.tsx",
+        "desktop/app/src/hub/agentPatch.ts",
+        "desktop/app/src/i18n.ts",
+        "desktop/app/src/hub/hub.css",
+        "desktop/app/scripts/test-agent-model-options.mjs"
+      ],
+      "acceptance": "Provider/Model 从设置里的 Providers/Models 继承为真下拉；切换 Provider 时若当前 Model 不在新列表则自动选第一个；当前值不在列表时保留 disabled 当前项，不静默丢失；Effort 为 跟随模型默认 + None/Minimal/Low/Medium/High/XHigh/Max 共 8 项；预算/压缩/记忆开关折叠进高级，默认收起；保留现有页签与保存语义。",
+      "tests": "npx tsc --noEmit && npm run build && npm run test:hub-patch && npm run test:hub && npm run test:css",
+      "status": "todo",
+      "note": "待 UI-1 复审 PASS",
+      "review": null
+    },
+    {
+      "id": "P4-UI-3",
+      "phase": "P4",
+      "title": "参考图视觉验收 + 5176 真实浏览器检查 + 独立 Review",
+      "deps": [
+        "P4-UI-1",
+        "P4-UI-2"
+      ],
+      "files": [
+        "docs/agent-hub/P4-UI-REDESIGN.md"
+      ],
+      "acceptance": "对照用户参考图 1–3：左栏 section、中栏对话、右栏详情、per-agent 颜色与系统通知；5176 真实浏览器覆盖智能体/群组/搜索/返回工作区/编辑器下拉/三主题；独立 Review PASS 后才收口。",
+      "tests": "browser review on localhost:5176 + independent review",
+      "status": "todo",
+      "note": "待 UI-2",
+      "review": null
     }
   ],
   "deferred": [
@@ -2550,6 +2611,11 @@ const BASE = {
       "commit": "9460476 + 1d4e38a + eefdfab",
       "review": "passed",
       "note": "端到端终审 PASS"
+    },
+    "P4-UI-1": {
+      "status": "in_progress",
+      "commit": "771809f",
+      "reviewNote": "独立复审 task-7rscybyy 进行中"
     }
   },
   "reviewGate": {
