@@ -26,9 +26,14 @@ const GROUP = {
   id: 'grp_1',
   name: '产品评审群',
   pinned: false,
+  // 6 名成员：叠放规则（≥5 → 前 3 + N）在 390 下要有真实数据可测。
   members: [
     { agent_id: 'ag_alice', role: 'owner' },
     { agent_id: 'ag_bob', role: 'member' },
+    { agent_id: 'ag_carol', role: 'member' },
+    { agent_id: 'ag_dave', role: 'member' },
+    { agent_id: 'ag_erin', role: 'member' },
+    { agent_id: 'ag_frank', role: 'member' },
   ],
 }
 const AGENT = {
@@ -38,6 +43,14 @@ const AGENT = {
   provider: 'anthropic',
   model: 'claude-opus',
 }
+const AGENTS = [
+  AGENT,
+  { id: 'ag_bob', name: 'Bob', role: '写作', provider: 'anthropic', model: 'claude-opus' },
+  { id: 'ag_carol', name: 'Carol', role: '找反例、标风险', provider: 'anthropic', model: 'claude-opus' },
+  { id: 'ag_dave', name: 'Dave', role: '分类、起草、等批准', provider: 'anthropic', model: 'claude-opus' },
+  { id: 'ag_erin', name: 'Erin', role: '盯竞品、盯价格变动', provider: 'anthropic', model: 'claude-opus' },
+  { id: 'ag_frank', name: 'Frank', role: '拆数据、算口径', provider: 'anthropic', model: 'claude-opus' },
+]
 const groupMessages = [
   {
     id: 'm1',
@@ -146,7 +159,7 @@ function mockCmd(cmd, payload) {
       return { sessions: [{ id: 'sess-1', title: '修复登录', updated_at: Date.parse(NOW) }] }
     case 'hub_agent_list':
       return {
-        agents: [AGENT],
+        agents: AGENTS,
         dm: { ag_alice: { unread: 2, last_text: '昨天的结论', last_at: NOW } },
       }
     case 'hub_group_list':
@@ -417,12 +430,85 @@ async function main() {
     assert(!(await page.locator('#theme').isHidden()), 'Hub 首页仍可打开外观')
     await measure(page, 'Hub 首页 390x844')
 
+    // —— 头像 sigil v2：无 emoji/首字母；群行叠放 +N；主题填充切换 ——
+    const avatarHome = await page.evaluate(() => {
+      const rows = (sel) => [...document.querySelectorAll(sel)]
+      const groupRows = rows('#hub-groups .hub-row')
+      const dmRows = rows('#hub-dms .hub-row')
+      const sigils = [...document.querySelectorAll('#screen-hub .sigil')]
+      const root = document.documentElement
+      const oldTheme = root.dataset.theme
+      const shape = document.querySelector('#hub-groups .sigil .shape')
+      root.dataset.theme = 'ink'
+      const inkFill = shape ? getComputedStyle(shape).fill : ''
+      root.dataset.theme = 'paper'
+      const paperFill = shape ? getComputedStyle(shape).fill : ''
+      root.dataset.theme = oldTheme
+      return {
+        legacy: document.querySelectorAll('#screen-hub .hub-avatar').length,
+        sigilText: sigils.map((n) => n.textContent || '').filter(Boolean),
+        groupRows: groupRows.map((row) => {
+          const stack = row.querySelector('.agent-stack')
+          const parts = [...row.querySelectorAll('.agent-stack .sigil')]
+          return {
+            parts: parts.length,
+            more: row.querySelector('.agent-stack-more')?.textContent || '',
+            lead: parts[0]?.getAttribute('data-state') || '',
+            peersNone: parts.slice(1).every((n) => n.getAttribute('data-state') === 'none'),
+            hidden: stack?.getAttribute('aria-hidden') || '',
+          }
+        }),
+        dmRows: dmRows.map((row) => {
+          const sig = row.querySelector('.sigil')
+          return sig ? {
+            size: sig.getAttribute('data-size'),
+            shape: sig.getAttribute('data-shape'),
+            hidden: sig.getAttribute('aria-hidden') || '',
+          } : null
+        }),
+        inkFill,
+        paperFill,
+      }
+    })
+    assert(avatarHome.legacy === 0, `Hub 首页不应再有 .hub-avatar 旧头像（got=${avatarHome.legacy}）`)
+    assert(avatarHome.sigilText.length === 0, `头像节点内不能有 emoji/首字母文本：${JSON.stringify(avatarHome.sigilText)}`)
+    assert(avatarHome.groupRows.length === 1 && avatarHome.groupRows[0].parts === 3 &&
+      avatarHome.groupRows[0].more === '+3', `群行 ≥5 成员应显示前 3 + +3：${JSON.stringify(avatarHome.groupRows)}`)
+    assert(avatarHome.groupRows[0].lead !== 'none' && avatarHome.groupRows[0].peersNone,
+      '群叠放只有 lead 画状态层，peer 的 data-state=none')
+    assert(avatarHome.groupRows[0].hidden === 'true', '侧栏式群行里的叠放对读屏 aria-hidden（行名已承载身份）')
+    assert(avatarHome.dmRows.every((r) => r && r.size === '32' && r.shape && r.hidden === 'true'),
+      `DM 行头像应为 32px sigil 且 aria-hidden：${JSON.stringify(avatarHome.dmRows)}`)
+    assert(avatarHome.inkFill && avatarHome.paperFill && avatarHome.inkFill !== avatarHome.paperFill,
+      `ink/paper 应使用不同填充值（ink=${avatarHome.inkFill} paper=${avatarHome.paperFill}）`)
+    console.log('  ✅ 头像: 无 emoji/首字母，群行 3++3、lead 状态、DM 32、ink/paper 双套填充')
+
     // —— 群时间线 ——
     await page.click('#hub-groups .hub-row')
     await page.waitForSelector('#screen-hub-group:not([hidden])')
     await page.waitForSelector('#hub-group-messages .hub-msg')
     await waitFor(() => hubWS)
     await measure(page, '群时间线 390x844')
+    const groupHeadAvatar = await page.evaluate(() => {
+      const stack = document.querySelector('#hub-group-head .agent-stack')
+      const sigils = [...document.querySelectorAll('#hub-group-head .agent-stack .sigil')]
+      return stack ? {
+        role: stack.getAttribute('role'),
+        label: stack.getAttribute('aria-label') || '',
+        parts: sigils.length,
+        more: document.querySelector('#hub-group-head .agent-stack-more')?.textContent || '',
+        lead: sigils[0]?.getAttribute('data-state') || '',
+        peersNone: sigils.slice(1).every((n) => n.getAttribute('data-state') === 'none'),
+        box: stack.getBoundingClientRect().width,
+      } : null
+    })
+    assert(groupHeadAvatar && groupHeadAvatar.role === 'img' &&
+      groupHeadAvatar.label.includes('产品评审群') && groupHeadAvatar.label.includes('6 个智能体'),
+      `群头独立叠放应有 role=img + 群名/成员数：${JSON.stringify(groupHeadAvatar)}`)
+    assert(groupHeadAvatar.parts === 3 && groupHeadAvatar.more === '+3' && groupHeadAvatar.lead !== 'none' &&
+      groupHeadAvatar.peersNone, '群头叠放 3++3 且只有 lead 带状态')
+    assert(groupHeadAvatar.box <= 120, `群头叠放在 390 下不应挤压标题（w=${groupHeadAvatar.box}）`)
+    console.log('  ✅ 群头叠放: role=img + 群名/6 个智能体/+3，仅 lead 状态')
     const md = await page.evaluate(() => {
       const body = document.querySelector('#hub-group-messages .hub-msg.agent .body')
       return {
@@ -492,6 +578,13 @@ async function main() {
     await page.keyboard.press('End')
     await page.keyboard.type('@')
     await page.waitForSelector('#mention-picker:not([hidden])')
+    const mentionAvatars = await page.evaluate(() => [...document.querySelectorAll('#mention-list .sigil')].map((n) => ({
+      size: n.getAttribute('data-size'), shape: n.getAttribute('data-shape'),
+      text: n.textContent || '', hidden: n.getAttribute('aria-hidden') || '',
+    })))
+    assert(mentionAvatars.length >= 1 && mentionAvatars.every((a) => a.size === '24' && a.shape &&
+      !a.text && a.hidden === 'true'),
+    `@ 选择器成员行应用 24px sigil（无 emoji/首字母）：${JSON.stringify(mentionAvatars.slice(0, 2))}`)
     assert((await page.evaluate(() => document.activeElement && document.activeElement.id)) === 'mention-filter', '敲 @ 后焦点进入筛选框')
     await page.keyboard.press('ArrowDown')
     const selected = await page.evaluate(() => {
@@ -558,6 +651,19 @@ async function main() {
     await page.waitForSelector('#screen-hub-dm:not([hidden])')
     await page.waitForSelector('#hub-dm-messages .hub-msg')
     await measure(page, 'DM 390x844')
+    const dmHeadAvatar = await page.evaluate(() => {
+      const sig = document.querySelector('#hub-dm-head .sigil')
+      return sig ? {
+        role: sig.getAttribute('role'),
+        label: sig.getAttribute('aria-label') || '',
+        size: sig.getAttribute('data-size'),
+        shape: sig.getAttribute('data-shape'),
+      } : null
+    })
+    assert(dmHeadAvatar && dmHeadAvatar.role === 'img' && dmHeadAvatar.label.startsWith('Alice，') &&
+      dmHeadAvatar.size === '32' && dmHeadAvatar.shape,
+      `DM 头独立头像应有 role=img + 名字/状态：${JSON.stringify(dmHeadAvatar)}`)
+    console.log('  ✅ DM 头: 32px sigil + role=img 名字/状态')
     const dmBold = await page.evaluate(() => {
       const b = document.querySelector('#hub-dm-messages .hub-msg .body b')
       return b ? b.textContent : ''

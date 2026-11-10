@@ -695,25 +695,103 @@ button[disabled] {
   text-align: left;
   background: var(--surface);
 }
-.hub-avatar {
-  display: grid;
-  place-items: center;
+/* —— 智能体头像 sigil v2（与桌面 desktop/app/src/hub/hub.css 同一套视觉）——
+   身份 = 形状 + 色相，状态 = 环/弧/点/空心轮廓；状态层只动 dashoffset/opacity。 */
+.sigil {
+  --sz: 32px;
+  --fill: #8fbfae;
+  --state: #a7a196;
+  --sigil-bg: var(--paper);
+  --sigil-ink: rgba(0, 0, 0, .28);
+  position: relative;
+  display: inline-block;
   flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 50%;
+  width: var(--sz);
+  height: var(--sz);
+  line-height: 0;
+  vertical-align: middle;
+}
+.sigil > svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.sigil .shape { fill: var(--fill); }
+.sigil .trait { fill: var(--sigil-ink); stroke: var(--sigil-ink); stroke-width: 0; }
+.sigil .trait.line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.sigil .ring { fill: none; stroke: var(--state); stroke-width: 1.5; }
+.sigil .dot { fill: var(--state); stroke: var(--sigil-bg); stroke-width: 2; }
+.sigil.s24 { --sz: 24px; }
+.sigil.s32 { --sz: 32px; }
+.sigil.s48 { --sz: 48px; }
+.sigil.s24 .trait { display: none; }
+.sigil.s24 .ring { stroke-width: 2; }
+.sigil[data-state='offline'] .shape { fill: none; stroke: var(--state); stroke-width: 2.5; }
+.sigil[data-state='offline'] .trait { display: none; }
+
+.sigil[data-state='idle'] { --state: #a7a196; }
+.sigil[data-state='working'] { --state: #6fc7b6; }
+.sigil[data-state='needs_attention'] { --state: #e7b86a; }
+.sigil[data-state='offline'] { --state: #756f65; }
+[data-theme='ink'] .sigil[data-state='idle'] { --state: #a7a196; }
+[data-theme='ink'] .sigil[data-state='working'] { --state: #6fc7b6; }
+[data-theme='ink'] .sigil[data-state='needs_attention'] { --state: #e7b86a; }
+[data-theme='ink'] .sigil[data-state='offline'] { --state: #756f65; }
+[data-theme='paper'] .sigil { --sigil-ink: rgba(255, 255, 255, .45); }
+[data-theme='paper'] .sigil[data-state='idle'] { --state: #6b675e; }
+[data-theme='paper'] .sigil[data-state='working'] { --state: #2e6b3f; }
+[data-theme='paper'] .sigil[data-state='needs_attention'] { --state: #8a5a00; }
+[data-theme='paper'] .sigil[data-state='offline'] { --state: #8a857a; }
+
+.sigil[data-hue='sage'] { --fill: #8fbfae; }
+.sigil[data-hue='clay'] { --fill: #d3927a; }
+.sigil[data-hue='sky'] { --fill: #8ab4f8; }
+.sigil[data-hue='lilac'] { --fill: #b6a4e0; }
+.sigil[data-hue='moss'] { --fill: #a9c47c; }
+.sigil[data-hue='rose'] { --fill: #d99aa6; }
+.sigil[data-hue='slate'] { --fill: #9aa8b6; }
+.sigil[data-hue='sand'] { --fill: #cbb493; }
+[data-theme='paper'] .sigil[data-hue='sage'] { --fill: #3f6b5d; }
+[data-theme='paper'] .sigil[data-hue='clay'] { --fill: #79452f; }
+[data-theme='paper'] .sigil[data-hue='sky'] { --fill: #2f5c9e; }
+[data-theme='paper'] .sigil[data-hue='lilac'] { --fill: #5a4a86; }
+[data-theme='paper'] .sigil[data-hue='moss'] { --fill: #4e6a27; }
+[data-theme='paper'] .sigil[data-hue='rose'] { --fill: #7d3d4b; }
+[data-theme='paper'] .sigil[data-hue='slate'] { --fill: #46525f; }
+[data-theme='paper'] .sigil[data-hue='sand'] { --fill: #6b5738; }
+
+.sigil .arc { stroke-dasharray: 103.7 34.5; stroke-dashoffset: -17.3; }
+.sigil[data-state='working'] .arc { animation: sigil-arc 1.6s linear infinite; }
+@keyframes sigil-arc { from { stroke-dashoffset: -17.3; } to { stroke-dashoffset: -155.5; } }
+.sigil[data-state='needs_attention'] .ring { stroke-width: 2.6; animation: sigil-ring 2.4s ease-in-out infinite; }
+.sigil[data-state='needs_attention'] .dot { animation: sigil-dot 2.4s ease-in-out infinite; }
+@keyframes sigil-ring { 0%, 100% { opacity: .95; } 50% { opacity: .35; } }
+@keyframes sigil-dot { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+
+/* Group 叠放：重叠 25%，paper 色 drop-shadow 分隔。 */
+.agent-stack { --sigil-bg: var(--paper); display: inline-flex; align-items: center; vertical-align: middle; }
+.agent-stack > * {
+  position: relative;
+  filter: drop-shadow(2px 0 0 var(--sigil-bg)) drop-shadow(-2px 0 0 var(--sigil-bg))
+    drop-shadow(0 2px 0 var(--sigil-bg)) drop-shadow(0 -2px 0 var(--sigil-bg));
+}
+.agent-stack > .sigil { margin-left: calc(var(--sz) * -.25); }
+.agent-stack > :first-child { margin-left: 0; }
+.agent-stack-more {
+  --sz: 24px;
+  display: inline-grid;
+  place-items: center;
+  width: var(--sz);
+  height: var(--sz);
+  margin-left: calc(var(--sz) * -.25);
+  border-radius: 999px;
   background: var(--elevated);
-  font-size: 16px;
-  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--border);
   color: var(--text-2);
+  font-size: calc(var(--sz) * .34);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -.02em;
 }
-.hub-avatar.sm {
-  width: 28px;
-  height: 28px;
-  font-size: 13px;
-}
+.agent-stack-more.s24 { --sz: 24px; }
+.agent-stack-more.s32 { --sz: 32px; }
+.agent-stack-more.s48 { --sz: 48px; }
 .hub-row-main {
   display: flex;
   flex: 1;
@@ -805,10 +883,14 @@ button[disabled] {
   overflow: hidden;
 }
 .hub-head {
+  display: flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
   padding: 10px 14px 8px;
   border-bottom: 1px solid var(--border);
 }
+.hub-head-main { flex: 1; min-width: 0; }
 .hub-head-title {
   overflow: hidden;
   font-size: 14px;
@@ -1398,7 +1480,10 @@ button[disabled] {
   }
   .cursor::after,
   .hub-msg.draft .body::after,
-  .hub-typing .dots::after {
+  .hub-typing .dots::after,
+  .sigil .arc,
+  .sigil .ring,
+  .sigil .dot {
     animation: none !important;
     opacity: 1 !important;
   }
