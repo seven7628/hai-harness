@@ -4703,6 +4703,10 @@ export function dispatchEvent(raw: AnyEvent): void {
             return d.error && d.error.id === p.id ? { ...merged, error: d.error.message } : { ...merged, error: undefined }
           }) as PluginInfo[]
           setState({ plugins: list })
+          // IM 的启用是**归属级**的：事件只带连接/安装面事实，归属启用状态的真相在
+          // im_status（按当前归属算）。owner 启停后顺手拉一次，别让 IM 面板顶部
+          // 停留在旧状态（"我明明关了它还显示启用"）。
+          if (list.some((p) => p.id === 'im')) send({ type: 'im_status', payload: {} })
         }
         break
       }
