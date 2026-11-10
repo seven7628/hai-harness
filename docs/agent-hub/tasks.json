@@ -1348,9 +1348,10 @@
       "acceptance": "Hub 不再是全屏覆盖页：左栏智能体/群组 section 位于工作区上方，中栏对话，右栏默认概览；工作区/会话点击可退出 Hub 且草稿不丢；active 行/头像环/未读/折叠 rail 使用 agent.accent；系统通知居中低对比并保留 data-seq 高亮；不新增重复 Hub 入口。",
       "tests": "npx tsc --noEmit && npx tsc -p tsconfig.electron.json --noEmit && npm run build && npm run test:hub-search && npm run test:hub && npm run test:hub-p3b && npm run test:p4 && npm run test:css",
       "commit": "771809f + 59aef20",
-      "status": "in_progress",
-      "note": "复审 CHANGES_REQUESTED 已修复（59aef20）；delta 复审中",
-      "reviewNote": "review task-7rscybyy CHANGES_REQUESTED；修复 59aef20：左栏高度预算/Run 泄漏/右栏展开/rail 工作区/搜索 tab 同步；delta 复审进行中。"
+      "status": "done",
+      "note": "UI-1 收口：Hub 并入 App shell，复审修复后 PASS",
+      "reviewNote": "delta review task-7rscybyy PASS（HEAD 59aef20）：620/768 工作区/会话可见且可滚到最后 agent；Run 关闭/切换回 Chat；折叠右栏概览/任务/Needs/Context 均展开；rail 工作区关闭 Hub 且仅一个 active；搜索命中与深链同步左栏 tab；nits 修复；tsc/build/test:p4/css/mobile 全绿。非阻断残余：safeAccent 仍接受 8 位 hex（alpha 被 contrastText 忽略，现有数据无此值）。",
+      "review": "passed"
     },
     {
       "id": "P4-UI-2",
@@ -1368,8 +1369,8 @@
       ],
       "acceptance": "Provider/Model 从设置里的 Providers/Models 继承为真下拉；切换 Provider 时若当前 Model 不在新列表则自动选第一个；当前值不在列表时保留 disabled 当前项，不静默丢失；Effort 为 跟随模型默认 + None/Minimal/Low/Medium/High/XHigh/Max 共 8 项；预算/压缩/记忆开关折叠进高级，默认收起；保留现有页签与保存语义。",
       "tests": "npx tsc --noEmit && npm run build && npm run test:hub-patch && npm run test:hub && npm run test:css",
-      "status": "todo",
-      "note": "待 UI-1 复审 PASS",
+      "status": "in_progress",
+      "note": "UI-1 PASS，开始实现",
       "review": null
     },
     {
@@ -2311,9 +2312,14 @@
       "note": "端到端终审 PASS"
     },
     "P4-UI-1": {
-      "status": "in_progress",
+      "status": "done",
       "commit": "771809f + 59aef20",
-      "reviewNote": "CHANGES_REQUESTED 修复 59aef20；delta 复审进行中"
+      "review": "passed",
+      "reviewNote": "delta review PASS（59aef20）；五条阻断/P2 全部修复，门禁全绿。"
+    },
+    "P4-UI-2": {
+      "status": "in_progress",
+      "reviewNote": "UI-1 已 PASS；Provider/Model 下拉 + 8 档 Effort + 高级折叠实现中"
     }
   },
   "reviewGate": {
