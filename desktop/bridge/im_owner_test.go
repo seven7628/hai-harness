@@ -6,7 +6,9 @@ package main
 // 「A 群启用」显示成「B 群也启用」。
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/seven7628/hai-harness/core"
@@ -21,11 +23,10 @@ import (
 func imTestBridge(t *testing.T, cfg im.Config) (*imBridge, *[]imTarget) {
 	t.Helper()
 	rt := &implugin.Runtime{
-		Config:   cfg,
 		Router:   im.NewRouter(cfg),
 		Security: im.NewSecurity(cfg, filepath.Join(t.TempDir(), "audit.jsonl")),
-		Gateways: map[string]im.Gateway{},
 	}
+	rt.SetConfig(cfg)
 	b := newIMBridge(rt)
 	asked := []imTarget{}
 	b.askFn = func(target imTarget, text string, images []core.Content) { asked = append(asked, target) }
@@ -294,4 +295,141 @@ func TestPluginEnableDisablePerOwner(t *testing.T) {
 	if saved2.OwnerEnabled(owner.Group("g9")) {
 		t.Fatal("group:g9 应已关闭")
 	}
+}
+
+// TestIMConfigSetKeepsOwnerLedger im_config_set 是「设置页保存整份配置」的入口，
+// 而 owners 账本不在编辑表单里。判「没携带」必须按 len==0，否则 `owners: {}`
+// 会把别人刚设的显式 false 清空（升级后/多窗口下表现为「关掉的归属又自己开了」）。
+func TestIMConfigSetKeepsOwnerLedger(t *testing.T) {
+	m, buf := testManager(t)
+	base := im.Config{Enabled: true, Gateways: []im.GatewayConfig{{
+		ID: "gw1", Type: "feishu", Enabled: false, AllowUsers: []string{"*"},
+		Routes: []im.RouteConfig{{Chat: im.Chat{Gateway: "feishu", ChatID: "c1"}, Agent: "a"}},
+	}}}
+	off := false
+	base.Owners = map[string]im.OwnerState{owner.Agent("a"): {Enabled: &off}}
+	if err := im.SaveConfig(m.imConfigPath(), base); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := newIMPluginForTest(t, base)
+	m.imPlugin = p
+	wsPath := t.TempDir()
+
+	// 表单序列化出的 config：没有 owners 字段
+	raw, _ := json.Marshal(im.Config{Enabled: true, Gateways: base.Gateways})
+	var formCfg map[string]any
+	_ = json.Unmarshal(raw, &formCfg)
+
+	if ok, errMsg, _ := runCmd(t, m, buf, "im_config_set", map[string]any{
+		"workspace": wsPath, "config": formCfg,
+	}); !ok {
+		t.Fatalf("保存配置失败: %s", errMsg)
+	}
+	saved, err := im.LoadConfig(m.imConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, exists := saved.Owners[owner.Agent("a")]; !exists || st.Enabled == nil || *st.Enabled {
+		t.Fatalf("无 owners 字段的保存不得清掉显式 false: %+v", saved.Owners)
+	}
+
+	// 显式空对象（前端可能序列化成 {}）同样视为「未携带」
+	formCfg["owners"] = map[string]any{}
+	if ok, errMsg, _ := runCmd(t, m, buf, "im_config_set", map[string]any{
+		"workspace": wsPath, "config": formCfg,
+	}); !ok {
+		t.Fatalf("保存配置失败: %s", errMsg)
+	}
+	saved2, _ := im.LoadConfig(m.imConfigPath())
+	if st, exists := saved2.Owners[owner.Agent("a")]; !exists || st.Enabled == nil || *st.Enabled {
+		t.Fatalf("owners:{} 的保存不得清掉显式 false: %+v", saved2.Owners)
+	}
+}
+
+// TestIMBindConfirmMigratesOwners 绑定确认新写一条项目路由时必须同时补归属账本：
+// 否则新路由的 owner 是「未登记」状态 —— 开启的配置里它靠有路由即启用的迁移默认还能跑，
+// 但只要用户在任何地方关过一个人，后续行为就取决于「谁先写」，不可解释。
+func TestIMBindConfirmMigratesOwners(t *testing.T) {
+	m, buf := testManager(t)
+	base := im.Config{Enabled: true, Gateways: []im.GatewayConfig{{
+		ID: "gw1", Type: "feishu", Enabled: false, AllowUsers: []string{"*"},
+		Routes: []im.RouteConfig{{Chat: im.Chat{Gateway: "feishu", ChatID: "old"}, Workspace: "/proj/old"}},
+	}}}
+	if base.Owners != nil {
+		t.Fatal("前置：旧配置没有 owners 段")
+	}
+	if err := im.SaveConfig(m.imConfigPath(), base); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := newIMPluginForTest(t, base)
+	m.imPlugin = p
+	wsPath := t.TempDir()
+
+	if ok, errMsg, _ := runCmd(t, m, buf, "im_bind_confirm", map[string]any{
+		"workspace": wsPath, "gateway_id": "gw1",
+		"chat": map[string]any{"gateway": "feishu", "chat_id": "new"}, "approve": true,
+	}); !ok {
+		t.Fatalf("绑定确认失败: %s", errMsg)
+	}
+	saved, err := im.LoadConfig(m.imConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, own := range []string{owner.Workspace("/proj/old"), owner.Workspace(wsPath)} {
+		st, exists := saved.Owners[own]
+		if !exists || st.Enabled == nil || !*st.Enabled {
+			t.Fatalf("绑定确认后 %s 应有显式 enabled=true（升级不静默丢消息）: %+v", own, saved.Owners)
+		}
+	}
+}
+
+// TestIMRuntimeConfigConcurrentAccess Runtime 的配置与连接表被两个 goroutine 同时用：
+// Gateway 回调（OnInMessage 里的归属闸门/镜像表）与命令循环（applyIMConfig/
+// SetOwnerEnabled 整体替换配置）。这组用例在 -race 下必须干净 —— 未加锁时
+// 「读 cfg.OwnerEnabled + 写 cfg.Owners」会被捕获成 data race（UB，线上偶发串数据）。
+func TestIMRuntimeConfigConcurrentAccess(t *testing.T) {
+	cfg := im.Config{
+		Enabled: true,
+		Gateways: []im.GatewayConfig{{
+			ID: "gw1", Type: "feishu", Enabled: false, AllowUsers: []string{"*"},
+			Routes: []im.RouteConfig{{Chat: im.Chat{Gateway: "feishu", ChatID: "c"}, Agent: "a"}},
+		}},
+	}
+	rt := &implugin.Runtime{Router: im.NewRouter(cfg), Security: im.NewSecurity(cfg, filepath.Join(t.TempDir(), "audit.jsonl"))}
+	rt.SetConfig(cfg)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	// 读者：模拟 Gateway 回调里的归属判定与路由查询
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				c := rt.ConfigSnapshot()
+				_ = c.OwnerEnabled(owner.Agent("a"))
+				for _, g := range c.Gateways {
+					_ = len(g.Routes)
+				}
+				_ = rt.GatewaySnapshot()
+			}
+		}
+	}()
+	// 写者：模拟 applyIMConfig / SetOwnerEnabled 的「改副本 → 整体发布」
+	for i := 0; i < 200; i++ {
+		c := rt.ConfigSnapshot()
+		on := i%2 == 0
+		if c.Owners == nil {
+			c.Owners = map[string]im.OwnerState{}
+		}
+		c.Owners[owner.Agent("a")] = im.OwnerState{Enabled: &on}
+		c.Mirrors = append(c.Mirrors, im.MirrorConfig{SessionID: "s", Chat: im.Chat{Gateway: "feishu", ChatID: "c"}})
+		rt.SetConfig(c)
+		rt.PutGateway("gw1", nil) // 连接表同锁：与 GatewaySnapshot 并发
+	}
+	close(stop)
+	wg.Wait()
 }

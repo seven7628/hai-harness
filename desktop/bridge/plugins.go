@@ -368,7 +368,7 @@ func (m *manager) enablePlugin(ctx context.Context, wsPath, id string) error {
 // 先摘事件桥引用（停网关期间到达的回调在入口处判 nil 直接返回），再 Disable（Stop 全部
 // Gateway）。幂等：重复调用时 Runtime 已是 nil，stopAll 直接返回。
 func (m *manager) closeIMPlugin() {
-	m.imBridge = nil // 与 attachIMBridge 的赋值同一处语义：进程级引用，无独立 Stop
+	m.setIMBridge(nil) // 与 attachIMBridge 的赋值同一处语义：进程级引用，无独立 Stop
 	p := m.imPlugin
 	if p == nil {
 		return
@@ -380,9 +380,15 @@ func (m *manager) closeIMPlugin() {
 	}
 }
 
+// imBridgeRef 读当前事件桥（原子；可能为 nil = 未装配/已摘除）。
+func (m *manager) imBridgeRef() *imBridge { return m.imBridge.Load() }
+
+// setIMBridge 发布/摘除事件桥（原子；装配顺序保证回调看到的是**完全初始化**的桥）。
+func (m *manager) setIMBridge(b *imBridge) { m.imBridge.Store(b) }
+
 // attachIMBridge 装配全局 IM 事件桥（幂等：已装配跳过）。
 func (m *manager) attachIMBridge(wsPath string) {
-	if m.imBridge != nil {
+	if m.imBridgeRef() != nil {
 		return
 	}
 	if m.imPlugin == nil {
@@ -395,7 +401,7 @@ func (m *manager) attachIMBridge(wsPath string) {
 	b := newIMBridge(rt)
 	b.attachManager(m, wsPath)
 	b.Attach()
-	m.imBridge = b
+	m.setIMBridge(b)
 	// 回填已有会话的 IM 桥引用（IM 插件可能晚于会话创建启用；emit 全事件漏斗转发用）
 	for _, w := range m.workspaces {
 		w.mu.Lock()
@@ -409,8 +415,8 @@ func (m *manager) attachIMBridge(wsPath string) {
 // imBridgeMessageSink 返回把 IM 消息接到全局桥的 handler（热重建 Gateway 后重新 Attach 用）。
 func (m *manager) imBridgeMessageSink() func(im.InMessage) {
 	return func(msg im.InMessage) {
-		if m.imBridge != nil {
-			m.imBridge.OnInMessage(msg)
+		if b := m.imBridgeRef(); b != nil {
+			b.OnInMessage(msg)
 		}
 	}
 }
@@ -418,8 +424,8 @@ func (m *manager) imBridgeMessageSink() func(im.InMessage) {
 // imBridgeActionSink 返回把按钮回调接到全局桥的 handler。
 func (m *manager) imBridgeActionSink() func(im.GatewayAction) {
 	return func(a im.GatewayAction) {
-		if m.imBridge != nil {
-			m.imBridge.OnGatewayAction(a)
+		if b := m.imBridgeRef(); b != nil {
+			b.OnGatewayAction(a)
 		}
 	}
 }

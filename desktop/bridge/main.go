@@ -1253,7 +1253,9 @@ type manager struct {
 	// 改一次浏览器配置就会掐断正在用的 IM 连接），进程退出走 closeIMPlugin。
 	imPlugin *implugin.Plugin
 	// imBridge IM 事件桥（插件 Enable 后装配：事件流→IM 推送；IM 消息→会话驱动）。
-	imBridge *imBridge
+	// 用 atomic.Pointer：装配在 Enable/命令路径写，Gateway 回调与 cron 触发在别的
+	// goroutine 读 —— 裸指针是 data race（-race UB）。读一律走 imBridgeRef()。
+	imBridge atomic.Pointer[imBridge]
 	// lastModel 最近一次 switch_model 的模型（IM 发起会话的默认模型来源；
 	// 与前端 globalPrefs「最近一次选择」语义一致——IM 会话应复用桌面端当前选择）。
 	lastModel string
@@ -2079,7 +2081,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		}
 	}
 	// IM 事件桥回填：IM 已启用时新会话直接挂上（emit 全事件漏斗转发用）
-	bs.im = m.imBridge
+	bs.im = m.imBridgeRef()
 	rlStart := time.Now()
 	bs.runLoop()
 	startupLog("A6.runLoop", rlStart)

@@ -110,12 +110,16 @@ func (m *manager) handleHooksList(c command) {
 	// 当前归属：payload.owner（设置页显式给）→ session_id（Hub 会话按 agent/group）→ workspace。
 	// 没有归属时**不**落回全局：用户级来源的信任状态标成 unbound（前端会提示"未绑定归属"）。
 	curOwner, curOwnerErr := ownerFromPayload(c)
+	// 显式给了非法 owner → **整条命令失败**。曾试过「带 warning 返回 200 + 空归属」，
+	// 但前端会据此把确认按钮接到空/别的归属上（或者以为已经给了归属）——
+	// 「显示了但写错人」比「明确报错」糟得多。缺省（不带 owner）仍照常聚合，只是归因为空。
+	if curOwnerErr != nil {
+		m.resp(c, false, curOwnerErr.Error(), nil)
+		return
+	}
 	info.Owner = curOwner
 	info.OwnerKind = owner.Kind(curOwner)
 	info.OwnerLabel = owner.Label(curOwner)
-	if curOwnerErr != nil {
-		info.Warnings = append(info.Warnings, curOwnerErr.Error())
-	}
 
 	// 用户级：~/.go-code/settings.json 的 hooks 段（可编辑）。
 	userSrc := hooks.ReadSource(homeCfgPath("settings.json"), "hooks")

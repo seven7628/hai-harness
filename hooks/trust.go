@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 
@@ -200,12 +199,10 @@ func (t *TrustStore) Trust(ownerID, command, scope, reason string) error {
 	if err != nil {
 		return err
 	}
-	if dir := filepath.Dir(t.Path); dir != "" {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-	}
-	return os.WriteFile(t.Path, append(raw, '\n'), 0o600)
+	// 原子写（同包 writeFileAtomic：目录 0700、临时文件 0600 + rename）。
+	// 半截 JSON 会让下次 LoadTrust 按空库处理 —— 用户之前所有确认一次性作废，
+	// 且没有任何提示（信任库是"宁可多确认一次"的语义，绝不能静默丢）。
+	return writeFileAtomic(t.Path, append(raw, '\n'))
 }
 
 // snapshotLocked 生成一份可序列化快照（调用方持锁）。

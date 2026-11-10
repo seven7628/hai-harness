@@ -65,7 +65,7 @@ func (m *manager) handleIMCommand(c command) {
 		for _, gc := range cfg.Gateways {
 			st := "not_started"
 			if rt != nil {
-				if g, ok := rt.Gateways[gc.ID]; ok {
+				if g, ok := rt.Gateway(gc.ID); ok {
 					st = string(g.Status())
 				}
 			}
@@ -96,7 +96,7 @@ func (m *manager) handleIMCommand(c command) {
 			m.resp(c, false, "IM 未启用", nil)
 			return
 		}
-		gw, ok := rt.Gateways[gatewayID]
+		gw, ok := rt.Gateway(gatewayID)
 		if !ok {
 			m.resp(c, false, "gateway 未启动: "+gatewayID, nil)
 			return
@@ -132,7 +132,9 @@ func (m *manager) handleIMCommand(c command) {
 		}
 		// owners（归属账本）不属于编辑器表单：payload 里没有就沿用磁盘上的，
 		// 否则「保存一次配置」会把所有人刚设的归属启用状态悄悄重置。
-		if cfg.Owners == nil {
+		// 判空必须用 len==0：前端序列化可能给出 `owners: {}`（空对象 ≠ nil），
+		// 只判 nil 会漏掉这种形态 → 显式 false 被清空（关掉的归属自己又开了）。
+		if len(cfg.Owners) == 0 {
 			if prev, perr := im.LoadConfig(m.imConfigPath()); perr == nil {
 				cfg.Owners = prev.Owners
 			}
@@ -422,6 +424,10 @@ func (m *manager) handleIMCommand(c command) {
 			return
 		}
 		cfg.Gateways[gi].Routes = append(cfg.Gateways[gi].Routes, im.RouteConfig{Chat: chat, Workspace: workspace})
+		// 新路由带来新的归属：补显式 enabled=true（与 im_config_set 同一条迁移规则）。
+		// 不补的话「有路由但未登记」只能靠隐式默认跑，任何一次显式关闭都会让它变成
+		// 「谁先写谁生效」的不可解释状态。
+		cfg.MigrateOwners()
 		if err := im.SaveConfig(m.imConfigPath(), cfg); err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
@@ -453,13 +459,12 @@ func (m *manager) applyIMConfig(ctx context.Context, ws string, cfg im.Config) {
 	}
 	// 主开关关闭：停止全部 Gateway 连接（IM 远程能力立即失效；配置保留）
 	if !cfg.Enabled {
-		for id, g := range rt.Gateways {
+		for _, g := range rt.TakeGateways() {
 			_ = g.Stop(ctx)
-			delete(rt.Gateways, id)
 		}
 		rt.Router.Update(cfg)
 		rt.Security.Update(cfg)
-		rt.Config = cfg
+		rt.SetConfig(cfg)
 		return
 	}
 	// ① 路由/镜像/安全即时更新
@@ -468,9 +473,9 @@ func (m *manager) applyIMConfig(ctx context.Context, ws string, cfg im.Config) {
 
 	// ② Gateway 连接差异重建（用旧 rt.Config 对比——必须先于 rt.Config 更新，
 	//    否则 oldCfg 已是新配置，恒等 → 永不重建）
-	old := rt.Gateways // id → Gateway（旧实例）
+	old := rt.GatewaySnapshot() // id → Gateway（旧实例）
 	oldCfg := map[string]im.GatewayConfig{}
-	for _, gc := range rt.Config.Gateways {
+	for _, gc := range rt.ConfigSnapshot().Gateways {
 		oldCfg[gc.ID] = gc
 	}
 	newMap := map[string]im.GatewayConfig{}
@@ -483,7 +488,7 @@ func (m *manager) applyIMConfig(ctx context.Context, ws string, cfg im.Config) {
 	for id, g := range old {
 		if _, keep := newMap[id]; !keep {
 			_ = g.Stop(ctx)
-			delete(rt.Gateways, id)
+			rt.DeleteGateway(id)
 		}
 	}
 	// 新增/配置变化的：重建（先停旧的再启新的）
@@ -505,14 +510,14 @@ func (m *manager) applyIMConfig(ctx context.Context, ws string, cfg im.Config) {
 			fmt.Fprintf(os.Stderr, "✗ im 启动 %s: %v\n", id, err)
 			continue
 		}
-		rt.Gateways[id] = g
+		rt.PutGateway(id, g)
 		// 新连接重新 Attach 回调
 		g.OnMessage(m.imBridgeMessageSink())
 		g.OnAction(m.imBridgeActionSink())
 	}
 
-	// ③ 最后更新 rt.Config（差异对比已完成）
-	rt.Config = cfg
+	// ③ 最后更新配置（差异对比已完成）——整体发布，读者（事件 goroutine）拿到的是新副本
+	rt.SetConfig(cfg)
 }
 
 // gatewayConfigEqual 判断 Gateway 配置是否等价（type + config 字节比较）。

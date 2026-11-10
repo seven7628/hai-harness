@@ -192,3 +192,42 @@ func TestTrustHashStillGuardsContent(t *testing.T) {
 		t.Fatalf("同 owner 同命令应 trusted，得到 %q", got)
 	}
 }
+
+// TestTrustWritesAtomically 信任库落盘必须原子（同目录临时文件 + rename）：
+// 进程被杀/磁盘满留下半截 JSON → LoadTrust 解析失败按空库处理 → 用户此前所有确认
+// 静默作废。这里断言：写完之后目录里只有正式文件（无残留临时文件）、内容可解析、
+// 且第二次确认不会丢掉第一次。
+func TestTrustWritesAtomically(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooks-state.json")
+	s, err := LoadTrust(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Trust(owner.Agent("a"), "echo one", "project", "t"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Trust(owner.Group("g"), "echo two", "project", "t"); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "hooks-state.json" {
+			t.Fatalf("落盘后残留临时文件 %q（原子写必须 rename 掉）", e.Name())
+		}
+	}
+	reloaded, err := LoadTrust(path)
+	if err != nil {
+		t.Fatalf("原子写出的文件必须可解析: %v", err)
+	}
+	if got := reloaded.Check(owner.Agent("a"), "echo one"); got != TrustTrusted {
+		t.Fatalf("第一次确认丢了: %q", got)
+	}
+	if got := reloaded.Check(owner.Group("g"), "echo two"); got != TrustTrusted {
+		t.Fatalf("第二次确认丢了: %q", got)
+	}
+}

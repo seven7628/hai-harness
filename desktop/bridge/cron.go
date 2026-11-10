@@ -111,9 +111,9 @@ func (m *manager) cronTick(now time.Time) {
 		// IM 推送绑定（可选）：任务配了 im_chat → 进程内挂镜像（push），
 		// 运行结果（正文/工具/流式）自动推送到指定 IM 群。不落盘——
 		// 每次触发是新 session id，落盘无意义（镜像表是 im-config.json 持久字段）。
-		if j.IMChat != nil && m.imBridge != nil {
+		if j.IMChat != nil && m.imBridgeRef() != nil {
 			if rt := m.imPlugin.Runtime(); rt != nil {
-				rt.Router.Update(imCfgWithMirror(rt.Config, sid, j.IMChat))
+				rt.Router.Update(imCfgWithMirror(rt.ConfigSnapshot(), sid, j.IMChat))
 			}
 		}
 		if led != nil {

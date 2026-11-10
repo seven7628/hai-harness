@@ -61,14 +61,91 @@ type Plugin struct {
 }
 
 // Runtime IM 运行时（启用后持有；bridge 事件流接入点）。
+//
+// 并发：配置与连接表由**同一把锁**保护（它们总是一起变更：路由/镜像更新与
+// Gateway 差异重建是同一次 applyIMConfig）。事件回调跑在 Gateway 自己的 goroutine
+// 里、命令处理跑在 stdin 循环里，两者都会读这两张表 —— 直接读字段就是 -race 的
+// data race（IM 的 owner 改造把读点加到 im_bridge 的投递闸门后更明显）。
+// 因此：**只经由 ConfigSnapshot/SetConfig/Gateway/GatewaySnapshot/PutGateway/
+// DeleteGateway/TakeGateways 访问**，字段本身不导出。
 type Runtime struct {
-	Config   im.Config
 	Router   *im.Router
 	Security *im.Security
-	// Gateways 实例 id → Gateway（已启动的）
-	Gateways map[string]im.Gateway
-	// GatewayTypes 类型 → 实例列表（按注册顺序）
+
+	mu       sync.RWMutex
+	cfg      im.Config
+	gateways map[string]im.Gateway // 实例 id → Gateway（已启动的）
+	// types 已启动 Gateway 的类型（按注册顺序；诊断用）
 	types []string
+}
+
+// ConfigSnapshot 当前配置的**独立副本**（深拷贝可变容器：owners/gateways/routes/
+// mirrors）。调用方可以随意读甚至改自己的副本，改副本不会影响运行时。
+func (r *Runtime) ConfigSnapshot() im.Config {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cfg.Clone()
+}
+
+// SetConfig 整体替换配置（发布后旧副本不再被原地修改：写入方必须先 Clone）。
+func (r *Runtime) SetConfig(cfg im.Config) {
+	r.mu.Lock()
+	r.cfg = cfg
+	r.mu.Unlock()
+}
+
+// Gateway 按实例 id 取已启动的 Gateway。
+func (r *Runtime) Gateway(id string) (im.Gateway, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	g, ok := r.gateways[id]
+	return g, ok
+}
+
+// GatewaySnapshot 连接表的浅拷贝（值是不可变接口；遍历期间不会被增删打乱）。
+func (r *Runtime) GatewaySnapshot() map[string]im.Gateway {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]im.Gateway, len(r.gateways))
+	for id, g := range r.gateways {
+		out[id] = g
+	}
+	return out
+}
+
+// PutGateway 登记一条已启动连接。
+func (r *Runtime) PutGateway(id string, g im.Gateway) {
+	r.mu.Lock()
+	if r.gateways == nil {
+		r.gateways = map[string]im.Gateway{}
+	}
+	r.gateways[id] = g
+	r.mu.Unlock()
+}
+
+// AddType 记录已启动 Gateway 的类型（诊断用；与连接表同锁）。
+func (r *Runtime) AddType(t string) {
+	r.mu.Lock()
+	r.types = append(r.types, t)
+	r.mu.Unlock()
+}
+
+// DeleteGateway 摘除一条连接（**不停**它：调用方拿到返回值后自己 Stop）。
+func (r *Runtime) DeleteGateway(id string) im.Gateway {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	g := r.gateways[id]
+	delete(r.gateways, id)
+	return g
+}
+
+// TakeGateways 取走全部连接并清空表（关闭/重建时用；Stop 由调用方在锁外做）。
+func (r *Runtime) TakeGateways() map[string]im.Gateway {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.gateways
+	r.gateways = map[string]im.Gateway{}
+	return out
 }
 
 // New 构造 IM 插件。
@@ -128,7 +205,7 @@ func (p *Plugin) State(_ context.Context) plugin.State {
 	}
 	// 汇总：任一 connected → ready；有 error → error
 	connected, errCount := 0, 0
-	for _, g := range p.runtime.Gateways {
+	for _, g := range p.runtime.GatewaySnapshot() {
 		switch g.Status() {
 		case im.StatusConnected:
 			connected++
@@ -179,16 +256,18 @@ func (p *Plugin) enableLocked(ctx context.Context) ([]tools.Tool, error) {
 	}
 	if !cfg.Enabled {
 		// 主开关关：插件"启用"但不启动任何网关（状态=已启用无连接）
-		p.runtime = &Runtime{Config: cfg, Router: im.NewRouter(cfg), Security: im.NewSecurity(cfg, auditPath(p.cfgPath)), Gateways: map[string]im.Gateway{}}
+		rt := &Runtime{Router: im.NewRouter(cfg), Security: im.NewSecurity(cfg, auditPath(p.cfgPath)), gateways: map[string]im.Gateway{}}
+		rt.SetConfig(cfg)
+		p.runtime = rt
 		return nil, nil
 	}
 
 	r := &Runtime{
-		Config:   cfg,
 		Router:   im.NewRouter(cfg),
 		Security: im.NewSecurity(cfg, auditPath(p.cfgPath)),
-		Gateways: make(map[string]im.Gateway, len(cfg.Gateways)),
+		gateways: make(map[string]im.Gateway, len(cfg.Gateways)),
 	}
+	r.SetConfig(cfg)
 	// 启动全部 enabled Gateway
 	var errs []string
 	for _, gc := range cfg.Gateways {
@@ -204,8 +283,8 @@ func (p *Plugin) enableLocked(ctx context.Context) ([]tools.Tool, error) {
 			errs = append(errs, fmt.Sprintf("%s: %v", gc.ID, err))
 			continue
 		}
-		r.Gateways[gc.ID] = g
-		r.types = append(r.types, gc.Type)
+		r.PutGateway(gc.ID, g)
+		r.AddType(gc.Type)
 	}
 	p.runtime = r
 	if len(errs) > 0 {
@@ -241,7 +320,7 @@ func (p *Plugin) OwnerView(ownerID string) OwnerView {
 	defer p.mu.Unlock()
 	var cfg im.Config
 	if p.runtime != nil {
-		cfg = p.runtime.Config
+		cfg = p.runtime.ConfigSnapshot()
 	} else if c, err := p.LoadConfig(p.cfgPath); err == nil {
 		cfg = c
 	}
@@ -254,7 +333,7 @@ func (p *Plugin) OwnerView(ownerID string) OwnerView {
 		}
 	}
 	if p.runtime != nil {
-		for id, g := range p.runtime.Gateways {
+		for id, g := range p.runtime.GatewaySnapshot() {
 			v.Gateways[id] = string(g.Status())
 			if g.Status() == im.StatusConnected {
 				v.Connected++
@@ -269,7 +348,7 @@ func (p *Plugin) Owners() map[string]bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.runtime != nil {
-		return p.runtime.Config.OwnersAll()
+		return p.runtime.ConfigSnapshot().OwnersAll()
 	}
 	cfg, err := p.LoadConfig(p.cfgPath)
 	if err != nil {
@@ -284,7 +363,7 @@ func (p *Plugin) RoutesForOwner(ownerID string) []im.RouteConfig {
 	defer p.mu.Unlock()
 	var cfg im.Config
 	if p.runtime != nil {
-		cfg = p.runtime.Config
+		cfg = p.runtime.ConfigSnapshot()
 	} else if c, err := p.LoadConfig(p.cfgPath); err == nil {
 		cfg = c
 	}
@@ -340,7 +419,7 @@ func (p *Plugin) SetOwnerEnabled(ctx context.Context, ownerID string, enabled bo
 		_, err := p.enableLocked(ctx) // 读刚写下的配置
 		return err
 	}
-	p.runtime.Config = cfg
+	p.runtime.SetConfig(cfg)
 	p.runtime.Router.Update(cfg)
 	p.runtime.Security.Update(cfg)
 	if !enabled && !anyOwnerEnabled(cfg) {
@@ -366,7 +445,9 @@ func anyOwnerEnabledAfterSet(cfg im.Config, justDisabled string) bool {
 // loadConfigLocked 读当前配置（运行态优先：热改过的内存态才是真相）。
 func (p *Plugin) loadConfigLocked() (im.Config, error) {
 	if p.runtime != nil {
-		return p.runtime.Config, nil
+		// 快照是独立副本：调用方（SetOwnerEnabled）要改 Owners 后重新发布，
+		// 直接在运行时的那份上改就是 data race（读者在事件 goroutine 里）。
+		return p.runtime.ConfigSnapshot(), nil
 	}
 	return p.LoadConfig(p.cfgPath)
 }
@@ -416,7 +497,7 @@ func (p *Plugin) stopAll() {
 		return
 	}
 	ctx := context.Background()
-	for _, g := range p.runtime.Gateways {
+	for _, g := range p.runtime.TakeGateways() {
 		_ = g.Stop(ctx)
 	}
 	p.runtime = nil

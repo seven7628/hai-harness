@@ -10,6 +10,45 @@ import (
 	"github.com/seven7628/hai-harness/owner"
 )
 
+// Clone 深拷贝配置（Owners 映射、Gateways 及其 Routes/AllowUsers/Config、Mirrors）。
+//
+// 为什么必须有：Runtime 的配置快照与调用方共享底层 map 时，一方原地写就是
+// data race（-race 下 UB，线上表现为偶发 panic/串数据）。规矩是
+// 「**改副本 → 整体发布**」：读方 ConfigSnapshot() 拿到独立副本，写方先 Clone 再改，
+// 最后 SetConfig 发布。切片/映射一律重新分配，不全信 append 的剩余容量。
+func (c Config) Clone() Config {
+	out := c
+	if c.Owners != nil {
+		out.Owners = make(map[string]OwnerState, len(c.Owners))
+		for k, v := range c.Owners {
+			if v.Enabled != nil {
+				b := *v.Enabled
+				v.Enabled = &b
+			}
+			out.Owners[k] = v
+		}
+	}
+	if c.Gateways != nil {
+		out.Gateways = make([]GatewayConfig, len(c.Gateways))
+		for i, g := range c.Gateways {
+			if g.Routes != nil {
+				g.Routes = append([]RouteConfig(nil), g.Routes...)
+			}
+			if g.AllowUsers != nil {
+				g.AllowUsers = append([]string(nil), g.AllowUsers...)
+			}
+			if g.Config != nil {
+				g.Config = append(json.RawMessage(nil), g.Config...)
+			}
+			out.Gateways[i] = g
+		}
+	}
+	if c.Mirrors != nil {
+		out.Mirrors = append([]MirrorConfig(nil), c.Mirrors...)
+	}
+	return out
+}
+
 // GatewayConfig 单个 Gateway 实例配置（一条配置 = 一个 Gateway 实例）。
 // 路由与授权名单是渠道维度，归属到实例（不再全局平铺）。
 type GatewayConfig struct {

@@ -220,7 +220,7 @@ func (b *imBridge) renderAndSend(wsPath, sessionID string, chat im.Chat, e event
 
 // gatewayFor 按 Chat 查 Gateway 实例。
 func (b *imBridge) gatewayFor(chat im.Chat) im.Gateway {
-	for _, g := range b.rt.Gateways {
+	for _, g := range b.rt.GatewaySnapshot() {
 		if g.Type() == chat.Gateway {
 			return g
 		}
@@ -276,7 +276,7 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 	// ③.5 归属闸门（owner 隔离）：该归属没启用 → 不投递，并留下可解释的审计。
 	// 这是「A 群关了不影响 B 智能体」的落点：连接是共享的，投递按 owner 放行。
 	ownerID := route.EffectiveOwner()
-	if !rt.Config.OwnerEnabled(ownerID) {
+	if !rt.ConfigSnapshot().OwnerEnabled(ownerID) {
 		rt.Security.Audit(im.AuditEntry{
 			Gateway: msg.Chat.Gateway, Chat: msg.Chat.String(), UserID: msg.UserID,
 			Action: "owner_disabled",
@@ -314,7 +314,7 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 	// 写镜像表（bidirectional）：IM 发起的会话自动双向——事件侧 MirrorsForSession 能查到
 	// 并推送回复回该 Chat。这是 IM 对话主链路的另一半（收→执行→推回）。
 	// 幂等：同一 session+chat 已存在则跳过（避免重复行）。
-	cfg := rt.Config
+	cfg := rt.ConfigSnapshot()
 	hasMirror := false
 	for _, mc := range cfg.Mirrors {
 		if mc.SessionID == sessionID && mc.Chat.Gateway == msg.Chat.Gateway && mc.Chat.ChatID == msg.Chat.ChatID {
@@ -328,7 +328,7 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 			Chat:      msg.Chat,
 			Mode:      im.MirrorBidirectional,
 		})
-		rt.Config = cfg
+		rt.SetConfig(cfg)
 		rt.Router.Update(cfg)
 		// 持久化镜像表（IM 发起的会话跨重启保留）
 		if b.saveCfg != nil {
@@ -409,7 +409,7 @@ func (b *imBridge) OnGatewayAction(a im.GatewayAction) {
 
 // Attach 把 Gateway 的消息/动作回调接到桥。
 func (b *imBridge) Attach() {
-	for _, g := range b.rt.Gateways {
+	for _, g := range b.rt.GatewaySnapshot() {
 		g.OnMessage(b.OnInMessage)
 		g.OnAction(b.OnGatewayAction)
 	}
@@ -642,7 +642,7 @@ func (b *imBridge) handleCommand(wsPath string, msg im.InMessage) bool {
 			sessionID = chatSessionIDAlias(msg.Chat, cmd.alias)
 		}
 		// 幂等挂镜像（新会话 → 该 chat 双向推送）
-		cfg := b.rt.Config
+		cfg := b.rt.ConfigSnapshot()
 		hasMirror := false
 		for _, mc := range cfg.Mirrors {
 			if mc.SessionID == sessionID && mc.Chat.Gateway == msg.Chat.Gateway && mc.Chat.ChatID == msg.Chat.ChatID {
@@ -656,7 +656,7 @@ func (b *imBridge) handleCommand(wsPath string, msg im.InMessage) bool {
 				Chat:      msg.Chat,
 				Mode:      im.MirrorBidirectional,
 			})
-			b.rt.Config = cfg
+			b.rt.SetConfig(cfg)
 			b.rt.Router.Update(cfg)
 			if b.saveCfg != nil {
 				if err := b.saveCfg(cfg); err != nil {

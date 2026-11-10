@@ -173,3 +173,28 @@ func TestHooksRunnerChecksOwner(t *testing.T) {
 		t.Fatalf("无归属不得执行，得到 runs=%d", len(outU.Runs))
 	}
 }
+
+// TestHooksListRejectsInvalidOwner 显式非法 owner 必须**响亮失败**：
+// 返回 200 + 空 owner 会让前端把「确认」按钮接到另一个归属（或让服务端把 owner 判成空），
+// 而用户看到的是「点过了没反应」。缺省（不带 owner）仍要能列出来（只读聚合）。
+func TestHooksListRejectsInvalidOwner(t *testing.T) {
+	m, buf := testManager(t)
+	ok, errMsg, _ := runCmd(t, m, buf, CmdHooksList, map[string]any{
+		"workspaces": []any{t.TempDir()},
+		"owner":      "global",
+	})
+	if ok {
+		t.Fatal("显式非法 owner 必须报错，不能 200 + 空归属")
+	}
+	if errMsg == "" {
+		t.Fatal("报错必须有可解释的原因")
+	}
+	// 不带 owner：只读聚合照常（当前归属为空 → 前端显示「未绑定」，写操作才会被拒）
+	ok2, err2, data := runCmd(t, m, buf, CmdHooksList, map[string]any{"workspaces": []any{}})
+	if !ok2 {
+		t.Fatalf("缺省 owner 的 hooks_list 应成功: %s", err2)
+	}
+	if data["owner"] != "" {
+		t.Fatalf("没有上下文时 owner 应为空，得到 %v", data["owner"])
+	}
+}
