@@ -101,41 +101,16 @@ func hooksJournalPath() string {
 // 只报告，不自动注册：往用户的 settings.json 里塞 hooks 段是替用户做决定，而且
 // 那里同时放着他的 provider 密钥，宿主不该为了这点便利去改写它。
 func reportUnreferencedScripts(cfg *hooks.Config) {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	dir := hooks.HooksDir()
+	if dir == "" {
 		return
 	}
-	dir := filepath.Join(home, ".go-code", "hooks")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	orphans, err := hooks.UnreferencedScripts(cfg, dir)
+	if err != nil || len(orphans) == 0 {
 		return
 	}
-	used := map[string]bool{}
-	if cfg != nil {
-		for _, groups := range cfg.Events {
-			for _, g := range groups {
-				for _, h := range g.Hooks {
-					cmd := h.Command
-					for _, e := range entries {
-						if strings.Contains(cmd, e.Name()) {
-							used[e.Name()] = true
-						}
-					}
-				}
-			}
-		}
-	}
-	var orphans []string
-	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || used[e.Name()] {
-			continue
-		}
-		orphans = append(orphans, e.Name())
-	}
-	if len(orphans) > 0 {
-		fmt.Fprintf(os.Stderr, "· hooks: %s 下有 %d 个脚本没有任何配置引用，不会执行：%s\n",
-			dir, len(orphans), strings.Join(orphans, ", "))
-	}
+	fmt.Fprintf(os.Stderr, "· hooks: %s 下有 %d 个脚本没有任何配置引用，不会执行：%s\n",
+		dir, len(orphans), strings.Join(orphans, ", "))
 }
 
 // hooksFor 返回某会话应装配的 hook 聚合。
