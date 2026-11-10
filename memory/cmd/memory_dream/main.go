@@ -35,6 +35,7 @@ func main() {
 		conf  = flag.String("conflicts", "", "导出待判冲突候选 JSON（交给模型判断有没有被推翻）")
 		savec = flag.String("save-conflicts", "", "保存模型给出的冲突判定 JSON")
 		rest  = flag.String("restore", "", "把一个快照里的归档原样恢复（文件 + 索引行）")
+		prot  = flag.String("protect", "", "从评测语料生成保护清单（这些条目不许归档）")
 	)
 	flag.Parse()
 
@@ -84,6 +85,37 @@ func main() {
 
 	for _, id := range ids {
 		d := memory.Dir{ID: id, Path: filepath.Join(base, id)}
+		if *prot != "" {
+			raw, err := os.ReadFile(*prot)
+			if err != nil {
+				fail("读评测语料失败：%v", err)
+			}
+			var corpus struct {
+				Items []struct {
+					Repo string `json:"repo"`
+					File string `json:"file"`
+				} `json:"items"`
+			}
+			if err := json.Unmarshal(raw, &corpus); err != nil {
+				fail("解析评测语料失败：%v", err)
+			}
+			var files []string
+			for _, it := range corpus.Items {
+				if it.Repo != id {
+					continue
+				}
+				name := it.File
+				if !strings.HasSuffix(name, ".md") {
+					name += ".md"
+				}
+				files = append(files, name)
+			}
+			if err := cfg.WriteProtected(d, files); err != nil {
+				fail("写保护清单失败：%v", err)
+			}
+			fmt.Printf("%s：保护 %d 条\n", id, len(files))
+			continue
+		}
 		if *rest != "" {
 			got, err := cfg.Restore(d, *rest)
 			if err != nil {

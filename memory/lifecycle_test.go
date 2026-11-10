@@ -203,3 +203,50 @@ func TestRestorePutsFileAndIndexLineBack(t *testing.T) {
 		t.Fatalf("日志应记恢复：\n%s", logRaw)
 	}
 }
+
+// 评测点名的条目不许归档：它们是"记忆还有没有用"的仪表。
+func TestApplySkipsProtectedFiles(t *testing.T) {
+	d, now := lifeFixture(t)
+	cfg := Config{Now: func() time.Time { return now }, ReadDir: os.ReadDir}
+	if err := cfg.WriteProtected(d, []string{"old.md"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cfg.ApplyDecisions(d, []Decision{{File: "old.md", Action: ActionArchive}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Archived) != 0 || !strings.Contains(strings.Join(res.Skipped, ";"), "保护清单") {
+		t.Fatalf("应被保护清单挡下：%+v", res)
+	}
+}
+
+// 单次归档的绝对上限是 2：一次挪一小步，坏了能归因。
+func TestApplyCapsAtTwoPerRun(t *testing.T) {
+	d, now := lifeFixture(t)
+	var lines []string
+	for i := 0; i < 10; i++ {
+		n := "x" + itoa(i) + ".md"
+		writeTopicFile(t, d, n, "---\ntype: project\n---\n\n# t\n\nx\n")
+		lines = append(lines, "- "+n)
+	}
+	writeIndex(t, d, "# Memory Index\n- [old.md](old.md) — x\n- [keep.md](keep.md) — y\n"+strings.Join(lines, "\n")+"\n")
+	old := now.Add(-30 * 24 * time.Hour)
+	entries, _ := os.ReadDir(d.Path)
+	for _, e := range entries {
+		_ = os.Chtimes(filepath.Join(d.Path, e.Name()), old, old)
+	}
+	cfg := Config{Now: func() time.Time { return now }, ReadDir: os.ReadDir}
+	var decs []Decision
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".md") && e.Name() != IndexFileName {
+			decs = append(decs, Decision{File: e.Name(), Action: ActionArchive})
+		}
+	}
+	res, err := cfg.ApplyDecisions(d, decs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Archived) > 2 {
+		t.Fatalf("单次最多 2 条，实际 %d", len(res.Archived))
+	}
+}

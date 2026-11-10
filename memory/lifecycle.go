@@ -46,9 +46,15 @@ const (
 
 // 安全护栏（不参与判断，只限制破坏面）。
 const (
-	dreamMaxArchiveRatio = 0.2                // 单次最多归档这个比例
-	dreamMinFileAge      = 7 * 24 * time.Hour // 最近动过的文件不碰
-	dreamArchiveDirName  = "archive"
+	dreamMaxArchiveRatio = 0.2 // 单次最多归档这个比例
+	// dreamMaxArchivePerRun 单次最多归档的**绝对条数**。
+	//
+	// 20% 对 73 条是 14 条，一次挪 14 条等于一次不可归因的大改——实测归档 4 条就让
+	// 答案级正确率掉 10 个点，且掉分主要来自"清单变短、路由变差"，与具体哪几条关系不大。
+	// 所以绝对上限压到 2：一次只挪一小步，坏了能一眼看出是哪一步。
+	dreamMaxArchivePerRun = 2
+	dreamMinFileAge       = 7 * 24 * time.Hour // 最近动过的文件不碰
+	dreamArchiveDirName   = "archive"
 )
 
 // ApplyResult 是一次应用的结果。
@@ -83,6 +89,7 @@ func (c Config) ApplyDecisions(d Dir, decisions []Decision) (ApplyResult, error)
 	for _, t := range topics {
 		allowed[t] = true
 	}
+	protected := c.ReadProtected(d)
 
 	// 先过滤，再落盘：护栏必须在动任何文件之前生效。
 	var todo []Decision
@@ -92,6 +99,12 @@ func (c Config) ApplyDecisions(d Dir, decisions []Decision) (ApplyResult, error)
 		}
 		if !allowed[dec.File] {
 			out.Skipped = append(out.Skipped, dec.File+"（不是这个记忆库里的条目）")
+			continue
+		}
+		// 被评测点名保护的条目一律不动：它们是"记忆是否还有用"的仪表，动它们
+		// 等于把仪表砸了再读数。见 --protect。
+		if protected[dec.File] {
+			out.Skipped = append(out.Skipped, dec.File+"（被评测保护清单点名）")
 			continue
 		}
 		p := filepath.Join(d.Path, dec.File)
@@ -109,6 +122,9 @@ func (c Config) ApplyDecisions(d Dir, decisions []Decision) (ApplyResult, error)
 		capN := int(float64(len(topics)) * dreamMaxArchiveRatio)
 		if capN < 1 {
 			capN = 1
+		}
+		if capN > dreamMaxArchivePerRun {
+			capN = dreamMaxArchivePerRun
 		}
 		if len(todo) > capN {
 			for _, dec := range todo[capN:] {
@@ -477,4 +493,43 @@ func (c Config) restoreIndexLine(d Dir, name string, snapIndex []string) {
 // joinSnapshot 拼快照里的索引路径。
 func joinSnapshot(snapshot string) string {
 	return filepath.Join(snapshot, IndexFileName)
+}
+
+// protectedPath 返回"评测保护清单"的路径。
+func protectedPath(d Dir) string { return filepath.Join(d.Path, stateDirName, "protected.json") }
+
+// ReadProtected 读保护清单（不存在 = 没有保护）。
+func (c Config) ReadProtected(d Dir) map[string]bool {
+	out := map[string]bool{}
+	raw, err := c.withDefaults().ReadFile(protectedPath(d))
+	if err != nil {
+		return out
+	}
+	var payload struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return out
+	}
+	for _, f := range payload.Files {
+		out[f] = true
+	}
+	return out
+}
+
+// WriteProtected 写保护清单。
+//
+// 清单由评测语料生成（`memory_dream --protect fact_eval.json`），不由模型决定：
+// 谁被评测点名是**事实**，不是判断。
+func (c Config) WriteProtected(d Dir, files []string) error {
+	c = c.withDefaults()
+	sort.Strings(files)
+	raw, err := json.MarshalIndent(map[string]any{"files": files}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := c.MkdirAll(filepath.Dir(protectedPath(d)), 0o755); err != nil {
+		return err
+	}
+	return c.atomicWrite(protectedPath(d), raw)
 }
