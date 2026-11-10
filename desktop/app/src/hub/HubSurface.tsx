@@ -1,29 +1,22 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Markdown } from '../components/markdown'
-import { Bot, SendIcon } from '../components/icons'
+import { Bot, Plus, SendIcon } from '../components/icons'
 import { useT } from '../i18n'
 import { useHubStore } from './useHubStore'
-import AgentEditor from './AgentEditor'
 import { alertSeverity } from './alerts'
-import HubInspector from './HubInspector'
 import GroupView from './GroupView'
+import HubAvatar from './HubAvatar'
 import { isImeComposing } from './mentions'
-import { formatRelativeTime, groupPreview, unreadBadge } from './conversation'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
-import {
-  HUB_SEARCH_DEBOUNCE_MS, normalizeSearchQuery, searchHitKey, searchScopeLabel,
-} from './search'
-import type { HubAgent, HubMessage, HubRunEntry, HubSearchScope } from './types'
+import type { HubMessage, HubRunEntry } from './types'
 import './hub.css'
 
-// Hub surface：左栏 = 智能体 rail（§8.2），右栏 = DM 视图（§8.4）。
+// Hub 中栏（P4-UI-1）：可嵌入 App 三栏布局的会话视图（不再自带 rail/inspector）。
 //
-// 刻意不做三栏（工作区左栏/会话中栏/审阅右栏）：Hub 的 DM 是「和这个智能体的一条长期
-// 对话」，不是运行日志；Run 视图（同一 session 的 Narrative）留到资料页/后续任务。
+// 左栏列表在 HubSidebar，右栏详情在 HubInspector；这里只管「当前 DM/群的对话」。
+// 工作区 CenterPanel 在 App 里保持挂载（display:none），草稿与本地状态不因进出 Hub 丢失。
 export default function HubSurface() {
   const t = useT()
-  const agents = useHubStore((s) => s.agents)
-  const dm = useHubStore((s) => s.dm)
   const activeId = useHubStore((s) => s.activeId)
   const profile = useHubStore((s) => s.profile)
   const messages = useHubStore((s) => s.messages)
@@ -34,79 +27,37 @@ export default function HubSurface() {
   const error = useHubStore((s) => s.error)
   const live = useHubStore((s) => s.live)
   const running = useHubStore((s) => s.running)
+  const agents = useHubStore((s) => s.agents)
   const select = useHubStore((s) => s.select)
   const loadOlder = useHubStore((s) => s.loadOlder)
   const send = useHubStore((s) => s.send)
   const refresh = useHubStore((s) => s.refresh)
-  const closeHub = useHubStore((s) => s.closeHub)
   const clearError = useHubStore((s) => s.clearError)
   const drafts = useHubStore((s) => s.drafts)
   const setDraft = useHubStore((s) => s.setDraft)
   const failedText = useHubStore((s) => s.failedText)
   const retry = useHubStore((s) => s.retry)
-  const clearSelection = useHubStore((s) => s.clearSelection)
   const notice = useHubStore((s) => s.notice)
   const clearNotice = useHubStore((s) => s.clearNotice)
-  // 全历史搜索（P4-04b-1）：输入框是本地 state（debounce 只认用户输入），
-  // 结果/游标在 store 里（切面板不丢，翻页要用）。
-  const runSearch = useHubStore((s) => s.search)
-  const searchMore = useHubStore((s) => s.searchMore)
-  const clearSearch = useHubStore((s) => s.clearSearch)
-  const openSearchHit = useHubStore((s) => s.openSearchHit)
-  const searchScope = useHubStore((s) => s.searchScope)
-  const setSearchScope = useHubStore((s) => s.setSearchScope)
-  const searchHits = useHubStore((s) => s.searchHits)
-  const searchHasMore = useHubStore((s) => s.searchHasMore)
-  const searchLoading = useHubStore((s) => s.searchLoading)
-  const searchError = useHubStore((s) => s.searchError)
-  const searchQuery = useHubStore((s) => s.searchQuery)
   const jump = useHubStore((s) => s.jump)
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
-  const draft = activeId ? (drafts[activeId] ?? '') : ''
+  const openEditor = useHubStore((s) => s.openEditor)
+  const closeHub = useHubStore((s) => s.closeHub)
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
+  const draft = activeId ? (drafts[activeId] ?? '') : ''
   const view = useHubStore((s) => s.view)
   const setView = useHubStore((s) => s.setView)
   const runLog = useHubStore((s) => s.runLog)
   const actions = useHubStore((s) => s.actions)
   const tasks = useHubStore((s) => s.tasks)
-  const needs = useHubStore((s) => s.needs)
   const alerts = useHubStore((s) => s.alerts)
   const dismissAlert = useHubStore((s) => s.dismissAlert)
   const retryTask = useHubStore((s) => s.retryTask)
   const groups = useHubStore((s) => s.groups)
-  const groupsLoading = useHubStore((s) => s.groupsLoading)
-  const groupInfo = useHubStore((s) => s.groupInfo)
   const activeGroupId = useHubStore((s) => s.activeGroupId)
-  const selectGroup = useHubStore((s) => s.selectGroup)
   const activeGroup = groups.find((g) => g.id === activeGroupId) ?? null
-  const [railTab, setRailTab] = React.useState<'agents' | 'groups'>('agents')
-  const activeTasks = tasks.filter((t) => !['completed', 'failed', 'interrupted', 'delivered', 'canceled', 'blocked_budget', 'declined'].includes(t.status ?? '')).length
 
-  // null = 关闭；'new' = 新建；HubAgent = 编辑该智能体。
-  const [editing, setEditing] = useState<HubAgent | 'new' | null>(null)
-  const [searchInput, setSearchInput] = useState('')
-  const [searchPanel, setSearchPanel] = useState(false)
-
-  // 250ms debounce：只在用户停止输入后发一次 hub_search；旧响应由 store 的代际丢弃。
-  useEffect(() => {
-    const q = normalizeSearchQuery(searchInput)
-    if (!q) {
-      clearSearch()
-      return
-    }
-    const timer = window.setTimeout(() => {
-      setSearchPanel(true)
-      void runSearch(q, searchScope)
-    }, HUB_SEARCH_DEBOUNCE_MS)
-    return () => window.clearTimeout(timer)
-  }, [searchInput, searchScope, runSearch, clearSearch])
-
-  const closeSearch = () => {
-    setSearchInput('')
-    setSearchPanel(false)
-    clearSearch()
-  }
   const listRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
@@ -180,384 +131,175 @@ export default function HubSurface() {
   }
 
   return (
-    <div className="hub">
-      <aside className="hub-rail" aria-label={t('hub.agents')}>
-        <div className="hub-rail-head">
-          <span className="hub-brand"><Bot size={16} /> {t('hub.title')}</span>
-          <span className="hub-rail-actions">
-            <button
-              className={`hub-link ${inspector === 'tasks' ? 'on' : ''}`}
-              onClick={() => setInspector(inspector === 'tasks' ? null : 'tasks')}
-              title="任务板"
-            >
-              任务{activeTasks > 0 ? <span className="hub-badge">{activeTasks}</span> : null}
-            </button>
-            <button
-              className={`hub-link ${inspector === 'needs' ? 'on' : ''}`}
-              onClick={() => setInspector(inspector === 'needs' ? null : 'needs')}
-              title="Needs you"
-            >
-              Needs{needs.length > 0 ? <span className="hub-badge alert">{needs.length}</span> : null}
-            </button>
-            <button className="hub-link" onClick={() => setEditing('new')} title={t('hub.newAgent')}>＋</button>
-            <button className="hub-link" onClick={closeHub} title={t('hub.backToWorkspaces')}>
-              {t('hub.back')}
-            </button>
-          </span>
-        </div>
-        {alerts.length > 0 ? (
-          <div className="hub-alert-stack" role="region" aria-label="Hub 告警">
-            {alerts.map((a) => {
-              const task = tasks.find((t) => t.id === a.task_id)
-              // 全局恢复失败没有 task/agent：退回当前 DM 或任务板上任一发起者，
-              // 让 hub_open 再触发一次恢复（不是空动作，P2.5-05 复审 B3）。
-              const agentID = a.agent_id || task?.origin?.agent_id || activeId || tasks[0]?.origin?.agent_id
-              return (
-                <div key={a.id} className={`hub-alert-row ${alertSeverity(a.severity)}`}>
-                  <span className="hub-alert-dot" title={a.severity ?? 'warning'} />
-                  <span className="hub-alert-text" title={a.message}>{a.message || a.code}</span>
-                  {a.task_id ? <span className="hub-sub">{a.task_id}</span> : null}
-                  {a.code === 'recovery_failed' ? (
-                    a.task_id ? (
-                      <button className="hub-link" onClick={() => void retryTask(a.task_id!)}>重试</button>
-                    ) : agentID ? (
-                      <button className="hub-link" onClick={() => void select(agentID)}>重试</button>
-                    ) : null
-                  ) : null}
-                  <button className="hub-link" onClick={() => dismissAlert(a.id)} aria-label="忽略告警">×</button>
-                </div>
-              )
-            })}
-          </div>
-        ) : null}
-        <div className="hub-search" role="search">
-          <div className="hub-search-box">
-            <input
-              className="hub-search-input"
-              type="search"
-              value={searchInput}
-              placeholder="搜索群聊与私聊…"
-              aria-label="搜索 Hub 消息（全部历史）"
-              onChange={(e) => {
-                setSearchInput(e.target.value)
-                setSearchPanel(true)
-              }}
-              onFocus={() => {
-                if (searchInput.trim()) setSearchPanel(true)
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  e.stopPropagation()
-                  closeSearch()
-                }
-              }}
-            />
-            {searchInput || searchQuery ? (
-              <button className="hub-link hub-search-clear" onClick={closeSearch} aria-label="清空搜索">×</button>
-            ) : null}
-          </div>
-          <div className="hub-search-scopes" role="tablist" aria-label="搜索范围">
-            {(['all', 'group', 'dm'] as HubSearchScope[]).map((sc) => (
-              <button
-                key={sc}
-                role="tab"
-                aria-selected={searchScope === sc}
-                className={searchScope === sc ? 'on' : ''}
-                onClick={() => setSearchScope(sc)}
-              >
-                {searchScopeLabel(sc)}
-              </button>
-            ))}
-          </div>
-        </div>
-        {searchPanel ? (
-          <div className="hub-search-results" aria-label="搜索结果" aria-busy={searchLoading}>
-            {searchError ? (
-              <div className="hub-error" role="alert">
-                <span>{searchError}</span>
-                <button className="hub-link" onClick={() => void runSearch(searchInput, searchScope)}>重试</button>
+    <div className="hub-center">
+      {alerts.length > 0 ? (
+        <div className="hub-alert-stack hub-center-alerts" role="region" aria-label="Hub 告警">
+          {alerts.map((a) => {
+            const task = tasks.find((t) => t.id === a.task_id)
+            // 全局恢复失败没有 task/agent：退回当前 DM 或任务板上任一发起者，
+            // 让 hub_open 再触发一次恢复（不是空动作，P2.5-05 复审 B3）。
+            const agentID = a.agent_id || task?.origin?.agent_id || activeId || tasks[0]?.origin?.agent_id
+            return (
+              <div key={a.id} className={`hub-alert-row ${alertSeverity(a.severity)}`}>
+                <span className="hub-alert-dot" title={a.severity ?? 'warning'} />
+                <span className="hub-alert-text" title={a.message}>{a.message || a.code}</span>
+                {a.task_id ? <span className="hub-sub">{a.task_id}</span> : null}
+                {a.code === 'recovery_failed' ? (
+                  a.task_id ? (
+                    <button className="hub-link" onClick={() => void retryTask(a.task_id!)}>重试</button>
+                  ) : agentID ? (
+                    <button className="hub-link" onClick={() => void select(agentID)}>重试</button>
+                  ) : null
+                ) : null}
+                <button className="hub-link" onClick={() => dismissAlert(a.id)} aria-label="忽略告警">×</button>
               </div>
-            ) : null}
-            {searchLoading && searchHits.length === 0 ? <div className="hub-rail-empty">搜索中…</div> : null}
-            {!searchLoading && !searchError && searchHits.length === 0 ? (
-              <div className="hub-rail-empty">没有匹配的消息</div>
-            ) : null}
-            {searchHits.map((hit) => (
-              <button
-                key={searchHitKey(hit)}
-                className={`hub-search-hit ${hit.owner_only ? 'owner-only' : ''}`}
-                onClick={() => {
-                  // 先收起结果面板再打开会话：跳转后要高亮的是时间线，不是结果行。
-                  setSearchPanel(false)
-                  void openSearchHit(hit)
-                }}
-                title={hit.snippet}
-              >
-                <span className="hub-search-hit-top">
-                  <span className="hub-search-hit-name">{hit.name || hit.group_id || hit.agent_id}</span>
-                  <span className={`hub-chip scope-${hit.scope}`}>{hit.scope === 'group' ? '群' : '私聊'}</span>
-                  {hit.owner_only ? <span className="hub-chip owner-only">仅群主可见</span> : null}
-                  <span className="hub-search-hit-time">{formatRelativeTime(hit.created_at)}</span>
-                </span>
-                <span className="hub-search-hit-snippet">{hit.snippet}</span>
-                <span className="hub-search-hit-meta">
-                  {hit.sender || ''}
-                  {hit.seq > 0 ? ` · #${hit.seq}` : ''}
-                </span>
-              </button>
-            ))}
-            {searchHasMore ? (
-              <button className="hub-search-more" onClick={() => void searchMore()} disabled={searchLoading}>
-                {searchLoading ? '加载中…' : '更早的结果'}
-              </button>
-            ) : null}
-          </div>
-        ) : (
-          <>
-            <div className="hub-rail-tabs" role="tablist">
-              <button role="tab" aria-selected={railTab === 'agents'} className={railTab === 'agents' ? 'on' : ''} onClick={() => setRailTab('agents')}>智能体</button>
-              <button role="tab" aria-selected={railTab === 'groups'} className={railTab === 'groups' ? 'on' : ''} onClick={() => setRailTab('groups')}>群组</button>
-            </div>
-            {railTab === 'groups' ? (
-              groupsLoading ? <div className="hub-rail-empty">加载中…</div> :
-              groups.length === 0 ? <div className="hub-rail-empty">还没有群组</div> : (
-                <div className="hub-rail-list">
-                  {groups.map((g) => {
-                    const info = groupInfo[g.id] ?? {}
-                    const unread = info.unread ?? 0
-                    const memberCount = (g.members ?? []).length
-                    // 预览优先任务结论（「做完了什么」），否则最后一条消息；都没有才退回成员/策略。
-                    const preview = groupPreview(info) || `${memberCount} 名成员 · ${g.policy?.mode ?? 'ask'}`
-                    const time = formatRelativeTime(info.last_at)
-                    return (
-                      <button
-                        key={g.id}
-                        className={`hub-row hub-group-row ${g.id === activeGroupId ? 'on' : ''}`}
-                        onClick={() => void selectGroup(g.id)}
-                        aria-label={`${g.name}，${memberCount} 名成员${unread > 0 ? `，${unreadBadge(unread)} 条未读` : '，没有未读'}，${preview}`}
-                      >
-                        <span className="hub-member-stack" aria-hidden="true">
-                          {(g.members ?? []).slice(0, 3).map((m, i) => (
-                            <span key={m.agent_id} className="hub-member-dot" style={{ zIndex: 3 - i }}>
-                              {(agents.find((a) => a.id === m.agent_id)?.name ?? m.agent_id).slice(0, 1)}
-                            </span>
-                          ))}
-                        </span>
-                        <span className="hub-row-text">
-                          <span className="hub-row-top">
-                            <span className="hub-name">{g.name}</span>
-                            {unread > 0 ? <span className="hub-unread">{unreadBadge(unread)}</span> : null}
-                          </span>
-                          <span className="hub-preview" title={preview}>{preview}</span>
-                        </span>
-                        {time ? <span className="hub-row-time">{time}</span> : null}
-                      </button>
-                    )
-                  })}
-                </div>
-              )
-            ) : agents.length === 0 && !loading ? (
-              <div className="hub-rail-empty">{t('hub.noAgents')}</div>
-            ) : (
-              <div className="hub-rail-list">
-                {agents.map((a) => (
-                  <HubRow
-                    key={a.id}
-                    agent={a}
-                    preview={dm[a.id]?.last_text}
-                    unread={dm[a.id]?.unread ?? 0}
-                    running={running[a.id] === true}
-                    active={a.id === activeId}
-                    onClick={() => void select(a.id)}
-                  />
-                ))}
-              </div>
-            )}
-          </>
-        )}
-        {error ? (
-          <div className="hub-error" role="alert">
-            <span>{error}</span>
-            {failedText ? (
-              <button className="hub-link" onClick={() => void retry()} disabled={sending}>
-                {t('hub.retry')}
-              </button>
-            ) : null}
-            <button className="hub-link" onClick={clearError} aria-label={t('hub.dismiss')}>×</button>
-          </div>
-        ) : null}
-        {notice ? (
-          <div className="hub-notice" role="status">
-            <span>{notice}</span>
-            <button className="hub-link" onClick={clearNotice} aria-label={t('hub.dismiss')}>×</button>
-          </div>
-        ) : null}
-      </aside>
+            )
+          })}
+        </div>
+      ) : null}
+      {error ? (
+        <div className="hub-error hub-center-banner" role="alert">
+          <span>{error}</span>
+          {failedText ? (
+            <button className="hub-link" onClick={() => void retry()} disabled={sending}>
+              {t('hub.retry')}
+            </button>
+          ) : null}
+          <button className="hub-link" onClick={clearError} aria-label={t('hub.dismiss')}>×</button>
+        </div>
+      ) : null}
+      {notice ? (
+        <div className="hub-notice hub-center-banner" role="status">
+          <span>{notice}</span>
+          <button className="hub-link" onClick={clearNotice} aria-label={t('hub.dismiss')}>×</button>
+        </div>
+      ) : null}
 
       {activeGroup ? (
         <GroupView key={activeGroup.id} group={activeGroup} />
       ) : (
-      <section className="hub-dm">
-        {!activeAgent ? (
-          <div className="hub-empty">
-            <Bot size={28} />
-            <p>{t('hub.pickAgent')}</p>
-          </div>
-        ) : (
-          <>
-            <header className="hub-dm-head">
-              <HubAvatar agent={activeAgent} size={26} />
-              <div className="hub-dm-title">
-                <strong>{activeAgent.name}</strong>
-                <span className="hub-sub">
-                  {[activeAgent.role, [activeAgent.provider, activeAgent.model].filter(Boolean).join(' · ')]
-                    .filter(Boolean)
-                    .join(' — ')}
+        <section className="hub-dm">
+          {!activeAgent ? (
+            <div className="hub-empty hub-empty-pick">
+              <Bot size={30} />
+              <p>{activeId ? t('hub.loading') : t('hub.pickAgent')}</p>
+              {!activeId ? (
+                <span className="hub-empty-actions">
+                  <button className="hub-link" onClick={() => openEditor(null)}>
+                    <Plus size={12} /> {t('hub.newAgent')}
+                  </button>
+                  <button className="hub-link" onClick={closeHub}>{t('hub.backToWorkspaces')}</button>
                 </span>
-              </div>
-              <span className="hub-view-toggle" role="tablist" aria-label="Chat or Run">
-                <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>Chat</button>
-                <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>
-              </span>
-              <button className="hub-link" onClick={() => setInspector(inspector === 'session' ? null : 'session')} title="会话信息">会话</button>
-              <button
-                className={`hub-link ${inspector === 'context' ? 'on' : ''}`}
-                onClick={() => setInspector(inspector === 'context' ? null : 'context')}
-                title="上下文（只读）：触发上下文与提示词分层"
-              >
-                Context
-              </button>
-              <button
-                className="hub-link"
-                onClick={() => void copyDeepLink('dm', activeAgent.id, latestSeq)}
-                title="复制这个会话的 hub:// 深链"
-              >
-                链接
-              </button>
-              <button className="hub-link" onClick={() => setEditing(activeAgent)} title={t('hub.editAgent')}>
-                {t('hub.edit')}
-              </button>
-              <span className={`hub-dot ${isRunning ? 'on' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
-            </header>
-
-            <div className={`hub-list ${view === 'run' ? 'run' : ''}`} ref={listRef} onScroll={onScroll}>
-              {view === 'run' ? (
-                <RunView entries={runLog} running={isRunning} />
-              ) : (
-              <>
-              {loading ? <div className="hub-muted">{t('hub.loading')}</div> : null}
-              {!loading && messages.length === 0 && !live ? (
-                <div className="hub-intro">
-                  <p>
-                    {activeAgent.description || activeAgent.role || t('hub.introFallback')}
-                  </p>
-                  <span className="hub-muted">{t('hub.introHint')}</span>
-                </div>
               ) : null}
-              <div className="hub-thread">
-                {messages.map((m) => (
-                  <HubBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} highlightSeq={highlightSeq} />
-                ))}
-                {actions.map((m) => (
-                  <HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} highlightSeq={highlightSeq} />
-                ))}
-                {live ? (
-                  <div className="hub-msg agent">
-                    <div className="hub-body">
-                      <Markdown text={live} streaming />
-                    </div>
+            </div>
+          ) : (
+            <>
+              <header className="hub-dm-head">
+                <HubAvatar agent={activeAgent} size={26} />
+                <div className="hub-dm-title">
+                  <strong>{activeAgent.name}</strong>
+                  <span className="hub-sub">
+                    {[activeAgent.role, [activeAgent.provider, activeAgent.model].filter(Boolean).join(' · ')]
+                      .filter(Boolean)
+                      .join(' — ')}
+                  </span>
+                </div>
+                <span className="hub-view-toggle" role="tablist" aria-label="Chat or Run">
+                  <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>Chat</button>
+                  <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>
+                </span>
+                <button
+                  className="hub-link"
+                  onClick={() => void copyDeepLink('dm', activeAgent.id, latestSeq)}
+                  title="复制这个会话的 hub:// 深链"
+                >
+                  链接
+                </button>
+                <button
+                  className={`hub-link ${inspector === 'context' ? 'on' : ''}`}
+                  onClick={() => setInspector(inspector === 'context' ? null : 'context')}
+                  title="上下文（只读）：触发上下文与提示词分层"
+                >
+                  Context
+                </button>
+                <button className="hub-link" onClick={() => openEditor(activeAgent)} title={t('hub.editAgent')}>
+                  {t('hub.edit')}
+                </button>
+                <span className={`hub-dot ${isRunning ? 'on' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
+              </header>
+
+              <div className={`hub-list ${view === 'run' ? 'run' : ''}`} ref={listRef} onScroll={onScroll}>
+                {view === 'run' ? (
+                  <RunView entries={runLog} running={isRunning} />
+                ) : (
+                <>
+                {loading ? <div className="hub-muted">{t('hub.loading')}</div> : null}
+                {!loading && messages.length === 0 && !live ? (
+                  <div className="hub-intro">
+                    <p>
+                      {activeAgent.description || activeAgent.role || t('hub.introFallback')}
+                    </p>
+                    <span className="hub-muted">{t('hub.introHint')}</span>
                   </div>
                 ) : null}
-                {isRunning && !live ? <div className="hub-muted">{t('hub.thinking')}</div> : null}
+                <div className="hub-thread">
+                  {messages.map((m) => (
+                    <HubBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} highlightSeq={highlightSeq} />
+                  ))}
+                  {actions.map((m) => (
+                    <HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} highlightSeq={highlightSeq} />
+                  ))}
+                  {live ? (
+                    <div className="hub-msg agent">
+                      <div className="hub-body">
+                        <Markdown text={live} streaming />
+                      </div>
+                    </div>
+                  ) : null}
+                  {isRunning && !live ? <div className="hub-muted">{t('hub.thinking')}</div> : null}
+                </div>
+                </>
+                )}
               </div>
-              </>
-              )}
-            </div>
 
-            {view === 'chat' ? <div className="hub-composer">
-              <textarea
-                value={draft}
-                placeholder={t('hub.placeholder')}
-                onChange={(e) => activeId && setDraft(activeId, e.target.value)}
-                onKeyDown={(e) => {
-                  // DM 与群 composer 同口径：IME 合成中的 Enter 属于输入法（B2）。
-                  if (isImeComposing(e.nativeEvent, e.keyCode)) return
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    submit()
-                  }
-                }}
-                rows={2}
-              />
-              <button
-                className="hub-send"
-                onClick={() => void submit()}
-                disabled={sending || !draft.trim()}
-                title={t('hub.send')}
-                aria-label={t('hub.send')}
-              >
-                <SendIcon />
-              </button>
-            </div> : null}
-          </>
-        )}
-      </section>
+              {view === 'chat' ? <div className="hub-composer hub-composer-pill">
+                <button
+                  className="hub-composer-plus"
+                  onClick={() => setInspector(inspector === 'context' ? null : 'context')}
+                  title="上下文与提示词（暂不支持附件）"
+                  aria-label="打开上下文面板"
+                >
+                  <Plus size={14} />
+                </button>
+                <textarea
+                  value={draft}
+                  placeholder={`Message ${activeAgent.name}`}
+                  onChange={(e) => activeId && setDraft(activeId, e.target.value)}
+                  onKeyDown={(e) => {
+                    // DM 与群 composer 同口径：IME 合成中的 Enter 属于输入法（B2）。
+                    if (isImeComposing(e.nativeEvent, e.keyCode)) return
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      submit()
+                    }
+                  }}
+                  rows={2}
+                />
+                <button
+                  className="hub-send"
+                  onClick={() => void submit()}
+                  disabled={sending || !draft.trim()}
+                  title={t('hub.send')}
+                  aria-label={t('hub.send')}
+                >
+                  <SendIcon />
+                </button>
+              </div> : null}
+            </>
+          )}
+        </section>
       )}
-
-      <HubInspector />
-
-      {editing ? (
-        <AgentEditor
-          agent={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
-          onSaved={(id) => {
-            void refresh()
-            if (id) void select(id)
-            else clearSelection()
-          }}
-        />
-      ) : null}
     </div>
-  )
-}
-
-function HubRow({
-  agent,
-  preview,
-  unread,
-  running,
-  active,
-  onClick,
-}: {
-  agent: HubAgent
-  preview?: string
-  unread: number
-  running: boolean
-  active: boolean
-  onClick: () => void
-}) {
-  return (
-    <button className={`hub-row ${active ? 'on' : ''}`} onClick={onClick}>
-      <HubAvatar agent={agent} size={30} ring={running} />
-      <span className="hub-row-text">
-        <span className="hub-row-top">
-          <span className="hub-name">{agent.name}</span>
-          {unread > 0 ? <span className="hub-unread">{unread > 99 ? '99+' : unread}</span> : null}
-        </span>
-        <span className="hub-preview">{preview || agent.role || '—'}</span>
-      </span>
-    </button>
-  )
-}
-
-function HubAvatar({ agent, size, ring }: { agent: HubAgent; size: number; ring?: boolean }) {
-  const accent = agent.accent || '#b8492f'
-  const style = { width: size, height: size, background: `${accent}22`, borderColor: accent, color: accent }
-  const emoji = agent.avatar?.kind === 'emoji' ? agent.avatar.value : ''
-  return (
-    <span className={`hub-avatar ${ring ? 'ring' : ''}`} style={{ ...style, fontSize: Math.round(size * 0.5) }}>
-      {emoji || agent.name.slice(0, 1)}
-    </span>
   )
 }
 
@@ -570,13 +312,13 @@ function HubBubble({ msg, highlightSeq }: { msg: HubMessage; highlightSeq?: numb
     const action = typeof msg.refs?.action === 'string' ? msg.refs.action : ''
     if (action) {
       return (
-        <div className={`hub-action ${action}${hl}`} role="status" data-seq={seq}>
-          <span className="hub-action-kind">{actionLabel(action)}</span>
+        <div className={`hub-system-note hub-system-action ${action}${hl}`} role="status" data-seq={seq}>
+          <span className="hub-system-kind">{actionLabel(action)}</span>
           <span>{msg.text}</span>
         </div>
       )
     }
-    return <div className={`hub-msg system${hl}`} data-seq={seq}>{msg.text}</div>
+    return <div className={`hub-system-note${hl}`} data-seq={seq} role="status">{msg.text}</div>
   }
   return (
     <div className={`hub-msg ${kind === 'human' ? 'human' : 'agent'}${hl}`} data-seq={seq}>

@@ -602,8 +602,8 @@ function renderThread(
       const r = item.round
       const targets = (r.targets ?? []).map((id) => names[id] ?? id)
       nodes.push(
-        <div key={`round-${r.id}`} className="hub-action routing" role="status">
-          <span className="hub-action-kind">路由</span>
+        <div key={`round-${r.id}`} className="hub-system-note hub-system-routing" role="status">
+          <span className="hub-system-kind">路由</span>
           <span>
             {r.mention_all ? '@all ' : ''}
             {targets.length === 0 ? '无人被唤醒' : `唤醒 ${targets.join('、')}`}

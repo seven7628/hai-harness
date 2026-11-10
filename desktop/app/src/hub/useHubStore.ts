@@ -119,9 +119,14 @@ interface HubState {
   deepLinkOwnedOpen: boolean
   /** 当前选中智能体的系统提示词预览（只读；hub_agent_prompt_preview）。 */
   prompt: HubPromptState | null
+  /**
+   * Agent 编辑器：null = 关闭；'new' = 新建；HubAgent = 编辑该智能体。
+   * 放在 store 而不是 HubSurface：左栏「＋」、中栏「编辑」、右栏详情都要打开同一个弹层。
+   */
+  editor: HubAgent | 'new' | null
 
   // —— 全历史搜索（hub_search，P4-04b-1）——
-  /** 已提交的查询（输入框由 HubSurface 自己持有，避免 debounce 回环）。 */
+  /** 已提交的查询（输入框由 HubSidebar 自己持有，避免 debounce 回环）。 */
   searchQuery: string
   searchScope: HubSearchScope
   searchHits: HubSearchHit[]
@@ -133,6 +138,13 @@ interface HubState {
 
   openHub(): void
   closeHub(): void
+  /** 从左侧栏点智能体：确保 Hub 打开，再选中该 DM（打开即已读的语义不变）。 */
+  openAgent(agentID: string): Promise<void>
+  /** 从左侧栏点群组：确保 Hub 打开，再选中该群。 */
+  openGroup(groupID: string): Promise<void>
+  /** 打开 Agent 编辑器（null = 新建）。 */
+  openEditor(agent: HubAgent | null): void
+  closeEditor(): void
   refresh(): Promise<void>
   select(agentID: string): Promise<void>
   clearSelection(): void
@@ -300,6 +312,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   jump: null,
   deepLinkOwnedOpen: false,
   prompt: null,
+  editor: null,
   searchQuery: '',
   searchScope: 'all',
   searchHits: [],
@@ -319,8 +332,29 @@ export const useHubStore = create<HubState>((set, get) => ({
   closeHub() {
     // 关闭即作废：深链的所有权只覆盖「这一次打开」，正常重开仍要 mount 水合；
     // 未执行的跳转也一并丢弃（下次打开从当前时间线底部开始）。
+    // 右栏回到默认概览、编辑器一并关闭：退出 Hub 后不该留一个悬空的弹层。
     clearJumpTimer()
-    set({ open: false, deepLinkOwnedOpen: false, jump: null })
+    set({ open: false, deepLinkOwnedOpen: false, jump: null, inspector: null, editor: null })
+  },
+
+  async openAgent(agentID) {
+    if (!agentID) return
+    if (!get().open) get().openHub()
+    await get().select(agentID)
+  },
+
+  async openGroup(groupID) {
+    if (!groupID) return
+    if (!get().open) get().openHub()
+    await get().selectGroup(groupID)
+  },
+
+  openEditor(agent) {
+    set({ editor: agent ?? 'new' })
+  },
+
+  closeEditor() {
+    set({ editor: null })
   },
 
   async refresh() {
@@ -574,6 +608,8 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (!target) return
     const key = target.scope === 'group' ? (target.group_id ?? '') : (target.agent_id ?? '')
     if (!key) return
+    // 搜索框常驻左栏：Hub 关着时点命中同样要进入会话（不能只靠调用方先 openHub）。
+    if (!get().open) get().openHub()
     searchGen++ // 选中即离开结果面板：不让在飞的翻页把结果写回来
     if (target.scope === 'group') await get().selectGroup(key)
     else await get().select(key)

@@ -2,7 +2,7 @@
 // P4-04b-1 前端搜索纯逻辑验收（Node 直跑，无需浏览器）：
 //   search.ts：查询归一/scope 白名单/hub_search payload/游标编码/命中映射/
 //              翻页去重/点命中「加载 seq 附近一页」的计划与合并；
-//   HubSurface/useHubStore 静态契约：250ms debounce、hub_search 真的被调用、
+//   HubSidebar/useHubStore 静态契约：250ms debounce、hub_search 真的被调用、
 //              点命中真的走 searchAroundPlan（删掉 around-seq 加载 → 这里 RED）、
 //              Escape 清空、owner-only 徽标存在。
 import { readFileSync } from 'node:fs'
@@ -23,7 +23,8 @@ const result = await build({
 const mod = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`)
 
 const storeSrc = readFileSync(join(__dirname, '..', 'src', 'hub', 'useHubStore.ts'), 'utf8')
-const surfaceSrc = readFileSync(join(__dirname, '..', 'src', 'hub', 'HubSurface.tsx'), 'utf8')
+// 搜索框在 P4-UI-1 从左栏 rail 移进 HubSidebar（常驻 App 左栏）；契约跟着归属文件走。
+const surfaceSrc = readFileSync(join(__dirname, '..', 'src', 'hub', 'HubSidebar.tsx'), 'utf8')
 
 let pass = 0
 const ok = (m) => {

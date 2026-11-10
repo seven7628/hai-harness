@@ -88,7 +88,11 @@ export function GroupBubble({
     return <RoutingAction text={msg.text ?? ''} names={names} seq={seq} highlight={!!hl} />
   }
   if (msg.sender?.kind === 'system') {
-    return <div className={`hub-msg system${hl}`} data-seq={seq}>{msg.text}</div>
+    return (
+      <div className={`hub-system-note${hl}`} data-seq={seq} role="status">
+        {msg.text}
+      </div>
+    )
   }
   if (msg.kind === 'handoff') {
     const status = String(msg.refs?.status ?? '')
@@ -154,11 +158,11 @@ export function RoutingAction({
   highlight?: boolean
 }) {
   const parsed = parseRoutingText(text)
-  if (!parsed) return <div className="hub-msg system" data-seq={seq}>{text}</div>
+  if (!parsed) return <div className="hub-system-note" data-seq={seq} role="status">{text}</div>
   const targets = parsed.targets.map((id) => names[id] ?? id)
   return (
-    <div className={`hub-action routing${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">
-      <span className="hub-action-kind">路由</span>
+    <div className={`hub-system-note hub-system-routing${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">
+      <span className="hub-system-kind">路由</span>
       <span>
         {parsed.all ? '@all ' : ''}
         {targets.length === 0 ? '无人被唤醒' : `唤醒 ${targets.join('、')}`}
