@@ -1548,8 +1548,8 @@ const BASE = {
       "acceptance": "单会话热日志 >20k 条或 >50MB 时冷归档较早 70%，热段保留最近 2k；archive 不可变段+manifest；读/搜透明合并；失败不丢消息；删除独立且默认关闭。",
       "tests": "go test ./agenthub -run 'Archive|Search'",
       "commit": "",
-      "status": "deferred",
-      "note": "设计见 P4-04B-DESIGN.md §2；真实 ~/.go-code/hub 当前不存在（0 条消息），10k 合成 p95 20ms，未触发 20k 条/50MB；保持 deferred，等真实 store 跨阈值再启动"
+      "status": "in_progress",
+      "note": "2026-11-09 用户要求全部实现；拆 2a 存储/透明读搜、2b 后台触发、2c 独立 Review；删除默认关闭"
     },
     {
       "id": "P4-06",
@@ -1568,6 +1568,62 @@ const BASE = {
       "note": "04b-1 端到端 Review 由 task-peum3kmm delta review 覆盖；04b-2 保持 deferred",
       "review": "passed",
       "reviewNote": "task-peum3kmm PASS：隐私边界/owner-only/scope/cursor/桌面+手机跳转/全门禁；04b-2 未启动且 trigger 明确。"
+    },
+    {
+      "id": "P4-04b-2a",
+      "phase": "P4",
+      "title": "冷归档存储层 + 透明读/搜",
+      "deps": [
+        "P4-04b"
+      ],
+      "files": [
+        "agenthub/archive.go",
+        "agenthub/store.go",
+        "agenthub/store_dm.go",
+        "agenthub/store_search.go",
+        "agenthub/archive_test.go"
+      ],
+      "acceptance": "archive 段+manifest、阈值/保留、失败不丢、热+冷透明读/搜、client_msg_id 跨归档、重启 seq、去重、-race。",
+      "tests": "go test ./agenthub -run 'Archive|Search|Read|ClientID' -count=1 -race",
+      "commit": "",
+      "status": "in_progress",
+      "review": "",
+      "note": "实现契约见 docs/agent-hub/P4-04B-2-IMPL.md；核心开发交子智能体"
+    },
+    {
+      "id": "P4-04b-2b",
+      "phase": "P4",
+      "title": "冷归档后台触发 + bridge 生命周期",
+      "deps": [
+        "P4-04b-2a"
+      ],
+      "files": [
+        "desktop/bridge/hub_archive.go",
+        "desktop/bridge/hub_commands.go",
+        "desktop/bridge/hub_background.go"
+      ],
+      "acceptance": "hubStore 首次打开启动周期归档；启动先跑一次；短间隔可测；shutdown 停止；失败一次 hub_alert；不新增 agent 工具、不自动删除。",
+      "tests": "go test ./desktop/bridge -run 'Archive|Hub' -count=1 -race",
+      "commit": "",
+      "status": "todo",
+      "review": "",
+      "note": "依赖 2a Review 通过"
+    },
+    {
+      "id": "P4-04b-2c",
+      "phase": "P4",
+      "title": "04b-2 端到端独立 Review",
+      "deps": [
+        "P4-04b-2a",
+        "P4-04b-2b"
+      ],
+      "files": [],
+      "acceptance": "独立复审归档正确性/崩溃窗口/透明读搜/seq/幂等/后台生命周期/性能；PASS 才收口。",
+      "tests": "review task",
+      "commit": "",
+      "status": "todo",
+      "review": "",
+      "note": "实现与 2a/2b 均完成后派独立 agent"
     }
   ],
   "deferred": [
@@ -2461,15 +2517,34 @@ const BASE = {
       "note": "B1 逐会话续页游标；独立 delta Review PASS；04b-2 保持 deferred"
     },
     "P4-04b-2": {
-      "status": "deferred",
+      "status": "in_progress",
       "commit": "",
-      "note": "设计见 P4-04B-DESIGN.md §2；真实 ~/.go-code/hub 当前不存在（0 条消息），10k 合成 p95 20ms，未触发 20k 条/50MB；保持 deferred，等真实 store 跨阈值再启动"
+      "review": "",
+      "note": "拆 2a/2b/2c；删除默认关闭"
     },
     "P4-06": {
       "status": "done",
       "commit": "177c273",
       "review": "passed",
       "note": "04b-1 端到端 Review 由 task-peum3kmm 覆盖；04b-2 deferred"
+    },
+    "P4-04b-2a": {
+      "status": "in_progress",
+      "commit": "",
+      "review": "",
+      "note": "存储层实现中"
+    },
+    "P4-04b-2b": {
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "note": "依赖 2a"
+    },
+    "P4-04b-2c": {
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "note": "端到端独立复审"
     }
   },
   "reviewGate": {
