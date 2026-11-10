@@ -20,6 +20,7 @@
 | `PROGRESS.html` | 唯一进度看板（自包含，直接打开） |
 | `tasks.json` | 任务定义（看板数据源） |
 | `P4-RETRO.md` | P4 最终复盘：交付矩阵、回归/性能/成本、已知限制、waiver |
+| `IMPLICIT-STATE.md` | 跨 Go / Bridge / Electron / React 的隐式状态审计：93 条清单、风险矩阵、Top 10、治理路线 |
 | `sync_progress.py` | 改完 `tasks.json` 后，把数据同步进 `PROGRESS.html` |
 
 ## 工作流（每个任务）
