@@ -630,6 +630,7 @@
 .hub-agent-badge.clickable {
   cursor: pointer;
   /* 视觉不变，命中区 ≥44px（方案 §3.3.7）：padding 扩张热区，负 margin 抵消布局影响。 */
+  min-width: 44px;
   min-height: 44px;
   padding: 6px 4px;
   margin: -6px -4px;
@@ -1326,6 +1327,7 @@ button.hub-budget-chip:hover { border-color: currentColor; }
 button.hub-mention { cursor: pointer; }
 button.hub-mention:hover { background: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 22%, transparent); }
 button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-mention .sigil { margin-block: -3px; }
 .hub-mention-name { color: var(--mention-text); font-weight: 550; }
 .hub-mention-gone { color: var(--text-3); font-size: 0.86em; }
 .hub-mention.gone { opacity: 0.55; filter: grayscale(1); }

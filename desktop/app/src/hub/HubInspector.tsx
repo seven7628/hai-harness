@@ -5,7 +5,7 @@ import { useAppStore } from '../store/useAppStore'
 import AgentSigil from './AgentSigil'
 import AgentStack from './AgentStack'
 import { stateResolver } from './avatar'
-import { stackAriaLabel } from './avatarLabels'
+import { agentSigilLabel, stackAriaLabel } from './avatarLabels'
 import { usePendingAgents } from './useAgentState'
 import { effortLabel } from './agentModelOptions'
 import { useHubStore } from './useHubStore'
@@ -169,7 +169,7 @@ function OverviewPanel() {
             members={stackMembers}
             size={48}
             groupRunning={groupRunning}
-            label={stackAriaLabel(t, stackMembers, { groupRunning })}
+            label={stackAriaLabel(t, stackMembers, { groupRunning, name: group.name })}
           />
           <div className="hub-ov-id">
             <strong>{group.name}</strong>
@@ -227,6 +227,7 @@ function OverviewPanel() {
   }
 
   const isRunning = activeId ? running[activeId] === true : false
+  const agentState = agent ? stateOf(agent.id, agent.deleted) : 'idle'
   const recentTasks = tasks.filter((task) =>
     !isTerminal(task.status) &&
     (task.origin?.agent_id === agent.id || task.target?.agent_id === agent.id),
@@ -237,8 +238,9 @@ function OverviewPanel() {
         <AgentSigil
           agentId={agent.id}
           responsibility={agent.role}
-          state={stateOf(agent.id, agent.deleted)}
+          state={agentState}
           size={48}
+          label={agentSigilLabel(t, agent.name, agentState)}
         />
         <div className="hub-ov-id">
           <strong>{agent.name}</strong>

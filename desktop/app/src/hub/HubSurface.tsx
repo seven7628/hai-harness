@@ -7,6 +7,7 @@ import { useAppStore } from '../store/useAppStore'
 import { alertSeverity } from './alerts'
 import GroupView from './GroupView'
 import AgentSigil from './AgentSigil'
+import { agentSigilLabel } from './avatarLabels'
 import { useAgentState } from './useAgentState'
 import { isImeComposing } from './mentions'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
@@ -215,7 +216,8 @@ export default function HubSurface() {
                   agentId={activeAgent.id}
                   responsibility={activeAgent.role}
                   state={activeState}
-                  size={24}
+                  size={32}
+                  label={agentSigilLabel(t, activeAgent.name, activeState)}
                 />
                 <div className="hub-dm-title">
                   <strong>{activeAgent.name}</strong>

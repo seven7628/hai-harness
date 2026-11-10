@@ -370,9 +370,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
       <header className="hub-dm-head">
         <AgentStack
           members={stackMembers}
-          size={24}
+          size={32}
           groupRunning={groupRunning}
-          label={stackAriaLabel(t, stackMembers, { groupRunning })}
+          label={stackAriaLabel(t, stackMembers, { groupRunning, name: group.name })}
         />
         <div className="hub-dm-title">
           <strong>{group.name}</strong>

@@ -26,7 +26,7 @@ export default function AgentBadge({
   const style = { '--agent-accent': accent } as CSSProperties
   const body = (
     <>
-      <AgentSigil agentId={agent?.id} responsibility={agent?.role} state={state} size={24} />
+      <AgentSigil agentId={agent?.id} responsibility={agent?.role} state={state} size={32} />
       <span className="hub-agent-name">{name}</span>
       {role ? <span className="hub-agent-role">{role}</span> : null}
     </>
