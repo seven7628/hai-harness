@@ -1245,9 +1245,11 @@
       ],
       "acceptance": "单会话热日志 >20k 条或 >50MB 时冷归档较早 70%，热段保留最近 2k；archive 不可变段+manifest；读/搜透明合并；失败不丢消息；删除独立且默认关闭。",
       "tests": "go test ./agenthub -run 'Archive|Search'",
-      "commit": "",
-      "status": "in_progress",
-      "note": "2026-11-09 用户要求全部实现；拆 2a 存储/透明读搜、2b 后台触发、2c 独立 Review；删除默认关闭"
+      "commit": "9460476 + 1d4e38a + eefdfab",
+      "status": "done",
+      "note": "冷归档 2a+2b 完成；删除仍默认关闭/未自动执行",
+      "review": "passed",
+      "reviewNote": "独立终审 task-4zer9key PASS（HEAD 2456e1c）：2a 存储/透明读搜 + 2b ticker/bridge 全链路；20,001→14,000/hot 6,001；冷+热 1000 命中 50 页不重不漏；冷段 owner-only/噪声口径不退化；取消/关停/崩溃窗口/并发 append-read-search 均验证；bridge full 756 PASS，仅两条基线既有失败。非阻塞 F1 归档耗时日志口径、F2 空转 O(hot)、F3 冷段幂等锁内扫、F4 restartManager 测试清理、F5 dead trim、F6 彻底删除未覆盖 archive/dms。"
     },
     {
       "id": "P4-06",
@@ -1304,9 +1306,10 @@
       "acceptance": "hubStore 首次打开启动周期归档；启动先跑一次；短间隔可测；shutdown 停止；失败一次 hub_alert；不新增 agent 工具、不自动删除。",
       "tests": "go test ./desktop/bridge -run 'Archive|Hub' -count=1 -race",
       "commit": "eefdfab",
-      "status": "review",
-      "review": "",
-      "note": "后台 ticker/bridge 生命周期完成；主会话 TestHubArchive -race、TestHub、build/vet、tsc、p4 绿；独立终审中"
+      "status": "done",
+      "review": "passed",
+      "note": "后台 ticker/bridge；终审 PASS",
+      "reviewNote": "独立终审 task-4zer9key PASS（HEAD 2456e1c）：2a 存储/透明读搜 + 2b ticker/bridge 全链路；20,001→14,000/hot 6,001；冷+热 1000 命中 50 页不重不漏；冷段 owner-only/噪声口径不退化；取消/关停/崩溃窗口/并发 append-read-search 均验证；bridge full 756 PASS，仅两条基线既有失败。非阻塞 F1 归档耗时日志口径、F2 空转 O(hot)、F3 冷段幂等锁内扫、F4 restartManager 测试清理、F5 dead trim、F6 彻底删除未覆盖 archive/dms。"
     },
     {
       "id": "P4-04b-2c",
@@ -1319,10 +1322,11 @@
       "files": [],
       "acceptance": "独立复审归档正确性/崩溃窗口/透明读搜/seq/幂等/后台生命周期/性能；PASS 才收口。",
       "tests": "review task",
-      "commit": "eefdfab",
-      "status": "in_progress",
-      "review": "",
-      "note": "2a+2b 端到端独立 Review 中"
+      "commit": "9460476 + 1d4e38a + eefdfab",
+      "status": "done",
+      "review": "passed",
+      "note": "04b-2 端到端终审 PASS",
+      "reviewNote": "独立终审 task-4zer9key PASS（HEAD 2456e1c）：2a 存储/透明读搜 + 2b ticker/bridge 全链路；20,001→14,000/hot 6,001；冷+热 1000 命中 50 页不重不漏；冷段 owner-only/噪声口径不退化；取消/关停/崩溃窗口/并发 append-read-search 均验证；bridge full 756 PASS，仅两条基线既有失败。非阻塞 F1 归档耗时日志口径、F2 空转 O(hot)、F3 冷段幂等锁内扫、F4 restartManager 测试清理、F5 dead trim、F6 彻底删除未覆盖 archive/dms。"
     }
   ],
   "deferred": [
@@ -2216,10 +2220,10 @@
       "note": "B1 逐会话续页游标；独立 delta Review PASS；04b-2 保持 deferred"
     },
     "P4-04b-2": {
-      "status": "in_progress",
-      "commit": "",
-      "review": "",
-      "note": "拆 2a/2b/2c；删除默认关闭"
+      "status": "done",
+      "commit": "9460476 + 1d4e38a + eefdfab",
+      "review": "passed",
+      "note": "归档 2a+2b 完成；删除默认关闭"
     },
     "P4-06": {
       "status": "done",
@@ -2234,16 +2238,16 @@
       "note": "独立 delta review task-d7qecj9p PASS"
     },
     "P4-04b-2b": {
-      "status": "review",
+      "status": "done",
       "commit": "eefdfab",
-      "review": "",
-      "note": "ticker/bridge 终审中"
+      "review": "passed",
+      "note": "终审 task-4zer9key PASS"
     },
     "P4-04b-2c": {
-      "status": "in_progress",
-      "commit": "eefdfab",
-      "review": "",
-      "note": "04b-2 端到端 Review 中"
+      "status": "done",
+      "commit": "9460476 + 1d4e38a + eefdfab",
+      "review": "passed",
+      "note": "端到端终审 PASS"
     }
   },
   "reviewGate": {
