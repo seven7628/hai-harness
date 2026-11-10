@@ -686,6 +686,7 @@
 .hub-form input[type='text'],
 .hub-form input:not([type]),
 .hub-form input[type='color'],
+.hub-form input[type='number'],
 .hub-form select,
 .hub-form textarea,
 .hub-memory-editor textarea {
@@ -700,6 +701,45 @@
 }
 .hub-form input[type='color'] { padding: 2px; height: 30px; }
 .hub-form textarea { resize: vertical; line-height: 1.5; }
+/* 高级设置折叠区：默认收起，第一屏只留身份 + 模型。只用现有令牌，ink/paper/system 通吃。 */
+.hub-advanced {
+  grid-column: 1 / -1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.hub-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--text-2);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.hub-advanced > summary::-webkit-details-marker { display: none; }
+.hub-advanced > summary::before {
+  content: '›';
+  color: var(--text-3);
+  font-size: 14px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+.hub-advanced[open] > summary::before { transform: rotate(90deg); }
+.hub-advanced[open] > summary { border-bottom: 1px solid var(--border); }
+.hub-advanced > summary:focus-visible { outline: 1px solid var(--accent-solid); outline-offset: -1px; }
+.hub-advanced-body { padding: 10px; }
+/* 空 Provider / 空模型 / 未知当前值的解释文字（不要把提示塞进 placeholder）。 */
+.hub-form .hub-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.hub-form > .hub-hint { grid-column: 1 / -1; }
 .hub-row-actions { display: flex; align-items: center; gap: 8px; }
 .hub-primary {
   border: 1px solid var(--accent-border);

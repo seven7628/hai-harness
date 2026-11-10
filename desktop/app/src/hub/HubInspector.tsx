@@ -4,6 +4,7 @@ import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
 import HubAvatar from './HubAvatar'
 import { accentOfGroup } from './agentAccent'
+import { effortLabel } from './agentModelOptions'
 import { useHubStore } from './useHubStore'
 import NeedsYouPanel from './NeedsYouPanel'
 import ContextPanel from './ContextPanel'
@@ -216,7 +217,7 @@ function OverviewPanel() {
         <span className={`hub-ov-status ${isRunning ? 'on' : ''}`}>{isRunning ? t('hub.running') : t('hub.idle')}</span>
       </div>
       <div className="hub-ov-model" title="Provider · 模型 · 推理档位">
-        {[agent.provider, agent.model, agent.effort || '默认档位'].filter(Boolean).join(' · ')}
+        {[agent.provider, agent.model, effortLabel(agent.effort) || t('hub.effort.defaultShort')].filter(Boolean).join(' · ')}
       </div>
       <p className="hub-ov-desc">{agent.description || agent.role || '这个智能体还没有写简介。'}</p>
       <footer className="hub-ov-actions">
