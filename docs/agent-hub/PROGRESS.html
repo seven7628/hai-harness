@@ -1585,10 +1585,11 @@ const BASE = {
       ],
       "acceptance": "archive 段+manifest、阈值/保留、失败不丢、热+冷透明读/搜、client_msg_id 跨归档、重启 seq、去重、-race。",
       "tests": "go test ./agenthub -run 'Archive|Search|Read|ClientID' -count=1 -race",
-      "commit": "",
-      "status": "in_progress",
-      "review": "",
-      "note": "实现契约见 docs/agent-hub/P4-04B-2-IMPL.md；核心开发交子智能体"
+      "commit": "9460476 + 1d4e38a",
+      "status": "done",
+      "review": "passed",
+      "note": "存储/透明读搜完成；B1/N1/N3/N6 已修",
+      "reviewNote": "独立 delta review task-d7qecj9p PASS（HEAD 1d4e38a）：B1 精确 fixture 1,2,5,5,6,7,8,9,10,11 → ErrCorrupt，无 manifest/段、热字节不变、Open/Read 正常且重试不自愈循环；gap-only 仍可归档；N1 DM/群 client_msg_id trim 冷热一致；N3 orphan 复用 fsync；N6 冲突/部分失败/热优先去重/全冷多段分页有真实测试。agenthub -race、Archive -count=3 -shuffle、bridge Search|Hub|Mobile|DM 全绿；无自动删除。"
     },
     {
       "id": "P4-04b-2b",
@@ -1605,9 +1606,9 @@ const BASE = {
       "acceptance": "hubStore 首次打开启动周期归档；启动先跑一次；短间隔可测；shutdown 停止；失败一次 hub_alert；不新增 agent 工具、不自动删除。",
       "tests": "go test ./desktop/bridge -run 'Archive|Hub' -count=1 -race",
       "commit": "",
-      "status": "todo",
+      "status": "in_progress",
       "review": "",
-      "note": "依赖 2a Review 通过"
+      "note": "2a Review PASS；实现 hubStore 后周期归档、启动先跑、shutdown 停止、失败一次 hub_alert"
     },
     {
       "id": "P4-04b-2c",
@@ -2529,16 +2530,16 @@ const BASE = {
       "note": "04b-1 端到端 Review 由 task-peum3kmm 覆盖；04b-2 deferred"
     },
     "P4-04b-2a": {
+      "status": "done",
+      "commit": "9460476 + 1d4e38a",
+      "review": "passed",
+      "note": "独立 delta review task-d7qecj9p PASS"
+    },
+    "P4-04b-2b": {
       "status": "in_progress",
       "commit": "",
       "review": "",
-      "note": "存储层实现中"
-    },
-    "P4-04b-2b": {
-      "status": "todo",
-      "commit": "",
-      "review": "",
-      "note": "依赖 2a"
+      "note": "后台 ticker + bridge 生命周期实现中"
     },
     "P4-04b-2c": {
       "status": "todo",
