@@ -1236,16 +1236,21 @@ type manager struct {
 	cronCtx         context.Context
 	cronCancel      context.CancelFunc
 	oauthWaiter     oauthPromptWaiter // OAuth 登录 manual 输入等待表（oauth_prompt_answer 命令回填）
-	// imPlugin IM 集成插件 —— **进程级单例，owner = 进程**（BR-21 显式化，非工作区槽位）。
+	// imPlugin IM 集成插件 —— **连接面进程级共享 + 归属面（agent/group/workspace）隔离**。
 	//
-	// 为什么不能按工作区各造一份：IM 是「一个账号一条连接 + 一张路由表」。每个工作区各持
-	// 一份会变成同一账号多条长连接（同一条消息被多个实例收到 → 重复回复、重复派发），
-	// 而且 ~/.go-code/im-config.json 是全局配置，多份实例只会各自朝同一文件写。
-	// 现状是每个 workspace 的 registry **共享同一个实例**（buildPlugins(m.imPlugin)），
-	// plugin_list 在每个工作区都能看到它 —— 这是设计，不是遗漏。
+	// 两层要分清（BR-21 修法，与 hookTrust 同一口径）：
+	//   - 连接面（Enable/Disable/Runtime）：进程级一份。IM 是「一个账号一条连接」，按
+	//     工作区/归属各造一份会变成同一账号多条长连接（同一条消息被多个实例收到 →
+	//     重复回复、重复派发），而 ~/.go-code/im-config.json 也只有一份。所以每个工作区
+	//     的 registry **共享同一个实例**（buildPlugins(m.imPlugin)）。
+	//   - 归属面（OwnerEnabled/SetOwnerEnabled/OwnerView/RoutesForOwner）：启用状态与
+	//     路由按 owner 分。A 群关闭只停 A 群的投递，B 智能体照常收发；plugin_list /
+	//     im_status / im_routes 读的是**当前 owner 的视图**（plugins.go annotateIMOwner），
+	//     不是进程总开关。归属由路由投递目标派生（im/config.go RouteConfig.EffectiveOwner，
+	//     群 > 智能体 > 工作区），不另存一份真相。
 	//
-	// 生命周期归进程：工作区级 Close 被 implugin.Plugin.ClosePreserve 挡掉（否则删掉别的
-	// 项目 / 改一次浏览器配置就会掐断正在用的 IM 连接），进程退出走 closeIMPlugin。
+	// 生命周期：工作区级 Close 被 implugin.Plugin.ClosePreserve 挡掉（否则删掉别的项目 /
+	// 改一次浏览器配置就会掐断正在用的 IM 连接），进程退出走 closeIMPlugin。
 	imPlugin *implugin.Plugin
 	// imBridge IM 事件桥（插件 Enable 后装配：事件流→IM 推送；IM 消息→会话驱动）。
 	imBridge *imBridge
