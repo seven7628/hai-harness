@@ -1613,7 +1613,7 @@ button.hub-budget-chip:hover { border-color: currentColor; }
   height: 1em;
   margin-left: 2px;
   vertical-align: -2px;
-  background: currentColor;
+  background: var(--accent-solid);
   animation: hub-caret 1s steps(1) infinite;
 }
 @keyframes hub-caret { 50% { opacity: 0; } }
@@ -2317,6 +2317,9 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-group-view .hub-thread-grouped { gap: 18px; }
   .hub-msg.agent { grid-template-columns: 32px minmax(0, 1fr); gap: 8px; }
   .hub-msg-body { font-size: 13.5px; }
+  /* 窄屏表格不在单元格里逐字折行：保留可读列宽，横滑收在 .md-table-wrap 里
+     （文档级仍 0 横向溢出，横条只出现在表格自身）。 */
+  .hub-msg-body .md-table-wrap > table { min-width: 440px; }
   .hub-msg.human .hub-msg-main { max-width: 88%; }
   .hub-msg-time { margin-left: 0; }
   .hub-user-bubble { padding: 9px 12px; font-size: 13.5px; }
