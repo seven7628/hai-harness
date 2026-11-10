@@ -1649,10 +1649,10 @@ const BASE = {
       ],
       "acceptance": "Hub 不再是全屏覆盖页：左栏智能体/群组 section 位于工作区上方，中栏对话，右栏默认概览；工作区/会话点击可退出 Hub 且草稿不丢；active 行/头像环/未读/折叠 rail 使用 agent.accent；系统通知居中低对比并保留 data-seq 高亮；不新增重复 Hub 入口。",
       "tests": "npx tsc --noEmit && npx tsc -p tsconfig.electron.json --noEmit && npm run build && npm run test:hub-search && npm run test:hub && npm run test:hub-p3b && npm run test:p4 && npm run test:css",
-      "commit": "771809f",
+      "commit": "771809f + 59aef20",
       "status": "in_progress",
-      "note": "复审 CHANGES_REQUESTED：修复 P1 工作区裁剪/Run 泄漏 + P2 右栏概览/rail 工作区/搜索 tab 同步",
-      "reviewNote": "review task-7rscybyy：核心 shell PASS，但 980×620 工作区树裁剪、Run 模式跨关闭泄漏为合并阻断；P2 右栏概览 no-op、rail 工作区不回工作区、搜索命中不同步 tab。UI-1 fix commit 进行中。"
+      "note": "复审 CHANGES_REQUESTED 已修复（59aef20）；delta 复审中",
+      "reviewNote": "review task-7rscybyy CHANGES_REQUESTED；修复 59aef20：左栏高度预算/Run 泄漏/右栏展开/rail 工作区/搜索 tab 同步；delta 复审进行中。"
     },
     {
       "id": "P4-UI-2",
@@ -2614,8 +2614,8 @@ const BASE = {
     },
     "P4-UI-1": {
       "status": "in_progress",
-      "commit": "771809f",
-      "reviewNote": "review task-7rscybyy CHANGES_REQUESTED；修复中（工作区裁剪/Run 泄漏/右栏概览/rail 工作区/搜索 tab）"
+      "commit": "771809f + 59aef20",
+      "reviewNote": "CHANGES_REQUESTED 修复 59aef20；delta 复审进行中"
     }
   },
   "reviewGate": {
