@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DependencyList } from 'react'
-import { useT } from '../i18n'
-import { SendIcon } from '../components/icons'
+import { useLang, useT } from '../i18n'
+import { GitBranch, SendIcon, TerminalIcon } from '../components/icons'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
 import { hubCommand } from './api'
 import { GroupBubble } from './MessageBubble'
+import { DayDivider } from './ConversationMessage'
+import { dayKey, dayLabel } from './conversationDay'
 import { RoundGroup } from './RoundGroup'
 import { RoundActivityDigest } from './RoundActivityDigest'
 import { StreamingMessage } from './StreamingMessage'
@@ -53,6 +55,7 @@ const MENTION_LISTBOX_ID = 'hub-mention-listbox'
 
 export default function GroupView({ group }: { group: HubGroup }) {
   const t = useT()
+  const lang = useLang()
   const messages = useHubStore((s) => s.groupMessages)
   const activity = useHubStore((s) => s.groupActivity)
   const rounds = useHubStore((s) => s.groupRounds)
@@ -338,13 +341,30 @@ export default function GroupView({ group }: { group: HubGroup }) {
   // 回滚：hub.perfMemo=0 → deps 传 undefined，useMemo 每次渲染都重算，即 P4-01
   // 之前的路径（不新增分支组件、不改变任何输出）。默认开启。
   const threadNodes = usePerfMemo(
-    () => renderThread(items, agentNames, displayMode === 'grouped', roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq),
-    perfMemo ? [items, agentNames, displayMode, roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq] : undefined,
+    () => renderThread(items, agentNames, displayMode === 'grouped', roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq, lang),
+    perfMemo ? [items, agentNames, displayMode, roster, openAgent, triggerSeqBySenderMap, jumpToSeq, highlightSeq, lang] : undefined,
   )
 
   function copyLink(): void {
     const seq = messages.reduce((max, m) => (Number(m.seq) > max ? Number(m.seq) : max), 0)
     void copyDeepLink('group', group.id, seq)
+  }
+
+  // @ 按钮：在光标处插入一个 @ 并聚焦，随后由既有的 mention picker 接管（真实可用，
+  // 不做 demo 里的附件/语音按钮 —— 那些没有实现）。
+  function insertMentionToken(): void {
+    const el = textareaRef.current
+    const pos = el?.selectionStart ?? draft.length
+    const next = `${draft.slice(0, pos)}@${draft.slice(pos)}`
+    setDraft(next)
+    setCaret(pos + 1)
+    setDismissedMentionStart(-1)
+    requestAnimationFrame(() => {
+      const node = textareaRef.current
+      if (!node) return
+      node.focus()
+      node.setSelectionRange(pos + 1, pos + 1)
+    })
   }
 
   function exportMarkdown(): void {
@@ -367,47 +387,60 @@ export default function GroupView({ group }: { group: HubGroup }) {
 
   return (
     <section className="hub-dm hub-group-view">
-      <header className="hub-dm-head">
-        <AgentStack
-          members={stackMembers}
-          size={24}
-          groupRunning={groupRunning}
-          label={stackAriaLabel(t, stackMembers, { groupRunning })}
-        />
-        <div className="hub-dm-title">
-          <strong>{group.name}</strong>
-          <span className="hub-sub">
-            {members.length} 名成员{title ? ` · ${title}` : ''}
-            {owner ? ` · 群主 ${agentNames[owner.agent_id] ?? owner.agent_id}` : ''}
-          </span>
+      <header className="hub-conv-head hub-group-head">
+        <div className="hub-conv-id">
+          <AgentStack
+            members={stackMembers}
+            size={32}
+            groupRunning={groupRunning}
+            label={stackAriaLabel(t, stackMembers, { groupRunning })}
+          />
+          <div className="hub-conv-title">
+            <span className="hub-conv-line">
+              <strong>{group.name}</strong>
+              {group.deleted ? <span className="hub-chip danger">已删除</span> : null}
+            </span>
+            <span className="hub-conv-sub">
+              {t('hub.group.members').replace('{n}', String(members.length))}
+              {' · '}
+              {t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask')}
+              {owner ? ` · ${t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id)}` : ''}
+            </span>
+            {title ? <span className="hub-conv-sub hub-conv-names" title={title}>{title}</span> : null}
+          </div>
         </div>
-        {group.deleted ? <span className="hub-chip danger">已删除</span> : null}
-        <span className={`hub-chip group-mode-${group.policy?.mode ?? 'ask'}`}>{group.policy?.mode ?? 'ask'}</span>
-        <button className="hub-chip hub-budget-chip" onClick={() => void editBudget()} title="点击修改群日预算">
-          预算 ${(group.policy?.daily_budget_usd ?? 0).toFixed(0)}/日
-        </button>
-        <span className="hub-view-toggle" role="tablist" aria-label="Chat or Run">
-          <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>Chat</button>
-          <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>
-        </span>
-        {view === 'chat' ? (
-          <span className="hub-view-toggle" role="tablist" aria-label="紧凑或分开显示">
-            <button role="tab" aria-selected={displayMode === 'grouped'} className={displayMode === 'grouped' ? 'on' : ''} onClick={() => setDisplay('grouped')}>紧凑</button>
-            <button role="tab" aria-selected={displayMode === 'flat'} className={displayMode === 'flat' ? 'on' : ''} onClick={() => setDisplay('flat')}>分开</button>
+        <div className="hub-conv-actions">
+          <button
+            className="hub-pill hub-budget-chip"
+            onClick={() => void editBudget()}
+            title="点击修改群日预算"
+            aria-label={`群日预算 $${(group.policy?.daily_budget_usd ?? 0).toFixed(0)}，点击修改`}
+          >
+            {t('hub.header.budget').replace('{amount}', (group.policy?.daily_budget_usd ?? 0).toFixed(0))}
+          </button>
+          <span className="hub-seg" role="tablist" aria-label="Chat or Run">
+            <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>{t('hub.header.chat')}</button>
+            <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>{t('hub.header.run')}</button>
           </span>
-        ) : null}
-        <button
-          className={`hub-link ${inspector === 'context' ? 'on' : ''}`}
-          onClick={() => {
-            setInspector(rightExpanded && inspector === 'context' ? null : 'context')
-            setRightExpanded(true)
-          }}
-          title="上下文（只读）：触发上下文与提示词分层"
-        >
-          Context
-        </button>
-        <button className="hub-link" onClick={copyLink} title="复制这个群的 hub:// 深链">链接</button>
-        <button className="hub-link" onClick={exportMarkdown} title="导出群时间线 Markdown">导出 MD</button>
+          {view === 'chat' ? (
+            <span className="hub-seg" role="tablist" aria-label="紧凑或分开显示">
+              <button role="tab" aria-selected={displayMode === 'grouped'} className={displayMode === 'grouped' ? 'on' : ''} onClick={() => setDisplay('grouped')}>{t('hub.header.grouped')}</button>
+              <button role="tab" aria-selected={displayMode === 'flat'} className={displayMode === 'flat' ? 'on' : ''} onClick={() => setDisplay('flat')}>{t('hub.header.flat')}</button>
+            </span>
+          ) : null}
+          <button
+            className={`hub-action-btn ${inspector === 'context' ? 'on' : ''}`}
+            onClick={() => {
+              setInspector(rightExpanded && inspector === 'context' ? null : 'context')
+              setRightExpanded(true)
+            }}
+            title="上下文（只读）：触发上下文与提示词分层"
+          >
+            {t('hub.header.context')}
+          </button>
+          <button className="hub-action-btn" onClick={copyLink} title="复制这个群的 hub:// 深链">{t('hub.header.link')}</button>
+          <button className="hub-action-btn" onClick={exportMarkdown} title="导出群时间线 Markdown">{t('hub.header.export')}</button>
+        </div>
       </header>
 
       <ConversationBar
@@ -426,10 +459,17 @@ export default function GroupView({ group }: { group: HubGroup }) {
               <div className="hub-empty"><p>还没有群活动</p><span className="hub-muted">@ 路由与工具活动会出现在这里</span></div>
             ) : activity.map((a, i) => (
               <div key={`${a.after_seq}-${i}`} className={`hub-run-row ${a.status ?? ''}`}>
-                <span className="hub-chip">{a.kind === 'routing' ? '路由' : '工具'}</span>
-                <span className="hub-run-name">{a.name || a.kind}</span>
-                <span className="hub-muted">{a.kind === 'routing' ? routingSummary(a.summary ?? '', agentNames) : a.summary}</span>
-                <span className="hub-muted">#{a.after_seq}</span>
+                <span className="hub-run-icon" aria-hidden="true">
+                  {a.kind === 'routing' ? <GitBranch size={12} /> : <TerminalIcon size={12} />}
+                </span>
+                <span className="hub-run-copy">
+                  <span className="hub-run-kicker">{a.kind === 'routing' ? 'Route' : 'Tool'}</span>
+                  <span className="hub-run-line">
+                    <span className="hub-run-name">{a.name || a.kind}</span>
+                    <span className="hub-run-detail">{a.kind === 'routing' ? routingSummary(a.summary ?? '', agentNames) : a.summary}</span>
+                  </span>
+                </span>
+                <span className="hub-run-status">{a.status === 'error' ? '失败' : a.status === 'running' ? '运行中' : `#${a.after_seq}`}</span>
               </div>
             ))}
           </div>
@@ -470,6 +510,15 @@ export default function GroupView({ group }: { group: HubGroup }) {
           ) : null}
           {composerMode === 'chat' ? (
             <>
+              <button
+                type="button"
+                className="hub-composer-tool"
+                onClick={insertMentionToken}
+                title={t('hub.composer.mention')}
+                aria-label={t('hub.composer.mention')}
+              >
+                @
+              </button>
               <textarea
                 ref={textareaRef}
                 value={draft}
@@ -565,22 +614,29 @@ export default function GroupView({ group }: { group: HubGroup }) {
             </div>
           )}
         </div>
-        <div className="hub-composer-foot">
-          <span className="hub-view-toggle" role="tablist" aria-label="输入模式">
+        <div className="hub-composer-meta">
+          <span className="hub-seg hub-seg-quiet" role="tablist" aria-label="输入模式">
             <button role="tab" aria-selected={composerMode === 'chat'} className={composerMode === 'chat' ? 'on' : ''} onClick={() => setComposerMode('chat')}>对话</button>
             <button role="tab" aria-selected={composerMode === 'assign'} className={composerMode === 'assign' ? 'on' : ''} onClick={() => setComposerMode('assign')}>派任务</button>
           </span>
           {composerMode === 'chat' ? (
-            <span className="hub-muted hub-composer-hint">
+            <span className="hub-composer-hint">
               {members.length === 0
                 ? '群还没有成员，消息只会记录。'
                 : draft.trim() && mentionIds(draft, roster).length === 0 && !hasMentionAll(draft)
                   ? '仅记录，不触发回复（@成员 才会唤醒）'
-                  : '输入 @ 提及成员 · Enter 发送，Shift+Enter 换行'}
+                  : t('hub.composer.mentionHint')}
             </span>
           ) : (
-            <span className="hub-muted hub-composer-hint">派任务会创建账本任务，结果以任务卡回群。</span>
+            <span className="hub-composer-hint">派任务会创建账本任务，结果以任务卡回群。</span>
           )}
+          {composerMode === 'chat' ? (
+            <span className="hub-composer-keys">
+              <kbd>Enter</kbd> {t('hub.composer.enter')}
+              <span className="hub-composer-sep">·</span>
+              <kbd>Shift</kbd>+<kbd>Enter</kbd> {t('hub.composer.newline')}
+            </span>
+          ) : null}
         </div>
         {composerMode === 'assign' && assignNote ? (
           <div className="hub-assign-note" role="status">{assignNote}</div>
@@ -611,10 +667,12 @@ function renderThread(
   triggerSeqBySender: Record<string, number>,
   onJumpToSeq: (seq: number) => void,
   highlightSeq: number | null,
+  lang: 'zh' | 'en',
 ) {
   const nodes: React.ReactNode[] = []
   let batch: HubMessage[] = []
   let batchKey = ''
+  let lastDay = ''
   const flush = (): void => {
     if (batch.length === 0) return
     nodes.push(
@@ -632,6 +690,15 @@ function renderThread(
     )
     batch = []
     batchKey = ''
+  }
+  // 日期分隔线：每条消息（含交接卡/回执）按本地自然日切段；同轮消息跨天时先收批，
+  // 分隔线不能被包进 round-stack 的紧凑间距里。
+  const pushDay = (msg: HubMessage): void => {
+    const key = dayKey(msg.created_at)
+    if (!key || key === lastDay) return
+    if (batch.length > 0) flush()
+    lastDay = key
+    nodes.push(<DayDivider key={`day-${key}`} label={dayLabel(msg.created_at, lang)} />)
   }
   for (const item of items) {
     if (item.kind === 'round') {
@@ -652,6 +719,7 @@ function renderThread(
     }
     if (item.msg.kind === 'routing_receipt') {
       flush()
+      pushDay(item.msg)
       nodes.push(
         <GroupBubble
           key={`m-${item.msg.seq}`}
@@ -667,6 +735,7 @@ function renderThread(
       continue
     }
     const key = roundKey(item.msg)
+    pushDay(item.msg)
     if (batch.length > 0 && (key === '' || key !== batchKey)) flush()
     if (batch.length === 0) batchKey = key
     batch.push(item.msg)

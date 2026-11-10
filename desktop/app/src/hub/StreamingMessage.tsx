@@ -1,19 +1,24 @@
-// 群内流式草稿（P3a-09）：轻量纯文本 + 换行，不做 Markdown 重排；
-// final hub_message 到达后整条替换为完整 Markdown 气泡。
-import AgentBadge from './AgentBadge'
+import { useT } from '../i18n'
 import type { HubStreamDraft } from './groupStream'
+import { AgentMessage } from './ConversationMessage'
 import type { MentionAgent } from './mentions'
 
+// 群内流式草稿（P3a-09）：与最终消息同一版式（32px sigil + 作者头 + 无气泡正文），
+// 只多一个「正在输入」标签和光标。旧版另起一套带头气泡，最终消息到达时会跳一下。
 export function StreamingMessage({ draft, name, agent }: { draft: HubStreamDraft; name: string; agent?: MentionAgent | null }) {
+  const t = useT()
   return (
-    <div className="hub-msg agent hub-group-msg streaming" aria-live="polite">
-      <div className="hub-msg-head">
-        <AgentBadge agent={agent} name={name} role={agent?.role} />
-        <span className="hub-chip streaming-chip">正在输入</span>
+    <AgentMessage
+      agent={agent}
+      name={name}
+      role={[agent?.role, agent?.groupRole === 'owner' ? '群主' : ''].filter(Boolean).join(' · ') || undefined}
+      tags={<span className="hub-msg-tag streaming">{t('hub.streaming')}</span>}
+      className="hub-group-msg streaming"
+    >
+      <div className="hub-stream-text" aria-live="polite">
+        {draft.text}
+        <span className="hub-stream-caret" aria-hidden="true" />
       </div>
-      <div className="hub-body">
-        <div className="hub-stream-text">{draft.text}<span className="hub-stream-caret" aria-hidden="true" /></div>
-      </div>
-    </div>
+    </AgentMessage>
   )
 }

@@ -128,3 +128,14 @@ export function formatRelativeTime(iso?: string | null, now: number = Date.now()
     ? `${d.getMonth() + 1} 月 ${d.getDate()} 日`
     : `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
 }
+
+/** 消息时钟（HH:MM，本地时区）：消息头与用户气泡下的小字。 */
+export function formatClockTime(iso?: string | null): string {
+  if (!iso) return ''
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return ''
+  const d = new Date(t)
+  const hh = d.getHours() < 10 ? `0${d.getHours()}` : String(d.getHours())
+  const mm = d.getMinutes() < 10 ? `0${d.getMinutes()}` : String(d.getMinutes())
+  return `${hh}:${mm}`
+}

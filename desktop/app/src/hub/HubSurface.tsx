@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Markdown } from '../components/markdown'
-import { Bot, Plus, SendIcon } from '../components/icons'
-import { useT } from '../i18n'
+import { AccessIcon, Bot, LayersIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
+import { useLang, useT } from '../i18n'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
 import { alertSeverity } from './alerts'
 import GroupView from './GroupView'
 import AgentSigil from './AgentSigil'
+import { AgentMessage, DayDivider, UserMessage } from './ConversationMessage'
+import { dayKey, dayLabel } from './conversationDay'
+import { formatClockTime } from './conversation'
 import { useAgentState } from './useAgentState'
-import { isImeComposing } from './mentions'
+import { isImeComposing, type MentionAgent } from './mentions'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubMessage, HubRunEntry } from './types'
 import './hub.css'
@@ -19,6 +22,7 @@ import './hub.css'
 // 工作区 CenterPanel 在 App 里保持挂载（display:none），草稿与本地状态不因进出 Hub 丢失。
 export default function HubSurface() {
   const t = useT()
+  const lang = useLang()
   const activeId = useHubStore((s) => s.activeId)
   const profile = useHubStore((s) => s.profile)
   const messages = useHubStore((s) => s.messages)
@@ -146,6 +150,29 @@ export default function HubSurface() {
     if (ok) setDraft(activeId, '')
   }
 
+  // 时间线节点：日期分隔线按本地自然日切段（与群共用 conversationDay.ts 的口径）。
+  // actions 是运行时动作回执；没有 created_at 时不分段，不造时间。
+  const dmThread = useMemo(() => {
+    if (!activeAgent) return []
+    const nodes: ReactNode[] = []
+    let lastDay = ''
+    const pushDay = (m: HubMessage): void => {
+      const key = dayKey(m.created_at)
+      if (!key || key === lastDay) return
+      lastDay = key
+      nodes.push(<DayDivider key={`day-${key}`} label={dayLabel(m.created_at, lang)} />)
+    }
+    for (const m of messages) {
+      pushDay(m)
+      nodes.push(<HubBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} agent={activeAgent} highlightSeq={highlightSeq} />)
+    }
+    for (const m of actions) {
+      pushDay(m)
+      nodes.push(<HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} agent={activeAgent} highlightSeq={highlightSeq} />)
+    }
+    return nodes
+  }, [messages, actions, activeAgent, highlightSeq, lang])
+
   return (
     <div className="hub-center">
       {alerts.length > 0 ? (
@@ -210,43 +237,54 @@ export default function HubSurface() {
             </div>
           ) : (
             <>
-              <header className="hub-dm-head">
-                <AgentSigil
-                  agentId={activeAgent.id}
-                  responsibility={activeAgent.role}
-                  state={activeState}
-                  size={24}
-                />
-                <div className="hub-dm-title">
-                  <strong>{activeAgent.name}</strong>
-                  <span className="hub-sub">
-                    {[activeAgent.role, [activeAgent.provider, activeAgent.model].filter(Boolean).join(' · ')]
-                      .filter(Boolean)
-                      .join(' — ')}
-                  </span>
+              <header className="hub-conv-head hub-dm-head">
+                <div className="hub-conv-id">
+                  <AgentSigil
+                    agentId={activeAgent.id}
+                    responsibility={activeAgent.role}
+                    state={activeState}
+                    size={48}
+                  />
+                  <div className="hub-conv-title">
+                    <span className="hub-conv-line">
+                      <strong>{activeAgent.name}</strong>
+                      <span className={`hub-dot ${isRunning ? 'on' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
+                    </span>
+                    <span className="hub-conv-sub hub-conv-subline">
+                      <span className="hub-conv-sub-text">
+                        {[activeAgent.role, [activeAgent.provider, activeAgent.model].filter(Boolean).join(' · ')]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </span>
+                      <span className="hub-lock" title={t('hub.dm.lockedHint')}>
+                        <AccessIcon size={11} /> {t('hub.dm.locked')}
+                      </span>
+                    </span>
+                  </div>
                 </div>
-                <span className="hub-view-toggle" role="tablist" aria-label="Chat or Run">
-                  <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>Chat</button>
-                  <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>Run</button>
-                </span>
-                <button
-                  className="hub-link"
-                  onClick={() => void copyDeepLink('dm', activeAgent.id, latestSeq)}
-                  title="复制这个会话的 hub:// 深链"
-                >
-                  链接
-                </button>
-                <button
-                  className={`hub-link ${inspector === 'context' ? 'on' : ''}`}
-                  onClick={toggleContext}
-                  title="上下文（只读）：触发上下文与提示词分层"
-                >
-                  Context
-                </button>
-                <button className="hub-link" onClick={() => openEditor(activeAgent)} title={t('hub.editAgent')}>
-                  {t('hub.edit')}
-                </button>
-                <span className={`hub-dot ${isRunning ? 'on' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
+                <div className="hub-conv-actions">
+                  <span className="hub-seg" role="tablist" aria-label="Chat or Run">
+                    <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>{t('hub.header.chat')}</button>
+                    <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>{t('hub.header.run')}</button>
+                  </span>
+                  <button
+                    className={`hub-action-btn ${inspector === 'context' ? 'on' : ''}`}
+                    onClick={toggleContext}
+                    title="上下文（只读）：触发上下文与提示词分层"
+                  >
+                    {t('hub.header.context')}
+                  </button>
+                  <button
+                    className="hub-action-btn"
+                    onClick={() => void copyDeepLink('dm', activeAgent.id, latestSeq)}
+                    title="复制这个会话的 hub:// 深链"
+                  >
+                    {t('hub.header.link')}
+                  </button>
+                  <button className="hub-action-btn" onClick={() => openEditor(activeAgent)} title={t('hub.editAgent')}>
+                    {t('hub.edit')}
+                  </button>
+                </div>
               </header>
 
               <div className={`hub-list dm ${view === 'run' ? 'run' : ''}`} ref={listRef} onScroll={onScroll}>
@@ -264,58 +302,69 @@ export default function HubSurface() {
                   </div>
                 ) : null}
                 <div className="hub-thread">
-                  {messages.map((m) => (
-                    <HubBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} highlightSeq={highlightSeq} />
-                  ))}
-                  {actions.map((m) => (
-                    <HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} highlightSeq={highlightSeq} />
-                  ))}
+                  {dmThread}
                   {live ? (
-                    <div className="hub-msg agent">
-                      <div className="hub-body">
-                        <Markdown text={live} streaming />
-                      </div>
-                    </div>
+                    <AgentMessage
+                      agent={activeAgent}
+                      name={activeAgent.name}
+                      role={activeAgent.role}
+                      tags={<span className="hub-msg-tag streaming">{t('hub.streaming')}</span>}
+                      className="streaming"
+                    >
+                      <Markdown text={live} streaming />
+                    </AgentMessage>
                   ) : null}
-                  {isRunning && !live ? <div className="hub-muted">{t('hub.thinking')}</div> : null}
+                  {isRunning && !live ? <div className="hub-system-note">{t('hub.thinking')}</div> : null}
                 </div>
                 </>
                 )}
               </div>
 
-              {view === 'chat' ? <div className="hub-composer hub-composer-pill">
-                <button
-                  className="hub-composer-plus"
-                  onClick={showContext}
-                  title="上下文与提示词（暂不支持附件）"
-                  aria-label="打开上下文面板"
-                >
-                  <Plus size={14} />
-                </button>
-                <textarea
-                  value={draft}
-                  placeholder={`Message ${activeAgent.name}`}
-                  onChange={(e) => activeId && setDraft(activeId, e.target.value)}
-                  onKeyDown={(e) => {
-                    // DM 与群 composer 同口径：IME 合成中的 Enter 属于输入法（B2）。
-                    if (isImeComposing(e.nativeEvent, e.keyCode)) return
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      submit()
-                    }
-                  }}
-                  rows={2}
-                />
-                <button
-                  className="hub-send"
-                  onClick={() => void submit()}
-                  disabled={sending || !draft.trim()}
-                  title={t('hub.send')}
-                  aria-label={t('hub.send')}
-                >
-                  <SendIcon />
-                </button>
-              </div> : null}
+              {view === 'chat' ? (
+                <div className="hub-composer-wrap">
+                  <div className="hub-composer">
+                    <button
+                      className="hub-composer-tool"
+                      onClick={showContext}
+                      title="上下文与提示词（暂不支持附件）"
+                      aria-label="打开上下文面板"
+                    >
+                      <Plus size={14} />
+                    </button>
+                    <textarea
+                      value={draft}
+                      placeholder={t('hub.sendTo').replace('{name}', activeAgent.name)}
+                      onChange={(e) => activeId && setDraft(activeId, e.target.value)}
+                      onKeyDown={(e) => {
+                        // DM 与群 composer 同口径：IME 合成中的 Enter 属于输入法（B2）。
+                        if (isImeComposing(e.nativeEvent, e.keyCode)) return
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault()
+                          submit()
+                        }
+                      }}
+                      rows={2}
+                    />
+                    <button
+                      className="hub-send"
+                      onClick={() => void submit()}
+                      disabled={sending || !draft.trim()}
+                      title={t('hub.send')}
+                      aria-label={t('hub.send')}
+                    >
+                      <SendIcon />
+                    </button>
+                  </div>
+                  <div className="hub-composer-meta">
+                    <span className="hub-composer-hint">长期会话 · 上下文可自动压缩，记录不丢</span>
+                    <span className="hub-composer-keys">
+                      <kbd>Enter</kbd> {t('hub.composer.enter')}
+                      <span className="hub-composer-sep">·</span>
+                      <kbd>Shift</kbd>+<kbd>Enter</kbd> {t('hub.composer.newline')}
+                    </span>
+                  </div>
+                </div>
+              ) : null}
             </>
           )}
         </section>
@@ -324,7 +373,16 @@ export default function HubSurface() {
   )
 }
 
-function HubBubble({ msg, highlightSeq }: { msg: HubMessage; highlightSeq?: number | null }) {
+function HubBubble({
+  msg,
+  agent,
+  highlightSeq,
+}: {
+  msg: HubMessage
+  agent?: MentionAgent | null
+  highlightSeq?: number | null
+}) {
+  const t = useT()
   const kind = msg.sender?.kind ?? 'system'
   const seq = seqDataAttr(msg.seq)
   const hl = highlightClass(msg.seq, highlightSeq)
@@ -341,12 +399,35 @@ function HubBubble({ msg, highlightSeq }: { msg: HubMessage; highlightSeq?: numb
     }
     return <div className={`hub-system-note${hl}`} data-seq={seq} role="status">{msg.text}</div>
   }
-  return (
-    <div className={`hub-msg ${kind === 'human' ? 'human' : 'agent'}${hl}`} data-seq={seq}>
-      <div className="hub-body">
+  const time = formatClockTime(msg.created_at)
+  if (kind === 'human') {
+    return (
+      <UserMessage
+        dataSeq={seq}
+        className={hl}
+        ownerOnly={msg.visibility === 'owner'}
+        pending={msg.pending}
+        failed={msg.failed}
+        time={time}
+        dateTime={msg.created_at}
+      >
         <Markdown text={msg.text ?? ''} />
-      </div>
-    </div>
+      </UserMessage>
+    )
+  }
+  return (
+    <AgentMessage
+      agent={agent}
+      name={agent?.name || '智能体'}
+      role={agent?.role}
+      tags={msg.visibility === 'owner' ? <span className="hub-msg-tag owner">{t('hub.ownerOnly')}</span> : null}
+      time={time}
+      dateTime={msg.created_at}
+      dataSeq={seq}
+      className={hl}
+    >
+      <Markdown text={msg.text ?? ''} />
+    </AgentMessage>
   )
 }
 
@@ -365,10 +446,19 @@ function RunView({ entries, running }: { entries: HubRunEntry[]; running: boolea
     <div className="hub-run">
       {entries.map((e) => (
         <div key={e.id} className={`hub-run-row ${e.status ?? ''}`}>
-          <span className="hub-chip">{e.kind === 'compress' ? '压缩' : '工具'}</span>
-          <span className="hub-run-name">{e.name || e.kind}</span>
-          {e.summary ? <span className="hub-muted">{e.summary}</span> : null}
-          <span className="hub-muted">{e.status === 'running' ? '运行中' : e.status === 'error' ? '失败' : e.ms ? `${(e.ms / 1000).toFixed(1)}s` : '完成'}</span>
+          <span className="hub-run-icon" aria-hidden="true">
+            {e.kind === 'compress' ? <LayersIcon size={12} /> : <TerminalIcon size={12} />}
+          </span>
+          <span className="hub-run-copy">
+            <span className="hub-run-kicker">{e.kind === 'compress' ? 'Compress' : 'Tool'}</span>
+            <span className="hub-run-line">
+              <span className="hub-run-name">{e.name || e.kind}</span>
+              {e.summary ? <span className="hub-run-detail">{e.summary}</span> : null}
+            </span>
+          </span>
+          <span className="hub-run-status">
+            {e.status === 'running' ? '运行中' : e.status === 'error' ? '失败' : e.ms ? `${(e.ms / 1000).toFixed(1)}s` : '完成'}
+          </span>
         </div>
       ))}
     </div>

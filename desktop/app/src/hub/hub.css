@@ -3,6 +3,33 @@
  * 只加布局与少量尺寸：颜色一律走既有主题令牌（--paper/--surface/--ink/--border），
  * 不新造色板——三套主题（深/浅/跟随）都要照常可读。 */
 
+/* —— 会话区 token：只从现有 ink/paper 主题派生，两套主题都定义 ——
+ *
+ * 用户气泡不是 demo 的硬编码 #f0e8dc：深色主题取「墨色 90% + 赭石 10%」得到暖米白，
+ * 浅色主题取「墨色 94% + 赭石」得到深墨；气泡内文字反向取 paper，保持 4.5:1 以上。
+ * 事件卡底/图标块用 surface 与 ink 的极浅混合，不新增第三套灰阶。 */
+:root,
+[data-theme='ink'] {
+  --hub-conv-max: 760px;
+  --hub-user-bubble: color-mix(in srgb, var(--ink) 90%, var(--ochre));
+  --hub-user-ink: color-mix(in srgb, var(--paper) 72%, #000);
+  --hub-user-meta: var(--text-3);
+  --hub-event-bg: color-mix(in srgb, var(--surface) 94%, var(--paper));
+  --hub-event-icon-bg: color-mix(in srgb, var(--ink) 7%, transparent);
+  --hub-event-icon-ink: var(--text-2);
+  --hub-tool-bg: color-mix(in srgb, var(--surface) 82%, var(--paper));
+}
+[data-theme='paper'] {
+  --hub-conv-max: 760px;
+  --hub-user-bubble: color-mix(in srgb, var(--ink) 94%, var(--ochre));
+  --hub-user-ink: var(--paper-2);
+  --hub-user-meta: var(--text-3);
+  --hub-event-bg: color-mix(in srgb, var(--surface) 96%, var(--paper));
+  --hub-event-icon-bg: color-mix(in srgb, var(--ink) 5%, transparent);
+  --hub-event-icon-ink: var(--text-2);
+  --hub-tool-bg: color-mix(in srgb, var(--surface) 90%, var(--paper));
+}
+
 /* Hub 已并入 App shell：中栏/右栏在 Hub 打开时只隐藏不卸载（草稿/标签/滚动保留）。 */
 .hub-host-stack {
   flex: 1;
@@ -507,114 +534,302 @@
   cursor: pointer;
 }
 
-/* —— DM 视图 —— */
+/* —— 会话区（群 / DM 共用版式，2026-10 复刻）——
+ *
+ * 参考 docs/demo 的 messages/composer 节奏：760px 居中、30/28 留白、
+ * 22px 消息间距、agent 无气泡（32px sigil + 作者头）、human 右侧实心暖气泡。
+ * 颜色全部由当前 ink/paper 主题 token 派生（--hub-* 在文件顶部的两套主题里定义），
+ * 不复制 demo 的硬编码深色值。 */
 .hub-dm {
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
 }
-.hub-dm-head {
+
+/* —— 会话头：群（AgentStack + 两行 subtitle）/ DM（48px sigil + lock 提示） —— */
+.hub-conv-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  flex-wrap: wrap; /* 群头/Context/链接等动作增多时换行，不把标题挤没 */
-  gap: 9px;
-  row-gap: 4px;
-  padding: 10px 18px;
+  flex-wrap: wrap;
+  gap: 9px 12px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--border);
+  background: var(--paper);
 }
-.hub-dm-title { display: flex; flex-direction: column; min-width: 0; }
-.hub-dm-title strong { font-size: 13.5px; }
-.hub-sub {
-  font-size: 11.5px;
+.hub-conv-id {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+.hub-conv-id > .agent-stack { flex: none; }
+.hub-conv-title {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.hub-conv-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.hub-conv-line strong {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-conv-sub {
+  min-width: 0;
   color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-conv-names { color: var(--text-2); }
+.hub-conv-subline { display: flex; align-items: center; gap: 8px; }
+.hub-conv-sub-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.hub-lock {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
 .hub-dot {
-  margin-left: auto;
-  width: 7px;
-  height: 7px;
+  flex: none;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--text-3);
   opacity: 0.45;
 }
 .hub-dot.on { background: var(--indigo); opacity: 1; }
+
+/* header actions：全部是现有动作的紧凑版（没有 Auto/电脑开关）。 */
+.hub-conv-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+.hub-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.hub-seg button {
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.hub-seg button:hover { color: var(--ink); }
+.hub-seg button.on {
+  background: var(--paper-2);
+  color: var(--ink);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.hub-seg button:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-seg-quiet { padding: 0; border: 0; background: none; }
+.hub-seg-quiet button { padding: 3px 6px; font-size: 10.5px; }
+.hub-seg-quiet button.on { background: color-mix(in srgb, var(--ink) 8%, transparent); box-shadow: none; }
+.hub-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 6px 7px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.hub-action-btn:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.hub-action-btn.on {
+  color: var(--ink);
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.hub-action-btn:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+button.hub-pill.hub-budget-chip { cursor: pointer; }
+button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); color: var(--ink); }
+
+/* —— 时间线：外层滚动、内层 760px 居中；消息间距与 demo 一致 —— */
 .hub-list {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 18px 22px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-width: 760px;
-  width: 100%;
-  margin: 0 auto;
+  padding: 30px 28px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  scroll-behavior: auto;
 }
-/* 内容短时贴底（聊天习惯），长时正常从顶部滚动 —— margin-top:auto 只吃剩余空间。
-   DM 例外：短会话从顶部起排（编辑体；避免两句话被顶到输入框上方、上面空 500px）。 */
 .hub-thread {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-top: auto;
+  gap: 22px;
+  width: 100%;
+  max-width: var(--hub-conv-max);
+  margin: 0 auto;
 }
-.hub-list.dm .hub-thread { margin-top: 0; }
-.hub-group-view .hub-thread-flat { gap: 16px; }
-.hub-group-view .hub-thread-grouped { gap: 10px; }
+.hub-group-view .hub-thread-flat,
+.hub-group-view .hub-thread-grouped { gap: 22px; }
+.hub-day-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.hub-day-divider::before,
+.hub-day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
 .hub-intro {
-  margin-top: 8vh;
-  text-align: center;
-  color: var(--text-2);
-  font-size: 13px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-width: 440px;
+  margin: 12vh auto 0;
+  color: var(--text-3);
+  text-align: center;
 }
-.hub-msg { display: flex; flex-direction: column; }
-.hub-msg .hub-body {
-  max-width: 100%;
-  font-size: 13.5px;
-  line-height: 1.6;
-  border-radius: 12px;
-  padding: 9px 12px;
-  background: var(--surface);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+.hub-intro p {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.65;
 }
-.hub-msg.human { align-items: flex-end; }
-.hub-msg.human .hub-body {
-  max-width: 82%;
-  background: var(--accent-weak);
-  border: 1px solid var(--accent-border);
+.hub-intro .hub-muted { font-size: 12px; line-height: 1.6; }
+
+/* —— 消息：agent 左（无气泡）/ human 右（实心暖气泡） —— */
+.hub-msg { display: flex; min-width: 0; }
+.hub-msg.agent {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
 }
-.hub-msg.agent { align-items: flex-start; }
-/* ref-1：智能体消息走「编辑体」——无卡面、无内边距，和人类气泡明确分层。 */
-.hub-msg.agent .hub-body {
-  max-width: 100%;
-  background: transparent;
-  padding: 2px 0;
-  border-radius: 0;
+.hub-msg-rail {
+  position: relative;
+  width: 32px;
+  padding-top: 1px;
 }
-/* P4-UI-4：群聊里的每个作者是独立消息，不再共用一个外框。
-   头像/名字用作者身份色，气泡只借身份色做细边和极浅底，正文仍是 --ink。 */
-.hub-msg.hub-group-msg { gap: 5px; }
-.hub-msg.agent.hub-group-msg { align-items: flex-start; }
-.hub-msg.human.hub-group-msg { align-items: flex-end; }
+.hub-msg-avatar {
+  position: relative;
+  display: block;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+/* 视觉 32px、命中区 44px（不撑布局）：与 AgentBadge clickable 同一口径。 */
+.hub-msg-avatar::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+}
+.hub-msg-avatar.static { cursor: default; }
+.hub-msg-avatar:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 3px; }
+.hub-msg-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
 .hub-msg-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  flex-wrap: wrap;
   min-width: 0;
-  width: 100%;
-  max-width: 100%;
 }
-.hub-msg.agent .hub-msg-head { max-width: min(100%, 620px); }
-.hub-msg.human .hub-msg-head { max-width: min(82%, 560px); justify-content: flex-end; }
+.hub-msg-name {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: color-mix(in srgb, var(--agent-accent, var(--ink)) 45%, var(--ink));
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-msg-name:hover { text-decoration: underline; }
+.hub-msg-name:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 4px; }
+.hub-msg-role {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* AgentBadge 仍保留为可复用身份组件（当前会话区用 ConversationMessage 的作者头；
+   任务卡改用 event-card 解剖，不再嵌 24px sigil）。样式随组件保留，避免它被再次
+   引用时变成裸按钮 —— 44px 热区也还是同一条可达性契约。 */
 .hub-agent-badge {
-  --agent-accent: var(--accent-solid);
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -629,7 +844,6 @@
 }
 .hub-agent-badge.clickable {
   cursor: pointer;
-  /* 视觉不变，命中区 ≥44px（方案 §3.3.7）：padding 扩张热区，负 margin 抵消布局影响。 */
   min-height: 44px;
   padding: 6px 4px;
   margin: -6px -4px;
@@ -638,7 +852,7 @@
 .hub-agent-badge.clickable:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 6px; }
 .hub-agent-name {
   min-width: 0;
-  color: color-mix(in srgb, var(--agent-accent) 45%, var(--ink));
+  color: color-mix(in srgb, var(--agent-accent, var(--accent-solid)) 45%, var(--ink));
   font-size: 12.5px;
   font-weight: 600;
   white-space: nowrap;
@@ -651,15 +865,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.hub-msg-time {
-  flex: none;
-  margin-left: 2px;
+.hub-sub {
+  overflow: hidden;
   color: var(--text-3);
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.hub-msg.human .hub-msg-time { margin-left: 2px; }
 .hub-context-jump {
   flex: none;
   margin: 0;
@@ -674,61 +886,123 @@
 .hub-context-jump:hover { color: var(--ink); text-decoration: underline; }
 .hub-context-jump.static { cursor: default; }
 .hub-context-jump:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 4px; }
-.hub-msg.agent.hub-group-msg .hub-body {
-  max-width: min(100%, 620px);
-  padding: 9px 12px;
-  white-space: normal;
-  border: 1px solid color-mix(in srgb, var(--agent-accent) 20%, var(--border));
-  border-left: 3px solid color-mix(in srgb, var(--agent-accent) 70%, var(--border));
-  border-radius: 3px 12px 12px 12px;
-  background: color-mix(in srgb, var(--surface) 94%, var(--agent-accent));
-}
-.hub-msg.human.hub-group-msg .hub-body {
-  max-width: min(82%, 560px);
-  border-radius: 12px 3px 12px 12px;
-}
-.hub-msg.human .hub-agent-name { color: var(--ink); }
-.hub-msg.hub-group-msg .hub-body > .md > :first-child { margin-top: 0; }
-.hub-msg.hub-group-msg .hub-body > .md > :last-child { margin-bottom: 0; }
-.hub-msg.system {
-  align-items: center;
+
+.hub-msg-tag {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
   color: var(--text-3);
-  font-size: 11.5px;
-  text-align: center;
+  font-size: 9.5px;
+  line-height: 1.45;
+  white-space: nowrap;
 }
-/* 系统动作 / 路由回执 / 轮次摘要：时间线中居中的低对比小丸，
-   与 agent（左）/ human（右）气泡明确分层。 */
+.hub-msg-tag.owner { color: var(--text-2); }
+.hub-msg-tag.streaming {
+  color: var(--accent-solid);
+  border-color: color-mix(in srgb, var(--accent-solid) 32%, var(--border));
+}
+.hub-msg-time {
+  flex: none;
+  margin-left: 2px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.hub-msg-body {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.hub-msg-body > .md > :first-child { margin-top: 0; }
+.hub-msg-body > .md > :last-child { margin-bottom: 0; }
+.hub-msg.human { justify-content: flex-end; }
+.hub-msg.human .hub-msg-main {
+  align-items: flex-end;
+  max-width: min(78%, 620px);
+  gap: 5px;
+}
+.hub-user-bubble {
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  background: var(--hub-user-bubble);
+  color: var(--hub-user-ink);
+  font-size: 14px;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 8%, transparent);
+}
+.hub-user-bubble .md { color: inherit; }
+.hub-user-bubble .md > :first-child { margin-top: 0; }
+.hub-user-bubble .md > :last-child { margin-bottom: 0; }
+.hub-user-bubble code {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: inherit;
+}
+/* @ 徽章/链接在暖气泡里必须改用 inherit：默认的 accent 前景是给纸底配的，
+   放到米白底上会发灰（用户消息仍是可点的 @ 徽章）。 */
+.hub-user-bubble .hub-mention {
+  --mention-text: inherit;
+  border-color: color-mix(in srgb, currentColor 26%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+}
+.hub-user-bubble .hub-mention-name { color: inherit; }
+.hub-user-bubble a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.hub-user-bubble .md code { color: inherit; }
+.hub-user-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  color: var(--hub-user-meta);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.hub-user-failed { color: var(--crimson); }
+.hub-owner-only { color: var(--text-2); }
+.hub-msg.pending { opacity: 0.7; }
+.hub-msg.failed .hub-user-bubble { border-color: var(--crimson); }
+
+/* 系统行：居中细线（不再用胶囊底）。 */
 .hub-system-note {
-  align-self: center;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  max-width: 90%;
-  margin: 2px auto;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: 10.5px;
   line-height: 1.5;
   text-align: center;
   overflow-wrap: anywhere;
 }
-.hub-system-note::before {
+.hub-system-note::before,
+.hub-system-note::after {
   content: '';
-  flex: none;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.55;
+  flex: 1;
+  min-width: 12px;
+  height: 1px;
+  background: var(--border);
 }
 .hub-system-kind {
   flex: none;
   color: var(--text-2);
-  font-weight: 550;
+  font-weight: 600;
+  white-space: nowrap;
 }
+
 .hub-empty {
   flex: 1;
   display: flex;
@@ -739,81 +1013,123 @@
   color: var(--text-3);
   font-size: 13px;
 }
+
+/* —— 输入区：19px 圆角 pill + focus-within 边 + 圆形发送 + meta 行 —— */
+.hub-composer-wrap {
+  flex: 0 0 auto;
+  padding: 10px 28px 16px;
+  background: var(--paper);
+}
 .hub-composer {
+  position: relative;
   display: flex;
   align-items: flex-end;
-  gap: 8px;
-  padding: 10px 18px 14px;
-  border-top: 1px solid var(--border);
-  max-width: 760px;
+  gap: 5px;
   width: 100%;
+  max-width: var(--hub-conv-max);
   margin: 0 auto;
+  padding: 8px 8px 8px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 19px;
+  background: var(--surface);
+  box-shadow: 0 10px 26px color-mix(in srgb, #000 8%, transparent),
+    inset 0 1px 0 color-mix(in srgb, #fff 4%, transparent);
 }
+.hub-composer:focus-within { border-color: var(--accent-border); }
 .hub-composer textarea {
   flex: 1;
-  resize: none;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  min-width: 0;
+  min-height: 34px;
+  max-height: 140px;
+  padding: 5px 2px;
+  border: 0;
+  outline: none;
+  background: none;
   color: var(--ink);
   font: inherit;
-  font-size: 13px;
-  line-height: 1.5;
-  padding: 8px 10px;
-  outline: none;
+  font-size: 13.5px;
+  line-height: 1.55;
+  resize: none;
 }
-.hub-composer textarea:focus { border-color: var(--accent-border); }
-.hub-send {
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--accent-border);
-  border-radius: 50%;
-  background: var(--accent-solid);
-  color: #fff;
-  cursor: pointer;
-}
-.hub-send:disabled { opacity: 0.4; cursor: default; }
-
-/* P4-UI-1：中栏 DM composer 是一个居中的 pill（群组 composer 保留原样：
-   它还要容纳 @ 选择器/派任务表单，不能塞进单行 pill）。 */
-.hub-composer-pill {
-  align-items: flex-end;
-  gap: 6px;
-  width: calc(100% - 36px);
-  max-width: 760px;
-  margin: 0 auto 14px;
-  padding: 6px 8px 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface);
-}
-.hub-composer-pill:focus-within { border-color: var(--accent-border); }
-.hub-composer-pill textarea {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  padding: 5px 2px;
-  min-height: 26px;
-  max-height: 160px;
-}
-.hub-composer-pill textarea:focus { border: 0; }
-.hub-composer-plus {
+.hub-composer textarea::placeholder { color: var(--text-3); }
+.hub-composer-tool {
+  position: relative;
   flex: none;
   display: grid;
   place-items: center;
   width: 28px;
   height: 28px;
+  padding: 0;
   border: 0;
   border-radius: 50%;
-  background: transparent;
+  background: none;
   color: var(--text-3);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
   cursor: pointer;
 }
-.hub-composer-plus:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
-.hub-composer-pill .hub-send { width: 28px; height: 28px; flex: none; }
+/* 视觉 28px、命中区 44px：与发送键/头像同一口径（窄屏不缩水）。 */
+.hub-composer-tool::after { content: ''; position: absolute; inset: -8px; border-radius: 50%; }
+.hub-composer-tool:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.hub-composer-tool:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-send {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--paper);
+  cursor: pointer;
+}
+.hub-send::after { content: ''; position: absolute; inset: -5px; border-radius: 50%; }
+.hub-send:hover:not(:disabled) { background: var(--accent-solid); color: #fff; }
+.hub-send:disabled { opacity: 0.36; cursor: default; }
+.hub-send:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; }
+.hub-composer-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: var(--hub-conv-max);
+  min-height: 18px;
+  margin: 7px auto 0;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.hub-composer-hint {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-composer-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.hub-composer-keys kbd {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+.hub-composer-sep { opacity: 0.5; }
 
 /* —— 资料页 / 编辑弹层（§8.5）—— */
 .hub-rail-actions { display: inline-flex; align-items: center; gap: 4px; }
@@ -1017,22 +1333,63 @@
   font-size: 10px; line-height: 1;
 }
 .hub-badge.alert { background: #c2703a; color: #fff; }
-.hub-view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
-.hub-view-toggle button {
-  border: 0; background: transparent; color: var(--text-2); font-size: 11.5px;
-  padding: 3px 8px; cursor: pointer;
+.hub-list.run { padding: 22px 28px 10px; }
+/* 工具行 = 更紧凑的 event-card（23px 图标块 / 12px 圆角），与任务卡同一条左轴。 */
+.hub-run {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: var(--hub-conv-max);
+  margin: 0 auto;
 }
-.hub-view-toggle button.on { background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--ink); }
-.hub-list.run { padding: 10px 14px; }
-.hub-run { display: flex; flex-direction: column; gap: 4px; }
 .hub-run-row {
-  display: flex; align-items: center; gap: 8px; min-height: 26px;
-  padding: 3px 6px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
-  font-size: 12.5px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--hub-tool-bg);
+  font-size: 11.5px;
 }
-.hub-run-row .hub-run-name { font-weight: 550; }
-.hub-run-row.error .hub-chip { color: #b23a2e; }
-.hub-run-row.running .hub-chip { color: #b8772a; }
+.hub-run-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  border-radius: 7px;
+  background: var(--hub-event-icon-bg);
+  color: var(--hub-event-icon-ink);
+}
+.hub-run-copy { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.hub-run-kicker {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+.hub-run-line { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; min-width: 0; }
+.hub-run-row .hub-run-name { color: var(--ink); font-family: var(--font-mono); font-size: 11.5px; }
+.hub-run-detail { min-width: 0; color: var(--text-2); font-size: 10.5px; overflow-wrap: anywhere; }
+.hub-run-status {
+  flex: none;
+  align-self: center;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.hub-run-row.error .hub-run-status { color: var(--crimson); border-color: color-mix(in srgb, var(--crimson) 40%, var(--border)); }
+.hub-run-row.running .hub-run-status { color: var(--ochre); border-color: color-mix(in srgb, var(--ochre) 40%, var(--border)); }
 
 .hub-inspector {
   width: 100%;
@@ -1191,11 +1548,6 @@
   font-size: 12px; padding: 4px 6px; border-radius: 6px; cursor: pointer;
 }
 .hub-rail-tabs button.on { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
-.hub-approval-stub { display: flex; align-items: center; gap: 8px; }
-.hub-handoff-card { display: flex; align-items: center; gap: 8px; }
-.hub-handoff-text { flex: 1; min-width: 0; }
-.hub-handoff-status { font-size: 11px; opacity: .72; white-space: nowrap; }
-.hub-handoff-status.accepted { opacity: 1; }
 .hub-chip.group-mode-auto { color: #2f7a4f; }
 .hub-chip.group-mode-ask { color: #b8772a; }
 .hub-chip.group-mode-readonly { color: var(--text-2); }
@@ -1205,8 +1557,6 @@
 .hub-digest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px; margin-bottom: 6px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .hub-chip.danger { color: var(--danger, #c0392b); border-color: currentColor; }
 .hub-chip.owner-only { margin-left: 6px; font-size: 10px; }
-.hub-msg.pending { opacity: .72; }
-.hub-msg.failed { border-color: var(--danger, #c0392b); }
 
 /* 群日预算：与 mode chip 同形，但可点击编辑（P2.5-04）。 */
 button.hub-budget-chip { border: 1px solid transparent; cursor: pointer; font: inherit; }
@@ -1255,11 +1605,7 @@ button.hub-budget-chip:hover { border-color: currentColor; }
   margin: 6px 0;
 }
 
-/* P3a-09 群内流式草稿：轻量文本 + 光标；final 到达后整条替换为 Markdown 气泡。 */
-.hub-msg.streaming .hub-body {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* P3a-09 群内流式草稿：与最终消息同一版式（作者头 + 无气泡正文），只多光标。 */
 .hub-stream-text { white-space: pre-wrap; word-break: break-word; }
 .hub-stream-caret {
   display: inline-block;
@@ -1270,7 +1616,6 @@ button.hub-budget-chip:hover { border-color: currentColor; }
   background: currentColor;
   animation: hub-caret 1s steps(1) infinite;
 }
-.streaming-chip { opacity: .72; }
 @keyframes hub-caret { 50% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
   .hub-stream-caret { animation: none; }
@@ -1332,16 +1677,11 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-mention.unknown { border-style: dashed; color: var(--text-2); cursor: default; }
 
 /* —— @ 选择器（§8.3.3）：贴 composer 上沿，z-index 高于输入区 —— */
-.hub-composer-wrap {
-  border-top: 1px solid var(--border);
-  background: var(--paper);
-}
-.hub-composer-wrap .hub-composer { border-top: 0; padding-bottom: 6px; position: relative; }
 .hub-mention-picker {
   position: absolute;
-  left: 18px;
-  right: 18px;
-  bottom: calc(100% - 2px);
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
   z-index: 40;
   background: var(--paper-2);
   color: var(--ink);
@@ -1386,24 +1726,14 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-mention-option .hub-chip { margin-left: auto; }
 .hub-mention-empty { padding: 10px 12px; font-size: 12px; color: var(--text-3); }
 
-/* composer 底栏：对话/派任务切换 + 提示（§8.3.3「仅记录」） */
-.hub-composer-foot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 0 18px 10px;
-  font-size: 11px;
-}
-.hub-composer-hint { min-width: 0; }
+/* 派任务说明：紧跟 composer meta 行，宽度与 pill 对齐。 */
 .hub-assign-note {
-  max-width: 760px;
+  width: 100%;
+  max-width: var(--hub-conv-max);
   margin: 0 auto;
-  padding: 0 18px 10px;
-  font-size: 11.5px;
+  padding: 6px 2px 0;
   color: var(--text-2);
+  font-size: 11px;
 }
 
 /* —— 派任务表单（§7.1.3 / §8.3.3）—— */
@@ -1482,88 +1812,175 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-conv-stop:disabled { opacity: 0.45; cursor: default; text-decoration: none; }
 @keyframes hub-conv-pulse { 50% { opacity: 0.3; } }
 
-/* —— 任务结果卡（§7.5.5）—— */
-.hub-msg.task { align-items: stretch; }
-.hub-task-card {
+/* —— 事件卡（任务 / 交接 / 审批 / 产物）：demo 的 event-card 解剖 ——
+ *
+ * 29px 图标块 + mono kicker + 12px 标题 + meta + 右侧状态；
+ * 正文与操作缩进 38px（= 图标 29 + gap 9），与标题列对齐。
+ * 只重排现有数据：不加 demo 里的「预览 / 打开私有审批」这类没有 handler 的假按钮。 */
+.hub-msg.task { display: flex; padding-left: 42px; }
+.hub-msg.task > .hub-event { flex: 1; }
+/* 交接/审批卡直接挂在时间线上：与 agent 正文同一条左轴（32 + 10 = 42），
+   和任务卡（.hub-msg.task）一致；任务卡在自己的 wrapper 里不再叠加。 */
+.hub-thread > .hub-event { margin-left: 42px; }
+.hub-event {
+  display: flex;
+  gap: 9px;
+  width: 100%;
+  max-width: 560px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--hub-event-bg);
+  color: var(--ink);
+}
+.hub-event-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 29px;
+  height: 29px;
+  margin-top: 1px;
+  border-radius: 9px;
+  background: var(--hub-event-icon-bg);
+  color: var(--hub-event-icon-ink);
+}
+.hub-event.tone-success .hub-event-icon,
+.hub-event--task.tone-success .hub-event-icon { color: var(--success); }
+.hub-event.tone-error .hub-event-icon,
+.hub-event--task.tone-error .hub-event-icon { color: var(--danger); }
+.hub-event.tone-warn .hub-event-icon,
+.hub-event--task.tone-warn .hub-event-icon { color: var(--warning); }
+.hub-event.tone-info .hub-event-icon,
+.hub-event--task.tone-info .hub-event-icon { color: var(--accent-solid); }
+.hub-event-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.hub-event-top { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.hub-event-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.hub-event-kicker {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+.hub-event-title {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.hub-event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.hub-event-who { color: var(--text-2); }
+.hub-event-status {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--text-2);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.hub-event-status.success { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.hub-event-status.error { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.hub-event-status.warn,
+.hub-event-status.pending_ack { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+.hub-event-status.info { color: var(--accent-solid); background: var(--accent-weak); }
+.hub-event-status.muted { color: var(--text-2); }
+.hub-event-status.accepted { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.hub-event-status.declined { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.hub-event-body {
+  margin: 8px 0 0 38px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hub-event-error {
+  margin: 8px 0 0 38px;
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hub-event-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 9px 0 0 38px;
+}
+.hub-event-id {
+  min-width: 0;
+  max-width: 200px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-event-action {
+  margin-left: auto;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.hub-event-action:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.hub-event-action:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-task-open { margin-left: auto; }
+
+/* 产物区：event-card 里的次级行（26px 文件块 + 名称 + 路径 + 计量）。 */
+.hub-artifacts {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-width: 640px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--text-3);
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--ink);
+  margin: 9px 0 0 38px;
+  container-type: inline-size;
 }
-.hub-task-card.tone-success { border-left-color: var(--success); }
-.hub-task-card.tone-error { border-left-color: var(--danger); }
-.hub-task-card.tone-warn { border-left-color: var(--warning); }
-.hub-task-card.tone-info { border-left-color: var(--accent-solid); }
-.hub-task-card-who {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-}
-.hub-task-from {
-  margin-left: auto;
-  color: var(--text-3);
-  font-size: 10.5px;
-  white-space: nowrap;
-}
-.hub-task-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.hub-task-status {
-  flex: none;
-  padding: 1px 7px;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  font-size: 10.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.hub-task-status.success { color: var(--success); background: color-mix(in srgb, var(--success) 13%, transparent); }
-.hub-task-status.error { color: var(--danger); background: color-mix(in srgb, var(--danger) 13%, transparent); }
-.hub-task-status.warn { color: var(--warning); background: color-mix(in srgb, var(--warning) 13%, transparent); }
-.hub-task-status.info { color: var(--accent-solid); background: var(--accent-weak); }
-.hub-task-status.muted { color: var(--text-2); background: color-mix(in srgb, var(--ink) 6%, transparent); }
-.hub-task-title {
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-.hub-task-summary { margin: 0; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
-.hub-task-error { margin: 0; font-size: 12px; color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; }
-/* 产物区：文件图标 + 名称 + 路径 + 计量；与运行时 ArtifactsBlock 同一套信息层级。 */
-.hub-artifacts { display: flex; flex-direction: column; gap: 5px; padding-top: 2px; container-type: inline-size; }
 .hub-artifacts-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
-.hub-artifacts-title { color: var(--text-2); font-size: 11px; }
-.hub-artifacts-title b { color: var(--ink); font-weight: 600; }
-.hub-artifacts-list { list-style: none; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; }
+.hub-artifacts-title { color: var(--text-3); font-size: 10px; }
+.hub-artifacts-title b { color: var(--text-2); font-weight: 600; }
+.hub-artifacts-list { list-style: none; display: flex; flex-direction: column; gap: 5px; margin: 0; padding: 0; }
 .hub-artifact {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   min-width: 0;
-  padding: 7px 9px;
+  padding: 6px 8px;
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--paper) 88%, var(--surface));
+  background: color-mix(in srgb, var(--paper) 55%, transparent);
 }
 .hub-artifact-badge {
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
   border-radius: 7px;
   background: var(--accent-weak);
   color: var(--accent-solid);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 8.5px;
+  font-family: var(--font-mono);
+  font-size: 8px;
   font-weight: 700;
   letter-spacing: 0.02em;
 }
@@ -1571,7 +1988,7 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-artifact-name {
   overflow: hidden;
   color: var(--ink);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   font-weight: 550;
   text-overflow: ellipsis;
@@ -1580,7 +1997,7 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-artifact-path {
   overflow: hidden;
   color: var(--text-3);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1609,39 +2026,23 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   background: transparent;
 }
 @container (max-width: 380px) {
-  .hub-artifact { grid-template-columns: 28px minmax(0, 1fr); }
+  .hub-artifact { grid-template-columns: 26px minmax(0, 1fr); }
   .hub-artifact-meta { grid-column: 2; flex-wrap: wrap; gap: 4px 7px; }
 }
-@media (max-width: 640px) {
-  .hub-msg-head { flex-wrap: wrap; }
-  .hub-msg.agent .hub-msg-head,
-  .hub-msg.agent.hub-group-msg .hub-body { max-width: 100%; }
-  .hub-msg.human .hub-msg-head,
-  .hub-msg.human.hub-group-msg .hub-body { max-width: 92%; }
-  .hub-agent-role { max-width: 130px; }
-  .hub-msg-time { margin-left: 0; }
-}
-.hub-task-card-foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding-top: 6px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  font-size: 11px;
-  color: var(--text-3);
-}
-.hub-task-open { margin-left: auto; }
+
+/* 旧任务详情面板仍在用（HubInspector），保留这一条不动。 */
+.hub-task-summary { margin: 0; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* —— 正在输入（§7.5.3）—— */
+.hub-typing.idle { padding: 0; margin: 0 auto; }
 .hub-typing {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: 760px;
+  max-width: var(--hub-conv-max);
   margin: 0 auto;
-  padding: 6px 18px 0;
-  font-size: 11.5px;
+  padding: 0 2px 6px;
+  font-size: 11px;
   color: var(--text-3);
 }
 .hub-typing-dots { display: inline-flex; align-items: flex-end; gap: 3px; height: 10px; }
@@ -1708,7 +2109,7 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 /* 系统行/路由回执是窄条：圆角按行高收一点，别把整行画成气泡。 */
 .hub-msg.system.hub-msg-highlight,
 .hub-action.hub-msg-highlight,
-.hub-system-note.hub-msg-highlight { border-radius: 999px; }
+.hub-system-note.hub-msg-highlight { border-radius: 8px; }
 @keyframes hub-msg-highlight-in {
   from { background-color: transparent; outline-color: transparent; }
 }
@@ -1888,6 +2289,50 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 
 /* 窄窗（≤1100）：Hub section 的头/页签必须保持单行 —— 隐藏计数与返回文案、
    收紧间距；1440 布局不受影响，返回/新建按钮仍可用 aria-label/title 触达。 */
+/* —— 会话区响应式：900 / 640（390 与 640 同档，只靠换行）——
+ * 目标：0 横向溢出；消息留白 18/14 → 14/12；header actions 从右侧收成第二行。 */
+@media (max-width: 900px) {
+  .hub-conv-head { padding: 10px 14px; }
+  .hub-conv-actions { flex: 1 0 100%; justify-content: flex-start; margin-left: 0; }
+  .hub-list,
+  .hub-list.run { padding: 18px 14px 8px; }
+  .hub-composer-wrap { padding: 7px 12px 10px; }
+  .hub-msg.task { padding-left: 0; }
+  .hub-thread > .hub-event { margin-left: 0; }
+}
+@media (max-width: 640px) {
+  .hub-conv-head { padding: 9px 12px; gap: 8px; }
+  .hub-conv-id { gap: 9px; flex-basis: 100%; }
+  .hub-conv-line strong { font-size: 14px; }
+  .hub-conv-sub { font-size: 11px; }
+  .hub-conv-names { display: none; }
+  .hub-conv-actions { gap: 4px; }
+  .hub-action-btn { padding: 5px 6px; font-size: 10.5px; }
+  .hub-seg button { padding: 5px 6px; font-size: 10.5px; }
+  .hub-pill { padding: 4px 8px; font-size: 10px; }
+  .hub-list,
+  .hub-list.run { padding: 14px 12px 6px; }
+  .hub-thread,
+  .hub-group-view .hub-thread-flat,
+  .hub-group-view .hub-thread-grouped { gap: 18px; }
+  .hub-msg.agent { grid-template-columns: 32px minmax(0, 1fr); gap: 8px; }
+  .hub-msg-body { font-size: 13.5px; }
+  .hub-msg.human .hub-msg-main { max-width: 88%; }
+  .hub-msg-time { margin-left: 0; }
+  .hub-user-bubble { padding: 9px 12px; font-size: 13.5px; }
+  .hub-composer-wrap { padding: 6px 12px 9px; }
+  .hub-composer { border-radius: 18px; padding: 7px 7px 7px 8px; }
+  .hub-composer-keys { display: none; }
+  .hub-composer-hint { flex-basis: 100%; white-space: normal; }
+  .hub-event { padding: 9px 10px; }
+  .hub-event-body,
+  .hub-event-error,
+  .hub-event-foot,
+  .hub-artifacts { margin-left: 0; }
+  .hub-msg.task { padding-left: 0; }
+  .hub-typing { padding-bottom: 4px; }
+}
+
 @media (max-width: 1100px) {
   .hub-side-head { gap: 4px; padding: 4px 6px 2px 10px; }
   .hub-side-title { gap: 4px; font-size: 10.5px; letter-spacing: 0.04em; }

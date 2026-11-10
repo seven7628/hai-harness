@@ -21,9 +21,8 @@ export default function TaskArtifacts({ artifacts }: { artifacts: HubTaskArtifac
   return (
     <section className="hub-artifacts" aria-label={t('artifacts.aria').replace('{n}', String(artifacts.length))}>
       <header className="hub-artifacts-head">
-        <span className="hub-artifacts-title">
-          {t('artifacts.head')} <b>{artifacts.length}</b> {t('artifacts.files')}
-        </span>
+        <span className="hub-event-kicker">Artifacts</span>
+        <span className="hub-artifacts-title"><b>{artifacts.length}</b> {t('artifacts.files')}</span>
       </header>
       <ul className="hub-artifacts-list">
         {artifacts.map((a, i) => {
