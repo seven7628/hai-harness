@@ -96,6 +96,8 @@ type Injection struct {
 	// 单独留一个字段是因为它**不是记忆内容**：评估时要能把"模型自己写的索引"与
 	// "宿主加的提示"分开归因（同 guidance 的边界）。
 	Dream string
+	// DreamTask 待办提示（仅当今天还没自动处理过、且回归命令已配置时出现）。
+	DreamTask string
 }
 
 // Empty 无注入文本。装配层据此**不改动系统提示词的任何字节**。
@@ -131,6 +133,13 @@ func (c Config) BuildInjection(d Dir) (Injection, error) {
 		if line := dreamNotice(n, c.Now()); line != "" {
 			inj.Text += "\n\n" + line
 			inj.Dream = line
+			// 今天还没自动处理过 → 把提示变成可执行的任务（每天最多一次）。
+			if c.AutoDreamBlocker(d) == "" {
+				if task := dreamTask(n, DreamEvalCommand()); task != "" {
+					inj.Text += "\n" + task
+					inj.DreamTask = task
+				}
+			}
 		}
 	}
 	return inj, nil

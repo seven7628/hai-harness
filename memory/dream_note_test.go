@@ -171,3 +171,43 @@ func TestDreamNoteZeroConfigDoesNotPanic(t *testing.T) {
 		t.Fatal("刚跑完不该再跑")
 	}
 }
+
+// "每天最多一次"落地为：今天没归档过 + 配了回归命令 → 提示升级成待办；
+// 否则只报告现状，不催。
+func TestDreamTaskAppearsOnlyWhenActionable(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	d := memDir(t)
+	writeIndex(t, d, "- [a.md](a.md) — 甲\n")
+	cfg := noteCfg(now)
+	if err := cfg.SaveDreamNote(d, DreamNote{At: now.Add(-time.Hour), DeadAnchors: 8}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 没配回归命令：只报告，不催归档（因为归档后没法验证）。
+	t.Setenv(EnvDreamEvalCommand, "")
+	inj, _ := cfg.BuildInjection(d)
+	if inj.Dream == "" || inj.DreamTask != "" {
+		t.Fatalf("没配回归命令时不该出现待办：dream=%q task=%q", inj.Dream, inj.DreamTask)
+	}
+
+	// 配了：出现待办，且指向工具与命令。
+	t.Setenv(EnvDreamEvalCommand, "python3 eval.py")
+	inj, _ = cfg.BuildInjection(d)
+	if inj.DreamTask == "" {
+		t.Fatal("配了回归命令后应出现待办")
+	}
+	for _, want := range []string{"memory_dream", "python3 eval.py", "最多 2 条"} {
+		if !contains(inj.DreamTask, want) {
+			t.Fatalf("待办缺少 %q：%s", want, inj.DreamTask)
+		}
+	}
+
+	// 今天已经归档过：不再催。
+	if err := cfg.MarkAutoDream(d, 1); err != nil {
+		t.Fatal(err)
+	}
+	inj, _ = cfg.BuildInjection(d)
+	if inj.DreamTask != "" {
+		t.Fatalf("今天已归档过，不该再催：%q", inj.DreamTask)
+	}
+}

@@ -149,7 +149,7 @@ func dreamNotice(n DreamNote, now time.Time) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("上次盘点（%s）：%s。完整报告用 `memory_dream` 看。",
+	return fmt.Sprintf("上次盘点（%s）：%s。完整证据用 memory_dream 取。",
 		humanAge(age), strings.Join(parts, "、"))
 }
 
@@ -163,4 +163,24 @@ func humanAge(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%d 天前", int(d.Hours()/24))
 	}
+}
+
+// dreamTask 在"今天还没自动处理过"时追加一句待办，把提示变成可执行的任务。
+//
+// 为什么要单独一句：只说"有 8 条锚点失效"是在报告现状，模型可能就不动了。
+// 说"今天未处理 → 用 memory_dream 取证据"才是把决定权交给模型而不把它漏掉。
+// 仍然只陈述事实与动作名，不写"建议清理"这类判断。
+func dreamTask(n DreamNote, evalCmd string) string {
+	if !n.HasIssues() {
+		return ""
+	}
+	s := "待处理：今天尚未归档过。用 memory_dream(action=evidence) 取证据，"
+	s += "按其结果提交 decisions；宿主会先过快照与保护清单，"
+	s += "单次最多 2 条、7 天内动过的不动。"
+	if evalCmd != "" {
+		s += "归档后跑回归命令 `" + evalCmd + "`，不通过就用返回的快照恢复。"
+	} else {
+		s += "没有配置回归命令（" + EnvDreamEvalCommand + "），本次只允许查看证据、不允许归档。"
+	}
+	return s
 }
