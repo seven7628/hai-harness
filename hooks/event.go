@@ -94,6 +94,10 @@ type Payload struct {
 	TurnID         string          `json:"turn_id,omitempty"`
 	AgentID        string          `json:"agent_id,omitempty"`
 	AgentType      string          `json:"agent_type,omitempty"`
+	// Owner 本次派发的**信任归属**（workspace:<path> | agent:<id> | group:<id>）。
+	// json:"-"：归属是宿主内部概念，不进 hook 进程的 stdin 契约（那是 Claude 兼容面，
+	// 加字段等于扩协议）；hook 需要它时应由宿主经环境变量/参数显式给出。
+	Owner string `json:"-"`
 }
 
 // ToolResponse 工具结果的精简表示（够 hook 判断成败与拿到文件路径）。

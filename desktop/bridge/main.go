@@ -1291,21 +1291,18 @@ type manager struct {
 	// m.mu 形成锁序环；回收路径见 releasePreviewSlot / releaseAllPreviewSlots。
 	previewMu    sync.Mutex
 	previewSlots map[string]*previewSlot
-	// hookTrust hooks 信任库 —— **进程级单例，owner = 进程**（BR-21 显式化，非工作区槽位）。
+	// hookTrust hooks 信任库 —— **实例 = 进程级一份**（一个文件、即刻生效），
+	// **条目 = 按归属（owner）隔离**：workspace:<path> / agent:<id> / group:<id>。
 	//
-	// 为什么不能按工作区各造一份（审计 BR-21 原写法要求「按 workspace 分槽」，这里刻意
-	// 不照做，理由必须写清）：
-	//   1. 真相源是**一个全局文件** ~/.go-code/hooks-state.json（TrustStore 的 entries 与
-	//      managed 表）。按工作区分槽 = 多份内存副本写同一文件 → 后写覆盖前写，
-	//      在工作区 B 里确认过的 hook 会在 A 下一次写入时被静默抹掉（hooks 突然不跑了）。
-	//   2. 信任判定的粒度是「命令内容哈希」，不是工作区：Entry{Hash,Scope,Reason} 里没有
-	//      工作区维度，按工作区隔离需要改文件 schema + 迁移既有确认记录；不做迁移就等于
-	//      升级后所有已确认的 hook 静默回到「未信任」（与 GO-11 同一类「升级即静默关功能」）。
-	//      这是安全模型的产品决策，不属于本批止血范围（见交付报告的 blocked 项）。
-	//   3. 契约 §5.5 要求信任**即刻生效**：判定发生在每次派发时，面板的 hooks_trust 写的
-	//      就是这一个实例 —— 分槽后必需重建会话才生效，直接破坏该契约。
-	// 共享实例本身是正确设计；本批做的是把它的 owner（进程）与生命周期写进契约注释，
-	// 并用 workspace_slots_test.go 的回归钉住「同一实例 + 即刻生效」。
+	// 两层要分清（这正是审计 BR-21 的修法）：
+	//   - 共享实例：信任判定发生在每次派发时（Runner.Dispatch → TrustStore.Check），
+	//     面板的 hooks_trust 写的必须是同一个实例，否则新确认要重建会话才生效（契约
+	//     §5.5 要求即刻生效）；多份副本还会互相覆盖 ~/.go-code/hooks-state.json。
+	//   - 隔离归属：每条确认记在「哪个 owner 点过」名下。A 智能体/群的确认不得让
+	//     B 免确认；同一 agent 的 DM 与群聊也不共享（产品决策：选最安全的不共享）。
+	//     项目会话按 workspace 归属；Hub DM 按 agent；Hub 群聊按 group。
+	// 迁移：旧版全局条目落在 legacy 名下，只对 workspace 维兼容生效（见 hooks/trust.go）。
+	// 归属派生：bridge/owner_wire.go 的 ownerFromPayload / ownerOfSession（唯一入口）。
 	hookTrustMu sync.Mutex
 	hookTrust   *hooks.TrustStore
 }

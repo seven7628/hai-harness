@@ -2,12 +2,12 @@ package main
 
 // BR-21 回归：预览转换器的**工作区槽位**（owner = 工作区）+ 进程级单例的生命周期。
 //
-// 审计原文把 xlsxPV/docxPV/pptxPV/hookTrust/imPlugin 一起记成「进程级/全局单例，按 workspace
-// 分槽」。这五者其实分两类，本文件把两类各自的不变式钉住：
-//   - 预览器：沙箱根按工作区构造 → 必须按工作区分槽，且 root 只能来自槽位（不能来自调用点）；
-//   - hookTrust / imPlugin：真相源本身就是全局的（hooks-state.json / 一个 IM 账号） →
-//     owner 是**进程**，按工作区分槽会拆出多份互相覆盖的副本。它们的不变式是「跨工作区共享
-//     同一实例 + 生命周期归进程」（工作区级 Close 不得停掉它）。
+// 五者分两类，本文件各钉一条不变式：
+//   - 预览器：沙箱根按工作区构造 → 按工作区建槽，root 只能来自槽位（不能来自调用点）；
+//   - hookTrust / imPlugin：**底层连接/账本是进程级一份**（一个 hooks-state.json、
+//     一个 IM 账号），但**归属（owner）必须隔离** —— 条目按 agent/group/workspace 分表，
+//     启用与路由按 owner 记。共享实例是为了「即刻生效 / 不断线」，不是为了让授权互通。
+//     owner 维度的断言见 hooks_owner_test.go / im_owner_test.go；本文件只钉连接生命周期。
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/seven7628/hai-harness/im"
+	"github.com/seven7628/hai-harness/owner"
 	"github.com/seven7628/hai-harness/plugin"
 	implugin "github.com/seven7628/hai-harness/plugin/im"
 )
@@ -160,22 +161,28 @@ func TestShutdownWorkspaceReleasesPreviewSlot(t *testing.T) {
 	}
 }
 
-// TestHookTrustStoreSharedAcrossWorkspaces 钉住「信任库 owner = 进程」这条决策：
-// 两个工作区的会话装配必须拿到**同一个** TrustStore 实例（否则 hooks_trust 写完不即刻生
-// 效，或多份副本互相覆盖 ~/.go-code/hooks-state.json）。
-func TestHookTrustStoreSharedAcrossWorkspaces(t *testing.T) {
+// TestHookTrustStoreSingleInstanceOwnerScoped 钉住两件**同时成立**的事：
+//  1. 实例是进程级一份（一个文件、即刻生效，契约 §5.5）—— 否则 hooks_trust 写完要
+//     重建会话才生效，或多份副本互相覆盖 ~/.go-code/hooks-state.json；
+//  2. 条目**按 owner 隔离** —— 同一实例里 agent:a 的确认对 agent:b / group:g /
+//     workspace:w 一律不生效（旧实现在这里正是「全局 trusted」，即审计的跨 owner 越权）。
+func TestHookTrustStoreSingleInstanceOwnerScoped(t *testing.T) {
 	m, _ := testManager(t)
 	ts1 := m.hookTrustStore()
 	ts2 := m.hookTrustStore()
 	if ts1 != ts2 {
-		t.Fatal("hookTrustStore 必须返回同一实例（跨工作区共享；见 main.go 字段注释）")
+		t.Fatal("hookTrustStore 必须返回同一实例（一个文件、即刻生效）")
 	}
-	// 同一实例写入后立即可读 —— 契约 §5.5「信任即刻生效」的最小证据。
-	if err := ts1.Trust("echo hi", "project", "test"); err != nil {
+	if err := ts1.Trust(owner.Agent("a"), "echo hi", "project", "test"); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
-	if got := ts2.Check("echo hi"); got != "trusted" {
-		t.Fatalf("共享实例写入后应立即可见，得到 %q", got)
+	if got := ts2.Check(owner.Agent("a"), "echo hi"); got != "trusted" {
+		t.Fatalf("同 owner 写入后应立即可见（共享实例），得到 %q", got)
+	}
+	for _, other := range []string{owner.Agent("b"), owner.Group("g"), owner.Workspace("/ws/x")} {
+		if got := ts2.Check(other, "echo hi"); got != "untrusted" {
+			t.Fatalf("%s 不得继承 agent:a 的确认，得到 %q", other, got)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".go-code", "hooks-state.json")); err != nil {
 		t.Fatalf("信任库应落在隔离 HOME 下的 hooks-state.json: %v", err)

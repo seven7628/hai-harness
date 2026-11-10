@@ -8,6 +8,7 @@ import (
 
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/hooks"
+	"github.com/seven7628/hai-harness/owner"
 	"github.com/seven7628/hai-harness/session"
 )
 
@@ -111,14 +112,24 @@ func (m *manager) hookTrustStore() *hooks.TrustStore {
 	return m.hookTrust
 }
 
-// hooksFor 返回某会话应装配的 hook 聚合。
+// hooksFor 返回某会话应装配的 hook 聚合（owner = 信任归属，见 hooks/trust.go）。
 // 参数 d 为 nil（该工作区无 hooks）→ 返回 nil，Session 侧全钩子为 nil（零开销）。
-func hooksFor(d *hooks.Dispatcher, workspace, sessionID string) *events.ToolHooks {
+//
+// owner 必须由调用方按会话身份给出，**不能**在这里从 cwd 猜：Hub 会话的 cwd 是智能体
+// home（不是项目），按 cwd 派生会得到 workspace:<hub home> —— 一个谁都不该拥有的归属。
+func hooksFor(d *hooks.Dispatcher, workspace, sessionID, ownerID string) *events.ToolHooks {
 	if d == nil {
 		return nil
 	}
-	return d.ToolHooks(workspace, sessionID)
+	return d.ToolHooksFor(workspace, sessionID, ownerID)
 }
+
+// projectHookOwner 项目会话的信任归属（workspace 维）。
+func projectHookOwner(wsPath string) string { return owner.Workspace(wsPath) }
+
+// hubHookOwner Hub 会话的信任归属：DM → agent:<id>，群聊 → group:<group>。
+// 取不到（不是 Hub 会话 id）→ 空串：信任闸门一律判未信任（不猜归属，不落回全局）。
+func hubHookOwner(sessionID string) string { return owner.FromSessionID(sessionID, "") }
 
 // hooksOption 装配某会话的 hooks（配置 + 信任库 → 派发器 → ToolHooks）并作为 Session 选项返回。
 //
@@ -126,7 +137,7 @@ func hooksFor(d *hooks.Dispatcher, workspace, sessionID string) *events.ToolHook
 // 必须走完全同一条装配链 —— 否则"新建的会话"和"改过配置后的会话"会拿到不同的 hooks，
 // 而且只在改过一次配置之后才暴露（最难查的一类偏差）。
 func (m *manager) hooksOption(wsPath, id string, warn func(name, message string)) session.Option {
-	return session.WithHooks(hooksFor(m.setupHooks(wsPath, warn), wsPath, id))
+	return session.WithHooks(hooksFor(m.setupHooks(wsPath, warn), wsPath, id, projectHookOwner(wsPath)))
 }
 
 // hooksOptionUser 是 Hub 智能体会话的装配入口（P4-04a）：**只装用户级来源**，
@@ -140,7 +151,7 @@ func (m *manager) hooksOption(wsPath, id string, warn func(name, message string)
 // cwd 传 home 而不是空串：hook 进程的 GOCODE_PROJECT_DIR/CLAUDE_PROJECT_DIR 与
 // payload.cwd 需要指向一个真实存在、且属于该智能体的目录（其读写边界）。
 func (m *manager) hooksOptionUser(cwd, id string, warn func(name, message string)) session.Option {
-	return session.WithHooks(hooksFor(m.setupUserHooks(warn), cwd, id))
+	return session.WithHooks(hooksFor(m.setupUserHooks(warn), cwd, id, hubHookOwner(id)))
 }
 
 // reloadWorkspaceHooks 重读该工作区的 hooks 配置并推给它的**全部会话**（hooks_set 后调用）。
@@ -169,7 +180,7 @@ func (m *manager) reloadWorkspaceHooks(wsPath string) int {
 			continue // nil 会话（防御）：跳过；创建中的会话可能已读旧配置，且晚于本次快照注册（窄窗口，下次创建/重开读新配置）
 		}
 		// 每会话一个派发器（与会话创建路径一致）：派发器的会话级去重表属于该会话。
-		bs.s.SetHooks(hooksFor(m.setupHooks(wsPath, bs.warnHook), wsPath, bs.id))
+		bs.s.SetHooks(hooksFor(m.setupHooks(wsPath, bs.warnHook), wsPath, bs.id, projectHookOwner(wsPath)))
 		n++
 	}
 	if n > 0 {
@@ -213,7 +224,7 @@ func (m *manager) reloadHubRuntimeHooks(runtimes []*workspaceRuntime) int {
 				continue // nil 会话（防御）：跳过；创建中的会话可能已读旧配置，且晚于本次快照注册（窄窗口，下次创建/重开读新配置）
 			}
 			// 每会话一个派发器（与创建路径一致）：派发器的会话级去重表属于该会话。
-			bs.s.SetHooks(hooksFor(m.setupUserHooks(bs.warnHook), ws.path, bs.id))
+			bs.s.SetHooks(hooksFor(m.setupUserHooks(bs.warnHook), ws.path, bs.id, hubHookOwner(bs.id)))
 			n++
 		}
 		if n > 0 {

@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/seven7628/hai-harness/hooks"
+	"github.com/seven7628/hai-harness/owner"
 )
 
 // hookSourceView 一个 hooks 配置来源（契约 §5.3；字段名与前端 HookSourceView 一一对齐）。
@@ -38,6 +39,13 @@ type hookSourceView struct {
 	UnknownKeys []string         `json:"unknownKeys,omitempty"` // 顶层未识别键（保存后不保留）
 	Body        *hooks.Section   `json:"body"`                  // hooks 段模型（编辑与回写用）
 	Claude      []hookClaudeFile `json:"claude,omitempty"`      // 仅项目来源：.claude 兼容层（只读）
+	// Owner 该来源的信任归属（项目 → workspace:<path>；用户级 → 当前会话 owner）。
+	// 信任是**按 owner** 存与判的：同一条命令在不同归属下各自确认，互不继承。
+	Owner string `json:"owner"`
+	// Trust 该来源命令在本来源 owner 下的信任状态（命令 → managed|trusted|untrusted|modified）。
+	Trust map[string]string `json:"trust"`
+	// OwnerLabel 归属的人类可读短标签（设置页展示「这条确认给谁」）。
+	OwnerLabel string `json:"ownerLabel"`
 }
 
 // hookClaudeFile 项目里的 Claude Code 兼容层文件（只读，存在时才列出）。
@@ -64,8 +72,18 @@ type hooksInfo struct {
 	ClaudeUser *hookSourceView   `json:"claudeUser"` // 文件不存在 → null（前端据此隐藏卡片）
 	Projects   []hookSourceView  `json:"projects"`
 	Effective  hooksEffective    `json:"effective"`
-	Trust      map[string]string `json:"trust"` // 命令 → managed|trusted|untrusted|modified
+	Trust      map[string]string `json:"trust"` // 命令 → managed|trusted|untrusted|modified（当前 owner）
 	Warnings   []string          `json:"warnings"`
+	// Owner/OwnerKind/OwnerLabel 本次请求的**当前归属**（用户级来源的信任判定按它）。
+	// 前端必须把它回传进 hooks_trust —— 没有归属的确认在服务端会被拒绝（不写全局）。
+	Owner      string `json:"owner"`
+	OwnerKind  string `json:"ownerKind"`
+	OwnerLabel string `json:"ownerLabel"`
+	// LegacyTrust 当前 owner 下「只靠迁移前全局条目生效」的命令（UI 提示重新确认用）。
+	// 只对 workspace owner 可能出现（agent/group 不继承旧全局条目）。
+	LegacyTrust []string `json:"legacyTrust,omitempty"`
+	// Owners 已登记过确认的归属清单（诊断/展示：让人看见信任库不是全局一件事）。
+	Owners []string `json:"owners,omitempty"`
 }
 
 // projectHooksPath 项目级 hooks 文件（{ws}/.go-code/hooks.json，整文件即 hooks 段）。
@@ -89,13 +107,25 @@ func claudeUserHooksPath() string {
 func (m *manager) handleHooksList(c command) {
 	info := hooksInfo{Projects: []hookSourceView{}, Trust: map[string]string{}, Warnings: []string{}}
 
+	// 当前归属：payload.owner（设置页显式给）→ session_id（Hub 会话按 agent/group）→ workspace。
+	// 没有归属时**不**落回全局：用户级来源的信任状态标成 unbound（前端会提示"未绑定归属"）。
+	curOwner, curOwnerErr := ownerFromPayload(c)
+	info.Owner = curOwner
+	info.OwnerKind = owner.Kind(curOwner)
+	info.OwnerLabel = owner.Label(curOwner)
+	if curOwnerErr != nil {
+		info.Warnings = append(info.Warnings, curOwnerErr.Error())
+	}
+
 	// 用户级：~/.go-code/settings.json 的 hooks 段（可编辑）。
 	userSrc := hooks.ReadSource(homeCfgPath("settings.json"), "hooks")
 	info.User = sourceView("user", "user", "用户配置", "", true, userSrc)
+	info.User.Owner, info.User.OwnerLabel = curOwner, owner.Label(curOwner)
 
 	// Claude 兼容层（只读）：文件不存在 → null（卡片只在文件存在时出现）。
 	if cs := hooks.ReadSource(claudeUserHooksPath(), "hooks"); cs.Present {
 		v := sourceView("claude-user", "claude-user", "Claude 兼容（只读）", "", false, cs)
+		v.Owner, v.OwnerLabel = curOwner, owner.Label(curOwner)
 		info.ClaudeUser = &v
 	}
 
@@ -104,6 +134,9 @@ func (m *manager) handleHooksList(c command) {
 	// 项目级：每个前端发来的工作区一项（前端按"已绑定 + 目录还在"过滤）。
 	for _, ws := range workspaces {
 		p := sourceView("project:"+ws, "project", filepath.Base(ws), ws, true, hooks.ReadSource(projectHooksPath(ws), ""))
+		// 项目来源的归属**恒为该项目**（与当前打开哪个会话无关）：项目级 hooks 只在该
+		// 工作区的会话里派发，信任也应当落在它自己的 owner 上。
+		p.Owner, p.OwnerLabel = projectHookOwner(ws), owner.Label(projectHookOwner(ws))
 		exists := false
 		if st, err := os.Stat(ws); err == nil && st.IsDir() {
 			exists = true
@@ -141,32 +174,55 @@ func (m *manager) handleHooksList(c command) {
 	}
 
 	// 信任状态：覆盖所有返回 body 里出现的命令（含只读兼容层，用户要能查到"为什么没跑"）。
-	// 项目层放最后：同名命令在多层出现时以更严格的项目层判定为准。
+	// **按来源自己的 owner 判定**（项目 → workspace:<该项目>；用户级 → 当前会话归属），
+	// 顶层 trust 只放当前 owner 的视图（前端用户级卡片用它），项目卡片读各自的 src.trust。
 	trust := m.hookTrustStore()
-	collect := func(src hookSourceView, scope string) {
+	info.Owners = trust.Owners()
+	collect := func(src *hookSourceView, scope string) {
+		if src.Trust == nil {
+			src.Trust = map[string]string{}
+		}
 		for _, cmd := range commandsOf(src.Body) {
-			info.Trust[cmd] = trustStatusOf(trust, cmd, scope, reqTrust)
+			st := trustStatusOf(trust, src.Owner, cmd, scope, reqTrust)
+			src.Trust[cmd] = st
+			if src.Owner == curOwner {
+				info.Trust[cmd] = st
+				if trust.LegacyOnly(src.Owner, cmd) {
+					info.LegacyTrust = append(info.LegacyTrust, cmd)
+				}
+			}
 		}
 	}
-	collect(info.User, "user")
+	info.LegacyTrust = dedupeStrings(info.LegacyTrust)
+	collect(&info.User, "user")
 	if info.ClaudeUser != nil {
-		collect(*info.ClaudeUser, "claude-user")
+		collect(info.ClaudeUser, "claude-user")
 	}
-	for _, p := range info.Projects {
+	for i := range info.Projects {
+		p := &info.Projects[i]
 		collect(p, "project")
 		for _, cf := range p.Claude {
 			for _, cmd := range commandsOf(cf.Body) {
-				info.Trust[cmd] = trustStatusOf(trust, cmd, "claude-project", reqTrust)
+				st := trustStatusOf(trust, p.Owner, cmd, "claude-project", reqTrust)
+				p.Trust[cmd] = st
+				if p.Owner == curOwner {
+					info.Trust[cmd] = st
+				}
 			}
 		}
 	}
 	m.resp(c, true, "", map[string]any{
-		"user":       info.User,
-		"claudeUser": info.ClaudeUser, // nil → JSON null（前端据此隐藏卡片）
-		"projects":   info.Projects,
-		"effective":  info.Effective,
-		"trust":      info.Trust,
-		"warnings":   info.Warnings,
+		"user":        info.User,
+		"claudeUser":  info.ClaudeUser, // nil → JSON null（前端据此隐藏卡片）
+		"projects":    info.Projects,
+		"effective":   info.Effective,
+		"trust":       info.Trust,
+		"owner":       info.Owner,
+		"ownerKind":   info.OwnerKind,
+		"ownerLabel":  info.OwnerLabel,
+		"legacyTrust": info.LegacyTrust,
+		"owners":      info.Owners,
+		"warnings":    info.Warnings,
 	})
 }
 
@@ -220,7 +276,12 @@ func (m *manager) handleHooksSet(c command) {
 	m.resp(c, true, "", map[string]any{"changed": true})
 }
 
-// handleHooksTrust hooks_trust：把命令记入信任库（内容哈希；~/.go-code/hooks-state.json）。
+// handleHooksTrust hooks_trust：把命令记入**指定归属**的信任库（内容哈希；
+// ~/.go-code/hooks-state.json，v2 格式按 owner 分表）。
+//
+// 归属来源（payload）：owner 显式给出 → 否则由 session_id 派生（Hub DM→agent、群→group、
+// 其余→workspace）→ 否则由 workspace 派生。**三者都没有就报错**，绝不默认写成全局：
+// 「不知道确认给谁」的信任只会变成下一次跨 owner 越权的入口（这正是本条要修的东西）。
 //
 // **即刻生效**：信任判定发生在每次派发时（Runner.Dispatch → TrustStore.Check），而这里
 // 写的是进程内共享的同一个实例（manager.hookTrustStore）—— 不需要重建会话，也不需要
@@ -230,6 +291,11 @@ func (m *manager) handleHooksTrust(c command) {
 	if scope == "" {
 		scope = "project" // 缺省按更严格的一方（前端默认也是 project）
 	}
+	ownerID, err := ownerFromPayload(c)
+	if err != nil || ownerID == "" {
+		m.resp(c, false, "缺少归属（owner）：请在请求里给出 owner（agent:/group:/workspace:）或 session_id/workspace；拒绝把确认写成全局", nil)
+		return
+	}
 	reason := str(c.Payload, "reason")
 	trust := m.hookTrustStore()
 	n := 0
@@ -238,13 +304,13 @@ func (m *manager) handleHooksTrust(c command) {
 		if cmd == "" {
 			continue // 空命令不是可信任对象（空命令在运行期也必被跳过）
 		}
-		if err := trust.Trust(cmd, scope, reason); err != nil {
+		if err := trust.Trust(ownerID, cmd, scope, reason); err != nil {
 			m.resp(c, false, "信任库写入失败: "+err.Error(), nil)
 			return
 		}
 		n++
 	}
-	m.resp(c, true, "", map[string]any{"trusted": n})
+	m.resp(c, true, "", map[string]any{"trusted": n, "owner": ownerID, "ownerLabel": owner.Label(ownerID)})
 }
 
 // —— 组装与查询小工具 ——
@@ -286,13 +352,14 @@ func commandsOf(s *hooks.Section) []string {
 	return out
 }
 
-// trustStatusOf 命令的信任状态（与 hooks 包运行期判定同口径，契约 §4）：
+// trustStatusOf 命令在**指定 owner** 下的信任状态（与 hooks 包运行期判定同口径，契约 §4）。
+// owner 为空/非法 → hooks 侧一律未信任（不猜归属）。
 //   - project / claude-project：严格按信任库 —— 随仓库分发的配置默认**未信任**，
 //     攻击者让你 clone 一个仓库就能执行命令正是这条要防的；
 //   - user / claude-user：**默认可信**（写这个文件本身就是用户行为），只有 requireTrust
 //     时才按信任库；库里已登记时如实回报（managed 显示"托管"，让人看得见来源）。
-func trustStatusOf(trust *hooks.TrustStore, cmd, scope string, requireTrust bool) string {
-	st := trust.Check(cmd)
+func trustStatusOf(trust *hooks.TrustStore, ownerID, cmd, scope string, requireTrust bool) string {
+	st := trust.Check(ownerID, cmd)
 	switch scope {
 	case "project", "claude-project":
 		return string(st)
