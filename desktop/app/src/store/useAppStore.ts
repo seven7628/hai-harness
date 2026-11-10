@@ -4,6 +4,8 @@ import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, Provi
 import type { AnyEvent, BridgeCommand } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
+// 导航丢弃判定与诊断 trace（FE-03）：stale（正常过期）/ inconsistent（身份不一致）
+import { classifyNavDiscard, recordNavDiscard } from './navTrace'
 import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
@@ -3318,6 +3320,11 @@ transport.send = (cmd: BridgeCommand) => {
   return _traceOrigSend(cmd)
 }
 
+// __navDiscards / __clearNavDiscards：测试专用（Node 回归脚本 scripts/test-nav-trace.mjs）——
+// 读取/清空 FE-03 的导航丢弃记录（navTrace 的有界环形缓冲）。生产代码从不读它，零行为影响。
+// 直接 re-export 而不是再包一层：脚本必须看到**这一份**模块实例的记录（独立 bundle 会是另一种子）。
+export { navDiscards as __navDiscards, clearNavDiscards as __clearNavDiscards } from './navTrace'
+
 interface PendingCommand {
   type: string
   workspace?: string
@@ -5505,16 +5512,34 @@ export function dispatchEvent(raw: AnyEvent): void {
         const respAttempt = typeof d.attempt === 'number' ? d.attempt : undefined
         const isStaleAttempt = respAttempt != null
           && (pendingRestoreAttempt[sid] ?? 0) > respAttempt
-        const navigationCurrent = Boolean(
-          !isStaleAttempt
-          && meta
-          && meta.navigationGeneration === navigationGeneration
-          && (!responseWorkspace || responseWorkspace === getState().workspace)
-          && (!expectedSession || expectedSession === sid),
-        )
+        // 判定 + trace（FE-03）：把原来那一个布尔拆成 classifyNavDiscard 的三态 ——
+        // 代际/attempt 被取代 = stale（正常，用户点快一点就会有），代际对得上但
+        // workspace/session 不符 = inconsistent（真异常）。判定结果与旧布尔逐字等价，
+        // 只是「为什么丢」现在可查（navTrace 的有界缓冲 + Verbose 日志）。
+        const verdict = classifyNavDiscard({
+          responseWorkspace,
+          workspace: getState().workspace,
+          metaGeneration: meta?.navigationGeneration,
+          generation: navigationGeneration,
+          expectedSession,
+          sessionId: sid,
+          staleAttempt: isStaleAttempt,
+        })
         // 过期导航响应不得重建/激活视图，也不得关闭当前导航的 loading。若同 sid 已有
         // 更新的恢复请求，保留其 pending/buffer；否则清理本请求留下的恢复标记。
-        if (!navigationCurrent) {
+        if (!verdict.current) {
+          recordNavDiscard({
+            at: Date.now(),
+            kind: verdict.kind,
+            type: t,
+            reason: verdict.reason,
+            sid,
+            responseWorkspace,
+            workspace: getState().workspace,
+            metaGeneration: meta?.navigationGeneration,
+            generation: navigationGeneration,
+            expectedSession,
+          })
           if (snapshotPending.get(sid) === r.id) {
             snapshotPending.delete(sid)
             // 此前这里直接丢弃缓冲事件 → 该会话这段时间的事件在渲染进程永久消失
@@ -5534,9 +5559,15 @@ export function dispatchEvent(raw: AnyEvent): void {
           // 显式恢复的响应被丢弃（陈旧代际/陈旧 attempt）：若该会话视图仍为空 → 有限重试。
           // 同 sid 有更新请求在途时 scheduleRestoreRetry 会自行退出（不叠发、不误报）。
           if (t === 'new_session' && meta?.sessionId === sid) {
+            // 重试原因沿用原措辞（看门狗/日志依赖这两条的语义），但把 FE-03 的类别附在
+            // 后面 —— stale 与 inconsistent 必须一眼可分，否则真异常永远埋在「丢弃」里。
             scheduleRestoreRetry(
               sid,
-              isStaleAttempt ? '响应按陈旧 attempt 丢弃' : '响应按陈旧导航丢弃',
+              isStaleAttempt
+                ? '响应按陈旧 attempt 丢弃'
+                : verdict.kind === 'inconsistent'
+                  ? `响应身份不一致丢弃（${verdict.reason}）`
+                  : `响应按陈旧导航丢弃（${verdict.reason}）`,
               true,
               meta.workspace,
             )
