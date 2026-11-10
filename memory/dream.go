@@ -42,9 +42,14 @@ type DreamReport struct {
 	MissingMeta []string
 	NeverRead   []string
 	Duplicates  [][2]string
+	// Transcripts 是会话转录里的引用轨迹（Dream v2）。
+	Transcripts TranscriptReport
 	// Anchors 是代码锚点核对结果（Dream v1.5）。Unbound=true 表示这个记忆库还没绑定
 	// 本地仓库路径，整段跳过——**跳过不等于没问题**，报告里会写明。
 	Anchors AnchorReport
+	// topics 是全部条目名（内部用：转录统计要一份完整清单）。不导出——报告是给
+	// 人看的，条目清单只是算中间量。
+	topics []string
 }
 
 // DreamIndexStats 是索引的体量与限额读数（官方 200 行 / 25KB）。
@@ -118,6 +123,7 @@ func (c Config) Dream(d Dir) (DreamReport, error) {
 		if usage[name].Reads == 0 {
 			out.NeverRead = append(out.NeverRead, name)
 		}
+		out.addTopic(name)
 		if key := titleKey(body); key != "" {
 			titles[key] = append(titles[key], name)
 		}
@@ -144,6 +150,13 @@ func (c Config) Dream(d Dir) (DreamReport, error) {
 	sort.Strings(out.MissingMeta)
 	sort.Strings(out.NeverRead)
 	sort.Slice(out.Duplicates, func(i, j int) bool { return out.Duplicates[i][0] < out.Duplicates[j][0] })
+
+	// 会话转录：失败只记在报告里，不让整份盘点失败。
+	if tr, err := c.ScanTranscripts(d, 180*24*time.Hour); err == nil {
+		out.Transcripts = tr
+	} else {
+		out.Transcripts = TranscriptReport{Unbound: true}
+	}
 
 	// 代码锚点核对：失败只记在报告里，不让整份盘点失败。
 	if ar, err := c.CheckAnchors(d); err == nil {
@@ -184,6 +197,33 @@ func (r DreamReport) Markdown(now time.Time) string {
 		b.WriteString("## 索引已超限\n\n")
 		b.WriteString("超出官方 200 行 / 25KB 的部分在下次加载时被丢弃——**模型看不见它们，" +
 			"但文件还在**。这是唯一一处「内容仍在、却已经不在注入里」的状态。\n\n")
+	}
+
+	// 转录：先说"扫没扫"，再说"扫出什么"。这里只报"多久没被碰过"，**不下失效结论**。
+	if r.Transcripts.Unbound {
+		b.WriteString("## 会话转录：未扫描\n\n这个记忆库没有绑定工作区（`.state/repo.json` 的 `workspace`），" +
+			"扫不了对应的 events 目录。**这不等于没人用过。**\n\n")
+	} else {
+		silent := r.Transcripts.LongSilent(r.topicList(), now, 90*24*time.Hour)
+		fmt.Fprintf(&b, "## 会话转录（近 %s）\n\n扫了 %d 个事件文件；被读过的记忆 **%d** 条，"+
+			"其中 **超过 90 天没被碰过或从未出现过** 的 **%d** 条。\n\n",
+			"180 天", r.Transcripts.Files, len(r.Transcripts.Traces), len(silent))
+		b.WriteString("> 沉寂只说明「没人用过」，不说明「结论错了」——最久的那条可能等在某个" +
+			"只有特定日子才发生的场景里。它排在前面是为了让人先看它，不是为了让系统删它。\n\n")
+		limit := 10
+		for i, n := range silent {
+			if i >= limit {
+				fmt.Fprintf(&b, "- …另有 %d 条\n", len(silent)-limit)
+				break
+			}
+			ago := r.Transcripts.SilencedFor(n, now)
+			if ago < 0 {
+				fmt.Fprintf(&b, "- %s ⟵ 转录里从未出现\n", n)
+				continue
+			}
+			fmt.Fprintf(&b, "- %s ⟵ 最后引用 %d 天前\n", n, int(ago.Hours()/24))
+		}
+		b.WriteString("\n")
 	}
 
 	// 锚点：先说"核没核"，再说"核出什么"——没核与核过没问题，是两件事。
@@ -240,6 +280,13 @@ func (r DreamReport) Markdown(now time.Time) string {
 	}
 	return b.String()
 }
+
+// topicList 返回这个记忆库里的全部条目名（供转录统计用）。
+//
+// 为什么不把 allTopics 放进 Report：报告是给人看的，条目清单是算中间量。
+func (r DreamReport) topicList() []string { return r.topics }
+
+func (r *DreamReport) addTopic(name string) { r.topics = append(r.topics, name) }
 
 // titleKey 取正文第一个标题，用于重复检测（归一化后比较）。
 func titleKey(body string) string {

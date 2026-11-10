@@ -73,7 +73,13 @@ type repoBinding struct {
 	// 记忆里引用的文件可能落在兄弟仓库里（实测 agent-server-g 的记忆大量引用
 	// cybertron-gogroup 下其它子仓库的路径）。只按单仓核对会把它们全判成"失效"。
 	Workspace string `json:"workspace,omitempty"`
-	Bound     string `json:"bound"`
+	// Workspaces 是这个仓库**全部**已知的工作区（同一仓库可以在多个目录/工作树里被打开）。
+	//
+	// 为什么一个不够：实测 agent-server-g 的记忆，读取发生在
+	// `/Users/admin/cybertron-gogroup/agent-server-g` 里，而仓库身份的解析是从 git 来的；
+	// 只记一个"父工作区"会让整段转录统计落空（129 个会话文件里只认出 1 条记忆）。
+	Workspaces []string `json:"workspaces,omitempty"`
+	Bound      string   `json:"bound"`
 }
 
 // bindingPath 返回绑定文件路径。
@@ -103,7 +109,18 @@ func (c Config) BindRepoAt(ctx context.Context, workdir, workspace string) (Dir,
 			ws = abs
 		}
 	}
-	b := repoBinding{RepoID: d.ID, Root: root, Workspace: ws, Bound: c.Now().UTC().Format(time.RFC3339)}
+	// 把之前记录过的工作区并进来（重复绑定不同工作区时不该互相覆盖）。
+	prev, _ := c.binding(d)
+	wss := append([]string{}, prev.Workspaces...)
+	if prev.Workspace != "" {
+		wss = append(wss, prev.Workspace)
+	}
+	if ws != "" {
+		wss = append(wss, ws)
+	}
+	wss = uniqStrings(wss)
+	b := repoBinding{RepoID: d.ID, Root: root, Workspace: ws, Workspaces: wss,
+		Bound: c.Now().UTC().Format(time.RFC3339)}
 	raw, err := json.Marshal(b)
 	if err != nil {
 		return Dir{}, err
@@ -118,6 +135,21 @@ func (c Config) BindRepoAt(ctx context.Context, workdir, workspace string) (Dir,
 	return d, nil
 }
 
+// uniqStrings 去重并保持稳定顺序。
+func uniqStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // RepoRoot 读出绑定的本地仓库路径。
 func (c Config) RepoRoot(d Dir) (string, bool) {
 	b, ok := c.binding(d)
@@ -126,6 +158,95 @@ func (c Config) RepoRoot(d Dir) (string, bool) {
 	}
 	return b.Root, true
 }
+
+// BindRepoDiscovered 绑定仓库，并自动发现它的全部工作区（主树 / worktree / 克隆）。
+func (c Config) BindRepoDiscovered(ctx context.Context, workdir string) (Dir, []string, error) {
+	d, err := c.BindRepoAt(ctx, workdir, "")
+	if err != nil {
+		return Dir{}, nil, err
+	}
+	wss, err := c.DiscoverWorkspaces(ctx, d)
+	if err != nil || len(wss) == 0 {
+		return d, wss, err
+	}
+	return d, wss, c.addWorkspaces(d, wss)
+}
+
+// addWorkspaces 把发现到的工作区并进绑定（幂等）。
+func (c Config) addWorkspaces(d Dir, wss []string) error {
+	b, ok := c.binding(d)
+	if !ok {
+		return nil
+	}
+	b.Workspaces = uniqStrings(append(b.Workspaces, wss...))
+	if b.Workspace == "" && len(b.Workspaces) > 0 {
+		b.Workspace = b.Workspaces[0]
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	return c.withDefaults().atomicWrite(bindingPath(d), raw)
+}
+
+// DiscoverWorkspaces 扫描 events 目录里出现过的所有 workspace，把**解析到本仓库**的挑出来。
+//
+// 判据是真正的身份解析（git remote / common dir），不是路径前缀猜——同一个仓库可能有
+// 主树、worktree、克隆三处工作区，只有解析才能把它们归到一起。
+func (c Config) DiscoverWorkspaces(ctx context.Context, d Dir) ([]string, error) {
+	c = c.withDefaults()
+	root := c.eventsRoot()
+	if root == "" {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	dirs, err := c.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, de := range dirs {
+		if !de.IsDir() {
+			continue
+		}
+		ws := c.firstWorkspace(filepath.Join(root, de.Name()))
+		if ws == "" || seen[ws] {
+			continue
+		}
+		seen[ws] = true
+		got, err := resolveDir(ctx, ws, c)
+		if err != nil || got.ID != d.ID {
+			continue
+		}
+		out = append(out, ws)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// firstWorkspace 取一个 events 子目录里第一条带 workspace 的事件。
+func (c Config) firstWorkspace(dir string) string {
+	files, _ := c.ReadDir(dir)
+	for _, fe := range files {
+		if fe.IsDir() || !strings.HasSuffix(fe.Name(), ".jsonl") {
+			continue
+		}
+		raw, err := c.ReadFile(filepath.Join(dir, fe.Name()))
+		if err != nil {
+			continue
+		}
+		if len(raw) > 64*1024 {
+			raw = raw[:64*1024]
+		}
+		if m := workspaceField.FindSubmatch(raw); m != nil {
+			return string(m[1])
+		}
+	}
+	return ""
+}
+
+// workspaceField 从事件里抠出 workspace 值（只用于发现，不用于判定）。
+var workspaceField = regexp.MustCompile(`"workspace"\s*:\s*"([^"]+)"`)
 
 // binding 读绑定文件。
 func (c Config) binding(d Dir) (repoBinding, bool) {

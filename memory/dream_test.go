@@ -33,7 +33,7 @@ func dreamFixture(t *testing.T) Dir {
 
 func TestDreamBuckets(t *testing.T) {
 	d := dreamFixture(t)
-	r, err := (Config{}).Dream(d)
+	r, err := dreamCfg(t).Dream(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestDreamWritesNothing(t *testing.T) {
 	d := dreamFixture(t)
 	before := snapshot(t, d.Path)
 
-	if _, err := (Config{}).Dream(d); err != nil {
+	if _, err := dreamCfg(t).Dream(d); err != nil {
 		t.Fatal(err)
 	}
 
@@ -105,7 +105,7 @@ func TestDreamCleanRepoHasNoIssues(t *testing.T) {
 	d := memDir(t)
 	writeIndex(t, d, "# Memory Index\n- [a.md](a.md) — 说明\n")
 	writeTopicFile(t, d, "a.md", "---\ntype: project\nmodified: 2026-11-01T00:00:00+08:00\n---\n\n# 标题\n\n正文\n")
-	r, err := (Config{}).Dream(d)
+	r, err := dreamCfg(t).Dream(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestDreamNeverReadIsNotADeletionSignal(t *testing.T) {
 	writeIndex(t, d, "# Memory Index\n- [a.md](a.md) — 说明\n")
 	writeTopicFile(t, d, "a.md", "---\ntype: project\nmodified: 2026-11-01T00:00:00+08:00\n---\n\nx\n")
 
-	r, _ := (Config{}).Dream(d)
+	r, _ := dreamCfg(t).Dream(d)
 	if len(r.NeverRead) != 1 {
 		t.Fatalf("NeverRead = %v", r.NeverRead)
 	}
@@ -137,7 +137,7 @@ func TestDreamNeverReadIsNotADeletionSignal(t *testing.T) {
 	if err := (Config{}).RecordRead(d, filepath.Join(d.Path, "a.md")); err != nil {
 		t.Fatal(err)
 	}
-	r2, _ := (Config{}).Dream(d)
+	r2, _ := dreamCfg(t).Dream(d)
 	if len(r2.NeverRead) != 0 {
 		t.Fatalf("读过之后不该再列：%v", r2.NeverRead)
 	}
@@ -153,7 +153,7 @@ func TestDreamFlagsOversizeIndex(t *testing.T) {
 	}
 	writeIndex(t, d, b.String())
 
-	r, _ := (Config{}).Dream(d)
+	r, _ := dreamCfg(t).Dream(d)
 	if !r.Index.OverLine {
 		t.Fatalf("应判定超行：%d 行", r.Index.Lines)
 	}
@@ -190,4 +190,10 @@ func snapshot(t *testing.T, dir string) map[string]string {
 		out[e.Name()] = string(raw)
 	}
 	return out
+}
+
+// dreamCfg 给 Dream 一个**空的**转录根：单元测试不该去扫真实的 5GB 事件目录。
+func dreamCfg(t *testing.T) Config {
+	t.Helper()
+	return Config{EventsRoot: t.TempDir()}
 }

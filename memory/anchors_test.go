@@ -87,7 +87,9 @@ func TestDreamAnchorAllGood(t *testing.T) {
 	writeIndex(t, d, "# Memory Index\n- [a.md](a.md) — x\n")
 	writeTopicFile(t, d, "a.md", "---\ntype: project\nmodified: 2026-11-01T00:00:00+08:00\n---\n\n见 `main.go`\n")
 
-	r, err := repoCfg([]string{"main.go"}).Dream(d)
+	cfg := repoCfg([]string{"main.go"})
+	cfg.EventsRoot = t.TempDir() // 不扫真实事件目录
+	r, err := cfg.Dream(d)
 	if err != nil {
 		t.Fatal(err)
 	}

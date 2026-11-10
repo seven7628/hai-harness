@@ -124,6 +124,9 @@ type Config struct {
 	WriteFile func(string, []byte, os.FileMode) error
 	Rename    func(string, string) error
 	Remove    func(string) error
+	// EventsRoot 会话转录根（默认 <记忆根>/../events，即 ~/.go-code/events）。
+	// 做梦用它统计"这条记忆最后一次被读是什么时候"。
+	EventsRoot string
 	// RepoFiles 列举某个代码仓库里的全部文件（相对路径）。nil = git ls-files，失败时退回遍历。
 	//
 	// 做梦要用它核对"记忆里引用的代码文件还在不在"（Dream v1.5）。抽成出口的理由与
