@@ -142,9 +142,18 @@
 }
 .hub-side-scopes button:hover { color: var(--ink); }
 .hub-side-scopes button.on { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
-.hub-side-tabs { display: flex; gap: 2px; padding: 0 8px 3px 10px; }
+.hub-side-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px 3px 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.hub-side-tabs::-webkit-scrollbar { display: none; }
 .hub-side-tabs button {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: max-content;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1632,10 +1641,8 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-side-tabs { gap: 1px; padding: 0 6px 2px; }
   .hub-side-tabs button {
     gap: 3px;
-    min-width: 0;
     padding: 3px 4px;
     font-size: 11px;
-    white-space: nowrap;
   }
   .hub-side-count { display: none; }
   .hub-side-scopes { gap: 2px; }
