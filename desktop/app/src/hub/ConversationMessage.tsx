@@ -125,6 +125,9 @@ export function UserMessage({
           </div>
         ) : null}
       </div>
+      {/* demo 的「你」占位：24px + 11px gap，把气泡从列右缘收进 35px，
+          也给人类发言一个与 agent sigil 对应的右轴。装饰性，读屏不需要重复。 */}
+      <span className="hub-user-avatar" aria-hidden="true">你</span>
     </div>
   )
 }

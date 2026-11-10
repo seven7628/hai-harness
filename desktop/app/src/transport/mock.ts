@@ -720,6 +720,10 @@ class MockTransport implements Transport {
     if (!list) {
       const now = Date.now()
       const at = (ms: number): string => new Date(now - ms).toISOString()
+      // 截图 harness 专用 fixture：?hubFixture=cards 时才追加 handoff / approval
+      // 两种真实 kind，默认 mock 群聊保持原样，避免把验收卡混进日常演示。
+      const cardsFixture = typeof window !== 'undefined'
+        && new URLSearchParams(window.location.search).get('hubFixture') === 'cards'
       list = [
         {
           seq: 1, id: 'gm_mock1', kind: 'text', sender: { kind: 'human' },
@@ -794,10 +798,25 @@ class MockTransport implements Transport {
           created_at: at(30 * 60_000),
         },
       ]
+      if (cardsFixture) {
+        list.push(
+          {
+            seq: 8, id: 'gm_mock8', kind: 'handoff', sender: { kind: 'agent', agent_id: 'ag_mockres1' },
+            text: '把成本曲线复核交接给 Writer；完整指令在 Needs you。',
+            refs: { status: 'pending_ack' },
+            created_at: at(20 * 60_000),
+          },
+          {
+            seq: 9, id: 'gm_mock9', kind: 'approval_stub', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
+            text: '发布两页简报前需要你确认预算',
+            created_at: at(10 * 60_000),
+          },
+        )
+      }
       this.hubGroupMessages.set(gid, list)
-      this.hubGroupSeq.set(gid, 7)
-      // 最后两张卡未读：左栏演示「未读点 + 任务完成结论」。
-      this.hubGroupRead.set(gid, 5)
+      this.hubGroupSeq.set(gid, cardsFixture ? 9 : 7)
+      // 最后两张卡未读：左栏演示「未读点 + 任务完成结论」；fixture 下未读的是两张验收卡。
+      this.hubGroupRead.set(gid, cardsFixture ? 7 : 5)
       this.hubGroupConversations.set(gid, this.mockConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 }))
       // 预置账本条目：历史任务卡的「派发者」只能从 origin 来（B5），没有它卡片只显示执行者。
       this.hubGroupTasks.set('task_mock1', {

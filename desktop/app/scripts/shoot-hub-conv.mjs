@@ -7,13 +7,15 @@
 //
 // 断言（任一失败 → 退出码 1）：
 //   · documentElement.scrollWidth <= 视口宽（0 横向溢出）
-//   · 用户气泡右边缘与 760px 会话列右边缘对齐（右对齐）
-//   · agent 消息背景透明（无气泡）且有作者头
+//   · 用户气泡右缘留 35px（24px owner 头像 + 11px gap），头像贴会话列右缘
+//   · agent 正文左移 42px（32px sigil + 10px gap）；群头 2 行、桌面 ≤68px
+//   · 会话列 760px；宽屏 padding 30/28，窄屏 14/12
+//   · 交接/审批卡真实渲染（?hubFixture=cards），各有专属 token 样式
 //   · composer meta 行存在
 //   · 无 console error / pageerror
 //
-// 不造假数据：截图全部来自 mock 的真实 fixture（2 人群 / 两条 DM）。
-// 空态需要 mock 里没有消息的 agent，本脚本不覆盖（见交付说明里的临时 mock 截图）。
+// 不造假数据：截图全部来自 mock 的真实 fixture（2 人群 / 两条 DM）；
+// 交接/审批卡也只注入两种真实 kind，且仅在显式 query 下出现。
 import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
 
@@ -24,6 +26,11 @@ const arg = (name, def) => {
 }
 const URL = arg('url', process.env.HUB_CONV_URL || 'http://localhost:5177/')
 const OUT = arg('out', '/tmp/hub-conv-shots')
+const CARDS_URL = (() => {
+  const u = new globalThis.URL(URL)
+  u.searchParams.set('hubFixture', 'cards')
+  return u.toString()
+})()
 const VIEWPORTS = [
   [1440, 900],
   [1280, 900],
@@ -107,11 +114,16 @@ async function shot(width, height, theme, kind) {
       return { left: Math.round(b.left), right: Math.round(b.right), width: Math.round(b.width) }
     }
     const thread = rect(q('.hub-thread'))
+    const list = q('.hub-list')
+    const listStyle = list ? getComputedStyle(list) : null
     const bubble = rect(q('.hub-user-bubble'))
+    const ownerAvatar = rect(q('.hub-user-avatar'))
     const agent = q('.hub-msg.agent')
+    const agentMain = rect(q('.hub-msg.agent .hub-msg-main'))
     const dmSigil = q('.hub-dm-head .hub-conv-id > .sigil')
     const groupStack = q('.hub-group-head .hub-conv-id > .agent-stack')
     const title = q('.hub-conv-line strong')?.textContent?.trim() ?? ''
+    const header = q('.hub-conv-head')
     return {
       themeAttr: document.documentElement.dataset.theme,
       scrollWidth: document.documentElement.scrollWidth,
@@ -133,23 +145,46 @@ async function shot(width, height, theme, kind) {
       thread,
       bubble,
       bubbleRightGap: bubble && thread ? Math.round(thread.right - bubble.right) : null,
+      ownerAvatar,
+      ownerAvatarGap: bubble && ownerAvatar ? Math.round(ownerAvatar.left - bubble.right) : null,
+      ownerAvatarRightGap: ownerAvatar && thread ? Math.round(thread.right - ownerAvatar.right) : null,
+      agentOffset: agentMain && thread ? Math.round(agentMain.left - thread.left) : null,
       agentBackground: agent ? getComputedStyle(agent).backgroundColor : null,
       agentAuthor: q('.hub-msg.agent .hub-msg-name')?.textContent ?? null,
       composerMeta: q('.hub-composer-meta')?.innerText.replace(/\n/g, ' | ') ?? null,
-      headerHeight: Math.round(q('.hub-conv-head')?.getBoundingClientRect().height ?? 0),
+      headerHeight: Math.round(header?.getBoundingClientRect().height ?? 0),
+      headerSubCount: header ? header.querySelectorAll('.hub-conv-sub').length : 0,
+      headerSubtitle: header?.querySelector('.hub-conv-sub')?.textContent?.trim() ?? null,
+      listPadding: listStyle
+        ? { top: listStyle.paddingTop, left: listStyle.paddingLeft }
+        : null,
       dateDivider: q('.hub-day-divider')?.textContent ?? null,
     }
   })
   const failed = []
   if (m.scrollWidth > width) failed.push(`横向溢出 ${m.scrollWidth} > ${width}`)
-  if (m.bubbleRightGap !== 0) failed.push(`用户气泡未右对齐（gap=${m.bubbleRightGap}）`)
+  if (m.bubbleRightGap !== 35) failed.push(`用户气泡右缘应留 35px（gap=${m.bubbleRightGap}）`)
+  if (m.ownerAvatar?.width !== 24) failed.push(`owner 头像应为 24px（${m.ownerAvatar?.width}）`)
+  if (m.ownerAvatarGap !== 11) failed.push(`owner 头像与气泡 gap 应为 11（${m.ownerAvatarGap}）`)
+  if (m.ownerAvatarRightGap !== 0) failed.push(`owner 头像未贴齐会话列右缘（${m.ownerAvatarRightGap}）`)
+  if (m.agentOffset !== 42) failed.push(`agent 正文左移应为 42（${m.agentOffset}）`)
   if (m.agentBackground !== 'rgba(0, 0, 0, 0)') failed.push(`agent 消息有气泡底色（${m.agentBackground}）`)
   if (!m.agentAuthor) failed.push('agent 消息缺少作者头')
   if (!m.composerMeta) failed.push('composer 缺少 meta 行')
   if (m.themeAttr !== (theme === 'paper' ? 'paper' : 'ink')) {
     failed.push(`主题未生效（data-theme=${m.themeAttr}）`)
   }
+  const wide = width >= 1280
+  if (wide && m.thread?.width !== 760) failed.push(`会话列应为 760px（${m.thread?.width}）`)
+  const wantPadding = width > 900
+    ? { top: '30px', left: '28px' }
+    : { top: '14px', left: '12px' }
+  if (m.listPadding?.top !== wantPadding.top || m.listPadding?.left !== wantPadding.left) {
+    failed.push(`会话区 padding=${m.listPadding?.top}/${m.listPadding?.left}（应为 ${wantPadding.top}/${wantPadding.left}）`)
+  }
+  if (wide && m.headerHeight > 68) failed.push(`群/DM 头应 ≤68px（${m.headerHeight}）`)
   if (kind === 'dm') {
+    if (m.headerSubCount !== 1) failed.push(`DM 头应为 2 行（sub=${m.headerSubCount}）`)
     if (!m.dmSigil) failed.push('DM header 缺少独立 sigil')
     else {
       if (m.dmSigil.role !== 'img') failed.push(`DM header sigil role=${m.dmSigil.role}（应为 img）`)
@@ -158,6 +193,8 @@ async function shot(width, height, theme, kind) {
     }
   }
   if (kind === 'group') {
+    if (m.headerSubCount !== 1) failed.push(`群头 subtitle 应为 1 行（sub=${m.headerSubCount}）`)
+    if (!m.headerSubtitle?.includes('·')) failed.push(`群头 subtitle 缺少分隔信息：${m.headerSubtitle}`)
     if (!m.groupStack) failed.push('群头缺少 AgentStack')
     else {
       if (m.groupStack.role !== 'img') failed.push(`群叠放 role=${m.groupStack.role}（应为 img）`)
@@ -203,6 +240,55 @@ for (const [width, height] of [[1440, 900], [390, 900]]) {
     await page.close()
   }
 }
+// 交接 / 审批卡：mock 的 ?hubFixture=cards 注入两种真实 kind，必须真的画出来，
+// 且 handoff 用 accent 图标、approval 用 warn 图标 + 暖边框 + warn 标题。
+for (const theme of THEMES) {
+  const width = 1440
+  const page = await browser.newPage({ viewport: { width, height: 900 } })
+  const name = `${width}-group-cards-${theme}`
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(`${name}: ${m.text()}`) })
+  page.on('pageerror', (e) => errors.push(`${name}: pageerror ${e.message}`))
+  await page.goto(CARDS_URL, { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(1500)
+  await page.evaluate((t) => {
+    window.__store?.getState?.().setTheme?.(t === 'paper' ? 'light' : 'dark')
+  }, theme)
+  await page.waitForTimeout(350)
+  await openConversation(page, 'group')
+  await page.evaluate(() => {
+    document.querySelector('.hub-event--approval')?.scrollIntoView({ block: 'center' })
+  })
+  await page.waitForTimeout(350)
+  const m = await page.evaluate(() => {
+    const q = (s) => document.querySelector(s)
+    const color = (s) => (q(s) ? getComputedStyle(q(s)).color : null)
+    return {
+      handoffCount: document.querySelectorAll('.hub-event--handoff').length,
+      approvalCount: document.querySelectorAll('.hub-event--approval').length,
+      handoffText: q('.hub-event--handoff')?.textContent?.trim() ?? '',
+      approvalText: q('.hub-event--approval')?.textContent?.trim() ?? '',
+      handoffIcon: color('.hub-event--handoff .hub-event-icon'),
+      approvalIcon: color('.hub-event--approval .hub-event-icon'),
+      approvalBorder: q('.hub-event--approval') ? getComputedStyle(q('.hub-event--approval')).borderTopColor : null,
+      taskBorder: q('.hub-event--task') ? getComputedStyle(q('.hub-event--task')).borderTopColor : null,
+      approvalTitle: color('.hub-event--approval .hub-event-title'),
+      taskTitle: color('.hub-event--task .hub-event-title'),
+      scrollWidth: document.documentElement.scrollWidth,
+    }
+  })
+  const failed = []
+  if (m.handoffCount !== 1) failed.push(`handoff 卡数量=${m.handoffCount}`)
+  if (m.approvalCount !== 1) failed.push(`approval 卡数量=${m.approvalCount}`)
+  if (m.handoffIcon === m.approvalIcon) failed.push('handoff/approval 图标颜色未区分')
+  if (m.approvalBorder === m.taskBorder) failed.push('approval 暖边框未生效')
+  if (m.approvalTitle === m.taskTitle) failed.push('approval warn 标题未生效')
+  if (m.scrollWidth > width) failed.push(`横向溢出 ${m.scrollWidth} > ${width}`)
+  if (failed.length) errors.push(`${name}: ${failed.join('；')}`)
+  await page.screenshot({ path: `${OUT}/${name}.png` })
+  rows.push({ name, ...m, failed })
+  await page.close()
+}
+
 // 次要路径：Writer 的 DM（同版式、不同身份色/模型）。
 await shot(1440, 900, 'ink', 'writer')
 

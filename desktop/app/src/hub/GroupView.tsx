@@ -400,13 +400,21 @@ export default function GroupView({ group }: { group: HubGroup }) {
               <strong>{group.name}</strong>
               {group.deleted ? <span className="hub-chip danger">已删除</span> : null}
             </span>
-            <span className="hub-conv-sub">
+            <span
+              className="hub-conv-sub"
+              title={[
+                t('hub.group.members').replace('{n}', String(members.length)),
+                t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask'),
+                owner ? t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id) : '',
+                title,
+              ].filter(Boolean).join(' · ')}
+            >
               {t('hub.group.members').replace('{n}', String(members.length))}
               {' · '}
               {t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask')}
               {owner ? ` · ${t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id)}` : ''}
+              {title ? ` · ${title}` : ''}
             </span>
-            {title ? <span className="hub-conv-sub hub-conv-names" title={title}>{title}</span> : null}
           </div>
         </div>
         <div className="hub-conv-actions">

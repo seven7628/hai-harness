@@ -17,12 +17,28 @@ import (
 // 只校验「手机端出现的十六进制颜色都能在桌面端找到」——反向不要求（桌面有分类色
 // 手机用不到）。字体同理。
 func TestMobileTokensMatchDesktop(t *testing.T) {
-	const desktopPath = "../app/src/index.css"
+	// 桌面调色板不只在 index.css：sigil v2 的 8 个色相/状态色由 Hub 自己持有
+	// （hub.css 的 --sigil-* 与 avatar.ts 的 HUES 表），手机 avatar_model.js
+	// 是从这两处逐字复制的。取样必须覆盖它们，否则会把「同源复制」误判成
+	// 「手机另起色板」。本意不变：手机出现的颜色必须能在桌面端找到。
+	desktopPaths := []string{
+		"../app/src/index.css",
+		"../app/src/hub/hub.css",
+		"../app/src/hub/avatar.ts",
+	}
 	const mobilePath = "mobile_web/tokens.css"
 
-	desktop, err := os.ReadFile(desktopPath)
+	desktop, err := os.ReadFile(desktopPaths[0])
 	if err != nil {
 		t.Fatalf("读桌面样式失败: %v", err)
+	}
+	palette := string(desktop)
+	for _, f := range desktopPaths[1:] {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("读桌面调色板 %s 失败: %v", f, err)
+		}
+		palette += "\n" + string(b)
 	}
 	mobile, err := os.ReadFile(mobilePath)
 	if err != nil {
@@ -31,7 +47,7 @@ func TestMobileTokensMatchDesktop(t *testing.T) {
 
 	hexRe := regexp.MustCompile(`#[0-9a-fA-F]{3,8}\b`)
 	desktopSet := map[string]bool{}
-	for _, c := range hexRe.FindAllString(string(desktop), -1) {
+	for _, c := range hexRe.FindAllString(palette, -1) {
 		desktopSet[strings.ToLower(c)] = true
 	}
 	// P4-03c：不只 token 层，主题色可能出现在 index.html 的 theme-color、
@@ -41,6 +57,7 @@ func TestMobileTokensMatchDesktop(t *testing.T) {
 		"mobile_web/style.css",
 		"mobile_web/app.js",
 		"mobile_web/hub_model.js",
+		"mobile_web/avatar_model.js",
 		"mobile_web/index.html",
 	} {
 		b, err := os.ReadFile(f)

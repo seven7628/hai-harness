@@ -597,7 +597,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.hub-conv-names { color: var(--text-2); }
 .hub-conv-subline { display: flex; align-items: center; gap: 8px; }
 .hub-conv-sub-text {
   min-width: 0;
@@ -922,11 +921,31 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
 }
 .hub-msg-body > .md > :first-child { margin-top: 0; }
 .hub-msg-body > .md > :last-child { margin-bottom: 0; }
-.hub-msg.human { justify-content: flex-end; }
+.hub-msg.human {
+  justify-content: flex-end;
+  gap: 11px;
+}
 .hub-msg.human .hub-msg-main {
   align-items: flex-end;
-  max-width: min(78%, 620px);
+  max-width: min(78%, 620px, calc(100% - 35px));
   gap: 5px;
+}
+/* 列右缘的「你」占位（24 + 11 gap）：与 demo 一致，气泡不贴死 760 列边。 */
+.hub-user-avatar {
+  flex: none;
+  align-self: flex-start;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-top: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1;
+  user-select: none;
 }
 .hub-user-bubble {
   max-width: 100%;
@@ -1852,6 +1871,26 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
 .hub-event--task.tone-warn .hub-event-icon { color: var(--warning); }
 .hub-event.tone-info .hub-event-icon,
 .hub-event--task.tone-info .hub-event-icon { color: var(--accent-solid); }
+/* 交接：accent 图标 + 轻微 accent 边框，和任务卡的中性灰区分开。 */
+.hub-event--handoff {
+  border-color: color-mix(in srgb, var(--accent-solid) 24%, var(--border));
+}
+.hub-event--handoff .hub-event-icon {
+  color: var(--accent-solid);
+  background: color-mix(in srgb, var(--accent-solid) 12%, transparent);
+}
+.hub-event--handoff .hub-event-kicker { color: color-mix(in srgb, var(--accent-solid) 62%, var(--text-3)); }
+/* 审批：warn 图标 + 暖边框 + warn 标题；正文仍走 --text-2 保证可读。 */
+.hub-event--approval {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+  background: color-mix(in srgb, var(--warning) 6%, var(--hub-event-bg));
+}
+.hub-event--approval .hub-event-icon {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+}
+.hub-event--approval .hub-event-kicker { color: color-mix(in srgb, var(--warning) 72%, var(--ink)); }
+.hub-event--approval .hub-event-title { color: color-mix(in srgb, var(--warning) 55%, var(--ink)); }
 .hub-event-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .hub-event-top { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .hub-event-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
@@ -2314,7 +2353,6 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-conv-id { gap: 9px; flex-basis: 100%; }
   .hub-conv-line strong { font-size: 14px; }
   .hub-conv-sub { font-size: 11px; }
-  .hub-conv-names { display: none; }
   .hub-conv-actions { gap: 4px; }
   .hub-action-btn { padding: 5px 6px; font-size: 10.5px; }
   .hub-seg button { padding: 5px 6px; font-size: 10.5px; }
@@ -2324,12 +2362,12 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-thread,
   .hub-group-view .hub-thread-flat,
   .hub-group-view .hub-thread-grouped { gap: 18px; }
-  .hub-msg.agent { grid-template-columns: 32px minmax(0, 1fr); gap: 8px; }
+  .hub-msg.agent { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; }
   .hub-msg-body { font-size: 13.5px; }
   /* 窄屏表格不在单元格里逐字折行：保留可读列宽，横滑收在 .md-table-wrap 里
      （文档级仍 0 横向溢出，横条只出现在表格自身）。 */
   .hub-msg-body .md-table-wrap > table { min-width: 440px; }
-  .hub-msg.human .hub-msg-main { max-width: 88%; }
+  .hub-msg.human .hub-msg-main { max-width: min(88%, calc(100% - 35px)); }
   .hub-msg-time { margin-left: 0; }
   .hub-user-bubble { padding: 9px 12px; font-size: 13.5px; }
   .hub-composer-wrap { padding: 6px 12px 9px; }
