@@ -71,8 +71,12 @@ func (s *FileStore) SearchMessagesHuman(ctx context.Context, gid GroupID, query 
 	}
 	limit = normalizeLimit(limit)
 	s.mu.Lock()
-	msgs, err := readJSONLTolerantTail[Message](s.messagesPath(gid))
+	hot, err := readJSONLTolerantTail[Message](s.messagesPath(gid))
 	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	msgs, err := s.mergedLogMessages(ArchiveScopeGroups, string(gid), hot)
 	if err != nil {
 		return nil, err
 	}
@@ -90,8 +94,12 @@ func (s *FileStore) SearchDirectMessages(ctx context.Context, agentID AgentID, q
 	}
 	limit = normalizeLimit(limit)
 	s.mu.Lock()
-	msgs, err := readJSONLTolerantTail[Message](s.dmLogPath(agentID))
+	hot, err := readJSONLTolerantTail[Message](s.dmLogPath(agentID))
 	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	msgs, err := s.mergedLogMessages(ArchiveScopeDMs, string(agentID), hot)
 	if err != nil {
 		return nil, err
 	}

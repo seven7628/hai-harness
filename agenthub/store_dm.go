@@ -78,6 +78,7 @@ func (s *MemoryStore) AppendDirectMessage(ctx context.Context, agentID AgentID, 
 
 // ReadDirectMessages 从新到旧取一页：seq < beforeSeq（0/负 = 从最新开始）。
 // 返回顺序为**旧→新**（与 ReadMessages 同约定），方便前端直接渲染。
+// 热日志 + 冷归档透明合并；按 manifest 从新到旧读，凑够 limit 即停。
 func (s *FileStore) ReadDirectMessages(ctx context.Context, agentID AgentID, beforeSeq int64, limit int) ([]Message, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -89,23 +90,12 @@ func (s *FileStore) ReadDirectMessages(ctx context.Context, agentID AgentID, bef
 		limit = 50
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	all, err := readJSONLTolerantTail[Message](s.dmLogPath(agentID))
+	hot, err := readJSONLTolerantTail[Message](s.dmLogPath(agentID))
+	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	// 倒序遍历取最近 limit 条（beforeSeq 过滤），再反转成旧→新。
-	picked := make([]Message, 0, limit)
-	for i := len(all) - 1; i >= 0 && len(picked) < limit; i-- {
-		if beforeSeq > 0 && all[i].Seq >= beforeSeq {
-			continue
-		}
-		picked = append(picked, all[i])
-	}
-	for i, j := 0, len(picked)-1; i < j; i, j = i+1, j-1 {
-		picked[i], picked[j] = picked[j], picked[i]
-	}
-	return picked, nil
+	return s.pageMessages(ArchiveScopeDMs, string(agentID), hot, beforeSeq, limit)
 }
 
 // LoadDMCursor 读未读游标。没有游标 = 全未读（零值 + AgentID 已填，不报 ErrNotFound：
@@ -155,6 +145,7 @@ func (s *FileStore) SaveDMCursor(ctx context.Context, agentID AgentID, humanRead
 
 // DMUnread 返回未读条数与最后一条消息（左栏 DM 行：预览 + 未读点）。
 // 未读 = seq > human_read_seq 的条数（DM 只有人读，没有智能体自己的已读游标）。
+// 热+冷合并后按 seq 去重（热优先），完全归档后最后一条仍来自冷段。
 func (s *FileStore) DMUnread(ctx context.Context, agentID AgentID) (unread int, last *Message, err error) {
 	if err := ctx.Err(); err != nil {
 		return 0, nil, err
@@ -164,10 +155,14 @@ func (s *FileStore) DMUnread(ctx context.Context, agentID AgentID) (unread int, 
 		return 0, nil, err
 	}
 	s.mu.Lock()
-	msgs, rerr := readJSONLTolerantTail[Message](s.dmLogPath(agentID))
+	hot, rerr := readJSONLTolerantTail[Message](s.dmLogPath(agentID))
 	s.mu.Unlock()
 	if rerr != nil {
 		return 0, nil, rerr
+	}
+	msgs, err := s.mergedLogMessages(ArchiveScopeDMs, string(agentID), hot)
+	if err != nil {
+		return 0, nil, err
 	}
 	if len(msgs) == 0 {
 		return 0, nil, nil
@@ -205,6 +200,14 @@ func (s *FileStore) FindDirectMessageByClientID(ctx context.Context, agentID Age
 		if id, _ := msgs[i].Refs["client_msg_id"].(string); id == clientMsgID {
 			return msgs[i].Seq, true, nil
 		}
+	}
+	// 热日志找不到再搜冷段：幂等重发跨归档仍去重。
+	hit, err := s.findArchivedMessageByClientID(ArchiveScopeDMs, string(agentID), clientMsgID, false)
+	if err != nil {
+		return 0, false, err
+	}
+	if hit != nil {
+		return hit.Seq, true, nil
 	}
 	return 0, false, nil
 }

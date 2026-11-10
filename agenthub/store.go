@@ -117,6 +117,9 @@ type hubMeta struct {
 //	groups/<gid>/group.json
 //	groups/<gid>/log.jsonl
 //	groups/<gid>/activity.jsonl
+//	dms/<aid>/log.jsonl
+//	archive/groups/<gid>/manifest.json + <start>-<end>.jsonl
+//	archive/dms/<aid>/manifest.json + <start>-<end>.jsonl
 //	tasks/<id>/task.json
 //	tasks/<id>/events.jsonl
 //	needs/<id>.json
@@ -128,13 +131,14 @@ type hubMeta struct {
 type FileStore struct {
 	root string
 
-	mu       sync.Mutex // 保护 seq / events 索引 / ID 预留与日志读写的可见性
-	seq      map[GroupID]int64
-	dmSeq    map[AgentID]int64 // DM 索引的 per-agent 游标（§6.1.3）
-	taskSeq  map[TaskID]int64
-	reserved map[string]struct{}
-	idGen    func(prefix string) string
-	taskIdx  *taskIndex
+	mu        sync.Mutex // 保护 seq / events 索引 / ID 预留与日志读写的可见性
+	archiveMu sync.Mutex // 串行化归档（决定段边界 + 写 manifest）
+	seq       map[GroupID]int64
+	dmSeq     map[AgentID]int64 // DM 索引的 per-agent 游标（§6.1.3）
+	taskSeq   map[TaskID]int64
+	reserved  map[string]struct{}
+	idGen     func(prefix string) string
+	taskIdx   *taskIndex
 }
 
 // OpenFileStore 打开/创建 root，校验 schema，从日志重建 seq，并重建任务快照索引。
@@ -205,7 +209,8 @@ func migrateSchema(root string, from int) error {
 
 // rebuildIndex 从 append-only 日志恢复内存索引：
 //   - 每个群的 log.jsonl -> 下一个消息 seq；
-//   - 每个任务的 events.jsonl -> 下一个事件 seq。
+//   - 每个任务的 events.jsonl -> 下一个事件 seq；
+//   - archive manifest -> 冷段最大 end_seq（全量归档后 seq 不从 1 重号）。
 //
 // 快照 JSON（task.json/group.json）是实体权威值；日志只负责序号与审计，二者不互相覆盖。
 func (s *FileStore) rebuildIndex() error {
@@ -295,7 +300,7 @@ func (s *FileStore) rebuildIndex() error {
 		s.taskIdx = newTaskIndex()
 	}
 	s.taskIdx.reset(tasks)
-	return nil
+	return s.rebuildArchiveIndex()
 }
 
 func (s *FileStore) AllocateID(ctx context.Context, prefix string) (string, error) {
@@ -489,26 +494,49 @@ func (s *FileStore) AppendMessageWithRound(ctx context.Context, m *Message, roun
 		if err != nil {
 			return 0, false, err
 		}
+		var existing *Message
+		fromArchive := false
 		for i := len(msgs) - 1; i >= 0; i-- {
-			if messageClientMsgID(msgs[i]) != cid {
-				continue
+			if id, ok := msgs[i].Refs["client_msg_id"].(string); ok && strings.TrimSpace(id) == cid {
+				hit := msgs[i]
+				existing = &hit
+				break
 			}
-			existing := msgs[i]
+		}
+		if existing == nil {
+			// 幂等键可能已经随旧消息进入冷归档：不能跨归档重复写。
+			hit, err := s.findArchivedMessageByClientID(ArchiveScopeGroups, string(m.GroupID), cid, true)
+			if err != nil {
+				return 0, false, err
+			}
+			existing, fromArchive = hit, hit != nil
+		}
+		if existing != nil {
 			// 上次可能已写消息但回执失败；重试时补齐回执，仍返回原 seq。
 			if round != nil && !hasRoundReceipt(msgs, existing.Seq) {
-				beforeSize, err := regularFileSize(logPath)
-				if err != nil {
-					return 0, false, err
-				}
-				if err := s.appendRoundLocked(existing.GroupID, existing.Seq, round); err != nil {
-					// 二次失败也不能留下没有 activity 的孤儿回执（复审 NB-1）。
-					if truncErr := os.Truncate(logPath, beforeSize); truncErr != nil {
-						return 0, false, fmt.Errorf("heal receipt: %v; rollback: %w", err, truncErr)
+				needReceipt := true
+				if fromArchive {
+					has, err := s.hasArchivedRoundReceipt(m.GroupID, existing.Seq)
+					if err != nil {
+						return 0, false, err
 					}
-					return 0, false, err
+					needReceipt = !has
+				}
+				if needReceipt {
+					beforeSize, err := regularFileSize(logPath)
+					if err != nil {
+						return 0, false, err
+					}
+					if err := s.appendRoundLocked(existing.GroupID, existing.Seq, round); err != nil {
+						// 二次失败也不能留下没有 activity 的孤儿回执（复审 NB-1）。
+						if truncErr := os.Truncate(logPath, beforeSize); truncErr != nil {
+							return 0, false, fmt.Errorf("heal receipt: %v; rollback: %w", err, truncErr)
+						}
+						return 0, false, err
+					}
 				}
 			}
-			*m = existing
+			*m = *existing
 			return existing.Seq, true, nil
 		}
 	}
@@ -594,13 +622,15 @@ func (s *FileStore) ReadMessages(ctx context.Context, gid GroupID, beforeSeq int
 	}
 	limit = normalizeLimit(limit)
 
+	// 先取热日志快照，再读 manifest：归档只会在 manifest 提交后才裁剪热日志，
+	// 这个顺序保证「热里有全部」或「冷里有全部」，不会两头都少。
 	s.mu.Lock()
-	msgs, err := readJSONL[Message](s.messagesPath(gid))
+	hot, err := readJSONL[Message](s.messagesPath(gid))
 	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return sliceMessages(msgs, beforeSeq, limit), nil
+	return s.pageMessages(ArchiveScopeGroups, string(gid), hot, beforeSeq, limit)
 }
 
 func (s *FileStore) FindGroupMessageByClientID(ctx context.Context, gid GroupID, clientMsgID string) (*Message, error) {
@@ -626,7 +656,8 @@ func (s *FileStore) FindGroupMessageByClientID(ctx context.Context, gid GroupID,
 			return &m, nil
 		}
 	}
-	return nil, nil
+	// 热日志找不到再搜冷段：幂等重发必须跨归档命中。
+	return s.findArchivedMessageByClientID(ArchiveScopeGroups, string(gid), clientMsgID, true)
 }
 
 func (s *FileStore) SearchMessages(ctx context.Context, gid GroupID, query string, beforeSeq int64, limit int) ([]Message, error) {
@@ -639,8 +670,12 @@ func (s *FileStore) SearchMessages(ctx context.Context, gid GroupID, query strin
 	limit = normalizeLimit(limit)
 
 	s.mu.Lock()
-	msgs, err := readJSONL[Message](s.messagesPath(gid))
+	hot, err := readJSONL[Message](s.messagesPath(gid))
 	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	msgs, err := s.mergedLogMessages(ArchiveScopeGroups, string(gid), hot)
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +689,7 @@ func (s *FileStore) SearchMessages(ctx context.Context, gid GroupID, query strin
 			continue
 		}
 		// 搜索也必须按可见性/上下文 kind 过滤：否则 agent 可用 query 布尔探测
-		// owner-only 正文或 approval_stub 占位（P3a-07 B3）。
+		// owner-only 正文或 approval_stub 占位（P3a-07 B3）。冷段同口径。
 		if !m.VisibleTo(false) || !m.AgentContextKind() {
 			continue
 		}
