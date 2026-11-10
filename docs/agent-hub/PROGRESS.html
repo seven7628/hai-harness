@@ -303,8 +303,8 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P4 全部收口：04b-2 + UI-1/2/3 PASS；hub-ui 已合并到 agent-hub（714cfda）；前端全量绿，bridge 全量 3 条环境/顺序失败",
-  "updated": "2026-11-09",
+  "subtitle": "P4 收口 + P5 审计：群消息独立气泡（93c1a7c）与隐式状态 93 条（8cc8ab9）均 PASS",
+  "updated": "2026-11-10",
   "phases": [
     {
       "id": "P0",
@@ -346,6 +346,12 @@ const BASE = {
       "id": "P4",
       "name": "P4 · 打磨与扩展",
       "goal": "手机连接优先：Hub 移动页面、主题/交互、弱网与长会话打磨、其余扩展",
+      "days": "按需"
+    },
+    {
+      "id": "P5",
+      "name": "P5 · 质量审计",
+      "goal": "跨面隐式状态清单、风险矩阵与治理路线",
       "days": "按需"
     }
   ],
@@ -1695,6 +1701,53 @@ const BASE = {
       "review": "passed",
       "reviewNote": "final delta review task-sz5gnmgk PASS（4c88a85）；合并 714cfda（无 Go 文件变更）。合并后：tsc 双配置/build/test:p4/css/hub-patch 27/hub-model-options 31 全绿；go build bridge + go test ./agenthub/... 绿。go test ./desktop/bridge 全量 3 条环境/顺序依赖失败（MCP hot-apply flaky、真实 provider 探活 upstream Model unavailable、cost 价表口径 flaky）；前两条单独/加 HAI_EVAL_ALLOW_PING_SKIP 可过，cost 单独跑过；无 Go 代码差异。",
       "commit": "771809f + 59aef20 + 4834c44 + b75a415 + a9844f9 + 4c88a85"
+    },
+    {
+      "id": "P4-UI-4",
+      "phase": "P4",
+      "title": "群消息独立作者气泡 + 统一产物卡 + mock 丰富化",
+      "deps": [
+        "P4-UI-1",
+        "P4-UI-3"
+      ],
+      "files": [
+        "desktop/app/src/hub/MessageBubble.tsx",
+        "desktop/app/src/hub/AgentBadge.tsx",
+        "desktop/app/src/hub/TaskArtifacts.tsx",
+        "desktop/app/src/hub/TaskResultCard.tsx",
+        "desktop/app/src/hub/RoundGroup.tsx",
+        "desktop/app/src/hub/StreamingMessage.tsx",
+        "desktop/app/src/hub/TurnContextLine.tsx",
+        "desktop/app/src/hub/hub.css",
+        "desktop/app/src/i18n.ts",
+        "desktop/app/src/transport/mock.ts",
+        "desktop/app/scripts/test-hub-thread.mjs",
+        "docs/agent-hub/P4-UI-REDESIGN.md"
+      ],
+      "acceptance": "群聊中每个作者是独立消息卡（头像/名字/职责/时间 + 自己的气泡），不同作者不共用一个外框；系统/路由/交接行在气泡外；触发上下文收进消息头 ↳N；任务卡执行者置顶，产物用统一 Artifacts 行；mock 覆盖 GFM 表格/引用/mention/owner-only/系统指令/3 产物；窄列用容器查询，不压名字；i18n 复用 artifacts/hub 键。",
+      "tests": "npx tsc --noEmit && npm run test:p4 && npm run test:css && npm run build；5176 真实浏览器 1280/640/390 + ink/paper",
+      "status": "done",
+      "note": "群消息样式修订：独立作者气泡、去外框/同轮表头、任务卡上下文与产物卡、mock 增富；delta review PASS",
+      "review": "passed",
+      "commit": "93c1a7c + 689ab75 + 303f0e2",
+      "reviewNote": "task-uywytq78 PASS：5 条原始要求逐条达标；P1-1 owner-only human chip、P2-1 任务卡上下文、P2-2 旧产物规则、P2-3 容器查询、P2-4 i18n、P2-5 mock/测试均已修复并复验；P3 残留（modified 对比度/hardcoded title/断言语义）已在 303f0e2 收口。tsc/test:p4/css/build 全绿；5176 DOM 实测 .hub-round-group=0、3 产物行、系统行不在 .hub-msg 内。"
+    },
+    {
+      "id": "P5-01",
+      "phase": "P5",
+      "title": "隐式状态审计：93 条清单、风险矩阵与治理路线",
+      "deps": [],
+      "files": [
+        "docs/agent-hub/IMPLICIT-STATE.md",
+        "docs/agent-hub/README.md"
+      ],
+      "acceptance": "覆盖 Go/前端/Bridge-Electron 三面；每条含 file:line、触发、影响、风险与建议；给出分类法、P0/P1/P2/P3 统计、Top 10、跨面案例、已知事故对照、治理与验收指标；独立 Review PASS。",
+      "tests": "脚本核对 93 条/17-44-31-1/按面/主类/排序/列数/交叉引用；独立 Review task-cftz5wcy",
+      "status": "done",
+      "note": "三路只读调研（task-24z9jt7z / task-agn8vh3q / task-fa93d6sx）+ 主会话汇总；delta review PASS",
+      "review": "passed",
+      "commit": "ee5b33e + 8cc8ab9",
+      "reviewNote": "task-cftz5wcy PASS：93 条/17-44-31-1、按面 5/15/7/1 + 8/15/7/0 + 4/14/17/0、主类 16/14/12/12/9/6/6/5/5/4/3/1、编号零漏零重、表格列数/排序/交叉引用全过；M1-M6 + S1-S11 已修；R1/R2（截断、v1→v2 迁移规则/回滚）已在 8cc8ab9 收口。"
     }
   ],
   "deferred": [
@@ -2634,6 +2687,18 @@ const BASE = {
       "commit": "714cfda",
       "review": "passed",
       "reviewNote": "final delta PASS；合并 714cfda；前端全量绿。"
+    },
+    "P4-UI-4": {
+      "status": "done",
+      "commit": "93c1a7c + 689ab75 + 303f0e2",
+      "review": "passed",
+      "reviewNote": "task-uywytq78 PASS；5 条要求 + 6 项 P1/P2 修复 + P3 收口"
+    },
+    "P5-01": {
+      "status": "done",
+      "commit": "ee5b33e + 8cc8ab9",
+      "review": "passed",
+      "reviewNote": "task-cftz5wcy PASS；93 条/17-44-31-1；M1-M6 + S1-S11 + R1/R2 收口"
     }
   },
   "reviewGate": {
