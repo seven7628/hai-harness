@@ -6,7 +6,7 @@
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { unlinkSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -274,10 +274,27 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
     'lunaColor：写作→紫（12 色 role palette）')
   assert(luna.lunaColor('agt_other', 'Other', role) === '#3C82F6',
     'lunaColor：同一职责不同智能体同色（demo 的职责规则先于散列）')
-  assert(luna.lunaColor('agt_x', '', '') === luna.lunaColor('agt_x', '', ''),
-    'lunaColor：无职责时按 id 稳定散列')
+  assert(luna.lunaColor('agt_x', 'Researcher', '') === '#3C82F6',
+    'lunaColor：职责为空时 name 仍参与规则（Researcher→蓝）')
+  assert(luna.lunaColor('agt_x', '', '') === luna.lunaColor('agt_x', '', '', '#7bc199'),
+    'lunaColor：第 4 个 accent 参数被忽略（严格 demo）')
   assert(luna.lunaColor('agt_x', '', '') !== luna.lunaColor('agt_y', '', ''),
     'lunaColor：不同 id 散列不同色')
+}
+
+// 10c) 所有 AgentSigil 调用点必须传 name：demo 的 avatarColor 用 id+name+role 拼种子，
+//      少传 name 会让同一智能体在侧栏/会话头/@ chip 落到两种颜色（复审 B1）。
+{
+  const hubDir = join(__dirname, '..', 'src', 'hub')
+  let calls = 0
+  for (const file of readdirSync(hubDir).filter((f) => f.endsWith('.tsx'))) {
+    const src = readFileSync(join(hubDir, file), 'utf8')
+    for (const m of src.matchAll(/<AgentSigil\b[\s\S]*?\/>/g)) {
+      calls++
+      assert(/\bname=/.test(m[0]), `${file}: AgentSigil 必须传 name（否则跨面两色）`)
+    }
+  }
+  assert(calls > 0, '至少扫描到一个 AgentSigil 调用点')
 }
 
 // 11) 手机端 avatar_model.js 与桌面 avatar.ts 同 seed 对照（防两套算法漂移）。

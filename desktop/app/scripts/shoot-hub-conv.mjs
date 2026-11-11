@@ -20,7 +20,7 @@
 //   · 窄屏表格保留 440px 可读列宽 → 单元格单行，横滑只在 .md-table-wrap 里（0 文档级溢出）
 //   · 三张事件卡正文左缘与各自事件标题左缘对齐（≤2px），event-flow 的 .agent 内 gap 4
 //   · 无 context 的卡不画空 footer（handoff / approval 没有 .event-actions）
-//   · 头像身份色跟随 agent.accent（mock 用 demo 的 12 色 role palette：Researcher 蓝 / Writer 紫），正文 @ 提及带 16px Luna
+//   · 头像严格用 demo 的 12 色职责色（Researcher 蓝 / Writer 紫），不读 agent.accent；正文 @ 提及带 16px Luna
 //   · handoff / approval 卡有 .event-flow 头像，task 卡 .event-who 有 16px 头像
 //   · composer meta 行存在
 //   · 无 console error / pageerror

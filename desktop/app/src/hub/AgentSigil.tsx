@@ -32,7 +32,8 @@ export default function AgentSigil({
   style,
 }: {
   agentId?: string | null
-  /** 颜色散列的辅助输入；不传时只按 id。 */
+  /** 参与职责规则匹配（demo 的 avatarColor 同样吃 id+name+role）。
+   *  所有调用点都必须传真实名字，否则同一智能体可能在不同入口落到两种颜色。 */
   name?: string | null
   /** 职责短句（HubAgent.role）；决定固定身份色。 */
   responsibility?: string | null

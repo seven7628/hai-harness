@@ -31,7 +31,7 @@ export default function AgentMentionChip({
   const style = { '--mention-accent': identity } as CSSProperties
   const body = (
     <>
-      <AgentSigil agentId={agent.id} responsibility={role} status={false} size={16} />
+      <AgentSigil agentId={agent.id} name={name} responsibility={role} status={false} size={16} />
       <span className="hub-mention-name">{name}</span>
       {agent.deleted ? <span className="hub-mention-gone">（已移除）</span> : null}
     </>

@@ -1698,7 +1698,7 @@ button.hub-budget-chip:hover { border-color: currentColor; }
   border: 1px solid color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 38%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 13%, transparent);
-  /* 文本用 accent 与 --ink 的混合色：accent 只留给圆点/头像（B8，paper ≥4.5:1）。 */
+  /* 文本用职责色与 --ink 的混合色（B8，paper ≥4.5:1）；profile.accent 不参与这里。 */
   --mention-text: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 30%, var(--ink));
   color: var(--ink);
   font: inherit;
@@ -2152,7 +2152,7 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   border: 0;
   border-radius: 4px;
   background: none;
-  /* 同 B8：chip 文字压暗到与 --ink 混合，accent 只保留给圆点。 */
+  /* 同 B8：chip 文字压暗到与 --ink 混合；这里的颜色是职责色，profile.accent 不参与。 */
   color: color-mix(in srgb, var(--context-accent, var(--text-2)) 30%, var(--ink));
   font: inherit;
   font-size: 10.5px;

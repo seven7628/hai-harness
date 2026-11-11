@@ -368,6 +368,7 @@ function HubRow({
     >
       <AgentSigil
         agentId={agent.id}
+        name={agent.name}
         responsibility={agent.role}
         state={state}
         size={44}

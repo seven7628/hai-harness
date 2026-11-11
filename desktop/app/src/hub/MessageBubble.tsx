@@ -50,7 +50,7 @@ function EventFlow({ from, to }: { from?: EventActor | null; to?: EventActor | n
   if (!from && !to) return null
   const face = (a: EventActor) => (
     <span className="agent">
-      <AgentSigil agentId={a.id} responsibility={a.role} status={false} size={18} />
+      <AgentSigil agentId={a.id} name={a.name} responsibility={a.role} status={false} size={18} />
       {a.name}
     </span>
   )

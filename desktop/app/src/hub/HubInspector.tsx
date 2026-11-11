@@ -196,6 +196,7 @@ function OverviewPanel() {
               <div className="hub-ov-member" key={m.agent_id}>
                 <AgentSigil
                   agentId={m.agent_id}
+                  name={member?.name ?? m.agent_id}
                   responsibility={member?.role}
                   state={stateOf(m.agent_id, member?.deleted)}
                   size={24}
@@ -237,6 +238,7 @@ function OverviewPanel() {
       <div className="hub-ov-hero">
         <AgentSigil
           agentId={agent.id}
+          name={agent.name}
           responsibility={agent.role}
           state={agentState}
           size={48}
