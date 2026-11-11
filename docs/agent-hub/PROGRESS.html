@@ -303,8 +303,8 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "P4 收口 + P5 审计：群消息独立气泡（93c1a7c）与隐式状态 93 条（8cc8ab9）均 PASS",
-  "updated": "2026-11-10",
+  "subtitle": "demo 源码 1:1 移植（会话 + Luna 头像）已实现，独立 Review 进行中；P5-02 owner 隔离已 PASS",
+  "updated": "2026-11-19",
   "phases": [
     {
       "id": "P0",
@@ -1733,6 +1733,87 @@ const BASE = {
       "reviewNote": "task-uywytq78 PASS（两轮）：5 条原始要求达标；P1-1 owner-only human chip、P2-1 任务卡上下文、P2-2 旧产物规则、P2-3 容器查询、P2-4 i18n、P2-5 mock/测试均修复；P3 对比度/title 在 303f0e2，human 分支断言判别力在 503d515 收口（模拟只留 agent chip 会失败）；test:hub 23 项全绿。"
     },
     {
+      "id": "P4-UI-5",
+      "phase": "P4",
+      "title": "Avatar v2（几何 sigil：8 形状 × 8 色相 × 4 trait）",
+      "deps": [
+        "P4-UI-4"
+      ],
+      "files": [
+        "desktop/app/src/hub/avatar.ts",
+        "desktop/app/src/hub/AgentSigil.tsx",
+        "desktop/app/src/hub/AgentStack.tsx",
+        "desktop/app/src/hub/avatarLabels.ts",
+        "desktop/app/src/hub/hub.css",
+        "desktop/bridge/mobile_web/avatar_model.js"
+      ],
+      "acceptance": "确定性身份图形、四态、24/32/48 尺寸、群叠放 +N、桌面/手机同 seed；独立 Review PASS。",
+      "tests": "npm run test:hub-avatar && npm run test:hub-thread && npm run test:p4",
+      "commit": "774de86",
+      "status": "done",
+      "note": "已完成并 Review PASS；但 2026-11 用户明确要求直接复制 demo 源码（含头像），本版几何 sigil 被 P4-UI-7 取代。",
+      "review": "passed",
+      "reviewNote": "task-ap9gckfb PASS：B1 DM ChatHeader aria-hidden / 死代码 + B2 mobile 仍 emoji 修复后通过；DOM 实测 role=img +「Researcher，待命」。用户随后否决该视觉方向，保留记录不删。"
+    },
+    {
+      "id": "P4-UI-6",
+      "phase": "P4",
+      "title": "Conversation v2（demo 会话区第一版）",
+      "deps": [
+        "P4-UI-4",
+        "P4-UI-5"
+      ],
+      "files": [
+        "desktop/app/src/hub/ConversationMessage.tsx",
+        "desktop/app/src/hub/conversationDay.ts",
+        "desktop/app/src/hub/GroupView.tsx",
+        "desktop/app/src/hub/HubSurface.tsx",
+        "desktop/app/src/hub/hub.css"
+      ],
+      "acceptance": "760px 会话列、DM 作者头、用户右侧暖气泡 + 24px「你」、事件卡解剖、19px composer；独立 Review PASS。",
+      "tests": "npm run test:p4 && npx tsc --noEmit && npm run test:css",
+      "commit": "d5d0226",
+      "status": "done",
+      "note": "结构已合并且 Review PASS；但与 demo 原图在字号/密度/卡片/头像上仍有偏差，用户要求“直接 copy 源码”，由 P4-UI-7 重做视觉层。",
+      "review": "passed",
+      "reviewNote": "task-k3yc8zzd PASS（d5d0226）：B1 TestMobileTokensMatchDesktop 24 色红 + N1 群头 81→63px、N2 气泡 gap 0→35、N3 handoff/approval 专属 CSS、N5 .hub-body 死断言均修；真实 DOM 证据通过。"
+    },
+    {
+      "id": "P4-UI-7",
+      "phase": "P4",
+      "title": "demo 源码 1:1 移植：会话区 + Luna 头像（桌面/手机）",
+      "deps": [
+        "P4-UI-4",
+        "P4-UI-6"
+      ],
+      "files": [
+        "desktop/app/src/hub/demo.css",
+        "desktop/app/src/hub/lunaAvatar.ts",
+        "desktop/app/src/hub/vendor/mascot-bots.js",
+        "desktop/app/src/hub/vendor/luna-face.js",
+        "desktop/app/src/hub/AgentSigil.tsx",
+        "desktop/app/src/hub/AgentStack.tsx",
+        "desktop/app/src/hub/ConversationMessage.tsx",
+        "desktop/app/src/hub/MessageBubble.tsx",
+        "desktop/app/src/hub/TaskResultCard.tsx",
+        "desktop/app/src/hub/TaskArtifacts.tsx",
+        "desktop/app/src/hub/GroupView.tsx",
+        "desktop/app/src/hub/HubSurface.tsx",
+        "desktop/app/src/hub/hub.css",
+        "desktop/bridge/mobile_web/app.js",
+        "desktop/bridge/mobile_web/style.css",
+        "desktop/bridge/mobile_web/mascot-bots.js",
+        "desktop/bridge/mobile_web/luna-face.js"
+      ],
+      "acceptance": "直接复制 demo 的 DOM/CSS/头像引擎；只替换数据与事件绑定；桌面/手机都使用 Luna 头像；1440 群/DM 与 390 窄屏无横向溢出；任务卡/handoff/approval/路由/owner-only/流式/停止/深链行为不丢；独立 Review PASS。",
+      "tests": "npx tsc --noEmit && npm run test:p4 && npm run test:css && npm run test:p4:go && npm run build；Playwright 1440/390 群+DM；go test ./desktop/bridge -run 'TestMobile|TestHook'",
+      "commit": "424d6e7 + eb7ce39 + b7e9cae + 182b71c",
+      "status": "review",
+      "note": "用户否决上一版自制视觉后，按 demo 源文件直接移植；桌面 424d6e7、手机 eb7ce39；独立 Review task-zkce8kd6 进行中。",
+      "review": "",
+      "reviewNote": ""
+    },
+    {
       "id": "P5-01",
       "phase": "P5",
       "title": "隐式状态审计：93 条清单、风险矩阵与治理路线",
@@ -1748,6 +1829,38 @@ const BASE = {
       "review": "passed",
       "commit": "ee5b33e + 8cc8ab9 + 074ddfd",
       "reviewNote": "task-cftz5wcy PASS（三轮）：93 条/17-44-31-1、按面 5/15/7/1 + 8/15/7/0 + 4/14/17/0、主类 16/14/12/12/9/6/6/5/5/4/3/1、编号零漏零重、表格列数/排序/交叉引用全过；M1-M6 + S1-S11 已修；R1 括号/截断与 R2 v1→v2 迁移规则在 8cc8ab9 + 074ddfd 收口，全表括号配对回归通过。"
+    },
+    {
+      "id": "P5-02",
+      "phase": "P5",
+      "title": "隐式状态 P0 第 0 批：hook/IM owner 隔离 + 状态修复",
+      "deps": [
+        "P5-01"
+      ],
+      "files": [
+        "owner/owner.go",
+        "hooks/trust.go",
+        "im/config.go",
+        "plugin/im/plugin.go",
+        "desktop/bridge/owner_wire.go",
+        "desktop/bridge/workspace_slots.go",
+        "desktop/bridge/hooks_commands.go",
+        "desktop/bridge/im_bridge.go",
+        "desktop/bridge/im_commands.go",
+        "desktop/app/src/lib/owner.ts",
+        "desktop/app/src/lib/activeOwner.ts",
+        "desktop/app/src/lib/imRoute.ts",
+        "desktop/app/src/components/HooksTab.tsx",
+        "desktop/app/src/components/IMSettingsEditor.tsx",
+        "docs/agent-hub/OWNER-SCOPE.md"
+      ],
+      "acceptance": "hook 信任库与 IM 启停按 agent/group（+workspace）owner 隔离，跨 owner 不继承；旧 v1 数据只迁 legacy 且仅 workspace 生效；升级不丢 IM 路由；前端 owner 派生与 IM 路由三态可表达 agent/group；独立 Review PASS。",
+      "tests": "npm run test:owner && go test ./desktop/bridge -run 'TestHook|TestIMOwner' && npm run test:p4",
+      "commit": "efe24fd",
+      "status": "done",
+      "note": "P5-01 §6.1 第 0 批；owner 模型、hookTrust v2、IM Owners 三态与迁移、前端 owner/路由接线已完成；Review task-jdx7bpr8 PASS。",
+      "review": "passed",
+      "reviewNote": "task-jdx7bpr8 PASS：B1 前端 owner 读错 store（Hub 里写成 workspace）+ B2 IM 路由 UI 不能表达 agent/group（编辑会静默改写）修复后通过；UI 验收 16 项 + 真实 DOM 归属核对通过。"
     }
   ],
   "deferred": [
@@ -2699,6 +2812,32 @@ const BASE = {
       "commit": "ee5b33e + 8cc8ab9 + 074ddfd",
       "review": "passed",
       "reviewNote": "task-cftz5wcy PASS（三轮）：93 条/17-44-31-1、按面 5/15/7/1 + 8/15/7/0 + 4/14/17/0、主类 16/14/12/12/9/6/6/5/5/4/3/1、编号零漏零重、表格列数/排序/交叉引用全过；M1-M6 + S1-S11 已修；R1 括号/截断与 R2 v1→v2 迁移规则在 8cc8ab9 + 074ddfd 收口，全表括号配对回归通过。"
+    },
+    "P4-UI-5": {
+      "status": "done",
+      "commit": "774de86",
+      "review": "passed",
+      "reviewNote": "task-ap9gckfb PASS：B1 DM ChatHeader aria-hidden / 死代码 + B2 mobile 仍 emoji 修复后通过；DOM 实测 role=img +「Researcher，待命」。用户随后否决该视觉方向，保留记录不删。",
+      "note": "已完成并 Review PASS；但 2026-11 用户明确要求直接复制 demo 源码（含头像），本版几何 sigil 被 P4-UI-7 取代。"
+    },
+    "P4-UI-6": {
+      "status": "done",
+      "commit": "d5d0226",
+      "review": "passed",
+      "reviewNote": "task-k3yc8zzd PASS（d5d0226）：B1 TestMobileTokensMatchDesktop 24 色红 + N1 群头 81→63px、N2 气泡 gap 0→35、N3 handoff/approval 专属 CSS、N5 .hub-body 死断言均修；真实 DOM 证据通过。",
+      "note": "结构已合并且 Review PASS；但与 demo 原图在字号/密度/卡片/头像上仍有偏差，用户要求“直接 copy 源码”，由 P4-UI-7 重做视觉层。"
+    },
+    "P4-UI-7": {
+      "status": "review",
+      "commit": "424d6e7 + eb7ce39 + b7e9cae + 182b71c",
+      "note": "用户否决上一版自制视觉后，按 demo 源文件直接移植；桌面 424d6e7、手机 eb7ce39；独立 Review task-zkce8kd6 进行中。"
+    },
+    "P5-02": {
+      "status": "done",
+      "commit": "efe24fd",
+      "review": "passed",
+      "reviewNote": "task-jdx7bpr8 PASS：B1 前端 owner 读错 store（Hub 里写成 workspace）+ B2 IM 路由 UI 不能表达 agent/group（编辑会静默改写）修复后通过；UI 验收 16 项 + 真实 DOM 归属核对通过。",
+      "note": "P5-01 §6.1 第 0 批；owner 模型、hookTrust v2、IM Owners 三态与迁移、前端 owner/路由接线已完成；Review task-jdx7bpr8 PASS。"
     }
   },
   "reviewGate": {
