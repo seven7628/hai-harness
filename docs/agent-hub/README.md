@@ -22,6 +22,7 @@
 | `P4-RETRO.md` | P4 最终复盘：交付矩阵、回归/性能/成本、已知限制、waiver |
 | `IMPLICIT-STATE.md` | 跨 Go / Bridge / Electron / React 的隐式状态审计：93 条清单、风险矩阵、Top 10、治理路线 |
 | `OWNER-SCOPE.md` | owner 隔离模型：hooks 信任库 v2、IM 路由/启停归属、迁移与边界 |
+| `DEMO-PORT.md` | demo 源码移植记录：哪些 CSS/DOM/头像直接搬、哪些换成真实数据、本次边界 |
 | `sync_progress.py` | 改完 `tasks.json` 后，把数据同步进 `PROGRESS.html` |
 
 ## 工作流（每个任务）
