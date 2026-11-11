@@ -193,7 +193,7 @@ async function shot(width, height, theme, kind) {
     else {
       if (m.dmSigil.role !== 'img') failed.push(`DM header sigil role=${m.dmSigil.role}（应为 img）`)
       if (m.dmSigil.label && !m.dmSigil.label.includes('Researcher')) failed.push(`DM header avatar aria-label=${m.dmSigil.label}`)
-      if (m.dmSigil.width !== 44) failed.push(`DM header avatar=${m.dmSigil.width}px（应为 44）`)
+      if (m.dmSigil.width !== 52) failed.push(`DM header avatar=${m.dmSigil.width}px（应为 52）`)
     }
   }
   if (kind === 'group') {
