@@ -4,6 +4,7 @@ import { EyeIcon, GitBranch } from '../components/icons'
 import { useT } from '../i18n'
 import type { HubMessage } from './types'
 import { parseRoutingText } from './groupThread'
+import { uniqueContextSenders } from './groupProjection'
 import AgentMentionChip from './AgentMentionChip'
 import AgentSigil from './AgentSigil'
 import { AgentMessage, UserMessage } from './ConversationMessage'
@@ -43,19 +44,21 @@ function senderActor(msg: HubMessage, roster: MentionAgent[]): EventActor | null
   return msg.sender?.kind === 'agent' ? eventActor(msg.sender.agent_id, roster) : null
 }
 
-/** demo 的 .event-flow：18px Luna + 名字，中间 `→`（只有单向时只画头像+名字）。 */
+/** demo 的 .event-flow：`<span class="agent">{头像}{名字}</span>`（组内 gap 4），
+ *  组与组之间才是 .event-flow 的 6px 与 `→`。头像与名字分开当兄弟会变成 6px。 */
 function EventFlow({ from, to }: { from?: EventActor | null; to?: EventActor | null }) {
   if (!from && !to) return null
   const face = (a: EventActor) => (
-    <AgentSigil agentId={a.id} accent={a.accent} responsibility={a.role} status={false} size={18} />
+    <span className="agent">
+      <AgentSigil agentId={a.id} accent={a.accent} responsibility={a.role} status={false} size={18} />
+      {a.name}
+    </span>
   )
   return (
     <div className="event-flow">
       {from ? face(from) : null}
-      {from ? <span className="agent">{from.name}</span> : null}
       {from && to ? <span className="arrow" aria-hidden="true">→</span> : null}
       {to ? face(to) : null}
-      {to ? <span className="agent">{to.name}</span> : null}
     </div>
   )
 }
@@ -129,9 +132,9 @@ export function GroupBubble({
                   <span className="event-status">仅你可看</span>
                 </div>
                 <EventFlow from={initiator} />
-                <p className="event-body">审批正文不进入群上下文；处理入口在右栏 Needs you。</p>
               </div>
             </div>
+            <p className="event-body">审批正文不进入群上下文；处理入口在右栏 Needs you。</p>
           </article>
         </div>
       </div>
@@ -167,9 +170,9 @@ export function GroupBubble({
                   <span className={`event-status ${status === 'pending_ack' || !status ? 'wait' : status === 'accepted' ? 'ok' : ''}`}>{label}</span>
                 </div>
                 <EventFlow from={from} to={to} />
-                <p className="event-body">完整交接指令在 Needs you；群内只保留摘要。</p>
               </div>
             </div>
+            <p className="event-body">完整交接指令在 Needs you；群内只保留摘要。</p>
           </article>
         </div>
       </div>
@@ -183,6 +186,9 @@ export function GroupBubble({
   const role = roleParts.join(' · ')
   const time = formatClockTime(msg.created_at)
   const card = parseTaskResult(msg, task)
+  // TurnContextLine 自己会在 <2 人时 render null；但父层先判掉，任务卡的 footer
+  // 条件才能把「有 context」当真实内容，不至于补出一行空 footer。
+  const hasContext = uniqueContextSenders(msg.context?.senders).length >= 2
 
   if (card) {
     const executor = card.agentId ? roster.find((a) => a.id === card.agentId) : undefined
@@ -196,7 +202,7 @@ export function GroupBubble({
             executor={executor}
             initiator={initiator}
             onOpenAgent={card.agentId && onSelectAgent ? () => onSelectAgent(card.agentId) : undefined}
-            context={(
+            context={hasContext ? (
               <TurnContextLine
                 compact
                 msg={msg}
@@ -204,7 +210,7 @@ export function GroupBubble({
                 triggerSeqBySender={triggerSeqBySender}
                 onJumpToSeq={onJumpToSeq}
               />
-            )}
+            ) : undefined}
           />
         </div>
       </div>
@@ -217,7 +223,7 @@ export function GroupBubble({
       {msg.visibility === 'owner' ? <span className="agent-tag owner">{t('hub.ownerOnly')}</span> : null}
     </>
   )
-  const contextLine = (
+  const contextLine = hasContext ? (
     <TurnContextLine
       compact
       msg={msg}
@@ -225,7 +231,7 @@ export function GroupBubble({
       triggerSeqBySender={triggerSeqBySender}
       onJumpToSeq={onJumpToSeq}
     />
-  )
+  ) : undefined
 
   if (kind === 'human') {
     return (

@@ -2383,8 +2383,11 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-msg.agent { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; }
   .hub-msg-body { font-size: 13.5px; }
   /* 窄屏表格不在单元格里逐字折行：保留可读列宽，横滑收在 .md-table-wrap 里
-     （文档级仍 0 横向溢出，横条只出现在表格自身）。 */
-  .hub-msg-body .md-table-wrap > table { min-width: 440px; }
+     （文档级仍 0 横向溢出，横条只出现在表格自身）。demo 会话的正文容器是
+     .agent-text（不是 .hub-msg-body），两条都要覆盖，否则 390 下 `$49/席`
+     会被拆成两行（单元格 51px）。 */
+  .hub-msg-body .md-table-wrap > table,
+  .hub-demo .agent-text .md-table-wrap > table { min-width: 440px; }
   .hub-msg.human .hub-msg-main { max-width: min(88%, calc(100% - 35px)); }
   .hub-msg-time { margin-left: 0; }
   .hub-user-bubble { padding: 9px 12px; font-size: 13.5px; }
@@ -2479,13 +2482,28 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .msg-row > .avatar,
 .hub-demo .msg-row > .avatar-btn { align-self: flex-start; flex: 0 0 auto; }
 .hub-demo .avatar-btn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 50%; }
-.hub-demo .agent-name-btn { padding: 0; border: 0; background: none; color: inherit; cursor: pointer; font: inherit; }
+/* 只是把 <button> 的 UA 外观抹平：font-family / line-height 取自上下文即可。
+   不要 `font: inherit` —— 那会把 demo.css 的 .agent-name（12.5px/600）一并冲成继承值，
+   实测名字变成 13px/400。字号字重留给 .hub-demo .agent-name。 */
+.hub-demo .agent-name-btn { padding: 0; border: 0; background: none; color: inherit; cursor: pointer; font-family: inherit; line-height: inherit; }
 .hub-demo .agent-name-btn:hover { color: var(--accent); }
 .hub-demo .agent-tag { font-size: 9.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; line-height: 1.45; white-space: nowrap; }
 .hub-demo .agent-tag.reply { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 24%, var(--border)); }
 .hub-demo .agent-tag.observe { color: var(--muted-2); }
 .hub-demo .agent-tag.owner { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
-.hub-demo .msg-time { margin-left: 2px; }
+/* demo：名字与时间同处 .agent-head（gap 7），时间再自留 6px 呼吸位。 */
+.hub-demo .msg-time { margin-left: 6px; }
+/* demo.css 的 `.hub-demo button{font:inherit;color:inherit}`（0,1,1）压过了
+   hub.css 里的 `.hub-context-jump`（0,1,0），把「2 人触发」抬成正文 13px + 正文色。
+   这里用 (0,2,0) 的选择器压回 .hub-context-line 的口径：10.5px + 小字弱化色。 */
+.hub-demo .hub-context-jump {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--text-3) 55%, var(--ink));
+}
+.hub-demo .hub-context-jump:hover { color: var(--ink); }
+/* 消息 footer 里的入口（在 .msg-main 里紧贴正文）：只留 2px 上边距，不另开一行。 */
+.hub-demo .msg-main > .hub-context-jump { margin-top: 2px; }
 /* demo 的 .agent-text 是 pre-wrap（原文给纯文本/流式回显用）；套上 Markdown 后，
    块级元素之间的 `\n` 文本节点也被画成空行，段落间距等于「margin + 一个空行」。
    正文容器仍按 demo 的 1.7 行高与 8px 段距排版，只把空白处理交还给 normal，
@@ -2496,6 +2514,10 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .agent-text .md :not(pre) > code { white-space: pre-wrap; }
 .hub-demo .agent-text .md p { margin: 0 0 8px; }
 .hub-demo .agent-text .md p:last-child { margin-bottom: 0; }
+/* demo 的正文块首尾不加外边距：h2 开头不吃 14px 上边距，列表收尾不留 8px 下边距
+   （段距本身仍是 p 的 8px，别动）。 */
+.hub-demo .agent-text .md > :first-child { margin-top: 0; }
+.hub-demo .agent-text .md > :last-child { margin-bottom: 0; }
 .hub-demo .agent-text .md ul,
 .hub-demo .agent-text .md ol { margin: 6px 0 8px; padding-left: 20px; }
 .hub-demo .agent-text .md pre { margin: 8px 0; }

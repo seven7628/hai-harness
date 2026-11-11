@@ -13,7 +13,13 @@
 //   · 交接/审批卡真实渲染（?hubFixture=cards），各有专属 token 样式
 //   · 正文 Markdown 的空白处理是 normal（agent-text 的 pre-wrap 不再把 \n 画成空行），
 //     且每个段落的高度都是 line-height 的整数倍（没有多出来的空行）
-//   · 触发上下文是「N 人触发」可读文案，不再画「↳ N」
+//   · 触发上下文是「N 人触发」可读文案，不再画「↳ N」；字号/颜色按 demo 的小字口径
+//     （10.5px + --text-3 压向 --ink），且在消息 footer / 任务卡 footer 里
+//   · 作者名 = demo 的 .agent-name（12.5px/600），时间与名字间距 6px
+//   · 正文 md 首尾块不吃外边距（h2 开头 0、列表结尾 0），段距仍是 8px
+//   · 窄屏表格保留 440px 可读列宽 → 单元格单行，横滑只在 .md-table-wrap 里（0 文档级溢出）
+//   · 三张事件卡正文左缘与各自事件标题左缘对齐（≤2px），event-flow 的 .agent 内 gap 4
+//   · 无 context 的卡不画空 footer（handoff / approval 没有 .event-actions）
 //   · 头像身份色跟随 agent.accent（Researcher = #7bc199），正文 @ 提及带 16px Luna
 //   · handoff / approval 卡有 .event-flow 头像，task 卡 .event-who 有 16px 头像
 //   · composer meta 行存在
@@ -91,8 +97,94 @@ async function openConversation(page, kind) {
   await page.waitForTimeout(250)
 }
 
-async function shot(width, height, theme, kind) {
-  const name = `${width}-${kind}-${theme}`
+// 排版细节的测量（在页面里跑，shot 与 cards 共用）：作者名 / 时间 / 正文首尾 / 表格。
+function typeDetailProbe() {
+  const q = (s) => document.querySelector(s)
+  return {
+    // 作者名与时间：demo 是 .agent-name 12.5px/600、.msg-time margin-left 6px。
+    nameStyle: (() => {
+      const el = q('.msg-row.agent .agent-name')
+      if (!el) return null
+      const st = getComputedStyle(el)
+      return { fontSize: st.fontSize, fontWeight: st.fontWeight }
+    })(),
+    msgTimeStyle: (() => {
+      const el = q('.msg-row.agent .msg-time')
+      if (!el) return null
+      return { marginLeft: getComputedStyle(el).marginLeft, fontSize: getComputedStyle(el).fontSize }
+    })(),
+    // 正文首尾块不吃外边距：demo 的 agent-text 是紧贴头部的单块排版。
+    mdRhythm: [...document.querySelectorAll('.agent-text .md')].map((md) => {
+      const first = md.firstElementChild
+      const last = md.lastElementChild
+      return {
+        first: first?.tagName ?? null,
+        firstMt: first ? getComputedStyle(first).marginTop : null,
+        last: last?.tagName ?? null,
+        lastMb: last ? getComputedStyle(last).marginBottom : null,
+      }
+    }),
+    // 任务卡的「N 人触发」必须落在 footer.event-actions 里，且排在最左（不是正文的末尾）。
+    taskContextJump: (() => {
+      const footer = q('.event-card--task footer.event-actions')
+      const jump = footer?.querySelector('.hub-context-jump')
+      if (!footer || !jump) return null
+      return {
+        text: (jump.textContent ?? '').trim(),
+        fontSize: getComputedStyle(jump).fontSize,
+        first: footer.firstElementChild === jump,
+        inEventMain: !!q('.event-card--task .event-main .hub-context-jump'),
+      }
+    })(),
+    // 表格：可读列宽 ≥440 + 单行单元格；横滑只在自己容器里，文档级仍 0 溢出。
+    tableFit: [...document.querySelectorAll('.agent-text .md-table-wrap')].map((wrap) => {
+      const table = wrap.querySelector('table')
+      const cell = wrap.querySelector('td')
+      return {
+        wrapClient: Math.round(wrap.clientWidth),
+        wrapScroll: Math.round(wrap.scrollWidth),
+        tableWidth: table ? Math.round(table.getBoundingClientRect().width) : null,
+        tableMinWidth: table ? getComputedStyle(table).minWidth : null,
+        cellHeight: cell ? Math.round(cell.getBoundingClientRect().height * 10) / 10 : null,
+        overflowX: getComputedStyle(wrap).overflowX,
+      }
+    }),
+  }
+}
+
+// 排版细节断言（shot 与 cards 两处共用）：
+//   · 作者名 = demo 的 .agent-name（12.5px/600）—— hub.css 里 <button> 的 `font: inherit`
+//     曾把它压回 13px/400；
+//   · 时间与名字间距 = .msg-time 的 6px（曾被 hub.css 改成 2px）；
+//   · 正文 md 首尾块不吃外边距（h2 开头 14px / 列表结尾 8px 都是 demo 没有的）；
+//   · 表格单元格单行；窄屏保留 440px 可读列宽，横滑只发生在 .md-table-wrap 内部。
+function assertTypeDetail(m, failed, narrow) {
+  if (m.nameStyle?.fontSize !== '12.5px' || m.nameStyle?.fontWeight !== '600') {
+    failed.push(`作者名 ${m.nameStyle?.fontSize}/${m.nameStyle?.fontWeight}（应为 12.5px/600）`)
+  }
+  if (m.msgTimeStyle?.marginLeft !== '6px') {
+    failed.push(`时间左间距=${m.msgTimeStyle?.marginLeft}（应为 6px）`)
+  }
+  if (!m.mdRhythm.length) failed.push('正文里没有 Markdown 容器（无从校验首尾外边距）')
+  for (const r of m.mdRhythm) {
+    if (r.firstMt !== '0px') failed.push(`正文首块 <${r.first}> margin-top=${r.firstMt}（应为 0）`)
+    if (r.lastMb !== '0px') failed.push(`正文末块 <${r.last}> margin-bottom=${r.lastMb}（应为 0）`)
+  }
+  for (const t of m.tableFit) {
+    if (t.overflowX !== 'auto') failed.push(`表格容器 overflow-x=${t.overflowX}（应为 auto）`)
+    if (t.cellHeight >= 40) failed.push(`表格单元格高 ${t.cellHeight}px（内文被拆成两行）`)
+    if (!narrow) continue
+    if (t.tableMinWidth !== '440px') failed.push(`窄屏表格 min-width=${t.tableMinWidth}（应为 440px）`)
+    if (t.tableWidth < 440) failed.push(`窄屏表格宽 ${t.tableWidth}px < 440（列被压扁）`)
+    if (t.wrapScroll < t.wrapClient) failed.push(`表格容器 scrollWidth ${t.wrapScroll} < clientWidth ${t.wrapClient}`)
+    // 容器比 440 窄时必须真的能横滑（390 的群聊就是这种），而不是把表格压扁。
+    if (t.wrapClient < 440 && t.wrapScroll <= t.wrapClient) {
+      failed.push(`容器 ${t.wrapClient}px 窄于 440，但表格没有横滑（scroll=${t.wrapScroll}）`)
+    }
+  }
+}
+
+async function shot(width, height, theme, kind) {  const name = `${width}-${kind}-${theme}`
   const page = await browser.newPage({ viewport: { width, height } })
   page.on('console', (m) => {
     if (m.type() === 'error') errors.push(`${name}: ${m.text()}`)
@@ -195,6 +287,14 @@ async function shot(width, height, theme, kind) {
         ? {
             text: (q('.hub-context-jump').textContent ?? '').trim(),
             title: q('.hub-context-jump').getAttribute('title'),
+            fontSize: getComputedStyle(q('.hub-context-jump')).fontSize,
+            lineHeight: getComputedStyle(q('.hub-context-jump')).lineHeight,
+            color: getComputedStyle(q('.hub-context-jump')).color,
+            // 同一容器里正文的颜色：弱化色必须与正文色不同（被 demo.css 的 color:inherit 抬上来就会相等）。
+            bodyColor: q('.msg-main') ? getComputedStyle(q('.msg-main')).color : null,
+            inMsgFooter: !!q('.msg-main > .hub-context-jump'),
+            inEventMain: !!q('.event-main .hub-context-jump'),
+            marginTop: getComputedStyle(q('.hub-context-jump')).marginTop,
           }
         : null,
       // 头像身份色：会话区里每个出现过的 agent id → data-fill（mock 的 accent 是 #7bc199 / #9daed2）。
@@ -218,6 +318,8 @@ async function shot(width, height, theme, kind) {
       })(),
     }
   })
+  // 作者名 / 时间 / 正文首尾 / 表格：与 cards 区块同一份测量与断言。
+  Object.assign(m, await page.evaluate(typeDetailProbe))
   const failed = []
   if (m.scrollWidth > width) failed.push(`横向溢出 ${m.scrollWidth} > ${width}`)
   const narrow = width <= 640
@@ -275,6 +377,8 @@ async function shot(width, height, theme, kind) {
       break
     }
   }
+  // 排版细节（名字/时间/正文首尾/表格可读列宽）——与 cards 区块共用同一组断言。
+  assertTypeDetail(m, failed, narrow)
   // 触发上下文：可读文字，不再用「↳」符号。
   if (kind === 'group') {
     if (!m.contextJump) failed.push('群消息缺少触发上下文入口')
@@ -282,6 +386,20 @@ async function shot(width, height, theme, kind) {
       if (!m.contextJump.text.includes('人触发')) failed.push(`触发上下文文案=${m.contextJump.text}（应含「人触发」）`)
       if (m.contextJump.text.includes('↳')) failed.push('触发上下文仍在用「↳」符号')
       if (!m.contextJump.title?.includes('#')) failed.push(`触发上下文 title 缺少 seq：${m.contextJump.title}`)
+      // demo 的小字口径：被 demo.css 的 `.hub-demo button{font:inherit}` 抬成 13px 就太抢眼。
+      if (m.contextJump.fontSize !== '10.5px') failed.push(`触发上下文字号=${m.contextJump.fontSize}（应为 10.5px）`)
+      if (m.contextJump.color === m.contextJump.bodyColor) failed.push('触发上下文用了正文色（应为弱化色）')
+      if (!m.contextJump.inMsgFooter) failed.push('消息里的触发上下文不在 footer（.msg-main 直接子元素）')
+      if (m.contextJump.inEventMain) failed.push('触发上下文跑进了 .event-main（应留在 footer）')
+      if (m.contextJump.marginTop !== '2px') failed.push(`消息 footer 触发上下文上边距=${m.contextJump.marginTop}（应为 2px）`)
+    }
+    // 任务卡的「N 人触发」：在 footer.event-actions 最左侧，与 task id / 打开会话同一行。
+    if (!m.taskContextJump) failed.push('任务卡 footer 缺少「N 人触发」')
+    else {
+      if (!m.taskContextJump.text.includes('人触发')) failed.push(`任务卡 footer 上下文=${m.taskContextJump.text}`)
+      if (m.taskContextJump.fontSize !== '10.5px') failed.push(`任务卡 footer 上下文字号=${m.taskContextJump.fontSize}（应为 10.5px）`)
+      if (!m.taskContextJump.first) failed.push('任务卡「N 人触发」不在 footer 最左')
+      if (m.taskContextJump.inEventMain) failed.push('任务卡「N 人触发」仍在 .event-main')
     }
     if (!m.mentionAvatar) failed.push('正文 @ 提及缺少 Luna 头像')
     else {
@@ -344,9 +462,10 @@ for (const [width, height] of [[1440, 900], [390, 900]]) {
 }
 // 交接 / 审批卡：mock 的 ?hubFixture=cards 注入两种真实 kind，必须真的画出来，
 // 且 handoff 用 accent 图标、approval 用 warn 图标 + 暖边框 + warn 标题。
-for (const theme of THEMES) {
-  const width = 1440
-  const page = await browser.newPage({ viewport: { width, height: 900 } })
+// 1440 与 390 各一套：窄屏卡片左缘 = 38（事件图标 24 + gap 9 + 卡片外距 5）。
+const CARD_CASES = [[1440, 900], [390, 900]].flatMap(([w, h]) => THEMES.map((theme) => [w, h, theme]))
+for (const [width, height, theme] of CARD_CASES) {
+  const page = await browser.newPage({ viewport: { width, height } })
   const name = `${width}-group-cards-${theme}`
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`${name}: ${m.text()}`) })
   page.on('pageerror', (e) => errors.push(`${name}: pageerror ${e.message}`))
@@ -419,9 +538,40 @@ for (const theme of THEMES) {
           fill: face?.querySelector('svg[data-luna-face]')?.getAttribute('data-fill') ?? null,
         }
       }),
+      // 三张卡的正文左缘要跟各自事件标题左缘对齐（≤2px）。handoff/approval 的 .event-body
+      // 曾是 .event-main 的子元素，38px margin 叠上 event-main 的 39px 缩进 → 正文整体右移。
+      cardBodies: [...document.querySelectorAll('.event-card')].map((card) => {
+        const bodyEl = card.querySelector('.event-body')
+        const nameEl = card.querySelector('.event-title .name')
+        return {
+          kind: (card.className.match(/event-card--(\w+)/) ?? [])[1] ?? '?',
+          direct: !!bodyEl && bodyEl.parentElement === card,
+          delta: bodyEl && nameEl
+            ? Math.round((bodyEl.getBoundingClientRect().left - nameEl.getBoundingClientRect().left) * 10) / 10
+            : null,
+        }
+      }),
+      // event-flow：demo 是 `<span class="agent">{头像}{名字}</span>`，组内 gap 4（组间才是 6）。
+      // 头像必须真的在这个组里（avatarOffset=0），不能是名字旁边的兄弟节点。
+      flowAgents: [...document.querySelectorAll('.event-flow .agent')].map((el) => {
+        const avatar = el.querySelector('.luna-avatar')
+        return {
+          gap: getComputedStyle(el).gap,
+          text: el.textContent?.trim() ?? '',
+          avatarOffset: avatar
+            ? Math.round((avatar.getBoundingClientRect().left - el.getBoundingClientRect().left) * 10) / 10
+            : null,
+        }
+      }),
+      // 没有 context / task_id / 入口的卡不该留下一行空 footer。
+      emptyFooters: [...document.querySelectorAll('.event-card > footer')]
+        .filter((f) => !f.children.length).length,
+      handoffFooter: !!q('.event-card--handoff footer'),
+      approvalFooter: !!q('.event-card--approval footer'),
       scrollWidth: document.documentElement.scrollWidth,
     }
   })
+  Object.assign(m, await page.evaluate(typeDetailProbe))
   const failed = []
   const wantCardLeft = width <= 640 ? 38 : 41
   if (m.cardLeft !== wantCardLeft || m.handoffLeft !== wantCardLeft || m.approvalLeft !== wantCardLeft) {
@@ -431,6 +581,32 @@ for (const theme of THEMES) {
   if (m.cardActions?.ml !== '38px' || m.cardActions?.gap !== '6px') failed.push(`event-actions=${m.cardActions?.ml}/${m.cardActions?.gap}（应为 38px/6px）`)
   if (m.handoffCount !== 1) failed.push(`handoff 卡数量=${m.handoffCount}`)
   if (m.approvalCount !== 1) failed.push(`approval 卡数量=${m.approvalCount}`)
+  // 三张卡同构：正文是 article 的直接子元素，左缘与各自事件标题左缘齐（差 ≤2px）。
+  const bodyKinds = m.cardBodies.map((c) => c.kind).sort().join(',')
+  if (bodyKinds !== 'approval,handoff,task') failed.push(`事件卡种类=${bodyKinds}（应为 approval,handoff,task）`)
+  for (const c of m.cardBodies) {
+    if (!c.direct) failed.push(`${c.kind} 卡的 .event-body 不是 article 直接子元素（缩进会叠两层）`)
+    if (c.delta === null) failed.push(`${c.kind} 卡缺少 .event-body / .event-title .name`)
+    else if (Math.abs(c.delta) > 2) failed.push(`${c.kind} 卡正文左缘与标题差 ${c.delta}px（应 ≤2）`)
+  }
+  // event-flow 的 .agent 组内 gap 4，且头像与名字在同一个组里（avatarOffset=0）。
+  if (m.flowAgents.length !== 3) failed.push(`event-flow .agent 组数=${m.flowAgents.length}（handoff 2 + approval 1）`)
+  for (const g of m.flowAgents) {
+    if (g.gap !== '4px') failed.push(`event-flow .agent gap=${g.gap}（应为 4px）`)
+    if (g.avatarOffset === null) failed.push(`event-flow 的「${g.text}」组里没有头像（头像与名字成了兄弟）`)
+    else if (g.avatarOffset !== 0) failed.push(`event-flow 的「${g.text}」组头像偏 ${g.avatarOffset}px（应为 0）`)
+  }
+  // 没有 context 的卡不补 footer（handoff / approval 没有 event-actions，也没有空 footer）。
+  if (m.emptyFooters !== 0) failed.push(`有空 footer 的卡 ${m.emptyFooters} 个`)
+  if (m.handoffFooter) failed.push('handoff 卡不该有 footer.event-actions')
+  if (m.approvalFooter) failed.push('approval 卡不该有 footer.event-actions')
+  // 任务卡的「N 人触发」在 footer 最左；名字/时间/正文/表格同 shot 口径。
+  if (!m.taskContextJump) failed.push('任务卡 footer 缺少「N 人触发」')
+  else {
+    if (m.taskContextJump.fontSize !== '10.5px') failed.push(`任务卡上下文=${m.taskContextJump.fontSize}（应为 10.5px）`)
+    if (!m.taskContextJump.first) failed.push('任务卡「N 人触发」不在 footer 最左')
+  }
+  assertTypeDetail(m, failed, width <= 640)
   if (m.handoffIcon === m.approvalIcon) failed.push('handoff/approval 图标颜色未区分')
   if (m.approvalBorder === m.taskBorder) failed.push('approval 暖边框未生效')
   if (m.approvalTitle === m.taskTitle) failed.push('approval warn 标题未生效')
