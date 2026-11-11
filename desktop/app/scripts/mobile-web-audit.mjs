@@ -128,8 +128,14 @@ export function auditMobileWeb() {
   if (!/HaiMobileAvatar/.test(avatar) || !/function deriveSigil/.test(avatar) || !/function planStack/.test(avatar)) {
     errors.push('avatar: avatar_model.js 缺少 deriveSigil/planStack')
   }
-  if (!/A\.deriveSigil\(/.test(app) || !/A\.planStack\(/.test(app)) {
-    errors.push('avatar: app.js 未接 avatar_model.js（deriveSigil/planStack）')
+  if (!/A\.planStack\(/.test(app)) {
+    errors.push('avatar: app.js 未接 avatar_model.js 的 planStack')
+  }
+  if (!/LUNA_FACE/.test(app) || !/data-luna-face/.test(app)) {
+    errors.push('avatar: app.js 未接 Luna 引擎（LUNA_FACE/data-luna-face）')
+  }
+  if (!html.includes('src="mascot-bots.js"') || !html.includes('src="luna-face.js"')) {
+    errors.push('avatar: index.html 未加载 mascot-bots.js/luna-face.js')
   }
   if (!html.includes('src="avatar_model.js"')) errors.push('avatar: index.html 未加载 avatar_model.js')
   if (cleanCss.includes('.hub-avatar')) errors.push('avatar: 仍在用旧 .hub-avatar 圆头像样式')
