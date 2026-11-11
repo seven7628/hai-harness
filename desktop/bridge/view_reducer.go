@@ -1550,9 +1550,7 @@ func (r *ViewReducer) NormalizeForRestore() {
 	r.invalidateMarshalCache()
 	hadRunningMain := false // 顶层 run（runNodes 根节点）仍在跑 → 进程关闭/重启被杀 → 插 shutdown divider
 	blocks := make([]Block, 0, len(r.blocks))
-	var wasRunning []bool // 与 blocks 同序：恢复**前**是否处于运行态
 	for _, b := range r.blocks {
-		wasRunning = append(wasRunning, b.Status == statusRunning || b.Status == "interrupting")
 		switch b.Kind {
 		case blockKindTool:
 			if b.Status == statusRunning {
@@ -1574,20 +1572,37 @@ func (r *ViewReducer) NormalizeForRestore() {
 				}
 			}
 		}
-		// 恢复时对**终态** agent 卡片补做一次裁剪。
+		// 恢复时对 agent / async_task 卡片补做一次裁剪。
 		//
 		// applyAgentEndLocked 只在 agent_end 当刻裁剪；早于该特性上线的历史
-		// record（以及恢复时状态为 abandoned 的卡片）不会触发，于是 85% 体积
-		// 的老 items 会一直留在每次 checkpoint 里被反复重写。恢复是唯一能
-		// 一次性收敛它们的地方：此处裁剪不丢信息 —— 完整历史在子任务 journal
-		// 里，UI 通过 agent_history 分页取回。
+		// record、以及**进程重启时仍在 running 的卡片**（下面刚被收敛成
+		// abandoned）不会触发，于是 85% 体积的老 items 会一直留在每次
+		// checkpoint 里被反复重写。恢复是唯一能一次性收敛它们的地方：
+		// 此处裁剪不丢信息 —— 完整历史在子任务 journal 里，UI 通过
+		// agent_history 分页取回。
 		//
-		// 只裁终态（done/failed/aborted/abandoned）：running 卡片的 items 之后
-		// 还会按 tool_id 追加，裁掉会让后续 hasAgentToolItem 查不到而重复插入。
-		// 判据必须是「恢复前」的状态：上面刚把 running 一律改成 abandoned，
-		// 若用改后状态判断，运行中的卡片也会被裁 —— 而它们复跑时还要按
-		// tool_id 追加 items。用 wasRunning[i] 而非 b.Status。
-		if (b.Kind == blockKindAgent || b.Kind == blockKindAsyncTask) && !wasRunning[len(blocks)] {
+		// **2026-11-11 修正**：原实现只裁「恢复前就是终态」的卡片
+		//（`!wasRunning[i]`），理由是「running 卡片的 items 之后还要按
+		// tool_id 追加，裁掉会让 hasAgentToolItem 查不到而重复插入」。
+		// 这个理由**不成立**——恢复后的旧卡根本收不到 tool 事件：
+		//
+		//  1. 恢复只发生在会话**首次创建**（ws.sessions 里已有就直接返回，
+		//     不重复 hydrate）→ 运行中的会话不会被这里碰到；
+		//  2. 恢复后 agentBlockID 是空的（它只在 applyAgentStartLocked 里
+		//     填充，见 view_reducer.go 的 Restore 不重建它）→ 同一个 run_id
+		//     再来 agent_start 会**新建一张卡**（nextBlockID），tool_start /
+		//     tool_end / compress_start 都按 agentBlockID 找卡 → 找不到 → 对
+		//     旧卡无操作，不会重复插入 item；
+		//  3. agent_resume 的语义是「每次运行新建一张卡」（同一 task_id），
+		//     旧卡不会被续跑追加。
+		//
+		// 唯一还能碰到旧卡的是 applyUserInput（它按 RunID/TaskID 直接遍历
+		// blocks 匹配），而那只会**追加**一条，不涉及 tool_id 去重。
+		//
+		// 不裁的真实代价（2026-11-11 实测，真实会话 s-1792660803279727000-3）：
+		// 4 张 abandoned 卡片的 items 达 301/270/264/150 条且 items_trimmed=0
+		// （**从未裁过**）—— 它们每被重写一次就是几百 KB 的写放大。
+		if b.Kind == blockKindAgent || b.Kind == blockKindAsyncTask {
 			if n := len(b.Items); n > agentItemsLimit {
 				b.Items = append([]AgentItem(nil), b.Items[n-agentItemsLimit:]...)
 				b.ItemsTrimmed += n - agentItemsLimit
