@@ -64,7 +64,7 @@ func (m *manager) cronTick(now time.Time) {
 	led := m.cron.Ledger()
 	for _, j := range cron.Due(m.cron.List(), now) {
 		wsKey := workspaceKey(j.Workspace)
-		if !cs.Enabled {
+		if !cs.enabledOn() {
 			job, _ := m.cron.Advance(j.ID, false, now)
 			if led != nil {
 				led.AppendSkipped(job, wsKey, now)
@@ -111,9 +111,9 @@ func (m *manager) cronTick(now time.Time) {
 		// IM 推送绑定（可选）：任务配了 im_chat → 进程内挂镜像（push），
 		// 运行结果（正文/工具/流式）自动推送到指定 IM 群。不落盘——
 		// 每次触发是新 session id，落盘无意义（镜像表是 im-config.json 持久字段）。
-		if j.IMChat != nil && m.imBridge != nil {
+		if j.IMChat != nil && m.imBridgeRef() != nil {
 			if rt := m.imPlugin.Runtime(); rt != nil {
-				rt.Router.Update(imCfgWithMirror(rt.Config, sid, j.IMChat))
+				rt.Router.Update(imCfgWithMirror(rt.ConfigSnapshot(), sid, j.IMChat))
 			}
 		}
 		if led != nil {
@@ -135,7 +135,7 @@ func (m *manager) cronTick(now time.Time) {
 	// 一次性兜底落盘（各 Advance 内已落盘；此处保险）
 	m.cron.Persist()
 	// 自动清理超龄派生会话文件
-	if cs.AutoClean {
+	if cs.autoCleanOn() {
 		m.cronClean(now)
 	}
 }
@@ -265,8 +265,8 @@ func (m *manager) cronListData() map[string]any {
 		}
 	}
 	return map[string]any{
-		"enabled":    cs.Enabled,
-		"auto_clean": cs.AutoClean,
+		"enabled":    cs.enabledOn(),
+		"auto_clean": cs.autoCleanOn(),
 		"jobs":       jobs,
 	}
 }

@@ -238,31 +238,72 @@ func loadComputerApprovedApps() map[string]bool {
 }
 
 // cronSettings settings.json 顶层 cron 段（桌面端定时任务功能）。
+//
+// 字段是**三态**（*bool，GO-11）：nil = 磁盘上根本没有这个键（未设置），true/false = 用户
+// 显式选择。为什么不能沿用 bool：JSON 反序列化进零值结构体时「缺键」与「显式 false」
+// 得到同一个值（false），于是「升级后只带 auto_clean 的 settings.json」= 定时任务被静默
+// 关掉 —— 用户看不到任何提示，只是模型工具表里 CronCreate 们突然消失了。
+//
+// 默认值只能由「缺键」触发，因此读侧统一走 enabledOn/autoCleanOn（nil → 默认），
+// 而不是让零值碰巧等于默认值。
+//
 // Enabled: 是否开启定时任务工具 + 触发调度（缺省 true，用户决策 2026-08-19）。
 // AutoClean: 是否自动清理 N 天前的派生会话文件（缺省 true；只删派生会话文件，
 // 任务定义 cron.json 与运行账本 cron_runs.jsonl 保留）。
 type cronSettings struct {
-	Enabled   bool `json:"enabled"`
-	AutoClean bool `json:"auto_clean"`
+	Enabled   *bool `json:"enabled,omitempty"`
+	AutoClean *bool `json:"auto_clean,omitempty"`
+}
+
+// 缺省值（用户决策 2026-08-19：全开）。只在这里定义一次，读侧与种子值共用。
+const (
+	cronEnabledDefault   = true
+	cronAutoCleanDefault = true
+)
+
+// enabledOn 生效值：未设置（nil，含 JSON null）→ 缺省 true；显式 false 才关。
+func (cs cronSettings) enabledOn() bool { return boolDefault(cs.Enabled, cronEnabledDefault) }
+
+// autoCleanOn 同上（AutoClean 缺省 true）。
+func (cs cronSettings) autoCleanOn() bool { return boolDefault(cs.AutoClean, cronAutoCleanDefault) }
+
+// boolDefault 三态取值：nil → def，否则取指针值。
+func boolDefault(v *bool, def bool) bool {
+	if v == nil {
+		return def
+	}
+	return *v
+}
+
+// cronSettingsDefaults 缺省全开的设置（种子值与坏配置回退共用同一份）。
+func cronSettingsDefaults() cronSettings {
+	return cronSettings{
+		Enabled:   boolPtr(cronEnabledDefault),
+		AutoClean: boolPtr(cronAutoCleanDefault),
+	}
 }
 
 // loadCronSettings 读定时任务设置：未配置/坏配置 → 默认全开
 // （Enabled=true, AutoClean=true，用户决策 2026-08-19）。
+//
+// 先赋默认值再 Unmarshal（GO-11）：缺键保留种子值，只有磁盘上显式写下的键才改变结果。
+// 两层保护是刻意的——种子值管正常路径，enabledOn/autoCleanOn 管任何零值 cronSettings
+// （测试或未来新增的调用点手写结构体时也不会被读成「关」）。
 func loadCronSettings() cronSettings {
-	cs := cronSettings{Enabled: true, AutoClean: true}
 	raw, err := os.ReadFile(homeCfgPath("settings.json"))
 	if err != nil {
-		return cs
+		return cronSettingsDefaults()
 	}
 	var outer struct {
 		Cron json.RawMessage `json:"cron"`
 	}
 	if json.Unmarshal(raw, &outer) != nil || outer.Cron == nil {
-		return cs
+		return cronSettingsDefaults()
 	}
-	var c cronSettings
+	// 种子 = 默认全开；Unmarshal 只覆盖磁盘上出现的键。
+	c := cronSettingsDefaults()
 	if json.Unmarshal(outer.Cron, &c) != nil {
-		return cs // 坏配置回默认全开
+		return cronSettingsDefaults() // 坏配置回默认全开（不返回半解析结果）
 	}
 	return c
 }

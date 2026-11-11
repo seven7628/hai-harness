@@ -23,6 +23,7 @@ import type { BrowserWindow } from 'electron'
 import * as net from 'node:net'
 import { createInterface } from 'node:readline'
 import { SemanticAdapter } from './embed_v2'
+import { createRendererSender } from './renderer-send'
 
 // browserTrace 已停用（Browser Use 已稳定，不再写 ~/.go-code/browser_trace.log，
 // 避免占用磁盘）。保留 API 兼容调用点；函数体 no-op。
@@ -130,6 +131,10 @@ interface DormantInfo {
 }
 
 let winRef: BrowserWindow | null = null
+// 内嵌视图的导航/AI 动作也要回主窗口渲染层：窗口在关闭/reload 途中一律丢弃，
+// 不把「这一帧窗口不在」升级成主进程异常（与 main.ts 的 sendToRenderer 同一条通道，BR-04）。
+const rendererSender = createRendererSender(() => winRef)
+const sendToRenderer = rendererSender.send
 let visible = false
 let manualBounds = false
 let lastBounds: EmbedRect | null = null
@@ -890,8 +895,9 @@ function embedNavState(): EmbedNavState {
 
 // pushEmbedNav 把导航状态推给主窗口渲染层（工具条消费）。兼容旧字段名 url/title。
 function pushEmbedNav(): void {
+  // 状态在里面现算：窗口不在时也算一次没意义（embedNavState 会读 webContents 历史）。
   if (!winRef || winRef.isDestroyed()) return
-  winRef.webContents.send('embed-nav', embedNavState())
+  sendToRenderer('embed-nav', embedNavState())
 }
 
 // wireEntryNav 给单个视图接导航事件（幂等）。
@@ -1321,7 +1327,7 @@ function classifyAiAction(method: string | undefined, params: unknown): AiAction
 // emitAiAction 广播一条 AI 动作：主窗口渲染层（徽标/最近动作）+ 页面内动效层
 // （光标/涟漪/气泡/横幅，经 CDP Runtime.evaluate 派发到当前激活视图）。
 function emitAiAction(a: AiAction): void {
-  if (winRef && !winRef.isDestroyed()) winRef.webContents.send('embed-ai-action', a)
+  sendToRenderer('embed-ai-action', a)
   const e = activeEntry()
   if (!e) return
   try {

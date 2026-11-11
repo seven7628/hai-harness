@@ -4,6 +4,8 @@ import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, Provi
 import type { AnyEvent, BridgeCommand } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
+// 导航丢弃判定与诊断 trace（FE-03）：stale（正常过期）/ inconsistent（身份不一致）
+import { classifyNavDiscard, recordNavDiscard } from './navTrace'
 import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
@@ -13,6 +15,11 @@ import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAtt
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
+// 归属（owner）编码：信任/启用按归属隔离（FE 侧只做展示与回传，判定在 bridge）
+import { ownerValid } from '../lib/owner'
+// 「当前归属」派生：Hub 打开时读 Hub 的 session/群，否则按工作区会话
+// （B1：只读 activeSessionId 会把 Hub DM/群的确认写成 workspace:，服务端判 agent:/group: 查不到）
+import { resolveActiveOwner } from '../lib/activeOwner'
 import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
 
@@ -390,7 +397,7 @@ export interface HookSectionView {
 }
 
 // 一个 hooks 配置来源（用户配置 / Claude 兼容层 / 某项目的 hooks.json）。
-export interface HookSourceView {
+export interface HookSourceView extends HookOwnerFields {
   id: string
   kind: 'user' | 'claude-user' | 'project'
   title: string
@@ -414,9 +421,27 @@ export interface HookClaudeFile {
   body?: HookSectionView
 }
 
+// 归属（owner）相关的响应字段（FE/BR-21 owner 隔离）。
+// owner = workspace:<path> | agent:<id> | group:<id>；由 bridge 派生并回显，
+// UI 只负责展示与**回传**（hooks_trust / plugin_enable 等都必须带上它）。
+export interface HookOwnerFields {
+  owner?: string // 该来源的信任归属
+  ownerLabel?: string // 展示用短标签
+  trust?: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 该归属下命令 → 状态
+}
+
 // 某项目的 hooks 来源（bridge hooks_list.projects 一项）。
 export interface HookProjectView extends HookSourceView {
   claude?: HookClaudeFile[]
+}
+
+/** 当前归属的 IM 启用状态（im_status 的 owner 视角；连接是共享的）。 */
+export interface IMOwnerStatus {
+  owner: string
+  label: string
+  enabled: boolean
+  routes: number
+  master: boolean
 }
 
 // hooks_list 响应（SettingsModal 钩子页数据源）。
@@ -432,14 +457,29 @@ export interface HooksInfo {
     readClaudeSettings: boolean
     sources: string[]
   }
-  trust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 命令 → 信任状态
+  trust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 命令 → 信任状态（当前归属）
   warnings: string[]
+  // 当前归属（用户级来源的信任判定按它；hooks_trust 必须回传）。
+  owner?: string
+  ownerKind?: string
+  ownerLabel?: string
+  // 当前归属下「只靠迁移前全局条目生效」的命令（提示重新确认）。
+  legacyTrust?: string[]
+  owners?: string[] // 已登记过确认的归属清单（诊断/展示）
   at?: number // 前端回填的取回时刻（保存/刷新后递增 → 详情面板据此把本地副本重同步为磁盘态）
 }
 
 // 插件（SettingsModal 插件 tab）：bridge plugin_list 返回（能力包状态/版本）
 export interface PluginInfo {
   id: string
+  // owner 级状态（目前 IM 有：启用/路由按 agent/group/workspace 隔离，连接共享）
+  owner?: string
+  ownerLabel?: string
+  ownerEnabled?: boolean
+  ownerRoutes?: number
+  masterEnabled?: boolean
+  sharedConnected?: number
+  gateways?: Record<string, string>
   name: string
   description: string
   status: string // not-installed | installing | ready | enabled | error | update-available
@@ -3023,6 +3063,8 @@ interface AppState {
   imConfig?: IMConfig // IM 集成配置（im_config_get；SettingsModal IM tab）
   imSchemas: IMGatewaySchema[] // IM 网关 Schema（im_schema_list；动态表单）
   imStatuses: Record<string, string> // 网关 id → 状态（im_status）
+  // 当前归属的 IM 启用状态（im_status 的 owner 视角）：A 群关了不该显示 B 群也关。
+  imOwnerStatus: IMOwnerStatus | null
   imChats: Record<string, IMChatInfo[]> // gateway_id → 群列表（im_chat_list）
   imBindPending?: IMBindRequest // 待确认的 IM 绑定请求（im_bind_confirm_requested 事件）
   browserConfig?: BrowserCfg // 浏览器插件配置（browser_config_get；插件详情设置表单）
@@ -3167,7 +3209,7 @@ interface AppState {
   // hooks（钩子页）：来源汇总 / 保存某来源 / 信任项目命令
   fetchHooks(workspaces: string[]): void // hooks_list
   saveHooks(scope: 'user' | 'project', workspace: string | undefined, body: HookSectionView): Promise<{ ok: boolean; error?: string }> // hooks_set
-  trustHooks(commands: string[], scope: string): Promise<{ ok: boolean; error?: string }> // hooks_trust
+  trustHooks(commands: string[], scope: string, owner?: string): Promise<{ ok: boolean; error?: string }> // hooks_trust（按归属）
   fetchPlugins(): void // 插件清单 + 状态（plugin_list；SettingsModal 插件 tab）
   installPlugin(id: string): void // 受管安装组件（plugin_install）
   uninstallPlugin(id: string): void // 移除组件（plugin_uninstall）
@@ -3317,6 +3359,11 @@ transport.send = (cmd: BridgeCommand) => {
   if (__traceSpy.sent) __traceSpy.sent.push(cmd)
   return _traceOrigSend(cmd)
 }
+
+// __navDiscards / __clearNavDiscards：测试专用（Node 回归脚本 scripts/test-nav-trace.mjs）——
+// 读取/清空 FE-03 的导航丢弃记录（navTrace 的有界环形缓冲）。生产代码从不读它，零行为影响。
+// 直接 re-export 而不是再包一层：脚本必须看到**这一份**模块实例的记录（独立 bundle 会是另一种子）。
+export { navDiscards as __navDiscards, clearNavDiscards as __clearNavDiscards } from './navTrace'
 
 interface PendingCommand {
   type: string
@@ -3601,6 +3648,20 @@ function syncWorkspacesToBridge(paths: string[]): void {
   if (list.length) send({ type: 'workspace_sync', payload: { paths: list } })
 }
 
+// OWNER_SCOPED_COMMANDS 需要「归属」的桥命令：hooks 信任 + IM 启用/路由 + 插件启停。
+// 只对这批注入 owner：其它命令的 payload 语义不该被悄悄加字段（协议表面越小越好）。
+const OWNER_SCOPED_COMMANDS = new Set<string>([
+  'hooks_list',
+  'hooks_trust',
+  'plugin_list',
+  'plugin_enable',
+  'plugin_disable',
+  'im_status',
+  'im_route_list',
+  'im_route_set',
+  'im_route_del',
+])
+
 function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void): number {
   const id = ++cmdSeq
   const ws = String(cmd.payload?.workspace || useAppStore.getState().workspace || '')
@@ -3618,6 +3679,17 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
   // 恢复协议标识（问题四）：new_session 带 restore_id + attempt；响应回显，
   // renderer 据此丢弃陈旧响应（迟到的旧请求响应不得覆盖新会话）。
   let payload = cmd.payload
+  // 归属（owner）注入：信任与 IM 启用是**按归属**的，服务端缺归属会明确拒绝
+  // （绝不写成全局）。这里把「当前会话的归属」带上；调用方显式给了 owner 就不动它
+  // （例如项目来源的信任按钮要写 workspace:<该项目>，而不是当前会话的归属）。
+  if (OWNER_SCOPED_COMMANDS.has(cmd.type)) {
+    const p0 = (payload ?? {}) as Record<string, unknown>
+    if (!ownerValid(String(p0.owner ?? ''))) {
+      const st = useAppStore.getState()
+      const owner = resolveActiveOwner(String(st.activeSessionId ?? ''), String(st.workspace ?? ''))
+      if (owner) payload = { ...p0, owner }
+    }
+  }
   if (cmd.type === 'new_session') {
     // 新建会话（无 id = 真新建；带 id = 恢复已有会话）→ 注入当前活跃 Provider，
     // bridge 以 UI 选择的 Provider 归属会话（2026-09：多 Provider 同名模型时避免
@@ -4604,10 +4676,37 @@ export function dispatchEvent(raw: AnyEvent): void {
       case 'plugin_status': {
         const d = raw.data as { plugins?: PluginInfo[]; error?: { id: string; message: string } } | undefined
         if (d && Array.isArray(d.plugins)) {
-          const list = d.plugins.map((p) =>
-            d.error && d.error.id === p.id ? { ...p, error: d.error.message } : { ...p, error: undefined },
-          ) as PluginInfo[]
+          // 事件快照是**连接/安装面**事实（不含归属）。IM 的启用是归属级的：
+          // 事件若直接覆盖，A 群刚被关掉的 IM 会立刻显示回「已启用」（等于把 owner 隔离
+          // 在 UI 上抹掉）。故按 id 合并：保留上一次 plugin_list 带来的归属字段，
+          // 并用 ownerEnabled 决定 enabled（按钮跟着归属走，安装进度仍用事件的 status）。
+          const prev = new Map(getState().plugins.map((p) => [p.id, p]))
+          const list = d.plugins.map((p) => {
+            const merged: PluginInfo = { ...p }
+            const before = prev.get(p.id)
+            if (before && before.owner !== undefined) {
+              merged.owner = before.owner
+              merged.ownerLabel = before.ownerLabel
+              merged.ownerEnabled = before.ownerEnabled
+              merged.ownerRoutes = before.ownerRoutes
+              merged.masterEnabled = before.masterEnabled
+              merged.sharedConnected = before.sharedConnected
+              merged.gateways = before.gateways
+              if (before.ownerEnabled !== undefined) {
+                merged.enabled = before.ownerEnabled
+                if (!before.ownerEnabled) {
+                  merged.status = 'ready'
+                  merged.reason = '该归属未启用（连接由其它归属共享）'
+                }
+              }
+            }
+            return d.error && d.error.id === p.id ? { ...merged, error: d.error.message } : { ...merged, error: undefined }
+          }) as PluginInfo[]
           setState({ plugins: list })
+          // IM 的启用是**归属级**的：事件只带连接/安装面事实，归属启用状态的真相在
+          // im_status（按当前归属算）。owner 启停后顺手拉一次，别让 IM 面板顶部
+          // 停留在旧状态（"我明明关了它还显示启用"）。
+          if (list.some((p) => p.id === 'im')) send({ type: 'im_status', payload: {} })
         }
         break
       }
@@ -5380,13 +5479,22 @@ export function dispatchEvent(raw: AnyEvent): void {
         if (Array.isArray(d.schemas)) setState({ imSchemas: d.schemas as IMGatewaySchema[] })
         break
       }
-      // im_status：网关连接状态
+      // im_status：网关连接状态 + **当前归属**的启用状态（连接共享、启用按 owner 隔离）
       if (t === 'im_status') {
         if (Array.isArray(d.gateways)) {
           const m: Record<string, string> = {}
           for (const g of d.gateways as Array<{ id: string; status: string }>) m[g.id] = g.status
           setState({ imStatuses: m })
         }
+        setState({
+          imOwnerStatus: {
+            owner: String(d.owner ?? ''),
+            label: String(d.ownerLabel ?? ''),
+            enabled: d.ownerEnabled === true,
+            routes: Number(d.ownerRoutes ?? 0) || 0,
+            master: d.enabled === true,
+          },
+        })
         break
       }
       // im_chat_list：群列表（路由绑定下拉；gateway_id 从请求登记表取）
@@ -5505,16 +5613,34 @@ export function dispatchEvent(raw: AnyEvent): void {
         const respAttempt = typeof d.attempt === 'number' ? d.attempt : undefined
         const isStaleAttempt = respAttempt != null
           && (pendingRestoreAttempt[sid] ?? 0) > respAttempt
-        const navigationCurrent = Boolean(
-          !isStaleAttempt
-          && meta
-          && meta.navigationGeneration === navigationGeneration
-          && (!responseWorkspace || responseWorkspace === getState().workspace)
-          && (!expectedSession || expectedSession === sid),
-        )
+        // 判定 + trace（FE-03）：把原来那一个布尔拆成 classifyNavDiscard 的三态 ——
+        // 代际/attempt 被取代 = stale（正常，用户点快一点就会有），代际对得上但
+        // workspace/session 不符 = inconsistent（真异常）。判定结果与旧布尔逐字等价，
+        // 只是「为什么丢」现在可查（navTrace 的有界缓冲 + Verbose 日志）。
+        const verdict = classifyNavDiscard({
+          responseWorkspace,
+          workspace: getState().workspace,
+          metaGeneration: meta?.navigationGeneration,
+          generation: navigationGeneration,
+          expectedSession,
+          sessionId: sid,
+          staleAttempt: isStaleAttempt,
+        })
         // 过期导航响应不得重建/激活视图，也不得关闭当前导航的 loading。若同 sid 已有
         // 更新的恢复请求，保留其 pending/buffer；否则清理本请求留下的恢复标记。
-        if (!navigationCurrent) {
+        if (!verdict.current) {
+          recordNavDiscard({
+            at: Date.now(),
+            kind: verdict.kind,
+            type: t,
+            reason: verdict.reason,
+            sid,
+            responseWorkspace,
+            workspace: getState().workspace,
+            metaGeneration: meta?.navigationGeneration,
+            generation: navigationGeneration,
+            expectedSession,
+          })
           if (snapshotPending.get(sid) === r.id) {
             snapshotPending.delete(sid)
             // 此前这里直接丢弃缓冲事件 → 该会话这段时间的事件在渲染进程永久消失
@@ -5534,9 +5660,15 @@ export function dispatchEvent(raw: AnyEvent): void {
           // 显式恢复的响应被丢弃（陈旧代际/陈旧 attempt）：若该会话视图仍为空 → 有限重试。
           // 同 sid 有更新请求在途时 scheduleRestoreRetry 会自行退出（不叠发、不误报）。
           if (t === 'new_session' && meta?.sessionId === sid) {
+            // 重试原因沿用原措辞（看门狗/日志依赖这两条的语义），但把 FE-03 的类别附在
+            // 后面 —— stale 与 inconsistent 必须一眼可分，否则真异常永远埋在「丢弃」里。
             scheduleRestoreRetry(
               sid,
-              isStaleAttempt ? '响应按陈旧 attempt 丢弃' : '响应按陈旧导航丢弃',
+              isStaleAttempt
+                ? '响应按陈旧 attempt 丢弃'
+                : verdict.kind === 'inconsistent'
+                  ? `响应身份不一致丢弃（${verdict.reason}）`
+                  : `响应按陈旧导航丢弃（${verdict.reason}）`,
               true,
               meta.workspace,
             )
@@ -8475,6 +8607,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   plugins: [],
   imSchemas: [],
   imStatuses: {},
+  imOwnerStatus: null, // 当前归属的 IM 启用状态（im_status 的 owner 视角）
   imChats: {},
   browserPages: [],
   unreadViews: [],
@@ -9802,9 +9935,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     })
   },
-  trustHooks: (commands: string[], scope: string) => {
+  trustHooks: (commands: string[], scope: string, owner?: string) => {
+    const o = String(owner ?? '').trim()
     return new Promise<{ ok: boolean; error?: string }>((resolve) => {
-      send({ type: 'hooks_trust', payload: { commands, scope: scope || 'project', reason: '用户在设置面板确认' } }, false, (r) => {
+      // owner 必须显式给出（项目来源 → workspace:<该项目>；用户级来源 → 当前会话归属）。
+      // 不给时 send() 会注入当前会话归属；服务端两者都没有就拒绝（不写全局）。
+      send({
+        type: 'hooks_trust',
+        payload: { commands, scope: scope || 'project', reason: '用户在设置面板确认', ...(ownerValid(o) ? { owner: o } : {}) },
+      }, false, (r) => {
         send({ type: 'hooks_list', payload: { workspaces: get().projects.map((p) => p.path) } })
         resolve(r.ok ? { ok: true } : { ok: false, error: r.error ?? '信任失败' })
       })

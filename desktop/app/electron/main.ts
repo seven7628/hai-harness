@@ -22,8 +22,15 @@ import { copyEntry, createDir, createFile, duplicateEntry, guardTrash, importEnt
 import { ipcInputHistoryForget, ipcInputHistoryGet, ipcInputHistorySet, inputHistoryFilePath } from './input-history'
 // hub:// 深链（P4-02）：argv 提取是纯逻辑，单独文件才能被 Node 测试
 import { HUB_PROTOCOL, extractHubDeepLinkArg } from './deeplink'
+// 主进程 → 渲染进程的唯一发送通道（BR-04）：窗口 null／webContents 已销毁时丢弃而不是抛错
+import { createRendererSender } from './renderer-send'
 
 let mainWindow: BrowserWindow | null = null
+
+// sendToRenderer：所有 webContents.send 的唯一出口（见 renderer-send.ts 的取舍说明）。
+// 传 getter 而不是实例：主窗口会在关闭/重开时重建。
+const rendererSender = createRendererSender(() => mainWindow)
+const sendToRenderer = rendererSender.send
 let bridge: ChildProcessWithoutNullStreams | null = null
 
 // —— hub:// 深链（P4-02）——
@@ -36,13 +43,12 @@ let pendingHubDeepLinks: string[] = []
 function forwardHubDeepLink(raw: string): void {
   const link = String(raw ?? '').trim()
   if (!link) return
-  if (!rendererReady || !mainWindow || mainWindow.webContents.isDestroyed()) {
-    // 冷启动/刷新期间 renderer 还没订阅：先排队（上限 20，点很多次也只留最近几条）。
+  // 冷启动/刷新期间 renderer 还没订阅：先排队（上限 20，点很多次也只留最近几条）。
+  // 判空与发送之间的 race 交给 sendToRenderer（不抛）；真没送出去也回队，等下次挂载 take。
+  if (!rendererReady || !mainWindow || mainWindow.webContents.isDestroyed() || !sendToRenderer('hub:deep-link', link)) {
     pendingHubDeepLinks.push(link)
     if (pendingHubDeepLinks.length > 20) pendingHubDeepLinks.shift()
-    return
   }
-  mainWindow.webContents.send('hub:deep-link', link)
 }
 
 // renderer 挂载后**主动来取**队列：订阅在前、take 在后，之间到达的链接不会漏。
@@ -233,7 +239,9 @@ function activateEgoLite(message: string): void {
   const appName = 'ego lite'
   execFile('/usr/bin/open', ['-a', appName], { timeout: 5000 }, (err) => {
     const ok = !err
-    mainWindow?.webContents.send('bridge:event', JSON.stringify({
+    // execFile 是异步回调：此刻窗口可能已被关掉（用户在这 5s 内退出）—— 走统一通道丢弃，
+    // 否则 exception 会从子进程回调冒到主进程（BR-04 的同类现场）。
+    sendToRenderer('bridge:event', JSON.stringify({
       event_type: 'ego_activate_status',
       ok,
       ...(ok ? { message } : { error: err?.message ?? 'ego lite 激活失败' }),
@@ -891,11 +899,11 @@ function spawnBridge(bin: string): boolean {
     }
   }
   const flush = () => {
-    if (mainWindow && pending.length > 0) {
-      mainWindow.webContents.send('bridge:event', { lines: pending.splice(0) })
-    } else {
-      pending.length = 0 // 无窗口时丢弃剩余行（与原逐行行为一致），防缓冲泄漏
-    }
+    if (pending.length === 0) return
+    // 送不到（窗口不在/已销毁）就丢弃这一批：与原逐行行为一致，防缓冲泄漏。
+    // 这里在 16ms 定时器里执行，抛异常会变成 uncaughtException —— 统一走 sendToRenderer。
+    if (sendToRenderer('bridge:event', { lines: pending.splice(0) })) return
+    pending.length = 0
   }
   const scheduleFlush = () => {
     if (flushTimer) return // 同一批已有一枚定时器，不重置（避免无限推迟）
@@ -942,7 +950,7 @@ function spawnBridge(bin: string): boolean {
         if (type === 'auth_url' && event?.url) void shell.openExternal(event.url)
         else if (type === 'device_code' && event?.verification_uri) void shell.openExternal(event.verification_uri)
       } catch { /* 解析失败照常转发 */ }
-      mainWindow.webContents.send('bridge:event', t)
+      sendToRenderer('bridge:event', t)
       return
     }
     if (t.includes('"event_type":"command_response"')) {
@@ -961,7 +969,7 @@ function spawnBridge(bin: string): boolean {
         clearTimeout(request.timer)
         request.resolve(response)
       } else {
-        mainWindow.webContents.send('bridge:event', t)
+        sendToRenderer('bridge:event', t)
       }
       return
     }
@@ -991,7 +999,9 @@ function spawnBridge(bin: string): boolean {
     clearFlushTimer()
     flush() // 退出前送完剩余缓冲行，保证事件先于 bridge:exit 到达
     bridge = null
-    if (mainWindow) mainWindow.webContents.send('bridge:exit', { code, err: err.slice(-4000) })
+    // 退出时窗口常在拆除中（webContents 已销毁）：此前 if (mainWindow) 挡不住 destroyed，
+    // send 直接抛在 exit 回调里。统一走判空通道。
+    sendToRenderer('bridge:exit', { code, err: err.slice(-4000) })
   })
   return true
 }

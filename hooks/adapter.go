@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/owner"
 )
 
 // Dispatcher 是产品与内核之间的唯一入口：把外部命令 hook 适配成内核的
@@ -37,27 +38,49 @@ func (d *Dispatcher) Runner() *Runner { return d.runner }
 
 // ToolHooks 把外部 hook 适配成内核的 events.ToolHooks（七个钩子）。
 //
+// dispatchScope 一次装配的绑定上下文。
+//
+// owner 是**信任判定的归属**（owner 隔离）：同一条 project 级 hook 命令在
+// workspace:/a、agent:x、group:g 下是三条独立授权，互不继承。cwd/sessionID 只影响
+// hook 子进程的运行环境与 payload，不参与授权。
+type dispatchScope struct {
+	cwd       string
+	sessionID string
+	owner     string
+}
+
 // cwd/sessionID 在构造时绑定：cwd 作为 hook 子进程的工作目录与 GOCODE_PROJECT_DIR，
 // sessionID 用于 payload.session_id（会话内去重/统计）。
+//
+// 兼容入口：owner 按 cwd 派生为 workspace:<cwd>（**不是**全局）—— 旧的 ToolHooks 调用方
+// 自动获得「按工作区隔离」的最小安全语义；Hub 会话必须走 ToolHooksFor 显式给 agent/group。
 func (d *Dispatcher) ToolHooks(cwd, sessionID string) *events.ToolHooks {
+	return d.ToolHooksFor(cwd, sessionID, owner.Workspace(cwd))
+}
+
+// ToolHooksFor 绑定 owner 的装配入口（Hub DM → agent:<id>；群聊 → group:<g>；
+// 项目会话 → workspace:<path>）。owner 为空/非法时信任闸门一律判未信任（不猜归属）。
+func (d *Dispatcher) ToolHooksFor(cwd, sessionID, ownerID string) *events.ToolHooks {
+	sc := dispatchScope{cwd: cwd, sessionID: sessionID, owner: ownerID}
 	return &events.ToolHooks{
-		PreToolUse:       d.preToolUse(cwd, sessionID),
-		PostToolUse:      d.postToolUse(cwd, sessionID),
-		PostToolBatch:    d.postToolBatch(cwd, sessionID),
-		PreCompact:       d.preCompact(cwd, sessionID),
-		Stop:             d.stop(cwd, sessionID),
-		SessionStart:     d.sessionStart(cwd, sessionID),
-		UserPromptSubmit: d.userPromptSubmit(cwd, sessionID),
+		PreToolUse:       d.preToolUse(sc),
+		PostToolUse:      d.postToolUse(sc),
+		PostToolBatch:    d.postToolBatch(sc),
+		PreCompact:       d.preCompact(sc),
+		Stop:             d.stop(sc),
+		SessionStart:     d.sessionStart(sc),
+		UserPromptSubmit: d.userPromptSubmit(sc),
 	}
 }
 
 // ── 七个钩子的实现（ToolHooks 与 On* 方法共用同一份逻辑）──────────────────
 
-func (d *Dispatcher) preToolUse(cwd, sessionID string) events.PreToolUseHook {
+func (d *Dispatcher) preToolUse(sc dispatchScope) events.PreToolUseHook {
 	return func(ctx context.Context, pc events.PreToolUseContext) events.PreToolUseResult {
 		out := d.runner.Dispatch(ctx, EventPreToolUse, Payload{
-			SessionID:     sessionID,
-			Cwd:           cwd,
+			SessionID:     sc.sessionID,
+			Cwd:           sc.cwd,
+			Owner:         sc.owner,
 			HookEventName: string(EventPreToolUse),
 			ToolName:      pc.Call.Name,
 			ToolInput:     json.RawMessage(pc.Arguments),
@@ -72,11 +95,12 @@ func (d *Dispatcher) preToolUse(cwd, sessionID string) events.PreToolUseHook {
 	}
 }
 
-func (d *Dispatcher) postToolUse(cwd, sessionID string) events.PostToolUseHook {
+func (d *Dispatcher) postToolUse(sc dispatchScope) events.PostToolUseHook {
 	return func(ctx context.Context, pc events.PostToolUseContext) events.PostToolUseResult {
 		out := d.runner.Dispatch(ctx, EventPostToolUse, Payload{
-			SessionID:     sessionID,
-			Cwd:           cwd,
+			SessionID:     sc.sessionID,
+			Cwd:           sc.cwd,
+			Owner:         sc.owner,
 			HookEventName: string(EventPostToolUse),
 			ToolName:      pc.Call.Name,
 			ToolInput:     json.RawMessage(pc.Arguments),
@@ -91,10 +115,10 @@ func (d *Dispatcher) postToolUse(cwd, sessionID string) events.PostToolUseHook {
 	}
 }
 
-func (d *Dispatcher) postToolBatch(cwd, sessionID string) events.PostToolBatchHook {
+func (d *Dispatcher) postToolBatch(sc dispatchScope) events.PostToolBatchHook {
 	return func(ctx context.Context, _ []events.ToolRunResult) bool {
 		out := d.runner.Dispatch(ctx, EventPostToolBatch, Payload{
-			SessionID: sessionID, Cwd: cwd, HookEventName: string(EventPostToolBatch),
+			SessionID: sc.sessionID, Cwd: sc.cwd, Owner: sc.owner, HookEventName: string(EventPostToolBatch),
 		}, MatchValue{})
 		d.report(EventPostToolBatch, out)
 		// 外部 hook 不允许终止整个运行（终止只走 abort 语义）：返回值恒 false。
@@ -103,10 +127,10 @@ func (d *Dispatcher) postToolBatch(cwd, sessionID string) events.PostToolBatchHo
 	}
 }
 
-func (d *Dispatcher) preCompact(cwd, sessionID string) events.PreCompactHook {
+func (d *Dispatcher) preCompact(sc dispatchScope) events.PreCompactHook {
 	return func(ctx context.Context) string {
 		out := d.runner.Dispatch(ctx, EventPreCompact, Payload{
-			SessionID: sessionID, Cwd: cwd, HookEventName: string(EventPreCompact),
+			SessionID: sc.sessionID, Cwd: sc.cwd, Owner: sc.owner, HookEventName: string(EventPreCompact),
 		}, MatchValue{})
 		d.report(EventPreCompact, out)
 		text, _ := BuildInject(out.Contexts, maxEventInjectBytes)
@@ -118,10 +142,10 @@ func (d *Dispatcher) preCompact(cwd, sessionID string) events.PreCompactHook {
 // 所以截断轮也会走到这里（LastAssistant 可能为空）。exit 2 / decision=block →
 // Continue=true，内核续跑一轮（上限 8）——截断轮因此可被外部 hook 要求继续；
 // 引擎自身不自动重试截断。abort / ctx 取消 / 更早的出错路径不进入本钩子。
-func (d *Dispatcher) stop(cwd, sessionID string) events.StopHook {
+func (d *Dispatcher) stop(scope dispatchScope) events.StopHook {
 	return func(ctx context.Context, sc events.StopContext) events.StopResult {
 		out := d.runner.Dispatch(ctx, EventStop, Payload{
-			SessionID: sessionID, Cwd: cwd, HookEventName: string(EventStop),
+			SessionID: scope.sessionID, Cwd: scope.cwd, Owner: scope.owner, HookEventName: string(EventStop),
 			TurnID: sc.RunId,
 		}, MatchValue{})
 		d.report(EventStop, out)
@@ -133,10 +157,10 @@ func (d *Dispatcher) stop(cwd, sessionID string) events.StopHook {
 	}
 }
 
-func (d *Dispatcher) sessionStart(cwd, sessionID string) events.SessionStartHook {
+func (d *Dispatcher) sessionStart(scope dispatchScope) events.SessionStartHook {
 	return func(ctx context.Context, sc events.SessionStartContext) string {
 		out := d.runner.Dispatch(ctx, EventSessionStart, Payload{
-			SessionID: sessionID, Cwd: cwd, HookEventName: string(EventSessionStart),
+			SessionID: scope.sessionID, Cwd: scope.cwd, Owner: scope.owner, HookEventName: string(EventSessionStart),
 			Source: sc.Source,
 		}, MatchValue{Source: sc.Source})
 		d.report(EventSessionStart, out)
@@ -145,10 +169,10 @@ func (d *Dispatcher) sessionStart(cwd, sessionID string) events.SessionStartHook
 	}
 }
 
-func (d *Dispatcher) userPromptSubmit(cwd, sessionID string) events.UserPromptSubmitHook {
+func (d *Dispatcher) userPromptSubmit(sc dispatchScope) events.UserPromptSubmitHook {
 	return func(ctx context.Context, up events.UserPromptSubmitContext) events.UserPromptSubmitResult {
 		out := d.runner.Dispatch(ctx, EventUserPromptSubmit, Payload{
-			SessionID: sessionID, Cwd: cwd, HookEventName: string(EventUserPromptSubmit),
+			SessionID: sc.sessionID, Cwd: sc.cwd, Owner: sc.owner, HookEventName: string(EventUserPromptSubmit),
 			Prompt: up.Prompt,
 		}, MatchValue{Prompt: up.Prompt})
 		d.report(EventUserPromptSubmit, out)
@@ -164,12 +188,12 @@ func (d *Dispatcher) userPromptSubmit(cwd, sessionID string) events.UserPromptSu
 
 // OnSessionStart 直接派发 SessionStart（返回 system 层注入文本）。
 func (d *Dispatcher) OnSessionStart(ctx context.Context, p Payload, source string) string {
-	return d.sessionStart(p.Cwd, p.SessionID)(ctx, events.SessionStartContext{Source: source})
+	return d.sessionStart(dispatchScope{cwd: p.Cwd, sessionID: p.SessionID, owner: p.Owner})(ctx, events.SessionStartContext{Source: source})
 }
 
 // OnUserPromptSubmit 直接派发 UserPromptSubmit。
 func (d *Dispatcher) OnUserPromptSubmit(ctx context.Context, p Payload) (inject string, blocked bool, reason string) {
-	res := d.userPromptSubmit(p.Cwd, p.SessionID)(ctx, events.UserPromptSubmitContext{Prompt: p.Prompt})
+	res := d.userPromptSubmit(dispatchScope{cwd: p.Cwd, sessionID: p.SessionID, owner: p.Owner})(ctx, events.UserPromptSubmitContext{Prompt: p.Prompt})
 	return res.AdditionalContext, res.Block, res.Reason
 }
 
@@ -179,13 +203,13 @@ func (d *Dispatcher) OnPostToolUse(ctx context.Context, p Payload) (inject strin
 	if p.ToolResponse != nil {
 		pc.Result, pc.IsError = p.ToolResponse.Text, p.ToolResponse.IsError
 	}
-	res := d.postToolUse(p.Cwd, p.SessionID)(ctx, pc)
+	res := d.postToolUse(dispatchScope{cwd: p.Cwd, sessionID: p.SessionID, owner: p.Owner})(ctx, pc)
 	return res.AdditionalContext, res.ReplaceResult
 }
 
 // OnStop 直接派发 Stop。
 func (d *Dispatcher) OnStop(ctx context.Context, p Payload) (continueTurn bool, reason string) {
-	res := d.stop(p.Cwd, p.SessionID)(ctx, events.StopContext{RunId: p.TurnID})
+	res := d.stop(dispatchScope{cwd: p.Cwd, sessionID: p.SessionID, owner: p.Owner})(ctx, events.StopContext{RunId: p.TurnID})
 	return res.Continue, res.Reason
 }
 

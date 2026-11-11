@@ -24,6 +24,7 @@ import (
 	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/hooks"
+	"github.com/seven7628/hai-harness/owner"
 )
 
 // p404aShellQuote 单引号包一个 shell 参数（路径里可能有空格；单引号自身按 POSIX 转义）。
@@ -538,8 +539,10 @@ func TestHubSessionIgnoresProjectHooksInHubHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// owner 隔离后：确认必须写在**该智能体**的归属下（全局条目不再对 agent 生效）。
+	agentOwner := owner.Agent(string(p.ID))
 	for _, cmd := range []string{goCodeCmd, claudeCmd} {
-		if err := trust.Trust(cmd, "test", "p4-04a boundary"); err != nil {
+		if err := trust.Trust(agentOwner, cmd, "test", "p4-04a boundary"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -748,7 +751,7 @@ func TestProjectSessionHooksAssembleUserAndProjectLayers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := trust.Trust(projCmd, "test", "p4-04a project layer"); err != nil {
+	if err := trust.Trust(owner.Workspace(proj), projCmd, "test", "p4-04a project layer"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -807,7 +810,7 @@ func TestProjectPathRefusesHubHomeHooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := trust.Trust(cmd, "test", "p4-04a guard"); err != nil {
+	if err := trust.Trust(owner.Workspace(home), cmd, "test", "p4-04a guard"); err != nil {
 		t.Fatal(err)
 	}
 

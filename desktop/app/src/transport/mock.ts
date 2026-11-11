@@ -1,4 +1,4 @@
-import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply } from './types'
+import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply, IMConfig } from './types'
 import type { BridgeCommand } from '../store/events'
 import type { MCPProjectInfo, MCPProjectServer, HookSectionView } from '../store/useAppStore'
 import currentProjectReadmeZh from '../../../../README.zh-CN.md?raw'
@@ -1111,6 +1111,30 @@ class MockTransport implements Transport {
     events: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo claude-session-start', timeout: 5 }] }] },
   }
   // 信任库（mock）：命令 → 状态；未登记的项目命令默认 untrusted（安全默认，与真实现一致）
+  // mockIMConfig IM 配置的 mock 真相源（im_config_set 写它、im_config_get 读它）。
+  // 三种投递目标各一条：workspace / agent DM / 群（群还需要执行者 agent）。
+  private mockIMConfig: IMConfig = {
+    enabled: true,
+    gateways: [
+      {
+        id: 'feishu-main',
+        type: 'feishu',
+        enabled: true,
+        config: { app_id: 'cli_mock', mode: 'websocket' },
+        routes: [
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_group' }, workspace: '~/workspace/go-code' },
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_dm' }, agent: 'ag_mockres1' },
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_team' }, agent: 'ag_mockres1', group: 'grp_mock1' },
+        ],
+        allow_users: ['ou_mock_user'],
+      },
+    ],
+    mirrors: [],
+    security: { require_bind_confirm: true },
+  }
+
+  // mockTrust 按**归属**存（owner\u0000command）：与真 bridge 的 owner 隔离一致，
+  // 免得 mock 模式下「A 群信任了 → B 群也显示已信任」把真实缺陷掩盖掉。
   private mockTrust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> = {}
 
   // mockProjectMCPInfo 一个项目的项目层 MCP 视图（契约同真 bridge mcp_projects）。
@@ -1155,7 +1179,8 @@ class MockTransport implements Transport {
   }
 
   // mockHooksInfo hooks 来源汇总（契约同真 bridge hooks_list）。
-  private mockHooksInfo(paths: string[]) {
+  private mockHooksInfo(paths: string[], owner = '') {
+    const trustKey = (o: string, c: string) => `${o}\u0000${c}`
     const commands = (b?: HookSectionView): string[] => {
       const out: string[] = []
       for (const groups of Object.values(b?.events ?? {})) {
@@ -1164,17 +1189,24 @@ class MockTransport implements Transport {
       return out
     }
     const trust: Record<string, string> = {}
-    for (const c of commands(this.mockUserHooks)) trust[c] = this.mockTrust[c] ?? 'trusted' // 用户级默认可信
-    for (const c of commands(this.mockClaudeUserHooks)) trust[c] = this.mockTrust[c] ?? 'trusted'
+    // 用户级来源按**当前归属**判定（默认可信），项目来源按**该项目**的 workspace 归属判定。
+    for (const c of commands(this.mockUserHooks)) trust[c] = this.mockTrust[trustKey(owner, c)] ?? 'trusted'
+    for (const c of commands(this.mockClaudeUserHooks)) trust[c] = this.mockTrust[trustKey(owner, c)] ?? 'trusted'
     for (const p of paths) {
       const f = this.mockProjectFiles[p] ?? {}
-      for (const c of [...commands(f.hooks), ...commands(f.claudeHooks)]) trust[c] = this.mockTrust[c] ?? 'untrusted'
+      for (const c of [...commands(f.hooks), ...commands(f.claudeHooks)]) {
+        trust[c] = this.mockTrust[trustKey(`workspace:${p}`, c)] ?? 'untrusted'
+      }
     }
     const body = (b?: HookSectionView) => (b ?? {})
     return {
+      owner,
+      ownerKind: owner.split(':')[0] ?? '',
+      ownerLabel: owner,
       user: {
         id: 'user', kind: 'user', title: '用户配置', path: `${this.mockHome()}/.go-code/settings.json`,
         present: true, ok: true, editable: true, body: body(this.mockUserHooks),
+        owner, trust: Object.fromEntries(commands(this.mockUserHooks).map((c) => [c, trust[c]])),
       },
       claudeUser: {
         id: 'claude-user', kind: 'claude-user', title: 'Claude 兼容（只读）', path: `${this.mockHome()}/.claude/settings.json`,
@@ -1182,10 +1214,13 @@ class MockTransport implements Transport {
       },
       projects: paths.map((p) => {
         const f = this.mockProjectFiles[p] ?? {}
+        const pOwner = `workspace:${p}`
         return {
           id: `project:${p}`, kind: 'project', title: p.split('/').filter(Boolean).pop() ?? p,
           workspace: p, path: `${p}/.go-code/hooks.json`, exists: true,
           present: Boolean(f.hooks), ok: true, editable: true, body: body(f.hooks),
+          owner: pOwner,
+          trust: Object.fromEntries([...commands(f.hooks), ...commands(f.claudeHooks)].map((c) => [c, trust[c]])),
           claude: f.claudeHooks ? [{ path: `${p}/.claude/settings.json`, present: true, ok: true, body: f.claudeHooks }] : [],
         }
       }),
@@ -2341,7 +2376,8 @@ class MockTransport implements Transport {
       // hooks_list：hooks 配置来源汇总（钩子页数据源；契约对齐真 bridge）
       case 'hooks_list': {
         const list = (cmd.payload?.workspaces as string[] | undefined) ?? []
-        this.respond(cmd, this.mockHooksInfo(list.length ? list : [this.ws]))
+        const owner = String(cmd.payload?.owner ?? '')
+        this.respond(cmd, this.mockHooksInfo(list.length ? list : [this.ws], owner))
         break
       }
       // hooks_set：写某来源（mock：内存 + 回拉）
@@ -2369,8 +2405,14 @@ class MockTransport implements Transport {
       // hooks_trust：信任命令（mock：按命令记 trusted）
       case 'hooks_trust': {
         const commands = (cmd.payload?.commands as string[] | undefined) ?? []
-        for (const c of commands) this.mockTrust[c] = 'trusted'
-        this.respond(cmd, { trusted: commands.length })
+        // 与真 bridge 同一条纪律：没有归属就拒绝（绝不写成全局）。
+        const owner = String(cmd.payload?.owner ?? '')
+        if (!owner) {
+          this.respondErr(cmd, '缺少归属（owner）')
+          break
+        }
+        for (const c of commands) this.mockTrust[`${owner}\u0000${c}`] = 'trusted'
+        this.respond(cmd, { trusted: commands.length, owner })
         break
       }
       case 'command': {
@@ -2544,20 +2586,7 @@ class MockTransport implements Transport {
         break
       // IM 集成（SettingsModal IM tab 预览数据）
       case 'im_config_get':
-        this.respond(cmd, {
-          config: {
-            enabled: true,
-            gateways: [
-              {
-                id: 'feishu-main', type: 'feishu', enabled: true, config: { app_id: 'cli_mock', mode: 'websocket' },
-                routes: [{ chat: { gateway: 'feishu', chat_id: 'oc_mock_group' }, workspace: '~/workspace/go-code' }],
-                allow_users: ['ou_mock_user'],
-              },
-            ],
-            mirrors: [],
-            security: { require_bind_confirm: true },
-          },
-        })
+        this.respond(cmd, { config: JSON.parse(JSON.stringify(this.mockIMConfig)) })
         break
       case 'im_schema_list':
         this.respond(cmd, {
@@ -2593,12 +2622,29 @@ class MockTransport implements Transport {
           ],
         })
         break
-      case 'im_status':
-        this.respond(cmd, { enabled: true, gateways: [{ id: 'feishu-main', type: 'feishu', enabled: true, status: 'connected' }] })
+      case 'im_status': {
+        // owner 隔离：启用/路由按归属给（连接共享）—— mock 也回 owner 字段，
+        // 免得前端在 mock 模式下以为「没有归属也行」。
+        const owner = String(cmd.payload?.owner ?? '')
+        this.respond(cmd, {
+          enabled: true,
+          gateways: [{ id: 'feishu-main', type: 'feishu', enabled: true, status: 'connected' }],
+          owner,
+          ownerLabel: owner,
+          ownerEnabled: Boolean(owner),
+          ownerRoutes: 1,
+          owners: owner ? { [owner]: true } : {},
+        })
         break
-      case 'im_config_set':
+      }
+      case 'im_config_set': {
+        // mock 也落盘（内存态）：静态返回会让「保存后回读」看起来没生效，
+        // 路由编辑（尤其 agent/群目标的保留）就没法在浏览器里真实验收。
+        const cfg = (cmd.payload as { config?: IMConfig } | undefined)?.config
+        if (cfg) this.mockIMConfig = JSON.parse(JSON.stringify(cfg)) as IMConfig
         this.respond(cmd, {})
         break
+      }
       case 'im_chat_list': // 群列表（路由绑定下拉）
         this.respond(cmd, {
           chats: [
@@ -3194,13 +3240,17 @@ class MockTransport implements Transport {
     this.respond(cmd, payload)
   }
 
+  // respond/respondErr 的响应走**微任务**（真 bridge 是 stdio 异步，响应永远晚于 send 返回）。
+  // 曾经同步 emit：store 里「send 之后才 onCommandResponseOnce」的流程（saveIMConfig /
+  // trustHooks / 各保存按钮）在 mock 模式下永远等不到响应 —— UI 表现为点了没反应、
+  // 按钮一直 busy。保持异步 = mock 与真 bridge 同形。
   private respond(cmd: BridgeCommand, data: Record<string, unknown>) {
-    this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data })
+    queueMicrotask(() => this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data }))
   }
 
   // respondErr：命令失败响应（真 bridge 同形：ok:false + error；store 侧透出给面板）
   private respondErr(cmd: BridgeCommand, error: string) {
-    this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error })
+    queueMicrotask(() => this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error }))
   }
 
   // emit：事件行注入 workspace + seq；session_id 由调用方显式带（按会话路由）

@@ -82,10 +82,14 @@ func (r *Runner) Dispatch(ctx context.Context, ev Event, p Payload, mv MatchValu
 			// 信任闸门（规范 §6）：用户级配置默认可信（写这个文件本身就是用户行为）；
 			// 项目级配置（随仓库分发）必须显式信任，否则"打开别人的仓库即执行其命令"。
 			// cfg.RequireTrust 可要求全部显式信任（高安全场景）。
+			//
+			// 信任按 **owner** 判定（owner 隔离）：同一条命令在 agent:a / group:g /
+			// workspace:/p 下是三条独立授权。p.Owner 为空 → Check 一律未信任（不猜归属）。
 			if !r.cfg.trustedByScope(g.scope) {
-				if st := r.trust.Check(h.Command); st != TrustTrusted && st != TrustManaged {
+				if st := r.trust.Check(p.Owner, h.Command); st != TrustTrusted && st != TrustManaged {
 					out.Warnings = append(out.Warnings, fmt.Sprintf(
-						"hook %q not trusted (%s, scope=%s) — skipped", displayName(h), st, scopeLabel(g.scope)))
+						"hook %q not trusted (%s, scope=%s, owner=%s) — skipped",
+						displayName(h), st, scopeLabel(g.scope), ownerLabel(p.Owner)))
 					continue
 				}
 			}
@@ -332,6 +336,14 @@ func scopeLabel(scope string) string {
 		return "inline"
 	}
 	return scope
+}
+
+// ownerLabel 告警里展示的信任归属（空 = 未绑定归属 → 信任闸门判未信任）。
+func ownerLabel(id string) string {
+	if id == "" {
+		return "unbound"
+	}
+	return id
 }
 
 func displayName(h Handler) string {
