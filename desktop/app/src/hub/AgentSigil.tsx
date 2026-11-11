@@ -47,7 +47,8 @@ export default function AgentSigil({
   const ref = useRef<HTMLSpanElement>(null)
   const id = agentId || name || 'agent'
   const px = size
-  const st = status ? state : 'idle'
+  // 叠放里的 peer 也要保留工作/待审批表情；状态点由 .avatar-stack 的 CSS 隐藏。
+  const st = state
   const expr = lunaExpression(st as 'idle' | 'working' | 'needs_attention' | 'offline')
   const fill = lunaColor(id, name ?? '', responsibility ?? '')
 
