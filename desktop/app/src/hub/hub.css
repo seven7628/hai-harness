@@ -8,7 +8,7 @@
 .luna-avatar.lg{width:52px;height:52px}
 .luna-avatar:hover{transform:scale(1.1) rotate(-2deg)}
 .luna-avatar[data-state='working']>svg{animation:av-work 2.2s ease-in-out infinite}
-.luna-avatar[data-state='needs_attention']::after{content:'';position:absolute;top:6%;right:6%;width:22%;height:22%;border-radius:50%;background:var(--warn);border:2px solid var(--bg)}
+.luna-avatar[data-state='needs_attention']::after{content:'';position:absolute;top:6%;right:6%;width:22%;height:22%;border-radius:50%;background:var(--warning);border:2px solid var(--bg)}
 .luna-avatar-stack{display:inline-flex;align-items:center}
 .luna-avatar-stack .avatar-more{width:18px;height:18px;border-radius:50%;background:var(--surface-3);border:2px solid var(--bg);display:grid;place-items:center;font-size:9px;color:var(--muted);margin-left:-6px;flex:0 0 auto}
 .luna-avatar-stack .luna-avatar[data-state='needs_attention']::after{display:none}
