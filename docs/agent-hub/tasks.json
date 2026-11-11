@@ -1512,6 +1512,45 @@
       "reviewNote": "独立 Review task-zkce8kd6：首轮 CHANGES_REQUESTED（B1 事件卡未按 demo 的 msg-row+30px spacer，卡片左缘 0 而非 41/38；event-body/actions 缩进自写）；d00e663 修复后 delta review task-gk5vhda6 PASS：1440/640/390 卡片左缘 41/41/38、event-body 38px/11.5px、actions 9px 0 0 38px/gap6；tsc + test:p4 14 子脚本 + shoot-hub-conv 全绿；头像确认逐字节复用 luna-face.js，owner-only/observer/seq/停止/派任务/深链接线未丢。"
     },
     {
+      "id": "P4-UI-8",
+      "phase": "P4",
+      "title": "会话区视觉反馈：段距 / 触发文案 / 身份色与提及头像 / 事件卡归属 + 细节对齐",
+      "deps": [
+        "P4-UI-7"
+      ],
+      "files": [
+        "desktop/app/src/hub/hub.css",
+        "desktop/app/src/hub/lunaAvatar.ts",
+        "desktop/app/src/hub/AgentSigil.tsx",
+        "desktop/app/src/hub/AgentMentionChip.tsx",
+        "desktop/app/src/hub/MessageBubble.tsx",
+        "desktop/app/src/hub/TaskResultCard.tsx",
+        "desktop/app/src/hub/TurnContextLine.tsx",
+        "desktop/app/src/hub/GroupView.tsx",
+        "desktop/app/src/hub/HubSidebar.tsx",
+        "desktop/app/src/hub/HubSurface.tsx",
+        "desktop/app/src/hub/HubInspector.tsx",
+        "desktop/app/src/hub/AgentEditor.tsx",
+        "desktop/app/src/hub/AgentBadge.tsx",
+        "desktop/app/src/hub/MentionPicker.tsx",
+        "desktop/app/src/hub/AgentStack.tsx",
+        "desktop/app/src/hub/ConversationMessage.tsx",
+        "desktop/app/src/hub/AgentSigil.tsx",
+        "desktop/app/src/i18n.ts",
+        "desktop/app/src/transport/mock.ts",
+        "desktop/app/scripts/shoot-hub-conv.mjs",
+        "desktop/app/scripts/test-hub-avatar.mjs",
+        "docs/agent-hub/DEMO-PORT.md"
+      ],
+      "acceptance": "用户截图四项全部解决：Markdown 块距不再被 pre-wrap 放大；`↳ N` 改为「N 人触发」且 tooltip/跳转保留；智能体身份色统一用 profile.accent（无 accent 回退职责色），@ 提及有 16px Luna；handoff/approval/task 卡显示真实发起人/执行者头像与名字。细节对齐 demo：作者名 12.5/600、时间 6px、正文 14/23.8、事件卡正文与标题左缘 ≤2px、event-flow 组内 gap 4、390 表格 440px 横滑、390 task footer 单行、用户元信息 6px。独立 Review PASS。",
+      "tests": "npx tsc --noEmit && npm run test:p4 && npm run test:css && node scripts/test-hub-avatar.mjs && node scripts/shoot-hub-conv.mjs --url http://localhost:5183 --out /tmp/hub-qa5",
+      "commit": "b6805d6 + 56d0004 + 59e26d5 + 126c6af",
+      "status": "done",
+      "note": "P4-UI-7 的会话区后续反馈：桌面 1440/640/390 × ink/paper × 群/DM/三卡全部用 computed style + 截图验收；shoot HUB_CONV_SHOTS_PASS，0 console error。",
+      "review": "passed",
+      "reviewNote": "快速独立 Review task-dkupcrgw PASS：四项原始问题逐条解决；段距 8px、行高 23.8 的整数倍、首尾 margin 0；名 12.5/600、时间 margin 6；卡左缘 41/38、三卡 body 与 title 左缘差 -1px；event-flow gap 4/头像 18、task who 16；390 表格 wrap 211/table 440/cell 30.3、页面 scrollWidth 390；user-meta flex/6；390 task footer 26px 单行。非阻塞：640 底部状态栏为既有 shell、390 卡标题按 demo 截断、截图 hover 气泡已在 126c6af 清理。"
+    },
+    {
       "id": "P5-01",
       "phase": "P5",
       "title": "隐式状态审计：93 条清单、风险矩阵与治理路线",
@@ -2538,6 +2577,13 @@
       "review": "passed",
       "reviewNote": "task-jdx7bpr8 PASS：B1 前端 owner 读错 store（Hub 里写成 workspace）+ B2 IM 路由 UI 不能表达 agent/group（编辑会静默改写）修复后通过；UI 验收 16 项 + 真实 DOM 归属核对通过。",
       "note": "P5-01 §6.1 第 0 批；owner 模型、hookTrust v2、IM Owners 三态与迁移、前端 owner/路由接线已完成；Review task-jdx7bpr8 PASS。"
+    },
+    "P4-UI-8": {
+      "status": "done",
+      "commit": "b6805d6 + 56d0004 + 59e26d5 + 126c6af",
+      "review": "passed",
+      "reviewNote": "快速独立 Review task-dkupcrgw PASS：四项原始问题逐条解决；段距 8px、行高 23.8 的整数倍、首尾 margin 0；名 12.5/600、时间 margin 6；卡左缘 41/38、三卡 body 与 title 左缘差 -1px；event-flow gap 4/头像 18、task who 16；390 表格 wrap 211/table 440/cell 30.3、页面 scrollWidth 390；user-meta flex/6；390 task footer 26px 单行。非阻塞：640 底部状态栏为既有 shell、390 卡标题按 demo 截断、截图 hover 气泡已在 126c6af 清理。",
+      "note": "P4-UI-7 的会话区后续反馈：桌面 1440/640/390 × ink/paper × 群/DM/三卡全部用 computed style + 截图验收；shoot HUB_CONV_SHOTS_PASS，0 console error。"
     }
   },
   "reviewGate": {
