@@ -98,10 +98,26 @@ func (bs *blockStore) rewriteCompact(snap *compactSnapshot) (*compactWriter, err
 
 	for _, id := range ids {
 		ref := snap.index[id]
-		payload := make([]byte, ref.n)
-		if _, err := bs.f.ReadAt(payload, ref.off); err != nil {
-			cw.abort()
-			return nil, err
+		// 分片块：读目录 → 拼接完整内容（compact 把分片**折叠**成整块；
+		// 下次写入时 putAuto 会重新分片，见 block_frags.go）。
+		var payload []byte
+		if isFragmented(ref.kind) {
+			d, dok := bs.fragDirFor(id, ref)
+			if !dok {
+				cw.abort()
+				return nil, fmt.Errorf("compact: block %s has unreadable fragment dir", id)
+			}
+			payload, dok = bs.readFragDir(d)
+			if !dok {
+				cw.abort()
+				return nil, fmt.Errorf("compact: block %s fragment read failed", id)
+			}
+		} else {
+			payload = make([]byte, ref.n)
+			if _, err := bs.f.ReadAt(payload, ref.off); err != nil {
+				cw.abort()
+				return nil, err
+			}
 		}
 		if payloadDigest(payload) != ref.hash {
 			cw.abort()
@@ -121,8 +137,8 @@ func (bs *blockStore) rewriteCompact(snap *compactSnapshot) (*compactWriter, err
 			cw.abort()
 			return nil, err
 		}
-		cw.newIndex[id] = blockRef{off: payloadOff, n: ref.n, hash: ref.hash}
-		cw.pos += int64(len(head) + int(ref.n) + 8)
+		cw.newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: ref.hash, kind: ref.kind &^ kindFragmented}
+		cw.pos += int64(len(head) + len(payload) + 8)
 	}
 	return cw, nil
 }
@@ -150,11 +166,58 @@ func (bs *blockStore) finishCompact(snap *compactSnapshot, cw *compactWriter) er
 		r := bufio.NewReaderSize(io.NewSectionReader(bs.f, snap.pos, end-snap.pos), 1<<20)
 		pos := snap.pos
 		for pos < end {
-			kind, id, payload, err := readBlockRecord(r)
+			kind, id, _, payload, headLen, err := readBlockRecordExt(r)
 			if err != nil {
 				// 尾部半截/损坏：放弃本次回收，正式文件保持原样。
 				cw.abort()
 				return fmt.Errorf("%w: tail replay at %d: %v", errCompactAborted, pos, err)
+			}
+			if kind == blockRecFrag {
+				// 片段内容：它的字节会被下面的目录记录引用 → 这里跳过，
+				// 由目录统一读出并折叠成整块。
+				pos += int64(headLen + len(payload) + 8)
+				continue
+			}
+			if kind == blockRecDir {
+				// 目录：按目录里的偏移从**旧文件**读各片段 → 拼接 → 写成整块。
+				// （旧文件在 rename 前完好；rename 之后旧偏移就失效了。）
+				d, dok := parseFragDir(payload)
+				if !dok {
+					cw.abort()
+					return fmt.Errorf("%w: tail replay: corrupt fragment dir for %s", errCompactAborted, id)
+				}
+				full := make([]byte, 0, d.total)
+				for _, it := range d.items {
+					p := make([]byte, it.n)
+					if _, rerr := bs.f.ReadAt(p, it.off); rerr != nil {
+						cw.abort()
+						return fmt.Errorf("%w: tail replay: read fragment %s: %v", errCompactAborted, id, rerr)
+					}
+					full = append(full, p...)
+				}
+				if payloadDigest(full) != d.logical {
+					cw.abort()
+					return fmt.Errorf("%w: tail replay: fragment digest mismatch for %s", errCompactAborted, id)
+				}
+				h := buildBlockRecordHead(blockRecPut, id, full)
+				po := cw.pos + int64(len(h))
+				if _, werr := cw.w.Write(h); werr != nil {
+					cw.abort()
+					return werr
+				}
+				if _, werr := cw.w.Write(full); werr != nil {
+					cw.abort()
+					return werr
+				}
+				if _, werr := cw.w.Write(d.logical[:]); werr != nil {
+					cw.abort()
+					return werr
+				}
+				cw.newIndex[id] = blockRef{off: po, n: int32(len(full)), hash: d.logical, kind: d.kind}
+				cw.pos += int64(len(h) + len(full) + 8)
+				pos += int64(headLen + len(payload) + 8)
+				applied++
+				continue
 			}
 			head := buildBlockRecordHead(kind, id, payload)
 			if kind == blockRecPut {
@@ -216,6 +279,8 @@ func (bs *blockStore) finishCompact(snap *compactSnapshot, cw *compactWriter) er
 	_ = bs.f.Close()
 	bs.f = nf
 	bs.index = cw.newIndex
+	// 分片块在 compact 时被**折叠**成整块（见 rewriteCompact）→ 片段缓存清空。
+	bs.frags = map[string]*fragDir{}
 	bs.nBytes = cw.pos
 	bs.recordsWritten = int64(len(cw.newIndex))
 	bs.staleRecords = 0

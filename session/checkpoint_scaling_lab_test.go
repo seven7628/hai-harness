@@ -18,6 +18,7 @@ package session
 //  4. N 路并发提交经同一个 FileStorage 时的 lock 等待（30s 报错的放大器）。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -236,11 +237,18 @@ func TestCheckpointScalingLab(t *testing.T) {
 	t.Run("commit-growing-block-amplification", func(t *testing.T) {
 		// 模拟「子智能体卡片在 running 期每个事件都被整块重写」：
 		// 每次给一个 block 追加 8KB 文本，其余块不变。
-		// 挑一个接近 200KB 的块：真实会话里 running 卡片就是这个量级，
-		// 且不会让实验本身写掉几十 GB。
-		biggest := 0
+		//
+		// **必须挑 agent 卡片**（kind=agent）：只有它的 payload 里有顶层数组
+		// （items），才会走分片存储（见 block_frags.go）。
+		// 2026-11-11 修正：原实现挑「接近 200KB 的块」—— 真实会话里那个尺寸的
+		// 其实是 **tool 卡片**（无顶层数组 → 不分片 → 整块重写），
+		// 于是实验测的根本不是它声称要模拟的东西（agent 卡片）。
+		biggest := -1
 		bestDelta := 1 << 62
 		for i, s := range spans {
+			if !bytes.Contains(s[:min(len(s), 120)], []byte(`"kind":"agent"`)) {
+				continue
+			}
 			d := len(s) - 200*1024
 			if d < 0 {
 				d = -d
@@ -249,19 +257,26 @@ func TestCheckpointScalingLab(t *testing.T) {
 				bestDelta, biggest = d, i
 			}
 		}
+		if biggest < 0 {
+			t.Skip("该会话没有 agent 卡片（本用例专测 agent 卡片的写放大）")
+		}
+		t.Logf("选中 agent 卡片: index=%d len=%d 前 120 字节=%q", biggest, len(spans[biggest]), string(spans[biggest][:min(len(spans[biggest]), 120)]))
 		base := append([]byte(nil), spans[biggest]...)
 		work := append([][]byte(nil), spans...)
 		sidecar := dst.record + ".blocks"
 		before := fileSize(t, sidecar)
 		rev := rec.Revision + 100
 		const events = 40
+		// 追加的 item 必须是**合法 JSON**（切分器要解析它）。
+		// 生产里 item 是 AgentItem 结构体序列化出来的，永远合法。
 		payload := make([]byte, 8*1024)
 		for i := range payload {
 			payload[i] = byte('a' + i%26)
 		}
+		itemJSON := []byte(`{"kind":"tool","tool_id":"x","name":"bash","args":"` + string(payload) + `"}`)
 		start := time.Now()
 		for i := 0; i < events; i++ {
-			base = growBlock(t, base, payload)
+			base = growCardItems(t, base, itemJSON)
 			work[biggest] = base
 			rev++
 			grownView, gerr := replaceJSONField(view, "blocks", joinSpans(t, work))
@@ -277,8 +292,8 @@ func TestCheckpointScalingLab(t *testing.T) {
 		el := time.Since(start)
 		grown := fileSize(t, sidecar) - before
 		t.Logf("running 卡片 %d 个事件: sidecar +%.1fMB（有效增量仅 %.1fMB）, 平均 %.1fms/事件, 放大 %.1fx",
-			events, float64(grown)/1e6, float64(events*len(payload))/1e6,
-			float64(el.Milliseconds())/events, float64(grown)/float64(events*len(payload)))
+			events, float64(grown)/1e6, float64(events*len(itemJSON))/1e6,
+			float64(el.Milliseconds())/events, float64(grown)/float64(events*len(itemJSON)))
 	})
 
 	t.Run("commit-concurrent-lock", func(t *testing.T) {
@@ -332,6 +347,33 @@ func TestCheckpointScalingLab(t *testing.T) {
 				n, pct(totals, 0.5), pct(totals, 0.95), maxDur(totals), pct(waits, 0.5), maxDur(waits))
 		}
 	})
+}
+
+// growCardItems 在卡片的 items 数组末尾**字节级**追加一条 item。
+//
+// 为什么不能用 growBlock（map 反序列化 + 重新序列化）：那会把**每一条已有 item**
+// 的字节也改掉（Go map 序列化按键排序）—— 分片存储的「已有片段字节不变」前提
+// 被破坏，测出来的是「全部片段都要重写」的假象。
+//
+// 生产路径是「reducer 按结构体序列化」→ 已有 item 的字节稳定，只有新追加的那条
+// 是新的 → 分片才能真正生效。这里必须忠实复现这一点。
+//
+// 定位 items 数组复用 topLevelArrayElements（block_split.go）——它按**顶层**
+// 数组定位，不会被字符串里的同名标记骗到。
+func growCardItems(t *testing.T, card, add []byte) []byte {
+	t.Helper()
+	elems, ok := topLevelArrayElements(card)
+	if !ok {
+		t.Fatalf("卡片没有顶层数组")
+	}
+	out := make([]byte, 0, len(card)+len(add)+2)
+	out = append(out, card[:elems.arrayEnd]...)
+	if elems.arrayEnd > elems.arrayStart+1 {
+		out = append(out, ',') // 已有元素 → 补分隔逗号
+	}
+	out = append(out, add...)
+	out = append(out, card[elems.arrayEnd:]...)
+	return out
 }
 
 // ---- 小工具 ----

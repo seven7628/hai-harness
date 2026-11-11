@@ -246,6 +246,12 @@ type blockStore struct {
 	// 占比 94% —— 判据看不见的前者让 3.45GB 的文件永不回收。
 	// 维护成本 O(1)：put/delete 各加减一次，重建时按索引求和。
 	liveBytes int64
+	// frags 是**分片块**的片段目录：id → 目录。
+	//
+	// 有了它，「只增」的块（running 的 agent 卡片）每次只追加新增的那一段，
+	// 而不是整个 payload —— 见 block_frags.go 的写放大分析。
+	// 整块块不在这里；两者互斥（kind=1 清空分片，kind=4 建立分片）。
+	frags map[string]*fragDir
 }
 
 // blockRecordSize 是一条 sidecar 记录的总字节数（头 + payload + 摘要）。
@@ -352,7 +358,7 @@ func evictBlockStore(recordPath string) { closeBlockStore(recordPath) }
 
 // openBlockStore 打开（或创建）sidecar 并重建索引。
 func openBlockStore(path string) (*blockStore, error) {
-	bs := &blockStore{path: path, index: map[string]blockRef{}}
+	bs := &blockStore{path: path, index: map[string]blockRef{}, frags: map[string]*fragDir{}}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
@@ -463,7 +469,7 @@ func (bs *blockStore) rebuild() error {
 	r := bufio.NewReaderSize(io.NewSectionReader(bs.f, pos, size-pos), 1<<20)
 	for {
 		off := pos
-		kind, id, payload, err := readBlockRecord(r)
+		kind, id, _, payload, headLen, err := readBlockRecordExt(r)
 		if err == io.EOF {
 			break
 		}
@@ -475,13 +481,22 @@ func (bs *blockStore) rebuild() error {
 			pos = off
 			break
 		}
-		head := buildBlockRecordHead(kind, id, payload)
-		recLen := int64(len(head) + len(payload) + 8)
+		recLen := int64(headLen + len(payload) + 8)
 		switch kind {
 		case blockRecPut:
-			bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: payloadDigest(payload), kind: blockKindCode(payload)}
+			bs.index[id] = blockRef{off: off + int64(headLen), n: int32(len(payload)), hash: payloadDigest(payload), kind: blockKindCode(payload)}
+			delete(bs.frags, id) // 整块替换分片形态（二者互斥）
 		case blockRecDel:
 			delete(bs.index, id)
+			delete(bs.frags, id)
+		case blockRecFrag:
+			// 片段内容本身不建索引：目录（kind=4）里记着它的位置。
+			bs.recordsWritten++
+		case blockRecDir:
+			// 目录 = 该 id 的最新片段清单（重建后即真值）。
+			if aerr := bs.applyDirRecord(id, payload, off+int64(headLen)); aerr != nil {
+				return aerr
+			}
 		}
 		pos += recLen
 	}
@@ -587,9 +602,10 @@ func (bs *blockStore) delete(id string) error {
 	}
 	if prev, existed := bs.index[id]; existed {
 		bs.staleRecords++
-		bs.liveBytes -= blockRecordSize(id, int(prev.n))
+		bs.liveBytes -= bs.logicalSizeLocked(id, prev)
 	}
 	delete(bs.index, id)
+	delete(bs.frags, id) // 分片形态一起删（见 block_frags.go 的不变量 3）
 	bs.recordsWritten++
 	bs.bytesWritten += int64(len(head) + 8)
 	bs.sortedDirty = true
@@ -630,8 +646,17 @@ func (bs *blockStore) pruneTo(keep map[string]struct{}) error {
 	return nil
 }
 
-// put 追加一条 block（同 id 后续记录覆盖前者）。
+// put 追加一条 block。
+//
+// 分片感知：payload 里有长数组时以**片段**形式落盘（见 block_frags.go），
+// 「只增」的块每次只追加新增的那一段 → 写放大从 150–275× 降到个位数。
+// 没有长数组时走原路径，字节级行为与从前完全一致。
 func (bs *blockStore) put(id string, payload []byte) error {
+	return bs.putAuto(id, payload)
+}
+
+// putWhole 追加一条**整块**（同 id 后续记录覆盖前者）。
+func (bs *blockStore) putWhole(id string, payload []byte) error {
 	off := bs.nBytes
 	head := buildBlockRecordHead(blockRecPut, id, payload)
 	if _, err := bs.w.Write(head); err != nil {
@@ -646,8 +671,12 @@ func (bs *blockStore) put(id string, payload []byte) error {
 	}
 	if prev, existed := bs.index[id]; existed {
 		bs.staleRecords++
-		bs.liveBytes -= blockRecordSize(id, int(prev.n))
+		// 分片块的索引项 n 是**目录长度**而非逻辑长度 → 用 logicalSizeLocked 取真值。
+		// 它已经覆盖了「整块」与「分片」两种形态，**不要**再单独减一次。
+		bs.liveBytes -= bs.logicalSizeLocked(id, prev)
 	}
+	// 整块写入**替换**分片形态（二者互斥，见 block_frags.go 的不变量 3）。
+	delete(bs.frags, id)
 	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: d, kind: blockKindCode(payload)}
 	bs.liveBytes += blockRecordSize(id, len(payload))
 	bs.recordsWritten++
@@ -758,15 +787,7 @@ func (bs *blockStore) holdsSame(id string, payload []byte) bool {
 }
 
 func (bs *blockStore) read(id string) ([]byte, bool) {
-	ref, ok := bs.index[id]
-	if !ok {
-		return nil, false
-	}
-	buf := make([]byte, ref.n)
-	if _, err := bs.f.ReadAt(buf, ref.off); err != nil {
-		return nil, false
-	}
-	return buf, true
+	return bs.readBlock(id) // 分片感知（见 block_frags.go）
 }
 
 func (bs *blockStore) Len() int { return len(bs.index) }
@@ -1919,18 +1940,7 @@ func (bs *blockStore) actualSetSum(ids []string) (string, error) {
 // readAndVerify 按索引位置读取并校验该块摘要。
 // 校验只覆盖「这一块」，成本与该块大小成正比。
 func (bs *blockStore) readAndVerify(id string) ([]byte, bool) {
-	ref, ok := bs.index[id]
-	if !ok {
-		return nil, false
-	}
-	buf := make([]byte, ref.n)
-	if _, err := bs.f.ReadAt(buf, ref.off); err != nil {
-		return nil, false
-	}
-	if d := payloadDigest(buf); d != ref.hash {
-		return nil, false
-	}
-	return buf, true
+	return bs.readBlockVerified(id) // 分片感知：校验逻辑摘要（见 block_frags.go）
 }
 
 // isAscending 报告切片是否已升序（用于跳过重复排序）。
@@ -2112,9 +2122,23 @@ func (bs *blockStore) compact() error {
 		if !okRef {
 			continue
 		}
-		payload := make([]byte, ref.n)
-		if _, err := bs.f.ReadAt(payload, ref.off); err != nil {
-			return err
+		// 分片块：读出目录 → 拼接完整内容（compact 把分片**折叠**成整块；
+		// 下次写入时 putAuto 会重新分片，见 block_frags.go）。
+		var payload []byte
+		if isFragmented(ref.kind) {
+			d, dok := bs.fragDirFor(id, ref)
+			if !dok {
+				return fmt.Errorf("compact: block %s has unreadable fragment dir", id)
+			}
+			payload, dok = bs.readFragDir(d)
+			if !dok {
+				return fmt.Errorf("compact: block %s fragment read failed", id)
+			}
+		} else {
+			payload = make([]byte, ref.n)
+			if _, err := bs.f.ReadAt(payload, ref.off); err != nil {
+				return err
+			}
 		}
 		// 只搬运内容完好的块；校验失败的块保留在原文件里不参与 compact，
 		// 让后续读取时明确报错（而不是把损坏数据搬过去当成好的）。
