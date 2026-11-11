@@ -87,6 +87,8 @@ interface LunaScene {
 }
 
 let scene: LunaScene | null = null
+let activeFaces = 0
+let stopTimer: ReturnType<typeof setTimeout> | null = null
 let clickBound = false
 
 type LunaFaceGlobal = {
@@ -115,6 +117,28 @@ export function ensureLunaScene(): LunaScene | null {
     })
   }
   return scene
+}
+
+/** 每颗挂载的头像持有一份引用；最后一个卸载时停掉整页 rAF/gaze。 */
+export function retainLunaScene(): LunaScene | null {
+  if (stopTimer) { clearTimeout(stopTimer); stopTimer = null }
+  const sc = ensureLunaScene()
+  if (sc) activeFaces += 1
+  return sc
+}
+
+export function releaseLunaScene(): void {
+  activeFaces = Math.max(0, activeFaces - 1)
+  if (activeFaces === 0 && scene && !stopTimer) {
+    // 状态变化会 cleanup→setup 连跑；给一个短宽限，避免每颗头换表情都重建 scene。
+    stopTimer = setTimeout(() => {
+      stopTimer = null
+      if (activeFaces === 0 && scene) {
+        scene.stop()
+        scene = null
+      }
+    }, 250)
+  }
 }
 
 export function syncLunaScene(root: ParentNode | null | undefined): void {

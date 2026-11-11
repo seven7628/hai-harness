@@ -7,8 +7,8 @@ import type { MentionAgent } from './mentions'
 
 // 群消息/任务卡的「谁说的」标识：头像 + 名字 + 职责。
 // 只负责身份，不负责气泡；accent 只给名字上色，正文保持 --ink 的可读性。
-// 头像用 sigil v2（形状+色相回答「我是谁」，状态环回答「我现在怎样」），
-// 不再渲染 emoji/首字母；名字就在同一行，头像对读屏是装饰（aria-hidden）。
+// 头像用 demo 的 Luna 引擎（职责色回答「我是谁」，表情回答「我现在怎样」）；
+// 名字就在同一行，头像对读屏是装饰（aria-hidden）。
 export default function AgentBadge({
   agent,
   name,

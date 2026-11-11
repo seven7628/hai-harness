@@ -108,7 +108,7 @@ const i18nSrc = readFileSync(join(hubDir, '..', 'i18n.ts'), 'utf8')
 const demoCss = readFileSync(join(hubDir, 'demo.css'), 'utf8')
 
 const count = (haystack, needle) => haystack.split(needle).length - 1
-assert(sigilSrc.includes('data-luna-face') && sigilSrc.includes('ensureLunaScene') &&
+assert(sigilSrc.includes('data-luna-face') && sigilSrc.includes('retainLunaScene') && sigilSrc.includes('releaseLunaScene') &&
   lunaSrc.includes("import './vendor/mascot-bots.js'") && lunaSrc.includes("import './vendor/luna-face.js'"),
   '头像直接复用 demo 的 Luna 引擎（vendor 脚本 + data-luna-face）')
 assert(lunaSrc.includes('ROLE_RULES') && lunaSrc.includes('inspecting') &&
@@ -139,8 +139,8 @@ assert(!sidebarSrc.includes('HubAvatar') && !inspectorSrc.includes('HubAvatar') 
 assert(convoSrc.includes('size={52}') && convoSrc.includes('agent-head') &&
   convoSrc.includes('agent-text') && convoSrc.includes('user-bubble'),
   '消息区按 demo 的 52px 头像 + agent-head/agent-text/user-bubble 结构')
-assert(hubSurfaceSrc.includes('size={44}') && groupSrc.includes('<AgentStack') &&
-  groupSrc.includes('size={28}'), 'DM 头 44 / 群头叠放 28（demo 尺寸）')
+assert(hubSurfaceSrc.includes('size={52}') && groupSrc.includes('<AgentStack') &&
+  groupSrc.includes('size={28}'), 'DM 头 52 / 群头叠放 28（demo 尺寸）')
 assert(cssSrc.includes('.hub-demo .messages') && cssSrc.includes('.hub-demo .chat-header'),
   '会话区采用 demo 的 chat-header/messages/composer 布局')
 assert(cssSrc.includes('prefers-reduced-motion') && cssSrc.includes('animation: none !important'),

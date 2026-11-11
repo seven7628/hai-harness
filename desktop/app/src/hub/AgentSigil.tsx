@@ -2,12 +2,13 @@ import { useEffect, useRef } from 'react'
 import type { CSSProperties } from 'react'
 import type { AvatarState } from './avatar'
 import {
-  ensureLunaScene,
   lunaColor,
   lunaDamp,
   lunaExpression,
   lunaPhase,
   lunaSamples,
+  releaseLunaScene,
+  retainLunaScene,
 } from './lunaAvatar'
 
 // 头像 = demo 的 Luna 球面头像（mascot-bots.js + luna-face.js），不重画。
@@ -54,7 +55,7 @@ export default function AgentSigil({
 
   useEffect(() => {
     const host = ref.current
-    const sc = ensureLunaScene()
+    const sc = retainLunaScene()
     if (!host || !sc) return
     sc.sync(host.parentElement ?? document)
     const svg = host.querySelector('svg[data-luna-face]') as SVGElement | null
@@ -65,6 +66,7 @@ export default function AgentSigil({
       sc.setBase(svg, want)
       sc.setExpr(svg, want)
     }
+    return () => releaseLunaScene()
   }, [st, id, fill])
 
   return (

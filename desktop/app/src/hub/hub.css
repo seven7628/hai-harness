@@ -2454,9 +2454,9 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .hub-demo .messages-inner { width: 100%; max-width: 760px; margin: 0 auto; }
 .hub-demo .chat-title-wrap { min-width: 0; flex: 1; }
-.hub-demo .chat-title { display: flex; align-items: center; gap: 8px; }
-.hub-demo .chat-title .name { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hub-demo .chat-sub { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; min-width: 0; }
+.hub-demo .chat-title { display: flex; align-items: center; gap: 7px; }
+.hub-demo .chat-title .name { font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hub-demo .chat-sub { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; color: var(--muted); font-size: 11.5px; min-width: 0; }
 .hub-demo .chat-sub .sep { color: var(--muted-2); }
 .hub-demo .chat-sub .lock { display: inline-flex; align-items: center; gap: 3px; color: var(--muted-2); }
 .hub-demo .header-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; position: relative; }
@@ -2481,7 +2481,7 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .avatar-btn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 50%; }
 .hub-demo .agent-name-btn { padding: 0; border: 0; background: none; color: inherit; cursor: pointer; font: inherit; }
 .hub-demo .agent-name-btn:hover { color: var(--accent); }
-.hub-demo .agent-tag { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; line-height: 16px; white-space: nowrap; }
+.hub-demo .agent-tag { font-size: 9.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; line-height: 1.45; white-space: nowrap; }
 .hub-demo .agent-tag.reply { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 24%, var(--border)); }
 .hub-demo .agent-tag.observe { color: var(--muted-2); }
 .hub-demo .agent-tag.owner { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
@@ -2588,7 +2588,7 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 /* 窄屏：demo 只保留一行 sub（hide-mobile），否则 295px 主列会被挤成三行。 */
 @media (max-width: 640px) {
   .hub-demo .chat-sub > :nth-child(n+4) { display: none; }
-  .hub-demo .chat-header { min-height: 64px; height: 64px; padding: 0 10px; gap: 8px; }
+  .hub-demo .chat-header { min-height: 64px; height: 64px; padding: 0 12px; gap: 7px; }
   .hub-demo .chat-title-wrap { max-width: calc(100% - 150px); }
   .hub-demo .chat-header .avatar-stack .avatar-more { display: none; }
 }

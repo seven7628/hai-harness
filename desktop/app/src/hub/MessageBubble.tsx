@@ -19,7 +19,7 @@ import { highlightClass, seqDataAttr } from './seqJump'
 // P3b-07 起：task_result → TaskResultCard（派发者取账本 origin，不拿 sender 猜）；
 // 正文里的 @Name → AgentMentionChip；context.senders ≥2 → TurnContextLine。
 //
-// 2026-10 会话区复刻：agent 消息与 DM 共用「32px sigil + 作者头 + 无气泡正文」，
+// 2026-11 demo 源码移植：agent 消息与 DM 共用「52px Luna + 作者头 + 无气泡正文」，
 // human 消息与 DM 共用「右侧暖色气泡 + 时间」。群特有标签只在数据能表达时出现：
 //   · 观察  ← groupRole=observer（名册真实字段）
 //   · ↳ N   ← context.senders ≥2（触发上下文）

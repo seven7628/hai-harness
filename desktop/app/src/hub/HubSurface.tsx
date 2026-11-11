@@ -247,13 +247,13 @@ export default function HubSurface() {
                   name={activeAgent.name}
                   responsibility={activeAgent.role}
                   state={activeState}
-                  size={44}
+                  size={52}
                   label={agentSigilLabel(t, activeAgent.name, activeState)}
                 />
                 <div className="chat-title-wrap">
                   <div className="chat-title">
                     <span className="name">{activeAgent.name}</span>
-                    <span className={`dot ${isRunning ? 'live' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
+                    {isRunning ? <span className="dot live" title={t('hub.running')} /> : null}
                   </div>
                   <div className="chat-sub">
                     {activeAgent.role ? <span>{activeAgent.role}</span> : null}

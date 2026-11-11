@@ -232,7 +232,6 @@ export interface StackInputMember {
 export interface StackPlanMember {
   id: string
   responsibility: string
-  identity: SigilIdentity
   state: AvatarState
   /** 最左成员承担整组状态。 */
   lead: boolean
@@ -267,7 +266,6 @@ export function planStack(
   const members = visible.map((m, i) => ({
     id: m.id,
     responsibility: m.responsibility ?? '',
-    identity: deriveSigil(m.id, m.responsibility ?? ''),
     state: i === 0 ? state : (isAvatarState(m.state) ? m.state : 'idle'),
     lead: i === 0,
     withStatus: i === 0,

@@ -1017,7 +1017,7 @@
     const size = o.size === 24 || o.size === 48 ? o.size : 32
     const showStatus = o.status !== false
     const px = size
-    const node = el('span', 'avatar luna-avatar' + (size === 48 ? ' lg' : size === 28 ? ' xs' : ''))
+    const node = el('span', 'avatar luna-avatar' + (size === 48 ? ' lg' : ''))
     node.dataset.slug = String(id || '')
     node.dataset.agentId = String(id || '')
     node.dataset.state = showStatus ? state : 'idle'
