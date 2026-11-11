@@ -41,7 +41,8 @@ export interface CommandResponse {
 // 本模块只做**有界记录**：哪一次运行是被哪条事件收敛的。状态改写仍在 store（见
 // useAppStore 的 settleRunNodes），诊断不改变任何行为；生产代码从不读它。
 export type RunSettleSource =
-  | 'agent_end' // 主 run 收尾时顺带收敛了同步子 run（子 run 自己的 agent_end 没来）
+  | 'agent_end' // 主 run 收尾时顺带收敛了别的运行：同步子 run（阻塞调用，随父 run 结束）、
+  //             或 agent_end 缺 run_id 时的那个唯一顶层 run（无法排除它自己）。
   | 'agent_end_unmatched' // 收到一条 run_id 找不到节点的 agent_end（只记录，不猜归属）
   | 'new_run_batch' // 新批次开口（user_inputs_consumed injected=false）证明上一轮已结束
   | 'session_run_error' // 运行级失败（Go 侧只在主 run 非 abort 失败时发，会话级终态）
@@ -51,7 +52,8 @@ export type RunSettleSource =
 export interface RunSettleRecord {
   sessionId: string
   source: RunSettleSource
-  /** 被收敛的 run 节点 id（不含触发本次收敛的事件自己的 run；可为空 = 只记录未收敛）。 */
+  /** 被收敛的 run 节点 id（不含触发本次收敛的事件自己的 run；可为空 = 只记录未收敛）。
+   *  例外：`agent_end` 缺 `run_id` 时无法排除「它自己」，那个唯一顶层 run 也在列表里。 */
   runIds: string[]
   /** 事件携带的 run_id（诊断用，可能为空）。 */
   eventRunId?: string

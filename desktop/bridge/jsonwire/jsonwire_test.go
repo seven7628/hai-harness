@@ -56,18 +56,24 @@ func TestInjectAfterRemove_TaskPromotedCarriesEmptySessionID(t *testing.T) {
 }
 
 // 反向：不先删就直接注入 —— 这正是修复前的行为，测试把它钉住（后者胜 → 空串）。
+// 断言不依赖「解析器挑哪一份」：结构上顶层确实有两份（宿主在前、事件自带的空串在后），
+// 语义上 encoding/json 取后者 → 空串胜出，前端随后回退「当前会话」，正是串台根因。
+// 修复后的形态由 Envelope（删+注入一次完成）与 emit 级测试锁住，这条只负责说明为什么。
 func TestInjectWithoutRemove_ShadowsWithEmpty(t *testing.T) {
 	base := []byte(`{"session_id":"","event_type":"task_promoted"}`)
 	line, err := InjectKeys(base, []KV{kv(t, "session_id", "s-1")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if n := countKey(line, "session_id"); n != 2 {
+		t.Fatalf("只注入不删 → 顶层应有两份 session_id，实际 %d: %s", n, line)
+	}
 	var got map[string]any
 	if err := json.Unmarshal(line, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got["session_id"] != "" {
-		t.Skip("解析器选择前者：本测试的前提变了，请复核注入语义")
+		t.Fatalf("重复键应让事件自带的空串胜出（后者胜），实际 %v: %s", got["session_id"], line)
 	}
 }
 

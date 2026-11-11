@@ -148,6 +148,8 @@
 
 **修法**：在事件 marshal 前清空/禁止 SDK 自带路由键，或注入改为“解码 → 覆盖 → 重编码”；每行 golden test 断言 `session_id` 恰好出现一次；前端对空/不匹配的归属**丢弃并记录**，绝不回退当前会话。
 
+**现状（P5-03b）**：emit 侧已闭环（`Envelope` + 行级/emit 级断言）；但前端兜底**仍是旧行为**（`getSid` 回退 `activeSessionId`、空 sid 建 `views['']`），`writeLine` 直写行也不走信封 —— 两项分别是 §6.1 第 1 条的 **N7** / **N8** 残留，别把 BR-03 当成全闭环。
+
 ### 5.3 改一个主题，为什么 provider key 没了
 
 **状态怎么流动**：Electron `readSettingsResult` 深拷贝 `DEFAULT_SETTINGS` 再逐段合并 raw（BR-01）；`settings:set` 用 `{...cur, ...patch}` 把整份并集写回（BR-29）；bridge 的 OAuth 路径又把整个 `provider` 对象重写回去（BR-02）；`provider:save` 把 `api_key` 明文放进 settings（BR-08）。
@@ -187,7 +189,7 @@
 | GO-14 | G14 | L/Q/F | P0 | desktop/bridge/main.go:401 lastUsed | 任务并发派进正在跑的会话（并批/串话） |
 | BR-01 | B1 | D/S | P0 | desktop/app/electron/main.ts:471-518; main.ts:562-575; main.ts:1446-1486 | ① 老配置被钉死在旧默认值上，新版本改默认（新模型、新 reminder_rounds、新 provider 预置）对老用户永不生效，且无法区分“用户选的 30”和“默认的 30” |
 | BR-02 | B2 | S/Q | P0 | desktop/bridge/config_patch.go:1-24; config_patch.go:36-40; desktop/bridge/oauth.go:150-181 | bridge 那份 providers 快照会覆盖 Electron 刚写入的 api_key / label / prices / usage_input_includes_cache → 界面显示“已保存”但 key 丢失（详见 raw B2） |
-| BR-03 | B3 | I/F | P0 | desktop/bridge/jsonwire/jsonwire.go:5-10; jsonwire.go:64-141; desktop/bridge/main.go:653-680 | 跨会话串台——最严重的一类：消息/任务/用量被记到错误会话，用户看到“别人的内容出现在我的对话里” |
+| BR-03 | B3 | I/F | P0 | desktop/bridge/jsonwire/jsonwire.go（Envelope/ForceKeys/RemoveField）; desktop/bridge/main.go:653-680（emit 漏斗，含 extras 信封）; 残留：useAppStore 的 getSid 兜底、main.go 的 writeLine（§6.1 N7/N8） | 跨会话串台——最严重的一类：消息/任务/用量被记到错误会话，用户看到“别人的内容出现在我的对话里”（emit 行已闭环，前端归属兜底未闭环） |
 | BR-04 | B4 | L/H | P0 | main.ts:806; main.ts:945; main.ts:964 | ① mainWindow 为 null 时该行触发 TypeError，抛在 readline 的 'line' 监听里 → 主进程未捕获异常（轻则丢这一行，重则崩溃，取决于 Electron 对 uncaughtException 的处置；详见 raw B4） |
 | BR-08 | B8 | H/I | P0 | main.ts:1521-1528; main.ts:263-300; main.ts:875-880 | ① 凭据随“配置文件”外泄 |
 | BR-09 | B9 | M/S | P0 | session/block_store.go:776-778; session/store_record.go:315-325; session/store_record.go:381 | 历史丢失：本应“回退到上一份可用快照”，实际得到 0 块 → 会话空白（正是用户看到的“历史不出来”） |
@@ -219,7 +221,7 @@
 | BR-11 | B11 | H/F | P1 | desktop/bridge/appdata.go:33-57; appdata.go:60-70; agenthub/queue.go:78-90 | “重启后历史丢失 / 项目重复出现”（appdata.go:38-42 注释即为此事故） |
 | BR-12 | B12 | C/F | P1 | desktop/bridge/main.go:1212-1213; hub_workspace.go:345-368; hub_workspace.go:451-476 | ① 重启后同一任务被执行两次（副作用重复：发消息、写文件、派子 agent） |
 | BR-13 | B13 | L/F | P1 | desktop/bridge/hub_commands.go:41-44; hub_recovery.go:24-52; hub_recovery.go:93-130 | ① queued 任务永不入队 → “提交了但永远不跑” |
-| BR-15 | B15 | I/Q | P1 | desktop/app/src/store/events.ts:1-28; useAppStore.ts:4540-4556; useAppStore.ts:8356-8380 | 丢一条 agent_end 就永久“运行中”常亮 |
+| BR-15 | B15 | I/Q | P1 | desktop/app/src/store/events.ts:34-78（runSettleTraces）; useAppStore.ts 的 settleRunNodes / agent_end / session_run_error / session_closed / task_end / user_inputs_consumed; 回归：scripts/test-store-queue.mjs 场景 25–34 | 丢一条 agent_end 就永久“运行中”常亮（同步子 run / 异步子 run / 会话终态各自有证据，见 §6.1 第 1 条） |
 | BR-18 | B18 | I/T | P1 | desktop/app/src/transport/index.ts:8-16; desktop/app/src/transport/mock.ts; electron.ts:20-29 | ① 测试/演示通过而真机失败（mock 不发 command_response 的真实错误码/超时语义） |
 | BR-19 | B19 | I/Q | P1 | useAppStore.ts:3647-3668; electron.ts:82-83; main.ts:999-1003 | 乐观 UI 无法回滚或被回滚错（合成失败后再来真响应，第二个 ok:true 被 delete pending[id] 后当无主响应处理） |
 | BR-20 | B20 | L/I | P1 | useAppStore.ts:3623-3640; useAppStore.ts:3615-3619; useAppStore.ts:3627-3631 | ① pendingRestoreAttempt 永不清理（每会话一条，长会话列表下单页内存缓升） |
@@ -278,7 +280,20 @@
 
 0. **BR-21 + BR-04 + GO-11 + FE-03**：`xlsxPV/docxPV/pptxPV/hookTrust/imPlugin` 按 workspace 分槽；主进程所有 `webContents.send` 走判空包装；`cronSettings` 改 `*bool` / 先赋默认再 Unmarshal；前端导航代际丢弃补 trace 并区分“过期/不一致”。这四条是 §6.1 原先漏掉的 P0。
 1. **BR-03 + BR-15**：先把身份/事件信封做对；否则后面所有恢复/计费都建立在错归属上。
-   **批次 1（P5-03）进度**：BR-03 在 emit 路径闭环 —— `jsonwire.Envelope` 把「删同名键 + 注入宿主键」合成一个入口（结构异常回退 `ForceKeys`，再失败丢弃并告警，绝不带重复键上线），`TestEmitEnvelopeSessionIDExactlyOnce` 对 stdout 行断言顶层 `session_id`/`workspace` 恰好一份（空串/重复键/缺字段/嵌套对象/值里的 JSON 字符串）。BR-15 部分闭环 —— 运行位在四类终止事实上收敛：`session_run_error`（主 run 终态）、`session_closed`（全量落地）、`task_end`（按 taskId→runId 收敛异步子 run）、新批次开口（`injected=false` 证明上一轮结束）；无 `run_id` 的 `agent_end` 收敛唯一顶层 run，不匹配的只进诊断、不改当前 run 的结算位。残留：无 `task_id` 的子 run 丢掉自己的 `agent_end` 时没有可证明的终止事实（既有不变量允许子 run 晚于主 run 收尾），只能等它自己的 `agent_end`。
+   **批次 1（P5-03 / P5-03b）进度**：
+
+   *BR-03 —— emit 行闭环*：`jsonwire.Envelope` 把「删同名键 + 注入宿主键」合成一个入口（结构异常回退 `ForceKeys`，再失败丢弃并告警，绝不带重复键上线）。行级测试对 stdout 断言顶层 `session_id`/`workspace` 恰好一份（空串/重复键/缺字段/嵌套对象/值里的 JSON 字符串，负控：重复键能数到 2、嵌套同名键不计）；宿主**附加字段**（`cost_usd`/`todos`/`diff`）走同一个信封，`TestEmitTodoSnapshotExactlyOnce` 断言 `ToolResponse{todo_write, Todos:[...]}` 的 stdout 行顶层 `todos` 恰好一份且为宿主值（负控：只注入不删会数到 2）。
+
+   *BR-03 残留（N7/N8，**本批明确不做**，别再宣称闭环）*：
+   - **N7 前端归属兜底**：`useAppStore` 的 `getSid` 在 `session_id` 缺失时仍回退 `activeSessionId`，空 sid 还会建 `views['']`。也就是说，只要有一行**真的**漏了 `session_id`（旧日志、`writeLine` 直写行、未来新增的写入点），事件仍会落到「当前打开的会话」，跨项目串台的可能**没有消失**。要闭环得改成「sid 缺失 / 不在会话表 → 丢弃并记诊断」，这是跨全部事件分支的语义改动（恢复重放、`agent_send`、hub 群事件都依赖当前兜底），单列一批做。
+   - **N8 `writeLine` 直写行不走信封**：`out.writeLine`（`command_response` / `bridge_ready` / `sandbox_status` / `mesh_status` / `cron_changed` …）直接写 map，不经过 `Envelope`。这些行大多显式带 `session_id`/`workspace`，风险低于事件行，但**没有行级断言兜着**；后续入口：让 `writeLine` 也走同一个信封（或在 `out` 层统一注入），并为每类行补计数断言。
+
+   *BR-15 —— 运行位收敛（P5-03b 收口）*：运行位在这些终止事实上收敛，每一笔都写进 `events.ts` 的有界诊断（`runSettleTraces`，测试读 `__runSettles`）：`session_run_error`（主 run 终态，并冻结残留流式块）、`session_closed`（run / tool / agent 卡片 / `async_task` 占位全量落地）、`task_end`（按卡片 `taskId→runId` 与工具节点 `taskId` 收敛**执行方**；**不用** `TaskEnd.RunId` —— 它是发起方）、新批次开口（`injected=false` 证明上一轮结束，并冻结上一轮残留的流式块；`injected=true` 是运行中插话，**不是**终止证据）、无 `run_id` 的 `agent_end`（收敛唯一顶层 run）。子 run 的三种形态：
+   - **同步子 run**（in-loop，无 `task_id`）：父 run 收尾时**一并收敛** —— run 节点落脚（done/error/interrupted）、agent 卡片 `abandoned`。它是父 run 里的阻塞调用，父 run 结束它不可能还在跑；这是它丢了自己的 `agent_end` 之后唯一可证明的终止事实。
+   - **异步子 run**（带 `task_id`）：**绝不**随父 run 收敛（可以晚于父 run 收尾），终态证据是它自己的 `agent_end` / `task_end`。
+   - **既无 `task_id` 又不阻塞**：线上不存在（后台派发必带 `AgentStart.TaskId`，in-loop 子 agent 必阻塞）。测试 fixture 若这样写就是与线上不同形，已改正（场景12 的后台子 run 补 `task_id`）。
+   - 找不到归属的 `agent_end`（迟到旧 run）只进诊断、不改当前 run 的结算位。
+   - **验证入口**：`desktop/app/scripts/test-store-queue.mjs` 场景 25–34（`npm run test:store`）+ 五个变异实验（删 `injected` 判断 / `task_end` 兼认 `run_id` / 关掉同步子 run 收敛 / 去掉 `async_task` 分支 / 去掉流式块冻结，各自让对应场景变红）。
 2. **BR-01 + BR-02 + BR-08 + BR-29**：settings 单写者、patch 白名单、key 分离；这是“改一个主题丢 key”的根因。
 3. **GO-01 + BR-14**：价表单一权威源 + `cost_source`；先把账算对。
 4. **BR-09 + GO-02 + GO-04**：checkpoint 自包含 + sidecar 强校验 + seq 落盘；先把历史恢复对。
@@ -422,6 +437,7 @@ go test ./agenthub/... ./session/... -count=1
 |---|---|
 | 2026-11-10 | 初稿：三路调研合并、93 条清单、Top 10、五个跨面案例、治理路线 |
 | 2026-11-10 | P5-03（§6.1 批次 1）：BR-03 emit 信封收口（Envelope/ForceKeys + 行级测试）；BR-15 运行位收敛（session_run_error / session_closed / task_end / 新批次开口 / 未匹配 agent_end 诊断），残留见 §6.1 第 1 条 |
+| 2026-11-11 | P5-03b（复审 CHANGES_REQUESTED 修复）：`agent_end` 收「当前顶层 run」时顺带收敛**同步子 run**（无 task_id，节点落地 + 卡片 abandoned，诊断 runIds 只记被顺带收敛者，异步子 run 不动）；`user_inputs_consumed(injected=false)` 与 `session_run_error` 收敛后冻结残留流式块并落 `runEnded`；`session_closed` 补 `async_task` 占位；`task_end` fixture 补「run_id = 发起方」并加反向场景；测试场景 25–34 + 五个变异实验。**BR-03 残留单列为 N7（getSid 兜底 / 空 sid 建 `views['']`）与 N8（writeLine 直写行不走 Envelope），不再宣称全闭环** |
 
 ---
 

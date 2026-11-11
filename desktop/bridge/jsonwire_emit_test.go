@@ -10,10 +10,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/seven7628/hai-harness/desktop/bridge/jsonwire"
 	"github.com/seven7628/hai-harness/events"
 )
 
@@ -84,6 +86,93 @@ func TestEmitEnvelopeSessionIDExactlyOnce(t *testing.T) {
 	}
 	if !sawPromoted || !sawTool {
 		t.Fatalf("缺少预期事件行（promoted=%v tool=%v）:\n%s", sawPromoted, sawTool, buf.String())
+	}
+}
+
+// TestEmitTodoSnapshotExactlyOnce 盯的是**附加字段信封**（BR-03 的另一半）：
+// 宿主附加字段（cost_usd/todos/diff）此前只注入不删，事件自带同名字段时「后者胜」
+// 又把宿主的修正值盖回去。这条测试要求 stdout 行里顶层 `todos` 恰好一份。
+//
+// 为什么断言的是 `todos` 而不是 session_id：ToolResponse.Todos 没有 omitempty 之外的
+// 任何保护 —— 事件自己 marshal 出来就带一份 `todos`（测试里先验这个前提），宿主那份
+// 必须把它**删掉再注入**，否则同一行两份。结构上数得到 1 份，就说明 extras Envelope
+// 的删除分支真的跑了；负控（只注入不删 → 2 份）钉住这个判断不是空真。
+//
+// 不可达分支（不伪造覆盖）：
+//   · Envelope/ForceKeys 的失败回退：入参来自 json.Marshal（恒为合法对象、键名恒为
+//     结构体 tag 的普通 ASCII），RemoveField 只会在「非对象/结构异常」时返回 nil；
+//     emit 这条路上两者都不可能，故该回退**不可达**，没有 emit 级测试能覆盖它
+//     （原语层由 jsonwire_test.go 的 TestEnvelope_Fallback 等覆盖）。
+//   · 丢行分支（ForceKeys 也失败）：同上不可达。
+func TestEmitTodoSnapshotExactlyOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m, buf := newManagerWithAppData(t, t.TempDir())
+	bs, err := m.create(t.TempDir(), "s-br03-todos", "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	ts := time.Now().Add(-time.Second)
+	buf.Reset()
+
+	ev := &events.ToolResponse{
+		RunId: "r-todos", Id: "tool-todos", Name: "todo_write",
+		Todos: []events.TodoSnapshot{
+			{Id: "t1", Title: "写测试", Done: false, BlockedBy: []string{"t0"}},
+			{Id: "t2", Title: "收口", Done: true},
+		},
+		Timestamp: ts, EventType: events.ToolRunEndType,
+	}
+	// 前提①：事件自己 marshal 出来的行确实带一份顶层 todos（没有它就测不到「删」）。
+	rawEv, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countTopLevelToken(t, rawEv, "todos"); n != 1 {
+		t.Fatalf("前提不成立：事件自带 %d 份 todos（应为 1）", n)
+	}
+	// 前提②（负控）：只注入不删 —— 修复前的形态 —— 同一行会数到 2 份。
+	onlyInject, err := jsonwire.InjectKeys(rawEv, []jsonwire.KV{{Key: "todos", Value: []byte(`[]`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countTopLevelToken(t, onlyInject, "todos"); n != 2 {
+		t.Fatalf("负控失败：只注入不删应数到 2，实际 %d", n)
+	}
+
+	bs.emit(ev)
+	bs.out.flushNow()
+
+	var line string
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.TrimSpace(l) != "" {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("没有写出事件行:\n%s", buf.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("事件行不是合法 JSON: %v\n%s", err, line)
+	}
+	// 信封：身份键各一份（回归），附加字段也只有宿主那一份。
+	if n := countTopLevelToken(t, []byte(line), "session_id"); n != 1 {
+		t.Fatalf("顶层 session_id 应恰好 1 份，实际 %d: %s", n, line)
+	}
+	if n := countTopLevelToken(t, []byte(line), "todos"); n != 1 {
+		t.Fatalf("顶层 todos 应恰好 1 份（删掉事件自带的、注入宿主的），实际 %d: %s", n, line)
+	}
+	// 值是宿主写的那份（todosOf 的 TodoItem 形状与顺序），不是事件里那份原始数组。
+	var want []any
+	if err := json.Unmarshal([]byte(`[{"id":"t1","title":"写测试","done":false,"blocked_by":["t0"]},{"id":"t2","title":"收口","done":true}]`), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got["todos"], want) {
+		t.Fatalf("todos 不是宿主值: got %#v want %#v", got["todos"], want)
+	}
+	// 事件自己的字段不能因为删/注入而丢。
+	if got["event_type"] != string(events.ToolRunEndType) || got["id"] != "tool-todos" || got["name"] != "todo_write" {
+		t.Fatalf("事件字段丢失: %s", line)
 	}
 }
 

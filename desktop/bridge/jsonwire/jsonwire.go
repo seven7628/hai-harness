@@ -113,8 +113,10 @@ func InjectKeys(base []byte, kvs []KV) ([]byte, error) {
 	return out, nil
 }
 
-// RemoveField 从 JSON 对象字节中删除指定键（顶层，**所有**同名出现都删）。返回 nil 表示无法安全处理
-// （非对象/键不存在/结构异常——调用方回退 Unmarshal 路径）。
+// RemoveField 从 JSON 对象字节中删除指定键（顶层，**所有**同名出现都删）。
+// 返回 nil 表示无法安全处理（非对象 / 结构异常 —— 调用方回退 Unmarshal 路径）；
+// **键不存在时返回原对象**（JSON 语义等价，只是按逗号重新拼了一遍；见
+// TestRemoveField 的「键不存在」用例），调用方不必特判缺键。
 // 实现：扫描 `"key":` 的键值对并跳过其值（支持字符串/数字/对象/数组/布尔/null），
 // 拼接剩余部分。仅处理顶层（不递归），值内嵌套同名键不影响（按引号/括号配对跳过）。
 func RemoveField(raw []byte, key string) []byte {
