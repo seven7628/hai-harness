@@ -8,8 +8,8 @@
 // 断言（任一失败 → 退出码 1）：
 //   · documentElement.scrollWidth <= 视口宽（0 横向溢出）
 //   · 用户气泡右缘留 35px（24px owner 头像 + 11px gap），头像贴会话列右缘
-//   · agent 正文左移 42px（32px sigil + 10px gap）；群头 2 行、桌面 ≤68px
-//   · 会话列 760px；宽屏 padding 30/28，窄屏 14/12
+//   · 桌面：agent 正文左移 63px（52px Luna + 11px gap）；窄屏 60px（52 + 8）
+//   · 会话列 760px；宽屏 padding 30/28，窄屏 16/12
 //   · 交接/审批卡真实渲染（?hubFixture=cards），各有专属 token 样式
 //   · composer meta 行存在
 //   · 无 console error / pageerror
