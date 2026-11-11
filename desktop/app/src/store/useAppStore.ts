@@ -6888,15 +6888,24 @@ export function dispatchEvent(raw: AnyEvent): void {
         const stale = injected
           ? { nodes: v.runNodes, settled: [] as string[] }
           : settleRunNodes(v.runNodes, { rootLevel: true, status: 'done', at: consumedAt })
-        staleSettled = stale.settled
+        /* 同步子 run 一并落地（节点 + 卡片）：新批次开口证明上一轮**整个 run 树**
+           已经结束 —— 父 run 里的阻塞调用不可能还活着。只收无 task_id 的子 run，
+           异步子 run 等它自己的 agent_end / task_end（见 settleSyncSubRuns）。
+           injected=true 走上面那条：运行中插话不是终止证据（BR-15 复审 N1）。 */
+        const detachedNow = v.agentDetached ?? []
+        const sync = injected
+          ? { nodes: stale.nodes, blocks: v.blocks, agentDetached: detachedNow, settled: [] as string[] }
+          : settleSyncSubRuns(v, { nodes: stale.nodes, blocks: v.blocks, agentDetached: detachedNow, status: 'done', at: consumedAt })
+        staleSettled = [...stale.settled, ...sync.settled]
         /* 上一轮**真的**被收敛了（它的 agent_end 与末轮 llm_end 都丢了）：结算位落地，
            仍在流式的块按 agent_end 的口径冻结（复审 N2）—— 否则光标 ▍ 常闪、轮尾账
            永不落地，用户看到「已经进入下一轮、上一轮还在流」的幽灵。下一轮的 agent_start
-           会立刻把 runEnded 置回 false，这里补的只是欠下的那一笔。 */
-        const staleRunId = staleSettled[0] ?? v.runNodes.find((n) => n.kind === 'run' && !n.parentId)?.id
+           会立刻把 runEnded 置回 false，这里补的只是欠下的那一笔。
+           冻结只针对被收敛的**父** run（staleRunId 不从同步子 run 里取）。 */
+        const staleRunId = stale.settled[0] ?? v.runNodes.find((n) => n.kind === 'run' && !n.parentId)?.id
         const baseBlocks = staleSettled.length
-          ? freezeStreamingAssistants(v.blocks, { at: consumedAt, runId: staleRunId, turnStartTs: v.turnStartTs })
-          : v.blocks
+          ? freezeStreamingAssistants(sync.blocks, { at: consumedAt, runId: staleRunId, turnStartTs: v.turnStartTs })
+          : sync.blocks
         // 消费数按"消息条数"取：内容块组（每消息一组）为权威；旧日志无组 → 按文本条数。
         // （纯图片消息 texts=[] 但组数=1 —— 若按 texts 取 n=0，队列项会残留成"已推送"幽灵）
         const consumeCount = contentGroups ? contentGroups.length : texts.length
@@ -6966,14 +6975,17 @@ export function dispatchEvent(raw: AnyEvent): void {
           : blocks
         const upd = setView(s, sid, {
           ...v,
-          runNodes: stale.nodes,
+          runNodes: sync.nodes,
           pendingQueue: rest,
           pendingQueueError: undefined,
-          // 收敛了上一轮 → 结算位与流式态一起落地（下一轮 agent_start 立刻复位）。
-          ...(staleSettled.length ? { runEnded: true, streaming: false } : {}),
+          // 收敛了上一轮**顶层 run** → 结算位与流式态一起落地（下一轮 agent_start 立刻复位）。
+          ...(stale.settled.length ? { runEnded: true, streaming: false } : {}),
+          // 只在真的动了窗口外卡片时写回（无改动时是同引用）
+          ...(sync.agentDetached !== detachedNow ? { agentDetached: sync.agentDetached } : {}),
           blocks: [...baseBlocks, ...sigFacts],
         })
-        return stale.settled.length ? { ...upd, busySids: busySidsFromViews(upd.views) } : upd
+        // 任何节点被收敛（父 run 或同步子 run）都可能让会话不再忙 → 重算一次
+        return staleSettled.length ? { ...upd, busySids: busySidsFromViews(upd.views) } : upd
       })
       noteRunSettle(sid, 'new_run_batch', consumedAt, staleSettled)
       break
@@ -7186,6 +7198,10 @@ export function dispatchEvent(raw: AnyEvent): void {
         let blocks = !isSub
           ? freezeStreamingAssistants(v.blocks, { at: now, runId: id, turnStartTs: v.turnStartTs })
           : v.blocks
+        // 首屏窗口外的子卡片（分页，见 SessionView.agentDetached）：收敛同步子 run 时
+        // 同样要动它们 —— 卡片可能在 blocks 里，也可能只在这里。
+        const detachedNow = v.agentDetached ?? []
+        let agentDetached = detachedNow
         const finalAssistantIdx = isSub ? -1 : blocks.findLastIndex((b) =>
           b.kind === 'assistant' && !b.streaming && Boolean(b.text) && b.runId === id,
         )
@@ -7322,11 +7338,22 @@ export function dispatchEvent(raw: AnyEvent): void {
         }
         // 同步子 run 一并落地（节点 + 卡片）：它们自己的 agent_end 已经不会来了。
         // 只在真的收「当前顶层 run」时做；异步子 run 由 syncSubRunIds 排除，绝不碰。
+        // 状态**不继承**父 run 的 runStatus（BR-15 复审 N3）：同步子 agent 是父 run 里的
+        // 阻塞调用，父 run 收尾时它早已返回 —— finish_reason 说的是**父 loop** 的结局。
+        // 父 run 达轮数上限 / run 级失败时，那个正常返回的子 agent 会被画成
+        // interrupted / failed；只有 abort 才真的把它连同一起打断。
         if (topLevelSettle) {
-          const sync = settleRunNodes(settled.nodes, { runIds: syncSubRunIds(v), status: runStatus, at: now })
+          const sync = settleSyncSubRuns(v, {
+            nodes: settled.nodes,
+            blocks,
+            agentDetached,
+            status: aborted ? 'interrupted' : 'done',
+            at: now,
+          })
           settled = { nodes: sync.nodes, settled: settled.settled }
           endSyncSettled = sync.settled
-          if (endSyncSettled.length) blocks = abandonAgentCards(blocks, endSyncSettled)
+          blocks = sync.blocks
+          agentDetached = sync.agentDetached
         }
         // duration_ms 是服务端算的权威值（只给它自己的 run 节点）。
         const runNodes = settled.nodes.map((n) =>
@@ -7341,6 +7368,8 @@ export function dispatchEvent(raw: AnyEvent): void {
           ...(isSub ? {} : { runEnded: !endUnmatched || !hadRunningRoot }),
           runNodes,
           blocks,
+          // 只在真的动了窗口外卡片时写回（无改动时是同引用，别制造无意义的 diff）
+          ...(agentDetached !== detachedNow ? { agentDetached } : {}),
           turns,
           turnStartTs,
           runningAgentCount: countRunningAgents(blocks),
@@ -7412,17 +7441,23 @@ export function dispatchEvent(raw: AnyEvent): void {
         // scripts/test-store-queue.mjs 场景12 的「主 run 交卷 + 后台子 agent 仍在跑」），
         // 对它们下结论就成了凭空造状态。子任务的终态证据是各自的 agent_end / TaskEnd。
         const runs = settleRunNodes(v.runNodes, { rootLevel: true, status: 'error', at })
-        settled = runs.settled
+        /* 同步子 run 一并落地（节点 + 卡片）：会话级失败 = 上一轮整个 run 树已经结束，
+           父 run 里的阻塞调用不可能还在跑。只收无 task_id 的子 run，异步子 run 等
+           自己的 agent_end / task_end（见 settleSyncSubRuns；BR-15 复审 N1）。 */
+        const detachedNow = v.agentDetached ?? []
+        const sync = settleSyncSubRuns(v, { nodes: runs.nodes, blocks: v.blocks, agentDetached: detachedNow, status: 'done', at })
+        settled = [...runs.settled, ...sync.settled]
         /* 那个 run 的最后一条 llm_end 也随失败丢了 → 块仍停在 streaming=true：光标 ▍ 常闪、
            轮尾账（durMs / 指标行）永不落地。冻结口径与 agent_end 一致，且必须在清
            turnStartTs **之前**算 —— 那是 durMs 的唯一来源。runId 取当前顶层 run：
            即使节点已被别的路径收敛，残留的流式块也要冻结（复审 N2）。 */
         const rootRunId = v.runNodes.find((n) => n.kind === 'run' && !n.parentId)?.id
-        const frozen = freezeStreamingAssistants(v.blocks, { at, runId: rootRunId, turnStartTs: v.turnStartTs })
+        const frozen = freezeStreamingAssistants(sync.blocks, { at, runId: rootRunId, turnStartTs: v.turnStartTs })
         const upd = setView(s, sid, {
           ...v,
           runEnded: true,
-          runNodes: runs.nodes,
+          runNodes: sync.nodes,
+          ...(sync.agentDetached !== detachedNow ? { agentDetached: sync.agentDetached } : {}),
           blocks: upsertErrorAt(v, frozen, `（运行失败）${msg}`, undefined, at),
           streaming: false,
           llmStartTs: undefined,
@@ -7538,6 +7573,12 @@ export function dispatchEvent(raw: AnyEvent): void {
            右栏角标、树节点永久转圈（setView 之后 busySids 仍把它算作忙）。 */
         const runs = settleRunNodes(v.runNodes, { all: true, includeTools: true, status: 'done', at: closedAt })
         const work = abandonRunningBlocks(v.blocks, { tools: true })
+        /* 仍在流式的 assistant 块也要冻结（BR-15 复审 N2）：关闭后不会再有 llm_end ——
+           durMs 与底部指标行的唯一来源 —— 块就永远停在 streaming=true，光标 ▍ 常闪、
+           这一轮的轮尾账永远不落。口径与 agent_end / session_run_error 完全一致
+           （同一个 freezeStreamingAssistants），runId 取当前顶层 run。 */
+        const rootRunId = v.runNodes.find((n) => n.kind === 'run' && !n.parentId)?.id
+        const closedBlocks = freezeStreamingAssistants(work.blocks, { at: closedAt, runId: rootRunId, turnStartTs: v.turnStartTs })
         closedSettled = runs.settled
         const upd = setView(
           s,
@@ -7545,7 +7586,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           {
             ...v,
             runNodes: runs.nodes,
-            runningAgentCount: work.changed ? countRunningAgents(work.blocks) : v.runningAgentCount,
+            runningAgentCount: work.changed ? countRunningAgents(closedBlocks) : v.runningAgentCount,
             streaming: false,
             pendingQueue: [],
             // 一行信号：会话关闭是**结论级**事实（设计 session_closed），不写一行的话
@@ -7553,7 +7594,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             // 运行账（设计「18 runs · 17 consumed · 1 abandoned mid-tool」）：
             // 三个数由 Go 的 Session.recordRunOutcome 统计，缺字段就不画（不编 0）。
             blocks: pushSignalAt(
-              { ...v, blocks: work.blocks },
+              { ...v, blocks: closedBlocks },
               {
                 sig: 'closed',
                 etype: 'session_closed',
@@ -8056,15 +8097,22 @@ function noteRunSettle(
 
 /* 同步子 run 的 id：有父 run、且**不是后台任务**。
    后台任务的判据有两个来源，缺一不可：
-     · run 节点自己的 taskId（agent_start.task_id，与卡片同时记录）；
-     · agent 卡片的 taskId —— Go 侧 checkpoint 的 run_nodes **不带** task_id，暖恢复
-       出来的异步子 run 节点没有它，只认节点就会把摘离任务误杀。
+     · run 节点自己的 taskId（agent_start.task_id；P5-03c 起 Go 侧 checkpoint 的
+       run_nodes 也持久化它，暖恢复读得回来 —— 但**旧 checkpoint 没有**）；
+     · 卡片的 taskId（agent 卡，见 SessionView.blocks / agentDetached）—— 旧 checkpoint
+       的节点不带 task_id，以及卡片被分页到首屏窗口外、只剩 agentDetached 的情形，
+       节点那条判据不在，只剩这一条。
+   漏掉任一来源，暖恢复 + 分页窗口外就会两条判据同时缺失，把「可以晚于父 run 收尾」的
+   异步子 run 当成同步子 run 收敛掉（BR-15 复审 B1）。
    同步子 agent 是父 run 里的**阻塞调用**（没有 task_id、没有 task_end），父 run 收尾时
    它不可能还在跑 —— 这是它丢了自己的 agent_end 之后唯一可证明的终止事实。 */
 function syncSubRunIds(v: SessionView): string[] {
   const asyncRuns = new Set<string>()
   for (const n of v.runNodes) if (n.kind === 'run' && n.taskId) asyncRuns.add(n.id)
-  for (const b of v.blocks) if (b.kind === 'agent' && b.taskId) asyncRuns.add(b.runId)
+  // 卡片源必须含窗口外的 agentDetached：那不是缓存副本，是分页后**唯一**的卡片位置。
+  for (const b of [...(v.blocks ?? []), ...(v.agentDetached ?? [])]) {
+    if (b.kind === 'agent' && b.taskId) asyncRuns.add(b.runId)
+  }
   return v.runNodes
     .filter((n) => n.kind === 'run' && n.parentId && !asyncRuns.has(n.id))
     .map((n) => n.id)
@@ -8072,18 +8120,51 @@ function syncSubRunIds(v: SessionView): string[] {
 
 /* 只把**指定的**子运行卡片收敛为 abandoned（父 run 收尾了，它们自己的 agent_end
    不会再来了）。与 abandonRunningBlocks 的区别：不按「会话是否关闭」全量扫，只动这批
-   run；异步子 run 的卡片不在名单里，照旧由它的 agent_end / task_end 收尾。 */
-function abandonAgentCards(blocks: MsgBlock[], runIds: readonly string[]): MsgBlock[] {
-  if (!runIds.length) return blocks
+   run；异步子 run 的卡片不在名单里，照旧由它的 agent_end / task_end 收尾。
+   两个来源都要扫：`blocks`（首屏窗口内）与 `agentDetached`（窗口外，见 SessionView）——
+   **同步子卡同样会被分页出去**，只扫 blocks 就等于「翻页之后就再也收敛不掉」。 */
+function abandonAgentCards(
+  blocks: MsgBlock[],
+  detached: MsgBlock[],
+  runIds: readonly string[],
+): { blocks: MsgBlock[]; agentDetached: MsgBlock[]; changed: boolean } {
+  if (!runIds.length) return { blocks, agentDetached: detached, changed: false }
   const ids = new Set(runIds)
-  let changed = false
-  const out = blocks.map((b) => {
-    if (b.kind !== 'agent' || !ids.has(b.runId)) return b
-    if (b.status !== 'running' && b.status !== 'interrupting') return b
-    changed = true
-    return { ...b, status: 'abandoned' as const, interrupting: false }
-  })
-  return changed ? out : blocks
+  const mark = (list: MsgBlock[]): { list: MsgBlock[]; hit: boolean } => {
+    let hit = false
+    const out = list.map((b) => {
+      if (b.kind !== 'agent' || !ids.has(b.runId)) return b
+      if (b.status !== 'running' && b.status !== 'interrupting') return b
+      hit = true
+      return { ...b, status: 'abandoned' as const, interrupting: false }
+    })
+    return { list: hit ? out : list, hit }
+  }
+  const a = mark(blocks)
+  const d = mark(detached)
+  return { blocks: a.list, agentDetached: d.list, changed: a.hit || d.hit }
+}
+
+/* 父 run 收尾时一并落地**同步子 run**（节点 + 卡片）：三条父 run 终止证据共用这一处
+   （agent_end / 新批次开口 / session_run_error），口径只写一次。
+   · 只收**无 task_id** 的子 run（syncSubRunIds 已排除后台任务）：异步子 run 可以晚于
+     父 run 收尾，终态证据是它自己的 agent_end / task_end，这里绝不碰；
+   · 卡片源含 agentDetached（见 abandonAgentCards）；
+   · 状态由调用方给：父 run 收尾的**方式**不借给子 run（reason 见 agent_end 分支）。
+   返回的 blocks / agentDetached 在无改动时是**原数组引用**，调用方可以据此决定是否写回。 */
+function settleSyncSubRuns(
+  v: SessionView,
+  target: {
+    nodes: RunNode[]
+    blocks: MsgBlock[]
+    agentDetached: MsgBlock[]
+    status: RunNode['status']
+    at: number
+  },
+): { nodes: RunNode[]; blocks: MsgBlock[]; agentDetached: MsgBlock[]; settled: string[] } {
+  const r = settleRunNodes(target.nodes, { runIds: syncSubRunIds(v), status: target.status, at: target.at })
+  const cards = abandonAgentCards(target.blocks, target.agentDetached, r.settled)
+  return { nodes: r.nodes, blocks: cards.blocks, agentDetached: cards.agentDetached, settled: r.settled }
 }
 
 /* 冻结还在流式的 assistant 块（agent_end / 会话级终态 / 上一轮已收敛）。

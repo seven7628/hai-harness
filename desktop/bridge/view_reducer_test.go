@@ -363,6 +363,65 @@ func TestReducerAgentLifecycle(t *testing.T) {
 	}
 }
 
+// TestReducerAgentStartTaskIDOnRunNode 后台子运行的 task_id 必须落在 **run 节点**上，
+// 并且随 checkpoint 落盘 → 读回（暖恢复的真实路径：Marshal → 磁盘 → Unmarshal → Restore）。
+// 为什么：前端的「异步子 run vs 同步子 run」判据是 run 节点的 task_id + agent 卡片的
+// task_id；节点没有它时只剩卡片一条判据，而卡片一旦被分页到 200 块窗口外（只剩
+// agentDetached）保护就消失 —— 父 run 的 agent_end 会把仍在跑的异步子 run 误判成
+// 同步子 run 收敛掉（BR-15 复审 B1）。JSON 是 omitempty：同步子 agent 的节点输出不变。
+func TestReducerAgentStartTaskIDOnRunNode(t *testing.T) {
+	r := NewViewReducer()
+	ts := time.Now().Add(-time.Hour)
+	mustApply(t, r, evAgentStart(t, "root-1", "", "主会话", "", ts))
+	mustApply(t, r, evAgentStart(t, "sub-async", "root-1", "调查", "task-9", ts.Add(time.Second)))
+	mustApply(t, r, evAgentStart(t, "sub-sync", "root-1", "探索", "", ts.Add(2*time.Second)))
+
+	cp := r.Snapshot()
+	if len(cp.RunNodes) != 3 {
+		t.Fatalf("run nodes = %d, want 3", len(cp.RunNodes))
+	}
+	if got := cp.RunNodes[1]; got.ID != "sub-async" || got.TaskID != "task-9" {
+		t.Fatalf("异步子 run 节点必须带 task_id: %+v", got)
+	}
+	if got := cp.RunNodes[2]; got.ID != "sub-sync" || got.TaskID != "" {
+		t.Fatalf("同步子 run 节点不得带 task_id: %+v", got)
+	}
+
+	// 落盘 → 读回：暖恢复后节点仍能给出 task_id（否则前端只剩卡片一条判据）
+	data, err := r.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		RunNodes []map[string]json.RawMessage `json:"run_nodes"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.RunNodes) != 3 {
+		t.Fatalf("checkpoint run_nodes = %d, want 3", len(envelope.RunNodes))
+	}
+	if _, ok := envelope.RunNodes[1]["task_id"]; !ok {
+		t.Fatalf("checkpoint 的 run_nodes 应持久化 task_id: %s", data)
+	}
+	if _, ok := envelope.RunNodes[2]["task_id"]; ok {
+		t.Fatalf("无 task_id 的节点不得写出 task_id 键（omitempty，旧格式不变）: %+v", envelope.RunNodes[2])
+	}
+
+	var back Checkpoint
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	r2 := NewViewReducer()
+	if err := r2.Restore(&back); err != nil {
+		t.Fatal(err)
+	}
+	cp2 := r2.Snapshot()
+	if len(cp2.RunNodes) != 3 || cp2.RunNodes[1].TaskID != "task-9" || cp2.RunNodes[2].TaskID != "" {
+		t.Fatalf("暖恢复读回的 task_id 不一致: %+v", cp2.RunNodes)
+	}
+}
+
 // TestReducerAgentAbort 主 run abort：清错误块、工具块收尾、插 divider（横线隔离）。
 func TestReducerAgentAbort(t *testing.T) {
 	r := NewViewReducer()

@@ -221,7 +221,7 @@
 | BR-11 | B11 | H/F | P1 | desktop/bridge/appdata.go:33-57; appdata.go:60-70; agenthub/queue.go:78-90 | “重启后历史丢失 / 项目重复出现”（appdata.go:38-42 注释即为此事故） |
 | BR-12 | B12 | C/F | P1 | desktop/bridge/main.go:1212-1213; hub_workspace.go:345-368; hub_workspace.go:451-476 | ① 重启后同一任务被执行两次（副作用重复：发消息、写文件、派子 agent） |
 | BR-13 | B13 | L/F | P1 | desktop/bridge/hub_commands.go:41-44; hub_recovery.go:24-52; hub_recovery.go:93-130 | ① queued 任务永不入队 → “提交了但永远不跑” |
-| BR-15 | B15 | I/Q | P1 | desktop/app/src/store/events.ts:34-78（runSettleTraces）; useAppStore.ts 的 settleRunNodes / agent_end / session_run_error / session_closed / task_end / user_inputs_consumed; 回归：scripts/test-store-queue.mjs 场景 25–34 | 丢一条 agent_end 就永久“运行中”常亮（同步子 run / 异步子 run / 会话终态各自有证据，见 §6.1 第 1 条） |
+| BR-15 | B15 | I/Q | P1 | desktop/app/src/store/events.ts:34-78（runSettleTraces）; useAppStore.ts 的 settleRunNodes / settleSyncSubRuns / syncSubRunIds / agent_end / session_run_error / session_closed / task_end / user_inputs_consumed; desktop/bridge/view_reducer.go 的 applyAgentStartLocked（RunNode.TaskID）; 回归：scripts/test-store-queue.mjs 场景 25–39 | 丢一条 agent_end 就永久“运行中”常亮（同步子 run / 异步子 run / 会话终态各自有证据，见 §6.1 第 1 条） |
 | BR-18 | B18 | I/T | P1 | desktop/app/src/transport/index.ts:8-16; desktop/app/src/transport/mock.ts; electron.ts:20-29 | ① 测试/演示通过而真机失败（mock 不发 command_response 的真实错误码/超时语义） |
 | BR-19 | B19 | I/Q | P1 | useAppStore.ts:3647-3668; electron.ts:82-83; main.ts:999-1003 | 乐观 UI 无法回滚或被回滚错（合成失败后再来真响应，第二个 ok:true 被 delete pending[id] 后当无主响应处理） |
 | BR-20 | B20 | L/I | P1 | useAppStore.ts:3623-3640; useAppStore.ts:3615-3619; useAppStore.ts:3627-3631 | ① pendingRestoreAttempt 永不清理（每会话一条，长会话列表下单页内存缓升） |
@@ -288,12 +288,13 @@
    - **N7 前端归属兜底**：`useAppStore` 的 `getSid` 在 `session_id` 缺失时仍回退 `activeSessionId`，空 sid 还会建 `views['']`。也就是说，只要有一行**真的**漏了 `session_id`（旧日志、`writeLine` 直写行、未来新增的写入点），事件仍会落到「当前打开的会话」，跨项目串台的可能**没有消失**。要闭环得改成「sid 缺失 / 不在会话表 → 丢弃并记诊断」，这是跨全部事件分支的语义改动（恢复重放、`agent_send`、hub 群事件都依赖当前兜底），单列一批做。
    - **N8 `writeLine` 直写行不走信封**：`out.writeLine`（`command_response` / `bridge_ready` / `sandbox_status` / `mesh_status` / `cron_changed` …）直接写 map，不经过 `Envelope`。这些行大多显式带 `session_id`/`workspace`，风险低于事件行，但**没有行级断言兜着**；后续入口：让 `writeLine` 也走同一个信封（或在 `out` 层统一注入），并为每类行补计数断言。
 
-   *BR-15 —— 运行位收敛（P5-03b 收口）*：运行位在这些终止事实上收敛，每一笔都写进 `events.ts` 的有界诊断（`runSettleTraces`，测试读 `__runSettles`）：`session_run_error`（主 run 终态，并冻结残留流式块）、`session_closed`（run / tool / agent 卡片 / `async_task` 占位全量落地）、`task_end`（按卡片 `taskId→runId` 与工具节点 `taskId` 收敛**执行方**；**不用** `TaskEnd.RunId` —— 它是发起方）、新批次开口（`injected=false` 证明上一轮结束，并冻结上一轮残留的流式块；`injected=true` 是运行中插话，**不是**终止证据）、无 `run_id` 的 `agent_end`（收敛唯一顶层 run）。子 run 的三种形态：
-   - **同步子 run**（in-loop，无 `task_id`）：父 run 收尾时**一并收敛** —— run 节点落脚（done/error/interrupted）、agent 卡片 `abandoned`。它是父 run 里的阻塞调用，父 run 结束它不可能还在跑；这是它丢了自己的 `agent_end` 之后唯一可证明的终止事实。
-   - **异步子 run**（带 `task_id`）：**绝不**随父 run 收敛（可以晚于父 run 收尾），终态证据是它自己的 `agent_end` / `task_end`。
+   *BR-15 —— 运行位收敛（P5-03c 收口）*：运行位在这些终止事实上收敛，每一笔都写进 `events.ts` 的有界诊断（`runSettleTraces`，测试读 `__runSettles`）：`session_run_error`（主 run 终态 + 同步子 run，并冻结残留流式块）、`session_closed`（run / tool / agent 卡片 / `async_task` 占位全量落地，并冻结残留流式块）、`task_end`（按卡片 `taskId→runId` 与工具节点 `taskId` 收敛**执行方**；**不用** `TaskEnd.RunId` —— 它是发起方）、新批次开口（`injected=false` 证明上一轮**整个 run 树**结束 → 顶层 run + 同步子 run 一起收敛，并冻结上一轮残留的流式块；`injected=true` 是运行中插话，**不是**终止证据）、`agent_end` 收尾**当前顶层 run** 时顺带收敛同步子 run、无 `run_id` 的 `agent_end`（收敛唯一顶层 run）。三条「父 run 终止」证据（`agent_end` / 新批次开口 / `session_run_error`）共用同一个 helper（`settleSyncSubRuns`），口径只写一次。子 run 的三种形态，各自的**判据**与**终态证据**：
+   - **同步子 run**（in-loop，无 `task_id`）：父 run 收尾时**一并收敛** —— run 节点落脚、agent 卡片 `abandoned`（卡片可能在 `blocks`，也可能被分页到 `agentDetached`，两处都扫）。它是父 run 里的阻塞调用，父 run 结束它不可能还在跑；这是它丢了自己的 `agent_end` 之后唯一可证明的终止事实。状态**不继承**父 run 的 `runStatus`：父 run abort 才是 `interrupted`（阻塞调用被一起打断），`stop` / `max_iterations` / `error` 一律 `done` —— 那几个 `finish_reason` 说的是**父 loop** 的结局，父 run 达轮数上限时那个正常返回的子 agent 不该被画成 interrupted / failed。
+   - **异步子 run**（带 `task_id`）：可以晚于父 run 收尾，终态证据是它自己的 `agent_end` / `task_end`，**绝不**随父 run 收敛。这句保证的**前提**是判据本身成立 —— 判据有两个来源，缺一不可：① `RunNode.TaskID`（`agent_start.TaskId`；P5-03c 起 Go 侧 checkpoint 的 `run_nodes` 也持久化它，暖恢复读得回来 —— 但**旧 checkpoint 的节点没有**它）；② 卡片（`agent` / `async_task`）的 `taskId`，来源是 `view.blocks` **加** `view.agentDetached`（200 块窗口外的卡片只活在这里，那不是缓存副本）。**没有“节点是唯一事实”这回事**：暖恢复 + 卡片被分页出去时只剩 ②；P5-03c 之前两个来源同时缺，父 run 的 `agent_end` 会把仍在跑的后台子 run 误杀（评审 B-1）。
    - **既无 `task_id` 又不阻塞**：线上不存在（后台派发必带 `AgentStart.TaskId`，in-loop 子 agent 必阻塞）。测试 fixture 若这样写就是与线上不同形，已改正（场景12 的后台子 run 补 `task_id`）。
    - 找不到归属的 `agent_end`（迟到旧 run）只进诊断、不改当前 run 的结算位。
-   - **验证入口**：`desktop/app/scripts/test-store-queue.mjs` 场景 25–34（`npm run test:store`）+ 五个变异实验（删 `injected` 判断 / `task_end` 兼认 `run_id` / 关掉同步子 run 收敛 / 去掉 `async_task` 分支 / 去掉流式块冻结，各自让对应场景变红）。
+   - **诊断口径**：父 run 收尾顺带收敛的子 run 记同一条记录，`runIds` 只含**被顺带收敛**的 run（不含事件自己那个 run）；没有实际收敛就**不写**诊断（不许假装收敛过）。
+   - **验证入口**：`desktop/app/scripts/test-store-queue.mjs` 场景 25–39（`npm run test:store`；35–36 是**暖恢复 × 卡片在 `blocks` / 只在 `agentDetached`**，37–38 是同步子的另外两条父 run 终止证据，39 是同步子状态映射）+ 变异实验（删 `injected` 判断 / `task_end` 兼认 `run_id` / 关掉同步子 run 收敛 / 去掉 `async_task` 分支 / 去掉流式块冻结 / **删 `agentDetached` 来源** / **删卡片来源** / **删节点 `taskId` 来源** / `session_closed` 不冻结 / 同步子继承父 `runStatus`，各自让对应场景定向变红）。
 2. **BR-01 + BR-02 + BR-08 + BR-29**：settings 单写者、patch 白名单、key 分离；这是“改一个主题丢 key”的根因。
 3. **GO-01 + BR-14**：价表单一权威源 + `cost_source`；先把账算对。
 4. **BR-09 + GO-02 + GO-04**：checkpoint 自包含 + sidecar 强校验 + seq 落盘；先把历史恢复对。
@@ -438,6 +439,7 @@ go test ./agenthub/... ./session/... -count=1
 | 2026-11-10 | 初稿：三路调研合并、93 条清单、Top 10、五个跨面案例、治理路线 |
 | 2026-11-10 | P5-03（§6.1 批次 1）：BR-03 emit 信封收口（Envelope/ForceKeys + 行级测试）；BR-15 运行位收敛（session_run_error / session_closed / task_end / 新批次开口 / 未匹配 agent_end 诊断），残留见 §6.1 第 1 条 |
 | 2026-11-11 | P5-03b（复审 CHANGES_REQUESTED 修复）：`agent_end` 收「当前顶层 run」时顺带收敛**同步子 run**（无 task_id，节点落地 + 卡片 abandoned，诊断 runIds 只记被顺带收敛者，异步子 run 不动）；`user_inputs_consumed(injected=false)` 与 `session_run_error` 收敛后冻结残留流式块并落 `runEnded`；`session_closed` 补 `async_task` 占位；`task_end` fixture 补「run_id = 发起方」并加反向场景；测试场景 25–34 + 五个变异实验。**BR-03 残留单列为 N7（getSid 兜底 / 空 sid 建 `views['']`）与 N8（writeLine 直写行不走 Envelope），不再宣称全闭环** |
+| 2026-11-11 | P5-03c（复审 B-1 / N-1 / N-2 / N-3 / N-6 修复）：① **B-1 暖恢复误杀异步子 run** —— `syncSubRunIds` 的卡片源补 `agentDetached`、`abandonAgentCards` 两处都扫，Go `applyAgentStartLocked` 给 run 节点补 `TaskID`（JSON `omitempty`，格式不变）+ checkpoint 落盘/读回断言；② **N-1** 「同步子收敛 + 卡片 abandon」抽成 `settleSyncSubRuns`，新批次开口与 `session_run_error` 也调用（只收无 task_id 的子 run）；③ **N-2** `session_closed` 复用 `freezeStreamingAssistants` 冻结残留流式块；④ **N-3** 同步子 run 状态改 `aborted ? interrupted : done`，不再继承父 run 的 `runStatus`；⑤ **N-6** 节点判定显式 `kind==='run'`。测试场景 35–39 + 变异实验（删 `agentDetached` 来源 / 删卡片来源 / 删节点 `taskId` 来源 / 两条 N-1 路径回退 / 不冻结 / 继承 `runStatus`）。N7/N8 仍是 BR-03 残留，本批不做 |
 
 ---
 

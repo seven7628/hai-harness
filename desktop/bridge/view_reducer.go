@@ -2649,6 +2649,13 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 		Depth: e.Depth, Kind: runNodeKindRun, StartedAt: millis(ts),
 		// 每个 run 都记自己的窗口（含子 agent）：子 agent 可能跑在另一个模型上
 		CtxWindow: e.ContextWindow,
+		// 后台任务 id 跟着 run 节点一起落盘：`agent_resume` 复用 task_id，但**同步子
+		// agent（in-loop）永远没有它** —— 前端据此区分「可以晚于父 run 收尾的异步子
+		// run」与「父 run 里的阻塞调用」。此前只有 agent 卡片记它，暖恢复后节点没有，
+		// 前端只剩卡片一条判据；卡片一旦被分页到窗口外（只剩 agentDetached），保护
+		// 就消失，父 run 的 agent_end 会把仍在跑的异步子 run 误判成同步子 run 收敛掉
+		// （BR-15 复审 B1）。JSON 是 omitempty，无 task_id 的同步子 agent 输出不变。
+		TaskID: e.TaskId,
 	}
 	if e.ParentRunId == "" {
 		// 新顶层 run = 新 trace：丢弃旧 trace 与错误块
