@@ -1,18 +1,14 @@
-import type { CSSProperties, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { useT } from '../i18n'
 import AgentSigil from './AgentSigil'
-import { accentOfAgent } from './agentAccent'
 import { useAgentState } from './useAgentState'
 import type { MentionAgent } from './mentions'
 
-// 会话区的两种消息版式（群聊 / DM 共用，2026-10 会话区复刻）：
+// 会话区版式：直接采用 demo 的 DOM 结构（msg-row / agent-head / agent-text /
+// user-bubble / owner-avatar），类名和间距不另造。
 //
-//   agent  左侧 32px sigil + 作者头（名字/职责/标签/时间）+ **无气泡正文**；
-//   human  右侧实心暖色气泡 + 气泡下方右对齐的时间。
-//
-// 之前 DM 只有正文、群聊另写一套带头气泡；两边节奏不同，切会话像换产品。
-// 这里只做版式：身份色仍走 accentOfAgent，状态仍走 useAgentState（不重做头像），
-// 正文由调用方给（Markdown / 流式文本 / 任务卡），不在这里判断消息类型。
+// 只把数据接进来：头像由 Luna 引擎画，正文由调用方给 Markdown，
+// 状态/角色/时间仍来自 Hub 的真实字段。
 
 export function AgentMessage({
   agent,
@@ -42,47 +38,38 @@ export function AgentMessage({
 }) {
   const t = useT()
   const state = useAgentState(agent?.id, agent?.deleted)
-  const accent = accentOfAgent(agent ?? { id: '', name })
-  const style = { '--agent-accent': accent } as CSSProperties
-  const sigil = (
-    <AgentSigil agentId={agent?.id} responsibility={agent?.role} state={state} size={32} />
-  )
   return (
     <div
-      className={`hub-msg agent${className ? ` ${className}` : ''}`}
+      className={`msg-row agent${className ? ` ${className}` : ''}`}
       data-seq={dataSeq}
       data-agent-id={agent?.id || undefined}
-      style={style}
     >
-      <div className="hub-msg-rail">
-        {onOpenAgent ? (
-          <button
-            type="button"
-            className="hub-msg-avatar"
-            onClick={onOpenAgent}
-            title={t('hub.openAgentSession').replace('{name}', name)}
-            aria-label={t('hub.openAgentSession').replace('{name}', name)}
-          >
-            {sigil}
-          </button>
-        ) : (
-          <span className="hub-msg-avatar static">{sigil}</span>
-        )}
-      </div>
-      <div className="hub-msg-main">
-        <div className="hub-msg-head">
+      {onOpenAgent ? (
+        <button
+          type="button"
+          className="avatar-btn"
+          onClick={onOpenAgent}
+          title={t('hub.openAgentSession').replace('{name}', name)}
+          aria-label={t('hub.openAgentSession').replace('{name}', name)}
+        >
+          <AgentSigil agentId={agent?.id} name={name} responsibility={agent?.role ?? role} state={state} size={52} label={null} />
+        </button>
+      ) : (
+        <AgentSigil agentId={agent?.id} name={name} responsibility={agent?.role ?? role} state={state} size={52} label={null} />
+      )}
+      <div className="msg-main">
+        <div className="agent-head">
           {onOpenAgent ? (
-            <button type="button" className="hub-msg-name" onClick={onOpenAgent}>
+            <button type="button" className="agent-name agent-name-btn" onClick={onOpenAgent} title={role || undefined}>
               {name}
             </button>
           ) : (
-            <span className="hub-msg-name">{name}</span>
+            <span className="agent-name" title={role || undefined}>{name}</span>
           )}
-          {role ? <span className="hub-msg-role">{role}</span> : null}
           {tags}
-          {time ? <time className="hub-msg-time" dateTime={dateTime}>{time}</time> : null}
+          {time ? <time className="msg-time" dateTime={dateTime}>{time}</time> : null}
         </div>
-        <div className="hub-msg-body">{children}</div>
+        <div className="agent-text">{children}</div>
         {footer}
       </div>
     </div>
@@ -111,23 +98,21 @@ export function UserMessage({
   const t = useT()
   return (
     <div
-      className={`hub-msg human${pending ? ' pending' : ''}${failed ? ' failed' : ''}${className ? ` ${className}` : ''}`}
+      className={`msg-row user${pending ? ' pending' : ''}${failed ? ' failed' : ''}${className ? ` ${className}` : ''}`}
       data-seq={dataSeq}
     >
-      <div className="hub-msg-main">
-        <div className="hub-user-bubble">{children}</div>
+      <div className="msg-main">
+        <div className="user-bubble">{children}</div>
         {ownerOnly || pending || failed || time ? (
-          <div className="hub-user-meta">
-            {ownerOnly ? <span className="hub-owner-only">{t('hub.ownerOnly')}</span> : null}
+          <div className="user-meta">
+            {ownerOnly ? <span className="user-owner-only">{t('hub.ownerOnly')}</span> : null}
             {pending ? <span>{t('hub.sending')}</span> : null}
-            {failed ? <span className="hub-user-failed">{t('hub.sendFailed')}</span> : null}
+            {failed ? <span className="user-failed">{t('hub.sendFailed')}</span> : null}
             {time ? <time dateTime={dateTime}>{time}</time> : null}
           </div>
         ) : null}
       </div>
-      {/* demo 的「你」占位：24px + 11px gap，把气泡从列右缘收进 35px，
-          也给人类发言一个与 agent sigil 对应的右轴。装饰性，读屏不需要重复。 */}
-      <span className="hub-user-avatar" aria-hidden="true">你</span>
+      <span className="owner-avatar" aria-hidden="true">你</span>
     </div>
   )
 }
@@ -135,7 +120,7 @@ export function UserMessage({
 /** 日期分隔线：细线 + 居中日期（今天 / 昨天 / 9 月 21 日）。 */
 export function DayDivider({ label }: { label: string }) {
   return (
-    <div className="hub-day-divider" role="separator" aria-label={label}>
+    <div className="date-divider" role="separator" aria-label={label}>
       <span>{label}</span>
     </div>
   )

@@ -99,7 +99,7 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
   assert(mod.highestState(['idle', 'working', 'offline']) === 'offline', 'highestState 取最高优先级')
 }
 
-// 6) Group 叠放 2–6：2–4 全显示；≥5 前 3 + N；只有 lead 画状态层。
+// 6) Group 叠放 2–6：2–4 全显示；≥5 前 4 + N（demo 口径）。
 {
   const members = (n) => Array.from({ length: n }, (_, i) => ({
     id: `agt_m${i}`,
@@ -112,7 +112,7 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
   }
   for (const n of [5, 6]) {
     const p = mod.planStack(members(n))
-    assert(p.members.length === 3 && p.more === n - 3, `${n} 个成员：前 3 + ${n - 3}`)
+    assert(p.members.length === 4 && p.more === n - 4, `${n} 个成员：前 4 + ${n - 4}`)
   }
   {
     const p = mod.planStack(members(6))
@@ -188,7 +188,7 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
 }
 
 
-// 10) 真实组件输出（SSR）：独立头像 role=img，叠放只有 lead 带环/点。
+// 10) 真实组件输出（SSR）：demo Luna DOM；独立头像带 label，叠放按 4 + N。
 {
   const { createElement } = await import('react')
   const { renderToStaticMarkup } = await import('react-dom/server')
@@ -220,11 +220,9 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
   }))
   assert(html.includes('role="img"') && html.includes('aria-label="竞品研究，6 个智能体，群会话进行中"'),
     '叠放容器输出 role=img + 含群名/成员数/摘要的 aria-label')
-  assert((html.match(/class="ring/g) || []).length === 1, '叠放只给 lead 画一次状态环')
-  assert((html.match(/class="dot"/g) || []).length === 0, 'lead=working 时不画 attention 点')
-  assert((html.match(/class="trait/g) || []).length > 0 && (html.match(/data-state="none"/g) || []).length === 2,
-    '≥5 时只显示前 3 个成员，peer 的 data-state=none（不画状态层）')
-  assert(html.includes('agent-stack-more') && html.includes('>+3</span>'), '≥5 时输出 +N 徽标')
+  assert((html.match(/data-luna-face/g) || []).length === 4, '≥5 时只显示前 4 个头像（demo 口径）')
+  assert(html.includes('avatar-more') && html.includes('>+2</span>'), '≥5 时输出 +N 徽标')
+  assert(!html.includes('class="ring') && !html.includes('class="trait'), '不再输出 sigil 的环/内侧标记')
 
   const sigilBuild = await build({
     entryPoints: [join(__dirname, '..', 'src', 'hub', 'AgentSigil.tsx')],
@@ -236,19 +234,20 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
   const { default: AgentSigil } = await import(`${sigilPath}?v=${Date.now()}`)
   unlinkSync(sigilPath)
   const labelled = renderToStaticMarkup(createElement(AgentSigil, {
-    agentId: 'agt_a', responsibility: '研究', state: 'working', size: 32, label: 'Researcher，工作中',
+    agentId: 'agt_a', responsibility: '研究', state: 'working', size: 52, label: 'Researcher，工作中',
   }))
   const labelledTag = labelled.slice(0, labelled.indexOf('>') + 1)
   assert(labelledTag.includes('role="img"') && labelledTag.includes('aria-label="Researcher，工作中"') &&
     !labelledTag.includes('aria-hidden'), '独立头像 label → role=img + 状态词（不再 aria-hidden）')
+  assert(labelled.includes('data-luna-face') && labelled.includes('data-fill="#3C82F6"'),
+    'Luna SVG 由 demo 引擎填充（data-fill 来自职责色）')
   const decorative = renderToStaticMarkup(createElement(AgentSigil, {
-    agentId: 'agt_a', responsibility: '研究', state: 'working', size: 32,
+    agentId: 'agt_a', responsibility: '研究', state: 'working', size: 52,
   }))
   const decorativeTag = decorative.slice(0, decorative.indexOf('>') + 1)
   assert(decorativeTag.includes('aria-hidden="true"') && !decorativeTag.includes('role="img"'),
     '与名字同行的头像仍 aria-hidden')
 }
-
 
 // 11) 手机端 avatar_model.js 与桌面 avatar.ts 同 seed 对照（防两套算法漂移）。
 {

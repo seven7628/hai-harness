@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Markdown } from '../components/markdown'
-import { AccessIcon, Bot, LayersIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
+import { AccessIcon, Bot, LayersIcon, MoreIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
 import { useLang, useT } from '../i18n'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
@@ -15,6 +15,7 @@ import { useAgentState } from './useAgentState'
 import { isImeComposing, type MentionAgent } from './mentions'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubMessage, HubRunEntry } from './types'
+import { useResolvedTheme } from '../lib/useTheme'
 import './hub.css'
 
 // Hub 中栏（P4-UI-1）：可嵌入 App 三栏布局的会话视图（不再自带 rail/inspector）。
@@ -81,6 +82,8 @@ export default function HubSurface() {
   const listRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const theme = useResolvedTheme()
   const highlightTimer = useRef<number | null>(null)
   // 每个实例只消费每个 nonce 一次（同 GroupView：store 的 jump 留 TTL 给 StrictMode 第二实例）。
   const handledJump = useRef(0)
@@ -222,7 +225,7 @@ export default function HubSurface() {
       {activeGroup ? (
         <GroupView key={activeGroup.id} group={activeGroup} />
       ) : (
-        <section className="hub-dm">
+        <section className="main hub-dm hub-demo" data-theme={theme === 'paper' ? 'light' : 'dark'}>
           {!activeAgent ? (
             <div className="hub-empty hub-empty-pick">
               <Bot size={30} />
@@ -238,59 +241,63 @@ export default function HubSurface() {
             </div>
           ) : (
             <>
-              <header className="hub-conv-head hub-dm-head">
-                <div className="hub-conv-id">
-                  <AgentSigil
-                    agentId={activeAgent.id}
-                    responsibility={activeAgent.role}
-                    state={activeState}
-                    size={32}
-                    label={agentSigilLabel(t, activeAgent.name, activeState)}
-                  />
-                  <div className="hub-conv-title">
-                    <span className="hub-conv-line">
-                      <strong>{activeAgent.name}</strong>
-                      <span className={`hub-dot ${isRunning ? 'on' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
-                    </span>
-                    <span className="hub-conv-sub hub-conv-subline">
-                      <span className="hub-conv-sub-text">
-                        {[activeAgent.role, [activeAgent.provider, activeAgent.model].filter(Boolean).join(' · ')]
-                          .filter(Boolean)
-                          .join(' · ')}
-                      </span>
-                      <span className="hub-lock" title={t('hub.dm.lockedHint')}>
-                        <AccessIcon size={11} /> {t('hub.dm.locked')}
-                      </span>
+              <header className="chat-header">
+                <AgentSigil
+                  agentId={activeAgent.id}
+                  name={activeAgent.name}
+                  responsibility={activeAgent.role}
+                  state={activeState}
+                  size={44}
+                  label={agentSigilLabel(t, activeAgent.name, activeState)}
+                />
+                <div className="chat-title-wrap">
+                  <div className="chat-title">
+                    <span className="name">{activeAgent.name}</span>
+                    <span className={`dot ${isRunning ? 'live' : ''}`} title={isRunning ? t('hub.running') : t('hub.idle')} />
+                  </div>
+                  <div className="chat-sub">
+                    {activeAgent.role ? <span>{activeAgent.role}</span> : null}
+                    {activeAgent.role ? <span className="sep">·</span> : null}
+                    <span>{[activeAgent.provider, activeAgent.model].filter(Boolean).join(' · ') || t('hub.idle')}</span>
+                    <span className="sep">·</span>
+                    <span className="lock" title={t('hub.dm.lockedHint')}>
+                      <AccessIcon size={11} /> {t('hub.dm.locked')}
                     </span>
                   </div>
                 </div>
-                <div className="hub-conv-actions">
-                  <span className="hub-seg" role="tablist" aria-label="Chat or Run">
-                    <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>{t('hub.header.chat')}</button>
-                    <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>{t('hub.header.run')}</button>
-                  </span>
+                <div className="header-actions">
                   <button
-                    className={`hub-action-btn ${inspector === 'context' ? 'on' : ''}`}
+                    type="button"
+                    className={`icon-btn${inspector === 'context' ? ' active' : ''}`}
                     onClick={toggleContext}
                     title="上下文（只读）：触发上下文与提示词分层"
+                    aria-label="上下文"
                   >
-                    {t('hub.header.context')}
+                    <LayersIcon size={15} />
                   </button>
                   <button
-                    className="hub-action-btn"
-                    onClick={() => void copyDeepLink('dm', activeAgent.id, latestSeq)}
-                    title="复制这个会话的 hub:// 深链"
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => setMenuOpen((v) => !v)}
+                    aria-label="更多操作"
+                    aria-expanded={menuOpen}
                   >
-                    {t('hub.header.link')}
+                    <MoreIcon size={15} />
                   </button>
-                  <button className="hub-action-btn" onClick={() => openEditor(activeAgent)} title={t('hub.editAgent')}>
-                    {t('hub.edit')}
-                  </button>
-
+                  {menuOpen ? (
+                    <div className="header-menu" role="menu">
+                      <button type="button" role="menuitemradio" aria-checked={view === 'chat'} onClick={() => { setView('chat'); setMenuOpen(false) }}>{t('hub.header.chat')}</button>
+                      <button type="button" role="menuitemradio" aria-checked={view === 'run'} onClick={() => { setView('run'); setMenuOpen(false) }}>{t('hub.header.run')}</button>
+                      <span className="header-menu-sep" />
+                      <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); toggleContext() }}>{t('hub.header.context')}</button>
+                      <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void copyDeepLink('dm', activeAgent.id, latestSeq) }}>{t('hub.header.link')}</button>
+                      <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); openEditor(activeAgent) }}>{t('hub.edit')}</button>
+                    </div>
+                  ) : null}
                 </div>
               </header>
 
-              <div className={`hub-list dm ${view === 'run' ? 'run' : ''}`} ref={listRef} onScroll={onScroll}>
+              <div className={`messages dm ${view === 'run' ? 'run' : ''}`} ref={listRef} onScroll={onScroll}>
                 {view === 'run' ? (
                   <RunView entries={runLog} running={isRunning} />
                 ) : (
@@ -304,30 +311,30 @@ export default function HubSurface() {
                     <span className="hub-muted">{t('hub.introHint')}</span>
                   </div>
                 ) : null}
-                <div className="hub-thread">
+                <div className="messages-inner">
                   {dmThread}
                   {live ? (
                     <AgentMessage
                       agent={activeAgent}
                       name={activeAgent.name}
                       role={activeAgent.role}
-                      tags={<span className="hub-msg-tag streaming">{t('hub.streaming')}</span>}
+                      tags={<span className="agent-tag reply">{t('hub.streaming')}</span>}
                       className="streaming"
                     >
                       <Markdown text={live} streaming />
                     </AgentMessage>
                   ) : null}
-                  {isRunning && !live ? <div className="hub-system-note">{t('hub.thinking')}</div> : null}
+                  {isRunning && !live ? <div className="system-line"><span>{t('hub.thinking')}</span></div> : null}
                 </div>
                 </>
                 )}
               </div>
 
               {view === 'chat' ? (
-                <div className="hub-composer-wrap">
-                  <div className="hub-composer">
+                <div className="composer-wrap"><div className="composer-inner">
+                  <div className="composer">
                     <button
-                      className="hub-composer-tool"
+                      className="icon-btn"
                       onClick={showContext}
                       title="上下文与提示词（暂不支持附件）"
                       aria-label="打开上下文面板"
@@ -346,10 +353,10 @@ export default function HubSurface() {
                           submit()
                         }
                       }}
-                      rows={2}
+                      rows={1}
                     />
                     <button
-                      className="hub-send"
+                      className="send-btn"
                       onClick={() => void submit()}
                       disabled={sending || !draft.trim()}
                       title={t('hub.send')}
@@ -358,14 +365,15 @@ export default function HubSurface() {
                       <SendIcon />
                     </button>
                   </div>
-                  <div className="hub-composer-meta">
-                    <span className="hub-composer-hint">长期会话 · 上下文可自动压缩，记录不丢</span>
-                    <span className="hub-composer-keys">
-                      <kbd>Enter</kbd> {t('hub.composer.enter')}
-                      <span className="hub-composer-sep">·</span>
-                      <kbd>Shift</kbd>+<kbd>Enter</kbd> {t('hub.composer.newline')}
+                  <div className="composer-meta">
+                    <span className="composer-hint">
+                      <kbd>Enter</kbd> {t('hub.composer.enter')} · <kbd>Shift</kbd>+<kbd>Enter</kbd> {t('hub.composer.newline')}
+                    </span>
+                    <span className="meta-links">
+                      <button type="button" onClick={showContext}>它看到了什么</button>
                     </span>
                   </div>
+                </div>
                 </div>
               ) : null}
             </>
@@ -394,13 +402,13 @@ function HubBubble({
     const action = typeof msg.refs?.action === 'string' ? msg.refs.action : ''
     if (action) {
       return (
-        <div className={`hub-system-note hub-system-action ${action}${hl}`} role="status" data-seq={seq}>
+        <div className={`system-line hub-system-action ${action}${hl}`} role="status" data-seq={seq}>
           <span className="hub-system-kind">{actionLabel(action)}</span>
           <span>{msg.text}</span>
         </div>
       )
     }
-    return <div className={`hub-system-note${hl}`} data-seq={seq} role="status">{msg.text}</div>
+    return <div className={`system-line${hl}`} data-seq={seq} role="status"><span>{msg.text}</span></div>
   }
   const time = formatClockTime(msg.created_at)
   if (kind === 'human') {
@@ -423,7 +431,7 @@ function HubBubble({
       agent={agent}
       name={agent?.name || '智能体'}
       role={agent?.role}
-      tags={msg.visibility === 'owner' ? <span className="hub-msg-tag owner">{t('hub.ownerOnly')}</span> : null}
+      tags={msg.visibility === 'owner' ? <span className="agent-tag owner">{t('hub.ownerOnly')}</span> : null}
       time={time}
       dateTime={msg.created_at}
       dataSeq={seq}

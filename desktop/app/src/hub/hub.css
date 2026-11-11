@@ -1,3 +1,19 @@
+@import './demo.css';
+
+/* Luna avatar 基础样式：demo 的 .avatar 规则只在 .hub-demo 内生效；
+   侧栏/弹层等作用域外也要有同样的尺寸、眼睛与状态点。 */
+.luna-avatar{display:inline-flex;flex:0 0 auto;vertical-align:middle;position:relative;width:44px;height:44px;--eye:var(--bg);transition:transform .18s ease,filter .18s ease;border-radius:50%}
+.luna-avatar>svg{width:100%;height:100%;display:block;overflow:visible}
+.luna-avatar.xs{width:28px;height:28px}
+.luna-avatar.lg{width:52px;height:52px}
+.luna-avatar:hover{transform:scale(1.1) rotate(-2deg)}
+.luna-avatar[data-state='working']>svg{animation:av-work 2.2s ease-in-out infinite}
+.luna-avatar[data-state='needs_attention']::after{content:'';position:absolute;top:6%;right:6%;width:22%;height:22%;border-radius:50%;background:var(--warn);border:2px solid var(--bg)}
+.luna-avatar-stack{display:inline-flex;align-items:center}
+.luna-avatar-stack .avatar-more{width:18px;height:18px;border-radius:50%;background:var(--surface-3);border:2px solid var(--bg);display:grid;place-items:center;font-size:9px;color:var(--muted);margin-left:-6px;flex:0 0 auto}
+.luna-avatar-stack .luna-avatar[data-state='needs_attention']::after{display:none}
+.luna-avatar-stack .luna-avatar::before{content:'';position:absolute;inset:-3px;border-radius:50%;box-shadow:0 0 0 2px var(--bg);z-index:-1}
+
 /* Agent Hub surface（§8.2 Hub Rail + §8.4 DM 视图）。
  *
  * 只加布局与少量尺寸：颜色一律走既有主题令牌（--paper/--surface/--ink/--border），
@@ -2411,4 +2427,166 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .left.expanded .add-ws-btn { padding-top: 4px; padding-bottom: 4px; }
   .left-bottom { padding-top: 3px; padding-bottom: 5px; }
   .left-bottom .nav-item { padding-top: 4px; padding-bottom: 4px; }
+}
+
+/* ============================================================
+   Demo 源码移植层（2026-11）
+   DOM/CSS 来自 hai-super-assistant/docs/demo/index.html；
+   这里只补「React 接线后必须的容器约束」与新数据的少量扩展，不改 demo 的间距/字体。
+   ============================================================ */
+
+.hub-demo.main,
+.hub-demo.main.hub-group-view {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--chat);
+  color: var(--text);
+  font: 13px/1.55 var(--sans);
+  overflow: hidden;
+}
+.hub-demo.main > .chat-header { flex: 0 0 auto; width: 100%; }
+.hub-demo.main > .messages { flex: 1 1 auto; width: 100%; }
+.hub-demo.main > .composer-wrap { flex: 0 0 auto; width: 100%; }
+.hub-demo .messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.hub-demo .messages-inner { width: 100%; max-width: 760px; margin: 0 auto; }
+.hub-demo .chat-title-wrap { min-width: 0; flex: 1; }
+.hub-demo .chat-title { display: flex; align-items: center; gap: 8px; }
+.hub-demo .chat-title .name { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hub-demo .chat-sub { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; min-width: 0; }
+.hub-demo .chat-sub .sep { color: var(--muted-2); }
+.hub-demo .chat-sub .lock { display: inline-flex; align-items: center; gap: 3px; color: var(--muted-2); }
+.hub-demo .header-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; position: relative; }
+.hub-demo .header-actions .icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--muted); }
+.hub-demo .header-actions .icon-btn:hover,
+.hub-demo .header-actions .icon-btn.active { color: var(--text); background: var(--surface-2); }
+.hub-demo .header-actions .btn { height: 32px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12px; }
+.hub-demo .header-actions .btn:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.hub-demo .header-actions .btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+.hub-demo .header-menu {
+  position: absolute; right: 0; top: 38px; z-index: 60; min-width: 190px; padding: 6px;
+  border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface);
+  box-shadow: 0 18px 44px rgba(0,0,0,.34); display: flex; flex-direction: column; gap: 1px;
+}
+.hub-demo .header-menu button { height: 30px; padding: 0 9px; border-radius: 7px; text-align: left; color: var(--text); font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.hub-demo .header-menu button:hover { background: var(--surface-2); }
+.hub-demo .header-menu button[aria-checked="true"]::after { content: '✓'; color: var(--accent); }
+.hub-demo .header-menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
+
+.hub-demo .msg-row > .avatar,
+.hub-demo .msg-row > .avatar-btn { align-self: flex-start; flex: 0 0 auto; }
+.hub-demo .avatar-btn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 50%; }
+.hub-demo .agent-name-btn { padding: 0; border: 0; background: none; color: inherit; cursor: pointer; font: inherit; }
+.hub-demo .agent-name-btn:hover { color: var(--accent); }
+.hub-demo .agent-tag { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; line-height: 16px; white-space: nowrap; }
+.hub-demo .agent-tag.reply { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 24%, var(--border)); }
+.hub-demo .agent-tag.observe { color: var(--muted-2); }
+.hub-demo .agent-tag.owner { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
+.hub-demo .msg-time { margin-left: 2px; }
+.hub-demo .agent-text .md p { margin: 0 0 8px; }
+.hub-demo .agent-text .md p:last-child { margin-bottom: 0; }
+.hub-demo .agent-text .md ul,
+.hub-demo .agent-text .md ol { margin: 6px 0 8px; padding-left: 20px; }
+.hub-demo .agent-text .md pre { margin: 8px 0; }
+.hub-demo .agent-text .md table { margin: 8px 0; }
+.hub-demo .user-meta .user-owner-only { color: var(--warn); }
+.hub-demo .user-meta .user-failed { color: var(--danger); }
+.hub-demo .user-bubble .md p { margin: 0; }
+.hub-demo .user-bubble .md p + p { margin-top: 6px; }
+.hub-demo .streaming .agent-text::after { content: ''; display: inline-block; width: 5px; height: 13px; margin-left: 3px; vertical-align: -1px; background: var(--accent); animation: demo-caret 1s steps(2) infinite; }
+@keyframes demo-caret { 50% { opacity: 0; } }
+
+.hub-demo .system-line { display: flex; align-items: center; justify-content: center; gap: 7px; margin: 18px 0; color: var(--muted-2); font-size: 11px; text-align: center; }
+.hub-demo .system-line::before,
+.hub-demo .system-line::after { content: ''; height: 1px; flex: 1; background: var(--border); opacity: .55; }
+.hub-demo .route-line { display: flex; align-items: center; justify-content: center; gap: 7px; margin: 16px 0 20px; color: var(--muted-2); font-size: 11px; }
+.hub-demo .route-line::before,
+.hub-demo .route-line::after { content: ''; height: 1px; flex: 1; background: var(--border); opacity: .55; }
+.hub-demo .route-title { display: inline-flex; align-items: center; gap: 5px; }
+.hub-demo .routing-pill { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; }
+.hub-demo .hub-msg-highlight { animation: demo-highlight 1.4s ease; }
+@keyframes demo-highlight { 0%, 100% { background: transparent; } 20% { background: color-mix(in srgb, var(--accent) 12%, transparent); } }
+
+.hub-demo .hub-conv-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; padding: 0 2px; color: var(--muted-2); font-size: 11px; min-height: 24px; border: 0; background: none; }
+.hub-demo .hub-conv-status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+.hub-demo .hub-conv-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
+.hub-demo .hub-conv-bar.running .hub-conv-dot { background: var(--success); animation: demo-live 1.6s ease infinite; }
+@keyframes demo-live { 50% { opacity: .35; } }
+.hub-demo .hub-conv-turns,
+.hub-demo .hub-conv-pair,
+.hub-demo .hub-conv-terminal { color: var(--muted-2); }
+.hub-demo .hub-conv-stop { margin-left: auto; color: var(--muted); font-size: 11px; }
+.hub-demo .hub-conv-stop:hover { color: var(--danger); }
+
+.hub-demo .task-msg { margin: 0 0 22px; max-width: 560px; }
+.hub-demo .event-card--task { --event-color: var(--success); max-width: 560px; }
+.hub-demo .event-card--task.tone-error { --event-color: var(--danger); }
+.hub-demo .event-card--task.tone-warn { --event-color: var(--warn); }
+.hub-demo .event-card { margin: 0 0 14px; }
+.hub-demo .event-card .event-head { display: flex; gap: 10px; align-items: flex-start; }
+.hub-demo .event-card .event-main { flex: 1; min-width: 0; }
+.hub-demo .event-card .event-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hub-demo .event-card .event-title .name { font-size: 12.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-demo .event-card .event-status { margin-left: auto; flex: 0 0 auto; }
+.hub-demo .event-card .event-kicker { margin-bottom: 1px; }
+.hub-demo .event-card .event-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 3px; }
+.hub-demo .event-card .event-body { margin: 8px 0 0 39px; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.hub-demo .event-card .event-error { margin: 8px 0 0 39px; font-size: 12px; color: var(--danger); }
+.hub-demo .event-card .event-actions { display: flex; align-items: center; gap: 8px; margin: 8px 0 0 39px; }
+.hub-demo .event-card .event-id { font: 10.5px var(--mono); color: var(--muted-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-demo .event-card .event-action { margin-left: auto; height: 26px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--muted); font-size: 11px; background: var(--surface-2); }
+.hub-demo .event-card .event-action:hover { color: var(--text); border-color: var(--border-strong); }
+.hub-demo .event-artifacts { display: flex; flex-direction: column; gap: 6px; margin: 9px 0 0 39px; }
+.hub-demo .artifact-line { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-2) 66%, transparent); }
+.hub-demo .artifact-badge { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: 0 0 auto; font: 9px var(--mono); color: var(--muted); background: var(--surface-3); border: 1px solid var(--border); }
+.hub-demo .artifact-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.hub-demo .artifact-name { font-size: 11.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hub-demo .artifact-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10.5px; color: var(--muted-2); }
+.hub-demo .artifact-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 群消息分组只收紧间距，不再画外框（demo 的每条 msg-row 仍是独立行）。 */
+.hub-demo .hub-round-stack { display: contents; }
+
+.hub-demo .composer-meta .meta-links { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.hub-demo .composer-meta .meta-links button { color: var(--muted-2); font-size: 10.5px; }
+.hub-demo .composer-meta .meta-links button:hover { color: var(--text); }
+.hub-demo .composer-mode-switch { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; }
+.hub-demo .composer-mode-switch button { height: 18px; padding: 0 6px; border-radius: 5px; color: var(--muted-2); font-size: 10.5px; }
+.hub-demo .composer-mode-switch button.on { background: var(--surface-2); color: var(--text); }
+.hub-demo .composer-note { max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 900px) {
+  .hub-demo .composer-note { display: none; }
+}
+
+/* 正文里的 @ 提及在 demo 里是纯文字（不是头像 chip）；头像只在列表/选择器/作者头出现。 */
+.hub-demo .agent-text .hub-mention,
+.hub-demo .user-bubble .hub-mention {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--mention-accent, var(--accent));
+  font: inherit;
+  text-decoration: none;
+  vertical-align: baseline;
+}
+.hub-demo .agent-text .hub-mention:hover,
+.hub-demo .user-bubble .hub-mention:hover { text-decoration: underline; }
+.hub-demo .agent-text .hub-mention .luna-avatar,
+.hub-demo .user-bubble .hub-mention .luna-avatar { display: none; }
+.hub-demo .agent-text .hub-mention-name,
+.hub-demo .user-bubble .hub-mention-name { font: inherit; }
+.hub-demo .agent-text .hub-mention-gone,
+.hub-demo .user-bubble .hub-mention-gone { font-size: .9em; opacity: .7; }
+.hub-demo .user-bubble .hub-mention,
+.hub-demo .user-bubble .hub-mention-name { color: var(--user-text); }
+.hub-demo .user-bubble .hub-mention::before { content: '@'; opacity: .55; }
+
+/* 窄屏：demo 只保留一行 sub（hide-mobile），否则 295px 主列会被挤成三行。 */
+@media (max-width: 640px) {
+  .hub-demo .chat-sub > :nth-child(n+4) { display: none; }
+  .hub-demo .chat-header { min-height: 64px; height: 64px; padding: 0 10px; gap: 8px; }
+  .hub-demo .chat-title-wrap { max-width: calc(100% - 150px); }
+  .hub-demo .chat-header .avatar-stack .avatar-more { display: none; }
 }

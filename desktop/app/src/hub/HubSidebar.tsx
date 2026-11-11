@@ -288,7 +288,7 @@ export default function HubSidebar() {
                     >
                       <AgentStack
                         members={stackMembers}
-                        size={24}
+                        size={28}
                         groupRunning={groupRunning}
                         label={null}
                       />
@@ -370,7 +370,7 @@ function HubRow({
         agentId={agent.id}
         responsibility={agent.role}
         state={state}
-        size={24}
+        size={44}
       />
       <span className="hub-side-text">
         <span className="hub-side-top">

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DependencyList } from 'react'
 import { useLang, useT } from '../i18n'
-import { GitBranch, SendIcon, TerminalIcon } from '../components/icons'
+import { GitBranch, MoreIcon, SendIcon, TerminalIcon } from '../components/icons'
+import { useResolvedTheme } from '../lib/useTheme'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
 import { hubCommand } from './api'
@@ -10,7 +11,6 @@ import { dayKey, dayLabel } from './conversationDay'
 import { RoundGroup } from './RoundGroup'
 import { RoundActivityDigest } from './RoundActivityDigest'
 import { StreamingMessage } from './StreamingMessage'
-import ConversationBar from './ConversationBar'
 import MentionPicker from './MentionPicker'
 import AgentStack from './AgentStack'
 import AgentSigil from './AgentSigil'
@@ -87,6 +87,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const [composerMode, setComposerMode] = useState<'chat' | 'assign'>('chat')
   const [view, setView] = useState<'chat' | 'run'>('chat')
   const [displayMode, setDisplayMode] = useState<'grouped' | 'flat'>(readGroupDisplay)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const theme = useResolvedTheme()
   // @ 选择器：焦点始终在 textarea，选择器只做 listbox/aria-activedescendant。
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const assignTextareaRef = useRef<HTMLTextAreaElement>(null)
@@ -386,80 +388,89 @@ export default function GroupView({ group }: { group: HubGroup }) {
   }
 
   return (
-    <section className="hub-dm hub-group-view">
-      <header className="hub-conv-head hub-group-head">
-        <div className="hub-conv-id">
-          <AgentStack
-            members={stackMembers}
-            size={32}
-            groupRunning={groupRunning}
-            label={stackAriaLabel(t, stackMembers, { groupRunning, name: group.name })}
-          />
-          <div className="hub-conv-title">
-            <span className="hub-conv-line">
-              <strong>{group.name}</strong>
-              {group.deleted ? <span className="hub-chip danger">已删除</span> : null}
-            </span>
-            <span
-              className="hub-conv-sub"
-              title={[
-                t('hub.group.members').replace('{n}', String(members.length)),
-                t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask'),
-                owner ? t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id) : '',
-                title,
-              ].filter(Boolean).join(' · ')}
-            >
-              {t('hub.group.members').replace('{n}', String(members.length))}
-              {' · '}
-              {t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask')}
-              {owner ? ` · ${t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id)}` : ''}
-              {title ? ` · ${title}` : ''}
-            </span>
+    <section className="main hub-group-view hub-demo" data-theme={theme === 'paper' ? 'light' : 'dark'}>
+      <header className="chat-header">
+        <AgentStack
+          members={stackMembers}
+          size={28}
+          groupRunning={groupRunning}
+          label={stackAriaLabel(t, stackMembers, { groupRunning, name: group.name })}
+        />
+        <div className="chat-title-wrap">
+          <div className="chat-title">
+            <span className="name">{group.name}</span>
+            {group.deleted ? <span className="agent-tag">已删除</span> : null}
+          </div>
+          <div
+            className="chat-sub"
+            title={[
+              t('hub.group.members').replace('{n}', String(members.length)),
+              t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask'),
+              owner ? t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id) : '',
+              title,
+            ].filter(Boolean).join(' · ')}
+          >
+            <span>{t('hub.group.members').replace('{n}', String(members.length))}</span>
+            <span className="sep">·</span>
+            <span>{t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask')}</span>
+            {owner ? <><span className="sep">·</span><span>{t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id)}</span></> : null}
+            {title ? <><span className="sep">·</span><span>{title}</span></> : null}
+            {convActive ? <><span className="sep">·</span><span>自动对话中</span></> : null}
           </div>
         </div>
-        <div className="hub-conv-actions">
-          <button
-            className="hub-pill hub-budget-chip"
-            onClick={() => void editBudget()}
-            title="点击修改群日预算"
-            aria-label={`群日预算 $${(group.policy?.daily_budget_usd ?? 0).toFixed(0)}，点击修改`}
-          >
-            {t('hub.header.budget').replace('{amount}', (group.policy?.daily_budget_usd ?? 0).toFixed(0))}
-          </button>
-          <span className="hub-seg" role="tablist" aria-label="Chat or Run">
-            <button role="tab" aria-selected={view === 'chat'} className={view === 'chat' ? 'on' : ''} onClick={() => setView('chat')}>{t('hub.header.chat')}</button>
-            <button role="tab" aria-selected={view === 'run'} className={view === 'run' ? 'on' : ''} onClick={() => setView('run')}>{t('hub.header.run')}</button>
-          </span>
-          {view === 'chat' ? (
-            <span className="hub-seg" role="tablist" aria-label="紧凑或分开显示">
-              <button role="tab" aria-selected={displayMode === 'grouped'} className={displayMode === 'grouped' ? 'on' : ''} onClick={() => setDisplay('grouped')}>{t('hub.header.grouped')}</button>
-              <button role="tab" aria-selected={displayMode === 'flat'} className={displayMode === 'flat' ? 'on' : ''} onClick={() => setDisplay('flat')}>{t('hub.header.flat')}</button>
-            </span>
+        <div className="header-actions">
+          {convActive ? (
+            <button
+              type="button"
+              className="btn danger"
+              onClick={() => void stopConversation(group.id)}
+              disabled={convStopping}
+              title="停止自动对话（清空队列并中断当前 run）"
+            >
+              {convStopping ? '停止中…' : '停止'}
+            </button>
           ) : null}
           <button
-            className={`hub-action-btn ${inspector === 'context' ? 'on' : ''}`}
+            type="button"
+            className={`icon-btn${inspector === 'context' ? ' active' : ''}`}
             onClick={() => {
               setInspector(rightExpanded && inspector === 'context' ? null : 'context')
               setRightExpanded(true)
             }}
             title="上下文（只读）：触发上下文与提示词分层"
+            aria-label="上下文"
           >
-            {t('hub.header.context')}
+            <GitBranch size={15} />
           </button>
-          <button className="hub-action-btn" onClick={copyLink} title="复制这个群的 hub:// 深链">{t('hub.header.link')}</button>
-          <button className="hub-action-btn" onClick={exportMarkdown} title="导出群时间线 Markdown">{t('hub.header.export')}</button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-label="更多操作"
+            aria-expanded={menuOpen}
+          >
+            <MoreIcon size={15} />
+          </button>
+          {menuOpen ? (
+            <div className="header-menu" role="menu">
+              <button type="button" role="menuitemradio" aria-checked={view === 'chat'} onClick={() => { setView('chat'); setMenuOpen(false) }}>Chat</button>
+              <button type="button" role="menuitemradio" aria-checked={view === 'run'} onClick={() => { setView('run'); setMenuOpen(false) }}>Run</button>
+              <span className="header-menu-sep" />
+              <button type="button" role="menuitemradio" aria-checked={displayMode === 'grouped'} onClick={() => { setDisplay('grouped'); setMenuOpen(false) }}>{t('hub.header.grouped')}</button>
+              <button type="button" role="menuitemradio" aria-checked={displayMode === 'flat'} onClick={() => { setDisplay('flat'); setMenuOpen(false) }}>{t('hub.header.flat')}</button>
+              <span className="header-menu-sep" />
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); copyLink() }}>{t('hub.header.link')}</button>
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); exportMarkdown() }}>{t('hub.header.export')}</button>
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void editBudget() }}>
+                {t('hub.header.budget').replace('{amount}', (group.policy?.daily_budget_usd ?? 0).toFixed(0))}
+              </button>
+            </div>
+          ) : null}
         </div>
       </header>
 
-      <ConversationBar
-        conversation={conversation}
-        pairNames={agentNames}
-        active={convActive}
-        stopping={convStopping}
-        onStop={() => void stopConversation(group.id)}
-      />
-
-      <div className="hub-list" ref={listRef} onScroll={onScroll}>
+      <div className="messages" ref={listRef} onScroll={onScroll}>
+        <div className="messages-inner">
         {view === 'run' ? (
           <div className="hub-run">
             <RoundActivityDigest activity={activity} names={agentNames} />
@@ -500,12 +511,14 @@ export default function GroupView({ group }: { group: HubGroup }) {
             ))}
           </div>
         )}
+        </div>
       </div>
 
-      <div className="hub-composer-wrap">
+      <div className="composer-wrap">
+        <div className="composer-inner">
         {/* 常驻 live region：内容出现前容器已在 DOM 里，读屏才会播报（N8）。 */}
         <TypingIndicator names={typingNames} />
-        <div className="hub-composer">
+        <div className="composer">
           {pickerOpen ? (
             <MentionPicker
               id={MENTION_LISTBOX_ID}
@@ -520,7 +533,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
             <>
               <button
                 type="button"
-                className="hub-composer-tool"
+                className="icon-btn"
                 onClick={insertMentionToken}
                 title={t('hub.composer.mention')}
                 aria-label={t('hub.composer.mention')}
@@ -547,7 +560,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
                     void submit()
                   }
                 }}
-                rows={2}
+                rows={1}
                 aria-autocomplete="list"
                 aria-controls={pickerOpen && candidates.length > 0 ? MENTION_LISTBOX_ID : undefined}
                 aria-expanded={pickerOpen && candidates.length > 0}
@@ -556,7 +569,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
                 }
               />
               <button
-                className="hub-send"
+                className="send-btn"
                 onClick={() => void submit()}
                 disabled={sending || !draft.trim()}
                 title={t('hub.send')}
@@ -611,7 +624,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
               />
               <button
                 type="button"
-                className="hub-send hub-assign-send"
+                className="send-btn hub-assign-send"
                 onClick={() => void submitAssign()}
                 disabled={assigning || !assignTarget || !assignInstruction.trim()}
                 title="派发任务"
@@ -622,33 +635,32 @@ export default function GroupView({ group }: { group: HubGroup }) {
             </div>
           )}
         </div>
-        <div className="hub-composer-meta">
-          <span className="hub-seg hub-seg-quiet" role="tablist" aria-label="输入模式">
-            <button role="tab" aria-selected={composerMode === 'chat'} className={composerMode === 'chat' ? 'on' : ''} onClick={() => setComposerMode('chat')}>对话</button>
-            <button role="tab" aria-selected={composerMode === 'assign'} className={composerMode === 'assign' ? 'on' : ''} onClick={() => setComposerMode('assign')}>派任务</button>
+        <div className="composer-meta">
+          <span className="composer-hint">
+            <kbd>Enter</kbd> {t('hub.composer.enter')} <span className="composer-sep">·</span> <kbd>Shift</kbd>+<kbd>Enter</kbd> {t('hub.composer.newline')}
           </span>
-          {composerMode === 'chat' ? (
-            <span className="hub-composer-hint">
-              {members.length === 0
-                ? '群还没有成员，消息只会记录。'
-                : draft.trim() && mentionIds(draft, roster).length === 0 && !hasMentionAll(draft)
-                  ? '仅记录，不触发回复（@成员 才会唤醒）'
-                  : t('hub.composer.mentionHint')}
+          <span className="meta-links">
+            <span className="composer-mode-switch" role="tablist" aria-label="输入模式">
+              <button type="button" role="tab" aria-selected={composerMode === 'chat'} className={composerMode === 'chat' ? 'on' : ''} onClick={() => setComposerMode('chat')}>对话</button>
+              <button type="button" role="tab" aria-selected={composerMode === 'assign'} className={composerMode === 'assign' ? 'on' : ''} onClick={() => setComposerMode('assign')}>派任务</button>
             </span>
-          ) : (
-            <span className="hub-composer-hint">派任务会创建账本任务，结果以任务卡回群。</span>
-          )}
-          {composerMode === 'chat' ? (
-            <span className="hub-composer-keys">
-              <kbd>Enter</kbd> {t('hub.composer.enter')}
-              <span className="hub-composer-sep">·</span>
-              <kbd>Shift</kbd>+<kbd>Enter</kbd> {t('hub.composer.newline')}
-            </span>
-          ) : null}
+            {composerMode === 'chat' ? (
+              <span className="composer-note">
+                {members.length === 0
+                  ? '群还没有成员，消息只会记录。'
+                  : draft.trim() && mentionIds(draft, roster).length === 0 && !hasMentionAll(draft)
+                    ? '仅记录，不触发回复（@成员 才会唤醒）'
+                    : t('hub.composer.mentionHint')}
+              </span>
+            ) : (
+              <span className="composer-note">派任务会创建账本任务，结果以任务卡回群。</span>
+            )}
+          </span>
         </div>
         {composerMode === 'assign' && assignNote ? (
           <div className="hub-assign-note" role="status">{assignNote}</div>
         ) : null}
+        </div>
       </div>
     </section>
   )
@@ -714,8 +726,8 @@ function renderThread(
       const r = item.round
       const targets = (r.targets ?? []).map((id) => names[id] ?? id)
       nodes.push(
-        <div key={`round-${r.id}`} className="hub-system-note hub-system-routing" role="status">
-          <span className="hub-system-kind">路由</span>
+        <div key={`round-${r.id}`} className="route-line" role="status">
+          <span className="routing-pill">路由</span>
           <span>
             {r.mention_all ? '@all ' : ''}
             {targets.length === 0 ? '无人被唤醒' : `唤醒 ${targets.join('、')}`}

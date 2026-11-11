@@ -133,7 +133,7 @@
     const counts = countStates(states)
     let state = highestState(states)
     if (opts && opts.groupRunning && state === 'idle') state = 'working'
-    const visible = input.length >= 5 ? input.slice(0, 3) : input.slice()
+    const visible = input.length >= 5 ? input.slice(0, 4) : input.slice()
     const members = visible.map((m, i) => ({
       id: m.id,
       responsibility: m.responsibility || '',

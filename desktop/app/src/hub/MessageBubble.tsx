@@ -79,17 +79,17 @@ export function GroupBubble({
 
   if (msg.kind === 'approval_stub') {
     return (
-      <article className={`hub-event hub-event--approval${hl}`} data-seq={seq} aria-label={`审批占位：${msg.text || '有人发起审批，详情在 Needs you'}`}>
-        <span className="hub-event-icon" aria-hidden="true"><EyeIcon size={14} /></span>
-        <div className="hub-event-main">
-          <div className="hub-event-top">
-            <div className="hub-event-copy">
-              <span className="hub-event-kicker">Private approval</span>
-              <span className="hub-event-title">{msg.text || '有人发起审批，详情在 Needs you'}</span>
+      <article className={`event-card event-card--approval${hl}`} data-seq={seq} aria-label={`审批占位：${msg.text || '有人发起审批，详情在 Needs you'}`}>
+        <div className="event-head">
+          <span className="event-icon" aria-hidden="true"><EyeIcon size={14} /></span>
+          <div className="event-main">
+            <div className="event-kicker">Private approval</div>
+            <div className="event-title">
+              <span className="name">{msg.text || '有人发起审批，详情在 Needs you'}</span>
+              <span className="event-status">仅你可看</span>
             </div>
-            <span className="hub-event-status muted">仅你可看</span>
+            <p className="event-body">审批正文不进入群上下文；处理入口在右栏 Needs you。</p>
           </div>
-          <p className="hub-event-body">审批正文不进入群上下文；处理入口在右栏 Needs you。</p>
         </div>
       </article>
     )
@@ -99,8 +99,8 @@ export function GroupBubble({
   }
   if (msg.sender?.kind === 'system') {
     return (
-      <div className={`hub-system-note${hl}`} data-seq={seq} role="status">
-        {msg.text}
+      <div className={`system-line${hl}`} data-seq={seq} role="status">
+        <span>{msg.text}</span>
       </div>
     )
   }
@@ -108,17 +108,17 @@ export function GroupBubble({
     const status = String(msg.refs?.status ?? '')
     const label = status === 'pending_ack' ? '等待确认' : status === 'accepted' ? '已接受' : status === 'declined' ? '已拒绝' : '交接'
     return (
-      <article className={`hub-event hub-event--handoff${hl}`} data-seq={seq} aria-label={`交接：${msg.text}（${label}）`}>
-        <span className="hub-event-icon" aria-hidden="true"><GitBranch size={14} /></span>
-        <div className="hub-event-main">
-          <div className="hub-event-top">
-            <div className="hub-event-copy">
-              <span className="hub-event-kicker">Handoff</span>
-              <span className="hub-event-title">{msg.text}</span>
+      <article className={`event-card event-card--handoff${hl}`} data-seq={seq} aria-label={`交接：${msg.text}（${label}）`}>
+        <div className="event-head">
+          <span className="event-icon" aria-hidden="true"><GitBranch size={14} /></span>
+          <div className="event-main">
+            <div className="event-kicker">Handoff</div>
+            <div className="event-title">
+              <span className="name">{msg.text}</span>
+              <span className={`event-status ${status === 'pending_ack' || !status ? 'wait' : status === 'accepted' ? 'ok' : ''}`}>{label}</span>
             </div>
-            <span className={`hub-event-status ${status || 'pending_ack'}`}>{label}</span>
+            <p className="event-body">完整交接指令在 Needs you；群内只保留摘要。</p>
           </div>
-          <p className="hub-event-body">完整交接指令在 Needs you；群内只保留摘要。</p>
         </div>
       </article>
     )
@@ -136,7 +136,7 @@ export function GroupBubble({
     const executor = card.agentId ? roster.find((a) => a.id === card.agentId) : undefined
     const initiator = card.initiatorAgentId ? roster.find((a) => a.id === card.initiatorAgentId) : undefined
     return (
-      <div className={`hub-msg task${hl} ${msg.pending ? 'pending' : ''}`} data-seq={seq}>
+      <div className={`task-msg${hl} ${msg.pending ? 'pending' : ''}`} data-seq={seq}>
         <TaskResultCard
           view={card}
           executor={executor}
@@ -158,16 +158,18 @@ export function GroupBubble({
 
   const tags = (
     <>
-      {agent?.groupRole === 'observer' ? <span className="hub-msg-tag observe">{t('hub.observer')}</span> : null}
-      <TurnContextLine
-        compact
-        msg={msg}
-        roster={roster}
-        triggerSeqBySender={triggerSeqBySender}
-        onJumpToSeq={onJumpToSeq}
-      />
-      {msg.visibility === 'owner' ? <span className="hub-msg-tag owner">{t('hub.ownerOnly')}</span> : null}
+      {agent?.groupRole === 'observer' ? <span className="agent-tag observe">{t('hub.observer')}</span> : null}
+      {msg.visibility === 'owner' ? <span className="agent-tag owner">{t('hub.ownerOnly')}</span> : null}
     </>
+  )
+  const contextLine = (
+    <TurnContextLine
+      compact
+      msg={msg}
+      roster={roster}
+      triggerSeqBySender={triggerSeqBySender}
+      onJumpToSeq={onJumpToSeq}
+    />
   )
 
   if (kind === 'human') {
@@ -197,6 +199,7 @@ export function GroupBubble({
       dataSeq={seq}
       className={`hub-group-msg${hl}`}
       onOpenAgent={agent && onSelectAgent && !agent.deleted ? () => onSelectAgent(agent.id) : undefined}
+      footer={contextLine}
     >
       <Markdown text={linkedText} renderMention={roster.length > 0 ? renderMention : undefined} />
     </AgentMessage>
@@ -217,15 +220,15 @@ export function RoutingAction({
   const parsed = parseRoutingText(text)
   if (!parsed) {
     return (
-      <div className={`hub-system-note${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">
+      <div className={`system-line${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">
         {text}
       </div>
     )
   }
   const targets = parsed.targets.map((id) => names[id] ?? id)
   return (
-    <div className={`hub-system-note hub-system-routing${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">
-      <span className="hub-system-kind">路由</span>
+    <div className={`route-line${highlight ? ' hub-msg-highlight' : ''}`} data-seq={seq} role="status">
+      <span className="route-title"><span className="routing-pill">路由</span></span>
       <span>
         {parsed.all ? '@all ' : ''}
         {targets.length === 0 ? '无人被唤醒' : `唤醒 ${targets.join('、')}`}

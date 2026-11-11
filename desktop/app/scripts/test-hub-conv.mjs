@@ -63,25 +63,25 @@ const eq = (got, want, m) => {
   eq(conv.formatRelativeTime(iso, new Date(2026, 9, 20, 9, 6, 0).getTime()), '1 分钟前', '相对时间口径未被改动')
 }
 
-// 3) 消息版式：DM 与群共用同两个组件。
+// 3) 消息版式：demo DOM/CSS 原样移植，DM 与群共用同两个组件。
 {
   const conv = readFileSync(join(APP, 'src', 'hub', 'ConversationMessage.tsx'), 'utf8')
-  const css = readFileSync(join(APP, 'src', 'hub', 'hub.css'), 'utf8')
-  const cssCode = css.replace(/\/\*[\s\S]*?\*\//g, '')
-  assert(/\.hub-msg\.agent\s*\{[^}]*grid-template-columns:\s*32px/.test(css), 'agent 行是 32px + 正文两列')
-  assert(/\.hub-msg-avatar::after\s*\{[^}]*inset:\s*-6px/.test(css), '头像命中区扩到 44px（32 + 6×2）')
-  assert(/\.hub-user-bubble\s*\{[^}]*border-radius:\s*18px/.test(css), '用户气泡 18px 圆角')
-  assert(/\.hub-user-bubble\s*\{[^}]*padding:\s*10px 14px/.test(css), '用户气泡 10/14 内边距')
-  assert(css.includes('max-width: min(78%, 620px, calc(100% - 35px))'), '用户气泡给右缘 24px owner 头像 + 11px gap 留位')
-  assert(/\.hub-user-avatar\s*\{[^}]*width:\s*24px/.test(css), 'owner 头像 24px')
-  assert(/\.hub-list\s*\{[^}]*padding:\s*30px 28px 10px/.test(css), '会话区 padding 30/28')
-  assert(/\.hub-event--handoff\s*\{/.test(css) && /\.hub-event--approval\s*\{/.test(css), '交接/审批卡有专属 token 规则')
-  assert(/--hub-user-bubble/.test(cssCode) && /\[data-theme='paper'\]\s*\{[^}]*--hub-user-bubble/s.test(cssCode) && /:root,\s*\n\[data-theme='ink'\]\s*\{[^}]*--hub-user-bubble/s.test(cssCode), '--hub-user-bubble 两套主题都定义')
-  assert(!/#f0e8dc|#efe4d9|#f0e8dc/i.test(cssCode), '没有照抄 demo 的硬编码暖色')
-  assert(/--hub-conv-max:\s*760px/.test(css), '会话列 760px')
-  assert(/\.hub-composer\s*\{[^}]*border-radius:\s*19px/.test(css), 'composer 19px 圆角')
-  assert(/\.hub-event-icon\s*\{[^}]*width:\s*29px/.test(css), '事件卡 29px 图标块')
-  assert(/\.hub-run-icon\s*\{[^}]*width:\s*23px/.test(css), '工具行 23px 图标块 / 12px 圆角')
+  const demoCss = readFileSync(join(APP, 'src', 'hub', 'demo.css'), 'utf8')
+  assert(conv.includes('msg-row agent') && conv.includes('agent-head') && conv.includes('agent-text') &&
+    conv.includes('size={52}'), 'agent 行 = demo 的 msg-row/agent-head/agent-text + 52px 头像')
+  assert(conv.includes('msg-row user') && conv.includes('user-bubble') && conv.includes('owner-avatar'),
+    'user 行 = demo 的 msg-row/user-bubble/owner-avatar')
+  assert(/\.hub-demo \.user-bubble\s*\{[^}]*border-radius:\s*18px/.test(demoCss), '用户气泡 18px 圆角')
+  assert(/\.hub-demo \.user-bubble\s*\{[^}]*padding:\s*10px 14px/.test(demoCss), '用户气泡 10/14 内边距')
+  assert(/\.hub-demo \.owner-avatar\s*\{[^}]*width:\s*24px/.test(demoCss), 'owner 头像 24px')
+  assert(/\.hub-demo \.msg-row\.user \.msg-main\s*\{[^}]*max-width:\s*min\(78%,640px\)/.test(demoCss), '用户气泡给右缘 24px owner 头像 + 11px gap 留位')
+  assert(/\.hub-demo \.messages\s*\{[^}]*padding:\s*30px 28px 10px/.test(demoCss), '会话区 padding 30/28')
+  assert(/\.hub-demo \.event-card--handoff\s*\{/.test(demoCss) && /\.hub-demo \.event-card--approval\s*\{/.test(demoCss), '交接/审批卡有专属 token 规则')
+  assert(/--user-bubble:\s*#ded7c8/.test(demoCss) && /\[data-theme="light"\]\{[^}]*--user-bubble/s.test(demoCss), 'demo 的暖色 token 两套主题都在')
+  assert(/\.hub-demo \.messages-inner\s*\{[^}]*max-width:\s*760px/.test(demoCss), '会话列 760px')
+  assert(/\.hub-demo \.composer\s*\{[^}]*border-radius:\s*19px/.test(demoCss), 'composer 19px 圆角')
+  assert(/\.hub-demo \.event-icon\s*\{[^}]*width:\s*29px/.test(demoCss), '事件卡 29px 图标块')
+  assert(/\.hub-demo \.tool-card\s*\{/.test(demoCss) && /\.hub-demo \.tool-target\s*\{/.test(demoCss), '工具卡沿用 demo 的 tool-card/tool-target')
 }
 
 {
@@ -90,35 +90,35 @@ const eq = (got, want, m) => {
   assert(bubble.includes("from './ConversationMessage'") && bubble.includes('<AgentMessage') && bubble.includes('<UserMessage'), '群消息复用 ConversationMessage 的两种版式')
   assert(bubble.includes('groupRole === \'observer\'') && bubble.includes("t('hub.observer')"), '观察标签只在 groupRole=observer 时出现')
   assert(!bubbleCode.includes('回复 @'), '没有 reply_to 数据时不画「回复 @」')
-  assert(bubble.includes('hub-event--handoff') && bubble.includes('hub-event--approval'), '交接/审批走 event-card 解剖')
+  assert(bubble.includes('event-card--handoff') && bubble.includes('event-card--approval'), '交接/审批走 event-card 解剖')
 
   const stream = readFileSync(join(APP, 'src', 'hub', 'StreamingMessage.tsx'), 'utf8')
   assert(stream.includes('<AgentMessage') && !stream.includes('hub-msg-head'), '流式消息与最终消息同一版式')
 
   const dm = readFileSync(join(APP, 'src', 'hub', 'HubSurface.tsx'), 'utf8')
-  assert(/size=\{32\}/.test(dm) && dm.includes('agentSigilLabel(') && dm.includes("t('hub.dm.locked')"),
-    'DM 头 32px sigil + 独立 aria-label + 能力只读提示')
+  assert(/size=\{44\}/.test(dm) && dm.includes('agentSigilLabel(') && dm.includes("t('hub.dm.locked')"),
+    'DM 头 44px Luna 头像 + 独立 aria-label + 能力只读提示')
   assert(dm.includes('<AgentMessage') && dm.includes('<UserMessage'), 'DM 消息复用同一版式（作者头存在）')
-  assert(dm.includes('hub-composer-meta') && dm.includes('hub.composer.enter'), 'DM composer 有 meta 行')
+  assert(dm.includes('composer-meta') && dm.includes('hub.composer.enter'), 'DM composer 有 meta 行')
   assert(!dm.includes('hub-composer-plus') && !dm.includes('hub-composer-pill'), '旧 composer 结构已移除')
 
   const group = readFileSync(join(APP, 'src', 'hub', 'GroupView.tsx'), 'utf8')
-  assert(group.includes('<AgentStack') && /size=\{32\}/.test(group), '群头 AgentStack（+N 由 planStack 决定）')
+  assert(group.includes('<AgentStack') && /size=\{28\}/.test(group), '群头 AgentStack 28px（+N 由 planStack 决定）')
   assert(group.includes("t('hub.group.members')") && group.includes("t('hub.group.mode')") && group.includes("t('hub.group.owner')"), '群头 subtitle：成员数 / 模式 / owner')
-  assert((group.match(/hub-conv-sub/g) ?? []).length === 1 && group.includes('title ? ` · ${title}`'), '群头 subtitle 只有一行：成员名并入第二行')
+  assert(group.includes('chat-title-wrap') && group.includes('chat-sub'), '群头用 demo 的 chat-title-wrap/chat-sub')
   assert(!group.includes('hub-conv-names'), '群头不再有第三行成员名')
   assert(group.includes('DayDivider') && group.includes('dayLabel('), '群时间线有日期分隔线')
   assert(group.includes('insertMentionToken') && group.includes("t('hub.composer.mention')"), '@ 按钮真实插入并聚焦')
-  assert(group.includes('hub-composer-meta'), '群 composer 有 meta 行')
+  assert(group.includes('composer-meta'), '群 composer 有 meta 行')
 }
 
-// 4) 群头 +N 规则（AgentStack 行为不改，只消费）：≥5 人 = 前 3 + N。
+// 4) 群头 +N 规则：≥5 人 = 前 4 + N（demo 口径）。
 {
   const avatar = await load('avatar.ts')
   const members = Array.from({ length: 6 }, (_, i) => ({ id: `agt_${i}`, name: `A${i}`, state: 'idle' }))
   const plan = avatar.planStack(members)
-  eq(plan.members.length, 3, '6 人群头只画 3 个 sigil')
-  eq(plan.more, 3, '6 人群头显示 +3')
+  eq(plan.members.length, 4, '6 人群头画 4 个 Luna 头像')
+  eq(plan.more, 2, '6 人群头显示 +2')
   const two = avatar.planStack(members.slice(0, 2))
   eq(two.members.length, 2, '2 人群头全部画出')
   eq(two.more, 0, '2 人群头没有 +N')

@@ -251,7 +251,7 @@ export interface StackPlan {
 }
 
 /**
- * Group 叠放：2–4 个全显示；≥5 显示前 3 + `+N`。
+ * Group 叠放：2–4 个全显示；≥5 显示前 4 + `+N`（demo 口径）。
  * 状态层只画一次（lead），4 个环叠在一起会变成噪声。
  */
 export function planStack(
@@ -263,7 +263,7 @@ export function planStack(
   let state = highestState(states)
   // 群会话在跑：没有更高优先级（needs_attention/offline）时，lead 显示 working。
   if (opts?.groupRunning && state === 'idle') state = 'working'
-  const visible = input.length >= 5 ? input.slice(0, 3) : input.slice()
+  const visible = input.length >= 5 ? input.slice(0, 4) : input.slice()
   const members = visible.map((m, i) => ({
     id: m.id,
     responsibility: m.responsibility ?? '',

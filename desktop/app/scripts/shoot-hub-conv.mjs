@@ -101,7 +101,7 @@ async function shot(width, height, theme, kind) {
   await page.waitForTimeout(350)
   await openConversation(page, kind)
   await page.evaluate(() => {
-    const list = document.querySelector('.hub-list')
+    const list = document.querySelector('.hub-group-view .messages, .hub-dm .messages')
     if (list) list.scrollTop = 0
   })
   await page.waitForTimeout(250)
@@ -113,17 +113,17 @@ async function shot(width, height, theme, kind) {
       const b = el.getBoundingClientRect()
       return { left: Math.round(b.left), right: Math.round(b.right), width: Math.round(b.width) }
     }
-    const thread = rect(q('.hub-thread'))
-    const list = q('.hub-list')
+    const thread = rect(q('.messages-inner'))
+    const list = q('.messages')
     const listStyle = list ? getComputedStyle(list) : null
-    const bubble = rect(q('.hub-user-bubble'))
-    const ownerAvatar = rect(q('.hub-user-avatar'))
-    const agent = q('.hub-msg.agent')
-    const agentMain = rect(q('.hub-msg.agent .hub-msg-main'))
-    const dmSigil = q('.hub-dm-head .hub-conv-id > .sigil')
-    const groupStack = q('.hub-group-head .hub-conv-id > .agent-stack')
-    const title = q('.hub-conv-line strong')?.textContent?.trim() ?? ''
-    const header = q('.hub-conv-head')
+    const bubble = rect(q('.msg-row.user .user-bubble'))
+    const ownerAvatar = rect(q('.msg-row.user .owner-avatar'))
+    const agent = q('.msg-row.agent')
+    const agentMain = rect(q('.msg-row.agent .msg-main'))
+    const dmSigil = q('.hub-dm .chat-header > .avatar')
+    const groupStack = q('.hub-group-view .chat-header > .avatar-stack')
+    const title = q('.chat-header .chat-title .name')?.textContent?.trim() ?? ''
+    const header = q('.chat-header')
     return {
       themeAttr: document.documentElement.dataset.theme,
       scrollWidth: document.documentElement.scrollWidth,
@@ -150,24 +150,28 @@ async function shot(width, height, theme, kind) {
       ownerAvatarRightGap: ownerAvatar && thread ? Math.round(thread.right - ownerAvatar.right) : null,
       agentOffset: agentMain && thread ? Math.round(agentMain.left - thread.left) : null,
       agentBackground: agent ? getComputedStyle(agent).backgroundColor : null,
-      agentAuthor: q('.hub-msg.agent .hub-msg-name')?.textContent ?? null,
-      composerMeta: q('.hub-composer-meta')?.innerText.replace(/\n/g, ' | ') ?? null,
+      agentAuthor: q('.msg-row.agent .agent-name')?.textContent ?? null,
+      composerMeta: q('.hub-group-view .composer-meta, .hub-dm .composer-meta')?.innerText.replace(/\n/g, ' | ') ?? null,
       headerHeight: Math.round(header?.getBoundingClientRect().height ?? 0),
-      headerSubCount: header ? header.querySelectorAll('.hub-conv-sub').length : 0,
-      headerSubtitle: header?.querySelector('.hub-conv-sub')?.textContent?.trim() ?? null,
+      headerSubCount: header ? header.querySelectorAll('.chat-sub').length : 0,
+      headerSubtitle: header?.querySelector('.chat-sub')?.textContent?.trim() ?? null,
       listPadding: listStyle
         ? { top: listStyle.paddingTop, left: listStyle.paddingLeft }
         : null,
-      dateDivider: q('.hub-day-divider')?.textContent ?? null,
+      dateDivider: q('.date-divider')?.textContent ?? null,
     }
   })
   const failed = []
   if (m.scrollWidth > width) failed.push(`横向溢出 ${m.scrollWidth} > ${width}`)
-  if (m.bubbleRightGap !== 35) failed.push(`用户气泡右缘应留 35px（gap=${m.bubbleRightGap}）`)
+  const narrow = width <= 640
+  const wantBubbleGap = narrow ? 32 : 35
+  const wantOwnerGap = narrow ? 8 : 11
+  const wantAgentOffset = narrow ? 60 : 63
+  if (m.bubbleRightGap !== wantBubbleGap) failed.push(`用户气泡右缘应留 ${wantBubbleGap}px（gap=${m.bubbleRightGap}）`)
   if (m.ownerAvatar?.width !== 24) failed.push(`owner 头像应为 24px（${m.ownerAvatar?.width}）`)
-  if (m.ownerAvatarGap !== 11) failed.push(`owner 头像与气泡 gap 应为 11（${m.ownerAvatarGap}）`)
+  if (m.ownerAvatarGap !== wantOwnerGap) failed.push(`owner 头像与气泡 gap 应为 ${wantOwnerGap}（${m.ownerAvatarGap}）`)
   if (m.ownerAvatarRightGap !== 0) failed.push(`owner 头像未贴齐会话列右缘（${m.ownerAvatarRightGap}）`)
-  if (m.agentOffset !== 42) failed.push(`agent 正文左移应为 42（${m.agentOffset}）`)
+  if (m.agentOffset !== wantAgentOffset) failed.push(`agent 正文左移应为 ${wantAgentOffset}（${m.agentOffset}）`)
   if (m.agentBackground !== 'rgba(0, 0, 0, 0)') failed.push(`agent 消息有气泡底色（${m.agentBackground}）`)
   if (!m.agentAuthor) failed.push('agent 消息缺少作者头')
   if (!m.composerMeta) failed.push('composer 缺少 meta 行')
@@ -176,20 +180,20 @@ async function shot(width, height, theme, kind) {
   }
   const wide = width >= 1280
   if (wide && m.thread?.width !== 760) failed.push(`会话列应为 760px（${m.thread?.width}）`)
-  const wantPadding = width > 900
+  const wantPadding = width > 640
     ? { top: '30px', left: '28px' }
-    : { top: '14px', left: '12px' }
+    : { top: '16px', left: '12px' }
   if (m.listPadding?.top !== wantPadding.top || m.listPadding?.left !== wantPadding.left) {
     failed.push(`会话区 padding=${m.listPadding?.top}/${m.listPadding?.left}（应为 ${wantPadding.top}/${wantPadding.left}）`)
   }
   if (wide && m.headerHeight > 68) failed.push(`群/DM 头应 ≤68px（${m.headerHeight}）`)
   if (kind === 'dm') {
     if (m.headerSubCount !== 1) failed.push(`DM 头应为 2 行（sub=${m.headerSubCount}）`)
-    if (!m.dmSigil) failed.push('DM header 缺少独立 sigil')
+    if (!m.dmSigil) failed.push('DM header 缺少头像')
     else {
       if (m.dmSigil.role !== 'img') failed.push(`DM header sigil role=${m.dmSigil.role}（应为 img）`)
-      if (!m.dmSigil.label?.includes('Researcher')) failed.push(`DM header sigil aria-label=${m.dmSigil.label}`)
-      if (m.dmSigil.width !== 32) failed.push(`DM header sigil=${m.dmSigil.width}px（应为 32）`)
+      if (m.dmSigil.label && !m.dmSigil.label.includes('Researcher')) failed.push(`DM header avatar aria-label=${m.dmSigil.label}`)
+      if (m.dmSigil.width !== 44) failed.push(`DM header avatar=${m.dmSigil.width}px（应为 44）`)
     }
   }
   if (kind === 'group') {
@@ -230,7 +234,7 @@ for (const [width, height] of [[1440, 900], [390, 900]]) {
     await page.waitForTimeout(350)
     await openConversation(page, 'group')
     await page.evaluate(() => {
-      document.querySelector('.hub-event--task')?.scrollIntoView({ block: 'center' })
+      document.querySelector('.event-card--task')?.scrollIntoView({ block: 'center' })
     })
     await page.waitForTimeout(350)
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth)
@@ -256,23 +260,23 @@ for (const theme of THEMES) {
   await page.waitForTimeout(350)
   await openConversation(page, 'group')
   await page.evaluate(() => {
-    document.querySelector('.hub-event--approval')?.scrollIntoView({ block: 'center' })
+    document.querySelector('.event-card--approval')?.scrollIntoView({ block: 'center' })
   })
   await page.waitForTimeout(350)
   const m = await page.evaluate(() => {
     const q = (s) => document.querySelector(s)
     const color = (s) => (q(s) ? getComputedStyle(q(s)).color : null)
     return {
-      handoffCount: document.querySelectorAll('.hub-event--handoff').length,
-      approvalCount: document.querySelectorAll('.hub-event--approval').length,
-      handoffText: q('.hub-event--handoff')?.textContent?.trim() ?? '',
-      approvalText: q('.hub-event--approval')?.textContent?.trim() ?? '',
-      handoffIcon: color('.hub-event--handoff .hub-event-icon'),
-      approvalIcon: color('.hub-event--approval .hub-event-icon'),
-      approvalBorder: q('.hub-event--approval') ? getComputedStyle(q('.hub-event--approval')).borderTopColor : null,
-      taskBorder: q('.hub-event--task') ? getComputedStyle(q('.hub-event--task')).borderTopColor : null,
-      approvalTitle: color('.hub-event--approval .hub-event-title'),
-      taskTitle: color('.hub-event--task .hub-event-title'),
+      handoffCount: document.querySelectorAll('.event-card--handoff').length,
+      approvalCount: document.querySelectorAll('.event-card--approval').length,
+      handoffText: q('.event-card--handoff')?.textContent?.trim() ?? '',
+      approvalText: q('.event-card--approval')?.textContent?.trim() ?? '',
+      handoffIcon: color('.event-card--handoff .event-icon'),
+      approvalIcon: color('.event-card--approval .event-icon'),
+      approvalBorder: q('.event-card--approval') ? getComputedStyle(q('.event-card--approval')).borderTopColor : null,
+      taskBorder: q('.event-card--task') ? getComputedStyle(q('.event-card--task')).borderTopColor : null,
+      approvalTitle: color('.event-card--approval .event-title'),
+      taskTitle: color('.event-card--task .event-title'),
       scrollWidth: document.documentElement.scrollWidth,
     }
   })

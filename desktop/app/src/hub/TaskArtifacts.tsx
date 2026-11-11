@@ -1,9 +1,9 @@
 import { useT } from '../i18n'
 import type { HubTaskArtifact } from './types'
 
-// 任务卡里的产物区：与运行时的 ArtifactsBlock 同一套「文件图标 + 名称 + 路径 + 计量」语言，
-// 但用 Hub 的 token 重新排版（Hub 不挂 data-skin=runtime，不能直接复用那份作用域 CSS）。
-// 这里只做展示；预览/定位动作由外层决定，避免出现无 handler 的假按钮。
+// 任务卡里的产物区：demo 的 artifact-row 解剖（图标 + 名称 + meta），
+// 不再套一层「Artifacts 标题 + 大卡片」；动作由外层决定，不放假按钮。
+
 const EXT: Record<string, string> = {
   py: 'PY', go: 'GO', rs: 'RS', java: 'JAVA',
   ts: 'TS', tsx: 'TS', js: 'JS', jsx: 'JS', mjs: 'JS', cjs: 'JS',
@@ -19,37 +19,27 @@ export default function TaskArtifacts({ artifacts }: { artifacts: HubTaskArtifac
   const t = useT()
   if (artifacts.length === 0) return null
   return (
-    <section className="hub-artifacts" aria-label={t('artifacts.aria').replace('{n}', String(artifacts.length))}>
-      <header className="hub-artifacts-head">
-        <span className="hub-event-kicker">Artifacts</span>
-        <span className="hub-artifacts-title"><b>{artifacts.length}</b> {t('artifacts.files')}</span>
-      </header>
-      <ul className="hub-artifacts-list">
-        {artifacts.map((a, i) => {
-          const path = a.path ?? ''
-          const name = a.name || path.split('/').pop() || '文件'
-          const created = a.kind === 'created'
-          const modified = a.kind === 'modified'
-          return (
-            <li className="hub-artifact" key={`${path || a.name}-${i}`} title={path || name}>
-              <span className="hub-artifact-badge" aria-hidden="true">{badgeOf(name)}</span>
-              <span className="hub-artifact-info">
-                <span className="hub-artifact-name">{name}</span>
-                {path && path !== name ? <span className="hub-artifact-path">{path}</span> : null}
-              </span>
-              <span className="hub-artifact-meta">
-                {created || modified ? (
-                  <span className={`hub-artifact-kind ${created ? 'created' : 'modified'}`}>
-                    {t(created ? 'artifacts.created' : 'artifacts.modified')}
-                  </span>
-                ) : null}
+    <section className="event-artifacts" aria-label={t('artifacts.aria').replace('{n}', String(artifacts.length))}>
+      {artifacts.map((a, i) => {
+        const path = a.path ?? ''
+        const name = a.name || path.split('/').pop() || '文件'
+        const created = a.kind === 'created'
+        const modified = a.kind === 'modified'
+        return (
+          <div className="artifact-line" key={`${path || a.name}-${i}`} title={path || name}>
+            <span className="artifact-badge" aria-hidden="true">{badgeOf(name)}</span>
+            <span className="artifact-copy">
+              <span className="artifact-name">{name}</span>
+              <span className="artifact-meta">
+                {path && path !== name ? <span className="artifact-path">{path}</span> : null}
+                {created || modified ? <span>{t(created ? 'artifacts.created' : 'artifacts.modified')}</span> : null}
                 {a.size ? <span>{bytesText(a.size)}</span> : null}
                 {a.lines ? <span>{t('artifacts.lines').replace('{n}', String(a.lines))}</span> : null}
               </span>
-            </li>
-          )
-        })}
-      </ul>
+            </span>
+          </div>
+        )
+      })}
     </section>
   )
 }

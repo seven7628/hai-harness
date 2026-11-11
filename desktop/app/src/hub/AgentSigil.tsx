@@ -1,100 +1,98 @@
+import { useLayoutEffect, useRef } from 'react'
 import type { CSSProperties } from 'react'
+import type { AvatarState } from './avatar'
 import {
-  SHAPES,
-  SIGIL_VIEWBOX,
-  TRAITS,
-  deriveSigil,
-  isAvatarState,
-  type AvatarState,
-  type SigilSize,
-  type TraitMark,
-} from './avatar'
+  ensureLunaScene,
+  lunaColor,
+  lunaDamp,
+  lunaExpression,
+  lunaPhase,
+  lunaSamples,
+} from './lunaAvatar'
 
-// 智能体头像 sigil v2 的渲染层（方案 03 §3.3.3–3.3.7）。
+// 头像 = demo 的 Luna 球面头像（mascot-bots.js + luna-face.js），不重画。
 //
-// 只消费 avatar.ts 的 view model：形状/色相/内侧标记全部来自确定性推导，
-// 状态层只画环/弧/点（stroke-dashoffset 与 opacity，不触发布局）。
-// 主题靠 [data-theme='ink'|'paper'] 的 CSS 变量，不在 TS 里判断深浅色。
-//
-// 无障碍：与名字同一行的头像传 label=null → aria-hidden；独立出现时传 label
-// （含名字/状态词）→ role="img" + aria-label。
+// 组件只声明“谁 / 什么状态 / 多大 / 要不要读屏标签”，
+// 几何、眼形、眨眼、视线、点头全部交给 vendor 里的同一套引擎。
+// 外层类名同时保留 `avatar`（demo CSS 的动效/状态点）和 `luna-avatar`（侧栏等
+// 在 .hub-demo 作用域外也能拿到基础尺寸）。
 
-function traitNode(mark: TraitMark, i: number) {
-  if (mark.type === 'circle') {
-    return <circle key={i} className="trait" cx={mark.cx} cy={mark.cy} r={mark.r} />
-  }
-  if (mark.type === 'rect') {
-    return <rect key={i} className="trait" x={mark.x} y={mark.y} width={mark.width} height={mark.height} rx={mark.rx} />
-  }
-  return <path key={i} className="trait line" style={{ strokeWidth: mark.width }} d={mark.d} />
-}
-
-function statusLayer(state: AvatarState) {
-  if (state === 'idle') {
-    return <circle className="ring" cx="24" cy="24" r="22" opacity=".55" />
-  }
-  if (state === 'working') {
-    // 270° 弧：dasharray/dashoffset 在 CSS 里（旋转只改 dashoffset，不依赖 transform-origin）。
-    return <circle className="ring arc" cx="24" cy="24" r="22" strokeWidth="2" />
-  }
-  if (state === 'needs_attention') {
-    // 加粗环 + 右上实心点：与 idle 的区别是「点 + 环更重」，与 working 的区别是没有缺口。
-    return (
-      <>
-        <circle className="ring thick" cx="24" cy="24" r="22" />
-        <circle className="dot" cx="38" cy="10" r="5" />
-      </>
-    )
-  }
-  // offline：只有 2.5 单位轮廓，无环无点。
-  return null
-}
+const SIZE_CLASS: Record<number, string> = { 28: 'xs', 52: 'lg' }
 
 export default function AgentSigil({
   agentId,
+  name,
   responsibility,
   state = 'idle',
-  size = 32,
+  size = 44,
   status = true,
   label,
   className = '',
   style,
 }: {
-  /** 身份键：同一 id + 职责在任何位置渲染同一图形。 */
   agentId?: string | null
-  /** 职责短句（HubAgent.role）；只影响内侧标记。 */
+  /** 颜色散列的辅助输入；不传时只按 id。 */
+  name?: string | null
+  /** 职责短句（HubAgent.role）；决定固定身份色。 */
   responsibility?: string | null
   state?: AvatarState
-  size?: SigilSize
-  /** false：只画身份，不画状态层（Group 叠放的其余成员）。 */
+  size?: number
+  /** false：只画身份，不画状态点（头像叠放里的非 lead 成员）。 */
   status?: boolean
   /** 有值 → role="img" + aria-label；null/undefined → aria-hidden（名字已在同一行）。 */
   label?: string | null
   className?: string
   style?: CSSProperties
 }) {
-  const identity = deriveSigil(agentId, responsibility)
-  const shown = isAvatarState(state) ? state : 'idle'
-  const sigilState = status ? shown : 'none'
+  const ref = useRef<HTMLSpanElement>(null)
+  const id = agentId || name || 'agent'
+  const px = size
+  const st = status ? state : 'idle'
+  const expr = lunaExpression(st as 'idle' | 'working' | 'needs_attention' | 'offline')
+  const fill = lunaColor(id, name ?? '', responsibility ?? '')
+
+  useLayoutEffect(() => {
+    const host = ref.current
+    const sc = ensureLunaScene()
+    if (!host || !sc) return
+    sc.sync(host.parentElement ?? document)
+    const svg = host.querySelector('svg[data-luna-face]') as SVGElement | null
+    if (!svg) return
+    const want = lunaExpression(st as 'idle' | 'working' | 'needs_attention' | 'offline')
+    if (host.dataset.baseExpr !== want) {
+      host.dataset.baseExpr = want
+      sc.setBase(svg, want)
+      sc.setExpr(svg, want)
+    }
+  }, [st, id, fill])
+
   return (
     <span
-      className={`sigil s${size}${className ? ` ${className}` : ''}`}
+      ref={ref}
+      className={`avatar luna-avatar${SIZE_CLASS[px] ? ` ${SIZE_CLASS[px]}` : ''}${className ? ` ${className}` : ''}`}
       data-agent-id={agentId || undefined}
-      data-shape={identity.shapeId}
-      data-hue={identity.hueId}
-      data-trait={identity.traitId}
-      data-state={sigilState}
-      data-size={size}
+      data-slug={agentId || undefined}
+      data-state={st}
+      data-size={px}
       role={label ? 'img' : undefined}
       aria-label={label || undefined}
       aria-hidden={label ? undefined : true}
-      style={style}
+      style={{ width: px, height: px, ...style }}
     >
-      <svg viewBox={`0 0 ${SIGIL_VIEWBOX} ${SIGIL_VIEWBOX}`} focusable="false" aria-hidden="true">
-        <path className="shape" d={SHAPES[identity.shape].d} />
-        <g className="traits">{TRAITS[identity.trait].marks.map(traitNode)}</g>
-        {status ? <g className="status">{statusLayer(shown)}</g> : null}
-      </svg>
+      <svg
+        data-luna-face
+        data-expr={expr}
+        data-fill={fill}
+        data-eye="var(--eye,#0b0b0a)"
+        data-phase={lunaPhase(id)}
+        data-samples={lunaSamples(px)}
+        data-damp={lunaDamp(px)}
+        viewBox="0 0 240 240"
+        width={px}
+        height={px}
+        aria-hidden="true"
+        focusable="false"
+      />
     </span>
   )
 }

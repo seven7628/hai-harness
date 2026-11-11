@@ -12,7 +12,7 @@ export function StreamingMessage({ draft, name, agent }: { draft: HubStreamDraft
       agent={agent}
       name={name}
       role={[agent?.role, agent?.groupRole === 'owner' ? '群主' : ''].filter(Boolean).join(' · ') || undefined}
-      tags={<span className="hub-msg-tag streaming">{t('hub.streaming')}</span>}
+      tags={<span className="agent-tag reply">{t('hub.streaming')}</span>}
       className="hub-group-msg streaming"
     >
       <div className="hub-stream-text" aria-live="polite">

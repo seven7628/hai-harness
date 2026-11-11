@@ -87,13 +87,13 @@ assert(humanStart >= 0 && humanEnd > humanStart, '找到 human 分支边界（�
 const humanBranch = bubbleSrc.slice(humanStart, humanEnd)
 assert(humanBranch.includes("msg.visibility === 'owner'"), '人类 owner-only 消息也保留仅你可看标记（human 分支）')
 assert(taskSrc.includes('TaskArtifacts') && taskSrc.includes('context?: ReactNode'), '任务卡使用统一产物组件并保留上下文入口')
-assert(artifactsSrc.includes("t('artifacts.files')"), '产物标签走 i18n')
-assert(cssSrc.includes('container-type: inline-size') && cssSrc.includes('@container'), '产物布局靠容器查询，不跟视口断点走')
+assert(artifactsSrc.includes("t('artifacts.aria')") && artifactsSrc.includes("artifacts.created"), '产物标签走 i18n')
+assert(cssSrc.includes('.event-artifacts') && cssSrc.includes('.artifact-line'), '产物走 demo 的 artifact-line 解剖')
 assert(mockSrc.includes("visibility: 'owner'") && mockSrc.includes("sender: { kind: 'system' }"), 'mock 覆盖 owner-only 与系统指令两条路径')
 
 
-// 7) 头像 sigil v2：所有渲染路径都不再用 emoji/首字母；群叠放 +N；i18n 状态 key。
-const avatarSrc = readFileSync(join(hubDir, 'avatar.ts'), 'utf8')
+// 7) 头像：demo 的 Luna 引擎（mascot-bots.js + luna-face.js），不再有 sigil v2 / emoji。
+const lunaSrc = readFileSync(join(hubDir, 'lunaAvatar.ts'), 'utf8')
 const sigilSrc = readFileSync(join(hubDir, 'AgentSigil.tsx'), 'utf8')
 const stackSrc = readFileSync(join(hubDir, 'AgentStack.tsx'), 'utf8')
 const badgeSrc = readFileSync(join(hubDir, 'AgentBadge.tsx'), 'utf8')
@@ -103,55 +103,52 @@ const sidebarSrc = readFileSync(join(hubDir, 'HubSidebar.tsx'), 'utf8')
 const hubSurfaceSrc = readFileSync(join(hubDir, 'HubSurface.tsx'), 'utf8')
 const inspectorSrc = readFileSync(join(hubDir, 'HubInspector.tsx'), 'utf8')
 const groupSrc = readFileSync(join(hubDir, 'GroupView.tsx'), 'utf8')
+const convoSrc = readFileSync(join(hubDir, 'ConversationMessage.tsx'), 'utf8')
 const i18nSrc = readFileSync(join(hubDir, '..', 'i18n.ts'), 'utf8')
+const demoCss = readFileSync(join(hubDir, 'demo.css'), 'utf8')
 
 const count = (haystack, needle) => haystack.split(needle).length - 1
-assert(badgeSrc.includes('AgentSigil') && !badgeSrc.includes('avatar.value') &&
-  !badgeSrc.includes('name.slice(0, 1)'), 'AgentBadge 用 sigil，不再渲染 emoji/首字母')
-assert(mentionSrc.includes('AgentSigil') && !mentionSrc.includes('hub-mention-avatar') &&
-  !mentionSrc.includes('hub-mention-dot'), '@ 徽章用 sigil，旧的 emoji 头像/圆点已移除')
-assert(editorSrc.includes('AgentSigil') && !editorSrc.includes('setEmoji') &&
-  !editorSrc.includes("className=\"hub-avatar\""), '编辑器预览用 sigil，emoji 输入已移除（表单字段保留兼容）')
+assert(sigilSrc.includes('data-luna-face') && sigilSrc.includes('ensureLunaScene') &&
+  lunaSrc.includes("import './vendor/mascot-bots.js'") && lunaSrc.includes("import './vendor/luna-face.js'"),
+  '头像直接复用 demo 的 Luna 引擎（vendor 脚本 + data-luna-face）')
+assert(lunaSrc.includes('ROLE_RULES') && lunaSrc.includes('inspecting') &&
+  lunaSrc.includes('surprised') && lunaSrc.includes('sleepy'),
+  'demo 的职责配色与状态表情映射原样保留')
+assert(!sigilSrc.includes('statusLayer') && !sigilSrc.includes('SHAPES['),
+  'AgentSigil 不再自绘几何 sigil')
+assert(stackSrc.includes('planStack') && stackSrc.includes('avatar-more') &&
+  stackSrc.includes('plan.more > 0'), 'AgentStack 用 planStack 渲染 +N 徽标')
+assert(cssSrc.includes('.luna-avatar') && demoCss.includes('.hub-demo .avatar'),
+  'demo 头像样式已纳入 hub.css + demo.css')
+assert(demoCss.includes('.hub-demo .avatar') && demoCss.includes('.hub-demo .msg-row') &&
+  demoCss.includes('.hub-demo .composer'), 'demo DOM/CSS 已按 .hub-demo 作用域原样移植')
+assert(badgeSrc.includes('AgentSigil') && !badgeSrc.includes('name.slice(0, 1)'),
+  'AgentBadge 用 Luna 头像，不再渲染 emoji/首字母')
+assert(mentionSrc.includes('AgentSigil') && !mentionSrc.includes('hub-mention-dot'),
+  '@ 徽章用 Luna 头像，旧圆点已移除')
+assert(editorSrc.includes('AgentSigil') && !editorSrc.includes('setEmoji'),
+  '编辑器预览用 Luna 头像，emoji 输入已移除（表单字段保留兼容）')
 assert(groupSrc.includes('AgentStack') && !groupSrc.includes('hub-member-dot'),
   '群头成员叠图走 AgentStack，首字母圆点已移除')
-assert(sidebarSrc.includes('AgentStack') && !sidebarSrc.includes('hub-member-dot'),
-  '侧栏群行走 AgentStack')
+assert(sidebarSrc.includes('AgentStack') && sidebarSrc.includes('size={44}'),
+  '侧栏单人头像按 demo 用 44px')
 assert(inspectorSrc.includes('AgentStack') && inspectorSrc.includes('AgentSigil'),
-  '详情页群概览用叠放、成员/智能体用 sigil')
+  '详情页群概览用叠放、成员/智能体用 Luna 头像')
 assert(!sidebarSrc.includes('HubAvatar') && !inspectorSrc.includes('HubAvatar') &&
   !groupSrc.includes('MemberStack'), '不再有两套头像实现')
-assert(sigilSrc.includes('data-state') && sigilSrc.includes('statusLayer'),
-  '状态层由 AgentSigil 统一渲染（data-state 供 CSS 动画/主题）')
-assert(avatarSrc.includes('fnv1a(`avatar1|${id}`)') &&
-  avatarSrc.includes('fnv1a(`avatar1|${id}|${resp}`)'), '身份散列公式与 demo 逐字一致（avatar1|id / avatar1|id|resp）')
-assert(avatarSrc.includes("if (input.pending) return 'needs_attention'") &&
-  avatarSrc.includes("if (input.deleted) return 'offline'") &&
-  avatarSrc.includes("if (input.running) return 'working'"),
-  '状态映射 needs_attention > offline > working > idle')
-assert(avatarSrc.includes('input.length >= 5 ? input.slice(0, 3) : input.slice()'),
-  'Group 叠放：2–4 全显示、≥5 前 3 +N')
-assert(stackSrc.includes('planStack') && stackSrc.includes('agent-stack-more') &&
-  stackSrc.includes('plan.more > 0'), 'AgentStack 用 planStack 渲染 +N 徽标')
-assert(cssSrc.includes("[data-theme='ink'] .sigil") && cssSrc.includes("[data-theme='paper'] .sigil"),
-  'ink/paper 各自一套 sigil 主题值')
+assert(convoSrc.includes('size={52}') && convoSrc.includes('agent-head') &&
+  convoSrc.includes('agent-text') && convoSrc.includes('user-bubble'),
+  '消息区按 demo 的 52px 头像 + agent-head/agent-text/user-bubble 结构')
+assert(hubSurfaceSrc.includes('size={44}') && groupSrc.includes('<AgentStack') &&
+  groupSrc.includes('size={28}'), 'DM 头 44 / 群头叠放 28（demo 尺寸）')
+assert(cssSrc.includes('.hub-demo .messages') && cssSrc.includes('.hub-demo .chat-header'),
+  '会话区采用 demo 的 chat-header/messages/composer 布局')
 assert(cssSrc.includes('prefers-reduced-motion') && cssSrc.includes('animation: none !important'),
   'reduced-motion 下状态动画全部关闭')
-assert(!cssSrc.includes('.hub-avatar {') && !cssSrc.includes('.hub-avatar.ring') &&
-  !cssSrc.includes('.hub-agent-avatar') && !cssSrc.includes('.hub-member-dot'),
-  '旧 .hub-avatar/.hub-agent-avatar/.hub-member-dot 死样式已清理')
-assert(/\.sigil\.s24 \.trait\s*\{\s*display:\s*none/.test(cssSrc),
-  '24px 渐进披露：内侧 trait 必须隐藏（不是靠 JS 分叉）')
-assert(stackSrc.includes('status={m.withStatus}'), 'AgentStack 只给 lead 画状态层（peer status=false）')
-assert(sidebarSrc.includes('AgentStack') && sidebarSrc.includes('size={24}'),
-  '侧栏行头像用 24（不再压过 ChatHeader）')
-assert(hubSurfaceSrc.includes('size={32}') && badgeSrc.includes('size={32}'),
-  'ChatHeader 用 32、消息/任务徽章用 32（层级不再倒挂）')
-assert(cssSrc.includes('.hub-mention .sigil { margin-block: -3px; }'),
-  '@ 徽章用负 margin 抵消 24px 头像撑高的行高')
-assert(cssSrc.includes('min-width: 44px'), '可点击 badge 命中区同时满足 44x44')
-assert(hubSurfaceSrc.includes('agentSigilLabel(t, activeAgent.name, activeState)') &&
-  hubSurfaceSrc.includes('label={agentSigilLabel('),
-  'DM ChatHeader 独立头像带名字+状态 aria-label（不是 aria-hidden）')
+assert(!cssSrc.includes('.hub-avatar {') && !cssSrc.includes('.hub-agent-avatar') &&
+  !cssSrc.includes('.hub-member-dot'), '旧 .hub-avatar/.hub-agent-avatar/.hub-member-dot 死样式已清理')
+assert(hubSurfaceSrc.includes('agentSigilLabel(t, activeAgent.name, activeState)'),
+  'DM ChatHeader 独立头像带名字+状态 aria-label')
 assert(inspectorSrc.includes('agentSigilLabel(t, agent.name, agentState)'),
   '详情 hero 独立头像同样带名字+状态 aria-label')
 assert(groupSrc.includes('name: group.name') && inspectorSrc.includes('name: group.name'),
