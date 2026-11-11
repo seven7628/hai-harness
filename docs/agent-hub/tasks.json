@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "demo 源码 1:1 移植（会话 + Luna 头像）已实现，独立 Review 进行中；P5-02 owner 隔离已 PASS",
+  "subtitle": "demo 源码 1:1 移植（会话 + Luna 头像）PASS；P5-02 owner 隔离 PASS；左栏/右栏边界已记录",
   "updated": "2026-11-19",
   "phases": [
     {
@@ -1505,11 +1505,11 @@
       ],
       "acceptance": "直接复制 demo 的 DOM/CSS/头像引擎；只替换数据与事件绑定；桌面/手机都使用 Luna 头像；1440 群/DM 与 390 窄屏无横向溢出；任务卡/handoff/approval/路由/owner-only/流式/停止/深链行为不丢；独立 Review PASS。",
       "tests": "npx tsc --noEmit && npm run test:p4 && npm run test:css && npm run test:p4:go && npm run build；Playwright 1440/390 群+DM；go test ./desktop/bridge -run 'TestMobile|TestHook'",
-      "commit": "424d6e7 + eb7ce39 + b7e9cae + 182b71c",
-      "status": "review",
-      "note": "用户否决上一版自制视觉后，按 demo 源文件直接移植；桌面 424d6e7、手机 eb7ce39；独立 Review task-zkce8kd6 进行中。",
-      "review": "",
-      "reviewNote": ""
+      "commit": "424d6e7 + eb7ce39 + b7e9cae + 182b71c + d00e663 + 6affc02 + 7f14b80",
+      "status": "done",
+      "note": "用户否决上一版自制视觉后，按 demo 源文件直接移植；桌面 424d6e7、手机 eb7ce39；B1（事件卡解剖）已在 d00e663 修复并经 delta review PASS。左栏/右栏仍保留现有 Hub 导航，边界见 DEMO-PORT.md。",
+      "review": "passed",
+      "reviewNote": "独立 Review task-zkce8kd6：首轮 CHANGES_REQUESTED（B1 事件卡未按 demo 的 msg-row+30px spacer，卡片左缘 0 而非 41/38；event-body/actions 缩进自写）；d00e663 修复后 delta review task-gk5vhda6 PASS：1440/640/390 卡片左缘 41/41/38、event-body 38px/11.5px、actions 9px 0 0 38px/gap6；tsc + test:p4 14 子脚本 + shoot-hub-conv 全绿；头像确认逐字节复用 luna-face.js，owner-only/observer/seq/停止/派任务/深链接线未丢。"
     },
     {
       "id": "P5-01",
@@ -2526,9 +2526,11 @@
       "note": "结构已合并且 Review PASS；但与 demo 原图在字号/密度/卡片/头像上仍有偏差，用户要求“直接 copy 源码”，由 P4-UI-7 重做视觉层。"
     },
     "P4-UI-7": {
-      "status": "review",
-      "commit": "424d6e7 + eb7ce39 + b7e9cae + 182b71c",
-      "note": "用户否决上一版自制视觉后，按 demo 源文件直接移植；桌面 424d6e7、手机 eb7ce39；独立 Review task-zkce8kd6 进行中。"
+      "status": "done",
+      "commit": "424d6e7 + eb7ce39 + b7e9cae + 182b71c + d00e663 + 6affc02 + 7f14b80",
+      "review": "passed",
+      "reviewNote": "独立 Review task-zkce8kd6：首轮 CHANGES_REQUESTED（B1 事件卡未按 demo 的 msg-row+30px spacer，卡片左缘 0 而非 41/38；event-body/actions 缩进自写）；d00e663 修复后 delta review task-gk5vhda6 PASS：1440/640/390 卡片左缘 41/41/38、event-body 38px/11.5px、actions 9px 0 0 38px/gap6；tsc + test:p4 14 子脚本 + shoot-hub-conv 全绿；头像确认逐字节复用 luna-face.js，owner-only/observer/seq/停止/派任务/深链接线未丢。",
+      "note": "用户否决上一版自制视觉后，按 demo 源文件直接移植；桌面 424d6e7、手机 eb7ce39；B1（事件卡解剖）已在 d00e663 修复并经 delta review PASS。左栏/右栏仍保留现有 Hub 导航，边界见 DEMO-PORT.md。"
     },
     "P5-02": {
       "status": "done",
@@ -2541,12 +2543,12 @@
   "reviewGate": {
     "policy": "功能冻结：所有 status=review 的任务必须先拿到独立 Review 结论并修完 blocking，才允许进入下一阶段/新功能。P2.5 基础设施前置：P2.5-01..07 完成并 Review 后才开 P3b-01；P2.5-08 可与 P3b 并行。",
     "audit": {
-      "done_passed": 79,
-      "in_review": 1,
+      "done_passed": 80,
+      "in_review": 0,
       "not_started": 0,
       "in_review_breakdown": {
         "re_review_pending": 0,
-        "initial_pending": 1
+        "initial_pending": 0
       }
     },
     "batches": [
