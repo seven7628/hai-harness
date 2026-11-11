@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "demo 源码 1:1 移植（会话 + Luna 头像）PASS；P5-02 owner 隔离 PASS；P5-03 运行位收敛 PASS；左栏/右栏边界已记录",
+  "subtitle": "demo 源码 1:1 移植 PASS；P5-02 owner 隔离 PASS；P5-03 运行位 PASS；P5-04..07 §6.1 第 0 批 PASS；左栏/右栏边界已记录",
   "updated": "2026-11-19",
   "phases": [
     {
@@ -1625,6 +1625,102 @@
       "note": "三轮复审：P5-03b 修同步子收敛与 BR-03 残留澄清；P5-03c 修暖恢复误杀异步子 run（agentDetached + RunNode.TaskID）；P5-03d 把收敛作用域收窄到被落地的 run 树并补场景 40/41。P5-03d 复审 task-aq9uj36e PASS；depth-2 反例按 N-1 修正为「当前桌面端不可达的防御性覆盖」，N7/N8 仍为 BR-03 残留。",
       "review": "passed",
       "reviewNote": "task-aq9uj36e PASS（P5-03d）：roots 为空不收、根自身排除、kind!=='run' 排除、遇 task_id 不收不下沉、节点+blocks/agentDetached 双来源、三处调用点接线、injected 不收敛、同步子状态映射均核实；STORE_TEST_PASS 41 场景、tsc、test:p4 全绿；变异 A/C/E/F/G 定向红。非阻塞 N-1（maxSpawnDepth=2 只是深度上限，当前 desktop spawn 全 Background=true、无 task_id 的 runSync 不可达）已在同一收口补丁修正为防御性覆盖；N-2 已补「done 根不再收迟到的同步子」边界说明；N-3 roots 区分暂无专属 fixture。"
+    },
+    {
+      "id": "P5-04",
+      "phase": "P5",
+      "title": "§6.1 第 0 批：BR-21 跨工作区沙箱根错配（预览器槽位 / hookTrust owner / IM 归属）",
+      "deps": [
+        "P5-02"
+      ],
+      "files": [
+        "desktop/bridge/main.go",
+        "desktop/bridge/workspace_slots.go",
+        "desktop/bridge/workspace_slots_test.go",
+        "desktop/bridge/hooks_wire.go",
+        "desktop/bridge/hooks_commands.go",
+        "desktop/bridge/hooks_owner_test.go",
+        "desktop/bridge/hooks_hub_test.go",
+        "desktop/bridge/owner_wire.go",
+        "desktop/bridge/im_bridge.go",
+        "desktop/bridge/im_commands.go",
+        "desktop/bridge/im_owner_test.go",
+        "desktop/bridge/plugins.go",
+        "hooks/trust.go",
+        "hooks/runner.go",
+        "hooks/adapter.go",
+        "hooks/trust_owner_test.go",
+        "owner/owner.go",
+        "owner/owner_test.go",
+        "plugin/im/plugin.go",
+        "im/config.go",
+        "im/router.go"
+      ],
+      "acceptance": "预览器 xlsx/docx/pptx 按工作区建槽，沙箱读写根只来自槽位；三个预览命令与释放路径（delete/shutdown/releaseAll）覆盖；hookTrust 实例进程级一份、条目按 workspace:/agent:/group: owner 隔离，空 owner fail-closed 且旧全局条目只对 workspace 维兼容；IM 连接进程级共享、启用/路由/投递按 owner 隔离，A 归属关闭不掐断 B；并发 -race 干净。独立 Review PASS。",
+      "tests": "HOME=$(mktemp -d) GO_CODE_HOME=$(mktemp -d) go test ./desktop/bridge -run 'Preview|WorkspaceSlot|Hook|IM|Owner' -count=1 && go test ./hooks ./owner -count=1 && go vet ./hooks ./owner ./im ./plugin/im ./desktop/bridge",
+      "commit": "6b5504c + f50739a + 1357d3c",
+      "status": "done",
+      "note": "§6.1 第 0 批的沙箱面。复审 task-m933rrjv PASS：没有找到「传错 workspace 不报错、静默越权」的新路径；真实 Seatbelt 探针证明写 B 根被拒。残余 NB-2：legacy 迁移条目对所有 workspace:* 生效（本机 v1 hooks-state.json 即实例，属显式取舍，需收敛计划）。",
+      "review": "passed",
+      "reviewNote": "task-m933rrjv PASS：previewSlots（槽 key 工作区、根只来自槽位、三命令/释放/并发）、hookTrust（单实例 + owner 分表、空 owner fail-closed、legacy 仅 workspace 回退）、IM（共享连接 + OwnerEnabled/RouteConfig 同源 + 投递闸门）、回收四面全过；56 用例 + -race、全包 108s、go vet 全绿；12 个变异 9 红。非阻塞：NB-1 槽 key 未 filepath.Abs/Clean（/ws/a 与 /ws/a/ 两槽，释放漏）；NB-2 legacy 对所有 workspace 生效（真实 v1 文件，建议首次确认逐 workspace 重发或时间窗）；NB-3 shutdownWorkspace 对未登记 workspace 提前 return 不释放槽（32 上限兜底）；NB-4「关 A 不掐断 B 连接」连接层无回归测试；NB-5 hubHookOwner 接线无端到端测试；NB-6 RoutesForOwner 两个实现无生产调用/无测试；NB-7 im_route_set/del 收权不对称、im/plugin/im 无测试文件。"
+    },
+    {
+      "id": "P5-05",
+      "phase": "P5",
+      "title": "§6.1 第 0 批：BR-04 主进程 webContents.send 判空（窗口销毁不再抛进 readline）",
+      "deps": [],
+      "files": [
+        "desktop/app/electron/main.ts",
+        "desktop/app/electron/embed.ts",
+        "desktop/app/electron/renderer-send.ts",
+        "desktop/app/electron/renderer-send-test.ts",
+        "desktop/app/package.json"
+      ],
+      "acceptance": "所有渲染进程发送收敛到 renderer-send.ts 唯一出口；mainWindow/webContents 为 null 或已销毁、send 抛异常时不抛；返回值 true=已交给 webContents / false=丢弃，深链失败回队、flush 不误判送达；main.ts/embed.ts 无裸 webContents.send。独立 Review PASS。",
+      "tests": "cd desktop/app && npm run test:renderer-send && npx tsc -p tsconfig.electron.json --noEmit && npx eslint electron/renderer-send.ts electron/renderer-send-test.ts electron/main.ts electron/embed.ts",
+      "commit": "c3ee814",
+      "status": "done",
+      "note": "§6.1 第 0 批。复审 task-p93ywydm PASS：8 个发送点全部收敛，真 Electron 33.4.11 销毁窗口探针无 uncaughtException；5 个判空/返回值变异红。",
+      "review": "passed",
+      "reviewNote": "task-p93ywydm PASS：renderer-send.ts 的 !win / isDestroyed / !wc / wc.isDestroyed / send try-catch 完整；返回值契约与调用点一致；grep 无裸 webContents.send；深链队列/rendererReady 复位/16ms flush/command_response 保序未变；test:renderer-send 11/11，tsconfig.electron 与 src tsc 均 0 错误；M1-M5 变异全红。非阻塞：N1 main.ts:48 深链仍手写 mainWindow.webContents.isDestroyed（建议交给 sender）；N2 renderer-send.ts:74 webContents getter 在 try 外（可抛）；N3 stats/lastDropReason 无生产消费者；N5 源码守卫可被 webContents?.send / send?. 绕过；N7 package.json 的 test:embed-v2 引用被 gitignore 的 *.test.ts，干净检出会中断 npm test，新测试链可能跑不到。"
+    },
+    {
+      "id": "P5-06",
+      "phase": "P5",
+      "title": "§6.1 第 0 批：GO-11 cronSettings 三态（缺键不再被零值当成显式关闭）",
+      "deps": [],
+      "files": [
+        "desktop/bridge/providers.go",
+        "desktop/bridge/cron.go",
+        "desktop/bridge/main.go",
+        "desktop/bridge/cron_settings_test.go"
+      ],
+      "acceptance": "cronSettings.Enabled/AutoClean 为 *bool；nil/缺键/JSON null/坏 JSON/只带 auto_clean 的升级场景默认 true；显式 false 保持关闭；读侧全部走 enabledOn/autoCleanOn；Go 从不把缺键固化成显式值；前端无关保存不凭空写 cron 段。独立 Review PASS。",
+      "tests": "cd desktop/bridge && go test ./ -run 'CronSettings|CronListData|Cron' -count=1",
+      "commit": "540f801",
+      "status": "done",
+      "note": "§6.1 第 0 批。复审 task-z49yfgh2 PASS：三态语义/默认/4 个读点/写回均核实；9 用例全过，nil 默认改 false 或种子去掉+raw deref 均定向红。",
+      "review": "passed",
+      "reviewNote": "task-z49yfgh2 PASS：providers.go 三态 *bool + boolDefault；缺文件/坏 JSON/只带 auto_clean/JSON null 全默认开启，显式 false 仍关；cron.go 四个读点全走 accessor，无 cs.Enabled 当 bool 用；Go 无 marshal 路径，Electron settings:set 的 DEFAULT_SETTINGS 无 cron 键，不会固化缺键。非阻塞：main.go:5573 注释仍写「设置 cron.enabled=true 才注册」；工具注册门控（CronCreate 消失这一用户可见症状）无回归测试（变异 M4 全包不红）；坏字段会让整段回默认（静默 ON 方向）；前端首次拨动会把另一键写成显式值。"
+    },
+    {
+      "id": "P5-07",
+      "phase": "P5",
+      "title": "§6.1 第 0 批：FE-03 导航代际丢弃补 trace（stale vs inconsistent）",
+      "deps": [],
+      "files": [
+        "desktop/app/src/store/navTrace.ts",
+        "desktop/app/src/store/useAppStore.ts",
+        "desktop/app/scripts/test-nav-trace.mjs",
+        "desktop/app/package.json"
+      ],
+      "acceptance": "迟到响应的丢弃不再静默：stale（代际/attempt 被取代）与 inconsistent（无在途登记、workspace/session 不符）分开判定并记入 50 条环形缓冲；诊断不改变任何丢弃/应用行为、永不抛；正常路径不写 trace；恢复重试与看门狗保留。独立 Review PASS。",
+      "tests": "cd desktop/app && node scripts/test-nav-trace.mjs && node scripts/test-restore-retry.mjs && npx tsc --noEmit -p tsconfig.json",
+      "commit": "e4363c1 + 595f1b2",
+      "status": "done",
+      "note": "§6.1 第 0 批。复审 task-z49yfgh2 PASS：108 组输入与旧 navigationCurrent 0 差异；T1-T4 覆盖 stale/inconsistent/无登记/环形上限/happy path；M1/M2/M3/M6 变异红。",
+      "review": "passed",
+      "reviewNote": "task-z49yfgh2 PASS：classifyNavDiscard 顺序 staleAttempt→无登记→代际→workspace→session，recordNavDiscard 有界 50 且 try/catch；useAppStore:5641 丢弃前先记录，重试/看门狗路径保留；scripts/test-nav-trace.mjs T1-T4 全过，108 组等价性 0 差异。非阻塞（必须随登记保留）：①「无在途登记」生产不可达——useAppStore:5617 守卫 t==='new_session' 在 meta 缺失时为 ''，孤儿响应仍静默，与模块说明不一致；②switch_model/switch_persona 迟到响应在 5111-5116 仍静默；③7965 注释仍引用旧 navigationCurrent；④recordNavDiscard 的「永不抛」无测试（删 try/catch 仍绿）；⑤stale 同时 console.debug + scheduleRestoreRetry warn，口径略有张力。"
     }
   ],
   "deferred": [
@@ -2618,6 +2714,34 @@
       "review": "passed",
       "reviewNote": "task-aq9uj36e PASS（P5-03d）：roots 为空不收、根自身排除、kind!=='run' 排除、遇 task_id 不收不下沉、节点+blocks/agentDetached 双来源、三处调用点接线、injected 不收敛、同步子状态映射均核实；STORE_TEST_PASS 41 场景、tsc、test:p4 全绿；变异 A/C/E/F/G 定向红。非阻塞 N-1（maxSpawnDepth=2 只是深度上限，当前 desktop spawn 全 Background=true、无 task_id 的 runSync 不可达）已在同一收口补丁修正为防御性覆盖；N-2 已补「done 根不再收迟到的同步子」边界说明；N-3 roots 区分暂无专属 fixture。",
       "note": "P5-02 §6.1 第 1 批；BR-03 Envelope/行级测试，BR-15 五类终止事实与同步/异步子 run 边界；N7/N8 保留为 BR-03 残留。"
+    },
+    "P5-04": {
+      "status": "done",
+      "commit": "6b5504c + f50739a + 1357d3c",
+      "review": "passed",
+      "reviewNote": "task-m933rrjv PASS：previewSlots（槽 key 工作区、根只来自槽位、三命令/释放/并发）、hookTrust（单实例 + owner 分表、空 owner fail-closed、legacy 仅 workspace 回退）、IM（共享连接 + OwnerEnabled/RouteConfig 同源 + 投递闸门）、回收四面全过；56 用例 + -race、全包 108s、go vet 全绿；12 个变异 9 红。非阻塞：NB-1 槽 key 未 filepath.Abs/Clean（/ws/a 与 /ws/a/ 两槽，释放漏）；NB-2 legacy 对所有 workspace 生效（真实 v1 文件，建议首次确认逐 workspace 重发或时间窗）；NB-3 shutdownWorkspace 对未登记 workspace 提前 return 不释放槽（32 上限兜底）；NB-4「关 A 不掐断 B 连接」连接层无回归测试；NB-5 hubHookOwner 接线无端到端测试；NB-6 RoutesForOwner 两个实现无生产调用/无测试；NB-7 im_route_set/del 收权不对称、im/plugin/im 无测试文件。",
+      "note": "§6.1 第 0 批的沙箱面。复审 task-m933rrjv PASS：没有找到「传错 workspace 不报错、静默越权」的新路径；真实 Seatbelt 探针证明写 B 根被拒。残余 NB-2：legacy 迁移条目对所有 workspace:* 生效（本机 v1 hooks-state.json 即实例，属显式取舍，需收敛计划）。"
+    },
+    "P5-05": {
+      "status": "done",
+      "commit": "c3ee814",
+      "review": "passed",
+      "reviewNote": "task-p93ywydm PASS：renderer-send.ts 的 !win / isDestroyed / !wc / wc.isDestroyed / send try-catch 完整；返回值契约与调用点一致；grep 无裸 webContents.send；深链队列/rendererReady 复位/16ms flush/command_response 保序未变；test:renderer-send 11/11，tsconfig.electron 与 src tsc 均 0 错误；M1-M5 变异全红。非阻塞：N1 main.ts:48 深链仍手写 mainWindow.webContents.isDestroyed（建议交给 sender）；N2 renderer-send.ts:74 webContents getter 在 try 外（可抛）；N3 stats/lastDropReason 无生产消费者；N5 源码守卫可被 webContents?.send / send?. 绕过；N7 package.json 的 test:embed-v2 引用被 gitignore 的 *.test.ts，干净检出会中断 npm test，新测试链可能跑不到。",
+      "note": "§6.1 第 0 批。复审 task-p93ywydm PASS：8 个发送点全部收敛，真 Electron 33.4.11 销毁窗口探针无 uncaughtException；5 个判空/返回值变异红。"
+    },
+    "P5-06": {
+      "status": "done",
+      "commit": "540f801",
+      "review": "passed",
+      "reviewNote": "task-z49yfgh2 PASS：providers.go 三态 *bool + boolDefault；缺文件/坏 JSON/只带 auto_clean/JSON null 全默认开启，显式 false 仍关；cron.go 四个读点全走 accessor，无 cs.Enabled 当 bool 用；Go 无 marshal 路径，Electron settings:set 的 DEFAULT_SETTINGS 无 cron 键，不会固化缺键。非阻塞：main.go:5573 注释仍写「设置 cron.enabled=true 才注册」；工具注册门控（CronCreate 消失这一用户可见症状）无回归测试（变异 M4 全包不红）；坏字段会让整段回默认（静默 ON 方向）；前端首次拨动会把另一键写成显式值。",
+      "note": "§6.1 第 0 批。复审 task-z49yfgh2 PASS：三态语义/默认/4 个读点/写回均核实；9 用例全过，nil 默认改 false 或种子去掉+raw deref 均定向红。"
+    },
+    "P5-07": {
+      "status": "done",
+      "commit": "e4363c1 + 595f1b2",
+      "review": "passed",
+      "reviewNote": "task-z49yfgh2 PASS：classifyNavDiscard 顺序 staleAttempt→无登记→代际→workspace→session，recordNavDiscard 有界 50 且 try/catch；useAppStore:5641 丢弃前先记录，重试/看门狗路径保留；scripts/test-nav-trace.mjs T1-T4 全过，108 组等价性 0 差异。非阻塞（必须随登记保留）：①「无在途登记」生产不可达——useAppStore:5617 守卫 t==='new_session' 在 meta 缺失时为 ''，孤儿响应仍静默，与模块说明不一致；②switch_model/switch_persona 迟到响应在 5111-5116 仍静默；③7965 注释仍引用旧 navigationCurrent；④recordNavDiscard 的「永不抛」无测试（删 try/catch 仍绿）；⑤stale 同时 console.debug + scheduleRestoreRetry warn，口径略有张力。",
+      "note": "§6.1 第 0 批。复审 task-z49yfgh2 PASS：108 组输入与旧 navigationCurrent 0 差异；T1-T4 覆盖 stale/inconsistent/无登记/环形上限/happy path；M1/M2/M3/M6 变异红。"
     }
   },
   "reviewGate": {

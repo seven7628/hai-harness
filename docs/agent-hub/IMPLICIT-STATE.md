@@ -279,6 +279,8 @@
 ### 6.1 P0 处置顺序（建议）
 
 0. **BR-21 + BR-04 + GO-11 + FE-03**：`xlsxPV/docxPV/pptxPV/hookTrust/imPlugin` 按 workspace 分槽；主进程所有 `webContents.send` 走判空包装；`cronSettings` 改 `*bool` / 先赋默认再 Unmarshal；前端导航代际丢弃补 trace 并区分“过期/不一致”。这四条是 §6.1 原先漏掉的 P0。
+
+   **批次 0 进度（P5-04..P5-07，独立 Review PASS）**：预览器按工作区建槽、沙箱根只来自槽位（`6b5504c`）；hookTrust 单实例 + owner 分表、IM 连接共享 + 归属闸门（`f50739a` / `1357d3c`）；主进程发送收敛到 `renderer-send.ts` 唯一判空出口（`c3ee814`）；cron 三态缺键默认开启（`540f801`）；导航丢弃 stale/inconsistent 分类 + 50 条 trace（`e4363c1` + `595f1b2`）。残余必须带着看：BR-21 的 legacy 迁移条目对所有 `workspace:*` 生效（本机 v1 文件即实例），BR-04 的深链守卫仍手写 `isDestroyed`、`webContents` getter 在 try 外，GO-11 的工具注册门控无回归测试，FE-03 的「无在途登记」生产不可达、孤儿响应仍静默；逐条见 `tasks.json` 的 `reviewNote`。
 1. **BR-03 + BR-15**：先把身份/事件信封做对；否则后面所有恢复/计费都建立在错归属上。
    **批次 1（P5-03 / P5-03b）进度**：
 
@@ -441,6 +443,7 @@ go test ./agenthub/... ./session/... -count=1
 | 2026-11-11 | P5-03b（复审 CHANGES_REQUESTED 修复）：`agent_end` 收「当前顶层 run」时顺带收敛**同步子 run**（无 task_id，节点落地 + 卡片 abandoned，诊断 runIds 只记被顺带收敛者，异步子 run 不动）；`user_inputs_consumed(injected=false)` 与 `session_run_error` 收敛后冻结残留流式块并落 `runEnded`；`session_closed` 补 `async_task` 占位；`task_end` fixture 补「run_id = 发起方」并加反向场景；测试场景 25–34 + 五个变异实验。**BR-03 残留单列为 N7（getSid 兜底 / 空 sid 建 `views['']`）与 N8（writeLine 直写行不走 Envelope），不再宣称全闭环** |
 | 2026-11-11 | P5-03c（复审 B-1 / N-1 / N-2 / N-3 / N-6 修复）：① **B-1 暖恢复误杀异步子 run** —— `syncSubRunIds` 的卡片源补 `agentDetached`、`abandonAgentCards` 两处都扫，Go `applyAgentStartLocked` 给 run 节点补 `TaskID`（JSON `omitempty`，格式不变）+ checkpoint 落盘/读回断言；② **N-1** 「同步子收敛 + 卡片 abandon」抽成 `settleSyncSubRuns`，新批次开口与 `session_run_error` 也调用（只收无 task_id 的子 run）；③ **N-2** `session_closed` 复用 `freezeStreamingAssistants` 冻结残留流式块；④ **N-3** 同步子 run 状态改 `aborted ? interrupted : done`，不再继承父 run 的 `runStatus`；⑤ **N-6** 节点判定显式 `kind==='run'`。测试场景 35–39 + 变异实验（删 `agentDetached` 来源 / 删卡片来源 / 删节点 `taskId` 来源 / 两条 N-1 路径回退 / 不冻结 / 继承 `runStatus`）。N7/N8 仍是 BR-03 残留，本批不做 |
 | 2026-11-11 | P5-03d（复审 blocking 修复）：**收敛作用域 = 被落地的 run 树**。`syncSubRunIds(v, roots)` 从本次真正落地的根沿 `parentId` 做后代闭包、**遇 `task_id` 停止下沉**（异步节点自己也不算同步子 run），根节点自己不算，`roots` 为空时一个都不收；`settleSyncSubRuns` 接收并透传 `roots`，三个调用点分别给「本次被收敛的根」—— `agent_end`（`run_id` 存在传 `[id]`，缺 `run_id` 传当前视图的顶层 run 列表）/ 新批次开口（`stale.settled`）/ `session_run_error`（`runs.settled`）。修的是 depth-2 误杀（**防御性覆盖**：`maxSpawnDepth = 2` 只是深度上限；当前桌面端 spawn 全为 `Background: true`，depth-2 也带 `task_id`，无 `task_id` 的 `runSync` 在桌面端不可达，见复审 N-1）：此前按「全视图里无 `task_id` 的子 run」收，父 run 的 `agent_end` 会把仍在跑的 depth-2 收敛成 `done` / 卡片 `abandoned`，且 `settleRunNodes` 只动 running 节点 → **永久**误收敛（真实 `agent_end` 到了也改不回来）。测试场景 40–41（40 = depth-2 反例 + 它自己的 `agent_end` 仍能落地；41 = 新批次开口 / `session_run_error` 不下沉进异步子树 + 根自己的同步子仍收敛 + 工具节点不进闭包），场景 25–39 断言未改。N7/N8 仍是 BR-03 残留，本批不做 |
+| 2026-11-11 | §6.1 批次 0（P5-04..P5-07）：BR-21 预览器按工作区槽 / hookTrust owner 隔离 / IM 归属（`6b5504c` + `f50739a` + `1357d3c`）；BR-04 渲染发送唯一判空出口（`c3ee814`）；GO-11 cron 三态缺键默认开启（`540f801`）；FE-03 导航丢弃 stale/inconsistent trace（`e4363c1` + `595f1b2`）。四项独立 Review PASS（task-m933rrjv / task-p93ywydm / task-z49yfgh2）；残余（legacy 对所有 workspace 生效、深链守卫、cron 工具门控无测试、孤儿响应静默）见各 `reviewNote` |
 
 ---
 
