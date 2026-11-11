@@ -8114,8 +8114,9 @@ function noteRunSettle(
    路径上没有 task_id；根节点自己不算，无 roots 就什么都不收。
    「同步」的前提是有**作用域**的：判据不是「全视图里有没有 task_id」，而是**这棵树下
    的路径**——遇到带 task_id 的节点就停止下沉（异步节点既不算同步子 run，也不进入它的
-   子树）。`subagent` 的 maxSpawnDepth=2 允许「主 run → 异步后台任务（depth-1，带
-   task_id）→ 它自己派出的 in-loop 子 run（depth-2，无 task_id）」；depth-2 那条**不属于**
+   子树）。`subagent` 的 maxSpawnDepth=2 只是深度上限，不表示 depth-2 一定同步：当前
+   桌面端 spawn 全为 Background=true、会写 task_id，无 task_id 的 depth-2 只在宿主注册
+   同步 spawn 时可达（当前不注册），所以下面是**防御性覆盖**；depth-2 那条**不属于**
    父 run 收尾的范围（父 run 的 agent_end 只证明主 run 这棵树结束，不证明别人派出去的后台
    任务里的阻塞调用也结束了），它还在跑，终态证据仍是它自己的 agent_end / task_end。
    P5-03d 之前这里按「全视图里无 task_id 的子 run」收，depth-2 就被父 run 的 agent_end

@@ -1453,7 +1453,9 @@ assert.equal(
 console.log('PASS 场景39：同步子 run 的状态按父 run 的收场方式映射（只有 abort 是 interrupted）')
 
 // 场景 40（P5-03d，复审 blocking）：**收敛作用域 = 被落地的那棵 run 树**，不是「全视图里
-// 没有 task_id 的子 run」。subagent 的 maxSpawnDepth=2 允许
+// 没有 task_id 的子 run」。subagent 的 maxSpawnDepth=2 只是深度上限；当前桌面端 spawn 全是
+// Background=true、会写 task_id，无 task_id 的 depth-2 只在宿主注册同步 spawn 时可达（当前
+// 不注册），所以下面是**防御性覆盖**：
 //   主 run → 异步后台任务（depth-1，带 task_id）→ 它自己派出的 in-loop 子 run（depth-2，
 //   无 task_id）
 // 父 run 的 agent_end 只证明**主 run 这棵树**结束，不证明别人派出去的后台任务里的阻塞调用

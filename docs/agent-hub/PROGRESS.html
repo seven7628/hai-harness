@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "demo 源码 1:1 移植（会话 + Luna 头像）PASS；P5-02 owner 隔离 PASS；左栏/右栏边界已记录",
+  "subtitle": "demo 源码 1:1 移植（会话 + Luna 头像）PASS；P5-02 owner 隔离 PASS；P5-03 运行位收敛 PASS；左栏/右栏边界已记录",
   "updated": "2026-11-19",
   "phases": [
     {
@@ -1900,6 +1900,33 @@ const BASE = {
       "note": "P5-01 §6.1 第 0 批；owner 模型、hookTrust v2、IM Owners 三态与迁移、前端 owner/路由接线已完成；Review task-jdx7bpr8 PASS。",
       "review": "passed",
       "reviewNote": "task-jdx7bpr8 PASS：B1 前端 owner 读错 store（Hub 里写成 workspace）+ B2 IM 路由 UI 不能表达 agent/group（编辑会静默改写）修复后通过；UI 验收 16 项 + 真实 DOM 归属核对通过。"
+    },
+    {
+      "id": "P5-03",
+      "phase": "P5",
+      "title": "隐式状态 §6.1 第 1 批：BR-03 事件信封收口 + BR-15 运行位收敛",
+      "deps": [
+        "P5-02"
+      ],
+      "files": [
+        "desktop/app/src/store/useAppStore.ts",
+        "desktop/app/src/store/events.ts",
+        "desktop/app/scripts/test-store-queue.mjs",
+        "desktop/bridge/jsonwire/jsonwire.go",
+        "desktop/bridge/jsonwire/jsonwire_test.go",
+        "desktop/bridge/jsonwire_emit_test.go",
+        "desktop/bridge/view_reducer.go",
+        "desktop/bridge/view_reducer_test.go",
+        "desktop/bridge/main.go",
+        "docs/agent-hub/IMPLICIT-STATE.md"
+      ],
+      "acceptance": "BR-03：bridge 事件统一走 jsonwire Envelope，宿主键只注入一次、不覆盖事件自带字段，并有行级测试；N7（getSid 缺失回退 activeSessionId）与 N8（writeLine 直写行不走信封）显式保留为残留，不冒充全闭环。BR-15：运行位在 session_run_error / session_closed / task_end / 新批次开口 / agent_end 五类终止事实上收敛；同步子 run 只收「被落地 run 树下、路径无 task_id」的后代，异步子 run 及其子树绝不随父收敛；暖恢复用节点 TaskID + blocks/agentDetached 卡片双来源识别异步；状态不继承父 runStatus；场景 25–41 与变异实验覆盖。独立 Review PASS。",
+      "tests": "node scripts/test-store-queue.mjs && go test ./desktop/bridge -run 'JsonWire|ViewReducer|Session|Event' && npx tsc --noEmit && npm run test:p4",
+      "commit": "fb3be0e + 7433820 + 0bd57eb + 1da5992",
+      "status": "done",
+      "note": "三轮复审：P5-03b 修同步子收敛与 BR-03 残留澄清；P5-03c 修暖恢复误杀异步子 run（agentDetached + RunNode.TaskID）；P5-03d 把收敛作用域收窄到被落地的 run 树并补场景 40/41。P5-03d 复审 task-aq9uj36e PASS；depth-2 反例按 N-1 修正为「当前桌面端不可达的防御性覆盖」，N7/N8 仍为 BR-03 残留。",
+      "review": "passed",
+      "reviewNote": "task-aq9uj36e PASS（P5-03d）：roots 为空不收、根自身排除、kind!=='run' 排除、遇 task_id 不收不下沉、节点+blocks/agentDetached 双来源、三处调用点接线、injected 不收敛、同步子状态映射均核实；STORE_TEST_PASS 41 场景、tsc、test:p4 全绿；变异 A/C/E/F/G 定向红。非阻塞 N-1（maxSpawnDepth=2 只是深度上限，当前 desktop spawn 全 Background=true、无 task_id 的 runSync 不可达）已在同一收口补丁修正为防御性覆盖；N-2 已补「done 根不再收迟到的同步子」边界说明；N-3 roots 区分暂无专属 fixture。"
     }
   ],
   "deferred": [
@@ -2886,6 +2913,13 @@ const BASE = {
       "review": "passed",
       "reviewNote": "快速独立 Review task-dkupcrgw PASS：四项原始问题逐条解决；段距 8px、行高 23.8 的整数倍、首尾 margin 0；名 12.5/600、时间 margin 6；卡左缘 41/38、三卡 body 与 title 左缘差 -1px；event-flow gap 4/头像 18、task who 16；390 表格 wrap 211/table 440/cell 30.3、页面 scrollWidth 390；user-meta flex/6；390 task footer 26px 单行。非阻塞：640 底部状态栏为既有 shell、390 卡标题按 demo 截断、截图 hover 气泡已在 126c6af 清理。",
       "note": "P4-UI-7 的会话区后续反馈：桌面 1440/640/390 × ink/paper × 群/DM/三卡全部用 computed style + 截图验收；shoot HUB_CONV_SHOTS_PASS，0 console error。"
+    },
+    "P5-03": {
+      "status": "done",
+      "commit": "fb3be0e + 7433820 + 0bd57eb + 1da5992",
+      "review": "passed",
+      "reviewNote": "task-aq9uj36e PASS（P5-03d）：roots 为空不收、根自身排除、kind!=='run' 排除、遇 task_id 不收不下沉、节点+blocks/agentDetached 双来源、三处调用点接线、injected 不收敛、同步子状态映射均核实；STORE_TEST_PASS 41 场景、tsc、test:p4 全绿；变异 A/C/E/F/G 定向红。非阻塞 N-1（maxSpawnDepth=2 只是深度上限，当前 desktop spawn 全 Background=true、无 task_id 的 runSync 不可达）已在同一收口补丁修正为防御性覆盖；N-2 已补「done 根不再收迟到的同步子」边界说明；N-3 roots 区分暂无专属 fixture。",
+      "note": "P5-02 §6.1 第 1 批；BR-03 Envelope/行级测试，BR-15 五类终止事实与同步/异步子 run 边界；N7/N8 保留为 BR-03 残留。"
     }
   },
   "reviewGate": {
