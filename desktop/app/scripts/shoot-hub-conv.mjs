@@ -97,6 +97,17 @@ async function openConversation(page, kind) {
   await page.waitForTimeout(250)
 }
 
+// 截图前清掉 hover/focus：点完「左栏收缩」后指针停在按钮上，原生气泡会压住群头，
+// 那是取证噪声，不是布局。只影响截图，不改变页面状态。
+async function clearHover(page) {
+  await page.mouse.move(1, 1)
+  await page.evaluate(() => {
+    const el = document.activeElement
+    if (el instanceof HTMLElement) el.blur()
+  })
+  await page.waitForTimeout(150)
+}
+
 // 排版细节的测量（在页面里跑，shot 与 cards 共用）：作者名 / 时间 / 正文首尾 / 表格。
 function typeDetailProbe() {
   const q = (s) => document.querySelector(s)
@@ -444,6 +455,7 @@ async function shot(width, height, theme, kind) {  const name = `${width}-${kind
   }
   if (failed.length) errors.push(`${name}: ${failed.join('；')}`)
 
+  await clearHover(page)
   await page.screenshot({ path: `${OUT}/${name}.png` })
   rows.push({ name, ...m, failed })
   await page.close()
@@ -476,6 +488,7 @@ for (const [width, height] of [[1440, 900], [390, 900]]) {
     await page.waitForTimeout(350)
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth)
     if (overflow > width) errors.push(`${name}: 横向溢出 ${overflow} > ${width}`)
+    await clearHover(page)
     await page.screenshot({ path: `${OUT}/${name}.png` })
     rows.push({ name, scrollWidth: overflow })
     await page.close()
@@ -678,6 +691,7 @@ for (const [width, height, theme] of CARD_CASES) {
   }
   if (m.scrollWidth > width) failed.push(`横向溢出 ${m.scrollWidth} > ${width}`)
   if (failed.length) errors.push(`${name}: ${failed.join('；')}`)
+  await clearHover(page)
   await page.screenshot({ path: `${OUT}/${name}.png` })
   rows.push({ name, ...m, failed })
   await page.close()
