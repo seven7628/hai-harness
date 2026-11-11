@@ -34,6 +34,14 @@ type FileStore struct {
 	// 0 值（无论哪个字段）不关闭——由 NewFileStore 填默认值；要关闭用 WithAutoCompact(0, 0)。
 	compactKeep      int
 	compactThreshold int64
+	// stateRowsSinceCompact 是「上次压缩以来追加的 state 行数」。
+	//
+	// 为什么需要它（2026-11-11 实测）：state 行是**每轮的全量上下文快照** → 体积
+	// 随轮次线性增长、总账 O(N²)。而自压缩原来只看**文件体积**（24MB）→
+	// 一个 16MB 的子智能体 journal（52 条 state 行 × 319KB）永远触发不了压缩，
+	// 13.4GB 的子智能体 journal 就这么攒下来了（实测 2258 个文件，单个 6–22MB）。
+	// 按**行数**触发才能真正把 O(N²) 掐掉。
+	stateRowsSinceCompact int
 	// keepHistory 为 true 时**不裁剪**压缩窗口之外的 history 行（默认 false = 裁）。
 	//
 	// 为什么默认裁（2026-11-11，CHECKPOINT_V3_DESIGN §9「P1-1」）：history 行
@@ -207,6 +215,7 @@ func (s *FileStore) SaveState(_ context.Context, sessionId string, state *State)
 	if err := s.appendLine(p, line); err != nil {
 		return err
 	}
+	s.stateRowsSinceCompact++
 	// 自压缩（只在 state 追加后检查：state 行是膨胀源）。
 	// 失败不影响本次保存——文件已追加成功，压缩只是空间治理；
 	// 原文件在重写失败时保持不变，下次 checkpoint 会再试。
@@ -341,6 +350,16 @@ func (s *FileStore) AcquireLock(_ context.Context, sessionId string) (func(), er
 func (s *FileStore) appendLine(p string, line []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	// 进程级按路径互斥：与 compactFile 的重写互斥。
+	//
+	// 为什么需要（2026-11-11）：compactFile 是「读 → 写临时文件 → rename」，
+	// 在它读完之后、rename 之前到达的追加会写进**旧 inode** → rename 之后
+	// 那个 inode 已被删除 → **追加丢失**。
+	// 维护清扫（sweep.go）会在后台对**正在使用的**会话文件做压缩 → 窗口更大。
+	// 有了这把锁：追加要么在压缩前完成（被包含进去），要么在 rename 后重开新
+	// inode 写入 → 一条都不丢。
+	unlock := lockRecord(p)
+	defer unlock()
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // 会话历史含敏感内容，0600
 	if err != nil {
 		return err

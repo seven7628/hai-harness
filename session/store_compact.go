@@ -30,6 +30,9 @@ import (
 const (
 	// defaultCompactKeepStates 保留最后 N 条 state 行（<=0 关闭自压缩）。
 	defaultCompactKeepStates = 3
+	// DefaultCompactKeepStates 是 defaultCompactKeepStates 的导出形式
+	// （维护清扫等外部调用方要用同一个值）。
+	DefaultCompactKeepStates = defaultCompactKeepStates
 	// defaultCompactThreshold 触发自压缩的文件体积阈值（字节）。
 	defaultCompactThreshold = 24 << 20
 	// compactMinGainRatio 最低收益比：重写后至少省下该比例才执行，
@@ -37,6 +40,9 @@ const (
 	compactMinGainRatio = 0.2
 	// maxStateRowBytes 单条 state 行的读取上限（防御异常大行；正常最大约 2 MB）。
 	maxStateRowBytes = 64 << 20
+	// compactMinFileBytes 是「按 state 行数触发压缩」时的文件体积下限：
+	// 太小的文件整file重写不划算（省不下什么却要重写一遍）。
+	compactMinFileBytes = 1 << 20
 )
 
 // maybeCompact 检查并执行自压缩。仅由 SaveState 调用（state 行是膨胀源）。
@@ -61,6 +67,10 @@ func (s *FileStore) maybeCompact(p string) (bool, error) {
 // compactFile 原地重写：保留全部非 state 行 + 最后 keep 条 state 行。
 // 原子替换，失败时原文件保持不变。
 func (s *FileStore) compactFile(p string, keep int) (bool, error) {
+	// 与 appendLine 互斥（进程级按路径锁）：保证重写期间到达的追加不会写进
+	// 被 rename 掉的旧 inode（见 appendLine 的注释）。
+	unlock := lockRecord(p)
+	defer unlock()
 	// ① 第一遍：定位 state 行 / compaction 行的起点
 	scan, err := scanSessionRows(p)
 	if err != nil {

@@ -5932,6 +5932,15 @@ func serve() error {
 		hub:        session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
 		memPrefs:   newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
 	}
+	// 会话文件维护清扫（后台）：把「已结束、不会再被写入」的会话文件里
+	// 攒下的 O(N²) 一次性收掉（实测子智能体 journal 13.4GB / 主会话 jsonl 6.8GB）。
+	//
+	// 为什么需要：自压缩是**被动**的（只在 SaveState 时检查）→ 已经死掉的文件
+	// 永远等不到压缩。清扫复用同一套原子压缩逻辑，内容不变、恢复逐字节一致。
+	// 限速执行，不与正常使用抢 IO；settings.checkpoint.sweep_journals=false 可关。
+	if loadCheckpointSettings().sweepJournals() {
+		go sweepSessionFilesInBackground()
+	}
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
 	startupLog("A2.5.browserEngine("+string(m.getBrowserEngine())+")", serveStart)
@@ -6270,3 +6279,34 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 		startupLog("A7.evict: "+victim.id, now)
 	}
 }
+
+// sweepSessionFilesInBackground 后台清扫会话文件（限速）。
+//
+// 参数与判据见 session.SweepSessionFiles 的注释。默认阈值 4MB：
+// 实测 2258 个子智能体 journal 里 997 个 > 4MB（合计 13.4GB），压完约 1.3GB。
+func sweepSessionFilesInBackground() {
+	root := filepath.Join(appDataDir(), "sessions")
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintln(os.Stderr, "sweep: panic:", r)
+		}
+	}()
+	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sweep: 失败:", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩）%.1fMB → %.1fMB，用时 %s\n",
+		res.Files, res.Compacted, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
+}
+
+// 清扫参数。
+const (
+	// sweepMinFileBytes 是「值得压缩」的体积下限（4MB）。
+	sweepMinFileBytes = 4 << 20
+	// sweepPause 是每个文件之间的间隔（限速：避免 12GB 的重写把 IO 打满）。
+	sweepPause = 100 * time.Millisecond
+)
