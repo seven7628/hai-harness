@@ -33,7 +33,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -662,24 +661,22 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// **先删后注入**（2026-11 用户报障的真实事故）：events.TaskPromoted 等结构自己带
 	// `session_id`（无 omitempty，值为空串），注入是前置的，而 JSON 重复键**后者胜** ——
 	// 后端读到空串，就把「已摘为后台任务」路由到当前打开的会话（cybertron-gogroup 的一行
-	// 出现在 agent-server-g 的转录里）。这里把事件自带的同名键摘掉，只留宿主那一份。
-	// 只有字节里真的出现该键才走扫描：绝大多数事件没有这两个键（热路径就一次 Contains）。
-	if bytes.Contains(b, []byte(`"session_id"`)) {
-		if stripped := jsonwire.RemoveField(b, "session_id"); stripped != nil {
-			b = stripped
-		}
-	}
-	if bytes.Contains(b, []byte(`"workspace"`)) {
-		if stripped := jsonwire.RemoveField(b, "workspace"); stripped != nil {
-			b = stripped
-		}
-	}
-	injected, err := jsonwire.InjectKeys(b, []jsonwire.KV{
+	// 出现在 agent-server-g 的转录里）。Envelope 把「删 + 注入」合成一个入口：每行顶层
+	// 恰好一份，调用方没有「只做一半」的余地。热路径仍然只有一次 Contains。
+	hostKVs := []jsonwire.KV{
 		{Key: "session_id", Value: bs.sidKV},
 		{Key: "workspace", Value: bs.wsKV},
-	})
+	}
+	injected, err := jsonwire.Envelope(b, hostKVs)
 	if err != nil {
-		return
+		// 结构异常（非对象 / 无法安全扫描）：绝不能带着事件自带的空 session_id 出门。
+		// 解码→覆盖→重编码（键顺序变成字典序，归属是确定的）；仍失败就丢弃这一行并
+		// 留诊断 —— 少一条事件可以接受，落进错误会话不可接受。
+		injected, err = jsonwire.ForceKeys(b, hostKVs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[envelope] 丢弃无法修正的事件行 sid=%s ws=%s err=%v\n", bs.id, bs.workspace, err)
+			return
+		}
 	}
 	// 宿主附加字段（按事件类型）
 	var extras map[string]any
@@ -829,7 +826,9 @@ func (bs *bridgeSession) emit(e events.Event) {
 		extras = map[string]any{"todos": todosOf(bs, ev.Todos)}
 	}
 	if len(extras) > 0 {
-		// 直接构造 jsonwire.KV（避免 marshal→unmarshal 中间 map）
+		// 直接构造 jsonwire.KV（避免 marshal→unmarshal 中间 map）。
+		// 同样走 Envelope：宿主字段（cost_usd/todos/diff）与事件自带的同名字段并存时，
+		// 后者胜的解析规则会让宿主的修正值被原值盖掉 —— 与 BR-03 是同一类信封缺陷。
 		exKVs := make([]jsonwire.KV, 0, len(extras))
 		for k, v := range extras {
 			vb, err := json.Marshal(v)
@@ -838,9 +837,15 @@ func (bs *bridgeSession) emit(e events.Event) {
 			}
 			exKVs = append(exKVs, jsonwire.KV{Key: k, Value: vb})
 		}
-		if injected, err = jsonwire.InjectKeys(injected, exKVs); err != nil {
+		withExtras, eerr := jsonwire.Envelope(injected, exKVs)
+		if eerr != nil {
+			withExtras, eerr = jsonwire.ForceKeys(injected, exKVs)
+		}
+		if eerr != nil {
+			fmt.Fprintf(os.Stderr, "[envelope] 丢弃无法注入附加字段的事件行 sid=%s err=%v\n", bs.id, eerr)
 			return
 		}
+		injected = withExtras
 	}
 
 	// 运行态（会话列表状态点；重启后由下一次事件纠正）

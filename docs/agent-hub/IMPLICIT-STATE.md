@@ -278,6 +278,7 @@
 
 0. **BR-21 + BR-04 + GO-11 + FE-03**：`xlsxPV/docxPV/pptxPV/hookTrust/imPlugin` 按 workspace 分槽；主进程所有 `webContents.send` 走判空包装；`cronSettings` 改 `*bool` / 先赋默认再 Unmarshal；前端导航代际丢弃补 trace 并区分“过期/不一致”。这四条是 §6.1 原先漏掉的 P0。
 1. **BR-03 + BR-15**：先把身份/事件信封做对；否则后面所有恢复/计费都建立在错归属上。
+   **批次 1（P5-03）进度**：BR-03 在 emit 路径闭环 —— `jsonwire.Envelope` 把「删同名键 + 注入宿主键」合成一个入口（结构异常回退 `ForceKeys`，再失败丢弃并告警，绝不带重复键上线），`TestEmitEnvelopeSessionIDExactlyOnce` 对 stdout 行断言顶层 `session_id`/`workspace` 恰好一份（空串/重复键/缺字段/嵌套对象/值里的 JSON 字符串）。BR-15 部分闭环 —— 运行位在四类终止事实上收敛：`session_run_error`（主 run 终态）、`session_closed`（全量落地）、`task_end`（按 taskId→runId 收敛异步子 run）、新批次开口（`injected=false` 证明上一轮结束）；无 `run_id` 的 `agent_end` 收敛唯一顶层 run，不匹配的只进诊断、不改当前 run 的结算位。残留：无 `task_id` 的子 run 丢掉自己的 `agent_end` 时没有可证明的终止事实（既有不变量允许子 run 晚于主 run 收尾），只能等它自己的 `agent_end`。
 2. **BR-01 + BR-02 + BR-08 + BR-29**：settings 单写者、patch 白名单、key 分离；这是“改一个主题丢 key”的根因。
 3. **GO-01 + BR-14**：价表单一权威源 + `cost_source`；先把账算对。
 4. **BR-09 + GO-02 + GO-04**：checkpoint 自包含 + sidecar 强校验 + seq 落盘；先把历史恢复对。
@@ -420,6 +421,7 @@ go test ./agenthub/... ./session/... -count=1
 | 日期 | 变更 |
 |---|---|
 | 2026-11-10 | 初稿：三路调研合并、93 条清单、Top 10、五个跨面案例、治理路线 |
+| 2026-11-10 | P5-03（§6.1 批次 1）：BR-03 emit 信封收口（Envelope/ForceKeys + 行级测试）；BR-15 运行位收敛（session_run_error / session_closed / task_end / 新批次开口 / 未匹配 agent_end 诊断），残留见 §6.1 第 1 条 |
 
 ---
 
