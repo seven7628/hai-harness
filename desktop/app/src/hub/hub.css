@@ -2522,6 +2522,9 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .agent-text .md ol { margin: 6px 0 8px; padding-left: 20px; }
 .hub-demo .agent-text .md pre { margin: 8px 0; }
 .hub-demo .agent-text .md table { margin: 8px 0; }
+/* demo 的 .user-meta 只有右对齐；真实数据会同时出现「仅你可看」+ 时间，
+   没有 gap 会拼成「仅你可看00:47」。保持右对齐，两个元信息之间留 6px。 */
+.hub-demo .user-meta { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .hub-demo .user-meta .user-owner-only { color: var(--warn); }
 .hub-demo .user-meta .user-failed { color: var(--danger); }
 .hub-demo .user-bubble .md p { margin: 0; }
@@ -2632,4 +2635,10 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-demo .chat-header { min-height: 64px; height: 64px; padding: 0 12px; gap: 7px; }
   .hub-demo .chat-title-wrap { max-width: calc(100% - 150px); }
   .hub-demo .chat-header .avatar-stack .avatar-more { display: none; }
+}
+
+/* 390 的任务卡 footer：触发入口 + 内部 task id + 打开会话放不下，会折成两行。
+   task id 是排障标识，不是用户内容；最窄档收起，让 footer 保持单行。 */
+@media (max-width: 420px) {
+  .hub-demo .event-card .event-id { display: none; }
 }

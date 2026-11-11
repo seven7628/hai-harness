@@ -149,6 +149,21 @@ function typeDetailProbe() {
         overflowX: getComputedStyle(wrap).overflowX,
       }
     }),
+    // 人类消息的元信息可能同时有「仅你可看」+ 时间：必须是 flex + 6px gap，
+    // 否则会拼成「仅你可看00:47」。
+    userMeta: (() => {
+      const all = [...document.querySelectorAll('.msg-row.user .user-meta')]
+      // 优先量「仅你可看 + 时间」两条元信息的那一行；DM 只有时间时退回第一条。
+      const el = all.find((x) => x.querySelector('.user-owner-only')) ?? all[0]
+      if (!el) return null
+      const st = getComputedStyle(el)
+      return {
+        display: st.display,
+        gap: st.gap,
+        children: el.children.length,
+        hasOwnerOnly: !!el.querySelector('.user-owner-only'),
+      }
+    })(),
   }
 }
 
@@ -164,6 +179,12 @@ function assertTypeDetail(m, failed, narrow) {
   }
   if (m.msgTimeStyle?.marginLeft !== '6px') {
     failed.push(`时间左间距=${m.msgTimeStyle?.marginLeft}（应为 6px）`)
+  }
+  if (m.userMeta && (m.userMeta.display !== 'flex' || m.userMeta.gap !== '6px')) {
+    failed.push(`用户元信息 ${m.userMeta.display}/${m.userMeta.gap}（应为 flex/6px）`)
+  }
+  if (m.userMeta?.hasOwnerOnly && m.userMeta.children < 2) {
+    failed.push(`owner-only 行只剩 ${m.userMeta.children} 个元信息（应同时有标签与时间）`)
   }
   if (!m.mdRhythm.length) failed.push('正文里没有 Markdown 容器（无从校验首尾外边距）')
   for (const r of m.mdRhythm) {
@@ -538,6 +559,16 @@ for (const [width, height, theme] of CARD_CASES) {
           fill: face?.querySelector('svg[data-luna-face]')?.getAttribute('data-fill') ?? null,
         }
       }),
+      // 390 的 task footer 必须单行：内部 task id 在 ≤420 收起，避免把「打开会话」折到下一行。
+      taskFooter: (() => {
+        const footer = q('.event-card--task footer.event-actions')
+        if (!footer) return null
+        const id = footer.querySelector('.event-id')
+        return {
+          height: Math.round(footer.getBoundingClientRect().height),
+          idDisplay: id ? getComputedStyle(id).display : null,
+        }
+      })(),
       // 三张卡的正文左缘要跟各自事件标题左缘对齐（≤2px）。handoff/approval 的 .event-body
       // 曾是 .event-main 的子元素，38px margin 叠上 event-main 的 39px 缩进 → 正文整体右移。
       cardBodies: [...document.querySelectorAll('.event-card')].map((card) => {
@@ -605,6 +636,17 @@ for (const [width, height, theme] of CARD_CASES) {
   else {
     if (m.taskContextJump.fontSize !== '10.5px') failed.push(`任务卡上下文=${m.taskContextJump.fontSize}（应为 10.5px）`)
     if (!m.taskContextJump.first) failed.push('任务卡「N 人触发」不在 footer 最左')
+  }
+  if (!m.taskFooter) {
+    failed.push('任务卡缺少 footer.event-actions')
+  } else {
+    if (m.taskFooter.height > 30) failed.push(`任务卡 footer 高 ${m.taskFooter.height}px（应保持单行）`)
+    if (width <= 420 && m.taskFooter.idDisplay !== 'none') {
+      failed.push(`≤420 的内部 task id 未收起（display=${m.taskFooter.idDisplay}）`)
+    }
+    if (width > 420 && m.taskFooter.idDisplay === 'none') {
+      failed.push('宽屏任务卡不应隐藏 task id')
+    }
   }
   assertTypeDetail(m, failed, width <= 640)
   if (m.handoffIcon === m.approvalIcon) failed.push('handoff/approval 图标颜色未区分')
