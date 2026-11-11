@@ -411,6 +411,17 @@ func isStreamingChunkType(t events.EventType) bool {
 // 主用 agent_end.content）。落盘只保留事件**时间线**（run_id + timestamp + 工具起止
 // + usage/cost），既省 78% 体积，又保住历史 trace 的唯一数据源。
 func (bs *bridgeSession) logEventLine(line []byte) {
+	// 落盘的那一份去掉 agent_end 的 tool_calls（2026-11-11）：
+	//
+	// 子智能体的完整流水在**它自己的 journal** 里（agents/<taskId>.jsonl，
+	// agent_history 命令按页取），事件流这一份是纯重复 —— 实测占事件日志 10.2%
+	// （一个会话 114.5MB / 1585 条）。全仓库无消费方：前端只在 mock 里出现
+	// tool_calls，reducer 不看它，后端读的是 journal 的 state.messages。
+	//
+	// stdout 那一份**保留**（实时流不变）。
+	if bytes.Contains(line, []byte(`"event_type":"agent_end"`)) {
+		line = stripTopLevelField(line, "tool_calls")
+	}
 	dir := bs.eventsDir
 	if bs.cronEvDir != "" {
 		dir = bs.cronEvDir
