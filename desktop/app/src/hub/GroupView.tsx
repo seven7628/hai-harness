@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DependencyList } from 'react'
 import { useLang, useT } from '../i18n'
-import { GitBranch, MoreIcon, SendIcon, TerminalIcon } from '../components/icons'
+import { GitBranch, MoreIcon, PaperclipIcon, SendIcon, TerminalIcon } from '../components/icons'
 import { useResolvedTheme } from '../lib/useTheme'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
@@ -89,6 +89,10 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const [displayMode, setDisplayMode] = useState<'grouped' | 'flat'>(readGroupDisplay)
   const [menuOpen, setMenuOpen] = useState(false)
   const theme = useResolvedTheme()
+  const openContext = (): void => {
+    setInspector(rightExpanded && inspector === 'context' ? null : 'context')
+    setRightExpanded(true)
+  }
   // @ 选择器：焦点始终在 textarea，选择器只做 listbox/aria-activedescendant。
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const assignTextareaRef = useRef<HTMLTextAreaElement>(null)
@@ -433,10 +437,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
           <button
             type="button"
             className={`icon-btn${inspector === 'context' ? ' active' : ''}`}
-            onClick={() => {
-              setInspector(rightExpanded && inspector === 'context' ? null : 'context')
-              setRightExpanded(true)
-            }}
+            onClick={openContext}
             title="上下文（只读）：触发上下文与提示词分层"
             aria-label="上下文"
           >
@@ -511,13 +512,12 @@ export default function GroupView({ group }: { group: HubGroup }) {
             ))}
           </div>
         )}
+        <TypingIndicator names={typingNames} />
         </div>
       </div>
 
       <div className="composer-wrap">
         <div className="composer-inner">
-        {/* 常驻 live region：内容出现前容器已在 DOM 里，读屏才会播报（N8）。 */}
-        <TypingIndicator names={typingNames} />
         <div className="composer">
           {pickerOpen ? (
             <MentionPicker
@@ -531,6 +531,15 @@ export default function GroupView({ group }: { group: HubGroup }) {
           ) : null}
           {composerMode === 'chat' ? (
             <>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={openContext}
+                title="上下文与提示词（暂不支持附件）"
+                aria-label="打开上下文面板"
+              >
+                <PaperclipIcon size={15} />
+              </button>
               <button
                 type="button"
                 className="icon-btn"

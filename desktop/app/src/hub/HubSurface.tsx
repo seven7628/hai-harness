@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Markdown } from '../components/markdown'
-import { AccessIcon, Bot, LayersIcon, MoreIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
+import { AccessIcon, Bot, LayersIcon, MoreIcon, PaperclipIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
 import { useLang, useT } from '../i18n'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
@@ -339,7 +339,7 @@ export default function HubSurface() {
                       title="上下文与提示词（暂不支持附件）"
                       aria-label="打开上下文面板"
                     >
-                      <Plus size={14} />
+                      <PaperclipIcon size={15} />
                     </button>
                     <textarea
                       value={draft}
