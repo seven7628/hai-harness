@@ -1273,7 +1273,10 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	isNewSession := os.IsNotExist(statErr)
 
 	storeStart := time.Now()
-	store, err := session.NewFileStore(storeDir)
+	// keep_history=false（默认）→ 会话 jsonl 只保留「最后一个压缩点及其之后」
+	// + 首行（标题来源）。恢复只用最后一条 state 行；完整消息在 events.jsonl 里。
+	// settings.checkpoint.keep_history=true 可完全回退。
+	store, err := session.NewFileStore(storeDir, session.WithKeepHistory(loadCheckpointSettings().keepHistory()))
 	if err != nil {
 		return nil, fmt.Errorf("file store: %w", err)
 	}

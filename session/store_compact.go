@@ -61,24 +61,29 @@ func (s *FileStore) maybeCompact(p string) (bool, error) {
 // compactFile 原地重写：保留全部非 state 行 + 最后 keep 条 state 行。
 // 原子替换，失败时原文件保持不变。
 func (s *FileStore) compactFile(p string, keep int) (bool, error) {
-	// ① 第一遍：定位最后 keep 条 state 行的起点
-	starts, err := stateRowStarts(p)
+	// ① 第一遍：定位 state 行 / compaction 行的起点
+	scan, err := scanSessionRows(p)
 	if err != nil {
 		return false, err
 	}
-	if len(starts) <= keep {
-		return false, nil // 没有可丢的行（或 state 行还不够多）
+	// 没有可丢的：state 行不够多，且（裁剪开启时）边界之前也没有 history 行
+	if len(scan.stateStarts) <= keep && !(scan.canTrimHistory && !s.keepHistory) {
+		return false, nil
 	}
-	keepFrom := starts[len(starts)-keep]
+	var keepFrom int64
+	if len(scan.stateStarts) >= keep {
+		keepFrom = scan.stateStarts[len(scan.stateStarts)-keep]
+	}
+	boundary := scan.lastCompactionStart // 0 = 没有压缩点 → 不裁 history
 
 	orig, err := os.Stat(p)
 	if err != nil {
 		return false, err
 	}
 
-	// ② 第二遍：逐行拷贝（跳过起点 < keepFrom 的 state 行）→ 临时文件
+	// ② 第二遍：逐行拷贝（按下面的保留规则）→ 临时文件
 	tmp, err := writeStreamedTempFile(filepath.Dir(p), filepath.Base(p), orig.Mode().Perm(), func(w *bufio.Writer) (int64, error) {
-		return copyKeepingTailStates(p, keepFrom, w)
+		return copySessionRows(p, keepFrom, boundary, s.keepHistory, w)
 	})
 	if err != nil {
 		return false, err
@@ -102,6 +107,55 @@ func (s *FileStore) compactFile(p string, keep int) (bool, error) {
 		return true, err
 	}
 	return true, nil
+}
+
+// sessionRows 是会话 jsonl 的行扫描结果。
+type sessionRows struct {
+	stateStarts []int64 // 每条 state 行的起始偏移
+	// lastCompactionStart 是最后一条 compaction 行的起始偏移（0 = 没有压缩点）。
+	// 它就是「恢复窗口」的左边界。
+	lastCompactionStart int64
+	// canTrimHistory 表示边界之前确实有 history 行可丢（没有就不必重写）。
+	canTrimHistory bool
+}
+
+// scanSessionRows 顺序扫描会话 jsonl，收集行偏移。
+// 用 ReadBytes 逐行读（不在内存驻留整文件），行内不解析 JSON ——
+// 靠行首的类型前缀判定（fileRecord 的 Type 是第一个字段）。
+func scanSessionRows(p string) (sessionRows, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return sessionRows{}, err
+	}
+	defer f.Close()
+	out := sessionRows{}
+	r := bufio.NewReaderSize(f, 1<<20)
+	var off int64
+	for {
+		lineStart := off
+		line, rerr := r.ReadBytes('\n')
+		if len(line) > 0 {
+			off += int64(len(line))
+			switch {
+			case bytes.HasPrefix(line, stateRowPrefix):
+				out.stateStarts = append(out.stateStarts, lineStart)
+			case bytes.HasPrefix(line, compactionRowPrefix):
+				out.lastCompactionStart = lineStart
+			case bytes.HasPrefix(line, historyRowPrefix):
+				// 边界之前的 history 行可丢（边界之后的是恢复窗口的一部分）。
+				if out.lastCompactionStart == 0 {
+					out.canTrimHistory = true
+				}
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return out, rerr
+		}
+	}
+	return out, nil
 }
 
 // stateRowStarts 顺序扫描，返回每条 state 行的起始偏移。
@@ -138,7 +192,7 @@ func stateRowStarts(p string) ([]int64, error) {
 
 // copyKeepingTailStates 把 p 逐行写入 w，丢弃起始偏移 < keepFrom 的 state 行。
 // 保留的行按原始字节写出（不重新序列化 → 逐字节不变）。
-func copyKeepingTailStates(p string, keepFrom int64, w *bufio.Writer) (int64, error) {
+func copySessionRows(p string, keepFrom, boundary int64, keepHistory bool, w *bufio.Writer) (int64, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return 0, err
@@ -154,7 +208,16 @@ func copyKeepingTailStates(p string, keepFrom int64, w *bufio.Writer) (int64, er
 		line, rerr := r.ReadBytes('\n')
 		if len(line) > 0 {
 			off += int64(len(line))
-			if !(lineStart < keepFrom && bytes.HasPrefix(line, stateRowPrefix)) {
+			drop := false
+			switch {
+			case lineStart == 0:
+				drop = false // 首行永远保留（标题来源）
+			case lineStart < keepFrom && bytes.HasPrefix(line, stateRowPrefix):
+				drop = true // 只保留最后 keep 条 state 行
+			case !keepHistory && boundary > 0 && lineStart < boundary && bytes.HasPrefix(line, historyRowPrefix):
+				drop = true // 压缩窗口之外的 history 行
+			}
+			if !drop {
 				if _, err := w.Write(line); err != nil {
 					return written, err
 				}
@@ -172,7 +235,11 @@ func copyKeepingTailStates(p string, keepFrom int64, w *bufio.Writer) (int64, er
 }
 
 // stateRowPrefix state 行的判定前缀（与 fileRecord 的 JSON 字段序一致）。
-var stateRowPrefix = []byte(`{"type":"state"`)
+var (
+	stateRowPrefix      = []byte(`{"type":"state"`)
+	historyRowPrefix    = []byte(`{"type":"history"`)
+	compactionRowPrefix = []byte(`{"type":"compaction"`)
+)
 
 // writeStreamedTempFile 在 dir 内写临时文件（同目录 → rename 必在同一文件系统）。
 // 与 store_record.go 的 writeTempFile 的区别：**流式写**，不把整个文件读进内存

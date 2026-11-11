@@ -34,6 +34,15 @@ type FileStore struct {
 	// 0 值（无论哪个字段）不关闭——由 NewFileStore 填默认值；要关闭用 WithAutoCompact(0, 0)。
 	compactKeep      int
 	compactThreshold int64
+	// keepHistory 为 true 时**不裁剪**压缩窗口之外的 history 行（默认 false = 裁）。
+	//
+	// 为什么默认裁（2026-11-11，CHECKPOINT_V3_DESIGN §9「P1-1」）：history 行
+	// 实测 86.3MB/会话（21,154 行），而：
+	//   · 恢复不用它（尾扫最后一条 state 行 = 压缩后形态）；
+	//   · 内容在 events.jsonl（唯一事实来源）里完整存在；
+	//   · 全仓库唯一的读者 firstUserTextFromFile 只读**第一行**取会话标题。
+	// 保留窗口 =「最后一个压缩点及其之后」——正是用户要的恢复语义。
+	keepHistory bool
 
 	// writeMu 串行化同一 FileStore 上的「追加」与「自压缩」：
 	// 自压缩是「重写 + rename」，若与并发追加交错，落在旧 inode 上的行会丢失
@@ -50,6 +59,17 @@ func WithAutoCompact(keep int, threshold int64) FileStoreOption {
 	return func(s *FileStore) {
 		s.compactKeep = keep
 		s.compactThreshold = threshold
+	}
+}
+
+// WithKeepHistory 配置是否保留「压缩窗口之外」的 history 行。
+//
+// 默认 false（裁剪）：恢复只用 state 行，完整消息在 events.jsonl 里，
+// history 行是冗余副本（实测 86.3MB/会话）。
+// 置 true 可完全回退到旧行为（文件只增不减，只裁 state 行）。
+func WithKeepHistory(keep bool) FileStoreOption {
+	return func(s *FileStore) {
+		s.keepHistory = keep
 	}
 }
 
