@@ -74,6 +74,7 @@ export default function AgentSigil({
       data-agent-id={agentId || undefined}
       data-slug={agentId || undefined}
       data-state={st}
+      data-status={status ? 'on' : 'off'}
       data-size={px}
       role={label ? 'img' : undefined}
       aria-label={label || undefined}
