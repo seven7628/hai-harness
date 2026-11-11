@@ -20,7 +20,7 @@
 //   · 窄屏表格保留 440px 可读列宽 → 单元格单行，横滑只在 .md-table-wrap 里（0 文档级溢出）
 //   · 三张事件卡正文左缘与各自事件标题左缘对齐（≤2px），event-flow 的 .agent 内 gap 4
 //   · 无 context 的卡不画空 footer（handoff / approval 没有 .event-actions）
-//   · 头像身份色跟随 agent.accent（Researcher = #7bc199），正文 @ 提及带 16px Luna
+//   · 头像身份色跟随 agent.accent（mock 用 demo 的 12 色 role palette：Researcher 蓝 / Writer 紫），正文 @ 提及带 16px Luna
 //   · handoff / approval 卡有 .event-flow 头像，task 卡 .event-who 有 16px 头像
 //   · composer meta 行存在
 //   · 无 console error / pageerror
@@ -329,7 +329,7 @@ async function shot(width, height, theme, kind) {  const name = `${width}-${kind
             marginTop: getComputedStyle(q('.hub-context-jump')).marginTop,
           }
         : null,
-      // 头像身份色：会话区里每个出现过的 agent id → data-fill（mock 的 accent 是 #7bc199 / #9daed2）。
+      // 头像身份色：会话区里每个出现过的 agent id → data-fill（严格 demo：12 色 role palette，Researcher 蓝 / Writer 紫；与 accent 无关）。
       avatarFills: (() => {
         const out = {}
         for (const el of document.querySelectorAll('.chat-header .avatar, .messages .avatar')) {
@@ -437,13 +437,13 @@ async function shot(width, height, theme, kind) {  const name = `${width}-${kind
     else {
       if (m.mentionAvatar.display === 'none') failed.push('正文 @ 提及头像被隐藏（display:none）')
       if (m.mentionAvatar.width !== 16) failed.push(`正文 @ 提及头像=${m.mentionAvatar.width}px（应为 16）`)
-      if (m.mentionAvatar.fill !== '#7bc199') failed.push(`正文 @ 提及头像色=${m.mentionAvatar.fill}（应为 #7bc199）`)
+      if (m.mentionAvatar.fill !== '#3C82F6') failed.push(`正文 @ 提及头像色=${m.mentionAvatar.fill}（应为 #3C82F6）`)
     }
   }
-  // 身份色：头像必须用 profile.accent，而不是「研究→蓝 / 写作→紫」的职责色。
+  // 严格 demo：头像必须用 12 色 role palette（研究→蓝 / 写作→紫），不能读 profile.accent。
   // 群页面必须真的画出 Researcher（owner + 有发言）；DM 视角只校验页面上出现的智能体，
   // 不为凑断言往 Writer DM 塞 Researcher 头像。
-  const WANT_FILL = { ag_mockres1: '#7bc199', ag_mockwri2: '#9daed2' }
+  const WANT_FILL = { ag_mockres1: '#3C82F6', ag_mockwri2: '#885CF4' }
   const REQUIRED_FILL = kind === 'group' ? ['ag_mockres1'] : []
   for (const [id, want] of Object.entries(WANT_FILL)) {
     const got = m.avatarFills[id]
@@ -674,20 +674,20 @@ for (const [width, height, theme] of CARD_CASES) {
       failed.push(`handoff 归属名字=${hf.names.join('→')}（应为 Researcher→Writer）`)
     }
     if (hf.arrow !== '→') failed.push(`handoff 缺少 →（${hf.arrow}）`)
-    if (hf.fill[0] !== '#7bc199' || hf.fill[1] !== '#9daed2') failed.push(`handoff 头像色=${hf.fill.join('/')}`)
+    if (hf.fill[0] !== '#3C82F6' || hf.fill[1] !== '#885CF4') failed.push(`handoff 头像色=${hf.fill.join('/')}`)
   }
   const af = m.approvalFlow
   if (!af || af.avatars !== 1) failed.push(`approval 卡 .event-flow 头像=${af?.avatars ?? 0}（应为 1）`)
   else {
     if (af.size[0] !== 18) failed.push(`approval 头像尺寸=${af.size[0]}（应为 18）`)
     if (!af.names[0]?.includes('Writer')) failed.push(`approval 发起人=${af.names[0]}（应为 Writer）`)
-    if (af.fill[0] !== '#9daed2') failed.push(`approval 头像色=${af.fill[0]}（应为 #9daed2）`)
+    if (af.fill[0] !== '#885CF4') failed.push(`approval 头像色=${af.fill[0]}（应为 #885CF4）`)
   }
   const execWho = m.taskWho.find((w) => w.text.includes('Writer'))
   if (!execWho) failed.push('task 卡缺少执行者行')
   else {
     if (execWho.faceSize !== 16) failed.push(`task 卡执行者头像=${execWho.faceSize}px（应为 16）`)
-    if (execWho.fill !== '#9daed2') failed.push(`task 卡执行者头像色=${execWho.fill}（应为 #9daed2）`)
+    if (execWho.fill !== '#885CF4') failed.push(`task 卡执行者头像色=${execWho.fill}（应为 #885CF4）`)
   }
   if (m.scrollWidth > width) failed.push(`横向溢出 ${m.scrollWidth} > ${width}`)
   if (failed.length) errors.push(`${name}: ${failed.join('；')}`)

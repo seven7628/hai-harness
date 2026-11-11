@@ -5,7 +5,8 @@ import type { HubGroup } from './types'
 // 规则：
 //   - 智能体：用 profile.accent（编辑器里的 color input，#rrggbb）；缺省时按 id 稳定散列到调色板。
 //   - 群组：群主 accent → 第一个成员 accent → 按群 id 稳定散列。
-//   - 身份色只用于「环/指示条/未读徽标」；正文与名字仍用 --ink，保证三套主题可读。
+//   - 这个 accent 只用于「侧栏环/未读徽标/状态点」；头像与名字的身份色来自
+//     lunaAvatar 的 12 色 role palette（严格对齐 demo），两者不得互相回读。
 // 纯函数，方便在 UI 与测试里复用（不依赖 store / DOM）。
 
 const FALLBACK_PALETTE = [

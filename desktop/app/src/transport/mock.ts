@@ -650,6 +650,8 @@ class MockTransport implements Transport {
   // Hub（Agent Hub P1）：两个演示智能体 + 各自 DM 历史，供浏览器里验 rail/DM/流式。
   // 与真 bridge 同形：seq 单调、hub_message 带 message、command_response 带 data。
   private hubAgents: Record<string, unknown>[] = [
+    // 严格对齐 demo：头像色只由 12 色 role palette 决定（Researcher→blue、Writer→violet）。
+    // accent 只喂侧栏环/未读/状态点，故意保留与职责色不同的值，防止头像又偷偷读回 accent。
     { id: 'ag_mockres1', name: 'Researcher', accent: '#7bc199', avatar: { kind: 'emoji', value: '🟢' },
       role: '竞品研究员', description: '负责竞品价格、功能与公开情报；产出对比表与结论。',
       provider: 'deepseek', model: 'deepseek-v4-flash', persona: 'hub', version: 1 },

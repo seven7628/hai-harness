@@ -248,15 +248,16 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
   assert(decorativeTag.includes('aria-hidden="true"') && !decorativeTag.includes('role="img"'),
     '与名字同行的头像仍 aria-hidden')
 
-  // 身份色：传 accent 就用 accent（与侧栏/详情/编辑器同一个 profile 字段），不传才回退职责色。
+  // 严格 demo：accent 不参与头像。即使调用方还传 accent，data-fill 也必须仍是职责色。
   const accented = renderToStaticMarkup(createElement(AgentSigil, {
     agentId: 'agt_a', accent: '#7bc199', responsibility: '研究', state: 'working', size: 52,
   }))
-  assert(accented.includes('data-fill="#7bc199"'), 'SSR：accent=#7bc199 → data-fill=#7bc199（不再被职责色覆盖）')
-  assert(labelled.includes('data-fill="#3C82F6"'), 'SSR：不传 accent → 仍按职责规则（研究→#3C82F6）')
+  assert(accented.includes('data-fill="#3C82F6"'), 'SSR：传 accent=#7bc199 也不改头像（研究→#3C82F6）')
+  assert(!accented.includes('data-fill="#7bc199"'), 'SSR：头像不得回读 profile.accent')
+  assert(labelled.includes('data-fill="#3C82F6"'), 'SSR：不传 accent 仍按职责规则（研究→#3C82F6）')
 }
 
-// 10b) 身份色纯函数：accent 优先于职责规则/散列；非法值不往 SVG 里填。
+// 10b) 身份色纯函数：严格 demo 只认职责规则/散列，函数签名里没有 accent。
 {
   const lunaBuild = await build({
     entryPoints: [join(__dirname, '..', 'src', 'hub', 'lunaAvatar.ts')],
@@ -267,17 +268,16 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
   const luna = await import(`${lunaPath}?v=${Date.now()}`)
   unlinkSync(lunaPath)
   const role = '竞品研究员'
-  assert(luna.lunaColor('agt_mockres1', 'Researcher', role, '#7bc199') === '#7bc199',
-    'lunaColor：accent #7bc199 压过「研究→蓝」职责规则')
   assert(luna.lunaColor('agt_mockres1', 'Researcher', role) === '#3C82F6',
-    'lunaColor：没有 accent 时仍回退职责色（研究→#3C82F6）')
-  assert(luna.lunaColor('agt_mockwri2', 'Writer', '写作', '#9daed2') === '#9daed2',
-    'lunaColor：Writer accent #9daed2 压过「写作→紫」')
-  for (const bad of ['rgb(1,2,3)', 'green', '#xyzxyz', '', null, undefined]) {
-    assert(luna.lunaColor('agt_mockres1', 'Researcher', role, bad) === '#3C82F6',
-      `lunaColor：非法 accent ${JSON.stringify(bad)} 回退职责色`)
-  }
-  assert(luna.lunaColor('agt_x', '', '', '#ABC') === '#ABC', 'lunaColor：接受 #rgb 简写')
+    'lunaColor：研究→蓝（12 色 role palette）')
+  assert(luna.lunaColor('agt_mockwri2', 'Writer', '写作') === '#885CF4',
+    'lunaColor：写作→紫（12 色 role palette）')
+  assert(luna.lunaColor('agt_other', 'Other', role) === '#3C82F6',
+    'lunaColor：同一职责不同智能体同色（demo 的职责规则先于散列）')
+  assert(luna.lunaColor('agt_x', '', '') === luna.lunaColor('agt_x', '', ''),
+    'lunaColor：无职责时按 id 稳定散列')
+  assert(luna.lunaColor('agt_x', '', '') !== luna.lunaColor('agt_y', '', ''),
+    'lunaColor：不同 id 散列不同色')
 }
 
 // 11) 手机端 avatar_model.js 与桌面 avatar.ts 同 seed 对照（防两套算法漂移）。

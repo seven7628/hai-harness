@@ -28,16 +28,16 @@ import { highlightClass, seqDataAttr } from './seqJump'
 // 没有 reply_to 字段，所以不画 demo 的「回复 @」。
 
 // 事件卡的归属智能体：refs 里是 bridge 落的真实 id（hub_handoff.go 写
-// from_agent_id / to_agent_id；审批写 agent_id），名册只补名字与 accent。
+// from_agent_id / to_agent_id；审批写 agent_id），名册只补名字与职责。
 // refs 缺 id 时，handoff/审批退回 sender —— 那是发起人本人。
 // 两条路都拿不到就不画：绝不拿「当前打开的会话」兜底，归属不明的卡只画事件。
-type EventActor = { id: string; name: string; accent?: string; role?: string }
+type EventActor = { id: string; name: string; role?: string }
 
 function eventActor(id: unknown, roster: MentionAgent[]): EventActor | null {
   const key = typeof id === 'string' ? id.trim() : ''
   if (!key) return null
   const agent = roster.find((a) => a.id === key)
-  return { id: key, name: agent?.name || key, accent: agent?.accent, role: agent?.role }
+  return { id: key, name: agent?.name || key, role: agent?.role }
 }
 
 function senderActor(msg: HubMessage, roster: MentionAgent[]): EventActor | null {
@@ -50,7 +50,7 @@ function EventFlow({ from, to }: { from?: EventActor | null; to?: EventActor | n
   if (!from && !to) return null
   const face = (a: EventActor) => (
     <span className="agent">
-      <AgentSigil agentId={a.id} accent={a.accent} responsibility={a.role} status={false} size={18} />
+      <AgentSigil agentId={a.id} responsibility={a.role} status={false} size={18} />
       {a.name}
     </span>
   )

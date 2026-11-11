@@ -245,7 +245,6 @@ export default function HubSurface() {
                 <AgentSigil
                   agentId={activeAgent.id}
                   name={activeAgent.name}
-                  accent={activeAgent.accent}
                   responsibility={activeAgent.role}
                   state={activeState}
                   size={52}

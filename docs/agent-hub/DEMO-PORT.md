@@ -37,10 +37,10 @@ demo 的 CSS 原样搬过来，只在「demo 是静态数据、仓库是 Markdow
   套上 Markdown 后，块级元素之间的 `\n` 文本节点会被画成空行，段距翻倍。正文里恢复
   `.hub-demo .agent-text .md { white-space: normal }`，行高/段距仍用 demo 的 1.7 与 8px；
   `pre`/`code` 自己保留预排版。用户气泡不在此列（人类打的换行要留住）。
-- 身份色：demo 的 `avatarColor()` 只有职责规则 + id 散列；仓库的智能体有 `profile.accent`
-  （左栏/详情/编辑器同一个字段）。`lunaColor()` 改为 accent 优先，没 accent 才回退职责色，
-  保证同一智能体在侧栏、消息头、@ 提及、事件卡里是同一个颜色。
-- `@` 提及在 demo 里是纯文字 chip；仓库保留 16px Luna（accent 身份色），inline 摆放不撑行高。
+- 身份色严格按 demo：`avatarColor()` 只有职责规则 + id 散列，**不读** `AGENTS.color`。
+  仓库同样让 `lunaColor()` 只认 12 色 role palette；`profile.accent` 只服务侧栏环、未读徽标、
+  状态点（`--row-accent` / `.hub-unread`），不得再喂头像或名字。用户改 accent 时头像不能换色。
+- `@` 提及在 demo 里是纯文字 chip；仓库保留 16px Luna（职责色）与同色文字，inline 摆放不撑行高。
 - handoff / approval / task 卡补归属智能体：`.event-flow`（18px + 名字 + `→`）与
   `.event-who`（16px）读 `refs.from_agent_id` / `to_agent_id` / `agent_id`，缺失才回退 sender；
   拿不到就不画，绝不用「当前打开的会话」兜底。

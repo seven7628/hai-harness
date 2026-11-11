@@ -155,7 +155,6 @@ function OverviewPanel() {
         id: m.agent_id,
         name: member?.name ?? m.agent_id,
         responsibility: member?.role,
-        accent: member?.accent,
         state: stateOf(m.agent_id, member?.deleted),
       }
     })
@@ -197,7 +196,6 @@ function OverviewPanel() {
               <div className="hub-ov-member" key={m.agent_id}>
                 <AgentSigil
                   agentId={m.agent_id}
-                  accent={member?.accent}
                   responsibility={member?.role}
                   state={stateOf(m.agent_id, member?.deleted)}
                   size={24}
@@ -239,7 +237,6 @@ function OverviewPanel() {
       <div className="hub-ov-hero">
         <AgentSigil
           agentId={agent.id}
-          accent={agent.accent}
           responsibility={agent.role}
           state={agentState}
           size={48}

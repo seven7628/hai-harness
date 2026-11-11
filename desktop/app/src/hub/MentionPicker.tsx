@@ -104,7 +104,7 @@ export default function MentionPicker({
                   onPick(agent)
                 }}
               >
-                <AgentSigil agentId={agent.id} accent={agent.accent} responsibility={agent.role} status={false} size={24} />
+                <AgentSigil agentId={agent.id} responsibility={agent.role} status={false} size={24} />
                 <span className="hub-mention-option-name">{agent.name}</span>
                 {roleText ? (
                   <span className="hub-mention-option-role">{roleText}</span>

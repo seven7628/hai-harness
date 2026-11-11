@@ -34,7 +34,7 @@ export default function TaskResultCard({
   const status = view.tone === 'success' ? 'ok' : view.tone === 'warn' ? 'wait' : ''
   // 16px 身份头像跟名字同行：执行者与派发者都能看出来源；没有智能体对象时只留文字。
   const face = (agent: MentionAgent) => (
-    <AgentSigil agentId={agent.id} accent={agent.accent} responsibility={agent.role} status={false} size={16} />
+    <AgentSigil agentId={agent.id} responsibility={agent.role} status={false} size={16} />
   )
   return (
     <article

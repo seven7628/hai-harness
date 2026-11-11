@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react'
 import { useT } from '../i18n'
+import { lunaColor } from './lunaAvatar'
 import type { HubMessage } from './types'
 import type { MentionAgent } from './mentions'
 import { uniqueContextSenders } from './groupProjection'
@@ -59,8 +60,8 @@ export default function TurnContextLine({
       {senders.map((s) => {
         const agent = s.agent_id ? byID.get(s.agent_id) : undefined
         const name = s.name || agent?.name || s.agent_id || '成员'
-        const accent = agent?.accent || 'var(--text-3)'
-        const style = { '--context-accent': accent } as CSSProperties
+        const identity = agent ? lunaColor(agent.id, agent.name, agent.role ?? '') : 'var(--text-3)'
+        const style = { '--context-accent': identity } as CSSProperties
         const seq = (s.agent_id ? triggerSeqBySender?.[s.agent_id] : 0) || seqs[0] || 0
         const content = (
           <>
