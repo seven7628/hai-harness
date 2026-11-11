@@ -26,6 +26,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"time"
 )
 
 var errCompactAborted = errors.New("compact aborted")
@@ -221,8 +222,8 @@ func (bs *blockStore) finishCompact(snap *compactSnapshot, cw *compactWriter) er
 	bs.bytesWritten = cw.pos
 	bs.sortedDirty = true
 	bs.recomputeLiveBytes()
-	// 记下压缩后的体积：冷却判据用（见 block_store.go 的 compactCooldownFactor）。
-	bs.lastCompactBytes = cw.pos
+	// 记下压缩完成的时刻：最小间隔判据用（见 block_store.go 的 minCompactInterval）。
+	bs.lastCompactAt = time.Now()
 	if err := bs.startWriter(); err != nil {
 		return err
 	}
