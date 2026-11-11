@@ -8,6 +8,7 @@ import { hubCommand } from './api'
 import { GroupBubble } from './MessageBubble'
 import { DayDivider } from './ConversationMessage'
 import { dayKey, dayLabel } from './conversationDay'
+import { conversationTurnText } from './conversation'
 import { RoundGroup } from './RoundGroup'
 import { RoundActivityDigest } from './RoundActivityDigest'
 import { StreamingMessage } from './StreamingMessage'
@@ -419,7 +420,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
             <span>{t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask')}</span>
             {owner ? <><span className="sep">·</span><span>{t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id)}</span></> : null}
             {title ? <><span className="sep">·</span><span>{title}</span></> : null}
-            {convActive ? <><span className="sep">·</span><span>自动对话中</span></> : null}
+            {convActive ? <><span className="sep">·</span><span>自动对话中{conversation ? ` · ${conversationTurnText(conversation)}` : ''}</span></> : null}
           </div>
         </div>
         <div className="header-actions">
