@@ -8,6 +8,8 @@ export interface AgentStackMember {
   id: string
   name?: string
   responsibility?: string
+  /** 智能体 profile.accent；叠放里每颗头也用同一个身份色。 */
+  accent?: string
   state: AvatarState
   deleted?: boolean
 }
@@ -41,6 +43,7 @@ export default function AgentStack({
           key={m.id}
           agentId={m.id}
           name={members.find((x) => x.id === m.id)?.name}
+          accent={members.find((x) => x.id === m.id)?.accent}
           responsibility={m.responsibility}
           state={m.state}
           size={size}

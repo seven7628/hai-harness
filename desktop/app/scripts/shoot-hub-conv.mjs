@@ -11,6 +11,11 @@
 //   · 桌面：agent 正文左移 63px（52px Luna + 11px gap）；窄屏 60px（52 + 8）
 //   · 会话列 760px；宽屏 padding 30/28，窄屏 16/12
 //   · 交接/审批卡真实渲染（?hubFixture=cards），各有专属 token 样式
+//   · 正文 Markdown 的空白处理是 normal（agent-text 的 pre-wrap 不再把 \n 画成空行），
+//     且每个段落的高度都是 line-height 的整数倍（没有多出来的空行）
+//   · 触发上下文是「N 人触发」可读文案，不再画「↳ N」
+//   · 头像身份色跟随 agent.accent（Researcher = #7bc199），正文 @ 提及带 16px Luna
+//   · handoff / approval 卡有 .event-flow 头像，task 卡 .event-who 有 16px 头像
 //   · composer meta 行存在
 //   · 无 console error / pageerror
 //
@@ -159,6 +164,58 @@ async function shot(width, height, theme, kind) {
         ? { top: listStyle.paddingTop, left: listStyle.paddingLeft }
         : null,
       dateDivider: q('.date-divider')?.textContent ?? null,
+      mdWhiteSpace: q('.agent-text .md')
+        ? getComputedStyle(q('.agent-text .md')).whiteSpace
+        : null,
+      // 相邻块级元素之间的实际间隙：正常情况下只等于 margin（8px）；pre-wrap 会多出一个
+      // line-height 的空行（实测 39.8px），所以 gap 必须小于一个行高。
+      blockGap: (() => {
+        for (const md of document.querySelectorAll('.agent-text .md')) {
+          const first = md.querySelector('p')
+          const next = first?.nextElementSibling
+          if (!first || !next) continue
+          return {
+            gap: Math.round((next.getBoundingClientRect().top - first.getBoundingClientRect().bottom) * 10) / 10,
+            lh: Number.parseFloat(getComputedStyle(first).lineHeight),
+            next: next.className || next.tagName.toLowerCase(),
+          }
+        }
+        return null
+      })(),
+      // 段落高度 = line-height 的整数倍 → 段落之间没有多出来的空行。
+      paragraphs: [...document.querySelectorAll('.agent-text .md p')].map((el) => {
+        const st = getComputedStyle(el)
+        return {
+          h: Math.round(el.getBoundingClientRect().height * 10) / 10,
+          lh: Number.parseFloat(st.lineHeight),
+          text: (el.textContent ?? '').slice(0, 12),
+        }
+      }),
+      contextJump: q('.hub-context-jump')
+        ? {
+            text: (q('.hub-context-jump').textContent ?? '').trim(),
+            title: q('.hub-context-jump').getAttribute('title'),
+          }
+        : null,
+      // 头像身份色：会话区里每个出现过的 agent id → data-fill（mock 的 accent 是 #7bc199 / #9daed2）。
+      avatarFills: (() => {
+        const out = {}
+        for (const el of document.querySelectorAll('.chat-header .avatar, .messages .avatar')) {
+          const id = el.getAttribute('data-agent-id')
+          const fill = el.querySelector('svg[data-luna-face]')?.getAttribute('data-fill')
+          if (id && fill && !out[id]) out[id] = fill
+        }
+        return out
+      })(),
+      mentionAvatar: (() => {
+        const el = q('.agent-text .hub-mention .luna-avatar')
+        if (!el) return null
+        return {
+          display: getComputedStyle(el).display,
+          width: Math.round(el.getBoundingClientRect().width),
+          fill: el.querySelector('svg[data-luna-face]')?.getAttribute('data-fill') ?? null,
+        }
+      })(),
     }
   })
   const failed = []
@@ -204,6 +261,47 @@ async function shot(width, height, theme, kind) {
       if (m.groupStack.role !== 'img') failed.push(`群叠放 role=${m.groupStack.role}（应为 img）`)
       if (!m.groupStack.label?.includes(m.groupStack.title)) failed.push(`群叠放 aria-label 不含群名：${m.groupStack.label}`)
     }
+  }
+  // 段落间距：Markdown 块级元素之间不再被 pre-wrap 画出空行。
+  if (m.mdWhiteSpace !== 'normal') failed.push(`.agent-text .md white-space=${m.mdWhiteSpace}（应为 normal）`)
+  if (!m.blockGap) failed.push('找不到相邻的 Markdown 块级元素（无法校验空行）')
+  else if (m.blockGap.gap >= m.blockGap.lh) {
+    failed.push(`p → ${m.blockGap.next} 间隙 ${m.blockGap.gap}px ≥ 行高 ${m.blockGap.lh}px（多画了空行）`)
+  }
+  for (const p of m.paragraphs) {
+    const lines = Math.round(p.h / p.lh)
+    if (Math.abs(p.h - lines * p.lh) > 1) {
+      failed.push(`段落「${p.text}」高 ${p.h}px 不是 line-height ${p.lh}px 的整数倍（多出空行）`)
+      break
+    }
+  }
+  // 触发上下文：可读文字，不再用「↳」符号。
+  if (kind === 'group') {
+    if (!m.contextJump) failed.push('群消息缺少触发上下文入口')
+    else {
+      if (!m.contextJump.text.includes('人触发')) failed.push(`触发上下文文案=${m.contextJump.text}（应含「人触发」）`)
+      if (m.contextJump.text.includes('↳')) failed.push('触发上下文仍在用「↳」符号')
+      if (!m.contextJump.title?.includes('#')) failed.push(`触发上下文 title 缺少 seq：${m.contextJump.title}`)
+    }
+    if (!m.mentionAvatar) failed.push('正文 @ 提及缺少 Luna 头像')
+    else {
+      if (m.mentionAvatar.display === 'none') failed.push('正文 @ 提及头像被隐藏（display:none）')
+      if (m.mentionAvatar.width !== 16) failed.push(`正文 @ 提及头像=${m.mentionAvatar.width}px（应为 16）`)
+      if (m.mentionAvatar.fill !== '#7bc199') failed.push(`正文 @ 提及头像色=${m.mentionAvatar.fill}（应为 #7bc199）`)
+    }
+  }
+  // 身份色：头像必须用 profile.accent，而不是「研究→蓝 / 写作→紫」的职责色。
+  // 群页面必须真的画出 Researcher（owner + 有发言）；DM 视角只校验页面上出现的智能体，
+  // 不为凑断言往 Writer DM 塞 Researcher 头像。
+  const WANT_FILL = { ag_mockres1: '#7bc199', ag_mockwri2: '#9daed2' }
+  const REQUIRED_FILL = kind === 'group' ? ['ag_mockres1'] : []
+  for (const [id, want] of Object.entries(WANT_FILL)) {
+    const got = m.avatarFills[id]
+    if (!got) {
+      if (REQUIRED_FILL.includes(id)) failed.push(`群会话缺少 ${id} 的头像（身份色无从校验）`)
+      continue
+    }
+    if (got !== want) failed.push(`${id} 头像 data-fill=${got}（应为 ${want}）`)
   }
   if (failed.length) errors.push(`${name}: ${failed.join('；')}`)
 
@@ -289,6 +387,38 @@ for (const theme of THEMES) {
       taskBorder: q('.event-card--task') ? getComputedStyle(q('.event-card--task')).borderTopColor : null,
       approvalTitle: color('.event-card--approval .event-title'),
       taskTitle: color('.event-card--task .event-title'),
+      // 事件卡归属：handoff 画「发起人 → 接收人」，approval 画发起人，task 的执行者带 16px 头像。
+      handoffFlow: (() => {
+        const flow = q('.event-card--handoff .event-flow')
+        if (!flow) return null
+        const faces = [...flow.querySelectorAll('.luna-avatar')]
+        return {
+          avatars: faces.length,
+          size: faces.map((f) => Math.round(f.getBoundingClientRect().width)),
+          fill: faces.map((f) => f.querySelector('svg[data-luna-face]')?.getAttribute('data-fill') ?? null),
+          names: [...flow.querySelectorAll('.agent')].map((a) => a.textContent?.trim() ?? ''),
+          arrow: flow.querySelector('.arrow')?.textContent?.trim() ?? '',
+        }
+      })(),
+      approvalFlow: (() => {
+        const flow = q('.event-card--approval .event-flow')
+        if (!flow) return null
+        const faces = [...flow.querySelectorAll('.luna-avatar')]
+        return {
+          avatars: faces.length,
+          size: faces.map((f) => Math.round(f.getBoundingClientRect().width)),
+          fill: faces.map((f) => f.querySelector('svg[data-luna-face]')?.getAttribute('data-fill') ?? null),
+          names: [...flow.querySelectorAll('.agent')].map((a) => a.textContent?.trim() ?? ''),
+        }
+      })(),
+      taskWho: [...document.querySelectorAll('.event-card--task .event-who')].map((el) => {
+        const face = el.querySelector('.luna-avatar')
+        return {
+          text: el.textContent?.trim() ?? '',
+          faceSize: face ? Math.round(face.getBoundingClientRect().width) : null,
+          fill: face?.querySelector('svg[data-luna-face]')?.getAttribute('data-fill') ?? null,
+        }
+      }),
       scrollWidth: document.documentElement.scrollWidth,
     }
   })
@@ -304,6 +434,30 @@ for (const theme of THEMES) {
   if (m.handoffIcon === m.approvalIcon) failed.push('handoff/approval 图标颜色未区分')
   if (m.approvalBorder === m.taskBorder) failed.push('approval 暖边框未生效')
   if (m.approvalTitle === m.taskTitle) failed.push('approval warn 标题未生效')
+  // 事件卡归属：handoff 两端都要有 18px 头像与名字，→ 只在两端都在时出现。
+  const hf = m.handoffFlow
+  if (!hf || hf.avatars !== 2) failed.push(`handoff 卡 .event-flow 头像=${hf?.avatars ?? 0}（应为 2）`)
+  else {
+    if (hf.size.some((w) => w !== 18)) failed.push(`handoff 头像尺寸=${hf.size.join('/')}（应为 18）`)
+    if (!hf.names[0]?.includes('Researcher') || !hf.names[1]?.includes('Writer')) {
+      failed.push(`handoff 归属名字=${hf.names.join('→')}（应为 Researcher→Writer）`)
+    }
+    if (hf.arrow !== '→') failed.push(`handoff 缺少 →（${hf.arrow}）`)
+    if (hf.fill[0] !== '#7bc199' || hf.fill[1] !== '#9daed2') failed.push(`handoff 头像色=${hf.fill.join('/')}`)
+  }
+  const af = m.approvalFlow
+  if (!af || af.avatars !== 1) failed.push(`approval 卡 .event-flow 头像=${af?.avatars ?? 0}（应为 1）`)
+  else {
+    if (af.size[0] !== 18) failed.push(`approval 头像尺寸=${af.size[0]}（应为 18）`)
+    if (!af.names[0]?.includes('Writer')) failed.push(`approval 发起人=${af.names[0]}（应为 Writer）`)
+    if (af.fill[0] !== '#9daed2') failed.push(`approval 头像色=${af.fill[0]}（应为 #9daed2）`)
+  }
+  const execWho = m.taskWho.find((w) => w.text.includes('Writer'))
+  if (!execWho) failed.push('task 卡缺少执行者行')
+  else {
+    if (execWho.faceSize !== 16) failed.push(`task 卡执行者头像=${execWho.faceSize}px（应为 16）`)
+    if (execWho.fill !== '#9daed2') failed.push(`task 卡执行者头像色=${execWho.fill}（应为 #9daed2）`)
+  }
   if (m.scrollWidth > width) failed.push(`横向溢出 ${m.scrollWidth} > ${width}`)
   if (failed.length) errors.push(`${name}: ${failed.join('；')}`)
   await page.screenshot({ path: `${OUT}/${name}.png` })

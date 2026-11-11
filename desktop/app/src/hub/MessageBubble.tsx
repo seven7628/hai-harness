@@ -5,6 +5,7 @@ import { useT } from '../i18n'
 import type { HubMessage } from './types'
 import { parseRoutingText } from './groupThread'
 import AgentMentionChip from './AgentMentionChip'
+import AgentSigil from './AgentSigil'
 import { AgentMessage, UserMessage } from './ConversationMessage'
 import TaskResultCard from './TaskResultCard'
 import TurnContextLine from './TurnContextLine'
@@ -22,8 +23,42 @@ import { highlightClass, seqDataAttr } from './seqJump'
 // 2026-11 demo 源码移植：agent 消息与 DM 共用「52px Luna + 作者头 + 无气泡正文」，
 // human 消息与 DM 共用「右侧暖色气泡 + 时间」。群特有标签只在数据能表达时出现：
 //   · 观察  ← groupRole=observer（名册真实字段）
-//   · ↳ N   ← context.senders ≥2（触发上下文）
+//   · N 人触发 ← context.senders ≥2（触发上下文）
 // 没有 reply_to 字段，所以不画 demo 的「回复 @」。
+
+// 事件卡的归属智能体：refs 里是 bridge 落的真实 id（hub_handoff.go 写
+// from_agent_id / to_agent_id；审批写 agent_id），名册只补名字与 accent。
+// refs 缺 id 时，handoff/审批退回 sender —— 那是发起人本人。
+// 两条路都拿不到就不画：绝不拿「当前打开的会话」兜底，归属不明的卡只画事件。
+type EventActor = { id: string; name: string; accent?: string; role?: string }
+
+function eventActor(id: unknown, roster: MentionAgent[]): EventActor | null {
+  const key = typeof id === 'string' ? id.trim() : ''
+  if (!key) return null
+  const agent = roster.find((a) => a.id === key)
+  return { id: key, name: agent?.name || key, accent: agent?.accent, role: agent?.role }
+}
+
+function senderActor(msg: HubMessage, roster: MentionAgent[]): EventActor | null {
+  return msg.sender?.kind === 'agent' ? eventActor(msg.sender.agent_id, roster) : null
+}
+
+/** demo 的 .event-flow：18px Luna + 名字，中间 `→`（只有单向时只画头像+名字）。 */
+function EventFlow({ from, to }: { from?: EventActor | null; to?: EventActor | null }) {
+  if (!from && !to) return null
+  const face = (a: EventActor) => (
+    <AgentSigil agentId={a.id} accent={a.accent} responsibility={a.role} status={false} size={18} />
+  )
+  return (
+    <div className="event-flow">
+      {from ? face(from) : null}
+      {from ? <span className="agent">{from.name}</span> : null}
+      {from && to ? <span className="arrow" aria-hidden="true">→</span> : null}
+      {to ? face(to) : null}
+      {to ? <span className="agent">{to.name}</span> : null}
+    </div>
+  )
+}
 
 export interface GroupBubbleProps {
   msg: HubMessage
@@ -78,6 +113,8 @@ export function GroupBubble({
   const hl = highlightClass(msg.seq, highlightSeq)
 
   if (msg.kind === 'approval_stub') {
+    // 发起人：refs.agent_id（bridge 写卡时落的）→ sender.agent_id；都没有就不画。
+    const initiator = eventActor(msg.refs?.agent_id, roster) ?? senderActor(msg, roster)
     return (
       <div className={`msg-row event-row${hl}`} data-seq={seq}>
         <span className="event-spacer" aria-hidden="true" />
@@ -91,6 +128,7 @@ export function GroupBubble({
                   <span className="name">{msg.text || '有人发起审批，详情在 Needs you'}</span>
                   <span className="event-status">仅你可看</span>
                 </div>
+                <EventFlow from={initiator} />
                 <p className="event-body">审批正文不进入群上下文；处理入口在右栏 Needs you。</p>
               </div>
             </div>
@@ -112,6 +150,9 @@ export function GroupBubble({
   if (msg.kind === 'handoff') {
     const status = String(msg.refs?.status ?? '')
     const label = status === 'pending_ack' ? '等待确认' : status === 'accepted' ? '已接受' : status === 'declined' ? '已拒绝' : '交接'
+    // 发起人/接收人取 refs（bridge 在 hub_handoff.go 里写死这两个 id）；发起人缺失退回 sender。
+    const from = eventActor(msg.refs?.from_agent_id, roster) ?? senderActor(msg, roster)
+    const to = eventActor(msg.refs?.to_agent_id, roster)
     return (
       <div className={`msg-row event-row${hl}`} data-seq={seq}>
         <span className="event-spacer" aria-hidden="true" />
@@ -125,6 +166,7 @@ export function GroupBubble({
                   <span className="name">{msg.text}</span>
                   <span className={`event-status ${status === 'pending_ack' || !status ? 'wait' : status === 'accepted' ? 'ok' : ''}`}>{label}</span>
                 </div>
+                <EventFlow from={from} to={to} />
                 <p className="event-body">完整交接指令在 Needs you；群内只保留摘要。</p>
               </div>
             </div>

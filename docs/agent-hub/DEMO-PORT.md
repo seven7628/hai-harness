@@ -29,6 +29,22 @@ demo 是静态 `stateConversations`；仓库里保留同样的 DOM/类名，只�
 - 群叠放：`planStack` 按 demo 的 4 个 + `+N` 口径；桌面/手机同一份纯逻辑。
 - owner-only、observer、seq 高亮、日期分隔、滚动跟随、Context/深链/导出仍由原逻辑提供。
 
+## 移植时的必要偏差（真实数据才有的约束）
+
+demo 的 CSS 原样搬过来，只在「demo 是静态数据、仓库是 Markdown + 真实智能体」这两处补差：
+
+- `.hub-demo .agent-text` 是 demo 的 `white-space: pre-wrap`（给纯文本/流式回显用）。
+  套上 Markdown 后，块级元素之间的 `\n` 文本节点会被画成空行，段距翻倍。正文里恢复
+  `.hub-demo .agent-text .md { white-space: normal }`，行高/段距仍用 demo 的 1.7 与 8px；
+  `pre`/`code` 自己保留预排版。用户气泡不在此列（人类打的换行要留住）。
+- 身份色：demo 的 `avatarColor()` 只有职责规则 + id 散列；仓库的智能体有 `profile.accent`
+  （左栏/详情/编辑器同一个字段）。`lunaColor()` 改为 accent 优先，没 accent 才回退职责色，
+  保证同一智能体在侧栏、消息头、@ 提及、事件卡里是同一个颜色。
+- `@` 提及在 demo 里是纯文字 chip；仓库保留 16px Luna（accent 身份色），inline 摆放不撑行高。
+- handoff / approval / task 卡补归属智能体：`.event-flow`（18px + 名字 + `→`）与
+  `.event-who`（16px）读 `refs.from_agent_id` / `to_agent_id` / `agent_id`，缺失才回退 sender；
+  拿不到就不画，绝不用「当前打开的会话」兜底。
+
 ## 本次边界
 
 本次只移植**会话主区 + 头像**，即用户截图中与 demo 差异最大的部分。左栏/右栏仍保留现有 Hub 导航结构（智能体/群组/工作区/详情），未整体替换成 demo 的 demo 侧栏与 Computer 面板；如果要求整页 1:1，需要另开任务搬 `sidebar` / `right-panel` 并重新接真实数据。

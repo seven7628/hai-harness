@@ -50,7 +50,14 @@ export function hashLuna(input: string): number {
   return h
 }
 
-export function lunaColor(id: string, name = '', responsibility = ''): string {
+/** accent 只接受 hex（编辑器 color input / profile.accent 就是 hex）；别的字符串不往 SVG 里填。 */
+const ACCENT_HEX = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
+
+// 颜色优先级：智能体自己的 accent（左栏/详情/编辑器同一个 profile 字段）→ 职责规则 → id 散列。
+// accent 是用户选的身份色，必须压过散列，否则同一个智能体在侧栏和消息里会是两种颜色。
+export function lunaColor(id: string, name = '', responsibility = '', accent?: string | null): string {
+  const hex = typeof accent === 'string' ? accent.trim() : ''
+  if (ACCENT_HEX.test(hex)) return hex
   const seed = `${id} ${name} ${responsibility}`
   for (const [pattern, key] of ROLE_RULES) if (pattern.test(seed)) return PALETTE[key]
   return PALETTE[KEYS[hashLuna(id) % KEYS.length]]

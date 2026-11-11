@@ -3,8 +3,9 @@ import AgentSigil from './AgentSigil'
 import type { MentionAgent } from './mentions'
 
 // 正文里的 @ 徽章（P3b-07，方案 §7.5.2 / §8.3.5）。
-// 头像用 sigil v2（与列表/消息/详情同图），accent 只给文字上色，不参与头像填充；
-// 正文里的提及是身份标记，不画状态层（一段话里不需要第二套状态表）。
+// 头像用 sigil v2（与列表/消息/详情同图同色：agent.accent 优先），文字用 accent 混色，
+// 头像 16px inline、压在基线上，不改变正文行高；正文里的提及不画状态层
+// （一段话里不需要第二套状态表）。
 // 可点击时是 role=link 的按钮（键盘 Tab + Enter 可达），不可点击时退化为普通 span。
 
 export default function AgentMentionChip({
@@ -29,7 +30,7 @@ export default function AgentMentionChip({
   const style = { '--mention-accent': accent } as CSSProperties
   const body = (
     <>
-      <AgentSigil agentId={agent.id} responsibility={role} status={false} size={24} />
+      <AgentSigil agentId={agent.id} accent={agent.accent} responsibility={role} status={false} size={16} />
       <span className="hub-mention-name">{name}</span>
       {agent.deleted ? <span className="hub-mention-gone">（已移除）</span> : null}
     </>

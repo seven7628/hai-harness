@@ -272,6 +272,7 @@ export default function HubSidebar() {
                       id: m.agent_id,
                       name: member?.name ?? m.agent_id,
                       responsibility: member?.role,
+                      accent: member?.accent,
                       state: stateOf(m.agent_id, member?.deleted),
                     }
                   })
@@ -368,6 +369,7 @@ function HubRow({
     >
       <AgentSigil
         agentId={agent.id}
+        accent={agent.accent}
         responsibility={agent.role}
         state={state}
         size={44}

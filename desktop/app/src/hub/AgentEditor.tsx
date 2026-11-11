@@ -340,6 +340,7 @@ export default function AgentEditor({
           <aside className="hub-preview-card">
             <AgentSigil
               agentId={agentID || undefined}
+              accent={accent}
               responsibility={role}
               state={avatarState}
               size={48}

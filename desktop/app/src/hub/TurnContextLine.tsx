@@ -6,8 +6,8 @@ import { uniqueContextSenders } from './groupProjection'
 
 // 回复的触发上下文（P3b-07，方案 §8.3.5 TurnContextLine）。
 // 只有 ≥2 个**不同**触发者时才显示——单人回复没什么可解释的。
-// 群消息头用 compact 只画「↳ N」，不再单独占一行；trigger_seqs 放进 title/tooltip，
-// 点击只跳到触发消息并高亮（B6），不打开 DM。
+// 群消息头用 compact 只画「N 人触发」，不再单独占一行；触发者名单与 trigger_seqs
+// 放进 title/tooltip，点击只跳到触发消息并高亮（B6），不打开 DM。
 
 export default function TurnContextLine({
   msg,
@@ -21,7 +21,7 @@ export default function TurnContextLine({
   /** agent_id → 触发消息 seq（由已加载消息 + context.trigger_seqs 反推）。 */
   triggerSeqBySender?: Record<string, number>
   onJumpToSeq?: (seq: number) => void
-  /** 群消息头里的紧凑入口：只显示「↳ N」，不占一行。 */
+  /** 群消息头里的紧凑入口：只显示「N 人触发」，不占一行。 */
   compact?: boolean
 }) {
   const t = useT()
@@ -37,7 +37,7 @@ export default function TurnContextLine({
     const first = senders[0]
     const seq = (first.agent_id ? triggerSeqBySender?.[first.agent_id] : 0) || seqs[0] || 0
     const label = t('hub.contextJump').replace('{names}', names.join('、'))
-    const body = <span aria-hidden="true">↳ {senders.length}</span>
+    const body = <span>{t('hub.contextTriggeredBy').replace('{n}', String(senders.length))}</span>
     if (onJumpToSeq && seq > 0) {
       return (
         <button

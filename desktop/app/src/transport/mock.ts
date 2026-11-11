@@ -803,12 +803,14 @@ class MockTransport implements Transport {
           {
             seq: 8, id: 'gm_mock8', kind: 'handoff', sender: { kind: 'agent', agent_id: 'ag_mockres1' },
             text: '把成本曲线复核交接给 Writer；完整指令在 Needs you。',
-            refs: { status: 'pending_ack' },
+            // 与 desktop/bridge/hub_handoff.go 同形：卡面归属取这两个 refs，不按 sender 猜。
+            refs: { status: 'pending_ack', from_agent_id: 'ag_mockres1', to_agent_id: 'ag_mockwri2' },
             created_at: at(20 * 60_000),
           },
           {
             seq: 9, id: 'gm_mock9', kind: 'approval_stub', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
             text: '发布两页简报前需要你确认预算',
+            // 不造 refs.agent_id：mock 的审批就是 agent sender，走 UI 的 sender 回退分支。
             created_at: at(10 * 60_000),
           },
         )

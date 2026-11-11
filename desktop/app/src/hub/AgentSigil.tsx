@@ -13,7 +13,7 @@ import {
 
 // 头像 = demo 的 Luna 球面头像（mascot-bots.js + luna-face.js），不重画。
 //
-// 组件只声明“谁 / 什么状态 / 多大 / 要不要读屏标签”，
+// 组件只声明“谁 / 什么身份色 / 什么状态 / 多大 / 要不要读屏标签”，
 // 几何、眼形、眨眼、视线、点头全部交给 vendor 里的同一套引擎。
 // 外层类名同时保留 `avatar`（demo CSS 的动效/状态点）和 `luna-avatar`（侧栏等
 // 在 .hub-demo 作用域外也能拿到基础尺寸）。
@@ -24,6 +24,7 @@ export default function AgentSigil({
   agentId,
   name,
   responsibility,
+  accent,
   state = 'idle',
   size = 44,
   status = true,
@@ -36,6 +37,8 @@ export default function AgentSigil({
   name?: string | null
   /** 职责短句（HubAgent.role）；决定固定身份色。 */
   responsibility?: string | null
+  /** 智能体 profile.accent（#hex）：有值就是身份色，与侧栏/详情同源。 */
+  accent?: string | null
   state?: AvatarState
   size?: number
   /** false：只画身份，不画状态点（头像叠放里的非 lead 成员）。 */
@@ -51,7 +54,7 @@ export default function AgentSigil({
   // 叠放里的 peer 也要保留工作/待审批表情；状态点由 .avatar-stack 的 CSS 隐藏。
   const st = state
   const expr = lunaExpression(st as 'idle' | 'working' | 'needs_attention' | 'offline')
-  const fill = lunaColor(id, name ?? '', responsibility ?? '')
+  const fill = lunaColor(id, name ?? '', responsibility ?? '', accent)
 
   useEffect(() => {
     const host = ref.current

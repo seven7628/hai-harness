@@ -247,6 +247,37 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
   const decorativeTag = decorative.slice(0, decorative.indexOf('>') + 1)
   assert(decorativeTag.includes('aria-hidden="true"') && !decorativeTag.includes('role="img"'),
     '与名字同行的头像仍 aria-hidden')
+
+  // 身份色：传 accent 就用 accent（与侧栏/详情/编辑器同一个 profile 字段），不传才回退职责色。
+  const accented = renderToStaticMarkup(createElement(AgentSigil, {
+    agentId: 'agt_a', accent: '#7bc199', responsibility: '研究', state: 'working', size: 52,
+  }))
+  assert(accented.includes('data-fill="#7bc199"'), 'SSR：accent=#7bc199 → data-fill=#7bc199（不再被职责色覆盖）')
+  assert(labelled.includes('data-fill="#3C82F6"'), 'SSR：不传 accent → 仍按职责规则（研究→#3C82F6）')
+}
+
+// 10b) 身份色纯函数：accent 优先于职责规则/散列；非法值不往 SVG 里填。
+{
+  const lunaBuild = await build({
+    entryPoints: [join(__dirname, '..', 'src', 'hub', 'lunaAvatar.ts')],
+    bundle: true, platform: 'node', format: 'esm', write: false, logLevel: 'silent',
+  })
+  const lunaPath = join(__dirname, '.tmp-lunaavatar.mjs')
+  writeFileSync(lunaPath, lunaBuild.outputFiles[0].text)
+  const luna = await import(`${lunaPath}?v=${Date.now()}`)
+  unlinkSync(lunaPath)
+  const role = '竞品研究员'
+  assert(luna.lunaColor('agt_mockres1', 'Researcher', role, '#7bc199') === '#7bc199',
+    'lunaColor：accent #7bc199 压过「研究→蓝」职责规则')
+  assert(luna.lunaColor('agt_mockres1', 'Researcher', role) === '#3C82F6',
+    'lunaColor：没有 accent 时仍回退职责色（研究→#3C82F6）')
+  assert(luna.lunaColor('agt_mockwri2', 'Writer', '写作', '#9daed2') === '#9daed2',
+    'lunaColor：Writer accent #9daed2 压过「写作→紫」')
+  for (const bad of ['rgb(1,2,3)', 'green', '#xyzxyz', '', null, undefined]) {
+    assert(luna.lunaColor('agt_mockres1', 'Researcher', role, bad) === '#3C82F6',
+      `lunaColor：非法 accent ${JSON.stringify(bad)} 回退职责色`)
+  }
+  assert(luna.lunaColor('agt_x', '', '', '#ABC') === '#ABC', 'lunaColor：接受 #rgb 简写')
 }
 
 // 11) 手机端 avatar_model.js 与桌面 avatar.ts 同 seed 对照（防两套算法漂移）。

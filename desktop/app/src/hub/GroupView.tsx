@@ -134,6 +134,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
       id: m.agent_id,
       name: agentNames[m.agent_id] ?? m.agent_id,
       responsibility: member?.role,
+      accent: member?.accent,
       state: stateOf(m.agent_id, member?.deleted),
     }
   })
@@ -604,7 +605,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
                     className={`hub-assign-member ${assignTarget === agent.id ? 'on' : ''}`}
                     onClick={() => setAssignTarget(agent.id)}
                   >
-                    <AgentSigil agentId={agent.id} responsibility={agent.role} status={false} size={24} />
+                    <AgentSigil agentId={agent.id} accent={agent.accent} responsibility={agent.role} status={false} size={24} />
                     <span>{agent.name}</span>
                     {agent.groupRole && agent.groupRole !== 'all' ? <span className="hub-muted">{agent.groupRole}</span> : null}
                   </button>

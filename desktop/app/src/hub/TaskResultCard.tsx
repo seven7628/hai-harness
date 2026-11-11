@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { CheckList } from '../components/icons'
+import AgentSigil from './AgentSigil'
 import type { MentionAgent } from './mentions'
 import TaskArtifacts from './TaskArtifacts'
 import { taskDurationText, taskUsageText, type TaskCardView } from './taskCard'
@@ -21,7 +22,7 @@ export default function TaskResultCard({
   /** 派发者（账本 origin 解析出的智能体）；人派任务 originKind=human → 文案「你 → 执行者」。 */
   initiator?: MentionAgent | null
   onOpenAgent?: () => void
-  /** 多触发者时的「↳ N」入口；由群消息层传入，保持 B6 跳转。 */
+  /** 多触发者时的「N 人触发」入口；由群消息层传入，保持 B6 跳转。 */
   context?: ReactNode
 }) {
   const usage = taskUsageText(view.usage)
@@ -31,6 +32,10 @@ export default function TaskResultCard({
     ? '你'
     : (initiator?.name || view.initiatorName || view.initiatorAgentId || '')
   const status = view.tone === 'success' ? 'ok' : view.tone === 'warn' ? 'wait' : ''
+  // 16px 身份头像跟名字同行：执行者与派发者都能看出来源；没有智能体对象时只留文字。
+  const face = (agent: MentionAgent) => (
+    <AgentSigil agentId={agent.id} accent={agent.accent} responsibility={agent.role} status={false} size={16} />
+  )
   return (
     <article
       className={`event-card event-card--task tone-${view.tone}`}
@@ -45,10 +50,18 @@ export default function TaskResultCard({
             <span className={`event-status ${status}`}>{view.statusLabel}</span>
           </div>
           <div className="event-meta">
-            {execName ? <span className="event-who">{execName}</span> : null}
-            {fromName && fromName !== execName
-              ? <span>{fromName === '你' ? '你派发' : `${fromName} 派发`}</span>
-              : null}
+            {execName ? (
+              <span className="event-who">
+                {executor ? face(executor) : null}
+                {execName}
+              </span>
+            ) : null}
+            {fromName && fromName !== execName ? (
+              <span className="event-who">
+                {initiator ? face(initiator) : null}
+                {fromName === '你' ? '你派发' : `${fromName} 派发`}
+              </span>
+            ) : null}
             {duration ? <span title="任务耗时">{duration}</span> : null}
             {usage ? <span title="用量与成本">{usage}</span> : null}
           </div>
