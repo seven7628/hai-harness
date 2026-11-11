@@ -6888,14 +6888,22 @@ export function dispatchEvent(raw: AnyEvent): void {
           blocks: parentId
             ? (() => {
                 let taskId = raw.task_id ? String(raw.task_id) : undefined
-                if (!taskId) {
-                  const placeholder = [...v.blocks].reverse().find((b) => b.kind === 'async_task' && (b.status === 'running' || b.status === 'interrupting') && b.label === subName)
-                  if (placeholder?.kind === 'async_task') taskId = placeholder.taskId
-                }
+                // 占位卡（task_started 建的 async_task）即将被移除，但**父任务锚在它身上**：
+                // 子→孙派发时只有 task_started 带 parent_task_id（AgentStart 没这个字段），
+                // 不带过来的话孙卡在主转录/子会话页里就成了「没有归属的卡」——树靠
+                // parent_run_id 反查还能挂上，卡片则彻底看不出是谁派的（2026-11 报障的
+                // 「孙任务的事件落在主会话里」正是这一段）。Go 侧 view_reducer 的
+                // applyAgentStartLocked 早就是这么接的，这里补齐同一份契约。
+                const match = taskId
+                  ? v.blocks.findLast((b) => b.kind === 'async_task' && b.taskId === taskId)
+                  : [...v.blocks].reverse().find((b) => b.kind === 'async_task' && (b.status === 'running' || b.status === 'interrupting') && b.label === subName)
+                const placeholder = match?.kind === 'async_task' ? match : undefined
+                if (!taskId) taskId = placeholder?.taskId
+                const parentTaskId = (raw.parent_task_id ? String(raw.parent_task_id) : undefined) ?? placeholder?.parentTaskId
                 const withoutPlaceholder = taskId
                   ? v.blocks.filter((b) => !(b.kind === 'async_task' && b.taskId === taskId))
                   : v.blocks
-                return [...withoutPlaceholder, { kind: 'agent', id: blockSeq++, runId: id, parentRunId: parentId, label: subName || String(raw.content || 'agent'), status: 'running', spawnedAt: ts, taskId, ...(cw > 0 ? { ctxWindow: cw } : {}), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 }, items: [] }]
+                return [...withoutPlaceholder, { kind: 'agent', id: blockSeq++, runId: id, parentRunId: parentId, label: subName || String(raw.content || 'agent'), status: 'running', spawnedAt: ts, taskId, ...(parentTaskId ? { parentTaskId } : {}), ...(cw > 0 ? { ctxWindow: cw } : {}), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 }, items: [] }]
               })()
             : clearErrorBlocks(v.blocks), // 新顶层 run 开始：清上次失败的错误块
           runningAgentCount: parentId ? v.runningAgentCount + 1 : v.runningAgentCount,

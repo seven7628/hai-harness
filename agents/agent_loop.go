@@ -852,6 +852,11 @@ type RunOptions struct {
 	// 空 = 同步运行 / 非后台任务。
 	TaskId string
 
+	// ParentTaskId 发起方**后台任务** id（子→孙派发时 = 发起方子智能体的 task_id；
+	// SubAgent 工具从 ToolContext.TaskId 注入）。随 AgentStart 下发，卡片从运行事件就能
+	// 拿到归属，不依赖 task_started 占位卡还在不在窗口里。空 = 主 Agent 直派 / 同步子运行。
+	ParentTaskId string
+
 	// Todo 会话级待办清单（todo 工具经此注入工具上下文）；nil = 无会话待办。
 	Todo *todo.Store
 
@@ -1032,14 +1037,15 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 
 	startTime := time.Now()
 	ac.Handler(ac.ctx, &events.AgentStart{
-		Index:       0,
-		Content:     firstUserInput(input),
-		RunId:       ac.RunId,
-		Name:        ac.Name,
-		TaskId:      opts.TaskId, // 后台任务 id（前端任务卡片关联锚；空 = 非后台任务）
-		ParentRunId: ac.ParentRunId,
-		Depth:       ac.Depth,
-		Model:       a.currentModel(),
+		Index:        0,
+		Content:      firstUserInput(input),
+		RunId:        ac.RunId,
+		Name:         ac.Name,
+		TaskId:       opts.TaskId,       // 后台任务 id（前端任务卡片关联锚；空 = 非后台任务）
+		ParentTaskId: opts.ParentTaskId, // 发起方任务 id（子→孙派发）：卡片的归属锚
+		ParentRunId:  ac.ParentRunId,
+		Depth:        ac.Depth,
+		Model:        a.currentModel(),
 		// ContextWindow 上报（问题六）：前端占比分母单一事实源（1M 热切换后本地表滞后）
 		ContextWindow: a.currentContextWindow(),
 		Timestamp:     time.Now(),

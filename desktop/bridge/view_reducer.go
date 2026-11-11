@@ -2693,13 +2693,16 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 			}
 		}
 	}
-	// 占位卡的父**任务**锚点要带到升级后的 agent 卡上（占位即将被移除）：
-	// 孙节点靠它挂到发起的子智能体下，而不是回落成主会话下的根节点。
-	parentTaskID := ""
-	for _, b := range r.blocks {
-		if taskID != "" && b.Kind == blockKindAsyncTask && b.TaskID == taskID {
-			parentTaskID = b.ParentTaskID
-			break
+	// 父**任务**锚点：孙节点靠它挂到发起的子智能体下，而不是回落成主会话下的根节点。
+	// 首选事件自带的 ParentTaskId（2026-11 起 AgentStart 就带）—— 它不依赖占位卡在不在
+	// 窗口里；旧事件（字段为空 / 旧日志）才回退到占位卡继承。
+	parentTaskID := e.ParentTaskId
+	if parentTaskID == "" {
+		for _, b := range r.blocks {
+			if taskID != "" && b.Kind == blockKindAsyncTask && b.TaskID == taskID {
+				parentTaskID = b.ParentTaskID
+				break
+			}
 		}
 	}
 	for _, b := range r.blocks {
