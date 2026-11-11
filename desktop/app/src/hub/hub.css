@@ -10,7 +10,7 @@
 .luna-avatar[data-state='working']>svg{animation:av-work 2.2s ease-in-out infinite}
 .luna-avatar[data-state='needs_attention']::after{content:'';position:absolute;top:6%;right:6%;width:22%;height:22%;border-radius:50%;background:var(--warning);border:2px solid var(--bg)}
 .luna-avatar-stack{display:inline-flex;align-items:center}
-.luna-avatar-stack .avatar-more{width:18px;height:18px;border-radius:50%;background:var(--surface-3);border:2px solid var(--bg);display:grid;place-items:center;font-size:9px;color:var(--muted);margin-left:-6px;flex:0 0 auto}
+.luna-avatar-stack .avatar-more{width:18px;height:18px;border-radius:50%;background:var(--elevated);border:2px solid var(--bg);display:grid;place-items:center;font-size:9px;color:var(--text-3);margin-left:-6px;flex:0 0 auto}
 .luna-avatar-stack .luna-avatar[data-state='needs_attention']::after{display:none}
 .luna-avatar-stack .luna-avatar::before{content:'';position:absolute;inset:-3px;border-radius:50%;box-shadow:0 0 0 2px var(--bg);z-index:-1}
 
