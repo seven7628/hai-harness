@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import type { CSSProperties } from 'react'
 import type { AvatarState } from './avatar'
 import {
@@ -51,7 +51,7 @@ export default function AgentSigil({
   const expr = lunaExpression(st as 'idle' | 'working' | 'needs_attention' | 'offline')
   const fill = lunaColor(id, name ?? '', responsibility ?? '')
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     const host = ref.current
     const sc = ensureLunaScene()
     if (!host || !sc) return

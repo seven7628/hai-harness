@@ -25,6 +25,9 @@ func TestMobileTokensMatchDesktop(t *testing.T) {
 		"../app/src/index.css",
 		"../app/src/hub/hub.css",
 		"../app/src/hub/avatar.ts",
+		// demo 源码移植后的 Luna 头像色板与暖色 token（手机端共用同一份）。
+		"../app/src/hub/lunaAvatar.ts",
+		"../app/src/hub/demo.css",
 	}
 	const mobilePath = "mobile_web/tokens.css"
 

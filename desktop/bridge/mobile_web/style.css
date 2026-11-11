@@ -1494,3 +1494,19 @@ button[disabled] {
     transform: none;
   }
 }
+
+/* Luna 头像（demo 同源）：mascot-bots.js + luna-face.js 负责几何/动效。 */
+.avatar{display:inline-flex;flex:0 0 auto;vertical-align:middle;position:relative;width:44px;height:44px;--eye:var(--bg);transition:transform .18s ease,filter .18s ease;border-radius:50%}
+.avatar>svg{width:100%;height:100%;display:block;overflow:visible}
+.avatar.xs{width:28px;height:28px}
+.avatar.lg{width:52px;height:52px}
+.avatar:hover{transform:scale(1.12) rotate(-3deg)}
+.avatar[data-state="working"]>svg{animation:av-work 2.2s ease-in-out infinite}
+@keyframes av-work{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.5px)}}
+.avatar[data-state="needs_attention"]::after{content:"";position:absolute;top:6%;right:6%;width:22%;height:22%;border-radius:50%;background:var(--warning);border:2px solid var(--bg)}
+.avatar-stack{display:inline-flex;align-items:center}
+.avatar-stack .avatar{margin-left:-1px}
+.avatar-stack .avatar:first-child{margin-left:0}
+.avatar-stack .avatar[data-state="needs_attention"]::after{display:none}
+.avatar-stack .avatar::before{content:"";position:absolute;inset:-3px;border-radius:50%;box-shadow:0 0 0 2px var(--bg);z-index:-1}
+.avatar-more{width:18px;height:18px;border-radius:50%;background:var(--elevated);border:2px solid var(--bg);display:grid;place-items:center;font-size:9px;color:var(--text-3);margin-left:-6px;flex:0 0 auto}

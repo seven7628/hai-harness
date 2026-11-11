@@ -937,6 +937,77 @@
     return prefix + plan.total + ' 个智能体，' + hubStackSummary(plan)
   }
 
+  // Luna 头像（与桌面同一份 mascot-bots.js / luna-face.js；只接手机端的数据/尺寸）。
+  const LUNA_PALETTE = {
+    teal: '#54B9A6', cyan: '#38A9C9', blue: '#3C82F6', indigo: '#6464EC',
+    violet: '#885CF4', magenta: '#B45BDC', rose: '#EC5F8C', red: '#E2554C',
+    orange: '#ED712E', amber: '#F19D38', green: '#4FA968', slate: '#6F7C8C',
+  }
+  const LUNA_RULES = [
+    [/chief|coordinator|orchestrat|主理|协调/i, 'teal'],
+    [/critic|review|risk|反例|评审|风险/i, 'red'],
+    [/research|talent|recruit|hiring|研究|招聘/i, 'blue'],
+    [/writer|content|copy|写作|文案|稿/i, 'violet'],
+    [/inbox|triage|mail|收件|分诊/i, 'indigo'],
+    [/design|brand|visual|设计|视觉/i, 'magenta'],
+    [/support|success|service|客服|客户成功/i, 'rose'],
+    [/sales|outbound|growth|marketing|销售|增长|市场/i, 'amber'],
+    [/expense|finance|billing|invoice|财务|报销|账/i, 'orange'],
+    [/engineer|infra|platform|工程|基础/i, 'cyan'],
+    [/ops|schedule|calendar|运营|日程/i, 'green'],
+    [/legal|compliance|policy|合规|法务|政策/i, 'slate'],
+  ]
+  const LUNA_KEYS = Object.keys(LUNA_PALETTE)
+  function lunaHash(str) {
+    let h = 0
+    for (let i = 0; i < String(str).length; i += 1) h = (h * 31 + String(str).charCodeAt(i)) >>> 0
+    return h
+  }
+  function lunaColor(id, name, role) {
+    const seed = String(id || '') + ' ' + String(name || '') + ' ' + String(role || '')
+    for (const pair of LUNA_RULES) if (pair[0].test(seed)) return LUNA_PALETTE[pair[1]]
+    return LUNA_PALETTE[LUNA_KEYS[lunaHash(id || 'agent') % LUNA_KEYS.length]]
+  }
+  function lunaPhase(id) { return ((lunaHash(id || 'agent') % 83) / 10).toFixed(1) }
+  function lunaExpr(state) {
+    if (state === 'working') return 'inspecting'
+    if (state === 'needs_attention') return 'surprised'
+    if (state === 'offline') return 'sleepy'
+    return 'neutral'
+  }
+  let lunaScene = null
+  let lunaRaf = 0
+  function lunaEnsure() {
+    if (lunaScene || !window.LUNA_FACE) return lunaScene
+    lunaScene = window.LUNA_FACE.createScene({ aim: document.body, living: true, gap: [3200, 7000] })
+    lunaScene.start()
+    document.addEventListener('click', (e) => {
+      const svg = e.target && e.target.closest && e.target.closest('svg[data-luna-face]')
+      if (svg && lunaScene) lunaScene.poke(svg, 'spin')
+    })
+    return lunaScene
+  }
+  function lunaSync() {
+    const scene = lunaEnsure()
+    if (!scene) return
+    scene.sync(document)
+    document.querySelectorAll('.avatar[data-state]').forEach((el) => {
+      const svg = el.querySelector('svg[data-luna-face]')
+      if (!svg || !svg.__lunaFace) return
+      const state = el.getAttribute('data-state') || 'idle'
+      const next = lunaExpr(state)
+      if (el.dataset.baseExpr !== next) {
+        el.dataset.baseExpr = next
+        scene.setBase(svg, next)
+        scene.setExpr(svg, next)
+      }
+    })
+  }
+  function lunaScheduleSync() {
+    if (lunaRaf) return
+    lunaRaf = requestAnimationFrame(() => { lunaRaf = 0; lunaSync() })
+  }
+
   function hubSigil(opts) {
     const o = opts || {}
     const agent = o.agent || null
@@ -945,45 +1016,37 @@
     const state = o.state || hubStateOf(id, agent && agent.deleted)
     const size = o.size === 24 || o.size === 48 ? o.size : 32
     const showStatus = o.status !== false
-    const identity = A.deriveSigil(id, responsibility)
-    const node = el('span', 'sigil s' + size)
+    const px = size
+    const node = el('span', 'avatar luna-avatar' + (size === 48 ? ' lg' : size === 28 ? ' xs' : ''))
+    node.dataset.slug = String(id || '')
     node.dataset.agentId = String(id || '')
-    node.dataset.shape = identity.shapeId
-    node.dataset.hue = identity.hueId
-    node.dataset.trait = identity.traitId
-    node.dataset.state = showStatus ? state : 'none'
+    node.dataset.state = showStatus ? state : 'idle'
     node.dataset.size = String(size)
+    node.style.width = px + 'px'
+    node.style.height = px + 'px'
     if (o.label) {
       node.setAttribute('role', 'img')
       node.setAttribute('aria-label', o.label)
     } else {
       node.setAttribute('aria-hidden', 'true')
     }
-    const root = svgEl('svg', { viewBox: '0 0 48 48', focusable: 'false', 'aria-hidden': 'true' })
-    root.appendChild(svgEl('path', { class: 'shape', d: A.SHAPES[identity.shape].d }))
-    const traits = svgEl('g', { class: 'traits' })
-    for (const mark of A.TRAITS[identity.trait].marks) {
-      if (mark.type === 'circle') traits.appendChild(svgEl('circle', { class: 'trait', cx: mark.cx, cy: mark.cy, r: mark.r }))
-      else if (mark.type === 'rect') {
-        traits.appendChild(svgEl('rect', {
-          class: 'trait', x: mark.x, y: mark.y, width: mark.width, height: mark.height, rx: mark.rx,
-        }))
-      } else {
-        traits.appendChild(svgEl('path', { class: 'trait line', d: mark.d, style: 'stroke-width:' + mark.width }))
-      }
-    }
-    root.appendChild(traits)
-    if (showStatus) {
-      const status = svgEl('g', { class: 'status' })
-      if (state === 'idle') status.appendChild(svgEl('circle', { class: 'ring', cx: 24, cy: 24, r: 22, opacity: '.55' }))
-      else if (state === 'working') status.appendChild(svgEl('circle', { class: 'ring arc', cx: 24, cy: 24, r: 22, 'stroke-width': 2 }))
-      else if (state === 'needs_attention') {
-        status.appendChild(svgEl('circle', { class: 'ring thick', cx: 24, cy: 24, r: 22 }))
-        status.appendChild(svgEl('circle', { class: 'dot', cx: 38, cy: 10, r: 5 }))
-      }
-      root.appendChild(status)
-    }
+    const expr = lunaExpr(state)
+    const root = svgEl('svg', {
+      viewBox: '0 0 240 240',
+      width: px,
+      height: px,
+      'data-luna-face': 'true',
+      'data-expr': expr,
+      'data-fill': lunaColor(id, agent && agent.name, responsibility),
+      'data-eye': 'var(--eye,#0b0b0a)',
+      'data-phase': lunaPhase(id),
+      'data-samples': px <= 32 ? 40 : 56,
+      'data-damp': px <= 32 ? 0.4 : px >= 52 ? 0.62 : 0.55,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    })
     node.appendChild(root)
+    lunaScheduleSync()
     return node
   }
 
@@ -995,7 +1058,7 @@
       return { id: m.agent_id, responsibility: a && a.role, state: hubStateOf(m.agent_id, a && a.deleted) }
     })
     const plan = A.planStack(members, { groupRunning: o.groupRunning === true })
-    const wrap = el('span', 'agent-stack s' + size)
+    const wrap = el('span', 'avatar-stack luna-avatar-stack' + (size === 48 ? ' lg' : ''))
     wrap.dataset.state = plan.state
     if (o.label === false) wrap.setAttribute('aria-hidden', 'true')
     else {
@@ -1014,7 +1077,7 @@
       wrap.appendChild(node)
     })
     if (plan.more > 0) {
-      const more = el('span', 'agent-stack-more s' + size, '+' + plan.more)
+      const more = el('span', 'avatar-more', '+' + plan.more)
       more.setAttribute('aria-hidden', 'true')
       wrap.appendChild(more)
     }
