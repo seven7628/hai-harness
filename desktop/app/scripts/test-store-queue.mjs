@@ -1452,5 +1452,89 @@ assert.equal(
 )
 console.log('PASS 场景39：同步子 run 的状态按父 run 的收场方式映射（只有 abort 是 interrupted）')
 
+// 场景 40（P5-03d，复审 blocking）：**收敛作用域 = 被落地的那棵 run 树**，不是「全视图里
+// 没有 task_id 的子 run」。subagent 的 maxSpawnDepth=2 允许
+//   主 run → 异步后台任务（depth-1，带 task_id）→ 它自己派出的 in-loop 子 run（depth-2，
+//   无 task_id）
+// 父 run 的 agent_end 只证明**主 run 这棵树**结束，不证明别人派出去的后台任务里的阻塞调用
+// 也结束了。depth-2 那条还在跑，终态证据是它自己的 agent_end / task_end。
+// 修前：syncSubRunIds 按「全视图里无 task_id」收 → bg-child 被父 run 的 agent_end 收敛成
+// done、卡片 abandoned；而 settleRunNodes 只动 running 节点，误收敛是**永久**的
+// （真实 agent_end 到了也改不回来）。
+setup(); __clearRunSettles()
+const card40 = (runId) => viewOf().blocks.find((b) => b.kind === 'agent' && b.runId === runId)
+EV('agent_start', { run_id: 'r40' })
+EV('agent_start', { run_id: 'sub40-bg', parent_run_id: 'r40', depth: 1, task_id: 'tk40', name: 'bg' })
+EV('agent_start', { run_id: 'sub40-bg-child', parent_run_id: 'sub40-bg', depth: 2, name: 'bg-child' })
+EV('agent_end', { run_id: 'r40', finish_reason: 'stop' })
+assert.equal(nodeOf('r40')?.status, 'done', '父 run 自己照常收尾')
+assert.equal(nodeOf('sub40-bg')?.status, 'running', '带 task_id 的异步子 run 不随父 run 收敛')
+assert.equal(
+  nodeOf('sub40-bg-child')?.status,
+  'running',
+  'depth-2 in-loop 子 run 挂在异步节点之下，不在父 run 的收尾范围里（复审 blocking）',
+)
+assert.equal(card40('sub40-bg')?.status, 'running', '异步子卡等它自己的 agent_end / task_end')
+assert.equal(card40('sub40-bg-child')?.status, 'running', 'depth-2 卡仍在跑：不得被画成 abandoned')
+assert.ok(busy(), 'depth-2 还在跑 → busy 必须仍为真')
+assert.ok(!settles().some((r) => r.source === 'agent_end'), '这条 agent_end 没有顺带收敛任何人 → 不写诊断')
+assert.ok(
+  !settles().some((r) => r.runIds.includes('sub40-bg-child')),
+  '诊断里出现 depth-2 就等于误杀了它（它自己的 agent_end 还没到）',
+)
+// 误收敛过的节点是永久的（settleRunNodes 只动 running）：真事件到了必须还能落地。
+EV('agent_end', { run_id: 'sub40-bg-child', parent_run_id: 'sub40-bg', finish_reason: 'error' })
+assert.equal(nodeOf('sub40-bg-child')?.status, 'error', '终态证据仍是它自己的 agent_end（此处 error）')
+assert.equal(nodeOf('sub40-bg')?.status, 'running', '异步父 run 仍在跑')
+console.log('PASS 场景40：父 run 收尾不下沉进异步子 run 的子树（depth-2 不再被误杀）')
+
+// 场景 41（P5-03d）：另外两条「父 run 终止」证据同样按**被落地的根**划作用域；同时钉住
+// 正向路径 —— 根自己那棵树里的同步子 run 照旧收敛（别为了收窄作用域把正常路径关掉）。
+// 新批次开口：根 r41 下既有同步子 run（无 task_id），也有异步子 run（带 task_id）及它
+// 派出去的 depth-2 子 run；另有一个工具节点（parentId 也指向根，但不是 run 树的一环）。
+setup(); __clearRunSettles()
+const card41 = (runId) => viewOf().blocks.find((b) => b.kind === 'agent' && b.runId === runId)
+EV('agent_start', { run_id: 'r41' })
+EV('agent_start', { run_id: 'sub41-sync', parent_run_id: 'r41', depth: 1, name: 'sync' })
+EV('agent_start', { run_id: 'sub41-bg', parent_run_id: 'r41', depth: 1, task_id: 'tk41', name: 'bg' })
+EV('agent_start', { run_id: 'sub41-bg-child', parent_run_id: 'sub41-bg', depth: 2, name: 'bg-child' })
+EV('tool_run_start', { id: 'x41', name: 'bash', arguments: '{}', run_id: 'r41' })
+assert.equal(nodeOf('tool-x41')?.kind, 'tool', '前提：工具节点也带 parentId（发起它的 run）')
+assert.ok(busy())
+EV('user_inputs_consumed', { user_texts: ['下一轮的问题'], injected: false })
+assert.equal(nodeOf('r41')?.status, 'done', '根 run 由新批次开口收敛')
+// 正向：根自己路径上的同步子 run 仍收敛（节点落到 done + 卡片 abandoned）
+assert.equal(nodeOf('sub41-sync')?.status, 'done', '根自己的同步子 run 照旧随父 run 收敛')
+assert.equal(card41('sub41-sync')?.status, 'abandoned', '同步子卡落地（否则左栏一直转圈）')
+// 反向：异步节点之下的 depth-2 不下沉；异步节点自己也不碰
+assert.equal(nodeOf('sub41-bg')?.status, 'running', '带 task_id 的异步子 run 不随新批次收敛')
+assert.equal(nodeOf('sub41-bg-child')?.status, 'running', '新批次开口同样不得下沉进异步子树')
+assert.equal(card41('sub41-bg')?.status, 'running')
+assert.equal(card41('sub41-bg-child')?.status, 'running', 'depth-2 卡仍在跑')
+assert.ok(busy(), '后台任务还在跑 → busy 是真值')
+assert.ok(!mainRunActive(viewOf()), '主 run 已收尾')
+const settle41 = settles().find((r) => r.source === 'new_run_batch')
+assert.ok(settle41, '顺带收敛必须留诊断')
+assert.ok(settle41.runIds.includes('sub41-sync'), '诊断记的是真被顺带收敛的同步子 run')
+assert.ok(!settle41.runIds.includes('sub41-bg'), '异步子 run 不进名单')
+assert.ok(!settle41.runIds.includes('sub41-bg-child'), 'depth-2 不进名单')
+assert.ok(
+  !settle41.runIds.includes('tool-x41'),
+  '工具节点不是 run 树的一环：不进入同步子 run 闭包（复审 N-6）',
+)
+// session_run_error：第三条父 run 终止证据，同样只收被落地根之下、路径无 task_id 的同步子。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r41b' })
+EV('agent_start', { run_id: 'sub41b-sync', parent_run_id: 'r41b', depth: 1, name: 'sync' })
+EV('agent_start', { run_id: 'sub41b-bg', parent_run_id: 'r41b', depth: 1, task_id: 'tk41b', name: 'bg' })
+EV('agent_start', { run_id: 'sub41b-bg-child', parent_run_id: 'sub41b-bg', depth: 2, name: 'bg-child' })
+EV('session_run_error', { error: 'upstream 500' })
+assert.equal(nodeOf('r41b')?.status, 'error', '主 run 收敛为 error')
+assert.equal(nodeOf('sub41b-sync')?.status, 'done', '根自己的同步子 run 照样收敛')
+assert.equal(nodeOf('sub41b-bg')?.status, 'running', '异步子 run 等它自己的 agent_end / task_end')
+assert.equal(nodeOf('sub41b-bg-child')?.status, 'running', '会话级失败同样不得下沉进异步子树')
+assert.ok(busy())
+console.log('PASS 场景41：新批次开口 / 会话级失败也只收被落地树下无 task_id 的同步子 run')
+
 console.log('STORE_TEST_PASS')
 process.exit(0)
