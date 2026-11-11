@@ -79,19 +79,24 @@ export function GroupBubble({
 
   if (msg.kind === 'approval_stub') {
     return (
-      <article className={`event-card event-card--approval${hl}`} data-seq={seq} aria-label={`审批占位：${msg.text || '有人发起审批，详情在 Needs you'}`}>
-        <div className="event-head">
-          <span className="event-icon" aria-hidden="true"><EyeIcon size={14} /></span>
-          <div className="event-main">
-            <div className="event-kicker">Private approval</div>
-            <div className="event-title">
-              <span className="name">{msg.text || '有人发起审批，详情在 Needs you'}</span>
-              <span className="event-status">仅你可看</span>
+      <div className={`msg-row event-row${hl}`} data-seq={seq}>
+        <span className="event-spacer" aria-hidden="true" />
+        <div className="msg-main">
+          <article className="event-card event-card--approval" aria-label={`审批占位：${msg.text || '有人发起审批，详情在 Needs you'}`}>
+            <div className="event-head">
+              <span className="event-icon" aria-hidden="true"><EyeIcon size={14} /></span>
+              <div className="event-main">
+                <div className="event-kicker">Private approval</div>
+                <div className="event-title">
+                  <span className="name">{msg.text || '有人发起审批，详情在 Needs you'}</span>
+                  <span className="event-status">仅你可看</span>
+                </div>
+                <p className="event-body">审批正文不进入群上下文；处理入口在右栏 Needs you。</p>
+              </div>
             </div>
-            <p className="event-body">审批正文不进入群上下文；处理入口在右栏 Needs you。</p>
-          </div>
+          </article>
         </div>
-      </article>
+      </div>
     )
   }
   if (msg.kind === 'routing_receipt') {
@@ -108,19 +113,24 @@ export function GroupBubble({
     const status = String(msg.refs?.status ?? '')
     const label = status === 'pending_ack' ? '等待确认' : status === 'accepted' ? '已接受' : status === 'declined' ? '已拒绝' : '交接'
     return (
-      <article className={`event-card event-card--handoff${hl}`} data-seq={seq} aria-label={`交接：${msg.text}（${label}）`}>
-        <div className="event-head">
-          <span className="event-icon" aria-hidden="true"><GitBranch size={14} /></span>
-          <div className="event-main">
-            <div className="event-kicker">Handoff</div>
-            <div className="event-title">
-              <span className="name">{msg.text}</span>
-              <span className={`event-status ${status === 'pending_ack' || !status ? 'wait' : status === 'accepted' ? 'ok' : ''}`}>{label}</span>
+      <div className={`msg-row event-row${hl}`} data-seq={seq}>
+        <span className="event-spacer" aria-hidden="true" />
+        <div className="msg-main">
+          <article className="event-card event-card--handoff" aria-label={`交接：${msg.text}（${label}）`}>
+            <div className="event-head">
+              <span className="event-icon" aria-hidden="true"><GitBranch size={14} /></span>
+              <div className="event-main">
+                <div className="event-kicker">Handoff</div>
+                <div className="event-title">
+                  <span className="name">{msg.text}</span>
+                  <span className={`event-status ${status === 'pending_ack' || !status ? 'wait' : status === 'accepted' ? 'ok' : ''}`}>{label}</span>
+                </div>
+                <p className="event-body">完整交接指令在 Needs you；群内只保留摘要。</p>
+              </div>
             </div>
-            <p className="event-body">完整交接指令在 Needs you；群内只保留摘要。</p>
-          </div>
+          </article>
         </div>
-      </article>
+      </div>
     )
   }
   const kind = msg.sender?.kind ?? 'system'
@@ -136,22 +146,25 @@ export function GroupBubble({
     const executor = card.agentId ? roster.find((a) => a.id === card.agentId) : undefined
     const initiator = card.initiatorAgentId ? roster.find((a) => a.id === card.initiatorAgentId) : undefined
     return (
-      <div className={`task-msg${hl} ${msg.pending ? 'pending' : ''}`} data-seq={seq}>
-        <TaskResultCard
-          view={card}
-          executor={executor}
-          initiator={initiator}
-          onOpenAgent={card.agentId && onSelectAgent ? () => onSelectAgent(card.agentId) : undefined}
-          context={(
-            <TurnContextLine
-              compact
-              msg={msg}
-              roster={roster}
-              triggerSeqBySender={triggerSeqBySender}
-              onJumpToSeq={onJumpToSeq}
-            />
-          )}
-        />
+      <div className={`msg-row event-row task-row${hl} ${msg.pending ? 'pending' : ''}`} data-seq={seq}>
+        <span className="event-spacer" aria-hidden="true" />
+        <div className="msg-main">
+          <TaskResultCard
+            view={card}
+            executor={executor}
+            initiator={initiator}
+            onOpenAgent={card.agentId && onSelectAgent ? () => onSelectAgent(card.agentId) : undefined}
+            context={(
+              <TurnContextLine
+                compact
+                msg={msg}
+                roster={roster}
+                triggerSeqBySender={triggerSeqBySender}
+                onJumpToSeq={onJumpToSeq}
+              />
+            )}
+          />
+        </div>
       </div>
     )
   }

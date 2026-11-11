@@ -266,7 +266,19 @@ for (const theme of THEMES) {
   const m = await page.evaluate(() => {
     const q = (s) => document.querySelector(s)
     const color = (s) => (q(s) ? getComputedStyle(q(s)).color : null)
+    const inner = q('.messages-inner')?.getBoundingClientRect()
+    const leftOf = (s) => {
+      const el = q(s)
+      return el && inner ? Math.round(el.getBoundingClientRect().left - inner.left) : null
+    }
+    const body = q('.event-card--task .event-body')
+    const actions = q('.event-card--task .event-actions')
     return {
+      cardLeft: leftOf('.event-card--task'),
+      handoffLeft: leftOf('.event-card--handoff'),
+      approvalLeft: leftOf('.event-card--approval'),
+      cardBody: body ? { ml: getComputedStyle(body).marginLeft, fs: getComputedStyle(body).fontSize } : null,
+      cardActions: actions ? { ml: getComputedStyle(actions).marginLeft, gap: getComputedStyle(actions).gap } : null,
       handoffCount: document.querySelectorAll('.event-card--handoff').length,
       approvalCount: document.querySelectorAll('.event-card--approval').length,
       handoffText: q('.event-card--handoff')?.textContent?.trim() ?? '',
@@ -281,6 +293,12 @@ for (const theme of THEMES) {
     }
   })
   const failed = []
+  const wantCardLeft = width <= 640 ? 38 : 41
+  if (m.cardLeft !== wantCardLeft || m.handoffLeft !== wantCardLeft || m.approvalLeft !== wantCardLeft) {
+    failed.push(`事件卡左缘应=${wantCardLeft}（task=${m.cardLeft} handoff=${m.handoffLeft} approval=${m.approvalLeft}）`)
+  }
+  if (m.cardBody?.ml !== '38px' || m.cardBody?.fs !== '11.5px') failed.push(`event-body=${m.cardBody?.ml}/${m.cardBody?.fs}（应为 38px/11.5px）`)
+  if (m.cardActions?.ml !== '38px' || m.cardActions?.gap !== '6px') failed.push(`event-actions=${m.cardActions?.ml}/${m.cardActions?.gap}（应为 38px/6px）`)
   if (m.handoffCount !== 1) failed.push(`handoff 卡数量=${m.handoffCount}`)
   if (m.approvalCount !== 1) failed.push(`approval 卡数量=${m.approvalCount}`)
   if (m.handoffIcon === m.approvalIcon) failed.push('handoff/approval 图标颜色未区分')

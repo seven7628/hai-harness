@@ -81,6 +81,7 @@ const eq = (got, want, m) => {
   assert(/\.hub-demo \.messages-inner\s*\{[^}]*max-width:\s*760px/.test(demoCss), '会话列 760px')
   assert(/\.hub-demo \.composer\s*\{[^}]*border-radius:\s*19px/.test(demoCss), 'composer 19px 圆角')
   assert(/\.hub-demo \.event-icon\s*\{[^}]*width:\s*29px/.test(demoCss), '事件卡 29px 图标块')
+  assert(/\.hub-demo \.event-body\s*\{[^}]*margin:\s*8px 0 0 38px/.test(demoCss) && /\.hub-demo \.event-actions\s*\{[^}]*margin:\s*9px 0 0 38px/.test(demoCss), '事件卡正文/操作缩进 38px（demo 原值）')
   assert(/\.hub-demo \.tool-card\s*\{/.test(demoCss) && /\.hub-demo \.tool-target\s*\{/.test(demoCss), '工具卡沿用 demo 的 tool-card/tool-target')
 }
 
@@ -91,6 +92,7 @@ const eq = (got, want, m) => {
   assert(bubble.includes('groupRole === \'observer\'') && bubble.includes("t('hub.observer')"), '观察标签只在 groupRole=observer 时出现')
   assert(!bubbleCode.includes('回复 @'), '没有 reply_to 数据时不画「回复 @」')
   assert(bubble.includes('event-card--handoff') && bubble.includes('event-card--approval'), '交接/审批走 event-card 解剖')
+  assert(bubble.includes('event-row') && bubble.includes('event-spacer') && !bubble.includes('className={`task-msg'), '事件卡包在 msg-row + 30px spacer 里（卡片左缘 41/38）')
 
   const stream = readFileSync(join(APP, 'src', 'hub', 'StreamingMessage.tsx'), 'utf8')
   assert(stream.includes('<AgentMessage') && !stream.includes('hub-msg-head'), '流式消息与最终消息同一版式')

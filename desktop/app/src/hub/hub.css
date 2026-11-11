@@ -2521,11 +2521,11 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .hub-conv-stop { margin-left: auto; color: var(--muted); font-size: 11px; }
 .hub-demo .hub-conv-stop:hover { color: var(--danger); }
 
-.hub-demo .task-msg { margin: 0 0 22px; max-width: 560px; }
+.hub-demo .event-spacer { width: 30px; flex: 0 0 30px; }
 .hub-demo .event-card--task { --event-color: var(--success); max-width: 560px; }
 .hub-demo .event-card--task.tone-error { --event-color: var(--danger); }
 .hub-demo .event-card--task.tone-warn { --event-color: var(--warn); }
-.hub-demo .event-card { margin: 0 0 14px; }
+.hub-demo .event-card { margin: 0 0 12px; }
 .hub-demo .event-card .event-head { display: flex; gap: 10px; align-items: flex-start; }
 .hub-demo .event-card .event-main { flex: 1; min-width: 0; }
 .hub-demo .event-card .event-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -2533,13 +2533,13 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .event-card .event-status { margin-left: auto; flex: 0 0 auto; }
 .hub-demo .event-card .event-kicker { margin-bottom: 1px; }
 .hub-demo .event-card .event-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 3px; }
-.hub-demo .event-card .event-body { margin: 8px 0 0 39px; font-size: 12px; line-height: 1.6; color: var(--muted); }
-.hub-demo .event-card .event-error { margin: 8px 0 0 39px; font-size: 12px; color: var(--danger); }
-.hub-demo .event-card .event-actions { display: flex; align-items: center; gap: 8px; margin: 8px 0 0 39px; }
+.hub-demo .event-card .event-body { margin: 8px 0 0 38px; font-size: 11.5px; line-height: 1.55; color: var(--muted); }
+.hub-demo .event-card .event-error { margin: 8px 0 0 38px; font-size: 11.5px; color: var(--danger); }
+.hub-demo .event-card .event-actions { display: flex; align-items: center; gap: 6px; margin: 9px 0 0 38px; flex-wrap: wrap; }
 .hub-demo .event-card .event-id { font: 10.5px var(--mono); color: var(--muted-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hub-demo .event-card .event-action { margin-left: auto; height: 26px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--muted); font-size: 11px; background: var(--surface-2); }
 .hub-demo .event-card .event-action:hover { color: var(--text); border-color: var(--border-strong); }
-.hub-demo .event-artifacts { display: flex; flex-direction: column; gap: 6px; margin: 9px 0 0 39px; }
+.hub-demo .event-artifacts { display: flex; flex-direction: column; gap: 6px; margin: 9px 0 0 38px; }
 .hub-demo .artifact-line { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-2) 66%, transparent); }
 .hub-demo .artifact-badge { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: 0 0 auto; font: 9px var(--mono); color: var(--muted); background: var(--surface-3); border: 1px solid var(--border); }
 .hub-demo .artifact-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
