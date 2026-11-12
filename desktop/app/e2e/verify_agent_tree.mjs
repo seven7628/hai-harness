@@ -65,11 +65,27 @@ import RightPanel from '../../src/components/RightPanel'
 // ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45）：RightPanel 三个内容面板都是
 // getSurface(kind)?.render(...) ?? 兜底。少了这一行，本探针右栏验的一直是兜底分支。
 import '../../src/surfaces/builtin'
+import { getSurface } from '../../src/surfaces/registry'
 import { useAppStore, dispatchEvent, hydrateCheckpoint } from '../../src/store/useAppStore'
 import { aggregateFileActivity } from '../../src/lib/fileActivity'
 import { withAgentToolBlocks } from '../../src/lib/agentSession'
 import '../../src/index.css'
 import '../../src/narrative-skin.css'
+
+// —— R07 仪器自检：activity provider 的 render 到底有没有被执行 ——
+// 与 R06c 给 web 做的那层包法一致（e2e/verify_auto_open_visual.mjs 的 __webRenderCalls）：
+// 计数为 0 说明右栏走的是 RightPanel 的 ?? 兜底分支 —— 那时「链路面板看起来一样」证明的是
+// 兜底组件，不是 provider（04-review F45：探针必须先证明自己走的是被测那条路）。
+const actProvider = getSurface('activity')
+;(window as unknown as { __actRenderCalls: number }).__actRenderCalls = 0
+;(window as unknown as { __actProvider: unknown }).__actProvider = actProvider ?? null
+if (actProvider) {
+  const origActRender = actProvider.render
+  actProvider.render = (ctx) => {
+    ;(window as unknown as { __actRenderCalls: number }).__actRenderCalls++
+    return origActRender(ctx)
+  }
+}
 
 const q = new URLSearchParams(location.search)
 document.documentElement.setAttribute('data-theme', 'ink')
@@ -191,8 +207,8 @@ export default defineConfig({ root: APP, plugins: [react()], server: { fs: { all
 const URL_BASE = `http://localhost:${PORT}/e2e/_agenttreeprobe_run/index.html`
 const server = spawn('node', [path.join(APP, 'node_modules', 'vite', 'bin', 'vite.js'), '--port', String(PORT), '--strictPort', '--config', path.join(PROBE_DIR, 'vite.config.mts')], { cwd: APP, stdio: 'ignore' })
 const cleanup = () => {
-  try { server.kill('SIGTERM') } catch { /* 已退出 */ }
-  try { fs.rmSync(PROBE_DIR, { recursive: true, force: true }) } catch { /* 忽略 */ }
+  if (!process.env.KEEP_PROBE) try { server.kill('SIGTERM') } catch { /* 已退出 */ }
+  if (!process.env.KEEP_PROBE) try { fs.rmSync(PROBE_DIR, { recursive: true, force: true }) } catch { /* 忽略 */ }
 }
 process.on('exit', cleanup)
 const watchdog = setTimeout(() => {
@@ -678,6 +694,13 @@ async function main() {
   await page.goto(`${URL_BASE}?host=right`, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.right, .rtabs', { timeout: 20000 })
   await page.waitForTimeout(400)
+  // R07：把右栏真正展开。store 初始化走的是「折叠」路径（实测 rightExpanded=false），折叠态
+  // 根本不渲染 .right-body —— 那时下面 ⑥ 的「没有任务卡」是对的但没验到东西，R07 新增的
+  // 「链路面板由 provider 渲染」也永远数不到。展开后才是有内容的那棵树。
+  if ((await page.locator('.right-body').count()) === 0) {
+    await page.evaluate(() => { window.__store.getState().setRightExpanded(true) })
+    await page.waitForTimeout(500)
+  }
   const rail = {
     cards: await page.locator('.right .agent-card').count(),
     mon: await page.locator('.right .agent-monitor, .right .am-list').count(),
@@ -692,6 +715,26 @@ async function main() {
   assert(rail.taskEntries === 0, `右栏没有「任务」入口了（tab 已删除），实际 ${rail.taskEntries}`)
   assert(!rail.tabs.some((x) => x.trim() === '任务'), `标签条里不再出现「任务」标签，实际 ${JSON.stringify(rail.tabs)}`)
   await page.screenshot({ path: path.join(SHOTS, 'right-tasks.png') })
+
+  // ---- ⑥b R07：链路面板真的由 provider 渲染（仪器 + 内容两条一起看）----
+  //
+  // 为什么单靠截图不够：provider 是**副作用注册**，探针页少了 builtin import 时
+  // getSurface('activity') 恒 undefined，RightPanel 静默走 `??` 兜底 —— 兜底渲染的就是
+  // 同一个 ActivityTab，像素一模一样（这正是 F45 说的「最坏的一种失败：断言全绿但没测到」）。
+  // 所以这里断三件事：provider 在注册表里、它的 render 被执行过、面板里真有瀑布图。
+  // 变异检验（R07 报告）：把 provider.render 改成返回 null 并保留兜底 → 计数归 0 而像素不变；
+  // 改成返回别的元素 → 下面 tr-rail 断言立刻红。两条合起来才说明「渲染源是 provider」。
+  const act = await page.evaluate(() => ({
+    registered: !!window.__actProvider,
+    calls: window.__actRenderCalls,
+    rail: document.querySelectorAll('.right .tr-rail').length,
+    wf: document.querySelectorAll('.right .wf').length,
+  }))
+  if (REPORT) console.log(JSON.stringify(act, null, 2))
+  assert(act.registered, '仪器：activity provider 已注册（否则下面验的是 RightPanel 的 ?? 兜底）')
+  assert(act.calls > 0, `仪器：activity provider 的 render 真的执行过（实际 ${act.calls} 次；0 = 走了兜底）`)
+  assert(act.rail === 1, `前置：链路面板渲染出 trace 选择器（渲染源 = ActivityTab，实际 ${act.rail}）`)
+  assert(act.wf === 1, `前置：瀑布图在（实际 ${act.wf}）`)
 
   // ---- ⑦ 待办面板跟随「你在看谁」（右栏是它的唯一宿主）----
   //
