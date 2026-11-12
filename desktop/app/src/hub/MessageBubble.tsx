@@ -88,8 +88,9 @@ export function GroupBubble({
   // 就是执行者本人，按 sender 推会得到「Writer → Writer」（B5）。
   const task = useHubStore((s) => (taskId ? s.tasks.find((x) => x.id === taskId) : undefined))
   // 失败气泡的行内「重试」：只有「就是我这条 cid 的那次失败」才可点（沿用首发 cid，
-  // 见 store.retry）。按布尔订阅，别的消息不因 failed 记录变化而重渲染。
-  const canRetryThis = useHubStore((s) => !!msg.failed && !!s.failed && s.failed.clientMsgId === msg.clientMsgId)
+  // 见 store.retry(cid)）。按 cid 查失败表而不是看「最新一条」，多条失败时才不会点 A 发 B，
+  // 中间成功过别的消息也不会把这条的 cid 弄丢（复审 B1/B3）。按布尔订阅，别的消息不重渲染。
+  const canRetryThis = useHubStore((s) => !!msg.failed && !!s.failedByCid[msg.clientMsgId ?? ''])
   const retryFailed = useHubStore((s) => s.retry)
   const renderMention = useCallback(
     (id: string) => {
@@ -245,7 +246,7 @@ export function GroupBubble({
         ownerOnly={msg.visibility === 'owner'}
         pending={msg.pending}
         failed={msg.failed}
-        onRetry={canRetryThis ? () => void retryFailed() : undefined}
+        onRetry={canRetryThis ? () => void retryFailed(msg.clientMsgId) : undefined}
         time={time}
         dateTime={msg.created_at}
       >

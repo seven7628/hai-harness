@@ -18,6 +18,9 @@
 //   · ?hubFixture=tasks：排队/失败/中断 3 条任务真的画出来；640 无溢出
 //   · 640 从 rail 进 Hub → 点 inspector 图标（左栏被挤成 44）→ 退出 Hub：左栏回到进 Hub 前的展开态
 //   · Hub 打开期间 640→1280：inspector 按 ≥1000 展开成 ~360、左栏仍展开；缩回 640 能收回且左栏不丢
+//   · P1 复审 B1/B2/B3：A/B 两条失败点 A 的重试 → wire 上是 A（正文 + 首发 cid）；
+//     失败 → 横幅重试成功 → textarea 空且账本同文 1 条（DM 与群）；
+//     失败 A → 成功 B → 重发 A 仍用 A 的 cid、账本 A=1（状态推进用 waitForFunction）
 //
 // 截图：<out>/<name>.png。任一断言失败 → 退出码 1。
 import { chromium } from 'playwright'
@@ -469,6 +472,203 @@ async function banner(page) {
     check('Hub 打开期间 resize 流程未抛异常', false, String(e?.message ?? e).slice(0, 200))
   }
   results.push('resize-threshold')
+  await ctx.close()
+}
+
+// ————————————————————————————————————————————————————————————————
+// 7) P1 复审 B1/B2/B3（真浏览器复现路径）
+//   B1：DM A/B 两条失败，点 A 的行内重试 → wire 上必须是 A 的正文 + A 的 cid
+//   B2：失败 → 横幅重试成功 → textarea 空 + 账本同文只有 1 条（DM 与群）
+//   B3：失败 A → 成功 B（不能顺手清掉 A 的 cid）→ 重发 A 仍用 A 的 cid、账本 A=1
+// 状态推进一律用 waitForFunction 等 store/DOM 的真实变化，不靠固定 sleep。
+// ————————————————————————————————————————————————————————————————
+async function waitState(page, fn, label, arg, timeout = 8000) {
+  try {
+    await page.waitForFunction(fn, arg, { timeout, polling: 100 })
+    return true
+  } catch {
+    check(`等待状态超时：${label}`, false, label)
+    return false
+  }
+}
+
+{
+  console.log('\n[7a] 复审 B1：两条失败，点 A 的行内重试 → wire 上是 A')
+  const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 }, locale: 'zh-CN' })
+  const page = await ctx.newPage()
+  try {
+    await boot(page)
+    await enterHub(page)
+    await pickAgent(page)
+    await spySends(page)
+    await sendText(page, '.hub-dm', '__lostack__')
+    await waitState(page, () => window.__hub.getState().messages.filter((m) => m.failed).length === 1, 'A 失败气泡出现')
+    await sendText(page, '.hub-dm', '__fail__')
+    await waitState(page, () => {
+      const s = window.__hub.getState()
+      return s.messages.filter((m) => m.failed).length === 2 && Object.keys(s.failedByCid).length === 2
+    }, 'A/B 两条失败气泡 + 两条失败记录')
+    const two = await page.evaluate(() => {
+      const s = window.__hub.getState()
+      return {
+        cids: Object.keys(s.failedByCid),
+        failed: s.messages.filter((m) => m.failed).map((m) => ({ text: m.text, cid: m.clientMsgId })),
+      }
+    })
+    check('B1：失败表里两条 cid 都在（不再单槽覆盖）', two.cids.length === 2, two.cids.join(' , '))
+    check('B1：两条失败气泡各自带 cid', two.failed.length === 2 && two.failed.every((m) => !!m.cid))
+    check('B1：两条失败气泡都有行内重试', (await page.locator('.hub-dm .msg-row.user.failed .user-retry').count()) === 2)
+    const cidA = two.failed.find((m) => m.text === '__lostack__')?.cid ?? ''
+    const cidB = two.failed.find((m) => m.text === '__fail__')?.cid ?? ''
+    check('B1：A/B 的 cid 不同', !!cidA && !!cidB && cidA !== cidB, `${cidA} / ${cidB}`)
+    await page.screenshot({ path: `${OUT}/12-b1-two-failures.png` })
+
+    const n0 = await page.evaluate(() => (window.__sends ?? []).length)
+    // 点第一条（A = __lostack__）的重试
+    await page.locator('.hub-dm .msg-row.user.failed .user-retry').first().click({ timeout: 4000 })
+    await waitState(page, (start) => (window.__sends ?? []).slice(start).some((x) => x.kind === 'dm' && x.text === '__lostack__'),
+      'A 的重试真正上线', n0)
+    const retried = await page.evaluate((start) => (window.__sends ?? []).slice(start).find((x) => x.kind === 'dm'), n0)
+    check('B1：wire 正文是 A（不是最新失败的 B）', retried?.text === '__lostack__', retried?.text ?? '(none)')
+    check('B1：wire 复用 A 的首发 cid', retried?.reuse === cidA, `${cidA} → ${retried?.reuse ?? ''}`)
+    await waitState(page, () => {
+      const s = window.__hub.getState()
+      const left = s.messages.filter((m) => m.failed)
+      return left.length === 1 && left[0].text === '__fail__' && !s.sending
+    }, 'A 重试成功、只剩 B 失败')
+    check('B1：B 的失败气泡还在且仍可重试',
+      (await page.locator('.hub-dm .msg-row.user.failed .user-retry').count()) === 1)
+    const afterA = await page.evaluate(() => {
+      const s = window.__hub.getState()
+      return { byCid: Object.keys(s.failedByCid), banner: !!s.failed, bannerCid: s.failed?.clientMsgId ?? '' }
+    })
+    check('B1：失败表只剩 B 的 cid', afterA.byCid.length === 1 && afterA.byCid[0] === cidB, afterA.byCid.join(' , '))
+    check('B1：横幅改指向还没重试的 B', afterA.bannerCid === cidB, afterA.bannerCid)
+    await page.screenshot({ path: `${OUT}/12b-b1-after-retry-a.png` })
+  } catch (e) {
+    check('B1 流程未抛异常', false, String(e?.message ?? e).slice(0, 200))
+  }
+  results.push('review-b1')
+  await ctx.close()
+}
+
+{
+  console.log('\n[7b] 复审 B2：失败草稿 → 横幅重试成功 → 输入框空、账本同文 1 条')
+  const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 }, locale: 'zh-CN' })
+  const page = await ctx.newPage()
+  try {
+    await boot(page)
+    await enterHub(page)
+    await pickAgent(page)
+    await sendText(page, '.hub-dm', '__lostack__')
+    await waitState(page, () => !!window.__hub.getState().failed && !window.__hub.getState().sending, 'DM 失败记录')
+    check('B2：失败后草稿仍在输入框（失败不清草稿）',
+      (await page.inputValue('.hub-dm .composer textarea')) === '__lostack__')
+    await page.locator('.hub-center-banner.hub-error button', { hasText: '重试' }).first().click({ timeout: 4000 })
+    await waitState(page, () => {
+      const s = window.__hub.getState()
+      return !s.failed && !s.sending && s.messages.filter((m) => m.failed).length === 0
+    }, 'DM 横幅重试成功')
+    await waitState(page, () => (document.querySelector('.hub-dm .composer textarea')?.value ?? 'x') === '', 'DM 输入框清空')
+    check('B2：重试成功后 textarea 为空', (await page.inputValue('.hub-dm .composer textarea')) === '')
+    // 再点一次发送（旧 bug：同文换新 cid → 账本 2 条）。清空后按钮禁用，先确认它确实空。
+    check('B2：空草稿时发送按钮不可点', await page.locator('.hub-dm .composer .send-btn').first().isDisabled())
+    await pickAgent(page)
+    await waitState(page, () => window.__hub.getState().messages.length > 0, '重开 DM 读账本')
+    const reopened = await hubState(page)
+    check('B2：账本里这条正文只有 1 条（重试没二次入账）',
+      reopened.messages.filter((m) => m.text === '__lostack__').length === 1,
+      `got=${reopened.messages.filter((m) => m.text === '__lostack__').length}`)
+    await page.screenshot({ path: `${OUT}/13-b2-dm-draft-cleared.png` })
+  } catch (e) {
+    check('B2(DM) 流程未抛异常', false, String(e?.message ?? e).slice(0, 200))
+  }
+  await ctx.close()
+
+  const gctx = await browser.newContext({ viewport: { width: 1100, height: 900 }, locale: 'zh-CN' })
+  const gpage = await gctx.newPage()
+  try {
+    await boot(gpage)
+    await enterHub(gpage)
+    await pickGroup(gpage)
+    await sendText(gpage, '.hub-group-view', '__lostack__')
+    await waitState(gpage, () => !!window.__hub.getState().failed && !window.__hub.getState().groupSending, '群失败记录')
+    check('B2：群失败后草稿仍在输入框',
+      (await gpage.inputValue('.hub-group-view .composer textarea')) === '__lostack__')
+    await gpage.locator('.hub-center-banner.hub-error button', { hasText: '重试' }).first().click({ timeout: 4000 })
+    await waitState(gpage, () => {
+      const s = window.__hub.getState()
+      return !s.failed && !s.groupSending && s.groupMessages.filter((m) => m.failed).length === 0
+    }, '群横幅重试成功')
+    await waitState(gpage, () => (document.querySelector('.hub-group-view .composer textarea')?.value ?? 'x') === '', '群输入框清空')
+    check('B2：群重试成功后 textarea 为空', (await gpage.inputValue('.hub-group-view .composer textarea')) === '')
+    await pickGroup(gpage)
+    await waitState(gpage, () => window.__hub.getState().groupMessages.length > 0, '重开群读账本')
+    const reopened = await hubState(gpage)
+    check('B2：群账本里这条正文只有 1 条',
+      reopened.groupMessages.filter((m) => m.text === '__lostack__').length === 1,
+      `got=${reopened.groupMessages.filter((m) => m.text === '__lostack__').length}`)
+    await gpage.screenshot({ path: `${OUT}/13b-b2-group-draft-cleared.png` })
+  } catch (e) {
+    check('B2(群) 流程未抛异常', false, String(e?.message ?? e).slice(0, 200))
+  }
+  await gctx.close()
+  results.push('review-b2')
+}
+
+{
+  console.log('\n[7c] 复审 B3：失败 A → 成功 B → 重发 A 仍用 A 的 cid、账本 A=1')
+  const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 }, locale: 'zh-CN' })
+  const page = await ctx.newPage()
+  try {
+    await boot(page)
+    await enterHub(page)
+    await pickAgent(page)
+    await spySends(page)
+    await sendText(page, '.hub-dm', '__lostack__')
+    await waitState(page, () => !!window.__hub.getState().failed && !window.__hub.getState().sending, 'A 失败')
+    const cidA = await page.evaluate(() => window.__hub.getState().failed?.clientMsgId ?? '')
+    check('B3：A 的首发 cid 记下来了', /^ui-/.test(cidA), cidA)
+
+    await sendText(page, '.hub-dm', 'B3 中间那条成功的')
+    await waitState(page, () => {
+      const s = window.__hub.getState()
+      return !s.sending && s.messages.some((m) => m.text === 'B3 中间那条成功的' && !m.failed && !m.pending)
+    }, 'B 发送成功')
+    const afterB = await page.evaluate(() => {
+      const s = window.__hub.getState()
+      return { bannerCid: s.failed?.clientMsgId ?? '', byCid: Object.keys(s.failedByCid) }
+    })
+    check('B3：成功一条不会清掉 A 的失败记录（旧 bug 是无条件 failed:null）', afterB.byCid.includes(cidA), afterB.byCid.join(' , '))
+    check('B3：横幅仍指向 A', afterB.bannerCid === cidA, afterB.bannerCid)
+
+    // 用户直接在 composer 把 A 的原文再发一次（不点重试）
+    const n0 = await page.evaluate(() => (window.__sends ?? []).length)
+    await sendText(page, '.hub-dm', '__lostack__')
+    await waitState(page, (start) => (window.__sends ?? []).slice(start).some((x) => x.kind === 'dm' && x.text === '__lostack__'),
+      '重发 A 上线', n0)
+    const resent = await page.evaluate((start) => (window.__sends ?? []).slice(start).find((x) => x.kind === 'dm'), n0)
+    check('B3：重发 A 确实走 composer 的 send（正文没换）', resent?.text === '__lostack__', resent?.text ?? '(none)')
+    await waitState(page, () => {
+      const s = window.__hub.getState()
+      return !s.sending && s.messages.filter((m) => m.failed).length === 0
+    }, '重发 A 成功')
+    // reuse 是 store 内部按失败表匹配出来的，不经过 UI 入参；时间线气泡上的 cid 就是实际发出去的键。
+    const resentCid = await page.evaluate(() => window.__hub.getState().messages.find((m) => m.text === '__lostack__')?.clientMsgId ?? '')
+    check('B3：重发 A 实际用的仍是首发 cid（旧 bug：单槽已清 → 换新 cid → 账本 +1）', resentCid === cidA,
+      `${cidA} → ${resentCid}`)
+    await pickAgent(page)
+    await waitState(page, () => window.__hub.getState().messages.length > 0, '重开 DM 读账本')
+    const reopened = await hubState(page)
+    check('B3：账本里 A 只有 1 条', reopened.messages.filter((m) => m.text === '__lostack__').length === 1,
+      `got=${reopened.messages.filter((m) => m.text === '__lostack__').length}`)
+    check('B3：账本里 B 也只有 1 条', reopened.messages.filter((m) => m.text === 'B3 中间那条成功的').length === 1,
+      `got=${reopened.messages.filter((m) => m.text === 'B3 中间那条成功的').length}`)
+    await page.screenshot({ path: `${OUT}/14-b3-resent-a.png` })
+  } catch (e) {
+    check('B3 流程未抛异常', false, String(e?.message ?? e).slice(0, 200))
+  }
+  results.push('review-b3')
   await ctx.close()
 }
 

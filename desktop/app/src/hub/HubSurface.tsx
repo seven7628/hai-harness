@@ -180,7 +180,6 @@ export default function HubSurface() {
           msg={m}
           agent={activeAgent}
           highlightSeq={highlightSeq}
-          onRetry={retry}
         />,
       )
     }
@@ -189,7 +188,7 @@ export default function HubSurface() {
       nodes.push(<HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} agent={activeAgent} highlightSeq={highlightSeq} />)
     }
     return nodes
-  }, [messages, actions, activeAgent, highlightSeq, lang, retry])
+  }, [messages, actions, activeAgent, highlightSeq, lang])
 
   return (
     <div className="hub-center">
@@ -400,15 +399,16 @@ function HubBubble({
   msg,
   agent,
   highlightSeq,
-  onRetry,
 }: {
   msg: HubMessage
   agent?: MentionAgent | null
   highlightSeq?: number | null
-  /** 失败气泡的行内「重试」（沿用首发 cid，见 store.retry）。 */
-  onRetry?: () => void
 }) {
   const t = useT()
+  // 失败气泡的行内「重试」只认这条自己的 cid：两条失败时点 A 必须发 A，不能被
+  // 「最新一条失败」顶掉（复审 B1）。按布尔订阅，别的消息不因失败表变化而重渲染。
+  const canRetryThis = useHubStore((s) => !!msg.clientMsgId && !!s.failedByCid[msg.clientMsgId])
+  const retry = useHubStore((s) => s.retry)
   const kind = msg.sender?.kind ?? 'system'
   const seq = seqDataAttr(msg.seq)
   const hl = highlightClass(msg.seq, highlightSeq)
@@ -434,7 +434,7 @@ function HubBubble({
         ownerOnly={msg.visibility === 'owner'}
         pending={msg.pending}
         failed={msg.failed}
-        onRetry={msg.failed ? onRetry : undefined}
+        onRetry={msg.failed && canRetryThis ? () => void retry(msg.clientMsgId) : undefined}
         time={time}
         dateTime={msg.created_at}
       >

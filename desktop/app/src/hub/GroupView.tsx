@@ -84,7 +84,11 @@ export default function GroupView({ group }: { group: HubGroup }) {
   // P4-01 性能 memo 的启动期快照：localStorage['hub.perfMemo']='0' 后重载即关闭。
   // 只读一次（不在每次 render 访问 storage）；支持回滚不需要发版，见 perfFlags.ts。
   const [perfMemo] = useState(() => hubPerfMemoEnabled())
-  const [draft, setDraft] = useState('')
+  // 群 composer 草稿放 store（按群 id）：横幅/气泡重试成功后要能清掉输入框 —— 重试
+  // 不经过 submit，本地 state 收不到「成功」这件事（复审 B2）；顺带切群再回来草稿还在。
+  const draft = useHubStore((s) => s.groupDraftText[group.id] ?? '')
+  const setGroupDraft = useHubStore((s) => s.setGroupDraft)
+  const setDraft = useCallback((text: string): void => setGroupDraft(group.id, text), [setGroupDraft, group.id])
   const [composerMode, setComposerMode] = useState<'chat' | 'assign'>('chat')
   const [view, setView] = useState<'chat' | 'run'>('chat')
   const [displayMode, setDisplayMode] = useState<'grouped' | 'flat'>(readGroupDisplay)

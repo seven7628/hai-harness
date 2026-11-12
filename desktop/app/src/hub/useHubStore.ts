@@ -91,7 +91,16 @@ interface HubState {
   running: Record<string, boolean>
   /** 每个 agent 未发送的草稿（切 surface 不丢）。 */
   drafts: Record<string, string>
-  /** 上一次发送失败（DM/群共用）：重试要沿用同一个 client_msg_id，见 HubFailedSend。 */
+  /** 每个群 composer 的草稿（与 drafts 同语义；重试成功后按正文比对清空）。 */
+  groupDraftText: Record<string, string>
+  /**
+   * 失败发送记录表：client_msg_id → 记录。
+   *
+   * 不能只留「最新一条」单槽：成功一条就把槽清空的话，旧失败气泡还在时间线上，
+   * 但它的 cid 已经丢了 —— 重发会换新 cid、账本多一条（复审 B3）。
+   */
+  failedByCid: Record<string, HubFailedSend>
+  /** 最新一条失败（= failedByCid 里最后写入的那条）：横幅只取最新的这条。 */
   failed: HubFailedSend | null
   /** 任务板/Needs you/会话信息/上下文（只读）抽屉。 */
   inspector: 'tasks' | 'needs' | 'session' | 'context' | null
@@ -172,9 +181,15 @@ interface HubState {
   clearSelection(): void
   loadOlder(): Promise<void>
   send(text: string, reuseClientMsgId?: string): Promise<boolean>
-  /** 重发上一次失败的消息（DM 或群），沿用首发 client_msg_id。 */
-  retry(): Promise<boolean>
+  /**
+   * 重发一条失败的消息（DM 或群），沿用首发 client_msg_id。
+   *
+   * `clientMsgId` 不传 = 最新的那条失败（横幅用）；传了就按气泡自己的 cid 找记录 ——
+   * 多条失败时点 A 的重试必须发 A，不能取「最新的那条」（复审 B1）。
+   */
+  retry(clientMsgId?: string): Promise<boolean>
   setDraft(agentID: string, text: string): void
+  setGroupDraft(groupID: string, text: string): void
   clearError(): void
   clearNotice(): void
   /** 人类全历史搜索（250ms debounce 在 UI 层；这里只发一次 hub_search，旧响应按代际丢弃）。 */
@@ -265,6 +280,51 @@ function touchDMInfo(agentID: string): void {
   dmInfoUpdatedAt.set(agentID, Date.now())
 }
 
+/** 失败记录表（Object 保留插入顺序：最后一条就是「最新失败」）。 */
+type FailedMap = Record<string, HubFailedSend>
+
+function latestFailed(map: FailedMap): HubFailedSend | null {
+  const cids = Object.keys(map)
+  return cids.length > 0 ? map[cids[cids.length - 1]] : null
+}
+
+/**
+ * 清掉一条 cid 的失败记录，并把 `failed`（横幅用）重新指向剩下的最新一条。
+ *
+ * 成功一条只清这一条：别的失败气泡还在时间线上，它们的 cid 必须留着（复审 B3）。
+ */
+function dropFailed(map: FailedMap, cid: string): { failedByCid: FailedMap; failed: HubFailedSend | null } {
+  if (!cid || !map[cid]) return { failedByCid: map, failed: latestFailed(map) }
+  const next: FailedMap = { ...map }
+  delete next[cid]
+  return { failedByCid: next, failed: latestFailed(next) }
+}
+
+function rememberFailed(map: FailedMap, rec: HubFailedSend): Pick<HubState, 'failedByCid' | 'failed'> {
+  // 同 cid 再次失败：覆盖正文/目标，但保留它在时间线上的位置（Object 覆盖不换位）。
+  return { failedByCid: { ...map, [rec.clientMsgId]: rec }, failed: rec }
+}
+
+/**
+ * 按「正文 + 目标」找回这一行气泡的首发 cid。
+ *
+ * 用户没点「重试」、直接把失败的正文再发一次时也要沿用，否则账本会多一条
+ * （HUB-IDEM-01 / 复审 B3）。同文多条失败取最早的那条（时间线上第一个失败气泡）。
+ */
+function reuseCidFor(map: FailedMap, kind: 'dm' | 'group', scopeID: string, text: string): string {
+  for (const cid of Object.keys(map)) {
+    const rec = map[cid]
+    if (rec.kind !== kind || rec.text !== text) continue
+    if (kind === 'dm' ? rec.agentId === scopeID : rec.groupId === scopeID) return cid
+  }
+  return ''
+}
+
+/** 草稿是否仍是这次发出去的正文：用户后来改过的输入不能被重试抹掉（复审 B2）。 */
+function draftEquals(draft: string | undefined, body: string): boolean {
+  return typeof draft === 'string' && draft.trim() === body
+}
+
 function roundHasAction(r: HubRound | null | undefined): boolean {
   return !!r && (!!r.mention_all || (r.targets ?? []).length > 0 || (r.dropped ?? 0) > 0)
 }
@@ -308,6 +368,8 @@ export const useHubStore = create<HubState>((set, get) => ({
   rootRunId: null,
   running: {},
   drafts: {},
+  groupDraftText: {},
+  failedByCid: {},
   failed: null,
   inspector: null,
   tasks: [],
@@ -444,6 +506,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       error: null,
       // 切目标就丢掉失败记录：失败气泡已随消息列表清空，留着它重试会发到别人的会话。
       failed: null,
+      failedByCid: {},
       loading: true,
       // 每次打开/切换 DM 都回到 Chat：Run 日志是「当前会话的运行态」，不该跨会话泄漏。
       view: 'chat',
@@ -483,7 +546,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 
   clearSelection() {
-    set({ activeId: null, profile: null, sid: null, messages: [], hasMore: false, live: '', rootRunId: null, failed: null, jump: null, view: 'chat' })
+    set({ activeId: null, profile: null, sid: null, messages: [], hasMore: false, live: '', rootRunId: null, failed: null, failedByCid: {}, jump: null, view: 'chat' })
   },
 
   async loadOlder() {
@@ -521,9 +584,9 @@ export const useHubStore = create<HubState>((set, get) => ({
     // 幂等键（§7.1.3）：首发时定下，失败记录保留它；重试 / 同一条正文重发都沿用它。
     // 桥按 client_msg_id 去重（hubSend 命中即回原 seq、deduplicated），换新 cid 会让
     // 「响应丢了但消息其实已入队」的那条重复进模型上下文（HUB-IDEM-01）。
-    const prev = get().failed
-    const reuse = reuseClientMsgId
-      || (prev && prev.kind === 'dm' && prev.agentId === activeId && prev.text === body ? prev.clientMsgId : '')
+    // 按失败表里「同正文 + 同目标」的那条找，而不是只看最新一条：中间成功过别的消息
+    // 之后，旧失败气泡的 cid 仍要能找回（复审 B3）。
+    const reuse = reuseClientMsgId || reuseCidFor(get().failedByCid, 'dm', activeId, body)
     const n = ++optimisticSeq
     const clientMsgId = reuse || `ui-${Date.now()}-${n}`
     const optimistic: HubMessage = {
@@ -539,7 +602,8 @@ export const useHubStore = create<HubState>((set, get) => ({
       sending: true,
       error: null,
       notice: null,
-      failed: reuse && s.failed?.clientMsgId === reuse ? null : s.failed,
+      // 只摘这一条 cid：同会话里还有别的失败气泡，它们的记录要留着（复审 B3）。
+      ...dropFailed(s.failedByCid, reuse),
     }))
     const r = await hubCommand<{ seq?: number; deduplicated?: boolean }>('hub_send', {
       target: { kind: 'dm', agent_id: activeId },
@@ -548,10 +612,11 @@ export const useHubStore = create<HubState>((set, get) => ({
     })
     if (!r.ok) {
       // 失败：气泡标 failed（可重试），失败记录带原文 + 首发 cid —— 不能两头都清。
+      const rec: HubFailedSend = { kind: 'dm', text: body, clientMsgId, agentId: activeId }
       set((s) => ({
         sending: false,
         error: r.error || '发送失败',
-        failed: { kind: 'dm', text: body, clientMsgId, agentId: activeId },
+        ...rememberFailed(s.failedByCid, rec),
         messages: s.messages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
       }))
       return false
@@ -563,13 +628,21 @@ export const useHubStore = create<HubState>((set, get) => ({
         messages: s.messages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, seq, pending: false, failed: false } : m)),
       }))
     }
-    set({ sending: false, failed: null })
+    set((s) => ({
+      sending: false,
+      // 成功只清这一条 cid 的失败记录（复审 B3）。
+      ...dropFailed(s.failedByCid, clientMsgId),
+      // 草稿还是这条正文才清：横幅/气泡重试成功后输入框要空，但用户后来改过的输入不清（复审 B2）。
+      ...(draftEquals(s.drafts[activeId], body) ? { drafts: { ...s.drafts, [activeId]: '' } } : {}),
+    }))
     void get().refresh()
     return true
   },
 
-  async retry() {
-    const failed = get().failed
+  async retry(clientMsgId) {
+    const s = get()
+    // 按气泡自己的 cid 取记录：多条失败时点 A 的重试必须发 A（复审 B1）。
+    const failed = clientMsgId ? s.failedByCid[clientMsgId] : s.failed
     if (!failed) return false
     // 沿用首发 cid 与原文重发；失败气泡在 send/sendGroup 里按 cid 先摘掉（HUB-FAIL-01）。
     if (failed.kind === 'group') {
@@ -585,6 +658,11 @@ export const useHubStore = create<HubState>((set, get) => ({
   setDraft(agentID, text) {
     if (!agentID) return
     set((s) => ({ drafts: { ...s.drafts, [agentID]: text } }))
+  },
+
+  setGroupDraft(groupID, text) {
+    if (!groupID) return
+    set((s) => ({ groupDraftText: { ...s.groupDraftText, [groupID]: text } }))
   },
 
   clearError() {
@@ -997,7 +1075,7 @@ export const useHubStore = create<HubState>((set, get) => ({
         : s.groupInfo,
       groupReadSeq: { ...s.groupReadSeq },
       messages: [], live: '', rootRunId: null,
-      error: null, failed: null, loading: true,
+      error: null, failed: null, failedByCid: {}, loading: true,
       view: 'chat',
       // 手动切群/新深链都会走到这里：旧的跳转请求作废（深链在 selectGroup 之后再登记）。
       jump: null,
@@ -1083,7 +1161,7 @@ export const useHubStore = create<HubState>((set, get) => ({
     set({
       activeGroupId: null, groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false,
       groupDrafts: [], groupAssigning: false, groupAssignNote: null, groupConvStopping: false,
-      failed: null,
+      failed: null, failedByCid: {},
       jump: null,
     })
   },
@@ -1095,15 +1173,15 @@ export const useHubStore = create<HubState>((set, get) => ({
     const gen = ++groupSendGen
     // 与 DM 同一条幂等规则（HUB-IDEM-01）：失败记录保留首发 cid，重试/同正文重发沿用它，
     // 桥按 client_msg_id 去重，不会因「响应丢了」而把同一条再喂一次模型。
-    const prev = get().failed
-    const reuse = reuseClientMsgId
-      || (prev && prev.kind === 'group' && prev.groupId === activeGroupId && prev.text === body ? prev.clientMsgId : '')
+    // 同样按「同正文 + 同群」找记录，而不是只看最新一条（复审 B3）。
+    const reuse = reuseClientMsgId || reuseCidFor(get().failedByCid, 'group', activeGroupId, body)
     const n = ++optimisticSeq
     const clientMsgId = reuse || `g-${Date.now()}-${n}`
     set((s) => ({
       groupSending: true,
       error: null, notice: null,
-      failed: reuse && s.failed?.clientMsgId === reuse ? null : s.failed,
+      // 只摘这一条 cid，别的失败气泡还要能各自重试（复审 B3）。
+      ...dropFailed(s.failedByCid, reuse),
       // 重发先摘掉失败气泡，别在时间线上叠第二条乐观气泡（HUB-FAIL-01）。
       groupMessages: [
         ...(reuse ? s.groupMessages.filter((m) => !(m.failed && m.clientMsgId === reuse)) : s.groupMessages),
@@ -1122,16 +1200,21 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (groupSendGen !== gen || get().activeGroupId !== activeGroupId) return false
     if (!r.ok) {
       // 失败同样留记录（含 cid + @ 目标）：群里之前只有一条「网络中断 ×」，没有重试入口。
+      const rec: HubFailedSend = { kind: 'group', text: body, clientMsgId, groupId: activeGroupId, mentions, mentionAll }
       set((s) => ({
         groupSending: false, error: r.error || '发送失败',
-        failed: { kind: 'group', text: body, clientMsgId, groupId: activeGroupId, mentions, mentionAll },
+        ...rememberFailed(s.failedByCid, rec),
         groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
       }))
       return false
     }
     set((s) => ({
       groupSending: false,
-      failed: null,
+      // 成功只清这一条 cid 的失败记录；草稿仍是这条正文才清（复审 B2/B3）。
+      ...dropFailed(s.failedByCid, clientMsgId),
+      ...(draftEquals(s.groupDraftText[activeGroupId], body)
+        ? { groupDraftText: { ...s.groupDraftText, [activeGroupId]: '' } }
+        : {}),
       groupRounds: upsertRound(s.groupRounds, r.data?.round),
       groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId && r.data?.seq ? { ...m, seq: r.data.seq, pending: false } : m)),
     }))

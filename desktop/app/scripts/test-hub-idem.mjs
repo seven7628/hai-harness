@@ -11,6 +11,9 @@
 //     且失败气泡先被摘掉（不叠第二条乐观气泡）
 //   · 群失败 → failed 记录 kind=group（横幅据此给出「重试」）→ retry() 复用 cid → 只留 1 条
 //   · 切目标（换 DM / 换群）会丢掉失败的 cid —— 重试永远不会发到别的会话
+//   · 复审 B1：两条失败时按气泡的 cid 重试（wire 上正文/cid 都是点的那一条）
+//   · 复审 B2：重试成功后草稿清空（用户改过的不清），账本不再同文 +1
+//   · 复审 B3：成功一条只清它自己的 cid；旧失败原文重发仍复用首发 cid
 //   · mock 的 ?hubFixture=needs|tasks（HUB-FIXTURE-01）：4 种 need 与排队/失败/中断任务
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
@@ -81,13 +84,40 @@ function spySends() {
   return { seen, restore: () => H.setState({ send: origSend, sendGroup: origGroup }) }
 }
 
+/**
+ * 记录真正上线（mock transport 的 send）的 hub_send / hub_group_send 载荷。
+ *
+ * 比 spySends 更贴复审现场：B1 的缺陷是「点了 A、wire 上却是 B」，只有看到
+ * payload.text / client_msg_id 才能钉死它，而不是只看 store 的入参。
+ */
+function spyWire() {
+  const seen = []
+  const orig = t.send.bind(t)
+  t.send = (cmd) => {
+    if (cmd?.type === 'hub_send' || cmd?.type === 'hub_group_send') {
+      const p = cmd.payload ?? {}
+      seen.push({
+        type: cmd.type,
+        text: String(p.text ?? ''),
+        cid: String(p.client_msg_id ?? ''),
+        to: String(p.target?.agent_id ?? ''),
+        group: String(p.group_id ?? ''),
+      })
+    }
+    return orig(cmd)
+  }
+  return { seen, restore: () => { t.send = orig } }
+}
+
 const humanTexts = (list) => list.filter((m) => (m.sender?.kind ?? '') === 'human').map((m) => m.text)
+const countText = (list, text) => humanTexts(list).filter((x) => x === text).length
 
 // —— 1) DM：失败保留首发 cid，retry() 沿用同一 cid，账本不重复 ——
 {
   H.setState({ open: true })
   await H.getState().select('ag_mockres1')
-  assert(humanTexts(H.getState().messages).length >= 0, 'DM 打开（hub_open）成功')
+  eq(H.getState().activeId, 'ag_mockres1', 'DM 打开（hub_open）选中目标智能体')
+  eq(countText(H.getState().messages, '先列一下三家竞品的价格。'), 1, 'DM 打开拿到历史（种子 1 条人工消息）')
 
   const spy = spySends()
   const okSend = await H.getState().send('__lostack__')
@@ -181,7 +211,92 @@ const humanTexts = (list) => list.filter((m) => (m.sender?.kind ?? '') === 'huma
   spy.restore()
 }
 
-// —— 5) mock fixture：?hubFixture=needs|tasks（HUB-FIXTURE-01） ——
+// —— 5) 复审 B1：两条失败各自重试，wire 上是「点的那一条」 ——
+// 复审现场：DM 发 __lostack__（A 失败）→ 发 __fail__（B 失败）→ 点 A 的重试，
+// wire 里却是 {text:'__fail__', client_msg_id: B.cid}（retry 永远取最新 failed）。
+{
+  await H.getState().select('ag_mockwri2')
+  const wire = spyWire()
+  eq(await H.getState().send('__lostack__'), false, 'B1：A（__lostack__）对前端是失败')
+  const cidA = H.getState().failed?.clientMsgId ?? ''
+  eq(await H.getState().send('__fail__'), false, 'B1：B（__fail__）对前端是失败')
+  const cidB = H.getState().failed?.clientMsgId ?? ''
+  assert(cidA.startsWith('ui-') && cidB.startsWith('ui-') && cidA !== cidB, 'B1：两条失败各带首发 cid')
+  eq(Object.keys(H.getState().failedByCid).length, 2, 'B1：失败表里两条记录都在（不再被单槽覆盖）')
+  eq(H.getState().messages.filter((m) => m.failed).length, 2, 'B1：时间线上两条失败气泡')
+
+  // 点 A 气泡的行内「重试」= retry(A 的 cid)
+  eq(await H.getState().retry(cidA), true, 'B1：按 A 的 cid 重试成功（mock 按 cid 幂等）')
+  const wireA = wire.seen[wire.seen.length - 1]
+  eq(wireA.text, '__lostack__', 'B1：wire 正文是 A（不是最新失败的 B）')
+  eq(wireA.cid, cidA, 'B1：wire cid 是 A 的首发 cid')
+  eq(wireA.to, 'ag_mockwri2', 'B1：仍发回同一个 DM')
+  eq(H.getState().failedByCid[cidA], undefined, 'B1：只清 A 的记录')
+  eq(Object.keys(H.getState().failedByCid).join(','), cidB, 'B1：B 的记录还在（它自己还能重试）')
+  eq(H.getState().failed?.clientMsgId, cidB, 'B1：横幅改指向还没重试的 B')
+
+  // 点 B 的重试：mock 对 __fail__ 恒定注入失败，但 wire 上必须是 B 自己的正文 + cid
+  eq(await H.getState().retry(cidB), false, 'B1：B 重试仍失败（mock 对 __fail__ 恒定注入）')
+  const wireB = wire.seen[wire.seen.length - 1]
+  eq(wireB.text, '__fail__', 'B1：wire 正文是 B')
+  eq(wireB.cid, cidB, 'B1：wire cid 是 B 的首发 cid（没有换新）')
+  wire.restore()
+  H.getState().clearError()
+}
+
+// —— 6) 复审 B2：重试成功清草稿，再点发送不会同文 +1 ——
+// 复审现场：失败草稿留在输入框 → 横幅重试成功 → 输入框不动 → 再点发送用新 cid，账本同文 2 条。
+{
+  await H.getState().select('ag_mockres1')
+  const base = countText(H.getState().messages, '__lostack__')
+  eq(await H.getState().send('__lostack__'), false, 'B2：DM 发送失败')
+  const cid = H.getState().failed?.clientMsgId ?? ''
+  // composer 失败后不丢草稿（与 HubSurface.submit 同语义）：这里把输入框还原成原文。
+  H.getState().setDraft('ag_mockres1', `  ${'__lostack__'}  `)
+  eq(await H.getState().retry(cid), true, 'B2：横幅重试成功（cid 幂等，账本不新增）')
+  eq(H.getState().drafts['ag_mockres1'], '', 'B2：重试成功后草稿清空（比较忽略首尾空白）')
+  await H.getState().select('ag_mockres1')
+  const atReopen = H.getState().messages
+  eq(countText(atReopen, '__lostack__'), base + 1, 'B2：账本只多了这一次发送的 1 条（重试没二次入账）')
+  // 用户后来改过的草稿不能被重试抹掉
+  eq(await H.getState().send('__lostack__'), false, 'B2：再失败一次')
+  const cid2 = H.getState().failed?.clientMsgId ?? ''
+  H.getState().setDraft('ag_mockres1', '我改成别的了')
+  eq(await H.getState().retry(cid2), true, 'B2：再次重试成功')
+  eq(H.getState().drafts['ag_mockres1'], '我改成别的了', 'B2：改过的草稿保留（不无条件清）')
+
+  // 群同理：群 composer 草稿在 store 里，横幅重试（不经过 GroupView.submit）也能清
+  await H.getState().selectGroup('grp_mock1')
+  await waitFor(() => H.getState().activeGroupId === 'grp_mock1' && !H.getState().loading, '群打开（B2）')
+  eq(await H.getState().sendGroup('__lostack__'), false, 'B2：群发送失败')
+  const gcid = H.getState().failed?.clientMsgId ?? ''
+  H.getState().setGroupDraft('grp_mock1', '__lostack__')
+  eq(await H.getState().retry(gcid), true, 'B2：群横幅重试成功')
+  eq(H.getState().groupDraftText['grp_mock1'], '', 'B2：群重试成功后草稿清空')
+}
+
+// —— 7) 复审 B3：成功一条不清别人的 cid；旧失败原文重发仍用首发 cid ——
+// 复审现场：失败 A → 成功 B（无条件 failed:null）→ 重发 A 换新 cid → 账本 A 计数 2。
+{
+  await H.getState().select('ag_mockwri2')
+  const base = countText(H.getState().messages, '__lostack__')
+  const wire = spyWire()
+  eq(await H.getState().send('__lostack__'), false, 'B3：A 失败（已落账、响应丢失）')
+  const cidA = H.getState().failed?.clientMsgId ?? ''
+  eq(await H.getState().send('B3 中间那条成功的'), true, 'B3：B 成功（成功不能把 A 的 cid 一起清掉）')
+  eq(H.getState().failed?.clientMsgId, cidA, 'B3：成功后 A 的失败记录还在')
+  eq(!!H.getState().failedByCid[cidA], true, 'B3：A 的 cid 仍在失败表里')
+
+  // 用户直接把这句原文再发一次（不点重试、不传 cid）：必须复用 A 的首发 cid
+  eq(await H.getState().send('__lostack__'), true, 'B3：重发 A 成功（命中 cid 幂等）')
+  eq(wire.seen[wire.seen.length - 1].cid, cidA, 'B3：wire cid 仍是 A 的首发 cid')
+  eq(!!H.getState().failedByCid[cidA], false, 'B3：成功后 A 的记录才被清掉')
+  await H.getState().select('ag_mockwri2')
+  eq(countText(H.getState().messages, '__lostack__'), base + 1, 'B3：账本 A 只有 1 次发送（没有换新 cid 多记一条）')
+  wire.restore()
+}
+
+// —— 8) mock fixture：?hubFixture=needs|tasks（HUB-FIXTURE-01） ——
 {
   const call = (type, payload = {}) => new Promise((resolve) => {
     const id = 900_000 + Math.floor(Math.random() * 1000)
