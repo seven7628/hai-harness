@@ -190,10 +190,11 @@ const rect = (el) => el ? el.getBoundingClientRect() : null
         const at = [...document.querySelectorAll('.composer .icon-btn')]
           .find((el) => visible(el) && (el.getAttribute('title') || '').includes('@'))
         const send = [...document.querySelectorAll('.send-btn')].find(visible)
+        const labelOf = (el) => `${el.getAttribute('aria-label') || ''}${el.getAttribute('title') || ''}`
         const headerCtx = [...document.querySelectorAll('.header-actions .icon-btn')]
-          .find((el) => (el.getAttribute('title') || '').includes('上下文'))
+          .find((el) => labelOf(el).includes('上下文'))
         const headerMore = [...document.querySelectorAll('.header-actions .icon-btn')]
-          .find((el) => (el.getAttribute('title') || '').includes('更多'))
+          .find((el) => labelOf(el).includes('更多'))
         const jump = document.querySelector('.hub-context-jump')
         const scopes = [...document.querySelectorAll('.hub-side-scopes button')]
         const tabs = [...document.querySelectorAll('.hub-side-tabs button')]
@@ -206,10 +207,10 @@ const rect = (el) => el ? el.getBoundingClientRect() : null
       check(`@${width} @ 提及 ≥32`, inRange(m.at), m.at ? `${m.at.w}×${m.at.h}` : '未找到')
       check(`@${width} 发送 ≥32`, inRange(m.send), m.send ? `${m.send.w}×${m.send.h}` : '未找到')
       check(`@${width} 上下文入口 ≥32`, inRange(m.headerCtx), m.headerCtx ? `${m.headerCtx.w}×${m.headerCtx.h}` : '未找到')
-      if (m.headerMore) check(`@${width} 更多入口 ≥32`, inRange(m.headerMore), `${m.headerMore.w}×${m.headerMore.h}`)
+      check(`@${width} 更多入口 ≥32`, inRange(m.headerMore), m.headerMore ? `${m.headerMore.w}×${m.headerMore.h}` : '未找到')
       check(`@${width} 事件触发入口（N 人触发）≥32 高`, !!m.jump && m.jump.h >= 32 && m.jump.h <= 36,
         m.jump ? `${m.jump.w}×${m.jump.h}` : '未找到')
-      check(`@${width} 侧栏筛选 chip ≥32`, inRange(m.scope) || inRange(m.tab),
+      check(`@${width} 侧栏筛选 chip ≥32`, inRange(m.scope) && inRange(m.tab),
         `scope=${m.scope ? `${m.scope.w}×${m.scope.h}` : '-'} tab=${m.tab ? `${m.tab.w}×${m.tab.h}` : '-'}`)
       // 任务状态筛选（需要打开 inspector；窄窗先从 rail 撑开）
       const opened = await openPanel(page, '任务')
