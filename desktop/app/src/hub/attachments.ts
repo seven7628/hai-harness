@@ -113,6 +113,11 @@ function hasRef(text: string, token: string): boolean {
   return false
 }
 
+/** 把文件路径拼成 `@token`：空格转 `%20`，与主会话 Composer 的 displayPath 同口径。 */
+function fileRefToken(path: string): string {
+  return `@${path.replace(/ /g, '%20')}`
+}
+
 /**
  * 把文件引用拼进正文：每个 file 一行 `@<path>`，跳过重复路径与正文里已有的引用。
  *
@@ -127,7 +132,9 @@ export function withFileRefs(text: string, files?: HubAttachment[] | null): stri
     const path = (f.path ?? '').trim()
     if (!path || seen.has(path)) continue
     seen.add(path)
-    const token = `@${path}`
+    // `@` token 以空白为界：路径含空格必须 %20，否则模型只看到空格前那截
+    // （与主会话 Composer 的 displayPath 一致；agents.fileref 会解码回空格）。
+    const token = fileRefToken(path)
     if (hasRef(base, token)) continue
     refs.push(token)
   }

@@ -99,6 +99,8 @@ const file = (path, name = 'pricing.md', bytes = 2140) => ({ kind: 'file', name,
   eq(A.withFileRefs('第一行\n第二行', [file('/ws/a.md'), file('/ws/b.md')]), '第一行\n第二行\n@/ws/a.md\n@/ws/b.md',
     '保留原有换行 + 每个文件一行')
   eq(A.withFileRefs('看看这个\n@/ws/a.md', [file('/ws/a.md')]), '看看这个\n@/ws/a.md', '正文里已有同路径 → 不重复拼')
+  eq(A.withFileRefs('看看', [file('/ws/a b.md')]), '看看\n@/ws/a%20b.md', '路径含空格 → %20（@token 以空白为界）')
+  eq(A.withFileRefs('看看\n@/ws/a%20b.md', [file('/ws/a b.md')]), '看看\n@/ws/a%20b.md', '已拼过的 %20 引用不重复')
   eq(A.withFileRefs('看看', [file('/ws/a.md'), file('/ws/a.md')]), '看看\n@/ws/a.md', '同一路径传入两次 → 只拼一次')
   eq(A.withFileRefs('@/ws/a.md.bak', [file('/ws/a.md')]), '@/ws/a.md.bak\n@/ws/a.md', '前缀相同但 token 边界不同 → 仍然追加')
   eq(A.withFileRefs('看看', [img(PNG_A)]), '看看', '图片不进正文（走 attachments）')
