@@ -34,6 +34,55 @@ type FileStore struct {
 	// 0 值（无论哪个字段）不关闭——由 NewFileStore 填默认值；要关闭用 WithAutoCompact(0, 0)。
 	compactKeep      int
 	compactThreshold int64
+	// stateRowsSinceCompact 是「上次压缩以来追加的 state 行数」。
+	//
+	// 为什么需要它（2026-11-11 实测）：state 行是**每轮的全量上下文快照** → 体积
+	// 随轮次线性增长、总账 O(N²)。而自压缩原来只看**文件体积**（24MB）→
+	// 一个 16MB 的子智能体 journal（52 条 state 行 × 319KB）永远触发不了压缩，
+	// 13.4GB 的子智能体 journal 就这么攒下来了（实测 2258 个文件，单个 6–22MB）。
+	// 按**行数**触发才能真正把 O(N²) 掐掉。
+	stateRowsSinceCompact int
+	// keepHistory 为 true 时**不裁剪**压缩窗口之外的 history 行（默认 false = 裁）。
+	//
+	// 为什么默认裁（2026-11-11，CHECKPOINT_V3_DESIGN §9「P1-1」）：history 行
+	// 实测 86.3MB/会话（21,154 行），而：
+	//   · 恢复不用它（尾扫最后一条 state 行 = 压缩后形态）；
+	//   · 内容在 events.jsonl（唯一事实来源）里完整存在；
+	//   · 全仓库唯一的读者 firstUserTextFromFile 只读**第一行**取会话标题。
+	// 保留窗口 =「最后一个压缩点及其之后」——正是用户要的恢复语义。
+	keepHistory bool
+
+	// trimAllHistory 为 true 时，压缩会把**除首行外**的 history 行全丢
+	// （默认 false = 只丢压缩点之前的，见 P2a 的保留窗口设计）。
+	//
+	// **P5'（2026-11-11）**：桌面端的维护清扫用这个口径 —— 边界之后的
+	// history 行同样冗余（它们的消息就在最后一条 state 行里）。
+	// 实测清扫后最大的 40 个会话文件里 history 行占 **30%**（0.34GB）。
+	//
+	// 为什么默认不开启：P2a 的设计明确保留「最后一个压缩点及其之后的所有行」
+	// —— 那是**恢复窗口**的一部分，SDK 默认行为不动。
+	trimAllHistory bool
+
+	// historyTitleOnly 为 true 时**只写第一条** history 行（会话标题来源），
+	// 之后的 history 行一律不落盘（默认 false = 全写，保持 Store 契约）。
+	//
+	// **为什么默认不开启**（2026-11-11，P5'）：`Store.AppendHistory` 是公开
+	// 契约（「追加消息历史」），纯 SDK 用户（没有 events.jsonl 这个唯一事实
+	// 来源兜底）靠它留原始消息日志。零值必须是旧行为。
+	//
+	// **桌面端为什么可以开**：它有 events.jsonl（唯一事实来源）兜底 ——
+	// 完整消息在那里，而磁盘上的 history 行**没有任何读取方**：
+	//   · 恢复不用它（尾扫最后一条 state 行 = 压缩后形态）；
+	//   · FileStore.Load 本来就返回 History=nil（桌面运行时不需要）——
+	//     所以「磁盘上有、但读不到」是既有事实；
+	//   · 唯一读者 firstUserTextFromFile 只读**第一行**取会话标题。
+	//
+	// 实测：清扫后最大的 40 个会话文件里 history 行占 **30%**（0.34GB）。
+	historyTitleOnly bool
+
+	// historyWritten 记「这个会话文件已经有 history 行了」（按路径）。
+	// 只在首次 AppendHistory 时查一次文件，之后走内存缓存。
+	historyWritten sync.Map // path(string) → bool
 
 	// writeMu 串行化同一 FileStore 上的「追加」与「自压缩」：
 	// 自压缩是「重写 + rename」，若与并发追加交错，落在旧 inode 上的行会丢失
@@ -50,6 +99,48 @@ func WithAutoCompact(keep int, threshold int64) FileStoreOption {
 	return func(s *FileStore) {
 		s.compactKeep = keep
 		s.compactThreshold = threshold
+	}
+}
+
+// WithKeepHistory 配置是否保留「压缩窗口之外」的 history 行。
+//
+// 默认 false（裁剪）：恢复只用 state 行，完整消息在 events.jsonl 里，
+// history 行是冗余副本（实测 86.3MB/会话）。
+// 置 true 可完全回退到旧行为（文件只增不减，只裁 state 行）。
+func WithKeepHistory(keep bool) FileStoreOption {
+	return func(s *FileStore) {
+		s.keepHistory = keep
+	}
+}
+
+// WithTrimAllHistory 压缩时把**除首行外**的 history 行全丢
+// （默认只丢压缩点之前的 —— P2a 的保留窗口设计）。
+//
+// 桌面端的维护清扫用它（P5'，2026-11-11）：边界之后的 history 行同样冗余
+// （它们的消息就在最后一条 state 行里），实测占会话文件的 30%。
+//
+// 只在 keepHistory=false 时有意义（keepHistory=true 什么都不丢）。
+func WithTrimAllHistory() FileStoreOption {
+	return func(s *FileStore) {
+		s.trimAllHistory = true
+	}
+}
+
+// WithHistoryLogTitleOnly 只保留**第一条** history 行（会话标题来源），
+// 之后的 history 行不落盘。
+//
+// **默认关闭**（保持 Store 契约）：`AppendHistory` 是公开契约，纯 SDK 用户
+// 没有 events.jsonl 兜底，靠它留原始消息日志。
+//
+// 桌面端开启的理由（2026-11-11，P5'）：它有 events.jsonl（唯一事实来源），
+// 而磁盘上的 history 行**没有任何读取方**——恢复用 state 行，
+// `FileStore.Load` 本来就返回 History=nil，唯一读者 firstUserTextFromFile
+// 只读第一行取标题。
+//
+// 实测：清扫后最大的 40 个会话文件里 history 行占 **30%**（0.34GB）。
+func WithHistoryLogTitleOnly() FileStoreOption {
+	return func(s *FileStore) {
+		s.historyTitleOnly = true
 	}
 }
 
@@ -160,6 +251,24 @@ func tailLastState(f *os.File) (*State, error) {
 	return nil, nil
 }
 
+// AppendHistory 追加消息历史行（append-only 的全量消息日志）。
+//
+// **P5'（2026-11-11）**：开了 `WithHistoryLogTitleOnly()` 时**只写第一条** ——
+// 之后的 history 行一律不落盘（默认关闭：Store 契约要求全写）。
+//
+// 依据（桌面端开启的理由）：
+//
+//	· history 行的内容与 state 行**重复**（state 行存的是同一批消息的有效
+//	  上下文）—— 是一份纯冗余副本；
+//	· 恢复不用它（尾扫最后一条 state 行 = 压缩后形态）；
+//	· 完整消息在 events.jsonl（唯一事实来源）里完整存在；
+//	· 全仓库唯一的读者 firstUserTextFromFile 只读**第一行**取会话标题。
+//
+// 实测：清扫后最大的 40 个会话文件里 history 行占 **30%**（0.34GB）。
+//
+// 第一条必须写：会话标题的冷磁盘回退读的就是文件第一行。
+// 「已经有 history 行了吗」只查一次（读文件头找 `"type":"history"`），
+// 之后走内存缓存 —— 追加是每轮都发生的，不能每轮都扫文件。
 func (s *FileStore) AppendHistory(_ context.Context, sessionId string, msgs []core.Message) error {
 	if len(msgs) == 0 {
 		return nil
@@ -168,11 +277,50 @@ func (s *FileStore) AppendHistory(_ context.Context, sessionId string, msgs []co
 	if err != nil {
 		return err
 	}
+	if s.historyTitleOnly {
+		has, herr := s.hasHistoryRow(p)
+		if herr != nil {
+			return herr
+		}
+		if has {
+			return nil // 已有标题行 → 后续 history 行不落盘
+		}
+	}
 	line, err := json.Marshal(fileRecord{Type: "history", Messages: msgs})
 	if err != nil {
 		return err
 	}
+	if s.historyTitleOnly {
+		s.historyWritten.Store(p, true)
+	}
 	return s.appendLine(p, line)
+}
+
+// hasHistoryRow 判断会话文件里是否已经有 history 行（只查文件头）。
+//
+// 用「文件头里有没有 `"type":"history"`」而不是「第一行是不是 history 行」：
+// 前者对「首行写失败」之类的边界更稳；后者会误判成「没有」→ 又写一条。
+func (s *FileStore) hasHistoryRow(p string) (bool, error) {
+	if v, ok := s.historyWritten.Load(p); ok {
+		return v.(bool), nil
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.historyWritten.Store(p, false)
+			return false, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+	head := make([]byte, 64*1024)
+	n, rerr := f.Read(head)
+	if rerr != nil && !errors.Is(rerr, io.EOF) {
+		return false, rerr
+	}
+	has := bytes.Contains(head[:n], []byte(`"type":"history"`))
+	s.historyWritten.Store(p, has)
+	return has, nil
 }
 
 func (s *FileStore) SaveState(_ context.Context, sessionId string, state *State) error {
@@ -187,6 +335,7 @@ func (s *FileStore) SaveState(_ context.Context, sessionId string, state *State)
 	if err := s.appendLine(p, line); err != nil {
 		return err
 	}
+	s.stateRowsSinceCompact++
 	// 自压缩（只在 state 追加后检查：state 行是膨胀源）。
 	// 失败不影响本次保存——文件已追加成功，压缩只是空间治理；
 	// 原文件在重写失败时保持不变，下次 checkpoint 会再试。
@@ -321,6 +470,16 @@ func (s *FileStore) AcquireLock(_ context.Context, sessionId string) (func(), er
 func (s *FileStore) appendLine(p string, line []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	// 进程级按路径互斥：与 compactFile 的重写互斥。
+	//
+	// 为什么需要（2026-11-11）：compactFile 是「读 → 写临时文件 → rename」，
+	// 在它读完之后、rename 之前到达的追加会写进**旧 inode** → rename 之后
+	// 那个 inode 已被删除 → **追加丢失**。
+	// 维护清扫（sweep.go）会在后台对**正在使用的**会话文件做压缩 → 窗口更大。
+	// 有了这把锁：追加要么在压缩前完成（被包含进去），要么在 rename 后重开新
+	// inode 写入 → 一条都不丢。
+	unlock := lockRecord(p)
+	defer unlock()
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // 会话历史含敏感内容，0600
 	if err != nil {
 		return err

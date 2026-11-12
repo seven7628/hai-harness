@@ -65,16 +65,56 @@ func openMappedBlocks(path string) (*mappedBlocks, error) {
 }
 
 // span 返回块 id 的只读窗口与期望摘要。
+//
+// 分片块（kind 带 0x80 标志，见 block_frags.go）在文件里**不连续**：
+// 索引项指向「片段目录」，真正的内容散在若干片段里。
+// 这里按目录把片段拼成一块**新缓冲**（只有分片块失去零拷贝，
+// 其余块仍是 mmap 窗口）。实测分片块只占全部块的 ~1.7%（650/37520），
+// 换来的是写放大从 150–275× 降到个位数 —— 值得。
 func (m *mappedBlocks) span(id string) ([]byte, [8]byte, bool) {
 	ref, ok := m.index[id]
 	if !ok {
 		return nil, [8]byte{}, false
 	}
+	if isFragmented(ref.kind) {
+		return m.fragSpan(id, ref)
+	}
 	end := ref.off + int64(ref.n)
 	if ref.off < 0 || end > int64(len(m.data)) {
 		return nil, [8]byte{}, false
 	}
-	return m.data[ref.off:end], ref.hash, true
+	raw := m.data[ref.off:end]
+	if isCompressed(ref.kind) {
+		// 压缩块：落盘是压缩字节 → 解压回逻辑内容（**失去零拷贝** ——
+		// 只有压缩块如此，见 block_compress.go）。
+		out, derr := decompressBlock(raw)
+		if derr != nil {
+			return nil, [8]byte{}, false
+		}
+		raw = out
+	}
+	return raw, ref.hash, true
+}
+
+// fragSpan 拼接分片块的内容。
+func (m *mappedBlocks) fragSpan(id string, ref blockRef) ([]byte, [8]byte, bool) {
+	end := ref.off + int64(ref.n)
+	if ref.off < 0 || end > int64(len(m.data)) {
+		return nil, [8]byte{}, false
+	}
+	d, ok := parseFragDir(m.data[ref.off:end])
+	if !ok {
+		return nil, [8]byte{}, false
+	}
+	full := make([]byte, 0, d.total)
+	for _, it := range d.items {
+		e := it.off + int64(it.n)
+		if it.off < 0 || e > int64(len(m.data)) {
+			return nil, [8]byte{}, false
+		}
+		full = append(full, m.data[it.off:e]...)
+	}
+	return full, d.logical, true
 }
 
 func (m *mappedBlocks) close() error {

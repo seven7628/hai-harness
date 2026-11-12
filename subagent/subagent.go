@@ -243,6 +243,9 @@ func (t *Tool) buildOptions(tc *events.ToolContext, childDepth int, name string)
 	opts := &agents.RunOptions{Depth: childDepth, Name: name}
 	if tc != nil {
 		opts.ParentRunId = tc.RunId // 事件关联：子运行归属发起当前调用的运行
+		// 发起方**任务** id：子→孙派发时非空。随 AgentStart 下发 → 卡片自带归属，
+		// 不再依赖 task_started 占位卡（它会被 agent_start 移除、也可能被窗口裁掉）。
+		opts.ParentTaskId = tc.TaskId
 		// 审批继承：子运行内的工具同样需要人工确认；Spec.Mode 非 nil 时按
 		// 模式包装（与 Session 组装同一入口 agents.WrapApprover）
 		opts.Approver = agents.WrapApprover(tc.Approver, t.spec.Mode)

@@ -357,6 +357,8 @@ func HasCardKind(k uint8) bool { return hasCardKind(k) }
 
 // hasCardKind 报告该编码是否属于「必须随首屏带回的卡片类块」。
 func hasCardKind(k uint8) bool {
+	// 分片块的 kind 字节带 0x80 标志（见 block_frags.go）→ 先取真实类型。
+	k = realKind(k)
 	switch k {
 	case blockKindCodeAgent, blockKindCodeAsyncTask, blockKindCodeTaskResult, blockKindCodeTaskDelivery:
 		return true

@@ -95,7 +95,9 @@ function eventRows(items: AgentItem[] | undefined) {
   })
 }
 
-export function Lane({ agents }: { agents: AgentMsg[] }) {
+/* onOpen：把这一行切成「它自己的一页」（AgentSessionView）。缺省不画入口 ——
+   没有 taskId/runId 可指（旧数据）时点进去只会得到一张空页。 */
+export function Lane({ agents, onOpen }: { agents: AgentMsg[]; onOpen?: (b: AgentMsg) => void }) {
   const [open, setOpen] = useState<Record<string, boolean>>({})
   // 「同时派发」= 起始时刻彼此相差不到 1.2s。设计强调两个同时开跑的子 agent 不能被
   // 读成一前一后，而时间轴要么造假偏移、要么加一条刻度 —— 用一句话说清最省。
@@ -171,6 +173,13 @@ export function Lane({ agents }: { agents: AgentMsg[] }) {
                     <div className="la-foot">
                       showing the last {rows.length} of {(b.items || []).length} calls
                     </div>
+                  ) : null}
+                  {/* 这一行的子智能体有自己的一页（转录/用量/它派发的孙任务）。
+                      孙任务卡只在那一页里画（见 lib/nestedCards），所以这个入口不能只放在左栏树。 */}
+                  {onOpen ? (
+                    <button className="la-goto" type="button" onClick={() => onOpen(b)}>
+                      {i18nT('agentTree.openAsSession')}
+                    </button>
                   ) : null}
                 </div>
               </div>

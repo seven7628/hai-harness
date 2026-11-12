@@ -4,6 +4,7 @@ import type { AgentFocus, MsgBlock } from '../store/useAppStore'
 import { agentTreeFromView, pathOfNode } from '../lib/agentTree'
 import type { AgentTreeNode } from '../lib/agentTree'
 import { agentItemsToBlocks } from '../lib/agentSession'
+import { childrenOf, placeChildCards } from '../lib/nestedCards'
 import { TaskErrorInline } from './NarrativeBlocks'
 import Narrative from './Narrative'
 import type { NarrativeSource } from './Narrative'
@@ -114,6 +115,11 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   }, [cardId, cardTaskId, needFirstScreen, loadingFirst, loadAgentHistory])
 
   const node = chain[chain.length - 1]
+  /* 它派发的孙任务：主转录只画本层（见 lib/nestedCards），所以那些卡**在这一页**出现。
+     复用 agent 块（runtime 皮肤 = 车道行，其余皮肤 = 任务卡）—— 状态/停止/展开/重试
+     全走同一套渲染，不为「嵌套」再造第二种卡片形态。
+     落点由 placeChildCards 决定：派发工具行 → 时间锚 → 页尾（三道兜底，见那边的注释）。 */
+  const nestedCards = useMemo(() => childrenOf(allBlocks, node?.taskId), [allBlocks, node])
   // 数据源：agent 卡的活动记录 → 会话块。后台工具任务没有 items，就把它那一个工具块
   // 直接交给 Narrative（走主对话同一套 ToolRow/ToolGroup 渲染，而不是右栏那套展开体）。
   const mergedItems = useMemo(() => cards.flatMap((c) => c.items), [cards])
@@ -137,14 +143,18 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     // 负责「Task … completed」通知。
     //
     // id 用远离 agentItemsToBlocks 的负数区间（那边从 -1 递减），避免 React key 撞车。
+    // 孙任务卡用另一个更远的区间（-2_000_000 起递减）：原块的 id 是会话级的，两处同时渲染
+    // 会撞 key（表现是「展开了这个子任务，另一个跟着展开」）。
+    let nestedId = -2_000_000
+    const withChildren = placeChildCards(blocks, nestedCards, () => nestedId--)
     if (card.artifacts && card.artifacts.length > 0) {
-      blocks.push({
+      withChildren.push({
         kind: 'artifacts', id: -1_000_000, items: card.artifacts,
         ...(card.artifactsTruncated ? { truncated: true } : {}),
       })
     }
-    return blocks
-  }, [card, cards, toolBlock])
+    return withChildren
+  }, [card, cards, toolBlock, nestedCards])
 
   if (!node) return <div className="empty">{t('agentTree.gone')}</div>
   // 时长口径收在一处（lib/agentDuration.ts）：卡片结算 → 节点结算 → 该 run 末条 item 的整轮耗时；

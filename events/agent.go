@@ -23,6 +23,13 @@ type AgentStart struct {
 	// 的到达顺序。空 = 非后台任务 / 旧日志。
 	TaskId string `json:"task_id,omitempty"`
 
+	// ParentTaskId 发起方**后台任务** id（子→孙派发时 = 那个子智能体的 task_id；空 = 主
+	// Agent 直派 / 同步子运行）。与 TaskStarted.ParentTaskId 同源，但**必须随运行事件走**：
+	// 卡片是 agent_start 建的（占位卡会被移除），锚只挂在占位上时一裁窗口就丢归属 ——
+	// 2026-11 的「孙任务卡长在主会话转录里」正是这条（前端只能从占位继承，Go 侧
+	// view_reducer 早就有继承，两边不对称）。
+	ParentTaskId string `json:"parent_task_id,omitempty"`
+
 	// ParentRunId 发起方运行的 RunId（子 agent 场景）；空 = 根运行。
 	// Depth 运行深度（根 = 0）：父子事件流可沿此重建调用树。
 	ParentRunId string `json:"parent_run_id,omitempty"`

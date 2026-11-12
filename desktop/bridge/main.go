@@ -33,6 +33,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -512,6 +513,17 @@ func isStreamingChunkType(t events.EventType) bool {
 // 主用 agent_end.content）。落盘只保留事件**时间线**（run_id + timestamp + 工具起止
 // + usage/cost），既省 78% 体积，又保住历史 trace 的唯一数据源。
 func (bs *bridgeSession) logEventLine(line []byte) {
+	// 落盘的那一份去掉 agent_end 的 tool_calls（2026-11-11）：
+	//
+	// 子智能体的完整流水在**它自己的 journal** 里（agents/<taskId>.jsonl，
+	// agent_history 命令按页取），事件流这一份是纯重复 —— 实测占事件日志 10.2%
+	// （一个会话 114.5MB / 1585 条）。全仓库无消费方：前端只在 mock 里出现
+	// tool_calls，reducer 不看它，后端读的是 journal 的 state.messages。
+	//
+	// stdout 那一份**保留**（实时流不变）。
+	if bytes.Contains(line, []byte(`"event_type":"agent_end"`)) {
+		line = stripTopLevelField(line, "tool_calls")
+	}
 	dir := bs.eventsDir
 	if bs.cronEvDir != "" {
 		dir = bs.cronEvDir
@@ -1804,7 +1816,20 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	isNewSession := os.IsNotExist(statErr)
 
 	storeStart := time.Now()
-	store, err := session.NewFileStore(storeDir)
+	// keep_history=false（默认）→ 会话 jsonl 只保留「最后一个压缩点及其之后」
+	// + 首行（标题来源）。恢复只用最后一条 state 行；完整消息在 events.jsonl 里。
+	// settings.checkpoint.keep_history=true 可完全回退。
+	//
+	// P5'：默认**连 history 行都不写**（只留第一条给标题）——
+	// 桌面端有 events.jsonl 这个唯一事实来源兜底，而磁盘上的 history 行
+	// 没有任何读取方（实测占会话文件的 30%）。
+	// keep_history=true 同时回退这一项（写全部 history 行 + 不裁剪）。
+	keepHistory := loadCheckpointSettings().keepHistory()
+	storeOpts := []session.FileStoreOption{session.WithKeepHistory(keepHistory)}
+	if !keepHistory {
+		storeOpts = append(storeOpts, session.WithHistoryLogTitleOnly())
+	}
+	store, err := session.NewFileStore(storeDir, storeOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("file store: %w", err)
 	}
@@ -1859,9 +1884,28 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 						reducer.NormalizeForRestore() // 重启后 running → 终态（done/abandoned）
 					}
 				}
-				// checkpoint-first SDK 恢复：record.sdk_state 作为权威恢复源
-				//（含 pending 积压；session.NewSession 的 WithRecoveryState 分支使用）
+				// SDK 恢复源（P3-1）：**会话 jsonl 的最后一条 state 行**才是权威。
+				//
+				// record 的 sdk_state 从此只带标量（messages 不再进 record）——
+				// 那份副本在 447 个真实会话里有 19 个比 jsonl 旧（丢掉最新轮次）
+				// 或停在压缩点之前（绕开压缩、把未压缩上下文灌回模型）。
+				// jsonl 的 state 行则由 SDK 在**每个轮次检查点**落盘
+				// （session.checkpoint → persist），压缩后写的就是压缩后的上下文。
+				//
+				// 读法是尾扫（tailLastState）：只读文件尾，代价与 state 行大小
+				// 成正比（~16MB），与会话总长无关 —— 比读整条 record 更省。
+				//
+				// 没有 state 行（新会话 / 旧数据）→ 用 record 的标量兜底。
 				stateCopy := rec.SDKState
+				if data, lerr := store.Load(context.Background(), id); lerr == nil && data != nil && data.State != nil {
+					st := data.State
+					stateCopy.Messages = st.Messages
+					stateCopy.Usage = st.Usage
+					stateCopy.Cost = st.Cost
+					stateCopy.Pending = st.Pending
+					stateCopy.Todo = st.Todo
+					stateCopy.UpdatedAt = st.UpdatedAt
+				}
 				recoveryState = &stateCopy
 			} else if !errors.Is(lerr, session.ErrRecordNotFound) {
 				// record 存在但读不出来：**不能**当作空会话处理（那会让打开会话回一份
@@ -6586,6 +6630,15 @@ func serve() error {
 		hub:         session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
 		memPrefs:    newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
 	}
+	// 会话文件维护清扫（后台）：把「已结束、不会再被写入」的会话文件里
+	// 攒下的 O(N²) 一次性收掉（实测子智能体 journal 13.4GB / 主会话 jsonl 6.8GB）。
+	//
+	// 为什么需要：自压缩是**被动**的（只在 SaveState 时检查）→ 已经死掉的文件
+	// 永远等不到压缩。清扫复用同一套原子压缩逻辑，内容不变、恢复逐字节一致。
+	// 限速执行，不与正常使用抢 IO；settings.checkpoint.sweep_journals=false 可关。
+	if loadCheckpointSettings().sweepJournals() {
+		go sweepSessionFilesInBackground()
+	}
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
 	startupLog("A2.5.browserEngine("+string(m.getBrowserEngine())+")", serveStart)
@@ -6931,3 +6984,60 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 		startupLog("A7.evict: "+victim.id, now)
 	}
 }
+
+// sweepSessionFilesInBackground 后台清扫会话文件（限速）。
+//
+// 参数与判据见 session.SweepSessionFiles 的注释。默认阈值 4MB：
+// 实测 2258 个子智能体 journal 里 997 个 > 4MB（合计 13.4GB），压完约 1.3GB。
+//
+// 顺带做 **P3-1 的 record 清扫**（record 瘦身为 manifest + 标量 + 块引用）：
+// 实测全量 447 个会话的 record + .bak 共 4.0GB，其中 1.22GB 是 SDK 上下文的
+// 冗余副本、2.59GB 是内嵌块（formal/.bak 各一份）—— 搬进 sidecar 后只存一份。
+// 实测单个工作区 710MB → 75.5MB（省 89%）。
+func sweepSessionFilesInBackground() {
+	root := filepath.Join(appDataDir(), "sessions")
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintln(os.Stderr, "sweep: panic:", r)
+		}
+	}()
+	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sweep: 失败:", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩）%.1fMB → %.1fMB，用时 %s\n",
+			res.Files, res.Compacted, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
+	}
+	// sidecar 压缩清扫（P4）：存量 sidecar 里未压缩的块就地压一遍。
+	// 实测 6 个最大的 sidecar：2256MB → 395MB（省 82.5%）。
+	// 只动 sidecar、不碰 record（摘要算逻辑内容 ⇒ Sum 不变）。
+	cres, cerr := session.SweepBlockStores(root, sweepPause)
+	if cerr != nil {
+		fmt.Fprintln(os.Stderr, "sweep blocks: 失败:", cerr)
+	} else if cres.Rewritten > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
+			cres.Files, cres.Rewritten, float64(cres.Before)/1e6, float64(cres.After)/1e6,
+			cres.Blocks, cres.BlocksTotal, cres.Elapsed.Round(time.Millisecond))
+	}
+	// record 清扫（P3-1）：与上面同一把限速思路，独立失败互不影响。
+	rres, rerr := session.SweepRecordFiles(root, sweepPause)
+	if rerr != nil {
+		fmt.Fprintln(os.Stderr, "sweep record: 失败:", rerr)
+		return
+	}
+	if rres.Stripped > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫 record: %d 个（%d 个搬进 sidecar）%.1fMB → %.1fMB，用时 %s\n",
+			rres.Stripped, rres.Migrated, float64(rres.Before)/1e6, float64(rres.After)/1e6, rres.Elapsed.Round(time.Millisecond))
+	}
+}
+
+// 清扫参数。
+const (
+	// sweepMinFileBytes 是「值得压缩」的体积下限（4MB）。
+	sweepMinFileBytes = 4 << 20
+	// sweepPause 是每个文件之间的间隔（限速：避免 12GB 的重写把 IO 打满）。
+	sweepPause = 100 * time.Millisecond
+)

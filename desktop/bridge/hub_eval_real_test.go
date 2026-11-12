@@ -1,0 +1,1642 @@
+package main
+
+// P5-10：真实 Provider 的 Hub 端到端评测（7 个场景）。
+//
+// 现有 hub_eval*_test.go 全部用确定性 fake provider（不碰网络），所以「单智能体 DM /
+// 工具调用 / 审批 / 群 @all / 群 @指定 / @A→@B handoff / 自主开项目会话」都**没有真实
+// Provider 的端到端证据**。本文件补这个缺口：默认 skip，只有显式设 HAI_EVAL_HUB_REAL=1
+// 才跑（会产生真实付费调用）。
+//
+// 门控与隔离：
+//   - HAI_EVAL_HUB_REAL=1 才跑，否则 t.Skip；
+//   - provider/model 默认 opencode / deepseek-v4.1-flash，可由 HAI_EVAL_HUB_PROVIDER /
+//     HAI_EVAL_HUB_MODEL 覆盖；
+//   - 从**真实** ~/.go-code/settings.json 读出该 provider 的配置块（base_url/api_key/
+//     models/prices…），复制到 testManager 建的临时 HOME 的 settings.json 后再
+//     m.provCfg.loadSettings()。真实 HOME 只读不写；
+//   - 缺少 api_key 时可用 HAI_EVAL_HUB_API_KEY 覆盖，否则 skip 并说明；
+//   - 临时 HOME 里的 settings.json 在清理阶段删除（key 不落真实 HOME，也不进报告）；
+//   - 报告/事件里的 key 一律替换为 [REDACTED]；报告不含 base_url。
+//
+// 运行：
+//
+//	HAI_EVAL_HUB_REAL=1 HAI_EVAL_HUB_PROVIDER=opencode HAI_EVAL_HUB_MODEL=deepseek-v4.1-flash \
+//	  go test ./desktop/bridge -run TestHubRealE2E -count=1 -v -timeout 20m
+//
+// 报告默认 /tmp/hub-real-e2e/report.json，原始事件写同目录 events.jsonl。
+// 失败也写报告（defer），且每个失败场景带最近 5 条消息 / 最近 tool/approval/LLM 事件摘要。
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/seven7628/hai-harness/agenthub"
+)
+
+// 真实评测的协议标识（报告里自证用；schema 变更时一起改）。
+const hubRealProtocol = "hub-real-e2e/v1"
+
+// 等待真实模型/run 的上限：群 @all 要等两个成员各跑一轮，留足余量。
+const hubRealTimeout = 180 * time.Second
+
+// hubRealDefaultProvider / hubRealDefaultModel 是任务指定的真实 provider/model。
+const (
+	hubRealDefaultProvider = "opencode"
+	hubRealDefaultModel    = "deepseek-v4.1-flash"
+	hubRealDefaultReport   = "/tmp/hub-real-e2e/report.json"
+)
+
+// —— 报告 schema ——
+
+type hubRealReport struct {
+	Protocol   string                   `json:"protocol"`
+	StartedAt  time.Time                `json:"started_at"`
+	FinishedAt time.Time                `json:"finished_at"`
+	DurationMS int64                    `json:"duration_ms"`
+	Provider   string                   `json:"provider"`
+	Model      string                   `json:"model"`
+	Gate       string                   `json:"gate"`
+	Status     string                   `json:"status"` // pass | fail | skipped
+	SkipReason string                   `json:"skip_reason,omitempty"`
+	ReportPath string                   `json:"report_path,omitempty"`
+	EventsPath string                   `json:"events_path,omitempty"`
+	Scenarios  []*hubRealScenarioReport `json:"scenarios"`
+	Totals     hubRealTotals            `json:"totals"`
+	Notes      []string                 `json:"notes,omitempty"`
+}
+
+type hubRealTotals struct {
+	Scenarios    int     `json:"scenarios"`
+	Passed       int     `json:"passed"`
+	Failed       int     `json:"failed"`
+	Skipped      int     `json:"skipped"`
+	LLMCalls     int     `json:"llm_calls"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+}
+
+type hubRealScenarioReport struct {
+	Name         string            `json:"name"`
+	Status       string            `json:"status"` // pass | fail | skip
+	StartedAt    time.Time         `json:"started_at"`
+	DurationMS   int64             `json:"duration_ms"`
+	Prompt       string            `json:"prompt,omitempty"`
+	FinalText    string            `json:"final_text,omitempty"`
+	AgentReplies []string          `json:"agent_replies,omitempty"`
+	Messages     []hubRealMessage  `json:"messages,omitempty"`
+	ToolCalls    []hubRealToolCall `json:"tool_calls,omitempty"`
+	Approvals    []hubRealApproval `json:"approvals,omitempty"`
+	Handoffs     []hubRealHandoff  `json:"handoffs,omitempty"`
+	LLM          hubRealLLM        `json:"llm"`
+	LLMErrors    []string          `json:"llm_errors,omitempty"`
+	Project      *hubRealProject   `json:"project,omitempty"`
+	Errors       []string          `json:"errors,omitempty"`
+	Notes        []string          `json:"notes,omitempty"`
+	Diagnostics  []string          `json:"diagnostics,omitempty"`
+}
+
+type hubRealLLM struct {
+	Calls         int      `json:"calls"`
+	InputTokens   int64    `json:"input_tokens"`
+	OutputTokens  int64    `json:"output_tokens"`
+	CacheRead     int64    `json:"cache_read,omitempty"`
+	CacheWrite    int64    `json:"cache_write,omitempty"`
+	Reasoning     int64    `json:"reasoning,omitempty"`
+	CostUSD       float64  `json:"cost_usd"`
+	PricedCalls   int      `json:"priced_calls"`
+	UnpricedCalls int      `json:"unpriced_calls"`
+	Models        []string `json:"models,omitempty"`
+}
+
+type hubRealMessage struct {
+	Seq     int64  `json:"seq"`
+	Sender  string `json:"sender"`
+	AgentID string `json:"agent_id,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	RoundID string `json:"round_id,omitempty"`
+	Text    string `json:"text,omitempty"`
+}
+
+type hubRealToolCall struct {
+	Name       string `json:"name"`
+	Arguments  string `json:"arguments,omitempty"`
+	Result     string `json:"result,omitempty"`
+	IsError    bool   `json:"is_error"`
+	SessionID  string `json:"session_id,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+type hubRealApproval struct {
+	ToolCallID string `json:"tool_call_id"`
+	Name       string `json:"name"`
+	Arguments  string `json:"arguments,omitempty"`
+	Decision   string `json:"decision,omitempty"` // approved | rejected | (空 = 没决策)
+	SessionID  string `json:"session_id,omitempty"`
+}
+
+type hubRealHandoff struct {
+	ID          string `json:"id"`
+	GroupID     string `json:"group_id"`
+	FromAgentID string `json:"from_agent_id"`
+	ToAgentID   string `json:"to_agent_id"`
+	Instruction string `json:"instruction,omitempty"`
+	Status      string `json:"status"`
+	MessageSeq  int64  `json:"message_seq,omitempty"`
+}
+
+// hubRealProject 场景 7 的独立证据：workspace_create / session_create / session_send
+// 的参数与结果，以及项目会话自己的 LLM 用量。
+type hubRealProject struct {
+	Root            string           `json:"root"`
+	RequestedName   string           `json:"requested_name"`
+	WorkspacePath   string           `json:"workspace_path,omitempty"`
+	SessionID       string           `json:"session_id,omitempty"`
+	TaskID          string           `json:"task_id,omitempty"`
+	TaskStatus      string           `json:"task_status,omitempty"`
+	Accepted        bool             `json:"accepted"`
+	Queued          bool             `json:"queued"`
+	WorkspaceCreate *hubRealToolCall `json:"workspace_create,omitempty"`
+	WorkspaceList   *hubRealToolCall `json:"workspace_list,omitempty"`
+	SessionCreate   *hubRealToolCall `json:"session_create,omitempty"`
+	SessionList     *hubRealToolCall `json:"session_list,omitempty"`
+	SessionSend     *hubRealToolCall `json:"session_send,omitempty"`
+	SessionLLM      hubRealLLM       `json:"session_llm"`
+}
+
+// —— 入口 ——
+
+// TestHubRealE2E 真实 Provider 的 Hub 端到端评测（7 场景）。
+//
+// 默认 skip：这是会产生真实付费调用的 gated 测试，只允许显式开启。
+func TestHubRealE2E(t *testing.T) {
+	if os.Getenv("HAI_EVAL_HUB_REAL") != "1" {
+		t.Skip("真实 Provider Hub E2E：默认 skip。要跑请设 HAI_EVAL_HUB_REAL=1（会产生真实付费调用），" +
+			"provider/model 用 HAI_EVAL_HUB_PROVIDER / HAI_EVAL_HUB_MODEL 覆盖")
+	}
+	providerName := hubRealEnvOr("HAI_EVAL_HUB_PROVIDER", hubRealDefaultProvider)
+	model := hubRealEnvOr("HAI_EVAL_HUB_MODEL", hubRealDefaultModel)
+	reportPath := hubRealEnvOr("HAI_EVAL_HUB_REPORT", hubRealDefaultReport)
+
+	rep := &hubRealReport{
+		Protocol:  hubRealProtocol,
+		StartedAt: time.Now().UTC(),
+		Provider:  providerName,
+		Model:     model,
+		Gate:      "HAI_EVAL_HUB_REAL=1",
+		Status:    "fail", // 默认 fail：任何提前返回都不能写成假的 pass
+		Notes: []string{
+			"真实 provider 端到端评测：仅在本测试的 gated 路径里发真实请求。",
+			"报告与事件中已把 api_key 替换为 [REDACTED]；不含 base_url。",
+		},
+	}
+	var buf *syncBuf
+	var redactKey string
+	// 失败/跳过也要留下报告：defer 先于 testManager 的 cleanup 执行，事件流仍在。
+	defer func() {
+		hubRealWriteReport(t, rep, reportPath, buf, redactKey)
+	}()
+
+	cfg, skipReason := hubRealResolveProvider(t, providerName, model)
+	if cfg != nil {
+		redactKey = cfg.key // 报告脱敏用；key 本身绝不进报告
+	}
+	if skipReason != "" {
+		rep.Status = "skipped"
+		rep.SkipReason = skipReason
+		rep.FinishedAt = time.Now().UTC()
+		t.Skip(skipReason)
+	}
+	// 读真实 settings 里的价表会写全局 userPriceTable：快照并在 cleanup 还原，
+	// 否则同包其它按内置价断言的测试会顺序性失败（memory_baseline_test.go 同款隔离）。
+	isolateUserPrices(t)
+
+	m, b := testManager(t) // HOME/USERPROFILE 指向临时目录，之后所有读写都在隔离环境里
+	buf = b
+	hubRealInstallSettings(t, cfg)
+	m.provCfg.loadSettings()
+	if err := m.provCfg.setActive(providerName); err != nil {
+		rep.Status = "fail"
+		rep.SkipReason = "setActive: " + err.Error()
+		t.Fatalf("设 active provider 失败: %v", err)
+	}
+	// 场景 7 的 session_create 走「全局 active provider/model」：必须显式钉住，
+	// 否则项目会话会用默认模型而不是本次评测的 model。
+	m.mu.Lock()
+	m.lastModel = model
+	m.mu.Unlock()
+	if got := m.provCfg.providerName(); got != providerName {
+		t.Fatalf("active provider = %q, want %q", got, providerName)
+	}
+	if got := m.provCfg.keyLocked(providerName); strings.TrimSpace(got) == "" {
+		rep.Status = "skipped"
+		rep.SkipReason = "loadSettings 后 key 仍为空"
+		t.Skip(rep.SkipReason)
+	}
+	// Hub 派发（workspace_create/register/session_send）需要工作区登记表。
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+
+	e := &hubRealEval{t: t, m: m, buf: buf, cfg: cfg, rep: rep}
+	t.Logf("[hub-real] provider=%s model=%s report=%s", providerName, model, reportPath)
+
+	e.run("1_dm", "请只回复：HAI_DM_OK", (*hubRealScenario).scenarioDM)
+	e.run("2_tool_auto", "调用 bash 工具一次，command 必须是 `printf HAI_TOOL_OK`，然后回复工具输出。", (*hubRealScenario).scenarioToolAuto)
+	e.run("3_approval_hitl", "调用 bash 工具一次，command 必须是 `printf HAI_APPROVAL_OK`，然后回复工具输出。", (*hubRealScenario).scenarioApprovalHITL)
+	e.run("4_group_mention_all", "@all 每人只回复自己的名字 + HAI_ALL_OK", (*hubRealScenario).scenarioGroupMentionAll)
+	e.run("5_group_mention_one", "@RealOneB 只回复 HAI_ONE_OK", (*hubRealScenario).scenarioGroupMentionOne)
+	e.run("6_handoff", "@RealHandA 调用 handoff 工具，把任务交给 RealHandB，instruction 写：只回复 HANDOFF_OK。不要自己完成。", (*hubRealScenario).scenarioHandoff)
+	e.run("7_project_session", "请依次调用 workspace_create 创建项目，再调用 session_create 创建一个会话，然后调用 session_send 给该会话派任务：只回复 HAI_PROJECT_SESSION_OK。最后把 workspace 路径、session_id、task_id 回给我。", (*hubRealScenario).scenarioProjectSession)
+
+	// 场景全部跑完：状态由场景结果 + 顶层失败共同决定（write 里兜底）。
+	rep.FinishedAt = time.Now().UTC()
+	rep.Status = "pass"
+	for _, sc := range rep.Scenarios {
+		if sc.Status == "fail" {
+			rep.Status = "fail"
+			break
+		}
+	}
+	if t.Failed() {
+		rep.Status = "fail"
+	}
+}
+
+func hubRealEnvOr(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
+}
+
+// —— 真实 provider 配置：只读真实 HOME，写入临时 HOME ——
+
+type hubRealProviderCfg struct {
+	name  string
+	model string
+	key   string
+	block map[string]any
+}
+
+// hubRealResolveProvider 在 testManager 改 HOME **之前**读真实 settings.json 的
+// provider 配置块。返回 skipReason 时调用方 skip（并写进报告），不制造假失败。
+func hubRealResolveProvider(t *testing.T, name, model string) (*hubRealProviderCfg, string) {
+	t.Helper()
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		return nil, "无法解析真实 HOME: " + err.Error()
+	}
+	settingsPath := filepath.Join(realHome, ".go-code", "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return nil, fmt.Sprintf("读真实 settings.json 失败（%s）: %v", settingsPath, err)
+	}
+	var doc struct {
+		Provider map[string]json.RawMessage `json:"provider"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, "真实 settings.json 不是合法 JSON: " + err.Error()
+	}
+	rawBlock, ok := doc.Provider[name]
+	if !ok || len(rawBlock) == 0 {
+		return nil, fmt.Sprintf("真实 settings.json 里没有 provider %q 配置（可用 HAI_EVAL_HUB_PROVIDER 覆盖）", name)
+	}
+	var block map[string]any
+	if err := json.Unmarshal(rawBlock, &block); err != nil {
+		return nil, fmt.Sprintf("provider %q 配置块不可解析: %v", name, err)
+	}
+	if deleted, _ := block["deleted"].(bool); deleted {
+		return nil, fmt.Sprintf("provider %q 在真实 settings.json 里是已删除状态", name)
+	}
+	if base, _ := block["base_url"].(string); strings.TrimSpace(base) == "" {
+		return nil, fmt.Sprintf("provider %q 没有 base_url（settings.json 未配置）", name)
+	}
+	key, _ := block["api_key"].(string)
+	key = strings.TrimSpace(key)
+	if env := strings.TrimSpace(os.Getenv("HAI_EVAL_HUB_API_KEY")); env != "" {
+		key = env // 显式覆盖优先（key 可能已经迁到 safeStorage/keys.json）
+	}
+	if key == "" {
+		return nil, fmt.Sprintf("provider %q 没有可用 api_key（settings.json 无 api_key 且 HAI_EVAL_HUB_API_KEY 未设置）", name)
+	}
+	return &hubRealProviderCfg{name: name, model: model, key: key, block: block}, ""
+}
+
+// hubRealInstallSettings 把选中的 provider 配置块（内含 key）写进**临时 HOME** 的
+// settings.json，再让调用方 loadSettings。清理阶段删除该文件（key 不在盘上过夜）。
+func hubRealInstallSettings(t *testing.T, cfg *hubRealProviderCfg) {
+	t.Helper()
+	block := map[string]any{}
+	for k, v := range cfg.block {
+		block[k] = v
+	}
+	block["api_key"] = cfg.key // 真实 settings 可能已把 key 迁走；统一写回这一份副本
+	doc := map[string]any{
+		"provider": map[string]any{
+			"active": cfg.name,
+			cfg.name: block,
+		},
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatalf("构造临时 settings.json 失败: %v", err)
+	}
+	path := homeCfgPath("settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("建临时 HOME/.go-code 失败: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("写临时 settings.json 失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(path)
+		_ = os.RemoveAll(filepath.Dir(path))
+	})
+	t.Logf("[hub-real] 已把 provider %q 配置复制到临时 HOME（key 不打印、不落真实 HOME）", cfg.name)
+}
+
+// —— 评测驱动 ——
+
+type hubRealEval struct {
+	t     *testing.T
+	m     *manager
+	buf   *syncBuf
+	cfg   *hubRealProviderCfg
+	rep   *hubRealReport
+	cmdID int
+}
+
+func (e *hubRealEval) nextID() int {
+	e.cmdID++
+	return e.cmdID
+}
+
+func (e *hubRealEval) run(name, prompt string, fn func(*hubRealScenario)) {
+	e.t.Run(name, func(t *testing.T) {
+		sc := &hubRealScenario{
+			t:         t,
+			e:         e,
+			name:      name,
+			prompt:    prompt,
+			start:     e.buf.Len(),
+			started:   time.Now(),
+			decisions: map[string]string{},
+		}
+		sc.rep = &hubRealScenarioReport{
+			Name:      name,
+			Status:    "fail", // 默认 fail：只有函数正常返回才改成 pass
+			StartedAt: sc.started,
+			Prompt:    prompt,
+		}
+		defer func() {
+			sc.sync()
+			sc.rep.DurationMS = time.Since(sc.started).Milliseconds()
+			switch {
+			case t.Skipped():
+				sc.rep.Status = "skip"
+			case t.Failed():
+				sc.rep.Status = "fail"
+			default:
+				sc.rep.Status = "pass"
+			}
+			e.rep.Scenarios = append(e.rep.Scenarios, sc.rep)
+			t.Logf("[hub-real] %s status=%s duration=%dms llm_calls=%d tools=%d approvals=%d",
+				name, sc.rep.Status, sc.rep.DurationMS, sc.rep.LLM.Calls, len(sc.rep.ToolCalls), len(sc.rep.Approvals))
+		}()
+		fn(sc)
+	})
+}
+
+// hubRealScenario 收集单个场景的事件切片、报告与失败诊断。
+type hubRealScenario struct {
+	t       *testing.T
+	e       *hubRealEval
+	name    string
+	prompt  string
+	start   int
+	started time.Time
+	rep     *hubRealScenarioReport
+
+	// messageSource 由场景设置（DM/群日志）：失败时据此输出最近 5 条消息。
+	messageSource func() []agenthub.Message
+	// decisions 审批 id → 决策（报告证据）。
+	decisions map[string]string
+	// finalText 场景主回复（报告 FinalText）。
+	finalText string
+}
+
+func (sc *hubRealScenario) cmd(typ string, payload map[string]any) (bool, string, map[string]any) {
+	return hubCmd(sc.t, sc.e.m, sc.e.buf, sc.e.nextID(), typ, payload)
+}
+
+func (sc *hubRealScenario) store() agenthub.Store {
+	sc.t.Helper()
+	st, err := sc.e.m.hubStore()
+	if err != nil {
+		sc.failf("hubStore: %v", err)
+	}
+	return st
+}
+
+func (sc *hubRealScenario) watchDM(agentID agenthub.AgentID) {
+	sc.messageSource = func() []agenthub.Message {
+		st, err := sc.e.m.hubStore()
+		if err != nil {
+			return nil
+		}
+		msgs, err := st.ReadDirectMessages(context.Background(), agentID, 0, 500)
+		if err != nil {
+			return nil
+		}
+		return msgs
+	}
+}
+
+func (sc *hubRealScenario) watchGroup(gid agenthub.GroupID) {
+	sc.messageSource = func() []agenthub.Message {
+		st, err := sc.e.m.hubStore()
+		if err != nil {
+			return nil
+		}
+		msgs, err := st.ReadMessages(context.Background(), gid, 0, 500)
+		if err != nil {
+			return nil
+		}
+		return msgs
+	}
+}
+
+func (sc *hubRealScenario) messages() []agenthub.Message {
+	if sc.messageSource == nil {
+		return nil
+	}
+	return sc.messageSource()
+}
+
+// events 取本场景开始之后的全部事件（按 JSONL 逐行解析；半行/坏行跳过）。
+func (sc *hubRealScenario) events() []map[string]any {
+	raw := sc.e.buf.String()
+	if sc.start > len(raw) {
+		return nil
+	}
+	var out []map[string]any
+	for _, line := range strings.Split(raw[sc.start:], "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev map[string]any
+		if json.Unmarshal([]byte(line), &ev) != nil {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+func (sc *hubRealScenario) createAgent(name, role, instructions string, policy map[string]any) agenthub.AgentProfile {
+	profile := map[string]any{
+		"name":         name,
+		"provider":     sc.e.cfg.name,
+		"model":        sc.e.cfg.model,
+		"role":         role,
+		"instructions": instructions,
+	}
+	if policy != nil {
+		profile["policy"] = policy
+	}
+	ok, errMsg, data := sc.cmd("hub_agent_create", map[string]any{"profile": profile})
+	if !ok {
+		sc.failf("创建智能体 %s 失败: %s", name, errMsg)
+	}
+	return agentFromData(sc.t, data)
+}
+
+func (sc *hubRealScenario) sendDM(agentID agenthub.AgentID, text, clientMsgID string) map[string]any {
+	ok, errMsg, data := sc.cmd("hub_send", map[string]any{
+		"target": map[string]any{"kind": "dm", "agent_id": string(agentID)},
+		"text":   text, "client_msg_id": clientMsgID,
+	})
+	if !ok {
+		sc.failf("hub_send(%s) 失败: %s", agentID, errMsg)
+	}
+	return data
+}
+
+func (sc *hubRealScenario) sendGroup(gid agenthub.GroupID, text string, mentionAll bool) map[string]any {
+	payload := map[string]any{"group_id": string(gid), "text": text}
+	if mentionAll {
+		payload["mention_all"] = true
+	}
+	ok, errMsg, data := sc.cmd("hub_group_send", payload)
+	if !ok {
+		sc.failf("hub_group_send 失败: %s", errMsg)
+	}
+	return data
+}
+
+// waitFor 轮询直到 check 返回 ok；check 返回非空 terminal 时立即响亮失败
+// （典型：agent_end 已到达但模型没调用要求的工具，不再静默等到超时）。
+func (sc *hubRealScenario) waitFor(timeout time.Duration, what string, check func() (ok bool, terminal string)) {
+	sc.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		ok, terminal := check()
+		if ok {
+			return
+		}
+		if terminal != "" {
+			sc.failf("%s: %s", what, terminal)
+		}
+		if time.Now().After(deadline) {
+			sc.failf("%s: 等待超时（%s）", what, timeout)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+// failf 记录结构化错误 + 诊断（最近消息/工具/审批/LLM），再 t.Fatalf。
+func (sc *hubRealScenario) failf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	sc.rep.Errors = append(sc.rep.Errors, msg)
+	for _, line := range sc.diagLines() {
+		sc.rep.Diagnostics = append(sc.rep.Diagnostics, line)
+		sc.t.Log("[diag] " + line)
+	}
+	sc.sync()
+	sc.t.Fatalf("%s", msg)
+}
+
+// sync 从事件流重建报告字段（每次都重建，失败路径也能拿到已发生的事实）。
+func (sc *hubRealScenario) sync() {
+	rep := sc.rep
+	rep.AgentReplies = nil
+	rep.ToolCalls = nil
+	rep.Approvals = nil
+	rep.Handoffs = nil
+	rep.LLMErrors = nil
+	rep.LLM = hubRealLLM{}
+	models := map[string]bool{}
+	var approvals []hubRealApproval
+
+	for _, ev := range sc.events() {
+		switch str(ev, "event_type") {
+		case "llm_end":
+			in, out, cr, cw, reas, cost, priced := hubRealUsage(ev)
+			rep.LLM.Calls++
+			rep.LLM.InputTokens += in
+			rep.LLM.OutputTokens += out
+			rep.LLM.CacheRead += cr
+			rep.LLM.CacheWrite += cw
+			rep.LLM.Reasoning += reas
+			rep.LLM.CostUSD += cost
+			if priced {
+				rep.LLM.PricedCalls++
+			} else {
+				rep.LLM.UnpricedCalls++
+			}
+			if m := str(ev, "model"); m != "" {
+				models[m] = true
+			}
+		case "llm_error":
+			if len(rep.LLMErrors) < 10 {
+				rep.LLMErrors = append(rep.LLMErrors, fmt.Sprintf("attempt=%v will_retry=%v kind=%s message=%s",
+					ev["attempt"], ev["will_retry"], str(ev, "error_kind"), hubRealClip(str(ev, "message"), 500)))
+			}
+		case "tool_run_end":
+			rep.ToolCalls = append(rep.ToolCalls, hubRealToolCall{
+				Name:       str(ev, "name"),
+				Arguments:  hubRealClip(str(ev, "arguments"), 2000),
+				Result:     hubRealClip(str(ev, "result"), 4000),
+				IsError:    hubRealBool(ev, "is_error"),
+				SessionID:  str(ev, "session_id"),
+				ToolCallID: str(ev, "id"),
+			})
+		case "tool_approval_requested":
+			approvals = append(approvals, hubRealApproval{
+				ToolCallID: str(ev, "id"),
+				Name:       str(ev, "name"),
+				Arguments:  hubRealClip(str(ev, "arguments"), 2000),
+				SessionID:  str(ev, "session_id"),
+			})
+		case "hub_handoff":
+			h, _ := ev["handoff"].(map[string]any)
+			if h != nil {
+				rep.Handoffs = append(rep.Handoffs, hubRealHandoff{
+					ID:          str(h, "id"),
+					GroupID:     str(h, "group_id"),
+					FromAgentID: str(h, "from_agent_id"),
+					ToAgentID:   str(h, "to_agent_id"),
+					Instruction: hubRealClip(str(h, "instruction"), 500),
+					Status:      str(h, "status"),
+					MessageSeq:  int64(numOr(ev, "message_seq", 0)),
+				})
+			}
+		case "agent_end":
+			text := strings.TrimSpace(str(ev, "content"))
+			if text != "" && len(rep.AgentReplies) < 20 {
+				rep.AgentReplies = append(rep.AgentReplies, fmt.Sprintf("session=%s model=%s text=%s",
+					str(ev, "session_id"), str(ev, "model"), hubRealClip(text, 1000)))
+			}
+		}
+	}
+	// 审批决策在事件上没有（是测试注入的），按 id 合并。
+	for i := range approvals {
+		approvals[i].Decision = sc.decisions[approvals[i].ToolCallID]
+		rep.Approvals = append(rep.Approvals, approvals[i])
+	}
+	for m := range models {
+		rep.LLM.Models = append(rep.LLM.Models, m)
+	}
+	if sc.finalText != "" {
+		rep.FinalText = hubRealClip(sc.finalText, 4000)
+	}
+	// 最近 20 条消息作为证据（失败路径同样可用）。
+	var msgs []hubRealMessage
+	all := sc.messages()
+	if len(all) > 20 {
+		all = all[len(all)-20:]
+	}
+	for _, m := range all {
+		msgs = append(msgs, hubRealMessage{
+			Seq: m.Seq, Sender: string(m.Sender.Kind), AgentID: string(m.Sender.AgentID),
+			Kind: string(m.Kind), RoundID: m.RoundID, Text: hubRealClip(m.Text, 1000),
+		})
+	}
+	rep.Messages = msgs
+}
+
+// diagLines 失败诊断：最近 5 条消息 + 最近 tool/approval/LLM 事件摘要（不含 key）。
+func (sc *hubRealScenario) diagLines() []string {
+	var lines []string
+	all := sc.messages()
+	if start := len(all) - 5; start > 0 {
+		all = all[start:]
+	}
+	if len(all) == 0 {
+		lines = append(lines, "最近消息: （无）")
+	} else {
+		lines = append(lines, fmt.Sprintf("最近 %d 条消息:", len(all)))
+		for _, m := range all {
+			lines = append(lines, fmt.Sprintf("  seq=%d sender=%s agent=%s kind=%s round=%s text=%q",
+				m.Seq, m.Sender.Kind, m.Sender.AgentID, m.Kind, m.RoundID, hubRealClip(m.Text, 300)))
+		}
+	}
+	var toolLines, approvalLines, llmLines []string
+	for _, ev := range sc.events() {
+		switch str(ev, "event_type") {
+		case "tool_run_end":
+			toolLines = append(toolLines, fmt.Sprintf("  tool=%s is_error=%v args=%s result=%s",
+				str(ev, "name"), hubRealBool(ev, "is_error"),
+				hubRealClip(str(ev, "arguments"), 300), hubRealClip(str(ev, "result"), 500)))
+			if len(toolLines) > 8 {
+				toolLines = toolLines[1:]
+			}
+		case "tool_approval_requested":
+			approvalLines = append(approvalLines, fmt.Sprintf("  approval=%s id=%s args=%s",
+				str(ev, "name"), str(ev, "id"), hubRealClip(str(ev, "arguments"), 300)))
+		case "llm_end":
+			llmLines = append(llmLines, fmt.Sprintf("  llm_end session=%s model=%s content=%q",
+				str(ev, "session_id"), str(ev, "model"), hubRealClip(str(ev, "content"), 300)))
+			if len(llmLines) > 5 {
+				llmLines = llmLines[1:]
+			}
+		case "llm_error":
+			llmLines = append(llmLines, fmt.Sprintf("  llm_error session=%s kind=%s will_retry=%v message=%s",
+				str(ev, "session_id"), str(ev, "error_kind"), ev["will_retry"], hubRealClip(str(ev, "message"), 300)))
+			if len(llmLines) > 5 {
+				llmLines = llmLines[1:]
+			}
+		}
+	}
+	lines = append(lines, "最近 tool 事件:")
+	lines = append(lines, toolLines...)
+	if len(toolLines) == 0 {
+		lines = append(lines, "  （无 tool_run_end）")
+	}
+	lines = append(lines, "最近 approval 事件:")
+	lines = append(lines, approvalLines...)
+	if len(approvalLines) == 0 {
+		lines = append(lines, "  （无 tool_approval_requested）")
+	}
+	lines = append(lines, "最近 LLM 事件:")
+	lines = append(lines, llmLines...)
+	if len(llmLines) == 0 {
+		lines = append(lines, "  （无 llm_end/llm_error）")
+	}
+	return lines
+}
+
+// —— 场景 1：单智能体 DM ——
+
+func (sc *hubRealScenario) scenarioDM() {
+	const token = "HAI_DM_OK"
+	a := sc.createAgent("RealDM", "回复助手", "你只做被要求的事，回复尽量短，不要调用工具。", nil)
+	sc.watchDM(a.ID)
+	sid := "hub." + string(a.ID) + ".dm"
+	sc.sendDM(a.ID, sc.prompt, "real-e2e-dm-1")
+
+	var msgs []agenthub.Message
+	sc.waitFor(hubRealTimeout, "DM 回复进入索引", func() (bool, string) {
+		msgs = sc.messages()
+		for _, m := range msgs {
+			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == a.ID && strings.Contains(m.Text, token) {
+				return true, ""
+			}
+		}
+		if hubRealHasAgentEnd(sc.events(), sid) {
+			return false, "agent_end 已到达，但 DM 索引里没有含 " + token + " 的 agent 回复（模型没照做或回复被丢弃）"
+		}
+		return false, ""
+	})
+	if len(msgs) != 2 {
+		sc.failf("DM 索引条数 = %d，want 2（human + agent）: %+v", len(msgs), hubRealMessageBriefs(msgs))
+	}
+	if msgs[0].Sender.Kind != agenthub.SenderHuman || !strings.Contains(msgs[0].Text, token) {
+		sc.failf("DM 第 1 条不是人类 prompt: %+v", msgs[0])
+	}
+	if msgs[1].Sender.Kind != agenthub.SenderAgent || msgs[1].Sender.AgentID != a.ID {
+		sc.failf("DM 第 2 条不是该 agent 的回复: %+v", msgs[1])
+	}
+	sc.finalText = msgs[1].Text
+	sc.rep.Notes = append(sc.rep.Notes, fmt.Sprintf("agent_id=%s session=%s dm_messages=%d", a.ID, sid, len(msgs)))
+}
+
+// —— 场景 2：工具调用（auto，无审批） ——
+
+func (sc *hubRealScenario) scenarioToolAuto() {
+	const token = "HAI_TOOL_OK"
+	a := sc.createAgent("RealTool", "工具测试", "严格按用户要求调用工具，不要解释。", nil)
+	sc.watchDM(a.ID)
+	sid := "hub." + string(a.ID) + ".dm"
+	sc.sendDM(a.ID, sc.prompt, "real-e2e-tool-1")
+
+	var toolEnd map[string]any
+	sc.waitFor(hubRealTimeout, "bash 工具调用完成", func() (bool, string) {
+		for _, ev := range sc.events() {
+			if str(ev, "event_type") != "tool_run_end" || str(ev, "name") != "bash" {
+				continue
+			}
+			if hubRealBool(ev, "is_error") {
+				return false, "bash 工具返回 is_error=true: " + hubRealClip(str(ev, "result"), 800)
+			}
+			if strings.Contains(str(ev, "result"), token) {
+				toolEnd = ev
+				return true, ""
+			}
+		}
+		if hubRealHasAgentEnd(sc.events(), sid) {
+			return false, "agent_end 已到达，但没有含 " + token + " 的 bash tool_run_end（模型没调用工具）"
+		}
+		return false, ""
+	})
+	if !strings.Contains(str(toolEnd, "arguments"), "printf") {
+		sc.failf("bash 工具参数里没有 printf: %s", hubRealClip(str(toolEnd, "arguments"), 800))
+	}
+	var reply string
+	sc.waitFor(hubRealTimeout, "最终回复含工具输出 token", func() (bool, string) {
+		for _, m := range sc.messages() {
+			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == a.ID && strings.Contains(m.Text, token) {
+				reply = m.Text
+				return true, ""
+			}
+		}
+		if hubRealHasAgentEnd(sc.events(), sid) {
+			return false, "agent_end 已到达，但最终回复不含 " + token
+		}
+		return false, ""
+	})
+	sc.finalText = reply
+	sc.rep.Notes = append(sc.rep.Notes,
+		"bash arguments="+hubRealClip(str(toolEnd, "arguments"), 400),
+		"bash result="+hubRealClip(str(toolEnd, "result"), 400))
+}
+
+// —— 场景 3：审批（hitl） ——
+
+func (sc *hubRealScenario) scenarioApprovalHITL() {
+	const token = "HAI_APPROVAL_OK"
+	a := sc.createAgent("RealApproval", "审批测试", "严格按用户要求调用工具，不要解释。", nil)
+	sc.watchDM(a.ID)
+	bs, err := sc.e.m.hubDMSession(string(a.ID))
+	if err != nil {
+		sc.failf("hubDMSession: %v", err)
+	}
+	mode := parseMode("hitl")
+	bs.mode = mode
+	bs.s.SetMode(mode) // 快照语义：下一次 Run 生效
+	sc.watchDM(a.ID)
+	sid := "hub." + string(a.ID) + ".dm"
+	sc.sendDM(a.ID, sc.prompt, "real-e2e-approval-1")
+
+	var approval map[string]any
+	sc.waitFor(hubRealTimeout, "等待 tool_approval_requested", func() (bool, string) {
+		for _, ev := range sc.events() {
+			if str(ev, "event_type") != "tool_approval_requested" {
+				continue
+			}
+			approval = ev
+			return true, ""
+		}
+		if hubRealHasAgentEnd(sc.events(), sid) {
+			return false, "agent_end 已到达却没有 tool_approval_requested（模型没调用 bash，审批路径没被走到）"
+		}
+		return false, ""
+	})
+	if got := str(approval, "name"); got != "bash" {
+		sc.failf("审批工具名 = %q，want bash（arguments=%s）", got, hubRealClip(str(approval, "arguments"), 500))
+	}
+	if !strings.Contains(str(approval, "arguments"), token) {
+		sc.failf("审批参数不含 %s: %s", token, hubRealClip(str(approval, "arguments"), 500))
+	}
+	id := str(approval, "id")
+	if id == "" {
+		sc.failf("审批事件缺 id（无法注入决策）: %+v", approval)
+	}
+	if err := bs.s.Approve(id, true); err != nil {
+		sc.failf("Approve(%s,true) 失败: %v", id, err)
+	}
+	sc.decisions[id] = "approved"
+
+	var toolEnd map[string]any
+	sc.waitFor(hubRealTimeout, "审批后 bash 执行完成", func() (bool, string) {
+		for _, ev := range sc.events() {
+			if str(ev, "event_type") != "tool_run_end" || str(ev, "name") != "bash" {
+				continue
+			}
+			if hubRealBool(ev, "is_error") {
+				return false, "审批通过后 bash 仍失败: " + hubRealClip(str(ev, "result"), 800)
+			}
+			if strings.Contains(str(ev, "result"), token) {
+				toolEnd = ev
+				return true, ""
+			}
+		}
+		return false, ""
+	})
+	var reply string
+	sc.waitFor(hubRealTimeout, "审批后的最终回复", func() (bool, string) {
+		for _, m := range sc.messages() {
+			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == a.ID && strings.Contains(m.Text, token) {
+				reply = m.Text
+				return true, ""
+			}
+		}
+		if hubRealHasAgentEnd(sc.events(), sid) {
+			return false, "agent_end 已到达，但最终回复不含 " + token
+		}
+		return false, ""
+	})
+	sc.finalText = reply
+	sc.rep.Notes = append(sc.rep.Notes,
+		"approval id="+id+" name=bash decision=approved",
+		"bash result="+hubRealClip(str(toolEnd, "result"), 400))
+}
+
+// —— 场景 4：群 @all ——
+
+func (sc *hubRealScenario) scenarioGroupMentionAll() {
+	const token = "HAI_ALL_OK"
+	a := sc.createAgent("RealAllA", "群成员 A", "你是群成员，只在被 @ 时回复，回复简短。", nil)
+	b := sc.createAgent("RealAllB", "群成员 B", "你是群成员，只在被 @ 时回复，回复简短。", nil)
+	g := groupWithMembers(sc.t, sc.e.m, sc.e.buf, sc.e.nextID(), "RealAllGroup",
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{a.ID, "owner"},
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{b.ID, "member"})
+	sc.watchGroup(g.ID)
+	data := sc.sendGroup(g.ID, sc.prompt, true)
+	roundID := str(data, "round_id")
+	if r, ok := data["round"].(map[string]any); ok {
+		roundID = str(r, "id")
+	}
+	if roundID == "" {
+		roundID = hubRealRoundIDFromEvent(sc.events(), g.ID)
+	}
+	if roundID == "" {
+		sc.failf("@all 的 hub_group_send 响应/事件里没有 round id: %+v", data)
+	}
+	sc.rep.Notes = append(sc.rep.Notes, fmt.Sprintf("round=%s targets=%v mention_all=%v",
+		roundID, data["targets"], data["round"]))
+
+	sc.waitFor(hubRealTimeout, "@all 每个成员各写一条 final", func() (bool, string) {
+		got := map[agenthub.AgentID]int{}
+		for _, m := range sc.messages() {
+			if m.Sender.Kind == agenthub.SenderAgent && m.RoundID == roundID && strings.Contains(m.Text, token) {
+				got[m.Sender.AgentID]++
+			}
+		}
+		if got[a.ID] > 0 && got[b.ID] > 0 {
+			return true, ""
+		}
+		if hubRealHasAgentEnd(sc.events(), "hub."+string(a.ID)+".g."+string(g.ID)) &&
+			hubRealHasAgentEnd(sc.events(), "hub."+string(b.ID)+".g."+string(g.ID)) {
+			return false, fmt.Sprintf("两个成员都已 agent_end，但含 %s 的 final 数 = %v", token, got)
+		}
+		return false, ""
+	})
+	// 每个成员恰好一条本轮 final；两条说明重复提交。
+	for _, id := range []agenthub.AgentID{a.ID, b.ID} {
+		n := 0
+		var text string
+		for _, m := range sc.messages() {
+			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == id && m.RoundID == roundID {
+				n++
+				text = m.Text
+			}
+		}
+		if n != 1 {
+			sc.failf("%s 本轮 final 数 = %d，want 1（@all 每人只回复一条）", id, n)
+		}
+		if !strings.Contains(text, token) {
+			sc.failf("%s 本轮 final 不含 %s: %q", id, token, text)
+		}
+		sc.rep.Notes = append(sc.rep.Notes, fmt.Sprintf("agent %s reply=%q", id, hubRealClip(text, 200)))
+	}
+	// 等两个群会话空闲，避免残留 run 污染下一场景的基线。
+	for _, id := range []string{string(a.ID), string(b.ID)} {
+		bs, err := sc.e.m.hubGroupSession(id, string(g.ID))
+		if err == nil {
+			waitHubGroupIdle(sc.t, bs)
+		}
+	}
+}
+
+// —— 场景 5：群 @指定 ——
+
+func (sc *hubRealScenario) scenarioGroupMentionOne() {
+	const token = "HAI_ONE_OK"
+	gid, a, b, sessA, sessB := sc.groupFixtureFromStore()
+	baseSeq := hubRealMaxSeq(sc.messages())
+	seqA, seqB := sessA.hubGroupSeq.Load(), sessB.hubGroupSeq.Load()
+
+	data := sc.sendGroup(gid, "@"+b.Name+" 只回复 "+token, false)
+	roundID := str(data, "round_id")
+	if r, ok := data["round"].(map[string]any); ok {
+		roundID = str(r, "id")
+	}
+	targets := hubRealTargets(data)
+	if len(targets) != 1 || targets[0] != b.ID {
+		sc.failf("@%s targets = %v，want 只有 %s（round=%+v）", b.Name, targets, b.ID, data["round"])
+	}
+	// 唤醒发号在 hub_group_send 返回前同步完成（P3a-10）：A 不动 = 从未被唤醒。
+	if got := sessA.hubGroupSeq.Load(); got != seqA {
+		sc.failf("%s 未被 @，唤醒发号却从 %d 变成 %d", a.ID, seqA, got)
+	}
+	if got := sessB.hubGroupSeq.Load(); got != seqB+1 {
+		sc.failf("%s 被 @，唤醒发号 %d → %d，want +1", b.ID, seqB, got)
+	}
+	sc.rep.Notes = append(sc.rep.Notes,
+		fmt.Sprintf("round=%s targets=%v", roundID, targets),
+		fmt.Sprintf("baseline_seq=%d wake_seq A=%d→%d B=%d→%d", baseSeq, seqA, sessA.hubGroupSeq.Load(), seqB, sessB.hubGroupSeq.Load()))
+
+	sc.waitFor(hubRealTimeout, "被 @ 的成员写 final", func() (bool, string) {
+		for _, m := range sc.messages() {
+			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == b.ID &&
+				m.RoundID == roundID && strings.Contains(m.Text, token) {
+				sc.finalText = m.Text
+				return true, ""
+			}
+		}
+		if hubRealHasAgentEnd(sc.events(), "hub."+string(b.ID)+".g."+string(gid)) {
+			return false, "agent_end 已到达，但本轮没有含 " + token + " 的 final"
+		}
+		return false, ""
+	})
+	waitHubGroupIdle(sc.t, sessB)
+	// 未被 @ 的 A：本轮之后没有新 agent 消息，游标也不动。
+	for _, m := range sc.messages() {
+		if m.Seq <= baseSeq {
+			continue
+		}
+		if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == a.ID {
+			sc.failf("%s 未被 @，却写了新 agent 消息: seq=%d text=%q", a.ID, m.Seq, hubRealClip(m.Text, 300))
+		}
+	}
+	if got := sessA.hubGroupSeq.Load(); got != seqA {
+		sc.failf("%s 未被 @，等待结束后唤醒发号 = %d（曾被唤醒）", a.ID, got)
+	}
+}
+
+// groupFixtureFromStore 复用场景 4 建的群与两个成员（@all/@指定/handoff 同群）。
+func (sc *hubRealScenario) groupFixtureFromStore() (agenthub.GroupID, agenthub.AgentProfile, agenthub.AgentProfile, *bridgeSession, *bridgeSession) {
+	sc.t.Helper()
+	st := sc.store()
+	ctx := context.Background()
+	groups, err := st.ListGroups(ctx)
+	if err != nil {
+		sc.failf("ListGroups: %v", err)
+	}
+	var gid agenthub.GroupID
+	for _, g := range groups {
+		if g != nil && g.Name == "RealAllGroup" && !g.Deleted {
+			gid = g.ID
+			break
+		}
+	}
+	if gid == "" {
+		sc.failf("找不到场景 4 建的 RealAllGroup（场景 5 依赖同群）")
+	}
+	var a, b agenthub.AgentProfile
+	agents, err := st.ListAgents(ctx)
+	if err != nil {
+		sc.failf("ListAgents: %v", err)
+	}
+	for _, p := range agents {
+		if p == nil {
+			continue
+		}
+		switch p.Name {
+		case "RealAllA":
+			a = *p
+		case "RealAllB":
+			b = *p
+		}
+	}
+	if a.ID == "" || b.ID == "" {
+		sc.failf("找不到 RealAllA/RealAllB")
+	}
+	sessA, err := sc.e.m.hubGroupSession(string(a.ID), string(gid))
+	if err != nil {
+		sc.failf("hubGroupSession(A): %v", err)
+	}
+	sessB, err := sc.e.m.hubGroupSession(string(b.ID), string(gid))
+	if err != nil {
+		sc.failf("hubGroupSession(B): %v", err)
+	}
+	sc.watchGroup(gid)
+	return gid, a, b, sessA, sessB
+}
+
+// —— 场景 6：@A → @B handoff ——
+
+func (sc *hubRealScenario) scenarioHandoff() {
+	const token = "HANDOFF_OK"
+	gid, a, b, sessA, _ := sc.groupFixtureFromStore()
+	sc.rep.Notes = append(sc.rep.Notes, "from="+string(a.ID)+" to="+string(b.ID))
+
+	// 第一步：A 发 handoff（带显式 group_id/to_agent_id，避免模型猜错 id）。
+	promptA := fmt.Sprintf("@%s 调用 handoff 工具：group_id=%s，to_agent_id=%s，instruction 写「只回复 %s」。不要自己完成，不要回复我。",
+		a.Name, gid, b.ID, token)
+	data1 := sc.sendGroup(gid, promptA, false)
+	_ = data1
+	var handoffID string
+	sc.waitFor(hubRealTimeout, "handoff 创建事件", func() (bool, string) {
+		for _, ev := range sc.events() {
+			if str(ev, "event_type") != "hub_handoff" || str(ev, "group_id") != string(gid) {
+				continue
+			}
+			h, _ := ev["handoff"].(map[string]any)
+			if h == nil {
+				continue
+			}
+			if str(h, "from_agent_id") != string(a.ID) || str(h, "to_agent_id") != string(b.ID) {
+				return false, fmt.Sprintf("hub_handoff from/to = %s/%s，want %s/%s",
+					str(h, "from_agent_id"), str(h, "to_agent_id"), a.ID, b.ID)
+			}
+			status := str(h, "status")
+			if status != string(agenthub.HandoffPendingAck) {
+				return false, fmt.Sprintf("新建 handoff status = %q，want %q", status, agenthub.HandoffPendingAck)
+			}
+			handoffID = str(h, "id")
+			return true, ""
+		}
+		if hubRealHasAgentEnd(sc.events(), "hub."+string(a.ID)+".g."+string(gid)) {
+			return false, "A 的 agent_end 已到达却没有 hub_handoff 事件（模型没调用 handoff 工具）"
+		}
+		return false, ""
+	})
+	if handoffID == "" {
+		sc.failf("hub_handoff 事件缺 handoff id")
+	}
+	if h, err := sc.store().LoadHandoff(context.Background(), handoffID); err != nil || h == nil {
+		sc.failf("LoadHandoff(%s): %v", handoffID, err)
+	} else if h.Status != agenthub.HandoffPendingAck {
+		sc.failf("handoff %s 落盘状态 = %q，want pending_ack", handoffID, h.Status)
+	}
+	waitHubGroupIdle(sc.t, sessA)
+
+	// 第二步：B 用 handoff_ack 接受，并按 instruction 回复 token。
+	promptB := fmt.Sprintf("@%s 请用 handoff_ack 接受 handoff %s（accept=true），然后按 instruction 回复 %s。",
+		b.Name, handoffID, token)
+	sc.sendGroup(gid, promptB, false)
+	sc.waitFor(hubRealTimeout, "handoff_ack 工具调用", func() (bool, string) {
+		for _, ev := range sc.events() {
+			if str(ev, "event_type") != "tool_run_end" || str(ev, "name") != "handoff_ack" {
+				continue
+			}
+			if hubRealBool(ev, "is_error") {
+				return false, "handoff_ack 返回 is_error=true: " + hubRealClip(str(ev, "result"), 800)
+			}
+			if strings.Contains(str(ev, "arguments"), handoffID) && strings.Contains(str(ev, "result"), "accepted") {
+				return true, ""
+			}
+		}
+		if hubRealHasAgentEnd(sc.events(), "hub."+string(b.ID)+".g."+string(gid)) {
+			return false, "B 的 agent_end 已到达但没有成功的 handoff_ack 调用"
+		}
+		return false, ""
+	})
+	if h, err := sc.store().LoadHandoff(context.Background(), handoffID); err != nil || h == nil {
+		sc.failf("LoadHandoff(%s) after ack: %v", handoffID, err)
+	} else if h.Status != agenthub.HandoffAccepted {
+		sc.failf("handoff %s ack 后状态 = %q，want accepted", handoffID, h.Status)
+	}
+	sc.waitFor(hubRealTimeout, "B 按 instruction 回复", func() (bool, string) {
+		for _, m := range sc.messages() {
+			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == b.ID && strings.Contains(m.Text, token) {
+				sc.finalText = m.Text
+				return true, ""
+			}
+		}
+		return false, ""
+	})
+}
+
+// —— 场景 7：人类 @ 后自主「建项目 + 建会话 + 派任务 + 项目会话真跑」 ——
+
+func (sc *hubRealScenario) scenarioProjectSession() {
+	const token = "HAI_PROJECT_SESSION_OK"
+	tempHome, err := os.UserHomeDir()
+	if err != nil {
+		sc.failf("解析临时 HOME 失败: %v", err)
+	}
+	root := filepath.Join(tempHome, "hub-eval-project-roots")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		sc.failf("建项目根失败（%s）: %v", root, err)
+	}
+	projectName := fmt.Sprintf("hai-eval-%d", time.Now().UnixNano()%1e9)
+	projectName = strings.ReplaceAll(projectName, "-", "") // 单段目录名，无分隔符
+	a := sc.createAgent("ProjectRunner", "项目执行者",
+		"你能自主创建项目、创建会话并把任务派到项目会话；严格按用户给的顺序调用工具，不要用 bash 代替 workspace/session 工具。",
+		map[string]any{
+			"can_create_workspace": true,
+			"can_dispatch":         true,
+			"can_handoff":          true,
+			"can_share_artifact":   true,
+			"workspace_roots":      []string{root},
+			"max_auto_turns":       12,
+		})
+	g := groupWithMembers(sc.t, sc.e.m, sc.e.buf, sc.e.nextID(), "RealProjectGroup",
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{a.ID, "owner"})
+	sc.watchGroup(g.ID)
+	hubSID := "hub." + string(a.ID) + ".g." + string(g.ID)
+	sc.rep.Project = &hubRealProject{Root: root, RequestedName: projectName}
+
+	prompt := fmt.Sprintf("@%s 请依次完成，不要跳步、不要用 bash 代替：\n"+
+		"1) 调用 workspace_create 创建项目，name 必须是 %q（单段目录名）；\n"+
+		"2) 调用 workspace_list 确认它已登记；\n"+
+		"3) 调用 session_create 在该 workspace 下创建会话；\n"+
+		"4) 调用 session_list 确认该会话存在；\n"+
+		"5) 调用 session_send 给该会话派任务，text 必须是「只回复 %s」；\n"+
+		"6) 最后把 workspace 路径、session_id、task_id 回给我。",
+		a.Name, projectName, token)
+	sc.rep.Prompt = prompt
+	sc.sendGroup(g.ID, prompt, false)
+
+	// 1) workspace_create
+	wsEvidence := sc.waitToolEnd(hubSID, "workspace_create", func(ev map[string]any) (bool, string) {
+		return !hubRealBool(ev, "is_error"), ""
+	})
+	var wsRes struct {
+		Workspace struct {
+			Path string `json:"path"`
+			Name string `json:"name"`
+		} `json:"workspace"`
+	}
+	if err := json.Unmarshal([]byte(str(wsEvidence, "result")), &wsRes); err != nil || wsRes.Workspace.Path == "" {
+		sc.failf("workspace_create 结果不可解析: %s (err=%v)", hubRealClip(str(wsEvidence, "result"), 1000), err)
+	}
+	wsPath := wsRes.Workspace.Path
+	sc.rep.Project.WorkspaceCreate = hubRealToolEvidence(wsEvidence)
+	sc.rep.Project.WorkspacePath = wsPath
+	if st, err := os.Stat(wsPath); err != nil || !st.IsDir() {
+		sc.failf("workspace_create 声称的目录不存在: %s (err=%v)", wsPath, err)
+	}
+	if !hubRealPathWithin(wsPath, root) {
+		sc.failf("workspace_create 建到了 policy.workspace_roots 之外: %s (root=%s)", wsPath, root)
+	}
+
+	// 2) workspace_list 必须能看到它
+	listEvidence := sc.waitToolEnd(hubSID, "workspace_list", func(ev map[string]any) (bool, string) {
+		return !hubRealBool(ev, "is_error") && strings.Contains(str(ev, "result"), wsPath), ""
+	})
+	sc.rep.Project.WorkspaceList = hubRealToolEvidence(listEvidence)
+
+	// 3) session_create
+	createEvidence := sc.waitToolEnd(hubSID, "session_create", func(ev map[string]any) (bool, string) {
+		return !hubRealBool(ev, "is_error"), ""
+	})
+	var sessRes struct {
+		Session struct {
+			ID        string `json:"id"`
+			Workspace string `json:"workspace"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(str(createEvidence, "result")), &sessRes); err != nil || sessRes.Session.ID == "" {
+		sc.failf("session_create 结果不可解析: %s (err=%v)", hubRealClip(str(createEvidence, "result"), 1000), err)
+	}
+	sid := sessRes.Session.ID
+	sc.rep.Project.SessionCreate = hubRealToolEvidence(createEvidence)
+	sc.rep.Project.SessionID = sid
+	if bs := sc.e.m.get(wsPath, sid); bs == nil {
+		sc.failf("session_create 返回 %s，但 m.get(%s,%s) == nil", sid, wsPath, sid)
+	}
+	found := false
+	for _, row := range sc.e.m.listSessions(wsPath) {
+		if str(row, "id") == sid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		sc.failf("listSessions(%s) 里没有 session_create 返回的 %s", wsPath, sid)
+	}
+
+	// 4) session_list 必须能看到它
+	sessListEvidence := sc.waitToolEnd(hubSID, "session_list", func(ev map[string]any) (bool, string) {
+		return !hubRealBool(ev, "is_error") && strings.Contains(str(ev, "result"), sid), ""
+	})
+	sc.rep.Project.SessionList = hubRealToolEvidence(sessListEvidence)
+
+	// 5) session_send
+	sendEvidence := sc.waitToolEnd(hubSID, "session_send", func(ev map[string]any) (bool, string) {
+		return !hubRealBool(ev, "is_error"), ""
+	})
+	var sendRes struct {
+		TaskID    string `json:"task_id"`
+		SessionID string `json:"session_id"`
+		Accepted  bool   `json:"accepted"`
+		Status    string `json:"status"`
+		Queued    bool   `json:"queued"`
+	}
+	if err := json.Unmarshal([]byte(str(sendEvidence, "result")), &sendRes); err != nil {
+		sc.failf("session_send 结果不可解析: %s (err=%v)", hubRealClip(str(sendEvidence, "result"), 1000), err)
+	}
+	sc.rep.Project.SessionSend = hubRealToolEvidence(sendEvidence)
+	sc.rep.Project.TaskID = sendRes.TaskID
+	sc.rep.Project.TaskStatus = sendRes.Status
+	sc.rep.Project.Accepted = sendRes.Accepted
+	sc.rep.Project.Queued = sendRes.Queued
+	if !sendRes.Accepted || sendRes.TaskID == "" {
+		sc.failf("session_send accepted=%v task_id=%q，want accepted=true 且有 task_id（status=%q queued=%v）",
+			sendRes.Accepted, sendRes.TaskID, sendRes.Status, sendRes.Queued)
+	}
+	if sendRes.SessionID != "" && sendRes.SessionID != sid {
+		sc.failf("session_send 回的 session_id=%s，want %s", sendRes.SessionID, sid)
+	}
+	if sendRes.Queued || strings.EqualFold(sendRes.Status, "queued") {
+		sc.waitFor(60*time.Second, "排队任务被派发", func() (bool, string) {
+			task, err := agenthub.NewLedger(sc.store()).Replay(context.Background(), agenthub.TaskID(sendRes.TaskID))
+			if err != nil {
+				return false, ""
+			}
+			switch task.Status {
+			case agenthub.TaskDispatched, agenthub.TaskRunning, agenthub.TaskCompleted, agenthub.TaskDelivered:
+				sc.rep.Project.TaskStatus = string(task.Status)
+				return true, ""
+			case agenthub.TaskCanceled, agenthub.TaskFailed, agenthub.TaskDeclined, agenthub.TaskBlockedBudget:
+				return false, fmt.Sprintf("排队任务进入终态 %s: %s", task.Status, task.Error)
+			}
+			return false, ""
+		})
+	}
+
+	// 6) 项目会话必须**真的跑**：按 session_id 过滤 llm_end/agent_end，且正文含 token。
+	var projectEnd map[string]any
+	sc.waitFor(hubRealTimeout, "项目会话 agent_end", func() (bool, string) {
+		for _, ev := range sc.events() {
+			if str(ev, "event_type") == "agent_end" && str(ev, "session_id") == sid {
+				projectEnd = ev
+				if strings.Contains(str(ev, "content"), token) {
+					return true, ""
+				}
+				return false, "项目会话 agent_end 不含 " + token + "：" + hubRealClip(str(ev, "content"), 500)
+			}
+			if str(ev, "event_type") == "llm_error" && str(ev, "session_id") == sid {
+				return false, "项目会话 LLM 失败: " + hubRealClip(str(ev, "message"), 500)
+			}
+		}
+		return false, ""
+	})
+	var projectLLM hubRealLLM
+	projectLLMSeen := false
+	for _, ev := range sc.events() {
+		if str(ev, "event_type") != "llm_end" || str(ev, "session_id") != sid {
+			continue
+		}
+		in, out, cr, cw, reas, cost, priced := hubRealUsage(ev)
+		projectLLM.Calls++
+		projectLLM.InputTokens += in
+		projectLLM.OutputTokens += out
+		projectLLM.CacheRead += cr
+		projectLLM.CacheWrite += cw
+		projectLLM.Reasoning += reas
+		projectLLM.CostUSD += cost
+		if priced {
+			projectLLM.PricedCalls++
+		} else {
+			projectLLM.UnpricedCalls++
+		}
+		if strings.Contains(str(ev, "content"), token) {
+			projectLLMSeen = true
+		}
+	}
+	sc.rep.Project.SessionLLM = projectLLM
+	if projectLLM.Calls == 0 {
+		sc.failf("项目会话 %s 没有 llm_end（会话被创建但没有真跑）", sid)
+	}
+	if !projectLLMSeen {
+		sc.failf("项目会话 %s 的 llm_end 正文都不含 %s（agent_end 有 token 也不够：llm 事件是真实调用的证据）", sid, token)
+	}
+	// 会话必须回到空闲（不是只断言工具返回 JSON）。
+	sc.waitFor(60*time.Second, "项目会话 running=false", func() (bool, string) {
+		bs := sc.e.m.get(wsPath, sid)
+		if bs == nil {
+			return false, "项目会话从 m.get 里消失"
+		}
+		if !bs.running.Load() && !bs.hubDispatchPending.Load() {
+			return true, ""
+		}
+		return false, ""
+	})
+
+	// 7) Hub agent 的最终群回复应带 workspace/session_id（任务要求回给人类）。
+	sc.waitFor(hubRealTimeout, "Hub agent 回报 workspace/session_id", func() (bool, string) {
+		for _, m := range sc.messages() {
+			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == a.ID &&
+				strings.Contains(m.Text, sid) {
+				sc.finalText = m.Text
+				return true, ""
+			}
+		}
+		if hubRealHasAgentEnd(sc.events(), hubSID) {
+			return false, "Hub agent 已 agent_end，但群回复里没有 session_id " + sid
+		}
+		return false, ""
+	})
+	sc.rep.Project.TaskStatus = sendRes.Status
+	if sc.rep.Project.TaskStatus == "" {
+		sc.rep.Project.TaskStatus = "dispatched"
+	}
+	sc.rep.Notes = append(sc.rep.Notes,
+		"workspace_create name="+projectName,
+		"workspace_path="+wsPath,
+		"session_id="+sid,
+		"task_id="+sendRes.TaskID,
+		fmt.Sprintf("project_session_llm calls=%d in=%d out=%d cost_usd=%.6f",
+			projectLLM.Calls, projectLLM.InputTokens, projectLLM.OutputTokens, projectLLM.CostUSD),
+		fmt.Sprintf("project_agent_end content=%q", hubRealClip(str(projectEnd, "content"), 300)))
+}
+
+// waitToolEnd 等某个工具成功结束；失败/未调用都要响亮失败（不静默等到超时）。
+// accept 返回 true = 找到符合预期的调用；返回 terminal 非空 = 立即判失败。
+func (sc *hubRealScenario) waitToolEnd(hubSID, name string, accept func(ev map[string]any) (bool, string)) map[string]any {
+	sc.t.Helper()
+	var found map[string]any
+	var lastErr string
+	sc.waitFor(hubRealTimeout, "工具 "+name+" 成功完成", func() (bool, string) {
+		for _, ev := range sc.events() {
+			if str(ev, "event_type") != "tool_run_end" || str(ev, "name") != name {
+				continue
+			}
+			if hubRealBool(ev, "is_error") {
+				lastErr = hubRealClip(str(ev, "result"), 800)
+				continue
+			}
+			ok, terminal := accept(ev)
+			if terminal != "" {
+				return false, terminal
+			}
+			if ok {
+				found = ev
+				return true, ""
+			}
+		}
+		if hubRealHasAgentEnd(sc.events(), hubSID) {
+			msg := "agent_end 已到达但没有成功的 " + name + " 调用"
+			if lastErr != "" {
+				msg += "；最近一次工具错误: " + lastErr
+			}
+			// 把该场景已发生的工具调用摘要塞进诊断，而不是只说"没调用"。
+			for _, ev := range sc.events() {
+				if str(ev, "event_type") == "tool_run_end" {
+					sc.rep.Notes = append(sc.rep.Notes, fmt.Sprintf("tool %s is_error=%v result=%s",
+						str(ev, "name"), hubRealBool(ev, "is_error"), hubRealClip(str(ev, "result"), 300)))
+				}
+			}
+			return false, msg
+		}
+		return false, ""
+	})
+	return found
+}
+
+// —— 事件/报告小工具 ——
+
+func hubRealHasAgentEnd(events []map[string]any, sessionID string) bool {
+	for _, ev := range events {
+		if str(ev, "event_type") != "agent_end" {
+			continue
+		}
+		if sessionID == "" || str(ev, "session_id") == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+func hubRealRoundIDFromEvent(events []map[string]any, gid agenthub.GroupID) string {
+	for _, ev := range events {
+		if str(ev, "event_type") != "hub_round" || str(ev, "group_id") != string(gid) {
+			continue
+		}
+		if r, ok := ev["round"].(map[string]any); ok {
+			return str(r, "id")
+		}
+	}
+	return ""
+}
+
+func hubRealTargets(data map[string]any) []agenthub.AgentID {
+	var out []agenthub.AgentID
+	raw, ok := data["targets"].([]any)
+	if !ok {
+		if r, ok := data["round"].(map[string]any); ok {
+			raw, _ = r["targets"].([]any)
+		}
+	}
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, agenthub.AgentID(s))
+		}
+	}
+	return out
+}
+
+func hubRealMaxSeq(msgs []agenthub.Message) int64 {
+	var max int64
+	for _, m := range msgs {
+		if m.Seq > max {
+			max = m.Seq
+		}
+	}
+	return max
+}
+
+func hubRealMessageBriefs(msgs []agenthub.Message) []string {
+	out := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, fmt.Sprintf("seq=%d sender=%s agent=%s text=%q", m.Seq, m.Sender.Kind, m.Sender.AgentID, hubRealClip(m.Text, 200)))
+	}
+	return out
+}
+
+func hubRealToolEvidence(ev map[string]any) *hubRealToolCall {
+	return &hubRealToolCall{
+		Name:       str(ev, "name"),
+		Arguments:  hubRealClip(str(ev, "arguments"), 2000),
+		Result:     hubRealClip(str(ev, "result"), 4000),
+		IsError:    hubRealBool(ev, "is_error"),
+		SessionID:  str(ev, "session_id"),
+		ToolCallID: str(ev, "id"),
+	}
+}
+
+func hubRealUsage(ev map[string]any) (in, out, cacheRead, cacheWrite, reasoning int64, costUSD float64, priced bool) {
+	u, ok := ev["usage"].(map[string]any)
+	if !ok || u == nil {
+		return
+	}
+	in = int64(hubRealNum(u, "Input"))
+	out = int64(hubRealNum(u, "Output"))
+	cacheRead = int64(hubRealNum(u, "CacheRead"))
+	cacheWrite = int64(hubRealNum(u, "CacheWrite"))
+	reasoning = int64(hubRealNum(u, "Reasoning"))
+	if c, ok := u["Cost"].(map[string]any); ok {
+		priced, _ = c["Priced"].(bool)
+		costUSD = hubRealNum(c, "Total") / 1e6 // core.Cost.Total 是 µUSD
+	}
+	return
+}
+
+func hubRealNum(m map[string]any, key string) float64 {
+	switch v := m[key].(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case json.Number:
+		f, _ := v.Float64()
+		return f
+	}
+	return 0
+}
+
+func hubRealBool(m map[string]any, key string) bool {
+	v, _ := m[key].(bool)
+	return v
+}
+
+func hubRealClip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…(truncated)"
+}
+
+func hubRealPathWithin(path, root string) bool {
+	p, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	r, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(r, p)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..")
+}
+
+// hubRealWriteReport 写 report.json 与 events.jsonl；失败也写（defer 调用）。
+// api_key 用字符串替换抹掉；报告本身不含 base_url。
+func hubRealWriteReport(t *testing.T, rep *hubRealReport, reportPath string, buf *syncBuf, key string) {
+	rep.FinishedAt = time.Now().UTC()
+	if rep.StartedAt.IsZero() {
+		rep.StartedAt = rep.FinishedAt
+	}
+	rep.DurationMS = rep.FinishedAt.Sub(rep.StartedAt).Milliseconds()
+	if rep.Status == "" {
+		rep.Status = "fail"
+	}
+	// totals
+	rep.Totals = hubRealTotals{Scenarios: len(rep.Scenarios)}
+	for _, sc := range rep.Scenarios {
+		switch sc.Status {
+		case "pass":
+			rep.Totals.Passed++
+		case "skip":
+			rep.Totals.Skipped++
+		default:
+			rep.Totals.Failed++
+		}
+		rep.Totals.LLMCalls += sc.LLM.Calls
+		rep.Totals.InputTokens += sc.LLM.InputTokens
+		rep.Totals.OutputTokens += sc.LLM.OutputTokens
+		rep.Totals.CostUSD += sc.LLM.CostUSD
+	}
+	dir := filepath.Dir(reportPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Errorf("写报告前建目录失败 %s: %v", dir, err)
+		return
+	}
+	rep.ReportPath = reportPath
+	rep.EventsPath = filepath.Join(dir, "events.jsonl")
+
+	reportJSON, err := json.MarshalIndent(rep, "", "  ")
+	if err != nil {
+		t.Errorf("报告序列化失败: %v", err)
+		return
+	}
+	reportText := string(reportJSON)
+	if key != "" {
+		reportText = strings.ReplaceAll(reportText, key, "[REDACTED]")
+	}
+	if err := os.WriteFile(reportPath, []byte(reportText+"\n"), 0o644); err != nil {
+		t.Errorf("写报告失败 %s: %v", reportPath, err)
+	}
+	events := ""
+	if buf != nil {
+		events = buf.String()
+	}
+	if key != "" {
+		events = strings.ReplaceAll(events, key, "[REDACTED]")
+	}
+	if err := os.WriteFile(rep.EventsPath, []byte(events), 0o644); err != nil {
+		t.Errorf("写原始事件失败 %s: %v", rep.EventsPath, err)
+	}
+	t.Logf("[hub-real] report=%s events=%s status=%s scenarios=%d pass=%d fail=%d skip=%d llm_calls=%d cost_usd=%.6f",
+		reportPath, rep.EventsPath, rep.Status, rep.Totals.Scenarios, rep.Totals.Passed,
+		rep.Totals.Failed, rep.Totals.Skipped, rep.Totals.LLMCalls, rep.Totals.CostUSD)
+}

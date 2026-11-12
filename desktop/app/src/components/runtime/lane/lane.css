@@ -323,3 +323,22 @@ html[data-skin='runtime'] .la-foot {
     transform: none;
   }
 }
+
+/* 车道行展开后的「在会话视图中打开」：这条车道对应的子智能体有自己的一页，
+   它派发的孙任务卡也只画在那一页里（见 lib/nestedCards）—— 所以入口不能只放在左栏树。 */
+html[data-skin='runtime'] .la-goto {
+  margin-top: 3px;
+  padding: 3px 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font: 400 10.5px/1.5 var(--mono);
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease);
+}
+
+html[data-skin='runtime'] .la-goto:hover,
+html[data-skin='runtime'] .la-goto:focus-visible {
+  color: var(--accent);
+}

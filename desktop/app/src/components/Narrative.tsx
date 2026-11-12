@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, genMsOf, mainRunEnded } from '../store/useAppStore'
@@ -17,6 +17,7 @@ import { Ledger } from './runtime/turn/Ledger'
 import { AsyncNote } from './runtime/blocks/AsyncNote'
 import { UserBlock } from './runtime/blocks/UserBlock'
 import { Lane } from './runtime/lane/Lane'
+import { nestCards } from '../lib/nestedCards'
 import { LivePanel } from './runtime/turn/LivePanel'
 import { WorkBox } from './runtime/turn/WorkBox'
 import { FilesLine } from './runtime/turn/FilesLine'
@@ -194,8 +195,22 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 指定 viewSid（如 cron 详情页专用 view）→ 渲染该 view 的 blocks；缺省 = 活跃会话。
   // source 优先（子会话）：hooks 必须无条件调用，所以先取 store 再覆盖。
   const storeBlocks = useAppStore((s) => (viewSid ? s.views[viewSid]?.blocks ?? [] : s.blocks))
-  const blocks = source ? source.blocks : storeBlocks
+  const rawBlocks = source ? source.blocks : storeBlocks
+  /* 本层视图：**孙任务卡不在这里画**。事件流是会话级的（子智能体派孙任务时，它的
+     task_started / agent_start / llm_error 仍经父 handler 上浮到同一条流），store 只能把
+     它插成一张平铺的卡；卡上的 parentTaskId 说明它属于派发它的那张卡 —— 所以它在
+     那张卡的子会话页里画（AgentSessionView 用同一个 nestCards），主转录只留本层。
+     块本身留在 blocks 里不动：左栏树 / 停止按钮 / run→卡 查找全靠它们。 */
+  const blocks = useMemo(() => nestCards(rawBlocks).shown, [rawBlocks])
   const persona = useAppStore((s) => s.persona)
+  const focusAgent = useAppStore((s) => s.focusAgent)
+  /* 车道行的「打开」入口：子智能体有自己的一页（同一套渲染，只是换数据源）。
+     孙任务只出现在派发它的那一页上（见 lib/nestedCards），所以这个入口得跟着车道走 ——
+     否则想看「它自己干了什么」只能先去左栏树里找它。nodeId/runId/taskId 三个 id 的
+     分工见 store 的 AgentFocus 注释（树节点身份 / 找卡片 / 停止与分页）。 */
+  const openAgent = useCallback((b: Extract<MsgBlock, { kind: 'agent' }>) => {
+    focusAgent({ nodeId: b.taskId || b.runId, runId: b.runId, ...(b.taskId ? { taskId: b.taskId } : {}) })
+  }, [focusAgent])
   const turnMetrics = useAppStore((s) => (viewSid ? s.views[viewSid]?.turns : s.turns))
   const storedDensity = useAppStore((s) => s.settings.narrative_density ?? 'concise')
   // 会话页样式（current/v3/runtime）：用户块与轮头按设计重塑只在 runtime 皮肤下生效，
@@ -1181,7 +1196,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           group.push(list[i + 1] as Extract<MsgBlock, { kind: 'agent' }>)
           i++
         }
-        out.push(<Lane key={'la' + group[0].id} agents={group} />)
+        out.push(<Lane key={'la' + group[0].id} agents={group} onOpen={openAgent} />)
         continue
       }
       if (b.kind === 'tool') {
