@@ -19,7 +19,9 @@
 /decks/
 /examples/
 /build_tools/
-/internal/
+# 允许版本化的 internal 包（PR-05a0 起）：其余 internal/* 仍不入库
+/internal/*
+!/internal/atomicfile/
 /oss/
 /scripts/
 /promo-video/
