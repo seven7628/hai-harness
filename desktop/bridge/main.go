@@ -44,6 +44,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -5984,6 +5985,10 @@ func serve() error {
 	// 为什么需要：自压缩是**被动**的（只在 SaveState 时检查）→ 已经死掉的文件
 	// 永远等不到压缩。清扫复用同一套原子压缩逻辑，内容不变、恢复逐字节一致。
 	// 限速执行，不与正常使用抢 IO；settings.checkpoint.sweep_journals=false 可关。
+	//
+	// 堆软上限必须在清扫**之前**设好：清扫那 5 分钟的 IO 风暴会把堆冲到
+	// 3 GB（2026-11-12 实测），其中 2.8 GB 被系统换出到 swap 且再也回不来。
+	applyMemoryLimit()
 	if loadCheckpointSettings().sweepJournals() {
 		go sweepSessionFilesInBackground()
 	}
@@ -6345,33 +6350,58 @@ func sweepSessionFilesInBackground() {
 			fmt.Fprintln(os.Stderr, "sweep: panic:", r)
 		}
 	}()
-	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause)
+	// 清扫索引：记「哪些文件已经清过、且自那时起没动过」。
+	//
+	// 清扫本质是**一次性形态迁移**，不是常驻工序 —— P0–P5' 落地后会话文件
+	// 已经是新形态，每次启动再全量扫一遍是纯浪费（实测每次启动固定烧
+	// ~105 秒限速 sleep + 1.5 GB 读 + 487 次 fsync）。
+	//
+	// 索引只用于**跳过**（连文件都不打开），不参与任何写入决策 ⇒ 索引算错
+	// 最多多扫一遍，不会写坏数据。版本变了（清扫逻辑改了）→ 旧指纹全部
+	// 作废 → 触发一次全量。
+	ix := session.OpenSweepIndex(filepath.Join(appDataDir(), "checkpoint_sweep.json"), session.SweepIndexVersion)
+	// 清扫结束把内存还给 OS。
+	//
+	// 这一轮是启动期**唯一的堆峰值来源**（实测冲到 3 GB，其中 2.8 GB 被系统
+	// 换出到 swap —— Go 的 scavenger 慢慢还，但机器颠簸时它宁可换出也不释放）。
+	// FreeOSMemory = 一次完整 GC + 立刻归还 ⇒ 高水位当场消掉，而不是留着
+	// 等系统慢慢换出。
+	//
+	// 顺序：先落索引（defers 是后进先出），再还内存。
+	defer debug.FreeOSMemory()
+	defer func() {
+		if err := ix.Flush(); err != nil {
+			fmt.Fprintln(os.Stderr, "sweep index: 落盘失败:", err)
+		}
+	}()
+
+	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause, ix)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sweep: 失败:", err)
 	} else {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩）%.1fMB → %.1fMB，用时 %s\n",
-			res.Files, res.Compacted, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩，跳过 %d）%.1fMB → %.1fMB，用时 %s\n",
+			res.Files, res.Compacted, res.Skipped, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
 	}
 	// sidecar 压缩清扫（P4）：存量 sidecar 里未压缩的块就地压一遍。
 	// 实测 6 个最大的 sidecar：2256MB → 395MB（省 82.5%）。
 	// 只动 sidecar、不碰 record（摘要算逻辑内容 ⇒ Sum 不变）。
-	cres, cerr := session.SweepBlockStores(root, sweepPause)
+	cres, cerr := session.SweepBlockStores(root, sweepPause, ix)
 	if cerr != nil {
 		fmt.Fprintln(os.Stderr, "sweep blocks: 失败:", cerr)
-	} else if cres.Rewritten > 0 {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
-			cres.Files, cres.Rewritten, float64(cres.Before)/1e6, float64(cres.After)/1e6,
+	} else if cres.Rewritten > 0 || cres.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写，跳过 %d）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
+			cres.Files, cres.Rewritten, cres.Skipped, float64(cres.Before)/1e6, float64(cres.After)/1e6,
 			cres.Blocks, cres.BlocksTotal, cres.Elapsed.Round(time.Millisecond))
 	}
 	// record 清扫（P3-1）：与上面同一把限速思路，独立失败互不影响。
-	rres, rerr := session.SweepRecordFiles(root, sweepPause)
+	rres, rerr := session.SweepRecordFiles(root, sweepPause, ix)
 	if rerr != nil {
 		fmt.Fprintln(os.Stderr, "sweep record: 失败:", rerr)
 		return
 	}
-	if rres.Stripped > 0 {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫 record: %d 个（%d 个搬进 sidecar）%.1fMB → %.1fMB，用时 %s\n",
-			rres.Stripped, rres.Migrated, float64(rres.Before)/1e6, float64(rres.After)/1e6, rres.Elapsed.Round(time.Millisecond))
+	if rres.Stripped > 0 || rres.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫 record: %d 个（%d 个搬进 sidecar，跳过 %d）%.1fMB → %.1fMB，用时 %s\n",
+			rres.Stripped, rres.Migrated, rres.Skipped, float64(rres.Before)/1e6, float64(rres.After)/1e6, rres.Elapsed.Round(time.Millisecond))
 	}
 }
 
@@ -6382,3 +6412,34 @@ const (
 	// sweepPause 是每个文件之间的间隔（限速：避免 12GB 的重写把 IO 打满）。
 	sweepPause = 100 * time.Millisecond
 )
+
+// bridgeMemLimitDefaultMB 是堆软上限的默认值（MB）。
+//
+// 为什么是 2 GiB（2026-11-12 实测）：Go 默认 GOGC=100 ⇒ 堆目标 = 活堆 × 2。
+// 启动清扫处理 28 GB 时堆冲到 3 GB，2.8 GB 被系统换出到 swap 且**再也回不来**
+// （Go 的 scavenger 慢慢还，但机器在颠簸时把它换出而不是释放）。
+// 2 GiB 给日常负载（常驻实测 90–330 MB）留了 6 倍以上余量，
+// 又能把清扫那一下的峰值压掉三分之一。
+const bridgeMemLimitDefaultMB = 2048
+
+// applyMemoryLimit 设堆软上限。
+//
+// 优先级：GOMEMLIMIT 环境变量 > settings.checkpoint.mem_limit_mb > 默认 2 GiB。
+// 环境变量优先是因为它是运行时的显式设置，debug.SetMemoryLimit 会**覆盖**它。
+// 配置为 0 或负数 → 不设上限（回到 Go 默认行为）。
+func applyMemoryLimit() {
+	if v := os.Getenv("GOMEMLIMIT"); v != "" {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 堆上限：GOMEMLIMIT=%s（环境变量优先）\n", v)
+		return
+	}
+	mb, explicit := loadCheckpointSettings().memLimitMB()
+	if !explicit {
+		mb = bridgeMemLimitDefaultMB
+	}
+	if mb <= 0 {
+		fmt.Fprintln(os.Stderr, "[checkpoint] 堆上限：不设限（settings 显式关闭）")
+		return
+	}
+	debug.SetMemoryLimit(mb << 20)
+	fmt.Fprintf(os.Stderr, "[checkpoint] 堆上限：%d MB（软上限，GC 提前介入）\n", mb)
+}

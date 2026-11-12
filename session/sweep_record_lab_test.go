@@ -30,7 +30,7 @@ func TestRecordSweepLab(t *testing.T) {
 	t.Logf("清扫前：%d 个文件，%.1f MB", before.files, float64(before.bytes)/(1<<20))
 
 	start := time.Now()
-	res, err := SweepRecordFiles(root, 0)
+	res, err := SweepRecordFiles(root, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,14 +172,14 @@ func TestCombinedSweepLab(t *testing.T) {
 		t.Skip("need root")
 	}
 	t0 := time.Now()
-	r1, err := SweepSessionFiles(root, 0, DefaultCompactKeepStates, false, 0)
+	r1, err := SweepSessionFiles(root, 0, DefaultCompactKeepStates, false, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("会话文件清扫: %d 个文件（%d 个压缩）%.1fMB → %.1fMB，省 %.1fMB，用时 %s",
 		r1.Files, r1.Compacted, float64(r1.Before)/1e6, float64(r1.After)/1e6, float64(r1.Saved())/1e6, time.Since(t0).Round(time.Millisecond))
 	t1 := time.Now()
-	r2, err := SweepRecordFiles(root, 0)
+	r2, err := SweepRecordFiles(root, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
