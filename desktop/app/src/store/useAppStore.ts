@@ -2825,7 +2825,7 @@ export function applySessionPrefs(path: string, sid: string): void {
   if (Object.keys(patch).length > 0) useAppStore.setState(patch)
 }
 
-interface AppState {
+export interface AppState {
   bridgeStatus: 'idle' | 'starting' | 'running' | 'stopped' | 'error'
   bridgeError?: string
   workspace?: string
