@@ -58,6 +58,26 @@ function kindIcon(kind: TabKind): ReactElement {
   }
 }
 
+/**
+ * `.right-body` 的**本地兜底**：provider 未注册时用它渲染非 file 面板。
+ *
+ * 为什么存在：provider 靠 `surfaces/builtin` 的**副作用 import** 注册（只有 main.tsx 那样做），
+ * 而若干 e2e 探针页只 import RightPanel —— 那时注册表是空的。没有兜底，那些探针看到的是空白
+ * 面板，且空白不会让任何断言变红（04-review F45/F46 两次踩过）。
+ *
+ * 为什么没有 file：文件面板要一条「按标签 id 重挂载」的 key（见 body 里 file 那段的注释），
+ * 与统一委派槽的「不许加 key」相冲突 —— file 留独立槽，收口留给 PR-11。
+ * 表里没有的 kind（例如未注册的 plugin:*）返回 null：与「没有分支可渲染」的旧行为一致。
+ */
+function panelFallback(tab: TabInstance, scope: string): ReactNode {
+  switch (tab.kind) {
+    case 'activity': return <ActivityTab />
+    case 'git': return <ChangesTab />
+    case 'web': return <WebTab tab={tab} scope={scope} />
+    default: return null
+  }
+}
+
 export default function RightPanel() {
   const t = useT()
   const allTabs = primaryTabs(t).concat(secondaryTabs(t))
@@ -443,14 +463,20 @@ export default function RightPanel() {
               {t('rp.tabs.emptyHint')}
             </div>
           )}
-          {/* R07：链路面板走 provider 渲染（surfaces/builtin/activitySurface.tsx），`??` 回退到
-              本地 ActivityTab —— 与 git/file/web 同法。为什么必须留回退：provider 是**副作用
-              注册**（只有 main.tsx 导入 builtin 时才存在），而若干探针页只 import RightPanel；
-              没有回退时那些探针会渲染空面板，且空白不会让任何断言变红（04-review F45/F46）。
-              上面这道 kind 守卫不能省：provider.render 对别的 kind 返回 null，而
-              `null ?? <ActivityTab/>` 会取右边（见 activitySurface.tsx 的文件头）。 */}
-          {activeTab?.kind === 'activity' && (getSurface('activity')?.render({ tab: activeTab, scope }) ?? <ActivityTab />)}
-          {activeTab?.kind === 'git' && (getSurface('git')?.render({ tab: activeTab, scope }) ?? <ChangesTab />)}
+          {/* R07c：非 file 面板（activity / git / web）统一走 provider 委派 —— 一条表达式覆盖三种
+              kind，本地兜底见 panelFallback。为什么不按 kind 各写一行：三行的内容都是
+              「getSurface(kind)?.render(...) ?? 本地组件」，逐行写等于把 kind 判别留在 body 里，
+              而 PR-11 的终态判据是 body 里再没有 kind 等值分支（`grep -c "kind ==="` = 0）。
+              顺序也重要：provider 先、兜底后。provider 是**副作用注册**（只有 main.tsx 导入
+              builtin 时才存在），而若干探针页只 import RightPanel —— 没有兜底时它们渲染空白面板，
+              且空白不会让任何断言变红（04-review F45/F46）。
+              **不要**给这个元素加 key：切 web 标签时组件实例必须原地复用（DOM 容器不重挂载，
+              原生视图与页面状态才保得住）—— 加 key = 每次切标签销毁重建 WebContentsView（R06c）。
+              file 不走这条：它要一条「按标签 id 重挂载」的 key，与「不许加 key」相冲突，
+              重挂载语义的收口留给 PR-11。 */}
+          {activeTab && activeTab.kind !== 'file' && (
+            getSurface(activeTab.kind)?.render({ tab: activeTab, scope }) ?? panelFallback(activeTab, scope)
+          )}
           {/* key={activeTab.id}：**每个 file 标签一份组件实例**（阶段 2 的隔离手段）。
               为什么不共用一个实例再按 props 复位：file 标签之间切换时元素类型/位置不变，
               React 会复用实例 → 组件 state（mdMode/csvMode/detailMode/列表展开…）会从上一个
@@ -463,13 +489,6 @@ export default function RightPanel() {
               {getSurface('file')?.render({ tab: activeTab, scope }) ?? <FilePreviewTab tab={activeTab} />}
             </Fragment>
           )}
-          {/* R06c：web 面板走 provider 渲染，`??` 回退到本地 WebTab —— 与上面 git/file 同法。
-              为什么必须留着回退：provider 是**副作用注册**（只有 main.tsx 导入 builtin 时才存在），
-              而若干探针页只 import RightPanel。没有回退时，那些探针会渲染出空白面板，
-              且「面板空白」不会让任何断言变红（最坏的一种失败）。
-              注意**不要**给这个元素加 key：切 web 标签时组件实例必须原地复用（DOM 容器不重挂载，
-              原生视图与页面状态才保得住）—— 加 key = 每次切标签都销毁重建 WebContentsView。 */}
-          {activeTab?.kind === 'web' && (getSurface('web')?.render({ tab: activeTab, scope }) ?? <WebTab tab={activeTab} scope={scope} />)}
         </div>
       </div>
       {/* 脏内容确认框：关标签与退出应用共用一个（reason 区分）。挂在 aside 末尾而不是 body 里
