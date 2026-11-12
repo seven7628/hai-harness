@@ -22,6 +22,7 @@
 //      REPORT=1 node e2e/verify_subagent_transcript_style.mjs   # 只取证不判（复现用）
 // 退出码：全通过 0；任一断言失败非 0。
 import { chromium } from 'playwright'
+import { freePort, waitHttp } from './_serve.mjs'
 import { spawn } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -30,7 +31,8 @@ import fs from 'fs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
-const PORT = Number(process.env.PORT || 4190)
+// 端口由内核分配（见 e2e/_serve.mjs 的注释）：固定端口在链里会撞上一个还没退干净的服务器。
+const PORT = Number(process.env.PORT) || await freePort()
 const SHOTS = path.join(__dirname, '_subagent_shots')
 const REPORT = process.env.REPORT === '1' // 只量不判（复现/取证用）
 
@@ -74,6 +76,9 @@ document.documentElement.setAttribute('data-theme', q.get('theme') || 'ink')
 const HOST = q.get('host') === 'panel' ? 'panel' : 'main'
 
 const SID = 'probe'
+// 密度固定「详细」：简洁档（默认）把思考/工具折进一行「Worked · N calls」，
+// 这一段量的正是**逐行**的转录渲染（.thinking/.tool-row/.md-text），折叠态下量不到。
+useAppStore.setState((s) => ({ settings: { ...s.settings, narrative_density: 'detailed' } }))
 useAppStore.setState({
   workspace: '/mock/proj-auth',
   activeSessionId: SID,
@@ -187,7 +192,7 @@ async function probe(page, skin, host) {
     await page.waitForSelector('.narrative .agent-card', { timeout: 20000 })
     await page.locator('.narrative .agent-card .ac-main').first().evaluate((el) => el.click())
   }
-  const tr = host === 'panel' ? '.narrative' : '.agent-tr'
+  const tr = host === 'panel' ? '.narrative' : '.agent-card .ac-body'
   await page.waitForSelector(tr, { timeout: 5000 })
   await page.waitForTimeout(300)
 
@@ -205,9 +210,12 @@ async function probe(page, skin, host) {
     thinking: await loc.locator('.thinking').count(),
     shell: await page.locator('.agent-card').count(),          // 任务卡外壳（两处同一份实现）
     legacyShell: await page.locator('.agent-view, .av-hd, .av-body, .av-sec, .av-st').count(), // 旧卡壳退役
-    resultInline: await page.locator('.task-result-inline').count(),
-    resultMd: await page.locator('.task-result-inline .md, .task-result-inline .md-text').count(),
-    resultPre: await loc.locator('.task-result-inline pre').count(),
+    // 交付结果（2026-10 起的口径）：**不再是一张页脚卡**（.task-result-inline 已退役，
+    // 结果本身就是转录最后一条 assistant 正文）。故这里量两件事：
+    //   legacyResultCard = 旧页脚卡是否复活（必须 0）；
+    //   resultMd = 交付正文是否走 Markdown（.md-text 里能读到那两行列表）。
+    legacyResultCard: await page.locator('.task-result-inline').count(),
+    resultMd: await loc.locator('.md-text ul li, .md-text ol li').count(),
     taskCards: await page.locator('.agent-card:has(.task-promoted)').count(),
     // 一条消息的元信息行（2026-10 用户报障「子智能体没有模型信息、消息时刻、
     // 也没有 LLM 总耗时 · Agent 总耗时 · tokens/s」）—— 子会话必须与主会话一样有三段：
@@ -218,10 +226,8 @@ async function probe(page, skin, host) {
     turnMetaText: await loc.locator('.msg.assistant .assistant-turn-meta').first().textContent().catch(() => null),
   }
   const shellCard = page.locator('.narrative .agent-card').first()
-  const resultBlock = page.locator('.task-result-inline').first()
   const styles = {
     text: await first('.at-text, .md-text', TEXT),
-    result: (await resultBlock.count()) ? await css(resultBlock, TEXT) : null,
     // 卡壳只在主对话存在（panel = 子会话视图，没有 .ac-main/.ag-sec）
     header: (await shellCard.locator('.ac-main').count()) ? await css(shellCard.locator('.ac-main').first(), ['font-size', 'font-family', 'padding', 'gap', 'color']) : null,
     sec: (await shellCard.locator('.ag-sec').count()) ? await css(shellCard.locator('.ag-sec').first(), ['font-size', 'color', 'background-color', 'padding']) : null,
@@ -242,6 +248,8 @@ async function main() {
   fs.rmSync(SHOTS, { recursive: true, force: true })
   fs.mkdirSync(SHOTS, { recursive: true })
   await waitPort(PORT)
+  // 端口可连只说明**有东西**在监听；再确认这张探针页真能开（子进程退出即失败）
+  await waitHttp(PROBE_URL, { child: server })
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   page.on('pageerror', (e) => console.error('[pageerror]', e.message))
@@ -256,7 +264,6 @@ async function main() {
       console.log(`  ${' '.repeat(5)} 正文 ${JSON.stringify(r.styles.text)}`)
       console.log(`  ${' '.repeat(5)} 工具行 ${JSON.stringify(r.styles.row)}`)
       console.log(`  ${' '.repeat(5)} 工具参数 ${JSON.stringify(r.styles.args)}`)
-      console.log(`  ${' '.repeat(5)} 任务结果 ${JSON.stringify(r.styles.result)}`)
     }
   }
   console.log(`\n  📸 截图：${path.relative(APP, SHOTS)}/`)
@@ -276,10 +283,12 @@ async function main() {
       assert(main.survey.thinking > 0 && panel.survey.thinking > 0, '两处思考块都用 .thinking')
       assert(main.survey.icon === panel.survey.icon, `行首图标 .ic 数量一致（V3 皮肤下渲染，本皮肤 ${main.survey.icon} 个）`)
       assert(panel.styles.family === 'cmd', `bash 行按族着色（data-family=${panel.styles.family}）`)
-      assert(main.survey.resultMd > 0 && panel.survey.resultMd > 0 && main.survey.resultPre === 0 && panel.survey.resultPre === 0,
-        '任务结果两处都渲染 Markdown（不再是 mono <pre>）')
-      assert(JSON.stringify(main.styles.result) === JSON.stringify(panel.styles.result),
-        `任务结果计算样式一致：${JSON.stringify(panel.styles.result)}`)
+      // 交付结果不再是一张页脚卡：它已经就是转录最后一条正文（见 AgentSessionView 注释）。
+      // 两处都不能复活 .task-result-inline，且交付正文必须是 Markdown 列表（不是 mono <pre>）。
+      assert(main.survey.legacyResultCard === 0 && panel.survey.legacyResultCard === 0,
+        '任务结果页脚卡已退役（两处 .task-result-inline 均为 0）')
+      assert(main.survey.resultMd > 0 && panel.survey.resultMd > 0,
+        `交付结果两处都渲染成 Markdown 列表（不再是 mono <pre>，各 ${panel.survey.resultMd} 项）`)
       // 2026-10：第二处宿主是子会话视图（无卡壳）。旧 .agent-view/.av-* 已全仓退役。
       assert(main.survey.legacyShell === 0 && panel.survey.legacyShell === 0,
         '旧 .agent-view/.av-* 卡壳全仓退役')
@@ -299,7 +308,7 @@ async function main() {
         `子会话的指标行含 tokens/s（实际「${panel.survey.turnMetaText}」）`)
       assert(/TTFT/.test(panel.survey.turnMetaText ?? '') && /总耗时/.test(panel.survey.turnMetaText ?? ''),
         `子会话的指标行含 TTFT 与总耗时（实际「${panel.survey.turnMetaText}」）`)
-      for (const [label, key] of [['正文', 'text'], ['工具行', 'row'], ['工具参数', 'args'], ['工具名', 'name'], ['任务结果', 'result']]) {
+      for (const [label, key] of [['正文', 'text'], ['工具行', 'row'], ['工具参数', 'args'], ['工具名', 'name']]) {
         assert(JSON.stringify(main.styles[key]) === JSON.stringify(panel.styles[key]),
           `${label}计算样式一致：${JSON.stringify(panel.styles[key])}`)
       }
