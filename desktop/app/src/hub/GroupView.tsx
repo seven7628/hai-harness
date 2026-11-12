@@ -24,6 +24,7 @@ import { triggerSeqBySender } from './groupProjection'
 import { canAutoFollow, scrollToSeq, seqJumpPlan } from './seqJump'
 import { groupTimelineMarkdown } from './exportMarkdown'
 import { hubPerfMemoEnabled } from './perfFlags'
+import { useScrollbarWidth } from './useScrollbarWidth'
 import { downloadText, safeFilename, timestampSlug } from './download'
 import {
   ALL_MENTION_ID,
@@ -110,6 +111,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const [assignInstruction, setAssignInstruction] = useState('')
   // 时间线滚动 + 触发消息高亮（B1/B6）
   const listRef = useRef<HTMLDivElement>(null)
+  // 会话视图根节点：--hub-scrollbar-w 写在这里，composer 外层继承后补右内边距。
+  const rootRef = useRef<HTMLElement | null>(null)
+  useScrollbarWidth(listRef, rootRef)
   const threadRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
@@ -397,7 +401,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
   }
 
   return (
-    <section className="main hub-group-view hub-demo" data-theme={theme === 'paper' ? 'light' : 'dark'}>
+    <section ref={rootRef} className="main hub-group-view hub-demo" data-theme={theme === 'paper' ? 'light' : 'dark'}>
       <header className="chat-header">
         <AgentStack
           members={stackMembers}

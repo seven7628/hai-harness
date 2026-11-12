@@ -74,6 +74,10 @@
   min-height: 0;
   background: var(--paper);
   color: var(--ink);
+  /* 占位滚动条宽度：classic 10/15px、overlay 0。useScrollbarWidth 实测后写到
+     当前会话视图根节点（.hub-group-view/.hub-dm）上；这里给未测量时的默认值。
+     只被 demo 会话区的 composer 右内边距消费，改 0 等于退回补偿前的布局。 */
+  --hub-scrollbar-w: 0px;
 }
 .hub-center > .hub-dm,
 .hub-center > .hub-group-view { flex: 1; min-height: 0; }
@@ -2481,16 +2485,25 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
    vs 444→1188）。demo 的行宽只由 .messages-inner / .composer-inner 的 760 决定，
    外层只负责留白，所以在这里解除全局的 800 上限与自动居中。 */
 .hub-demo.main > .composer-wrap { flex: 0 0 auto; width: 100%; max-width: none; margin: 0; }
+/* 列对齐（占位滚动条）：`.messages` 是滚动容器，classic 条（Windows/Linux、常显
+   macOS、自定义 10px webkit 条）会从右侧吃掉 S px 内容盒，`.messages-inner` 的
+   margin:0 auto 整体左移 S/2；composer 外层没有滚动条，于是又差 S/2（10px 条约 5px、
+   15px 条约 7.5px）。composer 不能自己也变成滚动容器 —— 里面的 MentionPicker/灯箱/
+   附件面板是绝对定位，会被 overflow 裁掉 —— 所以只在右内边距补同一个 S。S 由
+   useScrollbarWidth 量 offsetWidth-clientWidth 后写进 --hub-scrollbar-w（overlay 0px）。 */
+.hub-demo.main > .composer-wrap { padding-right: calc(28px + var(--hub-scrollbar-w, 0px)); }
 .hub-demo .messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .hub-demo .messages-inner { width: 100%; max-width: 760px; margin: 0 auto; }
 /* 列对齐（窄窗）：demo 的消息区与 composer 左右内边距不是同一组值 —— ≤900 是 14 与 12，
    于是 641-900 之间消息列左右各比 composer 窄 2px；≤640 消息区收成 12，composer 沿用
-   900 段的 12，那一档本来就是对上的。这里把两档钉成同一组值，消息区（demo.css）不动。 */
+   900 段的 12，那一档本来就是对上的。这里把两档钉成同一组值，消息区（demo.css）不动。
+   选择器与上一段保持同特异性（.hub-demo.main > .composer-wrap），否则 base 段的
+   padding-right 会压过断点值。 */
 @media (max-width: 900px) {
-  .hub-demo .composer-wrap { padding: 7px 14px 10px; }
+  .hub-demo.main > .composer-wrap { padding: 7px 14px 10px; padding-right: calc(14px + var(--hub-scrollbar-w, 0px)); }
 }
 @media (max-width: 640px) {
-  .hub-demo .composer-wrap { padding: 7px 12px 10px; }
+  .hub-demo.main > .composer-wrap { padding: 7px 12px 10px; padding-right: calc(12px + var(--hub-scrollbar-w, 0px)); }
 }
 .hub-demo .chat-title-wrap { min-width: 0; flex: 1; }
 .hub-demo .chat-title { display: flex; align-items: center; gap: 7px; }

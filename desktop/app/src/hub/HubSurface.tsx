@@ -14,6 +14,7 @@ import { formatClockTime } from './conversation'
 import { agentSigilLabel } from './avatarLabels'
 import { useAgentState } from './useAgentState'
 import { isImeComposing, type MentionAgent } from './mentions'
+import { useScrollbarWidth } from './useScrollbarWidth'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubMessage, HubRunEntry } from './types'
 import { useResolvedTheme } from '../lib/useTheme'
@@ -86,6 +87,9 @@ export default function HubSurface() {
     : failed.agentId === activeId)
 
   const listRef = useRef<HTMLDivElement>(null)
+  // DM 会话视图根节点：--hub-scrollbar-w 写在这里，composer 外层继承后补右内边距。
+  const dmRootRef = useRef<HTMLElement | null>(null)
+  useScrollbarWidth(listRef, dmRootRef)
   const stickBottom = useRef(true)
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -236,7 +240,7 @@ export default function HubSurface() {
       {activeGroup ? (
         <GroupView key={activeGroup.id} group={activeGroup} />
       ) : (
-        <section className="main hub-dm hub-demo" data-theme={theme === 'paper' ? 'light' : 'dark'}>
+        <section ref={dmRootRef} className="main hub-dm hub-demo" data-theme={theme === 'paper' ? 'light' : 'dark'}>
           {!activeAgent ? (
             <div className="hub-empty hub-empty-pick">
               <Bot size={30} />
