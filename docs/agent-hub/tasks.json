@@ -2644,8 +2644,8 @@
       "reviewNote": "独立 delta 复审 task-uydfsps6 PASS：B1 深链所有权（StrictMode 双跑/1 次 history/highlight seq/no false notice）、B2 sender 名 escapeInline + fuzz 零 raw HTML、B3 missing seq 不登记 jump + 新消息仍贴底 + TTL；191/225/32 + tsc/build + Hub 57.7s 全绿。OS 深链仍未打包真机，明确 defer。"
     },
     "P4-04": {
-      "status": "todo",
-      "note": "依赖 P4-03d 与外部 hooks 协议拍板：AgentEnd hook + FTS/归档。"
+      "status": "done",
+      "note": "旧聚合项（无任务卡）：已拆解为 P4-04a（用户级 AgentEnd/Stop hook）、P4-04b（全量搜索）与 P4-04b-2（冷归档），三者均独立 Review passed；保留记录，不再作为待办。"
     },
     "P4-05": {
       "status": "done",
