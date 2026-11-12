@@ -80,7 +80,7 @@ func SweepSessionFiles(root string, minBytes int64, keep int, keepHistory bool, 
 		res.Before += fi.Size()
 
 		dir, _ := filepath.Split(path)
-		fs, ferr := NewFileStore(dir, WithAutoCompact(keep, 0), WithKeepHistory(keepHistory))
+		fs, ferr := NewFileStore(dir, WithAutoCompact(keep, 0), WithKeepHistory(keepHistory), WithTrimAllHistory())
 		if ferr != nil {
 			return nil
 		}

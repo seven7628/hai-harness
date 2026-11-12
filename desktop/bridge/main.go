@@ -1287,7 +1287,17 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	// keep_history=false（默认）→ 会话 jsonl 只保留「最后一个压缩点及其之后」
 	// + 首行（标题来源）。恢复只用最后一条 state 行；完整消息在 events.jsonl 里。
 	// settings.checkpoint.keep_history=true 可完全回退。
-	store, err := session.NewFileStore(storeDir, session.WithKeepHistory(loadCheckpointSettings().keepHistory()))
+	//
+	// P5'：默认**连 history 行都不写**（只留第一条给标题）——
+	// 桌面端有 events.jsonl 这个唯一事实来源兜底，而磁盘上的 history 行
+	// 没有任何读取方（实测占会话文件的 30%）。
+	// keep_history=true 同时回退这一项（写全部 history 行 + 不裁剪）。
+	keepHistory := loadCheckpointSettings().keepHistory()
+	storeOpts := []session.FileStoreOption{session.WithKeepHistory(keepHistory)}
+	if !keepHistory {
+		storeOpts = append(storeOpts, session.WithHistoryLogTitleOnly())
+	}
+	store, err := session.NewFileStore(storeDir, storeOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("file store: %w", err)
 	}

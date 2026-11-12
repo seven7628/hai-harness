@@ -19,8 +19,15 @@ import (
 // （tailLastState），ReadMeta 只读最后一条 meta 行；更早的 state 行无人读取。
 // history / compaction / meta 行全部保留（history 是 append-only 审计日志）。
 //
-// 保留 K=3（而非 1）的原因：tailLastState 的尾扫会跳过损坏行，末行半截时
+// 保留 K=2（而非 1）的原因：tailLastState 的尾扫会跳过损坏行，末行半截时
 // 需要回退到上一条；K=1 就退无可退。
+//
+// **为什么从 3 降到 2**（2026-11-11，P5'）：state 行是**每轮的全量上下文快照**
+// —— 实测清扫后最大的 40 个会话文件里 state 行占 **70%**（0.80GB / 132 行，
+// 每条约 6MB）。而恢复只用**最后一条**；多留的那些只是「末行半截时的回退」。
+// 文档给的理由（回退到上一条）K=2 就已经满足，K=3 多留的是**第二份**回退。
+//
+// 全局推算：state 行 ~3.85GB → 少留一条 ≈ **省 1.3GB**。
 //
 // 安全性：
 //   - 写临时文件 + rename 原子替换（同目录，保证同文件系统）——崩溃时原文件完好
@@ -29,7 +36,7 @@ import (
 //     （跨进程由会话 flock 保证）
 const (
 	// defaultCompactKeepStates 保留最后 N 条 state 行（<=0 关闭自压缩）。
-	defaultCompactKeepStates = 3
+	defaultCompactKeepStates = 2
 	// DefaultCompactKeepStates 是 defaultCompactKeepStates 的导出形式
 	// （维护清扫等外部调用方要用同一个值）。
 	DefaultCompactKeepStates = defaultCompactKeepStates
@@ -72,7 +79,7 @@ func (s *FileStore) compactFile(p string, keep int) (bool, error) {
 	unlock := lockRecord(p)
 	defer unlock()
 	// ① 第一遍：定位 state 行 / compaction 行的起点
-	scan, err := scanSessionRows(p)
+	scan, err := scanSessionRows(p, s.trimAllHistory)
 	if err != nil {
 		return false, err
 	}
@@ -93,7 +100,7 @@ func (s *FileStore) compactFile(p string, keep int) (bool, error) {
 
 	// ② 第二遍：逐行拷贝（按下面的保留规则）→ 临时文件
 	tmp, err := writeStreamedTempFile(filepath.Dir(p), filepath.Base(p), orig.Mode().Perm(), func(w *bufio.Writer) (int64, error) {
-		return copySessionRows(p, keepFrom, boundary, s.keepHistory, w)
+		return copySessionRows(p, keepFrom, boundary, s.keepHistory, s.trimAllHistory, w)
 	})
 	if err != nil {
 		return false, err
@@ -132,7 +139,7 @@ type sessionRows struct {
 // scanSessionRows 顺序扫描会话 jsonl，收集行偏移。
 // 用 ReadBytes 逐行读（不在内存驻留整文件），行内不解析 JSON ——
 // 靠行首的类型前缀判定（fileRecord 的 Type 是第一个字段）。
-func scanSessionRows(p string) (sessionRows, error) {
+func scanSessionRows(p string, trimAll bool) (sessionRows, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return sessionRows{}, err
@@ -152,8 +159,18 @@ func scanSessionRows(p string) (sessionRows, error) {
 			case bytes.HasPrefix(line, compactionRowPrefix):
 				out.lastCompactionStart = lineStart
 			case bytes.HasPrefix(line, historyRowPrefix):
-				// 边界之前的 history 行可丢（边界之后的是恢复窗口的一部分）。
-				if out.lastCompactionStart == 0 {
+				// 「可丢的 history 行」有两种口径（P5'）：
+				//   · 默认：只丢**压缩点之前**的（边界之后的是恢复窗口的一部分，
+				//     见 P2a 的设计）；
+				//   · trimAll：除**首行**外的全丢 —— 边界之后的同样冗余
+				//     （它们的消息就在最后一条 state 行里）。
+				//
+				// 首行必须留 —— 会话标题的冷磁盘回退读它（firstUserTextFromFile）。
+				if trimAll {
+					if lineStart > 0 {
+						out.canTrimHistory = true
+					}
+				} else if out.lastCompactionStart == 0 {
 					out.canTrimHistory = true
 				}
 			}
@@ -202,7 +219,7 @@ func stateRowStarts(p string) ([]int64, error) {
 
 // copyKeepingTailStates 把 p 逐行写入 w，丢弃起始偏移 < keepFrom 的 state 行。
 // 保留的行按原始字节写出（不重新序列化 → 逐字节不变）。
-func copySessionRows(p string, keepFrom, boundary int64, keepHistory bool, w *bufio.Writer) (int64, error) {
+func copySessionRows(p string, keepFrom, boundary int64, keepHistory, trimAll bool, w *bufio.Writer) (int64, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return 0, err
@@ -224,8 +241,11 @@ func copySessionRows(p string, keepFrom, boundary int64, keepHistory bool, w *bu
 				drop = false // 首行永远保留（标题来源）
 			case lineStart < keepFrom && bytes.HasPrefix(line, stateRowPrefix):
 				drop = true // 只保留最后 keep 条 state 行
-			case !keepHistory && boundary > 0 && lineStart < boundary && bytes.HasPrefix(line, historyRowPrefix):
-				drop = true // 压缩窗口之外的 history 行
+			case !keepHistory && bytes.HasPrefix(line, historyRowPrefix) &&
+				(trimAll && lineStart > 0 || (boundary > 0 && lineStart < boundary)):
+				// trimAll：除首行（标题来源）外全丢（P5'）；
+				// 否则：只丢压缩点之前的（P2a 的保留窗口）。
+				drop = true
 			}
 			if !drop {
 				if _, err := w.Write(line); err != nil {
