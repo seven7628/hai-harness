@@ -2384,7 +2384,8 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-conv-actions { flex: 1 0 100%; justify-content: flex-start; margin-left: 0; }
   .hub-list,
   .hub-list.run { padding: 18px 14px 8px; }
-  .hub-composer-wrap { padding: 7px 12px 10px; }
+  /* 与消息列同口径：这里曾是 12px，比 .hub-list 的 14px 窄 2px（641-900 各错 2px）。 */
+  .hub-composer-wrap { padding: 7px 14px 10px; }
   .hub-msg.task { padding-left: 0; }
 }
 @media (max-width: 640px) {
@@ -2474,9 +2475,23 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 }
 .hub-demo.main > .chat-header { flex: 0 0 auto; width: 100%; }
 .hub-demo.main > .messages { flex: 1 1 auto; width: 100%; }
-.hub-demo.main > .composer-wrap { flex: 0 0 auto; width: 100%; }
+/* 全局 index.css 的 `.composer-wrap` 带 max-width:800 + width:100% + margin:0 auto，
+   它会一并命中 demo 会话区的 composer 外层：1440 下外层被收成 800、再被 28px 内边距
+   压成 744，而 .messages-inner 是 760 —— 消息列与输入框左右各差 8px（实测 436→1196
+   vs 444→1188）。demo 的行宽只由 .messages-inner / .composer-inner 的 760 决定，
+   外层只负责留白，所以在这里解除全局的 800 上限与自动居中。 */
+.hub-demo.main > .composer-wrap { flex: 0 0 auto; width: 100%; max-width: none; margin: 0; }
 .hub-demo .messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .hub-demo .messages-inner { width: 100%; max-width: 760px; margin: 0 auto; }
+/* 列对齐（窄窗）：demo 的消息区与 composer 左右内边距不是同一组值 —— ≤900 是 14 与 12，
+   于是 641-900 之间消息列左右各比 composer 窄 2px；≤640 消息区收成 12，composer 沿用
+   900 段的 12，那一档本来就是对上的。这里把两档钉成同一组值，消息区（demo.css）不动。 */
+@media (max-width: 900px) {
+  .hub-demo .composer-wrap { padding: 7px 14px 10px; }
+}
+@media (max-width: 640px) {
+  .hub-demo .composer-wrap { padding: 7px 12px 10px; }
+}
 .hub-demo .chat-title-wrap { min-width: 0; flex: 1; }
 .hub-demo .chat-title { display: flex; align-items: center; gap: 7px; }
 .hub-demo .chat-title .name { font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

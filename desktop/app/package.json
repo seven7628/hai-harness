@@ -40,6 +40,7 @@
     "test:agents": "node scripts/test-agent-isolation.mjs",
     "test:checkpoint": "node scripts/test-checkpoint-hydrate.mjs",
     "test:css": "node scripts/test-css-sanity.mjs",
+    "check:hub-columns": "node scripts/check-hub-columns.mjs",
     "test:task-usage": "node scripts/test-task-usage.mjs",
     "test:subagent-resume-card": "node scripts/test-subagent-resume-card.mjs",
     "test:restore-retry": "node scripts/test-restore-retry.mjs",
