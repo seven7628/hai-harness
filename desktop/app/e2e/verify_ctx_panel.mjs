@@ -31,6 +31,7 @@
 // 用法：cd desktop/app && node e2e/verify_ctx_panel.mjs
 // 退出码：全通过 0；任一断言失败非 0。
 import { chromium } from 'playwright'
+import { freePort, waitHttp } from './_serve.mjs'
 import { spawn } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -39,7 +40,8 @@ import fs from 'fs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
-const PORT = Number(process.env.PORT || 4191)
+// 端口由内核分配（见 e2e/_serve.mjs 的注释）：固定端口在链里会撞上一个还没退干净的服务器。
+const PORT = Number(process.env.PORT) || await freePort()
 const SHOTS = path.join(__dirname, '_ctxpanel_shots')
 
 let pass = 0
@@ -131,6 +133,10 @@ try {
   fs.mkdirSync(SHOTS, { recursive: true })
   const page = await browser.newPage({ viewport: { width: 1180, height: 760 }, deviceScaleFactor: 2 })
   page.on('pageerror', (e) => { console.error('  ⚠ pageerror:', e.message) })
+  // 服务器就绪两道判据（此前这里**连 waitPort 都没调**，冷缓存下 goto 必吃
+  // ERR_CONNECTION_REFUSED —— 链里第 68 步的确定性红）：端口可连 + 探针页真能开。
+  await waitPort(PORT)
+  await waitHttp(PROBE_URL, { child: server })
   await page.goto(PROBE_URL, { waitUntil: 'load' })
   await page.waitForSelector('.composer .ctx', { timeout: 20000 })
   await page.waitForFunction('window.__ready === true', null, { timeout: 20000 })

@@ -19,6 +19,7 @@
 // 用法：cd desktop/app && node e2e/verify_retry_progress.mjs
 // 退出码：全通过 0；任一断言失败非 0。
 import { chromium } from 'playwright'
+import { freePort, waitHttp } from './_serve.mjs'
 import { spawn } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -27,7 +28,8 @@ import fs from 'fs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
-const PORT = Number(process.env.PORT || 4191)
+// 端口由内核分配（见 e2e/_serve.mjs 的注释）：固定端口在链里会撞上一个还没退干净的服务器。
+const PORT = Number(process.env.PORT) || await freePort()
 
 let pass = 0
 const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
@@ -98,6 +100,8 @@ const retryLine = (page) => page.locator('.msg.error .err-retry').textContent()
 
 async function main() {
   await waitPort(PORT)
+  // 端口可连只说明**有东西**在监听；再确认这张探针页真能开（子进程退出即失败）
+  await waitHttp(PROBE_URL, { child: server })
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 900, height: 800 } })
   const errs = []
