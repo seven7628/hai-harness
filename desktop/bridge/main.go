@@ -1345,9 +1345,28 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 						reducer.NormalizeForRestore() // 重启后 running → 终态（done/abandoned）
 					}
 				}
-				// checkpoint-first SDK 恢复：record.sdk_state 作为权威恢复源
-				//（含 pending 积压；session.NewSession 的 WithRecoveryState 分支使用）
+				// SDK 恢复源（P3-1）：**会话 jsonl 的最后一条 state 行**才是权威。
+				//
+				// record 的 sdk_state 从此只带标量（messages 不再进 record）——
+				// 那份副本在 447 个真实会话里有 19 个比 jsonl 旧（丢掉最新轮次）
+				// 或停在压缩点之前（绕开压缩、把未压缩上下文灌回模型）。
+				// jsonl 的 state 行则由 SDK 在**每个轮次检查点**落盘
+				// （session.checkpoint → persist），压缩后写的就是压缩后的上下文。
+				//
+				// 读法是尾扫（tailLastState）：只读文件尾，代价与 state 行大小
+				// 成正比（~16MB），与会话总长无关 —— 比读整条 record 更省。
+				//
+				// 没有 state 行（新会话 / 旧数据）→ 用 record 的标量兜底。
 				stateCopy := rec.SDKState
+				if data, lerr := store.Load(context.Background(), id); lerr == nil && data != nil && data.State != nil {
+					st := data.State
+					stateCopy.Messages = st.Messages
+					stateCopy.Usage = st.Usage
+					stateCopy.Cost = st.Cost
+					stateCopy.Pending = st.Pending
+					stateCopy.Todo = st.Todo
+					stateCopy.UpdatedAt = st.UpdatedAt
+				}
 				recoveryState = &stateCopy
 			} else if !errors.Is(lerr, session.ErrRecordNotFound) {
 				// record 存在但读不出来：**不能**当作空会话处理（那会让打开会话回一份
@@ -6295,6 +6314,11 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 //
 // 参数与判据见 session.SweepSessionFiles 的注释。默认阈值 4MB：
 // 实测 2258 个子智能体 journal 里 997 个 > 4MB（合计 13.4GB），压完约 1.3GB。
+//
+// 顺带做 **P3-1 的 record 清扫**（record 瘦身为 manifest + 标量 + 块引用）：
+// 实测全量 447 个会话的 record + .bak 共 4.0GB，其中 1.22GB 是 SDK 上下文的
+// 冗余副本、2.59GB 是内嵌块（formal/.bak 各一份）—— 搬进 sidecar 后只存一份。
+// 实测单个工作区 710MB → 75.5MB（省 89%）。
 func sweepSessionFilesInBackground() {
 	root := filepath.Join(appDataDir(), "sessions")
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
@@ -6308,10 +6332,20 @@ func sweepSessionFilesInBackground() {
 	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sweep: 失败:", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩）%.1fMB → %.1fMB，用时 %s\n",
+			res.Files, res.Compacted, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
+	}
+	// record 清扫（P3-1）：与上面同一把限速思路，独立失败互不影响。
+	rres, rerr := session.SweepRecordFiles(root, sweepPause)
+	if rerr != nil {
+		fmt.Fprintln(os.Stderr, "sweep record: 失败:", rerr)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩）%.1fMB → %.1fMB，用时 %s\n",
-		res.Files, res.Compacted, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
+	if rres.Stripped > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫 record: %d 个（%d 个搬进 sidecar）%.1fMB → %.1fMB，用时 %s\n",
+			rres.Stripped, rres.Migrated, float64(rres.Before)/1e6, float64(rres.After)/1e6, rres.Elapsed.Round(time.Millisecond))
+	}
 }
 
 // 清扫参数。

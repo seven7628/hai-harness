@@ -458,6 +458,37 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 	working := *record
 	working.ViewCheckpoint = append(ViewCheckpoint(nil), record.ViewCheckpoint...)
 
+	// P3-1：record **不再携带 SDK 上下文**（sdk_state.messages）。
+	//
+	// ## 为什么
+	//
+	// 实测 447 个真实会话：record.json 的 **99.5% 体积是 sdk_state.messages**
+	//（例：16.7MB 的 record 里 16.6MB 是消息；.bak 还要再存一份 → 全量 4.0GB）。
+	//
+	// 更要紧的是**它不是权威**。把每个 record 的 messages 与同会话 jsonl 的
+	// 最后一条 state 行逐条对比：
+	//
+	//	428/447  完全一致
+	//	 18/447  record **更旧**（jsonl 已写入更新的轮次）
+	//	 1/447   record 是**压缩前**的形态（jsonl 的 state 行是压缩后的上下文）
+	//
+	// 权威来源是**会话 jsonl 的最后一条 state 行**：SDK 在**每个轮次检查点**
+	// 都落一条（session.checkpoint → persist），且压缩后写的就是压缩后的有效
+	// 上下文。于是用 record 恢复会：
+	//   · 丢掉最新轮次（18/447）；或
+	//   · 绕开压缩点，把整个未压缩上下文灌回模型（1/447）——
+	//     这正是用户要的「截止到前一个压缩点」要避免的。
+	//
+	// ## 兼容性
+	//
+	// · 读侧：`SessionRecord.SDKState` 的类型**不变**（仍是 State），
+	//   所以旧 record（磁盘上有 messages）照常解码，v1 checksum 口径也能照常
+	//   复算（canonical JSON 里 messages 仍在）—— 不需要迁移；
+	// · 写侧：新 record 的 sdk_state.messages 为 nil（序列化成 null），
+	//   体积从 16.7MB 降到 KB 级；
+	// · 恢复侧：见 desktop/bridge/main.go 的恢复源（改读会话 jsonl）。
+	working.SDKState.Messages = nil
+
 	// 锁必须在**任何写入之前**拿到，并覆盖「sidecar 追加 → record 落盘」全程：
 	// sidecar 与 record 是同一条 record 的两半，并发提交会让它们错位。
 	path, err := s.RecordPath(working.WorkspaceKey, working.SessionID)
