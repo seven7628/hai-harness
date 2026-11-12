@@ -584,10 +584,11 @@ async function main() {
     text: '把返回 401 的分支也改掉', source: 'user', timestamp: Date.now(),
   }))
   await page.waitForTimeout(350)
-  /* skin：user 块（`.msg.user.rt-you`，UserBlock）目前**只在 runtime 皮肤**下渲染 ——
-     Narrative.renderBlock 的 user 分支带 `skin === 'runtime'` 门，current/v3 两档下 user 块
-     渲染成 null（主会话同样如此，不是子会话特例；见 R05a3b 报告的风险项）。
-     这一段要量的是「子会话里出现这条 user 块」，故显式把皮肤切到 runtime 再量，量完切回。
+  /* skin：user 块（`.msg.user`）在**三档皮肤**下都渲染 —— current/v3 走 Narrative.renderBlock
+     的老 DOM（`.msg.user > .who/.body`，F43 恢复；此前 6d28d60 把这条分支连同事件卡一起删了，
+     默认皮肤下用户消息整段消失），runtime 走 UserBlock（`.msg.user.rt-you`）。
+     这一段仍显式切到 runtime 再量：它同时钉住「子会话宿主走的是 UserBlock 那条路」，
+     与主会话的三档断言（e2e/verify_user_blocks.mjs）互补，不重复。
      皮肤只改显示层（MutationObserver → 重渲染），store 里的 user 项不受影响。 */
   await page.evaluate(() => document.documentElement.setAttribute('data-skin', 'runtime'))
   await page.waitForTimeout(300)
