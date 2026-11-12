@@ -544,7 +544,7 @@
     .hub-demo .messages{padding:18px 14px 8px}
     .hub-demo .composer-wrap{padding:7px 12px 10px}
     .hub-demo .composer-meta{font-size:10px}
-    .hub-demo .composer-meta .meta-links button:first-child{display:none}
+    .hub-demo .composer-meta .meta-links>button:first-child{display:none}
     .hub-demo .right-panel{width:min(var(--panel),96vw)}
   }
   @media (max-width:640px){
@@ -565,7 +565,7 @@
     .hub-demo .modal-body{padding:14px}
     .hub-demo .modal-foot{padding:10px 14px 14px}
     .hub-demo .toast-root{bottom:84px}
-    .hub-demo .composer-meta .meta-links button:last-child{display:none}
+    .hub-demo .composer-meta .meta-links>button:last-child{display:none}
     .hub-demo .handoff-card .card-actions{flex-wrap:wrap}
     .hub-demo .guide-step{grid-template-columns:20px minmax(0,1fr)}
     .hub-demo .guide-try{grid-column:2;justify-self:start;margin-top:2px}

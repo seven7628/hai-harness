@@ -33,9 +33,13 @@ const PERSONAS = [
 // 点击工作区头 → 切换为活跃并展开；活跃工作区再点 → 仅折叠/展开；悬停 + → 在该工作区直接建会话。
 // 会话标题：优先取重命名覆盖（titleOverrides，localStorage），否则 bridge 自动标题（第一条 user 文本）。
 // 双击会话标题 → 内联重命名（Enter 保存 / Esc 取消 / 清空恢复自动标题）。
-export default function LeftPanel() {
+export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
   const t = useT()
-  const leftExpanded = useAppStore((s) => s.leftExpanded)
+  const leftExpandedPref = useAppStore((s) => s.leftExpanded)
+  // 渲染用的「展开/折叠」以面板实际状态为准（App 从 Panel.onResize 回写）：
+  // store 只是用户意图，库在空间不足时会拒绝 expand —— 若仍按 store 画展开内容，
+  // 就会出现 44px 容器里塞整栏（P4 审计 HUB-N-01）。独立使用（无 prop）时退回 store。
+  const leftExpanded = collapsed == null ? leftExpandedPref : !collapsed
   const toggleLeft = useAppStore((s) => s.toggleLeft)
   const leftPinned = useAppStore((s) => s.leftPinned)
   const togglePin = useAppStore((s) => s.togglePin)
