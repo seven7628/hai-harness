@@ -1,5 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import './surfaces/builtin' // 注册内置 SurfaceProvider（副作用 import，必须早于首次渲染）
 import App from './App'
 import './index.css'
 

@@ -109,6 +109,8 @@ const hydrated = (rightTab, rightExpanded) => ({
   blocks: [{ id: 1, role: 'user', text: 'x' }],
   rightTab,
   rightExpanded,
+  // TEMPLATE 是真实 view，带 {open:false}；只改 rightExpanded 会造出漂移态（PR-01 起布局是权威）
+  rightLayout: rightExpanded ? { open: true, bias: 'even', ratio: 50 } : { open: false },
 })
 
 function reset(state = {}) {
@@ -116,7 +118,14 @@ function reset(state = {}) {
   const sid = state.activeSessionId
   // 顶层镜像是活跃会话 view 的镜像（真实应用里两者恒等）：给 views[active] 时必须同步，
   // 否则 setActiveSession 的「切走前回写顶层镜像」会把不一致的顶层值写回该 view。
-  const mirror = sid && views[sid] ? { rightTab: views[sid].rightTab, rightExpanded: views[sid].rightExpanded } : {}
+  const mirror = sid && views[sid]
+    ? {
+        rightTab: views[sid].rightTab,
+        rightExpanded: views[sid].rightExpanded,
+        // rightLayout 是权威、rightExpanded 是镜像（PR-01）：seed 时两个一起写，否则会造出漂移态
+        rightLayout: views[sid].rightLayout ?? { open: !!views[sid].rightExpanded, bias: 'even', ratio: 50 },
+      }
+    : {}
   useAppStore.setState({
     workspace: WS,
     activeSessionId: undefined,
@@ -130,6 +139,7 @@ function reset(state = {}) {
     titleOverrides: {},
     rightTab: 'activity',
     rightExpanded: false,
+    rightLayout: { open: false },
     rightSize: null,
     leftExpanded: true,
     filePreviews: {},
@@ -141,7 +151,12 @@ function reset(state = {}) {
     ...state,
     ...mirror,
     ...(state.rightTab !== undefined ? { rightTab: state.rightTab } : {}),
-    ...(state.rightExpanded !== undefined ? { rightExpanded: state.rightExpanded } : {}),
+    ...(state.rightExpanded !== undefined
+      ? {
+          rightExpanded: state.rightExpanded,
+          rightLayout: state.rightExpanded ? { open: true, bias: 'even', ratio: 50 } : { open: false },
+        }
+      : {}),
   })
 }
 const st = () => useAppStore.getState()

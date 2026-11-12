@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Group, Panel, Separator, usePanelCallbackRef } from 'react-resizable-panels'
 import LeftPanel from './components/LeftPanel'
 import CenterPanel from './components/CenterPanel'
@@ -21,8 +21,8 @@ import { applyNarrativeDensity, applyNarrativeSkin } from './lib/narrativeSkin'
 import { applyAppearance, useAppearance } from './lib/appearance'
 
 // 三栏面板的稳定 id：Group.onLayoutChanged 的 layout 以 id 为键（`{[id]: percentage}`）——
-// 不显式给 id 就只能拿到库自动生成的键，读不到「右栏占多少」。显式 id 同时让 layout 的
-// 含义自解释（见 App 里那条「右栏 >50% 收左栏」的规则）。
+// 不显式给 id 就只能拿到库自动生成的键，读不到「右栏占多少」。拖拽时用它换算成
+// 右栏占比（见 onLayoutChanged → setRightLayoutFromDrag）。
 const LEFT_PANEL_ID = 'left'
 const RIGHT_PANEL_ID = 'right'
 import { useRailTips } from './lib/railTips'
@@ -38,7 +38,6 @@ export default function App() {
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)
   const leftRef = usePanelCallbackRef()
   const rightRef = usePanelCallbackRef()
-  const rightOverHalf = useRef(false)
   // 启动 splash：每次启动先播品牌时刻动画，播完由 BootScreen 决定去向
   //（有持久工作区 → 自动恢复进入；无 → 显示选目录）。只启动一次，之后不再回启动屏。
   // 进入主界面 = 交叉淡化：BootScreen 内容淡出+轻微放大，同时 main 挂载并淡入上浮
@@ -112,28 +111,39 @@ export default function App() {
   }, [toggleLeft, toggleRight, setActiveSession, recentSessions])
 
   // 展开/折叠：store 状态 → 命令式 collapse/expand（v4 无 controlled collapsed prop）。
-  // 依赖 handle：挂载即应用初始状态（首轮 rightRef.current 为 null 拿不到 handle）。
+  // 先取 handle 再进 effect：依赖数组里放变量而不是 leftRef[0] 这种复杂表达式，
+  // 否则 exhaustive-deps 既报「复杂表达式」又漏检（handle 变了 effect 不会重跑）。
+  const leftHandle = leftRef[0]
+  const rightHandle = rightRef[0]
   useEffect(() => {
-    const h = leftRef[0]
-    if (!h) return
-    if (leftExpanded && h.isCollapsed()) h.expand()
-    else if (!leftExpanded && !h.isCollapsed()) h.collapse()
-  }, [leftExpanded, leftRef[0]])
+    if (!leftHandle) return
+    if (leftExpanded && leftHandle.isCollapsed()) leftHandle.expand()
+    else if (!leftExpanded && !leftHandle.isCollapsed()) leftHandle.collapse()
+  }, [leftExpanded, leftHandle])
 
   useEffect(() => {
-    const h = rightRef[0]
-    if (!h) return
-    if (rightExpanded && h.isCollapsed()) h.expand()
-    else if (!rightExpanded && !h.isCollapsed()) h.collapse()
-  }, [rightExpanded, rightRef[0]])
+    if (!rightHandle) return
+    if (rightExpanded && rightHandle.isCollapsed()) rightHandle.expand()
+    else if (!rightExpanded && !rightHandle.isCollapsed()) rightHandle.collapse()
+  }, [rightExpanded, rightHandle])
+
+  // 三态布局（PR-01）：预设 bias 时把右栏 resize 到目标比例；custom 由用户拖拽决定，不回写。
+  const rightLayout = useAppStore((s) => s.rightLayout)
+  const rightSize = useAppStore((s) => s.rightSize)
+  const setRightLayoutFromDrag = useAppStore((s) => s.setRightLayoutFromDrag)
+  useEffect(() => {
+    // rightSize（内嵌浏览器 viewport）优先级更高：它在时本轮不动宽度，避免两个 effect 抢写
+    if (!rightHandle || !leftHandle || rightSize != null) return
+    if (!rightLayout.open || rightLayout.bias === 'custom' || rightHandle.isCollapsed()) return
+    const availPct = Math.max(1, 100 - leftHandle.getSize().asPercentage)
+    rightHandle.resize(((availPct * rightLayout.ratio) / 100).toFixed(2) + '%')
+  }, [rightLayout, rightSize, rightHandle, leftHandle])
 
   // M3：rightSize 非空时把右侧面板 resize 到期望宽度（浏览器内嵌按 viewport 设）。
-  const rightSize = useAppStore((s) => s.rightSize)
   useEffect(() => {
-    const h = rightRef[0]
-    if (!h || rightSize == null || h.isCollapsed()) return
-    h.resize(rightSize)
-  }, [rightSize, rightRef[0]])
+    if (!rightHandle || rightSize == null || rightHandle.isCollapsed()) return
+    rightHandle.resize(rightSize)
+  }, [rightSize, rightHandle])
 
   return (
     <div className={`app-root ${inSkills ? 'in-skills' : ''}${inCron ? 'in-cron' : ''}${leaving ? ' leaving' : ''}`}>
@@ -143,24 +153,14 @@ export default function App() {
           <Group
             orientation="horizontal"
             className="main-group"
-            // 右栏被**用户拖**到 ≥50% 时自动收起左栏（把视界让给右栏）。
-            //
-            // 为什么必须看 `meta.isUserInteraction`（2026-09-18 实测缺陷）：右栏宽度也会被
-            // **程序**改 —— 内嵌浏览器按 viewport 适配走 `setRightSize` → `h.resize(900)`，
-            // 在 1440 宽的窗口里就是 62% > 50%。旧写法把这条规则放在 Panel.onResize 里，
-            // 于是「预览一个 PDF」会顺手把用户的左栏收掉（同一份 e2e 里实测：左栏 false）——
-            // 那正是 M4 要修掉的「预览有 Browser Use 接管视界的副作用」的另一种化身。
-            // 库只在**用户直接操作分隔条**（拖拽释放 / 方向键）时置 isUserInteraction=true，
-            // 程序化 setLayout/约束重算/初始挂载都是 false —— 正好是我们想要的判据。
+            // 用户拖分隔条 → 记成布局比例（custom 或吸附到预设）；**不再自动收起左栏**
+            //（三态布局里右栏 >50% 是合法状态，D-A 的自动展开只属于 openTab，不参与拖拽）
             onLayoutChanged={(layout, meta) => {
-              const pct = layout[RIGHT_PANEL_ID]
-              if (pct == null) return
-              const overHalf = pct >= 50
-              // 只在「从阈值下方跨到上方」时折叠一次；保持在 50% 以上期间不重复触发。
-              if (meta.isUserInteraction && overHalf && !rightOverHalf.current && !(leftRef[0]?.isCollapsed() ?? true)) {
-                leftRef[0]?.collapse()
-              }
-              rightOverHalf.current = overHalf
+              if (!meta.isUserInteraction) return
+              if (!rightLayout.open) return // 收起态拖左/中分隔条不该把右栏弹开（D-A）
+              // 只传 layout 百分比：它与 getSize().inPixels 的分母不同（后者不含分隔条），
+              // 混用会把窄拖拽（右栏 < 窗口 25%）当成抖动丢掉。去重在 store 里按 ratio 做。
+              setRightLayoutFromDrag(layout[RIGHT_PANEL_ID] ?? 0, layout[LEFT_PANEL_ID] ?? 0)
             }}
           >
             <Panel

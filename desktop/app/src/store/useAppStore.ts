@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
+import type { RightLayout } from '../lib/layout'
+import { afterDrag, collapse as layoutCollapse, expand as layoutExpand, normalizeLayout } from '../lib/layout'
 import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
@@ -27,13 +29,11 @@ export type RightTab = 'activity' | 'git' | 'file' | 'web'
 
 // —— 右侧栏标签模型（docs/RIGHT_PANEL_TABS_PLAN.md 阶段 1）——
 //
-// 分工（阶段 1 刻意保留双轨，行为等价重构）：
-//   · rightTab  = 「当前显示哪一类内容」的**权威**字段。e2e 直接读写它
-//     （verify_auto_open_visual.mjs:114 用它做用例复位、verify_pdf_preview.mjs:284 订阅它做诊断），
-//     且它经 SessionView 参与会话级恢复 —— 动它就等于同时改这两条契约。
-//   · tabsByScope = 「有哪些标签、顺序、激活的是哪个实例、最近关了哪些」。
-//   两者的一致性由 syncTabsToRightTab **单向收敛**（标签集跟随 rightTab）：rightTab 有多条
-//   改写路径（动作 / loadViewToTop 恢复 / e2e 直接 setState），逐个调用点同步必漏。
+// 分工（PR-02 起 activeId 权威）：
+//   · tabsByScope = 权威：有哪些标签、顺序、**激活的是哪个实例**（activeId）、最近关了哪些。
+//   · rightTab    = 派生字段，只为旧读点 / 会话恢复 / e2e 兼容保留一个版本（PR-11 删）。
+//     唯一写点是 rightTabPatch（tabPatch 调它），值 = 激活标签的 kind；没有标签时保留旧值。
+//   外部直接 setState({ rightTab }) **不会**换掉用户正在看的标签；下一次标签动作会把 rightTab 重新派生。
 export type ScopeKey = string // 会话 id；无会话时退化为工作区路径（D7）
 export type TabKind = RightTab // 复用 5 个既有取值：e2e 断言与 i18n key（rp.tab.*）都按它走
 // file 标签是**多实例**的（阶段 2）：身份 = (path, mode)，同一文件可以同时有 diff 与
@@ -55,8 +55,8 @@ export interface TabSet {
   tabs: TabInstance[]
   activeId: string | null // null = 用户把标签关光了（显示空态，不自动补默认标签）
   closed: TabInstance[] // 最近关闭（⌄ 下拉「重开」），上限 TAB_CLOSED_MAX
-  // 阶段 5：本次进程内**刚重启恢复**、还没被任何动作碰过（见 syncTabsToRightTab 的反向收敛）。
-  // 不持久化，用完即清。
+  // 阶段 5：本次进程内**刚重启恢复**、还没被任何动作碰过。不持久化，用完即清。
+  // 见 syncTabsToRightTab：恢复态第一次读只补派生字段（rightTab），第二次读清标记。
   restored?: boolean
 }
 export const TAB_CLOSED_MAX = 10
@@ -1066,6 +1066,8 @@ export interface SessionView {
   release?: PendingRelease // 沙箱拦截放行确认（sandbox_blocked；随 bash 工具结束清除）
   pendingQueue: QueuedInput[] // 客户端暂存队列（未推送 / 已推送待确认；逐条可编辑，LLM End 时整队推送）
   rightExpanded: boolean // 右侧栏是否展开（会话级，切换会话各自恢复）
+  // 三态布局（PR-01）：rightExpanded 是它的派生镜像；ratio = 右栏占「除左栏外」的百分比
+  rightLayout: RightLayout
   rightTab: RightTab // 右侧栏当前 tab（会话级）
 
   // —— 链路 tab：trace（docs/TRACE_CHAIN_REDESIGN.md）——
@@ -1188,9 +1190,17 @@ function emptyView(): SessionView {
     release: undefined,
     pendingQueue: [],
     rightExpanded: false,
+    rightLayout: layoutCollapse,
     rightTab: 'activity',
     traceEvents: [],
   }
+}
+
+// 右栏布局归一化：rightExpanded 只是 rightLayout.open 的镜像，读写都经过这里，
+// 避免「磁盘上一份 open:true、镜像 false」这种漂移被持久化（00 §1.5 派生值不落库）。
+function layoutMirror(v: { rightLayout?: RightLayout; rightExpanded: boolean }) {
+  const rightLayout = normalizeLayout(v.rightLayout, v.rightExpanded)
+  return { rightLayout, rightExpanded: rightLayout.open }
 }
 
 // view 的顶层镜像字段（组件读顶层）
@@ -1242,7 +1252,7 @@ function viewFields(nv: SessionView): Partial<AppState> {
     questions: nv.questions,
     release: nv.release,
     pendingQueue: nv.pendingQueue,
-    rightExpanded: nv.rightExpanded,
+    ...layoutMirror(nv),
     rightTab: nv.rightTab,
     traceEvents: nv.traceEvents,
     traceList: nv.traceList,
@@ -1307,7 +1317,7 @@ function topViewFields(s: AppState): Partial<SessionView> {
     questions: s.questions,
     release: s.release,
     pendingQueue: s.pendingQueue,
-    rightExpanded: s.rightExpanded,
+    ...layoutMirror(s),
     rightTab: s.rightTab,
     traceEvents: s.traceEvents,
     traceList: s.traceList,
@@ -1633,53 +1643,38 @@ function flushPendingPersistTabs(): void {
   flushPersistTabs()
 }
 
-// syncTabsToRightTab：把标签集**单向**收敛到 rightTab。幂等，且「已一致时返回同一个对象引用」
-// —— 调用方（含 React effect）据此判断「无需 set」，避免 effect → setState → effect 的循环。
+// syncTabsToRightTab：**只负责「这个 scope 还没有标签集」时按 rightTab 建默认集**。
 //
-// 三条分支对应三种真实场景：
-//   ① 该 scope 还没有标签集（首次进入）→ 以 rightTab 为准建默认集
-//   ② 集非空但激活项与 rightTab 不符（e2e 直接 setState 复位 / loadViewToTop 恢复了别的会话）→ 切到同 kind 的标签
-//   ③ 集为空（用户把标签关光了）→ **保持空**，否则刚关掉的标签会被立刻建回来
+// PR-02 起 activeId 是权威：标签集存在时**不再**读 rightTab 去反向挑选标签（旧分支②③已删）。
+// 理由：那两条会让「外部改一下 rightTab」静默换掉用户正在看的标签，也会在切会话恢复时
+// 把 persisted 的 activeId 顶掉。rightTab 现在只由 tabPatch 从激活标签派生。
 function syncTabsToRightTab(s: AppState): TabSet {
   const cur = s.tabsByScope[scopeKeyOf(s)]
   if (!cur) {
     const tab = makeTab(s.rightTab, s)
     return { tabs: [tab], activeId: tab.id, closed: [] }
   }
-  const active = cur.tabs.find((t) => t.id === cur.activeId)
-  if (active && active.kind === s.rightTab) {
-    // 已一致：只把「刚恢复」标记清掉（它是一次性的，不清的话用户之后手动切标签会被它拦住）。
-    return cur.restored ? { ...cur, restored: false } : cur
-  }
-  if (!cur.tabs.length) return cur
-  // 阶段 5：**重启恢复**的标签集要先于 rightTab 存在 —— rightTab 是会话 view 的字段，重启后由
-  // 恢复响应才建出来（默认 'activity'），与恢复的激活标签毫无关系。首次同步时由标签集**反向**
-  // 收敛 rightTab（tabPatch 会把激活标签的 kind 镜像过去），而不是把激活标签改成 rightTab 的
-  // kind（那正是「重启后标签集回来了、激活的却是别的标签」）。
-  //
-  // 标记**不在这里清**：`restored` 的含义是「这个 scope 的标签集自本次启动起还没被用户碰过」，
-  // 期间 rightTab 只可能来自 resetView / loadViewToTop 的默认值（用户的选择一定走
-  // openTab/activateTab/closeTab/reopenTab，那些路径会把标记连标签集一起换掉）→ 标签集权威。
-  // 清标记的时机有二：① 已一致（上面那条分支）；② 任何显式标签动作。这样「重启后切走再切回
-  // 来」也仍然是该 scope 自己的激活标签（否则切回来会被默认的 activity 顶掉）。
-  if (cur.restored) return { ...cur }
-  const hit = cur.tabs.find((t) => t.kind === s.rightTab)
-  if (hit) return { ...cur, activeId: hit.id }
-  const tab = makeTab(s.rightTab, s)
-  return { tabs: [...cur.tabs, tab], activeId: tab.id, closed: cur.closed }
+  // restored 是「本次启动起还没被用户碰过」的一次性标记：只在**显式标签动作**里清
+  //（那些动作会构造新 TabSet，不带 restored），读路径不动它 —— 否则重启恢复的 N25 会转红。
+  return cur
 }
 
-// tabPatch 把新的标签集写回 state，**同时**把 rightTab 镜像成激活标签的 kind
+// tabPatch 把新的标签集写回 state，**同时**把 rightTab 派生为激活标签的 kind
 //（有会话 → 写该会话 view；无会话 → 只写顶层，与 setRightTab 的既有口径一致）。
 // 集为空时保留原 rightTab：此时内容区由 activeTab===null 渲染空态，rightTab 只是个遗留值。
-function tabPatch(s: AppState, scope: ScopeKey, set0: TabSet): Partial<AppState> {
+// rightTabPatch：rightTab 的**唯一**写点（tabPatch 也走它）。只派生、不碰标签集。
+function rightTabPatch(s: AppState, kind: RightTab, layout?: RightLayout): Partial<AppState> {
+  const extra = layout ? { rightLayout: layout, rightExpanded: layout.open } : {}
+  const sid = s.activeSessionId
+  if (!sid) return { rightTab: kind, ...extra }
+  const v = s.views[sid] ?? emptyView()
+  return setView(s, sid, { ...v, rightTab: kind, ...extra })
+}
+
+function tabPatch(s: AppState, scope: ScopeKey, set0: TabSet, layout?: RightLayout): Partial<AppState> {
   const active = set0.tabs.find((t) => t.id === set0.activeId)
   const kind: RightTab = active?.kind ?? s.rightTab
-  const tabsByScope = { ...s.tabsByScope, [scope]: set0 }
-  const sid = s.activeSessionId
-  if (!sid) return { tabsByScope, rightTab: kind }
-  const v = s.views[sid] ?? emptyView()
-  return { ...setView(s, sid, { ...v, rightTab: kind }), tabsByScope }
+  return { ...rightTabPatch(s, kind, layout), tabsByScope: { ...s.tabsByScope, [scope]: set0 } }
 }
 
 // 标签列表的结构等价判断：syncWebTabs 在每个 embed-nav 事件上都会跑（导航/标题变化很频繁），
@@ -2825,7 +2820,7 @@ export function applySessionPrefs(path: string, sid: string): void {
   if (Object.keys(patch).length > 0) useAppStore.setState(patch)
 }
 
-interface AppState {
+export interface AppState {
   bridgeStatus: 'idle' | 'starting' | 'running' | 'stopped' | 'error'
   bridgeError?: string
   workspace?: string
@@ -2844,6 +2839,7 @@ interface AppState {
   leftExpanded: boolean
   leftPinned: boolean
   rightExpanded: boolean
+  rightLayout: RightLayout
   rightTab: RightTab
   rightSize: number | null // M3：期望的右侧面板宽度（null = 不强制；浏览器内嵌时按 viewport 设）
   // skeleton：切换会话时的骨架屏状态机（2026-10-21 重设计）。
@@ -3193,6 +3189,9 @@ interface AppState {
   toggleRight(): void
   setLeftExpanded(b: boolean): void // Panel onCollapse/onExpand 同步
   setRightExpanded(b: boolean): void
+  setRightLayout(l: RightLayout): void
+  setRightLayoutFromDrag(rightPct: number, leftPct: number): void
+  applyBias(b: 'even' | 'center' | 'right'): void
   togglePin(): void
   setRightTab(t: RightTab): void
   // focusAgent：左栏树点选一个子智能体 → 叙述区改为展示它的转录（同一次运行的两处视图）。
@@ -3204,7 +3203,7 @@ interface AppState {
   activateTab(id: string): void // 激活指定标签（切 scope 内的显示）
   closeTab(id: string): void // 关闭（激活项顺延到右邻居，无则左邻居）
   reopenTab(id?: string): void // 重开最近关闭的一个（给 id 则重开指定的那个）
-  syncTabsToRightTab(): void // 标签集单向收敛到 rightTab（组件 effect 调用；已一致时不 set）
+  syncTabsToRightTab(): void // 建默认集 / 恢复态补派生字段（activeId 权威，不再按 rightTab 反选）
   // 阶段 5：把防抖窗口里的标签集立即落盘（e2e/L1 断言与关窗前收尾用；正常路径靠订阅防抖写）。
   flushSessionTabs(): void
   // 内嵌页面 → 面板级 web 标签（阶段 1.5：一页一标签，浏览器内层标签条退役）。
@@ -8491,6 +8490,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   leftExpanded: true,
   leftPinned: false,
   rightExpanded: false,
+  rightLayout: layoutCollapse,
   rightTab: 'activity',
   rightSize: null,
   skeleton: { phase: 'idle' as const, at: 0 },
@@ -9965,21 +9965,50 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleLeft: () => set((s) => ({ leftExpanded: !s.leftExpanded })),
   // 右侧栏开关/tab 是会话级视图状态：写入活跃会话的 view（per-session 恢复）
+  // 布局唯一写者：rightLayout 写进去，rightExpanded 同步成派生镜像（D-D 同款纪律）
+  setRightLayout: (l) => {
+    const s = get()
+    const sid = s.activeSessionId
+    if (!sid) return set({ rightLayout: l, rightExpanded: l.open })
+    const v = s.views[sid] ?? emptyView()
+    set(setView(s, sid, { ...v, rightLayout: l, rightExpanded: l.open }))
+  },
+  // 只在右栏已展开时记录拖拽：收起态下 Group 仍会报 ~44px（rail），
+  // 若不拦住，拖左/中分隔条会把右栏弹开（违反 D-A：自动展开只属于 openTab）。
+  setRightLayoutFromDrag: (rightPct, leftPct) => {
+    const cur = get().rightLayout
+    if (!cur.open) return
+    const next = afterDrag(rightPct, leftPct)
+    if (next.open && Math.abs(next.ratio - cur.ratio) < 1) return // 无实质变化不重渲
+    get().setRightLayout(next)
+  },
+  // 点预设：清 rightSize（内嵌浏览器 viewport 宽度）与写布局同一个 set，避免先按旧比例闪一帧
+  applyBias: (b) => {
+    const s = get()
+    const layout = layoutExpand(b)
+    const sid = s.activeSessionId
+    const patch = sid
+      ? setView(s, sid, { ...(s.views[sid] ?? emptyView()), rightLayout: layout, rightExpanded: true })
+      : { rightLayout: layout, rightExpanded: true }
+    set({ ...patch, rightSize: null })
+  },
   toggleRight: () => {
     const s = get()
-    const sid = s.activeSessionId
-    const next = !s.rightExpanded
-    if (!sid) return set({ rightExpanded: next })
-    const v = s.views[sid] ?? emptyView()
-    set(setView(s, sid, { ...v, rightExpanded: next }))
+    get().setRightLayout(s.rightLayout.open ? layoutCollapse : layoutExpand('even'))
   },
   setLeftExpanded: (b) => set({ leftExpanded: b }),
+  // 兼容旧调用点（Panel onResize / 快捷键 / 测试 reset）：以 rightExpanded 为「已展开」判据，
+  // 避免 rightLayout 与 rightExpanded 因外部直接 set 而漂移；已展开时只做镜像自愈，不重置 bias。
   setRightExpanded: (b) => {
     const s = get()
-    const sid = s.activeSessionId
-    if (!sid) return set({ rightExpanded: b })
-    const v = s.views[sid] ?? emptyView()
-    set(setView(s, sid, { ...v, rightExpanded: b }))
+    if (b) {
+      if (s.rightLayout.open && s.rightExpanded) return
+      const bias = s.rightLayout.open && s.rightLayout.bias !== 'custom' ? s.rightLayout.bias : 'even'
+      get().setRightLayout(layoutExpand(bias)) // 同时自愈 rightExpanded 镜像
+    } else {
+      if (!s.rightLayout.open && !s.rightExpanded) return
+      get().setRightLayout(layoutCollapse)
+    }
   },
   togglePin: () => set((s) => ({ leftPinned: !s.leftPinned })),
   focusAgent: (f) => {
@@ -10057,7 +10086,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sizePatch = shouldSizeFile && typeof window !== 'undefined'
       ? { rightSize: Math.round(window.innerWidth * 0.6) }
       : {}
-    set({ ...tabPatch(s, scope, next), ...sizePatch })
+    // D-A：**内容触发**才展开（用户手势走 toggleRight/setRightExpanded，不在这里）；
+    // 后台静默打开（activate:false）不碰面板；已展开时不重置 bias。
+    const layout = !activate || s.rightLayout.open ? undefined : layoutExpand('even')
+    set({ ...tabPatch(s, scope, next, layout), ...sizePatch })
     return id
   },
   activateTab: (id) => {
@@ -10067,7 +10099,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (set0.activeId === id) return
     const tab = set0.tabs.find((t) => t.id === id)
     if (!tab) return
-    set(tabPatch(s, scope, { ...set0, activeId: id }))
+    set(tabPatch(s, scope, { ...set0, activeId: id, restored: false }))
     // web 标签 → 同步底层页面的激活态。内层标签条退役后，这里是**唯一**的切页入口。
     if (tab.kind === 'web') {
       if (tab.viewId) {
@@ -10135,9 +10167,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   syncTabsToRightTab: () => {
     const s = get()
     const scope = scopeKeyOf(s)
-    const next = syncTabsToRightTab(s)
-    if (next === s.tabsByScope[scope]) return
-    set(tabPatch(s, scope, next))
+    const cur = s.tabsByScope[scope]
+    if (!cur) return set(tabPatch(s, scope, syncTabsToRightTab(s)))
+    // activeId 权威（PR-02）：集合存在时不再按 rightTab 挑标签，只补派生字段 / 清恢复标记。
+    const active = cur.tabs.find((t) => t.id === cur.activeId)
+    const kind: RightTab = active?.kind ?? s.rightTab
+    // 派生字段落后（旧 e2e 直接 setState、或恢复响应先到）→ 纠正回激活标签，不动集合
+    if (kind !== s.rightTab) return set(rightTabPatch(s, kind))
+    if (!cur.restored) return // 非恢复态且已一致：无需收敛（旧的反向分支已删）
+    set(tabPatch(s, scope, { ...cur, restored: false })) // 恢复态且已一致 → 清标记（一次 set）
   },
   flushSessionTabs: () => flushPersistTabs(),
   // 把「内嵌浏览器的页面」同步成面板级 web 标签（一页一标签）。
