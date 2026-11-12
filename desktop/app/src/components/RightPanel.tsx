@@ -750,9 +750,32 @@ export default function RightPanel() {
   const activeTab = tabs.find((x) => x.id === tabSet?.activeId) ?? null
   // 编辑标签的脏标记（PR-05b）：真相在 lib/editorDocs，store 只镜像布尔值（标签圆点读它）。
   const dirtyTabs = useAppStore((s) => s.dirtyTabs)
-  const [menu, setMenu] = useState<'add' | 'more' | null>(null)
+  // 面板级菜单（⌄ 重开 / ＋ 新建 / 标签右键）：定位与内容仍是组件局部 state（菜单要锚坐标、
+  // 要读标签），**开合**另镜像一份到 store.panelMenuOpen —— R06c 起 web 面板由 webSurface 渲染，
+  // WebTab 不在本组件的 state 树里，读不到这两个局部 state，而它必须知道「有菜单开着」才能
+  // 隐藏原生视图（原生层级 > DOM，否则菜单被预览画面盖掉）。
+  // 两个 setter 调用点（下面 setMenu / setCtx）各自同步镜像；ref 只是为了让两个 wrapper 保持
+  // **稳定身份** —— 否则 ctx 的全局 click/Escape effect 会因为依赖变化每次渲染都重订阅。
+  const [menu, setMenuState] = useState<'add' | 'more' | null>(null)
   // 标签右键菜单（R4 的批量关闭 + 文件动作；内层标签条退役后搬到这里）。
-  const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null)
+  const [ctx, setCtxState] = useState<{ x: number; y: number; id: string } | null>(null)
+  const setPanelMenuOpen = useAppStore((s) => s.setPanelMenuOpen)
+  const menuRef = useRef<'add' | 'more' | null>(null)
+  const ctxRef = useRef<{ x: number; y: number; id: string } | null>(null)
+  const syncPanelMenuOpen = useCallback(() => {
+    setPanelMenuOpen(menuRef.current !== null || ctxRef.current !== null)
+  }, [setPanelMenuOpen])
+  const setMenu = useCallback((next: 'add' | 'more' | null | ((cur: 'add' | 'more' | null) => 'add' | 'more' | null)) => {
+    const v = typeof next === 'function' ? next(menuRef.current) : next
+    menuRef.current = v
+    setMenuState(v)
+    syncPanelMenuOpen()
+  }, [syncPanelMenuOpen])
+  const setCtx = useCallback((next: { x: number; y: number; id: string } | null) => {
+    ctxRef.current = next
+    setCtxState(next)
+    syncPanelMenuOpen()
+  }, [syncPanelMenuOpen])
   const ctxTab = ctx ? tabs.find((x) => x.id === ctx.id) ?? null : null
   const ctxIndex = ctxTab ? tabs.findIndex((x) => x.id === ctxTab.id) : -1
   // 菜单里的文件动作需要**绝对路径**：web 标签从 file:// URL 还原（阶段 5：待重建的恢复标签
@@ -793,7 +816,9 @@ export default function RightPanel() {
       window.removeEventListener('mousedown', onDown)
       window.removeEventListener('keydown', onKey)
     }
-  }, [ctx])
+    // setCtx 是 useCallback（身份稳定）：加进依赖只是把「它稳定」写成可检查的事实，
+    // 不会让 effect 重订阅 —— 但漏了它，panelMenuOpen 的镜像就会在闭包里悄悄失联。
+  }, [ctx, setCtx])
   // 可见性仲裁的口径与 BrowserTab 主体一致：**只看呈现方式**，不看插件/引擎状态 ——
   // 「打开文件/网页」不依赖浏览器插件（见 §8.7），把这道兜底闸门挂在插件上会让它在
   // **默认配置**（插件未启用）下整体失效，而默认配置恰恰是面板现在会挂载的情形。
