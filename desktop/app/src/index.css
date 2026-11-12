@@ -10984,6 +10984,84 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .md-view-switch button.on { background: var(--surface-2); color: var(--text); }
 .file-inspector-body { flex: 1; min-height: 0; overflow: auto; }
 .file-inspector-body .uni { margin: 0; }
+/* ===== 内嵌编辑器（PR-05b：零依赖受控 textarea + 行号栏）=====
+   颜色**一律走变量**（--warning/--danger/--elevated/--code-bg），深色与亮色两套主题下
+   都能读；不自带色值，避免"深色模式看不见黄条"这类只在一种主题下暴露的缺陷。 */
+.editor-root { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.editor-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; border-bottom: 1px solid var(--border);
+}
+.editor-path {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10.5px; color: var(--text-2);
+}
+.editor-stat { flex: 0 0 auto; font-size: 10px; color: var(--text-3); }
+/* 未保存圆点：与标签条上的 .rtab-dirty 同一个视觉语言（小圆点，不抢眼但要看得见） */
+.editor-dirty, .rtab-dirty {
+  flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); display: inline-block;
+}
+.rtab-dirty { margin: 0 4px 0 1px; }
+.editor-btn {
+  flex: 0 0 auto; padding: 2px 9px; border-radius: 5px;
+  border: 1px solid var(--border-strong); background: transparent;
+  color: var(--text-2); font-size: 11px; line-height: 18px; cursor: pointer;
+}
+.editor-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent-border); }
+.editor-btn:disabled { opacity: 0.45; cursor: default; }
+.editor-btn.primary { border-color: var(--accent-border); color: var(--accent); }
+.editor-btn.primary:hover:not(:disabled) { background: var(--accent-weak); }
+.editor-btn.danger { border-color: color-mix(in srgb, var(--danger) 55%, transparent); color: var(--danger); }
+.editor-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+/* 顶部条：warn = 黄（可继续编辑，需要决断），danger = 红（必须重新打开） */
+.editor-banner {
+  flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 6px 10px; font-size: 11.5px;
+  border-bottom: 1px solid var(--border);
+}
+.editor-banner.warn { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+.editor-banner.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.editor-banner-t { flex: 0 1 auto; }
+.editor-banner-mono, .editor-banner-msg { flex: 0 1 auto; font-size: 10.5px; opacity: 0.85; }
+.editor-banner-acts { flex: 0 0 auto; display: flex; gap: 6px; margin-left: auto; }
+.editor-banner .editor-btn { color: inherit; border-color: currentColor; opacity: 0.9; }
+.editor-banner .editor-btn.primary { background: color-mix(in srgb, currentColor 16%, transparent); }
+.editor-note {
+  flex: 0 0 auto; padding: 5px 10px; font-size: 11px; color: var(--text-3);
+  border-bottom: 1px solid var(--border);
+}
+.editor-note.ro { color: var(--warning); }
+.editor-body { flex: 1; min-height: 0; display: flex; background: var(--code-bg); }
+/* 行号栏：右对齐、等宽、不可选中；本身不滚（scrollTop 由正文同步过来） */
+.editor-gutter {
+  flex: 0 0 auto; min-width: 44px; padding: 8px 8px 8px 10px;
+  text-align: right; font-size: 12px; line-height: 18px; color: var(--text-3);
+  overflow: hidden; user-select: none; border-right: 1px solid var(--border);
+}
+.editor-area {
+  flex: 1; min-width: 0; padding: 8px 10px; border: 0; outline: none; resize: none;
+  background: transparent; color: var(--text);
+  font-size: 12px; line-height: 18px; tab-size: 2;
+  white-space: pre; overflow: auto;
+}
+.editor-area::selection { background: var(--accent-weak); }
+.editor-empty { padding: 16px; font-size: 12px; color: var(--text-3); }
+/* 脏内容确认框（关标签 / 退出应用共用）：走 elevated 浮层，不用原生 dialog —— 与
+   ctx-menu/其它浮层同一套观感，且不抢焦点到系统窗口层。 */
+.editor-confirm-backdrop {
+  position: fixed; inset: 0; z-index: 400; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+}
+.editor-confirm {
+  min-width: 320px; max-width: 420px; padding: 16px 18px;
+  border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--elevated); box-shadow: 0 18px 44px rgba(0, 0, 0, 0.4);
+}
+.editor-confirm-title { font-size: 13px; color: var(--text); }
+.editor-confirm-file { margin-top: 6px; font-size: 11px; color: var(--text-3); word-break: break-all; }
+.editor-confirm-more { margin-top: 4px; font-size: 11px; color: var(--warning); }
+.editor-confirm-acts { margin-top: 14px; display: flex; gap: 8px; justify-content: flex-end; }
 .file-source { height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .file-source-meta { flex: 0 0 auto; padding: 5px 10px; border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 10px; }
 .file-source .fp-code { flex: 1; min-height: 0; max-height: none; overflow: auto; }

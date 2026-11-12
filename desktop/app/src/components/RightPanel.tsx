@@ -11,6 +11,7 @@ import { Activity, GitBranch, FileIcon, BarChart, CheckList, Globe, PanelRight, 
 import { fmtTokens, fmtUsd, fmtDuration } from './ui'
 import { ChangesTab } from './ChangesTab'
 import { FilePreviewTab } from './FilePreview'
+import { EditorConfirm } from './EditorConfirm'
 import { fileUrlToPath } from '../lib/filePaths'
 import { fmtBytesShort, ratio } from '../lib/format'
 import { getSurface } from '../surfaces/registry'
@@ -761,6 +762,7 @@ export default function RightPanel() {
   const openTab = useAppStore((s) => s.openTab)
   const activateTab = useAppStore((s) => s.activateTab)
   const closeTab = useAppStore((s) => s.closeTab)
+  const closeTabs = useAppStore((s) => s.closeTabs)
   const reopenTab = useAppStore((s) => s.reopenTab)
   const syncTabs = useAppStore((s) => s.syncTabsToRightTab)
   const embedNav = useAppStore((s) => s.embedNav)
@@ -771,6 +773,8 @@ export default function RightPanel() {
   const tabs = tabSet?.tabs ?? []
   const closedTabs = tabSet?.closed ?? []
   const activeTab = tabs.find((x) => x.id === tabSet?.activeId) ?? null
+  // 编辑标签的脏标记（PR-05b）：真相在 lib/editorDocs，store 只镜像布尔值（标签圆点读它）。
+  const dirtyTabs = useAppStore((s) => s.dirtyTabs)
   const [menu, setMenu] = useState<'add' | 'more' | null>(null)
   // 标签右键菜单（R4 的批量关闭 + 文件动作；内层标签条退役后搬到这里）。
   const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null)
@@ -794,8 +798,11 @@ export default function RightPanel() {
     }
     setCtx(null)
   }
-  const ctxCloseOthers = () => { for (const x of tabs) if (x.id !== ctx?.id) closeTab(x.id); setCtx(null) }
-  const ctxCloseRight = () => { for (const x of tabs.slice(ctxIndex + 1)) closeTab(x.id); setCtx(null) }
+  // 批量关闭走 closeTabs：干净的一次关掉，脏的进确认队列（逐个问）。
+  // 早先这里是 `for (...) closeTab(x)` —— 守卫虽然兜住了内容，但多个脏标签只有一个能被问到，
+  // 用户点完"丢弃"还得再点一次关其它（评审 #4）。
+  const ctxCloseOthers = () => { closeTabs(tabs.filter((x) => x.id !== ctx?.id).map((x) => x.id)); setCtx(null) }
+  const ctxCloseRight = () => { closeTabs(tabs.slice(ctxIndex + 1).map((x) => x.id)); setCtx(null) }
   const ctxCopyPath = async () => { if (ctxPath) await copyText(ctxPath); setCtx(null) }
   const ctxReveal = async () => { if (ctxPath) await window.desktop?.showItemInFolder?.(ctxPath); setCtx(null) }
   const ctxOpenDefault = async () => { if (ctxPath) await window.desktop?.openPath?.(ctxPath); setCtx(null) }
@@ -986,6 +993,8 @@ export default function RightPanel() {
                     ? <span className="browser-page-dot" title={t('browser.tabUnread')} />
                     : <span className="rtab-ico">{tabIconEl(tab)}</span>}
                   <span className="rtab-t">{restoring ? t('browser.tabRestoring') : tabTitle(tab)}</span>
+                  {/* 未保存圆点：位置在标题后、✕ 前（✕ 的命中区不受影响），title 给读屏与 hover 文案 */}
+                  {dirtyTabs[tab.id] && <span className="rtab-dirty" title={t('editor.dirty')} aria-label={t('editor.dirty')} />}
                   <button
                     className="rtab-close"
                     title={t('rp.tabs.close')}
@@ -1110,6 +1119,9 @@ export default function RightPanel() {
           {activeTab?.kind === 'web' && <BrowserTab toolbarHidden={toolbarHidden} onToggleTabs={() => setImmersive((v) => !v)} menuOpen={!!menu || !!ctx} panelVisible={rightExpanded} activePageId={activeTab?.kind === 'web' ? activeTab.pageId : undefined} />}
         </div>
       </div>
+      {/* 脏内容确认框：关标签与退出应用共用一个（reason 区分）。挂在 aside 末尾而不是 body 里
+          —— 标签被关掉后 body 可能已经是空态，框还得在。 */}
+      <EditorConfirm />
     </aside>
   )
 }

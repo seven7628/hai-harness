@@ -13,6 +13,7 @@ import { looksSubRun } from '../lib/sessionScope'
 import { visualKindOf, isVisualPath } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
+import { isEditorEnabled, isTextLikePath } from '../lib/editorState'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import { t as i18nT } from '../i18n'
 import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
@@ -40,7 +41,9 @@ export type TabKind = RightTab // 复用 5 个既有取值：e2e 断言与 i18n 
 // source 两个标签（D5），但同一 (path, mode) 只有一个实例。openSeq 是「每次打开都回默认
 // 视图」的触发器 —— 阶段 1 靠全局 fileFocus.seq，阶段 2 起内容与视图都归标签所有，
 // 触发器也必须跟着标签走（否则重开 A 会把 B 的视图复位）。
-export type FileTabInstance = { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source'; toolId?: string; startLine?: number; openSeq?: number }
+// mode='edit'（PR-05b）：同一个文件的**编辑**标签与预览标签并存（身份 = (path, mode)）。
+// 它是 file 面板的第三种渲染分发，不是新 kind —— 文件树/预览工具栏的「编辑」动作都落在这里。
+export type FileTabInstance = { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source' | 'edit'; toolId?: string; startLine?: number; openSeq?: number }
 // web 标签的两种形态（阶段 5 起）：
 //   · 活的：有池身份（viewId = 原生视图池的 'tN'，或 pageId = MCP 页列表的数字 id）；
 //   · 待重建的（重启恢复出来的）：**没有**池身份，只有 url 快照 —— 池身份是运行时 id
@@ -1444,7 +1447,7 @@ const TABS_PERSIST_DEBOUNCE_MS = 300
 // 持久化形态：标签实例**剥掉运行时字段**（viewId / pageId / openSeq），web 换成 url 快照。
 type PersistedTab =
   | { id: string; kind: 'activity' | 'git' }
-  | { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source'; toolId?: string; startLine?: number }
+  | { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source' | 'edit'; toolId?: string; startLine?: number }
   | { id: string; kind: 'web'; url: string; srcPath?: string }
 interface PersistedTabSet { tabs: PersistedTab[]; activeId: string | null }
 interface PersistedTabs { v: number; scopes: Record<ScopeKey, PersistedTabSet> }
@@ -1530,7 +1533,8 @@ function sanitizePersistedTab(raw: unknown): PersistedTab | undefined {
   if (kind === 'file') {
     // mode 非法 → 归一化成缺省（缺省 = source 完整预览，与 focusSpec/tabKeyOf 的口径一致），
     // 而不是丢掉整个标签：路径还在，用户点开还能看到内容。
-    const mode = r.mode === 'diff' || r.mode === 'source' ? r.mode : undefined
+    // edit 也持久化：重启后用户还期望看到那个「正在编辑」的标签（dirty 内容不存，见 PR-05b 口径）
+    const mode = r.mode === 'diff' || r.mode === 'source' || r.mode === 'edit' ? r.mode : undefined
     const path = str(r.path)
     const toolId = str(r.toolId)
     const startLine = num(r.startLine)
@@ -2418,6 +2422,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   cron: { enabled: true, auto_clean: true }, // 定时任务默认全开（2026-08-19 用户决策）
   mesh: { session_enabled: false, remote_enabled: false }, // Session Mesh 默认全关（安全默认：开启后才注册工具）
   stt: { enabled: false }, // 语音输入默认关闭（配置 base_url/model/api_key 后开启）
+  editor: true, // 内嵌编辑器（PR-05b）默认开启；false = 隐藏所有「编辑」入口（回滚开关）
 }
 
 // activeProviderCfg 当前活跃 provider 的配置（active 恒为 provider id，其值恒为 ProviderCfg；
@@ -2886,6 +2891,17 @@ export interface AppState {
   persona: 'code' | 'work' // 双 Persona（Code 工程师 / Work 办公助理；切换当前会话下一轮生效）
   model: string // 当前模型（switch_model；下一次请求生效）
   filePreviews: Record<string, FilePreview> // 文件内容缓存（file_preview 响应；键 = fileKeyOf 归一化路径。阶段 2：按标签隔离，不再是全局单例）
+  // —— 内嵌编辑器（PR-05b）——
+  // dirtyTabs：标签 id → 有未保存改动。内容与 baseHash 的真相在 lib/editorDocs（按标签持有），
+  // 这里只镜像「脏不脏」—— 标签圆点、关标签确认、原生红点都只读这个布尔，不需要拿到正文。
+  dirtyTabs: Record<string, boolean>
+  // fileChange：**最后一次** file_changed（带自增 seq，保证「同一个 hash 连推两次」也能被看到；
+  // 用对象身份比较会漏）。编辑器会话订阅它把事件路由到开了这个路径的标签。
+  fileChange?: { path: string; hash?: string; deleted: boolean; seq: number }
+  // closeConfirm：关 dirty 标签 / 退出应用共用的确认框（PR-05b：两种触发一个框）。
+  // tabIds 是**队列**：批量关闭（关其它/关右侧）撞到多个脏标签时，一次问一个，
+  // 处理完一个再问下一个 —— 单槽会让后一个覆盖前一个，用户以为只丢了一个文件。
+  closeConfirm?: { reason: 'close'; tabIds: string[] } | { reason: 'quit' }
   fileFocus?: FileFocus // 对话文件点击 → 文件 Tab 精确定位（seq 允许重复点击同一路径）
   // officeBusy 正在转换的文件路径（xlsx/docx/pptx 任一在途；驱动按钮禁用与「转换中…」）。
   // 三种格式共用一个槽位而不是各一个：同一时刻用户点的是**一个**文件，多槽位只会让
@@ -3128,6 +3144,19 @@ export interface AppState {
   filePathMoved(fromPath: string, toPath: string, opts?: { isDir?: boolean }): void // 移动/重命名：路径跟着走
   filePathRemoved(path: string, opts?: { isDir?: boolean }): void // 删除：摘掉指向它的 file 标签与缓存
   closeFile(): void
+  // —— 内嵌编辑器（PR-05b）——
+  // 打开「编辑」标签（文件树右键 / 预览工具栏共用入口）。settings.editor=false 时入口不出现；
+  // 这里再拦一层：存量入口（旧快捷键/persisted 标签）也不该绕过回滚开关。
+  openFileForEdit(path: string): void
+  // 编辑器三命令（file_open/file_save/file_close）走这里：返回带 code/data 的完整响应。
+  // 不经 dispatchEvent 的通用失败分支 —— 冲突/失效是**该文档的局部状态**，不是全局 bridge 错误。
+  editCommand(type: 'file_open' | 'file_save' | 'file_close', payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; code?: string; data?: Record<string, unknown> }>
+  setTabDirty(tabId: string, dirty: boolean): void // 编辑器把脏状态镜像进来（圆点 + 原生红点 + 关闭确认）
+  cancelCloseConfirm(): void // 确认框「取消」：标签留着，脏内容不动
+  // 批量关闭（关其它 / 关右侧）：干净的直接关，脏的进确认队列（**绝不静默丢缓冲区**）
+  closeTabs(ids: string[]): void
+  // 确认框处理完一个标签：关掉它并把队列推进到下一个（没了就收起框）
+  closeConfirmNext(closedId: string): void
   fetchMetrics(opts?: { from?: string; to?: string; project?: string }): void // 强制拉取聚合报告
   ensureMetrics(): void // 按需拉取：报告缺失或超龄才发命令（空会话图表等高频入口）
   fetchSkills(): void // 技能清单（SkillsPage + /skill 命令补全数据源）
@@ -3201,7 +3230,8 @@ export interface AppState {
   // —— 右侧栏标签（阶段 1，docs/RIGHT_PANEL_TABS_PLAN.md）——
   openTab(spec: TabSpec, opts?: { activate?: boolean }): string // 打开或激活（阶段 1 幂等键 = kind）；返回标签 id
   activateTab(id: string): void // 激活指定标签（切 scope 内的显示）
-  closeTab(id: string): void // 关闭（激活项顺延到右邻居，无则左邻居）
+  closeTab(id: string): void // 关闭（激活项顺延到右邻居，无则左邻居）；**dirty 编辑标签先弹确认**
+  closeTabNow(id: string): void // 真关（确认框/批量关闭用；跳过 dirty 守卫）
   reopenTab(id?: string): void // 重开最近关闭的一个（给 id 则重开指定的那个）
   syncTabsToRightTab(): void // 建默认集 / 恢复态补派生字段（activeId 权威，不再按 rightTab 反选）
   // 阶段 5：把防抖窗口里的标签集立即落盘（e2e/L1 断言与关窗前收尾用；正常路径靠订阅防抖写）。
@@ -3600,7 +3630,7 @@ function syncWorkspacesToBridge(paths: string[]): void {
   if (list.length) send({ type: 'workspace_sync', payload: { paths: list } })
 }
 
-function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void): number {
+function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void, onData?: (r: { ok: boolean; error?: string; code?: string; data?: unknown }) => void): number {
   const id = ++cmdSeq
   const ws = String(cmd.payload?.workspace || useAppStore.getState().workspace || '')
   const sessionId = String(cmd.payload?.session_id || cmd.payload?.id || '')
@@ -3643,6 +3673,9 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
   }
   const finalPayload = ws ? { ...(payload || {}), workspace: ws } : payload
   if (onResp) onCommandResponseOnce(id, onResp)
+  // onData 与 onResp 同理：**登记必须在 transport.send 之前** —— mock transport 是同步回响应，
+  // 调用方「先 send 再登记」会漏掉响应（表现为 10s 超时）。
+  if (onData) onCommandResponseData(id, onData)
   // transport.send 的返回值是「写没写进 bridge」。旧实现直接 void 丢掉：
   // bridge 已退出时 Electron 返回 {ok:false,error:'bridge 未运行'}，但不发 command_response
   // → pending 永不结算、骨架屏超时后空白、全程无报错（用户报障「没有报错但历史不出来」）。
@@ -3697,15 +3730,17 @@ function onCommandResponseOnce(id: number, cb: (r: { ok: boolean; error?: string
 
 // onCommandResponseData 一次性 command_response 回调（带完整 data；如 mesh_status）。
 // 与 onCommandResponseOnce 同构，但回传 data 供展示类查询用；超时 10s 释放。
-function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string; data?: unknown }) => void): void {
+function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string; code?: string; data?: unknown }) => void): void {
   let timer: ReturnType<typeof setTimeout> | undefined
   const off = transport.onEvent((line) => {
     try {
-      const ev = JSON.parse(line) as { event_type?: string; id?: number; ok?: boolean; error?: string; data?: unknown }
+      // code 是**稳定错误码**（conflict / denied / not_found…）。编辑器的三条冲突动作全靠它
+      // 分流；靠 error 文案匹配等于把中文提示当成协议（改一句文案就静默走错分支）。
+      const ev = JSON.parse(line) as { event_type?: string; id?: number; ok?: boolean; error?: string; code?: string; data?: unknown }
       if (ev.event_type !== 'command_response' || ev.id !== id) return
       off()
       if (timer) clearTimeout(timer)
-      cb({ ok: ev.ok === true, error: ev.error, data: ev.data })
+      cb({ ok: ev.ok === true, error: ev.error, code: ev.code, data: ev.data })
     } catch {
       /* 非 JSON 事件忽略 */
     }
@@ -3715,6 +3750,14 @@ function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string
     cb({ ok: false, error: 'bridge 响应超时' })
   }, 10_000)
 }
+// sendData：与 send 同一条通道，但把**带 code/data** 的一次性响应交回调用方（Promise 形态）。
+// 用在「错误码本身就是业务分支」的命令上（编辑器三命令、mesh_ping）。
+function sendData(cmd: Omit<BridgeCommand, 'id'>): Promise<{ ok: boolean; error?: string; code?: string; data?: Record<string, unknown> }> {
+  return new Promise((resolve) => {
+    send(cmd, false, undefined, (r) => resolve({ ok: r.ok, error: r.error, code: r.code, data: (r.data ?? undefined) as Record<string, unknown> | undefined }))
+  })
+}
+
 // pendingRestoreAttempt：会话 → 最近一次 new_session 的 attempt 序号（陈旧响应丢弃用）。
 const pendingRestoreAttempt: Record<string, number> = {}
 // imChatReq：im_chat_list 请求 id → gateway_id（响应分发时定位群列表归属）。
@@ -4641,12 +4684,42 @@ export function dispatchEvent(raw: AnyEvent): void {
       })
       break
     }
+    // 外部变更（PR-05b / F35）：bridge 按已打开文件的目录监听，by 在 V0.1 恒为 "external"。
+    // 这里只**记账**（最后一次事件 + seq）；路由给哪个标签、要不要重载，是 lib/editorRuntime
+    // 的事 —— store 不该知道编辑器状态机的形状。
+    case 'file_changed': {
+      const path = String(raw.path ?? '')
+      if (!path) break
+      const hash = typeof raw.hash === 'string' ? raw.hash : undefined
+      const deleted = raw.deleted === true
+      setState((st) => ({ fileChange: { path, hash, deleted, seq: (st.fileChange?.seq ?? 0) + 1 } }))
+      break
+    }
     case 'command_response': {
       const r = raw as AnyEvent & { id: number; ok: boolean; error?: string; data?: Record<string, unknown>; workspace?: string }
       const meta = pending[r.id]
       delete pending[r.id]
       const t = meta?.type ?? ''
       embedBridgeAlive = true // 任意响应到达 ⇒ bridge 已就绪（embed 自举的放行信号）
+      // 编辑器三命令（file_open/file_save/file_close）：响应由 editCommand 的 Promise 消费，
+      // 这里**就地返回**。不返回的话，file_save 的冲突（ok:false + code=conflict）会掉进下面的
+      // 通用失败分支 → 把「文件已被外部修改」写成全局 bridgeError（甚至把 bridge 标红）。
+      // 这是**该文档的局部状态**，只属于编辑器自己的黄条。
+      if (t === 'file_open' || t === 'file_save' || t === 'file_close') {
+        // 但**bridge 掉线**不属于「这个文件写不进去」：进程死了 / 未运行 / EPIPE 时，
+        // 只出一行文档红条会让全局健康信号沉默（用户看着"文件已失效"，其实后端没了）。
+        // 只动全局信号，不碰文档状态 —— 文档的红条由编辑器自己按 code 决定。
+        if (!r.ok && looksBridgeDown(r.error)) {
+          const err = r.error || i18nT('bridge.unavailable')
+          const alreadyDown = getState().bridgeStatus === 'error'
+          setState({
+            bridgeStatus: 'error' as const,
+            bridgeError: err,
+            ...(alreadyDown ? {} : { toast: { msg: err, kind: 'error' as const, id: Date.now() } }),
+          })
+        }
+        return
+      }
       // new_session 失败必须在这里收敛：bare（真新建）要撤掉 loading shell；
       // 带 id 的恢复要释放 snapshotPending/preBuf，否则该会话后续事件会被永久积压。
       // 旧路径落到通用 `if (!r.ok)` 只设 bridgeError —— 骨架屏/空白壳没人收，用户看到
@@ -8486,6 +8559,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 阶段 5：重启恢复的标签集（模块加载时同步读 localStorage，见 loadPersistedTabs）。
   tabsByScope: initTabsByScope,
   filePreviews: {},
+  dirtyTabs: {},
   recentSessions: initRecent,
   leftExpanded: true,
   leftPinned: false,
@@ -9591,6 +9665,30 @@ export const useAppStore = create<AppState>((set, get) => ({
   // —— 标签标题不变，用户看到的是「回到了文件活动列表」），语义与阶段 1 的「清两个全局单例」
   // 等价（面板都退回活动列表）。mode 清掉后该标签的身份键回落 'source'，故再次打开同一文件
   // 仍命中**这个**标签（不会因为「键变了」而多开一个）。
+  // —— 内嵌编辑器（PR-05b）——
+  openFileForEdit: (path) => {
+    if (!isEditorEnabled(get().settings)) return // 回滚开关：settings.editor=false → 不建编辑标签
+    if (!isTextLikePath(path)) return // 二进制/图片/工作簿只有内嵌浏览器或转换服务能渲染
+    // 身份 = (path, 'edit')：同一个文件已有预览标签时**另开一个**编辑标签（D5 同款口径），
+    // 反之亦然 —— 用户能一边看 diff 一边改源码。
+    get().openTab({ kind: 'file', path, mode: 'edit' })
+    get().setRightExpanded(true)
+    // fileFocus 跟着走：左栏选中行与「文件」标签空开时的落点都靠它
+    get().locateFile(path, undefined, 'source')
+  },
+  editCommand: (type, payload) => sendData({ type, payload }),
+  setTabDirty: (tabId, dirty) => {
+    const cur = get().dirtyTabs
+    if (!!cur[tabId] === dirty) return
+    const next = { ...cur }
+    if (dirty) next[tabId] = true
+    else delete next[tabId]
+    set({ dirtyTabs: next })
+    // 原生脏标记（macOS 标题栏的圆点 / 关窗时的系统提示）：任一标签脏即为脏。
+    // 非 macOS 由主进程空实现（F32 的「零依赖」同样适用于主进程这一侧）。
+    if (typeof window !== 'undefined') void window.desktop?.setDirty?.(Object.keys(next).length > 0)
+  },
+  cancelCloseConfirm: () => set({ closeConfirm: undefined }),
   closeFile: () => {
     const s = get()
     const scope = scopeKeyOf(s)
@@ -10126,6 +10224,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
   closeTab: (id) => {
+    // dirty 的编辑标签**不直接关**：弹三选（保存/丢弃/取消），取消则标签留着、内容不动。
+    // 批量关闭（关其它/关右侧）走同一个守卫 → 脏标签会被留下并弹一个框，宁可少关一个，
+    // 也不静默丢掉用户没保存的内容。
+    if (get().dirtyTabs[id]) {
+      set({ closeConfirm: { reason: 'close', tabIds: [id] } })
+      return
+    }
+    get().closeTabNow(id)
+  },
+  closeTabs: (ids) => {
+    const dirty = ids.filter((id) => get().dirtyTabs[id])
+    for (const id of ids) if (!dirty.includes(id)) get().closeTabNow(id)
+    // 多个脏标签：全部进队列（一个都不关），确认框逐个问
+    if (dirty.length) set({ closeConfirm: { reason: 'close', tabIds: dirty } })
+  },
+  closeConfirmNext: (closedId) => {
+    get().closeTabNow(closedId)
+    const cur = get().closeConfirm
+    if (cur?.reason !== 'close') return
+    const rest = cur.tabIds.filter((x) => x !== closedId)
+    set({ closeConfirm: rest.length ? { reason: 'close', tabIds: rest } : undefined })
+  },
+  closeTabNow: (id) => {
     const s = get()
     const scope = scopeKeyOf(s)
     const set0 = syncTabsToRightTab(s)
