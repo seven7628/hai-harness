@@ -1786,6 +1786,14 @@ const zh: Record<string, string> = {
   'rp.file.csvEmpty': '文件为空',
   'rp.file.csvMoreRows': '还有 {n} 行未显示',
   'rp.file.reading': '正在读取文件…',
+  // —— 预览渲染器注册表（R08a：file{mode:'preview'} 与 .file-source 的渲染器分支共用）——
+  // 落点是 data-renderer="unavailable" 的占位：**必须写明原因**，绝不白屏（00 §4.3）。
+  'rp.preview.unavailable': '预览不可用',
+  'rp.preview.noRenderer': '没有能渲染 {ext} 的渲染器（该格式还没有接入应用内预览）',
+  'rp.preview.noPath': '这个预览标签没有文件路径 —— 关闭后从文件树重新打开',
+  'rp.preview.imageLoading': '正在读取图片…',
+  'rp.preview.imageFailed': '图片没能显示',
+  'rp.preview.imageBroken': '图片数据读到了，但解码失败（文件可能已损坏，或扩展名与实际内容不符）',
   'rp.file.changedCount': '{n} 改',
   'rp.file.failedCount': ' · {n} 失败',
   'rp.file.readCount': '{n} 次读取',
@@ -3565,6 +3573,13 @@ const en: Record<string, string> = {
   'rp.file.csvEmpty': 'File is empty',
   'rp.file.csvMoreRows': '{n} more rows not shown',
   'rp.file.reading': 'Reading file…',
+  // Preview renderer registry (R08a). Unavailable is a *stated* placeholder, never a blank panel.
+  'rp.preview.unavailable': 'Preview unavailable',
+  'rp.preview.noRenderer': 'No renderer for {ext} yet (this format has no in-app preview)',
+  'rp.preview.noPath': 'This preview tab has no file path — close it and reopen from the file tree',
+  'rp.preview.imageLoading': 'Reading image…',
+  'rp.preview.imageFailed': 'Image could not be displayed',
+  'rp.preview.imageBroken': 'Image data was read but could not be decoded (corrupt file, or extension does not match content)',
   'rp.file.changedCount': '{n} changed',
   'rp.file.failedCount': ' · {n} failed',
   'rp.file.readCount': '{n} reads',

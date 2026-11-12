@@ -5,9 +5,6 @@ import { useAppStore, fileKeyOf } from '../store/useAppStore'
 import type { FileTabInstance } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { Markdown } from './markdown'
-import { codeToHtml } from './highlight'
-import { useResolvedTheme } from '../lib/useTheme'
-import { useAppearance } from '../lib/appearance'
 import { withAgentToolBlocks } from '../lib/agentSession'
 import { isCsvPath } from '../lib/csv'
 import { visualKindOf } from '../lib/visualFile'
@@ -15,20 +12,15 @@ import { baseDirFor } from '../lib/localAsset'
 import { fileStatusLabel } from '../lib/fileStatus'
 import { normalizeFilePath, sameFilePath } from '../lib/filePaths'
 import { isEditorEnabled, isTextLikePath } from '../lib/editorState'
-import CsvPreview from './CsvPreview'
 import { UnifiedDiff, fmtDuration } from './ui'
 import { aggregateFileActivity } from '../lib/fileActivity'
 import type { FileActivity, FileOperation } from '../lib/fileActivity'
-function langFromPath(p: string): string {
-  const ext = (p.split('.').pop() || '').toLowerCase()
-  const map: Record<string, string> = {
-    go: 'go', ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx',
-    json: 'json', yaml: 'yaml', yml: 'yaml', sql: 'sql', py: 'python',
-    rs: 'rust', html: 'html', htm: 'html', css: 'css', md: 'markdown',
-    vue: 'vue', // .vue 单文件组件（template + script + style 三块高亮）
-  }
-  return map[ext] ?? 'text'
-}
+// R08a：纯文本与 CSV 两条分支已迁到渲染器注册表（text / csv），这里只留宿主。
+// markdown 预览那条**没动**（本轮三个渲染器不含 markdown）。
+import { PreviewHost } from '../surfaces/preview/PreviewHost'
+import { useCodeHtml } from '../surfaces/preview/useCodeHtml'
+import { fileRefOf } from '../surfaces/preview/registry'
+import { preloadRenderers } from '../surfaces/preview/loader'
 
 // Markdown 文件判定（「最终文件」视图据此提供预览/纯文本双模式）：
 // .md / .markdown / .mdx（MDX 也走同一套渲染 —— 它的 JSX 部分会按 HTML 处理，
@@ -166,13 +158,14 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
   // 转换在途的文件路径（xlsx/docx/pptx 任一）——驱动按钮「转换中…」与禁用，见 renderBinaryActions。
   const officeBusy = useAppStore((s) => s.officeBusy)
   const showToast = useAppStore((s) => s.showToast)
-  const resolved = useResolvedTheme()
-  // 代码主题也在这里订阅：字号/主题之外，「外观 → 代码主题」改了必须**重渲 HTML 内嵌的那段
-  // shiki 产物** —— 高亮结果是字符串，不像 CSS 变量会自动跟着走。此前依赖数组里只有
-  // resolved（亮/暗），于是切同侧的另一个代码主题时对话代码块会变、右侧栏预览纹丝不动。
-  const ap = useAppearance()
-  const codeTheme = resolved === 'paper' ? ap.codeThemeLight : ap.codeThemeDark
-  const [html, setHtml] = useState('')
+  // 高亮 HTML（text 渲染器的输入）：抽到 surfaces/preview/useCodeHtml，与独立预览面板
+  // 共用同一实现 —— 包括「外观 → 代码主题」换到同侧另一个主题时必须重算这一条
+  //（高亮结果是字符串，不像 CSS 变量会自动跟着走；此前踩过的缺陷见该文件顶部注释）。
+  // filePreview 缺失 → ''（与原先 setHtml('') 的分支等价）。
+  const html = useCodeHtml(filePreview?.content, filePreview?.path)
+  // 预热本面板用到的两个渲染器模块：动态 import 是异步的，而下面「定位到读过的行」的
+  // 锚点（.fp-code）最好与 html 同一次提交落地 —— 预热后 loader 命中缓存、同步挂载。
+  useEffect(() => { preloadRenderers(['text', 'csv']) }, [])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState<FileFilter>('all')
   const [highlightPath, setHighlightPath] = useState('')
@@ -214,14 +207,6 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
       : [{ label: t('rp.file.changedFiles'), items: changed }, { label: t('rp.file.readOnly'), items: readOnly }]
   const additions = activities.reduce((sum, f) => sum + f.additions, 0)
   const deletions = activities.reduce((sum, f) => sum + f.deletions, 0)
-
-  useEffect(() => {
-    let alive = true
-    if (!filePreview) { setHtml(''); return }
-    setHtml('')
-    void codeToHtml(filePreview.content, langFromPath(filePreview.path), resolved, true).then((h) => { if (alive) setHtml(h) })
-    return () => { alive = false }
-  }, [filePreview?.path, filePreview?.content, resolved, codeTheme])
 
   // 缓存缺失 → 按需补拉（阶段 2）。什么时候会缺：切工作区把缓存清了、被 FILE_PREVIEWS_MAX
   // 淘汰、标签从「最近关闭」重开。没有这条兜底，用户会永久停在「正在读取文件…」（阶段 1
@@ -312,6 +297,9 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
   // 文件活动列表内嵌 source（detailMode==='source'，file-inline-detail）。
   // 阶段 2：定位锚来自**本标签**的 payload（tab.startLine / tab.toolId），不再读 fileFocus ——
   // 否则打开 B 时 A 标签（已挂载在别处？）会跟着滚。openSeq 参与依赖：重开同一文件要重新定位。
+  // R08a：锚点现在由 text 渲染器挂载（经 lazy loader），**首次打开**时它与 html 谁先落地
+  // 没有保证（模块 import 是异步的）→ 双帧等不到就再等，上限 1.5s。原来「DOM 已就绪」
+  // 时行为逐字不变（第 2 帧就滚），只是不再依赖「一定在第 2 帧之前就绪」这个巧合。
   useEffect(() => {
     if (!html || tab.startLine == null || tab.toolId) return
     // 可视容器：standalone 优先（file-side-detail 显示中），否则找 detailMode==='source'
@@ -319,21 +307,23 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
     // querySelector 也会命中 → 用 closest 判断是否可见（offsetParent!==null）。
     // 范围限定在本面板内（panelRef）：同一页面上只挂一个 FilePreviewTab，但把查询收窄
     // 到自己的容器能防住将来「多面板并存」时的误定位。
-    const containers = Array.from((panelRef.current ?? document).querySelectorAll<HTMLElement>('.fp-code'))
-    const visible = containers.find((c) => c.offsetParent !== null) ?? containers[0]
-    if (!visible) return
-    const target = visible.querySelector<HTMLElement>(`.fp-ln[data-line="${tab.startLine}"]`)
-    if (!target) return
-    const lineEl = target.closest('.line')
-    if (!lineEl) return
-    // 用 scrollIntoView 定位该行到容器中部（block:'center'）；smooth 与整体 UX 一致。
-    let raf2 = 0
-    const frame1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        lineEl.scrollIntoView({ block: 'center', behavior: 'smooth' })
-      })
-    })
-    return () => { cancelAnimationFrame(frame1); cancelAnimationFrame(raf2) }
+    const findLine = (): Element | null => {
+      const containers = Array.from((panelRef.current ?? document).querySelectorAll<HTMLElement>('.fp-code'))
+      const visible = containers.find((c) => c.offsetParent !== null) ?? containers[0]
+      if (!visible) return null
+      const target = visible.querySelector<HTMLElement>(`.fp-ln[data-line="${tab.startLine}"]`)
+      return target?.closest('.line') ?? null
+    }
+    const deadline = Date.now() + 1500
+    let frame = 0
+    const tick = () => {
+      const lineEl = findLine()
+      // 用 scrollIntoView 定位该行到容器中部（block:'center'）；smooth 与整体 UX 一致。
+      if (lineEl) { lineEl.scrollIntoView({ block: 'center', behavior: 'smooth' }); return }
+      if (Date.now() < deadline) frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(() => { frame = requestAnimationFrame(tick) })
+    return () => cancelAnimationFrame(frame)
   }, [html, tab.openSeq, tab.startLine, tab.toolId])
 
   // 定位本标签的文件：把文件活动列表选中/展开/高亮到 tab 指向的那一项，并按 mode 落视图模式
@@ -397,16 +387,39 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
     return () => root.removeEventListener('scroll', onScroll, true)
   }, [tab.id])
 
+  // 滚动位置恢复（R08a 起要**等渲染器挂载**）：内容容器由 surfaces/preview 的 lazy loader
+  // 挂载，它与 html 不是同一次提交 —— 「元素还没出现/还没有内容」时不能当成「已经恢复到 0」，
+  // 否则切回标签会丢掉滚动位置（实测：e2e:md-file-modes 的「切回来仍在原视图」变红）。
+  // 判据是「元素在且已经有子节点」（.fp-code 的内容来自 shiki，.md-preview-doc 来自 Markdown），
+  // 找不到就按帧重试，上限 1.5s（与 startLine 定位同一套做法）。
   useEffect(() => {
     const root = panelRef.current
     const snap = fileTabScroll.get(tab.id)
     if (!root || !snap) return
     // 有 read_file 定位锚时不恢复：那一次打开的意图是「滚到那一行」（见上面 startLine 的 effect）
     if (tab.startLine != null && tab.mode !== 'diff') return
-    for (const [role, sel] of SCROLL_ROLES) {
-      const el = root.querySelector<HTMLElement>(sel)
-      if (el && snap[role] != null) el.scrollTop = snap[role]
+    const pending = new Set(Object.keys(snap))
+    const apply = (): boolean => {
+      for (const [role, sel] of SCROLL_ROLES) {
+        if (!pending.has(role)) continue
+        const want = snap[role]
+        if (want == null) { pending.delete(role); continue }
+        const el = root.querySelector<HTMLElement>(sel)
+        if (!el || (want > 0 && el.childElementCount === 0)) continue
+        el.scrollTop = want
+        pending.delete(role)
+      }
+      return pending.size === 0
     }
+    if (apply()) return
+    const deadline = Date.now() + 1500
+    let frame = 0
+    const tick = () => {
+      if (apply()) return
+      if (Date.now() < deadline) frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
   }, [tab.id, tab.startLine, tab.mode, html, filePreview?.content])
 
   const toggleFile = (item: FileActivity) => {
@@ -455,12 +468,16 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
              （pdf/图片/html/svg → 内嵌浏览器；xlsx/docx/pptx → bridge 转 HTML 后同一条浏览器；
              见 renderBinaryActions），而不是一句指不到按钮的提示。zip 等确实无应用内预览的
              格式 → 只留「用默认程序打开」这条真实出口，文案如实说明（rp.file.binaryNoPreview）。
-          ① CSV/TSV 且表格模式 → CsvPreview（内容 → lib/csv.ts 转 GFM 表格 → 同一套
-             Markdown 管线）；内容来自上面这条 file_preview 流程，**不在前端另读文件**
-             （读文件的 workspace 越界校验与 1 MiB 上限在 bridge 侧，绕过它等于开洞）。
-          ② Markdown 且预览模式 → 对话区 Markdown 组件（GFM/表格/mermaid/KaTeX）。
-          ③ 其余（含 ①② 的纯文本模式）→ shiki 高亮源码（既有行为不变）。
-          html（shiki 结果）对 CSV 也照常算着——切「纯文本」时立刻可用，省一次切换等待。 */}
+          ① CSV/TSV 且表格模式 → csv 渲染器（R08a 起经注册表挂载；渲染仍是 CsvPreview：
+             内容 → lib/csv.ts 转 GFM 表格 → 同一套 Markdown 管线）；内容来自上面这条
+             file_preview 流程，**不在前端另读文件**（读文件的 workspace 越界校验与
+             1 MiB 上限在 bridge 侧，绕过它等于开洞）。
+          ② Markdown 且预览模式 → 对话区 Markdown 组件（GFM/表格/mermaid/KaTeX）。**本轮没动**。
+          ③ 其余（含 ①② 的纯文本模式）→ text 渲染器（R08a 起经注册表挂载，DOM 仍是
+             .fp-code + shiki 高亮源码，既有行为不变）。
+          html（shiki 结果）对 CSV 也照常算着——切「纯文本」时立刻可用，省一次切换等待。
+          ①②③ 的注册表分支都带 only：文件面板的「表格/纯文本」是 UI 决策，不能让
+          weight 更高的渲染器把它抢走（见 registry.pickRenderer 的 only 说明）。 */}
       {filePreview.binary
         ? (visualKindOf(matchPath)
           // 可视类：内容已由上面的自动打开送进预览通道 —— 这里只留一行状态，**不再有提示段落
@@ -477,10 +494,10 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
             {renderBinaryActions(matchPath)}
           </div>)
         : isCsvFile(matchPath) && csvMode === 'table'
-          ? <CsvPreview content={filePreview.content} path={filePreview.path} />
+          ? <PreviewHost file={fileRefOf(filePreview.path, filePreview.content.length)} content={filePreview.content} only={['csv']} />
           : isMarkdownFile(matchPath) && mdMode === 'preview'
             ? <div className="md-preview-doc"><Markdown text={filePreview.content} baseDir={baseDirFor(filePreview.path, workspace)} /></div>
-            : <div className="fp-code" dangerouslySetInnerHTML={{ __html: html }} />}
+            : <PreviewHost file={fileRefOf(filePreview.path, filePreview.content.length)} content={filePreview.content} html={html} only={['text']} />}
     </div>
   }
 

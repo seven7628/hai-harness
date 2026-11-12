@@ -48,7 +48,11 @@ export type TabKind = RightTab // 复用 5 个既有取值：e2e 断言与 i18n 
 // 触发器也必须跟着标签走（否则重开 A 会把 B 的视图复位）。
 // mode='edit'（PR-05b）：同一个文件的**编辑**标签与预览标签并存（身份 = (path, mode)）。
 // 它是 file 面板的第三种渲染分发，不是新 kind —— 文件树/预览工具栏的「编辑」动作都落在这里。
-export type FileTabInstance = { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source' | 'edit'; toolId?: string; startLine?: number; openSeq?: number }
+// mode='preview'（R08a）：file 面板的第四种渲染分发 —— 按 surfaces/preview 的渲染器注册表
+// 显示文件（text/image/csv 先行，pdf/docx/pptx/xlsx/media 是 R08b/R08c）。同样不是新 kind（D-I）。
+// 持久化口径见 sanitizePersistedTab：四个 mode 都认，非法值归一化成缺省（source）。
+export type FileTabMode = 'diff' | 'source' | 'edit' | 'preview'
+export type FileTabInstance = { id: string; kind: 'file'; path?: string; mode?: FileTabMode; toolId?: string; startLine?: number; openSeq?: number }
 // web 标签的两种形态（阶段 5 起）：
 //   · 活的：有池身份（viewId = 原生视图池的 'tN'，或 pageId = MCP 页列表的数字 id）；
 //   · 待重建的（重启恢复出来的）：**没有**池身份，只有 url 快照 —— 池身份是运行时 id
@@ -1452,7 +1456,7 @@ const TABS_PERSIST_DEBOUNCE_MS = 300
 // 持久化形态：标签实例**剥掉运行时字段**（viewId / pageId / openSeq），web 换成 url 快照。
 type PersistedTab =
   | { id: string; kind: 'activity' | 'git' }
-  | { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source' | 'edit'; toolId?: string; startLine?: number }
+  | { id: string; kind: 'file'; path?: string; mode?: FileTabMode; toolId?: string; startLine?: number }
   | { id: string; kind: 'web'; url: string; srcPath?: string }
 interface PersistedTabSet { tabs: PersistedTab[]; activeId: string | null }
 interface PersistedTabs { v: number; scopes: Record<ScopeKey, PersistedTabSet> }
@@ -1515,7 +1519,9 @@ function sanitizePersistedTab(raw: unknown): PersistedTab | undefined {
     // mode 非法 → 归一化成缺省（缺省 = source 完整预览，与 focusSpec/tabKeyOf 的口径一致），
     // 而不是丢掉整个标签：路径还在，用户点开还能看到内容。
     // edit 也持久化：重启后用户还期望看到那个「正在编辑」的标签（dirty 内容不存，见 PR-05b 口径）
-    const mode = r.mode === 'diff' || r.mode === 'source' || r.mode === 'edit' ? r.mode : undefined
+    // preview（R08a）同理：它是渲染器注册表那条路，重启后按同一份注册表重建（依赖缺失时
+    // 显示 unavailable 占位，不是白屏）。
+    const mode = r.mode === 'diff' || r.mode === 'source' || r.mode === 'edit' || r.mode === 'preview' ? r.mode : undefined
     const path = str(r.path)
     const toolId = str(r.toolId)
     const startLine = num(r.startLine)
