@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, isPendingWebTab, rebuildWebTab } from '../store/useAppStore'
 import type { RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
 import type { AnyEvent } from '../store/events'
@@ -7,7 +7,7 @@ import { projectAllTraces, liveRootRunId } from '../store/trace'
 import type { TraceDetail } from '../store/trace'
 import TraceWaterfall, { buildRows } from './TraceWaterfall'
 import SpanSheet, { lookupPayload } from './SpanSheet'
-import { Activity, GitBranch, FileIcon, BarChart, CheckList, Globe, PanelRight, ImageIcon, ChevronDown, Plus } from './icons'
+import { Activity, GitBranch, FileIcon, CheckList, Globe, PanelRight, ChevronDown, Plus } from './icons'
 import { fmtTokens, fmtUsd, fmtDuration } from './ui'
 import { ChangesTab } from './ChangesTab'
 import { FilePreviewTab } from './FilePreview'
@@ -16,7 +16,6 @@ import { fileUrlToPath } from '../lib/filePaths'
 import { fmtBytesShort, ratio } from '../lib/format'
 import { getSurface } from '../surfaces/registry'
 import type {} from '../lib/fileStatus'
-import { visualKindOf } from '../lib/visualFile'
 import { centerOf, overlayCoversRect, rectsIntersect } from '../lib/overlayHit'
 import { shortName } from '../lib/shortPath'
 import { copyText } from '../lib/clipboard'
@@ -294,32 +293,8 @@ function kindShare(d: TraceDetail): { segs: { kind: string; ms: number }[]; sum:
 }
 
 // GitStatus 空值（工作区未探测/非仓库时的兜底展示）
-/** 标签标题：file:// → 文件名；否则 title → 主机名 → 原 URL。 */
-function tabLabel(url: string, title: string): string {
-  if (url.startsWith('file://')) {
-    const base = fileUrlToPath(url).split('/').filter(Boolean).pop()
-    if (base) return base
-  }
-  if (title) return title
-  try {
-    return new URL(url).host || url
-  } catch {
-    return url
-  }
-}
-
-/** 标签类型图标（与产出卡/文件栏共用 visualKindOf 这一事实源，避免两处漂移）。 */
-function tabIcon(url: string): ReactElement {
-  switch (visualKindOf(fileUrlToPath(url) || url)) {
-    case 'xlsx': return <BarChart size={12} />
-    case 'image': return <ImageIcon size={12} />
-    case 'pdf':
-    case 'docx':
-    case 'pptx': return <FileIcon size={12} />
-    case 'browser': return <Globe size={12} />
-    default: return /^https?:/.test(url) ? <Globe size={12} /> : <FileIcon size={12} />
-  }
-}
+// 标签标题/类型图标本体已随 R06b 迁进 surfaces/builtin/webSurface.tsx（那里是 web 分支的
+// 唯一消费者；若将来第二种 kind 也要用，再提升到 lib —— 本轮不预先抽象）。
 
 // 标签条最多平铺几个（超出收进「+N」）。取 5：与原型一致，且 360px 宽的右栏里
 // 5 个 × 最窄 86px 已经是「还能读出文件名」的下限。
@@ -875,10 +850,14 @@ export default function RightPanel() {
   // 其余按 kind。未读时**用未读点替代**图标（R4 口径：未读时用户最需要知道的是「有新东西」）。
   // 阶段 5：待重建的恢复标签不在视图池里（viewId 为空）→ 退化用它的 **url 快照**，
   // 否则重启后这些标签会丢掉图标与名字（用户看到一排「网页」）。
+  // R06b 起 web 的「名字 / 类型图标」由 webSurface 提供（visualKindOf 那套判定随之搬走，
+  // 仍是单一份）；RP 只保留 webTabUrl —— 标签的 title 属性还要用它。fallback 只在
+  // provider 未注册时可达：main.tsx 的副作用 import 保证不会发生。
   const webTabUrl = (tab: TabInstance): string =>
     tab.kind === 'web' ? (embedNav?.targets?.find((x) => x.id === tab.viewId)?.url ?? tab.url ?? '') : ''
-  const tabIconEl = (tab: TabInstance): ReactElement =>
-    tab.kind === 'web' ? tabIcon(webTabUrl(tab)) : kindIcon(tab.kind)
+  // 返回 ReactNode（而非 ReactElement）：provider 的 icon 签名是 ReactNode，见 types.ts。
+  const tabIconEl = (tab: TabInstance): ReactNode =>
+    tab.kind === 'web' ? (getSurface('web')?.icon?.(tab) ?? kindIcon('web')) : kindIcon(tab.kind)
   const tabTitle = (tab: TabInstance): string => {
     if (tab.kind === 'file') {
       const base = (tab.path ?? '').split('/').filter(Boolean).pop()
@@ -887,10 +866,7 @@ export default function RightPanel() {
       // 完整路径在 title 里（见渲染点的 title 属性）。
       return (base && shortName(base)) || kindLabel('file')
     }
-    if (tab.kind === 'web') {
-      const tp = embedNav?.targets?.find((x) => x.id === tab.viewId)
-      return tabLabel(tp?.url ?? tab.url ?? '', tp?.title ?? '') || kindLabel('web')
-    }
+    if (tab.kind === 'web') return getSurface('web')?.title(tab, t) ?? kindLabel('web')
     return kindLabel(tab.kind)
   }
 
