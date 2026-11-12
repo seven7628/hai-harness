@@ -59,6 +59,12 @@ import { createRoot } from 'react-dom/client'
 import SettingsModal from '../../src/components/SettingsModal'
 import Narrative from '../../src/components/Narrative'
 import RightPanel from '../../src/components/RightPanel'
+// ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45/F46）：少了这一行 registry 是空的，
+// RightPanel 的 getSurface(kind)?.render(...) 恒走 ?? 兜底 —— 本探针验的一直是兜底组件
+//（file 的兜底就是同一个 FilePreviewTab，像素一致、断言全绿）。下面 page 加载后的第一条
+// 自检断言会当场戳穿这件事，补上这行才轮到真正的 provider 渲染。
+import '../../src/surfaces/builtin'
+import { getSurface } from '../../src/surfaces/registry'
 import { DEFAULT_SETTINGS, useAppStore } from '../../src/store/useAppStore'
 import { applyAppearance, useAppearance } from '../../src/lib/appearance'
 import { applyTheme } from '../../src/lib/theme'
@@ -96,6 +102,10 @@ useAppStore.setState({
     { kind: 'assistant', id: 1, streaming: false, thinking: '', text: '\\u4ee3\\u7801\\u5757\\uff1a\\n\\n\`\`\`ts\\nconst themePreview: ThemeConfig = {\\n  accent: "#2563eb",\\n};\\n\`\`\`' },
   ],
 } as never)
+
+;(window as unknown as { __surfaces: unknown }).__surfaces = {
+  file: !!getSurface('file'), git: !!getSurface('git'), web: !!getSurface('web'), activity: !!getSurface('activity'),
+}
 
 createRoot(document.getElementById('root')!).render(
   <>
@@ -199,6 +209,15 @@ try {
   await page.goto(URL_BASE)
   await page.waitForSelector('.settings-nav-item', { timeout: 20000 })
   await page.waitForSelector('.codeblock .shiki', { timeout: 20000 })
+
+  // —— 仪器自检（04-review F45/F46）——
+  // RightPanel 的内容面板一律是 getSurface(kind)?.render(...) ?? 本地组件。本探针页只
+  // import RightPanel 时注册表是空的 → 验的一直是 **兜底组件**，而兜底渲染的往往是同一个
+  // 组件（file → FilePreviewTab），像素一致、断言全绿 —— 这是最坏的一种失败：看不出坏。
+  // 所以先钉住「provider 真的在注册表里」：缺 import 时这里当场红，而不是让下面的面板断言
+  // 继续在兜底分支上假绿。
+  const surfaces = await page.evaluate(() => window.__surfaces ?? null)
+  assert(!!surfaces?.file, `仪器：builtin provider 已注册（缺 builtin import 时验的是 ?? 兜底；实得 ${JSON.stringify(surfaces)}）`)
 
   // ① 入口在导航里
   const navLabels = await page.$$eval('.settings-nav-item', (els) => els.map((e) => e.textContent?.trim() ?? ''))

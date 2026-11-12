@@ -3,3 +3,4 @@
 import './gitSurface'
 import './fileSurface'
 import './webSurface'
+import './activitySurface'

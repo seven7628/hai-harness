@@ -1,20 +1,14 @@
-import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import { Fragment, useEffect, useRef, useState, useCallback } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, isPendingWebTab, rebuildWebTab } from '../store/useAppStore'
 import type { RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
-import type { AnyEvent } from '../store/events'
-import { projectAllTraces, liveRootRunId } from '../store/trace'
-import type { TraceDetail } from '../store/trace'
-import TraceWaterfall, { buildRows } from './TraceWaterfall'
-import SpanSheet, { lookupPayload } from './SpanSheet'
 import { Activity, GitBranch, FileIcon, CheckList, Globe, PanelRight, ChevronDown, Plus } from './icons'
-import { fmtTokens, fmtUsd, fmtDuration } from './ui'
 import { ChangesTab } from './ChangesTab'
 import { WebTab } from './WebTab'
+import { ActivityTab } from './ActivityTab'
 import { FilePreviewTab } from './FilePreview'
 import { EditorConfirm } from './EditorConfirm'
 import { fileUrlToPath } from '../lib/filePaths'
-import { fmtBytesShort, ratio } from '../lib/format'
 import { getSurface } from '../surfaces/registry'
 import type {} from '../lib/fileStatus'
 import { shortName } from '../lib/shortPath'
@@ -42,256 +36,6 @@ function secondaryTabs(t: (k: string) => string): { key: RightTab; label: string
   ]
 }
 
-// 链路 tab = 执行链路（trace）瀑布图：树 + 时间轴泳道，点击 Span 升起详情抽屉。
-// 数据源（docs/TRACE_CHAIN_REDESIGN.md）：
-//   - 当前 trace：前端由事件流实时投影（store.traceEvents → projectAllTraces），零往返
-//   - 历史 trace：bridge `trace` 命令按需拉取（读事件日志投影，零新增存储）
-// 顶部 = trace 选择器（一个会话 = 多条 trace；Alt+←/→ 切换）+ 汇总；正文按锚点从 blocks 回查。
-function ActivityTab() {
-  const traceEvents = useAppStore((s) => s.traceEvents)
-  const traceList = useAppStore((s) => s.traceList)
-  const traceListTotal = useAppStore((s) => s.traceListTotal)
-  const traceListLoading = useAppStore((s) => s.traceListLoading)
-  const traceHasMore = useAppStore((s) => s.traceHasMore)
-  const activeTraceId = useAppStore((s) => s.activeTraceId)
-  const traceDetail = useAppStore((s) => s.traceDetail)
-  const traceFallback = useAppStore((s) => s.traceFallback)
-  const blocks = useAppStore((s) => s.blocks)
-  const runNodes = useAppStore((s) => s.runNodes)
-  // reqBlock（request_id → assistant 块 id）是 view 内部字段，不镜像顶层：
-  // 正文回查需要它把 llm span 的 request_id 落到具体块上。
-  const reqBlock = useAppStore((s) => s.views[s.activeSessionId ?? '']?.reqBlock)
-  const runningAgentCount = useAppStore((s) => s.runningAgentCount)
-  const fetchTraces = useAppStore((s) => s.fetchTraces)
-  const selectTrace = useAppStore((s) => s.selectTrace)
-  const t = useT()
-
-  // 详情抽屉选中项（span key）
-  const [selKey, setSelKey] = useState<string | null>(null)
-  const [pop, setPop] = useState(false)
-  const [loadedAll, setLoadedAll] = useState(false)
-
-  // ① 实时投影：当前 trace（最近一条）+ 全部 trace（供选择器与切回实时）
-  // liveRoot = 仍在运行的顶层 run（来自 runNodes：实时维护 + 恢复时归一化）：
-  // 让「无 agent_end 的 root run」显示为 running 而不是 interrupted。
-  const liveRoot = liveRootRunId(runNodes as { id: string; kind: string; status: string; parentId?: string }[])
-  const liveTraces = useMemo(
-    () => projectAllTraces(traceEvents as AnyEvent[], liveRoot),
-    [traceEvents, liveRoot],
-  )
-  const liveLatest = liveTraces[0]
-
-  // ② 选中态：activeTraceId 为空 = 跟随最新（实时）；否则用命令拉回的历史详情。
-  // 刷新/切回会话后 traceEvents 为空（checkpoint 不恢复它）→ 实时投影无内容，
-  // 此时回退到命令兜底拉回的 traceFallback，避免误报「尚无运行」。
-  // 优先级：实时投影 > 兜底（一旦有新事件，实时投影立即接管）。
-  const showingHistory = !!activeTraceId
-  const liveAvailable = !!liveLatest
-  const detail = showingHistory ? traceDetail : (liveLatest ?? traceFallback)
-  // 「正在运行」：实时可用时看投影状态；兜底数据来自磁盘，其 running 由后端判定
-  const running = !showingHistory && detail?.summary.status === 'running'
-
-  // 汇总列表：历史列表优先（含更早的 trace），无则用实时投影
-  const list = useMemo(() => {
-    if (traceList?.length) return traceList
-    return liveTraces.map((d) => d.summary)
-  }, [traceList, liveTraces])
-
-  // 进入 tab 拉一次历史列表（每个会话一次）
-  const askedRef = useRef<string | null>(null)
-  const sid = useAppStore((s) => s.activeSessionId) || ''
-  useEffect(() => {
-    if (!sid) return
-    if (askedRef.current === sid) return
-    askedRef.current = sid
-    setLoadedAll(false)
-    setSelKey(null)
-    fetchTraces(sid)
-  }, [sid, fetchTraces])
-
-  // 切换选中 trace 时清抽屉
-  useEffect(() => { setSelKey(null) }, [detail?.summary.id])
-
-  // Alt + ←/→ 切换 trace（列表按最近在上：← 更早，→ 更新）
-  // idx = 当前在列表中的位置；跟随实时（activeTraceId 空）时视为「最新位」。
-  // 实时投影的 id 与历史列表可能对不上（未落盘的最新 run / mock 工具），故 idx<0 时按 0 处理。
-  const idxRaw = useMemo(() => {
-    if (!detail) return -1
-    return list.findIndex((x) => x.id === detail.summary.id)
-  }, [list, detail])
-  const idx = idxRaw >= 0 ? idxRaw : 0
-  const go = useCallback((delta: number) => {
-    const next = idx + delta
-    if (next < 0 || next >= list.length) return
-    // 回到最新位 → 复位为「跟随实时」（用实时投影，零往返）；否则拉该条历史详情
-    if (next === 0) selectTrace(undefined, sid)
-    else selectTrace(list[next].id, sid)
-  }, [idx, list, selectTrace, sid])
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (!e.altKey || e.metaKey || e.ctrlKey) return
-      if (e.key === 'ArrowLeft') { e.preventDefault(); go(-1) }
-      else if (e.key === 'ArrowRight') { e.preventDefault(); go(1) }
-      else if (e.key === 'Escape') setPop(false)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [go])
-
-  // 选中 span 的正文回查（tool_id / request_id → blocks）
-  const rows = useMemo(() => (detail ? buildRows(detail.spans, new Set()) : []), [detail])
-  const selSpan = useMemo(() => {
-    if (!selKey || !detail) return null
-    const hit = detail.spans.find((s, i) => `${s.kind}:${s.id ?? s.run_id ?? ''}:${s.start_at ?? 0}:${i}` === selKey)
-    return hit ?? null
-  }, [selKey, detail])
-  const payload = useMemo(
-    () => lookupPayload(blocks, selSpan, reqBlock),
-    [blocks, selSpan, reqBlock],
-  )
-  void rows
-
-  if (!detail) {
-    return (
-      <div className="empty">
-        <div className="big">{t('rp.trace.noRun')}</div>
-        {traceListLoading ? t('rp.trace.listLoading') : t('rp.trace.noRunHint')}
-      </div>
-    )
-  }
-
-  const sum = detail.summary
-  const st = sum.status
-  const statusLabel = st === 'running' ? t('rp.trace.status.running') : st === 'error' ? t('rp.trace.status.error') : st === 'interrupted' ? t('rp.trace.status.interrupted') : t('rp.trace.status.done')
-  const glyph = st === 'error' ? '✗' : st === 'running' ? '▶' : st === 'interrupted' ? '⏸' : '✓'
-  const gcls = st === 'error' ? 'bad' : st === 'running' ? 'busy' : st === 'interrupted' ? 'warn' : 'ok'
-  const total = Math.max(1, sum.wall_ms)
-  const ks = kindShare(detail)
-  const more = traceListTotal != null && list.length < traceListTotal && traceHasMore && !loadedAll
-
-  return (
-    <>
-      {/* trace 选择器：一个会话 = 多条 trace（最近在上） */}
-      <div className="tr-rail" style={{ position: 'relative' }}>
-        <button className="tr-nav" onClick={() => go(-1)} disabled={idx <= 0} title={t('rp.trace.prev')}>‹</button>
-        <button className={`tr-pick${pop ? ' on' : ''}`} onClick={() => setPop((p) => !p)}
-          title={t('rp.trace.pick').replace('{n}', String(traceListTotal ?? list.length))}>
-          <span className="tr-idx mono">{`${idx + 1}/${traceListTotal ?? list.length}`}</span>
-          <span className={`g ${gcls}`}>{glyph}</span>
-          <span className="tr-lab">{sum.label}</span>
-          <span className="cv">{pop ? '▴' : '▾'}</span>
-        </button>
-        <button className="tr-nav" onClick={() => go(1)} disabled={idx >= list.length - 1} title={t('rp.trace.next')}>›</button>
-
-        {pop && (
-          <div className="tr-pop">
-            {/* 列表体独立滚动：弹层自身限高，行数一多也不会把上半截顶出可视区。
-                此前 .tr-pop 为绝对定位且缺 top，静态位置落在 .tr-rail（flex 居中）的
-                中线 → 行数 ≥4 时上半越出 .right-body 顶边；块级 start 方向溢出按规范
-                不可见且不可滚 → 只能看到 3 条（共 5 条）。 */}
-            <div className="tr-pop-body">
-              {list.map((x, i) => (
-                <button key={x.id} className={`tr-row${i === idx ? ' on' : ''}`}
-                  onClick={() => { setPop(false); if (i === 0) selectTrace(undefined, sid); else selectTrace(x.id, sid) }}>
-                  <span className={`g ${x.status === 'error' ? 'bad' : x.status === 'running' ? 'busy' : x.status === 'interrupted' ? 'warn' : 'ok'}`}>
-                    {x.status === 'error' ? '✗' : x.status === 'running' ? '▶' : x.status === 'interrupted' ? '⏸' : '✓'}
-                  </span>
-                  <span className="mid">
-                    <span className="l1">{i === 0 ? <span className="cur">{t('rp.trace.pickLabel')}</span> : null}{x.label}</span>
-                    <span className="l2 mono">
-                      {x.spans} spans · {x.tools} tools · {x.turns} {t('rp.trace.turns').replace('{n}', '').trim()}
-                      {x.subs ? ` · ${x.subs} 子` : ''}
-                      {x.errors ? ` · ${x.errors} ✗` : ''}
-                    </span>
-                    <span className="mix">
-                      {x.turns > 0 && <i className="k-llm" style={{ width: `${ratio(x.turns, x.spans)}%` }} />}
-                      {x.tools > 0 && <i className="k-tool" style={{ width: `${ratio(x.tools, x.spans)}%` }} />}
-                    </span>
-                  </span>
-                  <span className="r">
-                    <span className="dur mono">{fmtDuration(x.wall_ms)}</span>
-                    <span className="ago mono">{fmtBytesShort(x.meta_bytes)}</span>
-                  </span>
-                </button>
-              ))}
-              {more && (
-                // 加载更多：显式请求「全部」—— 后端 limit<=0 才回落默认上限，
-                // 不传会重复返回同一批（长会话 112 条 trace 时按钮点了没反应）。
-                <button className="more" onClick={() => { setLoadedAll(true); fetchTraces(sid, traceListTotal ?? 0) }}>
-                  {t('rp.trace.more').replace('{n}', String((traceListTotal ?? 0) - list.length))}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* trace 汇总 header */}
-      <div className="trace-hd">
-        <div className="th-line1">
-          <span className={`th-st ${gcls === 'ok' ? 'ok' : gcls === 'busy' ? 'busy' : ''}`}>{glyph}</span>
-          <span className="th-label" title={sum.label}>{sum.label}</span>
-          <span className="th-status mono">{statusLabel}</span>
-        </div>
-        <div className="th-meta mono">
-          {/* 时间对比：墙钟 vs 各类累计 —— 并发时累计可超墙钟，差额就是「并行省下的时间」 */}
-          <span>{t('rp.trace.wall')} <b>{fmtDuration(sum.wall_ms)}</b></span>
-          <span>
-            {t('rp.trace.total')} <b>{fmtDuration(ks.sum)}</b>
-            {!running && ks.sum > sum.wall_ms ? ` · ${t('rp.trace.saved').replace('{dur}', fmtDuration(ks.sum - sum.wall_ms))}` : ''}
-          </span>
-          <span>{sum.spans} spans</span>
-          {sum.tools > 0 && <span>{sum.tools} tools</span>}
-          {sum.turns > 0 && <span>{t('rp.trace.turns').replace('{n}', String(sum.turns))}</span>}
-          {sum.subs > 0 && <span>{t('rp.trace.subsTitle').replace('{n}', String(sum.subs))}</span>}
-          {sum.in_tok + sum.out_tok > 0 && <span>{fmtTokens(sum.in_tok + sum.out_tok)}</span>}
-          {sum.cost_usd > 0 && <span>{fmtUsd(sum.cost_usd)}</span>}
-          {sum.errors > 0 && <span style={{ color: 'var(--error)' }}>{t('rp.trace.errors').replace('{n}', String(sum.errors))}</span>}
-        </div>
-        {/* 时间占比条 + 图例：一眼看出这条 trace 主要花在哪 */}
-        <div className="th-bar">
-          {ks.segs.map((k) => (
-            <i key={k.kind} className={`k-${k.kind}`} style={{ width: `${(k.ms / total) * 100}%` }}
-              title={`${t(`rp.trace.kind.${k.kind}`)} ${fmtDuration(k.ms)}`} />
-          ))}
-        </div>
-        <div className="th-legend mono">
-          {ks.segs.map((k) => (
-            <span key={k.kind}><i className={`k-${k.kind}`} />{t(`rp.trace.kind.${k.kind}`)} {fmtDuration(k.ms)}</span>
-          ))}
-        </div>
-      </div>
-
-      {/* 瀑布图（树 + 时间轴泳道） */}
-      <TraceWaterfall
-        detail={detail}
-        running={running}
-        selected={selKey}
-        onSelect={setSelKey}
-        tick={runningAgentCount}
-      />
-
-      {/* Span 详情抽屉（正文按锚点回查，不在 trace 里） */}
-      {selSpan && <SpanSheet span={selSpan} payload={payload} onClose={() => setSelKey(null)} />}
-    </>
-  )
-}
-
-/**
- * 各类 span 的累计时长（占比条 + 图例 + 时间对比的数据源）。
- * 并发时各类之和可超墙钟 —— 不归一化：差额正是「并行省下的时间」，
- * 归一会把这个信息抹掉（原型 trace_waterfall_lab.html:1539 同口径）。
- */
-function kindShare(d: TraceDetail): { segs: { kind: string; ms: number }[]; sum: number } {
-  const acc = new Map<string, number>()
-  for (const s of d.spans) {
-    if (s.kind === 'run') continue
-    acc.set(s.kind, (acc.get(s.kind) ?? 0) + (s.dur_ms ?? 0))
-  }
-  const segs = [...acc.entries()].filter(([, ms]) => ms > 0).map(([kind, ms]) => ({ kind, ms }))
-  return { segs, sum: segs.reduce((a, x) => a + x.ms, 0) }
-}
-
 // GitStatus 空值（工作区未探测/非仓库时的兜底展示）
 // 标签标题/类型图标本体已随 R06b 迁进 surfaces/builtin/webSurface.tsx（那里是 web 分支的
 // 唯一消费者；若将来第二种 kind 也要用，再提升到 lib —— 本轮不预先抽象）。
@@ -311,6 +55,26 @@ function kindIcon(kind: TabKind): ReactElement {
     case 'file': return <FileIcon size={12} />
     case 'web': return <Globe size={12} />
     default: return <Activity size={12} />
+  }
+}
+
+/**
+ * `.right-body` 的**本地兜底**：provider 未注册时用它渲染非 file 面板。
+ *
+ * 为什么存在：provider 靠 `surfaces/builtin` 的**副作用 import** 注册（只有 main.tsx 那样做），
+ * 而若干 e2e 探针页只 import RightPanel —— 那时注册表是空的。没有兜底，那些探针看到的是空白
+ * 面板，且空白不会让任何断言变红（04-review F45/F46 两次踩过）。
+ *
+ * 为什么没有 file：文件面板要一条「按标签 id 重挂载」的 key（见 body 里 file 那段的注释），
+ * 与统一委派槽的「不许加 key」相冲突 —— file 留独立槽，收口留给 PR-11。
+ * 表里没有的 kind（例如未注册的 plugin:*）返回 null：与「没有分支可渲染」的旧行为一致。
+ */
+function panelFallback(tab: TabInstance, scope: string): ReactNode {
+  switch (tab.kind) {
+    case 'activity': return <ActivityTab />
+    case 'git': return <ChangesTab />
+    case 'web': return <WebTab tab={tab} scope={scope} />
+    default: return null
   }
 }
 
@@ -699,8 +463,20 @@ export default function RightPanel() {
               {t('rp.tabs.emptyHint')}
             </div>
           )}
-          {activeTab?.kind === 'activity' && <ActivityTab />}
-          {activeTab?.kind === 'git' && (getSurface('git')?.render({ tab: activeTab, scope }) ?? <ChangesTab />)}
+          {/* R07c：非 file 面板（activity / git / web）统一走 provider 委派 —— 一条表达式覆盖三种
+              kind，本地兜底见 panelFallback。为什么不按 kind 各写一行：三行的内容都是
+              「getSurface(kind)?.render(...) ?? 本地组件」，逐行写等于把 kind 判别留在 body 里，
+              而 PR-11 的终态判据是 body 里再没有 kind 等值分支（`grep -c "kind ==="` = 0）。
+              顺序也重要：provider 先、兜底后。provider 是**副作用注册**（只有 main.tsx 导入
+              builtin 时才存在），而若干探针页只 import RightPanel —— 没有兜底时它们渲染空白面板，
+              且空白不会让任何断言变红（04-review F45/F46）。
+              **不要**给这个元素加 key：切 web 标签时组件实例必须原地复用（DOM 容器不重挂载，
+              原生视图与页面状态才保得住）—— 加 key = 每次切标签销毁重建 WebContentsView（R06c）。
+              file 不走这条：它要一条「按标签 id 重挂载」的 key，与「不许加 key」相冲突，
+              重挂载语义的收口留给 PR-11。 */}
+          {activeTab && activeTab.kind !== 'file' && (
+            getSurface(activeTab.kind)?.render({ tab: activeTab, scope }) ?? panelFallback(activeTab, scope)
+          )}
           {/* key={activeTab.id}：**每个 file 标签一份组件实例**（阶段 2 的隔离手段）。
               为什么不共用一个实例再按 props 复位：file 标签之间切换时元素类型/位置不变，
               React 会复用实例 → 组件 state（mdMode/csvMode/detailMode/列表展开…）会从上一个
@@ -713,13 +489,6 @@ export default function RightPanel() {
               {getSurface('file')?.render({ tab: activeTab, scope }) ?? <FilePreviewTab tab={activeTab} />}
             </Fragment>
           )}
-          {/* R06c：web 面板走 provider 渲染，`??` 回退到本地 WebTab —— 与上面 git/file 同法。
-              为什么必须留着回退：provider 是**副作用注册**（只有 main.tsx 导入 builtin 时才存在），
-              而若干探针页只 import RightPanel。没有回退时，那些探针会渲染出空白面板，
-              且「面板空白」不会让任何断言变红（最坏的一种失败）。
-              注意**不要**给这个元素加 key：切 web 标签时组件实例必须原地复用（DOM 容器不重挂载，
-              原生视图与页面状态才保得住）—— 加 key = 每次切标签都销毁重建 WebContentsView。 */}
-          {activeTab?.kind === 'web' && (getSurface('web')?.render({ tab: activeTab, scope }) ?? <WebTab tab={activeTab} scope={scope} />)}
         </div>
       </div>
       {/* 脏内容确认框：关标签与退出应用共用一个（reason 区分）。挂在 aside 末尾而不是 body 里

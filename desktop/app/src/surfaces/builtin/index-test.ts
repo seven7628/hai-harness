@@ -10,8 +10,9 @@ import './index'
 import { getSurface, listSurfaces } from '../registry'
 import { useAppStore } from '../../store/useAppStore'
 import type { WebTabInstance } from '../../store/useAppStore'
-import { BarChart, FileIcon, Globe, ImageIcon } from '../../components/icons'
+import { Activity, BarChart, FileIcon, Globe, ImageIcon } from '../../components/icons'
 import { WebTab } from '../../components/WebTab'
+import { ActivityTab } from '../../components/ActivityTab'
 import { fileUrlToPath } from '../../lib/filePaths'
 import { visualKindOf } from '../../lib/visualFile'
 
@@ -72,8 +73,9 @@ test('builtin/index 的副作用注册了 web provider，且元数据符合 03 �
 })
 
 test('web 与 file 同属 content 组，按 order 排在 file 之后；git 仍在 workflow 组最前', () => {
-  // 注册 web 不该把它挤到别处，也不该撑破 registry 的「内置 kind 仅 4 个」白名单
-  assert.deepEqual(listSurfaces().map((p) => p.kind), ['git', 'file', 'web'])
+  // 注册 web 不该把它挤到别处，也不该撑破 registry 的「内置 kind 仅 4 个」白名单。
+  // R07 起 activity（content/order 30）排在 web 之后 —— 四个内置 kind 至此全部注册。
+  assert.deepEqual(listSurfaces().map((p) => p.kind), ['git', 'file', 'web', 'activity'])
 })
 
 // —— 元数据委派的**行为等价**证明 ——
@@ -170,4 +172,42 @@ test('web provider 读的是 store 里的 embedNav（与 RP 订阅同一字段�
   } finally {
     useAppStore.setState({ embedNav: undefined })
   }
+})
+
+// —— R07：activity provider（平移 + 渲染委派）——
+// 与 R06b 的 web 测试同构：元数据逐条钉死（PR-07 的验收口径写在 02-pr-plan PR-07），
+// 渲染断言要求**元素类型就是平移后的 ActivityTab** 且**不带任何 props** ——
+// 一旦有人给它塞 RP 专属 props（scope/menuOpen/…），「ActivityTab 不依赖 RP 局部 state」
+// 这条前置就不再成立，该在这里先红，而不是等切标签时组件重挂载丢抽屉。
+test('builtin/index 的副作用注册了 activity provider，且元数据符合 PR-07 口径', () => {
+  const p = getSurface('activity')
+  assert.ok(p, 'activity provider 未注册')
+  assert.equal(p.kind, 'activity')
+  assert.equal(p.namespace, 'builtin')
+  assert.equal(p.group, 'content')
+  assert.equal(p.order, 30)
+  // 会话级单例：一个会话只有一条「当前链路」，不像 file/web 多实例
+  assert.equal(p.singleton, true)
+  assert.equal(p.allowDuplicate, false)
+  assert.equal(p.scope, 'session')
+  assert.equal(p.weight, 'light')
+  assert.deepEqual(p.capabilities, ['read', 'view'])
+  assert.deepEqual(p.defaultSpec?.({} as never), { kind: 'activity' })
+  // title 与 RightPanel 的 kindLabel('activity') 同一份 i18n（不另起文案）
+  const tAct = (k: string) => (k === 'rp.tab.activity' ? '链路' : k)
+  assert.equal(p.title({ id: 'a', kind: 'activity' }, tAct), '链路')
+  assert.equal(html(p.icon?.({ id: 'a', kind: 'activity' })), html(Activity({ size: 12 })))
+})
+
+test('activity provider 的 render 只接 activity 标签，且不向组件传 props', () => {
+  const p = getSurface('activity')
+  assert.ok(p)
+  const el = p.render({ tab: { id: 'a', kind: 'activity' }, scope: 's' }) as unknown as {
+    type: unknown
+    props: Record<string, unknown>
+  }
+  assert.equal(el.type, ActivityTab)
+  assert.deepEqual(el.props, {})
+  // 别的 kind 明确返回 null（RightPanel 的判断依赖这一点；见 activitySurface.tsx 注释）
+  assert.equal(p.render({ tab: { id: 'g', kind: 'git' }, scope: 's' }), null)
 })
