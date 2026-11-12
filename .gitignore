@@ -70,6 +70,19 @@ brand/boot-preview*
 /desktop/app/scripts/_tmp_*
 /desktop/bridge/e2e_*.py
 testdata/
+# 例外：MCP stdio 端到端夹具（desktop/bridge 的 mcp_test/mcp_projects_test 用
+# `go build ../../mcp/testdata/server` 现场编译）。被上面的 `testdata/` 整目录吞掉时
+# 干净检出必红（R05a3 / R-10）。只放开这一条路径，全局 `testdata/` 仍然忽略。
+!/mcp/testdata/
+!/mcp/testdata/**
+# 例外：trace 跨实现投影的**输入**夹具（trace_crossimpl_test.go 读它；TS 侧
+# `npm run test:trace-parity` 依赖同一份事件流，见 docs/TRACE_CHAIN_REDESIGN.md）。
+# 被 `testdata/` 吞掉时该测试在干净检出永久静默 skip —— 比红更糟，因为 skip 不会被看见。
+# 只放开这一个文件：同目录其它东西（尤其 *.go.golden.json 这种测试**产物**）仍忽略，
+# 免得每跑一次测试就把工作区变脏。
+!/desktop/bridge/testdata/
+/desktop/bridge/testdata/*
+!/desktop/bridge/testdata/trace_fixture.json
 # 真实会话回放基准的夹具（tools/bench/export_real_sessions.py 生成）：
 # 含本机 ~/.go-code/sessions 的真实会话内容（数十 MB、含用户对话与代码），
 # 绝不入库。测试在夹具缺失时 t.Skip，不伪造数字。

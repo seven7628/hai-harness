@@ -17,6 +17,11 @@ import (
 // 与 testManager 不同：不重置 HOME/dataDir（同一测试内多次调用共享持久化）。
 func newManagerWithAppData(t *testing.T, dataDir string) (*manager, *syncBuf) {
 	t.Helper()
+	// loadProviderConfig() 会把**真实** settings.json 的 provider[].prices 写进
+	// 进程级 userPriceTable 且不还原。本 helper 不封闭 HOME（要复用本机 provider
+	// 配置），因此必须自己隔离，否则用户钉的旧价会泄漏给后续按内置价断言的
+	// metrics/reducer 测试（见 isolateUserPrices 注释里的实测）。
+	isolateUserPrices(t)
 	appDataDirOverride = dataDir
 	t.Cleanup(func() { appDataDirOverride = "" })
 	buf := &syncBuf{}
