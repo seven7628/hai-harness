@@ -681,6 +681,14 @@ type ViewReducer struct {
 	blockIdx      map[uint64]int
 	blockIdxDirty bool
 
+	// agentRunIdx 是「存在 agent 卡片」的 run_id 集合（O(1) 判子 run）。
+	//
+	// 为什么不能只靠 agentBlockID：Restore 会清空 agentBlockID（恢复后的旧卡片
+	// 不再接收后续 tool 事件，见 Restore 里的注释），但卡片本身还在 ——
+	// 恢复后仍要能认出「这个 run 是子 run」，否则工具行会挂错地方。
+	// 因此这个索引在 Restore 时按块重建。
+	agentRunIdx map[string]bool
+
 	blockSeq uint64
 }
 
@@ -748,6 +756,7 @@ func newReducer(seq, clearGeneration uint64) *ViewReducer {
 		compStart:         map[string]time.Time{},
 		agentCompressing:  map[string]bool{},
 		blockIdx:          map[uint64]int{},
+		agentRunIdx:       map[string]bool{},
 	}
 }
 
@@ -1503,9 +1512,9 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 
 	// 重建块 id 计数器（不依赖事件流）
 	var maxID uint64
-	for _, b := range r.blocks {
-		if b.ID > maxID {
-			maxID = b.ID
+	for i := range r.blocks {
+		if r.blocks[i].ID > maxID {
+			maxID = r.blocks[i].ID
 		}
 	}
 	r.blockSeq = maxID
@@ -1526,6 +1535,14 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 	r.userInputsSeen = map[string]bool{}
 	r.reqState = map[string]*reqState{}
 	r.agentBlockID = map[string]uint64{}
+	// agentRunIdx **要重建**（agentBlockID 不重建，见上）：恢复后的旧 agent 卡片
+	// 仍然存在，「这个 run 是子 run」的判定不能因为索引清空而失效。
+	r.agentRunIdx = map[string]bool{}
+	for i := range r.blocks {
+		if r.blocks[i].Kind == blockKindAgent && r.blocks[i].RunID != "" {
+			r.agentRunIdx[r.blocks[i].RunID] = true
+		}
+	}
 	r.toolBlockID = map[string]uint64{}
 	r.thinkStart = map[string]time.Time{}
 	r.turnThinkMs = map[string]int64{}
@@ -1550,7 +1567,8 @@ func (r *ViewReducer) NormalizeForRestore() {
 	r.invalidateMarshalCache()
 	hadRunningMain := false // 顶层 run（runNodes 根节点）仍在跑 → 进程关闭/重启被杀 → 插 shutdown divider
 	blocks := make([]Block, 0, len(r.blocks))
-	for _, b := range r.blocks {
+	for i := range r.blocks {
+		b := r.blocks[i]
 		switch b.Kind {
 		case blockKindTool:
 			if b.Status == statusRunning {
@@ -1860,8 +1878,8 @@ func (r *ViewReducer) lastAssistantBlockForRunLocked(runID string) uint64 {
 
 func (r *ViewReducer) rebuildBlockIdxLocked() {
 	m := make(map[uint64]int, len(r.blocks))
-	for i, b := range r.blocks {
-		m[b.ID] = i
+	for i := range r.blocks {
+		m[r.blocks[i].ID] = i
 	}
 	r.blockIdx = m
 	r.blockIdxDirty = false
@@ -1870,6 +1888,15 @@ func (r *ViewReducer) rebuildBlockIdxLocked() {
 // findBlockLocked 定位块下标：索引优先（O(1)），dirty 时惰性重建，
 // miss 时线性兜底（防御任何遗漏的索引维护点——正确性优先）。
 func (r *ViewReducer) findBlockLocked(id uint64) int {
+	// id=0 不是合法块 id（nextBlockID 从 1 起）→ 直接返回 -1。
+	//
+	// 为什么必须短路（2026-11-11，P3 前置）：miss 会走线性兜底扫描（O(N)），
+	// 而「这个 run 有 agent 卡片吗」在每个 tool_start/tool_end 都要问一次；
+	// 没有卡片时 bid=0 → 每次都是一次注定落空的全表扫描。
+	// 实测 205MB / 28,491 事件的会话：这一项是重放 CPU 的第三大来源。
+	if id == 0 {
+		return -1
+	}
 	if r.blockIdxDirty || r.blockIdx == nil {
 		r.rebuildBlockIdxLocked()
 	}
@@ -2095,7 +2122,7 @@ func (r *ViewReducer) applyLLMEndLocked(e *events.LLMEnd, meta EventMeta) {
 		}
 		// 主 agent 成功轮清除错误块（与 renderer 一致）
 		if e.FinishReason != core.FinishReasonError {
-			r.blocks = filterBlocks(r.blocks, func(b Block) bool { return b.Kind != blockKindError })
+			r.blocks = filterBlocks(r.blocks, func(b *Block) bool { return b.Kind != blockKindError })
 			r.blockIdxDirty = true
 		}
 		// 上下文占用 = 本轮实际输入（0 视为缺数保留旧值）；provider 真实报数 → 口径置回真实
@@ -2668,7 +2695,7 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 	if e.ParentRunId == "" {
 		// 新顶层 run = 新 trace：丢弃旧 trace 与错误块
 		r.runNodes = []RunNode{node}
-		r.blocks = filterBlocks(r.blocks, func(b Block) bool { return b.Kind != blockKindError })
+		r.blocks = filterBlocks(r.blocks, func(b *Block) bool { return b.Kind != blockKindError })
 		r.blockIdxDirty = true
 		if e.ContextWindow > 0 {
 			r.contextWindow = e.ContextWindow
@@ -2697,7 +2724,6 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 	bid = r.nextBlockID()
 	r.agentBlockID[e.RunId] = bid
 	// 移除 async_task 占位（同 taskId 或同 label 的 running 占位）
-	blocks := make([]Block, 0, len(r.blocks))
 	taskID := e.TaskId
 	if taskID == "" {
 		for i := len(r.blocks) - 1; i >= 0; i-- {
@@ -2713,26 +2739,33 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 	// 窗口里；旧事件（字段为空 / 旧日志）才回退到占位卡继承。
 	parentTaskID := e.ParentTaskId
 	if parentTaskID == "" {
-		for _, b := range r.blocks {
-			if taskID != "" && b.Kind == blockKindAsyncTask && b.TaskID == taskID {
-				parentTaskID = b.ParentTaskID
+		for i := range r.blocks {
+			if taskID != "" && r.blocks[i].Kind == blockKindAsyncTask && r.blocks[i].TaskID == taskID {
+				parentTaskID = r.blocks[i].ParentTaskID
 				break
 			}
 		}
 	}
-	for _, b := range r.blocks {
-		if taskID != "" && b.Kind == blockKindAsyncTask && b.TaskID == taskID {
-			continue
+	// 移除同 taskId 的 async_task 占位（**原地过滤**：保留底层数组的富余容量，
+	// 不再为每次 agent_start 复制整份 blocks —— 见 filterBlocks 的说明）。
+	if taskID != "" {
+		out := r.blocks[:0]
+		for i := range r.blocks {
+			if r.blocks[i].Kind == blockKindAsyncTask && r.blocks[i].TaskID == taskID {
+				continue
+			}
+			out = append(out, r.blocks[i])
 		}
-		blocks = append(blocks, b)
+		r.blocks = out
 	}
-	r.blocks = append(blocks, Block{
+	r.blocks = append(r.blocks, Block{
 		Kind: blockKindAgent, ID: bid, RunID: e.RunId, ParentRunID: e.ParentRunId, Label: label,
 		ParentTaskID: parentTaskID,
 		Status:       statusRunning, SpawnedAt: millis(ts), TaskID: taskID,
 		CtxWindow: e.ContextWindow, // 子 agent 自己的窗口（与 runNodes 同源，块更不易被裁剪）
 		Items:     make([]AgentItem, 0),
 	})
+	r.agentRunIdx[e.RunId] = true // 「这个 run 有 agent 卡片」——O(1) 判子 run（见 isSubRunLocked）
 	r.blockIdxDirty = true // blocks 由 filter 产物重建（含去占位）
 	r.noteBlockAppendLocked(bid)
 }
@@ -2911,7 +2944,7 @@ func (r *ViewReducer) applyAgentEndLocked(e *events.AgentEnd) {
 	// 主 run：中断/截断提示 + 工具块收尾
 	blocks := r.blocks
 	if aborted {
-		blocks = filterBlocks(blocks, func(b Block) bool { return b.Kind != blockKindError })
+		blocks = filterBlocks(blocks, func(b *Block) bool { return b.Kind != blockKindError })
 		for i := range blocks {
 			if blocks[i].Kind == blockKindTool && blocks[i].Status == statusRunning {
 				blocks[i].Status = statusDone
@@ -3508,6 +3541,7 @@ func (r *ViewReducer) clearLocked() {
 	r.mainCompressing = false
 	// 卡片/工具索引与新 blocks 同步清空（旧 sub run 的迟到事件路由到空 map 后无副作用）
 	r.agentBlockID = map[string]uint64{}
+	r.agentRunIdx = map[string]bool{}
 	r.toolBlockID = map[string]uint64{}
 	r.blockIdxDirty = true
 	// todos 与 lifetime 保留；去重集合不清（同一事件重送依然幂等）
@@ -3602,6 +3636,22 @@ func (r *ViewReducer) applySubTodosLocked(runID string, todos []TodoItem) {
 }
 
 // isSubRunLocked 判断 run 是否子 agent（有 agent 卡片或有父的 run 节点）。
+//
+// ## 为什么不再扫全表（2026-11-11，P3 前置）
+//
+// 旧实现每次问「这个 run 有没有 agent 卡片」都遍历**全部块**（O(N)），
+// 而且是 `for _, b := range r.blocks` —— 按值复制 ~1KB 的大结构。
+// 它挂在**每个 tool_start / tool_end** 上：实测 205MB / 28,491 事件的会话，
+// 光这一项就占了重放 CPU 的 13%（duffcopy 的 56%）。
+//
+// 改成 O(1)：
+//   · agentBlockID：run_id → agent 卡片块 id（applyAgentStartLocked 建卡时写）；
+//   · agentRunIdx：run_id → 存在 agent 卡片（**跨 Restore 仍然有效**——
+//     Restore 会清空 agentBlockID，见 Restore 里的注释，但卡片还在，
+//     所以这个索引必须在 Restore 时按块重建，否则恢复后的旧卡片不再被识别）。
+//
+// 语义与旧实现逐条对应：旧的第一条判据 = agentBlockID != 0；
+// 旧的第三条判据（有 RunID 匹配的 agent 块）= agentRunIdx[runID]。
 func (r *ViewReducer) isSubRunLocked(runID string) bool {
 	if runID == "" {
 		return false
@@ -3609,13 +3659,11 @@ func (r *ViewReducer) isSubRunLocked(runID string) bool {
 	if r.agentBlockID[runID] != 0 {
 		return true
 	}
+	if r.agentRunIdx[runID] {
+		return true
+	}
 	for _, n := range r.runNodes {
 		if n.ID == runID && n.Kind == runNodeKindRun && n.ParentID != "" {
-			return true
-		}
-	}
-	for _, b := range r.blocks {
-		if b.Kind == blockKindAgent && b.RunID == runID {
 			return true
 		}
 	}
@@ -3838,11 +3886,36 @@ func abortAgentCompressionItems(items []AgentItem) []AgentItem {
 	return out
 }
 
-func filterBlocks(blocks []Block, keep func(Block) bool) []Block {
-	out := make([]Block, 0, len(blocks))
-	for _, b := range blocks {
-		if keep(b) {
-			out = append(out, b)
+// filterBlocks 原地过滤块数组（保留顺序），返回保留后的切片。
+//
+// ## 为什么必须原地（2026-11-11，P3 前置：拆 reducer 的 O(N²)）
+//
+// 旧实现每次都 make + 逐块**按值复制**：
+//
+//	out := make([]Block, 0, len(blocks))
+//	for _, b := range blocks { if keep(b) { out = append(out, b) } }
+//
+// 它挂在**每个 llm_end / agent_start** 上（清 error 块）——于是一次会话的重放是
+// O(N²)。实测 205MB / 28,491 事件的真实会话：
+//
+//	filterBlocks        19.6GB 分配（占全量 41%）
+//	append(r.blocks,…) 24.1GB 分配（占 51%）—— 因为 filterBlocks 把 cap 重置成
+//	                                  len，append 的富余容量被反复丢弃 → 每来
+//	                                  一个工具块就整数组扩容一次
+//	duffcopy（Block 是 ~1KB 的大结构，按值迭代）占 CPU 23%
+//
+// 改法三件套：
+//   · 原地压缩（out := blocks[:0]）→ **零分配**，且保留底层数组的富余容量；
+//   · 谓词改收指针 → 不再按值复制 Block；
+//   · 调用点不再重建数组 → append 的摊还成本恢复 O(1)。
+//
+// 安全性：原地压缩只会写**下标 ≤ 当前扫描位**的位置（out.len ≤ i 恒成立），
+// 因此不会覆盖尚未扫描的元素。语义不变：保留块的顺序、内容、id 完全一致。
+func filterBlocks(blocks []Block, keep func(*Block) bool) []Block {
+	out := blocks[:0]
+	for i := range blocks {
+		if keep(&blocks[i]) {
+			out = append(out, blocks[i])
 		}
 	}
 	return out
