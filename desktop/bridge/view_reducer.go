@@ -4376,20 +4376,32 @@ func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.R
 	// 定位 beforeID 之前的最后一页；beforeID==0 表示「最新一页」。
 	end := total
 	if beforeID > 0 {
-		// 用二分：blocks 按 id 严格递增（blockSeq 单调分配），
-		// 线性扫描在长会话里是 21890 次比较/页，没有必要。
+		// 游标 = 上一页**第一块**的 id（稳定锚点）→ 在数组里找到它的位置 →
+		// 取它**之前**的 limit 个块。
 		//
-		// 二分的范围必须是**实际拿到的块**，不是 total：窗口恢复（paged）时 total 是
-		// 历史总块数（实测 10294），view 只装窗口内的块（496）——按 total 二分会
-		// 让谓词索引到 view 之外，index out of range 直接崩掉 bridge
-		// （2026-11-08 实测崩于 view_reducer.go:4288，症状是「新建会话/发消息
-		// 全部无反应」——bridge 死了，命令无人应答）。
-		// 非窗口模式下 total == len(view)，范围与旧写法一致。
-		n := len(view)
-		if n > total {
-			n = total
+		// **为什么不能用二分**（2026-11-11 修）：blocks **不是 id 有序的** ——
+		// insertBlockAtLocked 按**事件时刻**插入，会把「最大 id 的块」插到数组
+		// 中间（真实会话实测 3 个会话分别有 9 / 3 / 5 处逆序）。于是
+		// sort.Search 的谓词（view[i].ID >= beforeID）**不单调**，Go 文档未定义
+		// 其行为 —— 实测在特定游标上与线性扫描差 2~3 个位置（可能跳块或重复）。
+		// 现有分页测试全用「id 严格递增」的构造 ⇒ 测不出来。
+		//
+		// **为什么按位置取而不是按 id 范围取**：按 id 取范围会**跳过**「位置在
+		// 窗口外、但 id 大于游标」的块（逆序时必然发生）⇒ 历史丢块。按位置
+		// 倒着走数组 ⇒ 页与页首尾相接 ⇒ 不重不漏。
+		//
+		// 线性扫描的代价：21,890 次比较 ≈ 20µs，相对一页 200 块的序列化（~1ms）
+		// 完全可忽略 —— 而翻页是低频操作。
+		end = indexOfBlockByID(view, beforeID)
+		if end < 0 {
+			// 游标不在视图里（旧的 id 口径游标 / 已被归一化丢弃的空壳块）→
+			// 退回「按 id 范围」的旧口径，至少不越界。
+			n := len(view)
+			if n > total {
+				n = total
+			}
+			end = sort.Search(n, func(i int) bool { return view[i].ID >= beforeID })
 		}
-		end = sort.Search(n, func(i int) bool { return view[i].ID >= beforeID })
 	}
 	start := end - limit
 	if start < 0 {
@@ -4525,4 +4537,18 @@ func (r *ViewReducer) readPagedPageLocked(beforeID uint64, limit int) (blocks []
 	nextCursor = decoded[0].ID
 	hasMore = start > 0
 	return blocks, nextCursor, hasMore, total, nil
+}
+
+// indexOfBlockByID 在块数组里找 id 所在的下标；找不到返回 -1。
+//
+// 用途：分页的游标锚点（见 ReadBlockPage 的注释）——
+// blocks 不是 id 有序的（insertBlockAtLocked 按事件时刻插入），所以只能用
+// 线性扫描定位，不能用二分。
+func indexOfBlockByID(blocks []Block, id uint64) int {
+	for i := range blocks {
+		if blocks[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
