@@ -2766,7 +2766,7 @@ func (r *ViewReducer) applyAgentStartLocked(e *events.AgentStart) {
 		Items:     make([]AgentItem, 0),
 	})
 	r.agentRunIdx[e.RunId] = true // 「这个 run 有 agent 卡片」——O(1) 判子 run（见 isSubRunLocked）
-	r.blockIdxDirty = true // blocks 由 filter 产物重建（含去占位）
+	r.blockIdxDirty = true        // blocks 由 filter 产物重建（含去占位）
 	r.noteBlockAppendLocked(bid)
 }
 
@@ -3645,10 +3645,11 @@ func (r *ViewReducer) applySubTodosLocked(runID string, todos []TodoItem) {
 // 光这一项就占了重放 CPU 的 13%（duffcopy 的 56%）。
 //
 // 改成 O(1)：
-//   · agentBlockID：run_id → agent 卡片块 id（applyAgentStartLocked 建卡时写）；
-//   · agentRunIdx：run_id → 存在 agent 卡片（**跨 Restore 仍然有效**——
-//     Restore 会清空 agentBlockID，见 Restore 里的注释，但卡片还在，
-//     所以这个索引必须在 Restore 时按块重建，否则恢复后的旧卡片不再被识别）。
+//
+//	· agentBlockID：run_id → agent 卡片块 id（applyAgentStartLocked 建卡时写）；
+//	· agentRunIdx：run_id → 存在 agent 卡片（**跨 Restore 仍然有效**——
+//	  Restore 会清空 agentBlockID，见 Restore 里的注释，但卡片还在，
+//	  所以这个索引必须在 Restore 时按块重建，否则恢复后的旧卡片不再被识别）。
 //
 // 语义与旧实现逐条对应：旧的第一条判据 = agentBlockID != 0；
 // 旧的第三条判据（有 RunID 匹配的 agent 块）= agentRunIdx[runID]。
@@ -3905,9 +3906,10 @@ func abortAgentCompressionItems(items []AgentItem) []AgentItem {
 //	duffcopy（Block 是 ~1KB 的大结构，按值迭代）占 CPU 23%
 //
 // 改法三件套：
-//   · 原地压缩（out := blocks[:0]）→ **零分配**，且保留底层数组的富余容量；
-//   · 谓词改收指针 → 不再按值复制 Block；
-//   · 调用点不再重建数组 → append 的摊还成本恢复 O(1)。
+//
+//	· 原地压缩（out := blocks[:0]）→ **零分配**，且保留底层数组的富余容量；
+//	· 谓词改收指针 → 不再按值复制 Block；
+//	· 调用点不再重建数组 → append 的摊还成本恢复 O(1)。
 //
 // 安全性：原地压缩只会写**下标 ≤ 当前扫描位**的位置（out.len ≤ i 恒成立），
 // 因此不会覆盖尚未扫描的元素。语义不变：保留块的顺序、内容、id 完全一致。

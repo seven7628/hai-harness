@@ -164,3 +164,25 @@ func loadRecordBlocks(path string) ([][]byte, error) {
 	}
 	return elems, nil
 }
+
+// TestCombinedSweepLab 一次跑完两个清扫（会话文件 + record），量合计收益。
+func TestCombinedSweepLab(t *testing.T) {
+	root := os.Getenv("HAI_LAB_SWEEP_ROOT")
+	if root == "" {
+		t.Skip("need root")
+	}
+	t0 := time.Now()
+	r1, err := SweepSessionFiles(root, 0, DefaultCompactKeepStates, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("会话文件清扫: %d 个文件（%d 个压缩）%.1fMB → %.1fMB，省 %.1fMB，用时 %s",
+		r1.Files, r1.Compacted, float64(r1.Before)/1e6, float64(r1.After)/1e6, float64(r1.Saved())/1e6, time.Since(t0).Round(time.Millisecond))
+	t1 := time.Now()
+	r2, err := SweepRecordFiles(root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("record 清扫: %d 个（%d 个搬进 sidecar）%.1fMB → %.1fMB，省 %.1fMB，用时 %s",
+		r2.Stripped, r2.Migrated, float64(r2.Before)/1e6, float64(r2.After)/1e6, float64(r2.Saved())/1e6, time.Since(t1).Round(time.Millisecond))
+}

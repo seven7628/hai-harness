@@ -99,8 +99,9 @@ func applyScalingRound(red *ViewReducer, round, tools int) {
 // TestFilterBlocksKeepsOrderAndCapacity 钉住 filterBlocks 的语义与「原地」性质。
 //
 // 原地过滤是性能改动的核心，必须钉住两件事：
-//   · 语义：保留块的顺序、内容、id 完全一致；
-//   · 性质：底层数组被复用（cap 不被重置）—— 这是 append 摊还成本的关键。
+//
+//	· 语义：保留块的顺序、内容、id 完全一致；
+//	· 性质：底层数组被复用（cap 不被重置）—— 这是 append 摊还成本的关键。
 func TestFilterBlocksKeepsOrderAndCapacity(t *testing.T) {
 	blocks := []Block{
 		{Kind: blockKindAssistant, ID: 1, Text: "a"},
