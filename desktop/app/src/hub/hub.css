@@ -3081,9 +3081,11 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   padding: 2px 7px;
   border-radius: 999px;
   border: 1px solid var(--border);
+  background: transparent;
   color: var(--muted);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+  cursor: pointer;
 }
 .hub-demo .hub-msg-files {
   display: flex;

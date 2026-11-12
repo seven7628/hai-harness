@@ -78,7 +78,15 @@ function AttachmentsBody({
                 : <span className="hub-msg-img-ph">{a.name || '图片'}</span>}
             </button>
           ))}
-          {hidden > 0 ? <span className="hub-msg-img-more">+{hidden}</span> : null}
+          {hidden > 0 ? (
+            <button
+              type="button"
+              className="hub-msg-img-more"
+              onClick={() => setZoom(shown.length)}
+              title={`再看 ${hidden} 张`}
+              aria-label={`查看其余 ${hidden} 张图片`}
+            >+{hidden}</button>
+          ) : null}
         </div>
       ) : null}
       {files.length > 0 ? (

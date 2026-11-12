@@ -229,6 +229,29 @@ async function sendWithImage(testid, text) {
   await page.screenshot({ path: `${OUT}/group-sent.png` })
 }
 
+// —— 3b) 5 张图：气泡只铺 4 张，+1 能打开灯箱看到第 5 张 ——
+{
+  await openDM()
+  const five = Array.from({ length: 5 }, (_, i) => ({ ...filePayload, name: `hub-shot-${i + 1}.png` }))
+  await page.setInputFiles('[data-testid="hub-image-input"]', five)
+  await page.waitForTimeout(600)
+  check(await page.locator('.hub-attach-strip .hub-attach-chip--img').count() === 5, '5 张图都进了待发条带')
+  await page.locator('.hub-demo .composer textarea').first().fill('五张图')
+  await page.locator('.hub-demo .composer .send-btn').first().click()
+  const row = page.locator('.hub-demo .msg-row.user').last()
+  await row.waitFor({ timeout: 10000 })
+  await row.locator('.hub-msg-img').first().waitFor({ timeout: 8000 })
+  check(await row.locator('.hub-msg-img').count() === 4, '气泡只铺 4 张缩略图（不把整屏撑爆）')
+  const more = row.locator('.hub-msg-img-more')
+  check(await more.count() === 1 && (await more.textContent())?.trim() === '+1', '+1 是可点的「还有 1 张」入口')
+  await more.click()
+  await page.locator('.hub-attach-lb').waitFor({ timeout: 6000 })
+  const cap = await page.locator('.hub-attach-lb figcaption').textContent()
+  check(String(cap).includes('5/5'), `+1 打开的是第 5 张（got=${cap}）`)
+  await page.keyboard.press('Escape')
+  await page.locator('.hub-attach-lb').waitFor({ state: 'detached', timeout: 4000 })
+}
+
 // —— 4) 失败 → 重试：附件跟着失败走，重试成功后条带才清 ——
 {
   await openDM()
