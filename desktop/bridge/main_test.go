@@ -2279,6 +2279,66 @@ func TestSetProviderInjectedKeySurvivesReload(t *testing.T) {
 	}
 }
 
+// TestInjectedKeyBeatsStaleSettingsPlaintext 回归（P5-09 复审 B1b）：settings 迁移未完成、
+// provider 段里仍残留**旧明文** api_key 时，payload 注入的 key 必须永远胜出：
+//   - set_provider 注入新 key 后，任何 loadSettings（reload_settings / 热重载）都不得把内存 key
+//     顶回 settings 里的旧明文（旧 key 复活 → 401 / 轮换不生效）；
+//   - 反向锚点：没有 payload 注入的 provider 仍按 settings 明文生效（迁移未完成的兜底保留）。
+//
+// 回归背景：loadSettings 曾无条件「settings 有 api_key 就覆盖内存 + 清注入标记」，
+// 一次 reload_settings 就把刚保存的新 key 换回旧明文（实测 keyLocked = sk-OLD-plaintext）。
+func TestInjectedKeyBeatsStaleSettingsPlaintext(t *testing.T) {
+	m, buf := testManager(t)
+	cfgDir := filepath.Join(mustUserHome(t), ".go-code")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 迁移未完成的形态：settings 仍留旧明文（keys.json 里才是新 key，由 payload 下发）
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{
+		"schema_version": 2,
+		"provider": {
+			"active": "deepseek",
+			"zhipu": {"base_url": "https://open.bigmodel.cn/api/anthropic", "api_key": "sk-OLD-plaintext"},
+			"opencode": {"base_url": "https://opencode.ai/zen/go/v1", "api_key": "sk-OLD-opencode"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.provCfg.loadSettings() // 启动热载：迁移未完成时先吃 settings 明文（兜底）
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-OLD-plaintext" {
+		t.Fatalf("前置：settings 明文应先生效，got %q", got)
+	}
+
+	// keys.json 里的最新 key 随 set_provider payload 下发
+	m.dispatch(cmd(1, "set_provider", map[string]any{"provider": "zhipu", "api_key": "sk-NEW-injected"}))
+	if !lastRespOK(t, buf, 1) {
+		t.Fatalf("set_provider(带 key) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-NEW-injected" {
+		t.Fatalf("注入后 keyLocked = %q, want sk-NEW-injected", got)
+	}
+
+	// 顶层设置变更 → reload_settings（内部又跑一次 loadSettings）→ 旧明文不得复活
+	m.dispatch(cmd(2, "reload_settings", map[string]any{}))
+	if !lastRespOK(t, buf, 2) {
+		t.Fatalf("reload_settings 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-NEW-injected" {
+		t.Fatalf("reload_settings 后 keyLocked = %q, want sk-NEW-injected（settings 旧明文不得顶掉注入值）", got)
+	}
+
+	// 再直接跑一次 loadSettings（热重载/切 provider 都走它）：仍是新 key
+	m.provCfg.loadSettings()
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-NEW-injected" {
+		t.Fatalf("再次 loadSettings 后 keyLocked = %q, want sk-NEW-injected", got)
+	}
+
+	// 反向锚点：没有注入值的 provider 仍读 settings 明文（兜底不能被一起删掉）
+	if got := m.provCfg.keyLocked("opencode"); got != "sk-OLD-opencode" {
+		t.Fatalf("无注入值的 provider 应按 settings 明文生效，got %q", got)
+	}
+}
+
 // mustUserHome 取当前测试 HOME（testManager 已用 t.TempDir 隔离）。
 func mustUserHome(t *testing.T) string {
 	t.Helper()
