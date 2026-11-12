@@ -1604,7 +1604,7 @@
     if (!cv) return ''
     switch (cv.status) {
       case 'running':
-        return '自动对话进行中（' + (cv.turns_used || 0) + '/' + (cv.turn_budget || 8) + ' 轮）'
+        return '自动对话进行中（' + (cv.turns_used || 0) + (cv.turn_budget > 0 ? '/' + cv.turn_budget : '') + ' 轮）'
       case 'waiting_human':
         return '等你继续'
       case 'stopped':
@@ -1779,7 +1779,7 @@
       text = (ids.map(hubAgentName).join('、') || '智能体') + ' 正在输入'
       box.classList.add('hub-typing')
     } else if (cv && cv.status === 'running') {
-      text = '自动对话进行中 ' + (cv.turns_used || 0) + '/' + (cv.turn_budget || 8)
+      text = '自动对话进行中 ' + (cv.turns_used || 0) + (cv.turn_budget > 0 ? '/' + cv.turn_budget : '')
       box.classList.remove('hub-typing')
     } else if (cv && cv.status === 'waiting_human') {
       text = '等你继续'
