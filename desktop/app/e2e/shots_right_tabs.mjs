@@ -41,6 +41,11 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
   + '<body><div id="root"></div><script type="module" src="./main.tsx"></script></body></html>')
 fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import { createRoot } from 'react-dom/client'
+// 与 src/main.tsx 同序：**先**副作用注册内置 provider，再挂组件。
+// 缺这一行探针就是个「provider 全都没注册」的假世界：RightPanel 里每处
+// getSurface(k)?.render/title/icon 都会走 ?? 兜底分支 —— 2026-11（R06b）实测踩过：
+// web 标签的图标因此渲染成兜底值，截图证明的是兜底而不是委派。
+import '../../src/surfaces/builtin'
 import RightPanel from '../../src/components/RightPanel'
 import { useAppStore } from '../../src/store/useAppStore'
 import '../../src/index.css'
