@@ -1176,11 +1176,17 @@ try {
     m.useAppStore.setState({ rightExpanded: true })
     await window.__r2.call('openHtmlInBrowser', [u])
   }, [toFileUrl(fileT16)])
+  // 等的是「**这个文件**的视图已经可见、且已经拿到 url」—— 不能只等 `visible`：
+  // activate 建的视图先以右侧栏默认矩形可见（此时 url='' 、loading=true），随后才导航。
+  // 只等 visible 会随机抓到那一刻的快照，`t16Measure('')` 找不到任何子视图 → 三条 T16 断言
+  // 一起假红（2026-11 实测：同一棵树 4/7 次抓到 url=''，改前 3/3 次没抓到 —— 采样相位变了，
+  // 不是几何坏了）。判据用文件名，避免又抓成 about:blank 自举载体那一条。
+  const t16Name = path.basename(fileT16)
   const t16shown = await waitFor(async () => {
     const st = await win.evaluate(() => window.__r2.snap())
-    return st.targets.some((t) => t.visible) ? st : null
-  }, { label: 'T16 前提：预览可见', timeout: 30000 })
-  const vis16 = t16shown.targets.find((t) => t.visible)
+    return st.targets.some((t) => t.visible && t.url.includes(t16Name)) ? st : null
+  }, { label: 'T16 前提：预览可见且已拿到 url', timeout: 30000 })
+  const vis16 = t16shown.targets.find((t) => t.visible && t.url.includes(t16Name))
   // 量「显示中那一页」的排版视口（window.innerWidth/Height）与它的原生 bounds
   const t16Measure = async (url) => app.evaluate(async ({ BrowserWindow }, arg) => {
     const w = BrowserWindow.getAllWindows()[0]
