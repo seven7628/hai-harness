@@ -3043,6 +3043,9 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .hub-attach-lb-btn:hover { border-color: var(--focus); }
 .hub-demo .hub-attach-lb-btn.danger { color: var(--danger); }
 .hub-demo .hub-attach-lb-btn.close { width: 28px; padding: 0; }
+.hub-demo .hub-attach-lb-btn.nav { width: 28px; padding: 0; font-size: 16px; line-height: 1; }
+.hub-demo .hub-attach-lb-btn:disabled { opacity: 0.35; cursor: default; }
+.hub-demo .hub-attach-lb-btn:disabled:hover { border-color: var(--border-strong); }
 
 /* 消息气泡里的附件：与正文保持 6px 间距，图片最多 4 张（再多给 +N）。 */
 .hub-demo .hub-msg-attach { margin-top: 6px; max-width: 100%; min-width: 0; }

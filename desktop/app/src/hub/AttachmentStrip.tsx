@@ -14,6 +14,7 @@ export function HubImageLightbox({
   images,
   index,
   onClose,
+  onIndex,
   onRemove,
   onCopyImage,
   title,
@@ -21,6 +22,8 @@ export function HubImageLightbox({
   images: HubAttachment[]
   index: number
   onClose: () => void
+  /** 有多张时提供：上一张/下一张 + ←/→ 键。缺省 = 不显示导航（单图场景）。 */
+  onIndex?: (index: number) => void
   onRemove?: (index: number) => void
   onCopyImage?: (a: HubAttachment) => Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string }
   title?: string
@@ -47,6 +50,23 @@ export function HubImageLightbox({
     }
   }, [onClose])
 
+  // 方向键单独一个监听：切张时不能重跑上面的焦点恢复 effect（否则每按一次
+  // 方向键焦点都被拉回关闭按钮）。
+  useEffect(() => {
+    if (!onIndex || images.length <= 1) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'ArrowLeft' && index > 0) {
+        e.preventDefault()
+        onIndex(index - 1)
+      } else if (e.key === 'ArrowRight' && index < images.length - 1) {
+        e.preventDefault()
+        onIndex(index + 1)
+      }
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [onIndex, index, images.length])
+
   const copy = useCallback(async (): Promise<void> => {
     if (!current?.data_url) {
       setStatus('这张图没有可复制的内容')
@@ -68,6 +88,26 @@ export function HubImageLightbox({
     >
       <figure onClick={(e) => e.stopPropagation()}>
         <div className="hub-attach-lb-actions">
+          {onIndex && images.length > 1 ? (
+            <>
+              <button
+                type="button"
+                className="hub-attach-lb-btn nav"
+                disabled={index <= 0}
+                onClick={() => onIndex(index - 1)}
+                aria-label="上一张"
+                title="上一张（←）"
+              >‹</button>
+              <button
+                type="button"
+                className="hub-attach-lb-btn nav"
+                disabled={index >= images.length - 1}
+                onClick={() => onIndex(index + 1)}
+                aria-label="下一张"
+                title="下一张（→）"
+              >›</button>
+            </>
+          ) : null}
           <button type="button" className="hub-attach-lb-btn" onClick={() => void copy()}>复制图片</button>
           {onRemove ? (
             <button
@@ -178,6 +218,7 @@ export default function AttachmentStrip({
           images={images}
           index={zoom}
           onClose={closeZoom}
+          onIndex={setZoom}
           onRemove={(i) => onRemove('image', i)}
           title="待发送的图片"
         />

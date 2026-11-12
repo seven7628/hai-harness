@@ -74,7 +74,6 @@ export function useHubAttachments(): HubAttachments {
       try {
         const current = imagesRef.current.length
         const maxCount = Math.max(0, MAX_HUB_ATTACHMENTS - filesRef.current.length)
-        const room = Math.max(0, maxCount - current)
         // acceptImages 自己会用 maxCount - currentCount 算 room；这里传**绝对上限**
         // （总附件数 - 文件数），不能再传 room —— 否则 current 被减两次，已有图片
         // 时会少放 N 张（5 张只进 4 张的上限 bug）。
@@ -89,7 +88,8 @@ export function useHubAttachments(): HubAttachments {
           setImages((prev) => [...prev, ...added])
         }
         // 提示优先级：张数到顶 > 单张/总量超限 > 读取失败；成功一批就清掉旧提示。
-        if (room === 0) setNotice(`最多 ${MAX_HUB_ATTACHMENTS} 个附件`)
+        const over = Math.max(0, current + picked.length - maxCount)
+        if (over > 0) setNotice(`最多 ${MAX_HUB_ATTACHMENTS} 个附件，已忽略 ${over} 个`)
         else if (res.tooLarge > 0) setNotice(`图片过大：单条消息的图片总量上限 ${fmtBytes(MAX_HUB_IMAGE_BYTES)}，已跳过 ${res.tooLarge} 张`)
         else if (res.rejected > 0) setNotice(`有 ${res.rejected} 张图片读取失败，已跳过`)
         else setNotice('')

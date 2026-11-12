@@ -114,6 +114,7 @@ function AttachmentsBody({
           images={images}
           index={zoom}
           onClose={() => setZoom(null)}
+          onIndex={setZoom}
           onCopyImage={copyImage}
           title="图片预览"
         />
