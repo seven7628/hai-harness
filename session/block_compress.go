@@ -141,8 +141,9 @@ func blockKindCodeCompressed(payload []byte) uint8 {
 
 // CompressSweepResult 是 sidecar 压缩清扫的结果。
 type CompressSweepResult struct {
-	Files       int   // 扫到的 sidecar 数
+	Files       int   // 扫到的 sidecar 数（进入处理流程的）
 	Rewritten   int   // 实际重写的（有可压的块）
+	Skipped     int   // 索引判定「清过且没动过」而跳过的 sidecar 数
 	Before      int64 // 重写前总字节
 	After       int64 // 重写后总字节
 	Blocks      int   // 压缩的块数
@@ -333,6 +334,8 @@ func (bs *blockStore) rewriteWithCompression(snap *compactSnapshot, compressed, 
 // 参数：
 //   - root：会话根目录（~/.go-code/sessions）
 //   - pause：每个文件之间的间隔（限速，避免与正常使用抢 IO）
+//   - ix：清扫索引（可为 nil）。非 nil 时，「上次清过且此后没动过」的
+//     sidecar 直接跳过（见 sweep_index.go）。
 //
 // 安全性：
 //
@@ -341,7 +344,7 @@ func (bs *blockStore) rewriteWithCompression(snap *compactSnapshot, compressed, 
 //	· 原子替换（临时文件 + fsync + rename）；
 //	· 与提交/compact 共用同一把**进程级按路径锁**（`lockRecord`）——
 //	  否则重写期间到达的追加会写进被 rename 掉的旧 inode（丢数据）。
-func SweepBlockStores(root string, pause time.Duration) (CompressSweepResult, error) {
+func SweepBlockStores(root string, pause time.Duration, ix *SweepIndex) (CompressSweepResult, error) {
 	res := CompressSweepResult{}
 	start := time.Now()
 	if root == "" {
@@ -358,6 +361,11 @@ func SweepBlockStores(root string, pause time.Duration) (CompressSweepResult, er
 		if serr != nil {
 			return nil
 		}
+		// 索引：清过且没动过 → 跳过（连文件都不打开）。
+		if ix.Skip(path, fi.Size(), fi.ModTime().UnixNano()) {
+			res.Skipped++
+			return nil
+		}
 		res.Files++
 		res.Before += fi.Size()
 
@@ -369,6 +377,11 @@ func SweepBlockStores(root string, pause time.Duration) (CompressSweepResult, er
 		}
 		if nfi, nerr := os.Stat(path); nerr == nil {
 			res.After += nfi.Size()
+			// **失败不标记**：压缩失败的文件必须留到下一轮再试 ——
+			// 标了就会在下次清扫被跳过 ⇒ 未压缩的块永远补不上。
+			if cerr == nil {
+				ix.Mark(path, nfi.Size(), nfi.ModTime().UnixNano())
+			}
 		} else {
 			res.After += fi.Size()
 		}
@@ -393,7 +406,6 @@ func sweepOneBlockStore(path string) (bool, int, int, error) {
 	if err != nil {
 		return false, 0, 0, err
 	}
-	defer bs.Close()
 	// 已经有压缩块且没有未压缩块 → 跳过（幂等：二次清扫不重写）。
 	need := false
 	for _, ref := range bs.index {
@@ -403,8 +415,12 @@ func sweepOneBlockStore(path string) (bool, int, int, error) {
 		}
 	}
 	if !need {
+		// 什么都没改 → **不落盘**地关闭。Close() 会 fsync 整个 sidecar +
+		// 重写 .idx，而这次调用一个字节都没改（实测每次启动 477 次）。
+		bs.closeQuiet()
 		return false, 0, len(bs.index), nil
 	}
+	defer bs.Close()
 	compressed, total := 0, 0
 	rewritten, nComp, nTotal, rerr := compressBlockStore(bs, &compressed, &total)
 	if rerr != nil {

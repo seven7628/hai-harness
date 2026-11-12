@@ -54,7 +54,7 @@ func TestSweepSessionFilesCompactsOversized(t *testing.T) {
 	smallBefore := fileSize(t, filepath.Join(smallDir, smallID+".jsonl"))
 
 	bigBefore := fileSize(t, filepath.Join(bigDir, bigID+".jsonl"))
-	res, err := SweepSessionFiles(root, 1<<20, 3, false, 0)
+	res, err := SweepSessionFiles(root, 1<<20, 3, false, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestSweepConcurrentAppendsAreNotLost(t *testing.T) {
 	go func() {
 		defer close(sweeperDone)
 		for i := 0; i < 5; i++ {
-			_, _ = SweepSessionFiles(root, 1<<20, 3, true, 0)
+			_, _ = SweepSessionFiles(root, 1<<20, 3, true, 0, nil)
 		}
 	}()
 	wg.Wait()
@@ -214,7 +214,7 @@ func TestSweepTrimsHistoryExceptFirstLine(t *testing.T) {
 		}
 	}
 
-	res, err := SweepSessionFiles(root, 1<<20, 2, false, 0)
+	res, err := SweepSessionFiles(root, 1<<20, 2, false, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

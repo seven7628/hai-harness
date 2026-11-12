@@ -61,6 +61,7 @@ type RecordSweepResult struct {
 	Files    int   // 扫到的 record 文件数
 	Stripped int   // 实际改写的（含 .bak）
 	Migrated int   // 内嵌块搬进 sidecar 的个数
+	Skipped  int   // 索引判定「清过且没动过」而跳过的 record 数
 	Before   int64 // 清扫前总字节
 	After    int64 // 清扫后总字节
 	Elapsed  time.Duration
@@ -75,10 +76,12 @@ func (r RecordSweepResult) Saved() int64 { return r.Before - r.After }
 // 参数：
 //   - root：会话根目录（~/.go-code/sessions）
 //   - pause：每个文件之间的间隔（限速，避免与正常使用抢 IO）
+//   - ix：清扫索引（可为 nil）。非 nil 时，「上次清过且此后没动过」的
+//     record 直接跳过 —— 连文件都不打开（见 sweep_index.go）。
 //
 // 遍历 root 下**所有** .record.json（递归）—— 主会话的 <sid>.record.json 与
 // （可能的）子目录形式都在内。
-func SweepRecordFiles(root string, pause time.Duration) (RecordSweepResult, error) {
+func SweepRecordFiles(root string, pause time.Duration, ix *SweepIndex) (RecordSweepResult, error) {
 	res := RecordSweepResult{}
 	start := time.Now()
 	if root == "" {
@@ -94,11 +97,16 @@ func SweepRecordFiles(root string, pause time.Duration) (RecordSweepResult, erro
 		if !strings.HasSuffix(d.Name(), ".record.json") {
 			return nil // .bak 跟着 formal 一起处理
 		}
-		res.Files++
 		fi, serr := os.Stat(path)
 		if serr != nil {
 			return nil
 		}
+		// 索引：清过且没动过 → 跳过（连文件都不打开）。
+		if ix.Skip(path, fi.Size(), fi.ModTime().UnixNano()) {
+			res.Skipped++
+			return nil
+		}
+		res.Files++
 		res.Before += fi.Size()
 
 		changed, migrated, merr := migrateRecordFile(path)
@@ -113,6 +121,8 @@ func SweepRecordFiles(root string, pause time.Duration) (RecordSweepResult, erro
 		}
 		if nfi, nerr := os.Stat(path); nerr == nil {
 			res.After += nfi.Size()
+			// 处理完记指纹（改写会原子替换文件 → 新 size/mtime）。
+			ix.Mark(path, nfi.Size(), nfi.ModTime().UnixNano())
 		} else {
 			res.After += fi.Size()
 		}

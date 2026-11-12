@@ -405,7 +405,7 @@ func TestSweepBlockStoresCompressesExisting(t *testing.T) {
 	defer func() { blockCompressEnabled = true }()
 
 	before := fileSize(t, path)
-	res, err := SweepBlockStores(root, 0)
+	res, err := SweepBlockStores(root, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestSweepBlockStoresCompressesExisting(t *testing.T) {
 	bs2.Close()
 
 	// 幂等：再扫一次不重写。
-	res2, err := SweepBlockStores(root, 0)
+	res2, err := SweepBlockStores(root, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

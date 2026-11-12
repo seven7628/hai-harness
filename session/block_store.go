@@ -752,6 +752,22 @@ func (bs *blockStore) Close() error {
 	return err
 }
 
+// closeQuiet 关闭块存储但**不落盘**：不 flush 缓冲、不 fsync、不重写索引。
+//
+// 用途是「只读打开、发现不需要改」的路径 —— 清扫的探测阶段属于这种：
+// Close() 会 fsync 整个 sidecar + 重写 .idx，而那次调用一个字节都没改
+// （实测每次启动 477 次纯浪费）。
+//
+// 前置条件：自 open 以来没有经 bs.w 写过任何数据（只读路径天然满足）。
+func (bs *blockStore) closeQuiet() {
+	if bs == nil || bs.f == nil {
+		return
+	}
+	bs.w = nil // 丢弃缓冲（只读路径下本来就是空的）
+	_ = bs.f.Close()
+	bs.f = nil
+}
+
 // sum 返回当前滚动校验链（写入 record 供读取侧对账）。
 // sum 返回「当前索引里全部块」的一致性摘要。
 //

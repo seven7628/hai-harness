@@ -6345,33 +6345,49 @@ func sweepSessionFilesInBackground() {
 			fmt.Fprintln(os.Stderr, "sweep: panic:", r)
 		}
 	}()
-	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause)
+	// 清扫索引：记「哪些文件已经清过、且自那时起没动过」。
+	//
+	// 清扫本质是**一次性形态迁移**，不是常驻工序 —— P0–P5' 落地后会话文件
+	// 已经是新形态，每次启动再全量扫一遍是纯浪费（实测每次启动固定烧
+	// ~105 秒限速 sleep + 1.5 GB 读 + 487 次 fsync）。
+	//
+	// 索引只用于**跳过**（连文件都不打开），不参与任何写入决策 ⇒ 索引算错
+	// 最多多扫一遍，不会写坏数据。版本变了（清扫逻辑改了）→ 旧指纹全部
+	// 作废 → 触发一次全量。
+	ix := session.OpenSweepIndex(filepath.Join(appDataDir(), "checkpoint_sweep.json"), session.SweepIndexVersion)
+	defer func() {
+		if err := ix.Flush(); err != nil {
+			fmt.Fprintln(os.Stderr, "sweep index: 落盘失败:", err)
+		}
+	}()
+
+	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause, ix)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sweep: 失败:", err)
 	} else {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩）%.1fMB → %.1fMB，用时 %s\n",
-			res.Files, res.Compacted, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩，跳过 %d）%.1fMB → %.1fMB，用时 %s\n",
+			res.Files, res.Compacted, res.Skipped, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
 	}
 	// sidecar 压缩清扫（P4）：存量 sidecar 里未压缩的块就地压一遍。
 	// 实测 6 个最大的 sidecar：2256MB → 395MB（省 82.5%）。
 	// 只动 sidecar、不碰 record（摘要算逻辑内容 ⇒ Sum 不变）。
-	cres, cerr := session.SweepBlockStores(root, sweepPause)
+	cres, cerr := session.SweepBlockStores(root, sweepPause, ix)
 	if cerr != nil {
 		fmt.Fprintln(os.Stderr, "sweep blocks: 失败:", cerr)
-	} else if cres.Rewritten > 0 {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
-			cres.Files, cres.Rewritten, float64(cres.Before)/1e6, float64(cres.After)/1e6,
+	} else if cres.Rewritten > 0 || cres.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写，跳过 %d）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
+			cres.Files, cres.Rewritten, cres.Skipped, float64(cres.Before)/1e6, float64(cres.After)/1e6,
 			cres.Blocks, cres.BlocksTotal, cres.Elapsed.Round(time.Millisecond))
 	}
 	// record 清扫（P3-1）：与上面同一把限速思路，独立失败互不影响。
-	rres, rerr := session.SweepRecordFiles(root, sweepPause)
+	rres, rerr := session.SweepRecordFiles(root, sweepPause, ix)
 	if rerr != nil {
 		fmt.Fprintln(os.Stderr, "sweep record: 失败:", rerr)
 		return
 	}
-	if rres.Stripped > 0 {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫 record: %d 个（%d 个搬进 sidecar）%.1fMB → %.1fMB，用时 %s\n",
-			rres.Stripped, rres.Migrated, float64(rres.Before)/1e6, float64(rres.After)/1e6, rres.Elapsed.Round(time.Millisecond))
+	if rres.Stripped > 0 || rres.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫 record: %d 个（%d 个搬进 sidecar，跳过 %d）%.1fMB → %.1fMB，用时 %s\n",
+			rres.Stripped, rres.Migrated, rres.Skipped, float64(rres.Before)/1e6, float64(rres.After)/1e6, rres.Elapsed.Round(time.Millisecond))
 	}
 }
 
