@@ -70,6 +70,11 @@ brand/boot-preview*
 /desktop/app/scripts/_tmp_*
 /desktop/bridge/e2e_*.py
 testdata/
+# 例外：MCP stdio 端到端夹具（desktop/bridge 的 mcp_test/mcp_projects_test 用
+# `go build ../../mcp/testdata/server` 现场编译）。被上面的 `testdata/` 整目录吞掉时
+# 干净检出必红（R05a3 / R-10）。只放开这一条路径，全局 `testdata/` 仍然忽略。
+!/mcp/testdata/
+!/mcp/testdata/**
 # 真实会话回放基准的夹具（tools/bench/export_real_sessions.py 生成）：
 # 含本机 ~/.go-code/sessions 的真实会话内容（数十 MB、含用户对话与代码），
 # 绝不入库。测试在夹具缺失时 t.Skip，不伪造数字。
