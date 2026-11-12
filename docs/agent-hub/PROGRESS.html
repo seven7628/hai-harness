@@ -2044,6 +2044,30 @@ const BASE = {
       "note": "§6.1 第 2 条前半。复审 task-u3nht4h4 首轮 CHANGES_REQUESTED（B1 MCP args:undefined 误拒；B2 迁移失败后写路径盖章导致 v1 默认永久固化），8d81948 修复后 delta PASS。BR-08（api_key 移出 settings）未做，留给 P5-09。",
       "review": "passed",
       "reviewNote": "task-u3nht4h4 delta PASS（8d81948）：B1 的 args:undefined 在 IPC 真实形状下放行且不落键，args:[] 仍保留；B2 把 schema_version:2 的产生收敛到迁移写盘一处，四条 apply* 对 v1 拒写，写路径先迁移、失败时原文件逐字节不变、无 .bak/.tmp/schema_version 残留，故障恢复后重试可清掉固化默认；38/38 用例，M1/M5/M6 及 B1/B2 定向变异全红。非阻塞：main.ts 的 defaults 值与 commitSettingsWrite 传播错误仍只有文本断言，建议后续各补一行；explicit 只写不读；settings.json.bak/.corrupt-* 含明文 api_key 属 P5-09 范围。"
+    },
+    {
+      "id": "P5-09",
+      "phase": "P5",
+      "title": "§6.1 第 2 条（后半）：provider API key 移出 settings（keys.json/safeStorage + 启动迁移 + 主进程按需注入）",
+      "deps": [
+        "P5-08"
+      ],
+      "files": [
+        "desktop/app/electron/keys-store.ts",
+        "desktop/app/electron/keys-store-test.ts",
+        "desktop/app/electron/main.ts",
+        "desktop/app/electron/preload.ts",
+        "desktop/bridge/providers.go",
+        "desktop/bridge/main.go",
+        "desktop/bridge/main_test.go"
+      ],
+      "acceptance": "provider api_key 只存 keys.json（safeStorage；无钥匙串降级 base64 并注明非加密，0600），settings.json 启动迁移（先写 keys、成功后才删明文，失败保留重试，备份脱敏）；renderer 不再拿明文，主进程在 set_provider/switch_model/list_models/provider_billing 按需注入，bridge spawn env 只注入活跃 provider 一把；迁移时 keys.json 可解出的条目优先，settings 残留明文不得覆盖；payload 注入的新 key 在 reload_settings/loadSettings 后仍胜出。独立 Review PASS（首轮 B1 + delta）。",
+      "tests": "cd desktop/app && npm run test:keys-store && npm run test:settings-store && npx tsc -p tsconfig.electron.json --noEmit && npx tsc --noEmit && npx eslint electron/keys-store.ts electron/keys-store-test.ts electron/main.ts && cd ../.. && go test ./desktop/bridge -run 'Provider|SwitchModel|Key' -count=1",
+      "commit": "eea9d76 + 4801b62",
+      "status": "done",
+      "review": "passed",
+      "note": "§6.1 第 2 条后半（BR-08）。首轮独立 Review task-8creqtfp CHANGES_REQUESTED B1：迁移覆盖方向反了（settings 旧明文覆盖 keys.json 新 key）+ bridge settings 明文顶掉 payload 注入值；4801b62 修复后 delta Review task-vxynsptc PASS。合并：975204e。",
+      "reviewNote": "task-vxynsptc PASS（4801b62）：keys-store 19/19、settings-store 38/38、TSC/ESLint 通过、全量 bridge 干净 HOME 105.2s 通过；变异 A（去掉 keys.json 优先）与 B（去掉 !keyInjected）均精确变红，A2（无需救回也删 settings 明文）有测试钉住。非阻塞：① 显式清 key 后 reload_settings 仍可能被 settings 残留明文复活（基线已有，触发需迁移未完成；建议 main.ts 的 provider:save/remove 顺手删 legacy 明文）；② 「全部可解时 keys.json 不重写」实现正确但无测试钉住（变异 A3 存活）；③ main.ts 的迁移重试注释仍写「下一次 provider:save」；④ stt.api_key 与 MCP env/headers 仍随 settings 明文下发，需后续 keys.json 化。"
     }
   ],
   "deferred": [
@@ -3072,6 +3096,12 @@ const BASE = {
       "review": "passed",
       "reviewNote": "task-u3nht4h4 delta PASS（8d81948）：B1 的 args:undefined 在 IPC 真实形状下放行且不落键，args:[] 仍保留；B2 把 schema_version:2 的产生收敛到迁移写盘一处，四条 apply* 对 v1 拒写，写路径先迁移、失败时原文件逐字节不变、无 .bak/.tmp/schema_version 残留，故障恢复后重试可清掉固化默认；38/38 用例，M1/M5/M6 及 B1/B2 定向变异全红。非阻塞：main.ts 的 defaults 值与 commitSettingsWrite 传播错误仍只有文本断言，建议后续各补一行；explicit 只写不读；settings.json.bak/.corrupt-* 含明文 api_key 属 P5-09 范围。",
       "note": "§6.1 第 2 条前半。复审 task-u3nht4h4 首轮 CHANGES_REQUESTED（B1 MCP args:undefined 误拒；B2 迁移失败后写路径盖章导致 v1 默认永久固化），8d81948 修复后 delta PASS。BR-08（api_key 移出 settings）未做，留给 P5-09。"
+    },
+    "P5-09": {
+      "status": "done",
+      "commit": "eea9d76 + 4801b62",
+      "review": "passed",
+      "reviewNote": "task-vxynsptc PASS（4801b62）：keys-store 19/19、settings-store 38/38、TSC/ESLint 通过、全量 bridge 干净 HOME 105.2s 通过；变异 A（去掉 keys.json 优先）与 B（去掉 !keyInjected）均精确变红，A2（无需救回也删 settings 明文）有测试钉住。非阻塞：① 显式清 key 后 reload_settings 仍可能被 settings 残留明文复活（基线已有，触发需迁移未完成；建议 main.ts 的 provider:save/remove 顺手删 legacy 明文）；② 「全部可解时 keys.json 不重写」实现正确但无测试钉住（变异 A3 存活）；③ main.ts 的迁移重试注释仍写「下一次 provider:save」；④ stt.api_key 与 MCP env/headers 仍随 settings 明文下发，需后续 keys.json 化。"
     }
   },
   "reviewGate": {
