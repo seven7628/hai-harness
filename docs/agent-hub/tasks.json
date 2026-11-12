@@ -1786,6 +1786,82 @@
       "review": "passed",
       "note": "真实 Provider 端到端（不是 fake loop）。首轮全量运行 6/7（6_handoff 模型未按提示调用 handoff，报告 fail，非静默 skip）；稳定化后 7/7。独立 Review task-xrs5np2c 亲自复跑 7/7（87.5s，22 LLM calls），并验证门控 skip、provider 缺失 skip、bogus model 失败路径 status=fail、真实 settings 哈希不变、临时目录清理、key/base_url 零泄漏。初版测试文件在 merge e518801 中被并行任务误收，66228ce 是最终提交。 隐式状态修复：ba23b49（B1/B2 + N1-N6/N9-N12）。",
       "reviewNote": "task-xrs5np2c PASS（66228ce；HEAD 后续只有 P5-09 B1 合入与看板 docs，测试 blob 未变）：DM 强断言 human+agent 两条；tool/approval 按 run/tool id 归属；@all 双成员 + 单 round + 禁 @ 接龙；@指定 A 零新消息/B +1；handoff 四阶段（事件 pending_ack→LoadHandoff→handoff_ack→accepted→B 回复）；场景 7 五工具逐个断言参数 + 目录存在且在工作区根内 + m.get/listSessions 可查 + 按 sid 过滤 llm_end/agent_end + 账本 completed/delivered + Result.Summary=HAI_PROJECT_SESSION_OK。报告 calls=19 与 19 条 llm_end 对齐；成本 0 已注明上游未上报、不等于免费。非阻塞：① 门控内 skip 会覆盖默认真报告，建议仅在显式 HAI_EVAL_HUB_REPORT 时写或写 report.skip.json；② HAI_EVAL_HUB_ONLY 全不匹配会 pass+0 场景，建议置 fail；③ handoff 缺「B 回复 seq > accepted message_seq」时序断言；④ 审批走 bs.s.Approve，未覆盖 UI approve 命令；⑤ 迟到 llm_end/tool_run_end 未按 session/run 过滤；⑥ 180s×7 与 -timeout 20m 余量偏紧；⑦ 细节：setActive 失败写 SkipReason、totals 无成本口径注记、场景 panic 可能被记 pass、SIGKILL 时临时 settings 残留 key、commit message 有字面 \\n。 2026-11 隐式状态审计 task-dpjs4b83 升级 B1/B2 为 blocking（ONLY 未知场景假绿、handoff 被人类 prompt 喂答案）；ba23b49 修复后独立复审 task-gpcyfzdv PASS：真实复跑 7/7（83.5s，21 calls），未知 ONLY/只选 5/6/0 场景均 FAIL，promptB 不含 token、ack 后新 run、reply seq 18 > accepted seq 14，临时 settings 快照无 api_key、skip 不覆盖真报告、相对路径 FAIL、场景 7 无 handoff 串入。非阻塞剩余：B2 注释「token 唯一来源」过强、N7 未覆盖 UI approve、默认报告路径同秒边界、场景 6 root agent_end 未过滤 parent_run_id。"
+    },
+    {
+      "id": "P4-UI-9",
+      "phase": "P4",
+      "title": "UI/UX 收尾批次1：窄窗 Hub 侧栏/列宽/composer 派任务入口",
+      "deps": [
+        "P4-UI-8"
+      ],
+      "files": [
+        "desktop/app/src/App.tsx",
+        "desktop/app/src/components/LeftPanel.tsx",
+        "desktop/app/src/hub/hub.css",
+        "desktop/app/src/hub/demo.css",
+        "desktop/app/scripts/shoot-hub-narrow.mjs",
+        "desktop/app/package.json"
+      ],
+      "acceptance": "真实 Chromium 640/700/760/800 下 Hub 左栏实际与 class 一致（不再 44px 装 expanded）；会话列 ≥360；inspector <1000 收 44px 图标条；640 composer 对话/派任务开关 ≥44×28 可点开 assign form；无横向溢出；≥1000 行为不变。独立 Review PASS。",
+      "tests": "npx tsc --noEmit && npm run build:electron && npm run test:p4 && npm run shots:hub-narrow -- --url http://localhost:5180/",
+      "commit": "93ae161",
+      "status": "done",
+      "review": "passed",
+      "note": "P0 批次。审计真实浏览器发现 640 Hub 侧栏被压 44px、composer 开关 0×0；修复以实际 Panel 状态驱动 class、<1000 先收 inspector 再展左栏、退出恢复偏好，并新增 narrow 回归脚本。",
+      "reviewNote": "task-bbabeejr PASS：真实 Chromium 640/700/760/900/999/1000/1280/1440 复跑，640 left 140/hub-side 139/会话列 448/inspector 44，开关 44×28，421 拒绝 expand 时回写 false；≥1000 行为不变。非阻塞：640 开 inspector 仍会挤掉左栏、退出偏好在开 inspector 路径恢复、跨 1000 阈值需重算（已在 P4-UI-10/11 修）。"
+    },
+    {
+      "id": "P4-UI-10",
+      "phase": "P4",
+      "title": "UI/UX 收尾批次2：失败重试幂等、群失败反馈、statusbar 窄窗、Needs/任务 fixture",
+      "deps": [
+        "P4-UI-9"
+      ],
+      "files": [
+        "desktop/app/src/hub/useHubStore.ts",
+        "desktop/app/src/hub/HubErrorBanner.tsx",
+        "desktop/app/src/hub/HubSurface.tsx",
+        "desktop/app/src/hub/MessageBubble.tsx",
+        "desktop/app/src/hub/ConversationMessage.tsx",
+        "desktop/app/src/components/Statusbar.tsx",
+        "desktop/app/src/index.css",
+        "desktop/app/src/transport/mock.ts",
+        "desktop/app/scripts/test-hub-idem.mjs",
+        "desktop/app/scripts/shoot-hub-failures.mjs"
+      ],
+      "acceptance": "DM/群失败重试复用同一 client_msg_id，刷新后账本同文只 1 条；群/DM 共用 error banner（重试+关闭），失败气泡行内重试且不叠乐观气泡；statusbar ≤900/≤700 分段且 scrollHeight≤clientHeight、无横向溢出；mock ?hubFixture=needs|tasks 可展示 4 need 与 queued/failed/interrupted；P0 复审的退出左栏恢复/跨阈值重算修复。独立 Review PASS。",
+      "tests": "npx tsc --noEmit && npm run build:electron && npm run test:p4 && npm run test:hub-idem && npm run shots:hub-failures -- --url http://localhost:5180/",
+      "commit": "f7b4f9a + b7c0b1b",
+      "status": "done",
+      "review": "passed",
+      "note": "P1 批次。首轮 review CHANGES_REQUESTED：DM 失败气泡点 A 发 B、重试成功草稿不清导致再发 +1、成功清唯一 failed 槽导致旧失败原文换新 cid；b7c0b1b 改 failedByCid/retry(cid)/dropFailed/按原文清草稿后 delta PASS。",
+      "reviewNote": "task-655ypg8n CHANGES_REQUESTED（B1/DM 错发、B2/草稿残留、B3/单槽丢 cid）；b7c0b1b 修复，task-v7zhsx37 PASS：真实 Chromium 验 DM/群 A/B 各自重试 wire text+cid、重试成功 textarea 空+账本 1、失败 A→成功 B→重发 A 账本 A=1；88+15 项 node、浏览器 7a/7b/7c 全过，旧 store 反证 14 红。非阻塞：行内重试 busy 已在 P4-UI-11 补、DM 迟到失败横幅守卫仍遗留。"
+    },
+    {
+      "id": "P4-UI-11",
+      "phase": "P4",
+      "title": "UI/UX 收尾批次3：Context/Needs/对比度/点击区/编辑器/深链 + 390/system 验证",
+      "deps": [
+        "P4-UI-10"
+      ],
+      "files": [
+        "desktop/app/src/hub/ContextPanel.tsx",
+        "desktop/app/src/hub/NeedsYouPanel.tsx",
+        "desktop/app/src/hub/AgentEditor.tsx",
+        "desktop/app/src/hub/hub.css",
+        "desktop/app/src/index.css",
+        "desktop/app/src/transport/mock.ts",
+        "desktop/app/scripts/check-p4-p2-details.mjs",
+        "desktop/app/scripts/check-mobile-390.mjs",
+        "docs/agent-hub/P4-RETRO.md"
+      ],
+      "acceptance": "Context label 360 不竖排；Needs 提问卡解析出问题时不重复原始 JSON；侧栏标题 ink/paper 对比度 ≥4.5；640/760/900 目标 32–36、390 仍 44；AgentEditor 1280 720px 居中、删除移 footer；深链复制按钮与 URL 同行；mock hub_need_resolve 对齐 fail-closed/already/answers；390×844 + system 主题真实浏览器 PASS；check:p4-p2 门禁全绿。独立 Review PASS（含 gate B1/B2 修复）。",
+      "tests": "npx tsc --noEmit && npm run build:electron && npm run test:p4 && npm run check:p4-p2 -- --url http://localhost:5180/ && npm run test:mobile-390 -- --require-browser",
+      "commit": "4b6f30d + 2435a0c",
+      "status": "done",
+      "review": "passed",
+      "note": "P2 批次。产品代码 review 全部通过；首轮 CHANGES_REQUESTED 只在 check:p4-p2 门禁（更多入口用 title 找不到、筛选 chip 用 ||），2435a0c 改 aria-label 匹配+&& 后复跑全绿。",
+      "reviewNote": "task-h54jdhp3：产品六项/390/system/mock 对齐真实 Chromium 全部 PASS；阻塞仅 check:p4-p2 B1/B2；2435a0c 修后 `npm run check:p4-p2` 输出 640/760/900 均有「更多入口 32×32」与 scope&&tab，全部通过。非阻塞：≤900 与 Electron minWidth 980 不一致（980×620 目标仍小）、fixed sleep、stale error 未清、shoot-hub-conv 390 限制；iOS Safari/OS 深链仍发布 gate。"
     }
   ],
   "deferred": [
@@ -2826,6 +2902,24 @@
       "commit": "66228ce",
       "review": "passed",
       "reviewNote": "task-xrs5np2c PASS（66228ce；HEAD 后续只有 P5-09 B1 合入与看板 docs，测试 blob 未变）：DM 强断言 human+agent 两条；tool/approval 按 run/tool id 归属；@all 双成员 + 单 round + 禁 @ 接龙；@指定 A 零新消息/B +1；handoff 四阶段（事件 pending_ack→LoadHandoff→handoff_ack→accepted→B 回复）；场景 7 五工具逐个断言参数 + 目录存在且在工作区根内 + m.get/listSessions 可查 + 按 sid 过滤 llm_end/agent_end + 账本 completed/delivered + Result.Summary=HAI_PROJECT_SESSION_OK。报告 calls=19 与 19 条 llm_end 对齐；成本 0 已注明上游未上报、不等于免费。非阻塞：① 门控内 skip 会覆盖默认真报告，建议仅在显式 HAI_EVAL_HUB_REPORT 时写或写 report.skip.json；② HAI_EVAL_HUB_ONLY 全不匹配会 pass+0 场景，建议置 fail；③ handoff 缺「B 回复 seq > accepted message_seq」时序断言；④ 审批走 bs.s.Approve，未覆盖 UI approve 命令；⑤ 迟到 llm_end/tool_run_end 未按 session/run 过滤；⑥ 180s×7 与 -timeout 20m 余量偏紧；⑦ 细节：setActive 失败写 SkipReason、totals 无成本口径注记、场景 panic 可能被记 pass、SIGKILL 时临时 settings 残留 key、commit message 有字面 \\n。"
+    },
+    "P4-UI-9": {
+      "status": "done",
+      "commit": "93ae161",
+      "review": "passed",
+      "reviewNote": "task-bbabeejr PASS：真实 Chromium 640/700/760/900/999/1000/1280/1440 复跑，640 left 140/hub-side 139/会话列 448/inspector 44，开关 44×28，421 拒绝 expand 时回写 false；≥1000 行为不变。非阻塞：640 开 inspector 仍会挤掉左栏、退出偏好在开 inspector 路径恢复、跨 1000 阈值需重算（已在 P4-UI-10/11 修）。"
+    },
+    "P4-UI-10": {
+      "status": "done",
+      "commit": "f7b4f9a + b7c0b1b",
+      "review": "passed",
+      "reviewNote": "task-655ypg8n CHANGES_REQUESTED（B1/DM 错发、B2/草稿残留、B3/单槽丢 cid）；b7c0b1b 修复，task-v7zhsx37 PASS：真实 Chromium 验 DM/群 A/B 各自重试 wire text+cid、重试成功 textarea 空+账本 1、失败 A→成功 B→重发 A 账本 A=1；88+15 项 node、浏览器 7a/7b/7c 全过，旧 store 反证 14 红。非阻塞：行内重试 busy 已在 P4-UI-11 补、DM 迟到失败横幅守卫仍遗留。"
+    },
+    "P4-UI-11": {
+      "status": "done",
+      "commit": "4b6f30d + 2435a0c",
+      "review": "passed",
+      "reviewNote": "task-h54jdhp3：产品六项/390/system/mock 对齐真实 Chromium 全部 PASS；阻塞仅 check:p4-p2 B1/B2；2435a0c 修后 `npm run check:p4-p2` 输出 640/760/900 均有「更多入口 32×32」与 scope&&tab，全部通过。非阻塞：≤900 与 Electron minWidth 980 不一致（980×620 目标仍小）、fixed sleep、stale error 未清、shoot-hub-conv 390 限制；iOS Safari/OS 深链仍发布 gate。"
     }
   },
   "reviewGate": {
