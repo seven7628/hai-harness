@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Markdown } from '../components/markdown'
-import { AccessIcon, Bot, LayersIcon, MoreIcon, PaperclipIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
+import { AccessIcon, Bot, ImageIcon, LayersIcon, MoreIcon, PaperclipIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
 import { useLang, useT } from '../i18n'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
@@ -17,6 +17,10 @@ import { isImeComposing, type MentionAgent } from './mentions'
 import { useScrollbarWidth } from './useScrollbarWidth'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubMessage, HubRunEntry } from './types'
+import { useClearSentAttachments, useHubAttachments } from './useHubAttachments'
+import { withFileRefs } from './attachments'
+import AttachmentStrip from './AttachmentStrip'
+import HubAttachments from './HubAttachments'
 import { useResolvedTheme } from '../lib/useTheme'
 import './hub.css'
 
@@ -87,6 +91,8 @@ export default function HubSurface() {
     : failed.agentId === activeId)
 
   const listRef = useRef<HTMLDivElement>(null)
+  // 隐藏的图片选择器：按钮只负责触发 click（<input> 保留在可访问树里，e2e 可 setInputFiles）。
+  const imageInputRef = useRef<HTMLInputElement>(null)
   // DM 会话视图根节点：--hub-scrollbar-w 写在这里，composer 外层继承后补右内边距。
   const dmRootRef = useRef<HTMLElement | null>(null)
   useScrollbarWidth(listRef, dmRootRef)
@@ -156,12 +162,32 @@ export default function HubSurface() {
     if (el.scrollTop < 60 && hasMore && !loadingOlder) void loadOlder()
   }
 
+  // 待发附件（图片 data URL + 文件引用）。按会话重置：换 DM 时不把上一人的图带过去。
+  const attach = useHubAttachments()
+  const attachScope = useRef<string | null>(null)
+  useEffect(() => {
+    if (attachScope.current === activeId) return
+    attachScope.current = activeId
+    attach.reset()
+    // attach.reset 是稳定引用（useCallback([])），只在换目标时跑。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId])
+  // 失败气泡的行内重试成功后，条带里那张图也该消失（否则再点发送会重复发图）。
+  useClearSentAttachments(attach, 'dm', activeId)
+
   async function submit(): Promise<void> {
-    if (!draft.trim() || sending || !activeId) return
+    if (sending || !activeId) return
+    if (!draft.trim() && attach.total === 0) return
+    // 文件引用拼进正文（每个文件一行 @path），图片走 attachments —— 后端不读文件。
+    const text = withFileRefs(draft, attach.files)
+    const atts = attach.all
     stickBottom.current = true
-    const ok = await send(draft)
-    // 成功才清草稿；失败保留原文（store 同时留 failed 记录，气泡标 failed 并带行内重试）。
-    if (ok) setDraft(activeId, '')
+    const ok = await send(text, undefined, atts.length > 0 ? atts : undefined)
+    // 成功才清正文与附件；失败两头都保留（store 留 failed 记录，含附件指纹供重试）。
+    if (ok) {
+      setDraft(activeId, '')
+      attach.reset()
+    }
   }
 
   // 时间线节点：日期分隔线按本地自然日切段（与群共用 conversationDay.ts 的口径）。
@@ -347,19 +373,56 @@ export default function HubSurface() {
 
               {view === 'chat' ? (
                 <div className="composer-wrap"><div className="composer-inner">
+                  <AttachmentStrip
+                    images={attach.images}
+                    files={attach.files}
+                    notice={attach.notice}
+                    busy={attach.busy}
+                    onRemove={attach.remove}
+                  />
                   <div className="composer">
+                    <input
+                      ref={imageInputRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className="hub-attach-input"
+                      data-testid="hub-image-input"
+                      aria-label="选择图片"
+                      onChange={(e) => {
+                        const picked = Array.from(e.target.files ?? [])
+                        // 清 value：同一张图连选两次也要能再次触发 change。
+                        e.target.value = ''
+                        if (picked.length > 0) void attach.addImageFiles(picked)
+                      }}
+                    />
                     <button
                       className="icon-btn"
-                      onClick={showContext}
-                      title="上下文与提示词（暂不支持附件）"
-                      aria-label="打开上下文面板"
+                      onClick={() => void attach.pickFiles()}
+                      title="引用文件（发送时写成 @路径，不读文件内容）"
+                      aria-label="引用文件"
                     >
                       <PaperclipIcon size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={() => imageInputRef.current?.click()}
+                      title="添加图片"
+                      aria-label="添加图片"
+                    >
+                      <ImageIcon size={15} />
                     </button>
                     <textarea
                       value={draft}
                       placeholder={t('hub.sendTo').replace('{name}', activeAgent.name)}
                       onChange={(e) => activeId && setDraft(activeId, e.target.value)}
+                      onPaste={attach.onPaste}
+                      onDrop={attach.onDrop}
+                      onDragOver={(e) => {
+                        // 不拦 dragover 浏览器会当成「打开文件」而不是 drop。
+                        if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
+                      }}
                       onKeyDown={(e) => {
                         // DM 与群 composer 同口径：IME 合成中的 Enter 属于输入法（B2）。
                         if (isImeComposing(e.nativeEvent, e.keyCode)) return
@@ -373,7 +436,7 @@ export default function HubSurface() {
                     <button
                       className="send-btn"
                       onClick={() => void submit()}
-                      disabled={sending || !draft.trim()}
+                      disabled={sending || attach.busy || (!draft.trim() && attach.total === 0)}
                       title={t('hub.send')}
                       aria-label={t('hub.send')}
                     >
@@ -447,6 +510,7 @@ function HubBubble({
         dateTime={msg.created_at}
       >
         <Markdown text={msg.text ?? ''} />
+        <HubAttachments attachments={msg.attachments} />
       </UserMessage>
     )
   }
@@ -462,6 +526,7 @@ function HubBubble({
       className={hl}
     >
       <Markdown text={msg.text ?? ''} />
+      <HubAttachments attachments={msg.attachments} />
     </AgentMessage>
   )
 }

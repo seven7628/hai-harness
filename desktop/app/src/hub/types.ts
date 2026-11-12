@@ -44,12 +44,31 @@ export interface HubSender {
   agent_id?: string
 }
 
+/**
+ * 一条消息附件（Hub DM / 群共用；与 bridge 的 HubAttachment 一一对应）。
+ *
+ * 图片只走 data URL（前端压缩后），**不把任意文件内容读进来**；文件只做 `@path`
+ * 引用 —— 发送时由前端把 `@<path>` 拼进正文，后端不读文件。
+ */
+export interface HubAttachment {
+  kind: 'image' | 'file'
+  name?: string
+  mime_type?: string
+  bytes?: number
+  /** 仅 kind=image：压缩后的 data URL（后端直接喂视觉模型）。 */
+  data_url?: string
+  /** 仅 kind=file：引用路径（绝对路径优先）。 */
+  path?: string
+}
+
 export interface HubMessage {
   seq: number
   id?: string
   kind?: string
   sender?: HubSender
   text?: string
+  /** 旧消息没有这个字段（undefined 兼容）；只有人类发送时才带上。 */
+  attachments?: HubAttachment[]
   created_at?: string
   round_id?: string
   context?: { trigger_seqs?: number[]; senders?: Array<{ agent_id?: string; name?: string }>; reason?: string }

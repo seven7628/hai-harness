@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DependencyList } from 'react'
 import { useLang, useT } from '../i18n'
-import { GitBranch, MoreIcon, PaperclipIcon, SendIcon, TerminalIcon } from '../components/icons'
+import { GitBranch, ImageIcon, MoreIcon, PaperclipIcon, SendIcon, TerminalIcon } from '../components/icons'
 import { useResolvedTheme } from '../lib/useTheme'
 import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
@@ -40,6 +40,9 @@ import {
   type MentionAgent,
 } from './mentions'
 import type { HubGroup, HubMessage } from './types'
+import { useClearSentAttachments, useHubAttachments } from './useHubAttachments'
+import { withFileRefs } from './attachments'
+import AttachmentStrip from './AttachmentStrip'
 
 // 群组视图（P3a-08 → P3b-07）：群头（成员叠图）/ 自动对话状态条 / 时间线 /
 // 路由动作 / Chat|Run / 发言（@ 选择器）与派任务表单。
@@ -101,6 +104,19 @@ export default function GroupView({ group }: { group: HubGroup }) {
   }
   // @ 选择器：焦点始终在 textarea，选择器只做 listbox/aria-activedescendant。
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // 群 composer 的附件（图片 + 文件引用）：与 DM 同一套 hook；换群时清空。
+  const attach = useHubAttachments()
+  const attachScope = useRef<string | null>(null)
+  useEffect(() => {
+    if (attachScope.current === group.id) return
+    attachScope.current = group.id
+    attach.reset()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group.id])
+  // 失败气泡的行内重试成功后，条带里那张图也该消失（否则再点发送会重复发图）。
+  useClearSentAttachments(attach, 'group', group.id)
+  // 隐藏的图片选择器：按钮只触发 click，<input> 留在可访问树里（e2e 可 setInputFiles）。
+  const imageInputRef = useRef<HTMLInputElement>(null)
   const assignTextareaRef = useRef<HTMLTextAreaElement>(null)
   const [caret, setCaret] = useState(0)
   const [mentionIndex, setMentionIndex] = useState(0)
@@ -248,14 +264,22 @@ export default function GroupView({ group }: { group: HubGroup }) {
   }, [])
 
   async function submit(): Promise<void> {
-    if (!draft.trim() || sending) return
+    // 纯图片且没有正文也允许发（后端存「[图片]」）；群路由要不要 @ 由用户自己决定。
+    if (sending || (!draft.trim() && attach.total === 0)) return
     stickBottom.current = true
     // 结构化 mentions：正文里仍保留 @Name（后端也解析），但显式带上 agent_id，
-    // 让「点选过谁」不依赖后端对名字的二次解析（§8.3.3）。
-    const ok = await send(draft, mentionIds(draft, roster), hasMentionAll(draft))
+    // 让「点选过谁」不依赖后端对名字的二次解析（§8.3.3）。@ 只从用户输入的正文解析
+    // （拼进去的 @路径 不是唤醒目标）。
+    const mentions = mentionIds(draft, roster)
+    const mentionAll = hasMentionAll(draft)
+    // 文件引用拼进正文（一行一个 @path）；图片走 attachments。
+    const text = withFileRefs(draft, attach.files)
+    const atts = attach.all
+    const ok = await send(text, mentions, mentionAll, undefined, atts.length > 0 ? atts : undefined)
     if (ok) {
       setDraft('')
       setCaret(0)
+      attach.reset()
       requestAnimationFrame(() => textareaRef.current?.focus())
     }
   }
@@ -527,6 +551,13 @@ export default function GroupView({ group }: { group: HubGroup }) {
 
       <div className="composer-wrap">
         <div className="composer-inner">
+        <AttachmentStrip
+          images={attach.images}
+          files={attach.files}
+          notice={attach.notice}
+          busy={attach.busy}
+          onRemove={attach.remove}
+        />
         <div className="composer">
           {pickerOpen ? (
             <MentionPicker
@@ -540,14 +571,37 @@ export default function GroupView({ group }: { group: HubGroup }) {
           ) : null}
           {composerMode === 'chat' ? (
             <>
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hub-attach-input"
+                data-testid="hub-group-image-input"
+                aria-label="选择图片"
+                onChange={(e) => {
+                  const picked = Array.from(e.target.files ?? [])
+                  e.target.value = ''
+                  if (picked.length > 0) void attach.addImageFiles(picked)
+                }}
+              />
               <button
                 type="button"
                 className="icon-btn"
-                onClick={openContext}
-                title="上下文与提示词（暂不支持附件）"
-                aria-label="打开上下文面板"
+                onClick={() => void attach.pickFiles()}
+                title="引用文件（发送时写成 @路径，不读文件内容）"
+                aria-label="引用文件"
               >
                 <PaperclipIcon size={15} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => imageInputRef.current?.click()}
+                title="添加图片"
+                aria-label="添加图片"
+              >
+                <ImageIcon size={15} />
               </button>
               <button
                 type="button"
@@ -566,6 +620,12 @@ export default function GroupView({ group }: { group: HubGroup }) {
                   setDraft(e.target.value)
                   setCaret(e.target.selectionStart)
                   setDismissedMentionStart(-1)
+                }}
+                onPaste={attach.onPaste}
+                onDrop={attach.onDrop}
+                onDragOver={(e) => {
+                  // 不拦 dragover 浏览器会当成「打开文件」而不是 drop。
+                  if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
                 }}
                 onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
                 onClick={(e) => setCaret(e.currentTarget.selectionStart)}
@@ -589,7 +649,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
               <button
                 className="send-btn"
                 onClick={() => void submit()}
-                disabled={sending || !draft.trim()}
+                disabled={sending || attach.busy || (!draft.trim() && attach.total === 0)}
                 title={t('hub.send')}
                 aria-label={t('hub.send')}
               >

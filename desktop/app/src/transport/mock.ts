@@ -617,6 +617,10 @@ const MOCK_STATIC_PARTS: [string, number][] = [
   ['tools', 96], ['system_prompt', 58], ['skills', 16], ['other', 4], ['mcp', 14],
 ]
 
+// ?hubFixture=attach 用的小图（8×8 PNG，橙色底 + 深色对角）：真实 data URL，
+// 灯箱/复制/回显都走同一条路径，不是占位字符串。
+const MOCK_ATTACH_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAALklEQVR42mPQ0DH5f7MqDSsGyTHAGNgkQTQDugA6mwFdF7ppxCvAawVeRxLyJgDMMZrx26+tKgAAAABJRU5ErkJggg=='
+
 type MockGroupMessage = {
   seq: number
   id: string
@@ -628,6 +632,8 @@ type MockGroupMessage = {
   refs?: Record<string, unknown>
   round_id?: string
   context?: { trigger_seqs?: number[]; senders?: Array<{ agent_id?: string; name?: string }> }
+  /** 人类消息的附件（图片 / 文件引用）：与真 bridge 同形，原样回显给前端。 */
+  attachments?: Record<string, unknown>[]
 }
 
 class MockTransport implements Transport {
@@ -659,7 +665,7 @@ class MockTransport implements Transport {
       role: '写作', description: '把研究结论整理成可发布的文字，保持克制、可核查。',
       provider: 'deepseek', model: 'deepseek-v4-pro', persona: 'hub', version: 1 },
   ]
-  private hubMessages = new Map<string, { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string }[]>()
+  private hubMessages = new Map<string, { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string; attachments?: Record<string, unknown>[] }[]>()
   private hubCursor = new Map<string, number>()
   private hubSeq = new Map<string, number>()
   private hubVersions = new Map<string, { version: number; saved_at: string; profile: Record<string, unknown> }[]>()
@@ -785,16 +791,27 @@ class MockTransport implements Transport {
     return this.hubFixtureTaskList
   }
 
-  private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string; refs?: Record<string, string> }[] {
+  private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string; attachments?: Record<string, unknown>[]; refs?: Record<string, string> }[] {
     let list = this.hubMessages.get(agentID)
     if (!list) {
       list = [
         { seq: 1, sender: { kind: 'human' }, text: '先列一下三家竞品的价格。', created_at: new Date(Date.now() - 86_400_000).toISOString() },
         { seq: 2, sender: { kind: 'agent', agent_id: agentID }, text: '三家公开价：A $49/席、B $39/席（年付 $32）、C 未公开。\n\n需要我补功能对比吗？', created_at: new Date(Date.now() - 86_000_000).toISOString() },
       ]
+      // ?hubFixture=attach：一条带真实附件的历史人类消息（刷新/历史渲染的回归用）。
+      if (this.hubFixture() === 'attach') {
+        list.push({
+          seq: 3, sender: { kind: 'human' }, text: '这是当时的截图，另外价格表在 @/mock/workspace/pricing-v3.md',
+          created_at: new Date(Date.now() - 85_000_000).toISOString(),
+          attachments: [
+            { kind: 'image', name: 'pricing-shot.png', mime_type: 'image/png', bytes: MOCK_ATTACH_PNG.length, data_url: MOCK_ATTACH_PNG },
+            { kind: 'file', name: 'pricing-v3.md', path: '/mock/workspace/pricing-v3.md', bytes: 2140 },
+          ],
+        })
+      }
       this.hubMessages.set(agentID, list)
-      this.hubCursor.set(agentID, 2)
-      this.hubSeq.set(agentID, 2)
+      this.hubCursor.set(agentID, list[list.length - 1]?.seq ?? 2)
+      this.hubSeq.set(agentID, list[list.length - 1]?.seq ?? 2)
     }
     return list
   }
@@ -893,6 +910,17 @@ class MockTransport implements Transport {
           created_at: at(30 * 60_000),
         },
       ]
+      if (this.hubFixture() === 'attach') {
+        list.push({
+          seq: 8, id: 'gm_mock8', kind: 'text', sender: { kind: 'human' },
+          text: '群里也放一张：成本曲线截屏。',
+          created_at: at(20 * 60_000),
+          attachments: [
+            { kind: 'image', name: 'cost-shot.png', mime_type: 'image/png', bytes: MOCK_ATTACH_PNG.length, data_url: MOCK_ATTACH_PNG },
+            { kind: 'file', name: 'pricing-v3.csv', path: '/mock/workspace/pricing-v3.csv', bytes: 812 },
+          ],
+        })
+      }
       if (cardsFixture) {
         list.push(
           {
@@ -910,8 +938,9 @@ class MockTransport implements Transport {
           },
         )
       }
+      const attachFixture = this.hubFixture() === 'attach'
       this.hubGroupMessages.set(gid, list)
-      this.hubGroupSeq.set(gid, cardsFixture ? 9 : 7)
+      this.hubGroupSeq.set(gid, cardsFixture ? 9 : attachFixture ? 8 : 7)
       // 最后两张卡未读：左栏演示「未读点 + 任务完成结论」；fixture 下未读的是两张验收卡。
       this.hubGroupRead.set(gid, cardsFixture ? 7 : 5)
       this.hubGroupConversations.set(gid, this.mockConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 }))
@@ -926,6 +955,33 @@ class MockTransport implements Transport {
       })
     }
     return list
+  }
+
+  /**
+   * 规范化 payload 里的 attachments（mock 侧与 bridge 同口径）：
+   * 只认 kind=image/file，图片必须有 data_url，文件必须有 path —— 别让浏览器回归
+   * 用一条「被 mock 悄悄补全」的假附件通过。
+   */
+  private mockAttachments(raw: unknown): Record<string, unknown>[] {
+    if (!Array.isArray(raw)) return []
+    const out: Record<string, unknown>[] = []
+    for (const item of raw.slice(0, 10)) {
+      if (!item || typeof item !== 'object') continue
+      const a = item as Record<string, unknown>
+      const kind = a.kind === 'image' || a.kind === 'file' ? a.kind : ''
+      if (!kind) continue
+      if (kind === 'image' && !String(a.data_url ?? '')) continue
+      if (kind === 'file' && !String(a.path ?? '')) continue
+      out.push({
+        kind,
+        ...(a.name ? { name: String(a.name) } : {}),
+        ...(a.mime_type ? { mime_type: String(a.mime_type) } : {}),
+        ...(typeof a.bytes === 'number' ? { bytes: a.bytes } : {}),
+        ...(kind === 'image' ? { data_url: String(a.data_url) } : {}),
+        ...(kind === 'file' ? { path: String(a.path) } : {}),
+      })
+    }
+    return out
   }
 
   private hubGroupNextSeq(gid: string): number {
@@ -2904,7 +2960,9 @@ class MockTransport implements Transport {
         const target = (cmd.payload?.target ?? {}) as Record<string, unknown>
         const agentID = String(target.agent_id ?? '')
         const text = String(cmd.payload?.text ?? '').trim()
-        if (!agentID || !text) { this.respondErr(cmd, 'text 不能为空'); break }
+        // 附件（图片 / 文件引用）：纯图消息正文可以为空（真 bridge 存「[图片]」）。
+        const attachments = this.mockAttachments(cmd.payload?.attachments)
+        if (!agentID || (!text && attachments.length === 0)) { this.respondErr(cmd, 'text 不能为空'); break }
         // 两种 mock 注入的失败（浏览器回归用，见 scripts/shoot-hub-failures.mjs）：
         //   __fail__    → 没落账就失败（气泡标 failed，可重试）
         //   __lostack__ → 已经落账，但事件与响应都在网线上丢了（断线重连的真实现场）
@@ -2922,7 +2980,11 @@ class MockTransport implements Transport {
         const seq = (this.hubSeq.get(agentID) ?? 0) + 1
         this.hubSeq.set(agentID, seq)
         const created = new Date().toISOString()
-        log.push({ seq, sender: { kind: 'human' }, text, created_at: created, ...(clientID ? { refs: { client_msg_id: clientID } } : {}) })
+        log.push({
+          seq, sender: { kind: 'human' }, text, created_at: created,
+          ...(attachments.length > 0 ? { attachments } : {}),
+          ...(clientID ? { refs: { client_msg_id: clientID } } : {}),
+        })
         this.hubCursor.set(agentID, seq)
         if (text === '__lostack__') {
           // 落账了但既没 emit 也没响应：前端只看到「发送失败」，重试必须沿用同一 cid，
@@ -2932,7 +2994,11 @@ class MockTransport implements Transport {
         }
         // 真 bridge 先 emit hub_message 再 resp（hub_commands.go 的 hub_send）：
         // mock 必须同序，否则前端「事件先到/响应先到」两条路径里有一条永远测不到。
-        this.emit({ event_type: 'hub_message', agent_id: agentID, seq, message: { seq, sender: { kind: 'human' }, text, created_at: created }, client_msg_id: String(cmd.payload?.client_msg_id ?? '') })
+        this.emit({
+          event_type: 'hub_message', agent_id: agentID, seq,
+          message: { seq, sender: { kind: 'human' }, text, created_at: created, ...(attachments.length > 0 ? { attachments } : {}) },
+          client_msg_id: String(cmd.payload?.client_msg_id ?? ''),
+        })
         this.respond(cmd, { seq, session_id: `hub.${agentID}.dm` })
         // 模拟一轮回复：agent_start → content_chunk 流 → hub_message → agent_end
         const sid = `hub.${agentID}.dm`
@@ -3046,8 +3112,10 @@ class MockTransport implements Transport {
         const gid = String(cmd.payload?.group_id ?? '')
         const group = this.hubGroup(gid)
         const text = String(cmd.payload?.text ?? '').trim()
+        // 附件与 DM 同形：纯图（正文为空）也允许，路由由正文里的 @ 决定（没有就不唤醒）。
+        const attachments = this.mockAttachments(cmd.payload?.attachments)
         if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
-        if (!text) { this.respondErr(cmd, 'text 不能为空'); break }
+        if (!text && attachments.length === 0) { this.respondErr(cmd, 'text 不能为空'); break }
         // 与 DM 同款注入：__fail__ 不落账就失败（气泡标 failed、横幅给重试）。
         if (text === '__fail__') { this.respondErr(cmd, 'provider 未配置（mock 注入失败）'); break }
         const clientID = String(cmd.payload?.client_msg_id ?? '')
@@ -3062,6 +3130,7 @@ class MockTransport implements Transport {
         const targets = this.hubGroupTargets(gid, text, cmd.payload?.mentions, mentionAll)
         const msg = this.hubGroupAppend(gid, {
           kind: 'text', sender: { kind: 'human' }, text,
+          ...(attachments.length > 0 ? { attachments } : {}),
           ...(clientID ? { refs: { client_msg_id: clientID } } : {}),
         })
         if (text === '__lostack__') {

@@ -9,6 +9,7 @@ import AgentMentionChip from './AgentMentionChip'
 import AgentSigil from './AgentSigil'
 import { AgentMessage, UserMessage } from './ConversationMessage'
 import TaskResultCard from './TaskResultCard'
+import HubAttachments from './HubAttachments'
 import TurnContextLine from './TurnContextLine'
 import { formatClockTime } from './conversation'
 import { ALL_MENTION_ID, linkifyMentions, type MentionAgent } from './mentions'
@@ -254,6 +255,8 @@ export function GroupBubble({
         dateTime={msg.created_at}
       >
         <Markdown text={linkedText} renderMention={roster.length > 0 ? renderMention : undefined} />
+        {/* 附件（图片 / 文件引用）：旧消息没有这个字段 → HubAttachments 自己返回 null。 */}
+        <HubAttachments attachments={msg.attachments} />
       </UserMessage>
     )
   }
@@ -272,6 +275,8 @@ export function GroupBubble({
       footer={contextLine}
     >
       <Markdown text={linkedText} renderMention={roster.length > 0 ? renderMention : undefined} />
+      {/* agent 消息目前不带附件，但后端将来若回传（图片/文件）也要能显示，不能崩。 */}
+      <HubAttachments attachments={msg.attachments} />
     </AgentMessage>
   )
 }

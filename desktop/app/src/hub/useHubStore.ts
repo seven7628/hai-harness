@@ -2,11 +2,12 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type {
-  HubAgent, HubAlert, HubArtifactPreviewData, HubConversation, HubDMInfo, HubGroup, HubHistoryPage,
+  HubAgent, HubAlert, HubArtifactPreviewData, HubAttachment, HubConversation, HubDMInfo, HubGroup, HubHistoryPage,
   HubMessage, HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubPromptLayer, HubPromptPreviewData,
   HubRound, HubRunEntry, HubSearchCursor, HubSearchHit, HubSearchPage, HubSearchScope, HubTask,
   HubTaskArtifact, HubTaskUpdate,
 } from './types'
+import { attachmentFingerprint, validateAttachments } from './attachments'
 import {
   aroundHasMore, hasSeq, mapSearchHit, mapSearchPage, mergeAroundPage, mergeSearchHits,
   normalizeSearchQuery, normalizeSearchScope, searchAroundPlan, searchPagePayload,
@@ -76,6 +77,13 @@ export interface HubFailedSend {
   /** 群的 @ 目标（重发要原样带上，否则唤醒面变小）。 */
   mentions?: string[]
   mentionAll?: boolean
+  /** 首发时的附件：重试必须原样带上（含图片 data URL），否则「重试」会丢图。 */
+  attachments?: HubAttachment[]
+  /**
+   * 附件指纹（attachmentFingerprint）：重试/同文重发的幂等键要比较它。
+   * 只比正文的话，用户「删掉旧图换一张新图再发」会命中旧 cid 被 bridge 挡成旧消息。
+   */
+  attachmentsFingerprint?: string
 }
 
 interface HubState {
@@ -197,7 +205,7 @@ interface HubState {
   select(agentID: string): Promise<void>
   clearSelection(): void
   loadOlder(): Promise<void>
-  send(text: string, reuseClientMsgId?: string): Promise<boolean>
+  send(text: string, reuseClientMsgId?: string, attachments?: HubAttachment[]): Promise<boolean>
   /**
    * 重发一条失败的消息（DM 或群），沿用首发 client_msg_id。
    *
@@ -237,7 +245,7 @@ interface HubState {
   selectGroup(groupID: string): Promise<void>
   loadGroupActivity(groupID?: string): Promise<void>
   clearGroup(): void
-  sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string): Promise<boolean>
+  sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string, attachments?: HubAttachment[]): Promise<boolean>
   sendGroupAssign(groupID: string, req: { agent_id: string; instruction: string; title?: string }): Promise<boolean>
   stopGroupConversation(groupID: string): Promise<boolean>
   loadTasks(): Promise<void>
@@ -330,10 +338,12 @@ function rememberFailed(map: FailedMap, rec: HubFailedSend): Pick<HubState, 'fai
  * 用户没点「重试」、直接把失败的正文再发一次时也要沿用，否则账本会多一条
  * （HUB-IDEM-01 / 复审 B3）。同文多条失败取最早的那条（时间线上第一个失败气泡）。
  */
-function reuseCidFor(map: FailedMap, kind: 'dm' | 'group', scopeID: string, text: string): string {
+function reuseCidFor(map: FailedMap, kind: 'dm' | 'group', scopeID: string, text: string, attachmentsFingerprint = ''): string {
   for (const cid of Object.keys(map)) {
     const rec = map[cid]
     if (rec.kind !== kind || rec.text !== text) continue
+    // 正文相同但附件不同 = 另一条消息（换图重发不能被幂等挡成旧消息）。
+    if ((rec.attachmentsFingerprint ?? '') !== attachmentsFingerprint) continue
     if (kind === 'dm' ? rec.agentId === scopeID : rec.groupId === scopeID) return cid
   }
   return ''
@@ -627,22 +637,31 @@ export const useHubStore = create<HubState>((set, get) => ({
     })
   },
 
-  async send(text, reuseClientMsgId) {
+  async send(text, reuseClientMsgId, attachments) {
     const { activeId, sending } = get()
-    const body = text.trim()
-    if (!activeId || !body || sending) return false
+    const body = (text ?? '').trim()
+    // 附件（图片）可以没有正文：图片走 attachments，正文允许为空（后端存「[图片]」）。
+    const check = validateAttachments(attachments)
+    const atts = check.ok ? check.attachments : []
+    if (!activeId || (!body && atts.length === 0) || sending) return false
+    if (!check.ok) {
+      set({ error: check.error || '附件不合法' })
+      return false
+    }
     // 幂等键（§7.1.3）：首发时定下，失败记录保留它；重试 / 同一条正文重发都沿用它。
     // 桥按 client_msg_id 去重（hubSend 命中即回原 seq、deduplicated），换新 cid 会让
     // 「响应丢了但消息其实已入队」的那条重复进模型上下文（HUB-IDEM-01）。
-    // 按失败表里「同正文 + 同目标」的那条找，而不是只看最新一条：中间成功过别的消息
-    // 之后，旧失败气泡的 cid 仍要能找回（复审 B3）。
-    const reuse = reuseClientMsgId || reuseCidFor(get().failedByCid, 'dm', activeId, body)
+    // 按失败表里「同正文 + 同目标 + 同附件指纹」的那条找，而不是只看最新一条：中间成功
+    // 过别的消息之后，旧失败气泡的 cid 仍要能找回（复审 B3）；换图重发则是新消息。
+    const fp = attachmentFingerprint(atts)
+    const reuse = reuseClientMsgId || reuseCidFor(get().failedByCid, 'dm', activeId, body, fp)
     const n = ++optimisticSeq
     const clientMsgId = reuse || `ui-${Date.now()}-${n}`
     const optimistic: HubMessage = {
       seq: -n,
       sender: { kind: 'human' },
       text: body,
+      ...(atts.length > 0 ? { attachments: atts } : {}),
       pending: true,
       clientMsgId,
     }
@@ -659,10 +678,14 @@ export const useHubStore = create<HubState>((set, get) => ({
       target: { kind: 'dm', agent_id: activeId },
       text: body,
       client_msg_id: clientMsgId,
+      ...(atts.length > 0 ? { attachments: atts } : {}),
     })
     if (!r.ok) {
-      // 失败：气泡标 failed（可重试），失败记录带原文 + 首发 cid —— 不能两头都清。
-      const rec: HubFailedSend = { kind: 'dm', text: body, clientMsgId, agentId: activeId }
+      // 失败：气泡标 failed（可重试），失败记录带原文 + 附件 + 首发 cid —— 不能两头都清。
+      const rec: HubFailedSend = {
+        kind: 'dm', text: body, clientMsgId, agentId: activeId,
+        ...(atts.length > 0 ? { attachments: atts, attachmentsFingerprint: fp } : {}),
+      }
       set((s) => ({
         sending: false,
         error: r.error || '发送失败',
@@ -698,11 +721,11 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (failed.kind === 'group') {
       const { activeGroupId, groupSending } = get()
       if (!activeGroupId || groupSending || activeGroupId !== failed.groupId) return false
-      return get().sendGroup(failed.text, failed.mentions, failed.mentionAll, failed.clientMsgId)
+      return get().sendGroup(failed.text, failed.mentions, failed.mentionAll, failed.clientMsgId, failed.attachments)
     }
     const { activeId, sending } = get()
     if (!activeId || sending || activeId !== failed.agentId) return false
-    return get().send(failed.text, failed.clientMsgId)
+    return get().send(failed.text, failed.clientMsgId, failed.attachments)
   },
 
   setDraft(agentID, text) {
@@ -1216,15 +1239,23 @@ export const useHubStore = create<HubState>((set, get) => ({
     })
   },
 
-  async sendGroup(text, mentions, mentionAll, reuseClientMsgId) {
+  async sendGroup(text, mentions, mentionAll, reuseClientMsgId, attachments) {
     const { activeGroupId, groupSending } = get()
-    const body = text.trim()
-    if (!activeGroupId || !body || groupSending) return false
+    const body = (text ?? '').trim()
+    // 纯图片（正文为空）也允许发：群里没有 @ 时后端只存「[图片]」，@ 由用户在正文里给。
+    const check = validateAttachments(attachments)
+    const atts = check.ok ? check.attachments : []
+    if (!activeGroupId || (!body && atts.length === 0) || groupSending) return false
+    if (!check.ok) {
+      set({ error: check.error || '附件不合法' })
+      return false
+    }
     const gen = ++groupSendGen
     // 与 DM 同一条幂等规则（HUB-IDEM-01）：失败记录保留首发 cid，重试/同正文重发沿用它，
     // 桥按 client_msg_id 去重，不会因「响应丢了」而把同一条再喂一次模型。
-    // 同样按「同正文 + 同群」找记录，而不是只看最新一条（复审 B3）。
-    const reuse = reuseClientMsgId || reuseCidFor(get().failedByCid, 'group', activeGroupId, body)
+    // 同样按「同正文 + 同群 + 同附件指纹」找记录，而不是只看最新一条（复审 B3）。
+    const fp = attachmentFingerprint(atts)
+    const reuse = reuseClientMsgId || reuseCidFor(get().failedByCid, 'group', activeGroupId, body, fp)
     const n = ++optimisticSeq
     const clientMsgId = reuse || `g-${Date.now()}-${n}`
     set((s) => ({
@@ -1235,12 +1266,13 @@ export const useHubStore = create<HubState>((set, get) => ({
       // 重发先摘掉失败气泡，别在时间线上叠第二条乐观气泡（HUB-FAIL-01）。
       groupMessages: [
         ...(reuse ? s.groupMessages.filter((m) => !(m.failed && m.clientMsgId === reuse)) : s.groupMessages),
-        { seq: -n, sender: { kind: 'human' }, text: body, pending: true, clientMsgId },
+        { seq: -n, sender: { kind: 'human' }, text: body, ...(atts.length > 0 ? { attachments: atts } : {}), pending: true, clientMsgId },
       ],
     }))
     const payload: Record<string, unknown> = {
       group_id: activeGroupId, text: body, client_msg_id: clientMsgId,
     }
+    if (atts.length > 0) payload.attachments = atts
     // 结构化 mentions 是人点选过的目标（§8.3.3）；正文里的 @ 仍由后端再解析一次，
     // 两者取并集 —— 前端删改正文不会留下「幽灵唤醒」。
     if (mentions && mentions.length > 0) payload.mentions = mentions
@@ -1250,7 +1282,10 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (groupSendGen !== gen || get().activeGroupId !== activeGroupId) return false
     if (!r.ok) {
       // 失败同样留记录（含 cid + @ 目标）：群里之前只有一条「网络中断 ×」，没有重试入口。
-      const rec: HubFailedSend = { kind: 'group', text: body, clientMsgId, groupId: activeGroupId, mentions, mentionAll }
+      const rec: HubFailedSend = {
+        kind: 'group', text: body, clientMsgId, groupId: activeGroupId, mentions, mentionAll,
+        ...(atts.length > 0 ? { attachments: atts, attachmentsFingerprint: fp } : {}),
+      }
       set((s) => ({
         groupSending: false, error: r.error || '发送失败',
         ...rememberFailed(s.failedByCid, rec),

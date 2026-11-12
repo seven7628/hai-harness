@@ -2863,3 +2863,272 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-artifact-body { padding: 10px 12px; }
   .hub-artifact-foot { padding: 8px 12px; }
 }
+
+/* ============================================================
+   Hub 附件（P4 图片 / 文件引用）：composer 条带 + 消息气泡 + 灯箱
+   与主会话 Composer 的交互同源（点缩略图放大、× 移除、复制图片），
+   但类名独立（hub-attach-* / hub-msg-*），不串到主会话的 .cy-im*。
+   约束：390 下 0 横向溢出 —— 所有 chip 可换行，长路径/文件名 ellipsis。
+   ============================================================ */
+
+/* 隐藏的 <input type=file>：视觉不可见但保留在可访问树里（e2e 可 setInputFiles）。 */
+.hub-demo .hub-attach-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* composer 上方的待发附件条带：换行排列，永不撑破列宽。 */
+.hub-demo .hub-attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 0 0 6px;
+  padding: 0 2px;
+}
+.hub-demo .hub-attach-chip {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.hub-demo .hub-attach-chip--img {
+  width: 52px;
+  height: 52px;
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+.hub-demo .hub-attach-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: var(--surface-2);
+  cursor: zoom-in;
+}
+.hub-demo .hub-attach-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.hub-demo .hub-attach-thumb:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.hub-demo .hub-attach-ph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+.hub-demo .hub-attach-x {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(12, 12, 11, 0.72);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  z-index: 2;
+}
+.hub-demo .hub-attach-x:hover { background: var(--danger); color: var(--user-text); }
+.hub-demo .hub-attach-chip--file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(100%, 260px);
+  padding: 5px 22px 5px 9px;
+  font-size: 11.5px;
+  color: var(--text);
+}
+.hub-demo .hub-attach-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-demo .hub-attach-file-size {
+  flex: 0 0 auto;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.hub-demo .hub-attach-chip--file .hub-attach-x { top: 50%; transform: translateY(-50%); }
+.hub-demo .hub-attach-busy { color: var(--muted-2); font-size: 10.5px; }
+.hub-demo .hub-attach-notice {
+  margin: 0 0 6px;
+  padding: 0 2px;
+  color: var(--warn);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+/* 灯箱：固定铺满、点遮罩关闭、Esc 关闭（逻辑在组件里）。 */
+.hub-demo .hub-attach-lb {
+  position: fixed;
+  inset: 0;
+  z-index: 320;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(8, 8, 7, 0.82);
+  backdrop-filter: blur(3px);
+}
+.hub-demo .hub-attach-lb figure {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  max-width: min(92vw, 900px);
+  max-height: calc(100dvh - 40px);
+}
+.hub-demo .hub-attach-lb img {
+  display: block;
+  width: auto;
+  /* 小图也要撑出一个像样的预览（8×8 图标放到 8px 等于没放大）；大图仍受 max 约束。 */
+  min-width: min(280px, 86vw);
+  max-width: min(92vw, 900px);
+  min-height: min(160px, 34dvh);
+  max-height: calc(100dvh - 130px);
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+.hub-demo .hub-attach-lb-placeholder {
+  min-width: 160px;
+  padding: 34px 18px;
+  border-radius: 10px;
+  border: 1px dashed var(--border-strong);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.hub-demo .hub-attach-lb figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.hub-demo .hub-attach-lb-status { color: var(--text); }
+.hub-demo .hub-attach-lb-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+}
+.hub-demo .hub-attach-lb-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11.5px;
+}
+.hub-demo .hub-attach-lb-btn:hover { border-color: var(--focus); }
+.hub-demo .hub-attach-lb-btn.danger { color: var(--danger); }
+.hub-demo .hub-attach-lb-btn.close { width: 28px; padding: 0; }
+
+/* 消息气泡里的附件：与正文保持 6px 间距，图片最多 4 张（再多给 +N）。 */
+.hub-demo .hub-msg-attach { margin-top: 6px; max-width: 100%; min-width: 0; }
+.hub-demo .hub-msg-imgs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+.hub-demo .hub-msg-img {
+  width: 112px;
+  height: 84px;
+  padding: 0;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: var(--surface-2);
+  cursor: zoom-in;
+}
+.hub-demo .hub-msg-img img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.hub-demo .hub-msg-img:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.hub-demo .hub-msg-img-ph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 4px;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-demo .hub-msg-img-more {
+  align-self: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.hub-demo .hub-msg-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  max-width: 100%;
+}
+.hub-demo .hub-msg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: min(100%, 320px);
+  padding: 4px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11px;
+  text-align: left;
+}
+.hub-demo .hub-msg-file:hover { border-color: var(--border-strong); }
+.hub-demo .hub-msg-file-name { flex: 0 0 auto; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-demo .hub-msg-file-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-2);
+  font-family: var(--font-mono, var(--mono));
+  font-size: 10px;
+}
+/* 用户气泡（暖色底）里的 chip 用底色区分，不要在浅色气泡上再叠一层 surface-2。 */
+.hub-demo .user-bubble .hub-msg-file {
+  border-color: color-mix(in srgb, var(--user-text) 22%, transparent);
+  background: color-mix(in srgb, var(--user-text) 8%, transparent);
+  color: var(--user-text);
+}
+.hub-demo .user-bubble .hub-msg-file-path { color: color-mix(in srgb, var(--user-text) 62%, transparent); }
+
+@media (max-width: 640px) {
+  .hub-demo .hub-attach-lb { padding: 10px; }
+  .hub-demo .hub-attach-lb img { max-height: calc(100dvh - 150px); }
+  .hub-demo .hub-msg-img { width: 88px; height: 66px; }
+  .hub-demo .hub-msg-file { max-width: 100%; }
+  .hub-demo .hub-msg-file-name { max-width: 120px; }
+}
