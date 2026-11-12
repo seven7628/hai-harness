@@ -762,6 +762,7 @@ export default function RightPanel() {
   const openTab = useAppStore((s) => s.openTab)
   const activateTab = useAppStore((s) => s.activateTab)
   const closeTab = useAppStore((s) => s.closeTab)
+  const closeTabs = useAppStore((s) => s.closeTabs)
   const reopenTab = useAppStore((s) => s.reopenTab)
   const syncTabs = useAppStore((s) => s.syncTabsToRightTab)
   const embedNav = useAppStore((s) => s.embedNav)
@@ -797,8 +798,11 @@ export default function RightPanel() {
     }
     setCtx(null)
   }
-  const ctxCloseOthers = () => { for (const x of tabs) if (x.id !== ctx?.id) closeTab(x.id); setCtx(null) }
-  const ctxCloseRight = () => { for (const x of tabs.slice(ctxIndex + 1)) closeTab(x.id); setCtx(null) }
+  // 批量关闭走 closeTabs：干净的一次关掉，脏的进确认队列（逐个问）。
+  // 早先这里是 `for (...) closeTab(x)` —— 守卫虽然兜住了内容，但多个脏标签只有一个能被问到，
+  // 用户点完"丢弃"还得再点一次关其它（评审 #4）。
+  const ctxCloseOthers = () => { closeTabs(tabs.filter((x) => x.id !== ctx?.id).map((x) => x.id)); setCtx(null) }
+  const ctxCloseRight = () => { closeTabs(tabs.slice(ctxIndex + 1).map((x) => x.id)); setCtx(null) }
   const ctxCopyPath = async () => { if (ctxPath) await copyText(ctxPath); setCtx(null) }
   const ctxReveal = async () => { if (ctxPath) await window.desktop?.showItemInFolder?.(ctxPath); setCtx(null) }
   const ctxOpenDefault = async () => { if (ctxPath) await window.desktop?.openPath?.(ctxPath); setCtx(null) }

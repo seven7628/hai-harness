@@ -11,15 +11,17 @@ import { editorDocs } from '../lib/editorRuntime'
 export function EditorConfirm() {
   const t = useT()
   const confirm = useAppStore((s) => s.closeConfirm)
+  const closeNext = useAppStore((s) => s.closeConfirmNext)
   // 标签集按作用域存（tabsByScope）；确认框要按 id 找到那个标签的路径显示文件名。
   const tabsByScope = useAppStore((s) => s.tabsByScope)
   const scope = useAppStore((s) => s.activeSessionId || s.workspace || '')
   const cancel = useAppStore((s) => s.cancelCloseConfirm)
-  const closeNow = useAppStore((s) => s.closeTabNow)
   const activateTab = useAppStore((s) => s.activateTab)
   if (!confirm) return null
 
-  const tabId = confirm.reason === 'close' ? confirm.tabId : undefined
+  // 队列：批量关闭时一次问一个（关其它/关右侧撞到多个脏标签 —— 不能只问最后一个）
+  const queue = confirm.reason === 'close' ? confirm.tabIds : []
+  const tabId = queue[0]
   const tab = (tabsByScope[scope]?.tabs ?? []).find((x) => x.id === tabId) as FileTabInstance | undefined
   const name = (tab?.path ?? '').split('/').pop() || ''
   const quit = confirm.reason === 'quit'
@@ -46,8 +48,7 @@ export function EditorConfirm() {
     if (!tabId) return cancel()
     const r = await editorDocs.save(tabId)
     if (!r.ok) return revealAndClose(tabId)
-    closeNow(tabId)
-    cancel()
+    closeNext(tabId)
   }
 
   const onDiscard = () => {
@@ -56,8 +57,7 @@ export function EditorConfirm() {
       cancel()
       return
     }
-    if (tabId) closeNow(tabId)
-    cancel()
+    if (tabId) closeNext(tabId)
   }
 
   return (
@@ -72,6 +72,7 @@ export function EditorConfirm() {
       >
         <div className="editor-confirm-title">{t(quit ? 'editor.quit.title' : 'editor.close.title')}</div>
         {!quit && name && <div className="editor-confirm-file mono">{name}</div>}
+        {!quit && queue.length > 1 && <div className="editor-confirm-more">{t('editor.close.more').replace('{n}', String(queue.length - 1))}</div>}
         <div className="editor-confirm-acts">
           <button className="editor-btn" onClick={cancel} autoFocus>{t('editor.close.cancel')}</button>
           <button className="editor-btn danger" onClick={onDiscard}>{t('editor.close.discard')}</button>

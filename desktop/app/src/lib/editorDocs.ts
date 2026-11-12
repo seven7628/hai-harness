@@ -130,6 +130,8 @@ export function createEditorDocs(deps: EditorDocsDeps) {
       // 写出的一种死循环（每次都被拒，用户只看到红条闪）。
       if (blocked) return { ok: false, blocked }
       const doc = e!.doc
+      // payload.content 是**写盘形态**（按文件原本的 eol 还原过）；reducer 要的是编辑器空间的
+      // 那一段（LF），否则 `saved` 里 baseContent 会变成 CRLF 而 content 是 LF → 立刻又脏。
       const payload = { ...savePayload(doc, opts.overwrite), ...(opts.overwrite && doc.deleted ? { allowNew: true } : {}) }
       apply(tabId, { type: 'save-start' })
       const r = await deps.send('file_save', payload)
@@ -145,7 +147,7 @@ export function createEditorDocs(deps: EditorDocsDeps) {
       }
       const d = (r.data ?? {}) as { hash?: unknown }
       const hash = typeof d.hash === 'string' ? d.hash : ''
-      apply(tabId, { type: 'saved', content: payload.content, hash })
+      apply(tabId, { type: 'saved', content: doc.content, hash })
       return { ok: true }
     },
 

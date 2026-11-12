@@ -2899,7 +2899,9 @@ export interface AppState {
   // 用对象身份比较会漏）。编辑器会话订阅它把事件路由到开了这个路径的标签。
   fileChange?: { path: string; hash?: string; deleted: boolean; seq: number }
   // closeConfirm：关 dirty 标签 / 退出应用共用的确认框（PR-05b：两种触发一个框）。
-  closeConfirm?: { reason: 'close' | 'quit'; tabId?: string }
+  // tabIds 是**队列**：批量关闭（关其它/关右侧）撞到多个脏标签时，一次问一个，
+  // 处理完一个再问下一个 —— 单槽会让后一个覆盖前一个，用户以为只丢了一个文件。
+  closeConfirm?: { reason: 'close'; tabIds: string[] } | { reason: 'quit' }
   fileFocus?: FileFocus // 对话文件点击 → 文件 Tab 精确定位（seq 允许重复点击同一路径）
   // officeBusy 正在转换的文件路径（xlsx/docx/pptx 任一在途；驱动按钮禁用与「转换中…」）。
   // 三种格式共用一个槽位而不是各一个：同一时刻用户点的是**一个**文件，多槽位只会让
@@ -3151,6 +3153,10 @@ export interface AppState {
   editCommand(type: 'file_open' | 'file_save' | 'file_close', payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; code?: string; data?: Record<string, unknown> }>
   setTabDirty(tabId: string, dirty: boolean): void // 编辑器把脏状态镜像进来（圆点 + 原生红点 + 关闭确认）
   cancelCloseConfirm(): void // 确认框「取消」：标签留着，脏内容不动
+  // 批量关闭（关其它 / 关右侧）：干净的直接关，脏的进确认队列（**绝不静默丢缓冲区**）
+  closeTabs(ids: string[]): void
+  // 确认框处理完一个标签：关掉它并把队列推进到下一个（没了就收起框）
+  closeConfirmNext(closedId: string): void
   fetchMetrics(opts?: { from?: string; to?: string; project?: string }): void // 强制拉取聚合报告
   ensureMetrics(): void // 按需拉取：报告缺失或超龄才发命令（空会话图表等高频入口）
   fetchSkills(): void // 技能清单（SkillsPage + /skill 命令补全数据源）
@@ -4699,7 +4705,21 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 这里**就地返回**。不返回的话，file_save 的冲突（ok:false + code=conflict）会掉进下面的
       // 通用失败分支 → 把「文件已被外部修改」写成全局 bridgeError（甚至把 bridge 标红）。
       // 这是**该文档的局部状态**，只属于编辑器自己的黄条。
-      if (t === 'file_open' || t === 'file_save' || t === 'file_close') return
+      if (t === 'file_open' || t === 'file_save' || t === 'file_close') {
+        // 但**bridge 掉线**不属于「这个文件写不进去」：进程死了 / 未运行 / EPIPE 时，
+        // 只出一行文档红条会让全局健康信号沉默（用户看着"文件已失效"，其实后端没了）。
+        // 只动全局信号，不碰文档状态 —— 文档的红条由编辑器自己按 code 决定。
+        if (!r.ok && looksBridgeDown(r.error)) {
+          const err = r.error || i18nT('bridge.unavailable')
+          const alreadyDown = getState().bridgeStatus === 'error'
+          setState({
+            bridgeStatus: 'error' as const,
+            bridgeError: err,
+            ...(alreadyDown ? {} : { toast: { msg: err, kind: 'error' as const, id: Date.now() } }),
+          })
+        }
+        return
+      }
       // new_session 失败必须在这里收敛：bare（真新建）要撤掉 loading shell；
       // 带 id 的恢复要释放 snapshotPending/preBuf，否则该会话后续事件会被永久积压。
       // 旧路径落到通用 `if (!r.ok)` 只设 bridgeError —— 骨架屏/空白壳没人收，用户看到
@@ -10208,10 +10228,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 批量关闭（关其它/关右侧）走同一个守卫 → 脏标签会被留下并弹一个框，宁可少关一个，
     // 也不静默丢掉用户没保存的内容。
     if (get().dirtyTabs[id]) {
-      set({ closeConfirm: { reason: 'close', tabId: id } })
+      set({ closeConfirm: { reason: 'close', tabIds: [id] } })
       return
     }
     get().closeTabNow(id)
+  },
+  closeTabs: (ids) => {
+    const dirty = ids.filter((id) => get().dirtyTabs[id])
+    for (const id of ids) if (!dirty.includes(id)) get().closeTabNow(id)
+    // 多个脏标签：全部进队列（一个都不关），确认框逐个问
+    if (dirty.length) set({ closeConfirm: { reason: 'close', tabIds: dirty } })
+  },
+  closeConfirmNext: (closedId) => {
+    get().closeTabNow(closedId)
+    const cur = get().closeConfirm
+    if (cur?.reason !== 'close') return
+    const rest = cur.tabIds.filter((x) => x !== closedId)
+    set({ closeConfirm: rest.length ? { reason: 'close', tabIds: rest } : undefined })
   },
   closeTabNow: (id) => {
     const s = get()

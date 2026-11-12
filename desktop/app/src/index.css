@@ -11060,6 +11060,7 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 }
 .editor-confirm-title { font-size: 13px; color: var(--text); }
 .editor-confirm-file { margin-top: 6px; font-size: 11px; color: var(--text-3); word-break: break-all; }
+.editor-confirm-more { margin-top: 4px; font-size: 11px; color: var(--warning); }
 .editor-confirm-acts { margin-top: 14px; display: flex; gap: 8px; justify-content: flex-end; }
 .file-source { height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .file-source-meta { flex: 0 0 auto; padding: 5px 10px; border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 10px; }

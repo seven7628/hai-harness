@@ -24,6 +24,8 @@ export type EditorStatus = 'loading' | 'ready' | 'invalid'
  */
 export type EditorBannerKind = 'conflict' | 'external' | 'deleted' | 'invalid' | 'error'
 
+export type Eol = '\n' | '\r\n'
+
 export interface EditorBanner {
   kind: EditorBannerKind
   /** conflict 时带上磁盘上的当前 hash（file_save 的 data.currentHash） */
@@ -35,6 +37,12 @@ export interface EditorBanner {
 export interface EditorDoc {
   path: string
   content: string
+  /**
+   * 文件原本的行尾（PR-05b 评审 #3）。textarea 的 value **只可能是 LF**（HTML 规范把它
+   * 归一成 LF），拿它去和 CRLF 的磁盘原文比会让「打开即脏」，保存更会把整份文件改成 LF
+   * ——一次无害的编辑变成全文件 diff。所以：编辑器内部一律 LF，只有写盘时按 eol 还原。
+   */
+  eol: Eol
   baseContent: string
   baseHash: string
   status: EditorStatus
@@ -64,9 +72,24 @@ export function isDirty(content: string, baseContent: string): boolean {
 
 export function emptyDoc(path: string): EditorDoc {
   return {
-    path, content: '', baseContent: '', baseHash: '',
+    path, content: '', baseContent: '', baseHash: '', eol: '\n',
     status: 'loading', readonly: '', dirty: false, saving: false, deleted: false,
   }
+}
+
+/** 磁盘原文 → 编辑器空间（LF）。只做行尾归一，别的一概不动（不 trim、不补尾换行）。 */
+export function toEditorText(raw: string): string {
+  return raw.indexOf('\r') === -1 ? raw : raw.replace(/\r\n?/g, '\n')
+}
+
+/** 编辑器内容（LF）→ 写盘形态。CRLF 文件按原行尾还原，否则原样。 */
+export function toWireText(text: string, eol: Eol): string {
+  return eol === '\r\n' ? text.replace(/\n/g, '\r\n') : text
+}
+
+/** 判定文件原本的行尾。混用时按 CRLF 处理（改写最小：CRLF 文件的每一行本来就是 CRLF）。 */
+export function eolOf(raw: string): Eol {
+  return raw.indexOf('\r\n') !== -1 ? '\r\n' : '\n'
 }
 
 /** file_open / file_save 的只读判定：二进制优先（截断的大文件同时 binary 是不可能的，但先写死顺序）。 */
@@ -95,9 +118,12 @@ export function isEditorEnabled(settings: { editor?: boolean } | undefined): boo
   return settings?.editor !== false
 }
 
-/** 保存载荷。overwrite = 冲突条上的「覆盖保存」：显式清空 baseHash（服务端=无条件写）。 */
+/**
+ * 保存载荷。overwrite = 冲突条上的「覆盖保存」：显式清空 baseHash（服务端=无条件写）。
+ * content 在这里**还原行尾**：编辑器空间恒为 LF，写盘按文件原本的 eol。
+ */
 export function savePayload(doc: EditorDoc, overwrite = false): { path: string; content: string; baseHash: string; allowNew: boolean } {
-  return { path: doc.path, content: doc.content, baseHash: overwrite ? '' : doc.baseHash, allowNew: false }
+  return { path: doc.path, content: toWireText(doc.content, doc.eol), baseHash: overwrite ? '' : doc.baseHash, allowNew: false }
 }
 
 export type SaveBlock = '' | 'loading' | 'readonly' | 'invalid' | 'deleted' | 'saving'
@@ -135,11 +161,14 @@ export function reduceDoc(doc: EditorDoc, a: EditorAction): EditorDoc {
       return { ...emptyDoc(a.path), readonly: doc.readonly }
     case 'opened': {
       const readonly = readonlyOf(a)
+      // baseContent 存**归一后**的文本：dirty 判定必须在同一个空间里做（评审 #3）
+      const text = toEditorText(a.content)
       return {
         path: a.path ?? doc.path,
-        content: a.content,
-        baseContent: a.content,
+        content: text,
+        baseContent: text,
         baseHash: a.hash,
+        eol: eolOf(a.content),
         status: 'ready',
         readonly,
         dirty: false,
@@ -165,7 +194,9 @@ export function reduceDoc(doc: EditorDoc, a: EditorAction): EditorDoc {
         ...doc,
         saving: false,
         baseContent: a.content,
-        baseHash: a.hash,
+        // 响应缺 hash（老 bridge / 异常响应）时**保留旧 baseHash**：写成空串等于把下一次
+        // 保存变成 F36 的「无条件覆盖」，冲突检测从此失效。宁可下一次撞 conflict。
+        baseHash: a.hash || doc.baseHash,
         // 保存期间用户可能又敲了字：那是新的 dirty，不能被这次成功吞掉
         dirty: isDirty(doc.content, a.content),
         deleted: false,
