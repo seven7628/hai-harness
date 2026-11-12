@@ -44,6 +44,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -5984,6 +5985,10 @@ func serve() error {
 	// 为什么需要：自压缩是**被动**的（只在 SaveState 时检查）→ 已经死掉的文件
 	// 永远等不到压缩。清扫复用同一套原子压缩逻辑，内容不变、恢复逐字节一致。
 	// 限速执行，不与正常使用抢 IO；settings.checkpoint.sweep_journals=false 可关。
+	//
+	// 堆软上限必须在清扫**之前**设好：清扫那 5 分钟的 IO 风暴会把堆冲到
+	// 3 GB（2026-11-12 实测），其中 2.8 GB 被系统换出到 swap 且再也回不来。
+	applyMemoryLimit()
 	if loadCheckpointSettings().sweepJournals() {
 		go sweepSessionFilesInBackground()
 	}
@@ -6355,6 +6360,15 @@ func sweepSessionFilesInBackground() {
 	// 最多多扫一遍，不会写坏数据。版本变了（清扫逻辑改了）→ 旧指纹全部
 	// 作废 → 触发一次全量。
 	ix := session.OpenSweepIndex(filepath.Join(appDataDir(), "checkpoint_sweep.json"), session.SweepIndexVersion)
+	// 清扫结束把内存还给 OS。
+	//
+	// 这一轮是启动期**唯一的堆峰值来源**（实测冲到 3 GB，其中 2.8 GB 被系统
+	// 换出到 swap —— Go 的 scavenger 慢慢还，但机器颠簸时它宁可换出也不释放）。
+	// FreeOSMemory = 一次完整 GC + 立刻归还 ⇒ 高水位当场消掉，而不是留着
+	// 等系统慢慢换出。
+	//
+	// 顺序：先落索引（defers 是后进先出），再还内存。
+	defer debug.FreeOSMemory()
 	defer func() {
 		if err := ix.Flush(); err != nil {
 			fmt.Fprintln(os.Stderr, "sweep index: 落盘失败:", err)
@@ -6398,3 +6412,34 @@ const (
 	// sweepPause 是每个文件之间的间隔（限速：避免 12GB 的重写把 IO 打满）。
 	sweepPause = 100 * time.Millisecond
 )
+
+// bridgeMemLimitDefaultMB 是堆软上限的默认值（MB）。
+//
+// 为什么是 2 GiB（2026-11-12 实测）：Go 默认 GOGC=100 ⇒ 堆目标 = 活堆 × 2。
+// 启动清扫处理 28 GB 时堆冲到 3 GB，2.8 GB 被系统换出到 swap 且**再也回不来**
+// （Go 的 scavenger 慢慢还，但机器在颠簸时把它换出而不是释放）。
+// 2 GiB 给日常负载（常驻实测 90–330 MB）留了 6 倍以上余量，
+// 又能把清扫那一下的峰值压掉三分之一。
+const bridgeMemLimitDefaultMB = 2048
+
+// applyMemoryLimit 设堆软上限。
+//
+// 优先级：GOMEMLIMIT 环境变量 > settings.checkpoint.mem_limit_mb > 默认 2 GiB。
+// 环境变量优先是因为它是运行时的显式设置，debug.SetMemoryLimit 会**覆盖**它。
+// 配置为 0 或负数 → 不设上限（回到 Go 默认行为）。
+func applyMemoryLimit() {
+	if v := os.Getenv("GOMEMLIMIT"); v != "" {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 堆上限：GOMEMLIMIT=%s（环境变量优先）\n", v)
+		return
+	}
+	mb, explicit := loadCheckpointSettings().memLimitMB()
+	if !explicit {
+		mb = bridgeMemLimitDefaultMB
+	}
+	if mb <= 0 {
+		fmt.Fprintln(os.Stderr, "[checkpoint] 堆上限：不设限（settings 显式关闭）")
+		return
+	}
+	debug.SetMemoryLimit(mb << 20)
+	fmt.Fprintf(os.Stderr, "[checkpoint] 堆上限：%d MB（软上限，GC 提前介入）\n", mb)
+}
