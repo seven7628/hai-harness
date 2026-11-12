@@ -303,7 +303,7 @@ textarea.input{min-height:76px;resize:vertical;font-family:var(--mono);font-size
 const BASE = {
   "version": 1,
   "project": "Agent Hub",
-  "subtitle": "demo 源码 1:1 移植 PASS；P5-02 owner 隔离 PASS；P5-03 运行位 PASS；P5-04..07 §6.1 第 0 批 PASS；左栏/右栏边界已记录",
+  "subtitle": "demo 源码 1:1 移植 PASS；P5-02 owner 隔离 PASS；P5-03 运行位 PASS；P5-04..07 §6.1 第 0 批 PASS；P5-08 settings v2 PASS；左栏/右栏边界已记录",
   "updated": "2026-11-19",
   "phases": [
     {
@@ -2023,6 +2023,27 @@ const BASE = {
       "note": "§6.1 第 0 批。复审 task-z49yfgh2 PASS：108 组输入与旧 navigationCurrent 0 差异；T1-T4 覆盖 stale/inconsistent/无登记/环形上限/happy path；M1/M2/M3/M6 变异红。",
       "review": "passed",
       "reviewNote": "task-z49yfgh2 PASS：classifyNavDiscard 顺序 staleAttempt→无登记→代际→workspace→session，recordNavDiscard 有界 50 且 try/catch；useAppStore:5641 丢弃前先记录，重试/看门狗路径保留；scripts/test-nav-trace.mjs T1-T4 全过，108 组等价性 0 差异。非阻塞（必须随登记保留）：①「无在途登记」生产不可达——useAppStore:5617 守卫 t==='new_session' 在 meta 缺失时为 ''，孤儿响应仍静默，与模块说明不一致；②switch_model/switch_persona 迟到响应在 5111-5116 仍静默；③7965 注释仍引用旧 navigationCurrent；④recordNavDiscard 的「永不抛」无测试（删 try/catch 仍绿）；⑤stale 同时 console.debug + scheduleRestoreRetry warn，口径略有张力。"
+    },
+    {
+      "id": "P5-08",
+      "phase": "P5",
+      "title": "§6.1 第 2 条（前半）：settings v2 单写者 + 白名单 patch + v1→v2 迁移",
+      "deps": [
+        "P5-02"
+      ],
+      "files": [
+        "desktop/app/electron/settings-store.ts",
+        "desktop/app/electron/settings-store-test.ts",
+        "desktop/app/electron/main.ts",
+        "desktop/app/package.json"
+      ],
+      "acceptance": "settings.json 写路径从原始磁盘对象起步，不再把默认并集写回；settings:set/provider:save/provider:remove/mcp:save 只改目标段，未知顶层/嵌套键拒绝或保留原样；v1→v2 迁移删除与默认完全相同的固化键，保留未知键/自定义 provider/active/api_key/deleted，写 settings.json.bak（逐字节、0600）、schema_version:2、explicit 路径、幂等、失败拒绝写；迁移失败后写路径先重试迁移，绝不在未迁移文件上盖章；BR-02 的 auth_type 单键 patch 不丢兄弟/顶层。独立 Review PASS（含 B1/B2 delta）。",
+      "tests": "cd desktop/app && npm run test:settings-store && npx tsc -p tsconfig.electron.json --noEmit && npx tsc --noEmit && npx eslint electron/settings-store.ts electron/settings-store-test.ts electron/main.ts && npm run test:renderer-send",
+      "commit": "175107e + 8d81948",
+      "status": "done",
+      "note": "§6.1 第 2 条前半。复审 task-u3nht4h4 首轮 CHANGES_REQUESTED（B1 MCP args:undefined 误拒；B2 迁移失败后写路径盖章导致 v1 默认永久固化），8d81948 修复后 delta PASS。BR-08（api_key 移出 settings）未做，留给 P5-09。",
+      "review": "passed",
+      "reviewNote": "task-u3nht4h4 delta PASS（8d81948）：B1 的 args:undefined 在 IPC 真实形状下放行且不落键，args:[] 仍保留；B2 把 schema_version:2 的产生收敛到迁移写盘一处，四条 apply* 对 v1 拒写，写路径先迁移、失败时原文件逐字节不变、无 .bak/.tmp/schema_version 残留，故障恢复后重试可清掉固化默认；38/38 用例，M1/M5/M6 及 B1/B2 定向变异全红。非阻塞：main.ts 的 defaults 值与 commitSettingsWrite 传播错误仍只有文本断言，建议后续各补一行；explicit 只写不读；settings.json.bak/.corrupt-* 含明文 api_key 属 P5-09 范围。"
     }
   ],
   "deferred": [
@@ -3044,6 +3065,13 @@ const BASE = {
       "review": "passed",
       "reviewNote": "task-z49yfgh2 PASS：classifyNavDiscard 顺序 staleAttempt→无登记→代际→workspace→session，recordNavDiscard 有界 50 且 try/catch；useAppStore:5641 丢弃前先记录，重试/看门狗路径保留；scripts/test-nav-trace.mjs T1-T4 全过，108 组等价性 0 差异。非阻塞（必须随登记保留）：①「无在途登记」生产不可达——useAppStore:5617 守卫 t==='new_session' 在 meta 缺失时为 ''，孤儿响应仍静默，与模块说明不一致；②switch_model/switch_persona 迟到响应在 5111-5116 仍静默；③7965 注释仍引用旧 navigationCurrent；④recordNavDiscard 的「永不抛」无测试（删 try/catch 仍绿）；⑤stale 同时 console.debug + scheduleRestoreRetry warn，口径略有张力。",
       "note": "§6.1 第 0 批。复审 task-z49yfgh2 PASS：108 组输入与旧 navigationCurrent 0 差异；T1-T4 覆盖 stale/inconsistent/无登记/环形上限/happy path；M1/M2/M3/M6 变异红。"
+    },
+    "P5-08": {
+      "status": "done",
+      "commit": "175107e + 8d81948",
+      "review": "passed",
+      "reviewNote": "task-u3nht4h4 delta PASS（8d81948）：B1 的 args:undefined 在 IPC 真实形状下放行且不落键，args:[] 仍保留；B2 把 schema_version:2 的产生收敛到迁移写盘一处，四条 apply* 对 v1 拒写，写路径先迁移、失败时原文件逐字节不变、无 .bak/.tmp/schema_version 残留，故障恢复后重试可清掉固化默认；38/38 用例，M1/M5/M6 及 B1/B2 定向变异全红。非阻塞：main.ts 的 defaults 值与 commitSettingsWrite 传播错误仍只有文本断言，建议后续各补一行；explicit 只写不读；settings.json.bak/.corrupt-* 含明文 api_key 属 P5-09 范围。",
+      "note": "§6.1 第 2 条前半。复审 task-u3nht4h4 首轮 CHANGES_REQUESTED（B1 MCP args:undefined 误拒；B2 迁移失败后写路径盖章导致 v1 默认永久固化），8d81948 修复后 delta PASS。BR-08（api_key 移出 settings）未做，留给 P5-09。"
     }
   },
   "reviewGate": {
