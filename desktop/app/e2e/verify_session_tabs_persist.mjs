@@ -26,35 +26,24 @@
 //   P7 跨 scope 不串（A 工作区/会话的标签不出现在 B）
 //
 // 用法：cd desktop/app && node e2e/verify_session_tabs_persist.mjs
-// 退出码：全通过 0；任一断言失败非 0。
+// 退出码：全通过 0；任一断言失败 1；前置不满足（端口被占 / 探针服务没起来）2。
 import { spawn } from 'child_process'
 import fs from 'node:fs'
-import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
+import { exitCodeOf, isPrecondition, waitProbePage } from './_serve.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
 const PORT = 5208
 const LS_TABS = 'go-code.sessionTabs'
 
-// 照抄 verify_auto_open_visual.mjs 的 waitPort（host:'localhost' 让 Node 按系统解析顺序
-// 试 IPv4/IPv6 —— 直连 127.0.0.1 会在 vite 只绑 ::1 时永远连不上）。
-async function waitPort(port, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const up = await new Promise((resolve) => {
-      const s = net.connect({ port, host: 'localhost' })
-      const timer = setTimeout(() => { s.destroy(); resolve(false) }, 500)
-      s.on('connect', () => { clearTimeout(timer); s.destroy(); resolve(true) })
-      s.on('error', () => { clearTimeout(timer); s.destroy(); resolve(false) })
-    })
-    if (up) return
-    if (Date.now() > deadline) throw new Error('vite 未就绪')
-    await new Promise((r) => setTimeout(r, 250))
-  }
-}
+// 端口就绪 + 归属自检（e2e/_serve.mjs 的 waitProbePage）：固定端口跑在链里，撞上一个还没
+// 退干净的 vite（别人的模块图 / 别人的页面）时必须报「前置不满足」并退出 2 —— 不许连上去
+// 把 waitForFunction 超时读成「代码坏了」（04 F46 的实测）。判据取本脚本探针页自己的 <title>。
+const PROBE_URL = `http://localhost:${PORT}/e2e/_tabsprobe_run/index.html`
+const PROBE_MARKER = '<title>session-tabs probe</title>'
 
 // 探针页：真实 store + 真实 RightPanel + **假内嵌视图池**（window.desktop 的 embed 通路）。
 // 注入点必须在 store 模块加载之前（subscribeEmbedEvents 只在模块初始化时订阅一次）→ 内联
@@ -140,14 +129,15 @@ function check(label, cond, detail = '') {
   else { fails.push(label); console.log(`  ❌ ${label} ${detail}`) }
 }
 
+let code = 0
 try {
-  await waitPort(PORT)
+  await waitProbePage(PROBE_URL, { marker: PROBE_MARKER, probe: 'e2e:session-tabs', child: server })
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 1100, height: 900 } })
   const errs = []
   page.on('pageerror', (e) => errs.push('pageerror: ' + e.message))
 
-  const URL = `http://localhost:${PORT}/e2e/_tabsprobe_run/index.html`
+  const URL = PROBE_URL
   // 加载并「恢复会话」：真实链路上 activeSessionId 由 new_session 响应写入，探针直接置位
   // （与 verify_auto_open_visual.mjs 同口径）。等一小会儿让 store/面板 effect 跑完。
   // seed：预置 localStorage（模拟「上一次运行留下的存储」）。写之前先等一个防抖窗口 ——
@@ -328,12 +318,20 @@ try {
 
   check('全程无页面错误', errs.length === 0, errs.join('; '))
   await browser.close()
+} catch (e) {
+  // 前置不满足 ≠ 断言失败：退出码 2，且必须把「为什么」打出来（00 §4.6 红归因）。
+  if (!isPrecondition(e)) throw e
+  console.error(`\n⛔ 前置不满足（退出码 2，不是测试失败）：${e.message}`)
+  code = 2
 } finally {
   cleanup()
 }
 
-console.log(`\n${fails.length === 0 ? 'ALL PASS' : `FAILED (${fails.length}): ${fails.join('; ')}`}`)
+if (code === 0) {
+  console.log(`\n${fails.length === 0 ? 'ALL PASS' : `FAILED (${fails.length}): ${fails.join('; ')}`}`)
+  code = fails.length === 0 ? 0 : 1
+}
 // 成功路径也要显式收尾：spawn 的 vite 子进程会让 Node 事件循环永不空 → 脚本「全绿却永不退出」
 //（终端卡住 + 留下僵尸 vite 占端口，见提交 315fdd7）。这里 kill 掉子进程后事件循环自然排空，
 // 上面那行汇总已经打印完，不截断。
-process.exit(fails.length === 0 ? 0 : 1)
+process.exit(code)

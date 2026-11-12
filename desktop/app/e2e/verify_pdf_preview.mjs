@@ -31,7 +31,10 @@
 //   PDF_E2E_SRC=...      指定 PDF（默认取仓库 desktop/ 下那份真实报告）
 //   PDF_E2E_SHOT_DIR=... 截图输出目录（脚本会打印路径供人眼复核）
 //   GO_CODE_E2E_FORCE_BUILD=1 → 强制 npm run build（改了 electron/ 或 src/ 后必须）
-// 退出码：全通过 0；任一断言失败非 0；缺 embed API（老产物）skip 0。
+// 退出码：全通过 0；断言失败 1；**前置不满足 2**（夹具不在 / 端口被占 / 服务没起来）；
+//         缺 embed API（老产物）skip 0。
+// 夹具：默认取仓库 desktop/ 下那份真实报告；它**不在版本库里**（见看板 R-17），
+//       所以默认环境一定要用 PDF_E2E_SRC 指一份真实 PDF（中文名保留）。
 import { _electron } from 'playwright'
 import { spawn, spawnSync } from 'child_process'
 import fs from 'node:fs'
@@ -93,7 +96,13 @@ if (build.status !== 0) throw new Error(`go build 失败:\n${build.stderr}`)
 
 // —— 夹具：把**真实**那份 PDF 拷进隔离工作区（保留中文名 → 顺带钉住 file:// 的 URI 编码）——
 const PDF_SRC = process.env.PDF_E2E_SRC || path.join(REPO, 'desktop', '百工2026年上半年经营分析.pdf')
-if (!fs.existsSync(PDF_SRC)) throw new Error(`PDF 夹具不存在: ${PDF_SRC}`)
+if (!fs.existsSync(PDF_SRC)) {
+  // 夹具缺失 = 前置不满足，**不是**断言失败（00 §1.9 退出码三档 / 04 F47）：
+  // 退 2 并在消息里给出下一步，避免被读成「PDF 预览坏了」。
+  console.error(`\n⛔ 前置不满足（退出码 2，不是测试失败）：PDF 夹具不存在 —— ${PDF_SRC}`)
+  console.error('   用 PDF_E2E_SRC=/path/to/真实.pdf 指一份（保留中文名，顺带钉住 file:// 的 URI 编码）')
+  process.exit(2)
+}
 const PDF_NAME = path.basename(PDF_SRC)
 const pdfSize = fs.statSync(PDF_SRC).size
 fs.copyFileSync(PDF_SRC, path.join(WS, PDF_NAME))
@@ -214,6 +223,39 @@ try {
   check('视图归属当前会话（sid 对得上，不会跨会话泄漏）', (t2.target.sid ?? '') === SID, JSON.stringify(t2.target))
 
   // —— T3 视图几何 = 右栏内容容器 ——
+  //
+  // **先等布局落定，再量**（R06d）。以前这里是「量一次、差 ≤2px」，但被量的东西在面板入场
+  // 动画期间是**会动**的：`.right-body` 的 slideRight（translateX 18px → 0）把 .browser-shot
+  // 从 x+18 平移到 x；而原生视图只在两种时机拿到新矩形 —— ResizeObserver（只报尺寸、不报
+  // 位移）和 animationend 补的那一枪。于是「动画中途量一次」必然让视图落后于 DOM，差多少
+  // 取决于采样落在动画的哪一相。
+  //
+  // 实测（R06d，同码连跑 8 次）：E2E 窗口在后台，180ms 的入场动画被 Chromium 节流到 ~3.4s；
+  // 失败的跑次恰好采样在「最后一次动画中途同步」之后 2ms、animationend 纠正之前 → 视图 x
+  // 差 3–6px（y/宽/高全等，因为 slideRight 只平移）。所以这不是产品缺陷（产品在 animationend
+  // 会补到正确位置），是**探针的采样竞态** —— 与 R06c 修 T16 同款处置：判据一字不改（±2px），
+  // 先把被测对象等到落定。永久性偏移（真回归）照样红，因为量的是落定后的几何。
+  const settle = await win.evaluate(async () => {
+    const host = document.querySelector('.browser-shot')
+    const running = () => document.getAnimations().filter((a) => {
+      if (a.playState !== 'running') return false
+      const t = a.effect && a.effect.target
+      return !!t && t instanceof Element && (t === host || t.contains(host))
+    })
+    const names = []
+    const t0 = Date.now()
+    for (;;) {
+      const rs = running()
+      if (rs.length === 0) return { ok: true, waited: Date.now() - t0, names }
+      for (const a of rs) { if (a.animationName && !names.includes(a.animationName)) names.push(a.animationName) }
+      if (Date.now() - t0 > 20000) return { ok: false, waited: Date.now() - t0, names }
+      await new Promise((r) => setTimeout(r, 16))
+    }
+  })
+  console.log(`T3 布局落定：等 ${settle.waited}ms（运行中的动画：${settle.names.join(',') || '无'}）`)
+  check('右栏容器布局已落定（入场动画已结束，不是采样在动画中途）', settle.ok === true, JSON.stringify(settle))
+  // animationend → 渲染层 applyRect → IPC → 主进程 setBounds：给一条 IPC + 一帧的余量
+  await sleep(150)
   const domRect = await win.evaluate(() => {
     const el = document.querySelector('.browser-shot')
     if (!el) return null
