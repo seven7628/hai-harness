@@ -1663,17 +1663,18 @@ function syncTabsToRightTab(s: AppState): TabSet {
 //（有会话 → 写该会话 view；无会话 → 只写顶层，与 setRightTab 的既有口径一致）。
 // 集为空时保留原 rightTab：此时内容区由 activeTab===null 渲染空态，rightTab 只是个遗留值。
 // rightTabPatch：rightTab 的**唯一**写点（tabPatch 也走它）。只派生、不碰标签集。
-function rightTabPatch(s: AppState, kind: RightTab): Partial<AppState> {
+function rightTabPatch(s: AppState, kind: RightTab, layout?: RightLayout): Partial<AppState> {
+  const extra = layout ? { rightLayout: layout, rightExpanded: layout.open } : {}
   const sid = s.activeSessionId
-  if (!sid) return { rightTab: kind }
+  if (!sid) return { rightTab: kind, ...extra }
   const v = s.views[sid] ?? emptyView()
-  return setView(s, sid, { ...v, rightTab: kind })
+  return setView(s, sid, { ...v, rightTab: kind, ...extra })
 }
 
-function tabPatch(s: AppState, scope: ScopeKey, set0: TabSet): Partial<AppState> {
+function tabPatch(s: AppState, scope: ScopeKey, set0: TabSet, layout?: RightLayout): Partial<AppState> {
   const active = set0.tabs.find((t) => t.id === set0.activeId)
   const kind: RightTab = active?.kind ?? s.rightTab
-  return { ...rightTabPatch(s, kind), tabsByScope: { ...s.tabsByScope, [scope]: set0 } }
+  return { ...rightTabPatch(s, kind, layout), tabsByScope: { ...s.tabsByScope, [scope]: set0 } }
 }
 
 // 标签列表的结构等价判断：syncWebTabs 在每个 embed-nav 事件上都会跑（导航/标题变化很频繁），
@@ -10085,7 +10086,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sizePatch = shouldSizeFile && typeof window !== 'undefined'
       ? { rightSize: Math.round(window.innerWidth * 0.6) }
       : {}
-    set({ ...tabPatch(s, scope, next), ...sizePatch })
+    // D-A：**内容触发**才展开（用户手势走 toggleRight/setRightExpanded，不在这里）；
+    // 后台静默打开（activate:false）不碰面板；已展开时不重置 bias。
+    const layout = !activate || s.rightLayout.open ? undefined : layoutExpand('even')
+    set({ ...tabPatch(s, scope, next, layout), ...sizePatch })
     return id
   },
   activateTab: (id) => {

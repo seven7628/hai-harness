@@ -18,7 +18,7 @@
     "e2e:browser": "node e2e/desktop_browser_e2e.mjs",
     "e2e:image": "node e2e/verify_image_attach.mjs",
     "test:e2e-safety": "node --test e2e/safe_cleanup.test.mjs",
-    "test:builtin-surfaces": "esbuild src/surfaces/builtin/index-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/builtin-surfaces.test.cjs --loader:.svg=text --loader:.png=dataurl --loader:.md=text && node --test /tmp/builtin-surfaces.test.cjs",
+    "test:builtin-surfaces": "esbuild src/surfaces/builtin/index-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/builtin-surfaces.test.cjs --loader:.svg=text --loader:.png=dataurl --loader:.md=text --loader:.css=text --loader:.ttf=dataurl --loader:.woff=dataurl --loader:.woff2=dataurl --loader:.jpg=dataurl --loader:.jpeg=dataurl --loader:.gif=dataurl && node --test /tmp/builtin-surfaces.test.cjs",
     "test:layout": "esbuild src/lib/layout-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/layout.test.cjs && node --test /tmp/layout.test.cjs",
     "test:surface-registry": "esbuild src/surfaces/registry-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/surface-registry.test.cjs && node --test /tmp/surface-registry.test.cjs",
     "test:store": "node scripts/test-store-queue.mjs",

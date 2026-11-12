@@ -5,6 +5,16 @@ import assert from 'node:assert/strict'
 import './index'
 import { getSurface } from '../registry'
 
+test('builtin/index 的副作用注册了 file provider（多实例身份）', () => {
+  const p = getSurface('file')
+  assert.ok(p, 'file provider 未注册')
+  assert.equal(p.namespace, 'builtin')
+  assert.equal(p.group, 'content')
+  assert.equal(p.singleton, false)
+  assert.equal(p.allowDuplicate, true)
+  assert.deepEqual(p.capabilities, ['read', 'view', 'write'])
+})
+
 test('builtin/index 的副作用注册了 git provider', () => {
   const p = getSurface('git')
   assert.ok(p, 'git provider 未注册')

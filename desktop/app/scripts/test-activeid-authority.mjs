@@ -127,15 +127,26 @@ async function main() {
     eq(st().rightTab, 'git', 'B3 sync 把派生字段纠正回激活标签的 kind')
   }
 
-  console.log('\n—— C. 标签动作不碰布局（自动展开留给后续 PR 接线）——')
+  console.log('\n—— C. D-A：只有 openTab 会展开右栏，其它标签动作不碰布局 ——')
   {
     reset()
-    const b = layoutBefore()
+    eq(st().rightLayout.open, false, 'C0 初始收起')
     st().openTab({ kind: 'git' })
+    eq(st().rightLayout.open, true, 'C1 openTab → 自动展开（D-A 的唯一判定点）')
+    eq(st().rightExpanded, true, 'C2 rightExpanded 镜像同步')
+    const afterOpen = JSON.stringify(st().rightLayout)
+    st().activateTab(active().id)
+    eq(JSON.stringify(st().rightLayout), afterOpen, 'C3 activateTab 不改布局')
     st().openTab({ kind: 'activity' })
+    eq(JSON.stringify(st().rightLayout), afterOpen, 'C4 已展开时再 openTab 不重置 bias')
+
+    // 用户手动收起 → 下一次内容触发仍要展开（不加锁）
+    st().setRightExpanded(false)
+    eq(st().rightLayout.open, false, 'C5 手动收起')
     st().closeTab(active().id)
-    eq(layoutBefore(), b, 'C1 rightLayout 在整个标签动作序列里不变')
-    eq(st().rightExpanded, false, 'C2 rightExpanded 镜像也不变')
+    eq(st().rightLayout.open, false, 'C6 closeTab 不会把面板弹开')
+    st().openTab({ kind: 'git' })
+    eq(st().rightLayout.open, true, 'C7 收起后下一次 openTab 仍展开（D-A 无锁）')
   }
 
   console.log('\n—— D. 关光标签：activeId=null，rightTab 保留（不抛错）——')
