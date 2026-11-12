@@ -367,7 +367,7 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 		if omitted > 0 {
 			blocks = append(blocks, core.Content{
 				Type:    core.ContentTypeText,
-				Content: fmt.Sprintf("[另有 %d 张较早的图片未附上，请用 group_history 查看元数据或用工具读取文件]", omitted),
+				Content: fmt.Sprintf("[另有 %d 张较早的图片因单轮补发上限未附上（没有进入本轮上下文）]", omitted),
 			})
 		}
 	}

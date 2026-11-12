@@ -411,6 +411,30 @@ func TestHubGroupBusyImageDeliveredOnNextWake(t *testing.T) {
 	}
 }
 
+// 补发上限：只保留最近 6 张（按时间顺序给模型），更早的计入 omitted，不静默丢。
+func TestHubPendingImageAttachmentsCapsNewest(t *testing.T) {
+	var msgs []agenthub.Message
+	for i := 1; i <= 7; i++ {
+		msgs = append(msgs, agenthub.Message{
+			Seq: int64(i), Kind: agenthub.KindText, Sender: agenthub.Sender{Kind: agenthub.SenderHuman},
+			Text: "图", Attachments: []agenthub.Attachment{{
+				Kind: agenthub.AttachmentKindImage, Name: "img" + string(rune('0'+i)),
+				MIME: "image/png", DataURL: "data:image/png;base64,QUJD",
+			}},
+		})
+	}
+	atts, seqs, omitted := hubPendingImageAttachments(msgs, 0, 99)
+	if len(atts) != hubWakePendingImageLimit || omitted != 1 {
+		t.Fatalf("atts=%d omitted=%d, want %d/1", len(atts), omitted, hubWakePendingImageLimit)
+	}
+	if len(seqs) != len(atts) || seqs[0] != 2 || seqs[len(seqs)-1] != 7 {
+		t.Fatalf("seqs = %v, want 2..7（从新到旧取，按时间顺序给）", seqs)
+	}
+	if atts[0].Name != "img2" || atts[len(atts)-1].Name != "img7" {
+		t.Fatalf("顺序 = %s..%s, want img2..img7", atts[0].Name, atts[len(atts)-1].Name)
+	}
+}
+
 // 旧 text-only 行为：无附件字段时照旧，且不会写出附件。
 func TestHubSendTextOnlyUnchanged(t *testing.T) {
 	m, buf := testManager(t)
