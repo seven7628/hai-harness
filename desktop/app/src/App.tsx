@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Group, Panel, Separator, usePanelCallbackRef } from 'react-resizable-panels'
 import LeftPanel from './components/LeftPanel'
 import CenterPanel from './components/CenterPanel'
@@ -32,6 +32,10 @@ import { applyAppearance, useAppearance } from './lib/appearance'
 // 含义自解释（见 App 里那条「右栏 >50% 收左栏」的规则）。
 const LEFT_PANEL_ID = 'left'
 const RIGHT_PANEL_ID = 'right'
+// Hub 打开时右栏（inspector）是否强制展开的宽度门槛：≥1000 展开；<1000 收成 44px
+// 图标条，把宽度让给 Hub 侧栏与会话列 —— 再窄下去三栏铺开时中心列会被压到 300px
+// 下限、左栏甚至只剩 44px（P4 审计 HUB-N-01）。图标条仍可点开 inspector。
+const HUB_INSPECTOR_MIN_W = 1000
 import { useRailTips } from './lib/railTips'
 
 export default function App() {
@@ -46,6 +50,19 @@ export default function App() {
   const leftRef = usePanelCallbackRef()
   const rightRef = usePanelCallbackRef()
   const rightOverHalf = useRef(false)
+  // 窄窗进 Hub：左栏的展开要排在 inspector 收起之后（见下面 Hub 打开 effect）。
+  const pendingNarrowLeftExpand = useRef(false)
+  // —— 面板「实际」折叠态（渲染依据；store 只是用户意图）——
+  // v4 的 Panel 没有 controlled collapsed prop：窗口太窄时库会拒绝 expand，此时 store
+  // 仍是 true 而面板只有 44px。过去 LeftPanel 直接按 store 渲染，于是 44px 容器里塞
+  // 展开内容、群/DM 列表被挤成竖排单字（P4 审计 HUB-N-01）。两栏都从 onResize 回写真实
+  // 状态：class/内容按真实宽度渲染，store 同步跟随（供快捷键、持久化等其它消费者用）。
+  const [leftCollapsed, setLeftCollapsed] = useState(() => !useAppStore.getState().leftExpanded)
+  const [rightCollapsed, setRightCollapsed] = useState(() => !useAppStore.getState().rightExpanded)
+  const applyLeftPanelState = useCallback((collapsed: boolean): void => {
+    setLeftCollapsed(collapsed)
+    setLeftExpanded(!collapsed)
+  }, [setLeftExpanded])
   // 启动 splash：每次启动先播品牌时刻动画，播完由 BootScreen 决定去向
   //（有持久工作区 → 自动恢复进入；无 → 显示选目录）。只启动一次，之后不再回启动屏。
   // 进入主界面 = 交叉淡化：BootScreen 内容淡出+轻微放大，同时 main 挂载并淡入上浮
@@ -123,16 +140,35 @@ export default function App() {
   useEffect(() => {
     const h = leftRef[0]
     if (!h) return
-    if (leftExpanded && h.isCollapsed()) h.expand()
-    else if (!leftExpanded && !h.isCollapsed()) h.collapse()
-  }, [leftExpanded, leftRef[0]])
+    if (leftExpanded && h.isCollapsed()) {
+      h.expand()
+      // expand 会被空间约束拒绝（库直接保持 collapsedSize）：下一帧核对真实状态并回写，
+      // 别让 class/内容与面板分叉。窄窗进 Hub 时正在等 inspector 让位，交给重试那一步。
+      const raf = requestAnimationFrame(() => {
+        if (pendingNarrowLeftExpand.current) return
+        applyLeftPanelState(h.isCollapsed())
+      })
+      return () => cancelAnimationFrame(raf)
+    }
+    if (!leftExpanded && !h.isCollapsed()) h.collapse()
+  }, [leftExpanded, leftRef[0], applyLeftPanelState])
 
   useEffect(() => {
     const h = rightRef[0]
     if (!h) return
-    if (rightExpanded && h.isCollapsed()) h.expand()
-    else if (!rightExpanded && !h.isCollapsed()) h.collapse()
-  }, [rightExpanded, rightRef[0]])
+    if (rightExpanded && h.isCollapsed()) {
+      h.expand()
+      // 同理：窄窗（<1000）展开右栏会被中心列 300px 下限拒绝，回到 44px 图标条而不是
+      // 在 44px 里画详情。
+      const raf = requestAnimationFrame(() => {
+        const collapsed = h.isCollapsed()
+        setRightCollapsed(collapsed)
+        if (collapsed) setRightExpanded(false)
+      })
+      return () => cancelAnimationFrame(raf)
+    }
+    if (!rightExpanded && !h.isCollapsed()) h.collapse()
+  }, [rightExpanded, rightRef[0], setRightExpanded])
 
   // M3：rightSize 非空时把右侧面板 resize 到期望宽度（浏览器内嵌按 viewport 设）。
   const rightSize = useAppStore((s) => s.rightSize)
@@ -157,22 +193,58 @@ export default function App() {
   const closeEditor = useHubStore((s) => s.closeEditor)
   const openAgent = useHubStore((s) => s.openAgent)
   const clearHubSelection = useHubStore((s) => s.clearSelection)
-  // 进入 Hub 时确保右栏展开（概览是详情的主入口）；只在打开的那一次强制，
-  // 用户随后手动收起右栏不被反复顶开（折叠态由 HubInspector 自己提供图标条）。
-  // 退出 Hub 时恢复进入前的折叠状态：Hub 是临时视图，不应改变工作区的布局偏好。
+  // 进入 Hub 时按可用宽度决定右栏：≥1000 展开概览（详情主入口）；<1000 收成 44px 图标条，
+  // 把宽度让给 Hub 侧栏与会话列（点图标仍可展开 inspector）。
+  // 只在打开的那一次强制，用户随后手动收起右栏不被反复顶开（折叠态由 HubInspector
+  // 自己提供图标条）。退出 Hub 时恢复进入前的折叠状态：Hub 是临时视图，不应改变
+  // 工作区的布局偏好。
   const wasHubOpen = useRef(false)
   const rightExpandedBeforeHub = useRef<boolean | null>(null)
+  const leftExpandedBeforeHub = useRef<boolean | null>(null)
+  const [narrowHubEntry, setNarrowHubEntry] = useState(false)
   useEffect(() => {
     if (hubOpen && !wasHubOpen.current) {
-      rightExpandedBeforeHub.current = rightExpanded
-      setRightExpanded(true)
+      const st = useAppStore.getState()
+      rightExpandedBeforeHub.current = st.rightExpanded
+      leftExpandedBeforeHub.current = null
+      if (window.innerWidth < HUB_INSPECTOR_MIN_W) {
+        // 窄窗：先收 inspector。左栏是 Hub 的群/DM 导航，必须给它真实宽度（否则只剩
+        // 44px 图标条，选不了会话）。展开要等右栏真的收起来 —— 同一帧内 expand 会因
+        // 空间不足被库拒绝，这也是 HUB-N-01 的成因。
+        leftExpandedBeforeHub.current = st.leftExpanded
+        pendingNarrowLeftExpand.current = true
+        setNarrowHubEntry(true)
+        setRightExpanded(false)
+      } else {
+        setRightExpanded(true)
+      }
     } else if (!hubOpen && wasHubOpen.current) {
-      const before = rightExpandedBeforeHub.current
+      const beforeRight = rightExpandedBeforeHub.current
+      const beforeLeft = leftExpandedBeforeHub.current
       rightExpandedBeforeHub.current = null
-      if (before != null) setRightExpanded(before)
+      leftExpandedBeforeHub.current = null
+      pendingNarrowLeftExpand.current = false
+      setNarrowHubEntry(false)
+      if (beforeRight != null) setRightExpanded(beforeRight)
+      if (beforeLeft != null) setLeftExpanded(beforeLeft)
     }
     wasHubOpen.current = hubOpen
-  }, [hubOpen, rightExpanded, setRightExpanded])
+  }, [hubOpen, setRightExpanded, setLeftExpanded])
+
+  // 窄窗进 Hub 的第二步：听右栏「真实」折叠态（onResize 回写），让出宽度后再展开左栏。
+  useEffect(() => {
+    if (!narrowHubEntry || !rightCollapsed) return
+    setNarrowHubEntry(false)
+    pendingNarrowLeftExpand.current = false
+    setLeftExpanded(true)
+    const h = leftRef[0]
+    if (!h) return
+    if (h.isCollapsed()) h.expand()
+    // store 本来就是 true 时上面不会触发左侧 effect，这里自己核对一次：extreme 窄窗下
+    // 左栏仍可能被拒绝展开，那就回写成图标条，别留下「store 说展开、实际 44px」。
+    // 本 effect 会随即改 narrowHubEntry 触发重跑，因此不返回 cleanup（cleanup 会取消这一帧）。
+    requestAnimationFrame(() => applyLeftPanelState(h.isCollapsed()))
+  }, [narrowHubEntry, rightCollapsed, leftRef[0], setLeftExpanded, applyLeftPanelState])
   // App 级订阅：离开 Hub 页期间产生的结算/告警也要收进告警中心（P2.5-05 复审 B3）。
   useEffect(() => attachHubEvents(), [])
   // hub:// 深链（P4-02）：主进程 open-url / second-instance 转发过来 → 打开 Hub 并定位。
@@ -228,10 +300,12 @@ export default function App() {
               maxSize={360}
               onResize={(_size, _id, prev) => {
                 if (!prev) return // 挂载首报不覆盖 store 初始态
-                setLeftExpanded(!(leftRef[0]?.isCollapsed() ?? false))
+                const h = leftRef[0]
+                if (!h) return
+                applyLeftPanelState(h.isCollapsed())
               }}
             >
-              <LeftPanel />
+              <LeftPanel collapsed={leftCollapsed} />
             </Panel>
             <Separator className="resize-handle" />
             <Panel minSize={300}>
@@ -259,7 +333,9 @@ export default function App() {
               //（那里才有 meta.isUserInteraction，能区分用户拖拽与程序化 resize）。
               onResize={(_size, _id, prev) => {
                 if (!prev) return // 挂载首报不覆盖 store 初始态
-                setRightExpanded(!(rightRef[0]?.isCollapsed() ?? false))
+                const collapsed = rightRef[0]?.isCollapsed() ?? false
+                setRightCollapsed(collapsed)
+                setRightExpanded(!collapsed)
               }}
             >
               <div className={`hub-host-stack ${hubOpen ? 'hub-on' : ''}`}>

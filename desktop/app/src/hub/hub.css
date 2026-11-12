@@ -2599,6 +2599,24 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-demo .composer-note { display: none; }
 }
 
+/* 窄列 composer meta 行（P4 审计 HUB-N-02）：≤700 时 hint 可截断、模式开关不参与收缩，
+   一行放不下就换行 —— 640 窗口里「对话/派任务」必须是可点的 44×28 目标，
+   不能被 hint 挤成 6×6 的点。demo.css 的 meta-links 按钮隐藏规则已限定为直接子按钮，
+   不会再把开关里的 tab 一并隐藏。 */
+@media (max-width: 700px) {
+  .hub-demo .composer-meta { flex-wrap: wrap; row-gap: 4px; }
+  .hub-demo .composer-meta .composer-hint {
+    flex: 1 1 120px;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hub-demo .composer-meta .meta-links { flex: 0 0 auto; margin-left: auto; }
+  .hub-demo .composer-mode-switch { flex: 0 0 auto; white-space: nowrap; }
+  .hub-demo .composer-mode-switch button { height: 28px; min-width: 44px; padding: 0 8px; }
+}
+
 /* 正文里的 @ 提及在 demo 里是纯文字 chip（无边框/底色），但保留 16px 身份头像。 */
 .hub-demo .agent-text .hub-mention,
 .hub-demo .user-bubble .hub-mention {

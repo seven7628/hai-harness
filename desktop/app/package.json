@@ -146,6 +146,7 @@
     "test:hub-avatar": "node scripts/test-hub-avatar.mjs",
     "test:hub-conv": "node scripts/test-hub-conv.mjs",
     "shots:hub-conv": "node scripts/shoot-hub-conv.mjs",
+    "shots:hub-narrow": "node scripts/shoot-hub-narrow.mjs",
     "test:hub-stream": "node scripts/test-hub-stream.mjs",
     "test:hub-alerts": "node scripts/test-hub-alerts.mjs",
     "test:hub-p3b": "node scripts/test-hub-p3b.mjs",
