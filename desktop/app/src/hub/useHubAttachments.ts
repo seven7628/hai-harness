@@ -73,8 +73,12 @@ export function useHubAttachments(): HubAttachments {
       setBusy(true)
       try {
         const current = imagesRef.current.length
-        const room = Math.max(0, MAX_HUB_ATTACHMENTS - filesRef.current.length - current)
-        const res = await acceptImages(picked, imagesBytes(imagesRef.current), room, current)
+        const maxCount = Math.max(0, MAX_HUB_ATTACHMENTS - filesRef.current.length)
+        const room = Math.max(0, maxCount - current)
+        // acceptImages 自己会用 maxCount - currentCount 算 room；这里传**绝对上限**
+        // （总附件数 - 文件数），不能再传 room —— 否则 current 被减两次，已有图片
+        // 时会少放 N 张（5 张只进 4 张的上限 bug）。
+        const res = await acceptImages(picked, imagesBytes(imagesRef.current), maxCount, current)
         if (res.accepted.length > 0) {
           const added: HubAttachment[] = res.accepted.map((n) => ({
             kind: 'image',

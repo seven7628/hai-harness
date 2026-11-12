@@ -229,6 +229,18 @@ async function sendWithImage(testid, text) {
   await page.screenshot({ path: `${OUT}/group-sent.png` })
 }
 
+// —— 3a) 两批各 4 张：已有图片不能被重复扣一次（张数上限 10，8 张必须全进）——
+{
+  await openDM()
+  const batch = (n) => Array.from({ length: n }, (_, i) => ({ ...filePayload, name: `batch-${i + 1}.png` }))
+  await page.setInputFiles('[data-testid="hub-image-input"]', batch(4))
+  await page.waitForTimeout(900)
+  check(await page.locator('.hub-attach-strip .hub-attach-chip--img').count() === 4, '第一批 4 张进入条带')
+  await page.setInputFiles('[data-testid="hub-image-input"]', batch(4))
+  await page.waitForTimeout(1200)
+  check(await page.locator('.hub-attach-strip .hub-attach-chip--img').count() === 8, '第二批 4 张也进入条带（current 不被重复扣）')
+}
+
 // —— 3b) 5 张图：气泡只铺 4 张，+1 能打开灯箱看到第 5 张 ——
 {
   await openDM()
