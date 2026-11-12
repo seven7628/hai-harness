@@ -819,6 +819,10 @@ type manager struct {
 	// hooks_trust 写的就是它 —— 否则新信任要重建会话才生效（契约 §5.5 要求即刻生效）。
 	hookTrustMu sync.Mutex
 	hookTrust   *hooks.TrustStore
+	// fileEd 内嵌编辑器的打开集合 + 目录监听（进程级单例；懒建，见 file_edit.go）。
+	// fileEdMu 只保护这一个指针 —— 不用 m.mu（watcher 的 emit 路径也会碰 m.mu）。
+	fileEdMu sync.Mutex
+	fileEd   *fileEditor
 }
 
 // xlsxPreviewer 取（或懒创建）工作簿预览转换器单例。
@@ -2892,6 +2896,13 @@ func (m *manager) dispatch(c command) {
 		// 而不是把二进制喂给 shiki（乱码 + 白耗渲染）。
 		m.resp(c, true, "", map[string]any{"path": path, "content": content, "lines": lines, "truncated": truncated, "binary": binary})
 
+	case CmdFileOpen: // 内嵌编辑器：读原文 + sha256 + 登记打开集合（见 file_edit.go）
+		m.handleFileOpen(c, ws)
+	case CmdFileSave: // 内嵌编辑器：锁内比对 baseHash → 原子替换
+		m.handleFileSave(c, ws)
+	case CmdFileClose: // 内嵌编辑器：只退订（关标签），无写副作用
+		m.handleFileClose(c, ws)
+
 	case CmdXlsxPreview: // .xlsx 工作簿 → HTML（受管运行时跑固定 openpyxl 脚本）→ 前端送内嵌浏览器 file://
 		// 为什么在 bridge 而不是前端做：xlsx 是二进制容器（zip + XML），前端解析要引新依赖
 		// （SheetJS 等），而不加依赖是硬约束；受管运行时里 openpyxl 已就位，且转换跑在
@@ -3596,7 +3607,8 @@ func (m *manager) dispatch(c command) {
 		if ws != "" {
 			m.shutdownWorkspace(ws) // 关闭该工作区全部会话（状态落盘）
 		} else {
-			m.shutdownAll() // 兜底：全部工作区
+			m.shutdownAll()     // 兜底：全部工作区
+			m.stopFileWatches() // 进程级：停编辑器目录监听（等 goroutine 退出）
 		}
 		m.resp(c, true, "", nil)
 
@@ -6059,9 +6071,10 @@ func serve() error {
 			break
 		}
 	}
-	// stdin EOF → 优雅 Shutdown 全部会话（状态落盘）+ 停定时调度器
+	// stdin EOF → 优雅 Shutdown 全部会话（状态落盘）+ 停定时调度器 + 停文件监听
 	m.stopCron()
 	m.shutdownAll()
+	m.stopFileWatches()
 	return nil
 }
 
