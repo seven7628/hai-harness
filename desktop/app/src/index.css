@@ -11082,6 +11082,24 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .file-source { height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .file-source-meta { flex: 0 0 auto; padding: 5px 10px; border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 10px; }
 .file-source .fp-code { flex: 1; min-height: 0; max-height: none; overflow: auto; }
+/* 预览渲染器宿主（R08a，见 surfaces/preview/PreviewHost.tsx）。
+   file{mode:'preview'} 面板与文件面板的渲染器分支共用同一个容器：
+   · 必须是**真的盒子**且撑满 —— 里面的 .fp-code / .csv-preview 靠 flex:1 吃掉剩余高度；
+   · data-renderer="<id>" 是本轮唯一的可观测点（探针断言它，而不是猜 DOM 形状）;
+   · 未命中/依赖缺失/模块加载失败一律落到 .preview-unavailable 并写着原因，不许白屏。 */
+.preview-host { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.preview-host > * { min-height: 0; }
+.preview-unavailable { align-items: flex-start; justify-content: center; gap: 6px; padding: 22px 18px; color: var(--text-3); }
+.preview-unavailable-title { color: var(--text-2); font-size: 13px; }
+.preview-unavailable-reason { max-width: 56ch; font-size: 11.5px; line-height: 1.65; }
+/* 图片渲染器（surfaces/preview/renderers/image.tsx）：图片吃满剩余高度，
+   路径/失败原因贴在下方（读不到时用户至少要能知道「哪个文件」）。 */
+.preview-image { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 12px; }
+.preview-image img { flex: 1 1 auto; min-height: 0; max-width: 100%; object-fit: contain; display: block; margin: 0 auto; }
+.preview-image-empty { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 22px 18px; text-align: center; }
+.preview-image-title { color: var(--text-2); font-size: 13px; }
+.preview-image-reason { max-width: 56ch; color: var(--text-3); font-size: 11.5px; line-height: 1.65; }
+.preview-image-path { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 10px; }
 /* Markdown 预览（「最终文件」的预览模式）：复用对话区 .md 的全套元素样式
    （GFM 表格 / mermaid / KaTeX / 代码块），只把「窄列对话气泡」的排版覆写成
    「文档页」排版——全尺寸侧栏比对话区宽得多，沿用对话区的小字号与窄行宽会显得局促。
