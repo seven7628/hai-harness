@@ -152,6 +152,28 @@ func TestHubGroupTools(t *testing.T) {
 	if err != nil || !strings.Contains(out, `"count":0`) {
 		t.Fatalf("search leaked approval stub: %s, %v", out, err)
 	}
+	// 图片附件进 group_history 只能留元数据：data URL（几 MB base64）会撑爆下一轮请求。
+	imgURL := testImageDataURL("history-image")
+	if _, err := agenthub.AppendGroupMessage(ctx, st, &agenthub.Message{
+		GroupID: g.ID, Kind: agenthub.KindText,
+		Sender: agenthub.Sender{Kind: agenthub.SenderHuman},
+		Text:   "看这张图",
+		Attachments: []agenthub.Attachment{{
+			Kind: agenthub.AttachmentKindImage, Name: "history.png", MIME: "image/png", DataURL: imgURL,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err = call(bsA, "group_history", `{"group_id":"`+string(g.ID)+`"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "base64,") || strings.Contains(out, imgURL) {
+		t.Fatalf("group_history 把图片 data URL 交给模型: %s", out)
+	}
+	if !strings.Contains(out, "history.png") || !strings.Contains(out, `"kind":"image"`) {
+		t.Fatalf("group_history 丢了附件元数据: %s", out)
+	}
 	_ = time.Now
 }
 

@@ -32,6 +32,10 @@ func TestAttachmentValidateKinds(t *testing.T) {
 		{"image 不支持的类型", Attachment{Kind: AttachmentKindImage, DataURL: "data:image/bmp;base64,QUJD"}, false},
 		{"image 空负载", Attachment{Kind: AttachmentKindImage, DataURL: "data:image/png;base64,"}, false},
 		{"image 坏 base64", Attachment{Kind: AttachmentKindImage, DataURL: "data:image/png;base64,QU$D"}, false},
+		{"image base64 长度 mod1", Attachment{Kind: AttachmentKindImage, DataURL: "data:image/png;base64,QUJD="}, false},
+		{"image base64 只有填充", Attachment{Kind: AttachmentKindImage, DataURL: "data:image/png;base64,=="}, false},
+		{"image base64 无填充", Attachment{Kind: AttachmentKindImage, DataURL: "data:image/png;base64,QUJ"}, true},
+		{"image base64 填充后还有数据", Attachment{Kind: AttachmentKindImage, DataURL: "data:image/png;base64,QU=J"}, false},
 		{"image 缺 data_url", Attachment{Kind: AttachmentKindImage, Name: "a.png"}, false},
 		{"image mime 与 data URL 不一致", func() Attachment {
 			a := testImageAttachment("image/png")
@@ -75,6 +79,15 @@ func TestAttachmentValidateNamePathLength(t *testing.T) {
 	img.Name = strings.Repeat("a", MaxAttachmentNameLen+1)
 	if err := img.Validate(); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("超长 name err = %v, want ErrInvalid", err)
+	}
+	// 上限是字节数（协议/JSON 体积口径），不是字符数：171 个汉字 = 513 字节。
+	img.Name = strings.Repeat("图", 170)
+	if err := img.Validate(); err != nil {
+		t.Fatalf("170 个汉字（510 字节）应通过: %v", err)
+	}
+	img.Name = strings.Repeat("图", 171)
+	if err := img.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("171 个汉字（513 字节）err = %v, want ErrInvalid", err)
 	}
 	file := Attachment{Kind: AttachmentKindFile, Name: "f"}
 	file.Path = "/" + strings.Repeat("p", MaxAttachmentPathLen-1)

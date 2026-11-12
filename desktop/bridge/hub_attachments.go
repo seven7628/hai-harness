@@ -64,6 +64,65 @@ func hubHasImageAttachment(atts []agenthub.Attachment) bool {
 	return false
 }
 
+// 群唤醒补发图片的上限：游标之后可能积压多条带图消息（目标忙、无 @ 纯图等），
+// 一次性把所有 data URL 塞进请求会撑爆 provider。优先保证当前触发消息的图片，
+// 更早的图片按「从新到旧」补，超出的在上下文里显式说明，不静默丢。
+const (
+	hubWakePendingImageLimit = 6
+	hubWakePendingImageBytes = 6 * 1024 * 1024
+)
+
+// hubPendingImageAttachments 收集游标之后、当前触发消息之前的图片附件。
+//
+// 这些图片从未进过该智能体的模型上下文：目标忙时 wake 直接返回 busy（不排队），
+// 无 @ 的纯图消息也不会唤醒任何人；两者都只能靠下一次 wake 的快照补看正文。
+// 快照是文本，图片必须在这里单独取出来，否则模型只看到 `[图片]` 占位。
+func hubPendingImageAttachments(msgs []agenthub.Message, cursor, triggerSeq int64) ([]agenthub.Attachment, []int64, int) {
+	type pending struct {
+		att agenthub.Attachment
+		seq int64
+	}
+	var newest []pending
+	omitted := 0
+	total := 0
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Seq <= cursor || (triggerSeq > 0 && m.Seq >= triggerSeq) {
+			continue
+		}
+		if !m.AgentContextKind() || !m.VisibleTo(false) {
+			continue
+		}
+		for j := len(m.Attachments) - 1; j >= 0; j-- {
+			a := m.Attachments[j]
+			if !a.IsImage() || a.DataURL == "" {
+				continue
+			}
+			if len(newest) >= hubWakePendingImageLimit || total+len(a.DataURL) > hubWakePendingImageBytes {
+				omitted++
+				continue
+			}
+			newest = append(newest, pending{att: a, seq: m.Seq})
+			total += len(a.DataURL)
+		}
+	}
+	if len(newest) == 0 {
+		return nil, nil, 0
+	}
+	// 反转成时间顺序：模型按「先发生先看到」阅读，和快照一致。
+	atts := make([]agenthub.Attachment, 0, len(newest))
+	seqs := make([]int64, 0, len(newest))
+	seenSeq := map[int64]bool{}
+	for i := len(newest) - 1; i >= 0; i-- {
+		atts = append(atts, newest[i].att)
+		if !seenSeq[newest[i].seq] {
+			seenSeq[newest[i].seq] = true
+			seqs = append(seqs, newest[i].seq)
+		}
+	}
+	return atts, seqs, omitted
+}
+
 // hubAttachmentImageBlocks 把 image 附件转成模型内容块。
 // 文件附件不进上下文：前端已把 `@路径` 放进正文，由模型按需读取。
 func hubAttachmentImageBlocks(atts []agenthub.Attachment) []core.Content {

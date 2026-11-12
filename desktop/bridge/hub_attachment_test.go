@@ -69,6 +69,20 @@ func requestHasTextBlock(req *provider.StreamRequest, text string) bool {
 	return false
 }
 
+func requestHasTextContaining(req *provider.StreamRequest, sub string) bool {
+	if req == nil {
+		return false
+	}
+	for _, msg := range req.Messages {
+		for _, c := range msg.Content {
+			if c.Type == core.ContentTypeText && strings.Contains(c.Content, sub) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // 带图 DM：Ask 的 content 必须有 image 块（进模型上下文），索引里存完整附件。
 func TestHubSendWithImageAttachment(t *testing.T) {
 	m, buf := testManager(t)
@@ -336,6 +350,64 @@ func TestHubGroupSendImageOnlyWithStructuredMention(t *testing.T) {
 	req := waitEvalRequest(t, fake)
 	if !requestHasImageBlock(req, dataURL) {
 		t.Fatal("纯图群消息的唤醒里没有 image 块")
+	}
+}
+
+// 目标忙时图片消息不排队（wake 返回 busy）；下一次被 @ 时必须把积压的图片补进
+// 上下文，否则模型只看到快照里的 `[图片]` 占位，永远看不见图（B2）。
+func TestHubGroupBusyImageDeliveredOnNextWake(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "BusyImgOwner")
+	b := createHubAgent(t, m, buf, 2, "BusyImgMember")
+	g := groupWithMembers(t, m, buf, 3, "忙图群",
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{a.ID, "owner"},
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{b.ID, "member"},
+	)
+	bs, err := m.hubGroupSession(string(b.ID), string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &evalProvider{reply: "第二次看到图了"}
+	setGroupFakeLoop(t, m, bs, g, string(b.ID), fake)
+
+	bs.hubGroupBusy.Store(true)
+	dataURL := testImageDataURL("busy-pending-image")
+	ok, errMsg, data := hubCmd(t, m, buf, 4, "hub_group_send", map[string]any{
+		"group_id":    string(g.ID),
+		"text":        "@BusyImgMember 这张图稍后看",
+		"attachments": []any{imageAttachmentPayload(dataURL)},
+	})
+	if !ok {
+		t.Fatalf("忙目标也要先落消息: %s", errMsg)
+	}
+	if errs, _ := data["wake_errors"].([]any); len(errs) == 0 {
+		t.Fatal("忙目标应报告 wake_errors")
+	}
+	if fake.callCount() != 0 {
+		t.Fatalf("忙目标不该跑模型，实际调用 %d 次", fake.callCount())
+	}
+
+	// 下一轮（无附件）被 @：积压的图片必须补进这次请求。
+	bs.hubGroupBusy.Store(false)
+	ok, errMsg, _ = hubCmd(t, m, buf, 5, "hub_group_send", map[string]any{
+		"group_id": string(g.ID),
+		"text":     "@BusyImgMember 现在看上面那张图",
+	})
+	if !ok {
+		t.Fatalf("第二次 send: %s", errMsg)
+	}
+	req := waitEvalRequest(t, fake)
+	if !requestHasImageBlock(req, dataURL) {
+		t.Fatal("下一次 wake 没有补发积压的图片：模型只能看到 [图片] 占位")
+	}
+	if !requestHasTextContaining(req, "此前未送达") {
+		t.Fatal("补发积压图片时缺少说明块，模型不知道图对应哪条消息")
 	}
 }
 

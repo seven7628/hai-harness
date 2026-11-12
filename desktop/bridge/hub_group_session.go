@@ -344,12 +344,36 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	if text == "" {
 		text = "（群消息）"
 	}
-	// 隐藏快照块 → 触发消息正文 → 图片附件块。文件附件不进上下文：前端已把
-	// `@路径` 拼进正文，模型按正文自行读取（与主会话 @ 文件同语义）。
+	// 隐藏快照块 → 补发此前未送达的图片 → 触发消息正文 → 触发消息图片。
+	//
+	// 补发是必须的：目标忙时 wake 直接返回 busy（不排队），无 @ 的纯图消息也
+	// 不唤醒任何人；这两种情况下图片从未进过该智能体的模型上下文。快照只有
+	// 文本，模型只会看到 `[图片]` 占位 —— 必须在下一次 wake 把积压的 image
+	// 块一起带上，而不是假装它已经看过。
+	pendingImgs, pendingSeqs, omitted := hubPendingImageAttachments(msgs, cursor.AgentContextSeq, w.TriggerSeq)
 	blocks := []core.Content{
 		{Type: core.ContentTypeHubGroupWake, Content: hidden},
-		{Type: core.ContentTypeText, Content: text},
 	}
+	if len(pendingImgs) > 0 {
+		seqText := make([]string, 0, len(pendingSeqs))
+		for _, seq := range pendingSeqs {
+			seqText = append(seqText, fmt.Sprintf("#%d", seq))
+		}
+		blocks = append(blocks, core.Content{
+			Type:    core.ContentTypeText,
+			Content: fmt.Sprintf("[补发此前未送达的图片：%s]", strings.Join(seqText, "、")),
+		})
+		blocks = append(blocks, hubAttachmentImageBlocks(pendingImgs)...)
+		if omitted > 0 {
+			blocks = append(blocks, core.Content{
+				Type:    core.ContentTypeText,
+				Content: fmt.Sprintf("[另有 %d 张较早的图片未附上，请用 group_history 查看元数据或用工具读取文件]", omitted),
+			})
+		}
+	}
+	blocks = append(blocks, core.Content{Type: core.ContentTypeText, Content: text})
+	// 文件附件不进上下文：前端已把 `@路径` 拼进正文，模型按正文自行读取
+	// （与主会话 @ 文件同语义）。
 	blocks = append(blocks, hubAttachmentImageBlocks(w.Attachments)...)
 	msg := core.NewUserMessage(blocks...)
 	if err := bs.s.Ask(ctx, msg); err != nil {

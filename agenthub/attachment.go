@@ -182,12 +182,16 @@ func parseAttachmentDataURL(s string) (mime, payload string, ok bool) {
 	return mime, payload, true
 }
 
-// isAttachmentBase64Payload 只做字符表检查（不解码，避免为校验多分配 2.25MiB）：
-// 非法字符会让 provider/前端解码失败，宁可在这里拒绝。
+// isAttachmentBase64Payload 只做字符表/长度检查（不解码，避免为校验多分配 2.25MiB）：
+// 非法字符或非法长度会让 provider/前端解码失败，宁可在这里拒绝。
+//
+// 允许无填充 base64（长度 mod 4 为 2/3）：有些前端/库会省略尾部 `=`；但带填充时
+// 总长度必须是 4 的倍数，且 `=` 只能出现在末尾。这样 `A`、`QUJD=`、`==` 都会被拒。
 func isAttachmentBase64Payload(s string) bool {
 	if s == "" {
 		return false
 	}
+	data := 0
 	pad := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -196,6 +200,7 @@ func isAttachmentBase64Payload(s string) bool {
 			if pad > 0 {
 				return false // '=' 之后又出现数据字符
 			}
+			data++
 		case c == '=':
 			pad++
 			if pad > 2 {
@@ -204,6 +209,17 @@ func isAttachmentBase64Payload(s string) bool {
 		default:
 			return false
 		}
+	}
+	if data == 0 {
+		return false
+	}
+	// 无填充时长度 mod 4 只能是 0/2/3；mod 1 一定是坏串。
+	if len(s)%4 == 1 {
+		return false
+	}
+	// 一旦出现填充，整串就应当是标准 4 字节对齐。
+	if pad > 0 && len(s)%4 != 0 {
+		return false
 	}
 	return true
 }

@@ -83,3 +83,35 @@ func TestRedactedClearsAttachments(t *testing.T) {
 		t.Fatalf("human redacted = %+v, want 原样", forHuman)
 	}
 }
+
+// AgentToolView 是 group_history 等文本工具的边界：保留附件元数据（模型知道有图），
+// 但绝不能带 data URL —— 工具结果是文本，几 MB base64 会直接撑爆下一轮请求。
+func TestAgentToolViewStripsImageDataURL(t *testing.T) {
+	msg := Message{
+		Seq: 3, Kind: KindText, Sender: Sender{Kind: SenderHuman}, Text: "看这张图",
+		Visibility: VisibilityGroup,
+		Attachments: []Attachment{
+			{Kind: AttachmentKindImage, Name: "a.png", MIME: "image/png", Bytes: 3, DataURL: "data:image/png;base64,QUJD"},
+			{Kind: AttachmentKindFile, Name: "r.pdf", Path: "/tmp/r.pdf", Bytes: 9},
+		},
+	}
+	view := msg.AgentToolView()
+	if len(view.Attachments) != 2 {
+		t.Fatalf("附件元数据丢了: %+v", view.Attachments)
+	}
+	if view.Attachments[0].DataURL != "" || view.Attachments[0].Name != "a.png" || view.Attachments[0].Kind != AttachmentKindImage {
+		t.Fatalf("image view = %+v, want 只留元数据", view.Attachments[0])
+	}
+	if view.Attachments[1].Path != "/tmp/r.pdf" {
+		t.Fatalf("file view = %+v, want 保留 path", view.Attachments[1])
+	}
+	// 不能改动原消息（工具视图是副本）。
+	if msg.Attachments[0].DataURL == "" {
+		t.Fatal("AgentToolView 修改了原消息")
+	}
+	// owner-only 仍然整体清空。
+	msg.Visibility = VisibilityOwner
+	if got := msg.AgentToolView(); got.Attachments != nil {
+		t.Fatalf("owner-only 附件泄漏: %+v", got.Attachments)
+	}
+}

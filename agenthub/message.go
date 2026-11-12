@@ -161,3 +161,23 @@ func (m Message) Redacted(isHuman bool) Message {
 	m.Intent = ""
 	return m
 }
+
+// AgentToolView 返回消息进入模型**工具结果**的副本：可见性走 Redacted，图片附件只留
+// 元数据（kind/name/mime/bytes），不带 data URL。
+//
+// 工具结果是文本：一张 2.5MiB 的图带上 base64 就是 ~3.3MiB（约 80 万 token）塞进
+// 下一轮请求，既看不见图，也可能被 provider 直接拒绝。图片真正进上下文的唯一路径
+// 是 wake 的 image 内容块，不是 group_history 的 JSON。
+func (m Message) AgentToolView() Message {
+	m = m.Redacted(false)
+	if len(m.Attachments) == 0 {
+		return m
+	}
+	atts := make([]Attachment, len(m.Attachments))
+	for i, a := range m.Attachments {
+		a.DataURL = ""
+		atts[i] = a
+	}
+	m.Attachments = atts
+	return m
+}
