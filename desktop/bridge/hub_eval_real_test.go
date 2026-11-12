@@ -168,6 +168,12 @@ type hubRealProject struct {
 	SessionList     *hubRealToolCall `json:"session_list,omitempty"`
 	SessionSend     *hubRealToolCall `json:"session_send,omitempty"`
 	SessionLLM      hubRealLLM       `json:"session_llm"`
+	// 项目会话自己的终态证据（不是工具返回值）：
+	SessionAgentEnd        string `json:"session_agent_end,omitempty"`
+	SessionFinalText       string `json:"session_final_text,omitempty"`
+	TaskResultStatus       string `json:"task_result_status,omitempty"` // 账本终态（completed/delivered…）
+	TaskResultFinishReason string `json:"task_result_finish_reason,omitempty"`
+	TaskResultSummary      string `json:"task_result_summary,omitempty"`
 }
 
 // —— 入口 ——
@@ -193,7 +199,7 @@ func TestHubRealE2E(t *testing.T) {
 		Status:    "fail", // 默认 fail：任何提前返回都不能写成假的 pass
 		Notes: []string{
 			"真实 provider 端到端评测：仅在本测试的 gated 路径里发真实请求。",
-			"报告与事件中已把 api_key 替换为 [REDACTED]；不含 base_url。",
+			"报告与事件不对凭证字段落盘；命中的敏感值已替换为 [REDACTED]。",
 		},
 	}
 	var buf *syncBuf
@@ -245,13 +251,30 @@ func TestHubRealE2E(t *testing.T) {
 	e := &hubRealEval{t: t, m: m, buf: buf, cfg: cfg, rep: rep}
 	t.Logf("[hub-real] provider=%s model=%s report=%s", providerName, model, reportPath)
 
-	e.run("1_dm", "请只回复：HAI_DM_OK", (*hubRealScenario).scenarioDM)
-	e.run("2_tool_auto", "调用 bash 工具一次，command 必须是 `printf HAI_TOOL_OK`，然后回复工具输出。", (*hubRealScenario).scenarioToolAuto)
-	e.run("3_approval_hitl", "调用 bash 工具一次，command 必须是 `printf HAI_APPROVAL_OK`，然后回复工具输出。", (*hubRealScenario).scenarioApprovalHITL)
-	e.run("4_group_mention_all", "@all 每人只回复自己的名字 + HAI_ALL_OK", (*hubRealScenario).scenarioGroupMentionAll)
-	e.run("5_group_mention_one", "@RealOneB 只回复 HAI_ONE_OK", (*hubRealScenario).scenarioGroupMentionOne)
-	e.run("6_handoff", "@RealHandA 调用 handoff 工具，把任务交给 RealHandB，instruction 写：只回复 HANDOFF_OK。不要自己完成。", (*hubRealScenario).scenarioHandoff)
-	e.run("7_project_session", "请依次调用 workspace_create 创建项目，再调用 session_create 创建一个会话，然后调用 session_send 给该会话派任务：只回复 HAI_PROJECT_SESSION_OK。最后把 workspace 路径、session_id、task_id 回给我。", (*hubRealScenario).scenarioProjectSession)
+	// HAI_EVAL_HUB_ONLY 只跑指定场景（逗号分隔，调试/省钱用；默认全跑）。
+	// 注意 5/6 依赖 4 建的同一个群与成员。
+	only := map[string]bool{}
+	if raw := strings.TrimSpace(os.Getenv("HAI_EVAL_HUB_ONLY")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				only[p] = true
+			}
+		}
+		rep.Notes = append(rep.Notes, "HAI_EVAL_HUB_ONLY="+raw)
+	}
+	run := func(name, prompt string, fn func(*hubRealScenario)) {
+		if len(only) > 0 && !only[name] {
+			return
+		}
+		e.run(name, prompt, fn)
+	}
+	run("1_dm", "请只回复：HAI_DM_OK", (*hubRealScenario).scenarioDM)
+	run("2_tool_auto", "调用 bash 工具一次，command 必须是 `printf HAI_TOOL_OK`，然后回复工具输出。", (*hubRealScenario).scenarioToolAuto)
+	run("3_approval_hitl", "调用 bash 工具一次，command 必须是 `printf HAI_APPROVAL_OK`，然后回复工具输出。", (*hubRealScenario).scenarioApprovalHITL)
+	run("4_group_mention_all", "@all 每人只回复自己的名字 + HAI_ALL_OK", (*hubRealScenario).scenarioGroupMentionAll)
+	run("5_group_mention_one", "@RealOneB 只回复 HAI_ONE_OK", (*hubRealScenario).scenarioGroupMentionOne)
+	run("6_handoff", "@RealHandA 调用 handoff 工具，把任务交给 RealHandB，instruction 写：只回复 HANDOFF_OK。不要自己完成。", (*hubRealScenario).scenarioHandoff)
+	run("7_project_session", "请依次调用 workspace_create 创建项目，再调用 session_create 创建一个会话，然后调用 session_send 给该会话派任务：只回复 HAI_PROJECT_SESSION_OK。最后把 workspace 路径、session_id、task_id 回给我。", (*hubRealScenario).scenarioProjectSession)
 
 	// 场景全部跑完：状态由场景结果 + 顶层失败共同决定（write 里兜底）。
 	rep.FinishedAt = time.Now().UTC()
@@ -378,13 +401,16 @@ func (e *hubRealEval) nextID() int {
 
 func (e *hubRealEval) run(name, prompt string, fn func(*hubRealScenario)) {
 	e.t.Run(name, func(t *testing.T) {
+		start := e.buf.Len()
+		prior := hubRealRunIDs(hubRealParseEvents(e.buf.String()[:start]))
 		sc := &hubRealScenario{
 			t:         t,
 			e:         e,
 			name:      name,
 			prompt:    prompt,
-			start:     e.buf.Len(),
+			start:     start,
 			started:   time.Now(),
+			priorRuns: prior,
 			decisions: map[string]string{},
 		}
 		sc.rep = &hubRealScenarioReport{
@@ -403,6 +429,10 @@ func (e *hubRealEval) run(name, prompt string, fn func(*hubRealScenario)) {
 				sc.rep.Status = "fail"
 			default:
 				sc.rep.Status = "pass"
+			}
+			if sc.rep.LLM.Calls > 0 && sc.rep.LLM.CostUSD == 0 {
+				sc.rep.Notes = append(sc.rep.Notes,
+					"llm cost_usd=0：上游 usage.Cost.Total=0（不代表免费，可能是网关未上报成本）")
 			}
 			e.rep.Scenarios = append(e.rep.Scenarios, sc.rep)
 			t.Logf("[hub-real] %s status=%s duration=%dms llm_calls=%d tools=%d approvals=%d",
@@ -424,6 +454,9 @@ type hubRealScenario struct {
 
 	// messageSource 由场景设置（DM/群日志）：失败时据此输出最近 5 条消息。
 	messageSource func() []agenthub.Message
+	// priorRuns 是场景开始前已存在的 run_id 集合：异步事件可能晚于上一场景收尾才落盘，
+	// 终止判据必须忽略这些旧 run 的 agent_end，否则会把上一场景的收尾误判成本场景结束。
+	priorRuns map[string]bool
 	// decisions 审批 id → 决策（报告证据）。
 	decisions map[string]string
 	// finalText 场景主回复（报告 FinalText）。
@@ -484,8 +517,12 @@ func (sc *hubRealScenario) events() []map[string]any {
 	if sc.start > len(raw) {
 		return nil
 	}
+	return hubRealParseEvents(raw[sc.start:])
+}
+
+func hubRealParseEvents(raw string) []map[string]any {
 	var out []map[string]any
-	for _, line := range strings.Split(raw[sc.start:], "\n") {
+	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -495,6 +532,16 @@ func (sc *hubRealScenario) events() []map[string]any {
 			continue
 		}
 		out = append(out, ev)
+	}
+	return out
+}
+
+func hubRealRunIDs(events []map[string]any) map[string]bool {
+	out := map[string]bool{}
+	for _, ev := range events {
+		if rid := str(ev, "run_id"); rid != "" {
+			out[rid] = true
+		}
 	}
 	return out
 }
@@ -536,6 +583,10 @@ func (sc *hubRealScenario) sendGroup(gid agenthub.GroupID, text string, mentionA
 	ok, errMsg, data := sc.cmd("hub_group_send", payload)
 	if !ok {
 		sc.failf("hub_group_send 失败: %s", errMsg)
+	}
+	// 人 @ 了目标却唤醒失败 = 这一轮根本没跑，必须响亮失败（不能只看到 round 就继续）。
+	if raw, present := data["wake_errors"]; present && raw != nil {
+		sc.failf("hub_group_send 唤醒失败: %v", raw)
 	}
 	return data
 }
@@ -749,7 +800,7 @@ func (sc *hubRealScenario) scenarioDM() {
 				return true, ""
 			}
 		}
-		if hubRealHasAgentEnd(sc.events(), sid) {
+		if sc.hasNewAgentEnd(sid) {
 			return false, "agent_end 已到达，但 DM 索引里没有含 " + token + " 的 agent 回复（模型没照做或回复被丢弃）"
 		}
 		return false, ""
@@ -790,7 +841,7 @@ func (sc *hubRealScenario) scenarioToolAuto() {
 				return true, ""
 			}
 		}
-		if hubRealHasAgentEnd(sc.events(), sid) {
+		if sc.hasNewAgentEnd(sid) {
 			return false, "agent_end 已到达，但没有含 " + token + " 的 bash tool_run_end（模型没调用工具）"
 		}
 		return false, ""
@@ -806,7 +857,7 @@ func (sc *hubRealScenario) scenarioToolAuto() {
 				return true, ""
 			}
 		}
-		if hubRealHasAgentEnd(sc.events(), sid) {
+		if sc.hasNewAgentEnd(sid) {
 			return false, "agent_end 已到达，但最终回复不含 " + token
 		}
 		return false, ""
@@ -843,7 +894,7 @@ func (sc *hubRealScenario) scenarioApprovalHITL() {
 			approval = ev
 			return true, ""
 		}
-		if hubRealHasAgentEnd(sc.events(), sid) {
+		if sc.hasNewAgentEnd(sid) {
 			return false, "agent_end 已到达却没有 tool_approval_requested（模型没调用 bash，审批路径没被走到）"
 		}
 		return false, ""
@@ -887,7 +938,7 @@ func (sc *hubRealScenario) scenarioApprovalHITL() {
 				return true, ""
 			}
 		}
-		if hubRealHasAgentEnd(sc.events(), sid) {
+		if sc.hasNewAgentEnd(sid) {
 			return false, "agent_end 已到达，但最终回复不含 " + token
 		}
 		return false, ""
@@ -914,7 +965,11 @@ func (sc *hubRealScenario) scenarioGroupMentionAll() {
 			role string
 		}{b.ID, "member"})
 	sc.watchGroup(g.ID)
-	data := sc.sendGroup(g.ID, sc.prompt, true)
+	// 人类消息用 @all 触发；同时明确禁止回复里再出现 @ —— 否则真实模型的回复
+	// 会被 Router 当成新一轮 mention，自动接龙把后续场景的基线搅乱（隔离要求）。
+	prompt := "@all 每人只回复自己的名字 + HAI_ALL_OK。回复正文里不要出现 @ 符号（不要 @all、不要 @任何人）。"
+	sc.rep.Prompt = prompt
+	data := sc.sendGroup(g.ID, prompt, true)
 	roundID := str(data, "round_id")
 	if r, ok := data["round"].(map[string]any); ok {
 		roundID = str(r, "id")
@@ -925,49 +980,82 @@ func (sc *hubRealScenario) scenarioGroupMentionAll() {
 	if roundID == "" {
 		sc.failf("@all 的 hub_group_send 响应/事件里没有 round id: %+v", data)
 	}
-	sc.rep.Notes = append(sc.rep.Notes, fmt.Sprintf("round=%s targets=%v mention_all=%v",
-		roundID, data["targets"], data["round"]))
+	triggerSeq := int64(numOr(data, "seq", 0))
+	if triggerSeq == 0 {
+		sc.failf("@all 的 hub_group_send 响应里没有 seq: %+v", data)
+	}
+	sc.rep.Notes = append(sc.rep.Notes, fmt.Sprintf("round=%s trigger_seq=%d targets=%v mention_all=%v",
+		roundID, triggerSeq, data["targets"], data["round"]))
 
-	sc.waitFor(hubRealTimeout, "@all 每个成员各写一条 final", func() (bool, string) {
+	// 真实模型可能用 group_say 工具发言（消息 RoundID 为空，finishHubRound 会按同文去重），
+	// 所以判据是「触发 seq 之后该成员有一条含 token 的 agent 消息」，而不是强求 RoundID。
+	sc.waitFor(hubRealTimeout, "@all 每个成员各写一条回复", func() (bool, string) {
 		got := map[agenthub.AgentID]int{}
 		for _, m := range sc.messages() {
-			if m.Sender.Kind == agenthub.SenderAgent && m.RoundID == roundID && strings.Contains(m.Text, token) {
+			if m.Seq > triggerSeq && m.Sender.Kind == agenthub.SenderAgent && strings.Contains(m.Text, token) {
 				got[m.Sender.AgentID]++
 			}
 		}
 		if got[a.ID] > 0 && got[b.ID] > 0 {
 			return true, ""
 		}
-		if hubRealHasAgentEnd(sc.events(), "hub."+string(a.ID)+".g."+string(g.ID)) &&
-			hubRealHasAgentEnd(sc.events(), "hub."+string(b.ID)+".g."+string(g.ID)) {
-			return false, fmt.Sprintf("两个成员都已 agent_end，但含 %s 的 final 数 = %v", token, got)
+		if sc.hasNewAgentEnd("hub."+string(a.ID)+".g."+string(g.ID)) &&
+			sc.hasNewAgentEnd("hub."+string(b.ID)+".g."+string(g.ID)) {
+			return false, fmt.Sprintf("两个成员都已 agent_end，但触发后含 %s 的回复数 = %v", token, got)
 		}
 		return false, ""
 	})
-	// 每个成员恰好一条本轮 final；两条说明重复提交。
 	for _, id := range []agenthub.AgentID{a.ID, b.ID} {
-		n := 0
-		var text string
+		var texts []string
 		for _, m := range sc.messages() {
-			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == id && m.RoundID == roundID {
-				n++
-				text = m.Text
+			if m.Seq > triggerSeq && m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == id {
+				texts = append(texts, m.Text)
 			}
 		}
-		if n != 1 {
-			sc.failf("%s 本轮 final 数 = %d，want 1（@all 每人只回复一条）", id, n)
+		if len(texts) == 0 {
+			sc.failf("%s 在 @all 触发后没有 agent 回复", id)
 		}
-		if !strings.Contains(text, token) {
-			sc.failf("%s 本轮 final 不含 %s: %q", id, token, text)
+		hasToken := false
+		seen := map[string]bool{}
+		for _, text := range texts {
+			if strings.Contains(text, token) {
+				hasToken = true
+				sc.finalText = text
+			}
+			if seen[text] {
+				sc.failf("%s 在 @all 同一轮重复写了同一段正文: %q", id, hubRealClip(text, 300))
+			}
+			seen[text] = true
 		}
-		sc.rep.Notes = append(sc.rep.Notes, fmt.Sprintf("agent %s reply=%q", id, hubRealClip(text, 200)))
+		if !hasToken {
+			sc.failf("%s 的 @all 回复不含 %s: %v", id, token, hubRealMessageBriefs(sc.messages()))
+		}
+		for _, text := range texts {
+			if strings.Contains(text, "@") {
+				sc.failf("%s 的回复出现 @（会触发新一轮群唤醒，破坏场景隔离）: %q", id, hubRealClip(text, 300))
+			}
+		}
+		sc.rep.Notes = append(sc.rep.Notes, fmt.Sprintf("agent %s replies=%d texts=%v", id, len(texts), hubRealBriefTexts(texts, 200)))
 	}
-	// 等两个群会话空闲，避免残留 run 污染下一场景的基线。
+	// 两个成员的 run 必须真正收口（AgentEnd），再等群轮闩释放。
+	for _, id := range []agenthub.AgentID{a.ID, b.ID} {
+		sid := "hub." + string(id) + ".g." + string(g.ID)
+		sc.waitFor(hubRealTimeout, string(id)+" agent_end", func() (bool, string) {
+			return sc.hasNewAgentEnd(sid), ""
+		})
+	}
 	for _, id := range []string{string(a.ID), string(b.ID)} {
 		bs, err := sc.e.m.hubGroupSession(id, string(g.ID))
 		if err == nil {
-			waitHubGroupIdle(sc.t, bs)
+			sc.waitFor(60*time.Second, id+" 群会话空闲", func() (bool, string) {
+				return !bs.hubGroupBusy.Load(), ""
+			})
 		}
+	}
+	// 只有人类这条 @all 应该产生 hub_round：模型回复不得再触发自动接龙。
+	rounds := hubRealRoundEvents(sc.events(), g.ID)
+	if len(rounds) != 1 {
+		sc.failf("hub_round 事件 = %d 条，want 1（回复里出现 @ 会触发额外轮次）: %+v", len(rounds), rounds)
 	}
 }
 
@@ -995,27 +1083,42 @@ func (sc *hubRealScenario) scenarioGroupMentionOne() {
 	if got := sessB.hubGroupSeq.Load(); got != seqB+1 {
 		sc.failf("%s 被 @，唤醒发号 %d → %d，want +1", b.ID, seqB, got)
 	}
+	triggerSeq := int64(numOr(data, "seq", 0))
+	if triggerSeq == 0 {
+		sc.failf("@%s 的 hub_group_send 响应里没有 seq: %+v", b.Name, data)
+	}
 	sc.rep.Notes = append(sc.rep.Notes,
-		fmt.Sprintf("round=%s targets=%v", roundID, targets),
+		fmt.Sprintf("round=%s trigger_seq=%d targets=%v", roundID, triggerSeq, targets),
 		fmt.Sprintf("baseline_seq=%d wake_seq A=%d→%d B=%d→%d", baseSeq, seqA, sessA.hubGroupSeq.Load(), seqB, sessB.hubGroupSeq.Load()))
 
-	sc.waitFor(hubRealTimeout, "被 @ 的成员写 final", func() (bool, string) {
+	sc.waitFor(hubRealTimeout, "被 @ 的成员写回复", func() (bool, string) {
 		for _, m := range sc.messages() {
-			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == b.ID &&
-				m.RoundID == roundID && strings.Contains(m.Text, token) {
+			if m.Seq > triggerSeq && m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == b.ID &&
+				strings.Contains(m.Text, token) {
 				sc.finalText = m.Text
 				return true, ""
 			}
 		}
-		if hubRealHasAgentEnd(sc.events(), "hub."+string(b.ID)+".g."+string(gid)) {
-			return false, "agent_end 已到达，但本轮没有含 " + token + " 的 final"
+		if sc.hasNewAgentEnd("hub." + string(b.ID) + ".g." + string(gid)) {
+			return false, "agent_end 已到达，但触发后没有含 " + token + " 的 agent 回复"
 		}
 		return false, ""
 	})
-	waitHubGroupIdle(sc.t, sessB)
-	// 未被 @ 的 A：本轮之后没有新 agent 消息，游标也不动。
+	// 等这个 run 真正收尾（agent_end）：busy 闩可能先于收尾事件释放，
+	// 不等它会把「上一场景的迟到 agent_end」带进下一场景。
+	sc.waitFor(hubRealTimeout, "B 的 run 收尾", func() (bool, string) {
+		return sc.hasNewAgentEnd("hub." + string(b.ID) + ".g." + string(gid)), ""
+	})
+	sc.waitFor(60*time.Second, "B 群会话空闲", func() (bool, string) {
+		return !sessB.hubGroupBusy.Load(), ""
+	})
+	// 只有人类这条 @B 应该产生 hub_round：B 的回复不得再触发自动接龙。
+	if rounds := hubRealRoundEvents(sc.events(), gid); len(rounds) != 1 {
+		sc.failf("hub_round 事件 = %d 条，want 1（只应有人的 @%s）: %+v", len(rounds), b.Name, rounds)
+	}
+	// 未被 @ 的 A：触发之后没有新 agent 消息，游标也不动。
 	for _, m := range sc.messages() {
-		if m.Seq <= baseSeq {
+		if m.Seq <= triggerSeq {
 			continue
 		}
 		if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == a.ID {
@@ -1110,7 +1213,7 @@ func (sc *hubRealScenario) scenarioHandoff() {
 			handoffID = str(h, "id")
 			return true, ""
 		}
-		if hubRealHasAgentEnd(sc.events(), "hub."+string(a.ID)+".g."+string(gid)) {
+		if sc.hasNewAgentEnd("hub." + string(a.ID) + ".g." + string(gid)) {
 			return false, "A 的 agent_end 已到达却没有 hub_handoff 事件（模型没调用 handoff 工具）"
 		}
 		return false, ""
@@ -1123,10 +1226,17 @@ func (sc *hubRealScenario) scenarioHandoff() {
 	} else if h.Status != agenthub.HandoffPendingAck {
 		sc.failf("handoff %s 落盘状态 = %q，want pending_ack", handoffID, h.Status)
 	}
-	waitHubGroupIdle(sc.t, sessA)
+	sc.waitFor(hubRealTimeout, "A 的 handoff run 收尾", func() (bool, string) {
+		return sc.hasNewAgentEnd("hub." + string(a.ID) + ".g." + string(gid)), ""
+	})
+	sc.waitFor(60*time.Second, "A 群会话空闲（handoff 工具后模型可能还要再收尾一轮）", func() (bool, string) {
+		return !sessA.hubGroupBusy.Load(), ""
+	})
 
 	// 第二步：B 用 handoff_ack 接受，并按 instruction 回复 token。
-	promptB := fmt.Sprintf("@%s 请用 handoff_ack 接受 handoff %s（accept=true），然后按 instruction 回复 %s。",
+	// 明确要求「必须实际调用工具」：只回文字不算完成验收（真实模型会偷懒直接用正文回复）。
+	promptB := fmt.Sprintf("@%s 你必须**实际调用 handoff_ack 工具**（不要用文字代替工具调用）："+
+		"handoff_id 必须是 %q，accept 必须是 true。调用成功后，再按 handoff 的 instruction 只回复 %s。",
 		b.Name, handoffID, token)
 	sc.sendGroup(gid, promptB, false)
 	sc.waitFor(hubRealTimeout, "handoff_ack 工具调用", func() (bool, string) {
@@ -1141,7 +1251,7 @@ func (sc *hubRealScenario) scenarioHandoff() {
 				return true, ""
 			}
 		}
-		if hubRealHasAgentEnd(sc.events(), "hub."+string(b.ID)+".g."+string(gid)) {
+		if sc.hasNewAgentEnd("hub." + string(b.ID) + ".g." + string(gid)) {
 			return false, "B 的 agent_end 已到达但没有成功的 handoff_ack 调用"
 		}
 		return false, ""
@@ -1222,6 +1332,10 @@ func (sc *hubRealScenario) scenarioProjectSession() {
 	wsPath := wsRes.Workspace.Path
 	sc.rep.Project.WorkspaceCreate = hubRealToolEvidence(wsEvidence)
 	sc.rep.Project.WorkspacePath = wsPath
+	// 断言**参数**：模型传的项目名就是人要求的那个（不是自己编的另一个）。
+	if args := str(wsEvidence, "arguments"); !strings.Contains(args, projectName) {
+		sc.failf("workspace_create 参数里没有要求的项目名 %q: %s", projectName, hubRealClip(args, 800))
+	}
 	if st, err := os.Stat(wsPath); err != nil || !st.IsDir() {
 		sc.failf("workspace_create 声称的目录不存在: %s (err=%v)", wsPath, err)
 	}
@@ -1251,6 +1365,10 @@ func (sc *hubRealScenario) scenarioProjectSession() {
 	sid := sessRes.Session.ID
 	sc.rep.Project.SessionCreate = hubRealToolEvidence(createEvidence)
 	sc.rep.Project.SessionID = sid
+	// 断言参数：session_create 用的就是 workspace_create 返回的路径。
+	if args := str(createEvidence, "arguments"); !strings.Contains(args, wsPath) {
+		sc.failf("session_create 参数里没有 workspace_create 返回的路径 %q: %s", wsPath, hubRealClip(args, 800))
+	}
 	if bs := sc.e.m.get(wsPath, sid); bs == nil {
 		sc.failf("session_create 返回 %s，但 m.get(%s,%s) == nil", sid, wsPath, sid)
 	}
@@ -1296,6 +1414,10 @@ func (sc *hubRealScenario) scenarioProjectSession() {
 	}
 	if sendRes.SessionID != "" && sendRes.SessionID != sid {
 		sc.failf("session_send 回的 session_id=%s，want %s", sendRes.SessionID, sid)
+	}
+	// 断言参数：派给的是刚建的那个会话，任务文本就是要求的 token 提示。
+	if args := str(sendEvidence, "arguments"); !strings.Contains(args, sid) || !strings.Contains(args, token) {
+		sc.failf("session_send 参数不符（需要 session_id=%s 且 text 含 %s）: %s", sid, token, hubRealClip(args, 800))
 	}
 	if sendRes.Queued || strings.EqualFold(sendRes.Status, "queued") {
 		sc.waitFor(60*time.Second, "排队任务被派发", func() (bool, string) {
@@ -1361,6 +1483,36 @@ func (sc *hubRealScenario) scenarioProjectSession() {
 	if !projectLLMSeen {
 		sc.failf("项目会话 %s 的 llm_end 正文都不含 %s（agent_end 有 token 也不够：llm 事件是真实调用的证据）", sid, token)
 	}
+	sc.rep.Project.SessionAgentEnd = hubRealClip(str(projectEnd, "content"), 2000)
+	sc.rep.Project.SessionFinalText = hubRealClip(str(projectEnd, "content"), 4000)
+
+	// 6b) 账本证据：派出的任务必须真的被**结算**（completed/delivered），
+	// 且 Result.Summary 来自项目会话的最终答复（含 token）——不是只拿到 task_id 就结束。
+	sc.waitFor(60*time.Second, "session_send 任务结算", func() (bool, string) {
+		task, err := agenthub.NewLedger(sc.store()).Replay(context.Background(), agenthub.TaskID(sendRes.TaskID))
+		if err != nil {
+			return false, ""
+		}
+		sc.rep.Project.TaskResultStatus = string(task.Status)
+		if task.Status == agenthub.TaskCompleted || task.Status == agenthub.TaskDelivered {
+			if task.Result != nil {
+				sc.rep.Project.TaskResultFinishReason = task.Result.FinishReason
+				sc.rep.Project.TaskResultSummary = hubRealClip(task.Result.Summary, 4000)
+				if !strings.Contains(task.Result.Summary, token) {
+					return false, fmt.Sprintf("任务 %s 已 %s，但 Result.Summary 不含 %s: %q",
+						sendRes.TaskID, task.Status, token, hubRealClip(task.Result.Summary, 500))
+				}
+			}
+			return true, ""
+		}
+		switch task.Status {
+		case agenthub.TaskFailed, agenthub.TaskInterrupted, agenthub.TaskCanceled,
+			agenthub.TaskDeclined, agenthub.TaskBlockedBudget:
+			return false, fmt.Sprintf("派出的任务进入终态 %s: %s", task.Status, task.Error)
+		}
+		return false, ""
+	})
+
 	// 会话必须回到空闲（不是只断言工具返回 JSON）。
 	sc.waitFor(60*time.Second, "项目会话 running=false", func() (bool, string) {
 		bs := sc.e.m.get(wsPath, sid)
@@ -1382,14 +1534,18 @@ func (sc *hubRealScenario) scenarioProjectSession() {
 				return true, ""
 			}
 		}
-		if hubRealHasAgentEnd(sc.events(), hubSID) {
+		if sc.hasNewAgentEnd(hubSID) {
 			return false, "Hub agent 已 agent_end，但群回复里没有 session_id " + sid
 		}
 		return false, ""
 	})
-	sc.rep.Project.TaskStatus = sendRes.Status
-	if sc.rep.Project.TaskStatus == "" {
-		sc.rep.Project.TaskStatus = "dispatched"
+	if sc.rep.Project.TaskResultStatus != "" {
+		sc.rep.Project.TaskStatus = sc.rep.Project.TaskResultStatus
+	} else {
+		sc.rep.Project.TaskStatus = sendRes.Status
+		if sc.rep.Project.TaskStatus == "" {
+			sc.rep.Project.TaskStatus = "dispatched"
+		}
 	}
 	sc.rep.Notes = append(sc.rep.Notes,
 		"workspace_create name="+projectName,
@@ -1398,6 +1554,9 @@ func (sc *hubRealScenario) scenarioProjectSession() {
 		"task_id="+sendRes.TaskID,
 		fmt.Sprintf("project_session_llm calls=%d in=%d out=%d cost_usd=%.6f",
 			projectLLM.Calls, projectLLM.InputTokens, projectLLM.OutputTokens, projectLLM.CostUSD),
+		fmt.Sprintf("task_result status=%s finish_reason=%s summary=%q",
+			sc.rep.Project.TaskResultStatus, sc.rep.Project.TaskResultFinishReason,
+			hubRealClip(sc.rep.Project.TaskResultSummary, 300)),
 		fmt.Sprintf("project_agent_end content=%q", hubRealClip(str(projectEnd, "content"), 300)))
 }
 
@@ -1425,7 +1584,7 @@ func (sc *hubRealScenario) waitToolEnd(hubSID, name string, accept func(ev map[s
 				return true, ""
 			}
 		}
-		if hubRealHasAgentEnd(sc.events(), hubSID) {
+		if sc.hasNewAgentEnd(hubSID) {
 			msg := "agent_end 已到达但没有成功的 " + name + " 调用"
 			if lastErr != "" {
 				msg += "；最近一次工具错误: " + lastErr
@@ -1446,16 +1605,31 @@ func (sc *hubRealScenario) waitToolEnd(hubSID, name string, accept func(ev map[s
 
 // —— 事件/报告小工具 ——
 
-func hubRealHasAgentEnd(events []map[string]any, sessionID string) bool {
-	for _, ev := range events {
+// hasNewAgentEnd 本场景内是否出现了**新 run** 的 agent_end（忽略场景开始前就存在的 run）。
+func (sc *hubRealScenario) hasNewAgentEnd(sessionID string) bool {
+	for _, ev := range sc.events() {
 		if str(ev, "event_type") != "agent_end" {
 			continue
 		}
-		if sessionID == "" || str(ev, "session_id") == sessionID {
-			return true
+		if sessionID != "" && str(ev, "session_id") != sessionID {
+			continue
 		}
+		if rid := str(ev, "run_id"); rid != "" && sc.priorRuns[rid] {
+			continue // 上一场景的迟到收尾
+		}
+		return true
 	}
 	return false
+}
+
+func hubRealRoundEvents(events []map[string]any, gid agenthub.GroupID) []map[string]any {
+	var out []map[string]any
+	for _, ev := range events {
+		if str(ev, "event_type") == "hub_round" && str(ev, "group_id") == string(gid) {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 func hubRealRoundIDFromEvent(events []map[string]any, gid agenthub.GroupID) string {
@@ -1494,6 +1668,14 @@ func hubRealMaxSeq(msgs []agenthub.Message) int64 {
 		}
 	}
 	return max
+}
+
+func hubRealBriefTexts(texts []string, n int) []string {
+	out := make([]string, 0, len(texts))
+	for _, t := range texts {
+		out = append(out, hubRealClip(t, n))
+	}
+	return out
 }
 
 func hubRealMessageBriefs(msgs []agenthub.Message) []string {
@@ -1564,15 +1746,9 @@ func hubRealClip(s string, n int) string {
 }
 
 func hubRealPathWithin(path, root string) bool {
-	p, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	r, err := filepath.Abs(root)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(r, p)
+	// macOS 的 /tmp 是 /private/tmp 的符号链接：两边都要先解析真实路径再比，
+	// 否则 workspace_root 明明包含它，前缀比较却判成「跑到 root 之外」。
+	rel, err := filepath.Rel(hubCanonicalPath(root), hubCanonicalPath(path))
 	if err != nil {
 		return false
 	}
