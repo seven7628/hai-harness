@@ -14,6 +14,7 @@ import { visualKindOf } from '../lib/visualFile'
 import { baseDirFor } from '../lib/localAsset'
 import { fileStatusLabel } from '../lib/fileStatus'
 import { normalizeFilePath, sameFilePath } from '../lib/filePaths'
+import { isEditorEnabled, isTextLikePath } from '../lib/editorState'
 import CsvPreview from './CsvPreview'
 import { UnifiedDiff, fmtDuration } from './ui'
 import { aggregateFileActivity } from '../lib/fileActivity'
@@ -153,6 +154,10 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
   const blocks = useAppStore((s) => s.blocks) ?? []
   const openFile = useAppStore((s) => s.openFile)
   const closeFile = useAppStore((s) => s.closeFile)
+  // PR-05b：「编辑」入口。开关（settings.editor）与文件类型两道门都在这里，
+  // 按钮**不出现**而不是禁用 —— 回滚开关的意义就是界面上看不到这条能力。
+  const editorOn = useAppStore((s) => isEditorEnabled(s.settings))
+  const openFileForEdit = useAppStore((s) => s.openFileForEdit)
   // 二进制预览入口（见 renderBinaryActions）：与产出卡走**同一条**通道 ——
   // pdf/图片/html/svg 用内嵌浏览器，xlsx/docx/pptx 先经 bridge 转 HTML 再进同一条浏览器。
   // 复用 store 动作而非在文件栏新写渲染，是为了「卡片能看 → 文件栏也能看」不会各自演化。
@@ -676,6 +681,14 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
                 <button className={csvMode === 'plain' ? 'on' : ''} onClick={() => setCsvMode('plain')} aria-pressed={csvMode === 'plain'}>{t('rp.file.csvSource')}</button>
               </span>}
               <button className="on">{t('rp.file.finalFile')}</button>
+              {/* 「编辑」只在独立大视图给（分栏内嵌那份是列表里的活动详情，语义是「看」）。
+                  只读判定刻意留给**编辑器自己**：binary/截断由 file_open 说了算，
+                  这里按扩展名先筛一道只是省一次必然失败的打开。 */}
+              {editorOn && isTextLikePath(standalone.path) && (
+                <button className="file-edit-entry" onClick={() => openFileForEdit(standalone.path)} title={t('editor.editHint')}>
+                  {t('editor.edit')}
+                </button>
+              )}
               <button className="file-detail-close" onClick={() => closeFile()} title={t('rp.file.closeView')} aria-label={t('rp.file.closeView')}>✕</button>
             </div>
           </div>

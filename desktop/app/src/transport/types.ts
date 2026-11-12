@@ -236,6 +236,9 @@ export interface AppSettings {
   mesh?: MeshSettings // Session Mesh 会话间通信（缺省全关：开启后才注册 session_* 工具）
   agent?: AgentSettings // Agent 运行时设置（提醒阈值 + 子 agent 并发槽上限）
   stt?: STTSettings // 语音输入（话筒）配置；配置齐全才显示话筒按钮
+  // 内嵌编辑器回滚开关（PR-05b）：false → 文件树/预览工具栏的「编辑」入口**不出现**。
+  // 缺省（字段不存在）视为开启 —— 老 settings.json 不该因为少一个键就没了这条能力。
+  editor?: boolean
 }
 
 // 一条定时任务（cron_list 返回；CronPage 数据源）

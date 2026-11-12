@@ -4,6 +4,7 @@ import type { FsEntry, FsOpReply } from '../transport/types'
 import { fileKeyOf, useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { copyText } from '../lib/clipboard'
+import { isEditorEnabled, isTextLikePath } from '../lib/editorState'
 import ConfirmModal from './ConfirmModal'
 import {
   Back,
@@ -76,6 +77,9 @@ export default function WorkspaceFiles({ onBack }: { onBack: () => void }) {
   const t = useT()
   const workspace = useAppStore((s) => s.workspace)
   const openFile = useAppStore((s) => s.openFile)
+  // PR-05b 入口②：文件树的「编辑」。开关关掉时这一项**不渲染**（回滚 = 界面上没这条）。
+  const editorOn = useAppStore((s) => isEditorEnabled(s.settings))
+  const openFileForEdit = useAppStore((s) => s.openFileForEdit)
   // 选中行 = 「文件面板当前定位的文件」。阶段 2 起内容按标签隔离（filePreviews），
   // 但「最后定位的文件」仍是 fileFocus 的语义（原 filePreview.path 与它同值：都由同一次
   // locateFile 写入）→ 换成 fileFocus.path，行为不变。
@@ -1296,6 +1300,24 @@ export default function WorkspaceFiles({ onBack }: { onBack: () => void }) {
               >
                 <PencilIcon size={13} /> {t('files.rename')}
               </button>
+              {/* 「编辑」（PR-05b 入口②）：只对**文本类单文件**出现 —— 目录/二进制/图片/
+                  工作簿编辑不了（binary 的最终判定在 file_open，这里只是别给一个必然失败的动作）。
+                  位置刻意在「重命名」之后：菜单前两项（打开 / 新建文件夹）的顺序被
+                  e2e/verify_left_files_batch.mjs 的键盘用例钉住，插在前面会改变 Tab/↑↓ 顺序。 */}
+              {editorOn && !menu.entry.isDir && isTextLikePath(menu.entry.path) && (
+                <button
+                  className="ctx-item"
+                  role="menuitem"
+                  data-edit="1"
+                  onClick={() => {
+                    const entry = menu.entry!
+                    setMenu(null)
+                    openFileForEdit(entry.path)
+                  }}
+                >
+                  <PencilIcon size={13} /> {t('editor.edit')}
+                </button>
+              )}
               <div className="ctx-sep" />
               <button className="ctx-item" role="menuitem" disabled={menuMulti} onClick={() => void reveal(menu.entry!.path)}>
                 <FolderOpenIcon size={13} /> {t('files.reveal')}

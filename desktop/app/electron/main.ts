@@ -23,6 +23,12 @@ import { ipcInputHistoryForget, ipcInputHistoryGet, ipcInputHistorySet, inputHis
 
 let mainWindow: BrowserWindow | null = null
 let bridge: ChildProcessWithoutNullStreams | null = null
+// —— 原生脏标记 + 退出拦截（PR-05b）——
+// docDirty 由渲染层镜像（任一编辑标签有未保存改动）；allowQuit 是**防死循环**的放行标志：
+// 拦下 → 问用户 → 用户选丢弃/保存完 → quitAnyway() 置 true → app.quit() 第二次进
+// before-quit 时直接放行。没有这个标志，preventDefault 会把进程永久锁在退出前。
+let docDirty = false
+let allowQuit = false
 
 // —— 启动打点（TEMP-STARTUP：定位黑屏/启动慢；**已停用**，不再写 electron-startup.log）——
 function startupMark(_phase: string): void {
@@ -340,6 +346,7 @@ interface AppSettings {
   permissions?: PermissionsSettings // Computer Use 已授权 App（空 = 全部拒绝）
   agent?: AgentRuntimeSettings // Agent 运行时设置（提醒阈值 + 压缩阈值 + 子 agent 并发槽上限）
   stt?: STTSettings // 语音输入（话筒）配置；配置齐全才显示话筒
+  editor?: boolean // 内嵌编辑器回滚开关（PR-05b）；缺省 = 开启
 }
 
 // 内置五卡（不可删除；其余为自定义 provider）
@@ -400,6 +407,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   sandbox: { mode: 'seatbelt', sensitive_paths: [] }, // 命令沙箱默认开启（2026-08-16 用户决策）
   permissions: { computer_approved_apps: [] }, // Computer Use 已授权 App 空 = 全部拒绝（安全默认）
   stt: { enabled: false }, // 语音输入默认关闭（配置 base_url/model/api_key 后开启）
+  editor: true, // 内嵌编辑器（PR-05b）默认开启；设 false = 隐藏所有「编辑」入口（回滚用）
 }
 
 // SettingsRead 读盘结果：settings 永远可用（显示兜底），corrupt 标记「文件在但读不出」。
@@ -1548,6 +1556,19 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     mainWindow.webContents.setZoomFactor(z)
     return { ok: true, scale: z }
   })
+  // 原生脏标记（PR-05b）：macOS 用 setDocumentEdited（标题栏红点 + 关窗提示），
+  // 其它平台空实现 —— 「零依赖」也包括不为一个视觉提示引入平台分支。
+  ipcMain.handle('app:set-dirty', (_e, dirty: unknown) => {
+    docDirty = dirty === true
+    if (process.platform === 'darwin') mainWindow?.setDocumentEdited(docDirty)
+    return { ok: true }
+  })
+  // 确认框选了「丢弃」/所有脏文档保存完毕 → 真正退出（置放行标志，见 before-quit）
+  ipcMain.handle('app:quit-anyway', () => {
+    allowQuit = true
+    app.quit()
+    return { ok: true }
+  })
   // 下载安装 ego lite（Browser 引擎=ego 的引导，2026-09）：
   // 跑随包 skill 的 scripts/install.sh（下载 DMG → 装 /Applications → 去 quarantine → 启动）。
   // 输出实时回传（install 日志可能很长；ret 聚合尾部几行）。不阻塞主进程。
@@ -1834,6 +1855,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
+// before-quit：脏文档时**拦一次**并问渲染层（复用脏确认框）。三个放行条件：
+//   · allowQuit（用户已经答过：丢弃/保存完）
+//   · 没有脏文档
+//   · 窗口已经没了（没人能回答；关窗后 mac 上的 cmd+Q 就是这条路径，再拦只会挂住进程）
+// stopBridge 每次都调：它幂等（bridge 为 null 时什么都不做）。
+app.on('before-quit', (e) => {
+  if (!allowQuit && docDirty && mainWindow && !mainWindow.isDestroyed()) {
+    e.preventDefault()
+    mainWindow.webContents.send('app:quit-request')
+    return
+  }
   stopBridge()
 })

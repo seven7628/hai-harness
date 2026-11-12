@@ -11,6 +11,7 @@ import { Activity, GitBranch, FileIcon, BarChart, CheckList, Globe, PanelRight, 
 import { fmtTokens, fmtUsd, fmtDuration } from './ui'
 import { ChangesTab } from './ChangesTab'
 import { FilePreviewTab } from './FilePreview'
+import { EditorConfirm } from './EditorConfirm'
 import { fileUrlToPath } from '../lib/filePaths'
 import { fmtBytesShort, ratio } from '../lib/format'
 import { getSurface } from '../surfaces/registry'
@@ -771,6 +772,8 @@ export default function RightPanel() {
   const tabs = tabSet?.tabs ?? []
   const closedTabs = tabSet?.closed ?? []
   const activeTab = tabs.find((x) => x.id === tabSet?.activeId) ?? null
+  // 编辑标签的脏标记（PR-05b）：真相在 lib/editorDocs，store 只镜像布尔值（标签圆点读它）。
+  const dirtyTabs = useAppStore((s) => s.dirtyTabs)
   const [menu, setMenu] = useState<'add' | 'more' | null>(null)
   // 标签右键菜单（R4 的批量关闭 + 文件动作；内层标签条退役后搬到这里）。
   const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null)
@@ -986,6 +989,8 @@ export default function RightPanel() {
                     ? <span className="browser-page-dot" title={t('browser.tabUnread')} />
                     : <span className="rtab-ico">{tabIconEl(tab)}</span>}
                   <span className="rtab-t">{restoring ? t('browser.tabRestoring') : tabTitle(tab)}</span>
+                  {/* 未保存圆点：位置在标题后、✕ 前（✕ 的命中区不受影响），title 给读屏与 hover 文案 */}
+                  {dirtyTabs[tab.id] && <span className="rtab-dirty" title={t('editor.dirty')} aria-label={t('editor.dirty')} />}
                   <button
                     className="rtab-close"
                     title={t('rp.tabs.close')}
@@ -1110,6 +1115,9 @@ export default function RightPanel() {
           {activeTab?.kind === 'web' && <BrowserTab toolbarHidden={toolbarHidden} onToggleTabs={() => setImmersive((v) => !v)} menuOpen={!!menu || !!ctx} panelVisible={rightExpanded} activePageId={activeTab?.kind === 'web' ? activeTab.pageId : undefined} />}
         </div>
       </div>
+      {/* 脏内容确认框：关标签与退出应用共用一个（reason 区分）。挂在 aside 末尾而不是 body 里
+          —— 标签被关掉后 body 可能已经是空态，框还得在。 */}
+      <EditorConfirm />
     </aside>
   )
 }

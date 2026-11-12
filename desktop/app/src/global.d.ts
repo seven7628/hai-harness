@@ -54,6 +54,10 @@ declare global {
       applyTheme: (theme: string) => Promise<{ ok: boolean }>
       // 外观设置「字体大小」→ 原生缩放（返回钳制后的实际比例）
       setUiZoom: (scale: number) => Promise<{ ok: boolean; scale?: number }>
+      // PR-05b：原生脏标记 + 退出拦截（before-quit 拦一次 → 渲染层复用脏确认框）
+      setDirty?: (dirty: boolean) => Promise<{ ok: boolean }>
+      quitAnyway?: () => Promise<{ ok: boolean }>
+      onQuitRequest?: (cb: () => void) => () => void
       // M0/M2：右侧栏内嵌浏览器视图 + debugger 代理
       embedShow: (p: { url?: string; rect?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; error?: string; state?: unknown }>
       embedResize: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>

@@ -191,6 +191,17 @@ const MOCK_README_ZH = rewriteHtmlSrc(rewriteMdImage(currentProjectReadmeZh))
 // —— mock 工作区文件（read_file / file_preview / 审批 diff 共用同一内容：真 bridge 从磁盘读同一文件）——
 // read_file 读到几行就是几行（header 行数 = 内容实际行数）；edit_file 的 diff 只反映该工具自己的改动，
 // 每个文件工具按各自参数给出不同结果（不共享同一份 canned 内容）。
+// mockHash：mock 的「sha256」。真 bridge 用 sha256 十六进制串，这里只要**同内容同 hash、
+// 内容变则 hash 变**（冲突判定的唯一要求）。FNV-1a 32 位足够，且不引入依赖。
+function mockHash(text: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return 'mock-' + h.toString(16).padStart(8, '0')
+}
+
 const MOCK_FILES: Record<string, string[]> = {
   'auth.go': [
     'package auth',
@@ -634,6 +645,11 @@ class MockTransport implements Transport {
   private ctxTokens = new Map<string, number>()
   private ctxEstimated = new Map<string, boolean>()
   private sessions = new Map<string, MockSess[]>() // workspace path → 该项目的会话列表
+  // —— 内嵌编辑器（PR-05b）：mock 的虚拟文件系统 ——
+  // overlay = 被 file_save 写过的路径 → 新内容（覆盖 MOCK_FILES 的只读种子）；
+  // opened = 当前「已 file_open」的路径集合（保存授权，与真 bridge 的打开集合同义）。
+  private fileOverlay = new Map<string, string>()
+  private fileOpened = new Set<string>()
   private pickIdx = 0
   private titleIdx = 0
 
@@ -1766,9 +1782,52 @@ class MockTransport implements Transport {
         }
         // 预览与 read_file 同源（MOCK_FILES）：点击工具里的文件路径 → 展示该文件真实内容。
         // 兼容两种路径形态：工具参数短名（"auth.go"）与文件树完整路径（"/mock/proj-auth/src/App.vue"）。
+        // 编辑器存过盘的路径以 overlay 为准（否则「保存成功」之后预览还是旧种子内容）。
+        const edited = this.fileOverlay.get(path)
+        if (edited != null) {
+          this.respond(cmd, { path, content: edited, lines: edited.split('\n').length, truncated: false, binary: false })
+          break
+        }
         const lines = MOCK_FILES[path] ?? MOCK_FILES[path.split('/').pop() ?? '']
         const content = lines ? lines.join('\n') : `// ${path}\n// （mock 示例：真 bridge 读取工作区文件）\n`
         this.respond(cmd, { path, content, lines: lines ? lines.length : 2, truncated: false, binary: false })
+        break
+      }
+      // —— 内嵌编辑器三命令（PR-05b）：与真 bridge 同契约（含 code），失信于前端就等于漏测 ——
+      case 'file_open': {
+        const path = String(cmd.payload?.path ?? '')
+        if (!path) { this.respondCode(cmd, 'path 为空', 'denied'); break }
+        this.fileOpened.add(path)
+        const content = this.fileText(path)
+        this.respond(cmd, {
+          ok: true, path, content, hash: mockHash(content),
+          size: content.length, mtime: Date.now(), truncated: false, binary: false,
+        })
+        break
+      }
+      case 'file_save': {
+        const path = String(cmd.payload?.path ?? '')
+        const content = String(cmd.payload?.content ?? '')
+        // baseHash 缺省 = ""（覆盖保存）→ 无条件写；否则比磁盘当前 hash。
+        const baseHash = String(cmd.payload?.baseHash ?? '')
+        if (!this.fileOpened.has(path) && cmd.payload?.allowNew !== true) {
+          this.respondCode(cmd, '未打开的文件不允许写入（先 file_open，或带 allowNew 显式新建）', 'denied')
+          break
+        }
+        const cur = this.fileText(path)
+        if (baseHash !== '' && mockHash(cur) !== baseHash) {
+          this.respondCode(cmd, '文件已被外部修改，本次保存未写入（baseHash 不匹配）', 'conflict',
+            { path, currentHash: mockHash(cur) })
+          break
+        }
+        this.fileOverlay.set(path, content)
+        this.respond(cmd, { ok: true, path, hash: mockHash(content), size: content.length, mtime: Date.now() })
+        break
+      }
+      case 'file_close': {
+        const path = String(cmd.payload?.path ?? '')
+        this.fileOpened.delete(path)
+        this.respond(cmd, { ok: true, path })
         break
       }
       case 'switch_effort':
@@ -2316,6 +2375,41 @@ class MockTransport implements Transport {
 
   private respond(cmd: BridgeCommand, data: Record<string, unknown>) {
     this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data })
+  }
+
+  // respondCode：失败响应带**稳定错误码**（conflict / denied / not_found）。编辑器三条冲突动作
+  // 全靠 code 分流，mock 漏掉它就等于这三条路径在无真 bridge 时走不通。
+  private respondCode(cmd: BridgeCommand, error: string, code: string, data: Record<string, unknown> = {}) {
+    this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error, code, data })
+  }
+
+  // fileText：mock 虚拟文件的内容（overlay 优先 → MOCK_FILES 种子 → 占位文本）。
+  private fileText(path: string): string {
+    const over = this.fileOverlay.get(path)
+    if (over != null) return over
+    const path2 = this.fileOverlay.get(path.split('/').pop() ?? '')
+    if (path2 != null) return path2
+    const lines = MOCK_FILES[path] ?? MOCK_FILES[path.split('/').pop() ?? '']
+    return lines ? lines.join('\n') : `// ${path}\n// （mock 示例：真 bridge 读取工作区文件）\n`
+  }
+
+  // externalChange：**制造一次外部变更**（真 bridge 由 fsnotify 目录监听触发）。
+  // 浏览器下没有第二个进程能改文件，e2e/手工验证只能显式打这一枪：
+  //   __haiMockExternalChange('/mock/workspace/auth.go')                    // 脏 + 外部改 → 黄条
+  //   __haiMockExternalChange('/mock/workspace/auth.go', { deleted: true }) // 删除分支
+  // 返回改后的 hash，方便断言。
+  // public：mockTransport() 把它挂到 globalThis 上给 e2e/手工验证用（见文件末尾）。
+  externalChange(path: string, opts: { deleted?: boolean; content?: string } = {}): string {
+    if (opts.deleted) {
+      this.fileOverlay.delete(path)
+      this.emit({ event_type: 'file_changed', path, by: 'external', deleted: true, timestamp: ts() })
+      return ''
+    }
+    const next = opts.content ?? `${this.fileText(path)}\n// ← 外部改动 ${new Date().toISOString()}`
+    this.fileOverlay.set(path, next)
+    const hash = mockHash(next)
+    this.emit({ event_type: 'file_changed', path, by: 'external', hash, timestamp: ts() })
+    return hash
   }
 
   // respondErr：命令失败响应（真 bridge 同形：ok:false + error；store 侧透出给面板）
@@ -3812,6 +3906,10 @@ export function mockTransport(): Transport {
     (globalThis as { __mockEmit?: (e: Record<string, unknown>) => void }).__mockEmit = (e) => {
       ;(tr as unknown as { emit: (x: Record<string, unknown>) => void }).emit(e)
     }
+    // 内嵌编辑器（PR-05b）：浏览器里没有第二个进程，外部变更必须显式打一枪 ——
+    // 冲突三条动作（重新加载 / 覆盖保存 / 取消）在无真 bridge 时也要能点通。
+    ;(globalThis as { __haiMockExternalChange?: (p: string, o?: { deleted?: boolean; content?: string }) => string })
+      .__haiMockExternalChange = (p, o) => tr.externalChange(p, o)
   }
   return tr
 }
