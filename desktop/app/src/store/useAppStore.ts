@@ -18,6 +18,11 @@ import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } fro
 import { t as i18nT } from '../i18n'
 import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
+// R06 C1：web 标签的身份判据已下沉到 lib/webTab（纯函数、零 store 运行时依赖）。
+// store 侧保留同名 re-export —— RightPanel 等调用点的 import 路径不变（本轮零行为变化），
+// 下一轮 provider 直接从 lib 取，不再经过 store。
+import { isPendingWebTab, samePreviewTarget, webTabKey, webUrlSnapshot } from '../lib/webTab'
+export { isPendingWebTab, samePreviewTarget, webTabKey }
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
 //
@@ -1452,30 +1457,6 @@ type PersistedTab =
 interface PersistedTabSet { tabs: PersistedTab[]; activeId: string | null }
 interface PersistedTabs { v: number; scopes: Record<ScopeKey, PersistedTabSet> }
 
-// isPendingWebTab：待重建的 web 标签（重启恢复出来的那种）。
-// 判据 = 「有 url 快照 + 没有任何池身份」：池身份是运行时 id，跨进程不复用，故恢复时一律
-// 不带；带上就会指向重启后新建的**另一个**页面（主进程 't'+自增序号从 t1 重来）。
-export function isPendingWebTab(t: TabInstance): t is WebTabInstance {
-  return t.kind === 'web' && !t.viewId && t.pageId == null && !!t.url
-}
-
-// webUrlSnapshot：一个 web 标签此刻能拿到的最可信的 url（+ 源文件路径）快照。
-// 三级反查见 toPersistedTab 的注释；返回 undefined = 这个标签**不可恢复**。
-function webUrlSnapshot(t: WebTabInstance, s: AppState): { url: string; srcPath?: string } | undefined {
-  if (t.url) return { url: t.url, ...(t.srcPath ? { srcPath: t.srcPath } : {}) }
-  if (t.viewId) {
-    const tp = s.embedNav?.targets?.find((x) => x.id === t.viewId)
-    // about:blank = 自举占位（还没导航到真实页面）→ 不是「用户打开的页面」，不恢复。
-    if (tp?.url && tp.url !== 'about:blank') return { url: tp.url, ...(tp.srcPath ? { srcPath: tp.srcPath } : {}) }
-    return undefined
-  }
-  if (t.pageId != null) {
-    const pg = s.browserPages.find((p) => p.id === t.pageId)
-    if (pg?.url) return { url: pg.url }
-  }
-  return undefined
-}
-
 // toPersistedTab：运行时标签 → 存储形态。返回 undefined = **不持久化这个标签**。
 //
 // web 标签的 url 从哪来（本阶段最容易做歪的一处）：TabInstance **没有** url 字段，而
@@ -1698,26 +1679,6 @@ function makeWebTab(source: 'native' | 'mcp', key: string): TabInstance {
     ? { id, kind: 'web', viewId: key }
     : { id, kind: 'web', pageId: Number(key.replace(/^p/, '')) }
 }
-
-// webTabKey：web 标签在**当前数据源**下的身份（另一数据源的身份返回 undefined → 不参与本次同步）。
-function webTabKey(t: TabInstance, source: 'native' | 'mcp'): string | undefined {
-  if (t.kind !== 'web') return undefined
-  if (source === 'native') return t.viewId
-  return t.pageId != null ? `p${t.pageId}` : undefined
-}
-
-// samePreviewTarget：一个「待重建的恢复标签」（阶段 5）是不是就对应这个页面 —— 用户点它 →
-// 重建出视图 → syncWebTabs 用它把视图接回**原来那个标签实例**（否则恢复的标签永远停在
-// 待重建态，点一次还多一个重复标签）。
-// 口径与主进程 embed:open-target 的去重一致：两侧都有 srcPath 时比 srcPath（office 转换
-// 产物每次换临时 html_path，只有源文件认得出「是同一个」），否则比 url。
-function samePreviewTarget(t: WebTabInstance, x: { url: string; srcPath?: string }, ws: string | undefined): boolean {
-  const a = t.srcPath
-  const b = x.srcPath
-  if (a && b) return relIfInside(a, ws) === relIfInside(b, ws)
-  return !!t.url && t.url === x.url
-}
-
 
 // 浏览器面板状态（web tab）按工作区隔离：切换工作区时清空上一个工作区的页列表/截图/
 // loading。浏览器连接与页/截图都是 per-workspace（bridge runtime(ws).plugins 隔离），
