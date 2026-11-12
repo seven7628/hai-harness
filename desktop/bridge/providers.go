@@ -428,7 +428,8 @@ type providerConfig struct {
 	// list_models / provider_billing 随命令带 key，key 由 Electron 从 keys.json 取）。
 	// loadSettings 只按 settings.json 重算「settings 来源」的 key：注入值必须保留——否则
 	// 保存新 key 后紧跟的 loadSettings、或随便一次 reload_settings（切沙箱/浏览器引擎）都会
-	// 把内存里的新 key 清掉，回退到 spawn 时的旧 env key（401 / 轮换不生效）。
+	// 把内存里的新 key 清掉（回退 spawn 时的旧 env key）或被 settings 残留的旧明文顶回去
+	// （401 / 轮换不生效）。
 	keyInjected map[string]bool
 	models      map[string]map[string]int64                  // provider → model → context window（tokens）
 	maxTokens   map[string]map[string]int64                  // provider → model → 单次输出上限（tokens）
@@ -665,11 +666,12 @@ func (pc *providerConfig) loadSettings() {
 		if p.BaseURL != "" {
 			pc.baseURL[name] = p.BaseURL
 		}
-		if p.ApiKey != "" {
+		if p.ApiKey != "" && !pc.keyInjected[name] {
 			// legacy：迁移未完成的 settings 明文（BR-08 迁移后 settings 不再有 key）。
-			// settings 是这一份的来源 → 清注入标记，后续 settings 删 key 仍能清内存（旧语义）。
+			// **payload 注入值永远胜出**：settings 明文只可能是上次迁移的残留，比 keys.json 旧；
+			// 拿它覆盖注入值 = 旧 key 复活（reload_settings 后立刻 401）。只有没有注入值时
+			// 才采用 settings 明文（迁移未完成的兜底）。
 			pc.apiKey[name] = p.ApiKey
-			delete(pc.keyInjected, name)
 		} else if !pc.keyInjected[name] {
 			// settings 里无 key 且内存值不是 payload 注入的（用户删除/从未配置）：
 			// 清内存旧值，回退 env 兜底。注入值**不删**（见 keyInjected 字段说明）。

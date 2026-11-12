@@ -4,7 +4,8 @@
 //   ① keys.json 形状与编码：safeStorage 可用 → enc:true；不可用 → enc:false + base64
 //      （**降级不是加密**）；解密失败按未设置；原子写 0600、未知 provider 条目原样保留；
 //   ② 坏文件（坏 JSON / 非对象）→ 备份 `.corrupt-<ts>` + **拒绝写**（不覆盖丢 key）；
-//   ③ 迁移：先写 keys.json 再删 settings 明文；keys 写失败 → settings 一个字不动；
+//   ③ 迁移：先写 keys.json 再删 settings 明文；keys.json 已有可用条目 → 保留旧 key（优先于
+//      settings 明文）；旧条目解不开/为空才用明文救回；keys 写失败 → settings 一个字不动；
 //      settings 写失败 → 明文保留（宁可重复不可丢）；幂等；备份（.bak / .corrupt-*）脱敏；
 //   ④ 注入面：spawn env 只放**当前活跃** provider 一把 key；set_provider / switch_model
 //      缺 api_key 时按 provider 注入，已带的 key 绝不覆盖；
@@ -299,15 +300,54 @@ test('迁移成功：先写 keys.json 再删 settings 明文；其它字段/键�
   assert.ok(keysAt >= 0 && settingsAt > keysAt, `必须先写 keys.json（${keysAt} < ${settingsAt}）`)
 })
 
-test('迁移：同名旧条目以 settings 明文为准覆盖', () => {
+test('迁移：已有可用旧 key → 不被 settings 明文覆盖（keys.json 优先）', () => {
   const old = { deepseek: { enc: false, data: Buffer.from('sk-old').toString('base64') }, keep: { enc: false, data: 'x' } }
   const f = fakeIo({ [KEYS]: JSON.stringify(old) })
   const raw = rawSettings()
   const m = migratePlaintextProviderKeys(migrationArgs(f.io, raw))
   assert.equal(m.ok, true)
-  assert.equal(getKey(args(f.io), 'deepseek'), 'sk-deepseek', 'settings 是当前最新来源')
+  assert.equal(getKey(args(f.io), 'deepseek'), 'sk-old', '旧条目可用 → 保留，settings 明文（更旧）不得覆盖')
+  assert.equal(getKey(args(f.io), 'openai'), 'sk-openai', '没有旧条目的 provider 照常迁移')
   const keys = JSON.parse(f.text(KEYS)!) as KeyStoreFile
   assert.deepEqual(keys.keep, old.keep, '无关旧条目保留')
+  // keys.json 已有可用旧条目的 provider 也要删 settings 明文（明文不该常驻盘上，下次启动也不必再比一遍）
+  assert.equal(m.settingsChanged, true)
+  assert.deepEqual(m.moved, ['deepseek', 'openai'])
+  assert.equal(f.text(SETTINGS)!.includes('sk-deepseek'), false, 'settings 明文仍要删')
+  assert.equal(f.text(SETTINGS)!.includes('sk-openai'), false)
+})
+
+test('迁移：旧条目解不开（换机器/钥匙串丢失）→ 用 settings 明文救回', () => {
+  const old = {
+    deepseek: { enc: true, data: Buffer.from('enc:sk-old-undecryptable').toString('base64') },
+    keep: { enc: false, data: 'x' },
+  }
+  const f = fakeIo({ [KEYS]: JSON.stringify(old) })
+  const broken = fakeCrypto({ decryptFails: true })
+  const m = migratePlaintextProviderKeys(migrationArgs(f.io, rawSettings(), broken))
+  assert.equal(m.ok, true, '解不开不是错误：用 settings 明文救回')
+  // 用可用的 crypto 读回：deepseek 已被 settings 明文救回（重写成新条目），openai 是新写入的
+  const a = args(f.io)
+  assert.equal(getKey(a, 'deepseek'), 'sk-deepseek', '旧条目解不开 → 明文救回')
+  assert.equal(getKey(a, 'openai'), 'sk-openai')
+  const keys = JSON.parse(f.text(KEYS)!) as KeyStoreFile
+  assert.deepEqual(keys.keep, old.keep, '无关旧条目保留（解不开也不删别人的）')
+  assert.equal(f.text(SETTINGS)!.includes('sk-deepseek'), false, '救回后 settings 明文仍要删')
+})
+
+test('迁移：旧条目为空 / 形状不对 → 用 settings 明文救回', () => {
+  const old = {
+    deepseek: { enc: false, data: '' }, // 空值 = 没有 key
+    openai: { enc: 'yes', data: 42 }, // 形状不对（不是 KeyEntry）
+  }
+  const f = fakeIo({ [KEYS]: JSON.stringify(old) })
+  const raw = rawSettings()
+  const m = migratePlaintextProviderKeys(migrationArgs(f.io, raw))
+  assert.equal(m.ok, true)
+  const a = args(f.io)
+  assert.equal(getKey(a, 'deepseek'), 'sk-deepseek')
+  assert.equal(getKey(a, 'openai'), 'sk-openai')
+  assert.deepEqual(m.moved, ['deepseek', 'openai'])
 })
 
 test('迁移：keys.json 写失败 → settings 一个字都不改（明文保留，下次重试）', () => {

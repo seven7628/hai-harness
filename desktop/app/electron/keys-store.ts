@@ -246,12 +246,10 @@ export function copyKey(args: KeyStoreArgs, from: string, to: string): KeyCopyRe
 }
 
 /**
- * getKey：取某 provider 的明文 key。解密失败（换机器 / 钥匙串丢失 / 落后格式）→ 空串，
- * 绝不抛错（renderer 侧「测试连接」按「未设置」提示，用户重新填一次即可）。
+ * decodeEntry：keys.json 条目 → 明文。条目不存在 / 形状不对 / 解密失败（换机器 / 钥匙串丢失 /
+ * 落后格式）→ 空串，绝不抛错。
  */
-export function getKey(args: KeyStoreArgs, provider: string): string {
-  if (!isValidProviderName(provider)) return ''
-  const entry = readKeyStoreLoose(args)[provider]
+function decodeEntry(args: KeyStoreArgs, provider: string, entry: unknown): string {
   if (!isKeyEntry(entry)) return ''
   try {
     return entry.enc ? args.crypto.decryptString(entry.data) : Buffer.from(entry.data, 'base64').toString('utf8')
@@ -259,6 +257,15 @@ export function getKey(args: KeyStoreArgs, provider: string): string {
     args.log?.(`[keys] ${provider} 的 key 解密失败（换机器/钥匙串丢失？按未设置处理）：${errMessage(e)}`)
     return ''
   }
+}
+
+/**
+ * getKey：取某 provider 的明文 key。解密失败（换机器 / 钥匙串丢失 / 落后格式）→ 空串，
+ * 绝不抛错（renderer 侧「测试连接」按「未设置」提示，用户重新填一次即可）。
+ */
+export function getKey(args: KeyStoreArgs, provider: string): string {
+  if (!isValidProviderName(provider)) return ''
+  return decodeEntry(args, provider, readKeyStoreLoose(args)[provider])
 }
 
 /** hasKey：条目存在且解得出非空明文（解不开的条目不算「已设置」——它用不了）。 */
@@ -278,7 +285,7 @@ export interface PlaintextMigrationArgs extends KeyStoreArgs {
 
 export interface PlaintextMigration {
   ok: boolean
-  /** 已搬进 keys.json（且已从 settings 删掉明文）的 provider。 */
+  /** 明文已从 settings 移除的 provider（key 在 keys.json 可用：保留原条目或用明文救回）。 */
   moved: string[]
   /** 明文仍留在 settings 的 provider（keys 已写但 settings 写失败 → 下次启动重试）。 */
   kept: string[]
@@ -293,8 +300,12 @@ export interface PlaintextMigration {
  * migratePlaintextProviderKeys：存量 `provider.<name>.api_key` 明文 → keys.json。
  *
  * 顺序（每一步都为了「绝不丢 key」）：
- *   ① 先把 key 写进 keys.json —— settings 是当前最新来源，同名旧条目以明文为准覆盖；
- *   ② keys 写成功后才从 settings 原始对象删 `api_key` 并原子写回；
+ *   ① 先把 key 写进 keys.json —— **keys.json 优先**：同名旧条目能解出非空明文时**保留旧条目**
+ *      （settings 里的 api_key 只可能是上次迁移的残留，只可能比 keys.json 旧 —— provider:save
+ *      已不再写 settings；拿它覆盖就是旧 key 复活）；只有条目不存在 / 解不开 / 为空
+ *      （换机器、坏条目）才用 settings 明文写入**救回**；
+ *   ② keys 写成功后才从 settings 原始对象删 `api_key` 并原子写回（本轮无需改写 keys.json 时
+ *      也算「已写入」—— 旧条目本来就在盘上）；
  *   ③ settings 写失败 → 明文**保留在 settings**（key 已在 keys.json，重复但绝不丢）；
  *   ④ 两者都成功后，把 settings 的备份（`.bak` / `.corrupt-*`）里的明文替换成占位符。
  *
@@ -320,21 +331,30 @@ export function migratePlaintextProviderKeys(args: PlaintextMigrationArgs): Plai
   }
   if (pending.length === 0) return { ok: true, moved: [], kept: [], settingsChanged: false }
 
-  // ① 先写 keys.json（一次原子写：要么全进，要么一个都不进）
+  // ① 先写 keys.json（一次原子写：要么全进，要么一个都不进）。
+  //    同名条目**能解出非空明文就保留**（keys.json 是 key 的唯一权威来源，settings 明文更旧）；
+  //    解不出/为空/不存在才用 settings 明文救回。
   const read = readKeyStoreForWrite(args)
   if (!read.ok) return { ok: false, moved: [], kept: pending.map((p) => p.name), settingsChanged: false, error: read.error }
   const keys = read.keys
-  for (const p of pending) keys[p.name] = encodeKey(args, p.plain)
-  try {
-    writeKeyStore(args, keys)
-  } catch (e) {
-    // keys 没写成 → settings 一个字都不动（明文仍在，下次启动重试）
-    return {
-      ok: false,
-      moved: [],
-      kept: pending.map((p) => p.name),
-      settingsChanged: false,
-      error: `写 ${args.file} 失败（settings.json 未改动，明文保留）：${errMessage(e)}`,
+  const rescued: string[] = []
+  for (const p of pending) {
+    if (decodeEntry(args, p.name, keys[p.name]).trim()) continue // 旧 key 可用 → 保留，不覆盖
+    keys[p.name] = encodeKey(args, p.plain)
+    rescued.push(p.name)
+  }
+  if (rescued.length > 0) {
+    try {
+      writeKeyStore(args, keys)
+    } catch (e) {
+      // keys 没写成 → settings 一个字都不动（明文仍在，下次启动重试）
+      return {
+        ok: false,
+        moved: [],
+        kept: pending.map((p) => p.name),
+        settingsChanged: false,
+        error: `写 ${args.file} 失败（settings.json 未改动，明文保留）：${errMessage(e)}`,
+      }
     }
   }
 
