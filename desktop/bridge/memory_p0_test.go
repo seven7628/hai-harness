@@ -384,6 +384,9 @@ func (r p0Run) precision() bool {
 // 上一版自创 6 条行为规则是 12%~62% 采纳率的来源；这次的区别是**有原文可依**。
 // 但"照抄"不等于"该加"——C 是否真的更好仍要由本装置测出来，故它先是实验臂。
 func TestP0GuidanceCausesModelToWriteMemory(t *testing.T) {
+	if os.Getenv("HAI_EVAL_NETWORK") == "" {
+		t.Skip("需要可用网关，设 HAI_EVAL_NETWORK=1 运行")
+	}
 	prov, model, p := baselineEnvOrSkip(t)
 	baselinePing(t, p, prov, model)
 	reps := p0Reps(t)
