@@ -1482,7 +1482,7 @@ const zh: Record<string, string> = {
   'narrative.refMissing': '未找到',
   'narrative.refBlocked': '未加载',
   'narrative.error': '错误',
-  'narrative.retryCountdown': '{n} 后开始重试',
+  'narrative.retryCountdown': '{n}s 后开始重试',
   'narrative.retryElapsed': '本次尝试已进行 {t}',
   'narrative.retryWaited': '已等待 {t}',
   // 失败尝试的已产生成本（2026-09-23）：上游按已生成 token 计费 —— 重试不是免费的
@@ -3281,7 +3281,7 @@ const en: Record<string, string> = {
   'narrative.refMissing': 'not found',
   'narrative.refBlocked': 'not loaded',
   'narrative.error': 'Error',
-  'narrative.retryCountdown': 'retrying in {n}',
+  'narrative.retryCountdown': 'retrying in {n}s',
   'narrative.retryElapsed': 'attempt running {t}',
   'narrative.retryWaited': 'waited {t}',
   'narrative.retryCost': 'retries spent {cost}',

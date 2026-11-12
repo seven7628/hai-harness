@@ -2481,6 +2481,23 @@ body.is-electron .left.collapsed .rail .rbtn {
   border-top: 1px solid var(--border);
   background: var(--bg);
 }
+/* 卡片内嵌的转录（.ac-narrative 里的那个 .narrative，2026-11 起取代 .agent-tr）：
+   与上面 .agent-tr 同一条理由 —— 卡壳是 mono 12px + --text-2 的状态行语境，
+   转录里是要读的正文，**必须显式重置**排版上下文。漏了这一条就是 2026-09-23 报障的
+   复发形态：同一份 Markdown 在卡内 12px mono、在子会话页 13.5px sans。
+   （e2e/verify_subagent_transcript_style.mjs 逐项比对两处宿主的计算样式，漏了会红。） */
+.ac-narrative {
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.ac-narrative .narrative {
+  /* 卡内那个 .narrative 只当容器：排版一律继承上一档（皮肤层若给 .narrative 单独写
+     font-size/color，卡内会再漂一次 —— 那正是这条要防的） */
+  font: inherit;
+  color: inherit;
+}
 
 /* 子 agent 转录（思考 / 正文 / 工具调用 / 压缩）：内容与主对话共用同一套渲染原语
    （NarrativeBlocks + .md-text/.md/@ 工具行/思考块），所以这里只负责**排版上下文**与容器。
