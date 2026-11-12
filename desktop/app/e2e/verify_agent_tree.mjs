@@ -18,6 +18,7 @@
 // 用法：cd desktop/app && node e2e/verify_agent_tree.mjs
 //      REPORT=1 ... # 只取证（截图）不判定
 import { chromium } from 'playwright'
+import { freePort, waitHttp } from './_serve.mjs'
 import { spawn } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -26,7 +27,8 @@ import fs from 'fs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
-const PORT = Number(process.env.PORT || 4193)
+// 端口由内核分配（见 e2e/_serve.mjs 的注释）：固定端口在链里会撞上一个还没退干净的服务器。
+const PORT = Number(process.env.PORT) || await freePort()
 const SHOTS = path.join(__dirname, '_agenttree_shots')
 const REPORT = process.env.REPORT === '1'
 
@@ -61,7 +63,7 @@ import LeftPanel from '../../src/components/LeftPanel'
 import CenterPanel from '../../src/components/CenterPanel'
 import RightPanel from '../../src/components/RightPanel'
 import { useAppStore, dispatchEvent, hydrateCheckpoint } from '../../src/store/useAppStore'
-import { aggregateFileActivity } from '../../src/components/RightPanel'
+import { aggregateFileActivity } from '../../src/lib/fileActivity'
 import { withAgentToolBlocks } from '../../src/lib/agentSession'
 import '../../src/index.css'
 import '../../src/narrative-skin.css'
@@ -201,6 +203,8 @@ async function main() {
   fs.rmSync(SHOTS, { recursive: true, force: true })
   fs.mkdirSync(SHOTS, { recursive: true })
   await waitPort(PORT)
+  // 端口可连只说明**有东西**在监听；再确认这张探针页真能开（子进程退出即失败）
+  await waitHttp(URL_BASE, { child: server })
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 1360, height: 860 } })
   page.on('pageerror', (e) => console.error('[pageerror]', e.message))
@@ -506,16 +510,30 @@ async function main() {
   })
   await page.waitForSelector('.narrative .as-hd', { timeout: 10000 })
   await page.waitForTimeout(200)
+  // 2026-11 运行时皮肤：默认（简洁档）的工具行是**车道行** `.rt-turn > .rt-act`，
+  // `.tool-row` / `.tool-group` 只在展开全量视图里出现 —— 主对话与子会话两处都走同一套，
+  // 故锚点必须是 .rt-act（旧的 .tool-row 断言在这个皮肤下恒为 0，属脚本 drift）。
+  const laneCount = await page.locator('.narrative .rt-act').count()
+  const turnCount = await page.locator('.narrative .rt-turn').count()
+  // 简洁档默认把这一个调用折成「Worked · 1 call」，参数/结果要点开才看得到（与主对话同构）。
+  if (laneCount > 0) {
+    await page.locator('.narrative .rt-act').first().click()
+    await page.waitForTimeout(300)
+  }
   const toolSess = {
     title: await page.locator('.narrative .as-crumb-cur').innerText(),
-    // 后台工具任务在子会话里用**主对话同一套**工具行（.tool-group > .tool-row），
-    // 不再是右栏那套展开体（.tr-sec / .json-box）
-    groups: await page.locator('.narrative .tool-group').count(),
-    rows: await page.locator('.narrative .tool-row').count(),
+    lanes: laneCount,
+    turns: turnCount,
+    text: await page.locator('.narrative').innerText(),
+    // 旧右栏那套展开体外壳（.agent-view / .av-*）不得作为子会话外壳回归
+    legacyShell: await page.locator('.narrative .agent-view, .narrative .av-hd, .narrative .av-body').count(),
     backBtn: await page.locator('.narrative .as-back').count(),
   }
   if (REPORT) console.log(JSON.stringify(toolSess, null, 2))
-  assert(toolSess.groups >= 1 && toolSess.rows >= 1, '后台工具任务在子会话里用主对话同一套工具行渲染（.tool-group/.tool-row）')
+  assert(toolSess.turns >= 1 && toolSess.lanes >= 1,
+    `后台工具任务在子会话里用主对话同一套工具行渲染（.rt-turn ${toolSess.turns} / .rt-act ${toolSess.lanes}）`)
+  assert(toolSess.text.includes('sleep 30'), `展开后看得到工具参数（实际「${toolSess.text.replace(/\n/g, ' / ')}」）`)
+  assert(toolSess.legacyShell === 0, '子会话没有回退到旧右栏展开体外壳（.agent-view/.av-*）')
   assert(toolSess.backBtn === 1, '工具任务的子会话也有「返回主会话」')
   await page.screenshot({ path: path.join(SHOTS, 'center-tool-task.png') })
 
@@ -566,6 +584,13 @@ async function main() {
     text: '把返回 401 的分支也改掉', source: 'user', timestamp: Date.now(),
   }))
   await page.waitForTimeout(350)
+  /* skin：user 块（`.msg.user.rt-you`，UserBlock）目前**只在 runtime 皮肤**下渲染 ——
+     Narrative.renderBlock 的 user 分支带 `skin === 'runtime'` 门，current/v3 两档下 user 块
+     渲染成 null（主会话同样如此，不是子会话特例；见 R05a3b 报告的风险项）。
+     这一段要量的是「子会话里出现这条 user 块」，故显式把皮肤切到 runtime 再量，量完切回。
+     皮肤只改显示层（MutationObserver → 重渲染），store 里的 user 项不受影响。 */
+  await page.evaluate(() => document.documentElement.setAttribute('data-skin', 'runtime'))
+  await page.waitForTimeout(300)
   const userInTranscript = {
     blocks: await page.locator('.narrative .msg.user').count(),
     text: await page.locator('.narrative .msg.user').first().innerText().catch(() => ''),
@@ -589,12 +614,24 @@ async function main() {
   // 混进主会话历史 —— 正是「TODO 串了」那类 bug 的同构版本）
   const inMain = await page.locator('.narrative .msg.user').allInnerTexts()
   assert(!inMain.some((x) => x.includes('401')), `主会话叙述区不出现子运行的对话（实际 ${JSON.stringify(inMain.map((x) => x.slice(0, 20)))}）`)
+  // 量完把皮肤切回探针默认（后面几段按原皮肤量版式/滚动，不受这一段的临时切换影响）
+  await page.evaluate(() => document.documentElement.setAttribute('data-skin', 'current'))
+  await page.waitForTimeout(200)
 
   // ---- ⑤b 功能复用：子会话的滚动/贴底来自 Narrative（不是「看着像」而是「就是它」）----
   //
   // 用户 2026-10 的原话是「复用主会话的页面样式**与功能**」。样式能靠同宽同 padding 验，
   // 功能（贴底跟随、能滚动、能翻更早）只能靠真的滚一次才算数 —— 这正是上一版独立实现里
   // 缺失的部分（当时下方一片空白且不能跟随）。
+  /* 密度：简洁档（默认）把一次运行的工作过程收成一行「Worked · N calls」——
+     40 条工具调用也只占一行，页面永远不超过一屏，这段「真的能滚」就量不到任何东西。
+     故这一段按**详细档**（用户可选设置）量：同样的块以逐行形态铺开，才能验到滚动/贴底。
+     量完恢复默认，后面几段不受影响。 */
+  await page.evaluate(() => {
+    const st = window.__store.getState()
+    window.__store.setState({ settings: { ...st.settings, narrative_density: 'detailed' } })
+  })
+  await page.waitForTimeout(200)
   await page.evaluate(() => {
     const st = window.__store.getState()
     st.focusAgent(undefined)
@@ -627,6 +664,11 @@ async function main() {
   const awayBtn = await page.locator('.narrative .narrative-jump').count()
   assert(awayBtn === 1, '上滑离开底部 → 出现「回到底部」（与主会话同一套手势状态机）')
   await page.screenshot({ path: path.join(SHOTS, 'center-subsession-scrolled.png') })
+  await page.evaluate(() => {
+    const st = window.__store.getState()
+    window.__store.setState({ settings: { ...st.settings, narrative_density: 'concise' } })
+  })
+  await page.waitForTimeout(200)
 
   // ---- ⑥ 右栏退役：任务 tab 不再列任何派生运行 ----
   await page.goto(`${URL_BASE}?host=right`, { waitUntil: 'domcontentloaded' })
@@ -653,8 +695,14 @@ async function main() {
   // 它自己的；孙 agent（没有清单）→ 整块不渲染。**第三条是关键**：回退主会话清单会让
   // 「它没有计划」显示成「它和主会话一样」，是用户 2026-10 报障的根因。
   const todoOf = async (focus) => {
-    await page.evaluate((f) => window.__store.getState().focusAgent(f), focus)
-    await page.waitForTimeout(200)
+    // 待办面板只在右栏**展开**形态里渲染（收起时右栏只剩一列图标）。右栏是它的唯一宿主，
+    // 故先把右栏展开 —— 这是量面板的前提，不是被测行为。
+    await page.evaluate((f) => {
+      const st = window.__store.getState()
+      st.setRightExpanded(true)
+      st.focusAgent(f)
+    }, focus)
+    await page.waitForTimeout(250)
     return {
       count: await page.locator('.right .todo-panel').count(),
       text: await page.locator('.right .todo-panel').innerText().catch(() => ''),
