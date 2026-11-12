@@ -170,7 +170,7 @@ function mockCmd(cmd, payload) {
     case 'hub_need_list':
       return { needs: [] }
     case 'hub_group_get':
-      return { group: GROUP, conversation: { status: 'idle', turns_used: 0, turn_budget: 8 } }
+      return { group: GROUP, conversation: { status: 'idle', turns_used: 0, turn_budget: -1 } }
     case 'hub_group_history': {
       // 搜索跳转的 around 页：以 before_seq 结尾的一页（含 seq=40 的命中）。
       if (Number((payload || {}).before_seq) === 41) {

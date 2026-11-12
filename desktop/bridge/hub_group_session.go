@@ -456,7 +456,7 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		return
 	}
 
-	// 与 group_say / 人类发送共用同一临界区：查重、轮次上限、路由、落盘不能被插队。
+	// 与 group_say / 人类发送共用同一临界区：查重、路由、落盘不能被插队。
 	m.hubGroupSendMu.Lock()
 	g, err := st.LoadGroup(ctx, wake.GroupID)
 	if err != nil || g == nil || g.Deleted {
@@ -486,24 +486,10 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		}
 		return
 	}
-	msg, routed, limitHit, routeErr, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, agentGroupWrite{
+	msg, routed, routeErr, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, agentGroupWrite{
 		Text: text, RoundID: wake.RoundID, MessageID: wake.MessageID, Context: turnCtx,
 	})
 	m.hubGroupSendMu.Unlock()
-	if limitHit {
-		// 轮次上限：不写消息、不唤醒；写一条 activity 让 UI 能看到「被限流」，
-		// 同时推进游标（这一轮确实处理了，只是拒绝发言）。
-		_ = st.AppendActivity(ctx, &agenthub.Activity{
-			GroupID: g.ID, AfterSeq: wake.TriggerSeq, Kind: "status", Status: "blocked",
-			Name: "round", Summary: fmt.Sprintf("本轮智能体发言已达上限 %d，已停止自动接龙", groupTurnLimit(g)),
-			At: time.Now().UTC(),
-		})
-		m.hubAlertf("group_turn_limit", "群 %s 智能体发言达上限，已停止自动接龙", g.ID)
-		if err := m.advanceGroupAgentCursor(ctx, st, g.ID, spec.Agent.ID, wake.TriggerSeq); err != nil {
-			m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
-		}
-		return
-	}
 	if err != nil {
 		m.hubAlertf("group_reply_failed", "群回复落账失败：%v", err)
 		return
@@ -526,39 +512,6 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 	}
 }
 
-func groupTurnLimit(g *agenthub.Group) int {
-	limit := agenthub.DefaultGroupMaxTurnsPerHuman
-	if g != nil && g.Policy.MaxTurnsPerHuman > 0 {
-		limit = g.Policy.MaxTurnsPerHuman
-	}
-	return limit
-}
-
-// enforceGroupTurnLimit 限制「最后一次人类发言之后」智能体连续发言的轮次。
-// 人类发新消息会重置计数（MaxTurnsPerHuman 默认 8）。返回 true = 已达上限。
-func enforceGroupTurnLimit(ctx context.Context, st agenthub.Store, g *agenthub.Group) (bool, error) {
-	if g == nil {
-		return false, fmt.Errorf("%w: group is nil", agenthub.ErrInvalid)
-	}
-	limit := groupTurnLimit(g)
-	msgs, err := st.ReadMessages(ctx, g.ID, 0, 500)
-	if err != nil {
-		return false, err
-	}
-	turns := 0
-	// ReadMessages 按 seq 升序返回（最新在末尾）：必须倒序扫到最近一条人类消息。
-	for i := len(msgs) - 1; i >= 0; i-- {
-		m := msgs[i]
-		if m.Sender.Kind == agenthub.SenderHuman {
-			break
-		}
-		if m.Sender.Kind == agenthub.SenderAgent {
-			turns++
-		}
-	}
-	return turns >= limit, nil
-}
-
 // agentGroupWrite 是一次「智能体群消息」的落账请求。group_say 可以带结构化
 // mentions/mention_all（P3b-02）；final 回复只用正文，正文里的 @Name 仍由 Router 解析。
 type agentGroupWrite struct {
@@ -573,23 +526,20 @@ type agentGroupWrite struct {
 	Context *agenthub.TurnContext
 }
 
-// appendAgentGroupMessageLocked 是 group_say / final 共用的「限流 + 路由 + 落账」路径。
+// appendAgentGroupMessageLocked 是 group_say / final 共用的「路由 + 落账」路径。
 // 调用方必须持有 hubGroupSendMu；wake 由调用方在解锁后做（会话装配可能很慢）。
 // routeFatal=true：@ 解析失败就不落消息（group_say 的工具语义）；false：正文照发、
 // 只把 routeErr 交回调用方告警（final 的语义）。
-func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, w agentGroupWrite) (msg *agenthub.Message, routed *agenthub.Round, limitHit bool, routeErr error, err error) {
-	if limitHit, err = enforceGroupTurnLimit(ctx, st, g); err != nil {
-		return nil, nil, false, nil, err
-	}
-	if limitHit {
-		return nil, nil, true, nil, nil
-	}
+//
+// 不再有「人类发言后最多 N 条」的闸门（用户口径：群策略限制取消）：
+// 群策略 MaxTurnsPerHuman 字段保留只为兼容旧 JSON，不参与拦截。
+func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, w agentGroupWrite) (msg *agenthub.Message, routed *agenthub.Round, routeErr error, err error) {
 	r, routeErr := m.routeGroupMentions(ctx, st, g, sender, false, agenthub.MentionRequest{
 		Text: w.Text, Mentions: w.Mentions, MentionAll: w.MentionAll,
 	})
 	if routeErr != nil {
 		if w.RouteFatal {
-			return nil, nil, false, routeErr, nil
+			return nil, nil, routeErr, nil
 		}
 		r = nil
 	}
@@ -607,14 +557,14 @@ func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub
 	}
 	seq, _, err := agenthub.AppendGroupMessageRouted(ctx, st, msg, routed)
 	if err != nil {
-		return nil, nil, false, routeErr, err
+		return nil, nil, routeErr, err
 	}
 	m.emitHubGroupMessage(g.ID, seq, msg)
 	if routed != nil {
 		routed.TriggerSeq = seq
 		m.emitHubGroupRound(g.ID, *routed)
 	}
-	return msg, routed, false, routeErr, nil
+	return msg, routed, routeErr, nil
 }
 
 // routeGroupMentions 只对完整正文做 @ 路由（streaming partial 绝不路由），并把结构化

@@ -175,8 +175,17 @@ const roster = [
     group_id: 'g1', status: 'running', turns_used: 3, turn_budget: 8,
     depth: 2, max_depth: 4, queue_len: 1, pair_count: { 'ag_alice→ag_alicechen': 2 },
   }
-  eq(conversation.conversationTurnText(conv), '第 3/8 轮 · 深度 2/4 · 队列 1', '轮次/深度/队列一行')
-  eq(conversation.conversationTurnText({ status: 'idle' }), '第 0/8 轮 · 深度 0/4 · 队列 0', '缺省限额补 Go 默认值')
+  eq(conversation.conversationTurnText(conv), '第 3/8 轮 · 深度 2/4 · 队列 1', '有限预算仍显示第 N/上限 轮')
+  eq(
+    conversation.conversationTurnText({ ...conv, turn_budget: -1 }),
+    '第 3 轮 · 深度 2/4 · 队列 1',
+    '无限预算（-1）不显示 /8',
+  )
+  eq(
+    conversation.conversationTurnText({ status: 'idle' }),
+    '第 0 轮 · 深度 0/4 · 队列 0',
+    '缺省限额 = 无上限（生产默认），不能又回落到 8',
+  )
   eq(conversation.conversationStatusLabel('running'), '自动对话中', 'running 文案')
   eq(conversation.conversationStatusLabel('waiting_human'), '等你继续', 'waiting_human 文案')
   eq(conversation.conversationPairText(conv, { ag_alice: 'Alice', ag_alicechen: 'Alice Chen' }), 'Alice → Alice Chen 2/2', 'pair 计数按名还原')
@@ -192,8 +201,8 @@ const roster = [
   )
   eq(
     conversation.conversationTerminalText({ status: 'exhausted' }),
-    '自动对话已达上限（8 轮），等你继续',
-    'exhausted 默认文案',
+    '自动对话已达上限，等你继续',
+    'exhausted 兜底文案不提轮数',
   )
   eq(
     conversation.conversationTerminalText({ status: 'exhausted', stop_reason: 'A→B 踢皮球 2/2' }),

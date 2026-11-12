@@ -1,6 +1,6 @@
 package main
 
-// P3b-04：对话控制器的 bridge 接线 —— 8 轮上限、深度、踢皮球、同内容循环、冷却、
+// P3b-04：对话控制器的 bridge 接线 —— 轮次预算、深度、踢皮球、同内容循环、冷却、
 // 人类优先（清队列）、停止按钮、忙目标任务泵、hub_conversation 事件。
 //
 // 全部用确定性 fake provider：链路只在进程内跑，不碰网络。等待一律用轮询
@@ -1029,7 +1029,8 @@ func g2Group(t *testing.T, m *manager, gid agenthub.GroupID) *agenthub.Group {
 // depth=1/turn=1），并广播一个 running 的 hub_conversation 事件。
 func TestHubConversationEventAndWakeDepth(t *testing.T) {
 	m, buf := testManager(t)
-	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
+	// 显式注入有限预算：测试注入路径语义不变（生产默认是 UnlimitedTurnBudget）。
+	convLimits(m, agenthub.ConversationLimits{TurnBudget: 8, Cooldown: -1})
 
 	a := createHubAgent(t, m, buf, 1, "事件A")
 	g := convGroupWith(t, m, buf, 10, "事件群", map[string]any{"max_turns_per_human": 100}, a)
@@ -1057,7 +1058,9 @@ func TestHubConversationEventAndWakeDepth(t *testing.T) {
 		t.Fatalf("begin 事件 status = %q, want running", got)
 	}
 	conv, _ := events[0]["conversation"].(map[string]any)
-	if conv == nil || conv["turn_budget"].(float64) != 8 || conv["max_depth"].(float64) != 4 {
+	// 显式注入的有限预算要原样透出（生产默认是 -1，见 hub_group_get 用例）。
+	if conv == nil || conv["turn_budget"].(float64) != 8 ||
+		conv["max_depth"].(float64) != float64(agenthub.DefaultConversationMaxDepth) {
 		t.Fatalf("事件里的限额 = %+v", conv)
 	}
 }

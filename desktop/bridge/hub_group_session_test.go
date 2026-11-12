@@ -489,7 +489,8 @@ func TestHubGroupSendSkipsBusyTargetWithoutCorruptingRound(t *testing.T) {
 	}
 }
 
-func TestFinishHubRoundTurnLimitStopsAutoChain(t *testing.T) {
+// 用户口径「群策略限制取消」：人类之后已有 8 条智能体发言，final 仍然要追加。
+func TestFinishHubRoundIgnoresMaxTurnsPerHuman(t *testing.T) {
 	m, buf := testManager(t)
 	a := createHubAgent(t, m, buf, 1, "LimitOwner")
 	b := createHubAgent(t, m, buf, 2, "LimitB")
@@ -511,7 +512,7 @@ func TestFinishHubRoundTurnLimitStopsAutoChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 人类之后已有 8 条智能体发言（默认 MaxTurnsPerHuman=8）。
+	// 人类之后已有 8 条智能体发言（默认 MaxTurnsPerHuman=8，但已不参与拦截）。
 	for i := 0; i < agenthub.DefaultGroupMaxTurnsPerHuman; i++ {
 		if _, err := st.AppendMessage(context.Background(), &agenthub.Message{
 			GroupID: g.ID, Kind: agenthub.KindText, RoundID: "rnd_limit",
@@ -539,15 +540,15 @@ func TestFinishHubRoundTurnLimitStopsAutoChain(t *testing.T) {
 			agentMsgs++
 		}
 	}
-	if agentMsgs != agenthub.DefaultGroupMaxTurnsPerHuman {
-		t.Fatalf("agent messages = %d, want %d (over-limit final must not append)", agentMsgs, agenthub.DefaultGroupMaxTurnsPerHuman)
+	if want := agenthub.DefaultGroupMaxTurnsPerHuman + 1; agentMsgs != want {
+		t.Fatalf("agent messages = %d, want %d（第 9 条必须落盘）", agentMsgs, want)
 	}
 	cur, err := st.LoadCursor(context.Background(), g.ID, b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cur.AgentContextSeq != trigger {
-		t.Fatalf("agent_context_seq = %d, want %d even when limited", cur.AgentContextSeq, trigger)
+		t.Fatalf("agent_context_seq = %d, want %d", cur.AgentContextSeq, trigger)
 	}
 }
 
@@ -728,7 +729,7 @@ func TestHubGroupGetHydratesConversationAndCursor(t *testing.T) {
 	if conv["status"] != string(agenthub.ConversationRunning) {
 		t.Fatalf("conversation.status = %v, want running", conv["status"])
 	}
-	if conv["turn_budget"] != float64(8) || conv["max_depth"] != float64(4) {
+	if conv["turn_budget"] != float64(agenthub.UnlimitedTurnBudget) || conv["max_depth"] != float64(agenthub.DefaultConversationMaxDepth) {
 		t.Fatalf("conversation limits = %+v", conv)
 	}
 	cursor, _ := data["cursor"].(map[string]any)

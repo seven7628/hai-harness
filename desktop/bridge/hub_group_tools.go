@@ -376,7 +376,7 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	for _, id := range args.Mentions {
 		mentions = append(mentions, agenthub.AgentID(strings.TrimSpace(id)))
 	}
-	// 与人类发送 / final 共用一个临界区：限流检查到消息+回执落盘不能被并发工具调用插队。
+	// 与人类发送 / final 共用一个临界区：路由到消息+回执落盘不能被并发工具调用插队。
 	t.m.hubGroupSendMu.Lock()
 	g, err = st.LoadGroup(ctx, g.ID)
 	if err != nil {
@@ -387,13 +387,10 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		t.m.hubGroupSendMu.Unlock()
 		return "", fmt.Errorf("%w: 群组已删除", agenthub.ErrNotFound)
 	}
-	msg, routed, limitHit, routeErr, err := t.m.appendAgentGroupMessageLocked(ctx, st, g, t.agentID, agentGroupWrite{
+	msg, routed, routeErr, err := t.m.appendAgentGroupMessageLocked(ctx, st, g, t.agentID, agentGroupWrite{
 		Text: text, Mentions: mentions, MentionAll: args.MentionAll, RouteFatal: true,
 	})
 	t.m.hubGroupSendMu.Unlock()
-	if limitHit {
-		return "", fmt.Errorf("%w: 本轮智能体发言已达上限 %d，等人类回复后再继续", agenthub.ErrInvalid, groupTurnLimit(g))
-	}
 	if err != nil {
 		return "", err
 	}

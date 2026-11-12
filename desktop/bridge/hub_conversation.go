@@ -31,11 +31,14 @@ import (
 var errHubGroupTargetBusy = errors.New("群会话忙：上一轮尚未结束")
 
 // hubConversation 懒开对话控制器。限额可被测试用 hubConvLimits 先注入（生产恒 nil）。
+// 生产不设自动接龙轮次上限：深度/同对/冷却/同内容指纹照样拦，唯独不再按「第 8 轮」停。
 func (m *manager) hubConversation() *agenthub.ConversationController {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.hubConv == nil {
-		opts := agenthub.ConversationOptions{}
+		opts := agenthub.ConversationOptions{
+			Limits: agenthub.ConversationLimits{TurnBudget: agenthub.UnlimitedTurnBudget},
+		}
 		if m.hubConvLimits != nil {
 			opts.Limits = *m.hubConvLimits
 		}
@@ -363,7 +366,7 @@ func (m *manager) notifyHubConversation(gid agenthub.GroupID, view agenthub.Conv
 		if view.Status == agenthub.ConversationStopped {
 			text = "人类停止了自动对话，等你继续"
 		} else {
-			text = "本轮自动对话已达上限，等待人类继续"
+			text = "自动对话已停止，等你继续"
 		}
 	}
 	st, err := m.hubStore()

@@ -155,8 +155,9 @@ func TestHubGroupTools(t *testing.T) {
 	_ = time.Now
 }
 
-// P3a-05 B3 / B1-b：轮次上限必须生效；保留名不能建成智能体。
-func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
+// 用户口径「群策略限制取消」：MaxTurnsPerHuman 字段保留但不再拦截
+// （旧的 8 轮/1 轮闸门都取消）；保留名仍不能建成智能体。
+func TestHubGroupSayIgnoresMaxTurnsPerHumanAndReservedName(t *testing.T) {
 	m, buf := testManager(t)
 	a := createHubAgent(t, m, buf, 1, "LimitA")
 	b := createHubAgent(t, m, buf, 2, "LimitB")
@@ -189,27 +190,22 @@ func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
 		}
 		return tool.Call(context.Background(), name, args)
 	}
-	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"第一轮"}`); err != nil {
-		t.Fatalf("first say: %v", err)
+	// max_turns_per_human=1 已经不管用：连续 3 条都放行。
+	for i := 1; i <= 3; i++ {
+		if _, err := call("group_say", fmt.Sprintf(`{"group_id":%q,"text":"第 %d 轮"}`, string(g.ID), i)); err != nil {
+			t.Fatalf("第 %d 条必须放行（max_turns_per_human 不再拦截）: %v", i, err)
+		}
 	}
-	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"第二轮"}`); err == nil {
-		t.Fatal("second agent turn must be rejected by max_turns_per_human=1")
-	}
-	// 人类再发言重置计数：之后第一条 agent 回复应放行。
+	// 人类发言照旧插队（不进对话队列），但也不再有「重置后只能说一条」。
 	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
 		"group_id": string(g.ID), "text": "继续说",
 	}); !ok {
-		t.Fatalf("human reset: %s", errMsg)
+		t.Fatalf("human seed: %s", errMsg)
 	}
-	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"重置后第一轮"}`); err != nil {
-		t.Fatalf("human message must reset turn counter: %v", err)
+	if _, err := call("group_say", `{"group_id":"`+string(g.ID)+`","text":"人类之后第一条"}`); err != nil {
+		t.Fatalf("human 之后的 agent 发言必须放行: %v", err)
 	}
-	// 并发 group_say 也必须串行过「检查→落盘」：6 个同时发，limit=1 只能过 1 个。
-	if ok, errMsg, _ := hubCmd(t, m, buf, 12, "hub_group_send", map[string]any{
-		"group_id": string(g.ID), "text": "并发重置",
-	}); !ok {
-		t.Fatalf("human reset for concurrent: %s", errMsg)
-	}
+	// 并发 group_say 仍串行过「路由→落盘」：6 个同时发，一个都不能被吞。
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	passed := 0
@@ -225,15 +221,30 @@ func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if passed != 1 {
-		t.Fatalf("concurrent group_say passed = %d, want 1", passed)
+	if passed != 6 {
+		t.Fatalf("concurrent group_say passed = %d, want 6（不再有限流闸门）", passed)
+	}
+	// 落账条数对得上：3 + 1 + 6 = 10 条 agent 消息，不丢不重。
+	st := mustHubStore(t, m)
+	msgs, err := st.ReadMessages(context.Background(), g.ID, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentMsgs := 0
+	for _, msg := range msgs {
+		if msg.Sender.Kind == agenthub.SenderAgent {
+			agentMsgs++
+		}
+	}
+	if agentMsgs != 10 {
+		t.Fatalf("agent messages = %d, want 10", agentMsgs)
 	}
 	if ok, _, _ := hubCmd(t, m, buf, 4, "hub_agent_create", map[string]any{
 		"profile": map[string]any{"name": "user", "provider": "deepseek", "model": "deepseek-v4-flash", "role": "x"},
 	}); ok {
 		t.Fatal("reserved profile name must be rejected")
 	}
-	// 默认 8 轮：策略留 0 时不显式设置，第 8 条放行、第 9 条拒绝。
+	// 默认策略（不显式设置 max_turns_per_human）：第 9 条同样放行。
 	ok, errMsg, data = hubCmd(t, m, buf, 13, "hub_group_create", map[string]any{
 		"name": "默认限流群", "members": []map[string]any{
 			{"agent_id": string(a.ID), "role": "owner"},
@@ -254,7 +265,7 @@ func TestHubGroupSayTurnLimitAndReservedName(t *testing.T) {
 			t.Fatalf("turn %d must pass: %v", i+1, err)
 		}
 	}
-	if _, err := call("group_say", fmt.Sprintf(`{"group_id":%q,"text":"第 9 轮"}`, string(defaultGroup.ID))); err == nil {
-		t.Fatal("default max_turns_per_human=8 must reject the 9th turn")
+	if _, err := call("group_say", fmt.Sprintf(`{"group_id":%q,"text":"第 9 轮"}`, string(defaultGroup.ID))); err != nil {
+		t.Fatalf("第 9 条必须放行（默认 MaxTurnsPerHuman 不再拦截）: %v", err)
 	}
 }

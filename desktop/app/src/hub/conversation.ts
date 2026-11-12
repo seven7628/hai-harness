@@ -3,8 +3,11 @@ import type { HubConversation, HubGroupProgress } from './types'
 // 群内自动对话的状态文案（P3b-07，方案 §7.5.4 / §8.3.5）。
 // 纯函数：ConversationBar 与左栏都从这里取同一套口径，Node 直测。
 
-/** Go 侧 DefaultConversationTurnBudget / DefaultConversationMaxDepth 的同值镜像。 */
-export const HUB_TURN_BUDGET = 8
+/**
+ * Go 侧 UnlimitedTurnBudget / DefaultConversationMaxDepth 的同值镜像。
+ * HUB_TURN_BUDGET 是「没有限额」：生产默认不设自动接龙轮次上限，缺省不能又显示 8。
+ */
+export const HUB_TURN_BUDGET = -1
 export const HUB_MAX_DEPTH = 4
 
 export type ConversationTone = 'idle' | 'running' | 'waiting' | 'stopped' | 'exhausted' | 'unknown'
@@ -31,15 +34,20 @@ export function conversationStatusLabel(status?: string): string {
   }
 }
 
-/** 轮次/深度/队列一行：`第 3/8 轮 · 深度 2/4 · 队列 1`（缺省补 Go 默认限额）。 */
+/**
+ * 轮次/深度/队列一行：
+ * - 有轮次上限：`第 3/8 轮 · 深度 2/4 · 队列 1`
+ * - 无限（turn_budget<=0，生产默认）：`第 3 轮 · 深度 2/4 · 队列 1`
+ */
 export function conversationTurnText(conv?: HubConversation | null): string {
   if (!conv) return ''
-  const budget = conv.turn_budget && conv.turn_budget > 0 ? conv.turn_budget : HUB_TURN_BUDGET
+  const budget = conv.turn_budget ?? HUB_TURN_BUDGET
   const maxDepth = conv.max_depth && conv.max_depth > 0 ? conv.max_depth : HUB_MAX_DEPTH
   const turns = Math.max(0, conv.turns_used ?? 0)
   const depth = Math.max(0, conv.depth ?? 0)
   const queue = Math.max(0, conv.queue_len ?? 0)
-  return `第 ${turns}/${budget} 轮 · 深度 ${depth}/${maxDepth} · 队列 ${queue}`
+  const turn = budget > 0 ? `第 ${turns}/${budget} 轮` : `第 ${turns} 轮`
+  return `${turn} · 深度 ${depth}/${maxDepth} · 队列 ${queue}`
 }
 
 /** 最热的一对 A→B（方案 §6.5.6 的踢皮球护栏）：`A → B 2/2`；没有则空串。 */
@@ -74,8 +82,8 @@ export function conversationTerminalText(conv?: HubConversation | null): string 
   }
   if (conv.status === 'exhausted') {
     if (reason) return `自动对话已达上限：${reason}`
-    const budget = conv.turn_budget && conv.turn_budget > 0 ? conv.turn_budget : HUB_TURN_BUDGET
-    return `自动对话已达上限（${budget} 轮），等你继续`
+    // 兜底不提轮数：生产不设轮次上限，命中的只会是深度/同对/同内容等护栏。
+    return '自动对话已达上限，等你继续'
   }
   if (conv.status === 'waiting_human') return '队列已排空，等你继续'
   return ''

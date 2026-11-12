@@ -4,6 +4,7 @@ package agenthub
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +57,14 @@ func TestConversationLimitsDefaults(t *testing.T) {
 	c2 := NewConversationController(ConversationOptions{Limits: ConversationLimits{Cooldown: -1}})
 	if c2.Limits().Cooldown != 0 {
 		t.Fatalf("负冷却应关闭冷却，得到 %v", c2.Limits().Cooldown)
+	}
+	// UnlimitedTurnBudget 必须原样保留：withDefaults 不能把 -1 补回 8。
+	c3 := NewConversationController(ConversationOptions{Limits: ConversationLimits{TurnBudget: UnlimitedTurnBudget}})
+	if got := c3.Limits().TurnBudget; got != UnlimitedTurnBudget {
+		t.Fatalf("TurnBudget = %d, want %d（-1 不能被补成 8）", got, UnlimitedTurnBudget)
+	}
+	if v := c3.View("group_1"); v.TurnBudget != UnlimitedTurnBudget || v.Status != ConversationIdle {
+		t.Fatalf("空对话视图 = %+v", v)
 	}
 }
 
@@ -186,6 +195,109 @@ func TestConversationQueuedWakeCannotExceedBudget(t *testing.T) {
 	if v.Status != ConversationExhausted || v.QueueLen != 0 || v.TurnsUsed != 8 {
 		t.Fatalf("预算耗尽后 = %+v", v)
 	}
+}
+
+// 生产默认（UnlimitedTurnBudget）：20 轮自动接龙照跑，不再有第 9 条闸门。
+func TestConversationUnlimitedTurnBudgetKeepsTwentyTurns(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		TurnBudget: UnlimitedTurnBudget, PairLimit: 99, MaxDepth: 99, Cooldown: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	for i := 1; i <= 20; i++ {
+		if _, err := c.Offer(ConversationOffer{
+			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+			Text: fmt.Sprintf("第 %d 条不同的发言", i), Depth: 2, TriggerSeq: int64(i),
+		}); err != nil {
+			t.Fatalf("第 %d 轮不该被轮次预算拦下: %v", i, err)
+		}
+		if _, ok := c.NextDue("group_1", clk.Now()); !ok {
+			t.Fatalf("第 %d 轮 NextDue 失败（无限预算不能在出队处误杀）", i)
+		}
+		got, ok := c.BeginTurn("group_1", clk.Now())
+		if !ok || got.Turn != i {
+			t.Fatalf("第 %d 轮 BeginTurn = %+v %v", i, got, ok)
+		}
+		clk.Advance(time.Second)
+	}
+	v := c.View("group_1")
+	if v.TurnsUsed != 20 || v.Status != ConversationRunning || v.QueueLen != 0 {
+		t.Fatalf("20 轮后 = %+v", v)
+	}
+	if v.TurnBudget != UnlimitedTurnBudget {
+		t.Fatalf("视图 turn_budget = %d, want %d", v.TurnBudget, UnlimitedTurnBudget)
+	}
+}
+
+// 取消轮次闸门后，其余安全阀一个都不能松：深度、同对、同内容指纹照样停。
+func TestConversationUnlimitedTurnBudgetStillStopsOnSafetyValves(t *testing.T) {
+	t.Run("深度", func(t *testing.T) {
+		c, clk := newTestController(t, ConversationLimits{TurnBudget: UnlimitedTurnBudget, Cooldown: -1})
+		c.BeginHuman("group_1", 1, clk.Now())
+		for depth := 1; depth <= DefaultConversationMaxDepth; depth++ {
+			if _, err := c.Offer(ConversationOffer{
+				GroupID: "group_1", Sender: AgentID("agent_" + string(rune('a'+depth))),
+				Targets: convIDs("agent_z"), Text: fmt.Sprintf("深度 %d", depth), Depth: depth,
+			}); err != nil {
+				t.Fatalf("深度 %d 应当允许: %v", depth, err)
+			}
+			if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+				t.Fatalf("深度 %d begin", depth)
+			}
+		}
+		_, err := c.Offer(ConversationOffer{
+			GroupID: "group_1", Sender: "agent_x", Targets: convIDs("agent_y"),
+			Text: "第 5 跳", Depth: DefaultConversationMaxDepth + 1,
+		})
+		if !errors.Is(err, ErrConversationExhausted) || !strings.Contains(err.Error(), "深度") {
+			t.Fatalf("超深必须按深度 exhausted，得到 %v", err)
+		}
+	})
+
+	t.Run("同对", func(t *testing.T) {
+		c, clk := newTestController(t, ConversationLimits{TurnBudget: UnlimitedTurnBudget, Cooldown: -1})
+		c.BeginHuman("group_1", 1, clk.Now())
+		for i := 0; i < DefaultConversationPairLimit; i++ {
+			if _, err := c.Offer(ConversationOffer{
+				GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+				Text: fmt.Sprintf("第 %d 次不同说法", i+1), Depth: 2,
+			}); err != nil {
+				t.Fatalf("第 %d 次 a→b 应当允许: %v", i+1, err)
+			}
+			if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+				t.Fatalf("第 %d 次 begin", i+1)
+			}
+		}
+		_, err := c.Offer(ConversationOffer{
+			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+			Text: "第三次", Depth: 2,
+		})
+		if !errors.Is(err, ErrConversationExhausted) || !strings.Contains(err.Error(), "互踢") {
+			t.Fatalf("同对超限必须按踢皮球 exhausted，得到 %v", err)
+		}
+	})
+
+	t.Run("同内容指纹", func(t *testing.T) {
+		c, clk := newTestController(t, ConversationLimits{
+			TurnBudget: UnlimitedTurnBudget, PairLimit: 99, Cooldown: -1,
+		})
+		c.BeginHuman("group_1", 1, clk.Now())
+		text := "好的，我来处理：把报告写好，然后发给你。"
+		if _, err := c.Offer(ConversationOffer{
+			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: text, Depth: 2,
+		}); err != nil {
+			t.Fatalf("offer: %v", err)
+		}
+		if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+			t.Fatal("begin")
+		}
+		_, err := c.Offer(ConversationOffer{
+			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+			Text: "好的 我来处理！把报告写好，然后发给你", Depth: 2,
+		})
+		if !errors.Is(err, ErrConversationExhausted) || !strings.Contains(err.Error(), "循环") {
+			t.Fatalf("同内容必须按循环 exhausted，得到 %v", err)
+		}
+	})
 }
 
 func TestConversationDepthCap(t *testing.T) {

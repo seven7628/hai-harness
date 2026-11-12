@@ -884,7 +884,7 @@ class MockTransport implements Transport {
         },
         {
           seq: 6, id: 'gm_mock6', kind: 'text', sender: { kind: 'system' },
-          text: '群策略：自动对话最多 8 轮；遇到预算/权限阻断会停下等人类。',
+          text: '群策略：自动对话遇到预算/权限阻断会停下等人类，也可随时手动停止。',
           created_at: at(40 * 60_000),
         },
         {
@@ -1002,7 +1002,7 @@ class MockTransport implements Transport {
   ): Record<string, unknown> {
     return {
       id: `conv_${gid}`, group_id: gid, status,
-      turns_used: opts.turns ?? 0, turn_budget: 8,
+      turns_used: opts.turns ?? 0, turn_budget: -1, // -1 = 不设自动接龙轮次上限（生产默认）
       depth: opts.depth ?? 0, max_depth: 4,
       queue_len: opts.queue ?? 0, pair_limit: 2, pair_count: opts.pair ?? {},
       cooldown_ms: 1500,

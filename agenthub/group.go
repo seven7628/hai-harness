@@ -30,11 +30,15 @@ type Member struct {
 
 // GroupPolicy 是群级策略。Mode 与 tools.preset 是两个独立概念：
 // 前者管“要不要审批/能不能产生副作用”，后者管“模型看不看得见工具”。
+//
+// MaxTurnsPerHuman 已废弃（deprecated，见字段注释）：字段与默认值只为兼容旧
+// JSON/旧群文件而保留，生产不再用它拦截「人类发言后智能体连续发言」的条数
+// （用户口径：群策略限制取消）。自动接龙由深度/同对/冷却/同内容指纹等护栏约束。
 type GroupPolicy struct {
 	Mode             string  `json:"mode"` // auto | ask | readonly
 	MaxParallelRuns  int     `json:"max_parallel_runs"`
 	MaxHandoffDepth  int     `json:"max_handoff_depth"`
-	MaxTurnsPerHuman int     `json:"max_turns_per_human"`      // 默认 8
+	MaxTurnsPerHuman int     `json:"max_turns_per_human"`      // 已废弃，默认 8（仅兼容旧数据）
 	MaxMentions      int     `json:"max_mentions_per_message"` // 默认 3
 	DailyBudgetUSD   float64 `json:"daily_budget_usd"`
 }

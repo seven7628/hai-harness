@@ -48,7 +48,11 @@ func (e *ExhaustedError) Error() string {
 // Unwrap 让 errors.Is(err, ErrConversationExhausted) 成立。
 func (e *ExhaustedError) Unwrap() error { return ErrConversationExhausted }
 
-// 对话默认限额（方案 §6.5.6 规则 4/7；D13 = 8 轮）。
+// UnlimitedTurnBudget 表示「生产默认不设自动接龙轮次上限」。
+// 深度/同对/冷却/同内容指纹等护栏照常生效，只是不再按轮数拦截。
+const UnlimitedTurnBudget = -1
+
+// 对话默认限额（方案 §6.5.6 规则 4/7；D13 = 8 轮，仅作为**显式关闭上限**时的兼容默认）。
 const (
 	DefaultConversationTurnBudget = 8
 	DefaultConversationMaxDepth   = 4
@@ -81,6 +85,9 @@ func (s ConversationStatus) Terminal() bool {
 }
 
 // ConversationLimits 可注入的限额（零值取默认）。
+//
+// TurnBudget<0 表示不设自动接龙上限（生产用 UnlimitedTurnBudget=-1）；
+// 正好 0（未指定）时补成 DefaultConversationTurnBudget，兼容旧调用方。
 type ConversationLimits struct {
 	TurnBudget int
 	MaxDepth   int
@@ -90,8 +97,11 @@ type ConversationLimits struct {
 
 // withDefaults 把零值补成默认值。**Cooldown<0 表示关闭冷却**（测试用）：
 // 「首轮立即唤醒、后续轮之间强制间隔」这条语义需要一个显式的关闭开关。
+//
+// TurnBudget 只在 ==0 时补默认：负值（UnlimitedTurnBudget）必须原样保留，
+// 否则生产注入的「不设上限」会被悄悄改回 8 轮。
 func (l ConversationLimits) withDefaults() ConversationLimits {
-	if l.TurnBudget <= 0 {
+	if l.TurnBudget == 0 {
 		l.TurnBudget = DefaultConversationTurnBudget
 	}
 	if l.MaxDepth <= 0 {
@@ -145,6 +155,8 @@ type ConversationOffer struct {
 }
 
 // ConversationView 是给事件/UI/命令回执的快照（JSON 直接可读）。
+// TurnBudget<0 = 不设自动接龙上限（生产默认 UnlimitedTurnBudget）；UI 据此显示
+// 「第 N 轮」而不是「第 N/8 轮」。
 type ConversationView struct {
 	ID         string             `json:"id,omitempty"`
 	GroupID    GroupID            `json:"group_id"`
@@ -317,7 +329,7 @@ func (c *ConversationController) StartHumanRound(group GroupID, targets int, at 
 // Offer 把一条消息上的 @ 目标入队（每个目标一条 Wake）。
 //
 // 护栏（命中即 exhausted + ErrConversationExhausted，**一条都不入队**）：
-//   - 轮次预算：TurnsUsed >= TurnBudget；
+//   - 轮次预算：TurnBudget>0 且 TurnsUsed >= TurnBudget（生产默认不限轮次）；
 //   - 深度：这批 wake 的 Depth > MaxDepth（人类首轮=1，之后每 @ 一跳 +1）；
 //   - 踢皮球：同一对 agent 的 A→B 次数已达 PairLimit（人类发送不计）；
 //   - 同内容循环：同一对 agent 重复同一段归一化指纹（人类发送不计）。
@@ -358,7 +370,8 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	// 人类优先：预算与深度是「自动接龙」的护栏，人类发送不受它们约束（§6.5.6
 	// 规则 1/5）。bridge 的人类路径本来就是并行唤醒、不进队列；这里保留同一口径，
 	// 免得将来把人类唤醒并进队列时被预算误杀。
-	if !req.Human && conv.turns >= limits.TurnBudget {
+	// 轮次上限只在 TurnBudget>0 时生效：生产默认 UnlimitedTurnBudget（不设上限）。
+	if !req.Human && limits.TurnBudget > 0 && conv.turns >= limits.TurnBudget {
 		return nil, c.exhaustLocked(conv, now,
 			fmt.Sprintf("本轮自动对话已达上限 %d 轮，等待人类继续", limits.TurnBudget))
 	}
@@ -441,7 +454,7 @@ func (c *ConversationController) NextDue(group GroupID, at time.Time) (Wake, boo
 	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
 		return Wake{}, false
 	}
-	if conv.turns >= c.limits.TurnBudget {
+	if c.limits.TurnBudget > 0 && conv.turns >= c.limits.TurnBudget {
 		c.exhaustLocked(conv, now,
 			fmt.Sprintf("本轮自动对话已达上限 %d 轮，等待人类继续", c.limits.TurnBudget))
 		return Wake{}, false
@@ -487,7 +500,7 @@ func (c *ConversationController) BeginTurn(group GroupID, at time.Time) (Wake, b
 	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
 		return Wake{}, false
 	}
-	if conv.turns >= c.limits.TurnBudget {
+	if c.limits.TurnBudget > 0 && conv.turns >= c.limits.TurnBudget {
 		c.exhaustLocked(conv, now,
 			fmt.Sprintf("本轮自动对话已达上限 %d 轮，等待人类继续", c.limits.TurnBudget))
 		return Wake{}, false
