@@ -1,15 +1,18 @@
-// web（内嵌浏览器）面板的 SurfaceProvider —— R06 C2：本轮只搬**元数据**（title/icon），
-// render 仍返回 null（渲染继续由 RightPanel 兜底，C3 才换成 provider 渲染）。
+// web（内嵌浏览器）面板的 SurfaceProvider —— R06 C2 搬元数据（title/icon），C3 搬渲染。
 //
-// 为什么拆两轮（03-code-plan §2.3）：渲染委派才是三条高风险真正出现的地方（原生 overlay 的
+// 为什么分两轮（03-code-plan §2.3）：渲染委派才是三条高风险真正出现的地方（原生 overlay 的
 // 挂载时机、menuOpen/immersive 决定 embedHide、viewId/pageId 两套身份键空间）；而「注册 + 元数据」
 // 出错的失败模式是 tsc/单测秒红。两类失败不该共用一个 commit —— bad-PR 时要能只回退渲染层。
+//
+// C3 起 render 真渲染组件本体（components/WebTab.tsx，自 RightPanel 逐字平移）。RightPanel 侧
+// 仍保留 `?? <WebTab/>` 回退：provider 是副作用注册，只 import RightPanel 的探针页拿不到它。
 //
 // 身份判据不在这里：`isPendingWebTab / webTabKey / webUrlSnapshot` 已下沉 lib/webTab.ts（R06a）。
 // 元数据只需要「这个标签此刻对应池里的哪个目标」这一条很窄的读法（见 liveTarget），
 // 不要把任何身份判据在这里重写一遍 —— 两套判据分叉时最先坏的是恢复链路。
 import type { ReactElement } from 'react'
 import { BarChart, FileIcon, Globe, ImageIcon } from '../../components/icons'
+import { WebTab } from '../../components/WebTab'
 import { fileUrlToPath } from '../../lib/filePaths'
 import { visualKindOf } from '../../lib/visualFile'
 import { useAppStore } from '../../store/useAppStore'
@@ -78,9 +81,11 @@ export const webSurface: SurfaceProvider<WebTabInstance> = {
   // 打开时的默认实例：无池身份的 web 标签，形状与 store.makeTab('web') 在「认不出当前页」时
   // 给的一致。契约字段，目前还没有运行时消费者（与 git/file 的同名字段一样）。
   defaultSpec: () => ({ kind: 'web' }),
-  // C2 只注册元数据：DOM 仍由 RightPanel 按 kind 分发（本轮零渲染改动）。
-  // 返回 null 而不是省略 render —— registry 的 assertProvider 要求 render 是函数。
-  render: () => null,
+  // C3：渲染委派。只传 { tab, scope } —— 组件里不再有 RP 专属 props（immersive 变内部 state，
+  // panelVisible/menuOpen 从 store 读）。**不要**在这里加 key 或按 tab.id 分支：切 web 标签时
+  // RightPanel 的元素类型与位置都不变，React 复用同一个 WebTab 实例（DOM 容器不重挂载），
+  // 原生视图与页面状态才保得住；加 key = 每次切标签销毁重建 WebContentsView。
+  render: ({ tab, scope }) => <WebTab tab={tab} scope={scope} />,
 }
 
 registerSurface(webSurface)

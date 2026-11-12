@@ -621,6 +621,31 @@ try {
   const lost = [...t4.beforeIds, ...t4.created].filter((id) => !t4.ids.includes(id))
   check('T4 无静默丢失（打开过的条目全部仍在 targets 里：活 or 休眠）',
     lost.length === 0, `lost=${JSON.stringify(lost)}`)
+  // —— 内存基线（P09/P10；03 §2.3 / R-5 的硬要求：无基线不许合）——
+  // 负载 = T4 循环刚把**活渲染进程**顶到上限 12 的那一刻（放在 ⑥「唤醒一个休眠条目」之前：
+  // 唤醒那条路不驱逐，采样点若放在它之后 live 会变成 13，就不再是「12 视图」这个负载了）。
+  // 默认不采，`MEM_BASELINE=1` 时才跑：常规门禁不该多一个测量步骤，但基线必须能在门禁脚本里
+  // 就地复现（口径写死在负载旁边，别让人以后拿另一种负载去跟这组数字比）。
+  if (process.env.MEM_BASELINE === '1') {
+    const pool = await win.evaluate(() => window.__r2.snap())
+    // 口径①：Electron 自己的 per-process 记账（主进程 app.getAppMetrics，RSS = workingSetSize）。
+    const metrics = await app.evaluate(({ app }) => app.getAppMetrics())
+    const tabs = metrics.filter((m) => m.type === 'Tab').map((m) => ({ pid: m.pid, mb: m.memory.workingSetSize / 1024 }))
+    // 口径②：ps 读同一批 pid 的 RSS（交叉核对：两个数应当同量级，差太多说明采样时机或 pid 对不上）。
+    const psOut = tabs.length ? spawnSync('ps', ['-o', 'rss=', '-p', tabs.map((t) => t.pid).join(',')], { encoding: 'utf8' }).stdout || '' : ''
+    const psMB = psOut.split('\n').map((x) => parseInt(x.trim(), 10)).filter((n) => n > 0).map((kb) => kb / 1024)
+    const r1 = (n) => Math.round(n * 10) / 10
+    const sum = (a) => r1(a.reduce((x, y) => x + y, 0))
+    const max = (a) => (a.length ? r1(Math.max(...a)) : 0)
+    console.log('P09/P10 内存基线（负载 = T4 建满的视图池）')
+    console.log(`  视图池：targets=${pool.n} live=${pool.live}（上限 12；sleeping=${pool.n - pool.live}）`)
+    console.log(`  渲染进程数：${tabs.length}`)
+    console.log(`  P09 单渲染进程最大 RSS：getAppMetrics=${max(tabs.map((t) => t.mb))}MB / ps=${max(psMB)}MB  —— 上限 150MB`)
+    console.log(`  P10 全部渲染进程合计 RSS：getAppMetrics=${sum(tabs.map((t) => t.mb))}MB / ps=${sum(psMB)}MB  —— 上限 800MB`)
+    console.log(`  per-pid(MB, getAppMetrics)：${tabs.map((t) => t.mb.toFixed(1)).join(', ')}`)
+    console.log(`  per-pid(MB, ps)：${psMB.map((x) => x.toFixed(1)).join(', ')}`)
+  }
+
   // ⑥ 被休眠的标签**可点回重建**（同一 id、内容可读、live +1）
   // 用户点标签的真实流程：他先切回**那个标签所属的会话**，再点标签。跨会话激活是被拒绝的
   //（口径与活条目一致，见 activateEmbedTarget），故这里必须先 embedSetSession(victim.sid)，

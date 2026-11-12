@@ -103,6 +103,11 @@ fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import { createRoot } from 'react-dom/client'
 import RightPanel from '../../src/components/RightPanel'
 import { useAppStore } from '../../src/store/useAppStore'
+// ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45 的教训：探针缺这一行 → getSurface()
+// 全 undefined → 断言证明的是 RightPanel 的「量不到就回退」那条分支，不是 provider）。
+// 本脚本的实测：R06b 把 web 的 title 委派给 provider 后，这里少了这行，「标签名用快照 url 还原
+// （report.pdf）」拿到的是 kindLabel 的「网页」→ 探针假红（脚本不在 npm test 链里，一直没人发现）。
+import '../../src/surfaces/builtin'
 import '../../src/index.css'
 
 // 启动顺序与真实应用一致：先 start()（它会重置视图字段），会话恢复（new_session 响应 →
