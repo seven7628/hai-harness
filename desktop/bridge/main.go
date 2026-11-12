@@ -4954,6 +4954,12 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	if profile.withBash {
 		eng.RegisterTool(context.Background(), builtin.NewGitWorktreeTool(workspace))
 	}
+	// memory_dream：记忆盘点的证据与执行。模型负责判断，宿主负责护栏与落盘。
+	// 不在 FileTools.Tools() 里注册（那份清单被 Explore 白名单与 schema 巡检复用），
+	// 也不给子 agent——记忆归档是会话级动作，不该被并行子任务各提一份。
+	if !memCfgValue(memCfg).Disabled() {
+		eng.RegisterTool(context.Background(), newMemoryDreamTool(memHost, workspace))
+	}
 	eng.RegisterTool(context.Background(), question.NewTool(qw)) // ask_user：模型→用户提问（HITL 反方向）
 	// load_skill 的注册**必须在本函数末尾**（见结尾 registerLoadSkill）：它的能力面
 	// 需要「本会话完整的工具集」——MCP / 插件 / codemode / cron / mesh 工具都在它之后

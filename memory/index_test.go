@@ -58,7 +58,7 @@ func TestBuildInjection_IndexOneLinePerMemory(t *testing.T) {
 	d := memDir(t)
 	writeIndex(t, d, "# Project Memory\n\n- user_role.md\n- feedback_testing.md\n- build-and-verify.md\n")
 
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestBuildInjection_IndexOneLinePerMemory(t *testing.T) {
 // 只可能靠这段说明写出来。不注入 = 冷启动死锁（guidance.go 顶部）。
 func TestBuildInjection_NoIndexStillInjectsGuidance(t *testing.T) {
 	d := memDir(t)
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatalf("索引不存在不应报错：%v", err)
 	}
@@ -124,7 +124,7 @@ func TestBuildInjection_EmptyIndex(t *testing.T) {
 		"只有标题": "# Project Memory\n",
 	} {
 		writeIndex(t, d, content)
-		inj, err := (Config{}).BuildInjection(d)
+		inj, err := (fullCfg()).BuildInjection(d)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -152,7 +152,7 @@ func TestBuildInjection_LineLimit(t *testing.T) {
 	}
 	writeIndex(t, d, b.String())
 
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestBuildInjection_ByteLimit(t *testing.T) {
 	}
 	writeIndex(t, d, b.String())
 
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestBuildInjection_IndexWithNonTopicLinesIsPreservedVerbatim(t *testing.T) 
 		"MEMORY.md\n"
 	writeIndex(t, d, raw)
 
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestBuildInjection_IndexWithNonTopicLinesIsPreservedVerbatim(t *testing.T) 
 	want := indexHeading + "\n\n" +
 		"Notes live in topic files; keep this list short.\n" +
 		"- user_role.md\n- deleted_topic.md\nsub/nested.md\n- notes.txt\nMEMORY.md" + // 结尾换行由宿主补齐
-		"\n\n" + guidance(d, true)
+		"\n\n" + guidance(d, true, InjectionFull, 0)
 	if inj.Text != want {
 		t.Fatalf("注入与原文不一致：\n%q\nwant\n%q", inj.Text, want)
 	}
@@ -293,7 +293,7 @@ func TestBuildInjection_DanglingIndexEntriesAreNotValidated(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(d.Path, "gone.md")); !os.IsNotExist(err) {
 		t.Fatal("前提失败：gone.md 不应存在")
 	}
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestBuildInjection_TruncationNoticeIsAppendedAtEnd(t *testing.T) {
 	d := memDir(t)
 	writeIndex(t, d, buildLinesIndex(250))
 
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ func TestBuildInjection_TruncationNoticeIsAppendedAtEnd(t *testing.T) {
 		t.Fatalf("前提失败：TruncatedBy = %q", inj.Load.TruncatedBy)
 	}
 
-	notice := truncationNotice("line") + "\n\n" + guidance(d, true)
+	notice := truncationNotice("line") + "\n\n" + guidance(d, true, InjectionFull, 0)
 	if !strings.Contains(inj.Text, notice) {
 		t.Fatalf("250 行索引应带截断提示，得到：\n%q", inj.Text)
 	}
@@ -458,7 +458,7 @@ func TestBuildInjection_TruncationNoticeIsAppendedAtEnd(t *testing.T) {
 	// 条目本身**一字未改**：清单部分与"没有提示时的同样 200 行"逐字节相同。
 	// 即：只追加，不删行、不加行、不改排序。
 	body := strings.TrimSuffix(inj.Text, notice)
-	body = strings.TrimSuffix(body, "\n\n"+guidance(d, true))
+	body = strings.TrimSuffix(body, "\n\n"+guidance(d, true, InjectionFull, 0))
 	_, wantBody := boundIndex(d, []byte(buildLinesIndex(250)))
 	if body != indexHeading+"\n\n"+wantBody {
 		t.Fatalf("提示之外的内容被改动了：\n%q", body)
@@ -495,7 +495,7 @@ func TestBuildInjection_NoNoticeWhenWithinBothLimits(t *testing.T) {
 			d := memDir(t)
 			writeIndex(t, d, tc.content)
 
-			inj, err := (Config{}).BuildInjection(d)
+			inj, err := (fullCfg()).BuildInjection(d)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -509,7 +509,7 @@ func TestBuildInjection_NoNoticeWhenWithinBothLimits(t *testing.T) {
 			// 之前完全相同。这里刻意用 boundIndex 而不是"手写一个想当然的原文"：它是那次
 			// 改动**之前**注入文本的逐字节来源，所以这个等式就是"索引字节没变"的证明。
 			_, wantBody := boundIndex(d, []byte(tc.content))
-			want := indexHeading + "\n\n" + wantBody + "\n\n" + guidance(d, true)
+			want := indexHeading + "\n\n" + wantBody + "\n\n" + guidance(d, true, InjectionFull, 0)
 			if inj.Text != want {
 				t.Fatalf("注入文本被改动了：\n%q\nwant\n%q", inj.Text, want)
 			}
@@ -530,7 +530,7 @@ func TestBuildInjection_ByteLimitNoticeSaysByte(t *testing.T) {
 	}
 	writeIndex(t, d, b.String())
 
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestBuildInjection_ByteLimitNoticeSaysByte(t *testing.T) {
 		t.Fatalf("TruncatedBy = %q, want \"byte\"", inj.Load.TruncatedBy)
 	}
 	notice := truncationNotice("byte")
-	if !strings.HasSuffix(inj.Text, notice+"\n\n"+guidance(d, true)) {
+	if !strings.HasSuffix(inj.Text, notice+"\n\n"+guidance(d, true, InjectionFull, 0)) {
 		t.Fatalf("应带 \"byte\" 提示且紧接目录说明之前：\n%q", inj.Text)
 	}
 	if !strings.Contains(inj.Text, notice) {
@@ -585,7 +585,7 @@ func TestTruncationNoticeIsNotCountedAgainstTheLimits(t *testing.T) {
 	}
 
 	// 拼上提示后注入文本变长，但**限额判定不因它改变**：重跑 boundIndex 结论相同。
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +619,7 @@ func TestTruncationNoticeLeaksNoDroppedEntries(t *testing.T) {
 	raw := buildLinesIndex(250)
 	writeIndex(t, d, raw)
 
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +627,7 @@ func TestTruncationNoticeLeaksNoDroppedEntries(t *testing.T) {
 	// "25000"（官方字节限额）是规格的一部分，与"泄露丢了多少条"无关。
 	notice := truncationNotice("line")
 	// 截断提示与目录说明一起构成注入的末尾（说明在最后，见 guidance.go）。
-	if !strings.HasSuffix(inj.Text, notice+"\n\n"+guidance(d, true)) {
+	if !strings.HasSuffix(inj.Text, notice+"\n\n"+guidance(d, true, InjectionFull, 0)) {
 		t.Fatalf("注入末尾不是常量提示：\n%q", inj.Text)
 	}
 	if !strings.Contains(inj.Text, notice) {
@@ -669,7 +669,7 @@ func TestTruncationNoticeNotAddedWhenIndexIsEmpty(t *testing.T) {
 		"超限但全是空行": strings.Repeat("\n", MaxIndexLines+50),
 	} {
 		writeIndex(t, d, content)
-		inj, err := (Config{}).BuildInjection(d)
+		inj, err := (fullCfg()).BuildInjection(d)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

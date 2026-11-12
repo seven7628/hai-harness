@@ -9,7 +9,7 @@ import (
 // 缺任何一条，Step 4 的 modified 钩子就仍然不会触发（guidance.go 顶部的闭环）。
 func TestGuidance_StatesPathAndShape(t *testing.T) {
 	d := memDir(t)
-	g := guidance(d, true)
+	g := guidance(d, true, InjectionFull, 0)
 
 	mustContain := []string{
 		d.Path,        // 目录绝对路径：模型唯一的写入目标
@@ -35,7 +35,7 @@ func TestGuidance_StatesPathAndShape(t *testing.T) {
 // 实测采纳率 12%~62%。官方对应的判据是连续变量，要先做 A/B 对照实验才能决定加不加。
 // 这条测试的作用是让"顺手加一句劝告"在 CI 上直接失败，而不是再走一轮才发现。
 func TestGuidance_CarriesNoBehaviouralRules(t *testing.T) {
-	g := guidance(memDir(t), true)
+	g := guidance(memDir(t), true, InjectionFull, 0)
 
 	// 逐条对应官方 §2.2 里"还没做 A/B、所以一律不加"的行为判据。
 	forbidden := []string{
@@ -55,7 +55,7 @@ func TestGuidance_CarriesNoBehaviouralRules(t *testing.T) {
 // 自我约束 2：每一句都要能指回官方原文。指引性的祈使句（"请…"/"务必…"）在官方
 // auto memory 的注入里没有对应物，是我们上一版翻车的文体特征。
 func TestGuidance_HasNoImperativeAdvice(t *testing.T) {
-	g := guidance(memDir(t), true)
+	g := guidance(memDir(t), true, InjectionFull, 0)
 	for _, bad := range []string{"请", "务必", "应该", "建议"} {
 		if strings.Contains(g, bad) {
 			t.Fatalf("说明段出现指引性措辞 %q：\n%s", bad, g)
@@ -69,7 +69,7 @@ func TestGuidance_HasNoImperativeAdvice(t *testing.T) {
 // 不会因为文件碰巧存在就被读成"你的索引空了"（那像是什么丢了）。
 func TestGuidance_EmptyDiffersOnlyByAbsenceLine(t *testing.T) {
 	d := memDir(t)
-	with, without := guidance(d, true), guidance(d, false)
+	with, without := guidance(d, true, InjectionFull, 0), guidance(d, false, InjectionFull, 0)
 
 	if with == without {
 		t.Fatal("hasIndex 不影响输出")
@@ -94,7 +94,7 @@ func TestGuidance_EmptyDiffersOnlyByAbsenceLine(t *testing.T) {
 // 现状 ~600 字节。参照：官方限额本身是 200 行 / 25000 字节，说明段不到其 3%。
 // 真正的防线是那三条自我约束（形态、不发明行为、每句可溯源），这条只是兜底。
 func TestGuidance_StaysSmall(t *testing.T) {
-	g := guidance(memDir(t), false)
+	g := guidance(memDir(t), false, InjectionFull, 0)
 	const limit = 1200
 	if len(g) > limit {
 		t.Fatalf("说明段 %d 字节，超过上限 %d——它在每个会话里无条件注入：\n%s", len(g), limit, g)
@@ -107,14 +107,53 @@ func TestGuidance_DoesNotEchoIndexEntries(t *testing.T) {
 	d := memDir(t)
 	writeIndex(t, d, "- user_role.md\n- feedback_testing.md\n")
 
-	inj, err := (Config{}).BuildInjection(d)
+	inj, err := (fullCfg()).BuildInjection(d)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 剥掉宿主加的部分后，剩下的必须正好是索引正文。
 	_, body := boundIndex(d, []byte("- user_role.md\n- feedback_testing.md\n"))
-	want := indexHeading + "\n\n" + body + "\n\n" + guidance(d, true)
+	want := indexHeading + "\n\n" + body + "\n\n" + guidance(d, true, InjectionFull, 0)
 	if inj.Text != want {
 		t.Fatalf("说明段与索引正文混在了一起：\n%q\nwant\n%q", inj.Text, want)
+	}
+}
+
+// 说明段与解析器必须对齐：文档给的那行样例，必须真的能被宿主认成一条记忆。
+//
+// 这条测试防的是一类静默失效：索引行由模型手写，注入/恢复只认"行内有定位符"的行。
+// 说明段若给出一个解析器不认的样例（或解析器日后收紧而说明段没跟上），模型就会
+// 照着写出永远不进注入的索引行——而这条路径没有任何报错，只有"怎么注入里没有它"。
+func TestGuidance_IndexExampleIsParseable(t *testing.T) {
+	line := strings.Trim(indexLineExample, "`")
+
+	target, summary, ok := splitLocator(line)
+	if !ok {
+		t.Fatalf("说明段给的索引行样例解析不出定位符：%q", line)
+	}
+	if target != "文件名.md" {
+		t.Fatalf("样例定位符 = %q，期望 文件名.md", target)
+	}
+	if summary == "" {
+		t.Fatalf("样例没有摘要部分：%q", line)
+	}
+
+	// 面板/审计走的是另一套入口，必须得到同一个文件名——否则"已登记"与
+	// "会注入"两处会各说各话。
+	names := parseIndexEntries(line)
+	if len(names) != 1 || names[0] != "文件名.md" {
+		t.Fatalf("parseIndexEntries(%q) = %v，期望 [文件名.md]", line, names)
+	}
+}
+
+// 反向：行内没有文件名时，说明段承诺"不算作一条记忆"——解析器必须真的这样行为。
+func TestGuidance_LineWithoutFilenameIsNotAMemory(t *testing.T) {
+	for _, line := range []string{
+		"- 标题 — 一句话摘要，没有文件名",
+		"- 只是分组说明文字",
+	} {
+		if _, _, ok := splitLocator(strings.TrimPrefix(line, "- ")); ok {
+			t.Fatalf("%q 不该被认成一条记忆", line)
+		}
 	}
 }
