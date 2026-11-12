@@ -403,7 +403,13 @@ function putValue(target: JsonObject, key: string, value: unknown, path: string,
 function applyKind(target: JsonObject, key: string, kind: FieldKind, value: unknown, path: string, ctx: Ctx): string | undefined {
   // 统一的三态口径：null = 删除该键（读侧回默认）。避免「不存在」与「显式设成默认值」
   // 被混成一件事（provider usage_input_includes_cache / cache_ttl_1h 就靠这个）。
+  // 例外：provider / mcpServers 是两个大 map，整段 null 不是「回默认」而是数据事故——
+  // 会把所有 provider（含明文 api_key）或所有 MCP env/headers 一起抹掉，一律拒绝；
+  // 想清空请逐个 provider / 逐个 server 删（mcpServers: {} 仍是合法的「清空」）。
   if (value === null && kind.t !== 'forbidden') {
+    if (kind.t === 'providerMap' || kind.t === 'mcpServers') {
+      return invalidValue(path, '不允许整段置空（会连带清掉 api_key / env，请逐项删除）')
+    }
     putValue(target, key, null, path, ctx)
     return
   }
@@ -571,9 +577,6 @@ function normalizeMcpServers(value: unknown, base: string): { servers: JsonObjec
     if (!name.trim()) return { error: '服务器名不能为空' }
     const path = `${base}.${name}`
     if (!isPlainObject(raw)) return { error: invalidValue(path, '应为对象') }
-    for (const field of Object.keys(raw)) {
-      if (!MCP_FIELDS[field]) return { error: unknownKey(`${path}.${field}`) }
-    }
     const c = raw as { type?: unknown; command?: unknown; url?: unknown }
     // 类型归一与 bridge 的 mcp.ServerConfig.Validate 同口径（streamable_http/streamable-http 都是 http 别名）。
     const type = (typeof c.type === 'string' ? c.type : 'stdio').trim().toLowerCase()
@@ -584,8 +587,13 @@ function normalizeMcpServers(value: unknown, base: string): { servers: JsonObjec
     if (remote && !(typeof c.url === 'string' && c.url.trim())) return { error: `${name}: 需 url` }
     const out: JsonObject = {}
     for (const [field, v] of Object.entries(raw)) {
-      const kind = MCP_FIELDS[field]
-      const err = applyKind(out, field, kind, v, `${path}.${field}`, { touched: [] })
+      // undefined = 「这一项没填」，不是「值是 undefined」：MCPTab.buildCfg 对无参数的 stdio
+      // 总是给出 `args: undefined`，经 Electron IPC（V8 结构化克隆）后**键仍然存在**。
+      // 不跳过就会被 applyKind 当成坏值（`应为字符串数组`）→ 整个保存失败（P5-08 复审 B1）。
+      // 口径与 applyObjectPatch 一致：先跳过，再做未知键检查。
+      if (v === undefined) continue
+      if (!MCP_FIELDS[field]) return { error: unknownKey(`${path}.${field}`) }
+      const err = applyKind(out, field, MCP_FIELDS[field], v, `${path}.${field}`, { touched: [] })
       if (typeof err === 'string') return { error: err }
     }
     servers[name] = out
@@ -593,9 +601,24 @@ function normalizeMcpServers(value: unknown, base: string): { servers: JsonObjec
   return { servers }
 }
 
-/** 给 raw 打上 schema_version（写侧兜底：任何成功写出的文件都是 v2；未来版本不降级）。 */
-function stampSchemaVersion(raw: JsonObject): void {
-  if (!isV2Settings(raw)) raw.schema_version = SETTINGS_SCHEMA_VERSION
+// ─────────────────────── 写前置条件：只接受已迁移（v2）的对象 ───────────────────────
+
+/**
+ * 未迁移输入的拒绝理由（四条 apply* 的统一前置条件）。
+ *
+ * 为什么必须在 apply* 里挡住：这里曾经无脑 `stampSchemaVersion(raw)`，于是「启动迁移失败 +
+ * 用户改一次主题」就把未迁移的 v1 文件写成 `schema_version: 2` —— 下次启动 already-v2 直接
+ * 跳过迁移，固化在旧文件里的默认值再也删不掉（BR-01 的安全属性被永久废掉，P5-08 复审 B2）。
+ * 现在 schema_version:2 **只可能**由「成功的迁移写盘」产生（readSettingsForWrite），
+ * apply* 拿到 v1 一律拒绝，宁可不保存也不盖章。
+ */
+function unmigratedInputError(rawIn: JsonObject): string {
+  return `settings.json 尚未迁移到 v2（schema_version=${JSON.stringify(rawIn.schema_version ?? null)}）：已拒绝这次写入，避免把未迁移的默认值盖章成 v2`
+}
+
+/** 写侧入口的公共闸门：输入必须是 v2（迁移由读盘侧负责，见 readSettingsForWrite）。 */
+function isWritable(rawIn: JsonObject): boolean {
+  return isV2Settings(rawIn)
 }
 
 /**
@@ -613,16 +636,16 @@ function settleExplicit(raw: JsonObject, ctx: Ctx): void {
  * · 未知顶层/嵌套键 → `{ ok:false, error:'unknown settings key <path>' }`，一个键都不写；
  * · 只改 patch 涉及的键（局部合并），未出现的键/段原样保留；
  * · provider 分支与 provider:save 同规则（字段白名单 + 合并不补默认）；
- * · 路径记进 explicit；schema_version 写成 2。
+ * · 路径记进 explicit；输入必须是已迁移的 v2（见 unmigratedInputError）。
  */
 export function applySettingsPatch(rawIn: JsonObject, patch: unknown, schema: Record<string, FieldKind> = SETTINGS_SCHEMA): SettingsApplyResult {
+  if (!isWritable(rawIn)) return { ok: false, error: unmigratedInputError(rawIn) }
   const raw = cloneJson(rawIn)
   if (!isPlainObject(patch)) return { ok: false, error: '无效设置 patch（应为对象）' }
   if (Object.keys(patch).length === 0) return { ok: true, raw, changed: false, touched: [] }
   const ctx: Ctx = { touched: [] }
   const err = applyObjectPatch(raw, schema, patch, '', ctx)
   if (err) return { ok: false, error: err }
-  stampSchemaVersion(raw)
   settleExplicit(raw, ctx)
   return { ok: true, raw, changed: !deepEqual(rawIn, raw), touched: ctx.touched }
 }
@@ -639,6 +662,7 @@ export function applySettingsPatch(rawIn: JsonObject, patch: unknown, schema: Re
  *   · api_key 空串视为「不修改」（与既有行为一致）；本任务仍把它留在 settings（BR-08 下一步）。
  */
 export function applyProviderSave(rawIn: JsonObject, input: unknown): SettingsApplyResult {
+  if (!isWritable(rawIn)) return { ok: false, error: unmigratedInputError(rawIn) }
   const raw = cloneJson(rawIn)
   if (!isPlainObject(input)) return { ok: false, error: '无效 provider 配置' }
   const name = input.provider
@@ -671,7 +695,6 @@ export function applyProviderSave(rawIn: JsonObject, input: unknown): SettingsAp
   if (Object.keys(current).length === 0) delete providers[name]
   else providers[name] = current
   raw.provider = providers
-  stampSchemaVersion(raw)
   settleExplicit(raw, ctx)
   return { ok: true, raw, changed: !deepEqual(rawIn, raw), touched: ctx.touched }
 }
@@ -685,6 +708,7 @@ export interface ProviderRemoveOptions {
 
 /** applyProviderRemove：只改 provider.<name> 与 provider.active，其余段/兄弟原样保留。 */
 export function applyProviderRemove(rawIn: JsonObject, provider: unknown, opts: ProviderRemoveOptions): SettingsApplyResult {
+  if (!isWritable(rawIn)) return { ok: false, error: unmigratedInputError(rawIn) }
   if (!isValidProviderName(provider)) return { ok: false, error: '无效 provider 名称' }
   const raw = cloneJson(rawIn)
   const providers = isPlainObject(raw.provider) ? (raw.provider as JsonObject) : {}
@@ -705,13 +729,13 @@ export function applyProviderRemove(rawIn: JsonObject, provider: unknown, opts: 
     touched.push('provider.active')
   }
   raw.provider = providers
-  stampSchemaVersion(raw)
   settleExplicit(raw, { touched })
   return { ok: true, raw, changed: !deepEqual(rawIn, raw), touched }
 }
 
 /** applyMcpServers：mcpServers 段全量替换（只改这一段，顶层其它键原样保留）。 */
 export function applyMcpServers(rawIn: JsonObject, servers: unknown): SettingsApplyResult {
+  if (!isWritable(rawIn)) return { ok: false, error: unmigratedInputError(rawIn) }
   const raw = cloneJson(rawIn)
   const ctx: Ctx = { touched: [] }
   const target: JsonObject = {}
@@ -719,7 +743,6 @@ export function applyMcpServers(rawIn: JsonObject, servers: unknown): SettingsAp
   if (err) return { ok: false, error: err }
   if (isPlainObject(target.mcpServers)) raw.mcpServers = target.mcpServers
   else delete raw.mcpServers
-  stampSchemaVersion(raw)
   settleExplicit(raw, ctx)
   return { ok: true, raw, changed: !deepEqual(rawIn, raw), touched: ctx.touched }
 }
@@ -777,50 +800,120 @@ function errMessage(e: unknown): string {
 }
 
 /**
- * runSettingsMigration：启动时执行的 v1→v2 迁移（在 bridge spawn 之前调用）。
+ * readSettingsForWrite：**写路径专用的读盘**（BR-01 的安全属性，P5-08 复审 B2 的修法）。
  *
- * 顺序：读原文件 → 解析（坏文件**不碰**）→ 已是 v2 跳过 → 先写 `<file>.bak`（0600，
- * 原文本逐字节）→ 原子写迁移后的 JSON。任一步失败都返回 `ok:false` 且**不留半截文件**；
- * 调用方只记日志、继续用旧文件（迁移失败不能阻止应用启动）。
+ * 「写即迁移」：读原文件 → 已是 v2 就返回原始对象 → 未迁移（v1/更早）则**先**写
+ * `<file>.bak`（0600，原文本逐字节）再原子写迁移结果，然后返回**迁移后**的原始对象。
+ *
+ * 三条硬约束：
+ *   · 迁移没成功 → 返回 `ok:false`，调用方必须**拒绝这次写**（原文件保持不变）。绝不把
+ *     未迁移对象交给 apply*：那会盖 `schema_version: 2`，下次启动 already-v2 跳过迁移，
+ *     固化默认值再也删不掉。
+ *   · 只认**原始对象**；缺文件 → `{ schema_version: 2 }`（首次运行的干净起点，不写盘）。
+ *   · 坏文件（读失败 / JSON 坏 / 非对象）→ `skipped:'corrupt'` + `ok:false`，不碰文件。
+ *
+ * 幂等：v2 文件只读不写；.bak 不会被第二次覆盖。
  */
-export function runSettingsMigration(args: {
-  file: string
-  backupFile: string
-  defaults: JsonObject
-  io: SettingsFsOps
-  log?: (msg: string) => void
-}): SettingsMigrationRun {
+export interface SettingsWriteRead {
+  ok: boolean
+  /** ok 时的原始对象（**一定是 v2**：未迁移文件已在返回前迁移落盘）。 */
+  raw?: JsonObject
+  /** 没迁移时的原因（诊断用：missing / already-v2 / corrupt）。 */
+  skipped?: 'missing' | 'already-v2' | 'corrupt'
+  changed?: boolean
+  backup?: string
+  removed?: string[]
+  error?: string
+}
+
+export function readSettingsForWrite(args: SettingsMigrationArgs): SettingsWriteRead {
   const { file, backupFile, defaults, io, log } = args
   let text: string
   try {
     text = io.readFile(file)
   } catch (e) {
-    if (errCode(e) === 'ENOENT') return { ok: true, skipped: 'missing' }
-    return { ok: false, error: `读取 ${file} 失败: ${errMessage(e)}` }
+    if (errCode(e) === 'ENOENT') {
+      // 首次运行 / 用户删过：空文档就是最干净的 v2 起点（没有任何默认值可固化）。
+      return { ok: true, raw: { schema_version: SETTINGS_SCHEMA_VERSION }, skipped: 'missing' }
+    }
+    return { ok: false, skipped: 'corrupt', error: `读取 ${file} 失败（已拒绝这次写入、原文件保持不变）: ${errMessage(e)}` }
   }
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch (e) {
-    return { ok: false, skipped: 'corrupt', error: `${file} 不是有效 JSON（${errMessage(e)}），迁移跳过、原文件保持不变` }
+    return { ok: false, skipped: 'corrupt', error: `${file} 不是有效 JSON（${errMessage(e)}），已拒绝这次写入、原文件保持不变` }
   }
   if (!isPlainObject(parsed)) {
-    return { ok: false, skipped: 'corrupt', error: `${file} 不是 JSON 对象，迁移跳过、原文件保持不变` }
+    return { ok: false, skipped: 'corrupt', error: `${file} 不是 JSON 对象，已拒绝这次写入、原文件保持不变` }
   }
-  if (isV2Settings(parsed)) return { ok: true, skipped: 'already-v2' }
+  if (isV2Settings(parsed)) return { ok: true, raw: parsed, skipped: 'already-v2' }
 
   const m = migrateSettingsV2(parsed, defaults)
   try {
     atomicWriteText(io, backupFile, text, 0o600)
   } catch (e) {
-    return { ok: false, error: `备份 ${backupFile} 失败（未改动 ${file}）：${errMessage(e)}` }
+    return { ok: false, error: `备份 ${backupFile} 失败（未改动 ${file}，已拒绝这次写入）：${errMessage(e)}` }
   }
   try {
     atomicWriteText(io, file, `${JSON.stringify(m.raw, null, 2)}\n`, 0o600)
   } catch (e) {
     // 原子写失败：目标文件未被 rename 覆盖，仍是迁移前那份；备份也还在。
-    return { ok: false, error: `写回 ${file} 失败（原文件保持不变，备份 ${backupFile}）：${errMessage(e)}` }
+    return { ok: false, error: `写回 ${file} 失败（原文件保持不变，备份 ${backupFile}，已拒绝这次写入）：${errMessage(e)}` }
   }
   log?.(`[settings] v1→v2 迁移：删除 ${m.removed.length} 个默认固化键，备份 ${backupFile}`)
-  return { ok: true, changed: m.changed, backup: backupFile, removed: m.removed }
+  return { ok: true, raw: m.raw, changed: m.changed, backup: backupFile, removed: m.removed }
+}
+
+export interface SettingsMigrationArgs {
+  file: string
+  backupFile: string
+  defaults: JsonObject
+  io: SettingsFsOps
+  log?: (msg: string) => void
+}
+
+/**
+ * runSettingsMigration：启动时执行的 v1→v2 迁移（在 bridge spawn 之前调用）。
+ *
+ * 与写路径共用 readSettingsForWrite（同一套顺序与错误），只是把结果压成「跑了一次迁移」的
+ * 报告形状。任一步失败都返回 `ok:false` 且**不留半截文件**；调用方只记日志、继续用旧文件
+ * （启动迁移失败不阻止启动，后续写会重试迁移而不是盖章 —— 见 readSettingsForWrite）。
+ */
+export function runSettingsMigration(args: SettingsMigrationArgs): SettingsMigrationRun {
+  const r = readSettingsForWrite(args)
+  if (!r.ok) return r.skipped === 'corrupt' ? { ok: false, skipped: 'corrupt', error: r.error } : { ok: false, error: r.error }
+  if (r.skipped) return { ok: true, skipped: r.skipped }
+  return { ok: true, changed: r.changed, backup: r.backup, removed: r.removed }
+}
+
+export type SettingsCommitResult =
+  | { ok: true; raw: JsonObject; changed: boolean }
+  | { ok: false; error: string; corrupt?: boolean }
+
+/**
+ * commitSettingsWrite：四条写路径的**唯一出口**（main.ts 只调它）。
+ *
+ * 读 raw（未迁移先迁移落盘）→ `mutate`（applySettingsPatch / applyProviderSave /
+ * applyProviderRemove / applyMcpServers）→ changed 才原子写。
+ * 迁移失败 / 坏文件 → `ok:false`，**一个字节都不写**（B2：绝不给未迁移文件盖章）。
+ *
+ * 注意顺序：**先迁移再改**，所以 patch 本身非法时 v1 文件也已经迁移好了（幂等、带 .bak），
+ * 只是这次修改被拒。这正是想要的：迁移不依赖 patch 是否合法，越早完成越安全。
+ */
+export function commitSettingsWrite(args: SettingsMigrationArgs & { mutate: (raw: JsonObject) => SettingsApplyResult }): SettingsCommitResult {
+  const { mutate, ...readArgs } = args
+  const read = readSettingsForWrite(readArgs)
+  if (!read.ok || !read.raw) {
+    return { ok: false, error: read.error ?? '读取 settings.json 失败', corrupt: read.skipped === 'corrupt' }
+  }
+  const applied = mutate(read.raw)
+  if (!applied.ok) return { ok: false, error: applied.error }
+  if (!applied.changed) return { ok: true, raw: applied.raw, changed: false }
+  try {
+    atomicWriteText(readArgs.io, readArgs.file, `${JSON.stringify(applied.raw, null, 2)}\n`, 0o600)
+  } catch (e) {
+    return { ok: false, error: `配置写盘失败（原文件保持不变）: ${errMessage(e)}` }
+  }
+  return { ok: true, raw: applied.raw, changed: true }
 }

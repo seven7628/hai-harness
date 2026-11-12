@@ -31,10 +31,11 @@ import {
   applyProviderRemove,
   applyProviderSave,
   applySettingsPatch,
-  atomicWriteText,
+  commitSettingsWrite,
   isValidProviderName,
   runSettingsMigration,
   type JsonObject,
+  type SettingsApplyResult,
   type SettingsFsOps,
 } from './settings-store'
 
@@ -590,17 +591,6 @@ function quarantineCorruptSettings(): string {
   }
 }
 
-// readRawSettingsForWrite 写路径专用读盘：坏文件 → 返回错误并**拒绝这次写**（同时备份坏文件）。
-// 与读侧的唯一区别：返回**原始对象**（未合并 DEFAULT_SETTINGS）——写侧拿并集当基线就会把
-// 默认值固化（BR-01），这是本函数存在的唯一理由。
-function readRawSettingsForWrite(): { raw: JsonObject } | { error: string } {
-  const r = readRawSettings()
-  if (!r.corrupt) return { raw: r.raw }
-  const backup = quarantineCorruptSettings()
-  const where = backup ? `旧文件已备份到 ${backup}（未删除），可从中恢复 Provider 配置` : `原文件保持不变，请修复后重试`
-  return { error: `settings.json 解析失败（${r.error ?? '未知错误'}），已拒绝写入以免清空配置；${where}。` }
-}
-
 // settingsFs：迁移与写盘共用的原子文件适配器（目录 0700、文件 0600、同目录 tmp + rename）。
 // settings.json 含明文 provider api_key / MCP env，权限与 bridge 的 patchJSONFile 保持一致。
 const settingsFs: SettingsFsOps = {
@@ -611,19 +601,30 @@ const settingsFs: SettingsFsOps = {
   unlink: (file) => fs.unlinkSync(file),
 }
 
-// writeRawSettings 写**原始对象**（不合并默认值）。原子写：崩溃/被 kill 只会留下旧文件，
-// 不会留下半截（并发读的 bridge 也不会读到半截 → provider key / MCP 一起消失）。
-function writeRawSettings(raw: JsonObject): { ok: true } | { ok: false; error: string } {
-  try {
-    // 末尾换行与 bridge 的 patchJSONFile 一致（同一文件多写者，格式别来回翻）。
-    atomicWriteText(settingsFs, SETTINGS_FILE(), `${JSON.stringify(raw, null, 2)}\n`)
-    return { ok: true }
-  } catch (e) {
-    // 磁盘只读/权限不足/磁盘满/JSON 序列化失败：必须向调用方暴露失败，
-    // 不能假装保存成功（否则 UI 显示已保存、实际未落盘）。
-    const msg = e instanceof Error ? e.message : String(e)
-    return { ok: false, error: `配置写盘失败: ${msg}` }
+// commitSettings：四条写路径的**唯一出口**。settings-store.commitSettingsWrite 负责
+// 「读原始对象（未迁移先迁移落盘）→ mutate → changed 才原子写」，这里只做 main.ts 侧的适配：
+//   · 坏文件（JSON 坏 / 读不出）→ 先 quarantine 原文件再拒绝这次写（不删，留作人工恢复）；
+//   · 迁移失败 → 拒绝这次写。**不写 schema_version:2**：给未迁移的 v1 文件盖章会让下次启动
+//     的 already-v2 直接跳过迁移，固化默认值就再也删不掉了（BR-01 的安全属性，复审 B2）。
+// 写基线永远是**原始对象**（不合并 DEFAULT_SETTINGS），否则一次主题修改就把默认值固化进用户文件。
+function commitSettings(mutate: (raw: JsonObject) => SettingsApplyResult): { ok: true } | { ok: false; error: string } {
+  const r = commitSettingsWrite({
+    file: SETTINGS_FILE(),
+    backupFile: `${SETTINGS_FILE()}.bak`,
+    defaults: DEFAULT_SETTINGS as unknown as JsonObject,
+    io: settingsFs,
+    log: (m) => console.log(m),
+    mutate,
+  })
+  if (r.ok) return { ok: true }
+  if (!r.corrupt) {
+    console.error(`[settings] 写盘被拒绝：${r.error}`)
+    return { ok: false, error: r.error }
   }
+  const backup = quarantineCorruptSettings()
+  const where = backup ? `旧文件已备份到 ${backup}（未删除），可从中恢复 Provider 配置` : '原文件保持不变，请修复后重试'
+  console.error(`[settings] ${r.error}`)
+  return { ok: false, error: `${r.error}；${where}。` }
 }
 
 // migrateSettingsOnStartup：存量 v1 → v2（§9.3）。必须在 **bridge spawn 之前**跑：
@@ -1511,14 +1512,8 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // settings.json 从几行变 200+ 行、新版本默认值对老用户永不生效」的根因。
   // 返回值仍走 readSettingsResult()：renderer 拿到完整设置形状（与 settings:get 一致）。
   ipcMain.handle('settings:set', (_e, patch: unknown) => {
-    const read = readRawSettingsForWrite()
-    if ('error' in read) return { ok: false, error: read.error }
-    const applied = applySettingsPatch(read.raw, patch)
-    if (!applied.ok) return { ok: false, error: applied.error }
-    if (applied.changed) {
-      const res = writeRawSettings(applied.raw)
-      if (!res.ok) return { ok: false, error: res.error }
-    }
+    const res = commitSettings((raw) => applySettingsPatch(raw, patch))
+    if (!res.ok) return { ok: false, error: res.error }
     return { ok: true, settings: readSettingsResult().settings }
   })
   // provider:save：持久化配置（settings.json）+ key（safeStorage 加密 keys.json）。不转发 bridge——
@@ -1527,14 +1522,8 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // 兄弟 provider / provider 段未知字段 / 顶层未知键一律不动（BR-02 的 Electron 一半），
   // 也**不补** DEFAULT_SETTINGS 的 base_url/models/max_tokens/protocol/input_types。
   ipcMain.handle('provider:save', (_e, p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; prices?: Record<string, { input: number; cache_read: number; cache_write: number; output: number }>; input_types?: Record<string, string[]>; openai_compat?: OpenAICompatCapabilities; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => {
-    const read = readRawSettingsForWrite()
-    if ('error' in read) return { ok: false, error: read.error }
-    const applied = applyProviderSave(read.raw, p)
-    if (!applied.ok) return { ok: false, error: applied.error }
-    if (applied.changed) {
-      const res = writeRawSettings(applied.raw)
-      if (!res.ok) return res
-    }
+    const res = commitSettings((raw) => applyProviderSave(raw, p))
+    if (!res.ok) return res
     if (p?.api_key) {
       // 明文 key 持久化到 settings.json provider 段（用户决策 2026-08-16；BR-08 是下一步）。
       // 同步删除 keys.json 同名旧条目（2026-09）：新 key 已明文落 settings.json，
@@ -1551,14 +1540,8 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // 写侧语义在 settings-store.applyProviderRemove：只动 provider.<name> 与 provider.active；
   // 内置 provider **不重建对象、不补默认值**（旧实现在删除时把整份默认写回，正是 BR-01）。
   ipcMain.handle('provider:remove', (_e, provider: string) => {
-    const read = readRawSettingsForWrite()
-    if ('error' in read) return { ok: false, error: read.error }
-    const applied = applyProviderRemove(read.raw, provider, { builtins: BUILTIN_PROVIDERS })
-    if (!applied.ok) return { ok: false, error: applied.error }
-    if (applied.changed) {
-      const res = writeRawSettings(applied.raw)
-      if (!res.ok) return res
-    }
+    const res = commitSettings((raw) => applyProviderRemove(raw, provider, { builtins: BUILTIN_PROVIDERS }))
+    if (!res.ok) return res
     removeProviderKey(provider)
     return { ok: true }
   })
@@ -1574,14 +1557,8 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // 写侧只替换自己的段：provider/theme/hooks 等顶层键与其它段原样保留
   //（校验与类型归一在 settings-store.normalizeMcpServers，与 bridge 的 Validate 同口径）。
   ipcMain.handle('mcp:save', (_e, servers: Record<string, MCPServerCfg>) => {
-    const read = readRawSettingsForWrite()
-    if ('error' in read) return { ok: false, error: read.error }
-    const applied = applyMcpServers(read.raw, servers)
-    if (!applied.ok) return { ok: false, error: applied.error }
-    if (applied.changed) {
-      const res = writeRawSettings(applied.raw)
-      if (!res.ok) return res
-    }
+    const res = commitSettings((raw) => applyMcpServers(raw, servers))
+    if (!res.ok) return res
     return { ok: true }
   })
   // 主题变化 → 窗口底色跟随（防切亮色时 pre-paint 白/黑闪）；主渲染由 renderer 设 data-theme

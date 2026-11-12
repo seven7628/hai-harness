@@ -6,7 +6,9 @@
 //   ② 写侧白名单：未知键（顶层/嵌套）拒绝；只改 patch 涉及的键；explicit 记录显式路径；
 //   ③ provider:save / provider:remove / mcp:save 只改自己的段（BR-02 的 Electron 一半）：
 //      不补兄弟 provider 默认、不丢未知字段、不丢其它顶层键；
-//   ④ 迁移文件 IO：缺文件/坏文件/非对象/备份路径可注入/写失败保留原文件。
+//   ④ 迁移文件 IO：缺文件/坏文件/非对象/备份路径可注入/写失败保留原文件；
+//   ⑤ 写即迁移（复审 B2）：写路径先迁移再改，迁移失败**拒绝这次写**且不盖章 schema_version:2；
+//   ⑥ main.ts 接线守卫（只作补充：行为断言在 ①–⑤，不再拿源码文本当唯一证据）。
 //
 // 注意：本任务**不**迁移 provider.*.api_key（BR-08 是下一步）——测试显式断言 key 原样保留。
 import { test } from 'node:test'
@@ -21,6 +23,7 @@ import {
   applyProviderSave,
   applySettingsPatch,
   atomicWriteText,
+  commitSettingsWrite,
   deepEqual,
   explicitPathsOf,
   deleteExplicitPath,
@@ -322,7 +325,7 @@ test('settings:set 未知键（顶层/嵌套/provider 字段）一律拒绝，�
   }
 })
 
-test('一次 theme patch 的 diff 只有 theme + explicit（v2）/ + schema_version（v1）', () => {
+test('一次 theme patch 的 diff 只有 theme + explicit（已迁移 v2）；未迁移 v1 由写路径先迁移', () => {
   // v2 已迁移文件：schema_version 已在 → diff = theme + explicit
   const v2Before = v2()
   const r2 = applySettingsPatch(v2Before, { theme: 'dark' })
@@ -339,18 +342,35 @@ test('一次 theme patch 的 diff 只有 theme + explicit（v2）/ + schema_vers
     assert.deepEqual(r2.raw.mcpServers, v2Before.mcpServers)
     assert.deepEqual(r2.raw.hooks, v2Before.hooks)
   }
-  // 尚未迁移的 v1 文件：+ schema_version（写侧兜底，任何成功写出的文件都是 v2）
+  // 未迁移的 v1 文件：apply* **不再**顺手盖章 schema_version（那会让「启动迁移失败 + 改一次
+  // 主题」把固化默认值永久钉死，复审 B2）。写路径必须先迁移：见 ⑤「写即迁移」的用例。
   const v1Before: JsonObject = { theme: 'dark', provider: { active: 'deepseek' }, unknown_top: 1 }
   const r1 = applySettingsPatch(v1Before, { theme: 'light' })
-  assert.ok(r1.ok)
-  if (r1.ok) {
-    printDiff('未迁移文件 + settings:set({theme:"light"})', v1Before, r1.raw)
-    assert.deepEqual(
-      rawDiff(v1Before, r1.raw).map((x) => x.path),
-      ['explicit', 'schema_version', 'theme'],
-    )
-    assert.equal(r1.raw.unknown_top, 1)
+  assert.equal(r1.ok, false)
+  if (!r1.ok) assert.match(r1.error, /尚未迁移到 v2/)
+  assert.equal('schema_version' in v1Before, false, '拒绝时不得改动入参（更不能盖章）')
+})
+
+test('四条 apply* 对未迁移输入（schema_version<2）一律拒绝：宁可不保存，也不盖章', () => {
+  // 迁移没跑成功时，写路径必须**拒绝**这次写：盖章 schema_version:2 会让下次启动
+  // already-v2 跳过迁移，v1 里的固化默认值再也删不掉（BR-01 的安全属性，复审 B2）。
+  const v1Raw: JsonObject = { theme: 'dark', provider: { active: 'deepseek' }, mcpServers: {} }
+  const snapshot = JSON.stringify(v1Raw)
+  const cases: Array<[string, () => { ok: boolean; error?: string }]> = [
+    ['applySettingsPatch', () => applySettingsPatch(v1Raw, { theme: 'light' })],
+    ['applyProviderSave', () => applyProviderSave(v1Raw, { provider: 'deepseek', label: 'x' })],
+    ['applyProviderRemove', () => applyProviderRemove(v1Raw, 'deepseek', { builtins: ['deepseek'] })],
+    ['applyMcpServers', () => applyMcpServers(v1Raw, { fs: { command: 'mcp-fs' } })],
+  ]
+  for (const [name, call] of cases) {
+    const r = call()
+    assert.equal(r.ok, false, `${name} 必须拒绝未迁移输入`)
+    assert.match(r.error ?? '', /尚未迁移到 v2/, `${name} 的错误要说清原因`)
   }
+  assert.equal(JSON.stringify(v1Raw), snapshot, '拒绝时不得改动入参')
+  // 未来版本（schema_version > 2）照常可写：读侧不降级，写侧也不挡
+  const future = applySettingsPatch({ schema_version: 3, theme: 'dark' }, { theme: 'light' })
+  assert.equal(future.ok, true)
 })
 
 test('已知段局部合并：只改 patch 提到的叶子，同段其它字段保留；null 回默认', () => {
@@ -406,6 +426,69 @@ test('settings:set 收到 provider 时走同一套白名单/合并规则（不�
   assert.deepEqual(r.raw.mcpServers, before.mcpServers)
   assert.deepEqual(r.raw.hooks, before.hooks)
   assert.deepEqual(explicitPathsOf(r.raw), ['provider.active', 'provider.openai.label'])
+})
+
+test('settings:set 禁止整段 provider / mcpServers 置 null（会连带清掉 api_key / env）', () => {
+  const raw: JsonObject = {
+    schema_version: 2,
+    theme: 'light',
+    agent: { reminder_rounds: 12 },
+    provider: { active: 'deepseek', deepseek: { api_key: 'sk-d' } },
+    mcpServers: { fs: { command: 'mcp-fs', env: { TOKEN: 't' } } },
+  }
+  for (const patch of [{ provider: null }, { mcpServers: null }]) {
+    const r = applySettingsPatch(raw, patch)
+    assert.equal(r.ok, false)
+    assert.match(r.error ?? '', /不允许整段置空/)
+  }
+  // 其它段保持「null = 回默认（删键）」
+  const r = applySettingsPatch(raw, { agent: null, theme: null })
+  assert.ok(r.ok)
+  if (!r.ok) return
+  assert.equal('agent' in r.raw, false)
+  assert.equal('theme' in r.raw, false)
+  assert.deepEqual(r.raw.provider, raw.provider, 'provider 段不动')
+  assert.deepEqual(r.raw.mcpServers, raw.mcpServers, 'mcpServers 段不动')
+  // mcpServers: {} 仍是合法的「清空」（mcp:save 的既有路径）
+  const empty = applyMcpServers(raw, {})
+  assert.ok(empty.ok)
+  if (empty.ok) assert.equal('mcpServers' in empty.raw, false)
+})
+
+test('settings:set 只 patch 已有 provider 的 label：base_url/models/auth_type/未知字段原样保留', () => {
+  // provider 分支不能每次从 {} 重建条目（复审 M5 的存活变异）：那会把 base_url / models /
+  // auth_type 以及本版本不认识的字段一起抹掉，等于把 provider 打回默认。局部合并才是对的。
+  const before: JsonObject = {
+    schema_version: 2,
+    provider: {
+      active: 'myproxy',
+      myproxy: {
+        base_url: 'https://p/v1',
+        models: { 'm-1': 32768 },
+        max_tokens: { 'm-1': 4096 },
+        protocol: 'chat_completions',
+        auth_type: 'oauth',
+        label: '旧名',
+        future_field: { nested: [1, 2] },
+      },
+      deepseek: { api_key: 'sk-d' },
+    },
+  }
+  const r = applySettingsPatch(before, { provider: { myproxy: { label: '新名' } } })
+  assert.ok(r.ok)
+  if (!r.ok) return
+  assert.deepEqual((r.raw.provider as JsonObject).myproxy, {
+    base_url: 'https://p/v1',
+    models: { 'm-1': 32768 },
+    max_tokens: { 'm-1': 4096 },
+    protocol: 'chat_completions',
+    auth_type: 'oauth',
+    label: '新名',
+    future_field: { nested: [1, 2] },
+  })
+  assert.deepEqual((r.raw.provider as JsonObject).deepseek, { api_key: 'sk-d' }, '兄弟 provider 不动')
+  assert.equal((r.raw.provider as JsonObject).active, 'myproxy')
+  assert.deepEqual(explicitPathsOf(r.raw), ['provider.myproxy.label'])
 })
 
 // ───────────────────────── ③ 段级写（BR-02 的 Electron 一半） ─────────────────────────
@@ -551,6 +634,66 @@ test('mcp:save 校验与 bridge 同口径：未知字段/缺 command/缺 url 拒
   }
 })
 
+test('mcp:save / settings:set{mcpServers} 带 args: undefined（无参数 stdio）成功且不写 args 键', () => {
+  // MCPTab.buildCfg 对无参数的 stdio server 总是给出 `args: <string[]|undefined>`，经 Electron IPC
+  // （V8 结构化克隆）后**键还在**。写侧把它当成「这一项没填」跳过，而不是坏值拒绝
+  //（复审 B1：旧实现会让「添加/编辑无 args 的 stdio server」整条保存失败）。
+  const before = v2()
+  const cfg = { type: 'stdio', command: 'npx', args: undefined }
+  const cases: Array<[string, () => ReturnType<typeof applyMcpServers>]> = [
+    ['mcp:save', () => applyMcpServers(before, { npx: cfg })],
+    ['settings:set{mcpServers}', () => applySettingsPatch(before, { mcpServers: { npx: cfg } })],
+  ]
+  for (const [name, call] of cases) {
+    const r = call()
+    assert.equal(r.ok, true, `${name} 不应拒绝 args: undefined`)
+    if (!r.ok) continue
+    const entry = (r.raw.mcpServers as JsonObject).npx as JsonObject
+    assert.deepEqual(entry, { type: 'stdio', command: 'npx' }, `${name}: args: undefined 不得落成键`)
+    assert.equal('args' in entry, false, `${name}: 无参数时配置里不该出现 args`)
+    assert.deepEqual(r.raw.provider, before.provider, `${name}: 其它段不动`)
+  }
+  // undefined = 未提供（与 applySettingsPatch 的 {...cur} 同口径）：未知键也会被跳过；
+  // 但**有值**的未知键仍然拒绝（不放松校验）。
+  assert.equal(applyMcpServers(before, { fs: { command: 'mcp-fs', bogus: undefined } }).ok, true)
+  const bad = applyMcpServers(before, { fs: { command: 'mcp-fs', bogus: 1 } })
+  assert.equal(bad.ok, false)
+  if (!bad.ok) assert.match(bad.error, /unknown settings key mcpServers\.fs\.bogus/)
+})
+
+test('mcp:save 编辑已有条目：草稿原样回填保留 args/command/env；清空 args 只删该键', () => {
+  const before: JsonObject = {
+    schema_version: 2,
+    mcpServers: { fs: { type: 'stdio', command: 'mcp-fs', args: ['--root', '/tmp'], env: { A: 'b' } } },
+    theme: 'light',
+  }
+  // 编辑（MCPTab 用 {...cur} 重建整份 cfg）：未改动的 args/command 原样保留
+  const edited = applyMcpServers(before, { fs: { type: 'stdio', command: 'mcp-fs', args: ['--root', '/tmp'], env: { A: 'b', B: 'c' } } })
+  assert.ok(edited.ok)
+  if (edited.ok) {
+    const entry = (edited.raw.mcpServers as JsonObject).fs as JsonObject
+    assert.equal(entry.command, 'mcp-fs')
+    assert.deepEqual(entry.args, ['--root', '/tmp'])
+    assert.deepEqual(entry.env, { A: 'b', B: 'c' })
+    assert.equal(edited.raw.theme, 'light')
+  }
+  // 用户把参数清空：args: [] 保留空数组（写侧不擅自改用户意图），args: undefined 则不留键
+  const emptyArgs = applyMcpServers(before, { fs: { type: 'stdio', command: 'mcp-fs', args: [], env: { A: 'b' } } })
+  assert.ok(emptyArgs.ok)
+  if (emptyArgs.ok) {
+    const entry = (emptyArgs.raw.mcpServers as JsonObject).fs as JsonObject
+    assert.equal(entry.command, 'mcp-fs')
+    assert.deepEqual(entry.args, [])
+  }
+  const noArgs = applyMcpServers(before, { fs: { type: 'stdio', command: 'mcp-fs', args: undefined, env: { A: 'b' } } })
+  assert.ok(noArgs.ok)
+  if (noArgs.ok) {
+    const entry = (noArgs.raw.mcpServers as JsonObject).fs as JsonObject
+    assert.equal(entry.command, 'mcp-fs')
+    assert.equal('args' in entry, false)
+  }
+})
+
 // ───────────────────────── ④ 迁移文件 IO（可注入） ─────────────────────────
 
 const FILE = '/cfg/settings.json'
@@ -669,7 +812,171 @@ test('atomicWriteText：写失败不留 tmp、不改目标', () => {
   assert.ok(calls.includes('unlink /cfg/a.json.tmp'))
 })
 
-// ───────────────────────── ⑤ main.ts 接线守卫（不启动 Electron） ─────────────────────────
+// ─────────────────── ⑤ 写即迁移：写路径绝不越过迁移盖章（复审 B2） ───────────────────
+//
+// 场景（复审给的真机路径）：启动迁移失败（备份/写回失败）→ 用户改一次主题。旧实现在 apply*
+// 里盖章 schema_version:2，于是 v1 文件被写成 v2 → 下次启动 already-v2 跳过迁移 → v1 里
+// 固化的默认值永久生效、再也删不掉。以下用例全部在**行为层**断言（注入 fs，不看源码文本）。
+
+test('写即迁移：v1 文件 + 一次 theme patch → 先迁移再 patch，产物没有任何固化默认键', () => {
+  const original = `${JSON.stringify(v1(), null, 2)}\n`
+  const { io, store, calls } = fakeIo({ [FILE]: original })
+  const r = commitSettingsWrite({
+    file: FILE,
+    backupFile: BAK,
+    defaults: DEFAULTS,
+    io,
+    mutate: (raw) => applySettingsPatch(raw, { theme: 'light' }),
+  })
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  // 备份 = 迁移前逐字节原文（可回滚）
+  assert.equal(store.get(BAK)?.text, original)
+  const out = JSON.parse(store.get(FILE)!.text) as JsonObject
+  assert.equal(out.schema_version, 2)
+  assert.equal(out.theme, 'light')
+  // 关键断言：一次主题修改**不得**把 DEFAULT_SETTINGS 的任何默认值带进用户文件
+  for (const k of ['lang', 'mcpServers', 'agent', 'sandbox', 'permissions', 'stt']) {
+    assert.equal(k in out, false, `${k} 等于默认值，不得因一次 theme patch 被固化`)
+  }
+  assert.equal(JSON.stringify(out).includes('deepseek-chat'), false, '内置 models 默认不得落盘')
+  const deepseek = (out.provider as JsonObject).deepseek as JsonObject
+  for (const field of ['base_url', 'models', 'max_tokens', 'protocol', 'input_types']) {
+    assert.equal(field in deepseek, false, `provider.deepseek.${field} 是默认值，不得落盘`)
+  }
+  // 用户值原样保留
+  assert.deepEqual(deepseek, { api_key: 'sk-deepseek' })
+  assert.deepEqual((out.provider as JsonObject).myproxy, MYPROXY)
+  assert.deepEqual((out.provider as JsonObject).zhipu, { deleted: true })
+  assert.deepEqual(out.hooks, { pre_tool: [{ name: 'audit' }] })
+  assert.deepEqual(out.runtime, { stop_background_on_interrupt: true })
+  assert.deepEqual(explicitPathsOf(out), ['theme'])
+  // 两次原子写：迁移 → patch（都走 tmp+rename）
+  assert.equal(calls.filter((c) => c === `rename ${FILE}.tmp ${FILE}`).length, 2)
+})
+
+test('写路径：迁移失败（备份失败）→ 拒绝这次写、原文件逐字节不变、绝不出现 schema_version:2', () => {
+  const original = `${JSON.stringify(v1(), null, 2)}\n`
+  const { io, store, fail } = fakeIo({ [FILE]: original })
+  fail.rename.add(BAK)
+  const r = commitSettingsWrite({
+    file: FILE,
+    backupFile: BAK,
+    defaults: DEFAULTS,
+    io,
+    mutate: (raw) => applySettingsPatch(raw, { theme: 'light' }),
+  })
+  assert.equal(r.ok, false)
+  assert.match(r.ok ? '' : r.error, /备份 .* 失败/)
+  assert.equal(r.ok ? true : r.corrupt, false, '不是坏文件 → main.ts 不该 quarantine')
+  assert.equal(store.get(FILE)?.text, original, '原文件必须逐字节不变')
+  assert.equal((JSON.parse(store.get(FILE)!.text) as JsonObject).schema_version, undefined, '绝不能盖章')
+  assert.equal(store.has(BAK), false)
+  assert.equal(store.has(`${FILE}.tmp`), false, '失败不留 tmp')
+
+  // 磁盘恢复后重试 → 迁移 + patch 成功（每次写都重试迁移，而不是「跳过迁移直接盖章」）
+  fail.rename.clear()
+  const retry = commitSettingsWrite({
+    file: FILE,
+    backupFile: BAK,
+    defaults: DEFAULTS,
+    io,
+    mutate: (raw) => applySettingsPatch(raw, { theme: 'light' }),
+  })
+  assert.equal(retry.ok, true)
+  const out = JSON.parse(store.get(FILE)!.text) as JsonObject
+  assert.equal(out.schema_version, 2)
+  assert.equal(out.theme, 'light')
+  assert.equal('lang' in out, false, '重试也是「先迁移再 patch」，不带默认值')
+})
+
+test('写路径：迁移失败（写回失败）→ 拒绝这次写、原文件逐字节不变、备份仍在', () => {
+  const original = `${JSON.stringify(v1(), null, 2)}\n`
+  const { io, store, fail } = fakeIo({ [FILE]: original })
+  fail.rename.add(FILE)
+  const r = commitSettingsWrite({
+    file: FILE,
+    backupFile: BAK,
+    defaults: DEFAULTS,
+    io,
+    mutate: () => {
+      throw new Error('迁移失败时不得调用 mutate（会把未迁移对象交给 apply*）')
+    },
+  })
+  assert.equal(r.ok, false)
+  assert.match(r.ok ? '' : r.error, /写回 .* 失败（原文件保持不变/)
+  assert.equal(store.get(FILE)?.text, original)
+  assert.equal((JSON.parse(store.get(FILE)!.text) as JsonObject).schema_version, undefined)
+  assert.equal(store.get(BAK)?.text, original, '备份已写（迁移前原文），目标文件没被覆盖')
+  assert.equal(store.has(`${FILE}.tmp`), false)
+})
+
+test('写路径：坏文件 → corrupt 标记 + 拒绝写（main.ts 据此 quarantine），且不调用 mutate', () => {
+  for (const text of ['{ not json', '[]', 'null']) {
+    const { io, store } = fakeIo({ [FILE]: text })
+    const r = commitSettingsWrite({
+      file: FILE,
+      backupFile: BAK,
+      defaults: DEFAULTS,
+      io,
+      mutate: () => {
+        throw new Error('坏文件不得进入 mutate（默认值绝不能当写基线）')
+      },
+    })
+    assert.equal(r.ok, false)
+    assert.equal(r.ok ? false : r.corrupt, true)
+    assert.equal(store.get(FILE)?.text, text)
+    assert.equal(store.has(BAK), false)
+  }
+})
+
+test('写路径：缺文件（首次运行）→ 只写用户显式值 + schema_version，不先铺一遍默认值', () => {
+  const { io, store } = fakeIo()
+  const r = commitSettingsWrite({
+    file: FILE,
+    backupFile: BAK,
+    defaults: DEFAULTS,
+    io,
+    mutate: (raw) => applySettingsPatch(raw, { theme: 'light' }),
+  })
+  assert.equal(r.ok, true)
+  const out = JSON.parse(store.get(FILE)!.text) as JsonObject
+  assert.deepEqual(out, { schema_version: 2, theme: 'light', explicit: ['theme'] })
+  assert.equal(store.has(BAK), false, '没有旧文件可备份 → 不写 .bak')
+})
+
+test('写路径：已迁移 v2 + 幂等 patch → changed=false 不写盘；有变化才写一次', () => {
+  // 幂等 = 值相同**且** explicit 已记过这条路径（缺 explicit 时补齐本身就是一次真实变化）
+  const settled: JsonObject = { ...v2(), explicit: ['theme'] }
+  const text = `${JSON.stringify(settled, null, 2)}\n`
+  const { io, store, calls } = fakeIo({ [FILE]: text })
+  const same = commitSettingsWrite({
+    file: FILE,
+    backupFile: BAK,
+    defaults: DEFAULTS,
+    io,
+    mutate: (raw) => applySettingsPatch(raw, { theme: 'light' }), // settled 已是 light + explicit
+  })
+  assert.equal(same.ok, true)
+  assert.equal(same.ok ? same.changed : true, false)
+  assert.equal(store.get(FILE)?.text, text, '没变化就不重写（也没必要动 mtime）')
+  assert.equal(calls.some((c) => c.startsWith('write')), false)
+
+  const changed = commitSettingsWrite({
+    file: FILE,
+    backupFile: BAK,
+    defaults: DEFAULTS,
+    io,
+    mutate: (raw) => applySettingsPatch(raw, { theme: 'dark' }),
+  })
+  assert.equal(changed.ok, true)
+  assert.equal(changed.ok ? changed.changed : false, true)
+  const out = JSON.parse(store.get(FILE)!.text) as JsonObject
+  assert.equal(out.theme, 'dark')
+  assert.deepEqual(rawDiff(settled, out).map((x) => x.path), ['theme'])
+})
+
+// ───────────────────────── ⑥ main.ts 接线守卫（不启动 Electron） ─────────────────────────
 
 function sourcePath(file: string): string {
   const p = join(process.cwd(), 'electron', file)
@@ -690,7 +997,12 @@ test('main.ts：写路径全部走 settings-store（不再有并集基线 / 段�
   const flat = flatten(src)
   // 旧的「读并集 → 整文件重写」入口必须消失
   assert.equal(flat.includes('settingsForWrite'), false, 'settingsForWrite（并集写基线）必须删除')
-  assert.equal(flat.includes('writeSettings('), false, 'writeSettings(AppSettings) 必须换成 writeRawSettings')
+  assert.equal(flat.includes('writeSettings('), false, 'writeSettings(AppSettings) 必须换成 commitSettings(原始对象)')
+  assert.equal(flat.includes('writeRawSettings('), false, 'writeRawSettings 已并入 settings-store.commitSettingsWrite')
+  assert.equal(flat.includes('readRawSettingsForWrite('), false, '读原始对象 + 迁移统一在 settings-store.readSettingsForWrite')
+  // 四条写路径共用同一个「迁移 + 原子写」出口（B2：不存在绕过迁移的写）
+  assert.equal(flat.split('commitSettings(').length - 1, 5, '四条写路径 + 定义各一次 commitSettings(')
+  assert.equal(flat.split('commitSettingsWrite(').length - 1, 1, 'commitSettings 是 commitSettingsWrite( 的唯一调用点')
   // 四条写路径的调用点
   for (const fn of ['applySettingsPatch(', 'applyProviderSave(', 'applyProviderRemove(', 'applyMcpServers(']) {
     assert.ok(flat.includes(fn), `main.ts 应调用 ${fn}`)
