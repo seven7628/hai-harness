@@ -15,10 +15,13 @@ import { spawn } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import net from 'net'
+import { freePort } from './_serve.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
-const PORT = 4183
+// 端口由内核分配（e2e/_serve.mjs 的注释 / 04-review F46）：固定端口在 npm test 链里会撞上一个
+// 还没退干净的 preview 服务，那种「红」跟代码无关 —— 本轮把它挂进链，先把这个坑堵上。
+const PORT = Number(process.env.PORT) || await freePort()
 const URL_BASE = `http://localhost:${PORT}/`
 
 let pass = 0
@@ -50,6 +53,41 @@ try {
   browser = await chromium.launch()
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } })
   page.on('pageerror', (e) => { throw new Error(`页面异常: ${e.message}`) })
+
+  // 答一批 ask_user 提问（mock 流程的一环：答完才跑到 edit_file）。
+  //
+  // 【为什么重写】原来等的是 `[role=dialog][aria-modal=true]` —— 那是 ask_user 还是**弹窗**时的
+  // 选择器。改版后 AskUserQuestionPanel 住在 CenterPanel 的 `.dock` 里（role="region"，每题
+  // `.q-item`、选项 `.q-option`、提交是 dock 里的主按钮），旧选择器恒 null：提问永远没人答 →
+  // mock 的 edit_file 永远不执行 → ⑧ 干等 18s 找不到行。它不在 npm test 链里，所以红了几轮
+  // 没人知道（00 §4.6：链外的红迟早烂成「既有红」）。
+  // 现在的答法对两种布局都成立：逐题点第一个未选选项 → 有「提交」就提交，没有就点「下一问」。
+  const answerAskUser = async (timeoutMs = 0) => {
+    const deadline = Date.now() + timeoutMs
+    while (!(await page.$('.dock'))) {
+      if (Date.now() >= deadline) return false
+      await page.waitForTimeout(250)
+    }
+    for (let step = 0; step < 6; step++) {
+      await page.evaluate(() => {
+        for (const q of document.querySelectorAll('.dock .q-item, .dock .ask')) {
+          const opt = q.querySelector('.q-option:not(.sel)')
+          if (opt) opt.click()
+        }
+      })
+      await page.waitForTimeout(200)
+      const submitted = await page.evaluate(() => {
+        const b = [...document.querySelectorAll('.dock button')].find((x) => /提交/.test(x.textContent || '') && !x.disabled)
+        if (b) { b.click(); return true }
+        const next = document.querySelector('.dock .ask-btn.go:not([disabled])')
+        if (next) { next.click(); return false }
+        return false
+      })
+      await page.waitForTimeout(300)
+      if (submitted) return true
+    }
+    return false
+  }
   await page.goto(URL_BASE, { waitUntil: 'load' })
   await page.waitForTimeout(2500)
 
@@ -72,20 +110,9 @@ try {
     const b = [...document.querySelectorAll('button')].find((x) => /发送/.test(x.getAttribute('aria-label') || ''))
     if (b) b.click()
   })
-  // ask_user 弹窗：全选后提交（mock 流程的一环）
-  for (let i = 0; i < 24; i++) {
-    if (await page.$('[role=dialog][aria-modal=true]')) break
-    await page.waitForTimeout(700)
-  }
-  await page.evaluate(() => {
-    const d = document.querySelector('[role=dialog][aria-modal=true]')
-    if (d) d.querySelectorAll('button').forEach((b) => { if (!/提交/.test(b.textContent || '')) b.click() })
-  })
-  await page.waitForTimeout(400)
-  await page.evaluate(() => {
-    const b = [...document.querySelectorAll('[role=dialog] button')].find((x) => /提交/.test(x.textContent || ''))
-    if (b) b.click()
-  })
+  // ask_user 提问：答完提交（mock 流程的一环）
+  const answeredOnce = await answerAskUser(20000)
+  if (!answeredOnce) console.log('  ⚠️ 准备阶段没等到 .dock（提问面板）——后面的链路会缺 edit_file 行')
   await page.waitForTimeout(7000)
 
   // —— 展开右栏 + 链路 tab ——
@@ -325,21 +352,8 @@ try {
   console.log('\n【⑧】带 diff 的工具 span 抽屉（unified 字符串渲染）')
   const pageErrors = []
   page.on('pageerror', (e) => pageErrors.push(e.message))
-  const answerAskUser = async () => {
-    if (!(await page.$('[role=dialog][aria-modal=true]'))) return false
-    await page.evaluate(() => {
-      const d = document.querySelector('[role=dialog][aria-modal=true]')
-      if (!d) return
-      d.querySelectorAll('button').forEach((b) => { if (!/提交/.test(b.textContent || '')) b.click() })
-    })
-    await page.waitForTimeout(350)
-    await page.evaluate(() => {
-      const b = [...document.querySelectorAll('[role=dialog] button')].find((x) => /提交/.test(x.textContent || ''))
-      if (b) b.click()
-    })
-    return true
-  }
-  let answered = await answerAskUser()
+  // 答提问的 helper 在文件顶部（按当前 .dock 布局；旧的 [role=dialog] 选择器已失配）
+  let answered = await answerAskUser(20000)
   let diffRow = -1
   for (let i = 0; i < 60; i++) {
     // 提问可能因时序稍晚才弹出：循环里持续兜底
