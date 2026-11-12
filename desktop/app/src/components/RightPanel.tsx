@@ -1960,6 +1960,8 @@ export default function RightPanel() {
   const setRightTab = useAppStore((s) => s.setRightTab)
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)
   const toggleRight = useAppStore((s) => s.toggleRight)
+  const rightLayout = useAppStore((s) => s.rightLayout)
+  const applyBias = useAppStore((s) => s.applyBias)
   const browserConfig = useAppStore((s) => s.browserConfig)
   // —— 标签模型（阶段 1）——
   const tabsByScope = useAppStore((s) => s.tabsByScope)
@@ -2228,6 +2230,20 @@ export default function RightPanel() {
                 </button>
               ))}
             </div>}
+          </div>
+          <div className="rp-bias" role="group" aria-label={t('rp.bias.label')}>
+            {(['even', 'center', 'right'] as const).map((b) => (
+              <button
+                key={b}
+                className={'rp-bias-b' + (rightLayout.open && rightLayout.bias === b ? ' on' : '')}
+                onClick={() => applyBias(b)}
+                title={t('rp.bias.' + b)}
+                aria-label={t('rp.bias.' + b)}
+                aria-pressed={rightLayout.open && rightLayout.bias === b}
+              >
+                {t('rp.bias.' + b)}
+              </button>
+            ))}
           </div>
           <button className="tab-collapse" onClick={toggleRight} title={t('topbar.toggleRight')} aria-label={t('topbar.toggleRight')}>
             <PanelRight size={15} />

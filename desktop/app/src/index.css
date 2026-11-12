@@ -5332,6 +5332,34 @@ body.is-electron .left.collapsed .rail .rbtn {
   color: var(--text);
   border-bottom-color: var(--accent-strong);
 }
+/* 右栏宽度预设（三态：平分 / 居中 / 右重；拖拽后变「自定义」，不高亮） */
+.rp-bias {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+.rp-bias-b {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rp-bias-b:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+.rp-bias-b.on {
+  color: var(--text);
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-strong) 12%, transparent);
+}
 /* 右栏自身收缩按钮（归属右栏，顶栏已移除） */
 .tab-collapse {
   flex: 0 0 auto;

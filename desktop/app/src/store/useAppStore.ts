@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
+import type { RightLayout } from '../lib/layout'
+import { afterDrag, collapse as layoutCollapse, expand as layoutExpand, normalizeLayout } from '../lib/layout'
 import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
@@ -1066,6 +1068,8 @@ export interface SessionView {
   release?: PendingRelease // 沙箱拦截放行确认（sandbox_blocked；随 bash 工具结束清除）
   pendingQueue: QueuedInput[] // 客户端暂存队列（未推送 / 已推送待确认；逐条可编辑，LLM End 时整队推送）
   rightExpanded: boolean // 右侧栏是否展开（会话级，切换会话各自恢复）
+  // 三态布局（PR-01）：rightExpanded 是它的派生镜像；ratio = 右栏占「除左栏外」的百分比
+  rightLayout: RightLayout
   rightTab: RightTab // 右侧栏当前 tab（会话级）
 
   // —— 链路 tab：trace（docs/TRACE_CHAIN_REDESIGN.md）——
@@ -1188,9 +1192,17 @@ function emptyView(): SessionView {
     release: undefined,
     pendingQueue: [],
     rightExpanded: false,
+    rightLayout: layoutCollapse,
     rightTab: 'activity',
     traceEvents: [],
   }
+}
+
+// 右栏布局归一化：rightExpanded 只是 rightLayout.open 的镜像，读写都经过这里，
+// 避免「磁盘上一份 open:true、镜像 false」这种漂移被持久化（00 §1.5 派生值不落库）。
+function layoutMirror(v: { rightLayout?: RightLayout; rightExpanded: boolean }) {
+  const rightLayout = normalizeLayout(v.rightLayout, v.rightExpanded)
+  return { rightLayout, rightExpanded: rightLayout.open }
 }
 
 // view 的顶层镜像字段（组件读顶层）
@@ -1242,7 +1254,7 @@ function viewFields(nv: SessionView): Partial<AppState> {
     questions: nv.questions,
     release: nv.release,
     pendingQueue: nv.pendingQueue,
-    rightExpanded: nv.rightExpanded,
+    ...layoutMirror(nv),
     rightTab: nv.rightTab,
     traceEvents: nv.traceEvents,
     traceList: nv.traceList,
@@ -1307,7 +1319,7 @@ function topViewFields(s: AppState): Partial<SessionView> {
     questions: s.questions,
     release: s.release,
     pendingQueue: s.pendingQueue,
-    rightExpanded: s.rightExpanded,
+    ...layoutMirror(s),
     rightTab: s.rightTab,
     traceEvents: s.traceEvents,
     traceList: s.traceList,
@@ -2844,6 +2856,7 @@ export interface AppState {
   leftExpanded: boolean
   leftPinned: boolean
   rightExpanded: boolean
+  rightLayout: RightLayout
   rightTab: RightTab
   rightSize: number | null // M3：期望的右侧面板宽度（null = 不强制；浏览器内嵌时按 viewport 设）
   // skeleton：切换会话时的骨架屏状态机（2026-10-21 重设计）。
@@ -3193,6 +3206,9 @@ export interface AppState {
   toggleRight(): void
   setLeftExpanded(b: boolean): void // Panel onCollapse/onExpand 同步
   setRightExpanded(b: boolean): void
+  setRightLayout(l: RightLayout): void
+  setRightLayoutFromDrag(rightPct: number, leftPct: number): void
+  applyBias(b: 'even' | 'center' | 'right'): void
   togglePin(): void
   setRightTab(t: RightTab): void
   // focusAgent：左栏树点选一个子智能体 → 叙述区改为展示它的转录（同一次运行的两处视图）。
@@ -8491,6 +8507,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   leftExpanded: true,
   leftPinned: false,
   rightExpanded: false,
+  rightLayout: layoutCollapse,
   rightTab: 'activity',
   rightSize: null,
   skeleton: { phase: 'idle' as const, at: 0 },
@@ -9965,21 +9982,50 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleLeft: () => set((s) => ({ leftExpanded: !s.leftExpanded })),
   // 右侧栏开关/tab 是会话级视图状态：写入活跃会话的 view（per-session 恢复）
+  // 布局唯一写者：rightLayout 写进去，rightExpanded 同步成派生镜像（D-D 同款纪律）
+  setRightLayout: (l) => {
+    const s = get()
+    const sid = s.activeSessionId
+    if (!sid) return set({ rightLayout: l, rightExpanded: l.open })
+    const v = s.views[sid] ?? emptyView()
+    set(setView(s, sid, { ...v, rightLayout: l, rightExpanded: l.open }))
+  },
+  // 只在右栏已展开时记录拖拽：收起态下 Group 仍会报 ~44px（rail），
+  // 若不拦住，拖左/中分隔条会把右栏弹开（违反 D-A：自动展开只属于 openTab）。
+  setRightLayoutFromDrag: (rightPct, leftPct) => {
+    const cur = get().rightLayout
+    if (!cur.open) return
+    const next = afterDrag(rightPct, leftPct)
+    if (next.open && Math.abs(next.ratio - cur.ratio) < 1) return // 无实质变化不重渲
+    get().setRightLayout(next)
+  },
+  // 点预设：清 rightSize（内嵌浏览器 viewport 宽度）与写布局同一个 set，避免先按旧比例闪一帧
+  applyBias: (b) => {
+    const s = get()
+    const layout = layoutExpand(b)
+    const sid = s.activeSessionId
+    const patch = sid
+      ? setView(s, sid, { ...(s.views[sid] ?? emptyView()), rightLayout: layout, rightExpanded: true })
+      : { rightLayout: layout, rightExpanded: true }
+    set({ ...patch, rightSize: null })
+  },
   toggleRight: () => {
     const s = get()
-    const sid = s.activeSessionId
-    const next = !s.rightExpanded
-    if (!sid) return set({ rightExpanded: next })
-    const v = s.views[sid] ?? emptyView()
-    set(setView(s, sid, { ...v, rightExpanded: next }))
+    get().setRightLayout(s.rightLayout.open ? layoutCollapse : layoutExpand('even'))
   },
   setLeftExpanded: (b) => set({ leftExpanded: b }),
+  // 兼容旧调用点（Panel onResize / 快捷键 / 测试 reset）：以 rightExpanded 为「已展开」判据，
+  // 避免 rightLayout 与 rightExpanded 因外部直接 set 而漂移；已展开时只做镜像自愈，不重置 bias。
   setRightExpanded: (b) => {
     const s = get()
-    const sid = s.activeSessionId
-    if (!sid) return set({ rightExpanded: b })
-    const v = s.views[sid] ?? emptyView()
-    set(setView(s, sid, { ...v, rightExpanded: b }))
+    if (b) {
+      if (s.rightLayout.open && s.rightExpanded) return
+      const bias = s.rightLayout.open && s.rightLayout.bias !== 'custom' ? s.rightLayout.bias : 'even'
+      get().setRightLayout(layoutExpand(bias)) // 同时自愈 rightExpanded 镜像
+    } else {
+      if (!s.rightLayout.open && !s.rightExpanded) return
+      get().setRightLayout(layoutCollapse)
+    }
   },
   togglePin: () => set((s) => ({ leftPinned: !s.leftPinned })),
   focusAgent: (f) => {
