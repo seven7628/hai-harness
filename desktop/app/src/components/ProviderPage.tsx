@@ -264,19 +264,8 @@ export default function ProviderPage() {
     setProtocols(p)
     setUsageIncls(u)
     setCacheTTLs(t)
-    // key 草稿预填已存明文（默认掩码，眼睛切换明文）；只填空缺草稿，不覆盖用户已输入
-    setKeys((m) => {
-      let changed = false
-      const next = { ...m }
-      for (const pid of providerIds) {
-        const stored = cfgOf(pid)?.api_key ?? ''
-        if (!next[pid] && stored) {
-          next[pid] = stored
-          changed = true
-        }
-      }
-      return changed ? next : m
-    })
+    // BR-08：key 草稿**默认空**，绝不再从 settings 预填明文（settings 里也没有 key 了）。
+    // 是否已有 key 只看 providerKeys[pid] 这个布尔（provider:key-status），提示「已设置 · 留空不修改」。
     // 依赖整个 settings：增删 provider / 改名也触发回填。cfgOf/providerIds 是每帧新建的闭包，
     // 放进依赖会变成「每次渲染都回填」，把用户正在输入的草稿冲掉。
   }, [settings]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -295,9 +284,10 @@ export default function ProviderPage() {
       cache_ttl_1h: ttlDraft === 'auto' ? null : ttlDraft === '1h',
       api_key,
     })
-    // 不清空草稿：key 已预填明文（掩码），眼睛可切换查看；保存后 settings 刷新回填
     setErr(null)
     if (ok) {
+      // 主进程已把 key 写进 keys.json → 清掉渲染层的明文草稿；「已设置」提示由 providerKeys 反映
+      if (api_key) setKeys((m) => ({ ...m, [pid]: '' }))
       showToast(t('provider.saved')) // 成功 → 全局 Toast（符合系统样式）
     } else {
       showToast(t('provider.saveErr'), 'error')
@@ -416,10 +406,13 @@ export default function ProviderPage() {
     setTestNew({ ok: r.ok, msg: r.ok ? t('provider.testOk').replace('{n}', String(r.count)) : (r.error ?? t('provider.testFailed')) })
   }
 
-  // 卡片「测试连接」：用卡片草稿 baseURL + key（key 草稿空则回落已存 key）探活。
+  // 卡片「测试连接」：用卡片草稿 baseURL + key 探活。
+  // BR-08：草稿空时向主进程按 provider 单取一次（keys.json，瞬态，不回填表单、不落 settings）；
+  // 取不到就是「未设置」——渲染层不再有「已存明文」可回落。
   const runCardTest = async (pid: string) => {
     const pc = cfgOf(pid)
-    const key = (keys[pid] ?? '').trim() || pc?.api_key || ''
+    let key = (keys[pid] ?? '').trim()
+    if (!key) key = (await getTransport().providerKey(pid)).trim()
     if (!key) {
       setErr(t('provider.testErrKey'))
       return
@@ -1271,14 +1264,16 @@ export default function ProviderPage() {
                 <div className="set-row">
                   <div>
                     <div className="set-label">{t('provider.key')}</div>
-                    <div className="set-desc">{hasKey ? t('provider.keySet') : t('provider.keyNotSet')}</div>
+                    <div className="set-desc">
+                      {hasKey ? `${t('provider.keySet')} · ${t('provider.keyKeep')}` : t('provider.keyNotSet')}
+                    </div>
                   </div>
                   <div className="prov-keyrow">
                     <div className="prov-keyinput">
                       <input
                         className="prov-input"
                         type={showKey[pid] ? 'text' : 'password'}
-                        placeholder={t('provider.keyPh')}
+                        placeholder={hasKey ? t('provider.keyPhKeep') : t('provider.keyPh')}
                         value={keys[pid] ?? ''}
                         onChange={(e) => setKeys((m) => ({ ...m, [pid]: e.target.value }))}
                         aria-label={`${pid} api key`}
@@ -1296,7 +1291,7 @@ export default function ProviderPage() {
                         {showKey[pid] ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
                       </button>
                     </div>
-                    <button className="btn" onClick={() => void runCardTest(pid)} disabled={testing[pid] || !((keys[pid] ?? '').trim() || pc?.api_key)}>
+                    <button className="btn" onClick={() => void runCardTest(pid)} disabled={testing[pid] || !((keys[pid] ?? '').trim() || hasKey)}>
                       {testing[pid] ? t('provider.testing') : t('provider.test')}
                     </button>
                     <button className="btn primary" onClick={() => save(pid)}>

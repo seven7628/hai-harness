@@ -420,14 +420,20 @@ const (
 )
 
 type providerConfig struct {
-	mu        sync.Mutex
-	active    string                                       // "deepseek" | "openai" | "opencode" | "kimi" | "zhipu" | 自定义
-	baseURL   map[string]string                            // provider → base url
-	apiKey    map[string]string                            // provider → key（内存；env / set_provider）
-	models    map[string]map[string]int64                  // provider → model → context window（tokens）
-	maxTokens map[string]map[string]int64                  // provider → model → 单次输出上限（tokens）
-	protocol  map[string]string                            // provider → OpenAI 接入协议
-	compat    map[string]provider.OpenAICompatCapabilities // provider → chat-completions 能力
+	mu      sync.Mutex
+	active  string            // "deepseek" | "openai" | "opencode" | "kimi" | "zhipu" | 自定义
+	baseURL map[string]string // provider → base url
+	apiKey  map[string]string // provider → key（内存；env / payload 注入 / legacy settings）
+	// keyInjected provider → 该 key 是**命令 payload 注入**的（BR-08：set_provider / switch_model /
+	// list_models / provider_billing 随命令带 key，key 由 Electron 从 keys.json 取）。
+	// loadSettings 只按 settings.json 重算「settings 来源」的 key：注入值必须保留——否则
+	// 保存新 key 后紧跟的 loadSettings、或随便一次 reload_settings（切沙箱/浏览器引擎）都会
+	// 把内存里的新 key 清掉，回退到 spawn 时的旧 env key（401 / 轮换不生效）。
+	keyInjected map[string]bool
+	models      map[string]map[string]int64                  // provider → model → context window（tokens）
+	maxTokens   map[string]map[string]int64                  // provider → model → 单次输出上限（tokens）
+	protocol    map[string]string                            // provider → OpenAI 接入协议
+	compat      map[string]provider.OpenAICompatCapabilities // provider → chat-completions 能力
 	// 新增（2026-08 provider 优化）：
 	inputTypes map[string]map[string][]string // provider → model → ["text","image"]（前端 input_types；bridge 现开始消费）
 	registry   *provider.Registry             // 模型元数据注册表（内置真实常量 + settings 覆盖；依赖注入）
@@ -530,9 +536,10 @@ func loadProviderConfig() *providerConfig {
 			// 故 compat 的 BasePath 置 /v4，保证 /chat/completions 落在正确路径。
 			"zhipu": "https://open.bigmodel.cn/api/paas/v4",
 		},
-		apiKey:    map[string]string{},
-		models:    models,
-		maxTokens: maxTokens,
+		apiKey:      map[string]string{},
+		keyInjected: map[string]bool{},
+		models:      models,
+		maxTokens:   maxTokens,
 		protocol: map[string]string{
 			"deepseek": protocolChatCompletions,
 			"openai":   protocolChatCompletions,
@@ -586,8 +593,11 @@ func loadProviderConfig() *providerConfig {
 // active 是保留键；其余每个 key 是一个 provider（base_url/api_key/protocol/models/max_tokens），
 // 键名经 validProviderName 校验（跳过非法键）。内置三卡默认值在 loadProviderConfig 预置，
 // 这里只覆盖显式配置；自定义 provider 在此全量加载。
-// api_key 明文持久化在 settings.json（桌面端用户决策 2026-08-16：Provider 设置直接写
-// settings.json，不依赖 .env/keys.json 注入）——loadSettings 是 bridge 读取 key 的主通道。
+// **api_key 不是主通道**（BR-08，2026-09）：key 由 Electron 保管在 ~/.go-code/keys.json
+// （safeStorage 加密，0600），按需注入：启动时 spawn env 只带**当前活跃 provider** 一把，
+// 保存/切换 provider 与切模型时随命令 payload 下发（set_provider / switch_model）。
+// settings.json 不再写 provider key；这里**仍读** `api_key` 只为兼容迁移未完成的旧文件
+// （Electron 启动迁移会把明文搬进 keys.json 并从 settings 删除）。
 func (pc *providerConfig) loadSettings() {
 	raw, err := os.ReadFile(homeCfgPath("settings.json"))
 	if err != nil {
@@ -638,6 +648,7 @@ func (pc *providerConfig) loadSettings() {
 		if p.Deleted {
 			delete(pc.baseURL, name)
 			delete(pc.apiKey, name)
+			delete(pc.keyInjected, name) // 删除 = 连注入的 key 一起忘掉（重新添加不许用旧 key）
 			delete(pc.models, name)
 			delete(pc.maxTokens, name)
 			delete(pc.inputTypes, name)
@@ -655,10 +666,13 @@ func (pc *providerConfig) loadSettings() {
 			pc.baseURL[name] = p.BaseURL
 		}
 		if p.ApiKey != "" {
-			pc.apiKey[name] = p.ApiKey // 明文 key（settings.json 主通道）；空值清除内存旧值（避免旧 key 残留）
-		} else {
-			// settings 里无 key（用户删除/从未配置）：清内存旧值，回退 env 兜底。
-			// 防止「面板删 key 后内存仍持旧 key → 新会话 401」。
+			// legacy：迁移未完成的 settings 明文（BR-08 迁移后 settings 不再有 key）。
+			// settings 是这一份的来源 → 清注入标记，后续 settings 删 key 仍能清内存（旧语义）。
+			pc.apiKey[name] = p.ApiKey
+			delete(pc.keyInjected, name)
+		} else if !pc.keyInjected[name] {
+			// settings 里无 key 且内存值不是 payload 注入的（用户删除/从未配置）：
+			// 清内存旧值，回退 env 兜底。注入值**不删**（见 keyInjected 字段说明）。
 			delete(pc.apiKey, name)
 		}
 		if p.Protocol == protocolResponses || p.Protocol == protocolAnthropic {
@@ -774,17 +788,43 @@ func (pc *providerConfig) setBaseURL(name, url string) {
 	}
 }
 
+// setKey 写入某 provider 的内存 key（payload 注入 / 显式清除）。标记 keyInjected：
+// loadSettings 不得清掉它（见 keyInjected 字段说明）。空串 = 显式清除（回退 env 兜底）。
 func (pc *providerConfig) setKey(name, key string) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
-	if validProviderName(name) {
-		if key == "" {
-			// 显式清空：内存旧 key 不得残留（旧 key 轮换后若不清除，
-			// keyLocked 会继续返回旧值 → 401；回退 env/.env 兜底）。
-			delete(pc.apiKey, name)
-		} else {
-			pc.apiKey[name] = key
-		}
+	if !validProviderName(name) {
+		return
+	}
+	if pc.keyInjected == nil {
+		pc.keyInjected = map[string]bool{}
+	}
+	if key == "" {
+		// 显式清空：内存旧 key 不得残留（旧 key 轮换后若不清除，
+		// keyLocked 会继续返回旧值 → 401；回退 env/.env 兜底）。
+		delete(pc.apiKey, name)
+		delete(pc.keyInjected, name)
+		return
+	}
+	pc.apiKey[name] = key
+	pc.keyInjected[name] = true
+}
+
+// applyPayloadKey 把命令 payload 里的 api_key 应用到某 provider 的内存 key（BR-08）。
+// 客户端不再把 key 持久化到 settings.json，非活跃 provider 也没有 env 兜底 —— 所以
+// 「按 provider 触发、且需要 key」的命令（set_provider / switch_model / list_models /
+// provider_billing）都随命令带 key。
+// 语义：不带 api_key 字段 = 不动；带字符串 = 写入（空串 = 显式清除）。非字符串忽略。
+func (pc *providerConfig) applyPayloadKey(payload map[string]any, provider string) {
+	if provider == "" {
+		return
+	}
+	raw, ok := payload["api_key"]
+	if !ok {
+		return
+	}
+	if key, isStr := raw.(string); isStr {
+		pc.setKey(provider, key)
 	}
 }
 
@@ -846,9 +886,13 @@ func (pc *providerConfig) samplingDefaultsFor(provider string) (temperature, top
 	return &t, &p
 }
 
-// keyLocked 取某 provider 的 key：运行中 set_provider 写入的内存值优先；
-// 其次内置三卡的既定 env（boot 时 Electron 注入 / .env）；最后自定义 provider 的
-// 通用 env 兜底 GOCODE_KEY_<UPPER(name)>（Electron loadKeysEnv 对任意已存 key 生成）。
+// keyLocked 取某 provider 的 key：运行中 set_provider / switch_model 写入的内存值优先；
+// 其次内置五卡的既定 env（boot 时 Electron 只注入**活跃 provider 一把** / .env）；最后自定义
+// provider 的通用 env 兜底 GOCODE_KEY_<UPPER(name)>。
+//
+// 注意（BR-08）：env 里只有活跃 provider 的 key，**非活跃 provider 不再有 env 兜底** ——
+// 切到别的 provider 时 key 随命令 payload 注入（Electron sendCommand 按 provider 取 keys.json）。
+// 所以「payload 带 key」的路径必须真的落到 pc.apiKey（见 main.go CmdSwitchModel）。
 func (pc *providerConfig) keyLocked(name string) string {
 	// G2 修复：加锁读 pc.apiKey（newProvider 可能在 runLoop goroutine 并发读，
 	// 与 set_provider 主线程写存在竞争窗口；-race 未触发只因实际串行）。

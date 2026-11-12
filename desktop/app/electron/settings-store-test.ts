@@ -10,7 +10,9 @@
 //   ⑤ 写即迁移（复审 B2）：写路径先迁移再改，迁移失败**拒绝这次写**且不盖章 schema_version:2；
 //   ⑥ main.ts 接线守卫（只作补充：行为断言在 ①–⑤，不再拿源码文本当唯一证据）。
 //
-// 注意：本任务**不**迁移 provider.*.api_key（BR-08 是下一步）——测试显式断言 key 原样保留。
+// 注意：本任务的写侧**不**碰 provider.*.api_key —— 下面显式断言「未被 patch 的 key 原样保留」。
+// key 从 settings 搬到 keys.json 是 BR-08（keys-store.migratePlaintextProviderKeys / main.ts
+// provider:save），由 keys-store-test.ts 覆盖；本文件的 `.bak` 逐字节断言因此不受其影响。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'

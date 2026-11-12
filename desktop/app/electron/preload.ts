@@ -107,10 +107,13 @@ contextBridge.exposeInMainWorld('desktop', {
   egoInstall: () => ipcRenderer.invoke('ego:install') as Promise<{ ok: boolean; error?: string }>,
   // 启动已安装的 ego lite（已装未运行时用；open -a，无需 TCC 授权）
   egoLaunch: () => ipcRenderer.invoke('ego:launch') as Promise<{ ok: boolean; error?: string }>,
-  providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) =>
+  providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string | null }) =>
     ipcRenderer.invoke('provider:save', p) as Promise<{ ok: boolean; hasKey?: boolean; error?: string }>,
   providerRemove: (provider: string) => ipcRenderer.invoke('provider:remove', provider) as Promise<{ ok: boolean; error?: string }>,
   providerKeyStatus: (provider: string) => ipcRenderer.invoke('provider:key-status', provider) as Promise<boolean>,
+  // BR-08：明文 key 只在需要时按 provider 单取（本地「测试连接」/改名复制），不出现在 settings 里
+  providerKey: (provider: string) => ipcRenderer.invoke('provider:key', provider) as Promise<string>,
+  providerCopyKey: (p: { from: string; to: string }) => ipcRenderer.invoke('provider:copy-key', p) as Promise<{ ok: boolean; copied?: boolean; error?: string }>,
   // OAuth 订阅登录（2026-08 P2）：登录/登出/状态经主进程转发 bridge 命令
   oauthLogin: (p: { provider: string }) => ipcRenderer.invoke('oauth:login', p) as Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>,
   oauthLogout: (p: { provider: string }) => ipcRenderer.invoke('oauth:logout', p) as Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>,
@@ -241,8 +244,10 @@ declare global {
       externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
       importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
       pickApp: () => Promise<{ name: string; bundleId?: string } | null>
-      providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
+      providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string | null }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
       providerKeyStatus: (provider: string) => Promise<boolean>
+      providerKey: (provider: string) => Promise<string>
+      providerCopyKey: (p: { from: string; to: string }) => Promise<{ ok: boolean; copied?: boolean; error?: string }>
       mcpSave: (servers: Record<string, MCPServerCfg>) => Promise<{ ok: boolean; error?: string }>
       fsList: (dir: string) => Promise<{ ok: boolean; path: string; entries: { name: string; path: string; isDir: boolean; size?: number }[]; error?: string }>
       fsReadRef: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; content?: string; error?: string }>

@@ -3046,6 +3046,10 @@ func (m *manager) dispatch(c command) {
 			m.lastModel = name
 			m.mu.Unlock()
 		}
+		// provider key 随命令下发（BR-08）：客户端不再把 key 持久化到 settings.json，key 由
+		// Electron（keys.json）保管，切模型时按目标 provider 注入（非活跃 provider 无 env 兜底）。
+		// payload 显式带空串 = 清除（回退 env 兜底）；不带该键 = 不动内存现有值。
+		m.provCfg.applyPayloadKey(c.Payload, prov)
 		bs.editModelCfg(prov, name, "")
 		if str(c.Payload, "provider") != "" {
 			bs.setProviderExplicit(true) // 用户显式选定 Provider → 后续 rebuildAll 保留归属
@@ -3062,7 +3066,6 @@ func (m *manager) dispatch(c command) {
 	case CmdSetProvider: // 热切换：Provider 设置面板 → 更新配置 + 重建全部会话 loop（不重启 bridge）
 		providerName := str(c.Payload, "provider")
 		baseURL := str(c.Payload, "base_url")
-		apiKey := str(c.Payload, "api_key")
 		protocol := str(c.Payload, "protocol")
 		// 仅当 payload 显式携带 active（前端「设为当前」/ providerSave active 字段）才切换
 		// 全局活跃 Provider。纯「保存配置」（改 key/协议/模型窗口）不切 active——
@@ -3109,13 +3112,9 @@ func (m *manager) dispatch(c command) {
 		if baseURL != "" {
 			m.provCfg.setBaseURL(providerName, baseURL)
 		}
-		if apiKey != "" {
-			m.provCfg.setKey(providerName, apiKey)
-		} else if _, ok := c.Payload["api_key"]; ok {
-			// payload 显式带空 api_key（前端保存未填 key / 删 key）：清内存旧值，
-			// 防止旧 key 残留 → 新会话 401（回退 env/.env 兜底）。
-			m.provCfg.setKey(providerName, "")
-		}
+		// provider key（BR-08）：key 不再进 settings.json，只随命令 payload 下发；
+		// 应用点在本 case 末尾的 loadSettings 之后（applyPayloadKey）——loadSettings 会按
+		// settings 重算内存 key，先写会被重算逻辑影响。
 		if protocol != "" {
 			m.provCfg.setProtocol(providerName, protocol) // payload 兜底 settings.json 落盘时序
 		}
@@ -3214,6 +3213,9 @@ func (m *manager) dispatch(c command) {
 				m.provCfg.setPrices(providerName, parsed)
 			}
 		}
+		// 顺序要点（BR-08）：loadSettings 已按 settings 重算内存 key（settings 无 api_key），
+		// 这里再落 payload 的 api_key —— 显式空串 = 清除（回退 env 兜底），不带 = 不动。
+		m.provCfg.applyPayloadKey(c.Payload, providerName)
 		m.provCfg.syncRegistry() // 热更新注册表（窗口/上限/价/input_types 覆盖）
 		m.rebuildAll()
 		m.resp(c, true, "", map[string]any{"active": m.provCfg.providerName()})
@@ -3342,6 +3344,9 @@ func (m *manager) dispatch(c command) {
 		if providerName == "" {
 			providerName = m.provCfg.providerName()
 		}
+		// BR-08：env 里只有活跃 provider 的 key，非活跃 provider 的 key 随命令下发
+		//（设置页对任意一家点「拉取模型列表」都得能用，不要求先保存/先切过去）。
+		m.provCfg.applyPayloadKey(c.Payload, providerName)
 		models, err := m.provCfg.listModels(providerName)
 		if err != nil {
 			code := "provider_error"

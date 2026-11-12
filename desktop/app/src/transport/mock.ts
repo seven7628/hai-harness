@@ -1377,6 +1377,25 @@ class MockTransport implements Transport {
       /* ignore */
     }
   }
+  // mock 的「keys.json」替身：明文 key 只活在 localStorage（不落真实盘、不进 settings 之外的地方）。
+  // 值优先取这里，其次回退 settings.provider[].api_key（历史 mock 数据仍有该字段）。
+  private keyValues(): Record<string, string> {
+    try {
+      return JSON.parse(localStorage.getItem('go-code.provider-key-values') ?? '{}')
+    } catch {
+      return {}
+    }
+  }
+  private setKeyValue(provider: string, value: string): void {
+    try {
+      const m = this.keyValues()
+      if (value) m[provider] = value
+      else delete m[provider]
+      localStorage.setItem('go-code.provider-key-values', JSON.stringify(m))
+    } catch {
+      /* ignore */
+    }
+  }
 
   async settingsGet(): Promise<AppSettings> {
     return this.settings()
@@ -1516,10 +1535,19 @@ class MockTransport implements Transport {
     else if (p.usage_input_includes_cache === null) delete pc.usage_input_includes_cache
     if (p.cache_ttl_1h === true || p.cache_ttl_1h === false) pc.cache_ttl_1h = p.cache_ttl_1h
     else if (p.cache_ttl_1h === null) delete pc.cache_ttl_1h
-    if (p.api_key) pc.api_key = p.api_key // 与 electron provider:save 一致：明文写回 settings.provider（bridge 读取主通道）
+    // mock 不落真实盘：settings 里保留 api_key 让旧 mock 数据自洽；同时记一份「keys.json 替身」，
+    // 供 providerKey()/runCardTest 使用（真实主进程只写 keys.json，不写 settings）。
+    if (p.api_key) {
+      pc.api_key = p.api_key
+      this.setKeyValue(p.provider, p.api_key)
+    } else if (p.api_key === null) {
+      delete pc.api_key
+      this.setKeyValue(p.provider, '')
+    }
     cur.provider[p.provider] = pc
     this.saveSettings(cur)
     if (p.api_key) this.setHasKey(p.provider, true)
+    else if (p.api_key === null) this.setHasKey(p.provider, false)
     return { ok: true, hasKey: this.hasKeys()[p.provider] ?? false }
   }
   async providerRemove(provider: string): Promise<{ ok: boolean; error?: string }> {
@@ -1542,11 +1570,28 @@ class MockTransport implements Transport {
     }
     if (cur.provider.active === provider) cur.provider.active = 'deepseek'
     this.saveSettings(cur)
+    this.setKeyValue(provider, '')
     if (this.hasKeys()[provider]) this.setHasKey(provider, false)
     return { ok: true }
   }
   async providerKeyStatus(provider: string): Promise<boolean> {
     return this.hasKeys()[provider] ?? false
+  }
+  // 与 electron provider:key 对齐：只取一把 key（本地测试/改名用），不预填表单。
+  async providerKey(provider: string): Promise<string> {
+    const stored = this.keyValues()[provider]
+    if (stored) return stored
+    const pc = this.settings().provider[provider] as ProviderCfg | undefined
+    return pc?.api_key ?? ''
+  }
+  // 与 electron provider:copy-key 对齐：console 改名时把 key 搬到新 id。
+  async providerCopyKey(from: string, to: string): Promise<{ ok: boolean; copied?: boolean; error?: string }> {
+    if (!isValidProviderName(from) || !isValidProviderName(to)) return { ok: false, error: '无效 provider 名称' }
+    const key = await this.providerKey(from)
+    if (!key) return { ok: true, copied: false }
+    this.setKeyValue(to, key)
+    this.setHasKey(to, true)
+    return { ok: true, copied: true }
   }
   // OAuth 订阅登录（2026-08 P2）：mock 环境用本地模拟（localStorage 标记登录态）。
   async oauthLogin(provider: string): Promise<{ ok: boolean; error?: string }> {

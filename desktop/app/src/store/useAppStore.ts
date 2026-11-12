@@ -11351,9 +11351,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     return r
   },
-  // 自定义 provider 改名：把整卡配置迁移到新 id（providerSave 建新条目 + 复制 api_key，
-  // providerRemove 物理删旧条目；内置 5 家不可改名——UI 已挡）。改的是活跃 provider 时
-  // electron provider:remove 会自动回退 active 到内置，故改名流程：先建新 id 再删旧 id，
+  // 自定义 provider 改名：把整卡配置迁移到新 id（providerSave 建新条目 → providerCopyKey 搬 key →
+  // providerRemove 物理删旧条目；内置 5 家不可改名——UI 已挡）。key 住在 keys.json（BR-08），
+  // 明文不再经过 renderer（旧实现把 cfg.api_key 塞进 providerSave，等于让 key 在渲染层兜一圈）。
+  // 改的是活跃 provider 时 electron provider:remove 会自动回退 active 到内置，故改名流程：
+  // 先建新 id 再删旧 id，
   // 最后把 active 指回新 id（若原先是活跃）。session 侧归属（bs.provider）不迁移——
   // 改名的自定义 provider 通常不是活跃/会话绑定方；如需要可在设置里重新「设为当前」。
   // renameProviderDisplay 改**显示名**（label），不动 id。
@@ -11392,11 +11394,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       auth_type: cfg.auth_type,
       usage_input_includes_cache: cfg.usage_input_includes_cache ?? null, // usage 口径标注随卡迁移
       cache_ttl_1h: cfg.cache_ttl_1h ?? null, // 缓存 TTL 标注随卡迁移
-      api_key: cfg.api_key,
       ...(wasActive ? { active: name } : {}),
     })
     if (!r.ok) return r
-    // 2) 删旧 id（物理删除；不触发 removeProvider 的 set_provider 通知——bridge 内存
+    // 2) key 单独搬（主进程把 keys.json 条目从旧 id 复制到新 id；明文不出主进程）。
+    //    必须在新条目建好之后、删旧条目之前 —— 中途失败要能回滚新条目，不能出现
+    //    「新 id 没 key、旧 id 也被删」的双输。旧主进程无此 IPC → unsupported → 回滚报错。
+    const cp = await transport.providerCopyKey(oldName, name)
+    if (!cp.ok) {
+      await transport.providerRemove(name) // 回滚：删掉刚建的新条目（含可能已复制的 key）
+      return { ok: false, error: cp.error === 'unsupported' ? '当前主进程版本不支持复制 API key，请更新后重试' : (cp.error ?? '复制 API key 失败') }
+    }
+    // 3) 删旧 id（物理删除；不触发 removeProvider 的 set_provider 通知——bridge 内存
     //    由下面合并后的 set_provider 一次性重建，避免中间态把 active 切走）
     const rm = await transport.providerRemove(oldName)
     if (!rm.ok) {
@@ -11405,7 +11414,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return rm
     }
     const s2 = await transport.settingsGet()
-    set({ settings: s2, providerKeys: { ...get().providerKeys, [name]: Boolean(r.hasKey), [oldName]: false } })
+    set({ settings: s2, providerKeys: { ...get().providerKeys, [name]: cp.copied === true, [oldName]: false } })
     send({ type: 'set_provider', payload: { provider: s2.provider.active, active: s2.provider.active } })
     return { ok: true }
   },

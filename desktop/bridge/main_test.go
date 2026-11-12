@@ -2137,6 +2137,158 @@ func TestSetProviderEmptyKeyClearsStale(t *testing.T) {
 	}
 }
 
+// TestSwitchModelInjectsProviderKey switch_model 可随 payload 带 api_key（BR-08）：
+// key 不再持久化在 settings.json，由 Electron（keys.json / safeStorage）在切模型时按目标
+// provider 注入。钉住三件事：
+//
+//	① 带 api_key → 该 provider 的 keyLocked 立刻生效（非活跃 provider 没有 env 兜底）；
+//	② 不带 api_key → 不误清现有内存值（保留旧值）；
+//	③ 注入必须发生在 loadSettings **之后** —— settings 已无 api_key，loadSettings 会清内存旧值，
+//	   先注入就会被抹掉（带 settings.json 的分支正是这个顺序锚点）；清掉后回退 env 兜底。
+func TestSwitchModelInjectsProviderKey(t *testing.T) {
+	ws := t.TempDir()
+	m, buf := testManager(t)
+	if _, err := m.create(ws, "s1", ""); err != nil {
+		t.Fatal(err)
+	}
+	switchToZhipu := func(id int, key string, withKey bool) map[string]any {
+		payload := map[string]any{"workspace": ws, "session_id": "s1", "model": "glm-5.3-flash", "provider": "zhipu"}
+		if withKey {
+			payload["api_key"] = key
+		}
+		m.dispatch(cmd(id, "switch_model", payload))
+		if !lastRespOK(t, buf, id) {
+			t.Fatalf("switch_model(zhipu) 应成功: %v", readAllLines(buf))
+		}
+		return payload
+	}
+
+	// ① 带 key：写入目标 provider 的内存 key（测试 HOME 里还没有 settings.json）
+	switchToZhipu(1, "sk-zhipu-payload", true)
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-payload" {
+		t.Fatalf("带 api_key 的 switch_model 后 keyLocked = %q, want sk-zhipu-payload", got)
+	}
+
+	// ② 不带 api_key：内存值保留（不得误清）
+	switchToZhipu(2, "", false)
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-payload" {
+		t.Fatalf("不带 api_key 的 switch_model 误清了内存 key: %q", got)
+	}
+
+	// ③ 有 settings.json（无 api_key，迁移后的正常形态）：loadSettings 会清内存 key，
+	//    所以注入必须在其后 —— 否则 keyLocked 会是空的。
+	cfgDir := filepath.Join(mustUserHome(t), ".go-code")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{
+		"schema_version": 2,
+		"provider": {
+			"active": "deepseek",
+			"zhipu": {"base_url": "https://open.bigmodel.cn/api/paas/v4"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	switchToZhipu(3, "sk-zhipu-payload-2", true)
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-payload-2" {
+		t.Fatalf("loadSettings 之后注入失败: keyLocked = %q, want sk-zhipu-payload-2（注入点必须在 loadSettings 之后）", got)
+	}
+
+	// ④ 再切一次且不带 key：注入值**保留**（不误清）——payload 不带 api_key 的语义是「不动」
+	switchToZhipu(4, "", false)
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-payload-2" {
+		t.Fatalf("不带 api_key 的 switch_model 误清了注入 key: %q", got)
+	}
+
+	// ⑤ 显式空串 = 清除 → 回退 env 兜底
+	t.Setenv("ZHIPUAI_API_KEY", "sk-zhipu-env")
+	switchToZhipu(5, "", true) // 带 key 字段但为空串
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-env" {
+		t.Fatalf("清掉后 env 兜底 keyLocked = %q, want sk-zhipu-env", got)
+	}
+}
+
+// TestSetProviderInjectedKeySurvivesReload set_provider 带 api_key 后，key 必须在内存里**留住**：
+//   - settings.json 已无 api_key（BR-08 迁移后的正常形态）→ loadSettings 不得清掉注入值；
+//   - reload_settings（切沙箱/浏览器引擎等顶层设置变更会发）不得清掉注入值；
+//   - 再保存一次新 key 必须覆盖旧值（轮换生效）；
+//   - 显式空 api_key = 清除（回退 env 兜底）。
+//
+// 回归背景：set_provider 里 setKey 曾排在 loadSettings 之前，settings 无 key 时会把它删掉 →
+// 「面板里改了 key，实际还在用旧 key / 401」。
+func TestSetProviderInjectedKeySurvivesReload(t *testing.T) {
+	m, buf := testManager(t)
+	cfgDir := filepath.Join(mustUserHome(t), ".go-code")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{
+		"schema_version": 2,
+		"provider": {
+			"active": "deepseek",
+			"zhipu": {"base_url": "https://open.bigmodel.cn/api/paas/v4"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m.dispatch(cmd(1, "set_provider", map[string]any{"provider": "zhipu", "api_key": "sk-rotated-1"}))
+	if !lastRespOK(t, buf, 1) {
+		t.Fatalf("set_provider(带 key) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-rotated-1" {
+		t.Fatalf("保存后 keyLocked = %q, want sk-rotated-1（settings 无 api_key 时不得清掉注入值）", got)
+	}
+
+	// 顶层设置变更 → reload_settings（内部又跑一次 loadSettings）→ 注入值必须还在
+	m.dispatch(cmd(2, "reload_settings", map[string]any{}))
+	if !lastRespOK(t, buf, 2) {
+		t.Fatalf("reload_settings 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-rotated-1" {
+		t.Fatalf("reload_settings 后 keyLocked = %q, want sk-rotated-1（注入值不得被重载清掉）", got)
+	}
+
+	// 再保存（不带 key 字段）：仍是同一个 key
+	m.dispatch(cmd(3, "set_provider", map[string]any{"provider": "zhipu", "protocol": "anthropic"}))
+	if !lastRespOK(t, buf, 3) {
+		t.Fatalf("set_provider(无 key) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-rotated-1" {
+		t.Fatalf("不带 key 的保存误清了 key: %q", got)
+	}
+
+	// 轮换：新 key 覆盖旧值
+	m.dispatch(cmd(4, "set_provider", map[string]any{"provider": "zhipu", "api_key": "sk-rotated-2"}))
+	if !lastRespOK(t, buf, 4) {
+		t.Fatalf("set_provider(轮换) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-rotated-2" {
+		t.Fatalf("轮换后 keyLocked = %q, want sk-rotated-2", got)
+	}
+
+	// 显式空串 = 清除 → env 兜底
+	t.Setenv("ZHIPUAI_API_KEY", "sk-zhipu-env")
+	m.dispatch(cmd(5, "set_provider", map[string]any{"provider": "zhipu", "api_key": ""}))
+	if !lastRespOK(t, buf, 5) {
+		t.Fatalf("set_provider(空 key) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-env" {
+		t.Fatalf("清 key 后 env 兜底 keyLocked = %q, want sk-zhipu-env", got)
+	}
+}
+
+// mustUserHome 取当前测试 HOME（testManager 已用 t.TempDir 隔离）。
+func mustUserHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	return home
+}
+
 // TestLoadSettingsEmptyKeyClearsStale settings.json 里 provider 无 api_key →
 // loadSettings 清内存旧 key（删除 key 后重启/热重载不留旧值 → 新会话 401）。
 func TestLoadSettingsEmptyKeyClearsStale(t *testing.T) {

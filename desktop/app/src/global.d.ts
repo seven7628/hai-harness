@@ -27,6 +27,9 @@ declare global {
       providerSave: (p: ProviderSaveInput) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
       providerRemove: (provider: string) => Promise<{ ok: boolean; error?: string }>
       providerKeyStatus: (provider: string) => Promise<boolean>
+      // BR-08：明文 key 只在需要时按 provider 单取（本地测试/改名），不预填到设置表单
+      providerKey?: (provider: string) => Promise<string>
+      providerCopyKey?: (p: { from: string; to: string }) => Promise<{ ok: boolean; copied?: boolean; error?: string }>
       // OAuth 订阅登录（2026-08 P2）
       oauthLogin: (p: { provider: string }) => Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>
       oauthLogout: (p: { provider: string }) => Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>

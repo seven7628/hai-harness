@@ -659,7 +659,9 @@ export function applySettingsPatch(rawIn: JsonObject, patch: unknown, schema: Re
  *   · 兄弟 provider、provider 段的未知字段、顶层未知键**一律不动**（不是 `{...cur}` 全量重写）；
  *   · 不把 DEFAULT_SETTINGS 的 base_url/models/max_tokens/protocol/input_types 补进 raw；
  *   · 重新保存 = 清除 deleted 标记（内置删除后重新启用）；
- *   · api_key 空串视为「不修改」（与既有行为一致）；本任务仍把它留在 settings（BR-08 下一步）。
+ *   · api_key 空串视为「不修改」（与既有行为一致）。BR-08 起 main.ts 的 provider:save 会先把
+ *     `api_key` 剥掉（写 keys.json），所以这里只剩「历史遗留 api_key 原样保留」这一种情况；
+ *     真正的迁移在 keys-store.migratePlaintextProviderKeys（本模块不认识 keys.json）。
  */
 export function applyProviderSave(rawIn: JsonObject, input: unknown): SettingsApplyResult {
   if (!isWritable(rawIn)) return { ok: false, error: unmigratedInputError(rawIn) }
