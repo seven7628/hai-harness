@@ -11,6 +11,7 @@ import { getSurface, listSurfaces } from '../registry'
 import { useAppStore } from '../../store/useAppStore'
 import type { WebTabInstance } from '../../store/useAppStore'
 import { BarChart, FileIcon, Globe, ImageIcon } from '../../components/icons'
+import { WebTab } from '../../components/WebTab'
 import { fileUrlToPath } from '../../lib/filePaths'
 import { visualKindOf } from '../../lib/visualFile'
 
@@ -36,7 +37,7 @@ test('builtin/index 的副作用注册了 git provider', () => {
   assert.equal(typeof p.render, 'function')
 })
 
-// —— R06b：web provider（本轮只有元数据，render 仍由 RightPanel 兜底）——
+// —— R06b/C3：web provider（元数据 + 渲染委派）——
 
 test('builtin/index 的副作用注册了 web provider，且元数据符合 03 §2.3 的口径', () => {
   const p = getSurface('web')
@@ -52,10 +53,21 @@ test('builtin/index 的副作用注册了 web provider，且元数据符合 03 �
   // heavy：一个 web 标签背后是一个真实渲染进程（视图池上限 12，03 §2.3 不变量 1）
   assert.equal(p.weight, 'heavy')
   assert.deepEqual(p.capabilities, ['read', 'view'])
-  // C2 只搬元数据：render 必须存在（registry 的 assertProvider 要求），但返回 null ——
-  // 渲染仍在 RP 里按 kind 分发，这就是「本轮零渲染改动」的机器可读形式。
+  // C3 起 render 真的产出组件（C2 那条 `=== null` 的断言是「本轮零渲染改动」的机器可读形式，
+  // 现在已经过期）：类型必须**就是**平移后的 WebTab —— 不是占位、不是内联箭头函数包一层，
+  // 否则 RightPanel 侧的元素类型会在每次渲染变化 → 切标签时组件重挂载 → 原生视图被销毁重建
+  //（面板闪白 + 页面状态丢失，正是 R06c 最怕的回归）。props 里只该有 { tab, scope }：
+  // 多传 RP 专属 props（immersive/menuOpen/panelVisible）就会把「上移成 store / 内部 state」
+  // 这件事又偷偷退回组件 props，两条真相源立刻分叉。
   assert.equal(typeof p.render, 'function')
-  assert.equal(p.render({ tab: { id: 't1', kind: 'web' }, scope: 's' }), null)
+  const el = p.render({ tab: { id: 't1', kind: 'web' }, scope: 's' }) as unknown as {
+    type: unknown
+    props: Record<string, unknown>
+  }
+  assert.equal(el.type, WebTab)
+  assert.deepEqual(Object.keys(el.props).sort(), ['scope', 'tab'])
+  assert.deepEqual(el.props.tab, { id: 't1', kind: 'web' })
+  assert.equal(el.props.scope, 's')
   assert.deepEqual(p.defaultSpec?.({} as never), { kind: 'web' })
 })
 

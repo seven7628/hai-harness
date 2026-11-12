@@ -91,6 +91,9 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
 window.__pool = []
 window.__navCb = null
 window.__seq = 0
+// 唤醒记账：休眠标签点开后必须用**原 id** 调 embedActivate（主进程按 id 重建 webContents，
+// URL 取休眠快照）。不记账就只能断言「点了没报错」，验不到「唤醒的是同一页」。
+window.__activateCalls = []
 const impl = {
   // —— 视图池：被测通路，必须记账 ——
   embedStatus: async () => ({ ok: true, targets: window.__pool.map((t) => ({ ...t })) }),
@@ -102,7 +105,7 @@ const impl = {
     window.__pool.push({ id, url, title: '', sid: (o && o.sid) || '', srcPath: (o && o.srcPath) || '' })
     return { ok: true, state: { activeId: (o && o.activate) ? id : null, targets: window.__pool.map((t) => ({ ...t })) } }
   },
-  embedActivate: async (id) => ({ ok: true, state: { activeId: id, targets: window.__pool.map((t) => ({ ...t })) } }),
+  embedActivate: async (id) => { window.__activateCalls.push(id); return { ok: true, state: { activeId: id, targets: window.__pool.map((t) => ({ ...t })) } } },
   embedCloseTarget: async (id) => { window.__pool = window.__pool.filter((t) => t.id !== id); return { ok: true } },
   embedReloadTarget: async () => ({ ok: true }),
   embedNavigateTarget: async () => ({ ok: true }),
@@ -130,11 +133,31 @@ fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import { createRoot } from 'react-dom/client'
 import RightPanel from '../../src/components/RightPanel'
 import { useAppStore } from '../../src/store/useAppStore'
+// ⚠️ 副作用注册，必须与 src/main.tsx 一致。R06b 把 web 的 title/icon 委派给 provider 之后，
+// 少了这一行 getSurface('web') 恒为 undefined —— 探针证明的会是 RightPanel 的 \`??\` 兜底
+// 分支，而不是 provider（实测：标签名退化成 kindLabel 的「网页」，session-tabs 探针因此假红）。
+import '../../src/surfaces/builtin'
+import { getSurface } from '../../src/surfaces/registry'
 import '../../src/index.css'
+
+// —— 仪器自检：provider 的 render 到底有没有被执行 ——
+// 「用探针证明没变」的验收必须先证明探针走的是被测那条路（04-review F45）。这里给注册表里
+// 那个实例的 render 包一层计数：面板真的走委派 → 计数增长；若 RightPanel 走的是 \`??\` 回退，
+// 计数恒为 0，断言会当场变红而不是静默通过。
+const webProvider = getSurface('web')
+;(window as unknown as { __webRenderCalls: number }).__webRenderCalls = 0
+if (webProvider) {
+  const orig = webProvider.render
+  webProvider.render = (ctx) => {
+    ;(window as unknown as { __webRenderCalls: number }).__webRenderCalls++
+    return orig(ctx)
+  }
+}
 
 // 固定工作区，使 relIfInside 的相对化路径可预测（probe 断言依赖它）。
 useAppStore.setState({ workspace: '/w' })
 ;(window as unknown as { __store: unknown }).__store = useAppStore
+;(window as unknown as { __webSurface: unknown }).__webSurface = webProvider ?? null
 void useAppStore.getState().start('/w')
 
 createRoot(document.getElementById('root')!).render(<RightPanel />)
@@ -163,6 +186,14 @@ function check(label, cond, detail = '') {
 
 try {
   await waitPort(PORT)
+  // 端口归属自检：waitPort 只能证明「有人在听」，证明不了「听的是本脚本刚起的那个」。
+  // 2026-11 实测踩到过：一个残留在 5199 的 vite（**另一棵 worktree** 的服务）让本脚本连上了
+  // 别人的模块图 → 探针页 404 → 一直等不到 __store，报出来的却是 waitForFunction 超时，
+  // 看起来像代码坏了。判据取本脚本生成的探针页自己的 <title>。
+  const ownerHtml = await fetch(`http://localhost:${PORT}/e2e/_autoprobe_run/index.html`).then((r) => r.text()).catch(() => '')
+  if (!ownerHtml.includes('<title>auto-open probe</title>')) {
+    throw new Error(`端口 ${PORT} 上响应的不是本脚本的探针页（waitPort 骗过了自己）—— 先清掉占用该端口的进程`)
+  }
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 1100, height: 900 } })
   const errs = []
@@ -177,6 +208,7 @@ try {
   // tabsByScope / unreadViews / 假视图池也一并复位 —— 阶段 4 的断言要看「标签集与未读点」。
   const reset = () => page.evaluate(() => {
     window.__pool.length = 0
+    window.__activateCalls.length = 0
     window.__store.setState({ rightTab: 'activity', rightExpanded: false, leftExpanded: true, unreadViews: [], tabsByScope: {} })
   })
   // 快照：面板三态 + 定位锚 + 未读点 + 本 scope 的标签集 + 折叠态 rail 角标。
@@ -283,6 +315,73 @@ try {
   const userNav = await snap()
   check('显式预览的 nav 事件后仍在内容标签且展开', userNav.tab === 'web' && userNav.expanded === true, JSON.stringify(userNav))
   check('显式预览的 nav 事件后左栏仍展开（不被 focusBrowser 收起）', userNav.left === true, JSON.stringify(userNav))
+
+  // —— A5：休眠标签点开唤醒（R06c 新增）——
+  //
+  // 为什么这条不能省：A2/A3 验的是「后台标签 + 未读点」，A4 验的是「用户显式预览」，而**休眠
+  // 标签的唤醒**是第三条路 —— 渲染层的 `.rtab[data-sleeping]` 被点 → store 的 activateTab →
+  // IPC embedActivate(**原 id**)。container 的 T4 类断言直接调 IPC，绕过了标签渲染与
+  // activateTab 的判断；而 R06c 恰好把面板从 RightPanel 搬进了 WebTab（provider 渲染），
+  // 「点标签 → 面板跟着换」这一跳正是平移后最容易断的地方。所以这里**从 DOM 点**，
+  // 断言落在 IPC 入参、标签身份与标签名上。
+  //
+  // 口径（03 §2.3 不变量 3）：sleep = 销毁 webContents 但**不广播 destroyed**、保留 id 与
+  // lastUsed；唤醒用**原 id** 重建、URL 取休眠快照。于是「唤醒后 URL 不丢」在本探针里的
+  // 可观测形式 = 标签身份（data-view）不变 + 标签名（由池里的 url 推出的文件名）不变。
+  console.log('A5 休眠标签点开 → 走渲染层的 activateTab 唤醒：用**原 id**，标题/身份不变')
+  await reset()
+  await page.evaluate(() => window.__store.getState().openInBrowserTab('out/sleep-a.pdf', { activate: true }))
+  await page.waitForTimeout(50)
+  await page.evaluate(() => window.__store.getState().openInBrowserTab('out/sleep-b.pdf', { activate: true }))
+  await page.waitForTimeout(50)
+  // 让 A 休眠：主进程的休眠口径 = 条目仍在 targets 里、带 sleeping 标记（id/url 都保留）。
+  // 顺手推一帧 nav（真链路里由主进程推），标签条才会把它渲染成 data-sleeping。
+  const sleptId = await page.evaluate(() => {
+    const a = window.__pool[0]
+    const active = window.__pool[1]
+    if (!a || !active) return ''
+    a.sleeping = true
+    const s = window.__store.getState()
+    window.__navCb({
+      id: active.id, url: active.url, title: '', loading: false, sid: s.activeSessionId || '', visible: true, srcPath: '',
+      canGoBack: false, canGoForward: false, activeId: active.id, targets: window.__pool.map((t) => ({ ...t })),
+    })
+    return a.id
+  })
+  const sleepTab = () => page.evaluate(() => {
+    const el = document.querySelector('.rtab[data-sleeping="1"]')
+    if (!el) return null
+    const label = el.querySelector('.rtab-t')
+    return {
+      view: el.dataset.view || '',
+      title: label ? label.textContent : '',
+      on: el.classList.contains('on'),
+      tabs: document.querySelectorAll('.rtab').length,
+    }
+  })
+  const preSleep = await sleepTab()
+  const renderCalls = await page.evaluate(() => window.__webRenderCalls)
+  check('仪器：休眠帧让标签带上 data-sleeping（否则下面点的是普通标签）', !!preSleep, JSON.stringify(preSleep))
+  check('仪器：provider 的 render 真的执行过（不是 `??` 兜底分支）', renderCalls > 0, `renderCalls=${renderCalls}`)
+  check('前置：休眠标签在池里是**原 id**', !!preSleep && preSleep.view === sleptId, `${JSON.stringify(preSleep)} 期望 ${sleptId}`)
+  check('前置：休眠标签不是激活标签（点它才会走激活分支）', !!preSleep && preSleep.on === false, JSON.stringify(preSleep))
+  check('休眠标签名由池里 url 推出（provider.title，不是 kindLabel 兜底）',
+    !!preSleep && preSleep.title === 'sleep-a.pdf', JSON.stringify(preSleep))
+
+  await page.click('.rtab[data-sleeping="1"]')
+  await page.waitForTimeout(50)
+  const activations = await page.evaluate(() => window.__activateCalls.slice())
+  const postSleep = await sleepTab()
+  check('点休眠标签 → 用**原 id** 调 embedActivate（唤醒同一页，不是新建）',
+    activations.includes(sleptId), JSON.stringify(activations))
+  check('唤醒后台标签名不变（URL 快照没丢）',
+    !!postSleep && postSleep.title === preSleep.title, `${JSON.stringify(preSleep)} → ${JSON.stringify(postSleep)}`)
+  check('唤醒后标签身份不变（data-view 仍是原 id）',
+    !!postSleep && postSleep.view === preSleep.view, `${JSON.stringify(preSleep)} → ${JSON.stringify(postSleep)}`)
+  check('唤醒后标签数不变（没有多开一个重复标签）',
+    !!postSleep && postSleep.tabs === preSleep.tabs, `${JSON.stringify(preSleep)} → ${JSON.stringify(postSleep)}`)
+  check('唤醒后该标签成为激活标签（点开即切过去）',
+    !!postSleep && postSleep.on === true, JSON.stringify(postSleep))
 
   console.log('D1 去重：同一文件不重复打开')
   await reset()

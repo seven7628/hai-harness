@@ -2808,6 +2808,15 @@ export interface AppState {
   rightLayout: RightLayout
   rightTab: RightTab
   rightSize: number | null // M3：期望的右侧面板宽度（null = 不强制；浏览器内嵌时按 viewport 设）
+  // panelMenuOpen：右栏**面板级**下拉/右键菜单是否开着（R06c 从 RightPanel 的局部 state 上移）。
+  //
+  // 为什么必须上移：它参与原生内嵌视图的**可见性仲裁** —— WebContentsView 恒合成在窗口 DOM
+  // 之上（原生层级 > DOM，CSS z-index 压不住），菜单打开期间不隐藏视图就会被预览画面盖住
+  // （用户实测：点「＋」后菜单被挡掉，见 WebTab 的可见性 effect）。而菜单状态原本是 RightPanel
+  // 的组件局部 state（menu / ctx 两份），provider 渲染的 WebTab 读不到组件局部 state。
+  // 口径 = `menu !== null || ctx !== null`（RP 在**两个** setter 调用点同步写这里，没有第三个写者），
+  // 只表示「有菜单开着」，不含定位/内容（那两份仍留在 RP：菜单要锚坐标、要读标签）。
+  panelMenuOpen: boolean
   // skeleton：切换会话时的骨架屏状态机（2026-10-21 重设计）。
   //
   // 为什么不是一个 boolean：骨架屏最怕**闪烁**。实测本机会话加载耗时分布极宽
@@ -3184,6 +3193,9 @@ export interface AppState {
   applyBias(b: 'even' | 'center' | 'right'): void
   togglePin(): void
   setRightTab(t: RightTab): void
+  // R06c：右栏面板级菜单（⌄ 重开 / ＋ 新建 / 标签右键）开合的**唯一**写点，由 RightPanel 的
+  // 两个 setter 调用点镜像进来 —— 它是 WebTab 可见性仲裁的输入（见 AppState.panelMenuOpen）。
+  setPanelMenuOpen(open: boolean): void
   // focusAgent：左栏树点选一个子智能体 → 叙述区改为展示它的转录（同一次运行的两处视图）。
   // 传 undefined = 回到主会话。**不改变消息投递目标**（输入框永远发给主会话）：
   // 这只是"看哪个"，与"发给谁"是两个问题（子智能体的输入通道是 agent_send）。
@@ -8528,6 +8540,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   rightLayout: layoutCollapse,
   rightTab: 'activity',
   rightSize: null,
+  // 菜单关着（与 menu/ctx 的初值一致）；RP 挂载后由两个 setter 镜像维护。
+  panelMenuOpen: false,
   skeleton: { phase: 'idle' as const, at: 0 },
   enterAnimAt: 0,
   inSkills: false,
@@ -10084,6 +10098,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 为什么不让它直接写 rightTab：那会绕过标签集，出现「切过去了、标签条上却没有这个标签」。
     get().openTab({ kind: t } as TabSpec, { activate: true })
   },
+  // 同值不 set：菜单开合会连带触发 RP 的两个 setter（menu 与 ctx 各一），重复写会让
+  // 所有订阅者白跑一轮通知（WebTab 的可见性 effect 也挂在同一个值上）。
+  setPanelMenuOpen: (open) => set((s) => (s.panelMenuOpen === open ? {} : { panelMenuOpen: open })),
   // openTab：打开或激活一个标签。幂等键（阶段 2，见 tabKeyOf）：
   //   · file → kind + path + mode：**多实例**。同一文件可以同时有 diff 与 source 两个标签
   //     （D5），同一 (path, mode) 命中已有实例（更新 payload + openSeq，不新增）。
