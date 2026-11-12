@@ -81,13 +81,16 @@ const (
 	// agent_id → DM 游标。两个只给一个。
 	CmdHubMarkRead Command = "hub_mark_read"
 	// —— Agent Hub（P2：任务板 + Needs you） ——
-	CmdHubTaskList    Command = "hub_task_list"
-	CmdHubTaskGet     Command = "hub_task_get"
-	CmdHubTaskCancel  Command = "hub_task_cancel"
-	CmdHubTaskRetry   Command = "hub_task_retry"
-	CmdHubNeedList    Command = "hub_need_list"
-	CmdHubNeedResolve Command = "hub_need_resolve"
-	CmdHubClear       Command = "hub_clear" // 清空 DM 上下文（保留 system，§6.4）
+	CmdHubTaskList   Command = "hub_task_list"
+	CmdHubTaskGet    Command = "hub_task_get"
+	CmdHubTaskCancel Command = "hub_task_cancel"
+	CmdHubTaskRetry  Command = "hub_task_retry"
+	// CmdHubTaskArtifactPreview 任务卡产物的人类只读预览（task_id + path 白名单寻址）。
+	// 只给本地桌面 UI；不要加进 mobile_server 白名单。
+	CmdHubTaskArtifactPreview Command = "hub_task_artifact_preview"
+	CmdHubNeedList            Command = "hub_need_list"
+	CmdHubNeedResolve         Command = "hub_need_resolve"
+	CmdHubClear               Command = "hub_clear" // 清空 DM 上下文（保留 system，§6.4）
 	// —— Agent Hub（P3a：群组基础） ——
 	CmdHubGroupList         Command = "hub_group_list"
 	CmdHubGroupGet          Command = "hub_group_get"

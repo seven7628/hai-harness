@@ -81,6 +81,8 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubTaskCancel(c)
 	case CmdHubTaskRetry:
 		m.hubTaskRetry(c)
+	case CmdHubTaskArtifactPreview:
+		m.hubTaskArtifactPreview(c)
 	case CmdHubNeedList:
 		m.hubNeedList(c)
 	case CmdHubNeedResolve:

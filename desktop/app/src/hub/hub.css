@@ -2760,3 +2760,106 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-side-tabs button { min-height: 32px; }
   .hub-panel-head select { min-height: 32px; }
 }
+
+/* —— 任务产物预览（P4-UI-12）—— */
+/* 行按钮化：保留 .artifact-line 的 demo 视觉，只去掉原生 button 外观。 */
+.hub-demo button.artifact-line {
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.hub-demo button.artifact-line .artifact-copy { flex: 1; min-width: 0; }
+.hub-demo button.artifact-line:hover {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--surface-2) 88%, transparent);
+}
+.hub-demo button.artifact-line:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+
+/* 任务板（Inspector）里的产物 li → 同一个预览 action。 */
+.hub-artifact-link {
+  width: 100%;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-artifact-link:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
+.hub-artifact-link:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+
+/* 弹窗：复用 .hub-modal 视觉，独立宽高（比资料页更宽，给表格/图片留空间）。 */
+.hub-artifact-modal {
+  width: min(920px, 94vw);
+  height: min(720px, 90vh);
+}
+.hub-artifact-head { gap: 12px; }
+.hub-artifact-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hub-artifact-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-3);
+  font: 10.5px var(--font-mono);
+}
+.hub-artifact-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(56ch, 100%); }
+.hub-artifact-close { flex: 0 0 auto; }
+.hub-artifact-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+.hub-artifact-doc { max-width: 100%; }
+.hub-artifact-pre {
+  margin: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--ink);
+  font: 12px/1.55 var(--font-mono);
+}
+.hub-artifact-image { display: flex; align-items: flex-start; justify-content: center; min-height: 0; }
+.hub-artifact-image img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
+.hub-artifact-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.hub-artifact-mime { color: var(--text-3); font-family: var(--font-mono); font-size: 10.5px; }
+.hub-artifact-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.hub-artifact-error p { margin: 0; }
+.hub-artifact-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+.hub-artifact-copied { margin-right: auto; min-height: 1em; color: var(--text-3); font-size: 11px; }
+
+@media (max-width: 520px) {
+  .hub-artifact-modal { width: 100vw; height: 100dvh; border-radius: 0; border: 0; }
+  .hub-artifact-body { padding: 10px 12px; }
+  .hub-artifact-foot { padding: 8px 12px; }
+}

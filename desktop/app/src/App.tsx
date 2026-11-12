@@ -15,6 +15,7 @@ import SettingsModal from './components/SettingsModal'
 import ToastView from './components/ToastView'
 import BootScreen from './components/BootScreen'
 import HubSurface from './hub/HubSurface'
+import ArtifactPreview from './hub/ArtifactPreview'
 import HubInspector from './hub/HubInspector'
 import AgentEditor from './hub/AgentEditor'
 import './hub/hub.css'
@@ -511,6 +512,7 @@ export default function App() {
           }}
         />
       ) : null}
+      <ArtifactPreview />
       <SandboxReleaseModal />
       <NewWorkspaceModal />
       <IMBindConfirmModal />

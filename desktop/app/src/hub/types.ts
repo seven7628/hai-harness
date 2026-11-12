@@ -168,6 +168,19 @@ export interface HubTaskResult {
   artifacts?: HubTaskArtifact[]
 }
 
+/** hub_task_artifact_preview 的响应数据（path 是展示用相对路径，不回绝对路径）。 */
+export interface HubArtifactPreviewData {
+  path: string
+  name: string
+  size: number
+  lines: number
+  truncated: boolean
+  binary: boolean
+  content?: string
+  data_url?: string
+  mime?: string
+}
+
 export interface HubAlert {
   id: string
   scope?: string // hub | group | agent | task

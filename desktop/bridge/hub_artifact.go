@@ -52,11 +52,18 @@ func registerTaskArtifacts(ctx context.Context, st agenthub.Store, task *agenthu
 		gid = task.Origin.GroupID
 	}
 	var firstErr error
+	// 相对产物路径的锚点：workspace 优先，否则执行者/发起者的 agent home。
+	// agent-target 任务的 CWD 是 bridge 进程目录，直接 os.Stat 相对路径必然失败
+	// （P4-UI-12 回归）。
+	root := strings.TrimSpace(task.Target.Workspace)
+	if root == "" {
+		root = hubAgentHome(string(owner))
+	}
 	for _, a := range arts {
 		path := strings.TrimSpace(a.Path)
 		source := path
-		if source != "" && !filepath.IsAbs(source) && strings.TrimSpace(task.Target.Workspace) != "" {
-			source = filepath.Join(task.Target.Workspace, source)
+		if source != "" && !filepath.IsAbs(source) {
+			source = filepath.Join(root, source)
 		}
 		displayPath := path
 		if filepath.IsAbs(displayPath) {

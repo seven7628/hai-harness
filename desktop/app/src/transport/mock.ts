@@ -3242,6 +3242,67 @@ class MockTransport implements Transport {
         this.respond(cmd, { conversation, interrupted })
         break
       }
+      case 'hub_task_artifact_preview': {
+        const taskID = String(cmd.payload?.task_id ?? '').trim()
+        const path = String(cmd.payload?.path ?? '').trim()
+        if (!taskID) { this.respondErr(cmd, 'task_id 不能为空'); break }
+        if (!this.hubGroupTasks.has(taskID)) { this.respondErr(cmd, '任务不存在'); break }
+        // fixture：与群任务卡的三件产物一一对应；未知 path 明确失败，不静默空成功。
+        if (path === 'out/pricing-v3.md') {
+          const content = [
+            '# 三家价格对比 v3',
+            '',
+            '> 两页简报的完整草稿 · Writer',
+            '',
+            '## 摘要',
+            '',
+            '- Pro 档性价比最高，三家价差在 $4 以内。',
+            '- Team 档只有 Globex 提供 20 席起订。',
+            '- 三年期合约平均可再降 12%。',
+            '',
+            '| 供应商 | 档位 | 月价 | 起订席位 |',
+            '| --- | --- | --- | --- |',
+            '| Acme | Pro | $20 | 5 |',
+            '| Globex | Team | $50 | 20 |',
+            '| Initech | Pro | $24 | 8 |',
+            '',
+            '## 结论',
+            '',
+            '建议先签 Acme Pro 试运行，季度复核后再谈 Team 档。',
+          ].join('\n')
+          this.respond(cmd, {
+            ok: true, path, name: 'pricing-v3.md', size: content.length,
+            lines: content.split('\n').length, truncated: false, binary: false, content,
+          })
+          break
+        }
+        if (path === 'out/pricing-v3.csv') {
+          const content = [
+            'vendor,tier,monthly_usd,seats',
+            'Acme,Pro,20,5',
+            'Globex,Team,50,20',
+            'Initech,Pro,24,8',
+            'Acme,Enterprise,80,50',
+          ].join('\n')
+          this.respond(cmd, {
+            ok: true, path, name: 'pricing-v3.csv', size: content.length,
+            lines: content.split('\n').length, truncated: false, binary: false, content,
+          })
+          break
+        }
+        if (path === 'out/assets/cost-curve.png') {
+          // 与 fsReadImage 同一张 120×40 SVG（e2e 断言 naturalWidth=120，别改尺寸）。
+          const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40"><rect width="120" height="40" fill="#d97a66"/><text x="8" y="26" font-size="14" fill="#ffffff">cost-curve.png</text></svg>'
+          const b64 = btoa(Array.from(new TextEncoder().encode(svg), (b) => String.fromCharCode(b)).join(''))
+          this.respond(cmd, {
+            ok: true, path, name: 'cost-curve.png', size: 184320, lines: 0, truncated: false,
+            binary: true, mime: 'image/svg+xml', data_url: `data:image/svg+xml;base64,${b64}`,
+          })
+          break
+        }
+        this.respondErr(cmd, `产物不在任务结果清单中: ${path || '(empty)'}`)
+        break
+      }
       case 'hub_task_list': {
         const tasks = [...this.hubGroupTasks.values()]
         // ?hubFixture=tasks：补「排队 / 失败 / 中断」三种任务态（真实账本在 mock 里只有完成态）。

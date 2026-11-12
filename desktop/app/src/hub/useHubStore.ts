@@ -2,9 +2,10 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type {
-  HubAgent, HubAlert, HubConversation, HubDMInfo, HubGroup, HubHistoryPage, HubMessage,
-  HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubPromptLayer, HubPromptPreviewData, HubRound,
-  HubRunEntry, HubSearchCursor, HubSearchHit, HubSearchPage, HubSearchScope, HubTask, HubTaskUpdate,
+  HubAgent, HubAlert, HubArtifactPreviewData, HubConversation, HubDMInfo, HubGroup, HubHistoryPage,
+  HubMessage, HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubPromptLayer, HubPromptPreviewData,
+  HubRound, HubRunEntry, HubSearchCursor, HubSearchHit, HubSearchPage, HubSearchScope, HubTask,
+  HubTaskArtifact, HubTaskUpdate,
 } from './types'
 import {
   aroundHasMore, hasSeq, mapSearchHit, mapSearchPage, mergeAroundPage, mergeSearchHits,
@@ -34,6 +35,17 @@ import type { HubJumpRequest } from './seqJump'
 //   - 只认根 run 的 chunk/agent_start/agent_end（B5：子 agent 会串进流式、提前熄运行点）
 //   - 发送失败保留原文和失败气泡（B2：之前气泡与输入框一起清空）
 //   - live 在根 run 结束时清空、重进会话时重置（B3：半截气泡残留）
+
+/** 任务产物预览弹窗（App 级）：key 用于丢弃迟到的旧响应。 */
+export interface HubArtifactPreviewState {
+  key: string
+  taskId: string
+  path: string
+  name: string
+  loading: boolean
+  error: string | null
+  data: HubArtifactPreviewData | null
+}
 
 /** Context 面板的提示词预览状态：loaded=true 时同 agent 可复用（只读缓存）。 */
 export interface HubPromptState {
@@ -155,6 +167,8 @@ interface HubState {
    * 放在 store 而不是 HubSurface：左栏「＋」、中栏「编辑」、右栏详情都要打开同一个弹层。
    */
   editor: HubAgent | 'new' | null
+  /** 任务卡产物预览弹窗；null = 关闭。 */
+  artifactPreview: HubArtifactPreviewState | null
 
   // —— 全历史搜索（hub_search，P4-04b-1）——
   /** 已提交的查询（输入框由 HubSidebar 自己持有，避免 debounce 回环）。 */
@@ -176,6 +190,9 @@ interface HubState {
   /** 打开 Agent 编辑器（null = 新建）。 */
   openEditor(agent: HubAgent | null): void
   closeEditor(): void
+  /** 打开任务产物预览；同一 task/path 重入会作废旧请求（key 竞态保护）。 */
+  openArtifactPreview(taskId: string, artifact: HubTaskArtifact): Promise<void>
+  closeArtifactPreview(): void
   refresh(): Promise<void>
   select(agentID: string): Promise<void>
   clearSelection(): void
@@ -252,6 +269,8 @@ export const HUB_JUMP_TTL_MS = 2000
 let jumpTimer: ReturnType<typeof setTimeout> | null = null
 // 搜索代际：输入 debounce 里后发的查询必须能丢弃先发的迟到响应（否则结果会闪回旧词）。
 let searchGen = 0
+// 产物预览代际：旧请求的迟到响应不得覆盖新打开的文件（也不得在关闭后复活弹窗）。
+let artifactPreviewGen = 0
 
 function clearJumpTimer(): void {
   if (jumpTimer) {
@@ -399,6 +418,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   deepLinkOwnedOpen: false,
   prompt: null,
   editor: null,
+  artifactPreview: null,
   searchQuery: '',
   searchScope: 'all',
   searchHits: [],
@@ -441,6 +461,36 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   closeEditor() {
     set({ editor: null })
+  },
+
+  async openArtifactPreview(taskId, artifact) {
+    const path = String(artifact.path ?? '').trim()
+    const name = String(artifact.name ?? '').trim()
+    const key = `${taskId}\u0000${path || name}`
+    const data: HubArtifactPreviewData | null = null
+    const gen = ++artifactPreviewGen
+    set({
+      artifactPreview: {
+        key, taskId, path, name, loading: true, error: null, data,
+      },
+    })
+    const payload: Record<string, unknown> = { task_id: taskId, path }
+    if (!path && name) payload.name = name
+    const r = await hubCommand<HubArtifactPreviewData>('hub_task_artifact_preview', payload)
+    // 旧响应不能覆盖新请求（快速连点 A→B）；关闭后到达的响应也直接丢弃。
+    if (gen !== artifactPreviewGen) return
+    const cur = get().artifactPreview
+    if (!cur || cur.key !== key) return
+    if (!r.ok || !r.data) {
+      set({ artifactPreview: { ...cur, loading: false, error: r.error || '预览失败', data: null } })
+      return
+    }
+    set({ artifactPreview: { ...cur, loading: false, error: null, data: r.data } })
+  },
+
+  closeArtifactPreview() {
+    artifactPreviewGen++
+    set({ artifactPreview: null })
   },
 
   async refresh() {

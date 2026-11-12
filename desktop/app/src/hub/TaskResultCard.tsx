@@ -69,7 +69,7 @@ export default function TaskResultCard({
       </div>
       {view.summary ? <p className="event-body">{view.summary}</p> : null}
       {view.error ? <p className="event-error" role="alert">{view.error}</p> : null}
-      <TaskArtifacts artifacts={view.artifacts} />
+      <TaskArtifacts artifacts={view.artifacts} taskId={view.taskId} />
       {/* 「N 人触发」是卡的元信息，不是正文：跟 task id / 打开会话同一行（demo 的 event-actions）。
           条件带上 context —— 否则一张既无 task_id 又无入口的卡会留下空 footer。 */}
       {view.taskId || context || (view.agentId && onOpenAgent) ? (

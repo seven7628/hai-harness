@@ -357,6 +357,7 @@ function TaskRow({
 }) {
   const alerts = useHubStore((s) => s.alerts)
   const agents = useHubStore((s) => s.agents)
+  const openArtifactPreview = useHubStore((s) => s.openArtifactPreview)
   const taskAlerts = alerts.filter((a) => a.task_id === task.id)
   const terminal = isTerminal(task.status)
   const usage = task.result?.usage
@@ -389,7 +390,17 @@ function TaskRow({
           {task.result?.artifacts?.length ? (
             <ul className="hub-artifacts">
               {task.result.artifacts.map((a, i) => (
-                <li key={`${a.path ?? a.name ?? i}`}><span>{a.kind === 'created' ? '新增' : '修改'}</span> {a.path || a.name}</li>
+                <li key={`${a.path ?? a.name ?? i}`}>
+                  <button
+                    type="button"
+                    className="hub-artifact-link"
+                    aria-haspopup="dialog"
+                    title={`${a.path || a.name || ''} · 预览`}
+                    onClick={() => void openArtifactPreview(task.id, a)}
+                  >
+                    <span>{a.kind === 'created' ? '新增' : '修改'}</span> {a.path || a.name}
+                  </button>
+                </li>
               ))}
             </ul>
           ) : null}
