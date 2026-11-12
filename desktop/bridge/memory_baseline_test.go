@@ -113,9 +113,12 @@ func baselineEnforceEmptyMemoryState(t *testing.T) string {
 		const wiredPkg = "github.com/seven7628/hai-harness/desktop/bridge"
 		unexpected := make([]string, 0, len(offenders))
 		for _, o := range offenders {
-			if o != wiredPkg {
-				unexpected = append(unexpected, o)
+			// memory/ 自己子树里的命令（memory/cmd/*）不算"接线"：它是记忆子系统
+			// 自带的工具，不参与任何产品装配路径，基线前提不受影响。
+			if o == wiredPkg || strings.HasPrefix(o, "github.com/seven7628/hai-harness/memory/") {
+				continue
 			}
+			unexpected = append(unexpected, o)
 		}
 		if len(unexpected) == 0 {
 			t.Skipf(

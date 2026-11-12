@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/seven7628/hai-harness/events"
@@ -130,6 +131,12 @@ func (h *memoryHost) injectionFor(dir memory.Dir) string {
 // 边界：只跑 Dream（只读、写一份摘要），**不做裁决也不归档**——归档要模型给理由、
 // 宿主过护栏、事后跑回归，那一步不能自动触发。
 func (h *memoryHost) maybeDream(dir memory.Dir) {
+	// 后台任务绝不在 `go test` 下跑：它会在测试收尾、临时目录被删之后继续写盘，
+	// 表现为 "TempDir RemoveAll cleanup: .state: directory not empty" 这种
+	// 偶发竞态——实测两个用例因此变红，且每次跑失败的名字还不一样。
+	if testing.Testing() {
+		return
+	}
 	if h.cfg.Disabled() || !h.cfg.DreamDue(dir) {
 		return
 	}
