@@ -634,7 +634,8 @@ body.is-electron .left-brand {
 .left-title {
   flex: 1;
   font-size: 11px;
-  color: var(--text-3);
+  /* 同 HUB-A11Y-01：11px 小节标题要 ≥4.5:1（--text-3 在 ink/paper 只有 4.30/3.28）。 */
+  color: var(--text-2);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }

@@ -92,6 +92,8 @@ export function GroupBubble({
   // 中间成功过别的消息也不会把这条的 cid 弄丢（复审 B1/B3）。按布尔订阅，别的消息不重渲染。
   const canRetryThis = useHubStore((s) => !!msg.failed && !!s.failedByCid[msg.clientMsgId ?? ''])
   const retryFailed = useHubStore((s) => s.retry)
+  // 同 DM：群发送进行中时行内「重试」置灰（横幅已有 busy），与 store 的并发拒绝一致。
+  const groupSending = useHubStore((s) => s.groupSending)
   const renderMention = useCallback(
     (id: string) => {
       if (id === ALL_MENTION_ID) {
@@ -247,6 +249,7 @@ export function GroupBubble({
         pending={msg.pending}
         failed={msg.failed}
         onRetry={canRetryThis ? () => void retryFailed(msg.clientMsgId) : undefined}
+        retryDisabled={groupSending}
         time={time}
         dateTime={msg.created_at}
       >

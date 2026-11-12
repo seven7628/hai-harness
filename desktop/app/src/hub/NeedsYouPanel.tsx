@@ -69,7 +69,10 @@ function NeedRow({
         <span className={`hub-chip ${need.kind ?? ''}`}>{kindLabel[need.kind ?? ''] ?? need.kind ?? '事项'}</span>
         <strong>{need.title || need.kind || '待处理'}</strong>
       </header>
-      {need.body ? <HubNeedBody body={need.body} /> : null}
+      {/* 提问类：body 就是 questions JSON。能解析出问题时，输入框才是正文 ——
+          再把原始 JSON 一并铺出来会占掉半屏，看起来像渲染了两遍（HUB-NEED-01）。
+          解析不出来（老格式/纯文本）才退回原始 body，否则用户什么都看不到。 */}
+      {need.body && !(need.kind === 'question' && questions.length > 0) ? <HubNeedBody body={need.body} /> : null}
       {needAlerts.length > 0 ? (
         <div className="hub-task-alerts">
           {needAlerts.slice(0, 3).map((a) => (

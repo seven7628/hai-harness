@@ -409,6 +409,9 @@ function HubBubble({
   // 「最新一条失败」顶掉（复审 B1）。按布尔订阅，别的消息不因失败表变化而重渲染。
   const canRetryThis = useHubStore((s) => !!msg.clientMsgId && !!s.failedByCid[msg.clientMsgId])
   const retry = useHubStore((s) => s.retry)
+  // 正在发送时行内「重试」置灰：横幅同一时刻已是 busy，气泡按钮不能还显示可点
+  // （P1 复审非阻塞）。store.retry 本身也会拒绝并发重试，这里只对齐视觉与指针。
+  const sending = useHubStore((s) => s.sending)
   const kind = msg.sender?.kind ?? 'system'
   const seq = seqDataAttr(msg.seq)
   const hl = highlightClass(msg.seq, highlightSeq)
@@ -435,6 +438,7 @@ function HubBubble({
         pending={msg.pending}
         failed={msg.failed}
         onRetry={msg.failed && canRetryThis ? () => void retry(msg.clientMsgId) : undefined}
+        retryDisabled={sending}
         time={time}
         dateTime={msg.created_at}
       >

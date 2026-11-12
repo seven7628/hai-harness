@@ -349,11 +349,6 @@ export default function AgentEditor({
             <span className="hub-sub">{role || '—'}</span>
             <span className="hub-sub">{[provider, model].filter(Boolean).join(' · ') || '—'}</span>
             <span className="hub-sub">{t('hub.versionLabel').replace('{v}', String(currentVersion || 1))}</span>
-            {!isNew ? (
-              <button className="hub-danger" onClick={() => void remove()} disabled={busy}>
-                {t('hub.delete')}
-              </button>
-            ) : null}
           </aside>
 
           <section className="hub-tab-area">
@@ -617,6 +612,13 @@ export default function AgentEditor({
             ) : null}
 
             <footer className="hub-modal-foot">
+              {/* 删除放在 footer 左侧次要位：原先贴在预览卡里紧挨内容，鼠标往上走就点到，
+                  又是不可撤销操作（HUB-EDITOR-01）。这里与「取消 / 保存」隔开一整行宽。 */}
+              {!isNew ? (
+                <button className="hub-danger" onClick={() => void remove()} disabled={busy}>
+                  {t('hub.delete')}
+                </button>
+              ) : null}
               <button className="hub-link" onClick={onClose}>{t('hub.cancel')}</button>
               <button className="hub-primary" onClick={() => void save()} disabled={busy}>
                 {busy ? t('hub.saving') : t('hub.save')}

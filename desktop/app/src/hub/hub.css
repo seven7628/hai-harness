@@ -112,7 +112,9 @@
   gap: 6px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--text-3);
+  /* 小节标题 11px 属 AA 正文口径（4.5:1）：--text-3 实测 ink 4.30 / paper 3.28（HUB-A11Y-01），
+     换一档 --text-2（ink 7.14 / paper 6.75）。字号/字重/字距不动，层级仍是小节标题。 */
+  color: var(--text-2);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   white-space: nowrap;
@@ -1188,7 +1190,10 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
   z-index: 60;
 }
 .hub-modal {
-  width: min(880px, 92vw);
+  /* 资料页宽度：1280 下不再撑到 880（表单内容只有 ~700px，两侧全是留白，
+     在 a11y 树里整块 role=dialog 的 scrim 还会被读成「整页」）。720 足够放
+     208px 预览卡 + 512px 表单；640 宽窗仍走 92vw 收窄。 */
+  width: min(720px, 92vw);
   height: min(620px, 88vh);
   display: flex;
   flex-direction: column;
@@ -1218,8 +1223,11 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
   min-width: 0;
 }
 .hub-preview-card strong { font-size: 14px; margin-top: 6px; }
+/* 删除是破坏性操作：不再挂在预览卡顶部紧挨内容（HUB-EDITOR-01 误触），
+   改放 footer 左侧次要位（margin-right:auto 把它顶到「取消 / 保存」的对侧）。 */
 .hub-danger {
-  margin-top: auto;
+  margin-right: auto;
+  align-self: center;
   border: 1px solid color-mix(in srgb, var(--crimson) 45%, transparent);
   background: none;
   color: var(--crimson);
@@ -2200,10 +2208,14 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   padding: 8px 12px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
   font-size: 11.5px;
 }
-.hub-deeplink .hub-btn { margin-left: auto; }
-/* 深链独占一行：面板只有 330px，单行截断会让用户看不到 ?seq=（复制出来才是完整的）。 */
+.hub-deeplink > .hub-muted { flex: 0 0 auto; white-space: nowrap; }
+/* 深链独占一行：面板只有 330px，单行截断会让用户看不到 ?seq=（复制出来才是完整的）。
+   复制按钮贴在 URL 行尾（HUB-DL-01）：之前 margin-left:auto 把它顶到右上角，
+   离 URL 隔了一整行，看起来像页头按钮而不是这条链接的操作。 */
+.hub-deeplink-row { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hub-deeplink .hub-btn { flex: none; margin-left: 0; }
 .hub-deeplink-url {
-  flex: 1 1 100%; order: 3; min-width: 0;
+  flex: 1 1 auto; min-width: 0;
   overflow-wrap: anywhere; white-space: normal;
   font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px; color: var(--text-2);
@@ -2222,6 +2234,9 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-context-picker {
   display: flex; align-items: center; gap: 8px; padding: 4px 12px 8px; font-size: 11.5px;
 }
+/* 「消息」label 不参与收缩：inspector 360 时 select 的固有宽度会把 label 压成
+   14×36 的竖排（HUB-CTX-01）。label 定宽不换行，剩余宽度全给 select。 */
+.hub-context-picker label { flex: 0 0 auto; white-space: nowrap; }
 .hub-context-picker select {
   flex: 1 1 auto; min-width: 0; font-size: 11.5px; border: 1px solid var(--border);
   border-radius: 6px; background: var(--paper); color: var(--ink); padding: 3px 6px;
@@ -2678,4 +2693,42 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
    task id 是排障标识，不是用户内容；最窄档收起，让 footer 保持单行。 */
 @media (max-width: 420px) {
   .hub-demo .event-card .event-id { display: none; }
+}
+
+/* ============================================================
+   点击目标规范（HUB-TARGET-01 / P4-UI-11）
+
+   口径：**桌面 32–36 / 移动 44**。
+   · 桌面（这里 ≤900 的窄窗也按桌面指针精度算）：可点元素的最小边 ≥32px，
+     上限 36px —— 再大一档就会把 composer / 消息头撑高，破坏 demo 的行高节奏。
+   · 移动（desktop/bridge/mobile_web，390 手机页）：44px 触控下限，那边
+     style.css 里单独实现，本文件不重复（hub.css 只服务桌面渲染进程）。
+
+   审计实测（640 桌面窗口，P4-UI-11 前）：@ 28×28、发送 31×31、上下文/更多 30×30、
+   事件触发入口 41×15、侧栏筛选 chip 35×18、任务状态筛选 65×23。全部 < 32。
+   只放大命中区、不放大字号：视觉截图与 demo 设计语言保持一致。
+   ============================================================ */
+@media (max-width: 900px) {
+  /* composer：@ 提及（28→32）、发送（31→32）。 */
+  .hub-demo .composer .icon-btn { width: 32px; height: 32px; }
+  .hub-demo .send-btn { width: 32px; height: 32px; }
+
+  /* 会话头：上下文（只读）/ 更多（30→32）。仍在 64px 头部里，不换行。 */
+  .hub-demo .header-actions .icon-btn { width: 32px; height: 32px; }
+
+  /* 消息头的事件触发入口（「N 人触发」41×15）：只扩命中区，不撑行高。
+     min-height 把命中框抬到 32px，负 margin 把这 32px 收回原布局高度（≈15px），
+     上下各溢出 ~8px 落在同一行空白处，不与其他可点元素水平重叠。 */
+  .hub-demo button.hub-context-jump {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 5px;
+    margin: -8px 0;
+  }
+
+  /* 侧栏筛选 chip（全部/群聊/私聊 35×18、智能体/群组 23 高）与任务状态筛选。 */
+  .hub-side-scopes button { min-height: 32px; }
+  .hub-side-tabs button { min-height: 32px; }
+  .hub-panel-head select { min-height: 32px; }
 }

@@ -130,13 +130,35 @@ A/B 历史证据（P4-01 reviewNote，非本次 rerun）：delta p50 **0.9 → 0
 | P4-04a C2 hook 测试 POSIX-only；Windows 执行路径未测 | P4-04a | 中（Windows 目标） | 否（macOS）；Windows 发布前补 |
 | P4-04a C3 `isHubHomePath` 未做 symlink/case 规范化 | P4-04a | 低（纵深防御） | 否 |
 | P4-01 `finalizedMessageIds` 无界；DM 无等价 reconcile；bench 未设 CI 阈值 | P4-01 inspection | 低 | 否 |
-| P4-03b 任务板/Needs 只有纯逻辑测试，无浏览器 UX 测试 | 终审 N1 | 中 | 否 |
-| P4-02 Context 面板桌面 UI 为手工 Chromium 验证，无提交的 rendered-UI 测试 | 终审 N2 | 中 | 否 |
 | P4-03a close 不 detach tap；`isChunkEvent` 仅测试用；`dispatchMu` 注释过期 | P4-03a review | 低 hygiene | 否 |
 | P4-03d `/api/events` 只有无 token 负测，无 invalid/revoked token 负测 | P4-03d review | 低测试缺口 | 否 |
-| 桌面 Hub 390px 溢出（D-390-mobile） | P4-03c note | 低（桌面窄窗） | 否 |
+| 桌面 Hub 390px 宽度下左栏抽屉无法展开（只能看到 `hub-side` 之外的空态；手机端走 `mobile_web`） | P4-03c note / P4-UI-11 复核 | 低（桌面窄窗） | 否；桌面最小窗口按 980×620 支持，390 档只保证不横向溢出 |
 | `npm run lint` 2 条既有 lab 解析错误、58 warnings | 终审 N14 | 低 repo hygiene | 否 |
 | CI 不跑 `desktop/bridge` 与 P4 mobile/bench 脚本 | 终审 N16 | 中置信度缺口 | 否，但发布前应补 |
+
+### 4.1 P4-UI-11 已收口的 P2 细节（原 defer 行已移除）
+
+P2 浏览器审计的六项细节 + 两条 P1 复审非阻塞项在本轮修完，**不再是 defer**；
+证据全部是可重跑的脚本断言（`npm run check:p4-p2` 需先起 dev server）：
+
+| 审计项 | 修法 | 证据（实测） |
+|---|---|---|
+| HUB-CTX-01 Context「消息」label 竖排 14×36 | `.hub-context-picker label { flex:0 0 auto; white-space:nowrap }` + select 吃剩余宽度 | 360px inspector：label `23×18`（宽>高、nowrap）、select `304px`；`check:p4-p2 [1]` |
+| HUB-NEED-01 Needs 提问卡先铺原始 JSON | 提问类解析出输入框后不再渲染 `HubNeedBody`；解析失败才退回原文 | 提问卡 `0` 个 `.hub-need-body` + 2 个输入框；审批/失败/交接仍各 1 个 body；`check:p4-p2 [5]` + `shots:hub-failures [4]` |
+| HUB-A11Y-01 侧栏小节标题对比度 4.30/3.28 | 智能体 / 工作区标题 `--text-3` → `--text-2`（字号/字重/字距不动） | ink `7.14:1`、paper `6.75:1`（均 ≥4.5，AA 正文口径）；`check:p4-p2 [2]` |
+| HUB-TARGET-01 640 点击目标 <32px | `@media (max-width:900px)`：@/发送/上下文/更多 32×32、事件触发入口命中高 32（负 margin 不撑行高）、侧栏筛选 chip 与任务状态筛选 ≥32 | 640/760/900 全部 `32–36`；`check:p4-p2 [3]`；规范注释写在 `hub.css` 尾部（桌面 32–36 / 移动 44） |
+| HUB-EDITOR-01 资料页 1280 撑满、删除易误触 | `.hub-modal` `width:min(720px,92vw)`；删除从预览卡挪到 footer 左侧次要位 | 1280：`720px` @ `x=280`（居中）；640：`589px`（92vw）；footer 顺序 `删除智能体 → 取消 → 保存`；`check:p4-p2 [4]` |
+| HUB-DL-01 深链「复制链接」浮右上 | URL 与按钮包进 `.hub-deeplink-row`，按钮贴 URL 行尾（间距 8px） | url 右缘 1354 / 按钮左缘 1362（同一行）；`check:p4-p2 [1]` |
+| P1 复审：行内「重试」sending 时未禁用 | `UserMessage` 增 `retryDisabled`，DM 用 `sending`、群用 `groupSending`（store 本身已拒绝并发） | `test:hub-conv` / `test:hub-idem` 回归通过；气泡按钮 disabled 与横幅 busy 同态 |
+| P1 复审：mock `hub_need_resolve` 与真实不同 | 未知交接 resolution fail-closed、重复 resolve 回 `already:true`、提问缺/空 answers 报错（错误文案与 `hub_taskboard.go` 同口径） | `test:hub-idem` 新增 15 项（103 项全通过）；正常 payload（交接 accept / 提问 answers map）浏览器里仍能 resolve |
+
+顺带修掉的既有问题：`check-mobile-390.mjs` 的头像断言停留在 sigil v1（`.agent-stack` / `.sigil` / 3++3），
+在 Luna 迁移（`424d6e7`/`eb7ce39`）后一直红。已按当前引擎改成 demo 口径（群行前 4 + `+2`、DM 32px Luna、
+`--eye` 令牌随 ink/paper 切换），`npm run test:mobile-390 -- --require-browser` 重新变绿。
+
+390 × 844 真机口径复核（Chromium 151，`--require-browser`）：`scrollWidth=390`、按钮 ≥44px、
+reduced-motion 关动画、@ 提及、失败保草稿、重试幂等、已读游标全部通过；system 主题
+`setTheme('system')` + `emulateMedia(colorScheme)` 双向切 ink/paper（手机页与桌面 Hub 各测一次）。
 
 ## 5. 收口豁免（B2）
 
@@ -145,6 +167,14 @@ P4-05 的验收命令 `npm test && go test ./...` 在**干净 worktree** 不能�
 1. `npm test` 因 `desktop/app/e2e/` 被 gitignore 且干净 worktree 不存在该目录而无法启动；P4 使用新增的 `npm run test:p4`（纯逻辑 7 套件）+ `npm run test:p4:browser`（真实 390 浏览器）+ `npm run test:p4:go`（领域与 P4 关键 Go 测试）。发布前若要全量 npm test，需把稳定 e2e fixture 入库或改造 CI-safe 子集。
 2. `go test ./...` 的基线红项见 §2.2：真实 provider 不可用、price-table 全局污染、execproc/codemode 预存在沙箱/文案测试；P4 不碰这些包。CI 等效包与 P4 关键行为已单独跑绿。
 3. OS 深链与 iOS Safari 是**发布 gate**，不是 P4 代码失败；本文件不把二者标记为已验证。
+4. **P4-UI-11 的桌面细节回归需要 dev server**（脚本自带 mock，但要真实 Chromium 渲染）：
+   `npx vite --port 5180` + `node scripts/check-p4-p2-details.mjs --url http://localhost:5180/`。
+   本轮跑过的组合：`shoot-hub-narrow`（640/760/900 × ink/paper）、`shoot-hub-failures`
+   （失败重试/状态栏/fixture/退出恢复/阈值重算）、`check-p4-p2-details`（六项细节 + system 主题）、
+   `test:mobile-390 --require-browser`（390×844）。`scripts/shoot-hub-conv.mjs` 的 390 档在
+   P4-UI-9 布局下取不到左栏 Hub 列表（桌面 390 无抽屉），是既有脚本/布局限制，本轮未纳入 gate。
+5. 目标尺寸口径统一为 **桌面 32–36 / 移动 44**：桌面 Hub 的 `@`/发送/上下文/更多/事件触发/筛选
+   在 ≤900 提到 32；390 手机页继续走 `mobile_web/style.css` 的 44px 触控下限，两边不共用一套数字。
 
 ## 6. 复盘
 

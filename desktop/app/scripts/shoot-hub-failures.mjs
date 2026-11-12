@@ -15,6 +15,8 @@
 //   · 640/760/900：.statusbar scrollHeight <= clientHeight、无横向溢出、分档内容取舍正确
 //     （≤900 无 cache/ctx/cost，≤700 再无 in/out）；1280 全段可见（回归保护）
 //   · ?hubFixture=needs：4 种 need（审批/提问/失败/交接）真的画出来；640 无溢出
+//     + HUB-NEED-01：提问卡解析出输入框后不再铺原始 questions JSON（其余三类仍显示 body）
+//     + mock resolve 正常 payload（交接接受 / 提问提交回答）跑通后卡片消失
 //   · ?hubFixture=tasks：排队/失败/中断 3 条任务真的画出来；640 无溢出
 //   · 640 从 rail 进 Hub → 点 inspector 图标（左栏被挤成 44）→ 退出 Hub：左栏回到进 Hub 前的展开态
 //   · Hub 打开期间 640→1280：inspector 按 ≥1000 展开成 ~360、左栏仍展开；缩回 640 能收回且左栏不丢
@@ -339,6 +341,23 @@ async function banner(page) {
         check(`@${width} 提问类有可填问题`, (await page.locator('.hub-need-questions input').count()) >= 2)
         // 审批类有批准/拒绝
         check(`@${width} 审批类有批准/拒绝`, (await page.locator('.hub-need-approval .hub-btn').count()) >= 2)
+        // HUB-NEED-01：解析出输入框后不能再铺一遍原始 questions JSON（否则占掉半屏）。
+        const qCard = page.locator('.hub-need-question').first()
+        check(`@${width} 提问卡不再渲染原始 JSON`, (await qCard.locator('.hub-need-body').count()) === 0)
+        const bodyCards = await page.locator('.hub-need-approval .hub-need-body, .hub-need-failure .hub-need-body, .hub-need-handoff .hub-need-body').count()
+        check(`@${width} 审批/失败/交接仍显示 body`, bodyCards === 3, `got=${bodyCards}`)
+        // 正常 payload 的 resolve 不被 mock 对齐改坏（交接接受 / 提问提交回答各走一次）
+        if (width === 1100) {
+          await page.locator('.hub-need-handoff .hub-btn').filter({ hasText: '接受' }).first().click({ timeout: 4000 })
+          await page.waitForTimeout(700)
+          check('交接「接受」后卡片消失（mock resolve 正常 payload）', (await page.locator('.hub-need-handoff').count()) === 0)
+          const inputs = page.locator('.hub-need-question input')
+          await inputs.nth(0).fill('写「未公开」')
+          await inputs.nth(1).fill('中文')
+          await page.locator('.hub-need-question .hub-btn').filter({ hasText: '提交回答' }).first().click({ timeout: 4000 })
+          await page.waitForTimeout(700)
+          check('提问「提交回答」后卡片消失（answers map 通过校验）', (await page.locator('.hub-need-question').count()) === 0)
+        }
       } else {
         const chips = await page.evaluate(() => [...document.querySelectorAll('.hub-panel .hub-task .hub-chip')].map((n) => n.className))
         check(`@${width} 任务板有 3 条 fixture 任务`, (await page.locator('.hub-panel .hub-task').count()) >= 3,

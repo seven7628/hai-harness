@@ -148,6 +148,7 @@
     "shots:hub-conv": "node scripts/shoot-hub-conv.mjs",
     "shots:hub-narrow": "node scripts/shoot-hub-narrow.mjs",
     "shots:hub-failures": "node scripts/shoot-hub-failures.mjs",
+    "check:p4-p2": "node scripts/check-p4-p2-details.mjs",
     "test:hub-stream": "node scripts/test-hub-stream.mjs",
     "test:hub-alerts": "node scripts/test-hub-alerts.mjs",
     "test:hub-p3b": "node scripts/test-hub-p3b.mjs",

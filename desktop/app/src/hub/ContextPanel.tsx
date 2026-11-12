@@ -95,14 +95,16 @@ export default function ContextPanel() {
 
       <div className="hub-deeplink">
         <span className="hub-muted">深链</span>
-        <code className="hub-deeplink-url" title={link}>{link || '—'}</code>
-        <button
-          className="hub-btn"
-          onClick={() => void copyDeepLink(kind, scopeId, latestSeq)}
-          title="复制到剪贴板（含最新消息位置）"
-        >
-          复制链接
-        </button>
+        <div className="hub-deeplink-row">
+          <code className="hub-deeplink-url" title={link}>{link || '—'}</code>
+          <button
+            className="hub-btn"
+            onClick={() => void copyDeepLink(kind, scopeId, latestSeq)}
+            title="复制到剪贴板（含最新消息位置）"
+          >
+            复制链接
+          </button>
+        </div>
       </div>
 
       <div className="hub-context-section">

@@ -335,6 +335,40 @@ const countText = (list, text) => humanTexts(list).filter((x) => x === text).len
   eq(resolved.data?.need?.status, 'resolved', 'resolve 后状态为 resolved')
   const after = await call('hub_need_list', { status: 'pending' })
   eq((after.data?.needs ?? []).length, 3, 'resolve 后 pending 只剩 3 条')
+
+  // —— 8b) hub_need_resolve 与真实 bridge 对齐（P1 复审非阻塞）——
+  // mock 原先任何 resolution 都成功，前端的 fail-closed 分支在演示里根本走不到。
+  const pendingOf = async (id) => ((await call('hub_need_list', { status: 'pending' })).data?.needs ?? []).find((n) => n.id === id)
+  const again = await call('hub_need_resolve', { need_id: 'need_mock_approval', resolution: 'deny' })
+  eq(again.ok, true, '重复 resolve 幂等成功（不再报错）')
+  eq(again.data?.already, true, '重复 resolve 返回 already:true')
+  eq(again.data?.need?.status, 'resolved', '重复 resolve 不改状态（仍 resolved）')
+
+  const badHandoff = await call('hub_need_resolve', { need_id: 'need_mock_handoff', resolution: 'acceptt' })
+  eq(badHandoff.ok, false, '交接未知 resolution 失败（fail-closed）')
+  assert(String(badHandoff.error ?? '').includes('未知的交接处理方式'),
+    `交接错误信息与真实 bridge 同口径（got=${badHandoff.error}）`)
+  eq((await pendingOf('need_mock_handoff'))?.status, 'pending', 'fail-closed 后交接仍是 pending（没被静默消费）')
+
+  const noAnswers = await call('hub_need_resolve', { need_id: 'need_mock_question', resolution: 'answered' })
+  eq(noAnswers.ok, false, '提问缺 answers 失败')
+  assert(String(noAnswers.error ?? '').includes('缺少 answers'), `提问错误信息为「缺少 answers」（got=${noAnswers.error}）`)
+  const emptyAnswers = await call('hub_need_resolve', {
+    need_id: 'need_mock_question', resolution: 'answered', answers: {},
+  })
+  eq(emptyAnswers.ok, false, '提问 answers 为空对象失败')
+  assert(String(emptyAnswers.error ?? '').includes('answers 不能为空'), `空 answers 错误信息（got=${emptyAnswers.error}）`)
+  eq((await pendingOf('need_mock_question'))?.status, 'pending', '参数错误后提问仍是 pending')
+
+  // 正常 payload（UI 提交的 {question_id: answer}）必须不受影响。
+  const answered = await call('hub_need_resolve', {
+    need_id: 'need_mock_question', resolution: 'answered', answers: { q1: '写「未公开」', q2: '中文' },
+  })
+  eq(answered.ok, true, '提问带 answers map 正常 resolve')
+  eq(answered.data?.need?.status, 'resolved', '提问 resolve 后状态为 resolved')
+  const accepted = await call('hub_need_resolve', { need_id: 'need_mock_handoff', resolution: 'accept' })
+  eq(accepted.ok, true, '交接 accept 正常 resolve')
+  eq((await pendingOf('need_mock_handoff')), undefined, '交接 accept 后从 pending 消失')
   delete globalThis.window
 }
 

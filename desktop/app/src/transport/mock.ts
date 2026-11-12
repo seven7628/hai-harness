@@ -3260,13 +3260,19 @@ class MockTransport implements Transport {
         break
       }
       case 'hub_need_resolve': {
-        const needID = String(cmd.payload?.need_id ?? '')
+        const needID = String(cmd.payload?.need_id ?? '').trim()
+        if (!needID) { this.respondErr(cmd, 'need_id 不能为空'); break }
         const need = this.hubFixtureNeeds().find((n) => n.id === needID)
         if (!need) { this.respondErr(cmd, '待处理项不存在'); break }
+        // 幂等：已经处理过的 need 不再改状态，只回 already（与真实 bridge 同口径）。
+        if (need.status !== 'pending') { this.respond(cmd, { need, already: true }); break }
+        const resolution = String(cmd.payload?.resolution ?? '').trim() || 'acknowledged'
+        const bad = mockHubNeedResolveCheck(String(need.kind ?? ''), resolution, cmd.payload?.answers)
+        if (bad) { this.respondErr(cmd, bad); break }
         // 只把状态改掉：hub_need_list 按 status=pending 过滤，前端刷新后它就消失了。
         need.status = 'resolved'
         need.resolved_at = new Date().toISOString()
-        this.respond(cmd, { need })
+        this.respond(cmd, { need, resolution })
         break
       }
       case 'hub_agent_get': {
@@ -4947,4 +4953,43 @@ function deepMerge(base: Record<string, unknown>, patch: Record<string, unknown>
     }
   }
   return out
+}
+
+// hub_need_resolve 的入参校验（P1 复审非阻塞）：与真实 bridge 的
+// desktop/bridge/hub_taskboard.go（hubNeedResolve / hubNeedAnswers）同口径。
+// mock 原先「任何 resolution 成功 → need 标记 resolved」，于是前端在假的成功里
+// 看不到 fail-closed 分支：交接拼错 resolution 会被静默消费、提问缺 answers 也算处理完。
+// 返回 '' 表示通过，否则返回与 Go 侧同样的中文错误。
+export function mockHubNeedResolveCheck(kind: string, resolution: string, answers: unknown): string {
+  switch (kind) {
+    case 'question': {
+      // Go：answers == nil → 缺少 answers；能解成 [{question_id,answer}] 且非空即通过；
+      // 否则按 map 解，空 map → answers 不能为空；两种都不成立 → 格式错误。
+      if (answers === undefined || answers === null) return '缺少 answers'
+      if (Array.isArray(answers)) {
+        const ok = answers.length > 0 && answers.every((a) => !!a && typeof a === 'object'
+          && String((a as { question_id?: unknown }).question_id ?? '').trim() !== '')
+        return ok ? '' : 'answers 格式错误: 需要 [{question_id,answer}] 或 {question_id: answer}'
+      }
+      if (typeof answers === 'object') {
+        return Object.keys(answers as Record<string, unknown>).length > 0 ? '' : 'answers 不能为空'
+      }
+      return 'answers 格式错误: 需要 [{question_id,answer}] 或 {question_id: answer}'
+    }
+    case 'handoff': {
+      // 只有明确的接受/拒绝才改交接状态；「标记已读」只读。未知 resolution fail-closed。
+      const accept = resolution === 'accept' || resolution === 'accepted' ||
+        resolution === 'approve' || resolution === 'approved' || resolution === 'true'
+      const decline = resolution === 'decline' || resolution === 'declined' || resolution === 'deny' ||
+        resolution === 'denied' || resolution === 'reject' || resolution === 'rejected' || resolution === 'false'
+      const read = resolution === 'acknowledged' || resolution === 'ack' || resolution === 'read'
+      return accept || decline || read ? '' : `未知的交接处理方式: ${resolution}`
+    }
+    case 'approval':
+    case 'failure':
+    case 'budget':
+      return ''
+    default:
+      return `未知的 Need 类型: ${kind}`
+  }
 }

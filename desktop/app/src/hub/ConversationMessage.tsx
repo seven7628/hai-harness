@@ -83,6 +83,7 @@ export function UserMessage({
   pending,
   failed,
   onRetry,
+  retryDisabled,
   dataSeq,
   className = '',
   children,
@@ -94,6 +95,8 @@ export function UserMessage({
   failed?: boolean
   /** 失败气泡的行内重试（沿用首发 client_msg_id，不新开一条乐观气泡）。 */
   onRetry?: () => void
+  /** 正在发送时行内「重试」置灰：横幅已有 busy，气泡按钮也要同态（P1 复审非阻塞）。 */
+  retryDisabled?: boolean
   dataSeq?: string
   className?: string
   children: ReactNode
@@ -112,7 +115,9 @@ export function UserMessage({
             {pending ? <span>{t('hub.sending')}</span> : null}
             {failed ? <span className="user-failed">{t('hub.sendFailed')}</span> : null}
             {failed && onRetry ? (
-              <button type="button" className="user-retry" onClick={onRetry}>{t('hub.retry')}</button>
+              <button type="button" className="user-retry" onClick={onRetry} disabled={retryDisabled}>
+                {t('hub.retry')}
+              </button>
             ) : null}
             {time ? <time dateTime={dateTime}>{time}</time> : null}
           </div>
