@@ -59,11 +59,13 @@ brand/boot-preview*
 *_test.tsx
 *_test.mjs
 *_test.js
-*.test.ts
-*.test.tsx
+# *.test.ts(x) 不再全局忽略：electron/ 与 src/ 下的测试已入库（R05a3b），
+# 否则新写的测试文件会静默躺在磁盘上永不进 CI（F37/F41 的同一个坑）。
+# e2e 同理：目录入库，只忽略运行时产物。
 *.test.mjs
 *.test.js
-/desktop/app/e2e/
+/desktop/app/e2e/_*
+/desktop/app/e2e/.DS_Store
 # desktop/app/scripts 里的 test-*.mjs 是 package.json 各 test:<name> 脚本的实现，
 # 曾经被整目录忽略 → 干净检出里 npm run test:store 之类全部 MODULE_NOT_FOUND
 # （与 desktop/bridge 测试包是同一类事故）。脚本本身入库；只有一次性草稿不入库。
