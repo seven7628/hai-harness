@@ -691,7 +691,101 @@ class MockTransport implements Transport {
   // 每群脚本代际：hub_conversation_stop 换代后，未到点的任务卡/流式回调全部作废（N9）。
   private hubGroupGen = new Map<string, number>()
 
-  private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string }[] {
+  /** 浏览器回归/截图用的场景开关（?hubFixture=cards|needs|tasks）；默认 mock 保持原样。 */
+  private hubFixture(): string {
+    if (typeof window === 'undefined') return ''
+    return new URLSearchParams(window.location.search).get('hubFixture') ?? ''
+  }
+
+  // —— ?hubFixture=needs|tasks：Needs / 任务板的可视回归数据 ——
+  //
+  // 真实 bridge 的 hub_need_list / hub_task_list 由账本产生；mock 里这两条命令以前都走
+  // `default: respond({})`，于是 Needs 面板恒空、任务板只有 1 条完成态 ——「审批/提问/失败/
+  // 交接」四类卡片与「排队/失败/中断」三种任务态在浏览器里从来没被画过（HUB-FIXTURE-01）。
+  // 只在 fixture 打开时注入，日常演示的 mock 群聊不变。
+  private hubFixtureNeedList: Record<string, unknown>[] | null = null
+  private hubFixtureTaskList: Record<string, unknown>[] | null = null
+
+  private hubFixtureNeeds(): Record<string, unknown>[] {
+    if (!this.hubFixtureNeedList) {
+      const now = Date.now()
+      const at = (ms: number): string => new Date(now - ms).toISOString()
+      this.hubFixtureNeedList = [
+        {
+          id: 'need_mock_approval', kind: 'approval', status: 'pending', agent_id: 'ag_mockwri2',
+          task_id: 'task_mock1', session_id: 'hub.ag_mockwri2.g.grp_mock1', anchor: 'call_mock_write_1',
+          title: '写文件前确认：把价格表落到 reports/pricing.md',
+          body: '工具 write_file 需要一次审批：\nreports/pricing.md（新建，约 1.2KB）',
+          created_at: at(90_000),
+        },
+        {
+          id: 'need_mock_question', kind: 'question', status: 'pending', agent_id: 'ag_mockres1',
+          session_id: 'hub.ag_mockres1.g.grp_mock1', anchor: 'ask_mock_1',
+          title: '整理简报前有两个问题',
+          body: JSON.stringify([
+            { id: 'q1', question: 'C 家没有公开单价，要不要写「未公开」而不是估算价？' },
+            { id: 'q2', question: '简报用中文，还是中英对照？' },
+          ]),
+          created_at: at(600_000),
+        },
+        {
+          id: 'need_mock_failure', kind: 'failure', status: 'pending', agent_id: 'ag_mockres1',
+          task_id: 'task_mock_failed',
+          title: '抓取 C 家定价页失败',
+          body: 'HTTP 403（robot 校验）：https://c-pricing.example.com 需要人工确认是否继续重试。',
+          created_at: at(1_500_000),
+        },
+        {
+          id: 'need_mock_handoff', kind: 'handoff', status: 'pending', agent_id: 'ag_mockwri2',
+          session_id: 'hub.ag_mockwri2.g.grp_mock1',
+          title: '对比表交接给我润色',
+          body: 'Researcher 已给出三家单价与功能列；请确认接收后由 Writer 出两页简报。',
+          created_at: at(2_400_000),
+        },
+      ]
+    }
+    return this.hubFixtureNeedList
+  }
+
+  private hubFixtureTasks(): Record<string, unknown>[] {
+    if (!this.hubFixtureTaskList) {
+      const now = Date.now()
+      const at = (ms: number): string => new Date(now - ms).toISOString()
+      const base = { origin: { kind: 'human', group_id: 'grp_mock1' } }
+      this.hubFixtureTaskList = [
+        {
+          ...base, id: 'task_mock_queued', root_task_id: 'task_mock_queued',
+          title: '补一版中英对照摘要',
+          instruction: '把上一版简报翻成英文，价格与专有名词保留中文原名。',
+          status: 'queued', attempt: 1,
+          target: { kind: 'agent', agent_id: 'ag_mockwri2', group_id: 'grp_mock1', session_id: 'hub.ag_mockwri2.g.grp_mock1' },
+          created_at: at(120_000), updated_at: at(120_000),
+        },
+        {
+          ...base, id: 'task_mock_failed', root_task_id: 'task_mock_failed',
+          title: '抓取 C 家定价页',
+          instruction: '拉取 https://c-pricing.example.com 的公开单价并整理成表格。',
+          status: 'failed', attempt: 2,
+          error: '工具 bash 超时（30s）：curl 无响应；已重试 1 次',
+          target: { kind: 'agent', agent_id: 'ag_mockres1', group_id: 'grp_mock1', session_id: 'hub.ag_mockres1.g.grp_mock1' },
+          result: { summary: '' },
+          created_at: at(1_500_000), updated_at: at(1_400_000),
+        },
+        {
+          ...base, id: 'task_mock_interrupted', root_task_id: 'task_mock_interrupted',
+          title: '把三家功能列补全',
+          instruction: '按官方文档补全功能对比列（SSO / 审计日志 / 数据驻留）。',
+          status: 'interrupted', attempt: 1,
+          error: '人类停止了自动对话，任务已中断',
+          target: { kind: 'agent', agent_id: 'ag_mockres1', group_id: 'grp_mock1', session_id: 'hub.ag_mockres1.g.grp_mock1' },
+          created_at: at(7_200_000), updated_at: at(7_000_000),
+        },
+      ]
+    }
+    return this.hubFixtureTaskList
+  }
+
+  private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string; refs?: Record<string, string> }[] {
     let list = this.hubMessages.get(agentID)
     if (!list) {
       list = [
@@ -724,8 +818,7 @@ class MockTransport implements Transport {
       const at = (ms: number): string => new Date(now - ms).toISOString()
       // 截图 harness 专用 fixture：?hubFixture=cards 时才追加 handoff / approval
       // 两种真实 kind，默认 mock 群聊保持原样，避免把验收卡混进日常演示。
-      const cardsFixture = typeof window !== 'undefined'
-        && new URLSearchParams(window.location.search).get('hubFixture') === 'cards'
+      const cardsFixture = this.hubFixture() === 'cards'
       list = [
         {
           seq: 1, id: 'gm_mock1', kind: 'text', sender: { kind: 'human' },
@@ -2812,13 +2905,31 @@ class MockTransport implements Transport {
         const agentID = String(target.agent_id ?? '')
         const text = String(cmd.payload?.text ?? '').trim()
         if (!agentID || !text) { this.respondErr(cmd, 'text 不能为空'); break }
+        // 两种 mock 注入的失败（浏览器回归用，见 scripts/shoot-hub-failures.mjs）：
+        //   __fail__    → 没落账就失败（气泡标 failed，可重试）
+        //   __lostack__ → 已经落账，但事件与响应都在网线上丢了（断线重连的真实现场）
         if (text === '__fail__') { this.respondErr(cmd, 'provider 未配置（mock 注入失败）'); break }
+        const clientID = String(cmd.payload?.client_msg_id ?? '')
         const log = this.hubLog(agentID)
+        // client_msg_id 幂等（与 bridge 的 hubSend 同形）：断线重发直接回原 seq，不重复落账、
+        // 也不再 Ask 一次。没有它，「响应丢了 → 重试」会在模型上下文里留下两条一样的消息
+        //（HUB-IDEM-01 的回归面：换新 cid 就一定会在这里多出一条）。
+        const existing = clientID ? log.find((m) => m.refs?.client_msg_id === clientID) : undefined
+        if (existing) {
+          this.respond(cmd, { seq: existing.seq, deduplicated: true, session_id: `hub.${agentID}.dm` })
+          break
+        }
         const seq = (this.hubSeq.get(agentID) ?? 0) + 1
         this.hubSeq.set(agentID, seq)
         const created = new Date().toISOString()
-        log.push({ seq, sender: { kind: 'human' }, text, created_at: created })
+        log.push({ seq, sender: { kind: 'human' }, text, created_at: created, ...(clientID ? { refs: { client_msg_id: clientID } } : {}) })
         this.hubCursor.set(agentID, seq)
+        if (text === '__lostack__') {
+          // 落账了但既没 emit 也没响应：前端只看到「发送失败」，重试必须沿用同一 cid，
+          // 否则上面的幂等分支永远不命中，模型上下文里就真的多一条。
+          this.respondErr(cmd, '连接中断：响应丢失（mock 注入，消息已落账）')
+          break
+        }
         // 真 bridge 先 emit hub_message 再 resp（hub_commands.go 的 hub_send）：
         // mock 必须同序，否则前端「事件先到/响应先到」两条路径里有一条永远测不到。
         this.emit({ event_type: 'hub_message', agent_id: agentID, seq, message: { seq, sender: { kind: 'human' }, text, created_at: created }, client_msg_id: String(cmd.payload?.client_msg_id ?? '') })
@@ -2937,6 +3048,8 @@ class MockTransport implements Transport {
         const text = String(cmd.payload?.text ?? '').trim()
         if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
         if (!text) { this.respondErr(cmd, 'text 不能为空'); break }
+        // 与 DM 同款注入：__fail__ 不落账就失败（气泡标 failed、横幅给重试）。
+        if (text === '__fail__') { this.respondErr(cmd, 'provider 未配置（mock 注入失败）'); break }
         const clientID = String(cmd.payload?.client_msg_id ?? '')
         const log = this.hubGroupLog(gid)
         const existing = clientID ? log.find((m) => m.refs?.client_msg_id === clientID) : undefined
@@ -2951,6 +3064,11 @@ class MockTransport implements Transport {
           kind: 'text', sender: { kind: 'human' }, text,
           ...(clientID ? { refs: { client_msg_id: clientID } } : {}),
         })
+        if (text === '__lostack__') {
+          // 与 DM 同款注入：已落账但事件/响应都丢了；重试走上面的 cid 幂等分支。
+          this.respondErr(cmd, '连接中断：响应丢失（mock 注入，消息已落账）')
+          break
+        }
         this.hubGroupEmitMessage(gid, msg)
         this.hubGroupSetConversation(gid, 'running', {
           turns: targets.length > 0 ? 1 : 0, depth: 1, queue: Math.max(0, targets.length - 1),
@@ -3125,8 +3243,30 @@ class MockTransport implements Transport {
         break
       }
       case 'hub_task_list': {
-        const tasks = [...this.hubGroupTasks.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        const tasks = [...this.hubGroupTasks.values()]
+        // ?hubFixture=tasks：补「排队 / 失败 / 中断」三种任务态（真实账本在 mock 里只有完成态）。
+        if (this.hubFixture() === 'tasks') tasks.push(...this.hubFixtureTasks())
+        tasks.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
         this.respond(cmd, { tasks })
+        break
+      }
+      case 'hub_need_list': {
+        const status = String(cmd.payload?.status ?? '')
+        // ?hubFixture=needs：审批/提问/失败/交接四种 need；默认（真实账本没有 need）返回空。
+        const needs = this.hubFixture() === 'needs'
+          ? this.hubFixtureNeeds().filter((n) => !status || n.status === status)
+          : []
+        this.respond(cmd, { needs })
+        break
+      }
+      case 'hub_need_resolve': {
+        const needID = String(cmd.payload?.need_id ?? '')
+        const need = this.hubFixtureNeeds().find((n) => n.id === needID)
+        if (!need) { this.respondErr(cmd, '待处理项不存在'); break }
+        // 只把状态改掉：hub_need_list 按 status=pending 过滤，前端刷新后它就消失了。
+        need.status = 'resolved'
+        need.resolved_at = new Date().toISOString()
+        this.respond(cmd, { need })
         break
       }
       case 'hub_agent_get': {

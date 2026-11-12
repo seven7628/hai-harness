@@ -82,6 +82,7 @@ export function UserMessage({
   ownerOnly,
   pending,
   failed,
+  onRetry,
   dataSeq,
   className = '',
   children,
@@ -91,6 +92,8 @@ export function UserMessage({
   ownerOnly?: boolean
   pending?: boolean
   failed?: boolean
+  /** 失败气泡的行内重试（沿用首发 client_msg_id，不新开一条乐观气泡）。 */
+  onRetry?: () => void
   dataSeq?: string
   className?: string
   children: ReactNode
@@ -108,6 +111,9 @@ export function UserMessage({
             {ownerOnly ? <span className="user-owner-only">{t('hub.ownerOnly')}</span> : null}
             {pending ? <span>{t('hub.sending')}</span> : null}
             {failed ? <span className="user-failed">{t('hub.sendFailed')}</span> : null}
+            {failed && onRetry ? (
+              <button type="button" className="user-retry" onClick={onRetry}>{t('hub.retry')}</button>
+            ) : null}
             {time ? <time dateTime={dateTime}>{time}</time> : null}
           </div>
         ) : null}

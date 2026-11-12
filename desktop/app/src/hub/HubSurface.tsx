@@ -6,6 +6,7 @@ import { useHubStore } from './useHubStore'
 import { useAppStore } from '../store/useAppStore'
 import { alertSeverity } from './alerts'
 import GroupView from './GroupView'
+import HubErrorBanner from './HubErrorBanner'
 import AgentSigil from './AgentSigil'
 import { AgentMessage, DayDivider, UserMessage } from './ConversationMessage'
 import { dayKey, dayLabel } from './conversationDay'
@@ -43,7 +44,7 @@ export default function HubSurface() {
   const clearError = useHubStore((s) => s.clearError)
   const drafts = useHubStore((s) => s.drafts)
   const setDraft = useHubStore((s) => s.setDraft)
-  const failedText = useHubStore((s) => s.failedText)
+  const failed = useHubStore((s) => s.failed)
   const retry = useHubStore((s) => s.retry)
   const notice = useHubStore((s) => s.notice)
   const clearNotice = useHubStore((s) => s.clearNotice)
@@ -77,7 +78,12 @@ export default function HubSurface() {
   const retryTask = useHubStore((s) => s.retryTask)
   const groups = useHubStore((s) => s.groups)
   const activeGroupId = useHubStore((s) => s.activeGroupId)
+  const groupSending = useHubStore((s) => s.groupSending)
   const activeGroup = groups.find((g) => g.id === activeGroupId) ?? null
+  // 重试只对「当前目标的那次失败」开放：失败记录跨会话留着会把消息发错人。
+  const canRetryFailed = !!failed && (failed.kind === 'group'
+    ? failed.groupId === activeGroupId
+    : failed.agentId === activeId)
 
   const listRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
@@ -150,7 +156,7 @@ export default function HubSurface() {
     if (!draft.trim() || sending || !activeId) return
     stickBottom.current = true
     const ok = await send(draft)
-    // 成功才清草稿；失败保留原文（store 同时把它放进 failedText，气泡标 failed）。
+    // 成功才清草稿；失败保留原文（store 同时留 failed 记录，气泡标 failed 并带行内重试）。
     if (ok) setDraft(activeId, '')
   }
 
@@ -168,14 +174,22 @@ export default function HubSurface() {
     }
     for (const m of messages) {
       pushDay(m)
-      nodes.push(<HubBubble key={`${m.seq}-${m.clientMsgId ?? ''}`} msg={m} agent={activeAgent} highlightSeq={highlightSeq} />)
+      nodes.push(
+        <HubBubble
+          key={`${m.seq}-${m.clientMsgId ?? ''}`}
+          msg={m}
+          agent={activeAgent}
+          highlightSeq={highlightSeq}
+          onRetry={retry}
+        />,
+      )
     }
     for (const m of actions) {
       pushDay(m)
       nodes.push(<HubBubble key={`action-${m.seq}-${m.text ?? ''}`} msg={m} agent={activeAgent} highlightSeq={highlightSeq} />)
     }
     return nodes
-  }, [messages, actions, activeAgent, highlightSeq, lang])
+  }, [messages, actions, activeAgent, highlightSeq, lang, retry])
 
   return (
     <div className="hub-center">
@@ -205,15 +219,13 @@ export default function HubSurface() {
         </div>
       ) : null}
       {error ? (
-        <div className="hub-error hub-center-banner" role="alert">
-          <span>{error}</span>
-          {failedText ? (
-            <button className="hub-link" onClick={() => void retry()} disabled={sending}>
-              {t('hub.retry')}
-            </button>
-          ) : null}
-          <button className="hub-link" onClick={clearError} aria-label={t('hub.dismiss')}>×</button>
-        </div>
+        <HubErrorBanner
+          message={error}
+          canRetry={canRetryFailed}
+          busy={sending || groupSending}
+          onRetry={() => void retry()}
+          onDismiss={clearError}
+        />
       ) : null}
       {notice ? (
         <div className="hub-notice hub-center-banner" role="status">
@@ -388,10 +400,13 @@ function HubBubble({
   msg,
   agent,
   highlightSeq,
+  onRetry,
 }: {
   msg: HubMessage
   agent?: MentionAgent | null
   highlightSeq?: number | null
+  /** 失败气泡的行内「重试」（沿用首发 cid，见 store.retry）。 */
+  onRetry?: () => void
 }) {
   const t = useT()
   const kind = msg.sender?.kind ?? 'system'
@@ -419,6 +434,7 @@ function HubBubble({
         ownerOnly={msg.visibility === 'owner'}
         pending={msg.pending}
         failed={msg.failed}
+        onRetry={msg.failed ? onRetry : undefined}
         time={time}
         dateTime={msg.created_at}
       >

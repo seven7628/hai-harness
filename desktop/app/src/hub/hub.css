@@ -552,6 +552,12 @@
   cursor: pointer;
 }
 
+/* 错误横幅（DM/群共用）：一行放「消息 + 重试 + 关闭」，窄窗下消息自己省略，
+   不把按钮挤出可视区（列在 .hub-error 之后，只覆盖布局，不动配色）。 */
+.hub-error.hub-error-row { display: flex; align-items: center; gap: 8px; cursor: default; }
+.hub-error.hub-error-row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.hub-error.hub-error-row > button { flex: 0 0 auto; }
+
 /* —— 会话区（群 / DM 共用版式，2026-10 复刻）——
  *
  * 参考 docs/demo 的 messages/composer 节奏：760px 居中、30/28 留白、
@@ -2527,6 +2533,19 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .user-meta { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .hub-demo .user-meta .user-owner-only { color: var(--warn); }
 .hub-demo .user-meta .user-failed { color: var(--danger); }
+/* 失败气泡的行内重试：与「发送失败」同一行（沿用首发 cid，不新开气泡，HUB-FAIL-01）。 */
+.hub-demo .user-meta .user-retry {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.hub-demo .user-meta .user-retry:hover { color: var(--ink); }
+.hub-demo .user-meta .user-retry:disabled { opacity: .5; cursor: default; }
 .hub-demo .user-bubble .md p { margin: 0; }
 .hub-demo .user-bubble .md p + p { margin-top: 6px; }
 .hub-demo .streaming .agent-text::after { content: ''; display: inline-block; width: 5px; height: 13px; margin-left: 3px; vertical-align: -1px; background: var(--accent); animation: demo-caret 1s steps(2) infinite; }

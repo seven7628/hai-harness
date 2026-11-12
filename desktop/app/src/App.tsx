@@ -36,6 +36,8 @@ const RIGHT_PANEL_ID = 'right'
 // 图标条，把宽度让给 Hub 侧栏与会话列 —— 再窄下去三栏铺开时中心列会被压到 300px
 // 下限、左栏甚至只剩 44px（P4 审计 HUB-N-01）。图标条仍可点开 inspector。
 const HUB_INSPECTOR_MIN_W = 1000
+// 宽窗 inspector 的目标宽度（与右栏 Panel 的 defaultSize 一致）。
+const HUB_INSPECTOR_W = 360
 import { useRailTips } from './lib/railTips'
 
 export default function App() {
@@ -202,6 +204,32 @@ export default function App() {
   const rightExpandedBeforeHub = useRef<boolean | null>(null)
   const leftExpandedBeforeHub = useRef<boolean | null>(null)
   const [narrowHubEntry, setNarrowHubEntry] = useState(false)
+  // 退出 Hub 的第二步（P0 复审 #1）：640 从 rail 进 Hub → 点 inspector 图标（右栏撑开、
+  // 左栏被挤成 44px）→ 退出 Hub。进 Hub 前左栏是 expanded，但「右栏收起」与「左栏展开」
+  // 同一帧下发时，库按当时的空间结算，expand 被拒绝，左栏就永久停在 44px。
+  // 这里先让右栏让位，等 onResize 回写出 rightCollapsed 再恢复左栏 —— 与窄窗进 Hub
+  // 复用同一条「两步 + 回写核对」办法。
+  const pendingExitLeftExpand = useRef<boolean | null>(null)
+  const [exitLeftRestore, setExitLeftRestore] = useState(false)
+  // Hub 打开期间跨过 1000px 阈值（640↔1280 拖窗口）：按新宽度重算右栏，否则 1280 下
+  // inspector 仍是 44px 图标条、左栏独占 326px（P0 复审 #4）。用户手动改过右栏就把
+  // 控制权交还给人（autoRight 置空），本次 Hub 会话不再自动顶开/收起。
+  const autoRight = useRef<{ wide: boolean; expanded: boolean } | null>(null)
+  // P0 复审 #2：窄窗下右栏展开会把左栏挤成 44px，Hub 的群/DM 导航跟着消失。
+  // 实测关掉 inspector 之后左栏仍停在 44px（库只在窗口变宽时才给回宽度），
+  // 用户只能退出 Hub 才找得回来。这里记下「左栏是被右栏挤掉的」，等右栏让位再恢复。
+  const leftSqueezedInHub = useRef(false)
+  const prevLeftCollapsed = useRef(leftCollapsed)
+  // 恢复左栏的「真展开」：store 可能已经是 true（库把面板收成 44px 时回写过），
+  // 只 setLeftExpanded 不会触发左侧 effect，必须自己 expand 并回写核对真实宽度。
+  const restoreLeftPanel = useCallback((expanded: boolean): void => {
+    setLeftExpanded(expanded)
+    const h = leftRef[0]
+    if (!h) return
+    if (expanded && h.isCollapsed()) h.expand()
+    if (!expanded && !h.isCollapsed()) h.collapse()
+    requestAnimationFrame(() => applyLeftPanelState(h.isCollapsed()))
+  }, [leftRef[0], setLeftExpanded, applyLeftPanelState])
   useEffect(() => {
     if (hubOpen && !wasHubOpen.current) {
       const st = useAppStore.getState()
@@ -215,8 +243,10 @@ export default function App() {
         pendingNarrowLeftExpand.current = true
         setNarrowHubEntry(true)
         setRightExpanded(false)
+        autoRight.current = { wide: false, expanded: false }
       } else {
         setRightExpanded(true)
+        autoRight.current = { wide: true, expanded: true }
       }
     } else if (!hubOpen && wasHubOpen.current) {
       const beforeRight = rightExpandedBeforeHub.current
@@ -225,11 +255,21 @@ export default function App() {
       leftExpandedBeforeHub.current = null
       pendingNarrowLeftExpand.current = false
       setNarrowHubEntry(false)
+      autoRight.current = null
       if (beforeRight != null) setRightExpanded(beforeRight)
-      if (beforeLeft != null) setLeftExpanded(beforeLeft)
+      if (beforeLeft != null) {
+        // 右栏此刻还占着宽度（Hub 里点开过 inspector）→ 先让它收起来，下一帧再恢复左栏。
+        const rightNowCollapsed = rightRef[0]?.isCollapsed() ?? rightCollapsed
+        if (beforeRight === false && !rightNowCollapsed) {
+          pendingExitLeftExpand.current = beforeLeft
+          setExitLeftRestore(true)
+        } else {
+          restoreLeftPanel(beforeLeft)
+        }
+      }
     }
     wasHubOpen.current = hubOpen
-  }, [hubOpen, setRightExpanded, setLeftExpanded])
+  }, [hubOpen, setRightExpanded, restoreLeftPanel, rightCollapsed])
 
   // 窄窗进 Hub 的第二步：听右栏「真实」折叠态（onResize 回写），让出宽度后再展开左栏。
   useEffect(() => {
@@ -245,6 +285,92 @@ export default function App() {
     // 本 effect 会随即改 narrowHubEntry 触发重跑，因此不返回 cleanup（cleanup 会取消这一帧）。
     requestAnimationFrame(() => applyLeftPanelState(h.isCollapsed()))
   }, [narrowHubEntry, rightCollapsed, leftRef[0], setLeftExpanded, applyLeftPanelState])
+  // 退出 Hub 的第二步：等右栏真的收成图标条（onResize 回写 rightCollapsed）再恢复左栏。
+  useEffect(() => {
+    if (!exitLeftRestore || !rightCollapsed) return
+    setExitLeftRestore(false)
+    const want = pendingExitLeftExpand.current
+    pendingExitLeftExpand.current = null
+    if (want != null) restoreLeftPanel(want)
+  }, [exitLeftRestore, rightCollapsed, restoreLeftPanel])
+  // Hub 里「左栏被右栏挤成 44px」的识别：只在左栏由展开→收起、且此刻右栏是展开的时候
+  // 记账（用户自己按 ⌘B 收左栏时右栏通常不在展开态）。Hub 关闭即作废。
+  useEffect(() => {
+    const was = prevLeftCollapsed.current
+    prevLeftCollapsed.current = leftCollapsed
+    if (!hubOpen) {
+      leftSqueezedInHub.current = false
+      return
+    }
+    if (!was && leftCollapsed && rightExpanded) leftSqueezedInHub.current = true
+  }, [leftCollapsed, rightExpanded, hubOpen])
+
+  // 右栏让位（收起 / 窗口变宽）后把被挤掉的左栏恢复：Hub 打开期间不许把群/DM 导航弄丢
+  // （P0 复审 #2）。恢复走 restoreLeftPanel：会回写核对真实宽度，不会再留「store 说展开、实际 44px」。
+  useEffect(() => {
+    if (!hubOpen || !rightCollapsed || !leftCollapsed) return
+    if (!leftSqueezedInHub.current) return
+    leftSqueezedInHub.current = false
+    restoreLeftPanel(true)
+  }, [hubOpen, rightCollapsed, leftCollapsed, restoreLeftPanel])
+
+  // 兜底：右栏没在 400ms 内回写（异常路径）也要恢复，别把左栏永久留在 44px 图标条。
+  useEffect(() => {
+    if (!exitLeftRestore) return
+    const timer = window.setTimeout(() => {
+      setExitLeftRestore(false)
+      const want = pendingExitLeftExpand.current
+      pendingExitLeftExpand.current = null
+      if (want != null) restoreLeftPanel(want)
+    }, 400)
+    return () => window.clearTimeout(timer)
+  }, [exitLeftRestore, restoreLeftPanel])
+
+  // Hub 打开期间窗口跨过阈值：按新宽度重算右栏（P0 复审 #4）。
+  useEffect(() => {
+    if (!hubOpen) return
+    const auto = (): { wide: boolean; expanded: boolean } | null => autoRight.current
+    const apply = (): void => {
+      const a = auto()
+      if (!a) return
+      const wide = window.innerWidth >= HUB_INSPECTOR_MIN_W
+      if (wide === a.wide) return
+      // 上一次自动调整之后用户自己改过右栏：交还控制权，本次 Hub 会话不再自动动它。
+      if (useAppStore.getState().rightExpanded !== a.expanded) {
+        autoRight.current = null
+        return
+      }
+      autoRight.current = { wide, expanded: wide }
+      setRightExpanded(wide)
+      if (wide) {
+        // 展开按库里记的「上次尺寸」结算：实测 640→1280 会撑到 580px（会话列被压到
+        // 366），不是宽窗默认的 360。这里显式给一次宽窗默认宽度（与 Panel defaultSize 同值）。
+        requestAnimationFrame(() => {
+          const h = rightRef[0]
+          if (h && !h.isCollapsed()) h.resize(HUB_INSPECTOR_W)
+        })
+        return
+      }
+      // 收窄方向：右栏让位之后，被挤掉的左栏由下面的 squeezed effect 恢复。
+    }
+    // 两个方向的时机不同：
+    //   收窄 → 立刻让位（延迟会让库按旧宽度把左栏挤掉）；
+    //   变宽 → 等排版结算完（同一帧 expand 会按旧宽度算，反而把左栏挤成 44px）。
+    let timer = 0
+    const onResize = (): void => {
+      window.clearTimeout(timer)
+      const a = auto()
+      if (a && a.wide && window.innerWidth < HUB_INSPECTOR_MIN_W) { apply(); return }
+      timer = window.setTimeout(apply, 220)
+    }
+    apply()
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      window.clearTimeout(timer)
+    }
+  }, [hubOpen, setRightExpanded])
+
   // App 级订阅：离开 Hub 页期间产生的结算/告警也要收进告警中心（P2.5-05 复审 B3）。
   useEffect(() => attachHubEvents(), [])
   // hub:// 深链（P4-02）：主进程 open-url / second-instance 转发过来 → 打开 Hub 并定位。

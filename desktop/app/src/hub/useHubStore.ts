@@ -46,6 +46,26 @@ export interface HubPromptState {
   error: string | null
 }
 
+/**
+ * 一次发送失败的记录（DM / 群共用）。
+ *
+ * `clientMsgId` 是桥的幂等键（desktop/bridge/hub_commands.go 的 hubSend：命中同 cid
+ * 直接回原 seq，不再 Ask 一次）。失败后重试必须沿用首发那一个 —— 换新 cid 会让
+ * 「响应丢了但消息其实已入队」的那条重复进模型上下文（HUB-IDEM-01）。
+ */
+export interface HubFailedSend {
+  kind: 'dm' | 'group'
+  text: string
+  clientMsgId: string
+  /** kind=dm 的目标智能体。 */
+  agentId?: string
+  /** kind=group 的目标群。 */
+  groupId?: string
+  /** 群的 @ 目标（重发要原样带上，否则唤醒面变小）。 */
+  mentions?: string[]
+  mentionAll?: boolean
+}
+
 interface HubState {
   open: boolean
   agents: HubAgent[]
@@ -71,8 +91,8 @@ interface HubState {
   running: Record<string, boolean>
   /** 每个 agent 未发送的草稿（切 surface 不丢）。 */
   drafts: Record<string, string>
-  /** 上一次发送失败的原文（供重试；失败气泡同时保留在列表里）。 */
-  failedText: string | null
+  /** 上一次发送失败（DM/群共用）：重试要沿用同一个 client_msg_id，见 HubFailedSend。 */
+  failed: HubFailedSend | null
   /** 任务板/Needs you/会话信息/上下文（只读）抽屉。 */
   inspector: 'tasks' | 'needs' | 'session' | 'context' | null
   tasks: HubTask[]
@@ -151,7 +171,8 @@ interface HubState {
   select(agentID: string): Promise<void>
   clearSelection(): void
   loadOlder(): Promise<void>
-  send(text: string): Promise<boolean>
+  send(text: string, reuseClientMsgId?: string): Promise<boolean>
+  /** 重发上一次失败的消息（DM 或群），沿用首发 client_msg_id。 */
   retry(): Promise<boolean>
   setDraft(agentID: string, text: string): void
   clearError(): void
@@ -184,7 +205,7 @@ interface HubState {
   selectGroup(groupID: string): Promise<void>
   loadGroupActivity(groupID?: string): Promise<void>
   clearGroup(): void
-  sendGroup(text: string, mentions?: string[], mentionAll?: boolean): Promise<boolean>
+  sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string): Promise<boolean>
   sendGroupAssign(groupID: string, req: { agent_id: string; instruction: string; title?: string }): Promise<boolean>
   stopGroupConversation(groupID: string): Promise<boolean>
   loadTasks(): Promise<void>
@@ -287,7 +308,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   rootRunId: null,
   running: {},
   drafts: {},
-  failedText: null,
+  failed: null,
   inspector: null,
   tasks: [],
   tasksLoading: false,
@@ -421,6 +442,8 @@ export const useHubStore = create<HubState>((set, get) => ({
       runLog: [],
       actions: [],
       error: null,
+      // 切目标就丢掉失败记录：失败气泡已随消息列表清空，留着它重试会发到别人的会话。
+      failed: null,
       loading: true,
       // 每次打开/切换 DM 都回到 Chat：Run 日志是「当前会话的运行态」，不该跨会话泄漏。
       view: 'chat',
@@ -460,7 +483,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 
   clearSelection() {
-    set({ activeId: null, profile: null, sid: null, messages: [], hasMore: false, live: '', rootRunId: null, failedText: null, jump: null, view: 'chat' })
+    set({ activeId: null, profile: null, sid: null, messages: [], hasMore: false, live: '', rootRunId: null, failed: null, jump: null, view: 'chat' })
   },
 
   async loadOlder() {
@@ -491,30 +514,44 @@ export const useHubStore = create<HubState>((set, get) => ({
     })
   },
 
-  async send(text) {
+  async send(text, reuseClientMsgId) {
     const { activeId, sending } = get()
     const body = text.trim()
     if (!activeId || !body || sending) return false
-    const clientMsgId = `ui-${Date.now()}-${++optimisticSeq}`
+    // 幂等键（§7.1.3）：首发时定下，失败记录保留它；重试 / 同一条正文重发都沿用它。
+    // 桥按 client_msg_id 去重（hubSend 命中即回原 seq、deduplicated），换新 cid 会让
+    // 「响应丢了但消息其实已入队」的那条重复进模型上下文（HUB-IDEM-01）。
+    const prev = get().failed
+    const reuse = reuseClientMsgId
+      || (prev && prev.kind === 'dm' && prev.agentId === activeId && prev.text === body ? prev.clientMsgId : '')
+    const n = ++optimisticSeq
+    const clientMsgId = reuse || `ui-${Date.now()}-${n}`
     const optimistic: HubMessage = {
-      seq: -optimisticSeq,
+      seq: -n,
       sender: { kind: 'human' },
       text: body,
       pending: true,
       clientMsgId,
     }
-    set((s) => ({ messages: [...s.messages, optimistic], sending: true, error: null, notice: null }))
+    set((s) => ({
+      // 重发上一次失败的那条：先把失败气泡从时间线摘掉，再挂新的（别叠出第二条，HUB-FAIL-01）。
+      messages: [...(reuse ? s.messages.filter((m) => !(m.failed && m.clientMsgId === reuse)) : s.messages), optimistic],
+      sending: true,
+      error: null,
+      notice: null,
+      failed: reuse && s.failed?.clientMsgId === reuse ? null : s.failed,
+    }))
     const r = await hubCommand<{ seq?: number; deduplicated?: boolean }>('hub_send', {
       target: { kind: 'dm', agent_id: activeId },
       text: body,
       client_msg_id: clientMsgId,
     })
     if (!r.ok) {
-      // 失败：气泡标 failed（可重试），原文留在 failedText 供输入框回填 —— 不能两头都清。
+      // 失败：气泡标 failed（可重试），失败记录带原文 + 首发 cid —— 不能两头都清。
       set((s) => ({
         sending: false,
         error: r.error || '发送失败',
-        failedText: body,
+        failed: { kind: 'dm', text: body, clientMsgId, agentId: activeId },
         messages: s.messages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
       }))
       return false
@@ -526,16 +563,23 @@ export const useHubStore = create<HubState>((set, get) => ({
         messages: s.messages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, seq, pending: false, failed: false } : m)),
       }))
     }
-    set({ sending: false, failedText: null })
+    set({ sending: false, failed: null })
     void get().refresh()
     return true
   },
 
   async retry() {
-    const text = get().failedText
-    if (!text) return false
-    set({ failedText: null, messages: get().messages.filter((m) => !m.failed) })
-    return get().send(text)
+    const failed = get().failed
+    if (!failed) return false
+    // 沿用首发 cid 与原文重发；失败气泡在 send/sendGroup 里按 cid 先摘掉（HUB-FAIL-01）。
+    if (failed.kind === 'group') {
+      const { activeGroupId, groupSending } = get()
+      if (!activeGroupId || groupSending || activeGroupId !== failed.groupId) return false
+      return get().sendGroup(failed.text, failed.mentions, failed.mentionAll, failed.clientMsgId)
+    }
+    const { activeId, sending } = get()
+    if (!activeId || sending || activeId !== failed.agentId) return false
+    return get().send(failed.text, failed.clientMsgId)
   },
 
   setDraft(agentID, text) {
@@ -953,7 +997,7 @@ export const useHubStore = create<HubState>((set, get) => ({
         : s.groupInfo,
       groupReadSeq: { ...s.groupReadSeq },
       messages: [], live: '', rootRunId: null,
-      error: null, loading: true,
+      error: null, failed: null, loading: true,
       view: 'chat',
       // 手动切群/新深链都会走到这里：旧的跳转请求作废（深链在 selectGroup 之后再登记）。
       jump: null,
@@ -1039,20 +1083,32 @@ export const useHubStore = create<HubState>((set, get) => ({
     set({
       activeGroupId: null, groupMessages: [], groupActivity: [], groupRounds: [], groupSending: false,
       groupDrafts: [], groupAssigning: false, groupAssignNote: null, groupConvStopping: false,
+      failed: null,
       jump: null,
     })
   },
 
-  async sendGroup(text, mentions, mentionAll) {
+  async sendGroup(text, mentions, mentionAll, reuseClientMsgId) {
     const { activeGroupId, groupSending } = get()
     const body = text.trim()
     if (!activeGroupId || !body || groupSending) return false
     const gen = ++groupSendGen
-    const clientMsgId = `g-${Date.now()}-${++optimisticSeq}`
+    // 与 DM 同一条幂等规则（HUB-IDEM-01）：失败记录保留首发 cid，重试/同正文重发沿用它，
+    // 桥按 client_msg_id 去重，不会因「响应丢了」而把同一条再喂一次模型。
+    const prev = get().failed
+    const reuse = reuseClientMsgId
+      || (prev && prev.kind === 'group' && prev.groupId === activeGroupId && prev.text === body ? prev.clientMsgId : '')
+    const n = ++optimisticSeq
+    const clientMsgId = reuse || `g-${Date.now()}-${n}`
     set((s) => ({
       groupSending: true,
       error: null, notice: null,
-      groupMessages: [...s.groupMessages, { seq: -optimisticSeq, sender: { kind: 'human' }, text: body, pending: true, clientMsgId }],
+      failed: reuse && s.failed?.clientMsgId === reuse ? null : s.failed,
+      // 重发先摘掉失败气泡，别在时间线上叠第二条乐观气泡（HUB-FAIL-01）。
+      groupMessages: [
+        ...(reuse ? s.groupMessages.filter((m) => !(m.failed && m.clientMsgId === reuse)) : s.groupMessages),
+        { seq: -n, sender: { kind: 'human' }, text: body, pending: true, clientMsgId },
+      ],
     }))
     const payload: Record<string, unknown> = {
       group_id: activeGroupId, text: body, client_msg_id: clientMsgId,
@@ -1065,14 +1121,17 @@ export const useHubStore = create<HubState>((set, get) => ({
     // 切群/下一轮发送已发生：旧响应只负责自己的乐观气泡，不得复位新一轮的 groupSending。
     if (groupSendGen !== gen || get().activeGroupId !== activeGroupId) return false
     if (!r.ok) {
+      // 失败同样留记录（含 cid + @ 目标）：群里之前只有一条「网络中断 ×」，没有重试入口。
       set((s) => ({
         groupSending: false, error: r.error || '发送失败',
+        failed: { kind: 'group', text: body, clientMsgId, groupId: activeGroupId, mentions, mentionAll },
         groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
       }))
       return false
     }
     set((s) => ({
       groupSending: false,
+      failed: null,
       groupRounds: upsertRound(s.groupRounds, r.data?.round),
       groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId && r.data?.seq ? { ...m, seq: r.data.seq, pending: false } : m)),
     }))

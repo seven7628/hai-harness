@@ -358,6 +358,37 @@ body::before {
   font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--text-2);
+  /* 单行底栏：段内不换行（换行会把 26px 撑成 30/39px，内容被裁 + 叠字）。 */
+  white-space: nowrap;
+  overflow: hidden;
+}
+/* 每一段都可压缩 → 先省略号，再按档位整段隐藏（见下方 900/700 两条查询）。
+   固定高度 + nowrap 下，段内文字撑高比横向挤压更糟：宁可省略也不换行。 */
+.statusbar > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+}
+.statusbar > span.grow {
+  flex: 1 1 auto;
+  min-width: 4px;
+}
+.statusbar > .status-git { flex: 0 1 auto; }
+.statusbar > .sb-bridge { text-align: right; }
+/* —— 窄窗分档（P4 复审 HUB-STATUS-01）——
+ * 900/760 实测 scrollHeight=30、640 实测 39（固定 26px 下溢出 4/13px）。
+ * ≤900 先收诊断类读数（cache/ctx/cost），≤700 再收 in/out；
+ * 剩下的段（run/turns/total/git/bridge）靠 min-width:0 + 省略号收尾。 */
+@media (max-width: 900px) {
+  .statusbar { gap: 12px; }
+  .statusbar .sb-cache,
+  .statusbar .sb-ctx,
+  .statusbar .sb-cost { display: none; }
+}
+@media (max-width: 700px) {
+  .statusbar { gap: 10px; padding: 0 10px; }
+  .statusbar .sb-io { display: none; }
 }
 /* HAI 品牌：左栏品牌行 = 共笔 logo（src/assets/hai-logo-{light,dark}.svg）；启动屏动画见「启动屏」段 */
 .brand-logo {
