@@ -11,20 +11,24 @@ package main
 //   - HAI_EVAL_HUB_REAL=1 才跑，否则 t.Skip；
 //   - provider/model 默认 opencode / deepseek-v4.1-flash，可由 HAI_EVAL_HUB_PROVIDER /
 //     HAI_EVAL_HUB_MODEL 覆盖；
-//   - 从**真实** ~/.go-code/settings.json 读出该 provider 的配置块（base_url/api_key/
-//     models/prices…），复制到 testManager 建的临时 HOME 的 settings.json 后再
-//     m.provCfg.loadSettings()。真实 HOME 只读不写；
-//   - 缺少 api_key 时可用 HAI_EVAL_HUB_API_KEY 覆盖，否则 skip 并说明；
-//   - 临时 HOME 里的 settings.json 在清理阶段删除（key 不落真实 HOME，也不进报告）；
-//   - 报告/事件里的 key 一律替换为 [REDACTED]；报告不含 base_url。
+//   - 从**真实** ~/.go-code/settings.json 读出该 provider 的配置块（base_url/models/
+//     prices…，**不含 api_key**），复制到 testManager 建的临时 HOME 的 settings.json；
+//     loadSettings 之后再 setKey 只注入内存。真实 HOME 只读不写；
+//   - 缺少 api_key 时可用 HAI_EVAL_HUB_API_KEY 覆盖，否则写 skip 报告并 skip；
+//   - 临时 settings.json 不含 api_key（写后自检）；不单独注册删除 cleanup，
+//     随 t.TempDir 在 testManager 的 shutdownHubRuntimes 之后删除；
+//   - 报告/事件/诊断里的 key 一律替换为 [REDACTED]；报告不含 base_url；
+//   - HAI_EVAL_HUB_ONLY 未知名直接 fail；5/6 必须显式带上 4；0 场景不能报 pass；
+//   - 门控 skip 写 <report>.skip.json，不覆盖真实报告，且不创建 manager/不发请求。
 //
 // 运行：
 //
 //	HAI_EVAL_HUB_REAL=1 HAI_EVAL_HUB_PROVIDER=opencode HAI_EVAL_HUB_MODEL=deepseek-v4.1-flash \
 //	  go test ./desktop/bridge -run TestHubRealE2E -count=1 -v -timeout 20m
 //
-// 报告默认 /tmp/hub-real-e2e/report.json，原始事件写同目录 events.jsonl。
-// 失败也写报告（defer），且每个失败场景带最近 5 条消息 / 最近 tool/approval/LLM 事件摘要。
+// 报告默认 /tmp/hub-real-e2e/report-<pid>-<时间戳>.json（绝对路径），原始事件写同目录
+// events.jsonl。失败也写报告（defer），且每个失败场景带最近 5 条消息 /
+// 最近 tool/approval/LLM 事件摘要。
 
 import (
 	"context"
@@ -43,14 +47,136 @@ import (
 const hubRealProtocol = "hub-real-e2e/v1"
 
 // 等待真实模型/run 的上限：群 @all 要等两个成员各跑一轮，留足余量。
-const hubRealTimeout = 180 * time.Second
+// 7 个场景 × 120s = 840s < 文档里的 `-timeout 20m`；单场景内部可能有多段等待，
+// 所以整轮仍应留出余量（真实全量通常 4~8 分钟，不是每个等待都打满）。
+const hubRealTimeout = 120 * time.Second
 
 // hubRealDefaultProvider / hubRealDefaultModel 是任务指定的真实 provider/model。
 const (
 	hubRealDefaultProvider = "opencode"
 	hubRealDefaultModel    = "deepseek-v4.1-flash"
-	hubRealDefaultReport   = "/tmp/hub-real-e2e/report.json"
 )
+
+// hubRealDefaultReport 默认报告路径带 PID + 启动时间：默认路径不会互相覆盖，
+// 也避免上一次的 pass 报告被本次 skip 误当成“本次结果”。仍然保持绝对路径。
+func hubRealDefaultReport() string {
+	return filepath.Join(os.TempDir(), "hub-real-e2e",
+		fmt.Sprintf("report-%d-%s.json", os.Getpid(), time.Now().Format("20060102-150405")))
+}
+
+// —— 场景表（HAI_EVAL_HUB_ONLY 的合法名与依赖的唯一事实源） ——
+
+type hubRealScenarioDef struct {
+	name    string
+	aliases []string // 序号别名（1…7）与短名（dm/tool/…）
+	deps    []string // 必须先选中的场景（5/6 复用 4 建的群与成员）
+	prompt  string
+	run     func(*hubRealScenario)
+}
+
+var hubRealScenarioDefs = []hubRealScenarioDef{
+	{
+		name: "1_dm", aliases: []string{"1", "dm"},
+		prompt: "请只回复：HAI_DM_OK",
+		run:    (*hubRealScenario).scenarioDM,
+	},
+	{
+		name: "2_tool_auto", aliases: []string{"2", "tool", "tool_auto"},
+		prompt: "调用 bash 工具一次，command 必须是 `printf HAI_TOOL_OK`，然后回复工具输出。",
+		run:    (*hubRealScenario).scenarioToolAuto,
+	},
+	{
+		name: "3_approval_hitl", aliases: []string{"3", "approval", "approval_hitl"},
+		prompt: "调用 bash 工具一次，command 必须是 `printf HAI_APPROVAL_OK`，然后回复工具输出。",
+		run:    (*hubRealScenario).scenarioApprovalHITL,
+	},
+	{
+		name: "4_group_mention_all", aliases: []string{"4", "all", "mention_all", "group_mention_all"},
+		prompt: "@all 每人只回复自己的名字 + HAI_ALL_OK",
+		run:    (*hubRealScenario).scenarioGroupMentionAll,
+	},
+	{
+		name: "5_group_mention_one", aliases: []string{"5", "one", "mention_one", "group_mention_one"},
+		deps:   []string{"4_group_mention_all"},
+		prompt: "@RealOneB 只回复 HAI_ONE_OK",
+		run:    (*hubRealScenario).scenarioGroupMentionOne,
+	},
+	{
+		name: "6_handoff", aliases: []string{"6", "handoff"},
+		deps:   []string{"4_group_mention_all"},
+		prompt: "@RealHandA 调用 handoff 工具，把任务交给 RealHandB。",
+		run:    (*hubRealScenario).scenarioHandoff,
+	},
+	{
+		name: "7_project_session", aliases: []string{"7", "project", "project_session"},
+		prompt: "请依次调用 workspace_create 创建项目，再调用 session_create 创建一个会话，然后调用 session_send 给该会话派任务：只回复 HAI_PROJECT_SESSION_OK。最后把 workspace 路径、session_id、task_id 回给我。",
+		run:    (*hubRealScenario).scenarioProjectSession,
+	},
+}
+
+// hubRealParseOnly 解析 HAI_EVAL_HUB_ONLY（逗号分隔；空项忽略；序号/短名映射到合法名）。
+// 任何未知 token / 空选择 / 只选 5、6 而未选 4 都返回错误——调用方必须在创建
+// manager、发真实请求之前 t.Fatalf，不能静默跑 0 个场景还报 pass。
+func hubRealParseOnly(raw string) (map[string]bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	alias := map[string]string{}
+	var legal []string
+	for _, def := range hubRealScenarioDefs {
+		legal = append(legal, def.name)
+		alias[def.name] = def.name
+		for _, a := range def.aliases {
+			alias[a] = def.name
+		}
+	}
+	only := map[string]bool{}
+	var bad []string
+	for _, part := range strings.Split(raw, ",") {
+		tok := strings.TrimSpace(part)
+		if tok == "" {
+			continue // 空项忽略（例如 "1,,4"）
+		}
+		name, ok := alias[tok]
+		if !ok {
+			bad = append(bad, tok)
+			continue
+		}
+		only[name] = true
+	}
+	if len(bad) > 0 {
+		return nil, fmt.Errorf("HAI_EVAL_HUB_ONLY 含未知场景 %s；合法名：%s（也接受序号别名 1…7 及 dm/tool/approval/all/one/handoff/project）",
+			strings.Join(bad, ", "), strings.Join(legal, ", "))
+	}
+	if len(only) == 0 {
+		return nil, fmt.Errorf("HAI_EVAL_HUB_ONLY=%q 没有有效场景名；合法名：%s", raw, strings.Join(legal, ", "))
+	}
+	for _, def := range hubRealScenarioDefs {
+		if !only[def.name] {
+			continue
+		}
+		for _, dep := range def.deps {
+			if !only[dep] {
+				return nil, fmt.Errorf("HAI_EVAL_HUB_ONLY 选择了 %s，但它依赖 %s（场景 4 建的同一个群与成员，场景 5/6 复用）；请显式同时选择 %s",
+					def.name, dep, dep)
+			}
+		}
+	}
+	return only, nil
+}
+
+// hubRealValidateReportPath HAI_EVAL_HUB_REPORT 必须是绝对路径：相对路径会写进
+// 仓库工作区（go test 的 cwd 是包目录），必须在任何写入/请求之前 fail。
+func hubRealValidateReportPath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("HAI_EVAL_HUB_REPORT 不能为空")
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("HAI_EVAL_HUB_REPORT 必须是绝对路径（避免写进仓库）: %q", path)
+	}
+	return nil
+}
 
 // —— 报告 schema ——
 
@@ -182,13 +308,35 @@ type hubRealProject struct {
 //
 // 默认 skip：这是会产生真实付费调用的 gated 测试，只允许显式开启。
 func TestHubRealE2E(t *testing.T) {
-	if os.Getenv("HAI_EVAL_HUB_REAL") != "1" {
-		t.Skip("真实 Provider Hub E2E：默认 skip。要跑请设 HAI_EVAL_HUB_REAL=1（会产生真实付费调用），" +
-			"provider/model 用 HAI_EVAL_HUB_PROVIDER / HAI_EVAL_HUB_MODEL 覆盖")
+	// 相对路径会写进仓库（go test 的 cwd 是包目录）：必须在任何写入之前拦住。
+	// 默认路径是绝对路径（/tmp 下，含 PID + 时间戳）。
+	reportPath := hubRealEnvOr("HAI_EVAL_HUB_REPORT", hubRealDefaultReport())
+	if err := hubRealValidateReportPath(reportPath); err != nil {
+		t.Fatalf("%v", err)
 	}
+
+	// 门控 skip 也要留下自己的 skip 报告：不覆盖上一次的真实报告，也绝不创建
+	// manager/发请求。文件是 <report>.skip.json（事件文件 events.skip.jsonl）。
+	if os.Getenv("HAI_EVAL_HUB_REAL") != "1" {
+		reason := "真实 Provider Hub E2E：默认 skip。要跑请设 HAI_EVAL_HUB_REAL=1（会产生真实付费调用），" +
+			"provider/model 用 HAI_EVAL_HUB_PROVIDER / HAI_EVAL_HUB_MODEL 覆盖"
+		rep := &hubRealReport{
+			Protocol:   hubRealProtocol,
+			StartedAt:  time.Now().UTC(),
+			Provider:   hubRealEnvOr("HAI_EVAL_HUB_PROVIDER", hubRealDefaultProvider),
+			Model:      hubRealEnvOr("HAI_EVAL_HUB_MODEL", hubRealDefaultModel),
+			Gate:       "HAI_EVAL_HUB_REAL=1",
+			Status:     "skipped",
+			SkipReason: reason,
+			Scenarios:  []*hubRealScenarioReport{},
+			Notes:      []string{"门控未开启：未创建 manager，未发任何真实请求。"},
+		}
+		hubRealWriteReport(t, rep, reportPath, true, nil, "")
+		t.Skip(reason)
+	}
+
 	providerName := hubRealEnvOr("HAI_EVAL_HUB_PROVIDER", hubRealDefaultProvider)
 	model := hubRealEnvOr("HAI_EVAL_HUB_MODEL", hubRealDefaultModel)
-	reportPath := hubRealEnvOr("HAI_EVAL_HUB_REPORT", hubRealDefaultReport)
 
 	rep := &hubRealReport{
 		Protocol:  hubRealProtocol,
@@ -197,6 +345,7 @@ func TestHubRealE2E(t *testing.T) {
 		Model:     model,
 		Gate:      "HAI_EVAL_HUB_REAL=1",
 		Status:    "fail", // 默认 fail：任何提前返回都不能写成假的 pass
+		Scenarios: []*hubRealScenarioReport{},
 		Notes: []string{
 			"真实 provider 端到端评测：仅在本测试的 gated 路径里发真实请求。",
 			"报告与事件不对凭证字段落盘；命中的敏感值已替换为 [REDACTED]。",
@@ -205,9 +354,21 @@ func TestHubRealE2E(t *testing.T) {
 	var buf *syncBuf
 	var redactKey string
 	// 失败/跳过也要留下报告：defer 先于 testManager 的 cleanup 执行，事件流仍在。
+	// skip 写 <report>.skip.json，避免把上一次的 pass 报告覆盖成 skipped。
 	defer func() {
-		hubRealWriteReport(t, rep, reportPath, buf, redactKey)
+		hubRealWriteReport(t, rep, reportPath, rep.Status == "skipped", buf, redactKey)
 	}()
+
+	// ONLY 必须在读真实配置/建 manager/发请求之前解析：未知场景或漏选依赖 4 的
+	// 5/6 直接 fail（错误里带全部合法名），不能跑 0 个场景还报 pass。
+	only, onlyErr := hubRealParseOnly(os.Getenv("HAI_EVAL_HUB_ONLY"))
+	if onlyErr != nil {
+		rep.Status = "fail"
+		t.Fatalf("%v", onlyErr)
+	}
+	if raw := strings.TrimSpace(os.Getenv("HAI_EVAL_HUB_ONLY")); raw != "" {
+		rep.Notes = append(rep.Notes, "HAI_EVAL_HUB_ONLY="+raw)
+	}
 
 	cfg, skipReason := hubRealResolveProvider(t, providerName, model)
 	if cfg != nil {
@@ -225,8 +386,11 @@ func TestHubRealE2E(t *testing.T) {
 
 	m, b := testManager(t) // HOME/USERPROFILE 指向临时目录，之后所有读写都在隔离环境里
 	buf = b
+	// settings.json 只写无 key 的配置（磁盘上没有任何明文 key）；loadSettings 后
+	// 再把 key 注入内存（setKey 会标记 keyInjected，后续 loadSettings 不会清掉）。
 	hubRealInstallSettings(t, cfg)
 	m.provCfg.loadSettings()
+	m.provCfg.setKey(providerName, cfg.key)
 	if err := m.provCfg.setActive(providerName); err != nil {
 		rep.Status = "fail"
 		rep.SkipReason = "setActive: " + err.Error()
@@ -242,7 +406,7 @@ func TestHubRealE2E(t *testing.T) {
 	}
 	if got := m.provCfg.keyLocked(providerName); strings.TrimSpace(got) == "" {
 		rep.Status = "skipped"
-		rep.SkipReason = "loadSettings 后 key 仍为空"
+		rep.SkipReason = "loadSettings + setKey 后 key 仍为空"
 		t.Skip(rep.SkipReason)
 	}
 	// Hub 派发（workspace_create/register/session_send）需要工作区登记表。
@@ -251,30 +415,19 @@ func TestHubRealE2E(t *testing.T) {
 	e := &hubRealEval{t: t, m: m, buf: buf, cfg: cfg, rep: rep}
 	t.Logf("[hub-real] provider=%s model=%s report=%s", providerName, model, reportPath)
 
-	// HAI_EVAL_HUB_ONLY 只跑指定场景（逗号分隔，调试/省钱用；默认全跑）。
-	// 注意 5/6 依赖 4 建的同一个群与成员。
-	only := map[string]bool{}
-	if raw := strings.TrimSpace(os.Getenv("HAI_EVAL_HUB_ONLY")); raw != "" {
-		for _, part := range strings.Split(raw, ",") {
-			if p := strings.TrimSpace(part); p != "" {
-				only[p] = true
-			}
+	for _, def := range hubRealScenarioDefs {
+		if len(only) > 0 && !only[def.name] {
+			continue
 		}
-		rep.Notes = append(rep.Notes, "HAI_EVAL_HUB_ONLY="+raw)
+		e.run(def.name, def.prompt, def.run)
 	}
-	run := func(name, prompt string, fn func(*hubRealScenario)) {
-		if len(only) > 0 && !only[name] {
-			return
-		}
-		e.run(name, prompt, fn)
+	// 选了 ONLY 却一个场景都没跑（例如别名全部被忽略/过滤逻辑回归）必须响亮失败：
+	// 0 场景没有资格报 pass。
+	if len(rep.Scenarios) == 0 {
+		rep.Status = "fail"
+		t.Fatalf("HAI_EVAL_HUB_ONLY=%q 没有执行任何场景（scenarios=0），不能报 pass",
+			os.Getenv("HAI_EVAL_HUB_ONLY"))
 	}
-	run("1_dm", "请只回复：HAI_DM_OK", (*hubRealScenario).scenarioDM)
-	run("2_tool_auto", "调用 bash 工具一次，command 必须是 `printf HAI_TOOL_OK`，然后回复工具输出。", (*hubRealScenario).scenarioToolAuto)
-	run("3_approval_hitl", "调用 bash 工具一次，command 必须是 `printf HAI_APPROVAL_OK`，然后回复工具输出。", (*hubRealScenario).scenarioApprovalHITL)
-	run("4_group_mention_all", "@all 每人只回复自己的名字 + HAI_ALL_OK", (*hubRealScenario).scenarioGroupMentionAll)
-	run("5_group_mention_one", "@RealOneB 只回复 HAI_ONE_OK", (*hubRealScenario).scenarioGroupMentionOne)
-	run("6_handoff", "@RealHandA 调用 handoff 工具，把任务交给 RealHandB，instruction 写：只回复 HANDOFF_OK。不要自己完成。", (*hubRealScenario).scenarioHandoff)
-	run("7_project_session", "请依次调用 workspace_create 创建项目，再调用 session_create 创建一个会话，然后调用 session_send 给该会话派任务：只回复 HAI_PROJECT_SESSION_OK。最后把 workspace 路径、session_id、task_id 回给我。", (*hubRealScenario).scenarioProjectSession)
 
 	// 场景全部跑完：状态由场景结果 + 顶层失败共同决定（write 里兜底）。
 	rep.FinishedAt = time.Now().UTC()
@@ -350,15 +503,19 @@ func hubRealResolveProvider(t *testing.T, name, model string) (*hubRealProviderC
 	return &hubRealProviderCfg{name: name, model: model, key: key, block: block}, ""
 }
 
-// hubRealInstallSettings 把选中的 provider 配置块（内含 key）写进**临时 HOME** 的
-// settings.json，再让调用方 loadSettings。清理阶段删除该文件（key 不在盘上过夜）。
+// hubRealInstallSettings 把选中的 provider 配置块写进**临时 HOME** 的 settings.json。
+//
+// **不写 api_key**：磁盘上不出现任何明文 key，SIGKILL / 测试超时 / 进程崩溃都不会
+// 把 key 留在临时文件里。key 由调用方在 loadSettings 之后用 setKey 只注入内存。
+// 这里也**不注册删除 Cleanup**：settings 在 t.TempDir 里，t.Cleanup 是 LIFO，testManager
+// 注册的 shutdownHubRuntimes 先跑，TempDir 的删除后跑（N6：不能先删 home 再收尾）。
 func hubRealInstallSettings(t *testing.T, cfg *hubRealProviderCfg) {
 	t.Helper()
 	block := map[string]any{}
 	for k, v := range cfg.block {
 		block[k] = v
 	}
-	block["api_key"] = cfg.key // 真实 settings 可能已把 key 迁走；统一写回这一份副本
+	delete(block, "api_key") // 关键：配置块可能来自真实 settings，key 不落临时盘
 	doc := map[string]any{
 		"provider": map[string]any{
 			"active": cfg.name,
@@ -376,11 +533,28 @@ func hubRealInstallSettings(t *testing.T, cfg *hubRealProviderCfg) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("写临时 settings.json 失败: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Remove(path)
-		_ = os.RemoveAll(filepath.Dir(path))
-	})
-	t.Logf("[hub-real] 已把 provider %q 配置复制到临时 HOME（key 不打印、不落真实 HOME）", cfg.name)
+	// 写后自检：文件里不能出现 api_key 字段，也不能出现 key 原文。
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("回读临时 settings.json 失败: %v", err)
+	}
+	var check struct {
+		Provider map[string]json.RawMessage `json:"provider"`
+	}
+	if err := json.Unmarshal(raw, &check); err != nil {
+		t.Fatalf("临时 settings.json 不可解析: %v", err)
+	}
+	var checkBlock map[string]any
+	if err := json.Unmarshal(check.Provider[cfg.name], &checkBlock); err != nil {
+		t.Fatalf("临时 settings.json 的 provider %q 不是对象: %v", cfg.name, err)
+	}
+	if _, has := checkBlock["api_key"]; has {
+		t.Fatalf("临时 settings.json 仍含 api_key 字段（key 不能落盘）")
+	}
+	if cfg.key != "" && strings.Contains(string(raw), cfg.key) {
+		t.Fatalf("临时 settings.json 含明文 api_key（key 不能落盘）")
+	}
+	t.Logf("[hub-real] 已把 provider %q 的无 key 配置写入临时 HOME（key 仅内存注入；临时目录随 testManager cleanup 删除）", cfg.name)
 }
 
 // —— 评测驱动 ——
@@ -613,7 +787,7 @@ func (sc *hubRealScenario) waitFor(timeout time.Duration, what string, check fun
 
 // failf 记录结构化错误 + 诊断（最近消息/工具/审批/LLM），再 t.Fatalf。
 func (sc *hubRealScenario) failf(format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
+	msg := sc.redactKey(fmt.Sprintf(format, args...))
 	sc.rep.Errors = append(sc.rep.Errors, msg)
 	for _, line := range sc.diagLines() {
 		sc.rep.Diagnostics = append(sc.rep.Diagnostics, line)
@@ -636,6 +810,11 @@ func (sc *hubRealScenario) sync() {
 	var approvals []hubRealApproval
 
 	for _, ev := range sc.events() {
+		// 只统计本场景的 run：上一场景的迟到事件（llm_end/tool_run_end/agent_end）
+		// 即使落在本场景的 buffer 区间里也不能串进来（场景 6→7 的群会话尤其明显）。
+		if rid := str(ev, "run_id"); rid != "" && sc.priorRuns[rid] {
+			continue
+		}
 		switch str(ev, "event_type") {
 		case "llm_end":
 			in, out, cr, cw, reas, cost, priced := hubRealUsage(ev)
@@ -722,6 +901,14 @@ func (sc *hubRealScenario) sync() {
 	rep.Messages = msgs
 }
 
+// redactKey 把凭证原文从诊断/日志里抹掉（真实模型可能把 key 回显进工具参数/正文）。
+func (sc *hubRealScenario) redactKey(s string) string {
+	if sc.e != nil && sc.e.cfg != nil && sc.e.cfg.key != "" {
+		return strings.ReplaceAll(s, sc.e.cfg.key, "[REDACTED]")
+	}
+	return s
+}
+
 // diagLines 失败诊断：最近 5 条消息 + 最近 tool/approval/LLM 事件摘要（不含 key）。
 func (sc *hubRealScenario) diagLines() []string {
 	var lines []string
@@ -740,6 +927,10 @@ func (sc *hubRealScenario) diagLines() []string {
 	}
 	var toolLines, approvalLines, llmLines []string
 	for _, ev := range sc.events() {
+		// 上一场景的迟到事件不进本场景诊断（与 sync 同一口径）。
+		if rid := str(ev, "run_id"); rid != "" && sc.priorRuns[rid] {
+			continue
+		}
 		switch str(ev, "event_type") {
 		case "tool_run_end":
 			toolLines = append(toolLines, fmt.Sprintf("  tool=%s is_error=%v args=%s result=%s",
@@ -779,6 +970,9 @@ func (sc *hubRealScenario) diagLines() []string {
 	lines = append(lines, llmLines...)
 	if len(llmLines) == 0 {
 		lines = append(lines, "  （无 llm_end/llm_error）")
+	}
+	for i := range lines {
+		lines[i] = sc.redactKey(lines[i])
 	}
 	return lines
 }
@@ -1147,7 +1341,7 @@ func (sc *hubRealScenario) groupFixtureFromStore() (agenthub.GroupID, agenthub.A
 		}
 	}
 	if gid == "" {
-		sc.failf("找不到场景 4 建的 RealAllGroup（场景 5 依赖同群）")
+		sc.failf("找不到场景 4 建的 RealAllGroup（场景 5/6 依赖场景 4 的同群与成员；只选 5/6 时请显式同时选择 4_group_mention_all）")
 	}
 	var a, b agenthub.AgentProfile
 	agents, err := st.ListAgents(ctx)
@@ -1166,7 +1360,7 @@ func (sc *hubRealScenario) groupFixtureFromStore() (agenthub.GroupID, agenthub.A
 		}
 	}
 	if a.ID == "" || b.ID == "" {
-		sc.failf("找不到 RealAllA/RealAllB")
+		sc.failf("找不到 RealAllA/RealAllB（场景 4 创建；场景 5/6 依赖）")
 	}
 	sessA, err := sc.e.m.hubGroupSession(string(a.ID), string(gid))
 	if err != nil {
@@ -1184,14 +1378,17 @@ func (sc *hubRealScenario) groupFixtureFromStore() (agenthub.GroupID, agenthub.A
 
 func (sc *hubRealScenario) scenarioHandoff() {
 	const token = "HANDOFF_OK"
-	gid, a, b, sessA, _ := sc.groupFixtureFromStore()
+	gid, a, b, sessA, sessB := sc.groupFixtureFromStore()
+	sidA := "hub." + string(a.ID) + ".g." + string(gid)
+	sidB := "hub." + string(b.ID) + ".g." + string(gid)
 	sc.rep.Notes = append(sc.rep.Notes, "from="+string(a.ID)+" to="+string(b.ID))
 
-	// 第一步：A 发 handoff（带显式 group_id/to_agent_id，避免模型猜错 id）。
+	// —— 阶段 1：A 创建 handoff（instruction 是 token 的唯一来源） ——
+	// 人类 prompt 只描述动作；token 只出现在 instruction 里，B 的 prompt 全程不出现。
 	promptA := fmt.Sprintf("@%s 调用 handoff 工具：group_id=%s，to_agent_id=%s，instruction 写「只回复 %s」。不要自己完成，不要回复我。",
 		a.Name, gid, b.ID, token)
-	data1 := sc.sendGroup(gid, promptA, false)
-	_ = data1
+	sc.rep.Prompt = promptA
+	sc.sendGroup(gid, promptA, false)
 	var handoffID string
 	sc.waitFor(hubRealTimeout, "handoff 创建事件", func() (bool, string) {
 		for _, ev := range sc.events() {
@@ -1213,7 +1410,7 @@ func (sc *hubRealScenario) scenarioHandoff() {
 			handoffID = str(h, "id")
 			return true, ""
 		}
-		if sc.hasNewAgentEnd("hub." + string(a.ID) + ".g." + string(gid)) {
+		if sc.hasNewAgentEnd(sidA) {
 			return false, "A 的 agent_end 已到达却没有 hub_handoff 事件（模型没调用 handoff 工具）"
 		}
 		return false, ""
@@ -1221,54 +1418,239 @@ func (sc *hubRealScenario) scenarioHandoff() {
 	if handoffID == "" {
 		sc.failf("hub_handoff 事件缺 handoff id")
 	}
-	if h, err := sc.store().LoadHandoff(context.Background(), handoffID); err != nil || h == nil {
+	h0, err := sc.store().LoadHandoff(context.Background(), handoffID)
+	if err != nil || h0 == nil {
 		sc.failf("LoadHandoff(%s): %v", handoffID, err)
-	} else if h.Status != agenthub.HandoffPendingAck {
-		sc.failf("handoff %s 落盘状态 = %q，want pending_ack", handoffID, h.Status)
+	} else if h0.Status != agenthub.HandoffPendingAck {
+		sc.failf("handoff %s 落盘状态 = %q，want pending_ack", handoffID, h0.Status)
+	}
+	// A 的 handoff run：后面用来证明 B 的回复不是 A 的同一条 run。
+	var aRunID string
+	for _, ev := range sc.events() {
+		// handoff 工具的参数里没有 handoff_id（id 是调用后分配的），按工具名取本次
+		// handoff run 的 run_id 即可；取最后一个成功调用，兼容模型重试。
+		if str(ev, "event_type") == "tool_run_end" && str(ev, "name") == "handoff" &&
+			!hubRealBool(ev, "is_error") && str(ev, "run_id") != "" {
+			aRunID = str(ev, "run_id")
+		}
 	}
 	sc.waitFor(hubRealTimeout, "A 的 handoff run 收尾", func() (bool, string) {
-		return sc.hasNewAgentEnd("hub." + string(a.ID) + ".g." + string(gid)), ""
+		return sc.hasNewAgentEnd(sidA), ""
 	})
 	sc.waitFor(60*time.Second, "A 群会话空闲（handoff 工具后模型可能还要再收尾一轮）", func() (bool, string) {
 		return !sessA.hubGroupBusy.Load(), ""
 	})
 
-	// 第二步：B 用 handoff_ack 接受，并按 instruction 回复 token。
+	// —— 阶段 2：B 实际调用 handoff_ack 接受（prompt 不含 token） ——
 	// 明确要求「必须实际调用工具」：只回文字不算完成验收（真实模型会偷懒直接用正文回复）。
-	promptB := fmt.Sprintf("@%s 你必须**实际调用 handoff_ack 工具**（不要用文字代替工具调用）："+
-		"handoff_id 必须是 %q，accept 必须是 true。调用成功后，再按 handoff 的 instruction 只回复 %s。",
-		b.Name, handoffID, token)
-	sc.sendGroup(gid, promptB, false)
+	promptB1 := fmt.Sprintf("@%s 你必须**实际调用 handoff_ack 工具**（不要用文字代替工具调用）："+
+		"handoff_id 必须是 %q，accept 必须是 true。本轮只回复「已接受」，"+
+		"不要猜测交接内容，不要执行 instruction。",
+		b.Name, handoffID)
+	sc.rep.Prompt = promptA + "\n---\n" + promptB1
+	sc.sendGroup(gid, promptB1, false)
+
+	var ack1 map[string]any
+	ack1Idx := -1
 	sc.waitFor(hubRealTimeout, "handoff_ack 工具调用", func() (bool, string) {
-		for _, ev := range sc.events() {
+		for i, ev := range sc.events() {
 			if str(ev, "event_type") != "tool_run_end" || str(ev, "name") != "handoff_ack" {
+				continue
+			}
+			// 只认 B 的 ack：A 可能在 handoff 后自己误调 handoff_ack（accept=false，
+			// 这是模型的真实行为），不能把发起方的失败调用当成本场景的验收对象。
+			if str(ev, "session_id") != sidB {
+				continue
+			}
+			if rid := str(ev, "run_id"); rid != "" && sc.priorRuns[rid] {
 				continue
 			}
 			if hubRealBool(ev, "is_error") {
 				return false, "handoff_ack 返回 is_error=true: " + hubRealClip(str(ev, "result"), 800)
 			}
 			if strings.Contains(str(ev, "arguments"), handoffID) && strings.Contains(str(ev, "result"), "accepted") {
+				ack1 = ev
+				ack1Idx = i
 				return true, ""
 			}
 		}
-		if sc.hasNewAgentEnd("hub." + string(b.ID) + ".g." + string(gid)) {
+		if sc.hasNewAgentEnd(sidB) {
 			return false, "B 的 agent_end 已到达但没有成功的 handoff_ack 调用"
 		}
 		return false, ""
 	})
-	if h, err := sc.store().LoadHandoff(context.Background(), handoffID); err != nil || h == nil {
+	h1, err := sc.store().LoadHandoff(context.Background(), handoffID)
+	if err != nil || h1 == nil {
 		sc.failf("LoadHandoff(%s) after ack: %v", handoffID, err)
-	} else if h.Status != agenthub.HandoffAccepted {
-		sc.failf("handoff %s ack 后状态 = %q，want accepted", handoffID, h.Status)
+	} else if h1.Status != agenthub.HandoffAccepted {
+		sc.failf("handoff %s ack 后状态 = %q，want accepted", handoffID, h1.Status)
 	}
+	// 阶段 3：instruction 确实随 ack 工具结果回到了模型（不是人类 prompt 喂的答案）。
+	ack1Result := str(ack1, "result")
+	if !strings.Contains(ack1Result, token) {
+		sc.failf("handoff_ack 结果里没有 instruction/token（B 无法从工具结果得知该回什么）: %s",
+			hubRealClip(ack1Result, 800))
+	}
+	if h1.Instruction == "" || !strings.Contains(h1.Instruction, token) {
+		sc.failf("handoff %s 落盘 instruction 不含 token: %q", handoffID, hubRealClip(h1.Instruction, 300))
+	}
+	// accepted 卡片（ack 触发的消息）的 seq：B 的最终回复必须排在它之后。
+	var ackCardSeq int64
+	for _, ev := range sc.events() {
+		if str(ev, "event_type") != "hub_handoff" || str(ev, "group_id") != string(gid) {
+			continue
+		}
+		h, _ := ev["handoff"].(map[string]any)
+		if h == nil || str(h, "id") != handoffID || str(h, "status") != string(agenthub.HandoffAccepted) {
+			continue
+		}
+		if !strings.Contains(str(h, "instruction"), token) {
+			sc.failf("accepted hub_handoff 事件不含 instruction/token: %q", hubRealClip(str(h, "instruction"), 300))
+		}
+		ackCardSeq = int64(numOr(ev, "message_seq", 0))
+	}
+	if ackCardSeq == 0 {
+		sc.failf("找不到 handoff %s 的 accepted 事件/message_seq（无法证明回复在 ack 之后）", handoffID)
+	}
+	sc.waitFor(hubRealTimeout, "B 的 ack run 收尾", func() (bool, string) {
+		return sc.hasNewAgentEnd(sidB), ""
+	})
+	sc.waitFor(60*time.Second, "B 群会话空闲（ack run）", func() (bool, string) {
+		return !sessB.hubGroupBusy.Load(), ""
+	})
+
+	// —— 阶段 4：新 run 里按 instruction 回复（token 仍然不在人类 prompt 里） ——
+	// 第二个 prompt 发生在 ack 之后，因此产生的 run_id 必然是 ack 之后的新 run；
+	// 要求再调一次幂等 handoff_ack，让 instruction 再次经由工具结果进入本 run
+	// （若模型没再调工具、但确实按上下文回复，仍用第一轮 ack 结果 + LoadHandoff 断言）。
+	promptB2 := fmt.Sprintf("@%s 再次实际调用 handoff_ack 工具（幂等，重复接受不会改变状态）："+
+		"handoff_id 必须是 %q，accept=true。然后严格按工具返回的 handoff.instruction 回复："+
+		"不要猜测、不要额外解释、不要提工具名。",
+		b.Name, handoffID)
+	if strings.Contains(promptB1, token) || strings.Contains(promptB2, token) {
+		sc.failf("promptB 不得含 token（否则无法证明 instruction 被投递）")
+	}
+	sc.rep.Prompt = promptA + "\n---\n" + promptB1 + "\n---\n" + promptB2
+	eventsBeforeB2 := len(sc.events())
+	dataB2 := sc.sendGroup(gid, promptB2, false)
+	triggerB2 := int64(numOr(dataB2, "seq", 0))
+	if triggerB2 == 0 {
+		sc.failf("第二个 prompt 的 hub_group_send 响应里没有 seq: %+v", dataB2)
+	}
+
+	var replyMsg agenthub.Message
 	sc.waitFor(hubRealTimeout, "B 按 instruction 回复", func() (bool, string) {
 		for _, m := range sc.messages() {
-			if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == b.ID && strings.Contains(m.Text, token) {
-				sc.finalText = m.Text
+			if m.Seq > triggerB2 && m.Sender.Kind == agenthub.SenderAgent &&
+				m.Sender.AgentID == b.ID && strings.Contains(m.Text, token) {
+				replyMsg = m
 				return true, ""
 			}
 		}
+		// 本轮 run 已收尾仍没有 token 回复 → 立即失败，不等满 120s。
+		for i, ev := range sc.events() {
+			if i < eventsBeforeB2 || str(ev, "event_type") != "agent_end" || str(ev, "session_id") != sidB ||
+				str(ev, "parent_run_id") != "" {
+				continue
+			}
+			return false, "B 的第二个 run 已 agent_end，但没有含 " + token + " 的回复（instruction 没被采纳？）: " +
+				hubRealClip(str(ev, "content"), 500)
+		}
 		return false, ""
+	})
+	if replyMsg.Seq <= ackCardSeq {
+		sc.failf("B 的回复 seq=%d 不在 accepted 消息 seq=%d 之后", replyMsg.Seq, ackCardSeq)
+	}
+
+	// 回复所属 run：必须是 eventsBeforeB2 之后启动的新 run，且不是 A 的 handoff run。
+	evs := sc.events()
+	var endEv map[string]any
+	endIdx := -1
+	for i := eventsBeforeB2; i < len(evs); i++ {
+		ev := evs[i]
+		if str(ev, "event_type") == "agent_end" && str(ev, "session_id") == sidB &&
+			str(ev, "parent_run_id") == "" {
+			endEv = ev
+			endIdx = i
+		}
+	}
+	if endEv == nil {
+		sc.waitFor(hubRealTimeout, "B 的第二个 run 收尾", func() (bool, string) {
+			evs = sc.events()
+			for i := eventsBeforeB2; i < len(evs); i++ {
+				if str(evs[i], "event_type") == "agent_end" && str(evs[i], "session_id") == sidB &&
+					str(evs[i], "parent_run_id") == "" {
+					endEv = evs[i]
+					endIdx = i
+					return true, ""
+				}
+			}
+			return false, ""
+		})
+	}
+	rid2 := str(endEv, "run_id")
+	if rid2 == "" {
+		sc.failf("B 第二个 run 的 agent_end 缺 run_id")
+	}
+	if sc.priorRuns[rid2] {
+		sc.failf("B 的回复来自上一场景的旧 run_id=%s", rid2)
+	}
+	if aRunID != "" && rid2 == aRunID {
+		sc.failf("B 的回复 run_id=%s 与 A 的 handoff run 相同（没有在 ack 之后新起 run）", rid2)
+	}
+	startIdx := -1
+	for i := eventsBeforeB2; i < len(evs); i++ {
+		if str(evs[i], "event_type") == "agent_start" && str(evs[i], "session_id") == sidB &&
+			str(evs[i], "run_id") == rid2 && str(evs[i], "parent_run_id") == "" {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx < 0 {
+		sc.failf("找不到 B 第二个 run（run_id=%s）的 agent_start：无法证明回复来自新 run", rid2)
+	}
+	if startIdx <= ack1Idx {
+		sc.failf("B 第二个 run 的 agent_start（idx=%d）不在 ack（idx=%d）之后", startIdx, ack1Idx)
+	}
+	if endIdx <= ack1Idx {
+		sc.failf("B 第二个 run 的 agent_end（idx=%d）不在 ack（idx=%d）之后", endIdx, ack1Idx)
+	}
+
+	// 若第二个 run 里也调了 handoff_ack：它的结果必须带 instruction，且属于同一个 run。
+	ack2Seen := false
+	for i := eventsBeforeB2; i < len(evs); i++ {
+		ev := evs[i]
+		if str(ev, "event_type") != "tool_run_end" || str(ev, "name") != "handoff_ack" ||
+			str(ev, "session_id") != sidB {
+			continue
+		}
+		if hubRealBool(ev, "is_error") {
+			sc.failf("第二个 run 的 handoff_ack 失败: %s", hubRealClip(str(ev, "result"), 800))
+		}
+		if str(ev, "run_id") != rid2 {
+			sc.failf("第二个 run 里的 handoff_ack run_id=%s，want %s", str(ev, "run_id"), rid2)
+		}
+		if !strings.Contains(str(ev, "result"), token) {
+			sc.failf("第二个 run 的 handoff_ack 结果不含 instruction/token: %s", hubRealClip(str(ev, "result"), 800))
+		}
+		ack2Seen = true
+	}
+	if ack2Seen {
+		sc.rep.Notes = append(sc.rep.Notes, "第二个 run 内 handoff_ack 结果携带 instruction；回复来自该 run")
+	} else {
+		sc.rep.Notes = append(sc.rep.Notes, "第二个 run 未重复 handoff_ack；instruction 证据取自第一轮 ack 结果 + LoadHandoff")
+	}
+
+	sc.finalText = replyMsg.Text
+	sc.rep.Notes = append(sc.rep.Notes,
+		fmt.Sprintf("handoff_id=%s ack_message_seq=%d reply_seq=%d trigger_b2_seq=%d reply_run=%s",
+			handoffID, ackCardSeq, replyMsg.Seq, triggerB2, rid2),
+		"promptB 不含 token；B 的回复 seq 在 accepted 消息之后，run 在 ack 之后新起")
+
+	// 场景 6 收尾：等 B 真正空闲再交给场景 7，避免迟到的 llm_end/tool_run_end
+	// 落进场景 7 的统计窗口（sync 还会按 run_id 过滤，这里是第二道保险）。
+	sc.waitFor(60*time.Second, "B 群会话空闲（场景 6 收尾，避免串入场景 7）", func() (bool, string) {
+		return !sessB.hubGroupBusy.Load(), ""
 	})
 }
 
@@ -1755,9 +2137,13 @@ func hubRealPathWithin(path, root string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..")
 }
 
-// hubRealWriteReport 写 report.json 与 events.jsonl；失败也写（defer 调用）。
+// hubRealWriteReport 写报告与事件流；失败也写（defer 调用）。
+// skip=true 时写 <report>.skip.json + events.skip.jsonl（不覆盖真实报告，N4）。
 // api_key 用字符串替换抹掉；报告本身不含 base_url。
-func hubRealWriteReport(t *testing.T, rep *hubRealReport, reportPath string, buf *syncBuf, key string) {
+func hubRealWriteReport(t *testing.T, rep *hubRealReport, reportPath string, skip bool, buf *syncBuf, key string) {
+	if skip {
+		reportPath += ".skip.json"
+	}
 	rep.FinishedAt = time.Now().UTC()
 	if rep.StartedAt.IsZero() {
 		rep.StartedAt = rep.FinishedAt
@@ -1788,7 +2174,17 @@ func hubRealWriteReport(t *testing.T, rep *hubRealReport, reportPath string, buf
 		return
 	}
 	rep.ReportPath = reportPath
-	rep.EventsPath = filepath.Join(dir, "events.jsonl")
+	// 没有事件流（门控 skip / ONLY 解析失败）时不写 events 文件：否则会用空文件
+	// 覆盖同目录上一次真实运行的 events.jsonl。
+	if buf == nil {
+		rep.EventsPath = ""
+	} else {
+		eventsName := "events.jsonl"
+		if skip {
+			eventsName = "events.skip.jsonl"
+		}
+		rep.EventsPath = filepath.Join(dir, eventsName)
+	}
 
 	reportJSON, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
@@ -1802,17 +2198,81 @@ func hubRealWriteReport(t *testing.T, rep *hubRealReport, reportPath string, buf
 	if err := os.WriteFile(reportPath, []byte(reportText+"\n"), 0o644); err != nil {
 		t.Errorf("写报告失败 %s: %v", reportPath, err)
 	}
-	events := ""
 	if buf != nil {
-		events = buf.String()
-	}
-	if key != "" {
-		events = strings.ReplaceAll(events, key, "[REDACTED]")
-	}
-	if err := os.WriteFile(rep.EventsPath, []byte(events), 0o644); err != nil {
-		t.Errorf("写原始事件失败 %s: %v", rep.EventsPath, err)
+		events := buf.String()
+		if key != "" {
+			events = strings.ReplaceAll(events, key, "[REDACTED]")
+		}
+		if err := os.WriteFile(rep.EventsPath, []byte(events), 0o644); err != nil {
+			t.Errorf("写原始事件失败 %s: %v", rep.EventsPath, err)
+		}
 	}
 	t.Logf("[hub-real] report=%s events=%s status=%s scenarios=%d pass=%d fail=%d skip=%d llm_calls=%d cost_usd=%.6f",
 		reportPath, rep.EventsPath, rep.Status, rep.Totals.Scenarios, rep.Totals.Passed,
 		rep.Totals.Failed, rep.Totals.Skipped, rep.Totals.LLMCalls, rep.Totals.CostUSD)
+}
+
+// TestHubRealOnlySelection 无网络自检：HAI_EVAL_HUB_ONLY 的未知名 / 只选 5、6
+// 必须在解析阶段失败（不会创建 manager、不会发真实请求）；别名与空项规则也在这里锁定。
+func TestHubRealOnlySelection(t *testing.T) {
+	invalid := []string{"__none__", "5", "6", "5,6", "0", "1,__none__", ","}
+	for _, raw := range invalid {
+		if _, err := hubRealParseOnly(raw); err == nil {
+			t.Fatalf("hubRealParseOnly(%q) 应当失败，实际成功（会静默跑 0 场景/缺依赖）", raw)
+		}
+	}
+	var legal []string
+	for _, def := range hubRealScenarioDefs {
+		legal = append(legal, def.name)
+	}
+	_, err := hubRealParseOnly("__none__")
+	if err == nil || !strings.Contains(err.Error(), "合法名") {
+		t.Fatalf("未知场景错误应列出合法名，实际: %v", err)
+	}
+	for _, name := range legal {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("未知场景错误缺少合法名 %s: %v", name, err)
+		}
+	}
+	_, err = hubRealParseOnly("5")
+	if err == nil || !strings.Contains(err.Error(), "4_group_mention_all") || !strings.Contains(err.Error(), "场景 4") {
+		t.Fatalf("只选 5 的错误应明确依赖场景 4，实际: %v", err)
+	}
+
+	if only, err := hubRealParseOnly("   "); err != nil || only != nil {
+		t.Fatalf("空 ONLY 应表示全跑（nil），实际 only=%v err=%v", only, err)
+	}
+	only, err := hubRealParseOnly(" 1 , dm ,, 4,5 ")
+	if err != nil {
+		t.Fatalf("hubRealParseOnly: %v", err)
+	}
+	if len(only) != 3 || !only["1_dm"] || !only["4_group_mention_all"] || !only["5_group_mention_one"] {
+		t.Fatalf("别名/空项解析 = %v，want 1_dm+4+5", only)
+	}
+	// 每个场景名的全部别名都能单独选中（5/6 带上依赖 4）。
+	for _, def := range hubRealScenarioDefs {
+		for _, alias := range append([]string{def.name}, def.aliases...) {
+			raw := alias
+			if len(def.deps) > 0 {
+				raw += "," + def.deps[0]
+			}
+			got, err := hubRealParseOnly(raw)
+			if err != nil || !got[def.name] {
+				t.Fatalf("别名 %q 解析失败: only=%v err=%v", raw, got, err)
+			}
+		}
+	}
+}
+
+// TestHubRealReportPathValidation 无网络自检：相对报告路径必须在写盘之前被拒绝。
+func TestHubRealReportPathValidation(t *testing.T) {
+	if err := hubRealValidateReportPath("report.json"); err == nil {
+		t.Fatal("相对报告路径必须被拒绝（否则会写进仓库）")
+	}
+	if err := hubRealValidateReportPath(filepath.Join(t.TempDir(), "report.json")); err != nil {
+		t.Fatalf("绝对报告路径被误拒: %v", err)
+	}
+	if !filepath.IsAbs(hubRealDefaultReport()) {
+		t.Fatalf("默认报告路径必须是绝对路径: %q", hubRealDefaultReport())
+	}
 }
