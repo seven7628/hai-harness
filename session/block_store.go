@@ -41,6 +41,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -227,10 +228,12 @@ type blockStore struct {
 	// 里有效内容只有 58MB。
 	recordsWritten int64
 	staleRecords   int64
-	// lastCompactBytes 是最近一次压缩后的文件体积（0 = 从未压缩过）。
-	// 冷却判据用：刚压完必须先长到 lastCompactBytes×compactCooldownFactor 才允许再压
-	//（见 compactCooldownFactor 的注释）。
-	lastCompactBytes int64
+	// lastCompactAt 是最近一次压缩完成的时刻（零值 = 从未压缩过）。
+	//
+	// 用途：同一 record 的两次压缩之间的**最小间隔**（见 minCompactInterval）。
+	// 它是进程内状态：重启后归零，于是「上次压缩遗留的垃圾」可以在启动后被
+	// 一次性回收 —— 这正是我们想要的（重启本来就要付一次打开成本）。
+	lastCompactAt time.Time
 	// bytesWritten 是历史累计写入字节（含废弃），用于估算放大倍数。
 	bytesWritten int64
 	// hashedBytes 是累计被哈希校验的 payload 字节数（可观测性/测试用）。
@@ -243,6 +246,12 @@ type blockStore struct {
 	// 占比 94% —— 判据看不见的前者让 3.45GB 的文件永不回收。
 	// 维护成本 O(1)：put/delete 各加减一次，重建时按索引求和。
 	liveBytes int64
+	// frags 是**分片块**的片段目录：id → 目录。
+	//
+	// 有了它，「只增」的块（running 的 agent 卡片）每次只追加新增的那一段，
+	// 而不是整个 payload —— 见 block_frags.go 的写放大分析。
+	// 整块块不在这里；两者互斥（kind=1 清空分片，kind=4 建立分片）。
+	frags map[string]*fragDir
 }
 
 // blockRecordSize 是一条 sidecar 记录的总字节数（头 + payload + 摘要）。
@@ -253,8 +262,13 @@ func blockRecordSize(id string, payloadLen int) int64 {
 type blockRef struct {
 	off  int64
 	n    int32
-	hash [8]byte // 该 id 当前 payload 的内容摘要
-	kind uint8   // 块类型编码（见 blockKind* 常量；0 = 未知）
+	hash [8]byte // 该 id 当前 payload 的**逻辑内容**摘要（解压后算 —— 见 block_compress.go）
+	// kind 是**块类型编码 + 标志位**（见 blockIndex.go 的 kind 字节布局）：
+	// 低位 = 真实块类型；0x80 = 分片；0x40 = 落盘是压缩字节。
+	//
+	// 为什么标志放这里：索引文件（.idx）的每条记录**本来就有一个 kind 字节**
+	// ⇒ 压缩标志无需改索引格式 ✓（旧索引照常可读 ✓）。
+	kind uint8
 }
 
 // unchanged 报告同 id 的新内容是否与已缓存的一致。
@@ -349,7 +363,7 @@ func evictBlockStore(recordPath string) { closeBlockStore(recordPath) }
 
 // openBlockStore 打开（或创建）sidecar 并重建索引。
 func openBlockStore(path string) (*blockStore, error) {
-	bs := &blockStore{path: path, index: map[string]blockRef{}}
+	bs := &blockStore{path: path, index: map[string]blockRef{}, frags: map[string]*fragDir{}}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
@@ -460,7 +474,7 @@ func (bs *blockStore) rebuild() error {
 	r := bufio.NewReaderSize(io.NewSectionReader(bs.f, pos, size-pos), 1<<20)
 	for {
 		off := pos
-		kind, id, payload, err := readBlockRecord(r)
+		kind, id, _, payload, digest, headLen, err := readBlockRecordExt(r)
 		if err == io.EOF {
 			break
 		}
@@ -472,13 +486,30 @@ func (bs *blockStore) rebuild() error {
 			pos = off
 			break
 		}
-		head := buildBlockRecordHead(kind, id, payload)
-		recLen := int64(len(head) + len(payload) + 8)
-		switch kind {
+		recLen := int64(headLen + len(payload) + 8)
+		switch kind &^ kindCompressed {
 		case blockRecPut:
-			bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: payloadDigest(payload), kind: blockKindCode(payload)}
+			// 摘要用记录里带的（**逻辑内容**的摘要 —— 压缩记录的落盘字节摘要
+			// 对不上；见 block_compress.go 的不变量）。
+			// 压缩块的真实类型码要从**解压后的前缀**取（payload 是压缩字节）——
+			// 只需解压 128 字节（blockKindCodeCompressed）✓。
+			kindCode := blockKindCode(payload)
+			if kind&kindCompressed != 0 {
+				kindCode = blockKindCodeCompressed(payload) | kindCompressed
+			}
+			bs.index[id] = blockRef{off: off + int64(headLen), n: int32(len(payload)), hash: digest, kind: kindCode}
+			delete(bs.frags, id) // 整块替换分片形态（二者互斥）
 		case blockRecDel:
 			delete(bs.index, id)
+			delete(bs.frags, id)
+		case blockRecFrag:
+			// 片段内容本身不建索引：目录（kind=4）里记着它的位置。
+			bs.recordsWritten++
+		case blockRecDir:
+			// 目录 = 该 id 的最新片段清单（重建后即真值）。
+			if aerr := bs.applyDirRecord(id, payload, off+int64(headLen)); aerr != nil {
+				return aerr
+			}
 		}
 		pos += recLen
 	}
@@ -584,9 +615,10 @@ func (bs *blockStore) delete(id string) error {
 	}
 	if prev, existed := bs.index[id]; existed {
 		bs.staleRecords++
-		bs.liveBytes -= blockRecordSize(id, int(prev.n))
+		bs.liveBytes -= bs.logicalSizeLocked(id, prev)
 	}
 	delete(bs.index, id)
+	delete(bs.frags, id) // 分片形态一起删（见 block_frags.go 的不变量 3）
 	bs.recordsWritten++
 	bs.bytesWritten += int64(len(head) + 8)
 	bs.sortedDirty = true
@@ -627,14 +659,33 @@ func (bs *blockStore) pruneTo(keep map[string]struct{}) error {
 	return nil
 }
 
-// put 追加一条 block（同 id 后续记录覆盖前者）。
+// put 追加一条 block。
+//
+// 分片感知：payload 里有长数组时以**片段**形式落盘（见 block_frags.go），
+// 「只增」的块每次只追加新增的那一段 → 写放大从 150–275× 降到个位数。
+// 没有长数组时走原路径，字节级行为与从前完全一致。
 func (bs *blockStore) put(id string, payload []byte) error {
+	return bs.putAuto(id, payload)
+}
+
+// putWhole 追加一条**整块**（同 id 后续记录覆盖前者）。
+func (bs *blockStore) putWhole(id string, payload []byte) error {
+	// 压缩（写路径）：落盘存压缩字节，**摘要算逻辑内容**（见 block_compress.go
+	// 的不变量）⇒ 压缩不改变 id 的摘要 ⇒ record 里的块集合摘要照常有效 ✓。
+	stored := payload
+	recKind := blockRecPut
+	if blockCompressEnabled {
+		if c, ok := compressBlock(payload); ok {
+			stored = c
+			recKind |= kindCompressed
+		}
+	}
 	off := bs.nBytes
-	head := buildBlockRecordHead(blockRecPut, id, payload)
+	head := buildBlockRecordHead(recKind, id, stored)
 	if _, err := bs.w.Write(head); err != nil {
 		return err
 	}
-	if _, err := bs.w.Write(payload); err != nil {
+	if _, err := bs.w.Write(stored); err != nil {
 		return err
 	}
 	d := payloadDigest(payload)
@@ -643,14 +694,24 @@ func (bs *blockStore) put(id string, payload []byte) error {
 	}
 	if prev, existed := bs.index[id]; existed {
 		bs.staleRecords++
-		bs.liveBytes -= blockRecordSize(id, int(prev.n))
+		// 分片块的索引项 n 是**目录长度**而非逻辑长度 → 用 logicalSizeLocked 取真值。
+		// 它已经覆盖了「整块」与「分片」两种形态，**不要**再单独减一次。
+		bs.liveBytes -= bs.logicalSizeLocked(id, prev)
 	}
-	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: d, kind: blockKindCode(payload)}
-	bs.liveBytes += blockRecordSize(id, len(payload))
+	// 整块写入**替换**分片形态（二者互斥，见 block_frags.go 的不变量 3）。
+	delete(bs.frags, id)
+	kindCode := blockKindCode(payload)
+	if recKind&kindCompressed != 0 {
+		kindCode |= kindCompressed
+	}
+	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(stored)), hash: d, kind: kindCode}
+	bs.liveBytes += blockRecordSize(id, len(stored))
 	bs.recordsWritten++
-	bs.bytesWritten += int64(len(head) + len(payload) + 8)
+	bs.bytesWritten += int64(len(head) + len(stored) + 8)
 	bs.sortedDirty = true
-	bs.nBytes += int64(len(head) + len(payload) + 8)
+	// nBytes 记的是**落盘**位置 ⇒ 必须用压缩后的长度（用 len(payload) 会让
+	// 位置与文件实际内容错位 ⇒ 后续记录的偏移全部指到空洞里 ⇒ 读回失败）。
+	bs.nBytes += int64(len(head) + len(stored) + 8)
 	return nil
 }
 
@@ -755,15 +816,7 @@ func (bs *blockStore) holdsSame(id string, payload []byte) bool {
 }
 
 func (bs *blockStore) read(id string) ([]byte, bool) {
-	ref, ok := bs.index[id]
-	if !ok {
-		return nil, false
-	}
-	buf := make([]byte, ref.n)
-	if _, err := bs.f.ReadAt(buf, ref.off); err != nil {
-		return nil, false
-	}
-	return buf, true
+	return bs.readBlock(id) // 分片感知（见 block_frags.go）
 }
 
 func (bs *blockStore) Len() int { return len(bs.index) }
@@ -1916,18 +1969,7 @@ func (bs *blockStore) actualSetSum(ids []string) (string, error) {
 // readAndVerify 按索引位置读取并校验该块摘要。
 // 校验只覆盖「这一块」，成本与该块大小成正比。
 func (bs *blockStore) readAndVerify(id string) ([]byte, bool) {
-	ref, ok := bs.index[id]
-	if !ok {
-		return nil, false
-	}
-	buf := make([]byte, ref.n)
-	if _, err := bs.f.ReadAt(buf, ref.off); err != nil {
-		return nil, false
-	}
-	if d := payloadDigest(buf); d != ref.hash {
-		return nil, false
-	}
-	return buf, true
+	return bs.readBlockVerified(id) // 分片感知：校验逻辑摘要（见 block_frags.go）
 }
 
 // isAscending 报告切片是否已升序（用于跳过重复排序）。
@@ -1965,30 +2007,47 @@ func lowerBound(a []uint64, v uint64) int {
 // compact：回收被覆盖的废弃记录
 // ---------------------------------------------------------------------------
 
-// compactThreshold 是触发 compact 的废弃**字节**比例阈值。
+// compactThreshold 是「废弃字节占文件总量」的历史阈值（0.20）。
 //
-// 取 0.20：低于此时重写代价大于收益；高于此时文件体积明显偏离有效内容。
-// 实测真实会话（23893 条 / 21551 唯一）废弃率 93%，远超阈值。
+// 保留它是为了**遥测与兼容**：既有测试按它构造数据，日志里也用它描述废弃率。
+// 但它**不再**作为触发条件（见 compactGainRatio）—— 原因见下。
 //
 // 为什么用字节而不是条数（2026-11-08 修正）：废弃的往往是大块 —— 子智能体
 // 卡片在 running 期每个事件整块重写，旧版本全部留在 append-only 文件里。
 // 真实会话实测：3.45GB sidecar，有效内容只有 184MB（字节废弃 94%），
-// 而废弃**条数**占比只有 18.66%（7054/37810）—— 按条数判，永远不回收，
-// 文件只能一路涨到 3.4GB，把「索引丢失后重建」「每次提交的哈希」一起拖慢。
+// 而废弃**条数**占比只有 18.66%（7054/37810）—— 按条数判，永远不回收。
 const compactThreshold = 0.20
 
-// compactCooldownFactor 是压缩后的**冷却**倍率：刚压完的 record，必须先长到
-// 「压后体积 × 该倍率」才允许再压。
+// compactGainRatio 是**回收量 vs 重写量**的判据：只有当「可回收的废弃字节」
+// 至少达到「有效字节（live）」的这个比例时，全量重写才划算。
 //
-// 为什么需要它（2026-11-09 实测事故）：比例判据会被「单次增量刚好推过线」的情况
-// 反复触发 —— 每次提交都把「进行中」的块整块重写（agent 卡片在 running 期每个事件
-// 都重写一遍），一次提交追加 16.1MB，废弃比例 = 16.1/77.2 = 20.85%，刚过 20% 阈值
-// → 触发全量重写（回收 16.1MB 却要重写 77.2MB）→ 回到 61.1MB → 下次提交再来一遍
-// → desktop bridge 每 100ms 压一次，永远停不下来。
+// 为什么换判据（2026-11-11，CHECKPOINT_V3_DESIGN §6.1 P0）：
 //
-// 冷却把「连续压缩」在体积上摊开：压完 → 至少长 50% 才可能再压 → 单次提交的增量
-// 再大也压不动（配合「live 块内容没变就不重写」这个根因修复，增量本身也趋近于 0）。
-const compactCooldownFactor = 1.5
+//	旧判据：废弃**占比** > 20% → 重写全部 live 字节。
+//	问题：占比是相对**总量**的，成本却是相对**live**的 —— 两者不对等。
+//	实测热会话：live=210MB / stale=106MB（占比 33% 过线），
+//	压一次 = 读 315MB + 写 210MB，只为省 106MB → 写放大 3×。
+//	而这个「过线」状态每涨 100MB 就重现一次 → 压缩死循环 → swap 打满 → 全机卡。
+//
+//	新判据：stale ≥ live×0.5。含义是「回收的至少要值回重写的一半」，
+//	于是单次压缩的写放大被**封顶**在 ~5×，且循环不可能持续：
+//	压完后 stale 归零，文件必须重新长到 1.5×live 才可能再压。
+//
+//	它同时**内含**了旧的「1.5× 体积冷却」（stale ≥ live×0.5 ⟺ total ≥ 1.5×live），
+//	所以旧的 compactCooldownFactor 可以退休（2026-11-11 移除）。
+//
+//	小文件 + 高废弃率仍会被收：stale/live 与文件大小无关（比例判据）。
+//	实测既有用例（200 小块 + 1MB 大块写 3 次）：stale=2MB / live=1.01MB → 2 ≥ 0.5 ✓。
+const compactGainRatio = 0.5
+
+// minCompactInterval 是同一 record 两次压缩之间的最小间隔。
+//
+// 为什么需要它：即便满足「收益 > 成本」，一个**高频写入**的会话也可能反复
+// 达到阈值（每次提交都追加大量废弃）。间隔把「即使划算也不连续做」钉死，
+// 避免压缩本身成为 IO 抖动源。
+//
+// 为什么不影响「重启后回收历史垃圾」：lastCompactAt 是进程内状态，重启归零。
+const minCompactInterval = 10 * time.Minute
 
 // compactMinBytes 是 compact 的最小体积门槛：太小的文件重写不划算。
 //
@@ -2014,21 +2073,29 @@ func (bs *blockStore) staleByteRatio() float64 {
 // needsCompact 报告是否应当回收（O(1)）。
 func (bs *blockStore) needsCompact() bool { return bs.needsCompactAt(compactMinBytes.Load()) }
 
+// needsCompactAt 报告是否值得做一次**全量重写**（O(1)）。
+//
+// 判据（P0，2026-11-11）：
+//  1. 文件本身够大（≥ minBytes）；
+//  2. **回收量下限**：可回收的废弃字节 ≥ minBytes（省不下 32MB 就不动）；
+//  3. **收益 > 成本**：stale ≥ live×compactGainRatio（写放大封顶 ~5×）；
+//  4. **最小间隔**：距上次压缩 ≥ minCompactInterval。
 func (bs *blockStore) needsCompactAt(minBytes int64) bool {
 	total := bs.nBytes - int64(len(blockStoreMagic))
 	if total < minBytes {
 		return false
 	}
-	// 冷却：刚压过必须先长够（防止「单次增量刚好推过比例线」造成的连续压缩）。
-	//
-	// 为什么是「长够 1.5 倍」而不是「废弃字节够多」：绝对字节门槛会误伤
-	// 「小文件 + 高废弃率」这种**该收**的情况（实测既有测试：小文件废弃率 66%
-	// 却因体积不足 32MB 不回收 —— 语义坏了）。比例判据保留原样（该收就收），
-	// 循环由冷却来断：压完必须先长到 1.5 倍才允许再压。
-	if bs.lastCompactBytes > 0 && total < int64(float64(bs.lastCompactBytes)*compactCooldownFactor) {
-		return false
+	stale := total - bs.liveBytes
+	if stale < minBytes {
+		return false // 回收量下限：省不下这么多就别动
 	}
-	return bs.staleByteRatio() > compactThreshold
+	if float64(stale) < float64(bs.liveBytes)*compactGainRatio {
+		return false // 收益 < 成本：不值得重写全部 live
+	}
+	if !bs.lastCompactAt.IsZero() && time.Since(bs.lastCompactAt) < minCompactInterval {
+		return false // 最小间隔：避免压缩成为 IO 抖动源
+	}
+	return true
 }
 
 // maybeCompact 在废弃比例超阈值时重写 sidecar，只保留每个 id 的最新版本。
@@ -2084,16 +2151,40 @@ func (bs *blockStore) compact() error {
 		if !okRef {
 			continue
 		}
-		payload := make([]byte, ref.n)
-		if _, err := bs.f.ReadAt(payload, ref.off); err != nil {
-			return err
+		// 分片块：读出目录 → 拼接完整内容（compact 把分片**折叠**成整块；
+		// 下次写入时 putAuto 会重新分片，见 block_frags.go）。
+		var payload []byte
+		if isFragmented(ref.kind) {
+			d, dok := bs.fragDirFor(id, ref)
+			if !dok {
+				return fmt.Errorf("compact: block %s has unreadable fragment dir", id)
+			}
+			payload, dok = bs.readFragDir(d)
+			if !dok {
+				return fmt.Errorf("compact: block %s fragment read failed", id)
+			}
+		} else {
+			payload = make([]byte, ref.n)
+			if _, err := bs.f.ReadAt(payload, ref.off); err != nil {
+				return err
+			}
 		}
 		// 只搬运内容完好的块；校验失败的块保留在原文件里不参与 compact，
 		// 让后续读取时明确报错（而不是把损坏数据搬过去当成好的）。
-		if payloadDigest(payload) != ref.hash {
+		//
+		// **压缩块**：落盘字节是压缩过的 ⇒ 摘要对不上（摘要算逻辑内容）⇒
+		// 这里不解压、不校验（读路径会解压并校验 ⇒ 损坏照样被挡住 ✓），
+		// 只是**字节级搬运**（不解压 ⇒ compact 不会因为压缩而变慢 ✓）。
+		// 压缩标志只对「整块」成立：分片块在 compact 里被**折叠成整块**，
+		// 它的内容是逻辑的（readFragDir）⇒ 落盘不压缩 ⇒ 标志要清掉。
+		compressed := isCompressed(ref.kind) && !isFragmented(ref.kind)
+		recKind := blockRecPut
+		if compressed {
+			recKind |= kindCompressed
+		} else if payloadDigest(payload) != ref.hash {
 			return fmt.Errorf("compact: block %s is corrupt, refusing to rewrite", id)
 		}
-		head := buildBlockRecordHead(blockRecPut, id, payload)
+		head := buildBlockRecordHead(recKind, id, payload)
 		payloadOff := pos + int64(len(head))
 		if _, err := w.Write(head); err != nil {
 			return err
@@ -2104,7 +2195,12 @@ func (bs *blockStore) compact() error {
 		if _, err := w.Write(ref.hash[:]); err != nil {
 			return err
 		}
-		newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: ref.hash}
+		// 类型码从**内容**取（压缩字节要解压前缀）✓
+		kindCode := blockKindCode(payload)
+		if compressed {
+			kindCode = blockKindCodeCompressed(payload) | kindCompressed
+		}
+		newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: ref.hash, kind: kindCode}
 		pos += int64(len(head)+len(payload)) + 8
 	}
 	if err := w.Flush(); err != nil {
