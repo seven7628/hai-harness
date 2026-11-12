@@ -20,13 +20,13 @@
 //       与 PDF 那条同形（⑥b）
 //
 // 用法：cd desktop/app && node e2e/verify_artifacts_card.mjs
-// 退出码：全通过 0；任一断言失败非 0。
+// 退出码：全通过 0；任一断言失败 1；前置不满足（端口被占 / 探针服务没起来）2。
 import { chromium } from 'playwright'
 import { spawn } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import net from 'net'
 import fs from 'fs'
+import { exitCodeOf, isPrecondition, waitProbePage } from './_serve.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
@@ -36,20 +36,10 @@ let pass = 0
 const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
 const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); ok(m) }
 
-async function waitPort(port, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const up = await new Promise((resolve) => {
-      const s = net.connect({ port, host: 'localhost' })
-      const timer = setTimeout(() => { s.destroy(); resolve(false) }, 500)
-      s.on('connect', () => { clearTimeout(timer); s.destroy(); resolve(true) })
-      s.on('error', () => { s.destroy(); resolve(false) })
-    })
-    if (up) return
-    if (Date.now() > deadline) throw new Error('vite 未就绪')
-    await new Promise((r) => setTimeout(r, 250))
-  }
-}
+// 就绪判据 = waitProbePage（e2e/_serve.mjs）：**这张探针页真的回了 200 且带本脚本的标记**，
+// 而不是「端口上有人在听」。固定端口 4188 一旦挂着别人（F46：残留在 5199 的那台 vite 就是这样），
+// 旧写法会把「连上了别人的服务器」读成测试失败 —— 现在是前置不满足，退出码 2。
+const PROBE_MARKER = '<title>artifacts probe</title>'
 
 // 临时探针页：挂真实 ArtifactCard 组件 + 真实 index.css（跑完删除）。
 // store 需要的最小状态用 setState 直接注入（workspace 用于相对路径绝对化）。
@@ -63,7 +53,16 @@ import { createRoot } from 'react-dom/client'
 import { ArtifactCard } from '../../src/components/ArtifactCard'
 import RightPanel from '../../src/components/RightPanel'
 import { useAppStore } from '../../src/store/useAppStore'
+// ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45）：RightPanel 里 file/git/web 三个面板
+// 都是 getSurface(kind)?.render(...) ?? 兜底，少了这一行，「点预览 → 文件真的渲染出来」证明的
+// 是 \`??\` 兜底分支，不是 provider。下面的 __surfaces 自检让这件事当场可断言。
+import '../../src/surfaces/builtin'
+import { getSurface } from '../../src/surfaces/registry'
 import '../../src/index.css'
+
+// 仪器自检：把「注册表里到底有没有这几个 kind」暴露给 e2e（断言见脚本里的「仪器」一节）。
+;(window as unknown as { __surfaces: Record<string, boolean> }).__surfaces =
+  Object.fromEntries(['file', 'git', 'web'].map((k) => [k, !!getSurface(k)]))
 
 // workspace 用于相对路径绝对化（点击复制/预览的目标路径）
 useAppStore.setState({ workspace: '/Users/dev/ws' })
@@ -163,7 +162,7 @@ const TRUNC = {
 const EMPTY = { items: [] }
 
 async function main() {
-  await waitPort(PORT)
+  await waitProbePage(PROBE_URL, { marker: PROBE_MARKER, probe: 'e2e:artifacts', child: server })
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 900, height: 1000 } })
   const errs = []
@@ -177,6 +176,13 @@ async function main() {
   })
   await page.goto(PROBE_URL)
   await page.waitForSelector('[data-case="single"] .artifacts-card')
+
+  // ── 仪器自检：探针走的是被测那条路（04 F45）──
+  // 少了 surfaces/builtin → getSurface() 全 undefined → RightPanel 静默走 `??` 兜底，
+  // 这时「预览渲染出内容」验的是兜底组件，不是 provider。坏掉的仪器必须当场变红。
+  const surfaces = (await page.evaluate(() => window.__surfaces)) ?? {}
+  assert(surfaces.file && surfaces.git && surfaces.web,
+    `surface provider 已注册（file/git/web = ${JSON.stringify(surfaces)}）`)
 
   const q = (sel, caseName = 'single') => page.locator(`[data-case="${caseName}"] ${sel}`)
   // 折叠可见行数：.art-more 包裹层 display:none 的行不计
@@ -655,7 +661,8 @@ main().then(() => {
   cleanup()
   process.exit(0)
 }).catch((e) => {
-  console.error('\n❌ ' + (e?.message ?? e))
+  const pre = isPrecondition(e)
+  console.error(`\n${pre ? '⛔ 前置不满足（退出码 2，不是测试失败）' : '❌'} ` + (e?.message ?? e))
   cleanup()
-  process.exit(1)
+  process.exit(exitCodeOf(e))
 })

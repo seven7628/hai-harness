@@ -40,31 +40,20 @@
 // 用法：node e2e/verify_auto_open_visual.mjs
 import { spawn } from 'child_process'
 import fs from 'node:fs'
-import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
+import { isPrecondition, waitProbePage } from './_serve.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
 const PORT = 5199
 
-// 照抄 verify_artifacts_card.mjs 的 waitPort（已在本仓库验证可用）：用 host:'localhost'
-// 让 Node 按系统解析顺序试 IPv4/IPv6 —— 直连 127.0.0.1 会在 vite 只绑 ::1 时永远连不上。
-async function waitPort(port, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const up = await new Promise((resolve) => {
-      const s = net.connect({ port, host: 'localhost' })
-      const timer = setTimeout(() => { s.destroy(); resolve(false) }, 500)
-      s.on('connect', () => { clearTimeout(timer); s.destroy(); resolve(true) })
-      s.on('error', () => { clearTimeout(timer); s.destroy(); resolve(false) })
-    })
-    if (up) return
-    if (Date.now() > deadline) throw new Error('vite 未就绪')
-    await new Promise((r) => setTimeout(r, 250))
-  }
-}
+// 端口就绪 + 归属自检（e2e/_serve.mjs 的 waitProbePage）：固定端口 5199 上可能挂着别人
+// 的服务（F46 的实测就是这台的 5199）—— 撞上时必须报「前置不满足」并退出 2，不许连上去
+// 把 waitForFunction 超时读成「代码坏了」。判据取本脚本探针页自己的 <title>。
+const PROBE_URL = `http://localhost:${PORT}/e2e/_autoprobe_run/index.html`
+const PROBE_MARKER = '<title>auto-open probe</title>'
 
 // 探针页：真实 store（含 start() 建链）+ 真实 RightPanel（验证「切到文件栏」是真的切了）。
 //
@@ -184,21 +173,17 @@ function check(label, cond, detail = '') {
   else { fails.push(label); console.log(`  ❌ ${label} ${detail}`) }
 }
 
+let code = 0
 try {
-  await waitPort(PORT)
-  // 端口归属自检：waitPort 只能证明「有人在听」，证明不了「听的是本脚本刚起的那个」。
+  // 端口就绪 + 归属自检：waitPort 只能证明「有人在听」，证明不了「听的是本脚本刚起的那个」。
   // 2026-11 实测踩到过：一个残留在 5199 的 vite（**另一棵 worktree** 的服务）让本脚本连上了
-  // 别人的模块图 → 探针页 404 → 一直等不到 __store，报出来的却是 waitForFunction 超时，
-  // 看起来像代码坏了。判据取本脚本生成的探针页自己的 <title>。
-  const ownerHtml = await fetch(`http://localhost:${PORT}/e2e/_autoprobe_run/index.html`).then((r) => r.text()).catch(() => '')
-  if (!ownerHtml.includes('<title>auto-open probe</title>')) {
-    throw new Error(`端口 ${PORT} 上响应的不是本脚本的探针页（waitPort 骗过了自己）—— 先清掉占用该端口的进程`)
-  }
+  // 别人的模块图 → 探针页 404 → 一直等不到 __store，报出来的却是 waitForFunction 超时。
+  await waitProbePage(PROBE_URL, { marker: PROBE_MARKER, probe: 'e2e:auto', child: server })
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 1100, height: 900 } })
   const errs = []
   page.on('pageerror', (e) => errs.push('pageerror: ' + e.message))
-  await page.goto(`http://localhost:${PORT}/e2e/_autoprobe_run/index.html`, { waitUntil: 'domcontentloaded' })
+  await page.goto(PROBE_URL, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(() => !!window.__store, null, { timeout: 20000 })
   await page.waitForTimeout(800)
 
@@ -433,9 +418,17 @@ try {
 
   check('无页面错误', errs.length === 0, errs.join('; '))
   await browser.close()
+} catch (e) {
+  // 前置不满足 ≠ 断言失败：退出码 2（00 §4.6：红必须落到具体机制，不许含糊成「测试挂了」）。
+  if (!isPrecondition(e)) throw e
+  console.error(`\n⛔ 前置不满足（退出码 2，不是测试失败）：${e.message}`)
+  code = 2
 } finally {
   cleanup()
 }
 
-console.log(`\n${fails.length === 0 ? 'ALL PASS' : `FAILED (${fails.length}): ${fails.join('; ')}`}`)
-process.exit(fails.length === 0 ? 0 : 1)
+if (code === 0) {
+  console.log(`\n${fails.length === 0 ? 'ALL PASS' : `FAILED (${fails.length}): ${fails.join('; ')}`}`)
+  code = fails.length === 0 ? 0 : 1
+}
+process.exit(code)

@@ -62,6 +62,9 @@ import { createRoot } from 'react-dom/client'
 import LeftPanel from '../../src/components/LeftPanel'
 import CenterPanel from '../../src/components/CenterPanel'
 import RightPanel from '../../src/components/RightPanel'
+// ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45）：RightPanel 三个内容面板都是
+// getSurface(kind)?.render(...) ?? 兜底。少了这一行，本探针右栏验的一直是兜底分支。
+import '../../src/surfaces/builtin'
 import { useAppStore, dispatchEvent, hydrateCheckpoint } from '../../src/store/useAppStore'
 import { aggregateFileActivity } from '../../src/lib/fileActivity'
 import { withAgentToolBlocks } from '../../src/lib/agentSession'
