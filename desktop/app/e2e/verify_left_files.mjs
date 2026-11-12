@@ -12,6 +12,7 @@
 // 用法：cd desktop/app && npm run build && node e2e/verify_left_files.mjs
 // 退出码：全通过 0；任一断言失败非 0。
 import { chromium } from 'playwright'
+import { freePort, waitHttp } from './_serve.mjs'
 import { spawn } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -19,7 +20,8 @@ import net from 'net'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
-const PORT = 4191
+// 端口由内核分配（见 e2e/_serve.mjs 的注释）：固定端口在链里会撞上一个还没退干净的服务器。
+const PORT = Number(process.env.PORT) || await freePort()
 const URL_BASE = `http://localhost:${PORT}/`
 
 // 行内操作按钮相对行中心的垂直偏差（px）：0 = 完全居中（此前 top:4px 实测偏高 1.7px）
@@ -59,6 +61,8 @@ process.on('exit', stopServer)
 
 async function main() {
   await waitPort(PORT)
+  // 端口可连只说明**有东西**在监听；再确认这张探针页真能开（子进程退出即失败）
+  await waitHttp(URL_BASE, { child: server })
   const browser = await chromium.launch()
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
   const errs = []
@@ -189,19 +193,51 @@ async function main() {
   await dragPanel(-90)
   assert(await page.locator('.ws-head .ws-more').count() === wideRows, '拖回窄宽度：重新收成「⋯」')
 
-  // ⑧ MCP 设置页：项目维度查看
+  // ⑧ MCP 设置页：两级形态（2026-09-21 改造）——一级 = 来源卡片（全局 + 每个项目一张），
+  //    二级 = 详情（全局 = 用户配置层 + 全局服务器；项目 = 该项目的配置层 + 只读/可编辑服务器）。
+  //
+  // 历史：这里是**单页三层**（.mcp-layers 里 3 行 + .mcp-user-h 分区标题）。改造后
+  // 那套 markup 只在**项目详情**里存在（且层数 = 该项目的层），全局是一个独立详情页。
+  // 脚本没跟上 → 进 MCP 页等 .mcp-layers 等到超时（F37 追补记录的 drift 之一）。
   await page.locator('.nav-item', { hasText: '设置' }).click()
   await page.waitForSelector('.settings-nav-item')
   await page.locator('.settings-nav-item', { hasText: 'MCP' }).click()
-  await page.waitForSelector('.mcp-layers')
-  const layerTexts = await page.locator('.mcp-layer').allInnerTexts()
-  assert(layerTexts.length === 3, `配置来源列出三层（实得 ${layerTexts.length}）`)
-  assert(layerTexts.some((s) => s.includes('用户')), '用户层标注「用户」')
-  assert(layerTexts.filter((s) => s.includes('项目')).length >= 1, '项目层标注「项目」')
-  const projRows = await page.locator('.mcp-proj .mcp-server').allInnerTexts()
-  assert(projRows.some((s) => s.includes('repo-tools')), `项目层服务器只读展示（实得 ${JSON.stringify(projRows)}）`)
-  assert(await page.locator('.mcp-user-h').count() === 1, '用户配置分区标题存在（与项目层区分）')
+  await page.waitForSelector('.src-card')
+
+  // 一级：全局 1 张 + 两个已绑定工作区各 1 张
+  const sourceCards = await page.locator('.src-card .src-card-title').allInnerTexts()
+  assert(sourceCards.length === 3, `一级 = 全局 + 每个项目一张来源卡（实得 ${sourceCards.length}：${JSON.stringify(sourceCards)}）`)
+  assert(await page.locator('.src-sec').count() === 2, '两个分区标题：全局 / 项目')
+  assert(await page.locator('.mcp-layers, .mcp-layer').count() === 0, '一级列表页不直接铺配置层（层级下移到详情页）')
   await page.screenshot({ path: process.env.SHOT_MCP || '/tmp/left-files-mcp.png' })
+
+  // 二级（全局）：用户配置层文件名 + 全局服务器（mock settings.mcpServers = github / memory）
+  await page.locator('.src-card').first().click()
+  await page.waitForSelector('.detail-head')
+  const userLayers = await page.locator('.mcp-layer-path').allInnerTexts()
+  assert(userLayers.length === 1 && userLayers[0].endsWith('.go-code/settings.json'),
+    `全局详情只列用户配置文件（实得 ${JSON.stringify(userLayers)}）`)
+  const userServers = await page.locator('.mcp-server .mcp-name').allInnerTexts()
+  assert(userServers.includes('github') && userServers.includes('memory'),
+    `全局服务器列出（实得 ${JSON.stringify(userServers)}）`)
+
+  // 二级（项目 workspace）：本项目自己的配置层（.mcp.json + .go-code/settings.json）+ 服务器
+  await page.locator('.detail-back').click()
+  await page.waitForSelector('.src-card')
+  await page.locator('.src-card', { hasText: 'workspace' }).first().click()
+  await page.waitForSelector('.mcp-layers')
+  const layerTexts = await page.locator('.mcp-layer-path').allInnerTexts()
+  assert(layerTexts.length === 2, `项目详情的配置层 = 该项目的两个文件（实得 ${layerTexts.length}：${JSON.stringify(layerTexts)}）`)
+  assert(layerTexts.some((p) => p.endsWith('.mcp.json')) && layerTexts.some((p) => p.endsWith('.go-code/settings.json')),
+    '两层分别是 .mcp.json（随仓库分发）与 .go-code/settings.json（本项目配置）')
+  const projRows = await page.locator('.mcp-server .mcp-name').allInnerTexts()
+  assert(projRows.includes('repo-tools') && projRows.includes('scratch-notes'),
+    `项目层服务器列出（实得 ${JSON.stringify(projRows)}）`)
+  const readOnlyRows = await page.locator('.mcp-server.readonly .mcp-name').allInnerTexts()
+  assert(readOnlyRows.includes('repo-tools') && !readOnlyRows.includes('scratch-notes'),
+    `.mcp.json 里的服务器只读、本项目 settings 里的可编辑（只读 ${JSON.stringify(readOnlyRows)}）`)
+  assert(await page.locator('.mcp-user-h').count() === 0, '旧的单页用户分区标题（.mcp-user-h）已退役')
+  await page.screenshot({ path: process.env.SHOT_MCP_PROJ || '/tmp/left-files-mcp-project.png' })
 
   const realErrs = errs.filter((e) => !/favicon/.test(e))
   assert(realErrs.length === 0, `控制台 0 报错（实得 ${realErrs.length}：${realErrs.slice(0, 2).join(' | ')}）`)
