@@ -2068,6 +2068,26 @@ const BASE = {
       "review": "passed",
       "note": "§6.1 第 2 条后半（BR-08）。首轮独立 Review task-8creqtfp CHANGES_REQUESTED B1：迁移覆盖方向反了（settings 旧明文覆盖 keys.json 新 key）+ bridge settings 明文顶掉 payload 注入值；4801b62 修复后 delta Review task-vxynsptc PASS。合并：975204e。",
       "reviewNote": "task-vxynsptc PASS（4801b62）：keys-store 19/19、settings-store 38/38、TSC/ESLint 通过、全量 bridge 干净 HOME 105.2s 通过；变异 A（去掉 keys.json 优先）与 B（去掉 !keyInjected）均精确变红，A2（无需救回也删 settings 明文）有测试钉住。非阻塞：① 显式清 key 后 reload_settings 仍可能被 settings 残留明文复活（基线已有，触发需迁移未完成；建议 main.ts 的 provider:save/remove 顺手删 legacy 明文）；② 「全部可解时 keys.json 不重写」实现正确但无测试钉住（变异 A3 存活）；③ main.ts 的迁移重试注释仍写「下一次 provider:save」；④ stt.api_key 与 MCP env/headers 仍随 settings 明文下发，需后续 keys.json 化。"
+    },
+    {
+      "id": "P5-10",
+      "phase": "P5",
+      "title": "真实 Provider Hub 端到端评测：opencode/deepseek-v4.1-flash，7 场景（DM/工具/审批/@all/@指定/handoff/项目会话）",
+      "deps": [
+        "P5-08",
+        "P5-09"
+      ],
+      "files": [
+        "desktop/bridge/hub_eval_real_test.go",
+        "docs/agent-hub/REAL-E2E.md"
+      ],
+      "acceptance": "新增默认 skip、HAI_EVAL_HUB_REAL=1 才跑的真实 Provider Hub E2E；用 opencode/deepseek-v4.1-flash 覆盖单 DM、bash 工具、hitl 审批、群 @all、群 @指定、@A→@B handoff、@指定智能体自主 workspace_create/session_create/session_send 且项目会话真实跑出 llm_end/agent_end 与 completed 任务；报告记录每场景耗时/LLM usage/tool/approval/handoff/project 证据，原始 events 落盘；真实 settings 只读、临时 HOME 隔离、key 不入报告/事件/commit。独立 Review PASS（含真实复跑与失败路径）。",
+      "tests": "go test ./desktop/bridge -run TestHubRealE2E -count=1（默认 skip）&& HAI_EVAL_HUB_REAL=1 HAI_EVAL_HUB_PROVIDER=opencode HAI_EVAL_HUB_MODEL=deepseek-v4.1-flash HAI_EVAL_HUB_REPORT=/tmp/hub-real-e2e/report.json go test ./desktop/bridge -run TestHubRealE2E -count=1 -v -timeout 20m",
+      "commit": "66228ce",
+      "status": "done",
+      "review": "passed",
+      "note": "真实 Provider 端到端（不是 fake loop）。首轮全量运行 6/7（6_handoff 模型未按提示调用 handoff，报告 fail，非静默 skip）；稳定化后 7/7。独立 Review task-xrs5np2c 亲自复跑 7/7（87.5s，22 LLM calls），并验证门控 skip、provider 缺失 skip、bogus model 失败路径 status=fail、真实 settings 哈希不变、临时目录清理、key/base_url 零泄漏。初版测试文件在 merge e518801 中被并行任务误收，66228ce 是最终提交。",
+      "reviewNote": "task-xrs5np2c PASS（66228ce；HEAD 后续只有 P5-09 B1 合入与看板 docs，测试 blob 未变）：DM 强断言 human+agent 两条；tool/approval 按 run/tool id 归属；@all 双成员 + 单 round + 禁 @ 接龙；@指定 A 零新消息/B +1；handoff 四阶段（事件 pending_ack→LoadHandoff→handoff_ack→accepted→B 回复）；场景 7 五工具逐个断言参数 + 目录存在且在工作区根内 + m.get/listSessions 可查 + 按 sid 过滤 llm_end/agent_end + 账本 completed/delivered + Result.Summary=HAI_PROJECT_SESSION_OK。报告 calls=19 与 19 条 llm_end 对齐；成本 0 已注明上游未上报、不等于免费。非阻塞：① 门控内 skip 会覆盖默认真报告，建议仅在显式 HAI_EVAL_HUB_REPORT 时写或写 report.skip.json；② HAI_EVAL_HUB_ONLY 全不匹配会 pass+0 场景，建议置 fail；③ handoff 缺「B 回复 seq > accepted message_seq」时序断言；④ 审批走 bs.s.Approve，未覆盖 UI approve 命令；⑤ 迟到 llm_end/tool_run_end 未按 session/run 过滤；⑥ 180s×7 与 -timeout 20m 余量偏紧；⑦ 细节：setActive 失败写 SkipReason、totals 无成本口径注记、场景 panic 可能被记 pass、SIGKILL 时临时 settings 残留 key、commit message 有字面 \n。"
     }
   ],
   "deferred": [
@@ -3102,6 +3122,12 @@ const BASE = {
       "commit": "eea9d76 + 4801b62",
       "review": "passed",
       "reviewNote": "task-vxynsptc PASS（4801b62）：keys-store 19/19、settings-store 38/38、TSC/ESLint 通过、全量 bridge 干净 HOME 105.2s 通过；变异 A（去掉 keys.json 优先）与 B（去掉 !keyInjected）均精确变红，A2（无需救回也删 settings 明文）有测试钉住。非阻塞：① 显式清 key 后 reload_settings 仍可能被 settings 残留明文复活（基线已有，触发需迁移未完成；建议 main.ts 的 provider:save/remove 顺手删 legacy 明文）；② 「全部可解时 keys.json 不重写」实现正确但无测试钉住（变异 A3 存活）；③ main.ts 的迁移重试注释仍写「下一次 provider:save」；④ stt.api_key 与 MCP env/headers 仍随 settings 明文下发，需后续 keys.json 化。"
+    },
+    "P5-10": {
+      "status": "done",
+      "commit": "66228ce",
+      "review": "passed",
+      "reviewNote": "task-xrs5np2c PASS（66228ce；HEAD 后续只有 P5-09 B1 合入与看板 docs，测试 blob 未变）：DM 强断言 human+agent 两条；tool/approval 按 run/tool id 归属；@all 双成员 + 单 round + 禁 @ 接龙；@指定 A 零新消息/B +1；handoff 四阶段（事件 pending_ack→LoadHandoff→handoff_ack→accepted→B 回复）；场景 7 五工具逐个断言参数 + 目录存在且在工作区根内 + m.get/listSessions 可查 + 按 sid 过滤 llm_end/agent_end + 账本 completed/delivered + Result.Summary=HAI_PROJECT_SESSION_OK。报告 calls=19 与 19 条 llm_end 对齐；成本 0 已注明上游未上报、不等于免费。非阻塞：① 门控内 skip 会覆盖默认真报告，建议仅在显式 HAI_EVAL_HUB_REPORT 时写或写 report.skip.json；② HAI_EVAL_HUB_ONLY 全不匹配会 pass+0 场景，建议置 fail；③ handoff 缺「B 回复 seq > accepted message_seq」时序断言；④ 审批走 bs.s.Approve，未覆盖 UI approve 命令；⑤ 迟到 llm_end/tool_run_end 未按 session/run 过滤；⑥ 180s×7 与 -timeout 20m 余量偏紧；⑦ 细节：setActive 失败写 SkipReason、totals 无成本口径注记、场景 panic 可能被记 pass、SIGKILL 时临时 settings 残留 key、commit message 有字面 \n。"
     }
   },
   "reviewGate": {
