@@ -1147,7 +1147,15 @@ func (m *manager) hubSend(c command) {
 	}
 	text := strings.TrimSpace(str(c.Payload, "text"))
 	clientMsgID := str(c.Payload, "client_msg_id")
-	if text == "" {
+	// 附件先解析+校验：超限/坏 data URL 直接拒绝，不落索引也不进模型上下文。
+	atts, err := hubParseAttachments(c.Payload)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	// 正文可以为空的唯一情况是「带了图片」：纯图消息是合法输入，纯文字消息
+	// 的既有校验保持不变（文件附件只做引用，仍需正文说明）。
+	if text == "" && !hubHasImageAttachment(atts) {
 		m.resp(c, false, "text 不能为空", nil)
 		return
 	}
@@ -1167,9 +1175,10 @@ func (m *manager) hubSend(c command) {
 		return
 	}
 	msg := &agenthub.Message{
-		Kind:   agenthub.KindText,
-		Sender: agenthub.Sender{Kind: agenthub.SenderHuman},
-		Text:   text,
+		Kind:        agenthub.KindText,
+		Sender:      agenthub.Sender{Kind: agenthub.SenderHuman},
+		Text:        hubDisplayText(text, atts),
+		Attachments: atts,
 	}
 	if clientMsgID != "" {
 		msg.Refs = map[string]any{"client_msg_id": clientMsgID}
@@ -1177,7 +1186,7 @@ func (m *manager) hubSend(c command) {
 	// 先把消息交给会话（Ask 只入队，失败会立刻返回），成功后才落索引：
 	// 反过来的话 Ask 失败会留下「索引里有、上下文里没有」的消息，重试又被
 	// client_msg_id 幂等挡掉 —— 用户看到已发送，模型永远收不到（P1-04 复核）。
-	if err := bs.s.Ask(ctx, core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})); err != nil {
+	if err := bs.s.Ask(ctx, core.NewUserMessage(hubUserContentBlocks(text, atts)...)); err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}

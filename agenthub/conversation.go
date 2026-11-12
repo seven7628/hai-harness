@@ -125,17 +125,20 @@ type Wake struct {
 	GroupID GroupID `json:"group_id"`
 	// ConversationID 是入队时所处对话的 id：投递方（bridge）在真正投递前用它
 	// 确认「这条 wake 还属于当前对话」，停止/人类插话开新对话后旧 wake 立即失效。
-	ConversationID string    `json:"conversation_id,omitempty"`
-	Sender         AgentID   `json:"sender,omitempty"`
-	Human          bool      `json:"human,omitempty"` // 人类发送：不计 PairCount/不算循环
-	Target         AgentID   `json:"target"`
-	Text           string    `json:"text,omitempty"`
-	Depth          int       `json:"depth"`
-	Turn           int       `json:"turn"`
-	TriggerSeq     int64     `json:"trigger_seq,omitempty"`
-	RoundID        string    `json:"round_id,omitempty"`
-	Fingerprint    string    `json:"fingerprint,omitempty"`
-	EnqueuedAt     time.Time `json:"enqueued_at"`
+	ConversationID string  `json:"conversation_id,omitempty"`
+	Sender         AgentID `json:"sender,omitempty"`
+	Human          bool    `json:"human,omitempty"` // 人类发送：不计 PairCount/不算循环
+	Target         AgentID `json:"target"`
+	Text           string  `json:"text,omitempty"`
+	// Attachments 是触发消息的附件（人类群消息的图片）。群唤醒要把它拼进模型
+	// 上下文（见 bridge wakeGroupAgent）；智能体之间的 @ 唤醒留空。
+	Attachments []Attachment `json:"attachments,omitempty"`
+	Depth       int          `json:"depth"`
+	Turn        int          `json:"turn"`
+	TriggerSeq  int64        `json:"trigger_seq,omitempty"`
+	RoundID     string       `json:"round_id,omitempty"`
+	Fingerprint string       `json:"fingerprint,omitempty"`
+	EnqueuedAt  time.Time    `json:"enqueued_at"`
 	// ReadyAt 是可跑时刻：max(入队时间, 上一次唤醒 + 冷却)。冷却只作用于
 	// **连续两次智能体唤醒之间**，所以新对话的第一个 wake 永远是「现在就绪」。
 	ReadyAt time.Time `json:"ready_at"`

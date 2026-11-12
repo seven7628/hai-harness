@@ -285,7 +285,9 @@ func (m *manager) wakeGroupRound(g *agenthub.Group, round agenthub.Round, trigge
 			GroupID: g.ID, ConversationID: m.hubConversationView(g.ID).ID,
 			Sender: trigger.Sender.AgentID, Human: trigger.Sender.Kind == agenthub.SenderHuman,
 			Target: target, Text: trigger.Text, Depth: depth, Turn: turn,
-			TriggerSeq: trigger.Seq, RoundID: round.ID, EnqueuedAt: time.Now(),
+			// 附件随 wake 走：群会话要在 hidden 快照之后把图片拼进模型上下文。
+			Attachments: trigger.Attachments,
+			TriggerSeq:  trigger.Seq, RoundID: round.ID, EnqueuedAt: time.Now(),
 		}
 		if err := m.wakeGroupAgent(ctx, st, g, w); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", target, err))
@@ -342,10 +344,14 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	if text == "" {
 		text = "（群消息）"
 	}
-	msg := core.NewUserMessage(
-		core.Content{Type: core.ContentTypeHubGroupWake, Content: hidden},
-		core.Content{Type: core.ContentTypeText, Content: text},
-	)
+	// 隐藏快照块 → 触发消息正文 → 图片附件块。文件附件不进上下文：前端已把
+	// `@路径` 拼进正文，模型按正文自行读取（与主会话 @ 文件同语义）。
+	blocks := []core.Content{
+		{Type: core.ContentTypeHubGroupWake, Content: hidden},
+		{Type: core.ContentTypeText, Content: text},
+	}
+	blocks = append(blocks, hubAttachmentImageBlocks(w.Attachments)...)
+	msg := core.NewUserMessage(blocks...)
 	if err := bs.s.Ask(ctx, msg); err != nil {
 		return err
 	}

@@ -76,23 +76,26 @@ type TurnContext struct {
 // Seq 只在群内有意义；DM 的索引与未读由 bridge 的 dm 索引维护。
 // Context 只出现在回复消息上；流式草稿（hub_message_delta）不落成 Message。
 type Message struct {
-	Seq        int64          `json:"seq"`
-	ID         string         `json:"id"`
-	GroupID    GroupID        `json:"group_id,omitempty"` // DM 为空
-	RoundID    string         `json:"round_id,omitempty"`
-	Context    *TurnContext   `json:"context,omitempty"`
-	Sender     Sender         `json:"sender"`
-	Kind       MessageKind    `json:"kind"`
-	Text       string         `json:"text,omitempty"`
-	Mentions   []AgentID      `json:"mentions,omitempty"`
-	MentionAll bool           `json:"mention_all,omitempty"`
-	ReplyToSeq int64          `json:"reply_to_seq,omitempty"`
-	Intent     Intent         `json:"intent,omitempty"`
-	TaskID     TaskID         `json:"task_id,omitempty"`
-	Turn       int            `json:"turn,omitempty"`
-	Visibility Visibility     `json:"visibility"`
-	Refs       map[string]any `json:"refs,omitempty"`
-	CreatedAt  time.Time      `json:"created_at"`
+	Seq     int64        `json:"seq"`
+	ID      string       `json:"id"`
+	GroupID GroupID      `json:"group_id,omitempty"` // DM 为空
+	RoundID string       `json:"round_id,omitempty"`
+	Context *TurnContext `json:"context,omitempty"`
+	Sender  Sender       `json:"sender"`
+	Kind    MessageKind  `json:"kind"`
+	Text    string       `json:"text,omitempty"`
+	// Attachments 是这条消息的图片/文件引用。图片以 data URL 持久化 —— 前端刷新
+	// 后仍能直接渲染，不用回读会话 jsonl；文件只是路径引用（后端不读内容）。
+	Attachments []Attachment   `json:"attachments,omitempty"`
+	Mentions    []AgentID      `json:"mentions,omitempty"`
+	MentionAll  bool           `json:"mention_all,omitempty"`
+	ReplyToSeq  int64          `json:"reply_to_seq,omitempty"`
+	Intent      Intent         `json:"intent,omitempty"`
+	TaskID      TaskID         `json:"task_id,omitempty"`
+	Turn        int            `json:"turn,omitempty"`
+	Visibility  Visibility     `json:"visibility"`
+	Refs        map[string]any `json:"refs,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
 }
 
 // OwnerOnlyPlaceholder 是 owner-only 消息进入其他智能体上下文时的替身，绝不泄露正文。
@@ -148,6 +151,7 @@ func (m Message) Redacted(isHuman bool) Message {
 		return m
 	}
 	m.Text = OwnerOnlyPlaceholder
+	m.Attachments = nil // owner-only 附件（图片 data URL/文件名）同样不能泄给其他读方
 	m.Refs = nil
 	m.Mentions = nil
 	m.MentionAll = false

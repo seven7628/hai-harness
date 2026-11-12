@@ -563,7 +563,14 @@ func (m *manager) hubGroupSend(c command) {
 	}
 	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
 	text := strings.TrimSpace(str(c.Payload, "text"))
-	if text == "" {
+	// 附件协议与 DM 同一条：先解析+校验（超限不写日志、不路由）。
+	atts, err := hubParseAttachments(c.Payload)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	// 群消息允许只有附件（纯图）；正文与附件都为空才拒绝。
+	if text == "" && len(atts) == 0 {
 		m.resp(c, false, "text 不能为空", nil)
 		return
 	}
@@ -594,7 +601,10 @@ func (m *manager) hubGroupSend(c command) {
 	}
 	msg := &agenthub.Message{
 		GroupID: g.ID, Kind: agenthub.KindText,
-		Sender: agenthub.Sender{Kind: agenthub.SenderHuman}, Text: text,
+		Sender: agenthub.Sender{Kind: agenthub.SenderHuman},
+		// 纯图消息存 `[图片]`：快照/perception 以正文非空判「可用消息」，
+		// 占位符让附件消息像普通消息一样进入上下文；路由仍用原始 text。
+		Text: hubDisplayText(text, atts), Attachments: atts,
 	}
 	if id := strings.TrimSpace(str(c.Payload, "client_msg_id")); id != "" {
 		msg.Refs = map[string]any{"client_msg_id": id}
