@@ -114,7 +114,9 @@ func TestCompactTriggeredByBytesNotRecords(t *testing.T) {
 		}
 	}
 	// 一个 1MB 的大块写 3 次：条数占比 <1%，字节占比 >60%。
-	big := `{"id":1000000,"kind":"agent","status":"done","text":"` + strings.Repeat("y", 1<<20) + `"}`
+	// 内容必须**不可压缩**（见 incompressible 的注释）：这个测试量的是
+	// 「按字节占比触发 compact」这条判据，压缩会把字节量改掉 ⇒ 量不到判据。
+	big := `{"id":1000000,"kind":"agent","status":"done","text":"` + incompressible(1<<20) + `"}`
 	for i := 0; i < 3; i++ {
 		if err := bs.put("1000000", []byte(big+" ")); err != nil {
 			t.Fatal(err)
@@ -268,4 +270,25 @@ func truncateForLog(b []byte) string {
 		return string(b)
 	}
 	return string(b[:n]) + "…"
+}
+
+// incompressible 造一段**不可压缩**的文本（伪随机字节）。
+//
+// 为什么需要（2026-11-11）：sidecar 起逐块压缩后（block_compress.go），
+// 用 `strings.Repeat("x", n)` 造的内容会被压掉 —— 于是「按字节口径」的测试
+// （追加语义、compact 的收益判据）量到的体积对不上。
+//
+// 这些测试的意图是**判据**而不是压缩器，所以它们必须用不可压缩的内容；
+// 压缩本身另有专门的测试（block_compress_test.go）。
+func incompressible(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"
+	b := make([]byte, n)
+	seed := uint64(0x9E3779B97F4A7C15)
+	for i := range b {
+		seed ^= seed << 13
+		seed ^= seed >> 7
+		seed ^= seed << 17
+		b[i] = alphabet[seed&63]
+	}
+	return string(b)
 }

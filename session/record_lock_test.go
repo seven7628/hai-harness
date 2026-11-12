@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -152,7 +151,8 @@ func TestCompactRunsInBackground(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	big := testBlock(1000000, strings.Repeat("y", 1<<20))
+	// 内容**不可压缩**（见 incompressible 的注释）：判据是字节占比，压缩会改字节量。
+	big := testBlock(1000000, incompressible(1<<20))
 	payloads = append(payloads, big)
 	for i := 0; i < 3; i++ {
 		if err := bs.put("1000000", []byte(big)); err != nil {
@@ -216,7 +216,8 @@ func TestCompactSynchronousWhenBackgroundDisabled(t *testing.T) {
 	if err := bs.put("1", []byte(payloads[0])); err != nil {
 		t.Fatal(err)
 	}
-	big := testBlock(1000000, strings.Repeat("y", 1<<20))
+	// 内容**不可压缩**（见 incompressible 的注释）：判据是字节占比，压缩会改字节量。
+	big := testBlock(1000000, incompressible(1<<20))
 	payloads = append(payloads, big)
 	for i := 0; i < 3; i++ {
 		if err := bs.put("1000000", []byte(big)); err != nil {

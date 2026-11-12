@@ -51,6 +51,12 @@ func agentCard(id int, items []string) []byte {
 // 这是**有意保留**的行为：这类块（tool / assistant 卡片）是终态、只写一次，
 // 分片对它们只有坏处没有好处（碎片化 + 每次多一次目录写）。
 func TestBlockRewriteAppendsWholeVersion(t *testing.T) {
+	// 这个测试量的是「整块重写 ⇒ 追加字节 = Σ 版本大小」这条**追加语义**，
+	// 而 sidecar 现在默认逐块压缩 ⇒ 物理追加量是压缩后的尺寸 ⇒ 量不到语义。
+	// 压缩本身另有专门的测试（block_compress_test.go）。
+	blockCompressEnabled = false
+	defer func() { blockCompressEnabled = true }()
+
 	dir := t.TempDir()
 	path := dir + "/x.record.json.blocks"
 	bs, err := openBlockStore(path)
@@ -66,7 +72,9 @@ func TestBlockRewriteAppendsWholeVersion(t *testing.T) {
 		}
 	}
 	// 一个 200KB 的块，每次事件长 8KB（内容是字符串字段 → 无数组 → 不分片）。
-	card := []byte(testBlock(9000, strings.Repeat("v", 200*1024)))
+	// 内容必须**不可压缩**（见 incompressible 的注释）：这个测试量的是
+	// 「追加字节 = Σ 版本大小」这条**追加语义**，压缩会把它量歪。
+	card := []byte(testBlock(9000, incompressible(200*1024)))
 	if err := bs.put("9000", card); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +86,8 @@ func TestBlockRewriteAppendsWholeVersion(t *testing.T) {
 	const events = 40
 	const step = 8 * 1024
 	for i := 0; i < events; i++ {
-		card = growBlock(t, card, []byte(strings.Repeat("a", step)))
+		card = growBlock(t, card, []byte(incompressible(step)))
+
 		if err := bs.put("9000", card); err != nil {
 			t.Fatal(err)
 		}
@@ -323,7 +332,7 @@ func TestFragmentWriteHistogram(t *testing.T) {
 	}
 	r := bufio.NewReaderSize(f, 1<<20)
 	for {
-		kind, id, _, payload, _, err := readBlockRecordExt(r)
+		kind, id, _, payload, _, _, err := readBlockRecordExt(r)
 		if err != nil {
 			break
 		}

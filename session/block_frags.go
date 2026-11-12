@@ -96,8 +96,11 @@ type fragItem struct {
 // isFragmented 报告 kind 字节是否带分片标志。
 func isFragmented(k uint8) bool { return k&kindFragmented != 0 }
 
-// realKind 取掉分片标志后的真实块类型。
-func realKind(k uint8) uint8 { return k &^ kindFragmented }
+// realKind 取掉标志位后的真实块类型（分片 0x80 / 压缩 0x40）。
+func realKind(k uint8) uint8 { return k &^ (kindFragmented | kindCompressed) }
+
+// isCompressed 报告索引项的 kind 字节是否带「压缩」标志。
+func isCompressed(k uint8) bool { return k&kindCompressed != 0 }
 
 // —— 目录记录的编解码 ——
 
@@ -336,6 +339,14 @@ func (bs *blockStore) readBlock(id string) ([]byte, bool) {
 	if _, err := bs.f.ReadAt(buf, ref.off); err != nil {
 		return nil, false
 	}
+	if isCompressed(ref.kind) {
+		// 落盘的是压缩字节 → 解压回逻辑内容（见 block_compress.go）。
+		out, derr := decompressBlock(buf)
+		if derr != nil {
+			return nil, false
+		}
+		buf = out
+	}
 	return buf, true
 }
 
@@ -362,6 +373,14 @@ func (bs *blockStore) readBlockVerified(id string) ([]byte, bool) {
 	buf := make([]byte, ref.n)
 	if _, err := bs.f.ReadAt(buf, ref.off); err != nil {
 		return nil, false
+	}
+	if isCompressed(ref.kind) {
+		// 摘要算的是**逻辑内容** ⇒ 先解压再比（解压失败 = 块损坏 ✓）。
+		out, derr := decompressBlock(buf)
+		if derr != nil {
+			return nil, false
+		}
+		buf = out
 	}
 	if d := payloadDigest(buf); d != ref.hash {
 		return nil, false
@@ -399,48 +418,56 @@ func (bs *blockStore) applyDirRecord(id string, dirBytes []byte, off int64) erro
 // 返回 headLen 是该 kind 的**记录头长度**（用于记账 pos 推进）。
 // kind=3（片段）与 kind=4（目录）的头比整块多/少一个字段，
 // 所以不能用 buildBlockRecordHead 反推长度。
-func readBlockRecordExt(r *bufio.Reader) (kind byte, id string, key uint32, payload []byte, headLen int, err error) {
+//
+// 返回 digest 是记录里带的**逻辑内容**摘要（压缩记录落盘的是压缩字节，
+// 但摘要算的是解压后的内容 —— 见 block_compress.go）。
+func readBlockRecordExt(r *bufio.Reader) (kind byte, id string, key uint32, payload []byte, digest [8]byte, headLen int, err error) {
 	k, err := r.ReadByte()
 	if err != nil {
-		return 0, "", 0, nil, 0, err
+		return 0, "", 0, nil, digest, 0, err
 	}
 	kind = k
 	var n [4]byte
 	if _, err := io.ReadFull(r, n[:]); err != nil {
-		return 0, "", 0, nil, 0, err
+		return 0, "", 0, nil, digest, 0, err
 	}
 	idLen := int(binary.BigEndian.Uint32(n[:]))
 	idb := make([]byte, idLen)
 	if _, err := io.ReadFull(r, idb); err != nil {
-		return 0, "", 0, nil, 0, err
+		return 0, "", 0, nil, digest, 0, err
 	}
 	id = string(idb)
 	headLen = 1 + 4 + idLen
-	if kind == blockRecFrag {
+	if kind&^kindCompressed == blockRecFrag {
 		// 片段：key(4) 跟在 id 后面
 		if _, err := io.ReadFull(r, n[:]); err != nil {
-			return 0, "", 0, nil, 0, err
+			return 0, "", 0, nil, digest, 0, err
 		}
 		key = binary.BigEndian.Uint32(n[:])
 		headLen += 4
 	}
 	if _, err := io.ReadFull(r, n[:]); err != nil {
-		return 0, "", 0, nil, 0, err
+		return 0, "", 0, nil, digest, 0, err
 	}
 	plen := int(binary.BigEndian.Uint32(n[:]))
 	headLen += 4
 	payload = make([]byte, plen)
 	if _, err := io.ReadFull(r, payload); err != nil {
-		return 0, "", 0, nil, 0, err
+		return 0, "", 0, nil, digest, 0, err
 	}
 	// 摘要（8 字节）必须**消费掉**：reader 是顺序读的，不吃它就会错位。
 	// （调用方记账时用 headLen+len(payload)+8 跳过它。）
 	var sum [8]byte
 	if _, err := io.ReadFull(r, sum[:]); err != nil {
-		return 0, "", 0, nil, 0, io.ErrUnexpectedEOF
+		return 0, "", 0, nil, digest, 0, io.ErrUnexpectedEOF
 	}
-	if want := payloadDigest(payload); !bytes.Equal(sum[:], want[:]) {
-		return 0, "", 0, nil, 0, fmt.Errorf("block store: payload digest mismatch (id %q)", id)
+	digest = sum
+	// 摘要算的是**逻辑内容**（解压后）—— 压缩记录的落盘字节摘要对不上，
+	// 它的校验挪到读路径（那里本来就要解压，见 readBlockVerified）。
+	if kind&kindCompressed == 0 {
+		if want := payloadDigest(payload); !bytes.Equal(sum[:], want[:]) {
+			return 0, "", 0, nil, digest, 0, fmt.Errorf("block store: payload digest mismatch (id %q)", id)
+		}
 	}
-	return kind, id, key, payload, headLen, nil
+	return kind, id, key, payload, digest, headLen, nil
 }

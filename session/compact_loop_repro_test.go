@@ -138,13 +138,15 @@ func TestCompactTriggersWhenGainExceedsCost(t *testing.T) {
 
 	mb := 1 << 20
 	// 60MB 底座。
+	// 内容**不可压缩**（见 incompressible 的注释）：这个测试量的是 compact 的
+	// 收益判据（stale/live 的字节比 + 绝对下限），压缩会把字节量改掉。
 	for i := 1; i <= 60; i++ {
-		if err := bs.put(fmt.Sprintf("%d", i), []byte(testBlock(i, strings.Repeat("z", mb-64)))); err != nil {
+		if err := bs.put(fmt.Sprintf("%d", i), []byte(testBlock(i, incompressible(mb-64)))); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// 一个 16MB 的块写 5 次 → live=76MB / stale=64MB（stale/live = 0.84 ≥ 0.5 ✓，stale ≥ 32MB ✓）。
-	big := []byte(testBlock(900, strings.Repeat("v", 16*mb)))
+	big := []byte(testBlock(900, incompressible(16*mb)))
 	for i := 0; i < 5; i++ {
 		if err := bs.put("900", big); err != nil {
 			t.Fatal(err)

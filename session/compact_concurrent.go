@@ -119,11 +119,18 @@ func (bs *blockStore) rewriteCompact(snap *compactSnapshot) (*compactWriter, err
 				return nil, err
 			}
 		}
-		if payloadDigest(payload) != ref.hash {
+		// 压缩标志只对「整块」成立：分片块在这里被**折叠成整块**，
+		// 内容是逻辑的 ⇒ 落盘不压缩 ⇒ 标志要清掉。
+		compressed := isCompressed(ref.kind) && !isFragmented(ref.kind)
+		if !compressed && payloadDigest(payload) != ref.hash {
 			cw.abort()
 			return nil, fmt.Errorf("compact: block %s is corrupt, refusing to rewrite", id)
 		}
-		head := buildBlockRecordHead(blockRecPut, id, payload)
+		recKind := blockRecPut
+		if compressed {
+			recKind |= kindCompressed
+		}
+		head := buildBlockRecordHead(recKind, id, payload)
 		payloadOff := cw.pos + int64(len(head))
 		if _, err := cw.w.Write(head); err != nil {
 			cw.abort()
@@ -137,7 +144,11 @@ func (bs *blockStore) rewriteCompact(snap *compactSnapshot) (*compactWriter, err
 			cw.abort()
 			return nil, err
 		}
-		cw.newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: ref.hash, kind: ref.kind &^ kindFragmented}
+		kindCode := blockKindCode(payload)
+		if compressed {
+			kindCode = blockKindCodeCompressed(payload) | kindCompressed
+		}
+		cw.newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: ref.hash, kind: kindCode}
 		cw.pos += int64(len(head) + len(payload) + 8)
 	}
 	return cw, nil
@@ -166,7 +177,7 @@ func (bs *blockStore) finishCompact(snap *compactSnapshot, cw *compactWriter) er
 		r := bufio.NewReaderSize(io.NewSectionReader(bs.f, snap.pos, end-snap.pos), 1<<20)
 		pos := snap.pos
 		for pos < end {
-			kind, id, _, payload, headLen, err := readBlockRecordExt(r)
+			kind, id, _, payload, digest, headLen, err := readBlockRecordExt(r)
 			if err != nil {
 				// 尾部半截/损坏：放弃本次回收，正式文件保持原样。
 				cw.abort()
@@ -219,8 +230,10 @@ func (bs *blockStore) finishCompact(snap *compactSnapshot, cw *compactWriter) er
 				applied++
 				continue
 			}
+			// kind 原样带走（含压缩标志 0x40）—— payload 是落盘字节，**不解压**
+			// （压缩是字节级搬运，见 block_compress.go）。
 			head := buildBlockRecordHead(kind, id, payload)
-			if kind == blockRecPut {
+			if kind&^kindCompressed == blockRecPut {
 				payloadOff := cw.pos + int64(len(head))
 				if _, err := cw.w.Write(head); err != nil {
 					cw.abort()
@@ -230,12 +243,17 @@ func (bs *blockStore) finishCompact(snap *compactSnapshot, cw *compactWriter) er
 					cw.abort()
 					return err
 				}
-				digest := payloadDigest(payload)
+				// 摘要用**记录里带的**（逻辑内容的摘要）—— 不重算（重算要解压）。
 				if _, err := cw.w.Write(digest[:]); err != nil {
 					cw.abort()
 					return err
 				}
-				cw.newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: digest}
+				// 类型码从内容取（压缩字节解压前缀）✓ 标志随内容走 ✓
+				kindCode := blockKindCode(payload)
+				if kind&kindCompressed != 0 {
+					kindCode = blockKindCodeCompressed(payload) | kindCompressed
+				}
+				cw.newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: digest, kind: kindCode}
 				cw.pos += int64(len(head) + len(payload) + 8)
 			} else { // blockRecDel：写删除记录，索引里去掉
 				if _, err := cw.w.Write(head); err != nil {

@@ -6346,6 +6346,17 @@ func sweepSessionFilesInBackground() {
 		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩）%.1fMB → %.1fMB，用时 %s\n",
 			res.Files, res.Compacted, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
 	}
+	// sidecar 压缩清扫（P4）：存量 sidecar 里未压缩的块就地压一遍。
+	// 实测 6 个最大的 sidecar：2256MB → 395MB（省 82.5%）。
+	// 只动 sidecar、不碰 record（摘要算逻辑内容 ⇒ Sum 不变）。
+	cres, cerr := session.SweepBlockStores(root, sweepPause)
+	if cerr != nil {
+		fmt.Fprintln(os.Stderr, "sweep blocks: 失败:", cerr)
+	} else if cres.Rewritten > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
+			cres.Files, cres.Rewritten, float64(cres.Before)/1e6, float64(cres.After)/1e6,
+			cres.Blocks, cres.BlocksTotal, cres.Elapsed.Round(time.Millisecond))
+	}
 	// record 清扫（P3-1）：与上面同一把限速思路，独立失败互不影响。
 	rres, rerr := session.SweepRecordFiles(root, sweepPause)
 	if rerr != nil {

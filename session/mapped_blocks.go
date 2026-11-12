@@ -83,7 +83,17 @@ func (m *mappedBlocks) span(id string) ([]byte, [8]byte, bool) {
 	if ref.off < 0 || end > int64(len(m.data)) {
 		return nil, [8]byte{}, false
 	}
-	return m.data[ref.off:end], ref.hash, true
+	raw := m.data[ref.off:end]
+	if isCompressed(ref.kind) {
+		// 压缩块：落盘是压缩字节 → 解压回逻辑内容（**失去零拷贝** ——
+		// 只有压缩块如此，见 block_compress.go）。
+		out, derr := decompressBlock(raw)
+		if derr != nil {
+			return nil, [8]byte{}, false
+		}
+		raw = out
+	}
+	return raw, ref.hash, true
 }
 
 // fragSpan 拼接分片块的内容。

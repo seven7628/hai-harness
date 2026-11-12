@@ -262,8 +262,13 @@ func blockRecordSize(id string, payloadLen int) int64 {
 type blockRef struct {
 	off  int64
 	n    int32
-	hash [8]byte // 该 id 当前 payload 的内容摘要
-	kind uint8   // 块类型编码（见 blockKind* 常量；0 = 未知）
+	hash [8]byte // 该 id 当前 payload 的**逻辑内容**摘要（解压后算 —— 见 block_compress.go）
+	// kind 是**块类型编码 + 标志位**（见 blockIndex.go 的 kind 字节布局）：
+	// 低位 = 真实块类型；0x80 = 分片；0x40 = 落盘是压缩字节。
+	//
+	// 为什么标志放这里：索引文件（.idx）的每条记录**本来就有一个 kind 字节**
+	// ⇒ 压缩标志无需改索引格式 ✓（旧索引照常可读 ✓）。
+	kind uint8
 }
 
 // unchanged 报告同 id 的新内容是否与已缓存的一致。
@@ -469,7 +474,7 @@ func (bs *blockStore) rebuild() error {
 	r := bufio.NewReaderSize(io.NewSectionReader(bs.f, pos, size-pos), 1<<20)
 	for {
 		off := pos
-		kind, id, _, payload, headLen, err := readBlockRecordExt(r)
+		kind, id, _, payload, digest, headLen, err := readBlockRecordExt(r)
 		if err == io.EOF {
 			break
 		}
@@ -482,9 +487,17 @@ func (bs *blockStore) rebuild() error {
 			break
 		}
 		recLen := int64(headLen + len(payload) + 8)
-		switch kind {
+		switch kind &^ kindCompressed {
 		case blockRecPut:
-			bs.index[id] = blockRef{off: off + int64(headLen), n: int32(len(payload)), hash: payloadDigest(payload), kind: blockKindCode(payload)}
+			// 摘要用记录里带的（**逻辑内容**的摘要 —— 压缩记录的落盘字节摘要
+			// 对不上；见 block_compress.go 的不变量）。
+			// 压缩块的真实类型码要从**解压后的前缀**取（payload 是压缩字节）——
+			// 只需解压 128 字节（blockKindCodeCompressed）✓。
+			kindCode := blockKindCode(payload)
+			if kind&kindCompressed != 0 {
+				kindCode = blockKindCodeCompressed(payload) | kindCompressed
+			}
+			bs.index[id] = blockRef{off: off + int64(headLen), n: int32(len(payload)), hash: digest, kind: kindCode}
 			delete(bs.frags, id) // 整块替换分片形态（二者互斥）
 		case blockRecDel:
 			delete(bs.index, id)
@@ -657,12 +670,22 @@ func (bs *blockStore) put(id string, payload []byte) error {
 
 // putWhole 追加一条**整块**（同 id 后续记录覆盖前者）。
 func (bs *blockStore) putWhole(id string, payload []byte) error {
+	// 压缩（写路径）：落盘存压缩字节，**摘要算逻辑内容**（见 block_compress.go
+	// 的不变量）⇒ 压缩不改变 id 的摘要 ⇒ record 里的块集合摘要照常有效 ✓。
+	stored := payload
+	recKind := blockRecPut
+	if blockCompressEnabled {
+		if c, ok := compressBlock(payload); ok {
+			stored = c
+			recKind |= kindCompressed
+		}
+	}
 	off := bs.nBytes
-	head := buildBlockRecordHead(blockRecPut, id, payload)
+	head := buildBlockRecordHead(recKind, id, stored)
 	if _, err := bs.w.Write(head); err != nil {
 		return err
 	}
-	if _, err := bs.w.Write(payload); err != nil {
+	if _, err := bs.w.Write(stored); err != nil {
 		return err
 	}
 	d := payloadDigest(payload)
@@ -677,12 +700,18 @@ func (bs *blockStore) putWhole(id string, payload []byte) error {
 	}
 	// 整块写入**替换**分片形态（二者互斥，见 block_frags.go 的不变量 3）。
 	delete(bs.frags, id)
-	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(payload)), hash: d, kind: blockKindCode(payload)}
-	bs.liveBytes += blockRecordSize(id, len(payload))
+	kindCode := blockKindCode(payload)
+	if recKind&kindCompressed != 0 {
+		kindCode |= kindCompressed
+	}
+	bs.index[id] = blockRef{off: off + int64(len(head)), n: int32(len(stored)), hash: d, kind: kindCode}
+	bs.liveBytes += blockRecordSize(id, len(stored))
 	bs.recordsWritten++
-	bs.bytesWritten += int64(len(head) + len(payload) + 8)
+	bs.bytesWritten += int64(len(head) + len(stored) + 8)
 	bs.sortedDirty = true
-	bs.nBytes += int64(len(head) + len(payload) + 8)
+	// nBytes 记的是**落盘**位置 ⇒ 必须用压缩后的长度（用 len(payload) 会让
+	// 位置与文件实际内容错位 ⇒ 后续记录的偏移全部指到空洞里 ⇒ 读回失败）。
+	bs.nBytes += int64(len(head) + len(stored) + 8)
 	return nil
 }
 
@@ -2142,10 +2171,20 @@ func (bs *blockStore) compact() error {
 		}
 		// 只搬运内容完好的块；校验失败的块保留在原文件里不参与 compact，
 		// 让后续读取时明确报错（而不是把损坏数据搬过去当成好的）。
-		if payloadDigest(payload) != ref.hash {
+		//
+		// **压缩块**：落盘字节是压缩过的 ⇒ 摘要对不上（摘要算逻辑内容）⇒
+		// 这里不解压、不校验（读路径会解压并校验 ⇒ 损坏照样被挡住 ✓），
+		// 只是**字节级搬运**（不解压 ⇒ compact 不会因为压缩而变慢 ✓）。
+		// 压缩标志只对「整块」成立：分片块在 compact 里被**折叠成整块**，
+		// 它的内容是逻辑的（readFragDir）⇒ 落盘不压缩 ⇒ 标志要清掉。
+		compressed := isCompressed(ref.kind) && !isFragmented(ref.kind)
+		recKind := blockRecPut
+		if compressed {
+			recKind |= kindCompressed
+		} else if payloadDigest(payload) != ref.hash {
 			return fmt.Errorf("compact: block %s is corrupt, refusing to rewrite", id)
 		}
-		head := buildBlockRecordHead(blockRecPut, id, payload)
+		head := buildBlockRecordHead(recKind, id, payload)
 		payloadOff := pos + int64(len(head))
 		if _, err := w.Write(head); err != nil {
 			return err
@@ -2156,7 +2195,12 @@ func (bs *blockStore) compact() error {
 		if _, err := w.Write(ref.hash[:]); err != nil {
 			return err
 		}
-		newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: ref.hash}
+		// 类型码从**内容**取（压缩字节要解压前缀）✓
+		kindCode := blockKindCode(payload)
+		if compressed {
+			kindCode = blockKindCodeCompressed(payload) | kindCompressed
+		}
+		newIndex[id] = blockRef{off: payloadOff, n: int32(len(payload)), hash: ref.hash, kind: kindCode}
 		pos += int64(len(head)+len(payload)) + 8
 	}
 	if err := w.Flush(); err != nil {
