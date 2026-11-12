@@ -69,11 +69,20 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
 fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import { createRoot } from 'react-dom/client'
 import RightPanel from '../../src/components/RightPanel'
+// ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45/F46）：少了这一行 registry 是空的，
+// RightPanel 的 getSurface(kind)?.render(...) 恒走 ?? 兜底 —— 本探针验的一直是兜底组件
+//（file 的兜底就是同一个 FilePreviewTab，像素一致、断言全绿）。下面 page 加载后的第一条
+// 自检断言会当场戳穿这件事，补上这行才轮到真正的 provider 渲染。
+import '../../src/surfaces/builtin'
+import { getSurface } from '../../src/surfaces/registry'
 import { useAppStore } from '../../src/store/useAppStore'
 import '../../src/index.css'
 
 useAppStore.setState({ workspace: '/mock/proj-auth' })
 ;(window as unknown as { __store: unknown }).__store = useAppStore
+;(window as unknown as { __surfaces: unknown }).__surfaces = {
+  file: !!getSurface('file'), git: !!getSurface('git'), web: !!getSurface('web'), activity: !!getSurface('activity'),
+}
 // 启动 store（建立 mock transport 连接）：不启动 → file_preview 响应无人接收，
 // 「最终文件」永远停在「正在读取文件…」。
 void useAppStore.getState().start('/mock/proj-auth')
@@ -117,8 +126,11 @@ const seedActivity = (page, filePath) => page.evaluate(async (p) => {
     blocks: [{ kind: 'tool', id: 1, toolId: 't1', name: 'read_file', args: JSON.stringify({ path: p }), result: 'ok', status: 'done', startedAt: Date.now() }],
     gitFiles: [],
   })
-  // rightTab='file' 且此刻没有 file 标签 → sync 建一个**空**标签（无 path = 文件活动列表态）
-  st.getState().syncTabsToRightTab()
+  // rightTab='file' 且此刻没有 file 标签 → **显式**开一个空标签（无 path = 文件活动列表态）。
+  // 不能只靠 syncTabsToRightTab：PR-02 起它只在「这个 scope 还没有标签集」时建默认集，
+  // 而这里恰恰是「标签集还在、只是被清空了」—— 于是 [9] 起的用例一直是红的（R07 复跑时
+  // 发现：补 surfaces/builtin import **之前**就已经红，与本轮改动无关，属链外腐化）。
+  st.getState().openTab({ kind: 'file' })
   await new Promise((r) => setTimeout(r, 300))
 }, filePath)
 
@@ -203,6 +215,15 @@ async function main() {
   await page.goto(PROBE_URL, { waitUntil: 'domcontentloaded' })
   // 右侧栏默认折叠（只渲染 rail）：必须先展开，否则挂载的是折叠态而非工作面板。
   await page.waitForSelector('aside.right.collapsed', { timeout: 30000 })
+
+  // —— 仪器自检（04-review F45/F46）——
+  // RightPanel 的内容面板一律是 getSurface(kind)?.render(...) ?? 本地组件。本探针页只
+  // import RightPanel 时注册表是空的 → 验的一直是 **兜底组件**，而兜底渲染的往往是同一个
+  // 组件（file → FilePreviewTab），像素一致、断言全绿 —— 这是最坏的一种失败：看不出坏。
+  // 所以先钉住「provider 真的在注册表里」：缺 import 时这里当场红，而不是让下面的面板断言
+  // 继续在兜底分支上假绿。
+  const surfaces = await page.evaluate(() => window.__surfaces ?? null)
+  assert(!!surfaces?.file, `仪器：builtin provider 已注册（缺 builtin import 时验的是 ?? 兜底；实得 ${JSON.stringify(surfaces)}）`)
   await openFinalFile(page, 'guide.md')
   await page.waitForSelector('.file-activity-panel', { timeout: 30000 })
   await page.waitForSelector('.md-view-switch', { timeout: 20000 })

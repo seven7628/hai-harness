@@ -66,12 +66,21 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
 fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import { createRoot } from 'react-dom/client'
 import RightPanel from '../../src/components/RightPanel'
+// ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45/F46）：少了这一行 registry 是空的，
+// RightPanel 的 getSurface(kind)?.render(...) 恒走 ?? 兜底 —— 本探针验的一直是兜底组件
+//（file 的兜底就是同一个 FilePreviewTab，像素一致、断言全绿）。下面 page 加载后的第一条
+// 自检断言会当场戳穿这件事，补上这行才轮到真正的 provider 渲染。
+import '../../src/surfaces/builtin'
+import { getSurface } from '../../src/surfaces/registry'
 import { ArtifactCard } from '../../src/components/ArtifactCard'
 import { useAppStore } from '../../src/store/useAppStore'
 import '../../src/index.css'
 
 useAppStore.setState({ workspace: '/mock/proj-auth' })
 ;(window as unknown as { __store: unknown }).__store = useAppStore
+;(window as unknown as { __surfaces: unknown }).__surfaces = {
+  file: !!getSurface('file'), git: !!getSurface('git'), web: !!getSurface('web'), activity: !!getSurface('activity'),
+}
 void useAppStore.getState().start('/mock/proj-auth')
 
 // 产出卡片与右栏同屏：验证**真实用户路径**（点卡片的「表格预览」→ 右栏渲染出表格），
@@ -174,6 +183,15 @@ async function main() {
   await page.goto(PROBE_URL, { waitUntil: 'domcontentloaded' })
   // 右侧栏默认折叠（只渲染 rail）：必须先展开，否则挂载的是折叠态而非工作面板。
   await page.waitForSelector('aside.right.collapsed', { timeout: 30000 })
+
+  // —— 仪器自检（04-review F45/F46）——
+  // RightPanel 的内容面板一律是 getSurface(kind)?.render(...) ?? 本地组件。本探针页只
+  // import RightPanel 时注册表是空的 → 验的一直是 **兜底组件**，而兜底渲染的往往是同一个
+  // 组件（file → FilePreviewTab），像素一致、断言全绿 —— 这是最坏的一种失败：看不出坏。
+  // 所以先钉住「provider 真的在注册表里」：缺 import 时这里当场红，而不是让下面的面板断言
+  // 继续在兜底分支上假绿。
+  const surfaces = await page.evaluate(() => window.__surfaces ?? null)
+  assert(!!surfaces?.file, `仪器：builtin provider 已注册（缺 builtin import 时验的是 ?? 兜底；实得 ${JSON.stringify(surfaces)}）`)
 
   console.log('\n[1] CSV 默认进表格视图（不是源码视图）')
   await openFinalFile(page, 'sales.csv')
