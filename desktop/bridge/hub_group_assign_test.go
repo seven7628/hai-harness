@@ -75,7 +75,7 @@ func TestHumanGroupAssign(t *testing.T) {
 	b := createDispatchAgent(t, m, buf, 1, "人类派活B", false)
 	c := createDispatchAgent(t, m, buf, 2, "旁听C", false)
 	g := assignGroup(t, m, buf, 3, "人类派活群", map[agenthub.AgentID]string{
-		b.ID: "owner", c.ID: "observer",
+		b.ID: "owner", c.ID: "member",
 	})
 	// B 用门闩式 fake：LLM 流不放开，任务就停在 dispatched —— 响应里的状态是确定的。
 	fb := newConvProvider("收到人类指派，马上做")

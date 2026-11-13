@@ -89,7 +89,7 @@ func TestHubGroupCRUDAndRoles(t *testing.T) {
 	}
 	// 观察者角色 + 成员移除。
 	ok, errMsg, data = hubCmd(t, m, buf, 6, "hub_group_member_add", map[string]any{
-		"group_id": string(g.ID), "agent_id": string(b.ID), "role": "observer",
+		"group_id": string(g.ID), "agent_id": string(b.ID), "role": "member",
 	})
 	if ok {
 		t.Fatalf("adding existing member must fail: %s", errMsg)
@@ -450,7 +450,7 @@ func TestHubGroupPatchDeleteAndCreateContracts(t *testing.T) {
 		t.Fatalf("rename with deleted owner: %s", errMsg)
 	}
 	if ok, errMsg, _ := hubCmd(t, m, buf, 17, "hub_group_member_add", map[string]any{
-		"group_id": string(orphan.ID), "agent_id": string(c.ID), "role": "observer",
+		"group_id": string(orphan.ID), "agent_id": string(c.ID), "role": "member",
 	}); !ok {
 		t.Fatalf("add member with deleted owner: %s", errMsg)
 	}

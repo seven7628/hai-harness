@@ -4,7 +4,7 @@ package agenthub
 //
 // 规则（严格解析器，不降级）：
 //   - 正文无 @ 且无结构化 mentions → 不唤醒任何智能体；
-//   - @all（正文或 mention_all）→ 仅 owner 或人类可用（member/observer 直接拒绝，
+//   - @all（正文或 mention_all）→ 仅 owner 或人类可用（member 直接拒绝，
 //     不降级成普通 @）；targets = 除发送者外的全部成员（按 JoinedAt、AgentID 排序）；
 //   - @Name / 结构化 agent id → 取并集：正文出现顺序在前，结构化 id 顺序在后，
 //     去重并过滤 self，再按 GroupPolicy.MaxMentions（默认 3）统一截断；
@@ -45,6 +45,11 @@ type Round struct {
 	Unknown    []string  `json:"unknown,omitempty"`
 	Dropped    int       `json:"dropped,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
+	// Sender/SenderHuman 是本轮的**来源**（P6-11）：快照据此标注「人」还是
+	// 「owner/member 同事请求」，审计与提示词都靠它区分人类授权与智能体请求。
+	// omitempty：P6-11 之前落盘的旧 round 没有该字段（空 = 来源未知）。
+	Sender      AgentID `json:"sender_agent_id,omitempty"`
+	SenderHuman bool    `json:"sender_human,omitempty"`
 }
 
 // Router 绑定一个群的成员与策略；成员变化后重新构造（parser 缓存名字）。
@@ -144,6 +149,7 @@ func (r *Router) RouteMentions(in MentionRequest, sender AgentID, isHuman bool, 
 		ID: NewID(PrefixRound), GroupID: r.group.ID, TriggerSeq: triggerSeq,
 		Targets: targets, Mentions: mentions, MentionAll: mentionAll,
 		Unknown: text.Unknown, Dropped: dropped, CreatedAt: now,
+		Sender: sender, SenderHuman: isHuman,
 	}, nil
 }
 

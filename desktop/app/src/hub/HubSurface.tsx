@@ -15,6 +15,7 @@ import { agentSigilLabel } from './avatarLabels'
 import { useAgentState } from './useAgentState'
 import { isImeComposing, type MentionAgent } from './mentions'
 import { useScrollbarWidth } from './useScrollbarWidth'
+import { useHeaderMenu } from './useHeaderMenu'
 import { useComposerAutoGrow } from './useComposerAutoGrow'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubMessage, HubRunEntry } from './types'
@@ -123,7 +124,8 @@ export default function HubSurface() {
   useScrollbarWidth(listRef, dmRootRef)
   const stickBottom = useRef(true)
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null)
-  const [menuOpen, setMenuOpen] = useState(false)
+  // 头部「更多操作」：外点/Esc 关闭 + 键盘导航（P6-16，与 GroupView 共用同一份行为）。
+  const headerMenu = useHeaderMenu()
   const theme = useResolvedTheme()
   const highlightTimer = useRef<number | null>(null)
   // 每个实例只消费每个 nonce 一次（同 GroupView：store 的 jump 留 TTL 给 StrictMode 第二实例）。
@@ -356,20 +358,22 @@ export default function HubSurface() {
                   <button
                     type="button"
                     className="icon-btn"
-                    onClick={() => setMenuOpen((v) => !v)}
+                    ref={headerMenu.triggerRef}
+                    onClick={headerMenu.toggle}
                     aria-label="更多操作"
-                    aria-expanded={menuOpen}
+                    aria-haspopup="menu"
+                    aria-expanded={headerMenu.open}
                   >
                     <MoreIcon size={15} />
                   </button>
-                  {menuOpen ? (
-                    <div className="header-menu" role="menu">
-                      <button type="button" role="menuitemradio" aria-checked={view === 'chat'} onClick={() => { setView('chat'); setMenuOpen(false) }}>{t('hub.header.chat')}</button>
-                      <button type="button" role="menuitemradio" aria-checked={view === 'run'} onClick={() => { setView('run'); setMenuOpen(false) }}>{t('hub.header.run')}</button>
+                  {headerMenu.open ? (
+                    <div className="header-menu" role="menu" ref={headerMenu.menuRef}>
+                      <button type="button" role="menuitemradio" aria-checked={view === 'chat'} onClick={() => { setView('chat'); headerMenu.close() }}>{t('hub.header.chat')}</button>
+                      <button type="button" role="menuitemradio" aria-checked={view === 'run'} onClick={() => { setView('run'); headerMenu.close() }}>{t('hub.header.run')}</button>
                       <span className="header-menu-sep" />
-                      <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); toggleContext() }}>{t('hub.header.context')}</button>
-                      <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void copyDeepLink('dm', activeAgent.id, latestSeq) }}>{t('hub.header.link')}</button>
-                      <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); openEditor(activeAgent) }}>{t('hub.edit')}</button>
+                      <button type="button" role="menuitem" onClick={() => { headerMenu.close(); toggleContext() }}>{t('hub.header.context')}</button>
+                      <button type="button" role="menuitem" onClick={() => { headerMenu.close(); void copyDeepLink('dm', activeAgent.id, latestSeq) }}>{t('hub.header.link')}</button>
+                      <button type="button" role="menuitem" onClick={() => { headerMenu.close(); openEditor(activeAgent) }}>{t('hub.edit')}</button>
                     </div>
                   ) : null}
                 </div>

@@ -33,8 +33,8 @@ function openProjectSession(workspace: string, sessionId: string): void {
 //
 // 2026-11 demo 源码移植：agent 消息与 DM 共用「52px Luna + 作者头 + 无气泡正文」，
 // human 消息与 DM 共用「右侧暖色气泡 + 时间」。群特有标签只在数据能表达时出现：
-//   · 观察  ← groupRole=observer（名册真实字段）
 //   · N 人触发 ← context.senders ≥2（触发上下文）
+// P6-12 删除了 observer 角色：不再有「观察」标签（只读由群模式 readonly 表达）。
 // 没有 reply_to 字段，所以不画 demo 的「回复 @」。
 
 // 事件卡的归属智能体：refs 里是 bridge 落的真实 id（hub_handoff.go 写
@@ -239,7 +239,6 @@ export function GroupBubble({
 
   const tags = (
     <>
-      {agent?.groupRole === 'observer' ? <span className="agent-tag observe">{t('hub.observer')}</span> : null}
       {msg.visibility === 'owner' ? <span className="agent-tag owner">{t('hub.ownerOnly')}</span> : null}
     </>
   )

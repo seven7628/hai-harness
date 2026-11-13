@@ -160,7 +160,9 @@ func (s *MemoryStore) LoadGroup(ctx context.Context, id GroupID) (*Group, error)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return cloneGroup(g), nil
+	out := cloneGroup(g)
+	out.MigrateLegacyMemberRoles() // 与 FileStore 同口径（P6-12）
+	return out, nil
 }
 
 func (s *MemoryStore) SaveGroup(ctx context.Context, g *Group) error {
@@ -169,6 +171,9 @@ func (s *MemoryStore) SaveGroup(ctx context.Context, g *Group) error {
 	}
 	if g == nil || !validID(string(g.ID)) {
 		return ErrInvalid
+	}
+	if err := rejectRemovedMemberRoles(g); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -189,7 +194,9 @@ func (s *MemoryStore) ListGroups(ctx context.Context) ([]*Group, error) {
 	defer s.mu.Unlock()
 	out := make([]*Group, 0, len(s.groups))
 	for _, g := range s.groups {
-		out = append(out, cloneGroup(g))
+		cp := cloneGroup(g)
+		cp.MigrateLegacyMemberRoles() // 与 FileStore 同口径（P6-12）
+		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil

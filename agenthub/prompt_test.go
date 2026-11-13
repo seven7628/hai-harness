@@ -100,7 +100,7 @@ func TestPromptL1DM(t *testing.T) {
 	}
 }
 
-// rosterGoldenSpec 是名册 golden 的固定输入：owner/member/observer 三种角色、
+// rosterGoldenSpec 是名册 golden 的固定输入：owner/member 两种角色（P6-12 删除 observer）、
 // CJK 职责、能力摘要（只读/断网/禁用工具）与一个缺档案的成员。
 // 改这里的字段等于改 golden —— 两处必须一起改，否则测试会以字节差异失败。
 func rosterGoldenSpec() PromptSpec {
@@ -125,7 +125,7 @@ func rosterGoldenSpec() PromptSpec {
 			OwnerAgentID: "ag_aaaaaaaa",
 			Members: []Member{
 				{AgentID: "ag_aaaaaaaa", Role: RoleOwner},
-				{AgentID: "ag_bbbbbbbb", Role: RoleObserver},
+				{AgentID: "ag_bbbbbbbb", Role: RoleMember},
 				{AgentID: "ag_cccccccc", Role: RoleMember},
 				{AgentID: "ag_dddddddd", Role: RoleMember},
 			},
@@ -146,7 +146,7 @@ func TestPromptRosterGolden(t *testing.T) {
 	}
 	for _, want := range []string{
 		"- Researcher (owner, ag_aaaaaaaa)",
-		"- Critic (observer, ag_bbbbbbbb)",
+		"- Critic (member, ag_bbbbbbbb)",
 		"- Writer (member, ag_cccccccc)",
 		"- unknown member (member, ag_dddddddd) — profile unavailable",
 		"read-only tools",

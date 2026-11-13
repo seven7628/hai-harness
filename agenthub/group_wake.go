@@ -15,6 +15,45 @@ import (
 	"strings"
 )
 
+// 群唤醒的**来源**（P6-11）：谁触发了这一轮。人类与智能体的消息在协议上必须分得开 ——
+// 「同事的请求」不是「系统指令」，也不能被当成人类授权（审批/只读闸门按来源与群模式判定，
+// 不按消息正文里自称的身份判定）。
+const (
+	WakeOriginHuman  = "human"
+	WakeOriginOwner  = "owner"
+	WakeOriginMember = "member"
+)
+
+// WakeOrigin 由**群成员表**推出唤醒来源，调用方不能自报（与 CheckHandoff 同口径）。
+// 人类恒 human；智能体按落盘角色 owner/member；非成员返回 ""（未知，不冒充成员）。
+func WakeOrigin(g *Group, sender AgentID, human bool) string {
+	if human {
+		return WakeOriginHuman
+	}
+	role, ok := g.RoleOf(sender)
+	if !ok {
+		return ""
+	}
+	switch role {
+	case RoleOwner:
+		return WakeOriginOwner
+	case RoleMember:
+		return WakeOriginMember
+	default:
+		return ""
+	}
+}
+
+// WakeOriginKnown 是否是协议里的合法来源（"" = 旧块/未知，调用方按未知处理）。
+func WakeOriginKnown(origin string) bool {
+	switch origin {
+	case "", WakeOriginHuman, WakeOriginOwner, WakeOriginMember:
+		return true
+	default:
+		return false
+	}
+}
+
 // GroupWakeHeader 群唤醒块的协议字段。MessageID 留给 P3a-09 的流式草稿；
 // 当前为空表示由 store 在落账时分配 msg_<seq>。
 type GroupWakeHeader struct {
@@ -23,6 +62,11 @@ type GroupWakeHeader struct {
 	RoundID    string  `json:"round_id"`
 	TriggerSeq int64   `json:"trigger_seq"`
 	MessageID  string  `json:"message_id,omitempty"`
+	// SenderAgentID / Origin 是这条唤醒的**来源**（P6-11）：人类触发 = human，
+	// 智能体触发 = owner/member（角色从群成员表解析）。omitempty：P6-11 之前落盘的
+	// 旧 header 没有这两个字段，解码为空 = 来源未知，不能当成人类。
+	SenderAgentID AgentID `json:"sender_agent_id,omitempty"`
+	Origin        string  `json:"origin,omitempty"`
 	// Depth/Turn 是对话控制器（P3b-04）的记账字段：本唤醒是第几跳 @（人类=0，首轮
 	// 智能体=1）、本轮对话的第几轮。omitempty + 缺省 0：P3b-04 之前落在 transcript
 	// 里的旧块必须继续能解析（「没有字段」= 深度/轮次未知，按 0 处理）。
@@ -50,6 +94,20 @@ func EncodeGroupWake(h *GroupWakeHeader, snapshot string) (string, error) {
 	}
 	if h.TriggerSeq <= 0 {
 		return "", fmt.Errorf("%w: 群唤醒 trigger_seq 必须为正", ErrInvalid)
+	}
+	// 来源只允许三选一/空（空 = 旧块/未知）。写坏值会让下游把「未知」当成人类，
+	// 所以宁可在编码处 fail-closed。
+	if !WakeOriginKnown(h.Origin) {
+		return "", fmt.Errorf("%w: 群唤醒 origin %q（只允许 human/owner/member）", ErrInvalid, h.Origin)
+	}
+	if h.SenderAgentID != "" {
+		if err := ValidateAgentID(h.SenderAgentID); err != nil {
+			return "", fmt.Errorf("%w: 群唤醒 sender_agent_id: %v", ErrInvalid, err)
+		}
+	}
+	// 智能体来源必须带发送者：只写 owner/member 而不写是谁，等于让下游无法追溯/审计。
+	if (h.Origin == WakeOriginOwner || h.Origin == WakeOriginMember) && h.SenderAgentID == "" {
+		return "", fmt.Errorf("%w: 群唤醒 origin=%s 必须带 sender_agent_id", ErrInvalid, h.Origin)
 	}
 	b, err := json.Marshal(h)
 	if err != nil {

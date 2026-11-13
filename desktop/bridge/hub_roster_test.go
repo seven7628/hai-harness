@@ -302,9 +302,9 @@ func TestHubGroupRosterRebuildsOnRosterChange(t *testing.T) {
 		t.Fatalf("initial roster already has the outsider:\n%s", initialPrompt)
 	}
 
-	// 1) 加成员：A/B 的 loop 都要换，且名册出现 C（observer）。
+	// 1) 加成员：A/B 的 loop 都要换，且名册出现 C（member）。
 	if ok, errMsg, _ := hubCmd(t, m, buf, 5, "hub_group_member_add", map[string]any{
-		"group_id": string(g.ID), "agent_id": string(c.ID), "role": "observer",
+		"group_id": string(g.ID), "agent_id": string(c.ID), "role": "member",
 	}); !ok {
 		t.Fatalf("add member: %s", errMsg)
 	}
@@ -312,10 +312,10 @@ func TestHubGroupRosterRebuildsOnRosterChange(t *testing.T) {
 		t.Fatal("add member did not rebuild A's group loop")
 	}
 	added := bsA.loop.SystemPromptText()
-	if !strings.Contains(added, "- Charlie (observer, "+string(c.ID)+")") {
+	if !strings.Contains(added, "- Charlie (member, "+string(c.ID)+")") {
 		t.Fatalf("rebuilt roster missing C:\n%s", added)
 	}
-	if !strings.Contains(bsB.loop.SystemPromptText(), "Charlie (observer") {
+	if !strings.Contains(bsB.loop.SystemPromptText(), "Charlie (member") {
 		t.Fatalf("other member's roster not rebuilt:\n%s", bsB.loop.SystemPromptText())
 	}
 

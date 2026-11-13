@@ -10,7 +10,8 @@ package main
 // 以为必填，或引擎先拦下省略 group_id 的合法调用。权限：
 //   - 必须是群成员（非成员一律拒绝，不泄漏群存在性以外的信息）；
 //   - group_history 走 Redacted(false)：owner-only 消息只显示占位；
-//   - observer 可以读，不能 group_say；
+//   - 群成员（owner/member）都能读、都能 group_say（P6-12 删除了 observer 角色：
+//     「只读」是群策略 readonly 的事，不是角色的事）；
 //   - group_say 与人类一样走严格 @ 路由（@all 只有 owner 可以）。
 
 import (
@@ -395,7 +396,7 @@ func newHubGroupSayTool(m *manager, agentID agenthub.AgentID, groupID agenthub.G
 	return &hubGroupSayTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "group_say",
 		Description_: "Say something in a Hub group (appends to the group log and routes @mentions). " +
-			"Observers cannot speak. @Name in text and the structured mentions list are unioned, deduped and capped by the group policy. " +
+			"@Name in text and the structured mentions list are unioned, deduped and capped by the group policy. " +
 			"mention_all is only allowed for the group owner (humans sending from the app are always allowed).",
 		Params_: tools.Obj(map[string]any{
 			"group_id":    hubGroupIDParam(groupID, "Group id"),
@@ -417,12 +418,9 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", err
 	}
-	st, g, role, err := t.groupAccess(ctx, args.GroupID)
+	st, g, _, err := t.groupAccess(ctx, args.GroupID)
 	if err != nil {
 		return "", err
-	}
-	if role == agenthub.RoleObserver {
-		return "", fmt.Errorf("%w: observer 不能在群里发言", agenthub.ErrInvalid)
 	}
 	text := strings.TrimSpace(args.Text)
 	if text == "" {

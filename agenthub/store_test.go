@@ -558,7 +558,7 @@ func TestMemoryStoreDeepCopy(t *testing.T) {
 	if err := s.SaveGroup(ctx, group); err != nil {
 		t.Fatal(err)
 	}
-	group.Members[0].Role = RoleObserver
+	group.Members[0].Role = RoleMember
 	gotGroup, _ := s.LoadGroup(ctx, group.ID)
 	if gotGroup.Members[0].Role != RoleOwner {
 		t.Fatalf("group mutated through members slice: %#v", gotGroup.Members)

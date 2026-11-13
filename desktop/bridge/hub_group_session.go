@@ -81,6 +81,9 @@ func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, erro
 			existing.hubDispatchPending.Store(false)
 			return nil, fmt.Errorf("%w: 群会话 %s 已关闭", agenthub.ErrInvalid, sid)
 		}
+		// 每次取会话都对齐一次群模式：策略可能在别处改过（多端/命令），
+		// SetMode 是快照赋值，重复设置零成本，但漏了就是「UI 显示 readonly、实际照跑」。
+		applyHubGroupMode(existing, g)
 		return existing, nil
 	}
 
@@ -94,6 +97,9 @@ func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, erro
 	if err != nil {
 		return nil, err
 	}
+	// createIn 给所有会话的默认模式是项目口径的 auto（全自动放行）；群会话必须用
+	// 群策略的 Mode 覆盖，否则「群模式」就是个假开关（P6-06）。
+	applyHubGroupMode(bs, g)
 	return bs, nil
 }
 
@@ -331,11 +337,18 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	}
 	// 快照只用到 round 的 id/trigger_seq：从 wake 复原一个最小 round，
 	// 这样对话队列只需保存协议字段，不必把 Round/Message 指针一直攥着。
-	round := agenthub.Round{GroupID: g.ID, ID: w.RoundID, TriggerSeq: w.TriggerSeq, Targets: []agenthub.AgentID{target}}
+	// 来源（P6-11）：角色从群成员表解析，调用方不能自报 —— 人类 = human，
+	// 智能体 = owner/member。快照与 header 共用同一份来源，审计/提示词都对得上。
+	origin := agenthub.WakeOrigin(g, w.Sender, w.Human)
+	round := agenthub.Round{
+		GroupID: g.ID, ID: w.RoundID, TriggerSeq: w.TriggerSeq, Targets: []agenthub.AgentID{target},
+		Sender: w.Sender, SenderHuman: w.Human,
+	}
 	snap := agenthub.BuildGroupSnapshot(g, target, msgs, cursor.AgentContextSeq, round, agenthub.SnapshotOptions{})
 	header := &agenthub.GroupWakeHeader{
 		GroupID: g.ID, AgentID: target, RoundID: w.RoundID, TriggerSeq: w.TriggerSeq,
 		Depth: w.Depth, Turn: w.Turn, ConversationID: w.ConversationID,
+		SenderAgentID: w.Sender, Origin: origin,
 	}
 	hidden, err := agenthub.EncodeGroupWake(header, snap.Text)
 	if err != nil {

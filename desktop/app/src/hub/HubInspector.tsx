@@ -137,6 +137,7 @@ function OverviewPanel() {
   const pendingIds = usePendingAgents()
   const stateOf = stateResolver({ running, pending: pendingIds })
   const openEditor = useHubStore((s) => s.openEditor)
+  const openGroupEditor = useHubStore((s) => s.openGroupEditor)
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const setPanel = useHubStore((s) => s.setInspector)
 
@@ -209,6 +210,15 @@ function OverviewPanel() {
         </div>
         <RecentTasks tasks={recentTasks} onOpen={() => setPanel('tasks')} />
         <footer className="hub-ov-actions">
+          {/* 编辑群组（P6-17）：群名/协作模式/群主/成员增删都在同一个弹层里保存。 */}
+          <button
+            className="hub-btn"
+            onClick={() => openGroupEditor(group.id)}
+            disabled={group.deleted}
+            title={group.deleted ? '群已删除，不能编辑' : '编辑群名 / 协作模式 / 群主 / 成员'}
+          >
+            编辑群组
+          </button>
           <button className="hub-btn" onClick={() => void copyDeepLink('group', group.id)}>复制链接</button>
         </footer>
       </section>

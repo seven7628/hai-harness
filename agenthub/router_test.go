@@ -30,7 +30,7 @@ func routerFixture(t *testing.T) (*Group, *Router) {
 			{AgentID: "ag_bbbbbbbb", Role: RoleMember, JoinedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
 			{AgentID: "ag_cccccccc", Role: RoleMember, JoinedAt: time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)},
 			{AgentID: "ag_dddddddd", Role: RoleMember, JoinedAt: time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC)},
-			{AgentID: "ag_eeeeeeee", Role: RoleObserver, JoinedAt: time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)},
+			{AgentID: "ag_eeeeeeee", Role: RoleMember, JoinedAt: time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)},
 		},
 	}
 	r, err := NewGroupRouter(g, profiles)
@@ -564,7 +564,7 @@ func TestRouterMentionAllStructured(t *testing.T) {
 	if !round.MentionAll || len(round.Targets) != 4 || !reflect.DeepEqual(round.Mentions, []AgentID{"ag_bbbbbbbb"}) {
 		t.Fatalf("owner structured @all = %+v", round)
 	}
-	// member/observer：拒绝且不降级（不留下只有 mentions 的 round）。
+	// member（owner 以外一律拒绝）：拒绝且不降级（不留下只有 mentions 的 round）。
 	for _, sender := range []AgentID{"ag_bbbbbbbb", "ag_eeeeeeee"} {
 		round, err := r.RouteMentions(MentionRequest{Text: "@Cara 看下", Mentions: []AgentID{"ag_cccccccc"}, MentionAll: true}, sender, false, 17, time.Now())
 		if !errors.Is(err, ErrMentionAllForbidden) || round.ID != "" || len(round.Targets) != 0 {

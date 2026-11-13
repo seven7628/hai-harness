@@ -38,8 +38,11 @@ func assignGroup(t *testing.T, m *manager, buf *syncBuf, cmdID int, name string,
 	for id, role := range members {
 		raw = append(raw, map[string]any{"agent_id": string(id), "role": role})
 	}
+	// 这些 fixture 验的是「派活/结算/回推」链路，不是审批闸门：显式 auto，
+	// 免得每个工具调用都停在 ToolApprovalRequested 上（ask/readonly 由
+	// hub_group_mode_test.go / hub_group_origin_test.go 专门覆盖）。
 	ok, errMsg, data := hubCmd(t, m, buf, cmdID, "hub_group_create", map[string]any{
-		"name": name, "members": raw,
+		"name": name, "members": raw, "policy": map[string]any{"mode": "auto"},
 	})
 	if !ok {
 		t.Fatalf("create group: %s", errMsg)

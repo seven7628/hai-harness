@@ -49,6 +49,11 @@ type Mode struct {
 	// 参与内容比较替换；"" = 不注入。模式切换只影响此处 + 修改工具桶，
 	// 稳定前缀（base/产品层/Agent.md/只读 schema）保持缓存命中。
 	SystemHint string
+
+	// BlockReason 可选：AllowTool 拒绝时的可读原因（"" = 默认文案）。
+	// 为什么需要：默认文案只说「当前模式没有这个工具」，模型会猜「工具不存在/我调错了」。
+	// 产品层（如群 readonly）用它说清**为什么**被拒，模型拿到的就是这句（IsError 回传）。
+	BlockReason func(t tools.Tool) string
 }
 
 // PlanSafeTool 可选接口：工具声明"plan 模式下可见且安全"。
