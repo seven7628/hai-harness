@@ -293,7 +293,7 @@ func TestGroupNormalizeDefaults(t *testing.T) {
 		t.Fatal("joined_at not defaulted")
 	}
 	if g.Policy.Mode != GroupModeAsk ||
-		g.Policy.MaxHandoffDepth != 3 || g.Policy.MaxTurnsPerHuman != 8 || g.Policy.MaxMentions != 3 {
+		g.Policy.MaxHandoffDepth != DefaultGroupMaxHandoffDepth || g.Policy.MaxMentions != DefaultGroupMaxMentions {
 		t.Fatalf("policy defaults = %#v", g.Policy)
 	}
 }

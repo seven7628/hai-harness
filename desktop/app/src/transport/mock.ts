@@ -736,7 +736,7 @@ class MockTransport implements Transport {
         { agent_id: 'ag_mockwri2', role: 'member' },
       ],
       policy: {
-        mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
+        mode: 'ask', max_handoff_depth: 3,
         max_mentions_per_message: 3, daily_budget_usd: 5,
       },
       created_at: new Date(Date.now() - 7 * 86_400_000).toISOString(),
@@ -752,7 +752,7 @@ class MockTransport implements Transport {
         { agent_id: 'ag_mockwri2', role: 'member' },
       ],
       policy: {
-        mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
+        mode: 'ask', max_handoff_depth: 3,
         max_mentions_per_message: 3, daily_budget_usd: 5,
       },
       created_at: new Date(Date.now() - 2 * 86_400_000).toISOString(),
@@ -3759,9 +3759,9 @@ class MockTransport implements Transport {
           members: memberIDs.map((id) => ({ agent_id: id, role: id === owner ? 'owner' : 'member' })),
           // 未传的字段沿用 fixtures 那套默认（bridge 侧由 Group.Normalize 补）。
           policy: {
-            mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
+            mode: 'ask', max_handoff_depth: 3,
             max_mentions_per_message: 3, daily_budget_usd: 5,
-            ...policy,
+            ...mockGroupPolicyFilter(policy),
           },
           created_at: now, updated_at: now,
         }
@@ -3980,7 +3980,7 @@ class MockTransport implements Transport {
           break
         }
         if (patch.policy && typeof patch.policy === 'object') {
-          group.policy = { ...(group.policy as Record<string, unknown>), ...(patch.policy as Record<string, unknown>) }
+          group.policy = { ...(group.policy as Record<string, unknown>), ...mockGroupPolicyFilter(patch.policy) }
         }
         if (typeof patch.owner_agent_id === 'string' && patch.owner_agent_id.trim()) {
           // owner 转让是成对改写（与 bridge 的 hubGroupUpdate 同语义）：旧 owner 降 member、新 owner 升 owner。
@@ -5792,6 +5792,20 @@ function mockGroupMembers(group: Record<string, unknown>): Array<{ agent_id: str
 function mockGroupModeOK(raw: unknown): boolean {
   if (raw === undefined || raw === null || raw === '') return true
   return raw === 'ask' || raw === 'auto' || raw === 'readonly'
+}
+
+// 群策略里**还真生效**的键（P6-13）。已删的 max_parallel_runs / max_turns_per_human
+// 在真 bridge 里由 encoding/json 忽略（未知字段不报错），mock 也必须忽略 —— 否则
+// 旧客户端传一次就把它「存」进群对象，UI 看起来像还有个能拧的旋钮。
+const MOCK_GROUP_POLICY_KEYS = ['mode', 'max_handoff_depth', 'max_mentions_per_message', 'daily_budget_usd']
+function mockGroupPolicyFilter(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object') return {}
+  const src = raw as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  for (const k of MOCK_GROUP_POLICY_KEYS) {
+    if (k in src) out[k] = src[k]
+  }
+  return out
 }
 
 function mockMetricsReport(from: string): Record<string, unknown> {

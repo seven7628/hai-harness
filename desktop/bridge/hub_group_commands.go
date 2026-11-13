@@ -195,12 +195,13 @@ func (m *manager) hubGroupUpdate(c command) {
 	var patch struct {
 		Name         *string           `json:"name"`
 		OwnerAgentID *agenthub.AgentID `json:"owner_agent_id"`
-		Policy       *struct {
-			Mode             *string  `json:"mode"`
-			MaxHandoffDepth  *int     `json:"max_handoff_depth"`
-			MaxTurnsPerHuman *int     `json:"max_turns_per_human"`
-			MaxMentions      *int     `json:"max_mentions_per_message"`
-			DailyBudgetUSD   *float64 `json:"daily_budget_usd"`
+		// 字段级 patch：只认**还生效**的旋钮。已删的 max_parallel_runs / max_turns_per_human
+		// 不在结构里 → encoding/json 忽略未知键，旧客户端传它们既不报错也不改任何行为。
+		Policy *struct {
+			Mode            *string  `json:"mode"`
+			MaxHandoffDepth *int     `json:"max_handoff_depth"`
+			MaxMentions     *int     `json:"max_mentions_per_message"`
+			DailyBudgetUSD  *float64 `json:"daily_budget_usd"`
 		} `json:"policy"`
 		Pinned *bool `json:"pinned"`
 	}
@@ -222,9 +223,6 @@ func (m *manager) hubGroupUpdate(c command) {
 		// max_parallel_runs 已删除（P6-02/D1）：并发 = 本轮目标数，不再接受该旋钮。
 		if pp.MaxHandoffDepth != nil {
 			next.Policy.MaxHandoffDepth = *pp.MaxHandoffDepth
-		}
-		if pp.MaxTurnsPerHuman != nil {
-			next.Policy.MaxTurnsPerHuman = *pp.MaxTurnsPerHuman
 		}
 		if pp.MaxMentions != nil {
 			next.Policy.MaxMentions = *pp.MaxMentions

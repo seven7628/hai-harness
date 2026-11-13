@@ -411,6 +411,7 @@ func TestHubGroupPatchDeleteAndCreateContracts(t *testing.T) {
 			{"agent_id": string(a.ID), "role": "owner"},
 			{"agent_id": string(b.ID), "role": "member"},
 		},
+		// 顺带带上已删的 max_turns_per_human：旧客户端会这么传，必须被忽略而不是报错。
 		"policy": map[string]any{"mode": "ask", "max_handoff_depth": 4, "max_turns_per_human": 6, "daily_budget_usd": 10},
 	})
 	if !ok {
@@ -425,7 +426,7 @@ func TestHubGroupPatchDeleteAndCreateContracts(t *testing.T) {
 	}
 	gp := groupFromData(t, data)
 	if gp.Policy.Mode != agenthub.GroupModeAuto || gp.Policy.MaxHandoffDepth != 4 ||
-		gp.Policy.MaxTurnsPerHuman != 6 || gp.Policy.DailyBudgetUSD != 10 {
+		gp.Policy.DailyBudgetUSD != 10 {
 		t.Fatalf("policy patch reset fields: %+v", gp.Policy)
 	}
 

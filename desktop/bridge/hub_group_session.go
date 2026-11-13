@@ -826,7 +826,8 @@ type agentGroupWrite struct {
 // 只把 routeErr 交回调用方告警（final 的语义）。
 //
 // 不再有「人类发言后最多 N 条」的闸门（用户口径：群策略限制取消）：
-// 群策略 MaxTurnsPerHuman 字段保留只为兼容旧 JSON，不参与拦截。
+// 那个旋钮（max_turns_per_human）已从 GroupPolicy 整个删掉（P6-13）—— 留着一个
+// 谁都不读的字段等于给 UI 一个假开关；旧 JSON 里的这个键由 encoding/json 忽略。
 func (m *manager) appendAgentGroupMessageLocked(ctx context.Context, st agenthub.Store, g *agenthub.Group, sender agenthub.AgentID, w agentGroupWrite) (msg *agenthub.Message, routed *agenthub.Round, routeErr error, err error) {
 	var r *agenthub.Round
 	if !w.SkipRoute {
