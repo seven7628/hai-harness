@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 10:49",
-    "current": "R11b"
+    "updated": "2026-11-13 11:05",
+    "current": "R12"
   },
   "rounds": [
     {
@@ -898,8 +898,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "R10"
       ],
       "status": "done",
-      "commit": "a1596ba",
-      "review": "主会话复核：两条前置判据开工即否（kind === ' 实得 18 而非 0；rightTab 在 e2e 有 55 处/15 文件、src 47 行/4 文件）→ rightTab 拆 R11b。A/B/C 三件行为保持：14 项门禁逐项同数（无一条丢失），新增断言 registry+3 / builtin+2 / persist+3 / tabbar+1 / right-tabs+5；4 条变异全部真红（file defaultSpec→Q2、web defaultSpec→L27、icon→tabbar A1+眼睛图标、BUILTIN_KINDS 含 plugin:→注册表单测+P8）",
+      "commit": "ab3e12f",
+      "review": "主会话复核：两条前置判据开工即否（kind === ' 实得 18 而非 0；rightTab 在 e2e 有 55 处/15 文件、src 47 行/4 文件）→ rightTab 拆 R11b。A/B/C 三件行为保持：14 项门禁逐项同数（无一条丢失），新增断言 registry+3 / builtin+2 / persist+3 / tabbar+1 / right-tabs+5；4 条变异全部真红（file defaultSpec→Q2、web defaultSpec→L27、icon→tabbar A1+眼睛图标、BUILTIN_KINDS 含 plugin:→注册表单测+P8）；合并后在 main 复核 tsc 0 / tabbar 89 / persist 38 / right-tabs 225",
       "perf": [],
       "acc": [
         "无 TAB_KINDS 代码引用（白名单搬进注册表 BUILTIN_KINDS + isBuiltinKind；3 处注释说明历史）",
@@ -928,6 +928,26 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "删字段后 tabPatch/viewFields 的写穿一并去掉"
       ],
       "rollback": "字段删除与探针迁移同一个 PR；不迁移完不删字段（本轮的前提条件）"
+    },
+    {
+      "id": "R11c",
+      "pr": "PR-11c",
+      "title": "收紧 3 处真 legacy 判别：file 标签名走 provider.title / 去掉 provider 兜底 / 宿主判定改能力位",
+      "type": "清理",
+      "est": 0.5,
+      "deps": [
+        "R11"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [],
+      "acc": [
+        "03 §5.4 里标为「真 legacy」的 3 处（#4/#5 宿主判定、#7 file 标签名、#8 provider 兜底）各自有 provider 契约承载",
+        "kind === ' 从 16 行继续下降，且 14 处「标签形状/探针契约」不动",
+        "全部 RightPanel 探针逐项同数"
+      ],
+      "rollback": "三处互相独立，各自一个 commit；宿主判定涉及 embedHide，回滚优先保留行为"
     },
     {
       "id": "R12",
