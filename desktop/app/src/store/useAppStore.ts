@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import type { RightLayout } from '../lib/layout'
 import { afterDrag, collapse as layoutCollapse, expand as layoutExpand, normalizeLayout } from '../lib/layout'
-import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings, OfficeKitStatus } from '../transport/types'
+import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings, OfficeKitStatus, HubConversationSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 // 运行位收敛诊断（BR-15）：只做有界记录，状态改写仍在 store
 import { recordRunSettle, type RunSettleSource } from './events'
@@ -3365,6 +3365,7 @@ export interface AppState {
   setCodemodeEnabled(on: boolean): void // codemode 开关（乐观 + 持久化 + bridge 重建：注册/移除 codemode 工具）
   setCronEnabled(on: boolean): void // 定时任务开关（乐观 + 持久化 + bridge 重建：加载/卸载 cron 工具）
   setCronAutoClean(on: boolean): void // 自动清理开关（乐观 + 持久化）
+  setHubConversation(patch: HubConversationSettings): void // 群聊对话引擎全局护栏（P6-04/D8：合并写盘 + bridge 热重载）
   setMeshSessionEnabled(on: boolean): void // Session Mesh C1 开关（乐观 + 持久化 + bridge 热重载：加载/卸载 session_* 工具）
   setMeshRemoteEnabled(on: boolean): void // Session Mesh C2 远程开关（依赖 C1；乐观 + 持久化 + 网关启停）
   setMeshRemoteCfg(remote: NonNullable<MeshSettings['remote']>): void // 远程网关配置（listen/peers/token；保存即热重载）
@@ -3374,6 +3375,7 @@ export interface AppState {
   setSubagentConcurrency(patch: Partial<Pick<AgentSettings, 'max_subagents' | 'max_explore_subagents'>>): void // 子 agent 并发槽上限（乐观 + 持久化 + bridge 热更新）
   setCompressThreshold(t: number): void // 自动压缩触发阈值（占窗口比例；乐观 + 持久化 + bridge 热更新）
   setFirstChunkTimeout(sec: number): void // 首字预算秒数（乐观 + 持久化 + bridge 热更新）
+  setProviderConcurrency(n: number): void // provider 并发上限（P6-03；0 = 不限，上限 64）
   setSTTSettings(patch: Partial<STTSettings>): void // 语音输入（话筒）配置（乐观 + 持久化）
   openNewFolder(): void // 「新建文件夹…」：打开创建文件夹 modal
   closeNewFolder(): void
@@ -11653,6 +11655,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ settings: { ...s.settings, cron: { ...cur, auto_clean: on } }, cronAutoClean: on }))
     void transport.settingsSet({ cron: { ...cur, auto_clean: on } })
   },
+  // 群聊对话引擎全局护栏（P6-04/D8）：部分 patch 合并到已有 `hub.conversation`，
+  // 乐观回显 + 落盘 + reload_settings（bridge 重读限额，下一轮 pump 生效）。
+  // 注意：这些是**进程内限额**，已排队的 wake 不会被新值回溯改写；改完需要 Hub 重启
+  // 才影响正在跑的 loop（loop 在启动时读限额），报告里已标注。
+  setHubConversation: (patch) => {
+    const cur: HubConversationSettings = get().settings.hub?.conversation ?? {}
+    const next: HubConversationSettings = { ...cur, ...patch }
+    set((s) => ({ settings: { ...s.settings, hub: { ...(s.settings.hub ?? {}), conversation: next } } }))
+    void transport.settingsSet({ hub: { conversation: next } }).then((r) => {
+      if (!r.ok) return // 写盘失败：不通知 bridge（避免"未持久化却热生效"的假成功）
+      send({ type: 'reload_settings', payload: {} })
+    })
+  },
   // Session Mesh 开关（C1 本机互聊）：乐观更新 + 落盘 + bridge 热重载（加载/卸载 session_* 工具）
   setMeshSessionEnabled: (on) => {
     const cur = get().settings.mesh ?? { session_enabled: false, remote_enabled: false }
@@ -11751,6 +11766,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 首字预算（秒）：与 setCompressThreshold 同一套路（乐观更新 + 落盘 + 推送命令热更）。
   // 数值钳在 (0, 900]：0/负数/非有限值回退默认 90（0 会让每次尝试瞬间失败，是误配不是
   // 「关闭」）；超上界按 900 截断而非回退 —— 用户显式想放宽时不该被悄悄改小。
+  // provider 并发上限（P6-03）：进程级信号量，群聊并行投递时给上游限流。
+  // 0 = 不限（缺省），硬上限 64（再大等于不限，只会把上游打到 429）。
+  // 写盘后发 reload_settings —— bridge 在 reload 路径重建信号量（hub_session.go），
+  // 已启动的群 loop 共享同一个进程级信号量，所以下一次 reload 即生效。
+  setProviderConcurrency: (n) => {
+    const cur = get().settings.agent ?? { reminder_rounds: 30 }
+    const value = Number.isFinite(n) ? Math.max(0, Math.min(64, Math.round(n))) : 0
+    const agent: AgentSettings = { ...cur, max_concurrent_provider_calls: value }
+    set((s) => ({ settings: { ...s.settings, agent } }))
+    void transport.settingsSet({ agent }).then((r) => {
+      if (!r.ok) return // 写盘失败：不通知 bridge（避免"未持久化却热生效"的假成功）
+      send({ type: 'reload_settings', payload: {} })
+    })
+  },
   setFirstChunkTimeout: (sec: number) => {
     const cur = get().settings.agent ?? { reminder_rounds: 30 }
     const n = Math.round(sec)

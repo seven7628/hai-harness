@@ -14,7 +14,7 @@ import { HooksTab } from './HooksTab'
 import MobileTab from './MobileTab'
 import UsageStats from './UsageStats'
 import ProviderPage from './ProviderPage'
-import type { MeshSettings, AppSettings } from '../transport/types'
+import type { MeshSettings, AppSettings, HubConversationSettings } from '../transport/types'
 
 // 左侧导航分组（对齐设计稿：基础项 → 模型 → Agent 能力 → 数据与统计）。
 // 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不分组，顶部基础项）。
@@ -332,9 +332,152 @@ function GeneralTab() {
       )}
       {/* 办公组件（LibreOffice kit，R08d）：版本/体积/许可/路径/状态 + 重新探测。
           只展示与说明，**不自动下载** —— 分发是 PR-13。 */}
+      {/* 群聊对话引擎护栏（P6-04/D8）：`hub.conversation` 全局旋钮 + provider 并发上限 */}
+      <ConversationSection />
       <OfficeKitSection />
       {/* 语音输入（STT）：整段折进可折叠卡片（默认收起）——OpenAI 兼容 /audio/transcriptions 端点 */}
       <STTSection />
+    </>
+  )
+}
+
+// —— 群聊对话引擎护栏（P6-04/D8）：settings.json 顶层 `hub.conversation` ——
+// 这些是**所有群共用**的引擎护栏（不是群策略）：调的是「怎么防无限接龙」。
+// 毫秒类窗口在界面上按分钟展示（没人想算 600000），写回时 ×60000；
+// 每项改动立即落盘 + reload_settings —— 但**已启动的群 loop 读的是启动时的限额**，
+// 所以描述里明说「改完需重启 Hub 才影响正在跑的群」。
+const CONV_DEFAULTS = {
+  maxDepth: 1000,
+  pairLimit: 10,
+  pairWindowMs: 600_000,
+  idleResetMs: 1_800_000,
+  cooldownMs: 0,
+  runTimeoutMs: 600_000,
+  maxPendingWakes: 200,
+} as const
+const MIN_MS = 60_000
+
+function ConvRow({
+  label,
+  desc,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  label: string
+  desc: string
+  value: number
+  min: number
+  max?: number
+  step?: number
+  onChange: (n: number) => void
+}) {
+  return (
+    <div className="set-row">
+      <div>
+        <div className="set-label">{label}</div>
+        <div className="set-desc">{desc}</div>
+      </div>
+      <input
+        className="text-input"
+        type="number"
+        min={min}
+        max={max}
+        step={step ?? 1}
+        value={value}
+        onChange={(e) => {
+          const n = Number(e.target.value)
+          if (Number.isFinite(n) && n >= min && (max === undefined || n <= max)) onChange(Math.round(n))
+        }}
+      />
+    </div>
+  )
+}
+
+function ConversationSection() {
+  const t = useT()
+  const conv: HubConversationSettings = useAppStore((s) => s.settings.hub?.conversation) ?? {}
+  const providerCalls = useAppStore((s) => s.settings.agent?.max_concurrent_provider_calls) ?? 0
+  const setConv = useAppStore((s) => s.setHubConversation)
+  const toMin = (ms: number | undefined, fallback: number) =>
+    Math.max(1, Math.round((ms && ms > 0 ? ms : fallback) / MIN_MS))
+  return (
+    <>
+      <div className="settings-sec-title">{t('settings.conversation')}</div>
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.conversation')}</div>
+          <div className="set-desc">{t('settings.conversation.desc')}</div>
+        </div>
+      </div>
+      <ConvRow
+        label={t('settings.conversation.maxDepth')}
+        desc={t('settings.conversation.maxDepth.desc')}
+        value={conv.max_depth ?? CONV_DEFAULTS.maxDepth}
+        min={1}
+        max={100_000}
+        onChange={(n) => setConv({ max_depth: n })}
+      />
+      <ConvRow
+        label={t('settings.conversation.pairLimit')}
+        desc={t('settings.conversation.pairLimit.desc')}
+        value={conv.pair_limit ?? CONV_DEFAULTS.pairLimit}
+        min={1}
+        max={1000}
+        onChange={(n) => setConv({ pair_limit: n })}
+      />
+      <ConvRow
+        label={t('settings.conversation.pairWindow')}
+        desc={t('settings.conversation.pairWindow.desc')}
+        value={toMin(conv.pair_window_ms, CONV_DEFAULTS.pairWindowMs)}
+        min={1}
+        max={1440}
+        onChange={(n) => setConv({ pair_window_ms: n * MIN_MS })}
+      />
+      <ConvRow
+        label={t('settings.conversation.idleReset')}
+        desc={t('settings.conversation.idleReset.desc')}
+        value={toMin(conv.idle_reset_ms, CONV_DEFAULTS.idleResetMs)}
+        min={1}
+        max={1440}
+        onChange={(n) => setConv({ idle_reset_ms: n * MIN_MS })}
+      />
+      <ConvRow
+        label={t('settings.conversation.cooldown')}
+        desc={t('settings.conversation.cooldown.desc')}
+        value={conv.cooldown_ms ?? CONV_DEFAULTS.cooldownMs}
+        min={0}
+        max={600_000}
+        step={100}
+        onChange={(n) => setConv({ cooldown_ms: n })}
+      />
+      <ConvRow
+        label={t('settings.conversation.runTimeout')}
+        desc={t('settings.conversation.runTimeout.desc')}
+        value={toMin(conv.run_timeout_ms, CONV_DEFAULTS.runTimeoutMs)}
+        min={1}
+        max={1440}
+        onChange={(n) => setConv({ run_timeout_ms: n * MIN_MS })}
+      />
+      <ConvRow
+        label={t('settings.conversation.maxPending')}
+        desc={t('settings.conversation.maxPending.desc')}
+        value={conv.max_pending_wakes ?? CONV_DEFAULTS.maxPendingWakes}
+        min={1}
+        max={10_000}
+        onChange={(n) => setConv({ max_pending_wakes: n })}
+      />
+      {/* provider 并发上限属于 agent 节（进程级），和上面几项一起放：都是「群聊并行投递」的闸。 */}
+      <ConvRow
+        label={t('settings.conversation.providerCalls')}
+        desc={t('settings.conversation.providerCalls.desc')}
+        value={providerCalls}
+        min={0}
+        max={64}
+        onChange={(n) => useAppStore.getState().setProviderConcurrency(n)}
+      />
     </>
   )
 }

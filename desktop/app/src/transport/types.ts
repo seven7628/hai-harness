@@ -152,6 +152,20 @@ export interface AgentSettings {
   // 30s 时弱网模型每一轮都被切成「上游故障」，重试 10 次全废，用户侧恒表现为
   // 「总是异常」后耗尽成供应商侧故障。默认值已调宽到 90s，此处留给按 provider 特性再调。
   first_chunk_timeout?: number
+  // 进程级 provider 并发上限（P6-03，缺省/0 = 不限，硬上限 64）。群聊并行投递时
+  // 11 个目标会同时打 provider，这一层是「别把上游打到 429」的总闸；调小 = 更保守。
+  max_concurrent_provider_calls?: number
+}
+// 群聊对话引擎的全局护栏（P6-04/D8，settings.json 顶层 `hub.conversation`）。
+// **不是群策略**：调的是「对话引擎怎么防无限接龙」，所有群共用一套，0/缺省回落默认值。
+export interface HubConversationSettings {
+  max_depth?: number // 每条链的深度上限（P6-05，默认 1000）
+  pair_limit?: number // 无序 pair 在窗口内的成功投递上限（默认 10）
+  pair_window_ms?: number // pair 计数的滚动窗口（默认 600000 = 10 分钟）
+  idle_reset_ms?: number // 群空闲多久回 idle 并清零（默认 1800000 = 30 分钟）
+  cooldown_ms?: number // 两次自动唤醒之间的最小间隔（默认 0）
+  run_timeout_ms?: number // 单轮 run 上限（默认 600000；P6-08 才真正中断）
+  max_pending_wakes?: number // 待投递队列上限（默认 200）
 }
 // Session Mesh 运行状态（mesh_status 命令响应；设置页「别人怎么连我」数据源）。
 export interface MeshStatusInfo {
@@ -237,6 +251,7 @@ export interface AppSettings {
   codemode?: CodemodeSettings
   mesh?: MeshSettings // Session Mesh 会话间通信（缺省全关：开启后才注册 session_* 工具）
   agent?: AgentSettings // Agent 运行时设置（提醒阈值 + 子 agent 并发槽上限）
+  hub?: { conversation?: HubConversationSettings } // 群聊对话引擎全局护栏（P6-04/D8）
   stt?: STTSettings // 语音输入（话筒）配置；配置齐全才显示话筒按钮
   // 内嵌编辑器回滚开关（PR-05b）：false → 文件树/预览工具栏的「编辑」入口**不出现**。
   // 缺省（字段不存在）视为开启 —— 老 settings.json 不该因为少一个键就没了这条能力。
