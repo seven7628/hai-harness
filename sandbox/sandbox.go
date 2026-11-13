@@ -94,6 +94,25 @@ func (NoSandbox) Run(ctx context.Context, spec ExecSpec) (string, error) {
 	return runExec(ctx, cmd, spec)
 }
 
+// RunArgs 以 argv 形式执行外部命令（不经 sh -c），复用 runExec 的既有语义：
+// 独立进程组 + 超时/取消杀整组（含孙进程）+ 输出合并 + 结局回填。
+//
+// 为什么需要它（R08d）：soffice 的参数里带 `-env:UserInstallation=file://<profile>`，
+// profile 路径来自临时目录（可能含空格/中文）。拼 `sh -c` 要过两层转义（shell 引号 +
+// LibreOffice 自己的 file URL 解析），argv 直传没有这一层 —— 而**进程纪律不另写一套**：
+// kill(-pgid) 的升级、有界等待、部分输出说明全在 runExec 里，这里只是换了个启动方式。
+//
+// 不用 exec.CommandContext 的原因与 NoSandbox.Run 相同：CommandContext 在 ctx 结束时
+// 只杀**父 pid**，留下 soffice.bin 孤儿并占住 profile；runExec 的 cctx 分支杀整组，
+// 才是这里「必须可取消」的真实实现（00-conventions §1.4 的意图，不是那一行的字面形态）。
+func RunArgs(ctx context.Context, bin string, args []string, spec ExecSpec) (string, error) {
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = spec.Cwd
+	cmd.Env = isolatedEnv()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // 独立进程组
+	return runExec(ctx, cmd, spec)
+}
+
 // backendSelector 运行期按选择器切换执行后端：会话状态（如权限模式）动态变化时
 // 无需重建工具/loop，每次 Run 重新选择。picker 必须并发安全（多会话共享同名 loop
 // 的后端时可能被并行调用）。
