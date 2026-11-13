@@ -1947,3 +1947,26 @@ func TestForcedCompactCommandOnlyStillStops(t *testing.T) {
 		t.Fatalf("纯 compact 调用了模型 %d 次", p.calls)
 	}
 }
+
+// 纯 /compact 但历史里有旧正文：不能把历史正文误判成同批正文。
+// （Run 入口 inputMark 恒 0，必须按「命令之后」的原始批次判断。）
+func TestForcedCompactWithHistoryButNoNewTextStops(t *testing.T) {
+	p := &mockProvider{rounds: []func(handler func(provider.StreamEvent) error) error{
+		func(handler func(provider.StreamEvent) error) error {
+			t.Fatal("纯 compact 不应重答历史正文")
+			return nil
+		},
+	}}
+	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+	handler, _ := collectEvents()
+	ac := loop.Run(context.Background(), []core.Message{
+		core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: "旧问题：3+4 等于几？"}),
+		core.NewCommandMessage("compact", ""),
+	}, handler)
+	if ac.Err != nil {
+		t.Fatalf("run: %v", ac.Err)
+	}
+	if p.calls != 0 {
+		t.Fatalf("纯 compact 重答了历史正文，calls=%d", p.calls)
+	}
+}
