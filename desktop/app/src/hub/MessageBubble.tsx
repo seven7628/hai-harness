@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from 'react'
-import { Markdown } from '../components/markdown'
+import CollapsibleMarkdown from './CollapsibleMarkdown'
 import { EyeIcon, GitBranch } from '../components/icons'
 import { useT } from '../i18n'
 import type { HubMessage } from './types'
@@ -266,7 +266,11 @@ export function GroupBubble({
         time={time}
         dateTime={msg.created_at}
       >
-        <Markdown text={linkedText} renderMention={roster.length > 0 ? renderMention : undefined} />
+        <CollapsibleMarkdown
+          text={linkedText}
+          ariaLabel={who}
+          renderMention={roster.length > 0 ? renderMention : undefined}
+        />
         {/* 附件（图片 / 文件引用）：旧消息没有这个字段 → HubAttachments 自己返回 null。 */}
         <HubAttachments attachments={msg.attachments} />
       </UserMessage>
@@ -286,7 +290,11 @@ export function GroupBubble({
       onOpenAgent={agent && onSelectAgent && !agent.deleted ? () => onSelectAgent(agent.id) : undefined}
       footer={contextLine}
     >
-      <Markdown text={linkedText} renderMention={roster.length > 0 ? renderMention : undefined} />
+      <CollapsibleMarkdown
+        text={linkedText}
+        ariaLabel={who}
+        renderMention={roster.length > 0 ? renderMention : undefined}
+      />
       {/* agent 消息目前不带附件，但后端将来若回传（图片/文件）也要能显示，不能崩。 */}
       <HubAttachments attachments={msg.attachments} />
     </AgentMessage>

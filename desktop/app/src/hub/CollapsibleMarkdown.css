@@ -1,0 +1,188 @@
+/* Hub 正文「超长限高 + 查看完整详情」壳（CollapsibleMarkdown.tsx）。
+ *
+ * 独立文件、独立类名前缀（.cm-*）：hub.css 由附件区改造并行改动，两边不碰同一个
+ * 文件就不会冲突；也让这套折叠样式不依赖任何 Hub 版式（DM 气泡 / 群无气泡正文 /
+ * 将来的其他调用点都能直接用）。
+ *
+ * 颜色一律走既有主题令牌（--paper-2 / --ink / --text* / --border* / --accent-solid /
+ * --ease），深色 ink / 亮色 paper 两套主题自动跟随；不新造色板。
+ *
+ * 折叠本身由 JS 给 .cm-clip 一个内联 max-height（= COLLAPSE_HEIGHT，单一来源），
+ * 这里只负责「裁掉 + 底部渐隐」。渐隐用 mask 而不是渐变遮罩块：气泡底色是
+ * --hub-user-bubble / --user-bubble，纸底是 --bg —— 遮罩块要么选错色，要么每个
+ * 调用点再覆盖一次变量；mask 与底色无关，也不需要知道自己在谁里面。 */
+
+.cm {
+  display: block;
+  min-width: 0;
+}
+
+.cm-clip {
+  position: relative;
+  min-width: 0;
+}
+
+/* 渐隐 56px：够让最后一行读起来是「没写完」，又不至于把可见内容糊掉一大块。 */
+.cm-clip.is-clipped {
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent 100%);
+}
+
+/* flow-root：内层永远保持**真实内容高度**（不被裁剪、也不让首尾外边距漏出去），
+   ResizeObserver 量的就是它 —— 图片/字体/iframe 晚到都会重新上报。 */
+.cm-inner {
+  display: flow-root;
+  min-width: 0;
+}
+
+.cm-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 6px;
+}
+
+/* 用 currentColor 混色而不是 --surface：这个按钮会出现在纸底、暖色用户气泡、
+   以及将来任何底色上，只跟着前景色走就不会出现「一块颜色对不上的药丸」。
+
+   选择器写成 `.cm .cm-more-btn` 而不是单类：demo.css 有
+   `.hub-demo button{border:0;background:none;padding:0}`（0,1,1），单类（0,1,0）
+   会被它整块压掉 —— 按钮就退化成一行裸字（实测：圆角还在，边框/内边距/底色全没了）。
+   同一坑 hub.css 里已有两处先例（.hub-demo button.artifact-line / .hub-context-jump）。 */
+.cm .cm-more-btn {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: 999px;
+  padding: 4px 14px;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  opacity: 0.82;
+  transition: opacity 120ms var(--ease), border-color 120ms var(--ease);
+}
+.cm .cm-more-btn:hover {
+  opacity: 1;
+  border-color: color-mix(in srgb, currentColor 55%, transparent);
+}
+/* 键盘必须看得见焦点（鼠标点完不留环：focus-visible 而非 focus）。 */
+.cm .cm-more-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+/* —— 完整内容弹窗 ——
+ * portal 到 body：.messages 是滚动容器，就地弹会被裁/跟随滚动；同时脱离
+ * .hub-demo[data-theme] 的暖色作用域，改用 App 级弹窗的令牌口径（与 .modal-hint
+ * 同一层语义）。z-index 120：高于 Hub 自己的 .hub-modal-scrim(60) 与 .modal-hint(100)，
+ * 低于提示类浮层(200+)。 */
+.cm-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.5);
+  animation: cm-fade-in 140ms var(--ease);
+}
+
+.cm-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 92vw);
+  max-height: 86vh;
+  background: var(--paper-2);
+  color: var(--ink);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  animation: cm-rise 160ms var(--ease);
+}
+/* 容器只是「焦点落点」（无焦点元素时兜底），不画焦点环。 */
+.cm-dialog:focus {
+  outline: none;
+}
+
+.cm-dialog-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.cm-dialog-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+/* 作者名：标题的定语（「完整内容 · Alice」），过长时省略而不是把关闭按钮挤走。 */
+.cm-dialog-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.cm-dialog-close {
+  flex: none;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.cm-dialog-close:hover {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: var(--text);
+}
+.cm-dialog-close:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+/* 正文自己滚：对话框钉在 86vh，长文不把关闭按钮顶出屏幕。
+   overscroll-behavior: contain —— 滚到底再滚不会把滚动传给背景（背景已 overflow:hidden，
+   这条是触控板惯性滚动的兜底）。 */
+.cm-dialog-body {
+  padding: 16px 18px 20px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 14px;
+  line-height: 1.66;
+}
+
+@keyframes cm-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes cm-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 动效敏感：遮罩与卡片都直接出现（不淡入、不位移），按钮过渡也去掉。 */
+@media (prefers-reduced-motion: reduce) {
+  .cm-scrim,
+  .cm-dialog {
+    animation: none;
+  }
+  .cm .cm-more-btn {
+    transition: none;
+  }
+}

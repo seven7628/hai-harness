@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Markdown } from '../components/markdown'
+import CollapsibleMarkdown from './CollapsibleMarkdown'
 import { AccessIcon, Bot, ImageIcon, LayersIcon, MoreIcon, PaperclipIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
 import { useLang, useT } from '../i18n'
 import { useHubStore } from './useHubStore'
@@ -382,7 +382,7 @@ export default function HubSurface() {
                       tags={<span className="agent-tag reply">{t('hub.streaming')}</span>}
                       className="streaming"
                     >
-                      <Markdown text={live} streaming />
+                      <CollapsibleMarkdown text={live} streaming ariaLabel={activeAgent.name} />
                     </AgentMessage>
                   ) : null}
                   {dmDrafts.map((d) => (
@@ -396,7 +396,7 @@ export default function HubSurface() {
                       // 兜底出来的 live 气泡不是同一件事 —— 浏览器回归靠它区分两条路径。
                       className="streaming dm-draft"
                     >
-                      <Markdown text={d.text} streaming />
+                      <CollapsibleMarkdown text={d.text} streaming ariaLabel={activeAgent.name} />
                     </AgentMessage>
                   ))}
                   {/* 「思考中」只在完全没有任何流式内容时出现：多气泡时每条草稿
@@ -552,7 +552,7 @@ function HubBubble({
         time={time}
         dateTime={msg.created_at}
       >
-        <Markdown text={msg.text ?? ''} />
+        <CollapsibleMarkdown text={msg.text ?? ''} ariaLabel="你" />
         <HubAttachments attachments={msg.attachments} />
       </UserMessage>
     )
@@ -568,7 +568,7 @@ function HubBubble({
       dataSeq={seq}
       className={hl}
     >
-      <Markdown text={msg.text ?? ''} />
+      <CollapsibleMarkdown text={msg.text ?? ''} ariaLabel={agent?.name || '智能体'} />
       <HubAttachments attachments={msg.attachments} />
     </AgentMessage>
   )
