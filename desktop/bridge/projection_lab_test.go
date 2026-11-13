@@ -74,11 +74,16 @@ func TestProjectionEquivalence(t *testing.T) {
 	// 内容键：tool_id / request_id / run_id（块的自然身份）→ 都���有则退化到 id。
 	stored := map[string][]byte{}
 	for _, span := range rec.LoadedBlockSpans {
-		k := blockKey(span)
+		// 惰性解压：压缩块的 Raw 是压缩字节，先取逻辑内容。
+		logical, lerr := span.Logical()
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		k := blockKey(logical)
 		if _, dup := stored[k]; dup {
 			continue
 		}
-		stored[k] = span
+		stored[k] = logical
 	}
 	t.Logf("磁盘真值：%d 块（%d 个唯一内容键）", len(rec.LoadedBlockSpans), len(stored))
 

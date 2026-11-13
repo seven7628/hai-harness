@@ -837,21 +837,36 @@ func parseCheckpointFromRecord(rec *session.SessionRecord) (*Checkpoint, error) 
 //
 // 用原子取号而不是静态分片：块大小差异极大（一行文本 vs 整段工具输出），
 // 静态切分会让某个 worker 拖尾。实测 30.8k 块：1 worker 850ms、8 worker 234ms。
-func decodeBlocksParallel(spans [][]byte, hashes [][8]byte, out []Block) error {
+// decodeBlocksParallel 并行解码各块（JSON → Block）。
+//
+// ## 惰性解压（P5）
+//
+// span 里的**压缩块**的 Raw 是 zlib 字节 ⇒ 这里才解压（Logical），
+// 解压后按**逻辑内容**校验摘要再解 JSON。
+//
+// 顺序不能变：摘要（payloadDigest）算的是逻辑内容，拿压缩字节去比必错。
+// 实测收益：打开会话时不再把整份 sidecar 的 3.8 万块逐个解压进堆
+// （259MB/会话 → 0），只有真正要解的那几千块付解压成本。
+func decodeBlocksParallel(spans []session.BlockSpan, hashes [][8]byte, out []Block) error {
 	if len(spans) != len(out) {
 		return fmt.Errorf("block spans %d != out %d", len(spans), len(out))
 	}
 	if hashes != nil && len(hashes) != len(spans) {
 		return fmt.Errorf("block hashes %d != spans %d", len(hashes), len(spans))
 	}
-	verify := func(i int) error {
+	// logical 取逻辑内容并校验摘要（hashes 为 nil 时只取内容）。
+	logical := func(i int) ([]byte, error) {
+		raw, err := spans[i].Logical()
+		if err != nil {
+			return nil, fmt.Errorf("block %d: %w", i, err)
+		}
 		if hashes == nil {
-			return nil
+			return raw, nil
 		}
-		if d := session.PayloadDigest(spans[i]); d != hashes[i] {
-			return fmt.Errorf("block %d: payload checksum mismatch", i)
+		if d := session.PayloadDigest(raw); d != hashes[i] {
+			return nil, fmt.Errorf("block %d: payload checksum mismatch", i)
 		}
-		return nil
+		return raw, nil
 	}
 	workers := runtime.GOMAXPROCS(0)
 	if workers > 8 {
@@ -859,10 +874,11 @@ func decodeBlocksParallel(spans [][]byte, hashes [][8]byte, out []Block) error {
 	}
 	if workers <= 1 || len(spans) < 64 {
 		for i := range spans {
-			if err := verify(i); err != nil {
+			raw, err := logical(i)
+			if err != nil {
 				return err
 			}
-			if err := json.Unmarshal(spans[i], &out[i]); err != nil {
+			if err := json.Unmarshal(raw, &out[i]); err != nil {
 				return fmt.Errorf("block %d: %w", i, err)
 			}
 		}
@@ -881,7 +897,8 @@ func decodeBlocksParallel(spans [][]byte, hashes [][8]byte, out []Block) error {
 				if i >= len(spans) {
 					return
 				}
-				if err := verify(i); err != nil {
+				raw, err := logical(i)
+				if err != nil {
 					mu.Lock()
 					if firstErr == nil {
 						firstErr = err
@@ -889,7 +906,7 @@ func decodeBlocksParallel(spans [][]byte, hashes [][8]byte, out []Block) error {
 					mu.Unlock()
 					return
 				}
-				if err := json.Unmarshal(spans[i], &out[i]); err != nil {
+				if err := json.Unmarshal(raw, &out[i]); err != nil {
 					mu.Lock()
 					if firstErr == nil {
 						firstErr = fmt.Errorf("block %d: %w", i, err)
@@ -943,7 +960,7 @@ func parseCheckpointFromRecordWindow(rec *session.SessionRecord, limit int) (*Ch
 		decoded[i] = struct{}{}
 	}
 
-	selSpans := make([][]byte, len(need))
+	selSpans := make([]session.BlockSpan, len(need))
 	selHashes := make([][8]byte, len(need))
 	hasHashes := len(rec.LoadedBlockHashes) == n
 	for j, i := range need {
@@ -962,7 +979,7 @@ func parseCheckpointFromRecordWindow(rec *session.SessionRecord, limit int) (*Ch
 	}
 
 	pagedIDs := make([]uint64, 0, start)
-	pagedSpans := make([][]byte, 0, start)
+	pagedSpans := make([]session.BlockSpan, 0, start)
 	pagedHashes := make([][8]byte, 0, start)
 	for i := 0; i < start; i++ {
 		if _, ok := decoded[i]; ok {

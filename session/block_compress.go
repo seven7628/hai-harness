@@ -267,7 +267,12 @@ func (bs *blockStore) rewriteWithCompression(snap *compactSnapshot, compressed, 
 		if c, cok := compressBlock(payload); cok {
 			stored = c
 			recKind |= kindCompressed
-			*compressed++
+			// 只数「**这次新压上的**」块：已经压过的块重压一次不算数 ——
+			// 否则这个计数永远等于「全部块数」，看不出到底有没有进展
+			// （而且 rewritten 的判据 `compressed > 0` 就永远为真）。
+			if !isCompressed(ref.kind) {
+				*compressed++
+			}
 		}
 		head := buildBlockRecordHead(recKind, id, stored)
 		payloadOff := pos + int64(len(head))
@@ -397,6 +402,39 @@ func SweepBlockStores(root string, pause time.Duration, ix *SweepIndex) (Compres
 	return res, nil
 }
 
+// hasCompressibleUncompressed 报告「有没有**未压缩且压得动**的块」。
+//
+// ## 为什么不是「有没有未压缩块」
+//
+// 实测（2026-11-13）：每个 sidecar 里剩下的未压缩块**100% 压不动**
+// （内容本身是随机/二进制，压了反而更大）。zlib 压不动时 compressBlock 返回
+// ok=false ⇒ 块保持未压缩 ⇒ 老判据「有未压缩块 ⇒ 需要重写」永远为真 ⇒
+// **每次启动都把整份 sidecar 解压一遍、压一遍、重写一遍**（实测 10.5s +
+// 96MB 重写），而文件内容一个字节都没变。
+//
+// 后果有两层：白烧 CPU/IO；重写改了 mtime ⇒ 清扫索引的指纹失效 ⇒ 下次
+// 启动照样重扫。**索引本来能把这轮整个跳过的**。
+//
+// 所以判据必须是「压得动」：压不动的内容，试一万次也压不动 ⇒ 不该重写。
+func (bs *blockStore) hasCompressibleUncompressed() bool {
+	for _, ref := range bs.index {
+		if isCompressed(ref.kind) {
+			continue
+		}
+		if ref.n <= 0 {
+			continue
+		}
+		payload := make([]byte, ref.n)
+		if _, err := bs.f.ReadAt(payload, ref.off); err != nil {
+			continue // 读不出来 = 坏块，交给别的路径报错，不在这里重写
+		}
+		if _, ok := compressBlock(payload); ok {
+			return true // 找到一个就够了
+		}
+	}
+	return false
+}
+
 // sweepOneBlockStore 压一个 sidecar（与提交/compact 共用按路径锁）。
 func sweepOneBlockStore(path string) (bool, int, int, error) {
 	unlock := lockRecord(path)
@@ -406,15 +444,10 @@ func sweepOneBlockStore(path string) (bool, int, int, error) {
 	if err != nil {
 		return false, 0, 0, err
 	}
-	// 已经有压缩块且没有未压缩块 → 跳过（幂等：二次清扫不重写）。
-	need := false
-	for _, ref := range bs.index {
-		if !isCompressed(ref.kind) {
-			need = true
-			break
-		}
-	}
-	if !need {
+	// 没有「未压缩且压得动」的块 → 跳过（幂等：二次清扫不重写）。
+	// 见 hasCompressibleUncompressed 的说明：老判据「有未压缩块」会让
+	// **每次启动都重写整份文件**（内容还是压不动那批）。
+	if !bs.hasCompressibleUncompressed() {
 		// 什么都没改 → **不落盘**地关闭。Close() 会 fsync 整个 sidecar +
 		// 重写 .idx，而这次调用一个字节都没改（实测每次启动 477 次）。
 		bs.closeQuiet()

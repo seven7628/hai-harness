@@ -57,13 +57,18 @@ func TestLoadRecordForViewMapsBlocksWithoutAssembly(t *testing.T) {
 		t.Fatalf("hashes=%d want %d", len(loaded.LoadedBlockHashes), len(blocks))
 	}
 	for i, span := range loaded.LoadedBlockSpans {
-		if d := PayloadDigest(span); d != loaded.LoadedBlockHashes[i] {
+		// 惰性解压：压缩块的 Raw 是压缩字节，先取逻辑内容。
+		logical, lerr := span.Logical()
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if d := PayloadDigest(logical); d != loaded.LoadedBlockHashes[i] {
 			t.Fatalf("块 %d 摘要与索引不符", i)
 		}
 		var b struct {
 			ID uint64 `json:"id"`
 		}
-		if err := json.Unmarshal(span, &b); err != nil {
+		if err := json.Unmarshal(logical, &b); err != nil {
 			t.Fatalf("块 %d 解码失败: %v", i, err)
 		}
 		if b.ID != uint64(i+1) {

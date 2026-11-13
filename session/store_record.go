@@ -105,11 +105,14 @@ type SessionRecord struct {
 	// 不持久化：它是单次提交的执行提示，不是数据。
 	DirtyBlocks map[uint64]struct{} `json:"-"`
 
-	// LoadedBlockSpans 是**读回**时各个 block 的字节切片（仅 sidecar 引用形态有），
+	// LoadedBlockSpans 是**读回**时各个 block 的字节来源（仅 sidecar 引用形态有），
 	// 与最终 ViewCheckpoint 中 blocks 数组的元素一一对应。
 	// 用途：恢复路径并行解码（避免对 210MB 做单线程 json.Unmarshal）。
 	// 不持久化；与 BlockSpans 方向相反（那是写、这是读）。
-	LoadedBlockSpans [][]byte `json:"-"`
+	//
+	// **压缩块的 Raw 是压缩字节**（Compressed=true），要 Logical() 才是逻辑内容 ——
+	// 解压推迟到真正解码那几块时（见 block_span.go 的 P5 惰性解压）。
+	LoadedBlockSpans []BlockSpan `json:"-"`
 
 	// BodyView 是解析前的原始 view：blocks 仍是 sidecar 引用（未展开成数组）。
 	// 恢复路径用它做「骨架解码 + 并行块解码」，不必扫描展开后的 210MB。

@@ -39,9 +39,12 @@ const checkpointSchemaVersion = session.ViewCheckpointSchemaVersion
 // schema_version + blocks + run_nodes + turns。
 // PagedBlocks 是窗口恢复时「未解码」的那部分块：ids/spans 按 id 升序，
 // spans 指向 sidecar 只读映射，Release 由持有者调用（幂等）。
+//
+// spans 里压缩块的 Raw 是**压缩字节**（惰性解压，见 session/block_span.go）：
+// 翻历史时按页解压那一页，不为整份会话付解压成本。
 type PagedBlocks struct {
 	IDs     []uint64
-	Spans   [][]byte
+	Spans   []session.BlockSpan
 	Hashes  [][8]byte
 	Release func()
 }
@@ -4456,7 +4459,15 @@ func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.R
 		limit = 50
 	}
 	// 定位 beforeID 之前的最后一页；beforeID==0 表示「最新一页」。
+	//
+	// **窗口恢复时 end 不能取 total**（2026-11-13 修）：total 含**未加载进内存**
+	// 的历史块（r.blocksTotal，实测 40,819），而 view 只有窗口那几百块 ⇒
+	// `view[start:end]` 越界 panic（实测 blocks_page before_id=0 必崩）。
+	// 「最新一页」就是内存窗口的尾巴 ⇒ end 取 len(view)。
 	end := total
+	if beforeID == 0 {
+		end = len(view)
+	}
 	if beforeID > 0 {
 		// 游标 = 上一页**第一块**的 id（稳定锚点）→ 在数组里找到它的位置 →
 		// 取它**之前**的 limit 个块。
@@ -4511,6 +4522,10 @@ func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.R
 	}
 	nextCursor = page[0].ID
 	hasMore = start > 0
+	// 窗口恢复：内存窗口之外还有历史块 ⇒ 还有更早的（前端会拿 nextCursor 去要）。
+	if r.paged != nil && r.blocksTotal > len(view) {
+		hasMore = true
+	}
 	return blocks, nextCursor, hasMore, total, nil
 }
 

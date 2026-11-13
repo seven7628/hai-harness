@@ -445,7 +445,9 @@ func TestCheckpointSerdeLab(t *testing.T) {
 					func() int {
 						n := 0
 						for _, sp := range cp5.PagedBlocks.Spans {
-							n += len(sp)
+							// 惰性解压：Raw 是**磁盘字节**（压缩块仍是压缩的）
+							// ⇒ 这里量的是「映射了多少字节」，不是「占了多少堆」。
+							n += len(sp.Raw)
 						}
 						return n
 					}(), len(cp5.Turns), len(cp5.Diffs))
@@ -477,6 +479,11 @@ func TestCheckpointSerdeLab(t *testing.T) {
 			f, ferr := os.Create(hp)
 			if ferr == nil {
 				runtime.GC()
+				// 必须 KeepAlive：keep/cps 只在下面的 Logf 里被用（仅取 len），
+				// 逃逸分析会判定它在写剖析前已死 ⇒ runtime.GC() 把 8GB 全回收了
+				// ⇒ 剖析里空空如也（踩过一次）。
+				runtime.KeepAlive(keep)
+				runtime.KeepAlive(cps)
 				if perr := pprof.WriteHeapProfile(f); perr != nil {
 					t.Logf("heap profile: %v", perr)
 				}

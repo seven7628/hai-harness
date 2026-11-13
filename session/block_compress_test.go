@@ -274,8 +274,16 @@ func TestCompressedBlockThroughMappedView(t *testing.T) {
 	if !ok {
 		t.Fatal("mmap 读不回压缩块")
 	}
-	if string(got) != string(payload) {
-		t.Fatalf("mmap 读回内容不一致（%d vs %d 字节）", len(got), len(payload))
+	// 惰性解压：span 里是**压缩字节**，逻辑内容要显式取。
+	if !got.Compressed {
+		t.Fatal("压缩块的 span 应标记 Compressed")
+	}
+	logical, lerr := got.Logical()
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if string(logical) != string(payload) {
+		t.Fatalf("mmap 读回内容不一致（%d vs %d 字节）", len(logical), len(payload))
 	}
 	if sum != payloadDigest(payload) {
 		t.Fatal("mmap 的摘要不是逻辑内容摘要")

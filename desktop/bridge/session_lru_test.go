@@ -6,10 +6,31 @@ import (
 	"time"
 )
 
-// TestMaxLiveSessions 预算判据：256MB ÷ 1.5MB 会算出 170，必须被 64 的句柄上限截住。
+// TestMaxLiveSessions 上限 = min(内存预算 ÷ 单会话成本, 句柄硬上限)。
+//
+// 2026-11-13：单会话成本从 1.5MB 修正到 96MB（实测 152MB/会话 —— 旧值把
+// 「压缩块解压进堆」那 259MB 算成了 0，见 main.go 里 LRU 常量的注释）⇒
+// **内存预算先于句柄上限触发**，上限从 64 降到 5。
+//
+// 旧版这条测试断言「上限 == 硬上限」，那正是算错成本的产物：64 × 420MB
+// = 27GB 能同时驻留。
 func TestMaxLiveSessions(t *testing.T) {
-	if got := maxLiveSessions(); got != maxLiveSessionsHard {
-		t.Fatalf("maxLiveSessions=%d want %d", got, maxLiveSessionsHard)
+	want := int(sessionMemBudgetBytes / sessionLiveCostBytes)
+	if want > maxLiveSessionsHard {
+		want = maxLiveSessionsHard
+	}
+	if want < 1 {
+		want = 1
+	}
+	if got := maxLiveSessions(); got != want {
+		t.Fatalf("maxLiveSessions=%d want %d", got, want)
+	}
+	// 上限必须真的有界：单会话成本若被改回「KB 级」，上限会失控。
+	if sessionLiveCostBytes < 1<<20 {
+		t.Fatalf("单会话成本 %d 太小 ⇒ 上限失控", sessionLiveCostBytes)
+	}
+	if maxLiveSessions() > 8 {
+		t.Fatalf("同时驻留的会话上限 %d 太大（单会话实测 152MB）", maxLiveSessions())
 	}
 }
 
