@@ -32,7 +32,7 @@ export const fileSurface: SurfaceProvider = {
     : tab.mode === 'edit'
       ? <Editor tab={tab} />
       : tab.mode === 'preview'
-        ? <PreviewPanel path={tab.path} />
+        ? <PreviewPanel path={tab.path} tabId={tab.id} />
         : <FilePreviewTab tab={tab} />),
 }
 

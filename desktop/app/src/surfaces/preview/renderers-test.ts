@@ -1,4 +1,4 @@
-// 内置预览渲染器的**接线**冒烟测试（R08a 三个 + R08b 四个）
+// 内置预览渲染器的**接线**冒烟测试（R08a 三个 + R08b 四个 + R08c 一个）
 //
 // 为什么单测注册表之后还要这一份：注册表测试用的是假渲染器，证明不了「真渲染器被注册了」
 // 与「load() 真的解出一个组件」。后者正是 04-review F45/F48 那一类静默失败 ——
@@ -10,27 +10,28 @@ import assert from 'node:assert/strict'
 import './renderers'
 import { fileRefOf, listRenderers, pickRenderer } from './registry'
 
-test('renderers/index 的副作用注册了 7 个渲染器（id 即 data-renderer）', () => {
-  assert.deepEqual(listRenderers().map((r) => r.id), ['csv', 'image', 'text', 'pdf', 'docx', 'pptx', 'xlsx'])
+test('renderers/index 的副作用注册了 8 个渲染器（id 即 data-renderer）', () => {
+  assert.deepEqual(listRenderers().map((r) => r.id), ['csv', 'image', 'text', 'pdf', 'docx', 'pptx', 'xlsx', 'media'])
 })
 
-test('weight 口径：专用格式(100) > image(80) > csv(60) > text(10)，与 types.PreviewWeight 注释一致', () => {
+test('weight 口径：专用格式(100) > media(90) > image(80) > csv(60) > text(10)，与 types.PreviewWeight 注释一致', () => {
   const w: Record<string, number> = Object.fromEntries(listRenderers().map((r) => [r.id, r.weight]))
-  assert.ok(w.pdf > w.image && w.image > w.csv && w.csv > w.text, '顺序变了就等于换了赢家，必须显式钉住')
+  assert.ok(w.pdf > w.media && w.media > w.image && w.image > w.csv && w.csv > w.text, '顺序变了就等于换了赢家，必须显式钉住')
   for (const id of ['pdf', 'docx', 'pptx', 'xlsx']) {
     assert.ok(w[id] > w.text, `${id} 必须压过文本兜底（否则会被渲染成空代码面）`)
   }
   // 字面量断言放最后：@types/node 的 deepStrictEqual 是 `asserts actual is T`，写在前面会把
   // w 的类型收窄成那个字面量对象，后面的 w[id] 就索引不动了（TS7053）。
-  assert.deepEqual(w, { csv: 60, image: 80, text: 10, pdf: 100, docx: 100, pptx: 100, xlsx: 100 })
+  assert.deepEqual(w, { csv: 60, image: 80, text: 10, pdf: 100, docx: 100, pptx: 100, xlsx: 100, media: 90 })
 })
 
-test('requires：pdf→embed，docx/pptx/xlsx→conversion（挂载前拦截，写明缺什么）', () => {
+test('requires：pdf→embed，docx/pptx/xlsx→conversion，media→media（挂载前拦截，写明缺什么）', () => {
   const req = Object.fromEntries(listRenderers().map((r) => [r.id, r.requires]))
   assert.deepEqual(req.pdf, ['embed'])
   assert.deepEqual(req.docx, ['conversion'])
   assert.deepEqual(req.pptx, ['conversion'])
   assert.deepEqual(req.xlsx, ['conversion'])
+  assert.deepEqual(req.media, ['media'], '音视频要 hai-media:// 通道（Range），缺了不该渲染黑着的 <video>')
   assert.equal(req.text, undefined, '文本兜底无依赖')
 })
 
@@ -52,11 +53,12 @@ test('按扩展名命中正确的渲染器（大小写不敏感 / .tsv 也是表
   assert.equal(pickRenderer(fileRefOf('README.md'))?.id, 'text', 'markdown 渲染器不在本轮：落 text')
 })
 
-test('本轮边界：media（mp4/mp3）与未知二进制仍无渲染器 → undefined（Host 给 unavailable 占位）', () => {
+test('R08c：音视频命中 media（mp4/mp3/mkv 都是），未知二进制仍无渲染器', () => {
   // binary=true 是 bridge 对这几类格式的真实判定（file_preview 回 binary + 空 content）
-  for (const p of ['a.mp4', 'a.mp3', 'a.zip']) {
-    assert.equal(pickRenderer(fileRefOf(p, 0, true)), undefined, `${p} 不该在 R08b 有渲染器（media 是 R08c）`)
+  for (const p of ['a.mp4', 'a.mp3', 'a.mkv', 'a.wav', 'CAMERA.MOV']) {
+    assert.equal(pickRenderer(fileRefOf(p, 0, true))?.id, 'media', `${p} 必须落到 media 渲染器`)
   }
+  assert.equal(pickRenderer(fileRefOf('a.zip', 0, true)), undefined, '未知二进制仍给 unavailable 占位')
   assert.equal(pickRenderer(fileRefOf('a.zip'))?.id, 'text', '同样的扩展名但 bridge 判成文本 → text 接得住')
 })
 

@@ -87,6 +87,12 @@ declare global {
       // python-pptx 不能渲染），故文档/UI 措辞都要带「近似」，别在前端许诺保真。
       watchDocx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string }>
       watchPptx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string }>
+      // R08c 媒体：协议 URL / ffprobe 元信息 / 协议计数器（类型见 src/lib/mediaProbe.ts）
+      mediaUrl: (p: { path: string; workspace: string }) => Promise<{ ok: boolean; url?: string; abs?: string; error?: string }>
+      mediaProbe: (p: { path: string; workspace: string }) => Promise<{ ok: boolean; error?: string; data?: unknown }>
+      mediaStats: () => Promise<{ requests: number; rangeRequests: number; firstByteHits: number; bytesServed: number }>
+      /** 工作区移除时回收媒体根（主进程已知工作区清单）。旧主进程没有这个方法 → 可选调用。 */
+      workspaceForget?: (p: string) => Promise<{ ok: boolean; error?: string }>
       onEmbedNav: (cb: (state: unknown) => void) => () => void
       onEmbedAiAction: (cb: (action: unknown) => void) => () => void
       // srcPath：预览的源文件路径 —— office 转换产物每次换临时 html_path，只有源文件能认得出

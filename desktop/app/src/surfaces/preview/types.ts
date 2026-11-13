@@ -29,6 +29,12 @@ export interface FileRef {
  */
 export interface PreviewProps {
   file: FileRef
+  /**
+   * 标签 id（`file` 标签的身份）。R08c 起用于媒体元素池的 owner 归属：
+   * 关标签时只有「这个标签」的 owner 被摘掉，别的标签还在播同一个文件就不受影响。
+   * 其余渲染器用不到（可选，不传也能工作）。
+   */
+  tabId?: string
   /** 文本内容；二进制渲染器（image/pdf/office）不使用，为 ''。 */
   content: string
   /**

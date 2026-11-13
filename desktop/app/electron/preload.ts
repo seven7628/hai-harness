@@ -183,6 +183,14 @@ contextBridge.exposeInMainWorld('desktop', {
   // 只是主进程侧换 bridge 命令（mammoth / python-pptx）。调用方见 store 的 previewOfficeFile。
   watchDocx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('docx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string }>,
   watchPptx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('pptx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string }>,
+  // 音视频（R08c）：`<video src>` 用 `hai-media://`（主进程按 Range 回 206，不把文件读进内存）。
+  // mediaUrl 只对工作区内的媒体扩展名给 URL；mediaProbe 是 ffprobe 元信息（缺 ffprobe 时
+  // 仍是 ok:true + available:false —— 降级不算错误）；mediaStats 是协议计数器（e2e 判据）。
+  mediaUrl: (p: { path: string; workspace: string }) => ipcRenderer.invoke('media:url', p) as Promise<{ ok: boolean; url?: string; abs?: string; error?: string }>,
+  mediaProbe: (p: { path: string; workspace: string }) => ipcRenderer.invoke('media:probe', p) as Promise<{ ok: boolean; error?: string; data?: unknown }>,
+  mediaStats: () => ipcRenderer.invoke('media:stats') as Promise<{ requests: number; rangeRequests: number; firstByteHits: number; bytesServed: number }>,
+  // 工作区被移除时回收「媒体根」（主进程的 known-workspaces 清单）。只是通知，不带路径推断。
+  workspaceForget: (p: string) => ipcRenderer.invoke('workspace:forget', p) as Promise<{ ok: boolean; error?: string }>,
   onEmbedNav: (cb: (state: unknown) => void) => {
     const listener = (_e: unknown, state: unknown) => cb(state)
     ipcRenderer.on('embed-nav', listener)

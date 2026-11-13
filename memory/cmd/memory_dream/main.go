@@ -198,7 +198,7 @@ func main() {
 	}
 	for i, id := range ids {
 		if i > 0 {
-			fmt.Println("\n---\n")
+			fmt.Print("\n---\n") // 结尾自带换行：用 Print 而不是 Println（vet 的 redundant newline）
 		}
 		rep, err := cfg.Dream(memory.Dir{ID: id, Path: filepath.Join(base, id)})
 		if err != nil {

@@ -30,6 +30,9 @@ import type { SignalFact } from '../lib/signalFacts'
 // store 侧保留同名 re-export —— RightPanel 等调用点的 import 路径不变（本轮零行为变化），
 // 下一轮 provider 直接从 lib 取，不再经过 store。
 import { isPendingWebTab, samePreviewTarget, webTabKey, webUrlSnapshot } from '../lib/webTab'
+// 媒体元素池的回收入口（R08c）：关标签时按标签里的 path 释放解码器/缓冲。
+// 只 import 函数、不 import 任何在模块顶层碰 document 的东西（node 单测会 import 本文件）。
+import { disposeMediaElementsForPath } from '../lib/mediaStage'
 export { isPendingWebTab, samePreviewTarget, webTabKey }
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
@@ -9257,6 +9260,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     for (const k of Object.keys(overrides)) if (k.startsWith(titleKey(path, ''))) delete overrides[k]
     saveJSON(LS_TITLES, overrides)
     const wsSids = s.projects.find((p) => p.path === path)?.sessions.map((x) => x.id) ?? []
+    // 媒体元素池同样要回收：这个工作区的标签马上整片删掉，元素留在池里就是没人管的
+    // 解码器（而且下一次「打开同名文件」会误命中旧元素）。
+    for (const scope of [...wsSids, path]) {
+      for (const t of s.tabsByScope[scope]?.tabs ?? []) {
+        if (t.kind === 'file') disposeMediaElementsForPath((t as FileTabInstance).path ?? '')
+      }
+    }
+    // 主进程的「媒体根」清单同步删除（评审裁决 1 的「关闭时删除」）：
+    // 不删的话，用户移除的工作区在进程生命周期内仍然是可流式读取的媒体根。
+    void window.desktop?.workspaceForget?.(path)
     const views = { ...s.views }
     for (const sid of wsSids) delete views[sid]
     // 标签集同工作区会话一并回收（含「无会话工作区」用工作区路径当 scope 的那一份，D7）
@@ -10509,6 +10522,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     const activeId = set0.activeId === id ? ((tabs[i] ?? tabs[i - 1])?.id ?? null) : set0.activeId
     const closed = [gone, ...set0.closed].slice(0, TAB_CLOSED_MAX)
     set(tabPatch(s, scope, { tabs, activeId, closed }))
+    // file{preview} 的媒体标签 → 回收元素池里那份解码器与缓冲。
+    // 切标签走的是 detach（保留），**只有这里才是真关**；非媒体标签调用是无操作。
+    if (gone.kind === 'file') disposeMediaElementsForPath((gone as FileTabInstance).path ?? '', gone.id)
     // web 标签 → 真关掉底层页面（视图池是进程级单例，不关就是僵尸渲染进程）。
     // 注意：关页面会触发 embed-nav → syncWebTabs 会看到该 key 消失，此时标签已不在集合里（幂等）。
     if (gone.kind === 'web') {

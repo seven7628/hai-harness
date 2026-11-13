@@ -5,9 +5,10 @@
 // 注册就必然发生过 —— F45 那类「探针只 import 了 RightPanel，provider 全 undefined」
 // 的坑在源头堵掉。
 //
-// R08a 注册 text/image/csv；R08b 补齐 pdf/docx/pptx/xlsx（weight 100 = 专用格式）。
-// media（mp4/mp3）仍是 R08c：没有渲染器 → unavailable 占位（写明原因），不是白屏。
+// R08a 注册 text/image/csv；R08b 补齐 pdf/docx/pptx/xlsx（weight 100 = 专用格式）；
+// R08c 补 media（音视频：原生 <video>/<audio> + hai-media:// 的 Range 通道）。
 import { isCsvPath } from '../../../lib/csv'
+import { mediaKindOf } from '../../../lib/mediaFile'
 import { DOCX_EXTS, IMAGE_EXTS, PDF_EXTS, PPTX_EXTS, XLSX_EXTS } from '../../../lib/visualFile'
 import { detectPreviewDeps } from '../deps'
 import { registerRenderer } from '../registry'
@@ -77,6 +78,19 @@ registerRenderer({
   match: (f) => (XLSX_EXTS.has(f.ext) ? 1 : 0),
   requires: ['conversion'],
   load: async () => (await import('./office')).default,
+})
+
+// —— R08c：音视频 ——
+// weight 90：低于四种「专用文档格式」（100），高于 image(80) —— 媒体文件不该被图片或文本
+// 抢走（mp4 在 bridge 眼里是二进制，text 本来不接；但 match 的顺序不该靠这个巧合）。
+// requires:'media' 指 hai-media:// 通道本身（见 deps.ts 的判据）：通道不在时挂载前就落到
+// 「写明缺什么」的占位，而不是渲染一个永远黑着的 <video>。
+registerRenderer({
+  id: 'media',
+  weight: 90,
+  match: (f) => (mediaKindOf(f.path) ? 1 : 0),
+  requires: ['media'],
+  load: async () => (await import('./media')).default,
 })
 
 // 依赖探测放在注册之后：本模块是「渲染器在册」的唯一副作用入口，凡是能选到渲染器的地方
