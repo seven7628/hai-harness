@@ -1,12 +1,39 @@
 // Surface 注册表：模块级单例，唯一写者（01 §3.2 / 03 §2.2）
 // 约束：注册即校验，重复注册抛错；插件不可声明 write（D-E）；排序必须字节稳定。
-import type { SurfaceKind, SurfaceProvider, SurfaceTab } from './types'
+import type { BuiltinKind, SurfaceKind, SurfaceProvider, SurfaceTab } from './types'
 // 与 health.ts 是**函数级**循环依赖（registry 只在 listSurfaces 里问「这个 kind 被禁用了吗」，
 // health 只在改动后调 notifySurfacesChanged 广播）。两个方向都只在调用期取值，模块求值期
 // 不互相读任何绑定 —— 两种 import 顺序都不会踩 TDZ，esbuild 打包同样成立。
 import { listDisabled } from './health'
 
-const BUILTIN_KINDS = new Set<SurfaceKind>(['activity', 'git', 'file', 'web'])
+/**
+ * 内置 kind 的白名单 —— **注册校验与持久化恢复共用的唯一真相**。
+ *
+ * PR-11 之前 store 有一份自己的 `TAB_KINDS`（只用于「持久化恢复时过滤未知 kind」），
+ * 两份清单必然分叉：一边加了 kind 而另一边没加，症状是「新 kind 的标签重启就消失」或
+ * 「注册表拒收但恢复路径照收」。现在只有这一份，store 通过 isBuiltinKind 读。
+ *
+ * 类型是 ReadonlySet（不是 Set）：消费者只该问「认得吗」，往这里加/删 kind 必须落在这个
+ * 文件里（值本身也是 assertProvider 的校验集，见下）。
+ */
+export const BUILTIN_KINDS: ReadonlySet<SurfaceKind> = new Set<SurfaceKind>([
+  'activity',
+  'git',
+  'file',
+  'web',
+])
+
+/**
+ * 「这个 kind 是内置的四类之一吗」—— store 的 loadPersistedTabs 用它过滤持久化里的标签。
+ *
+ * 为什么是谓词而不是让 store 直接 `BUILTIN_KINDS.has(r.kind)`：持久化里的 kind 是 `unknown`
+ * （来自 localStorage 的 JSON），`Set<SurfaceKind>.has` 收窄不了它 —— 那样调用方只能写
+ * `as` 把 unknown 硬塞进去，正好丢掉这个函数唯一的价值（窄化）。`plugin:` 与任意未知 kind
+ * 今天一律为 false（插件标签要等 R11b/PR-14 再放开）。
+ */
+export function isBuiltinKind(x: unknown): x is BuiltinKind {
+  return typeof x === 'string' && BUILTIN_KINDS.has(x as SurfaceKind)
+}
 const GROUP_ORDER = { workflow: 0, content: 1, plugin: 2 } as const
 
 const byKind = new Map<SurfaceKind, SurfaceProvider>()

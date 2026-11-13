@@ -42,6 +42,11 @@ import { isPendingWebTab, samePreviewTarget, webTabKey, webUrlSnapshot } from '.
 // 媒体元素池的回收入口（R08c）：关标签时按标签里的 path 释放解码器/缓冲。
 // 只 import 函数、不 import 任何在模块顶层碰 document 的东西（node 单测会 import 本文件）。
 import { disposeMediaElementsForPath } from '../lib/mediaStage'
+// PR-11：内置 kind 的白名单只在注册表里（BUILTIN_KINDS/isBuiltinKind），store 不再自持 TAB_KINDS。
+// 依赖方向 = store → registry 是**单向**的（registry 只 import types/health，从不 import store），
+// 反向的 builtin provider → store 更早就存在（webSurface 读 embedNav），两者不构成环：
+//   builtin → {store, registry}，store → registry，registry 谁都不 import。
+import { isBuiltinKind } from '../surfaces/registry'
 export { isPendingWebTab, samePreviewTarget, webTabKey }
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
@@ -1574,15 +1579,16 @@ function fromPersistedTab(p: PersistedTab, id: string): TabInstance {
   }
 }
 
-const TAB_KINDS: TabKind[] = ['activity', 'git', 'file', 'web']
-
 // sanitizePersistedTab：逐字段校验一条存储记录。**坏数据不炸**（规格 §2 要求 4）——
 // 结构不对/类型不对的字段一律丢弃（能救的字段救回来，救不了的整条丢），绝不抛错。
 function sanitizePersistedTab(raw: unknown): PersistedTab | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const r = raw as Record<string, unknown>
-  const kind = typeof r.kind === 'string' && (TAB_KINDS as string[]).includes(r.kind) ? r.kind as TabKind : undefined
-  if (!kind) return undefined // 非法 kind（含旧版本枚举）→ 丢弃这一条
+  // kind 白名单**不在本文件**（PR-11）：注册表的 BUILTIN_KINDS 是唯一真相，这里只是读它。
+  // 今天 plugin:* 与任意未知 kind 都为 false —— 插件标签要等 R11b/PR-14 再放开
+  //（届时放开的是注册表那一份清单，恢复路径自动跟上，不会再出现「两处枚举分叉」）。
+  const kind = isBuiltinKind(r.kind) ? r.kind : undefined
+  if (!kind) return undefined // 非法 kind（含旧版本枚举 / plugin:*）→ 丢弃这一条
   const id = typeof r.id === 'string' && r.id ? r.id : newTabId()
   const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
   const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
