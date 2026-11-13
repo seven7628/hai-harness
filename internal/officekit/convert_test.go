@@ -19,11 +19,11 @@ import (
 // 也是对的）：sandbox.RunArgs 走 isolatedEnv，子进程只看得到 PATH/HOME/TMPDIR/代理，
 // 测试不能靠环境变量传参 —— 那正好也证明了生产路径没有偷偷依赖调用方的环境。
 //
-// 参数：log = 每次调用的 argv 摘要；plog = "pid profileUrl"（并发/杀组断言用）；
-// sleep = 每次调用先睡多久；failFirst = 第一次调用退出码 1（预热失败用例）。
-func fakeConvertScript(log, plog, counter string, sleep time.Duration, failFirst, writePDF bool) string {
+// 参数：plog = "pid profileUrl"（并发/杀组断言用）；sleep = 每次调用先睡多久
+// （> 0 时放进**重定向了 stdio 的孙进程**再 wait，见超时用例的注释）；
+// failFirst = 第一次调用退出码 1（预热失败用例）。
+func fakeConvertScript(plog, counter string, sleep time.Duration, failFirst, writePDF bool) string {
 	var b strings.Builder
-	b.WriteString("LOG='" + log + "'\n")
 	b.WriteString("PLOG='" + plog + "'\n")
 	b.WriteString("COUNTER='" + counter + "'\n")
 	b.WriteString(`PROFILE=''
@@ -37,11 +37,14 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-echo "$$ $PROFILE" >> "$PLOG"
+printf '%s %s\n' "$$" "$PROFILE" >> "$PLOG"
 `)
 	if sleep > 0 {
 		// 先记 pid 再睡：超时用例要在进程还在睡的时候就能拿到 pid。
-		fmt.Fprintf(&b, "sleep %g\n", sleep.Seconds())
+		// 睡**孙进程**而不是 $0：这样「只杀单进程」的变异会留下一个活着的孙进程，
+		// 杀组断言（kill(-pgid,0)）才有可判的差异 —— 而 stdio 重定向到 /dev/null
+		// 是为了让 cmd.Wait 只被进程组决定，不被继承的管道拖住（详见超时用例注释）。
+		fmt.Fprintf(&b, "/bin/sleep %g >/dev/null 2>&1 &\nwait\n", sleep.Seconds())
 	}
 	if failFirst {
 		b.WriteString(`N=$(cat "$COUNTER" 2>/dev/null || echo 0)
@@ -102,9 +105,8 @@ func profileOf(t *testing.T, raw string) string {
 // 否则「固定目录名」这种变异会被各自独立的根掩盖掉（实测：改成固定名，用独立根时
 // 这条用例仍然全绿 —— 等于没测）。
 func TestConvertIsolatesProfilesPerJob(t *testing.T) {
-	log := filepath.Join(t.TempDir(), "argv.log")
 	plog := filepath.Join(t.TempDir(), "profiles.log")
-	kit := kitWithScript(t, fakeConvertScript(log, plog, filepath.Join(t.TempDir(), "n"), 150*time.Millisecond, false, true))
+	kit := kitWithScript(t, fakeConvertScript(plog, filepath.Join(t.TempDir(), "n"), 150*time.Millisecond, false, true))
 	src := srcDoc(t, t.TempDir(), "deck.pptx")
 	profileRoot := t.TempDir()
 
@@ -161,31 +163,48 @@ func TestConvertIsolatesProfilesPerJob(t *testing.T) {
 	}
 }
 
-// 超时：假 soffice 睡 5s、Options.Timeout=500ms →
-// 断言 ①返回 ErrTimeout（不是等 5s 自然结束）②进程组被杀（kill(-pgid,0)=ESRCH）
+// 超时：假 soffice 睡 60s、Options.Timeout=3s →
+// 断言 ①返回 ErrTimeout（不是等 60s 自然结束）②进程组被杀（kill(-pgid,0)=ESRCH）
 // ③临时 profile 被清理。
+//
+// 为什么时限是 3s、不是 500ms（R08d 复评 P0 的真因）：500ms 会与「脚本起跑」赛跑。
+// 机器有负载时（`-count=10` + ncpu 个 yes 进程压着）实测 20 轮里 8 轮假 soffice
+// **一行都没执行就被 SIGKILL**，plog 为空 → ReadFile 直接 Fatal，②③两条断言
+// 从未执行（所以评审看到的是「文件不存在」，而不是「进程组还活着」）。
+// 3s 相对实测起跑（≤0.5s）留了 6x 余量；plog 由测试**预建**，残余赛跑会报
+// 「plog 里没有 pid/profile」，不会再把「断言没跑」伪装成「文件读不到」。
+//
+// 为什么假 soffice 把长睡放进**重定向了 stdio 的孙进程**再 wait（同一个 P0 的另一半）：
+// 若孙进程握着继承来的 stdout 管道，「只杀单进程」的变异会让 cmd.Wait 卡到
+// WaitDelay(3s) 才返回 —— 于是「杀没杀进程组」只能靠 elapsed 判，而 elapsed 在负载下
+// 本身就有 3.5s 的尾巴（实测到过一次），变异的红/绿变成掷硬币。把管道让开之后，
+// 唯一能证明进程组还活着的就是进程组本身：杀单进程 → 孙进程活着 → kill(-pgid,0)
+// 成功 → 稳定红（见 04-review 的变异记录）。
 func TestConvertTimeoutKillsProcessGroupAndCleansProfile(t *testing.T) {
 	dir := t.TempDir()
-	log := filepath.Join(dir, "argv.log")
 	plog := filepath.Join(dir, "profiles.log")
-	kit := kitWithScript(t, fakeConvertScript(log, plog, filepath.Join(dir, "n"), 5*time.Second, false, true))
+	// 预建：假 soffice 只追加。文件缺失等于「断言没跑」，不能与「没杀进程组」混在一起。
+	if err := os.WriteFile(plog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kit := kitWithScript(t, fakeConvertScript(plog, filepath.Join(dir, "n"), 60*time.Second, false, true))
 	src := srcDoc(t, dir, "slow.docx")
 	outDir := t.TempDir()
 	profileRoot := t.TempDir()
 
 	start := time.Now()
 	_, err := kit.Convert(context.Background(), src, outDir, ConvertOptions{
-		Timeout:     500 * time.Millisecond,
+		Timeout:     3 * time.Second,
 		ProfileRoot: profileRoot,
 	})
 	elapsed := time.Since(start)
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("期望 ErrTimeout，得到 %v", err)
 	}
-	// 500ms 的时限 + runExec 的有界收尾（4s + 2s 是它的最坏上界，正常远小于此）；
-	// 若没杀进程组，这里会是脚本自己的 5s。
-	if elapsed > 3*time.Second {
-		t.Fatalf("超时后 %v 才返回：说明没有在 500ms 时限内杀掉，而是在等脚本自己结束", elapsed)
+	// 3s 的时限 + runExec 的有界收尾（4s + 2s 是它的最坏上界，正常远小于此）；
+	// 若没杀，这里会是脚本自己的 60s。10s 既容得下负载下的收尾尾巴，又远小于 60s。
+	if elapsed > 10*time.Second {
+		t.Fatalf("超时后 %v 才返回：说明没有在 3s 时限内杀掉，而是在等脚本自己结束（60s）", elapsed)
 	}
 
 	raw, rerr := os.ReadFile(plog)
@@ -194,7 +213,7 @@ func TestConvertTimeoutKillsProcessGroupAndCleansProfile(t *testing.T) {
 	}
 	fields := strings.Fields(strings.TrimSpace(string(raw)))
 	if len(fields) < 2 {
-		t.Fatalf("plog 里没有 pid/profile: %q", raw)
+		t.Fatalf("plog 里没有 pid/profile（假 soffice 没在 3s 内起跑？）: %q", raw)
 	}
 	var pid int
 	if _, err := fmt.Sscanf(fields[0], "%d", &pid); err != nil || pid <= 0 {
@@ -209,6 +228,8 @@ func TestConvertTimeoutKillsProcessGroupAndCleansProfile(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
+			// 变异跑（只杀单进程）会留一个 60s 的孙进程：先收掉，别让它跨用例带噪。
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
 			t.Fatalf("进程组 %d 仍存活（kill(-pgid,0) = %v）：超时没有杀进程组", pid, gerr)
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -223,7 +244,7 @@ func TestConvertTimeoutKillsProcessGroupAndCleansProfile(t *testing.T) {
 // soffice 退出码 0 但没产出 PDF：必须失败（「0 退出 ≠ 有产物」，不能让上层拿到空路径）。
 func TestConvertFailsWhenNoPDFProduced(t *testing.T) {
 	dir := t.TempDir()
-	kit := kitWithScript(t, fakeConvertScript(filepath.Join(dir, "a.log"), filepath.Join(dir, "p.log"), filepath.Join(dir, "n"), 0, false, false))
+	kit := kitWithScript(t, fakeConvertScript(filepath.Join(dir, "p.log"), filepath.Join(dir, "n"), 0, false, false))
 	src := srcDoc(t, dir, "empty.docx")
 	_, err := kit.Convert(context.Background(), src, t.TempDir(), ConvertOptions{ProfileRoot: t.TempDir()})
 	if !errors.Is(err, ErrConvertFailed) {
@@ -241,7 +262,7 @@ func TestWarmFailureDoesNotDisableKit(t *testing.T) {
 	// 走真探测（kit 目录 + KIT.json），确认「预热失败」不会把 State 变成 invalid。
 	root := t.TempDir()
 	kitDir := writeKit(t, root, PinnedVersion, CurrentPlatform(), nil)
-	if err := os.WriteFile(filepath.Join(kitDir, "soffice"), []byte("#!/bin/sh\n"+fakeConvertScript(filepath.Join(dir, "a.log"), plog, filepath.Join(dir, "n"), 0, true, true)), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(kitDir, "soffice"), []byte("#!/bin/sh\n"+fakeConvertScript(plog, filepath.Join(dir, "n"), 0, true, true)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// 二进制换了 → KIT.json 的 sha256 必须跟着换（否则校验不过是另一条断言的失败）。
