@@ -747,6 +747,10 @@ function createWindow(): void {
   mainWindow.webContents.on('did-stop-loading', () => {
     startupMark('did-stop-loading')
   })
+  // 打开 precise memory info：让渲染进程能读到 performance.memory.usedJSHeapSize
+  // （Chromium 默认不给，隐私考虑）。预算体检用它区分「我们的数据」与
+  // 「渲染进程的底噪」（Chromium + React + 代码 + DOM）。
+  app.commandLine.appendSwitch('enable-precise-memory-info')
   // 渲染进程的 console 透传到终端（2026-11-12）。
   //
   // 为什么需要：视图内存预算的降级/淘汰会打一行 `[budget] …`，而渲染进程的

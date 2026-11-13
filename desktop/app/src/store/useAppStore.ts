@@ -8521,6 +8521,45 @@ function viewLruOrder(views: Record<string, SessionView>): string[] {
   return viewOrder.concat(Object.keys(views).filter((sid) => !seen.has(sid)))
 }
 
+// —— 预算体检（2026-11-13）——
+//
+// 「渲染进程还占多少、其中多少是我们的视图」这个问题，**没有数据就只能猜**。
+// 这一行给出四个数：
+//
+//	est   = 按 roughSize 估算的视图字节（views 里的块 + 窗口外卡片 + trace…）
+//	heap  = V8 报告的真实 JS 堆（performance.memory）
+//	views = 视图数，blocks = 视图里的块总数
+//
+// ⇒ **heap − est ≈ 渲染进程的「底」**（Chromium + React + 模块代码 + DOM）。
+//   底占大头 ⇒ 视图侧没什么可榨的；est 占大头 ⇒ 降级还有空间。
+//
+// 30 秒一行（不刷屏）。
+let lastBudgetReport = 0
+function reportBudget(
+  st: AppState,
+  remaining: number,
+  budget: number,
+  degradeN: number,
+  evictN: number,
+): void {
+  const now = Date.now()
+  if (now - lastBudgetReport < 30000) return
+  lastBudgetReport = now
+  let blocks = 0
+  let cards = 0
+  for (const v of Object.values(st.views)) {
+    blocks += v.blocks.length
+    cards += v.agentDetached?.length ?? 0
+  }
+  const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory
+  const heapMB = mem?.usedJSHeapSize ? (mem.usedJSHeapSize / 1048576).toFixed(0) : '?'
+  console.info(
+    `[budget] 视图 ${Object.keys(st.views).length} 个 / 块 ${blocks} / 卡片 ${cards}` +
+      ` | 估算 ${(remaining / 1048576).toFixed(0)}MB（预算 ${(budget / 1048576).toFixed(0)}MB）` +
+      ` | V8 堆 ${heapMB}MB | 降级 ${degradeN} 淘汰 ${evictN}`,
+  )
+}
+
 /** 按字节预算处置超限的视图。 */
 function enforceViewBudget(force = false): void {
   const now = Date.now()
@@ -8536,6 +8575,7 @@ function enforceViewBudget(force = false): void {
     // 运行中的会话**不可淘汰**（淘汰 = 它的实时 UI 直接坏掉）；但可以被降级。
     protect: (_sid, v) => sessionBusy(v),
   })
+  reportBudget(st, plan.remaining, budget, plan.degrade.length, plan.evict.length)
   if (plan.degrade.length === 0 && plan.evict.length === 0) return
   const views = { ...st.views }
   const activeId = st.activeSessionId
