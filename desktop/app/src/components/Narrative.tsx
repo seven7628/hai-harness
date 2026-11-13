@@ -1103,6 +1103,58 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       )
     }
     if (b.kind === 'user' && skin === 'runtime') return <UserBlock key={b.id} b={b} />
+    /* 用户自己说的那句话：current/v3 走这条，runtime 走上面那条 UserBlock。
+       **这条分支不能少** —— 函数末尾是 `if (b.kind !== 'assistant') return null`，
+       少一条分支就等于默认皮肤（narrative_skin 未设 → current）下用户消息整段不渲染
+       （F43：6d28d60 把这块连同 system/task_result 的卡片一起删了，但那几样是「事件」，
+       这一样是**对话本身**）。它的样式一直在：index.css 的 .msg.user .who b / 
+       .msg.user .body p（pre-wrap —— 用户按的 ⏎ 必须原样回来）/ .user-imgs / .user-refs。 */
+    if (b.kind === 'user') {
+      // 图文消息：文本 + 图片附件缩略图（data URL 直显）
+      const imgs = b.contents?.filter((c) => c.type === 'image') ?? []
+      // @引用展开状态行（refs_loaded 事件）：loaded → 勾 + 已加载；missing/blocked → 警示
+      const refs = b.refs?.length
+        ? (() => {
+            const loaded = b.refs!.filter((r) => r.status === 'loaded')
+            const missing = b.refs!.filter((r) => r.status === 'missing')
+            const blocked = b.refs!.filter((r) => r.status === 'blocked')
+            // 有缺失/受保护时逐条列出；全成功时合并计数
+            const issues = [...missing.map((r) => ({ ...r, label: t('composer.refs.missing') })), ...blocked.map((r) => ({ ...r, label: t('composer.refs.blocked') }))]
+            return { loaded, issues, allLoaded: issues.length === 0 }
+          })()
+        : undefined
+      return (
+        <div className="msg user" key={b.id}>
+          <div className="who"><b>{t('narrative.user')}</b>{b.ts != null && <span className="msg-ts mono">{fmtClock(b.ts)}</span>}</div>
+          <div className="body"><p><InlineCode text={b.text} /></p></div>
+          {imgs.length > 0 && (
+            <div className="user-imgs">
+              {imgs.map((c, i) => (
+                <img key={i} src={c.content} alt={t('narrative.attachAlt')} />
+              ))}
+            </div>
+          )}
+          {refs && (
+            <div className="user-refs" role="status" aria-label={t('composer.refs.aria')}>
+              {refs.loaded.length > 0 && (
+                <span className={`user-refs-line ${refs.allLoaded ? 'ok' : ''}`}>
+                  <CheckCircleIcon size={12} />
+                  {refs.allLoaded
+                    ? t('composer.refs.loaded').replace('{n}', String(refs.loaded.length))
+                    : t('composer.refs.loadedList').replace('{list}', refs.loaded.map((r) => r.path).join('、'))}
+                </span>
+              )}
+              {refs.issues.map((r, i) => (
+                <span className="user-refs-line warn" key={i}>
+                  <PaperclipIcon size={12} />
+                  <code>{r.path}</code> {r.label}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )
+    }
     if (b.kind === 'agent') return <AgentTaskCard key={b.id} b={b} />
     // 本轮产出汇总（AgentEnd.Artifacts）：对话页尾部的「本次产出」卡片。
     // 位于本轮最终回复之后（AgentEnd 到达时追加），与截图里的 artifact 卡片同位置。

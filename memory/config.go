@@ -48,6 +48,36 @@ const (
 	// EnvProjectDirName 对齐官方 CLAUDE_CODE_PROJECT_DIR_NAME：强制 <project> 名，
 	// 让多个仓库共用一份记忆（官方用途：给整条产品线记一份共享记忆）。
 	EnvProjectDirName = "CLAUDE_CODE_PROJECT_DIR_NAME"
+	// EnvMemoryInjection 注入形态（本包自有的产品旋钮，官方无对应项，见 Injection* 常量）。
+	//
+	// 取值 full / hot / gate，大小写不敏感；不认识的值按"未设"处理（与 lookupBool 同一策略：
+	// 一个拼错的可选覆盖不该让应用起不来）。
+	EnvMemoryInjection = "autoMemoryInjection"
+)
+
+// 注入形态（2026-11 新增，技术方案 §5.1「三档加载契约」）。
+//
+// 官方只有一种形态：整份 MEMORY.md（前 200 行 / 25KB）每会话注入。实测这份固定开销
+// 是 5–7k token，而 57% 的请求根本不需要记忆——于是有了"档位"：
+//
+//	full  官方形态，整份索引。语义最完整，成本最高。用于评估对照与"查不到东西"时的兜底。
+//	hot   热点清单：按被读次数挑 Top-K（见 hotlist.go 的 HotListSize）。**产品默认**。
+//	gate  闸门：注入前逐条判断相关性。P2 才实现，当前**等价 hot**（见 injectionTier）。
+//
+// 为什么默认 hot 而不是 full：这不是省 token 的微优化。全量注入把 54 条从未被读过
+// 的记忆摊在每次会话开头，模型要在里面翻找，而它翻找的代价与"少看几条"的代价不对称——
+// 少看一条的结果是模型多读一次文件（一次 tool call），多看 54 条的结果是每会话固定多付
+// 5k token 且降低索引信噪比。默认值因此落在省的那一侧，full 保留为一句话可切的退路。
+//
+// 约束：hot 必须**如实说明自己是子集**（hotFooter）。否则模型会把精简清单当成全量，
+// 判定"这条我没记过"并重记一遍——那比不省更糟。
+const (
+	// InjectionFull 整份索引（官方形态）。
+	InjectionFull = "full"
+	// InjectionHot 热点清单 Top-K（K 见 HotListSize）。
+	InjectionHot = "hot"
+	// InjectionGate 相关性闸门（P2，尚未实现；当前等价 hot）。
+	InjectionGate = "gate"
 )
 
 // Config 是 Bootstrap 的输入（用户可见开关 + 供测试注入的 I/O 出口）。
@@ -70,6 +100,12 @@ type Config struct {
 	// ProjectDirName 覆盖 <project> 段（等价 CLAUDE_CODE_PROJECT_DIR_NAME）：
 	// 直接当作仓库身份，落在 <root>/repos/<ProjectDirName>。
 	ProjectDirName string
+	// Injection 注入形态：""（跟随环境变量，未设则 hot）/ InjectionFull / InjectionHot / InjectionGate。
+	//
+	// 零值不是 full：零值代表"用户没选过"，而产品的默认形态是 hot（见 Injection* 的
+	// 注释）。要全量注入必须显式写 InjectionFull——本包不给"忘了传就悄悄回到 5k token"
+	// 留后门，也不给"忘了传就悄悄砍成 K 条"留后门：两种默认都写在这里，可读可测。
+	Injection string
 
 	// Resolve 身份解析器（nil = memory.New()，即真实 git）。
 	Resolve *Resolver
@@ -79,7 +115,7 @@ type Config struct {
 	// List 要能跑在注入的根目录上，而不是去列用户真实的 ~/.go-code/memory
 	//（此前 list.go 直接 os.ReadDir，测试里 ReadFile 指向 tmp 而列举列真实 home）。
 	ReadDir func(string) ([]fs.DirEntry, error)
-	// ReadFile / WriteFile / Rename / Remove 是 Step 3/4 全部 I/O 的出口。
+	// ReadFile / WriteFile / Rename / Remove / MkdirAll 是 Step 3/4 全部 I/O 的出口。
 	//
 	// 单独抽出不是为了抽象洁癖，而是为了让「关闭开关不产生任何读盘副作用」成为
 	// 一个**可断言的事实**：测试注入计数版 ReadFile，关闭开关后计数必须为 0，
@@ -88,6 +124,20 @@ type Config struct {
 	WriteFile func(string, []byte, os.FileMode) error
 	Rename    func(string, string) error
 	Remove    func(string) error
+	// EventsRoot 会话转录根（默认 <记忆根>/../events，即 ~/.go-code/events）。
+	// 做梦用它统计"这条记忆最后一次被读是什么时候"。
+	EventsRoot string
+	// RepoFiles 列举某个代码仓库里的全部文件（相对路径）。nil = git ls-files，失败时退回遍历。
+	//
+	// 做梦要用它核对"记忆里引用的代码文件还在不在"（Dream v1.5）。抽成出口的理由与
+	// 其他 I/O 一样：测试要能在临时目录上跑，不能真去 exec git。
+	RepoFiles func(root string) ([]string, error)
+	// MkdirAll 建目录出口（nil = os.MkdirAll）。usage 落在 <memory-dir>/.state/ 下，
+	// 第一次记录前要把该目录建出来；与其余出口同一理由抽出来，好让测试指向临时目录。
+	MkdirAll func(string, os.FileMode) error
+	// OpenAppend 以追加模式打开文件（nil = os.OpenFile(..., O_APPEND|O_CREATE|O_WRONLY)）。
+	// 做梦日志用它；抽成出口的理由同其余 I/O。
+	OpenAppend func(string) (*os.File, error)
 }
 
 // enabled 是开关判定本体（Config.Enabled_ 的实现，避免方法名与字段混淆）。
@@ -102,6 +152,49 @@ func (c Config) enabled() bool {
 	}
 	// 官方默认开。
 	return true
+}
+
+// injectionTier 解析注入形态。
+//
+// 优先级与开关一致（后者覆盖前者）：环境变量 > Config.Injection > 默认 hot。
+// 环境变量在外层，是为了让 CI 与评估脚本能固定住某一档而不改用户偏好——
+// 三档 A/B 的读数必须可以在同一个记忆库上重复采集。
+//
+// 未识别值按"未设"处理（见 EnvMemoryInjection）。gate 在 P2 落地前等价 hot：
+// 与其返回一个"看起来已开启"的 gate 却仍在注入全量/热点，不如把降级写在这里——
+// 调用方拿到的 Injection.Tier 因此恒为 hot，不会有"以为在跑闸门"的错觉。
+func (c Config) injectionTier() string {
+	if t, ok := parseTier(os.Getenv(EnvMemoryInjection)); ok {
+		return degradeTier(t)
+	}
+	if t, ok := parseTier(c.Injection); ok {
+		return degradeTier(t)
+	}
+	return InjectionHot
+}
+
+// parseTier 解析一个档位字面量；ok=false 表示"未设或不认识"。
+func parseTier(v string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case InjectionFull:
+		return InjectionFull, true
+	case InjectionHot:
+		return InjectionHot, true
+	case InjectionGate:
+		return InjectionGate, true
+	}
+	return "", false
+}
+
+// degradeTier 把尚未实现的档位降到当前可用的最近一档。
+//
+// gate 在 P2 落地前等价 hot。**降级必须在这里显式发生**，而不是让调用方以为
+// "已经开了闸门"——Injection.Tier 报出去的是降级后的值，日志与评估读数因此不会撒谎。
+func degradeTier(t string) string {
+	if t == InjectionGate {
+		return InjectionHot
+	}
+	return t
 }
 
 // root 返回记忆根目录：Config.Directory > autoMemoryDirectory > ~/.go-code/memory。
@@ -157,6 +250,17 @@ func (c Config) withDefaults() Config {
 	}
 	if out.Remove == nil {
 		out.Remove = os.Remove
+	}
+	if out.RepoFiles == nil {
+		out.RepoFiles = listRepoFiles
+	}
+	if out.MkdirAll == nil {
+		out.MkdirAll = os.MkdirAll
+	}
+	if out.OpenAppend == nil {
+		out.OpenAppend = func(p string) (*os.File, error) {
+			return os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		}
 	}
 	return out
 }

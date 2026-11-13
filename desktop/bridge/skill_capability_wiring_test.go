@@ -23,10 +23,23 @@ import (
 	"github.com/seven7628/hai-harness/subagent"
 )
 
+// pcForTest 读真实 provider 配置，并隔离进程级用户价表。
+//
+// loadProviderConfig() 会把 settings.json 的 provider[].prices 写进全局
+// userPriceTable 且不还原——本机的旧钉价会泄漏给后续按内置价断言的成本测试
+// （见 isolateUserPrices 注释里的实测）。本文件只用注册表能力面，与价无关，
+// 但仍然会写全局表，所以必须自己隔离。
+func pcForTest(t *testing.T) *providerConfig {
+	t.Helper()
+	assertNoUserPrices(t)
+	isolateUserPrices(t)
+	return loadProviderConfig()
+}
+
 // TestSkillCapabilitiesForReadsModelInputs 能力面的图片模态来自 provider 注册表。
 // glm-5v-turbo 的 Inputs 含 image/video/pdf；glm-4.6 只有 text。
 func TestSkillCapabilitiesForReadsModelInputs(t *testing.T) {
-	pc := loadProviderConfig()
+	pc := pcForTest(t)
 
 	vision := skillCapabilitiesFor(pc, "zhipu", "glm-5v-turbo", nil)
 	if !vision.HasInput("image") {
@@ -50,7 +63,7 @@ func TestSkillCapabilitiesForReadsModelInputs(t *testing.T) {
 
 // TestSkillCapabilitiesForReadsTools 工具集来自引擎实况（不是硬编码清单）。
 func TestSkillCapabilitiesForReadsTools(t *testing.T) {
-	pc := loadProviderConfig()
+	pc := pcForTest(t)
 	eng := exploreToolEngine(t.TempDir(), nil, nil) // 窄工具集
 	caps := skillCapabilitiesFor(pc, "zhipu", "glm-5v-turbo", eng)
 	for _, name := range exploreAllowedTools {
@@ -72,7 +85,7 @@ func TestSkillCapabilitiesForReadsTools(t *testing.T) {
 // 不用 composeSystemPrompt —— 它是 agents 包私有方法，这里只能看导出接口，
 // 而这恰好也是宿主（bridge）真实观测 loop 的方式。
 func TestExploreLoopFiltersByModel(t *testing.T) {
-	pc := loadProviderConfig()
+	pc := pcForTest(t)
 	ws := t.TempDir()
 
 	reg, err := skills.NewRegistry(visualSkillsSourceDir)
@@ -111,7 +124,7 @@ func TestExploreLoopFiltersByModel(t *testing.T) {
 // 同一个 Explore 引擎里，清单没有的技能，load_skill 也必须拒绝。
 // 这是最容易被破坏的不变式（两处各算一份能力面，迟早漂移）。
 func TestExploreLoopLoadSkillSharesCapabilities(t *testing.T) {
-	pc := loadProviderConfig()
+	pc := pcForTest(t)
 	reg, err := skills.NewRegistry(visualSkillsSourceDir)
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +154,7 @@ func TestMainLoopLoadSkillRegisteredLast(t *testing.T) {
 	}
 	ws := t.TempDir()
 	m := &manager{}
-	pc := loadProviderConfig()
+	pc := pcForTest(t)
 
 	eng, _ := newSessionEngine(ws, "s-order", nil, pc, "zhipu", "glm-5v-turbo",
 		string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() },

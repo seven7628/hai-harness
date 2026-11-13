@@ -133,13 +133,19 @@ func TestMemoryWiredIntoRealSessionSystemPrompt(t *testing.T) {
 	if onChars <= baseChars {
 		t.Fatalf("开着记忆时提示词侧没有变长：基线 %d → 有记忆 %d（注入未生效）", baseChars, onChars)
 	}
-	// 增量必须覆盖索引正文（扣掉上面那行"尚无记忆"的记账差），留 300 字节余量。
+	// 增量断言按**默认档位 hot** 重写（2026-11）。
+	//
+	// 旧断言要求"增量覆盖整份索引"——那是 full 档的契约。默认改成热点清单后，
+	// 注入的是 Top-64 子集 + 一句"这不是全部"的页脚，必然比整份索引短
+	// （实测 100 条索引 1390 字节 → 增量 954）。所以这里只断言两件不该变的事：
+	// 注入确实发生了、且没有超过索引本身（超了说明说了两遍）。
+	// 档位的细节（K、截断、页脚）由 memory 包自己的测试覆盖，不在这里重复。
 	delta := onChars - baseChars
-	if delta < int64(len(idx))-300 {
-		t.Fatalf("增量 %d 远小于索引正文 %d：注入被截断或串错了内容", delta, len(idx))
+	if delta <= 0 {
+		t.Fatalf("增量 %d：注入没生效", delta)
 	}
-	if delta > int64(len(idx)) {
-		t.Fatalf("增量 %d 大于索引正文 %d：说明段本该两会话相同，差值不该超过索引", delta, len(idx))
+	if delta >= int64(len(idx)) {
+		t.Fatalf("增量 %d 不小于索引正文 %d：子集档不该把整份索引塞进去", delta, len(idx))
 	}
 }
 

@@ -129,6 +129,17 @@ const (
 
 	// —— 工具/技能/MCP/插件 ——
 	CmdFilePreview Command = "file_preview"
+	// —— 内嵌编辑器读写通道（实现见 file_edit.go；docs/creator-mode-v0.1/03-code-plan.md §2.7）——
+	//
+	// 与 file_preview 的分工：preview 产出**预览**（可截断、可转换），edit 产出**原文 +
+	// sha256**——编辑器要能原样写回，所以必须拿到字节级真相（含行尾，不做规范化）。
+	//
+	// CmdFileOpen  {path}                    → {ok, path, content, hash, size, mtime, truncated?, binary?}
+	// CmdFileSave  {path, content, baseHash} → {ok, hash, mtime}；错误码 conflict/not_found/too_large/denied
+	// CmdFileClose {path}                    → 只退订（无写副作用）：关闭编辑器标签时上报
+	CmdFileOpen  Command = "file_open"
+	CmdFileSave  Command = "file_save"
+	CmdFileClose Command = "file_close"
 	// CmdXlsxPreview 工作簿（.xlsx/.xlsm）→ HTML 预览：受管 Python + openpyxl 转换，
 	// 产物是临时文件的绝对路径，前端拿它走内嵌浏览器 file://（与 PDF 同一条渲染通道）。
 	CmdXlsxPreview Command = "xlsx_preview"

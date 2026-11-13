@@ -35,8 +35,9 @@ import (
 
 // SweepResult 是清扫的结果。
 type SweepResult struct {
-	Files     int   // 处理的文件数
+	Files     int   // 处理的文件数（超阈值的）
 	Compacted int   // 实际压缩了的文件数
+	Skipped   int   // 索引判定「清过且没动过」而跳过的文件数
 	Before    int64 // 压缩前总字节
 	After     int64 // 压缩后总字节
 	Elapsed   time.Duration
@@ -53,10 +54,12 @@ func (r SweepResult) Saved() int64 { return r.Before - r.After }
 //   - keep：保留最后 K 条 state 行
 //   - keepHistory：true = 保留压缩窗口之外的 history 行（不裁剪）
 //   - pause：每个文件之间的间隔（限速，避免与正常使用抢 IO）
+//   - ix：清扫索引（可为 nil）。非 nil 时，「上次清过且此后没动过」的
+//     文件直接跳过 —— 连文件都不打开（见 sweep_index.go）。
 //
 // 遍历的是 root 下**所有** .jsonl：主会话的 <sid>.jsonl 与子智能体的
 // agents/<taskId>.jsonl 用同一套压缩逻辑 ✓。
-func SweepSessionFiles(root string, minBytes int64, keep int, keepHistory bool, pause time.Duration) (SweepResult, error) {
+func SweepSessionFiles(root string, minBytes int64, keep int, keepHistory bool, pause time.Duration, ix *SweepIndex) (SweepResult, error) {
 	res := SweepResult{}
 	start := time.Now()
 	if root == "" {
@@ -73,7 +76,15 @@ func SweepSessionFiles(root string, minBytes int64, keep int, keepHistory bool, 
 			return nil
 		}
 		fi, serr := os.Stat(path)
-		if serr != nil || fi.Size() < minBytes {
+		if serr != nil {
+			return nil
+		}
+		// ① 索引：清过且没动过 → 跳过（连文件都不打开）。
+		if ix.Skip(path, fi.Size(), fi.ModTime().UnixNano()) {
+			res.Skipped++
+			return nil
+		}
+		if fi.Size() < minBytes {
 			return nil
 		}
 		res.Files++
@@ -93,6 +104,8 @@ func SweepSessionFiles(root string, minBytes int64, keep int, keepHistory bool, 
 		}
 		if nfi, nerr := os.Stat(path); nerr == nil {
 			res.After += nfi.Size()
+			// ② 处理完记指纹（compactFile 可能原子替换了文件 → 新 size/mtime）。
+			ix.Mark(path, nfi.Size(), nfi.ModTime().UnixNano())
 		}
 		if pause > 0 {
 			time.Sleep(pause)

@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { getTransport } from '../transport'
+import type { RightLayout } from '../lib/layout'
+import { afterDrag, collapse as layoutCollapse, expand as layoutExpand, normalizeLayout } from '../lib/layout'
 import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 // 运行位收敛诊断（BR-15）：只做有界记录，状态改写仍在 store
@@ -15,7 +17,16 @@ import { looksSubRun } from '../lib/sessionScope'
 import { visualKindOf, isVisualPath } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
+import { isEditorEnabled, isTextLikePath } from '../lib/editorState'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
+import {
+  BUDGET_CHECK_INTERVAL_MS,
+  currentBudgetBytes,
+  degradeView,
+  planBudget,
+  setMemPressure,
+  viewBytes,
+} from './viewBudget'
 import { t as i18nT } from '../i18n'
 // 归属（owner）编码：信任/启用按归属隔离（FE 侧只做展示与回传，判定在 bridge）
 import { ownerValid } from '../lib/owner'
@@ -24,6 +35,11 @@ import { ownerValid } from '../lib/owner'
 import { resolveActiveOwner } from '../lib/activeOwner'
 import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
+// R06 C1：web 标签的身份判据已下沉到 lib/webTab（纯函数、零 store 运行时依赖）。
+// store 侧保留同名 re-export —— RightPanel 等调用点的 import 路径不变（本轮零行为变化），
+// 下一轮 provider 直接从 lib 取，不再经过 store。
+import { isPendingWebTab, samePreviewTarget, webTabKey, webUrlSnapshot } from '../lib/webTab'
+export { isPendingWebTab, samePreviewTarget, webTabKey }
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
 //
@@ -36,20 +52,24 @@ export type RightTab = 'activity' | 'git' | 'file' | 'web'
 
 // —— 右侧栏标签模型（docs/RIGHT_PANEL_TABS_PLAN.md 阶段 1）——
 //
-// 分工（阶段 1 刻意保留双轨，行为等价重构）：
-//   · rightTab  = 「当前显示哪一类内容」的**权威**字段。e2e 直接读写它
-//     （verify_auto_open_visual.mjs:114 用它做用例复位、verify_pdf_preview.mjs:284 订阅它做诊断），
-//     且它经 SessionView 参与会话级恢复 —— 动它就等于同时改这两条契约。
-//   · tabsByScope = 「有哪些标签、顺序、激活的是哪个实例、最近关了哪些」。
-//   两者的一致性由 syncTabsToRightTab **单向收敛**（标签集跟随 rightTab）：rightTab 有多条
-//   改写路径（动作 / loadViewToTop 恢复 / e2e 直接 setState），逐个调用点同步必漏。
+// 分工（PR-02 起 activeId 权威）：
+//   · tabsByScope = 权威：有哪些标签、顺序、**激活的是哪个实例**（activeId）、最近关了哪些。
+//   · rightTab    = 派生字段，只为旧读点 / 会话恢复 / e2e 兼容保留一个版本（PR-11 删）。
+//     唯一写点是 rightTabPatch（tabPatch 调它），值 = 激活标签的 kind；没有标签时保留旧值。
+//   外部直接 setState({ rightTab }) **不会**换掉用户正在看的标签；下一次标签动作会把 rightTab 重新派生。
 export type ScopeKey = string // 会话 id；无会话时退化为工作区路径（D7）
 export type TabKind = RightTab // 复用 5 个既有取值：e2e 断言与 i18n key（rp.tab.*）都按它走
 // file 标签是**多实例**的（阶段 2）：身份 = (path, mode)，同一文件可以同时有 diff 与
 // source 两个标签（D5），但同一 (path, mode) 只有一个实例。openSeq 是「每次打开都回默认
 // 视图」的触发器 —— 阶段 1 靠全局 fileFocus.seq，阶段 2 起内容与视图都归标签所有，
 // 触发器也必须跟着标签走（否则重开 A 会把 B 的视图复位）。
-export type FileTabInstance = { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source'; toolId?: string; startLine?: number; openSeq?: number }
+// mode='edit'（PR-05b）：同一个文件的**编辑**标签与预览标签并存（身份 = (path, mode)）。
+// 它是 file 面板的第三种渲染分发，不是新 kind —— 文件树/预览工具栏的「编辑」动作都落在这里。
+// mode='preview'（R08a）：file 面板的第四种渲染分发 —— 按 surfaces/preview 的渲染器注册表
+// 显示文件（text/image/csv 先行，pdf/docx/pptx/xlsx/media 是 R08b/R08c）。同样不是新 kind（D-I）。
+// 持久化口径见 sanitizePersistedTab：四个 mode 都认，非法值归一化成缺省（source）。
+export type FileTabMode = 'diff' | 'source' | 'edit' | 'preview'
+export type FileTabInstance = { id: string; kind: 'file'; path?: string; mode?: FileTabMode; toolId?: string; startLine?: number; openSeq?: number }
 // web 标签的两种形态（阶段 5 起）：
 //   · 活的：有池身份（viewId = 原生视图池的 'tN'，或 pageId = MCP 页列表的数字 id）；
 //   · 待重建的（重启恢复出来的）：**没有**池身份，只有 url 快照 —— 池身份是运行时 id
@@ -64,8 +84,8 @@ export interface TabSet {
   tabs: TabInstance[]
   activeId: string | null // null = 用户把标签关光了（显示空态，不自动补默认标签）
   closed: TabInstance[] // 最近关闭（⌄ 下拉「重开」），上限 TAB_CLOSED_MAX
-  // 阶段 5：本次进程内**刚重启恢复**、还没被任何动作碰过（见 syncTabsToRightTab 的反向收敛）。
-  // 不持久化，用完即清。
+  // 阶段 5：本次进程内**刚重启恢复**、还没被任何动作碰过。不持久化，用完即清。
+  // 见 syncTabsToRightTab：恢复态第一次读只补派生字段（rightTab），第二次读清标记。
   restored?: boolean
 }
 export const TAB_CLOSED_MAX = 10
@@ -179,6 +199,16 @@ export interface FilePreview {
   // 适用入口：文件树/工具行的 open-file（产出卡另有 xlsx/pdf 专门分支）。
   binary?: boolean
 }
+
+// office 预览的「读回来的产物」（R08b，见 loadOfficePreview）。
+//
+// 三种格式共用一套：bridge 的 xlsx_preview / docx_preview / pptx_preview 都回一个 HTML 产物
+// 路径（不落工作区），前端再经 file_preview 把内容读回来（上限 1 MiB → truncated）。
+// truncated 不是「小瑕疵」而是**必须告知**的事实：截断的 HTML 在 iframe 里会缺尾（丢表格行/
+// 丢页面），所以渲染器据此给「在内嵌浏览器打开完整版」的出口。
+export type OfficePreviewResult =
+  | { ok: true; html: string; truncated: boolean; htmlPath: string }
+  | { ok: false; error: string }
 
 export interface FileFocus {
   path: string
@@ -1112,6 +1142,8 @@ export interface SessionView {
   release?: PendingRelease // 沙箱拦截放行确认（sandbox_blocked；随 bash 工具结束清除）
   pendingQueue: QueuedInput[] // 客户端暂存队列（未推送 / 已推送待确认；逐条可编辑，LLM End 时整队推送）
   rightExpanded: boolean // 右侧栏是否展开（会话级，切换会话各自恢复）
+  // 三态布局（PR-01）：rightExpanded 是它的派生镜像；ratio = 右栏占「除左栏外」的百分比
+  rightLayout: RightLayout
   rightTab: RightTab // 右侧栏当前 tab（会话级）
 
   // —— 链路 tab：trace（docs/TRACE_CHAIN_REDESIGN.md）——
@@ -1234,9 +1266,17 @@ function emptyView(): SessionView {
     release: undefined,
     pendingQueue: [],
     rightExpanded: false,
+    rightLayout: layoutCollapse,
     rightTab: 'activity',
     traceEvents: [],
   }
+}
+
+// 右栏布局归一化：rightExpanded 只是 rightLayout.open 的镜像，读写都经过这里，
+// 避免「磁盘上一份 open:true、镜像 false」这种漂移被持久化（00 §1.5 派生值不落库）。
+function layoutMirror(v: { rightLayout?: RightLayout; rightExpanded: boolean }) {
+  const rightLayout = normalizeLayout(v.rightLayout, v.rightExpanded)
+  return { rightLayout, rightExpanded: rightLayout.open }
 }
 
 // view 的顶层镜像字段（组件读顶层）
@@ -1288,7 +1328,7 @@ function viewFields(nv: SessionView): Partial<AppState> {
     questions: nv.questions,
     release: nv.release,
     pendingQueue: nv.pendingQueue,
-    rightExpanded: nv.rightExpanded,
+    ...layoutMirror(nv),
     rightTab: nv.rightTab,
     traceEvents: nv.traceEvents,
     traceList: nv.traceList,
@@ -1312,6 +1352,10 @@ function setView(s: AppState, sid: string, nv: SessionView, extra?: Partial<AppS
   const isActive = active ?? sid === s.activeSessionId
   // 后台事件可能首次创建 view；提交后立即执行 LRU 收敛，保证缓存不会随 session 数增长。
   if (isNew) queueMicrotask(() => evictViews())
+  // 预算检查：**每个事件后**都要有机会跑 —— 视图内容会随事件增长（翻页、流式、
+  // agent 卡回填），只在「新建视图 / 切会话」时查会漏掉「单个会话自己涨爆」。
+  // 定时器节流 ⇒ 每秒至多一次，不给事件路径加负担。
+  scheduleBudgetCheck()
   if (isActive) return { views, ...viewFields(nv), ...extra }
   return { views, ...extra }
 }
@@ -1353,7 +1397,7 @@ function topViewFields(s: AppState): Partial<SessionView> {
     questions: s.questions,
     release: s.release,
     pendingQueue: s.pendingQueue,
-    rightExpanded: s.rightExpanded,
+    ...layoutMirror(s),
     rightTab: s.rightTab,
     traceEvents: s.traceEvents,
     traceList: s.traceList,
@@ -1480,34 +1524,10 @@ const TABS_PERSIST_DEBOUNCE_MS = 300
 // 持久化形态：标签实例**剥掉运行时字段**（viewId / pageId / openSeq），web 换成 url 快照。
 type PersistedTab =
   | { id: string; kind: 'activity' | 'git' }
-  | { id: string; kind: 'file'; path?: string; mode?: 'diff' | 'source'; toolId?: string; startLine?: number }
+  | { id: string; kind: 'file'; path?: string; mode?: FileTabMode; toolId?: string; startLine?: number }
   | { id: string; kind: 'web'; url: string; srcPath?: string }
 interface PersistedTabSet { tabs: PersistedTab[]; activeId: string | null }
 interface PersistedTabs { v: number; scopes: Record<ScopeKey, PersistedTabSet> }
-
-// isPendingWebTab：待重建的 web 标签（重启恢复出来的那种）。
-// 判据 = 「有 url 快照 + 没有任何池身份」：池身份是运行时 id，跨进程不复用，故恢复时一律
-// 不带；带上就会指向重启后新建的**另一个**页面（主进程 't'+自增序号从 t1 重来）。
-export function isPendingWebTab(t: TabInstance): t is WebTabInstance {
-  return t.kind === 'web' && !t.viewId && t.pageId == null && !!t.url
-}
-
-// webUrlSnapshot：一个 web 标签此刻能拿到的最可信的 url（+ 源文件路径）快照。
-// 三级反查见 toPersistedTab 的注释；返回 undefined = 这个标签**不可恢复**。
-function webUrlSnapshot(t: WebTabInstance, s: AppState): { url: string; srcPath?: string } | undefined {
-  if (t.url) return { url: t.url, ...(t.srcPath ? { srcPath: t.srcPath } : {}) }
-  if (t.viewId) {
-    const tp = s.embedNav?.targets?.find((x) => x.id === t.viewId)
-    // about:blank = 自举占位（还没导航到真实页面）→ 不是「用户打开的页面」，不恢复。
-    if (tp?.url && tp.url !== 'about:blank') return { url: tp.url, ...(tp.srcPath ? { srcPath: tp.srcPath } : {}) }
-    return undefined
-  }
-  if (t.pageId != null) {
-    const pg = s.browserPages.find((p) => p.id === t.pageId)
-    if (pg?.url) return { url: pg.url }
-  }
-  return undefined
-}
 
 // toPersistedTab：运行时标签 → 存储形态。返回 undefined = **不持久化这个标签**。
 //
@@ -1566,7 +1586,10 @@ function sanitizePersistedTab(raw: unknown): PersistedTab | undefined {
   if (kind === 'file') {
     // mode 非法 → 归一化成缺省（缺省 = source 完整预览，与 focusSpec/tabKeyOf 的口径一致），
     // 而不是丢掉整个标签：路径还在，用户点开还能看到内容。
-    const mode = r.mode === 'diff' || r.mode === 'source' ? r.mode : undefined
+    // edit 也持久化：重启后用户还期望看到那个「正在编辑」的标签（dirty 内容不存，见 PR-05b 口径）
+    // preview（R08a）同理：它是渲染器注册表那条路，重启后按同一份注册表重建（依赖缺失时
+    // 显示 unavailable 占位，不是白屏）。
+    const mode = r.mode === 'diff' || r.mode === 'source' || r.mode === 'edit' || r.mode === 'preview' ? r.mode : undefined
     const path = str(r.path)
     const toolId = str(r.toolId)
     const startLine = num(r.startLine)
@@ -1679,53 +1702,38 @@ function flushPendingPersistTabs(): void {
   flushPersistTabs()
 }
 
-// syncTabsToRightTab：把标签集**单向**收敛到 rightTab。幂等，且「已一致时返回同一个对象引用」
-// —— 调用方（含 React effect）据此判断「无需 set」，避免 effect → setState → effect 的循环。
+// syncTabsToRightTab：**只负责「这个 scope 还没有标签集」时按 rightTab 建默认集**。
 //
-// 三条分支对应三种真实场景：
-//   ① 该 scope 还没有标签集（首次进入）→ 以 rightTab 为准建默认集
-//   ② 集非空但激活项与 rightTab 不符（e2e 直接 setState 复位 / loadViewToTop 恢复了别的会话）→ 切到同 kind 的标签
-//   ③ 集为空（用户把标签关光了）→ **保持空**，否则刚关掉的标签会被立刻建回来
+// PR-02 起 activeId 是权威：标签集存在时**不再**读 rightTab 去反向挑选标签（旧分支②③已删）。
+// 理由：那两条会让「外部改一下 rightTab」静默换掉用户正在看的标签，也会在切会话恢复时
+// 把 persisted 的 activeId 顶掉。rightTab 现在只由 tabPatch 从激活标签派生。
 function syncTabsToRightTab(s: AppState): TabSet {
   const cur = s.tabsByScope[scopeKeyOf(s)]
   if (!cur) {
     const tab = makeTab(s.rightTab, s)
     return { tabs: [tab], activeId: tab.id, closed: [] }
   }
-  const active = cur.tabs.find((t) => t.id === cur.activeId)
-  if (active && active.kind === s.rightTab) {
-    // 已一致：只把「刚恢复」标记清掉（它是一次性的，不清的话用户之后手动切标签会被它拦住）。
-    return cur.restored ? { ...cur, restored: false } : cur
-  }
-  if (!cur.tabs.length) return cur
-  // 阶段 5：**重启恢复**的标签集要先于 rightTab 存在 —— rightTab 是会话 view 的字段，重启后由
-  // 恢复响应才建出来（默认 'activity'），与恢复的激活标签毫无关系。首次同步时由标签集**反向**
-  // 收敛 rightTab（tabPatch 会把激活标签的 kind 镜像过去），而不是把激活标签改成 rightTab 的
-  // kind（那正是「重启后标签集回来了、激活的却是别的标签」）。
-  //
-  // 标记**不在这里清**：`restored` 的含义是「这个 scope 的标签集自本次启动起还没被用户碰过」，
-  // 期间 rightTab 只可能来自 resetView / loadViewToTop 的默认值（用户的选择一定走
-  // openTab/activateTab/closeTab/reopenTab，那些路径会把标记连标签集一起换掉）→ 标签集权威。
-  // 清标记的时机有二：① 已一致（上面那条分支）；② 任何显式标签动作。这样「重启后切走再切回
-  // 来」也仍然是该 scope 自己的激活标签（否则切回来会被默认的 activity 顶掉）。
-  if (cur.restored) return { ...cur }
-  const hit = cur.tabs.find((t) => t.kind === s.rightTab)
-  if (hit) return { ...cur, activeId: hit.id }
-  const tab = makeTab(s.rightTab, s)
-  return { tabs: [...cur.tabs, tab], activeId: tab.id, closed: cur.closed }
+  // restored 是「本次启动起还没被用户碰过」的一次性标记：只在**显式标签动作**里清
+  //（那些动作会构造新 TabSet，不带 restored），读路径不动它 —— 否则重启恢复的 N25 会转红。
+  return cur
 }
 
-// tabPatch 把新的标签集写回 state，**同时**把 rightTab 镜像成激活标签的 kind
+// tabPatch 把新的标签集写回 state，**同时**把 rightTab 派生为激活标签的 kind
 //（有会话 → 写该会话 view；无会话 → 只写顶层，与 setRightTab 的既有口径一致）。
 // 集为空时保留原 rightTab：此时内容区由 activeTab===null 渲染空态，rightTab 只是个遗留值。
-function tabPatch(s: AppState, scope: ScopeKey, set0: TabSet): Partial<AppState> {
+// rightTabPatch：rightTab 的**唯一**写点（tabPatch 也走它）。只派生、不碰标签集。
+function rightTabPatch(s: AppState, kind: RightTab, layout?: RightLayout): Partial<AppState> {
+  const extra = layout ? { rightLayout: layout, rightExpanded: layout.open } : {}
+  const sid = s.activeSessionId
+  if (!sid) return { rightTab: kind, ...extra }
+  const v = s.views[sid] ?? emptyView()
+  return setView(s, sid, { ...v, rightTab: kind, ...extra })
+}
+
+function tabPatch(s: AppState, scope: ScopeKey, set0: TabSet, layout?: RightLayout): Partial<AppState> {
   const active = set0.tabs.find((t) => t.id === set0.activeId)
   const kind: RightTab = active?.kind ?? s.rightTab
-  const tabsByScope = { ...s.tabsByScope, [scope]: set0 }
-  const sid = s.activeSessionId
-  if (!sid) return { tabsByScope, rightTab: kind }
-  const v = s.views[sid] ?? emptyView()
-  return { ...setView(s, sid, { ...v, rightTab: kind }), tabsByScope }
+  return { ...rightTabPatch(s, kind, layout), tabsByScope: { ...s.tabsByScope, [scope]: set0 } }
 }
 
 // 标签列表的结构等价判断：syncWebTabs 在每个 embed-nav 事件上都会跑（导航/标题变化很频繁），
@@ -1745,26 +1753,6 @@ function makeWebTab(source: 'native' | 'mcp', key: string): TabInstance {
     ? { id, kind: 'web', viewId: key }
     : { id, kind: 'web', pageId: Number(key.replace(/^p/, '')) }
 }
-
-// webTabKey：web 标签在**当前数据源**下的身份（另一数据源的身份返回 undefined → 不参与本次同步）。
-function webTabKey(t: TabInstance, source: 'native' | 'mcp'): string | undefined {
-  if (t.kind !== 'web') return undefined
-  if (source === 'native') return t.viewId
-  return t.pageId != null ? `p${t.pageId}` : undefined
-}
-
-// samePreviewTarget：一个「待重建的恢复标签」（阶段 5）是不是就对应这个页面 —— 用户点它 →
-// 重建出视图 → syncWebTabs 用它把视图接回**原来那个标签实例**（否则恢复的标签永远停在
-// 待重建态，点一次还多一个重复标签）。
-// 口径与主进程 embed:open-target 的去重一致：两侧都有 srcPath 时比 srcPath（office 转换
-// 产物每次换临时 html_path，只有源文件认得出「是同一个」），否则比 url。
-function samePreviewTarget(t: WebTabInstance, x: { url: string; srcPath?: string }, ws: string | undefined): boolean {
-  const a = t.srcPath
-  const b = x.srcPath
-  if (a && b) return relIfInside(a, ws) === relIfInside(b, ws)
-  return !!t.url && t.url === x.url
-}
-
 
 // 浏览器面板状态（web tab）按工作区隔离：切换工作区时清空上一个工作区的页列表/截图/
 // loading。浏览器连接与页/截图都是 per-workspace（bridge runtime(ws).plugins 隔离），
@@ -2130,6 +2118,16 @@ export const FILE_PREVIEWS_MAX = 8
 //   · 自愈（响应因任何原因没回来时，超过 FILE_PREVIEW_RETRY_MS 允许重发）。
 const filePreviewInFlight = new Map<string, number>()
 const FILE_PREVIEW_RETRY_MS = 5000
+// office 转换结果的短期缓存（键 = kind + 路径）：
+//   · 为什么要缓存：一次转换要起受管 Python（0.5~3s），而 preview 标签在切标签时会**卸载重挂**
+//     （RightPanel 只挂激活标签）—— 不缓存的话「看一眼 A、切走、切回」就再转一次。
+//   · 为什么带 TTL：产物是文件内容的函数，源文件可能被 agent/编辑器改掉；60s 足够挡住
+//     「切来切去」的重复转换，又不会让用户对着改完的文件看旧预览（重开标签即刷新）。
+//   · 为什么不按 mtime：fs_stat 契约里没有 mtime（transport 只回 size/isFile），
+//     为此改 IPC 面不值当 —— TTL 的口径足够诚实（超时即重转）。
+const officePreviewCache = new Map<string, { at: number; result: OfficePreviewResult }>()
+const OFFICE_PREVIEW_TTL_MS = 60_000
+const OFFICE_PREVIEW_CACHE_MAX = 8
 // requestFilePreview：发一次 file_preview 并登记在途（键按**发起时**的工作区归一化）。
 // 顺序很重要：**先登记再 send** —— mock transport 的响应是**同步**发出的（见 send 的
 // im_chat_list 注释），后登记会留下一条永远没人释放的在途记录（那条 path 从此不再补拉）。
@@ -2469,6 +2467,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   cron: { enabled: true, auto_clean: true }, // 定时任务默认全开（2026-08-19 用户决策）
   mesh: { session_enabled: false, remote_enabled: false }, // Session Mesh 默认全关（安全默认：开启后才注册工具）
   stt: { enabled: false }, // 语音输入默认关闭（配置 base_url/model/api_key 后开启）
+  editor: true, // 内嵌编辑器（PR-05b）默认开启；false = 隐藏所有「编辑」入口（回滚开关）
 }
 
 // activeProviderCfg 当前活跃 provider 的配置（active 恒为 provider id，其值恒为 ProviderCfg；
@@ -2871,7 +2870,7 @@ export function applySessionPrefs(path: string, sid: string): void {
   if (Object.keys(patch).length > 0) useAppStore.setState(patch)
 }
 
-interface AppState {
+export interface AppState {
   bridgeStatus: 'idle' | 'starting' | 'running' | 'stopped' | 'error'
   bridgeError?: string
   workspace?: string
@@ -2890,8 +2889,26 @@ interface AppState {
   leftExpanded: boolean
   leftPinned: boolean
   rightExpanded: boolean
+  rightLayout: RightLayout
   rightTab: RightTab
   rightSize: number | null // M3：期望的右侧面板宽度（null = 不强制；浏览器内嵌时按 viewport 设）
+  // panelMenuOpen：右栏**面板级**下拉/右键菜单是否开着（R06c 从 RightPanel 的局部 state 上移）。
+  //
+  // 为什么必须上移：它参与原生内嵌视图的**可见性仲裁** —— WebContentsView 恒合成在窗口 DOM
+  // 之上（原生层级 > DOM，CSS z-index 压不住），菜单打开期间不隐藏视图就会被预览画面盖住
+  // （用户实测：点「＋」后菜单被挡掉，见 WebTab 的可见性 effect）。而菜单状态原本是 RightPanel
+  // 的组件局部 state（menu / ctx 两份），provider 渲染的 WebTab 读不到组件局部 state。
+  // 口径 = `menu !== null || ctx !== null`（RP 在**两个** setter 调用点同步写这里，没有第三个写者），
+  // 只表示「有菜单开着」，不含定位/内容（那两份仍留在 RP：菜单要锚坐标、要读标签）。
+  panelMenuOpen: boolean
+  // previewEmbedActive：**预览面板**里的原生视图是否正在显示（R08b，pdf 渲染器唯一写者）。
+  //
+  // 为什么要进 store：RightPanel 的可见性闸门写死了「只在 web 标签显示原生视图」
+  //（`rightExpanded && activeTab.kind === 'web'`，见其 effect）。pdf 预览标签是 file kind，
+  // 它的视图由面板自己建/摆位，若不把这条状态告诉那道闸门，闸门会在面板刚显示完就把它藏掉
+  //（父级 effect 在子级 effect 之后跑 —— 实测顺序就是这样）。与 panelMenuOpen 同一处置：
+  // 「谁负责原生视图」是跨组件事实，留在局部 state 里必然两边各说各话。
+  previewEmbedActive: boolean
   // skeleton：切换会话时的骨架屏状态机（2026-10-21 重设计）。
   //
   // 为什么不是一个 boolean：骨架屏最怕**闪烁**。实测本机会话加载耗时分布极宽
@@ -2936,6 +2953,17 @@ interface AppState {
   persona: 'code' | 'work' // 双 Persona（Code 工程师 / Work 办公助理；切换当前会话下一轮生效）
   model: string // 当前模型（switch_model；下一次请求生效）
   filePreviews: Record<string, FilePreview> // 文件内容缓存（file_preview 响应；键 = fileKeyOf 归一化路径。阶段 2：按标签隔离，不再是全局单例）
+  // —— 内嵌编辑器（PR-05b）——
+  // dirtyTabs：标签 id → 有未保存改动。内容与 baseHash 的真相在 lib/editorDocs（按标签持有），
+  // 这里只镜像「脏不脏」—— 标签圆点、关标签确认、原生红点都只读这个布尔，不需要拿到正文。
+  dirtyTabs: Record<string, boolean>
+  // fileChange：**最后一次** file_changed（带自增 seq，保证「同一个 hash 连推两次」也能被看到；
+  // 用对象身份比较会漏）。编辑器会话订阅它把事件路由到开了这个路径的标签。
+  fileChange?: { path: string; hash?: string; deleted: boolean; seq: number }
+  // closeConfirm：关 dirty 标签 / 退出应用共用的确认框（PR-05b：两种触发一个框）。
+  // tabIds 是**队列**：批量关闭（关其它/关右侧）撞到多个脏标签时，一次问一个，
+  // 处理完一个再问下一个 —— 单槽会让后一个覆盖前一个，用户以为只丢了一个文件。
+  closeConfirm?: { reason: 'close'; tabIds: string[] } | { reason: 'quit' }
   fileFocus?: FileFocus // 对话文件点击 → 文件 Tab 精确定位（seq 允许重复点击同一路径）
   // officeBusy 正在转换的文件路径（xlsx/docx/pptx 任一在途；驱动按钮禁用与「转换中…」）。
   // 三种格式共用一个槽位而不是各一个：同一时刻用户点的是**一个**文件，多槽位只会让
@@ -3180,6 +3208,19 @@ interface AppState {
   filePathMoved(fromPath: string, toPath: string, opts?: { isDir?: boolean }): void // 移动/重命名：路径跟着走
   filePathRemoved(path: string, opts?: { isDir?: boolean }): void // 删除：摘掉指向它的 file 标签与缓存
   closeFile(): void
+  // —— 内嵌编辑器（PR-05b）——
+  // 打开「编辑」标签（文件树右键 / 预览工具栏共用入口）。settings.editor=false 时入口不出现；
+  // 这里再拦一层：存量入口（旧快捷键/persisted 标签）也不该绕过回滚开关。
+  openFileForEdit(path: string): void
+  // 编辑器三命令（file_open/file_save/file_close）走这里：返回带 code/data 的完整响应。
+  // 不经 dispatchEvent 的通用失败分支 —— 冲突/失效是**该文档的局部状态**，不是全局 bridge 错误。
+  editCommand(type: 'file_open' | 'file_save' | 'file_close', payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; code?: string; data?: Record<string, unknown> }>
+  setTabDirty(tabId: string, dirty: boolean): void // 编辑器把脏状态镜像进来（圆点 + 原生红点 + 关闭确认）
+  cancelCloseConfirm(): void // 确认框「取消」：标签留着，脏内容不动
+  // 批量关闭（关其它 / 关右侧）：干净的直接关，脏的进确认队列（**绝不静默丢缓冲区**）
+  closeTabs(ids: string[]): void
+  // 确认框处理完一个标签：关掉它并把队列推进到下一个（没了就收起框）
+  closeConfirmNext(closedId: string): void
   fetchMetrics(opts?: { from?: string; to?: string; project?: string }): void // 强制拉取聚合报告
   ensureMetrics(): void // 按需拉取：报告缺失或超龄才发命令（空会话图表等高频入口）
   fetchSkills(): void // 技能清单（SkillsPage + /skill 命令补全数据源）
@@ -3241,18 +3282,37 @@ interface AppState {
   toggleRight(): void
   setLeftExpanded(b: boolean): void // Panel onCollapse/onExpand 同步
   setRightExpanded(b: boolean): void
+  setRightLayout(l: RightLayout): void
+  setRightLayoutFromDrag(rightPct: number, leftPct: number): void
+  applyBias(b: 'even' | 'center' | 'right'): void
   togglePin(): void
   setRightTab(t: RightTab): void
+  // R06c：右栏面板级菜单（⌄ 重开 / ＋ 新建 / 标签右键）开合的**唯一**写点，由 RightPanel 的
+  // 两个 setter 调用点镜像进来 —— 它是 WebTab 可见性仲裁的输入（见 AppState.panelMenuOpen）。
+  setPanelMenuOpen(open: boolean): void
+  // R08b：预览面板里的原生视图显隐（pdf 渲染器的 ready/卸载两个调用点）。
+  setPreviewEmbedActive(on: boolean): void
+  /**
+   * R08b：office 预览 = 「转换 → 读回产物 HTML」。返回可直接进沙箱 iframe 的字符串。
+   *
+   * 为什么要把这条放进 store（而不是渲染器自己开通道）：`file_preview` 是一次性命令，
+   * 它的响应由 store 的命令分发统一结算（sendData）；渲染器拿不到那条 Promise 通道。
+   * 副作用与既有预览一致：产物绝对路径也会进 filePreviews 缓存（同一份缓存，多一条临时路径）。
+   */
+  loadOfficePreview(path: string, kind: 'xlsx' | 'docx' | 'pptx'): Promise<OfficePreviewResult>
   // focusAgent：左栏树点选一个子智能体 → 叙述区改为展示它的转录（同一次运行的两处视图）。
   // 传 undefined = 回到主会话。**不改变消息投递目标**（输入框永远发给主会话）：
   // 这只是"看哪个"，与"发给谁"是两个问题（子智能体的输入通道是 agent_send）。
   focusAgent(f?: AgentFocus): void
   // —— 右侧栏标签（阶段 1，docs/RIGHT_PANEL_TABS_PLAN.md）——
   openTab(spec: TabSpec, opts?: { activate?: boolean }): string // 打开或激活（阶段 1 幂等键 = kind）；返回标签 id
+  // R08b：「预览」显式入口（文件树右键）——建 preview 标签 + 展开右栏 + 拉内容，三件事一起做。
+  openPreviewTab(path: string): void
   activateTab(id: string): void // 激活指定标签（切 scope 内的显示）
-  closeTab(id: string): void // 关闭（激活项顺延到右邻居，无则左邻居）
+  closeTab(id: string): void // 关闭（激活项顺延到右邻居，无则左邻居）；**dirty 编辑标签先弹确认**
+  closeTabNow(id: string): void // 真关（确认框/批量关闭用；跳过 dirty 守卫）
   reopenTab(id?: string): void // 重开最近关闭的一个（给 id 则重开指定的那个）
-  syncTabsToRightTab(): void // 标签集单向收敛到 rightTab（组件 effect 调用；已一致时不 set）
+  syncTabsToRightTab(): void // 建默认集 / 恢复态补派生字段（activeId 权威，不再按 rightTab 反选）
   // 阶段 5：把防抖窗口里的标签集立即落盘（e2e/L1 断言与关窗前收尾用；正常路径靠订阅防抖写）。
   flushSessionTabs(): void
   // 内嵌页面 → 面板级 web 标签（阶段 1.5：一页一标签，浏览器内层标签条退役）。
@@ -3672,7 +3732,7 @@ const OWNER_SCOPED_COMMANDS = new Set<string>([
   'im_route_del',
 ])
 
-function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void): number {
+function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void, onData?: (r: { ok: boolean; error?: string; code?: string; data?: unknown }) => void): number {
   const id = ++cmdSeq
   const ws = String(cmd.payload?.workspace || useAppStore.getState().workspace || '')
   const sessionId = String(cmd.payload?.session_id || cmd.payload?.id || '')
@@ -3726,6 +3786,9 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
   }
   const finalPayload = ws ? { ...(payload || {}), workspace: ws } : payload
   if (onResp) onCommandResponseOnce(id, onResp)
+  // onData 与 onResp 同理：**登记必须在 transport.send 之前** —— mock transport 是同步回响应，
+  // 调用方「先 send 再登记」会漏掉响应（表现为 10s 超时）。
+  if (onData) onCommandResponseData(id, onData)
   // transport.send 的返回值是「写没写进 bridge」。旧实现直接 void 丢掉：
   // bridge 已退出时 Electron 返回 {ok:false,error:'bridge 未运行'}，但不发 command_response
   // → pending 永不结算、骨架屏超时后空白、全程无报错（用户报障「没有报错但历史不出来」）。
@@ -3780,15 +3843,17 @@ function onCommandResponseOnce(id: number, cb: (r: { ok: boolean; error?: string
 
 // onCommandResponseData 一次性 command_response 回调（带完整 data；如 mesh_status）。
 // 与 onCommandResponseOnce 同构，但回传 data 供展示类查询用；超时 10s 释放。
-function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string; data?: unknown }) => void): void {
+function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string; code?: string; data?: unknown }) => void): void {
   let timer: ReturnType<typeof setTimeout> | undefined
   const off = transport.onEvent((line) => {
     try {
-      const ev = JSON.parse(line) as { event_type?: string; id?: number; ok?: boolean; error?: string; data?: unknown }
+      // code 是**稳定错误码**（conflict / denied / not_found…）。编辑器的三条冲突动作全靠它
+      // 分流；靠 error 文案匹配等于把中文提示当成协议（改一句文案就静默走错分支）。
+      const ev = JSON.parse(line) as { event_type?: string; id?: number; ok?: boolean; error?: string; code?: string; data?: unknown }
       if (ev.event_type !== 'command_response' || ev.id !== id) return
       off()
       if (timer) clearTimeout(timer)
-      cb({ ok: ev.ok === true, error: ev.error, data: ev.data })
+      cb({ ok: ev.ok === true, error: ev.error, code: ev.code, data: ev.data })
     } catch {
       /* 非 JSON 事件忽略 */
     }
@@ -3798,6 +3863,14 @@ function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string
     cb({ ok: false, error: 'bridge 响应超时' })
   }, 10_000)
 }
+// sendData：与 send 同一条通道，但把**带 code/data** 的一次性响应交回调用方（Promise 形态）。
+// 用在「错误码本身就是业务分支」的命令上（编辑器三命令、mesh_ping）。
+function sendData(cmd: Omit<BridgeCommand, 'id'>): Promise<{ ok: boolean; error?: string; code?: string; data?: Record<string, unknown> }> {
+  return new Promise((resolve) => {
+    send(cmd, false, undefined, (r) => resolve({ ok: r.ok, error: r.error, code: r.code, data: (r.data ?? undefined) as Record<string, unknown> | undefined }))
+  })
+}
+
 // pendingRestoreAttempt：会话 → 最近一次 new_session 的 attempt 序号（陈旧响应丢弃用）。
 const pendingRestoreAttempt: Record<string, number> = {}
 // imChatReq：im_chat_list 请求 id → gateway_id（响应分发时定位群列表归属）。
@@ -4751,12 +4824,42 @@ export function dispatchEvent(raw: AnyEvent): void {
       })
       break
     }
+    // 外部变更（PR-05b / F35）：bridge 按已打开文件的目录监听，by 在 V0.1 恒为 "external"。
+    // 这里只**记账**（最后一次事件 + seq）；路由给哪个标签、要不要重载，是 lib/editorRuntime
+    // 的事 —— store 不该知道编辑器状态机的形状。
+    case 'file_changed': {
+      const path = String(raw.path ?? '')
+      if (!path) break
+      const hash = typeof raw.hash === 'string' ? raw.hash : undefined
+      const deleted = raw.deleted === true
+      setState((st) => ({ fileChange: { path, hash, deleted, seq: (st.fileChange?.seq ?? 0) + 1 } }))
+      break
+    }
     case 'command_response': {
       const r = raw as AnyEvent & { id: number; ok: boolean; error?: string; data?: Record<string, unknown>; workspace?: string }
       const meta = pending[r.id]
       delete pending[r.id]
       const t = meta?.type ?? ''
       embedBridgeAlive = true // 任意响应到达 ⇒ bridge 已就绪（embed 自举的放行信号）
+      // 编辑器三命令（file_open/file_save/file_close）：响应由 editCommand 的 Promise 消费，
+      // 这里**就地返回**。不返回的话，file_save 的冲突（ok:false + code=conflict）会掉进下面的
+      // 通用失败分支 → 把「文件已被外部修改」写成全局 bridgeError（甚至把 bridge 标红）。
+      // 这是**该文档的局部状态**，只属于编辑器自己的黄条。
+      if (t === 'file_open' || t === 'file_save' || t === 'file_close') {
+        // 但**bridge 掉线**不属于「这个文件写不进去」：进程死了 / 未运行 / EPIPE 时，
+        // 只出一行文档红条会让全局健康信号沉默（用户看着"文件已失效"，其实后端没了）。
+        // 只动全局信号，不碰文档状态 —— 文档的红条由编辑器自己按 code 决定。
+        if (!r.ok && looksBridgeDown(r.error)) {
+          const err = r.error || i18nT('bridge.unavailable')
+          const alreadyDown = getState().bridgeStatus === 'error'
+          setState({
+            bridgeStatus: 'error' as const,
+            bridgeError: err,
+            ...(alreadyDown ? {} : { toast: { msg: err, kind: 'error' as const, id: Date.now() } }),
+          })
+        }
+        return
+      }
       // new_session 失败必须在这里收敛：bare（真新建）要撤掉 loading shell；
       // 带 id 的恢复要释放 snapshotPending/preBuf，否则该会话后续事件会被永久积压。
       // 旧路径落到通用 `if (!r.ok)` 只设 bridgeError —— 骨架屏/空白壳没人收，用户看到
@@ -5192,6 +5295,37 @@ export function dispatchEvent(raw: AnyEvent): void {
               return setView(s, sid, { ...v, blocksOlderLoading: false, blocksOlderError: true })
             })
             break
+          }
+          // —— noeviction（Redis 的语义）——
+          //
+          // 预算已经超了还往缓存里塞更多数据 ⇒ **拒绝**这一页。
+          //
+          // 为什么不「先收下再降级」：降级会把刚加载来的**更早**的块裁掉（它裁的是
+          // 数组头部）⇒ 用户点了「加载更早」、页面转了一圈、看到的还是原样 ——
+          // 比明确报错更糟。Redis 的 `noeviction` 就是这个选择：
+          // "Keys are not evicted but the server will return an error when you try
+          // to execute commands that cache new data"。
+          //
+          // 用现成的 blocksOlderError 态（按钮变「重试」）⇒ 关掉别的会话腾出预算后
+          // 再点一次就能成功。
+          {
+            const stNow = useAppStore.getState()
+            let over = false
+            for (const v of Object.values(stNow.views)) {
+              if (viewBytes(v) > currentBudgetBytes()) {
+                over = true
+                break
+              }
+            }
+            if (over) {
+              console.info('[budget] 预算已满 → 拒绝这一页「加载更早」')
+              setState((s) => {
+                const v = s.views[sid]
+                if (!v) return {}
+                return setView(s, sid, { ...v, blocksOlderLoading: false, blocksOlderError: true })
+              })
+              break
+            }
           }
           const page = d as unknown as {
             blocks?: Array<Record<string, unknown>>
@@ -8896,21 +9030,149 @@ function evictViews(keep?: string): void {
     .filter((sid) => !keepSet.has(sid))
     .sort((a, b) => viewOrder.indexOf(a) - viewOrder.indexOf(b))
   const over = Object.keys(st.views).length - VIEW_CACHE_MAX
-  if (over <= 0 || cands.length === 0) return
-  const drop = cands.slice(0, Math.min(over, cands.length))
+  if (over > 0 && cands.length > 0) {
+    const drop = cands.slice(0, Math.min(over, cands.length))
+    const views = { ...st.views }
+    for (const sid of drop) delete views[sid]
+    for (const sid of drop) {
+      const i = viewOrder.indexOf(sid)
+      if (i >= 0) viewOrder.splice(i, 1)
+    }
+    useAppStore.setState({ views })
+  }
+  // ② 字节预算：超了就分级降级 / 淘汰（Redis 模型，见 viewBudget.ts）。
+  enforceViewBudget()
+}
+
+// —— 视图内存预算（2026-11-12，P1）——
+//
+// 渲染进程 footprint 实测 2.08 GB（峰值 3.13 GB），而 V8 的堆上限是**崩溃线**
+// 不是降级线（v8.dev/blog/heap-size-limit：到顶 → "a series of last resort
+// garbage collections" → 再不行就 "stops execution and reports an
+// out-of-memory failure" ⇒ Electron 里就是 Aw, Snap）。
+// 我们没设 --max-old-space-size ⇒ 用的是 Chromium 推算的默认值。
+//
+// ⇒ 渲染进程内存必须**我们自己管**，不能让 V8 兜底。
+// 模型抄 Redis 的 eviction：字节预算 + 写入时检查 + 分级降级（只丢可重取的）
+// + C 类（草稿/审批/待答）永不丢。详见 src/store/viewBudget.ts。
+let lastBudgetCheck = 0
+let budgetTimer: ReturnType<typeof setTimeout> | undefined
+
+/** 安排一次预算检查（每秒至多一次）。
+ *
+ *  用定时器而不是每次都查：视图有 4 万块时一次全量估价要几毫秒（Redis 的检查是
+ *  O(1) 的，我们的不是），而事件是高频的。 */
+function scheduleBudgetCheck(): void {
+  if (budgetTimer !== undefined) return
+  budgetTimer = setTimeout(() => {
+    budgetTimer = undefined
+    enforceViewBudget()
+  }, BUDGET_CHECK_INTERVAL_MS)
+}
+
+/** LRU 顺序（含没进过 viewOrder 的视图，避免漏掉候选）。 */
+function viewLruOrder(views: Record<string, SessionView>): string[] {
+  const seen = new Set(viewOrder)
+  return viewOrder.concat(Object.keys(views).filter((sid) => !seen.has(sid)))
+}
+
+// —— 预算体检（2026-11-13）——
+//
+// 「渲染进程还占多少、其中多少是我们的视图」这个问题，**没有数据就只能猜**。
+// 这一行给出四个数：
+//
+//	est   = 按 roughSize 估算的视图字节（views 里的块 + 窗口外卡片 + trace…）
+//	heap  = V8 报告的真实 JS 堆（performance.memory）
+//	views = 视图数，blocks = 视图里的块总数
+//
+// ⇒ **heap − est ≈ 渲染进程的「底」**（Chromium + React + 模块代码 + DOM）。
+//   底占大头 ⇒ 视图侧没什么可榨的；est 占大头 ⇒ 降级还有空间。
+//
+// 30 秒一行（不刷屏）。
+let lastBudgetReport = 0
+function reportBudget(
+  st: AppState,
+  remaining: number,
+  budget: number,
+  degradeN: number,
+  evictN: number,
+): void {
+  const now = Date.now()
+  if (now - lastBudgetReport < 30000) return
+  lastBudgetReport = now
+  let blocks = 0
+  let cards = 0
+  for (const v of Object.values(st.views)) {
+    blocks += v.blocks.length
+    cards += v.agentDetached?.length ?? 0
+  }
+  const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory
+  const heapMB = mem?.usedJSHeapSize ? (mem.usedJSHeapSize / 1048576).toFixed(0) : '?'
+  console.info(
+    `[budget] 视图 ${Object.keys(st.views).length} 个 / 块 ${blocks} / 卡片 ${cards}` +
+      ` | 估算 ${(remaining / 1048576).toFixed(0)}MB（预算 ${(budget / 1048576).toFixed(0)}MB）` +
+      ` | V8 堆 ${heapMB}MB | 降级 ${degradeN} 淘汰 ${evictN}`,
+  )
+}
+
+/** 按字节预算处置超限的视图。 */
+function enforceViewBudget(force = false): void {
+  const now = Date.now()
+  if (!force && now - lastBudgetCheck < BUDGET_CHECK_INTERVAL_MS) return
+  lastBudgetCheck = now
+  const st = useAppStore.getState()
+  const budget = currentBudgetBytes()
+  const plan = planBudget({
+    views: st.views,
+    order: viewLruOrder(st.views),
+    active: st.activeSessionId,
+    budget,
+    // 运行中的会话**不可淘汰**（淘汰 = 它的实时 UI 直接坏掉）；但可以被降级。
+    protect: (_sid, v) => sessionBusy(v),
+  })
+  reportBudget(st, plan.remaining, budget, plan.degrade.length, plan.evict.length)
+  if (plan.degrade.length === 0 && plan.evict.length === 0) return
   const views = { ...st.views }
-  for (const sid of drop) delete views[sid]
-  for (const sid of drop) {
+  const activeId = st.activeSessionId
+  let degradedActive = false
+  for (const sid of plan.degrade) {
+    const v = views[sid]
+    if (v) {
+      views[sid] = degradeView(v)
+      if (sid === activeId) degradedActive = true
+    }
+  }
+  for (const sid of plan.evict) {
+    delete views[sid]
     const i = viewOrder.indexOf(sid)
     if (i >= 0) viewOrder.splice(i, 1)
   }
-  useAppStore.setState({ views })
+  // 顶层镜像：活跃会话的视图被降级时，**顶层那份也得换**。
+  //
+  // store 有两份 blocks：views[sid].blocks 与顶层 s.blocks（活跃会话镜像，
+  // 见 viewFields / topViewFields）。只改 views 的话，顶层还指着**旧数组**
+  // ⇒ 旧数组仍被引用 ⇒ 白降级（内存一点没释放）。
+  // 这正是「978 MB 的 V8 堆却不降级」的一个直接原因（2026-11-12）。
+  useAppStore.setState(degradedActive && activeId ? { views, ...viewFields(views[activeId]) } : { views })
+  console.info(
+    `[budget] 超预算（${(budget / 1048576).toFixed(0)}MB）→ 降级 ${plan.degrade.length} 个 / 淘汰 ${plan.evict.length} 个，` +
+      `剩余估算 ${(plan.remaining / 1048576).toFixed(1)}MB`,
+  )
 }
 
 let wired = false
 function wire(): void {
   if (wired) return
   wired = true
+  // 内存压力信号（2026-11-12，P1）：主进程轮询系统内存推来。
+  // Chromium tab discarding 的模型 —— 内存吃紧时**主动**降级视图（丢可重取的
+  // 历史，保留用户正在交互的东西），而不是等 V8 撞上崩溃线。
+  if (typeof window !== 'undefined' && window.desktop?.onMemPressure) {
+    window.desktop.onMemPressure((p) => {
+      setMemPressure({ ...p, at: Date.now() })
+      enforceViewBudget(true)
+    })
+  }
   transport.onEvent((line) => {
     try {
       const ev = JSON.parse(line) as AnyEvent
@@ -9046,12 +9308,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 阶段 5：重启恢复的标签集（模块加载时同步读 localStorage，见 loadPersistedTabs）。
   tabsByScope: initTabsByScope,
   filePreviews: {},
+  dirtyTabs: {},
   recentSessions: initRecent,
   leftExpanded: true,
   leftPinned: false,
   rightExpanded: false,
+  rightLayout: layoutCollapse,
   rightTab: 'activity',
   rightSize: null,
+  // 菜单关着（与 menu/ctx 的初值一致）；RP 挂载后由两个 setter 镜像维护。
+  panelMenuOpen: false,
+  previewEmbedActive: false,
   skeleton: { phase: 'idle' as const, at: 0 },
   enterAnimAt: 0,
   inSkills: false,
@@ -10128,6 +10395,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (kind === 'xlsx' || kind === 'docx' || kind === 'pptx') void get().previewOfficeFile(path, kind)
     else void get().openInBrowserTab(path, { activate: true })
   },
+  // openPreviewTab：「预览」显式入口（R08b / 文件树右键菜单）。
+  //
+  // 为什么单独一个动作而不是让调用方自己 openTab：这条入口有**三件**必须一起发生的事 ——
+  // 建/激活 preview 标签、展开右栏、把 fileFocus 与内容请求接上（面板的内容来自
+  // store.filePreviews，缺了会停在「正在读取文件…」且没有任何东西会再来拉）。
+  // 与 openFile 的关系：openFile 是「打开」的默认通道（可视类落内嵌浏览器 web 标签，D-I 口径
+  // 不变）；本动作是**同一个文件的另一种看法** —— 两者身份不同（tabKeyOf 带 mode），可以并存。
+  openPreviewTab: (path) => {
+    if (!path) return
+    get().openTab({ kind: 'file', path, mode: 'preview' })
+    get().setRightExpanded(true)
+    // locateFile 只写 fileFocus + 发一次 file_preview（不改右栏标签、不抢视线），与 openFile
+    // 里那一步同一条：背景路径不靠它切面板，前台路径不靠它进入——它只负责「内容已就位」。
+    get().locateFile(path)
+  },
   // ensureFilePreview：内容缓存缺失时按需补拉（阶段 2）。
   // 调用方是文件面板：激活一个 file 标签时若该路径没有缓存（切工作区清空过 / 被
   // FILE_PREVIEWS_MAX 淘汰 / 标签从「最近关闭」重开）就补一次 —— 否则用户会停在
@@ -10150,6 +10432,30 @@ export const useAppStore = create<AppState>((set, get) => ({
   // —— 标签标题不变，用户看到的是「回到了文件活动列表」），语义与阶段 1 的「清两个全局单例」
   // 等价（面板都退回活动列表）。mode 清掉后该标签的身份键回落 'source'，故再次打开同一文件
   // 仍命中**这个**标签（不会因为「键变了」而多开一个）。
+  // —— 内嵌编辑器（PR-05b）——
+  openFileForEdit: (path) => {
+    if (!isEditorEnabled(get().settings)) return // 回滚开关：settings.editor=false → 不建编辑标签
+    if (!isTextLikePath(path)) return // 二进制/图片/工作簿只有内嵌浏览器或转换服务能渲染
+    // 身份 = (path, 'edit')：同一个文件已有预览标签时**另开一个**编辑标签（D5 同款口径），
+    // 反之亦然 —— 用户能一边看 diff 一边改源码。
+    get().openTab({ kind: 'file', path, mode: 'edit' })
+    get().setRightExpanded(true)
+    // fileFocus 跟着走：左栏选中行与「文件」标签空开时的落点都靠它
+    get().locateFile(path, undefined, 'source')
+  },
+  editCommand: (type, payload) => sendData({ type, payload }),
+  setTabDirty: (tabId, dirty) => {
+    const cur = get().dirtyTabs
+    if (!!cur[tabId] === dirty) return
+    const next = { ...cur }
+    if (dirty) next[tabId] = true
+    else delete next[tabId]
+    set({ dirtyTabs: next })
+    // 原生脏标记（macOS 标题栏的圆点 / 关窗时的系统提示）：任一标签脏即为脏。
+    // 非 macOS 由主进程空实现（F32 的「零依赖」同样适用于主进程这一侧）。
+    if (typeof window !== 'undefined') void window.desktop?.setDirty?.(Object.keys(next).length > 0)
+  },
+  cancelCloseConfirm: () => set({ closeConfirm: undefined }),
   closeFile: () => {
     const s = get()
     const scope = scopeKeyOf(s)
@@ -10530,21 +10836,50 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleLeft: () => set((s) => ({ leftExpanded: !s.leftExpanded })),
   // 右侧栏开关/tab 是会话级视图状态：写入活跃会话的 view（per-session 恢复）
+  // 布局唯一写者：rightLayout 写进去，rightExpanded 同步成派生镜像（D-D 同款纪律）
+  setRightLayout: (l) => {
+    const s = get()
+    const sid = s.activeSessionId
+    if (!sid) return set({ rightLayout: l, rightExpanded: l.open })
+    const v = s.views[sid] ?? emptyView()
+    set(setView(s, sid, { ...v, rightLayout: l, rightExpanded: l.open }))
+  },
+  // 只在右栏已展开时记录拖拽：收起态下 Group 仍会报 ~44px（rail），
+  // 若不拦住，拖左/中分隔条会把右栏弹开（违反 D-A：自动展开只属于 openTab）。
+  setRightLayoutFromDrag: (rightPct, leftPct) => {
+    const cur = get().rightLayout
+    if (!cur.open) return
+    const next = afterDrag(rightPct, leftPct)
+    if (next.open && Math.abs(next.ratio - cur.ratio) < 1) return // 无实质变化不重渲
+    get().setRightLayout(next)
+  },
+  // 点预设：清 rightSize（内嵌浏览器 viewport 宽度）与写布局同一个 set，避免先按旧比例闪一帧
+  applyBias: (b) => {
+    const s = get()
+    const layout = layoutExpand(b)
+    const sid = s.activeSessionId
+    const patch = sid
+      ? setView(s, sid, { ...(s.views[sid] ?? emptyView()), rightLayout: layout, rightExpanded: true })
+      : { rightLayout: layout, rightExpanded: true }
+    set({ ...patch, rightSize: null })
+  },
   toggleRight: () => {
     const s = get()
-    const sid = s.activeSessionId
-    const next = !s.rightExpanded
-    if (!sid) return set({ rightExpanded: next })
-    const v = s.views[sid] ?? emptyView()
-    set(setView(s, sid, { ...v, rightExpanded: next }))
+    get().setRightLayout(s.rightLayout.open ? layoutCollapse : layoutExpand('even'))
   },
   setLeftExpanded: (b) => set({ leftExpanded: b }),
+  // 兼容旧调用点（Panel onResize / 快捷键 / 测试 reset）：以 rightExpanded 为「已展开」判据，
+  // 避免 rightLayout 与 rightExpanded 因外部直接 set 而漂移；已展开时只做镜像自愈，不重置 bias。
   setRightExpanded: (b) => {
     const s = get()
-    const sid = s.activeSessionId
-    if (!sid) return set({ rightExpanded: b })
-    const v = s.views[sid] ?? emptyView()
-    set(setView(s, sid, { ...v, rightExpanded: b }))
+    if (b) {
+      if (s.rightLayout.open && s.rightExpanded) return
+      const bias = s.rightLayout.open && s.rightLayout.bias !== 'custom' ? s.rightLayout.bias : 'even'
+      get().setRightLayout(layoutExpand(bias)) // 同时自愈 rightExpanded 镜像
+    } else {
+      if (!s.rightLayout.open && !s.rightExpanded) return
+      get().setRightLayout(layoutCollapse)
+    }
   },
   togglePin: () => set((s) => ({ leftPinned: !s.leftPinned })),
   focusAgent: (f) => {
@@ -10560,6 +10895,49 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 兼容入口（e2e 与既有调用点仍按 kind 切标签）：语义 = **打开或激活**该 kind 的标签。
     // 为什么不让它直接写 rightTab：那会绕过标签集，出现「切过去了、标签条上却没有这个标签」。
     get().openTab({ kind: t } as TabSpec, { activate: true })
+  },
+  // 同值不 set：菜单开合会连带触发 RP 的两个 setter（menu 与 ctx 各一），重复写会让
+  // 所有订阅者白跑一轮通知（WebTab 的可见性 effect 也挂在同一个值上）。
+  setPanelMenuOpen: (open) => set((s) => (s.panelMenuOpen === open ? {} : { panelMenuOpen: open })),
+  setPreviewEmbedActive: (on) => set((s) => (s.previewEmbedActive === on ? {} : { previewEmbedActive: on })),
+  loadOfficePreview: async (path, kind) => {
+    const key = `${kind}\u0000${path}`
+    const hit = officePreviewCache.get(key)
+    if (hit && Date.now() - hit.at < OFFICE_PREVIEW_TTL_MS) return hit.result
+    const ws = get().workspace ?? ''
+    const call = kind === 'xlsx' ? transport.watchXlsx : kind === 'docx' ? transport.watchDocx : transport.watchPptx
+    let htmlPath: string
+    try {
+      // 与 previewOfficeFile 同一条 bridge 命令、同一份入参口径（相对路径由 bridge 锚定 workspace）。
+      const conv = await call.call(transport, { path, workspace: ws })
+      if (!conv?.ok || !conv.html_path) {
+        return { ok: false, error: conv?.error || i18nT('common.officeConvertFailed') }
+      }
+      htmlPath = conv.html_path
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+    // 产物是临时目录里的**绝对路径**（不落工作区）→ 用 file_preview 的绝对路径分支读回。
+    // 上限就是 file_preview 的那条 1 MiB：超了 truncated=true，界面必须如实说「已截断」并给
+    // 「在内嵌浏览器打开完整版」的出口（那条路不经过这里，见 previewOfficeFile 的注释）。
+    const r = await sendData({ type: 'file_preview', payload: { path: htmlPath, workspace: ws } })
+    if (!r.ok) return { ok: false, error: r.error || `读不回转换产物：${htmlPath}` }
+    const d = r.data ?? {}
+    const html = String(d.content ?? '')
+    const result: OfficePreviewResult = {
+      ok: true,
+      html,
+      truncated: !!d.truncated || !!d.binary,
+      htmlPath,
+    }
+    officePreviewCache.set(key, { at: Date.now(), result })
+    // 上限只是防内存长跑：8 份产物 HTML 已经远超「同时看着的面板数」。
+    while (officePreviewCache.size > OFFICE_PREVIEW_CACHE_MAX) {
+      const oldest = officePreviewCache.keys().next().value
+      if (oldest == null) break
+      officePreviewCache.delete(oldest)
+    }
+    return result
   },
   // openTab：打开或激活一个标签。幂等键（阶段 2，见 tabKeyOf）：
   //   · file → kind + path + mode：**多实例**。同一文件可以同时有 diff 与 source 两个标签
@@ -10622,7 +11000,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sizePatch = shouldSizeFile && typeof window !== 'undefined'
       ? { rightSize: Math.round(window.innerWidth * 0.6) }
       : {}
-    set({ ...tabPatch(s, scope, next), ...sizePatch })
+    // D-A：**内容触发**才展开（用户手势走 toggleRight/setRightExpanded，不在这里）；
+    // 后台静默打开（activate:false）不碰面板；已展开时不重置 bias。
+    const layout = !activate || s.rightLayout.open ? undefined : layoutExpand('even')
+    set({ ...tabPatch(s, scope, next, layout), ...sizePatch })
     return id
   },
   activateTab: (id) => {
@@ -10632,7 +11013,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (set0.activeId === id) return
     const tab = set0.tabs.find((t) => t.id === id)
     if (!tab) return
-    set(tabPatch(s, scope, { ...set0, activeId: id }))
+    set(tabPatch(s, scope, { ...set0, activeId: id, restored: false }))
     // web 标签 → 同步底层页面的激活态。内层标签条退役后，这里是**唯一**的切页入口。
     if (tab.kind === 'web') {
       if (tab.viewId) {
@@ -10659,6 +11040,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
   closeTab: (id) => {
+    // dirty 的编辑标签**不直接关**：弹三选（保存/丢弃/取消），取消则标签留着、内容不动。
+    // 批量关闭（关其它/关右侧）走同一个守卫 → 脏标签会被留下并弹一个框，宁可少关一个，
+    // 也不静默丢掉用户没保存的内容。
+    if (get().dirtyTabs[id]) {
+      set({ closeConfirm: { reason: 'close', tabIds: [id] } })
+      return
+    }
+    get().closeTabNow(id)
+  },
+  closeTabs: (ids) => {
+    const dirty = ids.filter((id) => get().dirtyTabs[id])
+    for (const id of ids) if (!dirty.includes(id)) get().closeTabNow(id)
+    // 多个脏标签：全部进队列（一个都不关），确认框逐个问
+    if (dirty.length) set({ closeConfirm: { reason: 'close', tabIds: dirty } })
+  },
+  closeConfirmNext: (closedId) => {
+    get().closeTabNow(closedId)
+    const cur = get().closeConfirm
+    if (cur?.reason !== 'close') return
+    const rest = cur.tabIds.filter((x) => x !== closedId)
+    set({ closeConfirm: rest.length ? { reason: 'close', tabIds: rest } : undefined })
+  },
+  closeTabNow: (id) => {
     const s = get()
     const scope = scopeKeyOf(s)
     const set0 = syncTabsToRightTab(s)
@@ -10700,9 +11104,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   syncTabsToRightTab: () => {
     const s = get()
     const scope = scopeKeyOf(s)
-    const next = syncTabsToRightTab(s)
-    if (next === s.tabsByScope[scope]) return
-    set(tabPatch(s, scope, next))
+    const cur = s.tabsByScope[scope]
+    if (!cur) return set(tabPatch(s, scope, syncTabsToRightTab(s)))
+    // activeId 权威（PR-02）：集合存在时不再按 rightTab 挑标签，只补派生字段 / 清恢复标记。
+    const active = cur.tabs.find((t) => t.id === cur.activeId)
+    const kind: RightTab = active?.kind ?? s.rightTab
+    // 派生字段落后（旧 e2e 直接 setState、或恢复响应先到）→ 纠正回激活标签，不动集合
+    if (kind !== s.rightTab) return set(rightTabPatch(s, kind))
+    if (!cur.restored) return // 非恢复态且已一致：无需收敛（旧的反向分支已删）
+    set(tabPatch(s, scope, { ...cur, restored: false })) // 恢复态且已一致 → 清标记（一次 set）
   },
   flushSessionTabs: () => flushPersistTabs(),
   // 把「内嵌浏览器的页面」同步成面板级 web 标签（一页一标签）。

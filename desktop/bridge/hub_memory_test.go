@@ -165,7 +165,7 @@ func TestHubMemoryWriteRebuildsLoop(t *testing.T) {
 		t.Fatal("DM session has no loop")
 	}
 	if ok, errMsg, _ := hubMemoryCmd(t, m, buf, 2, "hub_agent_memory_write", map[string]any{
-		"agent_id": agentID, "path": "MEMORY.md", "content": "- 记住：用户叫小王\n",
+		"agent_id": agentID, "path": "MEMORY.md", "content": "- [用户叫小王](profile.md) — 记住：用户叫小王\n",
 	}); !ok {
 		t.Fatalf("write failed: %s", errMsg)
 	}

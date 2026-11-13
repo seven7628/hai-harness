@@ -44,6 +44,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -56,6 +57,7 @@ import (
 	"github.com/seven7628/hai-harness/computer"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/cron"
+	"github.com/seven7628/hai-harness/desktop/bridge/conversion"
 	"github.com/seven7628/hai-harness/desktop/bridge/jsonwire"
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/hooks"
@@ -1498,8 +1500,96 @@ type manager struct {
 	//     项目会话按 workspace 归属；Hub DM 按 agent；Hub 群聊按 group。
 	// 迁移：旧版全局条目落在 legacy 名下，只对 workspace 维兼容生效（见 hooks/trust.go）。
 	// 归属派生：bridge/owner_wire.go 的 ownerFromPayload / ownerOfSession（唯一入口）。
+	// xlsxPV docxPV pptxPV 三个预览转换器（进程级单例，懒创建；单例理由同 pyRT：
+	// 运行时不按工作区隔离，新建只是构造结构体，重活在首次 Convert 的 Ensure 里）。
+	// R08a 起命令分支不再直接调它们 —— 统一经 conv 排队/缓存/限额，见 previewService。
+	xlsxPV *builtin.XlsxPreviewer
+	docxPV *builtin.DocxPreviewer
+	pptxPV *builtin.PptxPreviewer
+	// conv 转换服务（R08a）：并发 2 / 单次 60s / 内容寻址缓存 / 启动清扫。
+	// **必须是进程级单例**：并发闸门和缓存条目的 LRU 都建立在「同一份状态」上，
+	// 每次命令新建一个等于没有限额。懒建（见 previewService）。
+	conv *conversion.Service
+	// hookTrust 进程内共享的 hooks 信任库（~/.go-code/hooks-state.json；懒读一次，
+	// 见 hookTrustStore）。**必须共享同一实例**：信任判定发生在每次派发时，面板的
+	// hooks_trust 写的就是它 —— 否则新信任要重建会话才生效（契约 §5.5 要求即刻生效）。
 	hookTrustMu sync.Mutex
 	hookTrust   *hooks.TrustStore
+	// fileEd 内嵌编辑器的打开集合 + 目录监听（进程级单例；懒建，见 file_edit.go）。
+	// fileEdMu 只保护这一个指针 —— 不用 m.mu（watcher 的 emit 路径也会碰 m.mu）。
+	fileEdMu sync.Mutex
+	fileEd   *fileEditor
+	// previewCancels 在飞预览转换的取消表（R08a）：工作区关闭/退出时取消，见 preview_cancels.go。
+	// 零值可用（不占启动成本）—— manager 由多处字面量构造，不能要求显式初始化。
+	previewCancels previewCancels
+}
+
+// previewService 取（或懒创建）转换服务单例（R08a）。
+//
+// 为什么三个 previewer 在这里一次建好：conversion.Service 的 Converters 是构造期固定的
+// 映射；previewer 构造零 I/O（Ensure 在 Convert 内），一次建三个没有启动成本。
+// pyRT 为空时照样构造 —— 每个 previewer.Convert 会回「运行时未装配」的明确错误（不 panic）。
+// 调用方须持 m.mu（三个 *Locked 取用函数的前提）。
+func (m *manager) previewServiceLocked(pyRT *goruntime.Runtime) (*conversion.Service, error) {
+	if m.conv == nil {
+		svc, err := conversion.New(conversion.Options{
+			Converters: conversion.PreviewerConverters(
+				m.xlsxPreviewerLocked(pyRT), m.docxPreviewerLocked(pyRT), m.pptxPreviewerLocked(pyRT)),
+			// 产物落 appdata（~/.go-code/previews），**不落工作区**：预览产物不是用户资产。
+			CacheDir: conversion.DefaultCacheDir(appDataDir()),
+		})
+		if err != nil {
+			return nil, err
+		}
+		m.conv = svc
+	}
+	return m.conv, nil
+}
+
+// previewService 加锁取服务（命令分支用）。
+func (m *manager) previewService(pyRT *goruntime.Runtime) (*conversion.Service, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.previewServiceLocked(pyRT)
+}
+
+// xlsxPreviewerLocked 取（或懒创建）工作簿预览转换器单例（调用方须持 m.mu）。
+// pyRT 为空（SDK 层未装配运行时）时仍可构造 —— Convert 会给出「运行时不可用」的明确
+// 错误（bridge 侧在调用前已判定并回错误，这里只是兜底，不 panic）。
+func (m *manager) xlsxPreviewerLocked(pyRT *goruntime.Runtime) *builtin.XlsxPreviewer {
+	if m.xlsxPV == nil {
+		var py builtin.PythonRuntime
+		if pyRT != nil {
+			py = pyRT
+		}
+		// 沙箱按工作区构造（Seatbelt 的读写根在构造时注入，而本转换器是进程级单例）。
+		m.xlsxPV = builtin.NewXlsxPreviewer(py, m.xlsxPreviewSandbox)
+	}
+	return m.xlsxPV
+}
+
+// docxPreviewerLocked 取（或懒创建）文档预览转换器单例（理由同 xlsxPreviewerLocked）。
+func (m *manager) docxPreviewerLocked(pyRT *goruntime.Runtime) *builtin.DocxPreviewer {
+	if m.docxPV == nil {
+		var py builtin.PythonRuntime
+		if pyRT != nil {
+			py = pyRT
+		}
+		m.docxPV = builtin.NewDocxPreviewer(py, m.officePreviewSandbox)
+	}
+	return m.docxPV
+}
+
+// pptxPreviewerLocked 取（或懒创建）演示文稿预览转换器单例（理由同 xlsxPreviewerLocked）。
+func (m *manager) pptxPreviewerLocked(pyRT *goruntime.Runtime) *builtin.PptxPreviewer {
+	if m.pptxPV == nil {
+		var py builtin.PythonRuntime
+		if pyRT != nil {
+			py = pyRT
+		}
+		m.pptxPV = builtin.NewPptxPreviewer(py, m.officePreviewSandbox)
+	}
+	return m.pptxPV
 }
 
 // workspaceRuntime：单个工作区的会话集合 + 持久化目录 + 技能注册表 + 自定义 subagent 注册表 + MCP 管理器（按工作区隔离）
@@ -3672,87 +3762,35 @@ func (m *manager) dispatch(c command) {
 		// 而不是把二进制喂给 shiki（乱码 + 白耗渲染）。
 		m.resp(c, true, "", map[string]any{"path": path, "content": content, "lines": lines, "truncated": truncated, "binary": binary})
 
+	case CmdFileOpen: // 内嵌编辑器：读原文 + sha256 + 登记打开集合（见 file_edit.go）
+		m.handleFileOpen(c, ws)
+	case CmdFileSave: // 内嵌编辑器：锁内比对 baseHash → 原子替换
+		m.handleFileSave(c, ws)
+	case CmdFileClose: // 内嵌编辑器：只退订（关标签），无写副作用
+		m.handleFileClose(c, ws)
+
 	case CmdXlsxPreview: // .xlsx 工作簿 → HTML（受管运行时跑固定 openpyxl 脚本）→ 前端送内嵌浏览器 file://
 		// 为什么在 bridge 而不是前端做：xlsx 是二进制容器（zip + XML），前端解析要引新依赖
 		// （SheetJS 等），而不加依赖是硬约束；受管运行时里 openpyxl 已就位，且转换跑在
 		// 沙箱内（见 xlsxPreviewSandbox）。前端只拿产物路径 → 复用内嵌浏览器的 file:// 通道
 		// （与 PDF 预览同一条，实测可渲染）。
 		//
-		// 产物是临时文件（受管运行时 tmp 子目录，见 builtin.writeTempFile），不是用户资产：
-		// 不落工作区、不进产出卡片、不写 metrics。生命周期由转换器自己管（下一次转换时清上一条）。
-		path := str(c.Payload, "path")
-		abs, ok := m.previewInputPath(c, ws, path, "xlsx")
-		if !ok {
-			return
-		}
-		pyRT := m.pythonRuntime()
-		if pyRT == nil { // 理论上不会（pythonRuntime 恒返回非 nil），留作装配变化的兜底
-			m.resp(c, false, "受管 Python 运行时未装配，无法预览 xlsx", nil)
-			return
-		}
-		// 转换（openpyxl 解析 + 渲染）：秒级，但**首次调用可能先 bootstrap 运行时**
-		// （建 venv + pip 装约 42MB），故放 goroutine —— 与 oauth_login 同理，不能阻塞
-		// dispatch 主循环（那会让整个桌面端在此期间无响应）。响应经 m.resp 回写（线程安全）。
-		// 槽位按**本命令的 workspace** 取：转换器里的沙箱根在建槽时固定，这里不再把 ws 传进
-		// 去「靠自觉」——三条通路共用同一个工作区根（BR-21）。
-		slot := m.previewSlotFor(ws, pyRT)
-		go func() {
-			res, cerr := slot.convertXLSX(context.Background(), abs)
-			if cerr != nil {
-				m.resp(c, false, cerr.Error(), nil)
-				return
-			}
-			m.resp(c, true, "", map[string]any{"path": path, "html_path": res.HTMLPath})
-		}()
+		// 产物在 appdata 的预览缓存（~/.go-code/previews/<内容键>/index.html，R08a），
+		// 不是用户资产：不落工作区、不进产出卡片、不写 metrics。同一份内容二次打开直接命中。
+		m.handlePreviewConvert(c, ws, "xlsx")
 
 	case CmdDocxPreview: // .docx 文档 → HTML（受管运行时跑固定 mammoth 脚本）→ 内嵌浏览器 file://
-		// 与 xlsx_preview 逐字同构：为什么在 bridge 做、为什么产物落临时目录、路径口径，
+		// 与 xlsx_preview 逐字同构：为什么在 bridge 做、为什么产物落缓存目录、路径口径，
 		// 全部同 CmdXlsxPreview 的长注释（三条预览通路是一条通路，不该各自演化）。
 		//
 		// 与 xlsx 的唯一差别是转换器：Word 文档要的是**语义结构**（标题层级/列表/表格/
 		// 内嵌图片），mammoth 正是这个定位（builtin.DocxPreviewer 有详细取舍）。
-		path := str(c.Payload, "path")
-		abs, ok := m.previewInputPath(c, ws, path, "docx")
-		if !ok {
-			return
-		}
-		pyRT := m.pythonRuntime()
-		if pyRT == nil {
-			m.resp(c, false, "受管 Python 运行时未装配，无法预览 docx", nil)
-			return
-		}
-		slot := m.previewSlotFor(ws, pyRT)
-		go func() {
-			res, cerr := slot.convertDOCX(context.Background(), abs)
-			if cerr != nil {
-				m.resp(c, false, cerr.Error(), nil)
-				return
-			}
-			m.resp(c, true, "", map[string]any{"path": path, "html_path": res.HTMLPath})
-		}()
+		m.handlePreviewConvert(c, ws, "docx")
 
 	case CmdPptxPreview: // .pptx 演示文稿 → HTML（受管运行时跑固定 python-pptx 脚本）→ 内嵌浏览器 file://
 		// 同上。注意这条通路的产物是**近似版式重建**而不是渲染（本机没有 LibreOffice，
 		// python-pptx 不能渲染）—— 做不到的几件事印在页面顶部，见 builtin.PptxPreviewer。
-		path := str(c.Payload, "path")
-		abs, ok := m.previewInputPath(c, ws, path, "pptx")
-		if !ok {
-			return
-		}
-		pyRT := m.pythonRuntime()
-		if pyRT == nil {
-			m.resp(c, false, "受管 Python 运行时未装配，无法预览 pptx", nil)
-			return
-		}
-		slot := m.previewSlotFor(ws, pyRT)
-		go func() {
-			res, cerr := slot.convertPPTX(context.Background(), abs)
-			if cerr != nil {
-				m.resp(c, false, cerr.Error(), nil)
-				return
-			}
-			m.resp(c, true, "", map[string]any{"path": path, "html_path": res.HTMLPath})
-		}()
+		m.handlePreviewConvert(c, ws, "pptx")
 
 	case CmdContextBreakdown: // 上下文构成面板（Composer ctx 环 hover 数据源）
 		// 静态分区（系统提示词/技能/工具/MCP/其他）按请求组装字节固定展示，消息分区
@@ -4387,7 +4425,8 @@ func (m *manager) dispatch(c command) {
 		if ws != "" {
 			m.shutdownWorkspace(ws) // 关闭该工作区全部会话（状态落盘）
 		} else {
-			m.shutdownAll() // 兜底：全部工作区
+			m.shutdownAll()     // 兜底：全部工作区
+			m.stopFileWatches() // 进程级：停编辑器目录监听（等 goroutine 退出）
 		}
 		m.resp(c, true, "", nil)
 
@@ -4401,6 +4440,9 @@ func (m *manager) dispatch(c command) {
 // shutdown 命令 + stdin EOF 兜底（shutdownAll）会重复调用，不重复 Shutdown
 // （SDK Shutdown 幂等但会再次发 SessionClosed 事件）。
 func (m *manager) shutdownWorkspace(wsPath string) {
+	// 预览转换先取消（R08a）：它不依赖 workspace runtime 是否还在，且取消会立刻
+	// kill 转换子进程；放在最前面也能避免后面的清理等它（转换本身不持有 ws.mu）。
+	m.previewCancels.cancelWorkspace(wsPath)
 	// 已从 manager 摘除的 workspace（deleteWorkspace 后）不重建 runtime——
 	// m.runtime 会新建空 workspace（nil mcp/plugins），cleanup 调用时 panic。
 	m.mu.Lock()
@@ -4608,6 +4650,10 @@ func (m *manager) deleteWorkspace(wsPath string) {
 		delete(m.workspaces, wsPath) // 先摘除运行态，阻止新命令路由到该工作区
 	}
 	m.mu.Unlock()
+	// 预览转换取消（R08a）：必须在这里也做一次 —— 上面刚把 workspace 摘掉了，
+	// shutdownWorkspace 会因「未注册」提前返回，而「用户删了这个工作区」正是最该
+	// 取消在飞转换的入口（他不会再看到那些产物）。不持 m.mu 调用（取消表有自己的锁）。
+	m.previewCancels.cancelWorkspace(wsPath)
 	if ok {
 		ws.mu.Lock()
 		items := make([]*bridgeSession, 0, len(ws.sessions))
@@ -5762,6 +5808,12 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	if profile.withBash {
 		eng.RegisterTool(context.Background(), builtin.NewGitWorktreeTool(workspace))
 	}
+	// memory_dream：记忆盘点的证据与执行。模型负责判断，宿主负责护栏与落盘。
+	// 不在 FileTools.Tools() 里注册（那份清单被 Explore 白名单与 schema 巡检复用），
+	// 也不给子 agent——记忆归档是会话级动作，不该被并行子任务各提一份。
+	if !memCfgValue(memCfg).Disabled() {
+		eng.RegisterTool(context.Background(), newMemoryDreamTool(memHost, workspace))
+	}
 	eng.RegisterTool(context.Background(), question.NewTool(qw)) // ask_user：模型→用户提问（HITL 反方向）
 	// load_skill 的注册**必须在本函数末尾**（见结尾 registerLoadSkill）：它的能力面
 	// 需要「本会话完整的工具集」——MCP / 插件 / codemode / cron / mesh 工具都在它之后
@@ -6810,9 +6862,14 @@ func serve() error {
 	// 为什么需要：自压缩是**被动**的（只在 SaveState 时检查）→ 已经死掉的文件
 	// 永远等不到压缩。清扫复用同一套原子压缩逻辑，内容不变、恢复逐字节一致。
 	// 限速执行，不与正常使用抢 IO；settings.checkpoint.sweep_journals=false 可关。
+	//
+	// 堆软上限必须在清扫**之前**设好：清扫那 5 分钟的 IO 风暴会把堆冲到
+	// 3 GB（2026-11-12 实测），其中 2.8 GB 被系统换出到 swap 且再也回不来。
+	applyMemoryLimit()
 	if loadCheckpointSettings().sweepJournals() {
 		go sweepSessionFilesInBackground()
 	}
+	go m.sweepPreviewCache() // R08a：预览产物缓存清扫（过期 + LRU），见 (*manager).sweepPreviewCache
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
 	startupLog("A2.5.browserEngine("+string(m.getBrowserEngine())+")", serveStart)
@@ -6885,9 +6942,10 @@ func serve() error {
 			break
 		}
 	}
-	// stdin EOF → 优雅 Shutdown 全部会话（状态落盘）+ 停定时调度器
+	// stdin EOF → 优雅 Shutdown 全部会话（状态落盘）+ 停定时调度器 + 停文件监听
 	m.stopCron()
 	m.shutdownAll()
+	m.stopFileWatches()
 	return nil
 }
 
@@ -7168,6 +7226,39 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 // 实测全量 447 个会话的 record + .bak 共 4.0GB，其中 1.22GB 是 SDK 上下文的
 // 冗余副本、2.59GB 是内嵌块（formal/.bak 各一份）—— 搬进 sidecar 后只存一份。
 // 实测单个工作区 710MB → 75.5MB（省 89%）。
+// sweepPreviewCache R08a：启动时清扫预览缓存（过期 24h + 总量 LRU 到 512 MiB）。
+//
+// 为什么放在启动（而不是每次转换顺手扫）：清扫要遍历缓存目录、删几十个目录，
+// 属于后台维护；挂在转换路径上会让「点一下预览」偶发变慢，且并发路径下要额外加锁。
+// 为什么放 goroutine：不该拖延 bridge_ready（前端自举以它为准）。
+// 失败只打一行 stderr：缓存是**派生物**，清扫不成功最多是磁盘多占一点，不该报错给用户。
+func (m *manager) sweepPreviewCache() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintln(os.Stderr, "preview cache sweep: panic:", r)
+		}
+	}()
+	// **必须**走 Service 自己的那个 Cache 实例（不是 NewCache 另建一份）：
+	// Cache.mu 是**实例级**锁，另建一份同目录的 Cache = 两把锁 = 「Sweep 与 Put 互斥」
+	// 在生产里是空操作（评审抓到的正是这处）。窗口只能收窄到 Chtimes 之前，不能归零。
+	// pyRT 用真的（pythonRuntime 恒非 nil）：previewer 是单例，若这里拿 nil 建出来，
+	// 单例就被钉死成「没有运行时」，之后的预览全部报 unavailable。
+	svc, err := m.previewService(m.pythonRuntime())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "preview cache sweep: %v\n", err)
+		return
+	}
+	st, err := svc.Sweep()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "preview cache sweep: %v\n", err)
+		return
+	}
+	if st.Removed > 0 {
+		fmt.Fprintf(os.Stderr, "preview cache sweep: 删 %d 条（释放 %s），现存 %d 条 / %s\n",
+			st.Removed, humanBytes(int(st.Freed)), st.Entries, humanBytes(int(st.Bytes)))
+	}
+}
+
 func sweepSessionFilesInBackground() {
 	root := filepath.Join(appDataDir(), "sessions")
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
@@ -7178,33 +7269,58 @@ func sweepSessionFilesInBackground() {
 			fmt.Fprintln(os.Stderr, "sweep: panic:", r)
 		}
 	}()
-	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause)
+	// 清扫索引：记「哪些文件已经清过、且自那时起没动过」。
+	//
+	// 清扫本质是**一次性形态迁移**，不是常驻工序 —— P0–P5' 落地后会话文件
+	// 已经是新形态，每次启动再全量扫一遍是纯浪费（实测每次启动固定烧
+	// ~105 秒限速 sleep + 1.5 GB 读 + 487 次 fsync）。
+	//
+	// 索引只用于**跳过**（连文件都不打开），不参与任何写入决策 ⇒ 索引算错
+	// 最多多扫一遍，不会写坏数据。版本变了（清扫逻辑改了）→ 旧指纹全部
+	// 作废 → 触发一次全量。
+	ix := session.OpenSweepIndex(filepath.Join(appDataDir(), "checkpoint_sweep.json"), session.SweepIndexVersion)
+	// 清扫结束把内存还给 OS。
+	//
+	// 这一轮是启动期**唯一的堆峰值来源**（实测冲到 3 GB，其中 2.8 GB 被系统
+	// 换出到 swap —— Go 的 scavenger 慢慢还，但机器颠簸时它宁可换出也不释放）。
+	// FreeOSMemory = 一次完整 GC + 立刻归还 ⇒ 高水位当场消掉，而不是留着
+	// 等系统慢慢换出。
+	//
+	// 顺序：先落索引（defers 是后进先出），再还内存。
+	defer debug.FreeOSMemory()
+	defer func() {
+		if err := ix.Flush(); err != nil {
+			fmt.Fprintln(os.Stderr, "sweep index: 落盘失败:", err)
+		}
+	}()
+
+	res, err := session.SweepSessionFiles(root, sweepMinFileBytes, session.DefaultCompactKeepStates, false, sweepPause, ix)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sweep: 失败:", err)
 	} else {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩）%.1fMB → %.1fMB，用时 %s\n",
-			res.Files, res.Compacted, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫会话文件: %d 个超阈（%d 个压缩，跳过 %d）%.1fMB → %.1fMB，用时 %s\n",
+			res.Files, res.Compacted, res.Skipped, float64(res.Before)/1e6, float64(res.After)/1e6, res.Elapsed.Round(time.Millisecond))
 	}
 	// sidecar 压缩清扫（P4）：存量 sidecar 里未压缩的块就地压一遍。
 	// 实测 6 个最大的 sidecar：2256MB → 395MB（省 82.5%）。
 	// 只动 sidecar、不碰 record（摘要算逻辑内容 ⇒ Sum 不变）。
-	cres, cerr := session.SweepBlockStores(root, sweepPause)
+	cres, cerr := session.SweepBlockStores(root, sweepPause, ix)
 	if cerr != nil {
 		fmt.Fprintln(os.Stderr, "sweep blocks: 失败:", cerr)
-	} else if cres.Rewritten > 0 {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
-			cres.Files, cres.Rewritten, float64(cres.Before)/1e6, float64(cres.After)/1e6,
+	} else if cres.Rewritten > 0 || cres.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写，跳过 %d）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
+			cres.Files, cres.Rewritten, cres.Skipped, float64(cres.Before)/1e6, float64(cres.After)/1e6,
 			cres.Blocks, cres.BlocksTotal, cres.Elapsed.Round(time.Millisecond))
 	}
 	// record 清扫（P3-1）：与上面同一把限速思路，独立失败互不影响。
-	rres, rerr := session.SweepRecordFiles(root, sweepPause)
+	rres, rerr := session.SweepRecordFiles(root, sweepPause, ix)
 	if rerr != nil {
 		fmt.Fprintln(os.Stderr, "sweep record: 失败:", rerr)
 		return
 	}
-	if rres.Stripped > 0 {
-		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫 record: %d 个（%d 个搬进 sidecar）%.1fMB → %.1fMB，用时 %s\n",
-			rres.Stripped, rres.Migrated, float64(rres.Before)/1e6, float64(rres.After)/1e6, rres.Elapsed.Round(time.Millisecond))
+	if rres.Stripped > 0 || rres.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 清扫 record: %d 个（%d 个搬进 sidecar，跳过 %d）%.1fMB → %.1fMB，用时 %s\n",
+			rres.Stripped, rres.Migrated, rres.Skipped, float64(rres.Before)/1e6, float64(rres.After)/1e6, rres.Elapsed.Round(time.Millisecond))
 	}
 }
 
@@ -7215,3 +7331,34 @@ const (
 	// sweepPause 是每个文件之间的间隔（限速：避免 12GB 的重写把 IO 打满）。
 	sweepPause = 100 * time.Millisecond
 )
+
+// bridgeMemLimitDefaultMB 是堆软上限的默认值（MB）。
+//
+// 为什么是 2 GiB（2026-11-12 实测）：Go 默认 GOGC=100 ⇒ 堆目标 = 活堆 × 2。
+// 启动清扫处理 28 GB 时堆冲到 3 GB，2.8 GB 被系统换出到 swap 且**再也回不来**
+// （Go 的 scavenger 慢慢还，但机器在颠簸时把它换出而不是释放）。
+// 2 GiB 给日常负载（常驻实测 90–330 MB）留了 6 倍以上余量，
+// 又能把清扫那一下的峰值压掉三分之一。
+const bridgeMemLimitDefaultMB = 2048
+
+// applyMemoryLimit 设堆软上限。
+//
+// 优先级：GOMEMLIMIT 环境变量 > settings.checkpoint.mem_limit_mb > 默认 2 GiB。
+// 环境变量优先是因为它是运行时的显式设置，debug.SetMemoryLimit 会**覆盖**它。
+// 配置为 0 或负数 → 不设上限（回到 Go 默认行为）。
+func applyMemoryLimit() {
+	if v := os.Getenv("GOMEMLIMIT"); v != "" {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 堆上限：GOMEMLIMIT=%s（环境变量优先）\n", v)
+		return
+	}
+	mb, explicit := loadCheckpointSettings().memLimitMB()
+	if !explicit {
+		mb = bridgeMemLimitDefaultMB
+	}
+	if mb <= 0 {
+		fmt.Fprintln(os.Stderr, "[checkpoint] 堆上限：不设限（settings 显式关闭）")
+		return
+	}
+	debug.SetMemoryLimit(mb << 20)
+	fmt.Fprintf(os.Stderr, "[checkpoint] 堆上限：%d MB（软上限，GC 提前介入）\n", mb)
+}

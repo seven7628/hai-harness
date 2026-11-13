@@ -2515,6 +2515,23 @@ body.is-electron .left.collapsed .rail .rbtn {
   border-top: 1px solid var(--border);
   background: var(--bg);
 }
+/* 卡片内嵌的转录（.ac-narrative 里的那个 .narrative，2026-11 起取代 .agent-tr）：
+   与上面 .agent-tr 同一条理由 —— 卡壳是 mono 12px + --text-2 的状态行语境，
+   转录里是要读的正文，**必须显式重置**排版上下文。漏了这一条就是 2026-09-23 报障的
+   复发形态：同一份 Markdown 在卡内 12px mono、在子会话页 13.5px sans。
+   （e2e/verify_subagent_transcript_style.mjs 逐项比对两处宿主的计算样式，漏了会红。） */
+.ac-narrative {
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.ac-narrative .narrative {
+  /* 卡内那个 .narrative 只当容器：排版一律继承上一档（皮肤层若给 .narrative 单独写
+     font-size/color，卡内会再漂一次 —— 那正是这条要防的） */
+  font: inherit;
+  color: inherit;
+}
 
 /* 子 agent 转录（思考 / 正文 / 工具调用 / 压缩）：内容与主对话共用同一套渲染原语
    （NarrativeBlocks + .md-text/.md/@ 工具行/思考块），所以这里只负责**排版上下文**与容器。
@@ -5365,6 +5382,34 @@ body.is-electron .left.collapsed .rail .rbtn {
 .tabs button.on {
   color: var(--text);
   border-bottom-color: var(--accent-strong);
+}
+/* 右栏宽度预设（三态：平分 / 居中 / 右重；拖拽后变「自定义」，不高亮） */
+.rp-bias {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+.rp-bias-b {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rp-bias-b:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+.rp-bias-b.on {
+  color: var(--text);
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-strong) 12%, transparent);
 }
 /* 右栏自身收缩按钮（归属右栏，顶栏已移除） */
 .tab-collapse {
@@ -10990,9 +11035,125 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .md-view-switch button.on { background: var(--surface-2); color: var(--text); }
 .file-inspector-body { flex: 1; min-height: 0; overflow: auto; }
 .file-inspector-body .uni { margin: 0; }
+/* ===== 内嵌编辑器（PR-05b：零依赖受控 textarea + 行号栏）=====
+   颜色**一律走变量**（--warning/--danger/--elevated/--code-bg），深色与亮色两套主题下
+   都能读；不自带色值，避免"深色模式看不见黄条"这类只在一种主题下暴露的缺陷。 */
+.editor-root { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.editor-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; border-bottom: 1px solid var(--border);
+}
+.editor-path {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10.5px; color: var(--text-2);
+}
+.editor-stat { flex: 0 0 auto; font-size: 10px; color: var(--text-3); }
+/* 未保存圆点：与标签条上的 .rtab-dirty 同一个视觉语言（小圆点，不抢眼但要看得见） */
+.editor-dirty, .rtab-dirty {
+  flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); display: inline-block;
+}
+.rtab-dirty { margin: 0 4px 0 1px; }
+.editor-btn {
+  flex: 0 0 auto; padding: 2px 9px; border-radius: 5px;
+  border: 1px solid var(--border-strong); background: transparent;
+  color: var(--text-2); font-size: 11px; line-height: 18px; cursor: pointer;
+}
+.editor-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent-border); }
+.editor-btn:disabled { opacity: 0.45; cursor: default; }
+.editor-btn.primary { border-color: var(--accent-border); color: var(--accent); }
+.editor-btn.primary:hover:not(:disabled) { background: var(--accent-weak); }
+.editor-btn.danger { border-color: color-mix(in srgb, var(--danger) 55%, transparent); color: var(--danger); }
+.editor-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+/* 顶部条：warn = 黄（可继续编辑，需要决断），danger = 红（必须重新打开） */
+.editor-banner {
+  flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 6px 10px; font-size: 11.5px;
+  border-bottom: 1px solid var(--border);
+}
+.editor-banner.warn { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+.editor-banner.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.editor-banner-t { flex: 0 1 auto; }
+.editor-banner-mono, .editor-banner-msg { flex: 0 1 auto; font-size: 10.5px; opacity: 0.85; }
+.editor-banner-acts { flex: 0 0 auto; display: flex; gap: 6px; margin-left: auto; }
+.editor-banner .editor-btn { color: inherit; border-color: currentColor; opacity: 0.9; }
+.editor-banner .editor-btn.primary { background: color-mix(in srgb, currentColor 16%, transparent); }
+.editor-note {
+  flex: 0 0 auto; padding: 5px 10px; font-size: 11px; color: var(--text-3);
+  border-bottom: 1px solid var(--border);
+}
+.editor-note.ro { color: var(--warning); }
+.editor-body { flex: 1; min-height: 0; display: flex; background: var(--code-bg); }
+/* 行号栏：右对齐、等宽、不可选中；本身不滚（scrollTop 由正文同步过来） */
+.editor-gutter {
+  flex: 0 0 auto; min-width: 44px; padding: 8px 8px 8px 10px;
+  text-align: right; font-size: 12px; line-height: 18px; color: var(--text-3);
+  overflow: hidden; user-select: none; border-right: 1px solid var(--border);
+}
+.editor-area {
+  flex: 1; min-width: 0; padding: 8px 10px; border: 0; outline: none; resize: none;
+  background: transparent; color: var(--text);
+  font-size: 12px; line-height: 18px; tab-size: 2;
+  white-space: pre; overflow: auto;
+}
+.editor-area::selection { background: var(--accent-weak); }
+.editor-empty { padding: 16px; font-size: 12px; color: var(--text-3); }
+/* 脏内容确认框（关标签 / 退出应用共用）：走 elevated 浮层，不用原生 dialog —— 与
+   ctx-menu/其它浮层同一套观感，且不抢焦点到系统窗口层。 */
+.editor-confirm-backdrop {
+  position: fixed; inset: 0; z-index: 400; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+}
+.editor-confirm {
+  min-width: 320px; max-width: 420px; padding: 16px 18px;
+  border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--elevated); box-shadow: 0 18px 44px rgba(0, 0, 0, 0.4);
+}
+.editor-confirm-title { font-size: 13px; color: var(--text); }
+.editor-confirm-file { margin-top: 6px; font-size: 11px; color: var(--text-3); word-break: break-all; }
+.editor-confirm-more { margin-top: 4px; font-size: 11px; color: var(--warning); }
+.editor-confirm-acts { margin-top: 14px; display: flex; gap: 8px; justify-content: flex-end; }
 .file-source { height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .file-source-meta { flex: 0 0 auto; padding: 5px 10px; border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 10px; }
 .file-source .fp-code { flex: 1; min-height: 0; max-height: none; overflow: auto; }
+/* 预览渲染器宿主（R08a，见 surfaces/preview/PreviewHost.tsx）。
+   file{mode:'preview'} 面板与文件面板的渲染器分支共用同一个容器：
+   · 必须是**真的盒子**且撑满 —— 里面的 .fp-code / .csv-preview 靠 flex:1 吃掉剩余高度；
+   · data-renderer="<id>" 是本轮唯一的可观测点（探针断言它，而不是猜 DOM 形状）;
+   · 未命中/依赖缺失/模块加载失败一律落到 .preview-unavailable 并写着原因，不许白屏。 */
+.preview-host { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.preview-host > * { min-height: 0; }
+.preview-unavailable { align-items: flex-start; justify-content: center; gap: 6px; padding: 22px 18px; color: var(--text-3); }
+.preview-unavailable-title { color: var(--text-2); font-size: 13px; }
+.preview-unavailable-reason { max-width: 56ch; font-size: 11.5px; line-height: 1.65; }
+/* 图片渲染器（surfaces/preview/renderers/image.tsx）：图片吃满剩余高度，
+   路径/失败原因贴在下方（读不到时用户至少要能知道「哪个文件」）。 */
+.preview-image { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 12px; }
+.preview-image img { flex: 1 1 auto; min-height: 0; max-width: 100%; object-fit: contain; display: block; margin: 0 auto; }
+.preview-image-empty { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 22px 18px; text-align: center; }
+.preview-image-title { color: var(--text-2); font-size: 13px; }
+.preview-image-reason { max-width: 56ch; color: var(--text-3); font-size: 11.5px; line-height: 1.65; }
+.preview-image-path { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 10px; }
+/* pdf 渲染器（surfaces/preview/renderers/pdf.tsx）：原生 Chromium viewer 浮在这块区域上，
+   所以这里只提供「位置 + 尺寸 + 建连中的说明」。scrim 必须 pointer-events:none —— 它盖在
+   原生视图的矩形上，吞掉指针就等于让人不能选中/滚动 PDF。 */
+.pv-pdf { flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; display: flex; }
+.pv-pdf-scrim { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; }
+.pv-pdf-badge { align-self: flex-start; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); font-size: 10px; background: var(--bg-1); }
+.pv-pdf-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 10px; }
+.pv-pdf-hint { margin-top: auto; color: var(--text-3); font-size: 11.5px; }
+/* office 渲染器（surfaces/preview/renderers/office.tsx）：能力提示条固定一条，iframe 吃满剩余高度。
+   提示条是**必须**的：轻量预览与 LibreOffice 的保真度差得远，藏起来等于骗人（见 office.tsx 头注释）。 */
+.pv-office { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.pv-office-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 10px; border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 10.5px; }
+.pv-office-warn { color: var(--warning); }
+.pv-office-more { margin-left: auto; border: 1px solid var(--border); background: var(--bg-1); color: var(--text-2); border-radius: 4px; padding: 1px 8px; font-size: 10.5px; cursor: pointer; }
+.pv-office-more:hover { color: var(--text-1); border-color: var(--text-3); }
+.pv-office-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; }
+.pv-office-spin { display: inline-block; animation: pvspin 1.1s linear infinite; }
+.pv-office-hint { padding: 10px 12px; color: var(--text-3); font-size: 11.5px; line-height: 1.6; }
+.pv-error { color: var(--danger); }
+@keyframes pvspin { to { transform: rotate(360deg); } }
 /* Markdown 预览（「最终文件」的预览模式）：复用对话区 .md 的全套元素样式
    （GFM 表格 / mermaid / KaTeX / 代码块），只把「窄列对话气泡」的排版覆写成
    「文档页」排版——全尺寸侧栏比对话区宽得多，沿用对话区的小字号与窄行宽会显得局促。

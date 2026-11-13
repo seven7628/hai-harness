@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/seven7628/hai-harness/events"
@@ -87,10 +88,17 @@ func (m *manager) dispatcherFor(cfg *hooks.Config, warnings []string, warn func(
 		// 配置期告警发生在会话创建之前（bs.s 尚未赋值），只走 stderr，不发事件。
 		fmt.Fprintf(os.Stderr, "· hooks: %s\n", w)
 	}
+	// 脚本在、配置里没引用：这是最常见的"hooks 不生效"现场（实测过一次——
+	// ~/.go-code/hooks/ 下写好了脚本，settings.json 里没有 hooks 段，一次都没跑，
+	// 而系统里没有任何一处说明这件事）。装配前先把它说出来。
+	reportUnreferencedScripts(cfg)
+
 	if cfg == nil || cfg.DisableAll || len(cfg.Events) == 0 {
 		return nil
 	}
 	d := hooks.NewDispatcher(cfg, m.hookTrustStore(), warn)
+	// 执行日志：记的是"跑过没有"，不是实时反馈（实时反馈走 events.tool_hook_warning）。
+	d.Runner().SetJournal(hooks.NewJournal(hooksJournalPath()))
 	fmt.Fprintf(os.Stderr, "· hooks: 已装配 %d 类事件（来源 %v）\n", len(cfg.Events), cfg.Sources)
 	return d
 }
@@ -112,7 +120,34 @@ func (m *manager) hookTrustStore() *hooks.TrustStore {
 	return m.hookTrust
 }
 
-// hooksFor 返回某会话应装配的 hook 聚合（owner = 信任归属，见 hooks/trust.go）。
+// hooksJournalPath 执行日志路径：与信任库同目录的独立文件（同 hooksStatePath 的理由，
+// 避免与 Electron 对 settings.json 的全量重写互相覆盖）。
+func hooksJournalPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".go-code", "hooks-runs.jsonl")
+}
+
+// reportUnreferencedScripts 在装配时检查 ~/.go-code/hooks/ 下有没有"没被任何配置引用"的脚本。
+//
+// 只报告，不自动注册：往用户的 settings.json 里塞 hooks 段是替用户做决定，而且
+// 那里同时放着他的 provider 密钥，宿主不该为了这点便利去改写它。
+func reportUnreferencedScripts(cfg *hooks.Config) {
+	dir := hooks.HooksDir()
+	if dir == "" {
+		return
+	}
+	orphans, err := hooks.UnreferencedScripts(cfg, dir)
+	if err != nil || len(orphans) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "· hooks: %s 下有 %d 个脚本没有任何配置引用，不会执行：%s\n",
+		dir, len(orphans), strings.Join(orphans, ", "))
+}
+
+// hooksFor 返回某会话应装配的 hook 聚合。
 // 参数 d 为 nil（该工作区无 hooks）→ 返回 nil，Session 侧全钩子为 nil（零开销）。
 //
 // owner 必须由调用方按会话身份给出，**不能**在这里从 cwd 猜：Hub 会话的 cwd 是智能体

@@ -57,6 +57,10 @@ declare global {
       applyTheme: (theme: string) => Promise<{ ok: boolean }>
       // 外观设置「字体大小」→ 原生缩放（返回钳制后的实际比例）
       setUiZoom: (scale: number) => Promise<{ ok: boolean; scale?: number }>
+      // PR-05b：原生脏标记 + 退出拦截（before-quit 拦一次 → 渲染层复用脏确认框）
+      setDirty?: (dirty: boolean) => Promise<{ ok: boolean }>
+      quitAnyway?: () => Promise<{ ok: boolean }>
+      onQuitRequest?: (cb: () => void) => () => void
       // M0/M2：右侧栏内嵌浏览器视图 + debugger 代理
       embedShow: (p: { url?: string; rect?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; error?: string; state?: unknown }>
       embedResize: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>
@@ -109,6 +113,9 @@ declare global {
       onHubDeepLink: (cb: (url: string) => void) => () => void
       // 冷启动/刷新期间排队的深链（先订阅再取，避免错过）。
       hubTakeDeepLinks: () => Promise<string[]>
+      // 内存压力信号（2026-11-12，P1）：主进程轮询 process.getSystemMemoryInfo 推来，
+      // 单位 KB。渲染进程据此主动降级视图（Chromium tab discarding 的模型）。
+      onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => () => void
     }
   }
 }

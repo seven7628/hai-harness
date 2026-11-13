@@ -61,6 +61,12 @@ let mainWindow: BrowserWindow | null = null
 const rendererSender = createRendererSender(() => mainWindow)
 const sendToRenderer = rendererSender.send
 let bridge: ChildProcessWithoutNullStreams | null = null
+// —— 原生脏标记 + 退出拦截（PR-05b）——
+// docDirty 由渲染层镜像（任一编辑标签有未保存改动）；allowQuit 是**防死循环**的放行标志：
+// 拦下 → 问用户 → 用户选丢弃/保存完 → quitAnyway() 置 true → app.quit() 第二次进
+// before-quit 时直接放行。没有这个标志，preventDefault 会把进程永久锁在退出前。
+let docDirty = false
+let allowQuit = false
 
 // —— hub:// 深链（P4-02）——
 // 三个入口：macOS open-url、Win/Linux second-instance argv、首实例启动 argv（冷启动点链接）。
@@ -436,6 +442,7 @@ interface AppSettings {
   permissions?: PermissionsSettings // Computer Use 已授权 App（空 = 全部拒绝）
   agent?: AgentRuntimeSettings // Agent 运行时设置（提醒阈值 + 压缩阈值 + 子 agent 并发槽上限）
   stt?: STTSettings // 语音输入（话筒）配置；配置齐全才显示话筒
+  editor?: boolean // 内嵌编辑器回滚开关（PR-05b）；缺省 = 开启
 }
 
 // 内置五卡（不可删除；其余为自定义 provider）。命名校验见 settings-store.ts 的
@@ -491,6 +498,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   sandbox: { mode: 'seatbelt', sensitive_paths: [] }, // 命令沙箱默认开启（2026-08-16 用户决策）
   permissions: { computer_approved_apps: [] }, // Computer Use 已授权 App 空 = 全部拒绝（安全默认）
   stt: { enabled: false }, // 语音输入默认关闭（配置 base_url/model/api_key 后开启）
+  editor: true, // 内嵌编辑器（PR-05b）默认开启；设 false = 隐藏所有「编辑」入口（回滚用）
 }
 
 // SettingsRead 读盘结果：settings 永远可用（显示兜底），corrupt 标记「文件在但读不出」。
@@ -919,6 +927,24 @@ function createWindow(): void {
   // renderer 首帧/动画开始回传（preload 经 console-message 或 IPC）
   mainWindow.webContents.on('did-stop-loading', () => {
     startupMark('did-stop-loading')
+  })
+  // 打开 precise memory info：让渲染进程能读到 performance.memory.usedJSHeapSize
+  // （Chromium 默认不给，隐私考虑）。预算体检用它区分「我们的数据」与
+  // 「渲染进程的底噪」（Chromium + React + 代码 + DOM）。
+  app.commandLine.appendSwitch('enable-precise-memory-info')
+  // 渲染进程的 console 透传到终端（2026-11-12）。
+  //
+  // 为什么需要：视图内存预算的降级/淘汰会打一行 `[budget] …`，而渲染进程的
+  // console 只在 devtools 里 —— **终端看不到** ⇒ 机制有没有在工作无法观测。
+  // （2026-11-12 就因为看不见这行，误判成「机制没生效」，绕了一大圈。）
+  // 只透传带标记前缀的行，避免刷屏。
+  mainWindow.webContents.on('console-message', (_e: unknown, ...rest: unknown[]) => {
+    for (const a of rest) {
+      if (typeof a === 'string' && a.startsWith('[budget]')) {
+        console.log(`[renderer] ${a}`)
+        return
+      }
+    }
   })
   mainWindow.on('closed', () => {
     destroyEmbed()
@@ -1683,6 +1709,19 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     mainWindow.webContents.setZoomFactor(z)
     return { ok: true, scale: z }
   })
+  // 原生脏标记（PR-05b）：macOS 用 setDocumentEdited（标题栏红点 + 关窗提示），
+  // 其它平台空实现 —— 「零依赖」也包括不为一个视觉提示引入平台分支。
+  ipcMain.handle('app:set-dirty', (_e, dirty: unknown) => {
+    docDirty = dirty === true
+    if (process.platform === 'darwin') mainWindow?.setDocumentEdited(docDirty)
+    return { ok: true }
+  })
+  // 确认框选了「丢弃」/所有脏文档保存完毕 → 真正退出（置放行标志，见 before-quit）
+  ipcMain.handle('app:quit-anyway', () => {
+    allowQuit = true
+    app.quit()
+    return { ok: true }
+  })
   // 下载安装 ego lite（Browser 引擎=ego 的引导，2026-09）：
   // 跑随包 skill 的 scripts/install.sh（下载 DMG → 装 /Applications → 去 quarantine → 启动）。
   // 输出实时回传（install 日志可能很长；ret 聚合尾部几行）。不阻塞主进程。
@@ -1947,6 +1986,41 @@ if (!MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
   })
 }
 
+// —— 内存压力信号（2026-11-12，P1）——
+//
+// Chromium 的 tab discarding 用的是 OS 的内存压力通知
+// （chromiumos-design-docs/tab-discarding-and-reloading.md）：内存压力下丢弃
+// 标签页的**可重取状态**，保留用户正在交互的东西。
+//
+// Electron 没有直接暴露那个通知，但主进程能读系统内存：
+// `process.getSystemMemoryInfo()` → {total, free, swapTotal, swapFree}（KB）。
+// 渲染进程据此决定要不要**主动降级**视图。
+//
+// 为什么必须自己做：V8 的堆上限是**崩溃线**不是降级线
+// （v8.dev/blog/heap-size-limit：到顶 → "a series of last resort garbage
+// collections" → 再不行就 "stops execution and reports an out-of-memory
+// failure" ⇒ Electron 里就是 Aw, Snap）。而且我们没设 --max-old-space-size。
+//
+// 5 秒一次足够：内存压力是慢变量（换页颠簸以秒计，不是毫秒计）。
+function startMemPressureWatch(): void {
+  const timer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      const m = process.getSystemMemoryInfo()
+      mainWindow.webContents.send('mem:pressure', {
+        free: m.free,
+        total: m.total,
+        swapFree: m.swapFree,
+        swapTotal: m.swapTotal,
+      })
+    } catch {
+      /* 主进程 API 不可用（理论上不会）：静默忽略，不影响主流程 */
+    }
+  }, 5000)
+  // 不因为这个定时器而吊住进程退出。
+  timer.unref?.()
+}
+
 app.whenReady().then(() => {
   startupMark('whenReady')
   // 存量 settings v1→v2 迁移：必须在 bridge spawn（renderer 发 bridge:start）之前跑完，
@@ -1958,6 +2032,7 @@ app.whenReady().then(() => {
   registerHubProtocol()
   registerIpc()
   createWindow()
+  startMemPressureWatch()
   // 屏幕录制 SCK 预热（2026-09 Computer Use 截图排障）：macOS 14+ 截屏走
   // ScreenCaptureKit 独立 TCC（kTCCServiceScreenCaptureKit）——screencapture 命令
   // 与 desktopCapturer 都依赖它，系统设置「屏幕录制」只写旧服务。启动时调一次
@@ -1979,6 +2054,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
+// before-quit：脏文档时**拦一次**并问渲染层（复用脏确认框）。三个放行条件：
+//   · allowQuit（用户已经答过：丢弃/保存完）
+//   · 没有脏文档
+//   · 窗口已经没了（没人能回答；关窗后 mac 上的 cmd+Q 就是这条路径，再拦只会挂住进程）
+// stopBridge 每次都调：它幂等（bridge 为 null 时什么都不做）。
+app.on('before-quit', (e) => {
+  if (!allowQuit && docDirty && mainWindow && !mainWindow.isDestroyed()) {
+    e.preventDefault()
+    mainWindow.webContents.send('app:quit-request')
+    return
+  }
   stopBridge()
 })

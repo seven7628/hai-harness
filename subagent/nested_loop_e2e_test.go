@@ -246,6 +246,7 @@ func TestNestedSpawnEventsStillForwardToUI(t *testing.T) {
 	}
 
 	var started, ended bool
+	var childStart *events.AgentStart
 	for _, e := range evs.snapshot() {
 		switch e := e.(type) {
 		case *events.TaskStarted:
@@ -256,7 +257,21 @@ func TestNestedSpawnEventsStillForwardToUI(t *testing.T) {
 			if e.TaskId != "" {
 				ended = true
 			}
+		case *events.AgentStart:
+			// 孙运行的 AgentStart（depth 2 / 有 task_id）：卡片是它建的，归属锚必须同一条
+			// 事件带下来 —— 否则前端只能从 task_started 占位继承，占位一被裁就丢归属
+			//（2026-11：孙任务卡长在主会话转录里）。
+			if e.Depth == 2 && e.TaskId != "" {
+				childStart = e
+			}
 		}
+	}
+	if childStart == nil {
+		t.Fatal("孙运行的 AgentStart 事件应上浮到父事件流")
+	}
+	if childStart.ParentTaskId != parent.ID {
+		t.Errorf("孙运行 AgentStart.ParentTaskId = %q，期望发起方任务 %q（卡片归属锚随运行事件走）",
+			childStart.ParentTaskId, parent.ID)
 	}
 	if !started {
 		t.Error("孙任务 TaskStarted 事件应上浮到父事件流（前端任务卡片占位）")

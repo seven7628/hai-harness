@@ -386,8 +386,16 @@ func TestEmptyStateAssertionSkipsOnlyForWiredPackage(t *testing.T) {
 	if len(offenders) == 0 {
 		t.Skip("当前树未接线，本测试的前提不成立")
 	}
-	// 只允许 desktop/bridge 一个 importer
-	if len(offenders) != 1 || offenders[0] != "github.com/seven7628/hai-harness/desktop/bridge" {
+	// 只允许 desktop/bridge 一个**接线点**；memory/ 自己子树里的命令
+	// （memory/cmd/memory_dream）是子系统自带的工具，不算接线。
+	var wired []string
+	for _, o := range offenders {
+		if strings.HasPrefix(o, "github.com/seven7628/hai-harness/memory/") {
+			continue
+		}
+		wired = append(wired, o)
+	}
+	if len(wired) != 1 || wired[0] != "github.com/seven7628/hai-harness/desktop/bridge" {
 		t.Fatalf("接线白名单被打破，importer = %v", offenders)
 	}
 }

@@ -35,9 +35,10 @@ type Outcome struct {
 
 // Runner 执行外部命令 hook。并发安全（一次 Run 内多个工具可能同时派发）。
 type Runner struct {
-	cfg   *Config
-	trust *TrustStore
-	audit func(HookRun)
+	cfg     *Config
+	trust   *TrustStore
+	audit   func(HookRun)
+	journal *Journal
 
 	mu   sync.Mutex
 	seen map[string]struct{} // 会话级注入去重
@@ -49,6 +50,14 @@ func NewRunner(cfg *Config, trust *TrustStore, audit func(HookRun)) *Runner {
 		audit = func(HookRun) {}
 	}
 	return &Runner{cfg: cfg, trust: trust, audit: audit, seen: map[string]struct{}{}}
+}
+
+// SetJournal 挂上执行日志（nil 表示不记录）。返回自身以便链式装配。
+func (r *Runner) SetJournal(j *Journal) *Runner {
+	if r != nil {
+		r.journal = j
+	}
+	return r
 }
 
 // Dispatch 派发一个事件：matcher 过滤 → 信任/开关过滤 → 去重 → 并行执行 → 按配置顺序聚合。
@@ -201,10 +210,13 @@ func (r *Runner) runOne(ctx context.Context, a Anchor, ev Event, p Payload, h Ha
 	run := HookRun{
 		Event: ev, Name: h.Name, Command: h.Command, ExitCode: exitCode,
 		TimedOut: timedOut, DurationMs: dur, FailureMode: h.FailureMode, Scope: "runtime",
+		At: start, Session: p.SessionID,
 	}
 	defer func() {
 		out.Runs = append(out.Runs, run)
 		r.audit(run)
+		// 正常结束也落一行：见 journal.go 顶部——"跑过没有"不能靠日志里没有来推断。
+		r.journal.Append(run)
 	}()
 
 	// 权限类事件（PreToolUse/UserPromptSubmit）：非法输出 = 阻断；观测类：fail-open（规范 §4.4）
@@ -276,6 +288,7 @@ func (r *Runner) runOne(ctx context.Context, a Anchor, ev Event, p Payload, h Ha
 		if so.AdditionalContext != "" {
 			out.Contexts = append(out.Contexts, so.AdditionalContext)
 			run.InjectedBytes = len(so.AdditionalContext)
+			run.SideEffect = "context"
 		}
 		switch strings.ToLower(so.PermissionDecision) {
 		case "deny":
@@ -293,6 +306,9 @@ func (r *Runner) runOne(ctx context.Context, a Anchor, ev Event, p Payload, h Ha
 		}
 		if len(so.UpdatedInput) > 0 {
 			out.UpdatedInput = so.UpdatedInput
+			if run.SideEffect == "" {
+				run.SideEffect = "input"
+			}
 		}
 	}
 	run.Status = "ok"

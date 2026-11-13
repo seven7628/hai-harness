@@ -151,7 +151,7 @@ func TestHubPromptPreviewLayers(t *testing.T) {
 	}
 
 	if ok, errMsg, _ := hubMemoryCmd(t, m, buf, 3, "hub_agent_memory_write", map[string]any{
-		"agent_id": agentID, "path": "MEMORY.md", "content": "- 预览里要能看到这行\n",
+		"agent_id": agentID, "path": "MEMORY.md", "content": "- [预览](preview.md) — 预览里要能看到这行\n",
 	}); !ok {
 		t.Fatalf("memory write failed: %s", errMsg)
 	}

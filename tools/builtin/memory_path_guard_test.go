@@ -128,7 +128,10 @@ func TestAllowedSubtreesMatchSandboxOpenSubpaths(t *testing.T) {
 	for _, s := range allowedConfigSubtrees {
 		got[s] = true
 	}
-	// 预期集合：与 sandbox.defaultOpenSubpaths 的三项逐字对应
+	// 预期集合：与 sandbox.defaultOpenSubpaths 的几项逐字对应。
+	// previews **不在**这里：它是只读放行（readOnlyConfigSubtrees /
+	// sandbox.defaultReadOnlyOpenSubpaths，写侧由 SeatbeltPolicyMakesPreviewsReadOnly
+	// 与 previews_path_guard_test.go 各自钉住）。
 	want := map[string]bool{"plugins": true, "runtime": true, "memory": true}
 	for k := range want {
 		if !got[k] {

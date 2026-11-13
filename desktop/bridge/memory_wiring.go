@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/seven7628/hai-harness/events"
@@ -43,13 +44,18 @@ type memoryHost struct {
 
 	once sync.Once
 	dir  *memory.Dir
+
+	// dreamMu/dreaming 防止同一目录被并发触发多次盘点：会话开得越频繁，
+	// 越容易在"上次还没跑完"时又开一次。
+	dreamMu  sync.Mutex
+	dreaming map[string]bool
 }
 
 // newMemoryHost 装配期构造。**不**在这里解析身份：解析要跑 git，而装配期的
 // context 不总是可用的（会话 ctx 在 buildLoop 阶段尚未就绪，session 变量还是 nil）。
 // 身份改为惰性解析 —— 第一次真的需要目录时才跑 git。
 func newMemoryHost(cfg memory.Config) *memoryHost {
-	return &memoryHost{cfg: cfg}
+	return &memoryHost{cfg: cfg, dreaming: map[string]bool{}}
 }
 
 // resolve 取记忆目录（成功则缓存，失败则每次重试）。workdir 为空时不做任何事。
@@ -108,12 +114,57 @@ func (h *memoryHost) injectionFor(dir memory.Dir) string {
 	if h.cfg.Disabled() {
 		return ""
 	}
+	// 自动盘点（Dreaming 第一步）：过时了就在后台跑一次，**不在这条路径上等**。
+	// 实测一次完整盘点（含扫会话转录）约 8 秒——放在会话创建的关键路径上，
+	// 用户看到的就是"打开会话卡住了"。
+	h.maybeDream(dir)
 	inj, err := h.cfg.BuildInjection(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[memory] 读索引失败：%v\n", err)
 		return ""
 	}
 	return inj.Text
+}
+
+// maybeDream 在盘点过时时后台跑一次只读盘点。
+//
+// 边界：只跑 Dream（只读、写一份摘要），**不做裁决也不归档**——归档要模型给理由、
+// 宿主过护栏、事后跑回归，那一步不能自动触发。
+func (h *memoryHost) maybeDream(dir memory.Dir) {
+	// 后台任务绝不在 `go test` 下跑：它会在测试收尾、临时目录被删之后继续写盘，
+	// 表现为 "TempDir RemoveAll cleanup: .state: directory not empty" 这种
+	// 偶发竞态——实测两个用例因此变红，且每次跑失败的名字还不一样。
+	if testing.Testing() {
+		return
+	}
+	if h.cfg.Disabled() || !h.cfg.DreamDue(dir) {
+		return
+	}
+	h.dreamMu.Lock()
+	if h.dreaming == nil {
+		h.dreaming = map[string]bool{}
+	}
+	if h.dreaming[dir.ID] {
+		h.dreamMu.Unlock()
+		return
+	}
+	h.dreaming[dir.ID] = true
+	h.dreamMu.Unlock()
+
+	go func() {
+		defer func() {
+			h.dreamMu.Lock()
+			delete(h.dreaming, dir.ID)
+			h.dreamMu.Unlock()
+		}()
+		n, err := h.cfg.RunDreamAndSave(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] 自动盘点失败（%s）：%v\n", dir.ID, err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[memory] 自动盘点完成（%s）：%d 条，问题 %v\n",
+			dir.ID, n.Topics, n.HasIssues())
+	}()
 }
 
 // subagentInjection 返回某个子 agent 自己的记忆目录的注入段。
@@ -222,7 +273,18 @@ func (h *memoryHost) postWrite(ctx context.Context, workspace, absPath string) (
 	if ws.Err == nil && ws.Stamped != memory.StampedSkipped {
 		h.emitMemoryActivity(ctx, scope, events.MemoryActionSaved, filepath.Base(absPath))
 	}
-	return "", ws.Err
+	if ws.Err != nil {
+		return "", ws.Err
+	}
+	// 写后审计（P3）：脱敏 / 格式 / 索引登记。**不改写失败语义**——补戳已经成功，
+	// 审计只回一句提示；只有脱敏会真的改内容（见 memory/audit.go 开头的理由）。
+	ar, aerr := h.cfg.Audit(target, absPath)
+	if aerr != nil {
+		// 审计读不了不是写完的失败：记一行、继续。
+		fmt.Fprintf(os.Stderr, "[memory] 审计跳过（%s）：%v\n", absPath, aerr)
+		return "", nil
+	}
+	return ar.Notice, nil
 }
 
 // personaMemory 描述"给这个子 agent 注入哪一份记忆"。
@@ -295,6 +357,14 @@ func (h *memoryHost) postRead(ctx context.Context, workspace, absPath string) (s
 	// 计入会让 "Recalled N memories" 在刚启动、只加载了索引时就说 N>0。
 	if !owner.IsTopic(absPath) {
 		return "", nil
+	}
+	// 使用计数：热点清单（B 档注入 Top-8）的唯一排序信号，见 memory/hotlist.go。
+	// 记在 emit 之前，因为它是**排序数据**而不是可观测性事件：事件发不出去只影响
+	// 日志，计数丢一条会让常读的记忆慢慢沉底。
+	//
+	// 失败只记一行 stderr：读文件本身绝不能因为统计失败而失败（统计是观测）。
+	if err := h.cfg.RecordRead(owner, absPath); err != nil {
+		fmt.Fprintf(os.Stderr, "[memory] 记录使用计数失败（%s）：%v\n", absPath, err)
 	}
 	h.emitMemoryActivity(ctx, scope, events.MemoryActionRecalled, filepath.Base(absPath))
 	return "", nil

@@ -84,9 +84,20 @@ type Injection struct {
 	Dir *Dir
 	// Load 索引加载度量（未读到索引、或索引为空时为 nil）。
 	Load *IndexLoad
+	// Tier 本次实际使用的注入形态（full / hot）。gate 降级后这里报的是降级后的值
+	// （见 Config.injectionTier），所以调用方与评估读数不会出现"以为在跑闸门"的错觉。
+	Tier string
+	// Hot 热点清单（Tier=full 时为 nil）。Total/Shown/Omitted 是 §14「注入预算」的读数来源。
+	Hot *HotList
 	// Reason 注入形态标识："disabled" / "no-identity" / "no-index" / "empty-index"，
 	// 有索引正文时为空串。仅供装配层日志与测试断言，**不参与**是否注入的判定。
 	Reason string
+	// Dream 本次注入末尾附带的"上次盘点"一句（空 = 没有或已过期）。
+	// 单独留一个字段是因为它**不是记忆内容**：评估时要能把"模型自己写的索引"与
+	// "宿主加的提示"分开归因（同 guidance 的边界）。
+	Dream string
+	// DreamTask 待办提示（仅当今天还没自动处理过、且回归命令已配置时出现）。
+	DreamTask string
 }
 
 // Empty 无注入文本。装配层据此**不改动系统提示词的任何字节**。
@@ -111,7 +122,27 @@ func (c Config) BuildInjection(d Dir) (Injection, error) {
 		// 开关前置判定发生在任何 I/O 之前：关闭时**一次读盘都不发生**。
 		return Injection{Enabled: false, Reason: "disabled"}, nil
 	}
-	return c.buildInjection(d)
+	inj, err := c.buildInjection(d)
+	if err != nil || inj.Empty() {
+		return inj, err
+	}
+	// 上次盘点的结论附在最后：它是**事实**（有几条锚点失效），不是建议。
+	// 附在 guidance 之后而不是之前，是为了让"索引正文 → 形态说明 → 盘点结论"
+	// 保持"内容先、宿主的话后"的顺序，测试也能按这个边界切分。
+	if n, ok := c.LoadDreamNote(d); ok {
+		if line := dreamNotice(n, c.Now()); line != "" {
+			inj.Text += "\n\n" + line
+			inj.Dream = line
+			// 今天还没自动处理过 → 把提示变成可执行的任务（每天最多一次）。
+			if c.AutoDreamBlocker(d) == "" {
+				if task := dreamTask(n, DreamEvalCommand()); task != "" {
+					inj.Text += "\n" + task
+					inj.DreamTask = task
+				}
+			}
+		}
+	}
+	return inj, nil
 }
 
 func (c Config) buildInjection(d Dir) (Injection, error) {
@@ -123,8 +154,8 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 			// 能把记忆目录告诉模型的机会（没有 MEMORY.md 就永远没有"第一条"）。
 			// 见 guidance.go 顶部的闭环分析。
 			return Injection{
-				Text:    indexHeading + "\n\n" + guidance(d, false),
-				Enabled: true, Dir: &d, Reason: "no-index",
+				Text:    indexHeading + "\n\n" + guidance(d, false, c.injectionTier(), 0),
+				Enabled: true, Dir: &d, Reason: "no-index", Tier: c.injectionTier(),
 			}, nil
 		}
 		return Injection{Enabled: true, Dir: &d}, err
@@ -135,19 +166,33 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 		// 「无索引」与「空索引」在模型看来是同一件事——都还没有记忆——所以给同一
 		// 段文本，不因为文件碰巧存在就说"你的索引是空的"（那会像是丢了东西）。
 		return Injection{
-			Text:    indexHeading + "\n\n" + guidance(d, false),
-			Enabled: true, Dir: &d, Reason: "empty-index",
+			Text:    indexHeading + "\n\n" + guidance(d, false, c.injectionTier(), 0),
+			Enabled: true, Dir: &d, Reason: "empty-index", Tier: c.injectionTier(),
 		}, nil
+	}
+	tier := c.injectionTier()
+	// ↓ 热点清单：B 档唯一的正文。**在截断提示之前**生成——提示是宿主加的话，
+	// 不是索引内容，让它进解析器只会污染条目表（见 hotlist.go 的 parseIndexEntries）。
+	var hot *HotList
+	if tier == InjectionHot {
+		hot = BuildHotList(load.Text, c.ReadUsage(d))
+		text = hot.Text
 	}
 	// ↓ 截断提示：**只陈述本次已经发生的事实**，不新增机制（见 truncationNotice）。
 	if load.TruncatedBy != "" {
 		text += truncationNotice(load.TruncatedBy)
 	}
+	omitted := 0
+	if hot != nil {
+		omitted = hot.Omitted
+	}
 	return Injection{
-		Text:    indexHeading + "\n\n" + text + "\n\n" + guidance(d, true),
+		Text:    indexHeading + "\n\n" + text + "\n\n" + guidance(d, true, tier, omitted),
 		Enabled: true,
 		Dir:     &d,
 		Load:    load,
+		Tier:    tier,
+		Hot:     hot,
 	}, nil
 }
 

@@ -102,7 +102,7 @@ func TestEval1DMSingleSessionCompressKeepsMemory(t *testing.T) {
 	agentID := string(p.ID)
 	root := filepath.Join(appDataDir(), "hub")
 	const fact = "关键事实：本月预算 20 万"
-	if _, err := agenthub.WriteMemoryFile(root, p.ID, "MEMORY.md", "- "+fact+"\n"); err != nil {
+	if _, err := agenthub.WriteMemoryFile(root, p.ID, "MEMORY.md", "- ["+fact+"](fact.md) — "+fact+"\n"); err != nil {
 		t.Fatal(err)
 	}
 	bs, err := m.hubDMSession(agentID)
@@ -210,10 +210,10 @@ func TestEval2IndependentMemory(t *testing.T) {
 	root := filepath.Join(appDataDir(), "hub")
 	const factA = "关键事实：预算 20 万"
 	const factB = "关键事实：预算 50 万"
-	if _, err := agenthub.WriteMemoryFile(root, a.ID, "MEMORY.md", "- "+factA+"\n"); err != nil {
+	if _, err := agenthub.WriteMemoryFile(root, a.ID, "MEMORY.md", "- ["+factA+"](fact-a.md) — "+factA+"\n"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := agenthub.WriteMemoryFile(root, b.ID, "MEMORY.md", "- "+factB+"\n"); err != nil {
+	if _, err := agenthub.WriteMemoryFile(root, b.ID, "MEMORY.md", "- ["+factB+"](fact-b.md) — "+factB+"\n"); err != nil {
 		t.Fatal(err)
 	}
 	aLoop, _, err := m.hubLoadAgent(string(a.ID))

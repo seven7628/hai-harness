@@ -108,7 +108,7 @@ func TestSweepRecordStripsOldRecords(t *testing.T) {
 	}
 	before, _ := os.Stat(path)
 
-	res, err := SweepRecordFiles(filepath.Join(root, "sessions"), 0)
+	res, err := SweepRecordFiles(filepath.Join(root, "sessions"), 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestSweepRecordBytesMatchCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ② 扫。
-	if _, err := SweepRecordFiles(filepath.Join(root, "sessions"), 0); err != nil {
+	if _, err := SweepRecordFiles(filepath.Join(root, "sessions"), 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	swept, err := os.ReadFile(path)
@@ -204,7 +204,7 @@ func TestSweepRecordLeavesCleanRecordsAlone(t *testing.T) {
 	path, _ := store.RecordPath(wsKey, sid)
 	before, _ := os.ReadFile(path)
 
-	res, err := SweepRecordFiles(filepath.Join(root, "sessions"), 0)
+	res, err := SweepRecordFiles(filepath.Join(root, "sessions"), 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestSweepRecordMigratesInlineBlocksToSidecar(t *testing.T) {
 	before, _ := os.Stat(path)
 	beforeBak, _ := os.Stat(path + ".bak")
 
-	res, err := SweepRecordFiles(filepath.Join(root, "sessions"), 0)
+	res, err := SweepRecordFiles(filepath.Join(root, "sessions"), 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

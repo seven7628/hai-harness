@@ -151,6 +151,16 @@ contextBridge.exposeInMainWorld('desktop', {
   applyTheme: (theme: string) => ipcRenderer.invoke('settings:apply-theme', theme),
   // 外观设置「字体大小」：原生缩放（1 = 100%）。缩小/放大都要过范围钳制，主进程再兜一次。
   setUiZoom: (scale: number) => ipcRenderer.invoke('ui:set-zoom', scale),
+  // 原生脏标记（PR-05b）：任一编辑标签有未保存改动 → 主进程 setDocumentEdited（macOS 标题栏
+  // 红点 + 关窗时的系统提示）。非 macOS 主进程空实现，渲染层无感。
+  setDirty: (dirty: boolean) => ipcRenderer.invoke('app:set-dirty', dirty),
+  // before-quit 被拦下后的「真要退」信号。只由确认框的「丢弃/保存完成」调用一次。
+  quitAnyway: () => ipcRenderer.invoke('app:quit-anyway'),
+  onQuitRequest: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('app:quit-request', listener)
+    return () => ipcRenderer.removeListener('app:quit-request', listener)
+  },
   // M0 POC：右侧栏内嵌浏览器视图（WebContentsView + CDP 驱动通路）
   embedShow: (p: { url?: string; rect?: { x: number; y: number; width: number; height: number } }) => ipcRenderer.invoke('embed:show', p),
   embedResize: (rect: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke('embed:resize', rect),
@@ -224,6 +234,13 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('bridge:exit', listener)
     return () => ipcRenderer.removeListener('bridge:exit', listener)
   },
+  // 内存压力信号（2026-11-12，P1）：主进程轮询 process.getSystemMemoryInfo 推来。
+  // 渲染进程据此决定要不要主动降级视图（Chromium tab discarding 的模型）。
+  onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => {
+    const listener = (_e: unknown, p: { free: number; total: number; swapFree: number; swapTotal: number }) => cb(p)
+    ipcRenderer.on('mem:pressure', listener)
+    return () => ipcRenderer.removeListener('mem:pressure', listener)
+  },
 })
 
 declare global {
@@ -288,6 +305,8 @@ declare global {
       // hub:// 深链（P4-02）：返回取消订阅。
       onHubDeepLink: (cb: (url: string) => void) => () => void
       hubTakeDeepLinks: () => Promise<string[]>
+      // 内存压力信号（主进程轮询系统内存推来；见 electron/main.ts 的 startMemPressureWatch）
+      onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => () => void
     }
   }
 }
