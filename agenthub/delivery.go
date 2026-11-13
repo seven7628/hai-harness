@@ -68,7 +68,8 @@ const (
 	DeliveryReasonStopped     = "stopped"            // 人类停止自动对话
 	DeliveryReasonStale       = "stale_conversation" // 旧 generation 的 wake，丢弃
 	DeliveryReasonDuplicate   = "duplicate"          // 同一 wake id 重复投递（幂等命中）
-	DeliveryReasonInterrupted = "interrupted"        // run 被中断（停止/关停）
+	DeliveryReasonInterrupted = "interrupted"        // run 被中断（停止/关停/按 agent 停止）
+	DeliveryReasonTimeout     = "run_timeout"        // 单轮 run 超过 run_timeout_ms，被中断（P6-08）
 	DeliveryReasonShutdown    = "shutdown"           // Hub 正在关停
 	DeliveryReasonInvalid     = "invalid"            // 群/成员/会话已不可用
 	DeliveryReasonQueueFull   = "queue_full"         // 待投递队列到达 max_pending_wakes

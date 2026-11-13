@@ -457,6 +457,8 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	w = ctrl.CommitDelivery(w, time.Time{})
 	ok = true
 	bs.lastActive.Store(time.Now().UnixMilli())
+	// P6-08：挂 run 超时。定时器按 wake id 复核，收尾/停止后自然 no-op。
+	m.armHubRunTimeout(g.ID, target, w.ID)
 	bs.wakeRun()
 	// 投递成功：记录停在 running，run 收尾时由 finishHubGroupDelivery 推进到 done。
 	d, _ := ctrl.Delivery(g.ID, w.ID)
@@ -694,6 +696,22 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 	// 新对话是 running（不是 stopped），旧 run 允许正常收尾。
 	unlock := m.hubConvDispatch.lock(wake.GroupID)
 	defer unlock()
+	// P6-08：这一轮的投递记录已经不是 running（按 agent 停止/run 超时/关停把它收口成
+	// failed）→ 不写半截正文，只推进游标。判据比「群级 stopped」更细：只影响被打断的
+	// 那一个成员，其他成员照常落账。
+	if wake.WakeID != "" {
+		if d, ok := m.hubConversation().Delivery(wake.GroupID, wake.WakeID); ok && d.Status != agenthub.DeliveryRunning {
+			st, serr := m.hubStore()
+			if serr != nil {
+				m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", serr)
+				return
+			}
+			if err := m.advanceGroupAgentCursor(context.Background(), st, wake.GroupID, spec.Agent.ID, wake.TriggerSeq); err != nil {
+				m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
+			}
+			return
+		}
+	}
 	if m.hubConversationView(wake.GroupID).Status == agenthub.ConversationStopped {
 		st, serr := m.hubStore()
 		if serr != nil {

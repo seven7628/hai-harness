@@ -114,6 +114,18 @@ const eq = (got, want, m) => {
   assert(group.includes('DayDivider') && group.includes('dayLabel('), '群时间线有日期分隔线')
   assert(group.includes('insertMentionToken') && group.includes("t('hub.composer.mention')"), '@ 按钮真实插入并聚焦')
   assert(group.includes('composer-meta'), '群 composer 有 meta 行')
+
+  // P6-08：按 agent 停止的接线 —— 右栏成员行给入口、store 把 agent_id 带到命令里、
+  // mock 认得同一个键（三处少一处，按钮就是装饰品）。
+  const insp = readFileSync(join(APP, 'src', 'hub', 'HubInspector.tsx'), 'utf8')
+  assert(insp.includes('stoppableAgentIds(') && insp.includes('hub-ov-member-stop') &&
+    insp.includes('stopGroupConversation(group.id, m.agent_id)'), '右栏成员行有「只停这个成员」入口')
+  const store = readFileSync(join(APP, 'src', 'hub', 'useHubStore.ts'), 'utf8')
+  assert(/stopGroupConversation\(groupID, agentID\)/.test(store) && store.includes("aid ? { group_id: gid, agent_id: aid }"),
+    'stopGroupConversation 带 agent_id 走 hub_conversation_stop')
+  const mock = readFileSync(join(APP, 'src', 'transport', 'mock.ts'), 'utf8')
+  assert(mock.includes('const stopAgent = String(cmd.payload?.agent_id ?? \'\').trim()'),
+    'mock 的 hub_conversation_stop 认 agent_id（只停一个成员）')
 }
 
 // 4) 群头 +N 规则：≥5 人 = 前 4 + N（demo 口径）。
@@ -173,6 +185,26 @@ const eq = (got, want, m) => {
   eq(sum, '2 进行中 · 1 排队 · 1 已回复 · 1 跳过', '一轮 @ 的投递摘要')
   eq(conv.deliverySummary(null), '', '没有账本 → 空摘要')
   eq(conv.deliverySummary({ deliveries: [] }), '', '空账本 → 空摘要')
+}
+
+// 4c) 按 agent 停止（P6-08）：谁还能「只停这一个」+ 超时/中断的原因文案。
+{
+  const conv = await load('conversation.ts')
+  eq(conv.deliveryReasonText('run_timeout'), '单轮超时，已中断', '超时的原因文案')
+  eq(conv.deliveryReasonText('interrupted'), '运行被中断', '被中断的原因文案')
+  // 只有 running/queued 的 target 才给「停止」入口，终态的不给；同 target 去重。
+  const ids = conv.stoppableAgentIds({
+    deliveries: [
+      { target: 'agt_a', status: 'running' },
+      { target: 'agt_a', status: 'queued' },
+      { target: 'agt_b', status: 'queued' },
+      { target: 'agt_c', status: 'done' },
+      { target: 'agt_d', status: 'skipped', reason: 'stale_conversation' },
+      { target: '', status: 'running' },
+    ],
+  })
+  eq(JSON.stringify(ids), JSON.stringify(['agt_a', 'agt_b']), '可停成员 = 进行中/排队的 target（去重、跳过终态）')
+  eq(conv.stoppableAgentIds(null).length, 0, '没有对话 → 没有可停成员')
 }
 
 console.log(`\nHUB_CONV_TEST_PASS (${pass})`)

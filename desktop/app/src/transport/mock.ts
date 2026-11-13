@@ -3945,7 +3945,45 @@ class MockTransport implements Transport {
       }
       case 'hub_conversation_stop': {
         const gid = String(cmd.payload?.group_id ?? '')
+        const stopAgent = String(cmd.payload?.agent_id ?? '').trim()
         if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在'); break }
+        if (stopAgent) {
+          // P6-08：带 agent_id = 只停这个成员 —— 不换代、不改对话状态，其他成员继续。
+          // 真 bridge 只中断该成员在跑的 run + 丢掉它排队的唤醒；mock 用任务状态 +
+          // 队列计数表达同一件事（前端文案/按钮状态据此验收）。
+          if (!this.hubGroupMemberIDs(gid).includes(stopAgent)) { this.respondErr(cmd, '该智能体不是这个群的成员'); break }
+          const stoppedAt = new Date().toISOString()
+          let interrupted = 0
+          for (const task of this.hubGroupTasks.values()) {
+            const target = task.target as { group_id?: string; agent_id?: string } | undefined
+            const status = String(task.status ?? '')
+            if (String(target?.group_id ?? '') !== gid || String(target?.agent_id ?? '') !== stopAgent) continue
+            if (status !== 'dispatched' && status !== 'running') continue
+            task.status = 'interrupted'
+            task.updated_at = stoppedAt
+            task.error = '人类只停了这个成员的群运行'
+            interrupted++
+            this.hubGroupTaskUpdate(task, gid)
+          }
+          const prev = this.hubGroupConversations.get(gid) ?? this.mockConversation(gid, 'running')
+          const queued = Number(prev.queue_len ?? 0)
+          const skipped = queued > 0 ? 1 : 0
+          const conversation = queued > 0
+            ? this.hubGroupSetConversation(gid, String(prev.status ?? 'running'), {
+              turns: Number(prev.turns_used ?? 0), depth: Number(prev.depth ?? 0),
+              queue: queued - 1, ...(prev.stop_reason ? { reason: String(prev.stop_reason) } : {}),
+            })
+            : prev
+          const name = String(this.hubAgents.find((a) => String(a.id) === stopAgent)?.name ?? stopAgent)
+          const notice = this.hubGroupAppend(gid, {
+            kind: 'system', sender: { kind: 'system' },
+            text: `已停止「${name}」在本群的运行（中断 ${interrupted} 个 run，跳过 ${skipped} 条排队唤醒），其他成员继续`,
+          })
+          this.hubGroupEmitMessage(gid, notice)
+          this.emit({ event_type: 'hub_agent_status', agent_id: stopAgent, status: 'idle' })
+          this.respond(cmd, { conversation, interrupted, skipped, agent_id: stopAgent })
+          break
+        }
         this.hubGroupGen.set(gid, (this.hubGroupGen.get(gid) ?? 0) + 1)
         // 在飞任务必须结算：换代只作废回调，账本里 queued/dispatched/running 的任务
         // 会一直挂着 —— 前端按 dispatched/running 判「有东西可停」，一次停止之后

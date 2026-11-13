@@ -191,6 +191,7 @@ export function deliveryReasonText(reason?: string | null): string {
     case 'stale_conversation': return '上一轮对话已作废'
     case 'duplicate': return '重复投递已忽略'
     case 'interrupted': return '运行被中断'
+    case 'run_timeout': return '单轮超时，已中断'
     case 'shutdown': return 'Hub 正在关停'
     case 'invalid': return '群或成员已不可用'
     case 'queue_full': return '排队过多，已跳过'
@@ -211,6 +212,23 @@ export function deliveryLabel(d?: HubDelivery | null, names?: Record<string, str
     case 'failed': return why ? `${who} 失败：${why}` : `${who} 失败`
     default: return who
   }
+}
+
+/**
+ * 「只停这个成员」的目标（P6-08）：账本里还有进行中/排队投递的 target，按出现顺序
+ * 去重。群头/成员行的停止入口用它决定给谁显示 —— 群级停止仍然是另一颗按钮。
+ */
+export function stoppableAgentIds(conv?: HubConversation | null): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const d of conv?.deliveries ?? []) {
+    const id = (d.target ?? '').trim()
+    if (!id || seen.has(id)) continue
+    if (d.status !== 'running' && d.status !== 'queued') continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
 }
 
 /**

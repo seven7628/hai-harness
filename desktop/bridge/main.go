@@ -1439,6 +1439,10 @@ type manager struct {
 	// hubConvDispatch 按群串行化自动对话的「取 wake → 投递 → 记账」与停止/人类插话（B2）。
 	hubConvDispatch hubConvDispatchGate
 	hubConvNotified map[agenthub.GroupID]string
+	// hubRunTimerMu/hubRunTimers 是「每 (group, agent) 一个在跑 run 的超时定时器」
+	//（P6-08）：run 收尾/按 agent 停止时撤掉，到点则中断这一轮并继续队列。
+	hubRunTimerMu sync.Mutex
+	hubRunTimers  map[string]*hubRunTimer
 	// hubProvSem 是进程级 provider 并发信号量（P6-03，懒建一次）；所有 hub loop 共享。
 	hubProvSem     *agents.ProviderSemaphore
 	hubProvSemOnce sync.Once

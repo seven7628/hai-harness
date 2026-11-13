@@ -1613,6 +1613,10 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
 .hub-ov-members { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
 .hub-ov-member { display: flex; align-items: center; gap: 7px; font-size: 12px; min-width: 0; }
 .hub-ov-member-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* P6-08：成员行的「只停这个成员」入口 —— 靠右、小一号，不挤占名字与角色。 */
+.hub-ov-member .hub-ov-member-stop { margin-left: auto; flex: 0 0 auto; font-size: 11px; padding: 1px 5px; }
+.hub-ov-member .hub-ov-member-stop:hover { color: var(--danger, #c0392b); }
+.hub-ov-member .hub-ov-member-stop:disabled { opacity: .5; cursor: default; }
 .hub-ov-tasks { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--border); padding-top: 8px; }
 .hub-ov-task {
   display: flex;
