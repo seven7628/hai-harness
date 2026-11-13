@@ -36,12 +36,14 @@ var errHubGroupTargetBusy = errors.New("群会话忙：上一轮尚未结束")
 func (m *manager) hubConversation() *agenthub.ConversationController {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// P6-04：限额来自 settings.json 顶层 hub.conversation（全局，不是每群策略）。
+	// I1：按文件指纹缓存（只 stat，不每次读盘）；文件变了就热更新，无需重启。
+	limits := loadHubConversationLimitsCached()
+	if m.hubConvLimits != nil {
+		limits = *m.hubConvLimits
+	}
 	if m.hubConv == nil {
-		// P6-04：限额来自 settings.json 顶层 hub.conversation（全局，不是每群策略）。
-		opts := agenthub.ConversationOptions{Limits: loadHubConversationLimits()}
-		if m.hubConvLimits != nil {
-			opts.Limits = *m.hubConvLimits
-		}
+		opts := agenthub.ConversationOptions{Limits: limits}
 		// P6-09：对话状态落盘（conversations/<gid>.json）。落盘失败只告警：
 		// 磁盘问题不能让群聊停下。
 		opts.Persister = hubConversationPersister{m: m}
@@ -49,6 +51,11 @@ func (m *manager) hubConversation() *agenthub.ConversationController {
 			m.hubAlertf("hub_conversation_persist_failed", "群 %s 对话状态写入失败：%v", gid, err)
 		}
 		m.hubConv = agenthub.NewConversationController(opts)
+		return m.hubConv
+	}
+	// I1：设置保存后立即生效（旧对话状态原样保留）。只在真的变了时写一次。
+	if m.hubConv.Limits() != limits {
+		m.hubConv.SetLimits(limits)
 	}
 	return m.hubConv
 }

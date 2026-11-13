@@ -404,7 +404,24 @@ func (c *ConversationController) Limits() ConversationLimits {
 	if c == nil {
 		return ConversationLimits{}.withDefaults()
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.limits
+}
+
+// SetLimits 热更新全局对话限额（I1）：设置保存后**无需重启**即可生效。
+//
+// 只换限额，不动任何对话状态（队列/轮次/深度/pair 计数/指纹/账本原样保留）——
+// 调护栏不该把正在跑的群聊清零。下一次 Offer / View / 取队 / 挂 run 超时就用
+// 新值。0 值照常走 withDefaults（与构造时同口径，避免「设成 0 = 永不唤醒」）。
+func (c *ConversationController) SetLimits(limits ConversationLimits) {
+	if c == nil {
+		return
+	}
+	next := limits.withDefaults()
+	c.mu.Lock()
+	c.limits = next
+	c.mu.Unlock()
 }
 
 func (c *ConversationController) clockAt(at time.Time) time.Time {
