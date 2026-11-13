@@ -427,6 +427,21 @@ function clearsDraft(draft: string | undefined, sourceDraft: string | undefined,
   return draftEquals(draft, sourceDraft ?? text)
 }
 
+/**
+ * 发送失败后要不要把原文放回输入框。
+ *
+ * 草稿现在是**乐观清空**（按下发送/回车立刻清，见 send/sendGroup 的第一处 set）：
+ * 失败时必须还回去，否则用户得重打一遍。但用户已经在这段等待里输入了新内容时
+ * 绝不覆盖 —— 输入框里用户的字优先于「方便重试」。
+ *
+ * 返回 null = 不动草稿；返回字符串 = 写回这段原文。
+ */
+function restoreDraft(draft: string | undefined, sourceDraft: string | undefined, text: string): string | null {
+  if (typeof draft === 'string' && draft.trim()) return null
+  const original = (sourceDraft ?? text).trim()
+  return original || null
+}
+
 function roundHasAction(r: HubRound | null | undefined): boolean {
   return !!r && (!!r.mention_all || (r.targets ?? []).length > 0 || (r.dropped ?? 0) > 0)
 }
@@ -767,6 +782,9 @@ export const useHubStore = create<HubState>((set, get) => ({
       notice: null,
       // 只摘这一条 cid：同会话里还有别的失败气泡，它们的记录要留着（复审 B3）。
       ...dropFailed(s.failedByCid, reuse),
+      // 乐观清空：消息已经进时间线了，输入框不该再等响应（真 bridge 慢时尤其明显）。
+      // 失败分支按 restoreDraft 放回去 —— 只在用户没输入新内容时。
+      ...(clearsDraft(s.drafts[activeId], draft0, body) ? { drafts: { ...s.drafts, [activeId]: '' } } : {}),
     }))
     const r = await hubCommand<{ seq?: number; deduplicated?: boolean }>('hub_send', {
       target: { kind: 'dm', agent_id: activeId },
@@ -781,12 +799,17 @@ export const useHubStore = create<HubState>((set, get) => ({
         ...(draft0 === undefined ? {} : { sourceDraft: draft0 }),
         ...(atts.length > 0 ? { attachments: atts, attachmentsFingerprint: fp } : {}),
       }
-      set((s) => ({
-        sending: false,
-        error: r.error || '发送失败',
-        ...rememberFailed(s.failedByCid, rec),
-        messages: s.messages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
-      }))
+      set((s) => {
+        // 乐观清空后失败：把原文放回输入框（用户已输入新内容时不动，见 restoreDraft）。
+        const restore = restoreDraft(s.drafts[activeId], draft0, body)
+        return {
+          sending: false,
+          error: r.error || '发送失败',
+          ...rememberFailed(s.failedByCid, rec),
+          messages: s.messages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
+          ...(restore === null ? {} : { drafts: { ...s.drafts, [activeId]: restore } }),
+        }
+      })
       return false
     }
     const seq = Number(r.data?.seq ?? 0)
@@ -802,6 +825,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       ...dropFailed(s.failedByCid, clientMsgId),
       // 草稿还是这条（原始草稿）才清：横幅/气泡重试成功后输入框要空，用户后来改过的输入不清（复审 B2）。
       // 有文件引用时 body 多出几行 @path，必须比 sourceDraft —— 否则草稿不清，用户再回车会多发一条。
+      // 发送时已经乐观清过一次，这里幂等兜底（等待期间用户新输入的正文不匹配，不会被动）。
       ...(clearsDraft(s.drafts[activeId], draft0, body) ? { drafts: { ...s.drafts, [activeId]: '' } } : {}),
     }))
     void get().refresh()
@@ -1448,6 +1472,10 @@ export const useHubStore = create<HubState>((set, get) => ({
         ...(reuse ? s.groupMessages.filter((m) => !(m.failed && m.clientMsgId === reuse)) : s.groupMessages),
         { seq: -n, sender: { kind: 'human' }, text: body, ...(atts.length > 0 ? { attachments: atts } : {}), pending: true, clientMsgId },
       ],
+      // 与 DM 同一套乐观清空：气泡已进时间线，输入框不等响应（失败按 restoreDraft 放回）。
+      ...(clearsDraft(s.groupDraftText[activeGroupId], draft0, body)
+        ? { groupDraftText: { ...s.groupDraftText, [activeGroupId]: '' } }
+        : {}),
     }))
     const payload: Record<string, unknown> = {
       group_id: activeGroupId, text: body, client_msg_id: clientMsgId,
@@ -1467,16 +1495,22 @@ export const useHubStore = create<HubState>((set, get) => ({
         ...(draft0 === undefined ? {} : { sourceDraft: draft0 }),
         ...(atts.length > 0 ? { attachments: atts, attachmentsFingerprint: fp } : {}),
       }
-      set((s) => ({
-        groupSending: false, error: r.error || '发送失败',
-        ...rememberFailed(s.failedByCid, rec),
-        groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
-      }))
+      set((s) => {
+        // 同 DM：乐观清空后失败，把原文放回群草稿（用户已输入新内容时不动）。
+        const restore = restoreDraft(s.groupDraftText[activeGroupId], draft0, body)
+        return {
+          groupSending: false, error: r.error || '发送失败',
+          ...rememberFailed(s.failedByCid, rec),
+          groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true } : m)),
+          ...(restore === null ? {} : { groupDraftText: { ...s.groupDraftText, [activeGroupId]: restore } }),
+        }
+      })
       return false
     }
     set((s) => ({
       groupSending: false,
       // 成功只清这一条 cid 的失败记录；草稿仍是这条正文才清（复审 B2/B3）。
+      // 发送时已乐观清空，这里幂等兜底：等待期间用户新输入的正文不匹配，不会被抹掉。
       ...dropFailed(s.failedByCid, clientMsgId),
       ...(clearsDraft(s.groupDraftText[activeGroupId], draft0, body)
         ? { groupDraftText: { ...s.groupDraftText, [activeGroupId]: '' } }

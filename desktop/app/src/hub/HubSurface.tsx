@@ -203,11 +203,10 @@ export default function HubSurface() {
     stickBottom.current = true
     // 第 4 个参数是拼 @path 之前的草稿：失败重试成功后据此清输入框（见 store.clearsDraft）。
     const ok = await send(text, undefined, atts.length > 0 ? atts : undefined, draft)
-    // 成功才清正文与附件；失败两头都保留（store 留 failed 记录，含附件指纹供重试）。
-    if (ok) {
-      setDraft(activeId, '')
-      attach.reset()
-    }
+    // 正文由 store 在**发送那一刻**乐观清空（失败时它按需放回），这里不再 setDraft('')：
+    // 响应回来时用户可能已经输入了新内容，无条件清会把那段字抹掉。
+    // 附件仍只在成功分支收尾：失败时留着，重试还能再发一次（store 的失败记录也带指纹）。
+    if (ok) attach.reset()
   }
 
   // 时间线节点：日期分隔线按本地自然日切段（与群共用 conversationDay.ts 的口径）。

@@ -372,5 +372,80 @@ const countText = (list, text) => humanTexts(list).filter((x) => x === text).len
   delete globalThis.window
 }
 
+// —— 9) 乐观清空草稿：按下发送立刻清，失败才放回（HUB-CLEAR-01） ——
+// 用户报障：消息已经乐观出现在时间线，输入框却要等 hub_send/hub_group_send 的响应回来
+// 才清（真 bridge 慢时很明显）。mock 的响应只隔一个微任务，所以用 localStorage 把发送类
+// 命令的响应人为推迟 300ms，才能断言「send() 返回前输入框已经空了」。
+{
+  // Node 25 自带一个内建的 localStorage，**读它会打印 --localstorage-file 警告**，而且它是
+  // 访问器属性 —— 直接赋值只是把值塞进内建 setter，mock 侧无法把它和「真浏览器」区分开。
+  // 所以用 defineProperty 换成数据属性桩（getItem 恒返回 '300'）：mock 只认这种被真正
+  // 替换过的桩，浏览器里则读真 window.localStorage。测试结束按原描述符恢复。
+  const lsDesc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true, writable: true, value: { getItem: () => '300' },
+  })
+  await H.getState().select('ag_mockres1')
+  const A = H.getState().activeId
+  eq(A, 'ag_mockres1', '乐观清空：DM 打开')
+
+  // 成功：不等 await 就空
+  H.getState().setDraft(A, '待发内容')
+  const t0 = Date.now()
+  const p = H.getState().send('待发内容', undefined, undefined, '待发内容')
+  eq(H.getState().drafts[A] ?? '', '', '乐观清空：send 同步清空草稿（不等响应）')
+  eq(await p, true, '乐观清空：这次发送成功')
+  // 证明 harness 真的生效：响应被推迟了 300ms，否则「同步清空」这条断言是空转的。
+  assert(Date.now() - t0 >= 250, `乐观清空：mock 的发送响应确实被推迟（got=${Date.now() - t0}ms）`)
+  eq(H.getState().drafts[A] ?? '', '', '乐观清空：成功后草稿仍为空')
+
+  // 失败：同步清空 → 响应回来把原文放回输入框（用户改完能直接再发）
+  H.getState().setDraft(A, '__fail__')
+  const pf = H.getState().send('__fail__', undefined, undefined, '__fail__')
+  eq(H.getState().drafts[A] ?? '', '', '乐观清空：失败场景同样同步清空')
+  eq(await pf, false, '乐观清空：__fail__ 发送失败')
+  eq(H.getState().drafts[A], '__fail__', '乐观清空：失败后原文回到输入框')
+
+  // 等待期间用户输入新内容：失败也绝不覆盖
+  H.getState().setDraft(A, '__fail__')
+  const pw = H.getState().send('__fail__', undefined, undefined, '__fail__')
+  H.getState().setDraft(A, '新内容')
+  eq(await pw, false, '乐观清空：第二条 __fail__ 失败')
+  eq(H.getState().drafts[A], '新内容', '乐观清空：等待期间的新输入不被失败恢复覆盖')
+
+  // 成功也不能抹掉等待期间的新输入（这正是旧代码 setDraft('') 的缺陷）
+  H.getState().setDraft(A, '第二条成功')
+  const ps = H.getState().send('第二条成功', undefined, undefined, '第二条成功')
+  H.getState().setDraft(A, '用户新打的字')
+  eq(await ps, true, '乐观清空：第二条成功')
+  eq(H.getState().drafts[A], '用户新打的字', '乐观清空：成功后不抹掉等待期间的新输入')
+
+  // 群：同一套语义（sendGroup 的第 6 个参数是草稿）
+  await H.getState().selectGroup('grp_mock1')
+  const G = H.getState().activeGroupId
+  eq(G, 'grp_mock1', '乐观清空：群打开')
+
+  H.getState().setGroupDraft(G, '群里的待发内容')
+  const pg = H.getState().sendGroup('群里的待发内容', [], false, undefined, undefined, '群里的待发内容')
+  eq(H.getState().groupDraftText[G] ?? '', '', '乐观清空：群发送同步清空草稿')
+  eq(await pg, true, '乐观清空：群发送成功')
+  eq(H.getState().groupDraftText[G] ?? '', '', '乐观清空：群发送成功后草稿仍为空')
+
+  H.getState().setGroupDraft(G, '__fail__')
+  const pgf = H.getState().sendGroup('__fail__', [], false, undefined, undefined, '__fail__')
+  eq(H.getState().groupDraftText[G] ?? '', '', '乐观清空：群失败场景同样同步清空')
+  eq(await pgf, false, '乐观清空：群 __fail__ 失败')
+  eq(H.getState().groupDraftText[G], '__fail__', '乐观清空：群失败后原文回到草稿')
+
+  H.getState().setGroupDraft(G, '__fail__')
+  const pgw = H.getState().sendGroup('__fail__', [], false, undefined, undefined, '__fail__')
+  H.getState().setGroupDraft(G, '群里新打的字')
+  eq(await pgw, false, '乐观清空：群第二条 __fail__ 失败')
+  eq(H.getState().groupDraftText[G], '群里新打的字', '乐观清空：群里等待期间的新输入不被覆盖')
+
+  if (lsDesc) Object.defineProperty(globalThis, 'localStorage', lsDesc)
+  else delete globalThis.localStorage
+}
+
 off()
 console.log(`\n✅ Hub 失败重试幂等 / fixture：${pass} 项全部通过`)

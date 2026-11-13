@@ -284,9 +284,10 @@ export default function GroupView({ group }: { group: HubGroup }) {
     const atts = attach.all
     // 第 6 个参数是拼 @path 之前的草稿：失败重试成功后据此清输入框（见 store.clearsDraft）。
     const ok = await send(text, mentions, mentionAll, undefined, atts.length > 0 ? atts : undefined, draft)
+    // 正文由 store 在发送那一刻乐观清空（失败按需放回），这里不再 setDraft('') / setCaret(0)：
+    // 响应回来时用户可能已经在输入新内容，无条件清空会把它抹掉（光标也一并归零）。
+    // 附件与焦点仍只在成功分支收尾（失败时留着附件，重试还能再发一次）。
     if (ok) {
-      setDraft('')
-      setCaret(0)
       attach.reset()
       requestAnimationFrame(() => textareaRef.current?.focus())
     }
