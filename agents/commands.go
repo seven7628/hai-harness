@@ -31,6 +31,7 @@ func (a *AgentLoop) injectCommands(ac *AgentContext, opts *RunOptions, msgs []co
 		}
 		// compact 的「同批是否有正文」必须在原始批次上算：命令之后的消息才是本批。
 		// 不能用 inputMark（Run 入口恒 0，历史正文会被误判成本批）。
+		// 「正文」只算 text/image 块（空块与引擎注入块不算，见 hasUserBody）。
 		if name, _ := parseCommand(m); name == "compact" {
 			ac.compactHasBody = hasUserBody(msgs[i+1:])
 		}

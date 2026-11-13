@@ -1152,7 +1152,11 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 		forced := ac.forceCompact
 		ac.forceCompact = false
 		// 同批 compact + 用户正文（session_send 的 command + text）：压缩后必须继续
-		// 跑一轮，否则正文虽被压缩器保留在 latestUser，却因 Stop 永远没有模型回答。
+		// 跑一轮，否则正文因 Stop 永远没有模型回答。
+		// 正文在压缩后还剩多少取决于压缩器（llm_compressor.Compact 的上游契约，
+		// 此处不改）：默认 LatestUserMaxTokens（8k 估算 token）以内由 latestUser
+		// 块逐字保留；超过上限则并入压缩输入，压缩后只剩摘要要点、原文不再保留。
+		// 两种情形都必须继续 —— 摘要 + 交接提醒足以接着回答，Stop 则连这一轮都没有。
 		// 纯 /compact（命令之后没有新用户内容）仍保持「独立操作」语义。
 		continueAfterCompact := forced && ac.compactHasBody
 		ac.compactHasBody = false
@@ -2118,6 +2122,40 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 	}
 }
 
+// hasUserBody 命令之后（原始批次的切片）是否还有真正的用户内容。
+// 用于区分「纯 /compact」与「compact + 正文」：前者压缩完就停，后者要继续回答。
+//
+// 不是所有非 text 块都是正文：引擎注入块（hub_task / hub_group_wake / mesh_from /
+// task_result）与命令/技能/摘要块（command / skill / summary）同样是「非 text」，
+// 但它们不是用户这一批说的话。按「非 text 即正文」判会把「/compact + 群唤醒」
+// 「/compact + 后台任务回推」误判成带正文 —— 压缩完白跑一轮模型（还可能凭空
+// 回答一条用户没说过的任务）。只有 text 与 image 算正文，与
+// session.collectUserContents 的「text/image 才是用户输入」同一口径，但更严：
+// 空 text 块（只有空白）与空 image 块（Content == ""）都不算。
+// 用白名单而非黑名单：将来新增的引擎块类型默认不算正文 —— 宁可少跑一轮
+// （用户再发一句即可），也不能替用户凭空开一轮模型调用。
+func hasUserBody(msgs []core.Message) bool {
+	for _, m := range msgs {
+		if m.Role != core.User || m.IsCommandMessage() {
+			continue
+		}
+		for _, c := range m.Content {
+			switch c.Type {
+			case core.ContentTypeText:
+				if strings.TrimSpace(c.Content) != "" {
+					return true
+				}
+			case core.ContentTypeImage:
+				// image-only（无 text 正文）也是用户输入：截图/图片提问必须继续本轮。
+				if strings.TrimSpace(c.Content) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // maybeCompact 每轮 LLM 调用前按预估 token 触发压缩（LLMStart 前检查点）。
 // 压缩结果替换上下文；压缩调用的用量计入运行结算（Usage/Cost），失败降级为不压缩。
 // forced = 强制压缩（命令框架：compact 命令），跳过 ShouldCompact 预估直接压缩；
@@ -2125,22 +2163,6 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 // 压缩成功后：todo 默认不清空（S1-F，会话级独立状态；WithTodoResetOnCompact=true
 // 时恢复旧语义：快照注入 + Clear + CompactTodoReminder）+ 注入统一交接提醒
 // （CompactHandoffReminder，含文件账本/任务状态段）。
-// hasUserBody 命令之后（原始批次的切片）是否还有非命令的用户内容。
-// 用于区分「纯 /compact」与「compact + 正文」：前者压缩完就停，后者要继续回答。
-func hasUserBody(msgs []core.Message) bool {
-	for _, m := range msgs {
-		if m.Role != core.User || m.IsCommandMessage() {
-			continue
-		}
-		for _, c := range m.Content {
-			if strings.TrimSpace(c.Content) != "" || c.Type != core.ContentTypeText {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool) {
 	if a.cfg.Compressor == nil {
 		return
