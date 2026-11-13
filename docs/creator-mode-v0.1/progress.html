@@ -1303,6 +1303,13 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   ],
   "risks": [
     {
+      "id": "R-20",
+      "level": "mid",
+      "title": "换插件新版本仍吃旧的挂载失败计数（禁用键只有 kind，没有 hash）",
+      "d": "PR-10 的 <code>localStorage['surface.disabled']</code> 按 <b>kind</b> 记连续失败与禁用态；02 原本写的「按 kind+hash」里那个 hash 这一轮拿不到（插件产物要等 PR-12 的 loader）。后果：插件作者发版修好了崩溃，用户那边仍然是「已自动禁用」，要手动点一次「重新启用」才会重新尝试。",
+      "a": "PR-12 的 <code>surface_install</code> 落地后把键改成 <code>kind@hash</code>，迁移策略：旧键视为「无 hash 版本」，首次遇到新 hash 时重置计数；在此之前把这条写进插件安装文档。"
+    },
+    {
       "id": "R-1",
       "level": "bad",
       "title": "/internal/ 被 .gitignore 排除",

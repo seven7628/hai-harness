@@ -665,7 +665,7 @@ export class SurfaceBoundary extends React.Component<Props, { err?: Error }> {
 
 `recordMountFailure` 连续 3 次 → `disableSurface(kind)`：写 `localStorage['surface.disabled']`，注册表在 `listSurfaces()` 里过滤（但保留墓碑展示）。
 
-> **实现偏差（R10，F64–F65）** —— 上面那段骨架能跑通的前提是「provider.render 的异常落在边界子树里」，
+> **实现偏差（R10，F64–F66）** —— 上面那段骨架能跑通的前提是「provider.render 的异常落在边界子树里」，
 > 而按 RightPanel 现有的写法（内联调用 `getSurface(kind)?.render(...)`）根本不成立。落地时改了四处：
 >
 > - **`SurfaceHost` 宿主组件**：`provider.render()` 是普通函数，在 RightPanel 自己的 render 期间调用 =
@@ -677,9 +677,13 @@ export class SurfaceBoundary extends React.Component<Props, { err?: Error }> {
 > - **失败计数不能做成「只崩第一次」的夹具**：React 18 在 dev 下会把出错的那次 render **再跑一遍**
 >   （收集组件栈），「第一次抛、第二次成功」的写法第二遍就成功了，崩溃根本不发生（F65）。探针改用
 >   显式闸门（`__probe.setBoom`）控制「这次崩 / 这次不崩」。
-> - **`key={tab.id}` 的代价要写进注释**：boundary 换 key ⇒ children 跟着重挂，R06c 那条「切 web 标签
->   时内容原地复用」不再成立（视图在主进程池里，重挂不重建 WebContentsView，但 DOM 确实重建一次）。
->   PR-11 若要拿回原地复用，得把「按标签重置错误态」从 key 换成 boundary 内部的一条显式 reset。
+> - **隔离不用 key，用 `tabId` prop 复位**（复评否决了第一版的 `key={tab.id}`）：key 一变 React 会把
+>   **整棵 children 重挂**，R06c 的「切 web 标签原地复用」（原生视图与页面状态靠 DOM 容器不重挂）
+>   当场破功。正确写法是 boundary 收 `tabId`，在 `componentDidUpdate(prevProps, prevState)` 里
+>   `if (prevProps.tabId !== props.tabId && prevState.err) setState({err:null})` —— 只清错误态，
+>   children 原地更新。判据必须是 **prevState.err**：切标签与「新标签在同一帧崩掉」是同一个
+>   commit，只看 `this.state.err` 会把刚崩出来的新错误当旧残留清掉 → 同一次崩溃记两笔（F66）。
+>   探针 T2b 钉住这条：同一 provider 组件的 `useState` 实例号在 a→b→a 之后必须不变。
 
 ### 2.10 Go 侧命令与 dispatch
 

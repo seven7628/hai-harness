@@ -302,10 +302,15 @@
 
 - **09**：`+N` 溢出下拉、右键 `关闭/其他/右侧/全部/固定`、`⌃⇥`、空态能力面板、中键关闭。
 - **10**：`SurfaceBoundary`（每面板 ErrorBoundary）、挂载失败计数（localStorage，按 kind+hash）、3 次自动禁用、墓碑标签（`unavailable`）。
-  - **落地偏差（R10，F64–F65）**：计数键只用 **kind**，不带 hash —— 派单给的记录结构是
+  - **落地偏差（R10，F64–F66）**：计数键只用 **kind**，不带 hash —— 派单给的记录结构是
     `kind/count/lastError/at/disabled`，而「provider 内容哈希」这一层现在拿不到（插件要等
-    PR-12 的 loader 才有可哈希的产物）。后果：**换了新版本的插件，旧的失败计数仍然压着它**，
-    要用户手动「重新启用」一次。hash 留给 PR-12 的 `surface_install` 一起收口。
+    PR-12 的 loader 才有可哈希的产物）。**已裁决：同意这个取舍，不造假 hash**，风险记为 **R-20**。
+    PR-12 把键改成 `kind@hash` 时的**迁移策略**：旧键一律视为「无 hash 版本」，首次遇到新 hash
+    就按新键重新计数（不删旧键，它只是不再被这条插件命中）；在此之前把「发版后可能要手动
+    重新启用一次」写进插件安装文档。
+  - **复评推翻的两处**（三轮改动都在同一分支上，见 04 F66）：① 隔离**不用** `key={tab.id}`
+    （会重挂 children、破坏 R06c 的原地复用），改成 boundary 内 `tabId` 变化时复位错误态；
+    ② 墓碑的「移除标签」不用 `closeTabNow`（会静默丢未保存内容），改 `closeTabs([id])`。
 - **11**：删 `TAB_KINDS`、`makeTab` 的 kind switch、`kindIcon/kindLabel` 的 switch、`rightTab` 字段本身（如果 e2e 已全部迁移）。**判据：`grep -c "kind === '" RightPanel.tsx` = 0，`grep -rn "rightTab" desktop/app/src` 只剩兼容注释。**
 
 ---
