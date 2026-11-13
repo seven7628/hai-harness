@@ -25,36 +25,26 @@
 // 用法：cd desktop/app && node e2e/verify_md_file_modes.mjs
 // （用真实 RightPanel 的 FilePreviewTab 语义烘一个临时探针页 + 真实 index.css，
 //   跑完自动删除；不依赖 npm run build）
-// 退出码：全通过 0；任一断言失败非 0。
+// 退出码：全通过 0；断言失败 1；**前置不满足 2**（探针页起不来/端口被占 —— 不是代码坏了）。
+// 入链史：R08b 之前它是「裸奔」的（不在 npm test 里），而 R08a 的真回归正是它抓到的
+//（滚动位置恢复 140→0）；入链前先把就绪判据换成 _serve.mjs 的 waitProbePage（端口归属自检）。
 import { chromium } from 'playwright'
 import { spawn } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import net from 'net'
+import { freePort, isPrecondition, waitProbePage } from './_serve.mjs'
 import fs from 'fs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
-const PORT = Number(process.env.PORT || 4187)
+// 端口由内核分配（见 e2e/_serve.mjs 的注释）：固定端口在链里会撞上一个还没退干净的
+// 服务器（F46 的 5199 事故），而 waitPort 只会证明「有人在听」，证明不了「那是我们的页面」。
+const PORT = await freePort()
 
 let pass = 0
 const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
 const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); ok(m) }
 
-async function waitPort(port, timeoutMs = 25000) {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const up = await new Promise((resolve) => {
-      const s = net.connect({ port, host: 'localhost' })
-      const timer = setTimeout(() => { s.destroy(); resolve(false) }, 500)
-      s.on('connect', () => { clearTimeout(timer); s.destroy(); resolve(true) })
-      s.on('error', () => { clearTimeout(timer); resolve(false) })
-    })
-    if (up) return
-    if (Date.now() > deadline) throw new Error('vite 未就绪')
-    await new Promise((r) => setTimeout(r, 250))
-  }
-}
 
 const PROBE_DIR = path.join(__dirname, '_mdfileprobe_run')
 fs.mkdirSync(PROBE_DIR, { recursive: true })
@@ -101,6 +91,7 @@ const APP = path.resolve(__dirname, '../..')
 export default defineConfig({ root: APP, plugins: [react()], server: { fs: { allow: [APP] } } })
 `)
 
+const PROBE_MARKER = '<title>md file modes probe</title>'
 const PROBE_URL = `http://localhost:${PORT}/e2e/_mdfileprobe_run/index.html`
 const server = spawn('node', [path.join(APP, 'node_modules', 'vite', 'bin', 'vite.js'), '--port', String(PORT), '--strictPort', '--config', path.join(PROBE_DIR, 'vite.config.mts')], { cwd: APP, stdio: 'pipe' })
 const cleanup = () => {
@@ -200,7 +191,7 @@ const clickDetailTab = (page, label) => page.evaluate((lb) => {
 }, label)
 
 async function main() {
-  await waitPort(PORT)
+  await waitProbePage(PROBE_URL, { marker: PROBE_MARKER, probe: 'e2e:md-file-modes', child: server, timeoutMs: 120000 })
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
   const errs = []
@@ -527,7 +518,12 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error('\n❌ ' + e.message)
   cleanup()
+  if (isPrecondition(e)) {
+    // 前置不满足 ≠ 断言失败（00 §4.6 / 04 F46）：退出码 2
+    console.error(`\n⛔ 前置不满足（退出码 2，不是测试失败）：${e.message}`)
+    process.exit(2)
+  }
+  console.error('\n❌ ' + e.message)
   process.exit(1)
 })

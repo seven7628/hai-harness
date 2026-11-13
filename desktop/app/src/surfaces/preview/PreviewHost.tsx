@@ -5,7 +5,7 @@
 //   · 命中但依赖缺失 / 模块加载失败 → `data-renderer="unavailable"` + data-reason
 //   · 无人命中（含二进制无渲染器）→ `data-renderer="unavailable"` + data-reason
 // 「不许白屏」是硬要求：每一条失败路径都必须有**写明原因**的占位（00 §4.3 空态有引导）。
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { ComponentType } from 'react'
 import { useT } from '../../i18n'
 import { cachedRenderer, loadRenderer } from './loader'
@@ -24,6 +24,8 @@ export interface PreviewHostProps {
 }
 
 type Loaded = { id: string; C?: ComponentType<PreviewProps>; error?: string }
+/** 渲染器自己上报的「接不了」（R08b，见 types.PreviewProps.onUnavailable）。 */
+type Reported = { id: string; reason: string }
 
 export function PreviewHost({ file, content = '', html, only }: PreviewHostProps) {
   const t = useT()
@@ -38,6 +40,12 @@ export function PreviewHost({ file, content = '', html, only }: PreviewHostProps
     const C = id ? cachedRenderer(id) : undefined
     return id && C ? { id, C } : undefined
   })
+  // 渲染器上报的失败（转换失败/内嵌视图建不起来）。key 带 id：换渲染器时旧上报自动失效，
+  // 不必在 effect 里清（清了反而会多一次渲染）。
+  const [reported, setReported] = useState<Reported | undefined>(undefined)
+  const onUnavailable = useCallback((reason: string) => {
+    setReported((prev) => (id && prev?.id === id && prev.reason === reason ? prev : { id: id ?? '', reason }))
+  }, [id])
 
   useEffect(() => {
     if (!id) return
@@ -61,11 +69,14 @@ export function PreviewHost({ file, content = '', html, only }: PreviewHostProps
   const depReason = missingDependencyReason(picked)
   if (depReason) return <Unavailable id={picked.id} reason={depReason} />
   if (loaded?.id === picked.id && loaded.error) return <Unavailable id={picked.id} reason={loaded.error} />
+  // 渲染器上报的失败：整块换成 unavailable（不是把占位塞进渲染器自己的容器里）——
+  // data-renderer 只有宿主这一个写者，同屏两个标识会让探针与看板都得猜哪个算数。
+  if (reported?.id === picked.id) return <Unavailable id={picked.id} reason={reported.reason} />
 
   const C = loaded?.id === picked.id ? loaded.C : undefined
   return (
     <div className="preview-host" data-renderer={picked.id} data-state={C ? 'ready' : 'loading'}>
-      {C ? <C file={file} content={content} html={html} /> : null}
+      {C ? <C file={file} content={content} html={html} onUnavailable={onUnavailable} /> : null}
     </div>
   )
 }

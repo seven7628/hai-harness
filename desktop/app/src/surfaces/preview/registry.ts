@@ -16,13 +16,17 @@ import type {
 } from './types'
 
 /**
- * 已知依赖名册 → 默认状态。R08a 里两个都**没装**（转换服务是 R08b、媒体协议是 R08c），
- * 但名册先立起来：requires 写错名字必须在注册那一刻就炸，而不是上线后静默不可用。
+ * 已知依赖名册 → 默认状态。requires 写错名字必须在注册那一刻就炸，而不是上线后静默不可用。
+ *
+ * 默认值一律「不可用」：渲染器先别抢（抢了就得在面板里现编一句「不知道」），由 deps.ts 在
+ * 启动时用真环境覆盖（`detectPreviewDeps`）。这个方向与「依赖没探测到就当成有」相比只错一次：
+ * 漏探测 = 显示写明原因的占位；反过来的错是**白屏**。
  */
-const KNOWN_DEPS: PreviewDependency[] = ['conversion', 'media']
+const KNOWN_DEPS: PreviewDependency[] = ['conversion', 'media', 'embed']
 const DEFAULT_DEPS: Array<[PreviewDependency, DependencyStatus]> = [
-  ['conversion', { ok: false, reason: '转换服务未安装（docx/pptx/xlsx 预览不可用）' }],
+  ['conversion', { ok: false, reason: '转换服务状态未知（docx/pptx/xlsx 预览不可用）' }],
   ['media', { ok: false, reason: '媒体协议未接（音视频预览不可用）' }],
+  ['embed', { ok: false, reason: '内嵌浏览器视图状态未知（pdf 预览不可用）' }],
 ]
 
 /** 注册顺序 = 候选顺序：数组而不是 Map，同 weight 的先后**显式**可读（不依赖实现细节）。 */

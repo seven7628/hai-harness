@@ -69,6 +69,18 @@ export function resolveLocalAssetPath(src: string, baseDir?: string | null): str
   return fold(`${base}/${p}`)
 }
 
+/**
+ * 绝对路径 → file:// URL（逐段 encodeURIComponent）。
+ *
+ * R08b 从 store.openInBrowserTab 抄出这一份：pdf 预览面板要自己建视图（那条路不经过 store），
+ * 而 URL 的编码口径**必须逐字一致** —— 中文目录/空格文件名两边编出不同字符串，主进程的去重
+ * 与「同一个文件只开一条视图」就都失效了（实测 e2e:pdf 的夹具就是中文名）。
+ * 口径与 electron/embed.ts 的 file:// 导航、main.go 的 file:// 预览同源。
+ */
+export function fileUrlOf(abs: string): string {
+  return 'file://' + String(abs ?? '').split('/').map((seg) => encodeURIComponent(seg)).join('/')
+}
+
 /** 目录部分（POSIX 字符串处理，渲染进程没有 node:path）：'/a/b/c.md' → '/a/b'，'c.md' → ''。 */
 export function dirOf(p: string | undefined): string {
   const n = String(p ?? '').replaceAll('\\', '/').replace(/\/+$/, '')

@@ -55,9 +55,11 @@ test('字段缺失/非法：id / match / load / weight 一律注册即抛', () =
   assert.equal(listRenderers().length, 0, '校验失败不能留下半注册的条目')
 })
 
-test('依赖名册：已知依赖可注册，拼错的依赖名注册即抛', () => {
+test('依赖名册：已知依赖可注册（conversion / media / embed），拼错的依赖名注册即抛', () => {
   registerRenderer(make({ id: 'docx', requires: ['conversion'] }))
   assert.deepEqual(getRenderer('docx')?.requires, ['conversion'])
+  registerRenderer(make({ id: 'pdf', requires: ['embed'] }))
+  assert.deepEqual(getRenderer('pdf')?.requires, ['embed'])
   assert.throws(() => registerRenderer(make({ id: 'docx2', requires: ['conversoin' as never] })), /未知依赖：conversoin/)
   assert.throws(() => registerRenderer(make({ id: 'x', requires: 'conversion' as never })), /必须是数组/)
 })
@@ -109,10 +111,11 @@ test('依赖不可用：missingDependencyReason 给出**写明原因**的落点�
   const picked = pickRenderer(fx('a.docx'))
   assert.ok(picked, '依赖不可用 ≠ 选不到：选得到，落点是 unavailable 占位')
   const reason = missingDependencyReason(picked!)
-  assert.ok(reason && /转换服务未安装/.test(reason), `原因要写清楚，实际：${reason}`)
-  // 默认状态：R08a 里两个依赖都没装
+  assert.ok(reason && /状态未知/.test(reason), `原因要写清楚，实际：${reason}`)
+  // 默认状态：探测还没跑之前，三个依赖一律「不可用」（漏探测 = 写明原因的占位，而不是白屏）
   assert.equal(dependencyStatus('conversion')?.ok, false)
   assert.equal(dependencyStatus('media')?.ok, false)
+  assert.equal(dependencyStatus('embed')?.ok, false)
   setDependencyStatus('conversion', { ok: true })
   assert.equal(missingDependencyReason(picked!), undefined)
   setDependencyStatus('conversion', { ok: false, reason: '这次真的没装' })
@@ -132,4 +135,35 @@ test('fileRefOf：ext 与 lib/visualFile.extOf 同口径（唯一扩展名事实
   assert.equal(fileRefOf('.gitignore').ext, '')
   assert.equal(fileRefOf('Makefile').ext, '')
   assert.deepEqual(fileRefOf('x.png', 5, true), { path: 'x.png', ext: 'png', size: 5, binary: true })
+})
+
+// —— R08b：依赖探测（deps.ts）——
+// 探测是纯函数（入参就是一坨能力面），所以能和注册表一样脱离浏览器单测。
+test('detectPreviewDeps：能力面齐全 → ok；缺一个方法 → 不可用且原因点到具体缺什么', async () => {
+  const { detectPreviewDeps, dependencyReason } = await import('./deps')
+  const full = {
+    watchDocx: () => undefined, watchPptx: () => undefined, watchXlsx: () => undefined,
+    embedOpenTarget: () => undefined, embedShow: () => undefined,
+  }
+  detectPreviewDeps(full)
+  assert.equal(dependencyStatus('conversion')?.ok, true)
+  assert.equal(dependencyStatus('embed')?.ok, true)
+
+  // 浏览器预览模式（没有 window.desktop）：两条依赖都不可用，理由必须**分别**点到通道
+  detectPreviewDeps(undefined)
+  const conv = dependencyStatus('conversion')
+  const embed = dependencyStatus('embed')
+  assert.equal(conv?.ok, false)
+  assert.equal(embed?.ok, false)
+  const convReason = conv && !conv.ok ? conv.reason : ''
+  const embedReason = embed && !embed.ok ? embed.reason : ''
+  assert.match(convReason, /watchDocx|转换通道/, '转换缺失要说清缺哪条 IPC')
+  assert.match(embedReason, /WebContentsView|内嵌浏览器视图/, 'pdf 缺失要说清 Chromium viewer 在哪')
+  assert.notEqual(convReason, embedReason, '两种缺失不能共用一句笼统文案')
+  assert.equal(convReason, dependencyReason('conversion'), '理由只有一个来源（deps.ts）')
+
+  // 老桌面端：有 embed 但没转换 IPC → 只缺转换
+  detectPreviewDeps({ embedOpenTarget: () => undefined, embedShow: () => undefined })
+  assert.equal(dependencyStatus('conversion')?.ok, false)
+  assert.equal(dependencyStatus('embed')?.ok, true)
 })

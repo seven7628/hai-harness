@@ -18,32 +18,14 @@
 // `rightExpanded && activeTab.kind === 'web'` 时挂载，收起右栏即卸载。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useT } from '../i18n'
-import { centerOf, overlayCoversRect, rectsIntersect } from '../lib/overlayHit'
+import { embedRectOf } from '../lib/embedRect'
+import { useDomOverlayOpen, useUiModalOpen } from '../lib/uiOverlay'
 import { useAppStore } from '../store/useAppStore'
 import type { WebTabInstance } from '../store/useAppStore'
 import type { SurfaceRenderContext } from '../surfaces/types'
 
-// embedRectOf：把一个 DOM 容器量成「给原生视图用的矩形」；**量不出来返回 undefined**。
-//
-// 为什么不返回一个钳过的最小矩形（2026-09-21 用户报障的根因）：
-//   收起右栏时 WebTab 卸载，而 ResizeObserver 对**已脱离文档**的元素还会补发一次
-//   「尺寸 0」的通知 → 量到 0×0。旧实现在这里钳成 `Math.max(80, …)`，于是这次「量不到」被
-//   当成「容器只有 80×80」下发：`embed:resize` 把**所有**原生视图缩到 80×80，而
-//   `Emulation.setDeviceMetricsOverride` 更狠 —— 它把面板里**正显示的那一页**的排版视口钉死在
-//   80×80（页面按 80px 宽排版：内容只剩左上角一小块、页面底色铺满整块面板）。而且它**不会自愈**：
-//   同尺寸下切换标签不重挂载组件、ResizeObserver 也不再触发 → 那一页的视口留着错的（用户原话
-//   「图片、网页等无法正常加载」，刷新也救不回来）。
-//   正确的处置是「量不到就什么都不下发」：隐藏路径本就有 embedHide 兜底；主进程对 show 收到
-//   非法/缺失 rect 时也有右侧栏默认区域兜底（见 electron/embed.ts 的 isValidEmbedRect）。
-function embedRectOf(el: Element | null): { x: number; y: number; width: number; height: number } | undefined {
-  if (!el || !el.isConnected) return undefined
-  const r = el.getBoundingClientRect()
-  const width = Math.round(r.width)
-  const height = Math.round(r.height)
-  if (width < 1 || height < 1) return undefined
-  return { x: Math.round(r.x), y: Math.round(r.y), width, height }
-}
-
+// embedRectOf 已提到 lib/embedRect.ts（R08b：pdf 预览面板也要驱动同一个原生视图）。
+// 那段注释解释了为什么「量不到」必须返回 undefined 而不是钳成 80×80 —— 看它，别在这里重写。
 export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
   const t = useT()
   // —— R06c：原先由 RightPanel 传入的四样东西，各归其位（取值不变）——
@@ -75,13 +57,8 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
   const attachEmbedView = useAppStore((s) => s.attachEmbedView)
   // 全屏 DOM 弹窗状态：打开期间必须隐藏原生内嵌视图——WebContentsView 恒合成在窗口
   // DOM 之上（原生层级 > DOM），不隐藏会盖住设置/提问等弹窗（CSS z-index 压不住）。
-  const inSettings = useAppStore((s) => s.inSettings)
-  const inSkills = useAppStore((s) => s.inSkills)
-  const inCron = useAppStore((s) => s.inCron)
-  const showNewWsModal = useAppStore((s) => s.showNewWsModal)
-  const askQuestion = useAppStore((s) => s.questions.length > 0)
-  const askRelease = useAppStore((s) => s.release)
-  const uiModalOpen = inSettings || inSkills || inCron || showNewWsModal || askQuestion || !!askRelease
+  // R08b：名单搬到 lib/uiOverlay.ts（pdf 预览面板驱动同一个原生视图，闸门必须只有一份）。
+  const uiModalOpen = useUiModalOpen()
 
   // —— M5/M6：工具条 / AI 动作可视化 / 回退可见化 状态（embed 事件由 store 层全局订阅）——
   const nav = useAppStore((s) => s.embedNav)
@@ -272,52 +249,10 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nativeViewMode, retryNonce, panelVisible])
 
-  // 通用「覆盖层」检测（2026-09-20 修用户报的缺陷）：上面那份 uiModalOpen 名单是**手维护**的，
-  // 新增弹窗必漏 —— Composer 的「压缩上下文？」确认弹窗（CompactConfirm，`.modal-hint`）就不在
-  // 名单里。而 `.modal-hint` 是 `position:fixed; inset:0` + 居中 → 弹窗按**整个窗口**居中（卡片
-  // 360px / compact-card 420px），窗口 1440 宽时右栏从 x=552 起 → 弹窗横跨 510~930，**右半整段
-  // 压在右栏上**，被原生预览画面盖住（用户截图：文字被切、按钮被压）。
-  // 故这里改成按 DOM 判定：任何高层级覆盖层只要与右栏矩形**相交**就隐藏视图。名单保留作兜底
-  //（覆盖层是 fixed 定位、右栏尚未挂载等边界情况仍靠它）。
-  const [domOverlayOpen, setDomOverlayOpen] = useState(false)
-  useEffect(() => {
-    if (!nativeViewMode) return
-    // 全屏弹窗（.modal-hint / .settings-overlay / .img-zoom）+ 光标处浮层（.ctx-menu / .sel-popup /
-    // .settings-pop）：后者只有真的压在右栏上时才隐藏 —— 在中栏弹出的右键菜单不该让右栏黑一下。
-    const SEL = '.modal-hint.open, .settings-overlay, .img-zoom, .rt-lb, .cy-lb, .ctx-menu, .sel-popup, .settings-pop'
-    // 名单之外再问一句 DOM：右栏矩形**中点**上最顶层的元素是不是还在右栏里（判据与测试
-    // 见 lib/overlayHit.ts）。原生视图不参与 DOM 命中测试，所以「中点被别的元素占住」
-    // 只可能是 DOM 覆盖层压在它上面 —— 包括以后新加、名字还没进名单的那些。
-    // 用户 2026-10 报的正是漏掉的那一类：先开右栏的 HTML 预览、再点开聊天里的大图，
-    // 大图（`.rt-lb`，fixed inset:0）整个躲在原生预览画面后面。
-    const compute = () => {
-      const hostRect = shotRef.current?.getBoundingClientRect()
-      const host = shotRef.current
-      const pt = centerOf(hostRect ?? undefined, { width: window.innerWidth, height: window.innerHeight })
-      let hit = !!host && overlayCoversRect(
-        hostRect ?? undefined,
-        pt ? document.elementsFromPoint(pt.x, pt.y) : [],
-        { contains: (el) => host.contains(el as Node), positionOf: (el) => getComputedStyle(el as Element).position, viewport: { width: window.innerWidth, height: window.innerHeight } },
-      )
-      for (const el of document.querySelectorAll(SEL)) {
-        const r = el.getBoundingClientRect()
-        if (r.width < 1 || r.height < 1) continue
-        if (rectsIntersect(hostRect ?? undefined, r)) { hit = true; break }
-      }
-      // 同值不 set（MutationObserver 每次 class 变动都会走到这里，避免无谓重渲染）
-      setDomOverlayOpen((prev) => (prev === hit ? prev : hit))
-    }
-    compute()
-    // 节流 120ms（**不是防抖**）：聊天流式输出时 DOM 每秒变化几十次，防抖会让定时器永远被重置、
-    // 检测永不触发；节流保证「一定会跑」，同时把最坏开销从 60 次/秒压到 ~8 次/秒。
-    // 120ms 的延迟不可感知（弹窗自身入场动画 180ms）。无覆盖层时循环体不执行 → 不做布局读取。
-    let timer = 0
-    const mo = new MutationObserver(() => {
-      if (!timer) timer = window.setTimeout(() => { timer = 0; compute() }, 120)
-    })
-    mo.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class', 'style'], childList: true })
-    return () => { mo.disconnect(); if (timer) window.clearTimeout(timer) }
-  }, [nativeViewMode])
+  // 通用「覆盖层」检测（2026-09-20 修用户报的缺陷）：名单 + DOM 判定，R08b 搬到
+  // lib/uiOverlay.ts（pdf 预览面板也要同一道闸门）。语义与平移前逐字一致：
+  // 名单命中的全屏弹窗/光标浮层，或宿主矩形中点被非宿主元素占住 → 隐藏原生视图。
+  const domOverlayOpen = useDomOverlayOpen(shotRef, nativeViewMode)
 
   // 内嵌视图可见性：随页面数切换——有页面（正在浏览）显示，空闲隐藏（避免空白 about:blank 白框）；
   // 全屏弹窗（设置/提问等）与**面板级下拉菜单**打开期间强制隐藏：原生视图恒合成在窗口 DOM 之上

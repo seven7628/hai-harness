@@ -11,6 +11,7 @@ import {
   ChevronDown,
   ChevronRight,
   CopyIcon,
+  EyeIcon,
   FileIcon,
   FilePlusIcon,
   FolderIcon,
@@ -80,6 +81,7 @@ export default function WorkspaceFiles({ onBack }: { onBack: () => void }) {
   // PR-05b 入口②：文件树的「编辑」。开关关掉时这一项**不渲染**（回滚 = 界面上没这条）。
   const editorOn = useAppStore((s) => isEditorEnabled(s.settings))
   const openFileForEdit = useAppStore((s) => s.openFileForEdit)
+  const openPreviewTab = useAppStore((s) => s.openPreviewTab)
   // 选中行 = 「文件面板当前定位的文件」。阶段 2 起内容按标签隔离（filePreviews），
   // 但「最后定位的文件」仍是 fileFocus 的语义（原 filePreview.path 与它同值：都由同一次
   // locateFile 写入）→ 换成 fileFocus.path，行为不变。
@@ -1304,6 +1306,26 @@ export default function WorkspaceFiles({ onBack }: { onBack: () => void }) {
                   工作簿编辑不了（binary 的最终判定在 file_open，这里只是别给一个必然失败的动作）。
                   位置刻意在「重命名」之后：菜单前两项（打开 / 新建文件夹）的顺序被
                   e2e/verify_left_files_batch.mjs 的键盘用例钉住，插在前面会改变 Tab/↑↓ 顺序。 */}
+              {/* 「预览」（R08b）：**显式**进预览标签 —— 同一个文件在注册表那套渲染器里长什么样，
+                  与「打开」的默认通道（可视类落内嵌浏览器 web 标签，D-I 口径不变）是两回事。
+                  位置在「编辑」之后：菜单前两项（打开 / 新建文件夹）的顺序被
+                  e2e/verify_left_files_batch.mjs 的键盘用例钉住，插在前面会改 ↑↓ 顺序。
+                  所有非目录文件都给这一项（含 .zip 这类没有渲染器的）：落点会写明「没有能渲染
+                  .zip 的渲染器」并给路径，比在菜单里按扩展名猜「能不能预览」更诚实。 */}
+              {!menu.entry.isDir && (
+                <button
+                  className="ctx-item"
+                  role="menuitem"
+                  data-preview="1"
+                  onClick={() => {
+                    const entry = menu.entry!
+                    setMenu(null)
+                    openPreviewTab(entry.path)
+                  }}
+                >
+                  <EyeIcon size={13} /> {t('files.preview')}
+                </button>
+              )}
               {editorOn && !menu.entry.isDir && isTextLikePath(menu.entry.path) && (
                 <button
                   className="ctx-item"
