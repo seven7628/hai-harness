@@ -215,8 +215,10 @@ func TestConversationManualResetLiftsWaitingHuman(t *testing.T) {
 		t.Fatalf("status = %q, want waiting_human", v.Status)
 	}
 	v := c.Reset("group_1", clk.Now())
-	if v.Status != ConversationIdle || len(v.PairCount) != 0 || v.QueueLen != 0 || v.StopReason != "" {
-		t.Fatalf("手动重置后 = %+v, want idle/清零", v)
+	// P6-05：手动重置和「人类新输入 / 空闲 30 分钟」一样，必须把 depth 也清零 ——
+	// 否则重置后第一条 @ 会带着旧链的深度（新链第一条就被判 depth_limit）。
+	if v.Status != ConversationIdle || len(v.PairCount) != 0 || v.QueueLen != 0 || v.StopReason != "" || v.Depth != 0 || v.TurnsUsed != 0 {
+		t.Fatalf("手动重置后 = %+v, want idle/清零（含 depth/turns）", v)
 	}
 	// 重置之后同一对立刻能再 @（不自动唤醒，但下一次 @ 立即生效）。
 	wakes, err := c.Offer(ConversationOffer{
