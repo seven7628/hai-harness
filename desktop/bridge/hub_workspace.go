@@ -475,14 +475,22 @@ func (o *hubWorkspaceOps) CommandSession(ctx context.Context, req agenthub.Comma
 //
 // 为什么要图片也在这里读一遍：格式/单边/体积闸门只有读了文件才知道。留到派发时
 // 才发现「第 3 张图超限」会先建出一条 failed 任务并占住 client_msg_id 去重表。
+//
+// workspace 来自模型 JSON（session_send），必须先过与 Dispatch 同一道登记检查：
+// hubPrepareAttachments 会把 workspace 加进附件白名单根，未登记路径（尤其 "/"）
+// 等于允许按任意根读盘；图片还会被整份读入/解码（存在/大小/类型 oracle + DoS）。
 func (o *hubWorkspaceOps) CheckAttachments(ctx context.Context, req agenthub.AttachmentReq) ([]agenthub.AttachmentInfo, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path, err := o.knownWorkspace(req.Workspace)
+	if err != nil {
 		return nil, err
 	}
 	if len(req.Files) == 0 && len(req.Images) == 0 {
 		return nil, nil
 	}
-	prep, err := o.hubPrepareAttachments(req.AgentID, req.Workspace, hubCleanPaths(req.Files), hubCleanPaths(req.Images))
+	prep, err := o.hubPrepareAttachments(req.AgentID, path, hubCleanPaths(req.Files), hubCleanPaths(req.Images))
 	if err != nil {
 		return nil, err
 	}
