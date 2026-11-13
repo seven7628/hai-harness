@@ -192,7 +192,7 @@
 | P6-12 | done | group-surface | 715a28c | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-13 | done | group-ui | 15e4d34 | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
 | P6-14 | done | group-ui | f62aa98 | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
-| P6-15 | todo | main | — | — |
+| P6-15 | in_progress | main | — | 最终全量回归中 |
 | P6-16 | done | group-surface | 3bd3439 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-17 | done | group-surface | 1744204 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 

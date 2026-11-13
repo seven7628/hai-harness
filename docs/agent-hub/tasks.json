@@ -2181,7 +2181,8 @@
       ],
       "acceptance": "Go/TS/browser/真实 Hub E2E 全绿；独立 Review PASS；看板/文档同步；worktree 清理。",
       "tests": "go test ./...；npm run test:p4；浏览器关键脚本；真实 provider E2E",
-      "commit": "test(hub-p6-15): 群聊硬化最终回归"
+      "commit": "test(hub-p6-15): 群聊硬化最终回归",
+      "status": "in_progress"
     },
     {
       "id": "P6-16",
@@ -3341,6 +3342,10 @@
     "P6-14": {
       "status": "in_progress",
       "commit": "fix(hub-p6-14): 统一会话区色板与群状态条"
+    },
+    "P6-15": {
+      "status": "in_progress",
+      "commit": "test(hub-p6-15): 群聊硬化最终回归"
     }
   },
   "reviewGate": {
