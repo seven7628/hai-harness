@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 12:20",
-    "current": "R14"
+    "updated": "2026-11-13 18:40",
+    "current": "R14b"
   },
   "rounds": [
     {
@@ -1009,24 +1009,31 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     {
       "id": "R14",
       "pr": "PR-14",
-      "title": "常驻工具接线 + hai-surface-dev skill + 模板 + 插件页（无 mode）",
+      "title": "插件执行侧：渲染层 loader + hai-surface:// 协议 + host 只读命令白名单 + 开关 + skill/模板（无 mode）",
       "type": "新增",
       "est": 1.5,
       "deps": [
         "R13"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "d5756cf+c437e2d+74bed1f",
+      "review": "测试与实现**分开提交**（d5756cf 测试 / c437e2d 实现 / 74bed1f 素材），但两者同批完成 —— red→green 的真凭据是两条：①e2e 首跑就是红的（20 条断言失败，根因是普通 Chromium 里没有 hai-surface:// 协议实现，import 全部 Failed to fetch）→ 改成可注入 base URL（只换字节来源、保留 store→loader 接线）后转绿；②四条变异各真红一次再复原（协议去 `..`、白名单改「有 manifest 就放行」、loader 不校验 kind、开关 false 仍注册）。门禁：go vet 全绿 / TestSurface* 34 + TestUI* 15（-run 过滤后 50 条 PASS）/ tools/builtin/codemode 全绿 / tsc 0 / eslint 0 error / vite build / e2e tabbar 89·boundary 82·ui-snapshot 31·session-tabs 38·plugin-loader 50。裁决：①只读白名单恰好四条（git_snapshot/workspace_list/session_list/ui_inspect），写类一律不开；②enabled:false → 协议 404 + 命令 denied（能力随禁用一起消失，两处共用 surfaceStore.Enabled）；③加载失败进 ui_inspect 的 surfaces[]（disabled:true+error），不进 health 三连计数；④features.surfaceTools 缺省 false（常驻 schema 成本）；⑤host.command 回 {ok:false,reason} 不抛",
       "perf": [
         "P15"
       ],
       "acc": [
-        "工具描述 ≤120 字 / 参数 ≤3",
-        "skill requires.tools 生效",
-        "token 增量 ≤ 900"
+        "协议：.. / 绝对 / NUL / 反斜杠 / 尾斜杠 / 扩展名 / 非法 id / 未启用 / 软链逃逸 —— 各一条单测，且响应体不含目标内容",
+        "协议只服务 enabled 的插件；no-store + 按扩展名的 Content-Type；纯函数判定，不启动 Electron",
+        "索引 IPC {version,items[id,version,hash,enabled,kind,commands,data,entry,icon?,error?]}；坏 manifest 带 error 跳过、不影响其它项",
+        "loader：import(`?v=<hash>`) 真求值；kind 必须 = plugin:<id>（manifest 与模块各判一次）；apply 抛错回滚已注册 provider；单插件失败只黑自己",
+        "卸载 → provider 注销 + host 订阅清理 + 标签变墓碑（PR-10）；hash 变才重新 import",
+        "host.command：manifest.commands ∩ 宿主只读表；未声明/未允许/未知 id/超时一律拒绝，audit.jsonl 每调用一行（成功也记）",
+        "settings.features.surfaceTools=false → 三个 surface_* 工具不在引擎里；ui_inspect 无条件保留",
+        "templates/surface 真能被安装器装上（already_installed 幂等）；skill requires.tools 双向生效；panel.js 无 JSX / 无裸模块 import",
+        "T10 真模板端到端：templates/surface 的 manifest 派生索引项 → loader 注册 → RightPanel 渲染出「成本看板 / 工作区 1 个」（数据来自 host.command）",
+        "门禁：go vet / 定向 go test / codemode / tsc / eslint / vite build / 5 个 e2e 全绿"
       ],
-      "rollback": "关 settings.features.surfaceTools"
+      "rollback": "关 settings.features.surfaceTools（工具面消失）；协议与 loader 是纯新增，删文件即回滚"
     },
     {
       "id": "R14b",

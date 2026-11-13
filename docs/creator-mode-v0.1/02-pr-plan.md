@@ -387,6 +387,32 @@
 
 ---
 
+### PR-14 落地（R14）—— 与上面条款的口径差
+
+R14 只做**执行侧**（loader / 协议 / 索引 IPC / 白名单审计 / 开关 / 模板 / skill），
+PluginsPage 拆到 R14b。逐条记下与 01/03 的差，下一轮别按老写法改回去：
+
+| 项 | 计划里的写法 | 落地 | 为什么 |
+|---|---|---|---|
+| `host.command` 失败 | `throw new Error('命令未在 manifest.commands 中声明')`（03 §3.6） | 回 `{ok:false, reason:"denied"}`，**永不抛** | 插件在 `render`/`useEffect` 里 await 它，一次未捕获拒绝 = 整棵子树卸载（崩溃卡只接同步 throw）→ 症状是面板白着、墓碑不出现。越权是**可编程状态**（与 PR-13 的 `status:"rejected"` 同口径） |
+| `HostApi.Icon` / `useSession` | 必填 | **可选**，本轮不注入 | 没有可动态寻址的图标库、store 里也没有 `SessionProjection`。先给假实现，插件作者会按假的写，之后改不动 |
+| 协议通道 | 计划未指定 | `hai-surface://<id>/<path>`（比照 `hai-media` 的判定纪律） | `file://` 在 dist 不可用且不安全；字符串 + eval 绕开 ESM 边界；自定义协议同时给出「可 import / 有 `<id>` 身份 / 字节只来自该目录」 |
+| `enabled:false` 的插件 | 未写 | 协议 **404**、`surface_command` **denied** | 禁用就是「能力消失」。灰掉但字节照给 = 权限变装饰；两处共用 `surfaceStore.Enabled` 一个判据 |
+| 索引条目 | `{id,version,hash,enabled,kind,commands,icon?}` | 多 `data`（声明订阅的 op）、`entry`（PR-13 允许 `dist/panel.js`）、`error`（坏 manifest） | 少了 `entry` 就会对「改了入口名的合法插件」404；少了 `data` 就没法在 `host.events.on` 上做闸门；`error` 让「装坏了」在 `ui_inspect` 里与「没装」可分 |
+| 加载失败 | 「墓碑 + disabledReason」 | 进 `ui_inspect` 的 `surfaces[]`（`disabled:true` + `error`）+ `surface_status` 上报 + console.warn | 失败插件**没有 provider**，health 的三连计数挂在「挂载后崩溃」上，接不住「根本没装上」这一类 |
+| host 只读白名单 | 「git_snapshot / workspace_list / session_list / ui_inspect 对应的内部调用」 | 恰好这四条（`TestSurfaceHostCommandWhitelistIsClosed` 钉住） | 写类、provider/网络、审批/中断一律不开；加一条之前先回答「恶意插件连调 1000 次用户损失什么」 |
+| `settings.features.surfaceTools` 默认 | true（03 §3.7） | **false** | 三个工具是常驻 schema，每个轮次都付 token；V0.1 的插件能力是「先读 skill 再打开」 |
+| 迁移面 | `surface_disable` | 本轮未做 | 禁用走 `writeIndex` 的 enabled 位（R14b 的插件页接） |
+
+**证据**：`surfaces_command_test.go`（10 条：声明+允许 / 未声明 / 未知 id / 禁用 / 非法 id /
+宿主表外 / 白名单封闭 / 内部错误不透明 / ui_inspect 快照 / 开关三态）、
+`surface-protocol.test.ts`（24 条：纯函数 12 类逃逸 + 响应头 + 索引 + 翻译层）、
+`verify_plugin_loader.mjs`（50 项：真 store → loader → 注册表 → RightPanel 渲染、坏模块隔离、
+卸载墓碑、hash 升级、`host.command` 两级闸门、**真模板** templates/surface 的端到端渲染）、`surface_skill_content_test.go`（模板真装得上、
+skill requires 双向生效、panel.js 无 JSX / 无裸模块 import）。
+
+---
+
 ### PR-15 收口
 
 - 回写 `docs/DESKTOP.md` §5.7（⌘S、右栏三态、多标签）；

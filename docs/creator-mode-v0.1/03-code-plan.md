@@ -1239,6 +1239,18 @@ requires:
 
 `PluginsPage.tsx`：列表（图标/名称/版本/状态）、启用开关、卸载、`commands` 声明与 `audit.jsonl` 最近 20 行对照、`disabledReason`。
 
+> **落地（R14）**：PluginsPage 拆到 R14b；本轮做的是**执行侧**。与上面这段代码骨架的差
+> （逐条理由见 02 §PR-14 落地表）：
+> 1. `createHost().command` 回 `{ok:false, reason}` 而不是抛（面板在 `useEffect` 里 await 它）；
+> 2. `Icon` / `useSession` 标可选、本轮不注入；
+> 3. `syncPlugins` 的 `baseUrl` 恒为 `hai-surface://<id>`，`panel.js` 后面补 `?v=<hash>`
+>    （hash 是安装器算的 sha256）；入口名取 manifest 的 `entry`（缺省 `panel.js`），
+>    因为 PR-13 允许 `dist/panel.js`；
+> 4. 加载失败不进 health 的三连计数，而是进 `ui_inspect` 的 `surfaces[]`（`disabled`+`error`）
+>    —— 「没装上」与「挂载后崩溃」是两类失败、两条恢复路径；
+> 5. `surface_status` 的 `{kind,mounted,disabled,error}` 由 loader 在 apply 成功/失败后各推一次
+>    （PR-12 建的通道，形状未改）。
+
 ### 3.8 M1 测试
 
 | 用例 | 判据 |
