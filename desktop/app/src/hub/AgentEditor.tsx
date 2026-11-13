@@ -256,6 +256,8 @@ export default function AgentEditor({
 
   async function previewPrompt(): Promise<void> {
     if (!agentID) return
+    // 编辑器里的预览永远是 DM 变体（不带 group_id）：这里看的是 agent 自身的
+    // L1–L4，群作用域的名册/@ 只在 Context 面板按当前群取（见 promptScope.ts）。
     const r = await hubCommand<{ layers?: PromptLayer[]; note?: string }>('hub_agent_prompt_preview', {
       agent_id: agentID,
     })

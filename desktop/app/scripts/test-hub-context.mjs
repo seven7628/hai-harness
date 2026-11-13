@@ -18,6 +18,7 @@ const result = await build({
       "export * as deeplink from './deeplink.ts'",
       "export * as contextView from './contextView.ts'",
       "export * as seqJump from './seqJump.ts'",
+      "export * as promptScope from './promptScope.ts'",
       "export * as exportMarkdown from './exportMarkdown.ts'",
       "export * as store from './useHubStore.ts'",
       "export * as transport from '../transport/index.ts'",
@@ -44,7 +45,7 @@ const result = await build({
 })
 const source = result.outputFiles[0].text
 const mod = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
-const { deeplink, contextView, seqJump, exportMarkdown, store, transport, electronDeepLink } = mod
+const { deeplink, contextView, seqJump, promptScope, exportMarkdown, store, transport, electronDeepLink } = mod
 
 let pass = 0
 const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
@@ -350,16 +351,52 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   assert(bare.includes('## 用量') && bare.includes('- 未记录'), '缺用量时说明')
 }
 
+// —— 9b) promptScope：提示词预览的作用域键（DM ≠ 群，群 A ≠ 群 B）——
+// 钉的是「群作用域永远显示 DM 变体」的成因：缓存键/竞态判定只比 agentId。
+{
+  const { normalizePromptScope, promptScopeKey, promptScopeMatches } = promptScope
+  eq(JSON.stringify(normalizePromptScope(' ag_1 ', undefined)), '{"agentId":"ag_1","groupId":""}', '归一化：agent 去空白，缺省 group = DM 空串')
+  eq(normalizePromptScope('ag_1', '   ').groupId, '', '空白 group_id 也是 DM（与后端 TrimSpace 同口径）')
+  eq(normalizePromptScope('ag_1', ' grp_1 ').groupId, 'grp_1', '群 id 去空白')
+
+  const dm = { agentId: 'ag_1', groupId: '' }
+  const ga = { agentId: 'ag_1', groupId: 'grp_a' }
+  const gb = { agentId: 'ag_1', groupId: 'grp_b' }
+  assert(promptScopeKey(dm) !== promptScopeKey(ga), '同 agent 的 DM 与群不共用缓存键')
+  assert(promptScopeKey(ga) !== promptScopeKey(gb), '群 A 与群 B 不共用缓存键')
+  eq(promptScopeKey(ga), promptScopeKey({ agentId: ' ag_1 ', groupId: ' grp_a ' }), '键按归一化后比较（同作用域稳定）')
+  eq(promptScopeKey(null), '', '没有 agent 时键为空（不命中任何 state）')
+  eq(promptScopeKey({ groupId: 'grp_a' }), '', '只有群没有 agent 也是空键')
+  // 用 NUL 分隔而不是 ':'/'/'：群 id 允许自定义，':' 会拼出歧义键。
+  assert(
+    promptScopeKey({ agentId: 'a:b', groupId: 'c' }) !== promptScopeKey({ agentId: 'a', groupId: 'b:c' }),
+    'id 里带分隔符也不会撞键',
+  )
+
+  assert(promptScopeMatches(ga, ga), '同 agent 同群命中')
+  eq(promptScopeMatches(ga, dm), false, '群预览不命中 DM 作用域')
+  eq(promptScopeMatches(dm, ga), false, 'DM 预览不命中群作用域')
+  eq(promptScopeMatches(ga, gb), false, '群 A 预览不命中群 B')
+  eq(promptScopeMatches({ agentId: 'ag_1' }, dm), true, '老 state 没有 groupId 按 DM 处理（与后端缺省同义）')
+  eq(promptScopeMatches({ agentId: 'ag_1' }, ga), false, '老 state 不冒充群预览')
+  eq(promptScopeMatches(null, dm), false, '没有 state 不命中')
+  eq(promptScopeMatches(ga, null), false, '没有请求作用域不命中')
+}
+
 // —— 10) store：深链 / 跳转 / 提示词只读缓存 ——
 {
   transport.resetTransport()
   const t = transport.getTransport()
   const counts = new Map()
+  const sent = []
   const rawSend = t.send.bind(t)
   t.send = (cmd) => {
     counts.set(cmd.type, (counts.get(cmd.type) ?? 0) + 1)
+    sent.push({ type: cmd.type, payload: cmd.payload ?? {} })
     return rawSend(cmd)
   }
+  // 最近一次提示词预览请求的 payload（断言 group_id 有没有带、带的是哪个群）。
+  const lastPromptPayload = () => [...sent].reverse().find((c) => c.type === 'hub_agent_prompt_preview')?.payload ?? {}
   const H = store.useHubStore
   H.setState({
     open: false, activeId: null, activeGroupId: null, agents: [], groups: [],
@@ -430,6 +467,45 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   eq(counts.get('hub_agent_prompt_preview') ?? 0, 1, '同 agent 复用缓存（切页签不重复请求）')
   await H.getState().loadPromptPreview('ag_mockres1', true)
   eq(counts.get('hub_agent_prompt_preview') ?? 0, 2, 'force 重新读取')
+
+  // 修「群作用域永远显示 DM 变体」：缓存键必须含作用域，群作用域请求必须带 group_id。
+  // 注意 state 的 groupId 取自**本次请求**而不是响应字段（旧 bridge / 老 mock 不回显
+  // scope/group_id）—— 下面几条同时钉住「响应缺字段也不崩」。
+  counts.clear()
+  sent.length = 0
+  await H.getState().loadPromptPreview('ag_mockres1', true) // force：确保这次 DM 真的发出去
+  eq(counts.get('hub_agent_prompt_preview') ?? 0, 1, 'DM 作用域发一次请求')
+  eq(lastPromptPayload().group_id, undefined, 'DM 作用域不带 group_id（旧调用语义不变）')
+  eq(H.getState().prompt?.groupId ?? 'x', '', 'DM 作用域的 state 记空 groupId')
+  await H.getState().loadPromptPreview('ag_mockres1', false, 'grp_mock1')
+  eq(counts.get('hub_agent_prompt_preview') ?? 0, 2, '同 agent 从 DM 切到群必须重新请求（缓存键含作用域）')
+  eq(lastPromptPayload().group_id, 'grp_mock1', '群作用域请求带 group_id')
+  eq(H.getState().prompt?.groupId ?? '', 'grp_mock1', '群作用域的 state 记群 id')
+  eq(H.getState().prompt?.layers.length ?? 0, 2, '群作用域仍取到 layers')
+  const groupIdentity = (H.getState().prompt?.layers ?? []).find((l) => l.key === 'identity')?.text ?? ''
+  assert(groupIdentity.includes('Writer'), '群作用域的 L2 是群名册（mock 与真 bridge 同形）')
+  await H.getState().loadPromptPreview('ag_mockres1', false, 'grp_mock1')
+  eq(counts.get('hub_agent_prompt_preview') ?? 0, 2, '同群复用缓存（切页签不重复请求）')
+  await H.getState().loadPromptPreview('ag_mockres1', false, 'grp_mock2')
+  eq(counts.get('hub_agent_prompt_preview') ?? 0, 3, '群 A → 群 B 重新请求')
+  eq(lastPromptPayload().group_id, 'grp_mock2', '切群后请求带新群 id')
+  await H.getState().loadPromptPreview('ag_mockres1')
+  eq(counts.get('hub_agent_prompt_preview') ?? 0, 4, '群 → DM 重新请求（不拿群的层冒充 DM）')
+  eq(lastPromptPayload().group_id, undefined, '切回 DM 的请求不带 group_id')
+  const dmIdentity = (H.getState().prompt?.layers ?? []).find((l) => l.key === 'identity')?.text ?? ''
+  assert(dmIdentity.includes('Researcher') && !dmIdentity.includes('名册'), '切回 DM 拿回 DM 变体（不是群名册）')
+
+  // 竞态：群 A 的迟到响应不许写进群 B 的面板（判定要比作用域，不是只比 agentId）。
+  counts.clear()
+  await Promise.all([
+    H.getState().loadPromptPreview('ag_mockres1', false, 'grp_race_a'),
+    H.getState().loadPromptPreview('ag_mockres1', false, 'grp_race_b'),
+  ])
+  eq(H.getState().prompt?.groupId ?? '', 'grp_race_b', '迟到的群 A 响应不覆盖群 B')
+  eq(counts.get('hub_agent_prompt_preview') ?? 0, 2, '两个作用域各发一次（在飞请求不复用）')
+  counts.clear()
+  await H.getState().loadPromptPreview('ag_mockres1', false, 'grp_race_a')
+  eq(counts.get('hub_agent_prompt_preview') ?? 0, 1, '单槽缓存：切回群 A 重新请求而不是显示 B 的层')
 }
 
 // —— 11) 复审行为：深链所有权（B1）与缺失 seq（B3）——

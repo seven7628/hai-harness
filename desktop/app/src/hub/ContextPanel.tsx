@@ -5,6 +5,7 @@ import {
   contextMessageOptions, messageContextView, pickContextMessage, promptLayerViews,
   promptPreviewBytes, promptRuntimeNote, resolveTriggerJump,
 } from './contextView'
+import { promptScopeMatches } from './promptScope'
 import type { HubMessage } from './types'
 
 // Context（只读，P4-02）：Inspector 的第 4 个页签。
@@ -14,6 +15,8 @@ import type { HubMessage } from './types'
 //      点触发 seq 只调 store.requestJump —— 跳转与高亮仍由 GroupView/HubSurface 执行
 //      （同一套 seqJumpPlan + scrollToSeq，不在面板里复制滚动逻辑）。
 //   ② 智能体系统提示词分层：hub_agent_prompt_preview（L1–L4，只读）；
+//      作用域跟着当前视图走（群作用域带 group_id → 群变体 + 名册，DM 不带），
+//      缓存键 = (agent, 群)：切群/切 DM 必重新请求，同作用域才复用。
 //      L5 工具 schema 与技能清单在请求期由内核装配，不在预览里（面板恒显示这句）。
 //
 // 面板里没有输入框/保存按钮：记忆、人格、工具的编辑仍只在资料页（AgentEditor）。
@@ -56,11 +59,17 @@ export default function ContextPanel() {
   const promptAgentId = group
     ? (memberIds.includes(memberPick) ? memberPick : (memberIds[0] ?? ''))
     : (activeId ?? '')
+  // 提示词预览的作用域：群作用域必须把群 id 传给后端，否则 L1/L2 拿回来的是 DM 变体
+  // （群变体才有 @ 与 assign_task，L2 是群名册而不是该 agent 的 DM 身份）。DM 传空串。
+  const promptGroupId = group?.id ?? ''
   useEffect(() => {
-    if (promptAgentId) void loadPrompt(promptAgentId)
-  }, [promptAgentId, loadPrompt])
+    if (promptAgentId) void loadPrompt(promptAgentId, false, promptGroupId)
+  }, [promptAgentId, promptGroupId, loadPrompt])
   const promptAgent = agents.find((a) => a.id === promptAgentId)
-  const promptForTarget = prompt && prompt.agentId === promptAgentId ? prompt : null
+  // 只认同作用域的预览：切群/切 DM 后旧层在语义上是别人的正文，不能先显示再替换。
+  const promptForTarget = promptScopeMatches(prompt, { agentId: promptAgentId, groupId: promptGroupId })
+    ? prompt
+    : null
   const layers = useMemo(() => promptLayerViews(promptForTarget?.layers), [promptForTarget?.layers])
   const totalBytes = promptPreviewBytes(promptForTarget?.totalBytes, layers)
   const note = promptRuntimeNote(promptForTarget?.note)
@@ -198,7 +207,7 @@ export default function ContextPanel() {
           )}
           <button
             className="hub-link"
-            onClick={() => void loadPrompt(promptAgentId, true)}
+            onClick={() => void loadPrompt(promptAgentId, true, promptGroupId)}
             disabled={!promptAgentId}
             title="重新读取（只读）"
           >

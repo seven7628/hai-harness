@@ -3627,11 +3627,24 @@ class MockTransport implements Transport {
       case 'hub_agent_prompt_preview': {
         const id = String(cmd.payload?.agent_id ?? '')
         const agent = this.hubAgents.find((a) => a.id === id)
+        // 作用域：带非空 group_id = 群变体（真 bridge 的 L1 有 @/assign_task、L2 是群名册）。
+        // 演示页要靠它肉眼分辨「前端有没有把 group_id 传下来」，所以这里也分叉；
+        // 不带 group_id 保持原 DM 文案（旧调用语义不变）。
+        const gid = String(cmd.payload?.group_id ?? '').trim()
+        const group = gid ? this.hubGroup(gid) : undefined
+        const members = (group?.members as Array<{ agent_id?: string; role?: string }> | undefined) ?? []
+        const roster = members
+          .map((m) => {
+            const aid = String(m.agent_id ?? '')
+            const name = this.hubAgents.find((a) => a.id === aid)?.name ?? aid
+            return m.role ? `${name}（${m.role}）` : name
+          })
+          .join('、')
         const layers = [
-          { key: 'protocol', title: 'L1 · Hub 协议', text: 'You are an agent in Agent Hub…（mock）' },
-          { key: 'identity', title: 'L2 · 身份与职责', text: `${agent?.name ?? ''} — ${agent?.role ?? ''}` },
+          { key: 'protocol', title: 'L1 · Hub 协议', text: gid ? 'You are an agent in Agent Hub…（Group scope (mock)：可用 @ 与 assign_task）' : 'You are an agent in Agent Hub…（mock）' },
+          { key: 'identity', title: 'L2 · 身份与职责', text: gid ? `群 ${String(group?.name ?? gid)} 名册：${roster}` : `${agent?.name ?? ''} — ${agent?.role ?? ''}` },
         ]
-        this.respond(cmd, { agent_id: id, layers, total_chars: layers.reduce((n, l) => n + l.text.length, 0), note: 'L5 技能清单与工具 schema 在请求期由内核装配，不在预览内。' })
+        this.respond(cmd, { agent_id: id, scope: gid ? 'group' : 'dm', group_id: gid, layers, total_chars: layers.reduce((n, l) => n + l.text.length, 0), note: 'L5 技能清单与工具 schema 在请求期由内核装配，不在预览内。' })
         break
       }
       case 'hub_agent_memory': {

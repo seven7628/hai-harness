@@ -91,6 +91,10 @@ export interface HubPromptLayer {
 /** hub_agent_prompt_preview 响应（Go：hubPromptPreview）。 */
 export interface HubPromptPreviewData {
   agent_id?: string
+  /** 'dm' | 'group'：后端按是否收到 group_id 决定。前端不据此建缓存（见 promptScope.ts）。 */
+  scope?: string
+  /** 回显的群 id；DM 时为空串。旧 mock/旧 bridge 可能没有这两个字段。 */
+  group_id?: string
   layers?: HubPromptLayer[]
   total_bytes?: number
   note?: string

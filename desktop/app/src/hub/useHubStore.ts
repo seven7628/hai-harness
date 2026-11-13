@@ -29,6 +29,7 @@ import {
   type HubDeepLinkKind,
 } from './deeplink'
 import type { HubJumpRequest } from './seqJump'
+import { normalizePromptScope, promptScopeMatches } from './promptScope'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
 //
@@ -53,9 +54,16 @@ export interface HubArtifactPreviewState {
   data: HubArtifactPreviewData | null
 }
 
-/** Context 面板的提示词预览状态：loaded=true 时同 agent 可复用（只读缓存）。 */
+/**
+ * Context 面板的提示词预览状态：loaded=true 时**同 agent + 同作用域**可复用（只读缓存）。
+ *
+ * `groupId` 是缓存键的一半，不是展示字段：L1 协议与 L2 名册按作用域分叉，只按 agent
+ * 复用会让群作用域永远显示 DM 变体（切群也不重新请求）。空串 = DM。
+ */
 export interface HubPromptState {
   agentId: string
+  /** 请求时的群 id；空串 = DM 作用域（后端的 group_id 缺省语义）。 */
+  groupId: string
   layers: HubPromptLayer[]
   note: string
   totalBytes: number
@@ -266,8 +274,13 @@ interface HubState {
   openDeepLink(raw: string): Promise<boolean>
   /** 复制深链（Clipboard API + 主进程兜底，见 lib/clipboard）；结果写 notice/error。 */
   copyDeepLink(kind: HubDeepLinkKind, id: string, seq?: number): Promise<boolean>
-  /** 只读拉取系统提示词分层（同 agent 已加载则复用；force 强制刷新）。 */
-  loadPromptPreview(agentID: string, force?: boolean): Promise<void>
+  /**
+   * 只读拉取系统提示词分层（同 agent **且同作用域**已加载则复用；force 强制刷新）。
+   *
+   * `groupID` 可选：带上是群变体 + 名册，不带是 DM 变体（与后端 hubPromptPreview 的
+   * 缺省语义一致）。旧调用 `loadPromptPreview(agentId, force)` 语义不变。
+   */
+  loadPromptPreview(agentID: string, force?: boolean, groupID?: string): Promise<void>
   loadGroups(): Promise<void>
   selectGroup(groupID: string): Promise<void>
   loadGroupActivity(groupID?: string): Promise<void>
@@ -1061,18 +1074,20 @@ export const useHubStore = create<HubState>((set, get) => ({
     return ok
   },
 
-  async loadPromptPreview(agentID, force) {
-    const id = String(agentID ?? '').trim()
-    if (!id) return
+  async loadPromptPreview(agentID, force, groupID) {
+    const scope = normalizePromptScope(agentID, groupID)
+    if (!scope.agentId) return
     const current = get().prompt
-    if (!force && current && current.agentId === id) {
-      if (current.loading) return // 同 agent 在飞：复用这一次
-      if (current.loaded && !current.error) return // 只读缓存：切回来不重复请求
+    if (!force && promptScopeMatches(current, scope)) {
+      if (current?.loading) return // 同作用域在飞：复用这一次
+      if (current?.loaded && !current.error) return // 只读缓存：切回来不重复请求
     }
-    const keep = current?.agentId === id ? current.layers : []
+    // 换作用域（DM↔群、群 A→群 B）不保留旧层：那些层是另一个作用域的正文。
+    const keep = promptScopeMatches(current, scope) ? current?.layers ?? [] : []
     set({
       prompt: {
-        agentId: id,
+        agentId: scope.agentId,
+        groupId: scope.groupId,
         layers: force ? [] : keep,
         note: '',
         totalBytes: 0,
@@ -1081,13 +1096,18 @@ export const useHubStore = create<HubState>((set, get) => ({
         error: null,
       },
     })
-    const r = await hubCommand<HubPromptPreviewData>('hub_agent_prompt_preview', { agent_id: id })
-    // 竞态：切到别的智能体后，旧响应不能写进新面板。
-    if (get().prompt?.agentId !== id) return
+    // DM 不带 group_id：后端按「没带 = DM 变体」处理，与旧调用同形。
+    const payload: Record<string, unknown> = { agent_id: scope.agentId }
+    if (scope.groupId) payload.group_id = scope.groupId
+    const r = await hubCommand<HubPromptPreviewData>('hub_agent_prompt_preview', payload)
+    // 竞态：切到别的智能体**或别的群**后，旧响应不能写进新面板（只比 agentId 会让
+    // 群 A 的迟到响应覆盖群 B）。响应里没有 group_id（mock 就不带）也不影响判定：
+    // 作用域取的是**本次请求**的那一个。
+    if (!promptScopeMatches(get().prompt, scope)) return
     if (!r.ok) {
       set({
         prompt: {
-          agentId: id, layers: [], note: '', totalBytes: 0,
+          agentId: scope.agentId, groupId: scope.groupId, layers: [], note: '', totalBytes: 0,
           loading: false, loaded: false, error: r.error || '读取提示词失败',
         },
       })
@@ -1095,7 +1115,8 @@ export const useHubStore = create<HubState>((set, get) => ({
     }
     set({
       prompt: {
-        agentId: id,
+        agentId: scope.agentId,
+        groupId: scope.groupId,
         layers: r.data?.layers ?? [],
         note: r.data?.note ?? '',
         totalBytes: Number(r.data?.total_bytes ?? 0) || 0,
