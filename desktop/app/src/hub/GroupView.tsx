@@ -8,8 +8,8 @@ import { hubCommand } from './api'
 import { GroupBubble } from './MessageBubble'
 import { DayDivider } from './ConversationMessage'
 import { dayKey, dayLabel } from './conversationDay'
-import { conversationPairText, conversationTurnText } from './conversation'
 import { RoundGroup } from './RoundGroup'
+import ConversationBar from './ConversationBar'
 import { RoundActivityDigest } from './RoundActivityDigest'
 import { StreamingMessage } from './StreamingMessage'
 import MentionPicker from './MentionPicker'
@@ -106,6 +106,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const headerMenu = useHeaderMenu()
   // 群模式切换在飞：菜单项要能立刻反映「保存中」，失败由 store.error/HubErrorBanner 透出。
   const [modeSaving, setModeSaving] = useState<GroupMode | null>(null)
+  // 「重置本群限制」在飞：状态条上的按钮要能立刻反映，失败由 store.error 透出。
+  const [resetBusy, setResetBusy] = useState(false)
   const theme = useResolvedTheme()
   const openContext = (): void => {
     setInspector(rightExpanded && inspector === 'context' ? null : 'context')
@@ -222,12 +224,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
     const gid = task.target?.group_id || task.origin?.group_id
     return gid === group.id && (task.status === 'dispatched' || task.status === 'running')
   }).length
-  // P6-04：pair 文案与「重置限制」入口。
-  const convPair = conversationPairText(conversation, agentNames)
-  const pairAtLimit = conversation
-    ? Object.values(conversation.pair_count ?? {}).some((n) => Number(n) >= (conversation.pair_limit ?? 10))
-    : false
-  const convNeedsReset = conversation?.status === 'waiting_human' || pairAtLimit
+  // 状态条（本轮/本链/队列/pair/投递）由 ConversationBar 自己算（P6-10，纯函数在
+  // conversation.ts）：群头只留身份（成员/模式/owner/标题），不再重复一份对话计数。
   const convActive = groupDrafts.length > 0 || members.some((m) => running[m.agent_id] === true) || activeGroupTasks > 0
   // 头像的组状态口径：会话在跑（或草稿/成员/任务在跑）。convActive 本身不含 status，
   // 只看它会让「自动对话中但没有成员正在跑」的群头显示成待命。
@@ -491,34 +489,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
             <span>{t('hub.group.mode').replace('{mode}', group.policy?.mode ?? 'ask')}</span>
             {owner ? <><span className="sep">·</span><span>{t('hub.group.owner').replace('{name}', agentNames[owner.agent_id] ?? owner.agent_id)}</span></> : null}
             {title ? <><span className="sep">·</span><span>{title}</span></> : null}
-            {convActive ? <><span className="sep">·</span><span>自动对话中{conversation ? ` · ${conversationTurnText(conversation)}` : ''}</span></> : null}
-            {/* P6-04：无序 pair 的窗口计数 + 自动恢复时间（不再只显示最热的一对方向）。 */}
-            {convPair ? <><span className="sep">·</span><span className="hub-conv-pair" title="同一对智能体在窗口内的往返次数（防踢皮球）">{convPair}</span></> : null}
           </div>
         </div>
         <div className="header-actions">
-          {convActive ? (
-            <button
-              type="button"
-              className="btn danger"
-              onClick={() => void stopConversation(group.id)}
-              disabled={convStopping}
-              title="停止自动对话（清空队列并中断当前 run）"
-            >
-              {convStopping ? '停止中…' : '停止'}
-            </button>
-          ) : null}
-          {/* P6-04 ④：到限/等待人类时给「重置限制」入口（清零 pair/深度，不唤醒任何人）。 */}
-          {convNeedsReset ? (
-            <button
-              type="button"
-              className="btn"
-              onClick={() => void resetConversation(group.id)}
-              title="重置本群对话限制（清零互踢计数与深度，不唤醒任何人）"
-            >
-              重置限制
-            </button>
-          ) : null}
           <button
             type="button"
             className={`icon-btn${inspector === 'context' ? ' active' : ''}`}
@@ -574,6 +547,21 @@ export default function GroupView({ group }: { group: HubGroup }) {
           ) : null}
         </div>
       </header>
+
+      {/* 状态条（P6-10）：本轮/本链/队列/pair 倒计时/投递账本 + 重置/停止门禁。
+          放在 header 与消息区之间：状态是当前事实，滚动历史时不能跟着滚走。 */}
+      <ConversationBar
+        conversation={conversation}
+        pairNames={agentNames}
+        active={convActive}
+        stopping={convStopping}
+        resetting={resetBusy}
+        onStop={() => void stopConversation(group.id)}
+        onReset={() => {
+          setResetBusy(true)
+          void resetConversation(group.id).finally(() => setResetBusy(false))
+        }}
+      />
 
       <div className="messages" ref={listRef} onScroll={onScroll}>
         <div className="messages-inner">

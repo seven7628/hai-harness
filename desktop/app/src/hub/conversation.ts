@@ -30,7 +30,9 @@ export function conversationStatusLabel(status?: string): string {
     case 'waiting_human': return '等你继续'
     case 'stopped': return '已停止'
     case 'exhausted': return '已达上限'
-    default: return status || '未知'
+    // 未知状态码不能显示成一个裸单词（读起来像文案 bug，也分不清是状态还是原因）：
+    // 带上「未知状态」前缀，同时保留原始码给排障。
+    default: return status ? `未知状态（${status}）` : '未知'
   }
 }
 
@@ -41,13 +43,39 @@ export function conversationStatusLabel(status?: string): string {
  */
 export function conversationTurnText(conv?: HubConversation | null): string {
   if (!conv) return ''
+  const { depth, max } = depthPair(conv)
+  return [conversationRoundText(conv), `深度 ${depth}/${max}`, conversationQueueText(conv)].join(' · ')
+}
+
+/** 深度计数：`depth/max`。本链与「深度」两种叫法共用同一个分母口径（缺省 = HUB_MAX_DEPTH）。 */
+function depthPair(conv?: HubConversation | null): { depth: number; max: number } {
+  const max = conv?.max_depth && conv.max_depth > 0 ? conv.max_depth : HUB_MAX_DEPTH
+  return { depth: Math.max(0, conv?.depth ?? 0), max }
+}
+
+/** 本轮（人类一次发言后自动接龙的轮数）：`第 3 轮` / 有上限时 `第 3/8 轮`。 */
+export function conversationRoundText(conv?: HubConversation | null): string {
+  if (!conv) return ''
   const budget = conv.turn_budget ?? HUB_TURN_BUDGET
-  const maxDepth = conv.max_depth && conv.max_depth > 0 ? conv.max_depth : HUB_MAX_DEPTH
   const turns = Math.max(0, conv.turns_used ?? 0)
-  const depth = Math.max(0, conv.depth ?? 0)
-  const queue = Math.max(0, conv.queue_len ?? 0)
-  const turn = budget > 0 ? `第 ${turns}/${budget} 轮` : `第 ${turns} 轮`
-  return `${turn} · 深度 ${depth}/${maxDepth} · 队列 ${queue}`
+  return budget > 0 ? `第 ${turns}/${budget} 轮` : `第 ${turns} 轮`
+}
+
+/**
+ * 本链（当前接龙链的深度，P6-05）：`本链 2/4`。
+ * 与 conversationTurnText 里的「深度 2/4」是同一个数 —— 状态条用「本链」把
+ * 「这是**这一条链**的深度，不是整个群的轮次」说清楚。
+ */
+export function conversationChainText(conv?: HubConversation | null): string {
+  if (!conv) return ''
+  const { depth, max } = depthPair(conv)
+  return `本链 ${depth}/${max}`
+}
+
+/** 待投递队列（排队等目标空闲的 @）：`队列 2`。 */
+export function conversationQueueText(conv?: HubConversation | null): string {
+  if (!conv) return ''
+  return `队列 ${Math.max(0, conv.queue_len ?? 0)}`
 }
 
 /**
@@ -213,28 +241,216 @@ export function deliveryLabel(d?: HubDelivery | null, names?: Record<string, str
   }
 }
 
-/**
- * 一轮 @ 的投递摘要：`9 进行中 · 2 排队 · 1 跳过`。
- * 只统计最近一批（同一 conversation_id + 同一 turn 的最后连续一段），
- * 否则历史记录会把当前这轮淹没。
- */
-export function deliverySummary(conv?: HubConversation | null): string {
-  const list = conv?.deliveries ?? []
-  if (list.length === 0) return ''
+/** 最近一批投递（同一 conversation_id + 同一 turn 的最后一段）；历史记录不能淹没当前这轮。 */
+function lastDeliveryBatch(list: HubDelivery[]): HubDelivery[] {
+  if (list.length === 0) return []
   const last = list[list.length - 1]
-  const batch = list.filter((d) => (d.turn ?? 0) === (last.turn ?? 0) &&
+  return list.filter((d) => (d.turn ?? 0) === (last.turn ?? 0) &&
     (d.conversation_id ?? '') === (last.conversation_id ?? ''))
-  const count = (s: string): number => batch.filter((d) => d.status === s).length
+}
+
+/**
+ * 投递原因码 → 状态条里的一句话原因。
+ *
+ * 与 deliveryReasonText 的分工：那个是「码 → 人话」，未知码原样返回（给单条投递的
+ * 明细用，排障要能 grep 到原始码）；这里是「状态条上的一句话」，未知码必须**说明它
+ * 是未知码**，否则 `失败 1（boom）` 会被读成一句没翻译完的文案。空原因返回空串 ——
+ * 调用方不要拼出 `失败 1（）` 这种空括号。
+ */
+export function deliveryReasonInline(reason?: string | null): string {
+  const raw = (reason ?? '').trim()
+  if (!raw) return ''
+  const known = deliveryReasonText(raw)
+  return known === raw ? `未知原因：${raw}` : known
+}
+
+/**
+ * 一轮 @ 的投递分类（P6-10）。语义（与 Go 的 agenthub.Delivery 对齐）：
+ * - enqueued（已入队）= queued + running + done —— 「@all 成功 = 已入队」的口径；
+ * - pending（未回复）= queued + running —— 还没拿到回复的（排队/进行中）；
+ * - skipped 是护栏**有意**不跑（pair/depth/budget/queue_full…），与 failed 分开：
+ *   前者是设计，后者是出错，混在一起会让人以为护栏坏了。
+ */
+export interface DeliveryTally {
+  /** 已入队 = queued + running + done（未知状态不计入，避免把「已入队」算多）。 */
+  enqueued: number
+  queued: number
+  running: number
+  done: number
+  skipped: number
+  failed: number
+  /** 未回复 = queued + running。 */
+  pending: number
+  /** 本批投递条数（含未知状态）。 */
+  total: number
+  /** 第一条 failed 的原因码（状态条只放一句话；没有失败则空）。 */
+  failureReason: string
+  /** 每条投递的一句话，换行分隔 —— 状态条 hover 展开「谁在跑、谁跳过、为什么」。 */
+  detail: string
+}
+
+/** 把最近一轮投递归到几档里；没有账本时全 0（调用方据此决定显示哪些段）。 */
+export function deliveryTally(conv?: HubConversation | null, names?: Record<string, string>): DeliveryTally {
+  const batch = lastDeliveryBatch(conv?.deliveries ?? [])
+  const t: DeliveryTally = {
+    enqueued: 0, queued: 0, running: 0, done: 0, skipped: 0, failed: 0,
+    pending: 0, total: batch.length, failureReason: '', detail: '',
+  }
+  for (const d of batch) {
+    switch (d.status) {
+      case 'queued': t.queued++; break
+      case 'running': t.running++; break
+      case 'done': t.done++; break
+      case 'skipped': t.skipped++; break
+      case 'failed': t.failed++; break
+      default: break
+    }
+    if (!t.failureReason && d.status === 'failed' && (d.reason ?? '').trim()) t.failureReason = d.reason as string
+  }
+  t.pending = t.queued + t.running
+  t.enqueued = t.queued + t.running + t.done
+  t.detail = batch.map((d) => deliveryLabel(d, names)).filter(Boolean).join('\n')
+  return t
+}
+
+/**
+ * 投递一档的文案：`已入队 5 · 已回复 2 · 未回复 2 · 失败 1`。
+ * 只写非零的档（`已入队 0` 是噪音），全 0 返回空串 —— 空态不占一行。
+ */
+export function deliveryTallyText(t: DeliveryTally): string {
   const parts: string[] = []
-  const running = count('running')
-  const queued = count('queued')
-  const done = count('done')
-  const skipped = count('skipped')
-  const failed = count('failed')
-  if (running > 0) parts.push(`${running} 进行中`)
-  if (queued > 0) parts.push(`${queued} 排队`)
-  if (done > 0) parts.push(`${done} 已回复`)
-  if (skipped > 0) parts.push(`${skipped} 跳过`)
-  if (failed > 0) parts.push(`${failed} 失败`)
+  if (t.enqueued > 0) parts.push(`已入队 ${t.enqueued}`)
+  if (t.done > 0) parts.push(`已回复 ${t.done}`)
+  if (t.pending > 0) parts.push(`未回复 ${t.pending}`)
+  if (t.failed > 0) parts.push(`失败 ${t.failed}`)
+  if (t.skipped > 0) parts.push(`跳过 ${t.skipped}`)
   return parts.join(' · ')
+}
+
+// ── 状态条模型（P6-10）────────────────────────────────────────────────────────
+// 一条状态条说清楚：本轮 / 本链 / 队列 / pair（含恢复倒计时）/ 投递（已入队·已回复·
+// 未回复·失败·跳过）/ 终态，外加「停止」与「重置本群限制」两个门禁。
+// 组件只负责把 model 画出来 —— 文案、空态、门禁全在这里，Node 直测。
+
+export type ConversationSegmentKey = 'round' | 'chain' | 'queue' | 'pair' | 'delivery' | 'terminal'
+
+export interface ConversationBarSegment {
+  key: ConversationSegmentKey
+  text: string
+  /** hover 展开的口径/原因（一段投递明细可能是多行）。 */
+  title: string
+  tone: 'warn' | 'danger' | ''
+}
+
+export interface ConversationBarModel {
+  /** 没有任何可说的（空闲且无 run）→ 整条不渲染。 */
+  visible: boolean
+  tone: ConversationTone
+  /** 左侧状态标签（空闲/自动对话中/等你继续/未知状态（x）…）。 */
+  status: string
+  /** 状态标签的 hover 说明（未知状态码/无对话等空态在这里给可读文案）。 */
+  statusTitle: string
+  segments: ConversationBarSegment[]
+  canStop: boolean
+  /** 到限/等你继续/护栏命中 → 显示「重置本群限制」。 */
+  canReset: boolean
+  resetTitle: string
+}
+
+export const CONVERSATION_RESET_TITLE = '重置本群对话限制（清零互踢计数与深度，不唤醒任何人）'
+
+/**
+ * 组装状态条。所有判断都在这里，组件保持无逻辑：
+ * - visible：有 run 在跑 / 对话不是 idle / 有未回复或失败的投递 / 有可重置的护栏；
+ * - 未知状态码显示成「未知状态（x）」而不是裸码；
+ * - segments 里不会出现空文案（空态不占位，也不留悬空的分隔符）。
+ */
+export function conversationBarModel(opts: {
+  conversation?: HubConversation | null
+  pairNames?: Record<string, string>
+  active?: boolean
+  now?: number
+}): ConversationBarModel {
+  const conv = opts.conversation ?? null
+  const now = opts.now ?? Date.now()
+  const active = opts.active === true
+  const rawStatus = (conv?.status ?? '').trim()
+  const synthetic = rawStatus === '' || rawStatus === 'idle'
+  const tally = deliveryTally(conv, opts.pairNames)
+  const limit = conv?.pair_limit && conv.pair_limit > 0 ? conv.pair_limit : 10
+  const counts = Object.values(conv?.pair_count ?? {})
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n))
+  const pairAtLimit = counts.some((n) => n >= limit)
+  const { depth, max } = depthPair(conv)
+  const depthAtLimit = depth > 0 && depth >= max
+  const canReset = rawStatus === 'waiting_human' || rawStatus === 'exhausted' || pairAtLimit || depthAtLimit
+  const visible = active || !synthetic || canReset || tally.pending > 0 || tally.failed > 0
+  const tone: ConversationTone = synthetic ? (active ? 'running' : 'idle') : conversationTone(rawStatus)
+  const status = synthetic ? (active ? '任务运行中' : '空闲') : conversationStatusLabel(rawStatus)
+  const statusTitle = synthetic
+    ? (active ? '当前有 run 在跑，可随时停止' : '本群当前没有自动对话')
+    : tone === 'unknown'
+      ? `后端返回了未知的对话状态码（${rawStatus}），状态条只显示原始值`
+      : ''
+
+  const segments: ConversationBarSegment[] = []
+  if (!synthetic) {
+    // 未知状态码时**不画**本轮/本链/队列：这几个数在未知状态下没有已知含义，摆一排
+    // 0 只会让人以为「什么都没发生」。状态标签 + hover 里的原始码已经够排障。
+    if (tone !== 'unknown') {
+      segments.push({ key: 'round', text: conversationRoundText(conv), title: '本轮：人类一次发言后自动接龙的轮数', tone: '' })
+      segments.push({
+        key: 'chain',
+        text: conversationChainText(conv),
+        title: '本链：当前接龙链的深度（防无限交接）',
+        tone: depthAtLimit ? 'warn' : '',
+      })
+      segments.push({
+        key: 'queue',
+        text: conversationQueueText(conv),
+        title: '队列：排队等目标空闲的 @（目标忙/限流退避）',
+        tone: (conv?.queue_len ?? 0) > 0 ? 'warn' : '',
+      })
+    }
+    const pair = conversationPairText(conv, opts.pairNames, now)
+    if (pair) {
+      segments.push({
+        key: 'pair',
+        text: pair,
+        title: '同一对智能体在滚动窗口内的往返次数（防踢皮球）；到限后窗口滚过即自动恢复',
+        tone: pairAtLimit ? 'warn' : '',
+      })
+    }
+    const delivery = deliveryTallyText(tally)
+    if (delivery) {
+      const reason = deliveryReasonInline(tally.failureReason)
+      segments.push({
+        key: 'delivery',
+        text: reason ? `${delivery}（${reason}）` : delivery,
+        title: tally.detail || '本轮 @ 的投递账本（每个目标一条）',
+        tone: tally.failed > 0 ? 'danger' : tally.skipped > 0 ? 'warn' : '',
+      })
+    }
+    const terminal = conversationTerminalText(conv)
+    if (terminal) {
+      segments.push({
+        key: 'terminal',
+        text: terminal,
+        title: '终态：新的人类消息或「重置本群限制」可继续',
+        tone: rawStatus === 'exhausted' ? 'warn' : '',
+      })
+    }
+  }
+
+  return {
+    visible,
+    tone,
+    status,
+    statusTitle,
+    segments,
+    canStop: conversationCanStop(conv, active),
+    canReset,
+    resetTitle: CONVERSATION_RESET_TITLE,
+  }
 }

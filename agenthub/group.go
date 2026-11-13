@@ -39,17 +39,21 @@ type Member struct {
 // GroupPolicy 是群级策略。Mode 与 tools.preset 是两个独立概念：
 // 前者管“要不要审批/能不能产生副作用”，后者管“模型看不看得见工具”。
 //
-// MaxTurnsPerHuman 已废弃（deprecated，见字段注释）：字段与默认值只为兼容旧
-// JSON/旧群文件而保留，生产不再用它拦截「人类发言后智能体连续发言」的条数
-// （用户口径：群策略限制取消）。自动接龙由深度/同对/冷却/同内容指纹等护栏约束。
+// 只留**真的生效**的字段（P6-13 死旋钮清理）：每个字段都能指出「改它 → 哪段行为
+// 变了」，见 TestGroupPolicyFieldsEffective。已经删掉的两个：
+//   - max_parallel_runs（P6-02）：并发 = 本轮目标数，没有旋钮可拧；
+//   - max_turns_per_human（P6-13）：用户口径「群策略限制取消」，字段默认值与校验
+//     一起删了 —— 自动接龙由深度/同对/冷却/同内容指纹等护栏约束。
+// 旧群文件/旧客户端仍可能带这两个键：encoding/json 对未知字段是忽略（不是报错），
+// 所以存量数据照常能读，不需要迁移脚本。
 type GroupPolicy struct {
 	Mode string `json:"mode"` // auto | ask | readonly
-	// 并发不是策略旋钮（P6-02/D1）：一个群一个调度器，并发上限 = 本轮目标数
-	// （上限 = 活跃群成员数）。旧 JSON 里的 max_parallel_runs 读入即忽略。
-	MaxHandoffDepth  int     `json:"max_handoff_depth"`
-	MaxTurnsPerHuman int     `json:"max_turns_per_human"`      // 已废弃，默认 8（仅兼容旧数据）
-	MaxMentions      int     `json:"max_mentions_per_message"` // 默认 3
-	DailyBudgetUSD   float64 `json:"daily_budget_usd"`
+	// MaxHandoffDepth 是自动接龙的链路深度上限（0 → 默认 3）：到限后不再交接。
+	MaxHandoffDepth int `json:"max_handoff_depth"`
+	// MaxMentions 是单条消息最多唤醒的智能体数（0 → 默认 3，@all 另算）。
+	MaxMentions int `json:"max_mentions_per_message"`
+	// DailyBudgetUSD 是本群每日预算上限（0 = 不限额）：到限后新 run 不启动。
+	DailyBudgetUSD float64 `json:"daily_budget_usd"`
 }
 
 // 群策略取值。默认 GroupModeAsk（D4）。
@@ -117,11 +121,7 @@ func (s Scope) SessionID(agentID AgentID) string {
 
 // P0-03：群组默认值、角色与成员校验。
 const (
-	DefaultGroupMaxHandoffDepth  = 3
-	DefaultGroupMaxTurnsPerHuman = 8
-	// MaxGroupPolicyTurnsPerHuman 是 ReadMessages 单页窗口的上界；超过它会把
-	// 限流静默退化成 500，故策略层直接拒绝而不是悄悄截断。
-	MaxGroupPolicyTurnsPerHuman = 500
+	DefaultGroupMaxHandoffDepth = 3
 	DefaultGroupMaxMentions     = 3
 )
 
@@ -235,9 +235,6 @@ func (p *GroupPolicy) ApplyDefaults() {
 	if p.MaxHandoffDepth == 0 {
 		p.MaxHandoffDepth = DefaultGroupMaxHandoffDepth
 	}
-	if p.MaxTurnsPerHuman == 0 {
-		p.MaxTurnsPerHuman = DefaultGroupMaxTurnsPerHuman
-	}
 	if p.MaxMentions == 0 {
 		p.MaxMentions = DefaultGroupMaxMentions
 	}
@@ -334,9 +331,6 @@ func (p GroupPolicy) Validate() error {
 	}
 	if p.MaxHandoffDepth < 0 {
 		return fmt.Errorf("%w: group.policy.max_handoff_depth must be >= 0", ErrInvalid)
-	}
-	if p.MaxTurnsPerHuman < 0 || p.MaxTurnsPerHuman > MaxGroupPolicyTurnsPerHuman {
-		return fmt.Errorf("%w: group.policy.max_turns_per_human must be 0..%d", ErrInvalid, MaxGroupPolicyTurnsPerHuman)
 	}
 	if p.MaxMentions < 0 {
 		return fmt.Errorf("%w: group.policy.max_mentions_per_message must be >= 0", ErrInvalid)

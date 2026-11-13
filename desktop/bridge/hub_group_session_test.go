@@ -514,7 +514,8 @@ func TestHubGroupSendSkipsBusyTargetWithoutCorruptingRound(t *testing.T) {
 }
 
 // 用户口径「群策略限制取消」：人类之后已有 8 条智能体发言，final 仍然要追加。
-func TestFinishHubRoundIgnoresMaxTurnsPerHuman(t *testing.T) {
+// （P6-13：那个旋钮已经从 GroupPolicy 删掉，这里用字面量 8 表示「远超旧默认值」。）
+func TestFinishHubRoundIgnoresRemovedTurnsGate(t *testing.T) {
 	m, buf := testManager(t)
 	a := createHubAgent(t, m, buf, 1, "LimitOwner")
 	b := createHubAgent(t, m, buf, 2, "LimitB")
@@ -536,8 +537,8 @@ func TestFinishHubRoundIgnoresMaxTurnsPerHuman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 人类之后已有 8 条智能体发言（默认 MaxTurnsPerHuman=8，但已不参与拦截）。
-	for i := 0; i < agenthub.DefaultGroupMaxTurnsPerHuman; i++ {
+	// 人类之后已有 8 条智能体发言（旧默认上限就是 8，但那个闸门已删）。
+	for i := 0; i < 8; i++ {
 		if _, err := st.AppendMessage(context.Background(), &agenthub.Message{
 			GroupID: g.ID, Kind: agenthub.KindText, RoundID: "rnd_limit",
 			Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: b.ID},
@@ -564,7 +565,7 @@ func TestFinishHubRoundIgnoresMaxTurnsPerHuman(t *testing.T) {
 			agentMsgs++
 		}
 	}
-	if want := agenthub.DefaultGroupMaxTurnsPerHuman + 1; agentMsgs != want {
+	if want := 9; agentMsgs != want {
 		t.Fatalf("agent messages = %d, want %d（第 9 条必须落盘）", agentMsgs, want)
 	}
 	cur, err := st.LoadCursor(context.Background(), g.ID, b.ID)

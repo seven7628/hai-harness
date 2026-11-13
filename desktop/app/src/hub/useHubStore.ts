@@ -1644,6 +1644,17 @@ export const useHubStore = create<HubState>((set, get) => ({
         : {}),
       groupRounds: upsertRound(s.groupRounds, r.data?.round),
       groupMessages: s.groupMessages.map((m) => (m.clientMsgId === clientMsgId && r.data?.seq ? { ...m, seq: r.data.seq, pending: false } : m)),
+      // P6-10：@all 的「已入队 N」来自本次回执的投递账本 —— hub_conversation 事件可能晚
+      // 一帧到，状态条不该先空一屏再长出计数。回执与事件是同一本账（同 wake_id），事件
+      // 到了会整体覆盖快照，不会重复累加。
+      ...(r.data?.deliveries && r.data.deliveries.length > 0
+        ? {
+          groupConversations: {
+            ...s.groupConversations,
+            [activeGroupId]: { ...(s.groupConversations[activeGroupId] ?? {}), deliveries: r.data.deliveries },
+          },
+        }
+        : {}),
     }))
     void get().loadGroupActivity(activeGroupId)
     return true
