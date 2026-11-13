@@ -699,6 +699,11 @@ func (m *manager) applyHubSessionLoop(bs *bridgeSession, p *agenthub.AgentProfil
 	}
 	bs.loop = m.buildHubLoop(ws, bs.id, spec, bs.hubEngine)
 	bs.s.SetLoop(bs.loop)
+	// 名册重建顺带对齐群模式：策略变更与名册变更常常一起发生（同一次 hub_group_update），
+	// 这里再落一次保证「重建后的会话」不会退回 createIn 的默认 auto。
+	if scope.Kind == agenthub.ScopeGroup && spec.Group != nil {
+		applyHubGroupMode(bs, spec.Group)
+	}
 	return nil
 }
 

@@ -81,6 +81,9 @@ func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, erro
 			existing.hubDispatchPending.Store(false)
 			return nil, fmt.Errorf("%w: 群会话 %s 已关闭", agenthub.ErrInvalid, sid)
 		}
+		// 每次取会话都对齐一次群模式：策略可能在别处改过（多端/命令），
+		// SetMode 是快照赋值，重复设置零成本，但漏了就是「UI 显示 readonly、实际照跑」。
+		applyHubGroupMode(existing, g)
 		return existing, nil
 	}
 
@@ -94,6 +97,9 @@ func (m *manager) hubGroupSession(agentID, groupID string) (*bridgeSession, erro
 	if err != nil {
 		return nil, err
 	}
+	// createIn 给所有会话的默认模式是项目口径的 auto（全自动放行）；群会话必须用
+	// 群策略的 Mode 覆盖，否则「群模式」就是个假开关（P6-06）。
+	applyHubGroupMode(bs, g)
 	return bs, nil
 }
 

@@ -160,6 +160,34 @@ function spyWire() {
   eq(H.getState().groups.length, before, '失败不新增群')
 }
 
+// —— 3b) 群模式：readonly 必须能选、能落库、能改（P6-06 的真实开关） ——
+{
+  // 新建时选 readonly：wire 上必须是 readonly（不是被前端悄悄降级成 ask/auto）。
+  const spy = spyWire()
+  const ro = await H.getState().createGroup({
+    name: '只读群', member_ids: ['ag_mockres1'], policy: { mode: 'readonly' },
+  })
+  spy.restore()
+  assert(!!ro, 'readonly 群创建成功')
+  eq(ro.policy?.mode, 'readonly', 'readonly 群 policy.mode 落库')
+  const createPayload = spy.seen.find((x) => x.type === 'hub_group_create')?.payload ?? {}
+  eq(createPayload.policy?.mode, 'readonly', 'wire policy.mode = readonly')
+
+  // 改成 auto（GroupView 头部菜单/GroupEditor 走同一条 hub_group_update）。
+  const upd = await call('hub_group_update', { group_id: ro.id, patch: { policy: { mode: 'auto' } } })
+  eq(upd.ok, true, 'hub_group_update 改模式成功')
+  eq(upd.data?.group?.policy?.mode, 'auto', '改模式后响应里的 mode = auto')
+  const after = await call('hub_group_get', { group_id: ro.id })
+  eq(after.data?.group?.policy?.mode, 'auto', '重新读取仍是 auto（不是只改响应）')
+
+  // 非法值必须被拒绝：mock 接受一个不存在的模式 = UI 可以显示一个不存在的开关。
+  const bad = await call('hub_group_update', { group_id: ro.id, patch: { policy: { mode: 'turbo' } } })
+  eq(bad.ok, false, '非法群模式被拒绝')
+  assert(String(bad.error ?? '').includes('ask/auto/readonly'), `非法模式错误文案可读（got=${JSON.stringify(bad.error)}）`)
+  const still = await call('hub_group_get', { group_id: ro.id })
+  eq(still.data?.group?.policy?.mode, 'auto', '非法更新不改动已有模式')
+}
+
 // —— 4) 打开新群：空历史不报错（不能灌进「竞品研究」的种子） ——
 {
   const group = H.getState().groups.find((g) => g.name === '测试群')

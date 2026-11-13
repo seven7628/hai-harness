@@ -289,7 +289,10 @@ func (m *manager) hubGroupUpdate(c command) {
 	// 群名/owner（角色成对改写）进群名册（system prompt L2）：重建成员会话 loop，
 	// 下一个 Run 就能看到新名册。只换 loop，不打断在跑的回合。
 	rosterChanged := next.Name != g.Name || next.OwnerAgentID != g.OwnerAgentID
-	m.respGroupChanged(c, &next, rosterChanged)
+	// 群模式变更必须推到已装配会话：否则 UI 显示 readonly/ask、实际仍按旧模式跑
+	// （P6-06 的「假开关」）。SetMode 是快照语义，下一次 Run 生效，不打断在跑的回合。
+	modeChanged := next.Policy.EffectiveMode() != g.Policy.EffectiveMode()
+	m.respGroupChanged(c, &next, rosterChanged, modeChanged)
 }
 
 func (m *manager) hubGroupDelete(c command) {
@@ -366,7 +369,7 @@ func (m *manager) hubGroupMemberAdd(c command) {
 		return
 	}
 	// 新成员要进每个老成员的群名册（system prompt L2）：重建现有成员会话 loop。
-	m.respGroupChanged(c, &next, true)
+	m.respGroupChanged(c, &next, true, false)
 }
 
 func (m *manager) hubGroupMemberRemove(c command) {
@@ -416,16 +419,22 @@ func (m *manager) hubGroupMemberRemove(c command) {
 	}
 	// 移除的成员从名册里消失：重建剩下成员的群 loop（被移除者自己不再被唤醒，
 	// 旧会话不重建也不关闭 —— 在跑的回合要能正常收尾）。
-	m.respGroupChanged(c, &next, true)
+	m.respGroupChanged(c, &next, true, false)
 }
 
 // respGroupChanged 群变更后的统一响应：名册变了就重建成员们的群会话 loop，
-// 失败不静默 —— 把原因带回响应，UI 能提示「重启后生效」，而不是模型一直看旧名册。
-func (m *manager) respGroupChanged(c command, g *agenthub.Group, rosterChanged bool) {
+// 模式变了就把新 agents.Mode 推到已装配会话。失败不静默 —— 把原因带回响应，
+// UI 能提示「重启后生效」，而不是模型一直看旧名册/按旧模式执行。
+func (m *manager) respGroupChanged(c command, g *agenthub.Group, rosterChanged, modeChanged bool) {
 	data := map[string]any{"group": g}
 	if rosterChanged {
 		if err := m.refreshHubGroupRoster(g.ID); err != nil {
 			addHubWarning(data, "群已保存，但重建成员会话提示词失败，下一次唤醒仍用旧名册: "+err.Error())
+		}
+	}
+	if modeChanged {
+		if err := m.refreshHubGroupMode(g); err != nil {
+			addHubWarning(data, "群模式已保存，但推到成员会话失败，下一次唤醒仍按旧模式: "+err.Error())
 		}
 	}
 	m.resp(c, true, "", data)

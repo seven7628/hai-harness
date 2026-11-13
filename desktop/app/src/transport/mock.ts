@@ -3635,6 +3635,12 @@ class MockTransport implements Transport {
         // 按 bridge 的几道校验来（名字 / 成员 / 成员存在 / owner 归属 / 重名），错误文案给前端直接显示。
         if (!name) { this.respondErr(cmd, '群名称不能为空'); break }
         if (memberIDs.length === 0) { this.respondErr(cmd, '至少需要 1 个成员'); break }
+        // 群模式值域与 bridge 的 GroupPolicy.Validate 同源：readonly 现在有真实行为
+        // （P6-06 只读闸门），mock 接受一个不存在的值等于让 UI 显示一个假开关。
+        if (!mockGroupModeOK(policy.mode)) {
+          this.respondErr(cmd, `群模式只能是 ask/auto/readonly（got=${String(policy.mode)}）`)
+          break
+        }
         const known = new Set(this.hubAgents.map((a) => String(a.id ?? '')))
         const missing = memberIDs.filter((id) => !known.has(id))
         if (missing.length > 0) { this.respondErr(cmd, `智能体不存在：${missing.join('、')}`); break }
@@ -3855,6 +3861,10 @@ class MockTransport implements Transport {
         if (!group) { this.respondErr(cmd, '群组不存在'); break }
         const patch = (cmd.payload?.patch ?? {}) as Record<string, unknown>
         if (typeof patch.name === 'string') group.name = patch.name
+        if (patch.policy && typeof patch.policy === 'object' && !mockGroupModeOK((patch.policy as Record<string, unknown>).mode)) {
+          this.respondErr(cmd, `群模式只能是 ask/auto/readonly（got=${String((patch.policy as Record<string, unknown>).mode)}）`)
+          break
+        }
         if (patch.policy && typeof patch.policy === 'object') {
           group.policy = { ...(group.policy as Record<string, unknown>), ...(patch.policy as Record<string, unknown>) }
         }
@@ -5579,6 +5589,15 @@ const MOCK_STATS_MODELS = [
   { key: 'opencode/glm-5.2', weight: 0.13, inTok: 52000, outTok: 1800, price: { in: 1.4, out: 4.4 } },
   { key: 'anthropic/claude-opus-4.8', weight: 0.05, inTok: 68000, outTok: 2600, price: { in: 5, out: 25 } },
 ]
+
+/**
+ * 群模式值域（与 bridge agenthub.GroupPolicy.Validate 同源）。
+ * undefined = 未传（合法，按默认 ask 处理）；传了就必须是三选一。
+ */
+function mockGroupModeOK(raw: unknown): boolean {
+  if (raw === undefined || raw === null || raw === '') return true
+  return raw === 'ask' || raw === 'auto' || raw === 'readonly'
+}
 
 function mockMetricsReport(from: string): Record<string, unknown> {
   const day = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`

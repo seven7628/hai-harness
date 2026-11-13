@@ -2515,7 +2515,13 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 			// 模式防御与 schema 过滤同源（同一份 AllowTool）：plan 模式语义是
 			// 禁止而非待审，直接拒绝结果回传，模型可见后自行调整。
 			// 模式过滤在 hook 之前（hook 不得放宽模式硬约束——allow 不绕过 Block）
-			blockedCalls = append(blockedCalls, blockedCall{c, "blocked: tool is not available in the current mode"})
+			reason := "blocked: tool is not available in the current mode"
+			if ac.Mode.BlockReason != nil {
+				if custom := strings.TrimSpace(ac.Mode.BlockReason(t)); custom != "" {
+					reason = custom // 产品层说清原因（如群 readonly），模型据此改路
+				}
+			}
+			blockedCalls = append(blockedCalls, blockedCall{c, reason})
 			continue
 		}
 

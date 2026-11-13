@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '../i18n'
 import AgentSigil from './AgentSigil'
+import { asGroupMode, GROUP_MODE_HINT, GROUP_MODES, type GroupMode } from './groupMode'
 import { useHubStore } from './useHubStore'
 
 // 新建群组弹层（左栏「群组」页签的顶部 ＋ / 空态按钮）。
@@ -24,7 +25,10 @@ export default function GroupEditor({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState('')
   const [picked, setPicked] = useState<string[]>([])
   const [owner, setOwner] = useState('')
-  const [mode, setMode] = useState<'ask' | 'auto'>('ask')
+  // 三种协作模式都必须可选：bridge 侧 P6-06 把 mode 真接到了工具执行
+  // （readonly = 只读闸门，ask = 非只读工具逐个审批，auto = 不加群级审批）。
+  // 这里少给一个值，就等于把「readonly 群」藏起来 —— UI 与实际行为必须同一份事实。
+  const [mode, setMode] = useState<GroupMode>('ask')
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   // 只显示「这一次提交」写下的 store.error：Hub 里别的动作（发消息失败等）的文案
@@ -160,15 +164,12 @@ export default function GroupEditor({ onClose }: { onClose: () => void }) {
 
             <label className="hub-group-field">
               <span>协作模式</span>
-              <select value={mode} onChange={(e) => setMode(e.target.value === 'auto' ? 'auto' : 'ask')}>
-                <option value="ask">ask（推荐）</option>
-                <option value="auto">auto</option>
+              <select value={mode} onChange={(e) => setMode(asGroupMode(e.target.value))}>
+                {GROUP_MODES.map((m) => (
+                  <option key={m} value={m}>{m === 'ask' ? 'ask（推荐）' : m}</option>
+                ))}
               </select>
-              <span className="hub-group-hint">
-                {mode === 'ask'
-                  ? 'ask：有副作用的动作先征询你，其余按成员职责自动分工。'
-                  : 'auto：成员之间自动接龙，不逐步征询；随时可以停止。'}
-              </span>
+              <span className="hub-group-hint">{GROUP_MODE_HINT[mode]}</span>
             </label>
 
             {error ? <div className="hub-error" role="alert">{error}</div> : null}

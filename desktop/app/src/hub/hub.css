@@ -2643,6 +2643,8 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .header-menu button:hover { background: var(--surface-2); }
 .hub-demo .header-menu button[aria-checked="true"]::after { content: '✓'; color: var(--accent); }
 .hub-demo .header-menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
+/* 菜单分组标题（如「协作模式」）：不是可点项，只做分组说明。 */
+.hub-demo .header-menu-label { padding: 3px 9px 1px; color: var(--muted); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; }
 
 .hub-demo .msg-row > .avatar,
 .hub-demo .msg-row > .avatar-btn { align-self: flex-start; flex: 0 0 auto; }
