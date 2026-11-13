@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,7 +123,8 @@ func TestHubConversationBudgetGateGroupLevel(t *testing.T) {
 }
 
 // TestHubConversationRateLimitRunEndRequeues：run 因 429 结束（ErrorKind=rate_limit）
-// 时把这条投递退回队列 + 退避，**不标 failed**、不写 final。
+// 时把这条投递退回队列 + 退避，**不标 failed**、不写 final；退避到期后必须**真的
+// 重投一次**（B2：旧断言只读瞬时 queued，run 收尾把它覆写成 done 也是绿的）。
 func TestHubConversationRateLimitRunEndRequeues(t *testing.T) {
 	m, buf := testManager(t)
 	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
@@ -148,6 +150,9 @@ func TestHubConversationRateLimitRunEndRequeues(t *testing.T) {
 	if d.Status == agenthub.DeliveryFailed {
 		t.Fatalf("429 结束不该标 failed: %+v", d)
 	}
+	if d.Status == agenthub.DeliveryDone {
+		t.Fatalf("run 收尾把退避中的 queued 覆写成 done（B2）: %+v", d)
+	}
 	if d.Reason != agenthub.DeliveryReasonRateLimit {
 		t.Fatalf("reason = %q, want %q", d.Reason, agenthub.DeliveryReasonRateLimit)
 	}
@@ -156,6 +161,16 @@ func TestHubConversationRateLimitRunEndRequeues(t *testing.T) {
 	}
 	if n := fb.callCount(); n < 1 {
 		t.Fatalf("provider 调用 = %d, want >= 1", n)
+	}
+	// B2 真绿断言：等退避到期，provider 必须被**第二次**调用（真的重投了一次）。
+	// 旧实现里 queued 被 run 收尾覆写成 done → BeginDelivery no-op → 这里永远超时。
+	convWait(t, "退避到期后必须真的重投一次", func() bool { return fb.callCount() >= 2 })
+	d2, _ := m.hubConversation().Delivery(g.ID, d0.WakeID)
+	if d2.Attempts < 2 {
+		t.Fatalf("重投后 attempts = %d, want >= 2（%+v）", d2.Attempts, d2)
+	}
+	if d2.Status == agenthub.DeliveryDone {
+		t.Fatalf("退避中的记录不该被收口成 done: %+v", d2)
 	}
 }
 
@@ -188,19 +203,22 @@ func setGroupFakeLoopNoRetry(t *testing.T, m *manager, bs *bridgeSession, g *age
 
 // rateLimitProvider 每次都返回 429（模拟上游限流）。
 type rateLimitProvider struct {
-	mu    chan struct{}
+	mu    sync.Mutex
 	calls int
 }
 
 func (p *rateLimitProvider) Stream(ctx context.Context, req *provider.StreamRequest, h func(provider.StreamEvent) error) error {
-	if p.mu != nil {
-		<-p.mu
-	}
+	p.mu.Lock()
 	p.calls++
+	p.mu.Unlock()
 	return &provider.RateLimitError{StatusCode: 429, Err: errors.New("too many requests")}
 }
 
-func (p *rateLimitProvider) callCount() int { return p.calls }
+func (p *rateLimitProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
 
 // TestHubProviderSemaphoreSharedAcrossLoops：装配口径 —— 所有 hub loop 共享同一个
 // 进程级信号量实例（改一个 loop 的配置不会让别的 loop 绕过闸门）。

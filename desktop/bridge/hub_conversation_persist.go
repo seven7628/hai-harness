@@ -155,8 +155,9 @@ func (m *manager) restoreHubConversation(ctrl *agenthub.ConversationController, 
 	if rep.Restored > 0 || rep.Interrupted > 0 {
 		m.emitHubConversation(gid, ctrl.View(gid))
 	}
-	// 未投递的唤醒接着投（重启不该把队列悄悄丢掉）。
-	if rep.Restored > 0 && ctrl.View(gid).Status == agenthub.ConversationRunning {
+	// 未投递的唤醒接着投（重启不该把队列悄悄丢掉）。B1：waiting_human 且队列非空
+	// 同样要泵（软状态不是终态）。
+	if rep.Restored > 0 && ctrl.View(gid).Schedulable() {
 		m.scheduleHubConversationPump(gid)
 	}
 }

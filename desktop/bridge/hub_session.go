@@ -167,6 +167,8 @@ func (m *manager) closeHubRuntimes() {
 			Message: "Hub 后台任务 5s 内未退出，继续关闭会话",
 		})
 	}
+	// N6：先撤掉所有 run 超时定时器（它们闭包持有 manager，关停后再 fire 只会白跑）。
+	m.clearAllHubRunTimeouts()
 	m.mu.Lock()
 	wss := make([]*workspaceRuntime, 0, len(m.hubRuntimes))
 	for _, ws := range m.hubRuntimes {

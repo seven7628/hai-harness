@@ -73,6 +73,7 @@ const (
 	DeliveryReasonShutdown    = "shutdown"           // Hub 正在关停
 	DeliveryReasonInvalid     = "invalid"            // 群/成员/会话已不可用
 	DeliveryReasonQueueFull   = "queue_full"         // 待投递队列到达 max_pending_wakes
+	DeliveryReasonExhausted   = "exhausted"          // 对话护栏命中，队列整批作废（N1）
 )
 
 // Delivery 是一条 wake 的投递记录（一个 target 一条）。

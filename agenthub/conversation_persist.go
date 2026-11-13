@@ -88,6 +88,9 @@ func (c *ConversationController) saveState(group GroupID) {
 	}
 	c.lastSaved[group] = data
 	if err := c.persister.SaveConversationState(context.Background(), snap); err != nil {
+		// N5：写盘失败要回滚「已保存」指纹 —— 否则同一份状态再也走不到写盘
+		// （bytes.Equal 命中），一次瞬时磁盘错误就把这一代对话的持久化永久停掉。
+		delete(c.lastSaved, group)
 		if c.onPersistError != nil {
 			c.onPersistError(group, err)
 		}

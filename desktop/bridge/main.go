@@ -357,6 +357,9 @@ type bridgeSession struct {
 	// 精确收口账本，而不是把该目标所有 running 记录都标 done。emit 内写，
 	// hubOnRunEnd 读（同一 goroutine）。
 	hubGroupRunWakeID string
+	// hubGroupRunNoFinish 标记「这一轮不该由 AgentEnd 收口账本」（B2：429 已把
+	// 投递退回队列）。emit 内写，hubOnRunEnd 读（同一 goroutine）。
+	hubGroupRunNoFinish bool
 	// hubWakeDepth/hubWakeTurn 是 hubGroupWake.Depth/Turn 的原子镜像（P3b-04）：
 	// group_say 在工具 goroutine 里要算「下一跳深度」，不能直接读 emit 独占的指针。
 	hubWakeDepth atomic.Int64
@@ -2361,7 +2364,11 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 				// 先收口投递账本（running → done），再推进泵：泵看到的是
 				// 「这一轮已结束」的账本，不会把同一条 wake 当成还在跑。
 				// 按 wake id 收口（P6-09）：只标这一轮，不碰已经投给同一目标的下一轮。
-				m.finishHubGroupDelivery(gid, aid, bs.hubGroupRunWakeID)
+				// B2：429 退回队列的那一轮已经自己收过口（queued + 退避），这里一条都不碰。
+				if !bs.hubGroupRunNoFinish {
+					m.finishHubGroupDelivery(gid, aid, bs.hubGroupRunWakeID)
+				}
+				bs.hubGroupRunNoFinish = false
 				m.scheduleAgentTaskPump(gid, aid)
 				m.scheduleHubConversationPump(gid)
 			}

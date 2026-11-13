@@ -213,6 +213,33 @@ const eq = (got, want, m) => {
   )
   eq(conv.deliveryTallyText(conv.deliveryTally(null)), '', '没有账本 → 空文案（空态不占位）')
 
+  // I2：同一批按 conversation_id + round_id 聚合。被护栏跳过的目标**从来没有 turn**
+  // （恒 0），只按 turn 比对会把它挤出本批 —— 状态条上「A 在跑」却看不到「B 被跳过」。
+  const mixedBatch = conv.deliveryTally({ deliveries: [
+    { target: 'agt_c', status: 'running', turn: 1, conversation_id: cid, round_id: 'rnd_0' }, // 上一批（账本旧→新）
+    { target: 'agt_a', status: 'running', turn: 1, conversation_id: cid, round_id: 'rnd_1' },
+    { target: 'agt_b', status: 'skipped', reason: 'pair_limit', turn: 0, conversation_id: cid, round_id: 'rnd_1' },
+  ] }, names)
+  eq(mixedBatch.total, 2, 'I2：A running(turn=1) + B skipped(turn=0) 必须同批')
+  eq(mixedBatch.running, 1, 'I2：本批 running 1 条')
+  eq(mixedBatch.skipped, 1, 'I2：被跳过的目标也要显示（不能只剩 running）')
+  eq(mixedBatch.pending, 1, 'I2：未回复只算 queued+running（跳过不算）')
+  eq(mixedBatch.detail.split('\n').length, 2, 'I2：hover 明细包含被跳过的那条')
+  // round_id 为空（旧后端/人类首轮）→ 回退到 turn 比对。
+  const noRoundBatch = conv.deliveryTally({ deliveries: [
+    { target: 'agt_a', status: 'running', turn: 2, conversation_id: cid }, // 上一轮
+    { target: 'agt_b', status: 'skipped', reason: 'pair_limit', turn: 1, conversation_id: cid },
+    { target: 'agt_c', status: 'running', turn: 1, conversation_id: cid },
+  ] }, names)
+  eq(noRoundBatch.total, 2, 'I2：round_id 为空时回退 turn（同 turn 才算一批）')
+  eq(noRoundBatch.skipped, 1, 'I2：回退路径同样看得见被跳过的目标')
+  // 不同 round 绝不能混进同一批。
+  const crossRound = conv.deliveryTally({ deliveries: [
+    { target: 'agt_b', status: 'running', turn: 1, conversation_id: cid, round_id: 'rnd_8' },
+    { target: 'agt_a', status: 'done', turn: 3, conversation_id: cid, round_id: 'rnd_9' },
+  ] }, names)
+  eq(crossRound.total, 1, 'I2：不同 round 不同批（只有最后一条 round）')
+
   // —— 未知原因码：状态条上说明「这是未知码」；单条明细仍保留原始码给排障 ——
   eq(conv.deliveryReasonInline('boom'), '未知原因：boom', '未知原因码有可读文案')
   eq(conv.deliveryReasonInline('pair_limit'), '互踢到上限，已跳过', '已知码照常翻译')
@@ -245,6 +272,10 @@ const eq = (got, want, m) => {
   assert(running.segments.every((s) => s.text.trim().length > 0), '没有空文案段（不留悬空分隔符）')
   eq(running.canStop, true, '有队列 → 可停')
   eq(running.canReset, false, '没到限 → 不给重置')
+  // N4：后端没给 max_depth 时，分母与 Go 的 DefaultConversationMaxDepth（1000）对齐，
+  // 不能显示「深度 2/4」这种假上限。
+  const noMaxDepth = conv.conversationBarModel({ conversation: { status: 'running', depth: 2 } })
+  eq(noMaxDepth.segments.find((s) => s.key === 'chain').text, '本链 2/1000', 'N4：缺省深度分母 = Go 默认 1000')
 
   // —— 护栏命中：pair 到限 + 恢复倒计时 + 重置门禁 + 终态 ——
   const waiting = conv.conversationBarModel({
