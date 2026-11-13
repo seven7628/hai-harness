@@ -3932,6 +3932,18 @@ function busySidsFromViews(views: Record<string, SessionView> | undefined): Read
   return out
 }
 
+/* Hub 会话 id 判定：`hub.<agent>.dm`（DM）/ `hub.<agent>.g.<group>`（群会话）。
+   为什么需要按 **id 形状** 认：Hub 会话的流式/运行事件（content_chunk / reasoning_chunk /
+   agent_start / agent_end / llm_end / tool_run_*）**没有** hub_ 前缀 —— 只有事件名带 hub_ 的
+   那一批才是 `hub_message` / `hub_conversation` 之类；这些流事件是靠 bridge 给每条事件注入的
+   session_id（main.go，形状见 agenthub/group.go 的 SessionID）才认得出属于 Hub。
+   工作区会话是 `s_…`（session 包生成）、空 sid 是「无归属」—— 都不算 Hub，不能误伤。
+   单一入口原则（§17.6）：Hub 的事件只归 useHubStore；主 store 的 views/busySids 只认工作区
+   会话 —— 混进 hub.* 会留下永不清理的正文与常亮的运行点，并唤醒全部 useAppStore 订阅点。 */
+export function isHubSessionId(sid: unknown): boolean {
+  return typeof sid === 'string' && sid.startsWith('hub.')
+}
+
 // 事件路由目标会话（SDK 事件带 session_id；缺省回退活跃会话，避免建空 '' view）
 function getSid(raw: AnyEvent, fallback?: string): string {
   const sid = typeof raw.session_id === 'string' && raw.session_id ? raw.session_id : ''
@@ -4700,6 +4712,11 @@ function flushQueueAfterTool(sid: string): void {
 // bridge 事件 → 状态更新：按 session_id 路由进 views[sid]（后台会话事件进自己 view，不打扰当前显示）；
 // 活跃会话同步顶层镜像（组件读顶层零改动）。
 export function dispatchEvent(raw: AnyEvent): void {
+  // Hub 会话事件整条挡掉（与 wire() 传输层闸门同一判据；这里是**最后一道**）。
+  // dispatchEvent 是事件进视图层的唯一入口 —— 快照补应用、preBuf 补应用、日志重放都会走到
+  // 这里，所以在入口再挡一次：任何调用路径都不可能给 views 建出 hub.* 视图。
+  // command_response 例外：它不建视图，且 pending / snapshot 的结算必须走完（否则发消息超时）。
+  if (raw.event_type !== 'command_response' && isHubSessionId(raw.session_id)) return
   const setState = useAppStore.setState
   const getState = useAppStore.getState
   // 流式 chunk 合并（FIX_OPTIMIZATION 问题3①）：非快照重建时 chunk 先入缓冲 ~32ms 合并一次；
@@ -9196,6 +9213,13 @@ function wire(): void {
       // Hub 事件只归 useHubStore（§17.6 单一入口）：主 store 的 views/busySids 只认工作区
       // 会话，把 hub.<id>.dm 的流灌进来会留下永不清理的正文与常亮运行点（P1-08 复核 N1）。
       if (typeof ev.event_type === 'string' && ev.event_type.startsWith('hub_')) return
+      // 同一条判据的**第二种形状**：Hub 会话的流式/运行事件没有 hub_ 前缀（content_chunk /
+      // reasoning_chunk / agent_start / agent_end / llm_end / tool_run_*），靠 session_id 才认得出
+      // 是 hub.<agent>.dm / hub.<agent>.g.<gid>。它们以前漏进主 store：setView 建出永不清理的
+      // views['hub.*']，并唤醒五百多个 useAppStore 订阅点（Project 侧不需要这些视图）。
+      // 闸门放在最前面：chunk 合并缓冲与快照 preBuf 都不该收 Hub 事件。
+      // command_response 例外（不建视图；pending / snapshot 的结算必须走完）。
+      if (ev.event_type !== 'command_response' && isHubSessionId(ev.session_id)) return
       // 快照分流（FIX_OPTIMIZATION 问题2③）：new_session 快照在途时，发往该 sid 的事件先入
       // preBuf 暂存（防御，正常为空；响应到达后由 materializeSnapshot / 下方补应用），
       // 其余事件正常分发。
