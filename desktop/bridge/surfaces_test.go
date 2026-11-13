@@ -79,6 +79,15 @@ func withManifest(fn func(m map[string]any)) fixtureOpt {
 	return func(_ string, m map[string]any) { fn(m) }
 }
 
+func withSymlink(t *testing.T, name, target string) fixtureOpt {
+	t.Helper()
+	return func(dir string, _ map[string]any) {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Fatalf("建软链 %s: %v", name, err)
+		}
+	}
+}
+
 func withFile(t *testing.T, name, content string) fixtureOpt {
 	t.Helper()
 	return func(dir string, _ map[string]any) {
@@ -159,9 +168,16 @@ func TestSurfaceInstallWritesIndexHashAndPerms(t *testing.T) {
 	panel := "export default function Panel() { return null }\n"
 	src := surfaceFixture(t, "cost-board", "0.1.0", panel)
 
+	start := time.Now()
 	rec := st.Install(src, true)
+	elapsed := time.Since(start)
 	if rec.Status != surfaceApplied {
 		t.Fatalf("status = %q，want %q（reason=%q）", rec.Status, surfaceApplied, rec.Reason)
+	}
+	// P14 的一半（安装/卸载磁盘路径，预算 150ms）；另一半是渲染层 loader，PR-14 才有。
+	t.Logf("P14 install 耗时 = %v（预算 150ms）", elapsed)
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("P14 超预算：install = %v > 150ms", elapsed)
 	}
 	if rec.ID != "cost-board" || rec.Version != "0.1.0" {
 		t.Fatalf("回执 id/version = %q/%q", rec.ID, rec.Version)
@@ -317,6 +333,17 @@ func TestSurfaceInstallRejectsBadManifests(t *testing.T) {
 				return surfaceFixture(t, "too-big", "1.0.0", strings.Repeat("x", 256<<10+1))
 			},
 			reason: "256",
+		},
+		{
+			// 校验能过（入口是常规文件、体积合规），死在**拷贝**这一步：
+			// 这条是「先拷到 .install-* 再 rename」的唯一可观测点 —— 没有暂存目录
+			// 就会在 <id> 下留半个插件。
+			name: "目录里混了符号链接（死在拷贝步）",
+			fix: func(t *testing.T) string {
+				return surfaceFixture(t, "link-in-dir", "1.0.0", "a\n",
+					withSymlink(t, "extra-link", "/etc/passwd"))
+			},
+			reason: "符号链接",
 		},
 		{
 			name: "整目录超 1 MiB",
@@ -595,5 +622,53 @@ func TestSurfaceAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 	_, idx := readIndex(t, root)
 	if len(idx.Items) != 1 {
 		t.Fatalf("index 没写：%v", idx.Items)
+	}
+}
+
+// 首次安装就被拒：目录权限仍必须是 0700 / 0600。
+//
+// 这条守的是 audit 路径：`atomicfile.Append` 建父目录用 0755，如果「校验失败 → 写
+// audit」先于 ensureStore 发生，surfaces 根目录就会被种成 0755（之后所有插件文件都
+// 住在这个洞里，而权限断言只在成功路径上才发现）。
+func TestSurfaceRejectedFirstRunLeavesSafePerms(t *testing.T) {
+	st, root := testSurfaceStore(t)
+	bad := surfaceFixture(t, "Bad-Id", "1.0.0", "export default () => null\n")
+	rec := st.Install(bad, true)
+	if rec.Status != surfaceRejected {
+		t.Fatalf("status = %q，want rejected（reason=%q）", rec.Status, rec.Reason)
+	}
+	wantMode(t, root, 0o700)
+	wantMode(t, filepath.Join(root, "audit.jsonl"), 0o600)
+}
+
+// entry 可以是子目录里的文件：hash 认 manifest.entry，不认「panel.js」这个名字。
+//
+// 这条钉的是「hash = sha256(manifest.entry)」这个口径（01 §5.4 写的是 sha256(panel.js)）：
+// 认死文件名会让 `"entry":"dist/panel.js"` 这种合法 manifest 装不上，或者算出一个
+// 不属于任何文件的 hash。
+func TestSurfaceInstallAcceptsNestedEntry(t *testing.T) {
+	st, root := testSurfaceStore(t)
+	panel := "export default () => 'nested'\n"
+	src := surfaceFixture(t, "nested-entry", "0.2.0", "", withManifest(func(m map[string]any) {
+		m["entry"] = "dist/panel.js"
+	}), func(dir string, _ map[string]any) {
+		if err := os.MkdirAll(filepath.Join(dir, "dist"), 0o700); err != nil {
+			t.Fatalf("建 dist: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "dist", "panel.js"), []byte(panel), 0o600); err != nil {
+			t.Fatalf("写 dist/panel.js: %v", err)
+		}
+	})
+
+	rec := st.Install(src, true)
+	if rec.Status != surfaceApplied {
+		t.Fatalf("status = %q，want applied（reason=%q）", rec.Status, rec.Reason)
+	}
+	if want := sha256Hex(panel); rec.Hash != want {
+		t.Fatalf("hash = %q，want sha256(dist/panel.js) = %q", rec.Hash, want)
+	}
+	got := string(readBytes(t, filepath.Join(root, "nested-entry", "dist", "panel.js")))
+	if got != panel {
+		t.Fatalf("拷贝的入口 = %q，want %q", got, panel)
 	}
 }

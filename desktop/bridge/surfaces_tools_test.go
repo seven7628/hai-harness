@@ -58,9 +58,15 @@ func TestSurfaceToolsSchemaAndApproval(t *testing.T) {
 		if len(props) > 3 {
 			t.Fatalf("%s 参数 %d 个，超过 3 个上限", c.name, len(props))
 		}
-		if c.tl.CanParallel() != c.wantPar || c.tl.ReadOnly() != c.wantRO {
-			t.Fatalf("%s CanParallel/ReadOnly = %v/%v，want %v/%v",
-				c.name, c.tl.CanParallel(), c.tl.ReadOnly(), c.wantPar, c.wantRO)
+		if c.tl.CanParallel() != c.wantPar {
+			t.Fatalf("%s CanParallel = %v，want %v", c.name, c.tl.CanParallel(), c.wantPar)
+		}
+		ro, ok := c.tl.(tools.ReadOnlyTool)
+		if !ok {
+			t.Fatalf("%s 没实现 ReadOnlyTool（模式过滤要靠它）", c.name)
+		}
+		if ro.ReadOnly() != c.wantRO {
+			t.Fatalf("%s ReadOnly = %v，want %v", c.name, ro.ReadOnly(), c.wantRO)
 		}
 		ar, ok := c.tl.(tools.ApprovalRequired)
 		if !ok {
@@ -199,15 +205,15 @@ return { status: r.status, reason: r.reason, isObj: typeof r === "object" };
 // surfaceDenyApprover 复刻会话侧的「用户拒绝」：wait 返回 (false, nil)。
 type surfaceDenyApprover struct{}
 
-func (surfaceDenyApprover) BeginApproval(core.ToolCall) (func(context.Context) (bool, error), error) {
-	return func(context.Context) (bool, error) { return false, nil }, nil
+func (surfaceDenyApprover) BeginApproval(core.ToolCall) func(context.Context) (bool, error) {
+	return func(context.Context) (bool, error) { return false, nil }
 }
 
 // surfaceAllowApprover 批准（证明审批不是「永久拒绝」）。
 type surfaceAllowApprover struct{}
 
-func (surfaceAllowApprover) BeginApproval(core.ToolCall) (func(context.Context) (bool, error), error) {
-	return func(context.Context) (bool, error) { return true, nil }, nil
+func (surfaceAllowApprover) BeginApproval(core.ToolCall) func(context.Context) (bool, error) {
+	return func(context.Context) (bool, error) { return true, nil }
 }
 
 func TestSurfaceInstallApprovalDeniedDoesNotWriteIndex(t *testing.T) {
