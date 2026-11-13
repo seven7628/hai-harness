@@ -51,6 +51,12 @@
       "name": "P5 · 质量审计",
       "goal": "跨面隐式状态清单、风险矩阵与治理路线",
       "days": "按需"
+    },
+    {
+      "id": "P6",
+      "name": "P6 · 群聊硬化",
+      "goal": "投递账本、统一调度、Mode 真接线、Pair/Depth 全局化、人类插话代际、持久化、observer 删除、UI 一致性",
+      "days": "按需"
     }
   ],
   "tasks": [
@@ -1863,6 +1869,277 @@
       "review": "passed",
       "note": "P2 批次。产品代码 review 全部通过；首轮 CHANGES_REQUESTED 只在 check:p4-p2 门禁（更多入口用 title 找不到、筛选 chip 用 ||），2435a0c 改 aria-label 匹配+&& 后复跑全绿。",
       "reviewNote": "task-h54jdhp3：产品六项/390/system/mock 对齐真实 Chromium 全部 PASS；阻塞仅 check:p4-p2 B1/B2；2435a0c 修后 `npm run check:p4-p2` 输出 640/760/900 均有「更多入口 32×32」与 scope&&tab，全部通过。非阻塞：≤900 与 Electron minWidth 980 不一致（980×620 目标仍小）、fixed sleep、stale error 未清、shoot-hub-conv 390 限制；iOS Safari/OS 深链仍发布 gate。"
+    },
+    {
+      "id": "P6-01",
+      "phase": "P6",
+      "title": "投递账本：每 target queued/running/done/skipped/failed",
+      "deps": [],
+      "files": [
+        "agenthub/conversation.go",
+        "desktop/bridge/hub_conversation.go",
+        "desktop/bridge/hub_group_session.go",
+        "desktop/bridge/hub_group_commands.go"
+      ],
+      "acceptance": "忙目标排队重试不丢；命令返回 per-target deliveries；skipped/failed 有原因；UI 类型齐全；重复投递幂等。",
+      "tests": "go test ./agenthub/... ./desktop/bridge -run TestHubConversation|TestHubGroup；node scripts/test-hub-conv.mjs",
+      "commit": "feat(hub-p6-01): per-target 投递账本"
+    },
+    {
+      "id": "P6-02",
+      "phase": "P6",
+      "title": "统一群调度器：并发=目标数，删除 MaxParallelRuns",
+      "deps": [
+        "P6-01"
+      ],
+      "files": [
+        "desktop/bridge/hub_conversation.go",
+        "desktop/bridge/hub_group_session.go",
+        "agenthub/group.go",
+        "desktop/app/src/hub"
+      ],
+      "acceptance": "人类与 agent wake 同一调度器；12 人群 @all 11 并发；显式 @3 为 3；GroupPolicy.MaxParallelRuns 删除；忙目标排队；429 不标 failed。",
+      "tests": "go test ./desktop/bridge -run TestHubConversation；node scripts/test-hub-conv.mjs；浏览器 group stream",
+      "commit": "feat(hub-p6-02): 统一群调度器与并发=目标数"
+    },
+    {
+      "id": "P6-03",
+      "phase": "P6",
+      "title": "预跑预算门 + provider 信号量 + 429 退避",
+      "deps": [
+        "P6-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_conversation.go",
+        "desktop/bridge/hub_tools.go",
+        "desktop/bridge/main.go"
+      ],
+      "acceptance": "预算不足不启动 run；群/agent/全局三级；provider 并发信号量；429 排队退避；UI 可见预算/并发状态。",
+      "tests": "go test ./desktop/bridge -run Budget|HubConversation；真实 provider 429 模拟",
+      "commit": "feat(hub-p6-03): 群 run 预跑预算与限流"
+    },
+    {
+      "id": "P6-04",
+      "phase": "P6",
+      "title": "全局对话设置 + PairLimit 无序/10/成功投递计数",
+      "deps": [
+        "P6-01"
+      ],
+      "files": [
+        "agenthub/conversation.go",
+        "desktop/bridge/hub_conversation.go",
+        "desktop/app/electron/settings-store.ts",
+        "desktop/app/src/settings",
+        "desktop/app/src/hub/conversation.ts"
+      ],
+      "acceptance": "settings.json hub.conversation.max_depth/pair_limit；A↔B 无序；成功投递才计数；到限只 skip 该 target；A→C 不重置 A↔B；人类新 generation 清零。",
+      "tests": "go test ./agenthub -run TestConversationPair；settings 单测；node scripts/test-hub-conv.mjs",
+      "commit": "feat(hub-p6-04): 全局对话设置与无序 PairLimit"
+    },
+    {
+      "id": "P6-05",
+      "phase": "P6",
+      "title": "每链 Depth + 全局 1000 + 人类重置",
+      "deps": [
+        "P6-04"
+      ],
+      "files": [
+        "agenthub/conversation.go",
+        "desktop/bridge/hub_group_session.go",
+        "desktop/bridge/hub_conversation.go",
+        "desktop/app/src/hub/conversation.ts"
+      ],
+      "acceptance": "depth=parent+1；并行分支互不影响；深浅不串；max_depth 默认 1000；人类新输入归零；旧 run 不消耗新链额度。",
+      "tests": "go test ./agenthub -run TestConversationDepth；go test ./desktop/bridge -run TestHubGroupDepth；浏览器状态条",
+      "commit": "feat(hub-p6-05): 每链深度与全局 max_depth"
+    },
+    {
+      "id": "P6-06",
+      "phase": "P6",
+      "title": "Mode 真接线：auto/ask/readonly",
+      "deps": [],
+      "files": [
+        "desktop/bridge/hub_group_tools.go",
+        "desktop/bridge/hub_tools.go",
+        "desktop/bridge/hub_group_commands.go",
+        "desktop/app/src/hub/GroupEditor.tsx"
+      ],
+      "acceptance": "readonly 拒绝非只读工具；ask 对非只读工具弹审批；auto 直跑；group_say/读工具始终允许；人类 UI 与实际一致。",
+      "tests": "go test ./desktop/bridge -run TestGroupMode；浏览器 Needs 审批流",
+      "commit": "feat(hub-p6-06): 群 Mode 工具策略真接线"
+    },
+    {
+      "id": "P6-07",
+      "phase": "P6",
+      "title": "人类插话下一输入 + generation 隔离",
+      "deps": [
+        "P6-01",
+        "P6-02",
+        "P6-04",
+        "P6-05"
+      ],
+      "files": [
+        "desktop/bridge/hub_group_commands.go",
+        "desktop/bridge/hub_conversation.go",
+        "desktop/bridge/hub_group_session.go",
+        "desktop/app/src/hub/useHubStore.ts"
+      ],
+      "acceptance": "在飞 run 不中断；旧 generation 未投递 wake 丢弃；人类消息按 target 排队；旧 run @ 不路由；新链 depth/pair 清零。",
+      "tests": "go test ./desktop/bridge -run TestHumanInterject；浏览器群聊插话",
+      "commit": "feat(hub-p6-07): 人类插话下一输入与代际隔离"
+    },
+    {
+      "id": "P6-08",
+      "phase": "P6",
+      "title": "按 agent 停止 + run 超时",
+      "deps": [
+        "P6-01",
+        "P6-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_conversation.go",
+        "desktop/bridge/hub_commands.go",
+        "desktop/app/src/hub"
+      ],
+      "acceptance": "stop 可带 agent_id 只停一个；群级 stop 保留；run_timeout_ms 超时中断；队列继续。",
+      "tests": "go test ./desktop/bridge -run TestHubConversationStop；浏览器停止按钮",
+      "commit": "feat(hub-p6-08): 按 agent 停止与 run 超时"
+    },
+    {
+      "id": "P6-09",
+      "phase": "P6",
+      "title": "对话状态持久化 + 重启恢复",
+      "deps": [
+        "P6-01",
+        "P6-04",
+        "P6-05",
+        "P6-07"
+      ],
+      "files": [
+        "agenthub/store.go",
+        "agenthub/store_memory.go",
+        "agenthub/conversation.go",
+        "desktop/bridge/main.go"
+      ],
+      "acceptance": "每群 conversation 文件；queue/status/pair/depth 落盘；重启恢复未投递；已投递未完成标 interrupted 不重放；坏文件不覆盖。",
+      "tests": "go test ./agenthub -run TestConversationStore；go test ./desktop/bridge -run TestConversationRestart",
+      "commit": "feat(hub-p6-09): 对话状态持久化与重启恢复"
+    },
+    {
+      "id": "P6-10",
+      "phase": "P6",
+      "title": "@all 状态/沉默语义 + 状态条",
+      "deps": [
+        "P6-01",
+        "P6-02"
+      ],
+      "files": [
+        "desktop/bridge/hub_conversation.go",
+        "desktop/app/src/hub/useHubStore.ts",
+        "desktop/app/src/hub/ConversationBar.tsx",
+        "desktop/app/src/hub/conversation.ts"
+      ],
+      "acceptance": "每 target 已入队/已回复/未回复/失败可见；@all 成功=已入队；状态条显示本轮/本链/队列/pair/失败。",
+      "tests": "node scripts/test-hub-conv.mjs；浏览器群聊状态条",
+      "commit": "feat(hub-p6-10): @all 投递状态与群状态条"
+    },
+    {
+      "id": "P6-11",
+      "phase": "P6",
+      "title": "agent 来源标记 + 工具策略审计",
+      "deps": [
+        "P6-06"
+      ],
+      "files": [
+        "agenthub/message.go",
+        "agenthub/prompt.go",
+        "desktop/bridge/hub_group_session.go",
+        "desktop/bridge/hub_group_tools.go"
+      ],
+      "acceptance": "wake header 带 human/owner/member 来源；审计可查；ask/readonly 对 agent-origin 同样生效；不把 agent 消息当系统指令。",
+      "tests": "go test ./desktop/bridge -run TestGroupOrigin；prompt 快照",
+      "commit": "feat(hub-p6-11): agent 来源标记与工具策略审计"
+    },
+    {
+      "id": "P6-12",
+      "phase": "P6",
+      "title": "observer 删除与旧数据迁移",
+      "deps": [],
+      "files": [
+        "agenthub/group.go",
+        "agenthub/handoff.go",
+        "desktop/bridge/hub_group_tools.go",
+        "desktop/app/src/hub/mentions.ts",
+        "desktop/app/src/hub/MentionPicker.tsx",
+        "desktop/app/src/hub/MessageBubble.tsx",
+        "desktop/app/src/transport/mock.ts"
+      ],
+      "acceptance": "MemberRole 只剩 owner/member；旧 observer 加载转 member；删除所有 observer 特判/UI 标签/mock；@all 覆盖全部活跃成员。",
+      "tests": "go test ./agenthub/... ./desktop/bridge -run Group；node scripts/test-hub-group-create.mjs；浏览器 group",
+      "commit": "refactor(hub-p6-12): 删除 observer 角色并迁移旧数据"
+    },
+    {
+      "id": "P6-13",
+      "phase": "P6",
+      "title": "死旋钮清理：MaxParallelRuns / MaxTurnsPerHuman",
+      "deps": [
+        "P6-02",
+        "P6-06"
+      ],
+      "files": [
+        "agenthub/group.go",
+        "desktop/app/src/hub/GroupEditor.tsx",
+        "desktop/app/src/transport/mock.ts",
+        "docs/agent-hub"
+      ],
+      "acceptance": "删除 MaxParallelRuns/MaxTurnsPerHuman 字段与默认值；Mode 已生效；每个保留 policy 字段有生效性测试。",
+      "tests": "go test ./agenthub -run GroupPolicy；npm run test:p4",
+      "commit": "refactor(hub-p6-13): 清理群策略死旋钮"
+    },
+    {
+      "id": "P6-14",
+      "phase": "P6",
+      "title": "会话区/右栏色板统一 + ConversationBar 信息",
+      "deps": [
+        "P6-05",
+        "P6-10"
+      ],
+      "files": [
+        "desktop/app/src/hub/hub.css",
+        "desktop/app/src/hub/demo.css",
+        "desktop/app/src/hub/ConversationBar.tsx",
+        "desktop/app/src/hub/conversation.ts"
+      ],
+      "acceptance": "ink/paper/system 三主题中心与右栏同色；header/composer 同步；状态条显示本轮/本链/队列/pair/失败；1280/640 无溢出。",
+      "tests": "npm run test:css；浏览器截图三主题；check-p4-p2-details",
+      "commit": "fix(hub-p6-14): 统一会话区色板与群状态条"
+    },
+    {
+      "id": "P6-15",
+      "phase": "P6",
+      "title": "P6 最终回归 + 独立 Review",
+      "deps": [
+        "P6-01",
+        "P6-02",
+        "P6-03",
+        "P6-04",
+        "P6-05",
+        "P6-06",
+        "P6-07",
+        "P6-08",
+        "P6-09",
+        "P6-10",
+        "P6-11",
+        "P6-12",
+        "P6-13",
+        "P6-14"
+      ],
+      "files": [
+        "docs/agent-hub/GROUP-CHAT-HARDENING.md"
+      ],
+      "acceptance": "Go/TS/browser/真实 Hub E2E 全绿；独立 Review PASS；看板/文档同步；worktree 清理。",
+      "tests": "go test ./...；npm run test:p4；浏览器关键脚本；真实 provider E2E",
+      "commit": "test(hub-p6-15): 群聊硬化最终回归"
     }
   ],
   "deferred": [
