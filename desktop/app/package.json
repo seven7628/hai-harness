@@ -179,6 +179,7 @@
     "check:hub-avatar-perf": "node scripts/check-hub-avatar-perf.mjs",
     "check:hub-scroll-perf": "node scripts/check-hub-scroll-perf.mjs",
     "check:hub-group-stream": "node scripts/check-hub-group-stream.mjs",
+    "check:hub-menu-layer": "node scripts/check-hub-menu-layer.mjs",
     "check:hub-group-create": "node scripts/check-hub-group-create.mjs",
     "check:hub-taskcard-workspace": "node scripts/check-hub-taskcard-workspace.mjs",
     "test:hub-attach": "node scripts/test-hub-attach.mjs",

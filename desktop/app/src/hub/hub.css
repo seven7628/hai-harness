@@ -2594,6 +2594,22 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   overflow: hidden;
 }
 .hub-demo.main > .chat-header { flex: 0 0 auto; width: 100%; }
+
+/* 头部浮层层级（P6-16）。
+   根因：`.chat-header` 的 backdrop-filter 已经创建了 stacking context，但它自己的
+   z-index 是 auto —— 在 DOM 顺序里排在 `.messages` 之前，于是「更多操作」菜单
+   （z-index:60）只在这个上下文**内部**有效，菜单一旦溢出头部就被消息列表/表格盖住，
+   截图上表现为下层文字透出。把 60 改成 999 也治不好：那是同一个被关住的上下文。
+   修法：header 显式成为一层（position + z-index），isolation:isolate 让它的子元素
+   的层级只在这个层内比较，不再和外部的消息区互相穿透。 */
+.hub-demo .chat-header {
+  position: relative;
+  z-index: 50; /* 高于 .messages / 表格 / 右栏内容，低于 @ 选择器(40 之外)与灯箱(320) */
+  isolation: isolate;
+}
+/* 菜单自身仍留一个层内层级：头部里还有头像栈/标题等兄弟，避免菜单被它们盖住。 */
+.hub-demo .header-actions { z-index: 1; }
+
 .hub-demo.main > .messages { flex: 1 1 auto; width: 100%; }
 /* 全局 index.css 的 `.composer-wrap` 带 max-width:800 + width:100% + margin:0 auto，
    它会一并命中 demo 会话区的 composer 外层：1440 下外层被收成 800、再被 28px 内边距
