@@ -1740,12 +1740,27 @@ export const useHubStore = create<HubState>((set, get) => ({
         const root = get().rootRunId
         if (root && ev.run_id && ev.run_id !== root) return
         const piece = ev.content ?? ev.text ?? ''
-        if (piece) {
-          set((s) => ({
-            live: s.live + piece,
-            running: activeId ? { ...s.running, [activeId]: true } : s.running,
-          }))
-        }
+        if (!piece) return
+        // mock 与真 bridge 在发 hub_message_delta 的同时**仍然**发 content_chunk（旧 live
+        // 路径）。有草稿时 live 没人画（HubSurface 的 showLive=false；群视图只画群草稿），
+        // 但每个 token 都写一次 live 就会换引用、把整棵 DM 视图（消息列表 + Markdown）
+        // reconcile 一遍。running 同理：已经是 true 还 spread 一个新对象，订阅整张
+        // running map 的左栏/群视图/右栏全部白重渲染。只在真有可见变化时才写 state。
+        set((s) => {
+          const aid = s.activeId
+          // 群模式：live 不被 GroupView 使用（群正文走 groupDrafts）。
+          // DM：当前 agent 已有草稿时草稿就是真身，live 只是「还没收到 delta」的兜底。
+          const needLive = !s.activeGroupId
+            && !s.groupDrafts.some((d) => !d.groupId && d.agentId === aid)
+          // 已 true 时复用原 running 对象：引用不变 → 订阅者不通知。
+          const needRunning = !!aid && s.running[aid] !== true
+          // 两处都没有可见变化 → 原样返回（Zustand 不通知，零渲染）。
+          if (!needLive && !needRunning) return s
+          const next: Partial<HubState> = {}
+          if (needLive) next.live = s.live + piece
+          if (needRunning && aid) next.running = { ...s.running, [aid]: true }
+          return next
+        })
         return
       }
       case 'agent_start': {
