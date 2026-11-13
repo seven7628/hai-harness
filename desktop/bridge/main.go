@@ -342,7 +342,8 @@ type bridgeSession struct {
 
 	// hubOnAgentEnd Hub 会话的本轮收尾钩子（nil = 项目会话）。RunStream 层事件只经
 	// bs.emit 发出（Session 的 WithEventHandler 收不到 agent_*），所以钩子必须挂在 emit。
-	hubOnAgentEnd func(content string)
+	// segs 是按 LLM 轮次分段的正文（每段一条气泡；空 = 没有段，调用方回退 content）。
+	hubOnAgentEnd func(content string, segs []hubSegment)
 	// hubOnRunEnd 群会话根 run **真正**收尾（running/闩都已放开）之后的推进钩子
 	// （P3b-04：自动对话串行泵 + 忙目标任务泵）。nil = 非群会话。
 	hubOnRunEnd func()
@@ -356,8 +357,13 @@ type bridgeSession struct {
 	// hubGroupBusy 该群会话已投递但尚未 AgentEnd 的唤醒。忙时不投第二个快照，
 	// 避免两个 round 共用一次 AgentEnd。
 	hubGroupBusy atomic.Bool
-	// hubDelta 群内流式草稿的生产侧（nil = DM/项目会话）。只在 emit 的 run goroutine 写。
+	// hubDelta Hub 流式草稿的生产侧（nil = 项目会话）：群/DM 都按 LLM 轮次分段，
+	// 每段一条草稿、一次 LLMEnd 收口一段。只在 emit 的 run goroutine 写。
 	hubDelta *hubDeltaSink
+	// hubDeltaAgentID/hubDeltaDM 是 hubDelta 的段归属：DM 没有群唤醒头，AgentStart
+	// 只有它能告诉 sink「这些 delta 属于哪个智能体」；群会话由 wake 覆盖（同值）。
+	hubDeltaAgentID string
+	hubDeltaDM      bool
 	// hubGroupSeq 单调发号（永不回 0）；hubGroupOwner 是当前 busy 轮的代号
 	// （0 = idle）；hubGroupRunSeq 是正在跑的 run 绑定的代号。runLoop 在
 	// 「没有 AgentEnd」的终止路径上也要清闩，但旧 run 不能清掉新轮次的闩。
@@ -645,7 +651,13 @@ func (bs *bridgeSession) emit(e events.Event) {
 	//（左栏预览/历史里冒出「智能体说的话」）。
 	if ae, ok := e.(*events.AgentEnd); ok && bs.hubOnAgentEnd != nil &&
 		ae.ParentRunId == "" && ae.Depth == 0 {
-		bs.hubOnAgentEnd(ae.Content)
+		var segs []hubSegment
+		if bs.hubDelta != nil {
+			// 先收口流式草稿：每一段的 delta 都必须早于它的 final hub_message
+			//（前端按 message_id 用 final 替换草稿，先 final 后 delta 会被当迟到丢弃）。
+			segs = bs.hubDelta.finish()
+		}
+		bs.hubOnAgentEnd(ae.Content, segs)
 	}
 
 	// IM 镜像推送：会话事件 → Renderer → 飞书（有镜像关联的会话）。
@@ -696,20 +708,27 @@ func (bs *bridgeSession) emit(e events.Event) {
 	case *events.ContentChunk:
 		bs.appendLiveText(ev.Content)
 		if bs.hubDelta != nil {
-			bs.hubDelta.feed(ev.RunId, ev.Content)
+			bs.hubDelta.feed(ev.RunId, ev.RequestId, ev.Content)
 		}
 	case *events.ReasoningChunk:
 		bs.appendLiveThink(ev.Content)
 	case *events.AgentStart:
-		if ev.ParentRunId == "" && ev.Depth == 0 && bs.hubGroupWake != nil {
-			// 记住这一轮群 run 的 busy 代号：runLoop 的兜底清理只能清自己那一代。
-			bs.hubGroupRunSeq.Store(bs.hubGroupOwner.Load())
+		if ev.ParentRunId == "" && ev.Depth == 0 {
+			if bs.hubGroupWake != nil {
+				// 记住这一轮群 run 的 busy 代号：runLoop 的兜底清理只能清自己那一代。
+				bs.hubGroupRunSeq.Store(bs.hubGroupOwner.Load())
+			}
 			if bs.hubDelta != nil {
-				wake := bs.hubGroupWake
-				if wake.MessageID == "" {
-					wake.MessageID = agenthub.NewID(agenthub.PrefixMessage)
+				if wake := bs.hubGroupWake; wake != nil {
+					// 第一段的 message_id 在这里预分配（final 复用同一个 ID，
+					// 保留 P3a-09 的「AgentStart 分配 → final 同 ID」语义）。
+					if wake.MessageID == "" {
+						wake.MessageID = agenthub.NewID(agenthub.PrefixMessage)
+					}
+					bs.hubDelta.bindRun(ev.RunId, string(wake.GroupID), string(wake.AgentID), wake.RoundID, wake.MessageID)
+				} else if bs.hubDeltaDM {
+					bs.hubDelta.bindRun(ev.RunId, "", bs.hubDeltaAgentID, "", "")
 				}
-				bs.hubDelta.start(string(wake.GroupID), string(wake.AgentID), wake.RoundID, wake.MessageID, ev.RunId)
 			}
 		}
 		bs.resetLive() // 新 run：旧 run 的残留文本不能串到这一轮
@@ -749,6 +768,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 	case *events.LLMEnd:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
 		bs.setLiveText(ev.Content)                  // 与手机端一致：最终文本覆盖累计增量
+		// 收口这一段草稿：段正文以 LLMEnd.Content 为权威（草稿只用于流式），
+		// Content 为空就是空段 —— 落账时过滤（纯工具轮不产生空气泡）。
+		if bs.hubDelta != nil {
+			bs.hubDelta.closeSegment(ev.RunId, ev.Content)
+		}
 		if ev.Usage != nil {
 			// 成本金额已由 provider 填充进 Usage.Cost（µUSD，上游自报优先、缺失才按价表
 			// 折算，见 provider.ApplyUsageCost）并随 MetricsEntry 持久化；
@@ -779,6 +803,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 			}
 			extras = map[string]any{"cost_usd": costUSD}
 		}
+	case *events.LLMStart:
+		// 一次 LLM 调用 = 一段草稿（场景2b）：新 RequestId → 新 message_id。
+		if bs.hubDelta != nil {
+			bs.hubDelta.beginSegment(ev.RunId, ev.RequestId)
+		}
 	case *events.LLMError:
 		// 失败尝试也要进账（2026-09-23 决策）：metrics 以 Kind=attempt_failed 单列
 		// （调用数只数 call，重试浪费看 RetryCostUsd）；cost_usd 供前端会话成本累计 +
@@ -794,6 +823,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 		}
 		if bs.metrics != nil {
 			_ = bs.metrics.Record(entry)
+		}
+		// 重试会换 RequestId：丢弃失败那次已流出的半截正文（不冻成气泡），
+		// 成功的那次由新的 LLMStart 开新段、新 message_id。
+		if ev.WillRetry && bs.hubDelta != nil {
+			bs.hubDelta.discardSegment(ev.RunId)
 		}
 	case *events.ToolStart:
 		if bs.hubDelta != nil {
@@ -2041,10 +2075,13 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		bs.editModelCfg(opts.hub.Agent.Provider, opts.hub.Agent.Model, "")
 		bs.persona = "hub"
 		hubSpec := opts.hub
-		bs.hubOnAgentEnd = func(content string) { m.finishHubReply(bs, hubSpec, content) }
+		bs.hubOnAgentEnd = func(content string, segs []hubSegment) { m.finishHubReply(bs, hubSpec, content, segs) }
 		bs.hubEngine = hubEng
+		bs.hubDeltaAgentID = string(hubSpec.Agent.ID)
+		bs.hubDeltaDM = hubSpec.Scope.Kind == agenthub.ScopeDM
+		// 群与 DM 都要按 LLM 轮次分段流式（DM 的多段落账先做，前端 delta 后续接）。
+		bs.hubDelta = newHubDeltaSink(m.out)
 		if hubSpec.Scope.Kind == agenthub.ScopeGroup {
-			bs.hubDelta = newHubDeltaSink(m.out)
 			gid, aid := hubSpec.Scope.GroupID, hubSpec.Agent.ID
 			bs.hubOnRunEnd = func() {
 				m.scheduleAgentTaskPump(gid, aid)

@@ -68,17 +68,22 @@ func newP4DeltaProvider(content string, deltas ...string) *p4DeltaProvider {
 func (p *p4DeltaProvider) Stream(ctx context.Context, req *provider.StreamRequest, h func(provider.StreamEvent) error) error {
 	p.mu.Lock()
 	p.calls++
+	rid := fmt.Sprintf("req_p4_%d", p.calls)
 	p.mu.Unlock()
-	for _, d := range p.deltas {
-		if err := h(provider.LLMContentDeltaEvent{Delta: d}); err != nil {
-			return err
-		}
-	}
 	model := ""
 	if req != nil {
 		model = req.Model
 	}
+	if err := h(provider.LLMStartEvent{RequestId: rid, Model: model, Timestamp: time.Now()}); err != nil {
+		return err
+	}
+	for _, d := range p.deltas {
+		if err := h(provider.LLMContentDeltaEvent{RequestId: rid, Delta: d}); err != nil {
+			return err
+		}
+	}
 	return h(provider.LLMEndEvent{
+		RequestId:    rid,
 		FinishReason: core.FinishReasonStop, Content: p.content, Model: model,
 		Usage: core.Usage{Input: 20, Output: 10},
 	})

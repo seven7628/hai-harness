@@ -535,7 +535,7 @@ func TestFinishAgentTaskNoFinalBubble(t *testing.T) {
 	bsB.hubGroupBusy.Store(true)
 	bsB.hubGroupOwner.Store(1)
 	bsB.bindHubTasks([]agenthub.TaskID{task.ID})
-	m.finishHubReply(bsB, spec, "最终正文不该变成群气泡")
+	m.finishHubReply(bsB, spec, "最终正文不该变成群气泡", nil)
 	if bsB.hubGroupBusy.Load() || bsB.hubGroupOwner.Load() != 0 || bsB.hubGroupRunSeq.Load() != 0 {
 		t.Fatalf("群轮闩没清干净: busy=%v owner=%d run=%d",
 			bsB.hubGroupBusy.Load(), bsB.hubGroupOwner.Load(), bsB.hubGroupRunSeq.Load())

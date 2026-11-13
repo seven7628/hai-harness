@@ -726,13 +726,18 @@ type gatedStreamProvider struct {
 
 func (p *gatedStreamProvider) Stream(_ context.Context, req *provider.StreamRequest, h func(provider.StreamEvent) error) error {
 	p.barrier.wait()
+	const rid = "req_gated"
+	if err := h(provider.LLMStartEvent{RequestId: rid, Model: req.Model, Timestamp: time.Now()}); err != nil {
+		return err
+	}
 	for i, c := range p.chunks {
-		if err := h(provider.LLMContentDeltaEvent{Delta: c, Index: int64(i)}); err != nil {
+		if err := h(provider.LLMContentDeltaEvent{RequestId: rid, Delta: c, Index: int64(i)}); err != nil {
 			return err
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
 	return h(provider.LLMEndEvent{
+		RequestId:    rid,
 		FinishReason: core.FinishReasonStop,
 		Content:      p.reply,
 		Model:        req.Model,

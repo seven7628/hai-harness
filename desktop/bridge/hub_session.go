@@ -444,13 +444,24 @@ func (m *manager) hubDMSession(agentID string) (*bridgeSession, error) {
 // appendHubReply 把本轮最终回复追加进 DM 索引并发 hub_message（§6.4 第 5 步）。
 //
 // 只处理 DM 作用域：群组消息由群路由统一落账（P3），这里不能抢。
-// 空回复（纯工具轮/中断）不落索引 —— 左栏预览不该出现空气泡。
-func (m *manager) appendHubReply(spec *hubSessionSpec, content string) {
+// 每一段非空正文（一次 LLM 调用）各一条 DM 消息：模型在工具调用前后各说一段时，
+// 旧实现只保留最后一段（AgentEnd.Content），前一段的正文凭空消失。
+// 段全空（纯工具轮/中断）不落索引 —— 左栏预览不该出现空气泡；此时回退
+// AgentEnd.Content 的单条行为（老链路没有按轮次的段信息）。
+//
+// DM 没有路由/游标：段顺序 = 段顺序，message_id 复用流式草稿的 msg_ id
+// （前端后续可以按同一个 id 用 final 替换草稿）。
+func (m *manager) appendHubReply(spec *hubSessionSpec, content string, segs []hubSegment) {
 	if spec == nil || spec.Scope.Kind != agenthub.ScopeDM {
 		return
 	}
-	text := strings.TrimSpace(content)
-	if text == "" {
+	texts := hubNonEmptySegments(segs)
+	if len(texts) == 0 {
+		if text := strings.TrimSpace(content); text != "" {
+			texts = []hubSegment{{text: text}}
+		}
+	}
+	if len(texts) == 0 {
 		return
 	}
 	st, err := m.hubStore()
@@ -458,17 +469,20 @@ func (m *manager) appendHubReply(spec *hubSessionSpec, content string) {
 		return
 	}
 	agentID := spec.Agent.ID
-	msg := &agenthub.Message{
-		Kind:   agenthub.KindText,
-		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: agentID},
-		Text:   text,
+	for _, seg := range texts {
+		msg := &agenthub.Message{
+			Kind:   agenthub.KindText,
+			ID:     seg.messageID,
+			Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: agentID},
+			Text:   seg.text,
+		}
+		seq, err := st.AppendDirectMessage(context.Background(), agentID, msg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[hub] append dm reply %s: %v\n", agentID, err)
+			return
+		}
+		m.emitHubMessage(string(agentID), seq, msg, "")
 	}
-	seq, err := st.AppendDirectMessage(context.Background(), agentID, msg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[hub] append dm reply %s: %v\n", agentID, err)
-		return
-	}
-	m.emitHubMessage(string(agentID), seq, msg, "")
 }
 
 // emitHubMessage DM 索引新增一条消息（前端据此回显/替换乐观气泡）。

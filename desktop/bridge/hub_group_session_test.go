@@ -315,7 +315,7 @@ func TestFinishHubRoundDedupesGroupSay(t *testing.T) {
 	wake := &agenthub.GroupWakeHeader{
 		GroupID: g.ID, AgentID: b.ID, RoundID: "rnd_dedup", TriggerSeq: trigger,
 	}
-	m.finishHubRound(spec, wake, report)
+	m.finishHubRound(spec, wake, report, nil)
 	msgs, err := st.ReadMessages(context.Background(), g.ID, 0, 500)
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +529,7 @@ func TestFinishHubRoundIgnoresMaxTurnsPerHuman(t *testing.T) {
 	spec := m.hubSpecFor(loaded, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID}, m.hubRuntime(string(b.ID)).path)
 	spec.Group = g
 	wake := &agenthub.GroupWakeHeader{GroupID: g.ID, AgentID: b.ID, RoundID: "rnd_limit", TriggerSeq: trigger}
-	m.finishHubRound(spec, wake, "再补一条")
+	m.finishHubRound(spec, wake, "再补一条", nil)
 	msgs, err := st.ReadMessages(context.Background(), g.ID, 0, 500)
 	if err != nil {
 		t.Fatal(err)
@@ -668,7 +668,7 @@ func TestHubGroupFinalCarriesTurnContext(t *testing.T) {
 		GroupID: g.ID, AgentID: b.ID, RoundID: "rnd_ctx", TriggerSeq: triggerSeq,
 	}
 	// finishHubRound 自己从游标窗口重算 Context；这里不依赖 wake.Context。
-	m.finishHubRound(spec, wake, "B 的最终回复")
+	m.finishHubRound(spec, wake, "B 的最终回复", nil)
 
 	msgs, err = st.ReadMessages(ctx, g.ID, 0, 500)
 	if err != nil {
