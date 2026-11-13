@@ -2646,6 +2646,15 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 
 .hub-demo .msg-row > .avatar,
 .hub-demo .msg-row > .avatar-btn { align-self: flex-start; flex: 0 0 auto; }
+/* 长历史：离屏消息行不参与布局/绘制（与 Project 侧 index.css 的 .msg 同一手段）。
+   为什么可以选到整个 .msg-row：日期分隔线（.date-divider）、系统行（.system-line）、
+   路由回执（.route-line）都是 .msg-row 的**兄弟**节点，不在行内，所以不会被
+   contain:paint 裁掉；行内只有头像 + 正文/事件卡，宽度由行盒决定，不向外溢。
+   跳转高亮（.hub-msg-highlight）加在行自身，自身 box-shadow/outline 不受自身
+   containment 影响。正在流式的行例外：它每个 chunk 都在长高，跳过就等于让
+   scrollHeight 滞后，贴底会一顿一顿。 */
+.hub-demo .msg-row { content-visibility: auto; contain-intrinsic-size: auto 120px; }
+.hub-demo .msg-row.streaming { content-visibility: visible; contain-intrinsic-size: auto none; }
 .hub-demo .avatar-btn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 50%; }
 /* 只是把 <button> 的 UA 外观抹平：font-family / line-height 取自上下文即可。
    不要 `font: inherit` —— 那会把 demo.css 的 .agent-name（12.5px/600）一并冲成继承值，

@@ -203,6 +203,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
   // 草稿按当前群过滤一次：空态判断和渲染必须用同一份，否则别的群的草稿会让
   // 本群「还没有消息」的引导语消失，却渲染出零个气泡（空面板）。
   const groupDrafts = useMemo(() => drafts.filter((d) => d.groupId === group.id), [drafts, group.id])
+  // 贴底 effect 也要盯「草稿正文长度」：草稿是就地增长的，length 不变时正文已经长了
+  // 好几屏；只依赖 length 只能等 ResizeObserver 兜底（晚一帧，且长正文时更明显）。
+  const groupDraftChars = groupDrafts.reduce((n, d) => n + d.text.length, 0)
   const typingNames = useMemo(
     () => groupDrafts.map((d) => agentNames[d.agentId] ?? d.agentId),
     [groupDrafts, agentNames],
@@ -236,6 +239,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
   }, [
     messages.length,
     groupDrafts.length,
+    groupDraftChars,
     composerMode,
     assignNote,
     conversation?.status,

@@ -37,16 +37,13 @@ export default function HubSurface() {
   const activeId = useHubStore((s) => s.activeId)
   const profile = useHubStore((s) => s.profile)
   const messages = useHubStore((s) => s.messages)
-  const hasMore = useHubStore((s) => s.hasMore)
   const loading = useHubStore((s) => s.loading)
-  const loadingOlder = useHubStore((s) => s.loadingOlder)
   const sending = useHubStore((s) => s.sending)
   const error = useHubStore((s) => s.error)
   const live = useHubStore((s) => s.live)
   const running = useHubStore((s) => s.running)
   const agents = useHubStore((s) => s.agents)
   const select = useHubStore((s) => s.select)
-  const loadOlder = useHubStore((s) => s.loadOlder)
   const send = useHubStore((s) => s.send)
   const refresh = useHubStore((s) => s.refresh)
   const clearError = useHubStore((s) => s.clearError)
@@ -104,12 +101,21 @@ export default function HubSurface() {
   // 有 delta 时草稿就是真身：content_chunk 拼出的 live 是同一段正文的第二份，
   // 两个都渲染 = 双气泡。live 只留作「还没收到 delta」的兜底。
   const showLive = dmDrafts.length === 0
+  // 贴底依赖用「真正会渲染出来的正文长度」，不是 live 对象本身：
+  // 草稿模式下 live 根本不画（showLive=false），可 content_chunk 每来一块都会换 live 引用 ——
+  // 依赖 live 就等于每个 chunk 都跑一次读 scrollHeight / 写 scrollTop 的强制布局。
+  // 草稿模式固定 0，正文增长由 dmDraftChars 负责触发。
+  const liveChars = showLive ? live.length : 0
   // 重试只对「当前目标的那次失败」开放：失败记录跨会话留着会把消息发错人。
   const canRetryFailed = !!failed && (failed.kind === 'group'
     ? failed.groupId === activeGroupId
     : failed.agentId === activeId)
 
   const listRef = useRef<HTMLDivElement>(null)
+  // onScroll 的 rAF 合并句柄（0 = 没有 pending 帧）。惯性滚动每帧都会派发 scroll，
+  // 而 scrollHeight/scrollTop/clientHeight 都是强制布局的读 —— 逐事件读会在长历史上
+  // 把主线程吃满，所以一帧最多算一次。
+  const scrollRaf = useRef(0)
   // 隐藏的图片选择器：按钮只负责触发 click（<input> 保留在可访问树里，e2e 可 setInputFiles）。
   const imageInputRef = useRef<HTMLInputElement>(null)
   // DM 会话视图根节点：--hub-scrollbar-w 写在这里，composer 外层继承后补右内边距。
@@ -142,7 +148,7 @@ export default function HubSurface() {
     // 待执行的深链跳转优先：先贴底再跳会闪一下（跳转 effect 会接管滚动）。
     if (!canAutoFollow(jump, activeId)) return
     el.scrollTop = el.scrollHeight
-  }, [messages.length, live, dmDraftChars, jump, activeId])
+  }, [messages.length, liveChars, dmDraftChars, jump, activeId])
 
   // 深链 / Context 面板的触发 seq（P4-02）：只消费落在当前 DM 且消息已加载的请求。
   // 群走 GroupView 的同一条路径（targetId 不匹配时这里直接跳过）。
@@ -162,6 +168,9 @@ export default function HubSurface() {
     if (highlightTimer.current != null) window.clearTimeout(highlightTimer.current)
   }, [])
 
+  // 卸载/切目标时撤掉还没跑的帧：回调里会读 listRef，卸载后读到的已是 null。
+  useEffect(() => () => cancelAnimationFrame(scrollRaf.current), [])
+
   const activeAgent = useMemo(
     () => agents.find((a) => a.id === activeId) ?? profile ?? null,
     [agents, activeId, profile],
@@ -175,10 +184,19 @@ export default function HubSurface() {
   )
 
   function onScroll(): void {
-    const el = listRef.current
-    if (!el) return
-    stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-    if (el.scrollTop < 60 && hasMore && !loadingOlder) void loadOlder()
+    // 已有 pending 帧就直接返回（合并同一帧内的多次 scroll 事件）。
+    if (scrollRaf.current) return
+    scrollRaf.current = requestAnimationFrame(() => {
+      scrollRaf.current = 0
+      const el = listRef.current
+      if (!el) return
+      stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+      if (el.scrollTop >= 60) return
+      // 分页状态读 store 现值，而不是闭包里捕获的 hasMore/loadingOlder：
+      // rAF 回调比触发它的那次渲染晚一帧，旧值会让顶部重复请求（或该请求时不请求）。
+      const s = useHubStore.getState()
+      if (s.hasMore && !s.loadingOlder) void s.loadOlder()
+    })
   }
 
   // 待发附件（图片 data URL + 文件引用）。按会话重置：换 DM 时不把上一人的图带过去。
