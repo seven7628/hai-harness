@@ -111,6 +111,10 @@ contextBridge.exposeInMainWorld('desktop', {
   createWorkspaceFolder: (parent: string, name: string) => ipcRenderer.invoke('create-workspace-folder', parent, name),
   startBridge: () => ipcRenderer.invoke('bridge:start'), // 幂等：已运行则复用，workspace 随命令 payload 传入
   command: (cmd: unknown) => ipcRenderer.invoke('bridge:command', cmd),
+  // Surface 插件（PR-14）：索引是只读元数据；surfaceCommand 是插件调宿主只读命令的
+  // **唯一**入口（白名单与审计在 bridge —— 主进程只是转发 + 形状校验）。
+  surfaceIndex: () => ipcRenderer.invoke('surface:index'),
+  surfaceCommand: (p: { id: string; name: string; args?: unknown; workspace?: string }) => ipcRenderer.invoke('surface:command', p),
   stopBridge: () => ipcRenderer.invoke('bridge:stop'),
   settingsGet: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   settingsSet: (patch: Partial<AppSettings>) => ipcRenderer.invoke('settings:set', patch) as Promise<{ ok: boolean; error?: string; settings?: AppSettings }>,

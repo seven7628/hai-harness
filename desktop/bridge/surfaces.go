@@ -108,6 +108,18 @@ type surfaceManifest struct {
 	API     int               `json:"api"`
 	Entry   string            `json:"entry"`
 	Icon    string            `json:"icon"`
+	// Kind 渲染层的 provider kind（PR-14）：必须等于 `plugin:<id>`，否则 loader 拒绝加载。
+	// bridge 不消费它（注册表在渲染层），解出来是为了让「索引/诊断/内容守卫」读到同一份
+	// 声明 —— 而不是各自再解析一次 surface.json。
+	Kind string `json:"kind"`
+	// Commands 插件**声明**要用到的宿主命令（PR-14）。它是白名单的一半：
+	// 真正放行 = 在这里 **且** 在宿主只读命令表里（见 surfaces_command.go）。
+	// 刻意只解出名字，不解析参数形态 —— 参数由宿主命令自己的 handler 校验。
+	Commands []string `json:"commands"`
+	// Data 插件**声明**要订阅的 `ui` 通道 op（PR-14，渲染层 host.events.on 用它做闸门）。
+	// bridge 不消费它（ui 通道没有回执），读它只是为了让「同一份 surface.json 的
+	// 声明」在一处可查：渲染层从索引 IPC 读，Go 从这份结构读。
+	Data []string `json:"data"`
 }
 
 // surfaceReceipt 安装 / 卸载的回执（工具层直接序列化给模型与脚本）。
@@ -358,6 +370,46 @@ func (s *surfaceStore) List(enabledOnly bool) surfaceListResult {
 	// status=applied 在这里的含义是「这一份来自已落盘的 index」，不是「刚装完」
 	// （状态集合是封闭的，见 surfaceStatus* 注释）。
 	return surfaceListResult{Status: surfaceApplied, Items: items}
+}
+
+// ---- 查询（PR-14 的两个消费者：宿主命令白名单 / 渲染层索引 IPC 的 Go 侧口径）----
+
+// Enabled 该 id 在 index 里且 enabled=true。
+//
+// 这是**协议与命令白名单共用的唯一判据**：禁用/卸载后 `hai-surface://` 必须 404、
+// `surface_command` 必须 denied。两处各写一遍「enabled 是什么意思」，迟早一处松一处紧，
+// 而松的那一侧就是「禁用只是 UI 上灰了」—— 安全条目会变成装饰。
+//
+// index 读不出来（损坏/不存在）一律 false（fail-closed）。
+func (s *surfaceStore) Enabled(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, _, lock, err := s.lockIndex()
+	if err != nil {
+		return false
+	}
+	closeLock(lock)
+	pos := idx.pos(id)
+	return pos >= 0 && idx.Items[pos].Enabled
+}
+
+// Manifest 读 `<root>/<id>/surface.json`（id 先过 pattern，绝不拼接未校验的字符串）。
+//
+// 与 validateSurfaceSource 分开是刻意的：那一份是**安装期**校验（含拷贝后复算 hash），
+// 这一份是**运行期**读声明（commands/data/icon），不该因为「目录里有别的大文件」而失败。
+func (s *surfaceStore) Manifest(id string) (surfaceManifest, error) {
+	mf := surfaceManifest{}
+	if !surfaceIDPattern.MatchString(strings.TrimSpace(id)) {
+		return mf, fmt.Errorf("id 不合法：%q", id)
+	}
+	raw, err := os.ReadFile(filepath.Join(s.Dir(), strings.TrimSpace(id), "surface.json"))
+	if err != nil {
+		return mf, fmt.Errorf("读 surface.json 失败：%v", err)
+	}
+	if err := json.Unmarshal(raw, &mf); err != nil {
+		return mf, fmt.Errorf("surface.json 不是合法 JSON：%v", err)
+	}
+	return mf, nil
 }
 
 // ---- index：加锁 / 解析 / 隔离损坏 / 原子写 ----
@@ -681,13 +733,23 @@ func restoreOld(trash, dir string) {
 // 这条路径直接追加，就会把 surfaces 根目录种成 0755（后面所有文件都住在这个洞
 // 里）。审计写不写得成是次要点，目录权限不是。
 func (s *surfaceStore) audit(id, action string, ok bool, reason string) {
+	s.writeAudit(map[string]any{"id": id, "action": action, "ok": ok}, reason)
+}
+
+// auditCommand `surface_command` 的审计行：在通用三字段上多一条 `cmd`。
+//
+// 为什么单独一条而非塞进 reason：「哪个命令被拒了」是权限排查的**第一个**问题
+//（01-design §5.5「软约束 + 可审计」），写进自由文本就再也统计不出来。
+// 允许的调用也写一行（ok:true）—— 只有拒绝记录时，「这个插件到底调过什么」无解，
+// 而那正是用户装完插件后唯一的对账材料。
+func (s *surfaceStore) auditCommand(id, cmd string, ok bool, reason string) {
+	s.writeAudit(map[string]any{"id": id, "action": "command", "cmd": cmd, "ok": ok}, reason)
+}
+
+// writeAudit 审计的唯一写点（rec 里已有 id/action/ok，timestamp 与 reason 在这里补）。
+func (s *surfaceStore) writeAudit(rec map[string]any, reason string) {
 	_ = s.ensureStore()
-	rec := map[string]any{
-		"id":     id,
-		"action": action,
-		"ts":     time.Now().UTC().Format(time.RFC3339Nano),
-		"ok":     ok,
-	}
+	rec["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
 	if reason != "" {
 		rec["reason"] = clipText(reason, 300)
 	}

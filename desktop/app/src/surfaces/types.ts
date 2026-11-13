@@ -2,6 +2,7 @@
 // 设计口径见 docs/creator-mode-v0.1/01-design.md §3、§5.1；实现参考 03-code-plan.md §2.1。
 import type { ReactNode } from 'react'
 import type { AppState, TabInstance } from '../store/useAppStore'
+import type { SurfaceCommandReply } from '../transport/types'
 
 /** 内置 kind 保持 4 个：文档/媒体不是 kind，是 file{mode:'preview'} 的渲染器（D-I） */
 export type BuiltinKind = 'activity' | 'git' | 'file' | 'web'
@@ -26,14 +27,25 @@ export interface PluginTabInstance {
 /** 全量标签联合（内置沿用 store 里既有的四类 + plugin） */
 export type SurfaceTab = TabInstance | PluginTabInstance
 
-/** M1 填充：插件面板唯一可用的宿主能力（见 03 §3.6）；M0 阶段不注入 */
+/** M1 填充：插件面板唯一可用的宿主能力（见 03 §3.6）。
+ *
+ * 与 03 §3.6 的两处落地差（PR-14 裁决，改回之前先读这段）：
+ *   · `command` 的返回是 `SurfaceCommandReply` 且**永不抛**（连 reject 也没有）。
+ *     03 里的写法是「未声明就 throw」——实测那会在 `render` 里变成未捕获的 Promise
+ *     rejection，而 React 的崩溃卡只接同步 throw：症状是面板白着、控制台一行红、墓碑
+ *     不出现。越权是**可编程状态**，与 PR-13 的 `status:"rejected"` 同一口径。
+ *   · `Icon` / `useSession` 标成可选，本轮不注入。理由不是省事：`Icon` 需要一套宿主
+ *     图标表（本仓没有可动态寻址的图标库），`useSession` 需要一份 SessionProjection
+ *     （store 里今天没有这个投影）。先给假实现，插件作者会按假的写，之后改不动。
+ */
 export interface HostApi {
   React: typeof import('react')
-  Icon: (p: { name: string; size?: number }) => ReactNode
+  Icon?: (p: { name: string; size?: number }) => ReactNode
   t: (key: string, vars?: Record<string, unknown>) => string
   theme(): { mode: 'light' | 'dark'; tokens: Record<string, string> }
-  useSession<T>(sel: (s: SessionProjection) => T): T
-  command(name: string, payload?: unknown): Promise<unknown>
+  useSession?<T>(sel: (s: SessionProjection) => T): T
+  /** 白名单命令：未声明/未允许/超时/内部错误一律回 `{ok:false, reason}`，不抛。 */
+  command(name: string, payload?: unknown): Promise<SurfaceCommandReply>
   events: { on(type: string, fn: (e: unknown) => void): () => void }
   openTab(spec: DistributiveOmit<SurfaceTab, 'id'>): void
   toast(msg: string): void

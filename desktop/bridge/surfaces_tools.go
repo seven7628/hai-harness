@@ -3,13 +3,14 @@
 // 形状照 ui_tools.go：BaseTool + OutputSchema（结构化槽，脚本路径拿对象）+ 注册函数。
 // 三条纪律：
 //
-//  1. **无条件注册**（开关 `settings.features.surfaceTools` 留到 PR-14）：工具「在不在」
-//     与「能不能装」是两件事 —— 后者由审批与校验回答。
+//  1. **受开关控制**（`settings.features.surfaceTools`，缺省 false；PR-14）：工具「在不在」
+//     与「能不能装」是两件事 —— 后者由审批与校验回答。开关的读法与默认值见
+//     surface_settings.go。
 //  2. **失败不返回 Go error**（`status:"rejected"` 是正常回执）：模型据此改参数比吃掉
 //     一轮重试便宜；只有参数本身不是合法 JSON 才走 Go error（那是签名错误，重试无意义）。
 //     审批拒绝仍然由引擎的 Block 路径表达（含 `rejected` 子串），措辞不变。
 //  3. **安装/卸载成功才推 `surfaces_changed`**：PR-12 建好的通道，形状一个字不改；
-//     本轮渲染层只重读清单，**不加载 panel.js**（loader 是 PR-14）。
+//     PR-14 起渲染层收到它就跑一次 loader.syncPlugins（见 src/surfaces/plugin/loader.ts）。
 package main
 
 import (
@@ -255,12 +256,23 @@ func surfaceEntrySchema() any {
 	}, "id", "version", "hash")
 }
 
-// registerSurfaceTools 注册三个内置工具（**无条件**：开关留给 PR-14）。
+// registerSurfaceTools 注册三个内置工具，受 `settings.features.surfaceTools` 控制（PR-14 E）。
 //
-// 注册点与 registerUITools 同一处（main.go 建 loop 时），不改签名 —— 工具需要的是
-// 宿主能力（store 与 UI 通道），不是引擎装配的一部分。
+// 关（缺省）→ **一个都不注册**：工具面里没有 surface_install/remove/list，模型也就
+// 不会试图装插件（它连这个能力都不存在）。开 → 三个都在，行为与本轮之前逐字相同。
+//
+// 为什么门开在注册函数里而不是调用点（main.go）：调用点有一处（newSessionEngine 之后），
+// 而「读设置 + 决定注册什么」是一个整体；摆在外面就成了两处各自解释同一个开关。
+// 注册点与 registerUITools 同一处，不改签名 —— 工具需要的是宿主能力（store 与 UI 通道），
+// 不是引擎装配的一部分。
+//
+// **ui_inspect 不在这里**：它无条件注册（见 registerUITools），因为它是只读观测面 ——
+// 「关掉插件能力」不该顺带让人看不见现在的界面。
 func (m *manager) registerSurfaceTools(eng *tools.Engine) {
 	if m == nil || eng == nil {
+		return
+	}
+	if !m.surfaceToolsEnabled() {
 		return
 	}
 	store := &m.surfaces

@@ -1576,6 +1576,9 @@ type manager struct {
 	// 零值可用（root 为空时按 appDataDir() 解析）：同上一条纪律 —— manager 由多处
 	// 字面量构造，要求显式初始化必然会漏一处，而那处会装到别的目录去。
 	surfaces surfaceStore
+	// surfaceToolsForced 仅测试注入：非 nil 时覆盖 settings.features.surfaceTools
+	//（生产恒 nil）。做成字段而不是全局变量，是为了让并发跑的用例互不污染。
+	surfaceToolsForced *bool
 }
 
 // previewService 取（或懒创建）转换服务单例（R08a）。
@@ -2532,6 +2535,13 @@ func (m *manager) dispatch(c command) {
 		// 放在 switch 最前是刻意的：这条通道与 workspace/session 无关，不该受下面
 		// 那些「先查 workspace 为空就报错」的分支影响。
 		m.handleUI(c)
+		return
+
+	case CmdSurfaceCommand:
+		// 插件 → 宿主只读命令（PR-14 D）：白名单（manifest.commands ∩ 宿主表）+ 审计。
+		// 同样放在最前：它自带 `workspace` 解析，不该被下面的「workspace 为空」分支拦掉
+		//（workspace_list / ui_inspect 不需要 workspace）。
+		m.handleSurfaceCommand(c)
 		return
 
 	case "external_skills_status": // 检测 ~/.codex / ~/.claude 外部 Skills 来源
@@ -6006,8 +6016,9 @@ func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort strin
 	// UI 快照查询工具（PR-12）：**无条件**注册 —— 渲染层没连上时它回答
 	// {ok:false, reason:"no_snapshot"}，那是状态而不是失败（见 ui_tools.go）。
 	m.registerUITools(eng)
-	// Surface 插件安装器（PR-13）：同样**无条件**注册 —— 装不上是回执里的
-	// status=rejected，不是「工具不存在」（后者会让模型以为产品没有这个能力）。
+	// Surface 插件安装器（PR-13/PR-14）：受 settings.features.surfaceTools 控制
+	//（缺省 **false**，见 surface_settings.go —— 常驻 schema 的成本纪律）。
+	// 开关判定在注册函数内部：调用点只有这一处，摆在外面就成了两处各自解释同一个开关。
 	m.registerSurfaceTools(eng)
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider

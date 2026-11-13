@@ -23,6 +23,10 @@ import { ipcInputHistoryForget, ipcInputHistoryGet, ipcInputHistorySet, inputHis
 
 // 音视频字节通道（R08c）：`hai-media://` 支持 Range 的自定义协议 + 路径校验，见 media-protocol.ts
 import { MEDIA_SCHEME_PRIVILEGES, mediaStats, mediaUrlForFile, registerMediaProtocol } from './media-protocol'
+// Surface 插件资产通道（PR-14）：`hai-surface://<id>/panel.js`，路径校验是纯函数
+// （surface-protocol.ts / surface-index.ts），单测不启动 Electron。
+import { SURFACE_SCHEME_PRIVILEGES, registerSurfaceProtocol } from './surface-protocol'
+import { SURFACE_ID_RE, configureSurfaceRoot, readSurfaceIndex } from './surface-index'
 // 媒体协议的信任锚：只有用户在系统选择器里亲手打开过的工作区才能当媒体根（见文件头注释）
 import { configureKnownWorkspaces, forgetWorkspace, isKnownWorkspace, rememberWorkspace } from './known-workspaces'
 
@@ -63,7 +67,9 @@ import {
 // `hai-media://` 的特权必须**在 app ready 之前**登记（Electron 的硬性时序要求，晚了就再也
 // 注册不上）：standard + secure 让 <video> 认它是可播放的安全来源，stream 让响应体是流
 // （1 小时 mp4 不整个读进内存），supportFetchAPI 让探针能 fetch 同一 URL 断言 206。
-protocol.registerSchemesAsPrivileged([MEDIA_SCHEME_PRIVILEGES])
+// `hai-surface://` 同理：渲染层的 loader 要用 `import()` 拉 panel.js，所以它必须是
+// standard + secure + supportFetchAPI（见 surface-protocol.ts 的常量注释）。
+protocol.registerSchemesAsPrivileged([MEDIA_SCHEME_PRIVILEGES, SURFACE_SCHEME_PRIVILEGES])
 
 let mainWindow: BrowserWindow | null = null
 
@@ -149,6 +155,8 @@ type BridgeCommandResponse = {
   id?: number
   ok: boolean
   error?: string
+  // code 稳定错误码（bridge 的 respCode；surface_command 用它回 denied/unknown_id/timeout/error）
+  code?: string
   data?: Record<string, unknown>
 }
 
@@ -1738,6 +1746,40 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // media:stats：协议计数器（请求数 / Range 数 / 首字节数 / 字节数）。e2e 用它证明
   // 「切走再切回不重新请求首字节」——数的是生产里真正处理请求的那段代码，不是另建的替身。
   ipcMain.handle('media:stats', (e) => (isTrustedIpcSender(e) ? mediaStats() : { requests: 0, rangeRequests: 0, firstByteHits: 0, bytesServed: 0 }))
+  // surface:index：渲染层 loader 的唯一数据源（装了哪些插件 / hash 变没变 / 声明了哪些
+  // 命令与 op）。只读、只回元数据 —— panel.js 的字节走 `hai-surface://`（协议侧另判一次
+  // enabled + 扩展名 + realpath 包含）。坏 manifest 的项带 error 照发（跳过它、不拖累别人）。
+  ipcMain.handle('surface:index', (e) => {
+    if (!isTrustedIpcSender(e)) return { version: 1, items: [] }
+    return readSurfaceIndex()
+  })
+  // surface:command：插件调宿主只读命令的**渲染层入口**。
+  //
+  // 这里是**转发**不是边界：白名单与审计在 bridge（surfaces_command.go）——渲染层跑的
+  // 就是插件自己的进程，那边的预检只能算「省一次 IPC」。主进程这边只做三件事：
+  //   ① 来源可信（主窗口主 frame，复用 media 的同一条门禁）；
+  //   ② 形状合法（id 过 pattern，name 非空）—— 非法形状不值得发一条 bridge 命令；
+  //   ③ 用**负 id** 的一问一答通道（sendBridgeRequest），不让它进渲染层的事件流：
+  //      插件命令没有 run/session 归属，进了就会以「会话事实」的身份参与视图构建。
+  ipcMain.handle('surface:command', async (e, p: { id?: unknown; name?: unknown; args?: unknown; workspace?: unknown } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, reason: 'denied' }
+    const id = typeof p?.id === 'string' ? p.id : ''
+    const name = typeof p?.name === 'string' ? p.name.trim() : ''
+    if (!SURFACE_ID_RE.test(id) || !name) return { ok: false, reason: 'denied' }
+    const args = p?.args && typeof p.args === 'object' && !Array.isArray(p.args) ? (p.args as Record<string, unknown>) : {}
+    const workspace = typeof p?.workspace === 'string' ? p.workspace : ''
+    const response = await sendBridgeRequest('surface_command', { id, name, args, ...(workspace ? { workspace } : {}) }, 10_000)
+    if (!response.ok) {
+      // reason 是 bridge 给的固定集合（denied / unknown_id / timeout / error）。
+      // 桥**没回**（超时 / 进程不在）时没有 code：按 error 文案分成 timeout / error，
+      // 而不是一律报 denied —— 「git 太慢」与「越权」在面板上必须是两句话，
+      // 否则用户会去翻权限而问题在性能。ok 恒 false，安全上不放宽任何东西。
+      if (response.code) return { ok: false, reason: response.code }
+      const detail = response.error ?? ''
+      return { ok: false, reason: /超时|timeout|timed out/i.test(detail) ? 'timeout' : 'error' }
+    }
+    return { ok: true, data: response.data?.result }
+  })
   // workspace:forget：工作区被移除时回收媒体根（评审裁决 1 的「关闭时删除」）。
   // 只有主窗口主 frame 能调；删的是清单里的条目，不做任何路径推断。
   ipcMain.handle('workspace:forget', (e, p: unknown) => {
@@ -2203,6 +2245,10 @@ app.whenReady().then(() => {
   registerIpc()
   // 媒体协议：只读、只服务工作区内、只服务媒体扩展名（拒绝分支见 media-protocol.ts）
   registerMediaProtocol()
+  // Surface 插件资产（PR-14）：只读、只服务 `<cfgDir>/surfaces/<id>/`、只服务资产扩展名，
+  // 且**只服务 enabled 的插件**（禁用/卸载后立刻 404）。路径判定见 surface-protocol.ts。
+  configureSurfaceRoot(path.join(cfgDir(), 'surfaces'))
+  registerSurfaceProtocol()
   createWindow()
   startMemPressureWatch()
   // 屏幕录制 SCK 预热（2026-09 Computer Use 截图排障）：macOS 14+ 截屏走

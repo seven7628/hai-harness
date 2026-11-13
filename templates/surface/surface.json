@@ -1,0 +1,15 @@
+{
+  "id": "cost-board",
+  "name": {
+    "zh": "成本看板",
+    "en": "Cost board"
+  },
+  "version": "1.0.0",
+  "api": 1,
+  "kind": "plugin:cost-board",
+  "entry": "panel.js",
+  "icon": "icon.svg",
+  "placement": "plugin",
+  "commands": ["workspace_list", "session_list", "git_snapshot", "ui_inspect"],
+  "data": ["surfaces_changed"]
+}

@@ -704,3 +704,42 @@ export interface IMChatInfo {
   chat_id: string
   name: string
 }
+
+// —— Surface 插件索引（PR-14 B）——
+//
+// 与主进程 electron/surface-index.ts 的 SurfaceIndexItem 同构（两处都得写：preload
+// 不能 import 渲染层代码，而渲染层不能 import 主进程模块）。字段名即磁盘协议
+// （bridge 的 index.json + 每个 <id>/surface.json），**不是**驼峰改写 —— 少一层翻译，
+// 少一处会写错的地方。
+export interface SurfaceIndexItem {
+  id: string
+  version: string
+  /** sha256(入口文件)；loader 用它拼 `?v=<hash>` 做缓存键 */
+  hash: string
+  enabled: boolean
+  /** 必须等于 `plugin:<id>`（loader 校验；不符即拒绝注册） */
+  kind?: string
+  /** 声明的宿主命令（白名单的一半；另一半在 bridge） */
+  commands: string[]
+  /** 声明的 ui op（host.events.on 的闸门） */
+  data: string[]
+  /** `<id>` 目录内的相对路径（缺省 panel.js；可改名，如 dist/panel.js） */
+  entry: string
+  /** `<id>` 目录内的相对路径（如 icon.svg） */
+  icon?: string
+  /** manifest 读不出来时的原因（loader 跳过这一条，其余照常） */
+  error?: string
+}
+
+export interface SurfaceIndex {
+  version: number
+  items: SurfaceIndexItem[]
+}
+
+/** host.command 的返回（**永不抛**：拒绝是一个值，见 surfaces/plugin/loader.ts） */
+export interface SurfaceCommandReply {
+  ok: boolean
+  /** 固定集合：denied / unknown_id / timeout / error（渲染层预检也是 denied） */
+  reason?: string
+  data?: unknown
+}
