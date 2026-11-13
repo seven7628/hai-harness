@@ -1983,7 +1983,7 @@ func TestForcedCompactCommandOnlyStillStops(t *testing.T) {
 func TestForcedCompactWithHistoryButNoNewTextStops(t *testing.T) {
 	p := &compactCallProvider{}
 	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
-	handler, _ := collectEvents()
+	handler, list := collectEvents()
 	ac := loop.Run(context.Background(), []core.Message{
 		core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: "旧问题：3+4 等于几？"}),
 		core.NewCommandMessage("compact", ""),
@@ -1993,6 +1993,10 @@ func TestForcedCompactWithHistoryButNoNewTextStops(t *testing.T) {
 	}
 	if got := p.CallCount(); got != 0 {
 		t.Fatalf("纯 compact 重答了历史正文，calls=%d", got)
+	}
+	// 与 0 次成对：压缩必须真的执行（否则「没进 maybeCompact」也会让 0 次变绿）。
+	if got := countCompressEnd(list); got != 1 {
+		t.Fatalf("纯 compact 的 CompressEnd = %d, want 1", got)
 	}
 }
 
