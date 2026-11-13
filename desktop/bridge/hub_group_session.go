@@ -350,27 +350,19 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	// 不唤醒任何人；这两种情况下图片从未进过该智能体的模型上下文。快照只有
 	// 文本，模型只会看到 `[图片]` 占位 —— 必须在下一次 wake 把积压的 image
 	// 块一起带上，而不是假装它已经看过。
-	pendingImgs, pendingSeqs, omitted := hubPendingImageAttachments(msgs, cursor.AgentContextSeq, w.TriggerSeq)
+	//
+	// 补发窗口是**游标之后的全部消息**（分页从新往旧翻），不是快照那一页：
+	// 快照只渲染最近 40 条正文，但图片漏一张就永远补不回来，所以这里单独翻页
+	// 找图；msgs 作为最近一页直接复用，省掉一次重复读。快照自身的 500 条窗口
+	// 语义不变（BuildGroupSnapshot 只取最近 40 条正文，窗口大小与正文无关）。
+	pending, err := hubPendingImagesFromStore(ctx, st, g.ID, msgs, cursor.AgentContextSeq, w.TriggerSeq)
+	if err != nil {
+		return err
+	}
 	blocks := []core.Content{
 		{Type: core.ContentTypeHubGroupWake, Content: hidden},
 	}
-	if len(pendingImgs) > 0 {
-		seqText := make([]string, 0, len(pendingSeqs))
-		for _, seq := range pendingSeqs {
-			seqText = append(seqText, fmt.Sprintf("#%d", seq))
-		}
-		blocks = append(blocks, core.Content{
-			Type:    core.ContentTypeText,
-			Content: fmt.Sprintf("[补发此前未送达的图片：%s]", strings.Join(seqText, "、")),
-		})
-		blocks = append(blocks, hubAttachmentImageBlocks(pendingImgs)...)
-		if omitted > 0 {
-			blocks = append(blocks, core.Content{
-				Type:    core.ContentTypeText,
-				Content: fmt.Sprintf("[另有 %d 张较早的图片因单轮补发上限未附上（没有进入本轮上下文）]", omitted),
-			})
-		}
-	}
+	blocks = append(blocks, hubPendingImageBlocks(pending)...)
 	blocks = append(blocks, core.Content{Type: core.ContentTypeText, Content: text})
 	// 文件附件不进上下文：前端已把 `@路径` 拼进正文，模型按正文自行读取
 	// （与主会话 @ 文件同语义）。
