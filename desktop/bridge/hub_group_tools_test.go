@@ -269,9 +269,9 @@ func TestHubGroupTools(t *testing.T) {
 	_ = time.Now
 }
 
-// 用户口径「群策略限制取消」：MaxTurnsPerHuman 字段保留但不再拦截
-// （旧的 8 轮/1 轮闸门都取消）；保留名仍不能建成智能体。
-func TestHubGroupSayIgnoresMaxTurnsPerHumanAndReservedName(t *testing.T) {
+// 用户口径「群策略限制取消」：max_turns_per_human 这个旋钮**已删**（P6-13）——
+// 旧客户端还传它就当未知字段忽略（不报错、不生效）；保留名仍不能建成智能体。
+func TestHubGroupSayIgnoresRemovedTurnsKnobAndReservedName(t *testing.T) {
 	m, buf := testManager(t)
 	a := createHubAgent(t, m, buf, 1, "LimitA")
 	b := createHubAgent(t, m, buf, 2, "LimitB")
@@ -384,7 +384,7 @@ func TestHubGroupSayIgnoresMaxTurnsPerHumanAndReservedName(t *testing.T) {
 		}
 	}
 	if _, err := callB2("group_say", fmt.Sprintf(`{"group_id":%q,"text":"第 9 轮"}`, string(defaultGroup.ID))); err != nil {
-		t.Fatalf("第 9 条必须放行（默认 MaxTurnsPerHuman 不再拦截）: %v", err)
+		t.Fatalf("第 9 条必须放行（max_turns_per_human 已删，没有任何条数闸门）: %v", err)
 	}
 }
 

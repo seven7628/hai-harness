@@ -40,7 +40,7 @@ func TestHubGroupParallelBranchesKeepOwnDepth(t *testing.T) {
 	c := createHubAgent(t, m, buf, 3, "深度链C")
 	d := createHubAgent(t, m, buf, 4, "深度链D")
 	e := createHubAgent(t, m, buf, 5, "深度链E")
-	g := convGroupWith(t, m, buf, 10, "深度链群", map[string]any{"max_turns_per_human": 100}, a, b, c, d, e)
+	g := convGroupWith(t, m, buf, 10, "深度链群", nil, a, b, c, d, e)
 
 	p3bWireFake(t, m, g, string(a.ID), "@深度链B @深度链C 你们分头查")
 	p3bWireFake(t, m, g, string(b.ID), "@深度链D 你查一下")
@@ -90,7 +90,7 @@ func TestHubGroupDepthLimitStopsOnlyThatChain(t *testing.T) {
 	d := createHubAgent(t, m, buf, 4, "断链D")
 	e := createHubAgent(t, m, buf, 5, "断链E")
 	f := createHubAgent(t, m, buf, 6, "断链F")
-	g := convGroupWith(t, m, buf, 10, "断链群", map[string]any{"max_turns_per_human": 100}, a, b, c, d, e, f)
+	g := convGroupWith(t, m, buf, 10, "断链群", nil, a, b, c, d, e, f)
 
 	p3bWireFake(t, m, g, string(a.ID), "@断链B @断链C 分头")
 	p3bWireFake(t, m, g, string(b.ID), "@断链D 你深一层")
@@ -137,7 +137,7 @@ func TestHubGroupHumanResetsDepth(t *testing.T) {
 	a := createHubAgent(t, m, buf, 1, "归零A")
 	b := createHubAgent(t, m, buf, 2, "归零B")
 	c := createHubAgent(t, m, buf, 3, "归零C")
-	g := convGroupWith(t, m, buf, 10, "归零群", map[string]any{"max_turns_per_human": 100}, a, b, c)
+	g := convGroupWith(t, m, buf, 10, "归零群", nil, a, b, c)
 	p3bWireFake(t, m, g, string(a.ID), "@归零B 你先说")
 	p3bWireFake(t, m, g, string(b.ID), "@归零A 我再说")
 	fc := newConvProvider("C 收到")

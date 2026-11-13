@@ -14,11 +14,13 @@
 //   · 新群打开：selectGroup 不报错，history 为空，hub_group_get 正常返回
 //   · 既有 grp_mock1 / grp_demo 的顺序与内容不变（其它回归脚本靠「第一行」选群）
 import { build } from 'esbuild'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
-const hubDir = join(__dirname, '..', 'src', 'hub')
+const APP = join(__dirname, '..')
+const hubDir = join(APP, 'src', 'hub')
 
 const result = await build({
   stdin: {
@@ -230,6 +232,41 @@ function spyWire() {
   for (const g of created) {
     assert(Object.prototype.hasOwnProperty.call(progress, g.id), `progress 覆盖新群 ${g.name}`)
   }
+}
+
+// —— 4) 已删的群策略旋钮（P6-13）：旧客户端传了必须被忽略，不是报错、也不是存住 ——
+//
+// max_parallel_runs（P6-02：并发 = 本轮目标数）与 max_turns_per_human（P6-13：群策略
+// 限制取消）已经从 GroupPolicy 整个删掉。判据三件事：
+//   · 前端类型里没有这两个字段（留一个没人读的字段 = 给 UI 一个假开关）；
+//   · 旧 payload 带着它们 → 命令照常成功（不报错）；
+//   · 它们不会出现在返回的 policy 里（不会「存住了但不生效」），同批合法字段照常生效。
+{
+  const types = readFileSync(join(APP, 'src', 'hub', 'types.ts'), 'utf8')
+  const policyBlock = (types.match(/export interface HubGroupPolicy \{[\s\S]*?\n\}/) ?? [''])[0]
+  assert(policyBlock.includes('max_handoff_depth') && policyBlock.includes('max_mentions_per_message'), 'HubGroupPolicy 仍有生效字段')
+  assert(!/^\s*max_turns_per_human\?:/m.test(policyBlock), 'HubGroupPolicy 里没有已删的 max_turns_per_human 字段')
+  assert(!/^\s*max_parallel_runs\?:/m.test(policyBlock), 'HubGroupPolicy 里没有已删的 max_parallel_runs 字段')
+
+  const legacyPolicy = { mode: 'auto', max_turns_per_human: 8, max_parallel_runs: 3, max_mentions_per_message: 2 }
+  const created = await call('hub_group_create', {
+    name: '旧旋钮群', member_ids: ['ag_mockres1', 'ag_mockwri2'], policy: legacyPolicy,
+  })
+  eq(created.ok, true, '旧客户端带已删字段建群：不报错')
+  const policy = created.data?.group?.policy ?? {}
+  eq(policy.mode, 'auto', '同批合法字段（mode）照常生效')
+  eq(policy.max_mentions_per_message, 2, '同批合法字段（max_mentions）照常生效')
+  assert(!('max_turns_per_human' in policy), '已删的 max_turns_per_human 没有被存进群策略')
+  assert(!('max_parallel_runs' in policy), '已删的 max_parallel_runs 没有被存进群策略')
+
+  const patched = await call('hub_group_update', {
+    group_id: String(created.data?.group?.id ?? ''),
+    patch: { policy: { max_turns_per_human: 1, max_parallel_runs: 9, daily_budget_usd: 7 } },
+  })
+  eq(patched.ok, true, '旧客户端 patch 已删字段：不报错')
+  const after = patched.data?.group?.policy ?? {}
+  eq(after.daily_budget_usd, 7, '同批合法字段（日预算）照常生效')
+  assert(!('max_turns_per_human' in after) && !('max_parallel_runs' in after), 'patch 也没把已删字段写回群策略')
 }
 
 off()

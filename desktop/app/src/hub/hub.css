@@ -1562,6 +1562,13 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
   border-left: 0; background: var(--paper-2);
 }
 .hub-detail-rail { background: var(--bg); }
+/* 右栏底色必须真的等于 --paper-2（P6-14）：上面两条声明与 index.css 的
+   `.right{background:var(--bg)}` **同特指度**，而 index.css 在 hub.css 之后加载
+   （main.tsx 先 import App → hub.css，再 import index.css），于是它们一直被压掉 ——
+   右栏实际是 --paper（#1a1614），比会话区暗一档，两栏拼在一起一眼能看出接缝。
+   用 .right.xxx 把特指度提到 (0,2,0)，跟加载顺序解耦。 */
+.right.hub-inspector,
+.right.hub-detail-rail { background: var(--paper-2); }
 .hub-inspector-head {
   display: flex; align-items: center; gap: 4px;
   min-width: 0; flex: 0 0 auto;
@@ -1613,6 +1620,10 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
 .hub-ov-members { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
 .hub-ov-member { display: flex; align-items: center; gap: 7px; font-size: 12px; min-width: 0; }
 .hub-ov-member-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* P6-08：成员行的「只停这个成员」入口 —— 靠右、小一号，不挤占名字与角色。 */
+.hub-ov-member .hub-ov-member-stop { margin-left: auto; flex: 0 0 auto; font-size: 11px; padding: 1px 5px; }
+.hub-ov-member .hub-ov-member-stop:hover { color: var(--danger, #c0392b); }
+.hub-ov-member .hub-ov-member-stop:disabled { opacity: .5; cursor: default; }
 .hub-ov-tasks { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--border); padding-top: 8px; }
 .hub-ov-task {
   display: flex;
@@ -2605,6 +2616,40 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 }
 .hub-demo.main > .chat-header { flex: 0 0 auto; width: 100%; }
 
+/* ── 会话区配色统一到 app 主题令牌（P6-14）──────────────────────────────────
+   demo.css 自带一套暖色板：会话区/header/composer 吃 --chat（深色 #0d0d0c），
+   右栏 .hub-inspector 吃 app 的 --paper-2（#231d1a）—— 中间比右栏暗一整档；浅色
+   也一样（#f8f4eb vs #ffffff）。两套色板并排就是「拼起来的界面」。
+
+   修法：把 demo 的「面/字/线」令牌接到 app 令牌上（**同一个 token 源**），只换颜色
+   来源，不动 demo 的间距/字号/解剖：
+     --chat        会话区 / header / composer 的底 → --paper-2（与右栏同一个 token）
+     --surface     卡面 / 输入框 / 弹层           → --paper-3（比会话区亮一档，与 app
+                   的「卡面/凹陷」同一套分层语言；否则卡面会和底同色糊成一片）
+     --surface-2/3 次级面 / 浮层                  → --paper-3
+     --border*     发丝线 / 强分隔                → --ink-line / --ink-line-2
+     --text/--muted*  文字层级                    → --ink / --ink-2 / --ink-3
+     --header-bg   头部半透明底                   → --paper-2 的半透明版（滚动时仍模糊）
+   刻意**不**接：--accent（内容强调：流式光标/文件图标/回复标）、--user-bubble
+   （用户气泡的暖色）、--danger/--warn/--success（语义色）—— 这些是「内容」不是
+   「面」，混进 app 的交互主色会让会话区读起来像一整片警告色。
+
+   选择器同时写 .hub-demo 与 .hub-demo[data-theme='light']：demo.css 的浅色块是
+   (0,2,0) 特指，只写 .hub-demo 会被它压过（hub.css 在 demo.css 之后，同特指度才赢）。 */
+.hub-demo,
+.hub-demo[data-theme='light'] {
+  --chat: var(--paper-2);
+  --surface: var(--paper-3);
+  --surface-2: var(--paper-3);
+  --surface-3: var(--paper-3);
+  --border: var(--ink-line);
+  --border-strong: var(--ink-line-2);
+  --text: var(--ink);
+  --muted: var(--ink-2);
+  --muted-2: var(--ink-3);
+  --header-bg: color-mix(in srgb, var(--paper-2) 88%, transparent);
+}
+
 /* 头部浮层层级（P6-16）。
    根因：`.chat-header` 的 backdrop-filter 已经创建了 stacking context，但它自己的
    z-index 是 auto —— 在 DOM 顺序里排在 `.messages` 之前，于是「更多操作」菜单
@@ -2619,6 +2664,10 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 }
 /* 菜单自身仍留一个层内层级：头部里还有头像栈/标题等兄弟，避免菜单被它们盖住。 */
 .hub-demo .header-actions { z-index: 1; }
+/* header 的下边线（P6-14）：demo 写死 rgba(255,255,255,.055) —— 深色下比右栏的
+   --ink-line 弱一档、浅色下几乎看不见，于是「中间这块不属于 app」一眼就能看出来。
+   换成 app 的发丝线，header 与会话区/右栏的分隔就同源了。 */
+.hub-demo .chat-header { border-bottom-color: var(--ink-line); }
 
 .hub-demo.main > .messages { flex: 1 1 auto; width: 100%; }
 /* 全局 index.css 的 `.composer-wrap` 带 max-width:800 + width:100% + margin:0 auto，
@@ -2757,16 +2806,38 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .hub-msg-highlight { animation: demo-highlight 1.4s ease; }
 @keyframes demo-highlight { 0%, 100% { background: transparent; } 20% { background: color-mix(in srgb, var(--accent) 12%, transparent); } }
 
-.hub-demo .hub-conv-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; padding: 0 2px; color: var(--muted-2); font-size: 11px; min-height: 24px; border: 0; background: none; }
-.hub-demo .hub-conv-status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
-.hub-demo .hub-conv-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
-.hub-demo .hub-conv-bar.running .hub-conv-dot { background: var(--success); animation: demo-live 1.6s ease infinite; }
+/* 自动对话状态条（P6-10）：header 与 messages 之间的独立一档。
+   骨架/配色走上面 .hub-conv-bar 的 app 令牌基础规则；这里只补 demo 会话区的内边距
+   （与 .messages / .composer-wrap 同一组 28 / 14 / 12）与各档的状态色。
+   信息密度：本轮 · 本链 · 队列 · pair · 投递 · 终态 —— 一条，不另起第二套。 */
+.hub-demo.main > .hub-conv-bar { flex: 0 0 auto; padding: 5px 28px; }
+.hub-demo .hub-conv-facts { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 4px; min-width: 0; flex: 1 1 auto; font-variant-numeric: tabular-nums; }
+.hub-demo .hub-conv-seg { white-space: nowrap; }
+.hub-demo .hub-conv-seg.warn { color: var(--ochre); }
+.hub-demo .hub-conv-seg.danger { color: var(--crimson); }
+.hub-demo .hub-conv-sep { color: var(--ink-line-2); margin: 0 4px 0 2px; }
+.hub-demo .hub-conv-actions { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; flex: none; }
+.hub-demo .hub-conv-reset { color: var(--text-2); font-size: 11px; white-space: nowrap; }
+.hub-demo .hub-conv-reset:hover { color: var(--accent); }
+.hub-demo .hub-conv-reset:disabled { opacity: .5; cursor: default; }
+.hub-demo .hub-conv-stop { margin-left: 0; color: var(--text-2); font-size: 11px; white-space: nowrap; }
+.hub-demo .hub-conv-stop:hover { color: var(--crimson); }
+/* 状态色用 app 的语义令牌：运行中 = --indigo（不是主色，红点会被读成出错），
+   等你继续/护栏命中 = --ochre，已停止 = 弱字色。 */
+.hub-demo.main > .hub-conv-bar.running .hub-conv-dot { background: var(--indigo); animation: demo-live 1.6s ease infinite; }
+.hub-demo.main > .hub-conv-bar.waiting .hub-conv-dot,
+.hub-demo.main > .hub-conv-bar.exhausted .hub-conv-dot { background: var(--ochre); }
+.hub-demo.main > .hub-conv-bar.stopped .hub-conv-dot { background: var(--ink-3); }
 @keyframes demo-live { 50% { opacity: .35; } }
-.hub-demo .hub-conv-turns,
-.hub-demo .hub-conv-pair,
-.hub-demo .hub-conv-terminal { color: var(--muted-2); }
-.hub-demo .hub-conv-stop { margin-left: auto; color: var(--muted); font-size: 11px; }
-.hub-demo .hub-conv-stop:hover { color: var(--danger); }
+@media (max-width: 900px) {
+  .hub-demo.main > .hub-conv-bar { padding: 5px 14px; }
+}
+@media (max-width: 640px) {
+  /* 640：facts 自然折行、操作收到下一行右侧；不横向溢出（验收判据）。 */
+  .hub-demo.main > .hub-conv-bar { padding: 5px 12px; gap: 4px 8px; }
+  .hub-demo .hub-conv-facts { gap: 0 2px; }
+  .hub-demo .hub-conv-actions { gap: 10px; }
+}
 
 .hub-demo .event-spacer { width: 30px; flex: 0 0 30px; }
 .hub-demo .event-card--task { --event-color: var(--success); max-width: 560px; }

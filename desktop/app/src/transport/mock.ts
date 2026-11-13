@@ -736,7 +736,7 @@ class MockTransport implements Transport {
         { agent_id: 'ag_mockwri2', role: 'member' },
       ],
       policy: {
-        mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
+        mode: 'ask', max_handoff_depth: 3,
         max_mentions_per_message: 3, daily_budget_usd: 5,
       },
       created_at: new Date(Date.now() - 7 * 86_400_000).toISOString(),
@@ -752,7 +752,7 @@ class MockTransport implements Transport {
         { agent_id: 'ag_mockwri2', role: 'member' },
       ],
       policy: {
-        mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
+        mode: 'ask', max_handoff_depth: 3,
         max_mentions_per_message: 3, daily_budget_usd: 5,
       },
       created_at: new Date(Date.now() - 2 * 86_400_000).toISOString(),
@@ -763,6 +763,11 @@ class MockTransport implements Transport {
   private hubGroupSeq = new Map<string, number>()
   private hubGroupRead = new Map<string, number>()
   private hubGroupConversations = new Map<string, Record<string, unknown>>()
+  // P6-10：每群的投递账本（与 Go 的 ConversationController.deliveries 同义）。
+  // 放在这里而不是塞进 hubGroupConversations：真 bridge 的账本活在 controller 上，
+  // 每次 emit 的 ConversationView 都带一份快照 —— mock 照这个形状来，状态条才有
+  // 「已入队/已回复/未回复/失败」可看（以前 mock 从不产生 deliveries）。
+  private hubGroupDeliveries = new Map<string, Record<string, unknown>[]>()
   private hubGroupTasks = new Map<string, Record<string, unknown>>()
   private hubGroupAssigns = new Map<string, Record<string, unknown>>() // client_msg_id → 响应（幂等）
   private hubGroupTaskNo = 0
@@ -1411,16 +1416,55 @@ class MockTransport implements Transport {
   private mockConversation(
     gid: string,
     status: string,
-    opts: { turns?: number; depth?: number; queue?: number; reason?: string; pair?: Record<string, number> } = {},
+    opts: { turns?: number; depth?: number; queue?: number; reason?: string; pair?: Record<string, number>; pairResetInMs?: number } = {},
   ): Record<string, unknown> {
+    // 账本是**权威**：每次视图快照都带当前账本（有界，与 ConversationViewDeliveries 同值）。
+    const ledger = this.hubGroupDeliveries.get(gid) ?? []
     return {
       id: `conv_${gid}`, group_id: gid, status,
       turns_used: opts.turns ?? 0, turn_budget: -1, // -1 = 不设自动接龙轮次上限（生产默认）
       depth: opts.depth ?? 0, max_depth: 4,
       queue_len: opts.queue ?? 0, pair_limit: 2, pair_count: opts.pair ?? {},
+      ...(opts.pairResetInMs ? { pair_reset_at: new Date(Date.now() + opts.pairResetInMs).toISOString() } : {}),
       cooldown_ms: 1500,
       ...(opts.reason ? { stop_reason: opts.reason } : {}),
+      ...(ledger.length > 0 ? { deliveries: ledger.slice(-20) } : {}),
       updated_at: new Date().toISOString(),
+    }
+  }
+
+  /**
+   * ?hubFixture=guards：把演示群的对话钉成「护栏命中」的样子（P6-10 状态条的可视回归）。
+   *
+   * 为什么非要 fixture：pair 到限 / 深度到限 / 失败投递这三种状态，要真跑出来得先有两次
+   * 互踢、四层交接和一个会报错的投递 —— mock 没有调度器，永远到不了。这里只**读**一份与
+   * Go ConversationView 同形的快照（字段名/语义一致），不模拟任何调度行为。
+   *
+   * 后两条投递的 target 是合成 id（mock 只有两个智能体）：状态条的计数与「未知原因」
+   * 文案才是判据，hover 明细里的原始 id 不影响。
+   */
+  private hubFixtureGuardsConversation(gid: string): Record<string, unknown> {
+    const at = new Date().toISOString()
+    const base = { conversation_id: `conv_${gid}`, group_id: gid, human: true, depth: 4, turn: 2, attempts: 1, enqueued_at: at, updated_at: at }
+    const ledger = [
+      { ...base, wake_id: 'wk_guard_1', target: 'ag_mockres1', status: 'done', reason: '', note: '' },
+      { ...base, wake_id: 'wk_guard_2', target: 'ag_mockwri2', status: 'queued', reason: 'target_busy', note: '目标忙，排队中' },
+      { ...base, wake_id: 'wk_guard_3', target: 'ag_ghostpair', status: 'skipped', reason: 'pair_limit', note: '互踢到上限，已跳过' },
+      { ...base, wake_id: 'wk_guard_4', target: 'ag_ghostfail', status: 'failed', reason: 'boom', note: '' },
+    ]
+    this.hubGroupDeliveries.set(gid, ledger)
+    return {
+      id: `conv_${gid}`, group_id: gid, status: 'waiting_human',
+      turns_used: 2, turn_budget: -1,
+      depth: 4, max_depth: 4,
+      queue_len: 2, pair_limit: 2,
+      pair_count: { 'ag_mockres1↔ag_mockwri2': 2 },
+      pair_window_ms: 600_000,
+      pair_reset_at: new Date(Date.now() + 8 * 60_000).toISOString(),
+      cooldown_ms: 1500,
+      stop_reason: '同一对 2/2 到限',
+      deliveries: ledger,
+      updated_at: at,
     }
   }
 
@@ -1429,6 +1473,56 @@ class MockTransport implements Transport {
     this.hubGroupConversations.set(gid, conv)
     this.emit({ event_type: 'hub_conversation', group_id: gid, conversation: conv })
     return conv
+  }
+
+  // —— 投递账本（P6-10）——
+  // 真 bridge 的账本由 ConversationController 维护（P6-01）；mock 这里只保留「够状态条
+  // 与排障用」的形状：target/status/reason/turn/conversation_id。
+  //
+  // 与真 bridge 的**已知差异**（写在这里，免得被当成前端 bug）：mock 没有调度器，
+  // 一次 @ 只有 targets[0] 会真的回复，其余留在 queued —— 状态条因此会显示
+  // 「已入队 N · 已回复 1 · 未回复 N-1」，这正是「队列里还有东西」的真实读法。
+  private hubGroupDeliveryStart(gid: string, targets: string[], turn: number): void {
+    // 人类新消息开新对话：旧 wake 作废（与 Go 的 dropQueued 同义）。
+    const kept = (this.hubGroupDeliveries.get(gid) ?? []).filter((d) => d.status !== 'queued')
+    const at = new Date().toISOString()
+    const batch = targets.map((target, i) => ({
+      wake_id: `wk_mock_${gid}_${turn}_${i}`,
+      conversation_id: `conv_${gid}`, group_id: gid, target, human: true,
+      depth: 1, turn, status: i === 0 ? 'running' : 'queued',
+      reason: i === 0 ? '' : 'target_busy',
+      note: i === 0 ? '' : '目标忙，排队中',
+      attempts: 1, enqueued_at: at, updated_at: at,
+    }))
+    this.hubGroupDeliveries.set(gid, [...kept, ...batch].slice(-64))
+  }
+
+  /** 某目标收尾（回复落账 / 失败 / 护栏跳过）。没这条记录就静默忽略。 */
+  private hubGroupDeliverySettle(gid: string, target: string, status: string, reason = ''): void {
+    const list = this.hubGroupDeliveries.get(gid)
+    if (!list) return
+    const at = new Date().toISOString()
+    for (const d of list) {
+      if (d.target !== target || d.status === 'done' || d.status === 'skipped' || d.status === 'failed') continue
+      d.status = status
+      d.reason = reason
+      d.note = reason
+      d.updated_at = at
+    }
+  }
+
+  /** 停止/重置：排队中的一律结算成 skipped（真 bridge 停止时同理）。 */
+  private hubGroupDeliveryDropQueued(gid: string, reason: string): void {
+    const list = this.hubGroupDeliveries.get(gid)
+    if (!list) return
+    const at = new Date().toISOString()
+    for (const d of list) {
+      if (d.status !== 'queued') continue
+      d.status = 'skipped'
+      d.reason = reason
+      d.note = reason
+      d.updated_at = at
+    }
   }
 
   private hubGroupTaskUpdate(task: Record<string, unknown>, gid: string): void {
@@ -1515,6 +1609,8 @@ class MockTransport implements Transport {
       this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'idle' })
       // 人类中途停过：不要再把状态条推回 running（停止是终态，直到新的人类消息）。
       if (this.hubGroupConversations.get(gid)?.status !== 'stopped') {
+        // P6-10：这条目标已经拿到回复 → 账本记 done（其余仍在 queued，状态条显示「未回复 N」）。
+        this.hubGroupDeliverySettle(gid, first, 'done')
         this.hubGroupSetConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 })
       }
     })
@@ -1582,6 +1678,8 @@ class MockTransport implements Transport {
       this.emit({ event_type: 'agent_end', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
       this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'idle' })
       if (this.hubGroupConversations.get(gid)?.status !== 'stopped') {
+        // P6-10：这条目标已经拿到回复 → 账本记 done（其余仍在 queued，状态条显示「未回复 N」）。
+        this.hubGroupDeliverySettle(gid, first, 'done')
         this.hubGroupSetConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 })
       }
     })
@@ -3661,9 +3759,9 @@ class MockTransport implements Transport {
           members: memberIDs.map((id) => ({ agent_id: id, role: id === owner ? 'owner' : 'member' })),
           // 未传的字段沿用 fixtures 那套默认（bridge 侧由 Group.Normalize 补）。
           policy: {
-            mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
+            mode: 'ask', max_handoff_depth: 3,
             max_mentions_per_message: 3, daily_budget_usd: 5,
-            ...policy,
+            ...mockGroupPolicyFilter(policy),
           },
           created_at: now, updated_at: now,
         }
@@ -3687,7 +3785,10 @@ class MockTransport implements Transport {
         // 打开群一次水合：对话状态 + 人类已读游标（B7）。不再靠一条假事件——
         // 真 bridge 的 hub_group_get 直接返回 conversation/cursor。
         this.hubGroupLog(gid)
-        const conversation = this.hubGroupConversations.get(gid) ?? this.mockConversation(gid, 'idle')
+        // ?hubFixture=guards：只钉演示群，别的群（含左栏新建的）保持真实 mock 状态。
+        const conversation = this.hubFixture() === 'guards' && gid === DEMO_GROUP
+          ? this.hubFixtureGuardsConversation(gid)
+          : this.hubGroupConversations.get(gid) ?? this.mockConversation(gid, 'idle')
         const humanReadSeq = this.hubGroupRead.get(gid) ?? 0
         this.respond(cmd, { group, conversation, cursor: { human_read_seq: humanReadSeq } })
         // 场景演示：打开这个群补一次 Project 事件（子 run 名 + 待办快照），内联 ToDo 卡才有数据。
@@ -3739,6 +3840,8 @@ class MockTransport implements Transport {
           break
         }
         this.hubGroupEmitMessage(gid, msg)
+        // P6-10：本轮投递账本（人类首轮 n 个目标并行；mock 只有第一个会真回复）。
+        this.hubGroupDeliveryStart(gid, targets, 1)
         this.hubGroupSetConversation(gid, 'running', {
           turns: targets.length > 0 ? 1 : 0, depth: 1, queue: Math.max(0, targets.length - 1),
         })
@@ -3755,7 +3858,13 @@ class MockTransport implements Transport {
           })
           this.hubGroupEmitMessage(gid, receipt)
         }
-        this.respond(cmd, { seq: msg.seq, message_id: msg.id, round, targets })
+        // 回执带本次投递账本（与 bridge 同形）：状态条不必等 hub_conversation 事件就能
+        // 立刻显示「@all 已入队 N」。
+        const deliveries = this.hubGroupDeliveries.get(gid) ?? []
+        this.respond(cmd, {
+          seq: msg.seq, message_id: msg.id, round, targets,
+          ...(deliveries.length > 0 ? { deliveries } : {}),
+        })
         // 场景2b 群侧浏览器回归：?hubFixture=groupstream 用两轮脚本化回复替代单轮。
         // 场景演示群同样走两轮：在演示群里发 @ 消息就能看到「同一轮两条独立气泡」。
         if (this.hubFixture() === 'groupstream' || gid === DEMO_GROUP) {
@@ -3871,7 +3980,7 @@ class MockTransport implements Transport {
           break
         }
         if (patch.policy && typeof patch.policy === 'object') {
-          group.policy = { ...(group.policy as Record<string, unknown>), ...(patch.policy as Record<string, unknown>) }
+          group.policy = { ...(group.policy as Record<string, unknown>), ...mockGroupPolicyFilter(patch.policy) }
         }
         if (typeof patch.owner_agent_id === 'string' && patch.owner_agent_id.trim()) {
           // owner 转让是成对改写（与 bridge 的 hubGroupUpdate 同语义）：旧 owner 降 member、新 owner 升 owner。
@@ -3943,9 +4052,59 @@ class MockTransport implements Transport {
         this.respond(cmd, { seq: effective, human_read_seq: effective })
         break
       }
-      case 'hub_conversation_stop': {
+      case 'hub_conversation_reset': {
+        // P6-04 ④ 手动重置本群限制：清零 pair/深度/指纹/队列并解除 waiting_human，
+        // **不唤醒任何人**（真 bridge 见 hubConversationReset）。以前 mock 落到
+        // `default: respond({})` —— 按钮看起来点得动，状态条却一格都不变。
         const gid = String(cmd.payload?.group_id ?? '')
         if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在'); break }
+        this.hubGroupGen.set(gid, (this.hubGroupGen.get(gid) ?? 0) + 1) // 冷却/退避定时器作废
+        this.hubGroupDeliveries.set(gid, [])
+        const conversation = this.hubGroupSetConversation(gid, 'idle', { turns: 0, depth: 0, queue: 0 })
+        this.respond(cmd, { conversation })
+        break
+      }
+      case 'hub_conversation_stop': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const stopAgent = String(cmd.payload?.agent_id ?? '').trim()
+        if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在'); break }
+        if (stopAgent) {
+          // P6-08：带 agent_id = 只停这个成员 —— 不换代、不改对话状态，其他成员继续。
+          // 真 bridge 只中断该成员在跑的 run + 丢掉它排队的唤醒；mock 用任务状态 +
+          // 队列计数表达同一件事（前端文案/按钮状态据此验收）。
+          if (!this.hubGroupMemberIDs(gid).includes(stopAgent)) { this.respondErr(cmd, '该智能体不是这个群的成员'); break }
+          const stoppedAt = new Date().toISOString()
+          let interrupted = 0
+          for (const task of this.hubGroupTasks.values()) {
+            const target = task.target as { group_id?: string; agent_id?: string } | undefined
+            const status = String(task.status ?? '')
+            if (String(target?.group_id ?? '') !== gid || String(target?.agent_id ?? '') !== stopAgent) continue
+            if (status !== 'dispatched' && status !== 'running') continue
+            task.status = 'interrupted'
+            task.updated_at = stoppedAt
+            task.error = '人类只停了这个成员的群运行'
+            interrupted++
+            this.hubGroupTaskUpdate(task, gid)
+          }
+          const prev = this.hubGroupConversations.get(gid) ?? this.mockConversation(gid, 'running')
+          const queued = Number(prev.queue_len ?? 0)
+          const skipped = queued > 0 ? 1 : 0
+          const conversation = queued > 0
+            ? this.hubGroupSetConversation(gid, String(prev.status ?? 'running'), {
+              turns: Number(prev.turns_used ?? 0), depth: Number(prev.depth ?? 0),
+              queue: queued - 1, ...(prev.stop_reason ? { reason: String(prev.stop_reason) } : {}),
+            })
+            : prev
+          const name = String(this.hubAgents.find((a) => String(a.id) === stopAgent)?.name ?? stopAgent)
+          const notice = this.hubGroupAppend(gid, {
+            kind: 'system', sender: { kind: 'system' },
+            text: `已停止「${name}」在本群的运行（中断 ${interrupted} 个 run，跳过 ${skipped} 条排队唤醒），其他成员继续`,
+          })
+          this.hubGroupEmitMessage(gid, notice)
+          this.emit({ event_type: 'hub_agent_status', agent_id: stopAgent, status: 'idle' })
+          this.respond(cmd, { conversation, interrupted, skipped, agent_id: stopAgent })
+          break
+        }
         this.hubGroupGen.set(gid, (this.hubGroupGen.get(gid) ?? 0) + 1)
         // 在飞任务必须结算：换代只作废回调，账本里 queued/dispatched/running 的任务
         // 会一直挂着 —— 前端按 dispatched/running 判「有东西可停」，一次停止之后
@@ -3965,6 +4124,7 @@ class MockTransport implements Transport {
           this.hubGroupTaskUpdate(task, gid)
         }
         const prev = this.hubGroupConversations.get(gid) ?? {}
+        this.hubGroupDeliveryDropQueued(gid, 'stopped')
         const notice = this.hubGroupAppend(gid, {
           kind: 'system', sender: { kind: 'system' }, text: '人类停止了自动对话，等你继续',
         })
@@ -5670,6 +5830,20 @@ function mockGroupMembers(group: Record<string, unknown>): Array<{ agent_id: str
 function mockGroupModeOK(raw: unknown): boolean {
   if (raw === undefined || raw === null || raw === '') return true
   return raw === 'ask' || raw === 'auto' || raw === 'readonly'
+}
+
+// 群策略里**还真生效**的键（P6-13）。已删的 max_parallel_runs / max_turns_per_human
+// 在真 bridge 里由 encoding/json 忽略（未知字段不报错），mock 也必须忽略 —— 否则
+// 旧客户端传一次就把它「存」进群对象，UI 看起来像还有个能拧的旋钮。
+const MOCK_GROUP_POLICY_KEYS = ['mode', 'max_handoff_depth', 'max_mentions_per_message', 'daily_budget_usd']
+function mockGroupPolicyFilter(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object') return {}
+  const src = raw as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  for (const k of MOCK_GROUP_POLICY_KEYS) {
+    if (k in src) out[k] = src[k]
+  }
+  return out
 }
 
 function mockMetricsReport(from: string): Record<string, unknown> {

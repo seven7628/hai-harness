@@ -89,7 +89,7 @@ func TestHubGroupAllMentionsRunsAllTargetsInParallel(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		agents = append(agents, createHubAgent(t, m, buf, i+1, "并发成员"+string(rune('A'+i))))
 	}
-	g := convGroupWith(t, m, buf, 30, "十二人群", map[string]any{"max_turns_per_human": 100}, agents...)
+	g := convGroupWith(t, m, buf, 30, "十二人群", nil, agents...)
 	prov := newConcurrencyProvider()
 	release := prov.gated()
 	defer close(release)
@@ -149,7 +149,7 @@ func TestHubGroupSerialPumpFallback(t *testing.T) {
 	a := createHubAgent(t, m, buf, 1, "降级A")
 	b := createHubAgent(t, m, buf, 2, "降级B")
 	c := createHubAgent(t, m, buf, 3, "降级C")
-	g := convGroupWith(t, m, buf, 10, "降级群", map[string]any{"max_turns_per_human": 100}, a, b, c)
+	g := convGroupWith(t, m, buf, 10, "降级群", nil, a, b, c)
 	prov := newConcurrencyProvider()
 	release := prov.gated()
 	defer close(release)

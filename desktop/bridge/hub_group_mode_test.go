@@ -350,3 +350,56 @@ type timeoutApprover struct{}
 func (timeoutApprover) BeginApproval(core.ToolCall) func(context.Context) (bool, error) {
 	return func(context.Context) (bool, error) { return false, events.ErrApprovalTimeout }
 }
+
+// TestHubGroupModePolicyFieldIsEffective（P6-13 生效性口径）：同一个已装配的群会话，
+// 只改 policy.mode → 会话拿到的 agents.Mode 必须跟着换。这是「字段 → 行为」的接线
+// 判据：P6-06 之前它是个假开关（UI 显示 readonly，引擎照旧 auto）。
+//
+// 与上面三个纯函数用例的分工：那三个钉每种模式的语义，这里钉「改字段真的会被读」。
+func TestHubGroupModePolicyFieldIsEffective(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "模式主")
+	g := groupModeTestGroup(t, m, buf, 2, agenthub.GroupModeReadonly,
+		struct {
+			id   agenthub.AgentID
+			role string
+		}{a.ID, "owner"},
+	)
+	bs, err := m.hubGroupSession(string(a.ID), string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	modeName := func() string {
+		t.Helper()
+		got := bs.s.Mode()
+		if got == nil {
+			t.Fatal("会话没有模式")
+		}
+		return got.Name
+	}
+	if got := modeName(); got != groupModeNameReadonly {
+		t.Fatalf("新建 readonly 群后会话模式 = %q", got)
+	}
+	// 只改 mode 字段（其它策略字段原样保留）→ 已装配会话的模式必须换。
+	ok, errMsg, data := hubCmd(t, m, buf, 3, "hub_group_update", map[string]any{
+		"group_id": string(g.ID), "patch": map[string]any{"policy": map[string]any{"mode": agenthub.GroupModeAuto}},
+	})
+	if !ok {
+		t.Fatalf("update mode: %s", errMsg)
+	}
+	if got := groupFromData(t, data).Policy.Mode; got != agenthub.GroupModeAuto {
+		t.Fatalf("落盘 mode = %q", got)
+	}
+	if got := modeName(); got != groupModeNameAuto {
+		t.Fatalf("改字段后会话模式仍是 %q（假开关）", got)
+	}
+	ok, errMsg, _ = hubCmd(t, m, buf, 4, "hub_group_update", map[string]any{
+		"group_id": string(g.ID), "patch": map[string]any{"policy": map[string]any{"mode": agenthub.GroupModeAsk}},
+	})
+	if !ok {
+		t.Fatalf("update mode: %s", errMsg)
+	}
+	if got := modeName(); got != groupModeNameAsk {
+		t.Fatalf("改字段后会话模式仍是 %q（假开关）", got)
+	}
+}

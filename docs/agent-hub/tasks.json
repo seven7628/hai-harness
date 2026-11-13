@@ -2004,8 +2004,10 @@
       ],
       "acceptance": "在飞 run 不中断；旧 generation 未投递 wake 丢弃；人类消息按 target 排队；旧 run @ 不路由；新链 depth/pair 清零。",
       "tests": "go test ./desktop/bridge -run TestHumanInterject；浏览器群聊插话",
-      "commit": "feat(hub-p6-07): 人类插话下一输入与代际隔离",
-      "status": "in_progress"
+      "commit": "37207ce",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-08",
@@ -2022,8 +2024,10 @@
       ],
       "acceptance": "stop 可带 agent_id 只停一个；群级 stop 保留；run_timeout_ms 超时中断；队列继续。",
       "tests": "go test ./desktop/bridge -run TestHubConversationStop；浏览器停止按钮",
-      "commit": "feat(hub-p6-08): 按 agent 停止与 run 超时",
-      "status": "in_progress"
+      "commit": "7d3754b",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-09",
@@ -2043,8 +2047,10 @@
       ],
       "acceptance": "每群 conversation 文件；queue/status/pair/depth 落盘；重启恢复未投递；已投递未完成标 interrupted 不重放；坏文件不覆盖。",
       "tests": "go test ./agenthub -run TestConversationStore；go test ./desktop/bridge -run TestConversationRestart",
-      "commit": "feat(hub-p6-09): 对话状态持久化与重启恢复",
-      "status": "in_progress"
+      "commit": "38b8350",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-10",
@@ -2062,8 +2068,10 @@
       ],
       "acceptance": "每 target 已入队/已回复/未回复/失败可见；@all 成功=已入队；状态条显示本轮/本链/队列/pair/失败；pair 恢复倒计时 + 手动重置按钮。",
       "tests": "node scripts/test-hub-conv.mjs；浏览器群聊状态条",
-      "commit": "feat(hub-p6-10): @all 投递状态与群状态条",
-      "status": "in_progress"
+      "commit": "bc205cc + db0eb4e",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-11",
@@ -2122,8 +2130,10 @@
       ],
       "acceptance": "删除 MaxParallelRuns/MaxTurnsPerHuman 字段与默认值；Mode 已生效；每个保留 policy 字段有生效性测试。",
       "tests": "go test ./agenthub -run GroupPolicy；npm run test:p4",
-      "commit": "refactor(hub-p6-13): 清理群策略死旋钮",
-      "status": "in_progress"
+      "commit": "15e4d34",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-14",
@@ -2141,8 +2151,10 @@
       ],
       "acceptance": "ink/paper/system 三主题中心与右栏同色；header/composer 同步；状态条显示本轮/本链/队列/pair/失败；1280/640 无溢出。",
       "tests": "npm run test:css；浏览器截图三主题；check-p4-p2-details",
-      "commit": "fix(hub-p6-14): 统一会话区色板与群状态条",
-      "status": "in_progress"
+      "commit": "f62aa98",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-15",
@@ -2169,7 +2181,8 @@
       ],
       "acceptance": "Go/TS/browser/真实 Hub E2E 全绿；独立 Review PASS；看板/文档同步；worktree 清理。",
       "tests": "go test ./...；npm run test:p4；浏览器关键脚本；真实 provider E2E",
-      "commit": "test(hub-p6-15): 群聊硬化最终回归"
+      "commit": "test(hub-p6-15): 群聊硬化最终回归",
+      "status": "in_progress"
     },
     {
       "id": "P6-16",
@@ -3267,68 +3280,104 @@
       "reviewNote": "task-h54jdhp3：产品六项/390/system/mock 对齐真实 Chromium 全部 PASS；阻塞仅 check:p4-p2 B1/B2；2435a0c 修后 `npm run check:p4-p2` 输出 640/760/900 均有「更多入口 32×32」与 scope&&tab，全部通过。非阻塞：≤900 与 Electron minWidth 980 不一致（980×620 目标仍小）、fixed sleep、stale error 未清、shoot-hub-conv 390 限制；iOS Safari/OS 深链仍发布 gate。"
     },
     "P6-01": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-01): per-target 投递账本"
+      "status": "done",
+      "commit": "be8168a",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     "P6-02": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-02): 统一群调度器与并发=目标数"
+      "status": "done",
+      "commit": "e182496 + cf5bebd",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     "P6-03": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-03): 群 run 预跑预算与限流"
+      "status": "done",
+      "commit": "8abc06d",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     "P6-04": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-04): 全局对话设置与无序 PairLimit"
+      "status": "done",
+      "commit": "aef52b4 + 18c1ace",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     "P6-05": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-05): 每链深度与全局 max_depth"
+      "status": "done",
+      "commit": "81d9a6d + 8294a78",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     "P6-06": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-06): 群 Mode 工具策略真接线"
+      "status": "done",
+      "commit": "9e5ca58",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer 12 组 + check-hub-group-edit 浏览器 PASS；merge 4ec7313。"
     },
     "P6-11": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-11): agent 来源标记与工具策略审计"
+      "status": "done",
+      "commit": "4727831",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer 12 组 + check-hub-group-edit 浏览器 PASS；merge 4ec7313。"
     },
     "P6-12": {
-      "status": "in_progress",
-      "commit": "refactor(hub-p6-12): 删除 observer 角色并迁移旧数据"
+      "status": "done",
+      "commit": "715a28c",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer 12 组 + check-hub-group-edit 浏览器 PASS；merge 4ec7313。"
     },
     "P6-16": {
-      "status": "in_progress",
-      "commit": "fix(hub-p6-16): 修复头部更多菜单层级与透出"
+      "status": "done",
+      "commit": "3bd3439",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer 12 组 + check-hub-group-edit 浏览器 PASS；merge 4ec7313。"
     },
     "P6-17": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-17): 群组编辑与成员管理"
+      "status": "done",
+      "commit": "1744204",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer 12 组 + check-hub-group-edit 浏览器 PASS；merge 4ec7313。"
     },
     "P6-07": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-07): 人类插话下一输入与代际隔离"
+      "status": "done",
+      "commit": "37207ce",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     "P6-08": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-08): 按 agent 停止与 run 超时"
+      "status": "done",
+      "commit": "7d3754b",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     "P6-09": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-09): 对话状态持久化与重启恢复"
+      "status": "done",
+      "commit": "38b8350",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     "P6-10": {
-      "status": "in_progress",
-      "commit": "feat(hub-p6-10): @all 投递状态与群状态条"
+      "status": "done",
+      "commit": "bc205cc + db0eb4e",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     "P6-13": {
-      "status": "in_progress",
-      "commit": "refactor(hub-p6-13): 清理群策略死旋钮"
+      "status": "done",
+      "commit": "15e4d34",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     "P6-14": {
+      "status": "done",
+      "commit": "f62aa98",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
+    },
+    "P6-15": {
       "status": "in_progress",
-      "commit": "fix(hub-p6-14): 统一会话区色板与群状态条"
+      "commit": "test(hub-p6-15): 群聊硬化最终回归"
     }
   },
   "reviewGate": {

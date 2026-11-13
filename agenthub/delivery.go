@@ -68,7 +68,8 @@ const (
 	DeliveryReasonStopped     = "stopped"            // 人类停止自动对话
 	DeliveryReasonStale       = "stale_conversation" // 旧 generation 的 wake，丢弃
 	DeliveryReasonDuplicate   = "duplicate"          // 同一 wake id 重复投递（幂等命中）
-	DeliveryReasonInterrupted = "interrupted"        // run 被中断（停止/关停）
+	DeliveryReasonInterrupted = "interrupted"        // run 被中断（停止/关停/按 agent 停止）
+	DeliveryReasonTimeout     = "run_timeout"        // 单轮 run 超过 run_timeout_ms，被中断（P6-08）
 	DeliveryReasonShutdown    = "shutdown"           // Hub 正在关停
 	DeliveryReasonInvalid     = "invalid"            // 群/成员/会话已不可用
 	DeliveryReasonQueueFull   = "queue_full"         // 待投递队列到达 max_pending_wakes
@@ -228,16 +229,43 @@ func (l *deliveryLedger) prune() {
 
 // dropQueued 丢弃所有还在排队的记录（人类开新对话时旧 wake 作废）。
 // 返回丢掉的条数；running/终态记录保留（在飞 run 还能正常收尾/展示）。
-func (l *deliveryLedger) dropQueued() int {
+func (l *deliveryLedger) dropQueued() int { return l.dropQueuedExcept(nil) }
+
+// drop 删掉一条记录（被新的人类消息取代的 pending 输入用），返回是否删到。
+func (l *deliveryLedger) drop(id string) bool {
+	if l == nil || id == "" {
+		return false
+	}
+	if _, ok := l.byID[id]; !ok {
+		return false
+	}
+	delete(l.byID, id)
+	kept := l.order[:0]
+	for _, x := range l.order {
+		if _, ok := l.byID[x]; ok {
+			kept = append(kept, x)
+		}
+	}
+	l.order = kept
+	return true
+}
+
+// dropQueuedExcept 同 dropQueued，但保留 keep 里的 wake id：人类自己的「下一个输入」
+// 在换代后仍然要投（P6-07 §1.5），账本记录不能跟着旧 generation 一起消失。
+func (l *deliveryLedger) dropQueuedExcept(keep map[string]struct{}) int {
 	if l == nil {
 		return 0
 	}
 	n := 0
 	for id, d := range l.byID {
-		if d != nil && d.Status == DeliveryQueued {
-			delete(l.byID, id)
-			n++
+		if d == nil || d.Status != DeliveryQueued {
+			continue
 		}
+		if _, ok := keep[id]; ok {
+			continue
+		}
+		delete(l.byID, id)
+		n++
 	}
 	if n == 0 {
 		return 0

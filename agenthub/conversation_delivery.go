@@ -26,7 +26,7 @@ func (c *ConversationController) BeginDelivery(w Wake, at time.Time) (Wake, bool
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(w.GroupID) }()
 	conv := c.ensureLocked(w.GroupID, now)
 	if conv.deliveries == nil {
 		conv.deliveries = newDeliveryLedger()
@@ -91,7 +91,7 @@ func (c *ConversationController) CommitDelivery(w Wake, at time.Time) Wake {
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(w.GroupID) }()
 	conv := c.convs[w.GroupID]
 	if conv == nil || conv.deliveries == nil {
 		return w
@@ -143,7 +143,7 @@ func (c *ConversationController) RequeueDelivery(w Wake, reason string, readyAt 
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(w.GroupID) }()
 	conv := c.convs[w.GroupID]
 	if conv == nil || conv.deliveries == nil {
 		return false
@@ -174,7 +174,7 @@ func (c *ConversationController) FinishDelivery(group GroupID, wakeID string, st
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return false
@@ -199,7 +199,7 @@ func (c *ConversationController) FinishAgentDeliveries(group GroupID, agent Agen
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return 0
@@ -228,7 +228,7 @@ func (c *ConversationController) SkipQueuedDeliveries(group GroupID, reason stri
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return 0
@@ -257,7 +257,7 @@ func (c *ConversationController) InterruptRunningDeliveries(group GroupID, reaso
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return 0
@@ -278,6 +278,53 @@ func (c *ConversationController) InterruptRunningDeliveries(group GroupID, reaso
 	return n
 }
 
+// SkipAgentQueuedDeliveries 是「按 agent 停止」（P6-08）的队列侧动作：只把该目标
+// **还在排队**的记录记成 skipped 并出队，其他目标的队列/账本一条都不动。
+// 它正在跑的记录同样不动 —— 那条由调用方中断 run 之后用 FinishAgentDeliveries 收口。
+func (c *ConversationController) SkipAgentQueuedDeliveries(group GroupID, agent AgentID, reason string, at time.Time) int {
+	if c == nil || group == "" || agent == "" {
+		return 0
+	}
+	now := c.clockAt(at)
+	c.mu.Lock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
+	conv := c.convs[group]
+	if conv == nil {
+		return 0
+	}
+	// 队列是「谁在等」的真相，账本是旁路：按 wake id 去重后再计数，避免同一条
+	// wake（队列 + 账本各一份）被算两次。
+	hit := map[string]struct{}{}
+	if len(conv.queue) > 0 {
+		kept := conv.queue[:0]
+		for _, w := range conv.queue {
+			if w.Target != agent {
+				kept = append(kept, w)
+				continue
+			}
+			hit[w.ID] = struct{}{}
+		}
+		conv.queue = kept
+	}
+	if conv.deliveries != nil {
+		for id, d := range conv.deliveries.byID {
+			if d == nil || d.Target != agent || d.Status != DeliveryQueued {
+				continue
+			}
+			d.Status = DeliverySkipped
+			d.Reason = reason
+			d.ReadyAt = nil
+			d.UpdatedAt = now
+			hit[id] = struct{}{}
+		}
+	}
+	n := len(hit)
+	if n > 0 {
+		conv.updatedAt = now
+	}
+	return n
+}
+
 // SkipWake 把指定 wake 记成 skipped（预算门/护栏命中）并移出队列。
 // 返回 false 表示这条已经不在排队（已投/已终结/被换代清掉），调用方无需再管。
 func (c *ConversationController) SkipWake(group GroupID, wakeID string, reason string, at time.Time) bool {
@@ -286,7 +333,7 @@ func (c *ConversationController) SkipWake(group GroupID, wakeID string, reason s
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return false

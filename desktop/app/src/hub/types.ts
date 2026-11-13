@@ -305,10 +305,15 @@ export interface HubGroupMember {
   joined_at?: string
 }
 
+/**
+ * 群策略（Go agenthub.GroupPolicy 的镜像）。**只有真的生效的旋钮**（P6-13）：
+ * max_parallel_runs（并发 = 本轮目标数）与 max_turns_per_human（群策略限制取消）
+ * 已从后端删掉，前端也不再有这两个字段 —— 类型里留着等于给 UI 一个假开关。
+ * 旧群 JSON 里多这两个键由 Go 的 encoding/json 忽略，前端不读就不会显示。
+ */
 export interface HubGroupPolicy {
   mode?: string
   max_handoff_depth?: number
-  max_turns_per_human?: number
   max_mentions_per_message?: number
   daily_budget_usd?: number
 }

@@ -251,7 +251,7 @@ func TestHubConversationEightTurnsThenExhausted(t *testing.T) {
 	c := createHubAgent(t, m, buf, 3, "轮次C")
 	d := createHubAgent(t, m, buf, 4, "轮次D")
 	g := convGroupWith(t, m, buf, 10, "8轮群",
-		map[string]any{"max_turns_per_human": 100}, a, b, c, d)
+		nil, a, b, c, d)
 	for _, ag := range []agenthub.AgentProfile{a, b, c, d} {
 		p3bWireFake(t, m, g, string(ag.ID), "收到")
 	}
@@ -352,7 +352,7 @@ func TestHubConversationDepthStopsAtFourHops(t *testing.T) {
 	c := createHubAgent(t, m, buf, 3, "深度C")
 	d := createHubAgent(t, m, buf, 4, "深度D")
 	e := createHubAgent(t, m, buf, 5, "深度E")
-	g := convGroupWith(t, m, buf, 10, "深度群", map[string]any{"max_turns_per_human": 100}, a, b, c, d, e)
+	g := convGroupWith(t, m, buf, 10, "深度群", nil, a, b, c, d, e)
 	fe := newConvProvider("E 不该被叫醒")
 	p3bWireFake(t, m, g, string(a.ID), "@深度B 我 A 说完")
 	p3bWireFake(t, m, g, string(b.ID), "@深度C 我 B 说完")
@@ -396,7 +396,7 @@ func TestHubConversationPairLimitStopsPingPong(t *testing.T) {
 
 	a := createHubAgent(t, m, buf, 1, "斗嘴A")
 	b := createHubAgent(t, m, buf, 2, "斗嘴B")
-	g := convGroupWith(t, m, buf, 10, "斗嘴群", map[string]any{"max_turns_per_human": 100}, a, b)
+	g := convGroupWith(t, m, buf, 10, "斗嘴群", nil, a, b)
 	p3bWireFake(t, m, g, string(a.ID), "@斗嘴B A 第一次")
 	p3bWireFake(t, m, g, string(b.ID), "@斗嘴A B 第一次")
 	// A 每次都说不同的话：这样踢皮球只能靠 PairCount 拦，指纹拦不住。
@@ -442,7 +442,7 @@ func TestHubConversationFingerprintLoopStops(t *testing.T) {
 
 	a := createHubAgent(t, m, buf, 1, "循环A")
 	b := createHubAgent(t, m, buf, 2, "循环B")
-	g := convGroupWith(t, m, buf, 10, "循环群", map[string]any{"max_turns_per_human": 100}, a, b)
+	g := convGroupWith(t, m, buf, 10, "循环群", nil, a, b)
 	// A 每次都复读同一段话；B 每次都把话头推回 A。
 	p3bWireFake(t, m, g, string(a.ID), "@循环B 这件事我来处理，请你确认。")
 	p3bWireFake(t, m, g, string(b.ID), "@循环A 请你再确认一遍。")
@@ -484,7 +484,7 @@ func TestHubConversationStaleGenerationWakeDropped(t *testing.T) {
 	c := createHubAgent(t, m, buf, 3, "旧链C")
 	d := createHubAgent(t, m, buf, 4, "旧链D")
 	e := createHubAgent(t, m, buf, 5, "旧链E")
-	g := convGroupWith(t, m, buf, 10, "旧链群", map[string]any{"max_turns_per_human": 100}, a, b, c, d, e)
+	g := convGroupWith(t, m, buf, 10, "旧链群", nil, a, b, c, d, e)
 	p3bWireFake(t, m, g, string(a.ID), "@旧链B 一")
 	p3bWireFake(t, m, g, string(b.ID), "@旧链C 二")
 	p3bWireFake(t, m, g, string(c.ID), "@旧链D 三")
@@ -562,7 +562,7 @@ func TestHubConversationParallelAcrossTargets(t *testing.T) {
 	a := createHubAgent(t, m, buf, 1, "并行A")
 	b := createHubAgent(t, m, buf, 2, "并行B")
 	c := createHubAgent(t, m, buf, 3, "并行C")
-	g := convGroupWith(t, m, buf, 10, "并行群", map[string]any{"max_turns_per_human": 100}, a, b, c)
+	g := convGroupWith(t, m, buf, 10, "并行群", nil, a, b, c)
 	fa := newConvProvider("A 说完了", "A 补投后的话")
 	releaseA := fa.gated()
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(a.ID), string(g.ID)), g, string(a.ID), fa)
@@ -626,7 +626,7 @@ func TestHubConversationParallelBatchesAllTargets(t *testing.T) {
 	b := createHubAgent(t, m, buf, 2, "批次B")
 	c := createHubAgent(t, m, buf, 3, "批次C")
 	d := createHubAgent(t, m, buf, 4, "批次D")
-	g := convGroupWith(t, m, buf, 10, "批次群", map[string]any{"max_turns_per_human": 100}, a, b, c, d)
+	g := convGroupWith(t, m, buf, 10, "批次群", nil, a, b, c, d)
 	fa := newConvProvider("A 看完了")
 	releaseA := fa.gated()
 	defer close(releaseA)
@@ -705,7 +705,7 @@ func TestHubConversationCooldownGatesNextWake(t *testing.T) {
 
 	a := createHubAgent(t, m, buf, 1, "冷却A")
 	b := createHubAgent(t, m, buf, 2, "冷却B")
-	g := convGroupWith(t, m, buf, 10, "冷却群", map[string]any{"max_turns_per_human": 100}, a, b)
+	g := convGroupWith(t, m, buf, 10, "冷却群", nil, a, b)
 	p3bWireFake(t, m, g, string(a.ID), "@冷却B 你接着说")
 	p3bWireFake(t, m, g, string(b.ID), "B 说完了")
 
@@ -772,7 +772,7 @@ func TestHubConversationHumanClearsQueue(t *testing.T) {
 	a := createHubAgent(t, m, buf, 1, "人类A")
 	b := createHubAgent(t, m, buf, 2, "人类B")
 	c := createHubAgent(t, m, buf, 3, "人类C")
-	g := convGroupWith(t, m, buf, 10, "人类优先群", map[string]any{"max_turns_per_human": 100}, a, b, c)
+	g := convGroupWith(t, m, buf, 10, "人类优先群", nil, a, b, c)
 	p3bWireFake(t, m, g, string(a.ID), "@人类B @人类C 你们俩都说说")
 	fb := newConvProvider("B 在跑")
 	release := fb.gated()
@@ -827,7 +827,7 @@ func TestHubConversationBusyTargetWakeStaysQueued(t *testing.T) {
 
 	a := createHubAgent(t, m, buf, 1, "忙唤醒A")
 	b := createHubAgent(t, m, buf, 2, "忙唤醒B")
-	g := convGroupWith(t, m, buf, 10, "忙唤醒群", map[string]any{"max_turns_per_human": 100}, a, b)
+	g := convGroupWith(t, m, buf, 10, "忙唤醒群", nil, a, b)
 	p3bWireFake(t, m, g, string(a.ID), "@忙唤醒B 你接着说")
 	fb := newConvProvider("B 第一轮", "B 第二轮")
 	release := fb.gated()
@@ -873,7 +873,7 @@ func TestHubConversationStopInterruptsActiveRun(t *testing.T) {
 
 	a := createHubAgent(t, m, buf, 1, "停止A")
 	b := createHubAgent(t, m, buf, 2, "停止B")
-	g := convGroupWith(t, m, buf, 10, "停止群", map[string]any{"max_turns_per_human": 100}, a, b)
+	g := convGroupWith(t, m, buf, 10, "停止群", nil, a, b)
 	fa := newConvProvider("@停止B 我先说")
 	release := fa.gated()
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(a.ID), string(g.ID)), g, string(a.ID), fa)
@@ -946,7 +946,7 @@ func TestHubConversationBusyTargetTaskPump(t *testing.T) {
 		{"agent_id": string(to.ID), "role": "member"},
 	}
 	if ok, errMsg, data := hubCmd(t, m, buf, 10, "hub_group_create", map[string]any{
-		"name": "忙任务群", "members": raw, "policy": map[string]any{"max_turns_per_human": 100},
+		"name": "忙任务群", "members": raw, "policy": nil,
 	}); !ok {
 		t.Fatalf("create group: %s", errMsg)
 	} else {
@@ -1049,7 +1049,7 @@ func TestHubConversationEventAndWakeDepth(t *testing.T) {
 	convLimits(m, agenthub.ConversationLimits{TurnBudget: 8, Cooldown: -1})
 
 	a := createHubAgent(t, m, buf, 1, "事件A")
-	g := convGroupWith(t, m, buf, 10, "事件群", map[string]any{"max_turns_per_human": 100}, a)
+	g := convGroupWith(t, m, buf, 10, "事件群", nil, a)
 	fa := newConvProvider("A 看到消息了")
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(a.ID), string(g.ID)), g, string(a.ID), fa)
 

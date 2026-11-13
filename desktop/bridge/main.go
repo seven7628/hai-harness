@@ -353,6 +353,10 @@ type bridgeSession struct {
 	// hubGroupWake 当前群 run 绑定的轮次（UserInputsConsumed 从 hidden 块解析）。
 	// 只在 emit（dispatchMu 内）读写；finishHubRound 用完后清空。
 	hubGroupWake *agenthub.GroupWakeHeader
+	// hubGroupRunWakeID 是刚收尾那一轮投递的 wake id（P6-09）：hubOnRunEnd 用它
+	// 精确收口账本，而不是把该目标所有 running 记录都标 done。emit 内写，
+	// hubOnRunEnd 读（同一 goroutine）。
+	hubGroupRunWakeID string
 	// hubWakeDepth/hubWakeTurn 是 hubGroupWake.Depth/Turn 的原子镜像（P3b-04）：
 	// group_say 在工具 goroutine 里要算「下一跳深度」，不能直接读 emit 独占的指针。
 	hubWakeDepth atomic.Int64
@@ -1439,6 +1443,12 @@ type manager struct {
 	// hubConvDispatch 按群串行化自动对话的「取 wake → 投递 → 记账」与停止/人类插话（B2）。
 	hubConvDispatch hubConvDispatchGate
 	hubConvNotified map[agenthub.GroupID]string
+	// hubRunTimerMu/hubRunTimers 是「每 (group, agent) 一个在跑 run 的超时定时器」
+	//（P6-08）：run 收尾/按 agent 停止时撤掉，到点则中断这一轮并继续队列。
+	hubRunTimerMu sync.Mutex
+	hubRunTimers  map[string]*hubRunTimer
+	// hubRestoreOnce 保证对话状态重启恢复只跑一次（P6-09）。
+	hubRestoreOnce sync.Once
 	// hubProvSem 是进程级 provider 并发信号量（P6-03，懒建一次）；所有 hub loop 共享。
 	hubProvSem     *agents.ProviderSemaphore
 	hubProvSemOnce sync.Once
@@ -2350,7 +2360,8 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 			bs.hubOnRunEnd = func() {
 				// 先收口投递账本（running → done），再推进泵：泵看到的是
 				// 「这一轮已结束」的账本，不会把同一条 wake 当成还在跑。
-				m.finishHubGroupDelivery(gid, aid)
+				// 按 wake id 收口（P6-09）：只标这一轮，不碰已经投给同一目标的下一轮。
+				m.finishHubGroupDelivery(gid, aid, bs.hubGroupRunWakeID)
 				m.scheduleAgentTaskPump(gid, aid)
 				m.scheduleHubConversationPump(gid)
 			}
@@ -6957,6 +6968,10 @@ func serve() error {
 	m.startCron()
 	startupLog("A3.startCron", cronStart)
 
+	// P6-09：把磁盘上的群对话状态装回控制器（未投递的恢复排队、已投递未完成的标
+	// interrupted 并写系统说明、坏文件只告警不覆盖）。放在 ready 之前：前端一打开
+	// 群就该看到真实状态。
+	m.restoreHubConversations()
 	// P0/P1（§4.4/§4.6）：bridge 启动完成 → 发一次 ready 事件。
 	// 前端 embed 自举以此为准（不再靠任意 command response 猜测 bridge 就绪）。
 	startupLog("A4.bridge_ready(总启动)", serveStart)

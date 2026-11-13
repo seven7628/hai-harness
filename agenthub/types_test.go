@@ -99,11 +99,10 @@ func TestGroupJSONStable(t *testing.T) {
 			{AgentID: "ag_2p8v", Role: RoleMember, JoinedAt: testTime()},
 		},
 		Policy: GroupPolicy{
-			Mode:             GroupModeAsk,
-			MaxHandoffDepth:  3,
-			MaxTurnsPerHuman: 8,
-			MaxMentions:      3,
-			DailyBudgetUSD:   20,
+			Mode:            GroupModeAsk,
+			MaxHandoffDepth: 3,
+			MaxMentions:     3,
+			DailyBudgetUSD:  20,
 		},
 		Pinned:    true,
 		CreatedAt: testTime(),
@@ -261,15 +260,6 @@ func TestScopeSessionID(t *testing.T) {
 	}
 	if got := (Scope{}).SessionID("ag_1"); got != "" {
 		t.Fatalf("empty scope must return empty id, got %q", got)
-	}
-}
-
-func TestGroupPolicyTurnsUpperBound(t *testing.T) {
-	if err := (GroupPolicy{MaxTurnsPerHuman: MaxGroupPolicyTurnsPerHuman + 1}).Validate(); err == nil {
-		t.Fatal("max_turns_per_human above read window must be rejected")
-	}
-	if err := (GroupPolicy{MaxTurnsPerHuman: MaxGroupPolicyTurnsPerHuman}).Validate(); err != nil {
-		t.Fatalf("upper bound must be accepted: %v", err)
 	}
 }
 
