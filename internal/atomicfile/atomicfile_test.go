@@ -165,3 +165,79 @@ func TestConcurrentAppendsAreNotInterleaved(t *testing.T) {
 		}
 	}
 }
+
+// ReplaceReader 与 Replace 的语义必须一致（同样的 temp+fsync+rename、同样的权限、
+// 同样不留临时文件），区别只在内容来源 —— 大产物（office 预览 HTML）走它以免整读进内存。
+func TestReplaceReaderStreamsAndMatchesReplace(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "out", "big.html")
+	big := strings.Repeat("<p>段落</p>", 50000) // ~1.5 MiB，远超单次 Write 的舒适区
+	if err := ReplaceReader(p, strings.NewReader(big), 0o644); err != nil {
+		t.Fatalf("ReplaceReader: %v", err)
+	}
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != big {
+		t.Fatalf("内容不一致：%d vs %d bytes", len(got), len(big))
+	}
+	st, _ := os.Stat(p)
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("file mode = %v", st.Mode().Perm())
+	}
+	ents, _ := os.ReadDir(filepath.Dir(p))
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".atomic-") {
+			t.Fatalf("残留临时文件 %s", e.Name())
+		}
+	}
+	// 读端出错时目标文件不该被写坏（原子性：坏产物不会顶替好产物）
+	prev := "旧内容"
+	if err := Replace(p, prev); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceReader(p, errReader{}, 0o644); err == nil {
+		t.Fatal("读端出错应返回错误")
+	}
+	if got, _ := os.ReadFile(p); string(got) != prev {
+		t.Fatalf("写入失败后旧内容被破坏：%q", got)
+	}
+}
+
+// errReader 第一次读就报错（模拟转换产物读取中断）。
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, fmt.Errorf("boom") }
+
+// ReplaceReader 的 mode 参数必须真的落到文件上（R08a：预览产物要 0600，
+// 因为里面是用户文档的内容；工作区文件仍是 0644）。
+func TestReplaceReaderHonorsMode(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "previews", "index.html")
+	if err := ReplaceReader(secret, strings.NewReader("<html>doc</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v，期望 0600（预览产物可能含敏感文档内容）", st.Mode().Perm())
+	}
+	// 默认 WriteLocked 路径仍然是 0644（工作区文件口径不许被这次改动带偏）
+	plain := filepath.Join(dir, "plain.txt")
+	if err := Replace(plain, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(plain); st.Mode().Perm() != 0o644 {
+		t.Fatalf("Replace 的 mode 漂了: %v", st.Mode().Perm())
+	}
+	// 覆盖已存在的 0644 文件时，mode 也要生效（rename 换的是新 inode）
+	if err := ReplaceReader(plain, strings.NewReader("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(plain); st.Mode().Perm() != 0o600 {
+		t.Fatalf("覆盖写后 mode = %v，期望 0600", st.Mode().Perm())
+	}
+}
