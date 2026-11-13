@@ -9,6 +9,19 @@ import type { HubAttachment } from './types'
 // 图片只以 data URL 存在于消息里，所以灯箱里的「复制图片」是 ClipboardItem 直写；
 // 失败**不 alert**，在灯箱底部给一行可读的状态。
 
+// 附件没有后端 id；用对象身份发稳定 key。删除中间一张时，React 不会把「下一张」
+// 复用到被删节点的位置上（读屏不会把图片 2 念成原来的图片 3）。
+const attachKeys = new WeakMap<HubAttachment, number>()
+let nextAttachKey = 1
+function attachKey(a: HubAttachment): string {
+  let n = attachKeys.get(a)
+  if (!n) {
+    n = nextAttachKey++
+    attachKeys.set(a, n)
+  }
+  return `img-${n}`
+}
+
 /**
  * 灯箱里可聚焦的控件（按 DOM 顺序 = Tab 顺序）。
  *
@@ -60,6 +73,9 @@ export function HubImageLightbox({
 
   useEffect(() => {
     restoreTo.current = typeof document !== 'undefined' ? document.activeElement : null
+    // 灯箱打开时锁背景滚动：否则滚轮/触控板会把后面的时间线滚走，关闭后位置也变了。
+    const prevBodyOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
     closeRef.current?.focus()
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
@@ -97,6 +113,7 @@ export function HubImageLightbox({
     document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('keydown', onKey, true)
+      document.body.style.overflow = prevBodyOverflow
       // 关闭后焦点回到触发元素（缩略图 / +N）。触发元素可能已经不在文档里：灯箱里
       // 「删除」掉最后一张待发图时，缩略图跟着图片一起消失。这时兜底回 composer
       // 输入框，否则 activeElement 掉到 <body>，键盘用户下一次 Tab 从页面顶部重来。
@@ -246,7 +263,7 @@ export default function AttachmentStrip({
                 <div
                   className="hub-attach-chip hub-attach-chip--img"
                   role="listitem"
-                  key={`img-${i}`}
+                  key={attachKey(a)}
                   style={{ ['--i' as string]: i, ['--mid' as string]: mid }}
                 >
                   <button

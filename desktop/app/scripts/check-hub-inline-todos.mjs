@@ -173,6 +173,13 @@ try {
   const rowsBefore = await msgRows()
   const a = await cards()
   check(a.length === 3, `DM 出 3 张卡（主 run / 子 run / 未知 run；got=${a.length}）`)
+  const todoStyle = await page.locator('.hub-inline-todo').first().evaluate((el) => {
+    const s = getComputedStyle(el)
+    return { left: s.borderLeftWidth, top: s.borderTopWidth, radius: s.borderRadius }
+  })
+  check(todoStyle.left === todoStyle.top && todoStyle.left === '1px',
+    `待办卡不再有左侧色条（left=${todoStyle.left}, top=${todoStyle.top}）`)
+  check(todoStyle.radius === '8px', `待办卡圆角统一为 8px（got=${todoStyle.radius}）`)
 
   // 1) 主 run 卡
   const main = a.find((c) => c.attr.endsWith('主会话'))

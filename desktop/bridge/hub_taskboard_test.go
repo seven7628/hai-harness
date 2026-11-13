@@ -245,7 +245,8 @@ func TestHubNeedResolveOnHubDMSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := core.ToolCall{Id: "call-hub-1", Name: "bash", Arguments: `{"command":"ls"}`}
-	if _, err := bs.s.RequestApproval(context.Background(), call); err != nil {
+	wait, err := bs.s.RequestApproval(context.Background(), call)
+	if err != nil {
 		t.Fatalf("register approval: %v", err)
 	}
 	bs.emit(&events.ToolApprovalRequested{
@@ -266,6 +267,13 @@ func TestHubNeedResolveOnHubDMSession(t *testing.T) {
 	got, err := st.LoadNeed(context.Background(), needs[0].ID)
 	if err != nil || got.Status != "resolved" {
 		t.Fatalf("need = %+v, %v", got, err)
+	}
+	// 不只是账本状态变了：resolve 必须解除**这个** Session 上挂起的审批等待器。
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	approved, err := wait(ctx)
+	if err != nil || !approved {
+		t.Fatalf("hub_need_resolve 未解除 Project session 的审批等待：approved=%v err=%v", approved, err)
 	}
 }
 

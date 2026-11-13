@@ -74,6 +74,20 @@ check(String(text).includes('workspace'), `群内联卡显示 Project workspace�
 check(String(text).includes('s_mock_project'), `群内联卡显示 Project session（got=${text}）`)
 check(String(text).includes('Researcher-sub'), `群内联卡显示子智能体名（got=${text}）`)
 check(await page.locator('.hub-inline-need--question').count() >= 1, '群内联提问卡也出现')
+// 视觉口径：中性卡身 + 1px 四边同色边框 + 8px 圆角；类型色只留在 chip 上。
+const needStyle = await card.evaluate((el) => {
+  const s = getComputedStyle(el)
+  return { left: s.borderLeftWidth, top: s.borderTopWidth, radius: s.borderRadius, bg: s.backgroundColor }
+})
+check(needStyle.left === needStyle.top && needStyle.left === '1px',
+  `内联 need 卡不再有左侧 3px 色条（left=${needStyle.left}, top=${needStyle.top}）`)
+check(needStyle.radius === '8px', `内联 need 卡圆角统一为 8px（got=${needStyle.radius}）`)
+const inputStyle = await page.locator('.hub-inline-need--question input').first().evaluate((el) => {
+  const s = getComputedStyle(el)
+  return { height: s.height, border: s.borderTopColor, bg: s.backgroundColor }
+})
+check(inputStyle.height === '32px' && inputStyle.border !== 'rgba(0, 0, 0, 0)',
+  `提问输入框有可见边框且高度 32px（height=${inputStyle.height}, border=${inputStyle.border}）`)
 await page.screenshot({ path: '/tmp/hub-inline-needs-group.png' })
 
 // 批准：卡片消失，且没有新增 hub 消息（只走 need resolve）
@@ -82,6 +96,11 @@ await card.locator('button').filter({ hasText: '批准' }).first().click()
 await page.waitForTimeout(900)
 check(await page.locator('.hub-inline-need--approval').count() === 0, '批准后审批内联卡消失')
 check(await page.locator('.hub-demo .msg-row').count() === beforeMsgs, '内联卡不写 hub 消息（只展示）')
+// 提交后必须告诉用户落点：不是写 Hub 消息，而是 resolve 到具体的 Project session。
+await page.locator('.hub-notice').first().waitFor({ timeout: 4000 })
+const notice = await page.locator('.hub-notice').first().innerText()
+check(notice.includes('已提交到') && notice.includes('s_mock_project'),
+  `审批提交后提示具体 Project session（got=${notice}）`)
 
 // 2) 群 need 不出现在 DM
 await openDM()

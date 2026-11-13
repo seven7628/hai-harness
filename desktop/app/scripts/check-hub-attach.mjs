@@ -223,9 +223,13 @@ async function sendWithImage(testid, text) {
   await page.waitForTimeout(250) // 抽正/放大是 180ms 过渡：等它停稳再点，慢机也不 flaky。
   await stripThumb.click()
   await page.locator('.hub-attach-lb').waitFor({ timeout: 6000 })
+  check(await page.evaluate(() => document.body.style.overflow === 'hidden'),
+    '灯箱打开时锁背景滚动（body overflow=hidden）')
   check(await page.locator('.hub-attach-lb-btn.danger').count() === 1, '待发灯箱里有「删除」')
   await page.locator('.hub-attach-lb-btn.danger').click()
   await page.locator('.hub-attach-lb').waitFor({ state: 'detached', timeout: 4000 })
+  check(await page.evaluate(() => document.body.style.overflow !== 'hidden'),
+    '灯箱关闭后恢复背景滚动（body overflow 不再 hidden）')
   check(await page.locator('.hub-attach-chip--img').count() === 0, '灯箱里删除后条带清空')
   // 删除最后一张后，触发缩略图随图片一起消失：cleanup 里的 restoreTo 已不在文档中，
   // 必须兜底回 composer 输入框，否则 activeElement 掉到 <body>，键盘用户下一次 Tab
@@ -476,6 +480,26 @@ async function sendWithImage(testid, text) {
   check(lift.cardTop >= lift.clipTop, `700px 下抽出的牌不被裁（牌顶 ${lift.cardTop} >= 容器顶 ${lift.clipTop}）`)
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.waitForTimeout(500)
+}
+
+// —— 3d) 稳定 key：删第一张后，第二张的 DOM 不被复用成第三张 ——
+{
+  await openDM()
+  const cards = page.locator('.hub-attach-strip .hub-attach-chip--img')
+  const three = Array.from({ length: 3 }, (_, i) => ({ ...filePayload, name: `stable-${i + 1}.png` }))
+  await page.setInputFiles('[data-testid="hub-image-input"]', three)
+  await page.waitForTimeout(900)
+  const secondThumb = cards.nth(1).locator('.hub-attach-thumb')
+  await secondThumb.evaluate((el) => el.setAttribute('data-stable-key', '1'))
+  const secondTitle = await secondThumb.getAttribute('title')
+  await cards.nth(0).locator('.hub-attach-x').click()
+  await page.waitForTimeout(400)
+  const firstThumb = cards.nth(0).locator('.hub-attach-thumb')
+  const marked = await firstThumb.getAttribute('data-stable-key')
+  const firstTitle = await firstThumb.getAttribute('title')
+  check(await cards.count() === 2, '稳定 key 用例：删第一张后剩 2 张')
+  check(marked === '1' && firstTitle === secondTitle,
+    `删第一张后第二张仍带自己的 DOM 标记（marked=${marked}, title=${firstTitle}）`)
 }
 
 // —— 4) 失败 → 重试：附件跟着失败走，重试成功后条带才清 ——

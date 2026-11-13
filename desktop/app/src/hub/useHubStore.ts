@@ -1215,7 +1215,14 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (r.data?.need) {
       const resolved = r.data.need
       set((s) => ({ needs: s.needs.filter((n) => n.id !== needID), tasks: s.tasks }))
-      if (resolved.status === 'resolved') set({ notice: '已处理' })
+      if (resolved.status === 'resolved') {
+        // 审批/提问不是写一条 Hub 消息，而是用 need 的 session_id + anchor 去 resolve
+        // 对应 Project 会话里挂起的审批/提问；这里把落点明确告诉用户，避免「点完就没了」。
+        // failure/budget/handoff 只是标记已读/交接状态，不能说成「提交到会话」。
+        const target = resolved.target_session_id || resolved.session_id || ''
+        const routed = resolved.kind === 'approval' || resolved.kind === 'question'
+        set({ notice: routed && target ? `已提交到 ${target}` : '已处理' })
+      }
     }
     void get().loadNeeds()
   },

@@ -87,11 +87,13 @@ export default function HubInlineNeeds({ scope }: { scope: Scope }) {
         const qs = parseInlineQuestions(need.body)
         const typed = answers[need.id] ?? {}
         const kind = need.kind ?? 'other'
+        const target = need.target_session_id || need.session_id || ''
+        const submitTitle = target ? `提交到 ${target}` : undefined
         return (
           <article className={`hub-inline-need hub-inline-need--${kind}`} key={need.id}>
             <header>
               <span className={`hub-chip ${kind}`}>{kindLabel(kind)}</span>
-              <strong>{need.title || kindLabel(kind)}</strong>
+              <strong title={need.title || kindLabel(kind)}>{need.title || kindLabel(kind)}</strong>
               <span className="hub-inline-need-attr" title={attr(need)}>{attr(need)}</span>
             </header>
             {need.body && qs.length === 0 ? (
@@ -151,13 +153,13 @@ export default function HubInlineNeeds({ scope }: { scope: Scope }) {
             <footer>
               {kind === 'approval' ? (
                 <>
-                  <button className="hub-btn primary" disabled={busy === need.id} onClick={() => void run(need, qs, 'approve')}>批准</button>
-                  <button className="hub-btn" disabled={busy === need.id} onClick={() => void run(need, qs, 'deny')}>拒绝</button>
+                  <button className="hub-btn primary" title={submitTitle} disabled={busy === need.id} onClick={() => void run(need, qs, 'approve')}>批准</button>
+                  <button className="hub-btn" title={submitTitle} disabled={busy === need.id} onClick={() => void run(need, qs, 'deny')}>拒绝</button>
                 </>
               ) : kind === 'question' ? (
-                <button className="hub-btn primary" disabled={busy === need.id} onClick={() => void run(need, qs, 'answered')}>提交回答</button>
+                <button className="hub-btn primary" title={submitTitle} disabled={busy === need.id} onClick={() => void run(need, qs, 'answered')}>提交回答</button>
               ) : (
-                <button className="hub-btn" disabled={busy === need.id} onClick={() => void run(need, qs, 'acknowledged')}>标记已读</button>
+                <button className="hub-btn" title={submitTitle} disabled={busy === need.id} onClick={() => void run(need, qs, 'acknowledged')}>标记已读</button>
               )}
               <button className="hub-link" onClick={openAll}>查看全部</button>
               {need.task_id ? <span className="hub-muted">{need.task_id}</span> : null}

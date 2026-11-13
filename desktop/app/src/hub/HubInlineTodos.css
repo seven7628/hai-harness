@@ -2,8 +2,11 @@
  *
  * 与 hub.css 的分工：**.hub-inline-todos 的名字空间独占这个文件**。hub.css 正被
  * 另一个改动占用（P4-UI-15 的内联 need 卡），把这里的规则写进去会互相踩；同时
- * 这里只用 index.css 的全局 token（--surface/--border/--text-2/--accent/--success），
+ * 这里只用 index.css 的全局 token（--paper/--paper-2/--border/--text-2/--accent/--success），
  * 不依赖 hub.css 顶部的 --hub-* 变量 —— 单独 import 也能正确着色。
+ *
+ * 视觉口径与 Hub 的 task/need 卡一致：中性 surface + 1px border + 8px 圆角；
+ * 类型色只留给进度条和完成态，不再用整卡染色/左侧色条（那会让内联卡像告警条）。
  *
  * 空间口径（390 宽下实测要求）：
  *   卡片区自己限高（min(30vh, 168px)）+ 内部滚动，绝不让它把 .messages 挤成 0；
@@ -23,10 +26,9 @@
 
 .hub-inline-todo {
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--surface) 94%, var(--accent) 6%);
-  padding: 6px 10px 7px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--paper) 92%, var(--ink) 8%);
+  padding: 9px 11px 10px;
   font-size: 12px;
   min-width: 0;
 }
@@ -34,7 +36,7 @@
 .hub-inline-todo-head {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -52,7 +54,7 @@
 .hub-inline-todo-attr {
   min-width: 0;
   flex: 1 1 auto;
-  color: var(--muted);
+  color: var(--text-3);
   font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
@@ -63,29 +65,33 @@
   flex: 0 0 auto;
   border: 0;
   background: none;
-  padding: 0 2px;
-  color: var(--muted);
+  padding: 1px 6px;
+  color: var(--text-3);
   font: inherit;
   font-size: 10.5px;
   cursor: pointer;
   border-radius: 5px;
+  transition: color .15s ease, background .15s ease;
 }
-.hub-inline-todo-fold:hover { color: var(--text); }
+.hub-inline-todo-fold:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
 .hub-inline-todo-fold:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 
 .hub-inline-todo-bar {
   display: block;
   height: 3px;
-  margin: 5px 0 4px;
+  margin: 7px 0 6px;
   border-radius: 2px;
-  background: color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--border) 80%, transparent);
   overflow: hidden;
 }
 .hub-inline-todo-bar-fill {
   display: block;
   height: 100%;
   border-radius: 2px;
-  background: var(--accent);
+  background: color-mix(in srgb, var(--accent) 78%, var(--ink) 22%);
   transition: width .2s ease;
 }
 
@@ -95,30 +101,30 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .hub-inline-todo-item {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
   color: var(--text-2);
   font-size: 11.5px;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 /* 只读 checkbox：14px 见方，完成态实心 + 勾。不做 hover/点击态 —— 这张卡不许
    出现任何「批准 / 提交 / 勾选」的交互暗示（待办的改写只发生在 Project 会话里）。 */
 .hub-inline-todo-box {
   flex: 0 0 auto;
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   margin-top: 1px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid color-mix(in srgb, var(--text-3) 45%, var(--border-strong) 55%);
   border-radius: 3px;
-  background: var(--surface);
-  color: var(--surface);
+  background: var(--paper-2);
+  color: var(--paper);
   font-size: 9px;
   line-height: 13px;
   text-align: center;
@@ -144,14 +150,14 @@
 }
 
 .hub-inline-todo-more {
-  color: var(--muted);
+  color: var(--text-3);
   font-size: 10.5px;
-  padding-left: 19px;
+  padding-left: 21px;
   font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 640px) {
   .hub-inline-todos { max-height: min(26vh, 140px); margin-bottom: 6px; }
-  .hub-inline-todo { padding: 5px 8px 6px; }
+  .hub-inline-todo { padding: 7px 9px 8px; }
   .hub-inline-todo-attr { font-size: 10px; }
 }
