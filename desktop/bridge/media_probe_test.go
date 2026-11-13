@@ -158,6 +158,18 @@ func writeMediaFixture(t *testing.T, ws, name string, size int) string {
 	return p
 }
 
+// probeManager 造一个「工作区已打开」的 manager：media_probe 现在要求 workspace 有运行态
+// （评审裁决 1 的第二扇门），所以每个用例都必须真的 create 一次 —— 这也正是生产里的顺序
+// （先有会话，才会有人在右栏预览媒体）。
+func probeManager(t *testing.T, ws string) (*manager, *syncBuf) {
+	t.Helper()
+	m, buf := testManager(t)
+	if _, err := m.create(ws, "s1", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return m, buf
+}
+
 func probeViaDispatch(t *testing.T, m *manager, buf *syncBuf, ws, path string) map[string]any {
 	t.Helper()
 	m.dispatch(cmd(0, "media_probe", map[string]any{"workspace": ws, "path": path}))
@@ -187,7 +199,7 @@ func TestMediaProbeDegradesWhenFFprobeMissing(t *testing.T) {
 	writeMediaFixture(t, ws, "a.mp4", 32)
 	// PATH 指向一个空目录：LookPath("ffprobe") 必失败（本机装没装 ffprobe 都不影响这条）。
 	t.Setenv("PATH", t.TempDir())
-	m, buf := testManager(t)
+	m, buf := probeManager(t, ws)
 
 	d := probeViaDispatch(t, m, buf, ws, "a.mp4")
 	if d["available"] != false {
@@ -213,7 +225,7 @@ func TestMediaProbeParsesFFprobeOutput(t *testing.T) {
 	ws := t.TempDir()
 	writeMediaFixture(t, ws, "a.mp4", 64)
 	fakeFFprobe(t, fakeFFprobeOK)
-	m, buf := testManager(t)
+	m, buf := probeManager(t, ws)
 
 	d := probeViaDispatch(t, m, buf, ws, "a.mp4")
 	if d["available"] != true || d["state"] != "ok" {
@@ -246,7 +258,7 @@ func TestMediaProbeFailedIsNotAnError(t *testing.T) {
 	ws := t.TempDir()
 	writeMediaFixture(t, ws, "a.mp4", 16)
 	fakeFFprobe(t, `echo "boom: invalid data found" >&2; exit 1`)
-	m, buf := testManager(t)
+	m, buf := probeManager(t, ws)
 
 	d := probeViaDispatch(t, m, buf, ws, "a.mp4")
 	if d["state"] != "failed" {
@@ -269,7 +281,7 @@ func TestMediaProbeTimeoutIsFailedNotError(t *testing.T) {
 	old := mediaProbeTimeout
 	mediaProbeTimeout = 150 * time.Millisecond
 	t.Cleanup(func() { mediaProbeTimeout = old })
-	m, buf := testManager(t)
+	m, buf := probeManager(t, ws)
 
 	start := time.Now()
 	d := probeViaDispatch(t, m, buf, ws, "a.mkv")
@@ -301,7 +313,7 @@ func TestMediaProbeCacheByPathSizeMtime(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	m, buf := testManager(t)
+	m, buf := probeManager(t, ws)
 
 	d1 := probeViaDispatch(t, m, buf, ws, "a.mp4")
 	if d1["cached"] != false {
@@ -333,7 +345,7 @@ func TestMediaProbeRejectsBadPaths(t *testing.T) {
 	ws := t.TempDir()
 	writeMediaFixture(t, ws, "a.mp4", 8)
 	writeMediaFixture(t, ws, "notes.txt", 8)
-	m, buf := testManager(t)
+	m, buf := probeManager(t, ws)
 
 	// 越界（相对路径上跳）
 	m.dispatch(cmd(0, "media_probe", map[string]any{"workspace": ws, "path": "../evil.mp4"}))
@@ -359,5 +371,31 @@ func TestMediaProbeRejectsBadPaths(t *testing.T) {
 	m.dispatch(cmd(0, "media_probe", map[string]any{"workspace": ws}))
 	if l := readLines(buf); len(l) == 0 || l[0]["ok"] != false {
 		t.Fatalf("空 path 必须 ok:false: %v", l)
+	}
+}
+
+// 评审裁决 1 的第二扇门：渲染进程可以随便编一个 workspace 传进来（哪怕路径是真的、
+// 文件也存在），只要这个工作区没被 bridge 打开过，就不探测。
+func TestMediaProbeRejectsUnopenedWorkspace(t *testing.T) {
+	resetMediaProbeCache()
+	opened := t.TempDir()
+	other := t.TempDir()
+	writeMediaFixture(t, other, "a.mp4", 8)
+	fakeFFprobe(t, fakeFFprobeOK)
+	m, buf := probeManager(t, opened) // 只打开了 opened
+
+	m.dispatch(cmd(0, "media_probe", map[string]any{"workspace": other, "path": "a.mp4"}))
+	l := readLines(buf)
+	if len(l) == 0 || l[0]["ok"] != false {
+		t.Fatalf("未打开的工作区必须 ok:false（否则 media_probe 是任意目录的探测通道）: %v", l)
+	}
+	if msg, _ := l[0]["error"].(string); !strings.Contains(msg, "未打开") {
+		t.Fatalf("拒绝理由要写清是工作区未打开: %v", l[0])
+	}
+	// 绝对路径 + 不存在的 workspace 同样拒绝（旧口径「绝对路径不需要 workspace」对媒体不成立）
+	m.dispatch(cmd(0, "media_probe", map[string]any{"path": filepath.Join(other, "a.mp4")}))
+	l = readLines(buf)
+	if len(l) == 0 || l[0]["ok"] != false {
+		t.Fatalf("没有 workspace 的绝对路径必须 ok:false: %v", l)
 	}
 }

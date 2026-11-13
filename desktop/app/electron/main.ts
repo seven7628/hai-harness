@@ -22,6 +22,8 @@ import { copyEntry, createDir, createFile, duplicateEntry, guardTrash, importEnt
 import { ipcInputHistoryForget, ipcInputHistoryGet, ipcInputHistorySet, inputHistoryFilePath } from './input-history'
 // 音视频字节通道（R08c）：`hai-media://` 支持 Range 的自定义协议 + 路径校验，见 media-protocol.ts
 import { MEDIA_SCHEME_PRIVILEGES, mediaStats, mediaUrlForFile, registerMediaProtocol } from './media-protocol'
+// 媒体协议的信任锚：只有用户在系统选择器里亲手打开过的工作区才能当媒体根（见文件头注释）
+import { configureKnownWorkspaces, forgetWorkspace, isKnownWorkspace, rememberWorkspace } from './known-workspaces'
 
 // `hai-media://` 的特权必须**在 app ready 之前**登记（Electron 的硬性时序要求，晚了就再也
 // 注册不上）：standard + secure 让 <video> 认它是可播放的安全来源，stream 让响应体是流
@@ -207,7 +209,11 @@ async function handleWorkspacePick(requestId: string): Promise<void> {
       properties: ['openDirectory', 'createDirectory'],
     })
     if (r.canceled || !r.filePaths[0]) payload.canceled = true
-    else payload.path = r.filePaths[0]
+    else {
+      payload.path = r.filePaths[0]
+      // 用户亲手选的目录 → 进媒体根清单（与桌面端「添加工作区」同一条口径）
+      rememberWorkspace(r.filePaths[0])
+    }
   } catch (e) {
     payload.canceled = true
     payload.error = (e as Error).message
@@ -1125,6 +1131,16 @@ function guardLocalPath(p: unknown): { ok: boolean; path?: string; error?: strin
   return { ok: true, path: abs }
 }
 
+// isTrustedIpcSender IPC 来源判定：只认主窗口的**主 frame**。
+// 内嵌网页（WebContentsView）与子 frame 拿不到 `window.desktop`，但一旦将来有人把 preload
+// 暴露给它们，这里就是最后一道门 —— 媒体的两条 IPC 会把本地文件变成可读字节，不能只靠
+// 「渲染进程是我们自己的代码」这条假设。
+function isTrustedIpcSender(e: Electron.IpcMainInvokeEvent): boolean {
+  const wc = mainWindow?.webContents
+  if (!wc) return false
+  return e.sender === wc && e.senderFrame === wc.mainFrame
+}
+
 function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：黑屏定位）
   ipcMain.handle('startup-mark', (_e, phase: string) => {
     startupMark(`renderer:${phase}`)
@@ -1218,7 +1234,11 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     const win = BrowserWindow.fromWebContents(e.sender) ?? undefined
     const opts = { properties: ['openDirectory', 'createDirectory'] as ('openDirectory' | 'createDirectory')[] }
     const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
-    return r.canceled ? null : r.filePaths[0]
+    if (r.canceled || !r.filePaths[0]) return null
+    // **媒体协议的信任锚就在这里**：只有经系统选择器确认过的目录才进 known-workspaces。
+    // 渲染进程传什么 workspace 都不能自己登记（评审裁决 1：workspace=/Users 曾能登记成功）。
+    rememberWorkspace(r.filePaths[0])
+    return r.filePaths[0]
   })
   ipcMain.handle('home-dir', () => app.getPath('home'))
   ipcMain.handle('create-workspace-folder', (_e, parent: string, name: string) => {
@@ -1229,6 +1249,7 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     const target = path.join(base, clean)
     try {
       fs.mkdirSync(target) // recursive:false → 已存在 EEXIST，抛错
+      rememberWorkspace(target) // 新建即用户亲手指定的目录（父目录来自同一个选择器）
       return { ok: true, path: target }
     } catch (e) {
       const m = (e as NodeJS.ErrnoException).code === 'EEXIST' ? '目录已存在' : (e as Error).message
@@ -1349,29 +1370,44 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     return { ok: true, html_path: htmlPath }
   })
   // —— 媒体预览（R08c）：URL 通道 + 探测 ——
+  //
+  // 两条门禁（评审裁决 1），缺一条都能让协议退化成任意目录的读取通道：
+  //   ① 调用来源：必须是主窗口的**主 frame**（内嵌网页/子 frame 不得借道）；
+  //   ② 工作区：必须出现在 known-workspaces（用户亲手用系统选择器打开过）——
+  //      渲染进程自己传的字符串不再是授权凭据。
+  //
   // media:url：渲染进程要 `<video src>` 的唯一入口。路径校验在生产实现里（mediaUrlForFile
-  // 也是协议登记工作区白名单的唯一入口）：只给工作区内、扩展名在白名单里的文件。
-  ipcMain.handle('media:url', (_e, p: { path?: string; workspace?: string } = {}) =>
-    mediaUrlForFile(String(p?.path ?? ''), String(p?.workspace ?? '')))
+  // 也顺带登记协议的工作区根）：只给工作区内、扩展名在白名单里的文件。
+  ipcMain.handle('media:url', (e, p: { path?: string; workspace?: string } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, error: '不受信任的调用来源' }
+    return mediaUrlForFile(String(p?.path ?? ''), String(p?.workspace ?? ''), isKnownWorkspace)
+  })
   // media:probe：ffprobe 元信息 + 编解码判断。走主进程直发（sendBridgeRequest，负 id），
   // 与 xlsx/docx/pptx 三条预览通路同一个理由：一问一答、自带超时、不广播进事件流。
   // **降级不是错误**：ffprobe 不存在时 bridge 回 ok + available:false，这里照样把 data 交回
   // 前端 —— 面板要能一边说「读不到媒体信息」一边继续放。
-  ipcMain.handle('media:probe', async (_e, p: { path?: string; workspace?: string } = {}) => {
+  ipcMain.handle('media:probe', async (e, p: { path?: string; workspace?: string } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, error: '不受信任的调用来源' }
+    const workspace = String(p?.workspace ?? '')
+    if (!isKnownWorkspace(workspace)) return { ok: false, error: '工作区未登记（只能用系统选择器打开过的工作区预览媒体）' }
     const started = await ensureBridgeBin()
     if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 不可用' }
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
     const path = String(p?.path ?? '')
     if (!path) return { ok: false, error: 'path 为空' }
-    const response = await sendBridgeRequest('media_probe', {
-      path,
-      ...(p?.workspace ? { workspace: String(p.workspace) } : {}),
-    })
+    const response = await sendBridgeRequest('media_probe', { path, workspace })
     return { ok: response.ok, error: response.error, data: response.data }
   })
   // media:stats：协议计数器（请求数 / Range 数 / 首字节数 / 字节数）。e2e 用它证明
   // 「切走再切回不重新请求首字节」——数的是生产里真正处理请求的那段代码，不是另建的替身。
-  ipcMain.handle('media:stats', () => mediaStats())
+  ipcMain.handle('media:stats', (e) => (isTrustedIpcSender(e) ? mediaStats() : { requests: 0, rangeRequests: 0, firstByteHits: 0, bytesServed: 0 }))
+  // workspace:forget：工作区被移除时回收媒体根（评审裁决 1 的「关闭时删除」）。
+  // 只有主窗口主 frame 能调；删的是清单里的条目，不做任何路径推断。
+  ipcMain.handle('workspace:forget', (e, p: unknown) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, error: '不受信任的调用来源' }
+    forgetWorkspace(p)
+    return { ok: true }
+  })
   // app:pick：原生「选择应用程序」对话框（NSOpenPanel 选 .app，主窗口置顶 + 自带搜索）
   // → 返回所选 App 的显示名 + bundle id（权限白名单：避免手输拼错）。用户取消 → null。
   // （曾用 osascript choose application，但对话框不自动置前、真实环境选择不可靠——改原生。）
@@ -1863,6 +1899,8 @@ if (!MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
 
 app.whenReady().then(() => {
   startupMark('whenReady')
+  // 媒体根清单（settings.json 同目录、0600）：pick-workspace 等三处写入，见 known-workspaces.ts
+  configureKnownWorkspaces(path.join(cfgDir(), 'workspaces.json'))
   registerIpc()
   // 媒体协议：只读、只服务工作区内、只服务媒体扩展名（拒绝分支见 media-protocol.ts）
   registerMediaProtocol()

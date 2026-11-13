@@ -189,6 +189,8 @@ contextBridge.exposeInMainWorld('desktop', {
   mediaUrl: (p: { path: string; workspace: string }) => ipcRenderer.invoke('media:url', p) as Promise<{ ok: boolean; url?: string; abs?: string; error?: string }>,
   mediaProbe: (p: { path: string; workspace: string }) => ipcRenderer.invoke('media:probe', p) as Promise<{ ok: boolean; error?: string; data?: unknown }>,
   mediaStats: () => ipcRenderer.invoke('media:stats') as Promise<{ requests: number; rangeRequests: number; firstByteHits: number; bytesServed: number }>,
+  // 工作区被移除时回收「媒体根」（主进程的 known-workspaces 清单）。只是通知，不带路径推断。
+  workspaceForget: (p: string) => ipcRenderer.invoke('workspace:forget', p) as Promise<{ ok: boolean; error?: string }>,
   onEmbedNav: (cb: (state: unknown) => void) => {
     const listener = (_e: unknown, state: unknown) => cb(state)
     ipcRenderer.on('embed-nav', listener)

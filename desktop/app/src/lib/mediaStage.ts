@@ -7,31 +7,39 @@
 // 重新缓冲 —— 1 小时视频上这是肉眼可见的停顿，也是本轮验收里「切走 5 秒再切回不重新
 // 请求首字节」那条要挡的行为。元素活着，缓冲区就活着。
 //
-// 与 PDF 的 view pool 同一条思路（原生视图也是「切标签不销毁」），但媒体不需要
-// WebContentsView：一个 DOM 元素就够了。
+// 生命周期（评审裁决 3 的第一条：原来 dispose() 是死代码，关标签不释放解码器）：
+//   · 切标签 → detach()：暂停 + 摘下，池里留着（这正是「不重下」的来源）；
+//   · 关标签 → 由 store 调 disposeMediaElementsForPath(path)：没人挂着就当场销毁，
+//     还有别的标签共用一个 URL 时打 pendingDispose，等最后一个 detach 时再销毁；
+//   · 池满 4 个 → 淘汰最久未用的**未挂载**条目。
 //
-// 三条纪律：
-//   · detach 时**暂停**：切走的标签不该在后台继续出声；
-//   · 池子上限 4 个：一个右栏同时不会播更多，超出按最近使用淘汰（淘汰 = 真的销毁，
-//     下次进来重新拉字节，这是可接受的代价）；
-//   · 文件换过（mtime 变了）就重建：否则用户看到的是旧内容，而且 currentTime 落在
-//     新文件的非法区间里会直接报错。
-export type MediaElementKind = 'video' | 'audio'
+// 为什么是引用计数而不是一个 boolean（评审裁决 3 的第二条）：同一个文件可以开两个
+// 预览标签（file 标签 allowDuplicate）。后挂的那个会把元素挪到自己的宿主里，前一个
+// unmount 时若按「共享标志」判断，会把这个**正在显示**的元素从活 DOM 里拔掉。
+import type { MediaKind } from './mediaFile'
+
+/** 媒体种类与「这是不是媒体文件」同源（mediaFile.ts 的 MediaKind），不另立一份枚举。 */
+export type MediaElementKind = MediaKind
 
 export interface MediaStageOptions {
   /** 文件的 mtime（毫秒）。变了就重建元素（内容已经换了）。 */
   modifiedMs?: number
+  /** 标签里的原始路径（相对/绝对都行）：关闭标签时按它回收元素，见 disposeMediaElementsForPath。 */
+  srcPath?: string
 }
 
 interface PoolEntry {
   el: HTMLMediaElement
   kind: MediaElementKind
   src: string
+  srcPath: string
   modifiedMs: number
   /** 递增的使用序号：淘汰时挑最小的（最近没用过的）。 */
   lastUsed: number
-  /** 当前是否挂在某个宿主里（挂着的永不淘汰）。 */
-  attached: boolean
+  /** 有多少个 handle 正挂在这个元素上（引用计数，不是 boolean）。 */
+  attachedCount: number
+  /** 标签已经关了，但还有别的标签挂着 → 等最后一个 detach 再销毁。 */
+  pendingDispose: boolean
 }
 
 const MAX_POOL = 4
@@ -63,7 +71,7 @@ function destroyEntry(e: PoolEntry): void {
 function evictIfNeeded(): void {
   if (pool.size <= MAX_POOL) return
   const victims = [...pool.entries()]
-    .filter(([, e]) => !e.attached)
+    .filter(([, e]) => e.attachedCount === 0 && !e.pendingDispose)
     .sort((a, b) => a[1].lastUsed - b[1].lastUsed)
   for (const [key, e] of victims) {
     if (pool.size <= MAX_POOL) break
@@ -78,7 +86,7 @@ export interface MediaStageHandle {
   attach(host: HTMLElement): void
   /** 从 DOM 摘下 + 暂停；元素与缓冲区留在池子里。 */
   detach(): void
-  /** 从池子里彻底移除（关闭标签且不再需要时用；淘汰也会走到这条路）。 */
+  /** 本 handle 彻底结束（不再需要这个元素时）。还有别的 handle 挂着则只减计数。 */
   dispose(): void
 }
 
@@ -101,23 +109,47 @@ export function acquireMediaElement(
     entry = undefined
   }
   if (!entry) {
-    entry = { el: createElement(kind, src), kind, src, modifiedMs, lastUsed: 0, attached: false }
+    entry = {
+      el: createElement(kind, src),
+      kind,
+      src,
+      srcPath: opts.srcPath ?? '',
+      modifiedMs,
+      lastUsed: 0,
+      attachedCount: 0,
+      pendingDispose: false,
+    }
     entry.el.dataset.mediaKey = key
     pool.set(key, entry)
   }
   const e = entry
+  if (opts.srcPath) e.srcPath = opts.srcPath // 后挂的标签可能用另一种写法（相对/绝对）
   e.lastUsed = ++useSeq
   evictIfNeeded()
 
-  let attachedTo: HTMLElement | null = null
+  let host: HTMLElement | null = null
+  let counted = false
+  const uncount = (): void => {
+    if (!counted) return
+    counted = false
+    e.attachedCount = Math.max(0, e.attachedCount - 1)
+    if (e.attachedCount === 0 && e.pendingDispose) {
+      destroyEntry(e)
+      if (pool.get(key) === e) pool.delete(key)
+    }
+  }
   return {
     el: e.el,
-    attach(host: HTMLElement) {
-      if (attachedTo === host) return
-      if (attachedTo) attachedTo.removeChild(e.el)
-      host.appendChild(e.el)
-      attachedTo = host
-      e.attached = true
+    attach(next: HTMLElement) {
+      if (host === next) return
+      // 只有元素**还在本 handle 的宿主里**时才摘；被别的标签挪走了就只交接，不抢
+      if (host && e.el.parentElement === host) host.removeChild(e.el)
+      next.appendChild(e.el)
+      host = next
+      if (!counted) {
+        counted = true
+        e.attachedCount += 1
+      }
       e.lastUsed = ++useSeq
     },
     detach() {
@@ -127,20 +159,60 @@ export function acquireMediaElement(
       } catch {
         /* ignore */
       }
-      if (e.el.parentElement) e.el.parentElement.removeChild(e.el)
-      attachedTo = null
-      e.attached = false
+      if (host && e.el.parentElement === host) host.removeChild(e.el)
+      host = null
+      uncount()
     },
     dispose() {
-      destroyEntry(e)
-      if (pool.get(key) === e) pool.delete(key)
+      if (host && e.el.parentElement === host) host.removeChild(e.el)
+      host = null
+      uncount()
+      if (e.attachedCount === 0) {
+        destroyEntry(e)
+        if (pool.get(key) === e) pool.delete(key)
+      }
     },
   }
 }
 
+/**
+ * disposeMediaElementsForPath 关标签时按**标签里的路径**回收元素（store 调）。
+ * 之所以按 path 而不是 URL：store 不知道 URL（那是 media.tsx 从 IPC 拿的），
+ * 而标签对象里有 path —— 元素池在 acquire 时记下同一个字符串。
+ */
+export function disposeMediaElementsForPath(path: string): void {
+  if (!path) return
+  for (const [key, e] of [...pool.entries()]) {
+    if (e.srcPath !== path) continue
+    if (e.attachedCount > 0) {
+      // 还有别的标签显示着同一个文件：不能当场销毁（会把活 DOM 里的元素拔掉）
+      e.pendingDispose = true
+      continue
+    }
+    destroyEntry(e)
+    pool.delete(key)
+  }
+}
+
 /** 仅供单测/探针：当前池子里的条目（键 = 媒体 URL）。 */
-export function mediaStageSnapshot(): { key: string; kind: MediaElementKind; attached: boolean; currentTime: number }[] {
-  return [...pool.entries()].map(([key, e]) => ({ key, kind: e.kind, attached: e.attached, currentTime: e.el.currentTime }))
+export function mediaStageSnapshot(): {
+  key: string
+  kind: MediaElementKind
+  srcPath: string
+  attachedCount: number
+  pendingDispose: boolean
+  currentTime: number
+  inDom: boolean
+}[] {
+  return [...pool.entries()].map(([key, e]) => ({
+    key,
+    kind: e.kind,
+    srcPath: e.srcPath,
+    attachedCount: e.attachedCount,
+    pendingDispose: e.pendingDispose,
+    currentTime: e.el.currentTime,
+    inDom: !!e.el.parentElement,
+  }))
 }
 
 export function resetMediaStage(): void {

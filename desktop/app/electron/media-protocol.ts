@@ -142,8 +142,14 @@ export function allowedMediaRoots(): readonly string[] {
   return roots
 }
 
-/** 登记一个允许的根目录（realpath 规范化）。失败时不写入。 */
-export function allowMediaRoot(dir: string): { ok: boolean; root?: string; error?: string } {
+/**
+ * 登记一个允许的根目录（realpath 规范化）。失败时不写入。
+ *
+ * **刻意不 export**（评审裁决 1）：根从哪来，是这条协议唯一的信任边界。以前它是导出的，
+ * 谁都能登记任意目录；现在唯一的写入点是 mediaUrlForFile，而后者要求调用方给出
+ * 「这个 workspace 是不是用户真的打开过」的谓词（生产里 = known-workspaces 那份清单）。
+ */
+function allowMediaRoot(dir: string): { ok: boolean; root?: string; error?: string } {
   if (typeof dir !== 'string' || !dir || !path.isAbsolute(dir)) return { ok: false, error: '工作区路径必须是绝对路径' }
   let real: string
   try {
@@ -208,6 +214,10 @@ export function resolveMediaPath(rawPathname: string): MediaPathResult {
   } catch {
     return { ok: false, status: 404, reason: '文件不存在' }
   }
+  // realpath 之后再判一次扩展名：上面判的是 abs（软链名），读字节用的是 real。
+  // `ws/x.mp4 -> ~/foo.json` 会过 abs 的白名单、realpath 成 .json —— 不重判就等于
+  // 「白名单只管文件名不管内容」。
+  if (!isMediaExt(real)) return { ok: false, status: 403, reason: '目标不是媒体文件（软链指向其它类型）' }
   if (roots.length === 0) return { ok: false, status: 403, reason: '没有已登记的工作区' }
   const inside = roots.some((r) => real === r || real.startsWith(r + path.sep))
   if (!inside) return { ok: false, status: 403, reason: '文件在工作区外' }
@@ -236,12 +246,26 @@ export function mediaUrlFor(abs: string): string {
  * 绝对路径原样采用 —— 但**两种都必须落在 workspace 内**，因为协议只服务工作区内。
  * 成功时顺带把 workspace 登记成允许的根。
  */
-export function mediaUrlForFile(rawPath: string, workspace: string): { ok: boolean; url?: string; abs?: string; error?: string } {
+export function mediaUrlForFile(
+  rawPath: string,
+  workspace: string,
+  isTrustedWorkspace: (realWorkspace: string) => boolean,
+): { ok: boolean; url?: string; abs?: string; error?: string } {
   const raw = String(rawPath ?? '')
   const ws = String(workspace ?? '')
   if (!raw) return { ok: false, error: 'path 为空' }
   if (!ws || !path.isAbsolute(ws)) return { ok: false, error: 'workspace 为空' }
-  const allowed = allowMediaRoot(ws)
+  // 信任判断在**登记根之前**：不是用户亲手打开过的工作区，连根都登记不上。
+  let realWs: string
+  try {
+    realWs = fs.realpathSync(ws)
+  } catch {
+    return { ok: false, error: '工作区未登记（只能用系统选择器打开过的工作区预览媒体）' }
+  }
+  if (!isTrustedWorkspace(realWs)) {
+    return { ok: false, error: '工作区未登记（只能用系统选择器打开过的工作区预览媒体）' }
+  }
+  const allowed = allowMediaRoot(realWs)
   if (!allowed.ok) return { ok: false, error: allowed.error }
   const abs = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(ws, raw)
   if (!isMediaExt(abs)) return { ok: false, error: '不是媒体文件（扩展名不在白名单）' }
@@ -251,6 +275,12 @@ export function mediaUrlForFile(rawPath: string, workspace: string): { ok: boole
   } catch {
     return { ok: false, error: `无法读取文件: ${abs}` }
   }
+  // 与 resolveMediaPath 同一条：软链到非媒体文件时不给 URL（否则渲染层拿到的 URL 会 403，
+  // 面板只能显示「放不了」而说不出为什么）。
+  if (!isMediaExt(real)) return { ok: false, error: '目标不是媒体文件（软链指向其它类型）' }
+  // 敏感目录（~/.ssh 等）即使在工作区内也不给 URL —— 与协议侧的判定保持一致，
+  // 让面板在「拿不到 URL」时就说出真正的原因。
+  if (isSensitiveFsPath(real)) return { ok: false, error: '该路径受保护（含敏感凭据）' }
   const root = allowed.root as string
   if (!(real === root || real.startsWith(root + path.sep))) return { ok: false, error: '媒体文件在工作区外（协议只服务工作区内的文件）' }
   return { ok: true, url: mediaUrlFor(real), abs: real }
@@ -262,6 +292,10 @@ export interface MediaRequestLike {
   method: string
   url: string
   range?: string | null
+  /** `If-None-Match`：命中就回 304（Chromium 的媒体缓存会拿它做重验证）。 */
+  ifNoneMatch?: string | null
+  /** `If-Range`：不命中 = 服务端这份文件已经换过了 → **忽略 Range 回 200 整文件**（RFC 9110 §13.1.5）。 */
+  ifRange?: string | null
 }
 
 export interface MediaResponse {
@@ -280,6 +314,41 @@ export interface MediaStats {
   bytesServed: number
 }
 let stats: MediaStats = { requests: 0, rangeRequests: 0, firstByteHits: 0, bytesServed: 0 }
+
+// 计数**挂在流上**而不是挂在「计划」上（评审裁决 3 的第二条）：客户端 seek/abort 时
+// 计划里那 N 字节并没有真的发出去，按计划记数就成了「自报数字」——而 e2e 正拿它当
+// 「切走切回不重下」的判据。只有 'data' 真的流过去才算数。
+function countedStream(stream: Readable, isFromFirstByte: boolean): Readable {
+  let sawFirst = false
+  stream.on('data', (chunk: Buffer | string) => {
+    stats.bytesServed += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
+    if (!sawFirst) {
+      sawFirst = true
+      if (isFromFirstByte) stats.firstByteHits += 1
+    }
+  })
+  return stream
+}
+
+// etag 用**强验证器**（不带 W/）：If-Range 只认强验证器，弱 etag 永远不匹配（RFC 9110 §13.1.5）。
+function etagOf(size: number, mtimeMs: number): string {
+  return `"${size.toString(16)}-${Math.floor(mtimeMs).toString(16)}"`
+}
+
+function etagMatches(header: string, etag: string): boolean {
+  const norm = (v: string): string => v.trim().replace(/^W\//, '')
+  const target = norm(etag)
+  return header.split(',').some((raw) => {
+    const v = raw.trim()
+    return v === '*' || norm(v) === target
+  })
+}
+
+function ifRangeMatches(header: string, etag: string, lastModified: string): boolean {
+  const v = header.trim()
+  if (v.startsWith('"') || v.startsWith('W/')) return etagMatches(v, etag)
+  return v === lastModified
+}
 
 export function mediaStats(): MediaStats {
   return { ...stats }
@@ -332,20 +401,31 @@ export function handleMediaRequest(req: MediaRequestLike): MediaResponse {
   if (u.host !== MEDIA_HOST) return plain(403, 'bad host')
   const target = resolveMediaPath(u.pathname)
   if (!target.ok) return plain(target.status, target.reason)
+  const etag = etagOf(target.size, target.mtimeMs)
+  const lastModified = new Date(target.mtimeMs).toUTCString()
   const common = {
     'content-type': target.mime,
     'accept-ranges': 'bytes',
-    etag: `W/"${target.size.toString(16)}-${Math.floor(target.mtimeMs).toString(16)}"`,
-    'last-modified': new Date(target.mtimeMs).toUTCString(),
+    etag,
+    'last-modified': lastModified,
     // 媒体文件会被覆盖（重新导出/渲染），所以不许静默复用：no-cache = 每次用前先问。
     'cache-control': 'no-cache',
     // 同一条 URL 既给 <video>（no-cors）也给探针 fetch（cors），这里统一放开：
     // 工作区内的只读媒体，不涉及凭据。
     'access-control-allow-origin': '*',
   }
+  // 条件请求：命中就 304（无体）。不做这一步的话，etag 白给 —— 浏览器每次重验证都要
+  // 重新拉一遍字节，缓存形同虚设。
+  if (req.ifNoneMatch && etagMatches(req.ifNoneMatch, etag)) {
+    return { status: 304, headers: { ...common, 'content-length': '0' } }
+  }
   const header = req.range ?? null
   if (header != null) stats.rangeRequests += 1
-  const plan = planRange(header, target.size)
+  // If-Range 不命中 = 客户端手里那份已经过期 → 忽略 Range 回整文件（RFC 9110 §13.1.5），
+  // 否则客户端会把新文件的字节拼进旧的缓冲里（音视频最常见的是「拖完变雪花/爆音」）。
+  const plan = req.ifRange && !ifRangeMatches(req.ifRange, etag, lastModified)
+    ? ({ kind: 'entire' } as const)
+    : planRange(header, target.size)
   if (plan.kind === 'unsatisfiable') {
     return {
       status: 416,
@@ -353,18 +433,14 @@ export function handleMediaRequest(req: MediaRequestLike): MediaResponse {
     }
   }
   if (plan.kind === 'entire') {
-    stats.bytesServed += target.size
-    stats.firstByteHits += 1
     return {
       status: 200,
       headers: { ...common, 'content-length': String(target.size) },
-      body: method === 'HEAD' ? undefined : fileBody(target.real),
+      body: method === 'HEAD' ? undefined : countedStream(fileBody(target.real), true),
     }
   }
   const { start, end } = plan
   const len = end - start + 1
-  stats.bytesServed += len
-  if (start === 0) stats.firstByteHits += 1
   return {
     status: 206,
     headers: {
@@ -372,7 +448,7 @@ export function handleMediaRequest(req: MediaRequestLike): MediaResponse {
       'content-range': `bytes ${start}-${end}/${target.size}`,
       'content-length': String(len),
     },
-    body: method === 'HEAD' ? undefined : fileBody(target.real, { start, end }),
+    body: method === 'HEAD' ? undefined : countedStream(fileBody(target.real, { start, end }), start === 0),
   }
 }
 
@@ -383,12 +459,33 @@ export function handleMediaRequest(req: MediaRequestLike): MediaResponse {
  * 用 require 而不是顶层 import —— media-protocol.test.ts 在纯 Node 里跑，顶层 import
  * 'electron' 会让它在没有 Electron 的进程里直接崩（那个模块在 Node 里是字符串路径）。
  */
-export function registerMediaProtocol(): void {
+export interface MediaProtocolRequestLike {
+  method: string
+  url: string
+  headers: { get(name: string): string | null }
+}
+
+/** Electron 的 `protocol` 只需要 handle 这一个方法（测试注入假实现，见 media-protocol.test.ts）。 */
+export interface MediaProtocolLike {
+  handle(scheme: string, handler: (request: MediaProtocolRequestLike) => Response | Promise<Response>): void
+}
+
+export function registerMediaProtocol(proto?: MediaProtocolLike): void {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { protocol } = require('electron') as typeof import('electron')
+  const protocol = proto ?? (require('electron') as typeof import('electron')).protocol
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { Readable } = require('node:stream') as typeof import('node:stream')
   protocol.handle(MEDIA_SCHEME, (request) => {
-    const r = handleMediaRequest({ method: request.method, url: request.url, range: request.headers.get('range') })
+    // 三个头都要透传：range 决定 206/416，if-none-match 决定 304，if-range 决定
+    // 「Range 还算不算数」。这里少一个，下面的单测就直接调 handleMediaRequest 去了，
+    // 而生产走的是这条翻译层（F52/F53 的同形状：测试验的必须就是生产跑的那一段）。
+    const r = handleMediaRequest({
+      method: request.method,
+      url: request.url,
+      range: request.headers.get('range'),
+      ifNoneMatch: request.headers.get('if-none-match'),
+      ifRange: request.headers.get('if-range'),
+    })
     if (!r.body) return new Response(null, { status: r.status, headers: r.headers })
     const body = r.body instanceof Uint8Array ? r.body : (Readable.toWeb(r.body as Readable) as unknown as ReadableStream)
     return new Response(body, { status: r.status, headers: r.headers })

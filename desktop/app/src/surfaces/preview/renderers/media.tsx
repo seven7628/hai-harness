@@ -102,7 +102,8 @@ export default function MediaPreview({ file, onUnavailable }: PreviewProps) {
   useEffect(() => {
     const host = hostRef.current
     if (!url || !host) return
-    const handle = acquireMediaElement(url, kind, url, { modifiedMs })
+    // srcPath = 标签里的原始路径：store 关标签时按同一个字符串回收元素（见 mediaStage 头注释）
+    const handle = acquireMediaElement(url, kind, url, { modifiedMs, srcPath: path })
     handle.attach(host)
     const el = handle.el
     const onError = () => setElementError(true)
@@ -120,7 +121,7 @@ export default function MediaPreview({ file, onUnavailable }: PreviewProps) {
       el.removeEventListener('loadedmetadata', onMeta)
       handle.detach()
     }
-  }, [url, kind, modifiedMs])
+  }, [url, kind, modifiedMs, path])
 
   const openExternal = useCallback(() => {
     const abs = loaded.abs

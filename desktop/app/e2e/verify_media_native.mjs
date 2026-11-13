@@ -120,12 +120,24 @@ async function launch({ home, env = {} }) {
   })
   const win = await app.firstWindow()
   await win.waitForLoadState('domcontentloaded')
-  await win.evaluate(([ws]) => { localStorage.setItem('go-code.projects', JSON.stringify({ paths: [ws], active: ws })) }, [WS])
-  await win.reload()
+
+  // 工作区必须走**真入口**：主进程的 known-workspaces 只认系统选择器结果（评审裁决 1）。
+  // e2e 不能绕过它（绕过就等于没验那道门），所以只把主进程的 dialog 换成返回夹具目录，
+  // 其余照用户的路走：欢迎页的「选择工作区」→ pick-workspace IPC → rememberWorkspace → store。
+  await app.evaluate(({ dialog }, [ws]) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [ws] })
+  }, [WS])
+  // 没有工作区时应用停在 BootScreen（只有一个「选择工作区」按钮）
+  const bootBtn = win.locator('.boot-cta button').first()
+  await waitFor(() => bootBtn.isVisible(), { label: '欢迎页的「选择工作区」', timeout: 180000 })
+  await bootBtn.click()
+
   // 180s 而不是 90s：这条链里它是第 5 个 Electron 启动（前四个脚本的实例刚退），
   // 本机同时跑其它会话的 Electron 时首屏会被拖到分钟级（实测一次 90s 超时、单跑全绿）。
   // 这是**启动等待**，不是断言 —— 放宽只影响「环境慢时多久放弃」，不影响判据。
   await waitFor(() => win.locator('button', { hasText: '设置' }).first().isVisible(), { label: '主界面就绪', timeout: 180000 })
+  await waitFor(() => win.evaluate(async ([m, ws]) => (await import(m)).useAppStore.getState().workspace === ws, [STORE, WS]),
+    { label: '工作区已切换（经真实选择器入口）', timeout: 60000 })
   // 空工作区按规格**不**自动建会话 → 用真应用的 newSession 建一个（与 e2e:preview-native 同口径）
   const sid0 = await win.evaluate(async (m) => (await import(m)).useAppStore.getState().activeSessionId ?? '', STORE)
   if (!sid0) {
@@ -322,12 +334,49 @@ try {
   }
   await win.screenshot({ path: path.join(SHOTS, 'm4-mp3-audio.png') })
 
+  // ---------------- 7. 安全门：渲染进程编 workspace 换不到媒体根 ----------------
+  console.log('\n[7] 安全门：workspace 由渲染进程编 → 登记不上（评审裁决 1）')
+  {
+    // 工作区**外**的一份真媒体文件（.mp4，扩展名完全合法）—— 评审实测的原始攻击载荷
+    const leakDir = fs.mkdtempSync(path.join(os.tmpdir(), 'media-leak-'))
+    const leak = path.join(leakDir, 'leak.mp4')
+    fs.writeFileSync(leak, Buffer.alloc(4096, 7))
+    const before = await mediaStats(win)
+    const attempt = await win.evaluate(async ([p, ws]) => {
+      const url = await window.desktop.mediaUrl({ path: p, workspace: ws })
+      const probe = await window.desktop.mediaProbe({ path: p, workspace: ws })
+      // 再试一次评审原文的 `workspace=/Users`：走 probe（它先查清单，理由最直白）
+      const root = await window.desktop.mediaProbe({ path: '/Users/whatever.mp4', workspace: '/Users' })
+      return { url, probe, root }
+    }, [leak, leakDir])
+    // 计数要在「直连协议」之前取：IPC 被拒的三次一次都不该走到 protocol.handle
+    const afterIpc = await mediaStats(win)
+    check(attempt.url.ok === false, `工作区外的真 mp4：mediaUrl 必须拒绝（${JSON.stringify(attempt.url)}）`)
+    check(/未登记/.test(attempt.url.error ?? ''), `拒绝理由写明「未登记」：${attempt.url.error}`)
+    check(attempt.probe.ok === false, `mediaProbe 同样拒绝（第二扇门）：${JSON.stringify(attempt.probe)}`)
+    check(attempt.root.ok === false && /未登记/.test(attempt.root.error ?? ''),
+      `workspace=/Users 必须被清单拒绝（评审原文）：${JSON.stringify(attempt.root)}`)
+    // 根没登记 → 直接构造协议 URL 也拿不到字节（主进程 fetch 绕开 CORS，仍走同一条 handler）
+    const leakUrl = 'hai-media://local' + leak.split('/').map(encodeURIComponent).join('/')
+    const direct = await app.evaluate(async ({ session }, [u]) => {
+      const res = await session.defaultSession.fetch(u)
+      return { status: res.status, bytes: (await res.arrayBuffer()).byteLength }
+    }, [leakUrl])
+    check(direct.status === 403, `直接请求 hai-media:// 也 403（实得 ${direct.status}，${direct.bytes} 字节）`)
+    check(direct.bytes < 100, `拒绝响应里没有文件字节（${direct.bytes}）`)
+    check(afterIpc.requests === before.requests, `被拒的三次都没有走到协议层（requests ${before.requests}→${afterIpc.requests}）`)
+    // 直连那一次**会**走到协议层（403 也是协议给的答案），所以只要求它没送出字节
+    const afterDirect = await mediaStats(win)
+    check(afterDirect.requests === before.requests + 1, `直连那一次确实打到了协议（${before.requests}→${afterDirect.requests}）`)
+    fs.rmSync(leakDir, { recursive: true, force: true })
+  }
+
   check(errs.length === 0, `渲染进程无 console error（${errs.length ? errs.join(' | ') : 'clean'}）`)
   await app.close()
   app = null
 
   // ======================= 第二次启动：把 ffprobe 从 PATH 里藏掉 =======================
-  console.log('\n[7] 降级：藏掉 ffprobe（PATH 不含它的目录）→ 说「无法读取媒体信息」但仍可播放')
+  console.log('\n[8] 降级：藏掉 ffprobe（PATH 不含它的目录）→ 说「无法读取媒体信息」但仍可播放')
   const HOME2 = fs.mkdtempSync(path.join(os.tmpdir(), 'media-native-home2-'))
   // 只留系统目录：homebrew 的 /opt/homebrew/bin（ffprobe 在那里）不在其中。
   // 这一层是**真的换环境**，不是 mock 一次调用 —— LookPath 走的就是这条 PATH。

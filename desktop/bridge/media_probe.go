@@ -307,6 +307,21 @@ func probeMediaFile(abs string, size, modifiedMs int64) mediaProbeData {
 	return d
 }
 
+// workspaceOpened workspace 是否已被 bridge 打开（有 workspaceRuntime）。
+// 只做只读查询，不改状态：探测是预览的附属动作，不该顺手建一份运行态。
+func (m *manager) workspaceOpened(ws string) bool {
+	if ws == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.workspaces[ws]; ok {
+		return true
+	}
+	_, ok := m.workspaces[filepath.Clean(ws)]
+	return ok
+}
+
 // handleMediaProbe `media_probe` 的 dispatch 分支实现。
 // 路径口径与 file_preview 完全一致（同一个 resolveWorkspacePath）：越界/受保护目录的
 // 拒绝理由不该因为「看的是视频」而变。
@@ -316,8 +331,17 @@ func (m *manager) handleMediaProbe(c command, ws string) {
 		m.resp(c, false, "path 为空", nil)
 		return
 	}
-	if ws == "" && !filepath.IsAbs(raw) {
+	// 第二扇门（评审裁决 1）：`workspace` 来自渲染进程，不能拿它当授权凭据 ——
+	// 它必须是 bridge **真的打开过**的工作区（有运行态 = 有会话在这里跑过）。
+	// 主进程那侧还有一道「用户亲手选过」的清单（known-workspaces.ts），两道都过才探测。
+	// 注意：这里刻意不再接受「绝对路径 + 无 workspace」的旧口径 —— 媒体探测只服务于
+	// 已打开的工作区，工作区外没有可预览的媒体。
+	if ws == "" {
 		m.resp(c, false, "workspace 为空", nil)
+		return
+	}
+	if !m.workspaceOpened(ws) {
+		m.resp(c, false, "workspace 未打开: "+ws, nil)
 		return
 	}
 	abs, err := resolveWorkspacePath(ws, raw)
