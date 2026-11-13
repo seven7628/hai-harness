@@ -116,7 +116,17 @@ func taskResultCardFields(m Message) (TaskID, TaskStatus, string, string) {
 		id = TaskID(refString(m.Refs["task_id"]))
 	}
 	status := TaskStatus(refString(m.Refs["status"]))
-	return id, status, strings.TrimSpace(m.Text), strings.TrimSpace(refString(m.Refs["error"]))
+	summary := strings.TrimSpace(m.Text)
+	// Project 结果卡的正文首行是 `〔Project ws / sid〕`：卡面已经用
+	// target_* 单独画归属，左栏摘要是给人看的结论，不能把抬头再抄一遍。
+	if strings.HasPrefix(summary, "〔Project ") {
+		if i := strings.IndexByte(summary, '\n'); i >= 0 {
+			summary = strings.TrimSpace(summary[i+1:])
+		} else if strings.HasSuffix(summary, "〕") {
+			summary = ""
+		}
+	}
+	return id, status, summary, strings.TrimSpace(refString(m.Refs["error"]))
 }
 
 // refString 宽松读 Refs 的字符串字段（JSON 反序列化/直接构造都可能是 string 或命名类型）。

@@ -232,3 +232,20 @@ func TestGroupPerceptionOutcomeMapping(t *testing.T) {
 		}
 	}
 }
+
+// Project 结果卡的首行是 `〔Project ws / sid〕`：左栏结论只画摘要，不重复抬头。
+func TestGroupPerceptionStripsProjectHeader(t *testing.T) {
+	msgs := []Message{
+		percTaskCard(2, "task_p", TaskCompleted, "〔Project /tmp/proj / s-proj〕\n三家价格表已整理", ""),
+	}
+	got := BuildGroupPerception(msgs, 0, 0)
+	if got.LastTaskSummary != "三家价格表已整理" {
+		t.Fatalf("last_task_summary = %q, want 抬头已剥离", got.LastTaskSummary)
+	}
+	if got.LastOutcome != "任务完成：三家价格表已整理" {
+		t.Fatalf("last_outcome = %q, want 抬头已剥离", got.LastOutcome)
+	}
+	if strings.Contains(got.LastOutcome, "〔Project") {
+		t.Fatalf("last_outcome 仍带 Project 抬头: %q", got.LastOutcome)
+	}
+}
