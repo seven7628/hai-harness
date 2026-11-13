@@ -1884,9 +1884,9 @@
       "acceptance": "忙目标排队重试不丢；命令返回 per-target deliveries；skipped/failed 有原因；UI 类型齐全；重复投递幂等。",
       "tests": "go test ./agenthub/... ./desktop/bridge -run TestHubConversation|TestHubGroup；node scripts/test-hub-conv.mjs",
       "commit": "be8168a",
-      "status": "review",
-      "review": "pending",
-      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器复验进行中。merge d4aec2c + c570975。"
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     {
       "id": "P6-02",
@@ -1904,9 +1904,9 @@
       "acceptance": "人类与 agent wake 同一调度器；12 人群 @all 11 并发；显式 @3 为 3；GroupPolicy.MaxParallelRuns 删除；忙目标排队；429 不标 failed。",
       "tests": "go test ./desktop/bridge -run TestHubConversation；node scripts/test-hub-conv.mjs；浏览器 group stream",
       "commit": "e182496 + cf5bebd",
-      "status": "review",
-      "review": "pending",
-      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器复验进行中。merge d4aec2c + c570975。"
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     {
       "id": "P6-03",
@@ -1923,9 +1923,9 @@
       "acceptance": "预算不足不启动 run；群/agent/全局三级；provider 并发信号量；429 排队退避；UI 可见预算/并发状态。",
       "tests": "go test ./desktop/bridge -run Budget|HubConversation；真实 provider 429 模拟",
       "commit": "8abc06d",
-      "status": "review",
-      "review": "pending",
-      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器复验进行中。merge d4aec2c + c570975。"
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     {
       "id": "P6-04",
@@ -1944,9 +1944,9 @@
       "acceptance": "无序/10/成功投递计数/逐目标 skip/不整批熔断；10 分钟滚动窗口；人类新输入、窗口过期、空闲 30 分钟、手动重置、重启加载五类清零/恢复时机明确。",
       "tests": "go test ./agenthub -run TestConversationPair；settings 单测；node scripts/test-hub-conv.mjs",
       "commit": "aef52b4 + 18c1ace",
-      "status": "review",
-      "review": "pending",
-      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器复验进行中。merge d4aec2c + c570975。"
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     {
       "id": "P6-05",
@@ -1964,9 +1964,9 @@
       "acceptance": "depth=parent+1；并行分支互不影响；深浅不串；max_depth 默认 1000；人类新输入/空闲 30 分钟/手动重置清零；旧 run 不消耗新链额度。",
       "tests": "go test ./agenthub -run TestConversationDepth；go test ./desktop/bridge -run TestHubGroupDepth；浏览器状态条",
       "commit": "81d9a6d + 8294a78",
-      "status": "review",
-      "review": "pending",
-      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器复验进行中。merge d4aec2c + c570975。"
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub/agents/session + desktop/bridge 整包全绿；tsc/css/settings-store 全绿；浏览器 group/dm/menu/group-edit/scroll/composer 全绿。merge d4aec2c + c570975。"
     },
     {
       "id": "P6-06",
