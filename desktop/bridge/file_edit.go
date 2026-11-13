@@ -197,6 +197,13 @@ func (m *manager) handleFileSave(c command, ws string) {
 	if !ok {
 		return
 	}
+	// 只读子树拒绝（R08a）：~/.go-code/previews 是预览产物缓存 —— 读要放行（面板把
+	// HTML 读回前端），写必须拒（缓存条目 = 「这份文档的预览」，改了就是伪造面）。
+	// 与文件工具侧同一个判定（builtin.DenyHarnessConfigPathWrite），不各写一份。
+	if err := builtin.DenyHarnessConfigPathWrite(abs); err != nil {
+		m.respCode(c, false, err.Error(), "denied", nil)
+		return
+	}
 	if state, opened := e.expect(abs); opened {
 		switch state.readonly {
 		case "binary":

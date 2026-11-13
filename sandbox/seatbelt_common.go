@@ -16,7 +16,7 @@ var defaultSensitivePaths = []string{
 }
 
 // defaultOpenSubpaths 敏感 deny 中的受管放行子树（相对 home，SBPL 后规则胜 ——
-// 策略里置于敏感 deny 之后精确重开）。两个子树都是「受管 + 只含公开内容」：
+// 策略里置于敏感 deny 之后精确重开）。三个子树都是「受管 + 只含公开内容」：
 //
 //   - .go-code/plugins：受管插件目录安装 Browser Use 等组件
 //     （chrome-devtools-mcp 的 node_modules / config / profile），安装、调试与日志
@@ -37,15 +37,23 @@ var defaultOpenSubpaths = []string{
 	// **标准文件工具**读写记忆，没有记忆专用工具（技术方案 §1）；不放行则 bash 侧
 	// 写不了记忆，与文件工具侧行为不一致。该子树下只有记忆文件（0600），无密钥。
 	".go-code/memory",
-	// .go-code/previews：预览产物缓存（R08a，conversion 服务的内容寻址目录）。
-	// 放行的**唯一理由**是前端要读回：office 预览的面板渲染走 file_preview 读
-	// html_path（bridge 的 resolveWorkspacePath 复用 denyHarnessConfigPath，不放行就
-	// 「转换成功但读不回」）。子树里只有「由用户自己打开过的文档」转出的 HTML ——
-	// 没有密钥、没有会话历史，与 memory 同性质的派生物。不放在 .go-code/runtime 下
-	// 是因为那份子树属于受管 Python 运行时，升级/重装会整目录替换（缓存会被连带清掉，
-	// 且语义上把「用户文件的派生物」塞进「解释器目录」会让排查时看不出谁写的）。
-	".go-code/previews",
 }
+
+// defaultReadOnlyOpenSubpaths 敏感 deny 中**只读**放行的受管子树（相对 home）。
+//
+// 与 defaultOpenSubpaths 的差别是写：策略里先 allow file-read*，再用
+// `(deny file-write* (subpath ...))` 收尾（SBPL 后规则胜）关掉写 —— 读要开、写要关，
+// 否则「放行」等于把这条路径交给 shell 任意改写。
+//
+// .go-code/previews：预览产物缓存（R08a，conversion 服务的内容寻址目录）。
+//   - 必须能读：office 预览的面板渲染走 file_preview 读 html_path
+//     （bridge 的 resolveWorkspacePath 复用 denyHarnessConfigPath，不放行就
+//     「转换成功但读不回」）；
+//   - 必须不能写：缓存条目 = 「这份文档的预览」。能写 = 模型可以把 index.html 换成
+//     任意 HTML，用户看到的是**看起来属于这份文档**的伪造内容。缓存键是内容哈希、
+//     模型算得出来，所以「难猜」不是防线，只读才是。
+//   - 不放 .go-code/runtime 下：那份子树属于受管 Python 运行时，升级/重装会整目录替换。
+var defaultReadOnlyOpenSubpaths = []string{".go-code/previews"}
 
 // deviceReadPaths / deviceWritePaths 常规 shell 运行必需设备白名单（2026-08-28 误伤修复）。
 // 实测：bash 进程替换 <(...) 读 /dev/fd/N —— brew.sh 等脚本依赖，缺省默认全拒会直接
@@ -108,7 +116,10 @@ type Seatbelt struct {
 	// WithSensitivePaths 显式 deny 命中放行子树（相等或父目录）时剔除 —— 显式 deny
 	// 意图优先。
 	OpenSubpaths []string
-	Policy       string // 编译好的 SBPL 策略（NewSeatbelt 构造时生成并探测）
+	// ReadOnlySubpaths 只读放行子树（绝对路径）：allow file-read* + 末尾 deny file-write*。
+	// 默认 = home 下 defaultReadOnlyOpenSubpaths（预览产物缓存）。与 OpenSubpaths 不相交。
+	ReadOnlySubpaths []string
+	Policy           string // 编译好的 SBPL 策略（NewSeatbelt 构造时生成并探测）
 
 	noProbe       bool     // WithNoProbe：跳过构造期探测（测试/CI）
 	userSensitive []string // WithSensitivePaths 注入的显式敏感路径（相对 home 或绝对；构造期归一）

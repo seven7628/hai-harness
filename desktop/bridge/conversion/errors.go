@@ -15,8 +15,12 @@ const (
 	CodeTooLarge = "too_large"
 	// CodeTimeout 单次转换超过时限（默认 60s）被终止（同步 kill 掉进程组）。
 	CodeTimeout = "timeout"
-	// CodeCanceled 调用方取消（切走预览/会话关闭）；与 timeout 分开，前端说法不同。
+	// CodeCanceled 调用方取消（工作区关闭/应用退出）；与 timeout 分开，前端说法不同。
 	CodeCanceled = "canceled"
+	// CodeQueueTimeout 排队等待超过上界（默认 2×60s）：机器上同时有别的转换在跑，
+	// 本次**还没开始转**就被放弃。与 timeout 分开：前者「快到了、重试就行」，
+	// 后者「这份文件转不动」。
+	CodeQueueTimeout = "queue_timeout"
 	// CodeFailed 转换失败（Python 异常、产物缺失、解析不了这份文件……）。
 	CodeFailed = "failed"
 	// CodeNotFound 输入文件不存在/读不了。

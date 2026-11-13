@@ -72,6 +72,12 @@ func NewSeatbelt(workspace string, opts ...SeatbeltOption) (*Seatbelt, error) {
 		s.OpenSubpaths = append(s.OpenSubpaths, resolveRealPath(resolveHome(s.Home, p)))
 	}
 	s.OpenSubpaths = filterExplicitDenied(s.OpenSubpaths, explicitSensitive)
+	// 只读放行子树（默认 ~/.go-code/previews）：同样归一化；与 OpenSubpaths 不相交，
+	// 但用户显式 deny 命中它时同样剔除（显式 deny 意图优先于默认 carve-out）。
+	for _, p := range defaultReadOnlyOpenSubpaths {
+		s.ReadOnlySubpaths = append(s.ReadOnlySubpaths, resolveRealPath(resolveHome(s.Home, p)))
+	}
+	s.ReadOnlySubpaths = filterExplicitDenied(s.ReadOnlySubpaths, explicitSensitive)
 	s.Policy = s.buildPolicy()
 	if !s.noProbe {
 		if err := probePolicy(s.Policy); err != nil {
@@ -195,6 +201,13 @@ func (s *Seatbelt) buildPolicy() string {
 	for _, p := range s.OpenSubpaths {
 		fmt.Fprintf(&b, "(allow file-read* (subpath %q))\n", p)
 		fmt.Fprintf(&b, "(allow file-write* (subpath %q))\n", p)
+	}
+	// 只读放行子树（默认 ~/.go-code/previews 预览产物缓存）：读开、写关。
+	// deny 必须排在 allow 之后（SBPL 后规则胜）—— 这里的位置就是「最后」，
+	// 若以后往下追加规则，注意别把这条挤出末尾语义。
+	for _, p := range s.ReadOnlySubpaths {
+		fmt.Fprintf(&b, "(allow file-read* (subpath %q))\n", p)
+		fmt.Fprintf(&b, "(deny file-write* (subpath %q))\n", p)
 	}
 	return b.String()
 }

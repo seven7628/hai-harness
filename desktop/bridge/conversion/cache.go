@@ -1,6 +1,7 @@
 package conversion
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,12 +10,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seven7628/hai-harness/internal/atomicfile"
+	"github.com/seven7628/hai-harness/tools/builtin"
 )
 
 // cacheKeyVersion 产物口径版本。**改转换脚本/产物结构时必须 bump 它**（R08a 注释）。
@@ -24,31 +26,16 @@ import (
 // 且没有任何报错（最坏的一种故障）。bump 的代价只是升级后一次性重转。
 const cacheKeyVersion = "r08a-v1"
 
-// keyBuildStamp 二进制构建标识（vcs revision / 模块版本），也是缓存键的一位。
+// keyScriptFingerprint 三个转换脚本（编译期常量）的内容指纹，是缓存键里
+// 「转换器版本」这一位。
 //
-// 为什么把「哪个构建产出的」也放进键，而不是只靠人工 bump cacheKeyVersion：转换脚本是
-// 编译进二进制的常量，**改了脚本却忘了 bump** 是最容易犯的错，后果是升级后仍命中旧产物、
-// 且完全静默（用户只会觉得「更新没生效」）。带上构建标识后，换一个构建 = 换一套键，
-// 正确性不再依赖记性。代价：每次重新构建都会让旧条目自然过期（缓存本来就是可丢的）。
-var keyBuildStamp = buildStamp()
-
-// buildStamp 取构建标识（尽量短、稳定）：优先 vcs revision，其次模块版本。
-// 取不到（未启用 buildvcs / 本地 go run）就返回空串 —— 退化成「只靠 cacheKeyVersion」。
-func buildStamp() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return ""
-	}
-	for _, s := range bi.Settings {
-		if s.Key == "vcs.revision" && len(s.Value) >= 12 {
-			return s.Value[:12]
-		}
-	}
-	if v := bi.Main.Version; v != "" && v != "(devel)" {
-		return v
-	}
-	return ""
-}
+// 为什么是**脚本内容哈希**而不是构建标识（vcs revision / 版本号）：后者既过度又不足。
+//   - 不足：`go run` / `buildvcs=false` / 改了脚本还没提交时 revision 不变 —— 正好漏掉
+//     它声称要防的场景（改了脚本、静默命中旧产物，用户只看到「更新没生效」）；
+//   - 过度：改一行无关的 Go 代码就让整份缓存作废。
+//
+// 脚本是常量，算一次 sha256 成本为零，语义精确：**产物生成规则变了才换键**。
+var keyScriptFingerprint = builtin.PreviewScriptFingerprint()
 
 // indexName 条目里的产物文件名。它存在 = 条目可用（写入顺序见 Cache.Put）。
 const indexName = "index.html"
@@ -77,7 +64,29 @@ type Cache struct {
 	maxBytes int64
 	maxAge   time.Duration
 	now      func() time.Time
+
+	// mu 串行化 Put 与 Sweep（两者都会删/建条目目录）。
+	//
+	// 为什么需要（评审指出的窄窗口）：Sweep 按**目录 mtime** 判过期，而 Put 在写完
+	// 内容之后才刷 mtime —— 若那个 key 恰好有一条 24h 前的残条目，启动清扫可能在
+	// 「刚写完 index.html、还没刷 mtime」的瞬间把整个目录删掉，用户拿到一个已被删除的
+	// 产物路径（面板白屏）。
+	//
+	// 两道防线，各自能盖住的部分不同：
+	//   - 这把锁：Sweep 与 Put **不交错**（前提是两者用同一个 Cache 实例 ——
+	//     bridge 的启动清扫必须走 Service.cache，见 (*manager).sweepPreviewCache）；
+	//   - Put 一开始就刷 mtime：把窗口**收窄到 Chtimes 之前**（MkdirAll 到 Chtimes
+	//     之间仍有一个极短的瞬间目录还是旧时间；能删的前提是并发 Sweep 恰在此刻
+	//     ReadDir，且此后再无 Chtimes —— 概率极低但不为零，别写成「归零」）。
+	// Lookup 的 Chtimes 不受这把锁保护（命中路径不该排队），那点竞争只影响 LRU 顺序。
+	mu sync.Mutex
 }
+
+// cacheFileMode 产物文件权限：0600。
+//
+// 里面是**用户文档的内容**（表格数值、会议纪要、合同条款），与 memory 子树同口径：
+// 同机其它用户不该能直读。目录仍是 0700（MkdirAll），纵深防御。
+const cacheFileMode = 0o600
 
 // NewCache 构造缓存目录句柄（不建目录：首次写入时才建）。
 func NewCache(dir string, maxBytes int64, maxAge time.Duration) *Cache {
@@ -109,26 +118,37 @@ func (c *Cache) Lookup(key string) (string, bool) {
 		return "", false
 	}
 	now := c.now()
-	_ = os.Chtimes(c.entryDir(key), now, now)
+	if err := os.Chtimes(c.entryDir(key), now, now); err != nil {
+		// 刷 mtime 失败 = LRU 会把这个条目当成更旧的（极端情况下刚命中就被回收）。
+		// 不影响本次命中（产物还在），故只记一行诊断，不失败。
+		// 只打 key（十六进制哈希），不打路径 —— 路径里有用户名段（日志口径 §1.8）。
+		fmt.Fprintf(os.Stderr, "[conversion] touch cache entry failed key=%s err=%v\n", key, err)
+	}
 	return p, true
 }
 
 // Put 把 r（转换产物）写进条目并返回产物路径。失败不留下可用条目。
 func (c *Cache) Put(key string, r io.Reader, meta Meta) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	dir := c.entryDir(key)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	// 顺序有意义：meta 是诊断信息（可缺），index.html 的落地 = 条目可用（不可缺）。
-	if b, err := json.Marshal(meta); err == nil {
-		_ = atomicfile.Replace(filepath.Join(dir, metaName), string(b))
-	}
-	p := filepath.Join(dir, indexName)
-	if err := atomicfile.ReplaceReader(p, r); err != nil {
-		return "", err
-	}
+	// 先刷 mtime 再写内容：写完（可能几十 ms）之前若被并发 Sweep 看到旧 mtime，
+	// 整个目录会被当成过期条目删掉。见 Cache.mu 的注释。
 	now := c.now()
 	_ = os.Chtimes(dir, now, now)
+	// 顺序有意义：meta 是诊断信息（可缺），index.html 的落地 = 条目可用（不可缺）。
+	// meta 同样 0600：它记的是**源文件名**（用户文档名字本身就是信息）。
+	if b, err := json.Marshal(meta); err == nil {
+		_ = atomicfile.ReplaceReader(filepath.Join(dir, metaName), bytes.NewReader(b), cacheFileMode)
+	}
+	p := filepath.Join(dir, indexName)
+	if err := atomicfile.ReplaceReader(p, r, cacheFileMode); err != nil {
+		return "", err
+	}
+	_ = os.Chtimes(dir, c.now(), c.now())
 	return p, nil
 }
 
@@ -149,6 +169,8 @@ type Stats struct {
 // 只删缓存根目录下的**子目录**，绝不顺着 key 之外的位置递归 —— 这是「清理」，
 // 不是「清理工作区」（硬约束：不加任何删除工作区文件的逻辑）。
 func (c *Cache) Sweep() (Stats, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ents, err := os.ReadDir(c.dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return Stats{}, nil // 还没用过缓存：无事可做，不是错误
@@ -237,8 +259,8 @@ func CacheKey(kind, name string, params map[string]string, src string) (string, 
 	}
 	defer f.Close()
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|build=%s|kind=%s|name=%s|params=%s|",
-		cacheKeyVersion, keyBuildStamp, kind, name, paramsFingerprint(params))
+	fmt.Fprintf(h, "%s|script=%s|kind=%s|name=%s|params=%s|",
+		cacheKeyVersion, keyScriptFingerprint, kind, name, paramsFingerprint(params))
 	// 1 MiB 缓冲：100 MiB 的输入约 100 次 syscall，不让哈希成为新的瓶颈。
 	buf := make([]byte, 1<<20)
 	if _, err := io.CopyBuffer(h, f, buf); err != nil {

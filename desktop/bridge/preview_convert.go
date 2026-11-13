@@ -6,8 +6,6 @@
 package main
 
 import (
-	"context"
-
 	"github.com/seven7628/hai-harness/desktop/bridge/conversion"
 )
 
@@ -37,8 +35,13 @@ func (m *manager) handlePreviewConvert(c command, ws, kind string) {
 		m.respCode(c, false, "转换服务不可用: "+err.Error(), conversion.CodeFailed, nil)
 		return
 	}
+	// 可取消的 ctx（R08a 纪律面）：工作区关闭/退出时取消 —— 取消会转到
+	// sandbox.runExec 的 kill(-pgid)，不是「等它自己跑完」。换工作区不取消：
+	// 转换产物是按内容寻址的，换个工作区看同一份文件仍然算数。
+	ctx, done := m.previewCancels.begin(ws)
 	go func() {
-		res, cerr := svc.Convert(context.Background(), conversion.Request{Path: abs, Kind: kind, Workspace: ws})
+		defer done()
+		res, cerr := svc.Convert(ctx, conversion.Request{Path: abs, Kind: kind, Workspace: ws})
 		if cerr != nil {
 			// 错误码进信封（前端可据 code 区分「超时该重试」与「这份文件转不了」）；
 			// error 文本保持人话 —— 形状不变，只多一个可选字段。

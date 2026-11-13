@@ -191,7 +191,13 @@ const pathParamDesc = "File path. A relative path is resolved against the worksp
 // 而绝对路径那条路（`/workspace/cfg/settings.json`）是被拦的——同一个文件只因写法
 // 不同而结论相反。根因是"路径从哪来"被当成了"路径到哪去"的判据，而 deny 的本职是
 // 后者：Join 之后两条分支产出的都是绝对路径，就该受同一套判定。
-func (f *FileTools) resolve(raw string) (string, error) {
+func (f *FileTools) resolve(raw string) (string, error) { return f.resolveFor(raw, PathRead) }
+
+// resolveWrite 写意图的路径解析（write_file / edit_file）：与 resolve 逐字同源，
+// 只多一条「只读子树拒绝」。**必须共用同一份实现**，否则读写两条路的拒绝理由会漂。
+func (f *FileTools) resolveWrite(raw string) (string, error) { return f.resolveFor(raw, PathWrite) }
+
+func (f *FileTools) resolveFor(raw string, op PathOp) (string, error) {
 	if raw == "" {
 		return "", errors.New("path is required")
 	}
@@ -203,7 +209,7 @@ func (f *FileTools) resolve(raw string) (string, error) {
 	if base != "" && p != base && !strings.HasPrefix(p, base+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path %q escapes workspace root %q", raw, base)
 	}
-	if err := denyHarnessConfigPath(p); err != nil {
+	if err := denyHarnessConfigPath(p, op); err != nil {
 		return "", err
 	}
 	return p, nil
@@ -242,7 +248,7 @@ func (f *FileTools) resolve(raw string) (string, error) {
 //
 // 硬链与源文件共享 inode，所以唯一的判据是 inode 比对。受保护侧文件数很少且不随
 // 会话增长，反过来扫它们是廉价的；若扫放行子树（memory 可能有上千个文件）则不划算。
-func denyHarnessConfigPath(abs string) error {
+func denyHarnessConfigPath(abs string, op PathOp) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
@@ -264,10 +270,21 @@ func denyHarnessConfigPath(abs string) error {
 		// read_file / write_file / edit_file** 读写记忆目录"，没有记忆专用工具
 		// （技术方案 §1）。不放行它 = 模型既读不到注入的索引指向的 topic，也写不进
 		// 新记忆，auto memory 整个不成立。该子树下只有记忆文件（0600），不含密钥。
-		// previews（R08a 预览产物缓存 ~/.go-code/previews）：前端要把转换产物读回来
-		// （file_preview 读 html_path，与文件工具同一条路径校验）—— 不放行就是
-		// 「转换成功但读不回」。里面只有用户自己打开过的文档转出的 HTML，无密钥。
+		// previews（R08a 预览产物缓存）只读放行，理由见 readOnlyConfigSubtrees。
 		// .go-code 其余（settings.json 明文密钥 / sessions / events）仍保护。
+		for _, sub := range readOnlyConfigSubtrees {
+			dir := filepath.Join(cfgDir, sub)
+			if real == dir || strings.HasPrefix(real, dir+string(filepath.Separator)) {
+				if isHardlinkToProtected(abs, cfgDir) {
+					return fmt.Errorf("path %q is a hard link to a protected go-code config file", abs)
+				}
+				if op == PathWrite {
+					return fmt.Errorf("path %q is inside go-code's preview cache (%s), which is read-only for file tools: "+
+						"entries are generated from the source document and must not be edited", abs, sub)
+				}
+				return nil
+			}
+		}
 		for _, sub := range allowedConfigSubtrees {
 			dir := filepath.Join(cfgDir, sub)
 			if real == dir || strings.HasPrefix(real, dir+string(filepath.Separator)) {
@@ -290,7 +307,11 @@ func denyHarnessConfigPath(abs string) error {
 // （file_preview / xlsx_preview 等）。那份拷贝是纯词法的——不解析软链接、放行名单
 // 还漏了 memory，于是同一条链路在预览通路里畅通无阻。把它改为委托本函数，让
 // "~/.go-code 保护"只有一份实现（否则每修一次都要记得同步两处，而已经漂移过一次）。
-func DenyHarnessConfigPath(abs string) error { return denyHarnessConfigPath(abs) }
+func DenyHarnessConfigPath(abs string) error { return denyHarnessConfigPath(abs, PathRead) }
+
+// DenyHarnessConfigPathWrite 写意图的门面（编辑器保存 / 任何写盘通路）：
+// 与读门面同一份判定，只多拒绝只读子树（previews）。
+func DenyHarnessConfigPathWrite(abs string) error { return denyHarnessConfigPath(abs, PathWrite) }
 
 // protectedConfigFiles ~/.go-code 下**可能含明文密钥**的配置文件。
 //
@@ -335,12 +356,38 @@ func isHardlinkToProtected(abs, cfgDir string) bool {
 	return false
 }
 
-// allowedConfigSubtrees ~/.go-code 下对文件工具放行的受管子树。
+// PathOp 文件工具的访问意图。**同一个路径，读与写的结论可以不同**：
+// previews（预览产物缓存）对读放行、对写拒绝 —— 前端要读回产物，但任何人都
+// 不该改写它（改了就是给用户看「带 app 外壳的伪造文档」）。
+type PathOp int
+
+const (
+	// PathRead 读（read_file / file_preview / @引用 / 列目录）。
+	PathRead PathOp = iota
+	// PathWrite 写（write_file / edit_file / 编辑器保存）。
+	PathWrite
+)
+
+// allowedConfigSubtrees ~/.go-code 下对文件工具放行的受管子树（**读+写**）。
 //
 // 与 sandbox.defaultOpenSubpaths 是**同一份语义的两次列举**（沙箱放行 shell 侧、
 // 本名单放行文件工具侧）。两处不同步就会出现"沙箱能跑而文件工具读写不了"或反向。
 // 由 TestAllowedSubtreesMatchSandboxOpenSubpaths 钉住同步。
-var allowedConfigSubtrees = []string{"plugins", "runtime", "memory", "previews"}
+var allowedConfigSubtrees = []string{"plugins", "runtime", "memory"}
+
+// readOnlyConfigSubtrees 放行**读**、拒绝**写**的受管子树。
+//
+// 与 sandbox.defaultReadOnlyOpenSubpaths 同语义（沙箱侧用 SBPL 的 deny-write 收尾，
+// 见 seatbelt buildPolicy）；两处必须同步，否则「工具写不了但 bash 能写」只是把洞挪了个位置。
+//
+// previews（R08a 预览产物缓存 ~/.go-code/previews）为什么必须只读：
+//   - 必须要读：预览面板把产物 HTML 读回前端（file_preview 读 html_path），不放行就是
+//     「转换成功但读不回」；
+//   - 必须不能写：缓存条目 = 「这份文档的预览」。能写就意味着模型可以把 index.html 换成
+//     任意 HTML，用户在面板里看到的是**看起来属于这份文档**的伪造内容（带 app 外壳的
+//     钓鱼面）。缓存键是内容哈希，模型也能自己算出来 —— 所以「难猜」不是防线。
+//     只读才是。
+var readOnlyConfigSubtrees = []string{"previews"}
 
 // resolveRealTarget 解析路径的**真实目标**：对最深的已存在祖先做 EvalSymlinks，
 // 再把剩余（可能尚不存在）的部分原样接回去。
@@ -745,7 +792,7 @@ func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, 
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	p, err := t.resolve(a.Path)
+	p, err := t.resolveWrite(a.Path)
 	if err != nil {
 		return "", err
 	}
@@ -880,7 +927,7 @@ func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	p, err := t.resolve(a.Path)
+	p, err := t.resolveWrite(a.Path)
 	if err != nil {
 		return "", err
 	}

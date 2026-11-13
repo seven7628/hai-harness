@@ -172,7 +172,7 @@ func TestReplaceReaderStreamsAndMatchesReplace(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "out", "big.html")
 	big := strings.Repeat("<p>段落</p>", 50000) // ~1.5 MiB，远超单次 Write 的舒适区
-	if err := ReplaceReader(p, strings.NewReader(big)); err != nil {
+	if err := ReplaceReader(p, strings.NewReader(big), 0o644); err != nil {
 		t.Fatalf("ReplaceReader: %v", err)
 	}
 	got, err := os.ReadFile(p)
@@ -197,7 +197,7 @@ func TestReplaceReaderStreamsAndMatchesReplace(t *testing.T) {
 	if err := Replace(p, prev); err != nil {
 		t.Fatal(err)
 	}
-	if err := ReplaceReader(p, errReader{}); err == nil {
+	if err := ReplaceReader(p, errReader{}, 0o644); err == nil {
 		t.Fatal("读端出错应返回错误")
 	}
 	if got, _ := os.ReadFile(p); string(got) != prev {
@@ -209,3 +209,35 @@ func TestReplaceReaderStreamsAndMatchesReplace(t *testing.T) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, fmt.Errorf("boom") }
+
+// ReplaceReader 的 mode 参数必须真的落到文件上（R08a：预览产物要 0600，
+// 因为里面是用户文档的内容；工作区文件仍是 0644）。
+func TestReplaceReaderHonorsMode(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "previews", "index.html")
+	if err := ReplaceReader(secret, strings.NewReader("<html>doc</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v，期望 0600（预览产物可能含敏感文档内容）", st.Mode().Perm())
+	}
+	// 默认 WriteLocked 路径仍然是 0644（工作区文件口径不许被这次改动带偏）
+	plain := filepath.Join(dir, "plain.txt")
+	if err := Replace(plain, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(plain); st.Mode().Perm() != 0o644 {
+		t.Fatalf("Replace 的 mode 漂了: %v", st.Mode().Perm())
+	}
+	// 覆盖已存在的 0644 文件时，mode 也要生效（rename 换的是新 inode）
+	if err := ReplaceReader(plain, strings.NewReader("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(plain); st.Mode().Perm() != 0o600 {
+		t.Fatalf("覆盖写后 mode = %v，期望 0600", st.Mode().Perm())
+	}
+}

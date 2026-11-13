@@ -826,6 +826,9 @@ type manager struct {
 	// fileEdMu 只保护这一个指针 —— 不用 m.mu（watcher 的 emit 路径也会碰 m.mu）。
 	fileEdMu sync.Mutex
 	fileEd   *fileEditor
+	// previewCancels 在飞预览转换的取消表（R08a）：工作区关闭/退出时取消，见 preview_cancels.go。
+	// 零值可用（不占启动成本）—— manager 由多处字面量构造，不能要求显式初始化。
+	previewCancels previewCancels
 }
 
 // previewService 取（或懒创建）转换服务单例（R08a）。
@@ -3594,6 +3597,9 @@ func (m *manager) dispatch(c command) {
 // shutdown 命令 + stdin EOF 兜底（shutdownAll）会重复调用，不重复 Shutdown
 // （SDK Shutdown 幂等但会再次发 SessionClosed 事件）。
 func (m *manager) shutdownWorkspace(wsPath string) {
+	// 预览转换先取消（R08a）：它不依赖 workspace runtime 是否还在，且取消会立刻
+	// kill 转换子进程；放在最前面也能避免后面的清理等它（转换本身不持有 ws.mu）。
+	m.previewCancels.cancelWorkspace(wsPath)
 	// 已从 manager 摘除的 workspace（deleteWorkspace 后）不重建 runtime——
 	// m.runtime 会新建空 workspace（nil mcp/plugins），cleanup 调用时 panic。
 	m.mu.Lock()
@@ -3793,6 +3799,10 @@ func (m *manager) deleteWorkspace(wsPath string) {
 		delete(m.workspaces, wsPath) // 先摘除运行态，阻止新命令路由到该工作区
 	}
 	m.mu.Unlock()
+	// 预览转换取消（R08a）：必须在这里也做一次 —— 上面刚把 workspace 摘掉了，
+	// shutdownWorkspace 会因「未注册」提前返回，而「用户删了这个工作区」正是最该
+	// 取消在飞转换的入口（他不会再看到那些产物）。不持 m.mu 调用（取消表有自己的锁）。
+	m.previewCancels.cancelWorkspace(wsPath)
 	if ok {
 		ws.mu.Lock()
 		items := make([]*bridgeSession, 0, len(ws.sessions))
@@ -5975,7 +5985,7 @@ func serve() error {
 	if loadCheckpointSettings().sweepJournals() {
 		go sweepSessionFilesInBackground()
 	}
-	go sweepPreviewCache() // R08a：预览产物缓存清扫（过期 + LRU），见 sweepPreviewCache
+	go m.sweepPreviewCache() // R08a：预览产物缓存清扫（过期 + LRU），见 (*manager).sweepPreviewCache
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
 	startupLog("A2.5.browserEngine("+string(m.getBrowserEngine())+")", serveStart)
@@ -6331,15 +6341,23 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 // 属于后台维护；挂在转换路径上会让「点一下预览」偶发变慢，且并发路径下要额外加锁。
 // 为什么放 goroutine：不该拖延 bridge_ready（前端自举以它为准）。
 // 失败只打一行 stderr：缓存是**派生物**，清扫不成功最多是磁盘多占一点，不该报错给用户。
-func sweepPreviewCache() {
+func (m *manager) sweepPreviewCache() {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintln(os.Stderr, "preview cache sweep: panic:", r)
 		}
 	}()
-	c := conversion.NewCache(conversion.DefaultCacheDir(appDataDir()),
-		conversion.DefaultMaxCacheBytes, conversion.DefaultMaxCacheAge)
-	st, err := c.Sweep()
+	// **必须**走 Service 自己的那个 Cache 实例（不是 NewCache 另建一份）：
+	// Cache.mu 是**实例级**锁，另建一份同目录的 Cache = 两把锁 = 「Sweep 与 Put 互斥」
+	// 在生产里是空操作（评审抓到的正是这处）。窗口只能收窄到 Chtimes 之前，不能归零。
+	// pyRT 用真的（pythonRuntime 恒非 nil）：previewer 是单例，若这里拿 nil 建出来，
+	// 单例就被钉死成「没有运行时」，之后的预览全部报 unavailable。
+	svc, err := m.previewService(m.pythonRuntime())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "preview cache sweep: %v\n", err)
+		return
+	}
+	st, err := svc.Sweep()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "preview cache sweep: %v\n", err)
 		return
