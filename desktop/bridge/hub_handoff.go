@@ -46,11 +46,11 @@ func newHubHandoffTool(m *manager, agentID agenthub.AgentID, groupID agenthub.Gr
 			"The recipient must acknowledge; observers cannot hand off. " +
 			"Guard: chain depth 3 and at most 2 handoffs per pair in 10 minutes.",
 		Params_: tools.Obj(map[string]any{
-			"group_id":     tools.Str("Group id"),
+			"group_id":     hubGroupIDParam(groupID, "Group id"),
 			"to_agent_id":  tools.Str("Recipient agent id (must be a group member)"),
 			"instruction":  tools.Str("What ownership is being transferred, with enough context"),
 			"artifact_ids": tools.ArrayStr("Optional artifact id"),
-		}, "group_id", "to_agent_id", "instruction"),
+		}, hubGroupRequired(groupID, "group_id", "to_agent_id", "instruction")...),
 		CanParallel_: false, ReadOnly_: false,
 	}, m: m, agentID: agentID, groupID: groupID}}
 }
@@ -336,6 +336,8 @@ func agentDisplayName(ctx context.Context, st agenthub.Store, id agenthub.AgentI
 	return string(id)
 }
 
+// ValidParams：绑定群的会话里 group_id 可省略（pinnedGroupID 补本群），显式传别的群
+// 在这里就拒；其余必填项照旧，成员权限在 Call 里判。
 func (t *hubHandoffTool) ValidParams(_ context.Context, _, arguments string) error {
 	var a struct {
 		GroupID     string `json:"group_id"`
@@ -345,8 +347,11 @@ func (t *hubHandoffTool) ValidParams(_ context.Context, _, arguments string) err
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return err
 	}
-	if strings.TrimSpace(a.GroupID) == "" || strings.TrimSpace(a.ToAgentID) == "" || strings.TrimSpace(a.Instruction) == "" {
-		return fmt.Errorf("%w: group_id/to_agent_id/instruction 不能为空", agenthub.ErrInvalid)
+	if _, err := t.pinnedGroupID(a.GroupID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(a.ToAgentID) == "" || strings.TrimSpace(a.Instruction) == "" {
+		return fmt.Errorf("%w: to_agent_id/instruction 不能为空", agenthub.ErrInvalid)
 	}
 	return nil
 }

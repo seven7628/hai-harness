@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,7 +13,85 @@ import (
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/core"
+	"github.com/seven7628/hai-harness/tools"
 )
+
+// dispatchHubTool 用真实引擎派发一次工具调用（tools/engine.go：参数修复 → ValidParams
+// → Call + 必填提示）。这是生产路径；GetTool+Call 直调会绕过引擎校验，曾经让
+// 「缺省 = 本群」在 ValidParams 里根本不可达而测试全绿（假阳性）。
+func dispatchHubTool(t *testing.T, eng *tools.Engine, name, args string) (string, error) {
+	t.Helper()
+	if eng == nil {
+		t.Fatalf("engine 为 nil，无法派发 %s", name)
+	}
+	res, err := eng.Sequence(context.Background(), []core.ToolCall{{
+		Id: "call_" + name, Index: 0, Name: name, Arguments: args,
+	}}, nil)
+	if err != nil {
+		return "", err
+	}
+	if len(res) != 1 {
+		t.Fatalf("%s 结果条数 = %d，want 1", name, len(res))
+	}
+	if res[0].IsError {
+		return res[0].Result, errors.New(res[0].Result)
+	}
+	return res[0].Result, nil
+}
+
+// hubToolSchema 取工具暴露给模型/编排层的参数 schema（tools.Obj 的产物）。
+func hubToolSchema(t *testing.T, eng *tools.Engine, name string) map[string]any {
+	t.Helper()
+	tool, err := eng.GetTool(context.Background(), name)
+	if err != nil {
+		t.Fatalf("GetTool(%s): %v", name, err)
+	}
+	obj, ok := tool.Parameters().(map[string]any)
+	if !ok {
+		t.Fatalf("%s 的 schema 不是 object: %T", name, tool.Parameters())
+	}
+	return obj
+}
+
+// hubSchemaRequires 判断 schema 是否把 name 列为必填。
+func hubSchemaRequires(t *testing.T, schema map[string]any, name string) bool {
+	t.Helper()
+	switch req := schema["required"].(type) {
+	case []string:
+		for _, r := range req {
+			if r == name {
+				return true
+			}
+		}
+	case []any:
+		for _, r := range req {
+			if s, ok := r.(string); ok && s == name {
+				return true
+			}
+		}
+	case nil:
+		return false
+	default:
+		t.Fatalf("schema.required 类型不认识: %T", schema["required"])
+	}
+	return false
+}
+
+// hubSchemaPropDesc 取某个参数的 description（模型的唯一提示来源）。
+func hubSchemaPropDesc(t *testing.T, schema map[string]any, name string) string {
+	t.Helper()
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema.properties 不是 object: %T", schema["properties"])
+	}
+	prop, ok := props[name].(map[string]any)
+	if !ok {
+		t.Fatalf("schema 里没有参数 %q: %T", name, props[name])
+	}
+	desc, _ := prop["description"].(string)
+	return desc
+}
 
 func TestHubGroupTools(t *testing.T) {
 	m, buf := testManager(t)
@@ -53,11 +132,7 @@ func TestHubGroupTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := func(bs *bridgeSession, name, args string) (string, error) {
-		tool, err := bs.hubEngine.GetTool(context.Background(), name)
-		if err != nil {
-			return "", err
-		}
-		return tool.Call(context.Background(), name, args)
+		return dispatchHubTool(t, bs.hubEngine, name, args)
 	}
 	// owner 能读；owner-only 消息被 redacted。
 	out, err := call(bsA, "group_members", `{"group_id":"`+string(g.ID)+`"}`)
@@ -222,11 +297,7 @@ func TestHubGroupSayIgnoresMaxTurnsPerHumanAndReservedName(t *testing.T) {
 		t.Fatalf("human seed: %s", errMsg)
 	}
 	call := func(name, args string) (string, error) {
-		tool, err := bsB.hubEngine.GetTool(context.Background(), name)
-		if err != nil {
-			return "", err
-		}
-		return tool.Call(context.Background(), name, args)
+		return dispatchHubTool(t, bsB.hubEngine, name, args)
 	}
 	// max_turns_per_human=1 已经不管用：连续 3 条都放行。
 	for i := 1; i <= 3; i++ {
@@ -304,11 +375,7 @@ func TestHubGroupSayIgnoresMaxTurnsPerHumanAndReservedName(t *testing.T) {
 		t.Fatal(err)
 	}
 	callB2 := func(name, args string) (string, error) {
-		tool, err := bsB2.hubEngine.GetTool(context.Background(), name)
-		if err != nil {
-			return "", err
-		}
-		return tool.Call(context.Background(), name, args)
+		return dispatchHubTool(t, bsB2.hubEngine, name, args)
 	}
 	for i := 0; i < 8; i++ {
 		if _, err := callB2("group_say", fmt.Sprintf(`{"group_id":%q,"text":"第 %d 轮"}`, string(defaultGroup.ID), i+1)); err != nil {
@@ -352,11 +419,7 @@ func TestHubGroupSessionCannotTouchOtherGroup(t *testing.T) {
 	}
 	call := func(bs *bridgeSession, name, args string) (string, error) {
 		t.Helper()
-		tool, err := bs.hubEngine.GetTool(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		return tool.Call(ctx, name, args)
+		return dispatchHubTool(t, bs.hubEngine, name, args)
 	}
 
 	// ① 读：带群二的 group_id 一律拒绝（读不到群二的历史/名册/成员状态）。
@@ -453,6 +516,129 @@ func TestHubGroupSessionCannotTouchOtherGroup(t *testing.T) {
 	for _, msg := range mustReadLog(t, m, g2.ID) {
 		if strings.Contains(msg.Text, localSay) {
 			t.Fatalf("缺省 group_say 落进了群二: %+v", msg)
+		}
+	}
+}
+
+// 生产派发回归：四个群工具的 group_id「缺省 = 本群」必须同时体现在
+//
+//	(a) schema 的 required —— 模型/编排层看到的工具签名；
+//	(b) ValidParams —— tools/engine.go 在 Call 之前一定先跑的那道校验。
+//
+// 之前两处都把 group_id 当硬必填，绑定会话省略 group_id 会被引擎直接拒；旧测试用
+// GetTool+Call 直调绕过引擎，于是全绿（假阳性）。这里一律走 Engine.Sequence。
+func TestHubGroupToolGroupIDRequiredFollowsBinding(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "PinA")
+	b := createHubAgent(t, m, buf, 2, "PinB")
+	g1 := groupWithMembers(t, m, buf, 3, "绑定群一", memberRef{a.ID, "owner"}, memberRef{b.ID, "member"})
+	g2 := groupWithMembers(t, m, buf, 4, "绑定群二", memberRef{a.ID, "owner"}, memberRef{b.ID, "member"})
+	st := mustHubStore(t, m)
+	ctx := context.Background()
+	const onlyInG1 = "群一独有正文-pin-7c3"
+	if _, err := agenthub.AppendGroupMessage(ctx, st, &agenthub.Message{
+		GroupID: g1.ID, Sender: agenthub.Sender{Kind: agenthub.SenderHuman}, Text: onlyInG1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.hubGroupSession(string(a.ID), string(g1.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupTools := []string{"group_history", "group_members", "group_say", "handoff"}
+
+	// ① 绑定会话的 schema：group_id 不再是必填，描述说明缺省本群（模型据此才敢省略）。
+	for _, name := range groupTools {
+		schema := hubToolSchema(t, bs.hubEngine, name)
+		if hubSchemaRequires(t, schema, "group_id") {
+			t.Fatalf("%s 绑定会话仍把 group_id 列为 required（模型会以为必填）: %v", name, schema["required"])
+		}
+		if desc := hubSchemaPropDesc(t, schema, "group_id"); !strings.Contains(desc, "defaults to this session's group") {
+			t.Fatalf("%s 的 group_id 描述 = %q，want 说明缺省本群", name, desc)
+		}
+	}
+
+	// ② 引擎派发（无 group_id）：四个工具都成功，且读写的都是本群。
+	out, err := dispatchHubTool(t, bs.hubEngine, "group_history", `{}`)
+	if err != nil {
+		t.Fatalf("绑定会话 group_history{} 被引擎拒了: %v", err)
+	}
+	if !strings.Contains(out, onlyInG1) {
+		t.Fatalf("group_history{} 读到的不是本群: %s", out)
+	}
+	if out, err := dispatchHubTool(t, bs.hubEngine, "group_members", `{}`); err != nil {
+		t.Fatalf("绑定会话 group_members{} 被引擎拒了: %v", err)
+	} else if !strings.Contains(out, "PinB") || strings.Contains(out, string(g2.ID)) {
+		t.Fatalf("group_members{} 名册不是本群: %s", out)
+	}
+	const localSay = "绑定群缺省发言"
+	if _, err := dispatchHubTool(t, bs.hubEngine, "group_say", `{"text":"`+localSay+`"}`); err != nil {
+		t.Fatalf("绑定会话 group_say{text} 被引擎拒了: %v", err)
+	}
+	if out, err := dispatchHubTool(t, bs.hubEngine, "handoff", fmt.Sprintf(`{"to_agent_id":%q,"instruction":"缺省本群交接"}`, string(b.ID))); err != nil {
+		t.Fatalf("绑定会话 handoff 被引擎拒了: %v", err)
+	} else {
+		var created struct {
+			Handoff agenthub.Handoff `json:"handoff"`
+		}
+		if uerr := json.Unmarshal([]byte(out), &created); uerr != nil || created.Handoff.ID == "" {
+			t.Fatalf("handoff 结果 = %s (%v)", out, uerr)
+		}
+		if created.Handoff.GroupID != g1.ID {
+			t.Fatalf("缺省 handoff 的群 = %s，want %s", created.Handoff.GroupID, g1.ID)
+		}
+	}
+	foundLocal := false
+	for _, msg := range mustReadLog(t, m, g1.ID) {
+		if strings.Contains(msg.Text, localSay) {
+			foundLocal = true
+		}
+	}
+	if !foundLocal {
+		t.Fatalf("缺省 group_say 没落进群一")
+	}
+	// 群二日志一丝不沾：没有缺省发言、没有缺省交接卡。
+	for _, msg := range mustReadLog(t, m, g2.ID) {
+		if strings.Contains(msg.Text, localSay) || msg.Kind == agenthub.KindHandoff {
+			t.Fatalf("缺省调用越界写进群二: %+v", msg)
+		}
+	}
+
+	// ③ 未绑定（直造工具，groupID 空）：schema 仍必填，引擎派发缺 group_id 明确报错。
+	unbound := tools.NewToolEngine()
+	registerHubGroupTools(unbound, m, a.ID, "")
+	for _, name := range groupTools {
+		schema := hubToolSchema(t, unbound, name)
+		if !hubSchemaRequires(t, schema, "group_id") {
+			t.Fatalf("%s 未绑定时 group_id 必须仍是 required: %v", name, schema["required"])
+		}
+	}
+	if out, err := dispatchHubTool(t, unbound, "group_history", `{}`); err == nil {
+		t.Fatalf("未绑定 group_history{} 应被引擎拒绝: %s", out)
+	} else if !strings.Contains(err.Error(), "group_id") {
+		t.Fatalf("未绑定的报错应点名 group_id: %v", err)
+	}
+	// 显式给 group_id 时未绑定工具照旧可用：放宽缺省不能把老路径弄坏。
+	if out, err := dispatchHubTool(t, unbound, "group_history", fmt.Sprintf(`{"group_id":%q}`, string(g1.ID))); err != nil {
+		t.Fatalf("未绑定 group_history 带 group_id 应可用: %v", err)
+	} else if !strings.Contains(out, onlyInG1) {
+		t.Fatalf("未绑定 group_history 读错了群: %s", out)
+	}
+
+	// ④ 钉死不放宽：绑定会话显式传群二，四个工具全部拒绝，且理由是「只能操作本群」
+	// （不是「缺 group_id」——必填放宽不等于钉死放宽）。
+	for _, tc := range []struct{ name, args string }{
+		{"group_history", `{"group_id":"` + string(g2.ID) + `"}`},
+		{"group_members", `{"group_id":"` + string(g2.ID) + `"}`},
+		{"group_say", `{"group_id":"` + string(g2.ID) + `","text":"越权发言"}`},
+		{"handoff", `{"group_id":"` + string(g2.ID) + `","to_agent_id":"` + string(b.ID) + `","instruction":"越权交接"}`},
+	} {
+		out, err := dispatchHubTool(t, bs.hubEngine, tc.name, tc.args)
+		if err == nil {
+			t.Fatalf("%s 显式传群二成功了: %s", tc.name, out)
+		}
+		if !strings.Contains(err.Error(), "只能操作本群") {
+			t.Fatalf("%s 的拒绝理由不是钉死群: %v", tc.name, err)
 		}
 	}
 }

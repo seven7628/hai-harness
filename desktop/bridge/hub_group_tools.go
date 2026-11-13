@@ -5,7 +5,9 @@ package main
 // group_history / group_members / group_say 都带 group_id。**群作用域会话把群钉死**：
 // 装配时绑定 spec.Scope.GroupID，参数缺省用绑定群、给了别的群直接拒绝 —— 与
 // assign_task/task_ack 同口径。否则同一智能体在多个群时，A 群会话能借参数读写 B 群
-// （跨群越权）。权限：
+// （跨群越权）。缺省能力必须同时落在两处：schema 的 required（模型/编排层看到的
+// 工具签名）与 ValidParams（引擎在 Call 之前的必填校验）—— 只改一处的后果是模型
+// 以为必填，或引擎先拦下省略 group_id 的合法调用。权限：
 //   - 必须是群成员（非成员一律拒绝，不泄漏群存在性以外的信息）；
 //   - group_history 走 Redacted(false)：owner-only 消息只显示占位；
 //   - observer 可以读，不能 group_say；
@@ -68,6 +70,32 @@ func (t *hubGroupToolBase) pinnedGroupID(argsGroupID string) (agenthub.GroupID, 
 	return bound, nil
 }
 
+// hubGroupIDParam 是 group_id 参数的 schema 描述：绑定群的会话（群作用域）里参数可
+// 省略 —— 缺省就是本群；未绑定（直造工具的测试/老装配路径）仍要模型自己给。
+func hubGroupIDParam(bound agenthub.GroupID, base string) map[string]any {
+	if strings.TrimSpace(string(bound)) != "" {
+		return tools.Str(base + " (defaults to this session's group)")
+	}
+	return tools.Str(base)
+}
+
+// hubGroupRequired 过滤 schema 的 required：绑定群的会话里 group_id 可省略（由
+// pinnedGroupID 补上本群），未绑定时保持必填。required 若继续硬编码 "group_id"，
+// tools/engine.go 会在 Call 之前的必填校验（ValidParams + missingFieldsHint）就把
+// 「省略 group_id」的合法调用拒掉 —— 所以必需项必须跟着装配时的绑定一起变。
+func hubGroupRequired(bound agenthub.GroupID, required ...string) []string {
+	if strings.TrimSpace(string(bound)) == "" {
+		return required
+	}
+	out := make([]string, 0, len(required))
+	for _, name := range required {
+		if name != "group_id" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // groupAccess 先钉死群作用域、再读群 + 校验成员；返回成员角色。
 func (t *hubGroupToolBase) groupAccess(ctx context.Context, groupID string) (*agenthub.FileStore, *agenthub.Group, agenthub.MemberRole, error) {
 	gid, err := t.pinnedGroupID(groupID)
@@ -104,11 +132,11 @@ func newHubGroupHistoryTool(m *manager, agentID agenthub.AgentID, groupID agenth
 			"Only members can read; owner-only messages are redacted. " +
 			"Use query to search text, before_seq to page older messages.",
 		Params_: tools.Obj(map[string]any{
-			"group_id":   tools.Str("Group id from the task/system context"),
+			"group_id":   hubGroupIDParam(groupID, "Group id from the task/system context"),
 			"query":      tools.Str("Optional text search"),
 			"before_seq": tools.Int("Return messages older than this seq (0 = latest page)"),
 			"limit":      tools.Int("Page size 1-100 (default 30)"),
-		}, "group_id"),
+		}, hubGroupRequired(groupID, "group_id")...),
 		CanParallel_: true, ReadOnly_: true,
 	}, m: m, agentID: agentID, groupID: groupID}}
 }
@@ -222,7 +250,7 @@ func newHubGroupMembersTool(m *manager, agentID agenthub.AgentID, groupID agenth
 			"(idle/running, plus where they are busy). Roles/responsibilities are also in your system " +
 			"prompt; the status here is realtime. Missing profiles are reported explicitly. " +
 			"Only members can read.",
-		Params_:      tools.Obj(map[string]any{"group_id": tools.Str("Group id")}, "group_id"),
+		Params_:      tools.Obj(map[string]any{"group_id": hubGroupIDParam(groupID, "Group id")}, hubGroupRequired(groupID, "group_id")...),
 		CanParallel_: true, ReadOnly_: true,
 	}, m: m, agentID: agentID, groupID: groupID}}
 }
@@ -370,11 +398,11 @@ func newHubGroupSayTool(m *manager, agentID agenthub.AgentID, groupID agenthub.G
 			"Observers cannot speak. @Name in text and the structured mentions list are unioned, deduped and capped by the group policy. " +
 			"mention_all is only allowed for the group owner (humans sending from the app are always allowed).",
 		Params_: tools.Obj(map[string]any{
-			"group_id":    tools.Str("Group id"),
+			"group_id":    hubGroupIDParam(groupID, "Group id"),
 			"text":        tools.Str("Message text (use @Name to wake members)"),
 			"mentions":    tools.ArrayStr("Optional agent ids to wake explicitly; unioned with @Name in text"),
 			"mention_all": tools.Bool("Wake every group member (owner agents only; a rejected mention_all fails the call)"),
-		}, "group_id", "text"),
+		}, hubGroupRequired(groupID, "group_id", "text")...),
 		CanParallel_: false, ReadOnly_: false,
 	}, m: m, agentID: agentID, groupID: groupID}}
 }
@@ -455,16 +483,15 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 	return marshalHubToolResult(result)
 }
 
-// ValidParams 只做「JSON 可解析 + group_id 非空」；成员权限在 Call 里判。
+// ValidParams 只做「JSON 可解析 + group_id 合法」：绑定群的会话里 group_id 可省略
+// （pinnedGroupID 补本群），显式传别的群在这里就拒；成员权限在 Call 里判。
 func (t *hubGroupHistoryTool) ValidParams(_ context.Context, _, arguments string) error {
 	var a hubGroupHistoryArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return err
 	}
-	if strings.TrimSpace(a.GroupID) == "" {
-		return fmt.Errorf("%w: group_id 不能为空", agenthub.ErrInvalid)
-	}
-	return nil
+	_, err := t.pinnedGroupID(a.GroupID)
+	return err
 }
 
 func (t *hubGroupMembersTool) ValidParams(_ context.Context, _, arguments string) error {
@@ -472,10 +499,8 @@ func (t *hubGroupMembersTool) ValidParams(_ context.Context, _, arguments string
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return err
 	}
-	if strings.TrimSpace(a.GroupID) == "" {
-		return fmt.Errorf("%w: group_id 不能为空", agenthub.ErrInvalid)
-	}
-	return nil
+	_, err := t.pinnedGroupID(a.GroupID)
+	return err
 }
 
 func (t *hubGroupSayTool) ValidParams(_ context.Context, _, arguments string) error {
@@ -488,8 +513,11 @@ func (t *hubGroupSayTool) ValidParams(_ context.Context, _, arguments string) er
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return err
 	}
-	if strings.TrimSpace(a.GroupID) == "" || strings.TrimSpace(a.Text) == "" {
-		return fmt.Errorf("%w: group_id/text 不能为空", agenthub.ErrInvalid)
+	if _, err := t.pinnedGroupID(a.GroupID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(a.Text) == "" {
+		return fmt.Errorf("%w: text 不能为空", agenthub.ErrInvalid)
 	}
 	return nil
 }
