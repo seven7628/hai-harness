@@ -48,6 +48,10 @@ import { disposeMediaElementsForPath } from '../lib/mediaStage'
 // 反向的 builtin provider → store 更早就存在（webSurface 读 embedNav），两者不构成环：
 //   builtin → {store, registry}，store → registry，registry 谁都不 import。
 import { getSurface, isBuiltinKind } from '../surfaces/registry'
+// PR-12 `ui` 通道：渲染层 → 桥的 UI 快照（lib/uiSnapshot）+ 桥 → 渲染层的 ui 信封（lib/uiBus）。
+// 两者都不进事件流：`ui` 不是 28 类 agent 事件（不落盘、不重放、不进 transcript）。
+import { startUISnapshot } from '../lib/uiSnapshot'
+import { emitUI } from '../lib/uiBus'
 export { isPendingWebTab, samePreviewTarget, webTabKey }
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
@@ -9211,6 +9215,10 @@ function enforceViewBudget(force = false): void {
 }
 
 let wired = false
+// uiSnapStop：快照推送的停止函数（PR-12）。桥重启时先停再起 —— 不重订阅会泄漏
+// （每次 start() 多一份 window resize 监听），而**重发**是必要的：桥侧缓存随进程
+// 一起没了，新桥在用户动界面之前会一直回答 no_snapshot。
+let uiSnapStop: (() => void) | undefined
 function wire(): void {
   if (wired) return
   wired = true
@@ -9226,6 +9234,13 @@ function wire(): void {
   transport.onEvent((line) => {
     try {
       const ev = JSON.parse(line) as AnyEvent
+      // `ui` 信封（PR-12）：{type:"ui", op, data}。它**没有** event_type —— 不是 28 类事件，
+      // 也不许落进下面任何分支（那会建出永不清理的视图 / 干扰 command_response 的结算）。
+      // 只投给 uiBus 后立刻返回；未知 op 由 uiBus 静默丢弃（不报错、不打日志噪音）。
+      if (ev.type === 'ui') {
+        if (typeof ev.op === 'string') emitUI(ev.op, ev.data)
+        return
+      }
       // Hub 事件只归 useHubStore（§17.6 单一入口）：主 store 的 views/busySids 只认工作区
       // 会话，把 hub.<id>.dm 的流灌进来会留下永不清理的正文与常亮运行点（P1-08 复核 N1）。
       if (typeof ev.event_type === 'string' && ev.event_type.startsWith('hub_')) return
@@ -9488,6 +9503,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     booting = false
     set({ bridgeStatus: 'running', bridgeError: undefined })
+    // UI 快照推送（PR-12）：桥起来了才启动 —— 早于 transport.start 发的第一份快照
+    // 会写进还没 spawn 的进程（丢了还要等用户动界面才补）。幂等：先停旧的再起。
+    // 发送走 transport.send 而不是 store 的 send()：那边会登记 pending 等 command_response，
+    // 而 ui 信件**没有回执**（有回执就等于在事件流里放了一条假的同步点）。
+    uiSnapStop?.()
+    uiSnapStop = startUISnapshot({
+      getState: () => useAppStore.getState(),
+      subscribe: (fn) => useAppStore.subscribe(fn),
+      send: ({ op, data }) => {
+        void transport.send({ id: ++cmdSeq, type: 'ui', payload: { op, data } })
+      },
+      t: i18nT,
+      scopeKeyOf: (s) => scopeKeyOf(s),
+    })
     // 工作区清单上移（手机端要看到与桌面相同的列表）：localStorage 只是缓存，
     // bridge 的 ~/.go-code/workspaces.json 才是真相源。只增不减，见 workspace_registry.go。
     syncWorkspacesToBridge(get().projects.map((p) => p.path))
