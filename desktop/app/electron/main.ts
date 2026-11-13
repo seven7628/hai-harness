@@ -1830,10 +1830,46 @@ if (!MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
   })
 }
 
+// —— 内存压力信号（2026-11-12，P1）——
+//
+// Chromium 的 tab discarding 用的是 OS 的内存压力通知
+// （chromiumos-design-docs/tab-discarding-and-reloading.md）：内存压力下丢弃
+// 标签页的**可重取状态**，保留用户正在交互的东西。
+//
+// Electron 没有直接暴露那个通知，但主进程能读系统内存：
+// `process.getSystemMemoryInfo()` → {total, free, swapTotal, swapFree}（KB）。
+// 渲染进程据此决定要不要**主动降级**视图。
+//
+// 为什么必须自己做：V8 的堆上限是**崩溃线**不是降级线
+// （v8.dev/blog/heap-size-limit：到顶 → "a series of last resort garbage
+// collections" → 再不行就 "stops execution and reports an out-of-memory
+// failure" ⇒ Electron 里就是 Aw, Snap）。而且我们没设 --max-old-space-size。
+//
+// 5 秒一次足够：内存压力是慢变量（换页颠簸以秒计，不是毫秒计）。
+function startMemPressureWatch(): void {
+  const timer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      const m = process.getSystemMemoryInfo()
+      mainWindow.webContents.send('mem:pressure', {
+        free: m.free,
+        total: m.total,
+        swapFree: m.swapFree,
+        swapTotal: m.swapTotal,
+      })
+    } catch {
+      /* 主进程 API 不可用（理论上不会）：静默忽略，不影响主流程 */
+    }
+  }, 5000)
+  // 不因为这个定时器而吊住进程退出。
+  timer.unref?.()
+}
+
 app.whenReady().then(() => {
   startupMark('whenReady')
   registerIpc()
   createWindow()
+  startMemPressureWatch()
   // 屏幕录制 SCK 预热（2026-09 Computer Use 截图排障）：macOS 14+ 截屏走
   // ScreenCaptureKit 独立 TCC（kTCCServiceScreenCaptureKit）——screencapture 命令
   // 与 desktopCapturer 都依赖它，系统设置「屏幕录制」只写旧服务。启动时调一次

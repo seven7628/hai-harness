@@ -15,6 +15,14 @@ import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAtt
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { isEditorEnabled, isTextLikePath } from '../lib/editorState'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
+import {
+  BUDGET_CHECK_INTERVAL_MS,
+  currentBudgetBytes,
+  degradeView,
+  planBudget,
+  setMemPressure,
+  viewBytes,
+} from './viewBudget'
 import { t as i18nT } from '../i18n'
 import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
@@ -1298,6 +1306,10 @@ function setView(s: AppState, sid: string, nv: SessionView, extra?: Partial<AppS
   const isActive = active ?? sid === s.activeSessionId
   // 后台事件可能首次创建 view；提交后立即执行 LRU 收敛，保证缓存不会随 session 数增长。
   if (isNew) queueMicrotask(() => evictViews())
+  // 预算检查：**每个事件后**都要有机会跑 —— 视图内容会随事件增长（翻页、流式、
+  // agent 卡回填），只在「新建视图 / 切会话」时查会漏掉「单个会话自己涨爆」。
+  // 定时器节流 ⇒ 每秒至多一次，不给事件路径加负担。
+  scheduleBudgetCheck()
   if (isActive) return { views, ...viewFields(nv), ...extra }
   return { views, ...extra }
 }
@@ -5175,6 +5187,37 @@ export function dispatchEvent(raw: AnyEvent): void {
             })
             break
           }
+          // —— noeviction（Redis 的语义）——
+          //
+          // 预算已经超了还往缓存里塞更多数据 ⇒ **拒绝**这一页。
+          //
+          // 为什么不「先收下再降级」：降级会把刚加载来的**更早**的块裁掉（它裁的是
+          // 数组头部）⇒ 用户点了「加载更早」、页面转了一圈、看到的还是原样 ——
+          // 比明确报错更糟。Redis 的 `noeviction` 就是这个选择：
+          // "Keys are not evicted but the server will return an error when you try
+          // to execute commands that cache new data"。
+          //
+          // 用现成的 blocksOlderError 态（按钮变「重试」）⇒ 关掉别的会话腾出预算后
+          // 再点一次就能成功。
+          {
+            const stNow = useAppStore.getState()
+            let over = false
+            for (const v of Object.values(stNow.views)) {
+              if (viewBytes(v) > currentBudgetBytes()) {
+                over = true
+                break
+              }
+            }
+            if (over) {
+              console.info('[budget] 预算已满 → 拒绝这一页「加载更早」')
+              setState((s) => {
+                const v = s.views[sid]
+                if (!v) return {}
+                return setView(s, sid, { ...v, blocksOlderLoading: false, blocksOlderError: true })
+              })
+              break
+            }
+          }
           const page = d as unknown as {
             blocks?: Array<Record<string, unknown>>
             cursor?: number
@@ -8432,21 +8475,98 @@ function evictViews(keep?: string): void {
     .filter((sid) => !keepSet.has(sid))
     .sort((a, b) => viewOrder.indexOf(a) - viewOrder.indexOf(b))
   const over = Object.keys(st.views).length - VIEW_CACHE_MAX
-  if (over <= 0 || cands.length === 0) return
-  const drop = cands.slice(0, Math.min(over, cands.length))
+  if (over > 0 && cands.length > 0) {
+    const drop = cands.slice(0, Math.min(over, cands.length))
+    const views = { ...st.views }
+    for (const sid of drop) delete views[sid]
+    for (const sid of drop) {
+      const i = viewOrder.indexOf(sid)
+      if (i >= 0) viewOrder.splice(i, 1)
+    }
+    useAppStore.setState({ views })
+  }
+  // ② 字节预算：超了就分级降级 / 淘汰（Redis 模型，见 viewBudget.ts）。
+  enforceViewBudget()
+}
+
+// —— 视图内存预算（2026-11-12，P1）——
+//
+// 渲染进程 footprint 实测 2.08 GB（峰值 3.13 GB），而 V8 的堆上限是**崩溃线**
+// 不是降级线（v8.dev/blog/heap-size-limit：到顶 → "a series of last resort
+// garbage collections" → 再不行就 "stops execution and reports an
+// out-of-memory failure" ⇒ Electron 里就是 Aw, Snap）。
+// 我们没设 --max-old-space-size ⇒ 用的是 Chromium 推算的默认值。
+//
+// ⇒ 渲染进程内存必须**我们自己管**，不能让 V8 兜底。
+// 模型抄 Redis 的 eviction：字节预算 + 写入时检查 + 分级降级（只丢可重取的）
+// + C 类（草稿/审批/待答）永不丢。详见 src/store/viewBudget.ts。
+let lastBudgetCheck = 0
+let budgetTimer: ReturnType<typeof setTimeout> | undefined
+
+/** 安排一次预算检查（每秒至多一次）。
+ *
+ *  用定时器而不是每次都查：视图有 4 万块时一次全量估价要几毫秒（Redis 的检查是
+ *  O(1) 的，我们的不是），而事件是高频的。 */
+function scheduleBudgetCheck(): void {
+  if (budgetTimer !== undefined) return
+  budgetTimer = setTimeout(() => {
+    budgetTimer = undefined
+    enforceViewBudget()
+  }, BUDGET_CHECK_INTERVAL_MS)
+}
+
+/** LRU 顺序（含没进过 viewOrder 的视图，避免漏掉候选）。 */
+function viewLruOrder(views: Record<string, SessionView>): string[] {
+  const seen = new Set(viewOrder)
+  return viewOrder.concat(Object.keys(views).filter((sid) => !seen.has(sid)))
+}
+
+/** 按字节预算处置超限的视图。 */
+function enforceViewBudget(force = false): void {
+  const now = Date.now()
+  if (!force && now - lastBudgetCheck < BUDGET_CHECK_INTERVAL_MS) return
+  lastBudgetCheck = now
+  const st = useAppStore.getState()
+  const budget = currentBudgetBytes()
+  const plan = planBudget({
+    views: st.views,
+    order: viewLruOrder(st.views),
+    active: st.activeSessionId,
+    budget,
+    // 运行中的会话**不可淘汰**（淘汰 = 它的实时 UI 直接坏掉）；但可以被降级。
+    protect: (_sid, v) => sessionBusy(v),
+  })
+  if (plan.degrade.length === 0 && plan.evict.length === 0) return
   const views = { ...st.views }
-  for (const sid of drop) delete views[sid]
-  for (const sid of drop) {
+  for (const sid of plan.degrade) {
+    const v = views[sid]
+    if (v) views[sid] = degradeView(v)
+  }
+  for (const sid of plan.evict) {
+    delete views[sid]
     const i = viewOrder.indexOf(sid)
     if (i >= 0) viewOrder.splice(i, 1)
   }
   useAppStore.setState({ views })
+  console.info(
+    `[budget] 超预算（${(budget / 1048576).toFixed(0)}MB）→ 降级 ${plan.degrade.length} 个 / 淘汰 ${plan.evict.length} 个，` +
+      `剩余估算 ${(plan.remaining / 1048576).toFixed(1)}MB`,
+  )
 }
 
 let wired = false
 function wire(): void {
   if (wired) return
   wired = true
+  // 内存压力信号（2026-11-12，P1）：主进程轮询系统内存推来。
+  // Chromium tab discarding 的模型 —— 内存吃紧时**主动**降级视图（丢可重取的
+  // 历史，保留用户正在交互的东西），而不是等 V8 撞上崩溃线。
+  if (typeof window !== 'undefined' && window.desktop?.onMemPressure) {
+    window.desktop.onMemPressure((p) => {
+      setMemPressure({ ...p, at: Date.now() })
+      enforceViewBudget(true)
+    })
+  }
   transport.onEvent((line) => {
     try {
       const ev = JSON.parse(line) as AnyEvent
