@@ -9,7 +9,7 @@ import { ActivityTab } from './ActivityTab'
 import { FilePreviewTab } from './FilePreview'
 import { EditorConfirm } from './EditorConfirm'
 import { fileUrlToPath } from '../lib/filePaths'
-import { getSurface, listSurfaces, subscribeSurfaces } from '../surfaces/registry'
+import { getSurface, subscribeSurfaces } from '../surfaces/registry'
 import { SurfaceBoundary, SurfaceTombstone } from '../surfaces/SurfaceBoundary'
 import type { UnavailableReason } from '../surfaces/SurfaceBoundary'
 import { getSurfaceHealth, isSurfaceDisabled } from '../surfaces/health'
@@ -62,14 +62,16 @@ function kindIcon(kind: TabKind): ReactElement {
   }
 }
 
-// 「现在能新建什么」= 静态清单 × 注册表的**可用**列表。
-// 为什么不能只用 ADDABLE_KINDS：它是静态数组，而「被禁用」只有注册表知道（listSurfaces
-// 已按 health 的禁用集剔除）。两处（＋ 菜单 / 空态能力面板）都读这一份，否则会出现
-// 「菜单里还能点开一个已经禁用的面板」。取交集而不是只问 isSurfaceDisabled：provider
-// 都没注册的 kind 本来就没有东西可开（PR-11 删掉静态清单后，这里只剩 listSurfaces）。
+// 「现在能新建什么」= 静态清单减去**被禁用**的 kind（health 的禁用集）。
+//
+// 为什么**不**和 listSurfaces() 取交集（PR-10 复评改过一次）：菜单是「这个应用能开什么」的
+// 静态能力清单，不是「注册表此刻装了什么」的镜像。取交集会让「注册表空 / 某个 provider 漏了
+// 副作用注册」变成**菜单静默少一项甚至全空** —— 而那正是 panelFallback 兜得住的场景
+//（04 F45）：点下去还能渲染，用户只是少看见一个入口。少一项没人会报障，比渲染出错更难查。
+// 「禁用」是另一回事：那是用户/系统的显式决定，菜单必须跟着变。
+// PR-11 删掉静态清单时，等价的写法是「listSurfaces() ∪ 允许兜底的 kind」，别退回交集。
 function addableKinds(): TabKind[] {
-  const usable = new Set(listSurfaces().map((p) => p.kind))
-  return ADDABLE_KINDS.filter((k) => usable.has(k))
+  return ADDABLE_KINDS.filter((k) => !isSurfaceDisabled(k))
 }
 
 /**
@@ -153,9 +155,6 @@ export default function RightPanel() {
   const activateTab = useAppStore((s) => s.activateTab)
   const closeTab = useAppStore((s) => s.closeTab)
   const closeTabs = useAppStore((s) => s.closeTabs)
-  // 墓碑的「移除标签」走 closeTabNow（**跳过 dirty 守卫**）：墓碑不是编辑器，没有未保存内容，
-  // 弹一个「保存/丢弃/取消」只会让用户以为这里还藏着东西。
-  const closeTabNow = useAppStore((s) => s.closeTabNow)
   const reopenTab = useAppStore((s) => s.reopenTab)
   const syncTabs = useAppStore((s) => s.syncTabsToRightTab)
   const embedNav = useAppStore((s) => s.embedNav)
@@ -713,14 +712,13 @@ export default function RightPanel() {
               且空白不会让任何断言变红（04-review F45/F46）。
 
               PR-10：被禁用/插件缺失时不渲染 provider，换成墓碑（原因 + 重新启用 + 移除标签）。
-              正常路径外面多了一层 **key=标签 id 的 SurfaceBoundary** —— 错误边界只包内容区
-              （标签条/收起钮/＋ 菜单都在它外面：崩一个面板不能让人没法切走）。key 是隔离的
-              唯一手段：没有它，A 标签崩了再切到 B，React 复用同一个 boundary 实例，把 A 的
-              错误页继续画给 B 看。
-              代价（如实记录）：boundary 换 key ⇒ children 跟着重挂，R06c 那条「切 web 标签时
-              内容原地复用」在这里不再成立。WebTab 的挂载只做 embedShow（视图在主进程池里，
-              重挂不重建 WebContentsView），但 DOM 层确实重建了一次。PR-11 若要拿回原地复用，
-              得把「按标签重置错误态」从 key 换成 boundary 内部一条显式 reset。 */}
+              正常路径外面多了一层 SurfaceBoundary —— 错误边界只包内容区（标签条/收起钮/＋ 菜单
+              都在它外面：崩一个面板不能让人没法切走）。
+              **隔离靠 tabId prop，不靠 key**：A 标签崩了切到 B，boundary 在 componentDidUpdate
+              里看到 tabId 变了就把错误态复位，B 立刻渲染自己的内容。为什么不挂 key={tab.id}：
+              key 一变 React 会重挂整棵 children —— 切 web 标签时 DOM 容器重建，R06c 的
+              「原地复用」（原生视图与页面状态靠容器不重挂）当场破功。这一条由探针 T2b 钉住
+              （同一 provider 组件的实例号在 a→b→a 之后必须不变）。 */}
           {activeTab && activeTab.kind !== 'file' && (
             activeUnavailable ? (
               <SurfaceTombstone
@@ -728,10 +726,10 @@ export default function RightPanel() {
                 title={tabTitle(activeTab)}
                 reason={activeUnavailable}
                 auto={getSurfaceHealth(activeTab.kind)?.auto === true}
-                onRemove={() => closeTabNow(activeTab.id)}
+                onRemove={() => closeTabs([activeTab.id])}
               />
             ) : (
-              <SurfaceBoundary key={activeTab.id} kind={activeTab.kind} title={tabTitle(activeTab)}>
+              <SurfaceBoundary tabId={activeTab.id} kind={activeTab.kind} title={tabTitle(activeTab)}>
                 <SurfaceHost kind={activeTab.kind} tab={activeTab} scope={scope} />
               </SurfaceBoundary>
             )
@@ -751,10 +749,10 @@ export default function RightPanel() {
                   title={tabTitle(activeTab)}
                   reason={activeUnavailable}
                   auto={getSurfaceHealth('file')?.auto === true}
-                  onRemove={() => closeTabNow(activeTab.id)}
+                  onRemove={() => closeTabs([activeTab.id])}
                 />
               ) : (
-                <SurfaceBoundary kind="file" title={tabTitle(activeTab)}>
+                <SurfaceBoundary tabId={activeTab.id} kind="file" title={tabTitle(activeTab)}>
                   <SurfaceHost kind="file" tab={activeTab} scope={scope} fallback={<FilePreviewTab tab={activeTab} />} />
                 </SurfaceBoundary>
               )}

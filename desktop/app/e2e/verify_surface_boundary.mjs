@@ -16,15 +16,18 @@
 //
 // 覆盖（每条都能被实现打死）：
 //   T1 第 1 次崩溃 → CrashCard；**标签条/收起钮仍在**（边界只包内容区）；切到别的标签正常（隔离）。
-//   T2 崩溃后切走再切回 → 重新渲染（boundary 按 tab.id 重置，不是永久错误页）。
+//   T2 崩溃后切走再切回 → 重新渲染（boundary 靠 tabId 变化复位错误态，不是永久错误页）。
+//   T2b 切标签**不重挂 children**（R06c 原地复用）：provider 组件实例号在 a→b→a 后不变。
 //   T3 连续 3 次崩溃 → 该标签变墓碑（data-unavailable="1"）/ getSurface 仍在 / listSurfaces 不含 /
 //      localStorage 里有它（kind·count·lastError·at·disabled 五字段）。
-//   T3c 禁用内置 kind → ＋ 菜单与空态能力面板都不再列出它（listSurfaces 与静态 ADDABLE_KINDS 两处）。
+//   T3c 禁用内置 kind → ＋ 菜单与空态能力面板都不再列出它；**注销** provider 时菜单仍然列出它
+//       （菜单只按「禁用」过滤，不按「是否注册」—— provider 漏注册有 panelFallback 兜底）。
 //   T4 连续性：崩 2 次 → 成功渲染一次（同 kind 的另一个标签）→ 再崩 1 次 **不能** 被禁用
 //      （证明 recordMountSuccess 真的把 count 归零）。
 //   T5 刷新页面（page.reload）后墓碑仍在（读的是 localStorage，不是内存）。
 //   T6 点「重新启用」→ provider 回到 listSurfaces、标签恢复正常渲染、localStorage 的 disabled 消失。
-//   T7 点「移除标签」→ 标签消失且**不触发确认框**（这是墓碑，不是有未保存内容的编辑器）。
+//   T7a 干净标签点「移除标签」→ 立刻消失、不弹确认框。
+//   T7b dirty 标签点「移除标签」→ 标签仍在 + 弹确认框 + 取消后脏标记还在（closeTabs 语义，不许静默丢内容）。
 //
 // 用法：cd desktop/app && node e2e/verify_surface_boundary.mjs
 // 退出码：全通过 0；任一断言失败 1；前置不满足（端口被占 / 探针服务没起来）2。
@@ -62,12 +65,13 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
   + '<script type="module" src="./main.tsx"></script></body></html>')
 
 fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
+import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import RightPanel from '../../src/components/RightPanel'
 // ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45）：少了这行 registry 是空的，
 // RightPanel 的 getSurface(kind)?.render(...) 恒走 ?? 兜底 —— N0 会用 __surfaces 当场戳穿。
 import '../../src/surfaces/builtin'
-import { registerSurface, getSurface, listSurfaces } from '../../src/surfaces/registry'
+import { getSurface, listSurfaces, registerSurface, unregisterSurface } from '../../src/surfaces/registry'
 import { useAppStore } from '../../src/store/useAppStore'
 import '../../src/index.css'
 
@@ -101,6 +105,18 @@ registerSurface({
   },
 })
 
+// 原地复用探针（R06c）：每**挂载**一次领一个自增实例号 —— useState 的惰性初值只在 mount
+// 时执行，所以「切标签后实例号不变」= children 没有被重挂。切 web 标签必须原地复用
+//（原生视图与页面状态才保得住），崩溃边界不能靠 key 换隔离把它们一起打死。
+function StableProbe({ tab }: { tab: { id: string } }) {
+  const [inst] = useState(() => {
+    const g = window as unknown as { __inst?: number }
+    g.__inst = (g.__inst ?? 0) + 1
+    return g.__inst
+  })
+  return <div className="probe-stable" data-inst={inst} data-tab={tab.id}>stable</div>
+}
+
 // 对照组：同一次会话里一个**不崩**的面板（隔离 / 切换 / 连续性都要它）。
 registerSurface({
   kind: 'plugin:ok',
@@ -109,6 +125,15 @@ registerSurface({
   order: 20,
   title: () => '健康面板',
   render: (ctx) => <div className="probe-ok" data-tab={ctx.tab.id} data-kind="plugin:ok">ok</div>,
+})
+
+registerSurface({
+  kind: 'plugin:stable',
+  namespace: 'plugin',
+  group: 'plugin',
+  order: 30,
+  title: () => '复用面板',
+  render: (ctx) => <StableProbe tab={ctx.tab} />,
 })
 
 useAppStore.setState({ workspace: '/mock/proj-auth' })
@@ -120,6 +145,8 @@ w.__surfaces = {
   hasGit: () => !!getSurface('git'),
   has: (k: string) => !!getSurface(k as never),
   list: () => listSurfaces().map((p) => p.kind),
+  // 注销也是生产函数：T3c 要用它证明「菜单不因 provider 没注册而变空」。
+  unregister: (k: string) => unregisterSurface(k as never),
 }
 w.__health = health ? {
   isDisabled: (k: string) => health!.isSurfaceDisabled(k as never),
@@ -129,6 +156,7 @@ w.__health = health ? {
 } : null
 w.__probe = {
   setBoom: (v: boolean) => { boomEnabled = v },
+  resetInst: () => { (window as unknown as { __inst?: number }).__inst = 0 },
   open: (kind: string, params?: Record<string, unknown>) =>
     useAppStore.getState().openTab({ kind, params } as never),
 }
@@ -262,6 +290,9 @@ try {
       emptyAdds: qa('.rtabs-empty-add').map((b) => b.getAttribute('data-kind')),
       dialog: !!q('.editor-confirm'),
       probeOk: qa('.probe-ok').map((x) => x.getAttribute('data-tab')),
+      // 原地复用：当前渲染出来的 provider 组件实例号（data-inst）与它服务的标签
+      stable: qa('.probe-stable').map((x) => ({ tab: x.getAttribute('data-tab'), inst: Number(x.getAttribute('data-inst')) })),
+      dirty: Object.keys(window.__store.getState().dirtyTabs || {}),
       storage,
       disabledList: window.__health ? window.__health.list() : null,
       isDisabled: window.__health ? window.__health.isDisabled('plugin:boom') : null,
@@ -283,6 +314,14 @@ try {
   }
   // 点标签条上的某个标签（真点击，不调 store 动作）
   const clickTab = async (kind, label) => click(`.rtabs .rtab[data-kind="${kind}"]`, label ?? `标签 ${kind}`)
+  // 同 kind 的多个标签只能按下标点（标题/kind 都一样）
+  const clickTabAt = async (i, label) => {
+    const loc = page.locator('.rtabs .rtab').nth(i)
+    if ((await loc.count()) === 0) { check(`[缺元素] ${label}`, false, `index ${i}`); return false }
+    await loc.click()
+    await settle()
+    return true
+  }
   const section = async (name, fn) => {
     console.log(name)
     try { await fn() } catch (e) { check(`${name.split(' ')[0]} 执行中断`, false, String(e?.message ?? e)) }
@@ -293,6 +332,7 @@ try {
   }
   const boom0 = (id, extra = {}) => plugin(id, 'plugin:boom', { boom: true, ...extra })
   const ok = (id) => plugin(id, 'plugin:ok')
+  const stable = (id) => plugin(id, 'plugin:stable')
 
   // —— N0 / N1：先证明探针走的是被测那条路（F45） ——
   console.log('N 探针自检')
@@ -353,6 +393,29 @@ try {
       v.probeOk.includes('b2'), JSON.stringify({ crash: v.crash, probeOk: v.probeOk }))
     check('T2 切回后没有残留的 CrashCard（错误态跟着标签，不跟着 RightPanel）',
       v.crash === null, JSON.stringify(v.crash))
+  })
+
+  // —— T2b：切标签**不重挂 children**（R06c 原地复用）——
+  // 判据是**实例号**：StableProbe 的 useState 惰性初值只在 mount 时跑一次，切标签若把
+  // children 重挂（例如 boundary 挂 key={tab.id}），实例号会一路变大。
+  await section('T2b 切标签原地复用：provider 组件实例不重挂（R06c）', async () => {
+    await resetHealth()
+    await page.evaluate(() => window.__probe.resetInst())
+    await seed([stable('s1'), stable('s2')], 's1')
+    await settle()
+    const a1 = (await view()).stable[0]
+    check('T2b 第一个标签渲染出 provider（实例号 = 1）', a1?.tab === 's1' && a1?.inst === 1, JSON.stringify(a1))
+    await clickTabAt(1, '第 2 个标签 s2')
+    const b = (await view()).stable[0]
+    check('T2b 切到同 kind 的另一个标签 → 内容跟着换（data-tab=s2）', b?.tab === 's2', JSON.stringify(b))
+    await clickTabAt(0, '第 1 个标签 s1（切回）')
+    const a2 = (await view()).stable[0]
+    // 每次运行都把实例号打出来：这条断言的价值全在「数值没变」，只写 ✅ 不写数等于没证据。
+    console.log(`  ℹ T2b 实例号：切前 s1=${a1?.inst} → 切到 s2=${b?.inst} → 切回 s1=${a2?.inst}`)
+    check('T2b **切走再切回，实例号不变**（children 原地复用，没有重挂）',
+      a2?.tab === 's1' && a2?.inst === a1?.inst, JSON.stringify({ 切前: a1, 切到s2: b, 切回: a2 }))
+    check('T2b 全程只有一个 provider 组件实例（不是每个标签各一个）',
+      b?.inst === a1?.inst, JSON.stringify({ 切前: a1, 切到s2: b }))
   })
 
   // —— T4（先做：会清空计数，不影响 T3 的「恰好 3 次」）——
@@ -463,6 +526,21 @@ try {
     await page.keyboard.press('Escape')
     await settle()
     check('T3c 重新启用后 listSurfaces() 里又有它', ((await view()).listKinds || []).includes('git'))
+
+    // 反向：**注销** provider 不等于「禁用」—— 菜单是静态能力清单，不该因此变空
+    //（provider 漏注册时 panelFallback 兜得住，F45；菜单静默少一项反而更难查）。
+    await page.evaluate(() => window.__surfaces.unregister('git'))
+    await settle()
+    const gone = await view()
+    check('T3c 注销 git → getSurface("git") 为空（注册表里真的没了）', gone.hasGitProvider === false,
+      String(gone.hasGitProvider))
+    check('T3c 注销 git → listSurfaces() 不含它', !(gone.listKinds || []).includes('git'), JSON.stringify(gone.listKinds))
+    await click('.rtabs-add', '＋ 新建标签（注销后）')
+    const afterUnreg = await view()
+    check('T3c **注销** git 之后 ＋ 菜单里仍然有它（菜单不按注册表过滤）',
+      afterUnreg.addMenuKinds.join(',') === 'activity,git,web', JSON.stringify(afterUnreg.addMenuKinds))
+    await page.keyboard.press('Escape')
+    await settle()
   })
 
   // —— T5：刷新后墓碑仍在（读 localStorage，不是内存） ——
@@ -507,25 +585,47 @@ try {
   })
 
   // —— T7：移除标签（墓碑不是编辑器：不走 dirty 确认框） ——
-  await section('T7 点「移除标签」→ 标签消失且不触发确认框', async () => {
+  // —— T7a：干净标签 → 点了就消失、不弹确认框（交互洁癖可以满足的那一半）——
+  await section('T7a 干净标签：点「移除标签」→ 立刻消失、不弹确认框', async () => {
     // 手动禁用（不是崩溃路径）→ 墓碑的原因文案应当是「已禁用」，不带「连续 3 次」。
     await page.evaluate(() => window.__health.disable('plugin:boom'))
-    await seed([boom0('b7'), ok('o7')], 'b7', { dirty: { b7: true } })
+    await seed([boom0('b7'), ok('o7')], 'b7', {})
     await settle()
     const v = await view()
-    check('T7 手动禁用 → 墓碑原因为 disabled', v.tomb?.reason === 'disabled', String(v.tomb?.reason))
-    check('T7 手动禁用的文案不说「连续 3 次」（与自动禁用区分）',
+    check('T7a 手动禁用 → 墓碑原因为 disabled', v.tomb?.reason === 'disabled', String(v.tomb?.reason))
+    check('T7a 手动禁用的文案不说「连续 3 次」（与自动禁用区分）',
       !!v.tomb && !v.tomb.why.includes('连续 3 次'), String(v.tomb?.why))
-    check('T7 移除前标签集里有 b7', v.ids.includes('b7'), JSON.stringify(v.ids))
+    check('T7a 移除前标签集里有 b7', v.ids.includes('b7'), JSON.stringify(v.ids))
     await click('.surface-tombstone-remove', '移除标签')
     const after = await view()
-    check('T7 点「移除标签」→ 该标签从标签条与标签集里消失',
+    check('T7a 点「移除标签」→ 该标签从标签条与标签集里消失',
       !after.ids.includes('b7') && !after.rtabs.some((r) => r.kind === 'plugin:boom'),
       JSON.stringify({ ids: after.ids, rtabs: after.rtabs.map((r) => r.kind) }))
-    check('T7 **没有弹确认框**（墓碑用 closeTabNow，不是 closeTab）', after.dialog === false, String(after.dialog))
-    check('T7 顺延到右邻居（剩下的标签仍正常渲染）',
+    check('T7a 干净标签**没有弹确认框**', after.dialog === false, String(after.dialog))
+    check('T7a 顺延到右邻居（剩下的标签仍正常渲染）',
       after.activeId === 'o7' && after.probeOk.includes('o7'),
       JSON.stringify({ activeId: after.activeId, probeOk: after.probeOk }))
+  })
+
+  // —— T7b：dirty 标签 → 数据安全优先：标签仍在 + 确认框出现 + 取消后脏标记还在 ——
+  // 墓碑的「移除标签」走 store.closeTabs([id])：干净的立刻关，脏的进确认队列。
+  // 用 closeTabNow 会**静默丢掉未保存内容** —— 这条断言就是拦它的。
+  await section('T7b dirty 标签：点「移除标签」→ 标签仍在 + 弹确认框（不静默丢内容）', async () => {
+    await page.evaluate(() => window.__health.disable('plugin:boom'))
+    await seed([boom0('b7d'), ok('o7d')], 'b7d', { dirty: { b7d: true } })
+    await settle()
+    check('T7b 移除前是 dirty 标签', (await view()).dirty.includes('b7d'), 'dirtyTabs 里没有 b7d')
+    await click('.surface-tombstone-remove', '移除标签（dirty）')
+    const v = await view()
+    check('T7b dirty 标签**没有被静默关掉**', v.ids.includes('b7d'), JSON.stringify(v.ids))
+    check('T7b 弹出了确认框', v.dialog === true, String(v.dialog))
+    // 确认框第一个按钮是「取消」（EditorConfirm 的 autoFocus）
+    await click('.editor-confirm-acts .editor-btn', '取消（确认框第一个按钮）')
+    const after = await view()
+    check('T7b 点取消后标签仍在、也没被降级成干净的', after.ids.includes('b7d') && after.dirty.includes('b7d'),
+      JSON.stringify({ ids: after.ids, dirty: after.dirty }))
+    check('T7b 取消后确认框关掉', after.dialog === false, String(after.dialog))
+    check('T7b 取消后墓碑仍在（面板仍然是禁用态）', after.tomb?.reason === 'disabled', String(after.tomb?.reason))
   })
 
   // —— T8：i18n —— 崩溃卡/墓碑在 en 下必须全英文（缺 key 会静默回退 zh） ——

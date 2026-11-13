@@ -2,8 +2,8 @@
 //
 // 三条不可退让的约束：
 //  1. **只包内容区**：标签条 / 收起钮 / ＋ 菜单在边界外面 —— 崩一个面板不能让人没法切走。
-//  2. **按标签隔离**：key 由调用方挂（RightPanel 里 `key={tab.id}`），A 标签崩了切到 B
-//     必须是一张新边界；否则 B 看到的是 A 的错误页（最容易漏的一条）。
+//  2. **按标签隔离**：A 标签崩了切到 B，B 不能看到 A 的错误页（最容易漏的一条）。
+//     手段是 **tabId prop 变化时复位错误态**，不是给边界挂 key —— 见 componentDidUpdate 的注释。
 //  3. **崩溃不白屏**：渲染 CrashCard（面板名 + err.message + 可折叠 stack + 重试 / 禁用）。
 //
 // 墓碑（unavailable）与崩溃卡放在同一个文件：两者都是「内容区的占位」，视觉与文案同源，
@@ -78,6 +78,14 @@ export function SurfaceTombstone({ kind, title, reason, auto, onRemove }: {
 
 interface Props {
   kind: SurfaceKind
+  /**
+   * 这个边界当前服务的标签 id。**换了标签就把错误态复位**（componentDidUpdate）。
+   *
+   * 为什么不是 `key={tabId}`：key 一变 React 会把**整棵 children 重挂** —— 切 web 标签时
+   * DOM 容器跟着重建，R06c 的「切标签原地复用」（原生视图与页面状态靠的就是容器不重挂）
+   * 当场破功。tabId 变化只清错误态，children 是原地更新成新标签的内容，组件实例不换。
+   */
+  tabId: string
   /** 面板名（与标签条同源，由 RightPanel 用 tabTitle 传入） */
   title: string
   children?: ReactNode
@@ -104,7 +112,18 @@ export class SurfaceBoundary extends Component<Props, State> {
     if (!this.state.err) recordMountSuccess(this.props.kind)
   }
 
-  componentDidUpdate() {
+  componentDidUpdate(prevProps: Props, prevState: State) {
+    // 换标签 ⇒ **上一条标签留下的**错误页必须让位（否则 B 看到的是 A 的崩溃原因）。
+    // 只清 state.err：不换 key、不重挂 children —— 见 Props.tabId 的注释（R06c）。
+    //
+    // 判据必须是 `prevState.err`（这次更新**之前**就已经在错误态），不能只看 `this.state.err`：
+    // 「切到 b4a」和「b4a 在这一帧崩了」是**同一个 commit** —— 用 this.state.err 判断会把刚崩出来
+    // 的新错误当成旧标签的残留清掉，于是 children 再渲染一次、再崩一次，一次崩溃记两笔
+    //（PR-10 实测踩过：连崩 3 次的用例在第 1 次就数到 2，直接误禁用）。
+    if (prevProps.tabId !== this.props.tabId && prevState.err) {
+      this.setState({ err: null })
+      return
+    }
     // retry 后重新渲染成功也要归零：光靠 didMount 覆盖不到「同一个标签原地重试成功」。
     if (!this.state.err) recordMountSuccess(this.props.kind)
   }
