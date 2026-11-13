@@ -1842,7 +1842,28 @@ button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outl
   outline: none;
 }
 .hub-assign-title:focus { border-color: var(--accent-border); }
-.hub-assign-form textarea { grid-column: 1 / 2; }
+.hub-assign-form textarea {
+  grid-column: 1 / 2;
+  width: 100%;
+  height: auto;
+  min-height: 34px;
+  max-height: 140px;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  /* 用 inset shadow 画 1px 边框：不占布局高度，auto-grow 的 3 行正好 78px。 */
+  box-shadow: inset 0 0 0 1px var(--border);
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 22px;
+  resize: none;
+  overflow-y: auto;
+}
+.hub-assign-form textarea::placeholder { color: var(--text-3); }
+.hub-assign-form textarea:focus { outline: none; box-shadow: inset 0 0 0 1px var(--accent-border); }
 .hub-assign-send { grid-column: 2 / 3; align-self: end; }
 
 /* —— 自动对话状态条（§7.5.4）—— */
@@ -2633,6 +2654,10 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .event-flow .agent { white-space: nowrap; }
 .hub-demo .event-flow .luna-avatar { flex: 0 0 auto; display: inline-flex; }
 .hub-demo .event-who { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+/* workspace 目标结果卡的归属位置（B1）：「<ws> / <sid>」一行。真实路径可以很长，
+   单行省略而不是折行 —— 390 下不能把卡片撑出横向滚动（task id 已在 ≤420 收起）。 */
+.hub-demo .event-where { min-width: 0; max-width: 100%; overflow: hidden; }
+.hub-demo .event-where code { display: block; font: 10px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hub-demo .event-card .event-body { margin: 8px 0 0 38px; font-size: 11.5px; line-height: 1.55; color: var(--muted); }
 .hub-demo .event-card .event-error { margin: 8px 0 0 38px; font-size: 11.5px; color: var(--danger); }
 .hub-demo .event-card .event-actions { display: flex; align-items: center; gap: 6px; margin: 9px 0 0 38px; flex-wrap: wrap; }

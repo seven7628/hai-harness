@@ -129,6 +129,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const [assignTarget, setAssignTarget] = useState('')
   const [assignTitle, setAssignTitle] = useState('')
   const [assignInstruction, setAssignInstruction] = useState('')
+  // 派任务指令也是多行草稿：同样的自动增高，避免被 chat textarea 的样式误伤。
+  useComposerAutoGrow(assignTextareaRef, assignInstruction)
   // 时间线滚动 + 触发消息高亮（B1/B6）
   const listRef = useRef<HTMLDivElement>(null)
   // 会话视图根节点：--hub-scrollbar-w 写在这里，composer 外层继承后补右内边距。

@@ -233,8 +233,8 @@
   .hub-demo .composer-inner{max-width:760px;margin:0 auto}
   .hub-demo .composer{border:1px solid var(--border-strong);border-radius:19px;background:var(--surface);display:flex;align-items:flex-end;gap:5px;padding:8px 8px 8px 9px;box-shadow:0 12px 34px rgba(0,0,0,.16),inset 0 1px 0 rgba(255,255,255,.035)}
   .hub-demo .composer:focus-within{border-color:#5a5346}
-  .hub-demo .composer textarea{flex:1;min-width:0;height:34px;min-height:34px;max-height:100px;resize:none;background:none;border:0;outline:none;padding:6px 2px;font-size:13.5px;line-height:22px;box-sizing:border-box;overflow-y:hidden;color:var(--text)}
-  .hub-demo .composer textarea::placeholder{color:var(--muted-2)}
+  .hub-demo .composer > textarea{flex:1;min-width:0;height:34px;min-height:34px;max-height:100px;resize:none;background:none;border:0;outline:none;padding:6px 2px;font-size:13.5px;line-height:22px;box-sizing:border-box;overflow-y:auto;color:var(--text)}
+  .hub-demo .composer > textarea::placeholder{color:var(--muted-2)}
   .hub-demo .composer .icon-btn{width:28px;height:28px;margin-bottom:3px}
   .hub-demo .composer .send-btn{margin-bottom:1.5px}
   .hub-demo .send-btn{width:31px;height:31px;border-radius:50%;background:var(--text);color:var(--bg);display:grid;place-items:center;flex:0 0 auto;box-shadow:0 2px 8px rgba(0,0,0,.22)}
