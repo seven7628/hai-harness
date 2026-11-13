@@ -256,6 +256,32 @@ func (c *ConversationController) InterruptRunningDeliveries(group GroupID, reaso
 	return n
 }
 
+// SkipWake 把指定 wake 记成 skipped（预算门/护栏命中）并移出队列。
+// 返回 false 表示这条已经不在排队（已投/已终结/被换代清掉），调用方无需再管。
+func (c *ConversationController) SkipWake(group GroupID, wakeID string, reason string, at time.Time) bool {
+	if c == nil || wakeID == "" {
+		return false
+	}
+	now := c.clockAt(at)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conv := c.convs[group]
+	if conv == nil || conv.deliveries == nil {
+		return false
+	}
+	d := conv.deliveries.get(wakeID)
+	if d == nil || d.Status.Terminal() {
+		return false
+	}
+	c.removeQueuedLocked(conv, wakeID)
+	d.Status = DeliverySkipped
+	d.Reason = reason
+	d.ReadyAt = nil
+	d.UpdatedAt = now
+	conv.updatedAt = now
+	return true
+}
+
 // Deliveries 返回该群投递账本的快照（旧 → 新）。
 func (c *ConversationController) Deliveries(group GroupID) []Delivery {
 	if c == nil {

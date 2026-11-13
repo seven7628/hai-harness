@@ -246,11 +246,20 @@ func (m *manager) runHubConversationPass(gid agenthub.GroupID, wakes []agenthub.
 	if cur.Status == agenthub.ConversationStopped {
 		return
 	}
+	// 预跑预算门（P6-03）：一次 pass 只读一次群/成本索引，逐 target 判三级日预算。
+	// 预算不足的目标**不启动 run**（账本记 skipped(budget)），其他目标照跑。
+	g := m.loadHubGroup(gid)
 	deliverable := make([]agenthub.Wake, 0, len(wakes))
 	for _, w := range wakes {
 		if w.ConversationID != "" && w.ConversationID != cur.ID {
 			// 旧 generation 的 wake：丢弃（账本里会记 skipped(stale)）。
 			m.hubAlertf("group_conversation_stale_wake", "群 %s 唤醒 %s 属于已结束的对话，已丢弃", gid, w.Target)
+			continue
+		}
+		if ok, reason := m.hubConversationBudget(g, w.Target); !ok {
+			if ctrl.SkipWake(gid, w.ID, agenthub.DeliveryReasonBudget, time.Time{}) {
+				m.notifyHubBudgetBlocked(gid, reason)
+			}
 			continue
 		}
 		deliverable = append(deliverable, w)
@@ -330,6 +339,93 @@ func hubWakeRetryDelay(ctrl *agenthub.ConversationController, gid agenthub.Group
 		return hubWakeRetryMax
 	}
 	return d
+}
+
+// loadHubGroup 读群元数据（预算门用；读不到就返回 nil，由调用方 fail-open 放行）。
+func (m *manager) loadHubGroup(gid agenthub.GroupID) *agenthub.Group {
+	if m == nil || gid == "" {
+		return nil
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		return nil
+	}
+	g, err := st.LoadGroup(context.Background(), gid)
+	if err != nil || g == nil || g.Deleted {
+		return nil
+	}
+	return g
+}
+
+// hubConversationBudget 是**预跑预算门**（P6-03）：run 启动之前判三级日预算
+// （agent / group / global）。预算不足 → 不启动 run，账本记 skipped(budget)。
+//
+// 为什么要在启动前判：hubBudgetCheck 是 LLMEnd 处的**硬停**，它只能阻止继续烧，
+// 挡不住「已经开跑一轮」。11 个成员同时被 @ 时，跑完再停已经花掉了 11 轮钱。
+//
+// 读不到档案/索引时 fail-open（放行）：预算门不能因为一次读失败把群聊卡死；
+// 真正的兜底仍是 LLMEnd 硬停与 Guard.Check。
+func (m *manager) hubConversationBudget(g *agenthub.Group, agentID agenthub.AgentID) (bool, string) {
+	if m == nil || g == nil || agentID == "" {
+		return true, ""
+	}
+	st, err := m.hubStore()
+	if err != nil || st == nil {
+		return true, ""
+	}
+	p, _, err := m.hubLoadAgent(string(agentID))
+	if err != nil || p == nil {
+		return true, ""
+	}
+	limits := agenthub.GuardLimits{
+		DailyBudgetUSD:       p.Policy.DailyBudgetUSD,
+		GroupDailyBudgetUSD:  g.Policy.DailyBudgetUSD,
+		GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
+	}
+	if limits.DailyBudgetUSD <= 0 && limits.GroupDailyBudgetUSD <= 0 && limits.GlobalDailyBudgetUSD <= 0 {
+		return true, "" // 三级都不限额：不必读成本索引
+	}
+	agentDay, groupDay, globalDay := st.DailyCost(agentID, g.ID, time.Now().UTC())
+	if over, msg := limits.OverDailyBudget(agentDay, groupDay, globalDay); over {
+		return false, msg
+	}
+	return true, ""
+}
+
+// notifyHubBudgetBlocked 预算门命中时写一条系统消息（按原因去重）+ 告警事件。
+// 人需要知道「为什么没人被叫醒」，而不是只看到队列没动。
+func (m *manager) notifyHubBudgetBlocked(gid agenthub.GroupID, reason string) {
+	if m == nil {
+		return
+	}
+	key := "budget|" + reason
+	m.hubConvMu.Lock()
+	if m.hubConvNotified == nil {
+		m.hubConvNotified = map[agenthub.GroupID]string{}
+	}
+	if m.hubConvNotified[gid] == key {
+		m.hubConvMu.Unlock()
+		return
+	}
+	m.hubConvNotified[gid] = key
+	m.hubConvMu.Unlock()
+
+	text := "预算不足，本轮没有启动：" + reason
+	st, err := m.hubStore()
+	if err != nil {
+		return
+	}
+	msg := &agenthub.Message{
+		GroupID: gid, Kind: agenthub.KindSystem,
+		Sender: agenthub.Sender{Kind: agenthub.SenderSystem}, Text: text,
+	}
+	seq, err := agenthub.AppendGroupMessage(context.Background(), st, msg)
+	if err != nil {
+		m.hubAlertf("group_conversation_notice_failed", "群 %s 预算系统消息写入失败：%v", gid, err)
+		return
+	}
+	m.emitHubGroupMessage(gid, seq, msg)
+	m.hubAlertf("group_conversation_budget", "群 %s 预算不足，本轮未启动：%s", gid, reason)
 }
 
 // hubRetryableWakeError 判定「可重试」的投递错误：provider 限流（429）与上游瞬时

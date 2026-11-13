@@ -18,6 +18,7 @@ import (
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/provider"
 )
 
 // hubGroupAssembleHook 仅测试用：群会话装配在**持有 agent 锁**、createIn 之前的确定性
@@ -449,6 +450,56 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	return d, nil
 }
 
+// requeueHubWakeOnRateLimit run 因 429 结束时把这条投递退回队列（P6-03）。
+//
+// 为什么要重建 Wake：账本只存协议字段，重投时群会话要拿正文当触发消息。正文从群
+// 日志按 TriggerSeq 取回（一条消息，成本可忽略）；取不到就退回占位文案，快照本身
+// 仍然完整 —— 宁可用占位重试，也不要丢掉这一轮。
+func (m *manager) requeueHubWakeOnRateLimit(spec *hubSessionSpec, wake *agenthub.GroupWakeHeader) {
+	if m == nil || spec == nil || wake == nil || wake.WakeID == "" {
+		return
+	}
+	gid, aid := spec.Scope.GroupID, spec.Agent.ID
+	ctrl := m.hubConversation()
+	d, ok := ctrl.Delivery(gid, wake.WakeID)
+	if !ok || d.Status.Terminal() {
+		return
+	}
+	w := agenthub.Wake{
+		ID: d.WakeID, GroupID: gid, ConversationID: d.ConversationID,
+		Sender: d.Sender, Human: d.Human, Target: aid,
+		Text:  m.hubTriggerText(gid, d.TriggerSeq),
+		Depth: d.Depth, Turn: d.Turn, TriggerSeq: d.TriggerSeq, RoundID: d.RoundID,
+	}
+	delay := hubWakeRetryDelay(ctrl, gid, w)
+	if !ctrl.RequeueDelivery(w, agenthub.DeliveryReasonRateLimit, time.Now().Add(delay), time.Time{}) {
+		return
+	}
+	m.emitHubConversation(gid, ctrl.View(gid))
+	m.scheduleHubConversationTimer(gid, delay)
+}
+
+// hubTriggerText 取群日志里某条消息的正文（重投 429 唤醒时重建触发文本用）。
+func (m *manager) hubTriggerText(gid agenthub.GroupID, seq int64) string {
+	if m == nil || gid == "" || seq <= 0 {
+		return ""
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		return ""
+	}
+	msgs, err := st.ReadMessages(context.Background(), gid, 0, 500)
+	if err != nil {
+		return ""
+	}
+	for _, msg := range msgs {
+		if msg.Seq == seq {
+			return msg.Text
+		}
+	}
+	return ""
+}
+
 // finishHubReply 根 AgentEnd 的统一收尾：DM 写 DM 索引，群写 final group message。
 //
 // segs 是按 LLM 轮次（RequestId）分段的正文（已由 hubDeltaSink.finish 收口并
@@ -495,6 +546,13 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, ae *ev
 		m.hubAlertf("group_round_mismatch",
 			"群回复 round 归属不匹配：wake=%s/%s spec=%s/%s",
 			wake.GroupID, wake.AgentID, spec.Scope.GroupID, spec.Agent.ID)
+		return
+	}
+	// P6-03：这一轮因**限流**（provider 429，重试耗尽）结束 —— 不写 final、不标
+	// failed：把这条投递退回队列 + 退避，退避到期后重投同一条 wake id。目标不是
+	// 坏掉，只是暂时被上游按住；把 11 并发里的 3 条标 failed 才是真丢消息。
+	if ae.FinishReason == core.FinishReasonError && ae.ErrorKind == provider.ErrorKindRateLimit {
+		m.requeueHubWakeOnRateLimit(spec, wake)
 		return
 	}
 	// 智能体任务批次（hub_task 绑定）：结果由群内 task_result 卡承载（§6.7.1/§6.7.9），

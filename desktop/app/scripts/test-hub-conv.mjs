@@ -139,6 +139,8 @@ const eq = (got, want, m) => {
   eq(conv.deliveryLabel({ target: 'agt_a', status: 'failed', reason: 'boom' }, names),
     'A 失败：boom', '未知原因码原样显示')
   eq(conv.deliveryReasonText(''), '', '空原因 → 空文案')
+  eq(conv.deliveryReasonText('budget'), '预算不足，未启动', '预算门的可见文案（P6-03）')
+  eq(conv.deliveryReasonText('rate_limit'), '上游限流，退避重试', '429 退避的可见文案')
   const cid = 'conv_1'
   const sum = conv.deliverySummary({ deliveries: [
     { target: 'agt_a', status: 'running', turn: 1, conversation_id: cid },

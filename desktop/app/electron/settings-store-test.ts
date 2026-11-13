@@ -388,6 +388,21 @@ test('已知段局部合并：只改 patch 提到的叶子，同段其它字段�
   }
 })
 
+test('P6-03：agent.max_concurrent_provider_calls 可写、越界被拒（provider 信号量）', () => {
+  const raw: JsonObject = { schema_version: 2 }
+  const ok = applySettingsPatch(raw, { agent: { max_concurrent_provider_calls: 4 } })
+  assert.ok(ok.ok)
+  if (!ok.ok) return
+  assert.deepEqual(ok.raw.agent, { max_concurrent_provider_calls: 4 })
+  assert.deepEqual(explicitPathsOf(ok.raw), ['agent.max_concurrent_provider_calls'])
+  // 0 = 显式不限，是合法值（不是「缺省」）。
+  const zero = applySettingsPatch(ok.raw, { agent: { max_concurrent_provider_calls: 0 } })
+  assert.ok(zero.ok)
+  // 65 超上限：拒绝而不是静默钳制（用户要能看见自己的配置没生效）。
+  const bad = applySettingsPatch(ok.raw, { agent: { max_concurrent_provider_calls: 65 } })
+  assert.equal(bad.ok, false)
+})
+
 test('renderer 的 {...cur} 形状（undefined 字段 / bridge 专有字段）不会被误拒', () => {
   // 设置面板的 patch 普遍是 `{...cur, 目标键}`：cur 来自 settingsGet（读侧并集），
   // 可能带 undefined 字段与桥侧专有字段。它们必须被当作「未提供」，而不是未知键/坏值。

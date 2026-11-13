@@ -270,6 +270,9 @@ export const SETTINGS_SCHEMA: Record<string, FieldKind> = {
       // bridge 侧已有、UI 未暴露的字段：放行以免「手写过它 → 设置面板改 reminder_rounds
       // 时整条 patch 被拒」。0 = 关闭自动摘离。
       async_promote_after_seconds: { t: 'int', min: 0 },
+      // P6-03：provider 并发信号量上限（0 = 不限）。群聊 11 并发时把它设成 4~8
+      // 可以显著减少 429；bridge 侧读 loadAgentSettings().providerConcurrency()。
+      max_concurrent_provider_calls: { t: 'int', min: 0, max: 64 },
     },
   },
   sandbox: {

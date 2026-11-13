@@ -267,6 +267,10 @@ func (m *manager) hubLoopOptions(ws *workspaceRuntime, sid string, spec *hubSess
 	opts := []agents.Option{
 		agents.WithProvider(sameProvider),
 		agents.WithProviderName(p.Provider),
+		// P6-03：provider 并发信号量（进程级共享）。群聊 11 并发 run 同时打到上游会
+		// 成片 429；这个闸门限制的是「同时几个上游请求」，与调度器「同时几个 run」
+		// 是两层。未配置 = 不限（旧行为）。
+		agents.WithProviderSemaphore(m.hubProviderSemaphore()),
 		agents.WithModel(p.Model),
 		agents.WithToolEngine(eng),
 		agents.WithBaseSystemPrompt(""), // L0 关闭（D17）：显式空串，否则内核补 DefaultSystemPrompt
@@ -300,6 +304,19 @@ func (m *manager) hubLoopOptions(ws *workspaceRuntime, sid string, spec *hubSess
 // buildHubLoop 按 Profile 装配智能体的 AgentLoop。
 func (m *manager) buildHubLoop(ws *workspaceRuntime, sid string, spec *hubSessionSpec, eng *tools.Engine) *agents.AgentLoop {
 	return agents.NewAgentLoop(m.hubLoopOptions(ws, sid, spec, eng)...)
+}
+
+// hubProviderSemaphore 进程级 provider 并发闸门（P6-03）。所有 hub loop 共享同一个
+// 实例，所以它是「整个 Hub 同时打上游的请求数」上限，不是每会话一份。
+// 懒建一次：settings.json 改了要重启生效（与首字预算等同口径）。
+func (m *manager) hubProviderSemaphore() *agents.ProviderSemaphore {
+	if m == nil {
+		return nil
+	}
+	m.hubProvSemOnce.Do(func() {
+		m.hubProvSem = agents.NewProviderSemaphore(loadAgentSettings().providerConcurrency())
+	})
+	return m.hubProvSem
 }
 
 // hubSessionID 确定性会话 ID（方案 §6.1.4）：重启后直接按同一个 ID 冷恢复，

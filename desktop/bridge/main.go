@@ -1412,6 +1412,9 @@ type manager struct {
 	// hubConvDispatch 按群串行化自动对话的「取 wake → 投递 → 记账」与停止/人类插话（B2）。
 	hubConvDispatch hubConvDispatchGate
 	hubConvNotified map[agenthub.GroupID]string
+	// hubProvSem 是进程级 provider 并发信号量（P6-03，懒建一次）；所有 hub loop 共享。
+	hubProvSem     *agents.ProviderSemaphore
+	hubProvSemOnce sync.Once
 	// hubUnpricedWarned 每个智能体只告警一次「用量无价，预算无法计入」（P2.5-04）。
 	hubUnpricedWarned map[agenthub.AgentID]bool
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
