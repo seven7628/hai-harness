@@ -48,6 +48,10 @@ type Config struct {
 	// 全局兜底（旧调用兼容）。
 	ProviderName string
 
+	// ProviderSem 限制同时进行的上游调用数（P6-03）。nil = 不限（默认）。
+	// 进程级共享：bridge 把同一个实例注入所有 loop，11 并发 run 的请求总闸门。
+	ProviderSem *ProviderSemaphore
+
 	// 运行边界
 	MaxIterations int // 单次运行的最大轮数（防失控护栏）；0 = 不限制，
 	// 失控兜底交给成本预算（Session WithMaxCost）或外部取消
@@ -1919,6 +1923,14 @@ func llmErrorKind(ac *AgentContext, err error) string {
 //   - 流内：**不限总时长**（长 reasoning / 大文档生成不受切）。
 //   - LLMTimeout（Config）可选整轮挂死兜底：>0 时生效；bridge 装配传 0。
 func (a *AgentLoop) streamOnce(ac *AgentContext, r *roundResult) (bool, error) {
+	// P6-03：provider 并发信号量。**在首字看门狗之前**排队 —— 等槽位的时间不是
+	// 「上游无响应」，不该计入首字预算（否则并发被限流时会成片误报首字超时）。
+	if sem := a.cfg.ProviderSem; sem != nil {
+		if err := sem.Acquire(ac.ctx); err != nil {
+			return false, err
+		}
+		defer sem.Release()
+	}
 	streamCtx := ac.ctx
 	streamCancel := func() {}
 	if a.cfg.LLMTimeout > 0 {

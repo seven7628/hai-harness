@@ -48,6 +48,11 @@ type agentSettings struct {
 	MaxSubagents        int `json:"max_subagents"`
 	MaxExploreSubagents int `json:"max_explore_subagents"`
 
+	// MaxConcurrentProviderCalls 同时打到上游的请求数上限（P6-03 provider 信号量）。
+	// 缺失/<=0 = 不限（保持旧行为）；群聊 11 并发时把它设成 4~8 可以显著减少 429。
+	// 指针字段：0 与「没写」都要能表达（0 = 显式不限）。
+	MaxConcurrentProviderCalls *int `json:"max_concurrent_provider_calls,omitempty"`
+
 	// CompressThreshold 自动压缩触发阈值（占上下文窗口比例，0.8 = 80%）。
 	// 缺失/≤0 = 用 codeAgentCompressThreshold 默认值（用户未配置时行为不变）。
 	// 用**指针**字段承载「未配置」语义：0.0 本身不是合法阈值（等于永不压缩），
@@ -163,6 +168,22 @@ func (s agentSettings) maxExploreSubagents() int {
 		return subagent.DefaultConcurrency
 	}
 	return s.MaxExploreSubagents
+}
+
+// providerConcurrency 生效的 provider 并发上限（<=0 = 不限）。上限 64：再大就等于
+// 不限，还会掩盖配置错误。
+func (s agentSettings) providerConcurrency() int {
+	if s.MaxConcurrentProviderCalls == nil {
+		return 0
+	}
+	n := *s.MaxConcurrentProviderCalls
+	if n <= 0 {
+		return 0
+	}
+	if n > 64 {
+		return 64
+	}
+	return n
 }
 
 func loadAgentSettings() agentSettings {

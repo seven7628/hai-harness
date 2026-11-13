@@ -197,7 +197,6 @@ func (m *manager) hubGroupUpdate(c command) {
 		OwnerAgentID *agenthub.AgentID `json:"owner_agent_id"`
 		Policy       *struct {
 			Mode             *string  `json:"mode"`
-			MaxParallelRuns  *int     `json:"max_parallel_runs"`
 			MaxHandoffDepth  *int     `json:"max_handoff_depth"`
 			MaxTurnsPerHuman *int     `json:"max_turns_per_human"`
 			MaxMentions      *int     `json:"max_mentions_per_message"`
@@ -220,9 +219,7 @@ func (m *manager) hubGroupUpdate(c command) {
 		if pp.Mode != nil {
 			next.Policy.Mode = *pp.Mode
 		}
-		if pp.MaxParallelRuns != nil {
-			next.Policy.MaxParallelRuns = *pp.MaxParallelRuns
-		}
+		// max_parallel_runs 已删除（P6-02/D1）：并发 = 本轮目标数，不再接受该旋钮。
 		if pp.MaxHandoffDepth != nil {
 			next.Policy.MaxHandoffDepth = *pp.MaxHandoffDepth
 		}
@@ -694,22 +691,32 @@ func (m *manager) hubGroupSend(c command) {
 	unlockConv := m.hubConvDispatch.lock(g.ID)
 	// 人类消息**总是**开启新对话（清队列/计数），即使这条消息没有 @ 任何人 ——
 	// 「先停一下」这类插话必须能打断自动接龙（§6.5.6 规则 1/5）。
-	_, turn := m.beginHubConversationWithinGate(g, seq, len(round.Targets))
+	_, _ = m.beginHubConversationWithinGate(g, seq, len(round.Targets))
 	// 无 @ 只写日志（N-1）：不产生 hub_round，否则前端会误报「无人被唤醒」。
-	var wakeErrors []string
+	var humanWakes []agenthub.Wake
 	if routed != nil {
 		m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
-		// 首轮目标仍然**并行**唤醒：人叫醒几个人不该排队（§6.5.6 规则 2）。
+		// 人类首轮**入队**（在闸门内，与换代同一个临界区），投递交给闸门外的统一
+		// 调度器：人类与 agent 的 wake 走同一条路径，并发 = 本轮目标数（P6-02）。
 		// 先落日志/回执，再唤醒；唤醒失败不能把已写入的群消息回滚（人已经看到了）。
-		wakeErrors = m.wakeGroupRound(g, round, msg, 1, turn)
-		for _, we := range wakeErrors {
-			m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
+		if wakes, oerr := m.offerHumanRound(g, round, msg, 1); oerr != nil {
+			m.hubAlertf("group_conversation_offer_failed", "群 %s 人类首轮入队失败：%v", g.ID, oerr)
+		} else {
+			humanWakes = wakes
 		}
 	}
 	unlockConv()
+	// 调度器自己会取闸门，所以必须放在 unlockConv 之后（否则自死锁）。
+	// P6-01：返回每个 target 的投递记录 —— 忙的留队（queued），不是「唤醒失败」。
+	var deliveries []agenthub.Delivery
+	if len(humanWakes) > 0 {
+		deliveries = m.wakeGroupRound(g, humanWakes)
+	}
+	// 全部目标都被护栏跳过（例如队列已满）→ waiting_human + 一条说明。
+	m.notifyHubConversationWaiting(g.ID, m.hubConversationView(g.ID))
 	respData := map[string]any{"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets}
-	if len(wakeErrors) > 0 {
-		respData["wake_errors"] = wakeErrors
+	if len(deliveries) > 0 {
+		respData["deliveries"] = deliveries
 	}
 	m.resp(c, true, "", respData)
 }

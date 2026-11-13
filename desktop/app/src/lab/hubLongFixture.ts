@@ -131,7 +131,7 @@ export function buildHubLongFixture(): HubLongFixture {
     name: '长会话性能群',
     owner_agent_id: 'ag_alice',
     members: AGENTS.map((a) => ({ agent_id: a.id, role: a.id === 'ag_alice' ? 'owner' : 'member' })),
-    policy: { mode: 'auto', max_parallel_runs: 3, daily_budget_usd: 30, max_mentions_per_message: 3 },
+    policy: { mode: 'auto', daily_budget_usd: 30, max_mentions_per_message: 3 },
     created_at: at(0),
   }
 

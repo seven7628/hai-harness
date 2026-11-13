@@ -307,7 +307,6 @@ export interface HubGroupMember {
 
 export interface HubGroupPolicy {
   mode?: string
-  max_parallel_runs?: number
   max_handoff_depth?: number
   max_turns_per_human?: number
   max_mentions_per_message?: number
@@ -384,11 +383,50 @@ export interface HubConversation {
   max_depth?: number
   queue_len?: number
   pair_limit?: number
-  /** 键是 `from→to`（Go 的 ConversationPairKey）。 */
+  /** 键是**无序** `a↔b`（Go 的 ConversationPairKey，P6-04）。 */
   pair_count?: Record<string, number>
+  /** pair 计数的滚动窗口（毫秒，默认 10 分钟）。 */
+  pair_window_ms?: number
+  /** 最热那一对的最早过期时刻（「约 N 分钟后自动恢复」的数据源）。 */
+  pair_reset_at?: string
+  /** 空闲重置阈值（毫秒，默认 30 分钟）。 */
+  idle_reset_ms?: number
+  /** 单轮 run 上限（毫秒，默认 10 分钟）。 */
+  run_timeout_ms?: number
+  /** 待投递队列上限（默认 200）。 */
+  max_pending_wakes?: number
   cooldown_ms?: number
   last_wake_at?: string
   stop_reason?: string
   started_at?: string
+  updated_at?: string
+  /** 最近一轮的投递账本（P6-01）：每个 target 一条，见 HubDelivery。 */
+  deliveries?: HubDelivery[]
+}
+
+/**
+ * 投递账本的单目标状态（P6-01，Go 的 agenthub.Delivery）。
+ * queued：排队等目标空闲；running：已交给目标会话；done：这一轮收尾；
+ * skipped：护栏/停止/换代有意不跑（带 reason）；failed：投递出错（带 reason）。
+ */
+export interface HubDelivery {
+  wake_id?: string
+  conversation_id?: string
+  group_id?: string
+  target?: string
+  sender?: string
+  human?: boolean
+  depth?: number
+  turn?: number
+  trigger_seq?: number
+  round_id?: string
+  status?: 'queued' | 'running' | 'done' | 'skipped' | 'failed' | string
+  /** 原因码：target_busy / rate_limit / pair_limit / depth_limit / budget / queue_full / stale_conversation / ... */
+  reason?: string
+  /** 同一件事的人话说明（含「跟谁、几次、窗口多长」）。 */
+  note?: string
+  attempts?: number
+  ready_at?: string
+  enqueued_at?: string
   updated_at?: string
 }

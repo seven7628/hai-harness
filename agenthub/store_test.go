@@ -29,7 +29,7 @@ func testGroup() *Group {
 		Name:         "测试群",
 		OwnerAgentID: "ag_test",
 		Members:      []Member{{AgentID: "ag_test", Role: RoleOwner, JoinedAt: testTime()}},
-		Policy:       GroupPolicy{Mode: GroupModeAsk, MaxParallelRuns: 3},
+		Policy:       GroupPolicy{Mode: GroupModeAsk},
 		Pinned:       true,
 		CreatedAt:    testTime(),
 		UpdatedAt:    testTime(),

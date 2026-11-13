@@ -356,7 +356,12 @@ type bridgeSession struct {
 	// hubWakeDepth/hubWakeTurn 是 hubGroupWake.Depth/Turn 的原子镜像（P3b-04）：
 	// group_say 在工具 goroutine 里要算「下一跳深度」，不能直接读 emit 独占的指针。
 	hubWakeDepth atomic.Int64
-	hubWakeTurn  atomic.Int64
+	// hubWakeConvMu/hubWakeConvID 是 hubGroupWake.ConversationID 的镜像（P6-04）：
+	// group_say 要用「发起者那一轮所属的对话 id」去校验换代路由，而工具 goroutine
+	// 不能直接读 hubGroupWake（emit 线程会改它）。
+	hubWakeConvMu sync.Mutex
+	hubWakeConvID string
+	hubWakeTurn   atomic.Int64
 	// hubGroupBusy 该群会话已投递但尚未 AgentEnd 的唤醒。忙时不投第二个快照，
 	// 避免两个 round 共用一次 AgentEnd。
 	hubGroupBusy atomic.Bool
@@ -1197,10 +1202,32 @@ func (bs *bridgeSession) setHubGroupWake(h *agenthub.GroupWakeHeader) {
 	if h == nil {
 		bs.hubWakeDepth.Store(0)
 		bs.hubWakeTurn.Store(0)
+		bs.setHubWakeConvID("")
 		return
 	}
 	bs.hubWakeDepth.Store(int64(h.Depth))
 	bs.hubWakeTurn.Store(int64(h.Turn))
+	bs.setHubWakeConvID(h.ConversationID)
+}
+
+// setHubWakeConvID 写「当前 run 所属对话 id」镜像（P6-04）。
+func (bs *bridgeSession) setHubWakeConvID(id string) {
+	if bs == nil {
+		return
+	}
+	bs.hubWakeConvMu.Lock()
+	bs.hubWakeConvID = id
+	bs.hubWakeConvMu.Unlock()
+}
+
+// hubWakeConversationID 读当前 run 所属对话 id（空 = 未知/人类首轮）。
+func (bs *bridgeSession) hubWakeConversationID() string {
+	if bs == nil {
+		return ""
+	}
+	bs.hubWakeConvMu.Lock()
+	defer bs.hubWakeConvMu.Unlock()
+	return bs.hubWakeConvID
 }
 
 // hubTaskResultPushTTL 是「已回推、还没被 run 认领」标记的存活上限。正常情况下
@@ -1412,6 +1439,9 @@ type manager struct {
 	// hubConvDispatch 按群串行化自动对话的「取 wake → 投递 → 记账」与停止/人类插话（B2）。
 	hubConvDispatch hubConvDispatchGate
 	hubConvNotified map[agenthub.GroupID]string
+	// hubProvSem 是进程级 provider 并发信号量（P6-03，懒建一次）；所有 hub loop 共享。
+	hubProvSem     *agents.ProviderSemaphore
+	hubProvSemOnce sync.Once
 	// hubUnpricedWarned 每个智能体只告警一次「用量无价，预算无法计入」（P2.5-04）。
 	hubUnpricedWarned map[agenthub.AgentID]bool
 	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
@@ -2315,6 +2345,9 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		if hubSpec.Scope.Kind == agenthub.ScopeGroup {
 			gid, aid := hubSpec.Scope.GroupID, hubSpec.Agent.ID
 			bs.hubOnRunEnd = func() {
+				// 先收口投递账本（running → done），再推进泵：泵看到的是
+				// 「这一轮已结束」的账本，不会把同一条 wake 当成还在跑。
+				m.finishHubGroupDelivery(gid, aid)
 				m.scheduleAgentTaskPump(gid, aid)
 				m.scheduleHubConversationPump(gid)
 			}

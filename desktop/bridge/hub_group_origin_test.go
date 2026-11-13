@@ -53,7 +53,7 @@ func TestHubGroupAgentOriginWakeCarriesOriginAndRespectsReadonly(t *testing.T) {
 		Text:    "@" + b.Name + " 跑个命令看看",
 		RoundID: "rnd_p611", TriggerSeq: 1, Depth: 1, Turn: 1, EnqueuedAt: time.Now(),
 	}
-	if err := m.wakeGroupAgent(context.Background(), mustHubStore(t, m), g, w); err != nil {
+	if _, err := m.wakeGroupAgent(context.Background(), mustHubStore(t, m), g, w); err != nil {
 		t.Fatalf("agent-origin wake: %v", err)
 	}
 	convWait(t, "agent-origin 轮收尾", func() bool { return fake.callCount() >= 2 })
@@ -127,7 +127,7 @@ func TestHubGroupAgentOriginAskStillNeedsApproval(t *testing.T) {
 		Sender: a.ID, Human: false, Target: b.ID, Text: "@" + b.Name + " 跑一下",
 		RoundID: "rnd_p611_ask", TriggerSeq: 1, Depth: 1, Turn: 1, EnqueuedAt: time.Now(),
 	}
-	if err := m.wakeGroupAgent(context.Background(), mustHubStore(t, m), g, w); err != nil {
+	if _, err := m.wakeGroupAgent(context.Background(), mustHubStore(t, m), g, w); err != nil {
 		t.Fatalf("agent-origin wake: %v", err)
 	}
 	st := mustHubStore(t, m)

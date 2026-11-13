@@ -572,6 +572,10 @@ func TestEval8HumanStopStopsChain(t *testing.T) {
 	setGroupFakeLoopIters(t, m, bsB, g, string(b.ID), fb, 1)
 	defer close(gate) // 收尾：别把 goroutine 留在 TempDir 清理之后
 
+	// P6-02：不同目标现在并行放行，A @B 会立刻投出去。让 B 保持「上一轮未结束」
+	// 才能复现「唤醒留在队列里等停止」的窗口（本用例的意图）。
+	bsB.hubGroupBusy.Store(true)
+	defer bsB.hubGroupBusy.Store(false)
 	if ok, errMsg, _ := hubCmd(t, m, buf, 10, "hub_group_send", map[string]any{
 		"group_id": string(g.ID), "text": "@EvalStopA 你先起个头",
 	}); !ok {
