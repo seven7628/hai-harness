@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 07:10",
-    "current": "R10"
+    "updated": "2026-11-13 10:15",
+    "current": "R11"
   },
   "rounds": [
     {
@@ -873,15 +873,18 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R09"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "9c69652",
+      "review": "主会话复核两轮（第一版驳回三处：key 换隔离/菜单取交集/墓碑丢 dirty）；最终 tsc 0、边界探针 82 项、tabbar 88、persist 35，另 8 个 RightPanel 探针全绿",
       "perf": [
         "P01"
       ],
       "acc": [
-        "崩溃面板显示墓碑",
-        "3 次后禁用并可见"
+        "崩溃只崩内容区：标签条在、能切走（边界只包面板）",
+        "按 tabId 复位而不挂 key：a→b→a 实例号 1→1→1（R06c 原地复用）",
+        "连续 3 次失败自动禁用 → 墓碑；成功一次即归零（连续性）",
+        "墓碑可重新启用/移除标签；移除尊重 dirty 守卫",
+        "禁用只影响菜单与列表，getSurface 仍在（墓碑靠它取名字）"
       ],
       "rollback": "开关 surfaces.boundary=off"
     },
