@@ -140,7 +140,8 @@
 
 | worktree | 子智能体任务 | 说明 |
 |---|---|---|
-| `group-lifecycle` | P6-07 → P6-08 → P6-09 → P6-10 → P6-13 → P6-14 | 依赖 Wave 1 的 ledger/scheduler/generation；串行做 |
+| `group-lifecycle` | P6-07 → P6-08 → P6-09 | 依赖 Wave 1 的 ledger/scheduler/generation；串行做 |
+| `group-ui` | P6-10 → P6-13 → P6-14 | 状态条/死旋钮/色板；与 lifecycle 并行 |
 
 ### Wave 3
 
@@ -177,20 +178,20 @@
 
 | ID | 状态 | worktree | commit | 验证 |
 |---|---|---|---|---|
-| P6-01 | in_progress | group-core | — | — |
-| P6-02 | in_progress | group-core | — | — |
-| P6-03 | in_progress | group-core | — | — |
-| P6-04 | in_progress | group-core | — | — |
-| P6-05 | in_progress | group-core | — | — |
+| P6-01 | done | group-core | be8168a | 主 Session 复验并合并（d4aec2c + c570975）；Go/TS/浏览器全绿 |
+| P6-02 | done | group-core | e182496 + cf5bebd | 主 Session 复验并合并（d4aec2c + c570975）；Go/TS/浏览器全绿 |
+| P6-03 | done | group-core | 8abc06d | 主 Session 复验并合并（d4aec2c + c570975）；Go/TS/浏览器全绿 |
+| P6-04 | done | group-core | aef52b4 + 18c1ace | 主 Session 复验并合并（d4aec2c + c570975）；Go/TS/浏览器全绿 |
+| P6-05 | done | group-core | 81d9a6d + 8294a78 | 主 Session 复验并合并（d4aec2c + c570975）；Go/TS/浏览器全绿 |
 | P6-06 | done | group-surface | 9e5ca58 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
-| P6-07 | todo | group-lifecycle | — | — |
-| P6-08 | todo | group-lifecycle | — | — |
-| P6-09 | todo | group-lifecycle | — | — |
-| P6-10 | todo | group-lifecycle | — | — |
+| P6-07 | in_progress | group-lifecycle | — | — |
+| P6-08 | in_progress | group-lifecycle | — | — |
+| P6-09 | in_progress | group-lifecycle | — | — |
+| P6-10 | in_progress | group-ui | — | — |
 | P6-11 | done | group-surface | 4727831 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-12 | done | group-surface | 715a28c | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
-| P6-13 | todo | group-lifecycle | — | — |
-| P6-14 | todo | group-lifecycle | — | — |
+| P6-13 | in_progress | group-ui | — | — |
+| P6-14 | in_progress | group-ui | — | — |
 | P6-15 | todo | main | — | — |
 | P6-16 | done | group-surface | 3bd3439 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-17 | done | group-surface | 1744204 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
