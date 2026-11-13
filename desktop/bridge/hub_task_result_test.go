@@ -128,7 +128,7 @@ func p3bTaskResultTexts(bs *bridgeSession, id agenthub.TaskID) []string {
 	if bs == nil || bs.s == nil {
 		return nil
 	}
-	prefix := "〔后台任务 " + string(id) + " "
+	prefix := core.TaskResultMessagePrefix(string(id))
 	collect := func(list []core.Message) []string {
 		out := make([]string, 0, 1)
 		for _, msg := range list {
@@ -535,7 +535,9 @@ func TestFinishAgentTaskNoFinalBubble(t *testing.T) {
 	bsB.hubGroupBusy.Store(true)
 	bsB.hubGroupOwner.Store(1)
 	bsB.bindHubTasks([]agenthub.TaskID{task.ID})
-	m.finishHubReply(bsB, spec, "最终正文不该变成群气泡", nil)
+	m.finishHubReply(bsB, spec, &events.AgentEnd{
+		RunId: "run-agent-bubble", Content: "最终正文不该变成群气泡", FinishReason: core.FinishReasonStop,
+	}, nil)
 	if bsB.hubGroupBusy.Load() || bsB.hubGroupOwner.Load() != 0 || bsB.hubGroupRunSeq.Load() != 0 {
 		t.Fatalf("群轮闩没清干净: busy=%v owner=%d run=%d",
 			bsB.hubGroupBusy.Load(), bsB.hubGroupOwner.Load(), bsB.hubGroupRunSeq.Load())

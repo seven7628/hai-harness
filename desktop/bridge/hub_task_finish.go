@@ -392,8 +392,20 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 		}
 		summary += "—— 人类在该任务运行中介入了。先确认用户的最新意图，不要自动继续原计划。"
 	}
+	// 群来源：这次回推会在发起者的群会话里唤起一轮「无 wake 的 run」。Ask 之前
+	// 登记 task id —— AgentStart 用起始正文（= 这条 task_result）严格匹配认领，
+	// finishHubReply 据此把模型这一轮的正文落成群气泡（Review 场景 3 N1：总结
+	// 正文曾经被直接丢弃）。登记必须早于 Ask：入队即可能开跑，晚了就认领不到。
+	// 只有群会话需要：DM/项目会话的回复本来就进自己的对话页。
+	groupOrigin := task.Origin.Kind == agenthub.OriginGroup
+	if groupOrigin {
+		origin.markHubTaskResultPush(task.ID)
+	}
 	if err := origin.s.PushTaskResultUsage(string(task.ID), task.Title, summary,
 		string(task.Status), usage, pushErr); err != nil {
+		if groupOrigin {
+			origin.unmarkHubTaskResultPush(task.ID) // 没进过会话：撤回，别让下一轮误认领
+		}
 		m.emitHubTaskAlert(task.ID, "push_failed", err.Error())
 		return
 	}
@@ -437,7 +449,7 @@ func (m *manager) hubTaskOriginSession(task *agenthub.Task) (*bridgeSession, err
 // taskResultInHistory 发起者 history 是否已有该任务的 task_result。
 // task_result 只承载终态结果，任务 id 唯一，故 task_id 就是投递幂等键。
 func taskResultInHistory(msgs []core.Message, id agenthub.TaskID) bool {
-	prefix := "〔后台任务 " + string(id) + " "
+	prefix := core.TaskResultMessagePrefix(string(id))
 	for _, msg := range msgs {
 		for _, c := range msg.Content {
 			if c.Type == core.ContentTypeTaskResult && strings.HasPrefix(c.Content, prefix) {

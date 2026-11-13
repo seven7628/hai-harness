@@ -340,10 +340,11 @@ type bridgeSession struct {
 	wake             chan struct{}
 	out              *out
 
-	// hubOnAgentEnd Hub 会话的本轮收尾钩子（nil = 项目会话）。RunStream 层事件只经
+	// hubOnAgentEnd Hub 会话的本轮收尾钩子（nil = 未接线）。RunStream 层事件只经
 	// bs.emit 发出（Session 的 WithEventHandler 收不到 agent_*），所以钩子必须挂在 emit。
-	// segs 是按 LLM 轮次分段的正文（每段一条气泡；空 = 没有段，调用方回退 content）。
-	hubOnAgentEnd func(content string, segs []hubSegment)
+	// 传整个 AgentEnd 而不只是正文：结果回推触发的群 run 要按 FinishReason 决定
+	// 是否落账（被中断的运行不写半截总结）。segs 是按 LLM 轮次分段的正文。
+	hubOnAgentEnd func(ae *events.AgentEnd, segs []hubSegment)
 	// hubOnRunEnd 群会话根 run **真正**收尾（running/闩都已放开）之后的推进钩子
 	// （P3b-04：自动对话串行泵 + 忙目标任务泵）。nil = 非群会话。
 	hubOnRunEnd func()
@@ -370,6 +371,18 @@ type bridgeSession struct {
 	hubGroupSeq    atomic.Uint64
 	hubGroupOwner  atomic.Uint64
 	hubGroupRunSeq atomic.Uint64
+	// hubTaskResultTask 本次根 run 是「Hub 任务结果回推」唤起的群 run（Project/工作区
+	// 任务 AgentEnd → pushHubTaskResult → PushTaskResultUsage → Ask）。这类 run 没有
+	// hub_group_wake，但正文必须落成发起者的一条群气泡（不路由/@/唤醒旁人），否则
+	// 模型「收到项目结果，我来总结」只存在于会话历史里，群里只剩一张结果卡。
+	// 空 = 普通 run（没有 wake 就保持原来的静默语义）。只在 emit（dispatchMu 内）读写：
+	// AgentStart 认领、finishHubReply 消费后清空。
+	hubTaskResultTask agenthub.TaskID
+	// hubTaskResultPending 已回推、还没有 run 认领的 task id（值 = 登记时间，只用于
+	// 过期清理）。pushHubTaskResult 在 Ask **之前**登记、Ask 失败撤回；AgentStart 用
+	// 起始正文的固定前缀严格匹配认领。跨 goroutine（通知簿 ↔ emit），用锁保护。
+	hubTaskResultMu      sync.Mutex
+	hubTaskResultPending map[agenthub.TaskID]time.Time
 	// hubEngine Hub 会话的工具引擎（记忆/人格变更后重建 loop 时复用：
 	// 重建引擎会丢掉正在运行的工具任务与审批等待，没必要）。
 	hubEngine *tools.Engine
@@ -657,7 +670,7 @@ func (bs *bridgeSession) emit(e events.Event) {
 			//（前端按 message_id 用 final 替换草稿，先 final 后 delta 会被当迟到丢弃）。
 			segs = bs.hubDelta.finish()
 		}
-		bs.hubOnAgentEnd(ae.Content, segs)
+		bs.hubOnAgentEnd(ae, segs)
 	}
 
 	// IM 镜像推送：会话事件 → Renderer → 飞书（有镜像关联的会话）。
@@ -728,6 +741,17 @@ func (bs *bridgeSession) emit(e events.Event) {
 					bs.hubDelta.bindRun(ev.RunId, string(wake.GroupID), string(wake.AgentID), wake.RoundID, wake.MessageID)
 				} else if bs.hubDeltaDM {
 					bs.hubDelta.bindRun(ev.RunId, "", bs.hubDeltaAgentID, "", "")
+				}
+			}
+			// Hub 任务结果回推触发的群 run：没有 hub_group_wake，但起始正文就是那条
+			// task_result。认领后由 finishHubReply 把正文落成发起者的一条群气泡
+			// （不路由/@/唤醒）。只有群会话有 hubOnRunEnd —— DM/项目会话不走这条路径。
+			if bs.hubOnRunEnd != nil {
+				if bs.hubGroupWake == nil {
+					bs.claimHubTaskResultPush(ev.Content)
+				} else {
+					// 混合批（wake + 结果回推）：本轮归 wake，标记不得外溢到下一轮。
+					bs.takeHubTaskResultTask()
 				}
 			}
 		}
@@ -1167,6 +1191,79 @@ func (bs *bridgeSession) setHubGroupWake(h *agenthub.GroupWakeHeader) {
 	}
 	bs.hubWakeDepth.Store(int64(h.Depth))
 	bs.hubWakeTurn.Store(int64(h.Turn))
+}
+
+// hubTaskResultPushTTL 是「已回推、还没被 run 认领」标记的存活上限。正常情况下
+// 回推入队后毫秒级就被下一轮 run 认领；留在表里说明那条 task_result 被**插话**
+// 消费进了别的 run（Injected，没有自己的 AgentStart），不会再有 run 认领它。
+const hubTaskResultPushTTL = 10 * time.Minute
+
+// markHubTaskResultPush 登记「这条 task_result 即将回推进本会话」。必须在 Ask
+// **之前**调用：Ask 一入队 run 就可能起来，晚了 AgentStart 就认领不到。
+func (bs *bridgeSession) markHubTaskResultPush(id agenthub.TaskID) {
+	if bs == nil || id == "" {
+		return
+	}
+	bs.hubTaskResultMu.Lock()
+	if bs.hubTaskResultPending == nil {
+		bs.hubTaskResultPending = make(map[agenthub.TaskID]time.Time, 2)
+	}
+	now := time.Now()
+	for pid, at := range bs.hubTaskResultPending {
+		if now.Sub(at) > hubTaskResultPushTTL {
+			delete(bs.hubTaskResultPending, pid)
+		}
+	}
+	bs.hubTaskResultPending[id] = now
+	bs.hubTaskResultMu.Unlock()
+}
+
+// unmarkHubTaskResultPush 撤回登记（Ask 失败：这条 task_result 从没进过会话）。
+func (bs *bridgeSession) unmarkHubTaskResultPush(id agenthub.TaskID) {
+	if bs == nil || id == "" {
+		return
+	}
+	bs.hubTaskResultMu.Lock()
+	delete(bs.hubTaskResultPending, id)
+	bs.hubTaskResultMu.Unlock()
+}
+
+// claimHubTaskResultPush 根 AgentStart 认领回推标记：只有本轮起始正文**就是**
+// 某条已登记的 task_result（固定前缀 + 同 id）时才认领，并把该 id 从待认领表里
+// 摘掉（一次性：重试/并发的第二个 run 不会再认领同一条）。
+//
+// 为什么用 AgentStart.Content 严格匹配、而不是「wake == nil 就落账」：
+// 群会话里还有别的无 wake run（普通 API 调用、群任务批次、被插话消费的结果），
+// 它们的正文同样不该变成群气泡。起始正文是 task_result 的完整消息头（task id
+// 唯一），配上「只有 pushHubTaskResult 登记过的 id 才可能命中」就是双重证据。
+// 认领失败一律清空本轮标记（上一轮残留不得外溢到新 run）。
+func (bs *bridgeSession) claimHubTaskResultPush(startContent string) bool {
+	if bs == nil {
+		return false
+	}
+	bs.hubTaskResultMu.Lock()
+	defer bs.hubTaskResultMu.Unlock()
+	bs.hubTaskResultTask = ""
+	for id := range bs.hubTaskResultPending {
+		if strings.HasPrefix(startContent, core.TaskResultMessagePrefix(string(id))) {
+			delete(bs.hubTaskResultPending, id)
+			bs.hubTaskResultTask = id
+			return true
+		}
+	}
+	return false
+}
+
+// takeHubTaskResultTask 取走并清空本轮回推标记（finishHubReply 消费）。
+func (bs *bridgeSession) takeHubTaskResultTask() agenthub.TaskID {
+	if bs == nil {
+		return ""
+	}
+	bs.hubTaskResultMu.Lock()
+	id := bs.hubTaskResultTask
+	bs.hubTaskResultTask = ""
+	bs.hubTaskResultMu.Unlock()
+	return id
 }
 
 // hubTaskIDs 的跨 goroutine 访问器（P3b-05）：结算/绑定发生在 emit（dispatchMu
@@ -2075,7 +2172,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		bs.editModelCfg(opts.hub.Agent.Provider, opts.hub.Agent.Model, "")
 		bs.persona = "hub"
 		hubSpec := opts.hub
-		bs.hubOnAgentEnd = func(content string, segs []hubSegment) { m.finishHubReply(bs, hubSpec, content, segs) }
+		bs.hubOnAgentEnd = func(ae *events.AgentEnd, segs []hubSegment) { m.finishHubReply(bs, hubSpec, ae, segs) }
 		bs.hubEngine = hubEng
 		bs.hubDeltaAgentID = string(hubSpec.Agent.ID)
 		bs.hubDeltaDM = hubSpec.Scope.Kind == agenthub.ScopeDM

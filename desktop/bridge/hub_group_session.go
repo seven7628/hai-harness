@@ -17,6 +17,7 @@ import (
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/core"
+	"github.com/seven7628/hai-harness/events"
 )
 
 // hubGroupAssembleHook 仅测试用：群会话装配在**持有 agent 锁**、createIn 之前的确定性
@@ -383,16 +384,23 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 // flush 完 delta）；空段在落账前过滤，全空时回退 AgentEnd.Content 的单条行为。
 // final 必须先于对应 delta 是不可能的（finish 已经 flush），但 delta 必须先于
 // 本条 final：前端按 message_id 用 final 替换草稿，先 final 后 delta 会被当迟到丢弃。
-func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, content string, segs []hubSegment) {
-	if spec == nil {
+//
+// 群会话还有第三种 run（Review 场景 3 N1）：**任务结果回推**唤起的 run 没有
+// hub_group_wake（AgentStart 用 task_result 正文认领，见 claimHubTaskResultPush）。
+// 它的正文照样要落成发起者的一条气泡 —— 否则「收到项目结果，我来总结」只留在
+// 会话历史里，群里只剩一张结果卡。
+func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, ae *events.AgentEnd, segs []hubSegment) {
+	if spec == nil || ae == nil {
 		return
 	}
 	if spec.Scope.Kind != agenthub.ScopeGroup {
-		m.appendHubReply(spec, content, segs)
+		m.appendHubReply(spec, ae.Content, segs)
 		return
 	}
 	wake := bs.hubGroupWake
 	bs.setHubGroupWake(nil)
+	// 一次性标记：无论这一轮怎么收尾都要取走，不能留给下一个 run。
+	taskResult := bs.takeHubTaskResultTask()
 	runSeq := bs.hubGroupRunSeq.Load()
 	if runSeq == 0 {
 		runSeq = bs.hubGroupOwner.Load()
@@ -405,7 +413,11 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, conten
 		bs.clearHubGroupBusy(runSeq)
 	}()
 	if wake == nil {
-		// 没有绑定到轮次（例如进程内其它消息触发的 run）：不往群里写空气泡。
+		// 回推触发的 run：落一条不路由的群气泡（Sender = 发起者，round = nil）。
+		// 其余无 wake 的 run（普通 API 调用、群任务批次）保持静默：不往群里写空气泡。
+		if taskResult != "" {
+			m.finishHubTaskResultReply(spec, ae, segs)
+		}
 		return
 	}
 	if wake.GroupID != spec.Scope.GroupID || wake.AgentID != spec.Agent.ID {
@@ -422,7 +434,91 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, conten
 		m.advanceHubGroupCursor(wake.GroupID, spec.Agent.ID, wake.TriggerSeq)
 		return
 	}
-	m.finishHubRound(spec, wake, content, segs)
+	m.finishHubRound(spec, wake, ae.Content, segs)
+}
+
+// finishHubTaskResultReply 把「Hub 任务结果回推唤起」的群 run 正文落成发起者的
+// 一条群气泡（Review 场景 3 N1：总结正文曾经被直接丢弃，群里只剩结果卡）。
+//
+// 与 finishHubRound 的差别全是**去掉**：没有 wake 就没有 round、没有触发消息的
+// seq、没有可推进的游标。所以这里 SkipRoute（不解析 @、不填 mentions）、RoundID
+// 空、Context 空、不 offer wakes（不唤醒群里任何人、不启动/续跑自动对话），也不写
+// 结果卡（回推那一步已经写过，这里再写就是第二张）。
+//
+// 落账口径与群 final 一致：非空段各一条，全空回退 AgentEnd.Content。
+// 空正文 = 模型选择不输出 → 一条都不写（只留结果卡，不造空气泡）；
+// 被中断/失败/护栏截断的 run → 不写半截总结（FinishReason != stop）。
+func (m *manager) finishHubTaskResultReply(spec *hubSessionSpec, ae *events.AgentEnd, segs []hubSegment) {
+	if m == nil || spec == nil || ae == nil {
+		return
+	}
+	if ae.FinishReason != core.FinishReasonStop {
+		return
+	}
+	texts := hubNonEmptySegments(segs)
+	if len(texts) == 0 {
+		if text := strings.TrimSpace(ae.Content); text != "" {
+			texts = []hubSegment{{text: text}}
+		}
+	}
+	if len(texts) == 0 {
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		m.hubAlertf("group_reply_failed", "群回复落账失败：%v", err)
+		return
+	}
+	ctx := context.Background()
+	// 与 group_say / 人类发送 / 群 final 共用同一临界区：查重与落盘不能被插队。
+	m.hubGroupSendMu.Lock()
+	g, err := st.LoadGroup(ctx, spec.Scope.GroupID)
+	if err != nil || g == nil || g.Deleted {
+		m.hubGroupSendMu.Unlock()
+		m.hubAlertf("group_reply_failed", "群回复落账失败：群 %s 不存在", spec.Scope.GroupID)
+		return
+	}
+	msgs, err := st.ReadMessages(ctx, g.ID, 0, 500)
+	if err != nil {
+		m.hubGroupSendMu.Unlock()
+		m.hubAlertf("group_reply_failed", "读取群日志失败：%v", err)
+		return
+	}
+	// 去重与群 final 同口径：模型可能在本轮先用 group_say 汇报过（那条已经落账），
+	// AgentEnd 的最后一段是同一段收尾时不再写第二条。没有触发 seq，只看该智能体
+	// 最近一条发言。
+	lastText := ""
+	if last := lastAgentMessageInGroup(msgs, spec.Agent.ID); last != nil {
+		lastText = last.Text
+	}
+	for i, seg := range texts {
+		if i == len(texts)-1 && sameGroupReply(lastText, seg.text) {
+			break
+		}
+		w := agentGroupWrite{
+			Text: seg.text, MessageID: seg.messageID,
+			// 不路由：这条气泡不对应任何 round，@ 不应唤醒任何人。
+			SkipRoute: true,
+		}
+		if _, _, _, err := m.appendAgentGroupMessageLocked(ctx, st, g, spec.Agent.ID, w); err != nil {
+			m.hubGroupSendMu.Unlock()
+			m.hubAlertf("group_reply_failed", "群回复落账失败：%v", err)
+			return
+		}
+	}
+	m.hubGroupSendMu.Unlock()
+}
+
+// lastAgentMessageInGroup 取该智能体在群日志里最近一条非空发言（不按 seq 过滤：
+// 结果回推触发的 run 没有触发消息，去重只能对着「上一条我说的话」）。
+func lastAgentMessageInGroup(msgs []agenthub.Message, agentID agenthub.AgentID) *agenthub.Message {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Sender.Kind == agenthub.SenderAgent && m.Sender.AgentID == agentID && strings.TrimSpace(m.Text) != "" {
+			return &msgs[i]
+		}
+	}
+	return nil
 }
 
 // finishHubRound 把群会话最终正文写入群日志，并推进 agent_context_seq。

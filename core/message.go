@@ -176,6 +176,16 @@ func NewTaskResultMessage(taskID, name, result string, err error) Message {
 	return NewTaskResultMessageWithStatus(taskID, name, result, status, err)
 }
 
+// TaskResultMessagePrefix 返回 task_result 消息正文的固定开头（`〔后台任务 <id> `）。
+//
+// 单一事实来源：构造方（NewTaskResultMessageWithStatus）与需要从文本识别
+// 「这次 run 是不是被这条结果回推唤起的」的调用方（desktop/bridge 的群会话：
+// 群 run 的 AgentStart.Content 就是这条 task_result 正文）共用，避免两处各写
+// 一份格式后静默失配 —— 失配的表现是总结气泡永远不出现，且没有任何告警。
+func TaskResultMessagePrefix(taskID string) string {
+	return "〔后台任务 " + taskID + " "
+}
+
 // NewTaskResultMessageWithStatus 构造后台任务终态消息：user 角色 + task_result 内容块。
 // status 是 completed/interrupted/failed/abandoned/canceled/declined；result 原样嵌入、
 // 不截断、不解释。canceled/declined 只有 Hub 智能体任务（assign_task）会产生：
@@ -197,7 +207,9 @@ func NewTaskResultMessageWithStatus(taskID, name, result, status string, err err
 	case "declined":
 		label = "已被拒绝"
 	}
-	fmt.Fprintf(&b, "〔后台任务 %s %s〕", taskID, label)
+	b.WriteString(TaskResultMessagePrefix(taskID))
+	b.WriteString(label)
+	b.WriteString("〕")
 	if name != "" {
 		fmt.Fprintf(&b, "（%s）", name)
 	}
