@@ -78,7 +78,9 @@ export const webSurface: SurfaceProvider<WebTabInstance> = {
     const tp = liveTarget(tab)
     return tabLabel(tp?.url ?? tab.url ?? '', tp?.title ?? '') || t('rp.tab.web')
   },
-  icon: (tab) => tabIcon(liveTarget(tab)?.url ?? tab.url ?? ''),
+  // 图标：PR-11 起 RightPanel 不再有本地 switch，这里是唯一真相。入参可省 —— ＋ 菜单与
+  // 空态能力面板只列「能开什么」，没有实例，给通用 Globe（与旧 RP 的兜底字面一致）。
+  icon: (tab) => (tab ? tabIcon(liveTarget(tab)?.url ?? tab.url ?? '') : <Globe size={12} />),
   // 打开时的默认实例（PR-11 起这是 makeTab('web') 的**唯一**来源）：池里认得出「当前激活的
   // 真实页面」就带上它的 viewId（新标签直接接在那一页上），认不出就是空 web 标签 ——
   // 后者交给 syncWebTabs 的收养分支（见 store 里 activePageIdOf 的注释）。

@@ -153,6 +153,10 @@ try {
         restoring: r.getAttribute('data-restoring'),
         on: r.getAttribute('aria-selected') === 'true',
         title: (r.querySelector('.rtab-t')?.textContent ?? '').trim(),
+        // 图标的字形指纹（整个 <svg> 的内部标记，压掉空白）：PR-11 起由 provider.icon 给，
+        // RP 里没有 switch 了。取指纹而不是写死字符串 —— 断言只关心「有图标」与「不同 kind
+        // 不同」，见 A1。为什么不用 path 的 d：git/web 的图标是 line/circle，没有 d。
+        icon: (r.querySelector('.rtab-ico svg')?.innerHTML ?? '').replace(/\s+/g, ' ').trim().slice(0, 48),
       })),
       hasOverflow: !!ov,
       overflowTag: ov ? ov.tagName : '',
@@ -262,6 +266,15 @@ try {
       b.rows[3].mode === 'source' && b.rows[3].view === '' && b.rows[0].mode === null, JSON.stringify(b.rows[3]))
     check('A1 待重建的 web 标签仍带 data-pending / data-sleeping',
       b.rows[2].pending === '1' && b.rows[2].sleeping === '1', JSON.stringify(b.rows[2]))
+    // 标签条图标（PR-11）：四个 kind 的图标由各自 provider 的 icon 给 —— RP 侧的
+    // `switch (kind)` 已删。断言只钉两件**语义**：每行都有字形、四种 kind 的字形互不相同。
+    // 为什么不写死 path：图标重画不该让探针红；而「某个 provider 漏了 icon → 退化成同一个
+    // 兜底字形」正是本轮的失败模式，必须红（activity 与 git 撞字形即被这条抓住）。
+    const iconOf = (k) => b.rows.find((r) => r.kind === k)?.icon ?? ''
+    check('A1 每个标签都有图标，且 activity/git/web/file 的字形互不相同（provider.icon）',
+      b.rows.every((r) => r.icon.length > 8)
+        && new Set(['activity', 'git', 'web', 'file'].map(iconOf)).size === 4,
+      JSON.stringify(b.rows.map((r) => [r.kind, r.icon])))
   })
 
   await section('A2 7 个标签：5 槽 + +N=2，点隐藏项 = activateTab 并关闭', async () => {

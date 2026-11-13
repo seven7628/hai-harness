@@ -65,7 +65,14 @@ export interface SurfaceProvider<T extends SurfaceTab = SurfaceTab> {
   order?: number
 
   title: (tab: T, t: (k: string, v?: Record<string, unknown>) => string) => string
-  icon?: (tab: T) => ReactNode
+  /**
+   * 标签图标（PR-11 起 RightPanel 不再有本地 kind→图标 switch，这里是唯一真相）。
+   *
+   * `tab` 是**可选**的：调用点有两种 —— 标签条/溢出菜单有实例；＋ 菜单与空态能力面板只有
+   * kind（「能开什么」的静态清单）。实现忽略入参或按 tab 细化（file 的 preview 用眼睛、
+   * web 按页面类型）都可以，但**不要**为了让类型通过而造假 tab（传 undefined 就是事实）。
+   */
+  icon?: (tab?: T) => ReactNode
   badge?: (tab: T, s: AppState) => number
 
   singleton?: boolean
