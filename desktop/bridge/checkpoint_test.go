@@ -21,6 +21,7 @@ func newManagerWithAppData(t *testing.T, dataDir string) (*manager, *syncBuf) {
 	// 进程级 userPriceTable 且不还原。本 helper 不封闭 HOME（要复用本机 provider
 	// 配置），因此必须自己隔离，否则用户钉的旧价会泄漏给后续按内置价断言的
 	// metrics/reducer 测试（见 isolateUserPrices 注释里的实测）。
+	assertNoUserPrices(t)
 	isolateUserPrices(t)
 	appDataDirOverride = dataDir
 	t.Cleanup(func() { appDataDirOverride = "" })
@@ -54,6 +55,7 @@ func waitRecord(t *testing.T, wsKey, id string, timeout time.Duration) *session.
 // TestCheckpointCommitOnBoundary 语义边界（llm_end）触发 record 原子落盘：
 // revision/reducer_seq/view_checkpoint/sdk_state 均为有效值。
 func TestCheckpointCommitOnBoundary(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	dataDir := t.TempDir()
 	t.Setenv("HOME", home)

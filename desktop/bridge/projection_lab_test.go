@@ -41,6 +41,7 @@ import (
 
 // TestProjectionEquivalence 重放事件日志，与 sidecar 存的块逐字节比对。
 func TestProjectionEquivalence(t *testing.T) {
+	assertNoUserPrices(t)
 	eventsPath := os.Getenv("HAI_LAB_EVENTS")
 	recordPath := os.Getenv("HAI_LAB_RECORD")
 	if eventsPath == "" || recordPath == "" {

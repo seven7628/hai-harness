@@ -53,6 +53,7 @@ type normTrace struct {
 }
 
 func TestTraceProjectionCrossImpl(t *testing.T) {
+	assertNoUserPrices(t)
 	fixture := filepath.Join("testdata", "trace_fixture.json")
 	raw, err := os.ReadFile(fixture)
 	if err != nil {

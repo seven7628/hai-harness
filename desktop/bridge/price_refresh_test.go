@@ -86,6 +86,7 @@ func fakeModelsDev(t *testing.T) {
 // TestRefreshPricesFillsGapFromModelsDev 刷新按 base_url 匹配 models.dev provider，
 // 只补「当前无价」的已配置模型（免费条目、价源没有的模型都跳过），并即刻作用于注册表。
 func TestRefreshPricesFillsGapFromModelsDev(t *testing.T) {
+	assertNoUserPrices(t)
 	fakeModelsDev(t)
 	pc := &providerConfig{
 		// 自定义名 opencode2 与 models.dev 的 opencode-go 同 base_url → 按端点匹配
@@ -125,6 +126,7 @@ func TestRefreshPricesFillsGapFromModelsDev(t *testing.T) {
 // TestRefreshPricesKeepsExistingUnlessOverwrite 默认不覆盖已有价（内置价/手填价），
 // overwrite=true 才强制刷成实时价。
 func TestRefreshPricesKeepsExistingUnlessOverwrite(t *testing.T) {
+	assertNoUserPrices(t)
 	fakeModelsDev(t)
 	pc := &providerConfig{
 		baseURL: map[string]string{"opencode2": "https://opencode.ai/zen/go/v1"},
@@ -162,6 +164,7 @@ func TestRefreshPricesKeepsExistingUnlessOverwrite(t *testing.T) {
 // TestRefreshPricesOpenRouterPerTokenConversion OpenRouter 自报价的 pricing 是**每 token**
 // 的 USD 字符串 → 必须 ×1e6 换成 USD/1M（否则成本被低估六个数量级）。
 func TestRefreshPricesOpenRouterPerTokenConversion(t *testing.T) {
+	assertNoUserPrices(t)
 	srv := respondJSON(t, `{"data":[{"id":"deepseek/deepseek-v4-pro",
 		"pricing":{"prompt":"0.0000011154","completion":"0.0000033462","input_cache_read":"0.00000003718"}},
 		{"id":"poolside/laguna-s-2.1:free","pricing":{"prompt":"0","completion":"0"}}]}`)
@@ -190,6 +193,7 @@ func TestRefreshPricesOpenRouterPerTokenConversion(t *testing.T) {
 // TestRefreshPricesNoSourceForUnknownEndpoint 无实时价源的端点（models.dev 未收录的私有
 // 网关）→ 明确失败，且不留下任何价（不虚增成本）。
 func TestRefreshPricesNoSourceForUnknownEndpoint(t *testing.T) {
+	assertNoUserPrices(t)
 	fakeModelsDev(t)
 	pc := &providerConfig{
 		baseURL: map[string]string{"command-code": "https://api.commandcode.ai/provider/v1"},
@@ -214,6 +218,7 @@ func TestRefreshPricesNoSourceForUnknownEndpoint(t *testing.T) {
 // "opencode" 但 base_url 是 go 端点 → 必须取 opencode-go。
 // 回归：曾按名先命中，给整条链套了另一条端点的价（0.14/0.028/0.28 vs 0.15/0.003/0.6）。
 func TestRefreshPricesEndpointBeatsName(t *testing.T) {
+	assertNoUserPrices(t)
 	const fixture = `{
 	  "opencode": {"api": "https://opencode.ai/zen/v1",
 	    "models": {"deepseek-v4-flash": {"cost": {"input": 0.14, "output": 0.28, "cache_read": 0.028}}}},

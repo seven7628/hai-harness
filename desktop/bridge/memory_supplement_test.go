@@ -438,6 +438,7 @@ func supplementRunOnce(t *testing.T, p provider.Provider, prov, model, root, inj
 // 判据不变：§3.1 的 B 必须明显高于 A。但本文件额外要求"能说得出"而不是"看起来
 // 像"：结论字符串由 supplementClassifyVerdict 生成，MDE 一并输出。
 func TestSupplementPointerVsConflictPaired(t *testing.T) {
+	assertNoUserPrices(t)
 	memSnap := baselineEnforceEmptyMemoryState(t)
 
 	prov, model, p := baselineEnvOrSkip(t)

@@ -411,6 +411,7 @@ func TestPluginUpgradeInstallFailRestores(t *testing.T) {
 
 // TestPluginToolsInEngine：已启用插件工具经 newSessionEngine 注册进引擎（接线验证）。
 func TestPluginToolsInEngine(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 封闭：不读真实 settings.json（否则污染全局 userPriceTable，跨用例串价）
 	reg := subagent.NewRegistry()
 	bg := func() context.Context { return context.Background() }

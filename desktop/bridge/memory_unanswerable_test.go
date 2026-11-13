@@ -1106,6 +1106,7 @@ func unanswerablePing(t *testing.T, p provider.Provider, prov, model string) {
 // 判据：**B 必须显著高于 A。** 这是"记忆有用"的第一份直接证据。
 // 若 B≈A，结论就是"对能主动核对的模型，记忆的增量价值比预期小"。
 func TestUnanswerableKnowledgeThreeArms(t *testing.T) {
+	assertNoUserPrices(t)
 	memSnap := baselineEnforceEmptyMemoryState(t)
 
 	prov, model, p := unanswerableEnvOrSkip(t)

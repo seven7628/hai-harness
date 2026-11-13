@@ -652,6 +652,7 @@ func conflictContrastArms(xKey, yKey, question string, pairs []conflictPair, rep
 //  3. 判定器 ≠ 被测模型；
 //  4. 每臂可用判定 ≥ conflictPairableFloors。
 func TestConflictArmsSabotageRemovedAndRulesArmed(t *testing.T) {
+	assertNoUserPrices(t)
 	memSnap := baselineEnforceEmptyMemoryState(t)
 	isolateUserPrices(t) // 读真实 settings 前先隔离全局价表（见 memory_baseline_test.go 注释）
 

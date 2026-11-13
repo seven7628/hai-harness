@@ -751,6 +751,7 @@ func TestListSessionsUpdatedAtSort(t *testing.T) {
 // 主会话引擎按 persona profile 装配工具：code = 全工具（含 bash/agent_*/plan_submit），
 // work = 文件(无 bash)+todo（不派子 agent / 不规划）
 func TestSessionEngineRegistersAllTools(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 封闭：不读真实 settings.json（否则污染全局 userPriceTable，跨用例串价）
 	reg := subagent.NewRegistry()
 	bg := func() context.Context { return context.Background() }
@@ -818,6 +819,7 @@ func TestExploreToolEngineRestricted(t *testing.T) {
 
 // plan_submit 已移除：计划/文档使用 write_file，任务拆分使用 todo。
 func TestPlanSubmitNotRegistered(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 封闭：不读真实 settings.json（否则污染全局 userPriceTable，跨用例串价）
 	sk, err := skills.NewRegistry(t.TempDir())
 	if err != nil {
@@ -834,6 +836,7 @@ func TestPlanSubmitNotRegistered(t *testing.T) {
 // persona 下唯一能生效的路径；只断言 needsExecSandbox 不够 —— 装配链上任何一处按 withBash
 // 短路都会让断言通过而真机失效。
 func TestExecSandboxForWorkPersonaRunPython(t *testing.T) {
+	assertNoUserPrices(t)
 	if !sandbox.Available() {
 		t.Skip("sandbox-exec 不可用（非 macOS / 受限环境）")
 	}
@@ -1001,6 +1004,7 @@ func TestParseModeApprovalGating(t *testing.T) {
 // hitl=用户确认（write/edit/bash 审批）、auto=全自动（write/edit/bash 均不审批，
 // bash 工具层静态高危拦截/沙箱仍生效）、full-access=完全访问（全部自动放行）
 func TestParseModeThreeModes(t *testing.T) {
+	assertNoUserPrices(t)
 	hitl := parseMode("hitl")
 	if hitl.Approve(core.ToolCall{Name: "write_file"}) != agents.ApprovalRequired {
 		t.Fatal("hitl: write_file 应审批")
@@ -1046,6 +1050,7 @@ func TestParseModeThreeModes(t *testing.T) {
 
 // emit llm_end：记录一条指标（metrics 文件）+ 事件打 cost_usd（价表在宿主）
 func TestEmitRecordsMetrics(t *testing.T) {
+	assertNoUserPrices(t)
 	wsA := t.TempDir()
 	m, buf := testManager(t)
 	m.metrics = NewFileMetricsStore(filepath.Join(t.TempDir(), "metrics.jsonl"))
@@ -1574,6 +1579,7 @@ func TestSamplingDefaults(t *testing.T) {
 
 // TestMaxTokensFor 每模型输出上限：显式配置优先 → 已知模型官方默认 → defaultMaxTokens 兜底。
 func TestMaxTokensFor(t *testing.T) {
+	assertNoUserPrices(t)
 	pc := &providerConfig{
 		active:    "deepseek",
 		maxTokens: map[string]map[string]int64{"deepseek": {"deepseek-v4-flash-vision-exp": 200000}},
@@ -1625,6 +1631,7 @@ func TestMaxTokensFor(t *testing.T) {
 // TestOpencodeProviderConfig OpenCode Go provider 注册：默认 baseURL / 模型窗口 / max_tokens /
 // setActive / defaultModel / 采样默认（厂商默认，不套 DeepSeek 采样）/ key env 兜底。
 func TestOpencodeProviderConfig(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 封闭：不读用户真实 ~/.go-code/settings.json
 	t.Setenv("OPENCODE_API_KEY", "")
 	fresh := loadProviderConfig()
@@ -1675,6 +1682,7 @@ func TestOpencodeProviderConfig(t *testing.T) {
 // defaultModel / 采样默认（厂商默认）/ key env 兜底；Zhipu 的 compat.BasePath=/v4 修正
 // /api/paas/v4 版本根（否则 chat completions 会拼出 /v4/v1 错误路径）。
 func TestKimiZhipuProviderConfig(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 封闭：不读用户真实 ~/.go-code/settings.json
 	t.Setenv("KIMI_API_KEY", "")
 	t.Setenv("ZHIPUAI_API_KEY", "")
@@ -1817,6 +1825,7 @@ func TestProtocolSelection(t *testing.T) {
 // TestProtocolBackwardCompat 旧 settings.json（无 protocol 字段）不破坏现有行为：
 // 协议回退 chat_completions，newProvider 照常构造 OpenAIProvider（改动前后行为一致）。
 func TestProtocolBackwardCompat(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".go-code")
@@ -1845,6 +1854,7 @@ func TestProtocolBackwardCompat(t *testing.T) {
 // TestCustomProvider 用户自定义 provider：settings.json 任意 key 加载、格式校验放行、
 // key env 兜底（GOCODE_KEY_<UPPER>）、newProvider 用自定义 baseURL。
 func TestCustomProvider(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	_ = os.MkdirAll(filepath.Join(home, ".go-code"), 0o755)
@@ -1892,6 +1902,7 @@ func TestCustomProvider(t *testing.T) {
 }
 
 func TestCustomProviderCompatCapabilities(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if err := os.MkdirAll(filepath.Join(home, ".go-code"), 0o755); err != nil {
@@ -1926,6 +1937,7 @@ func TestCustomProviderCompatCapabilities(t *testing.T) {
 
 // 直达 providerConfig（不依赖 settings.json 落盘时序），rebuildAll 后窗口/输出上限即时生效。
 func TestSetProviderModelsMaxTokens(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 封闭：不读用户真实 ~/.go-code/settings.json
 	m, buf := testManager(t)
 	m.dispatch(cmd(1, "set_provider", map[string]any{
@@ -1952,6 +1964,7 @@ func TestSetProviderModelsMaxTokens(t *testing.T) {
 // 此前内置价只在 list_models（依赖网络 + 用户点击）的 capabilities 里带，重启后
 // 设置页模型价格显示为空/0，直到手动拉取才出现。
 func TestListProviderPresetsIncludesModelCosts(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 封闭
 	m, buf := testManager(t)
 	m.dispatch(cmd(5, "list_provider_presets", map[string]any{}))
@@ -2178,6 +2191,7 @@ func TestLoadSettingsEmptyKeyClearsStale(t *testing.T) {
 // loadSettings 写入全局 priceTable + 注册表（overrideRegistryLocked），costUsd 与
 // registry.PriceFor 均返回用户价；模型名/全量价删除后回退内置价。
 func TestLoadSettingsUserPrices(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cfgDir := filepath.Join(home, ".go-code")

@@ -125,6 +125,37 @@ async function shot(page, name) {
 
 const waitRenderer = (page, id, timeout = 20000) => page.waitForSelector(`[data-renderer="${id}"]`, { timeout })
 
+// waitFor 等一个选择器出现，**返回等待耗时**（ms），超时的报错里带上「当时面板长什么样」。
+//
+// 为什么要专门包一层（2026-11 实测）：`.fp-code .fp-ln` 是 shiki 高亮完成后的行号 gutter。
+// 本探针跑在 **vite dev server** 上，shiki 的语法文件是**按需转换**的 —— 冷启动（尤其机器
+// 负载高、同时挂着几套 vite/chrome 时）首屏确实要几十秒；而 20s 的硬超时一到，报错只有
+// 一句 waitForSelector timeout，看不出「是在高亮中」还是「渲染器根本没接上」。
+// 现在：超时预算 45s，报错里带 data-state / 行数 / 面板文本长度，成功时也打印等了多久
+// ——「慢」与「等不到」从此可区分，且慢的那次不再算红。
+const waitFor = async (page, selector, label, timeout = 45000) => {
+  const t0 = Date.now()
+  try {
+    await page.waitForSelector(selector, { timeout })
+  } catch (e) {
+    const st = await page.evaluate(() => {
+      const host = document.querySelector('[data-renderer="text"]')
+      const r = host?.getBoundingClientRect()
+      return {
+        renderer: host?.getAttribute('data-renderer') ?? '<none>',
+        state: host?.getAttribute('data-state') ?? '',
+        lines: document.querySelectorAll('.fp-code .fp-ln').length,
+        bodyLen: (document.querySelector('.right-body')?.textContent ?? '').trim().length,
+        w: Math.round(r?.width ?? 0), h: Math.round(r?.height ?? 0),
+      }
+    })
+    throw new Error(`${label}：${timeout}ms 内没出现 ${selector}；当时面板 = ${JSON.stringify(st)}`)
+  }
+  const ms = Date.now() - t0
+  ok(`${label}（等了 ${ms}ms）`)
+  return ms
+}
+
 // 当前面板的落点快照（unavailable 的 id/reason、任何 data-renderer 的值、面板是否空白）
 const landingOf = (page) => page.evaluate(() => {
   const el = document.querySelector('[data-renderer="unavailable"]')
@@ -167,7 +198,7 @@ async function main() {
   console.log('\n[1] text 渲染器：.go → data-renderer="text" + 行号 + 内容')
   await openTab(page, 'auth.go', 'preview')
   await waitRenderer(page, 'text')
-  await page.waitForSelector('[data-renderer="text"] .fp-code .fp-ln', { timeout: 20000 })
+  await waitFor(page, '[data-renderer="text"] .fp-code .fp-ln', 'text 行号 gutter 出现')
   let s = await page.evaluate(() => {
     const host = document.querySelector('[data-renderer="text"]')
     const r = host?.getBoundingClientRect()
@@ -225,7 +256,7 @@ async function main() {
   console.log('\n[4] markdown 临时态复核：.md 仍走 text，且内容可读（R08b 不改它）')
   await openTab(page, 'docs/guide.md', 'preview')
   await waitRenderer(page, 'text')
-  await page.waitForSelector('[data-renderer="text"] .fp-code .fp-ln', { timeout: 20000 })
+  await waitFor(page, '[data-renderer="text"] .fp-code .fp-ln', 'markdown 行号 gutter 出现')
   const md = await page.evaluate(() => {
     const host = document.querySelector('[data-renderer="text"]')
     const code = host?.querySelector('.fp-code')
@@ -381,7 +412,7 @@ async function main() {
   // —— [8] 旧路径（FilePreview）也被注册表接管 ——
   console.log('\n[8] 旧路径保留但已走注册表：mode=\'source\' 的 FilePreview 分支')
   await openTab(page, 'auth.go', 'source')
-  await page.waitForSelector('.file-source [data-renderer="text"] .fp-code .fp-ln', { timeout: 20000 })
+  await waitFor(page, '.file-source [data-renderer="text"] .fp-code .fp-ln', '文件面板源码模式 gutter 出现')
   s = await page.evaluate(() => ({
     text: document.querySelectorAll('.file-source [data-renderer="text"]').length,
     lines: document.querySelectorAll('.file-source [data-renderer="text"] .fp-ln').length,
