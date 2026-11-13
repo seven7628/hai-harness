@@ -42,6 +42,11 @@ func (m *manager) handlePreviewConvert(c command, ws, kind string) {
 	// 可取消的 ctx（R08a 纪律面）：工作区关闭/退出时取消 —— 取消会转到
 	// sandbox.runExec 的 kill(-pgid)，不是「等它自己跑完」。换工作区不取消：
 	// 转换产物是按内容寻址的，换个工作区看同一份文件仍然算数。
+	// approximate=true：调用方只要**近似 HTML**（右侧栏的面板渲染器要把它读回前端塞进
+	// iframe —— 读不了 PDF）。kit 路径的产物是 PDF，所以必须在这里跳过 kit：否则面板拿到的
+	// html_path 是 PDF，file_preview 读回二进制 → iframe 空白（R08d 回归，e2e:preview-native
+	// 的 docx 一条抓到）。原生视图（previewOfficeFile）不传这个标志，仍然拿 PDF。
+	approximate, _ := c.Payload["approximate"].(bool)
 	ctx, done := m.previewCancels.begin(ws)
 	go func() {
 		defer done()
@@ -53,7 +58,7 @@ func (m *manager) handlePreviewConvert(c command, ws, kind string) {
 		//（工具栏「1/1 页、85%、下载/打印」+ 中文正文 + 缩略图都在），证据见 e2e:pdf 跑出的
 		// 02-embed-pdf-view.png。所以「PDF 当 html_path 交给内嵌浏览器」不是降级，别再改成
 		// 「PDF 必须先转 HTML」或加 PDF.js 之类的中间层。
-		if m.officeKitState().prober.Kit() != nil {
+		if !approximate && m.officeKitState().prober.Kit() != nil {
 			if pdf, kerr := m.convertOfficePDF(ctx, abs, kind); kerr == nil {
 				m.resp(c, true, "", map[string]any{
 					"path": path, "html_path": pdf, "pdf_path": pdf, "renderer": "libreoffice",

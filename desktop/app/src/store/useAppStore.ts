@@ -10949,7 +10949,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     let htmlPath: string
     try {
       // 与 previewOfficeFile 同一条 bridge 命令、同一份入参口径（相对路径由 bridge 锚定 workspace）。
-      const conv = await call.call(transport, { path, workspace: ws })
+      // 但**产物形态不同**：这里要把 HTML 读回前端（iframe），所以显式要近似路径
+      //（approximate:true 跳过 kit）—— 否则 kit 可用时 html_path 是 PDF，读回二进制 →
+      // iframe 空白（R08d 回归，e2e:preview-native 抓到）。想看得保真，走 previewOfficeFile。
+      const conv = await call.call(transport, { path, workspace: ws, approximate: true })
       if (!conv?.ok || !conv.html_path) {
         return { ok: false, error: conv?.error || i18nT('common.officeConvertFailed') }
       }

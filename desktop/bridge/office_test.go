@@ -188,6 +188,37 @@ func TestPreviewConvertFallsBackWhenKitFails(t *testing.T) {
 	}
 }
 
+// 面板渲染器（store 的 loadOfficePreview）只要**近似 HTML**：approximate=true 时必须
+// 跳过 kit。否则 html_path 是 PDF，前端用 file_preview 把它当文本读回 → iframe 空白
+// （R08d 回归；e2e:preview-native 的 docx 一条抓到）。原生视图不传这个标志，照旧拿 PDF。
+func TestPreviewConvertApproximateFlagSkipsKit(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "panel.docx"), []byte("fake docx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, buf := testManager(t)
+	m.runtime(ws)
+	installOfficeState(m, fakeOfficeKit(t, pdfScript), officekit.RenderImages)
+	fake := &stubConverter{html: "<html>approximate</html>"}
+	m.conv = convertSvc(t, fake)
+
+	m.dispatch(cmd(8, "docx_preview", map[string]any{"workspace": ws, "path": "panel.docx", "approximate": true}))
+	resp := waitResponse(t, buf, 8)
+	if resp["ok"] != true {
+		t.Fatalf("近似预览失败: %+v", resp)
+	}
+	data, _ := resp["data"].(map[string]any)
+	if data["renderer"] != "approximate" {
+		t.Fatalf("renderer = %v，期望 approximate（面板读不了 PDF）", data["renderer"])
+	}
+	if html, _ := data["html_path"].(string); !strings.HasSuffix(html, ".html") {
+		t.Fatalf("html_path = %q，面板要的是 HTML 产物", html)
+	}
+	if fake.calls.Load() == 0 {
+		t.Fatal("近似转换器没被调用（说明还是走了 kit）")
+	}
+}
+
 // kit 卸载（bin 被删）后状态必须**自己**失效（R08d 复评 P1）：转换回落近似路径，
 // **并且** bridge 推一条 office_kit_status(state=missing) —— 前端横幅据此消失。
 //

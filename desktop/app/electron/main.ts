@@ -1619,7 +1619,7 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // 报「bridge 请求超时」，用户重试一次即可（第二次运行时已就绪）—— 与「首次 run_python
   // 调用慢」的既有体验一致。R08d 起这条 30s 只给近似路径：kit 可用时放宽到 90s
   //（soffice 单次上限 60s + 冷启），见 previewTimeoutMs。
-  ipcMain.handle('xlsx:preview', async (_e, req: { path?: string; workspace?: string } = {}) => {
+  ipcMain.handle('xlsx:preview', async (_e, req: { path?: string; workspace?: string; approximate?: boolean } = {}) => {
     const started = await ensureBridgeBin()
     if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 不可用' }
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
@@ -1630,6 +1630,9 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     const response = await sendBridgeRequest('xlsx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
+      // 面板渲染器只认 HTML（它把产物读回前端塞 iframe）：approximate=true 跳过 kit，
+      // 否则 kit 可用时拿到的是 PDF。原生视图不传，照旧拿 PDF（见 preview_convert 注释）。
+      ...(req?.approximate === true ? { approximate: true } : {}),
     }, previewTimeoutMs())
     if (!response.ok) return { ok: false, error: response.error ?? '工作簿转换失败' }
     const htmlPath = response.data?.html_path
@@ -1653,7 +1656,7 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // 调用慢」的既有体验一致。R08d 起这条 30s 只给近似路径：kit 可用时放宽到 90s
   //（soffice 单次上限 60s + 冷启），见 previewTimeoutMs。
   // 上面这套理由三条预览通路（xlsx/docx/pptx）**逐字共用**，改一处要三处一起想。
-  ipcMain.handle('docx:preview', async (_e, req: { path?: string; workspace?: string } = {}) => {
+  ipcMain.handle('docx:preview', async (_e, req: { path?: string; workspace?: string; approximate?: boolean } = {}) => {
     const started = await ensureBridgeBin()
     if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 不可用' }
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
@@ -1664,6 +1667,9 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     const response = await sendBridgeRequest('docx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
+      // 面板渲染器只认 HTML（它把产物读回前端塞 iframe）：approximate=true 跳过 kit，
+      // 否则 kit 可用时拿到的是 PDF。原生视图不传，照旧拿 PDF（见 preview_convert 注释）。
+      ...(req?.approximate === true ? { approximate: true } : {}),
     }, previewTimeoutMs())
     if (!response.ok) return { ok: false, error: response.error ?? '文档转换失败' }
     const htmlPath = response.data?.html_path
@@ -1677,7 +1683,7 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // 唯一差别是转换器：Python 侧 python-pptx **不能渲染**，产物是按真实 OOXML 几何做的
   // **近似版式重建**（做不到的几件事印在页面顶部，见 builtin.PptxPreviewer）。前端按钮
   // 文案也据此写「近似」—— 通路不保真，入口就不该许下保真的承诺。
-  ipcMain.handle('pptx:preview', async (_e, req: { path?: string; workspace?: string } = {}) => {
+  ipcMain.handle('pptx:preview', async (_e, req: { path?: string; workspace?: string; approximate?: boolean } = {}) => {
     const started = await ensureBridgeBin()
     if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 不可用' }
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
@@ -1688,6 +1694,9 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     const response = await sendBridgeRequest('pptx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
+      // 面板渲染器只认 HTML（它把产物读回前端塞 iframe）：approximate=true 跳过 kit，
+      // 否则 kit 可用时拿到的是 PDF。原生视图不传，照旧拿 PDF（见 preview_convert 注释）。
+      ...(req?.approximate === true ? { approximate: true } : {}),
     }, previewTimeoutMs())
     if (!response.ok) return { ok: false, error: response.error ?? '演示文稿转换失败' }
     const htmlPath = response.data?.html_path

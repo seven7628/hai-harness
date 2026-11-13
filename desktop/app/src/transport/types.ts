@@ -402,6 +402,19 @@ export interface OfficeKitStatus {
   pinnedVersion: string
 }
 
+/**
+ * 办公预览请求（xlsx / docx / pptx 三条命令同形）。
+ *
+ * approximate=true：**只要近似 HTML**，跳过 LibreOffice kit。右侧栏的面板渲染器
+ *（store 的 loadOfficePreview）必须传它 —— 它把产物当文本读回来塞进 iframe，读不了 PDF；
+ * 不传则 kit 可用时 html_path 是 PDF（给内嵌浏览器看的，见 previewOfficeFile）。
+ */
+export interface OfficePreviewRequest {
+  path: string
+  workspace: string
+  approximate?: boolean
+}
+
 export interface ExternalSkillsStatusResult {
   ok: boolean
   status?: ExternalSkillsStatus
@@ -551,15 +564,15 @@ export interface Transport {
   getPathForFile(file: File): string
   // xlsx 工作簿预览：bridge 用受管 Python（openpyxl）转 HTML → 返回产物路径 →
   // 前端送内嵌浏览器 file://（与 PDF 预览同一条通路；见 store 的 previewXlsx）。
-  watchXlsx(req: { path: string; workspace: string }): Promise<{ ok: boolean; html_path?: string; error?: string }>
+  watchXlsx(req: OfficePreviewRequest): Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
   /**
    * docx 文档 / pptx 演示文稿预览：与 watchXlsx 是**同一条通路**（同形态入参、同样返回
    * HTML 产物路径、同样送内嵌浏览器 file://），桥接层只换命令名（docx_preview /
    * pptx_preview）。拆成三个方法而不是一个带 kind 的方法，是为了与 store 的三个动作
    * （previewXlsx/previewDocx/previewPptx）一一对应；浏览器 mock 三个都返回失败。
    */
-  watchDocx(req: { path: string; workspace: string }): Promise<{ ok: boolean; html_path?: string; error?: string }>
-  watchPptx(req: { path: string; workspace: string }): Promise<{ ok: boolean; html_path?: string; error?: string }>
+  watchDocx(req: OfficePreviewRequest): Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
+  watchPptx(req: OfficePreviewRequest): Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
   // 语音转写：把录音音频（wav 字节）发到 OpenAI 兼容 /audio/transcriptions，返回文本。
   // 由主进程转发（net.fetch）——避开渲染层 CORS 限制、API key 不进网页层。
   sttTranscribe(audio: ArrayBuffer, mimeType: string): Promise<{ ok: boolean; text?: string; error?: string }>
