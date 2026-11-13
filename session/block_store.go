@@ -1776,7 +1776,11 @@ func resolveBlocksRef(view []byte, recordPath string) ([]byte, error) {
 
 // resolveBlocksRefSpans 同 resolveBlocksRef，另外返回每个 block 的字节切片
 // （仅 sidecar 引用形态有；内嵌数组形态返回 nil）。供恢复路径并行解码。
-func resolveBlocksRefSpans(view []byte, recordPath string) ([]byte, [][]byte, error) {
+// resolveBlocksRefSpans 走「拼装」路径（无 mmap / 索引落后时的回退）。
+//
+// 返回的 span 全部是**逻辑内容**（readBlockVerified 已解压并校验过摘要），
+// 所以 Compressed=false —— 与映射路径的 BlockSpan 语义一致。
+func resolveBlocksRefSpans(view []byte, recordPath string) ([]byte, []BlockSpan, error) {
 	blocksRaw, ok := splitViewBlocks(view)
 	if !ok {
 		return view, nil, nil // 无 blocks 字段：保持原样，由上层校验
@@ -1826,7 +1830,7 @@ func resolveBlocksRefSpans(view []byte, recordPath string) ([]byte, [][]byte, er
 			return nil, nil, aerr
 		}
 		resolved, rerr := replaceJSONField(view, "blocks", full)
-		return resolved, spans, rerr
+		return resolved, logicalSpans(spans), rerr
 	}
 
 	// 旧口径（无 ids）：只能要求「引用集合 == 索引集合」严格相等。
@@ -1881,7 +1885,7 @@ func resolveBlocksRefSpans(view []byte, recordPath string) ([]byte, [][]byte, er
 		return nil, nil, err
 	}
 	resolved, rerr := replaceJSONField(view, "blocks", full)
-	return resolved, spans, rerr
+	return resolved, logicalSpans(spans), rerr
 }
 
 // assemble 按 id 顺序拼出完整 blocks 数组。

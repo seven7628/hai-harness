@@ -71,50 +71,56 @@ func openMappedBlocks(path string) (*mappedBlocks, error) {
 // 这里按目录把片段拼成一块**新缓冲**（只有分片块失去零拷贝，
 // 其余块仍是 mmap 窗口）。实测分片块只占全部块的 ~1.7%（650/37520），
 // 换来的是写放大从 150–275× 降到个位数 —— 值得。
-func (m *mappedBlocks) span(id string) ([]byte, [8]byte, bool) {
+//
+// ## 压缩块：解压推迟到「真的要读这一块」
+//
+// 落盘是压缩字节的块，这里**原样返回 mmap 窗口**（Compressed=true），
+// 不在这里解压。理由（2026-11-13 实测）：整份 sidecar 的块逐个解压进堆
+// 要 **259MB/会话**（20 会话 5.06GB），而首屏只解 500–2000 块 ——
+// 97% 的解压是白付。改成惰性后，没被读的块**一个字节都不碰**
+// （mmap 未触碰的页不占物理内存也不占堆）。
+func (m *mappedBlocks) span(id string) (BlockSpan, [8]byte, bool) {
 	ref, ok := m.index[id]
 	if !ok {
-		return nil, [8]byte{}, false
+		return BlockSpan{}, [8]byte{}, false
 	}
 	if isFragmented(ref.kind) {
 		return m.fragSpan(id, ref)
 	}
 	end := ref.off + int64(ref.n)
 	if ref.off < 0 || end > int64(len(m.data)) {
-		return nil, [8]byte{}, false
+		return BlockSpan{}, [8]byte{}, false
 	}
 	raw := m.data[ref.off:end]
 	if isCompressed(ref.kind) {
-		// 压缩块：落盘是压缩字节 → 解压回逻辑内容（**失去零拷贝** ——
-		// 只有压缩块如此，见 block_compress.go）。
-		out, derr := decompressBlock(raw)
-		if derr != nil {
-			return nil, [8]byte{}, false
-		}
-		raw = out
+		// 压缩块：Raw 是**压缩字节**，解压推迟到 BlockSpan.Logical()。
+		return BlockSpan{Raw: raw, Compressed: true}, ref.hash, true
 	}
-	return raw, ref.hash, true
+	return BlockSpan{Raw: raw}, ref.hash, true
 }
 
 // fragSpan 拼接分片块的内容。
-func (m *mappedBlocks) fragSpan(id string, ref blockRef) ([]byte, [8]byte, bool) {
+//
+// 分片块在索引里带 0x80 标志而**不带**压缩标志（压缩时会把分片折叠成整块，
+// 见 block_compress.go）⇒ 拼出来就是逻辑内容，Compressed=false。
+func (m *mappedBlocks) fragSpan(id string, ref blockRef) (BlockSpan, [8]byte, bool) {
 	end := ref.off + int64(ref.n)
 	if ref.off < 0 || end > int64(len(m.data)) {
-		return nil, [8]byte{}, false
+		return BlockSpan{}, [8]byte{}, false
 	}
 	d, ok := parseFragDir(m.data[ref.off:end])
 	if !ok {
-		return nil, [8]byte{}, false
+		return BlockSpan{}, [8]byte{}, false
 	}
 	full := make([]byte, 0, d.total)
 	for _, it := range d.items {
 		e := it.off + int64(it.n)
 		if it.off < 0 || e > int64(len(m.data)) {
-			return nil, [8]byte{}, false
+			return BlockSpan{}, [8]byte{}, false
 		}
 		full = append(full, m.data[it.off:e]...)
 	}
-	return full, d.logical, true
+	return BlockSpan{Raw: full}, d.logical, true
 }
 
 func (m *mappedBlocks) close() error {
@@ -161,7 +167,7 @@ func blocksRefTarget(view []byte, recordPath string) (ref blocksRefDoc, storePat
 // mappedView 是「整份 sidecar 的只读映射 + 按 id 升序的块窗口」。
 type mappedView struct {
 	ids     []uint64
-	spans   [][]byte
+	spans   []BlockSpan
 	hashes  [][8]byte
 	kinds   []uint8
 	release func()
@@ -222,7 +228,7 @@ func resolveBlocksRefMapped(view []byte, recordPath string) (*mappedView, error)
 	}
 	sortUint64WithIDs(nums, ids)
 
-	spans := make([][]byte, len(ids))
+	spans := make([]BlockSpan, len(ids))
 	hashes := make([][8]byte, len(ids))
 	kinds := make([]uint8, len(ids))
 	for i, id := range ids {

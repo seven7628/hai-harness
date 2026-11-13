@@ -105,9 +105,14 @@ func TestFragmentedCardThroughMappedView(t *testing.T) {
 	// 两个 span 里必有一个是那张分片卡片 → 必须逐字节还原。
 	found := false
 	for i, span := range loaded.LoadedBlockSpans {
-		if string(span) == string(card) {
+		// 惰性解压：压缩块的 Raw 是压缩字节，先取逻辑内容。
+		logical, lerr := span.Logical()
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if string(logical) == string(card) {
 			found = true
-			if d := PayloadDigest(span); d != loaded.LoadedBlockHashes[i] {
+			if d := PayloadDigest(logical); d != loaded.LoadedBlockHashes[i] {
 				t.Fatalf("分片块的摘要不匹配（索引存的是逻辑摘要）")
 			}
 		}

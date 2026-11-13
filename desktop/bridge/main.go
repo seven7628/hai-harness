@@ -7149,19 +7149,36 @@ func main() {
 
 // 空闲会话 LRU。
 //
-// ## 预算怎么来的（2026-11-08 实测，不是估）
+// ## 预算怎么来的（2026-11-13 重测，**旧值是错的**）
 //
-//	pprof inuse_space：20 个真实会话并存仅 5.6MB（≈0.3MB/会话）——500 块窗口的
-//	文本 0.5MB、512 条 turns、34k 个 span 头都算上。mmap 是虚拟地址 + page cache，
-//	多会话共享，不按会话倍增。
+// 旧注释写的是「20 个真实会话并存仅 5.6MB（≈0.3MB/会话）… mmap 是虚拟地址 +
+// page cache，多会话共享，不按会话倍增」。**这个测量错了**，错在两处：
 //
-// 所以 256MB 能装 ~170 个会话，内存根本不是先触顶的那个：真正先耗尽的是
-// **打开的映射/文件句柄**。判据因此取「内存预算 ÷ 保守单会话成本」与「句柄上限」
-// 的较小者。
+//  1. **压缩块让 mmap 不再免费** —— sidecar 里 90% 的块是 zlib 压缩的，
+//     mmap 窗口在读取时必须解压成**堆缓冲**。当时没有解压 ⇒ 逐块解压
+//     **259MB/会话**（2026-11-13 实测：pprof inuse_space 里 io.ReadAll 占 64%）。
+//     已修（session/block_span.go 惰性解压），但**窗口本身**仍是实打实的堆。
+//  2. 窗口解码后的结构（2063 块 + 975 张 agent 卡片及其 items）**本来就要占堆**，
+//     它不属于「映射头」，属于数据本身。
+//
+// 重测（同一实验台，真实 40,819 块会话）：
+//
+//	改前：422.6MB/会话（20 会话 8.45GB）
+//	改后：152.3MB/会话（20 会话 3.05GB）
+//
+// 剩下这 152MB 是**真正要显示的数据**（窗口文本 + 卡片 items + 索引表），
+// 不是浪费。按它定预算。
+//
+// 推论：旧的 `maxLiveSessions()=64` 实际允许 64 × 420MB = **27GB** 同时驻留
+// —— 这就是「应用把机器吃满」的机制。新的上限是 5 个会话（≈750MB 最坏），
+// 与 GOMEMLIMIT（2GB）相称。
 const (
-	sessionMemBudgetBytes = 256 << 20
-	sessionLiveCostBytes  = 1500 << 10 // 保守：堆 0.3MB + 映射头 1.2MB
-	maxLiveSessionsHard   = 64         // 句柄/映射上限，先于内存预算触发
+	// sessionMemBudgetBytes 是「同时驻留的会话」内存预算（512MB）。
+	sessionMemBudgetBytes = 512 << 20
+	// sessionLiveCostBytes 是保守的单会话成本（96MB）：实测 152MB/会话
+	// （含窗口 2063 块 + 卡片 items），留 1/3 余量给尚未测到的大会话。
+	sessionLiveCostBytes = 96 << 20
+	maxLiveSessionsHard  = 64 // 句柄/映射上限，正常不会先于内存预算触发
 	// sessionEvictGrace 是「最近被访问过就不淘汰」的窗口：新会话首提交的 debounce
 	// 是 800ms，留 10s 足够让 coordinator 把最后一次提交落盘，避免淘汰丢改动。
 	sessionEvictGrace = 10 * time.Second
