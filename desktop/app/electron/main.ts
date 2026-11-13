@@ -747,6 +747,20 @@ function createWindow(): void {
   mainWindow.webContents.on('did-stop-loading', () => {
     startupMark('did-stop-loading')
   })
+  // 渲染进程的 console 透传到终端（2026-11-12）。
+  //
+  // 为什么需要：视图内存预算的降级/淘汰会打一行 `[budget] …`，而渲染进程的
+  // console 只在 devtools 里 —— **终端看不到** ⇒ 机制有没有在工作无法观测。
+  // （2026-11-12 就因为看不见这行，误判成「机制没生效」，绕了一大圈。）
+  // 只透传带标记前缀的行，避免刷屏。
+  mainWindow.webContents.on('console-message', (_e: unknown, ...rest: unknown[]) => {
+    for (const a of rest) {
+      if (typeof a === 'string' && a.startsWith('[budget]')) {
+        console.log(`[renderer] ${a}`)
+        return
+      }
+    }
+  })
   mainWindow.on('closed', () => {
     destroyEmbed()
     mainWindow = null

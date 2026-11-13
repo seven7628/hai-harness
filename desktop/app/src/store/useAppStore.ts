@@ -8538,16 +8538,27 @@ function enforceViewBudget(force = false): void {
   })
   if (plan.degrade.length === 0 && plan.evict.length === 0) return
   const views = { ...st.views }
+  const activeId = st.activeSessionId
+  let degradedActive = false
   for (const sid of plan.degrade) {
     const v = views[sid]
-    if (v) views[sid] = degradeView(v)
+    if (v) {
+      views[sid] = degradeView(v)
+      if (sid === activeId) degradedActive = true
+    }
   }
   for (const sid of plan.evict) {
     delete views[sid]
     const i = viewOrder.indexOf(sid)
     if (i >= 0) viewOrder.splice(i, 1)
   }
-  useAppStore.setState({ views })
+  // 顶层镜像：活跃会话的视图被降级时，**顶层那份也得换**。
+  //
+  // store 有两份 blocks：views[sid].blocks 与顶层 s.blocks（活跃会话镜像，
+  // 见 viewFields / topViewFields）。只改 views 的话，顶层还指着**旧数组**
+  // ⇒ 旧数组仍被引用 ⇒ 白降级（内存一点没释放）。
+  // 这正是「978 MB 的 V8 堆却不降级」的一个直接原因（2026-11-12）。
+  useAppStore.setState(degradedActive && activeId ? { views, ...viewFields(views[activeId]) } : { views })
   console.info(
     `[budget] 超预算（${(budget / 1048576).toFixed(0)}MB）→ 降级 ${plan.degrade.length} 个 / 淘汰 ${plan.evict.length} 个，` +
       `剩余估算 ${(plan.remaining / 1048576).toFixed(1)}MB`,

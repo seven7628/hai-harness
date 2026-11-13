@@ -26,6 +26,7 @@
     "test:preview-registry": "esbuild src/surfaces/preview/registry-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/preview-registry.test.cjs && node --test /tmp/preview-registry.test.cjs",
     "test:preview-renderers": "esbuild src/surfaces/preview/renderers-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/preview-renderers.test.cjs --loader:.svg=text --loader:.png=dataurl --loader:.md=text --loader:.css=text --loader:.ttf=dataurl --loader:.woff=dataurl --loader:.woff2=dataurl --loader:.jpg=dataurl --loader:.jpeg=dataurl --loader:.gif=dataurl && node --test /tmp/preview-renderers.test.cjs",
     "test:store": "node scripts/test-store-queue.mjs",
+    "test:store:budget": "node scripts/test-store-budget.mjs",
     "test:effort": "node scripts/test-effort-inherit.mjs",
     "test:store:scoping": "node scripts/test-store-scoping.mjs",
     "test:activeid": "node scripts/test-activeid-authority.mjs",
