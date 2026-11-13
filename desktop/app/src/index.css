@@ -5597,6 +5597,46 @@ body.is-electron .left.collapsed .rail .rbtn {
   right: 0;
   left: auto;
 }
+/* PR-09：+N 溢出。按钮与 ＋ / ⌄ 同款（26px 高、透明底），但要显示「+2」这种两字符，
+   所以宽度自适应；数字用等宽数字，避免 9→10 时按钮抖动。 */
+.rtabs-overflow-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+}
+.rtabs-overflow {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.rtabs-overflow:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+/* 下拉锚在**自己**的按钮下方、贴右缘（.rtabs-overflow-wrap 是定位基准，同 ＋ 的口径）。
+   项多时可滚：20 个标签 = 15 个隐藏项，一屏放不下。 */
+.rtabs-overflow-menu {
+  top: 100%;
+  left: auto;
+  right: 0;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.rtabs-overflow-item {
+  width: 100%;
+}
 .rtabs-mi {
   display: flex;
   align-items: center;
@@ -5620,6 +5660,32 @@ body.is-electron .left.collapsed .rail .rbtn {
 }
 .rtabs-empty {
   padding: 40px 16px;
+}
+/* PR-09：空态能力面板 —— 空态不只是「没有标签」这句话，还要能直接开工：
+   把 ADDABLE_KINDS 列成一排按钮（图标 + kindLabel，与 ＋ 菜单同源）。 */
+.rtabs-empty-adds {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+.rtabs-empty-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.rtabs-empty-add:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--accent-strong);
 }
 .right-body {
   flex: 1;

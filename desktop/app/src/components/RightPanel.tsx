@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState, useCallback } from 'react'
 import type { ReactElement, ReactNode } from 'react'
-import { useAppStore, isPendingWebTab, rebuildWebTab } from '../store/useAppStore'
+import { useAppStore, isPendingWebTab, rebuildWebTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
 import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
 import { Activity, GitBranch, FileIcon, CheckList, EyeIcon, Globe, PanelRight, ChevronDown, Plus } from './icons'
 import { ChangesTab } from './ChangesTab'
@@ -40,8 +40,8 @@ function secondaryTabs(t: (k: string) => string): { key: RightTab; label: string
 // 标签标题/类型图标本体已随 R06b 迁进 surfaces/builtin/webSurface.tsx（那里是 web 分支的
 // 唯一消费者；若将来第二种 kind 也要用，再提升到 lib —— 本轮不预先抽象）。
 
-// 标签条最多平铺几个（超出收进「+N」）。取 5：与原型一致，且 360px 宽的右栏里
-// 5 个 × 最窄 86px 已经是「还能读出文件名」的下限。
+// 标签条最多平铺几个（超出收进「+N」）：常量在 store（TABS_MAX_VISIBLE = 5，R4 起就已定义，
+// PR-09 之前没有消费者）。取 5：与原型一致，且 360px 宽的右栏里 5 个已是「还能读出文件名」的下限。
 
 // 主 Agent 压缩镜像（右栏任务 tab）：与主会话同一数据源 —— 进行中显示活动条
 // （顶层 compressing/compressBefore 镜像），完成后渲染主会话同一个 compression block
@@ -78,6 +78,10 @@ function panelFallback(tab: TabInstance, scope: string): ReactNode {
   }
 }
 
+// 标签条上的三个面板菜单（＋ 新建 / ⌄ 重开 / PR-09 的 +N 溢出）。开合走同一套
+// ref + state + panelMenuOpen 镜像，backdrop 与 Escape 也只写一份。
+type PanelMenu = 'add' | 'more' | 'overflow' | null
+
 export default function RightPanel() {
   const t = useT()
   const allTabs = primaryTabs(t).concat(secondaryTabs(t))
@@ -107,6 +111,20 @@ export default function RightPanel() {
   const tabs = tabSet?.tabs ?? []
   const closedTabs = tabSet?.closed ?? []
   const activeTab = tabs.find((x) => x.id === tabSet?.activeId) ?? null
+  // —— PR-09：+N 溢出（让 TABS_MAX_VISIBLE 真正生效）——
+  // 可见窗口 = 数组前 TABS_MAX_VISIBLE 个；**激活标签必须始终可见**：它落在窗口外时占据
+  // 最后一槽（只换渲染，不动 tabs 数组 —— 数组顺序既是用户打开的顺序，也是 ⌃⇥ 的遍历顺序）。
+  // 隐藏项 = 没进可见窗口的那些，N 与之一一对应（下拉里数得出来几个，按钮上就写几）。
+  const overflowed = tabs.length > TABS_MAX_VISIBLE
+  const visibleTabs = (() => {
+    if (!overflowed) return tabs
+    const head = tabs.slice(0, TABS_MAX_VISIBLE)
+    const act = tabs.find((x) => x.id === tabSet?.activeId)
+    if (!act || head.includes(act)) return head
+    return [...head.slice(0, TABS_MAX_VISIBLE - 1), act]
+  })()
+  const visibleIds = new Set(visibleTabs.map((x) => x.id))
+  const hiddenTabs = overflowed ? tabs.filter((x) => !visibleIds.has(x.id)) : []
   // 编辑标签的脏标记（PR-05b）：真相在 lib/editorDocs，store 只镜像布尔值（标签圆点读它）。
   const dirtyTabs = useAppStore((s) => s.dirtyTabs)
   // 面板级菜单（⌄ 重开 / ＋ 新建 / 标签右键）：定位与内容仍是组件局部 state（菜单要锚坐标、
@@ -115,16 +133,17 @@ export default function RightPanel() {
   // 隐藏原生视图（原生层级 > DOM，否则菜单被预览画面盖掉）。
   // 两个 setter 调用点（下面 setMenu / setCtx）各自同步镜像；ref 只是为了让两个 wrapper 保持
   // **稳定身份** —— 否则 ctx 的全局 click/Escape effect 会因为依赖变化每次渲染都重订阅。
-  const [menu, setMenuState] = useState<'add' | 'more' | null>(null)
+  // PR-09：'overflow' = 标签条的 +N 下拉（与 ＋ / ⌄ 共用 backdrop、Escape、panelMenuOpen 镜像）。
+  const [menu, setMenuState] = useState<PanelMenu>(null)
   // 标签右键菜单（R4 的批量关闭 + 文件动作；内层标签条退役后搬到这里）。
   const [ctx, setCtxState] = useState<{ x: number; y: number; id: string } | null>(null)
   const setPanelMenuOpen = useAppStore((s) => s.setPanelMenuOpen)
-  const menuRef = useRef<'add' | 'more' | null>(null)
+  const menuRef = useRef<PanelMenu>(null)
   const ctxRef = useRef<{ x: number; y: number; id: string } | null>(null)
   const syncPanelMenuOpen = useCallback(() => {
     setPanelMenuOpen(menuRef.current !== null || ctxRef.current !== null)
   }, [setPanelMenuOpen])
-  const setMenu = useCallback((next: 'add' | 'more' | null | ((cur: 'add' | 'more' | null) => 'add' | 'more' | null)) => {
+  const setMenu = useCallback((next: PanelMenu | ((cur: PanelMenu) => PanelMenu)) => {
     const v = typeof next === 'function' ? next(menuRef.current) : next
     menuRef.current = v
     setMenuState(v)
@@ -141,6 +160,55 @@ export default function RightPanel() {
   //（面板一片空白，且没有任何报错）。这是唯一一个不属于「镜像」的写点，故意留在这里而不是
   // 藏在 setter 里：它是生命周期约束，不是菜单状态的来源。
   useEffect(() => () => setPanelMenuOpen(false), [setPanelMenuOpen])
+  // —— PR-09：+N 下拉的键盘可达（roving focus）——
+  // 焦点由 state 驱动（overflowFocus 变 → 下面的 effect 把 DOM 焦点搬过去）；菜单项是
+  // tabIndex=-1 的**真 <button>**：Enter/Space 走浏览器原生激活（= 该项的 onClick），
+  // keydown 里只处理 ↑↓，不代劳 click（否则会和原生激活重复触发一次）。
+  const overflowBtnRef = useRef<HTMLButtonElement | null>(null)
+  const overflowMenuRef = useRef<HTMLDivElement | null>(null)
+  const [overflowFocus, setOverflowFocus] = useState(0)
+  useEffect(() => {
+    if (menu !== 'overflow') return
+    const items = overflowMenuRef.current?.querySelectorAll<HTMLButtonElement>('.rtabs-overflow-item')
+    if (!items?.length) return
+    items[Math.min(overflowFocus, items.length - 1)]?.focus()
+  }, [menu, overflowFocus])
+  // ＋ / ⌄ / +N 三个面板菜单的 Escape：backdrop 只覆盖「点别处」，键盘也得能关。
+  // +N 是键盘入口，关闭后焦点必须**回到按钮**：菜单项在关闭时被卸载，焦点会掉到 body，
+  // 键盘用户得从头 Tab 一整轮才能再打开（这就是「菜单键盘可达」的反面）。
+  useEffect(() => {
+    if (!menu) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setMenu(null)
+      if (menu === 'overflow') overflowBtnRef.current?.focus()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [menu, setMenu])
+  // —— PR-09：⌃⇥ / ⌃⇧⇥ 在 tabs 数组里前后移动 activeId（末尾/开头回绕）——
+  // 与 ⌘1..9（切 rightTab）是两回事，所以显式排除 metaKey。
+  // 监听挂在 window 而不是标签条上：这是**面板级**的全局切换，输入框/编辑器聚焦时也要生效
+  //（它不是一个文本编辑键）。卸载/折叠时拆掉监听。
+  useEffect(() => {
+    if (!rightExpanded) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || !e.ctrlKey || e.metaKey) return
+      e.preventDefault() // 别让 Tab 的默认行为（移动焦点）和切换同时发生
+      const set0 = useAppStore.getState().tabsByScope[scope]
+      const list = set0?.tabs ?? []
+      const n = list.length
+      if (!n) return
+      const i = list.findIndex((x) => x.id === set0?.activeId)
+      const step = e.shiftKey ? -1 : 1
+      // activeId 悬空（i<0）时：前进落到第一个、后退落到最后一个
+      const j = i < 0 ? (step > 0 ? 0 : n - 1) : (i + step + n) % n
+      const next = list[j]
+      if (next && next.id !== set0?.activeId) activateTab(next.id)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [rightExpanded, scope, activateTab])
   const ctxTab = ctx ? tabs.find((x) => x.id === ctx.id) ?? null : null
   const ctxIndex = ctxTab ? tabs.findIndex((x) => x.id === ctxTab.id) : -1
   // 菜单里的文件动作需要**绝对路径**：web 标签从 file:// URL 还原（阶段 5：待重建的恢复标签
@@ -166,6 +234,11 @@ export default function RightPanel() {
   // 用户点完"丢弃"还得再点一次关其它（评审 #4）。
   const ctxCloseOthers = () => { closeTabs(tabs.filter((x) => x.id !== ctx?.id).map((x) => x.id)); setCtx(null) }
   const ctxCloseRight = () => { closeTabs(tabs.slice(ctxIndex + 1).map((x) => x.id)); setCtx(null) }
+  // 关闭全部 = 同一条批量路径（干净的直接 closeTabNow、脏的进确认队列逐个问，见 store.closeTabs）。
+  // 不写成 `for (...) closeTab(x)`：那样多个脏标签只能被问到最后一个，用户丢完一个还得再关一次。
+  const ctxCloseAll = () => { closeTabs(tabs.map((x) => x.id)); setCtx(null) }
+  // 重开 = 重开栈栈顶（store.reopenTab 不传 id 时就是这个语义）；栈空时菜单项 disabled。
+  const ctxReopen = () => { reopenTab(); setCtx(null) }
   const ctxCopyPath = async () => { if (ctxPath) await copyText(ctxPath); setCtx(null) }
   const ctxReveal = async () => { if (ctxPath) await window.desktop?.showItemInFolder?.(ctxPath); setCtx(null) }
   const ctxOpenDefault = async () => { if (ctxPath) await window.desktop?.openPath?.(ctxPath); setCtx(null) }
@@ -338,7 +411,7 @@ export default function RightPanel() {
             <ChevronDown size={13} />
           </button>
           <div className="rtabs-list">
-            {tabs.map((tab) => {
+            {visibleTabs.map((tab) => {
               const on = tab.id === tabSet?.activeId
               // 阶段 3：休眠/恢复态的标签标记（灰态 + 「已休眠」/「正在恢复…」）。
               // 休眠条目仍在 embedNav.targets 里（sleeping: true）—— 标签身份不丢，点一下就恢复。
@@ -367,6 +440,18 @@ export default function RightPanel() {
                     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTab(tab.id) }
                   }}
                   onContextMenu={(e) => { e.preventDefault(); setCtx({ x: e.clientX, y: e.clientY, id: tab.id }) }}
+                  onMouseDown={(e) => {
+                    // 只挡默认行为（Chromium 的中键自动滚屏）；关闭放在 auxclick ——
+                    // 「按下后拖走取消」的手势不该关标签。
+                    if (e.button === 1) e.preventDefault()
+                  }}
+                  onAuxClick={(e) => {
+                    // PR-09：中键关闭（浏览器式）。走 closeTab —— 与 ✕ 完全同一条路径
+                    //（dirty 标签会进确认框，不会静默丢内容）。
+                    if (e.button !== 1) return
+                    e.preventDefault()
+                    closeTab(tab.id)
+                  }}
                 >
                   {tab.kind === 'web' && tab.viewId && unreadViews.includes(tab.viewId)
                     ? <span className="browser-page-dot" title={t('browser.tabUnread')} />
@@ -386,6 +471,51 @@ export default function RightPanel() {
               )
             })}
           </div>
+          {/* PR-09：+N 溢出。只渲染 TABS_MAX_VISIBLE 个槽位，其余收在这里；按钮是 <button>，
+              所以天然在 Tab 序里（Enter/Space 打开，↑↓ 在项间移焦点，Escape 关闭并归还焦点）。
+              菜单锚在自己的按钮下方（与 ＋ 同一套 .rtabs-menu-right 口径）。 */}
+          {overflowed && (
+            <div className="rtabs-overflow-wrap">
+              <button
+                ref={overflowBtnRef}
+                className="rtabs-overflow"
+                data-tip={t('rp.tabs.overflow').replace('{n}', String(hiddenTabs.length))}
+                aria-label={t('rp.tabs.overflow').replace('{n}', String(hiddenTabs.length))}
+                aria-haspopup="menu"
+                aria-expanded={menu === 'overflow'}
+                onClick={() => { setOverflowFocus(0); setMenu((m) => (m === 'overflow' ? null : 'overflow')) }}
+              >
+                +<span className="rtabs-overflow-n">{hiddenTabs.length}</span>
+              </button>
+              {menu === 'overflow' && (
+                <div
+                  ref={overflowMenuRef}
+                  className="rtabs-menu rtabs-overflow-menu"
+                  role="menu"
+                  onKeyDown={(e) => {
+                    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+                    e.preventDefault()
+                    const n = hiddenTabs.length
+                    if (!n) return
+                    const step = e.key === 'ArrowDown' ? 1 : -1
+                    setOverflowFocus((i) => (Math.min(i, n - 1) + step + n) % n)
+                  }}
+                >
+                  {hiddenTabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      className="rtabs-mi rtabs-overflow-item"
+                      role="menuitem"
+                      tabIndex={-1}
+                      onClick={() => { activateTab(tab.id); setMenu(null) }}
+                    >
+                      {tabIconEl(tab)} {tabTitle(tab)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {/* ＋ 的定位容器：新建菜单锚在**按钮**下方（贴按钮右缘），而不是标签条左侧 ——
               用户口径「菜单应该锚在「＋」按钮下面（右侧），不是左侧」。⌄ 的重开菜单保持锚在左侧。 */}
           <div className="rtabs-add-wrap">
@@ -442,6 +572,8 @@ export default function RightPanel() {
               >
                 {t('browser.menu.closeRight')}
               </button>
+              <button className="ctx-item" role="menuitem" onClick={ctxCloseAll}>{t('browser.menu.closeAll')}</button>
+              <button className="ctx-item" role="menuitem" disabled={closedTabs.length === 0} onClick={ctxReopen}>{t('browser.menu.reopen')}</button>
               {ctxPath && (
                 <>
                   <div className="ctx-sep" />
@@ -479,6 +611,18 @@ export default function RightPanel() {
             <div className="empty rtabs-empty">
               <div className="big">{t('rp.tabs.empty')}</div>
               {t('rp.tabs.emptyHint')}
+              {/* PR-09：空态不是终点 —— 把「能开什么」直接列出来（与 ＋ 菜单同一份 ADDABLE_KINDS，
+                  图标/文案同源），点一下就能开工，用户不必先猜 ＋ 里有什么。 */}
+              {tabs.length === 0 && (
+                <div className="rtabs-empty-adds" role="group" aria-label={t('rp.tabs.add')}>
+                  {ADDABLE_KINDS.map((k) => (
+                    <button key={k} className="rtabs-empty-add" data-kind={k} onClick={() => openTab({ kind: k } as TabSpec)}>
+                      {kindIcon(k)}
+                      <span>{kindLabel(k)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {/* R07c：非 file 面板（activity / git / web）统一走 provider 委派 —— 一条表达式覆盖三种
