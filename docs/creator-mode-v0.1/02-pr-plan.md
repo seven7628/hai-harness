@@ -302,6 +302,10 @@
 
 - **09**：`+N` 溢出下拉、右键 `关闭/其他/右侧/全部/固定`、`⌃⇥`、空态能力面板、中键关闭。
 - **10**：`SurfaceBoundary`（每面板 ErrorBoundary）、挂载失败计数（localStorage，按 kind+hash）、3 次自动禁用、墓碑标签（`unavailable`）。
+  - **落地偏差（R10，F64–F65）**：计数键只用 **kind**，不带 hash —— 派单给的记录结构是
+    `kind/count/lastError/at/disabled`，而「provider 内容哈希」这一层现在拿不到（插件要等
+    PR-12 的 loader 才有可哈希的产物）。后果：**换了新版本的插件，旧的失败计数仍然压着它**，
+    要用户手动「重新启用」一次。hash 留给 PR-12 的 `surface_install` 一起收口。
 - **11**：删 `TAB_KINDS`、`makeTab` 的 kind switch、`kindIcon/kindLabel` 的 switch、`rightTab` 字段本身（如果 e2e 已全部迁移）。**判据：`grep -c "kind === '" RightPanel.tsx` = 0，`grep -rn "rightTab" desktop/app/src` 只剩兼容注释。**
 
 ---

@@ -743,3 +743,33 @@ PR-09 的派单里我写了「`⌘1..9` 是切 `rightTab`」。实现者照这�
 实现者的两处判断经核为**正确**，记录备查：
 - `关闭全部` 用 `store.closeTabs(ids)`：store 里它先关干净的、把 dirty 的**整批**塞进 `closeConfirm` 队列逐个问；逐 id 调 `closeTab` 只会问到第一个。
 - `⌃⇥` 读 `useAppStore.getState().tabsByScope[scope]` 而不是闭包里的 `tabs` —— 键盘事件比 React 状态更新先到，用闭包值会慢一拍。
+
+### F64（PR-10）—— 缓存就是第二种真相：两个模块实例，两份 cache，一边写一边不认
+
+`surfaces/health.ts` 第一版是「模块级内存 store + 每次改动 write-through 到 localStorage」。看着很稳：
+写一半内存一半持久化，读走内存（省一次 JSON.parse）。
+
+探针直接把它打穿了：`disableSurface('git')` 之后 `localStorage` 里有记录、探针这一侧的
+`isSurfaceDisabled('git') === true`，但 `listSurfaces()` 仍然把 `git` 列在菜单里。两边读的是**同一份
+文件、同一个 localStorage**，却给出相反答案 —— 因为探针用 `import('../../src/surfaces/health.ts')`
+动态引入，和 RightPanel 那条 `../surfaces/health` 被解析成了**两个模块实例**，两份 `cache` 各自为政。
+
+修法不是「让探针别动态 import」（那只是把症状挪走），而是**删掉 cache**：真相源只留 localStorage，
+每次读它。一条记录的 `getItem + JSON.parse` 是微秒级，用不上第二种真相。
+
+> **教训（F53 的同族）**：F53 是「测试里新建了一个 Cache 实例，生产用的是 Service.cache，锁在测试路径上
+> 是空操作」；F64 是同一件事的另一面 —— **只要有两份可变状态，就迟早会分叉**，而分叉现场通常长得
+> 像「某个 UI 分支没刷新」。判据很简单：这个函数能不能被单独 import 两遍还表现一致？不能就别加缓存。
+
+### F65（PR-10）—— React 18 dev 会把出错的那次 render 跑第二遍，「只崩一次」的夹具因此永远不崩
+
+探针需要一个「第一次挂载崩、第二次成功」的标签来验「切走再切回能重新渲染」（boundary 按 tab.id 重置）。
+第一版写成计数器：`n = hits+1; hits.set(id, n); if (n <= 1) throw`。
+
+结果：那个标签一次都没崩，探针拿到的是正常的 `.probe-ok`。原因是 React 18 在**开发模式**下，出错后
+会把同一次 render 再执行一遍（用来重建组件栈）；第二遍 `n=2` 不再抛 → 错误消失 → 边界根本没被触发。
+
+改成显式闸门（`__probe.setBoom(true/false)`）后语义才可控：崩不崩是**夹具的输入**，不是渲染次数的函数。
+
+> **教训**：任何「按调用次数改变行为」的夹具，在 React dev 双跑、StrictMode 双挂载、并发重放面前都不成立。
+> 要么用显式开关，要么用「输入决定输出」的纯函数夹具 —— 别让夹具依赖框架内部的重试策略。
