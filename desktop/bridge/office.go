@@ -68,6 +68,35 @@ func (m *manager) officeKitStatus(refresh bool) officekit.Status {
 	return st
 }
 
+// officeKitGone kit 的 bin 是否已经不在了（用户卸载 / 清理 app 数据 / 换了一台机器同步过来）。
+//
+// 为什么单看 stat 就够：Prober 的 Kit() 是**缓存**的，它不会随着文件被删而变 —— 这正是
+// 「卸载后横幅还写着可用」的机制。转换是第一个能观察到事实变化的时刻，所以在这里判。
+func officeKitGone(kit *officekit.Kit) bool {
+	if kit == nil || kit.Bin == "" {
+		return false
+	}
+	_, err := os.Stat(kit.Bin)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// invalidateOfficeKit 作废探测缓存，并把新状态推给 renderer（R08d 复评 P1）。
+//
+// 为什么必须推：状态是**进程级缓存**，不推的话横幅会一直显示「可用」，直到用户自己
+// 去点设置页的「重新探测」—— 而用户卸载后看到的应该是「已缺失 + 怎么装」，不是
+// 「一切正常」的谎。事件名与命令同名（office_kit_status），前端用它更新同一份 store 字段。
+//
+// 为什么不必同步：重探要重新哈希 kit 二进制（几百 MB），放在转换的回落路径上会把
+// 「已经失败的那次预览」再拖几秒；横幅晚几百毫秒消失没有代价。
+func (m *manager) invalidateOfficeKit(goneBin string) {
+	st := m.officeKitState().prober.Refresh()
+	fmt.Fprintf(os.Stderr, "[officekit] kit 已不在（%s），状态刷新为 %s\n", goneBin, st.State)
+	m.out.writeLine(map[string]any{
+		"event_type": "office_kit_status",
+		"data":       map[string]any{"kit": st},
+	})
+}
+
 // warmOfficeKit 启动时预热一次（在 kit 首次可用时跑一次空转换，把冷启成本挪走）。
 //
 // 失败不致命、也不打印成错误：它只是「让第一次真实转换快一点」的优化。
@@ -159,6 +188,12 @@ func (m *manager) convertOfficePDF(ctx context.Context, abs, kind string) (strin
 	// profile 也放 jobDir 下：一个 job 的临时目录整块回收（进程被杀也不会留 profile）。
 	res, err := kit.Convert(ctx, abs, jobDir, officekit.ConvertOptions{ProfileRoot: jobDir})
 	if err != nil {
+		// kit 被删掉时这里报的是「启动 soffice: fork/exec …: no such file or directory」——
+		// 它不只是「这份文件转不了」，而是**状态本身变了**：作废缓存 + 推新状态，
+		// 否则横幅会一直说「可用」，直到用户手动点「重新探测」（R08d 复评 P1）。
+		if officeKitGone(kit) {
+			go m.invalidateOfficeKit(kit.Bin)
+		}
 		return "", err
 	}
 	f, err := os.Open(res.PDFPath)

@@ -7,6 +7,22 @@
 //
 // CodeMode 契约（00-conventions §2）：两个工具都实现 OutputSchemaProvider，脚本路径
 // （tools.IsScriptCall）写结构化结果，失败一律返回 Go error（不是 {"error":...}）。
+//
+// ## 已知取舍：工具集是**启动期快照**，不随 kit 的安装/卸载热生效（R08d 复评 P1）
+//
+// registerOfficeTools 只在 main.go 建 loop 时调一次，kit 不可用就**不注册**。于是：
+//   - 用户在本进程运行期间装好 kit → 设置页「重新探测」会立刻把状态刷成可用、预览也
+//     立刻走 soffice→PDF，但**本进程已有的会话里没有 office_convert/office_render**；
+//   - 要拿到这两个工具，必须重启应用（重建 loop）。
+//
+// 为什么不在探测转 ok 时补注册：注册点是 per-session 的 *tools.Engine，补注册意味着
+// 遍历所有活会话的 eng 调 RegisterTool —— 那会**在会话跑到一半时改工具集**（模型侧
+// 的 schema 列表、CodeMode 的内建 surface 都会变），而工具集变化本来只允许发生在
+// loop 重建这一个边界上（见 main.go 的 rebuildLoop 注释）。为一个「装完就重启」的
+// 低频路径去动那个边界，代价远大于收益。
+//
+// 代价是文案必须诚实：设置页那一节明确写着「装好后需重启应用才可用」
+// （i18n 的 office.kit.restartHint）。改这里之前先看那条文案 —— 两者是一对。
 package main
 
 import (

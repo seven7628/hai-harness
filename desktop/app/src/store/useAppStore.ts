@@ -4802,6 +4802,14 @@ export function dispatchEvent(raw: AnyEvent): void {
         }
         break
       }
+      // 办公组件状态变化（R08d）：bridge 在「kit 的 bin 已经不存在」时主动推一份新状态
+      //（转换回落的那一刻就是事实变化的时刻）。更新同一份字段，横幅随之自己消失 ——
+      // 否则它要等用户去设置页点「重新探测」，等于说谎。
+      case 'office_kit_status': {
+        const d = raw.data as { kit?: OfficeKitStatus } | undefined
+        if (d?.kit) setState({ officeKit: d.kit, officeKitLoading: false })
+        break
+      }
       // ego lite 激活提示（引擎=ego + load_skill(ego-browser) 时 bridge 发；方案 1）：
       // 窗口已带到前台，提示用户切到 agent 的 Space 查看实时操作。
       case 'ego_activate_status': {
@@ -10956,7 +10964,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     let htmlPath: string
     try {
       // 与 previewOfficeFile 同一条 bridge 命令、同一份入参口径（相对路径由 bridge 锚定 workspace）。
-      const conv = await call.call(transport, { path, workspace: ws })
+      // 但**产物形态不同**：这里要把 HTML 读回前端（iframe），所以显式要近似路径
+      //（approximate:true 跳过 kit）—— 否则 kit 可用时 html_path 是 PDF，读回二进制 →
+      // iframe 空白（R08d 回归，e2e:preview-native 抓到）。想看得保真，走 previewOfficeFile。
+      const conv = await call.call(transport, { path, workspace: ws, approximate: true })
       if (!conv?.ok || !conv.html_path) {
         return { ok: false, error: conv?.error || i18nT('common.officeConvertFailed') }
       }

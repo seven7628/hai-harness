@@ -16,6 +16,7 @@ import (
 	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/internal/officekit"
 	"github.com/seven7628/hai-harness/provider"
 	"github.com/seven7628/hai-harness/provider/anthropic"
 	"github.com/seven7628/hai-harness/provider/responses"
@@ -93,6 +94,11 @@ func testManager(t *testing.T) (*manager, *syncBuf) {
 		provCfg:    loadProviderConfig(),
 		out:        newOut(buf),
 	}
+	// 办公组件默认按「未安装」起步（R08d）：Prober 的零值选项会探测**本机**
+	//（PATH + /Applications），装了 LibreOffice 的开发机上预览会真的起 soffice ——
+	// 那会把「预览通路」测成「这台机器装没装 LO」，而且一次冷启就能吃掉用例的等待窗口。
+	// 需要 kit 的用例自己 installOfficeState（office_test.go），其余一律走近似路径。
+	installOfficeState(m, noKitOptions(t), officekit.RenderImages)
 	// 测试结束前统一停掉所有会话（不关 workspace：ws.plugins/mcp 关闭会误伤
 	// injectBrowserWS 等 fake 插件）。后台 run goroutine（401 重试等）在 TempDir
 	// cleanup 时仍可能 emit → syncMode 同步写盘 → directory not empty flaky。

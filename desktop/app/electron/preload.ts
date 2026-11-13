@@ -204,11 +204,11 @@ contextBridge.exposeInMainWorld('desktop', {
   // xlsx 工作簿预览：bridge 侧转 HTML（受管 Python + openpyxl），返回产物路径。
   // renderer：libreoffice = 走了 kit 的 soffice→PDF；approximate = 既有近似渲染（kit 缺失
   // 或这份文件转不动）。前端据此在面板顶部出横幅（R08d）。
-  watchXlsx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('xlsx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
+  watchXlsx: (req: { path: string; workspace: string; approximate?: boolean }) => ipcRenderer.invoke('xlsx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
   // docx 文档 / pptx 演示文稿预览：与 watchXlsx 是同一条通路（同样的 invoke 形态与返回），
   // 只是主进程侧换 bridge 命令（mammoth / python-pptx）。调用方见 store 的 previewOfficeFile。
-  watchDocx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('docx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
-  watchPptx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('pptx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
+  watchDocx: (req: { path: string; workspace: string; approximate?: boolean }) => ipcRenderer.invoke('docx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
+  watchPptx: (req: { path: string; workspace: string; approximate?: boolean }) => ipcRenderer.invoke('pptx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
   // 音视频（R08c）：`<video src>` 用 `hai-media://`（主进程按 Range 回 206，不把文件读进内存）。
   // mediaUrl 只对工作区内的媒体扩展名给 URL；mediaProbe 是 ffprobe 元信息（缺 ffprobe 时
   // 仍是 ok:true + available:false —— 降级不算错误）；mediaStats 是协议计数器（e2e 判据）。
@@ -306,7 +306,7 @@ declare global {
       pickFsDir: () => Promise<string | null>
       // 拖拽/选择得到的 File → 磁盘路径（JS 构造的 File 返回空串）
       getPathForFile: (file: File) => string
-      watchXlsx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
+      watchXlsx: (req: { path: string; workspace: string; approximate?: boolean }) => Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
       applyTheme: (theme: string) => Promise<{ ok: boolean }>
       embedShow: (p: { url?: string; rect?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; error?: string; state?: unknown }>
       embedResize: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>

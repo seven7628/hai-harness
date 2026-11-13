@@ -1474,6 +1474,10 @@ function OfficeKitSection() {
         <div>
           <div className="set-label">{t('office.kit.subtitle')}</div>
           <div className="set-desc">{t('office.kit.desc')}</div>
+          {/* 工具注册是启动期快照（desktop/bridge/office_tools.go）：状态可以热刷新，
+              问 agent 要 office_convert/office_render 必须重启 —— 写在这里，别让
+              「重新探测」暗示工具也热生效。 */}
+          <div className="set-desc">{t('office.kit.restartHint')}</div>
           {kit && (
             <div className="okb-meta">
               <div><span className="okb-k">{t('office.kit.version')}</span><span className="okb-v mono">{kit.version || '—'}{sourceLabel ? `（${sourceLabel}）` : ''}</span></div>
