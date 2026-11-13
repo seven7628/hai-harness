@@ -11100,6 +11100,26 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .preview-image-title { color: var(--text-2); font-size: 13px; }
 .preview-image-reason { max-width: 56ch; color: var(--text-3); font-size: 11.5px; line-height: 1.65; }
 .preview-image-path { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 10px; }
+/* pdf 渲染器（surfaces/preview/renderers/pdf.tsx）：原生 Chromium viewer 浮在这块区域上，
+   所以这里只提供「位置 + 尺寸 + 建连中的说明」。scrim 必须 pointer-events:none —— 它盖在
+   原生视图的矩形上，吞掉指针就等于让人不能选中/滚动 PDF。 */
+.pv-pdf { flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; display: flex; }
+.pv-pdf-scrim { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; }
+.pv-pdf-badge { align-self: flex-start; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); font-size: 10px; background: var(--bg-1); }
+.pv-pdf-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 10px; }
+.pv-pdf-hint { margin-top: auto; color: var(--text-3); font-size: 11.5px; }
+/* office 渲染器（surfaces/preview/renderers/office.tsx）：能力提示条固定一条，iframe 吃满剩余高度。
+   提示条是**必须**的：轻量预览与 LibreOffice 的保真度差得远，藏起来等于骗人（见 office.tsx 头注释）。 */
+.pv-office { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.pv-office-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 10px; border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 10.5px; }
+.pv-office-warn { color: var(--warning); }
+.pv-office-more { margin-left: auto; border: 1px solid var(--border); background: var(--bg-1); color: var(--text-2); border-radius: 4px; padding: 1px 8px; font-size: 10.5px; cursor: pointer; }
+.pv-office-more:hover { color: var(--text-1); border-color: var(--text-3); }
+.pv-office-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; }
+.pv-office-spin { display: inline-block; animation: pvspin 1.1s linear infinite; }
+.pv-office-hint { padding: 10px 12px; color: var(--text-3); font-size: 11.5px; line-height: 1.6; }
+.pv-error { color: var(--danger); }
+@keyframes pvspin { to { transform: rotate(360deg); } }
 /* Markdown 预览（「最终文件」的预览模式）：复用对话区 .md 的全套元素样式
    （GFM 表格 / mermaid / KaTeX / 代码块），只把「窄列对话气泡」的排版覆写成
    「文档页」排版——全尺寸侧栏比对话区宽得多，沿用对话区的小字号与窄行宽会显得局促。

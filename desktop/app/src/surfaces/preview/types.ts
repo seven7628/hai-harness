@@ -29,7 +29,7 @@ export interface FileRef {
  */
 export interface PreviewProps {
   file: FileRef
-  /** 文本内容；二进制渲染器（image）不使用，为 ''。 */
+  /** 文本内容；二进制渲染器（image/pdf/office）不使用，为 ''。 */
   content: string
   /**
    * 预高亮的 shiki HTML。**可选**，两条路各取所需：
@@ -38,16 +38,28 @@ export interface PreviewProps {
    * 传了就**必须**用传进来的那份（主题/字号都是调用方那一份，两边各算会闪一次色）。
    */
   html?: string
+  /**
+   * 「我接不了这个文件」的上报口（R08b）。
+   *
+   * 为什么必须是上报、不是自己画一块占位：`data-renderer` 只有一个写者（PreviewHost），
+   * 若渲染器自己渲染 `data-renderer="unavailable"`，宿主就会把它**包在** `data-renderer="docx"`
+   * 里面 —— 同屏两个 renderer 标识，探针与看板都得猜哪个算数。上报让宿主把整块换成
+   * unavailable（带 data-renderer-id），与「依赖缺失」那条路落到同一个组件上。
+   *
+   * 触发场景（都要求**写明缺什么**，不许笼统「加载失败」）：转换失败/超时、产物读不回、
+   * 内嵌视图建不起来。调用时机：effect / catch 里（渲染期调用会 setState 报警）。
+   */
+  onUnavailable?: (reason: string) => void
 }
 
 /**
- * 渲染器依赖（如「转换服务」「媒体协议」）。R08a 只立名册与默认不可用状态：
- * 真正会 `requires: ['conversion']` 的是 R08b 的 docx/pptx/xlsx，R08c 的 media。
+ * 渲染器依赖（如「转换服务」「媒体协议」「内嵌浏览器视图」）。R08a 立名册；
+ * R08b 起有真值：docx/pptx/xlsx → conversion、pdf → embed（探测见 deps.ts），R08c 的 media 待接。
  *
  * 为什么注册表要认识它：未安装时的落点必须是**写明原因的占位**（`data-renderer="unavailable"`），
  * 而不是白屏。把「依赖名」当自由字符串会出现拼错的 requires 永远静默不可用 —— 故注册即校验。
  */
-export type PreviewDependency = 'conversion' | 'media'
+export type PreviewDependency = 'conversion' | 'media' | 'embed'
 
 /** 依赖可用性。不可用时 reason 是给用户看的原因（诊断文案，与 bridge 的 error 同口径，不走 i18n）。 */
 export type DependencyStatus = { ok: true } | { ok: false; reason: string }

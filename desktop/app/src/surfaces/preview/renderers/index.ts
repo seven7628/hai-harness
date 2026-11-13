@@ -5,11 +5,11 @@
 // 注册就必然发生过 —— F45 那类「探针只 import 了 RightPanel，provider 全 undefined」
 // 的坑在源头堵掉。
 //
-// 本轮只注册三个（R08a）。pdf/docx/pptx/xlsx/media 是 R08b/R08c：它们的 match/weight
-// 已经在 types.PreviewWeight 的口径里留好位置（100 = 专用格式），但**没有**注册 ——
-// 于是那些扩展名现在落到 unavailable 占位，而不是白屏。
+// R08a 注册 text/image/csv；R08b 补齐 pdf/docx/pptx/xlsx（weight 100 = 专用格式）。
+// media（mp4/mp3）仍是 R08c：没有渲染器 → unavailable 占位（写明原因），不是白屏。
 import { isCsvPath } from '../../../lib/csv'
-import { IMAGE_EXTS } from '../../../lib/visualFile'
+import { DOCX_EXTS, IMAGE_EXTS, PDF_EXTS, PPTX_EXTS, XLSX_EXTS } from '../../../lib/visualFile'
+import { detectPreviewDeps } from '../deps'
 import { registerRenderer } from '../registry'
 
 // 注册顺序 = 同 weight 时的胜出顺序（见 registry.pickRenderer）。本轮三者 weight 互不相同，
@@ -36,3 +36,50 @@ registerRenderer({
   match: (f) => (f.binary ? 0 : 1),
   load: async () => (await import('./text')).default,
 })
+
+// —— R08b：四种「专用格式」 ——
+//
+// weight 100 高于 text(10)/csv(60)/image(80)：这不是审美而是**判据**。.pdf 在 registry 里
+// 同时被 text 接（非二进制就接 —— 而 pdf 在 bridge 眼里是二进制，故实务上 text 不接），
+// 但反过来一旦有人把 text 的 match 放宽或把 size 传成 0，pdf 就会被抢走渲染成空代码面。
+// 「专用格式永远先于通用兜底」这一条必须由数值保证，而不是由 match 的实现细节保证。
+//
+// requires 让「没装运行时」走到**挂载前**的 unavailable 占位（写明缺什么）：
+//   · pdf → embed（原生内嵌视图，Chromium 的 PDF viewer 只在那里）
+//   · docx/pptx/xlsx → conversion（受管 Python 的转换通道）
+registerRenderer({
+  id: 'pdf',
+  weight: 100,
+  match: (f) => (PDF_EXTS.has(f.ext) ? 1 : 0),
+  requires: ['embed'],
+  load: async () => (await import('./pdf')).default,
+})
+
+registerRenderer({
+  id: 'docx',
+  weight: 100,
+  match: (f) => (DOCX_EXTS.has(f.ext) ? 1 : 0),
+  requires: ['conversion'],
+  load: async () => (await import('./office')).default,
+})
+
+registerRenderer({
+  id: 'pptx',
+  weight: 100,
+  match: (f) => (PPTX_EXTS.has(f.ext) ? 1 : 0),
+  requires: ['conversion'],
+  load: async () => (await import('./office')).default,
+})
+
+registerRenderer({
+  id: 'xlsx',
+  weight: 100,
+  match: (f) => (XLSX_EXTS.has(f.ext) ? 1 : 0),
+  requires: ['conversion'],
+  load: async () => (await import('./office')).default,
+})
+
+// 依赖探测放在注册之后：本模块是「渲染器在册」的唯一副作用入口，凡是能选到渲染器的地方
+// 必然先执行过它 —— 于是「requires 有没有真值」与「渲染器在不在」不会各走一条时序
+//（F45 那类「探针只 import 了一半」的坑在源头堵掉）。
+detectPreviewDeps()

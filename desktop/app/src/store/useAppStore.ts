@@ -183,6 +183,16 @@ export interface FilePreview {
   binary?: boolean
 }
 
+// office 预览的「读回来的产物」（R08b，见 loadOfficePreview）。
+//
+// 三种格式共用一套：bridge 的 xlsx_preview / docx_preview / pptx_preview 都回一个 HTML 产物
+// 路径（不落工作区），前端再经 file_preview 把内容读回来（上限 1 MiB → truncated）。
+// truncated 不是「小瑕疵」而是**必须告知**的事实：截断的 HTML 在 iframe 里会缺尾（丢表格行/
+// 丢页面），所以渲染器据此给「在内嵌浏览器打开完整版」的出口。
+export type OfficePreviewResult =
+  | { ok: true; html: string; truncated: boolean; htmlPath: string }
+  | { ok: false; error: string }
+
 export interface FileFocus {
   path: string
   toolId?: string
@@ -2050,6 +2060,16 @@ export const FILE_PREVIEWS_MAX = 8
 //   · 自愈（响应因任何原因没回来时，超过 FILE_PREVIEW_RETRY_MS 允许重发）。
 const filePreviewInFlight = new Map<string, number>()
 const FILE_PREVIEW_RETRY_MS = 5000
+// office 转换结果的短期缓存（键 = kind + 路径）：
+//   · 为什么要缓存：一次转换要起受管 Python（0.5~3s），而 preview 标签在切标签时会**卸载重挂**
+//     （RightPanel 只挂激活标签）—— 不缓存的话「看一眼 A、切走、切回」就再转一次。
+//   · 为什么带 TTL：产物是文件内容的函数，源文件可能被 agent/编辑器改掉；60s 足够挡住
+//     「切来切去」的重复转换，又不会让用户对着改完的文件看旧预览（重开标签即刷新）。
+//   · 为什么不按 mtime：fs_stat 契约里没有 mtime（transport 只回 size/isFile），
+//     为此改 IPC 面不值当 —— TTL 的口径足够诚实（超时即重转）。
+const officePreviewCache = new Map<string, { at: number; result: OfficePreviewResult }>()
+const OFFICE_PREVIEW_TTL_MS = 60_000
+const OFFICE_PREVIEW_CACHE_MAX = 8
 // requestFilePreview：发一次 file_preview 并登记在途（键按**发起时**的工作区归一化）。
 // 顺序很重要：**先登记再 send** —— mock transport 的响应是**同步**发出的（见 send 的
 // im_chat_list 注释），后登记会留下一条永远没人释放的在途记录（那条 path 从此不再补拉）。
@@ -2823,6 +2843,14 @@ export interface AppState {
   // 口径 = `menu !== null || ctx !== null`（RP 在**两个** setter 调用点同步写这里，没有第三个写者），
   // 只表示「有菜单开着」，不含定位/内容（那两份仍留在 RP：菜单要锚坐标、要读标签）。
   panelMenuOpen: boolean
+  // previewEmbedActive：**预览面板**里的原生视图是否正在显示（R08b，pdf 渲染器唯一写者）。
+  //
+  // 为什么要进 store：RightPanel 的可见性闸门写死了「只在 web 标签显示原生视图」
+  //（`rightExpanded && activeTab.kind === 'web'`，见其 effect）。pdf 预览标签是 file kind，
+  // 它的视图由面板自己建/摆位，若不把这条状态告诉那道闸门，闸门会在面板刚显示完就把它藏掉
+  //（父级 effect 在子级 effect 之后跑 —— 实测顺序就是这样）。与 panelMenuOpen 同一处置：
+  // 「谁负责原生视图」是跨组件事实，留在局部 state 里必然两边各说各话。
+  previewEmbedActive: boolean
   // skeleton：切换会话时的骨架屏状态机（2026-10-21 重设计）。
   //
   // 为什么不是一个 boolean：骨架屏最怕**闪烁**。实测本机会话加载耗时分布极宽
@@ -3202,6 +3230,16 @@ export interface AppState {
   // R06c：右栏面板级菜单（⌄ 重开 / ＋ 新建 / 标签右键）开合的**唯一**写点，由 RightPanel 的
   // 两个 setter 调用点镜像进来 —— 它是 WebTab 可见性仲裁的输入（见 AppState.panelMenuOpen）。
   setPanelMenuOpen(open: boolean): void
+  // R08b：预览面板里的原生视图显隐（pdf 渲染器的 ready/卸载两个调用点）。
+  setPreviewEmbedActive(on: boolean): void
+  /**
+   * R08b：office 预览 = 「转换 → 读回产物 HTML」。返回可直接进沙箱 iframe 的字符串。
+   *
+   * 为什么要把这条放进 store（而不是渲染器自己开通道）：`file_preview` 是一次性命令，
+   * 它的响应由 store 的命令分发统一结算（sendData）；渲染器拿不到那条 Promise 通道。
+   * 副作用与既有预览一致：产物绝对路径也会进 filePreviews 缓存（同一份缓存，多一条临时路径）。
+   */
+  loadOfficePreview(path: string, kind: 'xlsx' | 'docx' | 'pptx'): Promise<OfficePreviewResult>
   // focusAgent：左栏树点选一个子智能体 → 叙述区改为展示它的转录（同一次运行的两处视图）。
   // 传 undefined = 回到主会话。**不改变消息投递目标**（输入框永远发给主会话）：
   // 这只是"看哪个"，与"发给谁"是两个问题（子智能体的输入通道是 agent_send）。
@@ -8548,6 +8586,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   rightSize: null,
   // 菜单关着（与 menu/ctx 的初值一致）；RP 挂载后由两个 setter 镜像维护。
   panelMenuOpen: false,
+  previewEmbedActive: false,
   skeleton: { phase: 'idle' as const, at: 0 },
   enterAnimAt: 0,
   inSkills: false,
@@ -10107,6 +10146,46 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 同值不 set：菜单开合会连带触发 RP 的两个 setter（menu 与 ctx 各一），重复写会让
   // 所有订阅者白跑一轮通知（WebTab 的可见性 effect 也挂在同一个值上）。
   setPanelMenuOpen: (open) => set((s) => (s.panelMenuOpen === open ? {} : { panelMenuOpen: open })),
+  setPreviewEmbedActive: (on) => set((s) => (s.previewEmbedActive === on ? {} : { previewEmbedActive: on })),
+  loadOfficePreview: async (path, kind) => {
+    const key = `${kind}\u0000${path}`
+    const hit = officePreviewCache.get(key)
+    if (hit && Date.now() - hit.at < OFFICE_PREVIEW_TTL_MS) return hit.result
+    const ws = get().workspace ?? ''
+    const call = kind === 'xlsx' ? transport.watchXlsx : kind === 'docx' ? transport.watchDocx : transport.watchPptx
+    let htmlPath: string
+    try {
+      // 与 previewOfficeFile 同一条 bridge 命令、同一份入参口径（相对路径由 bridge 锚定 workspace）。
+      const conv = await call.call(transport, { path, workspace: ws })
+      if (!conv?.ok || !conv.html_path) {
+        return { ok: false, error: conv?.error || i18nT('common.officeConvertFailed') }
+      }
+      htmlPath = conv.html_path
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+    // 产物是临时目录里的**绝对路径**（不落工作区）→ 用 file_preview 的绝对路径分支读回。
+    // 上限就是 file_preview 的那条 1 MiB：超了 truncated=true，界面必须如实说「已截断」并给
+    // 「在内嵌浏览器打开完整版」的出口（那条路不经过这里，见 previewOfficeFile 的注释）。
+    const r = await sendData({ type: 'file_preview', payload: { path: htmlPath, workspace: ws } })
+    if (!r.ok) return { ok: false, error: r.error || `读不回转换产物：${htmlPath}` }
+    const d = r.data ?? {}
+    const html = String(d.content ?? '')
+    const result: OfficePreviewResult = {
+      ok: true,
+      html,
+      truncated: !!d.truncated || !!d.binary,
+      htmlPath,
+    }
+    officePreviewCache.set(key, { at: Date.now(), result })
+    // 上限只是防内存长跑：8 份产物 HTML 已经远超「同时看着的面板数」。
+    while (officePreviewCache.size > OFFICE_PREVIEW_CACHE_MAX) {
+      const oldest = officePreviewCache.keys().next().value
+      if (oldest == null) break
+      officePreviewCache.delete(oldest)
+    }
+    return result
+  },
   // openTab：打开或激活一个标签。幂等键（阶段 2，见 tabKeyOf）：
   //   · file → kind + path + mode：**多实例**。同一文件可以同时有 diff 与 source 两个标签
   //     （D5），同一 (path, mode) 命中已有实例（更新 payload + openSeq，不新增）。

@@ -198,10 +198,15 @@ export default function RightPanel() {
   // 只 hide 不 show：show 由 WebTab 的可见性 effect（hasPages/弹窗）负责——
   // 本层只管「右栏收起/非 web tab 时强制隐藏」（刷新竞态：建连 effect 已改为建连即
   // hide，不会在右栏收起时浮出；此处兜底任何状态下右栏收起都隐藏）。
+  // R08b：pdf 预览标签（file kind）也在这块区域里显示原生视图 —— 它由面板自己建/摆位，
+  // 并把「我正在显示」写进 store.previewEmbedActive。缺这一条时，闸门会在面板刚显示完就
+  // 把视图藏掉（父级 effect 晚于子级 effect 跑），表现为「pdf 预览一片空白、但视图池里有它」。
+  const previewEmbedActive = useAppStore((s) => s.previewEmbedActive)
   useEffect(() => {
     if (!embeddedPresentation) return
-    if (!(rightExpanded && activeTab?.kind === 'web')) void window.desktop?.embedHide()
-  }, [embeddedPresentation, rightExpanded, activeTab?.kind])
+    const nativeHost = activeTab?.kind === 'web' || (activeTab?.kind === 'file' && previewEmbedActive)
+    if (!(rightExpanded && nativeHost)) void window.desktop?.embedHide()
+  }, [embeddedPresentation, rightExpanded, activeTab?.kind, previewEmbedActive])
 
   // 标签集单向收敛到 rightTab：rightTab 有多条改写路径（动作 / loadViewToTop 会话恢复 /
   // e2e 直接 setState 复位），在渲染层收敛一处覆盖全部；已一致时 store 侧不 set（防自激）。
