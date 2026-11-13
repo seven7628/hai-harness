@@ -149,15 +149,18 @@ type Wake struct {
 
 // ConversationOffer 是一次 Offer 请求（一条智能体/人类消息上的全部 @ 目标）。
 type ConversationOffer struct {
-	GroupID    GroupID
-	Sender     AgentID
-	Human      bool // true = 人类发送（Sender 为空）：不计 PairCount、不算指纹循环
-	Targets    []AgentID
-	Text       string // 触发这条唤醒的消息正文（指纹来源）
-	Depth      int    // 这批 wake 的跳数（人类首轮 = 1）
-	TriggerSeq int64
-	RoundID    string
-	At         time.Time
+	GroupID GroupID
+	Sender  AgentID
+	Human   bool // true = 人类发送（Sender 为空）：不计 PairCount、不算指纹循环
+	Targets []AgentID
+	Text    string // 触发这条唤醒的消息正文（指纹来源）
+	// Attachments 是触发消息的附件（人类群消息的图片），随 wake 一起入队：
+	// 群会话要在 hidden 快照之后把图片拼进模型上下文。
+	Attachments []Attachment
+	Depth       int // 这批 wake 的跳数（人类首轮 = 1）
+	TriggerSeq  int64
+	RoundID     string
+	At          time.Time
 }
 
 // ConversationView 是给事件/UI/命令回执的快照（JSON 直接可读）。
@@ -450,7 +453,8 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	for _, p := range plans {
 		w := Wake{
 			GroupID: group, ConversationID: conv.id, Sender: req.Sender, Human: req.Human, Target: p.target,
-			Text: text, Depth: depth, TriggerSeq: req.TriggerSeq, RoundID: req.RoundID,
+			Text: text, Attachments: req.Attachments, Depth: depth,
+			TriggerSeq: req.TriggerSeq, RoundID: req.RoundID,
 			Fingerprint: fp, EnqueuedAt: now,
 		}
 		// P6-01：入队即登记一条 queued 投递记录（幂等键 wake id 在这里分配一次）。
@@ -482,6 +486,93 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 // 返回 false：没有对话 / 不是 running / 队列空 / 还没到 ReadyAt（冷却中）/
 // 预算耗尽（这一种会把状态推进到 exhausted 并清队列）。
 // 投递失败时调用方**不要**出队：下次（群 run 结束）再取一次即可。
+//
+// 并行调度器用 DueWakes（一次取全批）；这个「队首一条」的版本留给只要一条的
+// 调用方与旧测试。
+// DueWakes 返回**现在就能投递**的全部 wake（P6-02 统一调度器的一次取队）。
+//
+// 并发 = 本轮目标数（§1.3）：这里把队里所有可跑的目标一次交出去，由调用方并行投递。
+// 约束：
+//   - 每个 target 至多一条（同一智能体不能并行跑两个群 run；后面的留给下一次 pass）；
+//   - 人类目标优先，其余按入队顺序（公平性）；
+//   - 冷却（Cooldown）与 429 退避（Delivery.ReadyAt）挡住的不交出去；
+//   - **不出队**：真正放行由 BeginDelivery 完成（幂等），所以两个 pass 同时取到
+//     同一批也只会投一次。
+func (c *ConversationController) DueWakes(group GroupID, at time.Time) []Wake {
+	if c == nil {
+		return nil
+	}
+	now := c.clockAt(at)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conv := c.convs[group]
+	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
+		return nil
+	}
+	if c.limits.TurnBudget > 0 && conv.turns >= c.limits.TurnBudget {
+		c.exhaustLocked(conv, now,
+			fmt.Sprintf("本轮自动对话已达上限 %d 轮，等待人类继续", c.limits.TurnBudget))
+		return nil
+	}
+	seen := make(map[AgentID]bool, len(conv.queue))
+	var human, auto []Wake
+	for i := range conv.queue {
+		w := conv.queue[i]
+		if w.Target == "" || seen[w.Target] {
+			continue
+		}
+		if ready := c.readyAtLocked(conv, w); now.Before(ready) {
+			continue
+		}
+		// 429 退避：这条 wake 还要等一会儿（P6-03 写入，调度器只看不说）。
+		if d := conv.deliveries.get(w.ID); d != nil && d.ReadyAt != nil && now.Before(*d.ReadyAt) {
+			continue
+		}
+		seen[w.Target] = true
+		w.ConversationID = conv.id
+		w.Turn = conv.turns + 1
+		w.ReadyAt = now
+		if w.Human {
+			human = append(human, w)
+		} else {
+			auto = append(auto, w)
+		}
+	}
+	if len(human) == 0 && len(auto) == 0 {
+		return nil
+	}
+	return append(human, auto...)
+}
+
+// NextReadyAt 队里最早可以再跑的时刻（都不可跑时用），供调度器排冷却/退避定时器。
+func (c *ConversationController) NextReadyAt(group GroupID) (time.Time, bool) {
+	if c == nil {
+		return time.Time{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conv := c.convs[group]
+	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
+		return time.Time{}, false
+	}
+	var best time.Time
+	for i := range conv.queue {
+		w := conv.queue[i]
+		ready := c.readyAtLocked(conv, w)
+		if d := conv.deliveries.get(w.ID); d != nil && d.ReadyAt != nil && d.ReadyAt.After(ready) {
+			ready = *d.ReadyAt
+		}
+		if best.IsZero() || ready.Before(best) {
+			best = ready
+		}
+	}
+	if best.IsZero() {
+		return time.Time{}, false
+	}
+	return best, true
+}
+
+// NextDue 队首的那一条（保留给「只要一条」的调用方与旧测试）。
 func (c *ConversationController) NextDue(group GroupID, at time.Time) (Wake, bool) {
 	if c == nil {
 		return Wake{}, false
@@ -550,7 +641,14 @@ func (c *ConversationController) BeginTurn(group GroupID, at time.Time) (Wake, b
 	}
 	head := conv.queue[0]
 	c.mu.Unlock()
-	return c.BeginDelivery(head, at)
+	w, fresh := c.BeginDelivery(head, at)
+	if !fresh {
+		return Wake{}, false
+	}
+	// 队首版是「出队 + 记账」一步到位的便捷入口（旧调用方/测试用）：投递成功
+	// 的记账直接落上。生产路径（调度器 → wakeGroupAgent）分开做，因为 Ask 可能
+	// 失败/被限流，那时不能吃轮次。
+	return c.CommitDelivery(w, at), true
 }
 
 // Stop 停止自动对话：清队列、Status=stopped、记下原因。幂等：已是终态则原样返回

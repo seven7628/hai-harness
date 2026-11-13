@@ -35,8 +35,9 @@ type Member struct {
 // JSON/旧群文件而保留，生产不再用它拦截「人类发言后智能体连续发言」的条数
 // （用户口径：群策略限制取消）。自动接龙由深度/同对/冷却/同内容指纹等护栏约束。
 type GroupPolicy struct {
-	Mode             string  `json:"mode"` // auto | ask | readonly
-	MaxParallelRuns  int     `json:"max_parallel_runs"`
+	Mode string `json:"mode"` // auto | ask | readonly
+	// 并发不是策略旋钮（P6-02/D1）：一个群一个调度器，并发上限 = 本轮目标数
+	// （上限 = 活跃群成员数）。旧 JSON 里的 max_parallel_runs 读入即忽略。
 	MaxHandoffDepth  int     `json:"max_handoff_depth"`
 	MaxTurnsPerHuman int     `json:"max_turns_per_human"`      // 已废弃，默认 8（仅兼容旧数据）
 	MaxMentions      int     `json:"max_mentions_per_message"` // 默认 3
@@ -108,7 +109,6 @@ func (s Scope) SessionID(agentID AgentID) string {
 
 // P0-03：群组默认值、角色与成员校验。
 const (
-	DefaultGroupMaxParallelRuns  = 3
 	DefaultGroupMaxHandoffDepth  = 3
 	DefaultGroupMaxTurnsPerHuman = 8
 	// MaxGroupPolicyTurnsPerHuman 是 ReadMessages 单页窗口的上界；超过它会把
@@ -168,9 +168,6 @@ func (g *Group) ApplyDefaults() {
 func (p *GroupPolicy) ApplyDefaults() {
 	if p.Mode == "" {
 		p.Mode = GroupModeAsk
-	}
-	if p.MaxParallelRuns == 0 {
-		p.MaxParallelRuns = DefaultGroupMaxParallelRuns
 	}
 	if p.MaxHandoffDepth == 0 {
 		p.MaxHandoffDepth = DefaultGroupMaxHandoffDepth
@@ -271,9 +268,6 @@ func (p GroupPolicy) Validate() error {
 	case GroupModeAuto, GroupModeAsk, GroupModeReadonly:
 	default:
 		return fmt.Errorf("%w: group.policy.mode must be auto, ask or readonly", ErrInvalid)
-	}
-	if p.MaxParallelRuns < 0 {
-		return fmt.Errorf("%w: group.policy.max_parallel_runs must be >= 0", ErrInvalid)
 	}
 	if p.MaxHandoffDepth < 0 {
 		return fmt.Errorf("%w: group.policy.max_handoff_depth must be >= 0", ErrInvalid)

@@ -47,7 +47,7 @@ func TestHubSearchFanOut10kLatency(t *testing.T) {
 		g := &agenthub.Group{
 			ID: gid, Name: fmt.Sprintf("fixture 群 %d", gi),
 			OwnerAgentID: "ag_fixture", Members: []agenthub.Member{{AgentID: "ag_fixture", Role: agenthub.RoleOwner}},
-			Policy:    agenthub.GroupPolicy{Mode: agenthub.GroupModeAsk, MaxParallelRuns: 3},
+			Policy:    agenthub.GroupPolicy{Mode: agenthub.GroupModeAsk},
 			CreatedAt: base, UpdatedAt: base,
 		}
 		raw, _ := json.Marshal(g)

@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -24,6 +23,10 @@ import (
 // hubGroupAssembleHook 仅测试用：群会话装配在**持有 agent 锁**、createIn 之前的确定性
 // 屏障（生产恒为 nil）。用来复现「名册重建与装配并发」的 TOCTOU（P3b-01b N1）。
 var hubGroupAssembleHook func(agentID string)
+
+// hubWakeAskHook 仅测试用：投递前注入 Ask 错误（生产恒 nil）。用来复现
+// 「provider 429 落在投递窗口」——那一条必须退回队列退避，不能标 failed。
+var hubWakeAskHook func(agentID string) error
 
 // hubGroupAssembleBarrier 在读钩子时取一次快照：调用方可能并发清空钩子。
 func hubGroupAssembleBarrier(agentID string) {
@@ -269,22 +272,16 @@ func (m *manager) refreshHubAgentRosters(agentID string) error {
 // 忙目标**不排队**：群会话一次只处理一轮，硬塞第二个快照会让两个 round 共用一次
 // AgentEnd（final 归属错轮）。目标仍在群里，下一次被 @ 时游标未推进会重新看到这条
 // 消息；智能体之间的排队由对话控制器负责（P3b-04）。
-// wakeGroupRound 把人类首轮唤醒投给各 target —— **并行**（人叫醒几个人不该排队，
-// §6.5.6 规则 2），并返回每个 target 的投递记录（P6-01）。
+// offerHumanRound 把人类首轮唤醒**入队**（分配幂等 wake id + queued 账本记录），
+// 返回本批 wake。真正投递由调用方交给统一调度器（pumpHubConversation）—— 人类与
+// agent 的 wake 走同一条路径（P6-02），并发 = 本轮目标数。
 //
-// 与智能体路径共用同一条投递管线：先 ctrl.Offer 登记（分配幂等 wake id + queued
-// 账本记录），再逐 target 并行 wakeGroupAgent。目标忙的那条**留队**（不报 failed、
-// 不丢），由群 run 收尾时的泵重试 —— 人叫醒 12 个人而 3 个正忙，3 条排队、9 条
-// 立刻跑，而不是 3 条被扔掉。
-func (m *manager) wakeGroupRound(g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message, depth, turn int) []agenthub.Delivery {
+// 必须持有 hubConvDispatch 闸门调用：入队要与「人类开新对话」在同一个临界区，
+// 否则停止/插话会插在两者之间。
+func (m *manager) offerHumanRound(g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message, depth int) ([]agenthub.Wake, error) {
 	if m == nil || g == nil || trigger == nil {
-		return nil
+		return nil, nil
 	}
-	st, err := m.hubStore()
-	if err != nil {
-		return []agenthub.Delivery{{GroupID: g.ID, Status: agenthub.DeliveryFailed, Reason: err.Error()}}
-	}
-	ctx := context.Background()
 	targets := make([]agenthub.AgentID, 0, len(round.Targets))
 	for _, target := range round.Targets {
 		if target == "" || target == trigger.Sender.AgentID {
@@ -293,33 +290,35 @@ func (m *manager) wakeGroupRound(g *agenthub.Group, round agenthub.Round, trigge
 		targets = append(targets, target)
 	}
 	if len(targets) == 0 {
+		return nil, nil
+	}
+	return m.hubConversation().Offer(agenthub.ConversationOffer{
+		GroupID: g.ID, Human: true, Targets: targets,
+		Text: trigger.Text, Attachments: trigger.Attachments,
+		Depth: depth, TriggerSeq: trigger.Seq, RoundID: round.ID,
+	})
+}
+
+// wakeGroupRound 投递一批已经入队的人类唤醒（P6-01/P6-02 的收尾步骤）：
+// 走**统一调度器**（与 agent 的 @ 完全同一条路径），返回本批每个 target 的投递记录。
+//
+// 目标忙的那条留队（queued），由群 run 收尾时的泵重试 —— 人叫醒 12 个人而 3 个
+// 正忙，3 条排队、9 条立刻跑，而不是 3 条被扔掉。
+func (m *manager) wakeGroupRound(g *agenthub.Group, wakes []agenthub.Wake) []agenthub.Delivery {
+	if m == nil || g == nil || len(wakes) == 0 {
 		return nil
 	}
-	ctrl := m.hubConversation()
-	wakes, err := ctrl.Offer(agenthub.ConversationOffer{
-		GroupID: g.ID, Human: true, Targets: targets,
-		Text: trigger.Text, Depth: depth, TriggerSeq: trigger.Seq, RoundID: round.ID,
-	})
-	if err != nil {
-		return []agenthub.Delivery{{GroupID: g.ID, Status: agenthub.DeliveryFailed, Reason: err.Error()}}
+	ids := make(map[string]struct{}, len(wakes))
+	for _, w := range wakes {
+		ids[w.ID] = struct{}{}
 	}
-	out := make([]agenthub.Delivery, len(wakes))
-	var wg sync.WaitGroup
-	for i := range wakes {
-		// Offer 只搬协议字段：附件随 wake 走（群会话要把图片拼进模型上下文）。
-		wakes[i].Attachments = trigger.Attachments
-		wakes[i].Turn = turn
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			d, derr := m.wakeGroupAgent(ctx, st, g, wakes[i])
-			if derr != nil {
-				m.hubAlertf("group_wake_failed", "群 %s 唤醒 %s 失败：%v", g.ID, wakes[i].Target, derr)
-			}
-			out[i] = d
-		}(i)
+	m.pumpHubConversation(g.ID)
+	out := make([]agenthub.Delivery, 0, len(wakes))
+	for _, d := range m.hubConversation().Deliveries(g.ID) {
+		if _, ok := ids[d.WakeID]; ok {
+			out = append(out, d)
+		}
 	}
-	wg.Wait()
 	return out
 }
 
@@ -348,7 +347,14 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	}
 	w = begun
 	// 投递失败的统一出口：记账 + 返回带状态的记录。
+	// 可重试的错误（429 限流 / 上游瞬时不可用）退回队列 + 退避，**不标 failed**：
+	// 目标不是坏掉，只是暂时被限流（§1.3）。
 	fail := func(err error) (agenthub.Delivery, error) {
+		if reason, retryable := hubRetryableWakeError(err); retryable {
+			ctrl.RequeueDelivery(w, reason, time.Now().Add(hubWakeRetryDelay(ctrl, g.ID, w)), time.Time{})
+			d, _ := ctrl.Delivery(g.ID, w.ID)
+			return d, err
+		}
 		ctrl.FinishDelivery(g.ID, w.ID, agenthub.DeliveryFailed, err.Error(), time.Time{})
 		d, _ := ctrl.Delivery(g.ID, w.ID)
 		return d, err
@@ -421,9 +427,20 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	// （与主会话 @ 文件同语义）。
 	blocks = append(blocks, hubAttachmentImageBlocks(w.Attachments)...)
 	msg := core.NewUserMessage(blocks...)
+	// hubWakeAskHook 仅测试用：在真正 Ask 之前注入一个错误（生产恒 nil）。
+	// 用来复现「provider 429 落在投递窗口」的路径 —— 那一条必须退回队列退避，
+	// 不能把目标标 failed（P6-02/P6-03）。
+	if hook := hubWakeAskHook; hook != nil {
+		if herr := hook(string(target)); herr != nil {
+			return fail(herr)
+		}
+	}
 	if err := bs.s.Ask(ctx, msg); err != nil {
 		return fail(err)
 	}
+	// Ask 成功才算「投递成功」：记账（轮次/深度/冷却起点）在这一刻发生。
+	// 忙/429 退回队列的尝试不会走到这里，所以不会白吃轮次预算。
+	w = ctrl.CommitDelivery(w, time.Time{})
 	ok = true
 	bs.lastActive.Store(time.Now().UnixMilli())
 	bs.wakeRun()

@@ -536,17 +536,18 @@ func TestHubConversationStaleDepthAfterHumanInterjection(t *testing.T) {
 	}
 }
 
-// TestHubConversationSerialWaitsForRunEnd 锁住复审 N1：本群还有会话在跑时，
-// group_say / 计时器都不能把下一条 wake 插进来（规则 3「串行」）。
-func TestHubConversationSerialWaitsForRunEnd(t *testing.T) {
+// TestHubConversationParallelAcrossTargets（P6-02）：不同目标之间**并行**放行 ——
+// A 还在跑时，C @B 的唤醒立刻投出去（旧实现要求「本群一次只跑一个」，已删除）。
+// 同一目标忙则留队（不丢、不报错），目标这一轮结束后补投。
+func TestHubConversationParallelAcrossTargets(t *testing.T) {
 	m, buf := testManager(t)
 	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
 
-	a := createHubAgent(t, m, buf, 1, "串行A")
-	b := createHubAgent(t, m, buf, 2, "串行B")
-	c := createHubAgent(t, m, buf, 3, "串行C")
-	g := convGroupWith(t, m, buf, 10, "串行群", map[string]any{"max_turns_per_human": 100}, a, b, c)
-	fa := newConvProvider("A 说完了")
+	a := createHubAgent(t, m, buf, 1, "并行A")
+	b := createHubAgent(t, m, buf, 2, "并行B")
+	c := createHubAgent(t, m, buf, 3, "并行C")
+	g := convGroupWith(t, m, buf, 10, "并行群", map[string]any{"max_turns_per_human": 100}, a, b, c)
+	fa := newConvProvider("A 说完了", "A 补投后的话")
 	releaseA := fa.gated()
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(a.ID), string(g.ID)), g, string(a.ID), fa)
 	fb := newConvProvider("B 说完了")
@@ -555,92 +556,97 @@ func TestHubConversationSerialWaitsForRunEnd(t *testing.T) {
 
 	// 人类 @A：A 卡在门闩上（这一轮在飞）。
 	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
-		"group_id": string(g.ID), "text": "@串行A 你先跑",
+		"group_id": string(g.ID), "text": "@并行A 你先跑",
 	}); !ok {
 		t.Fatalf("human send: %s", errMsg)
 	}
 	fa.waitStarted(t)
 
-	// C 空闲，直接 group_say @B：B 必须排队等 A 跑完，不能中途被叫起来。
+	// C 空闲，直接 group_say @B：**不同目标**，必须立刻并行跑（不再等 A）。
 	if _, err := p3bGroupSay(t, m, string(c.ID), map[string]any{
-		"group_id": string(g.ID), "text": "@串行B 你等 A 说完", "mentions": []string{string(b.ID)},
+		"group_id": string(g.ID), "text": "@并行B 你跟 A 一起", "mentions": []string{string(b.ID)},
 	}); err != nil {
 		t.Fatalf("C 的 group_say: %v", err)
 	}
-	if n := fb.callCount(); n != 0 {
-		t.Fatalf("A 还在跑，B 就被叫起来了（%d 次）—— 串行闸门失效", n)
-	}
-	if v := convView(m, g.ID); v.QueueLen != 1 || v.TurnsUsed != 1 {
-		t.Fatalf("对话 = %+v, want 1 条排队 + 1 轮（人类首轮）", v)
-	}
-	m.pumpHubConversation(g.ID) // 显式再泵一次（等价于冷却计时器/别的 run 收尾）
-	if n := fb.callCount(); n != 0 {
-		t.Fatalf("显式泵把 B 插进了 A 的 run：%d 次", n)
+	convWait(t, "B 与 A 并行开跑", func() bool { return fb.callCount() >= 1 })
+	if v := convView(m, g.ID); v.TurnsUsed != 2 {
+		t.Fatalf("turns used = %d, want 2（人类首轮 + B）: %+v", v.TurnsUsed, v)
 	}
 
-	close(releaseA)
-	convWait(t, "A 收尾后放行 B", func() bool { return fb.callCount() >= 1 })
-	if v := convView(m, g.ID); v.TurnsUsed != 2 || v.QueueLen != 0 {
-		t.Fatalf("B 放行后对话 = %+v, want 2 轮、队列空", v)
+	// 同一目标再 @ 一次 A：A 还在跑 → 留队（queued/target_busy），不报错、不丢。
+	if _, err := p3bGroupSay(t, m, string(c.ID), map[string]any{
+		"group_id": string(g.ID), "text": "@并行A 你还没完？", "mentions": []string{string(a.ID)},
+	}); err != nil {
+		t.Fatalf("C 再 @A: %v", err)
 	}
+	var queued agenthub.Delivery
+	convWait(t, "A 的第二次唤醒排队", func() bool {
+		for _, d := range m.hubConversation().Deliveries(g.ID) {
+			if d.Target == a.ID && d.Status == agenthub.DeliveryQueued {
+				queued = d
+				return true
+			}
+		}
+		return false
+	})
+	if queued.Reason != agenthub.DeliveryReasonBusy {
+		t.Fatalf("排队的记录 = %+v, want reason=target_busy", queued)
+	}
+	if n := fa.callCount(); n != 1 {
+		t.Fatalf("A 在忙时被投了第二份快照（调用 %d 次）", n)
+	}
+	// A 这一轮结束 → 排队的 wake 补投（同一条 wake id，attempts 累加）。
+	close(releaseA)
+	convWait(t, "A 收尾后补投排队的唤醒", func() bool { return fa.callCount() >= 2 })
 }
 
-// TestHubConversationSerialWaitsForAllFirstRoundRuns 锁住 N1 的并行首轮口径：
-// 人类同时叫醒 A/B（首轮允许并行），下一轮必须等**两条**都跑完才放行。
-func TestHubConversationSerialWaitsForAllFirstRoundRuns(t *testing.T) {
+// TestHubConversationParallelBatchesAllTargets（P6-02）：一次 @ 的全部目标同时开跑
+// （并发 = 本轮目标数），后一批不再等前一批 —— 旧「串行」闸门已删除。
+func TestHubConversationParallelBatchesAllTargets(t *testing.T) {
 	m, buf := testManager(t)
 	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
 
-	a := createHubAgent(t, m, buf, 1, "首轮A")
-	b := createHubAgent(t, m, buf, 2, "首轮B")
-	c := createHubAgent(t, m, buf, 3, "首轮C")
-	d := createHubAgent(t, m, buf, 4, "首轮D")
-	g := convGroupWith(t, m, buf, 10, "首轮群", map[string]any{"max_turns_per_human": 100}, a, b, c, d)
+	a := createHubAgent(t, m, buf, 1, "批次A")
+	b := createHubAgent(t, m, buf, 2, "批次B")
+	c := createHubAgent(t, m, buf, 3, "批次C")
+	d := createHubAgent(t, m, buf, 4, "批次D")
+	g := convGroupWith(t, m, buf, 10, "批次群", map[string]any{"max_turns_per_human": 100}, a, b, c, d)
 	fa := newConvProvider("A 看完了")
 	releaseA := fa.gated()
+	defer close(releaseA)
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(a.ID), string(g.ID)), g, string(a.ID), fa)
 	fb := newConvProvider("B 看完了")
 	releaseB := fb.gated()
+	defer close(releaseB)
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(b.ID), string(g.ID)), g, string(b.ID), fb)
 	p3bWireFake(t, m, g, string(c.ID), "C 说完了")
 	fd := newConvProvider("D 最后说")
+	releaseD := fd.gated()
+	defer close(releaseD)
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(d.ID), string(g.ID)), g, string(d.ID), fd)
 
-	// 人类同时 @A @B：首轮并行（§6.5.6 规则 2）。
+	// 人类同时 @A @B：首轮并行。
 	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
-		"group_id": string(g.ID), "text": "@首轮A @首轮B 你们一起看",
+		"group_id": string(g.ID), "text": "@批次A @批次B 你们一起看",
 	}); !ok {
 		t.Fatalf("human send: %s", errMsg)
 	}
 	fa.waitStarted(t)
 	fb.waitStarted(t)
 
-	// C 空闲，直接 group_say @D：D 的唤醒必须等 A/B 都跑完。
+	// C 空闲，直接 group_say @D：A/B 还在跑，但 D 是**另一个目标** → 立刻并行开跑。
 	if _, err := p3bGroupSay(t, m, string(c.ID), map[string]any{
-		"group_id": string(g.ID), "text": "@首轮D 你最后说", "mentions": []string{string(d.ID)},
+		"group_id": string(g.ID), "text": "@批次D 你也一起", "mentions": []string{string(d.ID)},
 	}); err != nil {
 		t.Fatalf("C 的 group_say: %v", err)
 	}
-	if n := fd.callCount(); n != 0 {
-		t.Fatalf("首轮还在跑，D 就被叫起来了（%d 次）", n)
-	}
-
-	// A 先结束：B 还在跑，D 仍然不能开始。
-	close(releaseA)
-	convWait(t, "A 的 run 收尾", func() bool {
-		bs, err := m.hubGroupSession(string(a.ID), string(g.ID))
-		return err == nil && !bs.hubGroupBusy.Load() && !bs.running.Load()
-	})
-	m.pumpHubConversation(g.ID)
-	if n := fd.callCount(); n != 0 {
-		t.Fatalf("B 还在跑，D 就被叫起来了（%d 次）", n)
-	}
-
-	// B 也结束：这才放行 D。
-	close(releaseB)
-	convWait(t, "两条首轮都结束后放行 D", func() bool { return fd.callCount() >= 1 })
+	fd.waitStarted(t)
+	// 人类首轮只算 1 轮（两条人类 wake 不各算一轮），D 的自动唤醒再 +1。
 	if v := convView(m, g.ID); v.TurnsUsed != 2 {
-		t.Fatalf("turns used = %d, want 2（人类首轮 + D）", v.TurnsUsed)
+		t.Fatalf("turns used = %d, want 2（人类首轮 + D）: %+v", v.TurnsUsed, v)
+	}
+	if v := convView(m, g.ID); v.QueueLen != 0 {
+		t.Fatalf("queue = %d, want 0（三条都投出去了）", v.QueueLen)
 	}
 }
 
@@ -669,49 +675,52 @@ func TestHubConversationStopRejectedAfterShutdown(t *testing.T) {
 
 // TestHubConversationCooldownGatesNextWake：连续两次智能体唤醒之间至少间隔冷却。
 //
-// A 的一条回复同时 @B/@C：B 立即跑（串行队列的第一条），C 排在队首等冷却。断言两件事：
+// TestHubConversationCooldownGatesNextWake：冷却只作用在**批次之间**（P6-02 之后
+// 同一批目标并行放行，不再互相排队）。这里锁两件事：
 //
-//	1）C 入队即可跑时刻是「B 的唤醒时刻 + 冷却」之后（确定性：看 Peek 的 ReadyAt）；
-//	2）两次 BeginTurn 的实际间隔 >= 冷却（端到端）。
+//	1）B 的唤醒落在冷却窗口内 → 留在队列里，Peek 的 ReadyAt = 上一次唤醒 + 冷却；
+//	2）真正放行时，两次智能体唤醒的实际间隔 >= 冷却。
 //
 // 两条都用控制器自己的时间戳，不依赖调度抖动。
 func TestHubConversationCooldownGatesNextWake(t *testing.T) {
-	const cooldown = 50 * time.Millisecond
+	const cooldown = 80 * time.Millisecond
 	m, buf := testManager(t)
 	convLimits(m, agenthub.ConversationLimits{Cooldown: cooldown, MaxDepth: 99, PairLimit: 99})
 
 	a := createHubAgent(t, m, buf, 1, "冷却A")
 	b := createHubAgent(t, m, buf, 2, "冷却B")
-	c := createHubAgent(t, m, buf, 3, "冷却C")
-	g := convGroupWith(t, m, buf, 10, "冷却群", map[string]any{"max_turns_per_human": 100}, a, b, c)
-	p3bWireFake(t, m, g, string(a.ID), "@冷却B @冷却C 你们俩接着说")
+	g := convGroupWith(t, m, buf, 10, "冷却群", map[string]any{"max_turns_per_human": 100}, a, b)
+	p3bWireFake(t, m, g, string(a.ID), "@冷却B 你接着说")
 	p3bWireFake(t, m, g, string(b.ID), "B 说完了")
-	p3bWireFake(t, m, g, string(c.ID), "C 说完了")
+
 	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
 		"group_id": string(g.ID), "text": "@冷却A 你先说",
 	}); !ok {
 		t.Fatalf("human send: %s", errMsg)
 	}
-	// turn 1 = 人类首轮唤 A；turn 2 = A 的回复唤 B；turn 3 = 同一批里的 C（受冷却约束）。
+	// turn 1 = 人类首轮唤 A；turn 2 = A 的回复唤 B。
 	v2 := waitConvTurns(t, m, g.ID, 2)
 	if v2.LastWakeAt == nil {
 		t.Fatalf("turn 2 缺 last_wake_at: %+v", v2)
 	}
 	t2 := *v2.LastWakeAt
 
+	// B 回复 @A：A 的唤醒必须等冷却窗口（冷却只挡「下一次唤醒」，不是同一批）。
+	if _, err := p3bGroupSay(t, m, string(b.ID), map[string]any{
+		"group_id": string(g.ID), "text": "@冷却A 再来一轮", "mentions": []string{string(a.ID)},
+	}); err != nil {
+		t.Fatalf("B 的 group_say: %v", err)
+	}
 	ctrl := m.hubConversation()
 	head, ok := ctrl.Peek(g.ID)
 	if !ok {
-		t.Fatal("C 应当还在队列里（冷却中）—— 没有冷却就会被立刻放行")
+		t.Fatal("A 的第二次唤醒应当还在队列里（冷却中）—— 没有冷却就会被立刻放行")
 	}
-	if head.Turn != 3 || head.Target != c.ID {
-		t.Fatalf("队首 = %+v, want turn 3 → C", head)
+	if head.Target != a.ID {
+		t.Fatalf("队首 = %+v, want → A", head)
 	}
 	if ready := head.ReadyAt.Sub(t2); ready < cooldown-5*time.Millisecond {
-		t.Fatalf("C 的可跑时刻距上一次唤醒 = %v, want >= %v（冷却没生效）", ready, cooldown)
-	}
-	if !head.ReadyAt.After(time.Now()) {
-		t.Fatalf("冷却窗口已过：ReadyAt = %v（冷却没生效）", head.ReadyAt)
+		t.Fatalf("A 的可跑时刻距上一次唤醒 = %v, want >= %v（冷却没生效）", ready, cooldown)
 	}
 
 	v3 := waitConvTurns(t, m, g.ID, 3)
@@ -722,7 +731,7 @@ func TestHubConversationCooldownGatesNextWake(t *testing.T) {
 	if v := convView(m, g.ID); v.CooldownMS != cooldown.Milliseconds() {
 		t.Fatalf("视图冷却 = %dms, want %dms", v.CooldownMS, cooldown.Milliseconds())
 	}
-	// 每轮推进都广播一个 hub_conversation（UI 靠它画「第 N/8 轮 · A → B」）。
+	// 每轮推进都广播一个 hub_conversation（UI 靠它画「第 N 轮 · 深度」）。
 	turnEvents := 0
 	for _, ev := range convConversationEvents(t, buf) {
 		conv, _ := ev["conversation"].(map[string]any)
@@ -751,21 +760,24 @@ func TestHubConversationHumanClearsQueue(t *testing.T) {
 	p3bWireFake(t, m, g, string(a.ID), "@人类B @人类C 你们俩都说说")
 	fb := newConvProvider("B 在跑")
 	release := fb.gated()
+	defer close(release)
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(b.ID), string(g.ID)), g, string(b.ID), fb)
 	fc := newConvProvider("C 不该跑")
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(c.ID), string(g.ID)), g, string(c.ID), fc)
+	// C 正忙：它的 wake 只能排队 —— 人类插话必须把这条排队记录一起清掉。
+	bsC := mustGroupSession(t, m, string(c.ID), string(g.ID))
+	bsC.hubGroupBusy.Store(true)
+	defer bsC.hubGroupBusy.Store(false)
 
-	// 人类 @A → A 回复同时 @B/@C：B 先跑（并行首轮之后的第一条），C 排队等冷却。
+	// 人类 @A → A 回复同时 @B/@C：B 立刻跑（门闩卡住），C 忙 → 排队。
 	if ok, errMsg, _ := hubCmd(t, m, buf, 11, "hub_group_send", map[string]any{
 		"group_id": string(g.ID), "text": "@人类A 你安排一下",
 	}); !ok {
 		t.Fatalf("human send: %s", errMsg)
 	}
-	fb.waitStarted(t) // B 已经开跑（被门闩卡住，队列里还压着 C）
+	fb.waitStarted(t)
+	convWait(t, "C 的唤醒排队", func() bool { return convView(m, g.ID).QueueLen >= 1 })
 	v := convView(m, g.ID)
-	if v.QueueLen < 1 {
-		t.Fatalf("C 应当还在队列里: %+v", v)
-	}
 	firstConvID := v.ID
 	if v.TurnsUsed != 2 { // turn1 = A，turn2 = B
 		t.Fatalf("turns used = %d, want 2", v.TurnsUsed)
@@ -788,18 +800,6 @@ func TestHubConversationHumanClearsQueue(t *testing.T) {
 	m.pumpHubConversation(g.ID)
 	if n := fc.callCount(); n != 0 {
 		t.Fatalf("人类消息之后 C 仍被唤醒 %d 次", n)
-	}
-	if v := convView(m, g.ID); v.TurnsUsed != 0 || v.QueueLen != 0 {
-		t.Fatalf("泵之后对话被旧队列污染: %+v", v)
-	}
-
-	close(release) // 放 B 跑完
-	convWait(t, "B 的 run 收尾", func() bool {
-		bs, err := m.hubGroupSession(string(b.ID), string(g.ID))
-		return err == nil && !bs.hubGroupBusy.Load()
-	})
-	if n := fc.callCount(); n != 0 {
-		t.Fatalf("B 收尾后 C 仍被唤醒 %d 次（人类消息没清队列）", n)
 	}
 }
 

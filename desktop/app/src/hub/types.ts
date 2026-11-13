@@ -307,7 +307,6 @@ export interface HubGroupMember {
 
 export interface HubGroupPolicy {
   mode?: string
-  max_parallel_runs?: number
   max_handoff_depth?: number
   max_turns_per_human?: number
   max_mentions_per_message?: number

@@ -411,7 +411,7 @@ func TestHubGroupPatchDeleteAndCreateContracts(t *testing.T) {
 			{"agent_id": string(a.ID), "role": "owner"},
 			{"agent_id": string(b.ID), "role": "member"},
 		},
-		"policy": map[string]any{"mode": "ask", "max_parallel_runs": 5, "max_turns_per_human": 6, "daily_budget_usd": 10},
+		"policy": map[string]any{"mode": "ask", "max_handoff_depth": 4, "max_turns_per_human": 6, "daily_budget_usd": 10},
 	})
 	if !ok {
 		t.Fatalf("policy group create: %s", errMsg)
@@ -424,7 +424,7 @@ func TestHubGroupPatchDeleteAndCreateContracts(t *testing.T) {
 		t.Fatalf("policy patch: %s", errMsg)
 	}
 	gp := groupFromData(t, data)
-	if gp.Policy.Mode != agenthub.GroupModeAuto || gp.Policy.MaxParallelRuns != 5 ||
+	if gp.Policy.Mode != agenthub.GroupModeAuto || gp.Policy.MaxHandoffDepth != 4 ||
 		gp.Policy.MaxTurnsPerHuman != 6 || gp.Policy.DailyBudgetUSD != 10 {
 		t.Fatalf("policy patch reset fields: %+v", gp.Policy)
 	}

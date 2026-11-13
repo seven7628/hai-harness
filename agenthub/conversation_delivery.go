@@ -60,13 +60,13 @@ func (c *ConversationController) BeginDelivery(w Wake, at time.Time) (Wake, bool
 		return w, false
 	}
 	c.removeQueuedLocked(conv, w.ID)
-	if !w.Human {
-		conv.turns++
-		conv.depth = w.Depth
-		conv.lastWake = now
-	}
 	w.ConversationID = conv.id
+	// Turn 是**预测值**：真正记账在 CommitDelivery（Ask 成功之后）。人类首轮的 1 个
+	// 回合已由 StartHumanRound 记过，所以人类 wake 不再 +1。
 	w.Turn = conv.turns
+	if !w.Human {
+		w.Turn++
+	}
 	w.ReadyAt = now
 	d.Status = DeliveryRunning
 	d.Turn = w.Turn
@@ -76,6 +76,40 @@ func (c *ConversationController) BeginDelivery(w Wake, at time.Time) (Wake, bool
 	d.UpdatedAt = now
 	conv.updatedAt = now
 	return w, true
+}
+
+// CommitDelivery 投递**成功**之后记账：TurnsUsed++、Depth、冷却起点（lastWake）。
+//
+// 为什么与 BeginDelivery 分开：BeginDelivery 必须在 Ask 之前（幂等判据），而
+// 「目标忙 / 429 退回队列」的尝试不能消耗轮次 —— 否则一个忙目标被重试 3 次就
+// 吃掉 3 轮预算，UI 上的「第 N 轮」也会虚增。人类 wake 不累加 TurnsUsed。
+//
+// 已停止/已收口的记录不再记账（那一轮随停止作废）。
+func (c *ConversationController) CommitDelivery(w Wake, at time.Time) Wake {
+	if c == nil || w.GroupID == "" {
+		return w
+	}
+	now := c.clockAt(at)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conv := c.convs[w.GroupID]
+	if conv == nil || conv.deliveries == nil {
+		return w
+	}
+	d := conv.deliveries.get(w.ID)
+	if d == nil || d.Status != DeliveryRunning {
+		return w
+	}
+	if !w.Human {
+		conv.turns++
+		conv.depth = w.Depth
+		conv.lastWake = now
+		w.Turn = conv.turns
+		d.Turn = w.Turn
+	}
+	d.UpdatedAt = now
+	conv.updatedAt = now
+	return w
 }
 
 // RequeueDelivery 投递失败可重试（目标忙 / provider 429）时把 wake 放回队列：
