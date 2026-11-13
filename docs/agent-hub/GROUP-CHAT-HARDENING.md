@@ -170,18 +170,18 @@
 
 | ID | 状态 | worktree | commit | 验证 |
 |---|---|---|---|---|
-| P6-01 | todo | group-core | — | — |
-| P6-02 | todo | group-core | — | — |
-| P6-03 | todo | group-core | — | — |
-| P6-04 | todo | group-core | — | — |
-| P6-05 | todo | group-core | — | — |
-| P6-06 | todo | group-surface | — | — |
+| P6-01 | in_progress | group-core | — | — |
+| P6-02 | in_progress | group-core | — | — |
+| P6-03 | in_progress | group-core | — | — |
+| P6-04 | in_progress | group-core | — | — |
+| P6-05 | in_progress | group-core | — | — |
+| P6-06 | in_progress | group-surface | — | — |
 | P6-07 | todo | group-lifecycle | — | — |
 | P6-08 | todo | group-lifecycle | — | — |
 | P6-09 | todo | group-lifecycle | — | — |
 | P6-10 | todo | group-lifecycle | — | — |
-| P6-11 | todo | group-surface | — | — |
-| P6-12 | todo | group-surface | — | — |
+| P6-11 | in_progress | group-surface | — | — |
+| P6-12 | in_progress | group-surface | — | — |
 | P6-13 | todo | group-surface | — | — |
 | P6-14 | todo | group-surface | — | — |
 | P6-15 | todo | main | — | — |
