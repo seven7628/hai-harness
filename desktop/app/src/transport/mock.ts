@@ -1174,6 +1174,73 @@ class MockTransport implements Transport {
   }
 
   /**
+   * 脚本化群内两轮流式回复（场景2b 群侧浏览器回归，?hubFixture=groupstream）。
+   *
+   * 与 mockDMStreamReply 同口径：真 bridge 每个 LLM 轮次一条气泡，且 content_chunk 与
+   * hub_message_delta **两条路径同时活着**；轮末一条 hub_message，message.id = 该轮
+   * delta 的 message_id。群 delta 带 group_id/round_id（DM 才是空串），两轮共用同一个
+   * round_id、message_id 每轮不同 —— 前端必须「一轮一条草稿、final 就清」，不能把两轮
+   * 拼成一条，也不能因为 content_chunk 再多画一条。
+   *
+   * 两轮之间留足间隔（轮 1 的 final 先到、轮 2 才开流）：断言「流式期间同时只有 1 条
+   * 草稿」靠的就是这个时间形状，重叠的轮次本来就该有两条。
+   */
+  private mockGroupStreamReply(gid: string, triggerSeq: number, targets: string[]): void {
+    const first = targets[0]
+    if (!first) return
+    const sessionID = `hub.${first}.g.${gid}`
+    const runID = `run_mock_grpstream_${triggerSeq}`
+    const roundID = `rnd_mock_${triggerSeq}`
+    const gen = this.hubGroupGen.get(gid) ?? 0
+    // 唯一标记（GROUP-R<n>-A/B）：正文在 DOM 里出现几次、有没有和另一轮拼接，一眼可判。
+    const rounds = [
+      'GROUP-R1-A 先给结论：三个方案里我推荐第二个，代价最低。 GROUP-R1-B',
+      'GROUP-R2-A 再补证据：第一个方案每次改价都要动两份配置。 GROUP-R2-B',
+    ]
+    this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'running' })
+    this.emit({ event_type: 'agent_start', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
+    let endAt = 0
+    rounds.forEach((text, r) => {
+      const messageID = `gm_mock_groupstream_${triggerSeq}_${r}`
+      const runes = Array.from(text)
+      const size = Math.max(1, Math.ceil(runes.length / 6))
+      const chunks: string[] = []
+      for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
+      // 第二轮等第一轮的 final 落地后再开流（间隔远大于人的点击速度 = 两轮）。
+      const start = 400 + r * 1200
+      chunks.forEach((chunk, i) => {
+        this.afterBg(start + i * 90, () => {
+          if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+          // 旧路径（live）：群视图不画 live，只有 DM 画 —— 这条绝不能变成第三条气泡。
+          this.emit({ event_type: 'content_chunk', session_id: sessionID, run_id: runID, content: chunk })
+          // 新路径（草稿）：群 delta 必须带 group_id/round_id。
+          this.emit({
+            event_type: 'hub_message_delta', group_id: gid, agent_id: first, round_id: roundID,
+            message_id: messageID, index: i, delta: chunk,
+          })
+        })
+      })
+      endAt = start + chunks.length * 90 + 120
+      this.afterBg(endAt, () => {
+        if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+        const msg = this.hubGroupAppend(gid, {
+          kind: 'text', sender: { kind: 'agent', agent_id: first }, text, round_id: roundID,
+        })
+        msg.id = messageID
+        this.hubGroupEmitMessage(gid, msg)
+      })
+    })
+    this.afterBg(endAt + 250, () => {
+      if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+      this.emit({ event_type: 'agent_end', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
+      this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'idle' })
+      if (this.hubGroupConversations.get(gid)?.status !== 'stopped') {
+        this.hubGroupSetConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 })
+      }
+    })
+  }
+
+  /**
    * 脚本化 DM 两轮回复（场景2b 浏览器回归，?hubFixture=dmstream）。
    *
    * 真 bridge 每个 LLM 轮次一条气泡：content_chunk 与 hub_message_delta **两条路径
@@ -3224,6 +3291,11 @@ class MockTransport implements Transport {
           this.hubGroupEmitMessage(gid, receipt)
         }
         this.respond(cmd, { seq: msg.seq, message_id: msg.id, round, targets })
+        // 场景2b 群侧浏览器回归：?hubFixture=groupstream 用两轮脚本化回复替代单轮。
+        if (this.hubFixture() === 'groupstream') {
+          this.mockGroupStreamReply(gid, msg.seq, targets)
+          break
+        }
         if (targets.length > 0) this.mockGroupReply(gid, msg.seq, targets)
         break
       }
