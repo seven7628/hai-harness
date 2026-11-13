@@ -121,6 +121,14 @@ func (m *manager) hubGroupCreate(c command) {
 			}
 		}
 	}
+	// P6-12：observer 角色已删除。显式写 observer 必须在 Normalize 之前拒绝 ——
+	// Normalize 会把旧 observer 迁成 member，先归一化再校验等于静默吞掉客户端的意图。
+	for _, mem := range members {
+		if agenthub.RemovedMemberRole(mem.Role) {
+			m.resp(c, false, fmt.Sprintf("角色 %q 已删除：群角色只剩 owner/member（只读请用群模式 readonly）", string(mem.Role)), nil)
+			return
+		}
+	}
 	g := &agenthub.Group{Name: req.Name, OwnerAgentID: owner, Members: members, Policy: req.Policy, Pinned: req.Pinned}
 	now := time.Now().UTC()
 	for i := range g.Members {
@@ -335,6 +343,10 @@ func (m *manager) hubGroupMemberAdd(c command) {
 	role := agenthub.MemberRole(strings.ToLower(strings.TrimSpace(str(c.Payload, "role"))))
 	if role == "" {
 		role = agenthub.RoleMember
+	}
+	if agenthub.RemovedMemberRole(role) {
+		m.resp(c, false, fmt.Sprintf("角色 %q 已删除：群角色只剩 owner/member（只读请用群模式 readonly）", string(role)), nil)
+		return
 	}
 	g, err := st.LoadGroup(ctx, id)
 	if err != nil {

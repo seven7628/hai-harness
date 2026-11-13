@@ -53,7 +53,7 @@ func callHubToolForAgent(t *testing.T, m *manager, agentID agenthub.AgentID, gro
 
 func TestHubHandoffCardAckAndNeed(t *testing.T) {
 	m, buf, agents, g := handoffGroupFixture(t, []handoffMember{
-		{"HandA", "owner"}, {"HandB", "member"}, {"HandC", "observer"},
+		{"HandA", "owner"}, {"HandB", "member"}, {"HandC", "member"},
 	})
 	a, b, c := agents[0], agents[1], agents[2]
 	st, err := m.hubStore()
@@ -109,10 +109,7 @@ func TestHubHandoffCardAckAndNeed(t *testing.T) {
 	if got, err := st.LoadHandoff(ctx, h.ID); err != nil || got.Status != agenthub.HandoffPendingAck {
 		t.Fatalf("mark read changed handoff: %+v, %v", got, err)
 	}
-	// observer 不能发起；非接收方不能 ack。
-	if _, err := callHubToolForAgent(t, m, c.ID, string(g.ID), "handoff", `{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(b.ID)+`","instruction":"x"}`); err == nil {
-		t.Fatal("observer handoff must fail")
-	}
+	// 非接收方不能 ack（P6-12：不再有「observer 不能交接」的特判，见测试末尾）。
 	if _, err := callHubToolForAgent(t, m, c.ID, string(g.ID), "handoff_ack", `{"handoff_id":"`+h.ID+`","accept":true}`); err == nil {
 		t.Fatal("non-recipient ack must fail")
 	}
@@ -142,6 +139,14 @@ func TestHubHandoffCardAckAndNeed(t *testing.T) {
 	}
 	if msgs, _ = st.ReadMessages(ctx, g.ID, 0, 20); len(msgs) != 2 {
 		t.Fatalf("repeat ack wrote card: %+v", msgs)
+	}
+	// P6-12：角色只剩 owner/member —— 任何成员都能发起交接（不再有 observer 特判）。
+	// 放在卡片计数之后：这次交接会追加一张卡，别把上面的幂等断言搅乱。
+	if out, err := callHubToolForAgent(t, m, c.ID, string(g.ID), "handoff",
+		`{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(a.ID)+`","instruction":"从 C 发起的交接"}`); err != nil {
+		t.Fatalf("member handoff should be allowed: %v", err)
+	} else if !strings.Contains(out, string(agenthub.HandoffPendingAck)) {
+		t.Fatalf("member handoff result = %s", out)
 	}
 }
 

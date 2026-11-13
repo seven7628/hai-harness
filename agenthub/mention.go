@@ -188,7 +188,7 @@ func (p *MentionParser) parseFrom(text string, sender AgentID, limit int) Mentio
 	return res
 }
 
-// CanMentionAll：人类与 owner 智能体可 @all；member/observer 不可，且不降级（D14）。
+// CanMentionAll：人类与 owner 智能体可 @all；member 不可，且不降级（D14）。
 func CanMentionAll(isHuman bool, role MemberRole) bool {
 	return isHuman || role == RoleOwner
 }

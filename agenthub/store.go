@@ -389,6 +389,9 @@ func (s *FileStore) LoadGroup(ctx context.Context, id GroupID) (*Group, error) {
 	if err := readJSON(s.groupPath(id), &g); err != nil {
 		return nil, err
 	}
+	// P6-12：旧 JSON 里的 observer 在加载时迁成 member（只改角色，不动成员/历史）。
+	// 读路径不写盘：下一次正常保存自然落成新形状。
+	g.MigrateLegacyMemberRoles()
 	return &g, nil
 }
 
@@ -398,6 +401,10 @@ func (s *FileStore) SaveGroup(ctx context.Context, g *Group) error {
 	}
 	if g == nil || !validID(string(g.ID)) {
 		return fmt.Errorf("%w: group", ErrInvalid)
+	}
+	// 新写入拒绝已删除的 observer 角色（读路径会迁移，写路径不许再产生）。
+	if err := rejectRemovedMemberRoles(g); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -434,6 +441,7 @@ func (s *FileStore) ListGroups(ctx context.Context) ([]*Group, error) {
 		if err := readJSON(path, &g); err != nil {
 			return nil, err
 		}
+		g.MigrateLegacyMemberRoles() // 与 LoadGroup 同口径（P6-12）
 		out = append(out, &g)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

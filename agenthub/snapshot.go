@@ -153,7 +153,9 @@ func renderGroupSnapshot(g *Group, agentID AgentID, round Round, kept []Message,
 			if hit {
 				b.WriteString("是\n")
 			} else {
-				b.WriteString("否（只读旁听）\n")
+				// 旧文案「只读旁听」是 observer 角色的残留（P6-12 已删除该角色）：
+				// 没被点名就是没被点名，与「能不能发言」无关。
+				b.WriteString("否（本轮未被点名）\n")
 			}
 		}
 	}

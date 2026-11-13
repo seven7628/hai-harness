@@ -3774,11 +3774,6 @@ class MockTransport implements Transport {
         if (!target) { this.respondErr(cmd, 'to_agent 不能为空（也接受 agent_id）'); break }
         if (!instruction) { this.respondErr(cmd, 'instruction 不能为空'); break }
         if (!this.hubGroupMemberIDs(gid).includes(target)) { this.respondErr(cmd, '目标不是该群成员'); break }
-        const membersRaw = (group.members as Array<{ agent_id?: string; role?: string }> | undefined) ?? []
-        if (membersRaw.find((m) => String(m.agent_id) === target)?.role === 'observer') {
-          this.respondErr(cmd, 'observer 只旁听，不能接派任务')
-          break
-        }
         const cacheKey = `${gid}:${clientID}`
         const cached = clientID ? this.hubGroupAssigns.get(cacheKey) : undefined
         if (cached) { this.respond(cmd, cached); break }

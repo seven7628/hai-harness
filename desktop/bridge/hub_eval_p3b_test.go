@@ -209,7 +209,7 @@ func p3bEvalScenarioRun(t *testing.T, prefix string, fail error) *p3bEvalScenari
 	b := createDispatchAgent(t, m, buf, 2, prefix+"B", false)
 	c := createDispatchAgent(t, m, buf, 3, prefix+"C", false)
 	g := assignGroup(t, m, buf, 4, prefix+"群", map[agenthub.AgentID]string{
-		a.ID: "owner", b.ID: "member", c.ID: "observer",
+		a.ID: "owner", b.ID: "member", c.ID: "member",
 	})
 	assignArgs := fmt.Sprintf(
 		`{"to_agent":%q,"instruction":"把三家价格表整理成一页","title":"价格表一页"}`,
@@ -358,7 +358,7 @@ func TestEval8AgentAssignCompletesAndWakesDispatcher(t *testing.T) {
 		t.Fatalf("A 的唤醒请求里没有结果正文：%s", p3bEvalRequestText(wakeReq))
 	}
 
-	// ⑤ C（observer）零 provider 调用、零唤醒、零输入积压。
+	// ⑤ C（本轮没被点名的成员）零 provider 调用、零唤醒、零输入积压。
 	// 负向断言先留一个窗口：run 是异步起的，「没等到」不等于「没发生」。
 	time.Sleep(200 * time.Millisecond)
 	if n := s.fc.callCount(); n != 0 {
@@ -446,8 +446,13 @@ func TestEval8AgentAssignCompletesAndWakesDispatcher(t *testing.T) {
 }
 
 // p3bEvalCardLine 群快照里这张卡的渲染行（renderGroupSnapshot 的格式）。
+// p3bEvalCardLine 是快照里这张卡应当渲染出的行（P6-11 起发送者带落盘角色）。
 func p3bEvalCardLine(card agenthub.Message) string {
-	return fmt.Sprintf("#%d %s: %s", card.Seq, string(card.Sender.AgentID), strings.TrimSpace(card.Text))
+	who := string(card.Sender.AgentID)
+	if card.Sender.Kind == agenthub.SenderAgent {
+		who += "(member)" // 场景里 B 是 member
+	}
+	return fmt.Sprintf("#%d %s: %s", card.Seq, who, strings.TrimSpace(card.Text))
 }
 
 // TestEval9OtherMemberSeesResultOnNextMention：评测 9（方案 §10.3 / §6.5.7）。

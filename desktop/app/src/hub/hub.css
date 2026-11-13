@@ -2665,7 +2665,6 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .agent-name-btn:hover { color: var(--accent); }
 .hub-demo .agent-tag { font-size: 9.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; line-height: 1.45; white-space: nowrap; }
 .hub-demo .agent-tag.reply { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 24%, var(--border)); }
-.hub-demo .agent-tag.observe { color: var(--muted-2); }
 .hub-demo .agent-tag.owner { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
 /* demo：名字与时间同处 .agent-head（gap 7），时间再自留 6px 呼吸位。 */
 .hub-demo .msg-time { margin-left: 6px; }

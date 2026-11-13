@@ -87,7 +87,7 @@ export default function MentionPicker({
             // @all 的合成候选只要一行「所有人」，别再拼 groupRole/职责。
             const roleText = groupRole === 'all'
               ? ''
-              : [groupRole === 'owner' ? 'owner' : groupRole === 'observer' ? 'observer' : groupRole === 'member' ? 'member' : groupRole, agent.role]
+              : [groupRole === 'owner' ? 'owner' : groupRole === 'member' ? 'member' : groupRole, agent.role]
                 .filter(Boolean)
                 .join(' · ')
             return (
@@ -96,7 +96,7 @@ export default function MentionPicker({
                 id={optionId(id, i)}
                 role="option"
                 aria-selected={i === activeIndex}
-                className={`hub-mention-option ${i === activeIndex ? 'on' : ''} ${agent.groupRole === 'observer' ? 'observer' : ''}`}
+                className={`hub-mention-option ${i === activeIndex ? 'on' : ''}`}
                 onMouseEnter={() => onActiveIndex(i)}
                 // mousedown + preventDefault：选择时 textarea 不失焦（否则 caret 丢失）。
                 onMouseDown={(e) => {
@@ -111,7 +111,6 @@ export default function MentionPicker({
                 ) : groupRole === 'all' ? null : (
                   <span className="hub-mention-option-role">成员</span>
                 )}
-                {agent.groupRole === 'observer' ? <span className="hub-chip">只旁听</span> : null}
               </li>
             )
           })}

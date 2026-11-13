@@ -102,7 +102,7 @@ func TestHubGroupTools(t *testing.T) {
 		"name": "工具群", "members": []map[string]any{
 			{"agent_id": string(a.ID), "role": "owner"},
 			{"agent_id": string(b.ID), "role": "member"},
-			{"agent_id": string(c.ID), "role": "observer"},
+			{"agent_id": string(c.ID), "role": "member"},
 		},
 	})
 	if !ok {
@@ -136,7 +136,7 @@ func TestHubGroupTools(t *testing.T) {
 	}
 	// owner 能读；owner-only 消息被 redacted。
 	out, err := call(bsA, "group_members", `{"group_id":"`+string(g.ID)+`"}`)
-	if err != nil || !strings.Contains(out, "ToolA") || !strings.Contains(out, "observer") {
+	if err != nil || !strings.Contains(out, "ToolA") || !strings.Contains(out, "ToolC") || strings.Contains(out, "observer") {
 		t.Fatalf("members = %s, %v", out, err)
 	}
 	out, err = call(bsA, "group_history", `{"group_id":"`+string(g.ID)+`"}`)
@@ -174,13 +174,14 @@ func TestHubGroupTools(t *testing.T) {
 	if len(acts) != 1 || acts[0].AfterSeq != 4 {
 		t.Fatalf("receipt = %+v", acts)
 	}
-	// observer 不能发言；非成员不能读。
+	// P6-12：角色只剩 owner/member —— 普通成员可以发言（不再有 observer 特判）；
+	// 被拒的是越权 @all（下面）。
 	bsC, err := m.hubGroupSession(string(c.ID), string(g.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := call(bsC, "group_say", `{"group_id":"`+string(g.ID)+`","text":"observer 说话"}`); err == nil {
-		t.Fatal("observer must not speak")
+	if _, err := call(bsC, "group_say", `{"group_id":"`+string(g.ID)+`","text":"member 说话"}`); err != nil {
+		t.Fatalf("member should speak: %v", err)
 	}
 	// @all 普通成员被拒绝（路由层），且失败不能留下半条日志（P3a-05 B1）。
 	if _, err := call(bsA, "group_say", `{"group_id":"`+string(g.ID)+`","text":"@all 开会"}`); err != nil {

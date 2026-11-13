@@ -3,7 +3,7 @@ package main
 // hub_handoff.go：群内交接卡、落盘与 ack（P3a-06，§6.8/§6.9）。
 //
 // handoff 工具：
-//   - 从 g.Members 解析双方角色（不信任调用方），拒非成员/observer/软删群；
+//   - 从 g.Members 解析双方角色（不信任调用方），拒非成员/软删群；
 //   - 链深度由历史推导（0 = 首跳），同无序对 10 分钟最多 2 次；
 //   - 写 handoffs/<id>.json + KindHandoff 卡片，并开一条 handoff Needs you。
 //
@@ -43,7 +43,7 @@ func newHubHandoffTool(m *manager, agentID agenthub.AgentID, groupID agenthub.Gr
 	return &hubHandoffTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "handoff",
 		Description_: "Transfer ownership of work to another group member (not the same as @mention). " +
-			"The recipient must acknowledge; observers cannot hand off. " +
+			"The recipient must acknowledge. " +
 			"Guard: chain depth 3 and at most 2 handoffs per pair in 10 minutes.",
 		Params_: tools.Obj(map[string]any{
 			"group_id":     hubGroupIDParam(groupID, "Group id"),
@@ -65,12 +65,9 @@ func (t *hubHandoffTool) Call(ctx context.Context, _, arguments string) (string,
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", err
 	}
-	st, g, role, err := t.groupAccess(ctx, args.GroupID)
+	st, g, _, err := t.groupAccess(ctx, args.GroupID)
 	if err != nil {
 		return "", err
-	}
-	if role == agenthub.RoleObserver {
-		return "", fmt.Errorf("%w: observer 不能发起交接", agenthub.ErrHandoffObserver)
 	}
 	instruction := strings.TrimSpace(args.Instruction)
 	if instruction == "" {

@@ -58,7 +58,7 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
 const roster = [
   { id: 'ag_alice', name: 'Alice', role: '研究', groupRole: 'owner', accent: '#7bc199' },
   { id: 'ag_alicechen', name: 'Alice Chen', role: '长文写作', groupRole: 'member', accent: '#9daed2' },
-  { id: 'ag_critic', name: 'Critic', role: '反例审查', groupRole: 'observer' },
+  { id: 'ag_critic', name: 'Critic', role: '反例审查', groupRole: 'member' },
 ]
 
 // —— 1) mentions：最长名字优先 ——
@@ -112,11 +112,12 @@ const roster = [
   eq(byRole.join(','), 'ag_alicechen', '按职责过滤（长文 → 长文写作）')
   const byID = mentions.filterMentionCandidates('ag_cri', roster).map((a) => a.id)
   eq(byID.join(','), 'ag_critic', '按 agent id 过滤')
-  const byGroupRole = mentions.filterMentionCandidates('observer', roster).map((a) => a.id)
-  eq(byGroupRole.join(','), 'ag_critic', '按群角色过滤')
+  const byGroupRole = mentions.filterMentionCandidates('member', roster).map((a) => a.id)
+  eq(byGroupRole.join(','), 'ag_alicechen,ag_critic', '按群角色过滤（member）')
   eq(mentions.filterMentionCandidates('', roster).length, 3, '空查询返回全部候选')
+  // P6-12：observer 角色已删除 —— 派任务对象不再按角色过滤（只排除已删除成员）。
   const assignable = mentions.assignableMembers(roster).map((a) => a.id)
-  assert(!assignable.includes('ag_critic'), 'observer 不进派任务成员列表')
+  eq(assignable.join(','), 'ag_alice,ag_alicechen,ag_critic', '所有未删除成员都可派任务')
 }
 
 // —— 3b) mentions：IME / 空候选 Enter / 句读关闭 / Markdown 链接标签（B2/B3/N4）——
@@ -154,7 +155,7 @@ const roster = [
     id: 'g1', name: '群',
     members: [
       { agent_id: 'ag_alice', role: 'owner' },
-      { agent_id: 'ag_critic', role: 'observer' },
+      { agent_id: 'ag_critic', role: 'member' },
       { agent_id: 'ag_gone', role: 'member' },
     ],
   }

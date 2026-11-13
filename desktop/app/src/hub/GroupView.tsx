@@ -712,7 +712,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
               <div className="hub-assign-members" role="radiogroup" aria-label="选择执行成员">
                 {assignable.length === 0 ? (
                   <span className="hub-muted">
-                    {members.length === 0 ? '群还没有成员，无法派任务。' : '没有可接派任务的成员（observer 只旁听）。'}
+                    {members.length === 0 ? '群还没有成员，无法派任务。' : '没有可接派任务的成员。'}
                   </span>
                 ) : assignable.map((agent) => (
                   <button

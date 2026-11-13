@@ -29,6 +29,9 @@ func (s *FileStore) MarkGroupRead(ctx context.Context, groupID GroupID, seq int6
 	if err := readJSON(s.groupPath(groupID), &g); err != nil {
 		return 0, err
 	}
+	// 游标写是「读整份 → 改一个字段 → 写整份」：先把旧角色迁移掉，
+	// 否则一次标记已读就会把 observer 又写回盘里（绕过 SaveGroup 的拒绝）。
+	g.MigrateLegacyMemberRoles()
 	if seq <= g.HumanReadSeq {
 		return g.HumanReadSeq, nil
 	}

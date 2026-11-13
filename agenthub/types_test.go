@@ -96,7 +96,7 @@ func TestGroupJSONStable(t *testing.T) {
 		OwnerAgentID: "ag_7f3k2m7q",
 		Members: []Member{
 			{AgentID: "ag_7f3k2m7q", Role: RoleOwner, JoinedAt: testTime()},
-			{AgentID: "ag_2p8v", Role: RoleObserver, JoinedAt: testTime()},
+			{AgentID: "ag_2p8v", Role: RoleMember, JoinedAt: testTime()},
 		},
 		Policy: GroupPolicy{
 			Mode:             GroupModeAsk,

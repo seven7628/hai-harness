@@ -5,8 +5,10 @@ package agenthub
 // 护栏（与 GroupPolicy 默认值一致）：
 //   - 深度：ChainDepth >= group.policy.max_handoff_depth（默认 3）拒绝；
 //   - 同一对 (from→to) 10 分钟内最多 2 次；第 3 次拒绝并进 Needs you；
-//   - observer 不能发起/接收交接（只读旁听）；
 //   - 交接必须 ack：pending_ack → accepted/declined；同一 need 只能处理一次（幂等）。
+//
+// 角色只剩 owner/member（P6-12）：不再有「observer 不能交接」的特判 —— 交接双方
+// 只要是群成员即可；「只读」由群策略 readonly 管，不由角色管。
 //
 // 本文件做纯判定 + 状态迁移；落盘/交接卡/ack 工具在 bridge（hub_handoff.go）。
 
@@ -19,7 +21,6 @@ import (
 var (
 	ErrHandoffTooDeep     = errors.New("hub handoff: depth limit reached")
 	ErrHandoffRateLimited = errors.New("hub handoff: pair rate limited")
-	ErrHandoffObserver    = errors.New("hub handoff: observer cannot hand off")
 	ErrHandoffNotPending  = errors.New("hub handoff: not pending ack")
 )
 
@@ -67,16 +68,11 @@ func CheckHandoff(g *Group, from, to AgentID, depth int, history []Handoff, now 
 	if from == "" || to == "" || from == to {
 		return fmt.Errorf("%w: handoff 需要两个不同的智能体", ErrInvalid)
 	}
-	fromRole, ok := g.RoleOf(from)
-	if !ok {
+	if _, ok := g.RoleOf(from); !ok {
 		return fmt.Errorf("%w: %s 不是群成员", ErrInvalid, from)
 	}
-	toRole, ok := g.RoleOf(to)
-	if !ok {
+	if _, ok := g.RoleOf(to); !ok {
 		return fmt.Errorf("%w: %s 不是群成员", ErrInvalid, to)
-	}
-	if fromRole == RoleObserver || toRole == RoleObserver {
-		return fmt.Errorf("%w: observer（%s → %s）", ErrHandoffObserver, from, to)
 	}
 	if depth < 0 {
 		return fmt.Errorf("%w: depth %d", ErrInvalid, depth)

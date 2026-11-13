@@ -14,7 +14,7 @@ export interface MentionAgent {
   name: string
   /** 职责（HubAgent.role，例如「竞品研究员」）。 */
   role?: string
-  /** 群内角色：owner | member | observer（@all 的合成候选用 all）。 */
+  /** 群内角色：owner | member（P6-12 删除 observer；@all 的合成候选用 all）。 */
   groupRole?: string
   accent?: string
   avatar?: HubAvatar
@@ -456,7 +456,11 @@ export function groupRoster(group: HubGroup | null | undefined, agents: HubAgent
   })
 }
 
-/** 可接派任务的成员：observer 只旁听（方案 §8.3.3），已删除的不列。 */
+/**
+ * 可接派任务的成员：除已删除的之外全都可以（P6-12 删除了 observer 角色）。
+ * 「只读」是群模式 readonly 的事，不再由角色过滤派活对象 —— 同一件事两个开关，
+ * 迟早出现「UI 不让人派、后端其实允许」或反过来的不一致。
+ */
 export function assignableMembers(members: MentionAgent[]): MentionAgent[] {
-  return members.filter((m) => !m.deleted && m.groupRole !== 'observer')
+  return members.filter((m) => !m.deleted)
 }

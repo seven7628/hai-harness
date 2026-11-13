@@ -309,7 +309,6 @@ const zh: Record<string, string> = {
   'hub.sending': '发送中…',
   'hub.sendFailed': '发送失败',
   'hub.streaming': '正在输入',
-  'hub.observer': '观察',
   // 长正文折叠 + 完整内容弹窗（hub/CollapsibleMarkdown.tsx）
   'hub.collapse.more': '查看完整详情',
   'hub.collapse.moreFor': '查看完整详情：{name}',
@@ -2394,7 +2393,6 @@ const en: Record<string, string> = {
   'hub.sending': 'Sending…',
   'hub.sendFailed': 'Send failed',
   'hub.streaming': 'Typing',
-  'hub.observer': 'Observing',
   'hub.collapse.more': 'View full content',
   'hub.collapse.moreFor': 'View full content: {name}',
   'hub.collapse.title': 'Full content',

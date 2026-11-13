@@ -53,7 +53,7 @@ func TestSnapshotDeltaAndFreezeRound(t *testing.T) {
 	// 别人被 @ / 无 round：旁听。
 	round.Targets = []AgentID{"ag_bbbbbbbb"}
 	snap2 := BuildGroupSnapshot(g, "ag_aaaaaaaa", msgs, 2, round, SnapshotOptions{})
-	if !strings.Contains(snap2.Text, "只读旁听") {
+	if !strings.Contains(snap2.Text, "本轮未被点名") {
 		t.Fatalf("text2 = %s", snap2.Text)
 	}
 }

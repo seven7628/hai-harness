@@ -4,7 +4,7 @@ package agenthub
 //
 // 规则（严格解析器，不降级）：
 //   - 正文无 @ 且无结构化 mentions → 不唤醒任何智能体；
-//   - @all（正文或 mention_all）→ 仅 owner 或人类可用（member/observer 直接拒绝，
+//   - @all（正文或 mention_all）→ 仅 owner 或人类可用（member 直接拒绝，
 //     不降级成普通 @）；targets = 除发送者外的全部成员（按 JoinedAt、AgentID 排序）；
 //   - @Name / 结构化 agent id → 取并集：正文出现顺序在前，结构化 id 顺序在后，
 //     去重并过滤 self，再按 GroupPolicy.MaxMentions（默认 3）统一截断；

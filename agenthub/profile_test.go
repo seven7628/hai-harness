@@ -271,7 +271,7 @@ func validGroup() *Group {
 		Members: []Member{
 			{AgentID: testAgentID('a'), Role: RoleOwner},
 			{AgentID: testAgentID('b'), Role: RoleMember},
-			{AgentID: testAgentID('c'), Role: RoleObserver},
+			{AgentID: testAgentID('c'), Role: RoleMember},
 		},
 	}
 }

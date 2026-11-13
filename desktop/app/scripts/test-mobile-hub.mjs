@@ -46,7 +46,7 @@ const roster = [
   { id: 'ag_alice', name: 'Alice', role: '研究', groupRole: 'owner' },
   { id: 'ag_alicechen', name: 'Alice Chen', role: '长文写作', groupRole: 'member' },
   { id: 'ag_bob', name: 'Bob', role: '数据', groupRole: 'member' },
-  { id: 'ag_obs', name: 'Observer', role: '旁听', groupRole: 'observer' },
+  { id: 'ag_obs', name: 'Observer', role: '旁听', groupRole: 'member' },
 ]
 
 // —— 1) seq 合并：按 seq 升序、按 id/seq 去重 ——

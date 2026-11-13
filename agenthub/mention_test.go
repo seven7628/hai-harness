@@ -185,8 +185,8 @@ func TestMentionAllPermissions(t *testing.T) {
 	if !CanMentionAll(false, RoleOwner) {
 		t.Fatal("owner should be able to @all")
 	}
-	if CanMentionAll(false, RoleMember) || CanMentionAll(false, RoleObserver) {
-		t.Fatal("member/observer must not @all")
+	if CanMentionAll(false, RoleMember) {
+		t.Fatal("member must not @all")
 	}
 	res := MentionResult{MentionAll: true}
 	if err := res.ValidateMentionAll(false, RoleMember); !errors.Is(err, ErrMentionAllForbidden) {
@@ -195,7 +195,7 @@ func TestMentionAllPermissions(t *testing.T) {
 	if err := res.ValidateMentionAll(false, RoleOwner); err != nil {
 		t.Fatalf("owner @all: %v", err)
 	}
-	if err := res.ValidateMentionAll(true, RoleObserver); err != nil {
+	if err := res.ValidateMentionAll(true, RoleMember); err != nil {
 		t.Fatalf("human @all: %v", err)
 	}
 	if err := (MentionResult{}).ValidateMentionAll(false, RoleMember); err != nil {
