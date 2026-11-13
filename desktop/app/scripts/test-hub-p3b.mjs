@@ -184,8 +184,8 @@ const roster = [
   )
   eq(
     conversation.conversationTurnText({ status: 'idle' }),
-    '第 0 轮 · 深度 0/4 · 队列 0',
-    '缺省限额 = 无上限（生产默认），不能又回落到 8',
+    '第 0 轮 · 深度 0/1000 · 队列 0',
+    '缺省限额 = 无上限（生产默认），不能又回落到 8；深度分母跟 Go 默认 1000',
   )
   eq(conversation.conversationStatusLabel('running'), '自动对话中', 'running 文案')
   eq(conversation.conversationStatusLabel('waiting_human'), '等你继续', 'waiting_human 文案')
