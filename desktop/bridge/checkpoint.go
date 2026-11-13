@@ -584,12 +584,13 @@ func (bs *bridgeSession) observe(e events.Event) {
 	if bs == nil || bs.reducer == nil {
 		return
 	}
-	meta := EventMeta{Provider: bs.provider}
+	prov, _, _, _ := bs.cfgSnapshot()
+	meta := EventMeta{Provider: prov}
 	switch ev := e.(type) {
 	case *events.LLMEnd:
 		if ev.Usage != nil {
 			// 与 emit 现有打标同表：单次 cost 随 turn 落 checkpoint
-			meta.CostUSD = costUsd(bs.provider, ev.Model, *ev.Usage)
+			meta.CostUSD = costUsd(prov, ev.Model, *ev.Usage)
 		}
 	case *events.ToolResponse:
 		if todoResponseCarriesSnapshot(ev) {
@@ -654,7 +655,8 @@ func (bs *bridgeSession) migrateLegacyToCheckpoint() bool {
 		if err != nil || ev == nil {
 			continue // 坏行跳过（与 buildSnapshot 一致）
 		}
-		_ = bs.reducer.Apply(ev, EventMeta{Provider: bs.provider})
+		prov, _, _, _ := bs.cfgSnapshot()
+		_ = bs.reducer.Apply(ev, EventMeta{Provider: prov})
 		applied++
 	}
 	// 扫描错误（超长行/IO 失败）：已读取前缀不完整，**不得提交为权威 record**

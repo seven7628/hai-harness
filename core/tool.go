@@ -273,6 +273,11 @@ const (
 // 口径标记（InputSemantics / ReasoningSummarized）不参与求和：它们是**单轮**的判定来源
 // 标记，跨轮聚合后没有单一含义（展示层要看单轮就看 LLMEnd.Usage）。
 func (u Usage) Add(v Usage) Usage {
+	// 空轮（普通工具结果恒零值）不参与累加：否则会把上一轮的有价性 AND 成无价，
+	// 让 AgentEnd.Usage.Cost.Priced 在「调用过工具」的 run 上恒 false（P2-04 复审 B1）。
+	if v.emptyRound() {
+		return u
+	}
 	u.Input += v.Input
 	u.Output += v.Output
 	u.CacheRead += v.CacheRead
@@ -283,6 +288,12 @@ func (u Usage) Add(v Usage) Usage {
 	u.Details = addDetails(u.Details, v.Details)
 	u.Cost = u.Cost.Add(v.Cost)
 	return u
+}
+
+// emptyRound 是否真空轮：无 token、无成本、无来源、无明细。有 token 但无价
+// （Source=none/explicit_zero）不是空轮，仍须参与 AND 以保持「未知 ≠ 0」。
+func (u Usage) emptyRound() bool {
+	return u.IsZero() && !u.Cost.Priced && u.Cost.Source == "" && u.Details == nil
 }
 
 // addDetails 明细相加：两边都 nil → nil（保持「没有信息」而不是伪造一个全 0 结构）。
@@ -308,12 +319,25 @@ func addDetails(a, b *UsageDetails) *UsageDetails {
 // Priced/Source 是单轮口径标记：跨轮聚合后无法用单一值表达（一轮有价一轮无价），
 // 因此聚合结果恒为零值 —— 需要「这一笔有没有价」看单轮 Usage.Cost（metrics 按行统计）。
 func (c Cost) Add(v Cost) Cost {
+	empty := c.Input == 0 && c.Output == 0 && c.Reasoning == 0 && c.CacheRead == 0 &&
+		c.CacheWrite == 0 && c.Total == 0 && !c.Priced && c.Source == ""
+	if empty {
+		return v // 首次累加：保留 Priced/Source（零值 AND 会把有价抹成无价）
+	}
+	// 跨轮聚合的有价性：所有轮次都有价才是有价；来源一致才保留 Source。
+	priced := c.Priced && v.Priced
+	source := c.Source
+	if source != v.Source {
+		source = ""
+	}
 	c.Input += v.Input
 	c.Output += v.Output
 	c.Reasoning += v.Reasoning
 	c.CacheRead += v.CacheRead
 	c.CacheWrite += v.CacheWrite
 	c.Total += v.Total
+	c.Priced = priced
+	c.Source = source
 	return c
 }
 

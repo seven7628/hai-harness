@@ -238,31 +238,72 @@ func loadComputerApprovedApps() map[string]bool {
 }
 
 // cronSettings settings.json 顶层 cron 段（桌面端定时任务功能）。
+//
+// 字段是**三态**（*bool，GO-11）：nil = 磁盘上根本没有这个键（未设置），true/false = 用户
+// 显式选择。为什么不能沿用 bool：JSON 反序列化进零值结构体时「缺键」与「显式 false」
+// 得到同一个值（false），于是「升级后只带 auto_clean 的 settings.json」= 定时任务被静默
+// 关掉 —— 用户看不到任何提示，只是模型工具表里 CronCreate 们突然消失了。
+//
+// 默认值只能由「缺键」触发，因此读侧统一走 enabledOn/autoCleanOn（nil → 默认），
+// 而不是让零值碰巧等于默认值。
+//
 // Enabled: 是否开启定时任务工具 + 触发调度（缺省 true，用户决策 2026-08-19）。
 // AutoClean: 是否自动清理 N 天前的派生会话文件（缺省 true；只删派生会话文件，
 // 任务定义 cron.json 与运行账本 cron_runs.jsonl 保留）。
 type cronSettings struct {
-	Enabled   bool `json:"enabled"`
-	AutoClean bool `json:"auto_clean"`
+	Enabled   *bool `json:"enabled,omitempty"`
+	AutoClean *bool `json:"auto_clean,omitempty"`
+}
+
+// 缺省值（用户决策 2026-08-19：全开）。只在这里定义一次，读侧与种子值共用。
+const (
+	cronEnabledDefault   = true
+	cronAutoCleanDefault = true
+)
+
+// enabledOn 生效值：未设置（nil，含 JSON null）→ 缺省 true；显式 false 才关。
+func (cs cronSettings) enabledOn() bool { return boolDefault(cs.Enabled, cronEnabledDefault) }
+
+// autoCleanOn 同上（AutoClean 缺省 true）。
+func (cs cronSettings) autoCleanOn() bool { return boolDefault(cs.AutoClean, cronAutoCleanDefault) }
+
+// boolDefault 三态取值：nil → def，否则取指针值。
+func boolDefault(v *bool, def bool) bool {
+	if v == nil {
+		return def
+	}
+	return *v
+}
+
+// cronSettingsDefaults 缺省全开的设置（种子值与坏配置回退共用同一份）。
+func cronSettingsDefaults() cronSettings {
+	return cronSettings{
+		Enabled:   boolPtr(cronEnabledDefault),
+		AutoClean: boolPtr(cronAutoCleanDefault),
+	}
 }
 
 // loadCronSettings 读定时任务设置：未配置/坏配置 → 默认全开
 // （Enabled=true, AutoClean=true，用户决策 2026-08-19）。
+//
+// 先赋默认值再 Unmarshal（GO-11）：缺键保留种子值，只有磁盘上显式写下的键才改变结果。
+// 两层保护是刻意的——种子值管正常路径，enabledOn/autoCleanOn 管任何零值 cronSettings
+// （测试或未来新增的调用点手写结构体时也不会被读成「关」）。
 func loadCronSettings() cronSettings {
-	cs := cronSettings{Enabled: true, AutoClean: true}
 	raw, err := os.ReadFile(homeCfgPath("settings.json"))
 	if err != nil {
-		return cs
+		return cronSettingsDefaults()
 	}
 	var outer struct {
 		Cron json.RawMessage `json:"cron"`
 	}
 	if json.Unmarshal(raw, &outer) != nil || outer.Cron == nil {
-		return cs
+		return cronSettingsDefaults()
 	}
-	var c cronSettings
+	// 种子 = 默认全开；Unmarshal 只覆盖磁盘上出现的键。
+	c := cronSettingsDefaults()
 	if json.Unmarshal(outer.Cron, &c) != nil {
-		return cs // 坏配置回默认全开
+		return cronSettingsDefaults() // 坏配置回默认全开（不返回半解析结果）
 	}
 	return c
 }
@@ -379,14 +420,21 @@ const (
 )
 
 type providerConfig struct {
-	mu        sync.Mutex
-	active    string                                       // "deepseek" | "openai" | "opencode" | "kimi" | "zhipu" | 自定义
-	baseURL   map[string]string                            // provider → base url
-	apiKey    map[string]string                            // provider → key（内存；env / set_provider）
-	models    map[string]map[string]int64                  // provider → model → context window（tokens）
-	maxTokens map[string]map[string]int64                  // provider → model → 单次输出上限（tokens）
-	protocol  map[string]string                            // provider → OpenAI 接入协议
-	compat    map[string]provider.OpenAICompatCapabilities // provider → chat-completions 能力
+	mu      sync.Mutex
+	active  string            // "deepseek" | "openai" | "opencode" | "kimi" | "zhipu" | 自定义
+	baseURL map[string]string // provider → base url
+	apiKey  map[string]string // provider → key（内存；env / payload 注入 / legacy settings）
+	// keyInjected provider → 该 key 是**命令 payload 注入**的（BR-08：set_provider / switch_model /
+	// list_models / provider_billing 随命令带 key，key 由 Electron 从 keys.json 取）。
+	// loadSettings 只按 settings.json 重算「settings 来源」的 key：注入值必须保留——否则
+	// 保存新 key 后紧跟的 loadSettings、或随便一次 reload_settings（切沙箱/浏览器引擎）都会
+	// 把内存里的新 key 清掉（回退 spawn 时的旧 env key）或被 settings 残留的旧明文顶回去
+	// （401 / 轮换不生效）。
+	keyInjected map[string]bool
+	models      map[string]map[string]int64                  // provider → model → context window（tokens）
+	maxTokens   map[string]map[string]int64                  // provider → model → 单次输出上限（tokens）
+	protocol    map[string]string                            // provider → OpenAI 接入协议
+	compat      map[string]provider.OpenAICompatCapabilities // provider → chat-completions 能力
 	// 新增（2026-08 provider 优化）：
 	inputTypes map[string]map[string][]string // provider → model → ["text","image"]（前端 input_types；bridge 现开始消费）
 	registry   *provider.Registry             // 模型元数据注册表（内置真实常量 + settings 覆盖；依赖注入）
@@ -489,9 +537,10 @@ func loadProviderConfig() *providerConfig {
 			// 故 compat 的 BasePath 置 /v4，保证 /chat/completions 落在正确路径。
 			"zhipu": "https://open.bigmodel.cn/api/paas/v4",
 		},
-		apiKey:    map[string]string{},
-		models:    models,
-		maxTokens: maxTokens,
+		apiKey:      map[string]string{},
+		keyInjected: map[string]bool{},
+		models:      models,
+		maxTokens:   maxTokens,
 		protocol: map[string]string{
 			"deepseek": protocolChatCompletions,
 			"openai":   protocolChatCompletions,
@@ -545,8 +594,11 @@ func loadProviderConfig() *providerConfig {
 // active 是保留键；其余每个 key 是一个 provider（base_url/api_key/protocol/models/max_tokens），
 // 键名经 validProviderName 校验（跳过非法键）。内置三卡默认值在 loadProviderConfig 预置，
 // 这里只覆盖显式配置；自定义 provider 在此全量加载。
-// api_key 明文持久化在 settings.json（桌面端用户决策 2026-08-16：Provider 设置直接写
-// settings.json，不依赖 .env/keys.json 注入）——loadSettings 是 bridge 读取 key 的主通道。
+// **api_key 不是主通道**（BR-08，2026-09）：key 由 Electron 保管在 ~/.go-code/keys.json
+// （safeStorage 加密，0600），按需注入：启动时 spawn env 只带**当前活跃 provider** 一把，
+// 保存/切换 provider 与切模型时随命令 payload 下发（set_provider / switch_model）。
+// settings.json 不再写 provider key；这里**仍读** `api_key` 只为兼容迁移未完成的旧文件
+// （Electron 启动迁移会把明文搬进 keys.json 并从 settings 删除）。
 func (pc *providerConfig) loadSettings() {
 	raw, err := os.ReadFile(homeCfgPath("settings.json"))
 	if err != nil {
@@ -597,6 +649,7 @@ func (pc *providerConfig) loadSettings() {
 		if p.Deleted {
 			delete(pc.baseURL, name)
 			delete(pc.apiKey, name)
+			delete(pc.keyInjected, name) // 删除 = 连注入的 key 一起忘掉（重新添加不许用旧 key）
 			delete(pc.models, name)
 			delete(pc.maxTokens, name)
 			delete(pc.inputTypes, name)
@@ -613,11 +666,15 @@ func (pc *providerConfig) loadSettings() {
 		if p.BaseURL != "" {
 			pc.baseURL[name] = p.BaseURL
 		}
-		if p.ApiKey != "" {
-			pc.apiKey[name] = p.ApiKey // 明文 key（settings.json 主通道）；空值清除内存旧值（避免旧 key 残留）
-		} else {
-			// settings 里无 key（用户删除/从未配置）：清内存旧值，回退 env 兜底。
-			// 防止「面板删 key 后内存仍持旧 key → 新会话 401」。
+		if p.ApiKey != "" && !pc.keyInjected[name] {
+			// legacy：迁移未完成的 settings 明文（BR-08 迁移后 settings 不再有 key）。
+			// **payload 注入值永远胜出**：settings 明文只可能是上次迁移的残留，比 keys.json 旧；
+			// 拿它覆盖注入值 = 旧 key 复活（reload_settings 后立刻 401）。只有没有注入值时
+			// 才采用 settings 明文（迁移未完成的兜底）。
+			pc.apiKey[name] = p.ApiKey
+		} else if !pc.keyInjected[name] {
+			// settings 里无 key 且内存值不是 payload 注入的（用户删除/从未配置）：
+			// 清内存旧值，回退 env 兜底。注入值**不删**（见 keyInjected 字段说明）。
 			delete(pc.apiKey, name)
 		}
 		if p.Protocol == protocolResponses || p.Protocol == protocolAnthropic {
@@ -679,6 +736,23 @@ func (pc *providerConfig) loadSettings() {
 	}
 }
 
+// providerExists 该 provider 条目是否存在且未被删除（Hub 保存 profile 的校验，§5.1）。
+//
+// **只判存在，不判有没有 key**：内置五家的 baseURL 在构造期恒预置，deleted 的条目在
+// loadSettings 里被整段移除，自定义 provider 则是 settings 里根本没有 —— 所以
+// 「baseURL 里有键」= 这个 provider 还没被删。无 key 也算存在（§5.1 字面要求），
+// 「有没有 key」是 UI 该标黄的运行时信息（§6.2.4 的 Exists && HasKey 在派发前判）。
+func (pc *providerConfig) providerExists(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	_, ok := pc.baseURL[name]
+	return ok
+}
+
 // validProviderName provider 命名校验（内置三卡 deepseek/openai/opencode 与用户自定义共用）：
 // 非空、非保留键 "active"，仅字母/数字/短横/下划线且首字符为字母（与前端添加表单同规则）。
 // set_provider / settings.json 解析 / provider 增删共用。
@@ -716,17 +790,43 @@ func (pc *providerConfig) setBaseURL(name, url string) {
 	}
 }
 
+// setKey 写入某 provider 的内存 key（payload 注入 / 显式清除）。标记 keyInjected：
+// loadSettings 不得清掉它（见 keyInjected 字段说明）。空串 = 显式清除（回退 env 兜底）。
 func (pc *providerConfig) setKey(name, key string) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
-	if validProviderName(name) {
-		if key == "" {
-			// 显式清空：内存旧 key 不得残留（旧 key 轮换后若不清除，
-			// keyLocked 会继续返回旧值 → 401；回退 env/.env 兜底）。
-			delete(pc.apiKey, name)
-		} else {
-			pc.apiKey[name] = key
-		}
+	if !validProviderName(name) {
+		return
+	}
+	if pc.keyInjected == nil {
+		pc.keyInjected = map[string]bool{}
+	}
+	if key == "" {
+		// 显式清空：内存旧 key 不得残留（旧 key 轮换后若不清除，
+		// keyLocked 会继续返回旧值 → 401；回退 env/.env 兜底）。
+		delete(pc.apiKey, name)
+		delete(pc.keyInjected, name)
+		return
+	}
+	pc.apiKey[name] = key
+	pc.keyInjected[name] = true
+}
+
+// applyPayloadKey 把命令 payload 里的 api_key 应用到某 provider 的内存 key（BR-08）。
+// 客户端不再把 key 持久化到 settings.json，非活跃 provider 也没有 env 兜底 —— 所以
+// 「按 provider 触发、且需要 key」的命令（set_provider / switch_model / list_models /
+// provider_billing）都随命令带 key。
+// 语义：不带 api_key 字段 = 不动；带字符串 = 写入（空串 = 显式清除）。非字符串忽略。
+func (pc *providerConfig) applyPayloadKey(payload map[string]any, provider string) {
+	if provider == "" {
+		return
+	}
+	raw, ok := payload["api_key"]
+	if !ok {
+		return
+	}
+	if key, isStr := raw.(string); isStr {
+		pc.setKey(provider, key)
 	}
 }
 
@@ -771,18 +871,30 @@ const (
 	deepseekDefaultTopP        = 0.95
 )
 
-// samplingDefaults 当前活跃 provider 的采样默认（temperature/topP；nil = 厂商默认）。
+// samplingDefaults 当前活跃 provider 的采样默认（历史入口，等价 samplingDefaultsFor(providerName())）。
 func (pc *providerConfig) samplingDefaults() (temperature, topP *float64) {
-	if pc.providerName() != "deepseek" {
+	return pc.samplingDefaultsFor(pc.providerName())
+}
+
+// samplingDefaultsFor 指定 provider 的采样默认（temperature/topP；nil = 厂商默认）。
+//
+// Hub 必须用这个而不是 samplingDefaults()：后者读全局 active，A=DeepSeek、B=Anthropic
+// 同时跑时会把 A 的采样参数发给 B（方案 §6.2.1 的采样默认必须按**显式 provider**取）。
+func (pc *providerConfig) samplingDefaultsFor(provider string) (temperature, topP *float64) {
+	if provider != "deepseek" {
 		return nil, nil
 	}
 	t, p := deepseekDefaultTemperature, deepseekDefaultTopP
 	return &t, &p
 }
 
-// keyLocked 取某 provider 的 key：运行中 set_provider 写入的内存值优先；
-// 其次内置三卡的既定 env（boot 时 Electron 注入 / .env）；最后自定义 provider 的
-// 通用 env 兜底 GOCODE_KEY_<UPPER(name)>（Electron loadKeysEnv 对任意已存 key 生成）。
+// keyLocked 取某 provider 的 key：运行中 set_provider / switch_model 写入的内存值优先；
+// 其次内置五卡的既定 env（boot 时 Electron 只注入**活跃 provider 一把** / .env）；最后自定义
+// provider 的通用 env 兜底 GOCODE_KEY_<UPPER(name)>。
+//
+// 注意（BR-08）：env 里只有活跃 provider 的 key，**非活跃 provider 不再有 env 兜底** ——
+// 切到别的 provider 时 key 随命令 payload 注入（Electron sendCommand 按 provider 取 keys.json）。
+// 所以「payload 带 key」的路径必须真的落到 pc.apiKey（见 main.go CmdSwitchModel）。
 func (pc *providerConfig) keyLocked(name string) string {
 	// G2 修复：加锁读 pc.apiKey（newProvider 可能在 runLoop goroutine 并发读，
 	// 与 set_provider 主线程写存在竞争窗口；-race 未触发只因实际串行）。
@@ -1375,6 +1487,26 @@ func (pc *providerConfig) hasModelIn(prov, name string) bool {
 	defer pc.mu.Unlock()
 	_, ok := pc.models[prov][name]
 	return ok
+}
+
+// providerKnown 该 provider 是否已配置（base URL / key 任一存在）。
+func (pc *providerConfig) providerKnown(prov string) bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.baseURL[prov] != "" || pc.apiKey[prov] != ""
+}
+
+// providerHasModels 该 provider 是否配置了模型表。空表 = 本地 vLLM 等
+// 尚未拉取模型列表的端点：switch_model 应 fail-open，允许用户显式指定模型。
+func (pc *providerConfig) providerHasModels(prov string) bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return len(pc.models[prov]) > 0
+}
+
+// allowUnlistedModel 显式 provider 的空模型表是否允许指定任意模型（本地 vLLM/Ollama）。
+func (pc *providerConfig) allowUnlistedModel(prov string) bool {
+	return pc.providerKnown(prov) && !pc.providerHasModels(prov)
 }
 
 // providerForModel 在所有已配置 Provider 的模型表里查找该模型所属的 Provider；找不到返回空串。

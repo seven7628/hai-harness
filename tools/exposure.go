@@ -251,3 +251,4 @@ type SkipTruncateProvider interface {
 type LoadoutProvider interface {
 	PrepareLoadout(ctx context.Context, declared []core.ToolSchema) []core.ToolSchema
 }
+

@@ -48,7 +48,7 @@ desktop/app/persist-check.js
 brand/boot-preview*
 
 # —— 测试与端到端：前端/E2E 不入版本库 ——
-# Go 测试【已恢复入库，2026-10-02】：此规则来自 918c0ee「初始发布快照」的副产物，
+# Go 测试【部分恢复入库，2026-10-12 起】：此规则来自 918c0ee「初始发布快照」的副产物，
 # 并非评审过的决策 —— 已有 28 个 Go 测试用 git add -f 绕过它入库，项目实际行为早已
 # 否定这条规则。代价是每个新 clone / worktree 都**静默丢失全部 Go 回归网**
 # （实测：codemode worktree 上 `go build` 通过但一个测试都没有）。
@@ -72,6 +72,15 @@ brand/boot-preview*
 /desktop/app/scripts/_tmp_*
 /desktop/bridge/e2e_*.py
 testdata/
+# 例外：agenthub 的 L1 提示词 golden 是契约文案，必须入库（否则干净检出里
+# golden 缺失 → 测试直接失败；被上面那条 testdata/ 规则误伤过一次）
+!agenthub/testdata/
+# 例外：MCP 端到端测试的 fixture server（go build 成子进程），mcp 与 desktop/bridge
+# 的 MCP 用例都靠它；同样被 testdata/ 规则误伤过（干净检出里直接 "fixture: exit status 1"）
+!mcp/testdata/
+# 例外：skills 包的合法/损坏 fixture（skill_test.go 与 agents/skills_integration_test.go
+# 依赖；被 testdata/ 规则误伤会让干净检出在真跑时炸）
+!skills/testdata/
 # 例外：MCP stdio 端到端夹具（desktop/bridge 的 mcp_test/mcp_projects_test 用
 # `go build ../../mcp/testdata/server` 现场编译）。被上面的 `testdata/` 整目录吞掉时
 # 干净检出必红（R05a3 / R-10）。只放开这一条路径，全局 `testdata/` 仍然忽略。

@@ -444,6 +444,34 @@ func TestLLMCompressorLatestUserOversized(t *testing.T) {
 	if !strings.Contains(p.req.Messages[1].Content[0].Content, strings.Repeat("x", 2000)) {
 		t.Fatalf("oversized input should enter compress input: %q", p.req.Messages[1].Content[0].Content[:60])
 	}
+	// 请求侧不重复：超长正文只能出现一次（既进压缩输入又留在 latestUser 的双份
+	// 会把压缩请求本身也撑爆 —— 双计是本分支最容易出的回归）。
+	dup := 0
+	for _, m := range p.req.Messages {
+		for _, c := range m.Content {
+			if strings.Contains(c.Content, strings.Repeat("x", 2000)) {
+				dup++
+			}
+		}
+	}
+	if dup != 1 {
+		t.Fatalf("oversized input must enter compress request exactly once, got %d", dup)
+	}
+	// 输出侧只留摘要：摘要消息确实生成（不是空壳），超长正文不再逐字保留 ——
+	// 这正是 agent_loop「compact + 正文仍要继续跑一轮」注释所依赖的上游契约
+	//（超过 LatestUserMaxTokens 的正文并入压缩，压缩后只剩摘要要点）。
+	if len(result.Messages[1].Content) == 0 ||
+		result.Messages[1].Content[0].Type != summaryContentType ||
+		!strings.Contains(result.Messages[1].Content[0].Content, "# 会话摘要") {
+		t.Fatalf("summary message must carry the compressed summary: %+v", result.Messages[1])
+	}
+	for _, m := range result.Messages {
+		for _, c := range m.Content {
+			if strings.Contains(c.Content, strings.Repeat("x", 200)) {
+				t.Fatalf("oversized input must not survive verbatim after compaction: %+v", m)
+			}
+		}
+	}
 }
 
 // TestEstimateTokensReasoningAndTools 验证预估包含回传的 Reasoning 与工具调用参数

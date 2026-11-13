@@ -113,3 +113,16 @@ func TestSubagentTodosDoNotLeakToParent(t *testing.T) {
 		t.Fatalf("父清单 = %+v, want [父任务]（未被子运行污染）", items)
 	}
 }
+
+// TestTodoSnapshotEmptyIsExplicit 空清单必须是非 nil 空切片：事件层用它表达
+// 「这份清单被清空」，不能让宿主把 nil 当成「没带快照」而回退到会话清单。
+func TestTodoSnapshotEmptyIsExplicit(t *testing.T) {
+	ac := &AgentContext{Todo: todo.New()}
+	got := ac.todoSnapshot()
+	if got == nil {
+		t.Fatal("空 store 的快照 = nil，want 非 nil 空切片（清空语义）")
+	}
+	if len(got) != 0 {
+		t.Fatalf("空 store 的快照 = %+v, want 空", got)
+	}
+}

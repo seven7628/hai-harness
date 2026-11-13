@@ -9,9 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/im"
+	"github.com/seven7628/hai-harness/owner"
 	implugin "github.com/seven7628/hai-harness/plugin/im"
 )
 
@@ -48,13 +50,28 @@ type imBridge struct {
 	toolStart map[string]time.Time
 
 	// 回调注入（由 bridge 装配）
-	askFn       func(wsPath, sessionID, text string, images []core.Content) // 驱动会话（Session.Ask；images = IM 图片附件）
+	// askFn 驱动投递目标（项目会话 / 智能体 DM / 群会话）：t 已按路由解析好归属与目标，
+	// 实现方按 t 决定怎么取会话（见 attachManager）。签名带 imTarget 而不是裸 wsPath，
+	// 是因为 owner 隔离后「投递给谁」有三种形态，用 workspace 表达不下。
+	askFn       func(t imTarget, text string, images []core.Content)
 	approveFn   func(wsPath, sessionID, approvalID string, approve bool) error
 	interruptFn func(wsPath, sessionID string)
 	// bindConfirmFn 陌生 Chat 首次消息 → 桌面端弹窗（返回确认的 workspace；空=拒绝）
 	bindConfirmFn func(chat im.Chat, userID, text string) (workspace string, approved bool)
 	// saveCfg 持久化配置（镜像表热更新落盘；注入 = im.SaveConfig(m.imConfigPath())）
 	saveCfg func(cfg im.Config) error
+}
+
+// imTarget 一条 IM 路由解析后的投递目标（owner 隔离后「投给谁」有三种形态）。
+type imTarget struct {
+	Owner string         // 归属（workspace:/agent:/group:）
+	Route im.RouteConfig // 原始路由（含投递目标字段）
+	// WsPath 会话所属运行时路径：项目路由 = 工作区；agent/group 路由 = 智能体 home。
+	WsPath string
+	// SessionID 目标会话 id：项目路由 = im-<gw>-<chat>[-alias]；hub 路由 = hub.<agent>.dm / hub.<agent>.g.<group>。
+	SessionID string
+	// Kind workspace | agent | group（与 Route.TargetKind() 一致，便于日志/审计）
+	Kind string
 }
 
 // newIMBridge 创建 IM 事件桥。
@@ -203,7 +220,7 @@ func (b *imBridge) renderAndSend(wsPath, sessionID string, chat im.Chat, e event
 
 // gatewayFor 按 Chat 查 Gateway 实例。
 func (b *imBridge) gatewayFor(chat im.Chat) im.Gateway {
-	for _, g := range b.rt.Gateways {
+	for _, g := range b.rt.GatewaySnapshot() {
 		if g.Type() == chat.Gateway {
 			return g
 		}
@@ -238,8 +255,8 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 		rt.Security.Audit(im.AuditEntry{Gateway: msg.Chat.Gateway, Chat: msg.Chat.String(), UserID: msg.UserID, Action: "message_rejected", Detail: "用户不在授权名单", Allowed: false})
 		return
 	}
-	// ② 路由
-	wsPath, ok := rt.Router.RouteFor(msg.Chat)
+	// ② 路由（完整路由：投递目标 + 归属）
+	route, ok := rt.Router.RouteForChat(msg.Chat)
 	if !ok {
 		// ③ 绑定确认（陌生 Chat）
 		if rt.Security.ShouldRequireConfirm(msg.Chat) && b.bindConfirmFn != nil {
@@ -248,12 +265,24 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 				rt.Security.Audit(im.AuditEntry{Gateway: msg.Chat.Gateway, Chat: msg.Chat.String(), UserID: msg.UserID, Action: "bind_pending", Detail: "等待桌面端确认绑定", Allowed: true})
 				return
 			}
-			wsPath = wsPath2
+			// 确认绑定产出的是一条**项目路由**（绑定时选的是工作区）
+			route = im.RouteConfig{Chat: msg.Chat, Workspace: wsPath2}
 			rt.Security.ConfirmChat(msg.Chat)
 		} else {
 			rt.Security.Audit(im.AuditEntry{Gateway: msg.Chat.Gateway, Chat: msg.Chat.String(), UserID: msg.UserID, Action: "route_miss", Detail: "无路由且无绑定确认", Allowed: true})
 			return
 		}
+	}
+	// ③.5 归属闸门（owner 隔离）：该归属没启用 → 不投递，并留下可解释的审计。
+	// 这是「A 群关了不影响 B 智能体」的落点：连接是共享的，投递按 owner 放行。
+	ownerID := route.EffectiveOwner()
+	if !rt.ConfigSnapshot().OwnerEnabled(ownerID) {
+		rt.Security.Audit(im.AuditEntry{
+			Gateway: msg.Chat.Gateway, Chat: msg.Chat.String(), UserID: msg.UserID,
+			Action: "owner_disabled",
+			Detail: "归属未启用: " + ownerLabelOf(ownerID),
+		})
+		return
 	}
 	auditDetail := truncate(msg.Text, 120)
 	if strings.TrimSpace(auditDetail) == "" {
@@ -261,20 +290,31 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 	}
 	rt.Security.Audit(im.AuditEntry{Gateway: msg.Chat.Gateway, Chat: msg.Chat.String(), UserID: msg.UserID, Action: "message_received", Detail: auditDetail, Allowed: true})
 
-	// ④ 文本指令（/new /list /help /switch）：不驱动会话，直接处理并回复
-	if handled := b.handleCommand(wsPath, msg); handled {
-		return
+	// ④ 文本指令（/new /list /help /switch）：不驱动会话，直接处理并回复。
+	// 只对项目路由有意义（它们操作的是工作区会话集合）；agent/group 路由的会话是枢纽
+	// 会话，没有「同工作区的其它会话」可切，故不拦文本。
+	if route.TargetKind() == "workspace" {
+		if handled := b.handleCommand(route.Workspace, msg); handled {
+			return
+		}
 	}
 
-	// ⑤ 驱动会话（按 Chat 找/建会话；会话 id 由 Chat 派生 + 当前别名）
+	// ⑤ 驱动会话：按路由目标解析（项目会话 / 智能体 DM / 群会话）
 	b.mu.Lock()
 	alias := b.activeAlias[msg.Chat.String()]
 	b.mu.Unlock()
-	sessionID := chatSessionIDAlias(msg.Chat, alias)
+	sessionID := b.targetSessionID(route, msg.Chat, alias)
+	if sessionID == "" {
+		rt.Security.Audit(im.AuditEntry{Gateway: msg.Chat.Gateway, Chat: msg.Chat.String(), UserID: msg.UserID, Action: "route_invalid", Detail: "路由目标不完整"})
+		return
+	}
+	// 项目路由的运行时路径 = 工作区；hub 路由（agent/group）由 askFn 按智能体 home 解析，
+	// 这里的 WsPath 只对项目路由有意义（保留在 imTarget 里供日志/审计）。
+	wsPath := route.Workspace
 	// 写镜像表（bidirectional）：IM 发起的会话自动双向——事件侧 MirrorsForSession 能查到
 	// 并推送回复回该 Chat。这是 IM 对话主链路的另一半（收→执行→推回）。
 	// 幂等：同一 session+chat 已存在则跳过（避免重复行）。
-	cfg := rt.Config
+	cfg := rt.ConfigSnapshot()
 	hasMirror := false
 	for _, mc := range cfg.Mirrors {
 		if mc.SessionID == sessionID && mc.Chat.Gateway == msg.Chat.Gateway && mc.Chat.ChatID == msg.Chat.ChatID {
@@ -288,7 +328,7 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 			Chat:      msg.Chat,
 			Mode:      im.MirrorBidirectional,
 		})
-		rt.Config = cfg
+		rt.SetConfig(cfg)
 		rt.Router.Update(cfg)
 		// 持久化镜像表（IM 发起的会话跨重启保留）
 		if b.saveCfg != nil {
@@ -298,7 +338,13 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 		}
 	}
 	if b.askFn != nil {
-		b.askFn(wsPath, sessionID, msg.Text, imImageBlocks(msg.Attachments))
+		b.askFn(imTarget{
+			Owner:     ownerID,
+			Route:     route,
+			WsPath:    wsPath,
+			SessionID: sessionID,
+			Kind:      route.TargetKind(),
+		}, msg.Text, imImageBlocks(msg.Attachments))
 	}
 }
 
@@ -363,7 +409,7 @@ func (b *imBridge) OnGatewayAction(a im.GatewayAction) {
 
 // Attach 把 Gateway 的消息/动作回调接到桥。
 func (b *imBridge) Attach() {
-	for _, g := range b.rt.Gateways {
+	for _, g := range b.rt.GatewaySnapshot() {
 		g.OnMessage(b.OnInMessage)
 		g.OnAction(b.OnGatewayAction)
 	}
@@ -384,15 +430,37 @@ func (m *manager) preferredModel() string {
 // m 为 manager；wsPath 用于会话路由。
 func (b *imBridge) attachManager(m *manager, wsPath string) {
 	ctx := context.Background()
-	b.askFn = func(ws, sessionID, text string, images []core.Content) {
-		bs := m.get(ws, sessionID)
-		if bs == nil {
-			// 会话不存在 → 创建（IM 发起）
+	b.askFn = func(t imTarget, text string, images []core.Content) {
+		// owner 隔离后「投给谁」有三种形态，各走既有的会话装配入口（不另造会话）：
+		//   group     → hubGroupSession(agent, group)（群会话）
+		//   agent     → hubDMSession(agent)（智能体 DM）
+		//   workspace → 项目会话（get 或 create）
+		var bs *bridgeSession
+		switch t.Kind {
+		case "group":
 			var err error
-			bs, err = m.create(ws, sessionID, "")
+			bs, err = m.hubGroupSession(t.Route.Agent, t.Route.Group)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "✗ im create session %s: %v\n", sessionID, err)
+				fmt.Fprintf(os.Stderr, "✗ im hub group session %s: %v\n", t.SessionID, err)
 				return
+			}
+		case "agent":
+			var err error
+			bs, err = m.hubDMSession(t.Route.Agent)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "✗ im hub dm session %s: %v\n", t.SessionID, err)
+				return
+			}
+		default:
+			bs = m.get(t.WsPath, t.SessionID)
+			if bs == nil {
+				// 会话不存在 → 创建（IM 发起）
+				var err error
+				bs, err = m.create(t.WsPath, t.SessionID, "")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "✗ im create session %s: %v\n", t.SessionID, err)
+					return
+				}
 			}
 		}
 		// 内容块：文本块（有文本时）+ 图片块（IM 图片附件）。纯图片消息（无文本）
@@ -406,7 +474,7 @@ func (b *imBridge) attachManager(m *manager, wsPath string) {
 			return // 空消息（无文本无图）：不投递
 		}
 		if err := bs.s.Ask(ctx, core.NewUserMessage(blocks...)); err != nil {
-			fmt.Fprintf(os.Stderr, "✗ im ask %s: %v\n", sessionID, err)
+			fmt.Fprintf(os.Stderr, "✗ im ask %s: %v\n", t.SessionID, err)
 			return
 		}
 		bs.lastActive.Store(time.Now().UnixMilli())
@@ -459,6 +527,42 @@ func chatSessionID(chat im.Chat) string {
 }
 
 // chatSessionIDAlias 带会话别名的派生：im-{gateway}-{chat_id} 或 im-{gateway}-{chat_id}-{alias}。
+// targetSessionID 按路由目标算会话 id（owner 隔离后的三种投递形态）。
+//
+//	group(+agent) → hub.<agent>.g.<group>（群会话；agent 是该群执行者）
+//	agent         → hub.<agent>.dm（智能体 DM）
+//	workspace     → im-<gateway>-<chatid>[-alias]（项目会话，保持原有语义）
+//
+// 空串 = 路由目标不完整（调用方拒绝投递，不猜一个默认目标）。
+func (b *imBridge) targetSessionID(route im.RouteConfig, chat im.Chat, alias string) string {
+	switch route.TargetKind() {
+	case "group":
+		if route.Agent == "" || route.Group == "" {
+			return ""
+		}
+		return hubSessionID(route.Agent, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: agenthub.GroupID(route.Group)})
+	case "agent":
+		if route.Agent == "" {
+			return ""
+		}
+		return hubSessionID(route.Agent, agenthub.Scope{Kind: agenthub.ScopeDM})
+	case "workspace":
+		if route.Workspace == "" {
+			return ""
+		}
+		return chatSessionIDAlias(chat, alias)
+	}
+	return ""
+}
+
+// ownerLabelOf 归属的短标签（审计 detail 用；空归属标 unbound）。
+func ownerLabelOf(ownerID string) string {
+	if ownerID == "" {
+		return "unbound"
+	}
+	return owner.Label(ownerID)
+}
+
 func chatSessionIDAlias(chat im.Chat, alias string) string {
 	base := "im-" + chat.Gateway + "-" + chat.ChatID
 	if alias == "" {
@@ -538,7 +642,7 @@ func (b *imBridge) handleCommand(wsPath string, msg im.InMessage) bool {
 			sessionID = chatSessionIDAlias(msg.Chat, cmd.alias)
 		}
 		// 幂等挂镜像（新会话 → 该 chat 双向推送）
-		cfg := b.rt.Config
+		cfg := b.rt.ConfigSnapshot()
 		hasMirror := false
 		for _, mc := range cfg.Mirrors {
 			if mc.SessionID == sessionID && mc.Chat.Gateway == msg.Chat.Gateway && mc.Chat.ChatID == msg.Chat.ChatID {
@@ -552,7 +656,7 @@ func (b *imBridge) handleCommand(wsPath string, msg im.InMessage) bool {
 				Chat:      msg.Chat,
 				Mode:      im.MirrorBidirectional,
 			})
-			b.rt.Config = cfg
+			b.rt.SetConfig(cfg)
 			b.rt.Router.Update(cfg)
 			if b.saveCfg != nil {
 				if err := b.saveCfg(cfg); err != nil {

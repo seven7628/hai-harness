@@ -385,9 +385,10 @@ npm run build                 # production bundle + bridge binary
 ```
 
 This repository is the **publishable subset** of the development tree: harness, bridge and client.
-Internal design documents, the unit/E2E suites and dev-time tooling are not published — so a
-`go test ./...` here has nothing to run by design, and the app's `package.json` only carries the
-scripts that work against the published sources. Style: `gofmt` for Go; two-space indent, single
+A subset of the Go tests is checked in; the push/PR CI currently runs a compile gate
+(`go test ./... -run '^$'`) plus the unit suites for `agenthub`, `agents`, `subagent`, `provider`,
+`tools` and `mcp`. The full tracked/missing inventory lives in
+`docs/agent-hub/test-baseline.md`. Internal design documents and dev-time tooling are not published. Style: `gofmt` for Go; two-space indent, single
 quotes and ESM for TypeScript.
 
 ## Repository layout

@@ -61,6 +61,37 @@ func TestEvictIdleSessionsLocked(t *testing.T) {
 	}
 }
 
+// TestEvictSkipsHubBusySessions 合并主分支 LRU 后的回归：Hub 的「已 Ask 未开跑/
+// 群轮未收/结算中」都不在 running 里，淘汰它们会直接丢任务。
+func TestEvictSkipsHubBusySessions(t *testing.T) {
+	m := &manager{}
+	ws := &workspaceRuntime{sessions: map[string]*bridgeSession{}}
+	old := time.Now().Add(-time.Hour).UnixNano()
+	mk := func(id string, mark func(*bridgeSession)) *bridgeSession {
+		bs := &bridgeSession{id: id}
+		bs.lastUsed.Store(old)
+		bs.cancel = func() {}
+		mark(bs)
+		ws.sessions[id] = bs
+		return bs
+	}
+	mk("dispatch-pending", func(bs *bridgeSession) { bs.hubDispatchPending.Store(true) })
+	mk("group-busy", func(bs *bridgeSession) { bs.hubGroupBusy.Store(true) })
+	mk("settling", func(bs *bridgeSession) { bs.hubSettling.Store(true) })
+	for i := 0; i < maxLiveSessions()+4; i++ {
+		mk(fmt.Sprintf("idle%02d", i), func(*bridgeSession) {})
+	}
+	m.evictIdleSessionsLocked(ws, "")
+	for _, id := range []string{"dispatch-pending", "group-busy", "settling"} {
+		if _, ok := ws.sessions[id]; !ok {
+			t.Fatalf("Hub 忙会话 %s 被 LRU 淘汰（任务会丢失）", id)
+		}
+	}
+	if len(ws.sessions) > maxLiveSessions() {
+		t.Fatalf("淘汰后仍超上限: %d > %d", len(ws.sessions), maxLiveSessions())
+	}
+}
+
 // TestEvictSkipsWhenAllBusy 全部在跑时允许超预算，而不是打断 run。
 func TestEvictSkipsWhenAllBusy(t *testing.T) {
 	m := &manager{}

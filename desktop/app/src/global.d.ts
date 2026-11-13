@@ -27,6 +27,9 @@ declare global {
       providerSave: (p: ProviderSaveInput) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
       providerRemove: (provider: string) => Promise<{ ok: boolean; error?: string }>
       providerKeyStatus: (provider: string) => Promise<boolean>
+      // BR-08：明文 key 只在需要时按 provider 单取（本地测试/改名），不预填到设置表单
+      providerKey?: (provider: string) => Promise<string>
+      providerCopyKey?: (p: { from: string; to: string }) => Promise<{ ok: boolean; copied?: boolean; error?: string }>
       // OAuth 订阅登录（2026-08 P2）
       oauthLogin: (p: { provider: string }) => Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>
       oauthLogout: (p: { provider: string }) => Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>
@@ -112,6 +115,10 @@ declare global {
       chromeClearLogin: () => Promise<{ ok: boolean; removed: number; error?: string }>
       onEvent: (cb: (line: string) => void) => () => void
       onExit: (cb: (info: { code: number | null; err: string }) => void) => () => void
+      // hub:// 深链（open-url / second-instance argv → 主进程转发）；返回取消订阅。
+      onHubDeepLink: (cb: (url: string) => void) => () => void
+      // 冷启动/刷新期间排队的深链（先订阅再取，避免错过）。
+      hubTakeDeepLinks: () => Promise<string[]>
       // 内存压力信号（2026-11-12，P1）：主进程轮询 process.getSystemMemoryInfo 推来，
       // 单位 KB。渲染进程据此主动降级视图（Chromium tab discarding 的模型）。
       onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => () => void

@@ -4,8 +4,12 @@ import type { RightLayout } from '../lib/layout'
 import { afterDrag, collapse as layoutCollapse, expand as layoutExpand, normalizeLayout } from '../lib/layout'
 import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
+// 运行位收敛诊断（BR-15）：只做有界记录，状态改写仍在 store
+import { recordRunSettle, type RunSettleSource } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
+// 导航丢弃判定与诊断 trace（FE-03）：stale（正常过期）/ inconsistent（身份不一致）
+import { classifyNavDiscard, recordNavDiscard } from './navTrace'
 import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
@@ -24,6 +28,11 @@ import {
   viewBytes,
 } from './viewBudget'
 import { t as i18nT } from '../i18n'
+// 归属（owner）编码：信任/启用按归属隔离（FE 侧只做展示与回传，判定在 bridge）
+import { ownerValid } from '../lib/owner'
+// 「当前归属」派生：Hub 打开时读 Hub 的 session/群，否则按工作区会话
+// （B1：只读 activeSessionId 会把 Hub DM/群的确认写成 workspace:，服务端判 agent:/group: 查不到）
+import { resolveActiveOwner } from '../lib/activeOwner'
 import { forgetInputHistory, forgetInputHistoryWorkspace, inputHistoryScope } from '../lib/inputHistory'
 import type { SignalFact } from '../lib/signalFacts'
 // R06 C1：web 标签的身份判据已下沉到 lib/webTab（纯函数、零 store 运行时依赖）。
@@ -423,7 +432,7 @@ export interface HookSectionView {
 }
 
 // 一个 hooks 配置来源（用户配置 / Claude 兼容层 / 某项目的 hooks.json）。
-export interface HookSourceView {
+export interface HookSourceView extends HookOwnerFields {
   id: string
   kind: 'user' | 'claude-user' | 'project'
   title: string
@@ -447,9 +456,27 @@ export interface HookClaudeFile {
   body?: HookSectionView
 }
 
+// 归属（owner）相关的响应字段（FE/BR-21 owner 隔离）。
+// owner = workspace:<path> | agent:<id> | group:<id>；由 bridge 派生并回显，
+// UI 只负责展示与**回传**（hooks_trust / plugin_enable 等都必须带上它）。
+export interface HookOwnerFields {
+  owner?: string // 该来源的信任归属
+  ownerLabel?: string // 展示用短标签
+  trust?: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 该归属下命令 → 状态
+}
+
 // 某项目的 hooks 来源（bridge hooks_list.projects 一项）。
 export interface HookProjectView extends HookSourceView {
   claude?: HookClaudeFile[]
+}
+
+/** 当前归属的 IM 启用状态（im_status 的 owner 视角；连接是共享的）。 */
+export interface IMOwnerStatus {
+  owner: string
+  label: string
+  enabled: boolean
+  routes: number
+  master: boolean
 }
 
 // hooks_list 响应（SettingsModal 钩子页数据源）。
@@ -465,14 +492,29 @@ export interface HooksInfo {
     readClaudeSettings: boolean
     sources: string[]
   }
-  trust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 命令 → 信任状态
+  trust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> // 命令 → 信任状态（当前归属）
   warnings: string[]
+  // 当前归属（用户级来源的信任判定按它；hooks_trust 必须回传）。
+  owner?: string
+  ownerKind?: string
+  ownerLabel?: string
+  // 当前归属下「只靠迁移前全局条目生效」的命令（提示重新确认）。
+  legacyTrust?: string[]
+  owners?: string[] // 已登记过确认的归属清单（诊断/展示）
   at?: number // 前端回填的取回时刻（保存/刷新后递增 → 详情面板据此把本地副本重同步为磁盘态）
 }
 
 // 插件（SettingsModal 插件 tab）：bridge plugin_list 返回（能力包状态/版本）
 export interface PluginInfo {
   id: string
+  // owner 级状态（目前 IM 有：启用/路由按 agent/group/workspace 隔离，连接共享）
+  owner?: string
+  ownerLabel?: string
+  ownerEnabled?: boolean
+  ownerRoutes?: number
+  masterEnabled?: boolean
+  sharedConnected?: number
+  gateways?: Record<string, string>
   name: string
   description: string
   status: string // not-installed | installing | ready | enabled | error | update-available
@@ -847,7 +889,11 @@ export interface RunNode {
   isError?: boolean
   startedAt?: number // span 开始时刻（agent_start / tool_run_start 记录）
   durMs?: number // span 时长（run：agent_end 结算；tool：tool_run_end 结算）
-  taskId?: string // 工具任务 id（tool_run_start 携带；task_promoted 据此标记后台态）
+  /** 后台任务 id：工具（tool_run_start）/ 异步子 run（agent_start.task_id）携带；
+   *  task_promoted 据此标记后台态；agent_end 据此区分「同步子 run」（无 task_id、且在
+   *  被收敛的 run 树路径上，随父 run 收尾）与「异步子 run」（有 task_id，只等它自己的
+   *  agent_end / task_end；闭包遇到它就停止下沉，子树的 depth-2 in-loop 子 run 也不碰）。 */
+  taskId?: string
   promoted?: boolean // 已被摘离为后台任务
   /** 该 run 自己的上下文窗口（agent_start.context_window）。子 agent 可能跑在另一个
    *  模型上，用会话级那一个数当分母，子智能体视角里的占比就是错的。 */
@@ -3054,6 +3100,8 @@ export interface AppState {
   imConfig?: IMConfig // IM 集成配置（im_config_get；SettingsModal IM tab）
   imSchemas: IMGatewaySchema[] // IM 网关 Schema（im_schema_list；动态表单）
   imStatuses: Record<string, string> // 网关 id → 状态（im_status）
+  // 当前归属的 IM 启用状态（im_status 的 owner 视角）：A 群关了不该显示 B 群也关。
+  imOwnerStatus: IMOwnerStatus | null
   imChats: Record<string, IMChatInfo[]> // gateway_id → 群列表（im_chat_list）
   imBindPending?: IMBindRequest // 待确认的 IM 绑定请求（im_bind_confirm_requested 事件）
   browserConfig?: BrowserCfg // 浏览器插件配置（browser_config_get；插件详情设置表单）
@@ -3211,7 +3259,7 @@ export interface AppState {
   // hooks（钩子页）：来源汇总 / 保存某来源 / 信任项目命令
   fetchHooks(workspaces: string[]): void // hooks_list
   saveHooks(scope: 'user' | 'project', workspace: string | undefined, body: HookSectionView): Promise<{ ok: boolean; error?: string }> // hooks_set
-  trustHooks(commands: string[], scope: string): Promise<{ ok: boolean; error?: string }> // hooks_trust
+  trustHooks(commands: string[], scope: string, owner?: string): Promise<{ ok: boolean; error?: string }> // hooks_trust（按归属）
   fetchPlugins(): void // 插件清单 + 状态（plugin_list；SettingsModal 插件 tab）
   installPlugin(id: string): void // 受管安装组件（plugin_install）
   uninstallPlugin(id: string): void // 移除组件（plugin_uninstall）
@@ -3380,6 +3428,15 @@ transport.send = (cmd: BridgeCommand) => {
   if (__traceSpy.sent) __traceSpy.sent.push(cmd)
   return _traceOrigSend(cmd)
 }
+
+// __navDiscards / __clearNavDiscards：测试专用（Node 回归脚本 scripts/test-nav-trace.mjs）——
+// 读取/清空 FE-03 的导航丢弃记录（navTrace 的有界环形缓冲）。生产代码从不读它，零行为影响。
+// 直接 re-export 而不是再包一层：脚本必须看到**这一份**模块实例的记录（独立 bundle 会是另一种子）。
+export { navDiscards as __navDiscards, clearNavDiscards as __clearNavDiscards } from './navTrace'
+
+// __runSettles / __clearRunSettles：测试专用（scripts/test-store-queue.mjs 的 BR-15 场景）——
+// 读取/清空「运行位被哪条终止事实收敛」的有界记录（events.ts）。生产代码从不读它。
+export { runSettleTraces as __runSettles, clearRunSettleTraces as __clearRunSettles } from './events'
 
 interface PendingCommand {
   type: string
@@ -3664,6 +3721,20 @@ function syncWorkspacesToBridge(paths: string[]): void {
   if (list.length) send({ type: 'workspace_sync', payload: { paths: list } })
 }
 
+// OWNER_SCOPED_COMMANDS 需要「归属」的桥命令：hooks 信任 + IM 启用/路由 + 插件启停。
+// 只对这批注入 owner：其它命令的 payload 语义不该被悄悄加字段（协议表面越小越好）。
+const OWNER_SCOPED_COMMANDS = new Set<string>([
+  'hooks_list',
+  'hooks_trust',
+  'plugin_list',
+  'plugin_enable',
+  'plugin_disable',
+  'im_status',
+  'im_route_list',
+  'im_route_set',
+  'im_route_del',
+])
+
 function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void, onData?: (r: { ok: boolean; error?: string; code?: string; data?: unknown }) => void): number {
   const id = ++cmdSeq
   const ws = String(cmd.payload?.workspace || useAppStore.getState().workspace || '')
@@ -3681,6 +3752,17 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
   // 恢复协议标识（问题四）：new_session 带 restore_id + attempt；响应回显，
   // renderer 据此丢弃陈旧响应（迟到的旧请求响应不得覆盖新会话）。
   let payload = cmd.payload
+  // 归属（owner）注入：信任与 IM 启用是**按归属**的，服务端缺归属会明确拒绝
+  // （绝不写成全局）。这里把「当前会话的归属」带上；调用方显式给了 owner 就不动它
+  // （例如项目来源的信任按钮要写 workspace:<该项目>，而不是当前会话的归属）。
+  if (OWNER_SCOPED_COMMANDS.has(cmd.type)) {
+    const p0 = (payload ?? {}) as Record<string, unknown>
+    if (!ownerValid(String(p0.owner ?? ''))) {
+      const st = useAppStore.getState()
+      const owner = resolveActiveOwner(String(st.activeSessionId ?? ''), String(st.workspace ?? ''))
+      if (owner) payload = { ...p0, owner }
+    }
+  }
   if (cmd.type === 'new_session') {
     // 新建会话（无 id = 真新建；带 id = 恢复已有会话）→ 注入当前活跃 Provider，
     // bridge 以 UI 选择的 Provider 归属会话（2026-09：多 Provider 同名模型时避免
@@ -4680,10 +4762,37 @@ export function dispatchEvent(raw: AnyEvent): void {
       case 'plugin_status': {
         const d = raw.data as { plugins?: PluginInfo[]; error?: { id: string; message: string } } | undefined
         if (d && Array.isArray(d.plugins)) {
-          const list = d.plugins.map((p) =>
-            d.error && d.error.id === p.id ? { ...p, error: d.error.message } : { ...p, error: undefined },
-          ) as PluginInfo[]
+          // 事件快照是**连接/安装面**事实（不含归属）。IM 的启用是归属级的：
+          // 事件若直接覆盖，A 群刚被关掉的 IM 会立刻显示回「已启用」（等于把 owner 隔离
+          // 在 UI 上抹掉）。故按 id 合并：保留上一次 plugin_list 带来的归属字段，
+          // 并用 ownerEnabled 决定 enabled（按钮跟着归属走，安装进度仍用事件的 status）。
+          const prev = new Map(getState().plugins.map((p) => [p.id, p]))
+          const list = d.plugins.map((p) => {
+            const merged: PluginInfo = { ...p }
+            const before = prev.get(p.id)
+            if (before && before.owner !== undefined) {
+              merged.owner = before.owner
+              merged.ownerLabel = before.ownerLabel
+              merged.ownerEnabled = before.ownerEnabled
+              merged.ownerRoutes = before.ownerRoutes
+              merged.masterEnabled = before.masterEnabled
+              merged.sharedConnected = before.sharedConnected
+              merged.gateways = before.gateways
+              if (before.ownerEnabled !== undefined) {
+                merged.enabled = before.ownerEnabled
+                if (!before.ownerEnabled) {
+                  merged.status = 'ready'
+                  merged.reason = '该归属未启用（连接由其它归属共享）'
+                }
+              }
+            }
+            return d.error && d.error.id === p.id ? { ...merged, error: d.error.message } : { ...merged, error: undefined }
+          }) as PluginInfo[]
           setState({ plugins: list })
+          // IM 的启用是**归属级**的：事件只带连接/安装面事实，归属启用状态的真相在
+          // im_status（按当前归属算）。owner 启停后顺手拉一次，别让 IM 面板顶部
+          // 停留在旧状态（"我明明关了它还显示启用"）。
+          if (list.some((p) => p.id === 'im')) send({ type: 'im_status', payload: {} })
         }
         break
       }
@@ -5517,13 +5626,22 @@ export function dispatchEvent(raw: AnyEvent): void {
         if (Array.isArray(d.schemas)) setState({ imSchemas: d.schemas as IMGatewaySchema[] })
         break
       }
-      // im_status：网关连接状态
+      // im_status：网关连接状态 + **当前归属**的启用状态（连接共享、启用按 owner 隔离）
       if (t === 'im_status') {
         if (Array.isArray(d.gateways)) {
           const m: Record<string, string> = {}
           for (const g of d.gateways as Array<{ id: string; status: string }>) m[g.id] = g.status
           setState({ imStatuses: m })
         }
+        setState({
+          imOwnerStatus: {
+            owner: String(d.owner ?? ''),
+            label: String(d.ownerLabel ?? ''),
+            enabled: d.ownerEnabled === true,
+            routes: Number(d.ownerRoutes ?? 0) || 0,
+            master: d.enabled === true,
+          },
+        })
         break
       }
       // im_chat_list：群列表（路由绑定下拉；gateway_id 从请求登记表取）
@@ -5642,16 +5760,34 @@ export function dispatchEvent(raw: AnyEvent): void {
         const respAttempt = typeof d.attempt === 'number' ? d.attempt : undefined
         const isStaleAttempt = respAttempt != null
           && (pendingRestoreAttempt[sid] ?? 0) > respAttempt
-        const navigationCurrent = Boolean(
-          !isStaleAttempt
-          && meta
-          && meta.navigationGeneration === navigationGeneration
-          && (!responseWorkspace || responseWorkspace === getState().workspace)
-          && (!expectedSession || expectedSession === sid),
-        )
+        // 判定 + trace（FE-03）：把原来那一个布尔拆成 classifyNavDiscard 的三态 ——
+        // 代际/attempt 被取代 = stale（正常，用户点快一点就会有），代际对得上但
+        // workspace/session 不符 = inconsistent（真异常）。判定结果与旧布尔逐字等价，
+        // 只是「为什么丢」现在可查（navTrace 的有界缓冲 + Verbose 日志）。
+        const verdict = classifyNavDiscard({
+          responseWorkspace,
+          workspace: getState().workspace,
+          metaGeneration: meta?.navigationGeneration,
+          generation: navigationGeneration,
+          expectedSession,
+          sessionId: sid,
+          staleAttempt: isStaleAttempt,
+        })
         // 过期导航响应不得重建/激活视图，也不得关闭当前导航的 loading。若同 sid 已有
         // 更新的恢复请求，保留其 pending/buffer；否则清理本请求留下的恢复标记。
-        if (!navigationCurrent) {
+        if (!verdict.current) {
+          recordNavDiscard({
+            at: Date.now(),
+            kind: verdict.kind,
+            type: t,
+            reason: verdict.reason,
+            sid,
+            responseWorkspace,
+            workspace: getState().workspace,
+            metaGeneration: meta?.navigationGeneration,
+            generation: navigationGeneration,
+            expectedSession,
+          })
           if (snapshotPending.get(sid) === r.id) {
             snapshotPending.delete(sid)
             // 此前这里直接丢弃缓冲事件 → 该会话这段时间的事件在渲染进程永久消失
@@ -5671,9 +5807,15 @@ export function dispatchEvent(raw: AnyEvent): void {
           // 显式恢复的响应被丢弃（陈旧代际/陈旧 attempt）：若该会话视图仍为空 → 有限重试。
           // 同 sid 有更新请求在途时 scheduleRestoreRetry 会自行退出（不叠发、不误报）。
           if (t === 'new_session' && meta?.sessionId === sid) {
+            // 重试原因沿用原措辞（看门狗/日志依赖这两条的语义），但把 FE-03 的类别附在
+            // 后面 —— stale 与 inconsistent 必须一眼可分，否则真异常永远埋在「丢弃」里。
             scheduleRestoreRetry(
               sid,
-              isStaleAttempt ? '响应按陈旧 attempt 丢弃' : '响应按陈旧导航丢弃',
+              isStaleAttempt
+                ? '响应按陈旧 attempt 丢弃'
+                : verdict.kind === 'inconsistent'
+                  ? `响应身份不一致丢弃（${verdict.reason}）`
+                  : `响应按陈旧导航丢弃（${verdict.reason}）`,
               true,
               meta.workspace,
             )
@@ -6871,8 +7013,39 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 不另起一轮（见 selectTurns：注入的 user 块进当前轮）。缺字段的旧事件/旧日志
       // 一律按「新运行的开口」处理 —— 老行为不变。
       const injected = raw.injected === true
+      const consumedAt = evTs(raw) ?? Date.now()
+      let staleSettled: string[] = []
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
+        /* 运行位收敛（BR-15）：injected=false 是**新运行的开口**（服务端 takeBatch 已把这
+           一批取进本轮请求），上一轮此刻不可能还在跑。若它的 agent_end 丢了，这是之后
+           唯一还会到达的终结证据 —— 不收，左栏运行点会一直亮到用户下次发消息。
+           injected=true 是**运行中插话**（AgentLoop 的插话 Poll）：它属于当前这一轮，
+           绝不能被当成「上一轮结束」的证据 —— 那会把正在跑的 run 当场画成交卷。
+           只收顶层 run：新的批次不会和旧的顶层 run 并行；异步任务等 TaskEnd。 */
+        const stale = injected
+          ? { nodes: v.runNodes, settled: [] as string[] }
+          : settleRunNodes(v.runNodes, { rootLevel: true, status: 'done', at: consumedAt })
+        /* 同步子 run 一并落地（节点 + 卡片）：新批次开口证明上一轮**整个 run 树**
+           已经结束 —— 那棵树里的阻塞调用不可能还活着。作用域只到**本次被收敛的根**
+           （`stale.settled`）：从根沿 parentId 往下、路径上没有 task_id 子 run 才算同步；
+           异步子 run 等它自己的 agent_end / task_end，**它派出去的 depth-2 in-loop 子 run
+           同样不在范围里**（父 run 收尾不替别人的后台任务下结论，见 settleSyncSubRuns）。
+           injected=true 走上面那条：运行中插话不是终止证据（BR-15 复审 N1）。 */
+        const detachedNow = v.agentDetached ?? []
+        const sync = injected
+          ? { nodes: stale.nodes, blocks: v.blocks, agentDetached: detachedNow, settled: [] as string[] }
+          : settleSyncSubRuns(v, { roots: stale.settled, nodes: stale.nodes, blocks: v.blocks, agentDetached: detachedNow, status: 'done', at: consumedAt })
+        staleSettled = [...stale.settled, ...sync.settled]
+        /* 上一轮**真的**被收敛了（它的 agent_end 与末轮 llm_end 都丢了）：结算位落地，
+           仍在流式的块按 agent_end 的口径冻结（复审 N2）—— 否则光标 ▍ 常闪、轮尾账
+           永不落地，用户看到「已经进入下一轮、上一轮还在流」的幽灵。下一轮的 agent_start
+           会立刻把 runEnded 置回 false，这里补的只是欠下的那一笔。
+           冻结只针对被收敛的**父** run（staleRunId 不从同步子 run 里取）。 */
+        const staleRunId = stale.settled[0] ?? v.runNodes.find((n) => n.kind === 'run' && !n.parentId)?.id
+        const baseBlocks = staleSettled.length
+          ? freezeStreamingAssistants(sync.blocks, { at: consumedAt, runId: staleRunId, turnStartTs: v.turnStartTs })
+          : sync.blocks
         // 消费数按"消息条数"取：内容块组（每消息一组）为权威；旧日志无组 → 按文本条数。
         // （纯图片消息 texts=[] 但组数=1 —— 若按 texts 取 n=0，队列项会残留成"已推送"幽灵）
         const consumeCount = contentGroups ? contentGroups.length : texts.length
@@ -6882,11 +7055,14 @@ export function dispatchEvent(raw: AnyEvent): void {
         // 服务端已确认消费 → 清除推送失败提示（问题十）
         const ts = evTs(raw) ?? Date.now() // 用户消息时间戳（回显）
         const normGroup = (g: { type?: string; content?: string; mime_type?: string }[]): QueuedContent[] =>
-          g.map((c) => ({
-            type: c.type === 'image' ? ('image' as const) : ('text' as const),
-            content: String(c.content ?? ''),
-            ...(c.mime_type ? { mimeType: c.mime_type } : {}),
-          }))
+          // 宿主协议块（hub_task / hub_group_wake）只给模型看，不能进用户气泡；
+          // 正文是同批的 text 块。漏过滤会把 header JSON + 群快照整段渲染出来。
+          g.filter((c) => c.type !== 'hub_task' && c.type !== 'hub_group_wake')
+            .map((c) => ({
+              type: c.type === 'image' ? ('image' as const) : ('text' as const),
+              content: String(c.content ?? ''),
+              ...(c.mime_type ? { mimeType: c.mime_type } : {}),
+            }))
         const groupText = (g: QueuedContent[] | undefined): string =>
           g ? g.filter((c) => c.type === 'text').map((c) => c.content).join('\n').trim() : ''
         // 把待发送中对应消息（FIFO 取最旧的 N 条）移入对话页：优先事件内容块
@@ -6937,8 +7113,21 @@ export function dispatchEvent(raw: AnyEvent): void {
               },
             ]
           : blocks
-        return setView(s, sid, { ...v, pendingQueue: rest, pendingQueueError: undefined, blocks: [...v.blocks, ...sigFacts] })
+        const upd = setView(s, sid, {
+          ...v,
+          runNodes: sync.nodes,
+          pendingQueue: rest,
+          pendingQueueError: undefined,
+          // 收敛了上一轮**顶层 run** → 结算位与流式态一起落地（下一轮 agent_start 立刻复位）。
+          ...(stale.settled.length ? { runEnded: true, streaming: false } : {}),
+          // 只在真的动了窗口外卡片时写回（无改动时是同引用）
+          ...(sync.agentDetached !== detachedNow ? { agentDetached: sync.agentDetached } : {}),
+          blocks: [...baseBlocks, ...sigFacts],
+        })
+        // 任何节点被收敛（父 run 或同步子 run）都可能让会话不再忙 → 重算一次
+        return staleSettled.length ? { ...upd, busySids: busySidsFromViews(upd.views) } : upd
       })
+      noteRunSettle(sid, 'new_run_batch', consumedAt, staleSettled)
       break
     }
     case 'goal_alignment_reminder': {
@@ -6999,9 +7188,13 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 记在**它自己**身上，而不是覆盖会话级那一个（用户 2026-10 报障：子会话里
       // 上下文窗口/占比显示的是主智能体的）。
       const cw = Number(raw.context_window ?? 0)
+      // task_id 记到节点上（此前只记在 agent 卡片）：它是「这次运行是不是后台任务」的
+      // 唯一事实，agent_end 收敛同步子 run 时靠它把异步子 run 排除掉（BR-15）。
+      const runTaskId = raw.task_id ? String(raw.task_id) : ''
       const node: RunNode = {
         id, parentId, label: subName || String(raw.content || 'run'), status: 'running',
         depth: Number(raw.depth ?? 0), kind: 'run', startedAt: ts,
+        ...(runTaskId ? { taskId: runTaskId } : {}),
         ...(cw > 0 ? { ctxWindow: cw } : {}),
       }
       setState((s) => {
@@ -7120,6 +7313,13 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 「子智能体里没有 artifacts」。主 run 的产出仍走独立的 artifacts 块（下方）。
       const endArtifacts = pickArtifacts(raw.artifacts)
       const endArtifactsTruncated = raw.artifacts_truncated === true
+      // 收敛结果（BR-15）：在 updater 里算出、setState 之后写诊断 —— 诊断是副作用，
+      // 不放进 updater（同一份状态可能被重算）。
+      let endOrphans: string[] = []
+      // 父 run 收尾时顺带收敛的**同步子 run**（无 task_id）：诊断里单列，好和它自己的
+      // run 区分开（runIds 的语义是「不是这条事件自己那个 run」）。
+      let endSyncSettled: string[] = []
+      let endUnmatched = false
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         // 主 run（无 agent 卡片）abort = 用户中断：复位流式态让发送钮恢复、叙述追加
@@ -7142,16 +7342,14 @@ export function dispatchEvent(raw: AnyEvent): void {
         //   - ttftMs：只在真收到过 chunk 时才有（由 chunk 分支结算），没有就不补 ——
         //     首字超时那类一个事件都没来的末轮，如实留空而不是编一个 30s。
         // 只动本 run 的块（runId 缺省的无 request 旧流按 view 级流式态一并收敛）。
+        // 冻结本体在 freezeStreamingAssistants —— 会话级终态与「新批次开口」复用同一口径。
         let blocks = !isSub
-          ? v.blocks.map((b) => {
-            if (b.kind !== 'assistant' || !b.streaming) return b
-            if (id && b.runId && b.runId !== id) return b
-            const nb = { ...b, streaming: false }
-            if (nb.thinkStart != null && nb.thinkMs == null) nb.thinkMs = Math.max(0, now - nb.thinkStart)
-            if (nb.durMs == null && v.turnStartTs?.[id] != null) nb.durMs = Math.max(0, now - (v.turnStartTs[id] as number))
-            return nb
-          })
+          ? freezeStreamingAssistants(v.blocks, { at: now, runId: id, turnStartTs: v.turnStartTs })
           : v.blocks
+        // 首屏窗口外的子卡片（分页，见 SessionView.agentDetached）：收敛同步子 run 时
+        // 同样要动它们 —— 卡片可能在 blocks 里，也可能只在这里。
+        const detachedNow = v.agentDetached ?? []
+        let agentDetached = detachedNow
         const finalAssistantIdx = isSub ? -1 : blocks.findLastIndex((b) =>
           b.kind === 'assistant' && !b.streaming && Boolean(b.text) && b.runId === id,
         )
@@ -7262,17 +7460,73 @@ export function dispatchEvent(raw: AnyEvent): void {
               ...(id ? { runId: id } : {}),
             } satisfies TurnMetric]
           : v.turns
+        /* 运行位收敛（BR-15）：只收敛**这条 agent_end 自己的 run 节点**。
+           · 主 run 无 run_id（旧日志/降级）：它只能是那个唯一的顶层 run 节点；
+           · 主 run 有 run_id 但视图里找不到：**不猜**（可能是被新的 agent_start
+             重置掉的旧 trace 的迟到事件），只留诊断；
+           · 异步子 run（带 task_id）不随主 run 收敛：它们可以晚于主 run 收尾（场景12
+             的不变量），终态证据是各自的 agent_end / TaskEnd。
+           · 同步子 run（有父 run、无 task_id、且**在被收敛的那棵 run 树的路径上**）**随父
+             run 收敛**：它是父 run 里的阻塞调用，父 run 结束它不可能还在跑。不收敛的话，
+             它自己的 agent_end 一丢，节点/卡片就永久转圈（BR-15 复审 B1）。
+             作用域 = 本次落地的根沿 parentId 往下的后代，**遇到 task_id 停止下沉**：
+             异步子 run 派出去的 in-loop 子 run（depth-2，父是带 task_id 的异步 run）
+             不归父 run 收尾管 —— 它仍在跑，终态证据是它自己的 agent_end / task_end
+             （P5-03d：此前按「全视图里无 task_id」收，把它误锁成 done/abandoned）。 */
+        const hadRunningRoot = v.runNodes.some((n) => n.kind === 'run' && !n.parentId && n.status === 'running')
+        // 这次 agent_end 是不是**当前顶层 run** 的收尾（决定要不要顺带收敛同步子 run）。
+        const topLevelSettle = !isSub
+          && (!id || v.runNodes.some((n) => n.kind === 'run' && n.id === id && !n.parentId))
+        let settled = { nodes: v.runNodes, settled: [] as string[] }
+        if (isSub) {
+          settled = settleRunNodes(v.runNodes, { runIds: [id], status: runStatus, at: now })
+        } else if (!id) {
+          settled = settleRunNodes(v.runNodes, { rootLevel: true, status: runStatus, at: now })
+          endOrphans = settled.settled
+        } else if (v.runNodes.some((n) => n.id === id)) {
+          settled = settleRunNodes(v.runNodes, { runIds: [id], status: runStatus, at: now })
+        } else {
+          endUnmatched = true
+        }
+        // 同步子 run 一并落地（节点 + 卡片）：它们自己的 agent_end 已经不会来了。
+        // 只在真的收「当前顶层 run」时做；作用域是**这次落地的那棵树**：有 run_id 就是它
+        // 自己，缺 run_id 就是当前视图里的顶层 run 列表。异步子 run（带 task_id）与它的
+        // 整棵子树都不在其中 —— syncSubRunIds 遇 task_id 停止下沉，depth-2 的 in-loop
+        // 子 run 归它自己的 agent_end / task_end，父 run 收尾绝不碰（P5-03d）。
+        // 状态**不继承**父 run 的 runStatus（BR-15 复审 N3）：同步子 agent 是父 run 里的
+        // 阻塞调用，父 run 收尾时它早已返回 —— finish_reason 说的是**父 loop** 的结局。
+        // 父 run 达轮数上限 / run 级失败时，那个正常返回的子 agent 会被画成
+        // interrupted / failed；只有 abort 才真的把它连同一起打断。
+        if (topLevelSettle) {
+          const roots = id ? [id] : v.runNodes.filter((n) => n.kind === 'run' && !n.parentId).map((n) => n.id)
+          const sync = settleSyncSubRuns(v, {
+            roots,
+            nodes: settled.nodes,
+            blocks,
+            agentDetached,
+            status: aborted ? 'interrupted' : 'done',
+            at: now,
+          })
+          settled = { nodes: sync.nodes, settled: settled.settled }
+          endSyncSettled = sync.settled
+          blocks = sync.blocks
+          agentDetached = sync.agentDetached
+        }
+        // duration_ms 是服务端算的权威值（只给它自己的 run 节点）。
+        const runNodes = settled.nodes.map((n) =>
+          id && n.id === id && typeof raw.duration_ms === 'number' ? { ...n, durMs: raw.duration_ms } : n,
+        )
         const upd = setView(s, sid, {
           ...v,
           // 主 run 的 AgentEnd = 结算边界：折叠行与轮尾账从这一刻起才允许出现
           //（判据的唯一来源，见 lib/turnSettle.ts）。子 run 的结束不动主 run 的结算位。
-          ...(isSub ? {} : { runEnded: true }),
-          runNodes: v.runNodes.map((n) =>
-            id && n.id === id
-              ? { ...n, status: runStatus, durMs: typeof raw.duration_ms === 'number' ? raw.duration_ms : (n.startedAt != null ? now - n.startedAt : n.durMs) }
-              : n,
-          ),
+          // 找不到归属的 agent_end（迟到的旧 run）不改结算位：否则会把**当前**在跑的
+          // 主 run 画成已交卷（节点还在转，折叠行却变成 Worked）。
+          ...(isSub ? {} : { runEnded: !endUnmatched || !hadRunningRoot }),
+          runNodes,
           blocks,
+          // 只在真的动了窗口外卡片时写回（无改动时是同引用，别制造无意义的 diff）
+          ...(agentDetached !== detachedNow ? { agentDetached } : {}),
           turns,
           turnStartTs,
           runningAgentCount: countRunningAgents(blocks),
@@ -7290,6 +7544,12 @@ export function dispatchEvent(raw: AnyEvent): void {
         })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
+      // 诊断（BR-15）：正常收尾不写；被「别的终止事实」收敛的才写 —— 这是回答
+      // 「为什么它不转了」的唯一线索。未匹配的 agent_end 也留一条（不猜归属）。
+      if (endUnmatched) {
+        recordRunSettle({ sessionId: sid, source: 'agent_end_unmatched', runIds: [], eventRunId: id, at: now })
+      }
+      noteRunSettle(sid, 'agent_end', now, [...endOrphans, ...endSyncSettled], { eventRunId: id })
       // run 结束后该会话不再受 busy 保护，立即让缓存按 LRU 收敛；若仍有子 run，sessionBusy
       // 保持 true，evictViews 会继续保护它。
       queueMicrotask(() => evictViews())
@@ -7327,17 +7587,44 @@ export function dispatchEvent(raw: AnyEvent): void {
     case 'session_run_error': {
       const sid = getSid(raw, getState().activeSessionId)
       const msg = String(raw.error || '任务运行失败')
+      const at = evTs(raw) ?? Date.now()
+      let settled: string[] = []
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
+        /* 收敛（BR-15）：会话级终态 = 主 run 已结束。此前这里只清 streaming —— 一旦
+           它前面那条 agent_end 丢了，runEnded 仍是 false、run 节点仍 running，
+           「永久运行中」就此成立（这条事件本来就不会再来了）。 */
+        // 只收**根 run**：子 run 可以晚于主 run 收尾（既有不变量，见
+        // scripts/test-store-queue.mjs 场景12 的「主 run 交卷 + 后台子 agent 仍在跑」），
+        // 对它们下结论就成了凭空造状态。子任务的终态证据是各自的 agent_end / TaskEnd。
+        const runs = settleRunNodes(v.runNodes, { rootLevel: true, status: 'error', at })
+        /* 同步子 run 一并落地（节点 + 卡片）：会话级失败 = 上一轮那棵 run 树已经结束，
+           树里的阻塞调用不可能还在跑。作用域只到**本次被收敛的根**（`runs.settled`）：
+           从根沿 parentId 往下、路径上没有 task_id 的子 run 才算同步；异步子 run 等
+           自己的 agent_end / task_end，它派出去的 depth-2 in-loop 子 run 同样不在范围里
+           （见 settleSyncSubRuns；BR-15 复审 N1 / P5-03d）。 */
+        const detachedNow = v.agentDetached ?? []
+        const sync = settleSyncSubRuns(v, { roots: runs.settled, nodes: runs.nodes, blocks: v.blocks, agentDetached: detachedNow, status: 'done', at })
+        settled = [...runs.settled, ...sync.settled]
+        /* 那个 run 的最后一条 llm_end 也随失败丢了 → 块仍停在 streaming=true：光标 ▍ 常闪、
+           轮尾账（durMs / 指标行）永不落地。冻结口径与 agent_end 一致，且必须在清
+           turnStartTs **之前**算 —— 那是 durMs 的唯一来源。runId 取当前顶层 run：
+           即使节点已被别的路径收敛，残留的流式块也要冻结（复审 N2）。 */
+        const rootRunId = v.runNodes.find((n) => n.kind === 'run' && !n.parentId)?.id
+        const frozen = freezeStreamingAssistants(sync.blocks, { at, runId: rootRunId, turnStartTs: v.turnStartTs })
         const upd = setView(s, sid, {
           ...v,
-          blocks: upsertErrorAt(v, v.blocks, `（运行失败）${msg}`, undefined, evTs(raw)),
+          runEnded: true,
+          runNodes: sync.nodes,
+          ...(sync.agentDetached !== detachedNow ? { agentDetached: sync.agentDetached } : {}),
+          blocks: upsertErrorAt(v, frozen, `（运行失败）${msg}`, undefined, at),
           streaming: false,
           llmStartTs: undefined,
           turnStartTs: {}, // run 级失败：所有 run（含在跑的子 agent）的轮起点一并作废
         })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
+      noteRunSettle(sid, 'session_run_error', at, settled)
       // 运行失败 = 本轮结束且不会再有 llm_end：把暂存队列整队推送，消息不滞留本机
       //（用户要求：run 异常失败后同样推送）。语义/编辑窗口/为什么不在 interrupt() 里推，
       // 见 flushQueueOnRunEnd。
@@ -7436,13 +7723,29 @@ export function dispatchEvent(raw: AnyEvent): void {
     case 'session_closed': {
       const sid = getSid(raw, getState().activeSessionId)
       disarmSessionCompressWatchdogs(sid) // 会话关闭：取消该会话全部压缩看门狗（主 + 各 SubAgent）
+      const closedAt = evTs(raw) ?? Date.now()
+      let closedSettled: string[] = []
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
+        /* 收敛（BR-15）：关闭 = 「运行已停、状态已落盘」，不会再有 agent_end/
+           tool_run_end。只置 runEnded 而留着 runNodes/tool 的 running，会让左栏点、
+           右栏角标、树节点永久转圈（setView 之后 busySids 仍把它算作忙）。 */
+        const runs = settleRunNodes(v.runNodes, { all: true, includeTools: true, status: 'done', at: closedAt })
+        const work = abandonRunningBlocks(v.blocks, { tools: true })
+        /* 仍在流式的 assistant 块也要冻结（BR-15 复审 N2）：关闭后不会再有 llm_end ——
+           durMs 与底部指标行的唯一来源 —— 块就永远停在 streaming=true，光标 ▍ 常闪、
+           这一轮的轮尾账永远不落。口径与 agent_end / session_run_error 完全一致
+           （同一个 freezeStreamingAssistants），runId 取当前顶层 run。 */
+        const rootRunId = v.runNodes.find((n) => n.kind === 'run' && !n.parentId)?.id
+        const closedBlocks = freezeStreamingAssistants(work.blocks, { at: closedAt, runId: rootRunId, turnStartTs: v.turnStartTs })
+        closedSettled = runs.settled
         const upd = setView(
           s,
           sid,
           {
             ...v,
+            runNodes: runs.nodes,
+            runningAgentCount: work.changed ? countRunningAgents(closedBlocks) : v.runningAgentCount,
             streaming: false,
             pendingQueue: [],
             // 一行信号：会话关闭是**结论级**事实（设计 session_closed），不写一行的话
@@ -7450,7 +7753,7 @@ export function dispatchEvent(raw: AnyEvent): void {
             // 运行账（设计「18 runs · 17 consumed · 1 abandoned mid-tool」）：
             // 三个数由 Go 的 Session.recordRunOutcome 统计，缺字段就不画（不编 0）。
             blocks: pushSignalAt(
-              v,
+              { ...v, blocks: closedBlocks },
               {
                 sig: 'closed',
                 etype: 'session_closed',
@@ -7470,6 +7773,7 @@ export function dispatchEvent(raw: AnyEvent): void {
         )
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
+      noteRunSettle(sid, 'session_closed', closedAt, closedSettled)
       break
     }
     case 'task_started': {
@@ -7513,6 +7817,7 @@ export function dispatchEvent(raw: AnyEvent): void {
       const ts = evTs(raw) ?? Date.now()
       // 任务全量用量（含成本）：卡片展示 tokens + 成本（不依赖 task_result_delivered 到达）
       const usage = taskUsageFromEvent(raw.usage as RawUsage | undefined)
+      let taskSettled: string[] = []
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         // task_end 自带 result/error（subagent 侧 TaskEnd 事件填充）：子 agent 派出的孙任务
@@ -7534,7 +7839,24 @@ export function dispatchEvent(raw: AnyEvent): void {
           ((b.kind === 'agent' || b.kind === 'async_task') && b.taskId === taskId)
           || (b.kind === 'tool' && b.promoted && b.taskId === taskId),
         )
-        if (idx < 0) return s
+        const card = idx >= 0 ? v.blocks[idx] : undefined
+        /* 运行位收敛（BR-15）：task_end 是该任务**自身**的终态（subagent.runBackground 在
+           子 run 收尾后发出），而子 run 的 agent_end 可能正好丢了 —— 只更新卡片、不收敛
+           run 节点，树/左栏会永久显示这个子智能体在跑。
+           注意 **不能**用事件里的 run_id：TaskEnd.RunId 是**发起方** run（session.go 的
+           promoted 工具任务甚至不带），拿它收敛会杀错节点。归属只能走卡片 taskId → runId
+           与工具节点自己的 taskId。 */
+        const runStatus: RunNode['status'] = status === 'failed' ? 'error' : status === 'interrupted' ? 'interrupted' : 'done'
+        const runIds = v.runNodes
+          .filter((n) => (n.kind === 'tool' && n.taskId === taskId) || (n.kind === 'run' && card?.kind === 'agent' && n.id === card.runId))
+          .map((n) => n.id)
+        const runs = settleRunNodes(v.runNodes, { runIds, includeTools: true, status: runStatus, at: ts })
+        taskSettled = runs.settled
+        if (idx < 0) {
+          if (!runs.settled.length) return s
+          const upd = setView(s, sid, { ...v, runNodes: runs.nodes })
+          return { ...upd, busySids: busySidsFromViews(upd.views) }
+        }
         const blocks = [...v.blocks]
         const b = blocks[idx]
         if (b.kind === 'agent' || b.kind === 'async_task') {
@@ -7557,9 +7879,18 @@ export function dispatchEvent(raw: AnyEvent): void {
             ...(b.durMs == null && b.startedAt != null ? { durMs: Math.max(0, ts - b.startedAt) } : {}),
           }
         }
-        const upd = setView(s, sid, { ...v, blocks: applyTaskUsage(blocks, taskId, usage) })
+        const nextBlocks = applyTaskUsage(blocks, taskId, usage)
+        const upd = setView(s, sid, {
+          ...v,
+          blocks: nextBlocks,
+          runNodes: runs.nodes,
+          // task_end 把卡片从 running 拉走时角标也要跟着落（此前只有 agent_end 重算，
+          // 子 run 的 agent_end 丢了就一直是「N 个在跑」）。
+          runningAgentCount: countRunningAgents(nextBlocks),
+        })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
+      noteRunSettle(sid, 'task_end', ts, taskSettled, { taskId })
       break
     }
     case 'task_promoted': {
@@ -7867,6 +8198,230 @@ function armSnapshotWatchdog(sid: string, requestId: number): void {
       scheduleRestoreRetry(sid, '恢复响应丢失（看门狗超时）', true, pending[requestId]?.workspace)
     }
   }, SNAPSHOT_WATCHDOG_MS)
+}
+
+/* —— 运行位收敛（BR-15）——
+
+   运行位的「结束」只有两类证据，绝不按超时/心跳推断（那会把真在跑判成结束）：
+     1. 同一 run 的 agent_end；
+     2. 事件**本身**能证明该运行已结束的终止事实：会话级失败/关闭、后台任务终态、
+        新批次开口（injected=false = 服务端 takeBatch，上一轮不可能还在跑）、
+        主 run 收尾（**被收敛的那棵 run 树里、路径上没有 task_id** 的同步子 run 是阻塞
+        调用，父 run 不结束它不可能还在跑；异步子 run 及其子树不在此列，见 syncSubRunIds）。
+   丢一条 agent_end 时，仅靠 ② 收敛。收敛的每一条都写进 events.ts 的有界诊断，
+   可回答「这条会话为什么不再转圈了」。 */
+function settleRunNodes(
+  nodes: RunNode[],
+  target: {
+    runIds?: readonly string[]
+    rootLevel?: boolean
+    /** 会话级终止（关闭）：不区分父子/工具，全部落地。 */
+    all?: boolean
+    includeTools?: boolean
+    status: RunNode['status']
+    at?: number
+  },
+): { nodes: RunNode[]; settled: string[] } {
+  const ids = new Set((target.runIds ?? []).filter(Boolean))
+  if (!ids.size && !target.rootLevel && !target.all) return { nodes, settled: [] }
+  const settled: string[] = []
+  const out = nodes.map((n) => {
+    if (n.status !== 'running') return n
+    if (n.kind !== 'run' && !(target.includeTools && n.kind === 'tool')) return n
+    if (n.kind === 'tool' && target.rootLevel) return n
+    if (!(ids.size ? ids.has(n.id) : target.all || !n.parentId)) return n
+    settled.push(n.id)
+    return {
+      ...n,
+      status: target.status,
+      // 时长只按「事件时间 − 开始时间」结算（服务端时钟），缺时间戳就不编。
+      ...(n.durMs == null && target.at != null && n.startedAt != null && target.at >= n.startedAt
+        ? { durMs: target.at - n.startedAt }
+        : {}),
+    }
+  })
+  return settled.length ? { nodes: out, settled } : { nodes, settled }
+}
+
+// 记录一次「被别的终止事实收敛」的运行（有界诊断；没有实际收敛就不写）。
+function noteRunSettle(
+  sessionId: string,
+  source: RunSettleSource,
+  at: number,
+  settled: string[],
+  extra?: { eventRunId?: string; taskId?: string },
+): void {
+  if (!settled.length) return
+  recordRunSettle({ sessionId, source, runIds: settled, at, ...extra })
+}
+
+/* 同步子 run 的 id：**本次落地的 run 树里**、从 `roots` 沿 parentId 往下的后代 run，
+   路径上没有 task_id；根节点自己不算，无 roots 就什么都不收。
+   「同步」的前提是有**作用域**的：判据不是「全视图里有没有 task_id」，而是**这棵树下
+   的路径**——遇到带 task_id 的节点就停止下沉（异步节点既不算同步子 run，也不进入它的
+   子树）。`subagent` 的 maxSpawnDepth=2 只是深度上限，不表示 depth-2 一定同步：当前
+   桌面端 spawn 全为 Background=true、会写 task_id，无 task_id 的 depth-2 只在宿主注册
+   同步 spawn 时可达（当前不注册），所以下面是**防御性覆盖**；depth-2 那条**不属于**
+   父 run 收尾的范围（父 run 的 agent_end 只证明主 run 这棵树结束，不证明别人派出去的后台
+   任务里的阻塞调用也结束了），它还在跑，终态证据仍是它自己的 agent_end / task_end。
+   P5-03d 之前这里按「全视图里无 task_id 的子 run」收，depth-2 就被父 run 的 agent_end
+   误判成同步子 run 收敛成 done / 卡片 abandoned；而 settleRunNodes 只动 running 节点，
+   误收敛是**永久**的（真实 agent_end 到了也改不回来）。
+   后台任务的判据有两个来源，缺一不可：
+     · run 节点自己的 taskId（agent_start.task_id；P5-03c 起 Go 侧 checkpoint 的
+       run_nodes 也持久化它，暖恢复读得回来 —— 但**旧 checkpoint 没有**）；
+     · 卡片的 taskId（agent 卡，见 SessionView.blocks / agentDetached）—— 旧 checkpoint
+       的节点不带 task_id，以及卡片被分页到首屏窗口外、只剩 agentDetached 的情形，
+       节点那条判据不在，只剩这一条。
+   漏掉任一来源，暖恢复 + 分页窗口外就会两条判据同时缺失，把「可以晚于父 run 收尾」的
+   异步子 run（连同它的整棵子树）当成同步子 run 收敛掉（BR-15 复审 B1）。
+   同步子 agent 是父 run 里的**阻塞调用**（没有 task_id、没有 task_end）——**对被收敛的
+   那棵 run 树、且路径上没有 task_id 的后代**而言，父 run 结束它不可能还在跑，这是它丢了
+   自己的 agent_end 之后唯一可证明的终止事实。
+   闭包只走 `kind === 'run'`：工具节点也带 parentId（`tool-*` → 发起它的 run），它们不是
+   run 树的一环，不参与这个集合（复审 N-6）。 */
+function syncSubRunIds(v: SessionView, roots: readonly string[]): string[] {
+  if (!roots.length) return []
+  const asyncRuns = new Set<string>()
+  for (const n of v.runNodes) if (n.kind === 'run' && n.taskId) asyncRuns.add(n.id)
+  // 卡片源必须含窗口外的 agentDetached：那不是缓存副本，是分页后**唯一**的卡片位置。
+  for (const b of [...(v.blocks ?? []), ...(v.agentDetached ?? [])]) {
+    if (b.kind === 'agent' && b.taskId) asyncRuns.add(b.runId)
+  }
+  // parentId → 子 run 节点：一次分桶，闭包沿这棵索引往下走。
+  const kids = new Map<string, RunNode[]>()
+  for (const n of v.runNodes) {
+    if (n.kind !== 'run' || !n.parentId) continue
+    const list = kids.get(n.parentId)
+    if (list) list.push(n)
+    else kids.set(n.parentId, [n])
+  }
+  const rootSet = new Set(roots)
+  const seen = new Set<string>() // 同一 run 只判一次（重放留下的重复节点不重复收）
+  const out: string[] = []
+  const walk = (id: string): void => {
+    for (const child of kids.get(id) ?? []) {
+      if (seen.has(child.id)) continue
+      seen.add(child.id)
+      // 带 task_id = 异步子 run：**不下沉**。它和它的子树都不归这棵树收尾。
+      if (asyncRuns.has(child.id)) continue
+      if (!rootSet.has(child.id)) out.push(child.id)
+      walk(child.id)
+    }
+  }
+  for (const r of roots) walk(r)
+  return out
+}
+
+/* 只把**指定的**子运行卡片收敛为 abandoned（父 run 收尾了，它们自己的 agent_end
+   不会再来了）。与 abandonRunningBlocks 的区别：不按「会话是否关闭」全量扫，只动这批
+   run；异步子 run 的卡片不在名单里，照旧由它的 agent_end / task_end 收尾。
+   两个来源都要扫：`blocks`（首屏窗口内）与 `agentDetached`（窗口外，见 SessionView）——
+   **同步子卡同样会被分页出去**，只扫 blocks 就等于「翻页之后就再也收敛不掉」。 */
+function abandonAgentCards(
+  blocks: MsgBlock[],
+  detached: MsgBlock[],
+  runIds: readonly string[],
+): { blocks: MsgBlock[]; agentDetached: MsgBlock[]; changed: boolean } {
+  if (!runIds.length) return { blocks, agentDetached: detached, changed: false }
+  const ids = new Set(runIds)
+  const mark = (list: MsgBlock[]): { list: MsgBlock[]; hit: boolean } => {
+    let hit = false
+    const out = list.map((b) => {
+      if (b.kind !== 'agent' || !ids.has(b.runId)) return b
+      if (b.status !== 'running' && b.status !== 'interrupting') return b
+      hit = true
+      return { ...b, status: 'abandoned' as const, interrupting: false }
+    })
+    return { list: hit ? out : list, hit }
+  }
+  const a = mark(blocks)
+  const d = mark(detached)
+  return { blocks: a.list, agentDetached: d.list, changed: a.hit || d.hit }
+}
+
+/* 父 run 收尾时一并落地**同步子 run**（节点 + 卡片）：三条父 run 终止证据共用这一处
+   （agent_end / 新批次开口 / session_run_error），口径只写一次。
+   · 作用域由 `roots` 给（本次**真正落地**的那棵/那几棵 run 树）；roots 为空就什么都不收
+     —— 没有落地事实，就没有「它的树结束了」这句话；
+   · 只收**被收敛的那棵 run 树下、且路径上没有 task_id** 的同步子 run（syncSubRunIds
+     做后代闭包，遇 task_id 停止下沉）。异步子 run 可以晚于父 run 收尾、给它派出去的
+     in-loop 子 run（depth-2）同理，终态证据是各自的 agent_end / task_end，这里绝不碰；
+   · 卡片源含 agentDetached（见 abandonAgentCards）；
+   · 状态由调用方给：父 run 收尾的**方式**不借给子 run（reason 见 agent_end 分支）。
+   返回的 blocks / agentDetached 在无改动时是**原数组引用**，调用方可以据此决定是否写回。 */
+function settleSyncSubRuns(
+  v: SessionView,
+  target: {
+    roots: readonly string[]
+    nodes: RunNode[]
+    blocks: MsgBlock[]
+    agentDetached: MsgBlock[]
+    status: RunNode['status']
+    at: number
+  },
+): { nodes: RunNode[]; blocks: MsgBlock[]; agentDetached: MsgBlock[]; settled: string[] } {
+  const r = settleRunNodes(target.nodes, {
+    runIds: syncSubRunIds(v, target.roots),
+    status: target.status,
+    at: target.at,
+  })
+  const cards = abandonAgentCards(target.blocks, target.agentDetached, r.settled)
+  return { nodes: r.nodes, blocks: cards.blocks, agentDetached: cards.agentDetached, settled: r.settled }
+}
+
+/* 冻结还在流式的 assistant 块（agent_end / 会话级终态 / 上一轮已收敛）。
+   这些收尾之后不会再有 llm_end —— durMs 与底部指标行的唯一来源 —— 块就永远停在
+   streaming=true：渲染门 `!b.streaming` 过不去，光标 ▍ 一直闪、轮尾账不落（BR-15 复审 N2）。
+   口径与 agent_end 分支完全一致（抓的是同一条判据，不是另写一份）：
+     · runId 给定时只冻结那次运行（缺 runId 的旧流一并收敛，与 agent_end 同向）；
+     · durMs：末轮 llm_start（turnStartTs[runId]）→ 这次收尾，诚实的「已跑多久」；
+     · ttftMs 不补：没收到过 chunk 就没有首字，编一个不如留空。 */
+function freezeStreamingAssistants(
+  blocks: MsgBlock[],
+  opts: { at: number; runId?: string; turnStartTs?: Record<string, number> },
+): MsgBlock[] {
+  const runId = opts.runId ?? ''
+  let changed = false
+  const out = blocks.map((b) => {
+    if (b.kind !== 'assistant' || !b.streaming) return b
+    if (runId && b.runId && b.runId !== runId) return b
+    changed = true
+    const nb = { ...b, streaming: false }
+    if (nb.thinkStart != null && nb.thinkMs == null) nb.thinkMs = Math.max(0, opts.at - nb.thinkStart)
+    if (nb.durMs == null && opts.turnStartTs?.[runId] != null) nb.durMs = Math.max(0, opts.at - (opts.turnStartTs[runId] as number))
+    return nb
+  })
+  return changed ? out : blocks
+}
+
+/* 会话关闭时落到块上：仍在跑的 agent 卡片与后台任务占位收敛为 abandoned
+   （自己的 agent_end / task_end 不会再来了；留着 running 会让右栏角标/左栏树永久转圈）。
+   async_task 占位块同样要落 —— 漏了它，session_closed 之后 runningTaskCount 仍亮
+   （BR-15 复审 N1）。收敛口径与 finalizeReplayView 的冷恢复分支一致。
+   tools=true 时连工具块一起落地（会话关闭后不会再有 tool_run_end）。 */
+function abandonRunningBlocks(
+  blocks: MsgBlock[],
+  opts: { tools: boolean },
+): { blocks: MsgBlock[]; changed: boolean } {
+  let changed = false
+  const out = blocks.map((b) => {
+    if (b.kind === 'agent' && (b.status === 'running' || b.status === 'interrupting')) {
+      changed = true
+      return { ...b, status: 'abandoned' as const, interrupting: false }
+    }
+    // async_task 没有 interrupting 字段：它的「中断中」就是 status（见 AsyncTaskStatus）。
+    if (b.kind === 'async_task' && (b.status === 'running' || b.status === 'interrupting')) {
+      changed = true
+      return { ...b, status: 'abandoned' as const }
+    }
+    if (opts.tools && b.kind === 'tool' && b.status === 'running') {
+      changed = true
+      return { ...b, status: 'done' as const, interrupting: false, ...(b.taskStatus ? { taskStatus: 'abandoned' as const } : {}) }
+    }
+    return b
+  })
+  return { blocks: changed ? out : blocks, changed }
 }
 
 /* finalizeReplayView 快照/历史归一化：残留的流式/running 态强制落地
@@ -8624,6 +9179,9 @@ function wire(): void {
   transport.onEvent((line) => {
     try {
       const ev = JSON.parse(line) as AnyEvent
+      // Hub 事件只归 useHubStore（§17.6 单一入口）：主 store 的 views/busySids 只认工作区
+      // 会话，把 hub.<id>.dm 的流灌进来会留下永不清理的正文与常亮运行点（P1-08 复核 N1）。
+      if (typeof ev.event_type === 'string' && ev.event_type.startsWith('hub_')) return
       // 快照分流（FIX_OPTIMIZATION 问题2③）：new_session 快照在途时，发往该 sid 的事件先入
       // preBuf 暂存（防御，正常为空；响应到达后由 materializeSnapshot / 下方补应用），
       // 其余事件正常分发。
@@ -8742,6 +9300,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   plugins: [],
   imSchemas: [],
   imStatuses: {},
+  imOwnerStatus: null, // 当前归属的 IM 启用状态（im_status 的 owner 视角）
   imChats: {},
   browserPages: [],
   unreadViews: [],
@@ -10123,9 +10682,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     })
   },
-  trustHooks: (commands: string[], scope: string) => {
+  trustHooks: (commands: string[], scope: string, owner?: string) => {
+    const o = String(owner ?? '').trim()
     return new Promise<{ ok: boolean; error?: string }>((resolve) => {
-      send({ type: 'hooks_trust', payload: { commands, scope: scope || 'project', reason: '用户在设置面板确认' } }, false, (r) => {
+      // owner 必须显式给出（项目来源 → workspace:<该项目>；用户级来源 → 当前会话归属）。
+      // 不给时 send() 会注入当前会话归属；服务端两者都没有就拒绝（不写全局）。
+      send({
+        type: 'hooks_trust',
+        payload: { commands, scope: scope || 'project', reason: '用户在设置面板确认', ...(ownerValid(o) ? { owner: o } : {}) },
+      }, false, (r) => {
         send({ type: 'hooks_list', payload: { workspaces: get().projects.map((p) => p.path) } })
         resolve(r.ok ? { ok: true } : { ok: false, error: r.error ?? '信任失败' })
       })
@@ -11220,9 +11785,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     return r
   },
-  // 自定义 provider 改名：把整卡配置迁移到新 id（providerSave 建新条目 + 复制 api_key，
-  // providerRemove 物理删旧条目；内置 5 家不可改名——UI 已挡）。改的是活跃 provider 时
-  // electron provider:remove 会自动回退 active 到内置，故改名流程：先建新 id 再删旧 id，
+  // 自定义 provider 改名：把整卡配置迁移到新 id（providerSave 建新条目 → providerCopyKey 搬 key →
+  // providerRemove 物理删旧条目；内置 5 家不可改名——UI 已挡）。key 住在 keys.json（BR-08），
+  // 明文不再经过 renderer（旧实现把 cfg.api_key 塞进 providerSave，等于让 key 在渲染层兜一圈）。
+  // 改的是活跃 provider 时 electron provider:remove 会自动回退 active 到内置，故改名流程：
+  // 先建新 id 再删旧 id，
   // 最后把 active 指回新 id（若原先是活跃）。session 侧归属（bs.provider）不迁移——
   // 改名的自定义 provider 通常不是活跃/会话绑定方；如需要可在设置里重新「设为当前」。
   // renameProviderDisplay 改**显示名**（label），不动 id。
@@ -11261,11 +11828,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       auth_type: cfg.auth_type,
       usage_input_includes_cache: cfg.usage_input_includes_cache ?? null, // usage 口径标注随卡迁移
       cache_ttl_1h: cfg.cache_ttl_1h ?? null, // 缓存 TTL 标注随卡迁移
-      api_key: cfg.api_key,
       ...(wasActive ? { active: name } : {}),
     })
     if (!r.ok) return r
-    // 2) 删旧 id（物理删除；不触发 removeProvider 的 set_provider 通知——bridge 内存
+    // 2) key 单独搬（主进程把 keys.json 条目从旧 id 复制到新 id；明文不出主进程）。
+    //    必须在新条目建好之后、删旧条目之前 —— 中途失败要能回滚新条目，不能出现
+    //    「新 id 没 key、旧 id 也被删」的双输。旧主进程无此 IPC → unsupported → 回滚报错。
+    const cp = await transport.providerCopyKey(oldName, name)
+    if (!cp.ok) {
+      await transport.providerRemove(name) // 回滚：删掉刚建的新条目（含可能已复制的 key）
+      return { ok: false, error: cp.error === 'unsupported' ? '当前主进程版本不支持复制 API key，请更新后重试' : (cp.error ?? '复制 API key 失败') }
+    }
+    // 3) 删旧 id（物理删除；不触发 removeProvider 的 set_provider 通知——bridge 内存
     //    由下面合并后的 set_provider 一次性重建，避免中间态把 active 切走）
     const rm = await transport.providerRemove(oldName)
     if (!rm.ok) {
@@ -11274,7 +11848,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return rm
     }
     const s2 = await transport.settingsGet()
-    set({ settings: s2, providerKeys: { ...get().providerKeys, [name]: Boolean(r.hasKey), [oldName]: false } })
+    set({ settings: s2, providerKeys: { ...get().providerKeys, [name]: cp.copied === true, [oldName]: false } })
     send({ type: 'set_provider', payload: { provider: s2.provider.active, active: s2.provider.active } })
     return { ok: true }
   },

@@ -1,0 +1,3470 @@
+@import './demo.css';
+
+/* Luna avatar 基础样式：demo 的 .avatar 规则只在 .hub-demo 内生效；
+   侧栏/弹层等作用域外也要有同样的尺寸、眼睛与状态点。 */
+.luna-avatar{display:inline-flex;flex:0 0 auto;vertical-align:middle;position:relative;width:44px;height:44px;--eye:var(--bg);transition:transform .18s ease,filter .18s ease;border-radius:50%}
+.luna-avatar>svg{width:100%;height:100%;display:block;overflow:visible}
+.luna-avatar.xs{width:28px;height:28px}
+.luna-avatar.lg{width:52px;height:52px}
+.luna-avatar:hover{transform:scale(1.1) rotate(-2deg)}
+.luna-avatar[data-state='working']>svg{animation:av-work 2.2s ease-in-out infinite}
+.luna-avatar[data-status='off']::after{display:none}
+.luna-avatar[data-state='needs_attention']::after{content:'';position:absolute;top:6%;right:6%;width:22%;height:22%;border-radius:50%;background:var(--warning);border:2px solid var(--bg)}
+.luna-avatar-stack{display:inline-flex;align-items:center}
+.luna-avatar-stack .avatar-more{width:18px;height:18px;border-radius:50%;background:var(--elevated);border:2px solid var(--bg);display:grid;place-items:center;font-size:9px;color:var(--text-3);margin-left:-6px;flex:0 0 auto}
+.luna-avatar-stack .luna-avatar[data-status='off']::after{display:none}
+.luna-avatar[data-state='needs_attention']::after{display:none}
+.luna-avatar-stack .luna-avatar::before{content:'';position:absolute;inset:-3px;border-radius:50%;box-shadow:0 0 0 2px var(--bg);z-index:-1}
+
+/* Agent Hub surface（§8.2 Hub Rail + §8.4 DM 视图）。
+ *
+ * 只加布局与少量尺寸：颜色一律走既有主题令牌（--paper/--surface/--ink/--border），
+ * 不新造色板——三套主题（深/浅/跟随）都要照常可读。 */
+
+/* —— 会话区 token：只从现有 ink/paper 主题派生，两套主题都定义 ——
+ *
+ * 用户气泡不是 demo 的硬编码 #f0e8dc：深色主题取「墨色 90% + 赭石 10%」得到暖米白，
+ * 浅色主题取「墨色 94% + 赭石」得到深墨；气泡内文字反向取 paper，保持 4.5:1 以上。
+ * 事件卡底/图标块用 surface 与 ink 的极浅混合，不新增第三套灰阶。 */
+:root,
+[data-theme='ink'] {
+  --hub-conv-max: 760px;
+  --hub-user-bubble: color-mix(in srgb, var(--ink) 90%, var(--ochre));
+  --hub-user-ink: color-mix(in srgb, var(--paper) 72%, #000);
+  --hub-user-meta: var(--text-3);
+  --hub-event-bg: color-mix(in srgb, var(--surface) 94%, var(--paper));
+  --hub-event-icon-bg: color-mix(in srgb, var(--ink) 7%, transparent);
+  --hub-event-icon-ink: var(--text-2);
+  --hub-tool-bg: color-mix(in srgb, var(--surface) 82%, var(--paper));
+}
+[data-theme='paper'] {
+  --hub-conv-max: 760px;
+  --hub-user-bubble: color-mix(in srgb, var(--ink) 94%, var(--ochre));
+  --hub-user-ink: var(--paper-2);
+  --hub-user-meta: var(--text-3);
+  --hub-event-bg: color-mix(in srgb, var(--surface) 96%, var(--paper));
+  --hub-event-icon-bg: color-mix(in srgb, var(--ink) 5%, transparent);
+  --hub-event-icon-ink: var(--text-2);
+  --hub-tool-bg: color-mix(in srgb, var(--surface) 90%, var(--paper));
+}
+
+/* Hub 已并入 App shell：中栏/右栏在 Hub 打开时只隐藏不卸载（草稿/标签/滚动保留）。 */
+.hub-host-stack {
+  flex: 1;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hub-host-cell {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.hub-host-stack.hub-on > .workspace-cell { display: none; }
+
+/* Hub 中栏：不再是整页 overlay，只占 CenterPanel 的槽位。 */
+.hub-center {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--paper);
+  color: var(--ink);
+  /* 占位滚动条宽度：classic 10/15px、overlay 0。useScrollbarWidth 实测后写到
+     当前会话视图根节点（.hub-group-view/.hub-dm）上；这里给未测量时的默认值。
+     只被 demo 会话区的 composer 右内边距消费，改 0 等于退回补偿前的布局。 */
+  --hub-scrollbar-w: 0px;
+}
+.hub-center > .hub-dm,
+.hub-center > .hub-group-view { flex: 1; min-height: 0; }
+.hub-center-alerts { flex: 0 0 auto; max-height: 22vh; }
+.hub-center-banner { flex: 0 0 auto; }
+.hub-empty-pick { flex: 1; }
+.hub-empty-pick p { margin: 0; font-size: 13px; color: var(--text-2); }
+.hub-empty-actions { display: flex; align-items: center; gap: 14px; }
+.hub-empty-actions .hub-link { display: inline-flex; align-items: center; gap: 4px; }
+
+/* —— 左栏「智能体」段（P4-UI-1）—— */
+/* 整个 section 做高度预算：最多 38vh，空间不足时可 shrink；滚动发生在内部列表，
+   不能把下方工作区/会话树挤成 0（980×620 实测过 .proj-list 只剩 36px）。 */
+.hub-side {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 38vh;
+  overflow: hidden;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.hub-side-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 3px 16px;
+}
+.hub-side-title {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  /* 小节标题 11px 属 AA 正文口径（4.5:1）：--text-3 实测 ink 4.30 / paper 3.28（HUB-A11Y-01），
+     换一档 --text-2（ink 7.14 / paper 6.75）。字号/字重/字距不动，层级仍是小节标题。 */
+  color: var(--text-2);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-side-actions { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.hub-side-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: 10.5px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.hub-side-back:hover { background: var(--surface); color: var(--ink); }
+.hub-side-add {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.hub-side-add:hover { background: var(--surface); color: var(--ink); }
+.hub-side-search {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 10px 5px 12px;
+}
+.hub-side-search-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-3);
+}
+.hub-side-search-box:focus-within { border-color: var(--accent-border); }
+.hub-side-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  padding: 0;
+}
+.hub-side-search-input::placeholder { color: var(--text-3); }
+.hub-side-search-clear { font-size: 13px; line-height: 1; padding: 0 2px; }
+.hub-side-scopes { display: flex; gap: 3px; }
+.hub-side-scopes button {
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.hub-side-scopes button:hover { color: var(--ink); }
+.hub-side-scopes button.on { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
+.hub-side-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px 3px 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.hub-side-tabs::-webkit-scrollbar { display: none; }
+.hub-side-tabs button {
+  flex: 1 1 auto;
+  min-width: max-content;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font-size: 11.5px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.hub-side-tabs button:hover { color: var(--ink); }
+.hub-side-tabs button.on {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink);
+  font-weight: 550;
+}
+.hub-side-count {
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--text-2);
+  font-size: 9.5px;
+  line-height: 14px;
+  text-align: center;
+}
+.hub-side-tabs button.on .hub-side-count { color: var(--ink); }
+.hub-side-list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 0 6px 6px;
+}
+.hub-side-results {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 6px 6px;
+}
+.hub-side-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-side-row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.hub-side-row.on {
+  background: color-mix(in srgb, var(--row-accent, var(--accent-solid)) 10%, transparent);
+  border-left-color: var(--row-accent, var(--accent-solid));
+}
+.hub-side-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.hub-side-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hub-side-meta { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.hub-side-meta .hub-preview { flex: 1; min-width: 0; }
+.hub-side-time {
+  flex: none;
+  color: var(--text-2);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.hub-side-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px 14px 14px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.hub-side-empty p { margin: 0; color: var(--text-2); font-size: 12px; }
+.hub-side-empty-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.hub-side-empty-add:hover { color: var(--ink); border-color: var(--accent-border); }
+.hub-side-results .hub-search-hit { margin: 2px 0; }
+.left-bottom .nav-item.on {
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink);
+}
+/* 折叠态 Hub 入口的 active 态跟随当前智能体/群组的身份色。 */
+/* 比 `.rail .rbtn.on` 多一层，确保身份色覆盖全局 accent（两者都是两类选择器时后者会赢）。 */
+.rail .rbtn.on.agent-active {
+  color: var(--agent-accent);
+  background: color-mix(in srgb, var(--agent-accent) 16%, transparent);
+}
+.rail .rbtn.on.agent-active:hover {
+  background: color-mix(in srgb, var(--agent-accent) 24%, transparent);
+}
+
+/* —— 左栏 rail —— */
+
+.hub-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--paper-2);
+}
+.hub-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.hub-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+.hub-link {
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.hub-link:hover { color: var(--ink); }
+.hub-link.on {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  border-radius: 5px;
+}
+.hub-rail-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hub-rail-empty,
+.hub-muted {
+  padding: 14px 12px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+.hub-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.hub-row.on { background: color-mix(in srgb, var(--ink) 9%, transparent); }
+.hub-row-text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.hub-row-top { display: flex; align-items: center; gap: 6px; }
+.hub-name { font-size: 13px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-preview {
+  font-size: 11.5px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-unread {
+  margin-left: auto;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent-solid);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 17px;
+  text-align: center;
+}
+/* —— 智能体头像 sigil v2（方案 03 §3.3；渲染见 AgentSigil.tsx / AgentStack.tsx）——
+   身份 = 形状 + 色相，状态 = 环/弧/点/空心轮廓。状态层只动 stroke-dashoffset 与
+   opacity，不触发布局。主题值按 [data-theme='ink'|'paper'] 切换，base 视为 ink。 */
+.sigil {
+  --sz: 32px;
+  --fill: #8fbfae;
+  --state: #a7a196;
+  --sigil-bg: var(--paper);
+  --sigil-ink: rgba(0, 0, 0, .28);
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: var(--sz);
+  height: var(--sz);
+  line-height: 0;
+  vertical-align: middle;
+}
+.sigil > svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.sigil .shape { fill: var(--fill); }
+.sigil .trait { fill: var(--sigil-ink); stroke: var(--sigil-ink); stroke-width: 0; }
+.sigil .trait.line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.sigil .ring { fill: none; stroke: var(--state); stroke-width: 1.5; }
+.sigil .dot { fill: var(--state); stroke: var(--sigil-bg); stroke-width: 2; }
+.sigil.s24 { --sz: 24px; }
+.sigil.s32 { --sz: 32px; }
+.sigil.s48 { --sz: 48px; }
+/* 尺寸渐进披露：24px 隐藏内侧标记；1.5 单位环缩到 1px 看不见，用 2 单位。 */
+.sigil.s24 .trait { display: none; }
+.sigil.s24 .ring { stroke-width: 2; }
+/* offline：空心轮廓（实心 vs 空心不依赖颜色），无环无点、不整体降透明度。 */
+.sigil[data-state='offline'] .shape { fill: none; stroke: var(--state); stroke-width: 2.5; }
+.sigil[data-state='offline'] .trait { display: none; }
+
+/* 状态色：只用于状态层，永不参与身份填充。 */
+.sigil[data-state='idle'] { --state: #a7a196; }
+.sigil[data-state='working'] { --state: #6fc7b6; }
+.sigil[data-state='needs_attention'] { --state: #e7b86a; }
+.sigil[data-state='offline'] { --state: #756f65; }
+[data-theme='ink'] .sigil[data-state='idle'] { --state: #a7a196; }
+[data-theme='ink'] .sigil[data-state='working'] { --state: #6fc7b6; }
+[data-theme='ink'] .sigil[data-state='needs_attention'] { --state: #e7b86a; }
+[data-theme='ink'] .sigil[data-state='offline'] { --state: #756f65; }
+[data-theme='paper'] .sigil { --sigil-ink: rgba(255, 255, 255, .45); }
+[data-theme='paper'] .sigil[data-state='idle'] { --state: #6b675e; }
+[data-theme='paper'] .sigil[data-state='working'] { --state: #2e6b3f; }
+[data-theme='paper'] .sigil[data-state='needs_attention'] { --state: #8a5a00; }
+[data-theme='paper'] .sigil[data-state='offline'] { --state: #8a857a; }
+
+/* 8 组身份色：同一色相按主题取填充值（不透明混色）。base = ink。 */
+.sigil[data-hue='sage'] { --fill: #8fbfae; }
+.sigil[data-hue='clay'] { --fill: #d3927a; }
+.sigil[data-hue='sky'] { --fill: #8ab4f8; }
+.sigil[data-hue='lilac'] { --fill: #b6a4e0; }
+.sigil[data-hue='moss'] { --fill: #a9c47c; }
+.sigil[data-hue='rose'] { --fill: #d99aa6; }
+.sigil[data-hue='slate'] { --fill: #9aa8b6; }
+.sigil[data-hue='sand'] { --fill: #cbb493; }
+[data-theme='paper'] .sigil[data-hue='sage'] { --fill: #3f6b5d; }
+[data-theme='paper'] .sigil[data-hue='clay'] { --fill: #79452f; }
+[data-theme='paper'] .sigil[data-hue='sky'] { --fill: #2f5c9e; }
+[data-theme='paper'] .sigil[data-hue='lilac'] { --fill: #5a4a86; }
+[data-theme='paper'] .sigil[data-hue='moss'] { --fill: #4e6a27; }
+[data-theme='paper'] .sigil[data-hue='rose'] { --fill: #7d3d4b; }
+[data-theme='paper'] .sigil[data-hue='slate'] { --fill: #46525f; }
+[data-theme='paper'] .sigil[data-hue='sand'] { --fill: #6b5738; }
+
+/* working：270° 弧（周长 2πr，r=22 → 138.2）。旋转只改 dashoffset。 */
+.sigil .arc { stroke-dasharray: 103.7 34.5; stroke-dashoffset: -17.3; }
+.sigil[data-state='working'] .arc { animation: sigil-arc 1.6s linear infinite; }
+@keyframes sigil-arc { from { stroke-dashoffset: -17.3; } to { stroke-dashoffset: -155.5; } }
+
+/* needs_attention：加粗环 + 右上点；呼吸只动 opacity，不动布局。 */
+.sigil[data-state='needs_attention'] .ring { stroke-width: 2.6; animation: sigil-ring 2.4s ease-in-out infinite; }
+.sigil[data-state='needs_attention'] .dot { animation: sigil-dot 2.4s ease-in-out infinite; }
+@keyframes sigil-ring { 0%, 100% { opacity: .95; } 50% { opacity: .35; } }
+@keyframes sigil-dot { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+
+/* prefers-contrast / forced-colors：状态层换高对比编码，形状不变（§3.3.6 必做项）。 */
+@media (prefers-contrast: more) {
+  .sigil .ring { stroke-width: 2.5; }
+  .sigil[data-state='idle'] { --state: var(--ink-2); }
+  .sigil[data-state='offline'] { --state: var(--ink-2); }
+}
+@media (forced-colors: active) {
+  .sigil .shape { fill: CanvasText; stroke: CanvasText; }
+  .sigil[data-state='offline'] .shape { fill: none; }
+  .sigil .ring { stroke: Highlight; }
+  .sigil .dot { fill: Highlight; stroke: Canvas; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sigil .arc, .sigil .ring, .sigil .dot { animation: none !important; }
+}
+
+/* Group 叠放：重叠 25%，paper 色 drop-shadow 分隔（不额外套边框层）。 */
+.agent-stack { --sigil-bg: var(--paper); display: inline-flex; align-items: center; vertical-align: middle; }
+.agent-stack > * {
+  position: relative;
+  filter: drop-shadow(2px 0 0 var(--sigil-bg)) drop-shadow(-2px 0 0 var(--sigil-bg))
+    drop-shadow(0 2px 0 var(--sigil-bg)) drop-shadow(0 -2px 0 var(--sigil-bg));
+}
+.agent-stack > .sigil { margin-left: calc(var(--sz) * -.25); }
+.agent-stack > :first-child { margin-left: 0; }
+.agent-stack-more {
+  --sz: 24px;
+  display: inline-grid;
+  place-items: center;
+  width: var(--sz);
+  height: var(--sz);
+  margin-left: calc(var(--sz) * -.25);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 10%, var(--paper));
+  color: var(--ink-2);
+  font-size: calc(var(--sz) * .34);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -.02em;
+}
+.agent-stack-more.s24 { --sz: 24px; }
+.agent-stack-more.s32 { --sz: 32px; }
+.agent-stack-more.s48 { --sz: 48px; }
+
+.hub-notice {
+  margin: 6px;
+  padding: 7px 9px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bamboo) 16%, transparent);
+  color: var(--ink);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hub-error {
+  margin: 6px;
+  padding: 7px 9px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--crimson) 14%, transparent);
+  color: var(--crimson);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 错误横幅（DM/群共用）：一行放「消息 + 重试 + 关闭」，窄窗下消息自己省略，
+   不把按钮挤出可视区（列在 .hub-error 之后，只覆盖布局，不动配色）。 */
+.hub-error.hub-error-row { display: flex; align-items: center; gap: 8px; cursor: default; }
+.hub-error.hub-error-row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.hub-error.hub-error-row > button { flex: 0 0 auto; }
+
+/* —— 会话区（群 / DM 共用版式，2026-10 复刻）——
+ *
+ * 参考 docs/demo 的 messages/composer 节奏：760px 居中、30/28 留白、
+ * 22px 消息间距、agent 无气泡（32px sigil + 作者头）、human 右侧实心暖气泡。
+ * 颜色全部由当前 ink/paper 主题 token 派生（--hub-* 在文件顶部的两套主题里定义），
+ * 不复制 demo 的硬编码深色值。 */
+.hub-dm {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* —— 会话头：群（AgentStack + 两行 subtitle）/ DM（48px sigil + lock 提示） —— */
+.hub-conv-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--paper);
+}
+.hub-conv-id {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+.hub-conv-id > .agent-stack { flex: none; }
+.hub-conv-title {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.hub-conv-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.hub-conv-line strong {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-conv-sub {
+  min-width: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-conv-subline { display: flex; align-items: center; gap: 8px; }
+.hub-conv-sub-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-lock {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.hub-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  opacity: 0.45;
+}
+.hub-dot.on { background: var(--indigo); opacity: 1; }
+
+/* header actions：全部是现有动作的紧凑版（没有 Auto/电脑开关）。 */
+.hub-conv-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+.hub-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.hub-seg button {
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.hub-seg button:hover { color: var(--ink); }
+.hub-seg button.on {
+  background: var(--paper-2);
+  color: var(--ink);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.hub-seg button:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-seg-quiet { padding: 0; border: 0; background: none; }
+.hub-seg-quiet button { padding: 3px 6px; font-size: 10.5px; }
+.hub-seg-quiet button.on { background: color-mix(in srgb, var(--ink) 8%, transparent); box-shadow: none; }
+.hub-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 6px 7px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.hub-action-btn:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.hub-action-btn.on {
+  color: var(--ink);
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.hub-action-btn:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+button.hub-pill.hub-budget-chip { cursor: pointer; }
+button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); color: var(--ink); }
+
+/* —— 时间线：外层滚动、内层 760px 居中；消息间距与 demo 一致 —— */
+.hub-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 30px 28px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  scroll-behavior: auto;
+}
+.hub-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: 100%;
+  max-width: var(--hub-conv-max);
+  margin: 0 auto;
+}
+.hub-group-view .hub-thread-flat,
+.hub-group-view .hub-thread-grouped { gap: 22px; }
+.hub-day-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.hub-day-divider::before,
+.hub-day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.hub-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 440px;
+  margin: 12vh auto 0;
+  color: var(--text-3);
+  text-align: center;
+}
+.hub-intro p {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.hub-intro .hub-muted { font-size: 12px; line-height: 1.6; }
+
+/* —— 消息：agent 左（无气泡）/ human 右（实心暖气泡） —— */
+.hub-msg { display: flex; min-width: 0; }
+.hub-msg.agent {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.hub-msg-rail {
+  position: relative;
+  width: 32px;
+  padding-top: 1px;
+}
+.hub-msg-avatar {
+  position: relative;
+  display: block;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+/* 视觉 32px、命中区 44px（不撑布局）：与 AgentBadge clickable 同一口径。 */
+.hub-msg-avatar::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+}
+.hub-msg-avatar.static { cursor: default; }
+.hub-msg-avatar:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 3px; }
+.hub-msg-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.hub-msg-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.hub-msg-name {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: color-mix(in srgb, var(--agent-accent, var(--ink)) 45%, var(--ink));
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-msg-name:hover { text-decoration: underline; }
+.hub-msg-name:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 4px; }
+.hub-msg-role {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* AgentBadge 仍保留为可复用身份组件（当前会话区用 ConversationMessage 的作者头；
+   任务卡改用 event-card 解剖，不再嵌 24px sigil）。样式随组件保留，避免它被再次
+   引用时变成裸按钮 —— 44px 热区也还是同一条可达性契约。 */
+.hub-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.hub-agent-badge.clickable {
+  cursor: pointer;
+  /* 视觉不变，命中区 ≥44px（方案 §3.3.7）：padding 扩张热区，负 margin 抵消布局影响。 */
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 4px;
+  margin: -6px -4px;
+}
+.hub-agent-badge.clickable:hover .hub-agent-name { text-decoration: underline; }
+.hub-agent-badge.clickable:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 6px; }
+.hub-agent-name {
+  min-width: 0;
+  color: color-mix(in srgb, var(--agent-accent, var(--accent-solid)) 45%, var(--ink));
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.hub-agent-role {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-sub {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-context-jump {
+  flex: none;
+  margin: 0;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.hub-context-jump:hover { color: var(--ink); text-decoration: underline; }
+.hub-context-jump.static { cursor: default; }
+.hub-context-jump:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; border-radius: 4px; }
+
+.hub-msg-tag {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-3);
+  font-size: 9.5px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.hub-msg-tag.owner { color: var(--text-2); }
+.hub-msg-tag.streaming {
+  color: var(--accent-solid);
+  border-color: color-mix(in srgb, var(--accent-solid) 32%, var(--border));
+}
+.hub-msg-time {
+  flex: none;
+  margin-left: 2px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.hub-msg-body {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.hub-msg-body > .md > :first-child { margin-top: 0; }
+.hub-msg-body > .md > :last-child { margin-bottom: 0; }
+.hub-msg.human {
+  justify-content: flex-end;
+  gap: 11px;
+}
+.hub-msg.human .hub-msg-main {
+  align-items: flex-end;
+  max-width: min(78%, 620px, calc(100% - 35px));
+  gap: 5px;
+}
+/* 列右缘的「你」占位（24 + 11 gap）：与 demo 一致，气泡不贴死 760 列边。 */
+.hub-user-avatar {
+  flex: none;
+  align-self: flex-start;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-top: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1;
+  user-select: none;
+}
+.hub-user-bubble {
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  background: var(--hub-user-bubble);
+  color: var(--hub-user-ink);
+  font-size: 14px;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 8%, transparent);
+}
+.hub-user-bubble .md { color: inherit; }
+.hub-user-bubble .md > :first-child { margin-top: 0; }
+.hub-user-bubble .md > :last-child { margin-bottom: 0; }
+.hub-user-bubble code {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: inherit;
+}
+/* @ 徽章/链接在暖气泡里必须改用 inherit：默认的 accent 前景是给纸底配的，
+   放到米白底上会发灰（用户消息仍是可点的 @ 徽章）。 */
+.hub-user-bubble .hub-mention {
+  --mention-text: inherit;
+  border-color: color-mix(in srgb, currentColor 26%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+}
+.hub-user-bubble .hub-mention-name { color: inherit; }
+.hub-user-bubble a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.hub-user-bubble .md code { color: inherit; }
+.hub-user-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  color: var(--hub-user-meta);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.hub-user-failed { color: var(--crimson); }
+.hub-owner-only { color: var(--text-2); }
+.hub-msg.pending { opacity: 0.7; }
+.hub-msg.failed .hub-user-bubble { border-color: var(--crimson); }
+
+/* 系统行：居中细线（不再用胶囊底）。 */
+.hub-system-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.hub-system-note::before,
+.hub-system-note::after {
+  content: '';
+  flex: 1;
+  min-width: 12px;
+  height: 1px;
+  background: var(--border);
+}
+.hub-system-kind {
+  flex: none;
+  color: var(--text-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hub-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+/* —— 输入区：19px 圆角 pill + focus-within 边 + 圆形发送 + meta 行 —— */
+.hub-composer-wrap {
+  flex: 0 0 auto;
+  padding: 10px 28px 16px;
+  background: var(--paper);
+}
+.hub-composer {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  width: 100%;
+  max-width: var(--hub-conv-max);
+  margin: 0 auto;
+  padding: 8px 8px 8px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 19px;
+  background: var(--surface);
+  box-shadow: 0 10px 26px color-mix(in srgb, #000 8%, transparent),
+    inset 0 1px 0 color-mix(in srgb, #fff 4%, transparent);
+}
+.hub-composer:focus-within { border-color: var(--accent-border); }
+.hub-composer textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  max-height: 140px;
+  padding: 5px 2px;
+  border: 0;
+  outline: none;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.55;
+  resize: none;
+}
+.hub-composer textarea::placeholder { color: var(--text-3); }
+.hub-composer-tool {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+/* 视觉 28px、命中区 44px：与发送键/头像同一口径（窄屏不缩水）。 */
+.hub-composer-tool::after { content: ''; position: absolute; inset: -8px; border-radius: 50%; }
+.hub-composer-tool:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.hub-composer-tool:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-send {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--paper);
+  cursor: pointer;
+}
+.hub-send::after { content: ''; position: absolute; inset: -5px; border-radius: 50%; }
+.hub-send:hover:not(:disabled) { background: var(--accent-solid); color: #fff; }
+.hub-send:disabled { opacity: 0.36; cursor: default; }
+.hub-send:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; }
+.hub-composer-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: var(--hub-conv-max);
+  min-height: 18px;
+  margin: 7px auto 0;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.hub-composer-hint {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-composer-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.hub-composer-keys kbd {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+.hub-composer-sep { opacity: 0.5; }
+
+/* —— 资料页 / 编辑弹层（§8.5）—— */
+.hub-rail-actions { display: inline-flex; align-items: center; gap: 4px; }
+.hub-modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.hub-modal {
+  /* 资料页宽度：1280 下不再撑到 880（表单内容只有 ~700px，两侧全是留白，
+     在 a11y 树里整块 role=dialog 的 scrim 还会被读成「整页」）。720 足够放
+     208px 预览卡 + 512px 表单；640 宽窗仍走 92vw 收窄。 */
+  width: min(720px, 92vw);
+  height: min(620px, 88vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--paper-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+.hub-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.hub-modal-title { font-size: 13px; font-weight: 600; }
+.hub-modal-body { flex: 1; display: grid; grid-template-columns: 208px minmax(0, 1fr); min-height: 0; }
+.hub-preview-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 18px 16px;
+  border-right: 1px solid var(--border);
+  min-width: 0;
+}
+.hub-preview-card strong { font-size: 14px; margin-top: 6px; }
+/* 删除是破坏性操作：不再挂在预览卡顶部紧挨内容（HUB-EDITOR-01 误触），
+   改放 footer 左侧次要位（margin-right:auto 把它顶到「取消 / 保存」的对侧）。 */
+.hub-danger {
+  margin-right: auto;
+  align-self: center;
+  border: 1px solid color-mix(in srgb, var(--crimson) 45%, transparent);
+  background: none;
+  color: var(--crimson);
+  border-radius: 8px;
+  padding: 5px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hub-tab-area { display: flex; flex-direction: column; min-height: 0; }
+.hub-tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--border); }
+.hub-tabs button {
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: 12.5px;
+  padding: 6px 10px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.hub-tabs button.on { color: var(--ink); border-bottom-color: var(--accent-solid); }
+.hub-tab-body { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
+.hub-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.hub-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); min-width: 0; }
+.hub-form label.wide { grid-column: 1 / -1; }
+.hub-form label.inline { flex-direction: row; align-items: center; gap: 6px; grid-column: 1 / -1; }
+.hub-form input[type='text'],
+.hub-form input:not([type]),
+.hub-form input[type='color'],
+.hub-form input[type='number'],
+.hub-form select,
+.hub-form textarea,
+.hub-memory-editor textarea {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+.hub-form input[type='color'] { padding: 2px; height: 30px; }
+.hub-form textarea { resize: vertical; line-height: 1.5; }
+.hub-form .hub-avatar-note {
+  grid-column: 1 / -1;
+  margin: -2px 0 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+/* 高级设置折叠区：默认收起，第一屏只留身份 + 模型。只用现有令牌，ink/paper/system 通吃。 */
+.hub-advanced {
+  grid-column: 1 / -1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.hub-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--text-2);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.hub-advanced > summary::-webkit-details-marker { display: none; }
+.hub-advanced > summary::before {
+  content: '›';
+  color: var(--text-3);
+  font-size: 14px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+.hub-advanced[open] > summary::before { transform: rotate(90deg); }
+.hub-advanced[open] > summary { border-bottom: 1px solid var(--border); }
+.hub-advanced > summary:focus-visible { outline: 1px solid var(--accent-solid); outline-offset: -1px; }
+.hub-advanced-body { padding: 10px; }
+/* 空 Provider / 空模型 / 未知当前值的解释文字（不要把提示塞进 placeholder）。 */
+.hub-form .hub-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.hub-form > .hub-hint { grid-column: 1 / -1; }
+.hub-row-actions { display: flex; align-items: center; gap: 8px; }
+.hub-primary {
+  border: 1px solid var(--accent-border);
+  background: var(--accent-solid);
+  color: #fff;
+  border-radius: 8px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.hub-primary:disabled { opacity: 0.5; cursor: default; }
+.hub-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+.hub-memory { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 12px; min-height: 0; }
+.hub-memory-list { display: flex; flex-direction: column; gap: 2px; overflow: auto; }
+.hub-memory-item {
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  text-align: left;
+  font-size: 12.5px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-memory-item.on { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
+.hub-memory-editor { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.hub-memory-editor textarea { flex: 1; min-height: 220px; }
+.hub-versions { display: flex; flex-direction: column; gap: 10px; }
+.hub-version-list { display: flex; flex-direction: column; gap: 4px; }
+.hub-version-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+.hub-version-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.hub-layers { display: flex; flex-direction: column; gap: 4px; }
+.hub-layers details { border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; }
+.hub-layers summary { cursor: pointer; font-size: 12.5px; }
+.hub-layers pre {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+
+/* —— P2-06：任务板 / Needs you / 会话信息 / Run 视图 —— */
+.hub-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; margin-left: 4px; padding: 0 4px;
+  border-radius: 8px; background: color-mix(in srgb, var(--ink) 12%, transparent);
+  font-size: 10px; line-height: 1;
+}
+.hub-badge.alert { background: #c2703a; color: #fff; }
+.hub-list.run { padding: 22px 28px 10px; }
+/* 工具行 = 更紧凑的 event-card（23px 图标块 / 12px 圆角），与任务卡同一条左轴。 */
+.hub-run {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: var(--hub-conv-max);
+  margin: 0 auto;
+}
+.hub-run-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--hub-tool-bg);
+  font-size: 11.5px;
+}
+.hub-run-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  border-radius: 7px;
+  background: var(--hub-event-icon-bg);
+  color: var(--hub-event-icon-ink);
+}
+.hub-run-copy { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.hub-run-kicker {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+.hub-run-line { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; min-width: 0; }
+.hub-run-row .hub-run-name { color: var(--ink); font-family: var(--font-mono); font-size: 11.5px; }
+.hub-run-detail { min-width: 0; color: var(--text-2); font-size: 10.5px; overflow-wrap: anywhere; }
+.hub-run-status {
+  flex: none;
+  align-self: center;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.hub-run-row.error .hub-run-status { color: var(--crimson); border-color: color-mix(in srgb, var(--crimson) 40%, var(--border)); }
+.hub-run-row.running .hub-run-status { color: var(--ochre); border-color: color-mix(in srgb, var(--ochre) 40%, var(--border)); }
+
+.hub-inspector {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  height: 100%;
+  display: flex; flex-direction: column; min-height: 0;
+  border-left: 0; background: var(--paper-2);
+}
+.hub-detail-rail { background: var(--bg); }
+.hub-inspector-head {
+  display: flex; align-items: center; gap: 4px;
+  min-width: 0; flex: 0 0 auto;
+  padding: 7px 8px; border-bottom: 1px solid var(--border);
+}
+.hub-inspector-tabs {
+  display: flex; align-items: center; gap: 1px;
+  flex: 1 1 auto; min-width: 0;
+  overflow-x: auto; scrollbar-width: none;
+}
+.hub-inspector-tabs::-webkit-scrollbar { display: none; }
+.hub-inspector-tabs button[role='tab'] {
+  border: 0; background: transparent; color: var(--text-2); font-size: 11.5px;
+  padding: 4px 7px; border-radius: 6px; cursor: pointer; flex: none;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.hub-inspector-tabs button[role='tab']:hover { color: var(--ink); }
+.hub-inspector-tabs button[role='tab'].on { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
+.hub-inspector-close {
+  margin-left: 4px; flex: 0 0 auto; display: grid; place-items: center;
+  width: 24px; height: 24px; padding: 0; border-radius: 6px;
+}
+.hub-inspector-close:hover { background: var(--surface); }
+
+/* 概览（右栏默认页签）：不是空白，也不是重表单 —— 只读事实 + 编辑入口。 */
+.hub-overview {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 14px 22px;
+}
+.hub-ov-hero { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.hub-ov-id { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.hub-ov-id strong { font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-ov-id span { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-ov-status {
+  flex: none; display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px;
+  color: var(--text-3); font-size: 10px;
+}
+.hub-ov-status::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: .7; }
+.hub-ov-status.on { color: var(--bamboo); border-color: color-mix(in srgb, var(--bamboo) 35%, transparent); }
+.hub-ov-model { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); overflow-wrap: anywhere; }
+.hub-ov-desc { margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-2); white-space: pre-wrap; }
+.hub-ov-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.hub-ov-actions .hub-btn { display: inline-flex; align-items: center; gap: 4px; }
+.hub-ov-actions .hub-btn.primary { background: color-mix(in srgb, var(--ink) 88%, transparent); color: var(--paper); border-color: transparent; }
+.hub-overview .hub-session-info { padding: 0; margin: 2px 0 0; }
+.hub-ov-label { font-size: 10.5px; color: var(--text-3); letter-spacing: .04em; text-transform: uppercase; }
+.hub-ov-members { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
+.hub-ov-member { display: flex; align-items: center; gap: 7px; font-size: 12px; min-width: 0; }
+.hub-ov-member-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-ov-tasks { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--border); padding-top: 8px; }
+.hub-ov-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-ov-task:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.hub-ov-task .hub-chip { flex: none; }
+.hub-ov-task-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+.hub-ov-note { padding: 0; margin: 2px 0 0; font-size: 10.5px; }
+.hub-ov-foot { border-top: 1px solid var(--border); padding-top: 10px; margin-top: auto; }
+.hub-ov-foot .hub-btn { width: 100%; justify-content: center; padding: 5px 9px; }
+
+.hub-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.hub-panel-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+.hub-panel-head select {
+  margin-left: auto; font-size: 11.5px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--paper); color: var(--ink); padding: 2px 4px;
+}
+.hub-pad { padding: 10px 12px; }
+.hub-panel-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 8px 16px; }
+.hub-task, .hub-need {
+  border: 1px solid var(--border); border-radius: 8px; margin: 6px 2px;
+  background: var(--paper); overflow: hidden;
+}
+.hub-task-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  border: 0; background: transparent; color: var(--ink); padding: 8px 10px; cursor: pointer;
+  font-size: 12.5px;
+}
+.hub-task-head strong { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-task-meta { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 10px 8px; font-size: 11px; }
+.hub-task-detail { border-top: 1px solid var(--border); padding: 8px 10px; }
+.hub-task-summary-text { white-space: pre-wrap; font-size: 12px; margin: 0 0 6px; }
+.hub-error-text { color: #b23a2e; font-size: 12px; }
+.hub-chip {
+  display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 6px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent); font-size: 10.5px;
+  color: var(--text-2); white-space: nowrap;
+}
+.hub-chip.task-failed, .hub-chip.task-interrupted { color: #b23a2e; background: color-mix(in srgb, #b23a2e 10%, transparent); }
+.hub-chip.task-completed, .hub-chip.task-delivered { color: #2f7a4f; background: color-mix(in srgb, #2f7a4f 10%, transparent); }
+.hub-chip.task-running, .hub-chip.task-dispatched { color: #b8772a; background: color-mix(in srgb, #b8772a 10%, transparent); }
+.hub-need-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px 4px; font-size: 12.5px; }
+.hub-need-body {
+  margin: 4px 10px; padding: 6px 8px; max-height: 180px; overflow: auto;
+  background: color-mix(in srgb, var(--ink) 4%, transparent); border-radius: 6px;
+  font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+.hub-need-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; }
+.hub-need-questions { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.hub-need-questions label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; }
+.hub-need-questions input {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--paper);
+  color: var(--ink); font-size: 12px; padding: 4px 6px;
+}
+.hub-btn {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--paper);
+  color: var(--ink); font-size: 11.5px; padding: 3px 9px; cursor: pointer;
+}
+.hub-btn.primary { background: color-mix(in srgb, var(--ink) 88%, transparent); color: var(--paper); border-color: transparent; }
+.hub-btn:disabled { opacity: 0.5; cursor: default; }
+.hub-session-info { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 6px 10px; padding: 12px; font-size: 12px; margin: 0; }
+.hub-session-info dt { color: var(--text-2); }
+.hub-session-info dd { margin: 0; overflow-wrap: anywhere; }
+.hub-action {
+  display: flex; align-items: center; gap: 8px; margin: 4px 0; padding: 3px 8px;
+  border-left: 2px solid color-mix(in srgb, var(--ink) 25%, transparent);
+  color: var(--text-2); font-size: 11.5px;
+}
+.hub-action-kind { color: var(--ink); font-weight: 550; }
+@media (max-width: 900px) {
+  .hub-detail { position: static; width: 100%; box-shadow: none; }
+}
+
+/* —— P3a-08：群组视图（群头/成员叠图/回执/审批占位） —— */
+.hub-rail-tabs {
+  display: flex; gap: 2px; padding: 6px 8px 4px; border-bottom: 1px solid var(--border);
+}
+.hub-rail-tabs button {
+  flex: 1; border: 0; background: transparent; color: var(--text-2);
+  font-size: 12px; padding: 4px 6px; border-radius: 6px; cursor: pointer;
+}
+.hub-rail-tabs button.on { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
+.hub-chip.group-mode-auto { color: #2f7a4f; }
+.hub-chip.group-mode-ask { color: #b8772a; }
+.hub-chip.group-mode-readonly { color: var(--text-2); }
+
+/* P4-UI-4：同轮只收紧间距；每条消息仍独立，不画外框/表头。 */
+.hub-round-stack { display: flex; flex-direction: column; gap: 7px; }
+.hub-digest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px; margin-bottom: 6px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.hub-chip.danger { color: var(--danger, #c0392b); border-color: currentColor; }
+.hub-chip.owner-only { margin-left: 6px; font-size: 10px; }
+
+/* 群日预算：与 mode chip 同形，但可点击编辑（P2.5-04）。 */
+button.hub-budget-chip { border: 1px solid transparent; cursor: pointer; font: inherit; }
+button.hub-budget-chip:hover { border-color: currentColor; }
+
+/* P2.5-05：Hub 告警中心（恢复失败/预算/推送失败等）。 */
+.hub-alert-stack { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); max-height: 42vh; overflow-y: auto; }
+.hub-alert-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); min-width: 0; }
+.hub-alert-dot { width: 6px; height: 6px; border-radius: 50%; background: #b8772a; flex: 0 0 auto; }
+.hub-alert-row.error .hub-alert-dot { background: #b23a2e; }
+.hub-alert-row.info .hub-alert-dot { background: #2f7a4f; }
+.hub-alert-dot.error { background: #b23a2e; }
+.hub-alert-dot.info { background: #2f7a4f; }
+.hub-alert-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* P2.5-05：全局告警入口（Hub 页关闭时仍可见，点击进入告警中心）。 */
+.hub-global-alert {
+  position: fixed;
+  top: 12px;
+  right: 16px;
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 7px 11px;
+  border: 1px solid var(--line, #d8d2c6);
+  border-radius: 999px;
+  background: var(--paper, #fffdf8);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+}
+.hub-global-alert-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.78;
+}
+.hub-task-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+/* P3a-09 群内流式草稿：与最终消息同一版式（作者头 + 无气泡正文），只多光标。 */
+.hub-stream-text { white-space: pre-wrap; word-break: break-word; }
+.hub-stream-caret {
+  display: inline-block;
+  width: 6px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent-solid);
+  animation: hub-caret 1s steps(1) infinite;
+}
+@keyframes hub-caret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .hub-stream-caret { animation: none; }
+}
+
+/* —— P3b-07：@ 徽章 / 选择器 / 自动对话状态条 / 任务卡 / 输入中 ——
+ *
+ * 颜色一律走既有令牌（--ink/--surface/--paper-2/--accent-solid/--success/--warning/
+ * --danger）；agent 的 accent 只上圆点与名字，不整块染色（群里才不会五颜六色）。
+ * 三套主题（深/浅/paper）+ 高对比都继承同一套变量，无需按主题分支。
+ */
+
+.hub-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 左栏群行：相对时间贴右上，预览单行省略（§8.2）。 */
+.hub-row-time {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* —— @ 徽章（§7.5.2）—— */
+.hub-mention {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
+  border: 1px solid color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 38%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 13%, transparent);
+  /* 文本用职责色与 --ink 的混合色（B8，paper ≥4.5:1）；profile.accent 不参与这里。 */
+  --mention-text: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 30%, var(--ink));
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.94em;
+  line-height: 1.5;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+button.hub-mention { cursor: pointer; }
+button.hub-mention:hover { background: color-mix(in srgb, var(--mention-accent, var(--accent-solid)) 22%, transparent); }
+button.hub-mention:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-mention .sigil { margin-block: -3px; }
+.hub-mention-name { color: var(--mention-text); font-weight: 550; }
+.hub-mention-gone { color: var(--text-3); font-size: 0.86em; }
+.hub-mention.gone { opacity: 0.55; filter: grayscale(1); }
+.hub-mention.unknown { border-style: dashed; color: var(--text-2); cursor: default; }
+
+/* —— @ 选择器（§8.3.3）：贴 composer 上沿，z-index 高于输入区 —— */
+.hub-mention-picker {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  background: var(--paper-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+.hub-mention-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.hub-mention-picker-hint { color: var(--text-3); font-size: 10.5px; }
+.hub-mention-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 280px;
+  overflow: auto;
+}
+.hub-mention-list:focus { outline: none; }
+.hub-mention-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.hub-mention-option.on { background: color-mix(in srgb, var(--accent-solid) 12%, transparent); }
+.hub-mention-option:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.hub-mention-option-name { font-weight: 550; }
+.hub-mention-option-role { color: var(--text-3); font-size: 11px; }
+.hub-mention-option .hub-chip { margin-left: auto; }
+.hub-mention-empty { padding: 10px 12px; font-size: 12px; color: var(--text-3); }
+
+/* 派任务说明：紧跟 composer meta 行，宽度与 pill 对齐。 */
+.hub-assign-note {
+  width: 100%;
+  max-width: var(--hub-conv-max);
+  margin: 0 auto;
+  padding: 6px 2px 0;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+/* —— 派任务表单（§7.1.3 / §8.3.3）—— */
+.hub-assign-form {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: start;
+}
+.hub-assign-members {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.hub-assign-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hub-assign-member.on {
+  border-color: var(--accent-border);
+  background: var(--accent-weak);
+}
+.hub-assign-member:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-assign-member .hub-muted { font-size: 10.5px; }
+.hub-assign-title {
+  grid-column: 1 / -1;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 9px;
+  outline: none;
+}
+.hub-assign-title:focus { border-color: var(--accent-border); }
+.hub-assign-form textarea {
+  grid-column: 1 / 2;
+  width: 100%;
+  height: auto;
+  min-height: 34px;
+  max-height: 140px;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  /* 用 inset shadow 画 1px 边框：不占布局高度，auto-grow 的 3 行正好 78px。 */
+  box-shadow: inset 0 0 0 1px var(--border);
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 22px;
+  resize: none;
+  overflow-y: auto;
+}
+.hub-assign-form textarea::placeholder { color: var(--text-3); }
+.hub-assign-form textarea:focus { outline: none; box-shadow: inset 0 0 0 1px var(--accent-border); }
+.hub-assign-send { grid-column: 2 / 3; align-self: end; }
+
+/* —— 自动对话状态条（§7.5.4）—— */
+.hub-conv-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 6px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--paper-2);
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+.hub-conv-status { display: inline-flex; align-items: center; gap: 5px; font-weight: 550; color: var(--ink); }
+.hub-conv-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); flex: none; }
+.hub-conv-bar.running .hub-conv-dot { background: var(--accent-solid); animation: hub-conv-pulse 1.6s ease-in-out infinite; }
+.hub-conv-bar.exhausted { background: color-mix(in srgb, var(--warning) 10%, var(--paper-2)); }
+.hub-conv-bar.stopped { opacity: 0.82; }
+.hub-conv-turns { font-variant-numeric: tabular-nums; }
+.hub-conv-pair { color: var(--text-3); }
+.hub-conv-terminal { color: var(--text-2); }
+.hub-conv-bar.exhausted .hub-conv-terminal { color: var(--warning); }
+.hub-conv-stop { margin-left: auto; }
+.hub-conv-stop:disabled { opacity: 0.45; cursor: default; text-decoration: none; }
+@keyframes hub-conv-pulse { 50% { opacity: 0.3; } }
+
+/* —— 事件卡（任务 / 交接 / 审批 / 产物）：demo 的 event-card 解剖 ——
+ *
+ * 29px 图标块 + mono kicker + 12px 标题 + meta + 右侧状态；
+ * 正文与操作缩进 38px（= 图标 29 + gap 9），与标题列对齐。
+ * 只重排现有数据：不加 demo 里的「预览 / 打开私有审批」这类没有 handler 的假按钮。 */
+.hub-msg.task { display: flex; padding-left: 42px; }
+.hub-msg.task > .hub-event { flex: 1; }
+.hub-event {
+  display: flex;
+  gap: 9px;
+  width: 100%;
+  max-width: 560px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--hub-event-bg);
+  color: var(--ink);
+}
+.hub-event-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 29px;
+  height: 29px;
+  margin-top: 1px;
+  border-radius: 9px;
+  background: var(--hub-event-icon-bg);
+  color: var(--hub-event-icon-ink);
+}
+.hub-event.tone-success .hub-event-icon,
+.hub-event--task.tone-success .hub-event-icon { color: var(--success); }
+.hub-event.tone-error .hub-event-icon,
+.hub-event--task.tone-error .hub-event-icon { color: var(--danger); }
+.hub-event.tone-warn .hub-event-icon,
+.hub-event--task.tone-warn .hub-event-icon { color: var(--warning); }
+.hub-event.tone-info .hub-event-icon,
+.hub-event--task.tone-info .hub-event-icon { color: var(--accent-solid); }
+/* 交接：accent 图标 + 轻微 accent 边框，和任务卡的中性灰区分开。 */
+.hub-event--handoff {
+  border-color: color-mix(in srgb, var(--accent-solid) 24%, var(--border));
+}
+.hub-event--handoff .hub-event-icon {
+  color: var(--accent-solid);
+  background: color-mix(in srgb, var(--accent-solid) 12%, transparent);
+}
+.hub-event--handoff .hub-event-kicker { color: color-mix(in srgb, var(--accent-solid) 62%, var(--text-3)); }
+/* 审批：warn 图标 + 暖边框 + warn 标题；正文仍走 --text-2 保证可读。 */
+.hub-event--approval {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+  background: color-mix(in srgb, var(--warning) 6%, var(--hub-event-bg));
+}
+.hub-event--approval .hub-event-icon {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+}
+.hub-event--approval .hub-event-kicker { color: color-mix(in srgb, var(--warning) 72%, var(--ink)); }
+.hub-event--approval .hub-event-title { color: color-mix(in srgb, var(--warning) 55%, var(--ink)); }
+.hub-event-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.hub-event-top { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.hub-event-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.hub-event-kicker {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+.hub-event-title {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.hub-event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.hub-event-who { color: var(--text-2); }
+.hub-event-status {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--text-2);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.hub-event-status.success { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.hub-event-status.error { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.hub-event-status.warn,
+.hub-event-status.pending_ack { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+.hub-event-status.info { color: var(--accent-solid); background: var(--accent-weak); }
+.hub-event-status.muted { color: var(--text-2); }
+.hub-event-status.accepted { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.hub-event-status.declined { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.hub-event-body {
+  margin: 8px 0 0 38px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hub-event-error {
+  margin: 8px 0 0 38px;
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hub-event-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 9px 0 0 38px;
+}
+.hub-event-id {
+  min-width: 0;
+  max-width: 200px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-event-action {
+  margin-left: auto;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.hub-event-action:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.hub-event-action:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-task-open { margin-left: auto; }
+
+/* 产物区：event-card 里的次级行（26px 文件块 + 名称 + 路径 + 计量）。 */
+.hub-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 9px 0 0 38px;
+  container-type: inline-size;
+}
+.hub-artifacts-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.hub-artifacts-title { color: var(--text-3); font-size: 10px; }
+.hub-artifacts-title b { color: var(--text-2); font-weight: 600; }
+.hub-artifacts-list { list-style: none; display: flex; flex-direction: column; gap: 5px; margin: 0; padding: 0; }
+.hub-artifact {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper) 55%, transparent);
+}
+.hub-artifact-badge {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--accent-weak);
+  color: var(--accent-solid);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.hub-artifact-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.hub-artifact-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-artifact-path {
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-artifact-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.hub-artifact-kind {
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 1.6;
+}
+.hub-artifact-kind.created {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+}
+.hub-artifact-kind.modified {
+  color: color-mix(in srgb, var(--accent-solid) 72%, var(--ink));
+  background: transparent;
+}
+@container (max-width: 380px) {
+  .hub-artifact { grid-template-columns: 26px minmax(0, 1fr); }
+  .hub-artifact-meta { grid-column: 2; flex-wrap: wrap; gap: 4px 7px; }
+}
+
+/* 交接/审批卡可能被 RoundGroup 包进 .hub-round-stack（不是 .hub-thread 的直接子节点），
+   所以左轴放在卡片自己身上：与 agent 正文同一条（32 + 10 = 42）。
+   用 width: calc(100% - 42px) 而不是只加 margin —— 否则窄列时 100% + 42 会顶出滚动区。
+   任务卡已经在 .hub-msg.task 里缩进，内部不再叠加。
+   注意：必须写在 .hub-event 基样式之后（媒体查询不提升优先级）。 */
+@media (min-width: 901px) {
+  .hub-event { margin-left: 42px; width: calc(100% - 42px); }
+  .hub-msg.task .hub-event { margin-left: 0; width: 100%; }
+}
+
+/* 旧任务详情面板仍在用（HubInspector），保留这一条不动。 */
+.hub-task-summary { margin: 0; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* —— 正在输入（§7.5.3）—— */
+.hub-typing.idle { padding: 0; margin: 0 auto; }
+.hub-typing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: var(--hub-conv-max);
+  margin: 0 auto;
+  padding: 0 2px 6px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.hub-typing-dots { display: inline-flex; align-items: flex-end; gap: 3px; height: 10px; }
+.hub-typing-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: hub-typing-dot 1.2s ease-in-out infinite;
+}
+.hub-typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+.hub-typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes hub-typing-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+
+/* —— 触发上下文（TurnContextLine）—— */
+.hub-context-line {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  max-width: 520px;
+  align-self: center;
+  margin: 2px auto -2px;
+  text-align: center;
+  font-size: 10.5px;
+  /* 小字标签也要过 4.5:1：--text-3 单独在 paper 只有 3.3，压向 --ink。 */
+  color: color-mix(in srgb, var(--text-3) 55%, var(--ink));
+}
+.hub-context-label { color: inherit; }
+.hub-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  /* 同 B8：chip 文字压暗到与 --ink 混合；这里的颜色是职责色，profile.accent 不参与。 */
+  color: color-mix(in srgb, var(--context-accent, var(--text-2)) 30%, var(--ink));
+  font: inherit;
+  font-size: 10.5px;
+}
+button.hub-context-chip { cursor: pointer; }
+button.hub-context-chip:hover { text-decoration: underline; }
+button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.hub-context-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--context-accent, var(--text-3)); flex: none; }
+
+/* —— B6 跳转落点（P3b-08）：上下文 chip 只滚动不给反馈等于没跳 ——
+   accent 压向 --ink 再取边框：ink 主题下提亮、paper 主题下压暗，两种底色上都看得见；
+   底色只做一层淡染，不改正文对比度。动画只淡入 220ms，reduced-motion 直接跳过
+   （高亮靠静态底色 + 边框传达，不依赖动画）。 */
+.hub-msg-highlight {
+  border-radius: 12px;
+  background-color: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, var(--ink));
+  outline-offset: 2px;
+  animation: hub-msg-highlight-in 220ms var(--ease);
+}
+/* 系统行/路由回执是窄条：圆角按行高收一点，别把整行画成气泡。 */
+.hub-msg.system.hub-msg-highlight,
+.hub-action.hub-msg-highlight,
+.hub-system-note.hub-msg-highlight { border-radius: 8px; }
+@keyframes hub-msg-highlight-in {
+  from { background-color: transparent; outline-color: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-typing-dots i,
+  .hub-conv-bar.running .hub-conv-dot,
+  .hub-msg-highlight { animation: none; }
+}
+
+/* —— Context 只读面板（P4-02）：深链 + 消息触发上下文 + 提示词分层 —— */
+.hub-context-panel { overflow: hidden; }
+.hub-deeplink {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  font-size: 11.5px;
+}
+.hub-deeplink > .hub-muted { flex: 0 0 auto; white-space: nowrap; }
+/* 深链独占一行：面板只有 330px，单行截断会让用户看不到 ?seq=（复制出来才是完整的）。
+   复制按钮贴在 URL 行尾（HUB-DL-01）：之前 margin-left:auto 把它顶到右上角，
+   离 URL 隔了一整行，看起来像页头按钮而不是这条链接的操作。 */
+.hub-deeplink-row { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hub-deeplink .hub-btn { flex: none; margin-left: 0; }
+.hub-deeplink-url {
+  flex: 1 1 auto; min-width: 0;
+  overflow-wrap: anywhere; white-space: normal;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px; color: var(--text-2);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  border-radius: 6px; padding: 3px 6px;
+}
+.hub-context-panel > .hub-context-section { flex: 0 0 auto; border-bottom: 1px solid var(--border); }
+.hub-context-panel > .hub-context-section:last-of-type { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.hub-section-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px 4px; font-size: 12.5px;
+}
+.hub-section-head select {
+  margin-left: auto; max-width: 55%; font-size: 11.5px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--paper); color: var(--ink); padding: 2px 4px;
+}
+.hub-context-picker {
+  display: flex; align-items: center; gap: 8px; padding: 4px 12px 8px; font-size: 11.5px;
+}
+/* 「消息」label 不参与收缩：inspector 360 时 select 的固有宽度会把 label 压成
+   14×36 的竖排（HUB-CTX-01）。label 定宽不换行，剩余宽度全给 select。 */
+.hub-context-picker label { flex: 0 0 auto; white-space: nowrap; }
+.hub-context-picker select {
+  flex: 1 1 auto; min-width: 0; font-size: 11.5px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--paper); color: var(--ink); padding: 3px 6px;
+}
+.hub-context-meta {
+  display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 4px 10px;
+  margin: 0; padding: 0 12px 8px; font-size: 11.5px;
+}
+.hub-context-meta dt { color: var(--text-3); }
+.hub-context-meta dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.hub-context-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 0 12px 8px; font-size: 11.5px;
+}
+.hub-context-key { color: var(--text-3); }
+.hub-context-seq { padding: 1px 7px; font-size: 11px; }
+.hub-context-seq.missing { border-style: dashed; color: var(--text-3); }
+.hub-prompt-layers { display: flex; flex-direction: column; gap: 6px; padding: 0 12px 8px; }
+.hub-prompt-layer {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--paper); overflow: hidden;
+}
+.hub-prompt-layer > summary {
+  display: flex; align-items: center; gap: 8px; padding: 6px 9px; cursor: pointer;
+  font-size: 12px; list-style: none;
+}
+.hub-prompt-layer > summary::-webkit-details-marker { display: none; }
+.hub-prompt-layer > summary:focus-visible { outline: 2px solid var(--accent-border); outline-offset: -2px; }
+.hub-prompt-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-prompt-text {
+  margin: 0; padding: 8px 9px 10px; max-height: 260px; overflow: auto;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  color: var(--text-2); background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.hub-chip.layer-l1 { color: #2f6f9a; background: color-mix(in srgb, #2f6f9a 12%, transparent); }
+.hub-chip.layer-l2 { color: #2f7a4f; background: color-mix(in srgb, #2f7a4f 12%, transparent); }
+.hub-chip.layer-l3 { color: #8a6a1f; background: color-mix(in srgb, #8a6a1f 14%, transparent); }
+.hub-chip.layer-l4 { color: #7a4a8a; background: color-mix(in srgb, #7a4a8a 12%, transparent); }
+.hub-prompt-note { font-size: 11px; line-height: 1.5; margin: 0; }
+
+/* —— 全历史搜索（P4-04b-1）——
+ * 结果面板占据 rail 的列表区（不叠在消息流上）：搜索是「换一种浏览方式」，
+ * 不是浮层；点命中后收起面板 → 时间线跳转+高亮。
+ * 颜色全部走主题令牌，深/浅/跟随三套都成立。 */
+.hub-search {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.hub-search-box {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--paper-3);
+}
+.hub-search-box:focus-within { border-color: var(--accent-border); }
+.hub-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 0;
+  outline: none;
+}
+.hub-search-input::placeholder { color: var(--text-3); }
+.hub-search-clear { font-size: 14px; line-height: 1; }
+.hub-search-scopes { display: flex; gap: 4px; }
+.hub-search-scopes button {
+  flex: 1;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11.5px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.hub-search-scopes button:hover { color: var(--ink); }
+.hub-search-scopes button.on {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
+  color: var(--ink);
+}
+.hub-search-results {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hub-search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-search-hit:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.hub-search-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.hub-search-hit.owner-only { border-color: color-mix(in srgb, #b8772a 35%, transparent); }
+.hub-search-hit-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hub-search-hit-name {
+  font-size: 12.5px; font-weight: 550; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hub-search-hit-time { margin-left: auto; font-size: 10.5px; color: var(--text-3); flex: none; }
+.hub-search-hit-snippet {
+  font-size: 11.5px; color: var(--text-2); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  word-break: break-word;
+}
+.hub-search-hit-meta { font-size: 10.5px; color: var(--text-3); }
+.hub-chip.scope-group { color: #2f6f9a; background: color-mix(in srgb, #2f6f9a 12%, transparent); }
+.hub-chip.scope-dm { color: #2f7a4f; background: color-mix(in srgb, #2f7a4f 12%, transparent); }
+.hub-search-more {
+  margin: 4px 0 8px; padding: 6px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--paper-3); color: var(--text-2);
+  font-size: 11.5px; cursor: pointer;
+}
+.hub-search-more:disabled { opacity: 0.6; cursor: default; }
+
+/* 窄窗（≤1100）：Hub section 的头/页签必须保持单行 —— 隐藏计数与返回文案、
+   收紧间距；1440 布局不受影响，返回/新建按钮仍可用 aria-label/title 触达。 */
+/* —— 会话区响应式：900 / 640（390 与 640 同档，只靠换行）——
+ * 目标：0 横向溢出；消息留白 18/14 → 14/12；header actions 从右侧收成第二行。 */
+@media (max-width: 900px) {
+  .hub-conv-head { padding: 10px 14px; }
+  .hub-conv-actions { flex: 1 0 100%; justify-content: flex-start; margin-left: 0; }
+  .hub-list,
+  .hub-list.run { padding: 18px 14px 8px; }
+  /* 与消息列同口径：这里曾是 12px，比 .hub-list 的 14px 窄 2px（641-900 各错 2px）。 */
+  .hub-composer-wrap { padding: 7px 14px 10px; }
+  .hub-msg.task { padding-left: 0; }
+}
+@media (max-width: 640px) {
+  .hub-conv-head { padding: 9px 12px; gap: 8px; }
+  .hub-conv-id { gap: 9px; flex-basis: 100%; }
+  .hub-conv-line strong { font-size: 14px; }
+  .hub-conv-sub { font-size: 11px; }
+  .hub-conv-actions { gap: 4px; }
+  .hub-action-btn { padding: 5px 6px; font-size: 10.5px; }
+  .hub-seg button { padding: 5px 6px; font-size: 10.5px; }
+  .hub-pill { padding: 4px 8px; font-size: 10px; }
+  .hub-list,
+  .hub-list.run { padding: 14px 12px 6px; }
+  .hub-thread,
+  .hub-group-view .hub-thread-flat,
+  .hub-group-view .hub-thread-grouped { gap: 18px; }
+  .hub-msg.agent { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; }
+  .hub-msg-body { font-size: 13.5px; }
+  /* 窄屏表格不在单元格里逐字折行：保留可读列宽，横滑收在 .md-table-wrap 里
+     （文档级仍 0 横向溢出，横条只出现在表格自身）。demo 会话的正文容器是
+     .agent-text（不是 .hub-msg-body），两条都要覆盖，否则 390 下 `$49/席`
+     会被拆成两行（单元格 51px）。 */
+  .hub-msg-body .md-table-wrap > table,
+  .hub-demo .agent-text .md-table-wrap > table { min-width: 440px; }
+  .hub-msg.human .hub-msg-main { max-width: min(88%, calc(100% - 35px)); }
+  .hub-msg-time { margin-left: 0; }
+  .hub-user-bubble { padding: 9px 12px; font-size: 13.5px; }
+  .hub-composer-wrap { padding: 6px 12px 9px; }
+  .hub-composer { border-radius: 18px; padding: 7px 7px 7px 8px; }
+  .hub-composer-keys { display: none; }
+  .hub-composer-hint { flex-basis: 100%; white-space: normal; }
+  .hub-event { padding: 9px 10px; }
+  .hub-event-body,
+  .hub-event-error,
+  .hub-event-foot,
+  .hub-artifacts { margin-left: 0; }
+  .hub-msg.task { padding-left: 0; }
+  .hub-typing { padding-bottom: 4px; }
+}
+
+@media (max-width: 1100px) {
+  .hub-side-head { gap: 4px; padding: 4px 6px 2px 10px; }
+  .hub-side-title { gap: 4px; font-size: 10.5px; letter-spacing: 0.04em; }
+  .hub-side-back { gap: 0; padding: 2px; }
+  .hub-side-back-label { display: none; }
+  .hub-side-tabs { gap: 1px; padding: 0 6px 2px; }
+  .hub-side-tabs button {
+    gap: 3px;
+    padding: 3px 4px;
+    font-size: 11px;
+  }
+  .hub-side-count { display: none; }
+  .hub-side-scopes { gap: 2px; }
+}
+
+/* 最低窗高（980×620）预算：压缩固定的头/搜索/底栏，把空间还给两个列表。
+   620 下 Hub section 仍保留 2 行左右列表，工作区树至少「标题 + 1 会话」可见。 */
+@media (max-height: 700px) {
+  .hub-side-head { padding-top: 3px; padding-bottom: 1px; }
+  .hub-side-search { gap: 2px; padding-bottom: 2px; }
+  .hub-side-search-box { padding: 3px 7px; }
+  .hub-side-scopes button { padding: 0 6px; line-height: 15px; }
+  .hub-side-tabs button { padding-top: 3px; padding-bottom: 3px; }
+  .left.expanded .left-head { padding-top: 4px; padding-bottom: 2px; }
+  .left.expanded .new-session-btn { padding-top: 5px; padding-bottom: 5px; }
+  .left.expanded .add-ws-btn { padding-top: 4px; padding-bottom: 4px; }
+  .left-bottom { padding-top: 3px; padding-bottom: 5px; }
+  .left-bottom .nav-item { padding-top: 4px; padding-bottom: 4px; }
+}
+
+/* ============================================================
+   Demo 源码移植层（2026-11）
+   DOM/CSS 来自 hai-super-assistant/docs/demo/index.html；
+   这里只补「React 接线后必须的容器约束」与新数据的少量扩展，不改 demo 的间距/字体。
+   ============================================================ */
+
+.hub-demo.main,
+.hub-demo.main.hub-group-view {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--chat);
+  color: var(--text);
+  font: 13px/1.55 var(--sans);
+  overflow: hidden;
+}
+.hub-demo.main > .chat-header { flex: 0 0 auto; width: 100%; }
+.hub-demo.main > .messages { flex: 1 1 auto; width: 100%; }
+/* 全局 index.css 的 `.composer-wrap` 带 max-width:800 + width:100% + margin:0 auto，
+   它会一并命中 demo 会话区的 composer 外层：1440 下外层被收成 800、再被 28px 内边距
+   压成 744，而 .messages-inner 是 760 —— 消息列与输入框左右各差 8px（实测 436→1196
+   vs 444→1188）。demo 的行宽只由 .messages-inner / .composer-inner 的 760 决定，
+   外层只负责留白，所以在这里解除全局的 800 上限与自动居中。 */
+.hub-demo.main > .composer-wrap { flex: 0 0 auto; width: 100%; max-width: none; margin: 0; }
+/* 列对齐（占位滚动条）：`.messages` 是滚动容器，classic 条（Windows/Linux、常显
+   macOS、自定义 10px webkit 条）会从右侧吃掉 S px 内容盒，`.messages-inner` 的
+   margin:0 auto 整体左移 S/2；composer 外层没有滚动条，于是又差 S/2（10px 条约 5px、
+   15px 条约 7.5px）。composer 不能自己也变成滚动容器 —— 里面的 MentionPicker/灯箱/
+   附件面板是绝对定位，会被 overflow 裁掉 —— 所以只在右内边距补同一个 S。S 由
+   useScrollbarWidth 量 offsetWidth-clientWidth 后写进 --hub-scrollbar-w（overlay 0px）。 */
+.hub-demo.main > .composer-wrap { padding-right: calc(28px + var(--hub-scrollbar-w, 0px)); }
+.hub-demo .messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.hub-demo .messages-inner { width: 100%; max-width: 760px; margin: 0 auto; }
+/* 列对齐（窄窗）：demo 的消息区与 composer 左右内边距不是同一组值 —— ≤900 是 14 与 12，
+   于是 641-900 之间消息列左右各比 composer 窄 2px；≤640 消息区收成 12，composer 沿用
+   900 段的 12，那一档本来就是对上的。这里把两档钉成同一组值，消息区（demo.css）不动。
+   选择器与上一段保持同特异性（.hub-demo.main > .composer-wrap），否则 base 段的
+   padding-right 会压过断点值。 */
+@media (max-width: 900px) {
+  .hub-demo.main > .composer-wrap { padding: 7px 14px 10px; padding-right: calc(14px + var(--hub-scrollbar-w, 0px)); }
+}
+@media (max-width: 640px) {
+  .hub-demo.main > .composer-wrap { padding: 7px 12px 10px; padding-right: calc(12px + var(--hub-scrollbar-w, 0px)); }
+}
+.hub-demo .chat-title-wrap { min-width: 0; flex: 1; }
+.hub-demo .chat-title { display: flex; align-items: center; gap: 7px; }
+.hub-demo .chat-title .name { font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hub-demo .chat-sub { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; color: var(--muted); font-size: 11.5px; min-width: 0; }
+.hub-demo .chat-sub .sep { color: var(--muted-2); }
+.hub-demo .chat-sub .lock { display: inline-flex; align-items: center; gap: 3px; color: var(--muted-2); }
+.hub-demo .header-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; position: relative; }
+.hub-demo .header-actions .icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--muted); }
+.hub-demo .header-actions .icon-btn:hover,
+.hub-demo .header-actions .icon-btn.active { color: var(--text); background: var(--surface-2); }
+.hub-demo .header-actions .btn { height: 32px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12px; }
+.hub-demo .header-actions .btn:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.hub-demo .header-actions .btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+.hub-demo .header-menu {
+  position: absolute; right: 0; top: 38px; z-index: 60; min-width: 190px; padding: 6px;
+  border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface);
+  box-shadow: 0 18px 44px rgba(0,0,0,.34); display: flex; flex-direction: column; gap: 1px;
+}
+.hub-demo .header-menu button { height: 30px; padding: 0 9px; border-radius: 7px; text-align: left; color: var(--text); font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.hub-demo .header-menu button:hover { background: var(--surface-2); }
+.hub-demo .header-menu button[aria-checked="true"]::after { content: '✓'; color: var(--accent); }
+.hub-demo .header-menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
+
+.hub-demo .msg-row > .avatar,
+.hub-demo .msg-row > .avatar-btn { align-self: flex-start; flex: 0 0 auto; }
+.hub-demo .avatar-btn { padding: 0; border: 0; background: none; cursor: pointer; border-radius: 50%; }
+/* 只是把 <button> 的 UA 外观抹平：font-family / line-height 取自上下文即可。
+   不要 `font: inherit` —— 那会把 demo.css 的 .agent-name（12.5px/600）一并冲成继承值，
+   实测名字变成 13px/400。字号字重留给 .hub-demo .agent-name。 */
+.hub-demo .agent-name-btn { padding: 0; border: 0; background: none; color: inherit; cursor: pointer; font-family: inherit; line-height: inherit; }
+.hub-demo .agent-name-btn:hover { color: var(--accent); }
+.hub-demo .agent-tag { font-size: 9.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; line-height: 1.45; white-space: nowrap; }
+.hub-demo .agent-tag.reply { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 24%, var(--border)); }
+.hub-demo .agent-tag.observe { color: var(--muted-2); }
+.hub-demo .agent-tag.owner { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
+/* demo：名字与时间同处 .agent-head（gap 7），时间再自留 6px 呼吸位。 */
+.hub-demo .msg-time { margin-left: 6px; }
+/* demo.css 的 `.hub-demo button{font:inherit;color:inherit}`（0,1,1）压过了
+   hub.css 里的 `.hub-context-jump`（0,1,0），把「2 人触发」抬成正文 13px + 正文色。
+   这里用 (0,2,0) 的选择器压回 .hub-context-line 的口径：10.5px + 小字弱化色。 */
+.hub-demo .hub-context-jump {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--text-3) 55%, var(--ink));
+}
+.hub-demo .hub-context-jump:hover { color: var(--ink); }
+/* 消息 footer 里的入口（在 .msg-main 里紧贴正文）：只留 2px 上边距，不另开一行。 */
+.hub-demo .msg-main > .hub-context-jump { margin-top: 2px; }
+/* demo 的 .agent-text 是 pre-wrap（原文给纯文本/流式回显用）；套上 Markdown 后，
+   块级元素之间的 `\n` 文本节点也被画成空行，段落间距等于「margin + 一个空行」。
+   正文容器仍按 demo 的 1.7 行高与 8px 段距排版，只把空白处理交还给 normal，
+   让 p/表格/列表之间只剩 margin。pre/code 自己保留预排版。 */
+.hub-demo .agent-text .md { white-space: normal; }
+.hub-demo .agent-text .md pre,
+.hub-demo .agent-text .md pre > code,
+.hub-demo .agent-text .md :not(pre) > code { white-space: pre-wrap; }
+.hub-demo .agent-text .md p { margin: 0 0 8px; }
+.hub-demo .agent-text .md p:last-child { margin-bottom: 0; }
+/* demo 的正文块首尾不加外边距：h2 开头不吃 14px 上边距，列表收尾不留 8px 下边距
+   （段距本身仍是 p 的 8px，别动）。 */
+.hub-demo .agent-text .md > :first-child { margin-top: 0; }
+.hub-demo .agent-text .md > :last-child { margin-bottom: 0; }
+.hub-demo .agent-text .md ul,
+.hub-demo .agent-text .md ol { margin: 6px 0 8px; padding-left: 20px; }
+.hub-demo .agent-text .md pre { margin: 8px 0; }
+.hub-demo .agent-text .md table { margin: 8px 0; }
+/* demo 的 .user-meta 只有右对齐；真实数据会同时出现「仅你可看」+ 时间，
+   没有 gap 会拼成「仅你可看00:47」。保持右对齐，两个元信息之间留 6px。 */
+.hub-demo .user-meta { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.hub-demo .user-meta .user-owner-only { color: var(--warn); }
+.hub-demo .user-meta .user-failed { color: var(--danger); }
+/* 失败气泡的行内重试：与「发送失败」同一行（沿用首发 cid，不新开气泡，HUB-FAIL-01）。 */
+.hub-demo .user-meta .user-retry {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.hub-demo .user-meta .user-retry:hover { color: var(--ink); }
+.hub-demo .user-meta .user-retry:disabled { opacity: .5; cursor: default; }
+.hub-demo .user-bubble .md p { margin: 0; }
+.hub-demo .user-bubble .md p + p { margin-top: 6px; }
+.hub-demo .streaming .agent-text::after { content: ''; display: inline-block; width: 5px; height: 13px; margin-left: 3px; vertical-align: -1px; background: var(--accent); animation: demo-caret 1s steps(2) infinite; }
+@keyframes demo-caret { 50% { opacity: 0; } }
+
+.hub-demo .system-line { display: flex; align-items: center; justify-content: center; gap: 7px; margin: 18px 0; color: var(--muted-2); font-size: 11px; text-align: center; }
+.hub-demo .system-line::before,
+.hub-demo .system-line::after { content: ''; height: 1px; flex: 1; background: var(--border); opacity: .55; }
+.hub-demo .route-line { display: flex; align-items: center; justify-content: center; gap: 7px; margin: 16px 0 20px; color: var(--muted-2); font-size: 11px; }
+.hub-demo .route-line::before,
+.hub-demo .route-line::after { content: ''; height: 1px; flex: 1; background: var(--border); opacity: .55; }
+.hub-demo .route-title { display: inline-flex; align-items: center; gap: 5px; }
+.hub-demo .routing-pill { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; }
+.hub-demo .hub-msg-highlight { animation: demo-highlight 1.4s ease; }
+@keyframes demo-highlight { 0%, 100% { background: transparent; } 20% { background: color-mix(in srgb, var(--accent) 12%, transparent); } }
+
+.hub-demo .hub-conv-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; padding: 0 2px; color: var(--muted-2); font-size: 11px; min-height: 24px; border: 0; background: none; }
+.hub-demo .hub-conv-status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+.hub-demo .hub-conv-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
+.hub-demo .hub-conv-bar.running .hub-conv-dot { background: var(--success); animation: demo-live 1.6s ease infinite; }
+@keyframes demo-live { 50% { opacity: .35; } }
+.hub-demo .hub-conv-turns,
+.hub-demo .hub-conv-pair,
+.hub-demo .hub-conv-terminal { color: var(--muted-2); }
+.hub-demo .hub-conv-stop { margin-left: auto; color: var(--muted); font-size: 11px; }
+.hub-demo .hub-conv-stop:hover { color: var(--danger); }
+
+.hub-demo .event-spacer { width: 30px; flex: 0 0 30px; }
+.hub-demo .event-card--task { --event-color: var(--success); max-width: 560px; }
+.hub-demo .event-card--task.tone-error { --event-color: var(--danger); }
+.hub-demo .event-card--task.tone-warn { --event-color: var(--warn); }
+.hub-demo .event-card { margin: 0 0 12px; }
+.hub-demo .event-card .event-head { display: flex; gap: 10px; align-items: flex-start; }
+.hub-demo .event-card .event-main { flex: 1; min-width: 0; }
+.hub-demo .event-card .event-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hub-demo .event-card .event-title .name { font-size: 12.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-demo .event-card .event-status { margin-left: auto; flex: 0 0 auto; }
+.hub-demo .event-card .event-kicker { margin-bottom: 1px; }
+.hub-demo .event-card .event-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 3px; }
+/* 事件卡的归属智能体：demo 的 .event-flow（头像 + 名字 + →）只补 inline 尺寸与对齐，
+   卡片骨架、间距、颜色仍走 demo.css。 */
+.hub-demo .event-flow .agent { white-space: nowrap; }
+.hub-demo .event-flow .luna-avatar { flex: 0 0 auto; display: inline-flex; }
+.hub-demo .event-who { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+/* workspace 目标结果卡的归属位置（B1）：「<ws> / <sid>」一行。真实路径可以很长，
+   单行省略而不是折行 —— 390 下不能把卡片撑出横向滚动（task id 已在 ≤420 收起）。 */
+.hub-demo .event-where { min-width: 0; max-width: 100%; overflow: hidden; }
+.hub-demo .event-where code { display: block; font: 10px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-demo .event-card .event-body { margin: 8px 0 0 38px; font-size: 11.5px; line-height: 1.55; color: var(--muted); }
+.hub-demo .event-card .event-error { margin: 8px 0 0 38px; font-size: 11.5px; color: var(--danger); }
+.hub-demo .event-card .event-actions { display: flex; align-items: center; gap: 6px; margin: 9px 0 0 38px; flex-wrap: wrap; }
+.hub-demo .event-card .event-id { font: 10.5px var(--mono); color: var(--muted-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-demo .event-card .event-action { margin-left: auto; height: 26px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--muted); font-size: 11px; background: var(--surface-2); }
+.hub-demo .event-card .event-action:hover { color: var(--text); border-color: var(--border-strong); }
+.hub-demo .event-artifacts { display: flex; flex-direction: column; gap: 6px; margin: 9px 0 0 38px; }
+.hub-demo .artifact-line { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-2) 66%, transparent); }
+.hub-demo .artifact-badge { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: 0 0 auto; font: 9px var(--mono); color: var(--muted); background: var(--surface-3); border: 1px solid var(--border); }
+.hub-demo .artifact-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.hub-demo .artifact-name { font-size: 11.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hub-demo .artifact-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10.5px; color: var(--muted-2); }
+.hub-demo .artifact-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 群消息分组只收紧间距，不再画外框（demo 的每条 msg-row 仍是独立行）。 */
+.hub-demo .hub-round-stack { display: contents; }
+
+.hub-demo .composer-meta .meta-links { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.hub-demo .composer-meta .meta-links button { color: var(--muted-2); font-size: 10.5px; }
+.hub-demo .composer-meta .meta-links button:hover { color: var(--text); }
+.hub-demo .composer-mode-switch { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; }
+.hub-demo .composer-mode-switch button { height: 18px; padding: 0 6px; border-radius: 5px; color: var(--muted-2); font-size: 10.5px; }
+.hub-demo .composer-mode-switch button.on { background: var(--surface-2); color: var(--text); }
+.hub-demo .composer-note { max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 900px) {
+  .hub-demo .composer-note { display: none; }
+}
+
+/* 窄列 composer meta 行（P4 审计 HUB-N-02）：≤700 时 hint 可截断、模式开关不参与收缩，
+   一行放不下就换行 —— 640 窗口里「对话/派任务」必须是可点的 44×28 目标，
+   不能被 hint 挤成 6×6 的点。demo.css 的 meta-links 按钮隐藏规则已限定为直接子按钮，
+   不会再把开关里的 tab 一并隐藏。 */
+@media (max-width: 700px) {
+  .hub-demo .composer-meta { flex-wrap: wrap; row-gap: 4px; }
+  .hub-demo .composer-meta .composer-hint {
+    flex: 1 1 120px;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hub-demo .composer-meta .meta-links { flex: 0 0 auto; margin-left: auto; }
+  .hub-demo .composer-mode-switch { flex: 0 0 auto; white-space: nowrap; }
+  .hub-demo .composer-mode-switch button { height: 28px; min-width: 44px; padding: 0 8px; }
+}
+
+/* 正文里的 @ 提及在 demo 里是纯文字 chip（无边框/底色），但保留 16px 身份头像。 */
+.hub-demo .agent-text .hub-mention,
+.hub-demo .user-bubble .hub-mention {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--mention-accent, var(--accent));
+  font: inherit;
+  text-decoration: none;
+  vertical-align: baseline;
+}
+.hub-demo .agent-text .hub-mention:hover,
+.hub-demo .user-bubble .hub-mention:hover { text-decoration: underline; }
+/* 正文里的 @ 提及带 16px Luna（该 agent 的 accent 身份色，尺寸由组件 size=16 给）：
+   inline 摆在中线略下，line-height 仍由正文决定，不额外撑高段落。 */
+.hub-demo .agent-text .hub-mention .luna-avatar,
+.hub-demo .user-bubble .hub-mention .luna-avatar {
+  display: inline-flex;
+  vertical-align: -3px;
+  margin-right: 3px;
+}
+.hub-demo .agent-text .hub-mention-name,
+.hub-demo .user-bubble .hub-mention-name { font: inherit; }
+.hub-demo .agent-text .hub-mention-gone,
+.hub-demo .user-bubble .hub-mention-gone { font-size: .9em; opacity: .7; }
+.hub-demo .user-bubble .hub-mention,
+.hub-demo .user-bubble .hub-mention-name { color: var(--user-text); }
+.hub-demo .user-bubble .hub-mention::before { content: '@'; opacity: .55; }
+
+/* 窄屏：demo 只保留一行 sub（hide-mobile），否则 295px 主列会被挤成三行。 */
+@media (max-width: 640px) {
+  .hub-demo .chat-sub > :nth-child(n+4) { display: none; }
+  .hub-demo .chat-header { min-height: 64px; height: 64px; padding: 0 12px; gap: 7px; }
+  .hub-demo .chat-title-wrap { max-width: calc(100% - 150px); }
+  .hub-demo .chat-header .avatar-stack .avatar-more { display: none; }
+}
+
+/* 390 的任务卡 footer：触发入口 + 内部 task id + 打开会话放不下，会折成两行。
+   task id 是排障标识，不是用户内容；最窄档收起，让 footer 保持单行。 */
+@media (max-width: 420px) {
+  .hub-demo .event-card .event-id { display: none; }
+}
+
+/* ============================================================
+   点击目标规范（HUB-TARGET-01 / P4-UI-11）
+
+   口径：**桌面 32–36 / 移动 44**。
+   · 桌面（这里 ≤900 的窄窗也按桌面指针精度算）：可点元素的最小边 ≥32px，
+     上限 36px —— 再大一档就会把 composer / 消息头撑高，破坏 demo 的行高节奏。
+   · 移动（desktop/bridge/mobile_web，390 手机页）：44px 触控下限，那边
+     style.css 里单独实现，本文件不重复（hub.css 只服务桌面渲染进程）。
+
+   审计实测（640 桌面窗口，P4-UI-11 前）：@ 28×28、发送 31×31、上下文/更多 30×30、
+   事件触发入口 41×15、侧栏筛选 chip 35×18、任务状态筛选 65×23。全部 < 32。
+   只放大命中区、不放大字号：视觉截图与 demo 设计语言保持一致。
+   ============================================================ */
+@media (max-width: 900px) {
+  /* composer：@ 提及（28→32）、发送（31→32）。 */
+  .hub-demo .composer .icon-btn { width: 32px; height: 32px; margin-bottom: 1px; }
+  .hub-demo .composer .send-btn { width: 32px; height: 32px; margin-bottom: 1px; }
+
+  /* 会话头：上下文（只读）/ 更多（30→32）。仍在 64px 头部里，不换行。 */
+  .hub-demo .header-actions .icon-btn { width: 32px; height: 32px; }
+
+  /* 消息头的事件触发入口（「N 人触发」41×15）：只扩命中区，不撑行高。
+     min-height 把命中框抬到 32px，负 margin 把这 32px 收回原布局高度（≈15px），
+     上下各溢出 ~8px 落在同一行空白处，不与其他可点元素水平重叠。 */
+  .hub-demo button.hub-context-jump {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 5px;
+    margin: -8px 0;
+  }
+
+  /* 侧栏筛选 chip（全部/群聊/私聊 35×18、智能体/群组 23 高）与任务状态筛选。 */
+  .hub-side-scopes button { min-height: 32px; }
+  .hub-side-tabs button { min-height: 32px; }
+  .hub-panel-head select { min-height: 32px; }
+}
+
+/* —— 任务产物预览（P4-UI-12）—— */
+/* 行按钮化：保留 .artifact-line 的 demo 视觉，只去掉原生 button 外观。 */
+.hub-demo button.artifact-line {
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.hub-demo button.artifact-line .artifact-copy { flex: 1; min-width: 0; }
+.hub-demo button.artifact-line:hover {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--surface-2) 88%, transparent);
+}
+.hub-demo button.artifact-line:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+
+/* 任务板（Inspector）里的产物 li → 同一个预览 action。 */
+.hub-artifact-link {
+  width: 100%;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hub-artifact-link:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
+.hub-artifact-link:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+
+/* 弹窗：复用 .hub-modal 视觉，独立宽高（比资料页更宽，给表格/图片留空间）。 */
+.hub-artifact-modal {
+  width: min(920px, 94vw);
+  height: min(720px, 90vh);
+}
+.hub-artifact-head { gap: 12px; }
+.hub-artifact-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hub-artifact-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-3);
+  font: 10.5px var(--font-mono);
+}
+.hub-artifact-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(56ch, 100%); }
+.hub-artifact-close { flex: 0 0 auto; }
+.hub-artifact-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+.hub-artifact-doc { max-width: 100%; }
+.hub-artifact-pre {
+  margin: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--ink);
+  font: 12px/1.55 var(--font-mono);
+}
+.hub-artifact-image { display: flex; align-items: flex-start; justify-content: center; min-height: 0; }
+.hub-artifact-image img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
+.hub-artifact-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.hub-artifact-mime { color: var(--text-3); font-family: var(--font-mono); font-size: 10.5px; }
+.hub-artifact-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.hub-artifact-error p { margin: 0; }
+.hub-artifact-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+.hub-artifact-copied { margin-right: auto; min-height: 1em; color: var(--text-3); font-size: 11px; }
+
+@media (max-width: 520px) {
+  .hub-artifact-modal { width: 100vw; height: 100dvh; border-radius: 0; border: 0; }
+  .hub-artifact-body { padding: 10px 12px; }
+  .hub-artifact-foot { padding: 8px 12px; }
+}
+
+/* ============================================================
+   Hub 附件（P4 图片 / 文件引用）：composer 条带 + 消息气泡 + 灯箱
+   与主会话 Composer 的交互同源（点缩略图放大、× 移除、复制图片），
+   但类名独立（hub-attach-* / hub-msg-*），不串到主会话的 .cy-im*。
+   约束：390 下 0 横向溢出 —— 所有 chip 可换行，长路径/文件名 ellipsis。
+   ============================================================ */
+
+/* 隐藏的 <input type=file>：视觉不可见但保留在可访问树里（e2e 可 setInputFiles）。 */
+.hub-demo .hub-attach-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* composer 上方的待发附件条带：图片扇形 + 文件 chip，换行排列，永不撑破列宽。 */
+.hub-demo .hub-attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 0 0 6px;
+  padding: 0 2px;
+}
+.hub-demo .hub-attach-chip {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+/* —— 待发图片：扇形叠放（与主会话 .cy-imgs 同构，类名留在 .hub-demo 里） ——
+   一张图不是一叠牌（data-n='1' 走 128×88 大缩略图）；多张按 `(i - mid) * 6deg`
+   叠成一手牌，悬停/聚焦时抽正、上浮、放大，同组其它牌退到 0.8。
+   容器左/上留白：抽出来的牌 + 旋转后的边角不能压到上面的 chip 或裁掉焦点环。 */
+.hub-demo .hub-attach-imgs {
+  display: flex;
+  align-items: flex-end;
+  min-width: 0;
+  max-width: 100%;
+  /* 10 张牌（≈523px）比 composer 列还宽：条带内部横向滚动，别把列/页面撑破。
+     上 16px / 下 12px 是「旋转后的边角 + hover 上浮 + 焦点环」的余量，否则会被 overflow 裁掉。 */
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* 右侧/底部留够阴影外扩的空间：overflow-x:auto 的滚动容器会把抽出的牌裁在边界上。 */
+  padding: 16px 12px 16px 12px;
+  scrollbar-width: thin;
+}
+.hub-demo .hub-attach-chip--img {
+  position: relative;
+  flex: none;
+  width: 64px;
+  height: 45px;
+  margin-left: -13px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  transform-origin: bottom center;
+  transform: rotate(calc((var(--i, 0) - var(--mid, 0)) * 6deg));
+  /* 叠放顺序与主会话相反（左边的牌压住右边）：这样每张牌右上角的 × 永远露在
+     隔壁牌的图上，既看得见也点得到（默认顺序下 × 正好落在 13px 的重叠区里，
+     被下一张牌的 <img> 挡住，点击会被拦）。扇形几何/动效与 .cy-im 一致。 */
+  z-index: calc(100 - var(--i, 0));
+  transition: transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1), opacity 180ms ease, box-shadow 180ms ease;
+  /* 入场：新加的牌按 --i 依次 pop 出来。只动 opacity/scale/translate（独立变换属性），
+     不碰上面那条 transform —— 否则会覆盖扇形角、hover 也过渡不回来。
+     fill 用 backwards：延迟期间保持 from（还没出来），结束后释放，hover 过渡照常。 */
+  animation: hub-attach-im-in 200ms cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+.hub-demo .hub-attach-imgs .hub-attach-chip--img:first-child { margin-left: 0; }
+.hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img {
+  width: 128px;
+  height: 88px;
+  transform: none;
+}
+.hub-demo .hub-attach-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--surface-2);
+  cursor: zoom-in;
+}
+.hub-demo .hub-attach-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* 焦点环画在缩略图内缘：牌是旋转的，外扩的环会被隔壁牌盖住一半。 */
+.hub-demo .hub-attach-thumb:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.hub-demo .hub-attach-ph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+.hub-demo .hub-attach-chip--img:hover,
+.hub-demo .hub-attach-chip--img:focus-within {
+  /* 只抽正 + 放大，不做 translateY：牌底边固定，鼠标在底缘时不会被“抬起”甩出
+     hover 区（否则 :hover 会反复得失，Playwright 也会一直 not stable）。 */
+  transform: rotate(0deg) scale(1.05);
+  z-index: 200; /* 高于静止时的 calc(100 - i)：抽出来的牌压住整叠 */
+  box-shadow: 0 12px 24px -14px rgba(0, 0, 0, 0.85);
+}
+/* 单图不叠牌：不旋转，抽出也只是轻微上浮（128×88 的 1.05 会糊边）。 */
+.hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img:hover,
+.hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img:focus-within {
+  transform: scale(1.03);
+}
+.hub-demo .hub-attach-imgs:hover .hub-attach-chip--img:not(:hover) { opacity: 0.8; }
+/* 入场：从 0.86 放大到 1 + 淡入 + 从下方 6px 升上来（独立变换属性，与扇形 transform 叠加）。 */
+@keyframes hub-attach-im-in {
+  from { opacity: 0; scale: 0.86; translate: 0 6px; }
+  to { opacity: 1; scale: 1; translate: 0 0; }
+}
+/* × 移除：留在牌的右上角（hover 抽出后整颗露出来）；牌被裁的是圆角缩略图，不是这颗按钮。 */
+.hub-demo .hub-attach-x {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(12, 12, 11, 0.72);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  z-index: 2;
+}
+.hub-demo .hub-attach-x:hover { background: var(--danger); color: var(--user-text); }
+.hub-demo .hub-attach-x:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.hub-demo .hub-attach-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.hub-demo .hub-attach-chip--file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(100%, 260px);
+  padding: 5px 22px 5px 9px;
+  font-size: 11.5px;
+  color: var(--text);
+}
+.hub-demo .hub-attach-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-demo .hub-attach-file-size {
+  flex: 0 0 auto;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.hub-demo .hub-attach-chip--file .hub-attach-x { top: 50%; transform: translateY(-50%); }
+.hub-demo .hub-attach-busy { color: var(--muted-2); font-size: 10.5px; }
+.hub-demo .hub-attach-notice {
+  margin: 0 0 6px;
+  padding: 0 2px;
+  color: var(--warn);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+/* 灯箱：固定铺满、点遮罩关闭、Esc 关闭（逻辑在组件里）。 */
+.hub-demo .hub-attach-lb {
+  position: fixed;
+  inset: 0;
+  z-index: 320;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(8, 8, 7, 0.82);
+  backdrop-filter: blur(3px);
+}
+.hub-demo .hub-attach-lb figure {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  max-width: min(92vw, 900px);
+  max-height: calc(100dvh - 40px);
+}
+.hub-demo .hub-attach-lb img {
+  display: block;
+  width: auto;
+  /* 小图也要撑出一个像样的预览（8×8 图标放到 8px 等于没放大）；大图仍受 max 约束。 */
+  min-width: min(280px, 86vw);
+  max-width: min(92vw, 900px);
+  min-height: min(160px, 34dvh);
+  max-height: calc(100dvh - 130px);
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+.hub-demo .hub-attach-lb-placeholder {
+  min-width: 160px;
+  padding: 34px 18px;
+  border-radius: 10px;
+  border: 1px dashed var(--border-strong);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.hub-demo .hub-attach-lb figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.hub-demo .hub-attach-lb-status { color: var(--text); }
+.hub-demo .hub-attach-lb-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+}
+.hub-demo .hub-attach-lb-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11.5px;
+}
+.hub-demo .hub-attach-lb-btn:hover { border-color: var(--focus); }
+.hub-demo .hub-attach-lb-btn.danger { color: var(--danger); }
+.hub-demo .hub-attach-lb-btn.close { width: 28px; padding: 0; }
+.hub-demo .hub-attach-lb-btn.nav { width: 28px; padding: 0; font-size: 16px; line-height: 1; }
+.hub-demo .hub-attach-lb-btn:disabled { opacity: 0.35; cursor: default; }
+.hub-demo .hub-attach-lb-btn:disabled:hover { border-color: var(--border-strong); }
+/* 焦点被 Tab 陷阱圈在灯箱里：键盘用户必须看得见当前停在哪颗按钮上（只有 hover 不够）。 */
+.hub-demo .hub-attach-lb-btn:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; }
+
+/* 消息气泡里的附件：与正文保持 6px 间距，图片最多 4 张（再多给 +N）。 */
+.hub-demo .hub-msg-attach { margin-top: 6px; max-width: 100%; min-width: 0; }
+.hub-demo .hub-msg-imgs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+.hub-demo .hub-msg-img {
+  position: relative;
+  width: 112px;
+  height: 84px;
+  padding: 0;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: var(--surface-2);
+  cursor: zoom-in;
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+.hub-demo .hub-msg-img img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* 气泡里的图已经是「发出去了」的成品：hover/聚焦给一点点放大 + 抬起，告诉你能点开。 */
+.hub-demo .hub-msg-img:hover,
+.hub-demo .hub-msg-img:focus-visible {
+  transform: scale(1.03);
+  border-color: var(--border-strong);
+  box-shadow: 0 10px 22px -14px rgba(0, 0, 0, 0.85);
+}
+.hub-demo .hub-msg-img:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* 「查看大图」：只在 hover/聚焦时浮出来（缩略图上不常驻文字，气泡才干净）。 */
+.hub-demo .hub-msg-img-zoom {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 3px 5px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.3;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+}
+.hub-demo .hub-msg-img:hover .hub-msg-img-zoom,
+.hub-demo .hub-msg-img:focus-visible .hub-msg-img-zoom { opacity: 1; }
+.hub-demo .hub-msg-img-ph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 4px;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-demo .hub-msg-img-more {
+  align-self: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.hub-demo .hub-msg-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  max-width: 100%;
+}
+.hub-demo .hub-msg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: min(100%, 320px);
+  padding: 4px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11px;
+  text-align: left;
+}
+.hub-demo .hub-msg-file:hover { border-color: var(--border-strong); }
+.hub-demo .hub-msg-file-name { flex: 0 0 auto; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-demo .hub-msg-file-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-2);
+  font-family: var(--font-mono, var(--mono));
+  font-size: 10px;
+}
+/* 用户气泡（暖色底）里的 chip 用底色区分，不要在浅色气泡上再叠一层 surface-2。 */
+.hub-demo .user-bubble .hub-msg-file {
+  border-color: color-mix(in srgb, var(--user-text) 22%, transparent);
+  background: color-mix(in srgb, var(--user-text) 8%, transparent);
+  color: var(--user-text);
+}
+.hub-demo .user-bubble .hub-msg-file-path { color: color-mix(in srgb, var(--user-text) 62%, transparent); }
+
+@media (max-width: 640px) {
+  .hub-demo .hub-attach-lb { padding: 10px; }
+  .hub-demo .hub-attach-lb img { max-height: calc(100dvh - 150px); }
+  .hub-demo .hub-attach-chip--img { width: 52px; height: 37px; margin-left: -12px; }
+  .hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img { width: 108px; height: 74px; }
+  .hub-demo .hub-msg-img { width: 88px; height: 66px; }
+  .hub-demo .hub-msg-file { max-width: 100%; }
+  .hub-demo .hub-msg-file-name { max-width: 120px; }
+}
+
+/* 减少动态：入场 pop / 悬停过渡全关，但抽正、缩放这些「状态」保留（只是瞬时到位）。 */
+@media (prefers-reduced-motion: reduce) {
+  .hub-demo .hub-attach-chip--img,
+  .hub-demo .hub-attach-thumb,
+  .hub-demo .hub-msg-img,
+  .hub-demo .hub-msg-img-zoom { animation: none; transition: none; }
+}
+
+/* —— Hub 单聊/群内联「任务等待你」卡（P4-UI-15） ——
+   只读展示 Project 主/子会话的审批、提问；不写 hub 消息、不进智能体上下文。
+   与 Needs you 抽屉共用同一份 need 和 resolve 路由。 */
+.hub-inline-needs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+.hub-inline-need {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--paper) 92%, var(--ink) 8%);
+  padding: 9px 11px 10px;
+  font-size: 12px;
+  min-width: 0;
+}
+.hub-inline-need header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-bottom: 7px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+.hub-inline-need header strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-inline-need .hub-chip { flex: 0 0 auto; }
+/* 类型只染 chip，不染整张卡：卡身保持中性 surface，和 Hub 的 task/need 卡同一套层次。 */
+.hub-inline-need .hub-chip.approval { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
+.hub-inline-need .hub-chip.question { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.hub-inline-need .hub-chip.failure { color: var(--danger, #b23a2e); background: color-mix(in srgb, var(--danger, #b23a2e) 12%, transparent); }
+.hub-inline-need-attr {
+  flex: 0 1 auto;
+  max-width: 55%;
+  margin-left: 8px;
+  min-width: 0;
+  color: var(--muted, var(--text-2));
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-inline-need-body {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  max-height: 88px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 7px;
+  background: var(--paper-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.hub-inline-need-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 9px;
+}
+.hub-inline-need-questions label,
+.hub-inline-need-question {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  min-width: 0;
+}
+/* 题干 + 「可多选」标记（N3）：多选与单选在提交口径上不同，不标出来用户会以为能选一个。 */
+.hub-inline-need-q {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.hub-inline-need-multi {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--text-3);
+  font-size: 9.5px;
+}
+.hub-inline-need-questions input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid color-mix(in srgb, var(--text-3) 45%, var(--border-strong) 55%);
+  border-radius: 7px;
+  background: var(--paper-2);
+  color: var(--text);
+  padding: 0 9px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.hub-inline-need-questions input::placeholder { color: var(--text-3); }
+.hub-inline-need-questions input:hover { border-color: var(--text-3); }
+.hub-inline-need-questions input:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 22%, transparent);
+}
+.hub-inline-need-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.hub-inline-need-options button {
+  border: 1px solid color-mix(in srgb, var(--text-3) 45%, var(--border-strong) 55%);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  padding: 3px 9px;
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+.hub-inline-need-options button:hover { color: var(--text); border-color: var(--text-3); }
+.hub-inline-need-options button.on {
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+  border-color: var(--text-3);
+  color: var(--text);
+}
+.hub-inline-need-options button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+/* 选项预览（N3）：与 AskUserQuestionPanel 同一个口径 —— 「必须看见才能选」的备选
+   不能只剩标签。ASCII 版面/diff 里有长行，块内自己横向滚动，永不撑破 390 的卡片。 */
+.hub-inline-need-preview {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-width: 100%;
+  max-height: 96px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 7px;
+  background: var(--paper-2);
+  color: var(--text-2);
+  font: 10.5px/1.5 var(--mono);
+  white-space: pre;
+  tab-size: 2;
+}
+.hub-inline-need footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+.hub-inline-need footer .hub-btn {
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+}
+.hub-inline-need footer .hub-btn.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+.hub-inline-need footer .hub-btn.primary:hover { background: color-mix(in srgb, var(--ink) 92%, var(--accent) 8%); }
+.hub-inline-need footer .hub-btn:not(.primary) {
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  border-color: color-mix(in srgb, var(--text-3) 70%, var(--border-strong) 30%);
+  color: var(--text-2);
+}
+.hub-inline-need footer .hub-btn:not(.primary):hover {
+  color: var(--text);
+  border-color: var(--text-3);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+.hub-inline-need footer .hub-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.hub-inline-need footer .hub-link { padding: 0; font-size: 11.5px; }
+.hub-inline-need footer .hub-muted { margin-left: auto; padding: 0; color: var(--text-3); font-size: 10.5px; }
+
+/* 390：归属信息单独占一行，避免把标题挤成「写文件前确…」；桌面仍保持一行紧凑。 */
+@media (max-width: 640px) {
+  .hub-inline-need header { flex-wrap: wrap; }
+  .hub-inline-need-attr { flex: 1 0 100%; max-width: 100%; margin-left: 0; }
+}

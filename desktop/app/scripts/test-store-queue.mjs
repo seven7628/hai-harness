@@ -52,7 +52,7 @@ await build({
   logLevel: 'silent',
   plugins: [assetPlugin],
 })
-const { useAppStore, sessionBusy, dispatchEvent, applySessionPrefs, runningTaskCount, hydrateCheckpoint } = require(outfile)
+const { useAppStore, sessionBusy, mainRunActive, dispatchEvent, applySessionPrefs, runningTaskCount, hydrateCheckpoint, __runSettles, __clearRunSettles } = require(outfile)
 // 2026-10：右栏「任务」tab 退役后 asyncTaskBlocks（给它用的平铺投影）已删除。
 // 它原来的两条判据（「有占位卡」「占位有状态」）在这里按**块本身**判，不再借道那个投影。
 const liveTasks = (blocks) => blocks.filter((b) => b.kind === 'async_task' || b.kind === 'agent'
@@ -87,6 +87,11 @@ const busy = () => {
   return v ? sessionBusy(v) : false
 }
 const EV = (t, p = {}) => dispatchEvent({ event_type: t, session_id: 's1', ...p })
+// 运行位（BR-15）的读法：nodeOf = 某个 run/工具节点，settles = 收敛诊断。
+const viewOf = () => useAppStore.getState().views.s1
+const nodes = () => viewOf().runNodes
+const nodeOf = (id) => nodes().find((n) => n.id === id)
+const settles = () => __runSettles()
 
 // ===== 场景 1：空闲 → 发送 → 会话进入运行态 → Agent End → 空闲 → 再发立即推送 =====
 setup()
@@ -493,9 +498,11 @@ assert.notEqual(dBlock?.afterRun, true, '运行中到达的回执不得打上 af
 //    「待发送」，等子 run 的下一个 llm_end 才代劳。
 setup()
 EV('agent_start', { run_id: 'r-main' })
-EV('agent_start', { run_id: 'r-sub', parent_run_id: 'r-main' })
+// 后台子 agent 的 AgentStart 必带 TaskId（runBackground 注入）—— fixture 要同形：带 task_id
+// 的子 run 才允许晚于主 run 收尾（无 task_id 的是 in-loop 同步子 agent，随主 run 收敛）。
+EV('agent_start', { run_id: 'r-sub', parent_run_id: 'r-main', depth: 1, task_id: 'tk12', name: 'bg' })
 EV('agent_end', { run_id: 'r-main', finish_reason: 'stop' })
-assert.ok(busy(), '子 run 仍在跑 → sessionBusy 仍为真（左栏运行点保留）')
+assert.ok(busy(), '后台子 run 仍在跑 → sessionBusy 仍为真（左栏运行点保留）')
 useAppStore.getState().ask('主 run 结束后立刻发')
 const q12 = pending().find((q) => text(q) === '主 run 结束后立刻发')
 assert.ok(q12 && q12.pushed, '主 run 已交卷时，新输入必须立即推送（不等后台子 agent）')
@@ -755,15 +762,23 @@ console.log('PASS 场景13：失败 attempt 记账；重试不算轮尾，最终
 // 服务端两条消费路径：Session.Run 的 takeBatch（新运行开口）与 AgentLoop 的插话 Poll
 // （运行中插进来的一条）。事件带 injected 位 —— 前者没有，后者有；转录据此不另起一轮
 // （否则同一个 run 画出两个 Working 盒子，用户 2026-11 报障）。
-setup()
+setup(); __clearRunSettles()
+// 顺序照线上来：takeBatch 的消费事件 → agent_start → 运行中插话 Poll 的消费事件。
+// 「新运行开口」那条此时还没有 run 节点可收；**插话那条绝不能收敛运行位**（它证明的
+// 恰恰是这一轮还在跑）—— 下面三条就是那条反向保护的钉子（BR-15 复审 B2）。
+EV('user_inputs_consumed', { user_texts: ['第一句'] }) // 新运行的开头（无 injected），先于 agent_start
 EV('agent_start', { run_id: 'r-mid' })
-EV('user_inputs_consumed', { user_texts: ['第一句'] }) // 新运行的开头（无 injected）
 EV('user_inputs_consumed', { user_texts: ['跑的时候补一句'], injected: true })
 const v17 = useAppStore.getState().views.s1
 const users17 = v17.blocks.filter((b) => b.kind === 'user')
 assert.equal(users17.length, 2)
 assert.notEqual(users17[0].injected, true, '新运行的开口不是插话')
 assert.equal(users17[1].injected, true, '插话 Poll 消费的消息带 injected 位（渲染层据此不切轮）')
+// 反向保护：插话不是终态证据 —— 运行位、节点、诊断都必须原样。
+assert.ok(busy(), '插话消费不得把正在跑的 run 画成交卷')
+assert.equal(nodeOf('r-mid')?.status, 'running', '插话后 run 节点仍 running')
+assert.ok(mainRunActive(viewOf()), '主 run 仍在跑')
+assert.ok(!settles().some((r) => r.source === 'new_run_batch'), '插话不得生成「上一轮已结束」的诊断')
 
 // ===== 场景 18：上下文压缩完成 → 对应会话的一行 signal =====
 // 用户 2026-11：压缩结束后，对应的 session 没有「压缩完成」的一行通知。
@@ -1016,6 +1031,512 @@ assert.ok(d24 > lastUser24, `运行中到达的回执必须落在**当前轮**�
 const delivery24 = blocks24[d24]
 assert.equal(delivery24.afterRun, false, '运行中到达的回执必须显式记 afterRun:false（恢复后仍能判）')
 console.log('PASS 场景24：运行中到达的回执落在当前轮内部（不按卡片回旧轮），afterRun 显式盖章')
+
+// ===== 场景 25–32（BR-15）：丢一条 agent_end 不得永久「运行中」 =====
+//
+// 运行位的结束证据本应只有 agent_end。事件会丢，所以当**别的终止事实**到达时，残留的
+// running 必须收敛；但绝不能按时间/超时猜（那会把真在跑判成结束），也不能顺手杀掉
+// 摘离的异步任务（它们的终态证据是 task_end）。
+// 场景 25：会话级运行失败（session_run_error）= 主 run 终态。
+// 它前面那条 agent_end 丢了，只剩这条会话级事件 —— 此前只清 streaming，runEnded 仍 false、
+// 根节点仍 running：主 run 的停止按钮/结算行永久卡在「运行中」。
+// 子 run 不动：既有不变量允许子 run 晚于主 run 收尾（见场景12），不能顺手杀掉。
+setup(); __clearRunSettles()
+const b25 = Date.now() - 5000
+const at25 = (ms) => new Date(b25 + ms).toISOString()
+EV('agent_start', { run_id: 'r25', timestamp: at25(0) })
+EV('agent_start', { run_id: 'r25-sub', parent_run_id: 'r25', depth: 1, task_id: 'tk25', name: 'bg-sub', timestamp: at25(10) })
+assert.ok(busy(), '两个 run 起跑后应 busy')
+assert.ok(mainRunActive(viewOf()), '主 run 在跑')
+// 失败前那段流式正文：这次运行不会再有 llm_end（run 级失败），块会停在 streaming=true。
+EV('llm_start', { run_id: 'r25', request_id: 'req25', model: 'gpt-test', timestamp: at25(20) })
+EV('content_chunk', { run_id: 'r25', request_id: 'req25', content: '半句话', timestamp: at25(30) })
+assert.ok(viewOf().blocks.some((b) => b.kind === 'assistant' && b.streaming), '起跑时正文在流')
+EV('session_run_error', { error: 'upstream 401', timestamp: at25(800) })
+const v25 = viewOf()
+const a25 = v25.blocks.find((b) => b.kind === 'assistant')
+assert.equal(a25?.streaming, false, '会话级失败必须冻结流式块（否则光标常闪、轮尾账不落）')
+assert.equal(a25?.durMs, 780, '冻结时按 llm_start → 失败时刻结算 durMs')
+assert.equal(v25.runEnded, true, '会话级失败必须把结算位落地')
+assert.equal(nodeOf('r25')?.status, 'error', '主 run 节点收敛为 error')
+assert.ok(!mainRunActive(viewOf()), '主 run 不得再显示运行中')
+assert.equal(nodeOf('r25-sub')?.status, 'running', '子 run 仍可晚于主 run 收尾，不许凭主 run 失败下结论')
+const t25 = settles().find((r) => r.source === 'session_run_error')
+assert.ok(t25, '收敛必须留诊断（为什么它不转了）')
+assert.deepEqual(t25.runIds, ['r25'])
+console.log('PASS 场景25：session_run_error 收敛主 run（子 run 保持自己的生命周期），流式块冻结')
+
+// 场景 26：会话关闭（session_closed）= 运行已停、不会再有任何事件。
+// 只置 runEnded 而留着 runNodes/tool 的 running，busySids 仍把它算作忙。
+setup(); __clearRunSettles()
+const b26 = Date.now() - 5000
+const at26 = (ms) => new Date(b26 + ms).toISOString()
+EV('agent_start', { run_id: 'r26', timestamp: at26(0) })
+EV('agent_start', { run_id: 'r26-bg', parent_run_id: 'r26', depth: 1, task_id: 'tk26', name: 'bg', timestamp: at26(10) })
+EV('tool_run_start', { id: 'x26', name: 'bash', arguments: '{}', run_id: 'r26', timestamp: at26(20) })
+// 关闭前那段流式正文：llm_end 不会再来了 —— 不冻结，块就永远停在 streaming=true
+//（光标 ▍ 常闪、轮尾账不落：复审 N2 的同一处欠账，session_closed 这条路径此前漏了）。
+EV('llm_start', { run_id: 'r26', request_id: 'req26', model: 'gpt-test', timestamp: at26(30) })
+EV('content_chunk', { run_id: 'r26', request_id: 'req26', content: '最后半句', timestamp: at26(40) })
+assert.ok(viewOf().blocks.some((b) => b.kind === 'assistant' && b.streaming), '关闭前正文在流')
+// 另一种「在跑的任务」：只有 task_started 占位、没有 agent_start 换成卡片的后台工具任务。
+// 它自己的终态是 task_end —— 会话关闭后那条也不会来了。
+EV('task_started', { task_id: 'tk26b', name: 'tool-bg', status: 'running', timestamp: at26(50) })
+assert.ok(busy())
+assert.equal(runningTaskCount(viewOf().blocks), 2, '起跑时两个任务在跑：子 agent（tk26）+ 占位（tk26b）')
+EV('session_closed', { runs: 1, consumed: 0, abandoned_mid_tool: 1, timestamp: at26(800) })
+assert.equal(viewOf().runEnded, true)
+assert.ok(!busy(), '关闭后不得再有任何 running 节点（含子 run / 工具）')
+assert.ok(nodes().every((n) => n.status !== 'running'), '所有 run/tool 节点都应落地')
+const a26 = viewOf().blocks.find((b) => b.kind === 'assistant')
+assert.equal(a26?.streaming, false, '关闭后流式块必须冻结（否则光标常闪、轮尾账永不落地）')
+assert.equal(a26?.durMs, 770, '冻结时按 llm_start → 关闭时刻结算 durMs（诚实的「已跑多久」）')
+const bg26 = viewOf().blocks.find((b) => b.kind === 'agent' && b.taskId === 'tk26')
+assert.equal(bg26?.status, 'abandoned', '残留的子 agent 卡片应收敛为 abandoned')
+const ph26 = viewOf().blocks.find((b) => b.kind === 'async_task' && b.taskId === 'tk26b')
+assert.equal(ph26?.status, 'abandoned', 'async_task 占位块同样要落地（否则角标/计数仍在跑）')
+assert.ok(
+  liveTasks(viewOf().blocks).every((b) => b.status !== 'running' && b.status !== 'interrupting'),
+  '关闭后所有 live 任务（agent 卡片 / async_task / promoted 工具）都不得再是 running',
+)
+assert.equal(runningTaskCount(viewOf().blocks), 0, '「N 个任务在跑」的计数必须归零')
+assert.equal(useAppStore.getState().runningAgentCount, 0)
+assert.ok(settles().some((r) => r.source === 'session_closed' && r.runIds.length === 3))
+console.log('PASS 场景26：session_closed 全量落地（run/tool/卡片），busy 不再残留')
+
+// 场景 27：子 run 自己的 agent_end 丢了，但它的 task_end 到达 —— 任务终态就是它运行的终态。
+// fixture 与线上同形：TaskEnd 也带 run_id，而那是**发起方** run（subagent 侧在派发它的
+// 那次运行里填），不是执行方 —— 所以下面收敛的只能是 sub27，不能是 r27。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r27' })
+EV('agent_start', { run_id: 'sub27', parent_run_id: 'r27', depth: 1, task_id: 'tk27', name: 'bg' })
+EV('agent_end', { run_id: 'r27', finish_reason: 'stop' })
+assert.ok(busy(), '父 run 已交卷，但摘离任务的 run 仍在跑（不许被父 run 杀掉）')
+assert.equal(nodeOf('sub27')?.status, 'running')
+EV('task_end', { task_id: 'tk27', run_id: 'r27', status: 'completed', result: 'ok' })
+assert.ok(!busy(), 'task_end 后不得再显示该任务在跑')
+assert.equal(nodeOf('sub27')?.status, 'done')
+assert.equal(useAppStore.getState().runningAgentCount, 0, 'task_end 也要把子 agent 角标归零')
+assert.ok(settles().some((r) => r.source === 'task_end' && r.runIds.includes('sub27')))
+console.log('PASS 场景27：task_end 收敛子 run（agent_end 丢失也能落地）')
+
+// 场景 28（反向）：task_end 的 run_id 是**发起方** run，主 run 还在跑时到达的 task_end
+// 绝不许把它一起收敛。归属只能走卡片 taskId → runId（执行方）与工具节点自己的 taskId。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r28' }) // 发起方：主 run，仍在跑
+EV('agent_start', { run_id: 'sub28', parent_run_id: 'r28', depth: 1, task_id: 'tk28', name: 'bg' })
+assert.ok(busy(), '主 run + 异步子 run 都在跑')
+assert.ok(mainRunActive(viewOf()))
+EV('task_end', { task_id: 'tk28', run_id: 'r28', status: 'completed', result: 'ok' })
+assert.equal(nodeOf('r28')?.status, 'running', 'task_end.run_id 是发起方，不是执行方：主 run 不得被收敛')
+assert.ok(mainRunActive(viewOf()), '主 run 仍应显示运行中')
+assert.equal(viewOf().runEnded, false, '任务终态不等于主 run 交卷')
+assert.equal(nodeOf('sub28')?.status, 'done', '只收敛执行方（卡片 taskId → runId）')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'agent' && b.taskId === 'tk28')?.status,
+  'completed', '卡片照旧按任务终态落地')
+const t28 = settles().find((r) => r.source === 'task_end')
+assert.ok(t28 && t28.runIds.includes('sub28') && !t28.runIds.includes('r28'), '诊断里只有执行方')
+console.log('PASS 场景28：task_end 只收敛执行方 run（发起方 run_id 不得被当成本次收敛目标）')
+
+// 场景 29（反向）：摘离的异步任务还在跑 —— 父 run 的 agent_end 不得顺手杀掉它。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r29' })
+EV('agent_start', { run_id: 'sub29', parent_run_id: 'r29', depth: 1, task_id: 'tk29', name: 'bg' })
+EV('agent_end', { run_id: 'r29', finish_reason: 'stop' })
+assert.ok(busy(), '异步任务仍在跑：busy 是真的，不许收敛')
+assert.equal(nodeOf('sub29')?.status, 'running')
+assert.ok(!settles().some((r) => r.source === 'agent_end'), '没有收敛就不写诊断')
+console.log('PASS 场景29：父 run 收尾不误杀摘离的异步任务')
+
+// 场景 30：主 run 的 agent_end 缺 run_id（旧日志/降级宿主）—— 只认唯一的顶层 run。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r30' })
+EV('agent_end', { finish_reason: 'stop' })
+assert.equal(viewOf().runEnded, true)
+assert.ok(!busy(), '缺 run_id 的主 run 收尾也必须落地顶层节点')
+assert.equal(nodeOf('r30')?.status, 'done')
+console.log('PASS 场景30：缺 run_id 的 agent_end 收敛唯一顶层 run')
+
+// 场景 31：run_id 找不到节点（迟到的旧 run）—— 只记录，不猜、不改当前 run 的结算位。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r31' })
+EV('agent_end', { run_id: 'r-stale', finish_reason: 'stop' })
+assert.ok(busy(), '找不到归属的 agent_end 不得杀掉当前 run')
+assert.equal(viewOf().runEnded, false, '迟到的旧 agent_end 不得把当前 run 画成已交卷')
+const t31 = settles().find((r) => r.source === 'agent_end_unmatched')
+assert.ok(t31 && t31.eventRunId === 'r-stale', '未匹配的 agent_end 必须留诊断')
+console.log('PASS 场景31：未匹配的 agent_end 只诊断、不猜归属')
+
+// 场景 32：新批次开口（injected=false）证明上一轮已结束 —— agent_end 丢了也能收敛。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r32' })
+EV('user_inputs_consumed', { user_texts: ['下一轮的问题'], injected: false })
+assert.ok(!busy(), '新批次开口后上一轮不得还在 running')
+assert.equal(nodeOf('r32')?.status, 'done')
+assert.ok(settles().some((r) => r.source === 'new_run_batch' && r.runIds.includes('r32')))
+console.log('PASS 场景32：新批次开口收敛上一轮残留的 run')
+
+// ===== 场景 33–34（BR-15 复审）：同步子 run 随父 run 收敛 / 新批次开口冻结流式块 =====
+
+// 场景 33：同步子 agent（in-loop，**无 task_id**）自己的 agent_end 丢了 —— 父 run 收尾时
+// 它必须一起落地：它是父 run 里的阻塞调用，父 run 收尾时它不可能还在跑，没有别的终止证据。
+// 同时锁反向：异步子 run（带 task_id）**绝不**跟着父 run 收敛（场景29 的不变量）。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r33' })
+EV('agent_start', { run_id: 'sub-sync', parent_run_id: 'r33', depth: 1, name: 'sync-explore' })
+EV('agent_start', { run_id: 'sub-async', parent_run_id: 'r33', depth: 1, task_id: 'tk33', name: 'bg' })
+assert.ok(busy(), '三个 run 都在跑')
+assert.equal(runningTaskCount(viewOf().blocks), 2, '两张子 agent 卡片都在跑')
+EV('agent_end', { run_id: 'r33', finish_reason: 'stop' })
+assert.equal(nodeOf('r33')?.status, 'done', '父 run 自己的节点照旧结算')
+assert.ok(!mainRunActive(viewOf()), '主 run 不再是运行中')
+assert.equal(nodeOf('sub-sync')?.status, 'done', '无 task_id 的同步子 run 随父 run 收敛')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'agent' && b.runId === 'sub-sync')?.status,
+  'abandoned',
+  '同步子 run 的卡片也要落地（它自己的 agent_end 不会来了）',
+)
+assert.equal(nodeOf('sub-async')?.status, 'running', '带 task_id 的异步子 run 绝不能碰')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'agent' && b.runId === 'sub-async')?.status,
+  'running',
+  '异步子 run 的卡片照旧等它自己的 agent_end / task_end',
+)
+assert.equal(runningTaskCount(viewOf().blocks), 1, '只剩摘离的后台任务在跑')
+const t33 = settles().find((r) => r.source === 'agent_end')
+assert.ok(t33, '顺带收敛必须留诊断（否则答不出「它为什么不转了」）')
+assert.deepEqual(t33.runIds, ['sub-sync'], '诊断只记被顺带收敛的同步子 run，不含事件自己的 run')
+assert.equal(t33.eventRunId, 'r33', '诊断要能指出是哪条 agent_end 收敛的')
+// 缺 run_id 的形态（旧日志/降级宿主）同样要收敛同步子 run：父 run 按唯一顶层节点定位。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r33b' })
+EV('agent_start', { run_id: 'sub33b', parent_run_id: 'r33b', depth: 1, name: 'sync2' })
+EV('agent_end', { finish_reason: 'stop' })
+assert.equal(nodeOf('r33b')?.status, 'done')
+assert.equal(nodeOf('sub33b')?.status, 'done', '缺 run_id 的主 run 收尾同样收敛同步子 run')
+assert.ok(!busy())
+assert.ok(settles().some((r) => r.source === 'agent_end' && r.runIds.includes('sub33b')))
+console.log('PASS 场景33：同步子 run 随父 run 收敛（异步子 run 不动，缺 run_id 亦然）')
+
+// 场景 34：上一轮 agent_end **和** llm_end 都丢了 —— 新批次开口（injected=false）收敛时，
+// 结算位与流式块要一起落地，否则光标 ▍ 常闪、轮尾账（durMs / 指标行）永不落地。
+setup(); __clearRunSettles()
+const b34 = Date.now() - 5000
+const at34 = (ms) => new Date(b34 + ms).toISOString()
+EV('agent_start', { run_id: 'r34', timestamp: at34(0) })
+EV('llm_start', { run_id: 'r34', request_id: 'req34', model: 'gpt-test', timestamp: at34(10) })
+EV('content_chunk', { run_id: 'r34', request_id: 'req34', content: '上一轮的半句话', timestamp: at34(20) })
+assert.equal(viewOf().runEnded, false, '上一轮还没结算')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'assistant')?.streaming,
+  true,
+  '上一轮正文还在流',
+)
+EV('user_inputs_consumed', { user_texts: ['下一轮的问题'], injected: false, timestamp: at34(900) })
+assert.equal(nodeOf('r34')?.status, 'done', '新批次开口收敛上一轮')
+assert.equal(viewOf().runEnded, true, '收敛后结算位必须落地（折叠行/轮尾账据此出现）')
+const a34 = viewOf().blocks.find((b) => b.kind === 'assistant')
+assert.equal(a34?.streaming, false, '流式块冻结：光标不再闪、指标行才可能出现')
+assert.equal(a34?.durMs, 890, 'durMs 按 llm_start → 收敛时刻结算（诚实的「已跑多久」）')
+assert.ok(settles().some((r) => r.source === 'new_run_batch' && r.runIds.includes('r34')))
+console.log('PASS 场景34：新批次开口收敛上一轮时冻结流式块（runEnded 落地、durMs 结算）')
+
+// ===== 场景 35–39（BR-15 复审 P5-03c）：暖恢复 + 分页窗口外的子卡片 / 同步子 run 的
+// 另外两条父 run 终止证据 / 同步子 run 的状态映射 =====
+
+// 场景 35：**暖恢复**（进程内复用，主 run 真的还在跑）+ 异步子 agent 的卡片在 blocks 里。
+// 关键前提：这个 checkpoint 的 run_nodes **不带** task_id（P5-03c 之前的 checkpoint 就是
+// 这样；那时 Go 侧只在卡片上记它）。于是「异步 vs 同步子 run」的判据只剩卡片这一条 ——
+// 删掉卡片源，父 run 的 agent_end 就会把仍在跑的后台子 run 当成同步子 run 收敛掉（复审 B1）。
+setup(); __clearRunSettles()
+hydrateCheckpoint('s1', {
+  schema_version: 1,
+  blocks: [
+    { kind: 'user', id: 1, text: '跑个后台任务', ts: 1000 },
+    {
+      kind: 'agent', id: 2, run_id: 'sub35', parent_run_id: 'r35', label: 'bg',
+      status: 'running', task_id: 'tk35', spawned_at: 1500, items: [],
+    },
+  ],
+  run_nodes: [
+    { id: 'r35', label: 'run', status: 'running', depth: 0, kind: 'run', started_at: 1000 },
+    { id: 'sub35', parent_id: 'r35', label: 'bg', status: 'running', depth: 1, kind: 'run', started_at: 1500 },
+  ],
+  turns: [],
+}, undefined, { live: true })
+assert.equal(nodeOf('sub35')?.status, 'running', '暖恢复：在跑的子 run 仍是 running')
+assert.equal(nodeOf('sub35')?.taskId, undefined, '前提：老 checkpoint 的 run 节点没有 task_id')
+assert.equal(viewOf().blocks.find((b) => b.kind === 'agent')?.taskId, 'tk35', '卡片带 task_id')
+assert.ok(busy(), '暖恢复：主 run + 子 run 都在跑 → busy')
+EV('agent_end', { run_id: 'r35', finish_reason: 'stop' })
+assert.equal(nodeOf('r35')?.status, 'done', '父 run 自己的节点照旧结算')
+assert.equal(nodeOf('sub35')?.status, 'running', '暖恢复 + 卡片在 blocks：异步子 run 不许被父 run 误杀')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'agent')?.status,
+  'running',
+  '异步子卡的终态证据仍是它自己的 agent_end / task_end',
+)
+assert.ok(busy(), '摘离的异步子 run 还在跑 → busy 必须仍为真')
+assert.ok(!mainRunActive(viewOf()), '主 run 已交卷')
+assert.ok(!settles().some((r) => r.source === 'agent_end'), '没有收敛就不写诊断（不许假装收敛过）')
+// 节点源单独成立（P5-03c 起 Go 把 task_id 写进 run_nodes：暖恢复读得回来）：
+// 这张 checkpoint 没有任何卡片可查，保护只能来自节点自己。
+setup(); __clearRunSettles()
+hydrateCheckpoint('s1', {
+  schema_version: 1,
+  blocks: [{ kind: 'user', id: 1, text: '只有节点', ts: 1000 }],
+  run_nodes: [
+    { id: 'r35b', label: 'run', status: 'running', depth: 0, kind: 'run', started_at: 1000 },
+    { id: 'sub35b', parent_id: 'r35b', label: 'bg', status: 'running', depth: 1, kind: 'run', started_at: 1500, task_id: 'tk35b' },
+  ],
+  turns: [],
+}, undefined, { live: true })
+assert.equal(nodeOf('sub35b')?.taskId, 'tk35b', 'P5-03c 起暖恢复读得回节点的 task_id')
+EV('agent_end', { run_id: 'r35b', finish_reason: 'stop' })
+assert.equal(nodeOf('sub35b')?.status, 'running', '节点带 task_id 的异步子 run 同样不许被误杀')
+assert.ok(busy())
+console.log('PASS 场景35：暖恢复（卡片在 blocks / 节点带 task_id）父 run 收尾不误杀异步子 run')
+
+// 场景 36（本批要修的 bug）：暖恢复 + 异步子卡被**分页到 200 块窗口外**，只活在
+// view.agentDetached 里。此时节点没有 task_id（老 checkpoint）、blocks 里也没有卡片 ——
+// 两个判据同时缺，父 run 的 agent_end 会把仍在跑的后台子 run 收敛成 done、卡片 abandon，
+// 左栏树上的「后台任务还在跑」就此消失。卡片源必须扫 agentDetached。
+setup(); __clearRunSettles()
+const detachedCard36 = {
+  kind: 'agent', id: 92, run_id: 'sub36', parent_run_id: 'r36', label: 'bg-window-out',
+  status: 'running', task_id: 'tk36', spawned_at: 1500, items: [],
+}
+hydrateCheckpoint('s1', {
+  schema_version: 1,
+  blocks: [{ kind: 'user', id: 1, text: '翻到第 200 块之后', ts: 1000 }],
+  run_nodes: [
+    { id: 'r36', label: 'run', status: 'running', depth: 0, kind: 'run', started_at: 1000 },
+    { id: 'sub36', parent_id: 'r36', label: 'bg-window-out', status: 'running', depth: 1, kind: 'run', started_at: 1500 },
+  ],
+  turns: [],
+}, undefined, { live: true, agents: [detachedCard36] })
+assert.equal(viewOf().agentDetached?.length, 1, '前提：卡片只存在于窗口外（agentDetached）')
+assert.ok(!viewOf().blocks.some((b) => b.kind === 'agent'), '前提：blocks 里没有这张卡片')
+assert.equal(nodeOf('sub36')?.taskId, undefined, '前提：老 checkpoint 的 run 节点没有 task_id（两条判据同时缺）')
+assert.ok(busy())
+EV('agent_end', { run_id: 'r36', finish_reason: 'stop' })
+assert.equal(nodeOf('r36')?.status, 'done')
+assert.equal(nodeOf('sub36')?.status, 'running', '窗口外的异步子 run 同样不许被误杀（BR-15 复审 B1）')
+assert.equal(
+  viewOf().agentDetached?.find((b) => b.kind === 'agent')?.status,
+  'running',
+  '窗口外卡片的终态证据仍是它自己的 agent_end / task_end',
+)
+assert.ok(busy(), '摘离的异步子 run 还在跑 → busy 必须仍为真')
+assert.ok(!mainRunActive(viewOf()))
+assert.ok(!settles().some((r) => r.source === 'agent_end'), '没有收敛就不写诊断')
+// 反向：真·同步子 run（无 task_id）在窗口外也要能收敛 —— 别把「扫 agentDetached」写成只认异步。
+setup(); __clearRunSettles()
+hydrateCheckpoint('s1', {
+  schema_version: 1,
+  blocks: [{ kind: 'user', id: 1, text: '翻到第 200 块之后', ts: 1000 }],
+  run_nodes: [
+    { id: 'r36b', label: 'run', status: 'running', depth: 0, kind: 'run', started_at: 1000 },
+    { id: 'sub36b', parent_id: 'r36b', label: 'sync-out', status: 'running', depth: 1, kind: 'run', started_at: 1500 },
+  ],
+  turns: [],
+}, undefined, {
+  live: true,
+  agents: [{ kind: 'agent', id: 93, run_id: 'sub36b', parent_run_id: 'r36b', label: 'sync-out', status: 'running', spawned_at: 1500, items: [] }],
+})
+EV('agent_end', { run_id: 'r36b', finish_reason: 'stop' })
+assert.equal(nodeOf('sub36b')?.status, 'done', '窗口外的**同步**子 run 照旧随父 run 收敛')
+assert.equal(
+  viewOf().agentDetached?.find((b) => b.kind === 'agent')?.status,
+  'abandoned',
+  '窗口外的同步子卡也必须落地（否则左栏一直转圈）',
+)
+assert.ok(!busy())
+console.log('PASS 场景36：卡片只在 agentDetached 时父 run 收尾也不误杀异步子 run')
+
+// 场景 37（复审 N-1）：新批次开口（user_inputs_consumed injected=false）也是**父 run 终止
+// 证据**，同步子 run 必须一起落地 —— 此前只有 agent_end 这一条路径做了，其余两条路径上
+// 同步子 run 会一直 running（左栏点常亮、busy 永远真）。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r37' })
+EV('agent_start', { run_id: 'sub37-sync', parent_run_id: 'r37', depth: 1, name: 'sync' })
+assert.ok(busy(), '父 + 同步子 run 都在跑')
+EV('user_inputs_consumed', { user_texts: ['下一轮的问题'], injected: false })
+assert.equal(nodeOf('r37')?.status, 'done', '父 run 由新批次开口收敛')
+assert.equal(nodeOf('sub37-sync')?.status, 'done', '同步子 run 同样收敛（无 task_id，阻塞调用不可能还活着）')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'agent')?.status,
+  'abandoned',
+  '同步子卡也要 abandon（它自己的 agent_end 不会来了）',
+)
+assert.ok(!busy(), '纯同步子 run：收敛后会话不再忙')
+assert.ok(!mainRunActive(viewOf()))
+assert.ok(
+  settles().some((r) => r.source === 'new_run_batch' && r.runIds.includes('sub37-sync')),
+  '顺带收敛必须留诊断',
+)
+// 异步子 run 不动：它仍在跑 → busy 仍是**真**（不能为了「看起来收干净了」杀掉它）
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r37b' })
+EV('agent_start', { run_id: 'sub37b-sync', parent_run_id: 'r37b', depth: 1, name: 'sync' })
+EV('agent_start', { run_id: 'sub37b-async', parent_run_id: 'r37b', depth: 1, task_id: 'tk37b', name: 'bg' })
+EV('user_inputs_consumed', { user_texts: ['下一轮的问题'], injected: false })
+assert.equal(nodeOf('sub37b-sync')?.status, 'done')
+assert.equal(nodeOf('sub37b-async')?.status, 'running', '带 task_id 的异步子 run 绝不随新批次收敛')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'agent' && b.taskId === 'tk37b')?.status,
+  'running',
+  '异步子卡等它自己的 agent_end / task_end',
+)
+assert.ok(busy(), '摘离任务还在跑 → busy 是真值')
+assert.ok(!mainRunActive(viewOf()), '主 run 已收尾')
+// 运行中插话（injected=true）**不是**终止证据：同步子 run 不许被它收敛。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r37c' })
+EV('agent_start', { run_id: 'sub37c', parent_run_id: 'r37c', depth: 1, name: 'sync' })
+EV('user_inputs_consumed', { user_texts: ['运行中插一句'], injected: true })
+assert.equal(nodeOf('sub37c')?.status, 'running', '插话属于当前这一轮，不是上一轮结束的证据')
+assert.equal(viewOf().blocks.find((b) => b.kind === 'agent')?.status, 'running')
+assert.ok(busy())
+console.log('PASS 场景37：新批次开口收敛同步子 run（异步不动，插话不算证据）')
+
+// 场景 38（复审 N-1）：会话级失败（session_run_error）同样是父 run 终止证据。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r38' })
+EV('agent_start', { run_id: 'sub38-sync', parent_run_id: 'r38', depth: 1, name: 'sync' })
+EV('agent_start', { run_id: 'sub38-async', parent_run_id: 'r38', depth: 1, task_id: 'tk38', name: 'bg' })
+EV('session_run_error', { error: 'upstream 500' })
+assert.equal(nodeOf('r38')?.status, 'error', '主 run 收敛为 error')
+assert.equal(nodeOf('sub38-sync')?.status, 'done', '同步子 run 同样收敛')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'agent' && b.runId === 'sub38-sync')?.status,
+  'abandoned',
+  '同步子卡 abandon',
+)
+assert.equal(nodeOf('sub38-async')?.status, 'running', '异步子 run 仍可晚于主 run 收尾（场景25 的不变量）')
+assert.ok(busy(), '摘离任务还在跑 → busy 是真值')
+assert.ok(!mainRunActive(viewOf()))
+assert.ok(
+  settles().some((r) => r.source === 'session_run_error' && r.runIds.includes('sub38-sync')),
+  '顺带收敛必须留诊断',
+)
+console.log('PASS 场景38：会话级失败也收敛同步子 run（异步不动）')
+
+// 场景 39（复审 N-3）：同步子 run 的**状态**不继承父 run 的 runStatus。
+// 它是父 run 里的阻塞调用：父 run 收尾时它早已返回。只有 abort 才真的把它一起打断；
+// max_iterations / error 说的是**父 loop** 的结局，把正常返回的子 agent 画成
+// interrupted / failed 等于凭空造失败。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r39' })
+EV('agent_start', { run_id: 'sub39', parent_run_id: 'r39', depth: 1, name: 'sync' })
+EV('agent_end', { run_id: 'r39', finish_reason: 'max_iterations' })
+assert.equal(nodeOf('r39')?.status, 'interrupted', '前提：父 run 达轮数上限 → interrupted')
+assert.equal(nodeOf('sub39')?.status, 'done', '同步子 run 正常返回：不得因为父 run 达上限被画成 interrupted')
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r39b' })
+EV('agent_start', { run_id: 'sub39b', parent_run_id: 'r39b', depth: 1, name: 'sync' })
+EV('agent_end', { run_id: 'r39b', finish_reason: 'error' })
+assert.equal(nodeOf('r39b')?.status, 'error', '前提：父 run 失败 → error')
+assert.equal(nodeOf('sub39b')?.status, 'done', '同步子 run 不得继承父 run 的 error')
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r39c' })
+EV('agent_start', { run_id: 'sub39c', parent_run_id: 'r39c', depth: 1, name: 'sync' })
+EV('agent_end', { run_id: 'r39c', finish_reason: 'abort' })
+assert.equal(nodeOf('r39c')?.status, 'interrupted')
+assert.equal(nodeOf('sub39c')?.status, 'interrupted', '中断会把父 run 里的阻塞调用一起打断 → interrupted')
+assert.equal(
+  viewOf().blocks.find((b) => b.kind === 'agent')?.status,
+  'abandoned',
+  '中断时同步子卡同样落地',
+)
+console.log('PASS 场景39：同步子 run 的状态按父 run 的收场方式映射（只有 abort 是 interrupted）')
+
+// 场景 40（P5-03d，复审 blocking）：**收敛作用域 = 被落地的那棵 run 树**，不是「全视图里
+// 没有 task_id 的子 run」。subagent 的 maxSpawnDepth=2 只是深度上限；当前桌面端 spawn 全是
+// Background=true、会写 task_id，无 task_id 的 depth-2 只在宿主注册同步 spawn 时可达（当前
+// 不注册），所以下面是**防御性覆盖**：
+//   主 run → 异步后台任务（depth-1，带 task_id）→ 它自己派出的 in-loop 子 run（depth-2，
+//   无 task_id）
+// 父 run 的 agent_end 只证明**主 run 这棵树**结束，不证明别人派出去的后台任务里的阻塞调用
+// 也结束了。depth-2 那条还在跑，终态证据是它自己的 agent_end / task_end。
+// 修前：syncSubRunIds 按「全视图里无 task_id」收 → bg-child 被父 run 的 agent_end 收敛成
+// done、卡片 abandoned；而 settleRunNodes 只动 running 节点，误收敛是**永久**的
+// （真实 agent_end 到了也改不回来）。
+setup(); __clearRunSettles()
+const card40 = (runId) => viewOf().blocks.find((b) => b.kind === 'agent' && b.runId === runId)
+EV('agent_start', { run_id: 'r40' })
+EV('agent_start', { run_id: 'sub40-bg', parent_run_id: 'r40', depth: 1, task_id: 'tk40', name: 'bg' })
+EV('agent_start', { run_id: 'sub40-bg-child', parent_run_id: 'sub40-bg', depth: 2, name: 'bg-child' })
+EV('agent_end', { run_id: 'r40', finish_reason: 'stop' })
+assert.equal(nodeOf('r40')?.status, 'done', '父 run 自己照常收尾')
+assert.equal(nodeOf('sub40-bg')?.status, 'running', '带 task_id 的异步子 run 不随父 run 收敛')
+assert.equal(
+  nodeOf('sub40-bg-child')?.status,
+  'running',
+  'depth-2 in-loop 子 run 挂在异步节点之下，不在父 run 的收尾范围里（复审 blocking）',
+)
+assert.equal(card40('sub40-bg')?.status, 'running', '异步子卡等它自己的 agent_end / task_end')
+assert.equal(card40('sub40-bg-child')?.status, 'running', 'depth-2 卡仍在跑：不得被画成 abandoned')
+assert.ok(busy(), 'depth-2 还在跑 → busy 必须仍为真')
+assert.ok(!settles().some((r) => r.source === 'agent_end'), '这条 agent_end 没有顺带收敛任何人 → 不写诊断')
+assert.ok(
+  !settles().some((r) => r.runIds.includes('sub40-bg-child')),
+  '诊断里出现 depth-2 就等于误杀了它（它自己的 agent_end 还没到）',
+)
+// 误收敛过的节点是永久的（settleRunNodes 只动 running）：真事件到了必须还能落地。
+EV('agent_end', { run_id: 'sub40-bg-child', parent_run_id: 'sub40-bg', finish_reason: 'error' })
+assert.equal(nodeOf('sub40-bg-child')?.status, 'error', '终态证据仍是它自己的 agent_end（此处 error）')
+assert.equal(nodeOf('sub40-bg')?.status, 'running', '异步父 run 仍在跑')
+console.log('PASS 场景40：父 run 收尾不下沉进异步子 run 的子树（depth-2 不再被误杀）')
+
+// 场景 41（P5-03d）：另外两条「父 run 终止」证据同样按**被落地的根**划作用域；同时钉住
+// 正向路径 —— 根自己那棵树里的同步子 run 照旧收敛（别为了收窄作用域把正常路径关掉）。
+// 新批次开口：根 r41 下既有同步子 run（无 task_id），也有异步子 run（带 task_id）及它
+// 派出去的 depth-2 子 run；另有一个工具节点（parentId 也指向根，但不是 run 树的一环）。
+setup(); __clearRunSettles()
+const card41 = (runId) => viewOf().blocks.find((b) => b.kind === 'agent' && b.runId === runId)
+EV('agent_start', { run_id: 'r41' })
+EV('agent_start', { run_id: 'sub41-sync', parent_run_id: 'r41', depth: 1, name: 'sync' })
+EV('agent_start', { run_id: 'sub41-bg', parent_run_id: 'r41', depth: 1, task_id: 'tk41', name: 'bg' })
+EV('agent_start', { run_id: 'sub41-bg-child', parent_run_id: 'sub41-bg', depth: 2, name: 'bg-child' })
+EV('tool_run_start', { id: 'x41', name: 'bash', arguments: '{}', run_id: 'r41' })
+assert.equal(nodeOf('tool-x41')?.kind, 'tool', '前提：工具节点也带 parentId（发起它的 run）')
+assert.ok(busy())
+EV('user_inputs_consumed', { user_texts: ['下一轮的问题'], injected: false })
+assert.equal(nodeOf('r41')?.status, 'done', '根 run 由新批次开口收敛')
+// 正向：根自己路径上的同步子 run 仍收敛（节点落到 done + 卡片 abandoned）
+assert.equal(nodeOf('sub41-sync')?.status, 'done', '根自己的同步子 run 照旧随父 run 收敛')
+assert.equal(card41('sub41-sync')?.status, 'abandoned', '同步子卡落地（否则左栏一直转圈）')
+// 反向：异步节点之下的 depth-2 不下沉；异步节点自己也不碰
+assert.equal(nodeOf('sub41-bg')?.status, 'running', '带 task_id 的异步子 run 不随新批次收敛')
+assert.equal(nodeOf('sub41-bg-child')?.status, 'running', '新批次开口同样不得下沉进异步子树')
+assert.equal(card41('sub41-bg')?.status, 'running')
+assert.equal(card41('sub41-bg-child')?.status, 'running', 'depth-2 卡仍在跑')
+assert.ok(busy(), '后台任务还在跑 → busy 是真值')
+assert.ok(!mainRunActive(viewOf()), '主 run 已收尾')
+const settle41 = settles().find((r) => r.source === 'new_run_batch')
+assert.ok(settle41, '顺带收敛必须留诊断')
+assert.ok(settle41.runIds.includes('sub41-sync'), '诊断记的是真被顺带收敛的同步子 run')
+assert.ok(!settle41.runIds.includes('sub41-bg'), '异步子 run 不进名单')
+assert.ok(!settle41.runIds.includes('sub41-bg-child'), 'depth-2 不进名单')
+assert.ok(
+  !settle41.runIds.includes('tool-x41'),
+  '工具节点不是 run 树的一环：不进入同步子 run 闭包（复审 N-6）',
+)
+// session_run_error：第三条父 run 终止证据，同样只收被落地根之下、路径无 task_id 的同步子。
+setup(); __clearRunSettles()
+EV('agent_start', { run_id: 'r41b' })
+EV('agent_start', { run_id: 'sub41b-sync', parent_run_id: 'r41b', depth: 1, name: 'sync' })
+EV('agent_start', { run_id: 'sub41b-bg', parent_run_id: 'r41b', depth: 1, task_id: 'tk41b', name: 'bg' })
+EV('agent_start', { run_id: 'sub41b-bg-child', parent_run_id: 'sub41b-bg', depth: 2, name: 'bg-child' })
+EV('session_run_error', { error: 'upstream 500' })
+assert.equal(nodeOf('r41b')?.status, 'error', '主 run 收敛为 error')
+assert.equal(nodeOf('sub41b-sync')?.status, 'done', '根自己的同步子 run 照样收敛')
+assert.equal(nodeOf('sub41b-bg')?.status, 'running', '异步子 run 等它自己的 agent_end / task_end')
+assert.equal(nodeOf('sub41b-bg-child')?.status, 'running', '会话级失败同样不得下沉进异步子树')
+assert.ok(busy())
+console.log('PASS 场景41：新批次开口 / 会话级失败也只收被落地树下无 task_id 的同步子 run')
 
 console.log('STORE_TEST_PASS')
 process.exit(0)

@@ -80,7 +80,11 @@ func testPythonRuntime(t *testing.T) *goruntime.Runtime {
 func testManager(t *testing.T) (*manager, *syncBuf) {
 	t.Helper()
 	// 隔离真实用户配置、插件和 Seatbelt 相关宿主状态；bridge 单测不应读取 ~/.go-code。
-	t.Setenv("HOME", t.TempDir())
+	// HOME 之外还要隔离 USERPROFILE：os.UserHomeDir 在 Windows 上读它，只设 HOME 时
+	// p404aWriteUserHooks / 边界测试可能写到真实 %USERPROFILE%\.go-code（破坏性）。
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	appDataDirOverride = t.TempDir()
 	t.Cleanup(func() { appDataDirOverride = "" })
 	buf := &syncBuf{}
@@ -93,6 +97,9 @@ func testManager(t *testing.T) (*manager, *syncBuf) {
 	// injectBrowserWS 等 fake 插件）。后台 run goroutine（401 重试等）在 TempDir
 	// cleanup 时仍可能 emit → syncMode 同步写盘 → directory not empty flaky。
 	t.Cleanup(func() {
+		// Hub 智能体运行态不在 m.workspaces 里（刻意分开登记），单独收尾：
+		// 否则 DM 会话的 run goroutine 会在 TempDir 清理后继续写盘（directory not empty）。
+		m.shutdownHubRuntimes()
 		m.mu.Lock()
 		paths := make([]string, 0, len(m.workspaces))
 		for wsPath := range m.workspaces {
@@ -2134,6 +2141,218 @@ func TestSetProviderEmptyKeyClearsStale(t *testing.T) {
 	}
 }
 
+// TestSwitchModelInjectsProviderKey switch_model 可随 payload 带 api_key（BR-08）：
+// key 不再持久化在 settings.json，由 Electron（keys.json / safeStorage）在切模型时按目标
+// provider 注入。钉住三件事：
+//
+//	① 带 api_key → 该 provider 的 keyLocked 立刻生效（非活跃 provider 没有 env 兜底）；
+//	② 不带 api_key → 不误清现有内存值（保留旧值）；
+//	③ 注入必须发生在 loadSettings **之后** —— settings 已无 api_key，loadSettings 会清内存旧值，
+//	   先注入就会被抹掉（带 settings.json 的分支正是这个顺序锚点）；清掉后回退 env 兜底。
+func TestSwitchModelInjectsProviderKey(t *testing.T) {
+	ws := t.TempDir()
+	m, buf := testManager(t)
+	if _, err := m.create(ws, "s1", ""); err != nil {
+		t.Fatal(err)
+	}
+	switchToZhipu := func(id int, key string, withKey bool) map[string]any {
+		payload := map[string]any{"workspace": ws, "session_id": "s1", "model": "glm-5.3-flash", "provider": "zhipu"}
+		if withKey {
+			payload["api_key"] = key
+		}
+		m.dispatch(cmd(id, "switch_model", payload))
+		if !lastRespOK(t, buf, id) {
+			t.Fatalf("switch_model(zhipu) 应成功: %v", readAllLines(buf))
+		}
+		return payload
+	}
+
+	// ① 带 key：写入目标 provider 的内存 key（测试 HOME 里还没有 settings.json）
+	switchToZhipu(1, "sk-zhipu-payload", true)
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-payload" {
+		t.Fatalf("带 api_key 的 switch_model 后 keyLocked = %q, want sk-zhipu-payload", got)
+	}
+
+	// ② 不带 api_key：内存值保留（不得误清）
+	switchToZhipu(2, "", false)
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-payload" {
+		t.Fatalf("不带 api_key 的 switch_model 误清了内存 key: %q", got)
+	}
+
+	// ③ 有 settings.json（无 api_key，迁移后的正常形态）：loadSettings 会清内存 key，
+	//    所以注入必须在其后 —— 否则 keyLocked 会是空的。
+	cfgDir := filepath.Join(mustUserHome(t), ".go-code")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{
+		"schema_version": 2,
+		"provider": {
+			"active": "deepseek",
+			"zhipu": {"base_url": "https://open.bigmodel.cn/api/paas/v4"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	switchToZhipu(3, "sk-zhipu-payload-2", true)
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-payload-2" {
+		t.Fatalf("loadSettings 之后注入失败: keyLocked = %q, want sk-zhipu-payload-2（注入点必须在 loadSettings 之后）", got)
+	}
+
+	// ④ 再切一次且不带 key：注入值**保留**（不误清）——payload 不带 api_key 的语义是「不动」
+	switchToZhipu(4, "", false)
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-payload-2" {
+		t.Fatalf("不带 api_key 的 switch_model 误清了注入 key: %q", got)
+	}
+
+	// ⑤ 显式空串 = 清除 → 回退 env 兜底
+	t.Setenv("ZHIPUAI_API_KEY", "sk-zhipu-env")
+	switchToZhipu(5, "", true) // 带 key 字段但为空串
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-env" {
+		t.Fatalf("清掉后 env 兜底 keyLocked = %q, want sk-zhipu-env", got)
+	}
+}
+
+// TestSetProviderInjectedKeySurvivesReload set_provider 带 api_key 后，key 必须在内存里**留住**：
+//   - settings.json 已无 api_key（BR-08 迁移后的正常形态）→ loadSettings 不得清掉注入值；
+//   - reload_settings（切沙箱/浏览器引擎等顶层设置变更会发）不得清掉注入值；
+//   - 再保存一次新 key 必须覆盖旧值（轮换生效）；
+//   - 显式空 api_key = 清除（回退 env 兜底）。
+//
+// 回归背景：set_provider 里 setKey 曾排在 loadSettings 之前，settings 无 key 时会把它删掉 →
+// 「面板里改了 key，实际还在用旧 key / 401」。
+func TestSetProviderInjectedKeySurvivesReload(t *testing.T) {
+	m, buf := testManager(t)
+	cfgDir := filepath.Join(mustUserHome(t), ".go-code")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{
+		"schema_version": 2,
+		"provider": {
+			"active": "deepseek",
+			"zhipu": {"base_url": "https://open.bigmodel.cn/api/paas/v4"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m.dispatch(cmd(1, "set_provider", map[string]any{"provider": "zhipu", "api_key": "sk-rotated-1"}))
+	if !lastRespOK(t, buf, 1) {
+		t.Fatalf("set_provider(带 key) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-rotated-1" {
+		t.Fatalf("保存后 keyLocked = %q, want sk-rotated-1（settings 无 api_key 时不得清掉注入值）", got)
+	}
+
+	// 顶层设置变更 → reload_settings（内部又跑一次 loadSettings）→ 注入值必须还在
+	m.dispatch(cmd(2, "reload_settings", map[string]any{}))
+	if !lastRespOK(t, buf, 2) {
+		t.Fatalf("reload_settings 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-rotated-1" {
+		t.Fatalf("reload_settings 后 keyLocked = %q, want sk-rotated-1（注入值不得被重载清掉）", got)
+	}
+
+	// 再保存（不带 key 字段）：仍是同一个 key
+	m.dispatch(cmd(3, "set_provider", map[string]any{"provider": "zhipu", "protocol": "anthropic"}))
+	if !lastRespOK(t, buf, 3) {
+		t.Fatalf("set_provider(无 key) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-rotated-1" {
+		t.Fatalf("不带 key 的保存误清了 key: %q", got)
+	}
+
+	// 轮换：新 key 覆盖旧值
+	m.dispatch(cmd(4, "set_provider", map[string]any{"provider": "zhipu", "api_key": "sk-rotated-2"}))
+	if !lastRespOK(t, buf, 4) {
+		t.Fatalf("set_provider(轮换) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-rotated-2" {
+		t.Fatalf("轮换后 keyLocked = %q, want sk-rotated-2", got)
+	}
+
+	// 显式空串 = 清除 → env 兜底
+	t.Setenv("ZHIPUAI_API_KEY", "sk-zhipu-env")
+	m.dispatch(cmd(5, "set_provider", map[string]any{"provider": "zhipu", "api_key": ""}))
+	if !lastRespOK(t, buf, 5) {
+		t.Fatalf("set_provider(空 key) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-zhipu-env" {
+		t.Fatalf("清 key 后 env 兜底 keyLocked = %q, want sk-zhipu-env", got)
+	}
+}
+
+// TestInjectedKeyBeatsStaleSettingsPlaintext 回归（P5-09 复审 B1b）：settings 迁移未完成、
+// provider 段里仍残留**旧明文** api_key 时，payload 注入的 key 必须永远胜出：
+//   - set_provider 注入新 key 后，任何 loadSettings（reload_settings / 热重载）都不得把内存 key
+//     顶回 settings 里的旧明文（旧 key 复活 → 401 / 轮换不生效）；
+//   - 反向锚点：没有 payload 注入的 provider 仍按 settings 明文生效（迁移未完成的兜底保留）。
+//
+// 回归背景：loadSettings 曾无条件「settings 有 api_key 就覆盖内存 + 清注入标记」，
+// 一次 reload_settings 就把刚保存的新 key 换回旧明文（实测 keyLocked = sk-OLD-plaintext）。
+func TestInjectedKeyBeatsStaleSettingsPlaintext(t *testing.T) {
+	m, buf := testManager(t)
+	cfgDir := filepath.Join(mustUserHome(t), ".go-code")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 迁移未完成的形态：settings 仍留旧明文（keys.json 里才是新 key，由 payload 下发）
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{
+		"schema_version": 2,
+		"provider": {
+			"active": "deepseek",
+			"zhipu": {"base_url": "https://open.bigmodel.cn/api/anthropic", "api_key": "sk-OLD-plaintext"},
+			"opencode": {"base_url": "https://opencode.ai/zen/go/v1", "api_key": "sk-OLD-opencode"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.provCfg.loadSettings() // 启动热载：迁移未完成时先吃 settings 明文（兜底）
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-OLD-plaintext" {
+		t.Fatalf("前置：settings 明文应先生效，got %q", got)
+	}
+
+	// keys.json 里的最新 key 随 set_provider payload 下发
+	m.dispatch(cmd(1, "set_provider", map[string]any{"provider": "zhipu", "api_key": "sk-NEW-injected"}))
+	if !lastRespOK(t, buf, 1) {
+		t.Fatalf("set_provider(带 key) 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-NEW-injected" {
+		t.Fatalf("注入后 keyLocked = %q, want sk-NEW-injected", got)
+	}
+
+	// 顶层设置变更 → reload_settings（内部又跑一次 loadSettings）→ 旧明文不得复活
+	m.dispatch(cmd(2, "reload_settings", map[string]any{}))
+	if !lastRespOK(t, buf, 2) {
+		t.Fatalf("reload_settings 应成功: %v", readAllLines(buf))
+	}
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-NEW-injected" {
+		t.Fatalf("reload_settings 后 keyLocked = %q, want sk-NEW-injected（settings 旧明文不得顶掉注入值）", got)
+	}
+
+	// 再直接跑一次 loadSettings（热重载/切 provider 都走它）：仍是新 key
+	m.provCfg.loadSettings()
+	if got := m.provCfg.keyLocked("zhipu"); got != "sk-NEW-injected" {
+		t.Fatalf("再次 loadSettings 后 keyLocked = %q, want sk-NEW-injected", got)
+	}
+
+	// 反向锚点：没有注入值的 provider 仍读 settings 明文（兜底不能被一起删掉）
+	if got := m.provCfg.keyLocked("opencode"); got != "sk-OLD-opencode" {
+		t.Fatalf("无注入值的 provider 应按 settings 明文生效，got %q", got)
+	}
+}
+
+// mustUserHome 取当前测试 HOME（testManager 已用 t.TempDir 隔离）。
+func mustUserHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	return home
+}
+
 // TestLoadSettingsEmptyKeyClearsStale settings.json 里 provider 无 api_key →
 // loadSettings 清内存旧 key（删除 key 后重启/热重载不留旧值 → 新会话 401）。
 func TestLoadSettingsEmptyKeyClearsStale(t *testing.T) {
@@ -2619,6 +2838,9 @@ func TestPromoteTaskCommandErrors(t *testing.T) {
 // TestPromoteTaskCommandSuccess 端到端：运行中长工具 → promote_task → 主 loop 拿占位继续 →
 // release → 结果自动回传（task_result_delivered）→ wake 唤醒 run loop → 模型续跑收到结果。
 func TestPromoteTaskCommandSuccess(t *testing.T) {
+	// 等待预算 10s（原 3s）：干净 clone 首次全量跑时，其它包的编译与测试并行抢 CPU，
+	// 3s 会让「promote → 占位 → task_result 回传」这种多段唤醒链偶发超时
+	// （P0-09 的干净检出 gate 上实际踩到过一次）。断言内容不变，只放宽等待。
 	ws := t.TempDir()
 	m, buf := testManager(t)
 	sid := newSessionID(t, m, buf, ws)
@@ -2670,7 +2892,7 @@ func TestPromoteTaskCommandSuccess(t *testing.T) {
 			taskID = str(ev, "task_id")
 		}
 		return ev != nil
-	}, 3*time.Second)
+	}, 10*time.Second)
 
 	// promote_task → ok:true
 	buf.Reset()
@@ -2680,16 +2902,16 @@ func TestPromoteTaskCommandSuccess(t *testing.T) {
 	}
 
 	// 主 run 拿到占位 → 下轮 stop → 第一次 agent_end
-	waitBridgeString(t, buf, func(s string) bool { return countAgentEnd(s) >= 1 }, 3*time.Second)
+	waitBridgeString(t, buf, func(s string) bool { return countAgentEnd(s) >= 1 }, 10*time.Second)
 
 	// release → 后台完成 → task_result_delivered 自动回传 + wake 唤醒 run loop
 	block.Release()
 	waitBridgeString(t, buf, func(s string) bool {
 		return findFirst(s, func(mm map[string]any) bool { return mm["event_type"] == "task_result_delivered" }) != nil
-	}, 3*time.Second)
+	}, 10*time.Second)
 
 	// wake 生效：run loop 再次运行，round3 模型收到 task_result 续跑（第二次 agent_end）
-	waitBridgeString(t, buf, func(s string) bool { return countAgentEnd(s) >= 2 }, 3*time.Second)
+	waitBridgeString(t, buf, func(s string) bool { return countAgentEnd(s) >= 2 }, 10*time.Second)
 	mu.Lock()
 	gotResult := p.round3TaskResult
 	mu.Unlock()
@@ -3292,5 +3514,26 @@ func TestAskBatchWorkspaceRouting(t *testing.T) {
 	}
 	if badOk {
 		t.Fatal("错位 workspace 的 ask_batch 不应 ok:true（必须让客户端回滚）")
+	}
+}
+
+// P1-10 N3：显式 provider 的模型表为空（本地 vLLM/Ollama 未拉列表）时允许指定模型；
+// 表非空仍严格拒绝未知模型，provider 本身未配置也拒绝。
+func TestAllowUnlistedModelOnlyForKnownEmptyProvider(t *testing.T) {
+	pc := &providerConfig{
+		baseURL:   map[string]string{"local": "http://127.0.0.1:8000/v1"},
+		apiKey:    map[string]string{"local": "x"},
+		models:    map[string]map[string]int64{"local": {}},
+		maxTokens: map[string]map[string]int64{},
+	}
+	if !pc.allowUnlistedModel("local") {
+		t.Fatal("known provider with empty model table must fail-open")
+	}
+	pc.models["local"]["known"] = 4096
+	if pc.allowUnlistedModel("local") {
+		t.Fatal("non-empty model table must be strict")
+	}
+	if pc.allowUnlistedModel("missing") {
+		t.Fatal("unknown provider must not fail-open")
 	}
 }

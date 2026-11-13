@@ -58,6 +58,60 @@ const (
 	// CmdMeshPing 主动 ping 一个已连/出站节点（连接检测；设置页「检测连接」按钮）。
 	CmdMeshPing Command = "mesh_ping"
 
+	// —— Agent Hub（P1：智能体 CRUD） ——
+	// 命令面按 docs/AGENT_HUB_TECH_PLAN.md §7.1.2 命名；hub_* 一律由 dispatchHub 分派。
+	CmdHubAgentCreate  Command = "hub_agent_create"
+	CmdHubAgentUpdate  Command = "hub_agent_update"
+	CmdHubAgentGet     Command = "hub_agent_get"
+	CmdHubAgentList    Command = "hub_agent_list"
+	CmdHubAgentDelete  Command = "hub_agent_delete"
+	CmdHubAgentRestore Command = "hub_agent_restore" // 从回收站恢复（§5.2 软删可恢复）
+	// —— Agent Hub（P1：人格版本 / 回滚 / 提示词预览） ——
+	CmdHubAgentVersions Command = "hub_agent_versions"       // 历史版本清单
+	CmdHubAgentRollback Command = "hub_agent_rollback"       // 回滚到某一版（新版本落地，不丢当前）
+	CmdHubPromptPreview Command = "hub_agent_prompt_preview" // 系统提示词分层预览
+	// —— Agent Hub（P1：记忆面板） ——
+	CmdHubAgentMemory      Command = "hub_agent_memory"       // 列表 / 读一个文件
+	CmdHubAgentMemoryWrite Command = "hub_agent_memory_write" // 写（写前备份）
+	// —— Agent Hub（P1：DM 会话） ——
+	CmdHubOpen    Command = "hub_open"
+	CmdHubSend    Command = "hub_send"
+	CmdHubHistory Command = "hub_history"
+	// CmdHubMarkRead 推进已读游标（左栏未读点，§7.1.1）：group_id → 群级游标；
+	// agent_id → DM 游标。两个只给一个。
+	CmdHubMarkRead Command = "hub_mark_read"
+	// —— Agent Hub（P2：任务板 + Needs you） ——
+	CmdHubTaskList   Command = "hub_task_list"
+	CmdHubTaskGet    Command = "hub_task_get"
+	CmdHubTaskCancel Command = "hub_task_cancel"
+	CmdHubTaskRetry  Command = "hub_task_retry"
+	// CmdHubTaskArtifactPreview 任务卡产物的人类只读预览（task_id + path 白名单寻址）。
+	// 只给本地桌面 UI；不要加进 mobile_server 白名单。
+	CmdHubTaskArtifactPreview Command = "hub_task_artifact_preview"
+	CmdHubNeedList            Command = "hub_need_list"
+	CmdHubNeedResolve         Command = "hub_need_resolve"
+	CmdHubClear               Command = "hub_clear" // 清空 DM 上下文（保留 system，§6.4）
+	// —— Agent Hub（P3a：群组基础） ——
+	CmdHubGroupList         Command = "hub_group_list"
+	CmdHubGroupGet          Command = "hub_group_get"
+	CmdHubGroupCreate       Command = "hub_group_create"
+	CmdHubGroupUpdate       Command = "hub_group_update"
+	CmdHubGroupDelete       Command = "hub_group_delete"
+	CmdHubGroupMemberAdd    Command = "hub_group_member_add"
+	CmdHubGroupMemberRemove Command = "hub_group_member_remove"
+	CmdHubGroupHistory      Command = "hub_group_history"
+	CmdHubGroupActivity     Command = "hub_group_activity"
+	CmdHubGroupSend         Command = "hub_group_send"
+	// CmdHubGroupAssign 人从群 UI 把一条可追踪任务派给成员（P3b-07a，§6.7.9）：
+	// 与智能体 assign_task 同一条路径，但 Origin=human、指派消息 Sender=human。
+	CmdHubGroupAssign Command = "hub_group_assign"
+	// CmdHubConversationStop 人类「停止自动对话」：中断当前群 run + 清队列 + stopped（§6.5.6 规则 6）。
+	CmdHubConversationStop Command = "hub_conversation_stop"
+	CmdHubArtifactGet      Command = "hub_artifact_get"
+	// CmdHubSearch 人类全历史搜索（群 + DM，P4-04b-1）。**人类命令**：智能体侧没有
+	// 对应工具（agent 只能 group_history(query) 搜自己参与的群），所以命令面就是边界。
+	CmdHubSearch Command = "hub_search"
+
 	// —— Provider 管理 ——
 	CmdListModels          Command = "list_models"
 	CmdTestConnection      Command = "test_connection"

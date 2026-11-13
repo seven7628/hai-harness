@@ -11,7 +11,9 @@
 package jsonwire
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -19,6 +21,60 @@ import (
 type KV struct {
 	Key   string
 	Value []byte
+}
+
+// Envelope 宿主字段的结构化保证：kvs 里每个键在输出**顶层恰好出现一次**，且值是宿主给的那份。
+//
+// 为什么需要它：BR-03 的事故不是「忘了删」，而是删除与注入是**两次调用**——
+// 调用方漏一次（或 RemoveField 返回 nil 时静默跳过），事件自带的值就活了下来，
+// 而 JSON 重复键后者胜。这里把「先删后注入」合成一个入口，调用方不再有机会只做一半：
+//   - 字节里没有该键 → 只注入（绝大多数事件的热路径，一次 Contains）；
+//   - 有该键 → RemoveField 删掉顶层**所有**同名出现，再注入宿主那一份；
+//   - 结构异常（非对象 / 无法安全扫描）→ 返回错误，绝不原样带着重复键出门；
+//     调用方必须改走 ForceKeys（解码→覆盖→重编码）。
+func Envelope(base []byte, kvs []KV) ([]byte, error) {
+	if len(kvs) == 0 {
+		return base, nil
+	}
+	if !isJSONObject(base) {
+		return nil, fmt.Errorf("jsonwire: 事件行不是 JSON 对象（无法注入宿主键）")
+	}
+	for _, kv := range kvs {
+		if kv.Key == "" {
+			return nil, fmt.Errorf("jsonwire: 空的注入键")
+		}
+		if !bytes.Contains(base, []byte(`"`+kv.Key+`"`)) {
+			continue // 快速路径：事件没有同名键
+		}
+		stripped := RemoveField(base, kv.Key)
+		if stripped == nil {
+			return nil, fmt.Errorf("jsonwire: 无法安全移除顶层键 %q（结构异常）", kv.Key)
+		}
+		base = stripped
+	}
+	return InjectKeys(base, kvs)
+}
+
+// ForceKeys 解码 → 覆盖 → 重编码：宿主键同样恰好一份，且以宿主值为准。
+//
+// Envelope 的结构异常兜底：键顺序会变成 map 的字典序（对事件消费者无语义影响），
+// 但归属不再依赖「重复键谁在后」这种解析器细节。失败（非对象 / 坏 JSON / null）
+// 时返回错误 —— 调用方应丢弃这一行并留诊断，而不是让一条归属不明的事件上线。
+func ForceKeys(base []byte, kvs []KV) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(base, &obj); err != nil {
+		return nil, fmt.Errorf("jsonwire: 事件行不是 JSON 对象: %w", err)
+	}
+	if obj == nil {
+		return nil, fmt.Errorf("jsonwire: 事件行是 null（不是对象）")
+	}
+	for _, kv := range kvs {
+		if kv.Key == "" {
+			return nil, fmt.Errorf("jsonwire: 空的注入键")
+		}
+		obj[kv.Key] = append(json.RawMessage(nil), kv.Value...)
+	}
+	return json.Marshal(obj)
 }
 
 // InjectKeys 把键值对注入 JSON 对象首部（保持合法 JSON）。
@@ -57,8 +113,10 @@ func InjectKeys(base []byte, kvs []KV) ([]byte, error) {
 	return out, nil
 }
 
-// RemoveField 从 JSON 对象字节中删除指定键（顶层，**所有**同名出现都删）。返回 nil 表示无法安全处理
-// （非对象/键不存在/结构异常——调用方回退 Unmarshal 路径）。
+// RemoveField 从 JSON 对象字节中删除指定键（顶层，**所有**同名出现都删）。
+// 返回 nil 表示无法安全处理（非对象 / 结构异常 —— 调用方回退 Unmarshal 路径）；
+// **键不存在时返回原对象**（JSON 语义等价，只是按逗号重新拼了一遍；见
+// TestRemoveField 的「键不存在」用例），调用方不必特判缺键。
 // 实现：扫描 `"key":` 的键值对并跳过其值（支持字符串/数字/对象/数组/布尔/null），
 // 拼接剩余部分。仅处理顶层（不递归），值内嵌套同名键不影响（按引号/括号配对跳过）。
 func RemoveField(raw []byte, key string) []byte {
@@ -204,4 +262,18 @@ func skipValue(s string, i int) (int, bool) {
 		}
 		return i, true
 	}
+}
+
+// isJSONObject 首非空白字节是否为 '{'（Envelope 的快速结构判定）：
+// InjectKeys 的「跳过首 { 尾 }」逻辑只对对象成立，数组/字符串/null 会被拼成坏 JSON。
+func isJSONObject(b []byte) bool {
+	for _, c := range b {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			return c == '{'
+		}
+	}
+	return false
 }

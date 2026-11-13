@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { useAppStore, titleKey, MAX_WORKSPACE_PINS, MAX_SESSION_PINS } from '../store/useAppStore'
 import ConfirmModal from './ConfirmModal'
 import WorkspaceFiles from './WorkspaceFiles'
@@ -6,6 +7,10 @@ import HaiLogo from './HaiLogo'
 import { ChevronDown, Plus, FolderPlus, FolderIcon, FolderOpenIcon, SessionPlus, PinIcon, Sparkles, Gear, SessionIcon, PanelLeft, Clock, MoreIcon } from './icons'
 import { useT } from '../i18n'
 import { AgentTree } from './AgentTree'
+import { Bot } from './icons'
+import { useHubStore } from '../hub/useHubStore'
+import HubSidebar from '../hub/HubSidebar'
+import { accentOfAgent, accentOfGroup } from '../hub/agentAccent'
 
 // 工作区行内操作（查看文件/置顶/新建/删除）需要的最小面板宽度：低于它就收成一个「⋯」溢出菜单。
 // 算法：行左右 margin 12 + padding 10 + 预留 81 + chevron 11 + 图标 15 + 两处 gap 14 + 计数 ~10
@@ -28,9 +33,13 @@ const PERSONAS = [
 // 点击工作区头 → 切换为活跃并展开；活跃工作区再点 → 仅折叠/展开；悬停 + → 在该工作区直接建会话。
 // 会话标题：优先取重命名覆盖（titleOverrides，localStorage），否则 bridge 自动标题（第一条 user 文本）。
 // 双击会话标题 → 内联重命名（Enter 保存 / Esc 取消 / 清空恢复自动标题）。
-export default function LeftPanel() {
+export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
   const t = useT()
-  const leftExpanded = useAppStore((s) => s.leftExpanded)
+  const leftExpandedPref = useAppStore((s) => s.leftExpanded)
+  // 渲染用的「展开/折叠」以面板实际状态为准（App 从 Panel.onResize 回写）：
+  // store 只是用户意图，库在空间不足时会拒绝 expand —— 若仍按 store 画展开内容，
+  // 就会出现 44px 容器里塞整栏（P4 审计 HUB-N-01）。独立使用（无 prop）时退回 store。
+  const leftExpanded = collapsed == null ? leftExpandedPref : !collapsed
   const toggleLeft = useAppStore((s) => s.toggleLeft)
   const leftPinned = useAppStore((s) => s.leftPinned)
   const togglePin = useAppStore((s) => s.togglePin)
@@ -48,6 +57,21 @@ export default function LeftPanel() {
   const deleteSession = useAppStore((s) => s.deleteSession)
   const deleteWorkspace = useAppStore((s) => s.deleteWorkspace)
   const openSkills = useAppStore((s) => s.openSkills)
+  const openHub = useHubStore((s) => s.openHub)
+  const hubOpen = useHubStore((s) => s.open)
+  const closeHub = useHubStore((s) => s.closeHub)
+  // 折叠/展开态的左栏「智能体」入口用当前会话的身份色（群组取群主/成员 accent）。
+  const hubAccent = useHubStore((s) => {
+    const group = s.activeGroupId ? s.groups.find((g) => g.id === s.activeGroupId) : null
+    if (group) return accentOfGroup(group, s.agents)
+    const agent = s.activeId ? s.agents.find((a) => a.id === s.activeId) : null
+    return agent ? accentOfAgent(agent) : ''
+  })
+  const hubAccentStyle = hubAccent ? ({ ['--agent-accent']: hubAccent } as CSSProperties) : undefined
+  // 工作区/会话/文件视角都是「离开 Hub 回工作区」的入口：先退出 Hub，再执行原动作。
+  const exitHub = (): void => {
+    if (hubOpen) closeHub()
+  }
   const openCron = useAppStore((s) => s.openCron)
   const openSettings = useAppStore((s) => s.openSettings)
   const setActiveWorkspace = useAppStore((s) => s.setActiveWorkspace)
@@ -201,6 +225,9 @@ export default function LeftPanel() {
               ))}
             </div>
           </div>
+          {/* Hub 左侧段：智能体/群组列表 + 全历史搜索，始终位于「工作区」之上；
+              限高 38vh 内部滚动，工作区树仍占据下方剩余空间。 */}
+          <HubSidebar />
           <div className="left-head">
             <span className="left-title">{t('left.workspaces')}</span>
             <button
@@ -216,7 +243,7 @@ export default function LeftPanel() {
 
           <button
             className="new-session-btn"
-            onClick={() => void newSession()}
+            onClick={() => { exitHub(); void newSession() }}
             title={t(workspace ? 'left.newSessionHere' : 'left.newSessionFirst')}
           >
             <SessionPlus size={14} /> {t('left.newSession')}
@@ -253,6 +280,7 @@ export default function LeftPanel() {
                     className={`ws-head ${activeProject ? 'active' : ''} ${p.pinned ? 'pinned' : ''} ${narrow ? 'narrow' : ''}`}
                     title={activeProject ? undefined : t('left.switchHint')}
                     onClick={() => {
+                      exitHub()
                       // 展开/收起重置「展示更多」状态（每次收起再展开回到 5 条视图）
                       setMore((m) => {
                         if (p.path !== workspace) return m // 切换工作区不重置（保持用户偏好）
@@ -310,6 +338,7 @@ export default function LeftPanel() {
                       aria-label={t('left.viewFilesIn')}
                       onClick={(e) => {
                         e.stopPropagation()
+                        exitHub()
                         // 文件视角以**该工作区**为根：非活跃先切为活跃（与「在该工作区新建会话」同款语义）
                         if (p.path !== workspace) setActiveWorkspace(p.path)
                         setLeftView('files')
@@ -321,7 +350,7 @@ export default function LeftPanel() {
                       className="ws-new"
                       title={t('left.newSessionIn')}
                       aria-label={t('left.newSessionIn')}
-                      onClick={(e) => { e.stopPropagation(); createSessionIn(p.path) }}
+                      onClick={(e) => { e.stopPropagation(); exitHub(); createSessionIn(p.path) }}
                     >
                       <Plus size={12} />
                     </button>
@@ -372,6 +401,7 @@ export default function LeftPanel() {
                                   className={`session-item ${s.id === activeSessionId ? 'active' : ''} ${s.pinned ? 'pinned' : ''}`}
                                   onClick={() => {
                                     if (isEditing) return
+                                    exitHub()
                                     // 点会话行 = 回到它的**主会话**。
                                     // 正在看某个子智能体时，点当前会话原先什么都不做（same id →
                                     // setActiveSession 是空操作），于是「点主会话没反应」——
@@ -484,6 +514,7 @@ export default function LeftPanel() {
                   role="menuitem"
                   onClick={() => {
                     setMoreMenu(null)
+                    exitHub()
                     if (!activeProject) setActiveWorkspace(p.path)
                     setLeftView('files')
                   }}
@@ -497,7 +528,7 @@ export default function LeftPanel() {
                 >
                   <PinIcon size={13} /> {t(p.pinned ? 'left.unpinWorkspace' : 'left.pinWorkspace')}
                 </button>
-                <button role="menuitem" onClick={() => { setMoreMenu(null); createSessionIn(p.path) }}>
+                <button role="menuitem" onClick={() => { setMoreMenu(null); exitHub(); createSessionIn(p.path) }}>
                   <Plus size={13} /> {t('left.newSessionIn')}
                 </button>
                 <div className="menu-sep" />
@@ -514,6 +545,8 @@ export default function LeftPanel() {
 
           <div className="left-spacer" />
           <div className="left-bottom">
+            {/* Hub 入口只保留上方「智能体/群组」section；这里不再放第二个「智能体」按钮。
+                files 视图本身有「返回任务」（即回到工作区）入口。 */}
             <button className="nav-item" onClick={openSkills}><Sparkles /> {t('left.skills')}</button>
             <button className="nav-item" onClick={openCron}><Clock /> {t('left.cron')}</button>
             <button className="nav-item" onClick={openSettings}><Gear /> {t('left.settings')}</button>
@@ -524,6 +557,17 @@ export default function LeftPanel() {
           <div className="rail-logo" title="HAI"><HaiLogo height={26} /></div>
           {/* 常驻展开钮（与展开态品牌行的 PanelLeft 同款，收起后不再消失） */}
           <button className="rbtn" data-tip={t('topbar.toggleLeft')} aria-label={t('topbar.toggleLeft')} onClick={toggleLeft}><PanelLeft /></button>
+          {/* 折叠态智能体入口（P4-UI-1）：点击 = 展开左栏并进入 Hub。
+              放在顶部而不是底部，与展开态 Hub section 的位置对应。 */}
+          <button
+            className={`rbtn ${hubOpen ? 'on' : ''} ${hubOpen && hubAccent ? 'agent-active' : ''}`}
+            style={hubAccentStyle}
+            data-tip={t('hub.title')}
+            aria-label={t('hub.title')}
+            onClick={() => { toggleLeft(); openHub() }}
+          >
+            <Bot />
+          </button>
           {/* 建会话 / 加工作区排在「工作区」图标之上：二者是入口动作（与展开态 .new-session-btn /
               .add-ws-btn 的上下顺序一致——展开时它们也在工作区列表之上），「工作区」图标只是
               展开当前列表的开关，放在动作之后。图标改为语义化同族（气泡+ / 文件夹+），
@@ -560,7 +604,20 @@ export default function LeftPanel() {
               </div>
             )}
           </div>
-          <button className="rbtn on" data-tip={t('left.workspaces')} onClick={toggleLeft} aria-label={t('left.workspaces')}><SessionIcon /></button>
+          <button
+            className={`rbtn ${hubOpen ? '' : 'on'}`}
+            data-tip={t('left.workspaces')}
+            aria-label={t('left.workspaces')}
+            aria-pressed={!hubOpen}
+            onClick={() => {
+              // 折叠态点「工作区」= 回到工作区并展开左栏；Hub 开着时先退出 Hub，
+              // 否则 Bot 与工作区两个入口会同时是高亮态，且中心仍停在 Hub。
+              if (hubOpen) closeHub()
+              toggleLeft()
+            }}
+          >
+            <SessionIcon />
+          </button>
           <div className="rail-spacer" />
           <div className="rail-bottom">
             <button className="rbtn" data-tip={t('left.skills')} onClick={() => { toggleLeft(); openSkills() }} aria-label={t('left.skills')}><Sparkles /></button>

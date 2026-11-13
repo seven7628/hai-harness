@@ -289,19 +289,29 @@ func NewSession(id string, loop *agents.AgentLoop, store Store, opts ...Option) 
 		s.questions = events.NewQuestionWaiter(0) // 默认窗口 30 分钟（超时告知模型「用户未作答」）
 	}
 
+	if s.cfg.recoveryState != nil && store == nil {
+		// 恢复源只在能完整恢复上下文时才成立（下面的 restore 分支挂在 store != nil 上）。
+		// 允许这个组合会产生半恢复会话：上下文没恢复，积压却留在 recoveryState 里，
+		// PendingCount 恒 >0 → Hub 的空闲闸门（§6.6.4）永远「忙」，任务永远排不出去。
+		return nil, errors.New("session: WithRecoveryState requires a store")
+	}
 	if store != nil {
 		// checkpoint-first：宿主注入的 recoveryState（SessionRecord.sdk_state）优先；
 		// 缺失/损坏时回退 legacy store（现有路径）。二者二选一，不叠加。
 		if s.cfg.recoveryState != nil {
 			rst := s.cfg.recoveryState
+			pending := rst.Pending
+			// 积压搬进 inbox 后清掉来源：否则 PendingCount 会把同一批输入算两遍，
+			// Hub 的空闲闸门（§6.6.4）就永远「忙」。拷贝 State 再改，不动宿主持有的记录。
+			cp := *rst
+			cp.Pending = nil
+			s.cfg.recoveryState = &cp
 			s.registry.AbandonAll("session restored")
 			s.messages = rst.Messages
 			s.usage = rst.Usage
 			s.usage.Cost = rst.Cost // 成本以 State.Cost 为权威（兼容 Usage.Cost 未填充）
 			s.todo.Restore(rst.Todo)
-			for _, m := range rst.Pending {
-				s.inbox <- m
-			}
+			s.enqueuePending(pending)
 		} else {
 			data, err := store.Load(context.Background(), id)
 			switch {
@@ -316,9 +326,7 @@ func NewSession(id string, loop *agents.AgentLoop, store Store, opts ...Option) 
 					s.usage = data.State.Usage
 					s.usage.Cost = data.State.Cost  // 成本以 State.Cost 为权威（兼容 Usage.Cost 未填充的旧快照）
 					s.todo.Restore(data.State.Todo) // 待办随快照精确还原（压缩不涉及）
-					for _, m := range data.State.Pending {
-						s.inbox <- m
-					}
+					s.enqueuePending(data.State.Pending)
 				}
 			case errors.Is(err, ErrNotFound):
 				// 新会话
@@ -384,6 +392,14 @@ func (s *Session) SetLoop(loop *agents.AgentLoop) {
 	s.mu.Lock()
 	s.loop = loop
 	s.mu.Unlock()
+}
+
+// Loop 当前运行时（只读像素：宿主在 SetLoop 后自检「下一次 Run 用哪个 loop」）。
+// 运行中的 Run 可能仍持旧 loop —— 快照语义见 SetLoop。
+func (s *Session) Loop() *agents.AgentLoop {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loop
 }
 
 // SetHooks 热替换本会话的 hooks 聚合（配置面板保存 hooks 后由宿主推入）。
@@ -1245,6 +1261,33 @@ func (s *Session) PendingSnapshot() []core.Message {
 	return out
 }
 
+// enqueuePending 把恢复积压灌进 inbox。积压可能超过默认缓冲（64），而构造期还没有
+// 消费者 —— 直接 send 会永久阻塞（发生在 NewSession 返回前，调用方连 ctx 都没有），
+// 所以超出时先把 inbox 换成足够大的新 channel（此时没有任何读者/写者缓存旧 channel）。
+func (s *Session) enqueuePending(pending []core.Message) {
+	if len(pending) == 0 {
+		return
+	}
+	if len(pending) > cap(s.inbox) {
+		s.inbox = make(chan core.Message, len(pending))
+	}
+	for _, m := range pending {
+		s.inbox <- m
+	}
+}
+
+// PendingCount 未消费输入条数（inbox 积压 + 恢复待入队），供 Hub 的空闲闸门判断
+// 「目标是否真的空了」（方案 §6.6.4：`!st.Running && st.Pending == 0`）。
+// 恢复路径在 NewSession 里已把 State.Pending 搬进 inbox 并清空来源，所以这里不会双算。
+// 是近似值（channel 长度随时变化），调用方只做 0 / 非 0 判断。
+func (s *Session) PendingCount() int {
+	n := len(s.inbox)
+	if rst := s.cfg.recoveryState; rst != nil {
+		n += len(rst.Pending)
+	}
+	return n
+}
+
 // Persist 手动触发快照保存。
 func (s *Session) Persist(ctx context.Context) error {
 	return s.persist(ctx, s.messages)
@@ -1448,6 +1491,54 @@ func (s *Session) RunningSnapshot() []core.Message {
 		return nil
 	}
 	return append([]core.Message{}, s.runningSnapshot...)
+}
+
+// HasTaskResult 会话的任一投递通道（history / messages / runningSnapshot /
+// pending inbox）是否已有该任务的 task_result。用于宿主侧回推幂等：只读，
+// 不排空、不改变顺序；checkpoint-first 重启后 history 可能为空，必须查
+// messages/runningSnapshot/pending 三路（P2-05 复审）。
+func (s *Session) HasTaskResult(taskID string) bool {
+	if s == nil || taskID == "" {
+		return false
+	}
+	prefix := "〔后台任务 " + taskID + " "
+	match := func(m core.Message) bool {
+		for _, c := range m.Content {
+			if c.Type == core.ContentTypeTaskResult && strings.HasPrefix(c.Content, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, list := range [][]core.Message{s.history, s.messages, s.runningSnapshot} {
+		for _, m := range list {
+			if match(m) {
+				return true
+			}
+		}
+	}
+	// inbox 不能直接遍历：drain→refill；Ask 入队同持 s.mu，故期间不会有新生产者。
+	var pending []core.Message
+	for {
+		select {
+		case m := <-s.inbox:
+			pending = append(pending, m)
+		default:
+			goto refill
+		}
+	}
+refill:
+	for _, m := range pending {
+		s.inbox <- m
+	}
+	for _, m := range pending {
+		if match(m) {
+			return true
+		}
+	}
+	return false
 }
 
 // absorb 吸收一次运行的结果：整段替换有效上下文，本轮产出并入完整历史（检查点

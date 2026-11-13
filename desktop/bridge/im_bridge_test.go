@@ -52,16 +52,17 @@ func initTestGateway() {
 // newTestBridge 构造带 fake gateway 的 imBridge。
 func newTestBridge(t *testing.T, cfg im.Config) (*imBridge, *testGateway) {
 	t.Helper()
+	cfg.Enabled = true // 新 owner 闸门先看主开关；测试统一视为已启用
 	initTestGateway()
 	gw, _ := im.New("testgw", nil)
 	tg := gw.(*testGateway)
 
 	rt := &implugin.Runtime{
-		Config:   cfg,
 		Router:   im.NewRouter(cfg),
 		Security: im.NewSecurity(cfg, ""),
-		Gateways: map[string]im.Gateway{"g1": gw},
 	}
+	rt.SetConfig(cfg)
+	rt.PutGateway("g1", gw)
 	b := newIMBridge(rt)
 	b.Attach()
 	return b, tg
@@ -78,9 +79,9 @@ func TestBridgeMessageRoutesToAsk(t *testing.T) {
 
 	var asked string
 	var askedWS string
-	b.askFn = func(ws, sid, text string, _ []core.Content) {
+	b.askFn = func(t imTarget, text string, _ []core.Content) {
 		asked = text
-		askedWS = ws
+		askedWS = t.Route.Workspace
 	}
 	b.OnInMessage(im.InMessage{
 		Chat: im.Chat{Gateway: "testgw", ChatID: "c1"}, UserID: "u1", Text: "修复登录 bug",
@@ -99,7 +100,7 @@ func TestBridgeRejectsUnauthorized(t *testing.T) {
 	b, _ := newTestBridge(t, cfg)
 
 	called := false
-	b.askFn = func(ws, sid, text string, _ []core.Content) { called = true }
+	b.askFn = func(t imTarget, text string, _ []core.Content) { called = true }
 	b.OnInMessage(im.InMessage{Chat: im.Chat{Gateway: "testgw", ChatID: "c1"}, UserID: "u2", Text: "hi"})
 	if called {
 		t.Fatal("未授权用户不应触发 ask")
@@ -210,11 +211,11 @@ func TestApplyIMConfigHotReload(t *testing.T) {
 	tg1 := gw1.(*testGateway)
 
 	rt := &implugin.Runtime{
-		Config:   cfg1,
 		Router:   im.NewRouter(cfg1),
 		Security: im.NewSecurity(cfg1, ""),
-		Gateways: map[string]im.Gateway{"g1": gw1},
 	}
+	rt.SetConfig(cfg1)
+	rt.PutGateway("g1", gw1)
 	// 用 plugin 包住（applyIMConfig 通过 imPluginOf 取 runtime）
 	p := implugin.New("")
 	// 注入 runtime（绕过 Enable：直接构造 Plugin 内部状态不可行，改用轻量验证）
@@ -253,7 +254,7 @@ func TestE2EIMFullConversation(t *testing.T) {
 
 	// 记录桥的 ask 调用（模拟真实 Session.Ask）
 	var asks []string
-	b.askFn = func(ws, sid, text string, _ []core.Content) { asks = append(asks, text) }
+	b.askFn = func(t imTarget, text string, _ []core.Content) { asks = append(asks, text) }
 
 	// ① 用户发任务
 	b.OnInMessage(im.InMessage{
@@ -352,7 +353,7 @@ func TestE2EIMRejectsUnknownChat(t *testing.T) {
 	b, _ := newTestBridge(t, cfg)
 
 	called := false
-	b.askFn = func(ws, sid, text string, _ []core.Content) { called = true }
+	b.askFn = func(t imTarget, text string, _ []core.Content) { called = true }
 	// 无 bindConfirmFn（未装配）→ 陌生聊天被拒
 	b.OnInMessage(im.InMessage{
 		Chat: im.Chat{Gateway: "testgw", ChatID: "oc_unknown"}, UserID: "ou_1", Text: "hi",
@@ -382,7 +383,7 @@ func TestIMCommands(t *testing.T) {
 		t.Fatalf("activeAlias = %q, want task1", b.activeAlias[chat.String()])
 	}
 	wantSID := chatSessionIDAlias(chat, "task1")
-	if !hasMirror(b.rt.Config, wantSID, chat) {
+	if !hasMirror(b.rt.ConfigSnapshot(), wantSID, chat) {
 		t.Fatalf("mirror for %s not found", wantSID)
 	}
 	// 指令回复已发送（send 调用了 Gateway.Send）
@@ -490,7 +491,7 @@ func TestBridgeAcceptsImageOnlyMessage(t *testing.T) {
 
 	called := false
 	var gotImages []core.Content
-	b.askFn = func(ws, sid, text string, images []core.Content) {
+	b.askFn = func(t imTarget, text string, images []core.Content) {
 		called = true
 		gotImages = images
 	}
@@ -518,7 +519,7 @@ func TestBridgeRejectsTrulyEmptyMessage(t *testing.T) {
 	}}
 	b, _ := newTestBridge(t, cfg)
 	called := false
-	b.askFn = func(ws, sid, text string, _ []core.Content) { called = true }
+	b.askFn = func(t imTarget, text string, _ []core.Content) { called = true }
 	b.OnInMessage(im.InMessage{
 		Chat: im.Chat{Gateway: "testgw", ChatID: "c1"}, UserID: "u1", Text: "   ",
 		Attachments: []im.Attachment{{Type: "file", URL: "https://x/a.pdf"}}, // 非图片附件不算内容

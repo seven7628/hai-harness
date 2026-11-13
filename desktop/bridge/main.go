@@ -51,6 +51,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/agents/prompt"
 	"github.com/seven7628/hai-harness/computer"
@@ -208,6 +209,12 @@ type out struct {
 	flushTimer *time.Timer // 定时 flush（懒启动；有未 flush 数据时重置）
 	stopCh     chan struct{}
 	stopOnce   sync.Once
+
+	// lineTap 行观察钩子（手机端 hub_* 事件扇出；见 mobile_hub.go）。
+	// 在写锁内调用以保持与 stdout 相同的事件顺序；钩子只做非阻塞投递，
+	// 不得回调 out/dispatch/Ask。nil = 未接线。
+	tapMu   sync.RWMutex
+	lineTap func([]byte)
 }
 
 func newOut(w io.Writer) *out {
@@ -222,10 +229,30 @@ func (o *out) writeLine(v any) {
 		return
 	}
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	_, _ = o.w.Write(b)
 	_ = o.w.WriteByte('\n')
 	_ = o.w.Flush()
+	// 钩子在写锁内执行：Hub 事件（hub_*）与 stdout 保持同一顺序；
+	// 钩子只做非阻塞 channel 投递，不允许回调 out（见 mobile_hub.go）。
+	o.tapLine(b)
+	o.mu.Unlock()
+}
+
+// setLineTap 安装行观察钩子（nil = 关闭）。只在启动/关停时调用。
+func (o *out) setLineTap(fn func([]byte)) {
+	o.tapMu.Lock()
+	o.lineTap = fn
+	o.tapMu.Unlock()
+}
+
+// tapLine 调用行观察钩子。调用方持 o.mu，钩子必须非阻塞。
+func (o *out) tapLine(line []byte) {
+	o.tapMu.RLock()
+	fn := o.lineTap
+	o.tapMu.RUnlock()
+	if fn != nil {
+		fn(line)
+	}
 }
 
 // writeRaw 原样写一行（事件行已完整 JSON，emit 直接输出不重新 marshal/注入）。
@@ -283,15 +310,22 @@ func (o *out) flushTick() {
 
 // bridgeSession：一个会话 + 常驻 run goroutine（消费队列，队列空即返回）
 type bridgeSession struct {
-	id     string
-	s      *session.Session
-	loop   *agents.AgentLoop // per-session loop（model/effort 运行时可切；persona 切换重建）
-	effort string
+	id string
+	// runtime 本会话所属的工作区运行态（rebuildLoop 用它取技能/插件/MCP/子代理）。
+	// nil = 旧会话（按 bs.workspace 兜底 re-resolve）。
+	runtime *workspaceRuntime
+	s       *session.Session
+	loop    *agents.AgentLoop // per-session loop（model/effort 运行时可切；persona 切换重建）
+	// cfgMu 保护 provider/model/effort/providerExplicit：dispatch goroutine（资料页保存、
+	// switch_*）写，run goroutine（emit/metrics/checkpoint）每条事件读 —— 不加锁就是
+	// data race（P1-10 复审 B-2）。
+	cfgMu    sync.RWMutex
+	effort   string
+	model    string // 当前模型（switch_model 设置；下一次请求生效）
+	provider string // 当前 provider（set_provider 重建时更新；emit 打标价表用）
 	// subagentEffort 子 agent 档位持有者（spawn/explore/文件化人设 loop）：switch_effort
 	// 时与主 loop 同步 —— 子 agent 追随主 loop（2026-09 决策）。rebuildLoop 换代。
 	subagentEffort *subagentEffortRef
-	model          string // 当前模型（switch_model 设置；下一次请求生效）
-	provider       string // 当前 provider（set_provider 重建时更新；emit 打标价表用）
 	// skillCaps 本会话的技能能力面（装配期算好后随 loop 换代一起替换；见
 	// skill_capability.go）。宿主 UI 与 skills 命令读它，**不重算** —— 重算会让
 	// 「面板显示可用的技能」与「loop 实际注入的清单」变成两个事实源。
@@ -300,7 +334,7 @@ type bridgeSession struct {
 	// 新会话 UI 指定）。true 时 rebuildAll 不再按模型名全局字母序重解析归属——
 	// 避免「glm-5.3-flash 同时存在于 opencode+zhipu 时被字母序改写到 opencode」
 	//（2026-09 修复：会话 Provider 归属以用户选择为准，不用模型名猜）。
-	providerExplicit bool
+	providerExplicit bool // guarded by cfgMu
 	mode             *agents.Mode
 	persona          string // 当前 Persona（"code"/"work"；switch_persona 重建 loop）
 	ctx              context.Context
@@ -308,14 +342,106 @@ type bridgeSession struct {
 	wake             chan struct{}
 	out              *out
 
-	workspace string     // 工作区根（审批 diff 读取原文件用）
-	mobile    *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
+	// hubOnAgentEnd Hub 会话的本轮收尾钩子（nil = 未接线）。RunStream 层事件只经
+	// bs.emit 发出（Session 的 WithEventHandler 收不到 agent_*），所以钩子必须挂在 emit。
+	// 传整个 AgentEnd 而不只是正文：结果回推触发的群 run 要按 FinishReason 决定
+	// 是否落账（被中断的运行不写半截总结）。segs 是按 LLM 轮次分段的正文。
+	hubOnAgentEnd func(ae *events.AgentEnd, segs []hubSegment)
+	// hubOnRunEnd 群会话根 run **真正**收尾（running/闩都已放开）之后的推进钩子
+	// （P3b-04：自动对话串行泵 + 忙目标任务泵）。nil = 非群会话。
+	hubOnRunEnd func()
+	// hubGroupWake 当前群 run 绑定的轮次（UserInputsConsumed 从 hidden 块解析）。
+	// 只在 emit（dispatchMu 内）读写；finishHubRound 用完后清空。
+	hubGroupWake *agenthub.GroupWakeHeader
+	// hubWakeDepth/hubWakeTurn 是 hubGroupWake.Depth/Turn 的原子镜像（P3b-04）：
+	// group_say 在工具 goroutine 里要算「下一跳深度」，不能直接读 emit 独占的指针。
+	hubWakeDepth atomic.Int64
+	hubWakeTurn  atomic.Int64
+	// hubGroupBusy 该群会话已投递但尚未 AgentEnd 的唤醒。忙时不投第二个快照，
+	// 避免两个 round 共用一次 AgentEnd。
+	hubGroupBusy atomic.Bool
+	// hubDelta Hub 流式草稿的生产侧（nil = 项目会话）：群/DM 都按 LLM 轮次分段，
+	// 每段一条草稿、一次 LLMEnd 收口一段。只在 emit 的 run goroutine 写。
+	hubDelta *hubDeltaSink
+	// hubDeltaAgentID/hubDeltaDM 是 hubDelta 的段归属：DM 没有群唤醒头，AgentStart
+	// 只有它能告诉 sink「这些 delta 属于哪个智能体」；群会话由 wake 覆盖（同值）。
+	hubDeltaAgentID string
+	hubDeltaDM      bool
+	// hubGroupSeq 单调发号（永不回 0）；hubGroupOwner 是当前 busy 轮的代号
+	// （0 = idle）；hubGroupRunSeq 是正在跑的 run 绑定的代号。runLoop 在
+	// 「没有 AgentEnd」的终止路径上也要清闩，但旧 run 不能清掉新轮次的闩。
+	hubGroupSeq    atomic.Uint64
+	hubGroupOwner  atomic.Uint64
+	hubGroupRunSeq atomic.Uint64
+	// hubTaskResultTask 本次根 run 是「Hub 任务结果回推」唤起的群 run（Project/工作区
+	// 任务 AgentEnd → pushHubTaskResult → PushTaskResultUsage → Ask）。这类 run 没有
+	// hub_group_wake，但正文必须落成发起者的一条群气泡（不路由/@/唤醒旁人），否则
+	// 模型「收到项目结果，我来总结」只存在于会话历史里，群里只剩一张结果卡。
+	// 空 = 普通 run（没有 wake 就保持原来的静默语义）。只在 emit（dispatchMu 内）读写：
+	// AgentStart 认领、finishHubReply 消费后清空。
+	hubTaskResultTask agenthub.TaskID
+	// hubTaskResultPending 已回推、还没有 run 认领的 task id（值 = 登记时间，只用于
+	// 过期清理）。pushHubTaskResult 在 Ask **之前**登记、Ask 失败撤回；AgentStart 用
+	// 起始正文的固定前缀严格匹配认领。跨 goroutine（通知簿 ↔ emit），用锁保护。
+	hubTaskResultMu      sync.Mutex
+	hubTaskResultPending map[agenthub.TaskID]time.Time
+	// hubEngine Hub 会话的工具引擎（记忆/人格变更后重建 loop 时复用：
+	// 重建引擎会丢掉正在运行的工具任务与审批等待，没必要）。
+	hubEngine *tools.Engine
+	// hubPumpQueue 根 run 结束时推进 Hub 派发队列（nil = 未接线）。
+	hubPumpQueue func(workspace, sessionID string)
+	// hubTaskIDs 本批 UserInputsConsumed 里的 hub_task id（P2-04 相关性）。
+	// 只在 emit（run goroutine）读写；AgentEnd 结算后清空。跨 goroutine 读
+	//（task_ack 工具）必须走 hubTaskMu 保护的访问器，否则 -race 会报数据竞争。
+	hubTaskIDs []agenthub.TaskID
+	hubTaskMu  sync.Mutex
+	// hubRunNames 子 run 的展示名（AgentStart.Name）：审批/Ask 事件只有 RunId，
+	// 场景2 的 Need 卡要显示「哪个子智能体」就得在这里按 run 建表。只在 emit
+	// （dispatchMu 内）写，recordHubNeed 同 goroutine 读；上限 256，防长会话无限增长。
+	hubRunNameMu sync.Mutex
+	hubRunNames  map[string]string
+	// P2.5-04：目标会话运行中的预算硬停。LLMEnd 累计本任务花费，超限时
+	// Interrupt 当前 run；finishHubTask 据此把终态落 blocked_budget。
+	hubTaskSpentMicro atomic.Int64
+	hubBudgetStop     atomic.Bool
+	hubBudgetReason   atomic.Value // string
+	// hubFinishTask 根 AgentEnd 时结算 hub_task（nil = 非项目会话/未接线）。
+	hubFinishTask func(ae *events.AgentEnd)
+	// hubTaskRunning 根 AgentStart：dispatched → running（P3b-08 B3；nil = 未接线）。
+	hubTaskRunning func(runID string)
+	// hubBudgetCheck 目标会话 LLMEnd 的预算检查；true = 立即中断本 run。
+	hubBudgetCheck func(taskID agenthub.TaskID, spentUSD float64) (bool, string)
+	// hubInterrupt 预算硬停时中断当前 run（默认 bs.s.Interrupt；测试可注入计数）。
+	hubInterrupt func()
+	// hubFailTask 把指定 hub_task 标 failed（注入/坏 header 的静默丢任务兜底）。
+	hubFailTask func(ids []agenthub.TaskID, reason string)
+	// hubAlert 通用 hub_alert（nil = 未接线）。
+	hubAlert func(code, message string)
+	// hubNeed 审批/提问事件的 Needs you 钩子（nil = 未接线）。
+	hubNeed func(e events.Event)
+	// hubExpireNeeds 根 run 结束时收掉该会话挂起的 need。
+	hubExpireNeeds func()
+	workspace      string     // 工作区根（审批 diff 读取原文件用）
+	mobile         *mobileHub // 手机端事件扇出（nil = 未启用；emit 尾部投递）
 	// lastUsed 最近一次被宿主访问（open/切回）的时间，供空闲会话 LRU 淘汰。
 	lastUsed atomic.Int64 // unix nanos
-
-	// running 主 run 是否在跑（agent_start → true / agent_end → false）。
-	// 只供会话列表显示状态点：进程重启后为 false，等下一次事件再纠正。
+	// running 主 run 是否在跑（**根** agent_start → true / 根 agent_end → false）。
+	// 子 agent 的 agent_end 也走同一个 emit，过滤 ParentRunId/Depth，否则根 run 还在跑
+	// 就被标成空闲，Hub 闸门会把任务直派进正在跑的会话（P2-03 复审 B1）。
+	// 只供会话列表显示状态点 + Hub 空闲闸门；进程重启后为 false，等下一次事件纠正。
 	running atomic.Bool
+	// hubSettling 根 AgentEnd 已到、结算尚未完成。emit 会先清 running（main.go 的
+	// 运行态分支），再落盘并调 finishHubTask；若 cancel 在这个窗口看到「空闲」，
+	// 会把已完成的任务抢成 canceled，而迟到的结算只能静默丢弃（P2-06 复审 B-2）。
+	// 覆盖整个 emit，闸门与取消在结算期间都仍算 busy。
+	hubSettling atomic.Bool
+	// hubHumanIntervened 本轮 hub_task 运行期间被用户插话（P2-09 阶段验收
+	// §6.7.5）。只在当前 batch 内有效：新 batch 开口清零，结算时写入账本并
+	// 在回推文本里提醒模型先确认人的最新意图。
+	hubHumanIntervened atomic.Bool
+	// hubDispatchPending 已 Ask 但该任务的根 run 还没开始（takeBatch→AgentStart 窗口）。
+	// 闸门据此仍算 busy，避免「检查时空闲、Ask 前 run 已经起来」的并批（P2-03 B1）。
+	hubDispatchPending atomic.Bool
 	// liveText/liveThink 当前 run 已产出的正文与思考（手机端流式快照）。
 	// 流式 chunk 不落盘、hub 也只丢不补：手机弱网丢帧或 WS 重连后，屏幕上
 	// 「正在流的那一段」只能靠这份内存快照补回来（见 mobile_server.liveFrame）。
@@ -519,6 +645,40 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// 必须按同一序列执行（并发子 agent / 任务结果事件不得与主 run 交错）。
 	bs.dispatchMu.Lock()
 	defer bs.dispatchMu.Unlock()
+	// 结算窗口：从根 AgentEnd 进入 emit（下面会清 running）到 finishHubTask 完成，
+	// 取消/队列闸门都必须仍看到 busy。defer 兜底所有提前 return；正常路径在结算
+	// 完成后、触发下一次泵之前显式清除（否则泵可能趁 latch 未清看到忙而漏派发）。
+	// 项目会话与 Hub 智能体会话（群内 agent 目标任务，P3b-05）同口径：群轮闩在
+	// finishHubReply 里已经放开，没有这把 latch 的话，结算窗口里的取消会把
+	// 「已经跑完、正在回推」的任务抢成 canceled。
+	settling := false
+	if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 &&
+		bs.runtime != nil {
+		settling = true
+		bs.hubSettling.Store(true)
+		defer func() {
+			if settling {
+				bs.hubSettling.Store(false)
+			}
+		}()
+	}
+	prov, _, _, _ := bs.cfgSnapshot() // 价表/指标打标（run goroutine 与资料页写并发）
+
+	// Hub DM：本轮最终回复进 DM 索引（左栏预览/搜索/未读）。上下文仍以 session jsonl
+	// 为准 —— 两份数据分工见 §6.1.3。空回复（纯工具轮/中断）由 appendHubReply 跳过。
+	// 只认**根 run** 的收尾：子 agent 的事件走同一个 handler（subagent 直接把
+	// tc.Handler 交给子 loop），不过滤就会把子 agent 的内部答复写进 DM 索引
+	//（左栏预览/历史里冒出「智能体说的话」）。
+	if ae, ok := e.(*events.AgentEnd); ok && bs.hubOnAgentEnd != nil &&
+		ae.ParentRunId == "" && ae.Depth == 0 {
+		var segs []hubSegment
+		if bs.hubDelta != nil {
+			// 先收口流式草稿：每一段的 delta 都必须早于它的 final hub_message
+			//（前端按 message_id 用 final 替换草稿，先 final 后 delta 会被当迟到丢弃）。
+			segs = bs.hubDelta.finish()
+		}
+		bs.hubOnAgentEnd(ae, segs)
+	}
 
 	// IM 镜像推送：会话事件 → Renderer → 飞书（有镜像关联的会话）。
 	// 必须在 dispatchMu 内：与 stdout/日志同序（IM 消息不早于对应 UI 事件）。
@@ -545,43 +705,130 @@ func (bs *bridgeSession) emit(e events.Event) {
 	// **先删后注入**（2026-11 用户报障的真实事故）：events.TaskPromoted 等结构自己带
 	// `session_id`（无 omitempty，值为空串），注入是前置的，而 JSON 重复键**后者胜** ——
 	// 后端读到空串，就把「已摘为后台任务」路由到当前打开的会话（cybertron-gogroup 的一行
-	// 出现在 agent-server-g 的转录里）。这里把事件自带的同名键摘掉，只留宿主那一份。
-	// 只有字节里真的出现该键才走扫描：绝大多数事件没有这两个键（热路径就一次 Contains）。
-	if bytes.Contains(b, []byte(`"session_id"`)) {
-		if stripped := jsonwire.RemoveField(b, "session_id"); stripped != nil {
-			b = stripped
-		}
-	}
-	if bytes.Contains(b, []byte(`"workspace"`)) {
-		if stripped := jsonwire.RemoveField(b, "workspace"); stripped != nil {
-			b = stripped
-		}
-	}
-	injected, err := jsonwire.InjectKeys(b, []jsonwire.KV{
+	// 出现在 agent-server-g 的转录里）。Envelope 把「删 + 注入」合成一个入口：每行顶层
+	// 恰好一份，调用方没有「只做一半」的余地。热路径仍然只有一次 Contains。
+	hostKVs := []jsonwire.KV{
 		{Key: "session_id", Value: bs.sidKV},
 		{Key: "workspace", Value: bs.wsKV},
-	})
+	}
+	injected, err := jsonwire.Envelope(b, hostKVs)
 	if err != nil {
-		return
+		// 结构异常（非对象 / 无法安全扫描）：绝不能带着事件自带的空 session_id 出门。
+		// 解码→覆盖→重编码（键顺序变成字典序，归属是确定的）；仍失败就丢弃这一行并
+		// 留诊断 —— 少一条事件可以接受，落进错误会话不可接受。
+		injected, err = jsonwire.ForceKeys(b, hostKVs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[envelope] 丢弃无法修正的事件行 sid=%s ws=%s err=%v\n", bs.id, bs.workspace, err)
+			return
+		}
 	}
 	// 宿主附加字段（按事件类型）
 	var extras map[string]any
 	switch ev := e.(type) {
 	case *events.ContentChunk:
 		bs.appendLiveText(ev.Content)
+		if bs.hubDelta != nil {
+			bs.hubDelta.feed(ev.RunId, ev.RequestId, ev.Content)
+		}
 	case *events.ReasoningChunk:
 		bs.appendLiveThink(ev.Content)
 	case *events.AgentStart:
+		if ev.RunId != "" && ev.Name != "" && (ev.ParentRunId != "" || ev.Depth > 0) {
+			bs.rememberHubRunName(ev.RunId, ev.Name)
+		}
+		if ev.ParentRunId == "" && ev.Depth == 0 {
+			if bs.hubGroupWake != nil {
+				// 记住这一轮群 run 的 busy 代号：runLoop 的兜底清理只能清自己那一代。
+				bs.hubGroupRunSeq.Store(bs.hubGroupOwner.Load())
+			}
+			if bs.hubDelta != nil {
+				if wake := bs.hubGroupWake; wake != nil {
+					// 第一段的 message_id 在这里预分配（final 复用同一个 ID，
+					// 保留 P3a-09 的「AgentStart 分配 → final 同 ID」语义）。
+					if wake.MessageID == "" {
+						wake.MessageID = agenthub.NewID(agenthub.PrefixMessage)
+					}
+					bs.hubDelta.bindRun(ev.RunId, string(wake.GroupID), string(wake.AgentID), wake.RoundID, wake.MessageID)
+				} else if bs.hubDeltaDM {
+					bs.hubDelta.bindRun(ev.RunId, "", bs.hubDeltaAgentID, "", "")
+				}
+			}
+			// Hub 任务结果回推触发的群 run：没有 hub_group_wake，但起始正文就是那条
+			// task_result。认领后由 finishHubReply 把正文落成发起者的一条群气泡
+			// （不路由/@/唤醒）。只有群会话有 hubOnRunEnd —— DM/项目会话不走这条路径。
+			if bs.hubOnRunEnd != nil {
+				if bs.hubGroupWake == nil {
+					bs.claimHubTaskResultPush(ev.Content)
+				} else {
+					// 混合批（wake + 结果回推）：本轮归 wake，标记不得外溢到下一轮。
+					bs.takeHubTaskResultTask()
+				}
+			}
+		}
 		bs.resetLive() // 新 run：旧 run 的残留文本不能串到这一轮
+	case *events.UserInputsConsumed:
+		// 相关性（§6.7.2）：只认 batch 开口（Injected=插话不算新任务）。
+		// 注入路径消费到的 hub_task 不能静默丢：闸门失效 → 任务 failed + 告警。
+		ids, bad := hubTaskIDsOf(ev.UserContents)
+		if bad > 0 && bs.hubAlert != nil {
+			bs.hubAlert("bad_header", fmt.Sprintf("有 %d 个 hub_task header 无法解析", bad))
+		}
+		// 群唤醒绑定（P3b-01a）：同一批里的 hidden 块决定 AgentEnd 归哪一轮。
+		wakes, badWakes := hubGroupWakesOf(ev.UserContents)
+		if badWakes > 0 && bs.hubAlert != nil {
+			bs.hubAlert("bad_header", fmt.Sprintf("有 %d 个 hub_group_wake header 无法解析", badWakes))
+		}
+		if ev.Injected {
+			if bs.hubTaskCount() > 0 {
+				bs.hubHumanIntervened.Store(true)
+			}
+			if len(ids) > 0 && bs.hubFailTask != nil {
+				bs.hubFailTask(ids, "injected_conflict: 任务消息被运行中插话消费（空闲闸门失效）")
+			}
+		} else {
+			bs.bindHubTasks(ids)
+			bs.hubTaskSpentMicro.Store(0)
+			bs.hubBudgetStop.Store(false)
+			bs.hubBudgetReason.Store("")
+			bs.hubHumanIntervened.Store(false) // 新 batch 开口：上一轮介入不外溢
+			bs.setHubGroupWake(nil)
+			if len(wakes) > 0 {
+				if len(wakes) > 1 && bs.hubAlert != nil {
+					bs.hubAlert("bad_header", fmt.Sprintf("一批用户输入里有 %d 个群唤醒，取最后一个", len(wakes)))
+				}
+				bs.setHubGroupWake(wakes[len(wakes)-1])
+			}
+		}
 	case *events.LLMEnd:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
 		bs.setLiveText(ev.Content)                  // 与手机端一致：最终文本覆盖累计增量
+		// 收口这一段草稿：段正文以 LLMEnd.Content 为权威（草稿只用于流式），
+		// Content 为空就是空段 —— 落账时过滤（纯工具轮不产生空气泡）。
+		if bs.hubDelta != nil {
+			bs.hubDelta.closeSegment(ev.RunId, ev.Content)
+		}
 		if ev.Usage != nil {
-			prov := bs.provider
 			// 成本金额已由 provider 填充进 Usage.Cost（µUSD，上游自报优先、缺失才按价表
 			// 折算，见 provider.ApplyUsageCost）并随 MetricsEntry 持久化；
 			// cost_usd 浮点字段仅供前端展示（USD）。
 			costUSD := costUsd(prov, ev.Model, *ev.Usage)
+			// P2.5-04：日预算/单任务预算的运行中硬停。只对当前 hub_task 生效；
+			// 花费累计用 LLMEnd 的每次调用来近似（最终以 AgentEnd 结算为准）。
+			curTaskID := bs.currentHubTaskID()
+			if bs.hubBudgetCheck != nil && curTaskID != "" {
+				spent := float64(bs.hubTaskSpentMicro.Add(int64(costUSD*1e6))) / 1e6
+				if !bs.hubBudgetStop.Load() {
+					if stop, reason := bs.hubBudgetCheck(curTaskID, spent); stop {
+						bs.hubBudgetStop.Store(true)
+						bs.hubBudgetReason.Store(reason)
+						if bs.hubInterrupt != nil {
+							bs.hubInterrupt()
+						} else {
+							bs.s.Interrupt()
+						}
+					}
+				}
+			}
 			if bs.metrics != nil {
 				_ = bs.metrics.Record(MetricsEntry{
 					Timestamp: ev.Timestamp, Workspace: bs.workspace,
@@ -590,6 +837,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 			}
 			extras = map[string]any{"cost_usd": costUSD}
 		}
+	case *events.LLMStart:
+		// 一次 LLM 调用 = 一段草稿（场景2b）：新 RequestId → 新 message_id。
+		if bs.hubDelta != nil {
+			bs.hubDelta.beginSegment(ev.RunId, ev.RequestId)
+		}
 	case *events.LLMError:
 		// 失败尝试也要进账（2026-09-23 决策）：metrics 以 Kind=attempt_failed 单列
 		// （调用数只数 call，重试浪费看 RetryCostUsd）；cost_usd 供前端会话成本累计 +
@@ -597,14 +849,23 @@ func (bs *bridgeSession) emit(e events.Event) {
 		// —— 此时仍记一行（FailedAttempts 计数用），不污染 token/成本合计。
 		entry := MetricsEntry{
 			Timestamp: ev.Timestamp, Workspace: bs.workspace, SessionID: bs.id,
-			Provider: bs.provider, Model: ev.Model, Kind: MetricsKindAttemptFailed,
+			Provider: prov, Model: ev.Model, Kind: MetricsKindAttemptFailed,
 		}
 		if ev.Usage != nil {
 			entry.Usage = *ev.Usage
-			extras = map[string]any{"cost_usd": costUsd(bs.provider, ev.Model, *ev.Usage)}
+			extras = map[string]any{"cost_usd": costUsd(prov, ev.Model, *ev.Usage)}
 		}
 		if bs.metrics != nil {
 			_ = bs.metrics.Record(entry)
+		}
+		// 重试会换 RequestId：丢弃失败那次已流出的半截正文（不冻成气泡），
+		// 成功的那次由新的 LLMStart 开新段、新 message_id。
+		if ev.WillRetry && bs.hubDelta != nil {
+			bs.hubDelta.discardSegment(ev.RunId)
+		}
+	case *events.ToolStart:
+		if bs.hubDelta != nil {
+			bs.hubDelta.flush()
 		}
 	case *events.ToolResponse:
 		bs.lastActive.Store(time.Now().UnixMilli()) // 有产出 → 更新最近活跃
@@ -639,13 +900,15 @@ func (bs *bridgeSession) emit(e events.Event) {
 		if ev.Usage != nil && ev.Usage.Cost.Total > 0 && bs.metrics != nil {
 			_ = bs.metrics.Record(MetricsEntry{
 				Timestamp: time.Now(), Workspace: bs.workspace,
-				SessionID: bs.id, Provider: bs.provider, Model: ev.Model, Usage: *ev.Usage,
+				SessionID: bs.id, Provider: prov, Model: ev.Model, Usage: *ev.Usage,
 			})
 		}
 		extras = map[string]any{"todos": todosOf(bs, ev.Todos)}
 	}
 	if len(extras) > 0 {
-		// 直接构造 jsonwire.KV（避免 marshal→unmarshal 中间 map）
+		// 直接构造 jsonwire.KV（避免 marshal→unmarshal 中间 map）。
+		// 同样走 Envelope：宿主字段（cost_usd/todos/diff）与事件自带的同名字段并存时，
+		// 后者胜的解析规则会让宿主的修正值被原值盖掉 —— 与 BR-03 是同一类信封缺陷。
 		exKVs := make([]jsonwire.KV, 0, len(extras))
 		for k, v := range extras {
 			vb, err := json.Marshal(v)
@@ -654,19 +917,39 @@ func (bs *bridgeSession) emit(e events.Event) {
 			}
 			exKVs = append(exKVs, jsonwire.KV{Key: k, Value: vb})
 		}
-		if injected, err = jsonwire.InjectKeys(injected, exKVs); err != nil {
+		withExtras, eerr := jsonwire.Envelope(injected, exKVs)
+		if eerr != nil {
+			withExtras, eerr = jsonwire.ForceKeys(injected, exKVs)
+		}
+		if eerr != nil {
+			fmt.Fprintf(os.Stderr, "[envelope] 丢弃无法注入附加字段的事件行 sid=%s err=%v\n", bs.id, eerr)
 			return
 		}
+		injected = withExtras
 	}
 
 	// 运行态（会话列表状态点；重启后由下一次事件纠正）
 	switch e.Type() {
 	case events.AgentStartType:
-		bs.running.Store(true)
+		if as, ok := e.(*events.AgentStart); !ok || (as.ParentRunId == "" && as.Depth == 0) {
+			bs.running.Store(true)
+			bs.hubDispatchPending.Store(false) // 根 run 已启动：交给 running 表达忙
+			// 任务板：dispatched → running（P3b-08 B3）。只在根 run 真正起来时推进，
+			// 且只做 store 投影（emit 正持 dispatchMu，绝不能再拿别的会话锁）。
+			if ok && as.ParentRunId == "" && as.Depth == 0 && bs.hubTaskRunning != nil {
+				bs.hubTaskRunning(as.RunId)
+			}
+		}
 	case events.AgentEndType:
-		bs.running.Store(false)
+		if ae, ok := e.(*events.AgentEnd); !ok || (ae.ParentRunId == "" && ae.Depth == 0) {
+			bs.running.Store(false)
+			bs.hubDispatchPending.Store(false)
+		}
 	}
-
+	// Needs you：Hub 智能体/正在执行 hub_task 的会话，审批与提问落成 need（§6.10）。
+	if bs.hubNeed != nil {
+		bs.hubNeed(e)
+	}
 	// 写 stdout 与事件日志用同一行（事件自包含，含注入的 session_id/workspace/run_id/diff/todos）
 	bs.out.writeRaw(injected)
 	// 手机端扇出：复用同一行字节（非阻塞；订阅者慢只丢 chunk，见 mobile_hub.go）
@@ -683,6 +966,88 @@ func (bs *bridgeSession) emit(e events.Event) {
 	if e.Type() == events.AgentEndType && bs.cronLedger != nil && bs.cronRun != "" {
 		bs.finishCronRun(bs.cronEndStatus, bs.cronEndErr, bs.cronEndContent)
 	}
+	// Hub 任务结算：**根 run** 的 AgentEnd、且事件已落盘（transcript 完整）。
+	// 项目会话（工作区目标）与 Hub 智能体会话（群内 agent 目标，P3b-05）共用
+	// 同一结算入口：hubTaskIDs 为空时 finishHubTask 立即返回，不改既有路径。
+	if e.Type() == events.AgentEndType && bs.hubFinishTask != nil && bs.runtime != nil {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
+			bs.hubFinishTask(ae)
+		}
+	}
+	// 结算已完成：先解除 busy，再触发下面的泵（泵看到的是真实空闲）。defer 只兜底
+	// 提前 return 的路径，避免 latch 泄漏让队列永久卡住。
+	if settling {
+		bs.hubSettling.Store(false)
+		settling = false
+	}
+	// 根 run 结束：挂起的审批/提问已失效（等待窗口随 run 结束），
+	// 从 Needs you 里收掉，避免永久 pending（Hub DM 与项目会话都要收）。
+	if e.Type() == events.AgentEndType && bs.hubExpireNeeds != nil {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" {
+			// 异步：emit 返回前要交还 run goroutine 记账（session_closed 的 consumed
+			// 在 handler 返回后才 +1），同步扫 need 磁盘会把 shutdown 的快照拖到前面。
+			go bs.hubExpireNeeds()
+		}
+	}
+	// Hub 派发队列：项目会话的**根 run** 结束后推进一步（AgentEnd 已落盘、
+	// bs.running 已置 false，闸门看到的是真实空闲状态）。
+	// 注意顺序：上面的 hubSettling 必须已清除，否则泵会看到忙而漏掉这次派发，
+	// 且没有补泵（P2-06 复审）。此泵是结算后的唯一推进点，不要把它提前。
+	if e.Type() == events.AgentEndType && bs.hubPumpQueue != nil && bs.runtime != nil &&
+		bs.runtime.kind == runtimeProject {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
+			// 异步：emit 持有 dispatchMu，同步泵会在 Ask→persist 失败→emit
+			// 的路径上重入同一把锁（P2-03 复审 N-1 自死锁）。与上面
+			// hubExpireNeeds 同款，泵内部自己看队列长度。
+			go bs.hubPumpQueue(bs.workspace, bs.id)
+		}
+	}
+	// 群会话根 run 真正收尾（AgentEnd 已落盘、running 与群轮闩都已放开、hubSettling
+	// 已清）：推进自动对话的串行泵与忙目标任务泵。放在 emit 末尾而不是
+	// finishHubReply 的 defer —— 那个时点 running 还是 true，AgentDispatch 的闸门会把
+	// 派发判成「忙」，队列永远不动（P3b-04 / D-agent-task-pump）。两个泵都异步
+	// （emit 持有 dispatchMu），且内部自己看队列长度。
+	if e.Type() == events.AgentEndType && bs.hubOnRunEnd != nil {
+		if ae, ok := e.(*events.AgentEnd); ok && ae.ParentRunId == "" && ae.Depth == 0 {
+			bs.hubOnRunEnd()
+		}
+	}
+}
+
+// cfgSnapshot 一次性读出 provider/model/effort/providerExplicit（run goroutine 用）。
+func (bs *bridgeSession) cfgSnapshot() (provider, model, effort string, explicit bool) {
+	bs.cfgMu.RLock()
+	defer bs.cfgMu.RUnlock()
+	return bs.provider, bs.model, bs.effort, bs.providerExplicit
+}
+
+// modelCfg 只读 provider/model/effort。
+func (bs *bridgeSession) modelCfg() (provider, model, effort string) {
+	bs.cfgMu.RLock()
+	defer bs.cfgMu.RUnlock()
+	return bs.provider, bs.model, bs.effort
+}
+
+// editModelCfg 在写锁内修改 provider/model/effort（空串 = 不改）。
+func (bs *bridgeSession) editModelCfg(provider, model, effort string) {
+	bs.cfgMu.Lock()
+	defer bs.cfgMu.Unlock()
+	if provider != "" {
+		bs.provider = provider
+	}
+	if model != "" {
+		bs.model = model
+	}
+	if effort != "" {
+		bs.effort = effort
+	}
+}
+
+// setProviderExplicit 写 providerExplicit（与 modelCfg 同一把锁）。
+func (bs *bridgeSession) setProviderExplicit(v bool) {
+	bs.cfgMu.Lock()
+	bs.providerExplicit = v
+	bs.cfgMu.Unlock()
 }
 
 // approvalWindow 审批等待窗口（与提问窗口 events.MaxQuestionTimeout 同值：最长 30 分钟）。
@@ -731,19 +1096,68 @@ func (bs *bridgeSession) approvalExtras(e *events.ToolApprovalRequested) map[str
 
 const maxPreviewBytes = 1 << 20
 
+// hubTaskIDsOf 从一批用户内容块里收集 hub_task id（§6.7.2）。
+// 一个正常 batch 只应有一个；多个是闸门 bug，由结算侧按 batch_conflict 处理。
+func hubTaskIDsOf(contents [][]core.Content) ([]agenthub.TaskID, int) {
+	var ids []agenthub.TaskID
+	bad := 0
+	for _, blocks := range contents {
+		for _, c := range blocks {
+			if c.Type != core.ContentTypeHubTask {
+				continue
+			}
+			h, err := agenthub.ParseTaskHeader(c.Content)
+			if err != nil || h.TaskID == "" {
+				bad++
+				continue
+			}
+			ids = append(ids, h.TaskID)
+		}
+	}
+	return ids, bad
+}
+
+// hubGroupWakesOf 从一批用户内容块里收集群唤醒 header（P3b-01a）。
+// 正常一次唤醒只有一个；多个说明群忙闸门失效，由调用方告警并取最后一个。
+func hubGroupWakesOf(contents [][]core.Content) ([]*agenthub.GroupWakeHeader, int) {
+	var out []*agenthub.GroupWakeHeader
+	bad := 0
+	for _, blocks := range contents {
+		for _, c := range blocks {
+			if c.Type != core.ContentTypeHubGroupWake {
+				continue
+			}
+			h, _, err := agenthub.ParseGroupWake(c.Content)
+			if err != nil || h == nil {
+				bad++
+				continue
+			}
+			out = append(out, h)
+		}
+	}
+	return out, bad
+}
+
 func (bs *bridgeSession) handler() events.EventHandler {
 	return func(_ context.Context, e events.Event) { bs.emit(e) }
 }
 
 func (bs *bridgeSession) runLoop() {
 	go func() {
+		// 退出时清掉当前持有者（关停后不再接新轮次）。
+		defer func() { bs.clearHubGroupBusy(bs.hubGroupOwner.Load()) }()
 		for {
 			select {
 			case <-bs.ctx.Done():
 				return
 			case <-bs.wake:
 			}
-			if err := bs.s.Run(bs.ctx, bs.handler()); err != nil {
+			err := bs.s.Run(bs.ctx, bs.handler())
+			// 即使 Run 在 AgentStart 前失败（快照落盘/锁错误），也要清群闩；
+			// 否则这个智能体在所有群里永久静音（P3b-01a 复审 B2）。
+			// PendingCount>0 表示还有下一批没处理，不能把它的闩清掉。
+			bs.clearHubGroupBusyAfterRun(bs.s.PendingCount())
+			if err != nil {
 				if errors.Is(err, session.ErrSessionClosed) || bs.ctx.Err() != nil {
 					return
 				}
@@ -753,25 +1167,285 @@ func (bs *bridgeSession) runLoop() {
 	}()
 }
 
+// clearHubGroupBusyAfterRun 是 Run 返回后的兜底：还有下一批输入（PendingCount>0）
+// 时不能清闩，否则第二个快照会在同一轮里插队。
+func (bs *bridgeSession) clearHubGroupBusyAfterRun(pending int) {
+	if pending == 0 {
+		bs.clearHubGroupBusy(bs.hubGroupOwner.Load())
+	}
+}
+
+// clearHubGroupBusy 只清当前持有者：代号单调发号，旧 run 的兜底清理不会
+// 误清新轮次（ABA 安全；P3b-01a 复审 N1）。
+func (bs *bridgeSession) clearHubGroupBusy(seq uint64) {
+	if bs == nil || seq == 0 {
+		return
+	}
+	if bs.hubGroupOwner.CompareAndSwap(seq, 0) {
+		bs.hubGroupBusy.Store(false)
+	}
+}
+
+// setHubGroupWake 记住本轮绑定的群唤醒，并把 Depth/Turn 镜像到原子字段
+// （P3b-04：group_say 要在工具 goroutine 里读下一跳深度）。只在 emit 的
+// dispatchMu 内调用。
+func (bs *bridgeSession) setHubGroupWake(h *agenthub.GroupWakeHeader) {
+	if bs == nil {
+		return
+	}
+	bs.hubGroupWake = h
+	if h == nil {
+		bs.hubWakeDepth.Store(0)
+		bs.hubWakeTurn.Store(0)
+		return
+	}
+	bs.hubWakeDepth.Store(int64(h.Depth))
+	bs.hubWakeTurn.Store(int64(h.Turn))
+}
+
+// hubTaskResultPushTTL 是「已回推、还没被 run 认领」标记的存活上限。正常情况下
+// 回推入队后毫秒级就被下一轮 run 认领；留在表里说明那条 task_result 被**插话**
+// 消费进了别的 run（Injected，没有自己的 AgentStart），不会再有 run 认领它。
+const hubTaskResultPushTTL = 10 * time.Minute
+
+// markHubTaskResultPush 登记「这条 task_result 即将回推进本会话」。必须在 Ask
+// **之前**调用：Ask 一入队 run 就可能起来，晚了 AgentStart 就认领不到。
+func (bs *bridgeSession) markHubTaskResultPush(id agenthub.TaskID) {
+	if bs == nil || id == "" {
+		return
+	}
+	bs.hubTaskResultMu.Lock()
+	if bs.hubTaskResultPending == nil {
+		bs.hubTaskResultPending = make(map[agenthub.TaskID]time.Time, 2)
+	}
+	now := time.Now()
+	for pid, at := range bs.hubTaskResultPending {
+		if now.Sub(at) > hubTaskResultPushTTL {
+			delete(bs.hubTaskResultPending, pid)
+		}
+	}
+	bs.hubTaskResultPending[id] = now
+	bs.hubTaskResultMu.Unlock()
+}
+
+// unmarkHubTaskResultPush 撤回登记（Ask 失败：这条 task_result 从没进过会话）。
+func (bs *bridgeSession) unmarkHubTaskResultPush(id agenthub.TaskID) {
+	if bs == nil || id == "" {
+		return
+	}
+	bs.hubTaskResultMu.Lock()
+	delete(bs.hubTaskResultPending, id)
+	bs.hubTaskResultMu.Unlock()
+}
+
+// claimHubTaskResultPush 根 AgentStart 认领回推标记：只有本轮起始正文**就是**
+// 某条已登记的 task_result（固定前缀 + 同 id）时才认领，并把该 id 从待认领表里
+// 摘掉（一次性：重试/并发的第二个 run 不会再认领同一条）。
+//
+// 为什么用 AgentStart.Content 严格匹配、而不是「wake == nil 就落账」：
+// 群会话里还有别的无 wake run（普通 API 调用、群任务批次、被插话消费的结果），
+// 它们的正文同样不该变成群气泡。起始正文是 task_result 的完整消息头（task id
+// 唯一），配上「只有 pushHubTaskResult 登记过的 id 才可能命中」就是双重证据。
+// 认领失败一律清空本轮标记（上一轮残留不得外溢到新 run）。
+func (bs *bridgeSession) claimHubTaskResultPush(startContent string) bool {
+	if bs == nil {
+		return false
+	}
+	bs.hubTaskResultMu.Lock()
+	defer bs.hubTaskResultMu.Unlock()
+	bs.hubTaskResultTask = ""
+	for id := range bs.hubTaskResultPending {
+		if strings.HasPrefix(startContent, core.TaskResultMessagePrefix(string(id))) {
+			delete(bs.hubTaskResultPending, id)
+			bs.hubTaskResultTask = id
+			return true
+		}
+	}
+	return false
+}
+
+// takeHubTaskResultTask 取走并清空本轮回推标记（finishHubReply 消费）。
+func (bs *bridgeSession) takeHubTaskResultTask() agenthub.TaskID {
+	if bs == nil {
+		return ""
+	}
+	bs.hubTaskResultMu.Lock()
+	id := bs.hubTaskResultTask
+	bs.hubTaskResultTask = ""
+	bs.hubTaskResultMu.Unlock()
+	return id
+}
+
+// hubTaskIDs 的跨 goroutine 访问器（P3b-05）：结算/绑定发生在 emit（dispatchMu
+// 内），而 task_ack 工具在工具 goroutine 里读「我这一轮绑定的任务」，必须走同一把
+// hubTaskMu。锁只包住 slice 赋值/拷贝，绝不在持锁时做 I/O。
+func (bs *bridgeSession) bindHubTasks(ids []agenthub.TaskID) {
+	if bs == nil {
+		return
+	}
+	bs.hubTaskMu.Lock()
+	bs.hubTaskIDs = ids
+	bs.hubTaskMu.Unlock()
+}
+
+// takeHubTasks 取走并清空本批任务绑定（AgentEnd 结算入口）。
+func (bs *bridgeSession) takeHubTasks() []agenthub.TaskID {
+	if bs == nil {
+		return nil
+	}
+	bs.hubTaskMu.Lock()
+	ids := bs.hubTaskIDs
+	bs.hubTaskIDs = nil
+	bs.hubTaskMu.Unlock()
+	return ids
+}
+
+// currentHubTaskID 本批绑定的第一个任务（无绑定返回空）。只读。
+func (bs *bridgeSession) currentHubTaskID() agenthub.TaskID {
+	if bs == nil {
+		return ""
+	}
+	bs.hubTaskMu.Lock()
+	defer bs.hubTaskMu.Unlock()
+	if len(bs.hubTaskIDs) == 0 {
+		return ""
+	}
+	return bs.hubTaskIDs[0]
+}
+
+func (bs *bridgeSession) hubTaskCount() int {
+	if bs == nil {
+		return 0
+	}
+	bs.hubTaskMu.Lock()
+	defer bs.hubTaskMu.Unlock()
+	return len(bs.hubTaskIDs)
+}
+
+// rememberHubRunName 记一次子 run 的展示名（事件里只有 RunId，Need 卡要显示名字）。
+// 只记子 run：根 run 的名字不是「子智能体」，不能拿来冒充。
+func (bs *bridgeSession) rememberHubRunName(runID, name string) {
+	if bs == nil {
+		return
+	}
+	runID = strings.TrimSpace(runID)
+	name = strings.TrimSpace(name)
+	if runID == "" || name == "" {
+		return
+	}
+	bs.hubRunNameMu.Lock()
+	defer bs.hubRunNameMu.Unlock()
+	if bs.hubRunNames == nil {
+		bs.hubRunNames = map[string]string{}
+	}
+	if len(bs.hubRunNames) >= 256 {
+		bs.hubRunNames = map[string]string{}
+	}
+	bs.hubRunNames[runID] = name
+}
+
+// hubRunName 取子 run 的展示名；空 = 未知/主 run（前端据此不冒充子智能体）。
+func (bs *bridgeSession) hubRunName(runID string) string {
+	if bs == nil || runID == "" {
+		return ""
+	}
+	bs.hubRunNameMu.Lock()
+	defer bs.hubRunNameMu.Unlock()
+	return bs.hubRunNames[runID]
+}
+
 // manager：进程内多 workspace 注册表（一个进程承载所有工作区的会话）
 type manager struct {
-	mu          sync.Mutex
-	workspaces  map[string]*workspaceRuntime // key = workspace 绝对路径
-	provCfg     *providerConfig              // 全局 provider 配置（热切换；set_provider 更新）
-	memPrefs    *memoryPrefStore             // Project Memory 用户开关（设置面板；下一个会话生效）
-	out         *out
-	metrics     *FileMetricsStore // 全局指标（跨 workspace，~/.go-code/metrics.jsonl）
-	seq         int
-	embed       embedBridge // M2：嵌入式浏览器 CDP 转发器（跨工作区共享单个内嵌视图）
-	cron        *cron.Store // 全局定时任务库（跨会话；~/.go-code/cron.json + 运行账本）
-	cronCtx     context.Context
-	cronCancel  context.CancelFunc
-	oauthWaiter oauthPromptWaiter // OAuth 登录 manual 输入等待表（oauth_prompt_answer 命令回填）
-	// imPlugin 全局 IM 集成插件（单例：连接/路由/安全跨 workspace 唯一；
-	// 每个 workspace 的 registry 共享同一实例，plugin_list 均可见）。
+	mu         sync.Mutex
+	workspaces map[string]*workspaceRuntime // key = workspace 绝对路径
+	// hubRuntimes Agent Hub 智能体的运行时，key = agentID（方案 §6.1.1）。
+	// 刻意不放进 workspaces：那些遍历是项目语义（workspace_list / reload / MCP 重放）。
+	hubRuntimes map[string]*workspaceRuntime
+	// hubFS Hub 领域存储（~/.go-code/hub，懒开；见 hubStore）。
+	hubFS *agenthub.FileStore
+	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
+	hubQueue *agenthub.Queue
+	// hubFinishMu 串行化任务结算的「检查已通知 → Finish → 结果卡」。
+	// **绝不**在这把锁内回推/唤醒其它会话（P3b-08 B1：emit 持 dispatchMu，
+	// 同步回推会 A↔B 互等死锁）；回推统一走 hubNotify（见 hub_notify.go）。
+	hubFinishMu sync.Mutex
+	// hubNotify 任务终态回推的 per-task 通知簿（异步 + 串行，P3b-08 B1）。
+	hubNotify hubNotifier
+	// hubGroupSendMu 串行化群发送的「限流检查 → 消息 + 回执写入」。
+	// bridge 的 agent 工具并发调用不会经过 dispatchMu（P3a-03 B-4）。
+	hubGroupSendMu sync.Mutex
+	// hubNeedMu 串行化 need 的「load → 决策 → save」，避免 resolve 与异步
+	// expiry 的读改写竞态互相覆盖（P2-06 B3）。
+	hubNeedMu sync.Mutex
+	// hubRecovered 进程内只做一次崩溃恢复（在首次 hub_open 时）。
+	// 只有恢复成功才置位；失败保持 false，下一次 hub_open 重试（P2-08 复审 B-2）。
+	hubRecovered bool
+	// hubRecovering 正在恢复（串行化并发 hub_open；失败后可再次进入）。
+	hubRecovering bool
+	// hubBg* 管理 Hub 的后台泵/过期 goroutine（P2.5-06）：
+	// 统一 ctx + WaitGroup，shutdown 时有界等待，关闭后不再启动新任务。
+	hubBgMu      sync.Mutex
+	hubBgCtx     context.Context
+	hubBgCancel  context.CancelFunc
+	hubBgWG      *sync.WaitGroup // generation 私有：reset 时换新，旧 waiter 只等旧 WG
+	hubBgDone    chan struct{}
+	hubBgClosing bool
+	// hubShutdown 进程/测试彻底关停：此后禁止重建 hub runtime/DM 会话/后台任务。
+	// 与 hubBgClosing（单代后台闸门）分开，避免迟到结算把已关闭的 runtime 复活。
+	hubShutdown atomic.Bool
+	// hubArchive* 冷归档后台 ticker（P4-04b-2b）。interval 零值 = 5 分钟；
+	// lastErr 按错误字符串去重 hub_alert，避免每个 tick 刷屏。
+	hubArchiveMu       sync.Mutex
+	hubArchiveRunning  bool
+	hubArchiveLastErr  string
+	hubArchiveInterval time.Duration
+	// hubMsgDedup 派发幂等表：key = workspace\x00session\x00client_msg_id（进程内）。
+	hubMsgDedup map[string]string
+	// —— 对话控制器（P3b-04，见 hub_conversation.go） ——
+	// hubConv 每群自动对话状态机（懒开）；hubConvLimits 供测试注入限额（生产 nil）。
+	hubConv       *agenthub.ConversationController
+	hubConvLimits *agenthub.ConversationLimits
+	// hubConvMu 保护下面三张表：换代（人类消息作废旧冷却定时器）、定时器、终态通知去重。
+	hubConvMu    sync.Mutex
+	hubConvGen   map[agenthub.GroupID]uint64
+	hubConvTimer map[agenthub.GroupID]*time.Timer
+	// hubConvDispatch 按群串行化自动对话的「取 wake → 投递 → 记账」与停止/人类插话（B2）。
+	hubConvDispatch hubConvDispatchGate
+	hubConvNotified map[agenthub.GroupID]string
+	// hubUnpricedWarned 每个智能体只告警一次「用量无价，预算无法计入」（P2.5-04）。
+	hubUnpricedWarned map[agenthub.AgentID]bool
+	// hubSessionLocks 每个智能体一把装配锁（见 lockHubAgent）。
+	hubSessionLocks map[string]*sync.Mutex
+	provCfg         *providerConfig  // 全局 provider 配置（热切换；set_provider 更新）
+	memPrefs        *memoryPrefStore // Project Memory 用户开关（设置面板；下一个会话生效）
+	out             *out
+	metrics         *FileMetricsStore // 全局指标（跨 workspace，~/.go-code/metrics.jsonl）
+	seq             int
+	embed           embedBridge // M2：嵌入式浏览器 CDP 转发器（跨工作区共享单个内嵌视图）
+	cron            *cron.Store // 全局定时任务库（跨会话；~/.go-code/cron.json + 运行账本）
+	cronCtx         context.Context
+	cronCancel      context.CancelFunc
+	oauthWaiter     oauthPromptWaiter // OAuth 登录 manual 输入等待表（oauth_prompt_answer 命令回填）
+	// imPlugin IM 集成插件 —— **连接面进程级共享 + 归属面（agent/group/workspace）隔离**。
+	//
+	// 两层要分清（BR-21 修法，与 hookTrust 同一口径）：
+	//   - 连接面（Enable/Disable/Runtime）：进程级一份。IM 是「一个账号一条连接」，按
+	//     工作区/归属各造一份会变成同一账号多条长连接（同一条消息被多个实例收到 →
+	//     重复回复、重复派发），而 ~/.go-code/im-config.json 也只有一份。所以每个工作区
+	//     的 registry **共享同一个实例**（buildPlugins(m.imPlugin)）。
+	//   - 归属面（OwnerEnabled/SetOwnerEnabled/OwnerView/RoutesForOwner）：启用状态与
+	//     路由按 owner 分。A 群关闭只停 A 群的投递，B 智能体照常收发；plugin_list /
+	//     im_status / im_routes 读的是**当前 owner 的视图**（plugins.go annotateIMOwner），
+	//     不是进程总开关。归属由路由投递目标派生（im/config.go RouteConfig.EffectiveOwner，
+	//     群 > 智能体 > 工作区），不另存一份真相。
+	//
+	// 生命周期：工作区级 Close 被 implugin.Plugin.ClosePreserve 挡掉（否则删掉别的项目 /
+	// 改一次浏览器配置就会掐断正在用的 IM 连接），进程退出走 closeIMPlugin。
 	imPlugin *implugin.Plugin
 	// imBridge IM 事件桥（插件 Enable 后装配：事件流→IM 推送；IM 消息→会话驱动）。
-	imBridge *imBridge
+	// 用 atomic.Pointer：装配在 Enable/命令路径写，Gateway 回调与 cron 触发在别的
+	// goroutine 读 —— 裸指针是 data race（-race UB）。读一律走 imBridgeRef()。
+	imBridge atomic.Pointer[imBridge]
 	// lastModel 最近一次 switch_model 的模型（IM 发起会话的默认模型来源；
 	// 与前端 globalPrefs「最近一次选择」语义一致——IM 会话应复用桌面端当前选择）。
 	lastModel string
@@ -807,6 +1481,25 @@ type manager struct {
 	// 不做 I/O，建 venv 是首次调用时 Ensure 的职责）。全局单例：运行时根在 home
 	// （~/.go-code/runtime/python），与工作区无关；Ensure 自身按 Root 串行 + flock 去重。
 	pyRT *goruntime.Runtime
+	// previewSlots 预览转换器的**工作区槽位**（BR-21）：key = 工作区绝对路径，
+	// 值里含该工作区的 xlsx/docx/pptx 三个转换器。owner 是工作区而不是进程 —— 因为三者
+	// 的 Seatbelt 读写根按工作区构造，进程级单例只能靠调用点自觉传对 workspace
+	//（错传不会报错，只会静默越权）。锁独立于 m.mu：建槽会用到 pyRT，独立锁避免与
+	// m.mu 形成锁序环；回收路径见 releasePreviewSlot / releaseAllPreviewSlots。
+	previewMu    sync.Mutex
+	previewSlots map[string]*previewSlot
+	// hookTrust hooks 信任库 —— **实例 = 进程级一份**（一个文件、即刻生效），
+	// **条目 = 按归属（owner）隔离**：workspace:<path> / agent:<id> / group:<id>。
+	//
+	// 两层要分清（这正是审计 BR-21 的修法）：
+	//   - 共享实例：信任判定发生在每次派发时（Runner.Dispatch → TrustStore.Check），
+	//     面板的 hooks_trust 写的必须是同一个实例，否则新确认要重建会话才生效（契约
+	//     §5.5 要求即刻生效）；多份副本还会互相覆盖 ~/.go-code/hooks-state.json。
+	//   - 隔离归属：每条确认记在「哪个 owner 点过」名下。A 智能体/群的确认不得让
+	//     B 免确认；同一 agent 的 DM 与群聊也不共享（产品决策：选最安全的不共享）。
+	//     项目会话按 workspace 归属；Hub DM 按 agent；Hub 群聊按 group。
+	// 迁移：旧版全局条目落在 legacy 名下，只对 workspace 维兼容生效（见 hooks/trust.go）。
+	// 归属派生：bridge/owner_wire.go 的 ownerFromPayload / ownerOfSession（唯一入口）。
 	// xlsxPV docxPV pptxPV 三个预览转换器（进程级单例，懒创建；单例理由同 pyRT：
 	// 运行时不按工作区隔离，新建只是构造结构体，重活在首次 Convert 的 Ensure 里）。
 	// R08a 起命令分支不再直接调它们 —— 统一经 conv 排队/缓存/限额，见 previewService。
@@ -900,7 +1593,22 @@ func (m *manager) pptxPreviewerLocked(pyRT *goruntime.Runtime) *builtin.PptxPrev
 }
 
 // workspaceRuntime：单个工作区的会话集合 + 持久化目录 + 技能注册表 + 自定义 subagent 注册表 + MCP 管理器（按工作区隔离）
+// runtimeKind 运行时类型（workspaceRuntime.kind，零值 = 项目工作区）。
+//
+// Hub 智能体的虚拟工作区与项目工作区走同一套 createIn 装配，但只吃全局层：
+// 智能体不属于任何仓库，项目级技能/MCP/插件只在「任务派发到该项目、由该项目自己跑」
+// 时才有意义（方案 §6.1.1）。两者分开登记（manager.workspaces vs hubRuntimes），
+// 免得 workspace_list / reload / MCP 重放这些遍历 m.workspaces 的路径看到智能体。
+type runtimeKind int
+
+const (
+	runtimeProject  runtimeKind = iota // 现有工作区：项目上下文 + 工具面
+	runtimeHubAgent                    // Agent Hub 智能体：全局层 + 工具面，无项目上下文
+)
+
 type workspaceRuntime struct {
+	kind            runtimeKind // 零值 = runtimeProject（既有构造点不必改）
+	agentID         string      // kind=runtimeHubAgent 时非空
 	path            string
 	storeDir        string
 	eventsDir       string
@@ -963,6 +1671,21 @@ func (bs *bridgeSession) liveSnapshot() (text, think string) {
 }
 
 func (m *manager) get(wsPath, id string) *bridgeSession {
+	// Hub 智能体的 home 不是工作区：直接走 m.runtime(wsPath) 会**造出**一个项目 kind 的
+	// runtime（读项目层、并混进 m.workspaces）。按 home 命中已有 hub runtime 时先查它，
+	// 让 interrupt/compact/blocks_page//clear 这些按 workspace+session_id 寻址的命令
+	// 对 DM 会话同样成立。
+	if ws := m.hubRuntimeByPath(wsPath); ws != nil {
+		ws.mu.Lock()
+		defer ws.mu.Unlock()
+		return ws.sessions[id]
+	}
+	if isHubHomePath(wsPath) {
+		// 未装配过 hub runtime：hub home 不是工作区，落到 m.runtime(wsPath) 会**造出**
+		// 一个项目 kind 的 runtime（读项目层、混进 m.workspaces）。blocks_page/compact
+		// 这类按 workspace+session_id 寻址的命令会因此留下幻影 runtime，直接判「没有会话」。
+		return nil
+	}
 	ws := m.runtime(wsPath)
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -973,6 +1696,12 @@ func (m *manager) get(wsPath, id string) *bridgeSession {
 // 返回「当前确有运行中 run」的会话数（无运行 = 0，前端据此判断是否为纯兜底命中）。
 // 用途：interrupt 命令路由失配（session_id/workspace 对不上）时的兜底，杜绝静默 no-op。
 func (m *manager) interruptAllIn(wsPath string) int {
+	if isHubHomePath(wsPath) {
+		// 智能体 home 不是工作区：这里 m.runtime(wsPath) 会造出项目 kind 的 runtime
+		// （读项目层、混进 m.workspaces）。hub 会话按 m.get 的 hubRuntimeByPath 寻址，
+		// 走到这个兜底分支说明本来就没有会话，直接 no-op。
+		return 0
+	}
 	ws := m.runtime(wsPath)
 	ws.mu.Lock()
 	sessions := make([]*bridgeSession, 0, len(ws.sessions))
@@ -1242,6 +1971,7 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	}
 	startupLog("A5.computerEnsureSynced", cuSyncStart)
 	ws := &workspaceRuntime{
+		kind:       runtimeProject,
 		path:       path,
 		storeDir:   wsSessionsDir(path), // APP 级：~/.go-code/sessions/<wsKey>（跨 workspace，工作区下只留 skills）
 		eventsDir:  wsEventsDir(path),   // APP 级：~/.go-code/events/<wsKey>
@@ -1278,18 +2008,48 @@ type sessionOpts struct {
 	cronEvDir string // 同 eventsDir（cron 语义别名，供快照归档用）
 	wsKey     string // workspaceKey（快照路径维度）
 	noRecord  bool   // true = 不装配 checkpoint record（触发即跑、跑完归档，无需崩溃恢复）
+	// hub 非 nil = 本次装配的是 Agent Hub 智能体会话（§6.1.2）：
+	// loop 走 buildHubLoop（L1/L2 提示词、显式 provider），事件回写 DM 索引。
+	// 项目会话保持 nil，装配路径逐字不变。
+	hub *hubSessionSpec
 }
 
+// createOpts 项目路径入口：先把工作区运行态取出来（必要时装配），再交给 createIn。
+// 保持既有签名不变——调用点很多（create / cron / 手机端），行为与拆分前完全一致。
 func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*bridgeSession, error) {
+	// 防御纵深（P4-04a N7）：Hub 智能体 home 不是项目工作区。若从这里装配项目
+	// runtime，会读 {home}/.go-code/hooks.json 等"项目层"并混进 m.workspaces。
+	// 明确拒绝，让调用方改走 hubDMSession / hubGroupSession（各自有用户级装配）。
+	if isHubHomePath(wsPath) {
+		return nil, fmt.Errorf("create session: %q 是 Hub 智能体 home，不是项目工作区（Hub 会话请走 hubDMSession/hubGroupSession）", wsPath)
+	}
+	return m.createIn(m.runtime(wsPath), id, effort, opts)
+}
+
+// createIn 会话装配主体（方案 §6.1.2）：runtime 由调用方决定 —— 项目路径传
+// m.runtime(wsPath)，Hub 智能体传 m.hubRuntime(agentID)。除了 ws 的来源与下面
+// 三处按 ws.kind 分流，其余（FileStore/record/reducer/questionWaiter/approval/
+// hooks/wake loop）与拆分前逐字一致。
+func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts sessionOpts) (*bridgeSession, error) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
-	ws := m.runtime(wsPath)
+	if ws == nil {
+		return nil, errors.New("create session: nil workspace runtime")
+	}
+	if opts.hub != nil && m.hubShutdown.Load() {
+		return nil, errors.New("create hub session: manager is shutting down")
+	}
+	wsPath := ws.path
 	// 会话首次创建前自动恢复「上次已启用」的插件（持久化标记；本进程每工作区一次）。
 	// 未安装/启用失败仅记日志，不阻断会话创建。
 	// TEMP-STARTUP A6：插件启用（同步，头号嫌疑——Enable ≤15s + embed 2s）
+	// 项目级自动装配：Hub 智能体的运行时只吃全局层，不做「按工作区恢复已启用插件」
+	//（方案 §6.1.1 列明的跳过项之一）。
 	plgStart := time.Now()
-	m.autoEnablePlugins(ws)
+	if ws.kind == runtimeProject {
+		m.autoEnablePlugins(ws)
+	}
 	startupLog("A6.autoEnablePlugins", plgStart)
 	// 会话已在进程内（切走再切回 / 后台仍活跃）→ 复用，不重建：避免丢内存态与 goroutine 泄漏
 	ws.mu.Lock()
@@ -1341,10 +2101,7 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	// 无 record = 新会话/旧数据 → 空 reducer + legacy store 恢复。
 	// 定时任务派生会话（opts.noRecord）跳过装配：触发即跑、跑完归档，无需崩溃恢复。
 	recStart := time.Now()
-	wsKey := workspaceKey(wsPath)
-	if opts.wsKey != "" {
-		wsKey = opts.wsKey
-	}
+	wsKey := sessionRecordKey(ws, wsPath, opts)
 	reducer := NewViewReducer()
 	var recoveryState *session.State // 冷恢复时从 record.sdk_state 注入 SDK 恢复源
 	var recordStore *session.FileStorage
@@ -1454,10 +2211,24 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	qw := events.NewQuestionWaiter(events.MaxQuestionTimeout)
 	var bs *bridgeSession // WithEventHandler 闭包引用（emit 依赖 bs.s，Run 期间已赋值）
 	var s *session.Session
-	sk := m.runtime(wsPath).skills // 工作区技能注册表（WithSkills + load_skill 共享）
+	sk := ws.skills // 本 runtime 的技能注册表（WithSkills + load_skill 共享）——不能按路径重查：
+	// hub 的 path 是智能体 home，按路径重查会造出一个项目 kind 的 runtime（读项目层）。
 	loopStart := time.Now()
-	loop, effortRef, skillCaps := m.buildLoop(wsPath, id, m.provCfg.providerName(), m.preferredModel(), effort,
-		func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
+	var loop *agents.AgentLoop
+	var effortRef *subagentEffortRef
+	var skillCaps *skills.Capabilities
+	var hubEng *tools.Engine
+	if opts.hub != nil {
+		// Hub 智能体：工具面 + 提示词都按 Profile 装配（§6.2），与项目会话共用内核。
+		eng, eRef := m.buildHubEngine(ws, id, opts.hub, reg, qw, func() context.Context { return s.Context() })
+		loop = m.buildHubLoop(ws, id, opts.hub, eng)
+		effortRef = eRef
+		skillCaps = skillCapabilitiesFor(m.provCfg, opts.hub.Agent.Provider, opts.hub.Agent.Model, eng)
+		hubEng = eng
+	} else {
+		loop, effortRef, skillCaps = m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort,
+			func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
+	}
 	startupLog("A6.buildLoop", loopStart)
 	nsStart := time.Now()
 	// AI 标题恢复：冷启动从会话 jsonl meta 尾扫（进程内 titles store 未命中时兜底；
@@ -1471,6 +2242,23 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	// （内核所有扩展钩子为 nil）。设计见 docs/graft-integration/05-hooks-能力设计规范.md。
 	// 2026-09-21：抽成 hooksOption —— 与 hooks_set 的热替换（reloadWorkspaceHooks）共用
 	// 同一条装配链，避免"新建的会话"和"改过配置的会话"拿到不同 hooks。
+	// P4-04a：Hub 智能体会话只装用户级来源。home 是智能体自己的数据目录，把它当
+	// WorkspaceDir 会让"打开智能体"读入 {home}/.go-code/hooks.json / .claude 项目配置
+	//（等于执行该目录里的命令）。项目会话仍走原路径，逐字不变。
+	// 注意必须**二选一**地调用：先调 hooksOption 再丢弃也会读一遍项目层配置，
+	// "不读"是安全边界的一部分，不只是"不用"。
+	// 显式默认 nil 选项：两条分支都必须覆盖（NewSession 会对每个 option 解引用，
+	// 漏赋值不是"没钩子"而是 panic），同时保证默认关路径就是 WithHooks(nil)。
+	// warnHook 用闭包而不是直接取 bs.warnHook：构造期 bs 仍是 nil，方法值会把
+	// nil 接收者固化进去，运行期 hook 告警就永远到不了事件流（只能落 stderr）。
+	// 闭包捕获变量本身，首次 Run 前 bs 已赋值，告警才能经 bs.emit 到达 UI。
+	warnHook := func(name, message string) { bs.warnHook(name, message) }
+	hookOpt := session.WithHooks(nil)
+	if ws.kind == runtimeHubAgent {
+		hookOpt = m.hooksOptionUser(wsPath, id, warnHook)
+	} else {
+		hookOpt = m.hooksOption(wsPath, id, warnHook)
+	}
 	s, err = session.NewSession(id, loop, store,
 		// 启用 HITL 审批并设置等待窗口：与提问窗口同值（30 分钟上限）。
 		// 2026-09-20（用户拍板）：原 60s → 30min —— 审批面板已改成停靠（用户会边翻对话历史/
@@ -1483,7 +2271,7 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 		// 派发器为 nil 时不装配（零开销路径）。SessionStart/UserPromptSubmit 由 Session 内部
 		// 从同一 ToolHooks 取用，无需在此额外传参。
 		session.WithHookCwd(wsPath),
-		m.hooksOption(wsPath, id, bs.warnHook),
+		hookOpt,
 		session.WithAITitle(restoredTitle), // 恢复 AI 标题（空 = 未生成/新会话）
 		session.WithEventHandler(func(_ context.Context, e events.Event) {
 			bs.emit(e) // 转发会话级事件（session_closed 等）
@@ -1500,7 +2288,34 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub()}
+	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubBudgetCheck: m.hubBudgetCheck, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }, hubTaskRunning: func(runID string) { m.markHubTaskRunning(bs, runID) }}
+	bs.hubInterrupt = func() { bs.s.Interrupt() }
+	bs.hubNeed = func(e events.Event) { m.recordHubNeed(bs, e) }
+	bs.hubExpireNeeds = func() { m.scheduleHubExpire(bs) }
+	bs.hubFailTask = m.failHubTasksByReason
+	bs.hubAlert = func(code, message string) {
+		m.emitHubAlert(hubAlertEvent{Code: code, Message: message})
+	}
+	if opts.hub != nil {
+		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：
+		// rebuildLoop 据此走 buildHubLoop，而不会被当成项目会话的 code persona 重建。
+		bs.editModelCfg(opts.hub.Agent.Provider, opts.hub.Agent.Model, "")
+		bs.persona = "hub"
+		hubSpec := opts.hub
+		bs.hubOnAgentEnd = func(ae *events.AgentEnd, segs []hubSegment) { m.finishHubReply(bs, hubSpec, ae, segs) }
+		bs.hubEngine = hubEng
+		bs.hubDeltaAgentID = string(hubSpec.Agent.ID)
+		bs.hubDeltaDM = hubSpec.Scope.Kind == agenthub.ScopeDM
+		// 群与 DM 都要按 LLM 轮次分段流式（DM 的多段落账先做，前端 delta 后续接）。
+		bs.hubDelta = newHubDeltaSink(m.out)
+		if hubSpec.Scope.Kind == agenthub.ScopeGroup {
+			gid, aid := hubSpec.Scope.GroupID, hubSpec.Agent.ID
+			bs.hubOnRunEnd = func() {
+				m.scheduleAgentTaskPump(gid, aid)
+				m.scheduleHubConversationPump(gid)
+			}
+		}
+	}
 	if opts.cronEvDir != "" {
 		bs.cronEvDir = opts.cronEvDir
 	}
@@ -1566,7 +2381,10 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	m.evictIdleSessionsLocked(ws, id)
 	ws.mu.Unlock()
 	// Session Mesh 注册（本机会话入 Hub 注册表；重复注册幂等忽略——进程内复用路径已挡）
-	if m.hub != nil {
+	// Hub 智能体会话**不注册**（方案 §6.1.2 第 3 点）：一旦进 mesh，工作区主会话的
+	// session_list 就会列出智能体，等于默认打开一条跨层投递通道。P4 要「工作区反问
+	// 智能体」时再引入带 kind 过滤的 RegisterEx。
+	if m.hub != nil && ws.kind == runtimeProject {
 		if err := m.hub.Register(s); err != nil {
 			// M3：跨工作区同 sid 碰撞（极罕见：genID 纳秒+序号进程内唯一，但磁盘
 			// 冷恢复可能复用旧 sid）。不静默——记录诊断，避免 session_send 寻址歧义难查。
@@ -1576,7 +2394,7 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 		}
 	}
 	// IM 事件桥回填：IM 已启用时新会话直接挂上（emit 全事件漏斗转发用）
-	bs.im = m.imBridge
+	bs.im = m.imBridgeRef()
 	rlStart := time.Now()
 	bs.runLoop()
 	startupLog("A6.runLoop", rlStart)
@@ -1632,6 +2450,10 @@ func (m *manager) respCode(c command, ok bool, errMsg, code string, data map[str
 }
 
 func (m *manager) dispatch(c command) {
+	// Hub 命令分派集中在新文件里（命令面会持续变长，不往这个 switch 里再塞 20 个 case）。
+	if m.dispatchHub(c) {
+		return
+	}
 	// TEMP-STARTUP A9：命令耗时（仅启动相关命令，避免全量噪音）
 	cmdStart := time.Now()
 	defer func() {
@@ -2448,7 +3270,7 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		bs.loop.SetReasoningEffort(provider.ReasoningEffortLevel(eff)) // 下一次 LLM 请求生效
-		bs.effort = eff
+		bs.editModelCfg("", "", eff)
 		// 子 agent 追随主 loop（2026-09 决策）：共享 spawn/explore loop 就地同步，
 		// 之后派生的文件化 subagent 由工厂读新档位（见 subagentEffortRef）。
 		if bs.subagentEffort != nil {
@@ -2489,10 +3311,14 @@ func (m *manager) dispatch(c command) {
 			m.provCfg.loadSettings()
 			m.provCfg.syncRegistry()
 			if !m.provCfg.hasModelIn(prov, name) {
-				// 仍查不到 → 显式报错，绝不静默回退按名全局解析（字母序会把 zhipu 的
+				// 本地 vLLM/Ollama 等端点可能还没拉模型表：只要 provider 有 base URL/key
+				// 且模型表为空，就允许显式指定模型（否则「能建 provider 不能用」）。
+				// 表非空仍严格拒绝，绝不静默回退按名全局解析（字母序会把 zhipu 的
 				// glm-5.3-flash 猜成 opencode → 请求打到错误 Provider 401/429，2026-09）。
-				m.respCode(c, false, "provider "+prov+" has no model "+name, "unknown_model", nil)
-				return
+				if !m.provCfg.allowUnlistedModel(prov) {
+					m.respCode(c, false, "provider "+prov+" has no model "+name, "unknown_model", nil)
+					return
+				}
 			}
 		}
 		// 显式 provider（前端跨 Provider 分组选中模型连带切）→ 会话归属以用户选择为准，
@@ -2505,27 +3331,37 @@ func (m *manager) dispatch(c command) {
 			m.respCode(c, false, "unknown model: "+name, "unknown_model", nil)
 			return
 		}
-		// 目标 Provider ≠ 当前活跃 → 自动把活跃 Provider 切到该模型所属 Provider
-		//（模型窗口/输出上限/压缩器都按它解析），无需依赖前端 set_provider 时序。
-		if prov != m.provCfg.providerName() {
+		// Hub 会话（persona=hub）用**显式 provider** 装配 loop：`applyHubSessionLoop`
+		// 用 bs.provider/model，window/maxTokens 也接受显式 provider。切 Hub 模型
+		// 绝不能改全局 active / lastModel —— 那会让「新建工作区会话」跟着换 provider
+		//（P1-10 评审 B6 实测：Hub 切 gpt-5 后新项目会话变成 openai）。
+		isHub := bs.persona == "hub" || bs.hubEngine != nil
+		if !isHub {
+			// 目标 Provider ≠ 当前活跃 → 自动把活跃 Provider 切到该模型所属 Provider
+			//（模型窗口/输出上限/压缩器都按它解析），无需依赖前端 set_provider 时序。
+			if prov != m.provCfg.providerName() {
+				m.provCfg.setActive(prov)
+			}
+			// model/provider/max_tokens/contextWindow 一起切：窗口与输出上限按目标模型重解析
+			// （Provider 设置已持久化；重载 settings.json 拿最新值）。
+			m.provCfg.loadSettings()
+			// settings.json 的 active 可能仍是旧值（客户端 provider:save 异步落盘，与
+			// 命令到达存在竞态）—— 重载后无条件把活跃 Provider 固定回本会话模型所属
+			// Provider，避免会话 loop 用错 Provider 表/地址（跨 Provider 切模型时）。
 			m.provCfg.setActive(prov)
+			// 记录全局"最近一次模型选择"：IM 发起的新会话用它（而非 defaultModel）
+			m.mu.Lock()
+			m.lastModel = name
+			m.mu.Unlock()
 		}
-		// model/provider/max_tokens/contextWindow 一起切：窗口与输出上限按目标模型重解析
-		// （Provider 设置已持久化；重载 settings.json 拿最新值）。
-		m.provCfg.loadSettings()
-		// settings.json 的 active 可能仍是旧值（客户端 provider:save 异步落盘，与
-		// 命令到达存在竞态）—— 重载后无条件把活跃 Provider 固定回本会话模型所属
-		// Provider，避免会话 loop 用错 Provider 表/地址（跨 Provider 切模型时）。
-		m.provCfg.setActive(prov)
-		bs.model = name
-		bs.provider = prov // 价表打标：本会话按所属 Provider 记账（不随全局活跃漂移）
-		if str(c.Payload, "provider") != "" && bs.provider == prov {
-			bs.providerExplicit = true // 用户显式选定 Provider → 后续 rebuildAll 保留归属
+		// provider key 随命令下发（BR-08）：客户端不再把 key 持久化到 settings.json，key 由
+		// Electron（keys.json）保管，切模型时按目标 provider 注入（非活跃 provider 无 env 兜底）。
+		// payload 显式带空串 = 清除（回退 env 兜底）；不带该键 = 不动内存现有值。
+		m.provCfg.applyPayloadKey(c.Payload, prov)
+		bs.editModelCfg(prov, name, "")
+		if str(c.Payload, "provider") != "" {
+			bs.setProviderExplicit(true) // 用户显式选定 Provider → 后续 rebuildAll 保留归属
 		}
-		// 记录全局"最近一次模型选择"：IM 发起的新会话用它（而非 defaultModel）
-		m.mu.Lock()
-		m.lastModel = name
-		m.mu.Unlock()
 		// 下一轮 LLM 生效：当前 loop 就地切 model/max_tokens/contextWindow ——
 		// 运行中的 Run 下一轮 LLM 立即读到新值（streamOnce/maybeCompact 按 current 取）。
 		// 窗口/输出上限按目标 Provider 显式解析（问题六：不依赖 active 漂移）
@@ -2538,7 +3374,6 @@ func (m *manager) dispatch(c command) {
 	case CmdSetProvider: // 热切换：Provider 设置面板 → 更新配置 + 重建全部会话 loop（不重启 bridge）
 		providerName := str(c.Payload, "provider")
 		baseURL := str(c.Payload, "base_url")
-		apiKey := str(c.Payload, "api_key")
 		protocol := str(c.Payload, "protocol")
 		// 仅当 payload 显式携带 active（前端「设为当前」/ providerSave active 字段）才切换
 		// 全局活跃 Provider。纯「保存配置」（改 key/协议/模型窗口）不切 active——
@@ -2585,13 +3420,9 @@ func (m *manager) dispatch(c command) {
 		if baseURL != "" {
 			m.provCfg.setBaseURL(providerName, baseURL)
 		}
-		if apiKey != "" {
-			m.provCfg.setKey(providerName, apiKey)
-		} else if _, ok := c.Payload["api_key"]; ok {
-			// payload 显式带空 api_key（前端保存未填 key / 删 key）：清内存旧值，
-			// 防止旧 key 残留 → 新会话 401（回退 env/.env 兜底）。
-			m.provCfg.setKey(providerName, "")
-		}
+		// provider key（BR-08）：key 不再进 settings.json，只随命令 payload 下发；
+		// 应用点在本 case 末尾的 loadSettings 之后（applyPayloadKey）——loadSettings 会按
+		// settings 重算内存 key，先写会被重算逻辑影响。
 		if protocol != "" {
 			m.provCfg.setProtocol(providerName, protocol) // payload 兜底 settings.json 落盘时序
 		}
@@ -2690,6 +3521,9 @@ func (m *manager) dispatch(c command) {
 				m.provCfg.setPrices(providerName, parsed)
 			}
 		}
+		// 顺序要点（BR-08）：loadSettings 已按 settings 重算内存 key（settings 无 api_key），
+		// 这里再落 payload 的 api_key —— 显式空串 = 清除（回退 env 兜底），不带 = 不动。
+		m.provCfg.applyPayloadKey(c.Payload, providerName)
 		m.provCfg.syncRegistry() // 热更新注册表（窗口/上限/价/input_types 覆盖）
 		m.rebuildAll()
 		m.resp(c, true, "", map[string]any{"active": m.provCfg.providerName()})
@@ -2818,6 +3652,9 @@ func (m *manager) dispatch(c command) {
 		if providerName == "" {
 			providerName = m.provCfg.providerName()
 		}
+		// BR-08：env 里只有活跃 provider 的 key，非活跃 provider 的 key 随命令下发
+		//（设置页对任意一家点「拉取模型列表」都得能用，不要求先保存/先切过去）。
+		m.provCfg.applyPayloadKey(c.Payload, providerName)
 		models, err := m.provCfg.listModels(providerName)
 		if err != nil {
 			code := "provider_error"
@@ -3533,6 +4370,12 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace/session_id 为空", nil)
 			return
 		}
+		if isHubHomePath(ws) {
+			// DM 只有一个会话（§6.4）：删掉它等于把「它」的上下文抹了，
+			// 恢复语义不存在；要清空上下文用 /clear（保留记忆与索引）。
+			m.resp(c, false, "智能体 DM 会话不可删除，请用 /clear 清空上下文", nil)
+			return
+		}
 		m.deleteSession(ws, sid)
 		m.resp(c, true, "", map[string]any{"sessions": m.listSessions(ws)})
 
@@ -3638,6 +4481,8 @@ func (m *manager) shutdownWorkspace(wsPath string) {
 	}
 	ws.mcp.Close()                         // 关闭工作区 MCP 服务器连接（子进程清理；会话复用按需重连）
 	ws.plugins.Close(context.Background()) // 关闭插件私有连接（Browser Use 子进程清理）
+	// 预览槽位随会话一起收尾（下次预览按需重建；见 workspace_slots.go）
+	m.releasePreviewSlot(wsPath)
 }
 
 // shutdownAll：stdin EOF 兜底，全部工作区优雅关闭
@@ -3663,6 +4508,12 @@ func (m *manager) shutdownAll() {
 		ws.stopMCPWatch()
 		ws.stopMCPHealth() // 探活 goroutine 收尾（Refresh 会取 Manager 锁：不得持锁调用）
 	}
+	// Hub 智能体运行时同理（不在 m.workspaces 里，单独收尾）
+	m.shutdownHubRuntimes()
+	// 预览转换器槽位回收（进程退出：不留任何工作区登记）
+	m.releaseAllPreviewSlots()
+	// 进程级单例的显式收尾（IM 连接不随工作区关闭而停，只能在这里停一次）
+	m.closeIMPlugin()
 	// Session Mesh 远程网关关闭（mesh 常驻 manager 级，不随工作区）
 	if m.meshGW != nil {
 		m.meshGW.Stop()
@@ -3833,6 +4684,8 @@ func (m *manager) deleteWorkspace(wsPath string) {
 		ws.stopMCPWatch()                      // 停止配置监听（goroutine + fd 收尾；不得持锁调用）
 		ws.stopMCPHealth()                     // 停止 MCP 低频探活（同上）
 	}
+	// 预览槽位随工作区一起回收（BR-21 的回收路径之一：登记表不能只增不减）
+	m.releasePreviewSlot(wsPath)
 	// 只删 harness 自有元数据（工作区 .go-code 下的 skills.json），**保留**用户文件：
 	// 项目级配置 {ws}/.go-code/settings.json（手写的 MCP 等）、skills/ 项目技能、
 	// worktrees/ 都是用户数据。目录仅在清空后为空时移除（原实现 RemoveAll 整目录会把
@@ -3849,6 +4702,13 @@ func (m *manager) deleteWorkspace(wsPath string) {
 // 关闭事件日志句柄（防 fd 泄漏）+ 等待 checkpoint coordinator drain（防止删除后
 // 异步 commit 又把 record 写回）。幂等：已 cancel 的跳过 Shutdown。
 func stopSession(bs *bridgeSession) {
+	// 群闩是进程内 liveness 状态：会话关闭后必须释放，不能把智能体永久标忙。
+	bs.hubGroupBusy.Store(false)
+	bs.hubGroupOwner.Store(0)
+	bs.hubGroupRunSeq.Store(0)
+	if bs.hubDelta != nil {
+		bs.hubDelta.close()
+	}
 	if bs.ctx.Err() == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = bs.s.Shutdown(ctx)
@@ -3889,7 +4749,7 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 			"title":      resolveLiveSessionTitle(wsKey, bs, id),
 			"updated_at": sessionUpdatedAt(ws, id, bs.lastActive.Load()),
 			"pinned":     sessionPins.isPinned(wsKey, id),
-			"running":    bs.running.Load(),
+			"running":    bs.running.Load() || bs.hubDispatchPending.Load(),
 		})
 	}
 	ws.mu.Unlock()
@@ -4990,7 +5850,7 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	}
 	// 定时任务工具门控：设置 cron.enabled=true 才注册（CronCreate/CronList/CronUpdate/CronDelete）。
 	// 任务定义/账本在宿主级 Store；本会话绑定自己的 workspace/sid 作为触发目标。
-	if cs != nil && loadCronSettings().Enabled {
+	if cs != nil && loadCronSettings().enabledOn() {
 		for _, t := range cron.NewTools(cs, cron.ToolBound{Workspace: workspace, SessionID: sid}) {
 			eng.RegisterTool(context.Background(), t)
 		}
@@ -5021,10 +5881,14 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 // 模型窗口（WithContextWindow）与输出上限（WithMaxTokens）按 prov 显式解析（问题六：
 // 不随全局活跃 Provider 漂移——跨 Provider 会话重建时窗口/端点/价表保持本会话归属）。
 // Provider 面板标记 1M / 配置 max_tokens 的模型 → 真 1M 上下文 + 对应单次输出上限。
-func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities) {
+// buildLoop 用**调用方给的 runtime** 装配 loop（方案 §6.1.2）：技能/插件/MCP/子代理
+// 全部取 ws 上的实例，绝不按路径再查一次 —— m.runtime(ws.path) 在 Hub 智能体的 home
+// 上会造出一个「项目 kind」的运行时，把项目层重新读进来（P0-08 复审的设计要点）。
+func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
+	workspace := ws.path
 	// 受管 Python 运行时（run_python 的解释器来源；manager 级单例，见 pythonRuntime 注释）。
 	// 在此就地取而不加 newSessionEngine 参数：buildLoop 是唯一的会话装配入口。
 	pyRT := m.pythonRuntime()
@@ -5033,7 +5897,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// 目标」；清单让模型用授权时记录的准确显示名唤起/激活（而非用户口语简称猜名）。
 	// 模型自由决策时易固执重试失败调用/蔓延 bash（真机 LLM E2E 教训 2026-09）。
 	sysPrompt := profile.systemPrompt
-	if plg := m.runtime(workspace).plugins; plg != nil {
+	if plg := ws.plugins; plg != nil {
 		if cap, ok := plg.Get(computerplugin.ID); ok {
 			if ec, ok2 := cap.(interface{ IsEnabled() bool }); ok2 && ec.IsEnabled() {
 				sysPrompt = sysPrompt + computerPromptGuide + computerAppsGuide()
@@ -5047,7 +5911,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// 就够、不要链式调用"——丢掉它，第三方工具的会用率会明显下降。
 	// 装配期取一次（会触发服务器惰性首连）；2s 预算内没连上的服务器本轮不贡献该层，
 	// 下次 loop 重建时补上（其工具本来也尚不可用）。
-	if mm := m.runtime(workspace).mcp; mm != nil {
+	if mm := ws.mcp; mm != nil {
 		ictx, icancel := context.WithTimeout(context.Background(), mcpInstructionsTimeout)
 		if txt := mcp.InstructionsText(mm.Instructions(ictx)); txt != "" {
 			sysPrompt = sysPrompt + "\n\n## MCP servers\n" + txt
@@ -5060,7 +5924,7 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
-	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
+	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, ws.subagents, ws.mcp, ws.plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()
@@ -5109,12 +5973,12 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// 保证「面板显示可用的」== 「loop 实际注入清单的」。
 	skillCaps := skillCapabilitiesFor(m.provCfg, prov, model, eng)
 	opts = append(opts,
-		agents.WithSkills(sk),                                // 技能发现清单注入 system（渐进披露）+ /skills 命令
-		agents.WithSkillCapabilities(skillCaps),              // 清单/命令/load_skill 三处同源过滤（按选中模型）
-		agents.WithSubagents(m.runtime(workspace).subagents), // 自定义 subagent 清单注入 system（渐进披露）+ spawn_agent
-		agents.WithAgentMDDir(workspace),                     // 工作区 AGENTS.md/CLAUDE.md 递归发现（工作记忆层）
-		agents.WithUserAgentMDDir(globalAgentMDDir()),        // 用户级 ~/.agents/AGENTS.md（跨工作区，优先级最低）
-		agents.WithWorkingDir(workspace),                     // Current Workspace 环境层：声明本会话文件操作根目录
+		agents.WithSkills(sk),                         // 技能发现清单注入 system（渐进披露）+ /skills 命令
+		agents.WithSkillCapabilities(skillCaps),       // 清单/命令/load_skill 三处同源过滤（按选中模型）
+		agents.WithSubagents(ws.subagents),            // 自定义 subagent 清单注入 system（渐进披露）+ spawn_agent
+		agents.WithAgentMDDir(workspace),              // 工作区 AGENTS.md/CLAUDE.md 递归发现（工作记忆层）
+		agents.WithUserAgentMDDir(globalAgentMDDir()), // 用户级 ~/.agents/AGENTS.md（跨工作区，优先级最低）
+		agents.WithWorkingDir(workspace),              // Current Workspace 环境层：声明本会话文件操作根目录
 		// @引用 PDF 文本抽取（2026-09）：PDF 结构层是纯 ASCII，agents 侧的二进制判定
 		// 读不出正文（压缩流 → 报「二进制不读内容」；未压缩 → 把 PDF 源码当正文注入）。
 		// 抽取要 pypdf + 受管运行时 + 沙箱，属宿主能力面 → 经钩子注入（agents 包不
@@ -5192,9 +6056,19 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 // loop 构建期捕获 provider + 模型窗口 + 输出上限（按 bs.provider 显式解析，问题六：
 // 跨 Provider 会话不随全局活跃漂移），重建即应用新配置（热切换不重启 bridge）。
 func (m *manager) rebuildLoop(bs *bridgeSession) {
+	// Hub 会话（persona=hub）不在 profiles 表里：必须走 Hub 装配，否则拿到零值
+	// personaProfile —— L1/L2 丢失、工具面按项目重装（P1-05 复审实测）。
+	if bs.persona == "hub" && bs.hubEngine != nil && m.rebuildHubLoop(bs) {
+		return
+	}
 	profile := profiles[bs.persona]
-	loop, effortRef, caps := m.buildLoop(bs.workspace, bs.id, bs.provider, bs.model, bs.effort,
-		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, m.runtime(bs.workspace).skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
+	ws := bs.runtime
+	if ws == nil {
+		ws = m.runtime(bs.workspace) // 兜底：本提交之前创建的会话没有 runtime 快照
+	}
+	prov, model, effort := bs.modelCfg()
+	loop, effortRef, caps := m.buildLoop(ws, bs.id, prov, model, effort,
+		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, ws.skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
 	bs.s.SetLoop(loop)
 	bs.loop = loop
 	bs.subagentEffort = effortRef // 子 agent 档位持有者随新引擎换代（旧引擎的 loop 已废弃）
@@ -5468,8 +6342,13 @@ func (m *manager) sessionByID(sid string) *bridgeSession {
 		return nil
 	}
 	m.mu.Lock()
-	wss := make([]*workspaceRuntime, 0, len(m.workspaces))
+	wss := make([]*workspaceRuntime, 0, len(m.workspaces)+len(m.hubRuntimes))
 	for _, ws := range m.workspaces {
+		wss = append(wss, ws)
+	}
+	// Hub 智能体会话不在 m.workspaces（hubRuntimes 单独登记）：审批/提问
+	// 的 need.Need.SessionID 是 hub.<agent>.dm，只扫项目工作区会永远找不到（P2-06 B1）。
+	for _, ws := range m.hubRuntimes {
 		wss = append(wss, ws)
 	}
 	m.mu.Unlock()
@@ -5527,7 +6406,7 @@ func (m *manager) maybeGenSessionTitle(wsPath string, bs *bridgeSession, firstTe
 		return
 	}
 	// 会话绑定的 provider/model（异步期间快照）
-	provName, model, effort := bs.provider, bs.model, bs.effort
+	provName, model, effort := bs.modelCfg()
 	if provName == "" || model == "" {
 		return
 	}
@@ -5789,27 +6668,30 @@ func (m *manager) rebuildAll() {
 			//    仅当原 Provider 已删除/不再含该模型才回退全局解析（防字母序改写：glm-5.3-flash
 			//    同时存在于 opencode+zhipu 时曾因 o<z 被改到 opencode，请求打到错误网关）。
 			// 2) 否则（旧会话无显式归属）按模型名解析一次并记录归属，后续不再漂移。
-			keep := bs.providerExplicit && m.provCfg.hasModelIn(bs.provider, bs.model)
-			if !keep && bs.provider != "" && m.provCfg.hasModelIn(bs.provider, bs.model) {
+			provName, model, effort, explicit := bs.cfgSnapshot()
+			keep := explicit && m.provCfg.hasModelIn(provName, model)
+			if !keep && provName != "" && m.provCfg.hasModelIn(provName, model) {
 				keep = true // 会话已有归属且模型仍在该 Provider → 保留（不因 rebuildAll 漂移）
 			}
 			if !keep {
-				if prov := m.provCfg.providerForModel(bs.model); prov != "" {
-					bs.provider = prov
+				if prov := m.provCfg.providerForModel(model); prov != "" {
+					provName = prov
 				} else {
-					bs.provider = m.provCfg.providerName()
-					if !m.provCfg.hasModel(bs.model) {
-						bs.model = m.provCfg.defaultModel()
+					provName = m.provCfg.providerName()
+					if !m.provCfg.hasModel(model) {
+						model = m.provCfg.defaultModel()
 					}
 				}
+				bs.editModelCfg(provName, model, "")
 			}
 			// 旧 loop 保活：in-flight Run 持旧 loop 引用直到本轮结束，就地推送运行时值，
 			// 其后续轮次即按新窗口判定压缩（rebuildLoop 只换引用，覆盖不到在跑的 Run）。
 			if bs.loop != nil {
-				bs.loop.SetModel(bs.model)
-				bs.loop.SetMaxTokens(m.provCfg.maxTokensForIn(bs.provider, bs.model))
-				bs.loop.SetContextWindow(m.provCfg.windowForIn(bs.provider, bs.model))
+				bs.loop.SetModel(model)
+				bs.loop.SetMaxTokens(m.provCfg.maxTokensForIn(provName, model))
+				bs.loop.SetContextWindow(m.provCfg.windowForIn(provName, model))
 			}
+			_ = effort
 			m.rebuildLoop(bs)
 		}
 	}
@@ -5967,13 +6849,15 @@ func serve() error {
 	pc := loadProviderConfig()
 	startupLog("A2.loadProviderConfig", pcStart)
 	m := &manager{
-		workspaces: map[string]*workspaceRuntime{},
-		provCfg:    pc,
-		out:        newOut(os.Stdout),
-		metrics:    NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
-		imPlugin:   implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
-		hub:        session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
-		memPrefs:   newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
+		workspaces:  map[string]*workspaceRuntime{},
+		hubRuntimes: map[string]*workspaceRuntime{},
+		hubMsgDedup: map[string]string{},
+		provCfg:     pc,
+		out:         newOut(os.Stdout),
+		metrics:     NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
+		imPlugin:    implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
+		hub:         session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
+		memPrefs:    newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
 	}
 	// 会话文件维护清扫（后台）：把「已结束、不会再被写入」的会话文件里
 	// 攒下的 O(N²) 一次性收掉（实测子智能体 journal 13.4GB / 主会话 jsonl 6.8GB）。
@@ -6306,7 +7190,14 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 		var oldest int64
 		now := time.Now()
 		for id, bs := range ws.sessions {
-			if id == keepID || bs.running.Load() {
+			if id == keepID {
+				continue
+			}
+			// 不只 running：Hub 任务可能已 Ask 未开跑（hubDispatchPending）、
+			// 群轮已投递未回复（hubGroupBusy）、AgentEnd 未结算（hubSettling），
+			// 或输入还在 inbox 里（PendingCount>0）。这些会话被淘汰 = 任务直接丢失，
+			// 而它们都不在 running 里 —— LRU 必须与 hubSessionBusy 同口径。
+			if hubSessionBusy(bs) || (bs.s != nil && bs.s.PendingCount() > 0) {
 				continue
 			}
 			if now.Sub(time.Unix(0, bs.lastUsed.Load())) < sessionEvictGrace {

@@ -123,6 +123,12 @@ type Seatbelt struct {
 
 	noProbe       bool     // WithNoProbe：跳过构造期探测（测试/CI）
 	userSensitive []string // WithSensitivePaths 注入的显式敏感路径（相对 home 或绝对；构造期归一）
+	// explicitSensitive 归一化后的**显式**敏感路径（默认 .go-code 不在内）。
+	// 用途：在策略末尾（所有 allow 之后）再 deny 一次 —— 显式 deny 必须压过
+	// 任何后置的 allow（OpenSubpaths 可能整棵重开，见 buildPolicy）。
+	explicitSensitive []string
+	openExtra         []string // WithOpenSubpaths 注入的额外放行子树（绝对路径；构造期归一）
+	readOnlyExtra     []string // WithReadOnlyPaths 注入的只读子树（读放行、写不放行）
 }
 
 // SeatbeltOption 构造选项。
@@ -149,6 +155,37 @@ func WithHomeWrite() SeatbeltOption {
 	return func(s *Seatbelt) { s.HomeWrite = true }
 }
 
+// WithOpenSubpaths 在敏感 deny 之后**重开**指定子树（读+写）。
+//
+// 用途：工作区本身就位于某个敏感路径之下时（Agent Hub 的智能体 home 在
+// ~/.go-code/hub/agents/<id>，而 ~/.go-code 因含 settings/密钥被整段 deny），
+// 不重开的话智能体连自己的 home 都读不了写不了 —— 沙箱会把正常功能一起关掉。
+// SBPL 后规则胜，所以这些 allow 必须排在 deny 之后（buildPolicy 已保证）。
+// 与 WithSensitivePaths 冲突时显式 deny 优先（构造期剔除）。
+func WithOpenSubpaths(paths ...string) SeatbeltOption {
+	return func(s *Seatbelt) {
+		for _, p := range paths {
+			if p != "" {
+				s.openExtra = append(s.openExtra, p)
+			}
+		}
+	}
+}
+
+// WithReadOnlyPaths 追加**只读**放行子树：file-read* 放行，file-write* 不放行。
+//
+// 用途：Agent Hub 的 tools.bash_roots —— 智能体能看用户指定的额外目录（如
+// ~/hai-workspaces），但不能改（要改就派任务给工作区会话，§6.3.1）。
+func WithReadOnlyPaths(paths ...string) SeatbeltOption {
+	return func(s *Seatbelt) {
+		for _, p := range paths {
+			if p != "" {
+				s.readOnlyExtra = append(s.readOnlyExtra, p)
+			}
+		}
+	}
+}
+
 // WithNoProbe 跳过构造期策略探测（测试/CI；生产保留探测防 SIGABRT 静默）。
 func WithNoProbe() SeatbeltOption {
 	return func(s *Seatbelt) { s.noProbe = true }
@@ -156,6 +193,14 @@ func WithNoProbe() SeatbeltOption {
 
 // resolveHome 解析为绝对路径：相对路径按 home 展开。
 func resolveHome(home, p string) string {
+	// "~" / "~/x" 按 home 展开：配置里写 "~/data" 是常见写法，旧实现会拼成
+	// "$HOME/~/data" 静默失效（P1-01 复核发现）。
+	if p == "~" {
+		return filepath.Clean(home)
+	}
+	if strings.HasPrefix(p, "~/") {
+		return filepath.Join(home, p[2:])
+	}
 	if filepath.IsAbs(p) {
 		return filepath.Clean(p)
 	}

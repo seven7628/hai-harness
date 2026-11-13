@@ -1,4 +1,4 @@
-import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply } from './types'
+import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply, IMConfig } from './types'
 import type { BridgeCommand } from '../store/events'
 import type { MCPProjectInfo, MCPProjectServer, HookSectionView } from '../store/useAppStore'
 import currentProjectReadmeZh from '../../../../README.zh-CN.md?raw'
@@ -628,6 +628,34 @@ const MOCK_STATIC_PARTS: [string, number][] = [
   ['tools', 96], ['system_prompt', 58], ['skills', 16], ['other', 4], ['mcp', 14],
 ]
 
+// ?hubFixture=attach 用的小图（8×8 PNG，橙色底 + 深色对角）：真实 data URL，
+// 灯箱/复制/回显都走同一条路径，不是占位字符串。
+const MOCK_ATTACH_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAALklEQVR42mPQ0DH5f7MqDSsGyTHAGNgkQTQDugA6mwFdF7ppxCvAawVeRxLyJgDMMZrx26+tKgAAAABJRU5ErkJggg=='
+
+// 场景演示群（grp_demo）的固定 id：种子消息、内联 need、Project 会话/run 必须互相对得上
+// —— 前端按 group_id 认领 need、按 (session, run) 认领待办快照、按 task_id 认领任务卡。
+// 只在这里定义一次，改一处就得全链路一起改（否则卡「静默不出」）。
+const DEMO_GROUP = 'grp_demo'
+const DEMO_SESSION = 's_demo_project'
+const DEMO_WORKSPACE = '/mock/workspace'
+const DEMO_RUN_ROOT = 'run_demo_root'
+const DEMO_RUN_SUB = 'run_demo_sub'
+
+type MockGroupMessage = {
+  seq: number
+  id: string
+  kind: string
+  sender: { kind: string; agent_id?: string }
+  text: string
+  visibility?: 'owner' | 'group'
+  created_at: string
+  refs?: Record<string, unknown>
+  round_id?: string
+  context?: { trigger_seqs?: number[]; senders?: Array<{ agent_id?: string; name?: string }> }
+  /** 人类消息的附件（图片 / 文件引用）：与真 bridge 同形，原样回显给前端。 */
+  attachments?: Record<string, unknown>[]
+}
+
 class MockTransport implements Transport {
   // 多订阅者（V2 P2-PROTOCOL-08）：onEvent 可注册多个回调，off 只移除自己的；
   // 单 cb 会被后注册覆盖、off 误伤所有订阅者（session_pin 一次性回调 + 长期订阅并存时丢事件）。
@@ -645,6 +673,932 @@ class MockTransport implements Transport {
   private ctxTokens = new Map<string, number>()
   private ctxEstimated = new Map<string, boolean>()
   private sessions = new Map<string, MockSess[]>() // workspace path → 该项目的会话列表
+  // Hub（Agent Hub P1）：两个演示智能体 + 各自 DM 历史，供浏览器里验 rail/DM/流式。
+  // 与真 bridge 同形：seq 单调、hub_message 带 message、command_response 带 data。
+  private hubAgents: Record<string, unknown>[] = [
+    // 严格对齐 demo：头像色只由 12 色 role palette 决定（Researcher→blue、Writer→violet）。
+    // accent 只喂侧栏环/未读/状态点，故意保留与职责色不同的值，防止头像又偷偷读回 accent。
+    { id: 'ag_mockres1', name: 'Researcher', accent: '#7bc199', avatar: { kind: 'emoji', value: '🟢' },
+      role: '竞品研究员', description: '负责竞品价格、功能与公开情报；产出对比表与结论。',
+      provider: 'deepseek', model: 'deepseek-v4-flash', persona: 'hub', version: 1 },
+    { id: 'ag_mockwri2', name: 'Writer', accent: '#9daed2', avatar: { kind: 'emoji', value: '🔵' },
+      role: '写作', description: '把研究结论整理成可发布的文字，保持克制、可核查。',
+      provider: 'deepseek', model: 'deepseek-v4-pro', persona: 'hub', version: 1 },
+  ]
+  private hubMessages = new Map<string, { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string; attachments?: Record<string, unknown>[] }[]>()
+  private hubCursor = new Map<string, number>()
+  private hubSeq = new Map<string, number>()
+  private hubVersions = new Map<string, { version: number; saved_at: string; profile: Record<string, unknown> }[]>()
+  private hubMemory = new Map<string, Map<string, string>>()
+  // P3b-07：群组 fixtures（左栏 progress / 历史 / @ 选择器 / 自动对话条 / 任务卡）。
+  // 与真 bridge 同形：progress 从落盘日志算，hub_message 先 emit 再 respond。
+  private hubGroups: Record<string, unknown>[] = [
+    {
+      id: 'grp_mock1', name: '竞品研究', owner_agent_id: 'ag_mockres1',
+      members: [
+        { agent_id: 'ag_mockres1', role: 'owner' },
+        { agent_id: 'ag_mockwri2', role: 'member' },
+      ],
+      policy: {
+        mode: 'ask', max_parallel_runs: 2, max_handoff_depth: 3, max_turns_per_human: 8,
+        max_mentions_per_message: 3, daily_budget_usd: 5,
+      },
+      created_at: new Date(Date.now() - 7 * 86_400_000).toISOString(),
+      updated_at: new Date(Date.now() - 86_400_000).toISOString(),
+    },
+    {
+      // 场景演示群：默认 mock 页打开就能逐条看到本轮六项能力（隔离 / 审批·Ask·ToDo
+      // 内联 / 多气泡 / 结果回推 / 合并发送）。**必须追加在末尾**：既有回归脚本靠
+      // 「群组页签第一行」选 grp_mock1（竞品研究），它的 id/顺序/内容一个字节都不能动。
+      id: DEMO_GROUP, name: '场景演示 · 六项能力', owner_agent_id: 'ag_mockres1',
+      members: [
+        { agent_id: 'ag_mockres1', role: 'owner' },
+        { agent_id: 'ag_mockwri2', role: 'member' },
+      ],
+      policy: {
+        mode: 'ask', max_parallel_runs: 2, max_handoff_depth: 3, max_turns_per_human: 8,
+        max_mentions_per_message: 3, daily_budget_usd: 5,
+      },
+      created_at: new Date(Date.now() - 2 * 86_400_000).toISOString(),
+      updated_at: new Date(Date.now() - 3_600_000).toISOString(),
+    },
+  ]
+  private hubGroupMessages = new Map<string, MockGroupMessage[]>()
+  private hubGroupSeq = new Map<string, number>()
+  private hubGroupRead = new Map<string, number>()
+  private hubGroupConversations = new Map<string, Record<string, unknown>>()
+  private hubGroupTasks = new Map<string, Record<string, unknown>>()
+  private hubGroupAssigns = new Map<string, Record<string, unknown>>() // client_msg_id → 响应（幂等）
+  private hubGroupTaskNo = 0
+  // 每群脚本代际：hub_conversation_stop 换代后，未到点的任务卡/流式回调全部作废（N9）。
+  private hubGroupGen = new Map<string, number>()
+
+  /** 浏览器回归/截图用的场景开关（?hubFixture=cards|needs|tasks）；默认 mock 保持原样。 */
+  private hubFixture(): string {
+    if (typeof window === 'undefined') return ''
+    return new URLSearchParams(window.location.search).get('hubFixture') ?? ''
+  }
+
+  // —— ?hubFixture=needs|tasks：Needs / 任务板的可视回归数据 ——
+  //
+  // 真实 bridge 的 hub_need_list / hub_task_list 由账本产生；mock 里这两条命令以前都走
+  // `default: respond({})`，于是 Needs 面板恒空、任务板只有 1 条完成态 ——「审批/提问/失败/
+  // 交接」四类卡片与「排队/失败/中断」三种任务态在浏览器里从来没被画过（HUB-FIXTURE-01）。
+  // 只在 fixture 打开时注入，日常演示的 mock 群聊不变。
+  private hubFixtureNeedList: Record<string, unknown>[] | null = null
+  private hubFixtureTaskList: Record<string, unknown>[] | null = null
+
+  private hubFixtureNeeds(): Record<string, unknown>[] {
+    if (!this.hubFixtureNeedList) {
+      const now = Date.now()
+      const at = (ms: number): string => new Date(now - ms).toISOString()
+      this.hubFixtureNeedList = [
+        {
+          id: 'need_mock_approval', kind: 'approval', status: 'pending', agent_id: 'ag_mockres1',
+          group_id: 'grp_mock1', origin_agent_id: 'ag_mockres1', origin_agent_name: 'Researcher',
+          origin_kind: 'group', target_kind: 'workspace', target_workspace: '/mock/workspace',
+          target_session_id: 's_mock_project', run_name: 'Researcher-sub', depth: 1,
+          task_id: 'task_mock1', session_id: 's_mock_project', anchor: 'call_mock_write_1',
+          title: '写文件前确认：把价格表落到 reports/pricing.md',
+          body: '工具 write_file 需要一次审批：\nreports/pricing.md（新建，约 1.2KB）',
+          created_at: at(90_000),
+        },
+        {
+          id: 'need_mock_question', kind: 'question', status: 'pending', agent_id: 'ag_mockres1',
+          group_id: 'grp_mock1', origin_agent_id: 'ag_mockres1', origin_agent_name: 'Researcher',
+          origin_kind: 'group', target_kind: 'workspace', target_workspace: '/mock/workspace',
+          target_session_id: 's_mock_project', run_name: 'Researcher-sub', depth: 1,
+          session_id: 's_mock_project', anchor: 'ask_mock_1',
+          title: '整理简报前有两个问题',
+          body: JSON.stringify([
+            { id: 'q1', question: 'C 家没有公开单价，要不要写「未公开」而不是估算价？' },
+            { id: 'q2', question: '简报用中文，还是中英对照？' },
+          ]),
+          created_at: at(600_000),
+        },
+        {
+          id: 'need_mock_failure', kind: 'failure', status: 'pending', agent_id: 'ag_mockres1',
+          group_id: 'grp_mock1', origin_agent_id: 'ag_mockres1', origin_agent_name: 'Researcher',
+          origin_kind: 'group', target_kind: 'workspace', target_workspace: '/mock/workspace',
+          task_id: 'task_mock_failed',
+          title: '抓取 C 家定价页失败',
+          body: 'HTTP 403（robot 校验）：https://c-pricing.example.com 需要人工确认是否继续重试。',
+          created_at: at(1_500_000),
+        },
+        {
+          id: 'need_mock_handoff', kind: 'handoff', status: 'pending', agent_id: 'ag_mockwri2',
+          group_id: 'grp_mock1', origin_agent_id: 'ag_mockwri2', origin_agent_name: 'Writer',
+          origin_kind: 'group', target_kind: 'agent', target_workspace: '/mock/workspace',
+          session_id: 'hub.ag_mockwri2.g.grp_mock1',
+          title: '对比表交接给我润色',
+          body: 'Researcher 已给出三家单价与功能列；请确认接收后由 Writer 出两页简报。',
+          created_at: at(2_400_000),
+        },
+      ]
+    }
+    return this.hubFixtureNeedList
+  }
+
+  private hubFixtureTasks(): Record<string, unknown>[] {
+    if (!this.hubFixtureTaskList) {
+      const now = Date.now()
+      const at = (ms: number): string => new Date(now - ms).toISOString()
+      const base = { origin: { kind: 'human', group_id: 'grp_mock1' } }
+      this.hubFixtureTaskList = [
+        {
+          ...base, id: 'task_mock_queued', root_task_id: 'task_mock_queued',
+          title: '补一版中英对照摘要',
+          instruction: '把上一版简报翻成英文，价格与专有名词保留中文原名。',
+          status: 'queued', attempt: 1,
+          target: { kind: 'agent', agent_id: 'ag_mockwri2', group_id: 'grp_mock1', session_id: 'hub.ag_mockwri2.g.grp_mock1' },
+          created_at: at(120_000), updated_at: at(120_000),
+        },
+        {
+          ...base, id: 'task_mock_failed', root_task_id: 'task_mock_failed',
+          title: '抓取 C 家定价页',
+          instruction: '拉取 https://c-pricing.example.com 的公开单价并整理成表格。',
+          status: 'failed', attempt: 2,
+          error: '工具 bash 超时（30s）：curl 无响应；已重试 1 次',
+          target: { kind: 'agent', agent_id: 'ag_mockres1', group_id: 'grp_mock1', session_id: 'hub.ag_mockres1.g.grp_mock1' },
+          result: { summary: '' },
+          created_at: at(1_500_000), updated_at: at(1_400_000),
+        },
+        {
+          ...base, id: 'task_mock_interrupted', root_task_id: 'task_mock_interrupted',
+          title: '把三家功能列补全',
+          instruction: '按官方文档补全功能对比列（SSO / 审计日志 / 数据驻留）。',
+          status: 'interrupted', attempt: 1,
+          error: '人类停止了自动对话，任务已中断',
+          target: { kind: 'agent', agent_id: 'ag_mockres1', group_id: 'grp_mock1', session_id: 'hub.ag_mockres1.g.grp_mock1' },
+          created_at: at(7_200_000), updated_at: at(7_000_000),
+        },
+      ]
+    }
+    return this.hubFixtureTaskList
+  }
+
+  private hubLog(agentID: string): { seq: number; sender: { kind: string; agent_id?: string }; text: string; created_at: string; attachments?: Record<string, unknown>[]; refs?: Record<string, string> }[] {
+    let list = this.hubMessages.get(agentID)
+    if (!list) {
+      list = [
+        { seq: 1, sender: { kind: 'human' }, text: '先列一下三家竞品的价格。', created_at: new Date(Date.now() - 86_400_000).toISOString() },
+        { seq: 2, sender: { kind: 'agent', agent_id: agentID }, text: '三家公开价：A $49/席、B $39/席（年付 $32）、C 未公开。\n\n需要我补功能对比吗？', created_at: new Date(Date.now() - 86_000_000).toISOString() },
+      ]
+      // ?hubFixture=attach：一条带真实附件的历史人类消息（刷新/历史渲染的回归用）。
+      if (this.hubFixture() === 'attach') {
+        list.push({
+          seq: 3, sender: { kind: 'human' }, text: '这是当时的截图，另外价格表在 @/mock/workspace/pricing-v3.md',
+          created_at: new Date(Date.now() - 85_000_000).toISOString(),
+          attachments: [
+            { kind: 'image', name: 'pricing-shot.png', mime_type: 'image/png', bytes: MOCK_ATTACH_PNG.length, data_url: MOCK_ATTACH_PNG },
+            { kind: 'file', name: 'pricing-v3.md', path: '/mock/workspace/pricing-v3.md', bytes: 2140 },
+          ],
+        })
+      }
+      // 场景演示①隔离：每个 DM 末尾各有一条**只有自己看得到**的标记文本（两个智能体
+      // 内容不同），与群里的「这句话只在本群」对照 —— 群/私聊是两份上下文。
+      // seq 按当前长度顺延：?hubFixture=attach 已经占了 3，这里不能写死。
+      //
+      // 时间戳必须让 Researcher **恒新于** Writer：两个 DM 是分别懒初始化的，各自取
+      // Date.now() 跨毫秒就会翻转侧栏顺序（DM 列表按 last_at 倒序），「第一行是谁」
+      // 变成运气（实测约 16% 的跑法里 Writer 在前）。Writer 再减 60s —— 远大于两次
+      // 初始化之间的抖动，顺序因此是确定的。
+      const dmOnlyAt = new Date(Date.now() - 84_000_000 - (agentID === 'ag_mockwri2' ? 60_000 : 0)).toISOString()
+      list.push({
+        seq: (list[list.length - 1]?.seq ?? 0) + 1,
+        sender: { kind: 'agent', agent_id: agentID },
+        text: agentID === 'ag_mockwri2'
+          ? 'DM-ONLY-WR：这句只出现在 Writer 的私聊里。群里那句「只在本群」不会流到这里，Researcher 的私聊也看不到它。'
+          : 'DM-ONLY-RE：这句只出现在 Researcher 的私聊里。群里那句「只在本群」不会流到这里，Writer 的私聊也看不到它。',
+        created_at: dmOnlyAt,
+      })
+      this.hubMessages.set(agentID, list)
+      this.hubCursor.set(agentID, list[list.length - 1]?.seq ?? 2)
+      this.hubSeq.set(agentID, list[list.length - 1]?.seq ?? 2)
+    }
+    return list
+  }
+
+  // —— P3b-07 群组 fixtures ——
+
+  private hubGroup(gid: string): Record<string, unknown> | undefined {
+    return this.hubGroups.find((g) => g.id === gid)
+  }
+
+  private hubGroupMemberIDs(gid: string): string[] {
+    const g = this.hubGroup(gid)
+    const members = (g?.members as Array<{ agent_id?: string }> | undefined) ?? []
+    return members.map((m) => String(m.agent_id ?? '')).filter(Boolean)
+  }
+
+  private hubGroupLog(gid: string): MockGroupMessage[] {
+    let list = this.hubGroupMessages.get(gid)
+    if (!list) {
+      // 场景演示群自带一条覆盖六项能力的时间线（见 hubDemoGroupSeed）；其余群沿用
+      // 原来的「竞品研究」种子，一个字节都不动。
+      if (gid === DEMO_GROUP) return this.hubDemoGroupSeed(gid)
+      const now = Date.now()
+      const at = (ms: number): string => new Date(now - ms).toISOString()
+      // 截图 harness 专用 fixture：?hubFixture=cards 时才追加 handoff / approval
+      // 两种真实 kind，默认 mock 群聊保持原样，避免把验收卡混进日常演示。
+      const cardsFixture = this.hubFixture() === 'cards'
+      list = [
+        {
+          seq: 1, id: 'gm_mock1', kind: 'text', sender: { kind: 'human' },
+          text: '@Researcher 把三家价格表整理成一页；@Writer 帮忙润色。', created_at: at(3 * 3_600_000),
+        },
+        {
+          seq: 2, id: 'gm_mock2', kind: 'routing_receipt', sender: { kind: 'system' },
+          text: 'targets=ag_mockres1,ag_mockwri2', created_at: at(3 * 3_600_000 - 1000),
+        },
+        {
+          seq: 3, id: 'gm_mock3', kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockres1' },
+          text: `价格对比先给你，**C 家没有公开单价**：
+
+| 方案 | 月付 | 年付 | 备注 |
+|---|---|---|---|
+| A | $49/席 | $490/席 | 含 SSO |
+| B | $39/席 | $32/席 | 年付折算 |
+| C | 未公开 | 未公开 | 需销售询价 |
+
+结论：A 适合 20 人以上，B 适合小团队；C 先不进短名单。
+
+- 抓取时间：今天 09:40
+- 口径：公开定价页，不含税`, round_id: 'rnd_mock1',
+          context: { trigger_seqs: [1], senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }] },
+          created_at: at(2 * 3_600_000),
+        },
+        {
+          seq: 4, id: 'gm_mock4', kind: 'text', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
+          text: `## 两页简报已出
+
+结论放在开头：**A 与 B 的差价在 10 人团队约为每月 $100**；C 缺少公开报价，建议放到第二轮询价。
+
+> 风险：B 的年付折扣绑定 12 个月，提前解约不退款。
+
+@Researcher 风险那节你再一眼；我补了一张成本曲线。`, round_id: 'rnd_mock1',
+          // fixture：真实 bridge 由 finishHubRound 从游标窗口写 TurnContext（B6）。
+          context: {
+            trigger_seqs: [1, 3],
+            senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }, { agent_id: 'ag_mockwri2', name: 'Writer' }],
+          },
+          created_at: at(90 * 60_000),
+        },
+        {
+          seq: 5, id: 'gm_mock5', kind: 'task_result', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
+          text: '已生成两页简报，含价格对比、结论与风险；附 Markdown、CSV 和成本曲线。', created_at: at(45 * 60_000),
+          context: {
+            trigger_seqs: [1, 3],
+            senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }, { agent_id: 'ag_mockwri2', name: 'Writer' }],
+          },
+          refs: {
+            task_id: 'task_mock1', status: 'completed', agent_id: 'ag_mockwri2', target_agent_id: 'ag_mockwri2',
+            // fixture：B5 的 origin 快照（真实 bridge 写卡时也落这三个字段）。
+            origin_kind: 'human',
+            title: '把三家价格表写成两页简报', duration_ms: 18_400,
+            usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
+            artifacts: [
+              { name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140, lines: 64 },
+              { name: 'pricing-v3.csv', path: 'out/pricing-v3.csv', kind: 'created', size: 812, lines: 12 },
+              { name: 'cost-curve.png', path: 'out/assets/cost-curve.png', kind: 'created', size: 184320 },
+            ],
+            error: '',
+          },
+        },
+        {
+          seq: 6, id: 'gm_mock6', kind: 'text', sender: { kind: 'system' },
+          text: '群策略：自动对话遇到预算/权限阻断会停下等人类，也可随时手动停止。',
+          created_at: at(40 * 60_000),
+        },
+        {
+          seq: 7, id: 'gm_mock7', kind: 'text', sender: { kind: 'human' }, visibility: 'owner',
+          text: '把 C 的询价邮件单独发我，不要贴到群里。',
+          created_at: at(30 * 60_000),
+        },
+      ]
+      if (this.hubFixture() === 'attach') {
+        list.push({
+          seq: 8, id: 'gm_mock8', kind: 'text', sender: { kind: 'human' },
+          text: '群里也放一张：成本曲线截屏。',
+          created_at: at(20 * 60_000),
+          attachments: [
+            { kind: 'image', name: 'cost-shot.png', mime_type: 'image/png', bytes: MOCK_ATTACH_PNG.length, data_url: MOCK_ATTACH_PNG },
+            { kind: 'file', name: 'pricing-v3.csv', path: '/mock/workspace/pricing-v3.csv', bytes: 812 },
+          ],
+        })
+      }
+      if (cardsFixture) {
+        list.push(
+          {
+            seq: 8, id: 'gm_mock8', kind: 'handoff', sender: { kind: 'agent', agent_id: 'ag_mockres1' },
+            text: '把成本曲线复核交接给 Writer；完整指令在 Needs you。',
+            // 与 desktop/bridge/hub_handoff.go 同形：卡面归属取这两个 refs，不按 sender 猜。
+            refs: { status: 'pending_ack', from_agent_id: 'ag_mockres1', to_agent_id: 'ag_mockwri2' },
+            created_at: at(20 * 60_000),
+          },
+          {
+            seq: 9, id: 'gm_mock9', kind: 'approval_stub', sender: { kind: 'agent', agent_id: 'ag_mockwri2' },
+            text: '发布两页简报前需要你确认预算',
+            // 不造 refs.agent_id：mock 的审批就是 agent sender，走 UI 的 sender 回退分支。
+            created_at: at(10 * 60_000),
+          },
+        )
+      }
+      const attachFixture = this.hubFixture() === 'attach'
+      this.hubGroupMessages.set(gid, list)
+      this.hubGroupSeq.set(gid, cardsFixture ? 9 : attachFixture ? 8 : 7)
+      // 最后两张卡未读：左栏演示「未读点 + 任务完成结论」；fixture 下未读的是两张验收卡。
+      this.hubGroupRead.set(gid, cardsFixture ? 7 : 5)
+      this.hubGroupConversations.set(gid, this.mockConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 }))
+      // 预置账本条目：历史任务卡的「派发者」只能从 origin 来（B5），没有它卡片只显示执行者。
+      this.hubGroupTasks.set('task_mock1', {
+        id: 'task_mock1', root_task_id: 'task_mock1', title: '把三家价格表写成两页简报',
+        instruction: '把三家价格表写成两页简报', status: 'completed', attempt: 1,
+        origin: { kind: 'human', group_id: gid },
+        target: { kind: 'agent', agent_id: 'ag_mockwri2', group_id: gid, session_id: `hub.ag_mockwri2.g.${gid}` },
+        result: { summary: '已生成两页简报，含价格对比、结论与风险；附 Markdown、CSV 和成本曲线。', finish_reason: 'stop' },
+        created_at: at(3 * 3_600_000), updated_at: at(45 * 60_000),
+      })
+    }
+    return list
+  }
+
+  // —— 场景演示群（grp_demo）的种子：一条消息对应一项能力 ——
+  //
+  // 默认 mock 页（http://localhost:5180/）打开这个群，不切任何 fixture 就能逐条点一遍
+  // 本轮实现的东西：
+  //   ① 隔离        seq2 人类群消息 + 各 DM 末尾的 DM-ONLY-* 标记（群内容不进私聊）
+  //   ② 内联卡      hubDemoNeeds() 的审批/Ask 两条 pending + task_demo_todo 的待办快照
+  //   ③ 多气泡      seq3/4 同一智能体连续两条（同一 round_id，前端收进同一轮）
+  //   ④ 结果回推    seq6 任务卡（target=workspace）→ seq7 执行者接着总结（AgentEnd 回推）
+  //   ⑤ 合并发送    seq5 人类消息同一批里带 /compact 正文 + 图片 + 文件引用
+  //   ⑥ 长 Markdown + visual-ui  seq8 表格/清单 20 余行 + ```html 围栏小卡片
+  //
+  // 只写一次（按 gid 缓存）：之后发消息走 hubGroupSeq 顺延，与其它群同一套游标语义。
+  private hubDemoGroupSeed(gid: string): MockGroupMessage[] {
+    const now = Date.now()
+    const at = (ms: number): string => new Date(now - ms).toISOString()
+    const researcher = { kind: 'agent', agent_id: 'ag_mockres1' }
+    const writer = { kind: 'agent', agent_id: 'ag_mockwri2' }
+    const longMarkdown = [
+      '长消息演示：一页对比表 + 清单 + 一个 visual-ui 卡片（下面表格与清单 20 余行，用来看限高）。',
+      '',
+      '## 一页看完：三家价格与交付风险',
+      '',
+      '| 方案 | 月付 | 年付 | SSO | 审计日志 | 数据驻留 | 结论 |',
+      '|---|---|---|---|---|---|---|',
+      '| A | $49/席 | $490/席 | ✓ | ✓ | 可选（+$4） | 20 人以上合适 |',
+      '| B | $39/席 | $32/席（折算） | ✓ | 部分 | 仅 EU | 小团队首选 |',
+      '| C | 未公开 | 未公开 | ? | ? | ? | 先询价 |',
+      '',
+      '清单（本轮六件事）：',
+      '',
+      '- [x] 固定口径：只认公开定价页，估算值单独标注',
+      '- [x] 抓取三家定价页并去重（今天 09:40）',
+      '- [x] C 的「未公开」照写，不用估算价填空',
+      '- [x] 统一含税口径（A 含税、B 不含、C 未知）',
+      '- [x] 对比表落成 reports/pricing-v3.md',
+      '- [ ] 第二轮：C 的销售询价与数据驻留确认',
+      '',
+      '风险：',
+      '',
+      '1. B 的年付折扣绑定 12 个月，提前解约不退款。',
+      '2. A 的数据驻留是付费项，报价单里不含。',
+      '3. C 的审计日志要签 NDA 后才能确认。',
+      '',
+      '```html',
+      '<div style="font:14px/1.5 -apple-system,system-ui,sans-serif;padding:14px 16px;border:1px solid #e3ddd2;border-radius:12px;background:#fbf8f2;color:#2c2a26">',
+      '  <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#8a8377">KPI · 本轮</div>',
+      '  <div style="display:flex;gap:18px;margin-top:8px">',
+      '    <div><div style="font-size:22px;font-weight:600">3</div><div style="font-size:11px;color:#8a8377">家在跑</div></div>',
+      '    <div><div style="font-size:22px;font-weight:600">$100</div><div style="font-size:11px;color:#8a8377">A/B 月差</div></div>',
+      '    <div><div style="font-size:22px;font-weight:600">1</div><div style="font-size:11px;color:#8a8377">待询价</div></div>',
+      '  </div>',
+      '  <div style="display:flex;align-items:center;gap:6px;margin-top:12px;font-size:11px;color:#6f6a61">',
+      '    <span style="padding:3px 7px;border:1px solid #d9d2c5;border-radius:999px">抓取</span>',
+      '    <span>→</span>',
+      '    <span style="padding:3px 7px;border:1px solid #d9d2c5;border-radius:999px">对表</span>',
+      '    <span>→</span>',
+      '    <span style="padding:3px 7px;border:1px solid #d9d2c5;border-radius:999px">出简报</span>',
+      '  </div>',
+      '</div>',
+      '```',
+    ].join('\n')
+    const list: MockGroupMessage[] = [
+      {
+        seq: 1, id: 'gm_demo_guide', kind: 'text', sender: { kind: 'system' },
+        text: '场景演示 · ①隔离（本群内容不进私聊）②审批/Ask/ToDo 内联卡（右栏与群内都可处理）'
+          + '③多气泡（同一智能体连续两条）④结果回推（Project 任务卡 → 执行者接着总结）'
+          + '⑤合并发送（/compact + 正文 + 文件 + 图片同一批）',
+        created_at: at(6 * 3_600_000),
+      },
+      {
+        seq: 2, id: 'gm_demo_isolated', kind: 'text', sender: { kind: 'human' },
+        text: '这句话只在本群，不要带去私聊。',
+        created_at: at(5 * 3_600_000),
+      },
+      // ③ 多气泡：同一轮里同一智能体两条（round_id 相同 → 前端收进同一个 round stack）。
+      {
+        seq: 3, id: 'gm_demo_bubble1', kind: 'text', sender: researcher,
+        text: '第一段（同一轮的第一条气泡）：先把口径固定下来 —— 只认公开定价页，估算值单独标注。',
+        round_id: 'rnd_demo1',
+        context: { trigger_seqs: [2], senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }] },
+        created_at: at(4 * 3_600_000),
+      },
+      {
+        seq: 4, id: 'gm_demo_bubble2', kind: 'text', sender: researcher,
+        text: '第二段（同一轮的第二条气泡）：工具调用之后继续说话，仍然是一条独立气泡 —— 两段不能被拼成一条。',
+        round_id: 'rnd_demo1',
+        context: { trigger_seqs: [2], senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }] },
+        created_at: at(4 * 3_600_000 - 8_000),
+      },
+      // ⑤ 合并发送：同一批里 /compact + 正文 + 文件 + 图片（人类消息的 attachments 原样回显）。
+      {
+        seq: 5, id: 'gm_demo_batch', kind: 'text', sender: { kind: 'human' },
+        text: '同一批：/compact + 正文 + 文件 + 图片。正文照旧进群上下文，图片给视觉模型，文件只做 @ 引用。',
+        attachments: [
+          { kind: 'image', name: 'pricing-board.png', mime_type: 'image/png', bytes: MOCK_ATTACH_PNG.length, data_url: MOCK_ATTACH_PNG },
+          { kind: 'file', name: 'pricing-v3.md', path: '/mock/workspace/pricing-v3.md', bytes: 2140 },
+        ],
+        created_at: at(3 * 3_600_000),
+      },
+      // ④ 结果回推：Project 任务卡（target=workspace，无执行智能体）+ 紧接着的执行者总结。
+      {
+        seq: 6, id: 'gm_demo_result', kind: 'task_result', sender: writer,
+        text: '〔Project /mock/workspace / s_demo_project〕\n价格表已更新到 reports/pricing-v3.md：A/B 统一含税口径，C 保留「未公开」。',
+        context: { trigger_seqs: [5], senders: [{ agent_id: 'ag_mockwri2', name: 'Writer' }] },
+        refs: {
+          task_id: 'task_demo_result', status: 'completed',
+          target_kind: 'workspace', target_workspace: DEMO_WORKSPACE, target_session_id: DEMO_SESSION,
+          origin_kind: 'human', title: '把价格表更新到 Project 工作区', duration_ms: 42_000,
+          usage: { input: 18_000, output: 4_200, cost_priced: true, cost_usd: 0.04 },
+          artifacts: [
+            { name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140, lines: 64 },
+            { name: 'pricing-v3.csv', path: 'out/pricing-v3.csv', kind: 'created', size: 812, lines: 12 },
+          ],
+          error: '',
+        },
+        created_at: at(2 * 3_600_000),
+      },
+      {
+        seq: 7, id: 'gm_demo_handback', kind: 'text', sender: writer,
+        text: '收到 Project 结果，我来总结：A/B 的差价按 10 人团队折算约每月 $100，C 的询价留到第二轮。',
+        // 指向上面那张卡（seq6）：上下文行据此画「回应 #6」，也是 AgentEnd 回推的形状。
+        // senders 必须 ≥2：TurnContextLine 在 <2 人时整行不渲染（「回应 #6」会消失）。
+        // Writer 是本条作者，Researcher 是这轮里产出对比表的人 —— 两人都在这次回推的上下文里。
+        context: {
+          trigger_seqs: [6],
+          senders: [{ agent_id: 'ag_mockwri2', name: 'Writer' }, { agent_id: 'ag_mockres1', name: 'Researcher' }],
+        },
+        created_at: at(2 * 3_600_000 - 12_000),
+      },
+      // ⑥ 长 Markdown（限高）+ ```html 围栏（visual-ui 卡片，无外链资源）。
+      {
+        seq: 8, id: 'gm_demo_markdown', kind: 'text', sender: researcher,
+        text: longMarkdown,
+        round_id: 'rnd_demo2',
+        context: { trigger_seqs: [5], senders: [{ agent_id: 'ag_mockres1', name: 'Researcher' }] },
+        created_at: at(30 * 60_000),
+      },
+    ]
+    this.hubGroupMessages.set(gid, list)
+    this.hubGroupSeq.set(gid, list[list.length - 1]?.seq ?? 0)
+    // 最后两条（Writer 总结 + 长 Markdown）留作未读：左栏有未读点，点进来就消。
+    this.hubGroupRead.set(gid, 6)
+    this.hubGroupConversations.set(gid, this.mockConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 }))
+    // 账本预置：结果卡（产物预览要查得到任务）与待办卡（target=workspace 才出内联待办）。
+    this.hubGroupTasks.set('task_demo_result', {
+      id: 'task_demo_result', root_task_id: 'task_demo_result',
+      title: '把价格表更新到 Project 工作区',
+      instruction: '把 reports/pricing-v3.md 更新到 Project 工作区并回推群聊。',
+      status: 'completed', attempt: 1,
+      origin: { kind: 'human', group_id: gid },
+      target: { kind: 'workspace', workspace: DEMO_WORKSPACE, session_id: DEMO_SESSION },
+      // usage / artifacts 必须在 **result 里**：任务详情（HubInspector「任务」页签）与
+      // Markdown 导出读的是 task.result?.usage / task.result?.artifacts，挂在 task 顶层
+      // 等于没写（成本显示「成本未知」、产物列表空）。与结果卡 refs 的同一份值对齐。
+      result: {
+        summary: '价格表已更新到 reports/pricing-v3.md：A/B 统一含税口径，C 保留「未公开」。',
+        finish_reason: 'stop',
+        usage: { input: 18_000, output: 4_200, cost_priced: true, cost_usd: 0.04 },
+        artifacts: [
+          { name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140, lines: 64 },
+          { name: 'pricing-v3.csv', path: 'out/pricing-v3.csv', kind: 'created', size: 812, lines: 12 },
+        ],
+      },
+      created_at: at(2 * 3_600_000), updated_at: at(2 * 3_600_000 - 42_000),
+    })
+    this.hubGroupTasks.set('task_demo_todo', {
+      id: 'task_demo_todo', root_task_id: 'task_demo_todo',
+      title: '把三家对比表整理成两页简报',
+      instruction: '在 Project 会话里核对价格、落成 reports/pricing-v3.md，然后回推群聊。',
+      status: 'running', attempt: 1,
+      origin: { kind: 'group', group_id: gid, agent_id: 'ag_mockres1', agent_name: 'Researcher' },
+      target: { kind: 'workspace', workspace: DEMO_WORKSPACE, session_id: DEMO_SESSION },
+      dispatch: { run_id: DEMO_RUN_ROOT },
+      created_at: at(12 * 60_000), updated_at: at(60_000),
+    })
+    return list
+  }
+
+  // —— 场景演示群的内联卡（审批 / Ask / ToDo）——
+  //
+  // 真 bridge 的 hub_need_list 由账本产生；mock 以前默认恒空，于是「默认页」看不到
+  // 内联卡（只能靠 ?hubFixture=needs）。这里给 grp_demo 造两条 pending，形状与
+  // hubFixtureNeeds 完全一致（group_id/target_workspace/run_name 都写全）。
+  //
+  // 只在**浏览器演示页**返回：?hubFixture=needs 仍走原 fixture（75 项断言不变），
+  // node 侧 harness（没有 window，也没有「页」可看）保持旧口径 —— 内联卡是给人看的
+  // 演示数据，不该把 store 单测里「默认 Needs 为空」的断言拖红。
+  private hubDemoNeedList: Record<string, unknown>[] | null = null
+
+  private hubDemoNeeds(): Record<string, unknown>[] {
+    if (typeof window === 'undefined') return []
+    if (this.hubFixture() === 'needs') return []
+    if (!this.hubDemoNeedList) {
+      const now = Date.now()
+      const at = (ms: number): string => new Date(now - ms).toISOString()
+      this.hubDemoNeedList = [
+        {
+          id: 'need_demo_approval', kind: 'approval', status: 'pending', agent_id: 'ag_mockres1',
+          group_id: DEMO_GROUP, origin_agent_id: 'ag_mockres1', origin_agent_name: 'Researcher',
+          origin_kind: 'group', target_kind: 'workspace', target_workspace: DEMO_WORKSPACE,
+          target_session_id: DEMO_SESSION, run_name: 'Researcher-sub', depth: 1,
+          task_id: 'task_demo_todo', session_id: DEMO_SESSION, anchor: 'call_demo_write_1',
+          title: '写文件前确认：把对比表落到 reports/pricing-v3.md',
+          body: '工具 write_file 需要一次审批：\nreports/pricing-v3.md（覆盖，约 2.1KB）',
+          created_at: at(90_000),
+        },
+        {
+          id: 'need_demo_question', kind: 'question', status: 'pending', agent_id: 'ag_mockres1',
+          group_id: DEMO_GROUP, origin_agent_id: 'ag_mockres1', origin_agent_name: 'Researcher',
+          origin_kind: 'group', target_kind: 'workspace', target_workspace: DEMO_WORKSPACE,
+          target_session_id: DEMO_SESSION, run_name: 'Researcher-sub', depth: 1,
+          task_id: 'task_demo_todo', session_id: DEMO_SESSION, anchor: 'ask_demo_1',
+          title: '出简报前有两个问题',
+          body: JSON.stringify([
+            { id: 'q1', question: 'C 家没有公开单价，写「未公开」还是给估算价？' },
+            { id: 'q2', question: '简报用中文，还是中英对照？' },
+          ]),
+          created_at: at(600_000),
+        },
+      ]
+    }
+    return this.hubDemoNeedList
+  }
+
+  // 打开 grp_demo 时补一次 Project 会话事件：agent_start（子 run 的展示名）→
+  // tool_run_end（该 run 的 todos 快照）。前端在**所有 sid 闸门之前**收这两条，
+  // 内联卡据此显示「子智能体 Researcher-sub」。只发一次：反复开关群不重复刷。
+  private hubDemoTodosSent = false
+
+  private emitHubDemoTodos(gid: string): void {
+    if (gid !== DEMO_GROUP || this.hubDemoTodosSent) return
+    this.hubDemoTodosSent = true
+    // 任务先入 store：openHub 的 loadTasks 可能早于本群打开，只发快照会出现
+    // 「有清单、认不到任务」而不出卡。hub_task_update 的 upsert 正是派发时的形状。
+    const task = this.hubGroupTasks.get('task_demo_todo')
+    if (task) this.emit({ event_type: 'hub_task_update', group_id: gid, task })
+    this.emit({
+      event_type: 'agent_start', session_id: DEMO_SESSION, run_id: DEMO_RUN_SUB,
+      parent_run_id: DEMO_RUN_ROOT, depth: 1, name: 'Researcher-sub',
+    })
+    this.emit({
+      event_type: 'tool_run_end', session_id: DEMO_SESSION, workspace: DEMO_WORKSPACE,
+      run_id: DEMO_RUN_SUB, name: 'todo_write', timestamp: new Date().toISOString(),
+      todos: [
+        { id: 'td_demo_1', title: '核对 A/B/C 三家公开单价', done: true },
+        { id: 'td_demo_2', title: '把对比表落成 reports/pricing-v3.md', done: true },
+        { id: 'td_demo_3', title: '写两页简报并回推群聊', done: false },
+      ],
+    })
+  }
+
+  /**
+   * 规范化 payload 里的 attachments（mock 侧与 bridge 同口径）：
+   * 只认 kind=image/file，图片必须有 data_url，文件必须有 path —— 别让浏览器回归
+   * 用一条「被 mock 悄悄补全」的假附件通过。
+   */
+  private mockAttachments(raw: unknown): Record<string, unknown>[] {
+    if (!Array.isArray(raw)) return []
+    const out: Record<string, unknown>[] = []
+    for (const item of raw.slice(0, 10)) {
+      if (!item || typeof item !== 'object') continue
+      const a = item as Record<string, unknown>
+      const kind = a.kind === 'image' || a.kind === 'file' ? a.kind : ''
+      if (!kind) continue
+      if (kind === 'image' && !String(a.data_url ?? '')) continue
+      if (kind === 'file' && !String(a.path ?? '')) continue
+      out.push({
+        kind,
+        ...(a.name ? { name: String(a.name) } : {}),
+        ...(a.mime_type ? { mime_type: String(a.mime_type) } : {}),
+        ...(typeof a.bytes === 'number' ? { bytes: a.bytes } : {}),
+        ...(kind === 'image' ? { data_url: String(a.data_url) } : {}),
+        ...(kind === 'file' ? { path: String(a.path) } : {}),
+      })
+    }
+    return out
+  }
+
+  private hubGroupNextSeq(gid: string): number {
+    const seq = (this.hubGroupSeq.get(gid) ?? 0) + 1
+    this.hubGroupSeq.set(gid, seq)
+    return seq
+  }
+
+  private hubGroupAppend(gid: string, msg: Omit<MockGroupMessage, 'seq' | 'id' | 'created_at'>): MockGroupMessage {
+    const seq = this.hubGroupNextSeq(gid)
+    const full: MockGroupMessage = {
+      seq, id: `gm_mock_${seq}`, created_at: new Date().toISOString(), ...msg,
+    }
+    this.hubGroupLog(gid).push(full)
+    return full
+  }
+
+  private hubGroupEmitMessage(gid: string, msg: MockGroupMessage): void {
+    this.emit({
+      event_type: 'hub_message', group_id: gid, seq: msg.seq, message: msg,
+      client_msg_id: String(msg.refs?.client_msg_id ?? ''),
+    })
+  }
+
+  private mockGroupPreview(text: string, max = 80): string {
+    const flat = text.replace(/\s+/g, ' ').trim()
+    const runes = Array.from(flat)
+    return runes.length > max ? runes.slice(0, max - 1).join('') + '…' : flat
+  }
+
+  private mockTaskOutcome(msg: MockGroupMessage): string {
+    const status = String(msg.refs?.status ?? '')
+    const reason = String(msg.refs?.error ?? '').trim()
+    const summary = this.mockGroupPreview(msg.text)
+    const first = (...values: string[]): string => values.find((v) => v.trim())?.trim() ?? ''
+    switch (status) {
+      case 'completed':
+      case 'delivered': return `任务完成：${first(summary, reason)}`.replace(/：$/, '')
+      case 'failed': return `任务失败：${first(reason, summary)}`.replace(/：$/, '')
+      case 'interrupted': return `任务已中断：${first(reason, summary)}`.replace(/：$/, '')
+      case 'canceled': return `任务已取消：${first(reason, summary)}`.replace(/：$/, '')
+      case 'declined': return `任务已被拒绝：${first(reason, summary)}`.replace(/：$/, '')
+      case 'blocked_budget': return `任务预算阻断：${first(reason, summary)}`.replace(/：$/, '')
+      default: return ''
+    }
+  }
+
+  private hubGroupProgress(gid: string): Record<string, unknown> {
+    const log = this.hubGroupLog(gid)
+    const read = this.hubGroupRead.get(gid) ?? 0
+    const usable = log.filter((m) => m.text.trim() && !['routing_receipt', 'round_summary', 'approval_stub'].includes(m.kind))
+    const last = usable[usable.length - 1]
+    const lastTask = [...usable].reverse().find((m) => m.kind === 'task_result')
+    const out: Record<string, unknown> = {}
+    if (!last) return out
+    out.unread = usable.filter((m) => m.seq > read && m.sender.kind !== 'human').length
+    out.last_seq = last.seq
+    out.last_sender = last.sender.kind
+    out.last_at = last.created_at
+    out.last_text = this.mockGroupPreview(last.text)
+    if (lastTask) {
+      out.last_task_id = String(lastTask.refs?.task_id ?? '')
+      out.last_task_status = String(lastTask.refs?.status ?? '')
+      out.last_task_summary = this.mockGroupPreview(lastTask.text)
+      if (lastTask.seq === last.seq) out.last_outcome = this.mockTaskOutcome(lastTask)
+    }
+    return out
+  }
+
+  private mockConversation(
+    gid: string,
+    status: string,
+    opts: { turns?: number; depth?: number; queue?: number; reason?: string; pair?: Record<string, number> } = {},
+  ): Record<string, unknown> {
+    return {
+      id: `conv_${gid}`, group_id: gid, status,
+      turns_used: opts.turns ?? 0, turn_budget: -1, // -1 = 不设自动接龙轮次上限（生产默认）
+      depth: opts.depth ?? 0, max_depth: 4,
+      queue_len: opts.queue ?? 0, pair_limit: 2, pair_count: opts.pair ?? {},
+      cooldown_ms: 1500,
+      ...(opts.reason ? { stop_reason: opts.reason } : {}),
+      updated_at: new Date().toISOString(),
+    }
+  }
+
+  private hubGroupSetConversation(gid: string, status: string, opts: Parameters<MockTransport['mockConversation']>[2] = {}): Record<string, unknown> {
+    const conv = this.mockConversation(gid, status, opts)
+    this.hubGroupConversations.set(gid, conv)
+    this.emit({ event_type: 'hub_conversation', group_id: gid, conversation: conv })
+    return conv
+  }
+
+  private hubGroupTaskUpdate(task: Record<string, unknown>, gid: string): void {
+    this.emit({
+      event_type: 'hub_task_update', task_id: task.id, task,
+      status: task.status, target_kind: 'agent', group_id: gid,
+      agent_id: '', target_agent_id: (task.target as Record<string, unknown> | undefined)?.agent_id,
+      title: task.title, error: task.error ?? '',
+    })
+  }
+
+  /** 从正文 + 结构化 mentions/mention_all 解析目标（mock 只做名字包含，真实解析在 Go）。 */
+  private hubGroupTargets(gid: string, text: string, mentions: unknown, mentionAll = false): string[] {
+    const members = this.hubGroupMemberIDs(gid)
+    const out: string[] = []
+    if (Array.isArray(mentions)) {
+      for (const raw of mentions) {
+        const id = String(raw)
+        if (members.includes(id) && !out.includes(id)) out.push(id)
+      }
+    }
+    const lowered = text.toLowerCase()
+    const named = this.hubAgents
+      .filter((a) => members.includes(String(a.id)) && a.deleted !== true)
+      .sort((a, b) => String(b.name).length - String(a.name).length)
+    for (const a of named) {
+      if (lowered.includes(`@${String(a.name).toLowerCase()}`) && !out.includes(String(a.id))) out.push(String(a.id))
+    }
+    if (mentionAll || /@all\b/i.test(text) || text.includes('＠all') || text.includes('@所有人') || text.includes('＠所有人')) {
+      for (const id of members) if (!out.includes(id)) out.push(id)
+    }
+    return out
+  }
+
+  /**
+   * 脚本化一条群内智能体回复：agent_start → 逐块 hub_message_delta → final hub_message
+   * → agent_end。delta 让 TypingIndicator 与 StreamingMessage 在浏览器里真的出现；
+   * final 的 message_id 与 delta 相同，store 据此清草稿（不依赖 agent_end 兜底）。
+   */
+  private mockGroupReply(
+    gid: string,
+    triggerSeq: number,
+    targets: string[],
+    opts: { startMs?: number; reply?: string; messageId?: string } = {},
+  ): void {
+    const first = targets[0]
+    if (!first) return
+    const nameOf = (id: string): string => String(this.hubAgents.find((a) => a.id === id)?.name ?? id)
+    const second = targets[1]
+    const reply = opts.reply ?? `收到。${second ? `@${nameOf(second)} ` : ''}我先把价格对比整理出来，稍后给结论。`
+    const messageID = opts.messageId ?? `gm_mock_stream_${triggerSeq}_${first}`
+    const roundID = `rnd_mock_${triggerSeq}`
+    const sessionID = `hub.${first}.g.${gid}`
+    const runID = `run_mock_${triggerSeq}_${first}`
+    const start = opts.startMs ?? 400
+    const gen = this.hubGroupGen.get(gid) ?? 0
+    this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'running' })
+    this.emit({ event_type: 'agent_start', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
+    const runes = Array.from(reply)
+    const size = Math.max(1, Math.ceil(runes.length / 6))
+    const chunks: string[] = []
+    for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
+    chunks.forEach((chunk, i) => {
+      this.afterBg(start + i * 90, () => {
+        if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+        this.emit({
+          event_type: 'hub_message_delta', group_id: gid, agent_id: first, round_id: roundID,
+          message_id: messageID, index: i, delta: chunk,
+        })
+      })
+    })
+    this.afterBg(start + chunks.length * 90 + 90, () => {
+      if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+      const msg = this.hubGroupAppend(gid, {
+        kind: 'text', sender: { kind: 'agent', agent_id: first }, text: reply, round_id: roundID,
+        context: {
+          trigger_seqs: [triggerSeq],
+          senders: targets.map((id) => ({ agent_id: id, name: nameOf(id) })),
+        },
+      })
+      msg.id = messageID
+      this.hubGroupEmitMessage(gid, msg)
+      this.emit({ event_type: 'agent_end', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
+      this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'idle' })
+      // 人类中途停过：不要再把状态条推回 running（停止是终态，直到新的人类消息）。
+      if (this.hubGroupConversations.get(gid)?.status !== 'stopped') {
+        this.hubGroupSetConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 })
+      }
+    })
+  }
+
+  /**
+   * 脚本化群内两轮流式回复（场景2b 群侧浏览器回归，?hubFixture=groupstream）。
+   *
+   * 与 mockDMStreamReply 同口径：真 bridge 每个 LLM 轮次一条气泡，且 content_chunk 与
+   * hub_message_delta **两条路径同时活着**；轮末一条 hub_message，message.id = 该轮
+   * delta 的 message_id。群 delta 带 group_id/round_id（DM 才是空串），两轮共用同一个
+   * round_id、message_id 每轮不同 —— 前端必须「一轮一条草稿、final 就清」，不能把两轮
+   * 拼成一条，也不能因为 content_chunk 再多画一条。
+   *
+   * 两轮之间留足间隔（轮 1 的 final 先到、轮 2 才开流）：断言「流式期间同时只有 1 条
+   * 草稿」靠的就是这个时间形状，重叠的轮次本来就该有两条。
+   */
+  private mockGroupStreamReply(gid: string, triggerSeq: number, targets: string[]): void {
+    const first = targets[0]
+    if (!first) return
+    const sessionID = `hub.${first}.g.${gid}`
+    const runID = `run_mock_grpstream_${triggerSeq}`
+    const roundID = `rnd_mock_${triggerSeq}`
+    const gen = this.hubGroupGen.get(gid) ?? 0
+    // 唯一标记（GROUP-R<n>-A/B）：正文在 DOM 里出现几次、有没有和另一轮拼接，一眼可判。
+    const rounds = [
+      'GROUP-R1-A 先给结论：三个方案里我推荐第二个，代价最低。 GROUP-R1-B',
+      'GROUP-R2-A 再补证据：第一个方案每次改价都要动两份配置。 GROUP-R2-B',
+    ]
+    this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'running' })
+    this.emit({ event_type: 'agent_start', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
+    let endAt = 0
+    rounds.forEach((text, r) => {
+      const messageID = `gm_mock_groupstream_${triggerSeq}_${r}`
+      const runes = Array.from(text)
+      const size = Math.max(1, Math.ceil(runes.length / 6))
+      const chunks: string[] = []
+      for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
+      // 第二轮等第一轮的 final 落地后再开流（间隔远大于人的点击速度 = 两轮）。
+      const start = 400 + r * 1200
+      chunks.forEach((chunk, i) => {
+        this.afterBg(start + i * 90, () => {
+          if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+          // 旧路径（live）：群视图不画 live，只有 DM 画 —— 这条绝不能变成第三条气泡。
+          this.emit({ event_type: 'content_chunk', session_id: sessionID, run_id: runID, content: chunk })
+          // 新路径（草稿）：群 delta 必须带 group_id/round_id。
+          this.emit({
+            event_type: 'hub_message_delta', group_id: gid, agent_id: first, round_id: roundID,
+            message_id: messageID, index: i, delta: chunk,
+          })
+        })
+      })
+      endAt = start + chunks.length * 90 + 120
+      this.afterBg(endAt, () => {
+        if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+        const msg = this.hubGroupAppend(gid, {
+          kind: 'text', sender: { kind: 'agent', agent_id: first }, text, round_id: roundID,
+        })
+        msg.id = messageID
+        this.hubGroupEmitMessage(gid, msg)
+      })
+    })
+    this.afterBg(endAt + 250, () => {
+      if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+      this.emit({ event_type: 'agent_end', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
+      this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'idle' })
+      if (this.hubGroupConversations.get(gid)?.status !== 'stopped') {
+        this.hubGroupSetConversation(gid, 'running', { turns: 2, depth: 1, queue: 0 })
+      }
+    })
+  }
+
+  /**
+   * 脚本化 DM 两轮回复（场景2b 浏览器回归，?hubFixture=dmstream）。
+   *
+   * 真 bridge 每个 LLM 轮次一条气泡：content_chunk 与 hub_message_delta **两条路径
+   * 同时活着**（group_id/round_id 是空串），轮末各一条 hub_message（message.id = 该轮的
+   * message_id）。前端只有把 live 让位给草稿才不会画成「1 条 live + 2 条草稿」。
+   */
+  private mockDMStreamReply(agentID: string, triggerSeq: number): void {
+    const sid = `hub.${agentID}.dm`
+    const runID = `mock-run-${triggerSeq}`
+    const rounds = [
+      '先说结论：三个方案里我推荐第二个，代价最低。',
+      '再补证据：第一个方案每次改价都要动两份配置，维护成本最高。',
+    ]
+    let endAt = 0
+    this.after(300, () => this.emit({ event_type: 'agent_start', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 }), sid)
+    rounds.forEach((text, r) => {
+      const messageID = `msg_mock_dm_${triggerSeq}_${r}`
+      const runes = Array.from(text)
+      const size = Math.max(1, Math.ceil(runes.length / 5))
+      const chunks: string[] = []
+      for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
+      // 第二轮紧接着第一轮的 final（间隔 < 人的点击速度，模拟工具调用后继续说话）。
+      const start = 400 + r * 700
+      chunks.forEach((chunk, i) => {
+        this.after(start + i * 70, () => {
+          // 旧路径（live）：真 bridge 现在也照发，前端不能和草稿同时画。
+          this.emit({ event_type: 'content_chunk', session_id: sid, run_id: runID, content: chunk })
+          // 新路径（草稿）：DM 的 group_id/round_id 是空串，不是缺字段。
+          this.emit({
+            event_type: 'hub_message_delta', group_id: '', agent_id: agentID, round_id: '',
+            message_id: messageID, index: i, delta: chunk,
+          })
+        }, sid)
+      })
+      endAt = start + chunks.length * 70 + 60
+      this.after(endAt, () => {
+        const rseq = (this.hubSeq.get(agentID) ?? 0) + 1
+        this.hubSeq.set(agentID, rseq)
+        const created = new Date().toISOString()
+        this.hubLog(agentID).push({ seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text, created_at: created })
+        this.emit({
+          event_type: 'hub_message', agent_id: agentID, seq: rseq,
+          message: { id: messageID, seq: rseq, kind: 'text', sender: { kind: 'agent', agent_id: agentID }, text, created_at: created },
+        })
+      }, sid)
+    })
+    this.after(endAt + 200, () => {
+      this.emit({ event_type: 'agent_end', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 })
+    }, sid)
+  }
+
   // —— 内嵌编辑器（PR-05b）：mock 的虚拟文件系统 ——
   // overlay = 被 file_save 写过的路径 → 新内容（覆盖 MOCK_FILES 的只读种子）；
   // opened = 当前「已 file_open」的路径集合（保存授权，与真 bridge 的打开集合同义）。
@@ -751,6 +1705,30 @@ class MockTransport implements Transport {
     events: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo claude-session-start', timeout: 5 }] }] },
   }
   // 信任库（mock）：命令 → 状态；未登记的项目命令默认 untrusted（安全默认，与真实现一致）
+  // mockIMConfig IM 配置的 mock 真相源（im_config_set 写它、im_config_get 读它）。
+  // 三种投递目标各一条：workspace / agent DM / 群（群还需要执行者 agent）。
+  private mockIMConfig: IMConfig = {
+    enabled: true,
+    gateways: [
+      {
+        id: 'feishu-main',
+        type: 'feishu',
+        enabled: true,
+        config: { app_id: 'cli_mock', mode: 'websocket' },
+        routes: [
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_group' }, workspace: '~/workspace/go-code' },
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_dm' }, agent: 'ag_mockres1' },
+          { chat: { gateway: 'feishu', chat_id: 'oc_mock_team' }, agent: 'ag_mockres1', group: 'grp_mock1' },
+        ],
+        allow_users: ['ou_mock_user'],
+      },
+    ],
+    mirrors: [],
+    security: { require_bind_confirm: true },
+  }
+
+  // mockTrust 按**归属**存（owner\u0000command）：与真 bridge 的 owner 隔离一致，
+  // 免得 mock 模式下「A 群信任了 → B 群也显示已信任」把真实缺陷掩盖掉。
   private mockTrust: Record<string, 'managed' | 'trusted' | 'untrusted' | 'modified'> = {}
 
   // mockProjectMCPInfo 一个项目的项目层 MCP 视图（契约同真 bridge mcp_projects）。
@@ -795,7 +1773,8 @@ class MockTransport implements Transport {
   }
 
   // mockHooksInfo hooks 来源汇总（契约同真 bridge hooks_list）。
-  private mockHooksInfo(paths: string[]) {
+  private mockHooksInfo(paths: string[], owner = '') {
+    const trustKey = (o: string, c: string) => `${o}\u0000${c}`
     const commands = (b?: HookSectionView): string[] => {
       const out: string[] = []
       for (const groups of Object.values(b?.events ?? {})) {
@@ -804,17 +1783,24 @@ class MockTransport implements Transport {
       return out
     }
     const trust: Record<string, string> = {}
-    for (const c of commands(this.mockUserHooks)) trust[c] = this.mockTrust[c] ?? 'trusted' // 用户级默认可信
-    for (const c of commands(this.mockClaudeUserHooks)) trust[c] = this.mockTrust[c] ?? 'trusted'
+    // 用户级来源按**当前归属**判定（默认可信），项目来源按**该项目**的 workspace 归属判定。
+    for (const c of commands(this.mockUserHooks)) trust[c] = this.mockTrust[trustKey(owner, c)] ?? 'trusted'
+    for (const c of commands(this.mockClaudeUserHooks)) trust[c] = this.mockTrust[trustKey(owner, c)] ?? 'trusted'
     for (const p of paths) {
       const f = this.mockProjectFiles[p] ?? {}
-      for (const c of [...commands(f.hooks), ...commands(f.claudeHooks)]) trust[c] = this.mockTrust[c] ?? 'untrusted'
+      for (const c of [...commands(f.hooks), ...commands(f.claudeHooks)]) {
+        trust[c] = this.mockTrust[trustKey(`workspace:${p}`, c)] ?? 'untrusted'
+      }
     }
     const body = (b?: HookSectionView) => (b ?? {})
     return {
+      owner,
+      ownerKind: owner.split(':')[0] ?? '',
+      ownerLabel: owner,
       user: {
         id: 'user', kind: 'user', title: '用户配置', path: `${this.mockHome()}/.go-code/settings.json`,
         present: true, ok: true, editable: true, body: body(this.mockUserHooks),
+        owner, trust: Object.fromEntries(commands(this.mockUserHooks).map((c) => [c, trust[c]])),
       },
       claudeUser: {
         id: 'claude-user', kind: 'claude-user', title: 'Claude 兼容（只读）', path: `${this.mockHome()}/.claude/settings.json`,
@@ -822,10 +1808,13 @@ class MockTransport implements Transport {
       },
       projects: paths.map((p) => {
         const f = this.mockProjectFiles[p] ?? {}
+        const pOwner = `workspace:${p}`
         return {
           id: `project:${p}`, kind: 'project', title: p.split('/').filter(Boolean).pop() ?? p,
           workspace: p, path: `${p}/.go-code/hooks.json`, exists: true,
           present: Boolean(f.hooks), ok: true, editable: true, body: body(f.hooks),
+          owner: pOwner,
+          trust: Object.fromEntries([...commands(f.hooks), ...commands(f.claudeHooks)].map((c) => [c, trust[c]])),
           claude: f.claudeHooks ? [{ path: `${p}/.claude/settings.json`, present: true, ok: true, body: f.claudeHooks }] : [],
         }
       }),
@@ -978,6 +1967,25 @@ class MockTransport implements Transport {
       /* ignore */
     }
   }
+  // mock 的「keys.json」替身：明文 key 只活在 localStorage（不落真实盘、不进 settings 之外的地方）。
+  // 值优先取这里，其次回退 settings.provider[].api_key（历史 mock 数据仍有该字段）。
+  private keyValues(): Record<string, string> {
+    try {
+      return JSON.parse(localStorage.getItem('go-code.provider-key-values') ?? '{}')
+    } catch {
+      return {}
+    }
+  }
+  private setKeyValue(provider: string, value: string): void {
+    try {
+      const m = this.keyValues()
+      if (value) m[provider] = value
+      else delete m[provider]
+      localStorage.setItem('go-code.provider-key-values', JSON.stringify(m))
+    } catch {
+      /* ignore */
+    }
+  }
 
   async settingsGet(): Promise<AppSettings> {
     return this.settings()
@@ -1117,10 +2125,19 @@ class MockTransport implements Transport {
     else if (p.usage_input_includes_cache === null) delete pc.usage_input_includes_cache
     if (p.cache_ttl_1h === true || p.cache_ttl_1h === false) pc.cache_ttl_1h = p.cache_ttl_1h
     else if (p.cache_ttl_1h === null) delete pc.cache_ttl_1h
-    if (p.api_key) pc.api_key = p.api_key // 与 electron provider:save 一致：明文写回 settings.provider（bridge 读取主通道）
+    // mock 不落真实盘：settings 里保留 api_key 让旧 mock 数据自洽；同时记一份「keys.json 替身」，
+    // 供 providerKey()/runCardTest 使用（真实主进程只写 keys.json，不写 settings）。
+    if (p.api_key) {
+      pc.api_key = p.api_key
+      this.setKeyValue(p.provider, p.api_key)
+    } else if (p.api_key === null) {
+      delete pc.api_key
+      this.setKeyValue(p.provider, '')
+    }
     cur.provider[p.provider] = pc
     this.saveSettings(cur)
     if (p.api_key) this.setHasKey(p.provider, true)
+    else if (p.api_key === null) this.setHasKey(p.provider, false)
     return { ok: true, hasKey: this.hasKeys()[p.provider] ?? false }
   }
   async providerRemove(provider: string): Promise<{ ok: boolean; error?: string }> {
@@ -1143,11 +2160,28 @@ class MockTransport implements Transport {
     }
     if (cur.provider.active === provider) cur.provider.active = 'deepseek'
     this.saveSettings(cur)
+    this.setKeyValue(provider, '')
     if (this.hasKeys()[provider]) this.setHasKey(provider, false)
     return { ok: true }
   }
   async providerKeyStatus(provider: string): Promise<boolean> {
     return this.hasKeys()[provider] ?? false
+  }
+  // 与 electron provider:key 对齐：只取一把 key（本地测试/改名用），不预填表单。
+  async providerKey(provider: string): Promise<string> {
+    const stored = this.keyValues()[provider]
+    if (stored) return stored
+    const pc = this.settings().provider[provider] as ProviderCfg | undefined
+    return pc?.api_key ?? ''
+  }
+  // 与 electron provider:copy-key 对齐：console 改名时把 key 搬到新 id。
+  async providerCopyKey(from: string, to: string): Promise<{ ok: boolean; copied?: boolean; error?: string }> {
+    if (!isValidProviderName(from) || !isValidProviderName(to)) return { ok: false, error: '无效 provider 名称' }
+    const key = await this.providerKey(from)
+    if (!key) return { ok: true, copied: false }
+    this.setKeyValue(to, key)
+    this.setHasKey(to, true)
+    return { ok: true, copied: true }
   }
   // OAuth 订阅登录（2026-08 P2）：mock 环境用本地模拟（localStorage 标记登录态）。
   async oauthLogin(provider: string): Promise<{ ok: boolean; error?: string }> {
@@ -1337,6 +2371,22 @@ class MockTransport implements Transport {
   }
   onExit(_cb: (info: BridgeExitInfo) => void): () => void {
     return () => undefined
+  }
+  // hub:// 深链：浏览器 mock 没有 OS 协议处理器，用 `hub:deep-link` DOM 事件模拟。
+  // 调试/Playwright 可这样触发：
+  //   window.dispatchEvent(new CustomEvent('hub:deep-link', { detail: 'hub://group/<id>?seq=N' }))
+  // 这样 mount/深链的竞态（复审 B1）能在真实 React 树里复现，而不只是 store 单测。
+  onHubDeepLink(cb: (url: string) => void): () => void {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => undefined
+    const listener = (event: Event): void => {
+      const url = (event as CustomEvent<unknown>).detail
+      if (typeof url === 'string' && url) cb(url)
+    }
+    window.addEventListener('hub:deep-link', listener)
+    return () => window.removeEventListener('hub:deep-link', listener)
+  }
+  takeHubDeepLinks(): Promise<string[]> {
+    return Promise.resolve([])
   }
 
   send(cmd: BridgeCommand): Promise<{ ok: boolean; error?: string }> {
@@ -2008,7 +3058,8 @@ class MockTransport implements Transport {
       // hooks_list：hooks 配置来源汇总（钩子页数据源；契约对齐真 bridge）
       case 'hooks_list': {
         const list = (cmd.payload?.workspaces as string[] | undefined) ?? []
-        this.respond(cmd, this.mockHooksInfo(list.length ? list : [this.ws]))
+        const owner = String(cmd.payload?.owner ?? '')
+        this.respond(cmd, this.mockHooksInfo(list.length ? list : [this.ws], owner))
         break
       }
       // hooks_set：写某来源（mock：内存 + 回拉）
@@ -2036,8 +3087,14 @@ class MockTransport implements Transport {
       // hooks_trust：信任命令（mock：按命令记 trusted）
       case 'hooks_trust': {
         const commands = (cmd.payload?.commands as string[] | undefined) ?? []
-        for (const c of commands) this.mockTrust[c] = 'trusted'
-        this.respond(cmd, { trusted: commands.length })
+        // 与真 bridge 同一条纪律：没有归属就拒绝（绝不写成全局）。
+        const owner = String(cmd.payload?.owner ?? '')
+        if (!owner) {
+          this.respondErr(cmd, '缺少归属（owner）')
+          break
+        }
+        for (const c of commands) this.mockTrust[`${owner}\u0000${c}`] = 'trusted'
+        this.respond(cmd, { trusted: commands.length, owner })
         break
       }
       case 'command': {
@@ -2211,20 +3268,7 @@ class MockTransport implements Transport {
         break
       // IM 集成（SettingsModal IM tab 预览数据）
       case 'im_config_get':
-        this.respond(cmd, {
-          config: {
-            enabled: true,
-            gateways: [
-              {
-                id: 'feishu-main', type: 'feishu', enabled: true, config: { app_id: 'cli_mock', mode: 'websocket' },
-                routes: [{ chat: { gateway: 'feishu', chat_id: 'oc_mock_group' }, workspace: '~/workspace/go-code' }],
-                allow_users: ['ou_mock_user'],
-              },
-            ],
-            mirrors: [],
-            security: { require_bind_confirm: true },
-          },
-        })
+        this.respond(cmd, { config: JSON.parse(JSON.stringify(this.mockIMConfig)) })
         break
       case 'im_schema_list':
         this.respond(cmd, {
@@ -2260,12 +3304,29 @@ class MockTransport implements Transport {
           ],
         })
         break
-      case 'im_status':
-        this.respond(cmd, { enabled: true, gateways: [{ id: 'feishu-main', type: 'feishu', enabled: true, status: 'connected' }] })
+      case 'im_status': {
+        // owner 隔离：启用/路由按归属给（连接共享）—— mock 也回 owner 字段，
+        // 免得前端在 mock 模式下以为「没有归属也行」。
+        const owner = String(cmd.payload?.owner ?? '')
+        this.respond(cmd, {
+          enabled: true,
+          gateways: [{ id: 'feishu-main', type: 'feishu', enabled: true, status: 'connected' }],
+          owner,
+          ownerLabel: owner,
+          ownerEnabled: Boolean(owner),
+          ownerRoutes: 1,
+          owners: owner ? { [owner]: true } : {},
+        })
         break
-      case 'im_config_set':
+      }
+      case 'im_config_set': {
+        // mock 也落盘（内存态）：静态返回会让「保存后回读」看起来没生效，
+        // 路由编辑（尤其 agent/群目标的保留）就没法在浏览器里真实验收。
+        const cfg = (cmd.payload as { config?: IMConfig } | undefined)?.config
+        if (cfg) this.mockIMConfig = JSON.parse(JSON.stringify(cfg)) as IMConfig
         this.respond(cmd, {})
         break
+      }
       case 'im_chat_list': // 群列表（路由绑定下拉）
         this.respond(cmd, {
           chats: [
@@ -2328,6 +3389,650 @@ class MockTransport implements Transport {
         this.mockTraceData(cmd, String(p?.run_id || ''), p?.latest === 1 || p?.latest === true)
         break
       }
+      case 'hub_agent_list': {
+        const includeDeleted = cmd.payload?.include_deleted === true
+        const liveAgents = this.hubAgents.filter((a) => includeDeleted || a.deleted !== true)
+        const dm: Record<string, unknown> = {}
+        for (const a of liveAgents) {
+          const id = String(a.id)
+          const log = this.hubLog(id)
+          const last = log[log.length - 1]
+          const cursor = this.hubCursor.get(id) ?? 0
+          dm[id] = {
+            unread: log.filter((m) => m.seq > cursor && m.sender.kind === 'agent').length,
+            last_seq: last?.seq,
+            last_text: last?.text.replace(/\s+/g, ' ').slice(0, 80),
+            last_sender: last?.sender.kind,
+            last_at: last?.created_at,
+          }
+        }
+        this.respond(cmd, { agents: liveAgents, dm })
+        break
+      }
+      case 'hub_open': {
+        const target = (cmd.payload?.target ?? {}) as Record<string, unknown>
+        const agentID = String(target.agent_id ?? '')
+        const agent = this.hubAgents.find((a) => a.id === agentID)
+        if (!agent) { this.respondErr(cmd, '智能体不存在'); break }
+        const log = this.hubLog(agentID)
+        const limit = Number(cmd.payload?.limit ?? 50)
+        const before = Number(cmd.payload?.before_seq ?? 0)
+        const upto = before > 0 ? log.filter((m) => m.seq < before) : log
+        const page = upto.slice(-limit)
+        this.hubCursor.set(agentID, log[log.length - 1]?.seq ?? 0)
+        this.respond(cmd, {
+          target: { kind: 'dm', agent_id: agentID },
+          agent,
+          session_id: `hub.${agentID}.dm`,
+          messages: page,
+          has_more: upto.length > page.length,
+          cursor: { human_read_seq: this.hubCursor.get(agentID) ?? 0 },
+          exists: true,
+        })
+        break
+      }
+      case 'hub_history': {
+        const agentID = String(cmd.payload?.agent_id ?? '')
+        const before = Number(cmd.payload?.before_seq ?? 0)
+        const limit = Number(cmd.payload?.limit ?? 50)
+        const log = this.hubLog(agentID).filter((m) => m.seq < before)
+        const page = log.slice(-limit)
+        this.respond(cmd, { messages: page, has_more: log.length > page.length })
+        break
+      }
+      case 'hub_send': {
+        const target = (cmd.payload?.target ?? {}) as Record<string, unknown>
+        const agentID = String(target.agent_id ?? '')
+        const text = String(cmd.payload?.text ?? '').trim()
+        // 附件（图片 / 文件引用）：纯图消息正文可以为空（真 bridge 存「[图片]」）。
+        const attachments = this.mockAttachments(cmd.payload?.attachments)
+        if (!agentID || (!text && attachments.length === 0)) { this.respondErr(cmd, 'text 不能为空'); break }
+        // 两种 mock 注入的失败（浏览器回归用，见 scripts/shoot-hub-failures.mjs）：
+        //   __fail__    → 没落账就失败（气泡标 failed，可重试）
+        //   __lostack__ → 已经落账，但事件与响应都在网线上丢了（断线重连的真实现场）
+        if (text === '__fail__') { this.respondErr(cmd, 'provider 未配置（mock 注入失败）'); break }
+        const clientID = String(cmd.payload?.client_msg_id ?? '')
+        const log = this.hubLog(agentID)
+        // client_msg_id 幂等（与 bridge 的 hubSend 同形）：断线重发直接回原 seq，不重复落账、
+        // 也不再 Ask 一次。没有它，「响应丢了 → 重试」会在模型上下文里留下两条一样的消息
+        //（HUB-IDEM-01 的回归面：换新 cid 就一定会在这里多出一条）。
+        const existing = clientID ? log.find((m) => m.refs?.client_msg_id === clientID) : undefined
+        if (existing) {
+          this.respond(cmd, { seq: existing.seq, deduplicated: true, session_id: `hub.${agentID}.dm` })
+          break
+        }
+        const seq = (this.hubSeq.get(agentID) ?? 0) + 1
+        this.hubSeq.set(agentID, seq)
+        const created = new Date().toISOString()
+        log.push({
+          seq, sender: { kind: 'human' }, text, created_at: created,
+          ...(attachments.length > 0 ? { attachments } : {}),
+          ...(clientID ? { refs: { client_msg_id: clientID } } : {}),
+        })
+        this.hubCursor.set(agentID, seq)
+        if (text === '__lostack__') {
+          // 落账了但既没 emit 也没响应：前端只看到「发送失败」，重试必须沿用同一 cid，
+          // 否则上面的幂等分支永远不命中，模型上下文里就真的多一条。
+          this.respondErr(cmd, '连接中断：响应丢失（mock 注入，消息已落账）')
+          break
+        }
+        // 真 bridge 先 emit hub_message 再 resp（hub_commands.go 的 hub_send）：
+        // mock 必须同序，否则前端「事件先到/响应先到」两条路径里有一条永远测不到。
+        this.emit({
+          event_type: 'hub_message', agent_id: agentID, seq,
+          message: { seq, sender: { kind: 'human' }, text, created_at: created, ...(attachments.length > 0 ? { attachments } : {}) },
+          client_msg_id: String(cmd.payload?.client_msg_id ?? ''),
+        })
+        this.respond(cmd, { seq, session_id: `hub.${agentID}.dm` })
+        // 场景2b 的浏览器回归档：真 bridge 现在按 LLM 轮次分段，且**仍然同时**发
+        // content_chunk。mock 复刻这个组合（两轮），前端必须只画两条草稿气泡。
+        if (this.hubFixture() === 'dmstream') {
+          this.mockDMStreamReply(agentID, seq)
+          break
+        }
+        // 模拟一轮回复：agent_start → content_chunk 流 → hub_message → agent_end
+        const sid = `hub.${agentID}.dm`
+        const runID = `mock-run-${seq}`
+        this.after(350, () => this.emit({ event_type: 'agent_start', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 }), sid)
+        const reply = '收到。我按「价格 / 功能 / 公开情报」三栏整理一版，先把对比表发你。'
+        reply.split('').forEach((ch, i) => {
+          this.after(450 + i * 18, () => this.emit({ event_type: 'content_chunk', session_id: sid, run_id: runID, content: ch }), sid)
+        })
+        this.after(450 + reply.length * 18 + 120, () => {
+          const rseq = (this.hubSeq.get(agentID) ?? 0) + 1
+          this.hubSeq.set(agentID, rseq)
+          const rcreated = new Date().toISOString()
+          this.hubLog(agentID).push({ seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text: reply, created_at: rcreated })
+          this.emit({ event_type: 'hub_message', agent_id: agentID, seq: rseq, message: { seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text: reply, created_at: rcreated } })
+          this.emit({ event_type: 'agent_end', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 })
+        }, sid)
+        break
+      }
+      // —— P3b-07：群组 / @ / 自动对话 / 任务卡 ——
+      case 'hub_search': {
+        // 浏览器 mock 的全历史搜索（bridge 同名命令的简化版）：扫 DM/群消息，
+        // 按时间倒序返回首页。只为本地 UI 联调；分页游标在 mock 里不产生。
+        const q = String(cmd.payload?.query ?? '').trim().toLowerCase()
+        const scope = String(cmd.payload?.scope ?? 'all')
+        const limit = Math.max(1, Math.min(200, Number(cmd.payload?.limit ?? 50)))
+        type Hit = Record<string, unknown>
+        const hits: Array<{ at: number; hit: Hit }> = []
+        const snippet = (text: string): string => {
+          if (!q) return text.slice(0, 120)
+          const i = text.toLowerCase().indexOf(q)
+          if (i < 0) return text.slice(0, 120)
+          return text.slice(Math.max(0, i - 40), Math.min(text.length, i + q.length + 80))
+        }
+        if (q && (scope === 'all' || scope === 'dm')) {
+          for (const a of this.hubAgents) {
+            if (a.deleted === true) continue
+            const agentID = String(a.id)
+            for (const m of this.hubLog(agentID)) {
+              if (!m.text.toLowerCase().includes(q)) continue
+              hits.push({
+                at: Date.parse(m.created_at) || 0,
+                hit: {
+                  scope: 'dm', agent_id: agentID, name: String(a.name ?? agentID),
+                  seq: m.seq, message_id: `dm_${agentID}_${m.seq}`, snippet: snippet(m.text),
+                  sender: m.sender.kind === 'human' ? '你' : String(a.name ?? agentID),
+                  sender_kind: m.sender.kind, sender_agent_id: m.sender.agent_id ?? '',
+                  kind: 'text', created_at: m.created_at,
+                },
+              })
+            }
+          }
+        }
+        if (q && (scope === 'all' || scope === 'group')) {
+          for (const g of this.hubGroups) {
+            const gid = String(g.id)
+            for (const m of this.hubGroupLog(gid)) {
+              if (!m.text.toLowerCase().includes(q)) continue
+              const member = this.hubAgents.find((a) => a.id === m.sender.agent_id)
+              hits.push({
+                at: Date.parse(m.created_at) || 0,
+                hit: {
+                  scope: 'group', group_id: gid, name: String(g.name ?? gid),
+                  seq: m.seq, message_id: m.id, snippet: snippet(m.text),
+                  sender: m.sender.kind === 'human' ? '你' : String(member?.name ?? m.sender.agent_id ?? ''),
+                  sender_kind: m.sender.kind, sender_agent_id: m.sender.agent_id ?? '',
+                  kind: m.kind, created_at: m.created_at,
+                },
+              })
+            }
+          }
+        }
+        hits.sort((x, y) => y.at - x.at)
+        const page = hits.slice(0, limit).map((x) => x.hit)
+        this.respond(cmd, { hits: page, has_more: hits.length > page.length })
+        break
+      }
+      case 'hub_group_list': {
+        const progress: Record<string, unknown> = {}
+        for (const g of this.hubGroups) progress[String(g.id)] = this.hubGroupProgress(String(g.id))
+        this.respond(cmd, { groups: this.hubGroups, progress })
+        break
+      }
+      case 'hub_group_get': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        // 打开群一次水合：对话状态 + 人类已读游标（B7）。不再靠一条假事件——
+        // 真 bridge 的 hub_group_get 直接返回 conversation/cursor。
+        this.hubGroupLog(gid)
+        const conversation = this.hubGroupConversations.get(gid) ?? this.mockConversation(gid, 'idle')
+        const humanReadSeq = this.hubGroupRead.get(gid) ?? 0
+        this.respond(cmd, { group, conversation, cursor: { human_read_seq: humanReadSeq } })
+        // 场景演示：打开这个群补一次 Project 事件（子 run 名 + 待办快照），内联 ToDo 卡才有数据。
+        this.emitHubDemoTodos(gid)
+        break
+      }
+      case 'hub_group_history': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        const before = Number(cmd.payload?.before_seq ?? 0)
+        const limit = Number(cmd.payload?.limit ?? 50)
+        const all = this.hubGroupLog(gid).filter((m) => (before > 0 ? m.seq < before : true))
+        const page = all.slice(-limit)
+        this.respond(cmd, { messages: page, has_more: all.length > page.length })
+        break
+      }
+      case 'hub_group_activity': {
+        this.respond(cmd, { activity: [] })
+        break
+      }
+      case 'hub_group_send': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        const text = String(cmd.payload?.text ?? '').trim()
+        // 附件与 DM 同形：纯图（正文为空）也允许，路由由正文里的 @ 决定（没有就不唤醒）。
+        const attachments = this.mockAttachments(cmd.payload?.attachments)
+        if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        if (!text && attachments.length === 0) { this.respondErr(cmd, 'text 不能为空'); break }
+        // 与 DM 同款注入：__fail__ 不落账就失败（气泡标 failed、横幅给重试）。
+        if (text === '__fail__') { this.respondErr(cmd, 'provider 未配置（mock 注入失败）'); break }
+        const clientID = String(cmd.payload?.client_msg_id ?? '')
+        const log = this.hubGroupLog(gid)
+        const existing = clientID ? log.find((m) => m.refs?.client_msg_id === clientID) : undefined
+        if (existing) {
+          // 断线重试：同 client_msg_id 不重复写日志，也不再路由/唤醒（与 bridge 同形）。
+          this.respond(cmd, { seq: existing.seq, message_id: existing.id, deduplicated: true })
+          break
+        }
+        const mentionAll = cmd.payload?.mention_all === true
+        const targets = this.hubGroupTargets(gid, text, cmd.payload?.mentions, mentionAll)
+        const msg = this.hubGroupAppend(gid, {
+          kind: 'text', sender: { kind: 'human' }, text,
+          ...(attachments.length > 0 ? { attachments } : {}),
+          ...(clientID ? { refs: { client_msg_id: clientID } } : {}),
+        })
+        if (text === '__lostack__') {
+          // 与 DM 同款注入：已落账但事件/响应都丢了；重试走上面的 cid 幂等分支。
+          this.respondErr(cmd, '连接中断：响应丢失（mock 注入，消息已落账）')
+          break
+        }
+        this.hubGroupEmitMessage(gid, msg)
+        this.hubGroupSetConversation(gid, 'running', {
+          turns: targets.length > 0 ? 1 : 0, depth: 1, queue: Math.max(0, targets.length - 1),
+        })
+        const round = targets.length > 0
+          ? {
+            id: `rnd_mock_${msg.seq}`, group_id: gid, trigger_seq: msg.seq, targets,
+            mention_all: mentionAll || /@all\b/i.test(text), dropped: 0,
+          }
+          : null
+        if (round) {
+          this.emit({ event_type: 'hub_round', group_id: gid, round })
+          const receipt = this.hubGroupAppend(gid, {
+            kind: 'routing_receipt', sender: { kind: 'system' }, text: `targets=${targets.join(',')}`,
+          })
+          this.hubGroupEmitMessage(gid, receipt)
+        }
+        this.respond(cmd, { seq: msg.seq, message_id: msg.id, round, targets })
+        // 场景2b 群侧浏览器回归：?hubFixture=groupstream 用两轮脚本化回复替代单轮。
+        // 场景演示群同样走两轮：在演示群里发 @ 消息就能看到「同一轮两条独立气泡」。
+        if (this.hubFixture() === 'groupstream' || gid === DEMO_GROUP) {
+          this.mockGroupStreamReply(gid, msg.seq, targets)
+          break
+        }
+        if (targets.length > 0) this.mockGroupReply(gid, msg.seq, targets)
+        break
+      }
+      case 'hub_group_assign': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        const target = String(cmd.payload?.agent_id ?? cmd.payload?.to_agent ?? '').trim()
+        const instruction = String(cmd.payload?.instruction ?? '').trim()
+        const title = String(cmd.payload?.title ?? '').trim()
+        const clientID = String(cmd.payload?.client_msg_id ?? '')
+        if (!target) { this.respondErr(cmd, 'to_agent 不能为空（也接受 agent_id）'); break }
+        if (!instruction) { this.respondErr(cmd, 'instruction 不能为空'); break }
+        if (!this.hubGroupMemberIDs(gid).includes(target)) { this.respondErr(cmd, '目标不是该群成员'); break }
+        const membersRaw = (group.members as Array<{ agent_id?: string; role?: string }> | undefined) ?? []
+        if (membersRaw.find((m) => String(m.agent_id) === target)?.role === 'observer') {
+          this.respondErr(cmd, 'observer 只旁听，不能接派任务')
+          break
+        }
+        const cacheKey = `${gid}:${clientID}`
+        const cached = clientID ? this.hubGroupAssigns.get(cacheKey) : undefined
+        if (cached) { this.respond(cmd, cached); break }
+        const taskID = `task_mock_${++this.hubGroupTaskNo}`
+        const agent = this.hubAgents.find((a) => a.id === target)
+        const name = String(agent?.name ?? target)
+        const task: Record<string, unknown> = {
+          id: taskID, root_task_id: taskID, parent_task_id: null, chain: [taskID],
+          origin: { kind: 'human', group_id: gid }, target: { kind: 'agent', agent_id: target, group_id: gid, session_id: `hub.${target}.g.${gid}` },
+          title: title || instruction.split('\n')[0].slice(0, 40), instruction,
+          callback: 'agent_end', status: 'queued', attempt: 1,
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }
+        this.hubGroupTasks.set(taskID, task)
+        const assignMsg = this.hubGroupAppend(gid, {
+          kind: 'text', sender: { kind: 'human' }, text: `@${name} ${instruction}`,
+          refs: { client_msg_id: clientID, task_id: taskID, intent: 'assign', mentions: [target] },
+        })
+        this.hubGroupEmitMessage(gid, assignMsg)
+        this.emit({
+          event_type: 'hub_round', group_id: gid,
+          round: { id: `rnd_mock_${assignMsg.seq}`, group_id: gid, trigger_seq: assignMsg.seq, targets: [target], dropped: 0 },
+        })
+        const response = {
+          task, task_id: taskID, status: 'queued', to_agent: target, seq: assignMsg.seq, dispatched: false,
+          note: '目标当前正忙：任务已入队（queued），对方回合结束后由对话控制器派发。',
+        }
+        if (clientID) this.hubGroupAssigns.set(cacheKey, response)
+        this.hubGroupSetConversation(gid, 'running', { turns: 1, depth: 1, queue: 1 })
+        this.respond(cmd, response)
+        const gen = this.hubGroupGen.get(gid) ?? 0
+        // 脚本化任务生命周期：queued → dispatched → running → completed（任务卡回群）。
+        // 停止（hub_conversation_stop）会换代，下面所有未到点的回调直接作废（N9）。
+        this.afterBg(1_200, () => {
+          if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+          task.status = 'dispatched'
+          task.updated_at = new Date().toISOString()
+          this.hubGroupTaskUpdate(task, gid)
+          this.hubGroupSetConversation(gid, 'running', { turns: 1, depth: 1, queue: 0 })
+          this.emit({ event_type: 'hub_agent_status', agent_id: target, status: 'running' })
+        })
+        this.mockGroupReply(gid, assignMsg.seq, [target], {
+          startMs: 700,
+          reply: '先核对三家价格，再生成两页简报，结论放开头。',
+        })
+        this.afterBg(2_400, () => {
+          if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+          const summary = '已生成两页简报：价格对比、结论与风险都在里面。'
+          const cardMsg = this.hubGroupAppend(gid, {
+            kind: 'task_result', sender: { kind: 'agent', agent_id: target }, text: summary,
+            refs: {
+              task_id: taskID, status: 'completed', agent_id: target, target_agent_id: target,
+              // 人派的：卡片自带 origin 快照，任务列表没加载也能显示「你 → Writer」。
+              origin_kind: 'human',
+              title: String(task.title ?? ''), duration_ms: 18_400,
+              usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
+              artifacts: [{ name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140 }],
+              error: '',
+            },
+          })
+          this.hubGroupEmitMessage(gid, cardMsg)
+          task.status = 'completed'
+          task.updated_at = new Date().toISOString()
+          task.result = {
+            finish_reason: 'stop', summary,
+            usage: { input: 12_000, output: 3_000, cost_priced: true, cost_usd: 0.03 },
+            artifacts: [{ name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140 }],
+          }
+          this.hubGroupTaskUpdate(task, gid)
+          this.emit({ event_type: 'hub_agent_status', agent_id: target, status: 'idle' })
+          if (this.hubGroupConversations.get(gid)?.status !== 'stopped') {
+            this.hubGroupSetConversation(gid, 'running', { turns: 3, depth: 1, queue: 0 })
+          }
+        })
+        break
+      }
+      case 'hub_group_update': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        if (!group) { this.respondErr(cmd, '群组不存在'); break }
+        const patch = (cmd.payload?.patch ?? {}) as Record<string, unknown>
+        if (typeof patch.name === 'string') group.name = patch.name
+        if (patch.policy && typeof patch.policy === 'object') {
+          group.policy = { ...(group.policy as Record<string, unknown>), ...(patch.policy as Record<string, unknown>) }
+        }
+        if (typeof patch.pinned === 'boolean') group.pinned = patch.pinned
+        group.updated_at = new Date().toISOString()
+        this.emit({ event_type: 'hub_group_update', group })
+        this.respond(cmd, { group })
+        break
+      }
+      case 'hub_mark_read': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const seq = Number(cmd.payload?.seq ?? 0)
+        if (!gid) { this.respondErr(cmd, 'group_id 或 agent_id 必须给一个'); break }
+        if (!(seq > 0)) { this.respondErr(cmd, 'seq 必须为正整数'); break }
+        const effective = Math.max(seq, this.hubGroupRead.get(gid) ?? 0)
+        this.hubGroupRead.set(gid, effective)
+        this.hubGroupLog(gid)
+        this.respond(cmd, { seq: effective, human_read_seq: effective })
+        break
+      }
+      case 'hub_conversation_stop': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        if (!this.hubGroup(gid)) { this.respondErr(cmd, '群组不存在'); break }
+        this.hubGroupGen.set(gid, (this.hubGroupGen.get(gid) ?? 0) + 1)
+        // 在飞任务必须结算：换代只作废回调，账本里 queued/dispatched/running 的任务
+        // 会一直挂着 —— 前端按 dispatched/running 判「有东西可停」，一次停止之后
+        // 再派一次任务，僵尸任务会把停止按钮重新点亮（P3b-07 复审残余 2）。
+        // 语义对齐真 bridge：停止中断主 run → AgentEnd 结算为 interrupted。
+        const stoppedAt = new Date().toISOString()
+        let interrupted = 0
+        for (const task of this.hubGroupTasks.values()) {
+          const taskGroup = String((task.target as { group_id?: string } | undefined)?.group_id ?? '')
+          const status = String(task.status ?? '')
+          if (taskGroup !== gid) continue
+          if (status !== 'queued' && status !== 'dispatched' && status !== 'running') continue
+          task.status = 'interrupted'
+          task.updated_at = stoppedAt
+          task.error = '人类停止了自动对话，任务已中断'
+          interrupted++
+          this.hubGroupTaskUpdate(task, gid)
+        }
+        const prev = this.hubGroupConversations.get(gid) ?? {}
+        const notice = this.hubGroupAppend(gid, {
+          kind: 'system', sender: { kind: 'system' }, text: '人类停止了自动对话，等你继续',
+        })
+        this.hubGroupEmitMessage(gid, notice)
+        const conversation = this.hubGroupSetConversation(gid, 'stopped', {
+          turns: Number(prev.turns_used ?? 0), depth: Number(prev.depth ?? 0), queue: 0,
+          reason: '人类停止了自动对话，等你继续',
+        })
+        for (const id of this.hubGroupMemberIDs(gid)) this.emit({ event_type: 'hub_agent_status', agent_id: id, status: 'idle' })
+        this.respond(cmd, { conversation, interrupted })
+        break
+      }
+      case 'hub_task_artifact_preview': {
+        const taskID = String(cmd.payload?.task_id ?? '').trim()
+        const path = String(cmd.payload?.path ?? '').trim()
+        if (!taskID) { this.respondErr(cmd, 'task_id 不能为空'); break }
+        if (!this.hubGroupTasks.has(taskID)) { this.respondErr(cmd, '任务不存在'); break }
+        // fixture：与群任务卡的三件产物一一对应；未知 path 明确失败，不静默空成功。
+        if (path === 'out/pricing-v3.md') {
+          const content = [
+            '# 三家价格对比 v3',
+            '',
+            '> 两页简报的完整草稿 · Writer',
+            '',
+            '## 摘要',
+            '',
+            '- Pro 档性价比最高，三家价差在 $4 以内。',
+            '- Team 档只有 Globex 提供 20 席起订。',
+            '- 三年期合约平均可再降 12%。',
+            '',
+            '| 供应商 | 档位 | 月价 | 起订席位 |',
+            '| --- | --- | --- | --- |',
+            '| Acme | Pro | $20 | 5 |',
+            '| Globex | Team | $50 | 20 |',
+            '| Initech | Pro | $24 | 8 |',
+            '',
+            '## 结论',
+            '',
+            '建议先签 Acme Pro 试运行，季度复核后再谈 Team 档。',
+          ].join('\n')
+          this.respond(cmd, {
+            ok: true, path, name: 'pricing-v3.md', size: content.length,
+            lines: content.split('\n').length, truncated: false, binary: false, content,
+          })
+          break
+        }
+        if (path === 'out/pricing-v3.csv') {
+          const content = [
+            'vendor,tier,monthly_usd,seats',
+            'Acme,Pro,20,5',
+            'Globex,Team,50,20',
+            'Initech,Pro,24,8',
+            'Acme,Enterprise,80,50',
+          ].join('\n')
+          this.respond(cmd, {
+            ok: true, path, name: 'pricing-v3.csv', size: content.length,
+            lines: content.split('\n').length, truncated: false, binary: false, content,
+          })
+          break
+        }
+        if (path === 'out/assets/cost-curve.png') {
+          // 与 fsReadImage 同一张 120×40 SVG（e2e 断言 naturalWidth=120，别改尺寸）。
+          const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40"><rect width="120" height="40" fill="#d97a66"/><text x="8" y="26" font-size="14" fill="#ffffff">cost-curve.png</text></svg>'
+          const b64 = btoa(Array.from(new TextEncoder().encode(svg), (b) => String.fromCharCode(b)).join(''))
+          this.respond(cmd, {
+            ok: true, path, name: 'cost-curve.png', size: 184320, lines: 0, truncated: false,
+            binary: true, mime: 'image/svg+xml', data_url: `data:image/svg+xml;base64,${b64}`,
+          })
+          break
+        }
+        this.respondErr(cmd, `产物不在任务结果清单中: ${path || '(empty)'}`)
+        break
+      }
+      case 'hub_task_list': {
+        const tasks = [...this.hubGroupTasks.values()]
+        // ?hubFixture=tasks：补「排队 / 失败 / 中断」三种任务态（真实账本在 mock 里只有完成态）。
+        if (this.hubFixture() === 'tasks') tasks.push(...this.hubFixtureTasks())
+        tasks.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        this.respond(cmd, { tasks })
+        break
+      }
+      case 'hub_need_list': {
+        const status = String(cmd.payload?.status ?? '')
+        // ?hubFixture=needs：审批/提问/失败/交接四种 need（原 fixture，逐条不变）；
+        // 默认演示页：grp_demo 的审批 + Ask 两条 pending（日常 mock 不再「Needs 恒空」）。
+        const needs = (this.hubFixture() === 'needs' ? this.hubFixtureNeeds() : this.hubDemoNeeds())
+          .filter((n) => !status || n.status === status)
+        this.respond(cmd, { needs })
+        break
+      }
+      case 'hub_need_resolve': {
+        const needID = String(cmd.payload?.need_id ?? '').trim()
+        if (!needID) { this.respondErr(cmd, 'need_id 不能为空'); break }
+        // 两个来源都查：fixture 与场景演示的 id 不重叠，谁在就处理谁。
+        const need = this.hubFixtureNeeds().find((n) => n.id === needID)
+          ?? this.hubDemoNeeds().find((n) => n.id === needID)
+        if (!need) { this.respondErr(cmd, '待处理项不存在'); break }
+        // 幂等：已经处理过的 need 不再改状态，只回 already（与真实 bridge 同口径）。
+        if (need.status !== 'pending') { this.respond(cmd, { need, already: true }); break }
+        const resolution = String(cmd.payload?.resolution ?? '').trim() || 'acknowledged'
+        const bad = mockHubNeedResolveCheck(String(need.kind ?? ''), resolution, cmd.payload?.answers)
+        if (bad) { this.respondErr(cmd, bad); break }
+        // 只把状态改掉：hub_need_list 按 status=pending 过滤，前端刷新后它就消失了。
+        need.status = 'resolved'
+        need.resolved_at = new Date().toISOString()
+        this.respond(cmd, { need, resolution })
+        break
+      }
+      case 'hub_agent_get': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const agent = this.hubAgents.find((a) => a.id === id)
+        if (!agent) this.respondErr(cmd, '智能体不存在')
+        else this.respond(cmd, { agent })
+        break
+      }
+      case 'hub_agent_create': {
+        const profile = { ...((cmd.payload?.profile ?? {}) as Record<string, unknown>) }
+        const id = `ag_mock${Date.now().toString(36)}`
+        const agent = { ...profile, id, persona: 'hub', version: 1 }
+        this.hubAgents.push(agent)
+        this.respond(cmd, { agent })
+        break
+      }
+      case 'hub_agent_update': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const idx = this.hubAgents.findIndex((a) => a.id === id)
+        if (idx < 0) { this.respondErr(cmd, '智能体不存在'); break }
+        const cur = this.hubAgents[idx]
+        const patch = (cmd.payload?.patch ?? {}) as Record<string, unknown>
+        const versions = this.hubVersions.get(id) ?? []
+        versions.unshift({ version: Number(cur.version ?? 1), saved_at: new Date().toISOString(), profile: JSON.parse(JSON.stringify(cur)) })
+        this.hubVersions.set(id, versions)
+        // 深合并（真 bridge 的 mergeJSONInto 是深合并）：浅合并会把 tools.allow/mcp 一起清掉，
+        // 让 mock 与真机行为不同（P1-09 复核 N5）。
+        const next = { ...deepMerge(cur, patch), version: Number(cur.version ?? 1) + 1 }
+        this.hubAgents[idx] = next
+        this.respond(cmd, { agent: next, effective: 'next_run' })
+        break
+      }
+      case 'hub_agent_delete': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const idx = this.hubAgents.findIndex((a) => a.id === id)
+        if (idx < 0) { this.respondErr(cmd, '智能体不存在'); break }
+        const purge = cmd.payload?.purge === true
+        if (purge) this.hubAgents = this.hubAgents.filter((a) => a.id !== id)
+        else this.hubAgents[idx] = { ...this.hubAgents[idx], deleted: true }
+        this.respond(cmd, { agent_id: id, purged: purge })
+        this.emit({ event_type: 'hub_agent_status', agent_id: id, status: purge ? 'deleted' : 'idle' })
+        break
+      }
+      case 'hub_agent_restore': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const idx = this.hubAgents.findIndex((a) => a.id === id)
+        if (idx < 0) { this.respondErr(cmd, '智能体不存在'); break }
+        const next = { ...this.hubAgents[idx], deleted: false, version: Number(this.hubAgents[idx].version ?? 1) + 1 }
+        this.hubAgents[idx] = next
+        this.respond(cmd, { agent: next })
+        break
+      }
+      case 'hub_agent_versions': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const agent = this.hubAgents.find((a) => a.id === id)
+        const list = (this.hubVersions.get(id) ?? []).map((v) => ({
+          version: v.version,
+          saved_at: v.saved_at,
+          name: v.profile.name,
+          role: v.profile.role,
+          provider: v.profile.provider,
+          model: v.profile.model,
+        }))
+        this.respond(cmd, { agent_id: id, current: Number(agent?.version ?? 1), versions: list })
+        break
+      }
+      case 'hub_agent_rollback': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const version = Number(cmd.payload?.version ?? 0)
+        const idx = this.hubAgents.findIndex((a) => a.id === id)
+        const versions = this.hubVersions.get(id) ?? []
+        const snap = versions.find((v) => v.version === version)
+        if (idx < 0 || !snap) { this.respondErr(cmd, `找不到第 ${version} 版`); break }
+        const cur = this.hubAgents[idx]
+        versions.unshift({ version: Number(cur.version ?? 1), saved_at: new Date().toISOString(), profile: { ...cur } })
+        const next = { ...JSON.parse(JSON.stringify(snap.profile)), id, version: Number(cur.version ?? 1) + 1 }
+        this.hubAgents[idx] = next
+        this.respond(cmd, { agent: next, restored_from: version })
+        break
+      }
+      case 'hub_agent_prompt_preview': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const agent = this.hubAgents.find((a) => a.id === id)
+        // 作用域：带非空 group_id = 群变体（真 bridge 的 L1 有 @/assign_task、L2 是群名册）。
+        // 演示页要靠它肉眼分辨「前端有没有把 group_id 传下来」，所以这里也分叉；
+        // 不带 group_id 保持原 DM 文案（旧调用语义不变）。
+        const gid = String(cmd.payload?.group_id ?? '').trim()
+        const group = gid ? this.hubGroup(gid) : undefined
+        const members = (group?.members as Array<{ agent_id?: string; role?: string }> | undefined) ?? []
+        const roster = members
+          .map((m) => {
+            const aid = String(m.agent_id ?? '')
+            const name = this.hubAgents.find((a) => a.id === aid)?.name ?? aid
+            return m.role ? `${name}（${m.role}）` : name
+          })
+          .join('、')
+        const layers = [
+          { key: 'protocol', title: 'L1 · Hub 协议', text: gid ? 'You are an agent in Agent Hub…（Group scope (mock)：可用 @ 与 assign_task）' : 'You are an agent in Agent Hub…（mock）' },
+          { key: 'identity', title: 'L2 · 身份与职责', text: gid ? `群 ${String(group?.name ?? gid)} 名册：${roster}` : `${agent?.name ?? ''} — ${agent?.role ?? ''}` },
+        ]
+        this.respond(cmd, { agent_id: id, scope: gid ? 'group' : 'dm', group_id: gid, layers, total_chars: layers.reduce((n, l) => n + l.text.length, 0), note: 'L5 技能清单与工具 schema 在请求期由内核装配，不在预览内。' })
+        break
+      }
+      case 'hub_agent_memory': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const path = String(cmd.payload?.path ?? '')
+        let files = this.hubMemory.get(id)
+        if (!files) { files = new Map(); this.hubMemory.set(id, files) }
+        if (!path) {
+          const entries = [...files.keys()].map((name) => ({ name, size: files.get(name)?.length ?? 0 }))
+          this.respond(cmd, { entries, dir: `~/.go-code/hub/agents/${id}/memory` })
+          break
+        }
+        // 读文件给一个真实 IPC 量级的延迟：mock 同步响应会掩盖「回执被迟到的读响应
+        // 清空」这类竞态（P1-09 复核 B2 的复现条件）。
+        setTimeout(() => this.respond(cmd, { path, content: files.get(path) ?? '', exists: files.has(path) }), 120)
+        break
+      }
+      case 'hub_agent_memory_write': {
+        const id = String(cmd.payload?.agent_id ?? '')
+        const path = String(cmd.payload?.path ?? '')
+        const content = String(cmd.payload?.content ?? '')
+        let files = this.hubMemory.get(id)
+        if (!files) { files = new Map(); this.hubMemory.set(id, files) }
+        const backup = files.has(path) ? `${path}.${Date.now()}.bak` : ''
+        files.set(path, content)
+        this.respond(cmd, { path, backup, bytes: content.length, effective: 'next_run' })
+        break
+      }
       default:
         this.respond(cmd, {})
     }
@@ -2373,8 +4078,12 @@ class MockTransport implements Transport {
     this.respond(cmd, payload)
   }
 
+  // respond/respondErr 的响应走**微任务**（真 bridge 是 stdio 异步，响应永远晚于 send 返回）。
+  // 曾经同步 emit：store 里「send 之后才 onCommandResponseOnce」的流程（saveIMConfig /
+  // trustHooks / 各保存按钮）在 mock 模式下永远等不到响应 —— UI 表现为点了没反应、
+  // 按钮一直 busy。保持异步 = mock 与真 bridge 同形。
   private respond(cmd: BridgeCommand, data: Record<string, unknown>) {
-    this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data })
+    queueMicrotask(() => this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data }))
   }
 
   // respondCode：失败响应带**稳定错误码**（conflict / denied / not_found）。编辑器三条冲突动作
@@ -2414,7 +4123,7 @@ class MockTransport implements Transport {
 
   // respondErr：命令失败响应（真 bridge 同形：ok:false + error；store 侧透出给面板）
   private respondErr(cmd: BridgeCommand, error: string) {
-    this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error })
+    queueMicrotask(() => this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error }))
   }
 
   // emit：事件行注入 workspace + seq；session_id 由调用方显式带（按会话路由）
@@ -3912,4 +5621,57 @@ export function mockTransport(): Transport {
       .__haiMockExternalChange = (p, o) => tr.externalChange(p, o)
   }
   return tr
+}
+
+// deepMerge：真 bridge 的 mergeJSONInto 语义（对象递归合并，数组/标量整体替换）。
+function deepMerge(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base }
+  for (const [k, v] of Object.entries(patch)) {
+    const cur = out[k]
+    if (v && typeof v === 'object' && !Array.isArray(v) && cur && typeof cur === 'object' && !Array.isArray(cur)) {
+      out[k] = deepMerge(cur as Record<string, unknown>, v as Record<string, unknown>)
+    } else {
+      out[k] = v
+    }
+  }
+  return out
+}
+
+// hub_need_resolve 的入参校验（P1 复审非阻塞）：与真实 bridge 的
+// desktop/bridge/hub_taskboard.go（hubNeedResolve / hubNeedAnswers）同口径。
+// mock 原先「任何 resolution 成功 → need 标记 resolved」，于是前端在假的成功里
+// 看不到 fail-closed 分支：交接拼错 resolution 会被静默消费、提问缺 answers 也算处理完。
+// 返回 '' 表示通过，否则返回与 Go 侧同样的中文错误。
+export function mockHubNeedResolveCheck(kind: string, resolution: string, answers: unknown): string {
+  switch (kind) {
+    case 'question': {
+      // Go：answers == nil → 缺少 answers；能解成 [{question_id,answer}] 且非空即通过；
+      // 否则按 map 解，空 map → answers 不能为空；两种都不成立 → 格式错误。
+      if (answers === undefined || answers === null) return '缺少 answers'
+      if (Array.isArray(answers)) {
+        const ok = answers.length > 0 && answers.every((a) => !!a && typeof a === 'object'
+          && String((a as { question_id?: unknown }).question_id ?? '').trim() !== '')
+        return ok ? '' : 'answers 格式错误: 需要 [{question_id,answer}] 或 {question_id: answer}'
+      }
+      if (typeof answers === 'object') {
+        return Object.keys(answers as Record<string, unknown>).length > 0 ? '' : 'answers 不能为空'
+      }
+      return 'answers 格式错误: 需要 [{question_id,answer}] 或 {question_id: answer}'
+    }
+    case 'handoff': {
+      // 只有明确的接受/拒绝才改交接状态；「标记已读」只读。未知 resolution fail-closed。
+      const accept = resolution === 'accept' || resolution === 'accepted' ||
+        resolution === 'approve' || resolution === 'approved' || resolution === 'true'
+      const decline = resolution === 'decline' || resolution === 'declined' || resolution === 'deny' ||
+        resolution === 'denied' || resolution === 'reject' || resolution === 'rejected' || resolution === 'false'
+      const read = resolution === 'acknowledged' || resolution === 'ack' || resolution === 'read'
+      return accept || decline || read ? '' : `未知的交接处理方式: ${resolution}`
+    }
+    case 'approval':
+    case 'failure':
+    case 'budget':
+      return ''
+    default:
+      return `未知的 Need 类型: ${kind}`
+  }
 }

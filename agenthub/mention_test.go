@@ -1,0 +1,269 @@
+package agenthub
+
+import (
+	"errors"
+	"reflect"
+	"testing"
+)
+
+func mentionProfile(id AgentID, name string) *AgentProfile {
+	p := validProfile()
+	p.ID = id
+	p.Name = name
+	return p
+}
+
+func mentionParser(t *testing.T, profiles ...*AgentProfile) *MentionParser {
+	t.Helper()
+	p, err := NewMentionParser(profiles)
+	if err != nil {
+		t.Fatalf("NewMentionParser: %v", err)
+	}
+	return p
+}
+
+func agentIDs(ids ...AgentID) []AgentID { return ids }
+
+func TestMentionBasicAndLongest(t *testing.T) {
+	alice := mentionProfile(testAgentID('a'), "Alice")
+	bob := mentionProfile(testAgentID('b'), "Bob")
+	account := mentionProfile(testAgentID('c'), "Account")
+	accountManager := mentionProfile(testAgentID('d'), "Account Manager")
+	writer := mentionProfile(testAgentID('e'), "Writer")
+	writerLead := mentionProfile(testAgentID('f'), "Writer Lead")
+	p := mentionParser(t, alice, bob, account, accountManager, writer, writerLead)
+
+	for _, tc := range []struct {
+		text string
+		want []AgentID
+	}{
+		{"@Writer please", agentIDs(writer.ID)},
+		{"@writer please", agentIDs(writer.ID)},
+		{"@Account Manager, take it", agentIDs(accountManager.ID)},
+		{"@Writer Lead and @Bob", agentIDs(writerLead.ID, bob.ID)},
+		{"@Account, ping", agentIDs(account.ID)},
+	} {
+		got := p.Parse(tc.text)
+		if !reflect.DeepEqual(got.Mentions, tc.want) {
+			t.Fatalf("Parse(%q).Mentions = %v, want %v", tc.text, got.Mentions, tc.want)
+		}
+	}
+}
+
+func TestMentionBoundaries(t *testing.T) {
+	writer := mentionProfile(testAgentID('e'), "Writer")
+	p := mentionParser(t, writer)
+	for _, text := range []string{
+		"foo@Writer", // 前面是字母
+		"x@Writer",   // 前面是字母
+		`\@Writer`,   // 前面是反斜杠
+		"/@Writer",   // 前面是斜杠
+		"@Writer-",   // 后面是连字符
+		"@WriterX",   // 后面是字母
+		"@@Writer",   // 双 @
+	} {
+		if got := p.Parse(text); len(got.Mentions) != 0 {
+			t.Fatalf("Parse(%q) matched %v, want none", text, got.Mentions)
+		}
+	}
+	if got := p.Parse("@Writer, hi"); len(got.Mentions) != 1 {
+		t.Fatalf("punctuation boundary = %v", got.Mentions)
+	}
+	if got := p.Parse("请@Writer 看一下"); len(got.Mentions) != 1 {
+		t.Fatalf("CJK before boundary = %#v", got)
+	}
+	if got := p.Parse("@Writer请看一下"); len(got.Mentions) != 1 {
+		t.Fatalf("CJK after boundary = %#v", got)
+	}
+	if got := p.Parse("＠Writer"); len(got.Mentions) != 1 {
+		t.Fatalf("fullwidth @ = %#v", got)
+	}
+	if got := p.Parse("@Writer_bot"); len(got.Mentions) != 0 {
+		t.Fatalf("underscore suffix = %#v", got)
+	}
+}
+
+func TestMentionSkipsCodeURLAndEmail(t *testing.T) {
+	alice := mentionProfile(testAgentID('a'), "Alice")
+	bob := mentionProfile(testAgentID('b'), "Bob")
+	writer := mentionProfile(testAgentID('e'), "Writer")
+	p := mentionParser(t, alice, bob, writer)
+
+	cases := []struct {
+		text string
+		want []AgentID
+	}{
+		{"`@Writer` @Bob", agentIDs(bob.ID)},
+		{"```\n@Writer\n@Alice\n```\n@Bob", agentIDs(bob.ID)},
+		{"https://example.com/@Writer @Bob", agentIDs(bob.ID)},
+		{"(https://example.com/@Writer) @Bob", agentIDs(bob.ID)},
+		{"mail a@Writer.com @Bob", agentIDs(bob.ID)},
+		{"@Writer and @Alice", agentIDs(writer.ID, alice.ID)},
+		{"价格是 5` 然后 @Alice 看", agentIDs(alice.ID)}, // 未闭合单反引号不是代码
+	}
+	for _, tc := range cases {
+		got := p.Parse(tc.text)
+		if !reflect.DeepEqual(got.Mentions, tc.want) {
+			t.Fatalf("Parse(%q).Mentions = %v, want %v", tc.text, got.Mentions, tc.want)
+		}
+	}
+}
+
+func TestMentionUnknownAndLimit(t *testing.T) {
+	alice := mentionProfile(testAgentID('a'), "Alice")
+	bob := mentionProfile(testAgentID('b'), "Bob")
+	carol := mentionProfile(testAgentID('c'), "Carol")
+	dave := mentionProfile(testAgentID('d'), "Dave")
+	p := mentionParser(t, alice, bob, carol, dave)
+
+	got := p.Parse("@Nobody, hi")
+	if len(got.Mentions) != 0 || len(got.Unknown) != 1 || got.Unknown[0] != "Nobody" {
+		t.Fatalf("unknown = %#v", got)
+	}
+	got = p.Parse("@Alice @Bob @Carol @Dave")
+	if len(got.Mentions) != MaxMentionsPerMessage || got.Dropped != 1 {
+		t.Fatalf("limit = %#v", got)
+	}
+	got = p.Parse("@Alice @Alice @Bob")
+	if len(got.Mentions) != 2 {
+		t.Fatalf("dedupe = %#v", got)
+	}
+	got = p.ParseWithLimit("@Alice @Bob @Carol", 1)
+	if len(got.Mentions) != 1 || got.Dropped != 2 {
+		t.Fatalf("custom limit = %#v", got)
+	}
+}
+
+func TestMentionAllAndHuman(t *testing.T) {
+	alice := mentionProfile(testAgentID('a'), "Alice")
+	p := mentionParser(t, alice)
+	for _, text := range []string{"@all", "@ALL", "@所有人"} {
+		got := p.Parse(text)
+		if !got.MentionAll || len(got.Mentions) != 0 {
+			t.Fatalf("Parse(%q) = %#v", text, got)
+		}
+	}
+	if got := p.Parse("@all @Alice"); !got.MentionAll || !reflect.DeepEqual(got.Mentions, agentIDs(alice.ID)) {
+		t.Fatalf("@all + member = %#v", got)
+	}
+	for _, text := range []string{"@你", "@user"} {
+		got := p.Parse(text)
+		if !got.HumanMention || len(got.Mentions) != 0 {
+			t.Fatalf("Parse(%q) = %#v", text, got)
+		}
+	}
+}
+
+func TestMentionSelfIgnored(t *testing.T) {
+	alice := mentionProfile(testAgentID('a'), "Alice")
+	bob := mentionProfile(testAgentID('b'), "Bob")
+	p := mentionParser(t, alice, bob)
+	got := p.ParseFrom("@Alice @Bob", alice.ID)
+	if !reflect.DeepEqual(got.Mentions, agentIDs(bob.ID)) || got.Dropped != 0 {
+		t.Fatalf("self mention = %#v", got)
+	}
+}
+
+func TestMentionDuplicateNamesRejected(t *testing.T) {
+	if _, err := NewMentionParser([]*AgentProfile{
+		mentionProfile(testAgentID('a'), "Writer"),
+		mentionProfile(testAgentID('b'), "writer"),
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("duplicate err = %v, want ErrInvalid", err)
+	}
+	for _, name := range []string{"all", "所有人", "你", "user"} {
+		if _, err := NewMentionParser([]*AgentProfile{mentionProfile(testAgentID('a'), name)}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("reserved %q err = %v, want ErrInvalid", name, err)
+		}
+	}
+}
+
+func TestMentionAllPermissions(t *testing.T) {
+	if !CanMentionAll(true, RoleMember) {
+		t.Fatal("human should be able to @all")
+	}
+	if !CanMentionAll(false, RoleOwner) {
+		t.Fatal("owner should be able to @all")
+	}
+	if CanMentionAll(false, RoleMember) || CanMentionAll(false, RoleObserver) {
+		t.Fatal("member/observer must not @all")
+	}
+	res := MentionResult{MentionAll: true}
+	if err := res.ValidateMentionAll(false, RoleMember); !errors.Is(err, ErrMentionAllForbidden) {
+		t.Fatalf("member @all err = %v, want ErrMentionAllForbidden", err)
+	}
+	if err := res.ValidateMentionAll(false, RoleOwner); err != nil {
+		t.Fatalf("owner @all: %v", err)
+	}
+	if err := res.ValidateMentionAll(true, RoleObserver); err != nil {
+		t.Fatalf("human @all: %v", err)
+	}
+	if err := (MentionResult{}).ValidateMentionAll(false, RoleMember); err != nil {
+		t.Fatalf("no @all: %v", err)
+	}
+
+	p := mentionParser(t, mentionProfile(testAgentID('a'), "Alice"))
+	if res, err := p.ParseAuthorized("@all", "", false, RoleMember); !errors.Is(err, ErrMentionAllForbidden) || len(res.Mentions) != 0 || res.MentionAll {
+		t.Fatalf("ParseAuthorized member = %#v, %v", res, err)
+	}
+	if res, err := p.ParseAuthorized("@all @Alice", "", false, RoleOwner); err != nil || !res.MentionAll || len(res.Mentions) != 1 {
+		t.Fatalf("ParseAuthorized owner = %#v, %v", res, err)
+	}
+}
+
+func TestMentionVisibility(t *testing.T) {
+	owner := Message{Text: "secret", Visibility: VisibilityOwner}
+	if owner.VisibleTo(false) || !owner.VisibleTo(true) {
+		t.Fatal("owner-only visibility wrong")
+	}
+	if owner.ContextText(false) != OwnerOnlyPlaceholder || owner.ContextText(true) != "secret" {
+		t.Fatalf("owner-only context text = %q / %q", owner.ContextText(false), owner.ContextText(true))
+	}
+	group := Message{Text: "hi"}
+	if group.Visibility.EffectiveVisibility() != VisibilityGroup || !group.VisibleTo(false) {
+		t.Fatal("empty visibility should default group")
+	}
+	if err := (Visibility("team")).Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid visibility err = %v", err)
+	}
+	for _, v := range []Visibility{"team", "OWNER", "Owner ", "owner"} {
+		msg := Message{Text: "secret", Refs: map[string]any{"approval_id": "need_7"}, Visibility: v}
+		if msg.VisibleTo(false) {
+			t.Fatalf("visibility %q must fail closed for agents", v)
+		}
+		if msg.ContextText(false) != OwnerOnlyPlaceholder {
+			t.Fatalf("visibility %q context = %q", v, msg.ContextText(false))
+		}
+		red := msg.Redacted(false)
+		if red.Text != OwnerOnlyPlaceholder || red.Refs != nil {
+			t.Fatalf("visibility %q redacted = %#v", v, red)
+		}
+	}
+}
+
+// P3b-02：代码/URL/email 里的 @all、@你 也不能触发（不只是成员名）。
+func TestMentionSkipsCodeURLAllAndHuman(t *testing.T) {
+	bob := mentionProfile(testAgentID('b'), "Bob")
+	p := mentionParser(t, bob)
+	for _, text := range []string{
+		"`@all` 和 `@你` 只是示例，@Bob 看下",
+		"```\n@all\n@所有人\n@user\n```\n@Bob 看下",
+		"https://example.com/@all/@你 @Bob 看下",
+		"mail ops@all.dev 后 @Bob 看下",
+	} {
+		got := p.Parse(text)
+		if got.MentionAll || got.HumanMention {
+			t.Fatalf("Parse(%q) = %#v: code/URL/email must not trigger @all/@human", text, got)
+		}
+		if !reflect.DeepEqual(got.Mentions, agentIDs(bob.ID)) {
+			t.Fatalf("Parse(%q).Mentions = %v, want %v", text, got.Mentions, agentIDs(bob.ID))
+		}
+	}
+	// 词边界：@alll / @all_bot 不是 @all，只当未知 @。
+	for _, text := range []string{"@alll 开会", "@all_bot 开会"} {
+		got := p.Parse(text)
+		if got.MentionAll || len(got.Unknown) != 1 {
+			t.Fatalf("Parse(%q) = %#v, want unknown token without @all", text, got)
+		}
+	}
+}

@@ -1100,10 +1100,21 @@ function MarkdownImage({ src, alt, baseDir, workspace, ...rest }: {
 // 流式中也实时渲染（未闭合围栏暂时按行内处理，闭合后升级为代码块）。
 // memo（问题3）：流的合并渲染下，只有「正在增长的那一条」assistant 块 text 变化才重 parse。
 // baseDir：引用本文的**文件所在目录**（「最终文件」预览传；对话区不传 → 本地图锚到工作区根）。
+export interface MarkdownProps {
+  text: string
+  baseDir?: string
+  streaming?: boolean
+  /**
+   * 把 `#mention=<id>` 站内链接换成自定义节点（Hub 的 @ 徽章）。
+   * 不传 = 现状（普通锚点）；只有 Hub 群消息传，DM/文件预览完全不受影响。
+   */
+  renderMention?: (id: string, children: ReactNode) => ReactNode
+}
+
 /* 正文的**渲染体**：不含 .md 外层（分段渲染时多个片段共用一个 .md 包装，
    这样 DOM 结构与整段渲染完全一致）。memo 是分段的收益来源：已完成的片段
    text 不变 → 连渲染都不进，只有尾部还在长的那一块重新解析。 */
-const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming }: { text: string; baseDir?: string; streaming?: boolean }) {
+const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming, renderMention }: MarkdownProps) {
   const lang = useLang()
   const resolved = useResolvedTheme()
   // 工作区是本地相对图的兜底锚点（对话区没有文件可锚）；它也是主进程侧的合法性判定依据。
@@ -1182,6 +1193,20 @@ const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming }: { 
           // target="_blank" 会把锚点也送到新窗口（Electron 下即"开裸窗口"）。
           a: ({ node: _node, href, children, ...props }) => {
             const h = String(href ?? '')
+            // Hub @ 徽章：只认 Hub 自己生成的 `#mention=<id>`，且只在调用方传了
+            // renderMention 时接管；其余场景保持下面的原逻辑（锚点/文件/外链）。
+            if (renderMention) {
+              const m = /^#mention=(.+)$/.exec(h)
+              if (m) {
+                let id = m[1]
+                try {
+                  id = decodeURIComponent(id)
+                } catch {
+                  // 保留原样：坏 href 交给调用方显示占位，不要整段渲染失败
+                }
+                return <>{renderMention(id, children)}</>
+              }
+            }
             const isExternal = /^https?:\/\//i.test(h)
             // 站内锚点：标题 id 带 user-content- 前缀（见 rehypeHeadingIds）→ href 同参才命中；
             // 已经带前缀的（GFM 脚注回链）原样保留。
@@ -1243,21 +1268,21 @@ const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming }: { 
    长的一块」，已完成的块各自 memo，只有尾部重新解析。
    只在 streaming 且够长时走这条路；**落定后仍由原来的整段渲染**，所以最终 DOM
    与改动前逐字节相同（切分器保证拼回去逐字等于原文，见 lib/mdSplit-test.ts）。 */
-export const Markdown = memo(function Markdown({ text, baseDir, streaming }: { text: string; baseDir?: string; streaming?: boolean }) {
+export const Markdown = memo(function Markdown({ text, baseDir, streaming, renderMention }: MarkdownProps) {
   const split = streaming ? splitStreamingMarkdown(text) : null
   if (!split) {
     return (
       <div className="md">
-        <MarkdownBody text={text} baseDir={baseDir} streaming={streaming} />
+        <MarkdownBody text={text} baseDir={baseDir} streaming={streaming} renderMention={renderMention} />
       </div>
     )
   }
   return (
     <div className="md">
       {split.head.map((t, i) => (
-        <MarkdownBody key={i} text={t} baseDir={baseDir} />
+        <MarkdownBody key={i} text={t} baseDir={baseDir} renderMention={renderMention} />
       ))}
-      <MarkdownBody key={split.head.length} text={split.tail} baseDir={baseDir} streaming />
+      <MarkdownBody key={split.head.length} text={split.tail} baseDir={baseDir} streaming renderMention={renderMention} />
     </div>
   )
 })

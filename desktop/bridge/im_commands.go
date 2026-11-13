@@ -49,16 +49,23 @@ func (m *manager) handleIMCommand(c command) {
 		return
 	}
 	ctx := context.Background()
+	// 归属：payload.owner → session_id → workspace（与 hooks 同一条派生，见 owner_wire.go）。
+	// 没有归属时按「未绑定」返回（ownerEnabled=false），**不**回落到全局状态。
+	ownerID, ownerErr := ownerFromPayload(c)
+	if ownerErr != nil {
+		m.resp(c, false, ownerErr.Error(), nil)
+		return
+	}
 
 	switch c.Type {
-	case "im_status": // 各 Gateway 连接状态 + 主开关
+	case "im_status": // 各 Gateway 连接状态 + 主开关 + **当前归属**的启用状态
 		cfg, _ := im.LoadConfig(m.imConfigPath())
 		rt := p.Runtime()
 		gateways := []map[string]any{}
 		for _, gc := range cfg.Gateways {
 			st := "not_started"
 			if rt != nil {
-				if g, ok := rt.Gateways[gc.ID]; ok {
+				if g, ok := rt.Gateway(gc.ID); ok {
 					st = string(g.Status())
 				}
 			}
@@ -66,9 +73,16 @@ func (m *manager) handleIMCommand(c command) {
 				"id": gc.ID, "type": gc.Type, "enabled": gc.Enabled, "status": st,
 			})
 		}
+		// 连接是共享的（同一份 gateways），启用状态按归属给 —— A 群关了不会显示 B 也关。
+		view := p.OwnerView(ownerID)
 		m.resp(c, true, "", map[string]any{
-			"enabled":  cfg.Enabled,
-			"gateways": gateways,
+			"enabled":      cfg.Enabled,
+			"gateways":     gateways,
+			"owner":        ownerID,
+			"ownerLabel":   ownerScopeLabel(ownerID),
+			"ownerEnabled": view.Enabled,
+			"ownerRoutes":  view.Routes,
+			"owners":       cfg.OwnersAll(),
 		})
 
 	case "im_chat_list": // 群列表（路由绑定下拉数据源；按 gateway_id 查）
@@ -82,7 +96,7 @@ func (m *manager) handleIMCommand(c command) {
 			m.resp(c, false, "IM 未启用", nil)
 			return
 		}
-		gw, ok := rt.Gateways[gatewayID]
+		gw, ok := rt.Gateway(gatewayID)
 		if !ok {
 			m.resp(c, false, "gateway 未启动: "+gatewayID, nil)
 			return
@@ -116,6 +130,17 @@ func (m *manager) handleIMCommand(c command) {
 			m.resp(c, false, "配置解析失败: "+err.Error(), nil)
 			return
 		}
+		// owners（归属账本）不属于编辑器表单：payload 里没有就沿用磁盘上的，
+		// 否则「保存一次配置」会把所有人刚设的归属启用状态悄悄重置。
+		// 判空必须用 len==0：前端序列化可能给出 `owners: {}`（空对象 ≠ nil），
+		// 只判 nil 会漏掉这种形态 → 显式 false 被清空（关掉的归属自己又开了）。
+		if len(cfg.Owners) == 0 {
+			if prev, perr := im.LoadConfig(m.imConfigPath()); perr == nil {
+				cfg.Owners = prev.Owners
+			}
+		}
+		// 迁移：为「有路由但没有显式状态」的归属补 enabled=true（升级不静默丢消息）。
+		cfg.MigrateOwners()
 		cfg, err := cfg.Validate()
 		if err != nil {
 			m.resp(c, false, err.Error(), nil)
@@ -126,24 +151,39 @@ func (m *manager) handleIMCommand(c command) {
 			return
 		}
 		m.applyIMConfig(ctx, ws, cfg)
-		m.resp(c, true, "", nil)
+		m.resp(c, true, "", map[string]any{"owners": cfg.OwnersAll()})
 
-	case "im_route_list": // 路由表（渠道维度：返回各 gateway 的路由）
+	case "im_route_list": // 路由表（渠道维度；给了 owner 就只返回该归属的路由）
 		cfg, _ := im.LoadConfig(m.imConfigPath())
-		// 聚合所有 gateway 的路由（带 gateway_id 标注）
+		// 聚合所有 gateway 的路由（带 gateway_id 标注 + 归属）。
+		// owner 过滤是本条隔离的读半边：A 群的管理面看不到 B 智能体的路由。
 		routes := []map[string]any{}
 		for _, g := range cfg.Gateways {
 			for _, r := range g.Routes {
+				ro := r.EffectiveOwner()
+				if ownerID != "" && ro != ownerID {
+					continue
+				}
 				routes = append(routes, map[string]any{
-					"gateway_id": g.ID,
-					"chat":       r.Chat,
-					"workspace":  r.Workspace,
+					"gateway_id":   g.ID,
+					"chat":         r.Chat,
+					"workspace":    r.Workspace,
+					"agent":        r.Agent,
+					"group":        r.Group,
+					"owner":        ro,
+					"ownerLabel":   ownerScopeLabel(ro),
+					"ownerEnabled": cfg.OwnerEnabled(ro),
+					"target":       r.TargetKind(),
 				})
 			}
 		}
-		m.resp(c, true, "", map[string]any{"routes": routes})
+		m.resp(c, true, "", map[string]any{
+			"routes": routes,
+			"owner":  ownerID,
+			"owners": cfg.OwnersAll(),
+		})
 
-	case "im_route_set": // 增/改路由（Chat → workspace，挂在指定 gateway 下）
+	case "im_route_set": // 增/改路由（Chat → workspace/agent/group，挂在指定 gateway 下）
 		var rc im.RouteConfig
 		if err := json.Unmarshal(mustJSON(c.Payload["route"]), &rc); err != nil {
 			m.resp(c, false, "路由解析失败: "+err.Error(), nil)
@@ -158,8 +198,20 @@ func (m *manager) handleIMCommand(c command) {
 			m.resp(c, false, "路由缺少 chat", nil)
 			return
 		}
-		if strings.TrimSpace(rc.Workspace) == "" {
-			m.resp(c, false, "路由缺少 workspace", nil)
+		// 归属**由投递目标派生**（workspace/agent/group），不取 payload.owner：
+		// 设置页可能在「A 智能体」会话里给 B 项目加路由 —— 那是合法操作，路由的归属
+		// 只能是它的目标本身（否则「关 A」会停掉 B 的投递）。payload.owner 在
+		// im_route_list 里用于过滤，在这里不做授权边界。
+		// 显式 route.owner 若给出，必须与目标一致（见 im.Config.Validate）。
+		if strings.TrimSpace(rc.Owner) != "" {
+			derived := (im.RouteConfig{Chat: rc.Chat, Workspace: rc.Workspace, Agent: rc.Agent, Group: rc.Group}).EffectiveOwner()
+			if rc.Owner != derived {
+				m.resp(c, false, fmt.Sprintf("route.owner=%s 与投递目标（%s）不一致", rc.Owner, derived), nil)
+				return
+			}
+		}
+		if rc.TargetKind() == "" {
+			m.resp(c, false, "路由缺少投递目标（workspace / agent / group+agent）", nil)
 			return
 		}
 		cfg, err := im.LoadConfig(m.imConfigPath())
@@ -191,14 +243,31 @@ func (m *manager) handleIMCommand(c command) {
 		if !replaced {
 			cfg.Gateways[gi].Routes = append(cfg.Gateways[gi].Routes, rc)
 		}
+		// 显式记下该归属的启用状态（新配的路由默认启用；升级后也看得见来源）。
+		if o := rc.EffectiveOwner(); o != "" {
+			if st, ok := cfg.Owners[o]; !ok || st.Enabled == nil {
+				on := true
+				_ = cfg.SetOwnerEnabled(o, &on)
+			}
+		}
+		cfg.MigrateOwners()
+		cfg, err = cfg.Validate()
+		if err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
 		if err := im.SaveConfig(m.imConfigPath(), cfg); err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
 		}
 		m.applyIMConfig(ctx, ws, cfg)
-		m.resp(c, true, "", nil)
+		m.resp(c, true, "", map[string]any{
+			"owner":        rc.EffectiveOwner(),
+			"ownerLabel":   ownerScopeLabel(rc.EffectiveOwner()),
+			"ownerEnabled": cfg.OwnerEnabled(rc.EffectiveOwner()),
+		})
 
-	case "im_route_del": // 删路由（按 Chat + gateway_id）
+	case "im_route_del": // 删路由（按 Chat + gateway_id；给了 owner 再按归属收窄）
 		var chat im.Chat
 		if err := json.Unmarshal(mustJSON(c.Payload["chat"]), &chat); err != nil {
 			m.resp(c, false, "chat 解析失败: "+err.Error(), nil)
@@ -218,6 +287,12 @@ func (m *manager) handleIMCommand(c command) {
 			out := g.Routes[:0]
 			for _, rc := range g.Routes {
 				if rc.Chat.Gateway == chat.Gateway && rc.Chat.ChatID == chat.ChatID && rc.Chat.ThreadID == chat.ThreadID {
+					// owner 过滤：管理面在 A 归属下不该删掉 B 归属的路由
+					//（Chat 唯一性由 im_route_set 保证，这里只是防御 + 语义清晰）。
+					if ownerID != "" && rc.EffectiveOwner() != ownerID {
+						out = append(out, rc)
+						continue
+					}
 					continue
 				}
 				out = append(out, rc)
@@ -349,6 +424,10 @@ func (m *manager) handleIMCommand(c command) {
 			return
 		}
 		cfg.Gateways[gi].Routes = append(cfg.Gateways[gi].Routes, im.RouteConfig{Chat: chat, Workspace: workspace})
+		// 新路由带来新的归属：补显式 enabled=true（与 im_config_set 同一条迁移规则）。
+		// 不补的话「有路由但未登记」只能靠隐式默认跑，任何一次显式关闭都会让它变成
+		// 「谁先写谁生效」的不可解释状态。
+		cfg.MigrateOwners()
 		if err := im.SaveConfig(m.imConfigPath(), cfg); err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
@@ -380,13 +459,12 @@ func (m *manager) applyIMConfig(ctx context.Context, ws string, cfg im.Config) {
 	}
 	// 主开关关闭：停止全部 Gateway 连接（IM 远程能力立即失效；配置保留）
 	if !cfg.Enabled {
-		for id, g := range rt.Gateways {
+		for _, g := range rt.TakeGateways() {
 			_ = g.Stop(ctx)
-			delete(rt.Gateways, id)
 		}
 		rt.Router.Update(cfg)
 		rt.Security.Update(cfg)
-		rt.Config = cfg
+		rt.SetConfig(cfg)
 		return
 	}
 	// ① 路由/镜像/安全即时更新
@@ -395,9 +473,9 @@ func (m *manager) applyIMConfig(ctx context.Context, ws string, cfg im.Config) {
 
 	// ② Gateway 连接差异重建（用旧 rt.Config 对比——必须先于 rt.Config 更新，
 	//    否则 oldCfg 已是新配置，恒等 → 永不重建）
-	old := rt.Gateways // id → Gateway（旧实例）
+	old := rt.GatewaySnapshot() // id → Gateway（旧实例）
 	oldCfg := map[string]im.GatewayConfig{}
-	for _, gc := range rt.Config.Gateways {
+	for _, gc := range rt.ConfigSnapshot().Gateways {
 		oldCfg[gc.ID] = gc
 	}
 	newMap := map[string]im.GatewayConfig{}
@@ -410,7 +488,7 @@ func (m *manager) applyIMConfig(ctx context.Context, ws string, cfg im.Config) {
 	for id, g := range old {
 		if _, keep := newMap[id]; !keep {
 			_ = g.Stop(ctx)
-			delete(rt.Gateways, id)
+			rt.DeleteGateway(id)
 		}
 	}
 	// 新增/配置变化的：重建（先停旧的再启新的）
@@ -432,14 +510,14 @@ func (m *manager) applyIMConfig(ctx context.Context, ws string, cfg im.Config) {
 			fmt.Fprintf(os.Stderr, "✗ im 启动 %s: %v\n", id, err)
 			continue
 		}
-		rt.Gateways[id] = g
+		rt.PutGateway(id, g)
 		// 新连接重新 Attach 回调
 		g.OnMessage(m.imBridgeMessageSink())
 		g.OnAction(m.imBridgeActionSink())
 	}
 
-	// ③ 最后更新 rt.Config（差异对比已完成）
-	rt.Config = cfg
+	// ③ 最后更新配置（差异对比已完成）——整体发布，读者（事件 goroutine）拿到的是新副本
+	rt.SetConfig(cfg)
 }
 
 // gatewayConfigEqual 判断 Gateway 配置是否等价（type + config 字节比较）。

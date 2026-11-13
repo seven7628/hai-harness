@@ -20,10 +20,45 @@ import { readImageAsDataUrl } from './read-image'
 import { copyEntry, createDir, createFile, duplicateEntry, guardTrash, importEntry, moveEntry, renameEntry } from './fs-ops'
 // 输入框历史本地文件（~/.go-code/input-history.json；与 renderer 的 localStorage 镜像配合）
 import { ipcInputHistoryForget, ipcInputHistoryGet, ipcInputHistorySet, inputHistoryFilePath } from './input-history'
+
 // 音视频字节通道（R08c）：`hai-media://` 支持 Range 的自定义协议 + 路径校验，见 media-protocol.ts
 import { MEDIA_SCHEME_PRIVILEGES, mediaStats, mediaUrlForFile, registerMediaProtocol } from './media-protocol'
 // 媒体协议的信任锚：只有用户在系统选择器里亲手打开过的工作区才能当媒体根（见文件头注释）
 import { configureKnownWorkspaces, forgetWorkspace, isKnownWorkspace, rememberWorkspace } from './known-workspaces'
+
+// hub:// 深链（P4-02）：argv 提取是纯逻辑，单独文件才能被 Node 测试
+import { HUB_PROTOCOL, extractHubDeepLinkArg } from './deeplink'
+// 主进程 → 渲染进程的唯一发送通道（BR-04）：窗口 null／webContents 已销毁时丢弃而不是抛错
+import { createRendererSender } from './renderer-send'
+// settings.json 单写者语义（BR-01 / BR-29 / BR-02 写侧）：v1→v2 迁移、白名单 patch、
+// provider/mcp 段级写、原子文件 IO。写侧只认**原始对象**，不认「默认值 ∪ 磁盘值」的并集。
+import {
+  applyMcpServers,
+  applyProviderRemove,
+  applyProviderSave,
+  applySettingsPatch,
+  commitSettingsWrite,
+  isValidProviderName,
+  runSettingsMigration,
+  type JsonObject,
+  type SettingsApplyResult,
+  type SettingsFsOps,
+} from './settings-store'
+// provider key 的唯一持久化容器（BR-08）：keys.json + safeStorage（无钥匙串时 base64 降级）、
+// 存量明文迁移、spawn env / 桥命令的按需注入。主进程不再自己解析 keys.json。
+import {
+  activeProviderKeyEnv,
+  copyKey as keyStoreCopyKey,
+  getKey as keyStoreGetKey,
+  hasKey as keyStoreHasKey,
+  injectProviderKey,
+  migratePlaintextProviderKeys,
+  removeKey as keyStoreRemoveKey,
+  setKey as keyStoreSetKey,
+  type KeyCryptoOps,
+  type KeyStoreArgs,
+  type KeyStoreFsOps,
+} from './keys-store'
 
 // `hai-media://` 的特权必须**在 app ready 之前**登记（Electron 的硬性时序要求，晚了就再也
 // 注册不上）：standard + secure 让 <video> 认它是可播放的安全来源，stream 让响应体是流
@@ -31,6 +66,11 @@ import { configureKnownWorkspaces, forgetWorkspace, isKnownWorkspace, rememberWo
 protocol.registerSchemesAsPrivileged([MEDIA_SCHEME_PRIVILEGES])
 
 let mainWindow: BrowserWindow | null = null
+
+// sendToRenderer：所有 webContents.send 的唯一出口（见 renderer-send.ts 的取舍说明）。
+// 传 getter 而不是实例：主窗口会在关闭/重开时重建。
+const rendererSender = createRendererSender(() => mainWindow)
+const sendToRenderer = rendererSender.send
 let bridge: ChildProcessWithoutNullStreams | null = null
 // —— 原生脏标记 + 退出拦截（PR-05b）——
 // docDirty 由渲染层镜像（任一编辑标签有未保存改动）；allowQuit 是**防死循环**的放行标志：
@@ -43,6 +83,61 @@ let allowQuit = false
 // 信任锚上的第四条可控写入口（复评「顺手改」第 1 条）。它只能登记「刚建出来的空目录」，
 // 危害有限，但没有理由留一条「渲染进程说在哪建就在哪建」的路。
 let lastPickedDir = ''
+
+// —— hub:// 深链（P4-02）——
+// 三个入口：macOS open-url、Win/Linux second-instance argv、首实例启动 argv（冷启动点链接）。
+// 冷启动/刷新时 renderer 还没订阅 IPC：先排队，等它挂载后主动 take（丢一条链接比抢跑更糟）。
+// 协议注册只在打包态做（见 registerHubProtocol）：dev 下注册会把系统里的 hub:// 指向开发目录。
+let rendererReady = false
+let pendingHubDeepLinks: string[] = []
+
+function forwardHubDeepLink(raw: string): void {
+  const link = String(raw ?? '').trim()
+  if (!link) return
+  // 冷启动/刷新期间 renderer 还没订阅：先排队（上限 20，点很多次也只留最近几条）。
+  // 判空与发送之间的 race 交给 sendToRenderer（不抛）；真没送出去也回队，等下次挂载 take。
+  if (!rendererReady || !mainWindow || mainWindow.webContents.isDestroyed() || !sendToRenderer('hub:deep-link', link)) {
+    pendingHubDeepLinks.push(link)
+    if (pendingHubDeepLinks.length > 20) pendingHubDeepLinks.shift()
+  }
+}
+
+// renderer 挂载后**主动来取**队列：订阅在前、take 在后，之间到达的链接不会漏。
+// take 之后 rendererReady=true，后续深链直接 send。页面刷新（did-start-loading）会复位。
+ipcMain.handle('hub:take-deep-links', () => {
+  const queued = pendingHubDeepLinks
+  pendingHubDeepLinks = []
+  rendererReady = true
+  return queued
+})
+
+/**
+ * 注册 hub:// 协议处理器（仅打包态）。
+ * macOS 的 scheme 来自 Info.plist 的 CFBundleURLTypes（electron-builder 生成），运行时不需要
+ * setAsDefaultProtocolClient；Win/Linux 才需要写注册表/desktop 文件。
+ * 注册失败不影响启动：链接仍可经 second-instance argv 进入。
+ */
+function registerHubProtocol(): void {
+  if (!app.isPackaged || process.defaultApp) return
+  try {
+    if (process.platform === 'darwin') return
+    app.setAsDefaultProtocolClient(HUB_PROTOCOL)
+  } catch {
+    /* 注册失败：留给 argv 通路，不阻塞启动 */
+  }
+}
+
+// macOS：URL scheme 在 ready 之前就可能到达，必须尽早注册事件监听。
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  forwardHubDeepLink(url)
+})
+
+// Win/Linux 冷启动：深链就在自己的 argv 里（没有 second-instance 可等）。
+{
+  const initial = extractHubDeepLinkArg(process.argv)
+  if (initial) pendingHubDeepLinks.push(initial)
+}
 
 // —— 启动打点（TEMP-STARTUP：定位黑屏/启动慢；**已停用**，不再写 electron-startup.log）——
 function startupMark(_phase: string): void {
@@ -195,7 +290,9 @@ function activateEgoLite(message: string): void {
   const appName = 'ego lite'
   execFile('/usr/bin/open', ['-a', appName], { timeout: 5000 }, (err) => {
     const ok = !err
-    mainWindow?.webContents.send('bridge:event', JSON.stringify({
+    // execFile 是异步回调：此刻窗口可能已被关掉（用户在这 5s 内退出）—— 走统一通道丢弃，
+    // 否则 exception 会从子进程回调冒到主进程（BR-04 的同类现场）。
+    sendToRenderer('bridge:event', JSON.stringify({
       event_type: 'ego_activate_status',
       ok,
       ...(ok ? { message } : { error: err?.message ?? 'ego lite 激活失败' }),
@@ -267,10 +364,10 @@ function bridgeEnv(): NodeJS.ProcessEnv {
 }
 
 // —— 全局设置持久化（~/.go-code/）——
-// settings.json：非密钥配置（theme/lang/provider 配置 + 模型窗口 map）+ provider api_key 明文
-// （用户决策 2026-08-16：桌面端有 Provider 设置面板，API key 直接明文持久化在 settings.json
-// provider 段，bridge 启动时 loadSettings 读取；不再依赖 keys.json 加密注入）。
-// keys.json（safeStorage 加密）仅保留旧版本遗留读取（loadKeysEnv 兜底），新写入一律落 settings.json。
+// settings.json：**非密钥**配置（theme/lang/provider 配置 + 模型窗口 map）。
+// provider API key 不在这里（BR-08）：key 只住 keys.json（safeStorage 加密，0600），
+// 启动时 spawn env 只带当前活跃 provider 的一把，切换/保存时由主进程按需注入 bridge 命令。
+// 详见 keys-store.ts 文件头（含「无钥匙串 → base64 降级，不是加密」的口径）。
 // 多实例模式（HAI_DATA_DIR）：配置根随数据目录（<dir>/.go-code，与桥 HOME 对齐）。
 const cfgDir = () => MULTI_DATA_DIR
   ? path.join(MULTI_DATA_DIR, '.go-code')
@@ -293,7 +390,8 @@ interface ProviderCfg {
   // 用户价表 / billing 请求全按 id 索引，改 id 会把历史断成两个 provider。
   label?: string
   openai_compat?: OpenAICompatCapabilities
-  api_key?: string // API key 明文（2026-08-16 起持久化于此，替代 keys.json 加密注入）
+  /** legacy：存量明文 key 的历史字段。迁移后 settings 不再写它（BR-08）；读侧也不再外泄给 renderer。 */
+  api_key?: string
   models: Record<string, number> // model → context window（tokens；1M=1000000）
   max_tokens: Record<string, number> // model → 单次输出上限（tokens；DeepSeek v4-flash 官方 384k）
   // 每模型用户价表覆盖（USD/1M tokens；缺省/全 0 = 用内置注册表价表）——与 types.ts ModelPrices 同构
@@ -368,14 +466,9 @@ interface AppSettings {
   editor?: boolean // 内嵌编辑器回滚开关（PR-05b）；缺省 = 开启
 }
 
-// 内置五卡（不可删除；其余为自定义 provider）
+// 内置五卡（不可删除；其余为自定义 provider）。命名校验见 settings-store.ts 的
+// isValidProviderName（与 bridge validProviderName 同规则）。
 const BUILTIN_PROVIDERS = ['deepseek', 'openai', 'opencode', 'kimi', 'zhipu'] as const
-// isValidProviderName 自定义 provider 命名校验（与 bridge validProviderName 同规则）：
-// 非空、非保留键 "active"，仅字母/数字/短横/下划线且首字符为字母。
-function isValidProviderName(name: string): boolean {
-  if (!name || name === 'active') return false
-  return /^[A-Za-z][A-Za-z0-9_-]*$/.test(name)
-}
 
 const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
@@ -437,66 +530,96 @@ const DEFAULT_SETTINGS: AppSettings = {
 //     保存把用户的全部 provider / api_key / MCP 配置整份清成默认（真机事故，不可逆）。
 type SettingsRead = { settings: AppSettings; corrupt: boolean; error?: string }
 
-function readSettingsResult(): SettingsRead {
+function defaultSettingsClone(): AppSettings {
+  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AppSettings // 深拷贝兜底默认
+}
+
+// RawSettingsRead 原始对象读盘（**不合并默认值**）：写侧唯一合法基线。
+// 缺文件（首次运行/用户删过）→ {}（可以按「只有用户显式写的键」起步）；
+// 文件在但读不出 / 不是 JSON 对象 → corrupt（默认值只能用于显示，绝不能写回）。
+type RawSettingsRead = { raw: JsonObject; corrupt: boolean; error?: string }
+
+function readRawSettings(): RawSettingsRead {
   try {
-    const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'))
-    const s = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AppSettings // 深拷贝兜底默认
-    const provider: AppSettings['provider'] = { ...s.provider, ...(raw.provider ?? {}) }
-    // Agent 运行时段（提醒阈值 / 压缩阈值 / 子 agent 并发槽）：字段级合并 + 逐项合法化，
-    // 缺字段回退默认（口径与 bridge 的 loadAgentSettings 一致）。
-    // 旧 settings 没有 agent 段时 reminder_rounds 用默认 30；0 明确表示禁用。
-    const agent: AgentRuntimeSettings = {
-      ...s.agent,
-      ...(raw.agent && typeof raw.agent === 'object' ? raw.agent : {}),
+    const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8')) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.error(`[settings] 读取失败（不是 JSON 对象）：${SETTINGS_FILE()} 暂时只按默认值显示；写盘侧会拒绝覆盖，不会清空配置`)
+      return { raw: {}, corrupt: true, error: '不是 JSON 对象' }
     }
-    if (!Number.isFinite(agent.reminder_rounds) || agent.reminder_rounds < 0) agent.reminder_rounds = 30
-    if (agent.compress_threshold !== undefined) {
-      const t = Number(agent.compress_threshold)
-      // 非法值（含 NaN / <=0 / >1）删掉字段 —— 让 bridge 走自己的默认，
-      // 而不是把 0 或 3 写死进配置（0 = 永不压缩，是误配，不是选项）。
-      if (!Number.isFinite(t) || t <= 0 || t > 1) delete agent.compress_threshold
-    }
-    for (const k of ['max_subagents', 'max_explore_subagents'] as const) {
-      const v = Number(agent[k])
-      if (!Number.isFinite(v) || v < 1) delete agent[k]
-    }
-    // 内置三卡：默认合并（老配置缺字段/缺协议时回退默认）
-    for (const k of BUILTIN_PROVIDERS) provider[k] = { ...s.provider[k], ...(raw.provider?.[k] ?? {}) }
-    // 自定义 provider：补齐 ProviderCfg 缺省（手改 settings.json 缺 models/max_tokens/protocol 时 UI 不崩）。
-    // 原值展开在前：认不出的字段（auth_type / usage_input_includes_cache / cache_ttl_1h /
-    // deleted / 将来新增）必须原样带过 —— 按固定键集重建等于每次读盘都把它们删一遍，
-    // 随后任何一次写盘就把这个「删除结果」固化（真机事故：自定义 provider 的 auth_type 静默消失）。
-    for (const [k, v] of Object.entries(provider)) {
-      if (k === 'active' || BUILTIN_PROVIDERS.includes(k as (typeof BUILTIN_PROVIDERS)[number])) continue
-      const cfg = (v ?? {}) as ProviderCfg
-      provider[k] = {
-        ...cfg,
-        base_url: cfg.base_url ?? '',
-        api_key: cfg.api_key ?? '',
-        models: cfg.models ?? {},
-        max_tokens: cfg.max_tokens ?? {},
-        protocol: cfg.protocol ?? 'chat_completions',
-        input_types: cfg.input_types ?? {},
-      }
-    }
-    // permissions 字段级合并：旧 settings 缺 computer_approved_apps → 补空数组
-    //（避免整段 raw 覆盖丢字段；allowed_apps 残留字段不再读入——已废弃）。
-    const permissions: PermissionsSettings = {
-      computer_approved_apps: raw.permissions?.computer_approved_apps ?? [],
-    }
-    return { settings: { ...s, ...raw, provider, agent, permissions }, corrupt: false }
+    return { raw: parsed as JsonObject, corrupt: false }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     const missing = !fs.existsSync(SETTINGS_FILE())
     if (!missing) {
+      // 每条写路径都是「读 → 改 → 写」：读失败静默变默认值 = 下一次保存把用户的全部
+      // provider / api_key / MCP 配置整份清成默认（真机事故，不可逆）——所以这里只允许显示。
       console.error(`[settings] 读取失败（${msg}）：${SETTINGS_FILE()} 暂时只按默认值显示；写盘侧会拒绝覆盖，不会清空配置`)
     }
-    return {
-      settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AppSettings,
-      corrupt: !missing,
-      error: missing ? undefined : `读取失败（${msg}）`,
+    return { raw: {}, corrupt: !missing, error: missing ? undefined : `读取失败（${msg}）` }
+  }
+}
+
+// readSettingsResult **显示用**：DEFAULT_SETTINGS 深拷贝后逐段合并磁盘值（BR-01 的读侧一半）。
+// 写侧禁止使用它——它返回的是「默认值 ∪ 磁盘值」，拿它当写基线会把默认值固化进用户文件。
+function readSettingsResult(): SettingsRead {
+  const r = readRawSettings()
+  if (r.corrupt) return { settings: defaultSettingsClone(), corrupt: true, error: r.error }
+  const raw = r.raw as Partial<AppSettings> & JsonObject
+  const s = defaultSettingsClone()
+  const rawProvider = raw.provider && typeof raw.provider === 'object' && !Array.isArray(raw.provider) ? raw.provider : {}
+  const provider: AppSettings['provider'] = { ...s.provider, ...rawProvider }
+  // Agent 运行时段（提醒阈值 / 压缩阈值 / 子 agent 并发槽）：字段级合并 + 逐项合法化，
+  // 缺字段回退默认（口径与 bridge 的 loadAgentSettings 一致）。
+  // 旧 settings 没有 agent 段时 reminder_rounds 用默认 30；0 明确表示禁用。
+  const agent: AgentRuntimeSettings = {
+    reminder_rounds: s.agent?.reminder_rounds ?? 30,
+    ...(raw.agent && typeof raw.agent === 'object' ? raw.agent : {}),
+  }
+  if (!Number.isFinite(agent.reminder_rounds) || agent.reminder_rounds < 0) agent.reminder_rounds = 30
+  if (agent.compress_threshold !== undefined) {
+    const t = Number(agent.compress_threshold)
+    // 非法值（含 NaN / <=0 / >1）删掉字段 —— 让 bridge 走自己的默认，
+    // 而不是把 0 或 3 写死进配置（0 = 永不压缩，是误配，不是选项）。
+    if (!Number.isFinite(t) || t <= 0 || t > 1) delete agent.compress_threshold
+  }
+  for (const k of ['max_subagents', 'max_explore_subagents'] as const) {
+    const v = Number(agent[k])
+    if (!Number.isFinite(v) || v < 1) delete agent[k]
+  }
+  // 内置三卡：默认合并（老配置缺字段/缺协议时回退默认）
+  for (const k of BUILTIN_PROVIDERS) provider[k] = { ...s.provider[k], ...(raw.provider?.[k] ?? {}) }
+  // 自定义 provider：补齐 ProviderCfg 缺省（手改 settings.json 缺 models/max_tokens/protocol 时 UI 不崩）。
+  // 原值展开在前：认不出的字段（auth_type / usage_input_includes_cache / cache_ttl_1h /
+  // deleted / 将来新增）必须原样带过 —— 按固定键集重建等于每次读盘都把它们删一遍，
+  // 随后任何一次写盘就把这个「删除结果」固化（真机事故：自定义 provider 的 auth_type 静默消失）。
+  for (const [k, v] of Object.entries(provider)) {
+    if (k === 'active' || BUILTIN_PROVIDERS.includes(k as (typeof BUILTIN_PROVIDERS)[number])) continue
+    const cfg = (v ?? {}) as ProviderCfg
+    provider[k] = {
+      ...cfg,
+      base_url: cfg.base_url ?? '',
+      models: cfg.models ?? {},
+      max_tokens: cfg.max_tokens ?? {},
+      protocol: cfg.protocol ?? 'chat_completions',
+      input_types: cfg.input_types ?? {},
     }
   }
+  // BR-08：明文 key 只住 keys.json —— 即使迁移失败（settings 里还留着明文），也绝不下发 renderer。
+  // key 的「已设置」指示走 provider:key-status，明文只在本地测试/改名时按 provider 单独取。
+  for (const [k, v] of Object.entries(provider)) {
+    if (k === 'active' || typeof v !== 'object' || v === null) continue
+    delete (v as ProviderCfg).api_key
+  }
+  // permissions 字段级合并：旧 settings 缺 computer_approved_apps → 补空数组
+  //（避免整段 raw 覆盖丢字段；allowed_apps 残留字段不再读入——已废弃）。
+  const permissions: PermissionsSettings = {
+    computer_approved_apps: raw.permissions?.computer_approved_apps ?? [],
+  }
+  // 内部键（schema_version / explicit）只给写侧自己用，不进 renderer 看到的 settings 形状。
+  const body: JsonObject = { ...raw }
+  delete body.explicit
+  delete body.schema_version
+  return { settings: { ...s, ...body, provider, agent, permissions } as AppSettings, corrupt: false }
 }
 
 function readSettings(): AppSettings {
@@ -518,38 +641,88 @@ function quarantineCorruptSettings(): string {
   }
 }
 
-// settingsForWrite 写路径专用读盘：坏文件 → 返回错误并**拒绝这次写**（同时备份坏文件）。
-// 本函数是「一次读失败就清空用户配置」的唯一闸门，任何新写路径都必须经它取 cur。
-function settingsForWrite(): { cur: AppSettings } | { error: string } {
-  const r = readSettingsResult()
-  if (!r.corrupt) return { cur: r.settings }
-  const backup = quarantineCorruptSettings()
-  const where = backup ? `旧文件已备份到 ${backup}（未删除），可从中恢复 Provider 配置` : `原文件保持不变，请修复后重试`
-  return { error: `settings.json 解析失败（${r.error ?? '未知错误'}），已拒绝写入以免清空配置；${where}。` }
+// settingsFs：迁移与写盘共用的原子文件适配器（目录 0700、文件 0600、同目录 tmp + rename）。
+// settings.json 仍有 MCP env/headers（明文，历史决策）与迁移期的 legacy api_key，权限与
+// bridge 的 patchJSONFile 保持一致；provider key 另有 keys.json（见 keys-store.ts）。
+const settingsFs: SettingsFsOps = {
+  mkdir: (dir, mode) => fs.mkdirSync(dir, { recursive: true, mode }),
+  readFile: (file) => fs.readFileSync(file, 'utf8'),
+  writeFile: (file, text, mode) => fs.writeFileSync(file, text, { mode }),
+  rename: (from, to) => fs.renameSync(from, to),
+  unlink: (file) => fs.unlinkSync(file),
 }
 
-function writeSettings(s: AppSettings): { ok: true } | { ok: false; error: string } {
-  const tmp = `${SETTINGS_FILE()}.tmp`
+// commitSettings：四条写路径的**唯一出口**。settings-store.commitSettingsWrite 负责
+// 「读原始对象（未迁移先迁移落盘）→ mutate → changed 才原子写」，这里只做 main.ts 侧的适配：
+//   · 坏文件（JSON 坏 / 读不出）→ 先 quarantine 原文件再拒绝这次写（不删，留作人工恢复）；
+//   · 迁移失败 → 拒绝这次写。**不写 schema_version:2**：给未迁移的 v1 文件盖章会让下次启动
+//     的 already-v2 直接跳过迁移，固化默认值就再也删不掉了（BR-01 的安全属性，复审 B2）。
+// 写基线永远是**原始对象**（不合并 DEFAULT_SETTINGS），否则一次主题修改就把默认值固化进用户文件。
+function commitSettings(mutate: (raw: JsonObject) => SettingsApplyResult): { ok: true } | { ok: false; error: string } {
+  const r = commitSettingsWrite({
+    file: SETTINGS_FILE(),
+    backupFile: `${SETTINGS_FILE()}.bak`,
+    defaults: DEFAULT_SETTINGS as unknown as JsonObject,
+    io: settingsFs,
+    log: (m) => console.log(m),
+    mutate,
+  })
+  if (r.ok) return { ok: true }
+  if (!r.corrupt) {
+    console.error(`[settings] 写盘被拒绝：${r.error}`)
+    return { ok: false, error: r.error }
+  }
+  const backup = quarantineCorruptSettings()
+  const where = backup ? `旧文件已备份到 ${backup}（未删除），可从中恢复 Provider 配置` : '原文件保持不变，请修复后重试'
+  console.error(`[settings] ${r.error}`)
+  return { ok: false, error: `${r.error}；${where}。` }
+}
+
+// migrateSettingsOnStartup：存量 v1 → v2（§9.3）。必须在 **bridge spawn 之前**跑：
+// bridge 逐次读盘判默认值，迁移没跑完就 spawn 会按 v1 里固化的旧默认启动。
+// 迁移失败只记日志、继续用旧文件 —— 迁移失败不能阻止应用启动。
+function migrateSettingsOnStartup(): void {
   try {
-    // settings.json 含明文 provider api_key / MCP env：目录 0700、文件 0600（与 bridge
-    // persistAuthType 的 tmp+rename 0600 一致，避免两边权限策略互相覆盖）。
-    fs.mkdirSync(cfgDir(), { recursive: true, mode: 0o700 })
-    // 原子写（同目录临时文件 + rename）：writeFileSync 直接写目标是「先截断再写」，
-    // 崩溃/被 kill 会留下半截文件，并发读（bridge 的文件监听热重载）也会读到半截 →
-    // 配置损坏（provider key / MCP 服务器一起消失）。rename 原子替换：读方要么旧要么新。
-    fs.writeFileSync(tmp, JSON.stringify(s, null, 2), { mode: 0o600 })
-    fs.renameSync(tmp, SETTINGS_FILE())
-    return { ok: true }
+    const r = runSettingsMigration({
+      file: SETTINGS_FILE(),
+      backupFile: `${SETTINGS_FILE()}.bak`,
+      defaults: DEFAULT_SETTINGS as unknown as JsonObject,
+      io: settingsFs,
+      log: (m) => console.log(m),
+    })
+    if (!r.ok) console.error(`[settings] v1→v2 迁移失败（继续用原文件）：${r.error}`)
+    else if (r.skipped) console.log(`[settings] v1→v2 迁移跳过：${r.skipped}`)
   } catch (e) {
-    // 磁盘只读/权限不足/磁盘满/JSON 序列化失败：必须向调用方暴露失败，
-    // 不能假装保存成功（否则 UI 显示已保存、实际未落盘，后续还可能用旧配置覆盖）。
+    console.error('[settings] v1→v2 迁移异常（继续用原文件）', e)
+  }
+}
+
+// migrateProviderKeysOnStartup：settings.json 的存量明文 `provider.<id>.api_key` → keys.json（BR-08）。
+// 必须排在 **migrateSettingsOnStartup 之后、bridge spawn 之前**：
+//   · v2 迁移按 §9.3 规则保留 api_key，这里才把它搬进 keys.json；
+//   · bridge 启动时 loadSettings 按 settings 重算内存 key，先搬走再 spawn 才不会读到明文。
+// 失败只记日志、不阻止启动、不改任何文件（keys-store 保证「宁可重复不可丢 key」）；
+// 下次启动 / 下一次 provider:save 会重试。
+function migrateProviderKeysOnStartup(): void {
+  try {
+    const file = SETTINGS_FILE()
+    let raw: JsonObject
     try {
-      fs.unlinkSync(tmp) // 失败残留的临时文件（含明文 key）清掉，避免堆积
+      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return // 非对象：不动
+      raw = parsed as JsonObject
     } catch {
-      /* 无残留 / 删不掉：忽略 */
+      return // 缺文件（新装）或坏 JSON：没有可安全迁移的明文，原样不动
     }
-    const msg = e instanceof Error ? e.message : String(e)
-    return { ok: false, error: `配置写盘失败: ${msg}` }
+    const r = migratePlaintextProviderKeys({
+      ...keyStoreArgs(),
+      settingsRaw: raw,
+      settingsFile: file,
+      settingsBackupFile: `${file}.bak`,
+    })
+    if (!r.ok) console.error(`[keys] 明文 key 迁移失败（不阻止启动，下次重试）：${r.error}`)
+  } catch (e) {
+    console.error('[keys] 明文 key 迁移异常（不阻止启动）', e)
   }
 }
 
@@ -603,76 +776,82 @@ async function transcribeAudio(audio: ArrayBuffer, mimeType: string): Promise<{ 
   }
 }
 
-// 内置五卡的固定 env 名；自定义 provider 用通用 GOCODE_KEY_<UPPER(id)>（bridge keyLocked 兜底）。
-function envNameForProvider(provider: string): string | null {
-  const fixed: Record<string, string> = { deepseek: 'DEEPSEEK_API_TOKEN', openai: 'OPENAI_API_KEY', opencode: 'OPENCODE_API_KEY', kimi: 'KIMI_API_KEY', zhipu: 'ZHIPUAI_API_KEY' }
-  if (fixed[provider]) return fixed[provider]
-  if (isValidProviderName(provider)) return `GOCODE_KEY_${provider.toUpperCase()}`
-  return null
+// —— keys.json 适配层（BR-08）——
+// 逻辑全在 keys-store.ts（纯函数，可在 node:test 里构造坏文件/写失败）；这里只做 Electron 适配：
+//   fs → KeyStoreFsOps（原子写 + readdir 找备份），safeStorage → KeyCryptoOps。
+function keysFsOps(): KeyStoreFsOps {
+  return {
+    ...settingsFs,
+    readdir: (dir) => fs.readdirSync(dir),
+  }
 }
 
-// 读取全部已存 key（解密），返回 env 变量名 → 明文 key
-// 2026-09：settings.json 已有明文 key 的 provider 跳过（settings 是新主源，spawn 注入
-// 的 env 只作 bridge keyLocked 的兜底；若同时注入旧 keys.json 条目，bridge 内存空时
-// 会回退到旧 key → 覆盖 settings 新 key → 401）。仅注入 settings 里没有的遗留 key。
+/** safeStorage 适配：加密可用性每次现查（钥匙串在会话中可能变得可用/不可用）。 */
+function keysCryptoOps(): KeyCryptoOps {
+  return {
+    isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+    encryptString: (plain) => safeStorage.encryptString(plain).toString('base64'),
+    decryptString: (data) => safeStorage.decryptString(Buffer.from(data, 'base64')),
+  }
+}
+
+function keyStoreArgs(): KeyStoreArgs {
+  return {
+    file: KEYS_FILE(),
+    io: keysFsOps(),
+    crypto: keysCryptoOps(),
+    log: (msg) => console.error(msg),
+  }
+}
+
+/**
+ * legacy 明文 key：迁移失败/未跑时 settings.json 里可能还留着 `provider.<id>.api_key`。
+ * 读的是**原始文件**（readSettingsResult 已把明文摘掉，不能读显示用对象）。
+ */
+function legacyPlainKey(provider: string): string {
+  try {
+    const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8')) as JsonObject
+    const providers = raw && typeof raw.provider === 'object' && raw.provider !== null ? (raw.provider as JsonObject) : {}
+    const cfg = providers[provider]
+    if (!cfg || typeof cfg !== 'object') return ''
+    const k = (cfg as JsonObject).api_key
+    return typeof k === 'string' ? k : ''
+  } catch {
+    return ''
+  }
+}
+
+/** 某 provider 的明文 key：keys.json 优先，迁移未完成时回退 settings 遗留明文（保证可用）。 */
+function providerKeyOf(provider: string): string {
+  if (!isValidProviderName(provider)) return ''
+  return keyStoreGetKey(keyStoreArgs(), provider) || legacyPlainKey(provider)
+}
+
+// spawn env 的 key 部分：**只注入当前活跃 provider 的一把**（BR-08）。
+// 旧实现把 keys.json 的全部条目塞进 env —— bridge 的所有 MCP/插件子进程都会继承这些明文 key，
+// 且旧条目会在 bridge 内存为空时顶替新 key（401 根因）。非活跃 provider 的 key 只在切换时
+// 随命令 payload 注入（sendCommand → injectProviderKey）。
 function loadKeysEnv(): Record<string, string> {
-  const out: Record<string, string> = {}
-  let settings: AppSettings | null = null
   try {
-    settings = readSettings()
+    const active = String(readSettings().provider.active ?? '')
+    return activeProviderKeyEnv(active, providerKeyOf)
   } catch {
-    /* settings 不可读：回落纯 keys.json */
+    return {}
   }
-  try {
-    const keys = JSON.parse(fs.readFileSync(KEYS_FILE(), 'utf8')) as Record<string, { enc: boolean; data: string }>
-    for (const [provider, v] of Object.entries(keys)) {
-      if (settings) {
-        const pc = settings.provider[provider]
-        if (pc && typeof pc !== 'string' && typeof pc.api_key === 'string' && pc.api_key.trim()) {
-          continue // settings 已有明文 key → 不注入旧加密条目（防覆盖）
-        }
-      }
-      const name = envNameForProvider(provider)
-      if (!name) continue
-      try {
-        out[name] = v.enc ? safeStorage.decryptString(Buffer.from(v.data, 'base64')) : Buffer.from(v.data, 'base64').toString()
-      } catch {
-        /* 解密失败（换机器/钥匙串丢失）：跳过该 key */
-      }
-    }
-  } catch {
-    /* 无 keys.json */
-  }
-  return out
 }
 
-// 删除某 provider 的 key（provider:remove 调用；keys.json 移除条目）
+// 删除某 provider 的 key（provider:remove 用；settings 删成功后才调，失败保留 key 不丢）
 function removeProviderKey(provider: string): void {
-  try {
-    const keys = JSON.parse(fs.readFileSync(KEYS_FILE(), 'utf8')) as Record<string, unknown>
-    delete keys[provider]
-    fs.writeFileSync(KEYS_FILE(), JSON.stringify(keys, null, 2), { mode: 0o600 })
-  } catch {
-    /* 无 keys.json / 写失败：忽略 */
-  }
+  const r = keyStoreRemoveKey(keyStoreArgs(), provider)
+  if (!r.ok) console.error(`[keys] 删除 ${provider} 的 key 失败：${r.error}`)
 }
 
 // 该 provider 是否有已存 key（仅布尔指示，回 renderer 展示「已设置 ✓」）。
-// 主源 = settings.json provider.api_key（明文，2026-08-16 起）；旧 keys.json 加密条目兜底。
+// 主源 = keys.json；迁移失败时回退 settings 遗留明文（保证「已设置」不误报未设置）。
 function providerHasKey(provider: string): boolean {
-  try {
-    const s = readSettings()
-    const pc = s.provider[provider]
-    if (pc && typeof pc !== 'string' && typeof pc.api_key === 'string' && pc.api_key.trim()) return true
-  } catch {
-    /* 读 settings 失败：落入 keys.json 检查 */
-  }
-  try {
-    const keys = JSON.parse(fs.readFileSync(KEYS_FILE(), 'utf8')) as Record<string, unknown>
-    return Boolean(keys && keys[provider])
-  } catch {
-    return false
-  }
+  if (!isValidProviderName(provider)) return false
+  if (keyStoreHasKey(keyStoreArgs(), provider)) return true
+  return Boolean(legacyPlainKey(provider).trim())
 }
 
 function devUrl(): string | undefined {
@@ -681,6 +860,7 @@ function devUrl(): string | undefined {
 
 function createWindow(): void {
   startupMark('createWindow')
+  rendererReady = false
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -756,6 +936,9 @@ function createWindow(): void {
   })
   mainWindow.webContents.on('did-start-loading', () => {
     startupMark('did-start-loading')
+    // 刷新后新的 renderer 还没订阅/还没 take：深链必须回到队列，否则 send 给一个
+    // 没有监听器的页面 = 静默丢链接（复审：注释说了复位，代码此前漏了这一步）。
+    rendererReady = false
     // 页面刷新（reload/导航）瞬间强制隐藏内嵌浏览器视图——WebContentsView 层级
     // 恒在 DOM 之上，刷新时 renderer 重新挂载（React 状态重置）期间若视图保持
     // visible，会浮在最上层挡住主页面（2026-08-30 实测：展开右栏后刷新必现）。
@@ -874,11 +1057,11 @@ function spawnBridge(bin: string): boolean {
     }
   }
   const flush = () => {
-    if (mainWindow && pending.length > 0) {
-      mainWindow.webContents.send('bridge:event', { lines: pending.splice(0) })
-    } else {
-      pending.length = 0 // 无窗口时丢弃剩余行（与原逐行行为一致），防缓冲泄漏
-    }
+    if (pending.length === 0) return
+    // 送不到（窗口不在/已销毁）就丢弃这一批：与原逐行行为一致，防缓冲泄漏。
+    // 这里在 16ms 定时器里执行，抛异常会变成 uncaughtException —— 统一走 sendToRenderer。
+    if (sendToRenderer('bridge:event', { lines: pending.splice(0) })) return
+    pending.length = 0
   }
   const scheduleFlush = () => {
     if (flushTimer) return // 同一批已有一枚定时器，不重置（避免无限推迟）
@@ -925,7 +1108,7 @@ function spawnBridge(bin: string): boolean {
         if (type === 'auth_url' && event?.url) void shell.openExternal(event.url)
         else if (type === 'device_code' && event?.verification_uri) void shell.openExternal(event.verification_uri)
       } catch { /* 解析失败照常转发 */ }
-      mainWindow.webContents.send('bridge:event', t)
+      sendToRenderer('bridge:event', t)
       return
     }
     if (t.includes('"event_type":"command_response"')) {
@@ -944,7 +1127,7 @@ function spawnBridge(bin: string): boolean {
         clearTimeout(request.timer)
         request.resolve(response)
       } else {
-        mainWindow.webContents.send('bridge:event', t)
+        sendToRenderer('bridge:event', t)
       }
       return
     }
@@ -974,14 +1157,52 @@ function spawnBridge(bin: string): boolean {
     clearFlushTimer()
     flush() // 退出前送完剩余缓冲行，保证事件先于 bridge:exit 到达
     bridge = null
-    if (mainWindow) mainWindow.webContents.send('bridge:exit', { code, err: err.slice(-4000) })
+    // 退出时窗口常在拆除中（webContents 已销毁）：此前 if (mainWindow) 挡不住 destroyed，
+    // send 直接抛在 exit 回调里。统一走判空通道。
+    sendToRenderer('bridge:exit', { code, err: err.slice(-4000) })
   })
+  void pushProviderKeys()
   return true
 }
 
+// pushProviderKeys：spawn 后把 keys.json 的 key 逐个注入 bridge 内存（BR-08，**只走命令不进 env**）。
+//
+// 为什么需要：spawn env 只带当前活跃 provider 的一把 key（避免 key 泄漏给所有 MCP/插件子进程），
+// 但 bridge 会把会话绑定到各自的 provider（`bs.provider` 重启后恢复）——会话的 provider 不是
+// 活跃那家时，keyLocked 会返回空 → 「未配置 API key」/401。启动补推一次让每条会话都能拿到 key；
+// 之后 key 轮换由 provider:save → set_provider 与 switch_model 按需注入。
+//
+// 走 sendBridgeRequest（带 id）而不是 sendCommand：响应在登记表里被吃掉，不会当成
+// command_response 事件打到 renderer（否则每次启动都会多出一串 set_provider 响应）。
+// 日志只记数量，**不记 key 明文**。
+async function pushProviderKeys(): Promise<void> {
+  try {
+    const settings = readSettings()
+    const names = Object.keys(settings.provider).filter((k) => k !== 'active')
+    let pushed = 0
+    for (const provider of names) {
+      const cfg = settings.provider[provider]
+      if (!cfg || typeof cfg !== 'object' || cfg.deleted) continue
+      const key = providerKeyOf(provider)
+      if (!key) continue
+      const r = await sendBridgeRequest('set_provider', { provider, api_key: key })
+      if (r.ok) pushed++
+    }
+    if (pushed > 0) console.log(`[keys] 已向 bridge 注入 ${pushed} 个 provider 的 key`)
+  } catch (e) {
+    console.error('[keys] provider key 预热失败（不影响启动，切 provider 时会再注入）', e)
+  }
+}
+
+// sendCommand：renderer → bridge 的**唯一普通命令出口**（sendBridgeRequest 只跑 oauth_*/启动预热）。
+// BR-08：转发前按需注入 provider key（白名单见 keys-store.PROVIDER_KEY_COMMANDS）——
+//   · set_provider（保存/切换 provider）、switch_model（切模型）缺 api_key → 按 payload.provider 取；
+//   · list_models / provider_billing（设置页按 provider 操作）同理：env 只有活跃那家的一把 key；
+//   · payload 已带 api_key（用户输入 / 显式空串清 key）一律不覆盖。
+// key 只进 stdin，**不进日志/错误消息**（这里也不打印 cmd）。
 function sendCommand(cmd: unknown): { ok: boolean; error?: string } {
   if (!bridge || bridge.killed) return { ok: false, error: 'bridge 未运行' }
-  bridge.stdin.write(JSON.stringify(cmd) + '\n')
+  bridge.stdin.write(JSON.stringify(injectProviderKey(cmd, providerKeyOf)) + '\n')
   return { ok: true }
 }
 
@@ -1492,130 +1713,60 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
       return null
     }
   })
-  ipcMain.handle('settings:set', (_e, patch: Partial<AppSettings>) => {
-    const read = settingsForWrite()
-    if ('error' in read) return { ok: false, error: read.error }
-    const cur = read.cur
-    const next: AppSettings = { ...cur, ...patch }
-    if (patch.provider) {
-      next.provider = { ...cur.provider }
-      for (const [k, v] of Object.entries(patch.provider)) {
-        if (k === 'active') {
-          next.provider.active = v as string
-        } else if (isValidProviderName(k)) {
-          next.provider[k] = { ...((cur.provider[k] as ProviderCfg | undefined) ?? {}), ...(v as ProviderCfg) }
-        }
-      }
-    }
-    if (patch.agent) {
-      // 字段级合并：三项各自合法化，未提供的字段沿用旧值（整体覆盖会把
-      // compress_threshold / 并发槽静默丢掉）。
-      // 注意别叫 cur：外层已有同名变量（整个 settings 的当前值）。
-      const curAgent: AgentRuntimeSettings = cur.agent ?? { reminder_rounds: 30 }
-      const agent: AgentRuntimeSettings = { ...curAgent }
-      const rounds = Number(patch.agent.reminder_rounds)
-      agent.reminder_rounds = Number.isFinite(rounds) && rounds >= 0 ? Math.round(rounds) : curAgent.reminder_rounds ?? 30
-      if (patch.agent.compress_threshold !== undefined) {
-        const t = Number(patch.agent.compress_threshold)
-        if (Number.isFinite(t) && t > 0 && t <= 1) agent.compress_threshold = t
-        else delete agent.compress_threshold
-      }
-      for (const k of ['max_subagents', 'max_explore_subagents'] as const) {
-        const v = patch.agent[k]
-        if (v === undefined) continue
-        const n = Number(v)
-        if (Number.isFinite(n) && n >= 1) agent[k] = Math.round(n)
-        else delete agent[k]
-      }
-      next.agent = agent
-    }
-    const res = writeSettings(next)
+  // settings:set：写侧白名单 patch（BR-29）+ 只写**原始对象**（BR-01）。
+  // 不再 `{ ...cur, ...patch }` 把「默认值 ∪ 磁盘值」的并集整份写回 —— 那是「改个主题
+  // settings.json 从几行变 200+ 行、新版本默认值对老用户永不生效」的根因。
+  // 返回值仍走 readSettingsResult()：renderer 拿到完整设置形状（与 settings:get 一致）。
+  ipcMain.handle('settings:set', (_e, patch: unknown) => {
+    const res = commitSettings((raw) => applySettingsPatch(raw, patch))
     if (!res.ok) return { ok: false, error: res.error }
-    return { ok: true, settings: next }
+    return { ok: true, settings: readSettingsResult().settings }
   })
-  // provider:save：持久化配置（settings.json）+ key（safeStorage 加密 keys.json）。不转发 bridge——
+  // provider:save：持久化配置（settings.json）+ key（keys.json，safeStorage 加密）。不转发 bridge——
   // 热切换由 renderer 另发 set_provider 桥命令（key 只在命令 payload 瞬态，不入持久态）。
-  ipcMain.handle('provider:save', (_e, p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; prices?: Record<string, { input: number; cache_read: number; cache_write: number; output: number }>; input_types?: Record<string, string[]>; openai_compat?: OpenAICompatCapabilities; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => {
-    if (!isValidProviderName(p.provider)) return { ok: false, error: '无效 provider 名称' }
-    if (p.active && !isValidProviderName(p.active)) return { ok: false, error: '无效 provider 名称' }
-    const read = settingsForWrite()
-    if ('error' in read) return { ok: false, error: read.error }
-    const cur = read.cur
-    if (p.active) cur.provider.active = p.active
-    const pc = (cur.provider[p.provider] as ProviderCfg | undefined) ?? { base_url: '', models: {}, max_tokens: {}, protocol: 'chat_completions', input_types: {} }
-    // 用户重新保存配置 = 重新启用（清除删除标记；内置 provider 删除是 deleted 标记，
-    // 重新添加同名时若不清除，bridge 重启仍视为已删除 → 配置丢失）。
-    delete pc.deleted
-    if (typeof p.base_url === 'string' && p.base_url) pc.base_url = p.base_url
-    if (p.openai_compat && typeof p.openai_compat === 'object') pc.openai_compat = p.openai_compat
-    if (p.protocol === 'chat_completions' || p.protocol === 'responses' || p.protocol === 'anthropic') pc.protocol = p.protocol
-    // 显示名（2026-11）：空串 = 清除字段（回内置名/id）。只影响 UI，不参与运行态。
-    if (typeof p.label === 'string') {
-      const label = p.label.trim()
-      if (label) pc.label = label.slice(0, 64)
-      else delete pc.label
-    }
-    if (p.models && typeof p.models === 'object') pc.models = p.models
-    if (p.max_tokens && typeof p.max_tokens === 'object') pc.max_tokens = p.max_tokens
-    if (p.prices && typeof p.prices === 'object') pc.prices = p.prices // 每模型价表覆盖（USD/1M tokens）
-    if (p.input_types && typeof p.input_types === 'object') pc.input_types = p.input_types // 模型输入类型（图片门控）
-    if (p.auth_type === 'api_key' || p.auth_type === 'oauth') pc.auth_type = p.auth_type // OAuth 鉴权方式（2026-08）
-    // usage 口径标注（2026-09-21）：bool = 写字段（bridge loadSettings 读它）；
-    // 显式 null = 删字段（回「自动」判定）——「不存在」与「false」语义不同，不能只写不删。
-    if (p.usage_input_includes_cache === true || p.usage_input_includes_cache === false) pc.usage_input_includes_cache = p.usage_input_includes_cache
-    else if (p.usage_input_includes_cache === null) delete pc.usage_input_includes_cache
-    // 缓存 TTL 标注（同三态：bool 写字段 / null 删字段回自动）
-    if (p.cache_ttl_1h === true || p.cache_ttl_1h === false) pc.cache_ttl_1h = p.cache_ttl_1h
-    else if (p.cache_ttl_1h === null) delete pc.cache_ttl_1h
-    if (p.api_key) {
-      pc.api_key = p.api_key // 明文 key 持久化到 settings.json provider 段（用户决策 2026-08-16）
-      // 同步删除 keys.json 同名旧条目（2026-09）：新 key 已明文落 settings.json，
-      // 若 keys.json 仍留旧加密 key，spawnBridge 会把它当 env（如 ZHIPUAI_API_KEY）
-      // 注入 bridge，且 bridge keyLocked 在内存空时回退 env → 旧 key 覆盖新 key →
-      // 401「令牌已过期或验证不正确」。settings 是新主源，旧加密条目必须清除。
+  // 写侧语义在 settings-store.applyProviderSave：只改 provider.<name> 里输入出现的字段，
+  // 兄弟 provider / provider 段未知字段 / 顶层未知键一律不动（BR-02 的 Electron 一半），
+  // 也**不补** DEFAULT_SETTINGS 的 base_url/models/max_tokens/protocol/input_types。
+  // BR-08：api_key **永远不进 settings**（api_key: undefined 先剔除），只落 keys.json：
+  //   · 非空 key → setKey（覆盖旧条目，旧格式自动升级为 enc:true）；
+  //   · null → 明确删 key（显式「清除」语义；前端目前不传 null，undefined/空串 = 不修改）；
+  //   · 先写 settings 再写 key：配置没落盘就不该留下孤儿 key（配置写失败 → 直接返回，用户重试）。
+  ipcMain.handle('provider:save', (_e, p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; prices?: Record<string, { input: number; cache_read: number; cache_write: number; output: number }>; input_types?: Record<string, string[]>; openai_compat?: OpenAICompatCapabilities; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string | null }) => {
+    const res = commitSettings((raw) => applyProviderSave(raw, { ...p, api_key: undefined }))
+    if (!res.ok) return res
+    const key = typeof p?.api_key === 'string' ? p.api_key : ''
+    if (key.trim()) {
+      const w = keyStoreSetKey(keyStoreArgs(), p.provider, key)
+      if (!w.ok) return { ok: false, error: `保存配置成功，但 API key 写入失败：${w.error}` }
+    } else if (p?.api_key === null) {
+      // 显式清除（当前 UI 不发 null；保留这个语义，避免将来「删 key」只能靠删 provider）
       removeProviderKey(p.provider)
     }
-    cur.provider[p.provider] = pc
-    const res = writeSettings(cur)
-    if (!res.ok) return res
     return { ok: true, hasKey: providerHasKey(p.provider) }
   })
-  // provider:remove：删除 provider（settings.json 移除 + keys.json 移除 + deleted 标记）。
+  // provider:remove：删除 provider（settings.json + keys.json；内置用 deleted 标记）。
   // 所有 provider（含内置 5 家）都可删除；删除活跃则回退到首个未删除的内置（deepseek 优先）。
   // deleted 标记让 bridge 重启后不复活（bridge 默认预置 5 家，靠标记识别用户删除）。
+  // 写侧语义在 settings-store.applyProviderRemove：只动 provider.<name> 与 provider.active；
+  // 内置 provider **不重建对象、不补默认值**（旧实现在删除时把整份默认写回，正是 BR-01）。
+  // 顺序：settings 删成功后才删 keys.json 条目（失败保留 key，绝不丢）。
   ipcMain.handle('provider:remove', (_e, provider: string) => {
-    if (!isValidProviderName(provider)) {
-      return { ok: false, error: '无效 provider 名称' }
-    }
-    const read = settingsForWrite()
-    if ('error' in read) return { ok: false, error: read.error }
-    const cur = read.cur
-    // 内置 5 家：物理删除会因 bridge 预置复活 → 用 deleted 标记替代（保留默认值供恢复）
-    if ((BUILTIN_PROVIDERS as readonly string[]).includes(provider)) {
-      const pc = cur.provider[provider]
-      const cfg = pc && typeof pc !== 'string' ? pc : ({} as ProviderCfg)
-      cur.provider[provider] = {
-        base_url: cfg.base_url ?? '', models: cfg.models ?? {}, max_tokens: cfg.max_tokens ?? {},
-        protocol: cfg.protocol ?? 'chat_completions', openai_compat: cfg.openai_compat,
-        input_types: cfg.input_types ?? {}, prices: cfg.prices,
-        auth_type: cfg.auth_type ?? 'api_key',
-        ...(cfg.api_key ? { api_key: cfg.api_key } : {}),
-        deleted: true,
-      } as ProviderCfg
-    } else {
-      // 自定义 provider：物理删除
-      delete cur.provider[provider]
-    }
-    // 删除活跃 → 回退到首个未删除的内置（deepseek 优先；全删则 active 置 deepseek 占位）
-    if (cur.provider.active === provider) {
-      cur.provider.active = (BUILTIN_PROVIDERS as readonly string[]).find((b) => b !== provider && !(cur.provider[b] as ProviderCfg | undefined)?.deleted) ?? 'deepseek'
-    }
-    const res = writeSettings(cur)
+    const res = commitSettings((raw) => applyProviderRemove(raw, provider, { builtins: BUILTIN_PROVIDERS }))
     if (!res.ok) return res
     removeProviderKey(provider)
     return { ok: true }
   })
+  // provider:key-status：只回布尔（迁移失败时 keys-store 查不到再回退 settings 遗留明文）。
   ipcMain.handle('provider:key-status', (_e, provider: string) => providerHasKey(provider))
+  // provider:key：取某 provider 的明文 key（仅 renderer 本地「测试连接」/改名用）。
+  // 不做日志、不进错误消息；无 key / 解密失败 → 空串。
+  ipcMain.handle('provider:key', (_e, provider: string) => providerKeyOf(String(provider ?? '')))
+  // provider:copy-key：provider 改名时把 keys.json 条目原样搬到新 id（不解密再加密）。
+  ipcMain.handle('provider:copy-key', (_e, p: { from: string; to: string }) => {
+    const r = keyStoreCopyKey(keyStoreArgs(), String(p?.from ?? ''), String(p?.to ?? ''))
+    if (!r.ok) return { ok: false, error: r.error }
+    return { ok: true, copied: r.copied }
+  })
   // —— OAuth 订阅登录（2026-08 P2）：登录/登出/状态经 bridge 命令；auth_url/device_code 事件
   //    由 bridge 推送（oauth_event），主进程负责唤起系统浏览器（shell.openExternal）。
   ipcMain.handle('oauth:login', (_e, p: { provider: string }) => sendBridgeRequest('oauth_login', p))
@@ -1624,24 +1775,10 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   ipcMain.handle('oauth:prompt-answer', (_e, p: { provider: string; value: string }) => sendBridgeRequest('oauth_prompt_answer', p))
   // mcp:save：持久化 MCP 服务器配置（settings.json mcpServers 段，全量替换）。
   // 不转发 bridge——热应用由 renderer 另发 mcp_set 桥命令（重建会话工具集）。
+  // 写侧只替换自己的段：provider/theme/hooks 等顶层键与其它段原样保留
+  //（校验与类型归一在 settings-store.normalizeMcpServers，与 bridge 的 Validate 同口径）。
   ipcMain.handle('mcp:save', (_e, servers: Record<string, MCPServerCfg>) => {
-    const read = settingsForWrite()
-    if ('error' in read) return { ok: false, error: read.error }
-    const cur = read.cur
-    if (!servers || typeof servers !== 'object') return { ok: false, error: '无效配置' }
-    for (const [name, c] of Object.entries(servers)) {
-      if (!name.trim()) return { ok: false, error: '服务器名不能为空' }
-      // 类型归一与 bridge 的 mcp.ServerConfig.Validate 同口径（streamable_http /
-      // streamable-http 都是 http 的别名）——不在这里归一就会把别名当未知类型拒掉。
-      const t = (c?.type ?? 'stdio').trim().toLowerCase()
-      const stdio = t === '' || t === 'stdio'
-      const remote = t === 'http' || t === 'streamable_http' || t === 'streamable-http' || t === 'sse'
-      if (!stdio && !remote) return { ok: false, error: `未知 type ${c?.type}` }
-      if (stdio && !c?.command?.trim()) return { ok: false, error: `${name}: stdio 需 command` }
-      if (remote && !c?.url?.trim()) return { ok: false, error: `${name}: 需 url` }
-    }
-    cur.mcpServers = servers
-    const res = writeSettings(cur)
+    const res = commitSettings((raw) => applyMcpServers(raw, servers))
     if (!res.ok) return res
     return { ok: true }
   })
@@ -1925,7 +2062,10 @@ const MULTI_INSTANCE = Boolean(MULTI_DATA_DIR)
 if (!MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
   app.quit()
 } else if (!MULTI_INSTANCE) {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    // Win/Linux：第二次启动是「点链接」的常态路径，深链在 argv 里。
+    const link = extractHubDeepLinkArg(argv)
+    if (link) forwardHubDeepLink(link)
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
@@ -1954,7 +2094,7 @@ function startMemPressureWatch(): void {
     if (!mainWindow || mainWindow.isDestroyed()) return
     try {
       const m = process.getSystemMemoryInfo()
-      mainWindow.webContents.send('mem:pressure', {
+      sendToRenderer('mem:pressure', {
         free: m.free,
         total: m.total,
         swapFree: m.swapFree,
@@ -1972,6 +2112,14 @@ app.whenReady().then(() => {
   startupMark('whenReady')
   // 媒体根清单（settings.json 同目录、0600）：pick-workspace 等三处写入，见 known-workspaces.ts
   configureKnownWorkspaces(path.join(cfgDir(), 'workspaces.json'))
+  // 存量 settings v1→v2 迁移：必须在 bridge spawn（renderer 发 bridge:start）之前跑完，
+  // 否则 bridge 会按 v1 里固化的旧默认启动。失败只记日志、继续用旧文件（不阻止启动）。
+  migrateSettingsOnStartup()
+  // 存量明文 provider key → keys.json（BR-08）：排在 v2 迁移之后（v2 保留 api_key）、
+  // spawn 之前（bridge 启动时要通过 env / 命令拿 key，且不能再从 settings 读到明文）。
+  migrateProviderKeysOnStartup()
+  registerHubProtocol()
+
   registerIpc()
   // 媒体协议：只读、只服务工作区内、只服务媒体扩展名（拒绝分支见 media-protocol.ts）
   registerMediaProtocol()
@@ -2006,7 +2154,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', (e) => {
   if (!allowQuit && docDirty && mainWindow && !mainWindow.isDestroyed()) {
     e.preventDefault()
-    mainWindow.webContents.send('app:quit-request')
+    sendToRenderer('app:quit-request')
     return
   }
   stopBridge()

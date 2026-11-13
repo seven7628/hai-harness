@@ -1,11 +1,28 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
+// 归属（owner）：IM 的启用/路由按归属隔离（连接共享）—— 页面必须显示「这些开关是给谁的」
+import { ownerLabel, ownerValid } from '../lib/owner'
+import {
+  makeRoute,
+  mergeRouteTarget,
+  routeOwner,
+  routeTargetKind,
+  routeTargetLabel,
+  routeTargetComplete,
+  routeTargetValue,
+  sameChat,
+  upsertRoute,
+  type RouteTargetKind,
+} from '../lib/imRoute'
+import { ownerForContext } from '../lib/activeOwner'
+import { useHubStore } from '../hub/useHubStore'
 import type {
   IMConfig,
   IMGatewayCfg,
   IMGatewaySchema,
   IMField,
+  IMRouteCfg,
 } from '../transport/types'
 import Sel from './Sel'
 
@@ -31,6 +48,21 @@ export function IMSettingsEditor() {
   const imStatuses = useAppStore((s) => s.imStatuses)
   const fetchIMConfig = useAppStore((s) => s.fetchIMConfig)
   const saveIMConfig = useAppStore((s) => s.saveIMConfig)
+  const imOwnerStatus = useAppStore((s) => s.imOwnerStatus)
+  const enablePlugin = useAppStore((s) => s.enablePlugin)
+  const disablePlugin = useAppStore((s) => s.disablePlugin)
+  // 当前归属（owner）：必须与 send() 的注入用**同一个派生**（lib/activeOwner）——
+  // 改造前这里只读 useAppStore.activeSessionId，Hub DM/群下算成 workspace:，
+  // 页面显示的归属与实际写入的归属不是一回事（B1）。
+  const hubOpen = useHubStore((s) => s.open)
+  const hubSid = useHubStore((s) => s.sid)
+  const hubGroupId = useHubStore((s) => s.activeGroupId)
+  const appSid = useAppStore((s) => s.activeSessionId)
+  const appWs = useAppStore((s) => s.workspace)
+  const imOwner = useMemo(
+    () => ownerForContext({ open: hubOpen, sid: hubSid, groupId: hubGroupId }, String(appSid ?? ''), String(appWs ?? '')),
+    [hubOpen, hubSid, hubGroupId, appSid, appWs],
+  )
 
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -45,6 +77,8 @@ export function IMSettingsEditor() {
   const [editingId, setEditingId] = useState<string | null>(null) // 编辑中的 gateway id
   // 行内添加路由/授权：gateway id → 'route' | 'allow' | null（正在添加什么）
   const [addingTo, setAddingTo] = useState<Record<string, 'route' | 'allow' | undefined>>({})
+  // 正在编辑哪条路由（gateway id → 路由下标）：编辑**只改目标维度**，不重建整条路由（B2）
+  const [editingRoute, setEditingRoute] = useState<Record<string, number | undefined>>({})
 
   // 打开时拉取配置（未取到则触发）；拉取失败 8s 后显示重试
   useEffect(() => {
@@ -294,6 +328,30 @@ export function IMSettingsEditor() {
         />
       </div>
 
+      {/* 归属（owner）：本页编辑的是**全局配置**（连接/网关/安全），但「启用/路由」按归属
+          隔离 —— 当前会话的归属决定了 plugin_enable/plugin_disable 与路由归属落在谁名下。
+          没有活跃会话时明确显示未绑定（服务端会拒绝无归属的启停，不会写成全局）。 */}
+      <p className="set-desc" style={{ marginBottom: 8 }}>
+        {t('plugin.owner.scope')}：<span className="mono">{imOwner || '—'}</span>
+        {imOwner ? ` · ${ownerLabel(imOwner)}` : ''}
+        {ownerValid(imOwner) && imOwnerStatus && imOwnerStatus.owner === imOwner && (
+          <>
+            {' · '}
+            <span>{imOwnerStatus.enabled
+              ? t('settings.im.ownerOn').replace('{n}', String(imOwnerStatus.routes))
+              : t('settings.im.ownerOff')}</span>
+            <button
+              className="btn gho"
+              style={{ marginLeft: 8 }}
+              disabled={busy}
+              onClick={() => (imOwnerStatus.enabled ? disablePlugin('im') : enablePlugin('im'))}
+            >
+              {imOwnerStatus.enabled ? t('settings.im.ownerDisable') : t('settings.im.ownerEnable')}
+            </button>
+          </>
+        )}
+      </p>
+
       {/* Gateway 列表 */}
       <div className="im-sec">
         <div className="im-sec-head">
@@ -373,39 +431,59 @@ export function IMSettingsEditor() {
                   {routes.length === 0 && !addingTo[g.id] && (
                     <p className="im-gw-empty">{t('settings.im.noRoutes')}</p>
                   )}
-                  {routes.map((r, i) => (
-                    <div className="im-route" key={i}>
-                      <span className="im-route-chat">
-                        {r.chat.gateway}:{r.chat.chat_id}
-                        {r.chat.thread_id ? `:${r.chat.thread_id}` : ''}
-                      </span>
-                      <span className="im-route-arrow">→</span>
-                      <span className="im-route-ws">{r.workspace}</span>
-                      <button
-                        className="btn dan im-gw-del"
-                        onClick={async () => {
-                          const next = { ...cfg }
-                          const gi = next.gateways.findIndex((x) => x.id === g.id)
-                          if (gi >= 0) {
-                            next.gateways[gi] = {
-                              ...next.gateways[gi],
-                              routes: (next.gateways[gi].routes ?? []).filter((_, j) => j !== i),
+                  {routes.map((r, i) => {
+                    const label = routeTargetLabel(r)
+                    const complete = routeTargetComplete(r)
+                    const own = routeOwner(r)
+                    return (
+                      <div className="im-route" key={i}>
+                        <span className="im-route-chat">
+                          {r.chat.gateway}:{r.chat.chat_id}
+                          {r.chat.thread_id ? `:${r.chat.thread_id}` : ''}
+                        </span>
+                        <span className="im-route-arrow">→</span>
+                        {/* 目标三态都显示（B2）：此前只渲染 workspace，agent/群路由看起来像空行 */}
+                        <span className="im-route-ws mono">{label || t('settings.im.routeNoTarget')}</span>
+                        {own && <span className="im-route-owner">{ownerLabel(own)}</span>}
+                        {!complete && <span className="im-err">{t('settings.im.routeIncomplete')}</span>}
+                        {complete && (
+                          <button
+                            className="btn gho im-gw-del"
+                            onClick={() => setEditingRoute((m) => ({ ...m, [g.id]: i }))}
+                          >
+                            {t('settings.im.edit')}
+                          </button>
+                        )}
+                        <button
+                          className="btn dan im-gw-del"
+                          onClick={async () => {
+                            const next = { ...cfg }
+                            const gi = next.gateways.findIndex((x) => x.id === g.id)
+                            if (gi >= 0) {
+                              next.gateways[gi] = {
+                                ...next.gateways[gi],
+                                routes: (next.gateways[gi].routes ?? []).filter((_, j) => j !== i),
+                              }
                             }
-                          }
-                          await save(next)
-                        }}
-                      >
-                        {t('settings.im.del')}
-                      </button>
-                    </div>
-                  ))}
-                  {addingTo[g.id] === 'route' && (
+                            await save(next)
+                          }}
+                        >
+                          {t('settings.im.del')}
+                        </button>
+                      </div>
+                    )
+                  })}
+                  {(addingTo[g.id] === 'route' || editingRoute[g.id] !== undefined) && (
                     <RouteAddRow
                       gatewayId={g.id}
                       gatewayType={g.type}
                       cfg={cfg}
                       save={save}
-                      onDone={() => setAddingTo((m) => ({ ...m, [g.id]: undefined }))}
+                      initial={editingRoute[g.id] !== undefined ? routes[editingRoute[g.id] as number] : undefined}
+                      onDone={() => {
+                        setAddingTo((m) => ({ ...m, [g.id]: undefined }))
+                        setEditingRoute((m) => ({ ...m, [g.id]: undefined }))
+                      }}
                     />
                   )}
                 </div>
@@ -482,23 +560,36 @@ export function IMSettingsEditor() {
   )
 }
 
-// RouteAddRow 行内添加路由（Chat → workspace）。
+// RouteAddRow 行内添加/编辑路由（Chat → workspace / agent / group）。
+//
+// 目标三态都要能表达（B2）：此前只有 workspace 下拉，同一 chat 再提交一次就把
+// agent/群目标覆盖成 workspace —— 消息从「驱动智能体」静默变成「驱动项目会话」。
+// 现在：
+//   · 目标类型显式选择，值按类型渲染（项目下拉 / 智能体下拉+手输 / 群下拉+手输+执行者）；
+//   · 编辑既有路由时用 mergeRouteTarget **只改用户编辑的维度**（群路由的执行者保留）；
+//   · 新增时若该 chat 已有路由，表单先回填既有目标（用户看得见将要替换的是什么）。
 interface RouteAddRowProps {
   gatewayId: string
   gatewayType: string
   cfg: IMConfig
   save: (next: IMConfig) => Promise<boolean>
   onDone: () => void
+  initial?: IMRouteCfg
 }
 
-function RouteAddRow({ gatewayId, gatewayType, cfg, save, onDone }: RouteAddRowProps) {
+function RouteAddRow({ gatewayId, gatewayType, cfg, save, onDone, initial }: RouteAddRowProps) {
   const t = useT()
   const workspace = useAppStore((s) => s.workspace)
   const projects = useAppStore((s) => s.projects)
   const imChats = useAppStore((s) => s.imChats)
   const fetchIMChats = useAppStore((s) => s.fetchIMChats)
-  const [chatId, setChatId] = useState('')
-  const [ws, setWs] = useState('')
+  const hubAgents = useHubStore((s) => s.agents)
+  const hubGroups = useHubStore((s) => s.groups)
+  const editing = Boolean(initial)
+  const [chatId, setChatId] = useState(String(initial?.chat?.chat_id ?? ''))
+  const [kind, setKind] = useState<RouteTargetKind>((routeTargetKind(initial ?? { chat: { gateway: '', chat_id: '' } }) || 'workspace') as RouteTargetKind)
+  const [value, setValue] = useState(initial ? routeTargetValue(initial) : '')
+  const [actor, setActor] = useState(String(initial?.agent ?? ''))
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -514,25 +605,47 @@ function RouteAddRow({ gatewayId, gatewayType, cfg, save, onDone }: RouteAddRowP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gatewayId, chats])
 
-  const submit = async () => {
+  const routes = cfg.gateways.find((x) => x.id === gatewayId)?.routes ?? []
+  // 新增时：选中的 chat 已有路由 → 回填它的目标，避免「以为在加、其实在覆盖别的目标」
+  useEffect(() => {
+    if (editing) return
     const cid = chatId.trim()
-    if (!cid) { setErr(t('settings.im.errChatId')); return }
-    if (!ws) { setErr(t('settings.im.errSelectWs')); return }
+    if (!cid) return
+    const ex = routes.find((r) => sameChat(r.chat, { gateway: gatewayType, chat_id: cid }))
+    if (!ex) return
+    const k = routeTargetKind(ex)
+    if (!k) return
+    setKind(k)
+    setValue(routeTargetValue(ex))
+    setActor(String(ex.agent ?? ''))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId])
+
+  const submit = async () => {
+    const v = value.trim()
+    if (!chatId.trim()) { setErr(t('settings.im.errChatId')); return }
+    if (!v) { setErr(t('settings.im.errSelectTarget')); return }
+    if (kind === 'group' && !actor.trim()) { setErr(t('settings.im.errGroupActor')); return }
     setErr(null)
     setBusy(true)
     const next = { ...cfg }
     const gi = next.gateways.findIndex((x) => x.id === gatewayId)
     if (gi < 0) { setBusy(false); return }
-    const routes = next.gateways[gi].routes ?? []
-    // 同 chat 已存在 → 替换
-    const existing = routes.findIndex((r) => r.chat.gateway === gatewayType && r.chat.chat_id === cid)
-    const newRoute = { chat: { gateway: gatewayType, chat_id: cid }, workspace: ws }
-    if (existing >= 0) routes[existing] = newRoute
-    else routes.push(newRoute)
-    next.gateways[gi] = { ...next.gateways[gi], routes }
+    const chat = initial?.chat ?? { gateway: gatewayType, chat_id: chatId.trim() }
+    let route: IMRouteCfg
+    if (initial) {
+      route = mergeRouteTarget(initial, kind, v)
+      if (kind === 'group') route = { ...route, agent: actor.trim() }
+    } else {
+      route = makeRoute(chat, kind, v)
+      if (kind === 'group') route = { ...route, agent: actor.trim() }
+    }
+    const merged = upsertRoute(next.gateways[gi].routes ?? [], route)
+    next.gateways[gi] = { ...next.gateways[gi], routes: merged }
     if (await save(next)) {
       setChatId('')
-      setWs('')
+      setValue('')
+      setActor('')
       onDone()
     }
     setBusy(false)
@@ -540,7 +653,12 @@ function RouteAddRow({ gatewayId, gatewayType, cfg, save, onDone }: RouteAddRowP
 
   return (
     <div className="im-route-add">
-      {chats && chats.length > 0 ? (
+      {editing ? (
+        <span className="im-route-chat mono">
+          {initial?.chat.gateway}:{initial?.chat.chat_id}
+          {initial?.chat.thread_id ? `:${initial.chat.thread_id}` : ''}
+        </span>
+      ) : chats && chats.length > 0 ? (
         <Sel
           value={chatId}
           options={[
@@ -560,14 +678,80 @@ function RouteAddRow({ gatewayId, gatewayType, cfg, save, onDone }: RouteAddRowP
         />
       )}
       <Sel
-        value={ws}
+        value={kind}
         options={[
-          { value: '', label: t('settings.im.bindSelectWorkspace') },
-          ...candidates.map((p) => ({ value: p, label: p })),
+          { value: 'workspace', label: t('settings.im.target.workspace') },
+          { value: 'agent', label: t('settings.im.target.agent') },
+          { value: 'group', label: t('settings.im.target.group') },
         ]}
-        onChange={setWs}
+        onChange={(v) => { setKind(v as RouteTargetKind); setValue(''); setErr(null) }}
         style={{ flex: 1 }}
       />
+      {kind === 'workspace' ? (
+        <Sel
+          value={value}
+          options={[
+            { value: '', label: t('settings.im.bindSelectWorkspace') },
+            ...candidates.map((p) => ({ value: p, label: p })),
+          ]}
+          onChange={setValue}
+          style={{ flex: 1 }}
+        />
+      ) : kind === 'agent' ? (
+        hubAgents.length > 0 ? (
+          <Sel
+            value={value}
+            options={[
+              { value: '', label: t('settings.im.selectAgent') },
+              ...hubAgents.map((a) => ({ value: a.id, label: a.name || a.id, hint: a.name ? a.id : undefined })),
+            ]}
+            onChange={setValue}
+            style={{ flex: 1 }}
+          />
+        ) : (
+          <input
+            className="im-inp"
+            placeholder={t('settings.im.agentIdPlaceholder')}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            style={{ flex: 1 }}
+          />
+        )
+      ) : hubGroups.length > 0 ? (
+        <Sel
+          value={value}
+          options={[
+            { value: '', label: t('settings.im.selectGroup') },
+            ...hubGroups.map((g) => ({ value: g.id, label: g.name || g.id, hint: g.name ? g.id : undefined })),
+          ]}
+          onChange={(v) => {
+            setValue(v)
+            // 群执行者缺省取群的 owner（用户可改）
+            if (!actor.trim()) {
+              const g = hubGroups.find((x) => x.id === v)
+              if (g?.owner_agent_id) setActor(g.owner_agent_id)
+            }
+          }}
+          style={{ flex: 1 }}
+        />
+      ) : (
+        <input
+          className="im-inp"
+          placeholder={t('settings.im.groupIdPlaceholder')}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          style={{ flex: 1 }}
+        />
+      )}
+      {kind === 'group' && (
+        <input
+          className="im-inp"
+          placeholder={t('settings.im.groupActorPlaceholder')}
+          value={actor}
+          onChange={(e) => setActor(e.target.value)}
+          style={{ flex: 1 }}
+        />
+      )}
       {err && <span className="im-err" style={{ marginLeft: 6 }}>{err}</span>}
       <button className="btn pri" disabled={busy} onClick={submit}>✓</button>
       <button className="btn gho" onClick={onDone}>✕</button>
