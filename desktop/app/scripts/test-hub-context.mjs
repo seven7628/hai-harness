@@ -4,9 +4,12 @@
 //   contextView：消息级触发上下文选择、trigger seq 定位落点、提示词分层归一化；
 //   seqJump：深链/触发 chip 的跳转判定（目标 + 已加载）与高亮 class、DOM 落点；
 //   exportMarkdown：HTML/元字符转义、群时间线、任务 Markdown（结果/产物/用量）；
-//   store：深链打开/选中/定位、重复深链只加载一次、无效链报错、提示词预览只读缓存。
+//   store：深链打开/选中/定位、重复深链只加载一次、无效链报错、提示词预览只读缓存；
+//   promptScope：提示词预览的缓存键/作用域判定（DM ≠ 群、群 A ≠ 群 B、迟到响应）；
+//   ContextPanel 接线：两处 loadPromptPreview 都必须把群 id 传下去（源码守卫）。
 // 这些是「Context 面板 / hub:// 深链 / 导出」在 UI 侧的唯一分叉点，值得独立回归。
 import { build } from 'esbuild'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
@@ -383,6 +386,25 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   eq(promptScopeMatches(ga, null), false, '没有请求作用域不命中')
 }
 
+// —— 9c) ContextPanel 接线：群作用域必须把群 id 传下去（源码守卫）——
+// 纯函数再准，接线漏一处就回到「群作用域显示 DM 变体」：面板里 loadPromptPreview
+// 有两个调用点（进面板的 effect、↻ 重新读取），两处都要带第三个实参 promptGroupId。
+// 用源码 grep 钉住（与 test-mobile-hub 的静态约束同一套路，不需要浏览器）。
+{
+  const src = readFileSync(join(hubDir, 'ContextPanel.tsx'), 'utf8')
+  const calls = [...src.matchAll(/loadPrompt\(([^)]*)\)/g)].map((m) => m[1])
+  eq(calls.length, 2, 'ContextPanel 有且只有两处 loadPromptPreview 调用（effect + ↻）')
+  for (const [i, args] of calls.entries()) {
+    const parts = args.split(',').map((s) => s.trim()).filter(Boolean)
+    eq(parts.length, 3, `第 ${i + 1} 处调用传三个实参（agent, force, groupID）`)
+    eq(parts[0], 'promptAgentId', `第 ${i + 1} 处调用的目标是当前成员`)
+    eq(parts[2], 'promptGroupId', `第 ${i + 1} 处调用的第三个实参是 promptGroupId`)
+  }
+  assert(/const promptGroupId = group\?\.id \?\? ''/.test(src), '群作用域取 group.id，DM 取空串')
+  assert(/promptScopeMatches\(prompt, \{ agentId: promptAgentId, groupId: promptGroupId \}\)/.test(src), '只渲染同作用域的预览')
+  assert(/\}, \[promptAgentId, promptGroupId, loadPrompt\]\)/.test(src), '切群（同 agent）也会重新请求')
+}
+
 // —— 10) store：深链 / 跳转 / 提示词只读缓存 ——
 {
   transport.resetTransport()
@@ -390,10 +412,16 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   const counts = new Map()
   const sent = []
   const rawSend = t.send.bind(t)
+  // 竞态用例需要**真实乱序**：mock 的 respond 是同步 queueMicrotask，按发送顺序回，
+  // 「A 先发先回」压不到迟到守卫（断言会假阳性）。所以把 grp_race_a 的预览请求压后
+  // 45ms —— 先发 A、后发 B，A 的响应后到，与「切群后旧响应迟到」同形。
+  const RACE_DELAY_MS = 45
+  const isLateRaceA = (cmd) => cmd.type === 'hub_agent_prompt_preview' && cmd.payload?.group_id === 'grp_race_a'
   t.send = (cmd) => {
     counts.set(cmd.type, (counts.get(cmd.type) ?? 0) + 1)
     sent.push({ type: cmd.type, payload: cmd.payload ?? {} })
-    return rawSend(cmd)
+    if (!isLateRaceA(cmd)) return rawSend(cmd)
+    return new Promise((resolve) => setTimeout(() => resolve(rawSend(cmd)), RACE_DELAY_MS))
   }
   // 最近一次提示词预览请求的 payload（断言 group_id 有没有带、带的是哪个群）。
   const lastPromptPayload = () => [...sent].reverse().find((c) => c.type === 'hub_agent_prompt_preview')?.payload ?? {}
@@ -469,8 +497,8 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   eq(counts.get('hub_agent_prompt_preview') ?? 0, 2, 'force 重新读取')
 
   // 修「群作用域永远显示 DM 变体」：缓存键必须含作用域，群作用域请求必须带 group_id。
-  // 注意 state 的 groupId 取自**本次请求**而不是响应字段（旧 bridge / 老 mock 不回显
-  // scope/group_id）—— 下面几条同时钉住「响应缺字段也不崩」。
+  // 前端只认**本次请求**的作用域，不读响应里的 scope/group_id（旧 bridge 不回显也
+  // 不影响）—— 下面几条同时钉住「响应缺字段也不崩」。
   counts.clear()
   sent.length = 0
   await H.getState().loadPromptPreview('ag_mockres1', true) // force：确保这次 DM 真的发出去
@@ -497,10 +525,13 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
 
   // 竞态：群 A 的迟到响应不许写进群 B 的面板（判定要比作用域，不是只比 agentId）。
   counts.clear()
+  const order = []
   await Promise.all([
-    H.getState().loadPromptPreview('ag_mockres1', false, 'grp_race_a'),
-    H.getState().loadPromptPreview('ag_mockres1', false, 'grp_race_b'),
+    H.getState().loadPromptPreview('ag_mockres1', false, 'grp_race_a').then(() => order.push('a')),
+    H.getState().loadPromptPreview('ag_mockres1', false, 'grp_race_b').then(() => order.push('b')),
   ])
+  // 夹具自检：A 确实后到。否则「A 先回」时迟到守卫根本没被触发，下面那条是假阳性。
+  eq(order.join(','), 'b,a', '夹具自检：群 A 的响应真的后到（不是同步按序回）')
   eq(H.getState().prompt?.groupId ?? '', 'grp_race_b', '迟到的群 A 响应不覆盖群 B')
   eq(counts.get('hub_agent_prompt_preview') ?? 0, 2, '两个作用域各发一次（在飞请求不复用）')
   counts.clear()

@@ -1101,8 +1101,8 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (scope.groupId) payload.group_id = scope.groupId
     const r = await hubCommand<HubPromptPreviewData>('hub_agent_prompt_preview', payload)
     // 竞态：切到别的智能体**或别的群**后，旧响应不能写进新面板（只比 agentId 会让
-    // 群 A 的迟到响应覆盖群 B）。响应里没有 group_id（mock 就不带）也不影响判定：
-    // 作用域取的是**本次请求**的那一个。
+    // 群 A 的迟到响应覆盖群 B）。前端只认**本次请求**的作用域，不读响应里的
+    // scope/group_id —— 旧 bridge 不回显也不影响判定。
     if (!promptScopeMatches(get().prompt, scope)) return
     if (!r.ok) {
       set({
