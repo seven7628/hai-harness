@@ -15,6 +15,7 @@ import (
 // 断言：别名 deepseek 模型经注册表同步后 retain=true（回传）+ rrc=true（恒带字段）；
 // 非推理族别名（gpt-5.6-luna）保持 false（不多传占位）。
 func TestOverrideRegistryDerivesAliasReasoningMeta(t *testing.T) {
+	assertNoUserPrices(t)
 	pc := &providerConfig{
 		registry: provider.NewRegistry(),
 		// syncRegistry 按 baseURL 枚举已配置 provider（与生产路径一致）

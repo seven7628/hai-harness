@@ -12,6 +12,7 @@ import (
 
 // TestLoadSettingsAuthType settings.json auth_type 解析：缺省 api_key / 显式 oauth / 非法回退。
 func TestLoadSettingsAuthType(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".go-code")
@@ -39,6 +40,7 @@ func TestLoadSettingsAuthType(t *testing.T) {
 
 // TestOAuthFlowOf 预设 OAuth 声明：支持 OAuth 的 provider 能构造 flow；无声明返回 nil。
 func TestOAuthFlowOf(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	_ = os.MkdirAll(filepath.Join(home, ".go-code"), 0o755)
@@ -63,6 +65,7 @@ func TestOAuthFlowOf(t *testing.T) {
 
 // TestNewProviderOAuthMode OAuth 模式下 newProvider 仍可构造（未登录时请求层报 401）。
 func TestNewProviderOAuthMode(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	_ = os.MkdirAll(filepath.Join(home, ".go-code"), 0o755)

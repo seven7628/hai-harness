@@ -177,6 +177,7 @@ func TestMetricsCostEmptyProviderFallback(t *testing.T) {
 // SDK/MaxCost/持久化同口径，不再依赖宿主并行价表（此前第三方聚合 provider 在宿主
 // 硬编码表外 → costUsd 恒 0 的根因）。
 func TestCostUsdPrefersFilledUsageCost(t *testing.T) {
+	assertNoUserPrices(t)
 	// command-code 这类第三方聚合 provider 不在宿主内置表：Usage.Cost 已由
 	// FillUsageCost 折算（µUSD）→ costUsd 直接换算，宿主价表缺失不影响。
 	u := core.Usage{Input: 1_000_000, Output: 500_000, Cost: core.Cost{Input: 100_000, Output: 50_000, Total: 150_000}}
@@ -193,6 +194,7 @@ func TestCostUsdPrefersFilledUsageCost(t *testing.T) {
 // 注册表价表（providers.json 内置价）对第三方 provider 生效：FillUsageCost 折算出的
 // µUSD 与注册表内置价一致（此前 override 抹零/宿主表缺第三方 → 成本全 0）。
 func TestFillUsageCostThirdPartyBuiltinPrice(t *testing.T) {
+	assertNoUserPrices(t)
 	reg := provider.NewRegistry()
 	u := core.Usage{Input: 1_000_000, Output: 500_000}
 	reg.FillUsageCost("openrouter", "deepseek/deepseek-v4-flash", &u)
@@ -213,6 +215,7 @@ func TestFillUsageCostThirdPartyBuiltinPrice(t *testing.T) {
 // overrideRegistryLocked 对已配置 provider 同步时不得抹掉未覆盖模型的内置价
 // （此前以零值 ModelInfo 整体 Override → Lookup 恒命中 override 零值 → 价全 0）。
 func TestOverrideRegistryKeepsBuiltinCost(t *testing.T) {
+	assertNoUserPrices(t)
 	// 隔离全局价表（本包其它测试依赖内置价）
 	priceTableMu.Lock()
 	saved := userPriceTable

@@ -19,6 +19,7 @@ import (
 // 切片共享）都会让用户看到「历史块串位/丢字段」，而这种错误不会在
 // 只跑慢路径的测试里暴露。
 func TestParseCheckpointFromRecordMatchesFullParse(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	ws := t.TempDir()

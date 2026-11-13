@@ -31,6 +31,7 @@ import (
 // 但仍然会写全局表，所以必须自己隔离。
 func pcForTest(t *testing.T) *providerConfig {
 	t.Helper()
+	assertNoUserPrices(t)
 	isolateUserPrices(t)
 	return loadProviderConfig()
 }

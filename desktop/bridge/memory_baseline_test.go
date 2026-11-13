@@ -735,35 +735,6 @@ func baselineMeanStd(xs []float64) (mean, std float64) {
 
 // —— 环境装配 ——
 
-// isolateUserPrices 快照全局用户价表并在测试结束时恢复。
-//
-// 为什么需要：eval 类测试要读**真实** settings.json 才能拿到凭证与 base_url，因而
-// 不能像其它测试那样 t.Setenv("HOME", t.TempDir()) 封闭 HOME。但 loadProviderConfig()
-// 会把 settings 的 provider[].prices 写进**进程级全局** userPriceTable 且不还原 ——
-// 于是用户手填的价（多为旧价）会残留给后续所有读价测试（metrics 系列按内置价断言
-// → 假失败）。实测：本机 settings 钉着 deepseek-v4-flash 0.14/0.014/0.28（旧价），
-// 泄漏后 TestMetrics* 全红，而单跑皆过（顺序敏感即泄漏的判据）。
-//
-// 只快照 userPriceTable，不动内置 priceTable（后者是常量，无人改写）。
-func isolateUserPrices(t *testing.T) {
-	t.Helper()
-	priceTableMu.Lock()
-	cp := make(map[string]map[string]provider.ModelPrice, len(userPriceTable))
-	for k, v := range userPriceTable {
-		inner := make(map[string]provider.ModelPrice, len(v))
-		for kk, vv := range v {
-			inner[kk] = vv
-		}
-		cp[k] = inner
-	}
-	priceTableMu.Unlock()
-	t.Cleanup(func() {
-		priceTableMu.Lock()
-		userPriceTable = cp
-		priceTableMu.Unlock()
-	})
-}
-
 // baselineEnvOrSkip 装配真实 provider。缺凭证 → skip，绝不假失败（§11）。
 func baselineEnvOrSkip(t *testing.T) (prov, model string, p provider.Provider) {
 	t.Helper()
@@ -872,6 +843,7 @@ func baselinePing(t *testing.T, p provider.Provider, prov, model string) {
 // 产出：每臂 n≥6 次重复的答案正确率 / 工具调用数 / 读文档数（均值 + 样本标准差）、
 // 判定器自洽率、以及 B 与 A 的差是否超出运行间波动。
 func TestBaselineStaleContextThreeArms(t *testing.T) {
+	assertNoUserPrices(t)
 	// 前提先于装配：仓库必须处于"没有可被消费的 Memory 实现"状态，否则下面每个
 	// 数字都测的是实现而不是模型。
 	memSnap := baselineEnforceEmptyMemoryState(t)

@@ -17,6 +17,7 @@ import (
 // TestMeshToolsRegisteredWhenEnabled 验收 #11：mesh.session_enabled=true → newSessionEngine 注册
 // session_send/session_list；false → 不注册（零侵入）。
 func TestMeshToolsRegisteredWhenEnabled(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	dir := filepath.Join(home, ".go-code")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -48,6 +49,7 @@ func TestMeshToolsRegisteredWhenEnabled(t *testing.T) {
 
 // TestMeshToolsNotRegisteredWhenDisabled mesh 未开启 → session_* 工具不存在（默认关闭）。
 func TestMeshToolsNotRegisteredWhenDisabled(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 无 settings.json → 默认全关
 	hub := session.NewHub("node-test")
 	eng, _ := newSessionEngine(t.TempDir(), "s1", nil, loadProviderConfig(), "deepseek",

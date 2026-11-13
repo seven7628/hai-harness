@@ -170,6 +170,7 @@ func TestReducerChunkNonAdjacentFlush(t *testing.T) {
 
 // TestReducerLLMEndDedupAndUsage 重复 llm_end 幂等；usage/cost 只累计一次。
 func TestReducerLLMEndDedupAndUsage(t *testing.T) {
+	assertNoUserPrices(t)
 	r := NewViewReducer()
 	ts := time.Now().Add(-time.Hour)
 	start := evLLMStart(t, "r1", "q1", "deepseek-v4-flash", ts)
@@ -209,6 +210,7 @@ func TestReducerLLMEndDedupAndUsage(t *testing.T) {
 // 部分用量折算成成本 → 会话展示成本累计 + 错误块「重试已花费」跨多次重试累加；
 // 成功轮（llm_end）只含自己那次，不双计。
 func TestReducerRetryCostAccounted(t *testing.T) {
+	assertNoUserPrices(t)
 	r := NewViewReducer()
 	ts := time.Now().Add(-time.Hour)
 	mustApply(t, r, evLLMStart(t, "r1", "q1", "deepseek-v4-flash", ts))
@@ -393,6 +395,7 @@ func TestReducerAgentAbort(t *testing.T) {
 
 // TestReducerTaskLifecycle task 占位/终态/结果回填；结果找不到任务时保留独立结果块。
 func TestReducerTaskLifecycle(t *testing.T) {
+	assertNoUserPrices(t)
 	r := NewViewReducer()
 	ts := time.Now().Add(-time.Hour)
 	mustApply(t, r, &events.TaskStarted{TaskId: "task-1", Name: "背景调查", Async: true, Timestamp: ts, EventType: events.TaskStartedType})
@@ -431,6 +434,7 @@ func TestReducerTaskLifecycle(t *testing.T) {
 // 卡片记 tokens + 成本（µUSD → USD，cost_usd 随 checkpoint 落盘可恢复）；
 // 会话级成本**不**因此变化（卡片级口径，addUsage 不搬 CostUSD，杜绝双计）。
 func TestReducerTaskUsageCost(t *testing.T) {
+	assertNoUserPrices(t)
 	r := NewViewReducer()
 	ts := time.Now().Add(-time.Hour)
 	u := core.Usage{Input: 1000, Output: 200, CacheRead: 800, TotalTokens: 1200, Cost: core.Cost{Input: 140, Output: 56, Total: 196}}
@@ -478,6 +482,7 @@ func TestReducerTaskUsageCost(t *testing.T) {
 //     （同步子 agent 没有 TaskEnd，这是它唯一的结算来源）；
 //   - CompressEnd.Usage → 压缩块（此前只进会话累计、不落块 → 恢复后 tokens 行静默消失）。
 func TestReducerCallUsageCost(t *testing.T) {
+	assertNoUserPrices(t)
 	r := NewViewReducer()
 	ts := time.Now().Add(-time.Hour)
 	u := core.Usage{Input: 1000, Output: 200, CacheRead: 800, TotalTokens: 1200, Cost: core.Cost{Input: 140, Output: 56, Total: 196}}
@@ -545,6 +550,7 @@ func TestReducerCallUsageCost(t *testing.T) {
 
 // TestReducerCompression 主/子压缩收敛：主追加 compression 块；子卡片项收敛。
 func TestReducerCompression(t *testing.T) {
+	assertNoUserPrices(t)
 	r := NewViewReducer()
 	ts := time.Now().Add(-time.Hour)
 	mustApply(t, r, evAgentStart(t, "root-1", "", "主会话", "", ts))
@@ -640,6 +646,7 @@ func TestReducerCtxAnchorSource(t *testing.T) {
 // TestReducerClearGeneration clear 代际 +1；blocks/run/turn/展示 usage 重置；
 // todos 与 lifetime 对账值保留。
 func TestReducerClearGeneration(t *testing.T) {
+	assertNoUserPrices(t)
 	r := NewViewReducer()
 	ts := time.Now().Add(-time.Hour)
 	mustApply(t, r, evUserInputs(t, []string{"hello"}, nil, ts))

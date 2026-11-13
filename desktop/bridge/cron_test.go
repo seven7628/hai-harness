@@ -97,6 +97,7 @@ func TestCronCommandsCRUD(t *testing.T) {
 }
 
 func TestCronToolsGatedBySettings(t *testing.T) {
+	assertNoUserPrices(t)
 	home := t.TempDir()
 	dir := filepath.Join(home, ".go-code")
 	_ = os.MkdirAll(dir, 0o755)

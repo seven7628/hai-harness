@@ -9,6 +9,7 @@ import (
 // miss —— 不兜底就会把上游 1M 窗口 / 128K 输出的模型填成默认窗口 / 8192 上限
 // （用户实测：command-code 的 xiaomi 系模型拉下来全是 128000/8192，拉完还得手改）。
 func TestModelCapabilitiesGatewayAlias(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 不读用户真实 settings.json
 	pc := loadProviderConfig()
 

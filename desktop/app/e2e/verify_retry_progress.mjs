@@ -98,6 +98,25 @@ const setBlock = (page, over) => page.evaluate((o) => {
 // textContent（不是 innerText）：探针页的叙述容器不参与真实布局，innerText 可能返回空串
 const retryLine = (page) => page.locator('.msg.error .err-retry').textContent()
 
+// waitBump 轮询到某个数字**真的变大**，返回 {v, line, ms}。
+//
+// 为什么不能用「固定 sleep 1.3s 再要求恰好 +1」：被断言的数字是 floor(墙钟差/1000)，
+// 固定 sleep 只能保证「至少过了 1.3s」，机器一抖（全链跑到第 12 分钟时常见）第二次读数
+// 就会跳 2 —— 于是断言在自己的前提上失败，报出来的是一句「+1 不成立」，与被测行为无关。
+// 实测就是这么红的：`已等待 19s → 已等待 21s`。
+// 正确形状是等**状态变化**（有界 5s），并把等到的耗时打进断言文本（可判断「是不是很慢」）。
+async function waitBump(page, re, prev, from, label, budgetMs = 5000) {
+  const t0 = Date.now()
+  let last = from
+  while (Date.now() - t0 < budgetMs) {
+    last = await retryLine(page)
+    const m = last.match(re)
+    if (m && Number(m[1]) > prev) return { v: Number(m[1]), line: last, ms: Date.now() - t0 }
+    await page.waitForTimeout(100)
+  }
+  throw new Error(`${label}：${budgetMs}ms 内 ${prev}s 一直没变（最后一次读数: ${last}）`)
+}
+
 async function main() {
   await waitPort(PORT)
   // 端口可连只说明**有东西**在监听；再确认这张探针页真能开（子进程退出即失败）
@@ -118,9 +137,13 @@ async function main() {
   // ② 退避窗口 = 倒计时，且每秒在走
   const c1 = await retryLine(page)
   assert(/3s 后开始重试/.test(c1), `退避窗口应显示倒计时: ${c1}`)
-  await page.waitForTimeout(1300)
-  const c2 = await retryLine(page)
-  assert(/2s 后开始重试/.test(c2), `倒计时应在走（3s → 2s）: ${c2}`)
+  const c2t0 = Date.now()
+  let c2 = c1
+  while (Date.now() - c2t0 < 5000 && !/2s 后开始重试/.test(c2)) {
+    await page.waitForTimeout(100)
+    c2 = await retryLine(page)
+  }
+  assert(/2s 后开始重试/.test(c2), `倒计时应在走（3s → 2s，等了 ${Date.now() - c2t0}ms）: ${c2}`)
 
   // ③ 退避结束 → 「本次尝试已进行 Xs」，且每秒在走
   // 秒数取整向下（fmtRun 用 floor），故用区间断言 + 「两次数值递增 1」而不是写死字面量。
@@ -131,10 +154,8 @@ async function main() {
   const e1s = secs(e1, /本次尝试已进行 (\d+)s/)
   assert(e1s != null && e1s >= 4 && e1s <= 5, `尝试进行中应显示已进行时长（≈5s）: ${e1}`)
   assert(!/已等待/.test(e1), `首次失败不显示累计等待（无信息量）: ${e1}`)
-  await page.waitForTimeout(1300)
-  const e2 = await retryLine(page)
-  const e2s = secs(e2, /本次尝试已进行 (\d+)s/)
-  assert(e2s === e1s + 1, `已进行时长应在走（每秒 +1）: ${e1} → ${e2}`)
+  const eBump = await waitBump(page, /本次尝试已进行 (\d+)s/, e1s, e1, '已进行时长应在走')
+  assert(eBump.v === e1s + 1, `已进行时长应在走（每秒 +1）: ${e1} → ${eBump.line}（等到变化用了 ${eBump.ms}ms）`)
 
   // ④ 本轮确实重过（起点更早）→ 追加累计「已等待」，同样每秒在走
   const t1 = Date.now()
@@ -142,9 +163,8 @@ async function main() {
   const w1 = await retryLine(page)
   const w1s = secs(w1, /已等待 (\d+)s/)
   assert(secs(w1, /本次尝试已进行 (\d+)s/) != null && w1s != null && w1s >= 19 && w1s <= 20, `应显示累计已等待时长（≈20s）: ${w1}`)
-  await page.waitForTimeout(1300)
-  const w2 = await retryLine(page)
-  assert(secs(w2, /已等待 (\d+)s/) === w1s + 1, `累计等待应在走（每秒 +1）: ${w1} → ${w2}`)
+  const wBump = await waitBump(page, /已等待 (\d+)s/, w1s, w1, '累计等待应在走')
+  assert(wBump.v === w1s + 1, `累计等待应在走（每秒 +1）: ${w1} → ${wBump.line}（等到变化用了 ${wBump.ms}ms）`)
 
   // ⑤ 重试耗尽：整行不渲染（不留「还在重试」的假象；无成本时不留任何行）
   await setBlock(page, { ts: Date.now(), retrying: false, retryAttempt: 11, retryMax: 11 })

@@ -74,6 +74,7 @@ func appendBlockDelete(t *testing.T, path, id string) {
 }
 
 func TestCorruptRecordHealsFromEventLog(t *testing.T) {
+	assertNoUserPrices(t)
 	ws := t.TempDir()
 	m, buf := testManager(t)
 	sid := "s-heal-1"

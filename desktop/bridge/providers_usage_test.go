@@ -30,6 +30,7 @@ func writeSettingsProvider(t *testing.T, cfg map[string]any) {
 }
 
 func TestUsageInclFromSettingsAndHotApply(t *testing.T) {
+	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir())
 	writeSettingsProvider(t, map[string]any{
 		"active": "aggregator",
