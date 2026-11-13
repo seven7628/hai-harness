@@ -2148,6 +2148,39 @@
       "acceptance": "Go/TS/browser/真实 Hub E2E 全绿；独立 Review PASS；看板/文档同步；worktree 清理。",
       "tests": "go test ./...；npm run test:p4；浏览器关键脚本；真实 provider E2E",
       "commit": "test(hub-p6-15): 群聊硬化最终回归"
+    },
+    {
+      "id": "P6-16",
+      "phase": "P6",
+      "title": "头部「更多」菜单层级/样式修复",
+      "deps": [],
+      "files": [
+        "desktop/app/src/hub/hub.css",
+        "desktop/app/src/hub/GroupView.tsx",
+        "desktop/app/src/hub/HubSurface.tsx"
+      ],
+      "acceptance": "“更多操作”下拉菜单永远压在消息列表/表格/右栏之上，不再透出下层内容；chat-header 的 backdrop-filter 不得把菜单困在低层级；外点/Esc 关闭；ink/paper/system 三主题 1280/640 截图验收；键盘可达。",
+      "tests": "npm run test:css；浏览器 check-hub-menu-layer（新增）；check-p4-p2-details",
+      "commit": "fix(hub-p6-16): 修复头部更多菜单层级与透出",
+      "status": "in_progress"
+    },
+    {
+      "id": "P6-17",
+      "phase": "P6",
+      "title": "群组编辑 + 成员增删/群主转让",
+      "deps": [],
+      "files": [
+        "desktop/app/src/hub/GroupEditor.tsx",
+        "desktop/app/src/hub/HubInspector.tsx",
+        "desktop/app/src/hub/HubSidebar.tsx",
+        "desktop/app/src/hub/useHubStore.ts",
+        "desktop/app/src/transport/mock.ts",
+        "desktop/app/src/i18n.ts"
+      ],
+      "acceptance": "右栏/群设置有编辑入口；可改群名、模式、群主；可添加/移除成员；owner 不可移除（先转让）；重复添加/非成员/超过 12 人有明确错误；保存后群状态与成员列表即时刷新；mock 同步。",
+      "tests": "node scripts/test-hub-group-create.mjs；新增 test-hub-group-edit；浏览器群组编辑/成员增删；tsc",
+      "commit": "feat(hub-p6-17): 群组编辑与成员管理",
+      "status": "in_progress"
     }
   ],
   "deferred": [
@@ -3238,6 +3271,14 @@
     "P6-12": {
       "status": "in_progress",
       "commit": "refactor(hub-p6-12): 删除 observer 角色并迁移旧数据"
+    },
+    "P6-16": {
+      "status": "in_progress",
+      "commit": "fix(hub-p6-16): 修复头部更多菜单层级与透出"
+    },
+    "P6-17": {
+      "status": "in_progress",
+      "commit": "feat(hub-p6-17): 群组编辑与成员管理"
     }
   },
   "reviewGate": {

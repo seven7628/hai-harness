@@ -124,6 +124,8 @@
 | P6-13 | 死旋钮清理 | P6-02/06 | `agenthub/group.go`、settings、UI/docs | 删除 MaxParallelRuns/MaxTurnsPerHuman；Mode 已生效；每个旋钮有效果测试 |
 | P6-14 | 会话区/右栏色板统一 + ConversationBar | P6-05/10 | `hub.css`、`demo.css`、`ConversationBar.tsx`、`conversation.ts` | 三主题中心/右栏一致；状态条显示本轮/本链/队列/pair/失败 |
 | P6-15 | 最终回归 + 独立 Review | 全部 | 全仓 | Go/TS/browser/真实 E2E；文档/看板更新 |
+| P6-16 | 头部「更多」菜单层级/样式修复 | — | `hub.css`、`GroupView.tsx`、`HubSurface.tsx` | 菜单永远压在消息/表格/右栏之上；无内容透出；三主题/1280/640；外点/Esc 关闭 |
+| P6-17 | 群组编辑 + 成员增删/群主转让 | — | `GroupEditor.tsx`、`HubInspector.tsx`、`HubSidebar.tsx`、`useHubStore.ts`、`transport/mock.ts`、`i18n.ts` | 编辑群名/模式/群主；添加/移除成员；owner 不可移除；12 人上限；mock + 浏览器验收 |
 
 ## 3. 执行波次与 worktree
 
@@ -132,7 +134,7 @@
 | worktree | 子智能体任务 | 说明 |
 |---|---|---|
 | `group-core` | P6-01 → P6-02 → P6-03 → P6-04 → P6-05 | 全部 conversation/scheduler/domain，串行做，避免 `conversation.go` 冲突 |
-| `group-surface` | P6-06 → P6-11 → P6-12 | Mode/来源/observer；避免碰 conversation 核心 |
+| `group-surface` | P6-06 → P6-11 → P6-12 → P6-16 → P6-17 | Mode/来源/observer/头部菜单层级/群组编辑；避免碰 conversation 核心 |
 
 ### Wave 2（Wave 1 合并后）
 
@@ -190,6 +192,8 @@
 | P6-13 | todo | group-lifecycle | — | — |
 | P6-14 | todo | group-lifecycle | — | — |
 | P6-15 | todo | main | — | — |
+| P6-16 | todo | group-surface | — | — |
+| P6-17 | todo | group-surface | — | — |
 
 ## 7. 残余风险 / 待观察
 
