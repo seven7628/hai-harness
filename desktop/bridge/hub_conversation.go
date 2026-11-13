@@ -519,6 +519,13 @@ func (m *manager) finishHubGroupDelivery(gid agenthub.GroupID, agentID agenthub.
 	ctrl := m.hubConversation()
 	finished := false
 	if wakeID != "" {
+		// B2：只收口**这一轮真的还在跑**的记录。429 退回队列（queued + ReadyAt）的
+		// 那一条绝不能被 AgentEnd 覆写成 done —— 否则退避到期后 BeginDelivery
+		// no-op，该 wake 永久占住队首。FinishDelivery 内部也只允许 running → 终态，
+		// 这里是同一判据的显式前置检查（两处都做更稳）。
+		if d, ok := ctrl.Delivery(gid, wakeID); !ok || d.Status != agenthub.DeliveryRunning {
+			return
+		}
 		finished = ctrl.FinishDelivery(gid, wakeID, agenthub.DeliveryDone, "", time.Time{})
 	} else {
 		finished = ctrl.FinishAgentDeliveries(gid, agentID, agenthub.DeliveryDone, "", time.Time{}) > 0
