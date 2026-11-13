@@ -107,7 +107,10 @@ const (
 	CmdHubGroupAssign Command = "hub_group_assign"
 	// CmdHubConversationStop 人类「停止自动对话」：中断当前群 run + 清队列 + stopped（§6.5.6 规则 6）。
 	CmdHubConversationStop Command = "hub_conversation_stop"
-	CmdHubArtifactGet      Command = "hub_artifact_get"
+	// CmdHubConversationReset 人类「重置本群限制」（P6-04 ④）：立即清零 pair/深度/指纹
+	// 并解除 waiting_human，不自动唤醒任何人。
+	CmdHubConversationReset Command = "hub_conversation_reset"
+	CmdHubArtifactGet       Command = "hub_artifact_get"
 	// CmdHubSearch 人类全历史搜索（群 + DM，P4-04b-1）。**人类命令**：智能体侧没有
 	// 对应工具（agent 只能 group_history(query) 搜自己参与的群），所以命令面就是边界。
 	CmdHubSearch Command = "hub_search"

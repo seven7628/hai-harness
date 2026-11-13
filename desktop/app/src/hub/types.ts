@@ -383,8 +383,18 @@ export interface HubConversation {
   max_depth?: number
   queue_len?: number
   pair_limit?: number
-  /** 键是 `from→to`（Go 的 ConversationPairKey）。 */
+  /** 键是**无序** `a↔b`（Go 的 ConversationPairKey，P6-04）。 */
   pair_count?: Record<string, number>
+  /** pair 计数的滚动窗口（毫秒，默认 10 分钟）。 */
+  pair_window_ms?: number
+  /** 最热那一对的最早过期时刻（「约 N 分钟后自动恢复」的数据源）。 */
+  pair_reset_at?: string
+  /** 空闲重置阈值（毫秒，默认 30 分钟）。 */
+  idle_reset_ms?: number
+  /** 单轮 run 上限（毫秒，默认 10 分钟）。 */
+  run_timeout_ms?: number
+  /** 待投递队列上限（默认 200）。 */
+  max_pending_wakes?: number
   cooldown_ms?: number
   last_wake_at?: string
   stop_reason?: string
@@ -411,8 +421,10 @@ export interface HubDelivery {
   trigger_seq?: number
   round_id?: string
   status?: 'queued' | 'running' | 'done' | 'skipped' | 'failed' | string
-  /** 人话原因码：target_busy / rate_limit / pair_limit / depth_limit / budget / stopped / ... */
+  /** 原因码：target_busy / rate_limit / pair_limit / depth_limit / budget / queue_full / stale_conversation / ... */
   reason?: string
+  /** 同一件事的人话说明（含「跟谁、几次、窗口多长」）。 */
+  note?: string
   attempts?: number
   ready_at?: string
   enqueued_at?: string

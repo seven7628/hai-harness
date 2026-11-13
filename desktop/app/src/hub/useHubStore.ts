@@ -301,6 +301,8 @@ interface HubState {
   sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string, attachments?: HubAttachment[], sourceDraft?: string): Promise<boolean>
   sendGroupAssign(groupID: string, req: { agent_id: string; instruction: string; title?: string }): Promise<boolean>
   stopGroupConversation(groupID: string): Promise<boolean>
+  /** P6-04 ④ 手动重置本群对话限制（hub_conversation_reset）。 */
+  resetGroupConversation(groupID: string): Promise<boolean>
   loadTasks(): Promise<void>
   loadNeeds(): Promise<void>
   cancelTask(taskID: string): Promise<void>
@@ -1569,6 +1571,22 @@ export const useHubStore = create<HubState>((set, get) => ({
       set((s) => ({ groupConversations: { ...s.groupConversations, [gid]: r.data!.conversation as HubConversation } }))
     }
     set({ notice: r.data?.interrupted ? `已停止自动对话（中断 ${r.data.interrupted} 个 run）` : '已停止自动对话' })
+    return true
+  },
+
+  /** P6-04 ④：重置本群对话限制（清零 pair/深度/指纹，解除 waiting_human）。 */
+  async resetGroupConversation(groupID) {
+    const gid = (groupID || get().activeGroupId || '').trim()
+    if (!gid) return false
+    const r = await hubCommand<{ conversation?: HubConversation }>('hub_conversation_reset', { group_id: gid })
+    if (!r.ok) {
+      set({ error: r.error || '重置对话限制失败' })
+      return false
+    }
+    if (r.data?.conversation) {
+      set((s) => ({ groupConversations: { ...s.groupConversations, [gid]: r.data!.conversation as HubConversation } }))
+    }
+    set({ notice: '已重置本群对话限制' })
     return true
   },
 

@@ -50,24 +50,51 @@ export function conversationTurnText(conv?: HubConversation | null): string {
   return `${turn} · 深度 ${depth}/${maxDepth} · 队列 ${queue}`
 }
 
-/** 最热的一对 A→B（方案 §6.5.6 的踢皮球护栏）：`A → B 2/2`；没有则空串。 */
+/**
+ * 最热的一对（方案 §6.5.6 的踢皮球护栏，P6-04 起是**无序**滚动窗口）：
+ * `A ↔ B 10/10 · 约 8 分钟后自动恢复`；没有则空串。
+ *
+ * 键是 Go 的 ConversationPairKey（`a↔b`，字典序）。旧数据里的 `a→b` 也兼容解析，
+ * 否则升级后老会话的计数会整片消失。
+ */
 export function conversationPairText(
   conv?: HubConversation | null,
   names?: Record<string, string>,
+  now: number = Date.now(),
 ): string {
   if (!conv?.pair_count) return ''
-  const limit = conv.pair_limit && conv.pair_limit > 0 ? conv.pair_limit : 2
+  const limit = conv.pair_limit && conv.pair_limit > 0 ? conv.pair_limit : 10
   let best: { key: string; count: number } | null = null
   for (const [key, count] of Object.entries(conv.pair_count)) {
     if (!Number.isFinite(count) || count <= 0) continue
     if (!best || count > best.count) best = { key, count }
   }
   if (!best) return ''
-  const parts = best.key.split(/\s*(?:→|->)\s*/)
+  const parts = best.key.split(/\s*(?:↔|→|->)\s*/)
   if (parts.length !== 2) return ''
   const [from, to] = parts
   const label = (id: string): string => names?.[id] ?? id
-  return `${label(from)} → ${label(to)} ${best.count}/${limit}`
+  const base = `${label(from)} ↔ ${label(to)} ${best.count}/${limit}`
+  const left = pairRecoverText(conv, now)
+  return left ? `${base} · ${left}` : base
+}
+
+/** 到限的 pair 还有多久自动恢复：`约 8 分钟后自动恢复`；没到限/没有窗口则空串。 */
+export function pairRecoverText(conv?: HubConversation | null, now: number = Date.now()): string {
+  if (!conv?.pair_reset_at) return ''
+  const limit = conv.pair_limit && conv.pair_limit > 0 ? conv.pair_limit : 10
+  // 只在「确实到限」时才提示恢复时间（没到限时那行字是噪音）。
+  const counts = Object.values(conv.pair_count ?? {})
+  if (counts.length === 0 || Math.max(...counts) < limit) return ''
+  const t = Date.parse(conv.pair_reset_at)
+  if (!Number.isFinite(t)) return ''
+  const ms = Math.max(0, t - now)
+  if (ms <= 0) return '即将自动恢复'
+  const min = Math.ceil(ms / 60_000)
+  if (min < 1) return '不到 1 分钟后自动恢复'
+  if (min < 60) return `约 ${min} 分钟后自动恢复`
+  const hours = Math.ceil(min / 60)
+  return `约 ${hours} 小时后自动恢复`
 }
 
 /**
@@ -166,6 +193,7 @@ export function deliveryReasonText(reason?: string | null): string {
     case 'interrupted': return '运行被中断'
     case 'shutdown': return 'Hub 正在关停'
     case 'invalid': return '群或成员已不可用'
+    case 'queue_full': return '排队过多，已跳过'
     default: return (reason ?? '').trim()
   }
 }

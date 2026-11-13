@@ -37,9 +37,8 @@ func (m *manager) hubConversation() *agenthub.ConversationController {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.hubConv == nil {
-		opts := agenthub.ConversationOptions{
-			Limits: agenthub.ConversationLimits{TurnBudget: agenthub.UnlimitedTurnBudget},
-		}
+		// P6-04：限额来自 settings.json 顶层 hub.conversation（全局，不是每群策略）。
+		opts := agenthub.ConversationOptions{Limits: loadHubConversationLimits()}
 		if m.hubConvLimits != nil {
 			opts.Limits = *m.hubConvLimits
 		}
@@ -91,6 +90,9 @@ func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigg
 	wakes, err := ctrl.Offer(agenthub.ConversationOffer{
 		GroupID: g.ID, Sender: sender, Targets: round.Targets,
 		Text: trigger.Text, Depth: depth, TriggerSeq: trigger.Seq, RoundID: round.ID,
+		// 发起者那一轮所属的对话 id：人类插话换代之后，旧 run 的 @ 不得进入新对话
+		//（§1.1/§1.5）。空 = 未知（人类首轮/测试），不校验。
+		ConversationID: m.hubRunConversationID(string(sender), g.ID),
 	})
 	if err != nil {
 		if errors.Is(err, agenthub.ErrConversationExhausted) {
@@ -98,7 +100,30 @@ func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigg
 		}
 		return nil, err
 	}
+	// 全部目标都被护栏跳过 → waiting_human（不是 exhausted）：写一条说明，人类一句话
+	// 就能继续（P6-04 §1.1 到限行为）。
+	m.notifyHubConversationWaiting(g.ID, ctrl.View(g.ID))
 	return wakes, nil
+}
+
+// hubRunConversationID 取某智能体**当前在跑的 run** 所属对话 id（空 = 未知）。
+// group_say 用它做换代路由校验：旧 generation 的 @ 不能进入人类新开的对话。
+func (m *manager) hubRunConversationID(agentID string, gid agenthub.GroupID) string {
+	if m == nil || agentID == "" || gid == "" {
+		return ""
+	}
+	ws := m.hubRuntimeIfExists(agentID)
+	if ws == nil {
+		return ""
+	}
+	sid := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: gid})
+	ws.mu.Lock()
+	bs := ws.sessions[sid]
+	ws.mu.Unlock()
+	if bs == nil {
+		return ""
+	}
+	return bs.hubWakeConversationID()
 }
 
 // hubGroupNextDepth 下一跳 @ 的深度：当前 run 绑定的唤醒深度 + 1（人类=0 → 首轮=1）。
@@ -746,6 +771,96 @@ func (m *manager) scheduleAgentTaskPump(gid agenthub.GroupID, agentID agenthub.A
 		}
 		m.emitHubTaskUpdate(latest)
 	})
+}
+
+// notifyHubConversationWaiting 全部目标都被护栏跳过时，写一条系统说明（P6-04）：
+// 状态是 waiting_human 而不是 exhausted —— 人类一句话就能继续，UI 也不该显示「已达上限」。
+// 按「对话 id + 原因」去重：同一代里重复 @ 不会刷屏。
+func (m *manager) notifyHubConversationWaiting(gid agenthub.GroupID, view agenthub.ConversationView) {
+	if m == nil || view.Status != agenthub.ConversationWaitingHuman {
+		return
+	}
+	text := strings.TrimSpace(view.StopReason)
+	if text == "" {
+		text = "本轮没有可唤醒的目标，等待人类继续"
+	}
+	key := "waiting|" + view.ID + "|" + text
+	m.hubConvMu.Lock()
+	if m.hubConvNotified == nil {
+		m.hubConvNotified = map[agenthub.GroupID]string{}
+	}
+	if m.hubConvNotified[gid] == key {
+		m.hubConvMu.Unlock()
+		return
+	}
+	m.hubConvNotified[gid] = key
+	m.hubConvMu.Unlock()
+
+	st, err := m.hubStore()
+	if err != nil {
+		return
+	}
+	msg := &agenthub.Message{
+		GroupID: gid, Kind: agenthub.KindSystem,
+		Sender: agenthub.Sender{Kind: agenthub.SenderSystem}, Text: text,
+	}
+	seq, err := agenthub.AppendGroupMessage(context.Background(), st, msg)
+	if err != nil {
+		m.hubAlertf("group_conversation_notice_failed", "群 %s 对话说明写入失败：%v", gid, err)
+		return
+	}
+	m.emitHubGroupMessage(gid, seq, msg)
+	m.emitHubConversation(gid, view)
+}
+
+// hubConversationReset 人类「重置本群限制」（P6-04 ④）：立即清零 pair/深度/指纹/
+// 队列并解除 waiting_human，**不自动唤醒任何人**（下一次 @ 立即生效）。
+//
+// 与 stop 的区别：stop 是「别再说了」（中断在飞 run、抑制 final、写系统消息）；
+// reset 是「把额度还给我」（不动在飞 run，只清计数）。在飞 run 收尾时它的 final
+// 照常落账 —— 它属于旧 generation 的产出，人已经看到了。
+func (m *manager) hubConversationReset(c command) {
+	if m == nil {
+		return
+	}
+	if m.hubShutdown.Load() {
+		m.resp(c, false, "Hub 正在关停，已忽略重置对话限制的请求", nil)
+		return
+	}
+	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	if gid == "" {
+		m.resp(c, false, "group_id 不能为空", nil)
+		return
+	}
+	ctx := context.Background()
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	g, err := st.LoadGroup(ctx, gid)
+	if err != nil {
+		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
+		return
+	}
+	if g == nil || g.Deleted {
+		m.resp(c, false, "群组不存在", nil)
+		return
+	}
+	ctrl := m.hubConversation()
+	// 与调度器同一个闸门：重置不能插在「取 wake → 投递」之间（否则刚清掉的
+	// 队列会被这一 pass 再投一条出去）。
+	unlock := m.hubConvDispatch.lock(g.ID)
+	view := ctrl.Reset(g.ID, time.Time{})
+	unlock()
+	m.bumpHubConversationGen(g.ID) // 冷却/退避定时器作废
+	m.hubConvMu.Lock()
+	if m.hubConvNotified != nil {
+		delete(m.hubConvNotified, g.ID) // 下一次护栏命中要能再报一次
+	}
+	m.hubConvMu.Unlock()
+	m.emitHubConversation(g.ID, view)
+	m.resp(c, true, "", map[string]any{"conversation": view})
 }
 
 // hubConversationStop 人类「停止自动对话」：中断当前群 run、清队列、stopped + 一条系统消息。

@@ -138,6 +138,25 @@ const eq = (got, want, m) => {
     'A 已跳过：互踢到上限，已跳过', 'skipped 文案带原因')
   eq(conv.deliveryLabel({ target: 'agt_a', status: 'failed', reason: 'boom' }, names),
     'A 失败：boom', '未知原因码原样显示')
+  // P6-04：无序 pair + 滚动窗口的自动恢复文案。
+  const now = new Date(2026, 9, 20, 12, 0, 0).getTime()
+  eq(conv.conversationPairText({ pair_limit: 10, pair_count: { 'agt_a↔agt_b': 10 } }, names, now),
+    'A ↔ B 10/10', 'pair 文案用 ↔（无序），没有恢复时间时只显示计数')
+  const resetAt = new Date(now + 8 * 60 * 1000).toISOString()
+  eq(conv.conversationPairText({ pair_limit: 10, pair_count: { 'agt_a↔agt_b': 10 }, pair_reset_at: resetAt }, names, now),
+    'A ↔ B 10/10 · 约 8 分钟后自动恢复', '到限时显示自动恢复时间')
+  eq(conv.pairRecoverText({ pair_limit: 10, pair_count: { 'agt_a↔agt_b': 3 }, pair_reset_at: resetAt }, now),
+    '', '没到限不提示恢复时间')
+  eq(conv.pairRecoverText({ pair_limit: 10, pair_count: { 'agt_a↔agt_b': 10 }, pair_reset_at: new Date(now + 30 * 60 * 1000).toISOString() }, now),
+    '约 30 分钟后自动恢复', '整分钟向上取整')
+  eq(conv.pairRecoverText({ pair_limit: 10, pair_count: { 'agt_a↔agt_b': 10 }, pair_reset_at: new Date(now - 1000).toISOString() }, now),
+    '即将自动恢复', '已过期 → 即将恢复')
+  eq(conv.pairRecoverText({ pair_limit: 10, pair_count: { 'agt_a↔agt_b': 10 }, pair_reset_at: new Date(now + 2 * 3600 * 1000).toISOString() }, now),
+    '约 2 小时后自动恢复', '超过一小时用小时')
+  // 旧数据（a→b 单向键）仍然能解析，不会因为升级丢计数。
+  eq(conv.conversationPairText({ pair_limit: 10, pair_count: { 'agt_a→agt_b': 4 } }, names, now),
+    'A ↔ B 4/10', '旧 → 键兼容解析')
+  eq(conv.conversationPairText({ pair_count: {} }, names, now), '', '空 pair_count → 空')
   eq(conv.deliveryReasonText(''), '', '空原因 → 空文案')
   eq(conv.deliveryReasonText('budget'), '预算不足，未启动', '预算门的可见文案（P6-03）')
   eq(conv.deliveryReasonText('rate_limit'), '上游限流，退避重试', '429 退避的可见文案')

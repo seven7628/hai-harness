@@ -296,6 +296,26 @@ export const SETTINGS_SCHEMA: Record<string, FieldKind> = {
       auto_clean: { t: 'bool' },
     },
   },
+  // P6-04（D8）：群聊对话引擎的全局护栏。**不是群策略** —— 这几个旋钮调的是
+  // 「对话引擎怎么防无限接龙」，12 个群各调一套会让排障无法用一句话解释。
+  // 0/缺省在 bridge 侧一律回落默认值（0 不是合法业务值，避免「设成 0 就永不唤醒」）。
+  hub: {
+    t: 'object',
+    fields: {
+      conversation: {
+        t: 'object',
+        fields: {
+          max_depth: { t: 'int', min: 1 },
+          pair_limit: { t: 'int', min: 1 },
+          pair_window_ms: { t: 'int', min: 1 },
+          idle_reset_ms: { t: 'int', min: 1 },
+          cooldown_ms: { t: 'int', min: 0 },
+          run_timeout_ms: { t: 'int', min: 1 },
+          max_pending_wakes: { t: 'int', min: 1 },
+        },
+      },
+    },
+  },
   codemode: {
     t: 'object',
     fields: {

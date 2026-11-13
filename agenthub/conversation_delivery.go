@@ -102,10 +102,32 @@ func (c *ConversationController) CommitDelivery(w Wake, at time.Time) Wake {
 	}
 	if !w.Human {
 		conv.turns++
-		conv.depth = w.Depth
+		// Depth 只做**展示**（本代见过的最大跳数）：它不再参与任何夹紧/判定 ——
+		// 每条链的深度由 wake 自带（P6-05），群级值被并行分支互相踩是旧实现的坑。
+		if w.Depth > conv.depth {
+			conv.depth = w.Depth
+		}
 		conv.lastWake = now
 		w.Turn = conv.turns
 		d.Turn = w.Turn
+		// 无序 pair 计数只在**投递成功**时 +1（§1.1）：忙/失败/停止/被跳过都不算，
+		// 否则「目标忙」会把额度白吃光，队列里的合法接龙永远轮不到。
+		if w.Sender != "" && w.Target != "" && w.Sender != w.Target {
+			p := newAgentPair(w.Sender, w.Target)
+			conv.pairs[p] = append(conv.pairs[p], now)
+			// 顺手按窗口裁一次：长时间运行的群不该无限攒时间戳。
+			if c.limits.PairWindow >= 0 {
+				cut := now.Add(-c.limits.PairWindow)
+				at := conv.pairs[p]
+				kept := at[:0]
+				for _, t := range at {
+					if !t.Before(cut) {
+						kept = append(kept, t)
+					}
+				}
+				conv.pairs[p] = kept
+			}
+		}
 	}
 	d.UpdatedAt = now
 	conv.updatedAt = now

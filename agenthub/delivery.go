@@ -71,6 +71,7 @@ const (
 	DeliveryReasonInterrupted = "interrupted"        // run 被中断（停止/关停）
 	DeliveryReasonShutdown    = "shutdown"           // Hub 正在关停
 	DeliveryReasonInvalid     = "invalid"            // 群/成员/会话已不可用
+	DeliveryReasonQueueFull   = "queue_full"         // 待投递队列到达 max_pending_wakes
 )
 
 // Delivery 是一条 wake 的投递记录（一个 target 一条）。
@@ -90,8 +91,11 @@ type Delivery struct {
 	RoundID    string `json:"round_id,omitempty"`
 
 	Status DeliveryStatus `json:"status"`
-	// Reason 是跳过/失败/排队的人话原因；running/done 通常为空。
+	// Reason 是**原因码**（target_busy/pair_limit/depth_limit/budget/...），UI 按码
+	// 本地化；Note 是同一件事的人话说明（写进系统消息/排障日志）。两者都留：
+	// 只存文案的话前端无法翻译，只存码的话排障时看不出「跟谁、几次、窗口多长」。
 	Reason string `json:"reason,omitempty"`
+	Note   string `json:"note,omitempty"`
 	// Attempts 投递尝试次数（busy/429 重试会累加）。
 	Attempts int `json:"attempts,omitempty"`
 	// ReadyAt 是「最早可以再试」的时刻（429 退避用；零值 = 随时可试）。

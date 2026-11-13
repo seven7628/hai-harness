@@ -356,7 +356,12 @@ type bridgeSession struct {
 	// hubWakeDepth/hubWakeTurn 是 hubGroupWake.Depth/Turn 的原子镜像（P3b-04）：
 	// group_say 在工具 goroutine 里要算「下一跳深度」，不能直接读 emit 独占的指针。
 	hubWakeDepth atomic.Int64
-	hubWakeTurn  atomic.Int64
+	// hubWakeConvMu/hubWakeConvID 是 hubGroupWake.ConversationID 的镜像（P6-04）：
+	// group_say 要用「发起者那一轮所属的对话 id」去校验换代路由，而工具 goroutine
+	// 不能直接读 hubGroupWake（emit 线程会改它）。
+	hubWakeConvMu sync.Mutex
+	hubWakeConvID string
+	hubWakeTurn   atomic.Int64
 	// hubGroupBusy 该群会话已投递但尚未 AgentEnd 的唤醒。忙时不投第二个快照，
 	// 避免两个 round 共用一次 AgentEnd。
 	hubGroupBusy atomic.Bool
@@ -1197,10 +1202,32 @@ func (bs *bridgeSession) setHubGroupWake(h *agenthub.GroupWakeHeader) {
 	if h == nil {
 		bs.hubWakeDepth.Store(0)
 		bs.hubWakeTurn.Store(0)
+		bs.setHubWakeConvID("")
 		return
 	}
 	bs.hubWakeDepth.Store(int64(h.Depth))
 	bs.hubWakeTurn.Store(int64(h.Turn))
+	bs.setHubWakeConvID(h.ConversationID)
+}
+
+// setHubWakeConvID 写「当前 run 所属对话 id」镜像（P6-04）。
+func (bs *bridgeSession) setHubWakeConvID(id string) {
+	if bs == nil {
+		return
+	}
+	bs.hubWakeConvMu.Lock()
+	bs.hubWakeConvID = id
+	bs.hubWakeConvMu.Unlock()
+}
+
+// hubWakeConversationID 读当前 run 所属对话 id（空 = 未知/人类首轮）。
+func (bs *bridgeSession) hubWakeConversationID() string {
+	if bs == nil {
+		return ""
+	}
+	bs.hubWakeConvMu.Lock()
+	defer bs.hubWakeConvMu.Unlock()
+	return bs.hubWakeConvID
 }
 
 // hubTaskResultPushTTL 是「已回推、还没被 run 认领」标记的存活上限。正常情况下

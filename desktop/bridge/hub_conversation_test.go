@@ -345,7 +345,7 @@ func TestHubConversationEightTurnsThenExhausted(t *testing.T) {
 // D 再 @E 就是第 5 跳 → 不入队、不唤醒 E，写一条深度原因的系统消息。
 func TestHubConversationDepthStopsAtFourHops(t *testing.T) {
 	m, buf := testManager(t)
-	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
+	convLimits(m, agenthub.ConversationLimits{Cooldown: -1, MaxDepth: 4})
 
 	a := createHubAgent(t, m, buf, 1, "深度A")
 	b := createHubAgent(t, m, buf, 2, "深度B")
@@ -367,8 +367,9 @@ func TestHubConversationDepthStopsAtFourHops(t *testing.T) {
 	}
 	msgs := waitConvSystemMessage(t, m, g.ID, "深度")
 	v := convView(m, g.ID)
-	if v.Status != agenthub.ConversationExhausted {
-		t.Fatalf("四跳之后对话 = %+v", v)
+	// P6-04：到限只拒绝该链继续 @（waiting_human），不把整个群判死（exhausted）。
+	if v.Status != agenthub.ConversationWaitingHuman {
+		t.Fatalf("四跳之后对话 = %+v, want waiting_human", v)
 	}
 	if v.Depth != 4 {
 		t.Fatalf("最后一跳深度 = %d, want 4", v.Depth)
@@ -411,21 +412,25 @@ func TestHubConversationPairLimitStopsPingPong(t *testing.T) {
 	}
 	msgs := waitConvSystemMessage(t, m, g.ID, "互踢")
 	v := convView(m, g.ID)
-	if v.Status != agenthub.ConversationExhausted {
-		t.Fatalf("踢皮球之后对话 = %+v", v)
+	if v.Status != agenthub.ConversationWaitingHuman {
+		t.Fatalf("踢皮球之后对话 = %+v, want waiting_human", v)
 	}
 	if got := v.PairCount[agenthub.ConversationPairKey(a.ID, b.ID)]; got != 2 {
 		t.Fatalf("A→B = %d, want 2（PairCount=%v）", got, v.PairCount)
 	}
-	if v.TurnsUsed != 5 {
-		t.Fatalf("turns used = %d, want 5（人类首轮 + 四次往返）", v.TurnsUsed)
+	// 轮次 = 人类首轮 + A@B + B@A = 3；A 的第三次 @B 被 pair 上限跳过（不算轮次）。
+	if v.TurnsUsed != 3 {
+		t.Fatalf("turns used = %d, want 3（人类首轮 + 两次往返）", v.TurnsUsed)
 	}
 	if got := len(convSystemMessages(msgs)); got != 1 {
 		t.Fatalf("系统消息 = %d 条, want 1", got)
 	}
-	// B 只被叫醒两次：第三次 @ 已经被拦下。
-	if n := convAgentMessages(msgs, b.ID); n != 2 {
-		t.Fatalf("B 的群消息 = %d, want 2", n)
+	// A 说了两次（第二次的 @ 被拦），B 只说了一次。
+	if n := convAgentMessages(msgs, a.ID); n != 2 {
+		t.Fatalf("A 的群消息 = %d, want 2", n)
+	}
+	if n := convAgentMessages(msgs, b.ID); n != 1 {
+		t.Fatalf("B 的群消息 = %d, want 1", n)
 	}
 }
 
@@ -466,12 +471,13 @@ func TestHubConversationFingerprintLoopStops(t *testing.T) {
 	}
 }
 
-// TestHubConversationStaleDepthAfterHumanInterjection 锁住复审 B1：四跳旧链还在跑
-// （header depth=4）时人类插话开新对话，旧链路回来 group_say @E 必须是新对话的第 1 跳，
-// 不能把新对话一开局就顶成「深度耗尽」。
-func TestHubConversationStaleDepthAfterHumanInterjection(t *testing.T) {
+// TestHubConversationStaleGenerationWakeDropped（P6-04 §1.1/§1.5）：四跳旧链还在跑
+// （header depth=4）时人类插话开新对话 —— 旧链路回来 group_say @E **不得进入新对话**：
+// 它的 wake 记 skipped(stale_conversation)，E 一次都不会被叫醒，新对话的深度额度
+// 一条都不被消耗。
+func TestHubConversationStaleGenerationWakeDropped(t *testing.T) {
 	m, buf := testManager(t)
-	convLimits(m, agenthub.ConversationLimits{Cooldown: -1}) // MaxDepth=4 默认
+	convLimits(m, agenthub.ConversationLimits{Cooldown: -1, MaxDepth: 4})
 
 	a := createHubAgent(t, m, buf, 1, "旧链A")
 	b := createHubAgent(t, m, buf, 2, "旧链B")
@@ -485,7 +491,7 @@ func TestHubConversationStaleDepthAfterHumanInterjection(t *testing.T) {
 	fd := newConvProvider("D 看完了不收尾 @") // 不带 @：四跳停在 D
 	releaseD := fd.gated()
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(d.ID), string(g.ID)), g, string(d.ID), fd)
-	fe := newConvProvider("E 收到")
+	fe := newConvProvider("E 不该被叫醒")
 	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(e.ID), string(g.ID)), g, string(e.ID), fe)
 
 	// 人类 → A(1) → B(2) → C(3) → D(4)：D 卡在门闩上，header 里攥着 depth=4。
@@ -507,32 +513,42 @@ func TestHubConversationStaleDepthAfterHumanInterjection(t *testing.T) {
 	if v := convView(m, g.ID); v.Depth != 0 {
 		t.Fatalf("人类插话后对话深度 = %d, want 0", v.Depth)
 	}
+	oldConv := convView(m, g.ID).ID
 
-	// 旧链的 D 还没跑完就回来说话：深度 5 必须夹到新对话的第 1 跳。
-	res, err := p3bGroupSay(t, m, string(d.ID), map[string]any{
+	// 旧链的 D 还没跑完就回来说话：这条 @ 属于旧 generation → 丢弃。
+	if _, err := p3bGroupSay(t, m, string(d.ID), map[string]any{
 		"group_id": string(g.ID), "text": "@旧链E 你也看一眼",
 		"mentions": []string{string(e.ID)},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("旧链路的 group_say: %v", err)
 	}
-	if _, bad := res["conversation"]; bad {
-		t.Fatalf("旧链路的 stale depth 把新对话顶爆了: %+v", res)
+	var stale bool
+	for _, dl := range m.hubConversation().Deliveries(g.ID) {
+		if dl.Target == e.ID && dl.Status == agenthub.DeliverySkipped && dl.Reason == agenthub.DeliveryReasonStale {
+			stale = true
+		}
 	}
-	if v := convView(m, g.ID); v.Terminal() {
-		t.Fatalf("新对话被 stale depth 结束: %+v", v)
+	if !stale {
+		t.Fatalf("旧 generation 的 @ 没有被记成 skipped(stale): %+v", m.hubConversation().Deliveries(g.ID))
 	}
-	close(releaseD) // D 收尾 → 串行泵放行 E
+	close(releaseD)
+	time.Sleep(100 * time.Millisecond)
+	if n := fe.callCount(); n != 0 {
+		t.Fatalf("旧链的 @ 把 E 叫醒了 %d 次（不得进入新对话）", n)
+	}
+	if v := convView(m, g.ID); v.ID != oldConv || v.Depth != 0 || v.TurnsUsed != 0 || v.Terminal() {
+		t.Fatalf("新对话被旧链污染: %+v", v)
+	}
+	// 新对话照常工作：人类 @E → 第 1 跳。
+	if ok, errMsg, _ := hubCmd(t, m, buf, 13, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@旧链E 现在你说",
+	}); !ok {
+		t.Fatalf("human send 2: %s", errMsg)
+	}
 	fe.waitStarted(t)
 	headers := convWakeHeaders(fe.lastRequest())
-	if len(headers) != 1 {
-		t.Fatalf("E 的唤醒 header = %d, want 1", len(headers))
-	}
-	if headers[0].Depth != 1 || headers[0].Turn != 1 {
-		t.Fatalf("E 的 depth/turn = %d/%d, want 1/1（新对话第一跳）", headers[0].Depth, headers[0].Turn)
-	}
-	if v := convView(m, g.ID); v.Terminal() || v.TurnsUsed != 1 || v.Depth != 1 {
-		t.Fatalf("对话 = %+v, want running + 1 轮 depth 1", v)
+	if len(headers) != 1 || headers[0].Depth != 1 {
+		t.Fatalf("E 的唤醒 header = %+v, want 1 条 depth=1", headers)
 	}
 }
 

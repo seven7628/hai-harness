@@ -50,8 +50,11 @@ func convIDs(ids ...string) []AgentID {
 func TestConversationLimitsDefaults(t *testing.T) {
 	c := NewConversationController(ConversationOptions{})
 	got := c.Limits()
-	if got.TurnBudget != 8 || got.MaxDepth != 4 || got.PairLimit != 2 || got.Cooldown != 1500*time.Millisecond {
-		t.Fatalf("默认限额 = %+v, want 8/4/2/1500ms", got)
+	// D2/D3：pair 默认 10（滚动窗口 10 分钟）、每链深度默认 1000、空闲重置 30 分钟。
+	if got.TurnBudget != 8 || got.MaxDepth != 1000 || got.PairLimit != 10 ||
+		got.PairWindow != 10*time.Minute || got.IdleReset != 30*time.Minute ||
+		got.MaxPendingWakes != 200 || got.Cooldown != 0 {
+		t.Fatalf("默认限额 = %+v, want 8/1000/10/10m/30m/200/0（D8 默认无冷却）", got)
 	}
 	// 零值限额的控制器与显式默认值同义；负数冷却 = 关闭。
 	c2 := NewConversationController(ConversationOptions{Limits: ConversationLimits{Cooldown: -1}})
@@ -231,9 +234,9 @@ func TestConversationUnlimitedTurnBudgetKeepsTwentyTurns(t *testing.T) {
 // 取消轮次闸门后，其余安全阀一个都不能松：深度、同对、同内容指纹照样停。
 func TestConversationUnlimitedTurnBudgetStillStopsOnSafetyValves(t *testing.T) {
 	t.Run("深度", func(t *testing.T) {
-		c, clk := newTestController(t, ConversationLimits{TurnBudget: UnlimitedTurnBudget, Cooldown: -1})
+		c, clk := newTestController(t, ConversationLimits{TurnBudget: UnlimitedTurnBudget, Cooldown: -1, MaxDepth: 4})
 		c.BeginHuman("group_1", 1, clk.Now())
-		for depth := 1; depth <= DefaultConversationMaxDepth; depth++ {
+		for depth := 1; depth <= 4; depth++ {
 			if _, err := c.Offer(ConversationOffer{
 				GroupID: "group_1", Sender: AgentID("agent_" + string(rune('a'+depth))),
 				Targets: convIDs("agent_z"), Text: fmt.Sprintf("深度 %d", depth), Depth: depth,
@@ -244,19 +247,36 @@ func TestConversationUnlimitedTurnBudgetStillStopsOnSafetyValves(t *testing.T) {
 				t.Fatalf("深度 %d begin", depth)
 			}
 		}
-		_, err := c.Offer(ConversationOffer{
+		// P6-04：到限**只跳过该 target**（账本 skipped/depth_limit），不整批熔断。
+		wakes, err := c.Offer(ConversationOffer{
 			GroupID: "group_1", Sender: "agent_x", Targets: convIDs("agent_y"),
-			Text: "第 5 跳", Depth: DefaultConversationMaxDepth + 1,
+			Text: "第 5 跳", Depth: 5,
 		})
-		if !errors.Is(err, ErrConversationExhausted) || !strings.Contains(err.Error(), "深度") {
-			t.Fatalf("超深必须按深度 exhausted，得到 %v", err)
+		if err != nil {
+			t.Fatalf("超深不该报错（只跳过该 target）: %v", err)
+		}
+		if len(wakes) != 0 {
+			t.Fatalf("超深仍入队: %+v", wakes)
+		}
+		if v := c.View("group_1"); v.Status != ConversationWaitingHuman {
+			t.Fatalf("全部跳过 → status = %q, want waiting_human（不是 exhausted）", v.Status)
+		}
+		var skipped *Delivery
+		for _, d := range c.Deliveries("group_1") {
+			if d.Status == DeliverySkipped && d.Reason == DeliveryReasonDepthLimit {
+				dd := d
+				skipped = &dd
+			}
+		}
+		if skipped == nil || !strings.Contains(skipped.Note, "深度") {
+			t.Fatalf("缺 depth_limit 的 skipped 记录: %+v", c.Deliveries("group_1"))
 		}
 	})
 
 	t.Run("同对", func(t *testing.T) {
-		c, clk := newTestController(t, ConversationLimits{TurnBudget: UnlimitedTurnBudget, Cooldown: -1})
+		c, clk := newTestController(t, ConversationLimits{TurnBudget: UnlimitedTurnBudget, Cooldown: -1, PairLimit: 2})
 		c.BeginHuman("group_1", 1, clk.Now())
-		for i := 0; i < DefaultConversationPairLimit; i++ {
+		for i := 0; i < 2; i++ {
 			if _, err := c.Offer(ConversationOffer{
 				GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
 				Text: fmt.Sprintf("第 %d 次不同说法", i+1), Depth: 2,
@@ -267,12 +287,12 @@ func TestConversationUnlimitedTurnBudgetStillStopsOnSafetyValves(t *testing.T) {
 				t.Fatalf("第 %d 次 begin", i+1)
 			}
 		}
-		_, err := c.Offer(ConversationOffer{
+		wakes, err := c.Offer(ConversationOffer{
 			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
 			Text: "第三次", Depth: 2,
 		})
-		if !errors.Is(err, ErrConversationExhausted) || !strings.Contains(err.Error(), "互踢") {
-			t.Fatalf("同对超限必须按踢皮球 exhausted，得到 %v", err)
+		if err != nil || len(wakes) != 0 {
+			t.Fatalf("同对超限只跳过该 target（不报错、不入队）: %v %+v", err, wakes)
 		}
 	})
 
@@ -301,7 +321,8 @@ func TestConversationUnlimitedTurnBudgetStillStopsOnSafetyValves(t *testing.T) {
 }
 
 func TestConversationDepthCap(t *testing.T) {
-	c, clk := newTestController(t, ConversationLimits{Cooldown: -1})
+	// P6-04/P6-05：到限**只拒绝这条链继续 @**（skip 该 target），不把整个群判死。
+	c, clk := newTestController(t, ConversationLimits{Cooldown: -1, MaxDepth: 4})
 	c.BeginHuman("group_1", 1, clk.Now())
 	for depth := 1; depth <= 4; depth++ {
 		if _, err := c.Offer(ConversationOffer{
@@ -317,42 +338,47 @@ func TestConversationDepthCap(t *testing.T) {
 	if v := c.View("group_1"); v.Depth != 4 {
 		t.Fatalf("depth = %d, want 4", v.Depth)
 	}
-	_, err := c.Offer(ConversationOffer{
+	wakes, err := c.Offer(ConversationOffer{
 		GroupID: "group_1", Sender: "agent_x", Targets: convIDs("agent_y"), Text: "第 5 跳", Depth: 5,
 	})
-	if !errors.Is(err, ErrConversationExhausted) {
-		t.Fatalf("深度 5 必须 exhausted，得到 %v", err)
+	if err != nil {
+		t.Fatalf("超深不该整批报错（只跳过该 target）: %v", err)
 	}
-	if !strings.Contains(err.Error(), "深度") {
-		t.Fatalf("原因应提到深度: %v", err)
+	if len(wakes) != 0 {
+		t.Fatalf("超深仍入队: %+v", wakes)
 	}
-	if v := c.View("group_1"); v.QueueLen != 0 || v.Status != ConversationExhausted {
-		t.Fatalf("exhausted 视图 = %+v", v)
+	if v := c.View("group_1"); v.Status != ConversationWaitingHuman || v.QueueLen != 0 {
+		t.Fatalf("全部跳过后的视图 = %+v, want waiting_human/queue=0", v)
 	}
 }
 
 func TestConversationPairLimit(t *testing.T) {
-	c, clk := newTestController(t, ConversationLimits{Cooldown: -1})
+	// P6-04：无序 pair、成功投递才计数、到限只跳过该 target。
+	c, clk := newTestController(t, ConversationLimits{Cooldown: -1, PairLimit: 2})
 	c.BeginHuman("group_1", 1, clk.Now())
 	for i := 0; i < 2; i++ {
 		if _, err := c.Offer(ConversationOffer{
 			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
 			Text: "第 " + string(rune('a'+i)) + " 次不同说法", Depth: 2,
 		}); err != nil {
-			t.Fatalf("第 %d 次 a→b 应当允许: %v", i+1, err)
+			t.Fatalf("第 %d 次 a↔b 应当允许: %v", i+1, err)
 		}
 		if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
 			t.Fatalf("第 %d 次 begin", i+1)
 		}
 	}
 	if n := c.PairCount("group_1", "agent_a", "agent_b"); n != 2 {
-		t.Fatalf("a→b = %d, want 2", n)
+		t.Fatalf("a↔b = %d, want 2", n)
 	}
-	_, err := c.Offer(ConversationOffer{
+	// 无序：反过来查同一个键。
+	if n := c.PairCount("group_1", "agent_b", "agent_a"); n != 2 {
+		t.Fatalf("b↔a = %d, want 2（无序 pair）", n)
+	}
+	wakes, err := c.Offer(ConversationOffer{
 		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "第三次", Depth: 2,
 	})
-	if !errors.Is(err, ErrConversationExhausted) || !strings.Contains(err.Error(), "互踢") {
-		t.Fatalf("第 3 次 a→b 必须按踢皮球 exhausted，得到 %v", err)
+	if err != nil || len(wakes) != 0 {
+		t.Fatalf("第 3 次 a↔b 只跳过该 target，得到 %v %+v", err, wakes)
 	}
 	// 人类发送不计 PairCount：同一对目标的既有人数不因人的消息增长。
 	c.BeginHuman("group_1", 2, clk.Now())
@@ -369,7 +395,7 @@ func TestConversationPairLimit(t *testing.T) {
 		t.Fatalf("人类发送计入 pair count = %d", n)
 	}
 	if n := c.PairCount("group_1", "agent_a", "agent_b"); n != 0 {
-		t.Fatalf("人类发送不该增长 a→b: %d", n)
+		t.Fatalf("人类发送不该增长 a↔b: %d", n)
 	}
 }
 
@@ -442,82 +468,83 @@ func TestConversationFingerprintLoop(t *testing.T) {
 	}
 }
 
-func TestConversationOfferNoPartialEnqueue(t *testing.T) {
-	c, clk := newTestController(t, ConversationLimits{Cooldown: -1})
+// TestConversationOfferSkipsOnlyAtLimitTarget（P6-04）：一条消息 @ 两个人，其中一个
+// 已经到 pair 上限 → **只跳过它**，另一个照常入队；不整批熔断、不报错。
+func TestConversationOfferSkipsOnlyAtLimitTarget(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{Cooldown: -1, PairLimit: 2})
 	c.BeginHuman("group_1", 1, clk.Now())
-	// 先把 a→c 用满（2 次）。
+	// 先把 a↔c 用满（2 次成功投递）。
 	for i := 0; i < 2; i++ {
 		if _, err := c.Offer(ConversationOffer{
 			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_c"),
 			Text: "c 第 " + string(rune('a'+i)) + " 句", Depth: 2,
 		}); err != nil {
-			t.Fatalf("预置 a→c: %v", err)
+			t.Fatalf("预置 a↔c: %v", err)
 		}
 		if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
 			t.Fatal("begin 预置")
 		}
 	}
-	_, err := c.Offer(ConversationOffer{
+	wakes, err := c.Offer(ConversationOffer{
 		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b", "agent_c"),
 		Text: "一条消息同时 @ 两个人", Depth: 2,
 	})
-	if !errors.Is(err, ErrConversationExhausted) {
-		t.Fatalf("a→c 已满必须拒绝整批，得到 %v", err)
+	if err != nil {
+		t.Fatalf("到限不该整批报错: %v", err)
 	}
-	if v := c.View("group_1"); v.QueueLen != 0 {
-		t.Fatalf("部分入队了：QueueLen = %d", v.QueueLen)
+	if len(wakes) != 1 || wakes[0].Target != "agent_b" {
+		t.Fatalf("wakes = %+v, want 只留 agent_b", wakes)
+	}
+	if v := c.View("group_1"); v.QueueLen != 1 {
+		t.Fatalf("queue = %d, want 1（只跳过命中的那条）", v.QueueLen)
+	}
+	var skipped bool
+	for _, d := range c.Deliveries("group_1") {
+		if d.Target == "agent_c" && d.Status == DeliverySkipped && d.Reason == DeliveryReasonPairLimit {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatalf("缺 a↔c 的 skipped(pair_limit) 记录: %+v", c.Deliveries("group_1"))
+	}
+	// 被跳过的那条不算投递成功 → 不增长 pair 计数。
+	if n := c.PairCount("group_1", "agent_a", "agent_c"); n != 2 {
+		t.Fatalf("a↔c = %d, want 2（skip 不该再计数）", n)
 	}
 	if n := c.PairCount("group_1", "agent_a", "agent_b"); n != 0 {
-		t.Fatalf("被拒的批次不该记账：a→b = %d", n)
+		t.Fatalf("a↔b = %d, want 0（还没投递）", n)
 	}
 }
 
-// TestConversationOfferClampsStaleDepth 锁住人类插话后的 stale depth（复审 B1）：
-// 人类消息开新对话（depth 归 0）之后，旧链路上还在跑的那一轮手里还是 depth=4 的
-// header —— 它回来 @ 一句必须是新对话的第 1 跳，而不是把新对话顶到 5 → exhausted。
-func TestConversationOfferClampsStaleDepth(t *testing.T) {
-	c, clk := newTestController(t, ConversationLimits{Cooldown: -1})
+// TestConversationDepthFollowsChainNotGroup（P6-04/P6-05）：depth 由 wake 自带，
+// 不再按「群级当前 depth」夹紧 —— 否则并行分支的深浅会互相踩。
+func TestConversationDepthFollowsChainNotGroup(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{Cooldown: -1, MaxDepth: 1000})
 	c.BeginHuman("group_1", 1, clk.Now())
+	// 深分支：depth 5。
 	wakes, err := c.Offer(ConversationOffer{
-		GroupID: "group_1", Sender: "agent_old", Targets: convIDs("agent_e"),
-		Text: "旧链路回来接着说", Depth: 5,
+		GroupID: "group_1", Sender: "agent_deep", Targets: convIDs("agent_x"),
+		Text: "深链", Depth: 5,
 	})
-	if err != nil {
-		t.Fatalf("人类插话后的旧深度不该被当成越界: %v", err)
-	}
-	if len(wakes) != 1 || wakes[0].Depth != 1 {
-		t.Fatalf("wake = %+v, want 唯一一条 depth=1", wakes)
-	}
-	if v := c.View("group_1"); v.Status != ConversationRunning || v.QueueLen != 1 {
-		t.Fatalf("对话 = %+v, want running + 1 条排队（不该 exhausted）", v)
-	}
-	if w, ok := c.NextDue("group_1", clk.Now()); !ok || w.Depth != 1 {
-		t.Fatalf("NextDue = %+v %v, want depth 1", w, ok)
+	if err != nil || len(wakes) != 1 || wakes[0].Depth != 5 {
+		t.Fatalf("深链 wake = %+v, %v（depth 必须原样保留）", wakes, err)
 	}
 	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
-		t.Fatal("begin turn")
+		t.Fatal("begin 深链")
 	}
-	if v := c.View("group_1"); v.Depth != 1 || v.TurnsUsed != 1 {
-		t.Fatalf("记账后 depth/turns = %d/%d, want 1/1", v.Depth, v.TurnsUsed)
-	}
-	// 夹紧只削「跳级」，正常生长照旧：conv.depth=1 → 下一跳 2。
+	// 浅分支随后到：不能因为「群级 depth 已经是 5」把它的 depth 抬到 6。
 	wakes, err = c.Offer(ConversationOffer{
-		GroupID: "group_1", Sender: "agent_e", Targets: convIDs("agent_f"),
-		Text: "正常下一跳", Depth: 2,
+		GroupID: "group_1", Sender: "agent_shallow", Targets: convIDs("agent_y"),
+		Text: "浅链", Depth: 2,
 	})
 	if err != nil || len(wakes) != 1 || wakes[0].Depth != 2 {
-		t.Fatalf("正常一跳 = %+v, %v", wakes, err)
+		t.Fatalf("浅链 wake = %+v, %v（不能被群级 depth 污染）", wakes, err)
 	}
 	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
-		t.Fatal("begin turn 2")
+		t.Fatal("begin 浅链")
 	}
-	// 手搓一个更深的 Depth=4：夹到 conv.depth+1 = 3，而不是照单全收。
-	wakes, err = c.Offer(ConversationOffer{
-		GroupID: "group_1", Sender: "agent_f", Targets: convIDs("agent_g"),
-		Text: "跳级的一条", Depth: 4,
-	})
-	if err != nil || len(wakes) != 1 || wakes[0].Depth != 3 {
-		t.Fatalf("跳级 depth 应夹到 3，得到 %+v, %v", wakes, err)
+	if v := c.View("group_1"); v.Depth != 5 {
+		t.Fatalf("视图 depth = %d, want 5（取见过的最大跳数）", v.Depth)
 	}
 }
 

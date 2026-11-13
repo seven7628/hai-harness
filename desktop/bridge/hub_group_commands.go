@@ -691,6 +691,8 @@ func (m *manager) hubGroupSend(c command) {
 	if len(humanWakes) > 0 {
 		deliveries = m.wakeGroupRound(g, humanWakes)
 	}
+	// 全部目标都被护栏跳过（例如队列已满）→ waiting_human + 一条说明。
+	m.notifyHubConversationWaiting(g.ID, m.hubConversationView(g.ID))
 	respData := map[string]any{"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets}
 	if len(deliveries) > 0 {
 		respData["deliveries"] = deliveries
