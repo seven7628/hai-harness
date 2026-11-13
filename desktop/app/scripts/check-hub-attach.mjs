@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 // Hub 图片 / 文件附件的真浏览器回归（P4-UI-13）。
 //
-// 前置：mock dev server 已启动（默认 5180，**不要占 5173**）：
-//   VITE_PORT=5180 npx vite
-// 运行：
+// 前置：默认自起 dev server（5226 端口，不占 5173/5180）；也可复用已起的：
 //   node scripts/check-hub-attach.mjs [--url http://localhost:5180/] [--out /tmp/hub-attach-shots]
+//   node scripts/check-hub-attach.mjs --no-spawn        # 只复用，不起新 server
 //
 // 断言：
 //   · DM：setInputFiles 注入一张 8×8 PNG → composer 上方出现缩略图 chip → 发送 →
@@ -15,6 +14,9 @@
 //     点文件 chip 复制路径不抛；历史消息的灯箱没有「删除」
 //   · 群：同样的注入 → 群用户气泡里出现 <img>（纯图片、正文为空也能发）
 //   · 390×844：DM / 群会话带附件时 documentElement.scrollWidth <= 390（0 横向溢出）
+//   · 扇形叠牌：data-n / --i / --mid、单图 128×88（390 下 108×74）、hover 的牌 z-index=200、
+//     每张牌右上角的 × 都是最上层命中元素（叠放顺序不遮挡）、第 2/3 张的 × 能移除自己、
+//     700px + 10 张不横向溢出且抽出的牌不被裁
 //   · 全程无 console error / pageerror
 //
 // 不造假数据：图片是真实 PNG（Buffer 注入），附件回显来自 mock 的 hub_message，
@@ -25,6 +27,11 @@
 // 消息与 composer 条带是否撑破文档。
 import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
+
+const APP_DIR = fileURLToPath(new URL('..', import.meta.url))
 
 const argv = process.argv.slice(2)
 const arg = (name, def) => {
@@ -32,10 +39,52 @@ const arg = (name, def) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : def
 }
 // 注意：别把常量命名成 URL —— 会遮住全局 URL 构造函数（history fixture 要用）。
-const BASE_URL = arg('url', process.env.HUB_ATTACH_URL || 'http://localhost:5180/')
+const URL_ARG = arg('url', process.env.HUB_ATTACH_URL || '')
+const PORT = Number(arg('port', process.env.HUB_ATTACH_PORT || '5226'))
+const BASE_URL = URL_ARG || `http://localhost:${PORT}/`
+const NO_SPAWN = argv.includes('--no-spawn')
 const OUT = arg('out', '/tmp/hub-attach-shots')
 const FIXTURE_URL = new URL(BASE_URL)
 FIXTURE_URL.searchParams.set('hubFixture', 'attach')
+
+// —— dev server：默认自起 / 退出时带走（与 check-hub-inline-todos.mjs 同一套）——
+async function preflight(url) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(4000) })
+    if (!res.ok) return `HTTP ${res.status}`
+    const html = await res.text()
+    if (!html.includes('id="root"')) return '响应里没有 #root（不是 vite dev 页面？）'
+    return null
+  } catch (e) {
+    return e?.cause?.code || e?.message || String(e)
+  }
+}
+
+let server = null
+if (await preflight(BASE_URL)) {
+  if (NO_SPAWN) {
+    console.error(`❌ dev server 不可用：${BASE_URL}`)
+    console.error(`   先起：cd desktop/app && npx vite --port ${PORT} --strictPort`)
+    process.exit(2)
+  }
+  // 直接跑 node_modules/.bin/vite：经 npx 会多一层 npm exec 进程，SIGTERM 只杀到壳。
+  server = spawn(join(APP_DIR, 'node_modules', '.bin', 'vite'), ['--port', String(PORT), '--strictPort'], {
+    cwd: APP_DIR, stdio: 'ignore',
+  })
+  let ready = false
+  for (let i = 0; i < 120; i++) {
+    await new Promise((r) => setTimeout(r, 500))
+    if (!(await preflight(BASE_URL))) { ready = true; break }
+  }
+  if (!ready) {
+    console.error(`❌ 自起 dev server 超时（${BASE_URL}）`)
+    process.exit(2)
+  }
+}
+const stopServer = () => { try { server?.kill('SIGTERM') } catch { /* 已退出 */ } }
+process.on('exit', stopServer)
+process.on('SIGINT', () => { stopServer(); process.exit(130) })
+process.on('SIGTERM', () => { stopServer(); process.exit(143) })
 
 // 8×8 PNG（橙底 + 深色对角）：真实可解码的图片，和 mock fixture 是同一张。
 const PNG = Buffer.from(
@@ -319,6 +368,95 @@ async function sendWithImage(testid, text) {
   await page.screenshot({ path: `${OUT}/dm-lightbox-focus.png` })
 }
 
+// —— 3c) 扇形叠牌：几何 / 命中区 / 单图尺寸 / 窄列不溢出 ——
+{
+  await openDM()
+  const cards = page.locator('.hub-attach-strip .hub-attach-chip--img')
+  const three = Array.from({ length: 3 }, (_, i) => ({ ...filePayload, name: `fan-${i + 1}.png` }))
+  await page.setInputFiles('[data-testid="hub-image-input"]', three)
+  await page.waitForTimeout(900)
+  await page.locator('.hub-attach-strip').scrollIntoViewIfNeeded()
+  check(await page.locator('.hub-attach-imgs').getAttribute('data-n') === '3', '三张图 → 扇形容器 data-n=3')
+  const geom = await page.evaluate(() => {
+    const el = document.querySelector('.hub-attach-imgs')
+    const card = el.querySelector('.hub-attach-chip--img')
+    return {
+      i: card.style.getPropertyValue('--i').trim(),
+      mid: card.style.getPropertyValue('--mid').trim(),
+      lastMid: el.querySelectorAll('.hub-attach-chip--img')[2].style.getPropertyValue('--mid').trim(),
+    }
+  })
+  check(geom.i === '0' && geom.mid === '1' && geom.lastMid === '1',
+    `扇形几何走 --i/--mid 行内变量（got i=${geom.i} mid=${geom.mid}/${geom.lastMid}）`)
+  // 每张牌右上角的 × 必须是命中的最上层元素：`z-index: 100 - i` 的叠放顺序就是为这个。
+  const hits = await page.evaluate(() => Array.from(document.querySelectorAll('.hub-attach-strip .hub-attach-chip--img')).map((card) => {
+    const x = card.querySelector('.hub-attach-x')
+    const r = x.getBoundingClientRect()
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
+    return top === x
+  }))
+  check(hits.length === 3 && hits.every(Boolean), `每张牌的 × 都在最上层（命中：${hits.join(',')}）`)
+  // hover 的牌抽到整叠之上：z-index 必须是 200（否则会被右边那张牌盖住一半）。
+  await cards.nth(1).hover()
+  await page.waitForTimeout(300)
+  const zHover = await cards.nth(1).evaluate((el) => getComputedStyle(el).zIndex)
+  check(zHover === '200', `hover 的牌 z-index=200（抽出来压住整叠，got=${zHover}）`)
+  // 第 2 张自己的 ×：hover 后点它自己（不是 .first()），条带少一张。
+  await cards.nth(1).locator('.hub-attach-x').click()
+  await page.waitForTimeout(400)
+  check(await cards.count() === 2, '第 2 张的 × 能移除自己（3 → 2）')
+  // 原来的第 3 张现在在第 2 位：它的 × 同样能移除（不是只有第一张可点）。
+  await cards.nth(1).hover()
+  await cards.nth(1).locator('.hub-attach-x').click()
+  await page.waitForTimeout(400)
+  check(await cards.count() === 1, '第 3 张的 × 也能移除自己（2 → 1）')
+
+  // 一张图不是一叠牌：128×88 大缩略图（删掉 data-n='1' 规则就退回 64×45）。
+  const size = await cards.first().evaluate((el) => `${el.offsetWidth}x${el.offsetHeight}`)
+  check(size === '128x88', `单图缩略图 128x88（got=${size}）`)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForTimeout(900)
+  const sizeNarrow = await cards.first().evaluate((el) => `${el.offsetWidth}x${el.offsetHeight}`)
+  check(sizeNarrow === '108x74', `390 下单图缩略图 108x74（got=${sizeNarrow}）`)
+
+  // 窄列（641–900）10 张牌：条带内部横向滚动，文档 0 横向溢出，抽出的牌不被裁。
+  await page.setViewportSize({ width: 700, height: 900 })
+  await page.waitForTimeout(500)
+  const ten = Array.from({ length: 10 }, (_, i) => ({ ...filePayload, name: `wide-${i + 1}.png` }))
+  await page.setInputFiles('[data-testid="hub-image-input"]', ten)
+  await page.waitForTimeout(1200)
+  check(await cards.count() === 10, '700px 下 10 张图都进条带')
+  const doc700 = await page.evaluate(() => document.documentElement.scrollWidth)
+  check(doc700 <= 700, `700px + 10 张：文档 0 横向溢出（scrollWidth=${doc700}）`)
+  const stripBox = await page.evaluate(() => {
+    const el = document.querySelector('.hub-attach-imgs')
+    const composer = document.querySelector('.hub-demo .composer')
+    return {
+      // 内容比列宽时必须是「内部滚动」而不是「溢出到列外」：
+      // overflow-x 仍是 visible 的话，最后几张牌会画到 composer 右边（页面不一定滚，但已经越界）。
+      overflowX: getComputedStyle(el).overflowX,
+      overflows: el.scrollWidth > el.clientWidth,
+      right: Math.round(el.getBoundingClientRect().right),
+      composerRight: Math.round(composer.getBoundingClientRect().right),
+    }
+  })
+  check(stripBox.overflowX === 'auto' && stripBox.overflows,
+    `700px + 10 张：牌比列宽时走条带内部滚动（overflowX=${stripBox.overflowX}，${stripBox.overflows ? '内容溢出' : '内容放得下'}）`)
+  check(stripBox.right <= stripBox.composerRight + 1,
+    `700px 下条带右缘不越界（${stripBox.right} <= ${stripBox.composerRight}）`)
+  // 抽出来的牌不能被 overflow 裁掉：hover 第一张，牌顶要落在容器的可视区内。
+  await cards.first().hover()
+  await page.waitForTimeout(300)
+  const lift = await page.evaluate(() => {
+    const el = document.querySelector('.hub-attach-imgs')
+    const card = el.querySelector('.hub-attach-chip--img')
+    return { cardTop: Math.round(card.getBoundingClientRect().top), clipTop: Math.round(el.getBoundingClientRect().top) }
+  })
+  check(lift.cardTop >= lift.clipTop, `700px 下抽出的牌不被裁（牌顶 ${lift.cardTop} >= 容器顶 ${lift.clipTop}）`)
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.waitForTimeout(500)
+}
+
 // —— 4) 失败 → 重试：附件跟着失败走，重试成功后条带才清 ——
 {
   await openDM()
@@ -394,5 +532,5 @@ if (failed.length > 0) {
   console.error(`\n截图在 ${OUT}`)
   process.exit(1)
 }
-console.log(`✅ Hub 附件浏览器回归通过（${assertions} 项断言：DM/群 注入·发送·回显·灯箱·Tab 焦点陷阱·历史·390）`)
+console.log(`✅ Hub 附件浏览器回归通过（${assertions} 项断言：DM/群 注入·发送·回显·灯箱·Tab 焦点陷阱·历史·390·扇形叠牌命中区）`)
 console.log(`   截图：${OUT}/dm-strip-files.png, dm-strip-drop-paste.png, dm-strip-image.png, dm-sent.png, dm-lightbox.png, dm-history.png, group-sent.png, dm-failed.png, dm-retried.png, dm-390.png, group-390.png`)

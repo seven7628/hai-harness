@@ -2933,7 +2933,12 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   align-items: flex-end;
   min-width: 0;
   max-width: 100%;
-  padding: 9px 2px 1px 12px;
+  /* 10 张牌（≈523px）比 composer 列还宽：条带内部横向滚动，别把列/页面撑破。
+     上 16px / 下 12px 是「旋转后的边角 + hover 上浮 + 焦点环」的余量，否则会被 overflow 裁掉。 */
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 16px 4px 12px 12px;
+  scrollbar-width: thin;
 }
 .hub-demo .hub-attach-chip--img {
   position: relative;
@@ -3250,14 +3255,6 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 @media (max-width: 640px) {
   .hub-demo .hub-attach-lb { padding: 10px; }
   .hub-demo .hub-attach-lb img { max-height: calc(100dvh - 150px); }
-  /* 390 下 8~10 张牌会超过列宽：牌在条带内部横向滚动，文档本身绝不溢出。
-     上方 18px 是给「旋转后的边角 + 抽出上浮」的余量，否则 overflow 会切掉牌顶。 */
-  .hub-demo .hub-attach-imgs {
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 18px 4px 6px 12px;
-    scrollbar-width: thin;
-  }
   .hub-demo .hub-attach-chip--img { width: 52px; height: 37px; margin-left: -12px; }
   .hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img { width: 108px; height: 74px; }
   .hub-demo .hub-msg-img { width: 88px; height: 66px; }
