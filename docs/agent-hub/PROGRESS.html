@@ -2273,8 +2273,10 @@ const BASE = {
       ],
       "acceptance": "readonly 拒绝非只读工具；ask 对非只读工具弹审批；auto 直跑；group_say/读工具始终允许；人类 UI 与实际一致。",
       "tests": "go test ./desktop/bridge -run TestGroupMode；浏览器 Needs 审批流",
-      "commit": "feat(hub-p6-06): 群 Mode 工具策略真接线",
-      "status": "in_progress"
+      "commit": "9e5ca58",
+      "status": "review",
+      "review": "pending",
+      "reviewNote": "主 Session 已复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer（12 组）+ check-hub-group-edit 浏览器 PASS；待合并后做最终 Review。"
     },
     {
       "id": "P6-07",
@@ -2366,8 +2368,10 @@ const BASE = {
       ],
       "acceptance": "wake header 带 human/owner/member 来源；审计可查；ask/readonly 对 agent-origin 同样生效；不把 agent 消息当系统指令。",
       "tests": "go test ./desktop/bridge -run TestGroupOrigin；prompt 快照",
-      "commit": "feat(hub-p6-11): agent 来源标记与工具策略审计",
-      "status": "in_progress"
+      "commit": "4727831",
+      "status": "review",
+      "review": "pending",
+      "reviewNote": "主 Session 已复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer（12 组）+ check-hub-group-edit 浏览器 PASS；待合并后做最终 Review。"
     },
     {
       "id": "P6-12",
@@ -2385,8 +2389,10 @@ const BASE = {
       ],
       "acceptance": "MemberRole 只剩 owner/member；旧 observer 加载转 member；删除所有 observer 特判/UI 标签/mock；@all 覆盖全部活跃成员。",
       "tests": "go test ./agenthub/... ./desktop/bridge -run Group；node scripts/test-hub-group-create.mjs；浏览器 group",
-      "commit": "refactor(hub-p6-12): 删除 observer 角色并迁移旧数据",
-      "status": "in_progress"
+      "commit": "715a28c",
+      "status": "review",
+      "review": "pending",
+      "reviewNote": "主 Session 已复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer（12 组）+ check-hub-group-edit 浏览器 PASS；待合并后做最终 Review。"
     },
     {
       "id": "P6-13",
@@ -2463,8 +2469,10 @@ const BASE = {
       ],
       "acceptance": "“更多操作”下拉菜单永远压在消息列表/表格/右栏之上，不再透出下层内容；chat-header 的 backdrop-filter 不得把菜单困在低层级；外点/Esc 关闭；ink/paper/system 三主题 1280/640 截图验收；键盘可达。",
       "tests": "npm run test:css；浏览器 check-hub-menu-layer（新增）；check-p4-p2-details",
-      "commit": "fix(hub-p6-16): 修复头部更多菜单层级与透出",
-      "status": "in_progress"
+      "commit": "3bd3439",
+      "status": "review",
+      "review": "pending",
+      "reviewNote": "主 Session 已复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer（12 组）+ check-hub-group-edit 浏览器 PASS；待合并后做最终 Review。"
     },
     {
       "id": "P6-17",
@@ -2481,8 +2489,10 @@ const BASE = {
       ],
       "acceptance": "右栏/群设置有编辑入口；可改群名、模式、群主；可添加/移除成员；owner 不可移除（先转让）；重复添加/非成员/超过 12 人有明确错误；保存后群状态与成员列表即时刷新；mock 同步。",
       "tests": "node scripts/test-hub-group-create.mjs；新增 test-hub-group-edit；浏览器群组编辑/成员增删；tsc",
-      "commit": "feat(hub-p6-17): 群组编辑与成员管理",
-      "status": "in_progress"
+      "commit": "1744204",
+      "status": "review",
+      "review": "pending",
+      "reviewNote": "主 Session 已复验：go test agenthub/agents/session + desktop/bridge 全绿；tsc/css/Node 7 脚本全绿；check-hub-menu-layer（12 组）+ check-hub-group-edit 浏览器 PASS；待合并后做最终 Review。"
     }
   ],
   "deferred": [

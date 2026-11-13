@@ -182,18 +182,18 @@
 | P6-03 | in_progress | group-core | — | — |
 | P6-04 | in_progress | group-core | — | — |
 | P6-05 | in_progress | group-core | — | — |
-| P6-06 | in_progress | group-surface | — | — |
+| P6-06 | review | group-surface | 9e5ca58 | 主 Session 复验通过（Go/TS/Node/浏览器）；待合并 |
 | P6-07 | todo | group-lifecycle | — | — |
 | P6-08 | todo | group-lifecycle | — | — |
 | P6-09 | todo | group-lifecycle | — | — |
 | P6-10 | todo | group-lifecycle | — | — |
-| P6-11 | in_progress | group-surface | — | — |
-| P6-12 | in_progress | group-surface | — | — |
+| P6-11 | review | group-surface | 4727831 | 主 Session 复验通过（Go/TS/Node/浏览器）；待合并 |
+| P6-12 | review | group-surface | 715a28c | 主 Session 复验通过（Go/TS/Node/浏览器）；待合并 |
 | P6-13 | todo | group-lifecycle | — | — |
 | P6-14 | todo | group-lifecycle | — | — |
 | P6-15 | todo | main | — | — |
-| P6-16 | todo | group-surface | — | — |
-| P6-17 | todo | group-surface | — | — |
+| P6-16 | review | group-surface | 3bd3439 | 主 Session 复验通过（Go/TS/Node/浏览器）；待合并 |
+| P6-17 | review | group-surface | 1744204 | 主 Session 复验通过（Go/TS/Node/浏览器）；待合并 |
 
 ## 7. 残余风险 / 待观察
 
