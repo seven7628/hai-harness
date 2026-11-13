@@ -2364,8 +2364,10 @@ const BASE = {
       ],
       "acceptance": "每 target 已入队/已回复/未回复/失败可见；@all 成功=已入队；状态条显示本轮/本链/队列/pair/失败；pair 恢复倒计时 + 手动重置按钮。",
       "tests": "node scripts/test-hub-conv.mjs；浏览器群聊状态条",
-      "commit": "feat(hub-p6-10): @all 投递状态与群状态条",
-      "status": "in_progress"
+      "commit": "bc205cc + db0eb4e",
+      "status": "review",
+      "review": "pending",
+      "reviewNote": "主 Session 合并后复验：agenthub 全绿；tsc/css/test:hub-conv 132 全绿；浏览器 conversation-bar/theme-palette/menu-layer/columns 全绿。merge 3521fe2；待 P6-15 最终回归。"
     },
     {
       "id": "P6-11",
@@ -2424,8 +2426,10 @@ const BASE = {
       ],
       "acceptance": "删除 MaxParallelRuns/MaxTurnsPerHuman 字段与默认值；Mode 已生效；每个保留 policy 字段有生效性测试。",
       "tests": "go test ./agenthub -run GroupPolicy；npm run test:p4",
-      "commit": "refactor(hub-p6-13): 清理群策略死旋钮",
-      "status": "in_progress"
+      "commit": "15e4d34",
+      "status": "review",
+      "review": "pending",
+      "reviewNote": "主 Session 合并后复验：agenthub 全绿；tsc/css/test:hub-conv 132 全绿；浏览器 conversation-bar/theme-palette/menu-layer/columns 全绿。merge 3521fe2；待 P6-15 最终回归。"
     },
     {
       "id": "P6-14",
@@ -2443,8 +2447,10 @@ const BASE = {
       ],
       "acceptance": "ink/paper/system 三主题中心与右栏同色；header/composer 同步；状态条显示本轮/本链/队列/pair/失败；1280/640 无溢出。",
       "tests": "npm run test:css；浏览器截图三主题；check-p4-p2-details",
-      "commit": "fix(hub-p6-14): 统一会话区色板与群状态条",
-      "status": "in_progress"
+      "commit": "f62aa98",
+      "status": "review",
+      "review": "pending",
+      "reviewNote": "主 Session 合并后复验：agenthub 全绿；tsc/css/test:hub-conv 132 全绿；浏览器 conversation-bar/theme-palette/menu-layer/columns 全绿。merge 3521fe2；待 P6-15 最终回归。"
     },
     {
       "id": "P6-15",

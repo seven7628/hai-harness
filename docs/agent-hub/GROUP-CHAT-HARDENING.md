@@ -187,11 +187,11 @@
 | P6-07 | in_progress | group-lifecycle | — | — |
 | P6-08 | in_progress | group-lifecycle | — | — |
 | P6-09 | in_progress | group-lifecycle | — | — |
-| P6-10 | in_progress | group-ui | — | — |
+| P6-10 | review | group-ui | bc205cc + db0eb4e | 主 Session 复验通过（Go/TS/Node/浏览器）；待 P6-15 |
 | P6-11 | done | group-surface | 4727831 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-12 | done | group-surface | 715a28c | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
-| P6-13 | in_progress | group-ui | — | — |
-| P6-14 | in_progress | group-ui | — | — |
+| P6-13 | review | group-ui | 15e4d34 | 主 Session 复验通过（Go/TS/Node/浏览器）；待 P6-15 |
+| P6-14 | review | group-ui | f62aa98 | 主 Session 复验通过（Go/TS/Node/浏览器）；待 P6-15 |
 | P6-15 | todo | main | — | — |
 | P6-16 | done | group-surface | 3bd3439 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-17 | done | group-surface | 1744204 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
