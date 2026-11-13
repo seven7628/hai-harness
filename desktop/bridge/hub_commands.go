@@ -855,14 +855,37 @@ func (m *manager) hubAgentRollback(c command) {
 // 与真正下发的提示词同源：L1–L3 走 agenthub.RenderLayers，L4 记忆走装配用的同一个
 // hubMemoryInjection。L5 技能清单与工具 schema 由内核在请求期拼装，**不复制**到这里
 // （复制就会变成第二份事实源），在 note 里写明。
+//
+// 作用域：L1 协议和 L2 名册都按作用域分叉（DM 变体没有 @/assign_task）。payload 里
+// 可选带 group_id —— 带上下发群变体 + 名册，不带就是 DM 变体。group_id 是**可选**的：
+// 旧调用（只传 agent_id）语义不变，预览永远是 DM 变体，前端补参数后自动变准。
 func (m *manager) hubPromptPreview(c command) {
 	p, _, err := m.hubLoadAgent(str(c.Payload, "agent_id"))
 	if err != nil {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
+	spec := agenthub.PromptSpec{Agent: p}
+	scope := "dm"
+	groupID := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	if groupID != "" {
+		// 与群会话同一条装配路径（enrichHubGroupSpec）：预览的 Group/Members 必须
+		// 和 hub_group_session.go 给的一致，否则「用户看到的 = 模型看到的」不成立。
+		st, serr := m.hubStore()
+		if serr != nil {
+			m.resp(c, false, "打开 Hub 存储失败: "+serr.Error(), nil)
+			return
+		}
+		hs := hubSessionSpec{Agent: *p}
+		if eerr := m.enrichHubGroupSpec(context.Background(), st, &hs, groupID); eerr != nil {
+			m.resp(c, false, "群作用域预览失败: "+eerr.Error(), nil)
+			return
+		}
+		spec.Group, spec.Members = hs.Group, hs.Members
+		scope = "group"
+	}
 	home := hubAgentHome(string(p.ID))
-	layers := agenthub.RenderLayers(agenthub.PromptSpec{Agent: p})
+	layers := agenthub.RenderLayers(spec)
 	// 内核在系统提示词尾部还会追加「## Current Workspace」与 home 里的 AGENTS.md：
 	// 不预览这两段，「用户看到的 = 模型看到的」就不成立（P1-06 复核实测差 94 字节，
 	// 写 AGENTS.md 后差更多）。顺序与 agents.composeSystemPrompt 一致。
@@ -882,6 +905,8 @@ func (m *manager) hubPromptPreview(c command) {
 	}
 	m.resp(c, true, "", map[string]any{
 		"agent_id":    string(p.ID),
+		"scope":       scope,
+		"group_id":    string(groupID),
 		"layers":      layers,
 		"total_bytes": total,
 		"note":        "L0 对 Hub 已关闭（D17）；L5 技能清单与工具 schema 在请求期由内核装配，不在预览内。",

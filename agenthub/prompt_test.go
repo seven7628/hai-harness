@@ -7,11 +7,23 @@ import (
 	"testing"
 )
 
+// goldenL1 读群作用域的 L1 变体（名册/@/assign_task 段）。
 func goldenL1(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", "l1.golden"))
+	return readGolden(t, "l1.golden")
+}
+
+// goldenL1DM 读 DM（1:1）的 L1 变体。两个文件都必须**不带尾随换行**（同下）。
+func goldenL1DM(t *testing.T) string {
+	t.Helper()
+	return readGolden(t, "l1-dm.golden")
+}
+
+func readGolden(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
 	if err != nil {
-		t.Fatalf("read L1 golden: %v", err)
+		t.Fatalf("read %s: %v", name, err)
 	}
 	return string(b)
 }
@@ -27,23 +39,55 @@ func goldenRoster(t *testing.T) string {
 	return string(b)
 }
 
-func TestPromptL1Only(t *testing.T) {
-	got := RenderSystem(PromptSpec{})
+// 群作用域 L1：名册/@ 唤醒/assign_task 段必须在，且逐字节 == l1.golden。
+func TestPromptL1Group(t *testing.T) {
+	got := RenderSystem(PromptSpec{Group: &Group{ID: "grp_aaaaaa"}})
 	if want := goldenL1(t); got != want {
-		t.Fatalf("L1-only prompt changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+		t.Fatalf("group L1 prompt changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
-	for _, want := range []string{"## Tools", "@Name", "assign_task", "## Workspaces", "## Safety"} {
+	for _, want := range []string{
+		"## Tools", "## Who is here", "@Name", "assign_task", "group_members()",
+		"group_history()", "## Workspaces", "## Safety",
+	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("L1 missing %q:\n%s", want, got)
+			t.Fatalf("group L1 missing %q:\n%s", want, got)
 		}
 	}
 	for _, unwanted := range []string{"## Group:", "## Identity"} {
 		if strings.Contains(got, unwanted) {
-			t.Fatalf("L1 unexpectedly contains %q", unwanted)
+			t.Fatalf("group L1 unexpectedly contains %q", unwanted)
 		}
 	}
-	// 真正的去 L0 是装配层 WithBaseSystemPrompt("") 的职责；RenderSystem 不接触 L0，
-	// 这条注释提醒 P0-08/P1 的 buildHubLoop 测试必须单独断言。
+}
+
+// DM 的 L1：1:1 变体。判据只有 spec.Group != nil（DM 恒 nil，群会话在
+// hub_group_session.go 设 Group），所以 PromptSpec{} 就是 DM。
+// 群工具名一个都不能出现 —— 它们只注册在群作用域（场景1），写进 DM 等于教模型
+// 调用不存在的工具。workspace 段（session_send/task_status）DM 也适用，必须保留。
+func TestPromptL1DM(t *testing.T) {
+	got := RenderSystem(PromptSpec{})
+	if want := goldenL1DM(t); got != want {
+		t.Fatalf("DM L1 prompt changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	for _, want := range []string{
+		"## Tools", "## How to speak", "one-to-one", "session_send()",
+		"task_status()", "## Workspaces", "## Safety",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("DM L1 missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{
+		"group_members", "group_history", "assign_task", "@Name", "@everyone",
+		"## Who is here", "## Group:", "## Identity",
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("DM L1 must not mention %q (group-only tool/section):\n%s", unwanted, got)
+		}
+	}
+	if got == goldenL1(t) {
+		t.Fatal("DM L1 still renders the group variant")
+	}
 }
 
 // rosterGoldenSpec 是名册 golden 的固定输入：owner/member/observer 三种角色、
@@ -194,9 +238,10 @@ func TestPromptIdentityInstructionsAndEmptyLayers(t *testing.T) {
 	}
 
 	empty := &AgentProfile{}
-	if got := RenderSystem(PromptSpec{Agent: empty}); got != goldenL1(t) {
+	if got := RenderSystem(PromptSpec{Agent: empty}); got != goldenL1DM(t) {
 		t.Fatalf("empty identity should not append a layer:\n%s", got)
 	}
+	// 空名册的群会话仍然是群变体：判据是 Group != nil，不是「有没有成员」。
 	if got := RenderSystem(PromptSpec{Group: &Group{Name: "空群"}}); got != goldenL1(t) {
 		t.Fatalf("empty roster should not append a layer:\n%s", got)
 	}
@@ -235,7 +280,12 @@ func TestPromptCJKAndFallbackRendering(t *testing.T) {
 	}
 }
 
+// 逐字节稳定对两种作用域都成立：同一 spec 必须渲染出完全相同的文本，
+// 否则 loop 重建会无谓地换掉 prompt cache。DM 变体是新加的第二条路径，单独覆盖。
 func TestPromptByteStable(t *testing.T) {
+	dmSpec := PromptSpec{
+		Agent: &AgentProfile{ID: "ag_aaaaaaaa", Name: "Researcher", Role: "研究"},
+	}
 	spec := PromptSpec{
 		Agent: &AgentProfile{ID: "ag_aaaaaaaa", Name: "Researcher", Role: "研究"},
 		Group: &Group{Name: "G", OwnerAgentID: "ag_aaaaaaaa", Members: []Member{
@@ -247,12 +297,18 @@ func TestPromptByteStable(t *testing.T) {
 			{ID: "ag_bbbbbbbb", Name: "Writer", Role: "写作"},
 		},
 	}
-	first := RenderSystem(spec)
-	for i := 0; i < 32; i++ {
-		if got := RenderSystem(spec); got != first {
-			t.Fatalf("RenderSystem changed on call %d", i)
+	for name, s := range map[string]PromptSpec{"group": spec, "dm": dmSpec} {
+		first := RenderSystem(s)
+		for i := 0; i < 32; i++ {
+			if got := RenderSystem(s); got != first {
+				t.Fatalf("%s: RenderSystem changed on call %d", name, i)
+			}
+		}
+		if name == "dm" && first == RenderSystem(spec) {
+			t.Fatal("dm and group must not render the same L1")
 		}
 	}
+	first := RenderSystem(spec)
 	// 成员顺序是群元数据的一部分，不能靠 map 迭代改变名册顺序。
 	writerLine := strings.Index(first, "- Writer (member, ag_bbbbbbbb)")
 	researcherLine := strings.Index(first, "- Researcher (owner, ag_aaaaaaaa)")
@@ -262,31 +318,55 @@ func TestPromptByteStable(t *testing.T) {
 }
 
 // 分层预览必须与真正下发的提示词逐字节同源（设置页不能另写一份文案）。
+// 群与 DM 两种 spec 都要过一遍：L1 层文本就是当前作用域的那一份。
 func TestRenderLayersMatchesSystem(t *testing.T) {
 	alice := &AgentProfile{ID: "ag_aaaaaaaa", Name: "Researcher", Role: "竞品研究员", Instructions: "只信一手来源"}
 	g := &Group{ID: "gr_gggggggg", Name: "Research", Members: []Member{{AgentID: alice.ID, Role: RoleOwner}}}
-	spec := PromptSpec{Agent: alice, Group: g, Members: []*AgentProfile{alice}}
 
-	layers := RenderLayers(spec)
-	if len(layers) != 3 {
-		t.Fatalf("layers = %d, want 3 (protocol/roster/identity): %+v", len(layers), layers)
+	cases := []struct {
+		name     string
+		spec     PromptSpec
+		wantKeys []string
+		wantL1   string
+	}{
+		{
+			name:     "group",
+			spec:     PromptSpec{Agent: alice, Group: g, Members: []*AgentProfile{alice}},
+			wantKeys: []string{"protocol", "roster", "identity"},
+			wantL1:   goldenL1(t),
+		},
+		{
+			name:     "dm",
+			spec:     PromptSpec{Agent: alice},
+			wantKeys: []string{"protocol", "identity"},
+			wantL1:   goldenL1DM(t),
+		},
 	}
-	wantKeys := []string{"protocol", "roster", "identity"}
-	parts := make([]string, 0, len(layers))
-	for i, layer := range layers {
-		if layer.Key != wantKeys[i] {
-			t.Fatalf("layer[%d].key = %q, want %q", i, layer.Key, wantKeys[i])
+	for _, tc := range cases {
+		layers := RenderLayers(tc.spec)
+		if len(layers) != len(tc.wantKeys) {
+			t.Fatalf("%s: layers = %d, want %d (protocol/roster/identity): %+v",
+				tc.name, len(layers), len(tc.wantKeys), layers)
 		}
-		if layer.Title == "" || strings.TrimSpace(layer.Text) == "" {
-			t.Fatalf("layer %q must have title and text: %+v", layer.Key, layer)
+		parts := make([]string, 0, len(layers))
+		for i, layer := range layers {
+			if layer.Key != tc.wantKeys[i] {
+				t.Fatalf("%s: layer[%d].key = %q, want %q", tc.name, i, layer.Key, tc.wantKeys[i])
+			}
+			if layer.Title == "" || strings.TrimSpace(layer.Text) == "" {
+				t.Fatalf("%s: layer %q must have title and text: %+v", tc.name, layer.Key, layer)
+			}
+			parts = append(parts, layer.Text)
 		}
-		parts = append(parts, layer.Text)
-	}
-	if got, want := strings.Join(parts, "\n\n"), RenderSystem(spec); got != want {
-		t.Fatalf("layers joined != RenderSystem:\n--- layers ---\n%s\n--- system ---\n%s", got, want)
+		if layers[0].Text != tc.wantL1 {
+			t.Fatalf("%s: protocol layer is not the scope's L1 variant:\n--- got ---\n%s", tc.name, layers[0].Text)
+		}
+		if got, want := strings.Join(parts, "\n\n"), RenderSystem(tc.spec); got != want {
+			t.Fatalf("%s: layers joined != RenderSystem:\n--- layers ---\n%s\n--- system ---\n%s", tc.name, got, want)
+		}
 	}
 
-	// 空输入：只剩 L1，且仍是同一个字节串（空层不产生空串层）。
+	// 空输入（DM）：只剩 L1，且仍是同一个字节串（空层不产生空串层）。
 	bare := RenderLayers(PromptSpec{})
 	if len(bare) != 1 || bare[0].Key != "protocol" {
 		t.Fatalf("bare layers = %+v, want only protocol", bare)
