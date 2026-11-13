@@ -402,6 +402,12 @@ type CommitPhaseTiming struct {
 	SidecarRef   time.Duration // 逐块比对 + 追加（脏块快路径下只剩 id 循环与集合摘要）
 	SidecarFlush time.Duration // fsync sidecar + 重写索引
 	Compact      time.Duration // 其中 compact 部分（sidecar 的子集，仅同步回收时非零）
+	// Ref 是 sc-ref（逐块比对 + 追加 + 摘要 + 文档）的**再分解**。
+	//
+	// 为什么拆：实测 sc-ref 在慢提交里占 7.6s（23.4s 那次），但这一段至少有
+	// 五件事 —— 不拆开就只能猜，而"猜"过一次就猜错过（当时以为 40,232 块的
+	// sha256 摘要要 10ms，实际差了三个数量级 ⇒ 真凶不是它）。
+	Ref RefPhaseTiming
 	// CompactScheduled 表示本次提交把回收交给了后台（Compact 不适用）。
 	CompactScheduled bool
 	Encode           time.Duration // 序列化信封 + 计算落盘 checksum
@@ -538,19 +544,23 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 	sidecarStart := time.Now()
 	openStart := time.Now()
 	if bs, berr := acquireBlockStore(path); berr == nil {
+		// pin 到本块结束：实例在锁外被使用，回收器不许中途关掉它。
+		// （**不能用 defer** —— defer 会在**函数**返回时才跑，pin 被拖得太久。）
 		t.SidecarOpen = time.Since(openStart)
 		refStart := time.Now()
 		// 优先用调用方给的 spans（reducer 顺带产出，零解析）；否则自行扫描。
 		var newView []byte
 		var rerr error
+		var refTiming RefPhaseTiming
 		wrote := 0
 		hashedBefore := bs.hashedBytes
 		if len(record.BlockSpans) > 0 {
-			newView, wrote, rerr = refBlocksFromSpansDirty(bs, working.ViewCheckpoint, record.BlockSpans, record.DirtyBlocks, record.BlockIDs, record.AllBlockIDs)
+			newView, wrote, rerr = refBlocksFromSpansDirty(bs, working.ViewCheckpoint, record.BlockSpans, record.DirtyBlocks, record.BlockIDs, record.AllBlockIDs, &refTiming)
 		} else {
 			newView, wrote, rerr = refBlocks(bs, working.ViewCheckpoint)
 		}
 		t.SidecarRef = time.Since(refStart)
+		t.Ref = refTiming
 		t.BlocksWrote = wrote
 		t.HashedBytes = bs.hashedBytes - hashedBefore
 		// 先落 sidecar 再落 record：record 里的引用必须指向已 durable 的数据。
@@ -583,6 +593,8 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 		}
 		// 不 Close：实例留在缓存里复用（Close 会 fsync 并关文件，下次提交
 		// 又要重扫 86MB 重建索引 —— 实测 78ms，吃掉增量方案的收益）。
+		// 只 unpin —— 之后它可以被后台回收器按 LRU+预算淘汰。
+		releaseBlockStore(path, bs)
 	}
 	t.Sidecar = time.Since(sidecarStart)
 	// 占位形态（"blocks":null）必须在落盘前被替换成引用或内嵌数组 ——

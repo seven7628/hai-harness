@@ -255,12 +255,15 @@ func (c *checkpointCoordinator) logCommit(err error, rev uint64, total, marshalD
 		status = "failed"
 	}
 	fmt.Fprintf(os.Stderr, "[checkpoint] %s commit total=%s session=%s rev=%d view=%.1fMB record=%.1fMB blocks=%d hashed=%.1fMB"+
-		" phase:%s%s%s%s%s%s%s%s%s%s%s%s%s err=%v\n",
+		" phase:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s err=%v\n",
 		status, total.Round(time.Millisecond), c.sessID, rev,
 		float64(ct.ViewBytes)/1e6, float64(ct.RecordBytes)/1e6, ct.BlocksWrote, float64(ct.HashedBytes)/1e6,
 		phase("marshal", marshalDur), phase("revision", revDur), phase("sdk", stateDur),
 		phase("lock", ct.LockWait), phase("sidecar", ct.Sidecar), phase("compact", ct.Compact),
 		phase("sc-open", ct.SidecarOpen), phase("sc-ref", ct.SidecarRef), phase("sc-flush", ct.SidecarFlush),
+		// sc-ref 的再分解（2026-11-12，P4 归因）：这一段有五件事，不拆开只能猜。
+		phase("ref-cmp", ct.Ref.Compare), phase("ref-put", ct.Ref.Put), phase("ref-prune", ct.Ref.Prune),
+		phase("ref-sum", ct.Ref.SetSum), phase("ref-doc", ct.Ref.Doc), phase("ref-repl", ct.Ref.Replace),
 		phase("encode", ct.Encode), phase("baseline", ct.Baseline), phase("temp", ct.Temp),
 		phase("bak+rename+dir", ct.Backup+ct.Rename+ct.SyncDir), err)
 }

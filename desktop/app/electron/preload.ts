@@ -220,6 +220,13 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('bridge:exit', listener)
     return () => ipcRenderer.removeListener('bridge:exit', listener)
   },
+  // 内存压力信号（2026-11-12，P1）：主进程轮询 process.getSystemMemoryInfo 推来。
+  // 渲染进程据此决定要不要主动降级视图（Chromium tab discarding 的模型）。
+  onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => {
+    const listener = (_e: unknown, p: { free: number; total: number; swapFree: number; swapTotal: number }) => cb(p)
+    ipcRenderer.on('mem:pressure', listener)
+    return () => ipcRenderer.removeListener('mem:pressure', listener)
+  },
 })
 
 declare global {
@@ -279,6 +286,8 @@ declare global {
       embedNavigateTarget: (id: string, url: string) => Promise<{ ok: boolean; error?: string }>
       onEvent: (cb: (payload: string | { lines: string[] }) => void) => () => void
       onExit: (cb: (info: BridgeExitInfo) => void) => () => void
+      // 内存压力信号（主进程轮询系统内存推来；见 electron/main.ts 的 startMemPressureWatch）
+      onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => () => void
     }
   }
 }

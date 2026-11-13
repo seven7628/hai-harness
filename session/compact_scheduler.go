@@ -69,11 +69,17 @@ func runBackgroundCompact(key string) {
 	unlock := lockRecord(key)
 	bs, err := acquireBlockStore(key)
 	if err != nil || bs == nil || !bs.needsCompact() {
+		if bs != nil {
+			releaseBlockStore(key, bs)
+		}
 		unlock()
 		return
 	}
+	// **bs 在下面会被锁外使用**（② 阶段）⇒ 必须一直 pin 着，
+	// 否则后台回收器可能在这期间把它关掉 ⇒ use-after-close。
 	snap, err := bs.beginCompact()
 	if err != nil {
+		releaseBlockStore(key, bs)
 		unlock()
 		return
 	}
@@ -82,6 +88,7 @@ func runBackgroundCompact(key string) {
 	// ② 重写（不持锁）：提交可以继续往旧文件追加
 	cw, err := bs.rewriteCompact(snap)
 	if err != nil {
+		releaseBlockStore(key, bs)
 		return // rewriteCompact 内部已清理临时文件
 	}
 
@@ -89,10 +96,10 @@ func runBackgroundCompact(key string) {
 	unlock = lockRecord(key)
 	defer unlock()
 
-	bs2, aerr := acquireBlockStore(key)
-	if aerr != nil || bs2 != bs {
-		// 期间实例被换掉（会话被删除/外部改动）→ 放弃，正式文件不动。
+	// 身份校验：期间实例被换掉（会话被删除/外部改动）→ 放弃，正式文件不动。
+	if !blockStoreStillCached(key, bs) {
 		cw.abort()
+		releaseBlockStore(key, bs)
 		return
 	}
 	before := bs.nBytes
@@ -101,11 +108,15 @@ func runBackgroundCompact(key string) {
 		if !isCompactAborted(ferr) {
 			fmt.Fprintf(os.Stderr, "[checkpoint] background compact %s: %v\n", filepath.Base(key), ferr)
 		}
+		releaseBlockStore(key, bs)
 		return
 	}
+	// 读完之后才归还：归还后实例可能被后台回收器关掉 ⇒ 不能再碰 bs。
+	after := bs.nBytes
+	releaseBlockStore(key, bs)
 	fmt.Fprintf(os.Stderr, "[checkpoint] background compact %s: %s → %s (%.1fx) in %s\n",
-		filepath.Base(key), humanBytes(before), humanBytes(bs.nBytes),
-		float64(before)/float64(max64(bs.nBytes, 1)), time.Since(start).Round(time.Millisecond))
+		filepath.Base(key), humanBytes(before), humanBytes(after),
+		float64(before)/float64(max64(after, 1)), time.Since(start).Round(time.Millisecond))
 }
 
 func isCompactAborted(err error) bool {
