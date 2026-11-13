@@ -172,6 +172,33 @@ check(htmlShown, '```html 围栏渲染成 visual-ui 预览块')
 const frameBox = htmlShown ? await htmlblock.locator('iframe.htmlblock-frame').boundingBox() : null
 check(!!frameBox && frameBox.height > 20, `visual-ui 预览块有高度（got=${frameBox?.height}）`)
 
+// 任务详情（右栏「任务」页签）：成本与产物读的是账本的 task.result.usage /
+// task.result.artifacts（HubInspector.tsx）。只把值挂在 task 顶层时这里会显示
+// 「成本未知」且产物列表为空 —— 这条断言就是钉这个形状的。
+// 页签在已展开的右栏里（`.hub-inspector-tabs`，role=tab）；收起态的图标栏是另一套
+// rbtn，这里不点它（展开态才是默认演示视图）。
+const tasksTab = page.locator('.hub-inspector-tabs button').filter({ hasText: '任务' }).first()
+const tabShown = await tasksTab.waitFor({ timeout: 6000 }).then(() => true).catch(() => false)
+check(tabShown, '右栏有「任务」页签')
+if (tabShown) await tasksTab.click({ timeout: 6000 })
+await page.waitForTimeout(600)
+const taskItem = page.locator('.hub-panel .hub-task').filter({ hasText: '把价格表更新到 Project 工作区' }).first()
+const taskItemShown = await taskItem.waitFor({ timeout: 8000 }).then(() => true).catch(() => false)
+check(taskItemShown, '右栏任务板里有演示任务 task_demo_result')
+if (taskItemShown) {
+  await taskItem.locator('.hub-task-head').first().click({ timeout: 6000 })
+  await page.waitForTimeout(400)
+  const detail = (await taskItem.locator('.hub-task-detail').first().innerText()).replace(/\s+/g, ' ')
+  check(detail.includes('$0.0400'), `任务详情显示成本（task.result.usage，got=${detail.slice(-90)}）`)
+  check(detail.includes('↑18000') && detail.includes('↓4200'), `任务详情显示 token 用量（got=${detail.slice(-90)}）`)
+  check(await taskItem.locator('.hub-artifact-link').count() >= 2, '任务详情列出产物（task.result.artifacts）')
+  await page.screenshot({ path: '/tmp/hub-demo-task-detail.png' })
+}
+// 回到概览：右栏页签不影响消息区，但默认视图更像人看到的样子。
+const overviewTab = page.locator('.hub-inspector-tabs button').filter({ hasText: '概览' }).first()
+await overviewTab.click({ timeout: 6000 }).catch(() => {})
+await page.waitForTimeout(300)
+
 await page.screenshot({ path: '/tmp/hub-demo-group.png', fullPage: false })
 
 // —— 3) 多气泡：发 @ 消息 → 两轮流式气泡 ——
@@ -218,13 +245,20 @@ await page.screenshot({ path: '/tmp/hub-demo-stream.png' })
 
 // —— 4) DM 隔离：Researcher 的私聊只有 DM-ONLY-RE ——
 // 不能按「第一行」选：DM 列表按 last_at 倒序，mock 侧顺序是数据决定的（见 hubLog 的
-// dmOnlyAt）。这里按名字选行，顺序怎么排都能落到 Researcher。
+// dmOnlyAt）。也不能按整行 hasText 'Researcher' —— 行的预览文本里就带着对方名字
+// （Writer 行的「…Researcher 的私聊也看不到它」），会同时命中两行。这里只认 `.hub-name`
+// 的精确文本。
 const agentTab = page.locator('.hub-side-tabs button').filter({ hasText: '智能体' }).first()
 if ((await agentTab.getAttribute('aria-selected')) !== 'true') await agentTab.click({ timeout: 6000 })
 await page.waitForTimeout(300)
-const researcherRow = page.locator('.hub-side-row').filter({ hasText: 'Researcher' }).first()
+const researcherRow = page.locator('.hub-side-row').filter({
+  has: page.locator('.hub-name').filter({ hasText: /^Researcher$/ }),
+}).first()
 const rowShown = await researcherRow.waitFor({ timeout: 8000 }).then(() => true).catch(() => false)
-check(rowShown, '侧栏能找到 Researcher 的 DM 行（按名字选，不依赖第一行）')
+check(rowShown, '侧栏能找到 Researcher 的 DM 行（按 .hub-name 精确匹配）')
+check(await researcherRow.count() === 1, '精确匹配只命中 1 行（预览文本里的「Researcher」不参与）')
+const rowName = rowShown ? (await researcherRow.locator('.hub-name').first().innerText()).trim() : ''
+check(rowName === 'Researcher', `选中行的 .hub-name 就是 Researcher（got=${rowName}）`)
 if (rowShown) await researcherRow.click({ timeout: 8000 })
 await page.waitForTimeout(900)
 const dmText = (await page.locator('.hub-demo').first().innerText()).replace(/\s+/g, ' ')

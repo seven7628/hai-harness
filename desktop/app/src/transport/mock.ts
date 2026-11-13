@@ -1163,13 +1163,18 @@ class MockTransport implements Transport {
       status: 'completed', attempt: 1,
       origin: { kind: 'human', group_id: gid },
       target: { kind: 'workspace', workspace: DEMO_WORKSPACE, session_id: DEMO_SESSION },
-      result: { summary: '价格表已更新到 reports/pricing-v3.md：A/B 统一含税口径，C 保留「未公开」。', finish_reason: 'stop' },
-      // 与结果卡 refs 同一份用量与产物：任务详情读账本，不能只有卡上有。
-      usage: { input: 18_000, output: 4_200, cost_priced: true, cost_usd: 0.04 },
-      artifacts: [
-        { name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140, lines: 64 },
-        { name: 'pricing-v3.csv', path: 'out/pricing-v3.csv', kind: 'created', size: 812, lines: 12 },
-      ],
+      // usage / artifacts 必须在 **result 里**：任务详情（HubInspector「任务」页签）与
+      // Markdown 导出读的是 task.result?.usage / task.result?.artifacts，挂在 task 顶层
+      // 等于没写（成本显示「成本未知」、产物列表空）。与结果卡 refs 的同一份值对齐。
+      result: {
+        summary: '价格表已更新到 reports/pricing-v3.md：A/B 统一含税口径，C 保留「未公开」。',
+        finish_reason: 'stop',
+        usage: { input: 18_000, output: 4_200, cost_priced: true, cost_usd: 0.04 },
+        artifacts: [
+          { name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140, lines: 64 },
+          { name: 'pricing-v3.csv', path: 'out/pricing-v3.csv', kind: 'created', size: 812, lines: 12 },
+        ],
+      },
       created_at: at(2 * 3_600_000), updated_at: at(2 * 3_600_000 - 42_000),
     })
     this.hubGroupTasks.set('task_demo_todo', {
