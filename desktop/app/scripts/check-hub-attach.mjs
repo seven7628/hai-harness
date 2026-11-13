@@ -220,6 +220,7 @@ async function sendWithImage(testid, text) {
   // 之间反复判定 not stable（真实用户也是先看到牌再点）。
   const stripThumb = page.locator('.hub-attach-strip .hub-attach-thumb').first()
   await stripThumb.hover()
+  await page.waitForTimeout(250) // 抽正/放大是 180ms 过渡：等它停稳再点，慢机也不 flaky。
   await stripThumb.click()
   await page.locator('.hub-attach-lb').waitFor({ timeout: 6000 })
   check(await page.locator('.hub-attach-lb-btn.danger').count() === 1, '待发灯箱里有「删除」')
@@ -529,6 +530,8 @@ async function sendWithImage(testid, text) {
 check(errors.length === 0, `存在 console error / pageerror：${errors.slice(0, 4).join(' | ')}`)
 
 await browser.close()
+// 自起的 vite 是子进程：不显式收掉，Node 的事件循环会一直等它，脚本跑完也不退出。
+stopServer()
 
 if (errors.length > 0) {
   console.error('\nconsole/page errors:')
@@ -542,3 +545,4 @@ if (failed.length > 0) {
 }
 console.log(`✅ Hub 附件浏览器回归通过（${assertions} 项断言：DM/群 注入·发送·回显·灯箱·Tab 焦点陷阱·历史·390·扇形叠牌命中区）`)
 console.log(`   截图：${OUT}/dm-strip-files.png, dm-strip-drop-paste.png, dm-strip-image.png, dm-sent.png, dm-lightbox.png, dm-history.png, group-sent.png, dm-failed.png, dm-retried.png, dm-390.png, group-390.png`)
+process.exit(0)
