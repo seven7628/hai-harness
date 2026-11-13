@@ -539,6 +539,7 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, ae *ev
 	// P6-09：记下这一轮的 wake id，hubOnRunEnd 按它收口账本（忙闩已经放开，
 	// 泵可能已经投了下一轮 —— 按目标收口会误标下一条）。
 	bs.hubGroupRunWakeID = ""
+	bs.hubGroupRunNoFinish = false
 	if wake != nil {
 		bs.hubGroupRunWakeID = wake.WakeID
 	}
@@ -573,6 +574,12 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, ae *ev
 	// failed：把这条投递退回队列 + 退避，退避到期后重投同一条 wake id。目标不是
 	// 坏掉，只是暂时被上游按住；把 11 并发里的 3 条标 failed 才是真丢消息。
 	if ae.FinishReason == core.FinishReasonError && ae.ErrorKind == provider.ErrorKindRateLimit {
+		// B2：这一轮已经退回队列（queued + 退避），**不再由 AgentEnd 收口账本**。
+		// 清掉 wake id（否则 hubOnRunEnd 会按它去 FinishDelivery(done)，把 queued
+		// 覆写成终态），并置 no-finish 标记（避免退化成「按目标收口」把泵刚投出去
+		// 的下一轮误标 done）。
+		bs.hubGroupRunWakeID = ""
+		bs.hubGroupRunNoFinish = true
 		m.requeueHubWakeOnRateLimit(spec, wake)
 		return
 	}

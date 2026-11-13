@@ -8,7 +8,9 @@ import type { HubConversation, HubDelivery, HubGroupProgress } from './types'
  * HUB_TURN_BUDGET 是「没有限额」：生产默认不设自动接龙轮次上限，缺省不能又显示 8。
  */
 export const HUB_TURN_BUDGET = -1
-export const HUB_MAX_DEPTH = 4
+// N4：与 Go 的 agenthub.DefaultConversationMaxDepth（1000）对齐。旧值 4 是 P6-05 之前
+// 的默认深度，会让「后端没给 max_depth」时状态条显示「深度 1/4」这种假上限。
+export const HUB_MAX_DEPTH = 1000
 
 export type ConversationTone = 'idle' | 'running' | 'waiting' | 'stopped' | 'exhausted' | 'unknown'
 
@@ -223,6 +225,7 @@ export function deliveryReasonText(reason?: string | null): string {
     case 'shutdown': return 'Hub 正在关停'
     case 'invalid': return '群或成员已不可用'
     case 'queue_full': return '排队过多，已跳过'
+    case 'exhausted': return '对话已达上限，已作废'
     default: return (reason ?? '').trim()
   }
 }
@@ -242,12 +245,29 @@ export function deliveryLabel(d?: HubDelivery | null, names?: Record<string, str
   }
 }
 
-/** 最近一批投递（同一 conversation_id + 同一 turn 的最后一段）；历史记录不能淹没当前这轮。 */
+/**
+ * 两条投递是否属于**同一批**（同一次 @ 产生的 N 条投递）。
+ *
+ * I2：按 conversation_id + round_id 聚合 —— 被护栏跳过的目标从来没有 turn（恒 0），
+ * 只按 turn 比对会把「A running(turn=1) + B skipped(turn=0)」拆成两批，状态条只显示
+ * 其中一条，人看到「A 在跑」却看不到「B 被跳过了」。
+ *
+ * round_id 为空（旧后端/人类首轮）才回退到 turn：两侧都空时比 turn，任一侧有
+ * round_id 就必须相等 —— 不同 round 绝不能混进同一批。
+ */
+function sameDeliveryBatch(a: HubDelivery, b: HubDelivery): boolean {
+  if ((a.conversation_id ?? '') !== (b.conversation_id ?? '')) return false
+  const ar = (a.round_id ?? '').trim()
+  const br = (b.round_id ?? '').trim()
+  if (ar || br) return ar === br
+  return (a.turn ?? 0) === (b.turn ?? 0)
+}
+
+/** 最近一批投递（同一 conversation_id + round_id 的最后一段）；历史记录不能淹没当前这轮。 */
 function lastDeliveryBatch(list: HubDelivery[]): HubDelivery[] {
   if (list.length === 0) return []
   const last = list[list.length - 1]
-  return list.filter((d) => (d.turn ?? 0) === (last.turn ?? 0) &&
-    (d.conversation_id ?? '') === (last.conversation_id ?? ''))
+  return list.filter((d) => sameDeliveryBatch(last, d))
 }
 
 /**

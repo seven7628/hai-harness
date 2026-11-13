@@ -166,3 +166,84 @@ func TestHubConversationResetRejectsShutdown(t *testing.T) {
 		t.Fatalf("关停后重置必须被拒: ok=%v err=%q", ok, errMsg)
 	}
 }
+
+// TestHubConversationLimitsHotReload：I1 回归 —— 设置保存后**无需重启**立即生效：
+// 新限额用于 Offer / View（状态条分母）/ 挂 run 超时，且旧对话状态一条都不丢。
+func TestHubConversationLimitsHotReload(t *testing.T) {
+	m, buf := testManager(t)
+	writeHubConvSettings(t, `{"hub":{"conversation":{"pair_limit":1,"max_depth":3,"run_timeout_ms":1234}}}`)
+	a := createHubAgent(t, m, buf, 1, "热更A")
+	b := createHubAgent(t, m, buf, 2, "热更B")
+	g := convGroupWith(t, m, buf, 10, "热更群", nil, a, b)
+
+	ctrl := m.hubConversation()
+	if got := ctrl.Limits(); got.PairLimit != 1 || got.MaxDepth != 3 || got.RunTimeout != 1234*time.Millisecond {
+		t.Fatalf("首读限额 = %+v, want 1/3/1234ms", got)
+	}
+	// 造一点对话状态：人类开新对话 + 一次成功投递（pair 用掉 1 次）。
+	ctrl.BeginHuman(g.ID, 1, time.Time{})
+	ctrl.StartHumanRound(g.ID, 1, time.Time{})
+	wakes, err := ctrl.Offer(agenthub.ConversationOffer{
+		GroupID: g.ID, Sender: a.ID, Targets: []agenthub.AgentID{b.ID},
+		Text: "第一句", Depth: 2, TriggerSeq: 3, RoundID: "r1",
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("offer: %v %+v", err, wakes)
+	}
+	w, ok := ctrl.BeginDelivery(wakes[0], time.Time{})
+	if !ok {
+		t.Fatal("投递应成功")
+	}
+	ctrl.CommitDelivery(w, time.Time{})
+	before := ctrl.View(g.ID)
+	// 人类首轮占 1 轮，这次自动投递再 +1 → 2 轮。
+	if before.TurnsUsed != 2 || before.HumanSeq != 1 || before.PairCount[agenthub.ConversationPairKey(a.ID, b.ID)] != 1 {
+		t.Fatalf("前置状态 = %+v", before)
+	}
+	// 旧限额下同一对再 @ 会被跳过（pair_limit=1）。
+	if w2, err := ctrl.Offer(agenthub.ConversationOffer{
+		GroupID: g.ID, Sender: a.ID, Targets: []agenthub.AgentID{b.ID},
+		Text: "第二句", Depth: 2, TriggerSeq: 4, RoundID: "r2",
+	}); err != nil || len(w2) != 0 {
+		t.Fatalf("旧限额应跳过同一对: %v %+v", err, w2)
+	}
+
+	// 保存新设置（不重启）：指纹（mtime+size）变化 → 下一次 hubConversation() 重载。
+	time.Sleep(20 * time.Millisecond)
+	writeHubConvSettings(t, `{"hub":{"conversation":{"pair_limit":2,"max_depth":7,"run_timeout_ms":2500,"pair_window_ms":600000,"idle_reset_ms":600000}}}`)
+	ctrl2 := m.hubConversation()
+	if ctrl2 != ctrl {
+		t.Fatal("热更新不该重建控制器（对话状态会丢）")
+	}
+	if got := ctrl2.Limits(); got.PairLimit != 2 || got.MaxDepth != 7 || got.RunTimeout != 2500*time.Millisecond {
+		t.Fatalf("热更新后限额 = %+v, want 2/7/2500ms", got)
+	}
+	// 状态条分母同步（View 直接读新限额）。
+	v := ctrl2.View(g.ID)
+	if v.PairLimit != 2 || v.MaxDepth != 7 || v.RunTimeoutMS != 2500 {
+		t.Fatalf("视图分母 = %+v, want pair=2/depth=7/timeout=2500", v)
+	}
+	// 旧对话状态不丢。
+	if v.ID != before.ID || v.HumanSeq != before.HumanSeq || v.TurnsUsed != before.TurnsUsed {
+		t.Fatalf("热更新把对话状态弄丢了: before=%+v after=%+v", before, v)
+	}
+	if n := v.PairCount[agenthub.ConversationPairKey(a.ID, b.ID)]; n != 1 {
+		t.Fatalf("pair 计数丢了: %d", n)
+	}
+	// 新限额立即用于 Offer：pair_limit=2 时同一对（已用 1 次）还能再投。
+	if w3, err := ctrl2.Offer(agenthub.ConversationOffer{
+		GroupID: g.ID, Sender: a.ID, Targets: []agenthub.AgentID{b.ID},
+		Text: "第三句", Depth: 2, TriggerSeq: 5, RoundID: "r3",
+	}); err != nil || len(w3) != 1 {
+		t.Fatalf("新 pair_limit 应立即生效: %v %+v", err, w3)
+	}
+	// 新 run_timeout 立即用于挂超时（旧定时器按旧值跑完是已知语义）。
+	m.armHubRunTimeout(g.ID, a.ID, "wake_hot_reload")
+	m.hubRunTimerMu.Lock()
+	rt := m.hubRunTimers[hubRunTimerKey(g.ID, a.ID)]
+	m.hubRunTimerMu.Unlock()
+	if rt == nil || rt.timeout != 2500*time.Millisecond {
+		t.Fatalf("run 超时没用新值: %+v", rt)
+	}
+	m.clearHubRunTimeout(g.ID, a.ID)
+}

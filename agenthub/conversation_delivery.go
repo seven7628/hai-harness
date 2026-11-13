@@ -166,8 +166,12 @@ func (c *ConversationController) RequeueDelivery(w Wake, reason string, readyAt 
 	return true
 }
 
-// FinishDelivery 把一条进行中的记录推进到终态（done/skipped/failed）。
-// 已终结的记录原样返回 false（幂等：AgentEnd 与停止路径可能都来收口）。
+// FinishDelivery 把一条**正在跑**的记录推进到终态（done/skipped/failed）。
+//
+// 只允许 running → 终态（B2）：queued 的记录是「还没投」或「429 退回队列等退避」，
+// 用 run 收尾去收口它会把退避中的 wake 覆写成终态 —— 退避到期后 BeginDelivery
+// no-op，这条 wake 就永久占住队首（Review B2 的复现）。已终结 / 未投递一律返回
+// false（幂等：AgentEnd 与停止路径可能都来收口）。
 func (c *ConversationController) FinishDelivery(group GroupID, wakeID string, status DeliveryStatus, reason string, at time.Time) bool {
 	if c == nil || wakeID == "" || !status.Terminal() {
 		return false
@@ -180,7 +184,7 @@ func (c *ConversationController) FinishDelivery(group GroupID, wakeID string, st
 		return false
 	}
 	d := conv.deliveries.get(wakeID)
-	if d == nil || d.Status.Terminal() {
+	if d == nil || d.Status != DeliveryRunning {
 		return false
 	}
 	d.Status = status
@@ -381,6 +385,27 @@ func (c *ConversationController) Delivery(group GroupID, wakeID string) (Deliver
 		return Delivery{}, false
 	}
 	return d.clone(), true
+}
+
+// skipQueuedLocked 把账本里所有还在排队的记录记成 skipped(reason)。
+// 用于「队列整批作废」的场景（exhausted 清队列，N1）：队列与账本是同一件事的两面，
+// 只清队列会让那几条记录永远停在「排队中」。调用方必须持锁。
+func (c *ConversationController) skipQueuedLocked(conv *conversation, reason string, now time.Time) int {
+	if conv == nil || conv.deliveries == nil {
+		return 0
+	}
+	n := 0
+	for _, d := range conv.deliveries.byID {
+		if d == nil || d.Status != DeliveryQueued {
+			continue
+		}
+		d.Status = DeliverySkipped
+		d.Reason = reason
+		d.ReadyAt = nil
+		d.UpdatedAt = now
+		n++
+	}
+	return n
 }
 
 // removeQueuedLocked 从队列里摘掉指定 wake（不存在则什么都不做）。

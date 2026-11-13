@@ -332,3 +332,53 @@ func itoa(i int) string {
 	}
 	return string(buf[n:])
 }
+
+// flakyPersister 前 fails 次写盘失败，之后成功（N5：失败必须回滚 lastSaved）。
+type flakyPersister struct {
+	countingPersister
+	mu    sync.Mutex
+	fails int
+}
+
+func (p *flakyPersister) SaveConversationState(ctx context.Context, st *ConversationState) error {
+	p.mu.Lock()
+	fail := p.fails > 0
+	if fail {
+		p.fails--
+	}
+	p.mu.Unlock()
+	if fail {
+		return errors.New("disk full")
+	}
+	return p.countingPersister.SaveConversationState(ctx, st)
+}
+
+// TestConversationPersistRetriesAfterFailure：N5 —— 一次写盘失败之后，同一份状态
+// 还能再试（不能因为 lastSaved 已记录指纹就永远跳过写盘）。
+func TestConversationPersistRetriesAfterFailure(t *testing.T) {
+	clk := newConvClock()
+	p := &flakyPersister{fails: 1}
+	var errs int
+	c := NewConversationController(ConversationOptions{
+		Limits: ConversationLimits{Cooldown: -1}, Now: clk.Now, Persister: p,
+		OnPersistError: func(GroupID, error) { errs++ },
+	})
+	gid := GroupID("group_1")
+	c.BeginHuman(gid, 1, clk.Now()) // 第 1 次写盘失败
+	if n := p.count(); n != 0 {
+		t.Fatalf("第一次写盘应失败，成功次数 = %d", n)
+	}
+	if errs != 1 {
+		t.Fatalf("失败回调次数 = %d, want 1", errs)
+	}
+	// 状态没变（读路径也会走到 saveState）：N5 要求这里**再试一次**并成功。
+	c.DueWakes(gid, clk.Now())
+	if n := p.count(); n != 1 {
+		t.Fatalf("N5：失败后同一状态没有重试（成功次数 = %d, want 1）", n)
+	}
+	// 再读一次：这次状态真的没变，指纹命中 → 不再写盘。
+	c.DueWakes(gid, clk.Now())
+	if n := p.count(); n != 1 {
+		t.Fatalf("状态没变却重复写盘（次数 = %d, want 1）", n)
+	}
+}

@@ -36,12 +36,14 @@ var errHubGroupTargetBusy = errors.New("群会话忙：上一轮尚未结束")
 func (m *manager) hubConversation() *agenthub.ConversationController {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// P6-04：限额来自 settings.json 顶层 hub.conversation（全局，不是每群策略）。
+	// I1：按文件指纹缓存（只 stat，不每次读盘）；文件变了就热更新，无需重启。
+	limits := loadHubConversationLimitsCached()
+	if m.hubConvLimits != nil {
+		limits = *m.hubConvLimits
+	}
 	if m.hubConv == nil {
-		// P6-04：限额来自 settings.json 顶层 hub.conversation（全局，不是每群策略）。
-		opts := agenthub.ConversationOptions{Limits: loadHubConversationLimits()}
-		if m.hubConvLimits != nil {
-			opts.Limits = *m.hubConvLimits
-		}
+		opts := agenthub.ConversationOptions{Limits: limits}
 		// P6-09：对话状态落盘（conversations/<gid>.json）。落盘失败只告警：
 		// 磁盘问题不能让群聊停下。
 		opts.Persister = hubConversationPersister{m: m}
@@ -49,6 +51,11 @@ func (m *manager) hubConversation() *agenthub.ConversationController {
 			m.hubAlertf("hub_conversation_persist_failed", "群 %s 对话状态写入失败：%v", gid, err)
 		}
 		m.hubConv = agenthub.NewConversationController(opts)
+		return m.hubConv
+	}
+	// I1：设置保存后立即生效（旧对话状态原样保留）。只在真的变了时写一次。
+	if m.hubConv.Limits() != limits {
+		m.hubConv.SetLimits(limits)
 	}
 	return m.hubConv
 }
@@ -226,7 +233,11 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 		m.notifyHubConversation(gid, view)
 		return
 	}
-	if view.Status != agenthub.ConversationRunning {
+	// B1：waiting_human 且队列非空时**也要泵** —— 与控制器 schedulableLocked 同一
+	// 判据（View.Schedulable）。只认 running 会让「到限 → waiting_human → 另一条
+	// 在飞 run 回来 @D」的 D 永久留在队里（Offer 成功、DueWakes 却返回空）。
+	// stopped/exhausted 仍不放。
+	if !view.Schedulable() {
 		return
 	}
 	// 串行 fallback（保留）：hubConvSerialPump 打开时一次只放一条。生产恒关；
@@ -515,6 +526,13 @@ func (m *manager) finishHubGroupDelivery(gid agenthub.GroupID, agentID agenthub.
 	ctrl := m.hubConversation()
 	finished := false
 	if wakeID != "" {
+		// B2：只收口**这一轮真的还在跑**的记录。429 退回队列（queued + ReadyAt）的
+		// 那一条绝不能被 AgentEnd 覆写成 done —— 否则退避到期后 BeginDelivery
+		// no-op，该 wake 永久占住队首。FinishDelivery 内部也只允许 running → 终态，
+		// 这里是同一判据的显式前置检查（两处都做更稳）。
+		if d, ok := ctrl.Delivery(gid, wakeID); !ok || d.Status != agenthub.DeliveryRunning {
+			return
+		}
 		finished = ctrl.FinishDelivery(gid, wakeID, agenthub.DeliveryDone, "", time.Time{})
 	} else {
 		finished = ctrl.FinishAgentDeliveries(gid, agentID, agenthub.DeliveryDone, "", time.Time{}) > 0

@@ -248,3 +248,92 @@ func TestDeliveryFinishAgentOnlyTouchesRunning(t *testing.T) {
 		t.Fatalf("重复收口 = %d, want 0", n)
 	}
 }
+
+// TestDeliveryFinishRequiresRunning：B2 回归 —— 账本状态机只允许
+// running → 终态。queued（还没投 / 429 退回队列等退避）被 FinishDelivery 收口
+// 会把退避中的 wake 覆写成终态：退避到期后 BeginDelivery no-op，这条 wake 永久
+// 占住队首。running → done/failed 仍然生效（fail() 的路径不能坏）。
+func TestDeliveryFinishRequiresRunning(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 100, MaxDepth: 100, IdleReset: -1,
+	})
+	gid := GroupID("g_finish_running")
+	c.BeginHuman(gid, 1, time.Time{})
+	c.StartHumanRound(gid, 1, time.Time{})
+	wakes := mustOffer(t, c, gid, "agent_a", []AgentID{"agent_b"}, 1)
+	id := wakes[0].ID
+
+	// queued → done：必须拒绝，状态原样。
+	if c.FinishDelivery(gid, id, DeliveryDone, "", time.Time{}) {
+		t.Fatal("queued 不能被 FinishDelivery 直接改成 done")
+	}
+	if d := deliveryByID(t, c, gid, id); d.Status != DeliveryQueued {
+		t.Fatalf("queued 被改写了: %+v", d)
+	}
+	// queued → failed：同样拒绝。
+	if c.FinishDelivery(gid, id, DeliveryFailed, "x", time.Time{}) {
+		t.Fatal("queued 不能被 FinishDelivery 直接改成 failed")
+	}
+
+	// running → done：允许。
+	if _, fresh := c.BeginDelivery(wakes[0], time.Time{}); !fresh {
+		t.Fatal("首次投递必须生效")
+	}
+	if !c.FinishDelivery(gid, id, DeliveryDone, "", time.Time{}) {
+		t.Fatal("running → done 必须生效")
+	}
+	if d := deliveryByID(t, c, gid, id); d.Status != DeliveryDone {
+		t.Fatalf("running → done 后 = %+v", d)
+	}
+	// 终态幂等：再来一次 false。
+	if c.FinishDelivery(gid, id, DeliveryDone, "", time.Time{}) {
+		t.Fatal("终态再收口必须是 no-op")
+	}
+
+	// 429 退避：running → queued(+ReadyAt) 之后，run 收尾（FinishDelivery done）
+	// 必须拒绝 —— 这正是 Review B2 的复现形状。
+	wakes2 := mustOffer(t, c, gid, "agent_c", []AgentID{"agent_d"}, 1)
+	id2 := wakes2[0].ID
+	w2, fresh := c.BeginDelivery(wakes2[0], time.Time{})
+	if !fresh {
+		t.Fatal("第二次投递必须生效")
+	}
+	ready := clk.Now().Add(500 * time.Millisecond)
+	if !c.RequeueDelivery(w2, DeliveryReasonRateLimit, ready, time.Time{}) {
+		t.Fatal("429 退回队列必须生效")
+	}
+	if d := deliveryByID(t, c, gid, id2); d.Status != DeliveryQueued || d.ReadyAt == nil || d.Attempts != 1 {
+		t.Fatalf("退回队列后 = %+v, want queued/ReadyAt/attempts=1", d)
+	}
+	if c.FinishDelivery(gid, id2, DeliveryDone, "", time.Time{}) {
+		t.Fatal("退避中的 queued 记录不能被 run 收尾覆写成 done")
+	}
+	if d := deliveryByID(t, c, gid, id2); d.Status != DeliveryQueued || d.ReadyAt == nil {
+		t.Fatalf("收尾之后退避记录被改写: %+v", d)
+	}
+	// 退避到期后必须还能真的重投一次（attempts 增加）。
+	clk.Advance(time.Second)
+	due := c.DueWakes(gid, clk.Now())
+	var again bool
+	for _, w := range due {
+		if w.ID == id2 {
+			again = true
+		}
+	}
+	if !again {
+		t.Fatalf("退避到期后必须回到可投集合: %+v", due)
+	}
+	if _, fresh := c.BeginDelivery(w2, clk.Now()); !fresh {
+		t.Fatal("退避到期后 BeginDelivery 必须生效（B2：不能被终态占住）")
+	}
+	if d := deliveryByID(t, c, gid, id2); d.Status != DeliveryRunning || d.Attempts != 2 {
+		t.Fatalf("重投后 = %+v, want running/attempts=2", d)
+	}
+	// running → failed：fail() 的收口路径仍然生效。
+	if !c.FinishDelivery(gid, id2, DeliveryFailed, "boom", time.Time{}) {
+		t.Fatal("running → failed 必须生效")
+	}
+	if d := deliveryByID(t, c, gid, id2); d.Status != DeliveryFailed || d.Reason != "boom" {
+		t.Fatalf("running → failed 后 = %+v", d)
+	}
+}

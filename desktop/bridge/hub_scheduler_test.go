@@ -172,8 +172,31 @@ func TestHubGroupSerialPumpFallback(t *testing.T) {
 	}
 }
 
-// TestHubGroupRateLimitRequeuesNotFails：provider 429（或上游瞬时不可用）退回队列
-// 退避，**不标 failed** —— 目标不是坏掉，只是暂时被限流。
+// rateLimitOnceProvider 前 n 次开流返回 429（run **中途**限流的确定性注入），
+// 之后转给内层 provider。旧版本用 hubWakeAskHook（投递窗口）注入 429，那条路径
+// 根本不会产生 AgentEnd，因此从没测到「run 收尾覆写 requeue」这个 bug（B2）。
+type rateLimitOnceProvider struct {
+	inner *convProvider
+	mu    sync.Mutex
+	fails int
+}
+
+func (p *rateLimitOnceProvider) Stream(ctx context.Context, req *provider.StreamRequest, h func(provider.StreamEvent) error) error {
+	p.mu.Lock()
+	fail := p.fails > 0
+	if fail {
+		p.fails--
+	}
+	p.mu.Unlock()
+	if fail {
+		return &provider.RateLimitError{StatusCode: 429, Err: errors.New("too many requests")}
+	}
+	return p.inner.Stream(ctx, req, h)
+}
+
+// TestHubGroupRateLimitRequeuesNotFails：run 中途 provider 429 → 退回队列 + 退避，
+// **不标 failed**，且退避到期后必须**真的重投一次**（第二次 provider 调用、
+// attempts 增加）。目标不是坏掉，只是暂时被限流。
 func TestHubGroupRateLimitRequeuesNotFails(t *testing.T) {
 	m, buf := testManager(t)
 	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
@@ -181,18 +204,10 @@ func TestHubGroupRateLimitRequeuesNotFails(t *testing.T) {
 	b := createHubAgent(t, m, buf, 2, "限流B")
 	g := convGroupWith(t, m, buf, 10, "限流群", nil, a, b)
 	fb := newConvProvider("限流之后成功")
-	release := fb.gated()
-	defer close(release)
-	setGroupFakeLoop(t, m, mustGroupSession(t, m, string(b.ID), string(g.ID)), g, string(b.ID), fb)
-
-	// 第一次投递注入 429。
-	hubWakeAskHook = func(agentID string) error {
-		if agentID == string(b.ID) {
-			return &provider.RateLimitError{StatusCode: 429, Err: errors.New("too many requests")}
-		}
-		return nil
-	}
-	defer func() { hubWakeAskHook = nil }()
+	prov := &rateLimitOnceProvider{inner: fb, fails: 1}
+	// 不重试：429 要作为「这一轮结束的原因」冒到 AgentEnd（默认 10 次重试会让测试
+	// 等十几秒，而且测不到 run 收尾的收口路径）。
+	setGroupFakeLoopNoRetry(t, m, mustGroupSession(t, m, string(b.ID), string(g.ID)), g, string(b.ID), prov)
 
 	ok, errMsg, data := hubCmd(t, m, buf, 20, "hub_group_send", map[string]any{
 		"group_id": string(g.ID), "text": "@限流B 试一下",
@@ -209,16 +224,21 @@ func TestHubGroupRateLimitRequeuesNotFails(t *testing.T) {
 	if d.Status == agenthub.DeliveryFailed {
 		t.Fatalf("429 不该标 failed: %+v", d)
 	}
+	if d.Status == agenthub.DeliveryDone {
+		t.Fatalf("run 收尾把退避中的 queued 覆写成 done（B2）: %+v", d)
+	}
 	if d.Reason != agenthub.DeliveryReasonRateLimit {
 		t.Fatalf("原因 = %q, want %q", d.Reason, agenthub.DeliveryReasonRateLimit)
 	}
 	if !d.ReadyAt.After(time.Now().Add(-time.Second)) {
 		t.Fatalf("缺退避时刻: %+v", d.ReadyAt)
 	}
-	// 退避到期后自动重试：不再注入 429，这一条必须真的跑起来。
-	hubWakeAskHook = nil
-	convWait(t, "退避后重投成功", func() bool { return fb.callCount() >= 1 })
+	// 退避到期后自动重试：这一条必须真的再跑一次（第二次 provider 调用）。
+	convWait(t, "退避后必须真的重投一次", func() bool { return fb.callCount() >= 1 })
 	d2, _ := m.hubConversation().Delivery(g.ID, d0.WakeID)
+	if d2.Attempts < 2 {
+		t.Fatalf("重投后 attempts = %d, want >= 2（%+v）", d2.Attempts, d2)
+	}
 	if d2.Status != agenthub.DeliveryRunning && d2.Status != agenthub.DeliveryDone {
 		t.Fatalf("重投后状态 = %s, want running/done", d2.Status)
 	}

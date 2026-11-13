@@ -24,7 +24,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
@@ -99,6 +101,53 @@ func readHubConversationSettings() (hubConversationSettings, bool) {
 		return hubConversationSettings{}, false
 	}
 	return *root.Hub.Conversation, true
+}
+
+// hubConvLimitsWatch 记住上次读到的 settings.json 指纹（mtime+size）与限额。
+//
+// 为什么要有缓存（I1）：hubConversation() 在每个群事件、每次泵、每次状态条刷新
+// 都会走到，每次都读盘+解析 JSON 太贵。这里只 stat 一次文件（mtime+size），指纹
+// 没变就直接返回缓存值 —— 用户保存设置后 mtime 变了，下一次调用就会重载，
+// **无需重启**。
+//
+// 失败回退：stat 失败（文件不存在/权限）时不缓存指纹，下次调用重新读（失败本身
+// 很便宜，而且文件可能刚被创建）；读/解析失败由 loadHubConversationLimits 回落
+// 默认值，不会把群聊卡死。
+type hubConvLimitsWatch struct {
+	mu     sync.Mutex
+	stamp  string
+	limits agenthub.ConversationLimits
+	ok     bool
+}
+
+var hubConvLimitsCache hubConvLimitsWatch
+
+// hubConvSettingsStamp 取 settings.json 的「路径+mtime+size」指纹（空 = 读不到）。
+func hubConvSettingsStamp(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%s|%d|%d", path, st.ModTime().UnixNano(), st.Size())
+}
+
+// loadHubConversationLimitsCached 带指纹缓存的 loadHubConversationLimits。
+// 文件没变 → 直接用上次结果；变了/读不到 → 重读。
+func loadHubConversationLimitsCached() agenthub.ConversationLimits {
+	path := homeCfgPath("settings.json")
+	stamp := hubConvSettingsStamp(path)
+	hubConvLimitsCache.mu.Lock()
+	defer hubConvLimitsCache.mu.Unlock()
+	if stamp != "" && hubConvLimitsCache.ok && stamp == hubConvLimitsCache.stamp {
+		return hubConvLimitsCache.limits
+	}
+	limits := loadHubConversationLimits()
+	if stamp != "" {
+		hubConvLimitsCache.stamp = stamp
+		hubConvLimitsCache.limits = limits
+		hubConvLimitsCache.ok = true
+	}
+	return limits
 }
 
 func clampInt(v, lo, hi int) int {

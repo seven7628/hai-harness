@@ -9,6 +9,7 @@ package agenthub
 //   - A→C 不清 A↔B；人类发送不计 pair。
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -292,5 +293,336 @@ func TestConversationMaxPendingWakes(t *testing.T) {
 	}
 	if v := c.View("group_1"); v.QueueLen != 2 || v.MaxPendingWakes != 2 {
 		t.Fatalf("视图 = %+v, want queue=2/max=2", v)
+	}
+}
+
+// TestConversationWaitingHumanStillSchedules：B1 回归 —— pair 到限把对话推到
+// waiting_human 之后，下一批 @（另一条在飞 run 回来 @D / 人类插话）必须**既能入队
+// 也能被调度器取到**，否则队列永久泵不动（Offer 成功、DueWakes 却返回空）。
+func TestConversationWaitingHumanStillSchedules(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 1, PairWindow: 10 * time.Minute, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	// 用满 a↔b（1 次成功投递）。
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "一句", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin")
+	}
+	// b→a 命中 pair 限 → 全部 skipped → waiting_human。
+	if wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_b", Targets: convIDs("agent_a"), Text: "两句", Depth: 2,
+	}); err != nil || len(wakes) != 0 {
+		t.Fatalf("到限必须跳过: %v %+v", err, wakes)
+	}
+	if v := c.View("group_1"); v.Status != ConversationWaitingHuman || v.QueueLen != 0 {
+		t.Fatalf("到限后 = %+v, want waiting_human/queue=0", v)
+	}
+	// 软状态不是终态：waiting_human + 空队列时调度器什么都不给（不会自己复活）。
+	if wakes := c.DueWakes("group_1", clk.Now()); len(wakes) != 0 {
+		t.Fatalf("空队列不该有可投 wake: %+v", wakes)
+	}
+	if _, ok := c.NextReadyAt("group_1"); ok {
+		t.Fatal("空队列不该有 NextReadyAt")
+	}
+	// 另一条在飞 run 回来 @D（不同 pair，不命中限）：必须入队 + 立刻可调度。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_c", Targets: convIDs("agent_d"), Text: "换个对手", Depth: 2,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("waiting_human 之后必须仍能入队: %v %+v", err, wakes)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationRunning || v.QueueLen != 1 {
+		t.Fatalf("入队后 = %+v, want running/queue=1（waiting_human 必须被拉回）", v)
+	}
+	if v.StopReason != "" {
+		t.Fatalf("拉回 running 后不该残留等待原因: %q", v.StopReason)
+	}
+	if due := c.DueWakes("group_1", clk.Now()); len(due) != 1 || due[0].Target != "agent_d" {
+		t.Fatalf("DueWakes = %+v, want [agent_d]（B1：队列必须泵得动）", due)
+	}
+	if _, ok := c.NextReadyAt("group_1"); !ok {
+		t.Fatal("B1：waiting_human 拉回后 NextReadyAt 必须给得出")
+	}
+	if _, ok := c.Peek("group_1"); !ok {
+		t.Fatal("B1：Peek 必须看得到队首")
+	}
+	if w, ok := c.BeginTurn("group_1", clk.Now()); !ok || w.Target != "agent_d" {
+		t.Fatalf("BeginTurn = %+v/%v, want agent_d", w, ok)
+	}
+}
+
+// TestConversationWaitingHumanKeepsWhenAllSkipped：B1 回归 —— 全部 skipped 时
+// **仍然**保持 waiting_human（不能因为放宽调度判据就翻回 running）。
+func TestConversationWaitingHumanKeepsWhenAllSkipped(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 1, PairWindow: 10 * time.Minute, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "一句", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin")
+	}
+	// 连续两次全部跳过：状态必须稳定停在 waiting_human，队列/调度一律为空。
+	for i := 0; i < 2; i++ {
+		if wakes, err := c.Offer(ConversationOffer{
+			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "再一句", Depth: 2,
+		}); err != nil || len(wakes) != 0 {
+			t.Fatalf("第 %d 次到限必须跳过: %v %+v", i+1, err, wakes)
+		}
+		v := c.View("group_1")
+		if v.Status != ConversationWaitingHuman || v.QueueLen != 0 || v.StopReason == "" {
+			t.Fatalf("第 %d 次全跳过之后 = %+v, want waiting_human/queue=0/有原因", i+1, v)
+		}
+		if wakes := c.DueWakes("group_1", clk.Now()); len(wakes) != 0 {
+			t.Fatalf("全跳过之后不该有可投 wake: %+v", wakes)
+		}
+	}
+}
+
+// TestConversationTerminalNeverSchedules：B1 放宽调度判据之后，stopped/exhausted
+// 仍然一条都不放（队列里有东西也不能投）。
+func TestConversationTerminalNeverSchedules(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "一句", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.Stop("group_1", "人类停止", clk.Now())
+	if wakes := c.DueWakes("group_1", clk.Now()); len(wakes) != 0 {
+		t.Fatalf("stopped 之后不该有可投 wake: %+v", wakes)
+	}
+	if v := c.View("group_1"); v.Status != ConversationStopped {
+		t.Fatalf("stopped 之后状态 = %q", v.Status)
+	}
+	// exhausted：同一对重复同一段内容 → 整批熔断（保留原有语义）。
+	c2, clk2 := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+	})
+	c2.BeginHuman("group_2", 1, clk2.Now())
+	if _, err := c2.Offer(ConversationOffer{
+		GroupID: "group_2", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "同一句话", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c2.BeginTurn("group_2", clk2.Now()); !ok {
+		t.Fatal("begin")
+	}
+	if _, err := c2.Offer(ConversationOffer{
+		GroupID: "group_2", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "同一句话", Depth: 2,
+	}); !errors.Is(err, ErrConversationExhausted) {
+		t.Fatalf("同内容应 exhausted: %v", err)
+	}
+	if wakes := c2.DueWakes("group_2", clk2.Now()); len(wakes) != 0 {
+		t.Fatalf("exhausted 之后不该有可投 wake: %+v", wakes)
+	}
+	if v := c2.View("group_2"); v.Status != ConversationExhausted {
+		t.Fatalf("exhausted 之后状态 = %q", v.Status)
+	}
+}
+
+// TestConversationExhaustMarksQueuedSkipped：N1 —— exhausted 清队列时账本里的
+// queued 记录也要收口，不能留下永远「排队中」的记录。
+func TestConversationExhaustMarksQueuedSkipped(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	// 先排一条正常的 @。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "同一句", Depth: 2, TriggerSeq: 3,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("offer: %v %+v", err, wakes)
+	}
+	if v := c.View("group_1"); v.QueueLen != 1 {
+		t.Fatalf("前置队列 = %d, want 1", v.QueueLen)
+	}
+	// 同内容再来一次 → 整批熔断 → exhausted 并清队列。
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "同一句", Depth: 2, TriggerSeq: 4,
+	}); !errors.Is(err, ErrConversationExhausted) {
+		t.Fatalf("同内容应 exhausted: %v", err)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationExhausted || v.QueueLen != 0 {
+		t.Fatalf("exhausted 后 = %+v, want exhausted/queue=0", v)
+	}
+	for _, d := range c.Deliveries("group_1") {
+		if d.Status == DeliveryQueued {
+			t.Fatalf("N1：队列清了，账本还留着「排队中」: %+v", d)
+		}
+		if d.Status == DeliverySkipped && d.Reason != DeliveryReasonExhausted {
+			t.Fatalf("N1：跳过原因 = %q, want %q", d.Reason, DeliveryReasonExhausted)
+		}
+	}
+}
+
+// TestConversationQueueFullIgnoresSkippedPlans：N3 —— queue_full 只统计真要入队的
+// plan；已经因互踢被跳过的目标不该把「队列没满」的一条 @ 判成 queue_full。
+func TestConversationQueueFullIgnoresSkippedPlans(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 1, PairWindow: time.Hour, IdleReset: -1, MaxPendingWakes: 1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	// 用满 a↔b。
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "一句", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin")
+	}
+	// a→[b, c]：b 命中 pair 限（跳过，不入队），c 正常。队列上限 1 应该刚好放行 c。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b", "agent_c"),
+		Text: "两句", Depth: 2,
+	})
+	if err != nil {
+		t.Fatalf("offer: %v", err)
+	}
+	if len(wakes) != 1 || wakes[0].Target != "agent_c" {
+		t.Fatalf("N3：只该放行 c（b 已跳过，不占队列额度），得到 %+v", wakes)
+	}
+	for _, d := range c.Deliveries("group_1") {
+		if d.Reason == DeliveryReasonQueueFull {
+			t.Fatalf("N3：不该出现 queue_full（被跳过的目标不算队列额度）: %+v", d)
+		}
+	}
+}
+
+// TestConversationResetBumpsGeneration：N2 —— 重置/空闲超时是换代：重置前那条在飞
+// run 的 final @ 不能把状态从 idle 翻回 running。
+func TestConversationResetBumpsGeneration(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	before := c.View("group_1")
+	v := c.Reset("group_1", clk.Now())
+	if v.Status != ConversationIdle {
+		t.Fatalf("重置后 = %q, want idle", v.Status)
+	}
+	if v.ID == before.ID || v.ID == "" {
+		t.Fatalf("N2：重置必须换代（旧 %q / 新 %q）", before.ID, v.ID)
+	}
+	// 旧 run 的 final @ 带着旧 conversation id：记 skipped(stale)，状态保持 idle。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "旧 run 收尾", Depth: 2, TriggerSeq: 3, ConversationID: before.ID,
+	})
+	if err != nil || len(wakes) != 0 {
+		t.Fatalf("旧代 @ 必须丢弃: %v %+v", err, wakes)
+	}
+	if v := c.View("group_1"); v.Status != ConversationIdle || v.QueueLen != 0 {
+		t.Fatalf("N2：旧 run 的 @ 把状态翻回了 %q（队列 %d）", v.Status, v.QueueLen)
+	}
+	var stale bool
+	for _, d := range c.Deliveries("group_1") {
+		if d.Status == DeliverySkipped && d.Reason == DeliveryReasonStale {
+			stale = true
+		}
+	}
+	if !stale {
+		t.Fatal("N2：旧代 @ 应记 skipped(stale)")
+	}
+	// 用当前 id 的 @ 照常入队（换代判据不是「一律拒绝」）。
+	wakes, err = c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "新代", Depth: 2, TriggerSeq: 4, ConversationID: v.ID,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("新代 @ 应入队: %v %+v", err, wakes)
+	}
+}
+
+// TestConversationOfferAfterIdleResetSchedules：N2 残留 —— 空闲超时把对话 reset 成
+// idle 之后，一条**没有** ConversationID 的 @（人类/新 run/测试）必须重新开一条对话
+// 并真的可调度：状态 running、队列 1、DueWakes 非空。
+// 旧实现里 settleLocked 排在 stale 判定之后：reset 清了队列，随后 wakes 又被 append
+// 进一个 idle 对话 → status=idle、queue=1、DueWakes=0，队列永远泵不动。
+func TestConversationOfferAfterIdleResetSchedules(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: time.Second,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	old := c.View("group_1")
+	// 越过空闲阈值（settle 是惰性的，下一次读写才会结算）。
+	clk.Advance(2 * time.Second)
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "空闲之后", Depth: 2, TriggerSeq: 3,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("offer: %v %+v", err, wakes)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationRunning || v.QueueLen != 1 {
+		t.Fatalf("空闲超时后 @ = %+v, want running/queue=1", v)
+	}
+	if v.ID == "" || v.ID == old.ID {
+		t.Fatalf("N2：空闲超时必须换代（旧 %q / 新 %q）", old.ID, v.ID)
+	}
+	if due := c.DueWakes("group_1", clk.Now()); len(due) != 1 || due[0].Target != "agent_b" {
+		t.Fatalf("N2：空闲超时后的 wake 必须可调度，得到 %+v", due)
+	}
+	// 再结算一次不能把它又 reset 掉（隐式新对话要刷新 updatedAt）。
+	if v := c.View("group_1"); v.Status != ConversationRunning || v.QueueLen != 1 {
+		t.Fatalf("N2：新对话被立刻再次空闲重置: %+v", v)
+	}
+}
+
+// TestConversationStaleOfferAfterIdleResetDropped：N2 残留 —— 空闲超时（换代）之后，
+// 旧 generation 的在飞 run 回来 @ 必须记 skipped(stale)，状态保持 idle、队列为空。
+func TestConversationStaleOfferAfterIdleResetDropped(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: time.Second,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	old := c.View("group_1")
+	// 不先读 View：这一条 Offer 自己就要触发空闲结算（结算必须先于换代判定）。
+	clk.Advance(2 * time.Second)
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "旧 run 收尾", Depth: 2, TriggerSeq: 3, ConversationID: old.ID,
+	})
+	if err != nil || len(wakes) != 0 {
+		t.Fatalf("旧代 @ 必须丢弃（不能先按旧代入队再被空闲重置清掉）: %v %+v", err, wakes)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationIdle || v.QueueLen != 0 {
+		t.Fatalf("N2：旧代 @ 把状态翻成 %q（队列 %d）", v.Status, v.QueueLen)
+	}
+	var stale bool
+	for _, d := range c.Deliveries("group_1") {
+		if d.Status == DeliverySkipped && d.Reason == DeliveryReasonStale {
+			stale = true
+		}
+	}
+	if !stale {
+		t.Fatal("N2：旧代 @ 应记 skipped(stale)")
 	}
 }
