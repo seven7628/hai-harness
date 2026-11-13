@@ -22,6 +22,8 @@
 # 允许版本化的 internal 包（PR-05a0 起）：其余 internal/* 仍不入库
 /internal/*
 !/internal/atomicfile/
+# officekit（R08d）：kit 探测/校验/转换 + PDF 栅格化，属于产品代码而非开发期资产
+!/internal/officekit/
 /oss/
 /scripts/
 /promo-video/
