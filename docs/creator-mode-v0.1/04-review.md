@@ -743,3 +743,73 @@ PR-09 的派单里我写了「`⌘1..9` 是切 `rightTab`」。实现者照这�
 实现者的两处判断经核为**正确**，记录备查：
 - `关闭全部` 用 `store.closeTabs(ids)`：store 里它先关干净的、把 dirty 的**整批**塞进 `closeConfirm` 队列逐个问；逐 id 调 `closeTab` 只会问到第一个。
 - `⌃⇥` 读 `useAppStore.getState().tabsByScope[scope]` 而不是闭包里的 `tabs` —— 键盘事件比 React 状态更新先到，用闭包值会慢一拍。
+
+### F64（PR-10）—— 缓存就是第二种真相：两个模块实例，两份 cache，一边写一边不认
+
+`surfaces/health.ts` 第一版是「模块级内存 store + 每次改动 write-through 到 localStorage」。看着很稳：
+写一半内存一半持久化，读走内存（省一次 JSON.parse）。
+
+探针直接把它打穿了：`disableSurface('git')` 之后 `localStorage` 里有记录、探针这一侧的
+`isSurfaceDisabled('git') === true`，但 `listSurfaces()` 仍然把 `git` 列在菜单里。两边读的是**同一份
+文件、同一个 localStorage**，却给出相反答案 —— 因为探针用 `import('../../src/surfaces/health.ts')`
+动态引入，和 RightPanel 那条 `../surfaces/health` 被解析成了**两个模块实例**，两份 `cache` 各自为政。
+
+修法不是「让探针别动态 import」（那只是把症状挪走），而是**删掉 cache**：真相源只留 localStorage，
+每次读它。一条记录的 `getItem + JSON.parse` 是微秒级，用不上第二种真相。
+
+> **教训（F53 的同族）**：F53 是「测试里新建了一个 Cache 实例，生产用的是 Service.cache，锁在测试路径上
+> 是空操作」；F64 是同一件事的另一面 —— **只要有两份可变状态，就迟早会分叉**，而分叉现场通常长得
+> 像「某个 UI 分支没刷新」。判据很简单：这个函数能不能被单独 import 两遍还表现一致？不能就别加缓存。
+
+### F65（PR-10）—— React 18 dev 会把出错的那次 render 跑第二遍，「只崩一次」的夹具因此永远不崩
+
+探针需要一个「第一次挂载崩、第二次成功」的标签来验「切走再切回能重新渲染」（boundary 按 tab.id 重置）。
+第一版写成计数器：`n = hits+1; hits.set(id, n); if (n <= 1) throw`。
+
+结果：那个标签一次都没崩，探针拿到的是正常的 `.probe-ok`。原因是 React 18 在**开发模式**下，出错后
+会把同一次 render 再执行一遍（用来重建组件栈）；第二遍 `n=2` 不再抛 → 错误消失 → 边界根本没被触发。
+
+改成显式闸门（`__probe.setBoom(true/false)`）后语义才可控：崩不崩是**夹具的输入**，不是渲染次数的函数。
+
+> **教训**：任何「按调用次数改变行为」的夹具，在 React dev 双跑、StrictMode 双挂载、并发重放面前都不成立。
+> 要么用显式开关，要么用「输入决定输出」的纯函数夹具 —— 别让夹具依赖框架内部的重试策略。
+
+### F66（PR-10 复评）—— 三条「我以为是取舍」的，两条其实是错的；还有一条是 React 的 commit 边界
+
+复评推翻了 PR-10 的两处实现，并留下了本 PR 最值钱的一个坑。
+
+**① `key={tab.id}` 换隔离：错。** 第一版为了「A 标签崩了切到 B 不能看到 A 的错误页」给 boundary
+挂 `key={tab.id}`，并且在注释里如实记了代价（children 重挂）。复评的判断是：**代价本身就不该付** ——
+R06c 的「切 web 标签原地复用」是硬约束（原生视图与页面状态靠 DOM 容器不重挂），而「按标签重置
+错误态」根本不需要 key。改法：boundary 收 `tabId`，变化时 `setState({err:null})`，children 原地更新。
+证据从「隔离用例」升级成「实例号用例」（T2b）：同一 provider 组件在 a→b→a 之后，`useState` 惰性初值
+领到的实例号必须不变。实测：key 版本 `1 → 2 → 3`，tabId 复位版本 `1 → 1 → 1`。
+
+> **教训**：写「代价：……」不等于尽到了告知义务。**如果那个代价破坏了另一条硬约束，它就是缺陷**，
+> 不是取舍。判断方法：把代价写成「它会破坏 X」，再问「X 是谁的硬约束」。这里 X=R06c，早就写在
+> RightPanel 的注释里（「**不要**给这个元素加 key」），我却先加了 key、再在注释里解释为什么加。
+
+**② `addableKinds()` 和 `listSurfaces()` 取交集：错。** 第一版的理由是「禁用只有注册表知道」，
+于是菜单 = `ADDABLE_KINDS ∩ listSurfaces()`。复评指出：菜单是「这个应用能开什么」的静态能力清单，
+不是注册表镜像；取交集会让「注册表空 / 某个 provider 漏了副作用注册」变成**菜单静默变空**，
+而那正是 `panelFallback` 兜得住的场景（F45）。少一项没人报障，比渲染出错更难查。
+改法：`ADDABLE_KINDS.filter(k => !isSurfaceDisabled(k))`。探针补了反向用例：`unregisterSurface('git')`
+之后 ＋ 菜单里**仍然有** git，只有 `disableSurface` 才让它消失。
+
+**③ 墓碑的「移除标签」用 `closeTabNow`：错（数据安全）。** 派单当时写的是「这是墓碑，不是有未保存
+内容的编辑器」，所以跳过 dirty 守卫。复评指出：`file{mode:'edit'}` 标签崩到被禁用时，`dirtyTabs`
+里可能真的有未保存内容，`closeTabNow` 会**静默丢掉**它。改 `closeTabs([id])`：干净的立刻关、
+脏的进确认队列 —— 交互洁癖不该压在数据安全上。探针拆成 T7a（干净：立刻消失、不弹框）/ T7b
+（脏：标签仍在 + 弹确认框 + 取消后脏标记还在）。
+
+**④ 顺带踩到 React 的 commit 边界（本 PR 最贵的一条）。** 改成 tabId 复位后，连崩 3 次的用例
+在第 1 次就数到 2，直接误禁用。原因：复位判据写成 `this.state.err` 时，**「切到 b4a」和
+「b4a 在这一帧崩了」是同一个 commit** —— 复位逻辑把刚崩出来的新错误当成上一个标签的残留清掉，
+children 再渲染一次、再崩一次，一次崩溃记两笔。判据必须是 `prevState.err`（这次更新**之前**
+就已经在错误态）。
+
+> **教训**：`componentDidUpdate` 里判「状态是不是旧的」，要看 `prevState`/`prevProps`，
+> 不能用 `this.state`/`this.props` —— 后者描述的是**这次更新之后**的世界，而你想问的是它之前。
+> 这类 bug 只在「同一次更新里既换输入又出错」时出现，平时跑一万次也碰不到；能抓到它的是
+> 「连续 3 次」这种**计数型断言**，不是「有没有崩溃卡」。计数型用例值得为每一个阈值都写一条。
+

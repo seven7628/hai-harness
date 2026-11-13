@@ -1,6 +1,10 @@
 // Surface 注册表：模块级单例，唯一写者（01 §3.2 / 03 §2.2）
 // 约束：注册即校验，重复注册抛错；插件不可声明 write（D-E）；排序必须字节稳定。
 import type { SurfaceKind, SurfaceProvider, SurfaceTab } from './types'
+// 与 health.ts 是**函数级**循环依赖（registry 只在 listSurfaces 里问「这个 kind 被禁用了吗」，
+// health 只在改动后调 notifySurfacesChanged 广播）。两个方向都只在调用期取值，模块求值期
+// 不互相读任何绑定 —— 两种 import 顺序都不会踩 TDZ，esbuild 打包同样成立。
+import { listDisabled } from './health'
 
 const BUILTIN_KINDS = new Set<SurfaceKind>(['activity', 'git', 'file', 'web'])
 const GROUP_ORDER = { workflow: 0, content: 1, plugin: 2 } as const
@@ -40,9 +44,19 @@ export function getSurface(kind: SurfaceKind | undefined): SurfaceProvider | und
   return kind ? byKind.get(kind) : undefined
 }
 
-/** 稳定排序：group → order（缺省 100）→ kind（按码点，不用 localeCompare，避免 ICU 差异） */
+/**
+ * 稳定排序：group → order（缺省 100）→ kind（按码点，不用 localeCompare，避免 ICU 差异）。
+ *
+ * PR-10 起**过滤掉被禁用的 provider**（连续 3 次崩溃自动禁用 / 手动禁用）：这个函数是
+ * 「现在能开/能列出什么」的唯一答案（＋ 菜单与空态能力面板都读它）。
+ * 注意 `getSurface()` **不过滤** —— 墓碑要靠它判断「provider 在，只是被禁用」（面板名从
+ * provider.title 取），两者口径必须分开。
+ */
 export function listSurfaces(): SurfaceProvider[] {
-  return [...byKind.values()].sort(
+  // 一次读出禁用集（不是每个 provider 各读一次）：listSurfaces 在渲染期被调，
+  // 每次 getItem + JSON.parse 乘以 provider 数没必要。
+  const off = new Set<SurfaceKind>(listDisabled())
+  return [...byKind.values()].filter((p) => !off.has(p.kind)).sort(
     (a, b) =>
       GROUP_ORDER[a.group] - GROUP_ORDER[b.group] ||
       (a.order ?? 100) - (b.order ?? 100) ||
@@ -59,6 +73,15 @@ export function subscribeSurfaces(fn: () => void): () => void {
 
 function emit() {
   for (const fn of listeners) fn()
+}
+
+/**
+ * 广播「表面层变了」——注册/注销之外，**可用性（禁用集）的变化也走这一条通道**。
+ * health.ts 每次改动后调它；UI 只需订阅 subscribeSurfaces 一处就能同时收到两类变化，
+ * 不另造第二套订阅（两份订阅器必然分叉出「一边刷新一边不刷新」）。
+ */
+export function notifySurfacesChanged() {
+  emit()
 }
 
 /** 仅供测试：清空注册表与订阅者 */
