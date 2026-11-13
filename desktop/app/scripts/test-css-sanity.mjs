@@ -17,7 +17,7 @@ import { fileURLToPath } from 'url'
 import postcss from 'postcss'
 
 const APP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const FILES = ['src/index.css', 'src/narrative-skin.css', 'src/hub/hub.css']
+const FILES = ['src/index.css', 'src/narrative-skin.css', 'src/hub/hub.css', 'src/hub/HubInlineTodos.css']
 
 let bad = 0
 for (const rel of FILES) {
