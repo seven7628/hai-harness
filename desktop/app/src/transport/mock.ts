@@ -315,7 +315,43 @@ const MOCK_FILES: Record<string, string[]> = {
   // 产出卡片回归（e2e/verify_artifacts_card.mjs）以 README.md 为样本断言 .fp-code，
   // 复用同名会把那条用例的语义改掉。
   'README.zh-CN.md': MOCK_README_ZH.split('\n'),
+  // —— HTML 预览探针的样例（e2e/verify_html_file_preview.mjs）——
+  // 刻意带 <script> 与内联事件：html 渲染器的沙箱若误开了 allow-scripts，它们会写
+  // window.__pwned / __onerror / __onload，探针据此当场红（不靠「看起来像」判断执行没执行）。
+  'demo.html': [
+    '<!doctype html>',
+    '<html lang="zh">',
+    '<head><meta charset="utf-8"><title>demo</title></head>',
+    '<body>',
+    '<h1>标题</h1>',
+    '<p id="note">静态预览，不执行脚本</p>',
+    '<script>window.__pwned = 1; document.title = "pwned"</script>',
+    '</body>',
+    '</html>',
+  ],
+  // 注入样例：两个内联事件向量（图片加载失败的 onerror、SVG 的 onload）。<img> 的 src 用
+  // data:,（必然解码失败）→ 若脚本能跑，onerror 一定触发，不会因为「图恰好加载成功」而假绿。
+  'inject.html': [
+    '<!doctype html>',
+    '<html><body>',
+    '<h1>注入样例</h1>',
+    '<img src="data:," onerror="window.__onerror = 1">',
+    '<svg width="8" height="8" onload="window.__onload = 1"></svg>',
+    '</body></html>',
+  ],
+  // 截断样例：真 bridge 在超过 1 MiB 时给 truncated=true（file_preview 的上限）。塞 1 MiB
+  // 样例内容进探针没有意义 —— 这里用固定 fixture 复刻**同一个字段契约**（见 MOCK_TRUNCATED）。
+  'huge.html': [
+    '<!doctype html>',
+    '<html><body><h1>截断样例</h1></body></html>',
+  ],
 }
+
+/**
+ * 按 basename 声明「这份样例在真 bridge 里会被截断」——file_preview 的 truncated 只能由
+ * bridge 的 1 MiB 闸产生，mock 里没有真文件可量，故用固定清单表达同一契约。
+ */
+const MOCK_TRUNCATED = new Set(['huge.html'])
 
 // —— mock 命令校验（与真 bridge 同规则：拒绝式失败，返回中文原因；null = 通过）——
 // 放在模块级而非类内：纯函数、无状态，mock 里被 dispatch 直接调用。
@@ -2853,7 +2889,10 @@ class MockTransport implements Transport {
         }
         const lines = MOCK_FILES[path] ?? MOCK_FILES[path.split('/').pop() ?? '']
         const content = lines ? lines.join('\n') : `// ${path}\n// （mock 示例：真 bridge 读取工作区文件）\n`
-        this.respond(cmd, { path, content, lines: lines ? lines.length : 2, truncated: false, binary: false })
+        this.respond(cmd, {
+          path, content, lines: lines ? lines.length : 2, binary: false,
+          truncated: MOCK_TRUNCATED.has(path.split('/').pop() ?? ''),
+        })
         break
       }
       // —— 内嵌编辑器三命令（PR-05b）：与真 bridge 同契约（含 code），失信于前端就等于漏测 ——

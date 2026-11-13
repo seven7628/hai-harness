@@ -2012,6 +2012,13 @@ const zh: Record<string, string> = {
   'rp.preview.officeFailed': '转换失败',
   'rp.preview.officeNoKind': '这个扩展名没有对应的转换通道',
   'rp.preview.officeTruncated': '内容超过 1 MiB，已截断',
+  // —— 2026-11：html（静态快照；默认通道仍是内嵌浏览器，见 useAppStore.openPreviewTab）——
+  // 文案必须让「这里不跑脚本」是**用户可读的事实**，否则一个带交互的页面看起来像坏了。
+  'rp.preview.htmlStatic': 'HTML · 静态预览（脚本已禁用）',
+  'rp.preview.htmlOpen': '在内嵌浏览器中打开（可交互）',
+  'rp.preview.htmlTruncated': '内容超过 1 MiB，已截断 —— 页面尾部可能缺失',
+  'rp.preview.htmlEmpty': '没有可显示的内容（文件为空，或读不回）',
+  'rp.preview.htmlFrameTitle': 'HTML 预览：{path}',
   // —— R08c：音视频（原生 <video>/<audio> + hai-media:// 的 Range 通道）——
   // 四种状态必须各有说法：能直放 / 需转码 / 先试播 / 放不了。含糊成一句「无法预览」，
   // 用户就分不清是文件坏了、编码不支持，还是路径不对。
@@ -4029,6 +4036,12 @@ const en: Record<string, string> = {
   'rp.preview.officeFailed': 'Conversion failed',
   'rp.preview.officeNoKind': 'No conversion channel for this extension',
   'rp.preview.officeTruncated': 'Content exceeds 1 MiB — truncated',
+  // R08e: html (static snapshot; the default channel is still the embedded browser)
+  'rp.preview.htmlStatic': 'HTML · static preview (scripts disabled)',
+  'rp.preview.htmlOpen': 'Open in the embedded browser (interactive)',
+  'rp.preview.htmlTruncated': 'Content exceeds 1 MiB — truncated; the end of the page may be missing',
+  'rp.preview.htmlEmpty': 'Nothing to show (file is empty, or could not be read back)',
+  'rp.preview.htmlFrameTitle': 'HTML preview: {path}',
   // R08c: audio/video (native <video>/<audio> over the hai-media:// Range channel)
   'rp.preview.mediaVideo': 'Video',
   'rp.preview.mediaAudio': 'Audio',
