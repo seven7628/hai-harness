@@ -48,6 +48,7 @@ fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import RightPanel from '../../src/components/RightPanel'
+import WorkspaceFiles from '../../src/components/WorkspaceFiles'
 // ⚠️ 副作用注册，必须与 src/main.tsx 一致（04-review F45/F46）：少了这一行 getSurface() 全
 // undefined，面板静默走 ?? 兜底 —— 文件面板的兜底恰好就是同一个 FilePreviewTab，像素一致、
 // 断言全绿。下面 [0] 的自检断言会当场戳穿这件事。
@@ -77,6 +78,11 @@ void useAppStore.getState().start('/mock/workspace')
 
 createRoot(document.getElementById('root')!).render(
   <div style={{ height: '100vh', display: 'flex', minWidth: 0 }}>
+    {/* 左栏挂**真实** WorkspaceFiles：下面 [10] 的「预览」入口是文件树右键菜单，
+        复刻一份菜单证明不了接线（F45 的老教训）。 */}
+    <div id="lp" style={{ width: 320, flex: '0 0 auto', minWidth: 0, borderRight: '1px solid var(--border)' }}>
+      <WorkspaceFiles onBack={() => {}} />
+    </div>
     <div style={{ flex: '1 1 auto', minWidth: 0 }} />
     <div id="rp" style={{ width: 860, height: '100vh', minWidth: 0, borderLeft: '1px solid var(--border)' }}>
       <RightPanel />
@@ -397,8 +403,91 @@ async function main() {
   await page.waitForSelector('.file-source [data-renderer="csv"] .csv-preview .md table', { timeout: 20000 })
   ok('切回「表格」仍由 csv 渲染器接（双向可逆）')
 
-  // —— [9] 变异 C（F45 标准动作）：清空注册表 → 两条路都必须变成 unavailable ——
-  console.log('\n[9] 变异 C：清空注册表，同样的面板必须变成 unavailable')
+  // —— [9] 产品入口（R08b Commit B）：文件树右键「预览」+ 两个标签标题可区分 ——
+  console.log('\n[9] 产品入口：文件树右键「预览」真的能进 preview 标签；同名 source 标签标题可区分')
+  // 先把标签收干净：标签条在 10+ 个标签时会窄到只剩两个字（shortName 截断），
+  // 截图就分辨不出「预览 vs 源码」—— 而这一节的判据正是「用户能不能分清」。
+  await page.evaluate(() => {
+    const st = window.__store.getState()
+    const tabs = Object.values(st.tabsByScope).flatMap((x) => x?.tabs ?? [])
+    for (const t of tabs) if (t.kind !== 'activity') st.closeTab(t.id)
+  })
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 300)))
+
+  // 9a 菜单顺序：前两项仍是「打开 / 新建文件夹」（G5 的 ↑↓ 口径），「预览」在后面
+  const rowSel = (name) => `#lp .lf-row:has-text("${name}")`
+  await page.locator(rowSel('auth.go')).first().click({ button: 'right' })
+  await page.waitForSelector('.lf-menu', { timeout: 20000 })
+  const menu = await page.evaluate(() => {
+    const items = [...document.querySelectorAll('.lf-menu .ctx-item')].map((b) => (b.textContent ?? '').trim())
+    return { items, previewIdx: items.findIndex((x) => x === '预览') }
+  })
+  assert(menu.items[0] === '打开', `菜单第一项仍是「打开」（实得 ${JSON.stringify(menu.items.slice(0, 3))}）`)
+  assert(/新建文件夹/.test(menu.items[1] ?? ''), `第二项仍是「新建文件夹」（实得 ${JSON.stringify(menu.items.slice(0, 3))}）`)
+  assert(menu.previewIdx > 1, `「预览」在后面、没插队（下标 ${menu.previewIdx}）`)
+
+  // 9b 点「预览」→ 建 preview 标签 + 面板真的按注册表渲染
+  await page.locator('.lf-menu [data-preview="1"]').click()
+  await page.waitForSelector('.right-body [data-preview-mode="preview"] [data-renderer="text"]', { timeout: 20000 })
+  const prevTab = await page.evaluate(() => {
+    const st = window.__store.getState()
+    const set = st.tabsByScope[Object.keys(st.tabsByScope).find((k) => st.tabsByScope[k]?.tabs?.some((x) => x.kind === 'file' && x.mode === 'preview')) ?? '']
+    const active = set?.tabs?.find((x) => x.id === set.activeId)
+    return { mode: active?.mode ?? '', path: active?.path ?? '' }
+  })
+  assert(prevTab.mode === 'preview' && /auth\.go$/.test(prevTab.path), `激活的是 preview 标签（${JSON.stringify(prevTab)}）`)
+
+  // 9c 同一个文件再「打开」→ 多出一个 source 标签；两个标题必须能区分
+  await page.locator(rowSel('auth.go')).first().click({ button: 'right' })
+  await page.waitForSelector('.lf-menu', { timeout: 20000 })
+  await page.locator('.lf-menu .ctx-item').first().click()
+  await page.waitForSelector('.right-body [data-renderer="text"]', { timeout: 20000 })
+  const titles = await page.evaluate(() => [...document.querySelectorAll('.rtab .rtab-t')].map((x) => (x.textContent ?? '').trim()))
+  const fileTitles = titles.filter((x) => x.includes('auth.go') || x.includes('auth'))
+  const withTag = fileTitles.filter((x) => x.includes('预览'))
+  assert(withTag.length === 1, `有一个标签标题带「预览」后缀（实得 ${JSON.stringify(fileTitles)}）`)
+  assert(fileTitles.length >= 2, `同一个文件的两个标签都在标签条上（实得 ${JSON.stringify(fileTitles)}）`)
+  assert(new Set(fileTitles).size === fileTitles.length, `两个标题互不相同（实得 ${JSON.stringify(fileTitles)}）`)
+  const modes = await page.evaluate(() => {
+    const st = window.__store.getState()
+    const all = Object.values(st.tabsByScope).flatMap((x) => x?.tabs ?? []).filter((x) => x.kind === 'file' && /auth\.go$/.test(x.path ?? ''))
+    return all.map((x) => x.mode ?? 'source')
+  })
+  assert(modes.includes('preview') && modes.includes('source'), `标签身份按 (path, mode) 区分（实得 ${JSON.stringify(modes)}）`)
+  // 标签窄到只剩两个字时标题会被截 —— 图标必须能替代（预览 = 眼睛，source = 文件）
+  const icons = await page.evaluate(() => [...document.querySelectorAll('.rtab[data-kind="file"]')]
+    .filter((x) => (x.getAttribute('data-mode') ?? '') === 'preview')
+    .map((x) => (x.querySelector('.rtab-ico svg path, .rtab-ico svg circle')?.getAttribute('d') ?? '').slice(0, 24)))
+  assert(icons.length > 0 && icons.every((d) => d.startsWith('M2 12s3.5-7')), `预览标签用眼睛图标（可截断后仍可辨；实得 ${JSON.stringify(icons.slice(0, 2))}）`)
+
+  const shotEntry = await shot(page, '09-product-entry.png')
+
+  // 9d T1 口径未改：可视类文件的「打开」仍落**内嵌浏览器（web 标签）**，不建 file 标签。
+  // 本环境没有原生视图通道（web 标签会如实显示「实时视图不可用」），但**标签类型**这一步
+  // 是纯前端决策 —— 它就是 T1 的口径，能在链里钉住；真渲染仍由 e2e:pdf 守（不在本轮改）。
+  const before = await page.evaluate(() => {
+    const st = window.__store.getState()
+    return Object.values(st.tabsByScope).flatMap((x) => x?.tabs ?? []).filter((x) => x.kind === 'file').length
+  })
+  const activeOf = () => page.evaluate(() => {
+    const st = window.__store.getState()
+    const sets = Object.values(st.tabsByScope)
+    const tabs = sets.flatMap((x) => x?.tabs ?? [])
+    const active = sets.flatMap((x) => (x?.tabs ?? []).filter((t) => t.id === x.activeId))[0]
+    return { fileTabs: tabs.filter((t) => t.kind === 'file').length, activeKind: active?.kind ?? '' }
+  })
+  await page.evaluate(() => window.__store.getState().openFile('report.pdf'))
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 300)))
+  const pdfOpen = await activeOf()
+  assert(pdfOpen.fileTabs === before, `openFile(pdf) 不新建 file 标签（${before} → ${pdfOpen.fileTabs}）`)
+  assert(pdfOpen.activeKind === 'web', `pdf 的「打开」落 web 标签（实得 ${JSON.stringify(pdfOpen)}；内嵌视图渲染由 e2e:pdf 守）`)
+  await page.evaluate(() => window.__store.getState().openFile('brand/screenshot-main.png'))
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 300)))
+  const pngOpen = await activeOf()
+  assert(pngOpen.fileTabs === before && pngOpen.activeKind === 'web', `图片同口径（不建 file 标签、落 web；实得 ${JSON.stringify(pngOpen)}）`)
+
+  // —— [10] 变异 C（F45 标准动作）：清空注册表 → 两条路都必须变成 unavailable ——
+  console.log('\n[10] 变异 C：清空注册表，同样的面板必须变成 unavailable')
   await page.evaluate(() => {
     window.__preview.registry.resetRenderersForTest()
     window.__preview.loader.resetRendererCacheForTest()
@@ -425,11 +514,31 @@ async function main() {
   assert(s.inSource && s.text === 0 && s.fpCode === 0, 'FilePreview 的纯文本分支也失效了（硬编码分支已被搬空）')
   const shotMutant = await shot(page, '08-mutation-registry-empty.png')
 
+  // —— [11] 持久化往返：preview 标签能存能恢复（结构版本不变，不需要迁移）——
+  console.log('\n[11] 持久化往返：刷新页面后 preview 标签按同一份结构恢复')
+  // 先造一个 preview 标签（注册表在 [10] 被清空了也没关系：这里验的是**标签**能不能恢复）
+  await openTab(page, 'auth.go', 'preview')
+  await page.waitForTimeout(900) // 持久化有去抖（schedulePersistTabs），等它落盘
+  const persisted = await page.evaluate(() => {
+    const raw = localStorage.getItem('go-code.sessionTabs') ?? ''
+    return { hasPreview: /"mode":"preview"/.test(raw), v: (JSON.parse(raw || '{}') || {}).v ?? null }
+  })
+  assert(persisted.hasPreview, 'localStorage 里有 mode:"preview"（toPersistedTab 带上 mode）')
+  assert(persisted.v === 1, `持久化结构版本仍是 1（不需要 +1 的迁移；实得 ${persisted.v}）`)
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(() => !!window.__store, { timeout: 30000 })
+  await page.evaluate(() => window.__store.getState().setRightExpanded(true))
+  await page.waitForSelector('.rtab[data-mode="preview"]', { timeout: 20000 })
+  const restoredTabs = await page.evaluate(() => [...document.querySelectorAll('.rtab[data-mode="preview"]')]
+    .map((x) => (x.querySelector('.rtab-t')?.textContent ?? '').trim()))
+  assert(restoredTabs.length >= 1 && restoredTabs.some((x) => x.includes('预览')),
+    `刷新后 preview 标签真的恢复出来了（${JSON.stringify(restoredTabs)}）`)
+
   assert(errs.length === 0, `无页面错误（${errs.length ? errs.join(' | ') : 'clean'}）`)
   await browser.close()
 
   console.log('\n截图：')
-  for (const p of [shotText, shotImage, shotCsv, shotMd, shotHeavy, shotWeight, shotUnavailable, shotMutant]) console.log('  ' + p)
+  for (const p of [shotText, shotImage, shotCsv, shotMd, shotHeavy, shotWeight, shotUnavailable, shotMutant, shotEntry]) console.log('  ' + p)
   console.log(`\n✅ 预览渲染器：${pass} 项全部通过`)
 }
 

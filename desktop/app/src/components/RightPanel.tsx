@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useRef, useState, useCallback } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, isPendingWebTab, rebuildWebTab } from '../store/useAppStore'
-import type { RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
-import { Activity, GitBranch, FileIcon, CheckList, Globe, PanelRight, ChevronDown, Plus } from './icons'
+import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
+import { Activity, GitBranch, FileIcon, CheckList, EyeIcon, Globe, PanelRight, ChevronDown, Plus } from './icons'
 import { ChangesTab } from './ChangesTab'
 import { WebTab } from './WebTab'
 import { ActivityTab } from './ActivityTab'
@@ -246,15 +246,27 @@ export default function RightPanel() {
   const webTabUrl = (tab: TabInstance): string =>
     tab.kind === 'web' ? (embedNav?.targets?.find((x) => x.id === tab.viewId)?.url ?? tab.url ?? '') : ''
   // 返回 ReactNode（而非 ReactElement）：provider 的 icon 签名是 ReactNode，见 types.ts。
-  const tabIconEl = (tab: TabInstance): ReactNode =>
-    tab.kind === 'web' ? (getSurface('web')?.icon?.(tab) ?? kindIcon('web')) : kindIcon(tab.kind)
+  const tabIconEl = (tab: TabInstance): ReactNode => {
+    if (tab.kind === 'web') return getSurface('web')?.icon?.(tab) ?? kindIcon('web')
+    // 预览标签用**眼睛**图标（R08b）：标签窄到只剩两个汉字时，标题里的「· 预览」会被
+    // shortName 截掉 —— 图标是那时唯一还看得见的区分（同一个文件的 source 标签仍是文件图标）。
+    if (tab.kind === 'file' && (tab as FileTabInstance).mode === 'preview') return <EyeIcon size={12} />
+    return kindIcon(tab.kind)
+  }
   const tabTitle = (tab: TabInstance): string => {
     if (tab.kind === 'file') {
       const base = (tab.path ?? '').split('/').filter(Boolean).pop()
       // 长文件名中间截断（保留 `_test.go` 这类尾巴）：标签最宽 168px，从尾巴截断时
       // `conversation_router.go` 与 `conversation_router_test.go` 会长得一模一样。
       // 完整路径在 title 里（见渲染点的 title 属性）。
-      return (base && shortName(base)) || kindLabel('file')
+      const name = (base && shortName(base)) || kindLabel('file')
+      // mode 后缀（R08b / R08a 偏差 5）：同一个文件可以同时有 preview 与 source 两个标签
+      //（tabKeyOf 的幂等键带 mode），而标题此前只写文件名 —— 两个标签一模一样，用户分不清
+      // 点哪个。只给**非缺省**的那一侧加后缀：source 是缺省（也是绝大多数标签），给它加词
+      // 等于把全应用的标签都改宽一寸，而「预览」这种新入口才是需要被认出来的那个。
+      // diff 也有同样的问题，但那是 PR-06 之前就有的口径，本轮不动（不在验收范围内）。
+      const mode = (tab as FileTabInstance).mode
+      return mode === 'preview' ? `${name} · ${t('rp.tab.previewTag')}` : name
     }
     if (tab.kind === 'web') return getSurface('web')?.title(tab, t) ?? kindLabel('web')
     return kindLabel(tab.kind)
@@ -341,6 +353,7 @@ export default function RightPanel() {
                   key={tab.id}
                   className={`rtab ${on ? 'on' : ''} ${sleeping ? 'sleeping' : ''}`}
                   data-kind={tab.kind}
+                  data-mode={tab.kind === 'file' ? ((tab as FileTabInstance).mode ?? 'source') : undefined}
                   data-view={tab.kind === 'web' ? (tab.viewId ?? (tab.pageId != null ? `p${tab.pageId}` : '')) : ''}
                   data-sleeping={sleeping ? '1' : undefined}
                   data-pending={pending ? '1' : undefined}

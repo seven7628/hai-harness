@@ -3246,6 +3246,8 @@ export interface AppState {
   focusAgent(f?: AgentFocus): void
   // —— 右侧栏标签（阶段 1，docs/RIGHT_PANEL_TABS_PLAN.md）——
   openTab(spec: TabSpec, opts?: { activate?: boolean }): string // 打开或激活（阶段 1 幂等键 = kind）；返回标签 id
+  // R08b：「预览」显式入口（文件树右键）——建 preview 标签 + 展开右栏 + 拉内容，三件事一起做。
+  openPreviewTab(path: string): void
   activateTab(id: string): void // 激活指定标签（切 scope 内的显示）
   closeTab(id: string): void // 关闭（激活项顺延到右邻居，无则左邻居）；**dirty 编辑标签先弹确认**
   closeTabNow(id: string): void // 真关（确认框/批量关闭用；跳过 dirty 守卫）
@@ -9662,6 +9664,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!kind) return
     if (kind === 'xlsx' || kind === 'docx' || kind === 'pptx') void get().previewOfficeFile(path, kind)
     else void get().openInBrowserTab(path, { activate: true })
+  },
+  // openPreviewTab：「预览」显式入口（R08b / 文件树右键菜单）。
+  //
+  // 为什么单独一个动作而不是让调用方自己 openTab：这条入口有**三件**必须一起发生的事 ——
+  // 建/激活 preview 标签、展开右栏、把 fileFocus 与内容请求接上（面板的内容来自
+  // store.filePreviews，缺了会停在「正在读取文件…」且没有任何东西会再来拉）。
+  // 与 openFile 的关系：openFile 是「打开」的默认通道（可视类落内嵌浏览器 web 标签，D-I 口径
+  // 不变）；本动作是**同一个文件的另一种看法** —— 两者身份不同（tabKeyOf 带 mode），可以并存。
+  openPreviewTab: (path) => {
+    if (!path) return
+    get().openTab({ kind: 'file', path, mode: 'preview' })
+    get().setRightExpanded(true)
+    // locateFile 只写 fileFocus + 发一次 file_preview（不改右栏标签、不抢视线），与 openFile
+    // 里那一步同一条：背景路径不靠它切面板，前台路径不靠它进入——它只负责「内容已就位」。
+    get().locateFile(path)
   },
   // ensureFilePreview：内容缓存缺失时按需补拉（阶段 2）。
   // 调用方是文件面板：激活一个 file 标签时若该路径没有缓存（切工作区清空过 / 被
