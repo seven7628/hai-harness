@@ -687,6 +687,64 @@ func TestHubPendingImagesPagePastRecentWindow(t *testing.T) {
 	}
 }
 
+// 触发点落在 head 之前：目标忙留队重试时触发消息可能很旧，其后又积压了成千上万条
+// 闲聊。head（最近 500 条）此时整页都在 triggerSeq 之后，扫它只会把预算花在不可用
+// 的消息上，真正在 (cursor, triggerSeq) 窗口里的图一张都补不到（回归：1104 条里
+// cursor=1、trigger=3、图在 seq 2 → atts=0、scanned=5000、truncated=true）。
+func TestHubPendingImagesSkipsHeadAfterTrigger(t *testing.T) {
+	ctx := context.Background()
+	gid := agenthub.GroupID("g_skip_head")
+	beforeImage := testImageDataURL("image-before-trigger")
+	msgs := make([]agenthub.Message, 0, hubWakeBacklogMessages+12)
+	msgs = append(msgs, agenthub.Message{
+		Text: hubImageOnlyText,
+		Attachments: []agenthub.Attachment{{
+			Kind: agenthub.AttachmentKindImage, Name: "before-trigger.png", MIME: "image/png", DataURL: beforeImage,
+		}},
+	}, agenthub.Message{Text: "@SkipB 看上面那张图"})
+	for i := 0; i < hubWakeBacklogMessages+10; i++ {
+		msgs = append(msgs, agenthub.Message{Text: fmt.Sprintf("触发后闲聊 %d", i)})
+	}
+	st := seedGroupLog(t, gid, msgs...)
+
+	// 负对照：head 是最近一页，既没有图，也整个落在触发点之后。
+	head, err := st.ReadMessages(ctx, gid, 0, hubWakeBacklogPage)
+	if err != nil {
+		t.Fatalf("读取 head: %v", err)
+	}
+	if len(head) == 0 {
+		t.Fatal("head 为空，负对照失效")
+	}
+	if last := head[len(head)-1].Seq; last <= 2 {
+		t.Fatalf("head 最新 seq = %d, want > 2（负对照失效：head 没覆盖到触发点之后）", last)
+	}
+	for _, m := range head {
+		if len(m.Attachments) > 0 {
+			t.Fatalf("head 不该有图（负对照失效）：seq %d 带附件", m.Seq)
+		}
+	}
+
+	got, err := hubPendingImagesFromStore(ctx, st, gid, head, 0, 2)
+	if err != nil {
+		t.Fatalf("收集补发图片: %v", err)
+	}
+	if len(got.atts) != 1 || got.atts[0].DataURL != beforeImage {
+		t.Fatalf("补发 = %+v, want 正好 seq 1 的那张图（触发点之前的窗口）", got.atts)
+	}
+	if len(got.seqs) != 1 || got.seqs[0] != 1 {
+		t.Fatalf("seqs = %v, want [1]", got.seqs)
+	}
+	if got.truncated {
+		t.Fatal("truncated = true, want false（触发点之后的消息与补发窗口无关）")
+	}
+	if got.omitted != 0 {
+		t.Fatalf("omitted = %d, want 0", got.omitted)
+	}
+	if got.scanned != 1 { // 只扫触发点之前的 seq 1，不扫触发之后的 5010 条
+		t.Fatalf("scanned = %d, want 1（不扫触发之后的 %d 条）", got.scanned, hubWakeBacklogMessages+10)
+	}
+}
+
 // 游标是最强的停止条件：更早的消息都已读过，不该再往前翻（否则每轮 wake 都要
 // 把整个群日志读一遍）。
 func TestHubPendingImagesCursorStopsPaging(t *testing.T) {

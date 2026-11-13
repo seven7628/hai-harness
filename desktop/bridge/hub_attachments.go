@@ -178,14 +178,24 @@ func hubBacklogMessageEligible(m agenthub.Message, cursor, triggerSeq int64) boo
 // 往前翻，直到：覆盖游标（更早的都已读过）/ 日志翻到头 / 撞上扫描预算。
 //
 // head 是调用方已经读到的最近一页（旧→新）——唤醒路径本来就要读它建快照，复用它
-// 省掉一次重复读；传 nil 时自己读最新一页。
+// 省掉一次重复读；传 nil 时自己读最新一页。触发点早于 head 时 head 整页都在窗口外，
+// 丢弃它改从触发点起读。
 func hubPendingImagesFromStore(ctx context.Context, st agenthub.Store, gid agenthub.GroupID,
 	head []agenthub.Message, cursor, triggerSeq int64) (hubPendingImages, error) {
 	p := hubPendingImagePicker{}
 	out := hubPendingImages{}
+	// 触发点落在 head 之前（目标忙留队重试时触发消息可能很旧，其后又积压了成千上万
+	// 条闲聊）时，head 里的消息 seq 全都 >= triggerSeq，扫它们只会白吃扫描预算，
+	// 真正在窗口里的图一张都补不到。这种情况直接从触发消息之前一页起读
+	// （beforeSeq 是开区间，正好取 seq < triggerSeq，不含触发消息本身）。
 	page := head
+	before := int64(0)
+	if triggerSeq > 0 && len(head) > 0 && head[len(head)-1].Seq >= triggerSeq {
+		page = nil
+		before = triggerSeq
+	}
 	if len(page) == 0 {
-		first, err := st.ReadMessages(ctx, gid, 0, hubWakeBacklogPage)
+		first, err := st.ReadMessages(ctx, gid, before, hubWakeBacklogPage)
 		if err != nil {
 			return out, fmt.Errorf("读取群日志失败: %w", err)
 		}
