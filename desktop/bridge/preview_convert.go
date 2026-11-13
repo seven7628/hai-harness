@@ -48,6 +48,11 @@ func (m *manager) handlePreviewConvert(c command, ws, kind string) {
 		// R08d：kit 可用 → soffice → PDF（真实版式），PDF 走**同一条**内嵌浏览器 file://
 		// 通道。html_path 仍是「该交给浏览器打开的那个产物」（PDF 也一样），另带
 		// renderer/pdf_path 供前端出横幅与诊断 —— 既有调用方读 html_path 不会坏。
+		//
+		// 已实测：Electron 的 <webview> 打开 file://…pdf 是 Chromium **PDFium 原生渲染**
+		//（工具栏「1/1 页、85%、下载/打印」+ 中文正文 + 缩略图都在），证据见 e2e:pdf 跑出的
+		// 02-embed-pdf-view.png。所以「PDF 当 html_path 交给内嵌浏览器」不是降级，别再改成
+		// 「PDF 必须先转 HTML」或加 PDF.js 之类的中间层。
 		if m.officeKitState().prober.Kit() != nil {
 			if pdf, kerr := m.convertOfficePDF(ctx, abs, kind); kerr == nil {
 				m.resp(c, true, "", map[string]any{
