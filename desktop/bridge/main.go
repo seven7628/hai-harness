@@ -393,6 +393,11 @@ type bridgeSession struct {
 	//（task_ack 工具）必须走 hubTaskMu 保护的访问器，否则 -race 会报数据竞争。
 	hubTaskIDs []agenthub.TaskID
 	hubTaskMu  sync.Mutex
+	// hubRunNames 子 run 的展示名（AgentStart.Name）：审批/Ask 事件只有 RunId，
+	// 场景2 的 Need 卡要显示「哪个子智能体」就得在这里按 run 建表。只在 emit
+	// （dispatchMu 内）写，recordHubNeed 同 goroutine 读；上限 256，防长会话无限增长。
+	hubRunNameMu sync.Mutex
+	hubRunNames  map[string]string
 	// P2.5-04：目标会话运行中的预算硬停。LLMEnd 累计本任务花费，超限时
 	// Interrupt 当前 run；finishHubTask 据此把终态落 blocked_budget。
 	hubTaskSpentMicro atomic.Int64
@@ -726,6 +731,9 @@ func (bs *bridgeSession) emit(e events.Event) {
 	case *events.ReasoningChunk:
 		bs.appendLiveThink(ev.Content)
 	case *events.AgentStart:
+		if ev.RunId != "" && ev.Name != "" && (ev.ParentRunId != "" || ev.Depth > 0) {
+			bs.rememberHubRunName(ev.RunId, ev.Name)
+		}
 		if ev.ParentRunId == "" && ev.Depth == 0 {
 			if bs.hubGroupWake != nil {
 				// 记住这一轮群 run 的 busy 代号：runLoop 的兜底清理只能清自己那一代。
@@ -1310,6 +1318,38 @@ func (bs *bridgeSession) hubTaskCount() int {
 	bs.hubTaskMu.Lock()
 	defer bs.hubTaskMu.Unlock()
 	return len(bs.hubTaskIDs)
+}
+
+// rememberHubRunName 记一次子 run 的展示名（事件里只有 RunId，Need 卡要显示名字）。
+// 只记子 run：根 run 的名字不是「子智能体」，不能拿来冒充。
+func (bs *bridgeSession) rememberHubRunName(runID, name string) {
+	if bs == nil {
+		return
+	}
+	runID = strings.TrimSpace(runID)
+	name = strings.TrimSpace(name)
+	if runID == "" || name == "" {
+		return
+	}
+	bs.hubRunNameMu.Lock()
+	defer bs.hubRunNameMu.Unlock()
+	if bs.hubRunNames == nil {
+		bs.hubRunNames = map[string]string{}
+	}
+	if len(bs.hubRunNames) >= 256 {
+		bs.hubRunNames = map[string]string{}
+	}
+	bs.hubRunNames[runID] = name
+}
+
+// hubRunName 取子 run 的展示名；空 = 未知/主 run（前端据此不冒充子智能体）。
+func (bs *bridgeSession) hubRunName(runID string) string {
+	if bs == nil || runID == "" {
+		return ""
+	}
+	bs.hubRunNameMu.Lock()
+	defer bs.hubRunNameMu.Unlock()
+	return bs.hubRunNames[runID]
 }
 
 // manager：进程内多 workspace 注册表（一个进程承载所有工作区的会话）

@@ -61,8 +61,8 @@ type Need struct {
 	TargetSessionID string  `json:"target_session_id,omitempty"`
 	// RunID 是触发这条 need 的 run（审批/提问事件自带 RunId）。
 	RunID string `json:"run_id,omitempty"`
-	// RunName 预留给子智能体归属：子智能体与主会话共用 approvalWaiter/QuestionWaiter，
-	// 事件里只有 RunId 没有名字，暂不填（后续按 run 注册表接）。
+	// RunName 子智能体展示名：AgentStart 带 Name 时按 run 建表，审批/Ask 事件
+	// 只有 RunId，落 Need 时从这里回填；主 run/未知 run 为空。
 	RunName string `json:"run_name,omitempty"`
 	// Depth 是审批事件的嵌套深度（codemode 子调用；不是子智能体深度）。提问恒 0。
 	Depth int `json:"depth,omitempty"`

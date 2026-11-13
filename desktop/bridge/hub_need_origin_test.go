@@ -33,7 +33,7 @@ func newProjectNeedSite(t *testing.T, origin agenthub.TaskOrigin) *projectNeedSi
 }
 
 // buildProjectNeedSite 用**已有**的 manager 搭现场：需要先建智能体档案的用例
-//（N2：session_send 建账只带 agent_id，名字得靠 profile 回落）复用它。
+// （N2：session_send 建账只带 agent_id，名字得靠 profile 回落）复用它。
 func buildProjectNeedSite(t *testing.T, m *manager, buf *syncBuf, origin agenthub.TaskOrigin) *projectNeedSite {
 	t.Helper()
 	wsPath := t.TempDir()
@@ -340,5 +340,42 @@ func TestHubNeedSkippedWithoutHubTask(t *testing.T) {
 	}
 	if n.SessionID != bs.id || n.Workspace != wsPath || n.RunID != "run-orphan" {
 		t.Fatalf("orphan need 会话/run = %+v", n)
+	}
+}
+
+// 子智能体审批：AgentStart 带 Name，Need 必须回填 run_name，内联卡才能显示
+// 「子智能体 子研究员」而不是只剩 workspace/session。
+func TestHubNeedRunNameFromSubagentStart(t *testing.T) {
+	site := newProjectNeedSite(t, agenthub.TaskOrigin{
+		Kind: agenthub.OriginGroup, GroupID: "grp_need", AgentID: "ag_need", AgentName: "派单员",
+	})
+	site.bs.emit(&events.AgentStart{
+		RunId: "run-sub-need", ParentRunId: "run-parent", Depth: 1, Name: "子研究员",
+		Timestamp: time.Now(), EventType: events.AgentStartType,
+	})
+	if _, err := site.bs.s.RequestApproval(context.Background(),
+		core.ToolCall{Id: "call-sub-need", Name: "bash"}); err != nil {
+		t.Fatalf("register approval: %v", err)
+	}
+	site.bs.emit(&events.ToolApprovalRequested{
+		RunId: "run-sub-need", Id: "call-sub-need", Name: "bash", Arguments: `{"command":"ls"}`,
+		Timestamp: time.Now(), EventType: events.ToolApprovalType,
+	})
+
+	n := singlePendingNeed(t, site.st)
+	if n.RunID != "run-sub-need" || n.RunName != "子研究员" {
+		t.Fatalf("run_id/run_name = %q/%q, want run-sub-need/子研究员", n.RunID, n.RunName)
+	}
+	ok, errMsg, data := hubCmd(t, site.m, site.buf, 2, "hub_need_list", map[string]any{"group_id": "grp_need"})
+	if !ok {
+		t.Fatalf("hub_need_list: %s", errMsg)
+	}
+	var out struct {
+		Needs []*agenthub.Need `json:"needs"`
+	}
+	raw, _ := json.Marshal(data)
+	_ = json.Unmarshal(raw, &out)
+	if len(out.Needs) != 1 || out.Needs[0].RunName != "子研究员" {
+		t.Fatalf("hub_need_list run_name = %s", raw)
 	}
 }

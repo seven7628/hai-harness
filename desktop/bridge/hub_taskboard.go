@@ -458,7 +458,7 @@ func (m *manager) recordHubNeed(bs *bridgeSession, e events.Event) {
 		ID: id, Kind: kind, Status: "pending",
 		TaskID:    taskID,
 		SessionID: bs.id, Workspace: bs.workspace, Anchor: anchor,
-		RunID: runID, Depth: depth,
+		RunID: runID, RunName: bs.hubRunName(runID), Depth: depth,
 		Title: title, Body: body, CreatedAt: time.Now().UTC(),
 	}
 	if isHub {
