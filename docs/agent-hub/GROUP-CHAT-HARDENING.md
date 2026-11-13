@@ -177,11 +177,11 @@
 
 | ID | 状态 | worktree | commit | 验证 |
 |---|---|---|---|---|
-| P6-01 | in_progress | group-core | — | — |
-| P6-02 | in_progress | group-core | — | — |
-| P6-03 | in_progress | group-core | — | — |
-| P6-04 | in_progress | group-core | — | — |
-| P6-05 | in_progress | group-core | — | — |
+| P6-01 | review | group-core | be8168a | 主 Session 合并后 Go/TS 全绿；浏览器复验中 |
+| P6-02 | review | group-core | e182496 + cf5bebd | 主 Session 合并后 Go/TS 全绿；浏览器复验中 |
+| P6-03 | review | group-core | 8abc06d | 主 Session 合并后 Go/TS 全绿；浏览器复验中 |
+| P6-04 | review | group-core | aef52b4 + 18c1ace | 主 Session 合并后 Go/TS 全绿；浏览器复验中 |
+| P6-05 | review | group-core | 81d9a6d + 8294a78 | 主 Session 合并后 Go/TS 全绿；浏览器复验中 |
 | P6-06 | done | group-surface | 9e5ca58 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-07 | todo | group-lifecycle | — | — |
 | P6-08 | todo | group-lifecycle | — | — |
