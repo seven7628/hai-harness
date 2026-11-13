@@ -1910,6 +1910,20 @@ func (p *compactCallProvider) CallCount() int {
 	return p.calls
 }
 
+// countCompressEnd 统计 CompressEnd 事件数。
+// 负向用例（0 次模型调用）必须同时断言压缩真的执行过（== 1）：否则将来
+// 「空批次提前 return、压根没进 maybeCompact」也会让 0 次断言变绿 ——
+// 两条断言成对，才等于「压缩完停在当前状态」。
+func countCompressEnd(list *[]events.Event) int {
+	n := 0
+	for _, e := range *list {
+		if _, ok := e.(*events.CompressEnd); ok {
+			n++
+		}
+	}
+	return n
+}
+
 // 同批 compact + 正文：压缩后必须继续跑一轮，正文不能被 Stop 吞掉。
 func TestForcedCompactWithUserTextContinuesRun(t *testing.T) {
 	p := &compactCallProvider{}
@@ -1948,7 +1962,7 @@ func TestForcedCompactWithUserTextContinuesRun(t *testing.T) {
 func TestForcedCompactCommandOnlyStillStops(t *testing.T) {
 	p := &compactCallProvider{}
 	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
-	handler, _ := collectEvents()
+	handler, list := collectEvents()
 	ac := loop.Run(context.Background(), []core.Message{
 		core.NewCommandMessage("compact", ""),
 	}, handler)
@@ -1957,6 +1971,10 @@ func TestForcedCompactCommandOnlyStillStops(t *testing.T) {
 	}
 	if got := p.CallCount(); got != 0 {
 		t.Fatalf("纯 compact 调用了模型 %d 次", got)
+	}
+	// 与 0 次成对：压缩必须真的执行（否则「没进 maybeCompact」也会让 0 次变绿）。
+	if got := countCompressEnd(list); got != 1 {
+		t.Fatalf("纯 compact 的 CompressEnd = %d, want 1", got)
 	}
 }
 
@@ -1978,8 +1996,8 @@ func TestForcedCompactWithHistoryButNoNewTextStops(t *testing.T) {
 	}
 }
 
-// compact 之后的块不都是「正文」：空块、引擎注入块、命令/技能/摘要块都不算。
-// 按「非 text 即正文」判会让这些批次压缩完白跑一轮模型（群唤醒/后台任务回推
+// compact 之后的块不都是「正文」：空块、纯注入提示、纯命令/技能/摘要块都不算。
+// 按「非 text 即正文」判会让这些批次压缩完白跑一轮模型（群唤醒/跨会话来源提示
 // 尤其明显：用户这轮并没有提新问题）。判据见 hasUserBody。
 func TestForcedCompactNonBodyBlocksDoNotContinue(t *testing.T) {
 	cases := []struct {
@@ -2004,9 +2022,6 @@ func TestForcedCompactNonBodyBlocksDoNotContinue(t *testing.T) {
 		{"仅 mesh_from 来源块", []core.Message{
 			core.NewUserMessage(core.Content{Type: core.ContentTypeMeshFrom, Content: "来自会话 sess_x"}),
 		}},
-		{"仅 task_result 块", []core.Message{
-			core.NewTaskResultMessageWithStatus("task_1", "job", "结果正文", "completed", nil),
-		}},
 		{"仅 skill 指令块", []core.Message{core.NewSkillMessage("技能指令正文")}},
 		{"仅 summary 块", []core.Message{
 			core.NewUserMessage(core.Content{Type: core.ContentTypeSummary, Content: "# 旧摘要"}),
@@ -2017,7 +2032,7 @@ func TestForcedCompactNonBodyBlocksDoNotContinue(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &compactCallProvider{}
 			loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
-			handler, _ := collectEvents()
+			handler, list := collectEvents()
 			msgs := append([]core.Message{core.NewCommandMessage("compact", "")}, tc.after...)
 			ac := loop.Run(context.Background(), msgs, handler)
 			if ac.Err != nil {
@@ -2025,6 +2040,45 @@ func TestForcedCompactNonBodyBlocksDoNotContinue(t *testing.T) {
 			}
 			if got := p.CallCount(); got != 0 {
 				t.Fatalf("%s：compact 之后没有用户正文，却调用了模型 %d 次", tc.name, got)
+			}
+			// 与 0 次成对：压缩必须真的执行过（防「空批次早退」让断言失去耦合）。
+			if got := countCompressEnd(list); got != 1 {
+				t.Fatalf("%s：CompressEnd = %d, want 1", tc.name, got)
+			}
+		})
+	}
+}
+
+// compact + task_result-only：后台任务结果不是「用户输入」（不算标题/UI 正文），
+// 但有活要干 —— core/message.go 约定「模型看到结果续跑」，必须继续跑一轮，
+// 不能被 Stop 吞掉（失败/中断的结果同样要处理）。
+func TestForcedCompactTaskResultOnlyContinuesRun(t *testing.T) {
+	for _, status := range []string{"completed", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			p := &compactCallProvider{}
+			loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+			handler, list := collectEvents()
+			ac := loop.Run(context.Background(), []core.Message{
+				core.NewCommandMessage("compact", ""),
+				core.NewTaskResultMessageWithStatus("task_1", "job", "结果正文", status, nil),
+			}, handler)
+			if ac.Err != nil {
+				t.Fatalf("run: %v", ac.Err)
+			}
+			if got := p.CallCount(); got != 1 {
+				t.Fatalf("task_result-only 必须继续调用一次模型，calls=%d", got)
+			}
+			if got := countCompressEnd(list); got != 1 {
+				t.Fatalf("CompressEnd = %d, want 1", got)
+			}
+			var end *events.AgentEnd
+			for _, e := range *list {
+				if ev, ok := e.(*events.AgentEnd); ok {
+					end = ev
+				}
+			}
+			if end == nil || end.Content != "已回答" {
+				t.Fatalf("AgentEnd = %+v, want 已回答", end)
 			}
 		})
 	}

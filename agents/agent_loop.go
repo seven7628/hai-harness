@@ -2122,26 +2122,38 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 	}
 }
 
-// hasUserBody 命令之后（原始批次的切片）是否还有真正的用户内容。
+// hasUserBody 命令之后（原始批次的切片）是否还有需要模型继续处理的内容。
 // 用于区分「纯 /compact」与「compact + 正文」：前者压缩完就停，后者要继续回答。
 //
-// 不是所有非 text 块都是正文：引擎注入块（hub_task / hub_group_wake / mesh_from /
-// task_result）与命令/技能/摘要块（command / skill / summary）同样是「非 text」，
-// 但它们不是用户这一批说的话。按「非 text 即正文」判会把「/compact + 群唤醒」
-// 「/compact + 后台任务回推」误判成带正文 —— 压缩完白跑一轮模型（还可能凭空
-// 回答一条用户没说过的任务）。只有 text 与 image 算正文，与
-// session.collectUserContents 的「text/image 才是用户输入」同一口径，但更严：
-// 空 text 块（只有空白）与空 image 块（Content == ""）都不算。
-// 用白名单而非黑名单：将来新增的引擎块类型默认不算正文 —— 宁可少跑一轮
+// 不是所有非 text 块都是正文，也不是所有非 text 块都不是正文：
+//   - 算正文：text（去空白非空）、image（有 URL/data URL —— image-only 也要继续本轮）、
+//     task_result（后台任务结果必须继续被处理：core/message.go 约定 provider 按文本
+//     送出、「模型看到 Markdown 结果续跑」，Stop 会把这次回推整个吞掉）；
+//   - 不算正文：空块、纯命令/技能/摘要块（command / skill / summary）、纯注入提示
+//     （hub_task / hub_group_wake / mesh_from）—— 这些是引擎替用户补的上下文，
+//     不是这一批要回答的东西。按「非 text 即正文」判会让「/compact + 群唤醒」
+//     压缩完白跑一轮模型（还可能凭空回答用户没说过的任务）。
+//
+// 与 session.collectUserContents 的口径不同：那个判「有没有用户输入」（标题/UI 用，
+// task_result 不算输入），这里判「有没有活要干」（task_result 有活要干）。
+// 用白名单而非黑名单：将来新增的块类型默认不算正文 —— 宁可少跑一轮
 // （用户再发一句即可），也不能替用户凭空开一轮模型调用。
 func hasUserBody(msgs []core.Message) bool {
 	for _, m := range msgs {
+		// 命令消息恒为 Role=System（core.NewCommandMessage），Role 判据已能挡住；
+		// 再查一次是纵深防御（防将来出现 user 角色的命令消息），且 IsCommandMessage
+		// 只查首块 —— 块级排除由下面的白名单负责，不在这里扩大语义。
 		if m.Role != core.User || m.IsCommandMessage() {
 			continue
 		}
 		for _, c := range m.Content {
 			switch c.Type {
 			case core.ContentTypeText:
+				if strings.TrimSpace(c.Content) != "" {
+					return true
+				}
+			case core.ContentTypeTaskResult:
+				// 不是用户说的话，但有活要干：任务结果必须继续被处理（见上）。
 				if strings.TrimSpace(c.Content) != "" {
 					return true
 				}
