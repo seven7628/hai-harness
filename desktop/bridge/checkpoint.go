@@ -255,12 +255,15 @@ func (c *checkpointCoordinator) logCommit(err error, rev uint64, total, marshalD
 		status = "failed"
 	}
 	fmt.Fprintf(os.Stderr, "[checkpoint] %s commit total=%s session=%s rev=%d view=%.1fMB record=%.1fMB blocks=%d hashed=%.1fMB"+
-		" phase:%s%s%s%s%s%s%s%s%s%s%s%s%s err=%v\n",
+		" phase:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s err=%v\n",
 		status, total.Round(time.Millisecond), c.sessID, rev,
 		float64(ct.ViewBytes)/1e6, float64(ct.RecordBytes)/1e6, ct.BlocksWrote, float64(ct.HashedBytes)/1e6,
 		phase("marshal", marshalDur), phase("revision", revDur), phase("sdk", stateDur),
 		phase("lock", ct.LockWait), phase("sidecar", ct.Sidecar), phase("compact", ct.Compact),
 		phase("sc-open", ct.SidecarOpen), phase("sc-ref", ct.SidecarRef), phase("sc-flush", ct.SidecarFlush),
+		// sc-ref 的再分解（2026-11-12，P4 归因）：这一段有五件事，不拆开只能猜。
+		phase("ref-cmp", ct.Ref.Compare), phase("ref-put", ct.Ref.Put), phase("ref-prune", ct.Ref.Prune),
+		phase("ref-sum", ct.Ref.SetSum), phase("ref-doc", ct.Ref.Doc), phase("ref-repl", ct.Ref.Replace),
 		phase("encode", ct.Encode), phase("baseline", ct.Baseline), phase("temp", ct.Temp),
 		phase("bak+rename+dir", ct.Backup+ct.Rename+ct.SyncDir), err)
 }
@@ -448,27 +451,42 @@ func (c *checkpointCoordinator) reportError(err error) {
 
 // nextRevisionLocked 计算下一次提交的 revision（持锁调用）：优先内存缓存；
 // 失效/首次时读磁盘基线。
+//
+// **只读头部**（2026-11-13）：revision 基线只需要**一个数字**，而 LoadRecord 会把
+// sidecar 的**整份 blocks 拼出来**（实测：235MB 的视图 = 2.716 秒！）。
+// LoadRecordMetadata 只解信封头（revision / reducer seq / generation），毫秒级。
+//
+// 语义等价性：原来的实现「LoadRecord 失败（损坏）→ 退回 LoadRecordMetadata」，
+// 也就是说**头部可读就认头部**。改成「先读头部，读不出来才整份读」是同一套
+// 判据的短路版本，结果完全一致。
 func (c *checkpointCoordinator) nextRevisionLocked(ctx context.Context) (uint64, bool, error) {
 	rev, known := c.lastRev, c.revKnown
 	if known {
 		return rev + 1, true, nil
 	}
+	// ① 头部优先（毫秒级）。
+	meta, merr := c.store.LoadRecordMetadata(ctx, c.wsKey, c.sessID)
+	if merr == nil {
+		return meta.Revision + 1, true, nil
+	}
+	if errors.Is(merr, session.ErrRecordNotFound) {
+		// 没有 record → revision 从 1 起。
+		return 1, true, nil
+	}
+	// ② 头部读不出来（损坏）→ 退回整份读（更全：会校验 payload 的 checksum）。
 	rec, err := c.store.LoadRecord(ctx, c.wsKey, c.sessID)
 	if err != nil {
 		if !isRecordNotFound(err) {
 			// record 读不出来（损坏）但**它存在**：revision 基线仍可从头部元数据拿到。
 			// 自愈提交必须能继续 —— 否则修好的视图永远落不了盘，每次打开都重放一遍。
-			if meta, merr := c.store.LoadRecordMetadata(ctx, c.wsKey, c.sessID); merr == nil {
+			if meta, merr2 := c.store.LoadRecordMetadata(ctx, c.wsKey, c.sessID); merr2 == nil {
 				return meta.Revision + 1, true, nil
 			}
 			return 0, false, err
 		}
-		rec = nil
+		return 1, true, nil
 	}
-	if rec != nil {
-		rev = rec.Revision
-	}
-	return rev + 1, true, nil
+	return rec.Revision + 1, true, nil
 }
 
 // isRecordNotFound 只认真正的「没有 record」。

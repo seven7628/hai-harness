@@ -112,6 +112,9 @@ declare global {
       chromeClearLogin: () => Promise<{ ok: boolean; removed: number; error?: string }>
       onEvent: (cb: (line: string) => void) => () => void
       onExit: (cb: (info: { code: number | null; err: string }) => void) => () => void
+      // 内存压力信号（2026-11-12，P1）：主进程轮询 process.getSystemMemoryInfo 推来，
+      // 单位 KB。渲染进程据此主动降级视图（Chromium tab discarding 的模型）。
+      onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => () => void
     }
   }
 }

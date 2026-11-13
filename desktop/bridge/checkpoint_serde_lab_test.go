@@ -652,6 +652,63 @@ func TestCheckpointSerdeLab(t *testing.T) {
 			(load4 + dec4 + res4).Round(time.Millisecond), len(cp4.Blocks), cp4.TurnsTotal)
 		return
 
+	case "app-commit":
+		// **忠实复现应用的提交路径**（2026-11-12，P4 归因）。
+		//
+		// 与上面 "commit" 阶段的三个关键差异 —— 正是它们解释了「实验室 72ms、
+		// 应用 4.4s」的差异：
+		//
+		//  1. **窗口恢复**（parseCheckpointFromRecordWindow(rec, 500)）⇒
+		//     reducer 处于 **paged 态** ⇒ `MarshalBodyWithSpans` 的 body 缓存
+		//     **永不命中**（paged != nil 时不走缓存）⇒ 每次提交都重跑整段编码；
+		//  2. **spans 来自 reducer**（不是从加载出来的 view 解析）⇒ 走的是
+		//     真实的 cloneBlocksForEncode / blockBytes 缓存路径；
+		//  3. **AllIDs 是全集**（paged.IDs + 窗口 id）⇒ 引用集合摘要按
+		//     **全部块**算（40k 级），不是窗口的 500 个。
+		rec2, lerr := store.LoadRecordForView(ctx, wsKey, sid)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		defer rec2.ReleaseView()
+		cp, perr := parseCheckpointFromRecordWindow(rec2, restoreWindowBlocks)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		red := NewViewReducer()
+		if err := red.Restore(cp); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("[app-commit] 窗口恢复：blocks=%d paged=%v", len(cp.Blocks), cp.PagedBlocks != nil)
+
+		// ① 量 reducer 的 marshal（提交路径的 marshalDur）。
+		t0 = time.Now()
+		spans2, serr2 := red.MarshalBodyWithSpans()
+		if serr2 != nil {
+			t.Fatal(serr2)
+		}
+		marshalDur := time.Since(t0)
+		t.Logf("[app-commit] reducer.MarshalBodyWithSpans = %s  spans=%d allIDs=%d dirty=%d",
+			marshalDur.Round(time.Millisecond), len(spans2.Spans), len(spans2.AllIDs), len(spans2.Dirty))
+
+		// ② 量一次真实提交。
+		r3 := session.NewSessionRecord(wsKey, sid, rec.Revision+1, 1, 0, rec.SDKState, spans2.Body)
+		r3.BlockSpans = spans2.Spans
+		r3.BlockIDs = spans2.IDs
+		r3.AllBlockIDs = spans2.AllIDs
+		r3.DirtyBlocks = spans2.Dirty
+		ct, cerr := store.CommitRecordTraced(ctx, r3)
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
+		t.Logf("[app-commit] CommitRecord=%s [lock=%s sidecar=%s(open=%s ref=%s flush=%s) encode=%s baseline=%s temp=%s blocks=%d hashed=%.1fMB] ref分解[cmp=%s put=%s prune=%s sum=%s doc=%s repl=%s]",
+			ct.Total.Round(time.Millisecond), ct.LockWait.Round(time.Millisecond), ct.Sidecar.Round(time.Millisecond),
+			ct.SidecarOpen.Round(time.Millisecond), ct.SidecarRef.Round(time.Millisecond), ct.SidecarFlush.Round(time.Millisecond),
+			ct.Encode.Round(time.Millisecond), ct.Baseline.Round(time.Millisecond), ct.Temp.Round(time.Millisecond),
+			ct.BlocksWrote, float64(ct.HashedBytes)/1e6,
+			ct.Ref.Compare.Round(time.Millisecond), ct.Ref.Put.Round(time.Millisecond), ct.Ref.Prune.Round(time.Millisecond),
+			ct.Ref.SetSum.Round(time.Millisecond), ct.Ref.Doc.Round(time.Millisecond), ct.Ref.Replace.Round(time.Millisecond))
+		return
+
 	case "commit":
 		// 生产形态（S1）：body 占位（blocks:null）+ spans + 脏块快路径
 		spans, ids := serdeSpans(t, view)
@@ -665,6 +722,14 @@ func TestCheckpointSerdeLab(t *testing.T) {
 		r2.BlockSpans = spans
 		r2.BlockIDs = ids
 		r2.DirtyBlocks = map[uint64]struct{}{}
+		// HAI_LAB_FULL_VERIFY=1 → 模拟 bridge 的**周期性全量校验**：
+		// 每 verifyEveryCommits(=32) 次提交，脏块集合被丢掉（DirtyBlocks=nil），
+		// 提交退回「逐块 sha256 全量比对」。这是慢提交（4.4s / 23s）的嫌疑来源
+		// —— 2026-11-12 实测：40,504 块全量比对要 sha256 约 280MB。
+		if os.Getenv("HAI_LAB_FULL_VERIFY") == "1" {
+			r2.DirtyBlocks = nil
+			t.Logf("[commit] HAI_LAB_FULL_VERIFY=1 → 走全量比对（dirty=nil）")
+		}
 		ct, err := store.CommitRecordTraced(ctx, r2)
 		if err != nil {
 			t.Fatal(err)

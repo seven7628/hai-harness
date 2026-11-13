@@ -766,6 +766,24 @@ function createWindow(): void {
   mainWindow.webContents.on('did-stop-loading', () => {
     startupMark('did-stop-loading')
   })
+  // 打开 precise memory info：让渲染进程能读到 performance.memory.usedJSHeapSize
+  // （Chromium 默认不给，隐私考虑）。预算体检用它区分「我们的数据」与
+  // 「渲染进程的底噪」（Chromium + React + 代码 + DOM）。
+  app.commandLine.appendSwitch('enable-precise-memory-info')
+  // 渲染进程的 console 透传到终端（2026-11-12）。
+  //
+  // 为什么需要：视图内存预算的降级/淘汰会打一行 `[budget] …`，而渲染进程的
+  // console 只在 devtools 里 —— **终端看不到** ⇒ 机制有没有在工作无法观测。
+  // （2026-11-12 就因为看不见这行，误判成「机制没生效」，绕了一大圈。）
+  // 只透传带标记前缀的行，避免刷屏。
+  mainWindow.webContents.on('console-message', (_e: unknown, ...rest: unknown[]) => {
+    for (const a of rest) {
+      if (typeof a === 'string' && a.startsWith('[budget]')) {
+        console.log(`[renderer] ${a}`)
+        return
+      }
+    }
+  })
   mainWindow.on('closed', () => {
     destroyEmbed()
     mainWindow = null
@@ -1915,6 +1933,41 @@ if (!MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
   })
 }
 
+// —— 内存压力信号（2026-11-12，P1）——
+//
+// Chromium 的 tab discarding 用的是 OS 的内存压力通知
+// （chromiumos-design-docs/tab-discarding-and-reloading.md）：内存压力下丢弃
+// 标签页的**可重取状态**，保留用户正在交互的东西。
+//
+// Electron 没有直接暴露那个通知，但主进程能读系统内存：
+// `process.getSystemMemoryInfo()` → {total, free, swapTotal, swapFree}（KB）。
+// 渲染进程据此决定要不要**主动降级**视图。
+//
+// 为什么必须自己做：V8 的堆上限是**崩溃线**不是降级线
+// （v8.dev/blog/heap-size-limit：到顶 → "a series of last resort garbage
+// collections" → 再不行就 "stops execution and reports an out-of-memory
+// failure" ⇒ Electron 里就是 Aw, Snap）。而且我们没设 --max-old-space-size。
+//
+// 5 秒一次足够：内存压力是慢变量（换页颠簸以秒计，不是毫秒计）。
+function startMemPressureWatch(): void {
+  const timer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      const m = process.getSystemMemoryInfo()
+      mainWindow.webContents.send('mem:pressure', {
+        free: m.free,
+        total: m.total,
+        swapFree: m.swapFree,
+        swapTotal: m.swapTotal,
+      })
+    } catch {
+      /* 主进程 API 不可用（理论上不会）：静默忽略，不影响主流程 */
+    }
+  }, 5000)
+  // 不因为这个定时器而吊住进程退出。
+  timer.unref?.()
+}
+
 app.whenReady().then(() => {
   startupMark('whenReady')
   // 媒体根清单（settings.json 同目录、0600）：pick-workspace 等三处写入，见 known-workspaces.ts
@@ -1923,6 +1976,7 @@ app.whenReady().then(() => {
   // 媒体协议：只读、只服务工作区内、只服务媒体扩展名（拒绝分支见 media-protocol.ts）
   registerMediaProtocol()
   createWindow()
+  startMemPressureWatch()
   // 屏幕录制 SCK 预热（2026-09 Computer Use 截图排障）：macOS 14+ 截屏走
   // ScreenCaptureKit 独立 TCC（kTCCServiceScreenCaptureKit）——screencapture 命令
   // 与 desktopCapturer 都依赖它，系统设置「屏幕录制」只写旧服务。启动时调一次
