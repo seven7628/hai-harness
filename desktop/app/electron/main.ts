@@ -1111,6 +1111,15 @@ function spawnBridge(bin: string): boolean {
       sendToRenderer('bridge:event', t)
       return
     }
+    // kit 状态变化（R08d）：bridge 在「kit 的 bin 已经不存在」时主动推一份新状态。
+    // 主进程据此更新预览超时的依据（卸载后不该再为它付 90s），并照常转发给渲染层
+    //（store 用它更新横幅，见 useAppStore 的 office_kit_status 分支）。
+    if (t.includes('"event_type":"office_kit_status"')) {
+      try {
+        const ev = JSON.parse(t) as { data?: { kit?: { available?: boolean } } }
+        if (typeof ev.data?.kit?.available === 'boolean') officeKitAvailable = ev.data.kit.available
+      } catch { /* 解析失败不影响转发 */ }
+    }
     if (t.includes('"event_type":"command_response"')) {
       // 先送完缓冲中的普通事件，再立即直发该同步点行（保序）
       clearFlushTimer()
@@ -1206,8 +1215,37 @@ function sendCommand(cmd: unknown): { ok: boolean; error?: string } {
   return { ok: true }
 }
 
+// —— 预览请求的超时口径（R08d 复评 P2）——
+//
+// 两条路的耗时差一个数量级，所以不能给一个数：
+//   - 近似渲染（受管 Python 转 HTML）：正常 <1s，卡死时 30s 就该报错让人重试；
+//   - kit 路径（soffice → PDF）：单次上限 60s（officekit.DefaultTimeout）+ 冷启 3–6s，
+//     90s 才是它的界。
+// 之前三条预览 IPC 无条件写 90s —— 等于把「卡死的近似转换」也拖到 90s（相对 R08a 的
+// 30s 是回归）。这里按**预计会走哪条路**选：kit 可用才付 90s，其余保持 30s。
+//
+// 判定依据来自本进程已知的 kit 状态：渲染层启动时会查一次（App.tsx 的 fetchOfficeKit），
+// 设置页「重新探测」与 bridge 主动推的 office_kit_status 事件也会更新它。
+const PREVIEW_TIMEOUT_MS = 30_000
+const KIT_PREVIEW_TIMEOUT_MS = 90_000
+// undefined = 还没问过（第一次预览前补问一次；问不到就按 30s，不把预览卡在这上面）。
+let officeKitAvailable: boolean | undefined
+
+function previewTimeoutMs(): number {
+  return officeKitAvailable === true ? KIT_PREVIEW_TIMEOUT_MS : PREVIEW_TIMEOUT_MS
+}
+
+// ensureOfficeKitKnown 首次需要选超时时问一次（之后走缓存/事件）。
+async function ensureOfficeKitKnown(): Promise<void> {
+  if (officeKitAvailable !== undefined) return
+  const r = await sendBridgeRequest('office_kit_status', {})
+  const kit = r.data?.kit as { available?: boolean } | undefined
+  officeKitAvailable = r.ok ? kit?.available === true : false
+}
+
 // timeoutMs 默认 30s（历史口径）。需要更长时间的调用（R08d：soffice→PDF 单次上限 60s，
 // 冷启 3–6s）必须显式放宽 —— 否则主进程先放弃、bridge 那边还在烧 CPU 转一份没人要的文件。
+// 预览类请求一律走 previewTimeoutMs()（见上），不要在这里写死数字。
 function sendBridgeRequest(type: string, payload: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<BridgeCommandResponse> {
   if (!bridge || bridge.killed) return Promise.resolve({ ok: false, error: 'bridge 未运行' })
   const id = bridgeRequestSeq--
@@ -1556,6 +1594,8 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
     const response = await sendBridgeRequest('office_kit_status', { refresh: req?.refresh === true })
     if (!response.ok) return { ok: false, error: response.error ?? '读取办公组件状态失败' }
+    // 顺手更新预览超时的依据（见 previewTimeoutMs）：设置页「重新探测」后热生效。
+    officeKitAvailable = (response.data?.kit as { available?: boolean } | undefined)?.available === true
     return { ok: true, kit: response.data?.kit }
   })
   ipcMain.handle('external-skills:import', async () => {
@@ -1572,22 +1612,25 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // 为什么走主进程直发（sendBridgeRequest，负 id）而不是 renderer 的 command 通道：
   //   ① 转换要跑受管 Python，**首次还会先 bootstrap 运行时**（建 venv + 装约 42MB），
   //      可能几分钟；renderer 的 pending 表是「事件驱动 + 无超时」的，不适合这种
-  //      「一问一答、可能很久」的请求 —— 主进程这条通道自带静默 30s 超时与错误归并；
+  //      「一问一答、可能很久」的请求 —— 主进程这条通道自带超时（previewTimeoutMs：
+  //      kit 可用 90s / 否则 30s）与错误归并；
   //   ② 产物路径只给内嵌浏览器用（不进 store 状态树/事件流），不需要广播给所有窗口。
   // 超时口径：30s 对已 bootstrap 的机器足够（实测小表 <1s）；未 bootstrap 的机器会
   // 报「bridge 请求超时」，用户重试一次即可（第二次运行时已就绪）—— 与「首次 run_python
-  // 调用慢」的既有体验一致，故不为它单独加长超时（避免长期挂着看不见的请求）。
+  // 调用慢」的既有体验一致。R08d 起这条 30s 只给近似路径：kit 可用时放宽到 90s
+  //（soffice 单次上限 60s + 冷启），见 previewTimeoutMs。
   ipcMain.handle('xlsx:preview', async (_e, req: { path?: string; workspace?: string } = {}) => {
     const started = await ensureBridgeBin()
     if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 不可用' }
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
     const path = String(req?.path ?? '')
     if (!path) return { ok: false, error: 'path 为空' }
-    // 90s：kit 路径单次上限 60s + 冷启余量（approximate 路径通常 <1s）。
+    // 超时按**预计走的路径**选（kit 可用 90s，否则 30s）：见 previewTimeoutMs 的注释。
+    await ensureOfficeKitKnown()
     const response = await sendBridgeRequest('xlsx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
-    }, 90_000)
+    }, previewTimeoutMs())
     if (!response.ok) return { ok: false, error: response.error ?? '工作簿转换失败' }
     const htmlPath = response.data?.html_path
     if (typeof htmlPath !== 'string' || !htmlPath) return { ok: false, error: 'bridge 未返回 HTML 路径' }
@@ -1602,11 +1645,13 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
   // 为什么走主进程直发（sendBridgeRequest，负 id）而不是 renderer 的 command 通道：
   //   ① 转换要跑受管 Python，**首次还会先 bootstrap 运行时**（建 venv + 装约 42MB），
   //      可能几分钟；renderer 的 pending 表是「事件驱动 + 无超时」的，不适合这种
-  //      「一问一答、可能很久」的请求 —— 主进程这条通道自带静默 30s 超时与错误归并；
+  //      「一问一答、可能很久」的请求 —— 主进程这条通道自带超时（previewTimeoutMs：
+  //      kit 可用 90s / 否则 30s）与错误归并；
   //   ② 产物路径只给内嵌浏览器用（不进 store 状态树/事件流），不需要广播给所有窗口。
   // 超时口径：30s 对已 bootstrap 的机器足够（实测小文档 <1s）；未 bootstrap 的机器会
   // 报「bridge 请求超时」，用户重试一次即可（第二次运行时已就绪）—— 与「首次 run_python
-  // 调用慢」的既有体验一致，故不为它单独加长超时（避免长期挂着看不见的请求）。
+  // 调用慢」的既有体验一致。R08d 起这条 30s 只给近似路径：kit 可用时放宽到 90s
+  //（soffice 单次上限 60s + 冷启），见 previewTimeoutMs。
   // 上面这套理由三条预览通路（xlsx/docx/pptx）**逐字共用**，改一处要三处一起想。
   ipcMain.handle('docx:preview', async (_e, req: { path?: string; workspace?: string } = {}) => {
     const started = await ensureBridgeBin()
@@ -1614,11 +1659,12 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
     const path = String(req?.path ?? '')
     if (!path) return { ok: false, error: 'path 为空' }
-    // 90s：kit 路径单次上限 60s + 冷启余量（approximate 路径通常 <1s）。
+    // 超时按**预计走的路径**选（kit 可用 90s，否则 30s）：见 previewTimeoutMs 的注释。
+    await ensureOfficeKitKnown()
     const response = await sendBridgeRequest('docx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
-    }, 90_000)
+    }, previewTimeoutMs())
     if (!response.ok) return { ok: false, error: response.error ?? '文档转换失败' }
     const htmlPath = response.data?.html_path
     if (typeof htmlPath !== 'string' || !htmlPath) return { ok: false, error: 'bridge 未返回 HTML 路径' }
@@ -1637,11 +1683,12 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
     const path = String(req?.path ?? '')
     if (!path) return { ok: false, error: 'path 为空' }
-    // 90s：kit 路径单次上限 60s + 冷启余量（approximate 路径通常 <1s）。
+    // 超时按**预计走的路径**选（kit 可用 90s，否则 30s）：见 previewTimeoutMs 的注释。
+    await ensureOfficeKitKnown()
     const response = await sendBridgeRequest('pptx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
-    }, 90_000)
+    }, previewTimeoutMs())
     if (!response.ok) return { ok: false, error: response.error ?? '演示文稿转换失败' }
     const htmlPath = response.data?.html_path
     if (typeof htmlPath !== 'string' || !htmlPath) return { ok: false, error: 'bridge 未返回 HTML 路径' }
