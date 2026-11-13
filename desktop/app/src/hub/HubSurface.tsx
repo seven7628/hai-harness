@@ -50,6 +50,7 @@ export default function HubSurface() {
   const refresh = useHubStore((s) => s.refresh)
   const clearError = useHubStore((s) => s.clearError)
   const drafts = useHubStore((s) => s.drafts)
+  const groupDrafts = useHubStore((s) => s.groupDrafts)
   const setDraft = useHubStore((s) => s.setDraft)
   const failed = useHubStore((s) => s.failed)
   const retry = useHubStore((s) => s.retry)
@@ -90,6 +91,18 @@ export default function HubSurface() {
   const activeGroupId = useHubStore((s) => s.activeGroupId)
   const groupSending = useHubStore((s) => s.groupSending)
   const activeGroup = groups.find((g) => g.id === activeGroupId) ?? null
+  // DM 多气泡流式（场景2b）：一轮 LLM 正文一条草稿 —— 同一份 groupDrafts 里
+  // groupId 为空的是单聊、非空的是群聊，这里只取当前 DM 的那些。
+  // 顺序 = 首块 delta 的到达顺序 = 轮次顺序；final 只删自己那条，后面的气泡不换位。
+  const dmDrafts = useMemo(
+    () => groupDrafts.filter((d) => !d.groupId && d.agentId === activeId),
+    [groupDrafts, activeId],
+  )
+  // 草稿文本增长也要贴底跟随（live 的长度变化原本靠 live 这个依赖项触发）。
+  const dmDraftChars = dmDrafts.reduce((n, d) => n + d.text.length, 0)
+  // 有 delta 时草稿就是真身：content_chunk 拼出的 live 是同一段正文的第二份，
+  // 两个都渲染 = 双气泡。live 只留作「还没收到 delta」的兜底。
+  const showLive = dmDrafts.length === 0
   // 重试只对「当前目标的那次失败」开放：失败记录跨会话留着会把消息发错人。
   const canRetryFailed = !!failed && (failed.kind === 'group'
     ? failed.groupId === activeGroupId
@@ -128,7 +141,7 @@ export default function HubSurface() {
     // 待执行的深链跳转优先：先贴底再跳会闪一下（跳转 effect 会接管滚动）。
     if (!canAutoFollow(jump, activeId)) return
     el.scrollTop = el.scrollHeight
-  }, [messages.length, live, jump, activeId])
+  }, [messages.length, live, dmDraftChars, jump, activeId])
 
   // 深链 / Context 面板的触发 seq（P4-02）：只消费落在当前 DM 且消息已加载的请求。
   // 群走 GroupView 的同一条路径（targetId 不匹配时这里直接跳过）。
@@ -350,7 +363,7 @@ export default function HubSurface() {
                 ) : (
                 <>
                 {loading ? <div className="hub-muted">{t('hub.loading')}</div> : null}
-                {!loading && messages.length === 0 && !live ? (
+                {!loading && messages.length === 0 && !live && dmDrafts.length === 0 ? (
                   <div className="hub-intro">
                     <p>
                       {activeAgent.description || activeAgent.role || t('hub.introFallback')}
@@ -360,7 +373,7 @@ export default function HubSurface() {
                 ) : null}
                 <div className="messages-inner">
                   {dmThread}
-                  {live ? (
+                  {live && showLive ? (
                     <AgentMessage
                       agent={activeAgent}
                       name={activeAgent.name}
@@ -371,7 +384,25 @@ export default function HubSurface() {
                       <Markdown text={live} streaming />
                     </AgentMessage>
                   ) : null}
-                  {isRunning && !live ? <div className="system-line"><span>{t('hub.thinking')}</span></div> : null}
+                  {dmDrafts.map((d) => (
+                    <AgentMessage
+                      key={d.messageId}
+                      agent={activeAgent}
+                      name={activeAgent.name}
+                      role={activeAgent.role}
+                      tags={<span className="agent-tag reply">{t('hub.streaming')}</span>}
+                      // dm-draft：这是「每轮一条」的草稿气泡（场景2b），与 content_chunk
+                      // 兜底出来的 live 气泡不是同一件事 —— 浏览器回归靠它区分两条路径。
+                      className="streaming dm-draft"
+                    >
+                      <Markdown text={d.text} streaming />
+                    </AgentMessage>
+                  ))}
+                  {/* 「思考中」只在完全没有任何流式内容时出现：多气泡时每条草稿
+                      已经自带「正在输入」标签，再来一行就会重复。 */}
+                  {isRunning && !live && dmDrafts.length === 0 ? (
+                    <div className="system-line"><span>{t('hub.thinking')}</span></div>
+                  ) : null}
                 </div>
                 </>
                 )}

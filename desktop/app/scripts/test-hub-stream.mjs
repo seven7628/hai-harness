@@ -90,4 +90,56 @@ assert(mod.groupScopeFromSession('hub.ag_a.g.grp_1')?.groupId === 'grp_1', '解�
 assert(mod.groupScopeFromSession('hub.ag_a.dm') === null, 'DM 不是群会话')
 assert(mod.groupScopeFromSession(undefined) === null, '缺 session_id')
 
+// 10) 场景2b：DM delta 的 group_id 是空串（不是缺字段），必须有 agent_id。
+const dmDelta = (id, index, text, extra = {}) => ({
+  group_id: '', agent_id: 'ag_a', round_id: '', message_id: id, index, delta: text, ...extra,
+})
+let dm = mod.applyHubDelta([], dmDelta('dm1', 0, '单聊'), [])
+assert(dm.length === 1 && dm[0].groupId === '' && dm[0].agentId === 'ag_a', 'DM 空 groupId 收下（草稿 groupId 为空串）')
+dm = mod.applyHubDelta(dm, dmDelta('dm1', 1, '第二块'), [])
+assert(dm[0].text === '单聊第二块' && dm[0].index === 1, 'DM 同 id 顺序合并')
+// 空 agentId：不知道草稿归谁，群和 DM 的过滤都靠它 → 必须拒绝（空 groupId + 空 agentId
+// 既不是群也不是单聊，收下只会在 UI 里长出一条无处可归的气泡）。
+assert(mod.applyHubDelta([], dmDelta('dm2', 0, '无主', { agent_id: '' }), []).length === 0, 'DM 空 agentId 拒绝')
+assert(mod.applyHubDelta([], { ...delta('dm3', 0, '无主'), agent_id: '' }, []).length === 0, '群 delta 空 agentId 也拒绝')
+// 群 delta 语义不变：group_id 必须原样带下来（GroupView 按 groupId 过滤），
+// 群的 delta 与 DM 的草稿在同一个数组里互不合并。
+let mixed = mod.applyHubDelta([], delta('g1x', 0, '群的'), [])
+mixed = mod.applyHubDelta(mixed, dmDelta('d1x', 0, '单聊的'), [])
+assert(mixed.length === 2, '群与 DM 草稿并存不合并')
+assert(mixed.find((d) => d.messageId === 'g1x').groupId === 'grp_1', '群草稿保留 groupId')
+assert(mixed.find((d) => d.messageId === 'd1x').groupId === '', 'DM 草稿 groupId 为空串')
+assert(mod.applyHubDelta([], { message_id: 'noscope', index: 0, delta: 'x' }, []).length === 0, '无 groupId 也无 agentId 丢弃')
+
+// 11) DM 两个 message_id 并行（两轮 LLM 各一条气泡），各自 index 单调、各自 final。
+let two2 = mod.applyHubDelta([], dmDelta('r1', 0, '第一轮'), [])
+two2 = mod.applyHubDelta(two2, dmDelta('r2', 0, '第二轮'), [])
+two2 = mod.applyHubDelta(two2, dmDelta('r1', 1, '+1'), [])
+two2 = mod.applyHubDelta(two2, dmDelta('r2', 1, '+2'), [])
+assert(two2.length === 2, '两个 DM message_id 并行 = 两条草稿')
+assert(two2.map((d) => d.text).join('|') === '第一轮+1|第二轮+2', '并行草稿各自拼接，不交叉')
+// 迟到的 r1 块不能写进 r2（按 message_id 定位，不是按 agent）。
+assert(mod.applyHubDelta(two2, dmDelta('r1', 1, 'LATE'), [])[0].text === '第一轮+1', 'DM 迟到块按 id 丢弃')
+const dmFin = mod.finalizeHubDraft(two2, [], 'r1')
+assert(dmFin.drafts.length === 1 && dmFin.drafts[0].messageId === 'r2', 'DM final 只删自己那条')
+assert(mod.applyHubDelta(dmFin.drafts, dmDelta('r1', 2, 'ghost'), dmFin.finalized).length === 1, 'DM final 后迟到 delta 不复活')
+// DM 首块必须 index=0（与群同口径）：中途打开会话时不造半截气泡。
+assert(mod.applyHubDelta([], dmDelta('mid', 3, '半截'), []).length === 0, 'DM 首块非 0 丢弃')
+
+// 12) agent_end 的作用域：DM 只清 DM 草稿，群只清本群草稿，同一个 agent 互不误伤。
+let scoped = mod.applyHubDelta([], delta('gg', 0, '群的'), [])
+scoped = mod.applyHubDelta(scoped, dmDelta('dd', 0, '单聊的'), [])
+const afterDM = mod.dropDraftsForAgent(scoped, 'ag_a', '')
+assert(afterDM.length === 1 && afterDM[0].groupId === 'grp_1', 'DM agent_end 只清 DM 草稿')
+const afterGRP = mod.dropDraftsForAgent(scoped, 'ag_a', 'grp_1')
+assert(afterGRP.length === 1 && afterGRP[0].groupId === '', '群 agent_end 只清本群草稿')
+assert(mod.dropDraftsForAgent(scoped, 'ag_a').length === 0, '不传作用域 = 清该 agent 全部（旧行为）')
+assert(mod.dropDraftsForAgent(scoped, 'ag_c', '') === scoped, '没有匹配时返回原数组')
+
+// 13) dmScopeFromSession 只认 hub.<agent>.dm。
+assert(mod.dmScopeFromSession('hub.ag_a.dm')?.agentId === 'ag_a', '解析 DM agent')
+assert(mod.dmScopeFromSession('hub.ag_a.g.grp_1') === null, '群会话不是 DM')
+assert(mod.dmScopeFromSession('proj.ag_a.dm') === null, '非 hub 会话不是 DM')
+assert(mod.dmScopeFromSession('') === null && mod.dmScopeFromSession(undefined) === null, '空 session_id')
+
 console.log(`\n✅ hub 流式草稿：${pass} 项全部通过`)

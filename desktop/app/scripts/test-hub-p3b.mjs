@@ -645,6 +645,135 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
   assert(viewSrc.includes('function usePerfMemo'), '存在带 undefined 语义的 usePerfMemo 包装')
 }
 
+// —— 12d) 场景2b：DM 多气泡流式（每轮 LLM 一条草稿，靠 message_id 分桶）——
+{
+  const H = store.useHubStore
+  const ev = (x) => H.getState().handleEvent(JSON.stringify(x))
+  // DM delta：group_id 是空串（不是缺字段），round_id 也是空串。
+  const dmDelta = (id, index, text, agent = 'ag_a') => ev({
+    event_type: 'hub_message_delta', group_id: '', agent_id: agent, round_id: '',
+    message_id: id, index, delta: text,
+  })
+  const dmFinal = (id, seq, text, agent = 'ag_a') => ev({
+    event_type: 'hub_message', agent_id: agent, seq,
+    message: { id, seq, kind: 'text', sender: { kind: 'agent', agent_id: agent }, text, created_at: '2026-03-10T12:00:00Z' },
+  })
+  const grpDelta = (id, index, text, agent = 'ag_a') => ev({
+    event_type: 'hub_message_delta', group_id: 'g1', agent_id: agent, round_id: 'r1',
+    message_id: id, index, delta: text,
+  })
+  const fresh = (patch = {}) => H.setState({
+    open: true, view: 'dm', activeId: 'ag_a', sid: 'hub.ag_a.dm', activeGroupId: null,
+    messages: [], live: '', groupMessages: [], groupDrafts: [], finalizedMessageIds: [],
+    dm: {}, groupInfo: {}, tasks: [],
+    ...patch,
+  })
+
+  fresh()
+  // 两轮 LLM = 两个 message_id = 两条草稿（场景2b 的核心：不能再挤成一条）。
+  dmDelta('m_r1', 0, '第一轮')
+  dmDelta('m_r2', 0, '第二轮')
+  eq(H.getState().groupDrafts.length, 2, 'DM：两个 message_id 各一条草稿')
+  assert(H.getState().groupDrafts.every((d) => d.groupId === '' && d.agentId === 'ag_a'), 'DM：草稿 groupId 为空、agentId 正确')
+  dmDelta('m_r1', 1, '+1')
+  dmDelta('m_r2', 1, '+2')
+  eq(H.getState().groupDrafts.map((d) => d.text).join('|'), '第一轮+1|第二轮+2', 'DM：并行草稿各自增长')
+
+  // final 各清各的：清掉 r1 后 r2 还在。
+  dmFinal('m_r1', 10, '第一轮+1（终）')
+  eq(H.getState().groupDrafts.length, 1, 'DM：final 只清自己那条草稿')
+  eq(H.getState().groupDrafts[0].messageId, 'm_r2', 'DM：另一轮的草稿仍在流式')
+  eq(H.getState().messages.filter((m) => m.id === 'm_r1').length, 1, 'DM：final 落一条消息')
+  dmFinal('m_r2', 11, '第二轮+2（终）')
+  eq(H.getState().groupDrafts.length, 0, 'DM：第二轮 final 后草稿清零')
+  eq(H.getState().messages.length, 2, 'DM：两条气泡 = 两条消息（不合并、不重复）')
+  assert(H.getState().finalizedMessageIds.includes('m_r1') && H.getState().finalizedMessageIds.includes('m_r2'), 'DM：final 记入 finalized')
+  dmDelta('m_r1', 2, '幽灵')
+  eq(H.getState().groupDrafts.length, 0, 'DM：final 后迟到 delta 不复活草稿')
+
+  // 只收当前 DM：别的 agent 的 delta 一律不进草稿。
+  dmDelta('m_x', 0, '别人的', 'ag_b')
+  eq(H.getState().groupDrafts.length, 0, 'DM：非当前 agent 的 delta 丢弃')
+  H.setState({ open: false })
+  dmDelta('m_y', 0, 'Hub 关着')
+  eq(H.getState().groupDrafts.length, 0, 'DM：Hub 关闭时不收草稿')
+
+  // agent_end：清掉 ag_a 的 DM 草稿，但一条群草稿都不能动。
+  fresh({ activeGroupId: 'g1' })
+  grpDelta('g_keep', 0, '群的半截')
+  H.setState({ activeId: 'ag_a', activeGroupId: null })
+  dmDelta('m_a1', 0, 'A 的这一轮')
+  dmDelta('m_a2', 0, 'A 的下一轮', 'ag_a')
+  eq(H.getState().groupDrafts.length, 3, 'agent_end 前：群 1 + DM 2 条草稿')
+  ev({ event_type: 'agent_end', session_id: 'hub.ag_a.dm' })
+  eq(H.getState().groupDrafts.length, 1, 'agent_end：DM 草稿全清（多轮一起清）')
+  eq(H.getState().groupDrafts[0].messageId, 'g_keep', 'agent_end：群草稿不受 DM agent_end 影响')
+  // 反过来：群 agent_end 也不能清 DM 草稿。
+  fresh()
+  grpDelta('g_a', 0, '群的')
+  dmDelta('m_keep', 0, '单聊的')
+  ev({ event_type: 'agent_end', session_id: 'hub.ag_a.g.g1' })
+  eq(H.getState().groupDrafts.length, 1, '群 agent_end 只清本群草稿')
+  eq(H.getState().groupDrafts[0].messageId, 'm_keep', '群 agent_end 不动 DM 草稿')
+
+  // content_chunk 仍然累加 live（非 Hub/项目会话要靠它），DM 的渲染只靠草稿去重。
+  fresh()
+  ev({ event_type: 'content_chunk', session_id: 'hub.ag_a.dm', run_id: 'run1', content: '旧链路' })
+  eq(H.getState().live, '旧链路', 'content_chunk：live 兜底仍在（草稿为空时渲染）')
+  dmDelta('m_live', 0, '新链路')
+  eq(H.getState().groupDrafts.length, 1, 'delta 到后草稿接管')
+  eq(H.getState().live, '旧链路', 'content_chunk 不因草稿清空 live（由 final 负责清）')
+  dmFinal('m_live', 12, '新链路（终）')
+  eq(H.getState().live, '', 'DM final 后 live 清空（不会和草稿叠成双气泡）')
+
+  // 群行为未被改坏：群 delta 仍只认当前群，final 仍走群消息桶。
+  fresh({ activeId: null, activeGroupId: 'g1', view: 'chat' })
+  grpDelta('g1x', 0, '群的')
+  eq(H.getState().groupDrafts.length, 1, '群：本群 delta 进草稿')
+  ev({ event_type: 'hub_message_delta', group_id: 'g2', agent_id: 'ag_a', round_id: 'r1', message_id: 'g2x', index: 0, delta: '别的群' })
+  eq(H.getState().groupDrafts.length, 1, '群：别的群的 delta 丢弃')
+  ev({
+    event_type: 'hub_message', group_id: 'g1',
+    message: { id: 'g1x', seq: 20, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_a' }, text: '群的（终）', created_at: '2026-03-10T12:00:00Z' },
+  })
+  eq(H.getState().groupDrafts.length, 0, '群：final 清草稿')
+  eq(H.getState().groupMessages.filter((m) => m.id === 'g1x').length, 1, '群：final 落一条群消息')
+  eq(H.getState().messages.length, 0, '群：群消息不进 DM 消息桶')
+
+  // 重连/重开 DM 的对账：hub_open 在飞时收到的流式草稿，历史里已有该 message_id →
+  // 删草稿并记入 finalized（迟到 delta 不能再复活它）。
+  fresh({ activeId: null })
+  const t = transport.getTransport()
+  const realSend = t.send.bind(t)
+  let openCmd = null
+  t.send = (cmd) => {
+    if (cmd.type === 'hub_open') { openCmd = cmd; return Promise.resolve({ ok: true }) }
+    return realSend(cmd)
+  }
+  try {
+    const inflight = H.getState().select('ag_a')
+    for (let i = 0; i < 50 && !openCmd; i++) await new Promise((r) => setTimeout(r, 5))
+    assert(!!openCmd, 'DM 对账：发出了 hub_open')
+    dmDelta('m_sync', 0, '断线期间只剩草稿')
+    eq(H.getState().groupDrafts.length, 1, 'DM 对账：历史在飞时 delta 仍进草稿')
+    t.emit({
+      event_type: 'command_response', id: openCmd.id, ok: true,
+      data: {
+        agent: roster[0], session_id: 'hub.ag_a.dm', has_more: false,
+        messages: [{ id: 'm_sync', seq: 21, kind: 'text', sender: { kind: 'agent', agent_id: 'ag_a' }, text: '历史里已有 final' }],
+      },
+    })
+    await inflight
+  } finally {
+    t.send = realSend
+  }
+  eq(H.getState().groupDrafts.length, 0, 'DM 对账：历史里已有 final 的草稿被清掉')
+  assert(H.getState().finalizedMessageIds.includes('m_sync'), 'DM 对账：已落地的 id 记入 finalized')
+  dmDelta('m_sync', 0, '幽灵')
+  eq(H.getState().groupDrafts.length, 0, 'DM 对账后迟到 delta 不复活草稿')
+  eq(H.getState().messages.filter((m) => m.id === 'm_sync').length, 1, 'DM 对账：历史消息只落一条')
+}
+
 // —— 13) DM 未读刷新竞态（P3b-08）：请求在飞时到达的消息不被旧快照覆盖 ——
 {
   const proj = groupProjection

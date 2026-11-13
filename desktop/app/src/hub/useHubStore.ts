@@ -13,7 +13,7 @@ import {
   normalizeSearchQuery, normalizeSearchScope, searchAroundPlan, searchPagePayload,
 } from './search'
 import { addHubAlert, alertFromEvent } from './alerts'
-import { applyHubDelta, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, reconcileDraftsWithMessages, type HubMessageDelta, type HubStreamDraft } from './groupStream'
+import { applyHubDelta, dmScopeFromSession, dropDraftsForAgent, finalizeHubDraft, groupScopeFromSession, reconcileDraftsWithMessages, type HubMessageDelta, type HubStreamDraft } from './groupStream'
 import {
   isHubTargetActive, projectGroupMessage, projectGroupRead, projectTaskUpdate, shouldApplyDMInfo,
   shouldApplyGroupProgress,
@@ -610,12 +610,27 @@ export const useHubStore = create<HubState>((set, get) => ({
       set({ loading: false, error: r.error || '打开对话失败' })
       return
     }
-    set({
-      loading: false,
-      profile: r.data?.agent ?? null,
-      sid: r.data?.session_id ?? null,
-      messages: r.data?.messages ?? [],
-      hasMore: r.data?.has_more === true,
+    set((s) => {
+      const history = r.data?.messages ?? []
+      const patch: Partial<HubState> = {
+        loading: false,
+        profile: r.data?.agent ?? null,
+        sid: r.data?.session_id ?? null,
+        messages: history,
+        hasMore: r.data?.has_more === true,
+      }
+      // 断线/重连对账（场景2b，与群的 selectGroup 同一套）：历史里已有的 message_id
+      // 说明那轮已经落地，残留草稿必须删掉并记入 finalized，迟到 delta 不能再复活它。
+      const rec = reconcileDraftsWithMessages(
+        s.groupDrafts,
+        s.finalizedMessageIds,
+        history.map((m) => m.id).filter((id): id is string => typeof id === 'string' && id.length > 0),
+      )
+      if (rec.drafts !== s.groupDrafts) {
+        patch.groupDrafts = rec.drafts
+        patch.finalizedMessageIds = rec.finalized
+      }
+      return patch
     })
     // 打开过 = 已读，但前提是 Hub 仍然开着：关闭 Hub 后才落地的响应
     // 不能把「关闭期间新到的消息」标成已读（B4）。
@@ -1474,6 +1489,10 @@ export const useHubStore = create<HubState>((set, get) => ({
         const agentID = ev.agent_id || ''
         const msg = typeof ev.message === 'string' ? undefined : ev.message
         if (!msg) return
+        // final 覆盖草稿（场景2b）：DM 每轮 LLM 内容一条 hub_message，id 复用本轮的
+        // 草稿 message_id。无论当前是否在看这个 DM 都要 finalize —— 否则切走再切回时
+        // 迟到的 delta 会重新长出幽灵气泡（与群同一套 finalized 守卫）。
+        const fin = finalizeHubDraft(get().groupDrafts, get().finalizedMessageIds, msg.id)
         // 左栏预览/未读同步：只有 Hub 打开且当前就是这个 DM 才不算未读。
         const dmActive = isHubTargetActive(get().open, activeId, agentID)
         touchDMInfo(agentID) // 刷新响应的竞态守卫要看到「这条消息比请求新」
@@ -1487,7 +1506,13 @@ export const useHubStore = create<HubState>((set, get) => ({
           if (dmActive) info.unread = 0
           else if (msg.sender?.kind === 'agent') info.unread = (info.unread ?? 0) + 1
           dm[agentID] = info
-          return { dm }
+          const next: Partial<HubState> = { dm }
+          // 只在真有草稿被删 / 有 id 入账时才改这两个字段：每个 DM final 都换引用会让
+          // groupDrafts 的订阅者（群视图、DM 视图）白重渲染一次。
+          if (fin.drafts !== s.groupDrafts) next.groupDrafts = fin.drafts
+          // LRU 满 200 时长度不再变化，只能看队头是否换了（新 id 一定在队头）。
+          if (fin.finalized[0] !== s.finalizedMessageIds[0]) next.finalizedMessageIds = fin.finalized
+          return next
         })
         if (!dmActive) return
         set((s) => {
@@ -1502,7 +1527,18 @@ export const useHubStore = create<HubState>((set, get) => ({
         return
       }
       case 'hub_message_delta': {
-        if (!ev.group_id || !get().open || ev.group_id !== get().activeGroupId) return
+        if (ev.group_id) {
+          if (!get().open || ev.group_id !== get().activeGroupId) return
+          set((s) => ({
+            groupDrafts: applyHubDelta(s.groupDrafts, ev as HubMessageDelta, s.finalizedMessageIds),
+          }))
+          return
+        }
+        // DM（场景2b）：group_id 是空串。草稿同样进 groupDrafts，靠 groupId==='' 与
+        // 群草稿分桶；只有「Hub 打开 + 正在看这个 agent」才收 —— 别的 DM 的流式内容
+        // 不能串到当前会话里（切过去时那段正文已经落成 final 消息，见 select 的对账）。
+        const agentID = typeof ev.agent_id === 'string' ? ev.agent_id : ''
+        if (!agentID || !get().open || agentID !== get().activeId) return
         set((s) => ({
           groupDrafts: applyHubDelta(s.groupDrafts, ev as HubMessageDelta, s.finalizedMessageIds),
         }))
@@ -1536,9 +1572,18 @@ export const useHubStore = create<HubState>((set, get) => ({
       case 'agent_end': {
         if (!isRoot) return // 子 agent 结束不能熄根 run 的运行点
         // 群内空回复/中断没有 final hub_message：按群会话 id 清掉该 agent 的草稿。
+        // 带上 groupId：同一个 agent 在自己的 DM 里可能也在流式，那条草稿不能一起清。
         const groupScope = groupScopeFromSession(ev.session_id)
         if (get().open && groupScope && groupScope.groupId === get().activeGroupId) {
-          set((s) => ({ groupDrafts: dropDraftsForAgent(s.groupDrafts, groupScope.agentId) }))
+          set((s) => ({
+            groupDrafts: dropDraftsForAgent(s.groupDrafts, groupScope.agentId, groupScope.groupId),
+          }))
+        }
+        // DM（场景2b）：hub.<agent>.dm 结束就清掉该 agent 的 DM 草稿（groupId===''），
+        // 纯工具轮/中断没有 final，不能把半截气泡留在时间线里；群草稿一条都不动。
+        const dmScope = dmScopeFromSession(ev.session_id)
+        if (dmScope) {
+          set((s) => ({ groupDrafts: dropDraftsForAgent(s.groupDrafts, dmScope.agentId, '') }))
         }
         if (!activeId || !sid || (ev.session_id && ev.session_id !== sid)) return
         set((s) => ({

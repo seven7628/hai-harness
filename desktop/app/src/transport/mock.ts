@@ -1173,6 +1173,58 @@ class MockTransport implements Transport {
     })
   }
 
+  /**
+   * 脚本化 DM 两轮回复（场景2b 浏览器回归，?hubFixture=dmstream）。
+   *
+   * 真 bridge 每个 LLM 轮次一条气泡：content_chunk 与 hub_message_delta **两条路径
+   * 同时活着**（group_id/round_id 是空串），轮末各一条 hub_message（message.id = 该轮的
+   * message_id）。前端只有把 live 让位给草稿才不会画成「1 条 live + 2 条草稿」。
+   */
+  private mockDMStreamReply(agentID: string, triggerSeq: number): void {
+    const sid = `hub.${agentID}.dm`
+    const runID = `mock-run-${triggerSeq}`
+    const rounds = [
+      '先说结论：三个方案里我推荐第二个，代价最低。',
+      '再补证据：第一个方案每次改价都要动两份配置，维护成本最高。',
+    ]
+    let endAt = 0
+    this.after(300, () => this.emit({ event_type: 'agent_start', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 }), sid)
+    rounds.forEach((text, r) => {
+      const messageID = `msg_mock_dm_${triggerSeq}_${r}`
+      const runes = Array.from(text)
+      const size = Math.max(1, Math.ceil(runes.length / 5))
+      const chunks: string[] = []
+      for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
+      // 第二轮紧接着第一轮的 final（间隔 < 人的点击速度，模拟工具调用后继续说话）。
+      const start = 400 + r * 700
+      chunks.forEach((chunk, i) => {
+        this.after(start + i * 70, () => {
+          // 旧路径（live）：真 bridge 现在也照发，前端不能和草稿同时画。
+          this.emit({ event_type: 'content_chunk', session_id: sid, run_id: runID, content: chunk })
+          // 新路径（草稿）：DM 的 group_id/round_id 是空串，不是缺字段。
+          this.emit({
+            event_type: 'hub_message_delta', group_id: '', agent_id: agentID, round_id: '',
+            message_id: messageID, index: i, delta: chunk,
+          })
+        }, sid)
+      })
+      endAt = start + chunks.length * 70 + 60
+      this.after(endAt, () => {
+        const rseq = (this.hubSeq.get(agentID) ?? 0) + 1
+        this.hubSeq.set(agentID, rseq)
+        const created = new Date().toISOString()
+        this.hubLog(agentID).push({ seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text, created_at: created })
+        this.emit({
+          event_type: 'hub_message', agent_id: agentID, seq: rseq,
+          message: { id: messageID, seq: rseq, kind: 'text', sender: { kind: 'agent', agent_id: agentID }, text, created_at: created },
+        })
+      }, sid)
+    })
+    this.after(endAt + 200, () => {
+      this.emit({ event_type: 'agent_end', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 })
+    }, sid)
+  }
+
   private pickIdx = 0
   private titleIdx = 0
 
@@ -3010,6 +3062,12 @@ class MockTransport implements Transport {
           client_msg_id: String(cmd.payload?.client_msg_id ?? ''),
         })
         this.respond(cmd, { seq, session_id: `hub.${agentID}.dm` })
+        // 场景2b 的浏览器回归档：真 bridge 现在按 LLM 轮次分段，且**仍然同时**发
+        // content_chunk。mock 复刻这个组合（两轮），前端必须只画两条草稿气泡。
+        if (this.hubFixture() === 'dmstream') {
+          this.mockDMStreamReply(agentID, seq)
+          break
+        }
         // 模拟一轮回复：agent_start → content_chunk 流 → hub_message → agent_end
         const sid = `hub.${agentID}.dm`
         const runID = `mock-run-${seq}`
