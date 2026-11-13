@@ -231,6 +231,14 @@ export interface HubTask {
     agent_id?: string
     group_id?: string
   }
+  /** 派发时间线（账本 Dispatch）：run_id = 这条任务在目标会话里跑起来的**主 run**。 */
+  dispatch?: {
+    run_id?: string
+    dispatched_at?: string
+    accepted_at?: string
+    agent_start_at?: string
+    agent_end_at?: string
+  }
   result?: HubTaskResult
   created_at?: string
   updated_at?: string

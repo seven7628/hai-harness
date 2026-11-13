@@ -1,0 +1,157 @@
+/* Hub 单聊/群内联「Project 待办」卡（场景2）。
+ *
+ * 与 hub.css 的分工：**.hub-inline-todos 的名字空间独占这个文件**。hub.css 正被
+ * 另一个改动占用（P4-UI-15 的内联 need 卡），把这里的规则写进去会互相踩；同时
+ * 这里只用 index.css 的全局 token（--surface/--border/--text-2/--accent/--success），
+ * 不依赖 hub.css 顶部的 --hub-* 变量 —— 单独 import 也能正确着色。
+ *
+ * 空间口径（390 宽下实测要求）：
+ *   卡片区自己限高（min(30vh, 168px)）+ 内部滚动，绝不让它把 .messages 挤成 0；
+ *   单卡可折叠（header 上的「收起」），折叠后只剩一行归属。
+ */
+.hub-inline-todos {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 8px;
+  /* 三张卡叠加也不许超过这个高度：composer-wrap 是 flex:0 0 auto，它长一寸
+     消息区就少一寸，小屏上会直接压成 0（.messages 的 min-height:0 挡不住）。 */
+  max-height: min(30vh, 168px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.hub-inline-todo {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 94%, var(--accent) 6%);
+  padding: 6px 10px 7px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.hub-inline-todo-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.hub-inline-todo-title {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .01em;
+}
+
+/* 归属行（谁的任务 · 哪个 workspace/session · 主会话还是哪个子智能体）：
+   一行省略号，完整值在 title 里。它是「这份清单是谁的」的唯一线索，不能换行把卡撑高。 */
+.hub-inline-todo-attr {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hub-inline-todo-fold {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  border-radius: 5px;
+}
+.hub-inline-todo-fold:hover { color: var(--text); }
+.hub-inline-todo-fold:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+.hub-inline-todo-bar {
+  display: block;
+  height: 3px;
+  margin: 5px 0 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+  overflow: hidden;
+}
+.hub-inline-todo-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width .2s ease;
+}
+
+.hub-inline-todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hub-inline-todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+/* 只读 checkbox：14px 见方，完成态实心 + 勾。不做 hover/点击态 —— 这张卡不许
+   出现任何「批准 / 提交 / 勾选」的交互暗示（待办的改写只发生在 Project 会话里）。 */
+.hub-inline-todo-box {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--surface);
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+}
+.hub-inline-todo-item.done .hub-inline-todo-box {
+  border-color: var(--success);
+  background: var(--success);
+}
+.hub-inline-todo-item.done .hub-inline-todo-text {
+  color: var(--text-3);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-3) 60%, transparent);
+}
+
+.hub-inline-todo-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  /* 一条待办最长两行：再长就该折叠，不然一张卡吃掉整个消息区。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.hub-inline-todo-more {
+  color: var(--muted);
+  font-size: 10.5px;
+  padding-left: 19px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .hub-inline-todos { max-height: min(26vh, 140px); margin-bottom: 6px; }
+  .hub-inline-todo { padding: 5px 8px 6px; }
+  .hub-inline-todo-attr { font-size: 10px; }
+}

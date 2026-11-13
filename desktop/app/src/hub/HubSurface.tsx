@@ -22,6 +22,7 @@ import { useClearSentAttachments, useHubAttachments } from './useHubAttachments'
 import { withFileRefs } from './attachments'
 import AttachmentStrip from './AttachmentStrip'
 import HubInlineNeeds from './HubInlineNeeds'
+import HubInlineTodos from './HubInlineTodos'
 import HubAttachments from './HubAttachments'
 import { useResolvedTheme } from '../lib/useTheme'
 import './hub.css'
@@ -411,6 +412,9 @@ export default function HubSurface() {
               {view === 'chat' ? (
                 <div className="composer-wrap"><div className="composer-inner">
                   <HubInlineNeeds scope={{ kind: 'dm', agentId: activeId }} />
+                  {/* 场景2：Project 待办（只读，与上面同一 scope）。放在 need 之后：
+                      需要人处理的卡在上、纯进度在下。 */}
+                  <HubInlineTodos scope={{ kind: 'dm', agentId: activeId }} />
                   <AttachmentStrip
                     images={attach.images}
                     files={attach.files}

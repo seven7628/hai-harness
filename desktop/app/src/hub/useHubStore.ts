@@ -20,6 +20,11 @@ import {
 } from './groupProjection'
 import { copyText } from '../lib/clipboard'
 import {
+  forgetTodoSnapshots, hubRunKey, isProjectSession, isTerminalTaskStatus,
+  mergeTodoSnapshot, putRunName, putTodoSnapshot,
+  type HubRunNameEvent, type HubRunNames, type HubTodoEvent, type HubTodoSnapshot,
+} from '../lib/hubTodoScope'
+import {
   formatHubDeepLink, hubDeepLinkKey, HUB_DEEP_LINK_INVALID_ERROR, parseHubDeepLink,
   type HubDeepLinkKind,
 } from './deeplink'
@@ -134,6 +139,14 @@ interface HubState {
   inspector: 'tasks' | 'needs' | 'session' | 'context' | null
   tasks: HubTask[]
   tasksLoading: boolean
+  /**
+   * Project 会话的待办快照（场景2：DM/群内联卡）。键 = (session, run)，
+   * 只由 `tool_run_end` 的 `todos` 字段喂进来；Hub 自己的会话不记。
+   * 只读展示，**绝不**写进 hub_message / refs（不进群快照、不进智能体上下文）。
+   */
+  todoSnapshots: Record<string, HubTodoSnapshot>
+  /** Project 会话的 run → 展示名（agent_start 维护；root = 主 run）。有界。 */
+  runNames: HubRunNames
   needs: HubNeed[]
   needsLoading: boolean
   /** Hub 全局告警（P2.5-05）：恢复失败/预算/推送失败等，按 envelope 去重。 */
@@ -268,6 +281,12 @@ interface HubState {
   retryTask(taskID: string): Promise<void>
   resolveNeed(needID: string, resolution: string, answers?: Record<string, string>): Promise<void>
   clearContext(): Promise<void>
+  /** 收一条 Project 会话的 tool_run_end 待办快照（Hub 自身会话 / 无 todos 字段不记）。 */
+  applyTodoSnapshot(event: HubTodoEvent): void
+  /** 记 Project 会话的 run 展示名（agent_start；根 run 也记，用于区分「主会话」）。 */
+  rememberRunName(event: HubRunNameEvent): void
+  /** 任务终态：立刻收掉属于它的内联待办卡（不必等 LRU）。 */
+  forgetTodosForTask(task: HubTask): void
   handleEvent(line: string): void
 }
 
@@ -293,6 +312,9 @@ let jumpTimer: ReturnType<typeof setTimeout> | null = null
 let searchGen = 0
 // 产物预览代际：旧请求的迟到响应不得覆盖新打开的文件（也不得在关闭后复活弹窗）。
 let artifactPreviewGen = 0
+// 待办快照的到达序（单调）：同键后到覆盖先到、LRU 淘汰都按它排序。
+// 用代际计数而不是 Date.now()：同一毫秒内多条 todo_* 事件必须仍可比较先后。
+let todoArrival = 0
 
 function clearJumpTimer(): void {
   if (jumpTimer) {
@@ -428,6 +450,8 @@ export const useHubStore = create<HubState>((set, get) => ({
   inspector: null,
   tasks: [],
   tasksLoading: false,
+  todoSnapshots: {},
+  runNames: {},
   needs: [],
   needsLoading: false,
   alerts: [],
@@ -474,6 +498,8 @@ export const useHubStore = create<HubState>((set, get) => ({
     // 关闭即作废：深链的所有权只覆盖「这一次打开」，正常重开仍要 mount 水合；
     // 未执行的跳转也一并丢弃（下次打开从当前时间线底部开始）。
     // 右栏回到默认概览、编辑器一并关闭：退出 Hub 后不该留一个悬空的弹层。
+    // 待办快照/run 名表**刻意不清**：Hub 关闭期间仍在收 Project 事件（场景2），
+    // 重开时内联卡应当已经是最新的；它们的归属由任务的 origin 决定，不会跨作用域串台。
     clearJumpTimer()
     set({ open: false, deepLinkOwnedOpen: false, jump: null, inspector: null, editor: null, view: 'chat' })
   },
@@ -1100,6 +1126,42 @@ export const useHubStore = create<HubState>((set, get) => ({
     set({ needsLoading: false, needs: r.data?.needs ?? [] })
   },
 
+  // —— 场景2：Project 会话的待办快照（DM/群内联卡）——
+  // 三个 action 都只读事件、只改前端状态：不写 hub_message、不写 refs、不发命令。
+  // 为什么放在 store 而不是组件里：Hub 关闭时也要继续收集（用户回来时卡还在），
+  // 组件只在打开 DM/群时才挂载；这份数据是 App 级订阅（attachHubEvents）的自然产物。
+  applyTodoSnapshot(event) {
+    const sessionId = String(event.session_id ?? '')
+    const runId = String(event.run_id ?? '')
+    if (!isProjectSession(sessionId) || !runId) return
+    const key = hubRunKey(sessionId, runId)
+    const prev = get().todoSnapshots[key]
+    const next = mergeTodoSnapshot(prev, { ...event, arrival: ++todoArrival })
+    if (!next || next === prev) return
+    set({ todoSnapshots: putTodoSnapshot(get().todoSnapshots, next) })
+  },
+
+  rememberRunName(event) {
+    const sessionId = String(event.session_id ?? '')
+    const runId = String(event.run_id ?? '')
+    if (!isProjectSession(sessionId) || !runId) return
+    // 根 run 也记（root=true，名字恒为空）：只有见过 agent_start 的 run 才允许显示
+    // 「主会话」——数不到的 run 显示 run_xxxx，绝不猜成主会话。
+    const root = (event.parent_run_id ?? '') === '' && (event.depth ?? 0) === 0
+    const next = putRunName(get().runNames, hubRunKey(sessionId, runId), { root, name: event.name })
+    if (next === get().runNames) return
+    set({ runNames: next })
+  },
+
+  forgetTodosForTask(task) {
+    const all = get().todoSnapshots
+    const next = forgetTodoSnapshots(all, {
+      sessionId: task.target?.session_id,
+      runIds: [task.dispatch?.run_id ?? ''].filter(Boolean),
+    })
+    if (next !== all) set({ todoSnapshots: next })
+  },
+
   async cancelTask(taskID) {
     const r = await hubCommand<{ task?: HubTask }>('hub_task_cancel', { task_id: taskID })
     if (!r.ok) {
@@ -1408,6 +1470,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       event_type?: string
       agent_id?: string
       session_id?: string
+      workspace?: string
       run_id?: string
       parent_run_id?: string
       depth?: number
@@ -1443,11 +1506,30 @@ export const useHubStore = create<HubState>((set, get) => ({
       target_agent_id?: string
       target_kind?: string
       group?: HubGroup
+      /** tool_run_end 的待办快照（属主 = 发出该调用的 run）。缺字段 = 无快照。 */
+      todos?: unknown
     }
     try {
       ev = JSON.parse(line) as typeof ev
     } catch {
       return
+    }
+    // —— 场景2：Project 会话的内联待办 ——
+    // 必须在下面所有 sid 闸门**之前**收：`sid` 是 Hub 自己的会话
+    // （hub.<agent>.dm / hub.<agent>.g.<group>），Project 会话（s_…）永远对不上，
+    // 先过闸门就等于把整条事件丢掉 —— 这也正是「Project 的 ToDo 一直看不到」的根因。
+    // 只收 Project 会话：Hub 自己的工具事件不写（同一份清单已在转录/右栏待办面板里）。
+    if (isProjectSession(ev.session_id)) {
+      if (ev.event_type === 'agent_start') {
+        get().rememberRunName({
+          session_id: ev.session_id, run_id: ev.run_id, name: ev.name,
+          parent_run_id: ev.parent_run_id, depth: ev.depth,
+        })
+      } else if (ev.event_type === 'tool_run_end' && 'todos' in ev) {
+        // 只有**带** todos 字段才是快照（bridge 只在 todo_*/编排调用上注入）。
+        // 缺字段不能当空清单：那样每条普通工具都会把一张活的卡清空。
+        get().applyTodoSnapshot(ev)
+      }
     }
     const { activeId, sid } = get()
     const isRoot = (ev.parent_run_id ?? '') === '' && (ev.depth ?? 0) === 0
@@ -1560,6 +1642,8 @@ export const useHubStore = create<HubState>((set, get) => ({
         return
       }
       case 'agent_start': {
+        // run 名表（子智能体展示名）已在函数顶部按 Project 会话记过；这里仍然只管
+        // 当前 DM 的运行点，口径不变（根 run 才亮环）。
         if (!isRoot) return
         if (!activeId || !sid || (ev.session_id && ev.session_id !== sid)) return
         set((s) => ({
@@ -1607,6 +1691,12 @@ export const useHubStore = create<HubState>((set, get) => ({
             const rest = s.tasks.filter((t) => t.id !== task.id)
             return { tasks: [task, ...rest] }
           })
+        }
+        // 场景2：任务进终态就立刻收掉内联待办卡（显示层已按终态过滤，这里顺手回收
+        // 快照，避免同一会话的下一条任务认领到上一轮的旧清单）。
+        if (isTerminalTaskStatus(task?.status ?? evt.status)) {
+          const known = task ?? get().tasks.find((t) => t.id === taskID)
+          if (known) get().forgetTodosForTask(known)
         }
         // 左栏任务态：只更新「最近一张任务卡」的 status/summary；迟到的 update
         // 不能把被新消息清掉的 last_outcome 复活（N2，见 projectTaskUpdate）。
@@ -1666,6 +1756,9 @@ export const useHubStore = create<HubState>((set, get) => ({
       }
       case 'tool_run_start':
       case 'tool_run_end': {
+        // 这里只管「Run 视图」的工具行：只认当前 DM 会话（Project 会话的工具事件
+        // 不属于 Hub 的 Run 页）。待办快照**不在这里**收 —— 它在 handleEvent 顶部、
+        // 这道 sid 闸门之前就落了表（见「场景2」注释）。
         if (!sid || (ev.session_id && ev.session_id !== sid)) return
         const key = ev.id || `${ev.name ?? 'tool'}-${ev.timestamp ?? Date.now()}`
         const started = ev.event_type === 'tool_run_start'
