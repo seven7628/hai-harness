@@ -216,7 +216,11 @@ async function sendWithImage(testid, text) {
   await page.locator('.hub-attach-strip .hub-attach-chip--img img').first().waitFor({ timeout: 10000 })
   await page.screenshot({ path: `${OUT}/dm-strip-image.png` })
   // 缩略图 → 待发灯箱（有「删除」）→ 删除后条带清空 → 再注入一次（走正常发送流程）。
-  await page.locator('.hub-attach-strip .hub-attach-thumb').first().click()
+  // 扇形牌 hover 会抽正/上浮；先 hover 再点，避免 Playwright 在「移动鼠标→元素位移」
+  // 之间反复判定 not stable（真实用户也是先看到牌再点）。
+  const stripThumb = page.locator('.hub-attach-strip .hub-attach-thumb').first()
+  await stripThumb.hover()
+  await stripThumb.click()
   await page.locator('.hub-attach-lb').waitFor({ timeout: 6000 })
   check(await page.locator('.hub-attach-lb-btn.danger').count() === 1, '待发灯箱里有「删除」')
   await page.locator('.hub-attach-lb-btn.danger').click()
@@ -232,6 +236,7 @@ async function sendWithImage(testid, text) {
 
   // 灯箱：点缩略图 → 复制（不抛）→ Esc 关闭 → 再开 → 点遮罩关闭
   const thumb = page.locator('.hub-demo .msg-row.user .hub-msg-img').first()
+  await thumb.hover()
   await thumb.click()
   await page.locator('.hub-attach-lb').waitFor({ timeout: 6000 })
   await page.screenshot({ path: `${OUT}/dm-lightbox.png` })
@@ -243,6 +248,7 @@ async function sendWithImage(testid, text) {
   check(errors.length === errorsBeforeCopy, `复制图片不应抛错：${errors.slice(0, 3).join(' | ')}`)
   await page.keyboard.press('Escape')
   await page.locator('.hub-attach-lb').waitFor({ state: 'detached', timeout: 4000 })
+  await thumb.hover()
   await thumb.click()
   await page.locator('.hub-attach-lb').waitFor({ timeout: 6000 })
   await page.mouse.click(4, 4)
@@ -264,7 +270,9 @@ async function sendWithImage(testid, text) {
   await page.waitForTimeout(300)
   check(errors.length === errorsBeforeFile, `点击文件 chip（复制路径）不应报错：${errors.slice(0, 3).join(' | ')}`)
   // 图片灯箱里的「删除」只在待发条带里出现；历史消息的灯箱不该有删除按钮。
-  await page.locator('.hub-demo .msg-row.user .hub-msg-img').first().click()
+  const historyImg = page.locator('.hub-demo .msg-row.user .hub-msg-img').first()
+  await historyImg.hover()
+  await historyImg.click()
   await page.locator('.hub-attach-lb').waitFor({ timeout: 6000 })
   check(await page.locator('.hub-attach-lb-btn.danger').count() === 0, '历史消息的灯箱没有「删除」（不删别人的消息）')
   await page.keyboard.press('Escape')

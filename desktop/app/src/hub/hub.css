@@ -2993,14 +2993,16 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 }
 .hub-demo .hub-attach-chip--img:hover,
 .hub-demo .hub-attach-chip--img:focus-within {
-  transform: rotate(0deg) translateY(-4px) scale(1.05);
+  /* 只抽正 + 放大，不做 translateY：牌底边固定，鼠标在底缘时不会被“抬起”甩出
+     hover 区（否则 :hover 会反复得失，Playwright 也会一直 not stable）。 */
+  transform: rotate(0deg) scale(1.05);
   z-index: 200; /* 高于静止时的 calc(100 - i)：抽出来的牌压住整叠 */
   box-shadow: 0 12px 24px -14px rgba(0, 0, 0, 0.85);
 }
 /* 单图不叠牌：不旋转，抽出也只是轻微上浮（128×88 的 1.05 会糊边）。 */
 .hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img:hover,
 .hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img:focus-within {
-  transform: translateY(-4px) scale(1.03);
+  transform: scale(1.03);
 }
 .hub-demo .hub-attach-imgs:hover .hub-attach-chip--img:not(:hover) { opacity: 0.8; }
 /* 入场：从 0.86 放大到 1 + 淡入 + 从下方 6px 升上来（独立变换属性，与扇形 transform 叠加）。 */
@@ -3169,7 +3171,7 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 /* 气泡里的图已经是「发出去了」的成品：hover/聚焦给一点点放大 + 抬起，告诉你能点开。 */
 .hub-demo .hub-msg-img:hover,
 .hub-demo .hub-msg-img:focus-visible {
-  transform: translateY(-1px) scale(1.03);
+  transform: scale(1.03);
   border-color: var(--border-strong);
   box-shadow: 0 10px 22px -14px rgba(0, 0, 0, 0.85);
 }
