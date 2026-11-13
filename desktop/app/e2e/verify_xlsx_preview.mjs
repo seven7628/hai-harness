@@ -63,6 +63,30 @@ big.save("big.xlsx")
 print("GEN_OK")
 `
 
+// GEN_NAV：R08b 的导航/冻结夹具。
+//   · 20 个 sheet（导航项数与上限的边界）、每个 30 行：页面够高（锚点跳转才有意义），
+//     且每张表的内容高（约 900px）**超过 78vh 的容器**—— 否则 set scrollTop 是空操作，
+//     「冻结表头吸顶」会变成一条永远为真的假断言（第一版就是 15 行，实测撞到了）；
+//   · 第 17 张放冻结窗格 C3 + 12 列各 26 字符宽（约 2244px，远宽于 1100 的视口 ——
+//     横向能滚出足够距离，「非冻结列确实被滚走」这条反证才有余量；宽列同时覆盖
+//     「列宽按 Excel 字符宽换算」这条）。
+const GEN_NAV = `
+import openpyxl
+wb = openpyxl.Workbook()
+for i in range(1, 21):
+    ws = wb.active if i == 1 else wb.create_sheet()
+    ws.title = "表%02d" % i
+    ws.append(["列" + chr(ord("A") + c) for c in range(12)])
+    for r in range(1, 31):
+        ws.append(["第%d张行%d列%d" % (i, r, c) for c in range(1, 13)])
+    if i == 17:
+        ws.freeze_panes = "C3"
+        for col in "ABCDEFGHIJKL":
+            ws.column_dimensions[col].width = 26
+wb.save("nav20.xlsx")
+print("GEN_NAV_OK")
+`
+
 // —— 驱动真 bridge（stdio NDJSON）：发一条命令，等它的 command_response ——
 function bridgeCall(bin, type, payload, timeoutMs = 180000) {
   return new Promise((resolve, reject) => {
@@ -194,6 +218,72 @@ async function main() {
     brokenMsg = e.message
   }
   assert(brokenMsg !== '', `损坏的工作簿 → 明确报错（${JSON.stringify(brokenMsg.slice(0, 80))}）`)
+
+  // ── R08b：多 sheet 导航 + 冻结窗格（真渲染，rect 比对，不看「元素存在」）──────────────
+  //
+  // 为什么必须比对矩形：锚点跳转「成功」的标准不是 #hash 变了，而是**目标标题真的落在
+  // 吸顶导航下方**。sticky 导航 + scroll-margin 少写一条，元素依然存在、href 依然正确，
+  // 只有 rect 会告诉你标题被压在导航条底下。
+  console.log('\n[5] 20 个工作表：导航跳转第 17 张 + 冻结窗格（rect 比对）')
+  execFileSync(PY, ['-c', GEN_NAV], { cwd: ws, stdio: 'inherit' })
+  const navF = await bridgeCall(BRIDGE, 'xlsx_preview', { workspace: ws, path: 'nav20.xlsx' })
+  await page.goto('file://' + navF.html_path)
+  const navCount = await page.locator('nav.sheet-nav a').count()
+  assert(navCount === 20, `导航 20 项（实际 ${navCount}）`)
+  await page.click('nav.sheet-nav a[href="#sheet-17"]')
+  await page.waitForTimeout(300)
+  const jump = await page.evaluate(() => {
+    const nb = document.querySelector('nav.sheet-nav').getBoundingClientRect()
+    const sec = document.getElementById('sheet-17')
+    const h2 = sec.querySelector('h2').getBoundingClientRect()
+    const th = sec.querySelector('thead th').getBoundingClientRect()
+    return {
+      navBottom: nb.bottom, h2Top: h2.top, h2Bottom: h2.bottom,
+      thTop: th.top, thBottom: th.bottom, vh: innerHeight,
+      text: sec.querySelector('h2').textContent,
+    }
+  })
+  assert(jump.text.startsWith('17. '), `跳到的是第 17 张（标题：${jump.text}）`)
+  assert(jump.h2Top >= jump.navBottom - 0.5,
+    `目标标题没被 sticky 导航挡住（h2.top=${jump.h2Top.toFixed(1)} ≥ nav.bottom=${jump.navBottom.toFixed(1)}）`)
+  assert(jump.thTop >= jump.navBottom - 0.5 && jump.thBottom <= jump.vh,
+    `第 17 张的表头在视口内且不在导航之下（th.top=${jump.thTop.toFixed(1)} th.bottom=${jump.thBottom.toFixed(1)}）`)
+  const frozen = await page.evaluate(() => {
+    const sec = document.getElementById('sheet-17')
+    const wrap = sec.querySelector('.table-wrap')
+    wrap.scrollTop = 260
+    wrap.scrollLeft = 600
+    const wr = wrap.getBoundingClientRect()
+    const cols = [...sec.querySelectorAll('thead th.frozen-col')].map((el) => el.getBoundingClientRect())
+    const th = sec.querySelector('thead th').getBoundingClientRect()
+    const neighbor = sec.querySelectorAll('thead th')[2].getBoundingClientRect()
+    const bodyFrozen = sec.querySelector('tbody td.frozen-col').getBoundingClientRect()
+    return {
+      wrapTop: wr.top, wrapLeft: wr.left,
+      thTop: th.top, col0Left: cols[0].left, col0w: cols[0].width, col1Left: cols[1].left,
+      neighborLeft: neighbor.left, bodyFrozenLeft: bodyFrozen.left,
+      canX: wrap.scrollWidth > wrap.clientWidth, scrollLeft: wrap.scrollLeft,
+      scrollTop: wrap.scrollTop, canY: wrap.scrollHeight > wrap.clientHeight,
+    }
+  })
+  assert(frozen.canX && frozen.scrollLeft > 0, `宽表横向可滚（scrollLeft=${frozen.scrollLeft}）`)
+  // 纵向同理：容器必须真的能滚，否则「冻结表头吸顶」是空断言。
+  assert(frozen.canY && frozen.scrollTop > 0, `表体纵向可滚（scrollTop=${frozen.scrollTop}），否则吸顶断言恒真`)
+  assert(Math.abs(frozen.thTop - frozen.wrapTop) <= 1.5,
+    `表内滚动后冻结表头仍吸在容器顶部（th.top=${frozen.thTop.toFixed(1)} wrap.top=${frozen.wrapTop.toFixed(1)}）`)
+  assert(Math.abs(frozen.col0Left - frozen.wrapLeft) <= 1.5,
+    `冻结第 1 列贴住容器左边（left=${frozen.col0Left.toFixed(1)} wrap.left=${frozen.wrapLeft.toFixed(1)}）`)
+  assert(Math.abs(frozen.col1Left - (frozen.wrapLeft + frozen.col0w)) <= 1.5,
+    `冻结第 2 列紧跟第 1 列、不重叠（left=${frozen.col1Left.toFixed(1)} 期望 ${(frozen.wrapLeft + frozen.col0w).toFixed(1)}）`)
+  assert(Math.abs(frozen.bodyFrozenLeft - frozen.wrapLeft) <= 1.5, '表体里的冻结列同样贴边（不只是表头）')
+  // 反证：非冻结列必须真的被滚走 —— 否则上面几条只是在证明「整张表没滚动」。
+  assert(frozen.neighborLeft < frozen.wrapLeft - 50,
+    `非冻结列已滚出左边（left=${frozen.neighborLeft.toFixed(1)}），冻结列不是假象`)
+  const SHOTS = path.join(__dirname, '_xlsx_shots')
+  fs.mkdirSync(SHOTS, { recursive: true })
+  const shotPath = path.join(SHOTS, 'xlsx-sheet17-frozen.png')
+  await page.screenshot({ path: shotPath })
+  console.log(`  📷 ${shotPath}`)
 
   assert(errs.length === 0, `页面无脚本错误（${errs.length ? errs.join(' | ') : 'clean'}）`)
   await browser.close()
