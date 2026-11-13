@@ -184,7 +184,7 @@ func (m *manager) settleHubTaskBatch(bs *bridgeSession, ae *events.AgentEnd, ids
 		}
 		// 结果卡（智能体任务）：持久层，store-only，留在结算窗口内。
 		// 回推一律交给异步通知簿 —— 见函数头注释与 hub_notify.go。
-		m.ensureAgentTaskResultCard(settled)
+		m.ensureTaskResultCard(settled)
 		// 同一 run 已回推过就不要再排一次：DM 分支的 push 会重发 delivered 快照
 		// （旧代码的 alreadyNotified 闸门，异步化后必须留在排队这一侧）。
 		if !alreadyNotified(settled, ae.RunId) {
@@ -202,7 +202,7 @@ func (m *manager) settleHubTaskBatch(bs *bridgeSession, ae *events.AgentEnd, ids
 		if t, lerr := st.LoadTask(ctx, extra); lerr == nil && t != nil {
 			m.emitHubTaskUpdate(t)
 			// 额外任务也要通知：以前只发告警，派发者永远等不到结果（P3b-08 P2）。
-			m.ensureAgentTaskResultCard(t)
+			m.ensureTaskResultCard(t)
 			if !alreadyNotified(t, ae.RunId) {
 				pending = append(pending, t.ID)
 			}
@@ -321,7 +321,11 @@ func alreadyNotified(t *agenthub.Task, runID string) bool {
 	return false
 }
 
-// pushHubTaskResult 把终态回推给发起智能体的 DM 会话（P2-05）。
+// pushHubTaskResult 把 workspace 任务的终态回推给发起智能体的**会话**（P2-05 / 会话 3）。
+//
+// 发起方是 DM → 唤醒它的 DM 会话；发起方是群成员（群内智能体用 session_send 把任务
+// 派给 Project 会话）→ 唤醒它在**该群**里的会话，模型下一轮就能读到项目主会话的
+// 摘要/状态/用量并做总结。两种来源共用同一套幂等与事件语义。
 //
 // 复用 Session.PushTaskResultUsage：入队 task_result 消息（模型续跑）+ TaskResultDelivered
 // 事件（UI 任务卡终态收敛）。回推成功才 MarkNotified（幂等：同一 run 只推一次）；
@@ -331,12 +335,14 @@ func alreadyNotified(t *agenthub.Task, runID string) bool {
 // 在结算锁/emit 的 dispatchMu 内调用会 A↔B 互等死锁（P3b-08 B1）。
 // 用量取账本里的结果快照（结算时已由 AgentEnd 落账），不再依赖 AgentEnd 指针。
 func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task, runID string) {
-	if task == nil || task.Origin.Kind != agenthub.OriginDM || task.Origin.AgentID == "" {
-		return // 群/人工来源的回推归 P3
+	if task == nil || task.Origin.AgentID == "" {
+		return // 人工/未知来源：没有可唤醒的智能体会话
 	}
-	origin, err := m.hubDMSession(string(task.Origin.AgentID))
+	origin, err := m.hubTaskOriginSession(task)
 	if err != nil || origin == nil {
-		m.emitHubTaskAlert(task.ID, "push_failed", fmt.Sprintf("无法打开发起会话: %v", err))
+		if err != nil {
+			m.emitHubTaskAlert(task.ID, "push_failed", fmt.Sprintf("无法打开发起会话: %v", err))
+		}
 		return
 	}
 	// 接收端幂等：若 id 已进入发起者 history（上次 push 成功但 MarkNotified
@@ -401,6 +407,31 @@ func (m *manager) pushHubTaskResult(ledger *agenthub.Ledger, task *agenthub.Task
 	if latest, lerr := ledger.Replay(context.Background(), task.ID); lerr == nil {
 		m.emitHubTaskUpdate(latest)
 	}
+}
+
+// hubTaskOriginSession 打开发起方的会话（回推目标）。
+//
+// 群来源只回推**发起者所在的那个群**的会话：session_send 的 Origin 由
+// buildHubEngine 按会话 scope 固定，模型改不了群 id。返回 nil, nil 表示这个来源
+// 没有可唤醒的会话（人工/未知来源），调用方静默跳过。
+func (m *manager) hubTaskOriginSession(task *agenthub.Task) (*bridgeSession, error) {
+	if m == nil || task == nil {
+		return nil, nil
+	}
+	switch task.Origin.Kind {
+	case agenthub.OriginDM:
+		return m.hubDMSession(string(task.Origin.AgentID))
+	case agenthub.OriginGroup:
+		gid := task.Origin.GroupID
+		if gid == "" {
+			gid = task.Target.GroupID
+		}
+		if gid == "" {
+			return nil, fmt.Errorf("群来源任务缺少 group_id，无法回推发起者")
+		}
+		return m.hubGroupSession(string(task.Origin.AgentID), string(gid))
+	}
+	return nil, nil
 }
 
 // taskResultInHistory 发起者 history 是否已有该任务的 task_result。

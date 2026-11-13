@@ -134,13 +134,27 @@ func (m *manager) deliverTaskResult(ctx context.Context, id agenthub.TaskID) {
 	m.pushHubTaskResult(ledger, task, runID)
 }
 
-// ensureAgentTaskResultCard 写群内结果卡（幂等）。
+// ensureTaskResultCard 写群内结果卡（幂等）。覆盖两种「群内可见」的任务：
+//   - target=agent：执行者是群成员，卡片按执行者署名；
+//   - group 来源的 workspace 任务：发起者是群成员，卡片按发起者署名（会话 3）。
+//
+// DM/人工来源的 workspace 任务不写卡：它们的对话不在群里，人派任务也没有可署名的
+// 群成员（保持 P2 的语义）。
 // store-only：可以在 hubFinishMu / emit 的 dispatchMu 内调用，不碰其它会话。
-func (m *manager) ensureAgentTaskResultCard(task *agenthub.Task) {
-	if m == nil || task == nil || task.Target.Kind != agenthub.TargetAgent {
+func (m *manager) ensureTaskResultCard(task *agenthub.Task) {
+	if m == nil || task == nil {
 		return
 	}
-	if _, err := m.appendAgentTaskResultCard(task); err != nil {
+	var err error
+	switch {
+	case task.Target.Kind == agenthub.TargetAgent:
+		_, err = m.appendAgentTaskResultCard(task)
+	case task.Target.Kind == agenthub.TargetWorkspace && task.Origin.Kind == agenthub.OriginGroup:
+		_, err = m.appendWorkspaceTaskResultCard(task)
+	default:
+		return
+	}
+	if err != nil {
 		m.emitHubTaskAlert(task.ID, "task_result_card_failed", err.Error())
 	}
 }

@@ -180,13 +180,13 @@ func (m *manager) recoverOneTaskLocked(ctx context.Context, ledger *agenthub.Led
 		m.emitHubTaskAlert(t.ID, "recovered_interrupted", reason)
 		m.openRecoveryNeed(updated)
 		// 终态已确定：补一张 interrupted 结果卡（此前从此不写卡 → 群里停在旧状态）。
-		m.ensureAgentTaskResultCard(updated)
+		m.ensureTaskResultCard(updated)
 		if alreadyNotified(updated, recoveryRunID(updated)) {
 			return ""
 		}
 		return updated.ID
 	case agenthub.TaskCompleted, agenthub.TaskFailed, agenthub.TaskInterrupted, agenthub.TaskBlockedBudget:
-		m.ensureAgentTaskResultCard(t)
+		m.ensureTaskResultCard(t)
 		if alreadyNotified(t, recoveryRunID(t)) {
 			return ""
 		}
@@ -194,7 +194,7 @@ func (m *manager) recoverOneTaskLocked(ctx context.Context, ledger *agenthub.Led
 	default:
 		// canceled/declined 等终态：卡可以补（幂等），但没有 delivered 出边，
 		// 不重推（否则每次重启都唤醒一次派发者）。
-		m.ensureAgentTaskResultCard(t)
+		m.ensureTaskResultCard(t)
 	}
 	return ""
 }

@@ -37,7 +37,7 @@ func (m *manager) notifyAgentTaskResult(task *agenthub.Task) {
 	if m == nil || task == nil || task.Target.Kind != agenthub.TargetAgent {
 		return
 	}
-	m.ensureAgentTaskResultCard(task)
+	m.ensureTaskResultCard(task)
 	m.scheduleTaskResultNotification(task.ID)
 }
 
@@ -52,7 +52,7 @@ func (m *manager) notifyCanceledAgentTask(task *agenthub.Task) {
 	m.notifyAgentTaskResult(task)
 }
 
-// appendAgentTaskResultCard 写一张群 task_result 卡（幂等）。
+// appendAgentTaskResultCard 写一张群 task_result 卡（target=agent，幂等）。
 //
 // 幂等靠确定性 client_msg_id：重复 AgentEnd / 取消与迟到结算并发时，先扫
 // FindGroupMessageByClientID，命中就不再追加。「查重 → 追加」必须在
@@ -68,6 +68,33 @@ func (m *manager) appendAgentTaskResultCard(task *agenthub.Task) (*agenthub.Mess
 	if gid == "" {
 		return nil, fmt.Errorf("%w: 智能体任务没有群作用域，无法写结果卡", agenthub.ErrInvalid)
 	}
+	return m.appendTaskResultCard(task, gid,
+		agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: task.Target.AgentID},
+		agentTaskCardText(task))
+}
+
+// appendWorkspaceTaskResultCard 写一张群 task_result 卡（group 来源的 Project 任务）。
+//
+// 署名用**发起**智能体而不是「执行者」（那里没有智能体，只有一个工作区会话）：
+// 它在群里，UI 能画头像，读者也知道该找谁追这一条。归属（哪个 workspace / 哪个
+// session）写在 refs 与正文抬头里 —— 群历史里没有别的地方能看到它。
+func (m *manager) appendWorkspaceTaskResultCard(task *agenthub.Task) (*agenthub.Message, error) {
+	if m == nil || task == nil || task.Target.Kind != agenthub.TargetWorkspace ||
+		task.Origin.Kind != agenthub.OriginGroup {
+		return nil, nil
+	}
+	if task.Origin.GroupID == "" {
+		return nil, fmt.Errorf("%w: 群来源的 Project 任务没有 group_id，无法写结果卡", agenthub.ErrInvalid)
+	}
+	return m.appendTaskResultCard(task, task.Origin.GroupID,
+		agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: task.Origin.AgentID},
+		workspaceTaskCardText(task))
+}
+
+// appendTaskResultCard 是两种结果卡唯一的落盘路径：幂等查重 + 追加 + 事件投影。
+// sender 与正文由调用方决定（agent 任务署名执行者，Project 任务署名发起者）。
+func (m *manager) appendTaskResultCard(task *agenthub.Task, gid agenthub.GroupID,
+	sender agenthub.Sender, text string) (*agenthub.Message, error) {
 	st, err := m.hubStore()
 	if err != nil {
 		return nil, err
@@ -76,27 +103,12 @@ func (m *manager) appendAgentTaskResultCard(task *agenthub.Task) (*agenthub.Mess
 	clientID := agentTaskResultClientID(task.ID)
 	msg := &agenthub.Message{
 		GroupID: gid, TaskID: task.ID, Kind: agenthub.KindTaskResult,
-		Sender: agenthub.Sender{Kind: agenthub.SenderAgent, AgentID: task.Target.AgentID},
-		Text:   truncateRunes(agentTaskCardText(task), 4000),
+		Sender: sender,
+		Text:   truncateRunes(text, 4000),
 		// Mentions 恒为空：结果卡不参与 @ 路由，也不唤醒任何人。
 		Visibility: agenthub.VisibilityGroup,
-		Refs: map[string]any{
-			"client_msg_id": clientID,
-			"task_id":       string(task.ID),
-			"status":        string(task.Status),
-			"agent_id":      string(task.Target.AgentID),
-			"title":         task.Title,
-			"duration_ms":   taskResultDurationMS(task),
-			"usage":         taskResultUsageSnapshot(task),
-			"artifacts":     taskResultArtifacts(task),
-			"error":         taskResultError(task),
-			// 派发者快照：sender 是执行者，UI 不能从 sender 推发起人（B5）。
-			// 账本还没加载时（重启/历史）前端靠这三项画「你/Researcher → Writer」。
-			"origin_kind":       task.Origin.Kind,
-			"origin_agent_id":   string(task.Origin.AgentID),
-			"origin_agent_name": task.Origin.AgentName,
-		},
-		CreatedAt: time.Now().UTC(),
+		Refs:       m.taskResultCardRefs(task, clientID),
+		CreatedAt:  time.Now().UTC(),
 	}
 	m.hubGroupSendMu.Lock()
 	existing, ferr := st.FindGroupMessageByClientID(ctx, gid, clientID)
@@ -116,6 +128,69 @@ func (m *manager) appendAgentTaskResultCard(task *agenthub.Task) (*agenthub.Mess
 	}
 	m.emitHubGroupMessage(gid, seq, msg)
 	return msg, nil
+}
+
+// taskResultCardRefs 是结果卡的归属快照。sender 只说明「谁署名」，归属一律看 refs：
+//   - agent 任务：sender = 执行者，origin_* = 派发者（B5）；
+//   - group 来源的 Project 任务：sender = 发起者，target_* = 项目工作区/会话。
+//
+// 账本还没加载时（重启/历史）前端只能靠这些字段画「谁 → 哪里 → 结果」。
+func (m *manager) taskResultCardRefs(task *agenthub.Task, clientID string) map[string]any {
+	refs := map[string]any{
+		"client_msg_id":     clientID,
+		"task_id":           string(task.ID),
+		"status":            string(task.Status),
+		"title":             task.Title,
+		"target_kind":       task.Target.Kind,
+		"duration_ms":       taskResultDurationMS(task),
+		"usage":             taskResultUsageSnapshot(task),
+		"artifacts":         taskResultArtifacts(task),
+		"error":             taskResultError(task),
+		"origin_kind":       task.Origin.Kind,
+		"origin_agent_id":   string(task.Origin.AgentID),
+		"origin_agent_name": m.hubOriginAgentName(task),
+	}
+	switch task.Target.Kind {
+	case agenthub.TargetAgent:
+		refs["agent_id"] = string(task.Target.AgentID)
+	case agenthub.TargetWorkspace:
+		refs["target_workspace"] = task.Target.Workspace
+		refs["target_session_id"] = task.Target.SessionID
+	}
+	return refs
+}
+
+// hubOriginAgentName 账本里的发起者名字可能是空的（session_send 建账只带 agent_id），
+// 回落到 profile.Name；读不到就留空 —— 查名字失败不能让卡片写不出来。
+func (m *manager) hubOriginAgentName(task *agenthub.Task) string {
+	if name := strings.TrimSpace(task.Origin.AgentName); name != "" {
+		return name
+	}
+	if task.Origin.AgentID == "" {
+		return ""
+	}
+	if p, _, err := m.hubLoadAgent(string(task.Origin.AgentID)); err == nil && p != nil {
+		return p.Name
+	}
+	return ""
+}
+
+// workspaceTaskCardText 是 Project 任务卡正文：先标明是哪个会话跑的，再是摘要。
+// 口径与 agentTaskCardText 一致（终态兜底同源），只多一行归属 —— 群里没有任务详情
+// 面板，读者必须在气泡里就能看出这段摘要来自哪个 workspace/session。
+func workspaceTaskCardText(task *agenthub.Task) string {
+	text := agentTaskCardText(task)
+	where := make([]string, 0, 2)
+	if ws := strings.TrimSpace(task.Target.Workspace); ws != "" {
+		where = append(where, ws)
+	}
+	if sid := strings.TrimSpace(task.Target.SessionID); sid != "" {
+		where = append(where, sid)
+	}
+	if len(where) == 0 {
+		return text
+	}
+	return "〔Project " + strings.Join(where, " / ") + "〕\n" + text
 }
 
 // pushAgentTaskResult 只回推派发者（origin=group + agent_id），DM/人工来源不回推。
