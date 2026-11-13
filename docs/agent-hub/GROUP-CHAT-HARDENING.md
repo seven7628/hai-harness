@@ -127,13 +127,13 @@
 | worktree | 子智能体任务 | 说明 |
 |---|---|---|
 | `group-core` | P6-01 → P6-02 → P6-03 → P6-04 → P6-05 | 全部 conversation/scheduler/domain，串行做，避免 `conversation.go` 冲突 |
-| `group-surface` | P6-06 → P6-11 → P6-12 → P6-13 → P6-14 | Mode/来源/observer/死旋钮/UI，避免碰 conversation 核心 |
+| `group-surface` | P6-06 → P6-11 → P6-12 | Mode/来源/observer；避免碰 conversation 核心 |
 
 ### Wave 2（Wave 1 合并后）
 
 | worktree | 子智能体任务 | 说明 |
 |---|---|---|
-| `group-lifecycle` | P6-07 → P6-08 → P6-09 → P6-10 | 依赖 Wave 1 的 ledger/scheduler/generation；串行做 |
+| `group-lifecycle` | P6-07 → P6-08 → P6-09 → P6-10 → P6-13 → P6-14 | 依赖 Wave 1 的 ledger/scheduler/generation；串行做 |
 
 ### Wave 3
 
@@ -182,8 +182,8 @@
 | P6-10 | todo | group-lifecycle | — | — |
 | P6-11 | in_progress | group-surface | — | — |
 | P6-12 | in_progress | group-surface | — | — |
-| P6-13 | todo | group-surface | — | — |
-| P6-14 | todo | group-surface | — | — |
+| P6-13 | todo | group-lifecycle | — | — |
+| P6-14 | todo | group-lifecycle | — | — |
 | P6-15 | todo | main | — | — |
 
 ## 7. 残余风险 / 待观察
