@@ -89,7 +89,7 @@ async function waitVisibleSideRow(page, timeoutMs = 10000) {
 
 async function openConversation(page, kind) {
   if (!(await waitVisibleSideRow(page, 300))) {
-    const entry = page.locator('button[aria-label="智能体"]').first()
+    const entry = page.locator('button[aria-label="智能体"], button[aria-label="Agents"]').first()
     if (!(await entry.count())) {
       throw new Error('找不到 Hub 入口（button[aria-label="智能体"]）；Hub 没打开？')
     }
