@@ -42,6 +42,12 @@ func (m *manager) hubConversation() *agenthub.ConversationController {
 		if m.hubConvLimits != nil {
 			opts.Limits = *m.hubConvLimits
 		}
+		// P6-09：对话状态落盘（conversations/<gid>.json）。落盘失败只告警：
+		// 磁盘问题不能让群聊停下。
+		opts.Persister = hubConversationPersister{m: m}
+		opts.OnPersistError = func(gid agenthub.GroupID, err error) {
+			m.hubAlertf("hub_conversation_persist_failed", "群 %s 对话状态写入失败：%v", gid, err)
+		}
 		m.hubConv = agenthub.NewConversationController(opts)
 	}
 	return m.hubConv
@@ -82,7 +88,12 @@ func (m *manager) beginHubConversationWithinGate(g *agenthub.Group, humanSeq int
 
 // offerGroupWakes 把一条智能体消息上的 @ 目标交给对话控制器（串行队列）。
 // 命中护栏时控制器已把状态推到 exhausted，这里顺手写系统消息/事件（去重）。
-func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message, sender agenthub.AgentID, depth int) ([]agenthub.Wake, error) {
+//
+// conversationID 是**发起这条 @ 的那一轮 run** 所属的对话 id（人类首轮/无 wake 的
+// run 为空 = 不校验）。调用方必须显式传进来，不能现读会话镜像：final 收尾时
+// finishHubReply 已经清掉 hubGroupWake，现读只会拿到空串，旧 generation 的 @ 就会
+// 被当成新对话的 @ 路由出去（P6-07 §1.5）。
+func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message, sender agenthub.AgentID, depth int, conversationID string) ([]agenthub.Wake, error) {
 	if m == nil || g == nil || trigger == nil || len(round.Targets) == 0 {
 		return nil, nil
 	}
@@ -92,7 +103,7 @@ func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigg
 		Text: trigger.Text, Depth: depth, TriggerSeq: trigger.Seq, RoundID: round.ID,
 		// 发起者那一轮所属的对话 id：人类插话换代之后，旧 run 的 @ 不得进入新对话
 		//（§1.1/§1.5）。空 = 未知（人类首轮/测试），不校验。
-		ConversationID: m.hubRunConversationID(string(sender), g.ID),
+		ConversationID: strings.TrimSpace(conversationID),
 	})
 	if err != nil {
 		if errors.Is(err, agenthub.ErrConversationExhausted) {
@@ -488,15 +499,27 @@ func (m *manager) dispatchConversationWake(gid agenthub.GroupID, wake agenthub.W
 	return err
 }
 
-// finishHubGroupDelivery 群 run 收尾时把该目标**正在跑**的投递记录推进到 done。
-// 每目标同时最多一条 running（群会话忙闩保证），所以不需要 wake id。
-// 也负责把「还没投出去」的排队记录留给下一次泵（它们仍是 queued，不在这里动）。
-func (m *manager) finishHubGroupDelivery(gid agenthub.GroupID, agentID agenthub.AgentID) {
+// finishHubGroupDelivery 群 run 收尾时把**这一轮**的投递记录推进到 done。
+//
+// 必须按 wake id 收口，不能「把这个目标所有 running 都标 done」：忙闩在
+// finishHubReply 的 defer 里就放开了，而收尾在 emit 末尾 —— 中间这一小段里泵可能
+// 已经把下一条 wake 投给同一目标（BeginDelivery 记成 running）。按目标收口会把
+// 新那一轮误标 done，它的 CommitDelivery 之后就只能 no-op（轮次不涨、pair 不记）。
+// wakeID 为空（任务结果回推等无 wake 的 run）才退回按目标收口。
+func (m *manager) finishHubGroupDelivery(gid agenthub.GroupID, agentID agenthub.AgentID, wakeID string) {
 	if m == nil || gid == "" || agentID == "" {
 		return
 	}
+	// P6-08：这一轮已经收尾，超时定时器必须撤掉（迟到的定时器会误杀下一轮）。
+	m.clearHubRunTimeout(gid, agentID)
 	ctrl := m.hubConversation()
-	if n := ctrl.FinishAgentDeliveries(gid, agentID, agenthub.DeliveryDone, "", time.Time{}); n > 0 {
+	finished := false
+	if wakeID != "" {
+		finished = ctrl.FinishDelivery(gid, wakeID, agenthub.DeliveryDone, "", time.Time{})
+	} else {
+		finished = ctrl.FinishAgentDeliveries(gid, agentID, agenthub.DeliveryDone, "", time.Time{}) > 0
+	}
+	if finished {
 		// 终态视图由 notifyHubConversation 统一去重上报（否则「run 收尾 + 耗尽」
 		// 会各发一个 exhausted 事件）。
 		if v := ctrl.View(gid); !v.Terminal() {
@@ -894,6 +917,11 @@ func (m *manager) hubConversationStop(c command) {
 		m.resp(c, false, "群组不存在", nil)
 		return
 	}
+	// P6-08：带 agent_id = 只停这个成员（其他成员继续）。不带 = 群级停止。
+	if agentID := agenthub.AgentID(strings.TrimSpace(str(c.Payload, "agent_id"))); agentID != "" {
+		m.hubConversationStopAgent(c, g, agentID)
+		return
+	}
 	ctrl := m.hubConversation()
 	// Stop P1：**先**标记 stopped / 清队列（不持闸门），再去抢闸门做中断。
 	// 这样停止窗口里收尾的 fast run 在 finishHubRound 里读到的一定是 stopped，
@@ -906,6 +934,8 @@ func (m *manager) hubConversationStop(c command) {
 	unlock := m.hubConvDispatch.lock(g.ID)
 	interrupted := 0
 	for _, bs := range m.groupActiveSessions(g) {
+		// P6-08：被停掉的 run 不用再等超时定时器（迟到的那次会复核账本 no-op）。
+		m.clearHubRunTimeout(g.ID, agenthub.AgentID(bs.hubDeltaAgentID))
 		if bs.hubInterrupt != nil {
 			bs.hubInterrupt()
 		} else {
@@ -922,4 +952,49 @@ func (m *manager) hubConversationStop(c command) {
 	// 状态还是 running），要么已经被抑制 —— 不会出现「停止」之后又冒一条 final。
 	m.notifyHubConversation(g.ID, view)
 	m.resp(c, true, "", map[string]any{"conversation": view, "interrupted": interrupted})
+}
+
+// hubConversationStopAgent 只停一个成员的群运行（P6-08）：
+//   - 中断它在本群的 run（其他成员的 run 一条都不碰）；
+//   - 丢掉它排队的「下一个输入」（skipped(stopped)），不再冒出来跑；
+//   - 账本把它的 running 收口成 failed(interrupted)；
+//   - 对话状态保持 running（其他成员还要继续接龙），只写一条点名说明。
+//
+// 幂等：没有可停的东西（没 run、没排队）时只回当前视图，不写说明、不告警。
+func (m *manager) hubConversationStopAgent(c command, g *agenthub.Group, agentID agenthub.AgentID) {
+	if m == nil || g == nil || agentID == "" {
+		return
+	}
+	if !groupHasMember(g, agentID) {
+		m.resp(c, false, "该智能体不是这个群的成员", nil)
+		return
+	}
+	ctrl := m.hubConversation()
+	// 与投递/停止同一个闸门：先摘队列，再中断，避免「刚摘掉的 wake 又被这一 pass 投出去」。
+	unlock := m.hubConvDispatch.lock(g.ID)
+	skipped := ctrl.SkipAgentQueuedDeliveries(g.ID, agentID, agenthub.DeliveryReasonStopped, time.Time{})
+	interrupted := 0
+	if m.interruptGroupAgent(g.ID, agentID) {
+		interrupted = 1
+	}
+	if interrupted > 0 {
+		ctrl.FinishAgentDeliveries(g.ID, agentID, agenthub.DeliveryFailed, agenthub.DeliveryReasonInterrupted, time.Time{})
+	}
+	unlock()
+	m.clearHubRunTimeout(g.ID, agentID)
+	if interrupted > 0 || skipped > 0 {
+		st, err := m.hubStore()
+		name := string(agentID)
+		if err == nil {
+			name = agentDisplayName(context.Background(), st, agentID)
+		}
+		text := fmt.Sprintf("已停止「%s」在本群的运行（中断 %d 个 run，跳过 %d 条排队唤醒），其他成员继续",
+			name, interrupted, skipped)
+		m.appendHubSystemMessage(g.ID, text)
+	}
+	view := ctrl.View(g.ID)
+	m.emitHubConversation(g.ID, view)
+	m.resp(c, true, "", map[string]any{
+		"conversation": view, "interrupted": interrupted, "skipped": skipped, "agent_id": string(agentID),
+	})
 }

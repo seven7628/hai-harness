@@ -9,6 +9,7 @@ import { agentSigilLabel, stackAriaLabel } from './avatarLabels'
 import { usePendingAgents } from './useAgentState'
 import { effortLabel } from './agentModelOptions'
 import { useHubStore } from './useHubStore'
+import { stoppableAgentIds } from './conversation'
 import NeedsYouPanel from './NeedsYouPanel'
 import ContextPanel from './ContextPanel'
 import type { HubTask } from './types'
@@ -137,6 +138,8 @@ function OverviewPanel() {
   const pendingIds = usePendingAgents()
   const stateOf = stateResolver({ running, pending: pendingIds })
   const openEditor = useHubStore((s) => s.openEditor)
+  const stopGroupConversation = useHubStore((s) => s.stopGroupConversation)
+  const convStopping = useHubStore((s) => s.groupConvStopping)
   const openGroupEditor = useHubStore((s) => s.openGroupEditor)
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const setPanel = useHubStore((s) => s.setInspector)
@@ -159,6 +162,7 @@ function OverviewPanel() {
         state: stateOf(m.agent_id, member?.deleted),
       }
     })
+    const stoppable = stoppableAgentIds(conv)
     const recentTasks = tasks.filter((task) =>
       !isTerminal(task.status) &&
       (task.origin?.group_id === group.id || task.target?.group_id === group.id),
@@ -193,17 +197,32 @@ function OverviewPanel() {
           <span className="hub-ov-label">成员</span>
           {members.map((m) => {
             const member = agents.find((a) => a.id === m.agent_id)
+            const state = stateOf(m.agent_id, member?.deleted)
+            // P6-08：只停这一个成员（其他成员继续）。成员在跑、或账本里还有它的
+            // 进行中/排队投递时才给入口 —— 没有可停的东西不显示空按钮。
+            const canStop = state === 'working' || stoppable.includes(m.agent_id)
             return (
               <div className="hub-ov-member" key={m.agent_id}>
                 <AgentSigil
                   agentId={m.agent_id}
                   name={member?.name ?? m.agent_id}
                   responsibility={member?.role}
-                  state={stateOf(m.agent_id, member?.deleted)}
+                  state={state}
                   size={24}
                 />
                 <span className="hub-ov-member-name">{member?.name ?? m.agent_id}</span>
                 <span className="hub-sub">{m.role || member?.role || ''}</span>
+                {canStop ? (
+                  <button
+                    type="button"
+                    className="hub-link hub-ov-member-stop"
+                    disabled={convStopping}
+                    onClick={() => void stopGroupConversation(group.id, m.agent_id)}
+                    title="只停这个成员在本群的运行（其他成员继续）"
+                  >
+                    停止
+                  </button>
+                ) : null}
               </div>
             )
           })}

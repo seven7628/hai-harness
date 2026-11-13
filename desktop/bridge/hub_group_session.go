@@ -457,6 +457,8 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	w = ctrl.CommitDelivery(w, time.Time{})
 	ok = true
 	bs.lastActive.Store(time.Now().UnixMilli())
+	// P6-08：挂 run 超时。定时器按 wake id 复核，收尾/停止后自然 no-op。
+	m.armHubRunTimeout(g.ID, target, w.ID)
 	bs.wakeRun()
 	// 投递成功：记录停在 running，run 收尾时由 finishHubGroupDelivery 推进到 done。
 	d, _ := ctrl.Delivery(g.ID, w.ID)
@@ -534,6 +536,12 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, ae *ev
 	}
 	wake := bs.hubGroupWake
 	bs.setHubGroupWake(nil)
+	// P6-09：记下这一轮的 wake id，hubOnRunEnd 按它收口账本（忙闩已经放开，
+	// 泵可能已经投了下一轮 —— 按目标收口会误标下一条）。
+	bs.hubGroupRunWakeID = ""
+	if wake != nil {
+		bs.hubGroupRunWakeID = wake.WakeID
+	}
 	// 一次性标记：无论这一轮怎么收尾都要取走，不能留给下一个 run。
 	taskResult := bs.takeHubTaskResultTask()
 	runSeq := bs.hubGroupRunSeq.Load()
@@ -694,6 +702,22 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 	// 新对话是 running（不是 stopped），旧 run 允许正常收尾。
 	unlock := m.hubConvDispatch.lock(wake.GroupID)
 	defer unlock()
+	// P6-08：这一轮的投递记录已经不是 running（按 agent 停止/run 超时/关停把它收口成
+	// failed）→ 不写半截正文，只推进游标。判据比「群级 stopped」更细：只影响被打断的
+	// 那一个成员，其他成员照常落账。
+	if wake.WakeID != "" {
+		if d, ok := m.hubConversation().Delivery(wake.GroupID, wake.WakeID); ok && d.Status != agenthub.DeliveryRunning {
+			st, serr := m.hubStore()
+			if serr != nil {
+				m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", serr)
+				return
+			}
+			if err := m.advanceGroupAgentCursor(context.Background(), st, wake.GroupID, spec.Agent.ID, wake.TriggerSeq); err != nil {
+				m.hubAlertf("group_cursor_failed", "群游标推进失败：%v", err)
+			}
+			return
+		}
+	}
 	if m.hubConversationView(wake.GroupID).Status == agenthub.ConversationStopped {
 		st, serr := m.hubStore()
 		if serr != nil {
@@ -796,7 +820,7 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		// 智能体之间的 @ 走对话控制器：入队（串行 + 冷却 + 护栏）。投递由本轮 run
 		// 真正收尾后的 hubOnRunEnd（running 与群轮闩都已放开）触发。
 		depth := wake.Depth + 1
-		if _, oerr := m.offerGroupWakes(g, *lastRouted, lastMsg, spec.Agent.ID, depth); oerr != nil &&
+		if _, oerr := m.offerGroupWakes(g, *lastRouted, lastMsg, spec.Agent.ID, depth, wake.ConversationID); oerr != nil &&
 			!errors.Is(oerr, agenthub.ErrConversationExhausted) {
 			m.hubAlertf("group_conversation_offer_failed", "群 %s 对话入队失败：%v", g.ID, oerr)
 		}

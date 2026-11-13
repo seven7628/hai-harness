@@ -323,6 +323,8 @@ func (m *manager) hubGroupDelete(c command) {
 	}
 	// 不重建成员 loop：已删除的群不会再被唤醒（发送/唤醒路径都拒绝 deleted 群），
 	// 旧会话留在内存里只为让在跑的回合正常收尾。
+	// P6-09：群没了，它的对话状态文件也没有意义 —— 清掉（失败只告警，不回滚删除）。
+	m.deleteHubConversationState(g.ID)
 	m.resp(c, true, "", map[string]any{"group": g})
 }
 

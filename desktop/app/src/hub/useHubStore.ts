@@ -332,7 +332,11 @@ interface HubState {
   clearGroup(): void
   sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string, attachments?: HubAttachment[], sourceDraft?: string): Promise<boolean>
   sendGroupAssign(groupID: string, req: { agent_id: string; instruction: string; title?: string }): Promise<boolean>
-  stopGroupConversation(groupID: string): Promise<boolean>
+  /**
+   * 停止自动对话（P6-08）：给 agentID 时只停该成员在本群的 run + 它的排队唤醒，
+   * 其他成员继续；不给就是群级停止（清队列 + 中断全部 run + stopped）。
+   */
+  stopGroupConversation(groupID: string, agentID?: string): Promise<boolean>
   /** P6-04 ④ 手动重置本群对话限制（hub_conversation_reset）。 */
   resetGroupConversation(groupID: string): Promise<boolean>
   loadTasks(): Promise<void>
@@ -1691,13 +1695,15 @@ export const useHubStore = create<HubState>((set, get) => ({
     return true
   },
 
-  async stopGroupConversation(groupID) {
+  async stopGroupConversation(groupID, agentID) {
     const gid = (groupID || get().activeGroupId || '').trim()
+    const aid = (agentID || '').trim()
     if (!gid || get().groupConvStopping) return false
     set({ groupConvStopping: true, error: null })
-    const r = await hubCommand<{ conversation?: HubConversation; interrupted?: number }>('hub_conversation_stop', {
-      group_id: gid,
-    })
+    const r = await hubCommand<{ conversation?: HubConversation; interrupted?: number; skipped?: number; agent_id?: string }>(
+      'hub_conversation_stop',
+      aid ? { group_id: gid, agent_id: aid } : { group_id: gid },
+    )
     set({ groupConvStopping: false })
     if (!r.ok) {
       set({ error: r.error || '停止自动对话失败' })
@@ -1706,7 +1712,19 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (r.data?.conversation) {
       set((s) => ({ groupConversations: { ...s.groupConversations, [gid]: r.data!.conversation as HubConversation } }))
     }
-    set({ notice: r.data?.interrupted ? `已停止自动对话（中断 ${r.data.interrupted} 个 run）` : '已停止自动对话' })
+    const interrupted = r.data?.interrupted ?? 0
+    if (aid) {
+      // 只停一个成员：其他成员还在跑，文案不能写成「已停止自动对话」。
+      const name = get().agents.find((a) => a.id === aid)?.name || aid
+      const skipped = r.data?.skipped ?? 0
+      const parts: string[] = []
+      if (interrupted) parts.push(`中断 ${interrupted} 个 run`)
+      if (skipped) parts.push(`跳过 ${skipped} 条排队唤醒`)
+      const detail = parts.length ? `（${parts.join('，')}）` : ''
+      set({ notice: `已停止「${name}」的群运行${detail}，其他成员继续` })
+    } else {
+      set({ notice: interrupted ? `已停止自动对话（中断 ${interrupted} 个 run）` : '已停止自动对话' })
+    }
     return true
   },
 

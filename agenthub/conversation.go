@@ -258,10 +258,62 @@ func ConversationPairKey(from, to AgentID) string {
 	return a + "↔" + b
 }
 
+// MaxConversationPrints 是每对 agent 保留的「同内容指纹」上限（P6-09 §1.6）：
+// 指纹集合只用来判「同一对是不是又在说同一段话」，留最近若干条就够；不封顶会随
+// 长命群的对话无限增长（每条 @ 一个指纹，且没有自然过期）。
+const MaxConversationPrints = 32
+
+// printSet 是一对 agent 见过的归一化正文指纹（FIFO 封顶）。
+type printSet struct {
+	seen  map[string]bool
+	order []string
+}
+
+func newPrintSet() *printSet {
+	return &printSet{seen: map[string]bool{}}
+}
+
+func (p *printSet) has(fp string) bool {
+	if p == nil || fp == "" {
+		return false
+	}
+	return p.seen[fp]
+}
+
+// add 记一个指纹；超过上限时丢最旧的一条（FIFO）。
+func (p *printSet) add(fp string) {
+	if p == nil || fp == "" {
+		return
+	}
+	if p.seen == nil {
+		p.seen = map[string]bool{}
+	}
+	if p.seen[fp] {
+		return
+	}
+	p.seen[fp] = true
+	p.order = append(p.order, fp)
+	for len(p.order) > MaxConversationPrints {
+		delete(p.seen, p.order[0])
+		p.order = p.order[1:]
+	}
+}
+
+func (p *printSet) list() []string {
+	if p == nil || len(p.order) == 0 {
+		return nil
+	}
+	return append([]string(nil), p.order...)
+}
+
 // ConversationOptions 构造参数：Limits 零值取默认，Now 为空用 time.Now。
 type ConversationOptions struct {
 	Limits ConversationLimits
 	Now    func() time.Time
+	// Persister 是对话状态的落盘点（P6-09）；nil = 不持久化（单测/评测）。
+	Persister ConversationPersister
+	// OnPersistError 落盘失败时回调（bridge 用来发 hub_alert）；nil = 静默。
+	OnPersistError func(group GroupID, err error)
 }
 
 // agentPair 是 pair 计数的键：**无序**（D2/§1.1）。用 newAgentPair 构造，直接写
@@ -286,7 +338,7 @@ type conversation struct {
 	depth     int
 	queue     []Wake
 	pairs     map[agentPair][]time.Time
-	prints    map[agentPair]map[string]bool
+	prints    map[agentPair]*printSet
 	lastWake  time.Time
 	startedAt time.Time
 	updatedAt time.Time
@@ -304,6 +356,19 @@ type ConversationController struct {
 	now    func() time.Time
 	convs  map[GroupID]*conversation
 	seq    uint64
+	// persister/onPersistError 见 ConversationOptions（P6-09）。
+	persister      ConversationPersister
+	onPersistError func(group GroupID, err error)
+	// persistMu 串行化「取快照 + 写盘」：两个 goroutine 同时改同一群时，后取的快照
+	// 必须后写，否则旧快照会覆盖新状态。
+	persistMu sync.Mutex
+	// persistBlocked 标记「状态文件坏了」的群：**不覆盖**坏文件（P6-09 §1.6），
+	// 只告警；删掉群（DeleteState）时才解封 —— 手动重置也不解封，覆盖坏文件等于
+	// 删掉排障唯一的证据。
+	persistBlocked map[GroupID]bool
+	// lastSaved 是每群最后一次落盘的快照字节：状态没变就跳过写盘（读路径上的
+	// DueWakes/View 也会走到这里，不能因为「读了一次」就 fsync 一次）。
+	lastSaved map[GroupID][]byte
 }
 
 // NewConversationController 构造控制器；opts 零值 = 全部默认。
@@ -313,9 +378,13 @@ func NewConversationController(opts ConversationOptions) *ConversationController
 		now = time.Now
 	}
 	return &ConversationController{
-		limits: opts.Limits.withDefaults(),
-		now:    now,
-		convs:  map[GroupID]*conversation{},
+		limits:         opts.Limits.withDefaults(),
+		now:            now,
+		convs:          map[GroupID]*conversation{},
+		persister:      opts.Persister,
+		onPersistError: opts.OnPersistError,
+		persistBlocked: map[GroupID]bool{},
+		lastSaved:      map[GroupID][]byte{},
 	}
 }
 
@@ -347,7 +416,7 @@ func (c *ConversationController) ensureLocked(group GroupID, now time.Time) *con
 			group:      group,
 			status:     ConversationIdle,
 			pairs:      map[agentPair][]time.Time{},
-			prints:     map[agentPair]map[string]bool{},
+			prints:     map[agentPair]*printSet{},
 			startedAt:  now,
 			updatedAt:  now,
 			deliveries: newDeliveryLedger(),
@@ -377,7 +446,7 @@ func (c *ConversationController) BeginHuman(group GroupID, humanSeq int64, at ti
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.ensureLocked(group, now)
 	conv.id = c.nextIDLocked(now)
 	conv.humanSeq = humanSeq
@@ -385,16 +454,78 @@ func (c *ConversationController) BeginHuman(group GroupID, humanSeq int64, at ti
 	conv.stop = ""
 	conv.turns = 0
 	conv.depth = 0
-	conv.queue = nil
 	conv.pairs = map[agentPair][]time.Time{}
-	conv.prints = map[agentPair]map[string]bool{}
+	conv.prints = map[agentPair]*printSet{}
 	conv.lastWake = time.Time{}
 	conv.startedAt = now
 	conv.updatedAt = now
-	// 人类开新对话：旧 generation 还在排队的 wake 全部作废（D5）。账本里只丢
+	// 人类开新对话：旧 generation 还在排队的 **auto** wake 全部作废（D5）。账本里只丢
 	// 这些 queued 记录；running/终态保留，在飞 run 收尾时还能正常落到 done。
-	conv.deliveries.dropQueued()
+	//
+	// 人类自己已经说出口、只是目标当时在跑的那几条是「下一个输入」（§1.5）：换代
+	// 不能把人的话一起丢掉，它们改挂新代继续排队，等目标这一轮结束再投。
+	keep := c.keepHumanWakesLocked(conv, now)
+	if conv.deliveries != nil {
+		conv.deliveries.dropQueuedExcept(keep)
+	}
 	return conv.view(c.limits, now)
+}
+
+// keepHumanWakesLocked 只保留队列里的人类 wake，并把它们改挂到当前 generation
+// （返回保留下来的 wake id，供账本裁剪）。人类 wake 是「下一个输入」：与 generation
+// 无关 —— 目标在跑就等它这一轮结束，换代不改变人的意图。
+//
+// auto wake 属于旧 generation：留着会在新对话里凭空接龙（§1.5）。
+func (c *ConversationController) keepHumanWakesLocked(conv *conversation, now time.Time) map[string]struct{} {
+	if conv == nil || len(conv.queue) == 0 {
+		return nil
+	}
+	kept := make(map[string]struct{}, len(conv.queue))
+	out := conv.queue[:0]
+	for _, w := range conv.queue {
+		if !w.Human {
+			continue
+		}
+		w.ConversationID = conv.id
+		if w.ID != "" {
+			kept[w.ID] = struct{}{}
+			if d := conv.deliveries.get(w.ID); d != nil {
+				d.ConversationID = conv.id
+				d.UpdatedAt = now
+			}
+		}
+		out = append(out, w)
+	}
+	conv.queue = out
+	return kept
+}
+
+// dropPendingHumanInputLocked 让「下一个输入」每 target 只留最新一条：人类连着
+// 对同一个（还在跑的）目标说话时，旧的 pending 让位给新消息 —— 正文都在群日志里，
+// 目标这一轮结束读得到，两条都投只会多跑一轮空转。不同 target 互不影响。
+func (c *ConversationController) dropPendingHumanInputLocked(conv *conversation, targets []AgentID) {
+	if conv == nil || len(conv.queue) == 0 || len(targets) == 0 {
+		return
+	}
+	want := make(map[AgentID]struct{}, len(targets))
+	for _, t := range targets {
+		want[t] = struct{}{}
+	}
+	kept := conv.queue[:0]
+	var dropped []string
+	for _, w := range conv.queue {
+		if _, ok := want[w.Target]; ok && w.Human {
+			if w.ID != "" {
+				dropped = append(dropped, w.ID)
+			}
+			continue
+		}
+		kept = append(kept, w)
+	}
+	conv.queue = kept
+	for _, id := range dropped {
+		conv.deliveries.drop(id)
+	}
 }
 
 // StartHumanRound 记一次人类触发的首轮：n 个目标**并行**唤醒，占 1 个回合预算
@@ -407,7 +538,7 @@ func (c *ConversationController) StartHumanRound(group GroupID, targets int, at 
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.ensureLocked(group, now)
 	if conv.status.Terminal() {
 		return 0
@@ -443,7 +574,7 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	targets := dedupeTargets(req.Targets, req.Sender)
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	// 没有目标 = 这条消息不产生任何唤醒：**不能**顺手建对话、换 id 或改状态
 	// （一条无 @ 的 group_say 不该让 /hub/conversation 多出一段「新对话」）。
 	if len(targets) == 0 {
@@ -527,7 +658,7 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 					req.Sender, target, limits.PairWindow, got, limits.PairLimit)})
 			continue
 		}
-		if fp != "" && conv.prints[p][fp] {
+		if fp != "" && conv.prints[p].has(fp) {
 			// 同内容指纹：保留原来的整批熔断语义（不是 P6-04 改动的范围）。
 			return nil, c.exhaustLocked(conv, now,
 				fmt.Sprintf("%s 对 %s 重复了同一段内容，判定为循环对话，等待人类继续", req.Sender, target))
@@ -535,6 +666,12 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 		plans = append(plans, plan{target: target, pair: p})
 	}
 	queueFull := !req.Human && len(conv.queue)+len(plans) > limits.MaxPendingWakes
+	if req.Human {
+		// 「下一个输入」每 target 只留最新一条：人类连着对同一个在跑的目标说话时，
+		// 旧的那条 pending 让位（正文都在群日志里，目标这一轮结束读得到；两条都投
+		// 只会多跑一轮空转）。不同 target 各自一条，互不阻塞（§1.3）。
+		c.dropPendingHumanInputLocked(conv, targets)
+	}
 	wakes := make([]Wake, 0, len(plans))
 	skipped := 0
 	for _, p := range plans {
@@ -570,9 +707,9 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 		}
 		if fp != "" {
 			if conv.prints[p.pair] == nil {
-				conv.prints[p.pair] = map[string]bool{}
+				conv.prints[p.pair] = newPrintSet()
 			}
-			conv.prints[p.pair][fp] = true
+			conv.prints[p.pair].add(fp)
 		}
 	}
 	conv.queue = append(conv.queue, wakes...)
@@ -622,7 +759,7 @@ func (c *ConversationController) DueWakes(group GroupID, at time.Time) []Wake {
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
 		return nil
@@ -755,6 +892,7 @@ func (c *ConversationController) BeginTurn(group GroupID, at time.Time) (Wake, b
 		c.exhaustLocked(conv, now,
 			fmt.Sprintf("本轮自动对话已达上限 %d 轮，等待人类继续", c.limits.TurnBudget))
 		c.mu.Unlock()
+		c.saveState(group)
 		return Wake{}, false
 	}
 	head := conv.queue[0]
@@ -777,7 +915,7 @@ func (c *ConversationController) Stop(group GroupID, reason string, at time.Time
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.ensureLocked(group, now)
 	if conv.status.Terminal() {
 		return conv.view(c.limits, now)
@@ -799,7 +937,7 @@ func (c *ConversationController) ClearQueue(group GroupID) int {
 		return 0
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil {
 		return 0
@@ -816,7 +954,15 @@ func (c *ConversationController) View(group GroupID) ConversationView {
 	}
 	now := c.clockAt(time.Time{})
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	// 空闲重置是状态变化（turns/depth/pair 归零）：只在这种时候落盘。View 在 emit
+	// 热路径上，不能每次读视图都写一次盘。
+	reset := false
+	defer func() {
+		c.mu.Unlock()
+		if reset {
+			c.saveState(group)
+		}
+	}()
 	conv := c.convs[group]
 	if conv == nil {
 		l := c.limits
@@ -827,7 +973,7 @@ func (c *ConversationController) View(group GroupID) ConversationView {
 			RunTimeoutMS: l.RunTimeout.Milliseconds(), MaxPendingWakes: l.MaxPendingWakes,
 		}
 	}
-	c.settleLocked(conv, now)
+	reset = c.settleLocked(conv, now)
 	return conv.view(c.limits, now)
 }
 
@@ -883,21 +1029,23 @@ func (c *ConversationController) pairResetAtLocked(conv *conversation, p agentPa
 
 // settleLocked 惰性结算「空闲重置」（§1.1 ③ / §1.2）：群连续 IdleReset 没有
 // run/wake → 回 idle，pair/depth/指纹/队列全部清零。不靠定时器。
-func (c *ConversationController) settleLocked(conv *conversation, now time.Time) {
+// settleLocked 空闲超时就重置，返回是否真的重置了（调用方据此决定要不要落盘）。
+func (c *ConversationController) settleLocked(conv *conversation, now time.Time) bool {
 	if conv == nil || c.limits.IdleReset < 0 {
-		return
+		return false
 	}
 	if conv.status == ConversationIdle {
-		return
+		return false
 	}
 	last := conv.updatedAt
 	if conv.lastWake.After(last) {
 		last = conv.lastWake
 	}
 	if last.IsZero() || now.Sub(last) < c.limits.IdleReset {
-		return
+		return false
 	}
 	c.resetLocked(conv, now)
+	return true
 }
 
 // resetLocked 清空一代对话的计数并回 idle（人类新输入 / 空闲超时 / 手动重置共用）。
@@ -908,7 +1056,7 @@ func (c *ConversationController) resetLocked(conv *conversation, now time.Time) 
 	conv.depth = 0
 	conv.queue = nil
 	conv.pairs = map[agentPair][]time.Time{}
-	conv.prints = map[agentPair]map[string]bool{}
+	conv.prints = map[agentPair]*printSet{}
 	conv.lastWake = time.Time{}
 	conv.updatedAt = now
 	if conv.deliveries != nil {
@@ -924,7 +1072,7 @@ func (c *ConversationController) Reset(group GroupID, at time.Time) Conversation
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil {
 		l := c.limits
