@@ -730,6 +730,8 @@ class MockTransport implements Transport {
   private hubGroupTasks = new Map<string, Record<string, unknown>>()
   private hubGroupAssigns = new Map<string, Record<string, unknown>>() // client_msg_id → 响应（幂等）
   private hubGroupTaskNo = 0
+  // hub_group_create 的自增号（grp_mock_1、grp_mock_2…）：与 fixtures 的 grp_mock1/grp_demo 区分开。
+  private hubGroupCreateNo = 0
   // 每群脚本代际：hub_conversation_stop 换代后，未到点的任务卡/流式回调全部作废（N9）。
   private hubGroupGen = new Map<string, number>()
 
@@ -3572,6 +3574,52 @@ class MockTransport implements Transport {
         this.respond(cmd, { groups: this.hubGroups, progress })
         break
       }
+      case 'hub_group_create': {
+        const name = String(cmd.payload?.name ?? '').trim()
+        const rawMembers = Array.isArray(cmd.payload?.member_ids) ? (cmd.payload.member_ids as unknown[]) : []
+        const memberIDs = [...new Set(rawMembers.map((x) => String(x ?? '').trim()).filter(Boolean))]
+        const ownerRaw = String(cmd.payload?.owner_agent_id ?? '').trim()
+        const policy = (cmd.payload?.policy ?? {}) as Record<string, unknown>
+        // 按 bridge 的几道校验来（名字 / 成员 / 成员存在 / owner 归属 / 重名），错误文案给前端直接显示。
+        if (!name) { this.respondErr(cmd, '群名称不能为空'); break }
+        if (memberIDs.length === 0) { this.respondErr(cmd, '至少需要 1 个成员'); break }
+        const known = new Set(this.hubAgents.map((a) => String(a.id ?? '')))
+        const missing = memberIDs.filter((id) => !known.has(id))
+        if (missing.length > 0) { this.respondErr(cmd, `智能体不存在：${missing.join('、')}`); break }
+        const owner = ownerRaw || memberIDs[0]
+        if (!memberIDs.includes(owner)) { this.respondErr(cmd, '群主必须是群成员'); break }
+        if (this.hubGroups.some((g) => String(g.name ?? '').trim() === name)) {
+          this.respondErr(cmd, '已存在同名群组')
+          break
+        }
+        const now = new Date().toISOString()
+        const group: Record<string, unknown> = {
+          id: `grp_mock_${++this.hubGroupCreateNo}`,
+          name,
+          owner_agent_id: owner,
+          // member_ids 简写：owner 升为 owner 角色，其余 member（与 bridge 同一条语义）。
+          members: memberIDs.map((id) => ({ agent_id: id, role: id === owner ? 'owner' : 'member' })),
+          // 未传的字段沿用 fixtures 那套默认（bridge 侧由 Group.Normalize 补）。
+          policy: {
+            mode: 'ask', max_parallel_runs: 2, max_handoff_depth: 3, max_turns_per_human: 8,
+            max_mentions_per_message: 3, daily_budget_usd: 5,
+            ...policy,
+          },
+          created_at: now, updated_at: now,
+        }
+        const gid = String(group.id)
+        this.hubGroups.push(group)
+        // 新群是空历史：必须显式落一个空列表 —— hubGroupLog 对没有记录的 gid 会灌「竞品研究」
+        // 那套种子，新群会凭空多出别人的对话。游标/已读/对话状态一并初始化，打开不报错。
+        this.hubGroupMessages.set(gid, [])
+        this.hubGroupSeq.set(gid, 0)
+        this.hubGroupRead.set(gid, 0)
+        this.hubGroupConversations.set(gid, this.mockConversation(gid, 'idle'))
+        this.respond(cmd, { group })
+        // 其它面板（左栏/详情）也立刻看到新群；不影响既有 demo 群。
+        this.emit({ event_type: 'hub_group_update', group })
+        break
+      }
       case 'hub_group_get': {
         const gid = String(cmd.payload?.group_id ?? '')
         const group = this.hubGroup(gid)
@@ -4083,7 +4131,37 @@ class MockTransport implements Transport {
   // trustHooks / 各保存按钮）在 mock 模式下永远等不到响应 —— UI 表现为点了没反应、
   // 按钮一直 busy。保持异步 = mock 与真 bridge 同形。
   private respond(cmd: BridgeCommand, data: Record<string, unknown>) {
-    queueMicrotask(() => this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data }))
+    const delay = this.mockSendDelayMs(cmd)
+    const emit = () => this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data })
+    if (delay > 0) { setTimeout(emit, delay); return }
+    queueMicrotask(emit)
+  }
+
+  /**
+   * 发送类命令的人为响应延迟（仅 mock）：`localStorage['mock.sendDelayMs']`（兼容既有的
+   * `mock.loadDelayMs`）里的毫秒值。
+   *
+   * mock 的响应只隔一个微任务，所以「按下发送后输入框什么时候清空」在本地永远看不出
+   * 区别 —— 真 bridge 慢的时候才暴露（乐观气泡已经在时间线上，输入框却要等响应）。
+   * 回归脚本用它把 hub_send / hub_group_send 的响应推迟几百毫秒，才能断言「同步就清空」。
+   * 只推迟响应：hub_message 事件仍先 emit —— 与真 bridge 的时序一致。
+   */
+  private mockSendDelayMs(cmd: BridgeCommand): number {
+    if (cmd?.type !== 'hub_send' && cmd?.type !== 'hub_group_send') return 0
+    // 注意：Node 25 也有内建的 localStorage，它是 getter/setter 且**读一下就会打印
+    // --localstorage-file 警告**（污染 Node 测试的 stderr）。所以只在它是「数据属性」时读
+    //（Node 测试用 defineProperty 注入纯对象桩）；浏览器里没有这种内建，退回 window.localStorage。
+    const desc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    const store = desc && 'value' in desc
+      ? (desc.value as { getItem?: (key: string) => string | null } | null)
+      : (typeof window === 'undefined' ? null : window.localStorage)
+    if (!store?.getItem) return 0
+    try {
+      const raw = store.getItem('mock.sendDelayMs') ?? store.getItem('mock.loadDelayMs') ?? 0
+      return Math.max(0, Number(raw) || 0)
+    } catch {
+      return 0 // 隐私模式等：读不到就保持同步语义
+    }
   }
 
   // respondCode：失败响应带**稳定错误码**（conflict / denied / not_found）。编辑器三条冲突动作
@@ -4123,7 +4201,10 @@ class MockTransport implements Transport {
 
   // respondErr：命令失败响应（真 bridge 同形：ok:false + error；store 侧透出给面板）
   private respondErr(cmd: BridgeCommand, error: string) {
-    queueMicrotask(() => this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error }))
+    const delay = this.mockSendDelayMs(cmd)
+    const emit = () => this.emit({ event_type: 'command_response', id: cmd.id, ok: false, error })
+    if (delay > 0) { setTimeout(emit, delay); return }
+    queueMicrotask(emit)
   }
 
   // emit：事件行注入 workspace + seq；session_id 由调用方显式带（按会话路由）

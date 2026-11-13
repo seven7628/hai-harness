@@ -1339,6 +1339,97 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
   padding: 10px 14px;
   border-top: 1px solid var(--border);
 }
+
+/* —— 新建群组弹层（左栏「群组」页签的 ＋ / 空态按钮）——
+   复用 .hub-modal 的骨架，只覆盖尺寸与版面：单列、高度自适应（成员列表自己滚），
+   footer 贴底。560 宽够放「勾选框 + 22px 头像 + 名字 + 职责」一行，390 宽走 92vw。 */
+.hub-group-modal {
+  width: min(560px, 92vw);
+  height: auto;
+  max-height: min(680px, 88vh);
+}
+/* 覆盖资料页的两栏 grid：这里只有一列表单，超出高度由 body 自己滚。 */
+.hub-group-modal .hub-modal-body { display: block; overflow: auto; padding: 14px; }
+.hub-group-form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.hub-group-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.hub-group-field > span:first-child { font-weight: 550; }
+/* 「（至少选 1 人）」是补充说明，不是标题：跟同一行但不加粗。 */
+.hub-group-required { font-weight: 400; color: var(--text-2); }
+/* 只作用于字段自己的输入控件：成员行里的 checkbox 也是 .hub-group-field 的后代，
+   用后代选择器会把勾选框撑成 100% 宽（390 下整行溢出 19px）。 */
+.hub-group-field > input,
+.hub-group-field > select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+}
+.hub-group-field > select { height: 31px; }
+.hub-group-hint { font-size: 11.5px; line-height: 1.45; color: var(--text-2); }
+.hub-group-members {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.hub-group-member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0; /* 390：名字/职责靠它才能省略而不是把行撑宽 */
+  padding: 5px 7px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.hub-group-member:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.hub-group-member.on { background: color-mix(in srgb, var(--accent-solid) 12%, transparent); }
+.hub-group-member input[type='checkbox'] {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--accent-solid);
+}
+.hub-group-member .avatar { flex: 0 0 auto; }
+.hub-group-member-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 职责小字用 --text-2（暗 7.14:1 / 亮 6.75:1）；--text-3 在亮色下只有 3.3:1，读不清。 */
+.hub-group-member-role {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.hub-group-empty { margin: 0; padding: 8px; font-size: 12px; color: var(--text-2); }
+/* 错误行在表单里贴边（.hub-error 的 6px 外边距会把它和 footer 挤开）。 */
+.hub-group-form .hub-error { margin: 0; }
 .hub-memory { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 12px; min-height: 0; }
 .hub-memory-list { display: flex; flex-direction: column; gap: 2px; overflow: auto; }
 .hub-memory-item {

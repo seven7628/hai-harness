@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type {
-  HubAgent, HubAlert, HubArtifactPreviewData, HubAttachment, HubConversation, HubDMInfo, HubGroup, HubHistoryPage,
+  HubAgent, HubAlert, HubArtifactPreviewData, HubAttachment, HubConversation, HubDMInfo, HubGroup, HubGroupPolicy,
+  HubHistoryPage,
   HubMessage, HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubPromptLayer, HubPromptPreviewData,
   HubRound, HubRunEntry, HubSearchCursor, HubSearchHit, HubSearchPage, HubSearchScope, HubTask,
   HubTaskArtifact, HubTaskUpdate,
@@ -282,6 +283,18 @@ interface HubState {
    */
   loadPromptPreview(agentID: string, force?: boolean, groupID?: string): Promise<void>
   loadGroups(): Promise<void>
+  /**
+   * 新建群组（hub_group_create）：成功后重拉左栏列表并打开新群。
+   *
+   * 空名 / 空成员在前端就挡掉：后端也会校验，但弹层要立刻给出原因，不必等一次往返。
+   * 失败统一写 error 并返回 null（弹层留在原地显示错误）；成功返回服务端分配的 group。
+   */
+  createGroup(req: {
+    name: string
+    member_ids: string[]
+    owner_agent_id?: string
+    policy?: HubGroupPolicy
+  }): Promise<HubGroup | null>
   selectGroup(groupID: string): Promise<void>
   loadGroupActivity(groupID?: string): Promise<void>
   clearGroup(): void
@@ -1262,6 +1275,38 @@ export const useHubStore = create<HubState>((set, get) => ({
       }
       return { groupsLoading: false, groups: r.data?.groups ?? [], groupInfo: merged }
     })
+  },
+
+  async createGroup(req) {
+    const name = (req.name ?? '').trim()
+    // 去空去重：UI 传的是勾选顺序，重复 id 会让后端「唯一 owner」校验报错。
+    const memberIDs = [...new Set((req.member_ids ?? []).map((id) => String(id ?? '').trim()).filter(Boolean))]
+    if (!name) {
+      set({ error: '群名称不能为空' })
+      return null
+    }
+    if (memberIDs.length === 0) {
+      set({ error: '至少选择 1 个成员' })
+      return null
+    }
+    // owner 缺省取第一个成员（与 bridge 的 hubGroupCreate 同一条语义）。
+    const owner = (req.owner_agent_id ?? '').trim() || memberIDs[0]
+    const r = await hubCommand<{ group?: HubGroup }>('hub_group_create', {
+      name,
+      member_ids: memberIDs,
+      owner_agent_id: owner,
+      policy: req.policy ?? { mode: 'ask' },
+    })
+    const group = r.data?.group
+    if (!r.ok || !group) {
+      set({ error: r.error || '创建群组失败' })
+      return null
+    }
+    // 两步都不能省：先刷新左栏（计数/列表立刻出现新群），再 openGroup 让 Hub 打开并选中它
+    //（openGroup 内部会按需 openHub —— 从别处新建群时也要落到群视图上）。
+    await get().loadGroups()
+    await get().openGroup(group.id)
+    return group
   },
 
   async selectGroup(groupID) {
