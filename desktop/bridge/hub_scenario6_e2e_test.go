@@ -17,6 +17,11 @@ package main
 // AgentStart 之后、正文那轮模型调用之前，所以「命令先于正文」的判据是
 // compress_end < 正文那轮 llm_end，且整批只有一个 agent_start。
 //
+// 压缩载荷与负例：同批用例先灌一段历史（短历史会合法返回 "nothing to compress"），
+// 用真 LLMCompressor + fake 摘要 provider 断言 manual compress_end 的 error 为空、
+// summary 是唯一哨兵，且该哨兵出现在正文那轮的模型请求里；随后再发一次纯 compact
+// （command-only），断言它只压缩、不再调用模型/重答历史（cf8e288 的批次判定）。
+//
 // 全部确定性：不碰网络、不读真实 settings（testManager 已隔离 HOME）；等待一律是
 // 轮询锚点（convWait / p404aWaitGroupIdle / waitResultNotifyDrained / waitEventOffsets），
 // 不用固定 sleep 猜时序。
@@ -134,16 +139,40 @@ func sc6WakeBlocks(req *provider.StreamRequest) []core.Content {
 	return out
 }
 
+// sc6EventCountFor 统计某会话某类事件条数（event_type + session_id）。
+func sc6EventCountFor(buf *syncBuf, eventType, sid string) int {
+	n := 0
+	for _, ev := range readAllLines(buf) {
+		if ev["event_type"] == eventType && ev["session_id"] == sid {
+			n++
+		}
+	}
+	return n
+}
+
+// sc6ManualCompressEnd 取某会话最后一条 manual compress_end（没有返回 nil）。
+func sc6ManualCompressEnd(buf *syncBuf, sid string) map[string]any {
+	var out map[string]any
+	for _, ev := range readAllLines(buf) {
+		if ev["event_type"] == "compress_end" && ev["session_id"] == sid && ev["reason"] == "manual" {
+			out = ev
+		}
+	}
+	return out
+}
+
 // TestHubScenario6BatchIsolationAndProjectResult 覆盖场景1/3/4：同一批 session_send
 // （compact + 正文 + files + images）的账本/附件归一、Project 真消费、回推总结，
 // 以及同一智能体 DM 与群的上下文/落盘隔离。
 func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
 	const (
-		summary   = "SC6-PROJECT-SUMMARY：三家对比表已完成"
-		aReply    = "SC6-A-BUBBLE：收到项目结果，我来总结"
-		dmOnly    = "SC6-DM-ONLY-私聊哨兵"
-		groupOnly = "SC6-GROUP-ONLY-群哨兵"
-		body      = "做一份三家对比表"
+		summary        = "SC6-PROJECT-SUMMARY：三家对比表已完成"
+		compactSummary = "SC6-COMPACT-SUMMARY：历史上下文已压缩"
+		warmup         = "SC6-WARMUP：先聊一句热身"
+		aReply         = "SC6-A-BUBBLE：收到项目结果，我来总结"
+		dmOnly         = "SC6-DM-ONLY-私聊哨兵"
+		groupOnly      = "SC6-GROUP-ONLY-群哨兵"
+		body           = "做一份三家对比表"
 	)
 	m, buf := testManager(t)
 	root := t.TempDir()
@@ -171,14 +200,30 @@ func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tp := newConvProvider(summary)
+	tp := newConvProvider("SC6-WARMUP-ANSWER：热身回答", summary)
 	target.s.SetLoop(agents.NewAgentLoop(
 		agents.WithProvider(tp),
 		agents.WithModel("sc6-target-fake"),
-		// 压缩器用自己的 fake：压缩轮不得消耗正文那轮的脚本回复。
+		// 真 LLMCompressor + fake 摘要 provider：压缩轮不得消耗正文那轮的脚本回复，
+		// 摘要正文由测试给定（唯一哨兵），才能断言它真的进了下一轮请求。
 		agents.WithCompressor(agents.NewLLMCompressor(
-			&fixedEvalProvider{reply: "## 摘要\n- 压缩完成"}, "sc6-target-fake")),
+			&fixedEvalProvider{reply: compactSummary}, "sc6-target-fake")),
 	))
+
+	// 0) 先灌一段历史：短历史会合法返回 "nothing to compress"，compress_end 就没有
+	//    summary 可断言。用一次真实 Run（Ask + wakeRun）产生 user/assistant 历史，
+	//    不建账、不写群消息；后面的 batch 才是被测对象。
+	if err := target.s.Ask(context.Background(), core.NewUserMessage(
+		core.Content{Type: core.ContentTypeText, Content: warmup})); err != nil {
+		t.Fatal(err)
+	}
+	target.wakeRun()
+	convWait(t, "热身 Run 完成", func() bool { return tp.callCount() >= 1 && !target.s.IsRunning() })
+	warmupStarts := sc6EventCountFor(buf, "agent_start", "s-proj")
+	warmupLLMEnds := sc6EventCountFor(buf, "llm_end", "s-proj")
+	if warmupStarts != 1 || warmupLLMEnds != 1 {
+		t.Fatalf("热身 Run 事件 = %d agent_start / %d llm_end, want 1/1", warmupStarts, warmupLLMEnds)
+	}
 
 	mdPath := filepath.Join(ws, "a.md")
 	if err := os.WriteFile(mdPath, []byte("# notes\n三家对比表要点"), 0o644); err != nil {
@@ -216,8 +261,9 @@ func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
 		t.Fatalf("账本里出现了图片 data URL: %s", raw)
 	}
 
-	// 2) Project 真消费同一批的正文/附件：模型请求里正文 + `@路径` + image 块都在。
-	convWait(t, "Project 会话被派发并开跑", func() bool { return tp.callCount() >= 1 })
+	// 2) Project 真消费同一批的正文/附件：模型请求里正文 + `@路径` + image 块都在，
+	//    且压缩摘要（同批 compact 的产物）确实进了这一轮上下文。
+	convWait(t, "Project 会话被派发并开跑", func() bool { return tp.callCount() >= 2 })
 	req := tp.lastRequest()
 	if !requestHasTextContaining(req, body) {
 		t.Fatal("目标请求缺派发正文（同批 compact 后必须继续回答）")
@@ -227,6 +273,9 @@ func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
 	}
 	if !requestHasImageBlock(req, wantImage) {
 		t.Fatalf("目标请求缺图片块（data URL %s…）", wantImage[:40])
+	}
+	if prompt := isolationPrompt(req); !strings.Contains(prompt, compactSummary) {
+		t.Fatalf("目标回答那轮的请求缺压缩摘要 %q（摘要没进上下文）:\n%s", compactSummary, prompt)
 	}
 
 	// 3) 结算：正文真被模型回答，账本摘要非空（不再是空摘要）。
@@ -241,6 +290,25 @@ func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
 	}
 	if !strings.Contains(task.Result.Summary, summary) {
 		t.Fatalf("任务 summary = %q, want 含项目哨兵 %q", task.Result.Summary, summary)
+	}
+	if n := tp.callCount(); n != 2 {
+		t.Fatalf("模型调用 = %d, want 2（热身 1 次 + 同批正文回答 1 次）", n)
+	}
+
+	// 3b) 压缩载荷：manual compress_end 必须成功且有摘要 —— 否则「压缩永远失败/无摘要」
+	//     也能绿。摘要哨兵还要出现在正文那轮请求里（见第 2 步）。
+	ce := sc6ManualCompressEnd(buf, "s-proj")
+	if ce == nil {
+		t.Fatal("没有 manual compress_end：同批 compact 没有真的执行")
+	}
+	if errMsg := str(ce, "error"); errMsg != "" {
+		t.Fatalf("manual compress_end error = %q, want 空（压缩必须成功）", errMsg)
+	}
+	if got := str(ce, "summary"); !strings.Contains(got, compactSummary) {
+		t.Fatalf("manual compress_end summary = %q, want 含压缩摘要哨兵 %q", got, compactSummary)
+	}
+	if before, _ := ce["before"].(float64); before <= 0 {
+		t.Fatalf("manual compress_end before = %v, want > 0（没有可压缩的历史）", ce["before"])
 	}
 
 	// 4) 事件序：同一批只有一个 Run（一个 agent_start）；压缩先于正文那轮模型调用。
@@ -275,14 +343,11 @@ func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
 		t.Fatalf("事件序 = agent_start %d / compress_start %d / compress_end %d / llm_end %d，want 严格递增（同一轮先压缩再回答正文）",
 			startAt, compressStartAt, compressEndAt, answerAt)
 	}
-	starts := 0
-	for _, ev := range readAllLines(buf) {
-		if ev["event_type"] == "agent_start" && ev["session_id"] == "s-proj" {
-			starts++
-		}
+	if starts := sc6EventCountFor(buf, "agent_start", "s-proj"); starts != warmupStarts+1 {
+		t.Fatalf("同批新增 agent_start = %d, want 1（压缩后必须在同一 Run 继续）", starts-warmupStarts)
 	}
-	if starts != 1 {
-		t.Fatalf("同批产生了 %d 个 agent_start, want 1（压缩后必须在同一 Run 继续）", starts)
+	if ends := sc6EventCountFor(buf, "llm_end", "s-proj"); ends != warmupLLMEnds+1 {
+		t.Fatalf("同批新增 llm_end = %d, want 1（正文必须被回答一次）", ends-warmupLLMEnds)
 	}
 
 	// 5) 群日志：恰好一张结果卡 + 发起者一条总结气泡，卡先于气泡。
@@ -341,7 +406,38 @@ func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
 		t.Fatalf("结果卡产生了 %d 条 @ 路由（hub_round）, want 0", n)
 	}
 
-	// 7) 隔离：同一智能体的 DM 与群各看各的（哨兵 + 文件双证据）。
+	// 7) 负例：纯 compact（command-only，不带正文）只压缩、不再调用模型/重答历史。
+	//    cf8e288 之前按 inputMark 判「同批有正文」会把历史正文误判成本批，这里必须红。
+	callsBefore := tp.callCount()
+	llmEndsBefore := sc6EventCountFor(buf, "llm_end", "s-proj")
+	compressEndsBefore := sc6EventCountFor(buf, "compress_end", "s-proj")
+	startsBefore := sc6EventCountFor(buf, "agent_start", "s-proj")
+	compact := sc6SessionSend(t, bsA, map[string]any{
+		"workspace": ws, "session_id": "s-proj", "command": "compact",
+	})
+	if compact["accepted"] != true || str(compact, "status") != agenthub.StatusCommandOnly {
+		t.Fatalf("纯 compact 批次 = %v", compact)
+	}
+	if str(compact, "task_id") != "" {
+		t.Fatalf("只有命令不该建账: %v", compact)
+	}
+	if receipt := sc6Receipt(t, compact); receipt["delivered"] != true {
+		t.Fatalf("纯 compact 命令回执 = %v, want delivered", receipt)
+	}
+	convWait(t, "纯 compact 执行完", func() bool {
+		return sc6EventCountFor(buf, "compress_end", "s-proj") == compressEndsBefore+1 && !target.s.IsRunning()
+	})
+	if n := tp.callCount(); n != callsBefore {
+		t.Fatalf("纯 compact 触发了模型调用 %d→%d（不能重答历史正文）", callsBefore, n)
+	}
+	if n := sc6EventCountFor(buf, "llm_end", "s-proj"); n != llmEndsBefore {
+		t.Fatalf("纯 compact 产生了 %d 条新 llm_end（不能重答历史正文）", n-llmEndsBefore)
+	}
+	if n := sc6EventCountFor(buf, "agent_start", "s-proj"); n != startsBefore+1 {
+		t.Fatalf("纯 compact 新增 agent_start = %d, want 1（压缩 Run 仍要跑）", n-startsBefore)
+	}
+
+	// 8) 隔离：同一智能体的 DM 与群各看各的（哨兵 + 文件双证据）。
 	dm, err := m.hubDMSession(string(a.ID))
 	if err != nil {
 		t.Fatal(err)
@@ -415,6 +511,7 @@ func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
 			t.Fatalf("落盘文件缺失/为空: %q (%v)", path, err)
 		}
 	}
+
 }
 
 // TestHubScenario6InlineCardsStayOutOfHubContext 覆盖场景2：审批/Ask/ToDo 是内联展示
