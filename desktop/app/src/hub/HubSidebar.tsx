@@ -57,8 +57,11 @@ export default function HubSidebar() {
   const searchQuery = useHubStore((s) => s.searchQuery)
 
   const [tab, setTab] = useState<'agents' | 'groups'>('agents')
-  // 新建群组弹层：与 AgentEditor 分开（那个是 store 里的全局弹层，群组弹层只由左栏打开）。
-  const [groupEditor, setGroupEditor] = useState(false)
+  // 群组弹层（新建/编辑）：与 AgentEditor 分开（那个是 store 里的全局弹层）。
+  // P6-17 起开关放 store：右栏 inspector 的「编辑群组」与左栏 ＋ 共用同一份状态。
+  const groupEditor = useHubStore((s) => s.groupEditor)
+  const openGroupEditor = useHubStore((s) => s.openGroupEditor)
+  const closeGroupEditor = useHubStore((s) => s.closeGroupEditor)
   const [searchInput, setSearchInput] = useState('')
   const [searchPanel, setSearchPanel] = useState(false)
   // 搜索命中 / 深链打开目标后，自动把左栏切到对应 scope；用户随后手动切 tab
@@ -129,7 +132,7 @@ export default function HubSidebar() {
           ) : null}
           <button
             className="hub-side-add"
-            onClick={() => (tab === 'groups' ? setGroupEditor(true) : openEditor(null))}
+            onClick={() => (tab === 'groups' ? openGroupEditor(null) : openEditor(null))}
             title={tab === 'groups' ? '新建群组' : t('hub.newAgent')}
             aria-label={tab === 'groups' ? '新建群组' : t('hub.newAgent')}
           >
@@ -253,7 +256,7 @@ export default function HubSidebar() {
               <div className="hub-side-empty">
                 <p>还没有群组</p>
                 <span>在 Hub 里把多个智能体拉进同一个群。</span>
-                <button className="hub-side-empty-add" onClick={() => setGroupEditor(true)}>
+                <button className="hub-side-empty-add" onClick={() => openGroupEditor(null)}>
                   <Plus size={12} /> 新建群组
                 </button>
               </div>
@@ -343,7 +346,12 @@ export default function HubSidebar() {
         </>
       )}
 
-      {groupEditor ? <GroupEditor onClose={() => setGroupEditor(false)} /> : null}
+      {groupEditor.open ? (
+        <GroupEditor
+          group={groupEditor.groupId ? groups.find((g) => g.id === groupEditor.groupId) ?? null : null}
+          onClose={closeGroupEditor}
+        />
+      ) : null}
     </section>
   )
 }

@@ -1413,6 +1413,16 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
   accent-color: var(--accent-solid);
 }
 .hub-group-member .avatar { flex: 0 0 auto; }
+/* 编辑模式：成员行右侧的移除按钮（P6-17）。群主那一行不渲染它 —— 先转让再移除。 */
+.hub-group-member-remove {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 14px; line-height: 1;
+}
+.hub-group-member-remove:hover { color: var(--danger, #c0392b); background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent); }
 .hub-group-member-name {
   flex: 0 1 auto;
   min-width: 0;

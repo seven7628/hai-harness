@@ -768,6 +768,8 @@ class MockTransport implements Transport {
   private hubGroupTaskNo = 0
   // hub_group_create 的自增号（grp_mock_1、grp_mock_2…）：与 fixtures 的 grp_mock1/grp_demo 区分开。
   private hubGroupCreateNo = 0
+  // hub_agent_create 的自增号：id 必须唯一（见该分支注释）。
+  private hubAgentCreateNo = 0
   // 每群脚本代际：hub_conversation_stop 换代后，未到点的任务卡/流式回调全部作废（N9）。
   private hubGroupGen = new Map<string, number>()
 
@@ -3855,7 +3857,15 @@ class MockTransport implements Transport {
         const group = this.hubGroup(gid)
         if (!group) { this.respondErr(cmd, '群组不存在'); break }
         const patch = (cmd.payload?.patch ?? {}) as Record<string, unknown>
-        if (typeof patch.name === 'string') group.name = patch.name
+        if (typeof patch.name === 'string') {
+          const name = patch.name.trim()
+          if (!name) { this.respondErr(cmd, '群名称不能为空'); break }
+          if (this.hubGroups.some((g) => String(g.id) !== gid && String(g.name ?? '').trim() === name)) {
+            this.respondErr(cmd, '已存在同名群组')
+            break
+          }
+          group.name = name
+        }
         if (patch.policy && typeof patch.policy === 'object' && !mockGroupModeOK((patch.policy as Record<string, unknown>).mode)) {
           this.respondErr(cmd, `群模式只能是 ask/auto/readonly（got=${String((patch.policy as Record<string, unknown>).mode)}）`)
           break
@@ -3863,7 +3873,60 @@ class MockTransport implements Transport {
         if (patch.policy && typeof patch.policy === 'object') {
           group.policy = { ...(group.policy as Record<string, unknown>), ...(patch.policy as Record<string, unknown>) }
         }
+        if (typeof patch.owner_agent_id === 'string' && patch.owner_agent_id.trim()) {
+          // owner 转让是成对改写（与 bridge 的 hubGroupUpdate 同语义）：旧 owner 降 member、新 owner 升 owner。
+          const want = patch.owner_agent_id.trim()
+          const members = mockGroupMembers(group)
+          if (!members.some((m) => m.agent_id === want)) {
+            this.respondErr(cmd, '新 owner 必须是群成员')
+            break
+          }
+          const prev = String(group.owner_agent_id ?? '')
+          for (const m of members) {
+            if (m.agent_id === prev) m.role = 'member'
+            if (m.agent_id === want) m.role = 'owner'
+          }
+          group.members = members
+          group.owner_agent_id = want
+        }
         if (typeof patch.pinned === 'boolean') group.pinned = patch.pinned
+        group.updated_at = new Date().toISOString()
+        this.emit({ event_type: 'hub_group_update', group })
+        this.respond(cmd, { group })
+        break
+      }
+      case 'hub_group_member_add': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        const agentID = String(cmd.payload?.agent_id ?? '').trim()
+        if (!agentID) { this.respondErr(cmd, 'agent_id 不能为空'); break }
+        const role = String(cmd.payload?.role ?? '').trim().toLowerCase() || 'member'
+        if (role === 'observer') {
+          this.respondErr(cmd, '角色 "observer" 已删除：群角色只剩 owner/member（只读请用群模式 readonly）')
+          break
+        }
+        if (!this.hubAgents.some((a) => String(a.id ?? '') === agentID)) { this.respondErr(cmd, '智能体不存在'); break }
+        const members = mockGroupMembers(group)
+        if (members.some((m) => m.agent_id === agentID)) { this.respondErr(cmd, '该智能体已在群里'); break }
+        if (members.length >= 12) { this.respondErr(cmd, '群成员上限 12 人'); break }
+        members.push({ agent_id: agentID, role, joined_at: new Date().toISOString() })
+        group.members = members
+        group.updated_at = new Date().toISOString()
+        this.emit({ event_type: 'hub_group_update', group })
+        this.respond(cmd, { group })
+        break
+      }
+      case 'hub_group_member_remove': {
+        const gid = String(cmd.payload?.group_id ?? '')
+        const group = this.hubGroup(gid)
+        if (!group) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        const agentID = String(cmd.payload?.agent_id ?? '').trim()
+        if (!agentID) { this.respondErr(cmd, 'agent_id 不能为空'); break }
+        if (agentID === String(group.owner_agent_id ?? '')) { this.respondErr(cmd, '不能移除群 owner，请先转让'); break }
+        const members = mockGroupMembers(group)
+        if (!members.some((m) => m.agent_id === agentID)) { this.respondErr(cmd, '该智能体不在群里'); break }
+        group.members = members.filter((m) => m.agent_id !== agentID)
         group.updated_at = new Date().toISOString()
         this.emit({ event_type: 'hub_group_update', group })
         this.respond(cmd, { group })
@@ -4019,7 +4082,9 @@ class MockTransport implements Transport {
       }
       case 'hub_agent_create': {
         const profile = { ...((cmd.payload?.profile ?? {}) as Record<string, unknown>) }
-        const id = `ag_mock${Date.now().toString(36)}`
+        // id 必须唯一：原先用 Date.now()，同一毫秒内连建多个会撞出重复 id
+        // （群编辑测试一次建 10 个 → 只有 2 个不同 id，成员增删全乱）。
+        const id = `ag_mock${(++this.hubAgentCreateNo).toString(36)}`
         const agent = { ...profile, id, persona: 'hub', version: 1 }
         this.hubAgents.push(agent)
         this.respond(cmd, { agent })
@@ -5589,6 +5654,19 @@ const MOCK_STATS_MODELS = [
  * 群模式值域（与 bridge agenthub.GroupPolicy.Validate 同源）。
  * undefined = 未传（合法，按默认 ask 处理）；传了就必须是三选一。
  */
+/** 群成员表的规整视图（mock 的 group.members 是 Record，编辑路径要按角色改写）。 */
+function mockGroupMembers(group: Record<string, unknown>): Array<{ agent_id: string; role?: string; joined_at?: string }> {
+  const raw = Array.isArray(group.members) ? (group.members as unknown[]) : []
+  return raw
+    .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object')
+    .map((m) => ({
+      agent_id: String(m.agent_id ?? ''),
+      role: m.role === undefined ? undefined : String(m.role),
+      joined_at: m.joined_at === undefined ? undefined : String(m.joined_at),
+    }))
+    .filter((m) => m.agent_id !== '')
+}
+
 function mockGroupModeOK(raw: unknown): boolean {
   if (raw === undefined || raw === null || raw === '') return true
   return raw === 'ask' || raw === 'auto' || raw === 'readonly'

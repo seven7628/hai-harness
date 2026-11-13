@@ -108,6 +108,12 @@ export interface HubFailedSend {
   sourceDraft?: string
 }
 
+/**
+ * 群成员上限（与 bridge 的 agenthub.MaxGroupMembers 同值）。
+ * 前端先挡一次是为了在弹层里立刻给原因；bridge 仍然会校验，两边不一致时以后端为准。
+ */
+const HUB_MAX_GROUP_MEMBERS = 12
+
 interface HubState {
   open: boolean
   agents: HubAgent[]
@@ -169,6 +175,11 @@ interface HubState {
   /** 群组（P3a-08）：列表/当前群/时间线/最近一轮路由。 */
   groups: HubGroup[]
   groupsLoading: boolean
+  /**
+   * 群组编辑弹层（新建 = groupId null，编辑 = 目标群）。放在 store 里而不是左栏局部
+   * state：右栏 inspector 也要能打开「编辑群组」，两处入口必须共用同一份开关。
+   */
+  groupEditor: { open: boolean; groupId: string | null }
   activeGroupId: string | null
   groupMessages: HubMessage[]
   groupRounds: HubRound[]
@@ -296,6 +307,27 @@ interface HubState {
     policy?: HubGroupPolicy
   }): Promise<HubGroup | null>
   selectGroup(groupID: string): Promise<void>
+  openGroupEditor(groupID?: string | null): void
+  closeGroupEditor(): void
+  /**
+   * 保存群组编辑（编辑模式）：name/owner/mode 走 hub_group_update，成员增删走
+   * hub_group_member_add/remove。返回刷新后的 group（失败返回 null 并写 error）。
+   *
+   * 顺序（bridge 的校验决定的，不能随意换）：
+   *  1. 已在群里的 owner 变更 → 先转让（否则下一步移除旧 owner 会被拒）；
+   *  2. 移除（先腾出名额，避免「12 人时先加后删」撞上限）；
+   *  3. 添加；
+   *  4. 新 owner 来自「本次新加的人」→ 再加一次 update 转让。
+   * 前端先做同一套校验（重名/非成员/上限/owner 不可移除），错误文案直接给原因。
+   */
+  saveGroupEdit(req: {
+    group_id: string
+    name: string
+    owner_agent_id?: string
+    mode?: string
+    add?: string[]
+    remove?: string[]
+  }): Promise<HubGroup | null>
   loadGroupActivity(groupID?: string): Promise<void>
   clearGroup(): void
   sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string, attachments?: HubAttachment[], sourceDraft?: string): Promise<boolean>
@@ -502,6 +534,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   groups: [],
   groupsLoading: false,
   activeGroupId: null,
+  groupEditor: { open: false, groupId: null },
   groupMessages: [],
   groupRounds: [],
   groupActivity: [],
@@ -1331,6 +1364,98 @@ export const useHubStore = create<HubState>((set, get) => ({
     await get().loadGroups()
     await get().openGroup(group.id)
     return group
+  },
+
+  openGroupEditor(groupID) {
+    set({ groupEditor: { open: true, groupId: groupID ? String(groupID) : null }, error: null })
+  },
+
+  closeGroupEditor() {
+    set({ groupEditor: { open: false, groupId: null } })
+  },
+
+  async saveGroupEdit(req) {
+    const gid = String(req.group_id ?? '').trim()
+    const group = get().groups.find((g) => g.id === gid)
+    if (!group) {
+      set({ error: '群组不存在（可能已被删除）' })
+      return null
+    }
+    const name = (req.name ?? '').trim()
+    if (!name) {
+      set({ error: '群名称不能为空' })
+      return null
+    }
+    if (get().groups.some((g) => g.id !== gid && (g.name ?? '').trim() === name)) {
+      set({ error: '已有同名群组，换个名字' })
+      return null
+    }
+    const current = (group.members ?? []).map((m) => String(m.agent_id))
+    const add = [...new Set((req.add ?? []).map((x) => String(x ?? '').trim()).filter(Boolean))]
+    const remove = [...new Set((req.remove ?? []).map((x) => String(x ?? '').trim()).filter(Boolean))]
+    const dup = add.filter((id) => current.includes(id))
+    if (dup.length > 0) {
+      set({ error: `该智能体已在群里：${dup.join('、')}` })
+      return null
+    }
+    const notMember = remove.filter((id) => !current.includes(id))
+    if (notMember.length > 0) {
+      set({ error: `要移除的智能体不在群里：${notMember.join('、')}` })
+      return null
+    }
+    const oldOwner = String(group.owner_agent_id ?? '')
+    const owner = String(req.owner_agent_id ?? '').trim() || oldOwner
+    // 被移除的不能是**最终**群主（bridge 会拒绝「移除 owner」，那会让群变成孤儿）。
+    // 旧 owner 可以移除 —— 只要同一次保存里已经转让给别人（下面先发 update 再 remove）。
+    if (remove.includes(owner)) {
+      set({ error: '不能移除群 owner，请先转让群主' })
+      return null
+    }
+    const finalCount = current.length - remove.length + add.length
+    if (finalCount > HUB_MAX_GROUP_MEMBERS) {
+      set({ error: `群成员上限 ${HUB_MAX_GROUP_MEMBERS} 人（当前 ${current.length} 人，改后 ${finalCount} 人）` })
+      return null
+    }
+    if (finalCount < 1) {
+      set({ error: '至少保留 1 个成员' })
+      return null
+    }
+    const finalMembers = [...current.filter((id) => !remove.includes(id)), ...add]
+    if (owner && !finalMembers.includes(owner)) {
+      set({ error: '群主必须是群成员' })
+      return null
+    }
+    const mode = String(req.mode ?? group.policy?.mode ?? 'ask')
+
+    const steps: Array<{ type: string; payload: Record<string, unknown> }> = []
+    const ownerIsNew = !!owner && owner !== oldOwner
+    const transferFirst = ownerIsNew && current.includes(owner)
+    const updatePayload = (withOwner: boolean): Record<string, unknown> => ({
+      group_id: gid,
+      patch: {
+        name,
+        policy: { mode },
+        ...(withOwner ? { owner_agent_id: owner } : {}),
+      },
+    })
+    if (transferFirst) steps.push({ type: 'hub_group_update', payload: updatePayload(true) })
+    for (const id of remove) steps.push({ type: 'hub_group_member_remove', payload: { group_id: gid, agent_id: id } })
+    for (const id of add) steps.push({ type: 'hub_group_member_add', payload: { group_id: gid, agent_id: id } })
+    if (!transferFirst) steps.push({ type: 'hub_group_update', payload: updatePayload(ownerIsNew) })
+
+    let firstError: string | null = null
+    for (const step of steps) {
+      const r = await hubCommand<{ group?: HubGroup }>(step.type, step.payload)
+      if (!r.ok && !firstError) firstError = r.error || `${step.type} 失败`
+    }
+    // 部分成功也要刷新：界面必须显示服务端的真实状态，不能停在乐观视图上。
+    await get().loadGroups()
+    if (get().activeGroupId === gid) await get().selectGroup(gid)
+    if (firstError) {
+      set({ error: firstError })
+      return null
+    }
+    return get().groups.find((g) => g.id === gid) ?? null
   },
 
   async selectGroup(groupID) {
