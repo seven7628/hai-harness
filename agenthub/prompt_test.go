@@ -48,6 +48,8 @@ func TestPromptL1Group(t *testing.T) {
 	for _, want := range []string{
 		"## Tools", "## Who is here", "@Name", "assign_task", "group_members()",
 		"group_history()", "## Workspaces", "## Safety",
+		// handoff 指引是群专属的：共享尾改成中性后，这段只能靠群段保住（B1）。
+		"handoff(to_agent_id, instruction)", "handoff_ack()",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("group L1 missing %q:\n%s", want, got)
@@ -72,12 +74,20 @@ func TestPromptL1DM(t *testing.T) {
 	for _, want := range []string{
 		"## Tools", "## How to speak", "one-to-one", "session_send()",
 		"task_status()", "## Workspaces", "## Safety",
+		// 共享尾对 DM 必须中性：不能出现「交给同事」这类只有群才成立的动作。
+		"say so and ask the user",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("DM L1 missing %q:\n%s", want, got)
 		}
 	}
 	for _, unwanted := range []string{
+		// 群工具一个都不能出现：group_members/group_history/group_say/agent_status 由
+		// registerHubGroupTools 注册，assign_task/task_ack 由 registerHubAssignTaskTool 注册，
+		// handoff/handoff_ack 同样只在群作用域 —— DM 引擎里这些工具一个都没有（eng.Tools()
+		// 实测没有 handoff）。写进 DM 就是教模型调用不存在的工具，而且与 DM 段「这里没有
+		// 别的智能体」自相矛盾。漏掉 handoff 等群工具，这条断言就拦不住 B1 回归。
+		"handoff", "handoff_ack", "group_say", "agent_status", "task_ack",
 		"group_members", "group_history", "assign_task", "@Name", "@everyone",
 		"## Who is here", "## Group:", "## Identity",
 	} {
