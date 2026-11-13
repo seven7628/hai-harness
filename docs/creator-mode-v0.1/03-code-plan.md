@@ -796,6 +796,19 @@ func (k *Kit) RenderImages(ctx context.Context, pdfPath string, pages []int, dpi
 
 ## 3. M1：`ui` 通道 + 安装器 + 创造模式
 
+> **落地偏差（R12，2026-11-13 合并）** —— 本节以下代码是**设计稿**，实际实现按这五条落地；
+> 读本节做 PR-13 时以这五条为准，别照着下面的片段改回去：
+>
+> 1. 命令侧 op 叫 `snapshot`（不是 `ui_snapshot`）：信封已有 `type:"ui"`。
+> 2. 缓存与工具都在 `desktop/bridge/`（`ui_state.go` / `ui_tools.go`）：缓存是 `package main`，
+>    工具若搬进 `tools/builtin` 就只能靠测试替身验缓存（00 §4.7 不算证据）。
+> 3. `ui_inspect` 返回 `{ok, ageMs, stale, data}`，并保留 `value` 作 `data` 的别名
+>    （§3.4 的脚本示例写的是 `s.value.tabs`）。
+> 4. 工具 `Call` 返回**结构化对象**（`OutputSchemaProvider` + `StructuredSink`），不是
+>    §3.4 片段里的 `return string(out)` —— 那条会让脚本拿到 JSON 字符串，正是 §3.4b 要防的。
+> 5. 渲染层的 `ui` 分流点在 `store/useAppStore.ts` 的事件解析入口（本项目没有
+>    `transport/stdio.ts`），落点是 `lib/uiBus.ts`；快照在 `lib/uiSnapshot.ts`。
+
 ### 3.1 协议：`ui` 信封（**不动 28 个 agent 事件**）
 
 Go：

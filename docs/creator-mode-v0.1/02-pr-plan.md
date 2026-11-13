@@ -337,13 +337,26 @@
 
 **改动**
 - 协议：新增 `{"type":"ui","payload":{op, data}}` 信封（**不进** `events.Event` 28 类、不落盘、不重放）
-- renderer → bridge：`ui_snapshot`（debounce 500ms，含 `layout/surfaces/tabs/editors/theme/viewport`）、`surface_status`
+- renderer → bridge：`op:"snapshot"`（debounce 500ms，含 `layout/surfaces/tabs/editors/theme/viewport/at`）、`op:"surface_status"`
 - bridge → renderer：`surfaces_changed`（安装/卸载后）
-- Go 侧缓存 + `tools/builtin/ui_inspect.go`（只读，返回 `ageMs`，>5s 标 stale）
+- Go 侧缓存 + `ui_inspect` 工具（只读，返回 `ageMs`，>5s 标 stale）
 
 **验收**：装一个 dummy provider（不落盘，直接 register）→ `ui_inspect` 能读到它的 kind 与 tab；故意不推快照 → `ageMs` 增长并被标 stale。
 
-**CodeMode 验收（必过）**：`run_code` 里 `const s = tools.ui_inspect({what:"tabs"})` 拿到**对象**（`Array.isArray(s.value.tabs)` 为真），不是 JSON 字符串；`ui_inspect` 标 `CanParallel: true`。
+**CodeMode 验收（必过）**：`run_code` 里 `const s = await tools.ui_inspect({what:"tabs"})` 拿到**对象**
+（`Array.isArray(s.value.tabs)` 为真），不是 JSON 字符串；`ui_inspect` 标 `CanParallel: true`。
+
+**落地（R12）** —— 与上面四处口径差，逐条记在这里（下一轮别按老名字改回去）：
+
+| 项 | 计划里的写法 | 落地 | 为什么 |
+|---|---|---|---|
+| op 名 | `ui_snapshot` | `snapshot` | 信封已经带 `type:"ui"`，再叫 `ui_snapshot` 是同一句话写两遍 |
+| 工具文件 | `tools/builtin/ui_inspect.go` | `desktop/bridge/ui_tools.go` | 缓存住在 bridge（`package main`），工具放别处就得为测试另建一份缓存替身（00 §4.7 明确不算证据） |
+| 返回字段 | `value` | `data`（并保留 `value` 别名） | 本 PR 口径是 `{ok, ageMs, stale, data}`；`value` 是 03-code-plan §3.4 的旧名，两个都给，按哪份文档写的脚本都能跑 |
+| 脚本调用 | `tools.ui_inspect(...)` | `await tools.ui_inspect(...)` | 脚本里的工具调用**恒**是 Promise（execproc 的既有契约）；不 await 拿到的是 Promise 而不是对象 |
+
+**证据**：`desktop/bridge/ui_state_test.go` / `ui_tools_test.go`（含真跑 `run_code`、P06 延迟预算）、
+`desktop/app/e2e/verify_ui_snapshot.mjs`（端口 5227，T0–T7）。
 
 ---
 

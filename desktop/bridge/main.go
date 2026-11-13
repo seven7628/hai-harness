@@ -1566,6 +1566,9 @@ type manager struct {
 	// 零值可用（懒建，见 officeKitState）；officeMu 只保护这一个指针。
 	officeMu sync.Mutex
 	office   *officeKitState
+	// ui 渲染层最近一次自述的快照（PR-12，见 ui_state.go）。
+	// 零值可用（内嵌结构体，自带 mutex）：不进事件流、不落盘，只服务 ui_inspect。
+	ui uiState
 }
 
 // previewService 取（或懒创建）转换服务单例（R08a）。
@@ -2513,6 +2516,13 @@ func (m *manager) dispatch(c command) {
 	ws := str(c.Payload, "workspace")
 	sid := str(c.Payload, "session_id")
 	switch c.Type {
+	case CmdUI:
+		// 渲染层自述（快照 / 面板状态）：只有内存写入，没有回执、没有事件（见 ui_state.go）。
+		// 放在 switch 最前是刻意的：这条通道与 workspace/session 无关，不该受下面
+		// 那些「先查 workspace 为空就报错」的分支影响。
+		m.handleUI(c)
+		return
+
 	case "external_skills_status": // 检测 ~/.codex / ~/.claude 外部 Skills 来源
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -5982,6 +5992,9 @@ func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort strin
 	// 放在 newSessionEngine 之后是为了不改那条 20 参数的签名 —— 工具需要的是宿主能力
 	// （缓存/信号量/受管运行时），不是引擎装配的一部分。
 	m.registerOfficeTools(eng, ws.path)
+	// UI 快照查询工具（PR-12）：**无条件**注册 —— 渲染层没连上时它回答
+	// {ok:false, reason:"no_snapshot"}，那是状态而不是失败（见 ui_tools.go）。
+	m.registerUITools(eng)
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()

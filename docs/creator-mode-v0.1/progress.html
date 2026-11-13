@@ -958,18 +958,18 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R11"
       ],
-      "status": "todo",
-      "commit": "",
+      "status": "done",
+      "commit": "bd28982+3947308",
       "review": "",
       "perf": [
         "P06"
       ],
       "acc": [
-        "先写 CodeMode e2e（红）",
-        "快照 ≤ 20ms",
-        "tabs 返回对象且空态为 []"
+        "先写 CodeMode e2e（红）：tools/builtin/codemode 无法 import package main，故真跑放在 desktop/bridge/ui_tools_test.go（真引擎 + m.registerUITools + m.dispatch）",
+        "快照 ≤ 20ms @ 20 tabs：P06 p95 = 38.6µs（TestUIInspectLatencyBudgetP06）",
+        "tabs 返回对象（s.value.tabs / s.data.tabs 都是数组）；空态 = [] 不是 null"
       ],
-      "rollback": "关 settings.features.surfaceTools"
+      "rollback": "关 settings.features.surfaceTools（本轮工具无条件注册，开关留给 PR-14）"
     },
     {
       "id": "R13",
@@ -1098,7 +1098,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "name": "ui_inspect 快照生成",
       "budget": "≤ 20ms @ 20 tabs",
       "how": "Go bridge 侧打点 + e2e 断言",
-      "last": null,
+      "last": "p95 = 38.6µs @ 20 tabs（desktop/bridge TestUIInspectLatencyBudgetP06，2026-11-13）",
       "target": "R02/R12"
     },
     {

@@ -250,6 +250,11 @@ const (
 	//（列表 / 详情两粒度），不落盘、零新增存储。见 desktop/bridge/trace.go 与
 	// docs/TRACE_CHAIN_REDESIGN.md。
 	CmdTrace Command = "trace"
+	// CmdUI 渲染层 → 桥的 UI 快照通道（PR-12）。
+	// **不是命令**：不回 command_response、不进 events.Event 28 类、不落盘、不重放。
+	// payload = {op, data}，op ∈ {snapshot, surface_status}；未知 op 静默忽略。
+	// 见 desktop/bridge/ui_state.go 与 03-code-plan §3.1。
+	CmdUI Command = "ui"
 )
 
 // String 命令名字符串（dispatch switch 用）。
