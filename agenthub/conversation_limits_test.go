@@ -556,3 +556,73 @@ func TestConversationResetBumpsGeneration(t *testing.T) {
 		t.Fatalf("新代 @ 应入队: %v %+v", err, wakes)
 	}
 }
+
+// TestConversationOfferAfterIdleResetSchedules：N2 残留 —— 空闲超时把对话 reset 成
+// idle 之后，一条**没有** ConversationID 的 @（人类/新 run/测试）必须重新开一条对话
+// 并真的可调度：状态 running、队列 1、DueWakes 非空。
+// 旧实现里 settleLocked 排在 stale 判定之后：reset 清了队列，随后 wakes 又被 append
+// 进一个 idle 对话 → status=idle、queue=1、DueWakes=0，队列永远泵不动。
+func TestConversationOfferAfterIdleResetSchedules(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: time.Second,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	old := c.View("group_1")
+	// 越过空闲阈值（settle 是惰性的，下一次读写才会结算）。
+	clk.Advance(2 * time.Second)
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "空闲之后", Depth: 2, TriggerSeq: 3,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("offer: %v %+v", err, wakes)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationRunning || v.QueueLen != 1 {
+		t.Fatalf("空闲超时后 @ = %+v, want running/queue=1", v)
+	}
+	if v.ID == "" || v.ID == old.ID {
+		t.Fatalf("N2：空闲超时必须换代（旧 %q / 新 %q）", old.ID, v.ID)
+	}
+	if due := c.DueWakes("group_1", clk.Now()); len(due) != 1 || due[0].Target != "agent_b" {
+		t.Fatalf("N2：空闲超时后的 wake 必须可调度，得到 %+v", due)
+	}
+	// 再结算一次不能把它又 reset 掉（隐式新对话要刷新 updatedAt）。
+	if v := c.View("group_1"); v.Status != ConversationRunning || v.QueueLen != 1 {
+		t.Fatalf("N2：新对话被立刻再次空闲重置: %+v", v)
+	}
+}
+
+// TestConversationStaleOfferAfterIdleResetDropped：N2 残留 —— 空闲超时（换代）之后，
+// 旧 generation 的在飞 run 回来 @ 必须记 skipped(stale)，状态保持 idle、队列为空。
+func TestConversationStaleOfferAfterIdleResetDropped(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: time.Second,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	old := c.View("group_1")
+	// 不先读 View：这一条 Offer 自己就要触发空闲结算（结算必须先于换代判定）。
+	clk.Advance(2 * time.Second)
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "旧 run 收尾", Depth: 2, TriggerSeq: 3, ConversationID: old.ID,
+	})
+	if err != nil || len(wakes) != 0 {
+		t.Fatalf("旧代 @ 必须丢弃（不能先按旧代入队再被空闲重置清掉）: %v %+v", err, wakes)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationIdle || v.QueueLen != 0 {
+		t.Fatalf("N2：旧代 @ 把状态翻成 %q（队列 %d）", v.Status, v.QueueLen)
+	}
+	var stale bool
+	for _, d := range c.Deliveries("group_1") {
+		if d.Status == DeliverySkipped && d.Reason == DeliveryReasonStale {
+			stale = true
+		}
+	}
+	if !stale {
+		t.Fatal("N2：旧代 @ 应记 skipped(stale)")
+	}
+}

@@ -615,6 +615,11 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	if conv.status == ConversationExhausted {
 		return nil, &ExhaustedError{GroupID: group, Reason: conv.stop, Status: conv.status}
 	}
+	// N2：空闲结算必须在换代判定与 idle→running **之前**。settleLocked 到点会
+	// resetLocked（换代 + 清队列）：结算晚于 stale 判定时，旧 id 会「看起来还是当前
+	// 代」而被接受，随后 wakes 被 append 进一个已经 idle 的对话 —— 状态 idle、队列 1、
+	// DueWakes 恒 0，队列永远泵不动。
+	c.settleLocked(conv, now)
 	// N2：换代判定必须在 idle→running **之前**。旧 generation 的在飞 run 回来 @
 	// 不能先被「隐式开新对话」翻成 running 再丢弃 —— 那会让状态条停在「自动对话中」
 	// 而队列永远是空的（reset/空闲重置之后尤其明显）。
@@ -643,9 +648,11 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 		conv.id = c.nextIDLocked(now)
 		conv.status = ConversationRunning
 		conv.startedAt = now
+		// N2：隐式开新对话也要刷新 updatedAt —— 否则它带着「上次空闲起点」，
+		// 下一次 settleLocked 立刻判成又空闲超时，把刚入队的 wake 连队列一起清掉。
+		conv.updatedAt = now
 	}
 	limits := c.limits
-	c.settleLocked(conv, now)
 	// 人类优先：预算与深度是「自动接龙」的护栏，人类发送不受它们约束（§6.5.6
 	// 规则 1/5）。
 	// 轮次上限只在 TurnBudget>0 时生效：生产默认 UnlimitedTurnBudget（不设上限）。
