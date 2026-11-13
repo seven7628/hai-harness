@@ -182,7 +182,8 @@ export default function HubSurface() {
     const text = withFileRefs(draft, attach.files)
     const atts = attach.all
     stickBottom.current = true
-    const ok = await send(text, undefined, atts.length > 0 ? atts : undefined)
+    // 第 4 个参数是拼 @path 之前的草稿：失败重试成功后据此清输入框（见 store.clearsDraft）。
+    const ok = await send(text, undefined, atts.length > 0 ? atts : undefined, draft)
     // 成功才清正文与附件；失败两头都保留（store 留 failed 记录，含附件指纹供重试）。
     if (ok) {
       setDraft(activeId, '')

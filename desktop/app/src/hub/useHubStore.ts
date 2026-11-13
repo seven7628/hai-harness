@@ -84,6 +84,14 @@ export interface HubFailedSend {
    * 只比正文的话，用户「删掉旧图换一张新图再发」会命中旧 cid 被 bridge 挡成旧消息。
    */
   attachmentsFingerprint?: string
+  /**
+   * 首发时的**原始草稿**（`withFileRefs` 拼 `@path` 之前）—— 只用于「成功后要不要清 composer」。
+   *
+   * `text` 已经是拼过文件引用的正文（`草稿 + '\n@/a.md'`），拿它跟输入框里的草稿比
+   * 永远不相等：行内重试成功后草稿不清，用户再按回车就把同一条又发一遍（多发）。
+   * 老调用没有这个字段时退回比较 `text`（今天的行为）。
+   */
+  sourceDraft?: string
 }
 
 interface HubState {
@@ -205,7 +213,13 @@ interface HubState {
   select(agentID: string): Promise<void>
   clearSelection(): void
   loadOlder(): Promise<void>
-  send(text: string, reuseClientMsgId?: string, attachments?: HubAttachment[]): Promise<boolean>
+  /**
+   * 发一条 DM 消息。
+   *
+   * `sourceDraft` = 拼文件引用**之前**的 composer 草稿：成功后据此清草稿
+   * （见 clearsDraft）。重试时由失败记录带回来，调用方不用自己算。
+   */
+  send(text: string, reuseClientMsgId?: string, attachments?: HubAttachment[], sourceDraft?: string): Promise<boolean>
   /**
    * 重发一条失败的消息（DM 或群），沿用首发 client_msg_id。
    *
@@ -245,7 +259,7 @@ interface HubState {
   selectGroup(groupID: string): Promise<void>
   loadGroupActivity(groupID?: string): Promise<void>
   clearGroup(): void
-  sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string, attachments?: HubAttachment[]): Promise<boolean>
+  sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string, attachments?: HubAttachment[], sourceDraft?: string): Promise<boolean>
   sendGroupAssign(groupID: string, req: { agent_id: string; instruction: string; title?: string }): Promise<boolean>
   stopGroupConversation(groupID: string): Promise<boolean>
   loadTasks(): Promise<void>
@@ -352,6 +366,17 @@ function reuseCidFor(map: FailedMap, kind: 'dm' | 'group', scopeID: string, text
 /** 草稿是否仍是这次发出去的正文：用户后来改过的输入不能被重试抹掉（复审 B2）。 */
 function draftEquals(draft: string | undefined, body: string): boolean {
   return typeof draft === 'string' && draft.trim() === body
+}
+
+/**
+ * 这次发送成功后，composer 里那条草稿还能不能清掉。
+ *
+ * 优先比 `sourceDraft`（拼 @path 之前的原始草稿）：文件引用消息的 wire 正文是
+ * `草稿 + '\n@/path'`，比正文永远不等，草稿就永远清不掉（行内重试后按回车会多发一条）。
+ * 老记录没有 sourceDraft 时退回比 `text` —— 与之前一致，不做更激进的事。
+ */
+function clearsDraft(draft: string | undefined, sourceDraft: string | undefined, text: string): boolean {
+  return draftEquals(draft, sourceDraft ?? text)
 }
 
 function roundHasAction(r: HubRound | null | undefined): boolean {
@@ -637,9 +662,11 @@ export const useHubStore = create<HubState>((set, get) => ({
     })
   },
 
-  async send(text, reuseClientMsgId, attachments) {
+  async send(text, reuseClientMsgId, attachments, sourceDraft) {
     const { activeId, sending } = get()
     const body = (text ?? '').trim()
+    // 拼 @path 之前的草稿（只用来决定成功后清不清输入框）；老调用没有就退回正文。
+    const draft0 = typeof sourceDraft === 'string' ? sourceDraft.trim() : undefined
     // 附件（图片）可以没有正文：图片走 attachments，正文允许为空（后端存「[图片]」）。
     const check = validateAttachments(attachments)
     const atts = check.ok ? check.attachments : []
@@ -684,6 +711,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       // 失败：气泡标 failed（可重试），失败记录带原文 + 附件 + 首发 cid —— 不能两头都清。
       const rec: HubFailedSend = {
         kind: 'dm', text: body, clientMsgId, agentId: activeId,
+        ...(draft0 === undefined ? {} : { sourceDraft: draft0 }),
         ...(atts.length > 0 ? { attachments: atts, attachmentsFingerprint: fp } : {}),
       }
       set((s) => ({
@@ -705,8 +733,9 @@ export const useHubStore = create<HubState>((set, get) => ({
       sending: false,
       // 成功只清这一条 cid 的失败记录（复审 B3）。
       ...dropFailed(s.failedByCid, clientMsgId),
-      // 草稿还是这条正文才清：横幅/气泡重试成功后输入框要空，但用户后来改过的输入不清（复审 B2）。
-      ...(draftEquals(s.drafts[activeId], body) ? { drafts: { ...s.drafts, [activeId]: '' } } : {}),
+      // 草稿还是这条（原始草稿）才清：横幅/气泡重试成功后输入框要空，用户后来改过的输入不清（复审 B2）。
+      // 有文件引用时 body 多出几行 @path，必须比 sourceDraft —— 否则草稿不清，用户再回车会多发一条。
+      ...(clearsDraft(s.drafts[activeId], draft0, body) ? { drafts: { ...s.drafts, [activeId]: '' } } : {}),
     }))
     void get().refresh()
     return true
@@ -721,11 +750,11 @@ export const useHubStore = create<HubState>((set, get) => ({
     if (failed.kind === 'group') {
       const { activeGroupId, groupSending } = get()
       if (!activeGroupId || groupSending || activeGroupId !== failed.groupId) return false
-      return get().sendGroup(failed.text, failed.mentions, failed.mentionAll, failed.clientMsgId, failed.attachments)
+      return get().sendGroup(failed.text, failed.mentions, failed.mentionAll, failed.clientMsgId, failed.attachments, failed.sourceDraft)
     }
     const { activeId, sending } = get()
     if (!activeId || sending || activeId !== failed.agentId) return false
-    return get().send(failed.text, failed.clientMsgId, failed.attachments)
+    return get().send(failed.text, failed.clientMsgId, failed.attachments, failed.sourceDraft)
   },
 
   setDraft(agentID, text) {
@@ -1239,9 +1268,10 @@ export const useHubStore = create<HubState>((set, get) => ({
     })
   },
 
-  async sendGroup(text, mentions, mentionAll, reuseClientMsgId, attachments) {
+  async sendGroup(text, mentions, mentionAll, reuseClientMsgId, attachments, sourceDraft) {
     const { activeGroupId, groupSending } = get()
     const body = (text ?? '').trim()
+    const draft0 = typeof sourceDraft === 'string' ? sourceDraft.trim() : undefined
     // 纯图片（正文为空）也允许发：群里没有 @ 时后端只存「[图片]」，@ 由用户在正文里给。
     const check = validateAttachments(attachments)
     const atts = check.ok ? check.attachments : []
@@ -1284,6 +1314,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       // 失败同样留记录（含 cid + @ 目标）：群里之前只有一条「网络中断 ×」，没有重试入口。
       const rec: HubFailedSend = {
         kind: 'group', text: body, clientMsgId, groupId: activeGroupId, mentions, mentionAll,
+        ...(draft0 === undefined ? {} : { sourceDraft: draft0 }),
         ...(atts.length > 0 ? { attachments: atts, attachmentsFingerprint: fp } : {}),
       }
       set((s) => ({
@@ -1297,7 +1328,7 @@ export const useHubStore = create<HubState>((set, get) => ({
       groupSending: false,
       // 成功只清这一条 cid 的失败记录；草稿仍是这条正文才清（复审 B2/B3）。
       ...dropFailed(s.failedByCid, clientMsgId),
-      ...(draftEquals(s.groupDraftText[activeGroupId], body)
+      ...(clearsDraft(s.groupDraftText[activeGroupId], draft0, body)
         ? { groupDraftText: { ...s.groupDraftText, [activeGroupId]: '' } }
         : {}),
       groupRounds: upsertRound(s.groupRounds, r.data?.round),

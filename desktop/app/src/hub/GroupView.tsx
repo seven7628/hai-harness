@@ -275,7 +275,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
     // 文件引用拼进正文（一行一个 @path）；图片走 attachments。
     const text = withFileRefs(draft, attach.files)
     const atts = attach.all
-    const ok = await send(text, mentions, mentionAll, undefined, atts.length > 0 ? atts : undefined)
+    // 第 6 个参数是拼 @path 之前的草稿：失败重试成功后据此清输入框（见 store.clearsDraft）。
+    const ok = await send(text, mentions, mentionAll, undefined, atts.length > 0 ? atts : undefined, draft)
     if (ok) {
       setDraft('')
       setCaret(0)

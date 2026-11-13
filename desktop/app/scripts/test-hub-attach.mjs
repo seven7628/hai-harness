@@ -154,6 +154,21 @@ function spyWire() {
   return { seen, restore: () => { t.send = orig } }
 }
 
+// 注入一次「已落账、响应丢了」的失败：先把命令真发给 mock（消息入账），再抢在 mock 的
+// 微任务响应之前塞一条 ok:false —— 与 __lostack__ 同形，但不限制正文（带 @path 也能失败）。
+// 失败后重试命中 mock 的 cid 幂等，正好用来验「行内重试成功后草稿该不该清」。
+function failOnce(pred, error = '连接中断：响应丢失（测试注入）') {
+  const orig = t.send.bind(t)
+  let armed = true
+  t.send = (cmd) => {
+    if (!armed || !pred(cmd)) return orig(cmd)
+    armed = false
+    orig(cmd)
+    t.emit({ event_type: 'command_response', id: cmd.id, ok: false, error })
+  }
+  return { restore: () => { t.send = orig } }
+}
+
 {
   H.setState({ open: true })
   await H.getState().select('ag_mockres1')
@@ -246,6 +261,87 @@ function spyWire() {
   eq(sent2.attachments[0].path, '/ws/a.md', '群 wire 上带文件引用 path')
   eq(sent2.attachments[0].kind, 'file', '文件附件的 kind=file')
   eq(sent2.text, '看这个\n@/ws/a.md', '正文里的 @path 原样上线（后端不读文件）')
+  wire.restore()
+}
+
+// —— 6) 文件引用：失败后行内重试成功，草稿/条带要清（否则再回车多发一条） ——
+{
+  await H.getState().select('ag_mockres1')
+  await waitFor(() => H.getState().activeId === 'ag_mockres1' && !H.getState().loading, 'DM 重新打开')
+  const wire = spyWire()
+  // composer 的正文是「原始草稿」；wire 上的正文是 withFileRefs 拼过 @path 的版本。
+  const draft0 = '看下这份定价'
+  const body0 = A.withFileRefs(draft0, [file('/ws/pricing.md')])
+  eq(body0, '看下这份定价\n@/ws/pricing.md', '发送前先把文件引用拼进正文（复现前提）')
+  H.getState().setDraft('ag_mockres1', draft0)
+
+  const inject = failOnce((cmd) => cmd?.type === 'hub_send' && String(cmd.payload?.text ?? '').includes('@/ws/pricing.md'))
+  const okSend = await H.getState().send(body0, undefined, [file('/ws/pricing.md')], draft0)
+  inject.restore()
+  eq(okSend, false, '带文件引用的发送失败（注入丢响应）')
+
+  const failed = H.getState().failed
+  assert(!!failed, '失败记录存在')
+  eq(failed.text, body0, '失败记录里是拼过 @path 的正文')
+  eq(failed.sourceDraft, draft0, '失败记录同时留着原始草稿（拼 @path 之前）')
+  eq(H.getState().drafts.ag_mockres1, draft0, '失败时草稿两头都保留（用户能改完再发）')
+
+  const cid = failed.clientMsgId
+  const wireBefore = wire.seen.length
+  eq(await H.getState().retry(cid), true, '行内重试成功')
+  eq(wire.seen.length, wireBefore + 1, '重试只在网线上发一次')
+  assert(H.getState().failedByCid[cid] === undefined, '成功后这条失败记录清掉')
+  // 核心回归：重试成功后 composer 必须空 —— 之前比的是拼过 @path 的正文，永远不相等。
+  eq(H.getState().drafts.ag_mockres1, '', '重试成功后草稿清空（退回原始草稿比较）')
+
+  // 再按一次回车 = send('' , 无附件)：被门禁挡住，账本/网线都不多一条。
+  const humanBefore = H.getState().messages.filter((m) => m.sender?.kind === 'human').length
+  const wireCount = wire.seen.length
+  eq(await H.getState().send('', undefined, undefined), false, '空草稿 + 无附件：回车被挡住（不会多发一条）')
+  eq(wire.seen.length, wireCount, '被挡住时网线上没有任何 hub_send')
+  eq(H.getState().messages.filter((m) => m.sender?.kind === 'human').length, humanBefore, '时间线里没有多出气泡')
+  await H.getState().select('ag_mockres1')
+  const landed = H.getState().messages.filter((m) => m.sender?.kind === 'human' && m.text === body0)
+  eq(landed.length, 1, '账本里这条文件引用消息只有 1 条（没有多发）')
+  wire.restore()
+}
+
+// —— 6b) 用户中途改过草稿：重试成功也不许清（不能吞掉新输入） ——
+{
+  await H.getState().select('ag_mockres1')
+  await waitFor(() => H.getState().activeId === 'ag_mockres1' && !H.getState().loading, 'DM 打开')
+  const wire = spyWire()
+  const draft0 = '第一版'
+  const body0 = A.withFileRefs(draft0, [file('/ws/a.md')])
+  H.getState().setDraft('ag_mockres1', draft0)
+  const inject = failOnce((cmd) => cmd?.type === 'hub_send' && String(cmd.payload?.text ?? '').includes('@/ws/a.md'))
+  eq(await H.getState().send(body0, undefined, [file('/ws/a.md')], draft0), false, '第一版发送失败')
+  inject.restore()
+  const cid = H.getState().failed?.clientMsgId ?? ''
+  assert(cid !== '', '拿到失败 cid')
+
+  H.getState().setDraft('ag_mockres1', '第二版：用户已经改了')
+  eq(await H.getState().retry(cid), true, '重试成功')
+  eq(H.getState().drafts.ag_mockres1, '第二版：用户已经改了', '改过的草稿不被重试抹掉')
+  wire.restore()
+}
+
+// —— 6c) 群：同一条文件引用路径（群草稿也不能不清 / 也不能乱清） ——
+{
+  await H.getState().selectGroup('grp_mock1')
+  await waitFor(() => H.getState().activeGroupId === 'grp_mock1' && !H.getState().loading, '群打开')
+  const wire = spyWire()
+  const draft0 = '群里看这个'
+  const body0 = A.withFileRefs(draft0, [file('/ws/group.md')])
+  H.getState().setGroupDraft('grp_mock1', draft0)
+  const inject = failOnce((cmd) => cmd?.type === 'hub_group_send' && String(cmd.payload?.text ?? '').includes('@/ws/group.md'))
+  eq(await H.getState().sendGroup(body0, ['ag_mockres1'], false, undefined, [file('/ws/group.md')], draft0), false, '群：带文件引用发送失败')
+  inject.restore()
+  const cid = H.getState().failed?.clientMsgId ?? ''
+  assert(cid !== '', '群失败记录有 cid')
+  eq(H.getState().groupDraftText.grp_mock1, draft0, '失败后群草稿保留')
+  eq(await H.getState().retry(cid), true, '群：行内重试成功')
+  eq(H.getState().groupDraftText.grp_mock1, '', '群：重试成功后草稿清空')
   wire.restore()
 }
 
