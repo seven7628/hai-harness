@@ -40,6 +40,10 @@ await build({
 const { useAppStore } = require(outfile)
 
 const st = () => useAppStore.getState()
+// mock transport 的响应是**异步**的（mock.ts 的 respond → queueMicrotask；591638e「响应改异步
+// 与真 bridge 同形」之后）。本文件里的断言写于 mock 同步应答的年代，触发动作后必须让出一个
+// 宏任务再断言 —— 否则验的是「同步写入」，而那条路径在生产里从来没有存在过（真 bridge 是 IPC）。
+const flush = () => new Promise((r) => setTimeout(r, 0))
 
 // 启动（wire transport + bridgeStatus 流转；start() 本身也会触发一次工作区探测）
 useAppStore.setState({ workspace: '/mock/w', projects: [{ path: '/mock/w', sessions: [] }], bridgeStatus: 'idle' })
@@ -55,12 +59,14 @@ console.log('PASS 场景1：无会话时工作区级 git 探测结果写入 wsGi
 // 场景2：显式 loadWsGit 幂等重探
 useAppStore.setState({ wsGit: undefined })
 st().loadWsGit()
+await flush()
 assert.ok(st().wsGit, '场景2失败：loadWsGit 后 wsGit 应重新写入')
 console.log('PASS 场景2：loadWsGit 显式触发工作区级探测')
 
 // 场景3：setActiveWorkspace（添加/切换工作区主入口）→ 自动触发探测
 useAppStore.setState({ wsGit: undefined, wsGitLoading: false })
 st().setActiveWorkspace('/mock/w2')
+await flush()
 assert.ok(st().wsGit, '场景3失败：切换工作区后应自动完成 git 探测（wsGit 非空）')
 assert.equal(st().workspace, '/mock/w2', '场景3失败：活跃工作区未切换')
 console.log('PASS 场景3：setActiveWorkspace 自动识别新工作区的 git 状态')
@@ -69,6 +75,7 @@ console.log('PASS 场景3：setActiveWorkspace 自动识别新工作区的 git �
 const sid = 's-git'
 useAppStore.setState({ activeSessionId: sid })
 st().loadGitSnapshot() // payload 带 session_id → 响应回显 → 必须写 views[sid]，而非 wsGit
+await flush()
 const v = st().views[sid]
 assert.ok(v, '场景4失败：会话级快照未写入对应 view')
 assert.equal(v.gitLoading, false, '场景4失败：会话级快照 loading 未复位')
@@ -87,6 +94,7 @@ console.log('PASS 场景5：Statusbar 数据源回退（会话级 → 工作区�
 // 场景6：工作区级 git_history —— 无会话拉取历史，写入 wsGitHistory（B2 修复：此前响应被丢弃）
 useAppStore.setState({ activeSessionId: undefined, wsGitHistory: [] })
 st().loadWsGitHistory()
+await flush()
 assert.ok(Array.isArray(st().wsGitHistory) && st().wsGitHistory.length === 1, '场景6失败：工作区级历史应写入 wsGitHistory')
 assert.equal(st().wsGitHasMore, false, '场景6失败：has_more 应为 false')
 assert.equal(st().wsGitHistLoading, false, '场景6失败：历史加载态未复位')
@@ -95,6 +103,7 @@ console.log('PASS 场景6：工作区级 git_history 路由到 wsGitHistory')
 // 场景7：工作区级 git_commit_diff —— diff 写回对应提交
 const mockHash = st().wsGitHistory[0].hash
 st().loadWsCommitDiff(mockHash)
+await flush()
 const patched = st().wsGitHistory.find((c) => c.hash === mockHash)
 assert.ok(patched?.diff && patched.diff.includes('diff --git'), '场景7失败：提交 diff 未写回 wsGitHistory')
 assert.equal(st().wsCommitDiffLoading, undefined, '场景7失败：提交 diff 加载态未复位')
@@ -103,9 +112,11 @@ console.log('PASS 场景7：工作区级 git_commit_diff 写回对应提交')
 // 场景8（回归防护）：会话级 git_history / git_commit_diff 仍正确路由到 view（B2 修复的会话侧）
 useAppStore.setState({ activeSessionId: sid, views: {} })
 st().loadGitHistory()
+await flush()
 const vh = st().views[sid]
 assert.ok(vh?.gitHistory?.length === 1, '场景8失败：会话级历史未写入 view（B2 回归）')
 st().loadCommitDiff(mockHash)
+await flush()
 const vh2 = st().views[sid]
 assert.ok(vh2?.gitHistory?.[0]?.diff?.includes('diff --git'), '场景8失败：会话级提交 diff 未写回 view')
 console.log('PASS 场景8：会话级 git_history/git_commit_diff 路由到 view')
@@ -113,12 +124,14 @@ console.log('PASS 场景8：会话级 git_history/git_commit_diff 路由到 view
 // 场景9：工作区级 git_file_diff —— 写入 wsFileDiffs 缓存
 useAppStore.setState({ activeSessionId: undefined, wsFileDiffs: {} })
 st().loadWsFileDiff('README.md', false)
+await flush()
 assert.ok(st().wsFileDiffs['README.md']?.includes('diff --git'), '场景9失败：工作区级文件 diff 未写入 wsFileDiffs')
 console.log('PASS 场景9：工作区级 git_file_diff 路由到 wsFileDiffs')
 
 // 场景10（P1）：git_stage 写操作 —— ok 后 busy 复位且触发双层重拉（wsGit 仍在即视为重拉完成）
 useAppStore.setState({ activeSessionId: undefined, gitOpBusy: undefined, gitOpError: undefined })
 st().gitStage(['a.txt'])
+await flush()
 assert.equal(st().gitOpBusy, undefined, '场景10失败：写操作 ok 后 gitOpBusy 应复位')
 assert.equal(st().gitOpError, undefined, '场景10失败：成功不应置 gitOpError')
 assert.ok(st().wsGit, '场景10失败：写操作成功后应重拉工作区快照')
@@ -126,35 +139,43 @@ console.log('PASS 场景10：git_stage ok → busy 复位 + 双层重拉')
 
 // 场景11（P1）：git_commit ok → busy 复位
 st().gitCommit('test', false)
+await flush()
 assert.equal(st().gitOpBusy, undefined, '场景11失败：commit ok 后 gitOpBusy 应复位')
 console.log('PASS 场景11：git_commit ok 路由')
 
 // 场景12（P1.5）：会话级历史「加载更多」—— append 追加而非替换
 useAppStore.setState({ activeSessionId: sid, views: {} })
 st().loadGitHistory()
+await flush()
 assert.equal(st().views[sid]?.gitHistory?.length, 1, '场景12失败：会话级历史首页应为 1 条')
 assert.equal(st().views[sid]?.gitHasMore, false, '场景12失败：会话级 has_more 应为 false')
 st().loadGitHistory(true) // mock 恒返回 1 条 → append 后 2 条
+await flush()
 assert.equal(st().views[sid]?.gitHistory?.length, 2, '场景12失败：加载更多应追加而非替换')
 console.log('PASS 场景12：会话级 git_history 分页追加')
 
-// 场景13（P1）：写操作在途时防并发 —— busy 未复位前再次调用被忽略（以 commit 为例：
-// mock 同步应答无法观察 busy 窗口，这里验证 busy 复位后可再次发起）
+// 场景13（P1）：写操作可重复发起 —— 第一次复位之后再发第二次仍正常完成。
+// （busy 在途期间「第二次被忽略」这个窗口本文件**不**断言：那要控制 mock 的应答时机，
+//  靠真实时序去撞窗口只会得到一条偶发红的用例。）
 st().gitStage(['b.txt'])
+await flush()
 assert.equal(st().gitOpBusy, undefined, '场景13失败：第二次写操作应正常完成并复位')
 console.log('PASS 场景13：写操作可重复发起（busy 生命周期正确）')
 
 // 场景14（P2）：分支清单路由 + checkout 走写操作通道
 useAppStore.setState({ activeSessionId: undefined, gitBranches: undefined })
 st().loadGitBranches()
+await flush()
 assert.ok(Array.isArray(st().gitBranches) && st().gitBranches?.length === 1, '场景14失败：分支清单应写入 gitBranches')
 assert.equal(st().gitBranches?.[0].name, 'main', '场景14失败：分支名不符')
 st().gitCheckout('dev')
+await flush()
 assert.equal(st().gitOpBusy, undefined, '场景14失败：checkout ok 后 busy 应复位')
 console.log('PASS 场景14：分支清单路由 + checkout 写通道')
 
 // 场景15（P2）：git init ok → busy 复位（非仓库空态引导链路）
 st().gitInitRepo()
+await flush()
 assert.equal(st().gitOpBusy, undefined, '场景15失败：git init ok 后 busy 应复位')
 assert.equal(st().gitOpError, undefined, '场景15失败：git init ok 不应置错')
 console.log('PASS 场景15：git init 引导链路路由')
