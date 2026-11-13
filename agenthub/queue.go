@@ -192,7 +192,8 @@ func (q *Queue) submit(ctx context.Context, t *Task, g *Guard) (*Task, error) {
 	if strings.TrimSpace(t.Target.Workspace) == "" || strings.TrimSpace(t.Target.SessionID) == "" {
 		return nil, fmt.Errorf("%w: 目标 workspace/session_id 不能为空", ErrInvalid)
 	}
-	if strings.TrimSpace(t.Instruction) == "" {
+	// 正文可以为空 —— 只有图片/文件引用的派发同样合法（正文只是没有文字内容）。
+	if strings.TrimSpace(t.Instruction) == "" && !t.HasAttachments() {
 		return nil, fmt.Errorf("%w: instruction 不能为空", ErrInvalid)
 	}
 	// 键口径统一：workspace 归一到 knownWorkspace 的形态，session_id 去首尾空白。
@@ -468,6 +469,12 @@ func (q *Queue) Pump(ctx context.Context, target TaskTarget) (*Task, error) {
 		// 新 task id 作为键，避免被上一次投递的去重记录挡住（P2-02 B1）。
 		ClientMsgID: dispatchClientMsgID(dispatched),
 		TaskHeader:  header, // 目标会话据此绑定 task（§6.7.2）
+		// 同批命令与附件原样透传：命令先于正文入目标会话 inbox（FIFO），
+		// 附件只给路径 —— 阈值/白名单由执行边界（bridge）在投递时再校验一遍。
+		Command:     dispatched.Command,
+		CommandArgs: dispatched.CommandArgs,
+		Files:       dispatched.AttachmentPaths(AttachmentKindFile),
+		Images:      dispatched.AttachmentPaths(AttachmentKindImage),
 	})
 	if err != nil {
 		// 已 dispatched 再落 failed：状态机有序，账本里有失败原因可查。

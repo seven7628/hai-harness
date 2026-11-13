@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -199,5 +200,143 @@ func TestHubWorkspaceToolsEmptyLists(t *testing.T) {
 	}
 	if strings.Contains(out, "0001-01-01") {
 		t.Fatalf("zero updated_at leaked: %s", out)
+	}
+}
+
+// 场景4：toolFakeOps 的命令通道 + 忙闲可调（只用于新协议测试，旧测试仍用裸 fake）。
+type toolBatchFakeOps struct {
+	*toolFakeOps
+	running  bool
+	commands []agenthub.CommandSessionReq
+}
+
+func (f *toolBatchFakeOps) SessionStatus(context.Context, string, string) (agenthub.SessionInfo, error) {
+	return agenthub.SessionInfo{ID: "s1", Workspace: "/w", Running: f.running}, nil
+}
+
+func (f *toolBatchFakeOps) CommandSession(_ context.Context, req agenthub.CommandSessionReq) error {
+	f.commands = append(f.commands, req)
+	return nil
+}
+
+// 旧的 {workspace,session_id,text} 调用：返回的键与值一个字都不能变。
+func TestHubSessionSendToolLegacyShape(t *testing.T) {
+	eng, _ := hubWorkspaceToolEngine(t, &toolFakeOps{})
+	tl, err := eng.GetTool(context.Background(), "session_send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tl.Call(context.Background(), "session_send",
+		`{"workspace":"/w","session_id":"s1","text":"做对比表","client_msg_id":"cm1"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"accepted":true,"message":"","queued":false,"session_id":"s1","status":"","task_id":"task_fixed"}`
+	if out != want {
+		t.Fatalf("legacy session_send out = %s, want %s", out, want)
+	}
+}
+
+// 场景4：一批的参数校验（至少一个、命令白名单、clear 互斥、绝对路径、数量上限）。
+func TestHubSessionSendToolBatchParams(t *testing.T) {
+	eng, _ := hubWorkspaceToolEngine(t, &toolFakeOps{})
+	tl, err := eng.GetTool(context.Background(), "session_send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	many := make([]string, 0, agenthub.MaxSessionAttachments+1)
+	for i := 0; i <= agenthub.MaxSessionAttachments; i++ {
+		many = append(many, fmt.Sprintf(`"/w/f-%d.md"`, i))
+	}
+	bad := []string{
+		`{"workspace":"/w","session_id":"s1","text":"  "}`,
+		`{"workspace":"/w","text":"x"}`,
+		`{"workspace":"/w","session_id":"s1","command":"nope"}`,
+		`{"workspace":"/w","session_id":"s1","command":"clear","text":"x"}`,
+		`{"workspace":"/w","session_id":"s1","command":"clear","images":["/w/a.png"]}`,
+		`{"workspace":"/w","session_id":"s1","command":"skills","command_args":"pdf"}`,
+		`{"workspace":"/w","session_id":"s1","command":"compact","command_args":"x"}`,
+		`{"workspace":"/w","session_id":"s1","files":["a.md"]}`,
+		`{"workspace":"/w","session_id":"s1","files":["~/.ssh/id_rsa"]}`,
+		`{"workspace":"/w","session_id":"s1","files":[` + strings.Join(many, ",") + `]}`,
+	}
+	for _, args := range bad {
+		if err := tl.ValidParams(context.Background(), "session_send", args); err == nil {
+			t.Errorf("ValidParams(%s) must fail", args)
+		}
+	}
+	good := []string{
+		`{"workspace":"/w","session_id":"s1","text":"x"}`,
+		`{"workspace":"/w","session_id":"s1","text":"","images":["/w/a.png"]}`,
+		`{"workspace":"/w","session_id":"s1","text":"","files":["/w/a.md"]}`,
+		`{"workspace":"/w","session_id":"s1","command":"compact"}`,
+		`{"workspace":"/w","session_id":"s1","command":"clear"}`,
+		`{"workspace":"/w","session_id":"s1","command":"skills","command_args":"load pdf"}`,
+		`{"workspace":"/w","session_id":"s1","text":"正文","command":"compact","files":["/w/a.md"],"images":["/w/a.png"]}`,
+	}
+	for _, args := range good {
+		if err := tl.ValidParams(context.Background(), "session_send", args); err != nil {
+			t.Errorf("ValidParams(%s) = %v", args, err)
+		}
+	}
+}
+
+// 场景4：只有命令 → command_only + 空 task_id（不编造一次性 id、不建 Task）。
+func TestHubSessionSendToolCommandOnly(t *testing.T) {
+	ops := &toolBatchFakeOps{toolFakeOps: &toolFakeOps{}}
+	eng, _ := hubWorkspaceToolEngine(t, ops)
+	out, err := callHubTool(t, eng, "session_send", `{"workspace":"/w","session_id":"s1","command":"compact"}`)
+	if err != nil {
+		t.Fatalf("command-only: %v", err)
+	}
+	var got struct {
+		TaskID  string `json:"task_id"`
+		Status  string `json:"status"`
+		Queued  bool   `json:"queued"`
+		Command *struct {
+			Name      string `json:"name"`
+			Args      string `json:"args"`
+			Delivered bool   `json:"delivered"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.TaskID != "" || got.Status != agenthub.StatusCommandOnly || got.Queued {
+		t.Fatalf("command-only out = %s", out)
+	}
+	if got.Command == nil || got.Command.Name != "compact" || !got.Command.Delivered {
+		t.Fatalf("command receipt = %s", out)
+	}
+	if len(ops.commands) != 1 || ops.commands[0].Command != "compact" || len(ops.dispatched) != 0 {
+		t.Fatalf("commands = %+v dispatched = %+v", ops.commands, ops.dispatched)
+	}
+}
+
+// 场景4：命令 + 正文走队列 → queued=true 时 command.delivered=false（命令还没进目标）。
+func TestHubSessionSendToolQueuedCommandNotDelivered(t *testing.T) {
+	ops := &toolBatchFakeOps{toolFakeOps: &toolFakeOps{}, running: true}
+	svc := &agenthub.WorkspaceService{
+		Ops: ops, AgentID: "ag_tools",
+		Queue: agenthub.NewQueue(agenthub.NewLedger(agenthub.NewMemoryStore()), ops),
+	}
+	eng := tools.NewToolEngine()
+	registerHubWorkspaceTools(eng, svc, nil)
+	out, err := callHubTool(t, eng, "session_send", `{"workspace":"/w","session_id":"s1","text":"正文","command":"compact"}`)
+	if err != nil {
+		t.Fatalf("queued send: %v", err)
+	}
+	var got struct {
+		TaskID  string `json:"task_id"`
+		Queued  bool   `json:"queued"`
+		Command *struct {
+			Delivered bool `json:"delivered"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Queued || got.TaskID == "" || got.Command == nil || got.Command.Delivered {
+		t.Fatalf("queued out = %s; want queued with command.delivered=false", out)
 	}
 }

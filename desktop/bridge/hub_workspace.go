@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,6 +22,8 @@ import (
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/core"
+	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/tools/builtin"
 )
 
 // hubWorkspaceOps 是 WorkspaceOps 的实现（无状态，按调用传 AgentID 查 policy）。
@@ -185,13 +188,24 @@ func (o *hubWorkspaceOps) ListSessions(ctx context.Context, workspace string) ([
 	return out, nil
 }
 
-// hubDispatchMessage 构造派发消息：hub_task header 块在前、正文 text 块在后。
+// hubDispatchMessage 构造派发消息，块序固定：hub_task header → 正文 text → 图片块。
+//
 // provider 按文本送出（模型看得到 task_id）；UI/标题只认 text 块，用户气泡里只有正文。
-func hubDispatchMessage(text, header string) core.Message {
-	msg := core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: text})
+// 图片只在这一层出现（data URL 随消息进模型上下文），**绝不进账本/任务事件**。
+// 正文为空但带图时补占位正文：目标会话的快照/标题链路把「没有 text 块」当空消息。
+// images 用变参：老调用点（只发正文）保持 `hubDispatchMessage(text, header)` 不变。
+func hubDispatchMessage(text, header string, images ...core.Content) core.Message {
+	msg := core.NewUserMessage()
 	if header != "" {
-		msg.Content = append([]core.Content{{Type: core.ContentTypeHubTask, Content: header}}, msg.Content...)
+		msg.Content = append(msg.Content, core.Content{Type: core.ContentTypeHubTask, Content: header})
 	}
+	if text == "" && len(images) > 0 {
+		text = hubImageOnlyText
+	}
+	if text != "" {
+		msg.Content = append(msg.Content, core.Content{Type: core.ContentTypeText, Content: text})
+	}
+	msg.Content = append(msg.Content, images...)
 	return msg
 }
 
@@ -304,7 +318,12 @@ func (o *hubWorkspaceOps) CreateSession(ctx context.Context, req agenthub.Create
 	return info, nil
 }
 
-// Dispatch 把任务文本送进工作区会话（Ask 只入队；运行由会话自己的 runLoop 推进）。
+// Dispatch 把一条任务消息送进工作区会话（Ask 只入队；运行由会话自己的 runLoop 推进）。
+//
+// 一批可以同时带：命令（compact/clear/skills）+ 正文 + 文件引用 + 图片。
+// 投递顺序 = 命令 → 正文（同一批 FIFO：命令先进目标会话 inbox，正文随后）。
+// 所有校验（命令白名单、clear 同批矛盾、附件路径白名单、图片格式/体积）都在
+// **占 dedup 之前**完成 —— 坏输入必须能原样重试，不能留下「从未投递」的去重占位。
 func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq) (agenthub.DispatchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return agenthub.DispatchResult{}, err
@@ -313,10 +332,6 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 	if err != nil {
 		return agenthub.DispatchResult{}, err
 	}
-	text := strings.TrimSpace(req.Text)
-	if text == "" {
-		return agenthub.DispatchResult{}, fmt.Errorf("%w: text 不能为空", agenthub.ErrInvalid)
-	}
 	sid := strings.TrimSpace(req.SessionID)
 	if sid == "" {
 		return agenthub.DispatchResult{}, fmt.Errorf("%w: session_id 不能为空", agenthub.ErrInvalid)
@@ -324,6 +339,25 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 	if isHubHomePath(path) {
 		// 双保险：knownWorkspace 已挡，但这里错了就是「把工作区任务派进智能体自己」。
 		return agenthub.DispatchResult{}, fmt.Errorf("%w: Hub home 不是工作区", agenthub.ErrInvalid)
+	}
+	command := strings.TrimSpace(req.Command)
+	commandArgs := strings.TrimSpace(req.CommandArgs)
+	if err := agenthub.ValidateSessionCommand(command, commandArgs); err != nil {
+		return agenthub.DispatchResult{}, err
+	}
+	text := strings.TrimSpace(req.Text)
+	files := hubCleanPaths(req.Files)
+	images := hubCleanPaths(req.Images)
+	// clear 会清空整个上下文：同批再塞正文/附件等于「先清空再投递」，语义自相矛盾。
+	if command == agenthub.CommandClear && (text != "" || len(files) > 0 || len(images) > 0) {
+		return agenthub.DispatchResult{}, fmt.Errorf(
+			"%w: command=clear 不能与 text/files/images 同批（clear 会清空同批正文）", agenthub.ErrInvalid)
+	}
+	// Dispatch 必须真的有一条消息要投（正文/文件引用/图片）：只有命令的批次走
+	// CommandSession（选项窄接口），不要用空消息 Ask 出一个「没有内容」的回合。
+	if text == "" && len(files) == 0 && len(images) == 0 {
+		return agenthub.DispatchResult{}, fmt.Errorf(
+			"%w: Dispatch 需要 text/files/images 至少一个（只发命令用 CommandSession）", agenthub.ErrInvalid)
 	}
 	// 注意：m.get 自己会按路径装配 runtime，所以「先 get 再 runtime 再 get」没有意义；
 	// 而磁盘上的 session 不会自动回灌 ws.sessions。重启后要派任务，需要先让 UI
@@ -339,6 +373,12 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 			return agenthub.DispatchResult{}, fmt.Errorf("%w: 无效的 hub_task header: %v", agenthub.ErrInvalid, err)
 		}
 	}
+	// 附件同样在占位之前：路径越界/图片超限要能原样重试（同坏 header 的口径）。
+	attachments, err := o.hubPrepareAttachments(req.AgentID, path, files, images)
+	if err != nil {
+		return agenthub.DispatchResult{}, err
+	}
+	body := agenthub.AppendFileRefs(text, files)
 	// client_msg_id 幂等（进程内）：同一 (workspace, session, id) 只投递一次。
 	// 跨重启的幂等由 P2-03 账本/目标侧去重负责；这里先保证「超时用同一个 id 重试」
 	// 不会把同一任务执行两遍（P2-02 评审 B2）。
@@ -356,22 +396,298 @@ func (o *hubWorkspaceOps) Dispatch(ctx context.Context, req agenthub.DispatchReq
 		o.m.hubMsgDedup[dedupKey] = sid // 先占位：并发同 id 的第二个请求直接返回
 		o.m.mu.Unlock()
 	}
-	msg := hubDispatchMessage(text, req.TaskHeader)
+	msg := hubDispatchMessage(body, req.TaskHeader, attachments.blocks...)
 	// 先置 pending 再 Ask：若 runLoop 已有 wake token，Ask 后可能立刻
 	// AgentStart→AgentEnd，晚置位会把闸门永久 latch（P2-03 复审 NB-1）。
 	bs.hubDispatchPending.Store(true)
+	// 命令先入 inbox（纯 enqueue，立即返回），正文随后：同一批里 FIFO 命令在前，
+	// 目标会话在注入段先执行 compact/clear/skills、再看正文。
+	// 命令失败 = 这一批没投递：回滚 pending 与去重占位，让调用方拿到原始错误。
+	// 已知边界：命令成功但随后的 Ask 失败时，命令已经进了 inbox（无法撤回），
+	// 回滚的只是 pending/dedup —— 正文仍可安全重试。
+	if command != "" {
+		if err := bs.s.Command(ctx, command, commandArgs); err != nil {
+			bs.hubDispatchPending.Store(false)
+			o.hubRollbackDedup(dedupKey)
+			return agenthub.DispatchResult{}, err
+		}
+	}
 	if err := bs.s.Ask(ctx, msg); err != nil {
 		bs.hubDispatchPending.Store(false)
-		if dedupKey != "" {
-			o.m.mu.Lock()
-			delete(o.m.hubMsgDedup, dedupKey)
-			o.m.mu.Unlock()
-		}
+		o.hubRollbackDedup(dedupKey)
 		return agenthub.DispatchResult{}, err
 	}
 	bs.lastActive.Store(time.Now().UnixMilli())
 	bs.wakeRun()
 	return agenthub.DispatchResult{SessionID: sid, Accepted: true}, nil
+}
+
+// hubRollbackDedup 撤销本批的 client_msg_id 占位（空键 = 本次没有占位）。
+func (o *hubWorkspaceOps) hubRollbackDedup(key string) {
+	if key == "" {
+		return
+	}
+	o.m.mu.Lock()
+	delete(o.m.hubMsgDedup, key)
+	o.m.mu.Unlock()
+}
+
+// CommandSession 只发一条命令（无正文/附件）：不建账、不过队列。
+//
+// 命令是**会话操作**而不是任务：没有正文要谁做、没有 AgentEnd 可回推。走账本会
+// 凭空造一条永远结算不了的任务并强占空闲闸门，所以这里直接进目标会话的 inbox。
+func (o *hubWorkspaceOps) CommandSession(ctx context.Context, req agenthub.CommandSessionReq) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path, err := o.knownWorkspace(req.Workspace)
+	if err != nil {
+		return err
+	}
+	sid := strings.TrimSpace(req.SessionID)
+	if sid == "" {
+		return fmt.Errorf("%w: session_id 不能为空", agenthub.ErrInvalid)
+	}
+	if isHubHomePath(path) {
+		return fmt.Errorf("%w: Hub home 不是工作区", agenthub.ErrInvalid)
+	}
+	command := strings.TrimSpace(req.Command)
+	args := strings.TrimSpace(req.Args)
+	if command == "" {
+		return fmt.Errorf("%w: command 不能为空", agenthub.ErrInvalid)
+	}
+	if err := agenthub.ValidateSessionCommand(command, args); err != nil {
+		return err
+	}
+	bs := o.m.get(path, sid)
+	if bs == nil {
+		return fmt.Errorf("%w: session %q", agenthub.ErrNotFound, sid)
+	}
+	if err := bs.s.Command(ctx, command, args); err != nil {
+		return err
+	}
+	bs.lastActive.Store(time.Now().UnixMilli())
+	bs.wakeRun()
+	return nil
+}
+
+// CheckAttachments 在建账前校验附件（WorkspaceOps 的可选扩展，见 agenthub.AttachmentChecker）。
+//
+// 为什么要图片也在这里读一遍：格式/单边/体积闸门只有读了文件才知道。留到派发时
+// 才发现「第 3 张图超限」会先建出一条 failed 任务并占住 client_msg_id 去重表。
+func (o *hubWorkspaceOps) CheckAttachments(ctx context.Context, req agenthub.AttachmentReq) ([]agenthub.AttachmentInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(req.Files) == 0 && len(req.Images) == 0 {
+		return nil, nil
+	}
+	prep, err := o.hubPrepareAttachments(req.AgentID, req.Workspace, hubCleanPaths(req.Files), hubCleanPaths(req.Images))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]agenthub.AttachmentInfo, 0, len(prep.infos))
+	for _, a := range prep.infos {
+		out = append(out, agenthub.AttachmentInfo{Kind: a.Kind, Path: a.Path, Name: a.Name, Bytes: a.Bytes})
+	}
+	return out, nil
+}
+
+// hubDispatchAttachments 一次派发的附件装配结果：账本引用 + 模型图片块。
+type hubDispatchAttachments struct {
+	infos  []agenthub.TaskAttachment
+	blocks []core.Content
+}
+
+// hubPrepareAttachments 校验附件路径（白名单/敏感目录/软链归一）并把图片读成内容块。
+// 返回值只含路径/名称/字节数 —— data URL 留在 blocks 里，不进账本。
+func (o *hubWorkspaceOps) hubPrepareAttachments(agentID agenthub.AgentID, workspace string, files, images []string) (hubDispatchAttachments, error) {
+	if len(files) == 0 && len(images) == 0 {
+		return hubDispatchAttachments{}, nil
+	}
+	if len(files) > agenthub.MaxSessionAttachments || len(images) > agenthub.MaxSessionAttachments {
+		return hubDispatchAttachments{}, fmt.Errorf(
+			"%w: 单批 files/images 各最多 %d 个（files=%d, images=%d）",
+			agenthub.ErrInvalid, agenthub.MaxSessionAttachments, len(files), len(images))
+	}
+	roots, err := o.hubAttachmentRoots(agentID, workspace)
+	if err != nil {
+		return hubDispatchAttachments{}, err
+	}
+	out := hubDispatchAttachments{infos: make([]agenthub.TaskAttachment, 0, len(files)+len(images))}
+	imagePaths := make([]string, 0, len(images))
+	for _, raw := range files {
+		info, err := hubCheckAttachmentPath(raw, agenthub.AttachmentKindFile, roots)
+		if err != nil {
+			return hubDispatchAttachments{}, err
+		}
+		out.infos = append(out.infos, info)
+	}
+	for _, raw := range images {
+		info, err := hubCheckAttachmentPath(raw, agenthub.AttachmentKindImage, roots)
+		if err != nil {
+			return hubDispatchAttachments{}, err
+		}
+		out.infos = append(out.infos, info)
+		imagePaths = append(imagePaths, info.Path)
+	}
+	blocks, err := hubLoadAttachmentImages(imagePaths)
+	if err != nil {
+		return hubDispatchAttachments{}, err
+	}
+	out.blocks = blocks
+	return out, nil
+}
+
+// hubCheckAttachmentPath 校验一个附件路径，返回账本可存的引用（真实路径）。
+func hubCheckAttachmentPath(raw, kind string, roots []string) (agenthub.TaskAttachment, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return agenthub.TaskAttachment{}, fmt.Errorf("%w: %s 路径不能为空", agenthub.ErrInvalid, kind)
+	}
+	// 相对路径没有明确基准（解析到哪算「允许目录」由实现猜），~ 也不展开：
+	// 两种写法在模型侧都常见，所以错误文案要说清楚该怎么写。
+	if !filepath.IsAbs(raw) {
+		return agenthub.TaskAttachment{}, fmt.Errorf("%w: %s 只接受绝对路径，%q 不是（~ 也不展开）", agenthub.ErrInvalid, kind, raw)
+	}
+	// 软链接在这里归一：逃逸出白名单的目标会被下面的 hubPathWithin 判掉。
+	real := hubCanonicalPath(raw)
+	if isHubHomePath(real) {
+		return agenthub.TaskAttachment{}, fmt.Errorf("%w: %s 不能指向 Hub home（智能体自己的家目录）", agenthub.ErrForbidden, kind)
+	}
+	if hubSensitivePath(real) {
+		return agenthub.TaskAttachment{}, fmt.Errorf("%w: %s 命中敏感目录（~/.go-code、~/.ssh 等）", agenthub.ErrForbidden, kind)
+	}
+	inside := false
+	for _, root := range roots {
+		if hubPathWithin(real, root) {
+			inside = true
+			break
+		}
+	}
+	if !inside {
+		return agenthub.TaskAttachment{}, fmt.Errorf(
+			"%w: %s %q 不在 policy.workspace_roots / tools.bash_roots 内（软链接逃逸同判）", agenthub.ErrForbidden, kind, raw)
+	}
+	st, err := os.Lstat(real)
+	if err != nil {
+		return agenthub.TaskAttachment{}, fmt.Errorf("%w: %s 不存在或不可读: %v", agenthub.ErrInvalid, kind, raw)
+	}
+	if !st.Mode().IsRegular() {
+		return agenthub.TaskAttachment{}, fmt.Errorf("%w: %s 不是普通文件: %q", agenthub.ErrInvalid, kind, raw)
+	}
+	return agenthub.TaskAttachment{Kind: kind, Path: real, Name: filepath.Base(real), Bytes: st.Size()}, nil
+}
+
+// hubAttachmentRoots 计算附件允许的根：policy.workspace_roots ∪ tools.bash_roots ∪ 目标工作区。
+// 三项任一命中即可（bash_roots 本来就是「智能体可读的目录」）。
+func (o *hubWorkspaceOps) hubAttachmentRoots(agentID agenthub.AgentID, workspace string) ([]string, error) {
+	if strings.TrimSpace(string(agentID)) == "" {
+		return nil, fmt.Errorf("%w: agent_id 不能为空（附件路径要按智能体 policy 校验）", agenthub.ErrInvalid)
+	}
+	st, err := o.m.hubStore()
+	if err != nil {
+		return nil, err
+	}
+	prof, err := st.LoadAgent(context.Background(), agentID)
+	if err != nil {
+		return nil, fmt.Errorf("读取智能体失败: %w", err)
+	}
+	if prof == nil || prof.Deleted {
+		return nil, fmt.Errorf("%w: 智能体 %s 不可用", agenthub.ErrNotFound, agentID)
+	}
+	roots := make([]string, 0, len(prof.Policy.WorkspaceRoots)+len(prof.Tools.BashRoots)+1)
+	seen := make(map[string]bool, cap(roots))
+	add := func(p string) {
+		if strings.TrimSpace(p) == "" {
+			return
+		}
+		real, err := hubAbsExisting(hubExpandHome(p))
+		if err != nil || seen[real] {
+			return
+		}
+		seen[real] = true
+		roots = append(roots, real)
+	}
+	for _, p := range prof.Policy.WorkspaceRoots {
+		add(p)
+	}
+	for _, p := range prof.Tools.BashRoots {
+		add(p)
+	}
+	add(workspace)
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("%w: 智能体未配置 policy.workspace_roots（附件路径必须落在显式白名单内）", agenthub.ErrForbidden)
+	}
+	return roots, nil
+}
+
+// hubLoadAttachmentImages 把图片路径读成模型内容块（格式/单边/体积闸门复用 tools/builtin）。
+//
+// 复用方式：走 builtin 的 read_file 工具 + tools.ImageSink，而不是在这里再写一份
+// 解码/切片/重编码。loadImageForModel 是未导出的，但它的**行为**就是 read_file 的
+// 图片分支（png/jpeg/gif 可解码、单边 >8192px 切片、超体积降采样 JPEG），两套判据
+// 分开写必然漂移（那次 390x9697 截图事故就是这么来的）。这里只负责把 blocks 收集
+// 起来、并把**总量**卡在 MaxSessionImageBytes（单张闸门由 read_file 自己管）。
+func hubLoadAttachmentImages(paths []string) ([]core.Content, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	// root 只影响相对路径解析；这里全是绝对路径，取第一个文件的目录即可。
+	var readTool tools.Tool
+	for _, tl := range builtin.NewFileTools(filepath.Dir(paths[0])).Tools() {
+		if tl.Name() == "read_file" {
+			readTool = tl
+			break
+		}
+	}
+	if readTool == nil {
+		return nil, fmt.Errorf("%w: 图片读取通路不可用（read_file 未注册）", agenthub.ErrInvalid)
+	}
+	blocks := make([]core.Content, 0, len(paths))
+	var total int64
+	for _, p := range paths {
+		args, err := json.Marshal(map[string]string{"path": p})
+		if err != nil {
+			return nil, err
+		}
+		sink := &tools.ImageSink{}
+		if _, err := readTool.Call(tools.WithImageSink(context.Background(), sink), "read_file", string(args)); err != nil {
+			return nil, fmt.Errorf("%w: 读取图片失败: %v", agenthub.ErrInvalid, err)
+		}
+		imgs := sink.Images()
+		if len(imgs) == 0 {
+			return nil, fmt.Errorf("%w: %s 不是可解码的图片（png/jpeg/gif）", agenthub.ErrInvalid, filepath.Base(p))
+		}
+		for _, im := range imgs {
+			total += int64(len(im.Content))
+		}
+		// 逐张累计，超了立刻失败（不做「先全部读入再判」的白烧内存）。
+		if total > agenthub.MaxSessionImageBytes {
+			return nil, fmt.Errorf("%w: 图片总量超过 %d 字节（%d 张图的 data URL 之后仍超限）",
+				agenthub.ErrInvalid, agenthub.MaxSessionImageBytes, len(paths))
+		}
+		blocks = append(blocks, imgs...)
+	}
+	return blocks, nil
+}
+
+// hubCleanPaths 去空白、去重、保序（工具层/服务层已校验，这里是派发前的最后一道）。
+func hubCleanPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, raw := range paths {
+		p := strings.TrimSpace(raw)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // AgentDispatch 把智能体目标任务投进目标的群会话（P3b-03，target.kind=agent）。

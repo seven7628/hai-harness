@@ -60,6 +60,61 @@ type DispatchReq struct {
 	// TaskHeader 非空 = 在正文前加一个 hub_task 块（EncodeTaskHeader 的 JSON）。
 	// 目标会话的 UserInputsConsumed 据此绑定任务；正文仍是独立 text 块。
 	TaskHeader string `json:"task_header,omitempty"`
+	// Command/CommandArgs 非空 = 在**同一次**投递里先执行 SDK 命令再投正文
+	// （FIFO：命令消息先入 inbox）。实现方必须在正文投递失败时回滚占位，
+	// 且不得把命令失败吞成「已投递」。
+	Command     string `json:"command,omitempty"`
+	CommandArgs string `json:"command_args,omitempty"`
+	// Files 是**文件引用**路径（绝对路径）：只拼 `@路径` 到正文，不读内容。
+	Files []string `json:"files,omitempty"`
+	// Images 是图片路径（绝对路径）：派发时读成 image 内容块（不进账本/事件）。
+	Images []string `json:"images,omitempty"`
+}
+
+// CommandSessionReq 只发一条命令（无正文/附件）时的请求。
+type CommandSessionReq struct {
+	AgentID   AgentID `json:"agent_id"`
+	Workspace string  `json:"workspace"`
+	SessionID string  `json:"session_id"`
+	Command   string  `json:"command"`
+	Args      string  `json:"args,omitempty"`
+}
+
+// CommandSessionOps 是 WorkspaceOps 的**可选**扩展：命令专用投递通道。
+//
+// 为什么单独一个方法而不是「Dispatch 传空正文」：只有命令时不存在任务可言
+// （没有正文要给谁做、没有 AgentEnd 可回推），走账本会凭空造一条永远结算不了的
+// 任务并强占目标的空闲闸门。命令是会话操作，一跳入 inbox 即可。
+// 未实现该接口的 WorkspaceOps（测试替身/只读实现）仍按原样工作。
+type CommandSessionOps interface {
+	CommandSession(ctx context.Context, req CommandSessionReq) error
+}
+
+// AttachmentReq 是一次 session_send 的附件路径批（files/images 均为绝对路径）。
+type AttachmentReq struct {
+	AgentID   AgentID  `json:"agent_id"`
+	Workspace string   `json:"workspace"`
+	Files     []string `json:"files,omitempty"`
+	Images    []string `json:"images,omitempty"`
+}
+
+// AttachmentInfo 是校验后的附件引用（**只含路径/名称/字节数，不含内容**）。
+type AttachmentInfo struct {
+	Kind  string `json:"kind"`
+	Path  string `json:"path"`
+	Name  string `json:"name,omitempty"`
+	Bytes int64  `json:"bytes,omitempty"`
+}
+
+// AttachmentChecker 是 WorkspaceOps 的**可选**扩展：建账前校验附件路径。
+//
+// 为什么必须在建账前：路径白名单（policy.workspace_roots / tools.bash_roots）、
+// 敏感目录、软链逃逸与图片格式/体积闸门都是**执行边界**的知识（bridge 侧），
+// 但一旦先建了账本条目、再在队列泵送时才发现路径非法，就会留下一条 failed 任务
+// 并污染 client_msg_id 去重表。实现方返回错误 = 调用方**不落账、不派发**。
+// 未实现该接口的 WorkspaceOps 仍按原样工作（附件只在派发时校验）。
+type AttachmentChecker interface {
+	CheckAttachments(ctx context.Context, req AttachmentReq) ([]AttachmentInfo, error)
 }
 
 // DispatchDuplicateMessage 是目标侧去重命中时的 Message（同一幂等键已投递过）。

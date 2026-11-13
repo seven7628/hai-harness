@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/seven7628/hai-harness/agenthub"
 	"github.com/seven7628/hai-harness/tools"
@@ -242,18 +243,27 @@ func newHubSessionSendTool(svc *agenthub.WorkspaceService) *hubSessionSendTool {
 	return &hubSessionSendTool{
 		BaseTool: tools.BaseTool{
 			Name_: "session_send",
-			Description_: "Send a task message to an existing project session. First call workspace_list and session_list to find the target; " +
-				"the target must be a session inside a registered project workspace (never this agent's own home). " +
-				"Returns task_id (ledger id) and session_id; queued=true means the target is busy and the task waits in the Hub queue " +
-				"(it has NOT started yet). accepted=false + status=canceled/failed/interrupted/blocked_budget/declined means the task " +
-				"was NOT delivered; read message and call task_status before retrying. The project session runs the task asynchronously. " +
-				"This only dispatches — it does not read or write workspace files directly.",
+			Description_: "Send one batch to an existing project session: text, a slash-command (compact|clear|skills), file references and/or images. " +
+				"First call workspace_list and session_list to find the target; the target must be a session inside a registered project workspace " +
+				"(never this agent's own home). At least one of text/command/files/images is required. " +
+				"command=compact compresses the context, clear resets it (cannot be combined with text/files/images), skills needs command_args=\"load <name>\". " +
+				"The command runs in the SAME batch right before the text (FIFO), so clear/compact happen before the project session reads the message. " +
+				"files are ONLY `@path` references appended to the text (absolute paths, <=10, content is not read here; the project session reads them itself). " +
+				"images are absolute paths that are read and embedded as image blocks (<=10, <=3MiB total); never put data URLs in text. " +
+				"Returns task_id (ledger id) and session_id; queued=true means the target is busy and the task waits in the Hub queue (it has NOT started yet, " +
+				"command.delivered=false). command-only calls (no text/files/images) return status=command_only with an empty task_id: the command is " +
+				"enqueued directly and no task is created. accepted=false + status=canceled/failed/interrupted/blocked_budget/declined means the task " +
+				"was NOT delivered; read message and call task_status before retrying. This only dispatches — it does not read or write workspace files directly.",
 			Params_: tools.Obj(map[string]any{
 				"workspace":     tools.Str("Workspace path from workspace_list"),
 				"session_id":    tools.Str("Session id from session_list"),
-				"text":          tools.Str("Task text for the project session"),
+				"text":          tools.Str("Task text for the project session (may be empty when files/images/command carry the request)"),
+				"command":       tools.Str("Optional built-in command to run in the target session before the text: compact | clear | skills"),
+				"command_args":  tools.Str("Arguments for command: only skills uses this, in the form \"load <name>\""),
+				"files":         tools.ArrayStr("Optional absolute file paths to reference as `@path` in the text (max 10). Only the reference is appended; the file content is not sent"),
+				"images":        tools.ArrayStr("Optional absolute image paths to embed for the project session (max 10, png/jpeg/gif, <=3MiB total)"),
 				"client_msg_id": tools.Str("Optional idempotency key: a retry with the same id returns the same logical task; failed/canceled/interrupted retries get a NEW task_id (new attempt), completed ones are not re-run"),
-			}, "workspace", "session_id", "text"),
+			}, "workspace", "session_id"),
 			CanParallel_: false,
 			ReadOnly_:    false,
 		},
@@ -261,11 +271,54 @@ func newHubSessionSendTool(svc *agenthub.WorkspaceService) *hubSessionSendTool {
 	}
 }
 
+// hubSessionSendArgs 是 session_send 的一批参数（text/command/files/images 至少一个）。
 type hubSessionSendArgs struct {
-	Workspace   string `json:"workspace"`
-	SessionID   string `json:"session_id"`
-	Text        string `json:"text"`
-	ClientMsgID string `json:"client_msg_id"`
+	Workspace   string   `json:"workspace"`
+	SessionID   string   `json:"session_id"`
+	Text        string   `json:"text"`
+	Command     string   `json:"command"`
+	CommandArgs string   `json:"command_args"`
+	Files       []string `json:"files"`
+	Images      []string `json:"images"`
+	ClientMsgID string   `json:"client_msg_id"`
+}
+
+// input 转成服务层输入（幂等键原样透传，其余字段由服务层 TrimSpace/规范化）。
+func (a hubSessionSendArgs) input() agenthub.SendInput {
+	return agenthub.SendInput{
+		Workspace: a.Workspace, SessionID: a.SessionID, Text: a.Text,
+		Command: a.Command, CommandArgs: a.CommandArgs,
+		Files: a.Files, Images: a.Images, ClientMsgID: a.ClientMsgID,
+	}
+}
+
+// validateSessionSendArgs 工具层校验：命令白名单/同批矛盾/附件数量与绝对路径。
+// 服务层会再校验一遍（工具层先给出可恢复的明确拒绝，别让模型一路调到执行边界）。
+func validateSessionSendArgs(a hubSessionSendArgs) error {
+	if strings.TrimSpace(a.Workspace) == "" || strings.TrimSpace(a.SessionID) == "" {
+		return fmt.Errorf("session_send: workspace 与 session_id 不能为空（先 workspace_list / session_list）")
+	}
+	if err := agenthub.ValidateSessionCommand(a.Command, a.CommandArgs); err != nil {
+		return fmt.Errorf("session_send: %v", err)
+	}
+	files, err := agenthub.CleanAttachmentPaths("files", a.Files)
+	if err != nil {
+		return fmt.Errorf("session_send: %v", err)
+	}
+	images, err := agenthub.CleanAttachmentPaths("images", a.Images)
+	if err != nil {
+		return fmt.Errorf("session_send: %v", err)
+	}
+	text := strings.TrimSpace(a.Text)
+	command := strings.TrimSpace(a.Command)
+	// clear 会清空上下文（含同一批的正文/附件）：同批出现是自相矛盾的请求。
+	if command == agenthub.CommandClear && (text != "" || len(files) > 0 || len(images) > 0) {
+		return fmt.Errorf("session_send: command=clear 不能与 text/files/images 同批（clear 会清空同批正文）")
+	}
+	if command == "" && text == "" && len(files) == 0 && len(images) == 0 {
+		return fmt.Errorf("session_send: text/command/files/images 至少要给一个")
+	}
+	return nil
 }
 
 func (t *hubSessionSendTool) ValidParams(_ context.Context, _, arguments string) error {
@@ -273,13 +326,7 @@ func (t *hubSessionSendTool) ValidParams(_ context.Context, _, arguments string)
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return err
 	}
-	if a.Workspace == "" || a.SessionID == "" {
-		return fmt.Errorf("session_send: workspace 与 session_id 不能为空（先 workspace_list / session_list）")
-	}
-	if a.Text == "" {
-		return fmt.Errorf("session_send: text 不能为空")
-	}
-	return nil
+	return validateSessionSendArgs(a)
 }
 
 func (t *hubSessionSendTool) Call(ctx context.Context, _, arguments string) (string, error) {
@@ -287,7 +334,7 @@ func (t *hubSessionSendTool) Call(ctx context.Context, _, arguments string) (str
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	res, err := t.svc.Send(ctx, a.Workspace, a.SessionID, a.Text, a.ClientMsgID)
+	res, err := t.svc.SendBatch(ctx, a.input())
 	if err != nil {
 		if t.alert != nil {
 			code := "dispatch_denied"
@@ -305,11 +352,16 @@ func (t *hubSessionSendTool) Call(ctx context.Context, _, arguments string) (str
 		}
 		return "", err
 	}
-	return marshalHubToolResult(map[string]any{
+	out := map[string]any{
 		"task_id": res.TaskID, "session_id": res.SessionID,
 		"accepted": res.Accepted, "status": res.Status, "queued": res.Queued,
 		"message": res.Message,
-	})
+	}
+	// 只有带命令的批次才多这个键：旧的纯文本调用返回的键/值与之前完全一致。
+	if res.Command != nil {
+		out["command"] = res.Command
+	}
+	return marshalHubToolResult(out)
 }
 
 func marshalHubToolResult(v any) (string, error) {

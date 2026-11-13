@@ -1216,3 +1216,67 @@ func TestQueuePumpDropsStaleTerminalHead(t *testing.T) {
 		t.Fatalf("queued after pump = %d, want 0", n)
 	}
 }
+
+// 场景4：Pump 把命令与附件路径原样透传给 DispatchReq（命令先于正文由执行边界投递）。
+func TestQueuePumpPassesCommandAndAttachments(t *testing.T) {
+	ctx := context.Background()
+	ops := &queueFakeOps{}
+	q, st := newTestQueue(t, ops)
+	task := queueTask("看这三张图")
+	task.Command = CommandCompact
+	task.CommandArgs = ""
+	task.Attachments = []TaskAttachment{
+		{Kind: AttachmentKindFile, Path: "/ws/a.md", Name: "a.md", Bytes: 12},
+		{Kind: AttachmentKindImage, Path: "/ws/1.png", Name: "1.png", Bytes: 34},
+		{Kind: AttachmentKindImage, Path: "/ws/2.png", Name: "2.png", Bytes: 56},
+	}
+	created, err := q.Submit(ctx, task)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if created.Status != TaskDispatched {
+		t.Fatalf("status = %q, want dispatched", created.Status)
+	}
+	if len(ops.dispatched) != 1 {
+		t.Fatalf("dispatch calls = %d", len(ops.dispatched))
+	}
+	got := ops.dispatched[0]
+	if got.Command != CommandCompact {
+		t.Fatalf("dispatched command = %q, want %q", got.Command, CommandCompact)
+	}
+	if len(got.Files) != 1 || got.Files[0] != "/ws/a.md" {
+		t.Fatalf("dispatched files = %+v", got.Files)
+	}
+	if len(got.Images) != 2 || got.Images[0] != "/ws/1.png" || got.Images[1] != "/ws/2.png" {
+		t.Fatalf("dispatched images = %+v", got.Images)
+	}
+	// 账本仍只存引用（不含内容），且能回放出同样的一批。
+	replayed, err := NewLedger(st).Replay(ctx, created.ID)
+	if err != nil || len(replayed.Attachments) != 3 || replayed.Command != CommandCompact {
+		t.Fatalf("replayed = %+v, %v", replayed, err)
+	}
+}
+
+// 场景4：只有图片/文件引用（正文为空）的任务合法；两者都没有仍然拒绝。
+func TestQueueSubmitAllowsAttachmentOnlyTask(t *testing.T) {
+	ctx := context.Background()
+	ops := &queueFakeOps{}
+	q, _ := newTestQueue(t, ops)
+	task := queueTask("")
+	task.Attachments = []TaskAttachment{{Kind: AttachmentKindImage, Path: "/ws/1.png", Bytes: 10}}
+	created, err := q.Submit(ctx, task)
+	if err != nil {
+		t.Fatalf("image-only task rejected: %v", err)
+	}
+	if created.Status != TaskDispatched || len(ops.dispatched) != 1 {
+		t.Fatalf("image-only task = %+v, dispatched=%d", created, len(ops.dispatched))
+	}
+	if got := ops.dispatched[0]; got.Text != "" || len(got.Images) != 1 {
+		t.Fatalf("image-only dispatch req = %+v", got)
+	}
+
+	empty := queueTask("")
+	if _, err := q.Submit(ctx, empty); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty task (no text, no attachments) = %v, want ErrInvalid", err)
+	}
+}

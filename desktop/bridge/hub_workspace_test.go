@@ -4,13 +4,19 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/core"
 )
 
 func createWorkspaceAgent(t *testing.T, m *manager, buf *syncBuf, id int, name string, roots []string) agenthub.AgentProfile {
@@ -620,5 +626,449 @@ func TestHubDispatchBadHeaderDoesNotPoisonDedup(t *testing.T) {
 	}
 	if res.Message == agenthub.DispatchDuplicateMessage {
 		t.Fatal("bad header poisoned client_msg_id dedup: legal retry saw duplicate")
+	}
+}
+
+// 场景4：命令与正文同批 → 目标会话 inbox 里命令在前、正文在后（FIFO，同一批）。
+func TestHubDispatchCommandBeforeText(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "CmdAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-cmd", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	res, err := ops.Dispatch(context.Background(), agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-cmd",
+		Text: "正文", Command: "compact",
+	})
+	if err != nil || !res.Accepted {
+		t.Fatalf("dispatch = %+v, %v", res, err)
+	}
+	msgs := bs.s.PendingSnapshot()
+	if len(msgs) != 2 {
+		t.Fatalf("inbox = %d messages, want command + text", len(msgs))
+	}
+	if !msgs[0].IsCommandMessage() || !strings.HasPrefix(msgs[0].Content[0].Content, "compact") {
+		t.Fatalf("first inbox message = %+v, want the command first", msgs[0])
+	}
+	if msgs[1].Role != core.User || len(msgs[1].Content) != 1 || msgs[1].Content[0].Content != "正文" {
+		t.Fatalf("second inbox message = %+v, want the text", msgs[1])
+	}
+	if !bs.hubDispatchPending.Load() {
+		t.Fatal("dispatch must leave the pending gate set until AgentStart")
+	}
+}
+
+// 场景4：空正文 + 图片/文件引用也能派发；图片成 image 块，文件只拼 `@路径`。
+func TestHubDispatchAttachments(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "AttachAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-att", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	ctx := context.Background()
+	pngPath := filepath.Join(wsPath, "shot.png")
+	writeTestPNG(t, pngPath, 8, 8)
+	mdPath := filepath.Join(wsPath, "notes.md")
+	if err := os.WriteFile(mdPath, []byte("# notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lastMessage := func() core.Message {
+		t.Helper()
+		msgs := bs.s.PendingSnapshot()
+		if len(msgs) == 0 {
+			t.Fatal("no message in inbox")
+		}
+		return msgs[len(msgs)-1]
+	}
+
+	// 纯图片：占位正文 + image 块（正文为空不能变成「空消息」）。
+	if _, err := ops.Dispatch(ctx, agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-att", Images: []string{pngPath},
+	}); err != nil {
+		t.Fatalf("image-only dispatch: %v", err)
+	}
+	msg := lastMessage()
+	if len(msg.Content) != 2 || msg.Content[0].Type != core.ContentTypeText || msg.Content[0].Content != hubImageOnlyText {
+		t.Fatalf("image-only content = %+v", msg.Content)
+	}
+	if msg.Content[1].Type != core.ContentTypeImage || !strings.HasPrefix(msg.Content[1].Content, "data:image/png;base64,") {
+		t.Fatalf("image block = %+v", msg.Content[1])
+	}
+
+	// 纯文件：正文里只有 `@绝对路径`（不读内容、不塞 data URL）。
+	if _, err := ops.Dispatch(ctx, agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-att", Files: []string{mdPath},
+	}); err != nil {
+		t.Fatalf("file-only dispatch: %v", err)
+	}
+	msg = lastMessage()
+	if len(msg.Content) != 1 || msg.Content[0].Content != "@"+mdPath {
+		t.Fatalf("file-only content = %+v", msg.Content)
+	}
+
+	// header + 正文 + 文件 + 图片：块序必须是 header → text → image。
+	header, err := agenthub.EncodeTaskHeader(&agenthub.Task{
+		ID: "task_probe_attach", RootTaskID: "task_probe_attach",
+		Origin: agenthub.TaskOrigin{Kind: agenthub.OriginDM, AgentID: "ag_probe"}, Callback: agenthub.CallbackAgentEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ops.Dispatch(ctx, agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-att",
+		Text: "看这个", Files: []string{mdPath}, Images: []string{pngPath}, TaskHeader: header,
+	}); err != nil {
+		t.Fatalf("batch dispatch: %v", err)
+	}
+	msg = lastMessage()
+	if len(msg.Content) != 3 {
+		t.Fatalf("batch content = %+v", msg.Content)
+	}
+	if msg.Content[0].Type != core.ContentTypeHubTask || msg.Content[1].Type != core.ContentTypeText || msg.Content[2].Type != core.ContentTypeImage {
+		t.Fatalf("block order = %v, %v, %v", msg.Content[0].Type, msg.Content[1].Type, msg.Content[2].Type)
+	}
+	if msg.Content[1].Content != "看这个\n@"+mdPath {
+		t.Fatalf("text block = %q", msg.Content[1].Content)
+	}
+	if strings.Contains(msg.Content[1].Content, "data:image") {
+		t.Fatalf("data URL leaked into the text block: %q", msg.Content[1].Content)
+	}
+}
+
+// 场景4：坏附件（相对路径/~/.ssh/工作区外/软链逃逸/超限/非图片）全部在占 dedup 之前拒绝。
+func TestHubDispatchRejectsBadAttachmentsBeforeDedup(t *testing.T) {
+	m, buf := testManager(t)
+	home := os.Getenv("HOME")
+	wsPath := t.TempDir()
+	outside := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "BadAttachAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.create(wsPath, "s-bad", ""); err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sshKey := filepath.Join(sshDir, "id_rsa")
+	if err := os.WriteFile(sshKey, []byte("PRIVATE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 允许根 = home 的智能体：~/.ssh 必须在 hubSensitivePath 这一层被拒（而不是只靠根白名单）。
+	homeAgent := createWorkspaceAgent(t, m, buf, 2, "HomeRootAgent", []string{home})
+
+	outsideFile := filepath.Join(outside, "secret.md")
+	if err := os.WriteFile(outsideFile, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(wsPath, "escape.png")
+	if err := os.Symlink(outsideFile, link); err != nil {
+		t.Fatal(err)
+	}
+	mdPath := filepath.Join(wsPath, "notes.md")
+	if err := os.WriteFile(mdPath, []byte("# notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	many := make([]string, 0, agenthub.MaxSessionAttachments+1)
+	for i := 0; i <= agenthub.MaxSessionAttachments; i++ {
+		p := filepath.Join(wsPath, fmt.Sprintf("f-%d.md", i))
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		many = append(many, p)
+	}
+
+	cases := []struct {
+		name   string
+		agent  agenthub.AgentID
+		files  []string
+		images []string
+	}{
+		{"relative path", p.ID, []string{"notes.md"}, nil},
+		{"home alias", p.ID, []string{"~/.ssh/id_rsa"}, nil},
+		{"outside roots", p.ID, []string{outsideFile}, nil},
+		{"sensitive ssh", homeAgent.ID, []string{sshKey}, nil},
+		{"symlink escape", p.ID, []string{link}, nil},
+		{"too many files", p.ID, many, nil},
+		{"missing file", p.ID, []string{filepath.Join(wsPath, "nope.md")}, nil},
+		{"non-image in images", p.ID, nil, []string{mdPath}},
+	}
+	ctx := context.Background()
+	for i, c := range cases {
+		key := fmt.Sprintf("cm-bad-%d", i)
+		_, err := ops.Dispatch(ctx, agenthub.DispatchReq{
+			AgentID: c.agent, Workspace: wsPath, SessionID: "s-bad",
+			Text: "x", Files: c.files, Images: c.images, ClientMsgID: key,
+		})
+		if err == nil {
+			t.Fatalf("%s: dispatch must fail", c.name)
+		}
+		m.mu.Lock()
+		_, seen := m.hubMsgDedup[wsPath+"\x00s-bad\x00"+key]
+		m.mu.Unlock()
+		if seen {
+			t.Fatalf("%s: rejected attachment left a client_msg_id placeholder", c.name)
+		}
+	}
+	// 一个都没投出去：目标会话的 inbox 里应该一条都没有。
+	badBS := m.get(wsPath, "s-bad")
+	if badBS == nil {
+		t.Fatal("session s-bad disappeared")
+	}
+	if n := badBS.s.PendingCount(); n != 0 {
+		t.Fatalf("rejected dispatches reached the session: %d pending", n)
+	}
+}
+
+// 场景4：clear 与正文同批 → 直接拒绝（clear 会清空同批正文），不占 dedup。
+func TestHubDispatchClearWithTextRejected(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "ClearAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.create(wsPath, "s-clear", ""); err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	_, err := ops.Dispatch(context.Background(), agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-clear",
+		Text: "正文", Command: "clear", ClientMsgID: "cm-clear",
+	})
+	if !errors.Is(err, agenthub.ErrInvalid) {
+		t.Fatalf("clear+text = %v, want ErrInvalid", err)
+	}
+	m.mu.Lock()
+	_, seen := m.hubMsgDedup[wsPath+"\x00s-clear\x00cm-clear"]
+	m.mu.Unlock()
+	if seen {
+		t.Fatal("rejected clear+text left a client_msg_id placeholder")
+	}
+}
+
+// 场景4：只有命令走 CommandSession（不建 Task、不进队列）；未知命令被拒。
+func TestHubCommandSessionDirect(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "DirectCmdAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-direct", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newHubWorkspaceOps(m)
+	ctx := context.Background()
+	if err := ops.CommandSession(ctx, agenthub.CommandSessionReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-direct", Command: "compact",
+	}); err != nil {
+		t.Fatalf("command session: %v", err)
+	}
+	msgs := bs.s.PendingSnapshot()
+	if len(msgs) != 1 || !msgs[0].IsCommandMessage() {
+		t.Fatalf("inbox = %+v, want one command message", msgs)
+	}
+	if err := ops.CommandSession(ctx, agenthub.CommandSessionReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-direct", Command: "nope",
+	}); !errors.Is(err, agenthub.ErrInvalid) {
+		t.Fatalf("unknown command = %v, want ErrInvalid", err)
+	}
+	// 命令通道不碰账本：队列里没有任何任务。
+	q, err := m.hubQueueFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q.QueuedCount(wsPath, "s-direct"); got != 0 {
+		t.Fatalf("queued = %d, want 0", got)
+	}
+}
+
+// 场景4：3 张图的派发在账本/任务事件里只留路径 —— 不含 base64/data URL，事件 < 100KB。
+func TestHubSessionSendImageAttachmentsStayOutOfLedger(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "LedgerAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := m.create(wsPath, "s-ledger", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs.running.Store(true) // 目标忙 → 任务留在队列，账本里能看到完整快照与事件
+	paths := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		p := filepath.Join(wsPath, fmt.Sprintf("shot-%d.png", i))
+		writeTestPNG(t, p, 8, 8)
+		paths = append(paths, p)
+	}
+	q, err := m.hubQueueFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &agenthub.WorkspaceService{Ops: newHubWorkspaceOps(m), AgentID: agenthub.AgentID(p.ID), Queue: q}
+	ctx := context.Background()
+	res, err := svc.SendBatch(ctx, agenthub.SendInput{
+		Workspace: wsPath, SessionID: "s-ledger", Text: "看三张图", Images: paths,
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !res.Queued || res.TaskID == "" {
+		t.Fatalf("send result = %+v, want queued with task_id", res)
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := st.ReadTaskEvents(ctx, agenthub.TaskID(res.TaskID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= 100*1024 {
+		t.Fatalf("task events = %d bytes, want < 100KB", len(raw))
+	}
+	for _, needle := range []string{"base64", "data:image", "iVBORw0KGgo"} {
+		if strings.Contains(string(raw), needle) {
+			t.Fatalf("task events contain %q", needle)
+		}
+	}
+	task, err := st.LoadTask(ctx, agenthub.TaskID(res.TaskID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskJSON, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(taskJSON), "base64") || strings.Contains(string(taskJSON), "data:image") {
+		t.Fatalf("task snapshot contains image payload: %s", taskJSON)
+	}
+	if len(task.Attachments) != 3 || task.Attachments[0].Kind != agenthub.AttachmentKindImage ||
+		task.Attachments[0].Path == "" || task.Attachments[0].Bytes <= 0 {
+		t.Fatalf("attachments = %+v", task.Attachments)
+	}
+}
+
+// 场景4：图片总量超 3MiB → 建账前拒绝（不落账、不占 dedup）。
+func TestHubSessionSendImageBudgetRejectedBeforeLedger(t *testing.T) {
+	m, buf := testManager(t)
+	wsPath := t.TempDir()
+	p := createWorkspaceAgent(t, m, buf, 1, "ImageBudgetAgent", []string{wsPath})
+	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
+	if _, err := m.wsReg.add(wsPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.create(wsPath, "s-budget", ""); err != nil {
+		t.Fatal(err)
+	}
+	paths := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		p := filepath.Join(wsPath, fmt.Sprintf("noise-%d.png", i))
+		writeTestNoisePNG(t, p, 640, 640)
+		paths = append(paths, p)
+	}
+	ops := newHubWorkspaceOps(m)
+	ctx := context.Background()
+
+	// 建账前（CheckAttachments）就拒绝。
+	if _, err := ops.CheckAttachments(ctx, agenthub.AttachmentReq{
+		AgentID: p.ID, Workspace: wsPath, Images: paths,
+	}); !errors.Is(err, agenthub.ErrInvalid) {
+		t.Fatalf("CheckAttachments = %v, want ErrInvalid", err)
+	}
+	q, err := m.hubQueueFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &agenthub.WorkspaceService{Ops: ops, AgentID: agenthub.AgentID(p.ID), Queue: q}
+	if _, err := svc.SendBatch(ctx, agenthub.SendInput{
+		Workspace: wsPath, SessionID: "s-budget", Text: "看图", Images: paths,
+	}); !errors.Is(err, agenthub.ErrInvalid) {
+		t.Fatalf("SendBatch over image budget = %v, want ErrInvalid", err)
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tasks, err := st.ListTasks(ctx, agenthub.TaskFilter{}); err != nil || len(tasks) != 0 {
+		t.Fatalf("over-budget send must not create tasks: %+v, %v", tasks, err)
+	}
+
+	// 派发路径同样在占 dedup 之前拒绝。
+	if _, err := ops.Dispatch(ctx, agenthub.DispatchReq{
+		AgentID: p.ID, Workspace: wsPath, SessionID: "s-budget",
+		Images: paths, ClientMsgID: "cm-big",
+	}); !errors.Is(err, agenthub.ErrInvalid) {
+		t.Fatalf("Dispatch over image budget = %v, want ErrInvalid", err)
+	}
+	m.mu.Lock()
+	_, seen := m.hubMsgDedup[wsPath+"\x00s-budget\x00cm-big"]
+	m.mu.Unlock()
+	if seen {
+		t.Fatal("over-budget dispatch left a client_msg_id placeholder")
+	}
+}
+
+// writeTestPNG 写一张可解码的小 PNG。
+func writeTestPNG(t *testing.T, path string, w, h int) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i := 3; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 0xFF // alpha
+	}
+	writePNG(t, path, img)
+}
+
+// writeTestNoisePNG 写一张接近不可压缩的 PNG（用于构造超过图片总量闸门的批次）。
+func writeTestNoisePNG(t *testing.T, path string, w, h int) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	if _, err := crand.Read(img.Pix); err != nil {
+		t.Fatal(err)
+	}
+	writePNG(t, path, img)
+}
+
+func writePNG(t *testing.T, path string, img image.Image) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatalf("encode png: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -95,6 +95,19 @@ type TaskArtifact struct {
 	SHA256  string `json:"sha256,omitempty"`
 }
 
+// TaskAttachment 是派发时附带的附件**引用**：路径/名称/字节数。
+//
+// 刻意不存内容（data URL / 文件正文）：Task 会进账本快照、任务事件、任务板/结果卡
+// 投影，一条 3MiB 的图会让事件流与 UI 一起爆掉；图片本体只在派发瞬间进目标会话的
+// 模型上下文（见 bridge 的 hubDispatchMessage），文件则只以 `@路径` 引用出现在正文里，
+// 由目标会话自己按需读取。
+type TaskAttachment struct {
+	Kind  string `json:"kind"` // image | file
+	Path  string `json:"path"` // 绝对路径（bridge 校验后的真实路径）
+	Name  string `json:"name,omitempty"`
+	Bytes int64  `json:"bytes,omitempty"`
+}
+
 // TaskResult 是任务终态的权威结果。
 type TaskResult struct {
 	FinishReason string         `json:"finish_reason,omitempty"`
@@ -120,7 +133,14 @@ type Task struct {
 	// ArtifactIDs 是派发时显式引用的本群产物（assign_task 的可选入参）。
 	// 与 Result.Artifacts（执行产出的快照）是两回事：这里是「给对方看的输入」。
 	ArtifactIDs []string `json:"artifact_ids,omitempty"`
-	Callback    string   `json:"callback"`
+	// Command/CommandArgs 是本批要先在目标会话里执行的 SDK 命令（compact/clear/skills）。
+	// 与 Instruction 同一个派发批次，FIFO：命令先入 inbox、正文在后（见 Dispatch）。
+	Command     string `json:"command,omitempty"`
+	CommandArgs string `json:"command_args,omitempty"`
+	// Attachments 是本批附带的附件引用（kind/path/name/bytes）。**只存引用不存内容**，
+	// 见 TaskAttachment 的说明。
+	Attachments []TaskAttachment `json:"attachments,omitempty"`
+	Callback    string           `json:"callback"`
 	// ClientMsgID 是派发方给的幂等键（session_send 原样传入）；空 = 无幂等要求。
 	// 与目标侧去重表共用同一个值，跨进程由账本按 (target, client_msg_id) 查找兜底。
 	ClientMsgID     string      `json:"client_msg_id,omitempty"`
@@ -291,5 +311,43 @@ func (t *Task) Validate() error {
 	if t.Attempt < 0 {
 		return fmt.Errorf("%w: task.attempt must be >= 0", ErrInvalid)
 	}
+	for i, a := range t.Attachments {
+		if a.Kind != AttachmentKindFile && a.Kind != AttachmentKindImage {
+			return fmt.Errorf("%w: task.attachments[%d].kind %q is invalid", ErrInvalid, i, a.Kind)
+		}
+		if strings.TrimSpace(a.Path) == "" {
+			return fmt.Errorf("%w: task.attachments[%d].path is required", ErrInvalid, i)
+		}
+	}
 	return nil
+}
+
+// AttachmentPaths 返回某类附件的路径（派发/队列泵送按 kind 拆成 DispatchReq.Files/Images）。
+func (t *Task) AttachmentPaths(kind string) []string {
+	if t == nil {
+		return nil
+	}
+	return attachmentPaths(t.Attachments, kind)
+}
+
+// attachmentPaths 取某类附件的路径（保持原顺序）。
+func attachmentPaths(infos []TaskAttachment, kind string) []string {
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(infos))
+	for _, a := range infos {
+		if a.Kind == kind && a.Path != "" {
+			out = append(out, a.Path)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// HasAttachments 是否带附件引用（只有图片没有正文的任务也合法）。
+func (t *Task) HasAttachments() bool {
+	return t != nil && len(t.Attachments) > 0
 }
