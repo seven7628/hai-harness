@@ -277,6 +277,41 @@ func TestHubNeedResolveOnHubDMSession(t *testing.T) {
 	}
 }
 
+// Ask 走 AnswerQuestions，同样必须解除**这个** Session 上挂起的提问等待器；
+// 只改 Hub 账本不算「通知回 Session」。
+func TestHubNeedResolveQuestionRoutesToSessionWaiter(t *testing.T) {
+	m, buf := testManager(t)
+	hubAgent := createHubAgent(t, m, buf, 1, "NeedQuestion")
+	bs, err := m.hubDMSession(string(hubAgent.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait := bs.s.QuestionWaiter().Begin("batch-q")
+	bs.emit(&events.AskUserQuestion{
+		RunId: "rq", Id: "batch-q",
+		Questions: []events.QuestionItem{{Id: "q1", Question: "选哪个目录？"}},
+		Timestamp: time.Now(), EventType: events.AskUserQuestionType,
+	})
+	st, _ := m.hubStore()
+	needs, err := st.ListNeeds(context.Background(), agenthub.NeedFilter{Status: "pending"})
+	if err != nil || len(needs) != 1 || needs[0].Kind != "question" {
+		t.Fatalf("question needs = %+v, %v", needs, err)
+	}
+	ok, errMsg, _ := hubCmd(t, m, buf, 2, "hub_need_resolve", map[string]any{
+		"need_id": string(needs[0].ID), "resolution": "answered",
+		"answers": map[string]any{"q1": "reports"},
+	})
+	if !ok {
+		t.Fatalf("resolve question: %s", errMsg)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	answers, err := wait(ctx)
+	if err != nil || len(answers) != 1 || answers[0].QuestionId != "q1" || answers[0].Answer != "reports" {
+		t.Fatalf("hub_need_resolve 未把回答送回 Project session：answers=%+v err=%v", answers, err)
+	}
+}
+
 // P2-06 B2：会话存在但空闲时取消 dispatched/running，必须落 canceled，
 // 不能回「已请求中断」然后永远停在运行中。
 func TestHubTaskCancelIdleSessionIsTerminal(t *testing.T) {

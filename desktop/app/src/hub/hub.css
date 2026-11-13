@@ -3312,13 +3312,13 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 /* 类型只染 chip，不染整张卡：卡身保持中性 surface，和 Hub 的 task/need 卡同一套层次。 */
 .hub-inline-need .hub-chip.approval { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
 .hub-inline-need .hub-chip.question { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.hub-inline-need .hub-chip.failure { color: #e08b7e; background: color-mix(in srgb, #e08b7e 12%, transparent); }
+.hub-inline-need .hub-chip.failure { color: var(--danger, #b23a2e); background: color-mix(in srgb, var(--danger, #b23a2e) 12%, transparent); }
 .hub-inline-need-attr {
   flex: 0 1 auto;
   max-width: 55%;
   margin-left: 8px;
   min-width: 0;
-  color: var(--text-3);
+  color: var(--muted, var(--text-2));
   font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
@@ -3462,3 +3462,9 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-inline-need footer .hub-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .hub-inline-need footer .hub-link { padding: 0; font-size: 11.5px; }
 .hub-inline-need footer .hub-muted { margin-left: auto; padding: 0; color: var(--text-3); font-size: 10.5px; }
+
+/* 390：归属信息单独占一行，避免把标题挤成「写文件前确…」；桌面仍保持一行紧凑。 */
+@media (max-width: 640px) {
+  .hub-inline-need header { flex-wrap: wrap; }
+  .hub-inline-need-attr { flex: 1 0 100%; max-width: 100%; margin-left: 0; }
+}

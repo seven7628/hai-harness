@@ -54,7 +54,7 @@
 .hub-inline-todo-attr {
   min-width: 0;
   flex: 1 1 auto;
-  color: var(--text-3);
+  color: var(--muted, var(--text-2));
   font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
@@ -159,5 +159,7 @@
 @media (max-width: 640px) {
   .hub-inline-todos { max-height: min(26vh, 140px); margin-bottom: 6px; }
   .hub-inline-todo { padding: 7px 9px 8px; }
-  .hub-inline-todo-attr { font-size: 10px; }
+  .hub-inline-todo-head { flex-wrap: wrap; }
+  .hub-inline-todo-attr { flex: 1 0 100%; order: 3; font-size: 10px; }
+  .hub-inline-todo-fold { order: 2; margin-left: auto; }
 }
