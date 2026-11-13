@@ -201,179 +201,1240 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   </footer>
 </main>
 
-<script type="application/json" id="data">
-{
+<script type="application/json" id="data">{
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 06:40",
-    "current": "R09"
+    "updated": "2026-11-13 07:10",
+    "current": "R10"
   },
   "rounds": [
-    {"id":"R00","pr":"PR-00","title":"契约与注册表骨架（无 UI 接入）","type":"纯新增","est":0.5,"deps":[],"status":"done","commit":"a19bccd","review":"PASS","perf":[],"acc":["npm run test:surface-registry 绿","应用行为零变化（registry 未被 import）","重复 kind / 插件 write 抛错"],"rollback":"删 surfaces/{types,registry}.ts 与测试，无副作用"},
-    {"id":"R01","pr":"PR-01","title":"三态布局（open/bias/leftPinned）+ 删 rightOverHalf","type":"行为","est":1.5,"deps":["R00"],"status":"done","commit":"a312be4","review":"PASS","perf":["P04","P05"],"acc":["三态可切换并持久化","拖拽 60fps","⌘\\ 折叠不丢宽度"],"rollback":"开关 surfaces.layout=off 回到旧布局"},
-    {"id":"R02","pr":"PR-02","title":"activeId 权威、rightTab 派生（零行为变化）","type":"语义","est":1.5,"deps":["R01"],"status":"done","commit":"60e0216","review":"PASS","perf":["P06"],"acc":["先改 e2e 为红","同会话内切标签不改 rightTab 语义","关标签不触发自动展开"],"rollback":"revert 后仍走 rightTab 旧字段"},
-    {"id":"R03","pr":"PR-03","title":"git → SurfaceProvider","type":"迁移","est":0.5,"deps":["R02"],"status":"done","commit":"e9acdbd","review":"PASS","perf":["P01"],"acc":["面板等价","旧 switch 分支删除"],"rollback":"开关 surfaces.legacy.git=on"},
-    {"id":"R04","pr":"PR-04","title":"file → SurfaceProvider（多实例身份）","type":"迁移","est":1.0,"deps":["R03"],"status":"done","commit":"0d0e923","review":"PASS","perf":["P01","P07"],"acc":["同文件不同 mode 可并存","参数化身份稳定"],"rollback":"开关 surfaces.legacy.file=on"},
-    {"id":"R05a0","pr":"PR-05a0","title":"提取 internal/atomicfile（flock + 原子替换）","type":"重构","est":0.5,"deps":[],"status":"done","commit":"7442d31","review":"PASS","perf":[],"acc":["零行为变化","tools/builtin 调用点改薄壳","并发写测试通过"],"rollback":"revert 单 PR；旧实现原地保留在 commit 里"},
-    {"id":"R05a","pr":"PR-05a","title":"Go：file_open / file_save / file_close + fsnotify 外部变更","type":"新增","est":1.5,"deps":["R05a0"],"status":"done","commit":"6e1f419","review":"PASS","perf":["P08"],"acc":["保存冲突返回码正确","外部变更推送不丢","大文件不整读"],"rollback":"命令不注册即回退"},
-    {"id":"R05b","pr":"PR-05b","title":"内嵌编辑器（零依赖 textarea + 行号 + 冲突三分支 + dirty，F32）","type":"新增","est":2.0,"deps":["R04","R05a"],"status":"done","commit":"d584413","review":"PASS","perf":["P08"],"acc":["⌘S 只在聚焦时拦截（实测：只挂 textarea onKeyDown）","dirty 属于标签（删掉 store 单点 return 则 B1 红）","冲突条三选一 + denied 不重发","CRLF：打开→不改→保存逐字节等于磁盘原文"],"rollback":"settings.editor=false 时 openFileForEdit 单点拦截（不是隐藏按钮）"},
-    {"id":"R05a3","pr":"—","title":"测试资产转正（Go 61 文件 + MCP/trace fixture + exclude 清理）","type":"卫生","est":0.5,"deps":["R05a"],"status":"done","commit":"3162acb","review":"主会话复核","perf":[],"acc":["干净检出 go test = <b>647 PASS / 14 SKIP / 0 FAIL</b>","可运行测试 371 → 663","6 条成本红 = 测试污染（两处 loadProviderConfig），非环境","trace fixture 入库 → 永久静默 skip 转真跑"],"rollback":"revert 四个 commit"},
-    {"id":"R05a3b","pr":"—","title":"前端测试资产转正（53 e2e + 7 electron + 7 类红修/分流）","type":"卫生","est":1.0,"deps":["R05a"],"status":"done","commit":"6b9d6c8","review":"主会话复核","perf":[],"acc":["干净检出 npm test <b>69/69 全绿</b>（7m10s）","61 个测试文件入库（17082 行）","2 个外部前置分流为 test:external / test:golden","2 处判定为「脚本对、代码错」并修了产品"],"rollback":"revert 分支"},
-    {"id":"R05c","pr":"—","title":"缺陷：默认皮肤（current）下用户消息完全不渲染（F43）","type":"修复","est":0.5,"deps":["R05a3b"],"status":"done","commit":"53e02be","review":"主会话复核","perf":[],"acc":["红→绿：24 红 24 绿 → 54/54","四处宿主同时受益（主对话/子会话/子 agent 卡/cron 详情）","已接进 npm test（70 步）"],"rollback":"单 commit revert"},
-    {"id":"R06a","pr":"PR-06a","title":"身份判据下沉 lib/webTab（零 store 运行时依赖）","type":"重构","est":0.3,"deps":["R05c"],"status":"done","commit":"60ae0b5","review":"主会话复核","perf":[],"acc":["23 例 + 两处变异各让 2/4 条用例变红","esbuild 产物内 loadPersistedTabs/subscribeEmbedEvents/zustand 零命中","三个既有回归网一行未改全绿"],"rollback":"单 commit"},
-    {"id":"R06b","pr":"PR-06b","title":"注册 webSurface + title/icon 委派（render 仍由 RP 兜底）","type":"重构","est":0.3,"deps":["R06a"],"status":"done","commit":"f769a5e","review":"主会话复核","perf":[],"acc":["9 张截图逐字节一致（同码两跑先证确定性，无容差）","探针缺 import 的问题已修（否则证据是兜底分支）"],"rollback":"删 provider + index.ts 一行"},
-    {"id":"R08i","pr":"PR-08c","title":"媒体渲染器（hai-media Range / ffprobe 降级 / 编解码矩阵 / 元素池）","type":"新增","est":1.5,"deps":["R08b"],"status":"done","commit":"2323d6f","review":"两轮评审+主会话复核","perf":[],"acc":["Range 33→39 例（含 8 种逃逸 + 真 protocol.handle 入口）","workspace 信任锚：只有系统选择器打开过的目录可登记（四层全拒 /Users）","1 小时 mp4：seeked 122ms、切走 5s 切回首字节请求 2→2","ffprobe 缺失 → available:false 但仍可播放"],"rollback":"三个 commit 各自 revert"},
-    {"id":"R08g","pr":"—","title":"测试脚手架补齐：6 个包在干净检出编不过（19 文件 / 7273 行）","type":"卫生","est":0.5,"deps":["R08f"],"status":"done","commit":"f8a3450","review":"主会话复核","perf":[],"acc":["全仓 go vet 编译失败包 6 → 0","session 116 PASS / 0 FAIL（干净检出）","skills/testdata 夹具入库（原先被 ignore 吞掉）"],"rollback":"单 commit"},
-    {"id":"R08c","pr":"PR-08a","title":"转换服务收口 conversion（内容寻址缓存/并发2/60s/512MiB LRU）","type":"新增","est":1.0,"deps":["R08b"],"status":"done","commit":"f1dd0ce","review":"两轮评审 PASS","perf":[],"acc":["七条纪律测试（命中/too_large/失败不缓存/并发2/超时/清扫/同内容同键）","previews 降为<b>只读放行</b>（工具/bridge/SBPL 顺序/硬链四层测试）","产物 0600；脚本指纹替代 vcs revision（六条变异各红在对应测试）"],"rollback":"单 commit（命令形状不变）"},
-    {"id":"R08b","pr":"PR-08b","title":"pdf/docx/pptx/xlsx 渲染器 + 预览入口 + csv/md 探针入链","type":"新增","est":1.0,"deps":["R08a"],"status":"done","commit":"d6c8f6b","review":"主会话复核","perf":[],"acc":["链 78→80 步；原生验收 43 项（八格式各开一次）","pdf 用插件尺寸+亮像素占比+contentType 证内容（不假装页数）","两个变异先红后绿；pdf 空白回归修法=引用计数+600ms 宽容"],"rollback":"三个 commit 各自 revert"},
-    {"id":"R08a","pr":"PR-08a","title":"预览渲染器注册表 + text/image/csv + file{mode:'preview'} 分发","type":"新增","est":0.8,"deps":["R07"],"status":"done","commit":"dfb7869","review":"主会话复核","perf":[],"acc":["注册表 12 例（重复 id 抛 / weight 降序 / 同 weight 稳定序双向钉）","探针 31 项入链（78 步）","三个变异先红后绿","office 持久化数据实测为 0（415 个 leveldb 解码）"],"rollback":"单 commit（注册表新增路径）"},
-    {"id":"R07","pr":"PR-07","title":"activity → SurfaceProvider（ActivityTab 229 行平移）","type":"迁移","est":0.5,"deps":["R06"],"status":"done","commit":"0b0bce6","review":"主会话复核","perf":[],"acc":["249 行逐字比对 0 差异","三个变异：删 import 像素不变 / render 换内容会变 / render→null 全绿","顺手修掉 md_file_modes 与 trace 两笔旧账"],"rollback":"单 commit"},
-    {"id":"R07c","pr":"—","title":"非 file 面板收口成一条 provider 委派","type":"重构","est":0.2,"deps":["R07"],"status":"done","commit":"401f991","review":"主会话复核","perf":[],"acc":["kind==='activity' 1→0、git 1→0、web 12→11、file 5→5","变异：强制走 fallback → calls=0 红而像素不变"],"rollback":"单 commit"},
-    {"id":"R07d","pr":"—","title":"e2e:trace ⑧ 根因：ask 面板选择器 drift（modal→.dock）","type":"卫生","est":0.2,"deps":["R07"],"status":"done","commit":"9ecd332","review":"主会话复核","perf":[],"acc":["52 项全过（⑧ 里的抽屉断言第一次真跑）","先红用历史缺陷复现：s.map is not a function","链 74 → 75 步 / 1206 断言"],"rollback":"单 commit"},
-    {"id":"R06d","pr":"—","title":"门禁修诚实：三个 Chrome 探针进链 + T3 采样竞态","type":"卫生","est":0.4,"deps":["R06c"],"status":"done","commit":"e730b78 + a8acaaf","review":"主会话复核","perf":[],"acc":["npm test 71 → <b>74 步</b>（实测 +25s）：session-tabs / auto / artifacts 进链；真 Electron 三个另立 <code>npm run test:electron</code>","就绪判据从「有人在听」升级为「这张页面是我的」：比对自己探针页的 <code>&lt;title&gt;</code>；前置不满足 <b>退出码 2</b>，断言失败仍 1","补齐两个链内探针的 builtin import（artifacts / agent-tree）+ 仪器自检断言（artifacts 87 → 88 项）","T3 的 3px = 入场动画采样竞态（同码绿红交替）：判据不动，测量前等布局落定 → 5 连跑全绿；变异 +5px 仍红"],"rollback":"两个 commit 各自 revert（仪器 / 探针）"},
-    {"id":"R06c","pr":"PR-06c","title":"WebTab 平移 + panelMenuOpen 上移 + render 走 provider","type":"迁移","est":0.8,"deps":["R06b"],"status":"done","commit":"5a89444","review":"主会话复核","perf":["P09","P10"],"acc":["五个 e2e：container/scoping/session-tabs/auto 全绿，pdf 53✅/1❌（A/B 同红，既有 3px 偏移）","新断言：DOM 点休眠标签 → 用原 id embedActivate，标题/身份/数量不变（短路 web 分支则恰好那条红）","kind==='web' 13→12，RightPanel 1103→730 行","3 个探针仪器修正（缺 builtin import / 端口归属 / T16 采样竞态）"],"rollback":"删 provider 委派回退到 <WebTab/> 直挂"},
-    {"id":"R06","pr":"PR-06","title":"web → SurfaceProvider（拆三轮 R06a/b/c 全部完成）","type":"迁移","est":2.0,"deps":["R05b"],"status":"done","commit":"5a89444","review":"主会话复核","perf":["P02","P09","P10"],"acc":["三轮分别可 revert：lib/webTab → 元数据委派 → 渲染委派","休眠唤醒不丢 URL（DOM 点击级断言）","RightPanel 1103→730 行"],"rollback":"删 provider 委派回退 <WebTab/> 直挂"},
-    {"id":"R08","pr":"PR-08","title":"文档渲染器注册表（docx/pptx/xlsx/pdf/csv/图片/文本）","type":"新增","est":1.5,"deps":["R04"],"status":"todo","commit":"","review":"","perf":["P11"],"acc":["未知格式走 fallback 不白屏","大文件不整读"],"rollback":"开关 surfaces.preview.renderers=off"},
-    {"id":"P08a","pr":"PR-08a","title":"原计划·转换服务（准入/限额/内容寻址缓存/输出保留）","type":"新增","est":2.0,"deps":["R08"],"status":"done","commit":"f1dd0ce","review":"编号重排：实际由 R08c 交付","perf":["P11","P12"],"acc":["并发 2 生效","失败不缓存","24h+512MiB LRU"],"rollback":"开关 surfaces.convert=off 只用近似渲染"},
-    {"id":"P08b","pr":"PR-08b","title":"原计划·表格增强（sheet 导航/冻结/数字格式/CSV 双视图）","type":"增强","est":1.5,"deps":["R08a"],"status":"done","commit":"0443caf","review":"编号重排：实际由 R08b（表格增强）+ 15e0ab5 合并交付","perf":["P11"],"acc":["大表按窗渲染","数字格式与 Excel 一致"],"rollback":"开关 surfaces.preview.table=basic"},
-    {"id":"P08c","pr":"PR-08c","title":"原计划·媒体渲染器（hai-media:// Range + ffprobe + 播放器）","type":"新增","est":2.0,"deps":["R08"],"status":"done","commit":"R08i","review":"编号重排：实际由 R08i 交付","perf":["P13"],"acc":["Range 206 正确","路径逃逸被拒","seek ≤ 200ms"],"rollback":"开关 surfaces.media=off 只给下载"},
-    {"id":"R08d","pr":"PR-08d","title":"LibreOffice kit（下载/探测/校验 + profile 隔离 + soffice→PDF + renderImages）","type":"新增","est":3.0,"deps":["R08a"],"status":"done","commit":"eb8410b","review":"PASS（复评：超时杀组/状态自失效/工具重启提示/超时按路径 + 面板近似 PDF 空白修复）","perf":["P12"],"acc":["kit 缺失降级有横幅","进程组可杀","sha256 校验"],"rollback":"开关 surfaces.preview.kit=off"},
-    {"id":"R08e","pr":"PR-08e","title":"（可选）ffmpeg 转码 + 缩略图","type":"可选","est":2.0,"deps":["R08c"],"status":"todo","commit":"","review":"","perf":["P13"],"acc":["仅在需要转码时触发","失败回原格式"],"rollback":"关掉即无转码"},
-    {"id":"R09","pr":"PR-09","title":"标签条：溢出 / 右键菜单 / ⌃⇥ / 空态能力面板","type":"交互","est":1.0,"deps":["R04"],"status":"todo","commit":"","review":"","perf":["P03"],"acc":["20 标签下不卡","溢出菜单键盘可达"],"rollback":"开关 surfaces.tabbar.v2=off"},
-    {"id":"R10","pr":"PR-10","title":"Tombstone + Boundary + 3 次自动禁用","type":"健壮性","est":1.0,"deps":["R09"],"status":"todo","commit":"","review":"","perf":["P01"],"acc":["崩溃面板显示墓碑","3 次后禁用并可见"],"rollback":"开关 surfaces.boundary=off"},
-    {"id":"R11","pr":"PR-11","title":"删除 legacy：TAB_KINDS / makeTab switch / rightTab","type":"清理","est":0.5,"deps":["R10"],"status":"todo","commit":"","review":"","perf":[],"acc":["全仓无 TAB_KINDS 引用","e2e 全绿"],"rollback":"同 PR 内保留旧字段到最后一个 commit"},
-    {"id":"R12","pr":"PR-12","title":"ui 通道 + ui_inspect 工具","type":"新增","est":1.5,"deps":["R11"],"status":"todo","commit":"","review":"","perf":["P06"],"acc":["先写 CodeMode e2e（红）","快照 ≤ 20ms","tabs 返回对象且空态为 []"],"rollback":"关 settings.features.surfaceTools"},
-    {"id":"R13","pr":"PR-13","title":"安装器（index/manifest/install/remove/audit）","type":"新增","est":2.0,"deps":["R12"],"status":"todo","commit":"","review":"","perf":["P14"],"acc":["红灯先行","sha256 不符拒装","同 sha 重复安装返回同 id"],"rollback":"关 surfaces.plugin.enabled"},
-    {"id":"R14","pr":"PR-14","title":"常驻工具接线 + hai-surface-dev skill + 模板 + 插件页（无 mode）","type":"新增","est":1.5,"deps":["R13"],"status":"todo","commit":"","review":"","perf":["P15"],"acc":["工具描述 ≤120 字 / 参数 ≤3","skill requires.tools 生效","token 增量 ≤ 900"],"rollback":"关 settings.features.surfaceTools"},
-    {"id":"R15","pr":"PR-15","title":"验收收口：e2e 补全 + 文档回写","type":"收尾","est":1.0,"deps":["R14"],"status":"todo","commit":"","review":"","perf":[],"acc":["scripts/check.sh 全绿","npm run check 全绿","文档回写完成"],"rollback":"—"},
-    {"id":"R16","pr":"（缓冲）","title":"修复与打磨","type":"缓冲","est":2.0,"deps":[],"status":"todo","commit":"","review":"","perf":[],"acc":["按实际缺陷定"],"rollback":"—"}
+    {
+      "id": "R00",
+      "pr": "PR-00",
+      "title": "契约与注册表骨架（无 UI 接入）",
+      "type": "纯新增",
+      "est": 0.5,
+      "deps": [],
+      "status": "done",
+      "commit": "a19bccd",
+      "review": "PASS",
+      "perf": [],
+      "acc": [
+        "npm run test:surface-registry 绿",
+        "应用行为零变化（registry 未被 import）",
+        "重复 kind / 插件 write 抛错"
+      ],
+      "rollback": "删 surfaces/{types,registry}.ts 与测试，无副作用"
+    },
+    {
+      "id": "R01",
+      "pr": "PR-01",
+      "title": "三态布局（open/bias/leftPinned）+ 删 rightOverHalf",
+      "type": "行为",
+      "est": 1.5,
+      "deps": [
+        "R00"
+      ],
+      "status": "done",
+      "commit": "a312be4",
+      "review": "PASS",
+      "perf": [
+        "P04",
+        "P05"
+      ],
+      "acc": [
+        "三态可切换并持久化",
+        "拖拽 60fps",
+        "⌘\\ 折叠不丢宽度"
+      ],
+      "rollback": "开关 surfaces.layout=off 回到旧布局"
+    },
+    {
+      "id": "R02",
+      "pr": "PR-02",
+      "title": "activeId 权威、rightTab 派生（零行为变化）",
+      "type": "语义",
+      "est": 1.5,
+      "deps": [
+        "R01"
+      ],
+      "status": "done",
+      "commit": "60e0216",
+      "review": "PASS",
+      "perf": [
+        "P06"
+      ],
+      "acc": [
+        "先改 e2e 为红",
+        "同会话内切标签不改 rightTab 语义",
+        "关标签不触发自动展开"
+      ],
+      "rollback": "revert 后仍走 rightTab 旧字段"
+    },
+    {
+      "id": "R03",
+      "pr": "PR-03",
+      "title": "git → SurfaceProvider",
+      "type": "迁移",
+      "est": 0.5,
+      "deps": [
+        "R02"
+      ],
+      "status": "done",
+      "commit": "e9acdbd",
+      "review": "PASS",
+      "perf": [
+        "P01"
+      ],
+      "acc": [
+        "面板等价",
+        "旧 switch 分支删除"
+      ],
+      "rollback": "开关 surfaces.legacy.git=on"
+    },
+    {
+      "id": "R04",
+      "pr": "PR-04",
+      "title": "file → SurfaceProvider（多实例身份）",
+      "type": "迁移",
+      "est": 1.0,
+      "deps": [
+        "R03"
+      ],
+      "status": "done",
+      "commit": "0d0e923",
+      "review": "PASS",
+      "perf": [
+        "P01",
+        "P07"
+      ],
+      "acc": [
+        "同文件不同 mode 可并存",
+        "参数化身份稳定"
+      ],
+      "rollback": "开关 surfaces.legacy.file=on"
+    },
+    {
+      "id": "R05a0",
+      "pr": "PR-05a0",
+      "title": "提取 internal/atomicfile（flock + 原子替换）",
+      "type": "重构",
+      "est": 0.5,
+      "deps": [],
+      "status": "done",
+      "commit": "7442d31",
+      "review": "PASS",
+      "perf": [],
+      "acc": [
+        "零行为变化",
+        "tools/builtin 调用点改薄壳",
+        "并发写测试通过"
+      ],
+      "rollback": "revert 单 PR；旧实现原地保留在 commit 里"
+    },
+    {
+      "id": "R05a",
+      "pr": "PR-05a",
+      "title": "Go：file_open / file_save / file_close + fsnotify 外部变更",
+      "type": "新增",
+      "est": 1.5,
+      "deps": [
+        "R05a0"
+      ],
+      "status": "done",
+      "commit": "6e1f419",
+      "review": "PASS",
+      "perf": [
+        "P08"
+      ],
+      "acc": [
+        "保存冲突返回码正确",
+        "外部变更推送不丢",
+        "大文件不整读"
+      ],
+      "rollback": "命令不注册即回退"
+    },
+    {
+      "id": "R05b",
+      "pr": "PR-05b",
+      "title": "内嵌编辑器（零依赖 textarea + 行号 + 冲突三分支 + dirty，F32）",
+      "type": "新增",
+      "est": 2.0,
+      "deps": [
+        "R04",
+        "R05a"
+      ],
+      "status": "done",
+      "commit": "d584413",
+      "review": "PASS",
+      "perf": [
+        "P08"
+      ],
+      "acc": [
+        "⌘S 只在聚焦时拦截（实测：只挂 textarea onKeyDown）",
+        "dirty 属于标签（删掉 store 单点 return 则 B1 红）",
+        "冲突条三选一 + denied 不重发",
+        "CRLF：打开→不改→保存逐字节等于磁盘原文"
+      ],
+      "rollback": "settings.editor=false 时 openFileForEdit 单点拦截（不是隐藏按钮）"
+    },
+    {
+      "id": "R05a3",
+      "pr": "—",
+      "title": "测试资产转正（Go 61 文件 + MCP/trace fixture + exclude 清理）",
+      "type": "卫生",
+      "est": 0.5,
+      "deps": [
+        "R05a"
+      ],
+      "status": "done",
+      "commit": "3162acb",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "干净检出 go test = <b>647 PASS / 14 SKIP / 0 FAIL</b>",
+        "可运行测试 371 → 663",
+        "6 条成本红 = 测试污染（两处 loadProviderConfig），非环境",
+        "trace fixture 入库 → 永久静默 skip 转真跑"
+      ],
+      "rollback": "revert 四个 commit"
+    },
+    {
+      "id": "R05a3b",
+      "pr": "—",
+      "title": "前端测试资产转正（53 e2e + 7 electron + 7 类红修/分流）",
+      "type": "卫生",
+      "est": 1.0,
+      "deps": [
+        "R05a"
+      ],
+      "status": "done",
+      "commit": "6b9d6c8",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "干净检出 npm test <b>69/69 全绿</b>（7m10s）",
+        "61 个测试文件入库（17082 行）",
+        "2 个外部前置分流为 test:external / test:golden",
+        "2 处判定为「脚本对、代码错」并修了产品"
+      ],
+      "rollback": "revert 分支"
+    },
+    {
+      "id": "R05c",
+      "pr": "—",
+      "title": "缺陷：默认皮肤（current）下用户消息完全不渲染（F43）",
+      "type": "修复",
+      "est": 0.5,
+      "deps": [
+        "R05a3b"
+      ],
+      "status": "done",
+      "commit": "53e02be",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "红→绿：24 红 24 绿 → 54/54",
+        "四处宿主同时受益（主对话/子会话/子 agent 卡/cron 详情）",
+        "已接进 npm test（70 步）"
+      ],
+      "rollback": "单 commit revert"
+    },
+    {
+      "id": "R06a",
+      "pr": "PR-06a",
+      "title": "身份判据下沉 lib/webTab（零 store 运行时依赖）",
+      "type": "重构",
+      "est": 0.3,
+      "deps": [
+        "R05c"
+      ],
+      "status": "done",
+      "commit": "60ae0b5",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "23 例 + 两处变异各让 2/4 条用例变红",
+        "esbuild 产物内 loadPersistedTabs/subscribeEmbedEvents/zustand 零命中",
+        "三个既有回归网一行未改全绿"
+      ],
+      "rollback": "单 commit"
+    },
+    {
+      "id": "R06b",
+      "pr": "PR-06b",
+      "title": "注册 webSurface + title/icon 委派（render 仍由 RP 兜底）",
+      "type": "重构",
+      "est": 0.3,
+      "deps": [
+        "R06a"
+      ],
+      "status": "done",
+      "commit": "f769a5e",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "9 张截图逐字节一致（同码两跑先证确定性，无容差）",
+        "探针缺 import 的问题已修（否则证据是兜底分支）"
+      ],
+      "rollback": "删 provider + index.ts 一行"
+    },
+    {
+      "id": "R08i",
+      "pr": "PR-08c",
+      "title": "媒体渲染器（hai-media Range / ffprobe 降级 / 编解码矩阵 / 元素池）",
+      "type": "新增",
+      "est": 1.5,
+      "deps": [
+        "R08b"
+      ],
+      "status": "done",
+      "commit": "2323d6f",
+      "review": "两轮评审+主会话复核",
+      "perf": [],
+      "acc": [
+        "Range 33→39 例（含 8 种逃逸 + 真 protocol.handle 入口）",
+        "workspace 信任锚：只有系统选择器打开过的目录可登记（四层全拒 /Users）",
+        "1 小时 mp4：seeked 122ms、切走 5s 切回首字节请求 2→2",
+        "ffprobe 缺失 → available:false 但仍可播放"
+      ],
+      "rollback": "三个 commit 各自 revert"
+    },
+    {
+      "id": "R08g",
+      "pr": "—",
+      "title": "测试脚手架补齐：6 个包在干净检出编不过（19 文件 / 7273 行）",
+      "type": "卫生",
+      "est": 0.5,
+      "deps": [
+        "R08f"
+      ],
+      "status": "done",
+      "commit": "f8a3450",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "全仓 go vet 编译失败包 6 → 0",
+        "session 116 PASS / 0 FAIL（干净检出）",
+        "skills/testdata 夹具入库（原先被 ignore 吞掉）"
+      ],
+      "rollback": "单 commit"
+    },
+    {
+      "id": "R08c",
+      "pr": "PR-08a",
+      "title": "转换服务收口 conversion（内容寻址缓存/并发2/60s/512MiB LRU）",
+      "type": "新增",
+      "est": 1.0,
+      "deps": [
+        "R08b"
+      ],
+      "status": "done",
+      "commit": "f1dd0ce",
+      "review": "两轮评审 PASS",
+      "perf": [],
+      "acc": [
+        "七条纪律测试（命中/too_large/失败不缓存/并发2/超时/清扫/同内容同键）",
+        "previews 降为<b>只读放行</b>（工具/bridge/SBPL 顺序/硬链四层测试）",
+        "产物 0600；脚本指纹替代 vcs revision（六条变异各红在对应测试）"
+      ],
+      "rollback": "单 commit（命令形状不变）"
+    },
+    {
+      "id": "R08b",
+      "pr": "PR-08b",
+      "title": "pdf/docx/pptx/xlsx 渲染器 + 预览入口 + csv/md 探针入链",
+      "type": "新增",
+      "est": 1.0,
+      "deps": [
+        "R08a"
+      ],
+      "status": "done",
+      "commit": "d6c8f6b",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "链 78→80 步；原生验收 43 项（八格式各开一次）",
+        "pdf 用插件尺寸+亮像素占比+contentType 证内容（不假装页数）",
+        "两个变异先红后绿；pdf 空白回归修法=引用计数+600ms 宽容"
+      ],
+      "rollback": "三个 commit 各自 revert"
+    },
+    {
+      "id": "R08a",
+      "pr": "PR-08a",
+      "title": "预览渲染器注册表 + text/image/csv + file{mode:'preview'} 分发",
+      "type": "新增",
+      "est": 0.8,
+      "deps": [
+        "R07"
+      ],
+      "status": "done",
+      "commit": "dfb7869",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "注册表 12 例（重复 id 抛 / weight 降序 / 同 weight 稳定序双向钉）",
+        "探针 31 项入链（78 步）",
+        "三个变异先红后绿",
+        "office 持久化数据实测为 0（415 个 leveldb 解码）"
+      ],
+      "rollback": "单 commit（注册表新增路径）"
+    },
+    {
+      "id": "R07",
+      "pr": "PR-07",
+      "title": "activity → SurfaceProvider（ActivityTab 229 行平移）",
+      "type": "迁移",
+      "est": 0.5,
+      "deps": [
+        "R06"
+      ],
+      "status": "done",
+      "commit": "0b0bce6",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "249 行逐字比对 0 差异",
+        "三个变异：删 import 像素不变 / render 换内容会变 / render→null 全绿",
+        "顺手修掉 md_file_modes 与 trace 两笔旧账"
+      ],
+      "rollback": "单 commit"
+    },
+    {
+      "id": "R07c",
+      "pr": "—",
+      "title": "非 file 面板收口成一条 provider 委派",
+      "type": "重构",
+      "est": 0.2,
+      "deps": [
+        "R07"
+      ],
+      "status": "done",
+      "commit": "401f991",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "kind==='activity' 1→0、git 1→0、web 12→11、file 5→5",
+        "变异：强制走 fallback → calls=0 红而像素不变"
+      ],
+      "rollback": "单 commit"
+    },
+    {
+      "id": "R07d",
+      "pr": "—",
+      "title": "e2e:trace ⑧ 根因：ask 面板选择器 drift（modal→.dock）",
+      "type": "卫生",
+      "est": 0.2,
+      "deps": [
+        "R07"
+      ],
+      "status": "done",
+      "commit": "9ecd332",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "52 项全过（⑧ 里的抽屉断言第一次真跑）",
+        "先红用历史缺陷复现：s.map is not a function",
+        "链 74 → 75 步 / 1206 断言"
+      ],
+      "rollback": "单 commit"
+    },
+    {
+      "id": "R06d",
+      "pr": "—",
+      "title": "门禁修诚实：三个 Chrome 探针进链 + T3 采样竞态",
+      "type": "卫生",
+      "est": 0.4,
+      "deps": [
+        "R06c"
+      ],
+      "status": "done",
+      "commit": "e730b78 + a8acaaf",
+      "review": "主会话复核",
+      "perf": [],
+      "acc": [
+        "npm test 71 → <b>74 步</b>（实测 +25s）：session-tabs / auto / artifacts 进链；真 Electron 三个另立 <code>npm run test:electron</code>",
+        "就绪判据从「有人在听」升级为「这张页面是我的」：比对自己探针页的 <code>&lt;title&gt;</code>；前置不满足 <b>退出码 2</b>，断言失败仍 1",
+        "补齐两个链内探针的 builtin import（artifacts / agent-tree）+ 仪器自检断言（artifacts 87 → 88 项）",
+        "T3 的 3px = 入场动画采样竞态（同码绿红交替）：判据不动，测量前等布局落定 → 5 连跑全绿；变异 +5px 仍红"
+      ],
+      "rollback": "两个 commit 各自 revert（仪器 / 探针）"
+    },
+    {
+      "id": "R06c",
+      "pr": "PR-06c",
+      "title": "WebTab 平移 + panelMenuOpen 上移 + render 走 provider",
+      "type": "迁移",
+      "est": 0.8,
+      "deps": [
+        "R06b"
+      ],
+      "status": "done",
+      "commit": "5a89444",
+      "review": "主会话复核",
+      "perf": [
+        "P09",
+        "P10"
+      ],
+      "acc": [
+        "五个 e2e：container/scoping/session-tabs/auto 全绿，pdf 53✅/1❌（A/B 同红，既有 3px 偏移）",
+        "新断言：DOM 点休眠标签 → 用原 id embedActivate，标题/身份/数量不变（短路 web 分支则恰好那条红）",
+        "kind==='web' 13→12，RightPanel 1103→730 行",
+        "3 个探针仪器修正（缺 builtin import / 端口归属 / T16 采样竞态）"
+      ],
+      "rollback": "删 provider 委派回退到 <WebTab/> 直挂"
+    },
+    {
+      "id": "R06",
+      "pr": "PR-06",
+      "title": "web → SurfaceProvider（拆三轮 R06a/b/c 全部完成）",
+      "type": "迁移",
+      "est": 2.0,
+      "deps": [
+        "R05b"
+      ],
+      "status": "done",
+      "commit": "5a89444",
+      "review": "主会话复核",
+      "perf": [
+        "P02",
+        "P09",
+        "P10"
+      ],
+      "acc": [
+        "三轮分别可 revert：lib/webTab → 元数据委派 → 渲染委派",
+        "休眠唤醒不丢 URL（DOM 点击级断言）",
+        "RightPanel 1103→730 行"
+      ],
+      "rollback": "删 provider 委派回退 <WebTab/> 直挂"
+    },
+    {
+      "id": "R08",
+      "pr": "PR-08",
+      "title": "文档渲染器注册表（docx/pptx/xlsx/pdf/csv/图片/文本）",
+      "type": "新增",
+      "est": 1.5,
+      "deps": [
+        "R04"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [
+        "P11"
+      ],
+      "acc": [
+        "未知格式走 fallback 不白屏",
+        "大文件不整读"
+      ],
+      "rollback": "开关 surfaces.preview.renderers=off"
+    },
+    {
+      "id": "P08a",
+      "pr": "PR-08a",
+      "title": "原计划·转换服务（准入/限额/内容寻址缓存/输出保留）",
+      "type": "新增",
+      "est": 2.0,
+      "deps": [
+        "R08"
+      ],
+      "status": "done",
+      "commit": "f1dd0ce",
+      "review": "编号重排：实际由 R08c 交付",
+      "perf": [
+        "P11",
+        "P12"
+      ],
+      "acc": [
+        "并发 2 生效",
+        "失败不缓存",
+        "24h+512MiB LRU"
+      ],
+      "rollback": "开关 surfaces.convert=off 只用近似渲染"
+    },
+    {
+      "id": "P08b",
+      "pr": "PR-08b",
+      "title": "原计划·表格增强（sheet 导航/冻结/数字格式/CSV 双视图）",
+      "type": "增强",
+      "est": 1.5,
+      "deps": [
+        "R08a"
+      ],
+      "status": "done",
+      "commit": "0443caf",
+      "review": "编号重排：实际由 R08b（表格增强）+ 15e0ab5 合并交付",
+      "perf": [
+        "P11"
+      ],
+      "acc": [
+        "大表按窗渲染",
+        "数字格式与 Excel 一致"
+      ],
+      "rollback": "开关 surfaces.preview.table=basic"
+    },
+    {
+      "id": "P08c",
+      "pr": "PR-08c",
+      "title": "原计划·媒体渲染器（hai-media:// Range + ffprobe + 播放器）",
+      "type": "新增",
+      "est": 2.0,
+      "deps": [
+        "R08"
+      ],
+      "status": "done",
+      "commit": "R08i",
+      "review": "编号重排：实际由 R08i 交付",
+      "perf": [
+        "P13"
+      ],
+      "acc": [
+        "Range 206 正确",
+        "路径逃逸被拒",
+        "seek ≤ 200ms"
+      ],
+      "rollback": "开关 surfaces.media=off 只给下载"
+    },
+    {
+      "id": "R08d",
+      "pr": "PR-08d",
+      "title": "LibreOffice kit（下载/探测/校验 + profile 隔离 + soffice→PDF + renderImages）",
+      "type": "新增",
+      "est": 3.0,
+      "deps": [
+        "R08a"
+      ],
+      "status": "done",
+      "commit": "eb8410b",
+      "review": "PASS（复评：超时杀组/状态自失效/工具重启提示/超时按路径 + 面板近似 PDF 空白修复）",
+      "perf": [
+        "P12"
+      ],
+      "acc": [
+        "kit 缺失降级有横幅",
+        "进程组可杀",
+        "sha256 校验"
+      ],
+      "rollback": "开关 surfaces.preview.kit=off"
+    },
+    {
+      "id": "R08e",
+      "pr": "PR-08e",
+      "title": "（可选）ffmpeg 转码 + 缩略图",
+      "type": "可选",
+      "est": 2.0,
+      "deps": [
+        "R08c"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [
+        "P13"
+      ],
+      "acc": [
+        "仅在需要转码时触发",
+        "失败回原格式"
+      ],
+      "rollback": "关掉即无转码"
+    },
+    {
+      "id": "R09",
+      "pr": "PR-09",
+      "title": "标签条：溢出 / 右键菜单 / ⌃⇥ / 空态能力面板",
+      "type": "交互",
+      "est": 1.0,
+      "deps": [
+        "R04"
+      ],
+      "status": "done",
+      "commit": "96029d3",
+      "review": "主会话复核（tsc 0；新探针 88 项 PASS；session-tabs 回归 35 项 PASS；9 条变异各红在对应断言）",
+      "perf": [
+        "P03"
+      ],
+      "acc": [
+        "5 槽 + N 溢出（20 标签下 DOM 仍只 5 个 .rtab）",
+        "溢出菜单键盘可达（Enter 开 / ↑↓ 移焦点 / Escape 还焦点）",
+        "右键：关闭/其他/右侧/全部/重开，dirty 不静默丢弃",
+        "⌃⇥ 与 ⌃⇧⇥ 回绕；中输入框也生效",
+        "空态能力面板直接开工；中键关闭不误激活"
+      ],
+      "rollback": "开关 surfaces.tabbar.v2=off"
+    },
+    {
+      "id": "R10",
+      "pr": "PR-10",
+      "title": "Tombstone + Boundary + 3 次自动禁用",
+      "type": "健壮性",
+      "est": 1.0,
+      "deps": [
+        "R09"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [
+        "P01"
+      ],
+      "acc": [
+        "崩溃面板显示墓碑",
+        "3 次后禁用并可见"
+      ],
+      "rollback": "开关 surfaces.boundary=off"
+    },
+    {
+      "id": "R11",
+      "pr": "PR-11",
+      "title": "删除 legacy：TAB_KINDS / makeTab switch / rightTab",
+      "type": "清理",
+      "est": 0.5,
+      "deps": [
+        "R10"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [],
+      "acc": [
+        "全仓无 TAB_KINDS 引用",
+        "e2e 全绿"
+      ],
+      "rollback": "同 PR 内保留旧字段到最后一个 commit"
+    },
+    {
+      "id": "R12",
+      "pr": "PR-12",
+      "title": "ui 通道 + ui_inspect 工具",
+      "type": "新增",
+      "est": 1.5,
+      "deps": [
+        "R11"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [
+        "P06"
+      ],
+      "acc": [
+        "先写 CodeMode e2e（红）",
+        "快照 ≤ 20ms",
+        "tabs 返回对象且空态为 []"
+      ],
+      "rollback": "关 settings.features.surfaceTools"
+    },
+    {
+      "id": "R13",
+      "pr": "PR-13",
+      "title": "安装器（index/manifest/install/remove/audit）",
+      "type": "新增",
+      "est": 2.0,
+      "deps": [
+        "R12"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [
+        "P14"
+      ],
+      "acc": [
+        "红灯先行",
+        "sha256 不符拒装",
+        "同 sha 重复安装返回同 id"
+      ],
+      "rollback": "关 surfaces.plugin.enabled"
+    },
+    {
+      "id": "R14",
+      "pr": "PR-14",
+      "title": "常驻工具接线 + hai-surface-dev skill + 模板 + 插件页（无 mode）",
+      "type": "新增",
+      "est": 1.5,
+      "deps": [
+        "R13"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [
+        "P15"
+      ],
+      "acc": [
+        "工具描述 ≤120 字 / 参数 ≤3",
+        "skill requires.tools 生效",
+        "token 增量 ≤ 900"
+      ],
+      "rollback": "关 settings.features.surfaceTools"
+    },
+    {
+      "id": "R15",
+      "pr": "PR-15",
+      "title": "验收收口：e2e 补全 + 文档回写",
+      "type": "收尾",
+      "est": 1.0,
+      "deps": [
+        "R14"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [],
+      "acc": [
+        "scripts/check.sh 全绿",
+        "npm run check 全绿",
+        "文档回写完成"
+      ],
+      "rollback": "—"
+    },
+    {
+      "id": "R16",
+      "pr": "（缓冲）",
+      "title": "修复与打磨",
+      "type": "缓冲",
+      "est": 2.0,
+      "deps": [],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [],
+      "acc": [
+        "按实际缺陷定"
+      ],
+      "rollback": "—"
+    }
   ],
   "perf": [
-    {"id":"P01","name":"light 面板首次打开","budget":"p95 ≤ 120ms","how":"e2e performance.now() 打点，3 次取 p95","last":null,"target":"R03/R04/R07/R10"},
-    {"id":"P02","name":"heavy 面板恢复（web 唤醒）","budget":"p95 ≤ 250ms","how":"e2e 切标签往返，含视图池复用","last":null,"target":"R06"},
-    {"id":"P03","name":"标签条 20 标签渲染","budget":"p95 ≤ 50ms","how":"lab/probe 注入 20 标签后测 frame","last":null,"target":"R09"},
-    {"id":"P04","name":"三态布局拖拽帧","budget":"掉帧 < 5%，帧 ≤ 16.7ms","how":"performance trace 采样 2s","last":null,"target":"R01"},
-    {"id":"P05","name":"折叠/展开不重排整树","budget":"相邻帧 ≤ 2 次 layout","how":"Chrome DevTools layout count","last":null,"target":"R01"},
-    {"id":"P06","name":"ui_inspect 快照生成","budget":"≤ 20ms @ 20 tabs","how":"Go bridge 侧打点 + e2e 断言","last":null,"target":"R02/R12"},
-    {"id":"P07","name":"编辑器打开 1MB 文件","budget":"≤ 300ms；输入 p95 ≤ 16ms","how":"e2e 注入 1MB 文本 + 输入 50 字符","last":null,"target":"R05b"},
-    {"id":"P08","name":"保存往返（file_save）","budget":"p95 ≤ 80ms（不含磁盘 sync）","how":"Go 测试 + bridge 打点","last":null,"target":"R05a"},
-    {"id":"P09","name":"单渲染进程内存","budget":"≤ 200MB（dev；生产构建后收紧）","how":"app.getAppMetrics 与 ps -o rss 双路交叉","last":"151.4MB（12 视图负载，A/B 证明与代码无关）","target":"R06"},
-    {"id":"P10","name":"全部渲染进程合计","budget":"80MB × 活视图数 + 主窗口 200MB（12 视图 → 1160MB）","how":"同上；原 800MB 口径在 12 视图下任何实现都过不了","last":"1207.7MB（live=12，A/B 1159–1214）","target":"R06"},
-    {"id":"P11","name":"PDF 首屏 / 大表滚动","budget":"首屏 ≤ 800ms；滚动 ≥ 50fps","how":"e2e 加载固定样本 + rAF 采样","last":null,"target":"R08/R08b"},
-    {"id":"P12","name":"Office 冷转换 / 缓存命中","budget":"冷 ≤ 60s（soffice ≤ 8s）；命中 ≤ 120ms","how":"转换服务打点 + 缓存命中统计","last":null,"target":"R08a/R08d"},
-    {"id":"P13","name":"媒体首帧 / seek","budget":"首帧 ≤ 500ms；seek ≤ 200ms","how":"hai-media:// Range 实测","last":null,"target":"R08c"},
-    {"id":"P14","name":"插件加载 / 卸载","budget":"加载 ≤ 150ms；卸载后 0 常驻","how":"loader 打点 + 注册表前后数量","last":null,"target":"R13"},
-    {"id":"P15","name":"工具 schema token 增量","budget":"≤ 900 token/请求","how":"tokenizer 统计 4 个工具描述+schema","last":null,"target":"R14"}
+    {
+      "id": "P01",
+      "name": "light 面板首次打开",
+      "budget": "p95 ≤ 120ms",
+      "how": "e2e performance.now() 打点，3 次取 p95",
+      "last": null,
+      "target": "R03/R04/R07/R10"
+    },
+    {
+      "id": "P02",
+      "name": "heavy 面板恢复（web 唤醒）",
+      "budget": "p95 ≤ 250ms",
+      "how": "e2e 切标签往返，含视图池复用",
+      "last": null,
+      "target": "R06"
+    },
+    {
+      "id": "P03",
+      "name": "标签条 20 标签渲染",
+      "budget": "p95 ≤ 50ms",
+      "how": "lab/probe 注入 20 标签后测 frame",
+      "last": null,
+      "target": "R09"
+    },
+    {
+      "id": "P04",
+      "name": "三态布局拖拽帧",
+      "budget": "掉帧 < 5%，帧 ≤ 16.7ms",
+      "how": "performance trace 采样 2s",
+      "last": null,
+      "target": "R01"
+    },
+    {
+      "id": "P05",
+      "name": "折叠/展开不重排整树",
+      "budget": "相邻帧 ≤ 2 次 layout",
+      "how": "Chrome DevTools layout count",
+      "last": null,
+      "target": "R01"
+    },
+    {
+      "id": "P06",
+      "name": "ui_inspect 快照生成",
+      "budget": "≤ 20ms @ 20 tabs",
+      "how": "Go bridge 侧打点 + e2e 断言",
+      "last": null,
+      "target": "R02/R12"
+    },
+    {
+      "id": "P07",
+      "name": "编辑器打开 1MB 文件",
+      "budget": "≤ 300ms；输入 p95 ≤ 16ms",
+      "how": "e2e 注入 1MB 文本 + 输入 50 字符",
+      "last": null,
+      "target": "R05b"
+    },
+    {
+      "id": "P08",
+      "name": "保存往返（file_save）",
+      "budget": "p95 ≤ 80ms（不含磁盘 sync）",
+      "how": "Go 测试 + bridge 打点",
+      "last": null,
+      "target": "R05a"
+    },
+    {
+      "id": "P09",
+      "name": "单渲染进程内存",
+      "budget": "≤ 200MB（dev；生产构建后收紧）",
+      "how": "app.getAppMetrics 与 ps -o rss 双路交叉",
+      "last": "151.4MB（12 视图负载，A/B 证明与代码无关）",
+      "target": "R06"
+    },
+    {
+      "id": "P10",
+      "name": "全部渲染进程合计",
+      "budget": "80MB × 活视图数 + 主窗口 200MB（12 视图 → 1160MB）",
+      "how": "同上；原 800MB 口径在 12 视图下任何实现都过不了",
+      "last": "1207.7MB（live=12，A/B 1159–1214）",
+      "target": "R06"
+    },
+    {
+      "id": "P11",
+      "name": "PDF 首屏 / 大表滚动",
+      "budget": "首屏 ≤ 800ms；滚动 ≥ 50fps",
+      "how": "e2e 加载固定样本 + rAF 采样",
+      "last": null,
+      "target": "R08/R08b"
+    },
+    {
+      "id": "P12",
+      "name": "Office 冷转换 / 缓存命中",
+      "budget": "冷 ≤ 60s（soffice ≤ 8s）；命中 ≤ 120ms",
+      "how": "转换服务打点 + 缓存命中统计",
+      "last": null,
+      "target": "R08a/R08d"
+    },
+    {
+      "id": "P13",
+      "name": "媒体首帧 / seek",
+      "budget": "首帧 ≤ 500ms；seek ≤ 200ms",
+      "how": "hai-media:// Range 实测",
+      "last": null,
+      "target": "R08c"
+    },
+    {
+      "id": "P14",
+      "name": "插件加载 / 卸载",
+      "budget": "加载 ≤ 150ms；卸载后 0 常驻",
+      "how": "loader 打点 + 注册表前后数量",
+      "last": null,
+      "target": "R13"
+    },
+    {
+      "id": "P15",
+      "name": "工具 schema token 增量",
+      "budget": "≤ 900 token/请求",
+      "how": "tokenizer 统计 4 个工具描述+schema",
+      "last": null,
+      "target": "R14"
+    }
   ],
   "reviews": [
-    {"round":"R05b","verdict":"CHANGES","commit":"b706089","date":"2026-11-12","findings":[
-      "九项里 3 项实质达标、2 项取证缺口、1 项真缺陷：<b>CRLF 文件一打开即显脏、保存把整份文件改成 LF</b>",
-      "最严重：<code>send()</code> 的 onData + <code>dispatchEvent:4703</code> 就地 return 是本 PR 唯一主干改动，却<b>没有任何干净检出下能跑的测试</b>（冒烟脚本被 gitignore）",
-      "回滚开关未提到单点：<code>fileSurface</code> / <code>FilePreview</code> 的编辑入口未确认受 <code>settings.editor</code> 控制",
-      "批量关闭（关其它/关右侧）的 dirty 守卫未取证；<code>file_*</code> 失败被 return 挡住不参与 bridge 掉线判定",
-      "加判：响应缺 hash 时 <code>baseHash</code> 被写成空串 → 下次保存退化成 F36 的「无条件覆盖」",
-      "质量认可：状态机三态、blocked 不重发、baseHash 取响应、saved 保留新 dirty、allowQuit+isDestroyed 双放行"
-    ]},
-    {"round":"R05a1","verdict":"PASS","commit":"f2da6e9","date":"2026-11-12","findings":[
-      "事故：bridge 下 68 个 _test.go（17006 行）从未入库，<b>R00-R05a 的 Go 门禁一直是假绿</b>——干净检出 14 个未定义符号编译失败",
-      "干净检出实测：vet=0、定向 test ok；全量 <b>9 条红</b>（成本口径 5 + 真实 provider 探活 1 + fixture 缺失 2 + reducer 1），第 10 条来自仍未入库的 trace_realdata_test.go",
-      "最小可编译集 = 8 文件 / 6893 行 / 132 个 Test；61 个剩余文件不影响编译但永不运行 → R05a3",
-      "exclude 残留更正：17 条里 16 条是「已跟踪文件的冗余条目」，仅 1 条文件真缺失（runtime_settings_test.go）",
-      "门禁口径改：Go 一律在 worktree 干净检出里跑（00 §4.5 + F37）"
-    ]},
-    {"round":"R05a","verdict":"PASS","commit":"6e1f419","date":"2026-11-12","findings":[
-      "9/9 硬点通过：三命令共用 <code>editPath→resolveWorkspacePath</code>；冲突时序 LockPath→锁内 hash→ReplaceLocked；<code>os.WriteFile</code> 零命中",
-      "LRU+引用计数正确：旧版「重复挂目录 watch」泄漏已修，<code>dirs==count</code> 有断言；refs>=2 永不淘汰",
-      "watcher 只挂文件所在目录、300ms 去抖、stop() 幂等等 goroutine；自家保存只丢同 hash 的 2s 窗",
-      "建议转 R16：<code>recent</code> 表在 allowNew 路径无回收（单条 ~48B，无感）；受保护目录只测了解析器未测命令入口",
-      "待裁决（建议 3）：<code>allowNew:true + baseHash:\"\"</code> 会静默覆盖已存在的未打开文件——是否收紧为 conflict"
-    ]},
-    {"round":"R05a0","verdict":"PASS","commit":"7442d31","date":"2026-11-12","findings":[
-      "提取语义逐函数等价（0644/0755、.atomic- 前缀、Sync、O_APPEND、LOCK_NB、错误文案全保留）；gitignore 例外精确（atomicfile 未命中，internal/other 仍命中）",
-      "修复复核：并发用例已不是自证式（O_TRUNC 反向实验会红）；互斥用例 2s 超时、不会再挂死；0755 与 ErrLocked 文案有断言",
-      "建议转 R16：lock.go 注释写「四个名字」实际只剩三个；并发用例 okN 可能只有 1–3，可加有界重试；「无锁会交错」的说法不成立（单次 write 本就原子）"
-    ]},
-    {"round":"R04","verdict":"PASS","commit":"0d0e923","date":"2026-11-12","findings":[
-      "4 项修复逐条 PASS：activate:false 不再展开、effect 依赖改 activeTab?.kind、注释分层、title 死三元删除",
-      "平移完整性：770 删除行里 80 行逐字命中三个新 lib 文件，其余 20 行全是 export/改写/import，无内容丢失",
-      "遗留（转 R09）：store 里还有 3 处 <code>rightTab === 'web'</code>（Browser Use 去重），PR-09 一并改",
-      "遗留：openFile 的 sizePatch 不受 activate 约束（潜伏 nit，无调用者）"
-    ]},
-    {"round":"R04","verdict":"CHANGES","commit":"b522232","date":"2026-11-12","findings":[
-      "<code>openTab({activate:false})</code> 也会展开右栏——与「后台静默不碰面板」冲突（当前无调用者，属潜伏缺陷）",
-      "两个 effect 体已改读 <code>activeTab?.kind</code>，依赖数组仍是 <code>rightTab</code>：同类多实例切换时 effect 不重跑",
-      "注释「唯一判定点」与 toggleRight/setRightExpanded 的用户手势路径矛盾",
-      "验收口径写死实现形态（layoutExpand 只出现一次 / setRightExpanded 不再展开）——应改成「内容与后台路径不得直接展开」"
-    ]},
-    {"round":"R03","verdict":"PASS","commit":"e9acdbd","date":"2026-11-12","findings":[
-      "纯移动 + 可回退接线：RightPanel 仅 5 个 hunk，删除块完整（GIT_STALE_MS/GIT_POLL_MS/EMPTY_GIT/fileStatusLabel 全在），末 hunk 只改渲染行",
-      "fileStatusLabel / EMPTY_GIT 与删除版逐字一致（主会话用 git show + diff 复核）",
-      "建议转 R16：<code>?? &lt;ChangesTab/&gt;</code> 回退会在注册失效时静默降级，可补「未 import → 走回退」用例"
-    ]},
-    {"round":"R02","verdict":"PASS","commit":"60e0216","date":"2026-11-12","findings":[
-      "5 条必须改全部闭环；评审独立复验：把新脚本投到 base a312be4 上 B1 转红（旧实现把 activeId 切到 web）",
-      "建议转 R04：<code>syncTabsToRightTab</code> 函数级注释仍写「只建默认集 / rightTab 只由 tabPatch 派生」，与实现的三条分支不符",
-      "建议转 R04：RightPanel 三处按 <code>rightTab</code> 的判定（embedHide / 待重建标签 / 标签条高亮）改成读 activeTab.kind",
-      "口径：02:116 的「17 项」应改 26 项；e2e 迁移（capture_*.mjs 的 setState 复位杠杆）记入 PR-15"
-    ]},
-    {"round":"R02","verdict":"CHANGES","commit":"55a1c0c","date":"2026-11-12","findings":[
-      "新测试没进 <code>npm test</code> 链条（§1.9 MUST）；<code>test:right-tabs</code> 同样不在链条里",
-      "17 项断言在 base 上全绿：B 段从不调用 <code>syncTabsToRightTab</code>，而被删的分支②只在 sync 里生效",
-      "A5/E2 用 <code>?? 兜底</code> 自比较，出错时恒真",
-      "02 验收「同 kind 两标签、rightTab 同 / activeId 不同」未落地",
-      "store 文件头仍写「rightTab 权威、标签集跟随 rightTab」——与本 PR 反转后的契约相反"
-    ]},
-    {"round":"R01","verdict":"PASS","commit":"a312be4","date":"2026-11-12","findings":[
-      "三轮后收敛：pct→ratio→pct 往返闭合，窄拖拽有回归用例，220 项 + 8 例全绿，tsc/eslint 干净",
-      "建议转 R16：<code>lib/layout.ts:3-4</code> 注释仍是像素口径；<code>PX</code> 零引用（删或真用）；<code>applyBias</code> 是第二个写者（可并入 setRightLayout(l, extra)）",
-      "残留瑕疵（可留）：拖左/中分隔条时 leftPct 变化会改 ratio，恰好落在 58–64% 区间时可能吸附到 64 并位移约 5px；要消掉需在 App 存 lastRightPct（同基准 <0.1 才记账）"
-    ]},
-    {"round":"R01","verdict":"CHANGES","commit":"7cb4dff","date":"2026-11-12","findings":[
-      "<code>&lt;2px</code> 守卫两边基准不同（layout%×clientWidth vs getSize().inPixels=offsetWidth）：阈值等价于「右栏 ≥ 窗口 25%」，窄拖拽被当抖动丢掉",
-      "修法：改用 layout 百分比换算（分母 = 所有 panel 之和），store 内按 ratio 去重；补「拖到 20% 仍记 custom」用例"
-    ]},
-    {"round":"R01","verdict":"CHANGES","commit":"f03f420","date":"2026-11-11","findings":[
-      "收起态拖左/中分隔条会把右栏弹开（Group 级回调 + rail 仍报 44px）→ 违反 D-A",
-      "<code>afterDrag</code> 用 <code>leftPinned</code> 推左栏宽（差 180px），把 50% 记成 35% 并误吸附「居中」；<code>PX.leftRail</code> 56 ≠ 真实 44",
-      "bias effect 与 <code>rightSize</code> 抢写同一 Panel 宽度（last-writer-wins）",
-      "镜像 <code>rightExpanded</code> 未归一化，漂移态可被持久化恢复",
-      "删掉用户可见规则却没有回滚开关（00 §1.10 MUST），04 里写的 <code>surfaces.layout</code> 并不存在",
-      "01/02 的「展开→左栏自动 rail」未实现也未改口径"
-    ]},
-    {"round":"R00","verdict":"PASS","commit":"a19bccd","date":"2026-11-11","findings":[
-      "修复复核：DistributiveOmit 四处到位、12 例全绿、tsc 0 错、registry.ts 与上轮同一 blob（零改动）",
-      "建议转 R16：编译期用例改为直接钉签名（<code>Parameters&lt;HostApi['openTab']&gt;[0]</code>），否则改回 Omit 也不会红；并在注释里写明 node --test 只跑运行期、类型由 tsc 兜",
-      "建议转 R16：重注册用例补一条 <code>listSurfaces().length === 1</code> 钉住 Map 覆盖语义",
-      "建议撤回：<code>getSurface</code> 收窄重载不做（调用点传 active: SurfaceTab 即可，收窄要维护 kind→T 映射表）"
-    ]},
-    {"round":"R00","verdict":"CHANGES","commit":"55a2bff","date":"2026-11-11","findings":[
-      "<code>types.ts:35</code> <code>Omit&lt;SurfaceTab,'id'&gt;</code> 在联合类型上不分配，收缩成 <code>{kind}</code>，插件 <code>params</code> 编译不过 → 四处统一换 <code>DistributiveOmit</code>",
-      "<code>defaultSpec</code> / <code>dedupeKey</code> / <code>restore</code> 同问题，PR-04 的 file provider 会丢 <code>path</code>/<code>mode</code>",
-      "03 §2.2 写 <code>localeCompare</code>，实现是码点比较 → 回写文档，避免下一位照抄",
-      "建议：<code>host</code> 必填改成 M1 的 <code>PluginRenderContext</code>（已采纳）；<code>getSurface</code> 收窄重载（暂不做，记入本节）"
-    ]}
+    {
+      "round": "R05b",
+      "verdict": "CHANGES",
+      "commit": "b706089",
+      "date": "2026-11-12",
+      "findings": [
+        "九项里 3 项实质达标、2 项取证缺口、1 项真缺陷：<b>CRLF 文件一打开即显脏、保存把整份文件改成 LF</b>",
+        "最严重：<code>send()</code> 的 onData + <code>dispatchEvent:4703</code> 就地 return 是本 PR 唯一主干改动，却<b>没有任何干净检出下能跑的测试</b>（冒烟脚本被 gitignore）",
+        "回滚开关未提到单点：<code>fileSurface</code> / <code>FilePreview</code> 的编辑入口未确认受 <code>settings.editor</code> 控制",
+        "批量关闭（关其它/关右侧）的 dirty 守卫未取证；<code>file_*</code> 失败被 return 挡住不参与 bridge 掉线判定",
+        "加判：响应缺 hash 时 <code>baseHash</code> 被写成空串 → 下次保存退化成 F36 的「无条件覆盖」",
+        "质量认可：状态机三态、blocked 不重发、baseHash 取响应、saved 保留新 dirty、allowQuit+isDestroyed 双放行"
+      ]
+    },
+    {
+      "round": "R05a1",
+      "verdict": "PASS",
+      "commit": "f2da6e9",
+      "date": "2026-11-12",
+      "findings": [
+        "事故：bridge 下 68 个 _test.go（17006 行）从未入库，<b>R00-R05a 的 Go 门禁一直是假绿</b>——干净检出 14 个未定义符号编译失败",
+        "干净检出实测：vet=0、定向 test ok；全量 <b>9 条红</b>（成本口径 5 + 真实 provider 探活 1 + fixture 缺失 2 + reducer 1），第 10 条来自仍未入库的 trace_realdata_test.go",
+        "最小可编译集 = 8 文件 / 6893 行 / 132 个 Test；61 个剩余文件不影响编译但永不运行 → R05a3",
+        "exclude 残留更正：17 条里 16 条是「已跟踪文件的冗余条目」，仅 1 条文件真缺失（runtime_settings_test.go）",
+        "门禁口径改：Go 一律在 worktree 干净检出里跑（00 §4.5 + F37）"
+      ]
+    },
+    {
+      "round": "R05a",
+      "verdict": "PASS",
+      "commit": "6e1f419",
+      "date": "2026-11-12",
+      "findings": [
+        "9/9 硬点通过：三命令共用 <code>editPath→resolveWorkspacePath</code>；冲突时序 LockPath→锁内 hash→ReplaceLocked；<code>os.WriteFile</code> 零命中",
+        "LRU+引用计数正确：旧版「重复挂目录 watch」泄漏已修，<code>dirs==count</code> 有断言；refs>=2 永不淘汰",
+        "watcher 只挂文件所在目录、300ms 去抖、stop() 幂等等 goroutine；自家保存只丢同 hash 的 2s 窗",
+        "建议转 R16：<code>recent</code> 表在 allowNew 路径无回收（单条 ~48B，无感）；受保护目录只测了解析器未测命令入口",
+        "待裁决（建议 3）：<code>allowNew:true + baseHash:\"\"</code> 会静默覆盖已存在的未打开文件——是否收紧为 conflict"
+      ]
+    },
+    {
+      "round": "R05a0",
+      "verdict": "PASS",
+      "commit": "7442d31",
+      "date": "2026-11-12",
+      "findings": [
+        "提取语义逐函数等价（0644/0755、.atomic- 前缀、Sync、O_APPEND、LOCK_NB、错误文案全保留）；gitignore 例外精确（atomicfile 未命中，internal/other 仍命中）",
+        "修复复核：并发用例已不是自证式（O_TRUNC 反向实验会红）；互斥用例 2s 超时、不会再挂死；0755 与 ErrLocked 文案有断言",
+        "建议转 R16：lock.go 注释写「四个名字」实际只剩三个；并发用例 okN 可能只有 1–3，可加有界重试；「无锁会交错」的说法不成立（单次 write 本就原子）"
+      ]
+    },
+    {
+      "round": "R04",
+      "verdict": "PASS",
+      "commit": "0d0e923",
+      "date": "2026-11-12",
+      "findings": [
+        "4 项修复逐条 PASS：activate:false 不再展开、effect 依赖改 activeTab?.kind、注释分层、title 死三元删除",
+        "平移完整性：770 删除行里 80 行逐字命中三个新 lib 文件，其余 20 行全是 export/改写/import，无内容丢失",
+        "遗留（转 R09）：store 里还有 3 处 <code>rightTab === 'web'</code>（Browser Use 去重），PR-09 一并改",
+        "遗留：openFile 的 sizePatch 不受 activate 约束（潜伏 nit，无调用者）"
+      ]
+    },
+    {
+      "round": "R04",
+      "verdict": "CHANGES",
+      "commit": "b522232",
+      "date": "2026-11-12",
+      "findings": [
+        "<code>openTab({activate:false})</code> 也会展开右栏——与「后台静默不碰面板」冲突（当前无调用者，属潜伏缺陷）",
+        "两个 effect 体已改读 <code>activeTab?.kind</code>，依赖数组仍是 <code>rightTab</code>：同类多实例切换时 effect 不重跑",
+        "注释「唯一判定点」与 toggleRight/setRightExpanded 的用户手势路径矛盾",
+        "验收口径写死实现形态（layoutExpand 只出现一次 / setRightExpanded 不再展开）——应改成「内容与后台路径不得直接展开」"
+      ]
+    },
+    {
+      "round": "R03",
+      "verdict": "PASS",
+      "commit": "e9acdbd",
+      "date": "2026-11-12",
+      "findings": [
+        "纯移动 + 可回退接线：RightPanel 仅 5 个 hunk，删除块完整（GIT_STALE_MS/GIT_POLL_MS/EMPTY_GIT/fileStatusLabel 全在），末 hunk 只改渲染行",
+        "fileStatusLabel / EMPTY_GIT 与删除版逐字一致（主会话用 git show + diff 复核）",
+        "建议转 R16：<code>?? &lt;ChangesTab/&gt;</code> 回退会在注册失效时静默降级，可补「未 import → 走回退」用例"
+      ]
+    },
+    {
+      "round": "R02",
+      "verdict": "PASS",
+      "commit": "60e0216",
+      "date": "2026-11-12",
+      "findings": [
+        "5 条必须改全部闭环；评审独立复验：把新脚本投到 base a312be4 上 B1 转红（旧实现把 activeId 切到 web）",
+        "建议转 R04：<code>syncTabsToRightTab</code> 函数级注释仍写「只建默认集 / rightTab 只由 tabPatch 派生」，与实现的三条分支不符",
+        "建议转 R04：RightPanel 三处按 <code>rightTab</code> 的判定（embedHide / 待重建标签 / 标签条高亮）改成读 activeTab.kind",
+        "口径：02:116 的「17 项」应改 26 项；e2e 迁移（capture_*.mjs 的 setState 复位杠杆）记入 PR-15"
+      ]
+    },
+    {
+      "round": "R02",
+      "verdict": "CHANGES",
+      "commit": "55a1c0c",
+      "date": "2026-11-12",
+      "findings": [
+        "新测试没进 <code>npm test</code> 链条（§1.9 MUST）；<code>test:right-tabs</code> 同样不在链条里",
+        "17 项断言在 base 上全绿：B 段从不调用 <code>syncTabsToRightTab</code>，而被删的分支②只在 sync 里生效",
+        "A5/E2 用 <code>?? 兜底</code> 自比较，出错时恒真",
+        "02 验收「同 kind 两标签、rightTab 同 / activeId 不同」未落地",
+        "store 文件头仍写「rightTab 权威、标签集跟随 rightTab」——与本 PR 反转后的契约相反"
+      ]
+    },
+    {
+      "round": "R01",
+      "verdict": "PASS",
+      "commit": "a312be4",
+      "date": "2026-11-12",
+      "findings": [
+        "三轮后收敛：pct→ratio→pct 往返闭合，窄拖拽有回归用例，220 项 + 8 例全绿，tsc/eslint 干净",
+        "建议转 R16：<code>lib/layout.ts:3-4</code> 注释仍是像素口径；<code>PX</code> 零引用（删或真用）；<code>applyBias</code> 是第二个写者（可并入 setRightLayout(l, extra)）",
+        "残留瑕疵（可留）：拖左/中分隔条时 leftPct 变化会改 ratio，恰好落在 58–64% 区间时可能吸附到 64 并位移约 5px；要消掉需在 App 存 lastRightPct（同基准 <0.1 才记账）"
+      ]
+    },
+    {
+      "round": "R01",
+      "verdict": "CHANGES",
+      "commit": "7cb4dff",
+      "date": "2026-11-12",
+      "findings": [
+        "<code>&lt;2px</code> 守卫两边基准不同（layout%×clientWidth vs getSize().inPixels=offsetWidth）：阈值等价于「右栏 ≥ 窗口 25%」，窄拖拽被当抖动丢掉",
+        "修法：改用 layout 百分比换算（分母 = 所有 panel 之和），store 内按 ratio 去重；补「拖到 20% 仍记 custom」用例"
+      ]
+    },
+    {
+      "round": "R01",
+      "verdict": "CHANGES",
+      "commit": "f03f420",
+      "date": "2026-11-11",
+      "findings": [
+        "收起态拖左/中分隔条会把右栏弹开（Group 级回调 + rail 仍报 44px）→ 违反 D-A",
+        "<code>afterDrag</code> 用 <code>leftPinned</code> 推左栏宽（差 180px），把 50% 记成 35% 并误吸附「居中」；<code>PX.leftRail</code> 56 ≠ 真实 44",
+        "bias effect 与 <code>rightSize</code> 抢写同一 Panel 宽度（last-writer-wins）",
+        "镜像 <code>rightExpanded</code> 未归一化，漂移态可被持久化恢复",
+        "删掉用户可见规则却没有回滚开关（00 §1.10 MUST），04 里写的 <code>surfaces.layout</code> 并不存在",
+        "01/02 的「展开→左栏自动 rail」未实现也未改口径"
+      ]
+    },
+    {
+      "round": "R00",
+      "verdict": "PASS",
+      "commit": "a19bccd",
+      "date": "2026-11-11",
+      "findings": [
+        "修复复核：DistributiveOmit 四处到位、12 例全绿、tsc 0 错、registry.ts 与上轮同一 blob（零改动）",
+        "建议转 R16：编译期用例改为直接钉签名（<code>Parameters&lt;HostApi['openTab']&gt;[0]</code>），否则改回 Omit 也不会红；并在注释里写明 node --test 只跑运行期、类型由 tsc 兜",
+        "建议转 R16：重注册用例补一条 <code>listSurfaces().length === 1</code> 钉住 Map 覆盖语义",
+        "建议撤回：<code>getSurface</code> 收窄重载不做（调用点传 active: SurfaceTab 即可，收窄要维护 kind→T 映射表）"
+      ]
+    },
+    {
+      "round": "R00",
+      "verdict": "CHANGES",
+      "commit": "55a2bff",
+      "date": "2026-11-11",
+      "findings": [
+        "<code>types.ts:35</code> <code>Omit&lt;SurfaceTab,'id'&gt;</code> 在联合类型上不分配，收缩成 <code>{kind}</code>，插件 <code>params</code> 编译不过 → 四处统一换 <code>DistributiveOmit</code>",
+        "<code>defaultSpec</code> / <code>dedupeKey</code> / <code>restore</code> 同问题，PR-04 的 file provider 会丢 <code>path</code>/<code>mode</code>",
+        "03 §2.2 写 <code>localeCompare</code>，实现是码点比较 → 回写文档，避免下一位照抄",
+        "建议：<code>host</code> 必填改成 M1 的 <code>PluginRenderContext</code>（已采纳）；<code>getSurface</code> 收窄重载（暂不做，记入本节）"
+      ]
+    }
   ],
   "risks": [
-    {"id":"R-1","level":"bad","title":"/internal/ 被 .gitignore 排除","d":"D-G 要提取 internal/atomicfile、D-J 要 internal/officekit，但 .gitignore:22 有 /internal/——这两个包不会进版本库。","a":"PR-05a0 开工前定：①改 .gitignore 加 !internal/atomicfile ②放 desktop/internal/ ③git add -f。默认①，在 05a0 的 commit 里一起改。"},
-    {"id":"R-2","level":"warn","title":"store 的 AppState 未导出","d":"03 §2.1 的 types.ts 要 import type { AppState }，但 useAppStore.ts:2828 是 `interface AppState`（未 export）。","a":"PR-00 里补一个 `export`（单行，零行为变化），已计入本轮 diff。"},
-    {"id":"R-3","level":"info","title":"编辑器依赖已裁决（OP-1 → F32）","d":"D-F 的 CodeMirror 6 与「不加新 npm 依赖」冲突。","a":"已结案：V0.1 走零依赖受控 textarea + 行号 + 只读 shiki 高亮；CodeMirror 仅 V1 可选（按 00 §1.1 四步走例外）。"},
-    {"id":"R-4","level":"info","title":"e2e 端口与并发","d":"现有 67 个 verify_*.mjs 各自起 playwright 与端口，本轮新增 CodeMode e2e 需要独立端口。","a":"新 e2e 用 4180+ 段未占用端口；PR-15 再评估统一 runner（OP-4）。"},
-    {"id":"R-7","level":"warn","title":"P04/P05 拖拽帧未测（F29 推迟到 PR-15）","d":"无人值守环境无法驱动真实指针拖拽；R01 只验了换算为 O(1) 纯函数、拖拽只写一次 store。","a":"F29/F31：PR-15 用 playwright 起完整应用补行为断言与帧率；回滚 = revert 单 commit（F30，不留开关）。"},
-    {"id":"R-8","level":"bad","title":"desktop/bridge/main_test.go 未入库","d":"68 个已跟踪测试文件依赖它（testManager/syncBuf/cmd/readLines），但该文件被 .git/info/exclude:84 排除、从未提交 → 干净检出下整个 bridge 测试包不可编译。","a":"单独一轮仓库卫生：移除 exclude 行 + 提交 main_test.go（3282 行、无绝对路径、无密钥）；不混进功能轮次。"},
-    {"id":"R-18","level":"high","title":"LibreOffice 26.8 在本机渲染不出 CJK 字形","d":"真转换实测：ASCII 正常；中文三组字体（默认 / PingFang SC / Songti SC / Arial Unicode MS，含拷进 ~/Library/Fonts 重建 profile）全部 <b>字形空白</b>，但 PDF 里字符存在（extract_text 能取到）。","a":"标为环境阻塞，真转换的「中文正确性」未验证；需在另一台 macOS / 或 Linux 复验，必要时锁定 LO 版本或改用 docx→图片渲染。"},
-    {"id":"R-19","level":"mid","title":"右侧栏面板预览恒走近似 HTML（kit 可用时也不吃保真版）","d":"R08d 修「面板把 PDF 二进制当文本读回 iframe → 空白」时，给面板预览加了 approximate=true；保真版（真 PDF）走内嵌浏览器 previewOfficeFile。","a":"已知遗留：面板内要吃 kit 版，得让它像 PdfPreview 那样用原生 embed 视图摆缓存里的 PDF —— 属新一层产品改动，单独排一轮。"},
-    {"id":"R-14","level":"warn","title":"真 Electron 探针仍靠人跑（pdf/container/scoping）","d":"这三个要 <code>go build</code> + 真窗口，40–90s；进默认链会把全链从 ~12 分钟拉到 ~16 分钟。R06d 已把它们收进 <code>npm run test:electron</code>，但「记得跑」仍然靠人。","a":"每轮收尾手跑 <code>npm run test:electron</code>（PR-06c 的方式）；统一 runner / 并行（OP-4）到 PR-15 再评估。"},
-    {"id":"R-15","level":"warn","title":"链内还有 10 个 Chrome 探针没有端口归属自检","d":"它们都用内核分配端口（<code>e2e/_serve.mjs</code> 的 freePort）+「探针页回 200」判据 —— 撞车概率≈0，但「这张页面是我的」仍未证明；服务起不来时仍会表现成断言超时（E2E 里最容易误判成代码坏）。","a":"PR-15：把 <code>waitProbePage</code> 铺到全部探针（每处 ~3 行）；R06d 只动了被挂进链的三个 + 两个缺 import 的，diff 保持可回退。另有 3 个**链外**探针仍缺 <code>surfaces/builtin</code>（verify_appearance_settings / verify_csv_preview / verify_md_file_modes）—— F45 同类，补 import 后要先各自跑一遍确认断言不依赖兜底。"},
-    {"id":"R-17","level":"warn","title":"e2e:pdf 的默认 PDF 夹具不在版本库里","d":"默认取 <code>desktop/百工2026年上半年经营分析.pdf</code>，但 <code>git ls-files</code> 里没有任何 pdf —— 干净检出下 <code>npm run test:electron</code> 第一步就停。这跟 R-11 是同一类病（测试依赖的资产没入库）。","a":"已先把缺夹具改判「前置不满足」退 2（不再像测试失败）；后续二选一：入库一份小 PDF 夹具，或把 <code>test:electron:pdf</code> 的用法写死为「必须带 PDF_E2E_SRC 跑」。"},
-    {"id":"R-16","level":"info","title":"同类「动画中途采样」竞态可能还在别的几何断言里","d":"T3 修完了，但 <code>e2e:container</code> / <code>e2e:scoping</code> 里也有 DOM rect vs 原生 bounds 的比对，同样受 <code>.right-body</code> 入场动画影响（后台窗口被 Chromium 节流到 ~3.4s）。","a":"观察项：这两个探针连跑 5 次，若出现 3–6px 级抖动，照 T3 的 settle 写法补（判据不动）。"},
-    {"id":"R-13","level":"warn","title":"探针只 import index.css 时皮肤只生效一半","d":"vite dev 下 index.css 末尾的三行 <code>@import</code> 不下发（build 产物才有），<code>.rt-head</code> 的 display 变 block 而非 flex。","a":"新探针显式 import narrative-skin / runtime-palette / runtime-skin 三份；已写进 verify_user_blocks.mjs 头注释。"},
-    {"id":"R-12","level":"info","title":"「环境相关基线红」被证伪","d":"6 条成本失败的真因是 <code>loadProviderConfig()</code> 污染进程级 <code>userPriceTable</code> 且不恢复；反解数值精确吻合。","a":"已修（isolateUserPrices）。规则入 00 §4.6：禁止以「环境相关」结案。"},
-    {"id":"R-11","level":"high","title":"前端测试资产同样从未入库（比 Go 更严重）","d":".gitignore:66 整目录忽略 <code>desktop/app/e2e/</code>（53 个脚本）、:62 <code>*.test.ts</code>（7 个 electron 测试），<code>git ls-files</code> = 0。干净检出下 <code>npm test</code> 一步都跑不了。","a":"R05a3 一并转正：e2e 目录、electron 测试、MCP testdata fixture；逐个跑通再入库，跑不通的明示删除。"},
-    {"id":"R-10","level":"warn","title":"MCP 两个测试在干净检出永远红","d":"`mcp/testdata/server` 被 .gitignore:72 的 `testdata/` 吞掉，fixture 进不了库。","a":"R05a3 加 .gitignore 例外（!desktop/bridge/mcp/testdata/**）或把 fixture 生成为代码。"},
-    {"id":"R-9","level":"warn","title":"allowNew + baseHash:\"\" 可静默覆盖已存在文件","d":"另存为打到同名旧文件时无条件覆盖，Go 侧不拦。","a":"V0.1 定为前端责任（另存为前必须确认目标）；出现误覆盖反馈再按 L3 收紧为 conflict。"},
-    {"id":"R-6","level":"info","title":"R00 两条测试强化建议（转 R16）","d":"评审指出：类型回归用例只守了 DistributiveOmit 本身，没钉四个签名；重注册用例没断言 listSurfaces 只有一份。","a":"记入 R16 缓冲，不回头改已 PASS 的轮次（避免 PASS 后无评审改动）。"},
-    {"id":"R-5","level":"warn","title":"heavy 面板内存无基线","d":"web 视图池 + 多标签是本方案最大的性能风险，但当前没有任何内存基线数据。","a":"PR-06 前先跑一次基线（P09/P10），把数值写回本页性能模块；无基线不许合 PR-06。"}
+    {
+      "id": "R-1",
+      "level": "bad",
+      "title": "/internal/ 被 .gitignore 排除",
+      "d": "D-G 要提取 internal/atomicfile、D-J 要 internal/officekit，但 .gitignore:22 有 /internal/——这两个包不会进版本库。",
+      "a": "PR-05a0 开工前定：①改 .gitignore 加 !internal/atomicfile ②放 desktop/internal/ ③git add -f。默认①，在 05a0 的 commit 里一起改。"
+    },
+    {
+      "id": "R-2",
+      "level": "warn",
+      "title": "store 的 AppState 未导出",
+      "d": "03 §2.1 的 types.ts 要 import type { AppState }，但 useAppStore.ts:2828 是 `interface AppState`（未 export）。",
+      "a": "PR-00 里补一个 `export`（单行，零行为变化），已计入本轮 diff。"
+    },
+    {
+      "id": "R-3",
+      "level": "info",
+      "title": "编辑器依赖已裁决（OP-1 → F32）",
+      "d": "D-F 的 CodeMirror 6 与「不加新 npm 依赖」冲突。",
+      "a": "已结案：V0.1 走零依赖受控 textarea + 行号 + 只读 shiki 高亮；CodeMirror 仅 V1 可选（按 00 §1.1 四步走例外）。"
+    },
+    {
+      "id": "R-4",
+      "level": "info",
+      "title": "e2e 端口与并发",
+      "d": "现有 67 个 verify_*.mjs 各自起 playwright 与端口，本轮新增 CodeMode e2e 需要独立端口。",
+      "a": "新 e2e 用 4180+ 段未占用端口；PR-15 再评估统一 runner（OP-4）。"
+    },
+    {
+      "id": "R-7",
+      "level": "warn",
+      "title": "P04/P05 拖拽帧未测（F29 推迟到 PR-15）",
+      "d": "无人值守环境无法驱动真实指针拖拽；R01 只验了换算为 O(1) 纯函数、拖拽只写一次 store。",
+      "a": "F29/F31：PR-15 用 playwright 起完整应用补行为断言与帧率；回滚 = revert 单 commit（F30，不留开关）。"
+    },
+    {
+      "id": "R-8",
+      "level": "bad",
+      "title": "desktop/bridge/main_test.go 未入库",
+      "d": "68 个已跟踪测试文件依赖它（testManager/syncBuf/cmd/readLines），但该文件被 .git/info/exclude:84 排除、从未提交 → 干净检出下整个 bridge 测试包不可编译。",
+      "a": "单独一轮仓库卫生：移除 exclude 行 + 提交 main_test.go（3282 行、无绝对路径、无密钥）；不混进功能轮次。"
+    },
+    {
+      "id": "R-18",
+      "level": "high",
+      "title": "LibreOffice 26.8 在本机渲染不出 CJK 字形",
+      "d": "真转换实测：ASCII 正常；中文三组字体（默认 / PingFang SC / Songti SC / Arial Unicode MS，含拷进 ~/Library/Fonts 重建 profile）全部 <b>字形空白</b>，但 PDF 里字符存在（extract_text 能取到）。",
+      "a": "标为环境阻塞，真转换的「中文正确性」未验证；需在另一台 macOS / 或 Linux 复验，必要时锁定 LO 版本或改用 docx→图片渲染。"
+    },
+    {
+      "id": "R-19",
+      "level": "mid",
+      "title": "右侧栏面板预览恒走近似 HTML（kit 可用时也不吃保真版）",
+      "d": "R08d 修「面板把 PDF 二进制当文本读回 iframe → 空白」时，给面板预览加了 approximate=true；保真版（真 PDF）走内嵌浏览器 previewOfficeFile。",
+      "a": "已知遗留：面板内要吃 kit 版，得让它像 PdfPreview 那样用原生 embed 视图摆缓存里的 PDF —— 属新一层产品改动，单独排一轮。"
+    },
+    {
+      "id": "R-14",
+      "level": "warn",
+      "title": "真 Electron 探针仍靠人跑（pdf/container/scoping）",
+      "d": "这三个要 <code>go build</code> + 真窗口，40–90s；进默认链会把全链从 ~12 分钟拉到 ~16 分钟。R06d 已把它们收进 <code>npm run test:electron</code>，但「记得跑」仍然靠人。",
+      "a": "每轮收尾手跑 <code>npm run test:electron</code>（PR-06c 的方式）；统一 runner / 并行（OP-4）到 PR-15 再评估。"
+    },
+    {
+      "id": "R-15",
+      "level": "warn",
+      "title": "链内还有 10 个 Chrome 探针没有端口归属自检",
+      "d": "它们都用内核分配端口（<code>e2e/_serve.mjs</code> 的 freePort）+「探针页回 200」判据 —— 撞车概率≈0，但「这张页面是我的」仍未证明；服务起不来时仍会表现成断言超时（E2E 里最容易误判成代码坏）。",
+      "a": "PR-15：把 <code>waitProbePage</code> 铺到全部探针（每处 ~3 行）；R06d 只动了被挂进链的三个 + 两个缺 import 的，diff 保持可回退。另有 3 个**链外**探针仍缺 <code>surfaces/builtin</code>（verify_appearance_settings / verify_csv_preview / verify_md_file_modes）—— F45 同类，补 import 后要先各自跑一遍确认断言不依赖兜底。"
+    },
+    {
+      "id": "R-17",
+      "level": "warn",
+      "title": "e2e:pdf 的默认 PDF 夹具不在版本库里",
+      "d": "默认取 <code>desktop/百工2026年上半年经营分析.pdf</code>，但 <code>git ls-files</code> 里没有任何 pdf —— 干净检出下 <code>npm run test:electron</code> 第一步就停。这跟 R-11 是同一类病（测试依赖的资产没入库）。",
+      "a": "已先把缺夹具改判「前置不满足」退 2（不再像测试失败）；后续二选一：入库一份小 PDF 夹具，或把 <code>test:electron:pdf</code> 的用法写死为「必须带 PDF_E2E_SRC 跑」。"
+    },
+    {
+      "id": "R-16",
+      "level": "info",
+      "title": "同类「动画中途采样」竞态可能还在别的几何断言里",
+      "d": "T3 修完了，但 <code>e2e:container</code> / <code>e2e:scoping</code> 里也有 DOM rect vs 原生 bounds 的比对，同样受 <code>.right-body</code> 入场动画影响（后台窗口被 Chromium 节流到 ~3.4s）。",
+      "a": "观察项：这两个探针连跑 5 次，若出现 3–6px 级抖动，照 T3 的 settle 写法补（判据不动）。"
+    },
+    {
+      "id": "R-13",
+      "level": "warn",
+      "title": "探针只 import index.css 时皮肤只生效一半",
+      "d": "vite dev 下 index.css 末尾的三行 <code>@import</code> 不下发（build 产物才有），<code>.rt-head</code> 的 display 变 block 而非 flex。",
+      "a": "新探针显式 import narrative-skin / runtime-palette / runtime-skin 三份；已写进 verify_user_blocks.mjs 头注释。"
+    },
+    {
+      "id": "R-12",
+      "level": "info",
+      "title": "「环境相关基线红」被证伪",
+      "d": "6 条成本失败的真因是 <code>loadProviderConfig()</code> 污染进程级 <code>userPriceTable</code> 且不恢复；反解数值精确吻合。",
+      "a": "已修（isolateUserPrices）。规则入 00 §4.6：禁止以「环境相关」结案。"
+    },
+    {
+      "id": "R-11",
+      "level": "high",
+      "title": "前端测试资产同样从未入库（比 Go 更严重）",
+      "d": ".gitignore:66 整目录忽略 <code>desktop/app/e2e/</code>（53 个脚本）、:62 <code>*.test.ts</code>（7 个 electron 测试），<code>git ls-files</code> = 0。干净检出下 <code>npm test</code> 一步都跑不了。",
+      "a": "R05a3 一并转正：e2e 目录、electron 测试、MCP testdata fixture；逐个跑通再入库，跑不通的明示删除。"
+    },
+    {
+      "id": "R-10",
+      "level": "warn",
+      "title": "MCP 两个测试在干净检出永远红",
+      "d": "`mcp/testdata/server` 被 .gitignore:72 的 `testdata/` 吞掉，fixture 进不了库。",
+      "a": "R05a3 加 .gitignore 例外（!desktop/bridge/mcp/testdata/**）或把 fixture 生成为代码。"
+    },
+    {
+      "id": "R-9",
+      "level": "warn",
+      "title": "allowNew + baseHash:\"\" 可静默覆盖已存在文件",
+      "d": "另存为打到同名旧文件时无条件覆盖，Go 侧不拦。",
+      "a": "V0.1 定为前端责任（另存为前必须确认目标）；出现误覆盖反馈再按 L3 收紧为 conflict。"
+    },
+    {
+      "id": "R-6",
+      "level": "info",
+      "title": "R00 两条测试强化建议（转 R16）",
+      "d": "评审指出：类型回归用例只守了 DistributiveOmit 本身，没钉四个签名；重注册用例没断言 listSurfaces 只有一份。",
+      "a": "记入 R16 缓冲，不回头改已 PASS 的轮次（避免 PASS 后无评审改动）。"
+    },
+    {
+      "id": "R-5",
+      "level": "warn",
+      "title": "heavy 面板内存无基线",
+      "d": "web 视图池 + 多标签是本方案最大的性能风险，但当前没有任何内存基线数据。",
+      "a": "PR-06 前先跑一次基线（P09/P10），把数值写回本页性能模块；无基线不许合 PR-06。"
+    }
   ],
   "hotspots": [
     "<b>web 视图池</b>：多个 &lt;webview&gt; 常驻 → P09/P10 是唯一可能挡住 PR-06 的指标。",
@@ -408,8 +1469,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     "<a href=\"04-review.md\">04 评审裁决</a> · <a href=\"05-preview-media-research.md\">05 预览/媒体调研</a> · <a href=\"06-opencode-skills-research.md\">06 OpenCode 调研</a>",
     "<a href=\"README.md\">README</a>（口径表）"
   ]
-}
-</script>
+}</script>
 
 <script>
 const D = JSON.parse(document.getElementById('data').textContent);
