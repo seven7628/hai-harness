@@ -4323,25 +4323,78 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 //
 // 只挑树投影认的那三种：agent / async_task / 被摘离的（promoted）工具任务。
 // 其余块留在窗口以外由「加载更早」逐页取回，不进这个数组。
+//
+// ## 字节预算（2026-11-12，P3）
+//
+// 上面第二类（同步子智能体）整份带 items ⇒ **一次 new_session 就能带回上百 MB**：
+// 实测渲染进程 footprint 2.08 GB（峰值 3.13 GB），而 V8 的堆上限是**崩溃线**
+// ⇒ 内存尖峰发生在前端任何降级之前，降级机制根本来不及救。
+//
+// ⇒ 这里加一道**字节预算**：从**最近**的一端往回收集，超预算就停
+// （丢的是最老的卡片）。
+//
+// 丢掉的卡片**不是永久丢失**：它们还在 sidecar 里，用户「加载更早」时会作为
+// 普通块回来 ⇒ 左栏树照样能看到（树的根层本来就分页：DEFAULT_ROOT_PAGE = 5，
+// 默认只显示 5 个根）。
 func detachAgents(out []Block) []Block {
-	var agents []Block
-	for _, b := range out {
+	// 预算按**实际传输**的字节算（骨架卡片很小，整份卡片很大）。
+	var picked []Block
+	total := int64(0)
+	for i := len(out) - 1; i >= 0; i-- {
+		b := out[i]
 		switch {
 		case b.Kind == blockKindAgent, b.Kind == blockKindAsyncTask:
 		case b.Kind == blockKindTool && b.Promoted && b.TaskID != "":
 		default:
 			continue
 		}
-		if b.TaskID == "" || len(b.Items) == 0 {
-			agents = append(agents, b)
-			continue
+		if b.TaskID != "" && len(b.Items) > 0 {
+			slim := b // 值拷贝：Items 切片头置空不影响 r.blocks 本体
+			slim.ItemsTrimmed += len(slim.Items)
+			slim.Items = nil
+			b = slim
 		}
-		slim := b // 值拷贝：Items 切片头置空不影响 r.blocks 本体
-		slim.ItemsTrimmed += len(slim.Items)
-		slim.Items = nil
-		agents = append(agents, slim)
+		sz := detachedCardBytes(b)
+		if len(picked) > 0 && (total+sz > detachAgentsBudgetBytes || len(picked) >= detachAgentsMaxCards) {
+			break // 超预算 ⇒ 停（更老的也不要了）
+		}
+		total += sz
+		picked = append(picked, b)
 	}
-	return agents
+	// 倒序收集 ⇒ 翻回来保持原顺序（窗口外卡片的原始次序）。
+	for i, j := 0, len(picked)-1; i < j; i, j = i+1, j-1 {
+		picked[i], picked[j] = picked[j], picked[i]
+	}
+	return picked
+}
+
+const (
+	// detachAgentsBudgetBytes 是窗口外卡片允许携带的**总字节**上限（4 MB）。
+	//
+	// 定这个数的依据：左栏树的根层本来就分页（DEFAULT_ROOT_PAGE = 5），
+	// 而一次 new_session 的响应会被整个塞进渲染进程的 agentDetached。
+	// 4 MB ≈ 几十张带转录的卡片，够树画首屏 + 展开几页。
+	detachAgentsBudgetBytes int64 = 4 << 20
+
+	// detachAgentsMaxCards 是卡片**条数**上限（预算之外的兜底：
+	// 骨架卡片几乎不占字节，条数会很多）。
+	detachAgentsMaxCards = 500
+)
+
+// detachedCardBytes 估算一张窗口外卡片的载荷字节。
+//
+// 重点是 **items** —— 同步子智能体（没有 task_id）整份带转录，实测单卡
+// 100–185KB。图片是 base64（在 Content.Content 里），同样计入。
+func detachedCardBytes(b Block) int64 {
+	n := int64(len(b.Label) + len(b.TaskResult) + len(b.TaskError))
+	for i := range b.Items {
+		it := &b.Items[i]
+		n += int64(len(it.Text) + len(it.Args) + len(it.Result) + len(it.Name))
+		for j := range it.Images {
+			n += int64(len(it.Images[j].Content))
+		}
+	}
+	return n
 }
 
 // ReadBlockPage 按游标返回一页 block 的 JSON 字节（供 UI「加载更早」）。
