@@ -96,7 +96,13 @@ const (
 	// 按真实 EMU 几何做**近似**版式重建（LibreOffice 不可用，做不到渲染 —— 页面顶部有
 	// 明确标注，见 builtin.PptxPreviewer）。产物与通道同上。
 	CmdPptxPreview Command = "pptx_preview"
-	CmdSkills      Command = "skills"
+	// CmdMediaProbe 音视频元信息 + 直放判断（R08c，实现见 media_probe.go / media_matrix.go）。
+	// payload {path, workspace?} → {path, size, modified_ms, available, state, duration_ms,
+	// bit_rate, streams, playback{mode,kind,container,video_codec,audio_codec,reason,probed}, cached}。
+	// 两个**不是错误**的降级：ffprobe 不存在 → available:false；ffprobe 超时/异常 → state:"failed"。
+	// 两种情况都仍然给出按容器默认的 playback（能播的照样能播，只是元信息缺失）。
+	CmdMediaProbe Command = "media_probe"
+	CmdSkills     Command = "skills"
 	// CmdContextBreakdown 上下文构成（Composer ctx 环 hover 面板）：静态分区
 	//（系统提示词/技能/工具/MCP/其他）按请求组装字节**固定**展示，消息分区取
 	//「锚点 − 静态合计」残差（口径见 docs/CTX_ACCOUNTING_FIX_2026-09-20.md）。

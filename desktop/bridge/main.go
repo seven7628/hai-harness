@@ -16,7 +16,7 @@
 //
 //	switch_mode / switch_effort / switch_persona / switch_model / set_provider /
 //
-//	set_goal_alignment_rounds / set_max_subagents / set_compress_threshold / set_first_chunk_timeout / list_models / reload_settings / file_preview / xlsx_preview / skills / skill_toggle / skill_get / load_skill /
+//	set_goal_alignment_rounds / set_max_subagents / set_compress_threshold / set_first_chunk_timeout / list_models / reload_settings / file_preview / xlsx_preview / media_probe / skills / skill_toggle / skill_get / load_skill /
 //	skill_install / skill_browse / skill_update / skill_uninstall /
 //	market_add / market_remove / market_list / skill_update_market /
 //	mcp_list / mcp_set / mcp_refresh / plugin_list / plugin_install / plugin_uninstall /
@@ -2954,6 +2954,9 @@ func (m *manager) dispatch(c command) {
 		// 同上。注意这条通路的产物是**近似版式重建**而不是渲染（本机没有 LibreOffice，
 		// python-pptx 不能渲染）—— 做不到的几件事印在页面顶部，见 builtin.PptxPreviewer。
 		m.handlePreviewConvert(c, ws, "pptx")
+
+	case CmdMediaProbe: // 音视频元信息 + 直放判断（ffprobe 可选；缺失/超时都只是降级，不是错误）
+		m.handleMediaProbe(c, ws)
 
 	case CmdContextBreakdown: // 上下文构成面板（Composer ctx 环 hover 数据源）
 		// 静态分区（系统提示词/技能/工具/MCP/其他）按请求组装字节固定展示，消息分区
