@@ -121,10 +121,12 @@ check(groupText.includes('同一批：/compact + 正文 + 文件 + 图片'), '�
 check(groupText.includes('收到 Project 结果，我来总结'), '任务卡之后紧跟执行者总结（结果回推）')
 check(groupText.includes('DM-ONLY') === false, '群聊里不出现 DM-ONLY 标记（私聊内容不进群）')
 
-// 内联 need：审批 + 提问
+// 内联 need：审批 + 提问（waitFor 不能裸 await：超时只会抛 TimeoutError 栈，
+// 失败清单里看不到「哪张卡没出现」，一次跑完也就只报一个错）。
 const approval = page.locator('.hub-inline-need--approval').first()
-await approval.waitFor({ timeout: 8000 })
-const approvalText = (await approval.innerText()).replace(/\s+/g, ' ')
+const approvalShown = await approval.waitFor({ timeout: 8000 }).then(() => true).catch(() => false)
+check(approvalShown, '审批（approval）内联卡出现')
+const approvalText = approvalShown ? (await approval.innerText()).replace(/\s+/g, ' ') : ''
 check(approvalText.includes('workspace'), `审批卡显示 Project workspace（got=${approvalText.slice(0, 120)}）`)
 check(approvalText.includes('s_demo_project'), '审批卡显示 Project session')
 check(approvalText.includes('Researcher-sub'), '审批卡显示子智能体名')
@@ -132,8 +134,9 @@ check(await page.locator('.hub-inline-need--question').count() >= 1, '提问（A
 
 // 内联 ToDo：2/3 + 子智能体 Researcher-sub
 const todo = page.locator('.hub-inline-todo').first()
-await todo.waitFor({ timeout: 8000 })
-const todoText = (await todo.innerText()).replace(/\s+/g, ' ')
+const todoShown = await todo.waitFor({ timeout: 8000 }).then(() => true).catch(() => false)
+check(todoShown, 'ToDo 内联卡出现')
+const todoText = todoShown ? (await todo.innerText()).replace(/\s+/g, ' ') : ''
 check(todoText.includes('ToDo · 2/3'), `待办卡计数 2/3（got=${todoText.slice(0, 80)}）`)
 check(todoText.includes('子智能体 Researcher-sub'), `待办卡归属子智能体（got=${todoText.slice(0, 80)}）`)
 
@@ -145,19 +148,28 @@ check(String(fileTitle ?? '').includes('/mock/workspace/pricing-v3.md'), `文件
 
 // 任务卡：workspace 目标
 const taskRow = page.locator('.hub-group-view .task-row').first()
-await taskRow.waitFor({ timeout: 8000 })
-const taskText = (await taskRow.innerText()).replace(/\s+/g, ' ')
+const taskShown = await taskRow.waitFor({ timeout: 8000 }).then(() => true).catch(() => false)
+check(taskShown, '任务结果卡出现')
+const taskText = taskShown ? (await taskRow.innerText()).replace(/\s+/g, ' ') : ''
 check(taskText.includes('/mock/workspace'), `任务卡显示 workspace（got=${taskText.slice(0, 140)}）`)
 check(taskText.includes('s_demo_project'), '任务卡显示 Project session')
 check(await taskRow.locator('.hub-task-open').count() === 1, '任务卡有「打开会话」入口')
+
+// 回推总结的上下文行：TurnContextLine 在 senders <2 时整行 return null，所以这条同时
+// 钉住「senders 补足 2 人」和「指向任务卡 #6」两件事。
+const ctxJump = page.locator('.hub-group-view .hub-context-jump').first()
+const ctxShown = await ctxJump.waitFor({ timeout: 6000 }).then(() => true).catch(() => false)
+check(ctxShown, '回推总结带上下文行（senders ≥ 2）')
+const ctxTitle = ctxShown ? await ctxJump.getAttribute('title') : ''
+check(String(ctxTitle ?? '').includes('#6'), `上下文行指向任务卡 #6（got=${ctxTitle}）`)
 
 // 长 Markdown + visual-ui（```html 围栏 → .htmlblock iframe）
 check(await page.locator('.hub-group-view .md table').count() >= 1, '长消息里的表格渲染出来了')
 check(await page.locator('.hub-group-view .md ul li').count() >= 5, '长消息里的清单渲染出来了')
 const htmlblock = page.locator('.hub-group-view .htmlblock').first()
-await htmlblock.waitFor({ timeout: 8000 })
-check(await htmlblock.locator('iframe.htmlblock-frame').count() === 1, '```html 围栏渲染成 visual-ui 预览块')
-const frameBox = await htmlblock.locator('iframe.htmlblock-frame').boundingBox()
+const htmlShown = await htmlblock.waitFor({ timeout: 8000 }).then(() => true).catch(() => false)
+check(htmlShown, '```html 围栏渲染成 visual-ui 预览块')
+const frameBox = htmlShown ? await htmlblock.locator('iframe.htmlblock-frame').boundingBox() : null
 check(!!frameBox && frameBox.height > 20, `visual-ui 预览块有高度（got=${frameBox?.height}）`)
 
 await page.screenshot({ path: '/tmp/hub-demo-group.png', fullPage: false })
@@ -205,10 +217,15 @@ check(!finalRows.some((t) => t.includes('GROUP-R1-A') && t.includes('GROUP-R2-A'
 await page.screenshot({ path: '/tmp/hub-demo-stream.png' })
 
 // —— 4) DM 隔离：Researcher 的私聊只有 DM-ONLY-RE ——
+// 不能按「第一行」选：DM 列表按 last_at 倒序，mock 侧顺序是数据决定的（见 hubLog 的
+// dmOnlyAt）。这里按名字选行，顺序怎么排都能落到 Researcher。
 const agentTab = page.locator('.hub-side-tabs button').filter({ hasText: '智能体' }).first()
 if ((await agentTab.getAttribute('aria-selected')) !== 'true') await agentTab.click({ timeout: 6000 })
 await page.waitForTimeout(300)
-await page.locator('.hub-side-row').first().click({ timeout: 8000 })
+const researcherRow = page.locator('.hub-side-row').filter({ hasText: 'Researcher' }).first()
+const rowShown = await researcherRow.waitFor({ timeout: 8000 }).then(() => true).catch(() => false)
+check(rowShown, '侧栏能找到 Researcher 的 DM 行（按名字选，不依赖第一行）')
+if (rowShown) await researcherRow.click({ timeout: 8000 })
 await page.waitForTimeout(900)
 const dmText = (await page.locator('.hub-demo').first().innerText()).replace(/\s+/g, ' ')
 check(dmText.includes('DM-ONLY-RE'), 'Researcher 的 DM 里有 DM-ONLY-RE')

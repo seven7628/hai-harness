@@ -847,13 +847,19 @@ class MockTransport implements Transport {
       // 场景演示①隔离：每个 DM 末尾各有一条**只有自己看得到**的标记文本（两个智能体
       // 内容不同），与群里的「这句话只在本群」对照 —— 群/私聊是两份上下文。
       // seq 按当前长度顺延：?hubFixture=attach 已经占了 3，这里不能写死。
+      //
+      // 时间戳必须让 Researcher **恒新于** Writer：两个 DM 是分别懒初始化的，各自取
+      // Date.now() 跨毫秒就会翻转侧栏顺序（DM 列表按 last_at 倒序），「第一行是谁」
+      // 变成运气（实测约 16% 的跑法里 Writer 在前）。Writer 再减 60s —— 远大于两次
+      // 初始化之间的抖动，顺序因此是确定的。
+      const dmOnlyAt = new Date(Date.now() - 84_000_000 - (agentID === 'ag_mockwri2' ? 60_000 : 0)).toISOString()
       list.push({
         seq: (list[list.length - 1]?.seq ?? 0) + 1,
         sender: { kind: 'agent', agent_id: agentID },
         text: agentID === 'ag_mockwri2'
           ? 'DM-ONLY-WR：这句只出现在 Writer 的私聊里。群里那句「只在本群」不会流到这里，Researcher 的私聊也看不到它。'
           : 'DM-ONLY-RE：这句只出现在 Researcher 的私聊里。群里那句「只在本群」不会流到这里，Writer 的私聊也看不到它。',
-        created_at: new Date(Date.now() - 84_000_000).toISOString(),
+        created_at: dmOnlyAt,
       })
       this.hubMessages.set(agentID, list)
       this.hubCursor.set(agentID, list[list.length - 1]?.seq ?? 2)
@@ -1127,7 +1133,12 @@ class MockTransport implements Transport {
         seq: 7, id: 'gm_demo_handback', kind: 'text', sender: writer,
         text: '收到 Project 结果，我来总结：A/B 的差价按 10 人团队折算约每月 $100，C 的询价留到第二轮。',
         // 指向上面那张卡（seq6）：上下文行据此画「回应 #6」，也是 AgentEnd 回推的形状。
-        context: { trigger_seqs: [6], senders: [{ agent_id: 'ag_mockwri2', name: 'Writer' }] },
+        // senders 必须 ≥2：TurnContextLine 在 <2 人时整行不渲染（「回应 #6」会消失）。
+        // Writer 是本条作者，Researcher 是这轮里产出对比表的人 —— 两人都在这次回推的上下文里。
+        context: {
+          trigger_seqs: [6],
+          senders: [{ agent_id: 'ag_mockwri2', name: 'Writer' }, { agent_id: 'ag_mockres1', name: 'Researcher' }],
+        },
         created_at: at(2 * 3_600_000 - 12_000),
       },
       // ⑥ 长 Markdown（限高）+ ```html 围栏（visual-ui 卡片，无外链资源）。
@@ -1153,6 +1164,12 @@ class MockTransport implements Transport {
       origin: { kind: 'human', group_id: gid },
       target: { kind: 'workspace', workspace: DEMO_WORKSPACE, session_id: DEMO_SESSION },
       result: { summary: '价格表已更新到 reports/pricing-v3.md：A/B 统一含税口径，C 保留「未公开」。', finish_reason: 'stop' },
+      // 与结果卡 refs 同一份用量与产物：任务详情读账本，不能只有卡上有。
+      usage: { input: 18_000, output: 4_200, cost_priced: true, cost_usd: 0.04 },
+      artifacts: [
+        { name: 'pricing-v3.md', path: 'out/pricing-v3.md', kind: 'created', size: 2140, lines: 64 },
+        { name: 'pricing-v3.csv', path: 'out/pricing-v3.csv', kind: 'created', size: 812, lines: 12 },
+      ],
       created_at: at(2 * 3_600_000), updated_at: at(2 * 3_600_000 - 42_000),
     })
     this.hubGroupTasks.set('task_demo_todo', {
