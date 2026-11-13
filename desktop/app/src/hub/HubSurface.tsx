@@ -552,7 +552,7 @@ function HubBubble({
         time={time}
         dateTime={msg.created_at}
       >
-        <CollapsibleMarkdown text={msg.text ?? ''} ariaLabel="你" />
+        <CollapsibleMarkdown text={msg.text ?? ''} ariaLabel={t('hub.message.you')} />
         <HubAttachments attachments={msg.attachments} />
       </UserMessage>
     )
@@ -568,7 +568,7 @@ function HubBubble({
       dataSeq={seq}
       className={hl}
     >
-      <CollapsibleMarkdown text={msg.text ?? ''} ariaLabel={agent?.name || '智能体'} />
+      <CollapsibleMarkdown text={msg.text ?? ''} ariaLabel={agent?.name || t('hub.message.agentFallback')} />
       <HubAttachments attachments={msg.attachments} />
     </AgentMessage>
   )

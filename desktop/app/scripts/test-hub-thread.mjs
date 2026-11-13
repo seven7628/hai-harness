@@ -80,6 +80,13 @@ const mockSrc = readFileSync(join(hubDir, '..', 'transport', 'mock.ts'), 'utf8')
 const cssSrc = readFileSync(join(hubDir, 'hub.css'), 'utf8')
 assert(!roundSrc.includes('hub-round-group') && roundSrc.includes('hub-round-stack'), '同轮不再画外框/表头，只保留无边框间距栈')
 assert(bubbleSrc.includes('hub-group-msg') && bubbleSrc.includes('AgentMessage') && bubbleSrc.includes('UserMessage'), '每条群消息独立版式并带作者头（agent 无气泡 / human 右侧气泡）')
+// 长正文折叠壳必须把 streaming 透传给 Markdown：吞掉它 = 流式正文按整段重解析、
+// 半截 HTML 直接挂 iframe（2026-11 回归）。浏览器侧的同类断言见 check-hub-collapse.mjs。
+const collapseSrc = readFileSync(join(hubDir, 'CollapsibleMarkdown.tsx'), 'utf8')
+const collapseCode = collapseSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+assert(collapseCode.includes('<Markdown text={text} streaming={streaming}'), '折叠壳把 streaming 透传给 Markdown')
+assert(collapseCode.split('streaming={streaming}').length - 1 === 1, '只有折叠壳那一处传 streaming（弹窗里不传）')
+assert(collapseCode.includes('> COLLAPSE_HEIGHT') && !collapseCode.includes('COLLAPSE_HEIGHT + 1'), '折叠阈值是 > COLLAPSE_HEIGHT（419 不折 / 421 折）')
 assert(bubbleSrc.includes('TurnContextLine') && bubbleSrc.includes('compact'), '触发上下文收进消息头，不再单独占一行')
 const humanStart = bubbleSrc.indexOf("if (kind === 'human') {")
 const humanEnd = bubbleSrc.indexOf('<AgentMessage', humanStart)

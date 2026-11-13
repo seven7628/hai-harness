@@ -17,7 +17,8 @@ import './CollapsibleMarkdown.css'
 //   · 折叠用 mask 渐隐而不是「渐变遮罩块」：气泡底色是 --hub-user-bubble /
 //     --user-bubble，纸底是 --bg —— 遮罩块要么选错色，要么每个调用点再覆盖一次变量。
 
-/** 折叠阈值（px）：正文实际高度超过它才折叠。JS 与 CSS 共用这一个来源。 */
+/** 折叠阈值（px）：正文实际高度**高于**它才折叠（419/420 不折，421 折）。
+ *  max-height 也取这个值（内联，单一来源），CSS 里不再写死数字。 */
 export const COLLAPSE_HEIGHT = 420
 
 /** 对话框内可 Tab 到的元素（iframe = visual-ui 的 html 预览，也要进环）。 */
@@ -68,7 +69,7 @@ export default function CollapsibleMarkdown({
     if (streaming) return
     const el = innerRef.current
     if (!el) return
-    const measure = () => setOverflows(el.getBoundingClientRect().height > COLLAPSE_HEIGHT + 1)
+    const measure = () => setOverflows(el.getBoundingClientRect().height > COLLAPSE_HEIGHT)
     measure()
     if (typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(measure)
@@ -146,7 +147,10 @@ export default function CollapsibleMarkdown({
         style={collapsed ? ({ maxHeight: COLLAPSE_HEIGHT } as CSSProperties) : undefined}
       >
         <div className="cm-inner" ref={innerRef}>
-          <Markdown text={text} renderMention={renderMention} />
+          {/* streaming 必须透传：它决定 Markdown 的分片解析路径、缓存 key，以及
+              html 围栏渲染 iframe 还是「正在生成」骨架。吞掉它 = 流式正文按整段
+              重解析 + 半截 HTML 直接挂 iframe（见 markdown.tsx 的 HtmlPreviewBlock 注释）。 */}
+          <Markdown text={text} streaming={streaming} renderMention={renderMention} />
         </div>
       </div>
       {collapsed ? (
@@ -196,6 +200,8 @@ export default function CollapsibleMarkdown({
                   </button>
                 </header>
                 <div className="cm-dialog-body">
+                  {/* 弹窗**不传** streaming：能点开「完整内容」说明这条消息已经落定，
+                      这里要的是整段渲染（也不会出现流式骨架/分片）。 */}
                   <Markdown text={text} renderMention={renderMention} />
                 </div>
               </div>
