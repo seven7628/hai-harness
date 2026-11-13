@@ -205,7 +205,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 18:40",
+    "updated": "2026-11-13 13:05",
     "current": "R14b"
   },
   "rounds": [
@@ -1016,8 +1016,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "R13"
       ],
       "status": "done",
-      "commit": "d5756cf+c437e2d+74bed1f",
-      "review": "测试与实现**分开提交**（d5756cf 测试 / c437e2d 实现 / 74bed1f 素材），但两者同批完成 —— red→green 的真凭据是两条：①e2e 首跑就是红的（20 条断言失败，根因是普通 Chromium 里没有 hai-surface:// 协议实现，import 全部 Failed to fetch）→ 改成可注入 base URL（只换字节来源、保留 store→loader 接线）后转绿；②四条变异各真红一次再复原（协议去 `..`、白名单改「有 manifest 就放行」、loader 不校验 kind、开关 false 仍注册）。门禁：go vet 全绿 / TestSurface* 34 + TestUI* 15（-run 过滤后 50 条 PASS）/ tools/builtin/codemode 全绿 / tsc 0 / eslint 0 error / vite build / e2e tabbar 89·boundary 82·ui-snapshot 31·session-tabs 38·plugin-loader 50。裁决：①只读白名单恰好四条（git_snapshot/workspace_list/session_list/ui_inspect），写类一律不开；②enabled:false → 协议 404 + 命令 denied（能力随禁用一起消失，两处共用 surfaceStore.Enabled）；③加载失败进 ui_inspect 的 surfaces[]（disabled:true+error），不进 health 三连计数；④features.surfaceTools 缺省 false（常驻 schema 成本）；⑤host.command 回 {ok:false,reason} 不抛",
+      "commit": "bb1a152",
+      "review": "主会话复核：go vet（干净检出）/ TestSurface|TestUI|TestPluginCommand 50 条 / codemode 3 连跑绿 / tsc 0 / eslint 56 / build / 协议单测 24 / 插件 e2e 50 / tabbar 89 / boundary 82 / ui 31 / session-tabs 38。读码确认：协议校验 realpath 后**再判一次**扩展名与包含（软链换类型挡得住）；插件只能注册自己的 kind；host.command 白名单是封闭集合（加一条测试会红）",
       "perf": [
         "P15"
       ],
@@ -1031,7 +1031,12 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "settings.features.surfaceTools=false → 三个 surface_* 工具不在引擎里；ui_inspect 无条件保留",
         "templates/surface 真能被安装器装上（already_installed 幂等）；skill requires.tools 双向生效；panel.js 无 JSX / 无裸模块 import",
         "T10 真模板端到端：templates/surface 的 manifest 派生索引项 → loader 注册 → RightPanel 渲染出「成本看板 / 工作区 1 个」（数据来自 host.command）",
-        "门禁：go vet / 定向 go test / codemode / tsc / eslint / vite build / 5 个 e2e 全绿"
+        "门禁：go vet / 定向 go test / codemode / tsc / eslint / vite build / 5 个 e2e 全绿",
+        "裁决：宿主只读白名单收 4 条（git_snapshot/workspace_list/session_list/ui_inspect），写类一律不开",
+        "裁决：enabled:false → 协议 404 + 命令 denied（同一判据，「禁用=能力消失」）",
+        "裁决：加载失败进 UISurfaceEntry.error，不混进 PR-10 的崩溃三连（恢复动作不同）",
+        "裁决：host.command 失败返回 {ok:false,reason} 不抛（避免插件子树被卸载）",
+        "缺口：插件标签重启不恢复（R14c）；surface_disable 写路径与插件页（R14b）"
       ],
       "rollback": "关 settings.features.surfaceTools（工具面消失）；协议与 loader 是纯新增，删文件即回滚"
     },
@@ -1055,6 +1060,27 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "卸载后标签变墓碑；重启后仍可见（若 R14 决定持久墓碑）"
       ],
       "rollback": "整页可移除，不影响已装插件的运行（loader 与工具独立）"
+    },
+    {
+      "id": "R14c",
+      "pr": "PR-14c",
+      "title": "插件标签持久化：重启后仍在（设计 §5.8-A 的硬验收）",
+      "type": "新增",
+      "est": 0.5,
+      "deps": [
+        "R14"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [],
+      "acc": [
+        "sanitizePersistedTab 接受 plugin:*（且只接受 index 里存在的 id），内置四类行为不变",
+        "装一个插件 → 开标签 → reload → 标签恢复且面板渲染（e2e 走真 store）",
+        "插件被卸载后重启：标签不复活（或变墓碑，按 R14b 的墓碑持久化结论）",
+        "rightTab 的 `as RightTab` 断言要么去掉要么收窄（与 R11b 合并处理）"
+      ],
+      "rollback": "白名单放行是可独立回滚的一处判据；回滚后 plugin 标签退化为「重启丢失」"
     },
     {
       "id": "R15",
