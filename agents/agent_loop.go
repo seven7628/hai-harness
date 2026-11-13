@@ -1147,10 +1147,14 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 
 		forced := ac.forceCompact
 		ac.forceCompact = false
+		// 同批 compact + 用户正文（session_send 的 command + text）：压缩后必须继续
+		// 跑一轮，否则正文虽被压缩器保留在 latestUser，却因 Stop 永远没有模型回答。
+		// 纯 /compact（命令之后没有新用户内容）仍保持「独立操作」语义。
+		continueAfterCompact := forced && hasFreshUserInput(ac)
 		a.maybeCompact(ac, opts, forced)
-		// 手动压缩是独立操作：压缩完成后停在当前状态，等待用户下一条输入，
-		// 不应继续触发一次 LLM 对话。自动压缩则继续当前轮。
-		if forced {
+		// 手动压缩是独立操作：只有命令、没有正文时停在当前状态，等待用户下一条输入；
+		// 同批带正文则继续当前轮（见上）。
+		if forced && !continueAfterCompact {
 			ac.Stop()
 			continue
 		}
@@ -2116,6 +2120,25 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 // 压缩成功后：todo 默认不清空（S1-F，会话级独立状态；WithTodoResetOnCompact=true
 // 时恢复旧语义：快照注入 + Clear + CompactTodoReminder）+ 注入统一交接提醒
 // （CompactHandoffReminder，含文件账本/任务状态段）。
+// hasFreshUserInput 本批（inputMark 之后）是否还有非命令的用户内容。
+// 用于区分「纯 /compact」与「compact + 正文」：前者压缩完就停，后者要继续回答。
+func hasFreshUserInput(ac *AgentContext) bool {
+	if ac == nil || ac.inputMark < 0 || ac.inputMark >= len(ac.Messages) {
+		return false
+	}
+	for _, m := range ac.Messages[ac.inputMark:] {
+		if m.Role != core.User || m.IsCommandMessage() {
+			continue
+		}
+		for _, c := range m.Content {
+			if strings.TrimSpace(c.Content) != "" || c.Type != core.ContentTypeText {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool) {
 	if a.cfg.Compressor == nil {
 		return

@@ -1878,3 +1878,72 @@ func TestToolImageOnlyMessageNotTreatedAsEmpty(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 }
+
+// keepAllCompressor 原样保留消息，模拟「压缩后 latestUser 仍在」的真实压缩器。
+type keepAllCompressor struct{}
+
+func (keepAllCompressor) ShouldCompact(context.Context, CompressStats) bool { return true }
+func (keepAllCompressor) Compact(_ context.Context, messages []core.Message) (CompressResult, error) {
+	return CompressResult{Messages: messages}, nil
+}
+
+// 同批 compact + 正文：压缩后必须继续跑一轮，正文不能被 Stop 吞掉。
+func TestForcedCompactWithUserTextContinuesRun(t *testing.T) {
+	p := &mockProvider{rounds: []func(handler func(provider.StreamEvent) error) error{
+		func(handler func(provider.StreamEvent) error) error {
+			return handler(provider.LLMEndEvent{FinishReason: core.FinishReasonStop, Content: "已回答"})
+		},
+		func(handler func(provider.StreamEvent) error) error {
+			return handler(provider.LLMEndEvent{FinishReason: core.FinishReasonStop, Content: "已回答"})
+		},
+	}}
+	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+	handler, list := collectEvents()
+	ac := loop.Run(context.Background(), []core.Message{
+		core.NewCommandMessage("compact", ""),
+		core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: "请回答"}),
+	}, handler)
+	if ac.Err != nil {
+		t.Fatalf("run: %v", ac.Err)
+	}
+	if p.calls != 1 {
+		t.Fatalf("compact + text 应继续调用一次模型，calls=%d", p.calls)
+	}
+	var end *events.AgentEnd
+	compress := 0
+	for _, e := range *list {
+		switch ev := e.(type) {
+		case *events.CompressEnd:
+			compress++
+		case *events.AgentEnd:
+			end = ev
+		}
+	}
+	if compress != 1 {
+		t.Fatalf("CompressEnd = %d, want 1", compress)
+	}
+	if end == nil || end.Content != "已回答" {
+		t.Fatalf("AgentEnd = %+v, want 已回答", end)
+	}
+}
+
+// 纯 /compact（没有正文）仍应停在压缩完成，不触发模型调用。
+func TestForcedCompactCommandOnlyStillStops(t *testing.T) {
+	p := &mockProvider{rounds: []func(handler func(provider.StreamEvent) error) error{
+		func(handler func(provider.StreamEvent) error) error {
+			t.Fatal("纯 compact 不应调用模型")
+			return nil
+		},
+	}}
+	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+	handler, _ := collectEvents()
+	ac := loop.Run(context.Background(), []core.Message{
+		core.NewCommandMessage("compact", ""),
+	}, handler)
+	if ac.Err != nil {
+		t.Fatalf("run: %v", ac.Err)
+	}
+	if p.calls != 0 {
+		t.Fatalf("纯 compact 调用了模型 %d 次", p.calls)
+	}
+}
