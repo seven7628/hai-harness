@@ -29,6 +29,13 @@ type projectNeedSite struct {
 func newProjectNeedSite(t *testing.T, origin agenthub.TaskOrigin) *projectNeedSite {
 	t.Helper()
 	m, buf := testManager(t)
+	return buildProjectNeedSite(t, m, buf, origin)
+}
+
+// buildProjectNeedSite 用**已有**的 manager 搭现场：需要先建智能体档案的用例
+//（N2：session_send 建账只带 agent_id，名字得靠 profile 回落）复用它。
+func buildProjectNeedSite(t *testing.T, m *manager, buf *syncBuf, origin agenthub.TaskOrigin) *projectNeedSite {
+	t.Helper()
 	wsPath := t.TempDir()
 	m.wsReg = newWorkspaceRegistry(t.TempDir() + "/workspaces.json")
 	if _, err := m.wsReg.add(wsPath); err != nil {
@@ -178,6 +185,46 @@ func TestHubNeedOriginForProjectSessionQuestion(t *testing.T) {
 	assertProjectNeedAttribution(t, n, site, "run-need-ask", 0)
 	assertNeedListedBy(t, site, 2, map[string]any{"group_id": "grp_need"}, n.ID)
 	assertNeedListedBy(t, site, 3, map[string]any{"agent_id": "ag_need"}, n.ID)
+}
+
+// 场景2 N2：Project 侧 need 的「发起者名字」。session_send 建账只写 agent_id，
+// 账本 origin.agent_name 是空串 —— 归属若直接抄账本，前端只能显示 ag_xxx。
+// 规则：账本名字优先，空则按 profile 补（与结果卡 refs 的 hubOriginAgentName 同一回落）。
+func TestHubNeedOriginNameFallsBackToAgentProfile(t *testing.T) {
+	m, buf := testManager(t)
+	root := t.TempDir()
+	agent := createWorkspaceAgent(t, m, buf, 1, "群派发A", []string{root})
+	site := buildProjectNeedSite(t, m, buf, agenthub.TaskOrigin{
+		Kind: agenthub.OriginGroup, GroupID: "grp_need", AgentID: agent.ID, AgentName: "",
+	})
+	site.bs.emit(&events.AskUserQuestion{
+		RunId: "run-need-name", Id: "batch-need-name",
+		Questions: []events.QuestionItem{{Id: "q1", Question: "选哪个目录？"}},
+		Timestamp: time.Now(), EventType: events.AskUserQuestionType,
+	})
+
+	n := singlePendingNeed(t, site.st)
+	if n.OriginAgentID != agent.ID {
+		t.Fatalf("origin_agent_id = %q, want %q", n.OriginAgentID, agent.ID)
+	}
+	if n.OriginAgentName != "群派发A" {
+		t.Fatalf("origin_agent_name = %q, want 群派发A（账本没名字要按 profile 补）", n.OriginAgentName)
+	}
+	// 前端只认 hub_need_list 的响应：这一层也必须带名字，不能只在落库对象里对。
+	ok, errMsg, data := hubCmd(t, m, buf, 2, "hub_need_list", map[string]any{"group_id": "grp_need"})
+	if !ok {
+		t.Fatalf("hub_need_list: %s", errMsg)
+	}
+	var out struct {
+		Needs []*agenthub.Need `json:"needs"`
+	}
+	raw, _ := json.Marshal(data)
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Needs) != 1 || out.Needs[0].OriginAgentName != "群派发A" {
+		t.Fatalf("hub_need_list origin_agent_name = %s（want 群派发A）", raw)
+	}
 }
 
 // Hub DM 审批回归：归属仍是会话自己的智能体（GroupID 空、无项目 origin），

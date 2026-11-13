@@ -1,5 +1,5 @@
 import type { HubDMInfo, HubGroupProgress, HubMessage, HubTaskUpdate } from './types'
-import { parseTaskResult, taskOutcomeLine } from './taskCard'
+import { parseTaskResult, stripProjectHeader, taskOutcomeLine } from './taskCard'
 
 // 群左栏投影 + 「当前是否正在看」的纯归约（P3b-07 B4/N1/N2/N10）。
 //
@@ -62,7 +62,8 @@ export function projectGroupMessage(
   if (card) {
     next.last_task_id = card.taskId || info.last_task_id
     next.last_task_status = card.status
-    next.last_task_summary = card.summary || card.title
+    // 左栏/刷新口径与 Go 的 groupPreviewText 一致：存**摘要本身**，不存〔Project …〕抬头。
+    next.last_task_summary = stripProjectHeader(card.summary) || card.title
     next.last_task_seq = seq
   } else {
     // 最新可用消息不是任务卡：结论清空，但 last_task_* 保留（后端同口径）。

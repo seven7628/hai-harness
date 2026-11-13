@@ -15,7 +15,16 @@ import { formatClockTime } from './conversation'
 import { ALL_MENTION_ID, linkifyMentions, type MentionAgent } from './mentions'
 import { parseTaskResult } from './taskCard'
 import { useHubStore } from './useHubStore'
+import { useAppStore } from '../store/useAppStore'
 import { highlightClass, seqDataAttr } from './seqJump'
+
+// workspace 结果卡属于一个 Project 会话（不是发起者的 DM）：点开 = 退出 Hub、切到那个
+// 会话 —— 与左栏点会话同一条路径（setActiveSession 自带跨项目切换）。
+// 用 getState 而不是订阅：这是点击时的一次性动作，不该让卡片跟着工作区重渲。
+function openProjectSession(workspace: string, sessionId: string): void {
+  useHubStore.getState().closeHub()
+  useAppStore.getState().setActiveSession(sessionId, workspace || undefined)
+}
 
 // 群消息（handoff 卡、审批占位、路由回执只在人类 UI 出现；
 // routing_receipt 的落盘文本是 targets=ag_x，按名册还原成可读动作行）。
@@ -210,6 +219,9 @@ export function GroupBubble({
             executor={executor}
             initiator={initiator}
             onOpenAgent={card.agentId && onSelectAgent ? () => onSelectAgent(card.agentId) : undefined}
+            onOpenSession={card.targetSessionId
+              ? () => openProjectSession(card.targetWorkspace, card.targetSessionId)
+              : undefined}
             context={hasContext ? (
               <TurnContextLine
                 compact

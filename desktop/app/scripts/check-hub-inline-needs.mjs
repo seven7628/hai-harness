@@ -9,7 +9,11 @@
 //   · 批准后卡片消失（走 hub_need_resolve，不写 hub_message）
 //   · 有 group_id 的 need 不出现在 DM 内联卡（作用域隔离）
 //   · 390 无横向溢出；无 console error
+//   · 提问卡（N3，组件夹具）：多选可同时勾多个、提交按「；」拼接、选项预览显示在选项下、
+//     390 不溢出。mock 的 needs fixture 没有多选/预览题，这里用 scripts/hub-harness.mjs
+//     直接挂 HubInlineNeeds —— 不为一条断言去动 mock.ts。
 import { chromium } from 'playwright'
+import { openHubHarness } from './hub-harness.mjs'
 
 const argv = process.argv.slice(2)
 const arg = (name, def) => {
@@ -94,6 +98,98 @@ check(docW <= 390, `390 无横向溢出（doc=${docW}）`)
 await page.screenshot({ path: '/tmp/hub-inline-needs-390.png' })
 
 check(errors.length === 0, `无 console error / pageerror：${errors.slice(0, 3).join(' | ')}`)
+
+// 4) 提问卡的多选 + 预览（N3）：组件夹具，不依赖 mock fixture。
+//    答案口径必须与 AskUserQuestionPanel 一致：多选 = 勾选项用「；」拼接。
+const INLINE_ENTRY = `
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import HubInlineNeeds from './HubInlineNeeds.tsx'
+import { useHubStore } from './useHubStore.ts'
+import { useAppStore } from '../store/useAppStore.ts'
+
+const NEED = {
+  id: 'need_multi', kind: 'question', status: 'pending', group_id: 'grp_1', task_id: 'task_multi',
+  origin_agent_name: '群派发A', target_workspace: '/mock/workspace', target_session_id: 's_mock_project',
+  title: '整理简报前有两个问题',
+  body: JSON.stringify([
+    {
+      id: 'q1', question: '这份简报要送谁看？', multi: true,
+      options: [{ label: '客户' }, { label: '内部团队' }, { label: '投资人' }],
+    },
+    {
+      id: 'q2', question: 'C 家没有公开单价，怎么写？',
+      options: [
+        { label: '写「未公开」', preview: '价格列：未公开\\n备注：需销售询价' },
+        { label: '用估算价', preview: '价格列：$45（估算）\\n备注：非官方报价' },
+      ],
+    },
+  ]),
+}
+
+window.__hubResolve = null
+useHubStore.setState({
+  needs: [NEED],
+  resolveNeed: async (id, resolution, answers) => { window.__hubResolve = { id, resolution, answers } },
+})
+useAppStore.setState({ setRightExpanded: () => {} })
+
+createRoot(document.getElementById('hub-root')).render(
+  React.createElement(HubInlineNeeds, { scope: { kind: 'group', groupId: 'grp_1' } }),
+)
+requestAnimationFrame(() => { window.__harnessReady = true })
+`
+const hp = await openHubHarness(browser, { contents: INLINE_ENTRY, baseURL: BASE_URL })
+try {
+  const questions = hp.locator('.hub-inline-need-question')
+  await questions.first().waitFor({ timeout: 10000 })
+  check(await questions.count() === 2, `夹具渲染两道题（got=${await questions.count()}）`)
+
+  const q1 = questions.nth(0)
+  const q2 = questions.nth(1)
+  const q1Text = await q1.innerText()
+  check(q1Text.includes('可多选'), `多选题标出「可多选」（got=${q1Text}）`)
+  // 预览：还没选时先显示第一个带预览的选项（面板一出现就看得见备选长什么样）。
+  const preview = q2.locator('.hub-inline-need-preview')
+  await preview.waitFor({ timeout: 5000 })
+  check((await preview.innerText()).includes('价格列：未公开'), `选项预览默认显示首个备选（got=${await preview.innerText()}）`)
+
+  // 多选 = 切换勾选，不是覆盖：先点「客户」，再点「内部团队」，两个都得亮着。
+  const pick = async (q, label) => q.locator('button', { hasText: label }).first().click()
+  await pick(q1, '客户')
+  await pick(q1, '内部团队')
+  await hp.waitForTimeout(120)
+  check(await q1.locator('button', { hasText: '客户' }).first().getAttribute('aria-pressed') === 'true', '多选保留第一个勾选')
+  check(await q1.locator('button', { hasText: '内部团队' }).first().getAttribute('aria-pressed') === 'true', '多选可再勾第二个')
+
+  // 单选仍是一选一，预览跟着选中项走。
+  await pick(q2, '用估算价')
+  await hp.waitForTimeout(120)
+  check((await q2.locator('.hub-inline-need-preview').innerText()).includes('价格列：$45（估算）'), '预览跟着选中项切换')
+  check(await q2.locator('button', { hasText: '写「未公开」' }).first().getAttribute('aria-pressed') !== 'true', '单选换选后旧选项弹起')
+
+  // 提交：多选拼成「客户；内部团队」，单选原值。
+  await hp.locator('.hub-inline-need footer button', { hasText: '提交回答' }).click()
+  await hp.waitForTimeout(200)
+  const resolved = await hp.evaluate(() => window.__hubResolve)
+  check(resolved?.resolution === 'answered', `提交走需要 answered（got=${JSON.stringify(resolved)}）`)
+  check(resolved?.answers?.q1 === '客户；内部团队', `多选按「；」拼接（got=${JSON.stringify(resolved?.answers)}）`)
+  check(resolved?.answers?.q2 === '用估算价', `单选原值（got=${JSON.stringify(resolved?.answers)}）`)
+  await hp.screenshot({ path: '/tmp/hub-inline-needs-multi.png' })
+
+  // 390：预览里是 ASCII 版面（含长行），块内自己滚动，不能把卡片撑出横向溢出。
+  await hp.setViewportSize({ width: 390, height: 844 })
+  await hp.waitForTimeout(150)
+  const hpDocW = await hp.evaluate(() => document.documentElement.scrollWidth)
+  check(hpDocW <= 390, `390 内联提问卡无横向溢出（doc=${hpDocW}）`)
+  await hp.screenshot({ path: '/tmp/hub-inline-needs-multi-390.png' })
+
+  const hpErrs = hp.__hubErrors ?? []
+  check(hpErrs.length === 0, `提问卡夹具无 console error：${hpErrs.slice(0, 3).join(' | ')}`)
+} finally {
+  await hp.close()
+}
+
 await browser.close()
 
 if (failed.length) {
@@ -101,4 +197,4 @@ if (failed.length) {
   for (const f of failed) console.error(`  · ${f}`)
   process.exit(1)
 }
-console.log('✅ Hub 内联 need：群归属、审批、隔离、390 通过')
+console.log('✅ Hub 内联 need：群归属、审批、隔离、390、多选+预览通过')

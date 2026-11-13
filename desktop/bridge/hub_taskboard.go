@@ -471,7 +471,9 @@ func (m *manager) recordHubNeed(bs *bridgeSession, e events.Event) {
 		n.AgentID = task.Origin.AgentID
 		n.GroupID = task.Origin.GroupID
 		n.OriginAgentID = task.Origin.AgentID
-		n.OriginAgentName = task.Origin.AgentName
+		// session_send 建账只带 agent_id，不带名字（N2）：直接抄账本就是空串，
+		// 前端只能回落到 ag_xxx。按 profile 补名字，与结果卡 refs 同一回落。
+		n.OriginAgentName = m.hubOriginAgentName(task)
 		n.OriginKind = task.Origin.Kind
 	}
 	if hubNeedTaskOwnsSession(task, bs) {

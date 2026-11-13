@@ -354,6 +354,87 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
   assert(unknown.terminal === false, 'unknown 不是终态')
 }
 
+// —— 9c) taskCard：workspace 目标（B1，群结果卡丢 Project 归属 / 误标「派发」）——
+{
+  // refs 形状逐字对齐 bridge（hub_task_result.go taskResultCardRefs + workspaceTaskCardText）：
+  // workspace 目标没有 agent_id，署名是**发起者**，归属写在 target_* 与正文抬头里。
+  const ws = '/ws/agent-hub'
+  const sid = 's_proj_1'
+  const head = `〔Project ${ws} / ${sid}〕`
+  const wsRefs = {
+    task_id: 'task_ws1', status: 'completed', title: '做一份三家对比表', duration_ms: 42_000,
+    target_kind: 'workspace', target_workspace: ws, target_session_id: sid,
+    origin_kind: 'group', origin_agent_id: 'ag_dispatch', origin_agent_name: '群派发A',
+    usage: { input: 9000, output: 1200, cost_priced: true, cost_usd: 0.02 },
+    artifacts: [], error: '',
+  }
+  const wsText = `${head}\n三家对比表已完成，含结论与风险。`
+  const wsMsg = card(wsRefs, wsText, { kind: 'agent', agent_id: 'ag_dispatch' })
+  // 账本已加载的**正常路径**：result.summary 是纯摘要，不含抬头。
+  const wsTask = {
+    id: 'task_ws1', title: '做一份三家对比表', status: 'completed',
+    origin: { kind: 'group', group_id: 'g1', agent_id: 'ag_dispatch', agent_name: '群派发A' },
+    target: { kind: 'workspace', workspace: ws, session_id: sid, group_id: 'g1' },
+    result: { summary: '三家对比表已完成，含结论与风险。' },
+  }
+  const view = taskCard.parseTaskResult(wsMsg, wsTask)
+  eq(view.targetKind, 'workspace', 'target_kind 暴露到视图（refs 快照）')
+  eq(view.targetWorkspace, ws, 'target_workspace 暴露到视图')
+  eq(view.targetSessionId, sid, 'target_session_id 暴露到视图')
+  // B1 变异点：去掉「workspace 先取正文」就会退到 task.result.summary，抬头消失。
+  assert(view.summary.includes(ws) && view.summary.includes(sid),
+    `workspace 卡摘要必须带着 Project 归属（got=${JSON.stringify(view.summary)}）`)
+  eq(taskCard.stripProjectHeader(view.summary), '三家对比表已完成，含结论与风险。',
+    '抬头只由 meta 行画一次，正文渲染前剥掉')
+  eq(view.agentId, '', 'workspace 目标没有执行智能体（否则会画成「群派发A 派发」）')
+  // 防御：旧卡/脏 refs 把发起者写进 agent_id 时也不能画执行者 —— workspace 目标里没有
+  // 智能体，画出来就是「群派发A → 群派发A」这种假执行者。
+  eq(taskCard.parseTaskResult(card({ ...wsRefs, agent_id: 'ag_dispatch', target_agent_id: 'ag_dispatch' }, wsText)).agentId,
+    '', 'workspace 卡即使 refs 带了 agent_id 也不画执行者')
+  eq(view.originName, '群派发A', '发起者名（workspace 卡的 sender 就是发起者）')
+  eq(view.initiatorAgentId, 'ag_dispatch', '发起者 id 仍按 origin 解析（打开 DM 用得到）')
+
+  // 任务未加载（重启/历史）：归属仍在正文抬头里，不靠账本。
+  const history = taskCard.parseTaskResult(card(wsRefs, wsText, { kind: 'agent', agent_id: 'ag_dispatch' }))
+  assert(history.summary.includes(ws) && history.summary.includes(sid), '任务未加载时归属仍从正文读出')
+  eq(history.originName, '群派发A', '任务未加载时发起者名取 refs 快照')
+
+  // 抬头不能被当成标题：refs/账本都没有 title 时，标题取去掉抬头的正文首行。
+  const noTitle = taskCard.parseTaskResult(card(
+    { ...wsRefs, title: '', task_id: 'task_ws2' }, wsText,
+  ))
+  eq(noTitle.title, '三家对比表已完成，含结论与风险。', '标题兜底用去掉抬头的正文首行')
+  eq(taskCard.taskOutcomeLine(noTitle.status, noTitle.summary), '任务完成：三家对比表已完成，含结论与风险。',
+    '左栏结论行不把〔Project …〕抬头读进摘要')
+
+  // 失败卡：正文 = 抬头 + 错误原文，摘要不能把错误重复一遍。
+  const failedWs = taskCard.parseTaskResult(card(
+    { ...wsRefs, status: 'failed', error: '工具超时' }, `${head}\n工具超时`,
+  ))
+  eq(failedWs.summary, '', 'workspace 失败卡正文等于错误时不重复成 summary')
+  eq(failedWs.error, '工具超时', 'workspace 失败卡错误单独保留')
+  eq(failedWs.targetSessionId, sid, '失败卡仍保留 Project 归属')
+
+  // 人发起的 workspace 卡（理论上不写卡）：没有发起智能体时不能编一个。
+  const humanWs = taskCard.parseTaskResult(card(
+    { ...wsRefs, origin_kind: 'human', origin_agent_id: '', origin_agent_name: '' }, wsText,
+    { kind: 'human' },
+  ))
+  eq(humanWs.originName, '', '人发起时没有发起者名（卡片写「你 发起」）')
+
+  // agent 目标不受影响：执行者、派发者、摘要优先级都保持原样。
+  const agentView = taskCard.parseTaskResult(card(
+    { task_id: 'task_a', status: 'completed', agent_id: 'ag_writer', title: '写简报', target_kind: 'agent' },
+    '简报写好了', { kind: 'agent', agent_id: 'ag_writer' },
+  ), {
+    id: 'task_a', origin: { kind: 'group', agent_id: 'ag_researcher', agent_name: 'Researcher' },
+    target: { kind: 'agent', agent_id: 'ag_writer' }, result: { summary: '简报写好了（账本）' },
+  })
+  eq(agentView.agentId, 'ag_writer', 'agent 目标的执行者不变')
+  eq(agentView.summary, '简报写好了（账本）', 'agent 目标仍按 refs → 账本 → 正文的优先级')
+  eq(agentView.targetWorkspace, '', 'agent 目标没有 workspace 归属')
+}
+
 // —— 10) taskCard：target_agent_id 优先 + 未计价 + 缺字段兜底 ——
 {
   const view = taskCard.parseTaskResult(card(
@@ -408,6 +489,16 @@ const card = (refs, text, sender = { kind: 'system' }) => ({
   })
   const withCard = groupProjection.projectGroupMessage(base, cardMsg, false)
   eq(withCard.last_outcome, '任务完成：三家价格表好了', '任务卡给出左栏结论')
+  eq(withCard.last_task_summary, '三家价格表好了', '左栏摘要取正文')
+  // workspace 卡（B1）：正文带〔Project …〕抬头，左栏的口径必须与 Go 的
+  // groupPreviewText 一致 —— 摘要是摘要，抬头不跟着进左栏。
+  const wsCard = groupProjection.projectGroupMessage(base, m(11, agent,
+    `〔Project /ws/agent-hub / s_proj_1〕\n三家对比表已完成`, {
+      kind: 'task_result',
+      refs: { task_id: 'task_11', status: 'completed', target_kind: 'workspace', target_workspace: '/ws/agent-hub' },
+    }), false)
+  eq(wsCard.last_outcome, '任务完成：三家对比表已完成', 'workspace 卡左栏结论不带抬头')
+  eq(wsCard.last_task_summary, '三家对比表已完成', 'workspace 卡左栏摘要不带抬头')
   eq(withCard.last_task_seq, 9, '记住任务卡 seq')
   eq(withCard.last_task_id, 'task_9', '记住任务 id')
   const after = groupProjection.projectGroupMessage(withCard, m(10, agent, '后续普通消息'), false)

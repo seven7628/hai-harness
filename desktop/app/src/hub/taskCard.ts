@@ -4,6 +4,8 @@ import type { HubMessage, HubTask, HubTaskArtifact, HubTaskUsage } from './types
 //
 // bridge 写 task_result 群消息时把结果**反规范化**进 refs（hub_task_result.go）：
 //   {client_msg_id, task_id, status, agent_id, title, duration_ms, usage, artifacts, error}
+//   + 归属：target_kind（agent|workspace）、target_workspace/target_session_id、
+//     origin_kind/origin_agent_id/origin_agent_name
 // 前端只认这份快照，不去查账本 —— 历史消息在任务被重试/账本轮转后仍能原样渲染。
 // 纯函数，Node 直测。
 
@@ -21,6 +23,11 @@ export interface TaskCardView {
   title: string
   summary: string
   error: string
+  /** agent | workspace | ''（refs 快照优先，账本兜底）。workspace = 项目会话任务。 */
+  targetKind: string
+  /** workspace 目标的 Project 工作区与/或会话（agent 目标为空）。 */
+  targetWorkspace: string
+  targetSessionId: string
   /** 执行者（target_agent_id 优先；task_result 的 agent_id 就是执行者）。 */
   agentId: string
   /**
@@ -30,6 +37,12 @@ export interface TaskCardView {
   initiatorAgentId: string
   /** 派发者显示名（账本 origin.agent_name 或 refs 快照）；任务未加载时可为空。 */
   initiatorName: string
+  /**
+   * 发起者显示名（结果卡「<发起者> 发起」这一行）：账本/refs 的 origin 名，缺快照时
+   * 退到 sender —— bridge 约定 workspace 卡的 sender 就是发起者（hub_task_result.go）。
+   * 人发起为空串（卡片写「你 发起」）。
+   */
+  originName: string
   /** human | group | dm | agent | ''（未知/账本未加载）。 */
   originKind: string
   durationMs: number
@@ -130,14 +143,32 @@ function firstLine(text: string): string {
 export function parseTaskResult(msg: HubMessage, task?: HubTask | null): TaskCardView | null {
   if (!msg || msg.kind !== 'task_result') return null
   const refs = (msg.refs ?? {}) as Record<string, unknown>
-  const body = (msg.text ?? '').trim()
+  const text = (msg.text ?? '').trim()
+  // 归属：workspace 目标 = group 来源的 Project 任务（sender 是发起者，不是执行者）。
+  const targetKind = str(refs.target_kind) || str(task?.target?.kind)
+  const targetWorkspace = str(refs.target_workspace) || str(task?.target?.workspace)
+  const targetSessionId = str(refs.target_session_id) || str(task?.target?.session_id)
+  const workspace = targetKind === 'workspace'
+  // 正文抬头以下的真实摘要：正文 = 「〔Project <ws> / <sid>〕\n<摘要>」（workspaceTaskCardText）。
+  const body = workspace ? stripProjectHeader(text) : text
   // 缺状态 = 未知，不能默认 completed（否则失败卡会被画成绿色成功）。
   const status = str(refs.status) || 'unknown'
   const statusView = taskStatusView(status)
   const error = str(refs.error) || str(task?.error) || str(task?.result?.error)
-  const summary = str(refs.summary) || str(task?.result?.summary) || (error && body === error ? '' : body)
-  const title = str(refs.title) || str(task?.title) || firstLine(summary || body) || '任务结果'
-  const agentId = str(refs.target_agent_id) || str(refs.agent_id) || str(task?.target?.agent_id)
+  const repeated = !!error && body === error // 摘要与错误同一句：只在错误行画一次
+  // workspace 目标的摘要在账本里**不带**抬头（task.result.summary 是纯摘要），按普通
+  // 优先级取就会把「这段结果跑在哪个 Project 会话」丢掉（B1）。所以 workspace 卡
+  // 一律先取正文，再退到 refs/账本；卡片用 targetWorkspace/targetSessionId 画同一件事。
+  const summary = workspace
+    ? (repeated ? '' : firstNonEmpty(text, str(refs.summary), str(task?.result?.summary)))
+    : str(refs.summary) || str(task?.result?.summary) || (repeated ? '' : body)
+  // 标题兜底取**去掉抬头**的正文首行：summary 里带着〔Project …〕时不能把它当标题。
+  const title = str(refs.title) || str(task?.title) || firstLine(body || summary) || '任务结果'
+  // workspace 目标没有执行智能体（只跑在一个 Project 会话里）：硬画会把发起者当成执行者，
+  // 出现「群派发A 派发」这种不存在的执行者（B1）。
+  const agentId = workspace
+    ? ''
+    : str(refs.target_agent_id) || str(refs.agent_id) || str(task?.target?.agent_id)
   // 账本 origin.kind 是 human/group/dm（不是 sender kind）；结果卡 refs 自带一份
   // origin 快照，任务未加载（历史/重启后还没拉 task_list）也能画出「谁 → 执行者」。
   const originKind = str(task?.origin?.kind) || str(refs.origin_kind)
@@ -145,15 +176,23 @@ export function parseTaskResult(msg: HubMessage, task?: HubTask | null): TaskCar
   const originAgentName = str(task?.origin?.agent_name) || str(refs.origin_agent_name)
   const initiatorAgentId = originKind && originKind !== 'human' ? originAgentId : ''
   const initiatorName = originKind && originKind !== 'human' ? originAgentName : ''
+  const senderAgentId = msg.sender?.kind === 'agent' ? str(msg.sender.agent_id) : ''
+  // workspace 卡的 sender 就是发起者（bridge 约定）：快照缺名字时用它兜底，
+  // 宁可显示 id 也不能让「谁派的」变成空白。
+  const originName = initiatorName || (workspace && originKind !== 'human' ? senderAgentId : '')
   return {
     taskId: str(refs.task_id) || str(task?.id),
     status,
     title,
     summary,
     error,
+    targetKind,
+    targetWorkspace,
+    targetSessionId,
     agentId,
     initiatorAgentId,
     initiatorName,
+    originName,
     originKind,
     durationMs: Math.max(0, num(refs.duration_ms)),
     usage: asUsage(refs.usage),
@@ -162,6 +201,18 @@ export function parseTaskResult(msg: HubMessage, task?: HubTask | null): TaskCar
     tone: statusView.tone,
     terminal: statusView.terminal,
   }
+}
+
+/** 正文抬头的字面形态（hub_task_result.go workspaceTaskCardText）：`〔Project <ws> / <sid>〕`。 */
+const PROJECT_HEAD = /^〔Project [^〕\n]*〕[ \t]*\n?/
+
+/**
+ * 去掉正文开头的〔Project <ws> / <sid>〕抬头。
+ * 卡片用 refs 的 target_workspace/target_session_id 画同一件事，正文里再来一遍就是重复；
+ * 数据层（summary）保留抬头，因为它是不依赖账本的归属原文。
+ */
+export function stripProjectHeader(text: string): string {
+  return text.replace(PROJECT_HEAD, '').trim()
 }
 
 function truncate(text: string, max: number): string {
@@ -195,10 +246,13 @@ export function taskOutcomeLine(status: string, summary?: string, reason?: strin
     }
   })()
   if (!head) return ''
+  // workspace 结果卡的摘要带〔Project …〕抬头（抬头本身是归属，卡片 meta 行已经画过）：
+  // 左栏结论行只要摘要这一句，否则左栏会变成「任务完成：〔Project …〕…」。
+  const clean = stripProjectHeader(summary ?? '')
   const preferReason = ['failed', 'interrupted', 'canceled', 'declined', 'blocked_budget'].includes(status)
   const detail = preferReason
-    ? firstNonEmpty(reason ?? '', summary ?? '')
-    : firstNonEmpty(summary ?? '', reason ?? '')
+    ? firstNonEmpty(reason ?? '', clean)
+    : firstNonEmpty(clean, reason ?? '')
   if (!detail) return head.replace(/：$/, '')
   return head + truncate(detail.replace(/\s+/g, ' '), max)
 }

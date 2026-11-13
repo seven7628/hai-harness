@@ -3220,15 +3220,33 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   gap: 6px;
   margin-top: 6px;
 }
-.hub-inline-need-questions label {
+.hub-inline-need-questions label,
+.hub-inline-need-question {
   display: flex;
   flex-direction: column;
   gap: 3px;
   color: var(--text-2);
   font-size: 11.5px;
+  min-width: 0;
+}
+/* 题干 + 「可多选」标记（N3）：多选与单选在提交口径上不同，不标出来用户会以为能选一个。 */
+.hub-inline-need-q {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.hub-inline-need-multi {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 9.5px;
 }
 .hub-inline-need-questions input {
   width: 100%;
+  min-width: 0;
   height: 28px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -3255,6 +3273,22 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-inline-need-options button.on {
   border-color: var(--focus);
   color: var(--text);
+}
+/* 选项预览（N3）：与 AskUserQuestionPanel 同一个口径 —— 「必须看见才能选」的备选
+   不能只剩标签。ASCII 版面/diff 里有长行，块内自己横向滚动，永不撑破 390 的卡片。 */
+.hub-inline-need-preview {
+  margin: 3px 0 0;
+  padding: 5px 7px;
+  max-width: 100%;
+  max-height: 96px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: 10.5px/1.45 var(--mono);
+  white-space: pre;
+  tab-size: 2;
 }
 .hub-inline-need footer {
   display: flex;
