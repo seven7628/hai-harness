@@ -6,6 +6,10 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/seven7628/hai-harness/desktop/bridge/conversion"
 )
 
@@ -41,6 +45,22 @@ func (m *manager) handlePreviewConvert(c command, ws, kind string) {
 	ctx, done := m.previewCancels.begin(ws)
 	go func() {
 		defer done()
+		// R08d：kit 可用 → soffice → PDF（真实版式），PDF 走**同一条**内嵌浏览器 file://
+		// 通道。html_path 仍是「该交给浏览器打开的那个产物」（PDF 也一样），另带
+		// renderer/pdf_path 供前端出横幅与诊断 —— 既有调用方读 html_path 不会坏。
+		if m.officeKitState().prober.Kit() != nil {
+			if pdf, kerr := m.convertOfficePDF(ctx, abs, kind); kerr == nil {
+				m.resp(c, true, "", map[string]any{
+					"path": path, "html_path": pdf, "pdf_path": pdf, "renderer": "libreoffice",
+				})
+				return
+			} else if ctx.Err() == nil {
+				// kit 转不动这份文件 → 落回近似路径（用户至少还能看到内容）。
+				// 只打一行诊断：不把它当错误 —— 那是「降级」，不是「失败」。
+				fmt.Fprintf(os.Stderr, "[officekit] %s 走 kit 失败，回落近似路径（kind=%s code=%s）\n",
+					filepath.Base(abs), kind, officeCode(kerr))
+			}
+		}
 		res, cerr := svc.Convert(ctx, conversion.Request{Path: abs, Kind: kind, Workspace: ws})
 		if cerr != nil {
 			// 错误码进信封（前端可据 code 区分「超时该重试」与「这份文件转不了」）；
@@ -48,7 +68,7 @@ func (m *manager) handlePreviewConvert(c command, ws, kind string) {
 			m.respCode(c, false, cerr.Error(), conversion.CodeOf(cerr), nil)
 			return
 		}
-		// 响应形状与收口前逐字一致（{path, html_path}），前端一行不改。
-		m.resp(c, true, "", map[string]any{"path": path, "html_path": res.HTMLPath})
+		// 响应形状与收口前一致（{path, html_path}），只多一个 renderer。
+		m.resp(c, true, "", map[string]any{"path": path, "html_path": res.HTMLPath, "renderer": "approximate"})
 	}()
 }

@@ -829,6 +829,10 @@ type manager struct {
 	// previewCancels 在飞预览转换的取消表（R08a）：工作区关闭/退出时取消，见 preview_cancels.go。
 	// 零值可用（不占启动成本）—— manager 由多处字面量构造，不能要求显式初始化。
 	previewCancels previewCancels
+	// office 办公组件（R08d）的进程级状态：kit 探测缓存 + soffice 信号量 + 渲染函数。
+	// 零值可用（懒建，见 officeKitState）；officeMu 只保护这一个指针。
+	officeMu sync.Mutex
+	office   *officeKitState
 }
 
 // previewService 取（或懒创建）转换服务单例（R08a）。
@@ -2955,6 +2959,9 @@ func (m *manager) dispatch(c command) {
 		// python-pptx 不能渲染）—— 做不到的几件事印在页面顶部，见 builtin.PptxPreviewer。
 		m.handlePreviewConvert(c, ws, "pptx")
 
+	case CmdOfficeKitStatus: // 办公组件状态（R08d）：设置页展示 + 重新探测
+		m.handleOfficeKitStatus(c)
+
 	case CmdMediaProbe: // 音视频元信息 + 直放判断（ffprobe 可选；缺失/超时都只是降级，不是错误）
 		m.handleMediaProbe(c, ws)
 
@@ -5061,6 +5068,10 @@ func (m *manager) buildLoop(workspace, sid, prov, model, effort string, bgCtx fu
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
 	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, m.runtime(workspace).subagents, m.runtime(workspace).mcp, m.runtime(workspace).plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
+	// 办公组件验收工具（R08d）：kit 不可用则不注册（注册必然失败的工具只白耗轮次）。
+	// 放在 newSessionEngine 之后是为了不改那条 20 参数的签名 —— 工具需要的是宿主能力
+	// （缓存/信号量/受管运行时），不是引擎装配的一部分。
+	m.registerOfficeTools(eng, workspace)
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()
@@ -5989,6 +6000,7 @@ func serve() error {
 		go sweepSessionFilesInBackground()
 	}
 	go m.sweepPreviewCache() // R08a：预览产物缓存清扫（过期 + LRU），见 (*manager).sweepPreviewCache
+	go m.warmOfficeKit()     // R08d：kit 可用时预热一次（空转换，把 3–6s 冷启挪出首次转换）
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
 	startupLog("A2.5.browserEngine("+string(m.getBrowserEngine())+")", serveStart)

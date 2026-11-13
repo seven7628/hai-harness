@@ -96,6 +96,11 @@ const (
 	// 按真实 EMU 几何做**近似**版式重建（LibreOffice 不可用，做不到渲染 —— 页面顶部有
 	// 明确标注，见 builtin.PptxPreviewer）。产物与通道同上。
 	CmdPptxPreview Command = "pptx_preview"
+	// CmdOfficeKitStatus 办公组件（LibreOffice kit）状态（R08d，实现见 office.go）。
+	// payload {refresh?: bool} → {kit:{available,state,source,bin,root,version,platform,
+	// sizeBytes,license,licenseUrl,sourceUrl,reason,errors,platforms,pinnedVersion}}。
+	// 不可用**不是错误**（ok:true + available:false）：它正是「走近似渲染 + 横幅」的依据。
+	CmdOfficeKitStatus Command = "office_kit_status"
 	// CmdMediaProbe 音视频元信息 + 直放判断（R08c，实现见 media_probe.go / media_matrix.go）。
 	// payload {path, workspace?} → {path, size, modified_ms, available, state, duration_ms,
 	// bit_rate, streams, playback{mode,kind,container,video_codec,audio_codec,reason,probed}, cached}。
