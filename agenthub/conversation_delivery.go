@@ -387,6 +387,27 @@ func (c *ConversationController) Delivery(group GroupID, wakeID string) (Deliver
 	return d.clone(), true
 }
 
+// skipQueuedLocked 把账本里所有还在排队的记录记成 skipped(reason)。
+// 用于「队列整批作废」的场景（exhausted 清队列，N1）：队列与账本是同一件事的两面，
+// 只清队列会让那几条记录永远停在「排队中」。调用方必须持锁。
+func (c *ConversationController) skipQueuedLocked(conv *conversation, reason string, now time.Time) int {
+	if conv == nil || conv.deliveries == nil {
+		return 0
+	}
+	n := 0
+	for _, d := range conv.deliveries.byID {
+		if d == nil || d.Status != DeliveryQueued {
+			continue
+		}
+		d.Status = DeliverySkipped
+		d.Reason = reason
+		d.ReadyAt = nil
+		d.UpdatedAt = now
+		n++
+	}
+	return n
+}
+
 // removeQueuedLocked 从队列里摘掉指定 wake（不存在则什么都不做）。
 func (c *ConversationController) removeQueuedLocked(conv *conversation, wakeID string) bool {
 	if conv == nil || wakeID == "" {

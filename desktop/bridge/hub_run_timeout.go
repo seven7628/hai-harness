@@ -60,6 +60,26 @@ func (m *manager) armHubRunTimeout(gid agenthub.GroupID, agent agenthub.AgentID,
 	}
 }
 
+// clearAllHubRunTimeouts 撤掉**全部** run 超时定时器（N6：关停/测试清理）。
+//
+// 定时器闭包持有 *manager，关停后还会 fire 一次：那一下会去读会话、写系统消息、
+// 补泵 —— 全是白跑，而且在测试里会写到已删除的 TempDir 上。map 也要清空，
+// 否则同一进程重开（测试依赖）会看到上一轮的残留条目。
+func (m *manager) clearAllHubRunTimeouts() {
+	if m == nil {
+		return
+	}
+	m.hubRunTimerMu.Lock()
+	timers := m.hubRunTimers
+	m.hubRunTimers = map[string]*hubRunTimer{}
+	m.hubRunTimerMu.Unlock()
+	for _, rt := range timers {
+		if rt != nil && rt.timer != nil {
+			rt.timer.Stop()
+		}
+	}
+}
+
 // clearHubRunTimeout 撤掉某目标的超时定时器（run 收尾 / 停止 / 关停）。
 func (m *manager) clearHubRunTimeout(gid agenthub.GroupID, agent agenthub.AgentID) {
 	if m == nil || gid == "" || agent == "" {

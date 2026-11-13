@@ -615,17 +615,11 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	if conv.status == ConversationExhausted {
 		return nil, &ExhaustedError{GroupID: group, Reason: conv.stop, Status: conv.status}
 	}
-	if conv.status == ConversationIdle {
-		// 没有人类消息就被 @（例如 assign_task 直接唤醒）：隐式开一条对话，
-		// 否则预算/踢皮球对这些轮次完全失效。
-		conv.id = c.nextIDLocked(now)
-		conv.status = ConversationRunning
-		conv.startedAt = now
-	}
-	limits := c.limits
-	c.settleLocked(conv, now)
-	// 换代路由（§1.1/§1.5）：旧 generation 的在飞 run 回来 @ —— 丢弃，不进入新对话。
-	// 它的 pair 计数留在旧代（这里什么都不加），新代额度一条都不消耗。
+	// N2：换代判定必须在 idle→running **之前**。旧 generation 的在飞 run 回来 @
+	// 不能先被「隐式开新对话」翻成 running 再丢弃 —— 那会让状态条停在「自动对话中」
+	// 而队列永远是空的（reset/空闲重置之后尤其明显）。
+	// 换代路由（§1.1/§1.5）：旧 generation 的 @ 丢弃，不进入新对话；它的 pair 计数
+	// 留在旧代（这里什么都不加），新代额度一条都不消耗。
 	if req.ConversationID != "" && conv.id != "" && req.ConversationID != conv.id {
 		skipped := 0
 		for _, target := range targets {
@@ -643,6 +637,15 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 		conv.deliveries.prune()
 		return nil, nil
 	}
+	if conv.status == ConversationIdle {
+		// 没有人类消息就被 @（例如 assign_task 直接唤醒）：隐式开一条对话，
+		// 否则预算/踢皮球对这些轮次完全失效。
+		conv.id = c.nextIDLocked(now)
+		conv.status = ConversationRunning
+		conv.startedAt = now
+	}
+	limits := c.limits
+	c.settleLocked(conv, now)
 	// 人类优先：预算与深度是「自动接龙」的护栏，人类发送不受它们约束（§6.5.6
 	// 规则 1/5）。
 	// 轮次上限只在 TurnBudget>0 时生效：生产默认 UnlimitedTurnBudget（不设上限）。
@@ -693,7 +696,15 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 		}
 		plans = append(plans, plan{target: target, pair: p})
 	}
-	queueFull := !req.Human && len(conv.queue)+len(plans) > limits.MaxPendingWakes
+	// N3：队列上限只统计**真要入队**的 plan。已经因深度/互踢被跳过的目标不会再
+	// 进队列，把它们算进来会让「队列其实没满」的一条 @ 被判 queue_full。
+	pendingPlans := 0
+	for _, p := range plans {
+		if p.skip == "" {
+			pendingPlans++
+		}
+	}
+	queueFull := !req.Human && len(conv.queue)+pendingPlans > limits.MaxPendingWakes
 	if req.Human {
 		// 「下一个输入」每 target 只留最新一条：人类连着对同一个在跑的目标说话时，
 		// 旧的那条 pending 让位（正文都在群日志里，目标这一轮结束读得到；两条都投
@@ -1105,6 +1116,11 @@ func (c *ConversationController) settleLocked(conv *conversation, now time.Time)
 
 // resetLocked 清空一代对话的计数并回 idle（人类新输入 / 空闲超时 / 手动重置共用）。
 func (c *ConversationController) resetLocked(conv *conversation, now time.Time) {
+	// N2：重置/空闲超时也是**换代**。不换 id 的话，重置前那条在飞 run 的 final @
+	// 仍带着旧 id，会被当成新对话的 @ 接受 —— 状态从 idle 翻回 running，用户看到的
+	// 是「我刚重置，它又自己跑起来了」。换 id 后它命中 stale 分支：记 skipped(stale)，
+	// 状态保持 idle。
+	conv.id = c.nextIDLocked(now)
 	conv.status = ConversationIdle
 	conv.stop = ""
 	conv.turns = 0
@@ -1150,6 +1166,9 @@ func (c *ConversationController) exhaustLocked(conv *conversation, now time.Time
 	conv.status = ConversationExhausted
 	conv.stop = reason
 	conv.queue = nil
+	// N1：队列清空时账本也要一起收口 —— 否则那几条 queued 记录永远显示「排队中」，
+	// 而队列里其实一条都没有了（UI 与排障都会被带偏）。
+	c.skipQueuedLocked(conv, DeliveryReasonExhausted, now)
 	conv.updatedAt = now
 	return &ExhaustedError{GroupID: conv.group, Reason: reason, Status: conv.status}
 }

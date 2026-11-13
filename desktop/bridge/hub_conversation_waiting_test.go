@@ -147,3 +147,38 @@ func TestHubConversationOfferAfterWaitingHumanWakesTarget(t *testing.T) {
 	convWait(t, "waiting_human 之后 @D 必须真的唤醒 D", func() bool { return fd.callCount() >= 1 })
 	convWait(t, "D 投出去之后队列排空", func() bool { return convView(m, g.ID).QueueLen == 0 })
 }
+
+// TestHubRunTimeoutTimersClearedOnShutdown：N6 —— 关停要撤掉所有 run 超时定时器并
+// 清空 map（定时器闭包持有 manager，关停后再 fire 只会白跑一轮）。
+func TestHubRunTimeoutTimersClearedOnShutdown(t *testing.T) {
+	m, buf := testManager(t)
+	convLimits(m, agenthub.ConversationLimits{Cooldown: -1, RunTimeout: time.Minute})
+	a := createHubAgent(t, m, buf, 1, "超时A")
+	b := createHubAgent(t, m, buf, 2, "超时B")
+	g := convGroupWith(t, m, buf, 10, "超时群", nil, a, b)
+
+	count := func() int {
+		m.hubRunTimerMu.Lock()
+		defer m.hubRunTimerMu.Unlock()
+		return len(m.hubRunTimers)
+	}
+	m.armHubRunTimeout(g.ID, a.ID, "wake_timeout_a")
+	m.armHubRunTimeout(g.ID, b.ID, "wake_timeout_b")
+	if n := count(); n != 2 {
+		t.Fatalf("挂上的定时器 = %d, want 2", n)
+	}
+	// 直接清：map 空 + 到点不再 fire。
+	m.clearAllHubRunTimeouts()
+	if n := count(); n != 0 {
+		t.Fatalf("clearAllHubRunTimeouts 之后 = %d, want 0", n)
+	}
+	// 关停路径也要清（closeHubRuntimes 的第一件事）。
+	m.armHubRunTimeout(g.ID, a.ID, "wake_timeout_c")
+	if n := count(); n != 1 {
+		t.Fatalf("重挂后 = %d, want 1", n)
+	}
+	m.closeHubRuntimes()
+	if n := count(); n != 0 {
+		t.Fatalf("N6：关停后定时器 map 没清空（%d 条）", n)
+	}
+}

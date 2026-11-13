@@ -272,6 +272,10 @@ const eq = (got, want, m) => {
   assert(running.segments.every((s) => s.text.trim().length > 0), '没有空文案段（不留悬空分隔符）')
   eq(running.canStop, true, '有队列 → 可停')
   eq(running.canReset, false, '没到限 → 不给重置')
+  // N4：后端没给 max_depth 时，分母与 Go 的 DefaultConversationMaxDepth（1000）对齐，
+  // 不能显示「深度 2/4」这种假上限。
+  const noMaxDepth = conv.conversationBarModel({ conversation: { status: 'running', depth: 2 } })
+  eq(noMaxDepth.segments.find((s) => s.key === 'chain').text, '本链 2/1000', 'N4：缺省深度分母 = Go 默认 1000')
 
   // —— 护栏命中：pair 到限 + 恢复倒计时 + 重置门禁 + 终态 ——
   const waiting = conv.conversationBarModel({

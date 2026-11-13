@@ -435,3 +435,124 @@ func TestConversationTerminalNeverSchedules(t *testing.T) {
 		t.Fatalf("exhausted 之后状态 = %q", v.Status)
 	}
 }
+
+// TestConversationExhaustMarksQueuedSkipped：N1 —— exhausted 清队列时账本里的
+// queued 记录也要收口，不能留下永远「排队中」的记录。
+func TestConversationExhaustMarksQueuedSkipped(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	// 先排一条正常的 @。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "同一句", Depth: 2, TriggerSeq: 3,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("offer: %v %+v", err, wakes)
+	}
+	if v := c.View("group_1"); v.QueueLen != 1 {
+		t.Fatalf("前置队列 = %d, want 1", v.QueueLen)
+	}
+	// 同内容再来一次 → 整批熔断 → exhausted 并清队列。
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "同一句", Depth: 2, TriggerSeq: 4,
+	}); !errors.Is(err, ErrConversationExhausted) {
+		t.Fatalf("同内容应 exhausted: %v", err)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationExhausted || v.QueueLen != 0 {
+		t.Fatalf("exhausted 后 = %+v, want exhausted/queue=0", v)
+	}
+	for _, d := range c.Deliveries("group_1") {
+		if d.Status == DeliveryQueued {
+			t.Fatalf("N1：队列清了，账本还留着「排队中」: %+v", d)
+		}
+		if d.Status == DeliverySkipped && d.Reason != DeliveryReasonExhausted {
+			t.Fatalf("N1：跳过原因 = %q, want %q", d.Reason, DeliveryReasonExhausted)
+		}
+	}
+}
+
+// TestConversationQueueFullIgnoresSkippedPlans：N3 —— queue_full 只统计真要入队的
+// plan；已经因互踢被跳过的目标不该把「队列没满」的一条 @ 判成 queue_full。
+func TestConversationQueueFullIgnoresSkippedPlans(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 1, PairWindow: time.Hour, IdleReset: -1, MaxPendingWakes: 1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	// 用满 a↔b。
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "一句", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin")
+	}
+	// a→[b, c]：b 命中 pair 限（跳过，不入队），c 正常。队列上限 1 应该刚好放行 c。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b", "agent_c"),
+		Text: "两句", Depth: 2,
+	})
+	if err != nil {
+		t.Fatalf("offer: %v", err)
+	}
+	if len(wakes) != 1 || wakes[0].Target != "agent_c" {
+		t.Fatalf("N3：只该放行 c（b 已跳过，不占队列额度），得到 %+v", wakes)
+	}
+	for _, d := range c.Deliveries("group_1") {
+		if d.Reason == DeliveryReasonQueueFull {
+			t.Fatalf("N3：不该出现 queue_full（被跳过的目标不算队列额度）: %+v", d)
+		}
+	}
+}
+
+// TestConversationResetBumpsGeneration：N2 —— 重置/空闲超时是换代：重置前那条在飞
+// run 的 final @ 不能把状态从 idle 翻回 running。
+func TestConversationResetBumpsGeneration(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	c.StartHumanRound("group_1", 1, clk.Now())
+	before := c.View("group_1")
+	v := c.Reset("group_1", clk.Now())
+	if v.Status != ConversationIdle {
+		t.Fatalf("重置后 = %q, want idle", v.Status)
+	}
+	if v.ID == before.ID || v.ID == "" {
+		t.Fatalf("N2：重置必须换代（旧 %q / 新 %q）", before.ID, v.ID)
+	}
+	// 旧 run 的 final @ 带着旧 conversation id：记 skipped(stale)，状态保持 idle。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "旧 run 收尾", Depth: 2, TriggerSeq: 3, ConversationID: before.ID,
+	})
+	if err != nil || len(wakes) != 0 {
+		t.Fatalf("旧代 @ 必须丢弃: %v %+v", err, wakes)
+	}
+	if v := c.View("group_1"); v.Status != ConversationIdle || v.QueueLen != 0 {
+		t.Fatalf("N2：旧 run 的 @ 把状态翻回了 %q（队列 %d）", v.Status, v.QueueLen)
+	}
+	var stale bool
+	for _, d := range c.Deliveries("group_1") {
+		if d.Status == DeliverySkipped && d.Reason == DeliveryReasonStale {
+			stale = true
+		}
+	}
+	if !stale {
+		t.Fatal("N2：旧代 @ 应记 skipped(stale)")
+	}
+	// 用当前 id 的 @ 照常入队（换代判据不是「一律拒绝」）。
+	wakes, err = c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "新代", Depth: 2, TriggerSeq: 4, ConversationID: v.ID,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("新代 @ 应入队: %v %+v", err, wakes)
+	}
+}
