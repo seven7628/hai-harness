@@ -187,7 +187,7 @@ export default function RightPanel() {
     return () => window.removeEventListener('keydown', onKey)
   }, [menu, setMenu])
   // —— PR-09：⌃⇥ / ⌃⇧⇥ 在 tabs 数组里前后移动 activeId（末尾/开头回绕）——
-  // 与 ⌘1..9（切 rightTab）是两回事，所以显式排除 metaKey。
+  // 与 ⌘1..9（App.tsx：切最近会话，不是切标签）是两回事，所以显式排除 metaKey。
   // 监听挂在 window 而不是标签条上：这是**面板级**的全局切换，输入框/编辑器聚焦时也要生效
   //（它不是一个文本编辑键）。卸载/折叠时拆掉监听。
   useEffect(() => {
