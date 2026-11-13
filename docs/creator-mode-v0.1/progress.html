@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 11:05",
-    "current": "R12"
+    "updated": "2026-11-13 11:40",
+    "current": "R13"
   },
   "rounds": [
     {
@@ -959,15 +959,17 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "R11"
       ],
       "status": "done",
-      "commit": "bd28982+3947308",
-      "review": "",
+      "commit": "05c8c50",
+      "review": "主会话复核：go vet / go test ./desktop/bridge -run TestUI 16 条 / codemode 全量 / tsc 0 / eslint 56 / build / 快照探针 31 项 / tabbar 89 / boundary 82 / persist 38 全绿。另修一条自造 flake：首条快照预算 800ms 在共享机器上实测到 1018ms（8aa4bdb 改成 1500ms，「不逐条刷」仍由 T2 的合并断言守）",
       "perf": [
         "P06"
       ],
       "acc": [
         "先写 CodeMode e2e（红）：tools/builtin/codemode 无法 import package main，故真跑放在 desktop/bridge/ui_tools_test.go（真引擎 + m.registerUITools + m.dispatch）",
         "快照 ≤ 20ms @ 20 tabs：P06 p95 = 38.6µs（TestUIInspectLatencyBudgetP06）",
-        "tabs 返回对象（s.value.tabs / s.data.tabs 都是数组）；空态 = [] 不是 null"
+        "tabs 返回对象（s.value.tabs / s.data.tabs 都是数组）；空态 = [] 不是 null",
+        "ui 消息不进 28 类事件、不落盘、不重放（TestUIDispatchWritesNothingToDisk / UnknownOpIsSilentlyIgnored）",
+        "快照只有元数据：tabs 只给 id/kind/标题（截断 200），无文件内容"
       ],
       "rollback": "关 settings.features.surfaceTools（本轮工具无条件注册，开关留给 PR-14）"
     },
