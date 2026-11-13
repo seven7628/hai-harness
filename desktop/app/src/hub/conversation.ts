@@ -250,29 +250,6 @@ function lastDeliveryBatch(list: HubDelivery[]): HubDelivery[] {
 }
 
 /**
- * 一轮 @ 的投递摘要：`9 进行中 · 2 排队 · 1 跳过`。
- * 只统计最近一批（同一 conversation_id + 同一 turn 的最后连续一段），
- * 否则历史记录会把当前这轮淹没。
- */
-export function deliverySummary(conv?: HubConversation | null): string {
-  const batch = lastDeliveryBatch(conv?.deliveries ?? [])
-  if (batch.length === 0) return ''
-  const count = (s: string): number => batch.filter((d) => d.status === s).length
-  const parts: string[] = []
-  const running = count('running')
-  const queued = count('queued')
-  const done = count('done')
-  const skipped = count('skipped')
-  const failed = count('failed')
-  if (running > 0) parts.push(`${running} 进行中`)
-  if (queued > 0) parts.push(`${queued} 排队`)
-  if (done > 0) parts.push(`${done} 已回复`)
-  if (skipped > 0) parts.push(`${skipped} 跳过`)
-  if (failed > 0) parts.push(`${failed} 失败`)
-  return parts.join(' · ')
-}
-
-/**
  * 投递原因码 → 状态条里的一句话原因。
  *
  * 与 deliveryReasonText 的分工：那个是「码 → 人话」，未知码原样返回（给单条投递的

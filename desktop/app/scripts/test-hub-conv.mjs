@@ -162,17 +162,9 @@ const eq = (got, want, m) => {
   eq(conv.deliveryReasonText(''), '', '空原因 → 空文案')
   eq(conv.deliveryReasonText('budget'), '预算不足，未启动', '预算门的可见文案（P6-03）')
   eq(conv.deliveryReasonText('rate_limit'), '上游限流，退避重试', '429 退避的可见文案')
-  const cid = 'conv_1'
-  const sum = conv.deliverySummary({ deliveries: [
-    { target: 'agt_a', status: 'running', turn: 1, conversation_id: cid },
-    { target: 'agt_b', status: 'running', turn: 1, conversation_id: cid },
-    { target: 'agt_c', status: 'queued', reason: 'target_busy', turn: 1, conversation_id: cid },
-    { target: 'agt_d', status: 'skipped', reason: 'pair_limit', turn: 1, conversation_id: cid },
-    { target: 'agt_e', status: 'done', turn: 1, conversation_id: cid },
-  ] })
-  eq(sum, '2 进行中 · 1 排队 · 1 已回复 · 1 跳过', '一轮 @ 的投递摘要')
-  eq(conv.deliverySummary(null), '', '没有账本 → 空摘要')
-  eq(conv.deliverySummary({ deliveries: [] }), '', '空账本 → 空摘要')
+  // 一轮 @ 的投递汇总只有一处实现（deliveryTally + deliveryTallyText）：
+  // 同一批数据分两套口径迟早会漂，P6-10 把旧的 deliverySummary 并了进去。
+  assert(!('deliverySummary' in conv), '投递汇总只有 deliveryTally 一处实现（不再有第二套口径）')
 }
 
 // 4c) 状态条模型（P6-10）：本轮/本链/队列/pair 倒计时/投递账本 + 门禁 + 空态。
