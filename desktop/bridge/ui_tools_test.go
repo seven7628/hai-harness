@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -300,4 +302,41 @@ func jsonObjectAt(s string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// ---- P06 性能预算：ui_inspect 快照生成 ≤ 20ms @ 20 tabs ----
+//
+// 预算来自 progress.html 的 P06（how: Go bridge 侧打点 + e2e 断言）。这里量的是
+// **工具这条路**（引擎实际付的代价：解析 what → 取段 → 序列化），20ms 是 3 个数量级的
+// 余量：快照是纯元数据（20 个标签约 2–3 KB），任何接近 20ms 的结果都说明实现变成了
+// 别的东西（例如每次调用重新打一遍全量 surfaces 或者把快照落盘）。
+func TestUIInspectLatencyBudgetP06(t *testing.T) {
+	m, _ := testManager(t)
+	payload := uiSnapshotPayload()
+	tabs := make([]any, 0, 20)
+	for i := 0; i < 20; i++ {
+		tabs = append(tabs, map[string]any{
+			"id": "t" + strconv.Itoa(i), "kind": "file", "title": "file" + strconv.Itoa(i) + ".go",
+			"active": i == 0,
+		})
+	}
+	payload["tabs"] = map[string]any{"scope": "S1", "activeId": "t0", "tabs": tabs}
+	dispatchUISnapshot(t, m, payload)
+
+	tl := newUIInspectTool(&m.ui)
+	const runs = 200
+	durs := make([]time.Duration, 0, runs)
+	for i := 0; i < runs; i++ {
+		start := time.Now()
+		if _, err := tl.Call(context.Background(), "ui-1", `{"what":"all"}`); err != nil {
+			t.Fatalf("Call: %v", err)
+		}
+		durs = append(durs, time.Since(start))
+	}
+	sort.Slice(durs, func(i, j int) bool { return durs[i] < durs[j] })
+	p95 := durs[int(float64(len(durs))*0.95)]
+	t.Logf("P06 ui_inspect 快照生成：p95 = %v @ 20 tabs（预算 20ms）", p95)
+	if p95 > 20*time.Millisecond {
+		t.Fatalf("P06 超预算：p95 = %v > 20ms @ 20 tabs", p95)
+	}
 }
