@@ -736,7 +736,7 @@ class MockTransport implements Transport {
         { agent_id: 'ag_mockwri2', role: 'member' },
       ],
       policy: {
-        mode: 'ask', max_parallel_runs: 2, max_handoff_depth: 3, max_turns_per_human: 8,
+        mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
         max_mentions_per_message: 3, daily_budget_usd: 5,
       },
       created_at: new Date(Date.now() - 7 * 86_400_000).toISOString(),
@@ -752,7 +752,7 @@ class MockTransport implements Transport {
         { agent_id: 'ag_mockwri2', role: 'member' },
       ],
       policy: {
-        mode: 'ask', max_parallel_runs: 2, max_handoff_depth: 3, max_turns_per_human: 8,
+        mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
         max_mentions_per_message: 3, daily_budget_usd: 5,
       },
       created_at: new Date(Date.now() - 2 * 86_400_000).toISOString(),
@@ -3661,7 +3661,7 @@ class MockTransport implements Transport {
           members: memberIDs.map((id) => ({ agent_id: id, role: id === owner ? 'owner' : 'member' })),
           // 未传的字段沿用 fixtures 那套默认（bridge 侧由 Group.Normalize 补）。
           policy: {
-            mode: 'ask', max_parallel_runs: 2, max_handoff_depth: 3, max_turns_per_human: 8,
+            mode: 'ask', max_handoff_depth: 3, max_turns_per_human: 8,
             max_mentions_per_message: 3, daily_budget_usd: 5,
             ...policy,
           },

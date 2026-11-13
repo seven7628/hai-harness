@@ -189,7 +189,7 @@ const roster = [
   )
   eq(conversation.conversationStatusLabel('running'), '自动对话中', 'running 文案')
   eq(conversation.conversationStatusLabel('waiting_human'), '等你继续', 'waiting_human 文案')
-  eq(conversation.conversationPairText(conv, { ag_alice: 'Alice', ag_alicechen: 'Alice Chen' }), 'Alice → Alice Chen 2/2', 'pair 计数按名还原')
+  eq(conversation.conversationPairText(conv, { ag_alice: 'Alice', ag_alicechen: 'Alice Chen' }), 'Alice ↔ Alice Chen 2/10', 'pair 计数按名还原（无序/默认 10）')
 }
 
 // —— 6) conversation：终态文案 + 停止门禁 ——

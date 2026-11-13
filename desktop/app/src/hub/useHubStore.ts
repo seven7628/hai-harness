@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type {
-  HubAgent, HubAlert, HubArtifactPreviewData, HubAttachment, HubConversation, HubDMInfo, HubGroup, HubGroupPolicy,
+  HubAgent, HubAlert, HubArtifactPreviewData, HubAttachment, HubConversation, HubDelivery, HubDMInfo, HubGroup, HubGroupPolicy,
   HubHistoryPage,
   HubMessage, HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubPromptLayer, HubPromptPreviewData,
   HubRound, HubRunEntry, HubSearchCursor, HubSearchHit, HubSearchPage, HubSearchScope, HubTask,
@@ -333,6 +333,8 @@ interface HubState {
   sendGroup(text: string, mentions?: string[], mentionAll?: boolean, reuseClientMsgId?: string, attachments?: HubAttachment[], sourceDraft?: string): Promise<boolean>
   sendGroupAssign(groupID: string, req: { agent_id: string; instruction: string; title?: string }): Promise<boolean>
   stopGroupConversation(groupID: string): Promise<boolean>
+  /** P6-04 ④ 手动重置本群对话限制（hub_conversation_reset）。 */
+  resetGroupConversation(groupID: string): Promise<boolean>
   loadTasks(): Promise<void>
   loadNeeds(): Promise<void>
   cancelTask(taskID: string): Promise<void>
@@ -1610,7 +1612,7 @@ export const useHubStore = create<HubState>((set, get) => ({
     // 两者取并集 —— 前端删改正文不会留下「幽灵唤醒」。
     if (mentions && mentions.length > 0) payload.mentions = mentions
     if (mentionAll) payload.mention_all = true
-    const r = await hubCommand<{ seq?: number; round?: HubRound }>('hub_group_send', payload)
+    const r = await hubCommand<{ seq?: number; round?: HubRound; deliveries?: HubDelivery[] }>('hub_group_send', payload)
     // 切群/下一轮发送已发生：旧响应只负责自己的乐观气泡，不得复位新一轮的 groupSending。
     if (groupSendGen !== gen || get().activeGroupId !== activeGroupId) return false
     if (!r.ok) {
@@ -1694,6 +1696,22 @@ export const useHubStore = create<HubState>((set, get) => ({
       set((s) => ({ groupConversations: { ...s.groupConversations, [gid]: r.data!.conversation as HubConversation } }))
     }
     set({ notice: r.data?.interrupted ? `已停止自动对话（中断 ${r.data.interrupted} 个 run）` : '已停止自动对话' })
+    return true
+  },
+
+  /** P6-04 ④：重置本群对话限制（清零 pair/深度/指纹，解除 waiting_human）。 */
+  async resetGroupConversation(groupID) {
+    const gid = (groupID || get().activeGroupId || '').trim()
+    if (!gid) return false
+    const r = await hubCommand<{ conversation?: HubConversation }>('hub_conversation_reset', { group_id: gid })
+    if (!r.ok) {
+      set({ error: r.error || '重置对话限制失败' })
+      return false
+    }
+    if (r.data?.conversation) {
+      set((s) => ({ groupConversations: { ...s.groupConversations, [gid]: r.data!.conversation as HubConversation } }))
+    }
+    set({ notice: '已重置本群对话限制' })
     return true
   },
 

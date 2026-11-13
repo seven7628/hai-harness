@@ -141,7 +141,6 @@ function policyLine(group: HubGroup): string {
   const p = group.policy ?? {}
   const parts: string[] = []
   if (p.mode) parts.push(`mode=${escapeInline(p.mode, 20)}`)
-  if (p.max_parallel_runs) parts.push(`并行 ${p.max_parallel_runs}`)
   if (p.max_handoff_depth) parts.push(`交接深度 ${p.max_handoff_depth}`)
   if (p.daily_budget_usd) parts.push(`日预算 $${p.daily_budget_usd}`)
   return parts.join(' · ')

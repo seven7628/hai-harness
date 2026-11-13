@@ -247,7 +247,7 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
     name: 'Price <Team>',
     owner_agent_id: 'ag_a',
     members: [{ agent_id: 'ag_a', role: 'owner' }, { agent_id: 'ag_b' }],
-    policy: { mode: 'ask', max_parallel_runs: 2, daily_budget_usd: 5 },
+    policy: { mode: 'ask', daily_budget_usd: 5 },
   }
   const messages = [
     {
@@ -272,7 +272,7 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   assert(md.startsWith('# 群：Price &lt;Team&gt;'), '群名在标题里且转义')
   assert(md.includes('- 群组：`grp_1`'), '群 id')
   assert(md.includes('- 成员：Alice（owner）、Bob'), '成员与角色')
-  assert(md.includes('- 策略：mode=ask · 并行 2 · 日预算 $5'), '群策略')
+  assert(md.includes('- 策略：mode=ask · 日预算 $5'), '群策略（并发不再是策略旋钮）')
   assert(md.includes('- 消息：3 条 · seq 1–3'), '消息数量与 seq 范围')
   assert(md.includes('- 导出：2026-03-10T13:00:00Z'), '导出时间可固定')
   assert(md.indexOf('### #1') < md.indexOf('### #2'), '消息按 seq 升序')

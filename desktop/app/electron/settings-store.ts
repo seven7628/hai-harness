@@ -270,6 +270,9 @@ export const SETTINGS_SCHEMA: Record<string, FieldKind> = {
       // bridge 侧已有、UI 未暴露的字段：放行以免「手写过它 → 设置面板改 reminder_rounds
       // 时整条 patch 被拒」。0 = 关闭自动摘离。
       async_promote_after_seconds: { t: 'int', min: 0 },
+      // P6-03：provider 并发信号量上限（0 = 不限）。群聊 11 并发时把它设成 4~8
+      // 可以显著减少 429；bridge 侧读 loadAgentSettings().providerConcurrency()。
+      max_concurrent_provider_calls: { t: 'int', min: 0, max: 64 },
     },
   },
   sandbox: {
@@ -291,6 +294,26 @@ export const SETTINGS_SCHEMA: Record<string, FieldKind> = {
     fields: {
       enabled: { t: 'bool' },
       auto_clean: { t: 'bool' },
+    },
+  },
+  // P6-04（D8）：群聊对话引擎的全局护栏。**不是群策略** —— 这几个旋钮调的是
+  // 「对话引擎怎么防无限接龙」，12 个群各调一套会让排障无法用一句话解释。
+  // 0/缺省在 bridge 侧一律回落默认值（0 不是合法业务值，避免「设成 0 就永不唤醒」）。
+  hub: {
+    t: 'object',
+    fields: {
+      conversation: {
+        t: 'object',
+        fields: {
+          max_depth: { t: 'int', min: 1 },
+          pair_limit: { t: 'int', min: 1 },
+          pair_window_ms: { t: 'int', min: 1 },
+          idle_reset_ms: { t: 'int', min: 1 },
+          cooldown_ms: { t: 'int', min: 0 },
+          run_timeout_ms: { t: 'int', min: 1 },
+          max_pending_wakes: { t: 'int', min: 1 },
+        },
+      },
     },
   },
   codemode: {

@@ -100,7 +100,6 @@ func TestGroupJSONStable(t *testing.T) {
 		},
 		Policy: GroupPolicy{
 			Mode:             GroupModeAsk,
-			MaxParallelRuns:  3,
 			MaxHandoffDepth:  3,
 			MaxTurnsPerHuman: 8,
 			MaxMentions:      3,

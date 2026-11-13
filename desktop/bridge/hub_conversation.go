@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/provider"
 )
 
 // errHubGroupTargetBusy 目标群会话正忙（上一轮没结束）。与真正的错误区分开：
@@ -36,9 +37,8 @@ func (m *manager) hubConversation() *agenthub.ConversationController {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.hubConv == nil {
-		opts := agenthub.ConversationOptions{
-			Limits: agenthub.ConversationLimits{TurnBudget: agenthub.UnlimitedTurnBudget},
-		}
+		// P6-04：限额来自 settings.json 顶层 hub.conversation（全局，不是每群策略）。
+		opts := agenthub.ConversationOptions{Limits: loadHubConversationLimits()}
 		if m.hubConvLimits != nil {
 			opts.Limits = *m.hubConvLimits
 		}
@@ -90,6 +90,9 @@ func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigg
 	wakes, err := ctrl.Offer(agenthub.ConversationOffer{
 		GroupID: g.ID, Sender: sender, Targets: round.Targets,
 		Text: trigger.Text, Depth: depth, TriggerSeq: trigger.Seq, RoundID: round.ID,
+		// 发起者那一轮所属的对话 id：人类插话换代之后，旧 run 的 @ 不得进入新对话
+		//（§1.1/§1.5）。空 = 未知（人类首轮/测试），不校验。
+		ConversationID: m.hubRunConversationID(string(sender), g.ID),
 	})
 	if err != nil {
 		if errors.Is(err, agenthub.ErrConversationExhausted) {
@@ -97,7 +100,30 @@ func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigg
 		}
 		return nil, err
 	}
+	// 全部目标都被护栏跳过 → waiting_human（不是 exhausted）：写一条说明，人类一句话
+	// 就能继续（P6-04 §1.1 到限行为）。
+	m.notifyHubConversationWaiting(g.ID, ctrl.View(g.ID))
 	return wakes, nil
+}
+
+// hubRunConversationID 取某智能体**当前在跑的 run** 所属对话 id（空 = 未知）。
+// group_say 用它做换代路由校验：旧 generation 的 @ 不能进入人类新开的对话。
+func (m *manager) hubRunConversationID(agentID string, gid agenthub.GroupID) string {
+	if m == nil || agentID == "" || gid == "" {
+		return ""
+	}
+	ws := m.hubRuntimeIfExists(agentID)
+	if ws == nil {
+		return ""
+	}
+	sid := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: gid})
+	ws.mu.Lock()
+	bs := ws.sessions[sid]
+	ws.mu.Unlock()
+	if bs == nil {
+		return ""
+	}
+	return bs.hubWakeConversationID()
 }
 
 // hubGroupNextDepth 下一跳 @ 的深度：当前 run 绑定的唤醒深度 + 1（人类=0 → 首轮=1）。
@@ -161,30 +187,25 @@ func (g *hubConvDispatchGate) lock(gid agenthub.GroupID) func() {
 	return mu.Unlock
 }
 
-// pumpHubConversation 推动某个群的自动对话队列：**最多**投一条 wake 出去。
+// pumpHubConversation 是**统一群调度器**的一次 pass（P6-02）：人类与 agent 的 wake
+// 走同一个入口，一次把「现在能跑的目标」全部并行放行。
+//
+// 并发 = 本轮目标数（D1/§1.3）：12 人群 @all = 11 条同时投；显式 @3 = 3 条。
+// 每个 target 至多一条在飞（群会话忙闩 + DueWakes 的去重），所以「并发 = 目标数」
+// 是自然上限，不需要（也不再允许）一个 MaxParallelRuns 旋钮。
 //
 // 调用点：
-//   - group_say 入队之后（同 goroutine，首条立即投递）；
+//   - group_say / 人类消息入队之后（同 goroutine，首条立即投递）；
 //   - 群 run 真正收尾（emit 末尾的 hubOnRunEnd，running 与群轮闩都已放开）；
-//   - 冷却定时器（scheduleHubConversationTimer）。
+//   - 冷却/退避定时器（scheduleHubConversationTimer）。
 //
-// 投递失败（目标忙）时**不动队列**：wake 还在队首，下一次群 run 结束再取。
-//
-// 串行语义（§6.5.6 规则 3）：本群只要还有**任何**群会话在跑就不放行（groupRunInFlight）。
-// group_say 就在发送者自己的 run 里泵，冷却计时器也可能落在别人的 run 中间 —— 没有
-// 这道闸，A 还没说完 B 就被叫起来了（"一次一个"名不副实）。被挡住时 wake 留队，
-// 由下一次 hubOnRunEnd / 冷却计时器再来一泵。
-//
-// 一次调用最多投一条：这一条投出去之后如果还有别的会话在跑（并行首轮的另一条），
-// 继续等它们结束 —— 排一个延迟泵，避免只靠「那一条 run 自己收尾」的偶然性。
-//
-// 两段式（NextDue → 投递 → BeginTurn）之间可能被人类消息/停止插队：BeginTurn 会
-// 返回 false，那一轮就不记账（会话里多收到一份快照是良性的，最多多一次空转）。
+// 目标忙的 wake **不动队列**：账本退回 queued，下一次 pass 再取（不丢、不标 failed）。
+// 投递出错（可重试的 429/上游抖动）同样退回 queued + 退避，只有真错误才 failed。
 func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 	if m == nil || m.hubShutdown.Load() {
 		return
 	}
-	// 取/投/记账是一个临界区：停止与人类插话不能插在 NextDue 与投递之间
+	// 取/投/记账是一个临界区：停止与人类插话不能插在 DueWakes 与投递之间
 	// （否则 wake 会在停止之后真跑一轮，见 hubConvDispatchGate）。
 	unlock := m.hubConvDispatch.lock(gid)
 	defer unlock()
@@ -197,67 +218,256 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 	if view.Status != agenthub.ConversationRunning {
 		return
 	}
-	if m.groupRunInFlight(gid, "") {
-		return // 串行：本群还有会话在跑，下一条等它收尾（hubOnRunEnd 会再来）
+	// 串行 fallback（保留）：hubConvSerialPump 打开时一次只放一条。生产恒关；
+	// 弱网/单 provider 槽位需要降级时可以用它，测试也用它锁住 fallback 不腐烂。
+	if hubConvSerialPump {
+		wake, ok := ctrl.NextDue(gid, time.Time{})
+		if !ok {
+			m.armHubConversationTimer(gid)
+			return
+		}
+		m.runHubConversationPass(gid, []agenthub.Wake{wake})
+		return
 	}
-	wake, ok := ctrl.NextDue(gid, time.Time{})
-	if !ok {
-		// NextDue 也可能刚把状态推到 exhausted（队列里还剩预算外的 wake）。
+	wakes := ctrl.DueWakes(gid, time.Time{})
+	if len(wakes) == 0 {
+		// DueWakes 也可能刚把状态推到 exhausted（队列里还剩预算外的 wake）。
 		if v := ctrl.View(gid); v.Terminal() {
 			m.notifyHubConversation(gid, v)
 			return
 		}
-		if head, has := ctrl.Peek(gid); has {
-			if d := time.Until(head.ReadyAt); d > 0 {
-				m.scheduleHubConversationTimer(gid, d)
+		m.armHubConversationTimer(gid)
+		return
+	}
+	m.runHubConversationPass(gid, wakes)
+}
+
+// hubConvSerialPump 是串行 fallback 开关（默认关）。P6-02 之后正常路径必须并行
+// 放行（并发 = 本轮目标数）；保留它是因为「一次一个」在单 provider 槽位/弱网
+// 场景仍是合理的降级策略。测试用它锁住 fallback 不腐烂，生产恒为 false。
+var hubConvSerialPump = false
+
+// armHubConversationTimer 队列里还有东西但都不可跑（冷却/429 退避）时，排一个定时器
+// 到最早可跑时刻。没有可跑时刻就什么都不做（等 run 收尾/人类消息再来）。
+func (m *manager) armHubConversationTimer(gid agenthub.GroupID) {
+	ctrl := m.hubConversation()
+	next, ok := ctrl.NextReadyAt(gid)
+	if !ok {
+		return
+	}
+	if d := time.Until(next); d > 0 {
+		m.scheduleHubConversationTimer(gid, d)
+	}
+}
+
+// runHubConversationPass 并行投递一批 wake（并发 = 批大小 = 本轮目标数）。
+//
+// 先过一次「停止/换代」复查（Stop P1：停止是**先标记 stopped、再抢闸门**，所以它
+// 可能刚好落在 DueWakes 之后），再逐条投递；任何一条失败都不影响其他目标。
+func (m *manager) runHubConversationPass(gid agenthub.GroupID, wakes []agenthub.Wake) {
+	ctrl := m.hubConversation()
+	hubConvDispatchBarrier("due", gid)
+	cur := ctrl.View(gid)
+	if cur.Status == agenthub.ConversationStopped {
+		return
+	}
+	// 预跑预算门（P6-03）：一次 pass 只读一次群/成本索引，逐 target 判三级日预算。
+	// 预算不足的目标**不启动 run**（账本记 skipped(budget)），其他目标照跑。
+	g := m.loadHubGroup(gid)
+	deliverable := make([]agenthub.Wake, 0, len(wakes))
+	for _, w := range wakes {
+		if w.ConversationID != "" && w.ConversationID != cur.ID {
+			// 旧 generation 的 wake：丢弃（账本里会记 skipped(stale)）。
+			m.hubAlertf("group_conversation_stale_wake", "群 %s 唤醒 %s 属于已结束的对话，已丢弃", gid, w.Target)
+			continue
+		}
+		if ok, reason := m.hubConversationBudget(g, w.Target); !ok {
+			if ctrl.SkipWake(gid, w.ID, agenthub.DeliveryReasonBudget, time.Time{}) {
+				m.notifyHubBudgetBlocked(gid, reason)
+			}
+			continue
+		}
+		deliverable = append(deliverable, w)
+	}
+	if len(deliverable) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, w := range deliverable {
+		wg.Add(1)
+		go func(w agenthub.Wake) {
+			defer wg.Done()
+			m.deliverScheduledWake(gid, w)
+		}(w)
+	}
+	wg.Wait()
+	hubConvDispatchBarrier("delivered", gid)
+	// 记账（TurnsUsed/Depth/冷却起点）已经在 wakeGroupAgent 的 CommitDelivery 里完成：
+	// 那条路径是幂等的唯一入口，这里不能再记一次（会把轮次算成两轮）。
+	m.emitHubConversation(gid, ctrl.View(gid))
+	// 还有没投出去的（目标忙/冷却/退避）→ 排定时器兜底；真正放行时闸门会再判一次。
+	if v := ctrl.View(gid); v.QueueLen > 0 {
+		m.armHubConversationTimer(gid)
+	}
+}
+
+// deliverScheduledWake 投递一条调度器放行的 wake，并把失败分成「可重试」与「真错误」：
+//   - 目标忙（errHubGroupTargetBusy）：账本已退回 queued，不告警；
+//   - 429/上游抖动：退回 queued + 指数退避（**不标 failed**，§1.3）；
+//   - 其它错误：账本 failed + 告警；群/成员不存在则收口成 stopped。
+func (m *manager) deliverScheduledWake(gid agenthub.GroupID, wake agenthub.Wake) {
+	ctrl := m.hubConversation()
+	err := m.dispatchConversationWake(gid, wake)
+	if err == nil {
+		return
+	}
+	// 账本是权威：还留在 queued = 可重试（目标忙 / 429 退避），不是失败。
+	// wakeGroupAgent 已经把记录退回队列并写好 ReadyAt，这里只负责排下一次泵。
+	if d, ok := ctrl.Delivery(gid, wake.ID); ok && d.Status == agenthub.DeliveryQueued {
+		m.emitHubConversation(gid, ctrl.View(gid))
+		if d.ReadyAt != nil {
+			if delay := time.Until(*d.ReadyAt); delay > 0 {
+				m.scheduleHubConversationTimer(gid, delay)
 			}
 		}
 		return
 	}
-	hubConvDispatchBarrier("due", gid)
-	// 投递前再验一次（Stop P1）：停止是**先标记 stopped、再抢闸门**，所以它可能刚好
-	// 落在 NextDue 之后。已停止 → 这条 wake 作废（不告警，人就是要它停）；人类插话
-	// 开的对话会换 id → 旧 wake 丢弃并告警。
-	if cur := ctrl.View(gid); cur.Status == agenthub.ConversationStopped {
-		return
-	} else if wake.ConversationID != "" && wake.ConversationID != cur.ID {
-		m.hubAlertf("group_conversation_stale_wake", "群 %s 唤醒 %s 属于已结束的对话，已丢弃", gid, wake.Target)
-		return
+	m.hubAlertf("group_conversation_wake_failed", "群 %s 自动对话唤醒 %s 失败：%v", gid, wake.Target, err)
+	if errors.Is(err, agenthub.ErrNotFound) {
+		// 群/成员已不存在：重试永远是同一个结果，收口成 stopped。
+		m.notifyHubConversation(gid, ctrl.Stop(gid, "群或成员已不存在，自动对话已停止", time.Time{}))
 	}
-	if err := m.dispatchConversationWake(gid, wake); err != nil {
-		if errors.Is(err, errHubGroupTargetBusy) {
-			return // 留队：下一次群 run 结束再试，不告警（这是闸门，不是故障）
+}
+
+// hubWakeRetryBase/Max 是 429 退避的档位（P6-03 会把 provider 信号量接到同一档）。
+const (
+	hubWakeRetryBase = 500 * time.Millisecond
+	hubWakeRetryMax  = 30 * time.Second
+)
+
+// hubWakeRetryDelay 第 n 次尝试的退避时长（500ms 起，翻倍，封顶 30s）。
+func hubWakeRetryDelay(ctrl *agenthub.ConversationController, gid agenthub.GroupID, wake agenthub.Wake) time.Duration {
+	attempt := 1
+	if ctrl != nil {
+		if d, ok := ctrl.Delivery(gid, wake.ID); ok && d.Attempts > 0 {
+			attempt = d.Attempts
 		}
-		m.hubAlertf("group_conversation_wake_failed", "群 %s 自动对话唤醒 %s 失败：%v", gid, wake.Target, err)
-		if errors.Is(err, agenthub.ErrNotFound) {
-			// 群/成员已不存在：重试永远是同一个结果，收口成 stopped。
-			m.notifyHubConversation(gid, ctrl.Stop(gid, "群或成员已不存在，自动对话已停止", time.Time{}))
+	}
+	d := hubWakeRetryBase
+	for i := 1; i < attempt; i++ {
+		if d >= hubWakeRetryMax/2 {
+			return hubWakeRetryMax
 		}
+		d *= 2
+	}
+	if d > hubWakeRetryMax {
+		return hubWakeRetryMax
+	}
+	return d
+}
+
+// loadHubGroup 读群元数据（预算门用；读不到就返回 nil，由调用方 fail-open 放行）。
+func (m *manager) loadHubGroup(gid agenthub.GroupID) *agenthub.Group {
+	if m == nil || gid == "" {
+		return nil
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		return nil
+	}
+	g, err := st.LoadGroup(context.Background(), gid)
+	if err != nil || g == nil || g.Deleted {
+		return nil
+	}
+	return g
+}
+
+// hubConversationBudget 是**预跑预算门**（P6-03）：run 启动之前判三级日预算
+// （agent / group / global）。预算不足 → 不启动 run，账本记 skipped(budget)。
+//
+// 为什么要在启动前判：hubBudgetCheck 是 LLMEnd 处的**硬停**，它只能阻止继续烧，
+// 挡不住「已经开跑一轮」。11 个成员同时被 @ 时，跑完再停已经花掉了 11 轮钱。
+//
+// 读不到档案/索引时 fail-open（放行）：预算门不能因为一次读失败把群聊卡死；
+// 真正的兜底仍是 LLMEnd 硬停与 Guard.Check。
+func (m *manager) hubConversationBudget(g *agenthub.Group, agentID agenthub.AgentID) (bool, string) {
+	if m == nil || g == nil || agentID == "" {
+		return true, ""
+	}
+	st, err := m.hubStore()
+	if err != nil || st == nil {
+		return true, ""
+	}
+	p, _, err := m.hubLoadAgent(string(agentID))
+	if err != nil || p == nil {
+		return true, ""
+	}
+	limits := agenthub.GuardLimits{
+		DailyBudgetUSD:       p.Policy.DailyBudgetUSD,
+		GroupDailyBudgetUSD:  g.Policy.DailyBudgetUSD,
+		GlobalDailyBudgetUSD: agenthub.DefaultGlobalDailyBudgetUSD,
+	}
+	if limits.DailyBudgetUSD <= 0 && limits.GroupDailyBudgetUSD <= 0 && limits.GlobalDailyBudgetUSD <= 0 {
+		return true, "" // 三级都不限额：不必读成本索引
+	}
+	agentDay, groupDay, globalDay := st.DailyCost(agentID, g.ID, time.Now().UTC())
+	if over, msg := limits.OverDailyBudget(agentDay, groupDay, globalDay); over {
+		return false, msg
+	}
+	return true, ""
+}
+
+// notifyHubBudgetBlocked 预算门命中时写一条系统消息（按原因去重）+ 告警事件。
+// 人需要知道「为什么没人被叫醒」，而不是只看到队列没动。
+func (m *manager) notifyHubBudgetBlocked(gid agenthub.GroupID, reason string) {
+	if m == nil {
 		return
 	}
-	hubConvDispatchBarrier("delivered", gid)
-	begun, ok := ctrl.BeginTurn(gid, time.Time{})
-	if !ok {
-		if v := ctrl.View(gid); v.Status == agenthub.ConversationStopped {
-			// 停止在投递窗口里落地：这一轮随停止作废（finishHubRound 会抑制 final，
-			// 停止系统消息由 stop 自己写）。不算异常，不告警。
-			return
-		}
-		// 投递已经发生（目标会话真会跑一轮），却记不上账：不能再静默当成良性竞态，
-		// 否则这一轮完全绕过预算/深度护栏。留告警 + 终态视图，由人类重开对话。
-		m.hubAlertf("group_conversation_turn_lost", "群 %s 唤醒 %s 已投递但对话状态已变化，本轮未记账", gid, wake.Target)
-		m.notifyHubConversation(gid, ctrl.View(gid))
+	key := "budget|" + reason
+	m.hubConvMu.Lock()
+	if m.hubConvNotified == nil {
+		m.hubConvNotified = map[agenthub.GroupID]string{}
+	}
+	if m.hubConvNotified[gid] == key {
+		m.hubConvMu.Unlock()
 		return
 	}
-	if wake.ConversationID != "" && begun.ConversationID != wake.ConversationID {
-		m.hubAlertf("group_conversation_wake_raced", "群 %s 唤醒 %s 的对话在投递窗口内被替换，已停止本轮接龙", gid, wake.Target)
+	m.hubConvNotified[gid] = key
+	m.hubConvMu.Unlock()
+
+	text := "预算不足，本轮没有启动：" + reason
+	st, err := m.hubStore()
+	if err != nil {
+		return
 	}
-	m.emitHubConversation(gid, ctrl.View(gid))
-	// 串行：刚放行的那一条之外还有会话在跑（并行首轮的另一条），下一条必须等它们
-	// 全部结束。排一个延迟泵兜底；真正放行时闸门会再判一次。
-	if m.groupRunInFlight(gid, wake.Target) {
-		m.scheduleHubConversationPump(gid)
+	msg := &agenthub.Message{
+		GroupID: gid, Kind: agenthub.KindSystem,
+		Sender: agenthub.Sender{Kind: agenthub.SenderSystem}, Text: text,
 	}
+	seq, err := agenthub.AppendGroupMessage(context.Background(), st, msg)
+	if err != nil {
+		m.hubAlertf("group_conversation_notice_failed", "群 %s 预算系统消息写入失败：%v", gid, err)
+		return
+	}
+	m.emitHubGroupMessage(gid, seq, msg)
+	m.hubAlertf("group_conversation_budget", "群 %s 预算不足，本轮未启动：%s", gid, reason)
+}
+
+// hubRetryableWakeError 判定「可重试」的投递错误：provider 限流（429）与上游瞬时
+// 不可用都不该把目标标 failed —— 排回队列、退避后重试即可（§1.3）。
+func hubRetryableWakeError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	var rl *provider.RateLimitError
+	if errors.As(err, &rl) {
+		return agenthub.DeliveryReasonRateLimit, true
+	}
+	var up *provider.UpstreamUnavailableError
+	if errors.As(err, &up) {
+		return agenthub.DeliveryReasonRateLimit, true
+	}
+	return "", false
 }
 
 // dispatchConversationWake 把一条 wake 投给目标智能体的群会话（hidden 快照 + 正文）。
@@ -274,7 +484,25 @@ func (m *manager) dispatchConversationWake(gid agenthub.GroupID, wake agenthub.W
 	if g == nil || g.Deleted {
 		return fmt.Errorf("%w: 群组 %s 不存在", agenthub.ErrNotFound, gid)
 	}
-	return m.wakeGroupAgent(ctx, st, g, wake)
+	_, err = m.wakeGroupAgent(ctx, st, g, wake)
+	return err
+}
+
+// finishHubGroupDelivery 群 run 收尾时把该目标**正在跑**的投递记录推进到 done。
+// 每目标同时最多一条 running（群会话忙闩保证），所以不需要 wake id。
+// 也负责把「还没投出去」的排队记录留给下一次泵（它们仍是 queued，不在这里动）。
+func (m *manager) finishHubGroupDelivery(gid agenthub.GroupID, agentID agenthub.AgentID) {
+	if m == nil || gid == "" || agentID == "" {
+		return
+	}
+	ctrl := m.hubConversation()
+	if n := ctrl.FinishAgentDeliveries(gid, agentID, agenthub.DeliveryDone, "", time.Time{}); n > 0 {
+		// 终态视图由 notifyHubConversation 统一去重上报（否则「run 收尾 + 耗尽」
+		// 会各发一个 exhausted 事件）。
+		if v := ctrl.View(gid); !v.Terminal() {
+			m.emitHubConversation(gid, v)
+		}
+	}
 }
 
 // scheduleHubConversationTimer 在冷却窗口结束后重试一次泵。同一群只保留一个定时器，
@@ -545,6 +773,96 @@ func (m *manager) scheduleAgentTaskPump(gid agenthub.GroupID, agentID agenthub.A
 	})
 }
 
+// notifyHubConversationWaiting 全部目标都被护栏跳过时，写一条系统说明（P6-04）：
+// 状态是 waiting_human 而不是 exhausted —— 人类一句话就能继续，UI 也不该显示「已达上限」。
+// 按「对话 id + 原因」去重：同一代里重复 @ 不会刷屏。
+func (m *manager) notifyHubConversationWaiting(gid agenthub.GroupID, view agenthub.ConversationView) {
+	if m == nil || view.Status != agenthub.ConversationWaitingHuman {
+		return
+	}
+	text := strings.TrimSpace(view.StopReason)
+	if text == "" {
+		text = "本轮没有可唤醒的目标，等待人类继续"
+	}
+	key := "waiting|" + view.ID + "|" + text
+	m.hubConvMu.Lock()
+	if m.hubConvNotified == nil {
+		m.hubConvNotified = map[agenthub.GroupID]string{}
+	}
+	if m.hubConvNotified[gid] == key {
+		m.hubConvMu.Unlock()
+		return
+	}
+	m.hubConvNotified[gid] = key
+	m.hubConvMu.Unlock()
+
+	st, err := m.hubStore()
+	if err != nil {
+		return
+	}
+	msg := &agenthub.Message{
+		GroupID: gid, Kind: agenthub.KindSystem,
+		Sender: agenthub.Sender{Kind: agenthub.SenderSystem}, Text: text,
+	}
+	seq, err := agenthub.AppendGroupMessage(context.Background(), st, msg)
+	if err != nil {
+		m.hubAlertf("group_conversation_notice_failed", "群 %s 对话说明写入失败：%v", gid, err)
+		return
+	}
+	m.emitHubGroupMessage(gid, seq, msg)
+	m.emitHubConversation(gid, view)
+}
+
+// hubConversationReset 人类「重置本群限制」（P6-04 ④）：立即清零 pair/深度/指纹/
+// 队列并解除 waiting_human，**不自动唤醒任何人**（下一次 @ 立即生效）。
+//
+// 与 stop 的区别：stop 是「别再说了」（中断在飞 run、抑制 final、写系统消息）；
+// reset 是「把额度还给我」（不动在飞 run，只清计数）。在飞 run 收尾时它的 final
+// 照常落账 —— 它属于旧 generation 的产出，人已经看到了。
+func (m *manager) hubConversationReset(c command) {
+	if m == nil {
+		return
+	}
+	if m.hubShutdown.Load() {
+		m.resp(c, false, "Hub 正在关停，已忽略重置对话限制的请求", nil)
+		return
+	}
+	gid := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	if gid == "" {
+		m.resp(c, false, "group_id 不能为空", nil)
+		return
+	}
+	ctx := context.Background()
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	g, err := st.LoadGroup(ctx, gid)
+	if err != nil {
+		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
+		return
+	}
+	if g == nil || g.Deleted {
+		m.resp(c, false, "群组不存在", nil)
+		return
+	}
+	ctrl := m.hubConversation()
+	// 与调度器同一个闸门：重置不能插在「取 wake → 投递」之间（否则刚清掉的
+	// 队列会被这一 pass 再投一条出去）。
+	unlock := m.hubConvDispatch.lock(g.ID)
+	view := ctrl.Reset(g.ID, time.Time{})
+	unlock()
+	m.bumpHubConversationGen(g.ID) // 冷却/退避定时器作废
+	m.hubConvMu.Lock()
+	if m.hubConvNotified != nil {
+		delete(m.hubConvNotified, g.ID) // 下一次护栏命中要能再报一次
+	}
+	m.hubConvMu.Unlock()
+	m.emitHubConversation(g.ID, view)
+	m.resp(c, true, "", map[string]any{"conversation": view})
+}
+
 // hubConversationStop 人类「停止自动对话」：中断当前群 run、清队列、stopped + 一条系统消息。
 // 幂等：重复点击只返回当前视图（不再写消息/事件）。
 func (m *manager) hubConversationStop(c command) {
@@ -582,6 +900,9 @@ func (m *manager) hubConversationStop(c command) {
 	// final 会被抑制；而闸门保证「正在投递的 wake」先落地/记账，不会被中途撕开。
 	view := ctrl.Stop(g.ID, "人类停止了自动对话，等你继续", time.Time{})
 	m.bumpHubConversationGen(g.ID) // 冷却定时器作废：停止之后不许再自己接龙
+	// P6-01：账本跟着停止走 —— 排队的记 skipped(stopped)，在跑的记 interrupted
+	//（它们的 run 马上被中断，不会再正常收尾成 done）。
+	ctrl.SkipQueuedDeliveries(g.ID, agenthub.DeliveryReasonStopped, time.Time{})
 	unlock := m.hubConvDispatch.lock(g.ID)
 	interrupted := 0
 	for _, bs := range m.groupActiveSessions(g) {
@@ -593,6 +914,10 @@ func (m *manager) hubConversationStop(c command) {
 		interrupted++
 	}
 	unlock()
+	if interrupted > 0 {
+		ctrl.InterruptRunningDeliveries(g.ID, agenthub.DeliveryReasonInterrupted, time.Time{})
+	}
+	view = ctrl.View(g.ID)
 	// 系统消息在放闸门之后写：任何已经在收尾的 final 要么排在它前面（闸门先到，
 	// 状态还是 running），要么已经被抑制 —— 不会出现「停止」之后又冒一条 final。
 	m.notifyHubConversation(g.ID, view)

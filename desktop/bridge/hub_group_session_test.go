@@ -450,6 +450,7 @@ func TestEnrichHubGroupSpecKeepsRosterOnRebuild(t *testing.T) {
 
 func TestHubGroupSendSkipsBusyTargetWithoutCorruptingRound(t *testing.T) {
 	m, buf := testManager(t)
+	convLimits(m, agenthub.ConversationLimits{Cooldown: -1})
 	a := createHubAgent(t, m, buf, 1, "BusyOwner")
 	b := createHubAgent(t, m, buf, 2, "BusyB")
 	g := groupWithMembers(t, m, buf, 3, "忙群",
@@ -466,6 +467,11 @@ func TestHubGroupSendSkipsBusyTargetWithoutCorruptingRound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 门闩式 fake：补投之后 B 会真的跑一轮并卡住，好断言「投出去了」。
+	fb := newConvProvider("B 补投后的回复")
+	release := fb.gated()
+	defer close(release)
+	setGroupFakeLoop(t, m, bs, g, string(b.ID), fb)
 	bs.hubGroupBusy.Store(true) // 模拟上一轮还没 AgentEnd
 	defer bs.hubGroupBusy.Store(false)
 
@@ -476,18 +482,34 @@ func TestHubGroupSendSkipsBusyTargetWithoutCorruptingRound(t *testing.T) {
 	if !ok {
 		t.Fatalf("message itself must still be accepted: %s", errMsg)
 	}
-	errs, _ := data["wake_errors"].([]any)
-	if len(errs) == 0 {
-		t.Fatal("busy target must be reported in wake_errors")
+	// P6-01：目标忙 → 账本记 queued(target_busy)，wake 留队重试；不再是 wake_errors。
+	d0 := mustDelivery(t, data, b.ID)
+	if d0.Status != "queued" || d0.Reason != "target_busy" {
+		t.Fatalf("busy target must be queued/target_busy, got %+v", d0)
 	}
-	// 群消息必须已经落日志（唤醒失败不回滚）。
+	// 群消息必须已经落日志（投递没出去也不回滚）。
 	st := mustHubStore(t, m)
 	msgs, err := st.ReadMessages(context.Background(), g.ID, 0, 500)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(msgs) == 0 {
-		t.Fatal("group message missing after wake failure")
+		t.Fatal("group message missing after queued wake")
+	}
+	if n := fb.callCount(); n != 0 {
+		t.Fatalf("忙目标不该跑模型，实际调用 %d 次", n)
+	}
+	// 目标这一轮结束后（忙闩放开 + 泵），排队的 wake 必须真的投出去 —— 不丢，
+	// 而且是**同一条 wake id**（幂等键不变）。
+	bs.hubGroupBusy.Store(false)
+	m.scheduleHubConversationPump(g.ID)
+	fb.waitStarted(t)
+	d1, found := m.hubConversation().Delivery(g.ID, d0.WakeID)
+	if !found || d1.Status != "running" {
+		t.Fatalf("补投后的记录 = %+v (found=%v), want running", d1, found)
+	}
+	if d1.Attempts < 2 {
+		t.Fatalf("attempts = %d, want >= 2（忙一次 + 补投一次）", d1.Attempts)
 	}
 }
 

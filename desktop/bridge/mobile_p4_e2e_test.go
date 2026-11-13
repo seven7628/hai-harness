@@ -935,6 +935,10 @@ func TestMobileP4E2EHubStop(t *testing.T) {
 	bsB := mustGroupSession(t, m, string(b.ID), string(g.ID))
 	setGroupFakeLoopIters(t, m, bsB, g, string(b.ID), fb, 1)
 
+	// P6-02：不同目标现在是**并行**放行的，A @B 会立刻投出去。要让这条唤醒停在
+	// 队列里等停止（本用例的意图），把 B 标成「上一轮还没结束」即可。
+	bsB.hubGroupBusy.Store(true)
+	defer bsB.hubGroupBusy.Store(false)
 	h.cmd(t, "hub_group_send", map[string]any{
 		"group_id": string(g.ID), "text": "@P4StopA 你先起个头",
 		"mentions": []any{string(a.ID)},

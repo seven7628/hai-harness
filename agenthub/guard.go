@@ -195,3 +195,21 @@ func (l GuardLimits) OverTaskBudget(u Usage) (bool, string) {
 	}
 	return false, ""
 }
+
+// OverDailyBudget 判定三级日预算（agent / group / global）是否已经用满（P6-03 的
+// **预跑预算门**：在 run 启动之前判，而不是跑起来再在 LLMEnd 处硬停）。
+//
+// 口径与 Guard.Check / hubBudgetCheck 一致：0 或负数 = 不限额，>= 视为到顶。
+// 返回的说明是人话（会写进群系统消息 + 投递账本的 reason），必须说清是哪一级。
+func (l GuardLimits) OverDailyBudget(agentDay, groupDay, globalDay float64) (bool, string) {
+	if l.DailyBudgetUSD > 0 && agentDay >= l.DailyBudgetUSD {
+		return true, fmt.Sprintf("该智能体今日预算 $%.2f 已用满（已花 $%.2f）", l.DailyBudgetUSD, agentDay)
+	}
+	if l.GroupDailyBudgetUSD > 0 && groupDay >= l.GroupDailyBudgetUSD {
+		return true, fmt.Sprintf("本群今日预算 $%.2f 已用满（已花 $%.2f）", l.GroupDailyBudgetUSD, groupDay)
+	}
+	if l.GlobalDailyBudgetUSD > 0 && globalDay >= l.GlobalDailyBudgetUSD {
+		return true, fmt.Sprintf("全局今日预算 $%.2f 已用满（已花 $%.2f）", l.GlobalDailyBudgetUSD, globalDay)
+	}
+	return false, ""
+}

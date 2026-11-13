@@ -292,7 +292,7 @@ func TestGroupNormalizeDefaults(t *testing.T) {
 	if g.Members[0].JoinedAt.IsZero() {
 		t.Fatal("joined_at not defaulted")
 	}
-	if g.Policy.Mode != GroupModeAsk || g.Policy.MaxParallelRuns != 3 ||
+	if g.Policy.Mode != GroupModeAsk ||
 		g.Policy.MaxHandoffDepth != 3 || g.Policy.MaxTurnsPerHuman != 8 || g.Policy.MaxMentions != 3 {
 		t.Fatalf("policy defaults = %#v", g.Policy)
 	}
@@ -323,7 +323,6 @@ func TestGroupValidation(t *testing.T) {
 		{"invalid role", func(g *Group) { g.Members[1].Role = "admin" }},
 		{"owner not member", func(g *Group) { g.OwnerAgentID = testAgentID('d') }},
 		{"bad mode", func(g *Group) { g.Policy.Mode = "sometimes" }},
-		{"negative parallel", func(g *Group) { g.Policy.MaxParallelRuns = -1 }},
 		{"bad member id", func(g *Group) { g.Members[1].AgentID = "bad" }},
 	}
 	for _, tc := range tests {

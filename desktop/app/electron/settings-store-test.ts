@@ -388,6 +388,58 @@ test('已知段局部合并：只改 patch 提到的叶子，同段其它字段�
   }
 })
 
+test('P6-04：hub.conversation 全局对话设置可写、0/负值被拒（默认值回落由 bridge 负责）', () => {
+  const raw: JsonObject = { schema_version: 2 }
+  const r = applySettingsPatch(raw, {
+    hub: {
+      conversation: {
+        max_depth: 1000,
+        pair_limit: 10,
+        pair_window_ms: 600000,
+        idle_reset_ms: 1800000,
+        cooldown_ms: 0, // 0 = 无冷却，是合法值
+        run_timeout_ms: 600000,
+        max_pending_wakes: 200,
+      },
+    },
+  })
+  assert.ok(r.ok)
+  if (!r.ok) return
+  const conv = (r.raw.hub as JsonObject).conversation as JsonObject
+  assert.equal(conv.cooldown_ms, 0)
+  assert.equal(conv.pair_limit, 10)
+  assert.deepEqual(explicitPathsOf(r.raw).sort(), [
+    'hub.conversation.cooldown_ms',
+    'hub.conversation.idle_reset_ms',
+    'hub.conversation.max_depth',
+    'hub.conversation.max_pending_wakes',
+    'hub.conversation.pair_limit',
+    'hub.conversation.pair_window_ms',
+    'hub.conversation.run_timeout_ms',
+  ])
+  // pair_limit=0 不是「关掉护栏」，是坏值 → 拒绝（bridge 侧回落默认）。
+  const bad = applySettingsPatch(r.raw, { hub: { conversation: { pair_limit: 0 } } })
+  assert.equal(bad.ok, false)
+  // 未知子键仍然被拒（白名单语义不变）。
+  const unknown = applySettingsPatch(r.raw, { hub: { conversation: { nope: 1 } } })
+  assert.equal(unknown.ok, false)
+})
+
+test('P6-03：agent.max_concurrent_provider_calls 可写、越界被拒（provider 信号量）', () => {
+  const raw: JsonObject = { schema_version: 2 }
+  const ok = applySettingsPatch(raw, { agent: { max_concurrent_provider_calls: 4 } })
+  assert.ok(ok.ok)
+  if (!ok.ok) return
+  assert.deepEqual(ok.raw.agent, { max_concurrent_provider_calls: 4 })
+  assert.deepEqual(explicitPathsOf(ok.raw), ['agent.max_concurrent_provider_calls'])
+  // 0 = 显式不限，是合法值（不是「缺省」）。
+  const zero = applySettingsPatch(ok.raw, { agent: { max_concurrent_provider_calls: 0 } })
+  assert.ok(zero.ok)
+  // 65 超上限：拒绝而不是静默钳制（用户要能看见自己的配置没生效）。
+  const bad = applySettingsPatch(ok.raw, { agent: { max_concurrent_provider_calls: 65 } })
+  assert.equal(bad.ok, false)
+})
+
 test('renderer 的 {...cur} 形状（undefined 字段 / bridge 专有字段）不会被误拒', () => {
   // 设置面板的 patch 普遍是 `{...cur, 目标键}`：cur 来自 settingsGet（读侧并集），
   // 可能带 undefined 字段与桥侧专有字段。它们必须被当作「未提供」，而不是未知键/坏值。
