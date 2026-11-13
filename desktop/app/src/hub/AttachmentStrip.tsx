@@ -9,7 +9,27 @@ import type { HubAttachment } from './types'
 // 图片只以 data URL 存在于消息里，所以灯箱里的「复制图片」是 ClipboardItem 直写；
 // 失败**不 alert**，在灯箱底部给一行可读的状态。
 
-/** 灯箱：Esc / 点遮罩关闭；复制失败写在 figcaption 里（不弹 alert）。 */
+/**
+ * 灯箱里可聚焦的控件（按 DOM 顺序 = Tab 顺序）。
+ *
+ * 只认真正能落焦点的元素：首尾张上那个 disabled 的「上一张/下一张」不进循环，
+ * 隐藏的（`display:none` / 零尺寸）也不行，否则 Tab 会停在一个看不见的按钮上。
+ */
+function focusableIn(root: HTMLElement): HTMLElement[] {
+  const sel = 'button, [href], input, select, textarea, [tabindex]'
+  return Array.from(root.querySelectorAll<HTMLElement>(sel)).filter((el) => {
+    if (el.hasAttribute('disabled') || el.getAttribute('aria-hidden') === 'true') return false
+    if (el.tabIndex < 0) return false
+    return el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0
+  })
+}
+
+/**
+ * 灯箱：Esc / 点遮罩关闭；复制失败写在 figcaption 里（不弹 alert）。
+ *
+ * aria-modal=true 只是给读屏的声明，浏览器照样会把 Tab 放回背景 —— 打开后必须
+ * 自己把 Tab / Shift+Tab 圈在对话框内（首尾相接），否则键盘用户会掉进底下的页面。
+ */
 export function HubImageLightbox({
   images,
   index,
@@ -30,8 +50,13 @@ export function HubImageLightbox({
 }) {
   const current = images[index]
   const [status, setStatus] = useState('')
+  const rootRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const restoreTo = useRef<Element | null>(null)
+  // onClose 在调用方常是内联箭头（每次渲染新引用）：放进 ref，焦点恢复 effect 才
+  // 能在挂载时跑一次 —— 依赖它会让「复制」等重渲染把焦点拽回关闭按钮。
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
     restoreTo.current = typeof document !== 'undefined' ? document.activeElement : null
@@ -39,16 +64,44 @@ export function HubImageLightbox({
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.stopPropagation()
-        onClose()
+        onCloseRef.current()
+        return
+      }
+      if (e.key !== 'Tab') return
+      // Tab 陷阱：在灯箱的首尾之间循环，绝不落到背景的发送框/侧栏上。
+      const root = rootRef.current
+      if (!root) return
+      const items = focusableIn(root)
+      if (items.length === 0) {
+        e.preventDefault()
+        return
+      }
+      const first = items[0]
+      const last = items[items.length - 1]
+      const activeEl = document.activeElement as HTMLElement | null
+      const inside = !!activeEl && root.contains(activeEl)
+      if (!inside) {
+        e.preventDefault()
+        const target = e.shiftKey ? last : first
+        target.focus()
+        return
+      }
+      if (e.shiftKey && activeEl === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && activeEl === last) {
+        e.preventDefault()
+        first.focus()
       }
     }
     document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('keydown', onKey, true)
+      // 关闭后焦点回到触发元素（缩略图 / +N / 删除后回到 composer 原位置）。
       const back = restoreTo.current
       if (back instanceof HTMLElement && document.contains(back)) back.focus()
     }
-  }, [onClose])
+  }, [])
 
   // 方向键单独一个监听：切张时不能重跑上面的焦点恢复 effect（否则每按一次
   // 方向键焦点都被拉回关闭按钮）。
@@ -84,6 +137,7 @@ export function HubImageLightbox({
       role="dialog"
       aria-modal="true"
       aria-label={title || '图片预览'}
+      ref={rootRef}
       onClick={onClose}
     >
       <figure onClick={(e) => e.stopPropagation()}>

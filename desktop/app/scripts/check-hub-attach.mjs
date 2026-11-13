@@ -46,7 +46,8 @@ const filePayload = { name: 'hub-shot.png', mimeType: 'image/png', buffer: PNG }
 
 const failed = []
 const errors = []
-const check = (cond, msg) => { if (!cond) failed.push(msg) }
+let assertions = 0
+const check = (cond, msg) => { assertions++; if (!cond) failed.push(msg) }
 
 mkdirSync(OUT, { recursive: true })
 
@@ -256,6 +257,8 @@ async function sendWithImage(testid, text) {
   check(await row.locator('.hub-msg-img').count() === 4, '气泡只铺 4 张缩略图（不把整屏撑爆）')
   const more = row.locator('.hub-msg-img-more')
   check(await more.count() === 1 && (await more.textContent())?.trim() === '+2', '+2 是可点的「还有 2 张」入口')
+  // 打标记：关闭后要断言焦点真的回到这颗触发按钮（不是 body，也不是背景里的发送框）。
+  await more.evaluate((el) => el.setAttribute('data-focus-trigger', '1'))
   await more.click()
   await page.locator('.hub-attach-lb').waitFor({ timeout: 6000 })
   let cap = await page.locator('.hub-attach-lb figcaption').textContent()
@@ -268,8 +271,48 @@ async function sendWithImage(testid, text) {
   await page.waitForTimeout(150)
   cap = await page.locator('.hub-attach-lb figcaption').textContent()
   check(String(cap).includes('5/6'), `‹ 能回到第 5 张（got=${cap}）`)
+
+  // 灯箱的 Tab 陷阱：aria-modal 拦不住浏览器的 Tab，焦点必须自己圈在对话框里。
+  const focusInfo = () => page.evaluate(() => {
+    const el = document.activeElement
+    const lb = document.querySelector('.hub-attach-lb')
+    const label = el
+      ? (el.getAttribute('aria-label') || (el.textContent ?? '').trim().slice(0, 10) || el.tagName)
+      : ''
+    return { tag: el ? el.tagName : '', label, inside: !!(el && lb && lb.contains(el)) }
+  })
+  // 可聚焦控件：上一张 / 下一张 / 复制图片 / 关闭（历史消息的灯箱没有「删除」）。
+  const total = await page.locator('.hub-attach-lb button:not([disabled])').count()
+  check(total >= 3, `灯箱里有 ${total} 个可聚焦按钮（Tab 循环的落点）`)
+  const start = await focusInfo()
+  check(start.inside, `打开灯箱后焦点在灯箱内（got=${start.tag} ${start.label}）`)
+  // Tab 次数 > 按钮数：必须自己绕回来，不能停在背景的发送框/侧栏上。
+  const seen = []
+  for (let i = 0; i < total + 2; i++) {
+    await page.keyboard.press('Tab')
+    const info = await focusInfo()
+    check(info.inside, `第 ${i + 1} 次 Tab 仍停在 .hub-attach-lb 内（got=${info.tag} ${info.label}）`)
+    seen.push(info.label)
+  }
+  check(seen.includes(start.label), `Tab 循环回到起点（${seen.join(' → ')}）`)
+  for (let i = 0; i < total + 2; i++) {
+    await page.keyboard.press('Shift+Tab')
+    const info = await focusInfo()
+    check(info.inside, `第 ${i + 1} 次 Shift+Tab 仍停在 .hub-attach-lb 内（got=${info.tag} ${info.label}）`)
+  }
+  // 方向键导航不受焦点陷阱影响（焦点停在按钮上也要能翻页）。
+  const capBefore = await page.locator('.hub-attach-lb figcaption').textContent()
+  await page.keyboard.press('ArrowRight')
+  await page.waitForTimeout(150)
+  const capAfter = await page.locator('.hub-attach-lb figcaption').textContent()
+  check(String(capBefore) !== String(capAfter), `Tab 之后方向键仍能翻页（${capBefore} → ${capAfter}）`)
+
   await page.keyboard.press('Escape')
   await page.locator('.hub-attach-lb').waitFor({ state: 'detached', timeout: 4000 })
+  // Esc 之后焦点回到「+2」那颗触发按钮（不是 body，也不是背景里的输入框）。
+  const back = await page.evaluate(() => document.activeElement?.getAttribute('data-focus-trigger') === '1')
+  check(back, '关闭灯箱后焦点回到触发元素（+N 缩略图按钮）')
+  await page.screenshot({ path: `${OUT}/dm-lightbox-focus.png` })
 }
 
 // —— 4) 失败 → 重试：附件跟着失败走，重试成功后条带才清 ——
@@ -347,5 +390,5 @@ if (failed.length > 0) {
   console.error(`\n截图在 ${OUT}`)
   process.exit(1)
 }
-console.log('✅ Hub 附件浏览器回归通过（DM/群 注入·发送·回显·灯箱·历史·390）')
+console.log(`✅ Hub 附件浏览器回归通过（${assertions} 项断言：DM/群 注入·发送·回显·灯箱·Tab 焦点陷阱·历史·390）`)
 console.log(`   截图：${OUT}/dm-strip-files.png, dm-strip-drop-paste.png, dm-strip-image.png, dm-sent.png, dm-lightbox.png, dm-history.png, group-sent.png, dm-failed.png, dm-retried.png, dm-390.png, group-390.png`)
