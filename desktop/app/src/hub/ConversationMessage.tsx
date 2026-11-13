@@ -52,10 +52,10 @@ export function AgentMessage({
           title={t('hub.openAgentSession').replace('{name}', name)}
           aria-label={t('hub.openAgentSession').replace('{name}', name)}
         >
-          <AgentSigil agentId={agent?.id} name={name} responsibility={agent?.role ?? role} state={state} size={52} label={null} />
+          <AgentSigil agentId={agent?.id} name={name} responsibility={agent?.role ?? role} state={state} size={52} label={null} live={false} />
         </button>
       ) : (
-        <AgentSigil agentId={agent?.id} name={name} responsibility={agent?.role ?? role} state={state} size={52} label={null} />
+        <AgentSigil agentId={agent?.id} name={name} responsibility={agent?.role ?? role} state={state} size={52} label={null} live={false} />
       )}
       <div className="msg-main">
         <div className="agent-head">

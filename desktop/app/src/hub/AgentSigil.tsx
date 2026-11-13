@@ -20,6 +20,10 @@ import {
 
 const SIZE_CLASS: Record<number, string> = { 28: 'xs', 52: 'lg' }
 
+// 引擎把每颗头的运行态挂在 svg 上（vendor：svg.__lunaFace = face）。
+// 只用到 visible：false 时 step()/paintFace() 会整颗跳过。
+type LunaFaceRef = { visible: boolean }
+
 export default function AgentSigil({
   agentId,
   name,
@@ -30,6 +34,7 @@ export default function AgentSigil({
   label,
   className = '',
   style,
+  live = true,
 }: {
   agentId?: string | null
   /** 参与职责规则匹配（demo 的 avatarColor 同样吃 id+name+role）。
@@ -45,6 +50,9 @@ export default function AgentSigil({
   label?: string | null
   className?: string
   style?: CSSProperties
+  /** false：会话行头像。引擎不再随机换风格（data-live="off"），CSS 也不跑工作呼吸动画。
+   *  静态 prop：调用点传常量，不进 effect 依赖。 */
+  live?: boolean
 }) {
   const ref = useRef<HTMLSpanElement>(null)
   const id = agentId || name || 'agent'
@@ -70,6 +78,32 @@ export default function AgentSigil({
     return () => releaseLunaScene()
   }, [st, id, fill])
 
+  // 离屏停画：长会话里几十上百颗 52px 头像，引擎 30fps 无条件遍历 scene.faces 并写
+  // transform + d。引擎已尊重 face.visible（step / paintFace 都直接跳过），所以这里
+  // 只按可见性翻这一个开关，vendor 一行不改。
+  //
+  // 依赖 []：observer 只建一次。`st` 变化（工作/待审批）不影响可见性，重建反而会在
+  // 每次状态翻转时丢掉当前可见性、让离屏头像白画一帧。
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return
+    const host = ref.current
+    if (!host) return
+    const io = new IntersectionObserver((entries) => {
+      const entry = entries[entries.length - 1]
+      if (!entry) return
+      const svg = host.querySelector('svg[data-luna-face]') as (SVGElement & { __lunaFace?: LunaFaceRef }) | null
+      const face = svg?.__lunaFace
+      if (face) face.visible = entry.isIntersecting
+    }, {
+      // 滚动容器就是会话列表；头像在别处（header/侧栏/叠放）时退回视口。
+      root: host.closest('.messages'),
+      // 提前一屏量开始画，滚到时不会看到空白脸。
+      rootMargin: '200px',
+    })
+    io.observe(host)
+    return () => io.disconnect()
+  }, [])
+
   return (
     <span
       ref={ref}
@@ -79,6 +113,7 @@ export default function AgentSigil({
       data-state={st}
       data-status={status ? 'on' : 'off'}
       data-size={px}
+      data-live={live ? undefined : 'off'}
       role={label ? 'img' : undefined}
       aria-label={label || undefined}
       aria-hidden={label ? undefined : true}
@@ -86,6 +121,7 @@ export default function AgentSigil({
     >
       <svg
         data-luna-face
+        data-live={live ? undefined : 'off'}
         data-expr={expr}
         data-fill={fill}
         data-eye="var(--eye,#0b0b0a)"

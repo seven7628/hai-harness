@@ -8,6 +8,10 @@
 .luna-avatar.lg{width:52px;height:52px}
 .luna-avatar:hover{transform:scale(1.1) rotate(-2deg)}
 .luna-avatar[data-state='working']>svg{animation:av-work 2.2s ease-in-out infinite}
+/* 历史行头像（live=false）不跑工作呼吸：agent 一运行，110 行历史头像会同时起 CSS 动画。
+   demo.css 的 `.hub-demo .avatar[data-state="working"]>svg` 是 (0,3,1)，压过 (0,2,1)，
+   所以同一规则里再带一条 .hub-demo 变体（同权重 + 后置 = 胜出），而不是去改那条全局规则。 */
+.luna-avatar[data-live='off']>svg,.hub-demo .avatar[data-live='off']>svg{animation:none}
 .luna-avatar[data-status='off']::after{display:none}
 .luna-avatar[data-state='needs_attention']::after{content:'';position:absolute;top:6%;right:6%;width:22%;height:22%;border-radius:50%;background:var(--warning);border:2px solid var(--bg)}
 .luna-avatar-stack{display:inline-flex;align-items:center}
