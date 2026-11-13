@@ -188,7 +188,7 @@ func TestFinishAgentTaskCompleted(t *testing.T) {
 	b := createDispatchAgent(t, m, buf, 2, "结算B", false)
 	c := createDispatchAgent(t, m, buf, 3, "旁观C", false)
 	g := assignGroup(t, m, buf, 4, "结算群", map[agenthub.AgentID]string{
-		a.ID: "owner", b.ID: "member", c.ID: "observer",
+		a.ID: "owner", b.ID: "member", c.ID: "member",
 	})
 	task := p3bAgentTask(t, m, g, a.ID, b.ID, "价格表简报", agenthub.TaskDispatched)
 	if task.Target.GroupID != g.ID || task.Origin.Kind != agenthub.OriginGroup {
@@ -446,7 +446,7 @@ func TestFinishAgentTaskFailed(t *testing.T) {
 	b := createDispatchAgent(t, m, buf, 2, "失败B", false)
 	c := createDispatchAgent(t, m, buf, 3, "失败C", false)
 	g := assignGroup(t, m, buf, 4, "失败群", map[agenthub.AgentID]string{
-		a.ID: "owner", b.ID: "member", c.ID: "observer",
+		a.ID: "owner", b.ID: "member", c.ID: "member",
 	})
 	task := p3bAgentTask(t, m, g, a.ID, b.ID, "会失败的任务", agenthub.TaskDispatched)
 
@@ -641,7 +641,7 @@ func TestAgentTaskDeclinedAck(t *testing.T) {
 	b := createDispatchAgent(t, m, buf, 2, "拒绝B", false)
 	c := createDispatchAgent(t, m, buf, 3, "拒绝C", false)
 	g := assignGroup(t, m, buf, 4, "拒绝群", map[agenthub.AgentID]string{
-		a.ID: "owner", b.ID: "member", c.ID: "observer",
+		a.ID: "owner", b.ID: "member", c.ID: "member",
 	})
 	origin := p3bAgentTask(t, m, g, a.ID, b.ID, "要拒绝的任务", agenthub.TaskDispatched)
 	acceptTask := p3bAgentTask(t, m, g, a.ID, b.ID, "要接受的任务", agenthub.TaskDispatched)

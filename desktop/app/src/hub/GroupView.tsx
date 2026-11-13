@@ -23,8 +23,10 @@ import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './g
 import { triggerSeqBySender } from './groupProjection'
 import { canAutoFollow, scrollToSeq, seqJumpPlan } from './seqJump'
 import { groupTimelineMarkdown } from './exportMarkdown'
+import { asGroupMode, GROUP_MODE_HINT, GROUP_MODES, type GroupMode } from './groupMode'
 import { hubPerfMemoEnabled } from './perfFlags'
 import { useScrollbarWidth } from './useScrollbarWidth'
+import { useHeaderMenu } from './useHeaderMenu'
 import { useComposerAutoGrow } from './useComposerAutoGrow'
 import { downloadText, safeFilename, timestampSlug } from './download'
 import {
@@ -99,7 +101,10 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const [composerMode, setComposerMode] = useState<'chat' | 'assign'>('chat')
   const [view, setView] = useState<'chat' | 'run'>('chat')
   const [displayMode, setDisplayMode] = useState<'grouped' | 'flat'>(readGroupDisplay)
-  const [menuOpen, setMenuOpen] = useState(false)
+  // 头部「更多操作」：外点/Esc 关闭 + 键盘导航（P6-16，与 HubSurface 共用同一份行为）。
+  const headerMenu = useHeaderMenu()
+  // 群模式切换在飞：菜单项要能立刻反映「保存中」，失败由 store.error/HubErrorBanner 透出。
+  const [modeSaving, setModeSaving] = useState<GroupMode | null>(null)
   const theme = useResolvedTheme()
   const openContext = (): void => {
     setInspector(rightExpanded && inspector === 'context' ? null : 'context')
@@ -424,6 +429,20 @@ export default function GroupView({ group }: { group: HubGroup }) {
     downloadText(`hub-group-${safeFilename(group.name || group.id, 'group')}-${timestampSlug()}.md`, md)
   }
 
+  // 改群协作模式：走 hub_group_update 的字段级 patch（未传字段保留原值），
+  // bridge 侧会把新的 agents.Mode 推到已装配的成员会话（P6-06）。刷新列表让
+  // 头部文案、inspector 与真实策略同源 —— 不做「只改本地显示」的假开关。
+  async function setGroupMode(next: GroupMode): Promise<void> {
+    if (modeSaving || asGroupMode(group.policy?.mode) === next) return
+    setModeSaving(next)
+    const r = await hubCommand('hub_group_update', {
+      group_id: group.id,
+      patch: { policy: { mode: next } },
+    })
+    setModeSaving(null)
+    if (r.ok) await useHubStore.getState().loadGroups()
+  }
+
   async function editBudget(): Promise<void> {
     const current = group.policy?.daily_budget_usd ?? 0
     const raw = window.prompt('群日预算 USD（0 = 不限额）', String(current))
@@ -492,23 +511,43 @@ export default function GroupView({ group }: { group: HubGroup }) {
           <button
             type="button"
             className="icon-btn"
-            onClick={() => setMenuOpen((v) => !v)}
+            ref={headerMenu.triggerRef}
+            onClick={headerMenu.toggle}
             aria-label="更多操作"
-            aria-expanded={menuOpen}
+            aria-haspopup="menu"
+            aria-expanded={headerMenu.open}
           >
             <MoreIcon size={15} />
           </button>
-          {menuOpen ? (
-            <div className="header-menu" role="menu">
-              <button type="button" role="menuitemradio" aria-checked={view === 'chat'} onClick={() => { setView('chat'); setMenuOpen(false) }}>Chat</button>
-              <button type="button" role="menuitemradio" aria-checked={view === 'run'} onClick={() => { setView('run'); setMenuOpen(false) }}>Run</button>
+          {headerMenu.open ? (
+            <div className="header-menu" role="menu" ref={headerMenu.menuRef}>
+              <button type="button" role="menuitemradio" aria-checked={view === 'chat'} onClick={() => { setView('chat'); headerMenu.close() }}>Chat</button>
+              <button type="button" role="menuitemradio" aria-checked={view === 'run'} onClick={() => { setView('run'); headerMenu.close() }}>Run</button>
               <span className="header-menu-sep" />
-              <button type="button" role="menuitemradio" aria-checked={displayMode === 'grouped'} onClick={() => { setDisplay('grouped'); setMenuOpen(false) }}>{t('hub.header.grouped')}</button>
-              <button type="button" role="menuitemradio" aria-checked={displayMode === 'flat'} onClick={() => { setDisplay('flat'); setMenuOpen(false) }}>{t('hub.header.flat')}</button>
+              <button type="button" role="menuitemradio" aria-checked={displayMode === 'grouped'} onClick={() => { setDisplay('grouped'); headerMenu.close() }}>{t('hub.header.grouped')}</button>
+              <button type="button" role="menuitemradio" aria-checked={displayMode === 'flat'} onClick={() => { setDisplay('flat'); headerMenu.close() }}>{t('hub.header.flat')}</button>
               <span className="header-menu-sep" />
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); copyLink() }}>{t('hub.header.link')}</button>
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); exportMarkdown() }}>{t('hub.header.export')}</button>
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void editBudget() }}>
+              <button type="button" role="menuitem" onClick={() => { headerMenu.close(); copyLink() }}>{t('hub.header.link')}</button>
+              <button type="button" role="menuitem" onClick={() => { headerMenu.close(); exportMarkdown() }}>{t('hub.header.export')}</button>
+              <span className="header-menu-sep" />
+              {/* 协作模式：三选一（radio）。文案与 GroupEditor 同源（groupMode.ts），
+                  点哪一项就真的把群策略改成哪一项 —— 不是只改显示的假开关。 */}
+              <span className="header-menu-label">协作模式</span>
+              {GROUP_MODES.map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={asGroupMode(group.policy?.mode) === m}
+                  disabled={modeSaving !== null}
+                  title={GROUP_MODE_HINT[m]}
+                  onClick={() => void setGroupMode(m)}
+                >
+                  {modeSaving === m ? `${m} · 保存中…` : m}
+                </button>
+              ))}
+              <span className="header-menu-sep" />
+              <button type="button" role="menuitem" onClick={() => { headerMenu.close(); void editBudget() }}>
                 {t('hub.header.budget').replace('{amount}', (group.policy?.daily_budget_usd ?? 0).toFixed(0))}
               </button>
             </div>
@@ -677,7 +716,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
               <div className="hub-assign-members" role="radiogroup" aria-label="选择执行成员">
                 {assignable.length === 0 ? (
                   <span className="hub-muted">
-                    {members.length === 0 ? '群还没有成员，无法派任务。' : '没有可接派任务的成员（observer 只旁听）。'}
+                    {members.length === 0 ? '群还没有成员，无法派任务。' : '没有可接派任务的成员。'}
                   </span>
                 ) : assignable.map((agent) => (
                   <button

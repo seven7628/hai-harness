@@ -4,7 +4,7 @@ Responsibilities: 竞品研究员 / 负责竞品价格、功能与公开情报.
 Capabilities: all tools.
 Members:
 - Researcher (owner, ag_aaaaaaaa) — 竞品研究员 / 负责竞品价格、功能与公开情报 · all tools
-- Critic (observer, ag_bbbbbbbb) — 风险审查 / 只审阅，不给结论 · read-only tools
+- Critic (member, ag_bbbbbbbb) — 风险审查 / 只审阅，不给结论 · read-only tools
 - Writer (member, ag_cccccccc) — 长文写作与编辑 · all tools · no network · off: browser_*
 - unknown member (member, ag_dddddddd) — profile unavailable: do not @mention or assign work
 You can talk to them with @Name, or assign tracked work with assign_task(Name, instruction).

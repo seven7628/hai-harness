@@ -12,14 +12,22 @@ import (
 // GroupID 是群组的稳定标识。
 type GroupID string
 
-// MemberRole 是群内角色。角色只管群权限，不强制工具只读（D18）。
+// MemberRole 是群内角色。角色只管群权限（谁能 @all / 转让群主），不强制工具只读（D18）：
+// 「只读」是群策略 GroupPolicy.Mode（readonly）的事，不是角色的事。
+//
+// P6-12：observer 角色已删除 —— 「只读旁听」与群 readonly 模式是两套机制，留着角色会让
+// 同一件事有两个开关，而且 observer 的每个特判（不能发言/不能交接/不能派活）都要单独维护。
+// 旧 JSON 里的 observer 在**加载时**迁移成 member（MigrateLegacyMemberRoles），
+// 成员关系与历史都不动；新写入带 observer 一律拒绝（SaveGroup）。
 type MemberRole string
 
 const (
-	RoleOwner    MemberRole = "owner"
-	RoleMember   MemberRole = "member"
-	RoleObserver MemberRole = "observer"
+	RoleOwner  MemberRole = "owner"
+	RoleMember MemberRole = "member"
 )
+
+// legacyRoleObserver 是已删除的角色值：只在迁移/拒绝两处出现，不再是一等角色。
+const legacyRoleObserver = "observer"
 
 // Member 是群成员。JoinedAt 用于成员变更审计。
 type Member struct {
@@ -140,7 +148,7 @@ func (g *Group) ApplyDefaults() {
 
 	for i := range g.Members {
 		g.Members[i].AgentID = AgentID(strings.TrimSpace(string(g.Members[i].AgentID)))
-		g.Members[i].Role = MemberRole(strings.ToLower(strings.TrimSpace(string(g.Members[i].Role))))
+		g.Members[i].Role = normalizeMemberRole(g.Members[i].Role)
 		if g.Members[i].Role == "" {
 			g.Members[i].Role = RoleMember
 		}
@@ -162,6 +170,61 @@ func (g *Group) ApplyDefaults() {
 			g.OwnerAgentID = owner
 		}
 	}
+}
+
+// normalizeMemberRole 归一化角色：去空白/小写，并把已删除的 observer 迁移成 member。
+// 迁移放在这里（而不是只放 LoadGroup）是为了让「内存里构造的旧数据」也走同一条路
+// —— 只要调用方 Normalize/ApplyDefaults，就不会带着一个不存在的角色继续跑。
+func normalizeMemberRole(raw MemberRole) MemberRole {
+	role := MemberRole(strings.ToLower(strings.TrimSpace(string(raw))))
+	if role == legacyRoleObserver {
+		return RoleMember
+	}
+	return role
+}
+
+// MigrateLegacyMemberRoles 把旧数据里的 observer 就地迁移成 member（P6-12）。
+// 只改角色，不动成员顺序/JoinedAt/owner/history —— 迁移不能删人，也不能丢历史。
+// 返回被迁移的成员数（0 = 无需迁移，调用方不必回写）。
+func (g *Group) MigrateLegacyMemberRoles() int {
+	if g == nil {
+		return 0
+	}
+	migrated := 0
+	for i := range g.Members {
+		if RemovedMemberRole(g.Members[i].Role) {
+			g.Members[i].Role = RoleMember
+			migrated++
+		}
+	}
+	return migrated
+}
+
+// RemovedMemberRole 判断角色是否是已删除的历史角色（P6-12：observer）。
+//
+// 给上层写入口用（create/member_add 在 Normalize **之前**判）：Normalize 会把旧
+// observer 迁成 member，所以「先归一化再校验」会让一次显式写 observer 静默变成
+// member —— 老客户端会以为建了个旁听者。写入口必须自己拒绝。
+func RemovedMemberRole(role MemberRole) bool {
+	return MemberRole(strings.ToLower(strings.TrimSpace(string(role)))) == legacyRoleObserver
+}
+
+// rejectRemovedMemberRoles 拒绝**新写入**已删除的角色（P6-12：observer）。
+//
+// 与迁移的分工：读路径（LoadGroup/ListGroups/ApplyDefaults）把旧 observer 迁成 member，
+// 保证存量数据不会因为角色被删而丢成员；写路径必须拒绝，否则新代码还能造出 observer，
+// 迁移就永远做不完（而且「只读旁听」会被重新引入成第二个只读开关）。
+func rejectRemovedMemberRoles(g *Group) error {
+	if g == nil {
+		return nil
+	}
+	for _, m := range g.Members {
+		if RemovedMemberRole(m.Role) {
+			return fmt.Errorf("%w: group member %s has removed role %q（角色只剩 owner/member；旧数据在加载时迁移成 member）",
+				ErrInvalid, m.AgentID, legacyRoleObserver)
+		}
+	}
+	return nil
 }
 
 // ApplyDefaults 填 GroupPolicy 的零值（§5.9）。
@@ -239,7 +302,7 @@ func (g *Group) Validate() error {
 		}
 		seen[m.AgentID] = struct{}{}
 		switch m.Role {
-		case RoleOwner, RoleMember, RoleObserver:
+		case RoleOwner, RoleMember:
 		default:
 			return fmt.Errorf("%w: group member %s has invalid role %q", ErrInvalid, m.AgentID, m.Role)
 		}

@@ -15,13 +15,13 @@ func handoffGroup() *Group {
 			{AgentID: "ag_aaaaaaaa", Role: RoleOwner},
 			{AgentID: "ag_bbbbbbbb", Role: RoleMember},
 			{AgentID: "ag_cccccccc", Role: RoleMember},
-			{AgentID: "ag_dddddddd", Role: RoleObserver},
+			{AgentID: "ag_dddddddd", Role: RoleMember},
 		},
 		Policy: GroupPolicy{MaxHandoffDepth: 3},
 	}
 }
 
-func TestHandoffDepthAndObserver(t *testing.T) {
+func TestHandoffDepthGuards(t *testing.T) {
 	g := handoffGroup()
 	now := time.Now().UTC()
 	if err := CheckHandoff(g, "ag_aaaaaaaa", "ag_bbbbbbbb", 2, nil, now); err != nil {
@@ -30,11 +30,12 @@ func TestHandoffDepthAndObserver(t *testing.T) {
 	if err := CheckHandoff(g, "ag_aaaaaaaa", "ag_bbbbbbbb", 3, nil, now); !errors.Is(err, ErrHandoffTooDeep) {
 		t.Fatalf("depth 3 err = %v", err)
 	}
-	if err := CheckHandoff(g, "ag_dddddddd", "ag_bbbbbbbb", 0, nil, now); !errors.Is(err, ErrHandoffObserver) {
-		t.Fatalf("observer sender err = %v", err)
+	// P6-12：角色只剩 owner/member —— 任何成员之间都能交接（不再有 observer 特判）。
+	if err := CheckHandoff(g, "ag_dddddddd", "ag_bbbbbbbb", 0, nil, now); err != nil {
+		t.Fatalf("member→member handoff 应放行: %v", err)
 	}
-	if err := CheckHandoff(g, "ag_aaaaaaaa", "ag_dddddddd", 0, nil, now); !errors.Is(err, ErrHandoffObserver) {
-		t.Fatalf("observer target err = %v", err)
+	if err := CheckHandoff(g, "ag_aaaaaaaa", "ag_dddddddd", 0, nil, now); err != nil {
+		t.Fatalf("owner→member handoff 应放行: %v", err)
 	}
 	if err := CheckHandoff(g, "ag_aaaaaaaa", "ag_aaaaaaaa", 0, nil, now); err == nil {
 		t.Fatal("self handoff must fail")

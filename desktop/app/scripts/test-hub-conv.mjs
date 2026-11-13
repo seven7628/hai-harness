@@ -89,7 +89,9 @@ const eq = (got, want, m) => {
   const bubble = readFileSync(join(APP, 'src', 'hub', 'MessageBubble.tsx'), 'utf8')
   const bubbleCode = bubble.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   assert(bubble.includes("from './ConversationMessage'") && bubble.includes('<AgentMessage') && bubble.includes('<UserMessage'), '群消息复用 ConversationMessage 的两种版式')
-  assert(bubble.includes('groupRole === \'observer\'') && bubble.includes("t('hub.observer')"), '观察标签只在 groupRole=observer 时出现')
+  // P6-12：observer 角色已删除 —— 代码里不再有「观察」标签（只读由群模式 readonly 表达）。
+  // 注释可以提历史，渲染路径不许再引用 observer。
+  assert(!bubbleCode.includes('observer') && !bubbleCode.includes('hub.observer'), '不再有 observer「观察」标签')
   assert(!bubbleCode.includes('回复 @'), '没有 reply_to 数据时不画「回复 @」')
   assert(bubble.includes('event-card--handoff') && bubble.includes('event-card--approval'), '交接/审批走 event-card 解剖')
   assert(bubble.includes('event-row') && bubble.includes('event-spacer') && !bubble.includes('className={`task-msg'), '事件卡包在 msg-row + 30px spacer 里（卡片左缘 41/38）')
