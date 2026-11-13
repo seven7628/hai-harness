@@ -34,12 +34,31 @@ import { applyAppearance, useAppearance } from './lib/appearance'
 // 右栏占比（见 onLayoutChanged → setRightLayoutFromDrag）。
 const LEFT_PANEL_ID = 'left'
 const RIGHT_PANEL_ID = 'right'
-// Hub 打开时右栏（inspector）是否强制展开的宽度门槛：≥1000 展开；<1000 收成 44px
-// 图标条，把宽度让给 Hub 侧栏与会话列 —— 再窄下去三栏铺开时中心列会被压到 300px
-// 下限、左栏甚至只剩 44px（P4 审计 HUB-N-01）。图标条仍可点开 inspector。
+// Hub 的「窄窗」门槛：<1000 时左栏是 Hub 的群/DM 导航，进 Hub 要把它顶开（否则只剩
+// 44px 图标条，选不了会话 —— P4 审计 HUB-N-01）。
+// ⚠️ 它**不再**决定 inspector 是否自动展开：Hub 里右栏默认收起（用户报「智能体模式右侧
+// 占比太大」），宽窗窄窗一致，要看详情点 44px 图标条（.hub-detail-rail）。
 const HUB_INSPECTOR_MIN_W = 1000
-// 宽窗 inspector 的目标宽度（与右栏 Panel 的 defaultSize 一致）。
+// Hub 内展开 inspector 的目标宽度（与右栏 Panel 的 defaultSize 一致）。
 const HUB_INSPECTOR_W = 360
+// Hub 内右栏的宽度上限（px）：1280 下 420 = 32.8%，不到一半。库的 maxSize 只认 px/%/rem
+// 这类单值（没有 calc/min()），所以「420 与 40% 取更小」由下面的 hubRightMaxSize 自己算。
+const HUB_INSPECTOR_MAX_W = 420
+// 右栏 Panel 的 minSize：上限不能算得比它还小，否则库会把展开宽度夹到 max（反而更窄）。
+const RIGHT_PANEL_MIN_W = 200
+// 右栏在一个窗口里的物理上限 ≈ 窗口 - 左栏图标条 44 - 中心列下限 300 - 两条 4px 分隔条。
+const rightRoomPx = (winW: number): number => winW - 44 - 300 - 8
+// Hub 内右栏的 maxSize：≥1000 取「420px 与窗口 40% 的较小者」（1280 下 420 = 32.8%，不到
+// 一半）；<1000 只留 420px 硬上限。窗口窄到连 420 都够不着（room ≤ 420，如 640 下只有
+// 288）就返回 '80%' 不设限 —— 库在「imperative resize 的目标 > maxSize」时会算出非法布局
+// 然后整条拒绝，实测 640 下把 maxSize 设成 420 会让右栏连手动展开都做不到。够不着上限时
+// 不设它，420 的承诺依然成立（能到的最宽就是 room）。
+const hubRightMaxSize = (): number | '80%' => {
+  const winW = window.innerWidth
+  if (rightRoomPx(winW) <= HUB_INSPECTOR_MAX_W) return '80%'
+  const cap = winW >= HUB_INSPECTOR_MIN_W ? Math.min(HUB_INSPECTOR_MAX_W, Math.round(winW * 0.4)) : HUB_INSPECTOR_MAX_W
+  return Math.max(RIGHT_PANEL_MIN_W, cap)
+}
 import { useRailTips } from './lib/railTips'
 
 export default function App() {
@@ -176,6 +195,9 @@ export default function App() {
     if (!rightExpanded && !h.isCollapsed()) h.collapse()
   }, [rightExpanded, rightRef[0], setRightExpanded])
   const hubOpen = useHubStore((s) => s.open)
+  // Hub 期间右栏的宽度上限（见 hubRightMaxSize）。窗口宽窄变了要重算：否则 1024 下还按
+  // 1280 算，420 就成了 41%。退出 Hub 后回到 '80%'，不影响工作区的拖拽范围。
+  const [hubRightMax, setHubRightMax] = useState(hubRightMaxSize)
   // 三态布局（PR-01）：预设 bias 时把右栏 resize 到目标比例；custom 由用户拖拽决定，不回写。
   const rightLayout = useAppStore((s) => s.rightLayout)
   const rightSize = useAppStore((s) => s.rightSize)
@@ -198,6 +220,30 @@ export default function App() {
     rightHandle.resize(rightSize)
   }, [rightSize, rightHandle])
 
+  // hubRightMax 的重算：只跟 Hub 开关与窗口宽度有关，挂 listener 比每帧读 innerWidth 稳。
+  useEffect(() => {
+    if (!hubOpen) return
+    const onResize = (): void => setHubRightMax(hubRightMaxSize())
+    onResize()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [hubOpen])
+
+  // Hub 内展开 inspector：宽度落回设计值 360（用户报「展开后仍占太大」）。折叠→展开、
+  // 点 rail 的概览/任务/Needs/Context 图标都走这里 —— expand() 只会恢复「上次尺寸」，
+  // 工作区里拖宽过的右栏会被原样带进 Hub。
+  // 依赖只有这三项：把 rightSize/尺寸也放进来会在拖拽过程中每帧把宽度拉回 360。
+  useEffect(() => {
+    if (!hubOpen || !rightExpanded || !rightHandle || rightHandle.isCollapsed()) return
+    const raf = requestAnimationFrame(() => {
+      // 窄窗下 expand() 可能被中心列 300px 下限拒绝（上面那条 effect 会把 store 回写成
+      // false）：仍是图标条就别 resize —— resize 会把 44px 的折叠面板重新撑开。
+      if (rightHandle.isCollapsed()) return
+      rightHandle.resize(HUB_INSPECTOR_W)
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [hubOpen, rightExpanded, rightHandle])
+
   const hubAlerts = useHubStore((s) => s.alerts)
   // 归属（owner）上卷：Hub 的 DM session_id / 群 id 只在 useHubStore 里，而
   // useAppStore.send() 是非 React 路径 —— 这里单点写入中立模块（lib/activeOwner），
@@ -212,11 +258,11 @@ export default function App() {
   const closeEditor = useHubStore((s) => s.closeEditor)
   const openAgent = useHubStore((s) => s.openAgent)
   const clearHubSelection = useHubStore((s) => s.clearSelection)
-  // 进入 Hub 时按可用宽度决定右栏：≥1000 展开概览（详情主入口）；<1000 收成 44px 图标条，
-  // 把宽度让给 Hub 侧栏与会话列（点图标仍可展开 inspector）。
-  // 只在打开的那一次强制，用户随后手动收起右栏不被反复顶开（折叠态由 HubInspector
-  // 自己提供图标条）。退出 Hub 时恢复进入前的折叠状态：Hub 是临时视图，不应改变
-  // 工作区的布局偏好。
+  // 进入 Hub 时右栏（inspector）**一律收起**成 44px 图标条：Hub 的主角是会话列，宽窗下
+  // 强开 360px 详情会把会话列压到 ~680px（用户报「右侧占比太大、本该默认收起」）。
+  // 宽窄窗只差左栏：<1000 时左栏是群/DM 导航，要等右栏让出宽度后再顶开（两步，见下）。
+  // 只在打开的那一次强制，用户随后手动展开不被反复收起（折叠态由 HubInspector 自己提供
+  // 图标条）。退出 Hub 时恢复进入前的折叠状态：Hub 是临时视图，不应改变工作区的布局偏好。
   const wasHubOpen = useRef(false)
   const rightExpandedBeforeHub = useRef<boolean | null>(null)
   // 进入 Hub 前的三态布局与进入后自动写成的布局：退出时只还原前者，且仅在用户没在
@@ -232,9 +278,9 @@ export default function App() {
   // 复用同一条「两步 + 回写核对」办法。
   const pendingExitLeftExpand = useRef<boolean | null>(null)
   const [exitLeftRestore, setExitLeftRestore] = useState(false)
-  // Hub 打开期间跨过 1000px 阈值（640↔1280 拖窗口）：按新宽度重算右栏，否则 1280 下
-  // inspector 仍是 44px 图标条、左栏独占 326px（P0 复审 #4）。用户手动改过右栏就把
-  // 控制权交还给人（autoRight 置空），本次 Hub 会话不再自动顶开/收起。
+  // Hub 打开期间跨过 1000px 阈值（640↔1280 拖窗口）：默认收起之后只保留「收窄让位」。
+  // 变宽不自动展开（Hub 默认图标条）；用户手动动过右栏就把控制权交还给人
+  // （autoRight 置空），本次 Hub 会话不再自动收起。
   const autoRight = useRef<{ wide: boolean; expanded: boolean } | null>(null)
   // P0 复审 #2：窄窗下右栏展开会把左栏挤成 44px，Hub 的群/DM 导航跟着消失。
   // 实测关掉 inspector 之后左栏仍停在 44px（库只在窗口变宽时才给回宽度），
@@ -264,18 +310,9 @@ export default function App() {
         leftExpandedBeforeHub.current = st.leftExpanded
         pendingNarrowLeftExpand.current = true
         setNarrowHubEntry(true)
-        setRightExpanded(false)
-        autoRight.current = { wide: false, expanded: false }
-      } else {
-        setRightExpanded(true)
-        autoRight.current = { wide: true, expanded: true }
-        // 上面那条三态比例 effect 在 Hub 期间停用，右栏仍要回到设计宽度 360：
-        // expand() 会恢复「上次尺寸」，不显式 resize 会把工作区里拖宽过的右栏带进 Hub。
-        requestAnimationFrame(() => {
-          const h = rightRef[0]
-          if (h && !h.isCollapsed()) h.resize(HUB_INSPECTOR_W)
-        })
       }
+      setRightExpanded(false)
+      autoRight.current = { wide: window.innerWidth >= HUB_INSPECTOR_MIN_W, expanded: false }
       rightLayoutAutoHub.current = useAppStore.getState().rightLayout
     } else if (!hubOpen && wasHubOpen.current) {
       const beforeRight = rightExpandedBeforeHub.current
@@ -363,7 +400,12 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [exitLeftRestore, restoreLeftPanel])
 
-  // Hub 打开期间窗口跨过阈值：按新宽度重算右栏（P0 复审 #4）。
+  // Hub 打开期间窗口跨过 1000px 阈值：默认收起之后，这里只剩「交还控制权」与「收窄让位」。
+  //   · 变宽不自动展开：Hub 默认就是图标条，用户要看详情自己点（原来 640→1280 会自动
+  //     顶开 360px inspector，正是用户报的「右侧占比太大」）。
+  //   · 变窄仍可自动收起：给会话列让位。
+  //   · 用户手动动过右栏（store 与 autoRight 记录不一致）就置空 autoRight，本次 Hub 会话
+  //     不再自动收 —— 否则刚点开的 inspector 会在拖窗口时被莫名收掉。
   useEffect(() => {
     if (!hubOpen) return
     const auto = (): { wide: boolean; expanded: boolean } | null => autoRight.current
@@ -372,40 +414,24 @@ export default function App() {
       if (!a) return
       const wide = window.innerWidth >= HUB_INSPECTOR_MIN_W
       if (wide === a.wide) return
-      // 上一次自动调整之后用户自己改过右栏：交还控制权，本次 Hub 会话不再自动动它。
       if (useAppStore.getState().rightExpanded !== a.expanded) {
         autoRight.current = null
         return
       }
-      autoRight.current = { wide, expanded: wide }
-      setRightExpanded(wide)
-      if (wide) {
-        // 展开按库里记的「上次尺寸」结算：实测 640→1280 会撑到 580px（会话列被压到
-        // 366），不是宽窗默认的 360。这里显式给一次宽窗默认宽度（与 Panel defaultSize 同值）。
-        requestAnimationFrame(() => {
-          const h = rightRef[0]
-          if (h && !h.isCollapsed()) h.resize(HUB_INSPECTOR_W)
-        })
-        return
-      }
-      // 收窄方向：右栏让位之后，被挤掉的左栏由下面的 squeezed effect 恢复。
+      // 记下新的默认态（永远是收起）。变宽到这里就结束 —— 不再 expand。
+      autoRight.current = { wide, expanded: false }
+      if (wide) return
+      // 收窄方向：右栏让位之后，被挤掉的左栏由上面的 squeezed effect 恢复。
+      setRightExpanded(false)
     }
-    // 两个方向的时机不同：
-    //   收窄 → 立刻让位（延迟会让库按旧宽度把左栏挤掉）；
-    //   变宽 → 等排版结算完（同一帧 expand 会按旧宽度算，反而把左栏挤成 44px）。
-    let timer = 0
+    // 收窄要立刻让位（延迟会让库按旧宽度把左栏挤掉）；变宽方向 apply 是空操作，不必等排版。
     const onResize = (): void => {
-      window.clearTimeout(timer)
       const a = auto()
-      if (a && a.wide && window.innerWidth < HUB_INSPECTOR_MIN_W) { apply(); return }
-      timer = window.setTimeout(apply, 220)
+      if (a && a.wide && window.innerWidth < HUB_INSPECTOR_MIN_W) apply()
     }
     apply()
     window.addEventListener('resize', onResize)
-    return () => {
-      window.removeEventListener('resize', onResize)
-      window.clearTimeout(timer)
-    }
+    return () => window.removeEventListener('resize', onResize)
   }, [hubOpen, setRightExpanded])
 
   // App 级订阅：离开 Hub 页期间产生的结算/告警也要收进告警中心（P2.5-05 复审 B3）。
@@ -480,8 +506,10 @@ export default function App() {
               collapsible
               collapsedSize={44}
               defaultSize={360}
-              minSize={200}
-              maxSize="80%"
+              minSize={RIGHT_PANEL_MIN_W}
+              // Hub 期间右栏只是「详情」：上限 420px（且 ≤40%，见 hubRightMaxSize），
+              // 不许再吃到半屏；工作区仍是原来的 80%，拖拽范围不变。
+              maxSize={hubOpen ? hubRightMax : '80%'}
               // 只做「展开/收起」的镜像；「右栏 >50% 收左栏」的规则在 Group.onLayoutChanged
               //（那里才有 meta.isUserInteraction，能区分用户拖拽与程序化 resize）。
               onResize={(_size, _id, prev) => {

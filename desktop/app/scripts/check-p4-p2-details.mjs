@@ -69,7 +69,7 @@ async function pick(page, kind = 'group') {
 async function openPanel(page, label) {
   const tab = page.locator('.hub-inspector-tabs button').filter({ hasText: label }).first()
   if (await tab.count()) { await tab.click({ timeout: 4000 }); await page.waitForTimeout(700); return true }
-  const railLabel = label === 'Context' ? 'Context' : label === '任务' ? '任务' : label === 'Needs' ? 'Needs you' : label
+  const railLabel = label === 'Context' ? '上下文' : label === '任务' ? '任务' : label === 'Needs' ? 'Needs you' : label
   const rail = page.locator(`.hub-detail-rail button[aria-label="${railLabel}"]`).first()
   if (await rail.count()) { await rail.click({ timeout: 4000 }); await page.waitForTimeout(900); return true }
   return false

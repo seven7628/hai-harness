@@ -175,8 +175,15 @@ check(!!frameBox && frameBox.height > 20, `visual-ui 预览块有高度（got=${
 // 任务详情（右栏「任务」页签）：成本与产物读的是账本的 task.result.usage /
 // task.result.artifacts（HubInspector.tsx）。只把值挂在 task 顶层时这里会显示
 // 「成本未知」且产物列表为空 —— 这条断言就是钉这个形状的。
-// 页签在已展开的右栏里（`.hub-inspector-tabs`，role=tab）；收起态的图标栏是另一套
-// rbtn，这里不点它（展开态才是默认演示视图）。
+// Hub 默认收起 inspector（44px 图标条）：先点 rail 的「任务」把详情面板打开，
+// 再走已展开右栏的 `.hub-inspector-tabs`（role=tab）。默认收起是产品行为，不是测试绕路。
+if (!(await page.locator('.hub-inspector-tabs').count())) {
+  const rail = page.locator('.hub-detail-rail button[aria-label="任务"]').first()
+  if (await rail.count()) {
+    await rail.click({ timeout: 6000 })
+    await page.waitForTimeout(700)
+  }
+}
 const tasksTab = page.locator('.hub-inspector-tabs button').filter({ hasText: '任务' }).first()
 const tabShown = await tasksTab.waitFor({ timeout: 6000 }).then(() => true).catch(() => false)
 check(tabShown, '右栏有「任务」页签')
