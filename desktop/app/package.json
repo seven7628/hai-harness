@@ -119,6 +119,7 @@
     "e2e:container": "node e2e/verify_preview_container.mjs",
     "e2e:auto": "node e2e/verify_auto_open_visual.mjs",
     "e2e:session-tabs": "node e2e/verify_session_tabs_persist.mjs",
+    "e2e:tabbar": "node e2e/verify_tabbar_interactions.mjs",
     "e2e:preview-renderers": "node e2e/verify_preview_renderers.mjs",
     "e2e:html-file-preview": "node e2e/verify_html_file_preview.mjs",
     "e2e:preview-native": "node e2e/verify_preview_renderers_native.mjs",
