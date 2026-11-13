@@ -81,8 +81,24 @@ func TestSurfaceToolsSchemaAndApproval(t *testing.T) {
 	}
 }
 
-func TestSurfaceToolsRegisteredUnconditionally(t *testing.T) {
+// enableSurfaceTools 把 `settings.features.surfaceTools` 打开（PR-14 起缺省 **false**）。
+//
+// 为什么走 manager 上的覆盖字段而不是往 HOME 写 settings.json：这些用例要证的是
+// **工具本身**（脚本拿到对象 / 失败不抛 / 审批不写盘），不是开关的读法 —— 开关的
+// 三种状态（缺省 / true / 写坏）在 surfaces_command_test.go 的
+// TestSurfaceToolsFollowFeatureSwitch 里各有一条，走的是真实 settings.json。
+func enableSurfaceTools(m *manager) *bool {
+	on := true
+	m.surfaceToolsForced = &on
+	return &on
+}
+
+// 开关语义的同一条钉子（缺省 false / true 时三个都在）在
+// surfaces_command_test.go 的 TestSurfaceToolsFollowFeatureSwitch（走真实读盘路径）。
+// 这里只留一条最便宜的：**打开后**三个工具真的进了引擎。
+func TestSurfaceToolsRegisteredWhenFeatureEnabled(t *testing.T) {
 	m, _ := testManager(t)
+	enableSurfaceTools(m)
 	eng := tools.NewToolEngine()
 	m.registerSurfaceTools(eng) // 没有渲染层、没有 kit、没有快照
 	got := map[string]bool{}
@@ -91,7 +107,7 @@ func TestSurfaceToolsRegisteredUnconditionally(t *testing.T) {
 	}
 	for _, want := range []string{"surface_install", "surface_remove", "surface_list"} {
 		if !got[want] {
-			t.Fatalf("%s 没被注册 —— 三个工具必须无条件注册（开关留给 PR-14）", want)
+			t.Fatalf("%s 没被注册（开关已打开）", want)
 		}
 	}
 }
@@ -113,6 +129,7 @@ func requireNodeForSurfaces(t *testing.T) {
 // runSurfaceScript 用真引擎跑一段 run_code（注册走 m.registerSurfaceTools）。
 func runSurfaceScript(t *testing.T, m *manager, code string) map[string]any {
 	t.Helper()
+	enableSurfaceTools(m) // 开关缺省 false（PR-14）：脚本路径的用例都要先打开
 	eng := tools.NewToolEngine()
 	m.registerSurfaceTools(eng)
 	st, err := codemode.OpenStore(filepath.Join(t.TempDir(), codemode.StoreFileName))
@@ -221,6 +238,7 @@ func TestSurfaceInstallApprovalDeniedDoesNotWriteIndex(t *testing.T) {
 	src := surfaceFixture(t, "cost-board", "0.1.0", "export default () => null\n")
 
 	eng := tools.NewToolEngine()
+	enableSurfaceTools(m)
 	m.registerSurfaceTools(eng) // 生产注册函数（不是测试里手搓的工具实例）
 
 	handler := func(context.Context, events.Event) {}
@@ -261,6 +279,7 @@ func TestSurfaceRemoveRequiresApprovalToo(t *testing.T) {
 		t.Fatalf("安装: %+v", r)
 	}
 	eng := tools.NewToolEngine()
+	enableSurfaceTools(m)
 	m.registerSurfaceTools(eng)
 	handler := func(context.Context, events.Event) {}
 	ctx := events.WithToolContext(context.Background(), "run-remove", 0, handler, surfaceDenyApprover{}, nil)
@@ -285,6 +304,7 @@ func TestSurfaceInstallPushesSurfacesChanged(t *testing.T) {
 	src := surfaceFixture(t, "cost-board", "0.1.0", "export default () => null\n")
 
 	eng := tools.NewToolEngine()
+	enableSurfaceTools(m)
 	m.registerSurfaceTools(eng)
 	handler := func(context.Context, events.Event) {}
 	args, _ := json.Marshal(map[string]any{"target": src})
