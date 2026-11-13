@@ -385,16 +385,78 @@ func (c *ConversationController) BeginHuman(group GroupID, humanSeq int64, at ti
 	conv.stop = ""
 	conv.turns = 0
 	conv.depth = 0
-	conv.queue = nil
 	conv.pairs = map[agentPair][]time.Time{}
 	conv.prints = map[agentPair]map[string]bool{}
 	conv.lastWake = time.Time{}
 	conv.startedAt = now
 	conv.updatedAt = now
-	// 人类开新对话：旧 generation 还在排队的 wake 全部作废（D5）。账本里只丢
+	// 人类开新对话：旧 generation 还在排队的 **auto** wake 全部作废（D5）。账本里只丢
 	// 这些 queued 记录；running/终态保留，在飞 run 收尾时还能正常落到 done。
-	conv.deliveries.dropQueued()
+	//
+	// 人类自己已经说出口、只是目标当时在跑的那几条是「下一个输入」（§1.5）：换代
+	// 不能把人的话一起丢掉，它们改挂新代继续排队，等目标这一轮结束再投。
+	keep := c.keepHumanWakesLocked(conv, now)
+	if conv.deliveries != nil {
+		conv.deliveries.dropQueuedExcept(keep)
+	}
 	return conv.view(c.limits, now)
+}
+
+// keepHumanWakesLocked 只保留队列里的人类 wake，并把它们改挂到当前 generation
+// （返回保留下来的 wake id，供账本裁剪）。人类 wake 是「下一个输入」：与 generation
+// 无关 —— 目标在跑就等它这一轮结束，换代不改变人的意图。
+//
+// auto wake 属于旧 generation：留着会在新对话里凭空接龙（§1.5）。
+func (c *ConversationController) keepHumanWakesLocked(conv *conversation, now time.Time) map[string]struct{} {
+	if conv == nil || len(conv.queue) == 0 {
+		return nil
+	}
+	kept := make(map[string]struct{}, len(conv.queue))
+	out := conv.queue[:0]
+	for _, w := range conv.queue {
+		if !w.Human {
+			continue
+		}
+		w.ConversationID = conv.id
+		if w.ID != "" {
+			kept[w.ID] = struct{}{}
+			if d := conv.deliveries.get(w.ID); d != nil {
+				d.ConversationID = conv.id
+				d.UpdatedAt = now
+			}
+		}
+		out = append(out, w)
+	}
+	conv.queue = out
+	return kept
+}
+
+// dropPendingHumanInputLocked 让「下一个输入」每 target 只留最新一条：人类连着
+// 对同一个（还在跑的）目标说话时，旧的 pending 让位给新消息 —— 正文都在群日志里，
+// 目标这一轮结束读得到，两条都投只会多跑一轮空转。不同 target 互不影响。
+func (c *ConversationController) dropPendingHumanInputLocked(conv *conversation, targets []AgentID) {
+	if conv == nil || len(conv.queue) == 0 || len(targets) == 0 {
+		return
+	}
+	want := make(map[AgentID]struct{}, len(targets))
+	for _, t := range targets {
+		want[t] = struct{}{}
+	}
+	kept := conv.queue[:0]
+	var dropped []string
+	for _, w := range conv.queue {
+		if _, ok := want[w.Target]; ok && w.Human {
+			if w.ID != "" {
+				dropped = append(dropped, w.ID)
+			}
+			continue
+		}
+		kept = append(kept, w)
+	}
+	conv.queue = kept
+	for _, id := range dropped {
+		conv.deliveries.drop(id)
+	}
 }
 
 // StartHumanRound 记一次人类触发的首轮：n 个目标**并行**唤醒，占 1 个回合预算
@@ -535,6 +597,12 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 		plans = append(plans, plan{target: target, pair: p})
 	}
 	queueFull := !req.Human && len(conv.queue)+len(plans) > limits.MaxPendingWakes
+	if req.Human {
+		// 「下一个输入」每 target 只留最新一条：人类连着对同一个在跑的目标说话时，
+		// 旧的那条 pending 让位（正文都在群日志里，目标这一轮结束读得到；两条都投
+		// 只会多跑一轮空转）。不同 target 各自一条，互不阻塞（§1.3）。
+		c.dropPendingHumanInputLocked(conv, targets)
+	}
 	wakes := make([]Wake, 0, len(plans))
 	skipped := 0
 	for _, p := range plans {

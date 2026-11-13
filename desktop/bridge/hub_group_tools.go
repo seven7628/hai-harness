@@ -464,7 +464,7 @@ func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string
 		// 串行队列。首条立即尝试（新对话的第一条永远立即可跑）；后续条等本轮 run
 		// 结束、冷却到期后由泵放行。
 		depth := t.m.hubGroupNextDepth(string(t.agentID), g)
-		wakes, oerr := t.m.offerGroupWakes(g, *routed, msg, t.agentID, depth)
+		wakes, oerr := t.m.offerGroupWakes(g, *routed, msg, t.agentID, depth, t.m.hubRunConversationID(string(t.agentID), g.ID))
 		if oerr != nil {
 			if errors.Is(oerr, agenthub.ErrConversationExhausted) {
 				// 护栏命中：控制器已把状态推到 exhausted，系统消息/事件已由

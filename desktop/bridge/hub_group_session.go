@@ -796,7 +796,7 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		// 智能体之间的 @ 走对话控制器：入队（串行 + 冷却 + 护栏）。投递由本轮 run
 		// 真正收尾后的 hubOnRunEnd（running 与群轮闩都已放开）触发。
 		depth := wake.Depth + 1
-		if _, oerr := m.offerGroupWakes(g, *lastRouted, lastMsg, spec.Agent.ID, depth); oerr != nil &&
+		if _, oerr := m.offerGroupWakes(g, *lastRouted, lastMsg, spec.Agent.ID, depth, wake.ConversationID); oerr != nil &&
 			!errors.Is(oerr, agenthub.ErrConversationExhausted) {
 			m.hubAlertf("group_conversation_offer_failed", "群 %s 对话入队失败：%v", g.ID, oerr)
 		}

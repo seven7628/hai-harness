@@ -82,7 +82,12 @@ func (m *manager) beginHubConversationWithinGate(g *agenthub.Group, humanSeq int
 
 // offerGroupWakes 把一条智能体消息上的 @ 目标交给对话控制器（串行队列）。
 // 命中护栏时控制器已把状态推到 exhausted，这里顺手写系统消息/事件（去重）。
-func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message, sender agenthub.AgentID, depth int) ([]agenthub.Wake, error) {
+//
+// conversationID 是**发起这条 @ 的那一轮 run** 所属的对话 id（人类首轮/无 wake 的
+// run 为空 = 不校验）。调用方必须显式传进来，不能现读会话镜像：final 收尾时
+// finishHubReply 已经清掉 hubGroupWake，现读只会拿到空串，旧 generation 的 @ 就会
+// 被当成新对话的 @ 路由出去（P6-07 §1.5）。
+func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigger *agenthub.Message, sender agenthub.AgentID, depth int, conversationID string) ([]agenthub.Wake, error) {
 	if m == nil || g == nil || trigger == nil || len(round.Targets) == 0 {
 		return nil, nil
 	}
@@ -92,7 +97,7 @@ func (m *manager) offerGroupWakes(g *agenthub.Group, round agenthub.Round, trigg
 		Text: trigger.Text, Depth: depth, TriggerSeq: trigger.Seq, RoundID: round.ID,
 		// 发起者那一轮所属的对话 id：人类插话换代之后，旧 run 的 @ 不得进入新对话
 		//（§1.1/§1.5）。空 = 未知（人类首轮/测试），不校验。
-		ConversationID: m.hubRunConversationID(string(sender), g.ID),
+		ConversationID: strings.TrimSpace(conversationID),
 	})
 	if err != nil {
 		if errors.Is(err, agenthub.ErrConversationExhausted) {
