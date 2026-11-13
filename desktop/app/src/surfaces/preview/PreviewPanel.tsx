@@ -18,7 +18,7 @@ import { displayPath } from '../../lib/localAsset'
 import { PreviewHost } from './PreviewHost'
 import { fileRefOf } from './registry'
 
-export function PreviewPanel({ path }: { path?: string }) {
+export function PreviewPanel({ path, tabId }: { path?: string; tabId?: string }) {
   const t = useT()
   const workspace = useAppStore((s) => s.workspace)
   const filePreviews = useAppStore((s) => s.filePreviews)
@@ -52,7 +52,7 @@ export function PreviewPanel({ path }: { path?: string }) {
                 : ''}
             </div>
             {filePreview
-              ? <PreviewHost file={file} content={filePreview.content} />
+              ? <PreviewHost file={file} tabId={tabId} content={filePreview.content} />
               : <div className="file-activity-empty">{t('rp.file.reading')}</div>}
           </div>
         )}

@@ -107,28 +107,56 @@ test('dispose() 真的销毁并移除（关标签释放解码器，不是死代�
   assert.equal(mediaStageSnapshot().length, 0, '池子里也不该留下这个元素')
 })
 
-test('disposeMediaElementsForPath：没人挂着 → 当场销毁；还有人挂着 → 等最后一个 detach', () => {
+test('disposeMediaElementsForPath：没有 owner 了就销毁；还有 owner 就留着', () => {
   const host = hostEl()
-  const h = acquireMediaElement('hai-media://local/c.mp4', 'video', 'hai-media://local/c.mp4', { srcPath: 'c.mp4' })
-  // 没挂载时关标签：立即销毁
-  disposeMediaElementsForPath('c.mp4')
+  const h = acquireMediaElement('hai-media://local/c.mp4', 'video', 'hai-media://local/c.mp4', { srcPath: 'c.mp4', tabId: 'tab-c' })
+  assert.deepEqual(mediaStageSnapshot()[0].owners, ['tab-c'])
+  disposeMediaElementsForPath('c.mp4', 'tab-c') // 关标签：owner 摘干净
   assert.equal(mediaStageSnapshot().length, 0)
 
-  // 挂着时关标签（另一个标签还在显示同一个文件）：先标记，等最后一个 detach
-  const h2 = acquireMediaElement('hai-media://local/d.mp4', 'video', 'hai-media://local/d.mp4', { srcPath: 'd.mp4' })
+  // 没有 tabId 的老调用（工作区删除）：清空 owners 后销毁
+  const h2 = acquireMediaElement('hai-media://local/d.mp4', 'video', 'hai-media://local/d.mp4', { srcPath: 'd.mp4', tabId: 'tab-d' })
   h2.attach(asHost(host))
   disposeMediaElementsForPath('d.mp4')
-  assert.equal(mediaStageSnapshot().length, 1, '还挂着 → 不能当场销毁（会把活 DOM 里的元素拔掉）')
-  assert.equal(mediaStageSnapshot()[0].pendingDispose, true)
-  h2.detach()
-  assert.equal(mediaStageSnapshot().length, 0, '最后一个 handle 走了 → 这时才销毁')
+  assert.equal(mediaStageSnapshot().length, 0)
   void h
 })
 
+test('A/B 双标签：关 A 之后 B 切走再切回，元素不能被销毁（owner 计数，不是挂载计数）', () => {
+  const hostA = hostEl()
+  const hostB = hostEl()
+  const key = 'hai-media://local/shared-owner.mp4'
+  const a = acquireMediaElement(key, 'video', key, { srcPath: 'shared-owner.mp4', tabId: 'tab-A' })
+  a.attach(asHost(hostA))
+  // 假装已经解出元数据（真实元素解容器后就是 4；readyState 在 DOM 类型上是只读的）
+  ;(a.el as unknown as { readyState: number }).readyState = 4
+  const b = acquireMediaElement(key, 'video', key, { srcPath: 'shared-owner.mp4', tabId: 'tab-B' })
+  b.attach(asHost(hostB))
+
+  // 关 A：只摘掉 A 的 owner；随后 A 的组件卸载（真实顺序：store 先摘 owner，React 再 cleanup）
+  disposeMediaElementsForPath('shared-owner.mp4', 'tab-A')
+  a.detach()
+  assert.deepEqual(mediaStageSnapshot()[0].owners, ['tab-B'], 'B 还开着，元素必须留着')
+
+  // B 切走（detach，不是关）—— 按挂载计数的话这里就会销毁
+  b.detach()
+  assert.equal(mediaStageSnapshot().length, 1, 'detach 不参与销毁决策')
+
+  // B 切回：必须是同一个元素（readyState 不被重置 = 没有重新解容器/重下字节）
+  const b2 = acquireMediaElement(key, 'video', key, { srcPath: 'shared-owner.mp4', tabId: 'tab-B' })
+  b2.attach(asHost(hostB))
+  assert.equal(b2.el, b.el, '切回来必须是同一份元素')
+  assert.equal(b2.el.readyState, 4, 'readyState 不能被重置（重置 = 重新解了一遍容器）')
+
+  // B 关掉：这时才销毁
+  disposeMediaElementsForPath('shared-owner.mp4', 'tab-B')
+  assert.equal(mediaStageSnapshot().length, 0, '最后一个 owner 走了才销毁')
+})
+
 test('按路径回收不误伤别的文件（srcPath 精确匹配）', () => {
-  const h1 = acquireMediaElement('hai-media://local/x.mp4', 'video', 'hai-media://local/x.mp4', { srcPath: 'x.mp4' })
-  const h2 = acquireMediaElement('hai-media://local/y.mp4', 'video', 'hai-media://local/y.mp4', { srcPath: 'y.mp4' })
-  disposeMediaElementsForPath('x.mp4')
+  const h1 = acquireMediaElement('hai-media://local/x.mp4', 'video', 'hai-media://local/x.mp4', { srcPath: 'x.mp4', tabId: 'tab-x' })
+  const h2 = acquireMediaElement('hai-media://local/y.mp4', 'video', 'hai-media://local/y.mp4', { srcPath: 'y.mp4', tabId: 'tab-y' })
+  disposeMediaElementsForPath('x.mp4', 'tab-x')
   const snap = mediaStageSnapshot()
   assert.deepEqual(snap.map((s) => s.srcPath), ['y.mp4'])
   void h1

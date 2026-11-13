@@ -38,6 +38,11 @@ let bridge: ChildProcessWithoutNullStreams | null = null
 // before-quit 时直接放行。没有这个标志，preventDefault 会把进程永久锁在退出前。
 let docDirty = false
 let allowQuit = false
+// lastPickedDir 最近一次由**系统选择器**返回的目录（create-workspace-folder 的父目录白名单）。
+// 为什么需要：create-workspace-folder 的 `parent` 也是渲染进程传的任意绝对路径 —— 那是
+// 信任锚上的第四条可控写入口（复评「顺手改」第 1 条）。它只能登记「刚建出来的空目录」，
+// 危害有限，但没有理由留一条「渲染进程说在哪建就在哪建」的路。
+let lastPickedDir = ''
 
 // —— 启动打点（TEMP-STARTUP：定位黑屏/启动慢；**已停用**，不再写 electron-startup.log）——
 function startupMark(_phase: string): void {
@@ -213,6 +218,7 @@ async function handleWorkspacePick(requestId: string): Promise<void> {
       payload.path = r.filePaths[0]
       // 用户亲手选的目录 → 进媒体根清单（与桌面端「添加工作区」同一条口径）
       rememberWorkspace(r.filePaths[0])
+      lastPickedDir = path.resolve(r.filePaths[0])
     }
   } catch (e) {
     payload.canceled = true
@@ -1238,13 +1244,25 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     // **媒体协议的信任锚就在这里**：只有经系统选择器确认过的目录才进 known-workspaces。
     // 渲染进程传什么 workspace 都不能自己登记（评审裁决 1：workspace=/Users 曾能登记成功）。
     rememberWorkspace(r.filePaths[0])
+    lastPickedDir = path.resolve(r.filePaths[0])
     return r.filePaths[0]
   })
   ipcMain.handle('home-dir', () => app.getPath('home'))
-  ipcMain.handle('create-workspace-folder', (_e, parent: string, name: string) => {
+  ipcMain.handle('create-workspace-folder', (e, parent: string, name: string) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, error: '不受信任的调用来源' }
     const clean = String(name ?? '').trim()
     const base = String(parent ?? '')
     if (!base || !path.isAbsolute(base)) return { ok: false, error: '父目录无效' }
+    // 父目录必须是系统选择器**刚刚**给的那个（同一个洞的边角，复评顺手改 1）
+    let samePicked = false
+    if (lastPickedDir) {
+      try {
+        samePicked = fs.realpathSync(base) === fs.realpathSync(lastPickedDir)
+      } catch {
+        samePicked = path.resolve(base) === lastPickedDir
+      }
+    }
+    if (!samePicked) return { ok: false, error: '父目录必须来自系统选择器（请先「选择工作区」）' }
     if (!clean || clean.includes('/') || clean === '.' || clean === '..') return { ok: false, error: '无效的文件夹名称' }
     const target = path.join(base, clean)
     try {

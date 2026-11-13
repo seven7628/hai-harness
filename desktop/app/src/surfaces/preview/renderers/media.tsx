@@ -36,7 +36,7 @@ interface Loaded {
   probeError?: string
 }
 
-export default function MediaPreview({ file, onUnavailable }: PreviewProps) {
+export default function MediaPreview({ file, tabId, onUnavailable }: PreviewProps) {
   const t = useT()
   const workspace = useAppStore((s) => s.workspace)
   const [loaded, setLoaded] = useState<Loaded>({})
@@ -103,7 +103,7 @@ export default function MediaPreview({ file, onUnavailable }: PreviewProps) {
     const host = hostRef.current
     if (!url || !host) return
     // srcPath = 标签里的原始路径：store 关标签时按同一个字符串回收元素（见 mediaStage 头注释）
-    const handle = acquireMediaElement(url, kind, url, { modifiedMs, srcPath: path })
+    const handle = acquireMediaElement(url, kind, url, { modifiedMs, srcPath: path, tabId })
     handle.attach(host)
     const el = handle.el
     const onError = () => setElementError(true)
@@ -121,7 +121,7 @@ export default function MediaPreview({ file, onUnavailable }: PreviewProps) {
       el.removeEventListener('loadedmetadata', onMeta)
       handle.detach()
     }
-  }, [url, kind, modifiedMs, path])
+  }, [url, kind, modifiedMs, path, tabId])
 
   const openExternal = useCallback(() => {
     const abs = loaded.abs

@@ -37,6 +37,8 @@ import {
   type MediaResponse,
 } from './media-protocol.ts'
 import { MEDIA_VIDEO_EXTS } from '../src/lib/mediaFile.ts'
+// 生产的信任谓词（不是 ()=>true 桩，复评 4）：单测也走 known-workspaces 那份真清单
+import { configureKnownWorkspaces, isKnownWorkspace, rememberWorkspace } from './known-workspaces.ts'
 // Go 侧的容器矩阵以**文本**在打包时内联（esbuild --loader:.go=text）：它和协议白名单
 // 必须是同一批扩展名，否则「矩阵判得出、协议不给字节」或反过来。读源码文本而不是
 // 再抄一份清单 —— 抄一份就等于加了三份要同步的表。
@@ -60,13 +62,19 @@ const assertClean = (body: Buffer, where: string) => {
 
 // 登记工作区的根走**生产入口**（allowMediaRoot 已降为模块私有，评审裁决 1）：
 // mediaUrlForFile 是唯一会给 URL 的函数，它顺带登记根。
+// 第三个参数用**真的** isKnownWorkspace（复评 4）：之前是 ()=>true 桩，等于单测只验了
+// 「谓词返回 true 会怎样」，生产里那条接线只有跑不动的 e2e 覆盖。现在先把目录记进
+// known-workspaces（= 用户亲手选过），再登记根。
+const knownFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'media-known-')), 'workspaces.json')
 function registerWorkspace(dir: string, trusted = true): { ok: boolean; error?: string } {
+  if (trusted) rememberWorkspace(dir)
   const sample = fs.existsSync(path.join(dir, 'clip.mp4')) ? 'clip.mp4' : path.join(dir, 'song.MP3')
-  return mediaUrlForFile(sample, dir, () => trusted)
+  return mediaUrlForFile(sample, dir, isKnownWorkspace)
 }
 
 before(() => {
   process.env.HOME = fakeHome
+  configureKnownWorkspaces(knownFile)
   fs.writeFileSync(path.join(root, 'clip.mp4'), bytes(5000))
   fs.writeFileSync(path.join(root, 'song.MP3'), bytes(1000))
   fs.writeFileSync(path.join(root, 'notes.txt'), 'TOP-SECRET-TEXT')
@@ -329,7 +337,7 @@ test('逃逸 5b：软链名字是 .mp4、目标是文本 → 403（realpath 之�
   assert.equal(r.status, 403, '白名单只管文件名不管内容就等于没有白名单')
   assertClean(r.body, '软链到非媒体')
   // 拿 URL 的那条路也要拒（否则面板拿到一个必然 403 的 URL）
-  const u = mediaUrlForFile(path.join(root, 'hidden.mp4'), root, () => true)
+  const u = mediaUrlForFile(path.join(root, 'hidden.mp4'), root, isKnownWorkspace)
   assert.equal(u.ok, false)
 })
 
@@ -405,7 +413,7 @@ test('未登记工作区时任何路径都 403（fail-closed）', async () => {
 test('未登记的工作区拿不到 URL（渲染进程传 workspace=/Users 也换不到根）', async () => {
   resetMediaProtocolState()
   // 渲染进程能编的就是这两个入参；信任谓词说「没在清单里」→ 连根都登记不上
-  const denied = mediaUrlForFile(path.join(outside, 'secret.mp4'), outside, () => false)
+  const denied = mediaUrlForFile(path.join(outside, 'secret.mp4'), outside, isKnownWorkspace)
   assert.equal(denied.ok, false)
   assert.match(denied.error ?? '', /未登记/)
   // 根没登记 → 直接构造 URL 也 403（协议侧不认「刚才谁尝试过」）
@@ -413,11 +421,37 @@ test('未登记的工作区拿不到 URL（渲染进程传 workspace=/Users 也�
   assert.equal(r.status, 403)
   assertClean(r.body, '未登记工作区的 URL')
   // 反向：清单里有 → 正常给 URL 并登记根
-  const allowed = mediaUrlForFile(path.join(root, 'clip.mp4'), root, () => true)
+  const allowed = mediaUrlForFile(path.join(root, 'clip.mp4'), root, isKnownWorkspace)
   assert.equal(allowed.ok, true)
   assert.match(allowed.url ?? '', /^hai-media:\/\/local\//)
   resetMediaProtocolState()
   registerWorkspace(root)
+})
+
+test('登记第 9/10 个根之后，最早那个根仍然能 200（没有 FIFO 淘汰）', async () => {
+  // 复评裁决 1：这里曾经有 MAX_ROOTS=8 + slice(-8)。开 9 个工作区的用户一登记新根，
+  // 最先那个根立刻 403 —— 正在播的视频当场断流。这条用例就是那次回归的钉子。
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'media-many-roots-'))
+  const dirs: string[] = []
+  const bodies = new Map<string, Buffer>()
+  for (let i = 0; i < 10; i++) {
+    const d = path.join(base, `ws-${i}`)
+    fs.mkdirSync(d)
+    const b = Buffer.from(`ROOT-${i}-MEDIA`)
+    fs.writeFileSync(path.join(d, 'clip.mp4'), b)
+    dirs.push(d)
+    bodies.set(d, b)
+    const reg = registerWorkspace(d)
+    assert.equal(reg.ok, true, `第 ${i + 1} 个根应当登记成功: ${reg.error}`)
+    assert.equal(isKnownWorkspace(d), true)
+  }
+  // 最早的那个根（ws-0）必须仍然可用，且字节正确
+  for (const d of [dirs[0], dirs[1], dirs[9]]) {
+    const r = await call(path.join(d, 'clip.mp4'))
+    assert.equal(r.status, 200, `${d} 应当仍然能读（实得 ${r.status}）`)
+    assert.deepEqual(r.body, bodies.get(d))
+  }
+  fs.rmSync(base, { recursive: true, force: true })
 })
 
 test('scheme/host 不合法 → 400/403（不允许别的 host 借道）', () => {

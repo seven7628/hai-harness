@@ -91,6 +91,26 @@ test('目录已经不存在时 forget 仍然能清掉记录（用户删了文件
   assert.equal(isKnownWorkspace(gone), false)
 })
 
+test('没有 512 条的 FIFO：登记第 520 个目录后，第 1 个仍然记得', () => {
+  // 复评裁决 1：这里曾经是 slice(-512)，与 media-protocol 的 MAX_ROOTS 是同一个 bug 的
+  // 第二次实现。这两个地方都只靠一条用例守着，别再让它们靠「读代码」保证。
+  const base = fs.mkdtempSync(path.join(dir, 'many-'))
+  const before = knownWorkspaces().length
+  const first = path.join(base, 'w-000')
+  fs.mkdirSync(first)
+  rememberWorkspace(first)
+  for (let i = 1; i < 520; i++) {
+    const d = path.join(base, `w-${String(i).padStart(3, '0')}`)
+    fs.mkdirSync(d)
+    rememberWorkspace(d)
+  }
+  assert.equal(knownWorkspaces().length, before + 520, '不该被截断')
+  assert.equal(isKnownWorkspace(first), true, '最早那个目录必须还在（否则第 521 个一登记它就没了）')
+  configureKnownWorkspaces(file) // 落盘也要完整
+  assert.equal(isKnownWorkspace(first), true)
+  fs.rmSync(base, { recursive: true, force: true })
+})
+
 test('落盘文件损坏 → 空清单（fail-closed，宁可多选一次目录）', () => {
   fs.writeFileSync(file, '{ this is not json')
   configureKnownWorkspaces(file)

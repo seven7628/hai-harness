@@ -10353,7 +10353,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set(tabPatch(s, scope, { tabs, activeId, closed }))
     // file{preview} 的媒体标签 → 回收元素池里那份解码器与缓冲。
     // 切标签走的是 detach（保留），**只有这里才是真关**；非媒体标签调用是无操作。
-    if (gone.kind === 'file') disposeMediaElementsForPath((gone as FileTabInstance).path ?? '')
+    if (gone.kind === 'file') disposeMediaElementsForPath((gone as FileTabInstance).path ?? '', gone.id)
     // web 标签 → 真关掉底层页面（视图池是进程级单例，不关就是僵尸渲染进程）。
     // 注意：关页面会触发 embed-nav → syncWebTabs 会看到该 key 消失，此时标签已不在集合里（幂等）。
     if (gone.kind === 'web') {

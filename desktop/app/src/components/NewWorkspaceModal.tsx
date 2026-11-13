@@ -23,7 +23,9 @@ export default function NewWorkspaceModal() {
     setName('')
     setErr(null)
     setBusy(false)
-    void getTransport().homeDir().then(setParent)
+    // 不再预填 homeDir：主进程的 create-workspace-folder 只接受「系统选择器刚给过的父目录」
+    // （R08c 复评：parent 也是渲染进程可控的写入口，它决定在哪儿 mkdir + 登记媒体根）。
+    // 预填一个未经过选择器的路径会让「创建」永远失败，所以这里改成必须点「浏览…」。
     requestAnimationFrame(() => inputRef.current?.focus())
   }, [show])
 

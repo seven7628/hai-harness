@@ -20,7 +20,7 @@
 // 的翻译，单测直接调它（00 §4.7：测试必须走生产入口，不许在测试里另建等价物）。
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type { Readable } from 'node:stream'
+import { PassThrough, type Readable } from 'node:stream'
 import { isSensitiveFsPath } from './fs-guard'
 
 // —— 方案常量 ——
@@ -132,10 +132,13 @@ export function planRange(header: string | null | undefined, size: number): Rang
 
 // —— 路径校验（纯函数 + 一份进程内的工作区白名单）——
 
-// 允许的根目录（realpath）。只由 mediaUrlForFile（生产）与 allowMediaRoot（测试）写入：
+// 允许的根目录（realpath）。唯一写入点是 mediaUrlForFile（生产）→ allowMediaRoot。
 // 根 = 用户真的打开过的工作区目录，不是渲染进程随便给的任意字符串。
-// 上限 8：多工作区切换时留几个最近根，避免「切走再切回」把正在播的那条 URL 变 403。
-const MAX_ROOTS = 8
+//
+// **没有上限、没有淘汰**（复评裁决 1）：这里曾经有 `MAX_ROOTS = 8` + `slice(-8)`，后果是
+// 开 9 个工作区的用户一登记新根，最先那个根立刻 403 —— 正在播的视频当场断流。根的生命周期
+// 现在只有一条：工作区被移除时（IPC workspace:forget）→ 清单里删掉、下次不再登记。
+// 顺序只用于「诊断可读性」：最近登记的在最前。
 let roots: string[] = []
 
 export function allowedMediaRoots(): readonly string[] {
@@ -164,8 +167,8 @@ function allowMediaRoot(dir: string): { ok: boolean; root?: string; error?: stri
   }
   // 敏感目录（~/.ssh/.aws/...）即使被当成工作区打开也不做媒体根：与 fs-guard 同一份判据。
   if (isSensitiveFsPath(real)) return { ok: false, error: '该目录受保护' }
-  if (roots.includes(real)) return { ok: true, root: real }
-  roots = [...roots, real].slice(-MAX_ROOTS)
+  // 去重 + 提到最前（不截断）：重复登记不该让已有根的位置/存在性发生变化
+  roots = [real, ...roots.filter((r) => r !== real)]
   return { ok: true, root: real }
 }
 
@@ -318,16 +321,23 @@ let stats: MediaStats = { requests: 0, rangeRequests: 0, firstByteHits: 0, bytes
 // 计数**挂在流上**而不是挂在「计划」上（评审裁决 3 的第二条）：客户端 seek/abort 时
 // 计划里那 N 字节并没有真的发出去，按计划记数就成了「自报数字」——而 e2e 正拿它当
 // 「切走切回不重下」的判据。只有 'data' 真的流过去才算数。
-function countedStream(stream: Readable, isFromFirstByte: boolean): Readable {
+//
+// 返回的是 **PassThrough** 而不是源流本身（复评 4）：给源流挂 'data' 会把它切进 flowing
+// 模式，下游（Response body）如果没在同一个 tick 接上，数据就那么在中间被消费掉了。
+// 中间垫一个 PassThrough：pipe 自带背压、能缓冲，下游什么时候接上都行；计数挂在源流上
+// （pipe 已接好，额外的 'data' 监听只是旁听，不影响投递）。
+function countedStream(src: Readable, isFromFirstByte: boolean): Readable {
+  const out = new PassThrough()
+  src.pipe(out)
   let sawFirst = false
-  stream.on('data', (chunk: Buffer | string) => {
+  src.on('data', (chunk: Buffer | string) => {
     stats.bytesServed += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
     if (!sawFirst) {
       sawFirst = true
       if (isFromFirstByte) stats.firstByteHits += 1
     }
   })
-  return stream
+  return out
 }
 
 // etag 用**强验证器**（不带 W/）：If-Range 只认强验证器，弱 etag 永远不匹配（RFC 9110 §13.1.5）。
@@ -417,7 +427,10 @@ export function handleMediaRequest(req: MediaRequestLike): MediaResponse {
   // 条件请求：命中就 304（无体）。不做这一步的话，etag 白给 —— 浏览器每次重验证都要
   // 重新拉一遍字节，缓存形同虚设。
   if (req.ifNoneMatch && etagMatches(req.ifNoneMatch, etag)) {
-    return { status: 304, headers: { ...common, 'content-length': '0' } }
+    // 304 **不带 content-length**（RFC 9110 §15.4.5：它没有 body，而 content-length 描述的是
+    // 「这个响应的 body 长度」，写 0 会让缓存/代理以为表示本身是空的）。
+    const { 'content-type': _ct, ...cacheHeaders } = common
+    return { status: 304, headers: cacheHeaders }
   }
   const header = req.range ?? null
   if (header != null) stats.rangeRequests += 1

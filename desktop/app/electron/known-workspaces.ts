@@ -21,10 +21,9 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-// 上限只是防文件无限增长（一个人不会打开上千个工作区）；不用 FIFO 淘汰 ——
-// 评审指出的「活跃根被 8 次别的登记挤掉、正在播的视频断流」正是淘汰策略造成的，
-// 而这里的条目是**用户亲自选过**的目录，没有挤占的理由。删除只有一条路：forget。
-const MAX_KNOWN = 512
+// **没有上限、没有淘汰**（复评裁决 1）：这里曾经是 `slice(-512)` —— 与 media-protocol 里
+// 的 `MAX_ROOTS` 是同一个 bug 的第二次实现（「活跃根被后来的登记挤掉」）。条目是用户亲自
+// 用系统选择器选过的目录，没有挤占的理由；删除只有一条路：forget（工作区被移除）。
 
 interface KnownFile {
   version: 1
@@ -89,10 +88,9 @@ export function rememberWorkspace(p: unknown): string | undefined {
     return undefined
   }
   load()
-  if (!known.includes(real)) {
-    known = [...known, real].slice(-MAX_KNOWN)
-    save()
-  }
+  // 去重 + 提到最前，**不截断**
+  known = [real, ...known.filter((x) => x !== real)]
+  save()
   return real
 }
 
