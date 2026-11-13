@@ -316,6 +316,32 @@ try {
   const back = await snap()
   check('切回 S1 → 仍是 S1 自己的（两套互不串，且没被默认 activity 顶掉）', back.kinds === 'git' && back.tab === 'git', JSON.stringify({ kinds: back.kinds, tab: back.tab }))
 
+  // —— P8：kind 白名单（PR-11 起 = 注册表的 BUILTIN_KINDS，store 不再自持 TAB_KINDS）——
+  //
+  // 为什么这条必须在**真实恢复链路**上：单测钉住的是 isBuiltinKind 这个纯函数；而
+  // 「loadPersistedTabs 真的用了它」只有 reload 一次才看得见（改回 `typeof r.kind === 'string'`
+  // 这样的写法，单测全绿，症状却是重启后 plugin:/office 幽灵标签复活 —— 没有 provider 的空白面板）。
+  console.log('P8 恢复时丢弃 plugin: 与未知 kind（白名单 = 注册表的 BUILTIN_KINDS）')
+  await load(JSON.stringify({ v: 1, scopes: { S1: { tabs: [
+    { id: 'k1', kind: 'activity' },
+    { id: 'k2', kind: 'git' },
+    { id: 'k3', kind: 'file', path: '/w/src/a.ts', mode: 'source' },
+    { id: 'k4', kind: 'web', url: 'https://ok.example/a' },
+    { id: 'k5', kind: 'plugin:dummy', params: { a: 1 } }, // 插件标签要等 R11b/PR-14
+    { id: 'k6', kind: 'office' }, // 03 §5.1 里迁移掉的历史 kind
+    { id: 'k7', kind: 42 }, // 非字符串：老版本/手改的存储
+  ], activeId: 'k5' } } }))
+  await page.evaluate(() => window.__store.getState().setRightExpanded(true)) // 标签条只在展开态存在
+  await page.waitForTimeout(400)
+  const kinds8 = await snap()
+  check('四个内置 kind 全部恢复、且顺序不变', kinds8.kinds === 'activity,git,file,web', JSON.stringify(kinds8.kinds))
+  check('plugin: / 未知 kind 一条都没恢复（标签条上也不出现）',
+    kinds8.rows.length === 4 && kinds8.rows.every((r) => ['activity', 'git', 'file', 'web'].includes(r.kind)),
+    JSON.stringify(kinds8.rows.map((r) => r.kind)))
+  // activeId 指向被丢掉的那条 → 按 sanitizePersistedTabSet 的口径回落到第一个幸存标签
+  check('activeId 指向被丢掉的标签 → 回落到第一个幸存标签', kinds8.activeKind === 'activity', JSON.stringify({ activeKind: kinds8.activeKind }))
+
+
   check('全程无页面错误', errs.length === 0, errs.join('; '))
   await browser.close()
 } catch (e) {
