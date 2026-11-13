@@ -291,4 +291,40 @@ const eq = (got, want, m) => {
   assert(!group.includes('重置限制'), '重置入口只有状态条一处')
 }
 
+// 4e) 会话区配色统一到 app 令牌（P6-14）：静态契约。
+// 真正的判据在 check-hub-theme-palette.mjs（getComputedStyle 三套调色板）；这里钉住
+// 「颜色来源」本身，避免以后有人把 demo 的暖色值写回去、或者顺手把内容色也一起冲掉。
+{
+  const css = readFileSync(join(APP, 'src', 'hub', 'hub.css'), 'utf8')
+  // 取「.hub-demo, .hub-demo[data-theme='light'] { ... }」这一块。
+  const block = (css.match(/\.hub-demo,\n\.hub-demo\[data-theme='light'\] \{[\s\S]*?\n\}/) ?? [''])[0]
+  assert(block.length > 0, '会话区令牌映射块存在（同时覆盖深/浅两套 demo 主题）')
+  for (const [token, appToken] of [
+    ['--chat', 'var(--paper-2)'],       // 与右栏同一个 token
+    ['--surface', 'var(--paper-3)'],    // 卡面/输入框比底亮一档
+    ['--border', 'var(--ink-line)'],
+    ['--border-strong', 'var(--ink-line-2)'],
+    ['--text', 'var(--ink)'],
+    ['--muted', 'var(--ink-2)'],
+    ['--muted-2', 'var(--ink-3)'],
+  ]) {
+    assert(new RegExp(`\\${token}:\\s*${appToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')};`).test(block),
+      `${token} 接到 app 令牌 ${appToken}`)
+  }
+  assert(/--header-bg:\s*color-mix\(in srgb, var\(--paper-2\)/.test(block), 'header 底是同色半透明（不是另一套颜色）')
+  // 内容色不能被「统一」掉：强调/用户气泡/语义色仍归 demo（会话内容自己的调色板）。
+  assert(!/--accent:/.test(block) && !/--user-bubble:/.test(block), '不重接 --accent / --user-bubble（内容色不混进交互主色）')
+  assert(!/--danger:|--warn:|--success:/.test(block), '不重接语义色')
+  // header 的分隔线：demo 写死 rgba(255,255,255,.055)，浅色下几乎不可见 → 换成 app 发丝线。
+  assert(/\.hub-demo \.chat-header \{ border-bottom-color: var\(--ink-line\); \}/.test(css), 'header 分隔线 = --ink-line')
+  // 右栏底色真的等于 --paper-2（.right 的 --bg 会压掉同特指度的声明）。
+  assert(/\.right\.hub-inspector,\n\.right\.hub-detail-rail \{ background: var\(--paper-2\); \}/.test(css),
+    '右栏（展开/收起两态）底色 = --paper-2（提到 (0,2,0) 跟加载顺序解耦）')
+  // 会话区/header/composer 三处都吃 --chat（不是只改背景色）。
+  const demoCss = readFileSync(join(APP, 'src', 'hub', 'demo.css'), 'utf8')
+  assert(/\.hub-demo \.main\{[^}]*background:var\(--chat\)/.test(demoCss), '会话区底 = --chat')
+  assert(/\.hub-demo \.composer-wrap\{[^}]*background:var\(--chat\)/.test(demoCss), 'composer 外层 = --chat')
+  assert(/\.hub-demo \.chat-header\{[^}]*background:var\(--header-bg\)/.test(demoCss), 'header 底 = --header-bg（同一个 token 源）')
+}
+
 console.log(`\nHUB_CONV_TEST_PASS (${pass})`)

@@ -63,12 +63,14 @@ const shot = async (name) => {
   console.log(`  📷 ${OUT}/${name}.png`)
 }
 
-// 真读 Hub store（不是 DOM 猜）：dev server 下 `import('/src/hub/useHubStore.ts')` 与 App
-// 拿到的是同一个模块实例，所以这是 UI 背后的事实 —— 用来证明「重置」真的清零了计数，
-// 而不是把状态条藏起来。window.__store 是 app store，没有 groupConversations。
+// 真读 Hub store（不是 DOM 猜）：main.tsx 在 **dev 构建**里把 Hub store 挂在 window.__hub
+// （同 __store/__hydrate，见 shoot-hub-failures.mjs 的用法）。用它而不是动态 import：
+// HMR 会给同一文件换 `?t=` URL，动态 import 可能拿到另一个模块实例（状态是空的）。
+// window.__store 是 app store，没有 groupConversations。
 const hubConvState = () => page.evaluate(async () => {
-  const m = await import('/src/hub/useHubStore.ts')
-  const s = m.useHubStore.getState()
+  const store = window.__hub
+  if (!store) throw new Error('window.__hub 不存在（不是 dev 构建？）')
+  const s = store.getState()
   const c = s.groupConversations[s.activeGroupId] ?? null
   return {
     gid: s.activeGroupId, status: c?.status ?? null,
@@ -77,14 +79,17 @@ const hubConvState = () => page.evaluate(async () => {
   }
 })
 
-// HMR 后 vite 会给同一文件换 `?t=` URL，动态 import 因此拿到**另一个**模块实例
-// （状态是空的）。判据里要读 store，就先确认拿到的是 App 的那一份；不是就硬刷一次
-// （整页导航后两边都解析到无 query 的同一个 URL）。
+// 判据里要读 store，就先确认拿到的是 App 的那一份（__hub 在启动后异步挂上，可能晚一帧）；
+// 拿不到就硬刷一次。
 async function syncHubStore(open) {
-  if ((await hubConvState()).gid) return
+  for (let i = 0; i < 20; i++) {
+    const st = await hubConvState().catch(() => null)
+    if (st?.gid) return
+    await page.waitForTimeout(150)
+  }
   await page.reload({ waitUntil: 'domcontentloaded' })
   await open()
-  if (!(await hubConvState()).gid) throw new Error('读不到 Hub store（activeGroupId 为空）：动态 import 拿到的不是 App 的模块实例')
+  if (!(await hubConvState()).gid) throw new Error('读不到 Hub store（activeGroupId 为空）：window.__hub 没挂上')
 }
 
 const bar = page.locator('.hub-conv-bar')
