@@ -192,7 +192,7 @@
 | P6-12 | done | group-surface | 715a28c | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-13 | done | group-ui | 15e4d34 | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
 | P6-14 | done | group-ui | f62aa98 | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
-| P6-15 | in_progress | main | — | 最终全量回归中 |
+| P6-15 | done | main | cd34876 + 9b22c64 + 04496c7 + 74676a7 + 3e9a231 + 7ca9912 + 09fda28 | 首轮独立 Review CHANGES_REQUESTED（B1/B2 blocking、I1/I2 important、N1-N7）；修复后定向复审仅剩 N4 测试断言 blocking，已修；干净 worktree `go test -p 4 ./...` 全绿；tsc/test:hub-conv(148)/hub-p3b(295)/p4(30)/css 全绿；浏览器 conversation-bar(26)/menu-layer/group-edit/group-stream/dm-stream 全绿；merge 472bbd3 |
 | P6-16 | done | group-surface | 3bd3439 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-17 | done | group-surface | 1744204 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 
@@ -202,3 +202,7 @@
 - 11 并发对本地 vLLM/远端 provider 的 429 行为需要压测。
 - 持久化文件写入频率与群日志一致性（消息已落、conversation 未落）需要崩溃注入测试。
 - 旧 observer 数据迁移只做加载时转换；是否需要一次性回写由 P6-12 决定并记录。
+- **I3（follow-up）**：群成员增删/群主转让仍是多条 bridge 命令的非原子序列；任一步失败可能留下半改状态。需要新增一次性 `hub_group_edit`（单次 SaveGroup + roster 重建）并在前端切换。
+- **N7（follow-up）**：同内容指纹命中仍是 generation 级整批熔断，不是 per-target 跳过；保留现状，文档/UI 已按「等待人类继续」表述。
+- I1 热更新只影响之后的 Offer/View/run 超时；已挂的 run 超时定时器按挂载时的值跑完。状态条分母在下一次 `hub_conversation` 事件刷新。
+

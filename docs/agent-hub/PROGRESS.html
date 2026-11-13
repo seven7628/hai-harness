@@ -2483,8 +2483,10 @@ const BASE = {
       ],
       "acceptance": "Go/TS/browser/真实 Hub E2E 全绿；独立 Review PASS；看板/文档同步；worktree 清理。",
       "tests": "go test ./...；npm run test:p4；浏览器关键脚本；真实 provider E2E",
-      "commit": "test(hub-p6-15): 群聊硬化最终回归",
-      "status": "in_progress"
+      "commit": "cd34876 + 9b22c64 + 04496c7 + 74676a7 + 3e9a231 + 7ca9912 + 09fda28",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "首轮独立 Review CHANGES_REQUESTED（B1/B2 blocking、I1/I2 important、N1-N7）；修复后定向复审仅剩 N4 测试断言 blocking，已修；干净 worktree `go test -p 4 ./...` 全绿；tsc/test:hub-conv(148)/hub-p3b(295)/p4(30)/css 全绿；浏览器 conversation-bar(26)/menu-layer/group-edit/group-stream/dm-stream 全绿；merge 472bbd3。"
     },
     {
       "id": "P6-16",
@@ -3678,8 +3680,10 @@ const BASE = {
       "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     "P6-15": {
-      "status": "in_progress",
-      "commit": "test(hub-p6-15): 群聊硬化最终回归"
+      "status": "done",
+      "commit": "cd34876 + 9b22c64 + 04496c7 + 74676a7 + 3e9a231 + 7ca9912 + 09fda28",
+      "review": "passed",
+      "reviewNote": "首轮独立 Review CHANGES_REQUESTED（B1/B2 blocking、I1/I2 important、N1-N7）；修复后定向复审仅剩 N4 测试断言 blocking，已修；干净 worktree `go test -p 4 ./...` 全绿；tsc/test:hub-conv(148)/hub-p3b(295)/p4(30)/css 全绿；浏览器 conversation-bar(26)/menu-layer/group-edit/group-stream/dm-stream 全绿；merge 472bbd3。"
     }
   },
   "reviewGate": {
