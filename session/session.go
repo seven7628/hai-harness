@@ -811,7 +811,12 @@ func (s *Session) Run(ctx context.Context, handler events.EventHandler) error {
 		s.dispatchSessionStartOnce(runCtx, sessionStartHook)
 		// O2：包装事件回调——成功压缩时把摘要/analysis/用量/警告写入会话 jsonl 的
 		// compaction 留档记录（存储实现 CompactionRecorder 时；尽力而为不影响运行）。
-		ac := loop.RunStream(runCtx, history, s.wrapCompactionRecorder(handler), &agents.RunOptions{
+		//
+		// 运行账（R08f）：本轮运行的 ac 先登记在 runAC，wrapRunLedger 在 AgentEnd
+		// 交给消费者**之前**落账 —— 账目只认事件宣告的事实，不再事后回读 ac 的
+		// 可变状态（见 recordRunOutcome 与 wrapRunLedger 的注释）。
+		var runAC atomic.Pointer[agents.AgentContext]
+		ac := loop.RunStream(runCtx, history, s.wrapRunLedger(s.wrapCompactionRecorder(handler), &runAC), &agents.RunOptions{
 			Todo:     s.todo,
 			Approver: agents.WrapApprover(approver, mode),
 			Mode:     mode,
@@ -837,6 +842,7 @@ func (s *Session) Run(ctx context.Context, handler events.EventHandler) error {
 			OnRunning: func(ac *agents.AgentContext) {
 				s.mu.Lock()
 				s.running = ac
+				runAC.Store(ac) // 同一把 ac：AgentEnd 到达时据此确认「这是本次 Run 的顶层运行」
 				s.mu.Unlock()
 			},
 			// 检查点：每轮产出落盘（长时运行崩溃恢复粒度 = 轮），失败不中断运行
@@ -848,7 +854,9 @@ func (s *Session) Run(ctx context.Context, handler events.EventHandler) error {
 		s.running = nil
 		s.mu.Unlock()
 		s.absorb(ac)
-		s.recordRunOutcome(ac)
+		// 运行账已在 wrapRunLedger 里结清（AgentEnd 是唯一结算点：agents.RunStream
+		// 只有一条 return，必发 AgentEnd）。这里**不再**回读 ac 记账 —— 那正是
+		// R08f 的偶发红：返回之后 aborted 还能被 Interrupt/Shutdown 翻起来。
 
 		if err := s.persist(runCtx, s.messages); err != nil { // Run 后快照：记录本轮结果
 			return err
@@ -870,25 +878,77 @@ func (s *Session) Run(ctx context.Context, handler events.EventHandler) error {
 
 // recordRunOutcome 记一次运行怎么收场（session_closed 的运行账）。
 //
+// 判据只取**运行自己宣告的事实**（AgentEnd.FinishReason），不回头读 ac 的
+// aborted/Err：AgentEnd 发出之后 Interrupt / Shutdown 仍可能把 ac.aborted 翻起来
+// （R08f 的偶发红正是如此 —— 事件说 stop、账目说没收尾），而 ac.Err 在 abort 分支
+// 上还被 loop 主动清成 nil，事后读它既不新鲜也不自洽。事件是唯一的结算凭据。
+//
 // 三类事实，互不推断：
 //   - 正常收尾（consumed）：拿到 AgentEnd，既没 abort 也没出错 —— 这一轮的产出
-//     交到了用户手里；
+//     交到了用户手里（FinishReason = stop / max_iterations，与旧判据逐项等价：
+//     loop 只在这两种收场下满足 Err == nil && !IsAborted()，见 agent_loop.go 收尾 switch）；
 //   - 死在工具上（abandoned mid-tool）：ctx 在工具执行期间被取消（abort / Shutdown /
 //     父取消）。用户丢的不是"一段话"，是**工具的中间结果**，性质不同；
 //   - 其余（思考/流式阶段被打断）：两类都不计 —— 它没死在工具上，也没正常收尾。
 //     所以 runs 不一定等于 consumed+abandoned，宿主按事实渲染即可。
-func (s *Session) recordRunOutcome(ac *agents.AgentContext) {
-	if ac == nil {
-		return
-	}
+//
+// end 为 nil = 没拿到收尾宣告（当前实现不存在这条路径）：不记账 —— 既不知道收没
+// 收场，也不凭 ac 的可变状态去猜。
+func (s *Session) recordRunOutcome(end *events.AgentEnd, ac *agents.AgentContext) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
-	case ac.Err == nil && !ac.IsAborted():
+	case end == nil: // 没有收尾宣告：不记账
+	case finishedCleanly(end.FinishReason):
 		s.runsConsumed++
 	case ac.ToolAborted():
 		s.runsAbandoned++
 	}
+}
+
+// finishedCleanly 事件是否宣告「这一轮正常收尾」（产出交到了用户手里）。
+//
+// stop = 模型自然收尾 / Stop 钩子策略性终止；max_iterations = 轮数护栏截断
+// （loop 收尾 switch 里 Err == nil 且未 abort 的两种，与 recordRunOutcome 旧判据等价）。
+func finishedCleanly(r core.FinishReason) bool {
+	return r == core.FinishReasonStop || r == core.FinishReasonMaxIterations
+}
+
+// wrapRunLedger 在 AgentEnd 交给消费者**之前**落账（一次运行的唯一结算点）。
+//
+// 为什么不在 RunStream 返回之后记账：AgentEnd 一发出，用户就可能点「停止」/关窗，
+// Shutdown 随即 Abort 同一个 ac —— 返回后再读 ac.IsAborted() 就把「已宣告 stop、
+// 产出已交付」的一轮记成没消费（R08f：~1/10 偶发红，`consumed = <nil>, want 1`）。
+// 写在这里同时给出两个性质：账目先于事件可见（看到 AgentEnd 的消费者读到的是最终值），
+// 且判定不再依赖任何后续可变状态。
+//
+// 子 agent 的 AgentEnd 也经父 handler 转发（subagent → ToolContext.Handler），
+// RunId 不同：只认本次 Run 的顶层 ac，避免把子运行记进会话账。
+func (s *Session) wrapRunLedger(next events.EventHandler, top *atomic.Pointer[agents.AgentContext]) events.EventHandler {
+	return func(ctx context.Context, e events.Event) {
+		if end, ok := e.(*events.AgentEnd); ok {
+			// 只认本次 Run 的顶层 ac：子 agent 的 AgentEnd 同路转发（subagent →
+			// ToolContext.Handler），RunId 不同，不能算进会话账；也不能让它们把本轮
+			// 凭据摘掉（否则父运行的 AgentEnd 到得晚就一笔记不上）。
+			// 记完即摘凭据：同一次运行只结一次账。
+			if ac := top.Load(); ac != nil && end.RunId == ac.RunId && top.CompareAndSwap(ac, nil) {
+				s.recordRunOutcome(end, ac)
+			}
+		}
+		if next != nil { // 与 agents.RunStream 同语义：handler 可为 nil（测试/无 UI 场景）
+			next(ctx, e)
+		}
+	}
+}
+
+// RunLedger 返回本会话的运行账（runs / consumed / abandoned mid-tool）。
+//
+// 与 session_closed 事件同源（见 events.SessionClosed）：Shutdown 用它发事件，
+// 宿主/测试用它读只读快照。
+func (s *Session) RunLedger() (runs, consumed, abandoned int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runsTotal, s.runsConsumed, s.runsAbandoned
 }
 
 // Shutdown 优雅关闭会话：幂等、可重复调用。
@@ -947,9 +1007,7 @@ func (s *Session) Shutdown(ctx context.Context) error {
 	// Session context cancellation is retained for non-registry infrastructure.
 	// 运行账随关闭事件一起给出（设计 v2 的 session_closed 行）：这里已等到 Run 收尾
 	// （inRun=false 是它写完 recordRunOutcome 之后才置的），数字是最终值。
-	s.mu.Lock()
-	runs, consumed, abandoned := s.runsTotal, s.runsConsumed, s.runsAbandoned
-	s.mu.Unlock()
+	runs, consumed, abandoned := s.RunLedger()
 	s.emit(&events.SessionClosed{
 		SessionId:        s.id,
 		Runs:             runs,
