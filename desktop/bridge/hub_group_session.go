@@ -337,11 +337,18 @@ func (m *manager) wakeGroupAgent(ctx context.Context, st agenthub.Store, g *agen
 	}
 	// 快照只用到 round 的 id/trigger_seq：从 wake 复原一个最小 round，
 	// 这样对话队列只需保存协议字段，不必把 Round/Message 指针一直攥着。
-	round := agenthub.Round{GroupID: g.ID, ID: w.RoundID, TriggerSeq: w.TriggerSeq, Targets: []agenthub.AgentID{target}}
+	// 来源（P6-11）：角色从群成员表解析，调用方不能自报 —— 人类 = human，
+	// 智能体 = owner/member。快照与 header 共用同一份来源，审计/提示词都对得上。
+	origin := agenthub.WakeOrigin(g, w.Sender, w.Human)
+	round := agenthub.Round{
+		GroupID: g.ID, ID: w.RoundID, TriggerSeq: w.TriggerSeq, Targets: []agenthub.AgentID{target},
+		Sender: w.Sender, SenderHuman: w.Human,
+	}
 	snap := agenthub.BuildGroupSnapshot(g, target, msgs, cursor.AgentContextSeq, round, agenthub.SnapshotOptions{})
 	header := &agenthub.GroupWakeHeader{
 		GroupID: g.ID, AgentID: target, RoundID: w.RoundID, TriggerSeq: w.TriggerSeq,
 		Depth: w.Depth, Turn: w.Turn, ConversationID: w.ConversationID,
+		SenderAgentID: w.Sender, Origin: origin,
 	}
 	hidden, err := agenthub.EncodeGroupWake(header, snap.Text)
 	if err != nil {

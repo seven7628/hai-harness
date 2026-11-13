@@ -238,7 +238,8 @@ func TestSnapshotIncludesTaskResultForNonDispatcher(t *testing.T) {
 		got.Refs["status"] != string(TaskCompleted) {
 		t.Fatalf("task_result card lost fields: %+v", got)
 	}
-	if !strings.Contains(snap.Text, "#3 ag_bbbbbbbb: 价格表出来了：三家") {
+	// P6-11：发送者行带落盘角色（owner/member），来源逐行可追溯。
+	if !strings.Contains(snap.Text, "#3 ag_bbbbbbbb(member): 价格表出来了：三家") {
 		t.Fatalf("snapshot text = %q", snap.Text)
 	}
 	if strings.Contains(snap.Text, "回执") || strings.Contains(snap.Text, "本轮：B") {

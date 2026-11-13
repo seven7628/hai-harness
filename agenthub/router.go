@@ -45,6 +45,11 @@ type Round struct {
 	Unknown    []string  `json:"unknown,omitempty"`
 	Dropped    int       `json:"dropped,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
+	// Sender/SenderHuman 是本轮的**来源**（P6-11）：快照据此标注「人」还是
+	// 「owner/member 同事请求」，审计与提示词都靠它区分人类授权与智能体请求。
+	// omitempty：P6-11 之前落盘的旧 round 没有该字段（空 = 来源未知）。
+	Sender      AgentID `json:"sender_agent_id,omitempty"`
+	SenderHuman bool    `json:"sender_human,omitempty"`
 }
 
 // Router 绑定一个群的成员与策略；成员变化后重新构造（parser 缓存名字）。
@@ -144,6 +149,7 @@ func (r *Router) RouteMentions(in MentionRequest, sender AgentID, isHuman bool, 
 		ID: NewID(PrefixRound), GroupID: r.group.ID, TriggerSeq: triggerSeq,
 		Targets: targets, Mentions: mentions, MentionAll: mentionAll,
 		Unknown: text.Unknown, Dropped: dropped, CreatedAt: now,
+		Sender: sender, SenderHuman: isHuman,
 	}, nil
 }
 
