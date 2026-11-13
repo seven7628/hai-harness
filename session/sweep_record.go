@@ -175,16 +175,9 @@ func migrateRecordFile(path string) (bool, bool, error) {
 
 	// ② 内嵌块 → sidecar（走提交路径同一条路径：refBlocks 负责写块 + 建引用）。
 	if needMigrate {
-		bs, berr := acquireBlockStore(path)
-		if berr != nil {
-			return false, false, berr
-		}
-		newView, _, rerr := refBlocks(bs, rec.ViewCheckpoint)
-		if rerr != nil {
-			return false, false, rerr
-		}
-		if ferr := bs.flush(); ferr != nil {
-			return false, false, ferr
+		newView, merr := migrateBlocksToSidecar(path, rec.ViewCheckpoint)
+		if merr != nil {
+			return false, false, merr
 		}
 		rec.ViewCheckpoint = newView
 	}
@@ -214,8 +207,31 @@ func migrateRecordFile(path string) (bool, bool, error) {
 	return true, needMigrate, nil
 }
 
-// encodeStrippedRecord 重新编码 record 并按字节口径重算 checksum。
+// migrateBlocksToSidecar 把内嵌块搬进 sidecar，并把视图换成引用形态。
 //
+// 关键：**用完就归还（unpin）** —— 清扫会对**每个** record 打开 sidecar。
+// 不归还的话，446 个 record 的 sidecar 会全部常开：
+// 实测 bridge 打开 **395 个 sidecar / 1184 个 fd**，而 UI 只开了 15 个会话。
+// 这就是 2026-11-12 之前那个「句柄与索引内存无上限增长」的实际来源
+// —— 不是会话多，是**清扫开了不还**。
+func migrateBlocksToSidecar(recordPath string, view []byte) ([]byte, error) {
+	bs, err := acquireBlockStore(recordPath)
+	if err != nil {
+		return nil, err
+	}
+	// 用完即归还（defer 在函数末尾跑，这里正好合适）。
+	defer releaseBlockStore(recordPath, bs)
+	newView, _, rerr := refBlocks(bs, view)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if ferr := bs.flush(); ferr != nil {
+		return nil, ferr
+	}
+	return newView, nil
+}
+
+// encodeStrippedRecord 重新编码 record 并按字节口径重算 checksum。//
 // 产出的字节与「用同一份 record 走一次提交」**逐字节相同** —— 走的是同一条
 // 编码路径（encodeRecordEnvelope + checksumFieldSpan）。
 func encodeStrippedRecord(rec *SessionRecord) ([]byte, error) {

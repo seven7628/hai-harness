@@ -538,6 +538,8 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 	sidecarStart := time.Now()
 	openStart := time.Now()
 	if bs, berr := acquireBlockStore(path); berr == nil {
+		// pin 到本块结束：实例在锁外被使用，回收器不许中途关掉它。
+		// （**不能用 defer** —— defer 会在**函数**返回时才跑，pin 被拖得太久。）
 		t.SidecarOpen = time.Since(openStart)
 		refStart := time.Now()
 		// 优先用调用方给的 spans（reducer 顺带产出，零解析）；否则自行扫描。
@@ -583,6 +585,8 @@ func (s *FileStorage) commitRecord(ctx context.Context, record *SessionRecord, t
 		}
 		// 不 Close：实例留在缓存里复用（Close 会 fsync 并关文件，下次提交
 		// 又要重扫 86MB 重建索引 —— 实测 78ms，吃掉增量方案的收益）。
+		// 只 unpin —— 之后它可以被后台回收器按 LRU+预算淘汰。
+		releaseBlockStore(path, bs)
 	}
 	t.Sidecar = time.Since(sidecarStart)
 	// 占位形态（"blocks":null）必须在落盘前被替换成引用或内嵌数组 ——
